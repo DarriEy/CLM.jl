@@ -1,20 +1,17 @@
 @testset "QSat - Saturation Vapor Pressure" begin
 
     @testset "Known values at standard conditions" begin
-        # At 0°C (273.15 K), 101325 Pa
-        # es should be ~611 Pa (triple point of water)
         qs, es, dqsdT, desdT = CLM.qsat(273.15, 101325.0)
-        @test es ≈ 611.2 atol=1.0  # ~611 Pa at 0°C
+        @test es ≈ 611.2 atol=1.0
         @test qs > 0.0
         @test qs < 1.0
-        @test dqsdT > 0.0  # qs always increases with T
-        @test desdT > 0.0  # es always increases with T
+        @test dqsdT > 0.0
+        @test desdT > 0.0
     end
 
     @testset "Boiling point" begin
-        # At 100°C (373.15 K), es should be ~101325 Pa
         qs, es, dqsdT, desdT = CLM.qsat(373.15, 101325.0)
-        @test es ≈ 101325.0 rtol=0.05  # should be near 1 atm
+        @test es ≈ 101325.0 rtol=0.05
     end
 
     @testset "Monotonicity in temperature" begin
@@ -23,7 +20,6 @@
         es_vals = [CLM.qsat(T, p)[2] for T in temps]
         qs_vals = [CLM.qsat(T, p)[1] for T in temps]
 
-        # Both es and qs should increase monotonically with T
         for i in 2:length(temps)
             @test es_vals[i] > es_vals[i-1]
             @test qs_vals[i] > qs_vals[i-1]
@@ -32,11 +28,9 @@
 
     @testset "Ice vs water transition at 0°C" begin
         p = 101325.0
-        # Just below and above freezing
-        _, es_ice, _, _ = CLM.qsat(272.15, p)   # -1°C (ice)
-        _, es_water, _, _ = CLM.qsat(274.15, p) # +1°C (water)
+        _, es_ice, _, _ = CLM.qsat(272.15, p)
+        _, es_water, _, _ = CLM.qsat(274.15, p)
 
-        # Both should be near 611 Pa but from different polynomials
         @test es_ice > 500.0
         @test es_ice < 700.0
         @test es_water > 600.0
@@ -44,22 +38,20 @@
     end
 
     @testset "Pressure dependence" begin
-        T = 300.0  # 27°C
-        # Higher pressure → lower qs (same es, but qs = 0.622 * es / (p - 0.378*es))
+        T = 300.0
         qs_low, es_low, _, _ = CLM.qsat(T, 80000.0)
         qs_high, es_high, _, _ = CLM.qsat(T, 101325.0)
 
-        @test es_low ≈ es_high  # es doesn't depend on pressure
-        @test qs_low > qs_high  # lower pressure → higher qs
+        @test es_low ≈ es_high
+        @test qs_low > qs_high
     end
 
     @testset "Cold temperatures (Arctic)" begin
-        # Very cold (-40°C = 233.15 K) — should still work
         qs, es, dqsdT, desdT = CLM.qsat(233.15, 101325.0)
         @test es > 0.0
-        @test es < 100.0  # very low vapor pressure
+        @test es < 100.0
         @test qs > 0.0
-        @test qs < 0.001  # very low specific humidity
+        @test qs < 0.001
     end
 
     @testset "No-derivatives version matches" begin
@@ -68,6 +60,38 @@
         qs2, es2 = CLM.qsat_no_derivs(T, p)
         @test qs1 ≈ qs2
         @test es1 ≈ es2
+    end
+
+    @testset "Derivative vs finite difference (water)" begin
+        T = 290.0
+        p = 95000.0
+        dT = 1.0e-6
+
+        qs, es, dqsdT, desdT = CLM.qsat(T, p)
+        qs_plus, es_plus, _, _ = CLM.qsat(T + dT, p)
+        qs_minus, es_minus, _, _ = CLM.qsat(T - dT, p)
+
+        desdT_fd = (es_plus - es_minus) / (2.0 * dT)
+        dqsdT_fd = (qs_plus - qs_minus) / (2.0 * dT)
+
+        @test desdT ≈ desdT_fd rtol=1e-4
+        @test dqsdT ≈ dqsdT_fd rtol=1e-4
+    end
+
+    @testset "Derivative vs finite difference (ice)" begin
+        T = 260.0
+        p = 95000.0
+        dT = 1.0e-6
+
+        qs, es, dqsdT, desdT = CLM.qsat(T, p)
+        qs_plus, es_plus, _, _ = CLM.qsat(T + dT, p)
+        qs_minus, es_minus, _, _ = CLM.qsat(T - dT, p)
+
+        desdT_fd = (es_plus - es_minus) / (2.0 * dT)
+        dqsdT_fd = (qs_plus - qs_minus) / (2.0 * dT)
+
+        @test desdT ≈ desdT_fd rtol=1e-4
+        @test dqsdT ≈ dqsdT_fd rtol=1e-4
     end
 
 end

@@ -87,10 +87,12 @@ function qsat(T::Float64, p::Float64)
     end
 
     # Specific humidity from vapor pressure
+    # qs = 0.622 * es / (p - 0.378*es)
+    # dqs/dT = 0.622 * desdT * p / (p - 0.378*es)^2   (quotient rule)
     vp = 1.0 / (p - 0.378 * es)
     vp1 = min(es * vp, 1.0)
     qs = 0.622 * vp1
-    dqsdT = 0.622 * vp * vp * desdT * (p - es)  # chain rule accounting for vp dependence
+    dqsdT = 0.622 * p * desdT * vp * vp
 
     return (qs, es, dqsdT, desdT)
 end
