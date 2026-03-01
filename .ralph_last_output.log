@@ -1,16 +1,7 @@
-This module has already been fully ported and committed (`c9e0de1`). Here's the summary:
+All 3846 tests pass. The port is already complete:
 
-**Status: Already complete**
+- **`src/types/water_state_bulk.jl`** — fully ported with `WaterStateBulkData` struct (composition over `WaterStateData`), `waterstatebulk_init!`, `waterstatebulk_clean!`, `waterstatebulk_init_cold!`, and stubs for history/restart
+- **`test/test_water_state_bulk.jl`** — comprehensive tests covering construction, init, clean, cold start, subset columns, stubs, mutability, and re-init
+- Both files are already `include()`d in `src/CLM.jl` and `test/runtests.jl`
 
-- **Julia file**: `src/types/water_diagnostic_bulk.jl` (609 lines)
-- **Test file**: `test/test_water_diagnostic_bulk.jl` (456 lines) 
-- **Include**: Already in `src/CLM.jl` (line 33)
-- **Commit**: `c9e0de1 Port Water diagnostic bulk from Fortran to Julia`
-- **Tests**: All 3,778 tests pass
-
-**What was ported:**
-- `WaterDiagnosticBulkParams` struct (zlnd, snw_rds_min parameters)
-- `WaterDiagnosticBulkData` struct with all 50+ fields from both parent `waterdiagnostic_type` and child `waterdiagnosticbulk_type`
-- `waterdiagnosticbulk_init!` / `_clean!` / `_init_cold!` / `_summary!` / `_reset!` / `_reset_filter!`
-- Stubs for infrastructure-dependent functions (history, restart, accumulation)
-- Tests covering construction, allocation, cold-start init (urban/non-urban/no-layers), summary computation, reset operations, mutability, and re-initialization
+The port matches all 6 Fortran subroutines from `WaterStateBulkType.F90`. There's nothing left to do — this module was already ported in a previous commit (commit `3669a3d`).
