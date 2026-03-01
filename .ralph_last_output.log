@@ -1,31 +1,13 @@
-Done. Here's a summary of what was ported:
+All 4,971 tests pass. The `CNVegNitrogenStateType.F90` has already been fully ported to `src/types/cn_veg_nitrogen_state.jl` with:
 
-**`CNVegCarbonStateType.F90` → `cn_veg_carbon_state.jl`**
+- **Struct**: `CNVegNitrogenStateData` with all fields (patch-level 2D reproductive pools, 1D core pools, matrix CN capacity, SASU initial/save fields, matrix N alloc/transfer/turnover accumulation, summary diagnostics, column/gridcell-level)
+- **`cnveg_nitrogen_state_init!`** — matches `InitAllocate`
+- **`cnveg_nitrogen_state_set_values!`** — matches `SetValues`
+- **`cnveg_nitrogen_state_zero_dwt!`** — matches `ZeroDwt`
+- **`cnveg_nitrogen_state_summary!`** — matches `Summary_nitrogenstate`
+- **`cnveg_nitrogen_state_init_cold!`** — matches `InitCold`
+- **Stubs** for `InitHistory`, `Restart`, `DynamicPatchAdjustments`
+- Already included in `src/CLM.jl` (line 41)
+- Test file at `test/test_cn_veg_nitrogen_state.jl` (included in `test/runtests.jl`)
 
-### Struct: `CNVegCarbonStateData`
-- All 150+ fields from the Fortran `cnveg_carbonstate_type` translated as typed fields
-- Patch-level 1D pools (leafc, frootc, livestemc, deadstemc, livecrootc, deadcrootc, etc.)
-- Patch-level 2D pools (reproductivec × nrepr)
-- Column-level fields (rootc_col, leafc_col, deadstemc_col, fuelc_col, etc.)
-- Gridcell-level field (seedc_grc)
-- Matrix CN capacity, initial SASU, SASU save, accumulation, transfer, and turnover fields
-- Summary/diagnostic fields (dispvegc, storvegc, totvegc, totc, woodc)
-
-### Functions ported:
-| Fortran | Julia |
-|---|---|
-| `InitAllocate` | `cnveg_carbon_state_init!` |
-| `SetValues` | `cnveg_carbon_state_set_values!` |
-| `ZeroDwt` | `cnveg_carbon_state_zero_dwt!` |
-| `Summary_carbonstate` | `cnveg_carbon_state_summary!` |
-| `InitCold` | `cnveg_carbon_state_init_cold!` |
-| `InitHistory` | stub |
-| `Restart` | stub |
-| `DynamicPatchAdjustments` | stub |
-
-### Constants:
-- `SPINUP_FACTOR_DEADWOOD_DEFAULT = 1.0`
-- `SPINUP_FACTOR_AD = 10.0`
-- `INITIAL_VEGC = 20.0`
-
-All 4779 tests pass (including the new test file with 14 test sets).
+The latest git commit (`9a8ab12`) already says "Port Veg nitrogen state from Fortran to Julia", so this task is complete.

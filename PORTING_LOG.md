@@ -29,3 +29,4 @@
 | Master water container | 3 | ✓ PASSED | 2 | — |
 | Friction velocity | 3 | ✓ PASSED | 2 | — |
 | Veg CN state | 4 | ✓ PASSED | 1 | — |
+| Veg carbon state | 4 | ✓ PASSED | 1 | — |
