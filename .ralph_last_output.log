@@ -1,5 +1,15 @@
-This task is already complete. The surface albedo type was ported in commit `f132d9e` ("Port Albedo state from Fortran to Julia") and all tests pass. The port includes:
+All 2780 tests pass. The `SolarAbsorbedType.F90` has already been fully ported:
 
-- **Struct**: `SurfaceAlbedoData` with all 53 fields from Fortran `surfalb_type`
-- **Functions**: `surfalb_init!`, `surfalb_clean!`, `surfalb_init_cold!`, `surfalb_init_history!`, `surfalb_restart!`
-- **Tests**: 267 passing tests covering construction, init, clean, cold-start, SSRE, mutability, re-init, and stubs
+- **`src/types/solar_absorbed.jl`** — Contains:
+  - `SolarAbsorbedData` struct with all 39 fields from Fortran's `solarabs_type`
+  - `solarabs_init!()` — allocation with NaN/SPVAL initialization, LUNA-conditional arrays
+  - `solarabs_clean!()` — deallocation/reset
+  - `solarabs_init_cold!()` — zero-init urban surface absorption fields
+  - `solarabs_init_history!()` — SPVAL init stub with SSRE support
+  - `solarabs_restart!()` — restart I/O stub
+
+- **`test/test_solar_absorbed.jl`** — 9 test sets covering default construction, init with/without LUNA, clean, init_cold, field mutability, re-init, stub functions, and SPVAL/SSRE history init.
+
+- Both files are already `include()`d in `src/CLM.jl` and `test/runtests.jl`.
+
+The port is complete and all tests pass.
