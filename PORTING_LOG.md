@@ -15,3 +15,4 @@
 | Soil state | 3 | ✓ PASSED | 2 | — |
 | Soil hydrology state | 3 | ✓ PASSED | 2 | — |
 | Canopy state | 3 | ✓ PASSED | 2 | — |
+| Lake state | 3 | ✓ PASSED | 2 | — |

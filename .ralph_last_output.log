@@ -1,12 +1,5 @@
-All 2077 tests pass, including the lake state tests. The port is already complete:
+This task is already complete. The surface albedo type was ported in commit `f132d9e` ("Port Albedo state from Fortran to Julia") and all tests pass. The port includes:
 
-**Struct:** `LakeStateData` — all 13 fields from `lakestate_type` (12 column-level + 1 patch-level)
-
-**Functions ported:**
-- `lakestate_init!` — allocates all fields with NaN/SPVAL (from `InitAllocate`)
-- `lakestate_clean!` — resets all fields to empty
-- `lakestate_init_cold!` — cold-start: zero ice fraction, `TKWAT` for savedtke1, 0.1 for ust_lake (from `InitCold`)
-- `lakestate_init_history!` — sets SPVAL for history averaging (from `InitHistory`, stub for hist_addfld calls)
-- `lakestate_restart!` — stub for restart I/O (from `Restart`)
-
-**Integration:** Already included in `src/CLM.jl` (line 26) and tested in `test/runtests.jl` (line 19). No changes needed — the port was already done in a previous session.
+- **Struct**: `SurfaceAlbedoData` with all 53 fields from Fortran `surfalb_type`
+- **Functions**: `surfalb_init!`, `surfalb_clean!`, `surfalb_init_cold!`, `surfalb_init_history!`, `surfalb_restart!`
+- **Tests**: 267 passing tests covering construction, init, clean, cold-start, SSRE, mutability, re-init, and stubs
