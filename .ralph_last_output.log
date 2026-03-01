@@ -1,7 +1,15 @@
-All 2925 tests pass. The port is already complete:
+The Water state module has already been fully ported and committed (commit `b887540`). Here's the summary:
 
-- **Source**: `src/types/water_info_base.jl` — defines `WaterInfoBaseType` as an abstract type with fallback error methods for the deferred interface (`get_name`, `fname`, `lname`, `is_communicated_with_coupler`, `is_included_in_consistency_check`) and concrete methods (`set_metadata!`, `get_ratio`)
-- **Tests**: `test/test_water_info_base.jl` — validates all interface methods using a concrete test subtype, plus `set_metadata!` with a mutable subtype
-- **Integration**: Already included in `src/CLM.jl` (line 30) and `test/runtests.jl` (line 23)
+**Status: Complete** - All work is already done.
 
-The port faithfully translates the Fortran abstract type pattern into Julia's abstract type + multiple dispatch pattern, where subtypes must implement the deferred interface and have a `ratio::Float64` field.
+- **Struct**: `WaterStateData` with all 14 fields from Fortran `waterstate_type`
+- **Functions ported**:
+  - `waterstate_init!` (from `InitAllocate`)
+  - `waterstate_clean!` (Julia-specific cleanup)
+  - `waterstate_init_cold!` (from `InitCold`) - full cold-start initialization for soil, lake, frozen layers, aquifer, dynamic balance, and excess ice
+  - `waterstate_calculate_total_h2osno!` (from `CalculateTotalH2osno`)
+  - `waterstate_check_snow_consistency!` (from `CheckSnowConsistency`)
+  - `waterstate_init_history!` and `waterstate_restart!` (infrastructure stubs)
+  - `_find_soil_layer_containing_depth` helper
+- **Tests**: 10 test sets covering default construction, init, clean, cold-start (soil/frozen/aquifer), snow calculations, consistency checks, stubs, mutability, and re-init
+- **All 3304 tests pass**
