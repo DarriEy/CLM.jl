@@ -1,7 +1,7 @@
-All 277 tests pass. The Landunit type port is already complete and correct:
+All 448 tests pass. The Column type definition has already been fully ported:
 
-- **`src/types/landunit.jl`** — `LandunitData` struct with all 26 fields, `landunit_init!()`, and `landunit_clean!()` matching the Fortran source exactly
-- **`test/test_landunit.jl`** — Tests for default construction, init, clean, field mutability, and re-init
-- **`src/CLM.jl`** — Already includes `"types/landunit.jl"`
+- **`src/types/column.jl`** — `ColumnData` struct with all 33 fields matching the Fortran `column_type`, plus `column_init!`, `column_clean!`, and `column_update_itype!` functions
+- **`test/test_column.jl`** — Tests covering default construction, init with correct sizes/sentinel values, clean, field mutability, `update_itype!` (dynamic/non-dynamic), and re-init
+- Already included in `src/CLM.jl` and `test/runtests.jl`
 
-The commit `6623b7c` ("Port Landunit type definition from Fortran to Julia") already captured this work. No changes needed.
+The port is complete and all tests pass. There's nothing left to do for this task.
