@@ -38,6 +38,7 @@ include("types/water.jl")
 include("types/friction_velocity.jl")
 include("types/cn_veg_state.jl")
 include("types/cn_veg_carbon_state.jl")
+include("types/cn_veg_nitrogen_state.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
