@@ -21,3 +21,4 @@
 | Urban parameters | 3 | ✓ PASSED | 2 | — |
 | Water info base | 3 | ✓ PASSED | 2 | — |
 | Water state | 3 | ✓ PASSED | 2 | — |
+| Water flux | 3 | ✓ PASSED | 2 | — |
