@@ -371,6 +371,39 @@
         @test fvd.z0m_actual_patch[4] ≈ 0.02  # lake → z0mg_col
     end
 
+    @testset "frictionvel_read_nml!" begin
+        fvd = CLM.FrictionVelocityData()
+        @test fvd.zetamaxstable == -999.0
+
+        # Default value
+        CLM.frictionvel_read_nml!(fvd)
+        @test fvd.zetamaxstable ≈ 0.5
+
+        # Custom value
+        CLM.frictionvel_read_nml!(fvd; zetamaxstable=1.0)
+        @test fvd.zetamaxstable ≈ 1.0
+    end
+
+    @testset "frictionvel_read_params!" begin
+        fvd = CLM.FrictionVelocityData()
+        @test fvd.zsno == -999.0
+        @test fvd.zlnd == -999.0
+        @test fvd.zglc == -999.0
+
+        # Default values
+        CLM.frictionvel_read_params!(fvd)
+        @test fvd.zsno ≈ 0.00085
+        @test fvd.zlnd ≈ 0.000775
+        @test fvd.zglc == -999.0  # not set without Meier2022
+
+        # With Meier2022
+        CLM.frictionvel_read_params!(fvd; zsno=0.001, zlnd=0.002, zglc=0.003,
+            z0param_method="Meier2022")
+        @test fvd.zsno ≈ 0.001
+        @test fvd.zlnd ≈ 0.002
+        @test fvd.zglc ≈ 0.003
+    end
+
     @testset "stub functions" begin
         fvd = CLM.FrictionVelocityData()
         CLM.frictionvel_init!(fvd, 3, 2)

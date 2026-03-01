@@ -250,6 +250,58 @@ function frictionvel_restart!(fv::FrictionVelocityData,
 end
 
 # ==========================================================================
+# ReadNamelist — Set namelist parameters
+# ==========================================================================
+
+"""
+    frictionvel_read_nml!(fv::FrictionVelocityData; zetamaxstable::Float64=0.5)
+
+Set namelist parameters for friction velocity.
+In Julia, namelist values are passed directly instead of reading from a file.
+
+Ported from `frictionvel_type%ReadNamelist` in `FrictionVelocityMod.F90`.
+"""
+function frictionvel_read_nml!(fv::FrictionVelocityData;
+                                zetamaxstable::Float64 = 0.5)
+    fv.zetamaxstable = zetamaxstable
+    return nothing
+end
+
+# ==========================================================================
+# ReadParams — Read parameters from file (stub)
+# ==========================================================================
+
+"""
+    frictionvel_read_params!(fv::FrictionVelocityData;
+                              zsno::Float64=0.00085,
+                              zlnd::Float64=0.000775,
+                              zglc::Union{Float64,Nothing}=nothing,
+                              z0param_method::String="")
+
+Set roughness length parameters. In Julia, values are passed directly
+instead of reading from a NetCDF parameter file.
+
+Parameters:
+- `zsno`: Momentum roughness length for snow (m)
+- `zlnd`: Momentum roughness length for soil, glacier, wetland (m)
+- `zglc`: Momentum roughness length for glacier (m), only used with Meier2022
+
+Ported from `frictionvel_type%ReadParams` in `FrictionVelocityMod.F90`.
+"""
+function frictionvel_read_params!(fv::FrictionVelocityData;
+                                   zsno::Float64 = 0.00085,
+                                   zlnd::Float64 = 0.000775,
+                                   zglc::Union{Float64,Nothing} = nothing,
+                                   z0param_method::String = "")
+    fv.zsno = zsno
+    fv.zlnd = zlnd
+    if z0param_method == "Meier2022" && zglc !== nothing
+        fv.zglc = zglc
+    end
+    return nothing
+end
+
+# ==========================================================================
 # Stability functions (pure math, no global state)
 # ==========================================================================
 
