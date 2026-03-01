@@ -28,4 +28,5 @@ using CLM
     include("test_water_flux_bulk.jl")
     include("test_water_balance.jl")
     include("test_water.jl")
+    include("test_friction_velocity.jl")
 end
