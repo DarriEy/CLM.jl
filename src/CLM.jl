@@ -20,8 +20,9 @@ include("types/column.jl")
 include("types/patch.jl")
 
 # ===========================================================================
-# Tier 1: Infrastructure (solvers, utilities)
+# Tier 1: Infrastructure (solvers, utilities, decomposition)
 # ===========================================================================
+include("infrastructure/decomp.jl")
 include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 
