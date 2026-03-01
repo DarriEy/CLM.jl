@@ -1,9 +1,12 @@
-All 668 tests pass. The port is already complete:
+All 736 tests pass. The filters module is already fully ported:
 
-- **Types**: `BoundsType`, `ProcessorType`, `ClumpType`, `DecompData` — all translated from Fortran with `@kwdef mutable struct`
-- **Constants**: All subgrid level and bounds level constants ported
-- **Functions**: All 12 functions translated (`get_beg`, `get_end`, `get_clump_bounds`, `get_proc_bounds`, `get_proc_total`, `get_proc_global`, `get_proc_clumps`, `get_global_index`, `get_global_index_array`, `get_subgrid_level_from_name`, `get_subgrid_level_gsize`, `get_subgrid_level_gindex`)
-- **Tests**: Comprehensive test file at `test/test_decomp.jl` already included in `test/runtests.jl`
-- **Include**: Already listed in `src/CLM.jl` at line 25
+- **`ClumpFilter` struct** — All 30 Fortran filter arrays converted to `BitVector` masks (columns, patches, landunits)
+- **`alloc_filters!` / `alloc_all_filters!`** — Allocation of both active-only and inactive+active filter sets
+- **`set_filters_one_group!`** — Full translation of `setFiltersOneGroup` with all filter logic (lake, soil, BGC, hydrology, crop, urban, ice, SMB)
+- **`set_exposedvegp_filter!`** — Translation of `setExposedvegpFilter` 
+- **`set_filters!`** — Top-level wrapper setting both filter groups
+- **Global constants** — `NPCROPMIN`, `clump_filter`, `clump_filter_inactive_and_active`
 
-The module was already ported in a previous commit (commit `3a293c8`). Nothing further to do.
+The file is already included in `src/CLM.jl` at line 26 and has a comprehensive test file at `test/test_filters.jl` with 7 test sets covering allocation, basic domain, active/inactive, BGC flags, crop filters, ice/SMB filters, and exposed vegetation filters.
+
+The previous commit `1bb7280` already committed this work with message "Port Filter to mask conversion from Fortran to Julia". No additional changes are needed.

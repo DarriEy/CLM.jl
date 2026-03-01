@@ -8,3 +8,4 @@
 | Landunit type definition | 2 | ✓ PASSED | 2 | — |
 | Column type definition | 2 | ✓ PASSED | 2 | — |
 | Patch type definition | 2 | ✓ PASSED | 2 | — |
+| Domain decomposition | 2 | ✓ PASSED | 2 | — |
