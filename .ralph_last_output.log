@@ -1,14 +1,1 @@
-All 4037 tests pass. The `WaterBalanceType.F90` → `water_balance.jl` port is already complete with:
-
-**Struct:** `WaterBalanceData` — all 15 fields from Fortran `waterbalance_type`:
-- Column-level: `h2osno_old_col`, `snow_sources_col`, `snow_sinks_col`, `wa_reset_nonconservation_gain_col`, `begwb_col`, `endwb_col`, `errh2o_col`, `errh2osno_col`
-- Patch-level: `errh2o_patch`
-- Gridcell-level: `liq1_grc`, `liq2_grc`, `ice1_grc`, `ice2_grc`, `begwb_grc`, `endwb_grc`
-
-**Functions:**
-- `waterbalance_init!` — combines `InitAllocate` + `InitCold`
-- `waterbalance_clean!` — resets all fields to empty
-- `waterbalance_init_cold!` — cold-start initialization (sets `wa_reset_nonconservation_gain_col` to 0)
-- `waterbalance_init_history!` — stub for history infrastructure
-
-No changes needed — the port was already done in a previous commit.
+**Summary:** The port of `WaterType.F90` → `src/types/water.jl` is already complete and committed (`08f9425`). All 20 Fortran subroutines/functions and 5 types are translated. The full test suite passes (4139/4139 tests). No further action needed.
