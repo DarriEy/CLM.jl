@@ -683,6 +683,32 @@ function temperature_update_acc_vars!(temp::TemperatureData,
 end
 
 """
+    temperature_update_acc_vars_crop_gdds!(temp, bounds_patch, gddx_patch;
+                                           basetemp=0, max_accum=26.0, dtime=0)
+
+Update accumulated growing degree-day variables for crops.
+Computes daily GDD accumulation relative to a base temperature and updates
+the running accumulation.
+
+Ported from `temperature_type%UpdateAccVars_CropGDDs` in `TemperatureType.F90`.
+Requires accumulation infrastructure (accumulMod) and crop type — stub until those are ported.
+"""
+function temperature_update_acc_vars_crop_gdds!(temp::TemperatureData,
+                                                bounds_patch::UnitRange{Int},
+                                                gddx_patch::Vector{Float64};
+                                                basetemp::Int = 0,
+                                                max_accum::Float64 = 26.0,
+                                                dtime::Int = 0)
+    # Stub: When accumulMod and CropType are ported, this will:
+    # 1. Determine if each patch is in its GDD accumulation season
+    #    (based on latitude or read-in season boundaries)
+    # 2. Reset accumulation on Jan 1
+    # 3. Compute daily GDD: max(0, min(max_accum, t_ref2m - (TKFRZ + basetemp))) * dtime/CDAY
+    # 4. Call update_accum_field / extract_accum_field
+    return nothing
+end
+
+"""
     temperature_read_namelist!(temp; excess_ice_coldstart_depth=0.5, excess_ice_coldstart_temp=-5.0)
 
 Set namelist parameters for temperature initialization.

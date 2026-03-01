@@ -379,6 +379,7 @@
         @test CLM.temperature_init_acc_buffer!(temp, 1:5) === nothing
         @test CLM.temperature_update_acc_vars!(temp, 1:3, 1:5,
             CLM.LandunitData(), CLM.PatchData()) === nothing
+        @test CLM.temperature_update_acc_vars_crop_gdds!(temp, 1:5, fill(0.0, 5)) === nothing
     end
 
 end
