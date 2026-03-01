@@ -20,6 +20,7 @@ include("types/column.jl")
 include("types/patch.jl")
 include("types/temperature.jl")
 include("types/energy_flux.jl")
+include("types/soil_state.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
