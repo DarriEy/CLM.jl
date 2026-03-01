@@ -11,4 +11,5 @@ using CLM
     include("test_column.jl")
     include("test_patch.jl")
     include("test_filters.jl")
+    include("test_temperature.jl")
 end
