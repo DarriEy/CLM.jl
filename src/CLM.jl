@@ -27,6 +27,7 @@ include("types/lake_state.jl")
 include("types/surface_albedo.jl")
 include("types/solar_absorbed.jl")
 include("types/urban_params.jl")
+include("types/water_info_base.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)

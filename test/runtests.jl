@@ -20,4 +20,5 @@ using CLM
     include("test_surface_albedo.jl")
     include("test_solar_absorbed.jl")
     include("test_urban_params.jl")
+    include("test_water_info_base.jl")
 end
