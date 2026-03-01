@@ -1,1 +1,9 @@
-The Patch type definition has already been ported and committed (commit `7e41bb1`). All 529 tests pass. There's nothing more to do — the task is complete.
+All 668 tests pass. The port is already complete:
+
+- **Types**: `BoundsType`, `ProcessorType`, `ClumpType`, `DecompData` — all translated from Fortran with `@kwdef mutable struct`
+- **Constants**: All subgrid level and bounds level constants ported
+- **Functions**: All 12 functions translated (`get_beg`, `get_end`, `get_clump_bounds`, `get_proc_bounds`, `get_proc_total`, `get_proc_global`, `get_proc_clumps`, `get_global_index`, `get_global_index_array`, `get_subgrid_level_from_name`, `get_subgrid_level_gsize`, `get_subgrid_level_gindex`)
+- **Tests**: Comprehensive test file at `test/test_decomp.jl` already included in `test/runtests.jl`
+- **Include**: Already listed in `src/CLM.jl` at line 25
+
+The module was already ported in a previous commit (commit `3a293c8`). Nothing further to do.
