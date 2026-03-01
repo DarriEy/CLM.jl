@@ -1,18 +1,14 @@
-All 3,955 tests pass. The `WaterFluxBulkType.F90` has already been fully ported to Julia. Here's a summary of the existing port:
+All 4037 tests pass. The `WaterBalanceType.F90` → `water_balance.jl` port is already complete with:
 
-**Struct**: `WaterFluxBulkData` — uses composition with `wf::WaterFluxData` for the parent type, plus all 25 bulk-specific fields:
-- 6 patch-level 1D fields (snow unloading, evaporation partitioning, hydraulic redistribution)
-- 15 column-level 1D fields (evaporation, infiltration/runoff partitioning, surface water, deficit, AnnET)
-- 4 column-level 2D fields (advective flux, root-soil exchange, snow melt per layer, drainage)
+**Struct:** `WaterBalanceData` — all 15 fields from Fortran `waterbalance_type`:
+- Column-level: `h2osno_old_col`, `snow_sources_col`, `snow_sinks_col`, `wa_reset_nonconservation_gain_col`, `begwb_col`, `endwb_col`, `errh2o_col`, `errh2osno_col`
+- Patch-level: `errh2o_patch`
+- Gridcell-level: `liq1_grc`, `liq2_grc`, `ice1_grc`, `ice2_grc`, `begwb_grc`, `endwb_grc`
 
-**Functions** (all 8 Fortran subroutines translated):
-- `waterfluxbulk_init!` — allocate + NaN-initialize all fields
-- `waterfluxbulk_clean!` — reset to empty
-- `waterfluxbulk_init_cold!` — cold-start zeros for specific fields
-- `waterfluxbulk_init_history!` — stub
-- `waterfluxbulk_restart!` — stub
-- `waterfluxbulk_init_acc_buffer!` — stub
-- `waterfluxbulk_init_acc_vars!` — stub
-- `waterfluxbulk_update_acc_vars!` — stub
+**Functions:**
+- `waterbalance_init!` — combines `InitAllocate` + `InitCold`
+- `waterbalance_clean!` — resets all fields to empty
+- `waterbalance_init_cold!` — cold-start initialization (sets `wa_reset_nonconservation_gain_col` to 0)
+- `waterbalance_init_history!` — stub for history infrastructure
 
-The include is in `src/CLM.jl:35` and the test is in `test/runtests.jl:28`. Everything is passing.
+No changes needed — the port was already done in a previous commit.
