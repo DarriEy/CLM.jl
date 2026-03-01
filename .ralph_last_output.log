@@ -1,17 +1,18 @@
-The port of `EnergyFluxType.F90` to `energy_flux.jl` is already complete and committed (commit `2144aaf`). Here's a summary of what was verified:
+The port of `SoilStateType.F90` to `src/types/soil_state.jl` is already complete and committed (commit `d54cd6c`). Here's a summary of what was ported:
 
-**Struct (`EnergyFluxData`)**: All 76 Fortran pointer fields are translated to Julia typed fields. The only omission is `eflx_dynbal_dribbler` (an `annual_flux_dribbler_type` object), which is infrastructure not yet ported.
+**Struct**: `SoilStateData` with all 35 fields from the Fortran `soilstate_type`:
+- Sand/clay/organic matter (7 fields)
+- Hydraulic properties (21 fields including van Genuchten parameters)
+- Thermal conductivity/heat capacity (5 fields)
+- Root distributions (11 fields)
 
-**Subroutines ported**:
-- `InitAllocate` → `energyflux_init!` — allocates all fields with NaN
-- `InitCold` → `energyflux_init_cold!` — cold-start initialization (lwrad_out, urban fluxes, rresis)
-- `InitHistory` → `energyflux_init_history!` (stub)
-- `Restart` → `energyflux_restart!` (stub)
-- `InitAccBuffer` → `energyflux_init_acc_buffer!` (stub)
-- `InitAccVars` → `energyflux_init_acc_vars!` — startup btran_min initialization
-- `UpdateAccVars` → `energyflux_update_acc_vars!` (stub with documented logic)
-- `energyflux_clean!` — deallocation
+**Functions**:
+- `soilstate_init!` — allocation with correct NaN/SPVAL initialization matching Fortran
+- `soilstate_clean!` — deallocation (reset to empty)
+- `soilstate_init_cold!` — cold-start: `smp_l_col = -1000.0`, `hk_l_col = 0.0`
+- `soilstate_init_history!` — stub (awaiting histFileMod)
+- `soilstate_restart!` — stub (awaiting restart infrastructure)
 
-**Tests**: 381 lines covering default construction, init, clean, cold-start (3 scenarios), acc vars, field mutability, re-init, and stub functions.
+**Tests**: 289 passing tests covering construction, init sizes, init values (NaN vs SPVAL), clean, cold init, field mutability, re-init, and stubs.
 
-**All 1,065 tests pass.**
+All 1474 tests pass across the full suite.
