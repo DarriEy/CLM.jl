@@ -1,3 +1,12 @@
-The canopy state port is already committed (commit `64c8141`). The only uncommitted changes are to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — none of which are part of the canopy state port.
+All 2077 tests pass, including the lake state tests. The port is already complete:
 
-**Summary:** The `CanopyStateType.F90` → `canopy_state.jl` port is complete. All Fortran subroutines have been translated, the file is included in the module, tests are comprehensive, and the full suite (1882 tests) passes.
+**Struct:** `LakeStateData` — all 13 fields from `lakestate_type` (12 column-level + 1 patch-level)
+
+**Functions ported:**
+- `lakestate_init!` — allocates all fields with NaN/SPVAL (from `InitAllocate`)
+- `lakestate_clean!` — resets all fields to empty
+- `lakestate_init_cold!` — cold-start: zero ice fraction, `TKWAT` for savedtke1, 0.1 for ust_lake (from `InitCold`)
+- `lakestate_init_history!` — sets SPVAL for history averaging (from `InitHistory`, stub for hist_addfld calls)
+- `lakestate_restart!` — stub for restart I/O (from `Restart`)
+
+**Integration:** Already included in `src/CLM.jl` (line 26) and tested in `test/runtests.jl` (line 19). No changes needed — the port was already done in a previous session.
