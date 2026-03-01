@@ -1,16 +1,23 @@
-Done. Here's what was accomplished:
+Done. Here's a summary of what was ported:
 
-**The file `src/types/cn_veg_carbon_flux.jl` already had:**
-- `CNVegCarbonFluxData` struct with all ~370+ fields (gap mortality, harvest, fire, phenology, maintenance respiration, photosynthesis, allocation, growth respiration, storage-to-transfer, decomposition, dynamic landcover, GRU, crop, summary/diagnostic, FUN, and matrix CN fields)
-- `cnveg_carbon_flux_init!` — allocates all arrays
-- `cnveg_carbon_flux_set_values!` — bulk-sets values for masked patches/columns
-- `cnveg_carbon_flux_zero_dwt!` — zeros dynamic landcover fluxes
-- `cnveg_carbon_flux_zero_gru!` — zeros GRU fluxes
-- `cnveg_carbon_flux_init_cold!` — cold-start initialization
-- Stubs for `init_history!` and `restart!`
+**Struct:** `SoilBiogeochemCarbonStateData` — all fields from `soilbiogeochem_carbonstate_type`:
+- 3D arrays: `decomp_cpools_vr_col`, `decomp0_cpools_vr_col`, `decomp_cpools_vr_SASUsave_col` + matrix-CN arrays
+- 2D arrays: `ctrunc_vr_col`, `decomp_soilc_vr_col`, `decomp_cpools_col`, `decomp_cpools_1m_col`, `matrix_cap_decomp_cpools_col`, `in_acc`
+- 1D vectors: all diagnostic summaries (`ctrunc_col`, `totmicc_col`, `totlitc_col`, `totsomc_col`, etc.)
+- Scalars: `restart_file_spinup_state`, `totvegcthresh`
 
-**I added:**
-- `cnveg_carbon_flux_summary!` — computes patch-level summary carbon flux variables (MR, GR, AR, GPP, NPP, RR, AGNPP, BGNPP, litfall, fire_closs, allocation/loss summaries) matching the Fortran `Summary_carbonflux` subroutine
-- Test for the summary function validating MR, GR, AR, GPP, NPP calculations with known values
+**Functions ported:**
+| Fortran | Julia |
+|---|---|
+| `InitAllocate` | `soil_bgc_carbon_state_init!` |
+| `SetValues` | `soil_bgc_carbon_state_set_values!` |
+| `InitCold` | `soil_bgc_carbon_state_init_cold!` (c12 & c13/c14 paths) |
+| `Summary` | `soil_bgc_carbon_state_summary!` (full vertical integration, 1m integration, pool categorization) |
+| `SetTotVgCThresh` | `soil_bgc_carbon_state_set_totvegcthresh!` |
+| `InitHistory` | `soil_bgc_carbon_state_init_history!` (stub) |
+| `Restart` | `soil_bgc_carbon_state_restart!` (stub) |
+| `DynamicColumnAdjustments` | `soil_bgc_carbon_state_dynamic_col_adjustments!` (stub) |
 
-**All 5068 tests pass.** Committed as `c6deb78`.
+**Tests:** 13 test sets covering default construction, allocation (with/without matrix-CN), set_values, cold initialization (c12/c13 paths, matrix-CN), summary integration, CWD pools, threshold validation, stubs, mutability, and re-initialization.
+
+**All 5293 tests pass.**

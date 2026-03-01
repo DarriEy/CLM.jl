@@ -31,3 +31,5 @@
 | Veg CN state | 4 | ✓ PASSED | 1 | — |
 | Veg carbon state | 4 | ✓ PASSED | 1 | — |
 | Veg nitrogen state | 4 | ✓ PASSED | 2 | — |
+| Veg carbon flux | 4 | ✓ PASSED | 2 | — |
+| Veg nitrogen flux | 4 | ✓ PASSED | 1 | — |
