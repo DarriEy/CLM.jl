@@ -26,4 +26,5 @@ using CLM
     include("test_water_diagnostic_bulk.jl")
     include("test_water_state_bulk.jl")
     include("test_water_flux_bulk.jl")
+    include("test_water_balance.jl")
 end

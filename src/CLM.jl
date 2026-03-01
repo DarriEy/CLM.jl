@@ -33,6 +33,7 @@ include("types/water_flux.jl")
 include("types/water_diagnostic_bulk.jl")
 include("types/water_state_bulk.jl")
 include("types/water_flux_bulk.jl")
+include("types/water_balance.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
