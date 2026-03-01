@@ -30,4 +30,5 @@ using CLM
     include("test_water.jl")
     include("test_friction_velocity.jl")
     include("test_cn_veg_state.jl")
+    include("test_cn_veg_carbon_state.jl")
 end
