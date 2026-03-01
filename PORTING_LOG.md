@@ -13,3 +13,4 @@
 | Temperature state | 3 | ✓ PASSED | 2 | — |
 | Energy flux state | 3 | ✓ PASSED | 2 | — |
 | Soil state | 3 | ✓ PASSED | 2 | — |
+| Soil hydrology state | 3 | ✓ PASSED | 2 | — |

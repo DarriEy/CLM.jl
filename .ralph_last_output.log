@@ -1,17 +1,3 @@
-All 1640 tests pass. The port of `SoilHydrologyType.F90` to `src/types/soil_hydrology.jl` is already complete and verified. Here's a summary of what's been ported:
+The canopy state port is already committed (commit `64c8141`). The only uncommitted changes are to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — none of which are part of the canopy state port.
 
-**Struct**: `SoilHydrologyData` — all 30 fields from `soilhydrology_type` including:
-- Control flag (`h2osfcflag`)
-- 8 non-VIC column vectors (water table depths, frost table, ice fractions, etc.)
-- 1 non-VIC 2D matrix (`icefrac_col`)
-- 14 VIC 1D/2D/3D fields (porosity, conductivity, moisture, etc.)
-
-**Functions** (all 6 Fortran subroutines translated):
-- `soilhydrology_init!` — allocation with NaN initialization (from `InitAllocate`)
-- `soilhydrology_clean!` — deallocation (Julia addition)
-- `soilhydrology_init_cold!` — cold-start initialization with full column-type logic (from `InitCold`)
-- `soilhydrology_init_history!` — stub for history registration (from `InitHistory`)
-- `soilhydrology_restart!` — stub for restart I/O (from `Restart`)
-- `soilhydrology_read_nl!` — namelist reading via keyword args (from `ReadNL`)
-
-The include in `src/CLM.jl:24` and test in `test/runtests.jl:17` are already wired up. The latest commit `c2d1753` already has this work committed with the correct message.
+**Summary:** The `CanopyStateType.F90` → `canopy_state.jl` port is complete. All Fortran subroutines have been translated, the file is included in the module, tests are comprehensive, and the full suite (1882 tests) passes.
