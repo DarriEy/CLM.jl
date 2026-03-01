@@ -6,7 +6,7 @@ The goal is full process fidelity, GPU execution, and differentiability via AD.
 
 ## Fortran Source Location
 The original Fortran CLM source is at:
-`/Users/darrieythorsson/compHydro/code/SYMFLUENCE_data/installs/clm/`
+`/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/`
 
 ## Architecture & Conventions
 

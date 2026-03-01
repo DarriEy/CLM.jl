@@ -20,7 +20,7 @@ set -euo pipefail
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
-FORTRAN_ROOT="/Users/darrieythorsson/compHydro/code/SYMFLUENCE_data/installs/clm"
+FORTRAN_ROOT="/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm"
 LOG_FILE="$PROJECT_DIR/PORTING_LOG.md"
 STATE_FILE="$PROJECT_DIR/.ralph_state"
 MAX_RETRIES=3
@@ -241,8 +241,10 @@ for idx in $(seq $start_idx $((total - 1))); do
         prompt_file=$(mktemp)
         echo "$prompt" > "$prompt_file"
 
-        # Run Claude with timeout (30 min max per module)
-        if timeout 1800 claude -p "$(cat "$prompt_file")" \
+        # Run Claude (unset CLAUDECODE to allow nested launch; skip permissions for autonomy)
+        if CLAUDECODE= claude -p --dangerously-skip-permissions \
+            --model "$CLAUDE_MODEL" \
+            "$(cat "$prompt_file")" \
             2>&1 | tee "$PROJECT_DIR/.ralph_last_output.log"; then
 
             # Verify the Julia file was created
