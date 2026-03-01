@@ -165,6 +165,82 @@
         end
     end
 
+    @testset "cnveg_carbon_flux_summary!" begin
+        np = 4; nc = 2; ng = 1
+        cf = CLM.CNVegCarbonFluxData()
+        CLM.cnveg_carbon_flux_init!(cf, np, nc, ng)
+
+        mask_patch = BitVector([true, true, false, false])
+
+        # Set all flux vars to 0 first via set_values
+        mask_all_p = trues(np)
+        mask_all_c = trues(nc)
+        CLM.cnveg_carbon_flux_set_values!(cf, mask_all_p, 0.0, mask_all_c, 0.0)
+
+        # Set specific values for patch 1
+        cf.leaf_mr_patch[1]     = 1.0
+        cf.froot_mr_patch[1]    = 2.0
+        cf.livestem_mr_patch[1] = 0.5
+        cf.livecroot_mr_patch[1] = 0.3
+
+        cf.cpool_leaf_gr_patch[1]     = 0.1
+        cf.cpool_froot_gr_patch[1]    = 0.2
+        cf.cpool_livestem_gr_patch[1] = 0.05
+        cf.cpool_deadstem_gr_patch[1] = 0.04
+        cf.cpool_livecroot_gr_patch[1] = 0.03
+        cf.cpool_deadcroot_gr_patch[1] = 0.02
+
+        cf.transfer_leaf_gr_patch[1] = 0.01
+        cf.transfer_froot_gr_patch[1] = 0.01
+        cf.transfer_livestem_gr_patch[1] = 0.01
+        cf.transfer_deadstem_gr_patch[1] = 0.01
+        cf.transfer_livecroot_gr_patch[1] = 0.01
+        cf.transfer_deadcroot_gr_patch[1] = 0.01
+
+        cf.cpool_leaf_storage_gr_patch[1] = 0.005
+        cf.cpool_froot_storage_gr_patch[1] = 0.005
+        cf.cpool_livestem_storage_gr_patch[1] = 0.005
+        cf.cpool_deadstem_storage_gr_patch[1] = 0.005
+        cf.cpool_livecroot_storage_gr_patch[1] = 0.005
+        cf.cpool_deadcroot_storage_gr_patch[1] = 0.005
+
+        cf.psnsun_to_cpool_patch[1]  = 10.0
+        cf.psnshade_to_cpool_patch[1] = 5.0
+
+        CLM.cnveg_carbon_flux_summary!(cf, mask_patch, 1:np)
+
+        # MR = 1.0 + 2.0 + 0.5 + 0.3 = 3.8
+        @test cf.mr_patch[1] ≈ 3.8
+
+        # Current GR = 0.1 + 0.2 + 0.05 + 0.04 + 0.03 + 0.02 = 0.44
+        @test cf.current_gr_patch[1] ≈ 0.44
+
+        # Transfer GR = 6 * 0.01 = 0.06
+        @test cf.transfer_gr_patch[1] ≈ 0.06
+
+        # Storage GR = 6 * 0.005 = 0.03
+        @test cf.storage_gr_patch[1] ≈ 0.03
+
+        # GR = 0.44 + 0.06 + 0.03 = 0.53
+        @test cf.gr_patch[1] ≈ 0.53
+
+        # AR = MR + GR = 3.8 + 0.53 = 4.33
+        @test cf.ar_patch[1] ≈ 4.33
+
+        # GPP = 10 + 5 = 15
+        @test cf.gpp_patch[1] ≈ 15.0
+
+        # NPP = GPP - AR = 15 - 4.33 = 10.67
+        @test cf.npp_patch[1] ≈ 10.67
+
+        # Patch 2 should be all zeros (was set to 0)
+        @test cf.gpp_patch[2] ≈ 0.0
+        @test cf.npp_patch[2] ≈ 0.0
+
+        # Masked-out patch 3 should remain 0 (from set_values)
+        @test cf.gpp_patch[3] == 0.0
+    end
+
     @testset "stub functions run without error" begin
         cf = CLM.CNVegCarbonFluxData()
         @test CLM.cnveg_carbon_flux_init_history!(cf) === nothing
