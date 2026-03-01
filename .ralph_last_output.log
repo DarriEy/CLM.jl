@@ -1,18 +1,7 @@
-Done. Here's a summary of what was ported:
+All 277 tests pass. The Landunit type port is already complete and correct:
 
-**`GridcellType.F90` → `src/types/gridcell.jl`**
+- **`src/types/landunit.jl`** — `LandunitData` struct with all 26 fields, `landunit_init!()`, and `landunit_clean!()` matching the Fortran source exactly
+- **`test/test_landunit.jl`** — Tests for default construction, init, clean, field mutability, and re-init
+- **`src/CLM.jl`** — Already includes `"types/landunit.jl"`
 
-| Fortran | Julia |
-|---|---|
-| `gridcell_type` (type with pointers) | `GridcellData` (mutable struct with `@kwdef`) |
-| `Init(this, begg, endg)` subroutine | `gridcell_init!(grc, ngridcells)` function |
-| `Clean(this)` subroutine | `gridcell_clean!(grc)` function |
-
-**Key translation decisions:**
-- All Fortran `pointer` arrays → Julia `Vector{Float64}`, `Vector{Int}`, `Vector{Bool}`, or `Matrix{Int}`
-- Fortran `real(r8)` fields initialized to `nan` → Julia `fill(NaN, n)`
-- Fortran integer fields initialized to `ispval` → Julia `fill(ISPVAL, n)` (uses existing constant)
-- `landunit_indices` uses `MAX_LUNIT` from the already-ported `landunit_varcon.jl`
-- Default construction creates empty arrays (zero-size), matching the unallocated Fortran state
-
-**Tests:** 167/167 passing (including new gridcell tests covering construction, init, clean, mutability, and re-init).
+The commit `6623b7c` ("Port Landunit type definition from Fortran to Julia") already captured this work. No changes needed.
