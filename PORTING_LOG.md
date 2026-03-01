@@ -23,3 +23,4 @@
 | Water state | 3 | ✓ PASSED | 2 | — |
 | Water flux | 3 | ✓ PASSED | 2 | — |
 | Water diagnostic bulk | 3 | ✓ PASSED | 2 | — |
+| Water state bulk | 3 | ✓ PASSED | 2 | — |

@@ -1,7 +1,18 @@
-All 3846 tests pass. The port is already complete:
+All 3,955 tests pass. The `WaterFluxBulkType.F90` has already been fully ported to Julia. Here's a summary of the existing port:
 
-- **`src/types/water_state_bulk.jl`** — fully ported with `WaterStateBulkData` struct (composition over `WaterStateData`), `waterstatebulk_init!`, `waterstatebulk_clean!`, `waterstatebulk_init_cold!`, and stubs for history/restart
-- **`test/test_water_state_bulk.jl`** — comprehensive tests covering construction, init, clean, cold start, subset columns, stubs, mutability, and re-init
-- Both files are already `include()`d in `src/CLM.jl` and `test/runtests.jl`
+**Struct**: `WaterFluxBulkData` — uses composition with `wf::WaterFluxData` for the parent type, plus all 25 bulk-specific fields:
+- 6 patch-level 1D fields (snow unloading, evaporation partitioning, hydraulic redistribution)
+- 15 column-level 1D fields (evaporation, infiltration/runoff partitioning, surface water, deficit, AnnET)
+- 4 column-level 2D fields (advective flux, root-soil exchange, snow melt per layer, drainage)
 
-The port matches all 6 Fortran subroutines from `WaterStateBulkType.F90`. There's nothing left to do — this module was already ported in a previous commit (commit `3669a3d`).
+**Functions** (all 8 Fortran subroutines translated):
+- `waterfluxbulk_init!` — allocate + NaN-initialize all fields
+- `waterfluxbulk_clean!` — reset to empty
+- `waterfluxbulk_init_cold!` — cold-start zeros for specific fields
+- `waterfluxbulk_init_history!` — stub
+- `waterfluxbulk_restart!` — stub
+- `waterfluxbulk_init_acc_buffer!` — stub
+- `waterfluxbulk_init_acc_vars!` — stub
+- `waterfluxbulk_update_acc_vars!` — stub
+
+The include is in `src/CLM.jl:35` and the test is in `test/runtests.jl:28`. Everything is passing.
