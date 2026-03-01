@@ -23,6 +23,7 @@ include("types/energy_flux.jl")
 include("types/soil_state.jl")
 include("types/soil_hydrology.jl")
 include("types/canopy_state.jl")
+include("types/lake_state.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)

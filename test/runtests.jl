@@ -16,4 +16,5 @@ using CLM
     include("test_soil_state.jl")
     include("test_soil_hydrology.jl")
     include("test_canopy_state.jl")
+    include("test_lake_state.jl")
 end
