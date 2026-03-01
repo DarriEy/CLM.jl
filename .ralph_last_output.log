@@ -1,13 +1,16 @@
-All 4,971 tests pass. The `CNVegNitrogenStateType.F90` has already been fully ported to `src/types/cn_veg_nitrogen_state.jl` with:
+Done. Here's what was accomplished:
 
-- **Struct**: `CNVegNitrogenStateData` with all fields (patch-level 2D reproductive pools, 1D core pools, matrix CN capacity, SASU initial/save fields, matrix N alloc/transfer/turnover accumulation, summary diagnostics, column/gridcell-level)
-- **`cnveg_nitrogen_state_init!`** — matches `InitAllocate`
-- **`cnveg_nitrogen_state_set_values!`** — matches `SetValues`
-- **`cnveg_nitrogen_state_zero_dwt!`** — matches `ZeroDwt`
-- **`cnveg_nitrogen_state_summary!`** — matches `Summary_nitrogenstate`
-- **`cnveg_nitrogen_state_init_cold!`** — matches `InitCold`
-- **Stubs** for `InitHistory`, `Restart`, `DynamicPatchAdjustments`
-- Already included in `src/CLM.jl` (line 41)
-- Test file at `test/test_cn_veg_nitrogen_state.jl` (included in `test/runtests.jl`)
+**The file `src/types/cn_veg_carbon_flux.jl` already had:**
+- `CNVegCarbonFluxData` struct with all ~370+ fields (gap mortality, harvest, fire, phenology, maintenance respiration, photosynthesis, allocation, growth respiration, storage-to-transfer, decomposition, dynamic landcover, GRU, crop, summary/diagnostic, FUN, and matrix CN fields)
+- `cnveg_carbon_flux_init!` — allocates all arrays
+- `cnveg_carbon_flux_set_values!` — bulk-sets values for masked patches/columns
+- `cnveg_carbon_flux_zero_dwt!` — zeros dynamic landcover fluxes
+- `cnveg_carbon_flux_zero_gru!` — zeros GRU fluxes
+- `cnveg_carbon_flux_init_cold!` — cold-start initialization
+- Stubs for `init_history!` and `restart!`
 
-The latest git commit (`9a8ab12`) already says "Port Veg nitrogen state from Fortran to Julia", so this task is complete.
+**I added:**
+- `cnveg_carbon_flux_summary!` — computes patch-level summary carbon flux variables (MR, GR, AR, GPP, NPP, RR, AGNPP, BGNPP, litfall, fire_closs, allocation/loss summaries) matching the Fortran `Summary_carbonflux` subroutine
+- Test for the summary function validating MR, GR, AR, GPP, NPP calculations with known values
+
+**All 5068 tests pass.** Committed as `c6deb78`.
