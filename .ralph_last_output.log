@@ -1,1 +1,16 @@
-**Summary:** The port of `WaterType.F90` → `src/types/water.jl` is already complete and committed (`08f9425`). All 20 Fortran subroutines/functions and 5 types are translated. The full test suite passes (4139/4139 tests). No further action needed.
+Done. Here's a summary of what was completed:
+
+**Existing implementation was already comprehensive** — the file `src/types/friction_velocity.jl` and its tests already contained:
+- `FrictionVelocityData` struct with all 34 patch-level and 4 column-level fields
+- `frictionvel_init!`, `frictionvel_clean!`, `frictionvel_init_for_testing!`, `frictionvel_init_cold!`
+- `frictionvel_init_history!`, `frictionvel_restart!` (stubs)
+- `stability_func1`, `stability_func2` (pure math)
+- `monin_obuk_ini` (Monin-Obukhov initialization)
+- `set_roughness_and_forc_heights_nonlake!`, `set_actual_roughness_lengths!`
+- `friction_velocity!` (main calculation with all wind/temperature/humidity profiles)
+
+**Added two missing functions** from the Fortran source:
+- `frictionvel_read_nml!` — sets `zetamaxstable` (ported from `ReadNamelist`)
+- `frictionvel_read_params!` — sets `zsno`, `zlnd`, `zglc` with Meier2022 support (ported from `ReadParams`)
+
+**Tests**: All 4262 tests pass (12 new tests for the added functions). Committed as `7a747ab`.
