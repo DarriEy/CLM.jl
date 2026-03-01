@@ -1,15 +1,14 @@
-All 2780 tests pass. The `SolarAbsorbedType.F90` has already been fully ported:
+All 2915 tests pass. The urban parameters module has already been fully ported:
 
-- **`src/types/solar_absorbed.jl`** — Contains:
-  - `SolarAbsorbedData` struct with all 39 fields from Fortran's `solarabs_type`
-  - `solarabs_init!()` — allocation with NaN/SPVAL initialization, LUNA-conditional arrays
-  - `solarabs_clean!()` — deallocation/reset
-  - `solarabs_init_cold!()` — zero-init urban surface absorption fields
-  - `solarabs_init_history!()` — SPVAL init stub with SSRE support
-  - `solarabs_restart!()` — restart I/O stub
+**Source:** `src/types/urban_params.jl` — contains:
+- `UrbanControl` struct + `urban_ctrl` global instance (control variables)
+- `is_simple_build_temp()` / `is_prog_build_temp()` query functions
+- `UrbanInputData` struct + `urbinp_init!()` / `urbinp_clean!()` (raw input data)
+- `UrbanParamsData` struct + `urbanparams_init!()` / `urbanparams_clean!()` (landunit-level params)
+- `urbanparams_populate!()` — main initialization loop (view factors, aerodynamics, thermal properties)
+- `check_urban()` — validates urban data consistency
+- `urban_read_nml!()` — namelist parameter setting
 
-- **`test/test_solar_absorbed.jl`** — 9 test sets covering default construction, init with/without LUNA, clean, init_cold, field mutability, re-init, stub functions, and SPVAL/SSRE history init.
+**Test:** `test/test_urban_params.jl` — 570 lines covering all types, init/clean, populate with view factor/aerodynamic checks, traffic factor, Vancouver/Mexico City special cases, and check_urban validation.
 
-- Both files are already `include()`d in `src/CLM.jl` and `test/runtests.jl`.
-
-The port is complete and all tests pass.
+Both files are already included in `src/CLM.jl` and `test/runtests.jl`. The port is complete and all tests pass.

@@ -17,3 +17,4 @@
 | Canopy state | 3 | ✓ PASSED | 2 | — |
 | Lake state | 3 | ✓ PASSED | 2 | — |
 | Albedo state | 3 | ✓ PASSED | 2 | — |
+| Solar absorption | 3 | ✓ PASSED | 2 | — |
