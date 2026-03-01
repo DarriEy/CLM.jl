@@ -12,6 +12,11 @@ include("constants/varpar.jl")
 include("constants/varcon.jl")
 
 # ===========================================================================
+# Tier 1: Types (data structures)
+# ===========================================================================
+include("types/gridcell.jl")
+
+# ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities)
 # ===========================================================================
 include("infrastructure/tridiagonal.jl")
