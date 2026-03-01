@@ -6,4 +6,5 @@ using CLM
     include("test_qsat.jl")
     include("test_tridiagonal.jl")
     include("test_gridcell.jl")
+    include("test_landunit.jl")
 end
