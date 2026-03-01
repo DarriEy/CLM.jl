@@ -8,4 +8,5 @@ using CLM
     include("test_gridcell.jl")
     include("test_landunit.jl")
     include("test_column.jl")
+    include("test_patch.jl")
 end

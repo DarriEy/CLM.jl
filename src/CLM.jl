@@ -17,6 +17,7 @@ include("constants/varcon.jl")
 include("types/gridcell.jl")
 include("types/landunit.jl")
 include("types/column.jl")
+include("types/patch.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities)
