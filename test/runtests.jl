@@ -14,4 +14,5 @@ using CLM
     include("test_temperature.jl")
     include("test_energy_flux.jl")
     include("test_soil_state.jl")
+    include("test_soil_hydrology.jl")
 end
