@@ -10,3 +10,4 @@
 | Patch type definition | 2 | ✓ PASSED | 2 | — |
 | Domain decomposition | 2 | ✓ PASSED | 2 | — |
 | Filter to mask conversion | 2 | ✓ PASSED | 2 | — |
+| Temperature state | 3 | ✓ PASSED | 2 | — |
