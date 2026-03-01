@@ -20,6 +20,8 @@ const DST_SRC_NBR      = 3     # number of source size distributions
 const SZ_NBR           = 200   # number of sub-bin bins
 const MXPFT            = 78    # maximum number of PFTs
 const MXSOWINGS        = 1     # maximum number of crop sowings per year
+const MXHARVESTS       = MXSOWINGS + 1  # maximum number of crop harvests per year
+const NREPR            = 1     # number of crop reproductive pools (from CropReprPoolsMod, default=1)
 const NLAYER           = 3     # number of VIC layers
 const NVARIANTS        = 2     # number of soil moisture variants
 
