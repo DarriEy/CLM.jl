@@ -52,4 +52,5 @@ using CLM
     include("test_surface_resistance.jl")
     include("test_soil_moist_stress.jl")
     include("test_soil_temperature.jl")
+    include("test_lake_temperature.jl")
 end
