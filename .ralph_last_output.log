@@ -1,14 +1,15 @@
-Done. Here's a summary of what was completed:
+The hydrology drainage module has already been fully ported and committed (commit `7c2759a`). Here's a summary:
 
-**Ported subroutines from `HydrologyNoDrainageMod.F90`:**
+**Status: Already complete**
 
-The file already had the inline diagnostic code from `HydrologyNoDrainage` broken into 10 sub-functions plus a main orchestrator. Two public subroutines were missing:
+- **Source**: `src/biogeophys/hydrology_drainage.jl` (366 lines) — ported from `HydrologyDrainageMod.F90` (244 lines)
+- **Test**: `test/test_hydrology_drainage.jl` (323 lines) — tests all 5 public functions
+- **Include**: Already in `src/CLM.jl` (line 83) and `test/runtests.jl` (line 63)
+- **All 7,961 tests pass**
 
-1. **`calc_and_withdraw_irrigation_fluxes!`** — Stub for irrigation withdrawal. Calls `withdraw_groundwater_irrigation!` (already in `soil_hydrology.jl`) when groundwater irrigation is enabled. Full irrigation flux calculation awaits `IrrigationMod` being ported.
-
-2. **`handle_new_snow!`** — Coordinates the three steps of handling new snowfall:
-   - Add new snow mass (`update_state_add_new_snow!`)
-   - Remove snow from thawed wetlands (`build_filter_thawed_wetland_thin_snowpack!`, `update_state_remove_snow_thawed_wetlands!`, `bulk_remove_snow_thawed_wetlands!`)
-   - Initialize explicit snow pack (`build_filter_snowpack_initialized!`, `update_state_initialize_snow_pack!`, `bulk_initialize_snow_pack!`)
-
-**Tests:** Added 2 new test sets (irrigation stub + handle_new_snow). All **7926 tests pass**.
+The port includes:
+1. `compute_wetland_ice_hydrology!` — wetland/ice/urban flux handling
+2. `compute_total_runoff!` — total runoff computation
+3. `compute_water_mass_non_lake!` — water mass stub (TotalWaterAndHeatMod not yet ported)
+4. `adjust_runoff_terms!` — glacier SMB stub (GlacierSurfaceMassBalanceMod not yet ported)
+5. `hydrology_drainage!` — main orchestrator calling VIC mapping, drainage/lateral flow, vol. soil water update, and all the above
