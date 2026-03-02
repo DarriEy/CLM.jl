@@ -101,5 +101,6 @@ include("biogeochem/growth_resp.jl")
 include("biogeochem/maint_resp.jl")
 include("biogeochem/fun.jl")
 include("biogeochem/gap_mortality.jl")
+include("biogeochem/decomp_bgc.jl")
 
 end # module CLM
