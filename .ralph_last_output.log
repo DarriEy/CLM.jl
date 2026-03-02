@@ -1,14 +1,1 @@
-This module has already been fully ported and committed. Here's a summary of the current state:
-
-**`src/biogeochem/c_state_update1.jl`** — Already ported from `CNCStateUpdate1Mod.F90` with all three subroutines:
-
-1. **`c_state_update_dyn_patch!`** — Updates C states from dynamic patch fluxes (litter, CWD, seed pools)
-2. **`c_state_update0!`** — Updates cpool from photosynthesis on radiation timestep
-3. **`c_state_update1!`** — Full prognostic C state update (phenology, maintenance respiration, allocation, growth respiration, storage-to-transfer, crop harvest logic, decomposition cascade)
-
-**Already completed:**
-- Source file included in `src/CLM.jl` (line 110)
-- Test file `test/test_c_state_update1.jl` included in `test/runtests.jl` (line 86)
-- Tests cover: dyn_patch, update0, non-woody/non-crop, woody, FATES columns, decomp cascade, mask filtering, gresp storage/xfer
-- All **10876 tests pass**
-- Already committed as `b2a3d24`: "Port C state update 1 from Fortran to Julia"
+The source and test files were already committed in a previous session (commit `edd1c9e` "Port C state update 2 from Fortran to Julia" is already in the git log). The port is complete and all tests pass. No new changes are needed.
