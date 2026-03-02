@@ -1,20 +1,14 @@
-The snow hydrology port is already complete:
+Done. Here's a summary of what was completed:
 
-- **`src/biogeophys/snow_hydrology.jl`** — 2197 lines, 37 functions ported from the ~4070-line Fortran source
-- **`test/test_snow_hydrology.jl`** — 522 lines, 22+ test categories
-- **All 7889 tests pass**
-- **Already committed** as `e878cf2 Port Snow hydrology from Fortran to Julia`
+**Ported subroutines from `HydrologyNoDrainageMod.F90`:**
 
-The only uncommitted changes are to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — these are automation/tracking files, not part of the port itself.
+The file already had the inline diagnostic code from `HydrologyNoDrainage` broken into 10 sub-functions plus a main orchestrator. Two public subroutines were missing:
 
-The port covers all 43 Fortran subroutines/functions including:
-- New snow density calculation (Anderson 1976, Slater 2017, wind-dependent)
-- Snow water balance and percolation
-- Snow compaction (destructive, overburden, melt, wind drift metamorphism)
-- Layer combination and division
-- Snow capping
-- Aerosol transport through snowpack
-- Cold-start layer initialization
-- Snow/no-snow filter construction
+1. **`calc_and_withdraw_irrigation_fluxes!`** — Stub for irrigation withdrawal. Calls `withdraw_groundwater_irrigation!` (already in `soil_hydrology.jl`) when groundwater irrigation is enabled. Full irrigation flux calculation awaits `IrrigationMod` being ported.
 
-No further work is needed — the snow hydrology module is fully ported and passing all tests.
+2. **`handle_new_snow!`** — Coordinates the three steps of handling new snowfall:
+   - Add new snow mass (`update_state_add_new_snow!`)
+   - Remove snow from thawed wetlands (`build_filter_thawed_wetland_thin_snowpack!`, `update_state_remove_snow_thawed_wetlands!`, `bulk_remove_snow_thawed_wetlands!`)
+   - Initialize explicit snow pack (`build_filter_snowpack_initialized!`, `update_state_initialize_snow_pack!`, `bulk_initialize_snow_pack!`)
+
+**Tests:** Added 2 new test sets (irrigation stub + handle_new_snow). All **7926 tests pass**.
