@@ -37,3 +37,4 @@
 | Soil N state | 4 | ✓ PASSED | 2 | — |
 | Soil C flux | 4 | ✓ PASSED | 2 | — |
 | Soil N flux | 4 | ✓ PASSED | 2 | — |
+| Soil BGC state | 4 | ✓ PASSED | 2 | — |

@@ -1,10 +1,21 @@
-All 5,909 tests pass. The port is already complete:
+Done. The crop type port was already mostly complete. The only missing piece was the `CropUpdateAccVars` subroutine, which I've added as `crop_update_acc_vars!` — a documented stub (like the other accumulation-related functions) since the accumulation infrastructure (`accumulMod`) hasn't been ported yet. 
 
-- **Struct**: `SoilBiogeochemStateData` with all 13 fields from the Fortran type
-- **`soil_bgc_state_init!`**: Allocates all fields matching `InitAllocate`
-- **`soil_bgc_state_init_cold!`**: Cold-start initialization with special/soil-crop mask logic matching `InitCold`
-- **`soil_bgc_state_init_history!`** and **`soil_bgc_state_restart!`**: Stubs (no-op)
-- **`get_spinup_latitude_term`**: Logistic function for spinup acceleration at high latitudes
-- Includes registered in `src/CLM.jl` and `test/runtests.jl`
+Summary of the Fortran → Julia mapping (all 12 subroutines/functions now covered):
 
-The file and tests were already committed in the previous session (commit `87b8d10`).
+| Fortran | Julia | Status |
+|---------|-------|--------|
+| `crop_type` | `CropData` | Full struct |
+| `Init` | split into separate calls | ✓ |
+| `ReadNML` | `crop_read_nml!` | ✓ |
+| `InitAllocate` | `crop_init!` | ✓ |
+| `InitHistory` | `crop_init_history!` | Stub |
+| `InitCold` | `crop_init_cold!` | ✓ |
+| `InitAccBuffer` | `crop_init_acc_buffer!` | Stub |
+| `InitAccVars` | `crop_init_acc_vars!` | Stub |
+| `Restart` | `crop_restart!` | Stub |
+| `CropUpdateAccVars` | `crop_update_acc_vars!` | Stub (new) |
+| `CropIncrementYear` | `crop_increment_year!` | ✓ |
+| `checkDates` | `crop_check_dates!` | Stub |
+| `latbaset` | `latbaset` | ✓ |
+
+All 6025 tests pass.
