@@ -113,5 +113,6 @@ include("biogeochem/c_state_update3.jl")
 include("biogeochem/n_state_update1.jl")
 include("biogeochem/n_state_update2.jl")
 include("biogeochem/n_state_update3.jl")
+include("biogeochem/cn_driver.jl")
 
 end # module CLM
