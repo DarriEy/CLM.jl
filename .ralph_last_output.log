@@ -1,9 +1,14 @@
-The N leaching port is already complete:
+The N dynamics module has already been ported and committed (commit `9c9a694`). The only unstaged changes are to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — which are state/log files, not the port itself.
 
-- **Source**: `src/biogeochem/n_leaching.jl` — fully ported from `SoilBiogeochemNLeachingMod.F90`
-- **Tests**: `test/test_n_leaching.jl` — 10 test cases covering both branches, edge cases, and masking
-- **Integration**: Already included in `src/CLM.jl` (line 108) and `test/runtests.jl` (line 84)
-- **All 10,719 tests pass**
-- **Already committed**: `b28eacb Port N leaching from Fortran to Julia`
+**Summary:** The port of `CNNDynamicsMod.F90` → `n_dynamics.jl` is complete and passing all tests. Here's what was ported:
 
-The port translates all 3 Fortran entities (`params_type`, `readParams`, `SoilBiogeochemNLeaching`) with faithful logic including the `use_nitrif_denitrif` branching, dissolved N concentration calculations, leaching/runoff rate limiting, and correct Fortran→Julia `zisoi` index offset handling.
+| Fortran Subroutine | Julia Function | Description |
+|---|---|---|
+| `CNNDynamicsReadNML` | `n_dynamics_read_nml!` | Set N dynamics parameters |
+| `CNNDeposition` | `n_deposition!` | Atmospheric N deposition to soil mineral N |
+| `CNFreeLivingFixation` | `n_free_living_fixation!` | Free-living N fixation as f(ET) |
+| `CNNFixation` | `n_fixation!` | Symbiotic/asymbiotic N fixation as f(NPP) |
+| `CNNFert` | `n_fert!` | Crop N fertilizer (patch-to-column aggregation) |
+| `CNSoyfix` | `n_soyfix!` | Soybean N fixation (EPICPHASE model) |
+
+The `params_type` → `NDynamicsParams` struct is also ported. All 10,791 tests pass including the 13 N dynamics-specific tests.

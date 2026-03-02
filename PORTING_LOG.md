@@ -80,3 +80,4 @@
 | Decomp MIMICS | 8 | ✓ PASSED | 2 | — |
 | Decomposition | 8 | ✓ PASSED | 2 | — |
 | Nitrif-Denitrif | 8 | ✓ PASSED | 2 | — |
+| N leaching | 8 | ✓ PASSED | 2 | — |
