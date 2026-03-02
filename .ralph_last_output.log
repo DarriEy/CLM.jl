@@ -1,16 +1,28 @@
-All 11,180 tests pass. The port of `CNCStateUpdate3Mod.F90` to `c_state_update3.jl` is already complete and verified. Let me confirm what was done:
+The N state update 1 module is already fully ported and committed. Here's the summary:
 
-**Summary of the port:**
+**Status: Complete** — Commit `1e9e1f8` already contains the full port.
 
-The file `src/biogeochem/c_state_update3.jl` translates the single Fortran subroutine `CStateUpdate3` into the Julia function `c_state_update3!`. It handles:
+**What was ported from `CNNStateUpdate1Mod.F90`:**
 
-1. **Column-level fire mortality fluxes to soil** (lines 50-70) — CWD and litter pool inputs from fire mortality, guarded by `!use_soil_matrixcn`
-2. **Column-level litter/CWD losses to fire** (lines 73-84) — all decomposition pool losses to fire combustion, guarded by `!use_soil_matrixcn`  
-3. **Patch-level gresp pools** (lines 90-97) — gresp_storage and gresp_xfer fire losses (always applied, outside matrix guard)
-4. **Patch-level displayed pools** (lines 101-128) — leafc, frootc, livestemc, deadstemc, livecrootc, deadcrootc with live-to-dead transfers, guarded by `!use_matrixcn`
-5. **Patch-level storage pools** (lines 131-154) — all 6 storage pools, guarded by `!use_matrixcn`
-6. **Patch-level transfer pools** (lines 157-180) — all 6 transfer pools, guarded by `!use_matrixcn`
+1. **`n_state_update_dyn_patch!`** — Updates decomposition N pools from dynamic landcover fluxes (`dwt_frootn_to_litr_n`, `dwt_livecrootn_to_cwdn`, `dwt_deadcrootn_to_cwdn`) and decrements `seedn_grc`.
 
-The test file `test/test_c_state_update3.jl` covers: column soil pool updates, gresp pools, displayed pools with live-to-dead transfers, storage/transfer pools, mask filtering, `use_matrixcn` skip behavior, and `use_soil_matrixcn` skip behavior.
+2. **`n_state_update1!`** — Full prognostic N state update including:
+   - Column loop: soil decomposition input fluxes (phenology N → litter N, with FATES skip and matrix-CN branch)
+   - Patch loop: phenology transfer growth (leaf, froot, woody stem/croot, crop reproductive pools)
+   - Litterfall and retranslocation fluxes
+   - Live wood turnover with FUN `free_retransn_to_npool` logic
+   - Crop-specific paths (biofuel, removed residue, crop seed deficit)
+   - Soil mineral N uptake → npool
+   - Allocation from npool to all vegetation pools
+   - Storage → transfer pool movement
+   - All `use_matrixcn`/`use_soil_matrixcn` conditional branches
 
-Both files are already included in `src/CLM.jl` (line 112) and `test/runtests.jl` (line 88), and a commit already exists at `7978d5a`.
+**Tests (6 test sets, all passing):**
+- `n_state_update_dyn_patch!` — litter/CWD/seed pool updates
+- Non-woody, non-crop patch — npool and leafn accounting
+- Woody patch — livestemn/deadstemn turnover and alloc
+- FATES column — phenology input skipped
+- Mask filtering — no state changes when masks are off
+- Storage-to-xfer and retransn/npool accounting
+
+**Full test suite: 11,267 tests pass.**
