@@ -1,7 +1,10 @@
-All 7360 tests pass. The port is already complete:
+The SWRC Clapp-Hornberg port is already complete and committed (`a38c859`). Here's a summary of what's in place:
 
-- **`src/biogeophys/swrc_base.jl`** — Abstract type `SoilWaterRetentionCurve` with three function stubs (`soil_hk!`, `soil_suction!`, `soil_suction_inverse!`), matching the Fortran abstract type and its three deferred procedures
-- **`test/test_swrc_base.jl`** — Tests verifying the abstract type, error stubs on unimplemented subtypes, a concrete `ClappHornberg1978` implementation with hydraulic conductivity/suction/inverse roundtrip tests
-- Already included in `src/CLM.jl` (line 76) and `test/runtests.jl` (line 56)
+**Port: `SoilWaterRetentionCurveClappHornberg1978Mod.F90` → `swrc_clapp_hornberg.jl`**
 
-The port was already committed in `693aa43` ("Port SWRC base from Fortran to Julia"). Nothing further needs to be done.
+- **Type**: `SoilWaterRetentionCurveClappHornberg1978 <: SoilWaterRetentionCurve` — concrete subtype of the abstract base
+- **`soil_hk!`** — hydraulic conductivity: `hk = imped * hksat * s^(2*bsw + 3)` with derivative `dhkds`
+- **`soil_suction!`** — soil suction potential: `smp = -sucsat * s^(-bsw)` with derivative `dsmpds`
+- **`soil_suction_inverse!`** — inverse: `s_target = (-smp_target / sucsat)^(-1/bsw)`
+- **Tests** cover type hierarchy, basic computation, roundtrip consistency, finite-difference derivative checks, and edge cases (full saturation, ice impedance, multiple columns/layers)
+- **All 7385 tests pass**

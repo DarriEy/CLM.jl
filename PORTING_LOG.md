@@ -52,3 +52,4 @@
 | Soil moisture stress | 5 | ✓ PASSED | 2 | — |
 | Soil temperature | 6 | ✓ PASSED | 2 | — |
 | Lake temperature | 6 | ✓ PASSED | 2 | — |
+| SWRC base | 6 | ✓ PASSED | 2 | — |
