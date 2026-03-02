@@ -71,3 +71,4 @@
 | LUNA | 7 | ✓ PASSED | 2 | — |
 | Ozone damage | 7 | ✓ PASSED | 2 | — |
 | Phenology | 8 | ✓ PASSED | 2 | — |
+| CN allocation | 8 | ✓ PASSED | 2 | — |

@@ -1,24 +1,13 @@
-The CN allocation module has already been fully ported and committed (commit `ee971a7`). Here's a summary of what's in place:
+The growth respiration module has already been ported and committed (commit `6cce6c1`). The existing changes are only to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — these appear to be automation state files, not part of the port itself.
 
-**Source:** `src/biogeochem/allocation.jl` — ported from `CNAllocationMod.F90`
+**Summary: Growth respiration port is complete.**
 
-**Structs:**
-- `AllocationParams` — module-level parameters (`dayscrecover`)
-- `PftConAllocation` — PFT-level parameters used by allocation routines
-
-**Functions (all 3 Fortran subroutines translated):**
-1. `calc_gpp_mr_availc!` — calculates GPP, maintenance respiration, available C, curmr/xsmr partitioning, and xsmrpool deficit recovery
-2. `calc_crop_allocation_fractions!` — crop allocation fractions to leaf/stem/root/repr following AgroIBIS, using `crop_phase!` from phenology
-3. `calc_allometry!` — C/N allometry terms based on allocation fractions (woody, crop, grass branches)
-
-**Tests:** `test/test_allocation.jl` — 54 tests covering:
-- Struct defaults
-- Woody patch GPP/MR/availc calculation
-- MR exceeds GPP scenario
-- xsmrpool deficit recovery
-- Allometry for woody, grass, and dynamic stem_leaf patches
-- `use_fun` mode (g1a=0)
-- Crop allocation fractions (not-live, planted, leaf-emerge phases)
-- Mask respecting (skipped patches)
-
-All **9024 tests pass** across the full suite.
+- **Source**: `src/biogeochem/growth_resp.jl` — faithfully translates `CNGRespMod.F90`
+  - `PftConGrowthResp` struct for PFT parameters (woody, grperc, grpnow)
+  - `cn_gresp!()` function with mask-based iteration over patches
+  - Three branches: crop PFTs (ivt >= npcropmin), all PFTs (leaf/froot), woody PFTs
+  - Reproductive organ GR loop for crop PFTs
+  - All respiration factors preserved at 1.0 per Fortran
+- **Tests**: `test/test_growth_resp.jl` — 5 test sets covering woody PFT, grass PFT, crop PFT, mask skipping, and zero-allocation cases
+- **All 9068 tests pass**
+- **Already committed** as `6cce6c1`
