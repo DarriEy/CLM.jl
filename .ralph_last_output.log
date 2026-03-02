@@ -1,13 +1,17 @@
-The growth respiration module has already been ported and committed (commit `6cce6c1`). The existing changes are only to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — these appear to be automation state files, not part of the port itself.
+The maintenance respiration port is already complete and committed as `bef5423`. The working tree only has changes to automation state files (`.ralph_last_output.log`, `.ralph_state`, `PORTING_LOG.md`) — not part of the port itself.
 
-**Summary: Growth respiration port is complete.**
+**Summary: Maintenance respiration port is already done.**
 
-- **Source**: `src/biogeochem/growth_resp.jl` — faithfully translates `CNGRespMod.F90`
-  - `PftConGrowthResp` struct for PFT parameters (woody, grperc, grpnow)
-  - `cn_gresp!()` function with mask-based iteration over patches
-  - Three branches: crop PFTs (ivt >= npcropmin), all PFTs (leaf/froot), woody PFTs
-  - Reproductive organ GR loop for crop PFTs
-  - All respiration factors preserved at 1.0 per Fortran
-- **Tests**: `test/test_growth_resp.jl` — 5 test sets covering woody PFT, grass PFT, crop PFT, mask skipping, and zero-allocation cases
-- **All 9068 tests pass**
-- **Already committed** as `6cce6c1`
+- **Source**: `src/biogeochem/maint_resp.jl` — faithfully translates `CNMRespMod.F90`
+  - `MaintRespParams` struct with `br` and `br_root` (from `params_type`)
+  - `maint_resp_read_params!()` combining `CNMRespReadNML` + `readParams`
+  - `PftConMaintResp` struct for PFT-level woody flag
+  - `cn_mresp!()` function with mask-based iteration over columns and patches
+  - Column loop computing `tcsoi` temperature correction factors per soil layer
+  - Patch loop for leaf MR (sunlit + shaded × 12.011e-6), live stem MR, live coarse root MR
+  - Crop reproductive MR loop
+  - Fine root MR accumulation over soil layers with `crootfr` weighting
+  - Root/stem acclimation support (`rootstem_acc`)
+- **Tests**: `test/test_maint_resp.jl` — 9 test sets covering parameter defaults, woody PFT, grass PFT, no vegetation, temperature dependence, crop PFT, masked patches, acclimation, and separate `br_root`
+- **All 9099 tests pass**
+- **Already committed** as `bef5423`
