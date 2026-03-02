@@ -1,1 +1,8 @@
-All tasks are complete. The vegetation facade port from `CNVegetationFacade.F90` to `vegetation_facade.jl` was already done and committed (`223c005`). All 11,670 tests pass.
+The Fire base module has already been ported and committed (commit `1f2e922`). The port is complete:
+
+- **Source**: `src/biogeochem/fire_base.jl` (872 lines) — includes all types (`CNFireConstData`, `CNFireParams`, `PftConFireBase`, `CNFireBaseData`, `DgvsFireData`) and all physics functions (`cnfire_calc_fire_root_wetness_li2014!`, `cnfire_calc_fire_root_wetness_li2021!`, `cnfire_fluxes!`)
+- **Tests**: `test/test_fire_base.jl` (561 lines) — covers struct defaults, root wetness Li2014/Li2021, fire fluxes proportionality, zero fire area, peat fire boreal vs non-boreal, and decomp pool fire fluxes
+- **All 11,717 tests pass**
+- **Already committed** as `1f2e922 Port Fire base from Fortran to Julia`
+
+Infrastructure subroutines (`CNFireInit`, `InitAllocate`, `InitHistory`, `FireReadNML`, `CNFireReadParams`) are intentionally omitted as they handle I/O, memory allocation, and namelist reading — all handled by Julia struct constructors and keyword arguments.
