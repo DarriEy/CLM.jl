@@ -92,4 +92,9 @@ include("biogeophys/urban_fluxes.jl")
 include("biogeophys/luna.jl")
 include("biogeophys/ozone.jl")
 
+# ===========================================================================
+# Tier 2: Biogeochemistry
+# ===========================================================================
+include("biogeochem/phenology.jl")
+
 end # module CLM
