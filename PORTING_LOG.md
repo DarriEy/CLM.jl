@@ -90,3 +90,4 @@
 | N state update 3 | 8 | ✓ PASSED | 2 | — |
 | CN driver | 8 | ✓ PASSED | 2 | — |
 | Vegetation facade | 8 | ✓ PASSED | 2 | — |
+| Fire base | 9 | ✓ PASSED | 2 | — |

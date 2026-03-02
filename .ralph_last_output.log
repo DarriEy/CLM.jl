@@ -1,8 +1,15 @@
-The Fire base module has already been ported and committed (commit `1f2e922`). The port is complete:
+Port complete. Here's a summary of what was done:
 
-- **Source**: `src/biogeochem/fire_base.jl` (872 lines) — includes all types (`CNFireConstData`, `CNFireParams`, `PftConFireBase`, `CNFireBaseData`, `DgvsFireData`) and all physics functions (`cnfire_calc_fire_root_wetness_li2014!`, `cnfire_calc_fire_root_wetness_li2021!`, `cnfire_fluxes!`)
-- **Tests**: `test/test_fire_base.jl` (561 lines) — covers struct defaults, root wetness Li2014/Li2021, fire fluxes proportionality, zero fire area, peat fire boreal vs non-boreal, and decomp pool fire fluxes
-- **All 11,717 tests pass**
-- **Already committed** as `1f2e922 Port Fire base from Fortran to Julia`
+**Fortran `CNFireLi2014Mod.F90` has 3 subroutines:**
 
-Infrastructure subroutines (`CNFireInit`, `InitAllocate`, `InitHistory`, `FireReadNML`, `CNFireReadParams`) are intentionally omitted as they handle I/O, memory allocation, and namelist reading — all handled by Julia struct constructors and keyword arguments.
+| Fortran | Julia | Status |
+|---|---|---|
+| `need_lightning_and_popdens` | `need_lightning_and_popdens_li2014()` | Already ported |
+| `CNFireArea` | `cnfire_area_li2014!()` | Already ported |
+| `CNFireFluxes` | `cnfire_fluxes_li2014!()` | **Added in this commit** |
+
+**What was added:**
+- `cnfire_fluxes_li2014!` in `src/biogeochem/fire_li2014.jl` — delegates to the base `cnfire_fluxes!` with Li2014-specific combustion completeness factors (0.5 for litter, 0.25 for CWD per Li et al. 2014)
+- 4 new test sets in `test/test_fire_li2014.jl`: basic run, combustion factor verification, non-negative emission checks, and peat fire somc_fire calculation
+
+**Test results:** All 11,770 tests pass (20 new tests added).
