@@ -1,29 +1,9 @@
-The soil water movement module has already been fully ported. Here's the summary:
+Done. Here's a summary of what was completed:
 
-**Already completed:**
-- The Julia implementation file `src/biogeophys/soil_water_movement.jl` (1265 lines) is already in place
-- The test file `test/test_soil_water_movement.jl` (245 lines) is already in place
-- Both are already included in `src/CLM.jl` and `test/runtests.jl`
-- The most recent commit `957506d` is "Port Soil water movement from Fortran to Julia"
-- **All 7473 tests pass**, including all soil water movement tests
+**Fixed and committed:** The `perched_lateral_flow!` and `subsurface_lateral_flow!` functions in `src/biogeophys/soil_hydrology.jl`.
 
-**What was ported (all 14 Fortran subroutines/functions):**
+**Bug fixed:** BoundsError when accessing `col_zi[c, k-1]` with `k=1`. In Fortran, `zi(c, 0) = 0.0` represents the ground surface, but Julia's 1-based indexing makes index 0 invalid. Fixed by using `k > 1 ? col_zi[c, k-1] : 0.0` at three locations:
+- Lines 1627, 1634 in `perched_lateral_flow!` (frost table and perched water table layer location loops)
+- Line 2127 in `subsurface_lateral_flow!` (rising water table loop)
 
-| Fortran | Julia |
-|---------|-------|
-| `readParams` | `SoilWaterMovementConfig` (config struct with defaults) |
-| `init_soilwater_movement` | `init_soilwater_movement()` |
-| `use_aquifer_layer` | `use_aquifer_layer(cfg)` |
-| `SoilWater` | `soil_water!()` — main entry point |
-| `BaseflowSink` | `baseflow_sink!()` |
-| `soilwater_zengdecker2009` | `soilwater_zengdecker2009!()` |
-| `soilwater_moisture_form` | `soilwater_moisture_form!()` |
-| `compute_hydraulic_properties` | `compute_hydraulic_properties!()` |
-| `compute_moisture_fluxes_and_derivs` | `compute_moisture_fluxes_and_derivs!()` |
-| `compute_RHS_moisture_form` | `compute_RHS_moisture_form!()` |
-| `compute_LHS_moisture_form` | `compute_LHS_moisture_form!()` |
-| `compute_qcharge` | `compute_qcharge!()` |
-| `IceImpedance` | `ice_impedance()` |
-| `TridiagonalCol` | `tridiagonal_col!()` |
-
-No additional work is needed — this port is complete.
+**Test results:** All 7818 tests pass (4 new tests added for the two functions).
