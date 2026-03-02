@@ -90,5 +90,6 @@ include("biogeophys/bareground_fluxes.jl")
 include("biogeophys/soil_fluxes.jl")
 include("biogeophys/urban_fluxes.jl")
 include("biogeophys/luna.jl")
+include("biogeophys/ozone.jl")
 
 end # module CLM
