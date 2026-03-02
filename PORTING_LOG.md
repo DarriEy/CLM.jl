@@ -63,3 +63,4 @@
 | Lake hydrology | 6 | ✓ PASSED | 2 | — |
 | Hillslope hydrology | 6 | ✓ PASSED | 2 | — |
 | Photosynthesis | 7 | ✓ PASSED | 2 | — |
+| Canopy fluxes | 7 | ✓ PASSED | 2 | — |

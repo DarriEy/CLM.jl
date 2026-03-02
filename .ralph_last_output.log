@@ -1,16 +1,1 @@
-The canopy fluxes module has already been ported and committed. Here's a summary of what's in place:
 
-**Status: Complete** - Commit `a784f2f` already contains "Port Canopy fluxes from Fortran to Julia"
-
-**What was ported** (`src/biogeophys/canopy_fluxes.jl`, 1099 lines from 1756-line Fortran source):
-
-1. **Types & Constants**: `CanopyFluxesParamsData`, `CanopyFluxesControl`, and 15 module constants
-2. **Configuration**: `canopy_fluxes_read_nml!()` and `canopy_fluxes_read_params!()`
-3. **Main function** `canopy_fluxes!()` covering:
-   - Phase 1: Initialization (biomass heat capacity, daylength factor, aerodynamic params for ZengWang2007/Meier2022, longwave, QSat, Monin-Obukhov)
-   - Phase 2: Newton-Raphson iteration (friction velocity, aerodynamic resistances, stomatal conductance, energy balance, convergence)
-   - Phase 3: Post-iteration diagnostics (energy balance check, stem temperature, ground fluxes, 2m reference T/q/RH, longwave, skin temperature, soil flux derivatives, dew accumulation, `photosynthesis_total!`)
-
-4. **Tests** (`test/test_canopy_fluxes.jl`, 303 lines): Constants, parameter structs, namelist, and a comprehensive single-patch smoke test with 17+ output checks
-
-**All 8190 tests pass.**
