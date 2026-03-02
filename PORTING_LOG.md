@@ -67,3 +67,4 @@
 | Canopy hydrology | 7 | ✓ PASSED | 2 | — |
 | Bare ground fluxes | 7 | ✓ PASSED | 2 | — |
 | Soil fluxes | 7 | ✓ PASSED | 2 | — |
+| Urban fluxes | 7 | ✓ PASSED | 2 | — |

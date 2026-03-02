@@ -1,17 +1,32 @@
-The urban fluxes module has already been fully ported and committed (commit `27b7717`). Here's a summary of what's in place:
+The LUNA port is already complete and committed:
 
-**`src/biogeophys/urban_fluxes.jl`** — Complete port of `UrbanFluxesMod.F90` containing:
-- `UrbanFluxesParamsData` struct + `urban_fluxes_read_params!()` — module-level parameters
-- `simple_wasteheatfromac()` — waste heat from AC (simple CLM4.5 method)
-- `wasteheat!()` — total waste heat from urban heating/cooling
-- `calc_simple_internal_building_temp!()` — internal building temperature (simple method)
-- `urban_fluxes!()` — main subroutine: turbulent & momentum fluxes from urban canyon (roof, sunwall, shadewall, pervious & impervious road)
+- **Source**: `src/biogeophys/luna.jl` — fully ported from `LunaMod.F90`
+- **Tests**: `test/test_luna.jl` — 372 lines of tests covering all functions
+- **Commit**: `49474d3 Port LUNA from Fortran to Julia` (already on `master`)
+- **Include**: Already in `src/CLM.jl` at line 92
+- **Test suite**: All **8682 tests pass**
 
-**`test/test_urban_fluxes.jl`** — Tests covering:
-- Parameter struct defaults and read function
-- `simple_wasteheatfromac` with all HAC modes (off, on, wasteheat_on)
-- Full smoke test of `urban_fluxes!` with 5 urban columns (roof, sunwall, shadewall, road_imperv, road_perv)
-- `calc_simple_internal_building_temp!` correctness
-- Physical reasonableness checks (temperature bounds, wind stress sign, humidity range, zero wall evaporation, roots only on pervious road, etc.)
+The port covers all subroutines and functions from the Fortran source:
 
-**All 8585 tests pass.**
+| Fortran | Julia |
+|---------|-------|
+| `params_type` | `LunaParamsData` |
+| `allocParams` / `readParams` | `luna_params_init!` / `luna_params_clean!` |
+| `VcmxTKattge` | `vcmx_t_kattge` |
+| `JmxTKattge` | `jmx_t_kattge` |
+| `VcmxTLeuning` | `vcmx_t_leuning` |
+| `JmxTLeuning` | `jmx_t_leuning` |
+| `RespTBernacchi` | `resp_t_bernacchi` |
+| `Quadratic` | `quadratic_luna` |
+| `NUEref` | `nue_ref` |
+| `NUE` | `nue_calc` |
+| `Photosynthesis_luna` | `photosynthesis_luna!` |
+| `Nitrogen_investments` | `nitrogen_investments!` |
+| `NitrogenAllocation` | `nitrogen_allocation!` |
+| `is_time_to_run_LUNA` | `is_time_to_run_luna` |
+| `Clear24_Climate_LUNA` | `clear24_climate_luna!` |
+| `Acc24_Climate_LUNA` | `acc24_climate_luna!` |
+| `Acc240_Climate_LUNA` | `acc240_climate_luna!` |
+| `Update_Photosynthesis_Capacity` | `update_photosynthesis_capacity!` |
+
+No additional work needed — the port is complete and all tests pass.
