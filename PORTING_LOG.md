@@ -60,3 +60,4 @@
 | Snow hydrology | 6 | ✓ PASSED | 2 | — |
 | Hydrology no drain | 6 | ✓ PASSED | 2 | — |
 | Hydrology drainage | 6 | ✓ PASSED | 2 | — |
+| Lake hydrology | 6 | ✓ PASSED | 2 | — |
