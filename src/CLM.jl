@@ -99,5 +99,6 @@ include("biogeochem/phenology.jl")
 include("biogeochem/allocation.jl")
 include("biogeochem/growth_resp.jl")
 include("biogeochem/maint_resp.jl")
+include("biogeochem/fun.jl")
 
 end # module CLM

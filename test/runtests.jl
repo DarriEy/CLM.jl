@@ -75,4 +75,5 @@ using CLM
     include("test_allocation.jl")
     include("test_growth_resp.jl")
     include("test_maint_resp.jl")
+    include("test_fun.jl")
 end
