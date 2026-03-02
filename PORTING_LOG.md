@@ -47,3 +47,4 @@
 | Urban radiation | 5 | ✓ PASSED | 2 | — |
 | Snow SNICAR | 5 | ✓ PASSED | 2 | — |
 | Aerosol | 5 | ✓ PASSED | 2 | — |
+| Surface humidity | 5 | ✓ PASSED | 2 | — |
