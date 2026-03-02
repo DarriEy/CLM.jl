@@ -1,1 +1,16 @@
-The source and test files were already committed in a previous session (commit `edd1c9e` "Port C state update 2 from Fortran to Julia" is already in the git log). The port is complete and all tests pass. No new changes are needed.
+All 11,180 tests pass. The port of `CNCStateUpdate3Mod.F90` to `c_state_update3.jl` is already complete and verified. Let me confirm what was done:
+
+**Summary of the port:**
+
+The file `src/biogeochem/c_state_update3.jl` translates the single Fortran subroutine `CStateUpdate3` into the Julia function `c_state_update3!`. It handles:
+
+1. **Column-level fire mortality fluxes to soil** (lines 50-70) — CWD and litter pool inputs from fire mortality, guarded by `!use_soil_matrixcn`
+2. **Column-level litter/CWD losses to fire** (lines 73-84) — all decomposition pool losses to fire combustion, guarded by `!use_soil_matrixcn`  
+3. **Patch-level gresp pools** (lines 90-97) — gresp_storage and gresp_xfer fire losses (always applied, outside matrix guard)
+4. **Patch-level displayed pools** (lines 101-128) — leafc, frootc, livestemc, deadstemc, livecrootc, deadcrootc with live-to-dead transfers, guarded by `!use_matrixcn`
+5. **Patch-level storage pools** (lines 131-154) — all 6 storage pools, guarded by `!use_matrixcn`
+6. **Patch-level transfer pools** (lines 157-180) — all 6 transfer pools, guarded by `!use_matrixcn`
+
+The test file `test/test_c_state_update3.jl` covers: column soil pool updates, gresp pools, displayed pools with live-to-dead transfers, storage/transfer pools, mask filtering, `use_matrixcn` skip behavior, and `use_soil_matrixcn` skip behavior.
+
+Both files are already included in `src/CLM.jl` (line 112) and `test/runtests.jl` (line 88), and a commit already exists at `7978d5a`.
