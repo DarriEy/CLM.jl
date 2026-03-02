@@ -75,5 +75,6 @@ include("biogeophys/soil_temperature.jl")
 include("biogeophys/lake_temperature.jl")
 include("biogeophys/swrc_base.jl")
 include("biogeophys/swrc_clapp_hornberg.jl")
+include("biogeophys/swrc_van_genuchten.jl")
 
 end # module CLM

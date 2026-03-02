@@ -55,4 +55,5 @@ using CLM
     include("test_lake_temperature.jl")
     include("test_swrc_base.jl")
     include("test_swrc_clapp_hornberg.jl")
+    include("test_swrc_van_genuchten.jl")
 end
