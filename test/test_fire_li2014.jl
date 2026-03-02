@@ -586,4 +586,369 @@
         end
     end
 
+    # ================================================================
+    # Helper: create data structures for Li2014 fire flux tests
+    # ================================================================
+    function make_fire_li2014_flux_data(; np=4, nc=2, ng=1, nlevdecomp=1,
+                                         ndecomp_pools=4, n_litr=3)
+        npft = 20
+
+        # --- PFT constants (fire base) ---
+        pftcon = CLM.PftConFireBase(
+            woody    = vcat(fill(1.0, 8), fill(0.0, 12)),
+            cc_leaf  = fill(0.4, npft),
+            cc_lstem = fill(0.2, npft),
+            cc_dstem = fill(0.1, npft),
+            cc_other = fill(0.3, npft),
+            fm_leaf  = fill(0.6, npft),
+            fm_lstem = fill(0.5, npft),
+            fm_other = fill(0.4, npft),
+            fm_root  = fill(0.3, npft),
+            fm_lroot = fill(0.5, npft),
+            fm_droot = fill(0.2, npft),
+            lf_f     = fill(1.0/n_litr, npft, n_litr),
+            fr_f     = fill(1.0/n_litr, npft, n_litr),
+            smpso    = fill(-66000.0, npft),
+            smpsc    = fill(-275000.0, npft),
+        )
+
+        # --- Fire constants ---
+        cnfire_const = CLM.CNFireConstData()
+
+        # --- Patch data ---
+        patch = CLM.PatchData()
+        patch.itype  = [2, 10, 5, 15]
+        patch.column = [1, 1, 2, 2]
+        patch.wtcol  = [0.5, 0.5, 0.6, 0.4]
+
+        # --- Column data ---
+        col = CLM.ColumnData()
+        col.gridcell = [1, 1]
+
+        # --- Gridcell data ---
+        grc = CLM.GridcellData()
+        grc.latdeg = [45.0]
+        grc.lat    = [45.0 * pi / 180.0]
+
+        # --- DGVS data ---
+        dgvs = CLM.DgvsFireData(nind_patch = fill(100.0, np))
+
+        # --- CN Veg State ---
+        cnveg_state = CLM.CNVegStateData()
+        cnveg_state.cropf_col          = [0.0, 0.4]
+        cnveg_state.farea_burned_col   = [1.0e-4, 1.0e-4]
+        cnveg_state.fbac1_col          = zeros(nc)
+        cnveg_state.fbac_col           = zeros(nc)
+        cnveg_state.baf_crop_col       = [0.0, 2.0e-5]
+        cnveg_state.baf_peatf_col      = zeros(nc)
+        cnveg_state.trotr1_col         = zeros(nc)
+        cnveg_state.trotr2_col         = zeros(nc)
+        cnveg_state.dtrotr_col         = zeros(nc)
+        cnveg_state.lfc_col            = zeros(nc)
+        cnveg_state.lfc2_col           = zeros(nc)
+
+        # --- Carbon state ---
+        cnveg_cs = CLM.CNVegCarbonStateData()
+        cnveg_cs.leafcmax_patch               = fill(0.0, np)
+        cnveg_cs.leafc_patch                  = [10.0, 5.0, 8.0, 3.0]
+        cnveg_cs.leafc_storage_patch          = [1.0, 0.5, 0.8, 0.3]
+        cnveg_cs.leafc_xfer_patch             = [0.5, 0.25, 0.4, 0.15]
+        cnveg_cs.livestemc_patch              = [20.0, 0.0, 15.0, 0.0]
+        cnveg_cs.livestemc_storage_patch      = [2.0, 0.0, 1.5, 0.0]
+        cnveg_cs.livestemc_xfer_patch         = [1.0, 0.0, 0.8, 0.0]
+        cnveg_cs.deadstemc_patch              = [50.0, 0.0, 40.0, 0.0]
+        cnveg_cs.deadstemc_storage_patch      = [3.0, 0.0, 2.5, 0.0]
+        cnveg_cs.deadstemc_xfer_patch         = [1.5, 0.0, 1.2, 0.0]
+        cnveg_cs.frootc_patch                 = [4.0, 2.0, 3.0, 1.0]
+        cnveg_cs.frootc_storage_patch         = [0.5, 0.2, 0.3, 0.1]
+        cnveg_cs.frootc_xfer_patch            = [0.2, 0.1, 0.15, 0.05]
+        cnveg_cs.livecrootc_patch             = [10.0, 0.0, 8.0, 0.0]
+        cnveg_cs.livecrootc_storage_patch     = [1.0, 0.0, 0.8, 0.0]
+        cnveg_cs.livecrootc_xfer_patch        = [0.5, 0.0, 0.4, 0.0]
+        cnveg_cs.deadcrootc_patch             = [25.0, 0.0, 20.0, 0.0]
+        cnveg_cs.deadcrootc_storage_patch     = [1.5, 0.0, 1.2, 0.0]
+        cnveg_cs.deadcrootc_xfer_patch        = [0.8, 0.0, 0.6, 0.0]
+        cnveg_cs.gresp_storage_patch          = [0.2, 0.1, 0.15, 0.05]
+        cnveg_cs.gresp_xfer_patch             = [0.1, 0.05, 0.08, 0.03]
+
+        # --- Carbon flux (zero-initialized) ---
+        cnveg_cf = CLM.CNVegCarbonFluxData()
+        cnveg_cf.m_leafc_to_fire_patch                     = zeros(np)
+        cnveg_cf.m_leafc_storage_to_fire_patch             = zeros(np)
+        cnveg_cf.m_leafc_xfer_to_fire_patch                = zeros(np)
+        cnveg_cf.m_livestemc_to_fire_patch                 = zeros(np)
+        cnveg_cf.m_livestemc_storage_to_fire_patch         = zeros(np)
+        cnveg_cf.m_livestemc_xfer_to_fire_patch            = zeros(np)
+        cnveg_cf.m_deadstemc_to_fire_patch                 = zeros(np)
+        cnveg_cf.m_deadstemc_storage_to_fire_patch         = zeros(np)
+        cnveg_cf.m_deadstemc_xfer_to_fire_patch            = zeros(np)
+        cnveg_cf.m_frootc_to_fire_patch                    = zeros(np)
+        cnveg_cf.m_frootc_storage_to_fire_patch            = zeros(np)
+        cnveg_cf.m_frootc_xfer_to_fire_patch               = zeros(np)
+        cnveg_cf.m_livecrootc_to_fire_patch                = zeros(np)
+        cnveg_cf.m_livecrootc_storage_to_fire_patch        = zeros(np)
+        cnveg_cf.m_livecrootc_xfer_to_fire_patch           = zeros(np)
+        cnveg_cf.m_deadcrootc_to_fire_patch                = zeros(np)
+        cnveg_cf.m_deadcrootc_storage_to_fire_patch        = zeros(np)
+        cnveg_cf.m_deadcrootc_xfer_to_fire_patch           = zeros(np)
+        cnveg_cf.m_gresp_storage_to_fire_patch             = zeros(np)
+        cnveg_cf.m_gresp_xfer_to_fire_patch                = zeros(np)
+        cnveg_cf.m_leafc_to_litter_fire_patch              = zeros(np)
+        cnveg_cf.m_leafc_storage_to_litter_fire_patch      = zeros(np)
+        cnveg_cf.m_leafc_xfer_to_litter_fire_patch         = zeros(np)
+        cnveg_cf.m_livestemc_to_litter_fire_patch          = zeros(np)
+        cnveg_cf.m_livestemc_storage_to_litter_fire_patch  = zeros(np)
+        cnveg_cf.m_livestemc_xfer_to_litter_fire_patch     = zeros(np)
+        cnveg_cf.m_livestemc_to_deadstemc_fire_patch       = zeros(np)
+        cnveg_cf.m_deadstemc_to_litter_fire_patch          = zeros(np)
+        cnveg_cf.m_deadstemc_storage_to_litter_fire_patch  = zeros(np)
+        cnveg_cf.m_deadstemc_xfer_to_litter_fire_patch     = zeros(np)
+        cnveg_cf.m_frootc_to_litter_fire_patch             = zeros(np)
+        cnveg_cf.m_frootc_storage_to_litter_fire_patch     = zeros(np)
+        cnveg_cf.m_frootc_xfer_to_litter_fire_patch        = zeros(np)
+        cnveg_cf.m_livecrootc_to_litter_fire_patch         = zeros(np)
+        cnveg_cf.m_livecrootc_storage_to_litter_fire_patch = zeros(np)
+        cnveg_cf.m_livecrootc_xfer_to_litter_fire_patch    = zeros(np)
+        cnveg_cf.m_livecrootc_to_deadcrootc_fire_patch     = zeros(np)
+        cnveg_cf.m_deadcrootc_to_litter_fire_patch         = zeros(np)
+        cnveg_cf.m_deadcrootc_storage_to_litter_fire_patch = zeros(np)
+        cnveg_cf.m_deadcrootc_xfer_to_litter_fire_patch    = zeros(np)
+        cnveg_cf.m_gresp_storage_to_litter_fire_patch      = zeros(np)
+        cnveg_cf.m_gresp_xfer_to_litter_fire_patch         = zeros(np)
+        cnveg_cf.fire_mortality_c_to_cwdc_col              = zeros(nc, nlevdecomp)
+        cnveg_cf.m_decomp_cpools_to_fire_vr_col            = zeros(nc, nlevdecomp, ndecomp_pools)
+        cnveg_cf.m_c_to_litr_fire_col                      = zeros(nc, nlevdecomp, ndecomp_pools)
+
+        # --- Nitrogen state ---
+        cnveg_ns = CLM.CNVegNitrogenStateData()
+        cnveg_ns.leafn_patch                  = [0.4, 0.2, 0.32, 0.12]
+        cnveg_ns.leafn_storage_patch          = [0.04, 0.02, 0.032, 0.012]
+        cnveg_ns.leafn_xfer_patch             = [0.02, 0.01, 0.016, 0.006]
+        cnveg_ns.livestemn_patch              = [0.4, 0.0, 0.3, 0.0]
+        cnveg_ns.livestemn_storage_patch      = [0.04, 0.0, 0.03, 0.0]
+        cnveg_ns.livestemn_xfer_patch         = [0.02, 0.0, 0.016, 0.0]
+        cnveg_ns.deadstemn_patch              = [1.0, 0.0, 0.8, 0.0]
+        cnveg_ns.deadstemn_storage_patch      = [0.06, 0.0, 0.05, 0.0]
+        cnveg_ns.deadstemn_xfer_patch         = [0.03, 0.0, 0.024, 0.0]
+        cnveg_ns.frootn_patch                 = [0.16, 0.08, 0.12, 0.04]
+        cnveg_ns.frootn_storage_patch         = [0.02, 0.008, 0.012, 0.004]
+        cnveg_ns.frootn_xfer_patch            = [0.008, 0.004, 0.006, 0.002]
+        cnveg_ns.livecrootn_patch             = [0.2, 0.0, 0.16, 0.0]
+        cnveg_ns.livecrootn_storage_patch     = [0.02, 0.0, 0.016, 0.0]
+        cnveg_ns.livecrootn_xfer_patch        = [0.01, 0.0, 0.008, 0.0]
+        cnveg_ns.deadcrootn_patch             = [0.5, 0.0, 0.4, 0.0]
+        cnveg_ns.deadcrootn_storage_patch     = [0.03, 0.0, 0.024, 0.0]
+        cnveg_ns.deadcrootn_xfer_patch        = [0.016, 0.0, 0.012, 0.0]
+        cnveg_ns.retransn_patch               = [0.05, 0.02, 0.04, 0.01]
+
+        # --- Nitrogen flux (zero-initialized) ---
+        cnveg_nf = CLM.CNVegNitrogenFluxData()
+        cnveg_nf.m_leafn_to_fire_patch                     = zeros(np)
+        cnveg_nf.m_leafn_storage_to_fire_patch             = zeros(np)
+        cnveg_nf.m_leafn_xfer_to_fire_patch                = zeros(np)
+        cnveg_nf.m_livestemn_to_fire_patch                 = zeros(np)
+        cnveg_nf.m_livestemn_storage_to_fire_patch         = zeros(np)
+        cnveg_nf.m_livestemn_xfer_to_fire_patch            = zeros(np)
+        cnveg_nf.m_deadstemn_to_fire_patch                 = zeros(np)
+        cnveg_nf.m_deadstemn_storage_to_fire_patch         = zeros(np)
+        cnveg_nf.m_deadstemn_xfer_to_fire_patch            = zeros(np)
+        cnveg_nf.m_frootn_to_fire_patch                    = zeros(np)
+        cnveg_nf.m_frootn_storage_to_fire_patch            = zeros(np)
+        cnveg_nf.m_frootn_xfer_to_fire_patch               = zeros(np)
+        cnveg_nf.m_livecrootn_to_fire_patch                = zeros(np)
+        cnveg_nf.m_livecrootn_storage_to_fire_patch        = zeros(np)
+        cnveg_nf.m_livecrootn_xfer_to_fire_patch           = zeros(np)
+        cnveg_nf.m_deadcrootn_to_fire_patch                = zeros(np)
+        cnveg_nf.m_deadcrootn_storage_to_fire_patch        = zeros(np)
+        cnveg_nf.m_deadcrootn_xfer_to_fire_patch           = zeros(np)
+        cnveg_nf.m_retransn_to_fire_patch                  = zeros(np)
+        cnveg_nf.m_leafn_to_litter_fire_patch              = zeros(np)
+        cnveg_nf.m_leafn_storage_to_litter_fire_patch      = zeros(np)
+        cnveg_nf.m_leafn_xfer_to_litter_fire_patch         = zeros(np)
+        cnveg_nf.m_livestemn_to_litter_fire_patch          = zeros(np)
+        cnveg_nf.m_livestemn_storage_to_litter_fire_patch  = zeros(np)
+        cnveg_nf.m_livestemn_xfer_to_litter_fire_patch     = zeros(np)
+        cnveg_nf.m_livestemn_to_deadstemn_fire_patch       = zeros(np)
+        cnveg_nf.m_deadstemn_to_litter_fire_patch          = zeros(np)
+        cnveg_nf.m_deadstemn_storage_to_litter_fire_patch  = zeros(np)
+        cnveg_nf.m_deadstemn_xfer_to_litter_fire_patch     = zeros(np)
+        cnveg_nf.m_frootn_to_litter_fire_patch             = zeros(np)
+        cnveg_nf.m_frootn_storage_to_litter_fire_patch     = zeros(np)
+        cnveg_nf.m_frootn_xfer_to_litter_fire_patch        = zeros(np)
+        cnveg_nf.m_livecrootn_to_litter_fire_patch         = zeros(np)
+        cnveg_nf.m_livecrootn_storage_to_litter_fire_patch = zeros(np)
+        cnveg_nf.m_livecrootn_xfer_to_litter_fire_patch    = zeros(np)
+        cnveg_nf.m_livecrootn_to_deadcrootn_fire_patch     = zeros(np)
+        cnveg_nf.m_deadcrootn_to_litter_fire_patch         = zeros(np)
+        cnveg_nf.m_deadcrootn_storage_to_litter_fire_patch = zeros(np)
+        cnveg_nf.m_deadcrootn_xfer_to_litter_fire_patch    = zeros(np)
+        cnveg_nf.m_retransn_to_litter_fire_patch           = zeros(np)
+        cnveg_nf.fire_mortality_n_to_cwdn_col              = zeros(nc, nlevdecomp)
+        cnveg_nf.m_decomp_npools_to_fire_vr_col            = zeros(nc, nlevdecomp, ndecomp_pools)
+        cnveg_nf.m_n_to_litr_fire_col                      = zeros(nc, nlevdecomp, ndecomp_pools)
+
+        # --- Soil Biogeochem Carbon Flux ---
+        soilbgc_cf = CLM.SoilBiogeochemCarbonFluxData()
+        soilbgc_cf.somc_fire_col = zeros(nc)
+
+        # --- Decomp cascade config ---
+        decomp_cascade_con = CLM.DecompCascadeConData()
+        decomp_cascade_con.is_litter = BitVector([true, true, true, false])
+        decomp_cascade_con.is_cwd    = BitVector([false, false, false, true])
+
+        # --- Profile arrays ---
+        leaf_prof  = fill(1.0, np, nlevdecomp)
+        froot_prof = fill(1.0, np, nlevdecomp)
+        croot_prof = fill(1.0, np, nlevdecomp)
+        stem_prof  = fill(1.0, np, nlevdecomp)
+        totsomc    = fill(5000.0, nc)
+        decomp_cpools_vr = fill(100.0, nc, nlevdecomp, ndecomp_pools)
+        decomp_npools_vr = fill(5.0, nc, nlevdecomp, ndecomp_pools)
+        somc_fire  = zeros(nc)
+
+        # --- Masks ---
+        mask_soilc = trues(nc)
+        mask_soilp = trues(np)
+
+        return (pftcon=pftcon, cnfire_const=cnfire_const,
+                patch=patch, col=col, grc=grc,
+                dgvs=dgvs, cnveg_state=cnveg_state,
+                cnveg_cs=cnveg_cs, cnveg_cf=cnveg_cf,
+                cnveg_ns=cnveg_ns, cnveg_nf=cnveg_nf,
+                soilbgc_cf=soilbgc_cf, decomp_cascade_con=decomp_cascade_con,
+                leaf_prof=leaf_prof, froot_prof=froot_prof,
+                croot_prof=croot_prof, stem_prof=stem_prof,
+                totsomc=totsomc, decomp_cpools_vr=decomp_cpools_vr,
+                decomp_npools_vr=decomp_npools_vr, somc_fire=somc_fire,
+                mask_soilc=mask_soilc, mask_soilp=mask_soilp,
+                np=np, nc=nc, nlevdecomp=nlevdecomp,
+                ndecomp_pools=ndecomp_pools, n_litr=n_litr)
+    end
+
+    # ================================================================
+    # Test: cnfire_fluxes_li2014! runs without error
+    # ================================================================
+    @testset "cnfire_fluxes_li2014! basic run" begin
+        d = make_fire_li2014_flux_data()
+
+        mask_actfirec, mask_actfirep = CLM.cnfire_fluxes_li2014!(
+            d.mask_soilc, d.mask_soilp,
+            1:d.nc, 1:d.np,
+            d.cnfire_const, d.pftcon, d.patch, d.col, d.grc,
+            d.dgvs, d.cnveg_state, d.cnveg_cs, d.cnveg_cf,
+            d.cnveg_ns, d.cnveg_nf,
+            d.soilbgc_cf, d.decomp_cascade_con,
+            d.leaf_prof, d.froot_prof, d.croot_prof, d.stem_prof,
+            d.totsomc, d.decomp_cpools_vr, d.decomp_npools_vr, d.somc_fire;
+            dt=1800.0, dayspyr=365.0,
+            nlevdecomp=d.nlevdecomp, ndecomp_pools=d.ndecomp_pools,
+            i_met_lit=1, i_litr_max=d.n_litr
+        )
+
+        # Output masks should be BitVectors
+        @test mask_actfirec isa BitVector
+        @test mask_actfirep isa BitVector
+        @test length(mask_actfirec) == d.nc
+        @test length(mask_actfirep) == d.np
+
+        # Some fire should be active (farea_burned > 0)
+        @test any(mask_actfirec)
+        @test any(mask_actfirep)
+    end
+
+    # ================================================================
+    # Test: Li2014 uses 0.5 for litter and 0.25 for CWD
+    # ================================================================
+    @testset "cnfire_fluxes_li2014! combustion factors" begin
+        d = make_fire_li2014_flux_data()
+
+        CLM.cnfire_fluxes_li2014!(
+            d.mask_soilc, d.mask_soilp,
+            1:d.nc, 1:d.np,
+            d.cnfire_const, d.pftcon, d.patch, d.col, d.grc,
+            d.dgvs, d.cnveg_state, d.cnveg_cs, d.cnveg_cf,
+            d.cnveg_ns, d.cnveg_nf,
+            d.soilbgc_cf, d.decomp_cascade_con,
+            d.leaf_prof, d.froot_prof, d.croot_prof, d.stem_prof,
+            d.totsomc, d.decomp_cpools_vr, d.decomp_npools_vr, d.somc_fire;
+            dt=1800.0, dayspyr=365.0,
+            nlevdecomp=d.nlevdecomp, ndecomp_pools=d.ndecomp_pools,
+            i_met_lit=1, i_litr_max=d.n_litr
+        )
+
+        # Check decomp pool fire fluxes use Li2014 combustion factors
+        f = d.cnveg_state.farea_burned_col[1]
+        # Litter pools (is_litter = [true, true, true, false]):
+        # m_decomp_cpools_to_fire_vr = decomp_cpools_vr * f * 0.5
+        for l in 1:3  # litter pools
+            expected_c = 100.0 * f * 0.5
+            @test d.cnveg_cf.m_decomp_cpools_to_fire_vr_col[1, 1, l] ≈ expected_c atol=1e-15
+        end
+        # CWD pool (is_cwd = [false, false, false, true]):
+        # m_decomp_cpools_to_fire_vr = decomp_cpools_vr * (f - baf_crop) * 0.25
+        baf_crop = d.cnveg_state.baf_crop_col[1]
+        expected_cwd = 100.0 * (f - baf_crop) * 0.25
+        @test d.cnveg_cf.m_decomp_cpools_to_fire_vr_col[1, 1, 4] ≈ expected_cwd atol=1e-15
+    end
+
+    # ================================================================
+    # Test: Li2014 fire fluxes produce non-negative C emissions
+    # ================================================================
+    @testset "cnfire_fluxes_li2014! non-negative emissions" begin
+        d = make_fire_li2014_flux_data()
+
+        CLM.cnfire_fluxes_li2014!(
+            d.mask_soilc, d.mask_soilp,
+            1:d.nc, 1:d.np,
+            d.cnfire_const, d.pftcon, d.patch, d.col, d.grc,
+            d.dgvs, d.cnveg_state, d.cnveg_cs, d.cnveg_cf,
+            d.cnveg_ns, d.cnveg_nf,
+            d.soilbgc_cf, d.decomp_cascade_con,
+            d.leaf_prof, d.froot_prof, d.croot_prof, d.stem_prof,
+            d.totsomc, d.decomp_cpools_vr, d.decomp_npools_vr, d.somc_fire;
+            dt=1800.0, dayspyr=365.0,
+            nlevdecomp=d.nlevdecomp, ndecomp_pools=d.ndecomp_pools,
+            i_met_lit=1, i_litr_max=d.n_litr
+        )
+
+        # All fire emission fluxes should be non-negative
+        for p in 1:d.np
+            @test d.cnveg_cf.m_leafc_to_fire_patch[p] >= 0.0
+            @test d.cnveg_cf.m_gresp_storage_to_fire_patch[p] >= 0.0
+        end
+
+        # Leaf fire emission for patch 1 (tree, itype=2):
+        # f = (farea_burned - baf_crop) / (1 - cropf_col)
+        # = (1e-4 - 0) / (1 - 0) = 1e-4
+        # m_leafc_to_fire = leafc * f * cc_leaf = 10 * 1e-4 * 0.4 = 4e-4
+        @test d.cnveg_cf.m_leafc_to_fire_patch[1] ≈ 10.0 * 1.0e-4 * 0.4 atol=1e-15
+    end
+
+    # ================================================================
+    # Test: peat fire somc_fire calculation
+    # ================================================================
+    @testset "cnfire_fluxes_li2014! somc_fire" begin
+        d = make_fire_li2014_flux_data()
+
+        # Set baf_peatf > 0 to trigger peat fire
+        d.cnveg_state.baf_peatf_col .= 1.0e-5
+
+        CLM.cnfire_fluxes_li2014!(
+            d.mask_soilc, d.mask_soilp,
+            1:d.nc, 1:d.np,
+            d.cnfire_const, d.pftcon, d.patch, d.col, d.grc,
+            d.dgvs, d.cnveg_state, d.cnveg_cs, d.cnveg_cf,
+            d.cnveg_ns, d.cnveg_nf,
+            d.soilbgc_cf, d.decomp_cascade_con,
+            d.leaf_prof, d.froot_prof, d.croot_prof, d.stem_prof,
+            d.totsomc, d.decomp_cpools_vr, d.decomp_npools_vr, d.somc_fire;
+            dt=1800.0, dayspyr=365.0,
+            nlevdecomp=d.nlevdecomp, ndecomp_pools=d.ndecomp_pools,
+            i_met_lit=1, i_litr_max=d.n_litr
+        )
+
+        # Non-boreal (lat=45 > 40): somc_fire = baf_peatf * 2.2e3
+        @test d.somc_fire[1] ≈ 1.0e-5 * 2.2e3 atol=1e-10
+    end
+
 end

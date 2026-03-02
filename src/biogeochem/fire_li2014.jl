@@ -11,6 +11,7 @@
 #   need_lightning_and_popdens_li2014  — Returns true
 #   p2c!                               — Patch to column area-weighted average
 #   cnfire_area_li2014!                — Compute column-level burned area
+#   cnfire_fluxes_li2014!              — Fire C/N flux calculations (Li2014)
 # ==========================================================================
 
 # ---------------------------------------------------------------------------
@@ -606,4 +607,120 @@ function cnfire_area_li2014!(
     end
 
     return nothing
+end
+
+# ---------------------------------------------------------------------------
+# cnfire_fluxes_li2014! — Fire C/N flux calculations (Li2014 version)
+# ---------------------------------------------------------------------------
+
+"""
+    cnfire_fluxes_li2014!(mask_soilc, mask_soilp, bounds_c, bounds_p,
+        cnfire_const, pftcon, patch, col, grc,
+        dgvs, cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
+        soilbgc_cf, decomp_cascade_con,
+        leaf_prof_patch, froot_prof_patch, croot_prof_patch, stem_prof_patch,
+        totsomc_col, decomp_cpools_vr_col, decomp_npools_vr_col, somc_fire_col;
+        kwargs...)
+
+Fire effects routine for the Li et al. (2014) fire model.
+Delegates to `cnfire_fluxes!` with Li2014-specific combustion completeness
+factors: 0.5 for litter (changed from 0.4) and 0.25 for CWD (changed from 0.2)
+per Li et al. (2014).
+
+Ported from `CNFireFluxes` in `CNFireLi2014Mod.F90`.
+"""
+function cnfire_fluxes_li2014!(
+    mask_soilc::BitVector,
+    mask_soilp::BitVector,
+    bounds_c::UnitRange{Int},
+    bounds_p::UnitRange{Int},
+    cnfire_const::CNFireConstData,
+    pftcon::PftConFireBase,
+    patch::PatchData,
+    col::ColumnData,
+    grc::GridcellData,
+    dgvs::DgvsFireData,
+    cnveg_state::CNVegStateData,
+    cnveg_cs::CNVegCarbonStateData,
+    cnveg_cf::CNVegCarbonFluxData,
+    cnveg_ns::CNVegNitrogenStateData,
+    cnveg_nf::CNVegNitrogenFluxData,
+    soilbgc_cf::SoilBiogeochemCarbonFluxData,
+    decomp_cascade_con::DecompCascadeConData,
+    leaf_prof_patch::Matrix{Float64},
+    froot_prof_patch::Matrix{Float64},
+    croot_prof_patch::Matrix{Float64},
+    stem_prof_patch::Matrix{Float64},
+    totsomc_col::Vector{Float64},
+    decomp_cpools_vr_col::Array{Float64,3},
+    decomp_npools_vr_col::Array{Float64,3},
+    somc_fire_col::Vector{Float64};
+    dt::Float64 = 1800.0,
+    dayspyr::Float64 = 365.0,
+    nlevdecomp::Int = 1,
+    ndecomp_pools::Int = 7,
+    i_met_lit::Int = 1,
+    i_litr_max::Int = 3,
+    transient_landcover::Bool = false,
+    use_cndv::Bool = false,
+    use_matrixcn::Bool = false,
+    spinup_factor_deadwood::Float64 = SPINUP_FACTOR_DEADWOOD_DEFAULT,
+    secspday::Float64 = SECSPDAY,
+    nc3crop::Int = 15,
+    noveg::Int = 0,
+    kmo::Int = 6,
+    kda::Int = 15,
+    mcsec::Int = 3600
+)
+    # Li2014 uses specific combustion completeness factors:
+    # 0.5 for litter (changed from base 0.4) and 0.25 for CWD (changed from base 0.2)
+    # per Li et al. (2014). Create a local copy with Li2014-specific values.
+    li2014_const = CNFireConstData(
+        borealat                     = cnfire_const.borealat,
+        lfuel                        = cnfire_const.lfuel,
+        ufuel                        = cnfire_const.ufuel,
+        g0                           = cnfire_const.g0,
+        rh_low                       = cnfire_const.rh_low,
+        rh_hgh                       = cnfire_const.rh_hgh,
+        bt_min                       = cnfire_const.bt_min,
+        bt_max                       = cnfire_const.bt_max,
+        cli_scale                    = cnfire_const.cli_scale,
+        boreal_peatfire_c            = cnfire_const.boreal_peatfire_c,
+        pot_hmn_ign_counts_alpha     = cnfire_const.pot_hmn_ign_counts_alpha,
+        non_boreal_peatfire_c        = cnfire_const.non_boreal_peatfire_c,
+        cropfire_a1                  = cnfire_const.cropfire_a1,
+        occur_hi_gdp_tree            = cnfire_const.occur_hi_gdp_tree,
+        cmb_cmplt_fact_litter        = 0.5,   # Li2014 value
+        cmb_cmplt_fact_cwd           = 0.25,  # Li2014 value
+        max_rh30_affecting_fuel      = cnfire_const.max_rh30_affecting_fuel,
+        defo_fire_precip_thresh_bet  = cnfire_const.defo_fire_precip_thresh_bet,
+        defo_fire_precip_thresh_bdt  = cnfire_const.defo_fire_precip_thresh_bdt,
+        borpeat_fire_soilmoist_denom = cnfire_const.borpeat_fire_soilmoist_denom,
+        nonborpeat_fire_precip_denom = cnfire_const.nonborpeat_fire_precip_denom,
+    )
+
+    return cnfire_fluxes!(
+        mask_soilc, mask_soilp, bounds_c, bounds_p,
+        li2014_const, pftcon, patch, col, grc,
+        dgvs, cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
+        soilbgc_cf, decomp_cascade_con,
+        leaf_prof_patch, froot_prof_patch, croot_prof_patch, stem_prof_patch,
+        totsomc_col, decomp_cpools_vr_col, decomp_npools_vr_col, somc_fire_col;
+        dt = dt,
+        dayspyr = dayspyr,
+        nlevdecomp = nlevdecomp,
+        ndecomp_pools = ndecomp_pools,
+        i_met_lit = i_met_lit,
+        i_litr_max = i_litr_max,
+        transient_landcover = transient_landcover,
+        use_cndv = use_cndv,
+        use_matrixcn = use_matrixcn,
+        spinup_factor_deadwood = spinup_factor_deadwood,
+        secspday = secspday,
+        nc3crop = nc3crop,
+        noveg = noveg,
+        kmo = kmo,
+        kda = kda,
+        mcsec = mcsec,
+    )
 end
