@@ -1,1 +1,19 @@
-All 6072 tests pass. The CN shared params module is already fully ported and working. The port is complete — all Fortran subroutines, the type definition, and module-level variables have been translated, and the test file validates default construction, NetCDF reading, namelist reading, combined reading, soil depth setting, and field mutability.
+All 6,415 tests pass. The `DaylengthMod.F90` → `daylength.jl` port is already complete:
+
+**Source**: `src/biogeophys/daylength.jl` — already included in `src/CLM.jl`  
+**Tests**: `test/test_daylength.jl` — already included in `test/runtests.jl`
+
+**Ported functions** (all 4 from the Fortran module):
+| Fortran | Julia |
+|---------|-------|
+| `daylength(lat, decl)` (elemental) | `daylength(lat, decl)` |
+| `ComputeMaxDaylength(bounds, lat, obliquity, max_daylength)` | `compute_max_daylength!(lat, obliquity, max_daylength, bounds)` |
+| `InitDaylength(bounds, declin, declinm1, obliquity)` | `init_daylength!(grc, declin, declinm1, obliquity, bounds)` |
+| `UpdateDaylength(bounds, declin, obliquity)` | `update_daylength!(grc, declin, obliquity, is_first_step, bounds)` |
+
+The port correctly:
+- Preserves Fortran variable names (`my_lat`, `temp`, `max_decl`, etc.)
+- Returns `NaN` for invalid inputs (matching Fortran's `shr_infnan_nan`)
+- Uses local constants (`SECS_PER_RADIAN`, `LAT_EPSILON`, `POLE`, `OFFSET_POLE`)
+- Replaces the global `grc` access and `is_first_step_of_this_run_segment()` call with explicit parameters
+- Keeps all discontinuities (`min`/`max` clamping) identical to Fortran

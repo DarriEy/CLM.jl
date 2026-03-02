@@ -39,3 +39,4 @@
 | Soil N flux | 4 | ✓ PASSED | 2 | — |
 | Soil BGC state | 4 | ✓ PASSED | 2 | — |
 | Crop type | 4 | ✓ PASSED | 2 | — |
+| CN shared params | 4 | ✓ PASSED | 2 | — |
