@@ -71,5 +71,6 @@ include("biogeophys/aerosol.jl")
 include("biogeophys/surface_humidity.jl")
 include("biogeophys/surface_resistance.jl")
 include("biogeophys/soil_moist_stress.jl")
+include("biogeophys/soil_temperature.jl")
 
 end # module CLM

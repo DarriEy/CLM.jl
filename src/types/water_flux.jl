@@ -32,6 +32,9 @@ Base.@kwdef mutable struct WaterFluxData
     qflx_evap_soi_patch                 ::Vector{Float64} = Float64[]  # patch soil evaporation (mm H2O/s) (+ = to atm)
     qflx_evap_tot_patch                 ::Vector{Float64} = Float64[]  # patch total evaporation (mm H2O/s)
     qflx_liqevap_from_top_layer_patch   ::Vector{Float64} = Float64[]  # patch rate of liquid evaporation from top layer (mm H2O/s) [+]
+    qflx_ev_snow_patch                  ::Vector{Float64} = Float64[]  # patch evaporation heat flux from snow (mm H2O/s)
+    qflx_ev_soil_patch                  ::Vector{Float64} = Float64[]  # patch evaporation heat flux from soil (mm H2O/s)
+    qflx_ev_h2osfc_patch                ::Vector{Float64} = Float64[]  # patch evaporation heat flux from surface water (mm H2O/s)
     qflx_irrig_drip_patch               ::Vector{Float64} = Float64[]  # patch drip irrigation (mm H2O/s)
     qflx_irrig_sprinkler_patch          ::Vector{Float64} = Float64[]  # patch sprinkler irrigation (mm H2O/s)
 
@@ -85,6 +88,7 @@ Base.@kwdef mutable struct WaterFluxData
 
     # --- Column-level 2D fields ---
     qflx_snofrz_lyr_col                 ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col snow freezing rate per layer (kg m-2 s-1) (-nlevsno+1:0)
+    qflx_snomelt_lyr_col                ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col snow melt rate per layer (kg m-2 s-1) (-nlevsno+1:0)
     qflx_snow_percolation_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col liquid percolation from snow layer (mm H2O/s) (-nlevsno+1:0)
     qflx_gw_uncon_irrig_lyr_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col unconfined gw irrigation by layer (mm H2O/s) (1:nlevsoi)
 
@@ -126,6 +130,9 @@ function waterflux_init!(wf::WaterFluxData, nc::Int, np::Int, nl::Int, ng::Int)
     wf.qflx_evap_soi_patch                 = fill(NaN, np)
     wf.qflx_evap_tot_patch                 = fill(NaN, np)
     wf.qflx_liqevap_from_top_layer_patch   = fill(NaN, np)
+    wf.qflx_ev_snow_patch                  = fill(NaN, np)
+    wf.qflx_ev_soil_patch                  = fill(NaN, np)
+    wf.qflx_ev_h2osfc_patch                = fill(NaN, np)
     wf.qflx_irrig_drip_patch               = fill(NaN, np)
     wf.qflx_irrig_sprinkler_patch          = fill(NaN, np)
 
@@ -179,6 +186,7 @@ function waterflux_init!(wf::WaterFluxData, nc::Int, np::Int, nl::Int, ng::Int)
 
     # --- Column 2D ---
     wf.qflx_snofrz_lyr_col               = fill(NaN, nc, nlevsno)       # (-nlevsno+1:0)
+    wf.qflx_snomelt_lyr_col              = fill(NaN, nc, nlevsno)       # (-nlevsno+1:0)
     wf.qflx_snow_percolation_col          = fill(NaN, nc, nlevsno)       # (-nlevsno+1:0)
     wf.qflx_gw_uncon_irrig_lyr_col        = fill(NaN, nc, nlevsoi)       # (1:nlevsoi)
 
@@ -215,6 +223,9 @@ function waterflux_clean!(wf::WaterFluxData)
     wf.qflx_evap_soi_patch                 = Float64[]
     wf.qflx_evap_tot_patch                 = Float64[]
     wf.qflx_liqevap_from_top_layer_patch   = Float64[]
+    wf.qflx_ev_snow_patch                  = Float64[]
+    wf.qflx_ev_soil_patch                  = Float64[]
+    wf.qflx_ev_h2osfc_patch                = Float64[]
     wf.qflx_irrig_drip_patch               = Float64[]
     wf.qflx_irrig_sprinkler_patch          = Float64[]
 
@@ -268,6 +279,7 @@ function waterflux_clean!(wf::WaterFluxData)
 
     # Column 2D
     wf.qflx_snofrz_lyr_col               = Matrix{Float64}(undef, 0, 0)
+    wf.qflx_snomelt_lyr_col              = Matrix{Float64}(undef, 0, 0)
     wf.qflx_snow_percolation_col          = Matrix{Float64}(undef, 0, 0)
     wf.qflx_gw_uncon_irrig_lyr_col        = Matrix{Float64}(undef, 0, 0)
 
