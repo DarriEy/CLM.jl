@@ -61,5 +61,6 @@ include("infrastructure/band_diagonal.jl")
 # Tier 1: Biogeophysics (pure math)
 # ===========================================================================
 include("biogeophys/qsat.jl")
+include("biogeophys/daylength.jl")
 
 end # module CLM

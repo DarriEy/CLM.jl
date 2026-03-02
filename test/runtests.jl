@@ -41,4 +41,5 @@ using CLM
     include("test_soil_bgc_state.jl")
     include("test_crop.jl")
     include("test_cn_shared_params.jl")
+    include("test_daylength.jl")
 end
