@@ -57,4 +57,5 @@ using CLM
     include("test_swrc_clapp_hornberg.jl")
     include("test_swrc_van_genuchten.jl")
     include("test_soil_water_movement.jl")
+    include("test_soil_hydrology_mod.jl")
 end
