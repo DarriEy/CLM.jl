@@ -69,3 +69,4 @@
 | Soil fluxes | 7 | ✓ PASSED | 2 | — |
 | Urban fluxes | 7 | ✓ PASSED | 2 | — |
 | LUNA | 7 | ✓ PASSED | 2 | — |
+| Ozone damage | 7 | ✓ PASSED | 2 | — |
