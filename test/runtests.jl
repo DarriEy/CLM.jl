@@ -43,4 +43,5 @@ using CLM
     include("test_cn_shared_params.jl")
     include("test_daylength.jl")
     include("test_surface_albedo_mod.jl")
+    include("test_urban_albedo.jl")
 end
