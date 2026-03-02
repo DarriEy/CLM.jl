@@ -1,24 +1,16 @@
-The Soil Temperature module has already been fully ported and committed. Here's the summary:
+The lake temperature module is already fully ported and committed. Here's a summary:
 
-**Already done (commit `3ab7757`):**
+**File**: `src/biogeophys/lake_temperature.jl` (1177 lines)
 
-- **Julia source**: `src/biogeophys/soil_temperature.jl` — 1722 lines, ported from `SoilTemperatureMod.F90` (2975 lines)
-- **Test file**: `test/test_soil_temperature.jl` — included in test suite
-- **CLM.jl include**: Already present at line 74
-- **All 7292 tests pass**
+**Ported subroutines:**
+1. **`soil_therm_prop_lake!`** — Thermal conductivities and heat capacities of snow/soil layers for lake columns (Farouki soil conductivity, Jordan snow conductivity, de Vries heat capacity)
+2. **`phase_change_lake!`** — Phase change within snow, soil, and lake layers (melting/freezing with latent heat)
+3. **`lake_temperature!`** — Main driver: 11-step algorithm including density calculation, diffusivity, solar radiation penetration, Crank-Nicholson tridiagonal solve, phase change, convective mixing (top-down and bottom-up), CH4 conductance, and energy conservation check
 
-**Fortran → Julia function mapping (all complete):**
+**Helper**: `calculate_total_h2osno!` — total snow water calculation
 
-| Fortran Subroutine | Julia Function |
-|---|---|
-| `SoilTemperature` | `soil_temperature!` |
-| `SoilThermProp` | `soil_therm_prop!` |
-| `ComputeGroundHeatFluxAndDeriv` | `compute_ground_heat_flux_and_deriv!` |
-| `ComputeHeatDiffFluxAndFactor` | `compute_heat_diff_flux_and_factor!` |
-| `SetRHSVec` (+ Snow/Soil/SSW) | `set_rhs_vec!` (inlined) |
-| `SetMatrix` (+ Snow/Soil/SSW/Assemble) | `set_matrix!` (inlined) |
-| `PhaseChangeH2osfc` | `phase_change_h2osfc!` |
-| `PhaseChange_beta` | `phase_change_beta!` |
-| `BuildingHAC` | `building_hac!` |
+**Lake constants**: `BETAVIS`, `ZA_LAKE`, `N2MIN`, `TDMAX`, `DEPTHCRIT`, `MIXFACT`, `LAKEPUDDLING`, `LAKE_NO_ED`, `PUDZ`
 
-The only uncommitted changes are to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md`, which are not related to this module. No further action is needed.
+**Tests**: `test/test_lake_temperature.jl` — 6 test sets covering constants, thermal properties, phase change (no-change and freezing), full driver execution, and energy conservation
+
+**All 7347 tests pass.**
