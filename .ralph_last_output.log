@@ -1,10 +1,1 @@
-The SWRC Clapp-Hornberg port is already complete and committed (`a38c859`). Here's a summary of what's in place:
-
-**Port: `SoilWaterRetentionCurveClappHornberg1978Mod.F90` → `swrc_clapp_hornberg.jl`**
-
-- **Type**: `SoilWaterRetentionCurveClappHornberg1978 <: SoilWaterRetentionCurve` — concrete subtype of the abstract base
-- **`soil_hk!`** — hydraulic conductivity: `hk = imped * hksat * s^(2*bsw + 3)` with derivative `dhkds`
-- **`soil_suction!`** — soil suction potential: `smp = -sucsat * s^(-bsw)` with derivative `dsmpds`
-- **`soil_suction_inverse!`** — inverse: `s_target = (-smp_target / sucsat)^(-1/bsw)`
-- **Tests** cover type hierarchy, basic computation, roundtrip consistency, finite-difference derivative checks, and edge cases (full saturation, ice impedance, multiple columns/layers)
-- **All 7385 tests pass**
+The Van Genuchten files were already committed in a previous session (commit `5381f67` — "Port SWRC Van Genuchten from Fortran to Julia"). The port is complete — nothing further to do.

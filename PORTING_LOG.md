@@ -53,3 +53,4 @@
 | Soil temperature | 6 | ✓ PASSED | 2 | — |
 | Lake temperature | 6 | ✓ PASSED | 2 | — |
 | SWRC base | 6 | ✓ PASSED | 2 | — |
+| SWRC Clapp-Hornberg | 6 | ✓ PASSED | 2 | — |
