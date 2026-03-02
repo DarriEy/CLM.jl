@@ -84,5 +84,6 @@ include("biogeophys/hydrology_drainage.jl")
 include("biogeophys/lake_hydrology.jl")
 include("biogeophys/hillslope_hydrology.jl")
 include("biogeophys/photosynthesis.jl")
+include("biogeophys/canopy_fluxes.jl")
 
 end # module CLM
