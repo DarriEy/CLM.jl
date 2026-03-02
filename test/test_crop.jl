@@ -246,6 +246,7 @@
         @test CLM.crop_init_acc_vars!(cr, 1:5) === nothing
         @test CLM.crop_restart!(cr, 1:5) === nothing
         @test CLM.crop_check_dates!() === nothing
+        @test CLM.crop_update_acc_vars!(cr, 1:5, zeros(5), zeros(5, 2)) === nothing
     end
 
     @testset "field mutability" begin

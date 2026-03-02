@@ -259,6 +259,25 @@ function crop_restart!(cr::CropData, bounds_patch::UnitRange{Int})
 end
 
 """
+    crop_update_acc_vars!(cr, bounds_patch, t_ref2m_patch, t_soisno_col)
+
+Stub for accumulation variable update (no-op in Julia port until accumulation
+infrastructure is ported).
+
+In the Fortran source this routine:
+  - Updates HUI (heat unit index) accumulation
+  - Updates GDDACCUM (growing degree-days from air temperature)
+  - Updates GDDTSOI (growing degree-days from top two soil layers)
+
+Corresponds to `CropUpdateAccVars` in the Fortran source.
+"""
+function crop_update_acc_vars!(cr::CropData, bounds_patch::UnitRange{Int},
+                                t_ref2m_patch::Vector{Float64},
+                                t_soisno_col::Matrix{Float64})
+    return nothing
+end
+
+"""
     crop_increment_year!(cr, mask_pcrop, bounds_patch;
                          kmo, kda, mcsec, is_first_step)
 
