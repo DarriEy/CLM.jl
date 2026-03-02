@@ -86,3 +86,4 @@
 | C state update 2 | 8 | ✓ PASSED | 2 | — |
 | C state update 3 | 8 | ✓ PASSED | 2 | — |
 | N state update 1 | 8 | ✓ PASSED | 2 | — |
+| N state update 2 | 8 | ✓ PASSED | 2 | — |

@@ -1,19 +1,9 @@
-The port of `CNNStateUpdate2Mod.F90` is already complete. Here's the summary:
+The source and test files for `n_state_update3.jl` are already committed (they're not showing as modified or untracked). The only uncommitted changes are `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — which are not part of this port.
 
-**Source file**: `src/biogeochem/n_state_update2.jl` — already committed (commit `5508269`)
+The N state update 3 port is complete and all tests pass. The module faithfully translates both Fortran subroutines:
 
-**Three subroutines translated:**
-
-1. **`n_state_update2!`** — Gap-phase mortality N state update
-   - Column loop: adds `gap_mortality_n_to_litr_n_col` and `gap_mortality_n_to_cwdn_col` fluxes to `decomp_npools_vr_col`
-   - Patch loop: decrements 7 displayed pools + 6 storage + 6 transfer pools (including `retransn_patch`)
-
-2. **`n_state_update2h!`** — Harvest mortality N state update  
-   - Column loop: adds `harvest_n_to_litr_n_col` and `harvest_n_to_cwdn_col` fluxes
-   - Patch loop: decrements same pool categories using `hrv_*` flux fields; `deadstemn` uses `wood_harvestn_patch`
-
-3. **`n_state_update2g!`** — Gross unrepresented landcover change N state update
-   - Column loop: adds `gru_n_to_litr_n_col` and `gru_n_to_cwdn_col` fluxes
-   - Patch loop: `deadstemn` has two decrements (`gru_deadstemn_to_atm` + `gru_wood_productn_gain`); storage/transfer pools use `_to_atm` suffix
-
-**All 11,429 tests pass**, including the N State Update 2 test suite covering gap mortality, harvest, GRU, storage/transfer pools, mask filtering, and `use_matrixcn` behavior.
+1. **`n_state_update_leaching!`** — Sminn leaching with `use_nitrif_denitrif` branching (NO3 leaching+runoff with `max(0)` clamp, or simple sminn leaching)
+2. **`n_state_update3!`** — Fire N state updates including:
+   - Column-level: CWD and litter inputs from fire mortality, decomp pool fire losses
+   - Patch-level: displayed pools (with live-to-dead stem/croot transfers), storage, transfer, and retranslocated N pools
+   - `use_soil_matrixcn` / `use_matrixcn` guards properly skip updates when matrix solution is active
