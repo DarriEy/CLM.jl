@@ -96,5 +96,6 @@ include("biogeophys/ozone.jl")
 # Tier 2: Biogeochemistry
 # ===========================================================================
 include("biogeochem/phenology.jl")
+include("biogeochem/allocation.jl")
 
 end # module CLM

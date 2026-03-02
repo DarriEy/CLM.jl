@@ -72,4 +72,5 @@ using CLM
     include("test_luna.jl")
     include("test_ozone.jl")
     include("test_phenology.jl")
+    include("test_allocation.jl")
 end
