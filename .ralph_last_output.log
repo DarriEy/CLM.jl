@@ -1,8 +1,1 @@
-All 6666 tests pass, and all dependent types have the required fields. The port is complete and verified:
-
-- **Source file**: `src/biogeophys/urban_albedo.jl` — all 4 Fortran subroutines (`SnowAlbedo`, `incident_direct`, `incident_diffuse`, `net_solar`) plus the main `UrbanAlbedo` are ported
-- **Test file**: `test/test_urban_albedo.jl` — 8 test sets covering snow albedo, direct/diffuse radiation conservation, full integration (sun up/down/snow), varying H/W ratio, and energy conservation
-- **Integration**: Already included in `src/CLM.jl` and `test/runtests.jl`
-- **All 6666 tests pass**
-
-The code has already been committed (commit `50d3143`). The urban albedo port is complete.
+The surface radiation module was already committed in `15adf15` ("Port Surface radiation from Fortran to Julia"). All 6725 tests pass. There's nothing more to do — the port is complete.
