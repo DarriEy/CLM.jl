@@ -84,4 +84,5 @@ using CLM
     include("test_n_leaching.jl")
     include("test_n_dynamics.jl")
     include("test_c_state_update1.jl")
+    include("test_c_state_update2.jl")
 end
