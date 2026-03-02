@@ -46,4 +46,5 @@ using CLM
     include("test_urban_albedo.jl")
     include("test_surface_radiation.jl")
     include("test_urban_radiation.jl")
+    include("test_snow_snicar.jl")
 end
