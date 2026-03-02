@@ -82,4 +82,5 @@ using CLM
     include("test_soil_biogeochem_decomp.jl")
     include("test_nitrif_denitrif.jl")
     include("test_n_leaching.jl")
+    include("test_n_dynamics.jl")
 end

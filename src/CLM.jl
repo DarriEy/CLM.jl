@@ -106,5 +106,6 @@ include("biogeochem/decomp_mimics.jl")
 include("biogeochem/decomp.jl")
 include("biogeochem/nitrif_denitrif.jl")
 include("biogeochem/n_leaching.jl")
+include("biogeochem/n_dynamics.jl")
 
 end # module CLM
