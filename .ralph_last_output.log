@@ -1,1 +1,10 @@
-The surface radiation module was already committed in `15adf15` ("Port Surface radiation from Fortran to Julia"). All 6725 tests pass. There's nothing more to do — the port is complete.
+The urban radiation module is already fully ported and working:
+
+- **`src/biogeophys/urban_radiation.jl`** — Contains both `net_longwave!` and `urban_radiation!`, translating both Fortran subroutines from `UrbanRadiationMod.F90`
+- **`src/CLM.jl:68`** — Already includes the file
+- **`test/test_urban_radiation.jl`** — Comprehensive tests covering:
+  - `net_longwave!` basic convergence and energy conservation
+  - `urban_radiation!` basic functionality, non-urban SPVAL handling, snow effects, and roof longwave consistency
+  - Module constants (`MPE_URBAN_RAD`, `SNOEM`)
+- **`test/runtests.jl:48`** — Already includes the test file
+- **All 6792 tests pass**, including the most recent commit `9f7c155` ("Port Urban radiation from Fortran to Julia")
