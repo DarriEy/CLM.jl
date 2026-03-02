@@ -56,3 +56,4 @@
 | SWRC Clapp-Hornberg | 6 | ✓ PASSED | 2 | — |
 | SWRC Van Genuchten | 6 | ✓ PASSED | 2 | — |
 | Soil water movement | 6 | ✓ PASSED | 2 | — |
+| Soil hydrology | 6 | ✓ PASSED | 2 | — |
