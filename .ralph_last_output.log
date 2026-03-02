@@ -1,20 +1,16 @@
-The Photosynthesis module port is already complete. Here's a summary:
+The canopy fluxes module has already been ported and committed. Here's a summary of what's in place:
 
-**Status: Already committed** (`73dd7f2`)
+**Status: Complete** - Commit `a784f2f` already contains "Port Canopy fluxes from Fortran to Julia"
 
-**What was ported** (5210 lines of Fortran → 3169 lines of Julia + 371 lines of tests):
+**What was ported** (`src/biogeophys/canopy_fluxes.jl`, 1099 lines from 1756-line Fortran source):
 
-- **Types**: `PhotoParamsData` (from `photo_params_type`), `PhotosynthesisData` (from `photosyns_type`)
-- **Core functions**: `photosynthesis!`, `photosynthesis_total!`, `fractionation!`, `photosynthesis_hydrstress!`
-- **Solvers**: `hybrid_solver!`, `brent_solver!`, `ci_func!` (standard); `hybrid_PHS!`, `brent_PHS!`, `ci_func_PHS!` (hydraulic stress)
-- **Helper functions**: `ft_photo`, `fth_photo`, `fth25_photo`, `quadratic_solve`, `plc`, `d1plc`
-- **Plant hydraulics**: `calcstress!`, `getvegwp!`, `getqflx!`, `spacF!`, `spacA!`
-- **Initialization**: `photosynthesis_data_init!`, `photosynthesis_data_clean!`, `photosynthesis_timestep_init!`, `set_params_for_testing!`
+1. **Types & Constants**: `CanopyFluxesParamsData`, `CanopyFluxesControl`, and 15 module constants
+2. **Configuration**: `canopy_fluxes_read_nml!()` and `canopy_fluxes_read_params!()`
+3. **Main function** `canopy_fluxes!()` covering:
+   - Phase 1: Initialization (biomass heat capacity, daylength factor, aerodynamic params for ZengWang2007/Meier2022, longwave, QSat, Monin-Obukhov)
+   - Phase 2: Newton-Raphson iteration (friction velocity, aerodynamic resistances, stomatal conductance, energy balance, convergence)
+   - Phase 3: Post-iteration diagnostics (energy balance check, stem temperature, ground fluxes, 2m reference T/q/RH, longwave, skin temperature, soil flux derivatives, dew accumulation, `photosynthesis_total!`)
 
-**Files**:
-- `src/biogeophys/photosynthesis.jl` — main module
-- `test/test_photosynthesis.jl` — 371 lines of tests
-- `src/CLM.jl` — include added (line 86)
-- `test/runtests.jl` — test include added (line 66)
+4. **Tests** (`test/test_canopy_fluxes.jl`, 303 lines): Constants, parameter structs, namelist, and a comprehensive single-patch smoke test with 17+ output checks
 
-**All 8131 tests pass** (including photosynthesis tests).
+**All 8190 tests pass.**
