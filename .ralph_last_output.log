@@ -1,15 +1,17 @@
-All Fortran subroutines/functions are accounted for:
+The Aerosol module port is already complete. Here's a summary:
 
-| Fortran | Julia | Status |
-|---------|-------|--------|
-| `readParams` | `SnicarParams` struct defaults | Covered (params read from struct) |
-| `SNICAR_RT` | `snicar_rt!` | Ported |
-| `SnowAge_grain` | `snowage_grain!` | Ported |
-| `FreshSnowRadius` | `fresh_snow_radius` | Ported |
-| `SnowOptics_init` | `snow_optics_init!` | Ported (stub) |
-| `SnowAge_init` | `snowage_init!` | Ported (stub) |
-| `piecewise_linear_interp1d` | `piecewise_linear_interp1d` | Ported |
+**`src/biogeophys/aerosol.jl`** — Ported from `AerosolMod.F90` (803 lines Fortran → 638 lines Julia)
 
-The Snow SNICAR module has already been fully ported to Julia. The file is already included in `src/CLM.jl` (line 69), tests exist in `test/test_snow_snicar.jl` (included at line 49 of `test/runtests.jl`), and all 6859 tests pass. The commit from `392910d` ("Port Snow SNICAR from Fortran to Julia") is already in the history.
+### What was ported:
+- **`AerosolData`** struct — All 44 fields (mass arrays, concentrations, deposition fluxes)
+- **`aerosol_init!`** — Allocation with NaN initialization (from `InitAllocate`)
+- **`aerosol_clean!`** — Deallocation
+- **`aerosol_init_cold!`** — Cold-start zeroing (from `InitCold`)
+- **`aerosol_reset!`** / **`aerosol_reset_filter!`** — Per-column and mask-based reset (from `Reset`/`ResetFilter`)
+- **`aerosol_masses!`** — Column-integrated masses and concentrations (from `AerosolMasses`)
+- **`aerosol_fluxes!`** — Deposition fluxes from atmosphere into snow (from `AerosolFluxes`)
+- **`aerosol_restart!`** — Restart with derived concentration computation (from `Restart`)
+- **`aerosol_init_history!`** — History registration stub (from `InitHistory`)
 
-Nothing further needs to be done — this module is complete.
+### Tests: 
+All **6936 tests pass**, including comprehensive aerosol tests covering struct construction, allocation, cold init, reset, masses computation, deposition fluxes, snicar_use_aerosol=false, restart concentrations, and stubs.
