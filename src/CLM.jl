@@ -73,5 +73,6 @@ include("biogeophys/surface_resistance.jl")
 include("biogeophys/soil_moist_stress.jl")
 include("biogeophys/soil_temperature.jl")
 include("biogeophys/lake_temperature.jl")
+include("biogeophys/swrc_base.jl")
 
 end # module CLM
