@@ -73,3 +73,4 @@
 | Phenology | 8 | ✓ PASSED | 2 | — |
 | CN allocation | 8 | ✓ PASSED | 2 | — |
 | Growth respiration | 8 | ✓ PASSED | 2 | — |
+| Maintenance respiration | 8 | ✓ PASSED | 2 | — |

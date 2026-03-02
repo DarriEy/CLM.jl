@@ -1,17 +1,25 @@
-The maintenance respiration port is already complete and committed as `bef5423`. The working tree only has changes to automation state files (`.ralph_last_output.log`, `.ralph_state`, `PORTING_LOG.md`) — not part of the port itself.
+The FUN model port is already complete. Here's the summary:
 
-**Summary: Maintenance respiration port is already done.**
+**Commit `06eb954`** — "Port FUN model from Fortran to Julia" — already contains all the work:
 
-- **Source**: `src/biogeochem/maint_resp.jl` — faithfully translates `CNMRespMod.F90`
-  - `MaintRespParams` struct with `br` and `br_root` (from `params_type`)
-  - `maint_resp_read_params!()` combining `CNMRespReadNML` + `readParams`
-  - `PftConMaintResp` struct for PFT-level woody flag
-  - `cn_mresp!()` function with mask-based iteration over columns and patches
-  - Column loop computing `tcsoi` temperature correction factors per soil layer
-  - Patch loop for leaf MR (sunlit + shaded × 12.011e-6), live stem MR, live coarse root MR
-  - Crop reproductive MR loop
-  - Fine root MR accumulation over soil layers with `crootfr` weighting
-  - Root/stem acclimation support (`rootstem_acc`)
-- **Tests**: `test/test_maint_resp.jl` — 9 test sets covering parameter defaults, woody PFT, grass PFT, no vegetation, temperature dependence, crop PFT, masked patches, acclimation, and separate `br_root`
-- **All 9099 tests pass**
-- **Already committed** as `bef5423`
+**Files ported:**
+- `src/biogeochem/fun.jl` (1092 lines) — Full port of `CNFUNMod.F90`
+- `test/test_fun.jl` (504 lines) — Comprehensive test suite
+- `src/CLM.jl` — `include("biogeochem/fun.jl")` added
+- `test/runtests.jl` — `include("test_fun.jl")` added
+
+**What was translated:**
+- **3 pure cost functions**: `fun_cost_fix`, `fun_cost_active`, `fun_cost_nonmyc`
+- **Retranslocation subroutine**: `fun_retranslocation` → returns named tuple
+- **Init function**: `cnfun_init!` — per-FUN-period initialization
+- **Main CNFUN subroutine**: `cnfun!` — full N uptake calculation with:
+  - ECM/AM substep loop
+  - Fixer/non-fixer inner loop
+  - Conductance-based N allocation (COST_METHOD=2)
+  - FlexibleCN support
+  - Soil N pool limiting
+  - Patch-to-column aggregation (p2c)
+- **2 struct types**: `FUNParams`, `PftConFUN`
+- **8 module constants**: `COST_METHOD`, `NSTP`, `NCOST6`, etc.
+
+**Test results:** All 9168 tests pass (69 FUN-specific tests), including tests for cost functions, retranslocation, basic functionality, zero-C/zero-N edge cases, masked patches, and flexibleCN mode.
