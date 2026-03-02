@@ -81,3 +81,4 @@
 | Decomposition | 8 | ✓ PASSED | 2 | — |
 | Nitrif-Denitrif | 8 | ✓ PASSED | 2 | — |
 | N leaching | 8 | ✓ PASSED | 2 | — |
+| N dynamics | 8 | ✓ PASSED | 2 | — |

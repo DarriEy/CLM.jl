@@ -1,14 +1,14 @@
-The N dynamics module has already been ported and committed (commit `9c9a694`). The only unstaged changes are to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md` — which are state/log files, not the port itself.
+This module has already been fully ported and committed. Here's a summary of the current state:
 
-**Summary:** The port of `CNNDynamicsMod.F90` → `n_dynamics.jl` is complete and passing all tests. Here's what was ported:
+**`src/biogeochem/c_state_update1.jl`** — Already ported from `CNCStateUpdate1Mod.F90` with all three subroutines:
 
-| Fortran Subroutine | Julia Function | Description |
-|---|---|---|
-| `CNNDynamicsReadNML` | `n_dynamics_read_nml!` | Set N dynamics parameters |
-| `CNNDeposition` | `n_deposition!` | Atmospheric N deposition to soil mineral N |
-| `CNFreeLivingFixation` | `n_free_living_fixation!` | Free-living N fixation as f(ET) |
-| `CNNFixation` | `n_fixation!` | Symbiotic/asymbiotic N fixation as f(NPP) |
-| `CNNFert` | `n_fert!` | Crop N fertilizer (patch-to-column aggregation) |
-| `CNSoyfix` | `n_soyfix!` | Soybean N fixation (EPICPHASE model) |
+1. **`c_state_update_dyn_patch!`** — Updates C states from dynamic patch fluxes (litter, CWD, seed pools)
+2. **`c_state_update0!`** — Updates cpool from photosynthesis on radiation timestep
+3. **`c_state_update1!`** — Full prognostic C state update (phenology, maintenance respiration, allocation, growth respiration, storage-to-transfer, crop harvest logic, decomposition cascade)
 
-The `params_type` → `NDynamicsParams` struct is also ported. All 10,791 tests pass including the 13 N dynamics-specific tests.
+**Already completed:**
+- Source file included in `src/CLM.jl` (line 110)
+- Test file `test/test_c_state_update1.jl` included in `test/runtests.jl` (line 86)
+- Tests cover: dyn_patch, update0, non-woody/non-crop, woody, FATES columns, decomp cascade, mask filtering, gresp storage/xfer
+- All **10876 tests pass**
+- Already committed as `b2a3d24`: "Port C state update 1 from Fortran to Julia"
