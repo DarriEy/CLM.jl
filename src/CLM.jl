@@ -78,5 +78,6 @@ include("biogeophys/swrc_clapp_hornberg.jl")
 include("biogeophys/swrc_van_genuchten.jl")
 include("biogeophys/soil_water_movement.jl")
 include("biogeophys/soil_hydrology.jl")
+include("biogeophys/snow_hydrology.jl")
 
 end # module CLM
