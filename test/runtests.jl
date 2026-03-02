@@ -90,4 +90,5 @@ using CLM
     include("test_n_state_update2.jl")
     include("test_n_state_update3.jl")
     include("test_cn_driver.jl")
+    include("test_vegetation_facade.jl")
 end
