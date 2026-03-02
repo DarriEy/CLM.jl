@@ -63,4 +63,5 @@ using CLM
     include("test_hydrology_drainage.jl")
     include("test_lake_hydrology.jl")
     include("test_hillslope_hydrology.jl")
+    include("test_photosynthesis.jl")
 end
