@@ -378,4 +378,99 @@
         @test snw_rds_top[2] ≈ CLM.SPVAL
         @test sno_liq_top[2] ≈ CLM.SPVAL
     end
+
+    # ------------------------------------------------------------------
+    # 11. calc_and_withdraw_irrigation_fluxes! (stub)
+    # ------------------------------------------------------------------
+    @testset "calc_and_withdraw_irrigation_fluxes!" begin
+        nc2 = 2
+        np2 = 1; nl2 = 1; ng2 = 1
+        waterflux = CLM.WaterFluxData()
+        waterstate = CLM.WaterStateData()
+        CLM.waterflux_init!(waterflux, nc2, np2, nl2, ng2)
+        CLM.waterstate_init!(waterstate, nc2, np2, nl2, ng2)
+
+        mask_soil = BitVector([true, true])
+        bounds2 = 1:nc2
+        dtime = 1800.0
+
+        # Should run without error (stub — no irrigation fluxes calculated)
+        CLM.calc_and_withdraw_irrigation_fluxes!(
+            waterflux, waterstate,
+            mask_soil, bounds2, nlevsoi, dtime;
+            use_groundwater_irrigation=false)
+        @test true  # passes if no error thrown
+    end
+
+    # ------------------------------------------------------------------
+    # 12. handle_new_snow!
+    # ------------------------------------------------------------------
+    @testset "handle_new_snow!" begin
+        nc2 = 2
+        np2 = 1; nl2 = 1; ng2 = 1
+
+        temperature = CLM.TemperatureData()
+        CLM.temperature_init!(temperature, np2, nc2, nl2, ng2)
+
+        waterstatebulk = CLM.WaterStateBulkData()
+        CLM.waterstatebulk_init!(waterstatebulk, nc2, np2, nl2, ng2)
+
+        waterdiagbulk = CLM.WaterDiagnosticBulkData()
+        CLM.waterdiagnosticbulk_init!(waterdiagbulk, nc2, np2, nl2, ng2)
+
+        col_data = CLM.ColumnData()
+        CLM.column_init!(col_data, nc2)
+
+        lun_data = CLM.LandunitData()
+        CLM.landunit_init!(lun_data, nl2)
+
+        # Setup: 2 columns, 1 landunit (ISTSOIL)
+        col_data.landunit .= 1
+        col_data.itype .= 1  # soil type
+        col_data.snl .= 0    # no existing snow
+        lun_data.itype .= CLM.ISTSOIL
+        lun_data.urbpoi .= false
+        lun_data.lakpoi .= false
+
+        # Initialize ground temperature above freezing
+        temperature.t_grnd_col .= 280.0
+        temperature.t_soisno_col .= 280.0
+
+        # Initialize water state
+        waterstatebulk.ws.h2osno_no_layers_col .= 0.0
+        waterstatebulk.ws.h2osoi_ice_col .= 0.0
+        waterstatebulk.ws.h2osoi_liq_col .= 0.0
+
+        # Initialize diagnostic fields
+        waterdiagbulk.snow_depth_col .= 0.0
+        waterdiagbulk.frac_sno_eff_col .= 0.0
+        waterdiagbulk.snomelt_accum_col .= 0.0
+        waterdiagbulk.frac_iceold_col .= 0.0
+
+        # Column geometry
+        nlevtot = nlevsno + nlevmaxurbgrnd
+        for c in 1:nc2
+            for j in 1:nlevtot
+                col_data.dz[c, j] = 0.1
+                col_data.z[c, j] = 0.05 + (j - 1) * 0.1
+            end
+        end
+
+        mask_nolake = BitVector([true, true])
+        bounds2 = 1:nc2
+        dtime = 1800.0
+        forc_t = fill(260.0, nc2)           # forcing temperature below freezing
+        qflx_snow_grnd = fill(0.001, nc2)   # small snowfall flux
+
+        CLM.handle_new_snow!(
+            temperature, waterstatebulk, waterdiagbulk,
+            col_data, lun_data, mask_nolake, bounds2, dtime, nlevsno;
+            forc_t=forc_t, qflx_snow_grnd=qflx_snow_grnd)
+
+        # After adding new snow with snl==0, snow goes to h2osno_no_layers
+        # h2osno_no_layers += qflx_snow_grnd * dtime = 0.001 * 1800 = 1.8 mm
+        # Since ISTSOIL (not wetland), snow should NOT be removed
+        @test waterstatebulk.ws.h2osno_no_layers_col[1] ≈ 0.001 * 1800.0
+        @test waterstatebulk.ws.h2osno_no_layers_col[2] ≈ 0.001 * 1800.0
+    end
 end

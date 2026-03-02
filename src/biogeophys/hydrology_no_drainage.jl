@@ -15,6 +15,8 @@
 #   compute_wf2!                           — Soil water fraction of WHC (top 0.17m)
 #   update_snow_top_layer_diagnostics!     — Top-layer snow diagnostics
 #   hydrology_no_drainage!                 — Main orchestrator (calls sub-functions)
+#   calc_and_withdraw_irrigation_fluxes!   — Irrigation withdrawal (stub)
+#   handle_new_snow!                       — Handle new snow falling on ground
 # ==========================================================================
 
 # =========================================================================
@@ -575,6 +577,137 @@ function update_snow_top_layer_diagnostics!(
         snw_rds_top[c] = spval
         sno_liq_top[c] = spval
     end
+
+    return nothing
+end
+
+# =========================================================================
+# calc_and_withdraw_irrigation_fluxes!
+# =========================================================================
+
+"""
+    calc_and_withdraw_irrigation_fluxes!(soilhydrology, soilstate,
+        waterfluxbulk, waterstatebulk, water,
+        mask_soil, bounds, nlevsno, nlevgrnd;
+        use_groundwater_irrigation=false)
+
+Calculates irrigation withdrawal fluxes and withdraws from groundwater.
+
+In Fortran this calls `irrigation_inst%CalcIrrigationFluxes` and
+`WithdrawGroundwaterIrrigation`. Since IrrigationMod is not yet ported,
+this is a stub that only performs the groundwater withdrawal step when
+`use_groundwater_irrigation` is true.
+
+Ported from `CalcAndWithdrawIrrigationFluxes` in `HydrologyNoDrainageMod.F90`.
+"""
+function calc_and_withdraw_irrigation_fluxes!(
+    waterflux::WaterFluxData,
+    waterstate::WaterStateData,
+    mask_soil::BitVector,
+    bounds::UnitRange{Int},
+    nlevsoi::Int,
+    dtime::Float64;
+    use_groundwater_irrigation::Bool = false
+)
+    # Stub: CalcIrrigationFluxes requires IrrigationMod (not yet ported)
+    # When IrrigationMod is ported, add the irrigation flux calculation here.
+
+    # Groundwater irrigation withdrawal
+    if use_groundwater_irrigation
+        withdraw_groundwater_irrigation!(
+            waterflux, waterstate,
+            mask_soil, bounds, nlevsoi, dtime)
+    end
+
+    return nothing
+end
+
+# =========================================================================
+# handle_new_snow!
+# =========================================================================
+
+"""
+    handle_new_snow!(temperature, waterstatebulk, waterdiagbulk,
+        col, lun, mask_nolake, bounds, dtime, nlevsno;
+        forc_t, qflx_snow_grnd)
+
+Handle new snow falling on the ground.
+
+Coordinates:
+1. Update quantities for new snow (bulk density, diagnostics, state)
+2. Remove snow from thawed wetlands
+3. Initialize explicit snow pack where warranted
+
+Ported from `HandleNewSnow` in `HydrologyNoDrainageMod.F90`.
+"""
+function handle_new_snow!(
+    temperature::TemperatureData,
+    waterstatebulk::WaterStateBulkData,
+    waterdiagbulk::WaterDiagnosticBulkData,
+    col::ColumnData,
+    lun::LandunitData,
+    mask_nolake::BitVector,
+    bounds::UnitRange{Int},
+    dtime::Float64,
+    nlevsno::Int;
+    forc_t::Vector{Float64},
+    qflx_snow_grnd::Vector{Float64}
+)
+    nc = length(mask_nolake)
+
+    # --- 1. Update quantities for new snow ---
+    # Add new snow mass to appropriate state variable
+    update_state_add_new_snow!(
+        waterstatebulk.ws.h2osno_no_layers_col,
+        waterstatebulk.ws.h2osoi_ice_col,
+        dtime, col.snl, qflx_snow_grnd,
+        mask_nolake, bounds, nlevsno)
+
+    # --- 2. Remove snow from thawed wetlands ---
+    # Build landunit itype lookup for each column
+    lun_itype_col = Vector{Int}(undef, nc)
+    for c in bounds
+        mask_nolake[c] || continue
+        lun_itype_col[c] = lun.itype[col.landunit[c]]
+    end
+
+    mask_thawed_wetland = falses(nc)
+    build_filter_thawed_wetland_thin_snowpack!(
+        mask_thawed_wetland,
+        temperature.t_grnd_col, lun_itype_col, col.snl,
+        mask_nolake, bounds)
+
+    update_state_remove_snow_thawed_wetlands!(
+        waterstatebulk.ws.h2osno_no_layers_col,
+        mask_thawed_wetland, bounds)
+
+    bulk_remove_snow_thawed_wetlands!(
+        waterdiagbulk.snow_depth_col,
+        mask_thawed_wetland, bounds)
+
+    # --- 3. Initialize explicit snow pack ---
+    mask_init_snowpack = falses(nc)
+    build_filter_snowpack_initialized!(
+        mask_init_snowpack,
+        col.snl, lun_itype_col,
+        waterdiagbulk.frac_sno_eff_col,
+        waterdiagbulk.snow_depth_col,
+        qflx_snow_grnd,
+        mask_nolake, bounds)
+
+    update_state_initialize_snow_pack!(
+        waterstatebulk.ws.h2osno_no_layers_col,
+        waterstatebulk.ws.h2osoi_ice_col,
+        waterstatebulk.ws.h2osoi_liq_col,
+        mask_init_snowpack, bounds, nlevsno)
+
+    bulk_initialize_snow_pack!(
+        col.snl, col.zi, col.dz, col.z,
+        temperature.t_soisno_col,
+        waterdiagbulk.frac_iceold_col,
+        waterdiagbulk.snomelt_accum_col,
+        forc_t, waterdiagbulk.snow_depth_col,
+        mask_init_snowpack, bounds, nlevsno)
 
     return nothing
 end
