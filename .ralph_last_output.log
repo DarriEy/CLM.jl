@@ -1,1 +1,29 @@
-The Van Genuchten files were already committed in a previous session (commit `5381f67` — "Port SWRC Van Genuchten from Fortran to Julia"). The port is complete — nothing further to do.
+The soil water movement module has already been fully ported. Here's the summary:
+
+**Already completed:**
+- The Julia implementation file `src/biogeophys/soil_water_movement.jl` (1265 lines) is already in place
+- The test file `test/test_soil_water_movement.jl` (245 lines) is already in place
+- Both are already included in `src/CLM.jl` and `test/runtests.jl`
+- The most recent commit `957506d` is "Port Soil water movement from Fortran to Julia"
+- **All 7473 tests pass**, including all soil water movement tests
+
+**What was ported (all 14 Fortran subroutines/functions):**
+
+| Fortran | Julia |
+|---------|-------|
+| `readParams` | `SoilWaterMovementConfig` (config struct with defaults) |
+| `init_soilwater_movement` | `init_soilwater_movement()` |
+| `use_aquifer_layer` | `use_aquifer_layer(cfg)` |
+| `SoilWater` | `soil_water!()` — main entry point |
+| `BaseflowSink` | `baseflow_sink!()` |
+| `soilwater_zengdecker2009` | `soilwater_zengdecker2009!()` |
+| `soilwater_moisture_form` | `soilwater_moisture_form!()` |
+| `compute_hydraulic_properties` | `compute_hydraulic_properties!()` |
+| `compute_moisture_fluxes_and_derivs` | `compute_moisture_fluxes_and_derivs!()` |
+| `compute_RHS_moisture_form` | `compute_RHS_moisture_form!()` |
+| `compute_LHS_moisture_form` | `compute_LHS_moisture_form!()` |
+| `compute_qcharge` | `compute_qcharge!()` |
+| `IceImpedance` | `ice_impedance()` |
+| `TridiagonalCol` | `tridiagonal_col!()` |
+
+No additional work is needed — this port is complete.
