@@ -1,7 +1,17 @@
-The `SoilFluxesMod.F90` port is already complete:
+The urban fluxes module has already been fully ported and committed (commit `27b7717`). Here's a summary of what's in place:
 
-- **`src/biogeophys/soil_fluxes.jl`** — Full port of the `SoilFluxes` subroutine (425 lines), covering all 9 sections from the Fortran source
-- **`test/test_soil_fluxes.jl`** — 4 test sets: smoke test (non-urban), empty masks, dew formation (sub-freezing), and snow layers
-- **All 8412 tests pass**
-- **Already committed** as `9f2dec3 Port Soil fluxes from Fortran to Julia`
-- **Already included** in `src/CLM.jl` (line 90) and `test/runtests.jl` (line 70)
+**`src/biogeophys/urban_fluxes.jl`** — Complete port of `UrbanFluxesMod.F90` containing:
+- `UrbanFluxesParamsData` struct + `urban_fluxes_read_params!()` — module-level parameters
+- `simple_wasteheatfromac()` — waste heat from AC (simple CLM4.5 method)
+- `wasteheat!()` — total waste heat from urban heating/cooling
+- `calc_simple_internal_building_temp!()` — internal building temperature (simple method)
+- `urban_fluxes!()` — main subroutine: turbulent & momentum fluxes from urban canyon (roof, sunwall, shadewall, pervious & impervious road)
+
+**`test/test_urban_fluxes.jl`** — Tests covering:
+- Parameter struct defaults and read function
+- `simple_wasteheatfromac` with all HAC modes (off, on, wasteheat_on)
+- Full smoke test of `urban_fluxes!` with 5 urban columns (roof, sunwall, shadewall, road_imperv, road_perv)
+- `calc_simple_internal_building_temp!` correctness
+- Physical reasonableness checks (temperature bounds, wind stress sign, humidity range, zero wall evaporation, roots only on pervious road, etc.)
+
+**All 8585 tests pass.**
