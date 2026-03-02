@@ -34,3 +34,4 @@
 | Veg carbon flux | 4 | ✓ PASSED | 2 | — |
 | Veg nitrogen flux | 4 | ✓ PASSED | 1 | — |
 | Soil C state | 4 | ✓ PASSED | 1 | — |
+| Soil N state | 4 | ✓ PASSED | 2 | — |

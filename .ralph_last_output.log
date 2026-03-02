@@ -1,1 +1,11 @@
-Everything is already done — the port was completed in a previous session and committed as `56d6235`.
+This module has already been fully ported and committed (commit `e7d4a66`). The port includes:
+
+- **Struct**: `SoilBiogeochemCarbonFluxData` with all Fortran pointer fields translated to Julia typed arrays
+- **`soil_bgc_carbon_flux_init!`**: Allocates all fields (environmental scalars, HR, decomp cascade, matrix-CN)
+- **`soil_bgc_carbon_flux_set_values!`**: Sets flux values for masked columns
+- **`soil_bgc_carbon_flux_init_cold!`**: Cold-start initialization for special landunit columns
+- **`soil_bgc_carbon_flux_summary!`**: Vertically integrates HR and decomp cascade fluxes, computes total HR by pool type (SOM, litter, CWD, microbial)
+- **`soil_bgc_carbon_flux_init_history!`** / **`soil_bgc_carbon_flux_restart!`**: Stubs (correct for Julia port)
+- **Tests**: 10 test sets covering construction, init, set_values, init_cold, summary integration, stubs, mutability, and re-initialization
+
+The only omitted section is the MIMICS-specific `ligninNratio` calculation in `Summary`, which depends on unported infrastructure (`decomp_method`, `p2c`, `pftcon`, `CNParamsShareInst`). All 5611 tests pass.
