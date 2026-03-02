@@ -1,1 +1,9 @@
-No further action needed — the port is complete and all tests pass.
+The N leaching port is already complete:
+
+- **Source**: `src/biogeochem/n_leaching.jl` — fully ported from `SoilBiogeochemNLeachingMod.F90`
+- **Tests**: `test/test_n_leaching.jl` — 10 test cases covering both branches, edge cases, and masking
+- **Integration**: Already included in `src/CLM.jl` (line 108) and `test/runtests.jl` (line 84)
+- **All 10,719 tests pass**
+- **Already committed**: `b28eacb Port N leaching from Fortran to Julia`
+
+The port translates all 3 Fortran entities (`params_type`, `readParams`, `SoilBiogeochemNLeaching`) with faithful logic including the `use_nitrif_denitrif` branching, dissolved N concentration calculations, leaching/runoff rate limiting, and correct Fortran→Julia `zisoi` index offset handling.
