@@ -78,4 +78,5 @@ using CLM
     include("test_fun.jl")
     include("test_gap_mortality.jl")
     include("test_decomp_bgc.jl")
+    include("test_decomp_mimics.jl")
 end
