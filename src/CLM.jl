@@ -80,5 +80,6 @@ include("biogeophys/soil_water_movement.jl")
 include("biogeophys/soil_hydrology.jl")
 include("biogeophys/snow_hydrology.jl")
 include("biogeophys/hydrology_no_drainage.jl")
+include("biogeophys/hydrology_drainage.jl")
 
 end # module CLM

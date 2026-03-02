@@ -60,4 +60,5 @@ using CLM
     include("test_soil_hydrology_mod.jl")
     include("test_snow_hydrology.jl")
     include("test_hydrology_no_drainage.jl")
+    include("test_hydrology_drainage.jl")
 end
