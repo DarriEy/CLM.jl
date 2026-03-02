@@ -1,16 +1,24 @@
-The Phenology module has already been fully ported and committed. Here's the summary:
+The CN allocation module has already been fully ported and committed (commit `ee971a7`). Here's a summary of what's in place:
 
-- **Julia source**: `src/biogeochem/phenology.jl` (1612 lines) - already exists with all subroutines
-- **Include in CLM.jl**: line 98 - already present
-- **Test file**: `test/test_phenology.jl` - already exists and included in runtests.jl at line 74
-- **Tests**: All 8970 tests pass
-- **Git commit**: `f795e6d` "Port Phenology from Fortran to Julia" - already committed
+**Source:** `src/biogeochem/allocation.jl` — ported from `CNAllocationMod.F90`
 
-The port covers all 26 Fortran subroutines/functions:
-- Structs: `PhenologyParams`, `PhenologyState`, `PftConPhenology`
-- Init: `cn_phenology_set_params!`, `cn_phenology_set_nml!`, `cn_phenology_init!`, `crop_phenology_init!`
-- Phase 1: `cn_phenology_climate!`, `cn_evergreen_phenology!`, `cn_season_decid_phenology!`, `cn_stress_decid_phenology!`, `crop_phenology!`
-- Phase 2: `cn_onset_growth!`, `cn_offset_litterfall!`, `cn_background_litterfall!`, `cn_livewood_turnover!`, `cn_crop_harvest_to_product_pools!`, `cn_litter_to_column!`
-- Helpers: `seasonal_critical_daylength`, `seasonal_decid_onset`, `get_swindow`, `was_sown_in_this_window`, `plant_crop!`, `vernalization!`, `days_past_planting`, `crop_phase!`
+**Structs:**
+- `AllocationParams` — module-level parameters (`dayscrecover`)
+- `PftConAllocation` — PFT-level parameters used by allocation routines
 
-No further work is needed - this task is complete.
+**Functions (all 3 Fortran subroutines translated):**
+1. `calc_gpp_mr_availc!` — calculates GPP, maintenance respiration, available C, curmr/xsmr partitioning, and xsmrpool deficit recovery
+2. `calc_crop_allocation_fractions!` — crop allocation fractions to leaf/stem/root/repr following AgroIBIS, using `crop_phase!` from phenology
+3. `calc_allometry!` — C/N allometry terms based on allocation fractions (woody, crop, grass branches)
+
+**Tests:** `test/test_allocation.jl` — 54 tests covering:
+- Struct defaults
+- Woody patch GPP/MR/availc calculation
+- MR exceeds GPP scenario
+- xsmrpool deficit recovery
+- Allometry for woody, grass, and dynamic stem_leaf patches
+- `use_fun` mode (g1a=0)
+- Crop allocation fractions (not-live, planted, leaf-emerge phases)
+- Mask respecting (skipped patches)
+
+All **9024 tests pass** across the full suite.
