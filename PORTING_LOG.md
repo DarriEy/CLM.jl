@@ -77,3 +77,4 @@
 | FUN model | 8 | ✓ PASSED | 2 | — |
 | Gap mortality | 8 | ✓ PASSED | 2 | — |
 | Decomp BGC | 8 | ✓ PASSED | 2 | — |
+| Decomp MIMICS | 8 | ✓ PASSED | 2 | — |
