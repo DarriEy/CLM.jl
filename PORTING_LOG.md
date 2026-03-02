@@ -65,3 +65,4 @@
 | Photosynthesis | 7 | ✓ PASSED | 2 | — |
 | Canopy fluxes | 7 | ✓ PASSED | 2 | — |
 | Canopy hydrology | 7 | ✓ PASSED | 2 | — |
+| Bare ground fluxes | 7 | ✓ PASSED | 2 | — |

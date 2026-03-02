@@ -1,20 +1,7 @@
-The bare ground fluxes port is already complete and committed (`f6061ab`). Here's the summary:
+The `SoilFluxesMod.F90` port is already complete:
 
-**Port Status: Complete**
-
-- **Julia source**: `src/biogeophys/bareground_fluxes.jl` (337 lines)
-- **Test file**: `test/test_bareground_fluxes.jl` (321 lines)
-- **Module include**: Already in `src/CLM.jl` (line 89)
-- **Test include**: Already in `test/runtests.jl` (line 69)
-- **All tests pass**: 8365/8365
-
-**What was ported:**
-1. `BareGroundFluxesParamsData` struct (a_coef, a_exp, wind_min)
-2. `bareground_fluxes_read_params!` — replaces Fortran `readParams`
-3. `bareground_fluxes!` — main subroutine with all 4 phases:
-   - Phase 1: Initialization (btran, t_veg, stomatal resistance, rootr, rresis)
-   - Phase 2: Initial state and Monin-Obukhov setup
-   - Phase 3: Stability iteration (3 iterations with ZengWang2007/Meier2022 z0 methods)
-   - Phase 4: Final fluxes and 2m diagnostics (aerodynamic resistances, sensible/latent heat, momentum, evaporation, t_ref2m, q_ref2m, rh_ref2m)
-
-**One stub**: Human heat stress indices (lines 482-518 in Fortran) are stubbed out because `HumanIndexMod` is not yet ported. This will be filled in when that module is ported.
+- **`src/biogeophys/soil_fluxes.jl`** — Full port of the `SoilFluxes` subroutine (425 lines), covering all 9 sections from the Fortran source
+- **`test/test_soil_fluxes.jl`** — 4 test sets: smoke test (non-urban), empty masks, dew formation (sub-freezing), and snow layers
+- **All 8412 tests pass**
+- **Already committed** as `9f2dec3 Port Soil fluxes from Fortran to Julia`
+- **Already included** in `src/CLM.jl` (line 90) and `test/runtests.jl` (line 70)
