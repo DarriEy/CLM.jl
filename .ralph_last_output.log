@@ -1,17 +1,8 @@
-The Aerosol module port is already complete. Here's a summary:
+The surface humidity module is already fully committed (commit `d410c32`). The git status shows only unrelated files as modified (`.ralph_last_output.log`, `.ralph_state`, `PORTING_LOG.md`).
 
-**`src/biogeophys/aerosol.jl`** — Ported from `AerosolMod.F90` (803 lines Fortran → 638 lines Julia)
+**Summary**: The port of `SurfaceHumidityMod.F90` to `surface_humidity.jl` is complete:
 
-### What was ported:
-- **`AerosolData`** struct — All 44 fields (mass arrays, concentrations, deposition fluxes)
-- **`aerosol_init!`** — Allocation with NaN initialization (from `InitAllocate`)
-- **`aerosol_clean!`** — Deallocation
-- **`aerosol_init_cold!`** — Cold-start zeroing (from `InitCold`)
-- **`aerosol_reset!`** / **`aerosol_reset_filter!`** — Per-column and mask-based reset (from `Reset`/`ResetFilter`)
-- **`aerosol_masses!`** — Column-integrated masses and concentrations (from `AerosolMasses`)
-- **`aerosol_fluxes!`** — Deposition fluxes from atmosphere into snow (from `AerosolFluxes`)
-- **`aerosol_restart!`** — Restart with derived concentration computation (from `Restart`)
-- **`aerosol_init_history!`** — History registration stub (from `InitHistory`)
-
-### Tests: 
-All **6936 tests pass**, including comprehensive aerosol tests covering struct construction, allocation, cold init, reset, masses computation, deposition fluxes, snicar_use_aerosol=false, restart concentrations, and stubs.
+- **Source**: `src/biogeophys/surface_humidity.jl` — `calculate_surface_humidity!` function (193 lines)
+- **Tests**: `test/test_surface_humidity.jl` — 10 test cases covering all column types and edge cases
+- **Includes**: Already in `src/CLM.jl` and `test/runtests.jl`
+- **All 6978 tests pass**
