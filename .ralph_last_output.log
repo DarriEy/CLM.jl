@@ -1,19 +1,16 @@
-All 6,415 tests pass. The `DaylengthMod.F90` → `daylength.jl` port is already complete:
+The surface albedo module has already been fully ported and committed. Here's the summary:
 
-**Source**: `src/biogeophys/daylength.jl` — already included in `src/CLM.jl`  
-**Tests**: `test/test_daylength.jl` — already included in `test/runtests.jl`
+**Already completed (commit `dfb1e7c`):**
 
-**Ported functions** (all 4 from the Fortran module):
-| Fortran | Julia |
-|---------|-------|
-| `daylength(lat, decl)` (elemental) | `daylength(lat, decl)` |
-| `ComputeMaxDaylength(bounds, lat, obliquity, max_daylength)` | `compute_max_daylength!(lat, obliquity, max_daylength, bounds)` |
-| `InitDaylength(bounds, declin, declinm1, obliquity)` | `init_daylength!(grc, declin, declinm1, obliquity, bounds)` |
-| `UpdateDaylength(bounds, declin, obliquity)` | `update_daylength!(grc, declin, obliquity, is_first_step, bounds)` |
+- **`src/biogeophys/surface_albedo.jl`** — Full port of `SurfaceAlbedoMod.F90` including:
+  - `SurfaceAlbedoConstants` struct (module-level data: `albsat`, `albdry`, `isoicol`, `alblakwi`, `snowveg_affects_radiation`)
+  - `surface_albedo_init_time_const!` — soil color initialization (8 and 20 color classes)
+  - `soil_albedo!` — ground surface albedo for soil, land ice, unfrozen/frozen lake/wetland
+  - `two_stream!` — two-stream canopy radiative transfer (Dickinson/Sellers), with single-layer and multi-layer canopy support, SF-only mode
+  - `surface_albedo!` — top-level driver (cosine zenith, initialization, soil albedo, SNICAR stub, ground albedo weighting, canopy layering, vegetation filter, two-stream, non-veg patches, history output)
 
-The port correctly:
-- Preserves Fortran variable names (`my_lat`, `temp`, `max_decl`, etc.)
-- Returns `NaN` for invalid inputs (matching Fortran's `shr_infnan_nan`)
-- Uses local constants (`SECS_PER_RADIAN`, `LAT_EPSILON`, `POLE`, `OFFSET_POLE`)
-- Replaces the global `grc` access and `is_first_step_of_this_run_segment()` call with explicit parameters
-- Keeps all discontinuities (`min`/`max` clamping) identical to Fortran
+- **`test/test_surface_albedo_mod.jl`** — Tests covering constants, init, soil albedo (soil/ice), two-stream (single layer, SF-only), energy conservation, and global instance
+
+- Already included in `src/CLM.jl` and `test/runtests.jl`
+
+**All 6488 tests pass.**
