@@ -283,4 +283,166 @@
         @test CLM.TOLERANCE_SOILHYDRO == 1.0e-12
     end
 
+    # ------------------------------------------------------------------
+    # 10. perched_lateral_flow! (non-hillslope path)
+    # ------------------------------------------------------------------
+    @testset "perched_lateral_flow! non-hillslope" begin
+        nc = 2
+        nl = 1
+        ng = 1
+
+        sh = CLM.SoilHydrologyData()
+        CLM.soilhydrology_init!(sh, nc)
+        sh.frost_table_col .= 0.5   # frost table at 0.5 m
+        sh.zwt_col .= 1.0           # water table below frost table
+        sh.zwt_perched_col .= 0.3   # perched wt above frost table
+
+        ss = CLM.SoilStateData()
+        ss.watsat_col = fill(0.4, nc, nlevgrnd)
+        ss.bsw_col = fill(5.0, nc, nlevgrnd)
+        ss.hksat_col = fill(0.01, nc, nlevgrnd)
+        ss.sucsat_col = fill(100.0, nc, nlevgrnd)
+        ss.eff_porosity_col = fill(0.35, nc, nlevgrnd)
+
+        ws = CLM.WaterStateData()
+        CLM.waterstate_init!(ws, nc, nc, nl, ng)
+        ws.h2osoi_liq_col = fill(10.0, nc, nlevsoi)
+        ws.h2osoi_ice_col = fill(0.0, nc, nlevsoi)
+        ws.stream_water_volume_lun = fill(0.0, nl)
+
+        wfb = CLM.WaterFluxBulkData()
+        CLM.waterfluxbulk_init!(wfb, nc, nc, nl, ng)
+
+        col = CLM.ColumnData()
+        CLM.column_init!(col, nc)
+        col.dz = fill(0.1, nc, size(col.dz, 2))
+        col.z = zeros(nc, size(col.z, 2))
+        col.zi = zeros(nc, size(col.zi, 2))
+        for j in 1:size(col.z, 2)
+            col.z[:, j] .= 0.05 + (j - 1) * 0.1
+        end
+        for j in 1:size(col.zi, 2)
+            col.zi[:, j] .= j * 0.1
+        end
+        col.nbedrock .= nlevsoi
+        col.landunit .= 1
+        col.gridcell .= 1
+        col.is_hillslope_column .= false
+        col.active .= true
+        col.cold .= CLM.ISPVAL
+        col.hill_slope .= 0.1
+        col.hill_elev .= 10.0
+        col.hill_distance .= 100.0
+        col.hill_width .= 50.0
+        col.hill_area .= 5000.0
+        col.topo_slope .= 5.0
+
+        lun = CLM.LandunitData()
+        CLM.landunit_init!(lun, nl)
+        lun.stream_channel_length .= 100.0
+        lun.stream_channel_width .= 5.0
+        lun.stream_channel_depth .= 1.0
+
+        tdepth = fill(0.0, ng)
+        tdepthmax = fill(1.0, ng)
+
+        mask = trues(nc)
+
+        CLM.perched_lateral_flow!(sh, ss, ws, wfb,
+            col, lun, tdepth, tdepthmax,
+            mask, 1:nc, nlevsoi, 1800.0)
+
+        # Since frost_table > zwt_perched and non-hillslope, drainage should be computed
+        for c in 1:nc
+            @test !isnan(wfb.wf.qflx_drain_perched_col[c])
+            @test isfinite(wfb.wf.qflx_drain_perched_col[c])
+        end
+    end
+
+    # ------------------------------------------------------------------
+    # 11. subsurface_lateral_flow! (non-hillslope path)
+    # ------------------------------------------------------------------
+    @testset "subsurface_lateral_flow! non-hillslope" begin
+        nc = 2
+        nl = 1
+        ng = 1
+
+        sh = CLM.SoilHydrologyData()
+        CLM.soilhydrology_init!(sh, nc)
+        sh.zwt_col .= 0.5           # water table in middle
+        sh.frost_table_col .= 1.0   # frost table below wt
+
+        ss = CLM.SoilStateData()
+        ss.watsat_col = fill(0.4, nc, nlevgrnd)
+        ss.bsw_col = fill(5.0, nc, nlevgrnd)
+        ss.hksat_col = fill(0.01, nc, nlevgrnd)
+        ss.sucsat_col = fill(100.0, nc, nlevgrnd)
+        ss.eff_porosity_col = fill(0.35, nc, nlevgrnd)
+        ss.hk_l_col = fill(0.005, nc, nlevgrnd)
+
+        ws = CLM.WaterStateData()
+        CLM.waterstate_init!(ws, nc, nc, nl, ng)
+        ws.h2osoi_liq_col = fill(10.0, nc, nlevsoi)
+        ws.h2osoi_ice_col = fill(0.0, nc, nlevsoi)
+        ws.h2osfc_col .= 0.0
+        ws.stream_water_volume_lun = fill(0.0, nl)
+
+        wfb = CLM.WaterFluxBulkData()
+        CLM.waterfluxbulk_init!(wfb, nc, nc, nl, ng)
+        wfb.wf.qflx_snwcp_liq_col .= 0.0
+
+        col = CLM.ColumnData()
+        CLM.column_init!(col, nc)
+        col.dz = fill(0.1, nc, size(col.dz, 2))
+        col.z = zeros(nc, size(col.z, 2))
+        col.zi = zeros(nc, size(col.zi, 2))
+        for j in 1:size(col.z, 2)
+            col.z[:, j] .= 0.05 + (j - 1) * 0.1
+        end
+        for j in 1:size(col.zi, 2)
+            col.zi[:, j] .= j * 0.1
+        end
+        col.nbedrock .= nlevsoi
+        col.itype .= 1
+        col.landunit .= 1
+        col.gridcell .= 1
+        col.is_hillslope_column .= false
+        col.active .= true
+        col.cold .= CLM.ISPVAL
+        col.colu .= CLM.ISPVAL
+        col.hill_slope .= 0.1
+        col.hill_elev .= 10.0
+        col.hill_distance .= 100.0
+        col.hill_width .= 50.0
+        col.hill_area .= 5000.0
+        col.topo_slope .= 5.0
+        col.wtgcell .= 0.5
+
+        lun = CLM.LandunitData()
+        CLM.landunit_init!(lun, nl)
+        lun.stream_channel_length .= 100.0
+        lun.stream_channel_width .= 5.0
+        lun.stream_channel_depth .= 1.0
+        lun.stream_channel_number .= 1.0
+        lun.urbpoi .= false
+
+        grc_area = fill(100.0, ng)
+        tdepth = fill(0.0, ng)
+        tdepthmax = fill(1.0, ng)
+
+        mask_hydro = trues(nc)
+        mask_urban = falses(nc)
+
+        CLM.subsurface_lateral_flow!(sh, ss, ws, wfb,
+            col, lun, tdepth, tdepthmax, grc_area,
+            mask_hydro, mask_urban, 1:nc, nlevsoi, 1800.0)
+
+        # Non-hillslope with zwt <= zi[nbedrock] should produce baseflow
+        for c in 1:nc
+            @test isfinite(wfb.wf.qflx_drain_col[c])
+            @test isfinite(wfb.wf.qflx_latflow_out_col[c])
+            @test wfb.wf.qflx_latflow_out_col[c] >= 0.0
+        end
+    end
+
 end

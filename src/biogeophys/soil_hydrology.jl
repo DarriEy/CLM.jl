@@ -1538,3 +1538,722 @@ function withdraw_groundwater_irrigation!(
 
     return nothing
 end
+
+# =========================================================================
+# PerchedLateralFlow
+# =========================================================================
+
+"""
+    perched_lateral_flow!(soilhydrology, soilstate, waterstatebulk_ws,
+                           waterfluxbulk, col_data, lun_data,
+                           tdepth_grc, tdepthmax_grc,
+                           mask_hydrology, bounds, nlevsoi, dtime;
+                           use_hillslope_routing=false)
+
+Calculate subsurface drainage from perched saturated zone.
+
+Ported from `PerchedLateralFlow` in `SoilHydrologyMod.F90`.
+"""
+function perched_lateral_flow!(
+    soilhydrology::SoilHydrologyData,
+    soilstate::SoilStateData,
+    waterstatebulk_ws::WaterStateData,
+    waterfluxbulk::WaterFluxBulkData,
+    col_data::ColumnData,
+    lun_data::LandunitData,
+    tdepth_grc::Vector{Float64},
+    tdepthmax_grc::Vector{Float64},
+    mask_hydrology::BitVector,
+    bounds::UnitRange{Int},
+    nlevsoi::Int,
+    dtime::Float64;
+    use_hillslope_routing::Bool = false
+)
+    wf = waterfluxbulk.wf
+    params = soilhydrology_params
+
+    h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
+    h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
+    stream_water_volume = waterstatebulk_ws.stream_water_volume_lun
+
+    bsw    = soilstate.bsw_col
+    hksat  = soilstate.hksat_col
+    sucsat = soilstate.sucsat_col
+    watsat = soilstate.watsat_col
+
+    frost_table  = soilhydrology.frost_table_col
+    zwt          = soilhydrology.zwt_col
+    zwt_perched  = soilhydrology.zwt_perched_col
+
+    qflx_drain_perched = wf.qflx_drain_perched_col
+
+    col_dz          = col_data.dz
+    col_z           = col_data.z
+    col_zi          = col_data.zi
+    col_nbedrock    = col_data.nbedrock
+    col_landunit    = col_data.landunit
+    col_gridcell    = col_data.gridcell
+    col_is_hillslope = col_data.is_hillslope_column
+    col_active      = col_data.active
+    col_cold        = col_data.cold
+    col_hill_slope  = col_data.hill_slope
+    col_hill_elev   = col_data.hill_elev
+    col_hill_distance = col_data.hill_distance
+    col_hill_width  = col_data.hill_width
+    col_hill_area   = col_data.hill_area
+    col_topo_slope  = col_data.topo_slope
+
+    lun_stream_channel_length = lun_data.stream_channel_length
+    lun_stream_channel_width  = lun_data.stream_channel_width
+    lun_stream_channel_depth  = lun_data.stream_channel_depth
+
+    k_anisotropic = 1.0
+
+    nb = last(bounds)
+
+    # Local arrays
+    k_frost_arr = Vector{Int}(undef, nb)
+    k_perch_arr = Vector{Int}(undef, nb)
+    qflx_drain_perched_vol = Vector{Float64}(undef, nb)
+    qflx_drain_perched_out = Vector{Float64}(undef, nb)
+
+    # ---- Locate frost table and perched water table layers ----
+    for c in bounds
+        mask_hydrology[c] || continue
+        k_frost_arr[c] = col_nbedrock[c]
+        k_perch_arr[c] = col_nbedrock[c]
+
+        for k in 1:col_nbedrock[c]
+            # Fortran zi(c,0) = 0.0 (ground surface); handle k-1=0 case
+            zi_km1 = k > 1 ? col_zi[c, k-1] : 0.0
+            if frost_table[c] >= zi_km1 && frost_table[c] < col_zi[c, k]
+                k_frost_arr[c] = k
+                break
+            end
+        end
+
+        for k in 1:col_nbedrock[c]
+            zi_km1 = k > 1 ? col_zi[c, k-1] : 0.0
+            if zwt_perched[c] >= zi_km1 && zwt_perched[c] < col_zi[c, k]
+                k_perch_arr[c] = k
+                break
+            end
+        end
+    end
+
+    # ---- Compute drainage from perched saturated region ----
+    for c in bounds
+        mask_hydrology[c] || continue
+        l = col_landunit[c]
+        g = col_gridcell[c]
+        qflx_drain_perched[c]     = 0.0
+        qflx_drain_perched_out[c] = 0.0
+        qflx_drain_perched_vol[c] = 0.0
+
+        if frost_table[c] > zwt_perched[c]
+            # Hillslope columns
+            if col_is_hillslope[c] && col_active[c]
+                # Calculate head gradient
+                if HEAD_GRADIENT_METHOD[] == HEAD_GRADIENT_KINEMATIC
+                    head_gradient = col_hill_slope[c]
+                elseif HEAD_GRADIENT_METHOD[] == HEAD_GRADIENT_DARCY
+                    if col_cold[c] != ISPVAL
+                        head_gradient = (col_hill_elev[c] - zwt_perched[c]) -
+                            (col_hill_elev[col_cold[c]] - zwt_perched[col_cold[c]])
+                        head_gradient = head_gradient /
+                            (col_hill_distance[c] - col_hill_distance[col_cold[c]])
+                    else
+                        if use_hillslope_routing
+                            stream_water_depth = stream_water_volume[l] /
+                                lun_stream_channel_length[l] / lun_stream_channel_width[l]
+                            stream_channel_depth = lun_stream_channel_depth[l]
+                        else
+                            stream_water_depth = tdepth_grc[g]
+                            stream_channel_depth = tdepthmax_grc[g]
+                        end
+
+                        head_gradient = (col_hill_elev[c] - zwt_perched[c]) -
+                            max(min(stream_water_depth - stream_channel_depth, 0.0),
+                                col_hill_elev[c] - frost_table[c])
+                        head_gradient = head_gradient / col_hill_distance[c]
+
+                        if stream_water_depth <= 0.0
+                            head_gradient = max(head_gradient, 0.0)
+                        end
+                    end
+                else
+                    error("head_gradient_method must be kinematic or darcy")
+                end
+
+                # Determine source and destination columns
+                if head_gradient >= 0.0
+                    c_src = c
+                    c_dst = col_cold[c]
+                else
+                    c_src = col_cold[c]
+                    c_dst = c
+                end
+
+                # Calculate transmissivity of source column
+                transmis = 0.0
+
+                if TRANSMISSIVITY_METHOD[] == TRANSMISSIVITY_LAYERSUM
+                    if HEAD_GRADIENT_METHOD[] == HEAD_GRADIENT_KINEMATIC
+                        if k_perch_arr[c_src] < k_frost_arr[c_src]
+                            for k in k_perch_arr[c_src]:(k_frost_arr[c_src]-1)
+                                if k == k_perch_arr[c_src]
+                                    transmis += 1.0e-3 * hksat[c_src, k] *
+                                        (col_zi[c_src, k] - zwt_perched[c_src])
+                                else
+                                    transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k]
+                                end
+                            end
+                        end
+                    elseif HEAD_GRADIENT_METHOD[] == HEAD_GRADIENT_DARCY
+                        if c_src == ISPVAL
+                            transmis = 1.0e-3 * hksat[c, k_perch_arr[c_dst]] * stream_water_depth
+                        else
+                            if k_perch_arr[c_src] < k_frost_arr[c_src]
+                                for k in k_perch_arr[c_src]:(k_frost_arr[c_src]-1)
+                                    if k == k_perch_arr[c_src]
+                                        transmis += 1.0e-3 * hksat[c_src, k] *
+                                            (col_zi[c_src, k] - zwt_perched[c_src])
+                                    else
+                                        if c_dst == ISPVAL
+                                            if (col_hill_elev[c_src] - col_z[c_src, k]) > (-stream_channel_depth)
+                                                transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k]
+                                            end
+                                        else
+                                            if (col_hill_elev[c_src] - col_z[c_src, k]) >
+                                                    (col_hill_elev[c_dst] - zwt_perched[c_dst])
+                                                transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k]
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                elseif TRANSMISSIVITY_METHOD[] == TRANSMISSIVITY_UNIFORM
+                    transmis = 1.0e-3 * hksat[c_src, k_perch_arr[c_src]] *
+                        (col_zi[c_src, k_frost_arr[c_src]] - zwt_perched[c_src])
+                end
+
+                transmis = k_anisotropic * transmis
+
+                qflx_drain_perched_vol[c] = transmis * col_hill_width[c] * head_gradient
+                qflx_drain_perched_out[c] = 1.0e3 * qflx_drain_perched_vol[c] / col_hill_area[c]
+
+            else
+                # Non-hillslope columns
+                q_perch_max = params.perched_baseflow_scalar *
+                    sin(col_topo_slope[c] * (RPI / 180.0))
+
+                wtsub = 0.0
+                q_perch = 0.0
+                for k in k_perch_arr[c]:(k_frost_arr[c]-1)
+                    q_perch += hksat[c, k] * col_dz[c, k]
+                    wtsub += col_dz[c, k]
+                end
+                if wtsub > 0.0
+                    q_perch = q_perch / wtsub
+                end
+
+                qflx_drain_perched_out[c] = q_perch_max * q_perch *
+                    (frost_table[c] - zwt_perched[c])
+            end
+        end
+    end
+
+    # ---- Compute net drainage from perched saturated region ----
+    for c in bounds
+        mask_hydrology[c] || continue
+        qflx_drain_perched[c] += qflx_drain_perched_out[c]
+        if col_is_hillslope[c] && col_active[c]
+            if col_cold[c] != ISPVAL
+                qflx_drain_perched[col_cold[c]] -= 1.0e3 *
+                    qflx_drain_perched_vol[c] / col_hill_area[col_cold[c]]
+            end
+        end
+    end
+
+    # ---- Remove drainage from soil moisture storage ----
+    for c in bounds
+        mask_hydrology[c] || continue
+
+        drainage_tot = qflx_drain_perched[c] * dtime
+        for k in k_perch_arr[c]:(k_frost_arr[c]-1)
+            s_y = watsat[c, k] *
+                (1.0 - (1.0 + 1.0e3 * zwt_perched[c] / sucsat[c, k])^(-1.0 / bsw[c, k]))
+            s_y = max(s_y, params.aq_sp_yield_min)
+
+            if k == k_perch_arr[c]
+                drainage_layer = min(drainage_tot, s_y * (col_zi[c, k] - zwt_perched[c]) * 1.0e3)
+            else
+                drainage_layer = min(drainage_tot, s_y * col_dz[c, k] * 1.0e3)
+            end
+
+            drainage_layer = max(drainage_layer, 0.0)
+            drainage_tot -= drainage_layer
+            h2osoi_liq[c, k] -= drainage_layer
+        end
+
+        qflx_drain_perched[c] -= drainage_tot / dtime
+    end
+
+    return nothing
+end
+
+# =========================================================================
+# SubsurfaceLateralFlow
+# =========================================================================
+
+"""
+    subsurface_lateral_flow!(soilhydrology, soilstate, waterstatebulk_ws,
+                              waterfluxbulk, col_data, lun_data,
+                              tdepth_grc, tdepthmax_grc, grc_area,
+                              mask_hydrology, mask_urban, bounds,
+                              nlevsoi, dtime;
+                              use_hillslope_routing=false,
+                              nhillslope=0)
+
+Calculate subsurface lateral flow from saturated zone.
+
+Ported from `SubsurfaceLateralFlow` in `SoilHydrologyMod.F90`.
+"""
+function subsurface_lateral_flow!(
+    soilhydrology::SoilHydrologyData,
+    soilstate::SoilStateData,
+    waterstatebulk_ws::WaterStateData,
+    waterfluxbulk::WaterFluxBulkData,
+    col_data::ColumnData,
+    lun_data::LandunitData,
+    tdepth_grc::Vector{Float64},
+    tdepthmax_grc::Vector{Float64},
+    grc_area::Vector{Float64},
+    mask_hydrology::BitVector,
+    mask_urban::BitVector,
+    bounds::UnitRange{Int},
+    nlevsoi::Int,
+    dtime::Float64;
+    use_hillslope_routing::Bool = false,
+    nhillslope::Int = 0
+)
+    wf = waterfluxbulk.wf
+    params = soilhydrology_params
+
+    h2osfc     = waterstatebulk_ws.h2osfc_col
+    h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
+    h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
+    stream_water_volume = waterstatebulk_ws.stream_water_volume_lun
+
+    bsw          = soilstate.bsw_col
+    hksat        = soilstate.hksat_col
+    sucsat       = soilstate.sucsat_col
+    watsat       = soilstate.watsat_col
+    eff_porosity = soilstate.eff_porosity_col
+    hk_l         = soilstate.hk_l_col
+
+    icefrac      = soilhydrology.icefrac_col
+    frost_table  = soilhydrology.frost_table_col
+    zwt          = soilhydrology.zwt_col
+
+    qflx_latflow_out   = wf.qflx_latflow_out_col
+    qflx_latflow_in    = wf.qflx_latflow_in_col
+    volumetric_discharge = wf.volumetric_discharge_col
+    qflx_snwcp_liq     = wf.qflx_snwcp_liq_col
+    qflx_ice_runoff_xs = wf.qflx_ice_runoff_xs_col
+    qflx_drain         = wf.qflx_drain_col
+    qflx_qrgwl         = wf.qflx_qrgwl_col
+    qflx_rsub_sat      = wf.qflx_rsub_sat_col
+
+    col_dz           = col_data.dz
+    col_z            = col_data.z
+    col_zi           = col_data.zi
+    col_itype        = col_data.itype
+    col_nbedrock     = col_data.nbedrock
+    col_landunit     = col_data.landunit
+    col_gridcell     = col_data.gridcell
+    col_is_hillslope = col_data.is_hillslope_column
+    col_active       = col_data.active
+    col_cold         = col_data.cold
+    col_colu         = col_data.colu
+    col_hill_slope   = col_data.hill_slope
+    col_hill_elev    = col_data.hill_elev
+    col_hill_distance = col_data.hill_distance
+    col_hill_width   = col_data.hill_width
+    col_hill_area    = col_data.hill_area
+    col_topo_slope   = col_data.topo_slope
+    col_wtgcell      = col_data.wtgcell
+
+    lun_stream_channel_length = lun_data.stream_channel_length
+    lun_stream_channel_width  = lun_data.stream_channel_width
+    lun_stream_channel_depth  = lun_data.stream_channel_depth
+    lun_stream_channel_number = lun_data.stream_channel_number
+    lun_urbpoi = lun_data.urbpoi
+
+    k_anisotropic = 1.0
+
+    nb = last(bounds)
+
+    # Local arrays
+    jwt      = Vector{Int}(undef, nb)
+    drainage_arr = Vector{Float64}(undef, nb)
+    xsi_arr  = Vector{Float64}(undef, nb)
+    xs1_arr  = Vector{Float64}(undef, nb)
+    xs_arr   = Vector{Float64}(undef, nb)
+    ice_imped_col_arr = Vector{Float64}(undef, nb)
+    ice_imped_arr = Matrix{Float64}(undef, nb, nlevsoi)
+    qflx_latflow_out_vol = Vector{Float64}(undef, nb)
+    qflx_net_latflow     = Vector{Float64}(undef, nb)
+
+    dzmm = Matrix{Float64}(undef, nb, nlevsoi)
+
+    # ---- Convert layer thicknesses and compute icefrac/impedance ----
+    for j in 1:nlevsoi
+        for c in bounds
+            mask_hydrology[c] || continue
+            dzmm[c, j] = col_dz[c, j] * 1.0e3
+
+            vol_ice_val = min(watsat[c, j], h2osoi_ice[c, j] / (col_dz[c, j] * DENICE))
+            icefrac[c, j] = min(1.0, vol_ice_val / watsat[c, j])
+            ice_imped_arr[c, j] = 10.0^(-params.e_ice * icefrac[c, j])
+        end
+    end
+
+    # ---- Initial set ----
+    for c in bounds
+        mask_hydrology[c] || continue
+        qflx_drain[c]       = 0.0
+        qflx_rsub_sat[c]    = 0.0
+        drainage_arr[c]      = 0.0
+        qflx_latflow_in[c]  = 0.0
+        qflx_latflow_out[c] = 0.0
+        qflx_net_latflow[c] = 0.0
+        volumetric_discharge[c] = 0.0
+        qflx_latflow_out_vol[c] = 0.0
+    end
+
+    # ---- jwt: layer index right above water table ----
+    for c in bounds
+        mask_hydrology[c] || continue
+        jwt[c] = nlevsoi
+        for j in 1:nlevsoi
+            if zwt[c] <= col_zi[c, j]
+                jwt[c] = j - 1
+                break
+            end
+        end
+    end
+
+    # ---- Calculate column-average ice impedance factor ----
+    for c in bounds
+        mask_hydrology[c] || continue
+        dzsum = 0.0
+        icefracsum = 0.0
+        for j in max(jwt[c], 1):nlevsoi
+            dzsum += dzmm[c, j]
+            icefracsum += icefrac[c, j] * dzmm[c, j]
+        end
+        ice_imped_col_arr[c] = 10.0^(-params.e_ice * (icefracsum / dzsum))
+    end
+
+    # ---- Compute lateral flow ----
+    for c in bounds
+        mask_hydrology[c] || continue
+        l = col_landunit[c]
+        g = col_gridcell[c]
+
+        # Hillslope columns
+        if col_is_hillslope[c] && col_active[c]
+            # Head gradient method
+            if HEAD_GRADIENT_METHOD[] == HEAD_GRADIENT_KINEMATIC
+                head_gradient = col_hill_slope[c]
+            elseif HEAD_GRADIENT_METHOD[] == HEAD_GRADIENT_DARCY
+                if col_cold[c] != ISPVAL
+                    head_gradient = (col_hill_elev[c] - zwt[c]) -
+                        (col_hill_elev[col_cold[c]] - zwt[col_cold[c]])
+                    head_gradient /= (col_hill_distance[c] - col_hill_distance[col_cold[c]])
+                else
+                    if use_hillslope_routing
+                        stream_water_depth = stream_water_volume[l] /
+                            lun_stream_channel_length[l] / lun_stream_channel_width[l]
+                        stream_channel_depth = lun_stream_channel_depth[l]
+                    else
+                        stream_water_depth = tdepth_grc[g]
+                        stream_channel_depth = tdepthmax_grc[g]
+                    end
+
+                    head_gradient = (col_hill_elev[c] - zwt[c]) -
+                        min(stream_water_depth - stream_channel_depth, 0.0)
+                    head_gradient /= col_hill_distance[c]
+
+                    if stream_water_depth <= 0.0
+                        head_gradient = max(head_gradient, 0.0)
+                    end
+
+                    if head_gradient < 0.0
+                        head_gradient -= 1.0 / k_anisotropic
+                    end
+                end
+            else
+                error("head_gradient_method must be kinematic or darcy")
+            end
+
+            # Cap maximum head_gradient
+            head_gradient = min(max(head_gradient, -2.0), 2.0)
+
+            # Determine source and destination columns
+            if head_gradient >= 0.0
+                c_src = c
+                c_dst = col_cold[c]
+            else
+                c_src = col_cold[c]
+                c_dst = c
+            end
+
+            # Calculate transmissivity of source column
+            transmis = 0.0
+            if c_src != ISPVAL
+                if zwt[c_src] <= col_zi[c_src, col_nbedrock[c_src]]
+                    if TRANSMISSIVITY_METHOD[] == TRANSMISSIVITY_LAYERSUM
+                        for j in (jwt[c_src]+1):col_nbedrock[c_src]
+                            if j == jwt[c_src] + 1
+                                transmis += 1.0e-3 * ice_imped_arr[c_src, j] *
+                                    hksat[c_src, j] * (col_zi[c_src, j] - zwt[c_src])
+                            else
+                                if c_dst == ISPVAL
+                                    if (col_hill_elev[c_src] - col_z[c_src, j]) > (-stream_channel_depth)
+                                        transmis += 1.0e-3 * ice_imped_arr[c_src, j] *
+                                            hksat[c_src, j] * col_dz[c_src, j]
+                                    end
+                                else
+                                    if (col_hill_elev[c_src] - col_z[c_src, j]) >
+                                            (col_hill_elev[c_dst] - zwt[c_dst])
+                                        transmis += 1.0e-3 * ice_imped_arr[c_src, j] *
+                                            hksat[c_src, j] * col_dz[c_src, j]
+                                    end
+                                end
+                            end
+                        end
+                    elseif TRANSMISSIVITY_METHOD[] == TRANSMISSIVITY_UNIFORM
+                        transmis = 1.0e-3 * ice_imped_arr[c_src, jwt[c_src]+1] *
+                            hksat[c_src, jwt[c_src]+1] *
+                            (col_zi[c_src, col_nbedrock[c_src]] - zwt[c_src])
+                    else
+                        error("transmissivity_method must be LayerSum or Uniform")
+                    end
+                end
+            else
+                # transmissivity of losing stream
+                transmis = 1.0e-3 * ice_imped_arr[c, jwt[c]+1] *
+                    hksat[c, jwt[c]+1] * stream_water_depth
+            end
+
+            transmis = k_anisotropic * transmis
+
+            qflx_latflow_out_vol[c] = transmis * col_hill_width[c] * head_gradient
+
+            # Limit outflow by available stream channel water
+            if use_hillslope_routing && qflx_latflow_out_vol[c] < 0.0
+                available_stream_water = stream_water_volume[l] /
+                    lun_stream_channel_number[l] / nhillslope
+                if abs(qflx_latflow_out_vol[c]) * dtime > available_stream_water
+                    qflx_latflow_out_vol[c] = -available_stream_water / dtime
+                end
+            end
+
+            # volumetric_discharge from lowest column
+            if col_cold[c] == ISPVAL
+                volumetric_discharge[c] = qflx_latflow_out_vol[c] *
+                    (grc_area[g] * 1.0e6 * col_wtgcell[c] / col_hill_area[c])
+            end
+
+            # convert volumetric flow to equivalent flux
+            qflx_latflow_out[c] = 1.0e3 * qflx_latflow_out_vol[c] / col_hill_area[c]
+
+            # hilltop column has no inflow
+            if col_colu[c] == ISPVAL
+                qflx_latflow_in[c] = 0.0
+            end
+
+            # current outflow is inflow to downhill column
+            if col_cold[c] != ISPVAL
+                qflx_latflow_in[col_cold[c]] += 1.0e3 *
+                    qflx_latflow_out_vol[c] / col_hill_area[col_cold[c]]
+            end
+
+        else
+            # Non-hillslope columns: power law baseflow
+            if zwt[c] <= col_zi[c, col_nbedrock[c]]
+                qflx_latflow_out[c] = ice_imped_col_arr[c] * BASEFLOW_SCALAR[] *
+                    tan(RPI / 180.0 * col_topo_slope[c]) *
+                    (col_zi[c, col_nbedrock[c]] - zwt[c])^params.n_baseflow
+            end
+            qflx_latflow_out_vol[c] = 1.0e-3 * qflx_latflow_out[c] *
+                (grc_area[g] * 1.0e6 * col_wtgcell[c])
+            volumetric_discharge[c] = qflx_latflow_out_vol[c]
+        end
+    end
+
+    # ---- Topographic runoff: remove water via drainage ----
+    for c in bounds
+        mask_hydrology[c] || continue
+
+        qflx_net_latflow[c] = qflx_latflow_out[c] - qflx_latflow_in[c]
+
+        if zwt[c] <= col_zi[c, col_nbedrock[c]]
+            drainage_arr[c] = qflx_net_latflow[c]
+        else
+            drainage_arr[c] = 0.0
+        end
+
+        drainage_tot = -drainage_arr[c] * dtime
+
+        if drainage_tot > 0.0  # rising water table
+            for j in (jwt[c]+1):-1:1
+                if col_zi[c, j] < frost_table[c]
+                    s_y = watsat[c, j] *
+                        (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
+                    s_y = max(s_y, params.aq_sp_yield_min)
+
+                    drainage_layer = min(drainage_tot, s_y * col_dz[c, j] * 1.0e3)
+                    drainage_layer = max(drainage_layer, 0.0)
+                    h2osoi_liq[c, j] += drainage_layer
+
+                    drainage_tot -= drainage_layer
+
+                    if drainage_tot <= 0.0
+                        zwt[c] -= drainage_layer / s_y / 1000.0
+                        break
+                    else
+                        # Fortran zi(c,0) = 0.0 (ground surface); handle j-1=0 case
+                        zwt[c] = j > 1 ? col_zi[c, j-1] : 0.0
+                    end
+                end
+            end
+
+            # remove residual
+            h2osfc[c] += drainage_tot
+
+        else  # deepening water table
+            for j in (jwt[c]+1):col_nbedrock[c]
+                s_y = watsat[c, j] *
+                    (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
+                s_y = max(s_y, params.aq_sp_yield_min)
+
+                drainage_layer = max(drainage_tot, -(s_y * (col_zi[c, j] - zwt[c]) * 1.0e3))
+                drainage_layer = min(drainage_layer, 0.0)
+                h2osoi_liq[c, j] += drainage_layer
+
+                drainage_tot -= drainage_layer
+
+                if drainage_tot >= 0.0
+                    zwt[c] -= drainage_layer / s_y / 1000.0
+                    break
+                else
+                    zwt[c] = col_zi[c, j]
+                end
+            end
+
+            # remove residual
+            drainage_arr[c] += drainage_tot / dtime
+        end
+
+        zwt[c] = max(0.0, zwt[c])
+        zwt[c] = min(80.0, zwt[c])
+    end
+
+    # ---- Excessive water above saturation: redistribute upward ----
+    for j in nlevsoi:-1:2
+        for c in bounds
+            mask_hydrology[c] || continue
+            xsi_arr[c]        = max(h2osoi_liq[c, j] - eff_porosity[c, j] * dzmm[c, j], 0.0)
+            h2osoi_liq[c, j]  = min(eff_porosity[c, j] * dzmm[c, j], h2osoi_liq[c, j])
+            h2osoi_liq[c, j-1] += xsi_arr[c]
+        end
+    end
+
+    for c in bounds
+        mask_hydrology[c] || continue
+
+        xs1_arr[c] = max(max(h2osoi_liq[c, 1] - WATMIN, 0.0) -
+            max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_ice[c, 1] - WATMIN), 0.0)
+        h2osoi_liq[c, 1] -= xs1_arr[c]
+
+        l = col_landunit[c]
+        if lun_urbpoi[l]
+            qflx_rsub_sat[c] = xs1_arr[c] / dtime
+        else
+            h2osfc[c] += xs1_arr[c]
+            qflx_rsub_sat[c] = 0.0
+        end
+
+        # ice check
+        xs1_arr[c] = max(max(h2osoi_ice[c, 1], 0.0) -
+            max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1]), 0.0)
+        h2osoi_ice[c, 1] = min(max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1]),
+            h2osoi_ice[c, 1])
+        qflx_ice_runoff_xs[c] = xs1_arr[c] / dtime
+    end
+
+    # ---- Limit h2osoi_liq >= watmin ----
+    for j in 1:(nlevsoi-1)
+        for c in bounds
+            mask_hydrology[c] || continue
+            if h2osoi_liq[c, j] < WATMIN
+                xs_arr[c] = WATMIN - h2osoi_liq[c, j]
+                if j == jwt[c]
+                    zwt[c] += xs_arr[c] / eff_porosity[c, j] / 1000.0
+                end
+            else
+                xs_arr[c] = 0.0
+            end
+            h2osoi_liq[c, j]   += xs_arr[c]
+            h2osoi_liq[c, j+1] -= xs_arr[c]
+        end
+    end
+
+    # Bottom layer: get water from above
+    j = nlevsoi
+    for c in bounds
+        mask_hydrology[c] || continue
+        if h2osoi_liq[c, j] < WATMIN
+            xs_arr[c] = WATMIN - h2osoi_liq[c, j]
+            for i in (nlevsoi-1):-1:1
+                available_h2osoi_liq = max(h2osoi_liq[c, i] - WATMIN - xs_arr[c], 0.0)
+                if available_h2osoi_liq >= xs_arr[c]
+                    h2osoi_liq[c, j] += xs_arr[c]
+                    h2osoi_liq[c, i] -= xs_arr[c]
+                    xs_arr[c] = 0.0
+                    break
+                else
+                    h2osoi_liq[c, j] += available_h2osoi_liq
+                    h2osoi_liq[c, i] -= available_h2osoi_liq
+                    xs_arr[c] -= available_h2osoi_liq
+                end
+            end
+        else
+            xs_arr[c] = 0.0
+        end
+        h2osoi_liq[c, j] += xs_arr[c]
+        qflx_rsub_sat[c] -= xs_arr[c] / dtime
+    end
+
+    for c in bounds
+        mask_hydrology[c] || continue
+        qflx_drain[c] = qflx_rsub_sat[c] + drainage_arr[c]
+        qflx_qrgwl[c] = qflx_snwcp_liq[c]
+    end
+
+    # No drainage for urban columns (except pervious road)
+    for c in bounds
+        mask_urban[c] || continue
+        if col_itype[c] != ICOL_ROAD_PERV
+            qflx_drain[c] = 0.0
+            qflx_qrgwl[c] = qflx_snwcp_liq[c]
+        end
+    end
+
+    return nothing
+end
