@@ -109,5 +109,6 @@ include("biogeochem/n_leaching.jl")
 include("biogeochem/n_dynamics.jl")
 include("biogeochem/c_state_update1.jl")
 include("biogeochem/c_state_update2.jl")
+include("biogeochem/c_state_update3.jl")
 
 end # module CLM

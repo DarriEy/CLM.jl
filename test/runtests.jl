@@ -85,4 +85,5 @@ using CLM
     include("test_n_dynamics.jl")
     include("test_c_state_update1.jl")
     include("test_c_state_update2.jl")
+    include("test_c_state_update3.jl")
 end
