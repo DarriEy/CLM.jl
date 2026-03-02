@@ -44,3 +44,4 @@
 | Surface albedo | 5 | ✓ PASSED | 2 | — |
 | Urban albedo | 5 | ✓ PASSED | 2 | — |
 | Surface radiation | 5 | ✓ PASSED | 2 | — |
+| Urban radiation | 5 | ✓ PASSED | 2 | — |
