@@ -49,3 +49,4 @@
 | Aerosol | 5 | ✓ PASSED | 2 | — |
 | Surface humidity | 5 | ✓ PASSED | 2 | — |
 | Surface resistance | 5 | ✓ PASSED | 2 | — |
+| Soil moisture stress | 5 | ✓ PASSED | 2 | — |

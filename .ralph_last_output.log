@@ -1,1 +1,24 @@
-The soil moisture stress module was already ported and committed in commit `0167735`. The port is complete — all functions from `SoilMoistStressMod.F90` have been translated to Julia, the file is included in the module, tests are written and passing, and the commit has already been made.
+The Soil Temperature module has already been fully ported and committed. Here's the summary:
+
+**Already done (commit `3ab7757`):**
+
+- **Julia source**: `src/biogeophys/soil_temperature.jl` — 1722 lines, ported from `SoilTemperatureMod.F90` (2975 lines)
+- **Test file**: `test/test_soil_temperature.jl` — included in test suite
+- **CLM.jl include**: Already present at line 74
+- **All 7292 tests pass**
+
+**Fortran → Julia function mapping (all complete):**
+
+| Fortran Subroutine | Julia Function |
+|---|---|
+| `SoilTemperature` | `soil_temperature!` |
+| `SoilThermProp` | `soil_therm_prop!` |
+| `ComputeGroundHeatFluxAndDeriv` | `compute_ground_heat_flux_and_deriv!` |
+| `ComputeHeatDiffFluxAndFactor` | `compute_heat_diff_flux_and_factor!` |
+| `SetRHSVec` (+ Snow/Soil/SSW) | `set_rhs_vec!` (inlined) |
+| `SetMatrix` (+ Snow/Soil/SSW/Assemble) | `set_matrix!` (inlined) |
+| `PhaseChangeH2osfc` | `phase_change_h2osfc!` |
+| `PhaseChange_beta` | `phase_change_beta!` |
+| `BuildingHAC` | `building_hac!` |
+
+The only uncommitted changes are to `.ralph_last_output.log`, `.ralph_state`, and `PORTING_LOG.md`, which are not related to this module. No further action is needed.
