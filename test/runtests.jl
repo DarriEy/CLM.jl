@@ -83,4 +83,5 @@ using CLM
     include("test_nitrif_denitrif.jl")
     include("test_n_leaching.jl")
     include("test_n_dynamics.jl")
+    include("test_c_state_update1.jl")
 end
