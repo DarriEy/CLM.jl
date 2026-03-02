@@ -1,28 +1,19 @@
-The N state update 1 module is already fully ported and committed. Here's the summary:
+The port of `CNNStateUpdate2Mod.F90` is already complete. Here's the summary:
 
-**Status: Complete** — Commit `1e9e1f8` already contains the full port.
+**Source file**: `src/biogeochem/n_state_update2.jl` — already committed (commit `5508269`)
 
-**What was ported from `CNNStateUpdate1Mod.F90`:**
+**Three subroutines translated:**
 
-1. **`n_state_update_dyn_patch!`** — Updates decomposition N pools from dynamic landcover fluxes (`dwt_frootn_to_litr_n`, `dwt_livecrootn_to_cwdn`, `dwt_deadcrootn_to_cwdn`) and decrements `seedn_grc`.
+1. **`n_state_update2!`** — Gap-phase mortality N state update
+   - Column loop: adds `gap_mortality_n_to_litr_n_col` and `gap_mortality_n_to_cwdn_col` fluxes to `decomp_npools_vr_col`
+   - Patch loop: decrements 7 displayed pools + 6 storage + 6 transfer pools (including `retransn_patch`)
 
-2. **`n_state_update1!`** — Full prognostic N state update including:
-   - Column loop: soil decomposition input fluxes (phenology N → litter N, with FATES skip and matrix-CN branch)
-   - Patch loop: phenology transfer growth (leaf, froot, woody stem/croot, crop reproductive pools)
-   - Litterfall and retranslocation fluxes
-   - Live wood turnover with FUN `free_retransn_to_npool` logic
-   - Crop-specific paths (biofuel, removed residue, crop seed deficit)
-   - Soil mineral N uptake → npool
-   - Allocation from npool to all vegetation pools
-   - Storage → transfer pool movement
-   - All `use_matrixcn`/`use_soil_matrixcn` conditional branches
+2. **`n_state_update2h!`** — Harvest mortality N state update  
+   - Column loop: adds `harvest_n_to_litr_n_col` and `harvest_n_to_cwdn_col` fluxes
+   - Patch loop: decrements same pool categories using `hrv_*` flux fields; `deadstemn` uses `wood_harvestn_patch`
 
-**Tests (6 test sets, all passing):**
-- `n_state_update_dyn_patch!` — litter/CWD/seed pool updates
-- Non-woody, non-crop patch — npool and leafn accounting
-- Woody patch — livestemn/deadstemn turnover and alloc
-- FATES column — phenology input skipped
-- Mask filtering — no state changes when masks are off
-- Storage-to-xfer and retransn/npool accounting
+3. **`n_state_update2g!`** — Gross unrepresented landcover change N state update
+   - Column loop: adds `gru_n_to_litr_n_col` and `gru_n_to_cwdn_col` fluxes
+   - Patch loop: `deadstemn` has two decrements (`gru_deadstemn_to_atm` + `gru_wood_productn_gain`); storage/transfer pools use `_to_atm` suffix
 
-**Full test suite: 11,267 tests pass.**
+**All 11,429 tests pass**, including the N State Update 2 test suite covering gap mortality, harvest, GRU, storage/transfer pools, mask filtering, and `use_matrixcn` behavior.
