@@ -62,5 +62,6 @@ include("infrastructure/band_diagonal.jl")
 # ===========================================================================
 include("biogeophys/qsat.jl")
 include("biogeophys/daylength.jl")
+include("biogeophys/surface_albedo.jl")
 
 end # module CLM
