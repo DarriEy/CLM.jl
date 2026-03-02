@@ -1,1 +1,1 @@
-The gap mortality module is already fully ported and committed (commit `2448b75`). All 9218 tests pass. There's nothing more to do — the port is complete.
+The most recent commit `c2354d1` is already "Port Decomp BGC from Fortran to Julia" — this module has already been ported, committed, and all tests pass. There's nothing new to commit.

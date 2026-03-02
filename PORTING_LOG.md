@@ -75,3 +75,4 @@
 | Growth respiration | 8 | ✓ PASSED | 2 | — |
 | Maintenance respiration | 8 | ✓ PASSED | 2 | — |
 | FUN model | 8 | ✓ PASSED | 2 | — |
+| Gap mortality | 8 | ✓ PASSED | 2 | — |
