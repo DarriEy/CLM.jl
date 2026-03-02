@@ -65,5 +65,6 @@ include("biogeophys/daylength.jl")
 include("biogeophys/surface_albedo.jl")
 include("biogeophys/urban_albedo.jl")
 include("biogeophys/surface_radiation.jl")
+include("biogeophys/urban_radiation.jl")
 
 end # module CLM
