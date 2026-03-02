@@ -69,4 +69,5 @@ using CLM
     include("test_bareground_fluxes.jl")
     include("test_soil_fluxes.jl")
     include("test_urban_fluxes.jl")
+    include("test_luna.jl")
 end

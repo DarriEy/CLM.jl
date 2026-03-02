@@ -89,5 +89,6 @@ include("biogeophys/canopy_hydrology.jl")
 include("biogeophys/bareground_fluxes.jl")
 include("biogeophys/soil_fluxes.jl")
 include("biogeophys/urban_fluxes.jl")
+include("biogeophys/luna.jl")
 
 end # module CLM
