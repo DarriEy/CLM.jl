@@ -40,4 +40,5 @@ using CLM
     include("test_soil_bgc_nitrogen_flux.jl")
     include("test_soil_bgc_state.jl")
     include("test_crop.jl")
+    include("test_cn_shared_params.jl")
 end

@@ -47,6 +47,7 @@ include("types/soil_bgc_carbon_flux.jl")
 include("types/soil_bgc_nitrogen_flux.jl")
 include("types/soil_bgc_state.jl")
 include("types/crop.jl")
+include("types/cn_shared_params.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
