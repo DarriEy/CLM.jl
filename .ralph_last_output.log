@@ -1,16 +1,8 @@
-The surface albedo module has already been fully ported and committed. Here's the summary:
+All 6666 tests pass, and all dependent types have the required fields. The port is complete and verified:
 
-**Already completed (commit `dfb1e7c`):**
+- **Source file**: `src/biogeophys/urban_albedo.jl` — all 4 Fortran subroutines (`SnowAlbedo`, `incident_direct`, `incident_diffuse`, `net_solar`) plus the main `UrbanAlbedo` are ported
+- **Test file**: `test/test_urban_albedo.jl` — 8 test sets covering snow albedo, direct/diffuse radiation conservation, full integration (sun up/down/snow), varying H/W ratio, and energy conservation
+- **Integration**: Already included in `src/CLM.jl` and `test/runtests.jl`
+- **All 6666 tests pass**
 
-- **`src/biogeophys/surface_albedo.jl`** — Full port of `SurfaceAlbedoMod.F90` including:
-  - `SurfaceAlbedoConstants` struct (module-level data: `albsat`, `albdry`, `isoicol`, `alblakwi`, `snowveg_affects_radiation`)
-  - `surface_albedo_init_time_const!` — soil color initialization (8 and 20 color classes)
-  - `soil_albedo!` — ground surface albedo for soil, land ice, unfrozen/frozen lake/wetland
-  - `two_stream!` — two-stream canopy radiative transfer (Dickinson/Sellers), with single-layer and multi-layer canopy support, SF-only mode
-  - `surface_albedo!` — top-level driver (cosine zenith, initialization, soil albedo, SNICAR stub, ground albedo weighting, canopy layering, vegetation filter, two-stream, non-veg patches, history output)
-
-- **`test/test_surface_albedo_mod.jl`** — Tests covering constants, init, soil albedo (soil/ice), two-stream (single layer, SF-only), energy conservation, and global instance
-
-- Already included in `src/CLM.jl` and `test/runtests.jl`
-
-**All 6488 tests pass.**
+The code has already been committed (commit `50d3143`). The urban albedo port is complete.

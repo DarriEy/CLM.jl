@@ -41,3 +41,4 @@
 | Crop type | 4 | ✓ PASSED | 2 | — |
 | CN shared params | 4 | ✓ PASSED | 2 | — |
 | Day length | 5 | ✓ PASSED | 2 | — |
+| Surface albedo | 5 | ✓ PASSED | 2 | — |
