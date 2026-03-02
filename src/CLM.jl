@@ -67,5 +67,6 @@ include("biogeophys/urban_albedo.jl")
 include("biogeophys/surface_radiation.jl")
 include("biogeophys/urban_radiation.jl")
 include("biogeophys/snow_snicar.jl")
+include("biogeophys/aerosol.jl")
 
 end # module CLM
