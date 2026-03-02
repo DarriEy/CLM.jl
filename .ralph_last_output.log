@@ -1,32 +1,14 @@
-The LUNA port is already complete and committed:
+All 8780 tests pass, including the ozone tests. The ozone module has already been fully ported:
 
-- **Source**: `src/biogeophys/luna.jl` — fully ported from `LunaMod.F90`
-- **Tests**: `test/test_luna.jl` — 372 lines of tests covering all functions
-- **Commit**: `49474d3 Port LUNA from Fortran to Julia` (already on `master`)
-- **Include**: Already in `src/CLM.jl` at line 92
-- **Test suite**: All **8682 tests pass**
+- **Source**: `src/biogeophys/ozone.jl` — all subroutines translated:
+  - `OzoneData` struct (combining `ozone_base_type` + `ozone_type`)
+  - `ozone_init!` / `ozone_clean!` (Init, InitAllocate, InitHistory, InitCold)
+  - `calc_ozone_uptake!` / `calc_ozone_uptake_one_point` (CalcOzoneUptake, CalcOzoneUptakeOnePoint)
+  - `calc_ozone_stress!` dispatcher (CalcOzoneStress)
+  - `calc_ozone_stress_lombardozzi2015!` / `_one_point` (CalcOzoneStressLombardozzi2015*)
+  - `calc_ozone_stress_falk!` / `_one_point` (CalcOzoneStressFalk*)
+- **Include**: Already in `src/CLM.jl` at line 93
+- **Tests**: `test/test_ozone.jl` already in `test/runtests.jl` at line 73
+- **All tests pass** (8780/8780)
 
-The port covers all subroutines and functions from the Fortran source:
-
-| Fortran | Julia |
-|---------|-------|
-| `params_type` | `LunaParamsData` |
-| `allocParams` / `readParams` | `luna_params_init!` / `luna_params_clean!` |
-| `VcmxTKattge` | `vcmx_t_kattge` |
-| `JmxTKattge` | `jmx_t_kattge` |
-| `VcmxTLeuning` | `vcmx_t_leuning` |
-| `JmxTLeuning` | `jmx_t_leuning` |
-| `RespTBernacchi` | `resp_t_bernacchi` |
-| `Quadratic` | `quadratic_luna` |
-| `NUEref` | `nue_ref` |
-| `NUE` | `nue_calc` |
-| `Photosynthesis_luna` | `photosynthesis_luna!` |
-| `Nitrogen_investments` | `nitrogen_investments!` |
-| `NitrogenAllocation` | `nitrogen_allocation!` |
-| `is_time_to_run_LUNA` | `is_time_to_run_luna` |
-| `Clear24_Climate_LUNA` | `clear24_climate_luna!` |
-| `Acc24_Climate_LUNA` | `acc24_climate_luna!` |
-| `Acc240_Climate_LUNA` | `acc240_climate_luna!` |
-| `Update_Photosynthesis_Capacity` | `update_photosynthesis_capacity!` |
-
-No additional work needed — the port is complete and all tests pass.
+The commit "Port Ozone damage from Fortran to Julia" (6589e36) was already made. Nothing further to do — this module is complete.
