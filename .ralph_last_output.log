@@ -1,24 +1,20 @@
-The hillslope hydrology port is complete and already committed. Here's a summary:
+The Photosynthesis module port is already complete. Here's a summary:
 
-**Commit `9d48178`**: "Port Hillslope hydrology from Fortran to Julia"
+**Status: Already committed** (`73dd7f2`)
 
-**Files** (4 files, +1194 lines):
-- `src/biogeophys/hillslope_hydrology.jl` (739 lines) — Full port of `HillslopeHydrologyMod.F90`
-- `test/test_hillslope_hydrology.jl` (454 lines) — Comprehensive test suite
-- `src/CLM.jl` — Include added
-- `test/runtests.jl` — Test include added
+**What was ported** (5210 lines of Fortran → 3169 lines of Julia + 371 lines of tests):
 
-**Ported functions** (11 total):
-1. `hillslope_properties_init!` — Config initialization (string → enum mapping)
-2. `check_aquifer_layer!` — Validates aquifer/hillslope compatibility
-3. `init_hillslope!` — Initialize column-level hillslope properties from arrays
-4. `set_hillslope_soil_thickness!` — Dispatch to soil thickness methods
-5. `hillslope_soil_thickness_profile!` — Set lowland/upland soil depths via `nbedrock`
-6. `hillslope_soil_thickness_profile_linear!` — Linear soil depth interpolation
-7. `hillslope_set_lowland_upland_pfts!` — Assign PFTs by lowland/upland position
-8. `hillslope_dominant_lowland_pft!` — Stub (depends on unported `pftcon`/`find_k_max_indices`)
-9. `hillslope_pft_from_file!` — Assign PFTs from index array
-10. `hillslope_stream_outflow!` — Manning equation stream discharge with overbank handling
-11. `hillslope_update_stream_water!` — Stream water volume balance
+- **Types**: `PhotoParamsData` (from `photo_params_type`), `PhotosynthesisData` (from `photosyns_type`)
+- **Core functions**: `photosynthesis!`, `photosynthesis_total!`, `fractionation!`, `photosynthesis_hydrstress!`
+- **Solvers**: `hybrid_solver!`, `brent_solver!`, `ci_func!` (standard); `hybrid_PHS!`, `brent_PHS!`, `ci_func_PHS!` (hydraulic stress)
+- **Helper functions**: `ft_photo`, `fth_photo`, `fth25_photo`, `quadratic_solve`, `plc`, `d1plc`
+- **Plant hydraulics**: `calcstress!`, `getvegwp!`, `getqflx!`, `spacF!`, `spacA!`
+- **Initialization**: `photosynthesis_data_init!`, `photosynthesis_data_clean!`, `photosynthesis_timestep_init!`, `set_params_for_testing!`
 
-**Tests**: All 8064 tests pass (including 10 test sets for the new module covering constants, config, soil profiles, PFT assignment, stream outflow, and water balance).
+**Files**:
+- `src/biogeophys/photosynthesis.jl` — main module
+- `test/test_photosynthesis.jl` — 371 lines of tests
+- `src/CLM.jl` — include added (line 86)
+- `test/runtests.jl` — test include added (line 66)
+
+**All 8131 tests pass** (including photosynthesis tests).
