@@ -50,4 +50,5 @@ using CLM
     include("test_aerosol.jl")
     include("test_surface_humidity.jl")
     include("test_surface_resistance.jl")
+    include("test_soil_moist_stress.jl")
 end
