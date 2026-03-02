@@ -1,16 +1,10 @@
-The port of `SoilBiogeochemNitrogenFluxType.F90` to `soil_bgc_nitrogen_flux.jl` is already complete. Here's a summary:
+All 5,909 tests pass. The port is already complete:
 
-**Files:**
-- `src/types/soil_bgc_nitrogen_flux.jl` — Julia struct + 6 functions
-- `test/test_soil_bgc_nitrogen_flux.jl` — 11 test sets covering all functionality
-- `src/CLM.jl` line 47 — include already present
+- **Struct**: `SoilBiogeochemStateData` with all 13 fields from the Fortran type
+- **`soil_bgc_state_init!`**: Allocates all fields matching `InitAllocate`
+- **`soil_bgc_state_init_cold!`**: Cold-start initialization with special/soil-crop mask logic matching `InitCold`
+- **`soil_bgc_state_init_history!`** and **`soil_bgc_state_restart!`**: Stubs (no-op)
+- **`get_spinup_latitude_term`**: Logistic function for spinup acceleration at high latitudes
+- Includes registered in `src/CLM.jl` and `test/runtests.jl`
 
-**What was ported:**
-- `SoilBiogeochemNitrogenFluxData` struct with all 129+ fields (deposition, decomposition cascade, immobilization/mineralization, nitrification/denitrification, leaching, diagnostics, matrix-CN)
-- `soil_bgc_nitrogen_flux_init!` — allocates all arrays (from `InitAllocate`)
-- `soil_bgc_nitrogen_flux_set_values!` — sets fields with correct `use_nitrif_denitrif` branching (from `SetValues`)
-- `soil_bgc_nitrogen_flux_init_cold!` — cold-start initialization (from `InitCold`)
-- `soil_bgc_nitrogen_flux_summary!` — vertical integration of cascade, denitrification, leaching, supplement N (from `Summary`)
-- `soil_bgc_nitrogen_flux_init_history!` — no-op stub (from `InitHistory`)
-
-**Tests:** All 5796 tests pass. Already committed as `cd8d74d`.
+The file and tests were already committed in the previous session (commit `87b8d10`).
