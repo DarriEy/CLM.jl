@@ -67,4 +67,5 @@ using CLM
     include("test_canopy_fluxes.jl")
     include("test_canopy_hydrology.jl")
     include("test_bareground_fluxes.jl")
+    include("test_soil_fluxes.jl")
 end
