@@ -1,11 +1,16 @@
-This module has already been fully ported and committed (commit `e7d4a66`). The port includes:
+The port of `SoilBiogeochemNitrogenFluxType.F90` to `soil_bgc_nitrogen_flux.jl` is already complete. Here's a summary:
 
-- **Struct**: `SoilBiogeochemCarbonFluxData` with all Fortran pointer fields translated to Julia typed arrays
-- **`soil_bgc_carbon_flux_init!`**: Allocates all fields (environmental scalars, HR, decomp cascade, matrix-CN)
-- **`soil_bgc_carbon_flux_set_values!`**: Sets flux values for masked columns
-- **`soil_bgc_carbon_flux_init_cold!`**: Cold-start initialization for special landunit columns
-- **`soil_bgc_carbon_flux_summary!`**: Vertically integrates HR and decomp cascade fluxes, computes total HR by pool type (SOM, litter, CWD, microbial)
-- **`soil_bgc_carbon_flux_init_history!`** / **`soil_bgc_carbon_flux_restart!`**: Stubs (correct for Julia port)
-- **Tests**: 10 test sets covering construction, init, set_values, init_cold, summary integration, stubs, mutability, and re-initialization
+**Files:**
+- `src/types/soil_bgc_nitrogen_flux.jl` — Julia struct + 6 functions
+- `test/test_soil_bgc_nitrogen_flux.jl` — 11 test sets covering all functionality
+- `src/CLM.jl` line 47 — include already present
 
-The only omitted section is the MIMICS-specific `ligninNratio` calculation in `Summary`, which depends on unported infrastructure (`decomp_method`, `p2c`, `pftcon`, `CNParamsShareInst`). All 5611 tests pass.
+**What was ported:**
+- `SoilBiogeochemNitrogenFluxData` struct with all 129+ fields (deposition, decomposition cascade, immobilization/mineralization, nitrification/denitrification, leaching, diagnostics, matrix-CN)
+- `soil_bgc_nitrogen_flux_init!` — allocates all arrays (from `InitAllocate`)
+- `soil_bgc_nitrogen_flux_set_values!` — sets fields with correct `use_nitrif_denitrif` branching (from `SetValues`)
+- `soil_bgc_nitrogen_flux_init_cold!` — cold-start initialization (from `InitCold`)
+- `soil_bgc_nitrogen_flux_summary!` — vertical integration of cascade, denitrification, leaching, supplement N (from `Summary`)
+- `soil_bgc_nitrogen_flux_init_history!` — no-op stub (from `InitHistory`)
+
+**Tests:** All 5796 tests pass. Already committed as `cd8d74d`.
