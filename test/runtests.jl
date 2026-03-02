@@ -79,4 +79,5 @@ using CLM
     include("test_gap_mortality.jl")
     include("test_decomp_bgc.jl")
     include("test_decomp_mimics.jl")
+    include("test_soil_biogeochem_decomp.jl")
 end
