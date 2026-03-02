@@ -1,15 +1,21 @@
-The hydrology drainage module has already been fully ported and committed (commit `7c2759a`). Here's a summary:
+The lake hydrology module has already been fully ported and committed (`f770ed4`). Here's a summary of what's in place:
 
-**Status: Already complete**
+**Ported file:** `src/biogeophys/lake_hydrology.jl` (1033 lines)
 
-- **Source**: `src/biogeophys/hydrology_drainage.jl` (366 lines) — ported from `HydrologyDrainageMod.F90` (244 lines)
-- **Test**: `test/test_hydrology_drainage.jl` (323 lines) — tests all 5 public functions
-- **Include**: Already in `src/CLM.jl` (line 83) and `test/runtests.jl` (line 63)
-- **All 7,961 tests pass**
+**Functions translated from `LakeHydrologyMod.F90`:**
+1. `sum_flux_fluxes_onto_ground!` — Copy precip fluxes onto lake surface
+2. `lake_sublimation_dew!` — Calculate sublimation and dew for lake patches
+3. `lake_frac_sno_eff!` — Recalculate effective snow fraction
+4. `lake_patch_to_col_fluxes!` — Copy patch-level fluxes to column averages
+5. `lake_soil_hydrology!` — Maintain soil at saturation for lake columns
+6. `lake_check_single_snow_layer!` — Handle single unfrozen snow layer over lake
+7. `lake_snow_above_unfrozen!` — Handle snow layers above unfrozen lake top
+8. `lake_snow_diagnostics!` — Accumulate snow ice/liq and internal temperature
+9. `lake_water_balance!` — Compute ending water balance and runoff
+10. `lake_update_h2osoi_vol!` — Update volumetric soil water
+11. `lake_top_layer_diagnostics!` — Top-layer snow diagnostics for history
+12. `lake_hydrology!` — Main orchestrator
 
-The port includes:
-1. `compute_wetland_ice_hydrology!` — wetland/ice/urban flux handling
-2. `compute_total_runoff!` — total runoff computation
-3. `compute_water_mass_non_lake!` — water mass stub (TotalWaterAndHeatMod not yet ported)
-4. `adjust_runoff_terms!` — glacier SMB stub (GlacierSurfaceMassBalanceMod not yet ported)
-5. `hydrology_drainage!` — main orchestrator calling VIC mapping, drainage/lateral flow, vol. soil water update, and all the above
+**Tests:** `test/test_lake_hydrology.jl` with 12 test sets covering all functions, including a smoke test of the orchestrator.
+
+**All 8019 tests pass.**
