@@ -104,5 +104,6 @@ include("biogeochem/gap_mortality.jl")
 include("biogeochem/decomp_bgc.jl")
 include("biogeochem/decomp_mimics.jl")
 include("biogeochem/decomp.jl")
+include("biogeochem/nitrif_denitrif.jl")
 
 end # module CLM
