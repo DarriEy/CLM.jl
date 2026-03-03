@@ -1,23 +1,13 @@
-All 12,574 tests pass. This module has already been fully ported. Here's a summary of what's in place:
+The CN balance check module was already ported in commit `ad8a28d`. I reviewed the port against the Fortran source and found one bug:
 
-**Source:** `src/biogeochem/c_iso_flux.jl` (already included in `src/CLM.jl` at line 123)
-**Test:** `test/test_c_iso_flux.jl` (already included in `test/runtests.jl` at line 98)
+**Bug fixed:** In `n_balance_check!` at `src/biogeochem/cn_balance_check.jl:535`, the `col_noutputs_partial` calculation had a sign error. The Fortran subtracts both `wood_harvestn` and `crop_harvestn_to_cropprodn`:
 
-**Ported functions (all 12 Fortran subroutines):**
+```fortran
+col_noutputs_partial(c) = col_noutputs_partial(c) - wood_harvestn(c) - crop_harvestn_to_cropprodn(c)
+```
 
-| Fortran | Julia |
-|---|---|
-| `CIsoFluxCalc1d` | `c_iso_flux_calc!` |
-| `CIsoFluxCalc2dFlux` | `c_iso_flux_calc_2d_flux!` |
-| `CIsoFluxCalc2dBoth` | `c_iso_flux_calc_2d_both!` |
-| `CIsoFlux1` | `c_iso_flux1!` |
-| `CIsoFlux2` | `c_iso_flux2!` |
-| `CIsoFlux2h` | `c_iso_flux2h!` |
-| `CIsoFlux2g` | `c_iso_flux2g!` |
-| `CIsoFlux3` | `c_iso_flux3!` |
-| `CNCIsoLitterToColumn` | `cn_c_iso_litter_to_column!` |
-| `CNCIsoGapPftToColumn` | `cn_c_iso_gap_pft_to_column!` |
-| `CNCIsoHarvestPftToColumn` | `cn_c_iso_harvest_pft_to_column!` |
-| `CNCIsoGrossUnrepPftToColumn` | `cn_c_iso_gross_unrep_pft_to_column!` |
+But the Julia used `-=` with a line-continued `-`, which due to operator precedence evaluated as `-(wood_harvestn - crop_harvestn_to_cropprodn)`, incorrectly **adding** `crop_harvestn_to_cropprodn` instead of subtracting it. Fixed by changing `-` to `+` on the continuation line.
 
-The most recent commit `c25b1bb` already records "Port C isotope flux from Fortran to Julia". No additional work is needed.
+**Test added:** A new test case exercises the gridcell-level non-FATES nitrogen balance path, which was previously untested (all existing N balance tests used `use_fates_bgc=true`, skipping the affected code path).
+
+All 12620 tests pass.

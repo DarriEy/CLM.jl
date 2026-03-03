@@ -97,3 +97,4 @@
 | Dust emission | 9 | ✓ PASSED | 2 | — |
 | Irrigation | 9 | ✓ PASSED | 2 | — |
 | Satellite phenology | 9 | ✓ PASSED | 2 | — |
+| C isotope flux | 9 | ✓ PASSED | 2 | — |
