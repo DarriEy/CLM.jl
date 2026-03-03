@@ -139,4 +139,9 @@ include("biogeochem/vegetation_facade.jl")
 # ===========================================================================
 include("infrastructure/instances.jl")
 
+# ===========================================================================
+# Driver (depends on all modules above)
+# ===========================================================================
+include("driver/clm_driver.jl")
+
 end # module CLM

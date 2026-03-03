@@ -109,4 +109,5 @@ using CLM
     include("test_pftcon.jl")
     include("test_control.jl")
     include("test_instances.jl")
+    include("test_clm_driver.jl")
 end
