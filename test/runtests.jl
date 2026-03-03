@@ -92,6 +92,7 @@ using CLM
     include("test_fire_base.jl")
     include("test_fire_li2014.jl")
     include("test_methane.jl")
+    include("test_voc_emission.jl")
     include("test_cn_driver.jl")
     include("test_vegetation_facade.jl")
 end
