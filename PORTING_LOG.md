@@ -108,3 +108,4 @@
 | PFT constants | 10 | ✓ PASSED | 4 | Manual retry with tailored prompt |
 | Control module | 10 | ✓ PASSED | 4 | Manual retry with tailored prompt |
 | Instance factory | 10 | ✓ PASSED | 4 | Manual retry with tailored prompt |
+| Main CLM driver | 11 | ✓ PASSED | 2 | — |
