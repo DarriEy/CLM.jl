@@ -60,6 +60,7 @@ include("infrastructure/filters.jl")
 include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 include("infrastructure/topo.jl")
+include("infrastructure/subgrid_ave.jl")
 
 # ===========================================================================
 # Tier 1: Biogeophysics (pure math)
