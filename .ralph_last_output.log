@@ -1,16 +1,17 @@
-All 12,911 tests pass, including the TopoData tests. The topography module has already been fully ported:
+The port of `subgridAveMod.F90` to `subgrid_ave.jl` is already complete and committed (`90631fd`). Here's a summary:
 
-**`src/infrastructure/topo.jl`** contains:
-- `TopoData` struct (from Fortran `topo_type`)
-- `topo_init!` — combines allocate + history + cold-start
-- `topo_init_allocate!` — allocates arrays with NaN/false defaults
-- `topo_init_history!` — stub (Fortran history I/O not applicable)
-- `topo_init_cold!` — cold-start init for ice, hillslope, and regular columns
-- `topo_restart!` — stub (Fortran restart I/O not applicable)
-- `topo_update!` — per-timestep update with GLC callbacks and hillslope elevation
-- `topo_downscale_filter` — returns BitVector of columns needing downscaling
-- `topo_clean!` — resets arrays to empty
+**All 17 Fortran subroutines are ported:**
+- `create_scale_l2g_lookup` — l2g scale lookup table (7 scale types)
+- `build_scale_l2g!` — fills scale array from lookup
+- `set_c2l_scale!` — c2l scaling (unity/urbanf/urbans)
+- `p2c_1d!`, `p2c_2d!` — patch→column averaging (bounds-based)
+- `p2c_1d_filter!`, `p2c_2d_filter!` — patch→column averaging (mask-based)
+- `p2l_1d!`, `p2l_2d!` — patch→landunit averaging
+- `p2g_1d!`, `p2g_2d!` — patch→gridcell averaging
+- `c2l_1d!`, `c2l_2d!` — column→landunit averaging
+- `c2g_1d!`, `c2g_2d!` — column→gridcell averaging
+- `l2g_1d!`, `l2g_2d!` — landunit→gridcell averaging
 
-**`test/test_topo.jl`** covers all functions with 13 test sets including default construction, allocation, cold-start for ice/hillslope/soil columns, update with callbacks, hillslope meteorology downscaling, and cleanup.
+**Tests:** Comprehensive test suite in `test/test_subgrid_ave.jl` with 590+ assertions covering all functions, spval handling, inactive entity skipping, urban scaling, and zero-weight cases.
 
-The port is already complete and passing. No changes needed.
+**Full test suite: 13,000/13,000 tests pass.**

@@ -102,3 +102,4 @@
 | Balance check | 9 | ✓ PASSED | 2 | — |
 | Atm-to-land type | 10 | ✓ PASSED | 2 | — |
 | Land-to-atm type | 10 | ✓ PASSED | 2 | — |
+| Topography | 10 | ✓ PASSED | 2 | — |
