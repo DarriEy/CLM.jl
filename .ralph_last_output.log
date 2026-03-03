@@ -1,20 +1,23 @@
-Done. Here's a summary of what was completed:
+The VOC emissions module is already fully ported and committed (commit `52c9511`). Here's a summary of what's in place:
 
-**Two missing functions were ported from `ch4Mod.F90` to `methane.jl`:**
+**Source file**: `src/biogeochem/voc_emission.jl` (837 lines)
 
-1. **`ch4_init_gridcell_balance_check!`** (lines 1548-1579) — Computes total column CH4 via `ch4_totcolch4!` then aggregates to gridcell level using column-to-gridcell weights (`col_wtgcell`).
+**Types ported:**
+- `MEGANFactors` — compound class parameters (Agro, Amat, Anew, Aold, betaT, ct1, ct2, Ceo, LDF)
+- `MEGANCompound` — single MEGAN compound descriptor
+- `MEGANMechComp` — mechanism compound mapping
+- `VOCEmisData` — VOC emission state/flux data
 
-2. **`ch4!`** (lines 1581-2002) — The main methane timestep driver that:
-   - Sets atmospheric CH4/O2/CO2 concentrations from forcing
-   - Computes lagged surface runoff and finundated
-   - Handles finundated changes (concentration adjustment + dfsat flux)
-   - Calls `ch4_annualupdate!` for annual averages
-   - Does p2c averaging for `grnd_ch4_cond`
-   - Loops over sat=0/1 calling `ch4_prod!`, `ch4_oxid!`, `ch4_aere!`, `ch4_ebul!`, `ch4_tran!`
-   - Optionally processes lakes when `allowlakeprod` is enabled
-   - Weights soil fluxes by `finundated` and aggregates to gridcell (c2g)
-   - Performs column and gridcell balance checks with warnings
+**Functions ported:**
+- `vocemis_init!` / `vocemis_clean!` — allocation/deallocation
+- `megan_factors_init!` — default MEGAN factors setup
+- `get_map_EF` — mapped isoprene emission factors by PFT group
+- `get_gamma_P` — PPFD activity factor (sun/shade, calculated/fixed alpha/cp)
+- `get_gamma_L` — LAI activity factor
+- `get_gamma_SM` — soil moisture activity factor (Wang et al., 2022)
+- `get_gamma_T` — temperature activity factor (incl. boreal shrub/grass updates)
+- `get_gamma_A` — leaf age activity factor
+- `get_gamma_C` — CO2 activity factor (Heald et al., 2009)
+- `voc_emission!` — main driver
 
-**Tests added:** Two new test sets in `test/test_methane.jl` — one for `ch4_init_gridcell_balance_check!` and one for the full `ch4!` driver.
-
-**All 11,887 tests pass.**
+**Tests**: `test/test_voc_emission.jl` — covers all helper functions and driver integration. All 11,995 tests in the full suite pass.
