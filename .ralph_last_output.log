@@ -1,6 +1,8 @@
-The port is already complete and committed (`1d980f5`). All 12,780 tests pass. There's nothing additional to do — the Fortran `atm2lndType.F90` has been fully ported to `src/types/atm2lnd.jl` with:
+All 12,869 tests pass. The `lnd2atm.jl` port is already complete and fully functional:
 
-- **`Atm2LndParamsData`** — all 9 parameter fields
-- **`Atm2LndData`** — all 37 forcing/accumulation fields  
-- **10 functions** covering initialization, params, accumulation, cleanup, and stubs for I/O
-- **327-line test file** with 13 test sets covering construction, params validation, allocation, accumulation, cleanup, and mutability
+- **Struct types**: `Lnd2AtmParamsData` and `Lnd2AtmData` with all 24 fields from the Fortran source
+- **Functions**: `lnd2atm_params_init!`, `lnd2atm_init!`, `lnd2atm_read_namelist!`, `lnd2atm_init_history!`, `lnd2atm_clean!`, `lnd2atm_init_for_testing!`
+- **Include**: Already in `src/CLM.jl` (line 53) and `test/runtests.jl` (line 105)
+- **Tests**: 193 lines covering default construction, allocation, conditional allocations, namelist, clean, mutability, and re-initialization
+
+The port was already committed in commit `7fd52b4`.
