@@ -117,6 +117,7 @@ include("biogeochem/fire_base.jl")
 include("biogeochem/fire_li2014.jl")
 include("biogeochem/methane.jl")
 include("biogeochem/voc_emission.jl")
+include("biogeochem/dust_emission.jl")
 include("biogeochem/cn_driver.jl")
 include("biogeochem/vegetation_facade.jl")
 
