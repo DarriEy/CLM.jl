@@ -93,3 +93,4 @@
 | Fire base | 9 | ✓ PASSED | 2 | — |
 | Fire Li2014 | 9 | ✓ PASSED | 2 | — |
 | Methane | 9 | ✓ PASSED | 2 | — |
+| VOC emissions | 9 | ✓ PASSED | 2 | — |

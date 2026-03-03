@@ -1,23 +1,15 @@
-The VOC emissions module is already fully ported and committed (commit `52c9511`). Here's a summary of what's in place:
+The dust emission module has already been fully ported and committed (`64b2910`). Here's a summary of what's in place:
 
-**Source file**: `src/biogeochem/voc_emission.jl` (837 lines)
+**`src/biogeochem/dust_emission.jl`** — Complete port of `DustEmisBase.F90` including:
+- `DustEmisBaseData` struct (from `dust_emis_base_type`)
+- `dust_emis_init!` / `dust_emis_clean!` — allocation/deallocation
+- `init_dust_vars!` — size distributions, overlap factors, saltation factor, Stokes correction
+- `dust_dry_dep!` — turbulent dry deposition velocity calculation
+- `check_dust_emis_is_valid` — consistency validation
+- `get_dust_patch_vars` / `get_dust_const_vars` — accessor functions
+- `write_dust_patch_to_log` — logging
+- `_dust_erf` — local erf approximation (avoids SpecialFunctions.jl dependency)
 
-**Types ported:**
-- `MEGANFactors` — compound class parameters (Agro, Amat, Anew, Aold, betaT, ct1, ct2, Ceo, LDF)
-- `MEGANCompound` — single MEGAN compound descriptor
-- `MEGANMechComp` — mechanism compound mapping
-- `VOCEmisData` — VOC emission state/flux data
+**`test/test_dust_emission.jl`** — Comprehensive tests covering erf accuracy, init/clean, physical value validation, dry deposition, sensitivity, consistency checks, and a full integration cycle.
 
-**Functions ported:**
-- `vocemis_init!` / `vocemis_clean!` — allocation/deallocation
-- `megan_factors_init!` — default MEGAN factors setup
-- `get_map_EF` — mapped isoprene emission factors by PFT group
-- `get_gamma_P` — PPFD activity factor (sun/shade, calculated/fixed alpha/cp)
-- `get_gamma_L` — LAI activity factor
-- `get_gamma_SM` — soil moisture activity factor (Wang et al., 2022)
-- `get_gamma_T` — temperature activity factor (incl. boreal shrub/grass updates)
-- `get_gamma_A` — leaf age activity factor
-- `get_gamma_C` — CO2 activity factor (Heald et al., 2009)
-- `voc_emission!` — main driver
-
-**Tests**: `test/test_voc_emission.jl` — covers all helper functions and driver integration. All 11,995 tests in the full suite pass.
+All 12,154 tests pass. No further action needed.
