@@ -357,4 +357,116 @@
         end
     end
 
+    @testset "ch4_init_gridcell_balance_check!" begin
+        d = make_ch4_test_data()
+        col_gridcell = [1, 1, 2]
+        col_wtgcell = [0.5, 0.5, 1.0]
+
+        CLM.ch4_init_gridcell_balance_check!(d.ch4, d.mask_nolake, d.mask_lake,
+                                              col_gridcell, col_wtgcell,
+                                              d.dz, d.nlevsoi, d.ng, false)
+
+        # Gridcell 1 should have positive CH4 (weighted avg of columns 1 and 2)
+        @test d.ch4.totcolch4_bef_grc[1] > 0.0
+        # Gridcell 2 should have positive CH4 (column 3 only)
+        @test d.ch4.totcolch4_bef_grc[2] > 0.0
+    end
+
+    @testset "ch4! main driver" begin
+        d = make_ch4_test_data()
+        patch_column = [1, 1, 2, 3]
+        patch_itype = [1, 2, 1, 1]
+        patch_wtcol = [0.5, 0.5, 1.0, 1.0]
+        col_gridcell = [1, 1, 2]
+        col_wtgcell = [0.5, 0.5, 1.0]
+        is_fates = falses(d.nc)
+        latdeg = [45.0, 30.0]
+
+        forc_pbot = fill(101325.0, d.ng)
+        forc_t_grc = fill(CLM.TFRZ + 15.0, d.ng)
+        forc_po2 = fill(101325.0 * 0.209, d.ng)
+        forc_pco2 = fill(40.0, d.ng)
+        forc_pch4 = fill(101325.0 * 1.7e-6, d.ng)
+
+        h2osoi_liq = fill(0.3 * CLM.DENH2O * 0.1, d.nc, d.nlevsoi)
+        h2osoi_ice = zeros(d.nc, d.nlevsoi)
+        h2osfc_v = zeros(d.nc)
+        bsw = fill(5.0, d.nc, d.nlevsoi)
+        cellorg = fill(10.0, d.nc, d.nlevsoi)
+        t_grnd = fill(CLM.TFRZ + 15.0, d.nc)
+        t_h2osfc = fill(CLM.TFRZ + 15.0, d.nc)
+        frac_h2osfc = zeros(d.nc)
+        snow_depth_v = zeros(d.nc)
+        snl_v = zeros(Int, d.nc)
+        qflx_surf = zeros(d.nc)
+
+        rootfr_p = fill(0.2, d.np, d.nlevsoi)
+        rootfr_col = fill(0.2, d.nc, d.nlevsoi)
+        crootfr = fill(0.2, d.np, d.nlevsoi)
+        rootr_p = fill(0.2, d.np, d.nlevsoi)
+        elai_v = fill(2.0, d.np)
+        qflx_tran_veg = fill(1.0e-3, d.np)
+        annsum_npp_v = fill(500.0, d.np)
+        rr_v = fill(1.0e-6, d.np)
+
+        somhr = fill(1.0e-6, d.nc)
+        lithr = fill(1.0e-7, d.nc)
+        hr_vr = fill(1.0e-8, d.nc, d.nlevsoi)
+        o_scalar = ones(d.nc, d.nlevsoi)
+        fphr = ones(d.nc, d.nlevsoi)
+        pot_f_nit_vr = zeros(d.nc, d.nlevsoi)
+        lake_icefrac = zeros(d.nc, d.nlevsoi)
+        lakedepth = fill(5.0, d.nc)
+
+        agnpp = fill(1.0e-5, d.np)
+        bgnpp = fill(1.0e-5, d.np)
+
+        # Initialize balance check
+        d.ch4.ch4_first_time_grc .= true
+        d.ch4.totcolch4_bef_col .= 0.0
+
+        CLM.ch4!(d.ch4, d.params, d.ch4vc,
+                 d.mask_soil, d.mask_soilp, d.mask_lake, d.mask_nolake,
+                 col_gridcell, col_wtgcell, patch_column, patch_itype, patch_wtcol,
+                 is_fates, latdeg,
+                 forc_pbot, forc_t_grc, forc_po2, forc_pco2, forc_pch4,
+                 d.watsat, d.h2osoi_vol, h2osoi_liq, h2osoi_ice, h2osfc_v,
+                 bsw, cellorg, d.smp_l, d.t_soisno, t_grnd, t_h2osfc,
+                 frac_h2osfc, snow_depth_v, snl_v, qflx_surf,
+                 rootfr_p, rootfr_col, crootfr, rootr_p, elai_v,
+                 qflx_tran_veg, annsum_npp_v, rr_v,
+                 somhr, lithr, hr_vr, o_scalar, fphr, pot_f_nit_vr,
+                 lake_icefrac, lakedepth,
+                 d.z, d.dz, d.zi,
+                 d.nlevsoi, 5, 1, d.nlevsoi,
+                 5, 0.01, 130.0,
+                 d.ng, 0, 1800.0,
+                 true, false, false,
+                 agnpp, bgnpp, 365.0 * 86400.0)
+
+        # After first step, first_time should be false
+        for g in 1:d.ng
+            @test d.ch4.ch4_first_time_grc[g] == false
+        end
+
+        # Atmospheric concentrations should be set
+        @test d.ch4.c_atm_grc[1, 1] > 0.0  # CH4
+        @test d.ch4.c_atm_grc[1, 2] > 0.0  # O2
+
+        # Surface flux total should be finite
+        for c in 1:d.nc
+            @test isfinite(d.ch4.ch4_surf_flux_tot_col[c])
+        end
+
+        # Total column CH4 should be computed
+        for c in 1:d.nc
+            @test isfinite(d.ch4.totcolch4_col[c])
+        end
+
+        # Gridcell-level totals should be non-negative
+        for g in 1:d.ng
+            @test d.ch4.totcolch4_grc[g] >= 0.0
+        end
+    end
+
 end
