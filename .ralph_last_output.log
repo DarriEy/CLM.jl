@@ -1,13 +1,9 @@
-The CN balance check module was already ported in commit `ad8a28d`. I reviewed the port against the Fortran source and found one bug:
+The balance check module has already been fully ported and committed (commit `ff6543c`). Here's a summary:
 
-**Bug fixed:** In `n_balance_check!` at `src/biogeochem/cn_balance_check.jl:535`, the `col_noutputs_partial` calculation had a sign error. The Fortran subtracts both `wood_harvestn` and `crop_harvestn_to_cropprodn`:
+**Status: Already complete**
 
-```fortran
-col_noutputs_partial(c) = col_noutputs_partial(c) - wood_harvestn(c) - crop_harvestn_to_cropprodn(c)
-```
-
-But the Julia used `-=` with a line-continued `-`, which due to operator precedence evaluated as `-(wood_harvestn - crop_harvestn_to_cropprodn)`, incorrectly **adding** `crop_harvestn_to_cropprodn` instead of subtracting it. Fixed by changing `-` to `+` on the continuation line.
-
-**Test added:** A new test case exercises the gridcell-level non-FATES nitrogen balance path, which was previously untested (all existing N balance tests used `use_fates_bgc=true`, skipping the affected code path).
-
-All 12620 tests pass.
+- `src/biogeophys/balance_check.jl` — fully ported with all 8 Fortran subroutines/functions
+- Already included in `src/CLM.jl` (line 96)
+- `test/test_balance_check.jl` — comprehensive tests covering init/clean, column balance, gridcell balance, main balance check, urban walls, and startup skip
+- All 12,656 tests pass
+- Committed as `ff6543c "Port Balance check from Fortran to Julia"`
