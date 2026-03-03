@@ -1,1 +1,21 @@
-You've hit your limit · resets 9pm (America/Edmonton)
+All 13,272 tests pass. The CLM driver has already been fully ported from Fortran to Julia. Here's a summary of what's in the port:
+
+**Structs:**
+- `CLMDriverConfig` — control flags aggregated from Fortran module-level `use` statements
+- `CLMDriverState` — mutable state for tracking timestep/date variables
+
+**Functions:**
+- `clm_drv_init!` — initializes CO2 parameters, resets bottom heat flux, sets vegetation fraction, computes ice fraction of snow
+- `clm_drv_patch2col!` — averages patch-level evaporative/water fluxes to column level using `p2c_1d_filter!`
+- `write_diagnostic` — writes timestep completion message
+- `clm_drv!` — main driver orchestrating the full CLM physics calling sequence (glacier init, phenology, decomposition, hydrology, radiation, fluxes, temperatures, ecosystem dynamics, balance checks, diagnostics, accumulators, history/restart output)
+
+**Tests cover:**
+- Config/state construction
+- `write_diagnostic` output
+- `clm_drv_init!` (eflx_bot reset, frac_veg_nosno, CO2 init, frac_iceold)
+- `clm_drv_patch2col!` (p2c averaging verification)
+- `clm_drv!` smoke test and config flag variations
+- Urban snow fraction computation
+
+The commit "Port Main CLM driver from Fortran to Julia" already exists (commit `2a10837`).
