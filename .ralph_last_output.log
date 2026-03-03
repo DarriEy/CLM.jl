@@ -1,10 +1,16 @@
-The Irrigation module has already been ported, committed (commit `d5e3bbc`), and all 12,242 tests pass. Here's a summary:
+All 12,529 tests pass. The satellite phenology module has already been fully ported:
 
-**Port Status: Complete**
+- **Source**: `src/biogeochem/satellite_phenology.jl` — contains all 6 functions from the Fortran module:
+  - `SatellitePhenologyData` struct (module-level state)
+  - `satellite_phenology_init!` (allocate/initialize)
+  - `satellite_phenology_clean!` (deallocate)
+  - `satellite_phenology!` (main SP dynamics)
+  - `interp_monthly_veg!` (time weight computation)
+  - `read_annual_vegetation!` (12-month LAI for dry deposition)
+  - `read_monthly_vegetation!` (two consecutive months of veg data)
 
-- **Source**: `src/biogeophys/irrigation.jl` (1,039 lines) — all 23 Fortran routines accounted for
-- **Test**: `test/test_irrigation.jl` (494 lines) — covers constants, params, allocation/cleanup, nsteps calculation, relsat conversion, namelist validation, irrigation method setting, p2c/c2g averaging, GW unconfined summation, application flux routing, bulk withdrawals, volr limitation, and restart stub
-- **Integration**: Already included in `src/CLM.jl` (line 94) and `test/runtests.jl` (line 97)
-- **Commit**: `d5e3bbc Port Irrigation from Fortran to Julia`
+- **Included** in `src/CLM.jl` at line 122
+- **Tests** in `test/test_satellite_phenology.jl` (line 97 of runtests.jl)
+- **Committed** as `801d102` ("Port Satellite phenology from Fortran to Julia")
 
-The only intentionally omitted routine is `CalcOneTracerWithdrawals` (water tracers are not yet ported), which is noted in the code.
+Everything is complete and passing.

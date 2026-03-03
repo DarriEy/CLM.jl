@@ -95,3 +95,4 @@
 | Methane | 9 | ✓ PASSED | 2 | — |
 | VOC emissions | 9 | ✓ PASSED | 2 | — |
 | Dust emission | 9 | ✓ PASSED | 2 | — |
+| Irrigation | 9 | ✓ PASSED | 2 | — |
