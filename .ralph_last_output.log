@@ -1,8 +1,16 @@
-All 12,869 tests pass. The `lnd2atm.jl` port is already complete and fully functional:
+All 12,911 tests pass, including the TopoData tests. The topography module has already been fully ported:
 
-- **Struct types**: `Lnd2AtmParamsData` and `Lnd2AtmData` with all 24 fields from the Fortran source
-- **Functions**: `lnd2atm_params_init!`, `lnd2atm_init!`, `lnd2atm_read_namelist!`, `lnd2atm_init_history!`, `lnd2atm_clean!`, `lnd2atm_init_for_testing!`
-- **Include**: Already in `src/CLM.jl` (line 53) and `test/runtests.jl` (line 105)
-- **Tests**: 193 lines covering default construction, allocation, conditional allocations, namelist, clean, mutability, and re-initialization
+**`src/infrastructure/topo.jl`** contains:
+- `TopoData` struct (from Fortran `topo_type`)
+- `topo_init!` — combines allocate + history + cold-start
+- `topo_init_allocate!` — allocates arrays with NaN/false defaults
+- `topo_init_history!` — stub (Fortran history I/O not applicable)
+- `topo_init_cold!` — cold-start init for ice, hillslope, and regular columns
+- `topo_restart!` — stub (Fortran restart I/O not applicable)
+- `topo_update!` — per-timestep update with GLC callbacks and hillslope elevation
+- `topo_downscale_filter` — returns BitVector of columns needing downscaling
+- `topo_clean!` — resets arrays to empty
 
-The port was already committed in commit `7fd52b4`.
+**`test/test_topo.jl`** covers all functions with 13 test sets including default construction, allocation, cold-start for ice/hillslope/soil columns, update with callbacks, hillslope meteorology downscaling, and cleanup.
+
+The port is already complete and passing. No changes needed.

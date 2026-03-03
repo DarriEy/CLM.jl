@@ -101,3 +101,4 @@
 | CN balance check | 9 | ✓ PASSED | 2 | — |
 | Balance check | 9 | ✓ PASSED | 2 | — |
 | Atm-to-land type | 10 | ✓ PASSED | 2 | — |
+| Land-to-atm type | 10 | ✓ PASSED | 2 | — |
