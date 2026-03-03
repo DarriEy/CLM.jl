@@ -10,6 +10,7 @@ include("constants/landunit_varcon.jl")
 include("constants/column_varcon.jl")
 include("constants/varpar.jl")
 include("constants/varcon.jl")
+include("constants/pftcon.jl")
 
 # ===========================================================================
 # Tier 1: Types (data structures)

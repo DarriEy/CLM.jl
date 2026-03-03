@@ -104,3 +104,7 @@
 | Land-to-atm type | 10 | ✓ PASSED | 2 | — |
 | Topography | 10 | ✓ PASSED | 2 | — |
 | Subgrid averaging | 10 | ✓ PASSED | 2 | — |
+| Accumulation | 10 | ✓ PASSED | 2 | — |
+| PFT constants | 10 | ✗ FAILED | 3 | See .ralph_last_output.log |
+| Control module | 10 | ✗ FAILED | 3 | See .ralph_last_output.log |
+| Instance factory | 10 | ✗ FAILED | 3 | See .ralph_last_output.log |

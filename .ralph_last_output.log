@@ -1,6 +1,1 @@
-The Accumulation module has already been fully ported and committed (`a022acb`). Here's a summary of what's in place:
-
-**Source:** `src/infrastructure/accumul.jl` — all 20 Fortran subroutines/functions/types ported
-**Tests:** `test/test_accumul.jl` — comprehensive tests covering all 3 accumulation types (timeavg, runmean, runaccum), multi-level fields, inactive points, reset logic, and edge cases
-**Integration:** Already included in `src/CLM.jl` (line 64) and `test/runtests.jl` (line 108)
-**Test suite:** All 13,077 tests pass
+You've hit your limit · resets 9pm (America/Edmonton)
