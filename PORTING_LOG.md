@@ -103,3 +103,4 @@
 | Atm-to-land type | 10 | ✓ PASSED | 2 | — |
 | Land-to-atm type | 10 | ✓ PASSED | 2 | — |
 | Topography | 10 | ✓ PASSED | 2 | — |
+| Subgrid averaging | 10 | ✓ PASSED | 2 | — |

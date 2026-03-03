@@ -1,17 +1,6 @@
-The port of `subgridAveMod.F90` to `subgrid_ave.jl` is already complete and committed (`90631fd`). Here's a summary:
+The Accumulation module has already been fully ported and committed (`a022acb`). Here's a summary of what's in place:
 
-**All 17 Fortran subroutines are ported:**
-- `create_scale_l2g_lookup` — l2g scale lookup table (7 scale types)
-- `build_scale_l2g!` — fills scale array from lookup
-- `set_c2l_scale!` — c2l scaling (unity/urbanf/urbans)
-- `p2c_1d!`, `p2c_2d!` — patch→column averaging (bounds-based)
-- `p2c_1d_filter!`, `p2c_2d_filter!` — patch→column averaging (mask-based)
-- `p2l_1d!`, `p2l_2d!` — patch→landunit averaging
-- `p2g_1d!`, `p2g_2d!` — patch→gridcell averaging
-- `c2l_1d!`, `c2l_2d!` — column→landunit averaging
-- `c2g_1d!`, `c2g_2d!` — column→gridcell averaging
-- `l2g_1d!`, `l2g_2d!` — landunit→gridcell averaging
-
-**Tests:** Comprehensive test suite in `test/test_subgrid_ave.jl` with 590+ assertions covering all functions, spval handling, inactive entity skipping, urban scaling, and zero-weight cases.
-
-**Full test suite: 13,000/13,000 tests pass.**
+**Source:** `src/infrastructure/accumul.jl` — all 20 Fortran subroutines/functions/types ported
+**Tests:** `test/test_accumul.jl` — comprehensive tests covering all 3 accumulation types (timeavg, runmean, runaccum), multi-level fields, inactive points, reset logic, and edge cases
+**Integration:** Already included in `src/CLM.jl` (line 64) and `test/runtests.jl` (line 108)
+**Test suite:** All 13,077 tests pass
