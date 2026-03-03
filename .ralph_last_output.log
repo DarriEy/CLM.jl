@@ -1,15 +1,10 @@
-The dust emission module has already been fully ported and committed (`64b2910`). Here's a summary of what's in place:
+The Irrigation module has already been ported, committed (commit `d5e3bbc`), and all 12,242 tests pass. Here's a summary:
 
-**`src/biogeochem/dust_emission.jl`** — Complete port of `DustEmisBase.F90` including:
-- `DustEmisBaseData` struct (from `dust_emis_base_type`)
-- `dust_emis_init!` / `dust_emis_clean!` — allocation/deallocation
-- `init_dust_vars!` — size distributions, overlap factors, saltation factor, Stokes correction
-- `dust_dry_dep!` — turbulent dry deposition velocity calculation
-- `check_dust_emis_is_valid` — consistency validation
-- `get_dust_patch_vars` / `get_dust_const_vars` — accessor functions
-- `write_dust_patch_to_log` — logging
-- `_dust_erf` — local erf approximation (avoids SpecialFunctions.jl dependency)
+**Port Status: Complete**
 
-**`test/test_dust_emission.jl`** — Comprehensive tests covering erf accuracy, init/clean, physical value validation, dry deposition, sensitivity, consistency checks, and a full integration cycle.
+- **Source**: `src/biogeophys/irrigation.jl` (1,039 lines) — all 23 Fortran routines accounted for
+- **Test**: `test/test_irrigation.jl` (494 lines) — covers constants, params, allocation/cleanup, nsteps calculation, relsat conversion, namelist validation, irrigation method setting, p2c/c2g averaging, GW unconfined summation, application flux routing, bulk withdrawals, volr limitation, and restart stub
+- **Integration**: Already included in `src/CLM.jl` (line 94) and `test/runtests.jl` (line 97)
+- **Commit**: `d5e3bbc Port Irrigation from Fortran to Julia`
 
-All 12,154 tests pass. No further action needed.
+The only intentionally omitted routine is `CalcOneTracerWithdrawals` (water tracers are not yet ported), which is noted in the code.
