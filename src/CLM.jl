@@ -120,6 +120,7 @@ include("biogeochem/methane.jl")
 include("biogeochem/voc_emission.jl")
 include("biogeochem/dust_emission.jl")
 include("biogeochem/satellite_phenology.jl")
+include("biogeochem/c_iso_flux.jl")
 include("biogeochem/cn_driver.jl")
 include("biogeochem/vegetation_facade.jl")
 
