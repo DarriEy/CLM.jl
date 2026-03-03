@@ -102,4 +102,5 @@ using CLM
     include("test_cn_driver.jl")
     include("test_vegetation_facade.jl")
     include("test_atm2lnd.jl")
+    include("test_lnd2atm.jl")
 end

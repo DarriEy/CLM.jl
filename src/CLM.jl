@@ -50,6 +50,7 @@ include("types/crop.jl")
 include("types/cn_shared_params.jl")
 include("types/cn_products.jl")
 include("types/atm2lnd.jl")
+include("types/lnd2atm.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
