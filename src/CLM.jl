@@ -48,6 +48,7 @@ include("types/soil_bgc_nitrogen_flux.jl")
 include("types/soil_bgc_state.jl")
 include("types/crop.jl")
 include("types/cn_shared_params.jl")
+include("types/cn_products.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
@@ -121,6 +122,7 @@ include("biogeochem/voc_emission.jl")
 include("biogeochem/dust_emission.jl")
 include("biogeochem/satellite_phenology.jl")
 include("biogeochem/c_iso_flux.jl")
+include("biogeochem/cn_balance_check.jl")
 include("biogeochem/cn_driver.jl")
 include("biogeochem/vegetation_facade.jl")
 
