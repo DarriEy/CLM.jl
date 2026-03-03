@@ -96,3 +96,4 @@
 | VOC emissions | 9 | ✓ PASSED | 2 | — |
 | Dust emission | 9 | ✓ PASSED | 2 | — |
 | Irrigation | 9 | ✓ PASSED | 2 | — |
+| Satellite phenology | 9 | ✓ PASSED | 2 | — |

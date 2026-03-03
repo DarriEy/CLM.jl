@@ -1,16 +1,23 @@
-All 12,529 tests pass. The satellite phenology module has already been fully ported:
+All 12,574 tests pass. This module has already been fully ported. Here's a summary of what's in place:
 
-- **Source**: `src/biogeochem/satellite_phenology.jl` — contains all 6 functions from the Fortran module:
-  - `SatellitePhenologyData` struct (module-level state)
-  - `satellite_phenology_init!` (allocate/initialize)
-  - `satellite_phenology_clean!` (deallocate)
-  - `satellite_phenology!` (main SP dynamics)
-  - `interp_monthly_veg!` (time weight computation)
-  - `read_annual_vegetation!` (12-month LAI for dry deposition)
-  - `read_monthly_vegetation!` (two consecutive months of veg data)
+**Source:** `src/biogeochem/c_iso_flux.jl` (already included in `src/CLM.jl` at line 123)
+**Test:** `test/test_c_iso_flux.jl` (already included in `test/runtests.jl` at line 98)
 
-- **Included** in `src/CLM.jl` at line 122
-- **Tests** in `test/test_satellite_phenology.jl` (line 97 of runtests.jl)
-- **Committed** as `801d102` ("Port Satellite phenology from Fortran to Julia")
+**Ported functions (all 12 Fortran subroutines):**
 
-Everything is complete and passing.
+| Fortran | Julia |
+|---|---|
+| `CIsoFluxCalc1d` | `c_iso_flux_calc!` |
+| `CIsoFluxCalc2dFlux` | `c_iso_flux_calc_2d_flux!` |
+| `CIsoFluxCalc2dBoth` | `c_iso_flux_calc_2d_both!` |
+| `CIsoFlux1` | `c_iso_flux1!` |
+| `CIsoFlux2` | `c_iso_flux2!` |
+| `CIsoFlux2h` | `c_iso_flux2h!` |
+| `CIsoFlux2g` | `c_iso_flux2g!` |
+| `CIsoFlux3` | `c_iso_flux3!` |
+| `CNCIsoLitterToColumn` | `cn_c_iso_litter_to_column!` |
+| `CNCIsoGapPftToColumn` | `cn_c_iso_gap_pft_to_column!` |
+| `CNCIsoHarvestPftToColumn` | `cn_c_iso_harvest_pft_to_column!` |
+| `CNCIsoGrossUnrepPftToColumn` | `cn_c_iso_gross_unrep_pft_to_column!` |
+
+The most recent commit `c25b1bb` already records "Port C isotope flux from Fortran to Julia". No additional work is needed.
