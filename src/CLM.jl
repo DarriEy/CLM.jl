@@ -49,6 +49,7 @@ include("types/soil_bgc_state.jl")
 include("types/crop.jl")
 include("types/cn_shared_params.jl")
 include("types/cn_products.jl")
+include("types/atm2lnd.jl")
 
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
