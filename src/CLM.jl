@@ -93,6 +93,7 @@ include("biogeophys/urban_fluxes.jl")
 include("biogeophys/luna.jl")
 include("biogeophys/ozone.jl")
 include("biogeophys/irrigation.jl")
+include("biogeophys/balance_check.jl")
 
 # ===========================================================================
 # Tier 2: Biogeochemistry
