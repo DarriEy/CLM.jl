@@ -107,4 +107,5 @@ using CLM
     include("test_subgrid_ave.jl")
     include("test_accumul.jl")
     include("test_pftcon.jl")
+    include("test_control.jl")
 end

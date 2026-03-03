@@ -63,6 +63,7 @@ include("infrastructure/band_diagonal.jl")
 include("infrastructure/topo.jl")
 include("infrastructure/subgrid_ave.jl")
 include("infrastructure/accumul.jl")
+include("infrastructure/control.jl")
 
 # ===========================================================================
 # Tier 1: Biogeophysics (pure math)
