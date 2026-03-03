@@ -105,4 +105,5 @@ using CLM
     include("test_lnd2atm.jl")
     include("test_topo.jl")
     include("test_subgrid_ave.jl")
+    include("test_accumul.jl")
 end
