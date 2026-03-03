@@ -532,7 +532,7 @@ function n_balance_check!(
         col_noutputs_partial[c] = col_noutputs[c]
 
         if isempty(is_fates_col) || !is_fates_col[c]
-            col_noutputs_partial[c] -= wood_harvestn[c] -
+            col_noutputs_partial[c] -= wood_harvestn[c] +
                                        crop_harvestn_to_cropprodn[c]
         end
 

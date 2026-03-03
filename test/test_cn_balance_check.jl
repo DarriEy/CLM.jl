@@ -451,6 +451,41 @@
     end
 
     # -----------------------------------------------------------------------
+    # Test n_balance_check! — gridcell-level (non-FATES) path
+    # -----------------------------------------------------------------------
+    @testset "n_balance_check! gridcell-level non-FATES balanced" begin
+        d = make_balance_test_data()
+        dt = d.dt
+
+        CLM.begin_cn_column_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.mask_soil, d.bounds_c)
+        CLM.begin_cn_gridcell_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.c_products, d.n_products, d.bounds_g;
+            use_fates_bgc=false,
+            hrv_xsmrpool_amount_left=[0.0],
+            gru_conv_cflux_amount_left=[0.0],
+            dwt_conv_cflux_amount_left=[0.0])
+
+        # ndep input matched by denit output at column level
+        ndep_rate = 0.001
+        d.soilbgc_nflux.ndep_to_sminn_col .= ndep_rate
+        d.soilbgc_nflux.denit_col .= ndep_rate
+        # Storage unchanged (input = output)
+
+        # Set gridcell-level product fields to zero to keep it simple
+        d.n_products.product_loss_grc .= 0.0
+
+        CLM.n_balance_check!(d.bal, d.soilbgc_nflux, d.soilbgc_nstate,
+            d.cnveg_nflux, d.n_products, d.col_data, d.grc_data,
+            d.mask_soil, d.bounds_c, d.bounds_g, d.dt;
+            is_fates_col=d.col_data.is_fates,
+            use_fates_bgc=false)
+
+        # endnb_grc should be set correctly
+        @test d.bal.endnb_grc[1] ≈ d.soilbgc_nstate.totn_grc[1]
+    end
+
+    # -----------------------------------------------------------------------
     # Test masked columns are skipped properly
     # -----------------------------------------------------------------------
     @testset "masked columns skipped" begin
