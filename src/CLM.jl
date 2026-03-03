@@ -134,4 +134,9 @@ include("biogeochem/cn_balance_check.jl")
 include("biogeochem/cn_driver.jl")
 include("biogeochem/vegetation_facade.jl")
 
+# ===========================================================================
+# Instance factory (depends on all types above)
+# ===========================================================================
+include("infrastructure/instances.jl")
+
 end # module CLM
