@@ -1,9 +1,6 @@
-The balance check module has already been fully ported and committed (commit `ff6543c`). Here's a summary:
+The port is already complete and committed (`1d980f5`). All 12,780 tests pass. There's nothing additional to do — the Fortran `atm2lndType.F90` has been fully ported to `src/types/atm2lnd.jl` with:
 
-**Status: Already complete**
-
-- `src/biogeophys/balance_check.jl` — fully ported with all 8 Fortran subroutines/functions
-- Already included in `src/CLM.jl` (line 96)
-- `test/test_balance_check.jl` — comprehensive tests covering init/clean, column balance, gridcell balance, main balance check, urban walls, and startup skip
-- All 12,656 tests pass
-- Committed as `ff6543c "Port Balance check from Fortran to Julia"`
+- **`Atm2LndParamsData`** — all 9 parameter fields
+- **`Atm2LndData`** — all 37 forcing/accumulation fields  
+- **10 functions** covering initialization, params, accumulation, cleanup, and stubs for I/O
+- **327-line test file** with 13 test sets covering construction, params validation, allocation, accumulation, cleanup, and mutability

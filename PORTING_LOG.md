@@ -99,3 +99,4 @@
 | Satellite phenology | 9 | ✓ PASSED | 2 | — |
 | C isotope flux | 9 | ✓ PASSED | 2 | — |
 | CN balance check | 9 | ✓ PASSED | 2 | — |
+| Balance check | 9 | ✓ PASSED | 2 | — |
