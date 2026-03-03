@@ -94,6 +94,7 @@ using CLM
     include("test_methane.jl")
     include("test_voc_emission.jl")
     include("test_dust_emission.jl")
+    include("test_irrigation.jl")
     include("test_cn_driver.jl")
     include("test_vegetation_facade.jl")
 end
