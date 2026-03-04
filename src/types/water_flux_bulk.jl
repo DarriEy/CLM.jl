@@ -162,11 +162,37 @@ function waterfluxbulk_init_cold!(wfb::WaterFluxBulkData,
     for p in bounds_patch
         wfb.qflx_snowindunload_patch[p] = 0.0
         wfb.qflx_snotempunload_patch[p] = 0.0
+        # Evaporation partitioning — must be 0.0 for soil_fluxes! += accumulation
+        wfb.qflx_ev_soil_patch[p]       = 0.0
+        wfb.qflx_ev_h2osfc_patch[p]     = 0.0
+        wfb.qflx_ev_snow_patch[p]       = 0.0
+    end
+
+    nlevsoi = varpar.nlevsoi
+    for j in 1:nlevsoi
+        for c in bounds_col
+            wfb.qflx_rootsoi_col[c, j]       = 0.0
+            wfb.qflx_drain_vr_col[c, j]      = 0.0
+        end
     end
 
     for c in bounds_col
-        wfb.qflx_phs_neg_col[c]      = 0.0
-        wfb.qflx_h2osfc_surf_col[c]  = 0.0
+        wfb.qflx_phs_neg_col[c]              = 0.0
+        wfb.qflx_h2osfc_surf_col[c]          = 0.0
+        # Evaporation partitioning fields — must be 0.0 before first hydrology step
+        # (NaN * 0.0 = NaN in IEEE 754, so even zero-weighted terms poison the chain)
+        wfb.qflx_ev_soil_col[c]              = 0.0
+        wfb.qflx_ev_h2osfc_col[c]            = 0.0
+        wfb.qflx_ev_snow_col[c]              = 0.0
+        wfb.qflx_sat_excess_surf_col[c]      = 0.0
+        wfb.qflx_infl_excess_col[c]          = 0.0
+        wfb.qflx_infl_excess_surf_col[c]     = 0.0
+        wfb.qflx_in_soil_col[c]              = 0.0
+        wfb.qflx_in_soil_limited_col[c]      = 0.0
+        wfb.qflx_h2osfc_drain_col[c]         = 0.0
+        wfb.qflx_top_soil_to_h2osfc_col[c]   = 0.0
+        wfb.qflx_in_h2osfc_col[c]            = 0.0
+        wfb.qflx_deficit_col[c]              = 0.0
     end
 
     return nothing

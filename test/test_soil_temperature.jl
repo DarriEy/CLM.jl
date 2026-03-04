@@ -180,12 +180,15 @@
         # Canopy state
         cs.frac_veg_nosno_patch[p] = 0
 
-        # Water fluxes
+        # Water fluxes (set both nested wf and bulk-level fields)
         wfb.wf.qflx_evap_soi_patch[p] = 0.0
         wfb.wf.qflx_ev_snow_patch[p] = 0.0
         wfb.wf.qflx_ev_soil_patch[p] = 0.0
         wfb.wf.qflx_ev_h2osfc_patch[p] = 0.0
         wfb.wf.qflx_tran_veg_patch[p] = 0.0
+        wfb.qflx_ev_snow_patch[p] = 0.0
+        wfb.qflx_ev_soil_patch[p] = 0.0
+        wfb.qflx_ev_h2osfc_patch[p] = 0.0
         wfb.wf.qflx_snomelt_col[c] = 0.0
         wfb.wf.qflx_snofrz_col[c] = 0.0
         wfb.wf.qflx_snow_drain_col[c] = 0.0

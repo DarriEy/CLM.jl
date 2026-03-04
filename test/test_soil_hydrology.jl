@@ -189,7 +189,15 @@
         CLM.soilhydrology_init!(sh, nc)
 
         # Mock column metadata: all non-urban, non-lake columns
-        zi_col = fill(3.8, nc, nlevsoi)  # interface depths
+        # zi_col must be a combined snow+soil array: (nc, nlevsno + nlevgrnd + 1)
+        nlevsno_t = CLM.varpar.nlevsno
+        joff_zi = nlevsno_t + 1
+        nlev_zi = nlevsno_t + CLM.varpar.nlevmaxurbgrnd + 1
+        zi_col = fill(0.0, nc, nlev_zi)
+        # Set soil interface values: Fortran zi(c,j) → Julia zi_col[c, joff_zi + j]
+        for j in 1:nlevsoi
+            zi_col[:, joff_zi + j] .= 3.8  # interface depths
+        end
         wa_col = fill(4800.0, nc)         # aquifer water
         landunit_col = [1, 1, 1]
         lakpoi = falses(1)                # landunit 1 is not lake
@@ -208,16 +216,16 @@
             itype_col=itype_col,
             nbedrock_col=nbedrock_col)
 
-        # zwt_col should be computed: (25 + zi[c,nlevsoi]) - wa[c]/0.2/1000
+        # zwt_col should be computed: (25 + zi[c,joff_zi+nlevsoi]) - wa[c]/0.2/1000
         for c in 1:nc
-            expected_zwt = (25.0 + zi_col[c, nlevsoi]) - wa_col[c] / 0.2 / 1000.0
+            expected_zwt = (25.0 + zi_col[c, joff_zi + nlevsoi]) - wa_col[c] / 0.2 / 1000.0
             @test sh.zwt_col[c] ≈ expected_zwt
         end
 
-        # Non-urban, non-lake: zwt_perched and frost_table = zi[c, nlevsoi]
+        # Non-urban, non-lake: zwt_perched and frost_table = zi[c, joff_zi + nlevsoi]
         for c in 1:nc
-            @test sh.zwt_perched_col[c] ≈ zi_col[c, nlevsoi]
-            @test sh.frost_table_col[c] ≈ zi_col[c, nlevsoi]
+            @test sh.zwt_perched_col[c] ≈ zi_col[c, joff_zi + nlevsoi]
+            @test sh.frost_table_col[c] ≈ zi_col[c, joff_zi + nlevsoi]
         end
     end
 

@@ -353,18 +353,39 @@ Ported from `canopystate_type%UpdateAccVars` in `CanopyStateType.F90`.
 Core logic is ported; accumulator calls are stubs until accumulMod is ported.
 """
 function canopystate_update_acc_vars!(cs::CanopyStateData,
-                                       bounds_patch::UnitRange{Int})
-    # When accumulMod is available, the logic is:
-    #
-    # 1. Copy fsun_patch into buffer, then:
-    #    update_accum_field('FSUN24',  buffer, nstep)
-    #    extract_accum_field('FSUN24', fsun24_patch, nstep)
-    #    update_accum_field('FSUN240', buffer, nstep)
-    #    extract_accum_field('FSUN240', fsun240_patch, nstep)
-    #
-    # 2. Copy elai_patch into buffer, then:
-    #    update_accum_field('LAI240',  buffer, nstep)
-    #    extract_accum_field('LAI240', elai240_patch, nstep)
+                                       bounds_patch::UnitRange{Int};
+                                       nstep::Int = 0)
+    for p in bounds_patch
+        # FSUN24: 24-timestep running mean of sunlit fraction
+        fsun = cs.fsun_patch[p]
+        if isfinite(fsun)
+            if isnan(cs.fsun24_patch[p]) || cs.fsun24_patch[p] == SPVAL || nstep <= 1
+                cs.fsun24_patch[p] = fsun
+            else
+                n24 = min(nstep, 24)
+                cs.fsun24_patch[p] += (fsun - cs.fsun24_patch[p]) / n24
+            end
+
+            # FSUN240: 240-timestep running mean of sunlit fraction
+            if isnan(cs.fsun240_patch[p]) || cs.fsun240_patch[p] == SPVAL || nstep <= 1
+                cs.fsun240_patch[p] = fsun
+            else
+                n240 = min(nstep, 240)
+                cs.fsun240_patch[p] += (fsun - cs.fsun240_patch[p]) / n240
+            end
+        end
+
+        # LAI240: 240-timestep running mean of exposed LAI
+        elai = cs.elai_patch[p]
+        if isfinite(elai)
+            if isnan(cs.elai240_patch[p]) || cs.elai240_patch[p] == SPVAL || nstep <= 1
+                cs.elai240_patch[p] = elai
+            else
+                n240 = min(nstep, 240)
+                cs.elai240_patch[p] += (elai - cs.elai240_patch[p]) / n240
+            end
+        end
+    end
 
     return nothing
 end

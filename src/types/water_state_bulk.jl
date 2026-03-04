@@ -38,8 +38,8 @@ function waterstatebulk_init!(wsb::WaterStateBulkData, nc::Int, np::Int, nl::Int
     waterstate_init!(wsb.ws, nc, np, nl, ng)
 
     # Bulk-specific fields (InitBulkAllocate)
-    wsb.snow_persistence_col = fill(NaN, nc)
-    wsb.int_snow_col         = fill(NaN, nc)
+    wsb.snow_persistence_col = fill(0.0, nc)
+    wsb.int_snow_col         = fill(0.0, nc)
 
     return nothing
 end

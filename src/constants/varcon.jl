@@ -85,6 +85,23 @@ const FUN_PERIOD    = 1       # FUN update period
 const ZMIN_BEDROCK = 0.4       # minimum depth to bedrock [m]
 const AQUIFER_WATER_BASELINE = 5000.0  # baseline aquifer water [mm]
 
+# --- Error function approximation ---
+# Abramowitz & Stegun 7.1.26, ~1.5e-7 accuracy
+# Avoids SpecialFunctions.jl dependency
+function erf(x::Float64)
+    a1 =  0.254829592
+    a2 = -0.284496736
+    a3 =  1.421413741
+    a4 = -1.453152027
+    a5 =  1.061405429
+    p  =  0.3275911
+    sgn = x >= 0.0 ? 1.0 : -1.0
+    ax = abs(x)
+    t = 1.0 / (1.0 + p * ax)
+    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(-ax * ax)
+    return sgn * y
+end
+
 # --- Carbon ---
 const C_TO_B = 2.0             # carbon to biomass ratio
 const CATOMW = 12.011          # atomic weight of carbon [g/mol]
@@ -200,31 +217,36 @@ function varcon_init!()
     nlevgrnd = varpar.nlevgrnd
     nlevlak = varpar.nlevlak
 
-    # Standard CLM soil layer structure (20-layer, 3.8m)
-    # Node depths and interface depths follow CLM5 conventions
-    scalez = 0.025  # soil discretization scaling factor [m]
-    zsoi_val = zeros(nlevgrnd)
+    # CLM5 "20SL_8.5m" soil layer structure
+    # Piecewise linear layer thicknesses from initVerticalMod.F90
     dzsoi_val = zeros(nlevgrnd)
+    zsoi_val = zeros(nlevgrnd)
     zisoi_val = zeros(nlevgrnd + 1)
 
-    for j in 1:nlevsoi
-        zsoi_val[j] = scalez * (exp(0.5 * (j - 0.5)) - 1.0)
+    # Layer thicknesses: linearly increasing within 3 tiers
+    for j in 1:min(4, nlevsoi)
+        dzsoi_val[j] = j * 0.02                              # 0.02, 0.04, 0.06, 0.08 m
     end
-
-    # Bedrock layers (if any)
+    for j in 5:min(13, nlevsoi)
+        dzsoi_val[j] = dzsoi_val[4] + (j - 4) * 0.04        # 0.12 → 0.44 m
+    end
+    for j in 14:nlevsoi
+        dzsoi_val[j] = dzsoi_val[min(13, nlevsoi)] + (j - 13) * 0.10  # 0.54 → 1.14 m
+    end
+    # Bedrock layers: exponential thickening
     for j in (nlevsoi+1):nlevgrnd
-        zsoi_val[j] = zsoi_val[nlevsoi] + (j - nlevsoi) * 0.5
+        dzsoi_val[j] = dzsoi_val[nlevsoi] + (((j - nlevsoi) * 25.0)^1.5) / 100.0
     end
 
-    # Interface depths
+    # Interface depths (cumulative sum of layer thicknesses)
     zisoi_val[1] = 0.0
     for j in 1:nlevgrnd
-        if j < nlevgrnd
-            zisoi_val[j+1] = 0.5 * (zsoi_val[j] + zsoi_val[j+1])
-        else
-            zisoi_val[j+1] = zsoi_val[j] + 0.5 * (zsoi_val[j] - zisoi_val[j])
-        end
-        dzsoi_val[j] = zisoi_val[j+1] - zisoi_val[j]
+        zisoi_val[j+1] = zisoi_val[j] + dzsoi_val[j]
+    end
+
+    # Node depths (layer midpoints)
+    for j in 1:nlevgrnd
+        zsoi_val[j] = 0.5 * (zisoi_val[j] + zisoi_val[j+1])
     end
 
     zsoi[]  = zsoi_val

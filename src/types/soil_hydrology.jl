@@ -188,6 +188,12 @@ function soilhydrology_init_cold!(sh::SoilHydrologyData, bounds_col::UnitRange{I
         sh.zwt_col[c] = 0.0
     end
 
+    # Set decay factor and h2osfc threshold (from SoilHydrologyInitTimeConstMod.F90)
+    for c in bounds_col
+        sh.hkdepth_col[c] = 1.0 / 2.5
+        sh.h2osfc_thresh_col[c] = 0.0
+    end
+
     # Full cold-start initialization requires column/landunit info.
     # When called without column metadata (basic init), just set defaults.
     if zi_col === nothing || landunit_col === nothing
@@ -198,6 +204,10 @@ function soilhydrology_init_cold!(sh::SoilHydrologyData, bounds_col::UnitRange{I
         return nothing
     end
 
+    # Offset for zi array: Fortran zi(c, j) → Julia zi_col[c, joff_zi + j]
+    nlevsno_ = varpar.nlevsno
+    joff_zi  = nlevsno_ + 1
+
     for c in bounds_col
         l = landunit_col[c]
         if !(lakpoi !== nothing && lakpoi[l])  # not lake
@@ -205,9 +215,9 @@ function soilhydrology_init_cold!(sh::SoilHydrologyData, bounds_col::UnitRange{I
                 # Urban column
                 if itype_col !== nothing && itype_col[c] == ICOL_ROAD_PERV
                     if use_aquifer_layer
-                        sh.zwt_col[c] = (25.0 + zi_col[c, nlevsoi]) - wa_col[c] / 0.2 / 1000.0
+                        sh.zwt_col[c] = (25.0 + zi_col[c, joff_zi + nlevsoi]) - wa_col[c] / 0.2 / 1000.0
                     else
-                        sh.zwt_col[c] = zi_col[c, nbedrock_col[c]]
+                        sh.zwt_col[c] = zi_col[c, joff_zi + nbedrock_col[c]]
                     end
                 else
                     sh.zwt_col[c] = SPVAL
@@ -217,12 +227,12 @@ function soilhydrology_init_cold!(sh::SoilHydrologyData, bounds_col::UnitRange{I
             else
                 # Non-urban, non-lake
                 if use_aquifer_layer
-                    sh.zwt_col[c] = (25.0 + zi_col[c, nlevsoi]) - wa_col[c] / 0.2 / 1000.0
+                    sh.zwt_col[c] = (25.0 + zi_col[c, joff_zi + nlevsoi]) - wa_col[c] / 0.2 / 1000.0
                 else
-                    sh.zwt_col[c] = zi_col[c, nbedrock_col[c]]
+                    sh.zwt_col[c] = zi_col[c, joff_zi + nbedrock_col[c]]
                 end
-                sh.zwt_perched_col[c] = zi_col[c, nlevsoi]
-                sh.frost_table_col[c] = zi_col[c, nlevsoi]
+                sh.zwt_perched_col[c] = zi_col[c, joff_zi + nlevsoi]
+                sh.frost_table_col[c] = zi_col[c, joff_zi + nlevsoi]
             end
         end
     end

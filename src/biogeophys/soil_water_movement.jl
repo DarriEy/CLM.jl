@@ -813,6 +813,12 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
 
     nlevsoi  = varpar.nlevsoi
     nlevgrnd = varpar.nlevgrnd
+    nlevsno  = varpar.nlevsno
+
+    # Offsets for snow+soil arrays (z, dz, h2osoi_liq/ice, t_soisno)
+    # Soil layer j in Fortran maps to index j + joff in Julia 1-based arrays
+    joff    = nlevsno          # for z, dz, h2osoi_liq/ice, t_soisno
+    joff_zi = nlevsno + 1     # for zi (has extra element at top)
 
     z  = col_data.z
     zi = col_data.zi
@@ -881,13 +887,13 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     for j in 1:nlevsoi
         for c in eachindex(mask_hydrology)
             mask_hydrology[c] || continue
-            zmm[c, j]  = z[c, j] * 1.0e3
-            dzmm[c, j] = dz[c, j] * 1.0e3
-            zimm_arr[c, j+1] = zi[c, j] * 1.0e3  # j+1 because index 1 = Fortran j=0
+            zmm[c, j]  = z[c, joff + j] * 1.0e3
+            dzmm[c, j] = dz[c, joff + j] * 1.0e3
+            zimm_arr[c, j+1] = zi[c, joff_zi + j] * 1.0e3  # j+1 because index 1 = Fortran j=0
 
-            vol_ice[c, j] = min(watsat[c, j], h2osoi_ice[c, j] / (dz[c, j] * DENICE))
+            vol_ice[c, j] = min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * DENICE))
             icefrac[c, j] = min(1.0, vol_ice[c, j] / watsat[c, j])
-            vwc_liq[c, j] = max(h2osoi_liq[c, j], 1.0e-6) / (dz[c, j] * DENH2O)
+            vwc_liq[c, j] = max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
         end
     end
 
@@ -902,7 +908,7 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
         mask_hydrology[c] || continue
         jwt[c] = nlevsoi
         for j in 1:nlevsoi
-            if zwt[c] <= zi[c, j]
+            if zwt[c] <= zi[c, joff_zi + j]
                 jwt[c] = j - 1
                 break
             end
@@ -910,11 +916,11 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
 
         # Compute vwc at water table depth
         vwc_zwt[c] = watsat[c, nlevsoi]
-        if t_soisno[c, jwt[c]+1] < TFRZ
+        if t_soisno[c, joff + jwt[c]+1] < TFRZ
             vwc_zwt[c] = vwc_liq[c, nlevsoi]
             for j in nlevsoi:nlevgrnd
-                if zwt[c] <= zi[c, j]
-                    smp1_val = HFUS * (TFRZ - t_soisno[c, j]) / (GRAV * t_soisno[c, j]) * 1000.0
+                if zwt[c] <= zi[c, joff_zi + j]
+                    smp1_val = HFUS * (TFRZ - t_soisno[c, joff + j]) / (GRAV * t_soisno[c, joff + j]) * 1000.0
                     smp1_val = max(sucsat[c, nlevsoi], smp1_val)
                     vwc_zwt[c] = watsat[c, nlevsoi] * (smp1_val / sucsat[c, nlevsoi])^(-1.0 / bsw[c, nlevsoi])
                     vwc_zwt[c] = min(vwc_zwt[c], 0.5 * (watsat[c, nlevsoi] + h2osoi_vol[c, nlevsoi]))
@@ -1130,7 +1136,7 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
         mask_hydrology[c] || continue
 
         for j in 1:nlevsoi
-            h2osoi_liq[c, j] = h2osoi_liq[c, j] + dwat2[c, j] * dzmm[c, j]
+            h2osoi_liq[c, joff + j] = h2osoi_liq[c, joff + j] + dwat2[c, j] * dzmm[c, j]
         end
 
         # Calculate qcharge
@@ -1149,7 +1155,7 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
             if jwt[c] == 0
                 qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] + 1.0e-3) * 1000.0)
             else
-                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, jwt[c]]) * 1000.0 * 2.0)
+                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, joff + jwt[c]]) * 1000.0 * 2.0)
             end
 
             # Limit qcharge
@@ -1166,8 +1172,8 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
         mask_hydrology[c] || continue
         qflx_deficit[c] = 0.0
         for j in 1:nlevsoi
-            if h2osoi_liq[c, j] < 0.0
-                qflx_deficit[c] = qflx_deficit[c] - h2osoi_liq[c, j]
+            if h2osoi_liq[c, joff + j] < 0.0
+                qflx_deficit[c] = qflx_deficit[c] - h2osoi_liq[c, joff + j]
             end
         end
     end
@@ -1223,30 +1229,32 @@ function soil_water!(col_data::ColumnData,
 
     # FlexibleCN workaround for negative liquid water
     if use_flexibleCN
+        nlevsno_  = varpar.nlevsno
+        joff_     = nlevsno_
         watmin = 0.001
 
         for j in 1:(nlevsoi-1)
             for c in eachindex(mask_hydrology)
                 mask_hydrology[c] || continue
-                if h2osoi_liq[c, j] < 0.0
-                    xs = watmin - h2osoi_liq[c, j]
+                if h2osoi_liq[c, joff_ + j] < 0.0
+                    xs = watmin - h2osoi_liq[c, joff_ + j]
                 else
                     xs = 0.0
                 end
-                h2osoi_liq[c, j]   = h2osoi_liq[c, j] + xs
-                h2osoi_liq[c, j+1] = h2osoi_liq[c, j+1] - xs
+                h2osoi_liq[c, joff_ + j]   = h2osoi_liq[c, joff_ + j] + xs
+                h2osoi_liq[c, joff_ + j+1] = h2osoi_liq[c, joff_ + j+1] - xs
             end
         end
 
         j = nlevsoi
         for c in eachindex(mask_hydrology)
             mask_hydrology[c] || continue
-            if h2osoi_liq[c, j] < watmin
-                xs = watmin - h2osoi_liq[c, j]
+            if h2osoi_liq[c, joff_ + j] < watmin
+                xs = watmin - h2osoi_liq[c, joff_ + j]
             else
                 xs = 0.0
             end
-            h2osoi_liq[c, j] = h2osoi_liq[c, j] + xs
+            h2osoi_liq[c, joff_ + j] = h2osoi_liq[c, joff_ + j] + xs
             wa[c] = wa[c] - xs
         end
 
@@ -1254,8 +1262,8 @@ function soil_water!(col_data::ColumnData,
         for j in 1:nlevsoi
             for c in eachindex(mask_hydrology)
                 mask_hydrology[c] || continue
-                h2osoi_vol[c, j] = h2osoi_liq[c, j] / (dz[c, j] * DENH2O) +
-                                   h2osoi_ice[c, j] / (dz[c, j] * DENICE)
+                h2osoi_vol[c, j] = h2osoi_liq[c, joff_ + j] / (dz[c, joff_ + j] * DENH2O) +
+                                   h2osoi_ice[c, joff_ + j] / (dz[c, joff_ + j] * DENICE)
             end
         end
     end

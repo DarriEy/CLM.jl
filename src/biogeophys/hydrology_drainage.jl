@@ -272,6 +272,7 @@ function hydrology_drainage!(
             lun.urbpoi,
             mask_hydrology, mask_urban, bounds,
             nlevsoi, dtime;
+            nlevsno=nlevsno,
             use_vichydro=use_vichydro)
     else
         # Perched lateral flow requires gridcell-level depth data

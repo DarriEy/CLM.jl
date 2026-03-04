@@ -312,6 +312,8 @@ Stability function for rib < 0 (wind profile).
 Ported from `StabilityFunc1` in `FrictionVelocityMod.F90`.
 """
 function stability_func1(zeta::Float64)
+    # Guard: this function is only valid for zeta <= 0 (unstable conditions)
+    zeta = min(zeta, 0.0)
     chik2 = sqrt(1.0 - 16.0 * zeta)
     chik = sqrt(chik2)
     return 2.0 * log((1.0 + chik) * 0.5) +
@@ -326,6 +328,8 @@ Stability function for rib < 0 (temperature/humidity profile).
 Ported from `StabilityFunc2` in `FrictionVelocityMod.F90`.
 """
 function stability_func2(zeta::Float64)
+    # Guard: this function is only valid for zeta <= 0 (unstable conditions)
+    zeta = min(zeta, 0.0)
     chik2 = sqrt(1.0 - 16.0 * zeta)
     return 2.0 * log((1.0 + chik2) * 0.5)
 end
@@ -617,7 +621,7 @@ function friction_velocity!(
 
         # Deposition velocity
         if zeta < 0.0
-            vds_tmp = 2.0e-3 * ustar[n] * (1.0 + (300.0 / (-obu[n]))^0.666)
+            vds_tmp = 2.0e-3 * ustar[n] * (1.0 + (300.0 / max(-obu[n], 1.0e-10))^0.666)
         else
             vds_tmp = 2.0e-3 * ustar[n]
         end

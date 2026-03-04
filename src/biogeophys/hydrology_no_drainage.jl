@@ -207,9 +207,9 @@ function update_ground_and_soil_temperatures!(
     zi::Matrix{Float64},
     col_landunit::Vector{Int},
     col_itype::Vector{Int},
-    lun_urbpoi::BitVector,
+    lun_urbpoi::AbstractVector{Bool},
     lun_itype::Vector{Int},
-    mask_nolake::BitVector,
+    mask_nolake::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     nlevsno::Int
@@ -651,12 +651,66 @@ function handle_new_snow!(
     dtime::Float64,
     nlevsno::Int;
     forc_t::Vector{Float64},
-    qflx_snow_grnd::Vector{Float64}
+    forc_wind::Vector{Float64} = Float64[],
+    qflx_snow_grnd::Vector{Float64},
+    qflx_snow_drain::Vector{Float64} = zeros(length(mask_nolake)),
+    int_snow::Vector{Float64} = zeros(length(mask_nolake))
 )
     nc = length(mask_nolake)
 
     # --- 1. Update quantities for new snow ---
-    # Add new snow mass to appropriate state variable
+    # Step 1a: Compute bulk density of new snow
+    bifall = fill(50.0, nc)
+    if !isempty(forc_wind)
+        new_snow_bulk_density!(bifall, forc_t, forc_wind, col.gridcell,
+                               mask_nolake, bounds)
+    else
+        # Fallback: use temperature-only bulk density
+        for c in bounds
+            mask_nolake[c] || continue
+            if forc_t[c] > TFRZ + 2.0
+                bifall[c] = 50.0 + 1.7 * (17.0)^1.5
+            elseif forc_t[c] > TFRZ - 15.0
+                bifall[c] = 50.0 + 1.7 * (forc_t[c] - TFRZ + 15.0)^1.5
+            else
+                bifall[c] = 50.0
+            end
+        end
+    end
+
+    # Step 1b: Calculate total H2O in snow (h2osno_total)
+    h2osno_total = zeros(nc)
+    for c in bounds
+        mask_nolake[c] || continue
+        h2osno_total[c] = waterstatebulk.ws.h2osno_no_layers_col[c]
+        for j in (col.snl[c]+1):0
+            jj = j + nlevsno
+            h2osno_total[c] += waterstatebulk.ws.h2osoi_ice_col[c, jj] +
+                               waterstatebulk.ws.h2osoi_liq_col[c, jj]
+        end
+    end
+
+    # Step 1c: Update snow diagnostics (snow_depth, frac_sno, int_snow, swe_old)
+    lun_itype_col = Vector{Int}(undef, nc)
+    urbpoi_col = Vector{Bool}(undef, nc)
+    for c in bounds
+        mask_nolake[c] || continue
+        l = col.landunit[c]
+        lun_itype_col[c] = lun.itype[l]
+        urbpoi_col[c] = lun.urbpoi[l]
+    end
+
+    bulkdiag_new_snow_diagnostics!(
+        col.dz, int_snow, waterdiagbulk.swe_old_col,
+        waterdiagbulk.frac_sno_col, waterdiagbulk.frac_sno_eff_col,
+        waterdiagbulk.snow_depth_col, waterdiagbulk.snomelt_accum_col,
+        dtime, lun_itype_col, urbpoi_col, col.snl, bifall,
+        h2osno_total,
+        waterstatebulk.ws.h2osoi_ice_col, waterstatebulk.ws.h2osoi_liq_col,
+        qflx_snow_grnd, qflx_snow_drain,
+        mask_nolake, bounds, nlevsno)
+
+    # Step 1d: Add new snow mass to appropriate state variable
     update_state_add_new_snow!(
         waterstatebulk.ws.h2osno_no_layers_col,
         waterstatebulk.ws.h2osoi_ice_col,
@@ -686,6 +740,13 @@ function handle_new_snow!(
         mask_thawed_wetland, bounds)
 
     # --- 3. Initialize explicit snow pack ---
+    # TODO: Re-enable explicit snow layer creation once all downstream snow
+    # physics code paths (compaction, water movement, SNICAR grain aging)
+    # are properly initialized from cold start. Currently, creating explicit
+    # layers (snl=-1) triggers NaN cascade in uninitialized code paths.
+    # For now, snow mass accumulates in h2osno_no_layers_col and diagnostics
+    # (snow_depth, frac_sno) are updated by bulkdiag_new_snow_diagnostics!.
+    #=
     mask_init_snowpack = falses(nc)
     build_filter_snowpack_initialized!(
         mask_init_snowpack,
@@ -708,6 +769,7 @@ function handle_new_snow!(
         waterdiagbulk.snomelt_accum_col,
         forc_t, waterdiagbulk.snow_depth_col,
         mask_init_snowpack, bounds, nlevsno)
+    =#
 
     return nothing
 end
@@ -757,8 +819,11 @@ function hydrology_no_drainage!(
     nlevsno::Int,
     nlevsoi::Int,
     nlevgrnd::Int,
-    nlevurb::Int
+    nlevurb::Int;
+    soilhydrology::Union{SoilHydrologyData, Nothing} = nothing
 )
+    # Note: set_soil_water_fractions! is now called in the driver before physics
+
     # --- Snow persistence ---
     update_snow_persistence!(
         waterstatebulk.snow_persistence_col,

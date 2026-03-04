@@ -31,24 +31,8 @@ const DNS_AER = 2.5e3           # [kg m-3] Aerosol density
 const BOLTZ = 1.38065e-23       # [J/K/molecule] Boltzmann constant (SHR_CONST_BOLTZ)
 
 # ---------------------------------------------------------------------------
-# Local erf approximation (Abramowitz & Stegun 7.1.26, ~1.5e-7 accuracy)
-# Used in init_dust_vars! for overlap factor computation.
-# Avoids adding SpecialFunctions.jl as a dependency.
-# ---------------------------------------------------------------------------
-
-function _dust_erf(x::Float64)
-    a1 =  0.254829592
-    a2 = -0.284496736
-    a3 =  1.421413741
-    a4 = -1.453152027
-    a5 =  1.061405429
-    p  =  0.3275911
-    sgn = x >= 0.0 ? 1.0 : -1.0
-    ax = abs(x)
-    t = 1.0 / (1.0 + p * ax)
-    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(-ax * ax)
-    return sgn * y
-end
+# _dust_erf: alias for shared erf() from varcon.jl
+const _dust_erf = erf
 
 # ---------------------------------------------------------------------------
 # DustEmisBaseData — Dust emission state and flux data

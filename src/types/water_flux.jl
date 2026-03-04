@@ -141,10 +141,10 @@ function waterflux_init!(wf::WaterFluxData, nc::Int, np::Int, nl::Int, ng::Int)
     wf.qflx_snow_grnd_col                  = fill(NaN, nc)
     wf.qflx_rain_plus_snomelt_col          = fill(NaN, nc)
     wf.qflx_solidevap_from_top_layer_col   = fill(0.0, nc)  # ival = 0.0 in Fortran
-    wf.qflx_snwcp_liq_col                  = fill(NaN, nc)
-    wf.qflx_snwcp_ice_col                  = fill(NaN, nc)
-    wf.qflx_snwcp_discarded_liq_col        = fill(NaN, nc)
-    wf.qflx_snwcp_discarded_ice_col        = fill(NaN, nc)
+    wf.qflx_snwcp_liq_col                  = fill(0.0, nc)  # 0 when no explicit snow layers
+    wf.qflx_snwcp_ice_col                  = fill(0.0, nc)  # 0 when no explicit snow layers
+    wf.qflx_snwcp_discarded_liq_col        = fill(0.0, nc)  # 0 when no explicit snow layers
+    wf.qflx_snwcp_discarded_ice_col        = fill(0.0, nc)  # 0 when no explicit snow layers
     wf.qflx_glcice_col                     = fill(NaN, nc)
     wf.qflx_glcice_frz_col                 = fill(NaN, nc)
     wf.qflx_glcice_melt_col                = fill(NaN, nc)
@@ -157,24 +157,24 @@ function waterflux_init!(wf::WaterFluxData, nc::Int, np::Int, nl::Int, ng::Int)
     wf.qflx_liqevap_from_top_layer_col     = fill(NaN, nc)
     wf.qflx_liqdew_to_top_layer_col        = fill(NaN, nc)
     wf.qflx_soliddew_to_top_layer_col      = fill(NaN, nc)
-    wf.qflx_infl_col                       = fill(NaN, nc)
-    wf.qflx_surf_col                       = fill(NaN, nc)
-    wf.qflx_drain_col                      = fill(NaN, nc)
-    wf.qflx_drain_perched_col              = fill(NaN, nc)
+    wf.qflx_infl_col                       = fill(0.0, nc)
+    wf.qflx_surf_col                       = fill(0.0, nc)
+    wf.qflx_drain_col                      = fill(0.0, nc)
+    wf.qflx_drain_perched_col              = fill(0.0, nc)
     wf.qflx_latflow_in_col                 = fill(NaN, nc)
     wf.qflx_latflow_out_col                = fill(NaN, nc)
     wf.volumetric_discharge_col            = fill(NaN, nc)
     wf.qflx_top_soil_col                   = fill(NaN, nc)
     wf.qflx_floodc_col                     = fill(NaN, nc)
     wf.qflx_sl_top_soil_col                = fill(NaN, nc)
-    wf.qflx_snomelt_col                    = fill(NaN, nc)
-    wf.qflx_qrgwl_col                      = fill(NaN, nc)
-    wf.qflx_runoff_col                     = fill(NaN, nc)
-    wf.qflx_runoff_r_col                   = fill(NaN, nc)
-    wf.qflx_runoff_u_col                   = fill(NaN, nc)
+    wf.qflx_snomelt_col                    = fill(0.0, nc)
+    wf.qflx_qrgwl_col                      = fill(0.0, nc)
+    wf.qflx_runoff_col                     = fill(0.0, nc)
+    wf.qflx_runoff_r_col                   = fill(0.0, nc)
+    wf.qflx_runoff_u_col                   = fill(0.0, nc)
     wf.qflx_rsub_sat_col                   = fill(NaN, nc)
     wf.qflx_snofrz_col                     = fill(NaN, nc)
-    wf.qflx_snow_drain_col                 = fill(NaN, nc)
+    wf.qflx_snow_drain_col                 = fill(0.0, nc)
     wf.qflx_ice_runoff_snwcp_col           = fill(NaN, nc)
     wf.qflx_ice_runoff_xs_col              = fill(NaN, nc)
     wf.qflx_h2osfc_to_ice_col             = fill(NaN, nc)
@@ -325,6 +325,7 @@ function waterflux_init_cold!(wf::WaterFluxData,
         wf.qflx_irrig_sprinkler_patch[p]          = 0.0
         wf.qflx_tran_veg_patch[p]                 = 0.0
         wf.qflx_evap_veg_patch[p]                 = 0.0
+        wf.qflx_evap_soi_patch[p]                 = 0.0
     end
 
     # Column-level zeros
@@ -338,6 +339,11 @@ function waterflux_init_cold!(wf::WaterFluxData,
         wf.qflx_snow_drain_col[c]                 = 0.0
         wf.qflx_ice_runoff_xs_col[c]              = 0.0
         wf.qflx_glcice_dyn_water_flux_col[c]      = 0.0
+        # Hydrology chain inputs — must be 0.0 before first timestep
+        wf.qflx_floodc_col[c]                     = 0.0
+        wf.qflx_snow_h2osfc_col[c]                = 0.0
+        wf.qflx_rain_plus_snomelt_col[c]          = 0.0
+        wf.qflx_top_soil_col[c]                   = 0.0
     end
 
     # Column 2D irrigation layers

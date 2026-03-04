@@ -50,6 +50,15 @@ Base.@kwdef mutable struct CLMDriverConfig
     n_drydep::Int = 0
     decomp_method::Int = 1
     no_soil_decomp::Int = 0
+
+    # BGC decomposition cascade parameters (set from cascade init)
+    ndecomp_pools::Int = 7
+    ndecomp_cascade_transitions::Int = 10
+    i_litr_min::Int = 1
+    i_litr_max::Int = 3
+    i_cwd::Int = 7
+    npcropmin::Int = 17
+    nrepr::Int = 1
 end
 
 # ---------------------------------------------------------------------------
@@ -244,6 +253,22 @@ function write_diagnostic(nstep::Int; io::IO=stdout)
 end
 
 # ---------------------------------------------------------------------------
+# bitvec_to_filter — Convert BitVector mask to (count, indices) for Fortran-style APIs
+# ---------------------------------------------------------------------------
+
+"""
+    bitvec_to_filter(mask::BitVector) -> (num::Int, filter::Vector{Int})
+
+Convert a BitVector mask to the (count, index-array) form used by some
+ported Fortran routines (e.g. urban_fluxes!) that have not yet been
+converted to the BitVector interface.
+"""
+function bitvec_to_filter(mask::BitVector)
+    indices = findall(mask)
+    return (length(indices), indices)
+end
+
+# ---------------------------------------------------------------------------
 # clm_drv! — Main CLM driver
 # Ported from clm_drv in clm_driver.F90
 # ---------------------------------------------------------------------------
@@ -305,17 +330,62 @@ function clm_drv!(config::CLMDriverConfig,
                    is_first_step::Bool = false,
                    is_beg_curr_day::Bool = false,
                    is_beg_curr_year::Bool = false,
+                   dtime::Float64 = 1800.0,
+                   mon::Int = 1,
+                   day::Int = 1,
                    photosyns::PhotosynthesisData = PhotosynthesisData())
 
     bounds_clump = bounds_proc  # single-clump mode
 
+    # Shorthand aliases for frequently-used instances
+    bc = bounds_clump
+    col = inst.column
+    lun = inst.landunit
+    pch = inst.patch
+    grc = inst.gridcell
+    temp = inst.temperature
+    ef = inst.energyflux
+    cs = inst.canopystate
+    ss = inst.soilstate
+    sh = inst.soilhydrology
+    fv = inst.frictionvel
+    ls = inst.lakestate
+    sa = inst.solarabs
+    alb = inst.surfalb
+    sr = inst.surfrad
+    up = inst.urbanparams
+    a2l = inst.atm2lnd
+    wsb = inst.water.waterstatebulk_inst
+    wdb = inst.water.waterdiagnosticbulk_inst
+    wfb = inst.water.waterfluxbulk_inst
+    oz = inst.ozone
+    aer = inst.aerosol
+    irr = inst.irrigation
+    ps = photosyns
+
+    # Bound ranges
+    bc_col = bc.begc:bc.endc
+    bc_patch = bc.begp:bc.endp
+    bc_grc = bc.begg:bc.endg
+    bc_lun = bc.begl:bc.endl
+
+    # Compute column-level specific humidity from gridcell vapor pressure
+    # q = 0.622 * e / (p - 0.378 * e), where e = forc_vp, p = forc_pbot
+    nc = length(a2l.forc_pbot_downscaled_col)
+    forc_q_col = zeros(nc)
+    for c in bc_col
+        g = col.gridcell[c]
+        vp = a2l.forc_vp_grc[g]
+        pbot = a2l.forc_pbot_downscaled_col[c]
+        forc_q_col[c] = 0.622 * vp / max(pbot - 0.378 * vp, 1.0)
+    end
+
     # ========================================================================
     # Glacier area initialization on first timestep
-    # (In Fortran: glc2lnd_inst%update_glc2lnd_fracs + dynSubgrid_wrapup_weight_changes)
     # ========================================================================
     if is_first_step
-        # Placeholder: update_glc2lnd_fracs!(bounds_clump)
-        # Placeholder: dynSubgrid_wrapup_weight_changes!(bounds_clump)
+        # Placeholder: update_glc2lnd_fracs!(bounds_clump) [glacier coupling]
+        # Placeholder: dynSubgrid_wrapup_weight_changes!(bounds_clump) [dynamic subgrid]
     end
 
     # ========================================================================
@@ -323,327 +393,949 @@ function clm_drv!(config::CLMDriverConfig,
     # ========================================================================
     if config.use_cn
         if config.n_drydep > 0
-            # Placeholder: interpMonthlyVeg!(bounds_proc, inst.canopystate)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            if needs_read && inst.surfdata !== nothing
+                read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
+                    monthly_lai=inst.surfdata.monthly_lai,
+                    monthly_sai=inst.surfdata.monthly_sai,
+                    monthly_height_top=inst.surfdata.monthly_htop,
+                    monthly_height_bot=inst.surfdata.monthly_hbot,
+                    months=months)
+            end
         end
     elseif config.use_fates
         if config.use_fates_sp
-            # Placeholder: interpMonthlyVeg!(bounds_proc, inst.canopystate)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            if needs_read && inst.surfdata !== nothing
+                read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
+                    monthly_lai=inst.surfdata.monthly_lai,
+                    monthly_sai=inst.surfdata.monthly_sai,
+                    monthly_height_top=inst.surfdata.monthly_htop,
+                    monthly_height_bot=inst.surfdata.monthly_hbot,
+                    months=months)
+            end
         end
     else
         if doalb || config.n_drydep > 0
-            # Placeholder: interpMonthlyVeg!(bounds_proc, inst.canopystate)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            if needs_read && inst.surfdata !== nothing
+                read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
+                    monthly_lai=inst.surfdata.monthly_lai,
+                    monthly_sai=inst.surfdata.monthly_sai,
+                    monthly_height_top=inst.surfdata.monthly_htop,
+                    monthly_height_bot=inst.surfdata.monthly_hbot,
+                    months=months)
+            end
         end
     end
 
     # ========================================================================
     # Decomp vertical profiles
-    # (alt_calc and SoilBiogeochemVerticalProfile)
     # ========================================================================
-    # Placeholder: active_layer_inst%alt_calc(...)
+    # ActiveLayer — WIRED
+    alt_calc!(inst.active_layer, filt.soilc, temp, col, grc;
+              mon=mon, day=day, sec=0, dtime=Int(dtime))
     if (config.use_cn || config.use_fates_bgc) && config.decomp_method != config.no_soil_decomp
-        # Placeholder: SoilBiogeochemVerticalProfile!(bounds_clump, ...)
+        # SoilBiogeochemVerticalProfile — WIRED
+        soil_bgc_vertical_profile!(
+            inst.soilbiogeochem_state, inst.active_layer, ss, col, pch;
+            mask_bgc_soilc=filt.bgc_soilc,
+            mask_bgc_vegp=filt.bgc_vegp,
+            nlevdecomp=varpar.nlevdecomp,
+            nlevdecomp_full=varpar.nlevdecomp_full,
+            dzsoi_decomp=dzsoi_decomp[],
+            zsoi=zsoi[])
     end
 
     # ========================================================================
     # Initialize mass balance checks for C and N
     # ========================================================================
     if config.use_cn
-        # Placeholder: bgc_vegetation_inst%InitEachTimeStep(bounds_clump, ...)
+        # InitEachTimeStep — WIRED
+        cn_vegetation_init_each_timestep!(inst.bgc_vegetation;
+            mask_soilc=filt.soilc,
+            mask_soilp=filt.soilp,
+            bounds_col=bc_col,
+            bounds_patch=bc_patch)
     end
-
-    # Gridcell-level balance check init
     if config.use_cn || config.use_fates_bgc
-        # Placeholder: bgc_vegetation_inst%InitGridcellBalance(bounds_clump, ...)
+        # InitGridcellBalance — WIRED
+        cn_vegetation_init_gridcell_balance!(inst.bgc_vegetation;
+            mask_bgc_soilc=filt.bgc_soilc,
+            mask_bgc_vegp=filt.bgc_vegp,
+            mask_allc=filt.allc,
+            bounds_col=bc_col,
+            bounds_patch=bc_patch,
+            soilbgc_cs=inst.soilbiogeochem_carbonstate,
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
     end
     if config.use_lch4
-        # Placeholder: ch4_init_gridcell_balance_check!(bounds_clump, ...)
+        # Placeholder: ch4_init_gridcell_balance_check!(bc, ...) [CH4 gridcell balance]
     end
 
-    # Begin water balance
-    # Placeholder: water_gridcell_balance!(bounds_clump, ..., flag="begwb")
+    # Begin water balance — WIRED
+    water_gridcell_balance!(inst.water, ls, col, lun, grc,
+                            filt.nolakec, filt.lakec,
+                            bc_col, bc_lun, bc_grc, "begwb")
 
     # ========================================================================
     # Dynamic subgrid weights
     # ========================================================================
-    # Placeholder: dynSubgrid_driver!(bounds_proc, ...)
+    # Placeholder: dynSubgrid_driver!(bounds_proc, ...) [dynamic vegetation area]
 
     # ========================================================================
-    # Prescribed soil moisture from streams
+    # Prescribed soil moisture / column balance init
     # ========================================================================
     if config.use_soil_moisture_streams
-        # Placeholder: PrescribedSoilMoistureAdvance!(bounds_proc)
+        # Placeholder: PrescribedSoilMoistureAdvance!(bounds_proc) [soil moisture streams]
+        # Placeholder: PrescribedSoilMoistureInterp!(bc, ...) [soil moisture interp]
     end
-
-    # ========================================================================
-    # Column-level mass balance init
-    # ========================================================================
-    if config.use_soil_moisture_streams
-        # Placeholder: PrescribedSoilMoistureInterp!(bounds_clump, ...)
-    end
-    # Placeholder: BeginWaterColumnBalance!(bounds_clump, ...)
+    # BeginWaterColumnBalance — WIRED
+    begin_water_column_balance!(inst.water, sh, ls, col, lun,
+                                filt.nolakec, filt.lakec, bc_col)
 
     if config.use_cn || config.use_fates_bgc
-        # Placeholder: bgc_vegetation_inst%InitColumnBalance(bounds_clump, ...)
+        # InitColumnBalance — WIRED
+        cn_vegetation_init_column_balance!(inst.bgc_vegetation;
+            mask_bgc_soilc=filt.bgc_soilc,
+            mask_bgc_vegp=filt.bgc_vegp,
+            mask_allc=filt.allc,
+            bounds_col=bc_col,
+            bounds_patch=bc_patch,
+            soilbgc_cs=inst.soilbiogeochem_carbonstate,
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
     end
     if config.use_lch4
-        # Placeholder: ch4_init_column_balance_check!(bounds_clump, ...)
+        # Placeholder: ch4_init_column_balance_check!(bc, ...) [CH4 column balance]
     end
 
     # ========================================================================
-    # Update dynamic N deposition
+    # Update dynamic N deposition / forcing interpolation
     # ========================================================================
     if config.use_cn && !config.ndep_from_cpl
-        # Placeholder: ndep_interp!(bounds_proc, inst.atm2lnd)
+        # Placeholder: ndep_interp!(bounds_proc, a2l) [N deposition]
     end
-
     if config.use_cn
-        # Placeholder: bgc_vegetation_inst%InterpFileInputs(bounds_proc)
+        # Placeholder: bgc_vegetation_inst%InterpFileInputs(bounds_proc) [CN file inputs]
     end
+    # Placeholder: urbantv_interp!(bounds_proc) [urban TV]
 
-    # Placeholder: urbantv_interp!(bounds_proc)
-
-    # LAI streams
     if doalb && config.use_lai_streams
-        # Placeholder: lai_advance!(bounds_proc)
+        # Placeholder: lai_advance!(bounds_proc) [LAI streams]
     end
-
-    # Crop calendar streams
     if config.use_crop && config.use_cropcal_streams && is_beg_curr_year
-        # Placeholder: cropcal_advance!(bounds_proc)
+        # Placeholder: cropcal_advance!(bounds_proc) [crop calendar]
     end
 
     # ========================================================================
-    # Driver initialization, downscaling, canopy interception
+    # DAYLENGTH
     # ========================================================================
+    update_daylength!(grc, declin, obliqr, is_first_step, bc_grc)
 
-    # Update daylength
-    # Placeholder: update_daylength!(bounds_clump, declin=declin, obliquity=obliqr)
+    # ========================================================================
+    # Driver initialization
+    # ========================================================================
+    clm_drv_init!(bc, cs, wsb, wdb, ef, ps,
+                  col, pch, filt.nolakec, filt.nolakep, filt.soilp)
 
-    # Initialize variables needed for new driver time step
-    clm_drv_init!(bounds_clump,
-                  inst.canopystate,
-                  inst.water.waterstatebulk_inst,
-                  inst.water.waterdiagnosticbulk_inst,
-                  inst.energyflux,
-                  photosyns,
-                  inst.column,
-                  inst.patch,
-                  filt.nolakec,
-                  filt.nolakep,
-                  filt.soilp)
-
-    # Placeholder: topo_inst%UpdateTopo!(bounds_clump, ...)
-    # Placeholder: downscale_forcings!(bounds_clump, ...)
-    # Placeholder: set_atm2lnd_water_tracers!(bounds_clump, ...)
+    # Placeholder: topo_inst%UpdateTopo!(bc, ...) [topography update]
+    # Placeholder: downscale_forcings!(bc, ...) [atmospheric downscaling]
 
     # Update exposed vegetation filter
-    set_exposedvegp_filter!(filt, bounds_clump,
-                            inst.canopystate.frac_veg_nosno_patch[bounds_clump.begp:bounds_clump.endp])
+    set_exposedvegp_filter!(filt, bc,
+                            cs.frac_veg_nosno_patch[bc_patch])
 
     # ========================================================================
     # Irrigation withdrawal
     # ========================================================================
     if config.irrigate
-        # Placeholder: CalcAndWithdrawIrrigationFluxes!(bounds_clump, ...)
+        # Placeholder: CalcAndWithdrawIrrigationFluxes!(bc, ...) [irrigation]
     end
 
     # ========================================================================
-    # First stage of hydrology
+    # HYDROLOGY STAGE 1: Canopy interception, new snow, surface water
     # ========================================================================
-    # Placeholder: CanopyInterceptionAndThroughfall!(bounds_clump, ...)
-    # Placeholder: HandleNewSnow!(bounds_clump, ...)
-    # Placeholder: UpdateFracH2oSfc!(bounds_clump, ...)
+    # Rain/snow/flood forcings (from atmosphere, filled by downscale_forcings! or forcing reader)
+    np = length(pch.column)
+    forc_rain_col = isdefined(Main, :nothing) ? zeros(nc) : zeros(nc)  # will use a2l fields
+    forc_snow_col = zeros(nc)
+    qflx_floodg = zeros(length(grc.lat))
+    # Use Atm2LndData rain/snow if available (populated by downscale_forcings!/forcing_reader)
+    if length(a2l.forc_rain_downscaled_col) == nc
+        forc_rain_col = a2l.forc_rain_downscaled_col
+    end
+    if length(a2l.forc_snow_downscaled_col) == nc
+        forc_snow_col = a2l.forc_snow_downscaled_col
+    end
+
+    # CanopyInterceptionAndThroughfall — WIRED
+    canopy_interception_and_throughfall!(
+        pch, col, cs, inst.water, dtime,
+        filt.soilp, filt.nolakep, filt.nolakec,
+        bc_patch, bc_col, bc_grc,
+        forc_rain_col, forc_snow_col, a2l.forc_t_downscaled_col,
+        a2l.forc_wind_grc,
+        zeros(np), zeros(np))  # irrigation sprinkler/drip placeholders
+
+    # HandleNewSnow — WIRED
+    handle_new_snow!(temp, wsb, wdb, col, lun,
+                     filt.nolakec, bc_col, dtime, varpar.nlevsno;
+                     forc_t=a2l.forc_t_downscaled_col,
+                     forc_wind=a2l.forc_wind_grc,
+                     qflx_snow_grnd=wfb.wf.qflx_snow_grnd_col,
+                     qflx_snow_drain=wfb.wf.qflx_snow_drain_col,
+                     int_snow=wsb.int_snow_col)
+
+    # UpdateFracH2oSfc — WIRED
+    update_frac_h2osfc!(inst.water, col, filt.soilc, bc_col; dtime=dtime)
 
     # ========================================================================
-    # Surface radiation
+    # SURFACE RADIATION
     # ========================================================================
-    if config.use_fates
-        # Placeholder: clm_fates%wrap_sunfrac(nc, atm2lnd_inst, canopystate_inst)
+    if !config.use_fates
+        # CanopySunShadeFracs — WIRED
+        canopy_sun_shade_fracs!(alb, cs, sa,
+                                a2l.forc_solad_downscaled_col, a2l.forc_solai_grc,
+                                pch, filt.nourbanp, bc_patch)
     else
-        # Placeholder: CanopySunShadeFracs!(...)
+        # Placeholder: clm_fates%wrap_sunfrac(...) [FATES sun/shade]
     end
-    # Placeholder: SurfaceRadiation!(bounds_clump, ...)
-    # Placeholder: UrbanRadiation!(bounds_clump, ...)
+
+    # SurfaceRadiation — WIRED
+    surface_radiation!(alb, cs, sa, sr, wdb,
+                       col, lun, grc, pch,
+                       a2l.forc_solad_downscaled_col, a2l.forc_solai_grc,
+                       filt.nourbanp, filt.urbanp, bc_patch;
+                       dtime=dtime)
+
+    # UrbanRadiation — WIRED
+    urban_radiation!(sa, ef, col, lun, pch, up, temp, wdb,
+                     a2l.forc_lwrad_downscaled_col,
+                     a2l.forc_solad_downscaled_col, a2l.forc_solai_grc,
+                     filt.nourbanl, filt.urbanl, filt.urbanc, filt.urbanp,
+                     bc_lun, bc_patch)
 
     # ========================================================================
-    # Biogeophysics pre-flux calculations
+    # BIOGEOPHYSICS PRE-FLUX CALCULATIONS — WIRED
     # ========================================================================
-    # Placeholder: BiogeophysPreFluxCalcs!(bounds_clump, ...)
-    # Placeholder: ozone_inst%CalcOzoneStress!(bounds_clump, ...)
-    # Placeholder: CalculateSurfaceHumidity!(bounds_clump, ...)
+    biogeophys_pre_flux_calcs!(cs, ef, fv, temp, ss, wsb, wdb, wfb,
+                                col, lun, pch,
+                                a2l.forc_t_downscaled_col, a2l.forc_th_downscaled_col, forc_q_col,
+                                a2l.forc_hgt_u_grc, a2l.forc_hgt_t_grc, a2l.forc_hgt_q_grc,
+                                filt.nolakec, filt.nolakep, filt.urbanc,
+                                bc_col, bc_patch)
+
+    # CalcOzoneStress — WIRED
+    calc_ozone_stress!(oz, filt.exposedvegp, filt.noexposedvegp,
+                       bc_patch, pch, pftcon.woody;
+                       is_time_to_run_luna=false)
+
+    # CalculateSurfaceHumidity — WIRED
+    calculate_surface_humidity!(col, lun, temp, ss, wsb, wdb,
+                                a2l.forc_pbot_downscaled_col, forc_q_col,
+                                filt.nolakec, bc_col)
 
     # ========================================================================
-    # Determine fluxes
+    # DETERMINE FLUXES
     # ========================================================================
-    # Placeholder: BareGroundFluxes!(bounds_clump, ...)
-    # Placeholder: CanopyFluxes!(bounds_clump, ...)
-    # Placeholder: UrbanFluxes!(bounds_clump, ...)
-    # Placeholder: LakeFluxes!(bounds_clump, ...)
-    # Placeholder: frictionvel_inst%SetActualRoughnessLengths!(bounds_clump, ...)
+
+    # BareGroundFluxes — WIRED
+    bareground_fluxes!(cs, ef, fv, temp, ss, wfb, wsb, wdb, ps,
+                       pch, col, lun,
+                       filt.noexposedvegp, bc_patch,
+                       forc_q_col, a2l.forc_pbot_downscaled_col,
+                       a2l.forc_th_downscaled_col, a2l.forc_rho_downscaled_col,
+                       a2l.forc_t_downscaled_col,
+                       a2l.forc_u_grc, a2l.forc_v_grc,
+                       a2l.forc_hgt_t_grc, a2l.forc_hgt_u_grc, a2l.forc_hgt_q_grc)
+
+    # Compute volumetric liquid water content for root moisture stress
+    joff = varpar.nlevsno
+    for j in 1:varpar.nlevgrnd
+        for c in bc_col
+            filt.nolakec[c] || continue
+            dz_cj = col.dz[c, j + joff]
+            if dz_cj > 0.0
+                wdb.h2osoi_liqvol_col[c, j + joff] =
+                    wsb.ws.h2osoi_liq_col[c, j + joff] / (dz_cj * DENH2O)
+            else
+                wdb.h2osoi_liqvol_col[c, j + joff] = 0.0
+            end
+        end
+    end
+
+    # SoilMoistStress (root moisture stress / BTRAN) — WIRED
+    al = inst.active_layer
+    calc_root_moist_stress!(ss, ef, temp, wsb, wdb, col, pch,
+                             pftcon.smpso, pftcon.smpsc,
+                             Float64.(al.altmax_lastyear_indx_col),
+                             Float64.(al.altmax_indx_col),
+                             filt.exposedvegp, bc_patch,
+                             varpar.nlevgrnd, varpar.nlevsno)
+
+    # CanopyFluxes — WIRED
+    # Get downreg/leafn from CN vegetation facade when active, else zeros for SP mode
+    if config.use_cn
+        downreg_patch = get_downreg_patch(inst.bgc_vegetation, bc_patch)
+        leafn_patch = get_leafn_patch(inst.bgc_vegetation, bc_patch)
+    else
+        downreg_patch = zeros(np)
+        leafn_patch = zeros(np)
+    end
+    canopy_fluxes!(cs, ef, fv, temp, sa, ss, wfb, wsb, wdb, ps,
+                   pch, col, grc,
+                   filt.exposedvegp, bc_patch, bc_col,
+                   a2l.forc_lwrad_downscaled_col,
+                   forc_q_col, a2l.forc_pbot_downscaled_col,
+                   a2l.forc_th_downscaled_col, a2l.forc_rho_downscaled_col,
+                   a2l.forc_t_downscaled_col,
+                   a2l.forc_u_grc, a2l.forc_v_grc,
+                   a2l.forc_pco2_grc, a2l.forc_po2_grc,
+                   a2l.forc_hgt_t_grc, a2l.forc_hgt_u_grc, a2l.forc_hgt_q_grc,
+                   grc.dayl, grc.max_dayl,
+                   downreg_patch, leafn_patch,
+                   dtime)
+
+    # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)
+    (num_nourbanl, filter_nourbanl) = bitvec_to_filter(filt.nourbanl)
+    (num_urbanl, filter_urbanl) = bitvec_to_filter(filt.urbanl)
+    (num_urbanc, filter_urbanc) = bitvec_to_filter(filt.urbanc)
+    (num_urbanp, filter_urbanp) = bitvec_to_filter(filt.urbanp)
+    urban_fluxes!(ef, fv, temp, ss, up, wfb, wsb, wdb,
+                  pch, col, lun,
+                  num_nourbanl, filter_nourbanl,
+                  num_urbanl, filter_urbanl,
+                  num_urbanc, filter_urbanc,
+                  num_urbanp, filter_urbanp,
+                  bc_lun, bc_col, bc_patch,
+                  a2l.forc_t_downscaled_col, a2l.forc_th_downscaled_col,
+                  a2l.forc_rho_downscaled_col, forc_q_col,
+                  a2l.forc_pbot_downscaled_col,
+                  a2l.forc_u_grc, a2l.forc_v_grc;
+                  dtime=dtime, nstep=nstep)
+
+    # LakeFluxes — WIRED
+    lake_fluxes!(temp, ef, fv, sa, ls, wsb, wdb, wfb,
+                 col, pch, lun,
+                 a2l.forc_t_downscaled_col, a2l.forc_th_downscaled_col, forc_q_col,
+                 a2l.forc_pbot_downscaled_col, a2l.forc_rho_downscaled_col, a2l.forc_lwrad_downscaled_col,
+                 a2l.forc_u_grc, a2l.forc_v_grc,
+                 a2l.forc_hgt_u_grc, a2l.forc_hgt_t_grc, a2l.forc_hgt_q_grc,
+                 filt.lakec, filt.lakep,
+                 bc_col, bc_patch;
+                 dtime=dtime)
+
+    # SetActualRoughnessLengths — WIRED
+    set_actual_roughness_lengths!(fv,
+                                  filt.exposedvegp, filt.noexposedvegp,
+                                  filt.urbanp, filt.lakep,
+                                  bc_patch,
+                                  pch.column, pch.landunit,
+                                  lun.z_0_town)
 
     # ========================================================================
     # Irrigation needed
     # ========================================================================
     if config.irrigate
-        # Placeholder: irrigation_inst%CalcIrrigationNeeded!(bounds_clump, ...)
+        # Placeholder: irrigation_inst%CalcIrrigationNeeded!(bc, ...) [irrigation needed]
     end
 
     # ========================================================================
-    # Dust and VOC emissions
+    # EMISSIONS
     # ========================================================================
-    # Placeholder: dust_emis_inst%DustEmission!(bounds_clump, ...)
-    # Placeholder: dust_emis_inst%DustDryDep!(bounds_clump, ...)
-    # Placeholder: VOCEmission!(bounds_clump, ...)
+    # Placeholder: DustEmission!(bc, ...) [dust emission — deferred: Zender2003 mobilization]
+
+    # DustDryDep — WIRED
+    dust_dry_dep!(inst.dust_emis, BitVector(pch.active), pch.column, bc_patch,
+                  a2l.forc_pbot_downscaled_col, a2l.forc_rho_downscaled_col,
+                  a2l.forc_t_downscaled_col,
+                  fv.ram1_patch, fv.fv_patch)
+
+    # VOCEmission — no-op (MEGAN compounds not initialized; empty compound list)
+    # To enable: initialize MEGANCompound/MEGANMechComp arrays and call voc_emission!()
 
     # ========================================================================
-    # Determine temperatures
+    # DETERMINE TEMPERATURES
     # ========================================================================
-    # Placeholder: LakeTemperature!(bounds_clump, ...)
-    # Placeholder: SoilTemperature!(bounds_clump, ...)
-    # Placeholder: glacier_smb_inst%HandleIceMelt!(bounds_clump, ...)
+
+    # LakeTemperature — WIRED
+    grnd_ch4_cond = zeros(nc)  # placeholder (CH4 module provides when active)
+    lake_temperature!(col, pch, sa, ss, wsb, wdb, wfb, ef, temp, ls,
+                      grnd_ch4_cond,
+                      filt.lakec, filt.lakep,
+                      bc_col, bc_patch, dtime)
+
+    # SoilTemperature — WIRED
+    # Placeholder for urban building temperature max
+    nl = length(lun.itype)
+    urbantv_t_building_max = fill(323.15, nl)  # placeholder ~50°C cap
+    soil_temperature!(col, lun, pch, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
+                      urbantv_t_building_max,
+                      a2l.forc_lwrad_downscaled_col,
+                      filt.nolakec, filt.nolakep,
+                      filt.urbanl, filt.urbanc,
+                      bc_col, bc_lun, bc_patch,
+                      dtime)
+
+    # Placeholder: glacier_smb_inst%HandleIceMelt!(bc, ...) [glacier ice melt]
 
     # ========================================================================
-    # Update surface fluxes for new ground temperature
+    # SURFACE FLUXES for new ground temperature — WIRED
     # ========================================================================
-    # Placeholder: SoilFluxes!(bounds_clump, ...)
+    soil_fluxes!(ef, temp, cs, wsb, wdb, wfb, sa,
+                 pch, col, lun,
+                 filt.nolakec, filt.nolakep, filt.urbanp,
+                 bc_col, bc_patch,
+                 a2l.forc_lwrad_downscaled_col,
+                 dtime)
 
     # ========================================================================
     # Patch to column averaging
     # ========================================================================
-    clm_drv_patch2col!(bounds_clump,
-                       filt.allc,
-                       filt.nolakec,
-                       inst.energyflux,
-                       inst.water.waterfluxbulk_inst,
-                       inst.column,
-                       inst.patch)
+    clm_drv_patch2col!(bc, filt.allc, filt.nolakec,
+                       ef, wfb, col, pch)
 
     # ========================================================================
-    # Vertical soil and surface hydrology
+    # HYDROLOGY: Water balance physics (HydrologyNoDrainage)
+    # Ported calling sequence from HydrologyNoDrainage in
+    # HydrologyNoDrainageMod.F90 — ~20 physics calls that move water
+    # through snow, surface, soil, and water table.
     # ========================================================================
-    # Placeholder: HydrologyNoDrainage!(bounds_clump, ...)
-    # Placeholder: glacier_smb_inst%ComputeSurfaceMassBalance!(bounds_clump, ...)
-    # Placeholder: AerosolMasses!(bounds_clump, ...) [snow filter]
+
+    nlevsno = varpar.nlevsno
+    nlevsoi = varpar.nlevsoi
+
+    # --- 1. Build snow/no-snow filter ---
+    build_snow_filter!(filt.snowc, filt.nosnowc, col.snl,
+                       filt.nolakec, bc_col)
+
+    # --- 2. SnowWater: snow percolation → qflx_rain_plus_snomelt ---
+    # 2a. Apply top-layer fluxes (sublimation, dew, rain on snow)
+    update_state_top_layer_fluxes!(
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        dtime, col.snl, wdb.frac_sno_eff_col,
+        wfb.wf.qflx_soliddew_to_top_layer_col,
+        wfb.wf.qflx_solidevap_from_top_layer_col,
+        wfb.wf.qflx_liq_grnd_col,
+        wfb.wf.qflx_liqdew_to_top_layer_col,
+        wfb.wf.qflx_liqevap_from_top_layer_col,
+        filt.snowc, bc_col, nlevsno)
+
+    # 2b. Liquid percolation through snow
+    bulk_flux_snow_percolation!(
+        wfb.wf.qflx_snow_percolation_col,
+        dtime, col.snl, col.dz, wdb.frac_sno_eff_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        filt.snowc, bc_col, nlevsno)
+
+    # 2c. Update snow layer liquid after percolation
+    update_state_snow_percolation!(
+        wsb.ws.h2osoi_liq_col,
+        dtime, col.snl,
+        wfb.wf.qflx_snow_percolation_col,
+        filt.snowc, bc_col, nlevsno)
+
+    # 2d. Aerosol fluxes through snow layers
+    calc_and_apply_aerosol_fluxes!(
+        aer, dtime, col.snl,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        wfb.wf.qflx_snow_percolation_col,
+        filt.snowc, bc_col, nlevsno)
+
+    # 2e. Adjust layer thicknesses after percolation
+    post_percolation_adjust_layer_thicknesses!(
+        col.dz, col.snl,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        filt.snowc, bc_col, nlevsno)
+
+    # 2f. Sum percolation out of bottom snow layer → qflx_rain_plus_snomelt
+    # For snow columns: drainage from bottom + non-snow-covered rain
+    # For no-snow columns: rain + snowmelt
+    # Extract bottom-layer percolation (layer 0 in Fortran = index nlevsno in Julia)
+    qflx_snow_perc_bottom = zeros(nc)
+    for c in bc_col
+        if filt.snowc[c]
+            qflx_snow_perc_bottom[c] = wfb.wf.qflx_snow_percolation_col[c, nlevsno]
+        end
+    end
+    sum_flux_add_snow_percolation!(
+        wfb.wf.qflx_snow_drain_col,
+        wfb.wf.qflx_rain_plus_snomelt_col,
+        wdb.frac_sno_eff_col,
+        qflx_snow_perc_bottom,
+        wfb.wf.qflx_liq_grnd_col,
+        wfb.wf.qflx_snomelt_col,
+        filt.snowc, filt.nosnowc, bc_col)
+
+    # --- 3. Soil water fractions (eff_porosity, icefrac) ---
+    set_soil_water_fractions!(
+        sh, ss, wsb.ws,
+        col.dz, filt.hydrologyc, bc_col, nlevsoi, nlevsno)
+
+    # --- 3b. Set flood water flux (gridcell → column) ---
+    set_floodc!(
+        wfb.wf.qflx_floodc_col, qflx_floodg,
+        col.gridcell, col.itype,
+        filt.nolakec, bc_col)
+
+    # --- 4. Saturated excess runoff ---
+    saturated_excess_runoff!(
+        inst.sat_excess_runoff,
+        filt.hydrologyc, bc_col,
+        col, lun, sh, ss, wfb)
+
+    # --- 5. Set qflx inputs for infiltration calculation ---
+    set_qflx_inputs!(wfb, wdb, col.snl, filt.hydrologyc, bc_col)
+
+    # --- 6. Infiltration excess runoff ---
+    infiltration_excess_runoff!(
+        inst.infilt_excess_runoff,
+        sh, ss,
+        inst.sat_excess_runoff.fsat_col,
+        wfb, wdb,
+        filt.hydrologyc, bc_col)
+
+    # --- 7. Route infiltration excess ---
+    route_infiltration_excess!(
+        wfb, sh, col.landunit, lun.itype,
+        filt.hydrologyc, bc_col)
+
+    # --- 8. Update surface water (h2osfc) ---
+    update_h2osfc!(col, sh, ef, wfb, wsb, wdb,
+                   filt.hydrologyc, bc_col; dtime=dtime)
+
+    # --- 9. Infiltration ---
+    infiltration!(wfb, filt.hydrologyc, bc_col)
+
+    # --- 10. Total surface runoff ---
+    total_surface_runoff!(
+        wfb, sh, wsb.ws,
+        col.snl, col.itype, col.landunit, lun.urbpoi,
+        filt.hydrologyc, filt.urbanc,
+        bc_col, dtime)
+
+    # --- 11. Root water uptake (transpiration sink) ---
+    compute_effec_rootfrac_and_vert_tran_sink!(
+        bc_col, nlevsoi,
+        filt.hydrologyc,
+        ss, cs, wfb, ef,
+        col, lun, pch)
+
+    # --- 12. Soil water movement (Richards equation) ---
+    soil_water!(col,
+                filt.hydrologyc, filt.urbanc,
+                sh, ss, wfb, wsb,
+                temp, cs, ef,
+                SoilWaterRetentionCurveClappHornberg1978(), SoilWaterMovementConfig(),
+                dtime)
+
+    # --- 13. Water table ---
+    water_table!(sh, ss,
+                 temp.t_soisno_col, wsb.ws, wfb,
+                 col.dz, col.z, col.zi,
+                 filt.hydrologyc, bc_col,
+                 nlevsoi, dtime)
+
+    # --- 14. Condensation renewal ---
+    renew_condensation!(
+        wsb.ws, wdb, wfb,
+        col.snl, col.itype,
+        filt.hydrologyc, filt.urbanc,
+        bc_col, dtime)
+
+    # --- 15. Snow capping excess ---
+    h2osno_total = zeros(nc)
+    waterstate_calculate_total_h2osno!(wsb.ws, filt.snowc, bc_col,
+                                       col.snl, h2osno_total)
+    # Init snow capping fluxes
+    init_flux_snow_capping!(
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        filt.snowc, bc_col)
+    # Extract bottom snow layer copies (layer 0 in Fortran = nlevsno in Julia)
+    jj_bottom = nlevsno
+    dz_bottom_vec = col.dz[:, jj_bottom]
+    ice_bottom_vec = wsb.ws.h2osoi_ice_col[:, jj_bottom]
+    liq_bottom_vec = wsb.ws.h2osoi_liq_col[:, jj_bottom]
+    mask_capping = falses(nc)
+    rho_orig_bottom = zeros(nc)
+    frac_adjust = zeros(nc)
+    # Compute capping fluxes
+    bulk_flux_snow_capping_fluxes!(
+        mask_capping, rho_orig_bottom, frac_adjust,
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        dtime, dz_bottom_vec, inst.topo.topo_col, h2osno_total,
+        ice_bottom_vec, liq_bottom_vec,
+        col.landunit, lun.itype,
+        filt.snowc, bc_col, nlevsno, nstep)
+    # Remove capping mass from bottom layer
+    update_state_remove_snow_capping_fluxes!(
+        ice_bottom_vec, liq_bottom_vec,
+        dtime,
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        mask_capping, bc_col)
+    # Write back bottom layer state
+    for c in bc_col
+        if mask_capping[c]
+            wsb.ws.h2osoi_ice_col[c, jj_bottom] = ice_bottom_vec[c]
+            wsb.ws.h2osoi_liq_col[c, jj_bottom] = liq_bottom_vec[c]
+        end
+    end
+    # Update dz and aerosols after capping
+    snow_capping_update_dz_and_aerosols!(
+        dz_bottom_vec, aer, jj_bottom,
+        rho_orig_bottom, ice_bottom_vec, frac_adjust,
+        mask_capping, bc_col)
+    for c in bc_col
+        if mask_capping[c]
+            col.dz[c, jj_bottom] = dz_bottom_vec[c]
+        end
+    end
+
+    # --- 16. Snow compaction ---
+    snow_compaction!(
+        col.dz, dtime, col.snl,
+        temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        temp.imelt_col,
+        wdb.frac_sno_col, wdb.frac_h2osfc_col,
+        wdb.swe_old_col, wsb.int_snow_col, wdb.frac_iceold_col,
+        a2l.forc_wind_grc, col.gridcell, col.landunit,
+        lun.lakpoi, lun.urbpoi,
+        filt.snowc, bc_col, nlevsno)
+
+    # --- 17. Combine thin snow layers ---
+    combine_snow_layers!(
+        col.snl, col.dz, col.zi, col.z,
+        temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        wsb.ws.h2osno_no_layers_col,
+        wdb.snow_depth_col, wdb.frac_sno_col, wdb.frac_sno_eff_col,
+        wsb.int_snow_col, wdb.snw_rds_col,
+        aer, lun.itype, lun.urbpoi, col.landunit,
+        filt.snowc, bc_col, nlevsno)
+
+    # --- 18. Divide thick snow layers ---
+    divide_snow_layers!(
+        col.snl, col.dz, col.zi, col.z,
+        temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        wdb.frac_sno_col, wdb.snw_rds_col,
+        aer, false,  # is_lake=false
+        filt.snowc, bc_col, nlevsno)
+
+    # --- 19. Zero empty snow layers ---
+    zero_empty_snow_layers!(
+        col.snl, col.dz, col.z, col.zi,
+        temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        filt.snowc, bc_col, nlevsno)
+
+    # --- 20. Rebuild snow/no-snow filter after layer changes ---
+    build_snow_filter!(filt.snowc, filt.nosnowc, col.snl,
+                       filt.nolakec, bc_col)
+
+    # --- Diagnostics (hydrology_no_drainage!) ---
+    hydrology_no_drainage!(temp, ss, wsb, wdb,
+                           col, lun,
+                           filt.nolakec, filt.hydrologyc, filt.urbanc,
+                           filt.snowc, filt.nosnowc,
+                           bc_col,
+                           dtime,
+                           nlevsno, nlevsoi,
+                           varpar.nlevgrnd, varpar.nlevurb)
+
+    # Placeholder: glacier_smb_inst%ComputeSurfaceMassBalance!(bc, ...) [glacier SMB]
+
+    # AerosolMasses (non-lake) — WIRED
+    aerosol_masses!(aer,
+                    filt.snowc, filt.nosnowc, bc_col,
+                    col.snl, wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+                    wdb.h2osno_top_col, wdb.snw_rds_col)
 
     # ========================================================================
     # Lake hydrology
     # ========================================================================
-    # Placeholder: LakeHydrology!(bounds_clump, ...)
-    # Placeholder: AerosolMasses!(bounds_clump, ...) [lake snow filter]
-    # Placeholder: SnowAge_grain!(bounds_clump, ...) [lake snow filter]
+    # LakeHydrology — WIRED
+    lake_hydrology!(temp, ef, ls, ss, wsb, wdb,
+                    inst.water.waterbalancebulk_inst, wfb,
+                    col, pch,
+                    filt.lakec, filt.lakep,
+                    forc_rain_col, forc_snow_col, qflx_floodg,
+                    bc_col, bc_patch, dtime,
+                    varpar.nlevsno, varpar.nlevsoi, varpar.nlevgrnd)
+
+    # AerosolMasses (lake) — WIRED
+    aerosol_masses!(aer,
+                    filt.lakesnowc, filt.lakenosnowc, bc_col,
+                    col.snl, wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+                    wdb.h2osno_top_col, wdb.snw_rds_col)
+
+    # SnowAge_grain (lake) — WIRED
+    snowage_grain!(col.snl, col.dz, wdb.frac_sno_col,
+                   wsb.ws.h2osoi_liq_col, wsb.ws.h2osoi_ice_col,
+                   temp.t_soisno_col, temp.t_grnd_col,
+                   wfb.wf.qflx_snow_grnd_col, wfb.wf.qflx_snofrz_lyr_col,
+                   wsb.ws.h2osno_no_layers_col, a2l.forc_t_downscaled_col,
+                   wdb.snw_rds_col, wdb.snw_rds_top_col,
+                   wdb.sno_liq_top_col, temp.snot_top_col, temp.dTdz_top_col,
+                   varpar.nlevsno, dtime;
+                   mask_snowc=filt.lakesnowc, mask_nosnowc=filt.lakenosnowc)
 
     # ========================================================================
     # Urban snow fraction
     # ========================================================================
-    for c in bounds_clump.begc:bounds_clump.endc
-        l = inst.column.landunit[c]
-        if inst.landunit.urbpoi[l]
-            snow_depth = inst.water.waterdiagnosticbulk_inst.snow_depth_col[c]
-            inst.water.waterdiagnosticbulk_inst.frac_sno_col[c] = min(snow_depth / 0.05, 1.0)
+    for c in bc_col
+        l = col.landunit[c]
+        if lun.urbpoi[l]
+            snow_depth = wdb.snow_depth_col[c]
+            wdb.frac_sno_col[c] = min(snow_depth / 0.05, 1.0)
         end
     end
 
     # ========================================================================
     # Snow aging
     # ========================================================================
-    # Placeholder: SnowAge_grain!(bounds_clump, ...) [non-lake snow filter]
+    # SnowAge_grain (non-lake) — WIRED
+    snowage_grain!(col.snl, col.dz, wdb.frac_sno_col,
+                   wsb.ws.h2osoi_liq_col, wsb.ws.h2osoi_ice_col,
+                   temp.t_soisno_col, temp.t_grnd_col,
+                   wfb.wf.qflx_snow_grnd_col, wfb.wf.qflx_snofrz_lyr_col,
+                   wsb.ws.h2osno_no_layers_col, a2l.forc_t_downscaled_col,
+                   wdb.snw_rds_col, wdb.snw_rds_top_col,
+                   wdb.sno_liq_top_col, temp.snot_top_col, temp.dTdz_top_col,
+                   varpar.nlevsno, dtime;
+                   mask_snowc=filt.snowc, mask_nosnowc=filt.nosnowc)
 
     # ========================================================================
     # Ecosystem dynamics
     # ========================================================================
     if config.use_cn || config.use_fates_bgc
-        # Placeholder: bgc_vegetation_inst%EcosystemDynamicsPreDrainage!(bounds_clump, ...)
+        # EcosystemDynamicsPreDrainage — WIRED
+        cn_vegetation_ecosystem_pre_drainage!(inst.bgc_vegetation;
+            mask_bgc_soilc=filt.bgc_soilc,
+            mask_bgc_vegp=filt.bgc_vegp,
+            mask_pcropp=filt.pcropp,
+            mask_soilnopcropp=filt.soilnopcropp,
+            mask_exposedvegp=filt.exposedvegp,
+            mask_noexposedvegp=filt.noexposedvegp,
+            bounds_col=bc_col,
+            bounds_patch=bc_patch,
+            nlevdecomp=varpar.nlevdecomp,
+            nlevdecomp_full=varpar.nlevdecomp_full,
+            ndecomp_pools=config.ndecomp_pools,
+            ndecomp_cascade_transitions=config.ndecomp_cascade_transitions,
+            i_litr_min=config.i_litr_min,
+            i_litr_max=config.i_litr_max,
+            i_cwd=config.i_cwd,
+            npcropmin=config.npcropmin,
+            nrepr=config.nrepr,
+            patch_column=pch.column,
+            ivt=pch.itype,
+            woody=pftcon.woody,
+            harvdate=inst.crop.harvdate_patch,
+            col_is_fates=col.is_fates,
+            cascade_donor_pool=inst.decomp_cascade.cascade_donor_pool,
+            cascade_receiver_pool=inst.decomp_cascade.cascade_receiver_pool,
+            dt=dtime,
+            soilbgc_cs=inst.soilbiogeochem_carbonstate,
+            soilbgc_cf=inst.soilbiogeochem_carbonflux,
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
+            soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
+            soilbgc_state=inst.soilbiogeochem_state,
+            mask_actfirec=filt.actfirec,
+            mask_actfirep=filt.actfirep)
     end
 
-    # Satellite phenology (SP mode)
+    # Satellite phenology (SP mode) — WIRED
     if !config.use_cn && !config.use_fates && doalb
-        # Placeholder: SatellitePhenology!(bounds_clump, ...)
+        satellite_phenology!(inst.satellite_phenology, cs, wdb,
+                             pch, filt.nolakep, bc_patch)
     end
     if config.use_fates_sp && doalb
-        # Placeholder: SatellitePhenology!(bounds_clump, ...) [FATES SP uses inactive+active filters]
+        # Placeholder: SatellitePhenology!(bc, ...) [FATES-SP satellite phenology]
     end
 
-    # Dry deposition
-    # Placeholder: depvel_compute!(bounds_clump, ...)
+    # Dry deposition velocity — WIRED (only if n_drydep > 0)
+    if config.n_drydep > 0
+        depvel_compute!(inst.drydep, filt.nolakep, bc_patch,
+                        pch.gridcell, pch.column, pch.landunit, pch.itype,
+                        fv.ram1_patch, fv.rb1_patch, fv.fv_patch,
+                        cs.elai_patch,
+                        a2l.forc_t_downscaled_col, a2l.forc_solar_downscaled_col,
+                        wdb.frac_sno_col, grc.lat, 1)
+    end
 
-    # Crop calendar
     if config.use_crop && config.use_cropcal_streams && is_beg_curr_year
-        # Placeholder: cropcal_interp!(bounds_clump, ...)
+        # Placeholder: cropcal_interp!(bc, ...) [crop calendar interp]
     end
 
     # ========================================================================
-    # Hydrology with drainage
+    # HYDROLOGY: Drainage — WIRED
     # ========================================================================
-    # Placeholder: HydrologyDrainage!(bounds_clump, ...)
+    hydrology_drainage!(temp, sh, ss, wsb, wdb,
+                        inst.water.waterbalancebulk_inst, wfb,
+                        col, lun,
+                        filt.nolakec, filt.hydrologyc, filt.urbanc, filt.do_smb_c,
+                        forc_rain_col, forc_snow_col, qflx_floodg,
+                        bc_col,
+                        dtime,
+                        varpar.nlevsno, varpar.nlevsoi,
+                        varpar.nlevgrnd, varpar.nlevurb)
 
     # ========================================================================
     # Ecosystem dynamics post drainage
     # ========================================================================
     if config.use_cn || config.use_fates_bgc
-        # Placeholder: bgc_vegetation_inst%EcosystemDynamicsPostDrainage!(bounds_clump, ...)
+        # EcosystemDynamicsPostDrainage — WIRED
+        cn_vegetation_ecosystem_post_drainage!(inst.bgc_vegetation;
+            mask_bgc_soilc=filt.bgc_soilc,
+            mask_bgc_vegp=filt.bgc_vegp,
+            mask_allc=filt.allc,
+            mask_actfirec=filt.actfirec,
+            mask_actfirep=filt.actfirep,
+            bounds_col=bc_col,
+            bounds_patch=bc_patch,
+            nlevdecomp=varpar.nlevdecomp,
+            ndecomp_pools=config.ndecomp_pools,
+            ndecomp_cascade_transitions=config.ndecomp_cascade_transitions,
+            i_litr_min=config.i_litr_min,
+            i_litr_max=config.i_litr_max,
+            i_cwd=config.i_cwd,
+            dt=dtime,
+            doalb=doalb,
+            soilbgc_cs=inst.soilbiogeochem_carbonstate,
+            soilbgc_cf=inst.soilbiogeochem_carbonflux,
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
+            soilbgc_nf=inst.soilbiogeochem_nitrogenflux)
     end
 
     # ========================================================================
     # FATES dynamics
     # ========================================================================
     if config.use_fates
-        # Placeholder: clm_fates%WrapUpdateFatesRmean(nc, temperature_inst)
-        # Placeholder: clm_fates%wrap_update_hifrq_hist(bounds_clump, ...)
+        # Placeholder: clm_fates%WrapUpdateFatesRmean(...) [FATES running mean]
+        # Placeholder: clm_fates%wrap_update_hifrq_hist(...) [FATES history]
         if is_beg_curr_day
-            # Placeholder: clm_fates%dynamics_driv(nc, bounds_clump, ...)
-            # Placeholder: setFilters!(bounds_clump, ...)
+            # Placeholder: clm_fates%dynamics_driv(...) [FATES dynamics]
+            # Placeholder: setFilters!(...) [FATES filter update]
         end
     end
 
     # ========================================================================
     # Water diagnostic summaries
     # ========================================================================
-    # Placeholder: water_inst%Summary!(bounds_clump, ...)
+    # WaterSummary — WIRED
+    water_summary!(inst.water, bc_col, bc_patch;
+                   mask_soilp=filt.soilp,
+                   mask_allc=filt.allc,
+                   mask_nolakec=filt.nolakec,
+                   h2osno_total_col=wsb.ws.h2osno_no_layers_col,
+                   dz_col=col.dz,
+                   zi_col=col.zi,
+                   landunit_col=col.landunit,
+                   urbpoi=BitVector(lun.urbpoi),
+                   lun_itype=lun.itype)
 
     # ========================================================================
     # Carbon and nitrogen balance check
     # ========================================================================
     if config.use_cn || config.use_fates_bgc
-        # Placeholder: bgc_vegetation_inst%BalanceCheck!(bounds_clump, ...)
+        # CN BalanceCheck — WIRED
+        cn_vegetation_balance_check!(inst.bgc_vegetation;
+            mask_bgc_soilc=filt.bgc_soilc,
+            bounds_col=bc_col,
+            nstep_since_startup=nstep,
+            soilbgc_cf=inst.soilbiogeochem_carbonflux,
+            soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
+            soilbgc_cs=inst.soilbiogeochem_carbonstate,
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
     end
 
     # ========================================================================
     # Methane fluxes
     # ========================================================================
     if config.use_lch4
-        # Placeholder: ch4!(bounds_clump, ...)
+        # Placeholder: ch4!(bc, ...) [methane fluxes]
     end
 
     # ========================================================================
-    # Albedos for next time step
+    # ALBEDOS for next time step — WIRED
     # ========================================================================
     if doalb
-        # Placeholder: SurfaceAlbedo!(bounds_clump, ...)
-        # Placeholder: UrbanAlbedo!(bounds_clump, ...)
+        # SurfaceAlbedoConstants — initialized in clm_initialize!, fallback to empty
+        alb_con = inst.surfalb_con
+        # Simple coszen function: cos(solar zenith) from calendar day, lat, lon, declination
+        # NOTE: grc.lat and grc.lon are already in radians (set in init_gridcells.jl)
+        # Matches Fortran shr_orb_cosz: cosz = sin(lat)*sin(decl) - cos(lat)*cos(decl)*cos(jday*2π + lon)
+        coszen_cday = (cday, lat, lon, decl) -> begin
+            hour_angle = 2.0 * π * mod(cday, 1.0) + lon - π
+            max(sin(lat) * sin(decl) + cos(lat) * cos(decl) * cos(hour_angle), 0.0)
+        end
+
+        surface_albedo!(alb, alb_con, grc, col, lun, pch, cs, temp, wsb, wdb, ls, aer,
+                        filt_inactive_and_active.nourbanc,
+                        filt_inactive_and_active.nourbanp,
+                        nextsw_cday, declinp1,
+                        bc_grc, bc_col, bc_patch,
+                        pftcon.rhol, pftcon.rhos, pftcon.taul, pftcon.taus, pftcon.xl,
+                        coszen_cday)
+
+        # UrbanAlbedo — WIRED
+        urban_albedo!(filt.urbanl, filt.urbanc, filt.urbanp,
+                      lun, col, pch, wsb, wdb, up, sa, alb)
     end
 
     # ========================================================================
     # FATES seed dispersal
     # ========================================================================
     if config.use_fates
-        # Placeholder: clm_fates%WrapGlobalSeedDispersal()
+        # Placeholder: clm_fates%WrapGlobalSeedDispersal() [FATES seeds]
     end
 
     # ========================================================================
     # Land to atmosphere
     # ========================================================================
-    # Placeholder: lnd2atm!(bounds_proc, ...)
+    # Placeholder: lnd2atm!(bounds_proc, ...) [land-atmosphere coupling]
 
     # ========================================================================
     # Land to GLC
     # ========================================================================
-    # Placeholder: lnd2glc_inst%update_lnd2glc!(bounds_clump, ...)
+    # Placeholder: lnd2glc_inst%update_lnd2glc!(bc, ...) [land-glacier coupling]
 
     # ========================================================================
     # Energy and water balance check
     # ========================================================================
-    # Placeholder: water_gridcell_balance!(bounds_clump, ..., flag="endwb")
-    # Placeholder: BalanceCheck!(bounds_clump, ...)
+    # End water balance — WIRED
+    water_gridcell_balance!(inst.water, ls, col, lun, grc,
+                            filt.nolakec, filt.lakec,
+                            bc_col, bc_lun, bc_grc, "endwb")
+
+    # BalanceCheck — WIRED
+    balance_check!(inst.balcheck, wfb, wsb,
+                   inst.water.waterbalancebulk_inst, wdb, ef, sa, cs, alb,
+                   col, lun, pch, grc,
+                   filt.allc, bc_col, bc_patch, bc_grc,
+                   nstep, 0, dtime;
+                   forc_rain_col=forc_rain_col,
+                   forc_snow_col=forc_snow_col,
+                   forc_rain_grc=length(a2l.forc_rain_not_downscaled_grc) > 0 ? a2l.forc_rain_not_downscaled_grc : zeros(length(grc.lat)),
+                   forc_snow_grc=length(a2l.forc_snow_not_downscaled_grc) > 0 ? a2l.forc_snow_not_downscaled_grc : zeros(length(grc.lat)),
+                   forc_solad_col=a2l.forc_solad_downscaled_col,
+                   forc_solai_grc=a2l.forc_solai_grc,
+                   forc_lwrad_col=a2l.forc_lwrad_downscaled_col,
+                   forc_flood_grc=zeros(length(grc.lat)),
+                   qflx_ice_runoff_col=zeros(nc),
+                   qflx_evap_tot_grc=zeros(length(grc.lat)),
+                   qflx_surf_grc=zeros(length(grc.lat)),
+                   qflx_qrgwl_grc=zeros(length(grc.lat)),
+                   qflx_drain_grc=zeros(length(grc.lat)),
+                   qflx_drain_perched_grc=zeros(length(grc.lat)),
+                   qflx_ice_runoff_grc=zeros(length(grc.lat)),
+                   qflx_sfc_irrig_grc=zeros(length(grc.lat)),
+                   qflx_streamflow_grc=zeros(length(grc.lat)))
 
     # ========================================================================
     # Diagnostics
@@ -654,44 +1346,59 @@ function clm_drv!(config::CLMDriverConfig,
     # Update accumulators
     # ========================================================================
     if nstep > 0
-        # Placeholder: atm2lnd_inst%UpdateAccVars!(bounds_proc)
-        # Placeholder: temperature_inst%UpdateAccVars!(bounds_proc, crop_inst)
-        # Placeholder: canopystate_inst%UpdateAccVars!(bounds_proc)
-        # Placeholder: water_inst%UpdateAccVars!(bounds_proc)
-        # Placeholder: energyflux_inst%UpdateAccVars!(bounds_proc)
-        # Placeholder: bgc_vegetation_inst%UpdateAccVars!(bounds_proc, ...)
+        # Atm2Lnd accumulator update — WIRED
+        atm2lnd_update_acc_vars!(a2l, bc_patch, pch.gridcell, pch.column)
+
+        # Temperature accumulators — WIRED
+        temperature_update_acc_vars!(temp, bc_col, bc_patch, lun, pch;
+            nstep=nstep, dtime=Int(dtime))
+
+        # Canopy state accumulators — WIRED
+        canopystate_update_acc_vars!(cs, bc_patch; nstep=nstep)
+
+        # Water accumulators — WIRED
+        water_update_acc_vars!(inst.water, bc_col)
+
+        # Energy flux accumulators — WIRED
+        energyflux_update_acc_vars!(ef, bc_patch;
+            end_cd=is_beg_curr_day, dtime=Int(dtime))
+
+        # Placeholder: bgc_vegetation_inst%UpdateAccVars!(bounds_proc, ...) [BGC accum]
 
         if config.use_crop
-            # Placeholder: crop_inst%CropUpdateAccVars!(bounds_proc, ...)
+            # Placeholder: crop_inst%CropUpdateAccVars!(bounds_proc, ...) [crop accum]
         end
-
         if config.use_fates
-            # Placeholder: clm_fates%UpdateAccVars!(bounds_proc)
+            # Placeholder: clm_fates%UpdateAccVars!(bounds_proc) [FATES accum]
         end
     end
 
     # ========================================================================
     # History buffer
     # ========================================================================
-    # Placeholder: hist_update_hbuf!(bounds_proc)
+    # Placeholder: hist_update_hbuf!(bounds_proc) [history buffer update]
 
     # ========================================================================
     # Dynamic vegetation (CNDV)
     # ========================================================================
     if config.use_cn
-        # Placeholder: bgc_vegetation_inst%EndOfTimeStepVegDynamics!(bounds_clump, ...)
+        # EndOfTimeStepVegDynamics — WIRED
+        cn_vegetation_end_of_timestep!(inst.bgc_vegetation;
+            bounds_patch=bc_patch,
+            is_end_curr_year=false,
+            is_first_step=is_first_step)
     end
 
     # ========================================================================
     # History / Restart output
     # ========================================================================
     if !config.use_noio
-        # Placeholder: hist_htapes_wrapup!(rstwr, nlend, bounds_proc, ...)
+        # Placeholder: hist_htapes_wrapup!(rstwr, nlend, bounds_proc, ...) [history write]
         if config.use_cn
-            # Placeholder: bgc_vegetation_inst%WriteHistory!(bounds_proc)
+            # Placeholder: bgc_vegetation_inst%WriteHistory!(bounds_proc) [BGC history]
         end
         if rstwr
-            # Placeholder: restFile_write!(bounds_proc, filer, ...)
+            # Placeholder: restFile_write!(bounds_proc, ...) [restart write]
         end
     end
 

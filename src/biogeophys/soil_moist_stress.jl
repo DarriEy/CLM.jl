@@ -321,7 +321,7 @@ function calc_root_moist_stress_clm45default!(rootfr_unf::Matrix{Float64},
         for p in bounds_patch
             mask_patch[p] || continue
             c = patch_column[p]
-            itype = patch_itype[p]
+            itype = patch_itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
 
             # Root resistance factors
             if h2osoi_liqvol[c, j + joff] <= 0.0 || t_soisno[c, j + joff] <= TFRZ - 2.0

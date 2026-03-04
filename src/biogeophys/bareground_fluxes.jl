@@ -221,7 +221,8 @@ function bareground_fluxes!(
                 um[p] = max(ur[p], 0.1)
             else  # unstable
                 frictionvel.zeta_patch[p] = max(-100.0, min(frictionvel.zeta_patch[p], -0.01))
-                wc = temperature.beta_col[c] * (-GRAV * ustar[p] * thvstar * col_data.zii[c] / temperature.thv_col[c])^0.333
+                wc_arg = max(-GRAV * ustar[p] * thvstar * col_data.zii[c] / temperature.thv_col[c], 0.0)
+                wc = temperature.beta_col[c] * wc_arg^0.333
                 um[p] = sqrt(ur[p]^2 + wc^2)
             end
             obu[p] = zldis[p] / frictionvel.zeta_patch[p]

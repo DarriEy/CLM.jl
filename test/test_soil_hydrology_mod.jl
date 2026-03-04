@@ -64,6 +64,7 @@
     # ------------------------------------------------------------------
     @testset "set_soil_water_fractions!" begin
         nc = 3
+        nlevsno_test = 12
         sh = CLM.SoilHydrologyData()
         CLM.soilhydrology_init!(sh, nc)
 
@@ -72,14 +73,16 @@
         ss.eff_porosity_col = fill(0.35, nc, nlevgrnd)
 
         ws = CLM.WaterStateData()
-        ws.h2osoi_liq_col = fill(10.0, nc, nlevsoi)
-        ws.h2osoi_ice_col = fill(2.0, nc, nlevsoi)
+        # Snow+soil arrays: nlevsno + nlevsoi columns
+        ntot = nlevsno_test + nlevsoi
+        ws.h2osoi_liq_col = fill(10.0, nc, ntot)
+        ws.h2osoi_ice_col = fill(2.0, nc, ntot)
         ws.excess_ice_col = fill(0.0, nc, nlevsoi)
 
-        col_dz = fill(0.1, nc, nlevsoi)
+        col_dz = fill(0.1, nc, ntot)
         mask = trues(nc)
 
-        CLM.set_soil_water_fractions!(sh, ss, ws, col_dz, mask, 1:nc, nlevsoi)
+        CLM.set_soil_water_fractions!(sh, ss, ws, col_dz, mask, 1:nc, nlevsoi, nlevsno_test)
 
         # Check that icefrac was computed (not NaN) for active layers
         for c in 1:nc
@@ -265,11 +268,13 @@
         CLM.renew_condensation!(ws, wdb, wfb, col_snl, col_itype,
             mask_hydrology, mask_urban, 1:nc, dtime)
 
+        # Top soil layer at Julia index nlevsno+1 (Fortran layer 1 when snl=0)
+        jj = CLM.varpar.nlevsno + 1
         # h2osoi_liq should increase by liqdew * dtime
-        @test ws.h2osoi_liq_col[1, 1] ≈ 5.0 + 0.001 * 3600.0
+        @test ws.h2osoi_liq_col[1, jj] ≈ 5.0 + 0.001 * 3600.0
         # h2osoi_ice should increase by soliddew - solidevap
         expected_ice = 3.0 + 0.0005 * 3600.0 - 0.0001 * 3600.0
-        @test ws.h2osoi_ice_col[1, 1] ≈ expected_ice
+        @test ws.h2osoi_ice_col[1, jj] ≈ expected_ice
     end
 
     # ------------------------------------------------------------------

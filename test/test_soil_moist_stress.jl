@@ -191,7 +191,7 @@
         h2osoi_liqvol = zeros(nc, nlevtot)
 
         patch_column = [1, 2, 3, 4]
-        patch_itype = [1, 1, 2, 1]
+        patch_itype = [0, 0, 1, 0]  # 0-based Fortran PFT indices
         mask_patch = trues(np)
         bounds_patch = 1:np
 
@@ -251,7 +251,7 @@
         h2osoi_liqvol = zeros(nc, nlevtot)  # completely dry
 
         patch_column = [1, 2, 3, 4]
-        patch_itype = [1, 1, 1, 1]
+        patch_itype = [0, 0, 0, 0]  # 0-based Fortran PFT indices
         mask_patch = trues(np)
         bounds_patch = 1:np
 
@@ -292,7 +292,7 @@
         h2osoi_liqvol = fill(0.25, nc, nlevtot)
 
         patch_column = [1, 2, 3, 4]
-        patch_itype = [1, 1, 1, 1]
+        patch_itype = [0, 0, 0, 0]  # 0-based Fortran PFT indices
         mask_patch = trues(np)
         bounds_patch = 1:np
 

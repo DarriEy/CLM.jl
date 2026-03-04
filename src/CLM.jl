@@ -1,6 +1,8 @@
 module CLM
 
 using LinearAlgebra
+using Dates
+using NCDatasets
 
 # ===========================================================================
 # Tier 1: Constants & Parameters
@@ -66,16 +68,29 @@ include("infrastructure/accumul.jl")
 include("infrastructure/control.jl")
 
 # ===========================================================================
+# Initialization pipeline
+# ===========================================================================
+include("infrastructure/surfrd_utils.jl")
+include("infrastructure/init_subgrid.jl")
+include("infrastructure/subgrid_weights.jl")
+include("infrastructure/time_manager.jl")
+include("infrastructure/surfdata.jl")
+include("infrastructure/init_gridcells.jl")
+include("infrastructure/read_params.jl")
+include("infrastructure/init_vertical.jl")
+include("infrastructure/orbital.jl")
+
+# ===========================================================================
 # Tier 1: Biogeophysics (pure math)
 # ===========================================================================
 include("biogeophys/qsat.jl")
 include("biogeophys/daylength.jl")
+include("biogeophys/snow_snicar.jl")
+include("biogeophys/aerosol.jl")
 include("biogeophys/surface_albedo.jl")
 include("biogeophys/urban_albedo.jl")
 include("biogeophys/surface_radiation.jl")
 include("biogeophys/urban_radiation.jl")
-include("biogeophys/snow_snicar.jl")
-include("biogeophys/aerosol.jl")
 include("biogeophys/surface_humidity.jl")
 include("biogeophys/surface_resistance.jl")
 include("biogeophys/soil_moist_stress.jl")
@@ -87,6 +102,7 @@ include("biogeophys/swrc_van_genuchten.jl")
 include("biogeophys/soil_water_movement.jl")
 include("biogeophys/soil_hydrology.jl")
 include("biogeophys/snow_hydrology.jl")
+include("biogeophys/snow_cover_fraction.jl")
 include("biogeophys/hydrology_no_drainage.jl")
 include("biogeophys/hydrology_drainage.jl")
 include("biogeophys/lake_hydrology.jl")
@@ -101,6 +117,17 @@ include("biogeophys/luna.jl")
 include("biogeophys/ozone.jl")
 include("biogeophys/irrigation.jl")
 include("biogeophys/balance_check.jl")
+include("biogeophys/pre_flux_calcs.jl")
+include("biogeophys/surface_water.jl")
+include("biogeophys/lake_con.jl")
+include("biogeophys/lake_fluxes.jl")
+include("biogeophys/active_layer.jl")
+include("biogeophys/root_biophys.jl")
+include("biogeophys/soil_water_plant_sink.jl")
+include("biogeophys/sat_excess_runoff.jl")
+include("biogeophys/infilt_excess_runoff.jl")
+include("biogeophys/total_water_heat.jl")
+include("biogeophys/dry_dep_velocity.jl")
 
 # ===========================================================================
 # Tier 2: Biogeochemistry
@@ -114,6 +141,11 @@ include("biogeochem/gap_mortality.jl")
 include("biogeochem/decomp_bgc.jl")
 include("biogeochem/decomp_mimics.jl")
 include("biogeochem/decomp.jl")
+include("biogeochem/decomp_competition.jl")
+include("biogeochem/decomp_vertical_profile.jl")
+include("biogeochem/decomp_potential.jl")
+include("biogeochem/decomp_precision_control.jl")
+include("biogeochem/litter_vert_transp.jl")
 include("biogeochem/nitrif_denitrif.jl")
 include("biogeochem/n_leaching.jl")
 include("biogeochem/n_dynamics.jl")
@@ -132,6 +164,12 @@ include("biogeochem/satellite_phenology.jl")
 include("biogeochem/c_iso_flux.jl")
 include("biogeochem/cn_balance_check.jl")
 include("biogeochem/cn_driver.jl")
+include("biogeochem/cn_precision_control.jl")
+include("biogeochem/veg_struct_update.jl")
+include("biogeochem/nutrient_competition.jl")
+include("biogeochem/veg_compute_seed.jl")
+include("biogeochem/cn_annual_update.jl")
+include("biogeochem/cn_products_mod.jl")
 include("biogeochem/vegetation_facade.jl")
 
 # ===========================================================================
@@ -140,8 +178,24 @@ include("biogeochem/vegetation_facade.jl")
 include("infrastructure/instances.jl")
 
 # ===========================================================================
+# Infrastructure (depends on instances + all types)
+# ===========================================================================
+include("infrastructure/downscale_forcings.jl")
+include("infrastructure/lnd2atm_mod.jl")
+include("infrastructure/forcing_reader.jl")
+include("infrastructure/history_writer.jl")
+include("infrastructure/restart_io.jl")
+
+# ===========================================================================
+# Initialization (depends on instances + all types)
+# ===========================================================================
+include("infrastructure/cold_start.jl")
+
+# ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
 include("driver/clm_driver.jl")
+include("driver/clm_initialize.jl")
+include("driver/clm_run.jl")
 
 end # module CLM

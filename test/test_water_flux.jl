@@ -107,10 +107,10 @@
         @test all(isnan, wf.qflx_through_liq_patch)
         @test all(isnan, wf.qflx_liq_grnd_col)
         @test all(isnan, wf.qflx_snow_grnd_col)
-        @test all(isnan, wf.qflx_infl_col)
-        @test all(isnan, wf.qflx_surf_col)
-        @test all(isnan, wf.qflx_drain_col)
-        @test all(isnan, wf.qflx_runoff_col)
+        @test all(wf.qflx_infl_col .== 0.0)
+        @test all(wf.qflx_surf_col .== 0.0)
+        @test all(wf.qflx_drain_col .== 0.0)
+        @test all(wf.qflx_runoff_col .== 0.0)
         @test all(isnan, wf.qflx_snofrz_lyr_col)
         @test all(isnan, wf.qflx_snow_percolation_col)
         @test all(isnan, wf.qflx_gw_uncon_irrig_lyr_col)
@@ -244,9 +244,9 @@
         @test wf.qflx_drain_col[1] == 0.0
         @test wf.qflx_surf_col[1] == 0.0
 
-        # Non-soil column drain/surf should still be NaN (not zeroed by InitCold)
-        @test isnan(wf.qflx_drain_col[2])
-        @test isnan(wf.qflx_surf_col[2])
+        # Non-soil column drain/surf should still be 0.0 (zero-initialized)
+        @test wf.qflx_drain_col[2] == 0.0
+        @test wf.qflx_surf_col[2] == 0.0
     end
 
     @testset "stub functions run without error" begin
@@ -287,7 +287,7 @@
 
         CLM.waterflux_init!(wf, 7, 10, 3, 2)
         @test length(wf.qflx_infl_col) == 7
-        @test all(isnan, wf.qflx_infl_col)
+        @test all(wf.qflx_infl_col .== 0.0)
         @test length(wf.qflx_through_snow_patch) == 10
         @test size(wf.qflx_snofrz_lyr_col) == (7, nlevsno)
         @test size(wf.qflx_gw_uncon_irrig_lyr_col) == (7, nlevsoi)

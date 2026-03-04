@@ -317,7 +317,7 @@ function canopy_fluxes!(
         wtgq[p]    = 0.0
         wtaq0[p]   = 0.0
         obuold[p]  = 0.0
-        energyflux.btran_patch[p] = BTRAN0
+        # btran_patch is computed by calc_root_moist_stress! — do NOT reset here
         energyflux.dhsdt_canopy_patch[p] = 0.0
         energyflux.eflx_sh_stem_patch[p] = 0.0
     end
@@ -327,7 +327,7 @@ function canopy_fluxes!(
         for fi in 1:fn
             p = filterp[fi]
             c = patch_data.column[p]
-            ft = patch_data.itype[p]
+            ft = patch_data.itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
 
             elai_p = canopystate.elai_patch[p]
             esai_p = canopystate.esai_patch[p]
@@ -437,7 +437,7 @@ function canopy_fluxes!(
         p = filterp[fi]
         c = patch_data.column[p]
         g = patch_data.gridcell[p]
-        ft = patch_data.itype[p]
+        ft = patch_data.itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
 
         if z0param_method == "ZengWang2007"
             lt = min(canopystate.elai_patch[p] + canopystate.esai_patch[p], TLSAI_CRIT)
@@ -573,7 +573,7 @@ function canopy_fluxes!(
             p = filterp[fi]
             c = patch_data.column[p]
             g = patch_data.gridcell[p]
-            ft = patch_data.itype[p]
+            ft = patch_data.itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
 
             tlbef[p] = temperature.t_veg_patch[p]
             del2[p] = del_arr[p]
@@ -878,8 +878,9 @@ function canopy_fluxes!(
                 if frictionvel.ustar_patch[p] * thvstar > 0.0
                     wc = 0.0
                 else
-                    wc = BETA_CANOPY * (-GRAV * frictionvel.ustar_patch[p] * thvstar *
-                        ZII_CANOPY / temperature.thv_col[c])^0.333
+                    wc_arg = max(-GRAV * frictionvel.ustar_patch[p] * thvstar *
+                        ZII_CANOPY / temperature.thv_col[c], 0.0)
+                    wc = BETA_CANOPY * wc_arg^0.333
                 end
                 frictionvel.um_patch[p] = sqrt(ur[p]^2 + wc^2)
             end

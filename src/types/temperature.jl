@@ -652,32 +652,44 @@ function temperature_update_acc_vars!(temp::TemperatureData,
                                      patch_data::PatchData;
                                      end_cd::Bool = false,
                                      secs::Int = 0,
-                                     dtime::Int = 0)
-    # --- T_VEG24 / T_VEG240 ---
-    # Stub: update_accum_field/extract_accum_field calls go here
+                                     dtime::Int = 0,
+                                     nstep::Int = 0)
+    # Running mean periods (in timesteps at dtime=1800s):
+    # T_VEG24:  24 timesteps  = 12 hours
+    # T_VEG240: 240 timesteps = 5 days
+    # T10:      480 timesteps = 10 days
 
-    # --- TREFAV: hourly 2m air temperature average ---
-    # When accumulator is available, extract hourly average into rbufslp,
-    # then update daily min/max tracking:
-    #
-    # for p in bounds_patch
-    #     if rbufslp[p] != SPVAL
-    #         temp.t_ref2m_max_inst_patch[p] = max(rbufslp[p], temp.t_ref2m_max_inst_patch[p])
-    #         temp.t_ref2m_min_inst_patch[p] = min(rbufslp[p], temp.t_ref2m_min_inst_patch[p])
-    #     end
-    #     if end_cd
-    #         temp.t_ref2m_max_patch[p] = temp.t_ref2m_max_inst_patch[p]
-    #         temp.t_ref2m_min_patch[p] = temp.t_ref2m_min_inst_patch[p]
-    #         temp.t_ref2m_max_inst_patch[p] = -SPVAL
-    #         temp.t_ref2m_min_inst_patch[p] =  SPVAL
-    #     elseif secs == dtime
-    #         temp.t_ref2m_max_patch[p] = SPVAL
-    #         temp.t_ref2m_min_patch[p] = SPVAL
-    #     end
-    # end
+    for p in bounds_patch
+        tv = temp.t_veg_patch[p]
+        isfinite(tv) || continue
 
-    # Similar logic for TREFAV_U (urban) and TREFAV_R (rural)
-    # and for T10, SOIL10, TDM5, TDM10, GDD0/8/10, GDD020/820/1020
+        # T_VEG24: 24-timestep running mean of vegetation temperature
+        if isnan(temp.t_veg24_patch[p]) || nstep <= 1
+            temp.t_veg24_patch[p] = tv
+        else
+            n24 = min(nstep, 24)
+            temp.t_veg24_patch[p] += (tv - temp.t_veg24_patch[p]) / n24
+        end
+
+        # T_VEG240: 240-timestep running mean of vegetation temperature
+        if isnan(temp.t_veg240_patch[p]) || nstep <= 1
+            temp.t_veg240_patch[p] = tv
+        else
+            n240 = min(nstep, 240)
+            temp.t_veg240_patch[p] += (tv - temp.t_veg240_patch[p]) / n240
+        end
+
+        # T10: 10-day (480 timestep) running mean of 2m reference temperature
+        t2m = temp.t_ref2m_patch[p]
+        if isfinite(t2m)
+            if isnan(temp.t_a10_patch[p]) || nstep <= 1
+                temp.t_a10_patch[p] = t2m
+            else
+                n480 = min(nstep, 480)
+                temp.t_a10_patch[p] += (t2m - temp.t_a10_patch[p]) / n480
+            end
+        end
+    end
 
     return nothing
 end

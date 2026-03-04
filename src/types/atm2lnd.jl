@@ -96,6 +96,16 @@ Base.@kwdef mutable struct Atm2LndData
     forc_lwrad_downscaled_col     ::Vector{Float64} = Float64[]   # downscaled atm downwrd IR longwave radiation (W/m**2)
     forc_solad_downscaled_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # direct beam radiation downscaled (numrad)
 
+    # --- atm->lnd precipitation/humidity (gridcell-level, not downscaled) ---
+    forc_rain_not_downscaled_grc      ::Vector{Float64} = Float64[]   # rain rate (mm H2O/s)
+    forc_snow_not_downscaled_grc      ::Vector{Float64} = Float64[]   # snow rate (mm H2O/s)
+    forc_q_not_downscaled_grc         ::Vector{Float64} = Float64[]   # specific humidity (kg/kg)
+
+    # --- atm->lnd precipitation/humidity (column-level, downscaled) ---
+    forc_rain_downscaled_col          ::Vector{Float64} = Float64[]   # rain rate (mm H2O/s)
+    forc_snow_downscaled_col          ::Vector{Float64} = Float64[]   # snow rate (mm H2O/s)
+    forc_q_downscaled_col             ::Vector{Float64} = Float64[]   # specific humidity (kg/kg)
+
     # --- time averaged quantities (patch-level) ---
     fsd24_patch                   ::Vector{Float64} = Float64[]   # patch 24hr average of direct beam radiation
     fsd240_patch                  ::Vector{Float64} = Float64[]   # patch 240hr average of direct beam radiation
@@ -259,6 +269,11 @@ function atm2lnd_init!(a2l::Atm2LndData, ng::Int, nc::Int, np::Int)
     a2l.forc_rho_not_downscaled_grc   = fill(ival, ng)
     a2l.forc_lwrad_not_downscaled_grc = fill(ival, ng)
 
+    # atm->lnd precipitation/humidity (gridcell-level, not downscaled)
+    a2l.forc_rain_not_downscaled_grc  = fill(ival, ng)
+    a2l.forc_snow_not_downscaled_grc  = fill(ival, ng)
+    a2l.forc_q_not_downscaled_grc     = fill(ival, ng)
+
     # atm->lnd downscaled (column-level)
     a2l.forc_t_downscaled_col         = fill(ival, nc)
     a2l.forc_pbot_downscaled_col      = fill(ival, nc)
@@ -267,6 +282,11 @@ function atm2lnd_init!(a2l::Atm2LndData, ng::Int, nc::Int, np::Int)
     a2l.forc_lwrad_downscaled_col     = fill(ival, nc)
     a2l.forc_solad_downscaled_col     = fill(ival, nc, NUMRAD)
     a2l.forc_solar_downscaled_col     = fill(ival, nc)
+
+    # atm->lnd precipitation/humidity (column-level, downscaled)
+    a2l.forc_rain_downscaled_col      = fill(ival, nc)
+    a2l.forc_snow_downscaled_col      = fill(ival, nc)
+    a2l.forc_q_downscaled_col         = fill(ival, nc)
 
     # time-averaged (patch-level)
     a2l.fsd24_patch                   = fill(NaN, np)
@@ -513,6 +533,11 @@ function atm2lnd_clean!(a2l::Atm2LndData)
     a2l.forc_rho_not_downscaled_grc   = Float64[]
     a2l.forc_lwrad_not_downscaled_grc = Float64[]
 
+    # atm->lnd precipitation/humidity (gridcell-level, not downscaled)
+    a2l.forc_rain_not_downscaled_grc  = Float64[]
+    a2l.forc_snow_not_downscaled_grc  = Float64[]
+    a2l.forc_q_not_downscaled_grc     = Float64[]
+
     # atm->lnd downscaled
     a2l.forc_t_downscaled_col         = Float64[]
     a2l.forc_pbot_downscaled_col      = Float64[]
@@ -521,6 +546,11 @@ function atm2lnd_clean!(a2l::Atm2LndData)
     a2l.forc_lwrad_downscaled_col     = Float64[]
     a2l.forc_solad_downscaled_col     = Matrix{Float64}(undef, 0, 0)
     a2l.forc_solar_downscaled_col     = Float64[]
+
+    # atm->lnd precipitation/humidity (column-level, downscaled)
+    a2l.forc_rain_downscaled_col      = Float64[]
+    a2l.forc_snow_downscaled_col      = Float64[]
+    a2l.forc_q_downscaled_col         = Float64[]
 
     # time-averaged
     a2l.fsd24_patch                   = Float64[]

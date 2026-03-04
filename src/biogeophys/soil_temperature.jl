@@ -253,20 +253,25 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                 i = jj + row_offset
                 if 1 <= i <= n
                     ab_row = kl + ku + 1 + i - jj
-                    ab[ab_row, jj] = bmatrix[c, band_idx, jt + jj - 1]
+                    # Fortran BandDiagonal shifts source index by row_offset for off-diagonals:
+                    # diagonal reads from jtop+j-1, sub/super-diagonals shift ±1, ±2
+                    src_idx = jt + jj - 1 + row_offset
+                    ab[ab_row, jj] = bmatrix[c, band_idx, src_idx]
                 end
             end
         end
 
         rhs = rvector[c, jt:jb]
         ipiv = zeros(Int64, n)
+        rhs_mat = reshape(rhs, n, 1)
 
         try
-            LinearAlgebra.LAPACK.gbsv!(kl, ku, n, ab, ipiv, reshape(rhs, n, 1))
+            (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
+            LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
             tvector[c, jt:jb] .= rhs
         catch e
-            @warn "Band diagonal solve failed for column $c: $e"
-            tvector[c, jt:jb] .= 0.0
+            e isa LinearAlgebra.LAPACKException || rethrow()
+            # Singular matrix: leave tvector unchanged (preserves previous temperatures)
         end
     end
 
@@ -531,7 +536,8 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
 
             # Thermal conductivity of snow
             if col.snl[c] + 1 < 1 && j >= col.snl[c] + 1 && j <= 0
-                bw[c, jj] = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / (frac_sno[c] * col.dz[c, jj])
+                denom = max(frac_sno[c], 1.0e-6) * max(col.dz[c, jj], 1.0e-6)
+                bw[c, jj] = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / denom
                 if varctl.snow_thermal_cond_method == "Jordan1991"
                     thk[c, jj] = TKAIR + (7.75e-5 * bw[c, jj] + 1.105e-6 * bw[c, jj]^2) * (TKICE - TKAIR)
                 elseif varctl.snow_thermal_cond_method == "Sturm1997"
@@ -737,9 +743,9 @@ function compute_ground_heat_flux_and_deriv!(
         eflx_sh_soil = energyflux.eflx_sh_soil_patch[p]
         eflx_sh_h2osfc = energyflux.eflx_sh_h2osfc_patch[p]
         qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch[p]
-        qflx_ev_snow = waterfluxbulk.wf.qflx_ev_snow_patch[p]
-        qflx_ev_soil = waterfluxbulk.wf.qflx_ev_soil_patch[p]
-        qflx_ev_h2osfc = waterfluxbulk.wf.qflx_ev_h2osfc_patch[p]
+        qflx_ev_snow = waterfluxbulk.qflx_ev_snow_patch[p]
+        qflx_ev_soil = waterfluxbulk.qflx_ev_soil_patch[p]
+        qflx_ev_h2osfc = waterfluxbulk.qflx_ev_h2osfc_patch[p]
 
         if !lun.urbpoi[l]
             eflx_gnet[p] = sabg + dlrad +
@@ -830,7 +836,7 @@ function compute_ground_heat_flux_and_deriv!(
             hs_top[c] += eflx_gnet_top * patch_data.wtcol[p]
 
             eflx_sh_snow = energyflux.eflx_sh_snow_patch[p]
-            qflx_ev_snow = waterfluxbulk.wf.qflx_ev_snow_patch[p]
+            qflx_ev_snow = waterfluxbulk.qflx_ev_snow_patch[p]
             eflx_gnet_snow = sabg_lyr[p, lyr_top + joff] + dlrad +
                 (1.0 - frac_veg_nosno) * emg[c] * forc_lwrad[c] - lwrad_emit_snow[c] -
                 (eflx_sh_snow + qflx_ev_snow * htvp[c])

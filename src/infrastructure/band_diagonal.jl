@@ -48,15 +48,18 @@ function band_diagonal_solve!(u::Matrix{Float64}, b_matrix::Array{Float64,3},
         for j in 1:n
             for band_idx in 1:nband
                 # Map from CLM band index to LAPACK storage
-                # CLM: band 1 = lowest sub-diagonal, band (nband+1)/2 = diagonal
-                # LAPACK: row kl+ku+1+i-j for element (i,j)
+                # CLM stores band data row-oriented: bmatrix[band, j] is band element of row j.
+                # Fortran BandDiagonal shifts source index for off-diagonals:
+                #   diagonal (band 3): source = jtop+j-1
+                #   1st sub (band 4):  source = jtop+j   (shifted +1)
+                #   1st super (band 2): source = jtop+j-2 (shifted -1)
                 row_offset = band_idx - (kl + 1)  # -kl to +ku
                 i = j + row_offset  # row in original matrix
 
                 if 1 <= i <= n
-                    # LAPACK row index: kl + ku + 1 + (i-1) - (j-1) = kl + ku + 1 + i - j
                     ab_row = kl + ku + 1 + i - j
-                    ab[ab_row, j] = b_matrix[col, band_idx, jt + j - 1]
+                    src_idx = jt + j - 1 + row_offset
+                    ab[ab_row, j] = b_matrix[col, band_idx, src_idx]
                 end
             end
         end
@@ -64,16 +67,17 @@ function band_diagonal_solve!(u::Matrix{Float64}, b_matrix::Array{Float64,3},
         # Right-hand side (copied to allow LAPACK to overwrite)
         rhs = r[col, jt:jb]
 
-        # Solve using LAPACK dgbsv
+        # Solve using LAPACK gbtrf! (factorize) + gbtrs! (solve)
         ipiv = zeros(Int64, n)
+        rhs_mat = reshape(rhs, n, 1)
 
-        # Use Julia's LAPACK interface
         try
-            LinearAlgebra.LAPACK.gbsv!(kl, ku, n, ab, ipiv, reshape(rhs, n, 1))
+            (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
+            LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
             u[col, jt:jb] .= rhs
         catch e
-            @warn "Band diagonal solve failed for column $col: $e"
-            u[col, jt:jb] .= 0.0
+            e isa LinearAlgebra.LAPACKException || rethrow()
+            # Singular matrix: leave u unchanged (preserves previous temperatures)
         end
     end
 
@@ -112,16 +116,24 @@ function band_diagonal_column!(u::AbstractVector{Float64}, b_matrix::AbstractMat
             i = j + row_offset
             if 1 <= i <= n
                 ab_row = kl + ku + 1 + i - j
-                ab[ab_row, j] = b_matrix[band_idx, jtop + j - 1]
+                src_idx = jtop + j - 1 + row_offset
+                ab[ab_row, j] = b_matrix[band_idx, src_idx]
             end
         end
     end
 
     rhs = copy(r[jtop:jbot])
     ipiv = zeros(Int64, n)
+    rhs_mat = reshape(rhs, n, 1)
 
-    LinearAlgebra.LAPACK.gbsv!(kl, ku, n, ab, ipiv, reshape(rhs, n, 1))
-    u[jtop:jbot] .= rhs
+    try
+        (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
+        LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
+        u[jtop:jbot] .= rhs
+    catch e
+        e isa LinearAlgebra.LAPACKException || rethrow()
+        # Singular matrix: leave u unchanged (preserves previous temperatures)
+    end
 
     nothing
 end

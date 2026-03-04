@@ -340,10 +340,10 @@ function photosynthesis_data_init!(ps::PhotosynthesisData, np::Int;
     ps.cisun_z_patch = fill(NaN, np, nlevcan)
     ps.cisha_z_patch = fill(NaN, np, nlevcan)
 
-    ps.rssun_z_patch = fill(NaN, np, nlevcan)
-    ps.rssha_z_patch = fill(NaN, np, nlevcan)
-    ps.rssun_patch = fill(NaN, np)
-    ps.rssha_patch = fill(NaN, np)
+    ps.rssun_z_patch = fill(2.0e4, np, nlevcan)   # large default (closed stomata)
+    ps.rssha_z_patch = fill(2.0e4, np, nlevcan)
+    ps.rssun_patch = fill(2.0e4, np)              # large default (closed stomata)
+    ps.rssha_patch = fill(2.0e4, np)
 
     ps.luvcmax25top_patch = fill(NaN, np)
     ps.lujmax25top_patch = fill(NaN, np)

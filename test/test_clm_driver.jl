@@ -7,6 +7,9 @@
         # Ensure varpar is initialized (nlevsno=12, nlevgrnd=15, nlevurb=5, nlevlak=10)
         CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
 
+        # Initialize soil level constants (zsoi, dzsoi, dzsoi_decomp, etc.)
+        CLM.varcon_init!()
+
         nlevsno = CLM.varpar.nlevsno
         nlevgrnd = CLM.varpar.nlevgrnd
         nlevtot = nlevsno + nlevgrnd
@@ -14,7 +17,8 @@
 
         # --- Instances ---
         inst = CLM.CLMInstances()
-        CLM.clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np)
+        CLM.clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
+                           nlevdecomp_full=CLM.varpar.nlevdecomp_full)
 
         # Set up minimal column/patch linkage for p2c
         for c in 1:nc
@@ -79,12 +83,56 @@
         filt.soilp .= true
         filt.nolakeurbanp .= true
         filt.nourbanp .= true
+        filt.nourbanc .= true
+        filt.hydrologyc .= true
+        filt.urbanc .= false
+        filt.urbanl .= false
+        filt.urbanp .= false
+        filt.snowc .= false
+        filt.nosnowc .= true
+        filt.do_smb_c .= false
+        filt.exposedvegp .= true
+        filt.noexposedvegp .= false
+        filt.lakec .= false
+        filt.lakep .= false
+        filt.lakesnowc .= false
+        filt.lakenosnowc .= false
+        filt.bgc_soilc .= false   # BGC soil columns (no BGC active in smoke test)
+        filt.bgc_vegp .= false    # BGC vegetation patches (no BGC active in smoke test)
+        filt.pcropp .= false      # no prog crops
+        filt.soilnopcropp .= true  # all soil patches are non-crop
+        filt.actfirec .= false    # no active fire
+        filt.actfirep .= false    # no active fire
 
         filt_ia = CLM.ClumpFilter()
         CLM.alloc_filters!(filt_ia, nc, np, nl)
         filt_ia.allc .= true
         filt_ia.nolakec .= true
         filt_ia.nolakep .= true
+        filt_ia.nourbanc .= true
+        filt_ia.nourbanp .= true
+
+        # --- Urban control init ---
+        CLM.urban_read_nml!(CLM.urban_ctrl)
+
+        # --- Snow layer constants (needed by handle_new_snow!) ---
+        dzmin = zeros(nlevsno)
+        dzmax_u = zeros(nlevsno)
+        dzmax_l = zeros(nlevsno)
+        dzmin[1] = 0.010; dzmax_u[1] = 0.02; dzmax_l[1] = 0.03
+        dzmin[2] = 0.015; dzmax_u[2] = 0.05; dzmax_l[2] = 0.07
+        for j in 3:nlevsno
+            dzmin[j] = dzmax_u[j-1] * 0.5
+            dzmax_u[j] = 2.0 * dzmax_u[j-1] + 0.01
+            dzmax_l[j] = dzmax_u[j] + dzmax_l[j-1]
+            if j == nlevsno
+                dzmax_u[j] = floatmax(Float64)
+                dzmax_l[j] = floatmax(Float64)
+            end
+        end
+        CLM.SNOW_DZMIN[] = dzmin
+        CLM.SNOW_DZMAX_U[] = dzmax_u
+        CLM.SNOW_DZMAX_L[] = dzmax_l
 
         # --- Config ---
         config = CLM.CLMDriverConfig()

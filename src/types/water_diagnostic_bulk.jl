@@ -163,7 +163,7 @@ function waterdiagnosticbulk_init!(wd::WaterDiagnosticBulkData, nc::Int, np::Int
     wd.snow_depth_col              = fill(NaN, nc)
     wd.snow_5day_col               = fill(NaN, nc)
     wd.snowdp_col                  = fill(NaN, nc)
-    wd.snomelt_accum_col           = fill(NaN, nc)
+    wd.snomelt_accum_col           = fill(0.0, nc)
     wd.h2osoi_liq_tot_col          = fill(NaN, nc)
     wd.h2osoi_ice_tot_col          = fill(NaN, nc)
     wd.exice_subs_tot_col          = fill(0.0, nc)   # initialized to 0 in Fortran
@@ -189,7 +189,7 @@ function waterdiagnosticbulk_init!(wd::WaterDiagnosticBulkData, nc::Int, np::Int
     wd.bw_col                      = fill(NaN, nc, nlevsno)              # (-nlevsno+1:0)
     wd.air_vol_col                 = fill(NaN, nc, nlevgrnd)             # (1:nlevgrnd)
     wd.h2osoi_liqvol_col           = fill(NaN, nc, nlevtot_snow_soil)    # (-nlevsno+1:nlevgrnd)
-    wd.swe_old_col                 = fill(NaN, nc, nlevsno)              # (-nlevsno+1:0)
+    wd.swe_old_col                 = fill(0.0, nc, nlevsno)              # (-nlevsno+1:0)
     wd.exice_subs_col              = fill(0.0, nc, nlevmaxurbgrnd)       # (1:nlevmaxurbgrnd), init 0
     wd.exice_vol_col               = fill(0.0, nc, nlevsoi)              # (1:nlevsoi), init 0
     wd.snw_rds_col                 = fill(NaN, nc, nlevsno)              # (-nlevsno+1:0)

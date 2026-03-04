@@ -15,6 +15,7 @@
     # ------------------------------------------------------------------
 
     CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+    CLM._init_snow_layer_constants!()
     nlevsno  = CLM.varpar.nlevsno
     nlevsoi  = CLM.varpar.nlevsoi
     nlevgrnd = CLM.varpar.nlevgrnd
@@ -426,6 +427,7 @@
 
         # Setup: 2 columns, 1 landunit (ISTSOIL)
         col_data.landunit .= 1
+        col_data.gridcell .= 1
         col_data.itype .= 1  # soil type
         col_data.snl .= 0    # no existing snow
         lun_data.itype .= CLM.ISTSOIL
@@ -443,9 +445,11 @@
 
         # Initialize diagnostic fields
         waterdiagbulk.snow_depth_col .= 0.0
+        waterdiagbulk.frac_sno_col .= 0.0
         waterdiagbulk.frac_sno_eff_col .= 0.0
         waterdiagbulk.snomelt_accum_col .= 0.0
         waterdiagbulk.frac_iceold_col .= 0.0
+        waterdiagbulk.swe_old_col .= 0.0
 
         # Column geometry
         nlevtot = nlevsno + nlevmaxurbgrnd
@@ -453,6 +457,9 @@
             for j in 1:nlevtot
                 col_data.dz[c, j] = 0.1
                 col_data.z[c, j] = 0.05 + (j - 1) * 0.1
+            end
+            for j in 1:(nlevtot+1)
+                col_data.zi[c, j] = (j - 1) * 0.1
             end
         end
 
@@ -467,10 +474,17 @@
             col_data, lun_data, mask_nolake, bounds2, dtime, nlevsno;
             forc_t=forc_t, qflx_snow_grnd=qflx_snow_grnd)
 
-        # After adding new snow with snl==0, snow goes to h2osno_no_layers
-        # h2osno_no_layers += qflx_snow_grnd * dtime = 0.001 * 1800 = 1.8 mm
-        # Since ISTSOIL (not wetland), snow should NOT be removed
+        # After adding new snow with snl==0:
+        # 1. bulkdiag_new_snow_diagnostics! updates snow_depth and frac_sno
+        # 2. update_state_add_new_snow! adds 1.8mm to h2osno_no_layers
+        # (Explicit layer creation is disabled — snow stays in h2osno_no_layers)
         @test waterstatebulk.ws.h2osno_no_layers_col[1] ≈ 0.001 * 1800.0
         @test waterstatebulk.ws.h2osno_no_layers_col[2] ≈ 0.001 * 1800.0
+        # Snow depth should be positive (from diagnostics)
+        @test waterdiagbulk.snow_depth_col[1] > 0.0
+        @test waterdiagbulk.snow_depth_col[2] > 0.0
+        # snl should still be 0 (no explicit layers)
+        @test col_data.snl[1] == 0
+        @test col_data.snl[2] == 0
     end
 end

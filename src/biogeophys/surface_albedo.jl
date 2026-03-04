@@ -255,7 +255,7 @@ function two_stream!(surfalb::SurfaceAlbedoData,
 
         cosz = max(0.001, coszen_patch[p])
 
-        chil[p] = min(max(pftcon_xl[patchdata.itype[p]], -0.4), 0.6)
+        chil[p] = min(max(pftcon_xl[patchdata.itype[p] + 1], -0.4), 0.6)
         if abs(chil[p]) <= 0.01
             chil[p] = 0.01
         end
@@ -608,7 +608,7 @@ end
 """
     surface_albedo!(surfalb, con, grc, col, lun, patchdata,
                     canopystate, temperature, waterstatebulk,
-                    waterdiagbulk, lakestate,
+                    waterdiagbulk, lakestate, aerosol,
                     mask_nourbanc, mask_nourbanp,
                     nextsw_cday, declinp1,
                     bounds_grc, bounds_col, bounds_patch,
@@ -622,7 +622,7 @@ end
 Surface albedo and two-stream fluxes (top-level driver).
 
 Ported from subroutine `SurfaceAlbedo` in `SurfaceAlbedoMod.F90`.
-SNICAR_RT calls are represented as stubs (snow albedo is left at initialized values).
+Uses SNICAR_RT for snow albedo when optics tables are loaded.
 FATES calls are represented as stubs.
 """
 function surface_albedo!(surfalb::SurfaceAlbedoData,
@@ -636,6 +636,7 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                          waterstatebulk::WaterStateBulkData,
                          waterdiagbulk::WaterDiagnosticBulkData,
                          lakestate::LakeStateData,
+                         aerosol::AerosolData,
                          mask_nourbanc::BitVector,
                          mask_nourbanp::BitVector,
                          nextsw_cday::Float64,
@@ -766,12 +767,96 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                  coszen_col_arr, temperature, waterstatebulk, lakestate,
                  mask_nourbanc, bounds_col; lakepuddling=lakepuddling)
 
-    # --- SNICAR_RT calls would go here ---
-    # (Snow albedos are stub-zeroed; SNICAR_RT is not yet ported)
-    # For now, albsnd and albsni remain zero, so ground albedo = soil albedo * (1-frac_sno)
+    # --- Snow albedos via SNICAR radiative transfer ---
+    nc = length(bounds_col)
+    nlevsno_val = nlevsno
 
-    albsnd = zeros(length(bounds_col), numrad)
-    albsni = zeros(length(bounds_col), numrad)
+    # Check if SNICAR optics tables are loaded
+    use_snicar = length(snicar_optics.ext_cff_mss_snw_drc) > 0 &&
+                 any(x -> x != 0.0, @view snicar_optics.ext_cff_mss_snw_drc[1:min(10, end), 1:min(1, end)])
+
+    # Prepare SNICAR input arrays
+    h2osno_liq_snw = zeros(nc, nlevsno_val)
+    h2osno_ice_snw = zeros(nc, nlevsno_val)
+    h2osno_total_arr = zeros(nc)
+    snw_rds_int = fill(round(Int, snicar_params.snw_rds_min), nc, nlevsno_val)
+    mss_cnc_aer = zeros(nc, nlevsno_val, SNO_NBR_AER)
+    albsfc_snw = zeros(nc, numrad)
+
+    # Compute total h2osno using the proper method (includes h2osno_no_layers_col)
+    waterstate_calculate_total_h2osno!(waterstatebulk.ws, mask_nourbanc,
+                                        bounds_col, col.snl, h2osno_total_arr)
+
+    for c in bounds_col
+        mask_nourbanc[c] || continue
+        # Snow layer water content (first nlevsno slots are snow layers)
+        for j in 1:nlevsno_val
+            h2osno_liq_snw[c, j] = max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, j])
+            h2osno_ice_snw[c, j] = max(0.0, waterstatebulk.ws.h2osoi_ice_col[c, j])
+        end
+        # Snow grain radius (Float64 → Int, microns)
+        for j in 1:nlevsno_val
+            rds = waterdiagbulk.snw_rds_col[c, j]
+            if !isnan(rds) && rds > 0.0
+                snw_rds_int[c, j] = round(Int, clamp(rds, SNW_RDS_MIN_TBL, SNW_RDS_MAX_TBL))
+            end
+        end
+        # Aerosol mass concentrations (8 species: bcphi, bcpho, ocphi, ocpho, dst1-4)
+        if size(aerosol.mss_cnc_bcphi_col, 1) >= c
+            for j in 1:nlevsno_val
+                mss_cnc_aer[c, j, 1] = aerosol.mss_cnc_bcphi_col[c, j]
+                mss_cnc_aer[c, j, 2] = aerosol.mss_cnc_bcpho_col[c, j]
+                mss_cnc_aer[c, j, 3] = aerosol.mss_cnc_ocphi_col[c, j]
+                mss_cnc_aer[c, j, 4] = aerosol.mss_cnc_ocpho_col[c, j]
+                mss_cnc_aer[c, j, 5] = aerosol.mss_cnc_dst1_col[c, j]
+                mss_cnc_aer[c, j, 6] = aerosol.mss_cnc_dst2_col[c, j]
+                mss_cnc_aer[c, j, 7] = aerosol.mss_cnc_dst3_col[c, j]
+                mss_cnc_aer[c, j, 8] = aerosol.mss_cnc_dst4_col[c, j]
+            end
+        end
+        # Underlying surface albedo (diffuse soil albedo)
+        for ib in 1:numrad
+            albsfc_snw[c, ib] = albsoi[c, ib]
+        end
+    end
+
+    # Output arrays
+    albsnd = zeros(nc, numrad)
+    albsni = zeros(nc, numrad)
+    flx_absd_snw = zeros(nc, nlevsno_val + 1, numrad)
+    flx_absi_snw = zeros(nc, nlevsno_val + 1, numrad)
+
+    if use_snicar
+        # Call SNICAR_RT for direct beam (flg_slr=1)
+        snicar_rt!(coszen_col_arr, 1,
+                   h2osno_liq_snw, h2osno_ice_snw, h2osno_total_arr,
+                   snw_rds_int, mss_cnc_aer, albsfc_snw,
+                   col.snl, frac_sno,
+                   albsnd, flx_absd_snw, nlevsno_val;
+                   mask_nourbanc=mask_nourbanc)
+
+        # Call SNICAR_RT for diffuse (flg_slr=2)
+        snicar_rt!(coszen_col_arr, 2,
+                   h2osno_liq_snw, h2osno_ice_snw, h2osno_total_arr,
+                   snw_rds_int, mss_cnc_aer, albsfc_snw,
+                   col.snl, frac_sno,
+                   albsni, flx_absi_snw, nlevsno_val;
+                   mask_nourbanc=mask_nourbanc)
+    else
+        # Fallback: age-based snow albedo (used when SNICAR optics not loaded)
+        snow_persist = waterstatebulk.snow_persistence_col
+        for c in bounds_col
+            mask_nourbanc[c] || continue
+            if coszen_col_arr[c] > 0.0 && frac_sno[c] > 0.0
+                age_days = c <= length(snow_persist) ? snow_persist[c] / 86400.0 : 0.0
+                fage = 1.0 - exp(-age_days / 5.0)
+                albsnd[c, 1] = clamp(0.95 * (1.0 - 0.15 * fage), 0.1, 0.99)
+                albsni[c, 1] = clamp(0.95 * (1.0 - 0.15 * fage), 0.1, 0.99)
+                albsnd[c, 2] = clamp(0.65 * (1.0 - 0.50 * fage), 0.1, 0.99)
+                albsni[c, 2] = clamp(0.65 * (1.0 - 0.50 * fage), 0.1, 0.99)
+            end
+        end
+    end
 
     # --- Ground albedos (snow-fraction weighting) ---
     for ib in 1:numrad
@@ -797,21 +882,49 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
         end
     end
 
-    # --- Snow albedo history diagnostics ---
-    h2osno_total = zeros(length(bounds_col))
-    for c in bounds_col
-        mask_nourbanc[c] || continue
-        # Simple stub: sum ice+liq in snow layers
-        for jj in 1:nlevsno
-            h2osno_total[c] += max(0.0, waterstatebulk.ws.h2osoi_ice_col[c, jj]) +
-                               max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, jj])
+    # --- Map SNICAR flux absorption to surfalb fields ---
+    if use_snicar
+        for c in bounds_col
+            mask_nourbanc[c] || continue
+            l = col.landunit[c]
+            is_lake = lun.lakpoi[l]
+            for i in 1:(nlevsno_val + 1)
+                if use_subgrid_fluxes && !is_lake
+                    # Subgrid fluxes: SNICAR output used directly for snow-covered area
+                    surfalb.flx_absdv_col[c, i] = flx_absd_snw[c, i, IVIS]
+                    surfalb.flx_absdn_col[c, i] = flx_absd_snw[c, i, INIR]
+                    surfalb.flx_absiv_col[c, i] = flx_absi_snw[c, i, IVIS]
+                    surfalb.flx_absin_col[c, i] = flx_absi_snw[c, i, INIR]
+                else
+                    # No subgrid fluxes or lake: weight by snow fraction
+                    fsnow = frac_sno[c]
+                    for (flx_field, flx_snw, alb_s, alb_d, ib) in [
+                        (:flx_absdv_col, flx_absd_snw, albsnd, albsod, IVIS),
+                        (:flx_absdn_col, flx_absd_snw, albsnd, albsod, INIR),
+                        (:flx_absiv_col, flx_absi_snw, albsni, albsoi, IVIS),
+                        (:flx_absin_col, flx_absi_snw, albsni, albsoi, INIR),
+                    ]
+                        f_snw = flx_snw[c, i, ib]
+                        a_snw = alb_s[c, ib]
+                        a_soil = alb_d[c, ib]
+                        flx_out = getfield(surfalb, flx_field)
+                        if a_snw < 1.0
+                            flx_out[c, i] = f_snw * fsnow +
+                                (1.0 - fsnow) * (1.0 - a_soil) * (f_snw / max(1.0 - a_snw, 1.0e-6))
+                        else
+                            flx_out[c, i] = 0.0
+                        end
+                    end
+                end
+            end
         end
     end
 
+    # --- Snow albedo history diagnostics ---
     for ib in 1:numrad
         for c in bounds_col
             mask_nourbanc[c] || continue
-            if coszen_col_arr[c] > 0.0 && h2osno_total[c] > 0.0
+            if coszen_col_arr[c] > 0.0 && h2osno_total_arr[c] > 0.0
                 surfalb.albsnd_hst_col[c, ib] = albsnd[c, ib]
                 surfalb.albsni_hst_col[c, ib] = albsni[c, ib]
             else
@@ -951,7 +1064,7 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     for ib in 1:numrad
         for p in bounds_patch
             mask_vegsol[p] || continue
-            itype = patchdata.itype[p]
+            itype = patchdata.itype[p] + 1  # +1: Fortran 0-based PFT → Julia 1-based array
             rho[p, ib] = max(pftcon_rhol[itype, ib] * wl[p] + pftcon_rhos[itype, ib] * ws_arr[p], mpe)
             tau[p, ib] = max(pftcon_taul[itype, ib] * wl[p] + pftcon_taus[itype, ib] * ws_arr[p], mpe)
         end
@@ -1012,7 +1125,7 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                 surfalb.albgri_oc_hst_col[c, ib] = surfalb.albgri_oc_col[c, ib]
                 surfalb.albgrd_dst_hst_col[c, ib] = surfalb.albgrd_dst_col[c, ib]
                 surfalb.albgri_dst_hst_col[c, ib] = surfalb.albgri_dst_col[c, ib]
-                if h2osno_total[c] > 0.0
+                if h2osno_total_arr[c] > 0.0
                     surfalb.albsnd_hst2_col[c, ib] = surfalb.albsnd_hst_col[c, ib]
                     surfalb.albsni_hst2_col[c, ib] = surfalb.albsni_hst_col[c, ib]
                 end

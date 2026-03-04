@@ -1137,18 +1137,22 @@ function snowage_grain!(snl::Vector{Int},
 end
 
 # --------------------------------------------------------------------------
-# snow_optics_init! (stub)
+# snow_optics_init!
 # --------------------------------------------------------------------------
 
 """
-    snow_optics_init!(optics; numrad_snw=5)
+    snow_optics_init!(optics; numrad_snw=5, fsnowoptics="")
 
-Initialize snow optics lookup tables. In the full CLM, this reads from a
-NetCDF file. Here we allocate arrays of the correct size.
+Initialize snow optics lookup tables. If `fsnowoptics` is provided, reads
+Mie lookup tables from the NetCDF file. Otherwise allocates zero arrays.
 
 Ported from `SnowOptics_init` in `SnowSnicarMod.F90`.
 """
-function snow_optics_init!(optics::SnicarOpticsData; numrad_snw::Int=varctl.snicar_numrad_snw)
+function snow_optics_init!(optics::SnicarOpticsData;
+                            numrad_snw::Int=varctl.snicar_numrad_snw,
+                            fsnowoptics::String="")
+
+    # Allocate arrays
     optics.ss_alb_snw_drc = zeros(IDX_MIE_SNW_MX, numrad_snw)
     optics.asm_prm_snw_drc = zeros(IDX_MIE_SNW_MX, numrad_snw)
     optics.ext_cff_mss_snw_drc = zeros(IDX_MIE_SNW_MX, numrad_snw)
@@ -1185,24 +1189,169 @@ function snow_optics_init!(optics::SnicarOpticsData; numrad_snw::Int=varctl.snic
     optics.flx_wgt_dir = zeros(numrad_snw)
     optics.flx_wgt_dif = zeros(numrad_snw)
 
+    # Read from NetCDF if file provided
+    if !isempty(fsnowoptics) && isfile(fsnowoptics)
+        _snow_optics_read_nc!(optics, fsnowoptics, numrad_snw)
+    end
+
+    return nothing
+end
+
+"""
+    _snow_optics_read_nc!(optics, fsnowoptics, numrad_snw)
+
+Read SNICAR optics from NetCDF file. Uses 5-band mid-latitude-winter
+Saharan dust defaults matching CLM5.
+"""
+function _snow_optics_read_nc!(optics::SnicarOpticsData, fsnowoptics::String, numrad_snw::Int)
+    # Solar spectrum and dust optics short codes (CLM5 defaults)
+    ss = "mlw"   # mid_latitude_winter
+    ds = "sah"   # sahara
+
+    NCDataset(fsnowoptics, "r") do nc
+        # Helper to read a variable, handling missing values
+        function _read_var(varname)
+            if haskey(nc, varname)
+                data = Array(nc[varname])
+                return replace(data, missing => 0.0)
+            else
+                return nothing
+            end
+        end
+
+        # Ice optics (2D: idx_Mie_snw_mx × numrad_snw)
+        for (field, prop, beam) in [
+            (:ss_alb_snw_drc,      "ss_alb",      "dir"),
+            (:asm_prm_snw_drc,     "asm_prm",     "dir"),
+            (:ext_cff_mss_snw_drc, "ext_cff_mss", "dir"),
+            (:ss_alb_snw_dfs,      "ss_alb",      "dif"),
+            (:asm_prm_snw_dfs,     "asm_prm",     "dif"),
+            (:ext_cff_mss_snw_dfs, "ext_cff_mss", "dif"),
+        ]
+            varname = "$(prop)_ice_pic16_$(beam)_$(ss)"
+            data = _read_var(varname)
+            if data !== nothing
+                arr = getfield(optics, field)
+                n1 = min(size(data, 1), size(arr, 1))
+                n2 = min(size(data, 2), size(arr, 2))
+                arr[1:n1, 1:n2] .= Float64.(data[1:n1, 1:n2])
+            end
+        end
+
+        # BC optics (1D: numrad_snw) — both hphil and hphob read from bcphob
+        for (field, species) in [
+            (:ss_alb_bc_hphil, "bcphob"), (:ss_alb_bc_hphob, "bcphob"),
+            (:asm_prm_bc_hphil, "bcphob"), (:asm_prm_bc_hphob, "bcphob"),
+            (:ext_cff_mss_bc_hphil, "bcphob"), (:ext_cff_mss_bc_hphob, "bcphob"),
+        ]
+            prop = String(field)
+            # Extract property type from field name
+            if startswith(prop, "ss_alb")
+                pname = "ss_alb"
+            elseif startswith(prop, "asm_prm")
+                pname = "asm_prm"
+            else
+                pname = "ext_cff_mss"
+            end
+            varname = "$(pname)_$(species)_dif_$(ss)"
+            data = _read_var(varname)
+            if data !== nothing
+                arr = getfield(optics, field)
+                n = min(length(data), length(arr))
+                arr[1:n] .= Float64.(data[1:n])
+            end
+        end
+
+        # OC optics — both hphil and hphob read from ocphob
+        for (field, species) in [
+            (:ss_alb_oc_hphil, "ocphob"), (:ss_alb_oc_hphob, "ocphob"),
+            (:asm_prm_oc_hphil, "ocphob"), (:asm_prm_oc_hphob, "ocphob"),
+            (:ext_cff_mss_oc_hphil, "ocphob"), (:ext_cff_mss_oc_hphob, "ocphob"),
+        ]
+            prop = String(field)
+            if startswith(prop, "ss_alb")
+                pname = "ss_alb"
+            elseif startswith(prop, "asm_prm")
+                pname = "asm_prm"
+            else
+                pname = "ext_cff_mss"
+            end
+            varname = "$(pname)_$(species)_dif_$(ss)"
+            data = _read_var(varname)
+            if data !== nothing
+                arr = getfield(optics, field)
+                n = min(length(data), length(arr))
+                arr[1:n] .= Float64.(data[1:n])
+            end
+        end
+
+        # Dust optics (4 species)
+        for (didx, fsuffix) in [(1, :dst1), (2, :dst2), (3, :dst3), (4, :dst4)]
+            dust_num = lpad(didx, 2, '0')
+            for pname in ["ss_alb", "asm_prm", "ext_cff_mss"]
+                varname = "$(pname)_dust$(dust_num)_$(ds)_dif_$(ss)"
+                field = Symbol("$(pname)_$(fsuffix)")
+                data = _read_var(varname)
+                if data !== nothing
+                    arr = getfield(optics, field)
+                    n = min(length(data), length(arr))
+                    arr[1:n] .= Float64.(data[1:n])
+                end
+            end
+        end
+
+        # Flux weights
+        bnd = numrad_snw == 5 ? "5" : ""
+        for (field, beam) in [(:flx_wgt_dir, "dir"), (:flx_wgt_dif, "dif")]
+            varname = "flx_wgt_$(beam)$(bnd)_$(ss)"
+            data = _read_var(varname)
+            if data !== nothing
+                arr = getfield(optics, field)
+                n = min(length(data), length(arr))
+                arr[1:n] .= Float64.(data[1:n])
+            end
+        end
+    end
+
     return nothing
 end
 
 # --------------------------------------------------------------------------
-# snowage_init! (stub)
+# snowage_init!
 # --------------------------------------------------------------------------
 
 """
-    snowage_init!(aging)
+    snowage_init!(aging; fsnowaging="")
 
-Initialize snow aging lookup tables. In the full CLM, this reads from a
-NetCDF file. Here we allocate arrays of the correct size.
+Initialize snow aging lookup tables. If `fsnowaging` is provided, reads
+tau/kappa/drdt0 3D arrays from the NetCDF file. Otherwise allocates zero arrays.
 
 Ported from `SnowAge_init` in `SnowSnicarMod.F90`.
 """
-function snowage_init!(aging::SnicarAgingData)
+function snowage_init!(aging::SnicarAgingData; fsnowaging::String="")
     aging.snowage_tau = zeros(IDX_RHOS_MAX, IDX_TGRD_MAX, IDX_T_MAX)
     aging.snowage_kappa = zeros(IDX_RHOS_MAX, IDX_TGRD_MAX, IDX_T_MAX)
     aging.snowage_drdt0 = zeros(IDX_RHOS_MAX, IDX_TGRD_MAX, IDX_T_MAX)
+
+    if !isempty(fsnowaging) && isfile(fsnowaging)
+        NCDataset(fsnowaging, "r") do nc
+            for (field, varname) in [
+                (:snowage_tau,   "tau"),
+                (:snowage_kappa, "kappa"),
+                (:snowage_drdt0, "drdsdt0"),  # note: NetCDF var has extra 's'
+            ]
+                if haskey(nc, varname)
+                    data = Array(nc[varname])
+                    data = replace(data, missing => 0.0)
+                    arr = getfield(aging, field)
+                    n1 = min(size(data, 1), size(arr, 1))
+                    n2 = min(size(data, 2), size(arr, 2))
+                    n3 = min(size(data, 3), size(arr, 3))
+                    arr[1:n1, 1:n2, 1:n3] .= Float64.(data[1:n1, 1:n2, 1:n3])
+                end
+            end
+        end
+    end
+
     return nothing
 end

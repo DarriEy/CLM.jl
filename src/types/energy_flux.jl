@@ -585,21 +585,28 @@ function energyflux_update_acc_vars!(ef::EnergyFluxData,
                                      end_cd::Bool = false,
                                      secs::Int = 0,
                                      dtime::Int = 0)
-    # --- BTRANAV: hourly average btran ---
-    # When accumulator is available, extract hourly average into rbufslp,
-    # then update daily min tracking:
-    #
-    # for p in bounds_patch
-    #     if rbufslp[p] != SPVAL
-    #         ef.btran_min_inst_patch[p] = min(rbufslp[p], ef.btran_min_inst_patch[p])
-    #     end
-    #     if end_cd
-    #         ef.btran_min_patch[p] = ef.btran_min_inst_patch[p]
-    #         ef.btran_min_inst_patch[p] = SPVAL
-    #     elseif secs == dtime
-    #         ef.btran_min_patch[p] = SPVAL
-    #     end
-    # end
+    # BTRANAV: track daily min btran
+    for p in bounds_patch
+        bt = ef.btran_patch[p]
+        isfinite(bt) || continue
+
+        # Track instantaneous minimum for the current day
+        if hasfield(typeof(ef), :btran_min_inst_patch) && length(ef.btran_min_inst_patch) >= p
+            if ef.btran_min_inst_patch[p] == SPVAL
+                ef.btran_min_inst_patch[p] = bt
+            else
+                ef.btran_min_inst_patch[p] = min(bt, ef.btran_min_inst_patch[p])
+            end
+
+            # At end of day, copy to daily min and reset
+            if end_cd
+                if hasfield(typeof(ef), :btran_min_patch) && length(ef.btran_min_patch) >= p
+                    ef.btran_min_patch[p] = ef.btran_min_inst_patch[p]
+                end
+                ef.btran_min_inst_patch[p] = SPVAL
+            end
+        end
+    end
 
     return nothing
 end

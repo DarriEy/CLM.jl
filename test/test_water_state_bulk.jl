@@ -32,9 +32,9 @@
         @test length(wsb.snow_persistence_col) == nc
         @test length(wsb.int_snow_col) == nc
 
-        # NaN initialization for bulk fields
-        @test all(isnan, wsb.snow_persistence_col)
-        @test all(isnan, wsb.int_snow_col)
+        # Zero initialization for bulk fields
+        @test all(wsb.snow_persistence_col .== 0.0)
+        @test all(wsb.int_snow_col .== 0.0)
 
         # Parent fields should be initialized too
         @test length(wsb.ws.h2osno_no_layers_col) == nc
@@ -114,11 +114,11 @@
         @test wsb.snow_persistence_col[3] == 0.0
         @test wsb.snow_persistence_col[4] == 0.0
 
-        # Columns outside 2:4 should still be NaN (from init)
-        @test isnan(wsb.int_snow_col[1])
-        @test isnan(wsb.int_snow_col[5])
-        @test isnan(wsb.int_snow_col[6])
-        @test isnan(wsb.snow_persistence_col[1])
+        # Columns outside 2:4 should still be 0.0 (from init)
+        @test wsb.int_snow_col[1] == 0.0
+        @test wsb.int_snow_col[5] == 0.0
+        @test wsb.int_snow_col[6] == 0.0
+        @test wsb.snow_persistence_col[1] == 0.0
     end
 
     @testset "stub functions run without error" begin
@@ -159,9 +159,9 @@
 
         CLM.waterstatebulk_init!(wsb, 7, 10, 3, 2)
         @test length(wsb.snow_persistence_col) == 7
-        @test all(isnan, wsb.snow_persistence_col)
+        @test all(wsb.snow_persistence_col .== 0.0)
         @test length(wsb.int_snow_col) == 7
-        @test all(isnan, wsb.int_snow_col)
+        @test all(wsb.int_snow_col .== 0.0)
 
         # Parent should also be re-initialized
         @test length(wsb.ws.h2osfc_col) == 7

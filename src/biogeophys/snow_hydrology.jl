@@ -1920,7 +1920,7 @@ Determine the excess snow that needs to be capped.
 """
 function snow_capping_excess!(
     h2osno_excess::Vector{Float64},
-    apply_runoff::Vector{Bool},
+    apply_runoff::AbstractVector{Bool},
     h2osno::Vector{Float64},
     topo::Vector{Float64},
     snl::Vector{Int},
