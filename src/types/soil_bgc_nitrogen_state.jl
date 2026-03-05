@@ -11,56 +11,56 @@ at column and gridcell levels.
 
 Ported from `soilbiogeochem_nitrogenstate_type` in `SoilBiogeochemNitrogenStateType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemNitrogenStateData
+Base.@kwdef mutable struct SoilBiogeochemNitrogenStateData{FT<:AbstractFloat}
     # --- Vertically-resolved decomposition pools (col × nlev × npools) ---
-    decomp_npools_vr_col              ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3)
-    decomp0_npools_vr_col             ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3) baseline (initial value of this year)
-    decomp_npools_vr_SASUsave_col     ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3) SASU save
-    decomp_soiln_vr_col               ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3) total soil N vr
+    decomp_npools_vr_col              ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3)
+    decomp0_npools_vr_col             ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3) baseline (initial value of this year)
+    decomp_npools_vr_SASUsave_col     ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3) SASU save
+    decomp_soiln_vr_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3) total soil N vr
 
     # --- Vertically-resolved mineral N and truncation ---
-    sminn_vr_col                      ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3) soil mineral N vr
-    ntrunc_vr_col                     ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3) N truncation vr
+    sminn_vr_col                      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3) soil mineral N vr
+    ntrunc_vr_col                     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3) N truncation vr
 
     # --- Nitrification/denitrification pools ---
-    smin_no3_vr_col                   ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3) soil mineral NO3 vr
-    smin_no3_col                      ::Vector{Float64}  = Float64[]                        # (gN/m2) soil mineral NO3
-    smin_nh4_vr_col                   ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3) soil mineral NH4 vr
-    smin_nh4_col                      ::Vector{Float64}  = Float64[]                        # (gN/m2) soil mineral NH4
+    smin_no3_vr_col                   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3) soil mineral NO3 vr
+    smin_no3_col                      ::Vector{FT} = Float64[]                        # (gN/m2) soil mineral NO3
+    smin_nh4_vr_col                   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3) soil mineral NH4 vr
+    smin_nh4_col                      ::Vector{FT} = Float64[]                        # (gN/m2) soil mineral NH4
 
     # --- Summary (diagnostic) state variables ---
-    decomp_npools_col                 ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2) decomp N pools
-    decomp_npools_1m_col              ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2) decomp N pools to 1m
-    sminn_col                         ::Vector{Float64}  = Float64[]                        # (gN/m2) soil mineral N
-    ntrunc_col                        ::Vector{Float64}  = Float64[]                        # (gN/m2) N truncation
-    cwdn_col                          ::Vector{Float64}  = Float64[]                        # (gN/m2) coarse woody debris N
-    totlitn_col                       ::Vector{Float64}  = Float64[]                        # (gN/m2) total litter N
-    totmicn_col                       ::Vector{Float64}  = Float64[]                        # (gN/m2) total microbial N
-    totsomn_col                       ::Vector{Float64}  = Float64[]                        # (gN/m2) total SOM N
-    totlitn_1m_col                    ::Vector{Float64}  = Float64[]                        # (gN/m2) total litter N to 1m
-    totsomn_1m_col                    ::Vector{Float64}  = Float64[]                        # (gN/m2) total SOM N to 1m
-    dyn_nbal_adjustments_col          ::Vector{Float64}  = Float64[]                        # (gN/m2) dynamic column N adjustments
-    dyn_no3bal_adjustments_col        ::Vector{Float64}  = Float64[]                        # (gN/m2) dynamic column NO3 adjustments
-    dyn_nh4bal_adjustments_col        ::Vector{Float64}  = Float64[]                        # (gN/m2) dynamic column NH4 adjustments
+    decomp_npools_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2) decomp N pools
+    decomp_npools_1m_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2) decomp N pools to 1m
+    sminn_col                         ::Vector{FT} = Float64[]                        # (gN/m2) soil mineral N
+    ntrunc_col                        ::Vector{FT} = Float64[]                        # (gN/m2) N truncation
+    cwdn_col                          ::Vector{FT} = Float64[]                        # (gN/m2) coarse woody debris N
+    totlitn_col                       ::Vector{FT} = Float64[]                        # (gN/m2) total litter N
+    totmicn_col                       ::Vector{FT} = Float64[]                        # (gN/m2) total microbial N
+    totsomn_col                       ::Vector{FT} = Float64[]                        # (gN/m2) total SOM N
+    totlitn_1m_col                    ::Vector{FT} = Float64[]                        # (gN/m2) total litter N to 1m
+    totsomn_1m_col                    ::Vector{FT} = Float64[]                        # (gN/m2) total SOM N to 1m
+    dyn_nbal_adjustments_col          ::Vector{FT} = Float64[]                        # (gN/m2) dynamic column N adjustments
+    dyn_no3bal_adjustments_col        ::Vector{FT} = Float64[]                        # (gN/m2) dynamic column NO3 adjustments
+    dyn_nh4bal_adjustments_col        ::Vector{FT} = Float64[]                        # (gN/m2) dynamic column NH4 adjustments
 
     # --- Scalars ---
     totvegcthresh                     ::Float64 = NaN       # threshold for zeroing decomp pools
 
     # --- Nitrogen totals (includes soil, veg) ---
-    totn_col                          ::Vector{Float64}  = Float64[]  # (gN/m2) total column N
-    totecosysn_col                    ::Vector{Float64}  = Float64[]  # (gN/m2) total ecosystem N
-    totn_grc                          ::Vector{Float64}  = Float64[]  # (gN/m2) total gridcell N
+    totn_col                          ::Vector{FT} = Float64[]  # (gN/m2) total column N
+    totecosysn_col                    ::Vector{FT} = Float64[]  # (gN/m2) total ecosystem N
+    totn_grc                          ::Vector{FT} = Float64[]  # (gN/m2) total gridcell N
 
     # --- Matrix-CN fields ---
-    matrix_cap_decomp_npools_col      ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2)
-    matrix_cap_decomp_npools_vr_col   ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3)
-    in_nacc                           ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/yr)
-    in_nacc_2d                        ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
-    tran_nacc                         ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
-    vert_up_tran_nacc                 ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
-    vert_down_tran_nacc               ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
-    exit_nacc                         ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
-    hori_tran_nacc                    ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
+    matrix_cap_decomp_npools_col      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2)
+    matrix_cap_decomp_npools_vr_col   ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3)
+    in_nacc                           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/yr)
+    in_nacc_2d                        ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
+    tran_nacc                         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
+    vert_up_tran_nacc                 ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
+    vert_down_tran_nacc               ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
+    exit_nacc                         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
+    hori_tran_nacc                    ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/yr)
 end
 
 # ---------------------------------------------------------------------------

@@ -23,52 +23,52 @@ reflected/incident radiation diagnostics at the patch level.
 
 Ported from `surfrad_type` in `SurfaceRadiationMod.F90`.
 """
-Base.@kwdef mutable struct SurfaceRadiationData
+Base.@kwdef mutable struct SurfaceRadiationData{FT<:AbstractFloat}
     # --- Aerosol forcing (patch-level 1D) ---
-    sfc_frc_aer_patch      ::Vector{Float64} = Float64[]   # patch surface forcing of snow with all aerosols [W/m2]
-    sfc_frc_bc_patch       ::Vector{Float64} = Float64[]   # patch surface forcing of snow with BC [W/m2]
-    sfc_frc_oc_patch       ::Vector{Float64} = Float64[]   # patch surface forcing of snow with OC [W/m2]
-    sfc_frc_dst_patch      ::Vector{Float64} = Float64[]   # patch surface forcing of snow with dust [W/m2]
-    sfc_frc_aer_sno_patch  ::Vector{Float64} = Float64[]   # patch surface forcing of snow with all aerosols, snow-only avg [W/m2]
-    sfc_frc_bc_sno_patch   ::Vector{Float64} = Float64[]   # patch surface forcing of snow with BC, snow-only avg [W/m2]
-    sfc_frc_oc_sno_patch   ::Vector{Float64} = Float64[]   # patch surface forcing of snow with OC, snow-only avg [W/m2]
-    sfc_frc_dst_sno_patch  ::Vector{Float64} = Float64[]   # patch surface forcing of snow with dust, snow-only avg [W/m2]
+    sfc_frc_aer_patch      ::Vector{FT} = Float64[]   # patch surface forcing of snow with all aerosols [W/m2]
+    sfc_frc_bc_patch       ::Vector{FT} = Float64[]   # patch surface forcing of snow with BC [W/m2]
+    sfc_frc_oc_patch       ::Vector{FT} = Float64[]   # patch surface forcing of snow with OC [W/m2]
+    sfc_frc_dst_patch      ::Vector{FT} = Float64[]   # patch surface forcing of snow with dust [W/m2]
+    sfc_frc_aer_sno_patch  ::Vector{FT} = Float64[]   # patch surface forcing of snow with all aerosols, snow-only avg [W/m2]
+    sfc_frc_bc_sno_patch   ::Vector{FT} = Float64[]   # patch surface forcing of snow with BC, snow-only avg [W/m2]
+    sfc_frc_oc_sno_patch   ::Vector{FT} = Float64[]   # patch surface forcing of snow with OC, snow-only avg [W/m2]
+    sfc_frc_dst_sno_patch  ::Vector{FT} = Float64[]   # patch surface forcing of snow with dust, snow-only avg [W/m2]
 
     # --- Vegetation PAR at local noon (patch-level 1D) ---
-    parveg_ln_patch        ::Vector{Float64} = Float64[]   # patch absorbed par by vegetation at local noon [W/m**2]
+    parveg_ln_patch        ::Vector{FT} = Float64[]   # patch absorbed par by vegetation at local noon [W/m**2]
 
     # --- Reflected solar from snow (patch-level 1D) ---
-    fsr_sno_vd_patch       ::Vector{Float64} = Float64[]   # patch reflected direct beam vis solar radiation from snow [W/m**2]
-    fsr_sno_nd_patch       ::Vector{Float64} = Float64[]   # patch reflected direct beam NIR solar radiation from snow [W/m**2]
-    fsr_sno_vi_patch       ::Vector{Float64} = Float64[]   # patch reflected diffuse vis solar radiation from snow [W/m**2]
-    fsr_sno_ni_patch       ::Vector{Float64} = Float64[]   # patch reflected diffuse NIR solar radiation from snow [W/m**2]
+    fsr_sno_vd_patch       ::Vector{FT} = Float64[]   # patch reflected direct beam vis solar radiation from snow [W/m**2]
+    fsr_sno_nd_patch       ::Vector{FT} = Float64[]   # patch reflected direct beam NIR solar radiation from snow [W/m**2]
+    fsr_sno_vi_patch       ::Vector{FT} = Float64[]   # patch reflected diffuse vis solar radiation from snow [W/m**2]
+    fsr_sno_ni_patch       ::Vector{FT} = Float64[]   # patch reflected diffuse NIR solar radiation from snow [W/m**2]
 
     # --- Reflected solar VIS (patch-level 1D) ---
-    fsr_vis_d_patch        ::Vector{Float64} = Float64[]   # patch reflected direct beam vis solar radiation [W/m**2]
-    fsr_vis_i_patch        ::Vector{Float64} = Float64[]   # patch reflected diffuse vis solar radiation [W/m**2]
-    fsr_vis_d_ln_patch     ::Vector{Float64} = Float64[]   # patch reflected direct beam vis solar radiation at local noon [W/m**2]
+    fsr_vis_d_patch        ::Vector{FT} = Float64[]   # patch reflected direct beam vis solar radiation [W/m**2]
+    fsr_vis_i_patch        ::Vector{FT} = Float64[]   # patch reflected diffuse vis solar radiation [W/m**2]
+    fsr_vis_d_ln_patch     ::Vector{FT} = Float64[]   # patch reflected direct beam vis solar radiation at local noon [W/m**2]
 
     # --- Snow-free reflected VIS diagnostics (patch-level 1D) ---
-    fsrSF_vis_d_patch      ::Vector{Float64} = Float64[]   # snow-free patch reflected direct beam vis solar radiation [W/m**2]
-    fsrSF_vis_i_patch      ::Vector{Float64} = Float64[]   # snow-free patch reflected diffuse vis solar radiation [W/m**2]
-    fsrSF_vis_d_ln_patch   ::Vector{Float64} = Float64[]   # snow-free patch reflected direct beam vis solar rad at local noon [W/m**2]
+    fsrSF_vis_d_patch      ::Vector{FT} = Float64[]   # snow-free patch reflected direct beam vis solar radiation [W/m**2]
+    fsrSF_vis_i_patch      ::Vector{FT} = Float64[]   # snow-free patch reflected diffuse vis solar radiation [W/m**2]
+    fsrSF_vis_d_ln_patch   ::Vector{FT} = Float64[]   # snow-free patch reflected direct beam vis solar rad at local noon [W/m**2]
 
     # --- Snow radiative effect VIS (patch-level 1D) ---
-    ssre_fsr_vis_d_patch   ::Vector{Float64} = Float64[]   # snow radiative effect on direct vis reflected [W/m**2]
-    ssre_fsr_vis_i_patch   ::Vector{Float64} = Float64[]   # snow radiative effect on diffuse vis reflected [W/m**2]
-    ssre_fsr_vis_d_ln_patch ::Vector{Float64} = Float64[]  # snow radiative effect on direct vis reflected at local noon [W/m**2]
+    ssre_fsr_vis_d_patch   ::Vector{FT} = Float64[]   # snow radiative effect on direct vis reflected [W/m**2]
+    ssre_fsr_vis_i_patch   ::Vector{FT} = Float64[]   # snow radiative effect on diffuse vis reflected [W/m**2]
+    ssre_fsr_vis_d_ln_patch ::Vector{FT} = Float64[]  # snow radiative effect on direct vis reflected at local noon [W/m**2]
 
     # --- Incident solar on snow (patch-level 1D) ---
-    fsds_sno_vd_patch      ::Vector{Float64} = Float64[]   # patch incident visible, direct radiation on snow [W/m2]
-    fsds_sno_nd_patch      ::Vector{Float64} = Float64[]   # patch incident near-IR, direct radiation on snow [W/m2]
-    fsds_sno_vi_patch      ::Vector{Float64} = Float64[]   # patch incident visible, diffuse radiation on snow [W/m2]
-    fsds_sno_ni_patch      ::Vector{Float64} = Float64[]   # patch incident near-IR, diffuse radiation on snow [W/m2]
+    fsds_sno_vd_patch      ::Vector{FT} = Float64[]   # patch incident visible, direct radiation on snow [W/m2]
+    fsds_sno_nd_patch      ::Vector{FT} = Float64[]   # patch incident near-IR, direct radiation on snow [W/m2]
+    fsds_sno_vi_patch      ::Vector{FT} = Float64[]   # patch incident visible, diffuse radiation on snow [W/m2]
+    fsds_sno_ni_patch      ::Vector{FT} = Float64[]   # patch incident near-IR, diffuse radiation on snow [W/m2]
 
     # --- Incident solar VIS (patch-level 1D) ---
-    fsds_vis_d_patch       ::Vector{Float64} = Float64[]   # patch incident direct beam vis solar radiation [W/m**2]
-    fsds_vis_i_patch       ::Vector{Float64} = Float64[]   # patch incident diffuse vis solar radiation [W/m**2]
-    fsds_vis_d_ln_patch    ::Vector{Float64} = Float64[]   # patch incident direct beam vis solar rad at local noon [W/m**2]
-    fsds_vis_i_ln_patch    ::Vector{Float64} = Float64[]   # patch incident diffuse beam vis solar rad at local noon [W/m**2]
+    fsds_vis_d_patch       ::Vector{FT} = Float64[]   # patch incident direct beam vis solar radiation [W/m**2]
+    fsds_vis_i_patch       ::Vector{FT} = Float64[]   # patch incident diffuse vis solar radiation [W/m**2]
+    fsds_vis_d_ln_patch    ::Vector{FT} = Float64[]   # patch incident direct beam vis solar rad at local noon [W/m**2]
+    fsds_vis_i_ln_patch    ::Vector{FT} = Float64[]   # patch incident diffuse beam vis solar rad at local noon [W/m**2]
 end
 
 """
@@ -79,40 +79,40 @@ Allocate and initialize all fields of a `SurfaceRadiationData` instance for
 
 Ported from `surfrad_type%InitAllocate` in `SurfaceRadiationMod.F90`.
 """
-function surfrad_init!(sr::SurfaceRadiationData, np::Int)
-    sr.sfc_frc_aer_patch       = fill(NaN, np)
-    sr.sfc_frc_bc_patch        = fill(NaN, np)
-    sr.sfc_frc_oc_patch        = fill(NaN, np)
-    sr.sfc_frc_dst_patch       = fill(NaN, np)
-    sr.sfc_frc_aer_sno_patch   = fill(NaN, np)
-    sr.sfc_frc_bc_sno_patch    = fill(NaN, np)
-    sr.sfc_frc_oc_sno_patch    = fill(NaN, np)
-    sr.sfc_frc_dst_sno_patch   = fill(NaN, np)
+function surfrad_init!(sr::SurfaceRadiationData{FT}, np::Int) where {FT}
+    sr.sfc_frc_aer_patch       = fill(FT(NaN), np)
+    sr.sfc_frc_bc_patch        = fill(FT(NaN), np)
+    sr.sfc_frc_oc_patch        = fill(FT(NaN), np)
+    sr.sfc_frc_dst_patch       = fill(FT(NaN), np)
+    sr.sfc_frc_aer_sno_patch   = fill(FT(NaN), np)
+    sr.sfc_frc_bc_sno_patch    = fill(FT(NaN), np)
+    sr.sfc_frc_oc_sno_patch    = fill(FT(NaN), np)
+    sr.sfc_frc_dst_sno_patch   = fill(FT(NaN), np)
 
-    sr.parveg_ln_patch         = fill(NaN, np)
+    sr.parveg_ln_patch         = fill(FT(NaN), np)
 
-    sr.fsr_vis_d_patch         = fill(NaN, np)
-    sr.fsr_vis_d_ln_patch      = fill(NaN, np)
-    sr.fsr_vis_i_patch         = fill(NaN, np)
-    sr.fsrSF_vis_d_patch       = fill(NaN, np)
-    sr.fsrSF_vis_d_ln_patch    = fill(NaN, np)
-    sr.fsrSF_vis_i_patch       = fill(NaN, np)
-    sr.ssre_fsr_vis_d_patch    = fill(NaN, np)
-    sr.ssre_fsr_vis_d_ln_patch = fill(NaN, np)
-    sr.ssre_fsr_vis_i_patch    = fill(NaN, np)
-    sr.fsr_sno_vd_patch        = fill(NaN, np)
-    sr.fsr_sno_nd_patch        = fill(NaN, np)
-    sr.fsr_sno_vi_patch        = fill(NaN, np)
-    sr.fsr_sno_ni_patch        = fill(NaN, np)
+    sr.fsr_vis_d_patch         = fill(FT(NaN), np)
+    sr.fsr_vis_d_ln_patch      = fill(FT(NaN), np)
+    sr.fsr_vis_i_patch         = fill(FT(NaN), np)
+    sr.fsrSF_vis_d_patch       = fill(FT(NaN), np)
+    sr.fsrSF_vis_d_ln_patch    = fill(FT(NaN), np)
+    sr.fsrSF_vis_i_patch       = fill(FT(NaN), np)
+    sr.ssre_fsr_vis_d_patch    = fill(FT(NaN), np)
+    sr.ssre_fsr_vis_d_ln_patch = fill(FT(NaN), np)
+    sr.ssre_fsr_vis_i_patch    = fill(FT(NaN), np)
+    sr.fsr_sno_vd_patch        = fill(FT(NaN), np)
+    sr.fsr_sno_nd_patch        = fill(FT(NaN), np)
+    sr.fsr_sno_vi_patch        = fill(FT(NaN), np)
+    sr.fsr_sno_ni_patch        = fill(FT(NaN), np)
 
-    sr.fsds_vis_d_patch        = fill(NaN, np)
-    sr.fsds_vis_i_patch        = fill(NaN, np)
-    sr.fsds_vis_d_ln_patch     = fill(NaN, np)
-    sr.fsds_vis_i_ln_patch     = fill(NaN, np)
-    sr.fsds_sno_vd_patch       = fill(NaN, np)
-    sr.fsds_sno_nd_patch       = fill(NaN, np)
-    sr.fsds_sno_vi_patch       = fill(NaN, np)
-    sr.fsds_sno_ni_patch       = fill(NaN, np)
+    sr.fsds_vis_d_patch        = fill(FT(NaN), np)
+    sr.fsds_vis_i_patch        = fill(FT(NaN), np)
+    sr.fsds_vis_d_ln_patch     = fill(FT(NaN), np)
+    sr.fsds_vis_i_ln_patch     = fill(FT(NaN), np)
+    sr.fsds_sno_vd_patch       = fill(FT(NaN), np)
+    sr.fsds_sno_nd_patch       = fill(FT(NaN), np)
+    sr.fsds_sno_vi_patch       = fill(FT(NaN), np)
+    sr.fsds_sno_ni_patch       = fill(FT(NaN), np)
 
     return nothing
 end
@@ -122,40 +122,40 @@ end
 
 Deallocate (reset to empty) all fields of a `SurfaceRadiationData` instance.
 """
-function surfrad_clean!(sr::SurfaceRadiationData)
-    sr.sfc_frc_aer_patch       = Float64[]
-    sr.sfc_frc_bc_patch        = Float64[]
-    sr.sfc_frc_oc_patch        = Float64[]
-    sr.sfc_frc_dst_patch       = Float64[]
-    sr.sfc_frc_aer_sno_patch   = Float64[]
-    sr.sfc_frc_bc_sno_patch    = Float64[]
-    sr.sfc_frc_oc_sno_patch    = Float64[]
-    sr.sfc_frc_dst_sno_patch   = Float64[]
+function surfrad_clean!(sr::SurfaceRadiationData{FT}) where {FT}
+    sr.sfc_frc_aer_patch       = FT[]
+    sr.sfc_frc_bc_patch        = FT[]
+    sr.sfc_frc_oc_patch        = FT[]
+    sr.sfc_frc_dst_patch       = FT[]
+    sr.sfc_frc_aer_sno_patch   = FT[]
+    sr.sfc_frc_bc_sno_patch    = FT[]
+    sr.sfc_frc_oc_sno_patch    = FT[]
+    sr.sfc_frc_dst_sno_patch   = FT[]
 
-    sr.parveg_ln_patch         = Float64[]
+    sr.parveg_ln_patch         = FT[]
 
-    sr.fsr_vis_d_patch         = Float64[]
-    sr.fsr_vis_d_ln_patch      = Float64[]
-    sr.fsr_vis_i_patch         = Float64[]
-    sr.fsrSF_vis_d_patch       = Float64[]
-    sr.fsrSF_vis_d_ln_patch    = Float64[]
-    sr.fsrSF_vis_i_patch       = Float64[]
-    sr.ssre_fsr_vis_d_patch    = Float64[]
-    sr.ssre_fsr_vis_d_ln_patch = Float64[]
-    sr.ssre_fsr_vis_i_patch    = Float64[]
-    sr.fsr_sno_vd_patch        = Float64[]
-    sr.fsr_sno_nd_patch        = Float64[]
-    sr.fsr_sno_vi_patch        = Float64[]
-    sr.fsr_sno_ni_patch        = Float64[]
+    sr.fsr_vis_d_patch         = FT[]
+    sr.fsr_vis_d_ln_patch      = FT[]
+    sr.fsr_vis_i_patch         = FT[]
+    sr.fsrSF_vis_d_patch       = FT[]
+    sr.fsrSF_vis_d_ln_patch    = FT[]
+    sr.fsrSF_vis_i_patch       = FT[]
+    sr.ssre_fsr_vis_d_patch    = FT[]
+    sr.ssre_fsr_vis_d_ln_patch = FT[]
+    sr.ssre_fsr_vis_i_patch    = FT[]
+    sr.fsr_sno_vd_patch        = FT[]
+    sr.fsr_sno_nd_patch        = FT[]
+    sr.fsr_sno_vi_patch        = FT[]
+    sr.fsr_sno_ni_patch        = FT[]
 
-    sr.fsds_vis_d_patch        = Float64[]
-    sr.fsds_vis_i_patch        = Float64[]
-    sr.fsds_vis_d_ln_patch     = Float64[]
-    sr.fsds_vis_i_ln_patch     = Float64[]
-    sr.fsds_sno_vd_patch       = Float64[]
-    sr.fsds_sno_nd_patch       = Float64[]
-    sr.fsds_sno_vi_patch       = Float64[]
-    sr.fsds_sno_ni_patch       = Float64[]
+    sr.fsds_vis_d_patch        = FT[]
+    sr.fsds_vis_i_patch        = FT[]
+    sr.fsds_vis_d_ln_patch     = FT[]
+    sr.fsds_vis_i_ln_patch     = FT[]
+    sr.fsds_sno_vd_patch       = FT[]
+    sr.fsds_sno_nd_patch       = FT[]
+    sr.fsds_sno_vi_patch       = FT[]
+    sr.fsds_sno_ni_patch       = FT[]
 
     return nothing
 end
@@ -220,7 +220,7 @@ Initialize cold-start conditions for surface radiation (currently a no-op).
 
 Ported from `surfrad_type%InitCold` in `SurfaceRadiationMod.F90`.
 """
-function surfrad_init_cold!(sr::SurfaceRadiationData, bounds_patch::UnitRange{Int})
+function surfrad_init_cold!(sr::SurfaceRadiationData{FT}, bounds_patch::UnitRange{Int}) where {FT}
     # nothing for now (matches Fortran)
     return nothing
 end

@@ -12,83 +12,83 @@ transfer variables, and SNICAR aerosol forcing diagnostics.
 
 Ported from `surfalb_type` in `SurfaceAlbedoType.F90`.
 """
-Base.@kwdef mutable struct SurfaceAlbedoData
+Base.@kwdef mutable struct SurfaceAlbedoData{FT<:AbstractFloat}
     # --- Gridcell-level (1D) ---
-    azsun_grc                ::Vector{Float64} = Float64[]   # gridcell azimuth angle of sun
-    coszen_grc               ::Vector{Float64} = Float64[]   # gridcell cosine of solar zenith angle
-    coszen_col               ::Vector{Float64} = Float64[]   # col cosine of solar zenith angle
+    azsun_grc                ::Vector{FT} = Float64[]   # gridcell azimuth angle of sun
+    coszen_grc               ::Vector{FT} = Float64[]   # gridcell cosine of solar zenith angle
+    coszen_col               ::Vector{FT} = Float64[]   # col cosine of solar zenith angle
 
     # --- Patch-level albedos (2D: npatch × numrad) ---
-    albd_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (direct)
-    albi_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (diffuse)
-    albdSF_patch             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch snow-free surface albedo (direct)
-    albiSF_patch             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch snow-free surface albedo (diffuse)
+    albd_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (direct)
+    albi_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (diffuse)
+    albdSF_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch snow-free surface albedo (direct)
+    albiSF_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch snow-free surface albedo (diffuse)
 
     # --- Column-level ground/snow albedos (2D: ncol × numrad) ---
-    albgrd_pur_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground direct albedo
-    albgri_pur_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground diffuse albedo
-    albgrd_bc_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without BC
-    albgri_bc_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without BC
-    albgrd_oc_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without OC
-    albgri_oc_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without OC
-    albgrd_dst_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without dust
-    albgri_dst_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without dust
-    albgrd_col               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (direct)
-    albgri_col               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (diffuse)
-    albsod_col               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col soil albedo: direct
-    albsoi_col               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col soil albedo: diffuse
-    albsnd_hst_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, direct, for history files
-    albsni_hst_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, diffuse, for history files
+    albgrd_pur_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground direct albedo
+    albgri_pur_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground diffuse albedo
+    albgrd_bc_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without BC
+    albgri_bc_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without BC
+    albgrd_oc_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without OC
+    albgri_oc_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without OC
+    albgrd_dst_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without dust
+    albgri_dst_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without dust
+    albgrd_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (direct)
+    albgri_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (diffuse)
+    albsod_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil albedo: direct
+    albsoi_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil albedo: diffuse
+    albsnd_hst_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, direct, for history files
+    albsni_hst_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, diffuse, for history files
 
     # --- SNICAR history output variables (2D: ncol/npatch × numrad) ---
-    albd_hst_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (direct) for history
-    albi_hst_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (diffuse) for history
-    albgrd_pur_hst_col       ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground direct albedo for history
-    albgri_pur_hst_col       ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground diffuse albedo for history
-    albgrd_bc_hst_col        ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without BC for history
-    albgri_bc_hst_col        ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without BC for history
-    albgrd_oc_hst_col        ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without OC for history
-    albgri_oc_hst_col        ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without OC for history
-    albgrd_dst_hst_col       ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without dust for history
-    albgri_dst_hst_col       ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without dust for history
-    albgrd_hst_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (direct) for history
-    albgri_hst_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (diffuse) for history
-    albsnd_hst2_col          ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, direct, for history (snicar)
-    albsni_hst2_col          ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, diffuse, for history (snicar)
+    albd_hst_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (direct) for history
+    albi_hst_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch surface albedo (diffuse) for history
+    albgrd_pur_hst_col       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground direct albedo for history
+    albgri_pur_hst_col       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col pure snow ground diffuse albedo for history
+    albgrd_bc_hst_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without BC for history
+    albgri_bc_hst_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without BC for history
+    albgrd_oc_hst_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without OC for history
+    albgri_oc_hst_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without OC for history
+    albgrd_dst_hst_col       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground direct albedo without dust for history
+    albgri_dst_hst_col       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground diffuse albedo without dust for history
+    albgrd_hst_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (direct) for history
+    albgri_hst_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ground albedo (diffuse) for history
+    albsnd_hst2_col          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, direct, for history (snicar)
+    albsni_hst2_col          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow albedo, diffuse, for history (snicar)
 
     # --- Canopy radiative transfer (patch-level, 2D: npatch × numrad) ---
-    ftdd_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch down direct flux below canopy per unit direct flx
-    ftid_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch down diffuse flux below canopy per unit direct flx
-    ftii_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch down diffuse flux below canopy per unit diffuse flx
-    fabd_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by canopy per unit direct flux
-    fabd_sun_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by sunlit canopy per unit direct flux
-    fabd_sha_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by shaded canopy per unit direct flux
-    fabi_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by canopy per unit diffuse flux
-    fabi_sun_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by sunlit canopy per unit diffuse flux
-    fabi_sha_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by shaded canopy per unit diffuse flux
+    ftdd_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch down direct flux below canopy per unit direct flx
+    ftid_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch down diffuse flux below canopy per unit direct flx
+    ftii_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch down diffuse flux below canopy per unit diffuse flx
+    fabd_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by canopy per unit direct flux
+    fabd_sun_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by sunlit canopy per unit direct flux
+    fabd_sha_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by shaded canopy per unit direct flux
+    fabi_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by canopy per unit diffuse flux
+    fabi_sun_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by sunlit canopy per unit diffuse flux
+    fabi_sha_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch flux absorbed by shaded canopy per unit diffuse flux
 
     # --- Canopy layer PAR absorption (patch-level, 2D: npatch × nlevcan) ---
-    fabd_sun_z_patch         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch absorbed sunlit leaf direct PAR per canopy layer
-    fabd_sha_z_patch         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch absorbed shaded leaf direct PAR per canopy layer
-    fabi_sun_z_patch         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch absorbed sunlit leaf diffuse PAR per canopy layer
-    fabi_sha_z_patch         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch absorbed shaded leaf diffuse PAR per canopy layer
+    fabd_sun_z_patch         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch absorbed sunlit leaf direct PAR per canopy layer
+    fabd_sha_z_patch         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch absorbed shaded leaf direct PAR per canopy layer
+    fabi_sun_z_patch         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch absorbed sunlit leaf diffuse PAR per canopy layer
+    fabi_sha_z_patch         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch absorbed shaded leaf diffuse PAR per canopy layer
 
     # --- Snow layer flux absorption (col-level, 2D: ncol × (nlevsno+1)) ---
-    flx_absdv_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident direct flux: VIS
-    flx_absdn_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident direct flux: NIR
-    flx_absiv_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident diffuse flux: VIS
-    flx_absin_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident diffuse flux: NIR
+    flx_absdv_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident direct flux: VIS
+    flx_absdn_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident direct flux: NIR
+    flx_absiv_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident diffuse flux: VIS
+    flx_absin_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col absorbed flux per unit incident diffuse flux: NIR
 
     # --- Canopy structure (patch-level) ---
-    fsun_z_patch             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch sunlit fraction of canopy layer (npatch × nlevcan)
-    tlai_z_patch             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch tlai increment for canopy layer (npatch × nlevcan)
-    tsai_z_patch             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch tsai increment for canopy layer (npatch × nlevcan)
+    fsun_z_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch sunlit fraction of canopy layer (npatch × nlevcan)
+    tlai_z_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch tlai increment for canopy layer (npatch × nlevcan)
+    tsai_z_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch tsai increment for canopy layer (npatch × nlevcan)
     ncan_patch               ::Vector{Int}     = Int[]       # patch number of canopy layers
     nrad_patch               ::Vector{Int}     = Int[]       # patch number of canopy layers above snow for radiative transfer
 
     # --- Canopy scaling coefficients (patch-level, 1D) ---
-    vcmaxcintsun_patch       ::Vector{Float64} = Float64[]   # patch leaf to canopy scaling coefficient, sunlit leaf vcmax
-    vcmaxcintsha_patch       ::Vector{Float64} = Float64[]   # patch leaf to canopy scaling coefficient, shaded leaf vcmax
+    vcmaxcintsun_patch       ::Vector{FT} = Float64[]   # patch leaf to canopy scaling coefficient, sunlit leaf vcmax
+    vcmaxcintsha_patch       ::Vector{FT} = Float64[]   # patch leaf to canopy scaling coefficient, shaded leaf vcmax
 end
 
 """
@@ -100,7 +100,7 @@ Real fields are initialized to `NaN`, `SPVAL`, or `0.0` as in Fortran.
 
 Ported from `surfalb_type%InitAllocate` in `SurfaceAlbedoType.F90`.
 """
-function surfalb_init!(sa::SurfaceAlbedoData, np::Int, nc::Int, ng::Int)
+function surfalb_init!(sa::SurfaceAlbedoData{FT}, np::Int, nc::Int, ng::Int) where {FT}
     numrad  = NUMRAD
     nlevcan = NLEVCAN
     nlevsno = varpar.nlevsno
@@ -109,79 +109,79 @@ function surfalb_init!(sa::SurfaceAlbedoData, np::Int, nc::Int, ng::Int)
     nlev_sno1 = nlevsno + 1
 
     # --- Gridcell-level ---
-    sa.azsun_grc             = fill(NaN, ng)
-    sa.coszen_grc            = fill(NaN, ng)
-    sa.coszen_col            = fill(NaN, nc)
+    sa.azsun_grc             = fill(FT(NaN), ng)
+    sa.coszen_grc            = fill(FT(NaN), ng)
+    sa.coszen_col            = fill(FT(NaN), nc)
 
     # --- Column-level ground/snow albedos (ncol × numrad) ---
-    sa.albgrd_col            = fill(NaN, nc, numrad)
-    sa.albgri_col            = fill(NaN, nc, numrad)
-    sa.albsnd_hst_col        = fill(SPVAL, nc, numrad)
-    sa.albsni_hst_col        = fill(SPVAL, nc, numrad)
-    sa.albsod_col            = fill(SPVAL, nc, numrad)
-    sa.albsoi_col            = fill(SPVAL, nc, numrad)
-    sa.albgrd_pur_col        = fill(NaN, nc, numrad)
-    sa.albgri_pur_col        = fill(NaN, nc, numrad)
-    sa.albgrd_bc_col         = fill(NaN, nc, numrad)
-    sa.albgri_bc_col         = fill(NaN, nc, numrad)
-    sa.albgrd_oc_col         = fill(NaN, nc, numrad)
-    sa.albgri_oc_col         = fill(NaN, nc, numrad)
-    sa.albgrd_dst_col        = fill(NaN, nc, numrad)
-    sa.albgri_dst_col        = fill(NaN, nc, numrad)
+    sa.albgrd_col            = fill(FT(NaN), nc, numrad)
+    sa.albgri_col            = fill(FT(NaN), nc, numrad)
+    sa.albsnd_hst_col        = fill(FT(SPVAL), nc, numrad)
+    sa.albsni_hst_col        = fill(FT(SPVAL), nc, numrad)
+    sa.albsod_col            = fill(FT(SPVAL), nc, numrad)
+    sa.albsoi_col            = fill(FT(SPVAL), nc, numrad)
+    sa.albgrd_pur_col        = fill(FT(NaN), nc, numrad)
+    sa.albgri_pur_col        = fill(FT(NaN), nc, numrad)
+    sa.albgrd_bc_col         = fill(FT(NaN), nc, numrad)
+    sa.albgri_bc_col         = fill(FT(NaN), nc, numrad)
+    sa.albgrd_oc_col         = fill(FT(NaN), nc, numrad)
+    sa.albgri_oc_col         = fill(FT(NaN), nc, numrad)
+    sa.albgrd_dst_col        = fill(FT(NaN), nc, numrad)
+    sa.albgri_dst_col        = fill(FT(NaN), nc, numrad)
 
     # --- Patch-level albedos (npatch × numrad) ---
-    sa.albd_patch            = fill(NaN, np, numrad)
-    sa.albi_patch            = fill(NaN, np, numrad)
-    sa.albdSF_patch          = fill(NaN, np, numrad)
-    sa.albiSF_patch          = fill(NaN, np, numrad)
+    sa.albd_patch            = fill(FT(NaN), np, numrad)
+    sa.albi_patch            = fill(FT(NaN), np, numrad)
+    sa.albdSF_patch          = fill(FT(NaN), np, numrad)
+    sa.albiSF_patch          = fill(FT(NaN), np, numrad)
 
     # --- Canopy radiative transfer (npatch × numrad) ---
-    sa.ftdd_patch            = fill(NaN, np, numrad)
-    sa.ftid_patch            = fill(NaN, np, numrad)
-    sa.ftii_patch            = fill(NaN, np, numrad)
-    sa.fabd_patch            = fill(NaN, np, numrad)
-    sa.fabd_sun_patch        = fill(NaN, np, numrad)
-    sa.fabd_sha_patch        = fill(NaN, np, numrad)
-    sa.fabi_patch            = fill(NaN, np, numrad)
-    sa.fabi_sun_patch        = fill(NaN, np, numrad)
-    sa.fabi_sha_patch        = fill(NaN, np, numrad)
+    sa.ftdd_patch            = fill(FT(NaN), np, numrad)
+    sa.ftid_patch            = fill(FT(NaN), np, numrad)
+    sa.ftii_patch            = fill(FT(NaN), np, numrad)
+    sa.fabd_patch            = fill(FT(NaN), np, numrad)
+    sa.fabd_sun_patch        = fill(FT(NaN), np, numrad)
+    sa.fabd_sha_patch        = fill(FT(NaN), np, numrad)
+    sa.fabi_patch            = fill(FT(NaN), np, numrad)
+    sa.fabi_sun_patch        = fill(FT(NaN), np, numrad)
+    sa.fabi_sha_patch        = fill(FT(NaN), np, numrad)
 
     # --- Canopy layer PAR absorption (npatch × nlevcan) ---
-    sa.fabd_sun_z_patch      = fill(0.0, np, nlevcan)
-    sa.fabd_sha_z_patch      = fill(0.0, np, nlevcan)
-    sa.fabi_sun_z_patch      = fill(0.0, np, nlevcan)
-    sa.fabi_sha_z_patch      = fill(0.0, np, nlevcan)
+    sa.fabd_sun_z_patch      = fill(zero(FT), np, nlevcan)
+    sa.fabd_sha_z_patch      = fill(zero(FT), np, nlevcan)
+    sa.fabi_sun_z_patch      = fill(zero(FT), np, nlevcan)
+    sa.fabi_sha_z_patch      = fill(zero(FT), np, nlevcan)
 
     # --- Snow layer flux absorption (ncol × (nlevsno+1)) ---
-    sa.flx_absdv_col         = fill(SPVAL, nc, nlev_sno1)
-    sa.flx_absdn_col         = fill(SPVAL, nc, nlev_sno1)
-    sa.flx_absiv_col         = fill(SPVAL, nc, nlev_sno1)
-    sa.flx_absin_col         = fill(SPVAL, nc, nlev_sno1)
+    sa.flx_absdv_col         = fill(FT(SPVAL), nc, nlev_sno1)
+    sa.flx_absdn_col         = fill(FT(SPVAL), nc, nlev_sno1)
+    sa.flx_absiv_col         = fill(FT(SPVAL), nc, nlev_sno1)
+    sa.flx_absin_col         = fill(FT(SPVAL), nc, nlev_sno1)
 
     # --- Canopy structure (npatch × nlevcan) ---
-    sa.fsun_z_patch          = fill(0.0, np, nlevcan)
-    sa.tlai_z_patch          = fill(0.0, np, nlevcan)
-    sa.tsai_z_patch          = fill(0.0, np, nlevcan)
+    sa.fsun_z_patch          = fill(zero(FT), np, nlevcan)
+    sa.tlai_z_patch          = fill(zero(FT), np, nlevcan)
+    sa.tsai_z_patch          = fill(zero(FT), np, nlevcan)
     sa.ncan_patch            = fill(0, np)
     sa.nrad_patch            = fill(0, np)
-    sa.vcmaxcintsun_patch    = fill(NaN, np)
-    sa.vcmaxcintsha_patch    = fill(NaN, np)
+    sa.vcmaxcintsun_patch    = fill(FT(NaN), np)
+    sa.vcmaxcintsha_patch    = fill(FT(NaN), np)
 
     # --- SNICAR history output variables ---
-    sa.albgrd_hst_col        = fill(SPVAL, nc, numrad)
-    sa.albgri_hst_col        = fill(SPVAL, nc, numrad)
-    sa.albsnd_hst2_col       = fill(SPVAL, nc, numrad)
-    sa.albsni_hst2_col       = fill(SPVAL, nc, numrad)
-    sa.albgrd_pur_hst_col    = fill(SPVAL, nc, numrad)
-    sa.albgri_pur_hst_col    = fill(SPVAL, nc, numrad)
-    sa.albgrd_bc_hst_col     = fill(SPVAL, nc, numrad)
-    sa.albgri_bc_hst_col     = fill(SPVAL, nc, numrad)
-    sa.albgrd_oc_hst_col     = fill(SPVAL, nc, numrad)
-    sa.albgri_oc_hst_col     = fill(SPVAL, nc, numrad)
-    sa.albgrd_dst_hst_col    = fill(SPVAL, nc, numrad)
-    sa.albgri_dst_hst_col    = fill(SPVAL, nc, numrad)
-    sa.albd_hst_patch        = fill(SPVAL, np, numrad)
-    sa.albi_hst_patch        = fill(SPVAL, np, numrad)
+    sa.albgrd_hst_col        = fill(FT(SPVAL), nc, numrad)
+    sa.albgri_hst_col        = fill(FT(SPVAL), nc, numrad)
+    sa.albsnd_hst2_col       = fill(FT(SPVAL), nc, numrad)
+    sa.albsni_hst2_col       = fill(FT(SPVAL), nc, numrad)
+    sa.albgrd_pur_hst_col    = fill(FT(SPVAL), nc, numrad)
+    sa.albgri_pur_hst_col    = fill(FT(SPVAL), nc, numrad)
+    sa.albgrd_bc_hst_col     = fill(FT(SPVAL), nc, numrad)
+    sa.albgri_bc_hst_col     = fill(FT(SPVAL), nc, numrad)
+    sa.albgrd_oc_hst_col     = fill(FT(SPVAL), nc, numrad)
+    sa.albgri_oc_hst_col     = fill(FT(SPVAL), nc, numrad)
+    sa.albgrd_dst_hst_col    = fill(FT(SPVAL), nc, numrad)
+    sa.albgri_dst_hst_col    = fill(FT(SPVAL), nc, numrad)
+    sa.albd_hst_patch        = fill(FT(SPVAL), np, numrad)
+    sa.albi_hst_patch        = fill(FT(SPVAL), np, numrad)
 
     return nothing
 end
@@ -193,81 +193,81 @@ Deallocate (reset to empty) all fields of a `SurfaceAlbedoData` instance.
 
 Ported from deallocation in `SurfaceAlbedoType.F90`.
 """
-function surfalb_clean!(sa::SurfaceAlbedoData)
+function surfalb_clean!(sa::SurfaceAlbedoData{FT}) where {FT}
     # Gridcell-level
-    sa.azsun_grc             = Float64[]
-    sa.coszen_grc            = Float64[]
-    sa.coszen_col            = Float64[]
+    sa.azsun_grc             = FT[]
+    sa.coszen_grc            = FT[]
+    sa.coszen_col            = FT[]
 
     # Column-level (2D)
-    sa.albgrd_col            = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_col            = Matrix{Float64}(undef, 0, 0)
-    sa.albsnd_hst_col        = Matrix{Float64}(undef, 0, 0)
-    sa.albsni_hst_col        = Matrix{Float64}(undef, 0, 0)
-    sa.albsod_col            = Matrix{Float64}(undef, 0, 0)
-    sa.albsoi_col            = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_pur_col        = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_pur_col        = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_bc_col         = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_bc_col         = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_oc_col         = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_oc_col         = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_dst_col        = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_dst_col        = Matrix{Float64}(undef, 0, 0)
+    sa.albgrd_col            = Matrix{FT}(undef, 0, 0)
+    sa.albgri_col            = Matrix{FT}(undef, 0, 0)
+    sa.albsnd_hst_col        = Matrix{FT}(undef, 0, 0)
+    sa.albsni_hst_col        = Matrix{FT}(undef, 0, 0)
+    sa.albsod_col            = Matrix{FT}(undef, 0, 0)
+    sa.albsoi_col            = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_pur_col        = Matrix{FT}(undef, 0, 0)
+    sa.albgri_pur_col        = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_bc_col         = Matrix{FT}(undef, 0, 0)
+    sa.albgri_bc_col         = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_oc_col         = Matrix{FT}(undef, 0, 0)
+    sa.albgri_oc_col         = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_dst_col        = Matrix{FT}(undef, 0, 0)
+    sa.albgri_dst_col        = Matrix{FT}(undef, 0, 0)
 
     # Patch-level (2D)
-    sa.albd_patch            = Matrix{Float64}(undef, 0, 0)
-    sa.albi_patch            = Matrix{Float64}(undef, 0, 0)
-    sa.albdSF_patch          = Matrix{Float64}(undef, 0, 0)
-    sa.albiSF_patch          = Matrix{Float64}(undef, 0, 0)
+    sa.albd_patch            = Matrix{FT}(undef, 0, 0)
+    sa.albi_patch            = Matrix{FT}(undef, 0, 0)
+    sa.albdSF_patch          = Matrix{FT}(undef, 0, 0)
+    sa.albiSF_patch          = Matrix{FT}(undef, 0, 0)
 
     # Canopy radiative transfer
-    sa.ftdd_patch            = Matrix{Float64}(undef, 0, 0)
-    sa.ftid_patch            = Matrix{Float64}(undef, 0, 0)
-    sa.ftii_patch            = Matrix{Float64}(undef, 0, 0)
-    sa.fabd_patch            = Matrix{Float64}(undef, 0, 0)
-    sa.fabd_sun_patch        = Matrix{Float64}(undef, 0, 0)
-    sa.fabd_sha_patch        = Matrix{Float64}(undef, 0, 0)
-    sa.fabi_patch            = Matrix{Float64}(undef, 0, 0)
-    sa.fabi_sun_patch        = Matrix{Float64}(undef, 0, 0)
-    sa.fabi_sha_patch        = Matrix{Float64}(undef, 0, 0)
+    sa.ftdd_patch            = Matrix{FT}(undef, 0, 0)
+    sa.ftid_patch            = Matrix{FT}(undef, 0, 0)
+    sa.ftii_patch            = Matrix{FT}(undef, 0, 0)
+    sa.fabd_patch            = Matrix{FT}(undef, 0, 0)
+    sa.fabd_sun_patch        = Matrix{FT}(undef, 0, 0)
+    sa.fabd_sha_patch        = Matrix{FT}(undef, 0, 0)
+    sa.fabi_patch            = Matrix{FT}(undef, 0, 0)
+    sa.fabi_sun_patch        = Matrix{FT}(undef, 0, 0)
+    sa.fabi_sha_patch        = Matrix{FT}(undef, 0, 0)
 
     # Canopy layer PAR
-    sa.fabd_sun_z_patch      = Matrix{Float64}(undef, 0, 0)
-    sa.fabd_sha_z_patch      = Matrix{Float64}(undef, 0, 0)
-    sa.fabi_sun_z_patch      = Matrix{Float64}(undef, 0, 0)
-    sa.fabi_sha_z_patch      = Matrix{Float64}(undef, 0, 0)
+    sa.fabd_sun_z_patch      = Matrix{FT}(undef, 0, 0)
+    sa.fabd_sha_z_patch      = Matrix{FT}(undef, 0, 0)
+    sa.fabi_sun_z_patch      = Matrix{FT}(undef, 0, 0)
+    sa.fabi_sha_z_patch      = Matrix{FT}(undef, 0, 0)
 
     # Snow layer flux absorption
-    sa.flx_absdv_col         = Matrix{Float64}(undef, 0, 0)
-    sa.flx_absdn_col         = Matrix{Float64}(undef, 0, 0)
-    sa.flx_absiv_col         = Matrix{Float64}(undef, 0, 0)
-    sa.flx_absin_col         = Matrix{Float64}(undef, 0, 0)
+    sa.flx_absdv_col         = Matrix{FT}(undef, 0, 0)
+    sa.flx_absdn_col         = Matrix{FT}(undef, 0, 0)
+    sa.flx_absiv_col         = Matrix{FT}(undef, 0, 0)
+    sa.flx_absin_col         = Matrix{FT}(undef, 0, 0)
 
     # Canopy structure
-    sa.fsun_z_patch          = Matrix{Float64}(undef, 0, 0)
-    sa.tlai_z_patch          = Matrix{Float64}(undef, 0, 0)
-    sa.tsai_z_patch          = Matrix{Float64}(undef, 0, 0)
+    sa.fsun_z_patch          = Matrix{FT}(undef, 0, 0)
+    sa.tlai_z_patch          = Matrix{FT}(undef, 0, 0)
+    sa.tsai_z_patch          = Matrix{FT}(undef, 0, 0)
     sa.ncan_patch            = Int[]
     sa.nrad_patch            = Int[]
-    sa.vcmaxcintsun_patch    = Float64[]
-    sa.vcmaxcintsha_patch    = Float64[]
+    sa.vcmaxcintsun_patch    = FT[]
+    sa.vcmaxcintsha_patch    = FT[]
 
     # SNICAR history output
-    sa.albgrd_hst_col        = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_hst_col        = Matrix{Float64}(undef, 0, 0)
-    sa.albsnd_hst2_col       = Matrix{Float64}(undef, 0, 0)
-    sa.albsni_hst2_col       = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_pur_hst_col    = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_pur_hst_col    = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_bc_hst_col     = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_bc_hst_col     = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_oc_hst_col     = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_oc_hst_col     = Matrix{Float64}(undef, 0, 0)
-    sa.albgrd_dst_hst_col    = Matrix{Float64}(undef, 0, 0)
-    sa.albgri_dst_hst_col    = Matrix{Float64}(undef, 0, 0)
-    sa.albd_hst_patch        = Matrix{Float64}(undef, 0, 0)
-    sa.albi_hst_patch        = Matrix{Float64}(undef, 0, 0)
+    sa.albgrd_hst_col        = Matrix{FT}(undef, 0, 0)
+    sa.albgri_hst_col        = Matrix{FT}(undef, 0, 0)
+    sa.albsnd_hst2_col       = Matrix{FT}(undef, 0, 0)
+    sa.albsni_hst2_col       = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_pur_hst_col    = Matrix{FT}(undef, 0, 0)
+    sa.albgri_pur_hst_col    = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_bc_hst_col     = Matrix{FT}(undef, 0, 0)
+    sa.albgri_bc_hst_col     = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_oc_hst_col     = Matrix{FT}(undef, 0, 0)
+    sa.albgri_oc_hst_col     = Matrix{FT}(undef, 0, 0)
+    sa.albgrd_dst_hst_col    = Matrix{FT}(undef, 0, 0)
+    sa.albgri_dst_hst_col    = Matrix{FT}(undef, 0, 0)
+    sa.albd_hst_patch        = Matrix{FT}(undef, 0, 0)
+    sa.albi_hst_patch        = Matrix{FT}(undef, 0, 0)
 
     return nothing
 end

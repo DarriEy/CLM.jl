@@ -12,18 +12,18 @@ flags used across multiple CN modules.
 Ported from `CNParamsShareType` and module-level variables in
 `CNSharedParamsMod.F90`.
 """
-Base.@kwdef mutable struct CNSharedParamsData
+Base.@kwdef mutable struct CNSharedParamsData{FT<:AbstractFloat}
     # --- Parameters from CNParamsShareType ---
-    Q10                              ::Float64 = 1.5     # temperature dependence
-    minpsi                           ::Float64 = -10.0   # minimum soil water potential for heterotrophic resp (MPa)
-    maxpsi                           ::Float64 = -0.1    # maximum soil water potential for heterotrophic resp (MPa)
-    rf_cwdl2                         ::Float64 = 0.0     # respiration fraction in CWD to litter2 transition (frac)
-    tau_cwd                          ::Float64 = 0.0     # fragmentation rate constant CWD (1/yr)
-    cwd_flig                         ::Float64 = 0.0     # lignin fraction of coarse woody debris
-    froz_q10                         ::Float64 = 1.5     # separate q10 for frozen soil respiration rates
-    decomp_depth_efolding            ::Float64 = 0.5     # e-folding depth for reduction in decomposition (m)
-    mino2lim                         ::Float64 = 0.0     # minimum anaerobic decomposition rate as fraction of potential aerobic rate
-    organic_max                      ::Float64 = 0.0     # organic matter content (kg/m3) where soil acts like peat
+    Q10                              ::FT = 1.5     # temperature dependence
+    minpsi                           ::FT = -10.0   # minimum soil water potential for heterotrophic resp (MPa)
+    maxpsi                           ::FT = -0.1    # maximum soil water potential for heterotrophic resp (MPa)
+    rf_cwdl2                         ::FT = 0.0     # respiration fraction in CWD to litter2 transition (frac)
+    tau_cwd                          ::FT = 0.0     # fragmentation rate constant CWD (1/yr)
+    cwd_flig                         ::FT = 0.0     # lignin fraction of coarse woody debris
+    froz_q10                         ::FT = 1.5     # separate q10 for frozen soil respiration rates
+    decomp_depth_efolding            ::FT = 0.5     # e-folding depth for reduction in decomposition (m)
+    mino2lim                         ::FT = 0.0     # minimum anaerobic decomposition rate as fraction of potential aerobic rate
+    organic_max                      ::FT = 0.0     # organic matter content (kg/m3) where soil acts like peat
     constrain_stress_deciduous_onset ::Bool    = false   # if true, use additional constraint on stress deciduous onset trigger
 
     # --- Module-level variables ---

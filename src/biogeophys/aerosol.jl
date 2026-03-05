@@ -28,60 +28,60 @@ Fortran snow-layer index j ∈ [-nlevsno+1, 0] to Julia index j + nlevsno.
 
 Ported from `aerosol_type` in `AerosolMod.F90`.
 """
-Base.@kwdef mutable struct AerosolData
+Base.@kwdef mutable struct AerosolData{FT<:AbstractFloat}
     # --- Mass of aerosol species in snow (col, lyr) [kg] ---
-    mss_bcpho_col   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # hydrophobic BC
-    mss_bcphi_col   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # hydrophilic BC
-    mss_bctot_col   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # total BC (pho+phi)
-    mss_bc_col_col  ::Vector{Float64} = Float64[]                      # column-integrated BC
-    mss_bc_top_col  ::Vector{Float64} = Float64[]                      # top-layer BC
+    mss_bcpho_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophobic BC
+    mss_bcphi_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophilic BC
+    mss_bctot_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # total BC (pho+phi)
+    mss_bc_col_col  ::Vector{FT} = Float64[]                      # column-integrated BC
+    mss_bc_top_col  ::Vector{FT} = Float64[]                      # top-layer BC
 
-    mss_ocpho_col   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # hydrophobic OC
-    mss_ocphi_col   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # hydrophilic OC
-    mss_octot_col   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # total OC (pho+phi)
-    mss_oc_col_col  ::Vector{Float64} = Float64[]                      # column-integrated OC
-    mss_oc_top_col  ::Vector{Float64} = Float64[]                      # top-layer OC
+    mss_ocpho_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophobic OC
+    mss_ocphi_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophilic OC
+    mss_octot_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # total OC (pho+phi)
+    mss_oc_col_col  ::Vector{FT} = Float64[]                      # column-integrated OC
+    mss_oc_top_col  ::Vector{FT} = Float64[]                      # top-layer OC
 
-    mss_dst1_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # dust species 1
-    mss_dst2_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # dust species 2
-    mss_dst3_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # dust species 3
-    mss_dst4_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # dust species 4
-    mss_dsttot_col  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # total dust
-    mss_dst_col_col ::Vector{Float64} = Float64[]                      # column-integrated dust
-    mss_dst_top_col ::Vector{Float64} = Float64[]                      # top-layer dust
+    mss_dst1_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 1
+    mss_dst2_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 2
+    mss_dst3_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 3
+    mss_dst4_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 4
+    mss_dsttot_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # total dust
+    mss_dst_col_col ::Vector{FT} = Float64[]                      # column-integrated dust
+    mss_dst_top_col ::Vector{FT} = Float64[]                      # top-layer dust
 
     # --- Mass concentrations in snow (col, lyr) [kg/kg] ---
-    mss_cnc_bcphi_col ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_bcpho_col ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_ocphi_col ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_ocpho_col ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst1_col  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst2_col  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst3_col  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst4_col  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_bcphi_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_bcpho_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_ocphi_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_ocpho_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst1_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst2_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst3_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst4_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
 
     # --- Deposition fluxes (col) [kg/m2/s] ---
-    flx_dst_dep_dry1_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_wet1_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_dry2_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_wet2_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_dry3_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_wet3_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_dry4_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_wet4_col ::Vector{Float64} = Float64[]
-    flx_dst_dep_col      ::Vector{Float64} = Float64[]
+    flx_dst_dep_dry1_col ::Vector{FT} = Float64[]
+    flx_dst_dep_wet1_col ::Vector{FT} = Float64[]
+    flx_dst_dep_dry2_col ::Vector{FT} = Float64[]
+    flx_dst_dep_wet2_col ::Vector{FT} = Float64[]
+    flx_dst_dep_dry3_col ::Vector{FT} = Float64[]
+    flx_dst_dep_wet3_col ::Vector{FT} = Float64[]
+    flx_dst_dep_dry4_col ::Vector{FT} = Float64[]
+    flx_dst_dep_wet4_col ::Vector{FT} = Float64[]
+    flx_dst_dep_col      ::Vector{FT} = Float64[]
 
-    flx_bc_dep_dry_col   ::Vector{Float64} = Float64[]
-    flx_bc_dep_wet_col   ::Vector{Float64} = Float64[]
-    flx_bc_dep_pho_col   ::Vector{Float64} = Float64[]
-    flx_bc_dep_phi_col   ::Vector{Float64} = Float64[]
-    flx_bc_dep_col       ::Vector{Float64} = Float64[]
+    flx_bc_dep_dry_col   ::Vector{FT} = Float64[]
+    flx_bc_dep_wet_col   ::Vector{FT} = Float64[]
+    flx_bc_dep_pho_col   ::Vector{FT} = Float64[]
+    flx_bc_dep_phi_col   ::Vector{FT} = Float64[]
+    flx_bc_dep_col       ::Vector{FT} = Float64[]
 
-    flx_oc_dep_dry_col   ::Vector{Float64} = Float64[]
-    flx_oc_dep_wet_col   ::Vector{Float64} = Float64[]
-    flx_oc_dep_pho_col   ::Vector{Float64} = Float64[]
-    flx_oc_dep_phi_col   ::Vector{Float64} = Float64[]
-    flx_oc_dep_col       ::Vector{Float64} = Float64[]
+    flx_oc_dep_dry_col   ::Vector{FT} = Float64[]
+    flx_oc_dep_wet_col   ::Vector{FT} = Float64[]
+    flx_oc_dep_pho_col   ::Vector{FT} = Float64[]
+    flx_oc_dep_phi_col   ::Vector{FT} = Float64[]
+    flx_oc_dep_col       ::Vector{FT} = Float64[]
 end
 
 # --------------------------------------------------------------------------
@@ -95,62 +95,62 @@ Allocate all fields of an `AerosolData` instance for `nc` columns.
 
 Ported from `InitAllocate` in `AerosolMod.F90`.
 """
-function aerosol_init!(aer::AerosolData, nc::Int)
+function aerosol_init!(aer::AerosolData{FT}, nc::Int) where {FT}
     nlevsno = varpar.nlevsno
 
     # Deposition fluxes — 1D (col)
-    aer.flx_dst_dep_dry1_col = fill(NaN, nc)
-    aer.flx_dst_dep_wet1_col = fill(NaN, nc)
-    aer.flx_dst_dep_dry2_col = fill(NaN, nc)
-    aer.flx_dst_dep_wet2_col = fill(NaN, nc)
-    aer.flx_dst_dep_dry3_col = fill(NaN, nc)
-    aer.flx_dst_dep_wet3_col = fill(NaN, nc)
-    aer.flx_dst_dep_dry4_col = fill(NaN, nc)
-    aer.flx_dst_dep_wet4_col = fill(NaN, nc)
-    aer.flx_dst_dep_col      = fill(NaN, nc)
+    aer.flx_dst_dep_dry1_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_wet1_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_dry2_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_wet2_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_dry3_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_wet3_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_dry4_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_wet4_col = fill(FT(NaN), nc)
+    aer.flx_dst_dep_col      = fill(FT(NaN), nc)
 
-    aer.flx_bc_dep_dry_col   = fill(NaN, nc)
-    aer.flx_bc_dep_wet_col   = fill(NaN, nc)
-    aer.flx_bc_dep_pho_col   = fill(NaN, nc)
-    aer.flx_bc_dep_phi_col   = fill(NaN, nc)
-    aer.flx_bc_dep_col       = fill(NaN, nc)
+    aer.flx_bc_dep_dry_col   = fill(FT(NaN), nc)
+    aer.flx_bc_dep_wet_col   = fill(FT(NaN), nc)
+    aer.flx_bc_dep_pho_col   = fill(FT(NaN), nc)
+    aer.flx_bc_dep_phi_col   = fill(FT(NaN), nc)
+    aer.flx_bc_dep_col       = fill(FT(NaN), nc)
 
-    aer.flx_oc_dep_dry_col   = fill(NaN, nc)
-    aer.flx_oc_dep_wet_col   = fill(NaN, nc)
-    aer.flx_oc_dep_pho_col   = fill(NaN, nc)
-    aer.flx_oc_dep_phi_col   = fill(NaN, nc)
-    aer.flx_oc_dep_col       = fill(NaN, nc)
+    aer.flx_oc_dep_dry_col   = fill(FT(NaN), nc)
+    aer.flx_oc_dep_wet_col   = fill(FT(NaN), nc)
+    aer.flx_oc_dep_pho_col   = fill(FT(NaN), nc)
+    aer.flx_oc_dep_phi_col   = fill(FT(NaN), nc)
+    aer.flx_oc_dep_col       = fill(FT(NaN), nc)
 
     # Mass in snow layers — 2D (col, lyr)  Fortran (-nlevsno+1:0) → Julia 1:nlevsno
-    aer.mss_bcpho_col   = fill(NaN, nc, nlevsno)
-    aer.mss_bcphi_col   = fill(NaN, nc, nlevsno)
-    aer.mss_bctot_col   = fill(NaN, nc, nlevsno)
-    aer.mss_bc_col_col  = fill(NaN, nc)
-    aer.mss_bc_top_col  = fill(NaN, nc)
+    aer.mss_bcpho_col   = fill(FT(NaN), nc, nlevsno)
+    aer.mss_bcphi_col   = fill(FT(NaN), nc, nlevsno)
+    aer.mss_bctot_col   = fill(FT(NaN), nc, nlevsno)
+    aer.mss_bc_col_col  = fill(FT(NaN), nc)
+    aer.mss_bc_top_col  = fill(FT(NaN), nc)
 
-    aer.mss_ocpho_col   = fill(NaN, nc, nlevsno)
-    aer.mss_ocphi_col   = fill(NaN, nc, nlevsno)
-    aer.mss_octot_col   = fill(NaN, nc, nlevsno)
-    aer.mss_oc_col_col  = fill(NaN, nc)
-    aer.mss_oc_top_col  = fill(NaN, nc)
+    aer.mss_ocpho_col   = fill(FT(NaN), nc, nlevsno)
+    aer.mss_ocphi_col   = fill(FT(NaN), nc, nlevsno)
+    aer.mss_octot_col   = fill(FT(NaN), nc, nlevsno)
+    aer.mss_oc_col_col  = fill(FT(NaN), nc)
+    aer.mss_oc_top_col  = fill(FT(NaN), nc)
 
-    aer.mss_dst1_col    = fill(NaN, nc, nlevsno)
-    aer.mss_dst2_col    = fill(NaN, nc, nlevsno)
-    aer.mss_dst3_col    = fill(NaN, nc, nlevsno)
-    aer.mss_dst4_col    = fill(NaN, nc, nlevsno)
-    aer.mss_dsttot_col  = fill(NaN, nc, nlevsno)
-    aer.mss_dst_col_col = fill(NaN, nc)
-    aer.mss_dst_top_col = fill(NaN, nc)
+    aer.mss_dst1_col    = fill(FT(NaN), nc, nlevsno)
+    aer.mss_dst2_col    = fill(FT(NaN), nc, nlevsno)
+    aer.mss_dst3_col    = fill(FT(NaN), nc, nlevsno)
+    aer.mss_dst4_col    = fill(FT(NaN), nc, nlevsno)
+    aer.mss_dsttot_col  = fill(FT(NaN), nc, nlevsno)
+    aer.mss_dst_col_col = fill(FT(NaN), nc)
+    aer.mss_dst_top_col = fill(FT(NaN), nc)
 
     # Mass concentrations — 2D (col, lyr)
-    aer.mss_cnc_bcphi_col = fill(NaN, nc, nlevsno)
-    aer.mss_cnc_bcpho_col = fill(NaN, nc, nlevsno)
-    aer.mss_cnc_ocphi_col = fill(NaN, nc, nlevsno)
-    aer.mss_cnc_ocpho_col = fill(NaN, nc, nlevsno)
-    aer.mss_cnc_dst1_col  = fill(NaN, nc, nlevsno)
-    aer.mss_cnc_dst2_col  = fill(NaN, nc, nlevsno)
-    aer.mss_cnc_dst3_col  = fill(NaN, nc, nlevsno)
-    aer.mss_cnc_dst4_col  = fill(NaN, nc, nlevsno)
+    aer.mss_cnc_bcphi_col = fill(FT(NaN), nc, nlevsno)
+    aer.mss_cnc_bcpho_col = fill(FT(NaN), nc, nlevsno)
+    aer.mss_cnc_ocphi_col = fill(FT(NaN), nc, nlevsno)
+    aer.mss_cnc_ocpho_col = fill(FT(NaN), nc, nlevsno)
+    aer.mss_cnc_dst1_col  = fill(FT(NaN), nc, nlevsno)
+    aer.mss_cnc_dst2_col  = fill(FT(NaN), nc, nlevsno)
+    aer.mss_cnc_dst3_col  = fill(FT(NaN), nc, nlevsno)
+    aer.mss_cnc_dst4_col  = fill(FT(NaN), nc, nlevsno)
 
     return nothing
 end
@@ -160,57 +160,57 @@ end
 
 Deallocate (reset to empty) all fields of an `AerosolData` instance.
 """
-function aerosol_clean!(aer::AerosolData)
-    aer.flx_dst_dep_dry1_col = Float64[]
-    aer.flx_dst_dep_wet1_col = Float64[]
-    aer.flx_dst_dep_dry2_col = Float64[]
-    aer.flx_dst_dep_wet2_col = Float64[]
-    aer.flx_dst_dep_dry3_col = Float64[]
-    aer.flx_dst_dep_wet3_col = Float64[]
-    aer.flx_dst_dep_dry4_col = Float64[]
-    aer.flx_dst_dep_wet4_col = Float64[]
-    aer.flx_dst_dep_col      = Float64[]
+function aerosol_clean!(aer::AerosolData{FT}) where {FT}
+    aer.flx_dst_dep_dry1_col = FT[]
+    aer.flx_dst_dep_wet1_col = FT[]
+    aer.flx_dst_dep_dry2_col = FT[]
+    aer.flx_dst_dep_wet2_col = FT[]
+    aer.flx_dst_dep_dry3_col = FT[]
+    aer.flx_dst_dep_wet3_col = FT[]
+    aer.flx_dst_dep_dry4_col = FT[]
+    aer.flx_dst_dep_wet4_col = FT[]
+    aer.flx_dst_dep_col      = FT[]
 
-    aer.flx_bc_dep_dry_col   = Float64[]
-    aer.flx_bc_dep_wet_col   = Float64[]
-    aer.flx_bc_dep_pho_col   = Float64[]
-    aer.flx_bc_dep_phi_col   = Float64[]
-    aer.flx_bc_dep_col       = Float64[]
+    aer.flx_bc_dep_dry_col   = FT[]
+    aer.flx_bc_dep_wet_col   = FT[]
+    aer.flx_bc_dep_pho_col   = FT[]
+    aer.flx_bc_dep_phi_col   = FT[]
+    aer.flx_bc_dep_col       = FT[]
 
-    aer.flx_oc_dep_dry_col   = Float64[]
-    aer.flx_oc_dep_wet_col   = Float64[]
-    aer.flx_oc_dep_pho_col   = Float64[]
-    aer.flx_oc_dep_phi_col   = Float64[]
-    aer.flx_oc_dep_col       = Float64[]
+    aer.flx_oc_dep_dry_col   = FT[]
+    aer.flx_oc_dep_wet_col   = FT[]
+    aer.flx_oc_dep_pho_col   = FT[]
+    aer.flx_oc_dep_phi_col   = FT[]
+    aer.flx_oc_dep_col       = FT[]
 
-    aer.mss_bcpho_col   = Matrix{Float64}(undef, 0, 0)
-    aer.mss_bcphi_col   = Matrix{Float64}(undef, 0, 0)
-    aer.mss_bctot_col   = Matrix{Float64}(undef, 0, 0)
-    aer.mss_bc_col_col  = Float64[]
-    aer.mss_bc_top_col  = Float64[]
+    aer.mss_bcpho_col   = Matrix{FT}(undef, 0, 0)
+    aer.mss_bcphi_col   = Matrix{FT}(undef, 0, 0)
+    aer.mss_bctot_col   = Matrix{FT}(undef, 0, 0)
+    aer.mss_bc_col_col  = FT[]
+    aer.mss_bc_top_col  = FT[]
 
-    aer.mss_ocpho_col   = Matrix{Float64}(undef, 0, 0)
-    aer.mss_ocphi_col   = Matrix{Float64}(undef, 0, 0)
-    aer.mss_octot_col   = Matrix{Float64}(undef, 0, 0)
-    aer.mss_oc_col_col  = Float64[]
-    aer.mss_oc_top_col  = Float64[]
+    aer.mss_ocpho_col   = Matrix{FT}(undef, 0, 0)
+    aer.mss_ocphi_col   = Matrix{FT}(undef, 0, 0)
+    aer.mss_octot_col   = Matrix{FT}(undef, 0, 0)
+    aer.mss_oc_col_col  = FT[]
+    aer.mss_oc_top_col  = FT[]
 
-    aer.mss_dst1_col    = Matrix{Float64}(undef, 0, 0)
-    aer.mss_dst2_col    = Matrix{Float64}(undef, 0, 0)
-    aer.mss_dst3_col    = Matrix{Float64}(undef, 0, 0)
-    aer.mss_dst4_col    = Matrix{Float64}(undef, 0, 0)
-    aer.mss_dsttot_col  = Matrix{Float64}(undef, 0, 0)
-    aer.mss_dst_col_col = Float64[]
-    aer.mss_dst_top_col = Float64[]
+    aer.mss_dst1_col    = Matrix{FT}(undef, 0, 0)
+    aer.mss_dst2_col    = Matrix{FT}(undef, 0, 0)
+    aer.mss_dst3_col    = Matrix{FT}(undef, 0, 0)
+    aer.mss_dst4_col    = Matrix{FT}(undef, 0, 0)
+    aer.mss_dsttot_col  = Matrix{FT}(undef, 0, 0)
+    aer.mss_dst_col_col = FT[]
+    aer.mss_dst_top_col = FT[]
 
-    aer.mss_cnc_bcphi_col = Matrix{Float64}(undef, 0, 0)
-    aer.mss_cnc_bcpho_col = Matrix{Float64}(undef, 0, 0)
-    aer.mss_cnc_ocphi_col = Matrix{Float64}(undef, 0, 0)
-    aer.mss_cnc_ocpho_col = Matrix{Float64}(undef, 0, 0)
-    aer.mss_cnc_dst1_col  = Matrix{Float64}(undef, 0, 0)
-    aer.mss_cnc_dst2_col  = Matrix{Float64}(undef, 0, 0)
-    aer.mss_cnc_dst3_col  = Matrix{Float64}(undef, 0, 0)
-    aer.mss_cnc_dst4_col  = Matrix{Float64}(undef, 0, 0)
+    aer.mss_cnc_bcphi_col = Matrix{FT}(undef, 0, 0)
+    aer.mss_cnc_bcpho_col = Matrix{FT}(undef, 0, 0)
+    aer.mss_cnc_ocphi_col = Matrix{FT}(undef, 0, 0)
+    aer.mss_cnc_ocpho_col = Matrix{FT}(undef, 0, 0)
+    aer.mss_cnc_dst1_col  = Matrix{FT}(undef, 0, 0)
+    aer.mss_cnc_dst2_col  = Matrix{FT}(undef, 0, 0)
+    aer.mss_cnc_dst3_col  = Matrix{FT}(undef, 0, 0)
+    aer.mss_cnc_dst4_col  = Matrix{FT}(undef, 0, 0)
 
     return nothing
 end
@@ -222,7 +222,7 @@ Cold-start initialization: zero all mass and concentration arrays.
 
 Ported from `InitCold` in `AerosolMod.F90`.
 """
-function aerosol_init_cold!(aer::AerosolData, bounds::UnitRange{Int})
+function aerosol_init_cold!(aer::AerosolData{FT}, bounds::UnitRange{Int}) where {FT}
     nlevsno = varpar.nlevsno
 
     for c in bounds
@@ -266,7 +266,7 @@ Reset all aerosol mass variables to zero for column `c`.
 
 Ported from `Reset` in `AerosolMod.F90`.
 """
-function aerosol_reset!(aer::AerosolData, c::Int)
+function aerosol_reset!(aer::AerosolData{FT}, c::Int) where {FT}
     nlevsno = varpar.nlevsno
 
     for j in 1:nlevsno
@@ -302,7 +302,7 @@ Reset aerosol masses for all columns where `mask[c]` is true.
 
 Ported from `ResetFilter` in `AerosolMod.F90`.
 """
-function aerosol_reset_filter!(aer::AerosolData, mask::BitVector, bounds::UnitRange{Int})
+function aerosol_reset_filter!(aer::AerosolData{FT}, mask::BitVector, bounds::UnitRange{Int}) where {FT}
     for c in bounds
         mask[c] || continue
         aerosol_reset!(aer, c)
@@ -632,6 +632,6 @@ Stub — requires history infrastructure.
 
 Ported from `InitHistory` in `AerosolMod.F90`.
 """
-function aerosol_init_history!(aer::AerosolData, bounds::UnitRange{Int})
+function aerosol_init_history!(aer::AerosolData{FT}, bounds::UnitRange{Int}) where {FT}
     return nothing
 end

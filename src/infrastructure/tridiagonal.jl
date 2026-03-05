@@ -12,39 +12,41 @@ The system solved for levels jtop:nlevs is:
     a[j]*u[j-1] + b[j]*u[j] + c[j]*u[j+1] = r[j]
 
 # Arguments
-- `u::AbstractVector{Float64}`: Solution vector [nlevs] (OUTPUT)
-- `a::AbstractVector{Float64}`: Sub-diagonal [nlevs]
-- `b::AbstractVector{Float64}`: Diagonal [nlevs]
-- `c::AbstractVector{Float64}`: Super-diagonal [nlevs]
-- `r::AbstractVector{Float64}`: Right-hand side [nlevs]
+- `u::AbstractVector{<:Real}`: Solution vector [nlevs] (OUTPUT)
+- `a::AbstractVector{<:Real}`: Sub-diagonal [nlevs]
+- `b::AbstractVector{<:Real}`: Diagonal [nlevs]
+- `c::AbstractVector{<:Real}`: Super-diagonal [nlevs]
+- `r::AbstractVector{<:Real}`: Right-hand side [nlevs]
 - `jtop::Int`:                  Top active level
 - `nlevs::Int`:                 Total number of levels
 
 This is the reference implementation matching Fortran exactly.
 """
-function tridiagonal_solve!(u::AbstractVector{Float64}, a::AbstractVector{Float64},
-                            b::AbstractVector{Float64}, c::AbstractVector{Float64},
-                            r::AbstractVector{Float64}, jtop::Int, nlevs::Int)
-    # Working arrays for modified coefficients
-    cp = zeros(nlevs)
-    dp = zeros(nlevs)
+function tridiagonal_solve!(u::AbstractVector{<:Real}, a::AbstractVector{<:Real},
+                            b::AbstractVector{<:Real}, c::AbstractVector{<:Real},
+                            r::AbstractVector{<:Real}, jtop::Int, nlevs::Int)
+    T = promote_type(eltype(a), eltype(b), eltype(c), eltype(r))
+    cp = Vector{T}(undef, nlevs)
+    dp = Vector{T}(undef, nlevs)
 
     j = jtop
 
-    # Forward sweep: eliminate sub-diagonal
-    cp[j] = c[j] / b[j]
-    dp[j] = r[j] / b[j]
+    @inbounds begin
+        # Forward sweep: eliminate sub-diagonal
+        cp[j] = c[j] / b[j]
+        dp[j] = r[j] / b[j]
 
-    for jj in (j+1):nlevs
-        denom = b[jj] - a[jj] * cp[jj-1]
-        cp[jj] = c[jj] / denom
-        dp[jj] = (r[jj] - a[jj] * dp[jj-1]) / denom
-    end
+        for jj in (j+1):nlevs
+            denom = b[jj] - a[jj] * cp[jj-1]
+            cp[jj] = c[jj] / denom
+            dp[jj] = (r[jj] - a[jj] * dp[jj-1]) / denom
+        end
 
-    # Back substitution
-    u[nlevs] = dp[nlevs]
-    for jj in (nlevs-1):-1:j
-        u[jj] = dp[jj] - cp[jj] * u[jj+1]
+        # Back substitution
+        u[nlevs] = dp[nlevs]
+        for jj in (nlevs-1):-1:j
+            u[jj] = dp[jj] - cp[jj] * u[jj+1]
+        end
     end
 
     nothing
@@ -57,42 +59,45 @@ Solve tridiagonal systems for multiple columns simultaneously.
 Columns where `mask[col] == false` are skipped.
 
 # Arguments
-- `u::Matrix{Float64}`:     Solution [ncols × nlevs] (OUTPUT)
-- `a::Matrix{Float64}`:     Sub-diagonal [ncols × nlevs]
-- `b::Matrix{Float64}`:     Diagonal [ncols × nlevs]
-- `c::Matrix{Float64}`:     Super-diagonal [ncols × nlevs]
-- `r::Matrix{Float64}`:     Right-hand side [ncols × nlevs]
+- `u::AbstractMatrix{<:Real}`:     Solution [ncols × nlevs] (OUTPUT)
+- `a::AbstractMatrix{<:Real}`:     Sub-diagonal [ncols × nlevs]
+- `b::AbstractMatrix{<:Real}`:     Diagonal [ncols × nlevs]
+- `c::AbstractMatrix{<:Real}`:     Super-diagonal [ncols × nlevs]
+- `r::AbstractMatrix{<:Real}`:     Right-hand side [ncols × nlevs]
 - `jtop::Vector{Int}`:      Top active level per column [ncols]
-- `mask::BitVector`:         Active column mask [ncols]
+- `mask::AbstractVector{Bool}`:    Active column mask [ncols]
 - `ncols::Int`:              Number of columns
 - `nlevs::Int`:              Number of levels
 """
-function tridiagonal_multi!(u::Matrix{Float64}, a::Matrix{Float64}, b::Matrix{Float64},
-                            c::Matrix{Float64}, r::Matrix{Float64},
-                            jtop::Vector{Int}, mask::BitVector, ncols::Int, nlevs::Int)
-    # Per-column working arrays
-    cp = zeros(nlevs)
-    dp = zeros(nlevs)
+function tridiagonal_multi!(u::AbstractMatrix{<:Real}, a::AbstractMatrix{<:Real}, b::AbstractMatrix{<:Real},
+                            c::AbstractMatrix{<:Real}, r::AbstractMatrix{<:Real},
+                            jtop::Vector{Int}, mask::AbstractVector{Bool}, ncols::Int, nlevs::Int)
+    # Workspace allocated once, reused across all columns
+    T = promote_type(eltype(a), eltype(b), eltype(c), eltype(r))
+    cp = Vector{T}(undef, nlevs)
+    dp = Vector{T}(undef, nlevs)
 
     for col in 1:ncols
         mask[col] || continue
 
         j = jtop[col]
 
-        # Forward sweep
-        cp[j] = c[col, j] / b[col, j]
-        dp[j] = r[col, j] / b[col, j]
+        @inbounds begin
+            # Forward sweep
+            cp[j] = c[col, j] / b[col, j]
+            dp[j] = r[col, j] / b[col, j]
 
-        for jj in (j+1):nlevs
-            denom = b[col, jj] - a[col, jj] * cp[jj-1]
-            cp[jj] = c[col, jj] / denom
-            dp[jj] = (r[col, jj] - a[col, jj] * dp[jj-1]) / denom
-        end
+            for jj in (j+1):nlevs
+                denom = b[col, jj] - a[col, jj] * cp[jj-1]
+                cp[jj] = c[col, jj] / denom
+                dp[jj] = (r[col, jj] - a[col, jj] * dp[jj-1]) / denom
+            end
 
-        # Back substitution
-        u[col, nlevs] = dp[nlevs]
-        for jj in (nlevs-1):-1:j
-            u[col, jj] = dp[jj] - cp[jj] * u[col, jj+1]
+            # Back substitution
+            u[col, nlevs] = dp[nlevs]
+            for jj in (nlevs-1):-1:j
+                u[col, jj] = dp[jj] - cp[jj] * u[col, jj+1]
+            end
         end
     end
 

@@ -29,29 +29,28 @@ are active in the driver loop.
 
 Ported from module-level `use` statements in `clm_driver.F90`.
 """
-Base.@kwdef mutable struct CLMDriverConfig
-    use_fates::Bool = false
-    use_fates_sp::Bool = false
-    use_fates_bgc::Bool = false
-    use_cn::Bool = false
+# ---------------------------------------------------------------------------
+# BGC mode type hierarchy — enables dispatch-based specialization
+# ---------------------------------------------------------------------------
+
+"""Abstract supertype for biogeochemistry mode. Subtypes enable
+the compiler to specialize and dead-code-eliminate unused branches."""
+abstract type AbstractBGCMode end
+
+"""Satellite Phenology mode — prescribed LAI, no biogeochemistry."""
+struct SPMode <: AbstractBGCMode end
+
+"""Carbon-Nitrogen biogeochemistry mode."""
+Base.@kwdef struct CNMode <: AbstractBGCMode
     use_lch4::Bool = false
     use_c13::Bool = false
     use_c14::Bool = false
     use_crop::Bool = false
-    irrigate::Bool = false
-    use_noio::Bool = false
-    use_soil_moisture_streams::Bool = false
     use_cropcal_streams::Bool = false
-    use_lai_streams::Bool = false
-    ndep_from_cpl::Bool = false
     use_matrixcn::Bool = false
-    fates_spitfire_mode::Int = 0
-    fates_seeddisp_cadence::Int = 0
-    n_drydep::Int = 0
+    ndep_from_cpl::Bool = false
     decomp_method::Int = 1
     no_soil_decomp::Int = 0
-
-    # BGC decomposition cascade parameters (set from cascade init)
     ndecomp_pools::Int = 7
     ndecomp_cascade_transitions::Int = 10
     i_litr_min::Int = 1
@@ -59,6 +58,119 @@ Base.@kwdef mutable struct CLMDriverConfig
     i_cwd::Int = 7
     npcropmin::Int = 17
     nrepr::Int = 1
+end
+
+"""FATES (Functionally Assembled Terrestrial Ecosystem Simulator) mode."""
+Base.@kwdef struct FATESMode <: AbstractBGCMode
+    use_fates_sp::Bool = false
+    use_fates_bgc::Bool = false
+    fates_spitfire_mode::Int = 0
+    fates_seeddisp_cadence::Int = 0
+end
+
+# Convenience queries for dispatch
+is_bgc_active(::SPMode) = false
+is_bgc_active(::CNMode) = true
+is_bgc_active(m::FATESMode) = m.use_fates_bgc
+
+has_cn(::AbstractBGCMode) = false
+has_cn(::CNMode) = true
+
+has_fates(::AbstractBGCMode) = false
+has_fates(::FATESMode) = true
+
+has_lch4(::AbstractBGCMode) = false
+has_lch4(m::CNMode) = m.use_lch4
+
+mutable struct CLMDriverConfig{M <: AbstractBGCMode}
+    bgc_mode::M
+    irrigate::Bool
+    use_noio::Bool
+    use_soil_moisture_streams::Bool
+    use_lai_streams::Bool
+    n_drydep::Int
+end
+
+# Backward-compatible property accessors so existing code like config.use_cn still works
+function Base.getproperty(c::CLMDriverConfig, s::Symbol)
+    m = getfield(c, :bgc_mode)
+    if s === :use_cn
+        return m isa CNMode
+    elseif s === :use_fates
+        return m isa FATESMode
+    elseif s === :use_fates_sp
+        return m isa FATESMode && m.use_fates_sp
+    elseif s === :use_fates_bgc
+        return m isa FATESMode && m.use_fates_bgc
+    elseif s === :use_lch4
+        return m isa CNMode && m.use_lch4
+    elseif s === :use_c13
+        return m isa CNMode && m.use_c13
+    elseif s === :use_c14
+        return m isa CNMode && m.use_c14
+    elseif s === :use_crop
+        return m isa CNMode && m.use_crop
+    elseif s === :use_cropcal_streams
+        return m isa CNMode && m.use_cropcal_streams
+    elseif s === :use_matrixcn
+        return m isa CNMode && m.use_matrixcn
+    elseif s === :ndep_from_cpl
+        return m isa CNMode && m.ndep_from_cpl
+    elseif s === :fates_spitfire_mode
+        return m isa FATESMode ? m.fates_spitfire_mode : 0
+    elseif s === :fates_seeddisp_cadence
+        return m isa FATESMode ? m.fates_seeddisp_cadence : 0
+    elseif s === :decomp_method
+        return m isa CNMode ? m.decomp_method : 1
+    elseif s === :no_soil_decomp
+        return m isa CNMode ? m.no_soil_decomp : 0
+    elseif s === :ndecomp_pools
+        return m isa CNMode ? m.ndecomp_pools : 7
+    elseif s === :ndecomp_cascade_transitions
+        return m isa CNMode ? m.ndecomp_cascade_transitions : 10
+    elseif s === :i_litr_min
+        return m isa CNMode ? m.i_litr_min : 1
+    elseif s === :i_litr_max
+        return m isa CNMode ? m.i_litr_max : 3
+    elseif s === :i_cwd
+        return m isa CNMode ? m.i_cwd : 7
+    elseif s === :npcropmin
+        return m isa CNMode ? m.npcropmin : 17
+    elseif s === :nrepr
+        return m isa CNMode ? m.nrepr : 1
+    else
+        return getfield(c, s)
+    end
+end
+
+# Backward-compatible keyword constructor: CLMDriverConfig(use_cn=true, ...)
+function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
+                          use_fates_sp::Bool=false, use_fates_bgc::Bool=false,
+                          use_lch4::Bool=false, use_c13::Bool=false, use_c14::Bool=false,
+                          use_crop::Bool=false, use_cropcal_streams::Bool=false,
+                          use_matrixcn::Bool=false, ndep_from_cpl::Bool=false,
+                          fates_spitfire_mode::Int=0, fates_seeddisp_cadence::Int=0,
+                          irrigate::Bool=false, use_noio::Bool=false,
+                          use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
+                          n_drydep::Int=0,
+                          decomp_method::Int=1, no_soil_decomp::Int=0,
+                          ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
+                          i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
+                          npcropmin::Int=17, nrepr::Int=1)
+    if use_fates
+        mode = FATESMode(; use_fates_sp, use_fates_bgc,
+                          fates_spitfire_mode, fates_seeddisp_cadence)
+    elseif use_cn
+        mode = CNMode(; use_lch4, use_c13, use_c14, use_crop,
+                       use_cropcal_streams, use_matrixcn, ndep_from_cpl,
+                       decomp_method, no_soil_decomp,
+                       ndecomp_pools, ndecomp_cascade_transitions,
+                       i_litr_min, i_litr_max, i_cwd, npcropmin, nrepr)
+    else
+        mode = SPMode()
+    end
+    CLMDriverConfig(mode, irrigate, use_noio,
+                    use_soil_moisture_streams, use_lai_streams, n_drydep)
 end
 
 # ---------------------------------------------------------------------------
@@ -1091,6 +1203,9 @@ function clm_drv!(config::CLMDriverConfig,
         l = col.landunit[c]
         if lun.urbpoi[l]
             snow_depth = wdb.snow_depth_col[c]
+            if !isfinite(snow_depth)
+                snow_depth = 0.0
+            end
             wdb.frac_sno_col[c] = min(snow_depth / 0.05, 1.0)
         end
     end
@@ -1227,12 +1342,15 @@ function clm_drv!(config::CLMDriverConfig,
     # ========================================================================
     # Water diagnostic summaries
     # ========================================================================
+    h2osno_total_col = zeros(nc)
+    waterstate_calculate_total_h2osno!(wsb.ws, filt.allc, bc_col, col.snl, h2osno_total_col)
+
     # WaterSummary — WIRED
     water_summary!(inst.water, bc_col, bc_patch;
                    mask_soilp=filt.soilp,
                    mask_allc=filt.allc,
                    mask_nolakec=filt.nolakec,
-                   h2osno_total_col=wsb.ws.h2osno_no_layers_col,
+                   h2osno_total_col=h2osno_total_col,
                    dz_col=col.dz,
                    zi_col=col.zi,
                    landunit_col=col.landunit,

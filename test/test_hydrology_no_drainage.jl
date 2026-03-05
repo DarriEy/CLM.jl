@@ -476,15 +476,17 @@
 
         # After adding new snow with snl==0:
         # 1. bulkdiag_new_snow_diagnostics! updates snow_depth and frac_sno
-        # 2. update_state_add_new_snow! adds 1.8mm to h2osno_no_layers
-        # (Explicit layer creation is disabled — snow stays in h2osno_no_layers)
-        @test waterstatebulk.ws.h2osno_no_layers_col[1] ≈ 0.001 * 1800.0
-        @test waterstatebulk.ws.h2osno_no_layers_col[2] ≈ 0.001 * 1800.0
+        # 2. explicit snow-layer initialization moves mass to layer 0
+        jj_zero = 0 + nlevsno
+        @test waterstatebulk.ws.h2osno_no_layers_col[1] ≈ 0.0
+        @test waterstatebulk.ws.h2osno_no_layers_col[2] ≈ 0.0
+        @test waterstatebulk.ws.h2osoi_ice_col[1, jj_zero] ≈ 0.001 * 1800.0
+        @test waterstatebulk.ws.h2osoi_ice_col[2, jj_zero] ≈ 0.001 * 1800.0
         # Snow depth should be positive (from diagnostics)
         @test waterdiagbulk.snow_depth_col[1] > 0.0
         @test waterdiagbulk.snow_depth_col[2] > 0.0
-        # snl should still be 0 (no explicit layers)
-        @test col_data.snl[1] == 0
-        @test col_data.snl[2] == 0
+        # Explicit snow layer should be initialized.
+        @test col_data.snl[1] == -1
+        @test col_data.snl[2] == -1
     end
 end

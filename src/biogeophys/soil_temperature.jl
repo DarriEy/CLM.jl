@@ -233,6 +233,10 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     # Convert jtop/jbot to indices in the tvector space
     # Fortran: jtop = snl(c), so system runs from snl(c) to jbot(c) in the -nlevsno:nlevmaxurbgrnd space
     # Julia tvector index: Fortran_idx + nlevsno + 1
+    kl = div(nband - 1, 2)
+    ku = kl
+    m_ab = 2 * kl + ku + 1
+
     for c in bounds_col
         mask_nolakec[c] || continue
         jt = jtop[c] + nlevsno + 1  # map to Julia 1-based
@@ -242,10 +246,7 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
             continue
         end
 
-        kl = div(nband - 1, 2)
-        ku = kl
-        m = 2 * kl + ku + 1
-        ab = zeros(m, n)
+        ab = zeros(m_ab, n)
 
         for jj in 1:n
             for band_idx in 1:nband

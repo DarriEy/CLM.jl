@@ -83,22 +83,22 @@ Fields from ozone_type:
   - o3uptakesha_patch, o3uptakesun_patch: ozone dose (mmol O3/m^2)
   - tlai_old_patch: tlai from last time step
 """
-Base.@kwdef mutable struct OzoneData
+Base.@kwdef mutable struct OzoneData{FT<:AbstractFloat}
     # Stress method selector
     stress_method::Int = STRESS_METHOD_LOMBARDOZZI2015
 
     # --- Base type fields (from ozone_base_type) ---
-    o3coefvsha_patch    ::Vector{Float64} = Float64[]   # ozone coef for photosynthesis, shaded (0-1)
-    o3coefvsun_patch    ::Vector{Float64} = Float64[]   # ozone coef for photosynthesis, sunlit (0-1)
-    o3coefgsha_patch    ::Vector{Float64} = Float64[]   # ozone coef for conductance, shaded (0-1)
-    o3coefgsun_patch    ::Vector{Float64} = Float64[]   # ozone coef for conductance, sunlit (0-1)
-    o3coefjmaxsha_patch ::Vector{Float64} = Float64[]   # ozone coef for Jmax, shaded (0-1)
-    o3coefjmaxsun_patch ::Vector{Float64} = Float64[]   # ozone coef for Jmax, sunlit (0-1)
+    o3coefvsha_patch    ::Vector{FT} = Float64[]   # ozone coef for photosynthesis, shaded (0-1)
+    o3coefvsun_patch    ::Vector{FT} = Float64[]   # ozone coef for photosynthesis, sunlit (0-1)
+    o3coefgsha_patch    ::Vector{FT} = Float64[]   # ozone coef for conductance, shaded (0-1)
+    o3coefgsun_patch    ::Vector{FT} = Float64[]   # ozone coef for conductance, sunlit (0-1)
+    o3coefjmaxsha_patch ::Vector{FT} = Float64[]   # ozone coef for Jmax, shaded (0-1)
+    o3coefjmaxsun_patch ::Vector{FT} = Float64[]   # ozone coef for Jmax, sunlit (0-1)
 
     # --- Derived type fields (from ozone_type) ---
-    o3uptakesha_patch   ::Vector{Float64} = Float64[]   # ozone dose, shaded leaves (mmol O3/m^2)
-    o3uptakesun_patch   ::Vector{Float64} = Float64[]   # ozone dose, sunlit leaves (mmol O3/m^2)
-    tlai_old_patch      ::Vector{Float64} = Float64[]   # tlai from last time step
+    o3uptakesha_patch   ::Vector{FT} = Float64[]   # ozone dose, shaded leaves (mmol O3/m^2)
+    o3uptakesun_patch   ::Vector{FT} = Float64[]   # ozone dose, sunlit leaves (mmol O3/m^2)
+    tlai_old_patch      ::Vector{FT} = Float64[]   # tlai from last time step
 end
 
 # ==========================================================================
@@ -148,16 +148,16 @@ end
 
 Deallocate (reset to empty) all fields of an `OzoneData` instance.
 """
-function ozone_clean!(oz::OzoneData)
-    oz.o3coefvsha_patch    = Float64[]
-    oz.o3coefvsun_patch    = Float64[]
-    oz.o3coefgsha_patch    = Float64[]
-    oz.o3coefgsun_patch    = Float64[]
-    oz.o3coefjmaxsha_patch = Float64[]
-    oz.o3coefjmaxsun_patch = Float64[]
-    oz.o3uptakesha_patch   = Float64[]
-    oz.o3uptakesun_patch   = Float64[]
-    oz.tlai_old_patch      = Float64[]
+function ozone_clean!(oz::OzoneData{FT}) where {FT}
+    oz.o3coefvsha_patch    = FT[]
+    oz.o3coefvsun_patch    = FT[]
+    oz.o3coefgsha_patch    = FT[]
+    oz.o3coefgsun_patch    = FT[]
+    oz.o3coefjmaxsha_patch = FT[]
+    oz.o3coefjmaxsun_patch = FT[]
+    oz.o3uptakesha_patch   = FT[]
+    oz.o3uptakesun_patch   = FT[]
+    oz.tlai_old_patch      = FT[]
     return nothing
 end
 

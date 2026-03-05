@@ -11,45 +11,45 @@ at column and gridcell levels for C12 (and optionally C13/C14 isotopes).
 
 Ported from `soilbiogeochem_carbonstate_type` in `SoilBiogeochemCarbonStateType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemCarbonStateData
+Base.@kwdef mutable struct SoilBiogeochemCarbonStateData{FT<:AbstractFloat}
     # --- Vertically-resolved decomposition pools (col × nlev × npools) ---
-    decomp_cpools_vr_col              ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3)
-    decomp0_cpools_vr_col             ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3) baseline (initial value of this year)
-    decomp_cpools_vr_SASUsave_col     ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3) SASU save
-    decomp_soilc_vr_col               ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m3) total soil C vr
-    ctrunc_vr_col                     ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m3) C truncation vr
+    decomp_cpools_vr_col              ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3)
+    decomp0_cpools_vr_col             ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3) baseline (initial value of this year)
+    decomp_cpools_vr_SASUsave_col     ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3) SASU save
+    decomp_soilc_vr_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m3) total soil C vr
+    ctrunc_vr_col                     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m3) C truncation vr
 
     # --- Summary (diagnostic) state variables ---
-    ctrunc_col                        ::Vector{Float64} = Float64[]  # (gC/m2) C truncation
-    totmicc_col                       ::Vector{Float64} = Float64[]  # (gC/m2) total microbial C
-    totlitc_col                       ::Vector{Float64} = Float64[]  # (gC/m2) total litter C
-    totlitc_1m_col                    ::Vector{Float64} = Float64[]  # (gC/m2) total litter C to 1m
-    totsomc_col                       ::Vector{Float64} = Float64[]  # (gC/m2) total SOM C
-    totsomc_1m_col                    ::Vector{Float64} = Float64[]  # (gC/m2) total SOM C to 1m
-    cwdc_col                          ::Vector{Float64} = Float64[]  # (gC/m2) coarse woody debris C
-    decomp_cpools_1m_col              ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)  # (gC/m2) decomp pools to 1m
-    decomp_cpools_col                 ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)  # (gC/m2) decomp pools
-    dyn_cbal_adjustments_col          ::Vector{Float64} = Float64[]  # (gC/m2) dynamic column area adjustments
+    ctrunc_col                        ::Vector{FT} = Float64[]  # (gC/m2) C truncation
+    totmicc_col                       ::Vector{FT} = Float64[]  # (gC/m2) total microbial C
+    totlitc_col                       ::Vector{FT} = Float64[]  # (gC/m2) total litter C
+    totlitc_1m_col                    ::Vector{FT} = Float64[]  # (gC/m2) total litter C to 1m
+    totsomc_col                       ::Vector{FT} = Float64[]  # (gC/m2) total SOM C
+    totsomc_1m_col                    ::Vector{FT} = Float64[]  # (gC/m2) total SOM C to 1m
+    cwdc_col                          ::Vector{FT} = Float64[]  # (gC/m2) coarse woody debris C
+    decomp_cpools_1m_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (gC/m2) decomp pools to 1m
+    decomp_cpools_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (gC/m2) decomp pools
+    dyn_cbal_adjustments_col          ::Vector{FT} = Float64[]  # (gC/m2) dynamic column area adjustments
 
     # --- Scalars ---
     restart_file_spinup_state         ::Int = typemax(Int)  # spinup state from restart file
     totvegcthresh                     ::Float64 = NaN       # threshold for zeroing decomp pools
 
     # --- Carbon totals (includes soil, cpool, veg) ---
-    totc_col                          ::Vector{Float64} = Float64[]  # (gC/m2) total column C
-    totecosysc_col                    ::Vector{Float64} = Float64[]  # (gC/m2) total ecosystem C
-    totc_grc                          ::Vector{Float64} = Float64[]  # (gC/m2) total gridcell C
+    totc_col                          ::Vector{FT} = Float64[]  # (gC/m2) total column C
+    totecosysc_col                    ::Vector{FT} = Float64[]  # (gC/m2) total ecosystem C
+    totc_grc                          ::Vector{FT} = Float64[]  # (gC/m2) total gridcell C
 
     # --- Matrix-CN fields ---
-    matrix_cap_decomp_cpools_col      ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m2)
-    matrix_cap_decomp_cpools_vr_col   ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3)
-    in_acc                            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m3/yr)
-    in_acc_2d                         ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
-    tran_acc                          ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
-    vert_up_tran_acc                  ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
-    vert_down_tran_acc                ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
-    exit_acc                          ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
-    hori_tran_acc                     ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
+    matrix_cap_decomp_cpools_col      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m2)
+    matrix_cap_decomp_cpools_vr_col   ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3)
+    in_acc                            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m3/yr)
+    in_acc_2d                         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
+    tran_acc                          ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
+    vert_up_tran_acc                  ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
+    vert_down_tran_acc                ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
+    exit_acc                          ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
+    hori_tran_acc                     ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/yr)
 end
 
 # ---------------------------------------------------------------------------

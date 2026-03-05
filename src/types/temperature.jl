@@ -12,105 +12,105 @@ heat content, and accumulated quantities.
 
 Ported from `temperature_type` in `TemperatureType.F90`.
 """
-Base.@kwdef mutable struct TemperatureData
+Base.@kwdef mutable struct TemperatureData{FT<:AbstractFloat}
     # --- Temperatures (patch-level) ---
-    t_stem_patch             ::Vector{Float64} = Float64[]   # patch stem temperature (K)
-    t_veg_patch              ::Vector{Float64} = Float64[]   # patch vegetation temperature (K)
-    t_skin_patch             ::Vector{Float64} = Float64[]   # patch skin temperature (K)
-    t_veg_day_patch          ::Vector{Float64} = Float64[]   # patch daytime accumulative vegetation temperature (K*nsteps), LUNA
-    t_veg_night_patch        ::Vector{Float64} = Float64[]   # patch nighttime accumulative vegetation temperature (K*nsteps), LUNA
-    t_veg10_day_patch        ::Vector{Float64} = Float64[]   # 10-day running mean of patch daytime vegetation temperature (K), LUNA
-    t_veg10_night_patch      ::Vector{Float64} = Float64[]   # 10-day running mean of patch nighttime vegetation temperature (K), LUNA
+    t_stem_patch             ::Vector{FT} = Float64[]   # patch stem temperature (K)
+    t_veg_patch              ::Vector{FT} = Float64[]   # patch vegetation temperature (K)
+    t_skin_patch             ::Vector{FT} = Float64[]   # patch skin temperature (K)
+    t_veg_day_patch          ::Vector{FT} = Float64[]   # patch daytime accumulative vegetation temperature (K*nsteps), LUNA
+    t_veg_night_patch        ::Vector{FT} = Float64[]   # patch nighttime accumulative vegetation temperature (K*nsteps), LUNA
+    t_veg10_day_patch        ::Vector{FT} = Float64[]   # 10-day running mean of patch daytime vegetation temperature (K), LUNA
+    t_veg10_night_patch      ::Vector{FT} = Float64[]   # 10-day running mean of patch nighttime vegetation temperature (K), LUNA
     ndaysteps_patch          ::Vector{Int}     = Int[]       # number of daytime steps from midnight, LUNA
     nnightsteps_patch        ::Vector{Int}     = Int[]       # number of nighttime steps from midnight, LUNA
-    dt_veg_patch             ::Vector{Float64} = Float64[]   # patch change in t_veg, last iteration (K)
-    thm_patch                ::Vector{Float64} = Float64[]   # patch intermediate variable (forc_t+0.0098*forc_hgt_t_patch)
+    dt_veg_patch             ::Vector{FT} = Float64[]   # patch change in t_veg, last iteration (K)
+    thm_patch                ::Vector{FT} = Float64[]   # patch intermediate variable (forc_t+0.0098*forc_hgt_t_patch)
 
     # --- Temperatures (column-level, 1D) ---
-    t_h2osfc_col             ::Vector{Float64} = Float64[]   # col surface water temperature (K)
-    t_h2osfc_bef_col         ::Vector{Float64} = Float64[]   # col surface water temperature from time-step before (K)
-    tsl_col                  ::Vector{Float64} = Float64[]   # col temperature of near-surface soil layer (K)
-    t_soi10cm_col            ::Vector{Float64} = Float64[]   # col soil temperature in top 10cm (K)
-    t_soi17cm_col            ::Vector{Float64} = Float64[]   # col soil temperature in top 17cm (K)
-    t_sno_mul_mss_col        ::Vector{Float64} = Float64[]   # col snow temp * layer mass, layer sum (K*kg/m2)
-    t_grnd_col               ::Vector{Float64} = Float64[]   # col ground temperature (K)
-    t_grnd_r_col             ::Vector{Float64} = Float64[]   # col rural ground temperature (K)
-    t_grnd_u_col             ::Vector{Float64} = Float64[]   # col urban ground temperature (K)
-    snot_top_col             ::Vector{Float64} = Float64[]   # col temperature of top snow layer (K)
-    dTdz_top_col             ::Vector{Float64} = Float64[]   # col temperature gradient in top layer (K/m)
-    dt_grnd_col              ::Vector{Float64} = Float64[]   # col change in t_grnd, last iteration (K)
-    thv_col                  ::Vector{Float64} = Float64[]   # col virtual potential temperature (K)
-    soila10_col              ::Vector{Float64} = Float64[]   # col 10-day running mean of 12cm soil layer temperature (K)
+    t_h2osfc_col             ::Vector{FT} = Float64[]   # col surface water temperature (K)
+    t_h2osfc_bef_col         ::Vector{FT} = Float64[]   # col surface water temperature from time-step before (K)
+    tsl_col                  ::Vector{FT} = Float64[]   # col temperature of near-surface soil layer (K)
+    t_soi10cm_col            ::Vector{FT} = Float64[]   # col soil temperature in top 10cm (K)
+    t_soi17cm_col            ::Vector{FT} = Float64[]   # col soil temperature in top 17cm (K)
+    t_sno_mul_mss_col        ::Vector{FT} = Float64[]   # col snow temp * layer mass, layer sum (K*kg/m2)
+    t_grnd_col               ::Vector{FT} = Float64[]   # col ground temperature (K)
+    t_grnd_r_col             ::Vector{FT} = Float64[]   # col rural ground temperature (K)
+    t_grnd_u_col             ::Vector{FT} = Float64[]   # col urban ground temperature (K)
+    snot_top_col             ::Vector{FT} = Float64[]   # col temperature of top snow layer (K)
+    dTdz_top_col             ::Vector{FT} = Float64[]   # col temperature gradient in top layer (K/m)
+    dt_grnd_col              ::Vector{FT} = Float64[]   # col change in t_grnd, last iteration (K)
+    thv_col                  ::Vector{FT} = Float64[]   # col virtual potential temperature (K)
+    soila10_col              ::Vector{FT} = Float64[]   # col 10-day running mean of 12cm soil layer temperature (K)
 
     # --- Temperatures (column-level, 2D) ---
-    t_ssbef_col              ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col soil/snow temp before update (ncols, nlevsno+nlevmaxurbgrnd)
-    t_soisno_col             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col soil/snow temperature (K) (ncols, nlevsno+nlevmaxurbgrnd)
-    t_lake_col               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col lake temperature (K) (ncols, nlevlak)
+    t_ssbef_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil/snow temp before update (ncols, nlevsno+nlevmaxurbgrnd)
+    t_soisno_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil/snow temperature (K) (ncols, nlevsno+nlevmaxurbgrnd)
+    t_lake_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col lake temperature (K) (ncols, nlevlak)
 
     # --- Temperatures (landunit-level) ---
-    t_building_lun           ::Vector{Float64} = Float64[]   # lun internal building air temperature (K)
-    t_roof_inner_lun         ::Vector{Float64} = Float64[]   # lun roof inside surface temperature (K)
-    t_sunw_inner_lun         ::Vector{Float64} = Float64[]   # lun sunwall inside surface temperature (K)
-    t_shdw_inner_lun         ::Vector{Float64} = Float64[]   # lun shadewall inside surface temperature (K)
-    t_floor_lun              ::Vector{Float64} = Float64[]   # lun floor temperature (K)
-    taf_lun                  ::Vector{Float64} = Float64[]   # lun urban canopy air temperature (K)
+    t_building_lun           ::Vector{FT} = Float64[]   # lun internal building air temperature (K)
+    t_roof_inner_lun         ::Vector{FT} = Float64[]   # lun roof inside surface temperature (K)
+    t_sunw_inner_lun         ::Vector{FT} = Float64[]   # lun sunwall inside surface temperature (K)
+    t_shdw_inner_lun         ::Vector{FT} = Float64[]   # lun shadewall inside surface temperature (K)
+    t_floor_lun              ::Vector{FT} = Float64[]   # lun floor temperature (K)
+    taf_lun                  ::Vector{FT} = Float64[]   # lun urban canopy air temperature (K)
 
     # --- 2m reference temperatures (patch-level) ---
-    t_ref2m_patch            ::Vector{Float64} = Float64[]   # patch 2m height surface air temperature (K)
-    t_ref2m_r_patch          ::Vector{Float64} = Float64[]   # patch rural 2m height surface air temperature (K)
-    t_ref2m_u_patch          ::Vector{Float64} = Float64[]   # patch urban 2m height surface air temperature (K)
-    t_ref2m_min_patch        ::Vector{Float64} = Float64[]   # patch daily minimum of average 2m height surface air temperature (K)
-    t_ref2m_min_r_patch      ::Vector{Float64} = Float64[]   # patch daily minimum of average 2m height surface air temperature - rural (K)
-    t_ref2m_min_u_patch      ::Vector{Float64} = Float64[]   # patch daily minimum of average 2m height surface air temperature - urban (K)
-    t_ref2m_max_patch        ::Vector{Float64} = Float64[]   # patch daily maximum of average 2m height surface air temperature (K)
-    t_ref2m_max_r_patch      ::Vector{Float64} = Float64[]   # patch daily maximum of average 2m height surface air temperature - rural (K)
-    t_ref2m_max_u_patch      ::Vector{Float64} = Float64[]   # patch daily maximum of average 2m height surface air temperature - urban (K)
-    t_ref2m_min_inst_patch   ::Vector{Float64} = Float64[]   # patch instantaneous daily min of average 2m height surface air temp (K)
-    t_ref2m_min_inst_r_patch ::Vector{Float64} = Float64[]   # patch instantaneous daily min - rural (K)
-    t_ref2m_min_inst_u_patch ::Vector{Float64} = Float64[]   # patch instantaneous daily min - urban (K)
-    t_ref2m_max_inst_patch   ::Vector{Float64} = Float64[]   # patch instantaneous daily max of average 2m height surface air temp (K)
-    t_ref2m_max_inst_r_patch ::Vector{Float64} = Float64[]   # patch instantaneous daily max - rural (K)
-    t_ref2m_max_inst_u_patch ::Vector{Float64} = Float64[]   # patch instantaneous daily max - urban (K)
+    t_ref2m_patch            ::Vector{FT} = Float64[]   # patch 2m height surface air temperature (K)
+    t_ref2m_r_patch          ::Vector{FT} = Float64[]   # patch rural 2m height surface air temperature (K)
+    t_ref2m_u_patch          ::Vector{FT} = Float64[]   # patch urban 2m height surface air temperature (K)
+    t_ref2m_min_patch        ::Vector{FT} = Float64[]   # patch daily minimum of average 2m height surface air temperature (K)
+    t_ref2m_min_r_patch      ::Vector{FT} = Float64[]   # patch daily minimum of average 2m height surface air temperature - rural (K)
+    t_ref2m_min_u_patch      ::Vector{FT} = Float64[]   # patch daily minimum of average 2m height surface air temperature - urban (K)
+    t_ref2m_max_patch        ::Vector{FT} = Float64[]   # patch daily maximum of average 2m height surface air temperature (K)
+    t_ref2m_max_r_patch      ::Vector{FT} = Float64[]   # patch daily maximum of average 2m height surface air temperature - rural (K)
+    t_ref2m_max_u_patch      ::Vector{FT} = Float64[]   # patch daily maximum of average 2m height surface air temperature - urban (K)
+    t_ref2m_min_inst_patch   ::Vector{FT} = Float64[]   # patch instantaneous daily min of average 2m height surface air temp (K)
+    t_ref2m_min_inst_r_patch ::Vector{FT} = Float64[]   # patch instantaneous daily min - rural (K)
+    t_ref2m_min_inst_u_patch ::Vector{FT} = Float64[]   # patch instantaneous daily min - urban (K)
+    t_ref2m_max_inst_patch   ::Vector{FT} = Float64[]   # patch instantaneous daily max of average 2m height surface air temp (K)
+    t_ref2m_max_inst_r_patch ::Vector{FT} = Float64[]   # patch instantaneous daily max - rural (K)
+    t_ref2m_max_inst_u_patch ::Vector{FT} = Float64[]   # patch instantaneous daily max - urban (K)
 
     # --- Running mean temperatures (patch-level) ---
-    t_a10_patch              ::Vector{Float64} = Float64[]   # patch 10-day running mean of 2m temperature (K)
-    t_a10min_patch           ::Vector{Float64} = Float64[]   # patch 10-day running mean of min 2m temperature (K)
-    t_a5min_patch            ::Vector{Float64} = Float64[]   # patch 5-day running mean of min 2m temperature (K)
+    t_a10_patch              ::Vector{FT} = Float64[]   # patch 10-day running mean of 2m temperature (K)
+    t_a10min_patch           ::Vector{FT} = Float64[]   # patch 10-day running mean of min 2m temperature (K)
+    t_a5min_patch            ::Vector{FT} = Float64[]   # patch 5-day running mean of min 2m temperature (K)
 
     # --- Accumulated quantities (patch-level) ---
-    t_veg24_patch            ::Vector{Float64} = Float64[]   # patch 24hr average vegetation temperature (K)
-    t_veg240_patch           ::Vector{Float64} = Float64[]   # patch 240hr average vegetation temperature (K)
-    gdd0_patch               ::Vector{Float64} = Float64[]   # patch growing degree-days base  0C from planting (ddays)
-    gdd8_patch               ::Vector{Float64} = Float64[]   # patch growing degree-days base  8C from planting (ddays)
-    gdd10_patch              ::Vector{Float64} = Float64[]   # patch growing degree-days base 10C from planting (ddays)
-    gdd020_patch             ::Vector{Float64} = Float64[]   # patch 20-year average of gdd0 (ddays)
-    gdd820_patch             ::Vector{Float64} = Float64[]   # patch 20-year average of gdd8 (ddays)
-    gdd1020_patch            ::Vector{Float64} = Float64[]   # patch 20-year average of gdd10 (ddays)
+    t_veg24_patch            ::Vector{FT} = Float64[]   # patch 24hr average vegetation temperature (K)
+    t_veg240_patch           ::Vector{FT} = Float64[]   # patch 240hr average vegetation temperature (K)
+    gdd0_patch               ::Vector{FT} = Float64[]   # patch growing degree-days base  0C from planting (ddays)
+    gdd8_patch               ::Vector{FT} = Float64[]   # patch growing degree-days base  8C from planting (ddays)
+    gdd10_patch              ::Vector{FT} = Float64[]   # patch growing degree-days base 10C from planting (ddays)
+    gdd020_patch             ::Vector{FT} = Float64[]   # patch 20-year average of gdd0 (ddays)
+    gdd820_patch             ::Vector{FT} = Float64[]   # patch 20-year average of gdd8 (ddays)
+    gdd1020_patch            ::Vector{FT} = Float64[]   # patch 20-year average of gdd10 (ddays)
 
     # --- Heat content ---
-    beta_col                 ::Vector{Float64} = Float64[]   # col coefficient of convective velocity (-)
-    dynbal_baseline_heat_col ::Vector{Float64} = Float64[]   # col baseline heat content subtracted from total (J/m^2)
-    heat1_grc                ::Vector{Float64} = Float64[]   # grc initial gridcell total heat content (J/m^2)
-    heat2_grc                ::Vector{Float64} = Float64[]   # grc post land cover change total heat content (J/m^2)
-    liquid_water_temp1_grc   ::Vector{Float64} = Float64[]   # grc initial weighted average liquid water temperature (K)
-    liquid_water_temp2_grc   ::Vector{Float64} = Float64[]   # grc post land cover change weighted average liquid water temperature (K)
+    beta_col                 ::Vector{FT} = Float64[]   # col coefficient of convective velocity (-)
+    dynbal_baseline_heat_col ::Vector{FT} = Float64[]   # col baseline heat content subtracted from total (J/m^2)
+    heat1_grc                ::Vector{FT} = Float64[]   # grc initial gridcell total heat content (J/m^2)
+    heat2_grc                ::Vector{FT} = Float64[]   # grc post land cover change total heat content (J/m^2)
+    liquid_water_temp1_grc   ::Vector{FT} = Float64[]   # grc initial weighted average liquid water temperature (K)
+    liquid_water_temp2_grc   ::Vector{FT} = Float64[]   # grc post land cover change weighted average liquid water temperature (K)
 
     # --- Flags ---
     imelt_col                ::Matrix{Int}     = Matrix{Int}(undef, 0, 0)  # flag for melting (=1), freezing (=2), Not=0 (ncols, nlevsno+nlevmaxurbgrnd)
 
     # --- Emissivities ---
-    emv_patch                ::Vector{Float64} = Float64[]   # patch vegetation emissivity
-    emg_col                  ::Vector{Float64} = Float64[]   # col ground emissivity
+    emv_patch                ::Vector{FT} = Float64[]   # patch vegetation emissivity
+    emg_col                  ::Vector{FT} = Float64[]   # col ground emissivity
 
     # --- Misc ---
-    xmf_col                  ::Vector{Float64} = Float64[]   # col total latent heat of phase change of ground water
-    xmf_h2osfc_col           ::Vector{Float64} = Float64[]   # col latent heat of phase change of surface water
-    fact_col                 ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col used in computing tridiagonal matrix (ncols, nlevsno+nlevmaxurbgrnd)
-    c_h2osfc_col             ::Vector{Float64} = Float64[]   # col heat capacity of surface water
+    xmf_col                  ::Vector{FT} = Float64[]   # col total latent heat of phase change of ground water
+    xmf_h2osfc_col           ::Vector{FT} = Float64[]   # col latent heat of phase change of surface water
+    fact_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col used in computing tridiagonal matrix (ncols, nlevsno+nlevmaxurbgrnd)
+    c_h2osfc_col             ::Vector{FT} = Float64[]   # col heat capacity of surface water
 
     # --- Namelist parameters ---
-    excess_ice_coldstart_depth ::Float64 = 0.5   # depth below which excess ice will be present (m)
-    excess_ice_coldstart_temp  ::Float64 = -5.0  # coldstart temperature of layers with excess ice (deg C)
+    excess_ice_coldstart_depth ::FT = 0.5   # depth below which excess ice will be present (m)
+    excess_ice_coldstart_temp  ::FT = -5.0  # coldstart temperature of layers with excess ice (deg C)
 end
 
 """
@@ -123,7 +123,7 @@ integer fields to `ISPVAL` or `typemax(Int)`.
 
 Ported from `temperature_type%InitAllocate` in `TemperatureType.F90`.
 """
-function temperature_init!(temp::TemperatureData, np::Int, nc::Int, nl::Int, ng::Int)
+function temperature_init!(temp::TemperatureData{FT}, np::Int, nc::Int, nl::Int, ng::Int) where {FT}
     nlevsno        = varpar.nlevsno
     nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
     nlevlak        = varpar.nlevlak
@@ -132,99 +132,99 @@ function temperature_init!(temp::TemperatureData, np::Int, nc::Int, nl::Int, ng:
     nlev_soisno = nlevsno + nlevmaxurbgrnd
 
     # --- Temperatures (patch-level) ---
-    temp.t_stem_patch             = fill(NaN, np)
-    temp.t_veg_patch              = fill(NaN, np)
-    temp.t_skin_patch             = fill(NaN, np)
-    temp.t_veg_day_patch          = fill(SPVAL, np)
-    temp.t_veg_night_patch        = fill(SPVAL, np)
-    temp.t_veg10_day_patch        = fill(SPVAL, np)
-    temp.t_veg10_night_patch      = fill(SPVAL, np)
+    temp.t_stem_patch             = fill(FT(NaN), np)
+    temp.t_veg_patch              = fill(FT(NaN), np)
+    temp.t_skin_patch             = fill(FT(NaN), np)
+    temp.t_veg_day_patch          = fill(FT(SPVAL), np)
+    temp.t_veg_night_patch        = fill(FT(SPVAL), np)
+    temp.t_veg10_day_patch        = fill(FT(SPVAL), np)
+    temp.t_veg10_night_patch      = fill(FT(SPVAL), np)
     temp.ndaysteps_patch          = fill(ISPVAL, np)
     temp.nnightsteps_patch        = fill(ISPVAL, np)
-    temp.dt_veg_patch             = fill(NaN, np)
-    temp.thm_patch                = fill(NaN, np)
+    temp.dt_veg_patch             = fill(FT(NaN), np)
+    temp.thm_patch                = fill(FT(NaN), np)
 
     # --- Temperatures (column-level, 1D) ---
-    temp.t_h2osfc_col             = fill(NaN, nc)
-    temp.t_h2osfc_bef_col         = fill(NaN, nc)
-    temp.tsl_col                  = fill(NaN, nc)
-    temp.t_soi10cm_col            = fill(NaN, nc)
-    temp.t_soi17cm_col            = fill(SPVAL, nc)
-    temp.t_sno_mul_mss_col        = fill(NaN, nc)
-    temp.t_grnd_col               = fill(NaN, nc)
-    temp.t_grnd_r_col             = fill(NaN, nc)
-    temp.t_grnd_u_col             = fill(NaN, nc)
-    temp.snot_top_col             = fill(NaN, nc)
-    temp.dTdz_top_col             = fill(NaN, nc)
-    temp.dt_grnd_col              = fill(NaN, nc)
-    temp.thv_col                  = fill(NaN, nc)
-    temp.soila10_col              = fill(NaN, nc)
+    temp.t_h2osfc_col             = fill(FT(NaN), nc)
+    temp.t_h2osfc_bef_col         = fill(FT(NaN), nc)
+    temp.tsl_col                  = fill(FT(NaN), nc)
+    temp.t_soi10cm_col            = fill(FT(NaN), nc)
+    temp.t_soi17cm_col            = fill(FT(SPVAL), nc)
+    temp.t_sno_mul_mss_col        = fill(FT(NaN), nc)
+    temp.t_grnd_col               = fill(FT(NaN), nc)
+    temp.t_grnd_r_col             = fill(FT(NaN), nc)
+    temp.t_grnd_u_col             = fill(FT(NaN), nc)
+    temp.snot_top_col             = fill(FT(NaN), nc)
+    temp.dTdz_top_col             = fill(FT(NaN), nc)
+    temp.dt_grnd_col              = fill(FT(NaN), nc)
+    temp.thv_col                  = fill(FT(NaN), nc)
+    temp.soila10_col              = fill(FT(NaN), nc)
 
     # --- Temperatures (column-level, 2D) ---
-    temp.t_ssbef_col              = fill(NaN, nc, nlev_soisno)
-    temp.t_soisno_col             = fill(NaN, nc, nlev_soisno)
-    temp.t_lake_col               = fill(NaN, nc, nlevlak)
+    temp.t_ssbef_col              = fill(FT(NaN), nc, nlev_soisno)
+    temp.t_soisno_col             = fill(FT(NaN), nc, nlev_soisno)
+    temp.t_lake_col               = fill(FT(NaN), nc, nlevlak)
 
     # --- Temperatures (landunit-level) ---
-    temp.t_building_lun           = fill(NaN, nl)
-    temp.t_roof_inner_lun         = fill(NaN, nl)
-    temp.t_sunw_inner_lun         = fill(NaN, nl)
-    temp.t_shdw_inner_lun         = fill(NaN, nl)
-    temp.t_floor_lun              = fill(NaN, nl)
-    temp.taf_lun                  = fill(NaN, nl)
+    temp.t_building_lun           = fill(FT(NaN), nl)
+    temp.t_roof_inner_lun         = fill(FT(NaN), nl)
+    temp.t_sunw_inner_lun         = fill(FT(NaN), nl)
+    temp.t_shdw_inner_lun         = fill(FT(NaN), nl)
+    temp.t_floor_lun              = fill(FT(NaN), nl)
+    temp.taf_lun                  = fill(FT(NaN), nl)
 
     # --- 2m reference temperatures (patch-level) ---
-    temp.t_ref2m_patch            = fill(NaN, np)
-    temp.t_ref2m_r_patch          = fill(NaN, np)
-    temp.t_ref2m_u_patch          = fill(NaN, np)
-    temp.t_ref2m_min_patch        = fill(NaN, np)
-    temp.t_ref2m_min_r_patch      = fill(NaN, np)
-    temp.t_ref2m_min_u_patch      = fill(NaN, np)
-    temp.t_ref2m_max_patch        = fill(NaN, np)
-    temp.t_ref2m_max_r_patch      = fill(NaN, np)
-    temp.t_ref2m_max_u_patch      = fill(NaN, np)
-    temp.t_ref2m_min_inst_patch   = fill(NaN, np)
-    temp.t_ref2m_min_inst_r_patch = fill(NaN, np)
-    temp.t_ref2m_min_inst_u_patch = fill(NaN, np)
-    temp.t_ref2m_max_inst_patch   = fill(NaN, np)
-    temp.t_ref2m_max_inst_r_patch = fill(NaN, np)
-    temp.t_ref2m_max_inst_u_patch = fill(NaN, np)
+    temp.t_ref2m_patch            = fill(FT(NaN), np)
+    temp.t_ref2m_r_patch          = fill(FT(NaN), np)
+    temp.t_ref2m_u_patch          = fill(FT(NaN), np)
+    temp.t_ref2m_min_patch        = fill(FT(NaN), np)
+    temp.t_ref2m_min_r_patch      = fill(FT(NaN), np)
+    temp.t_ref2m_min_u_patch      = fill(FT(NaN), np)
+    temp.t_ref2m_max_patch        = fill(FT(NaN), np)
+    temp.t_ref2m_max_r_patch      = fill(FT(NaN), np)
+    temp.t_ref2m_max_u_patch      = fill(FT(NaN), np)
+    temp.t_ref2m_min_inst_patch   = fill(FT(NaN), np)
+    temp.t_ref2m_min_inst_r_patch = fill(FT(NaN), np)
+    temp.t_ref2m_min_inst_u_patch = fill(FT(NaN), np)
+    temp.t_ref2m_max_inst_patch   = fill(FT(NaN), np)
+    temp.t_ref2m_max_inst_r_patch = fill(FT(NaN), np)
+    temp.t_ref2m_max_inst_u_patch = fill(FT(NaN), np)
 
     # --- Running mean temperatures (patch-level) ---
-    temp.t_a10_patch              = fill(NaN, np)
-    temp.t_a10min_patch           = fill(NaN, np)
-    temp.t_a5min_patch            = fill(NaN, np)
+    temp.t_a10_patch              = fill(FT(NaN), np)
+    temp.t_a10min_patch           = fill(FT(NaN), np)
+    temp.t_a5min_patch            = fill(FT(NaN), np)
 
     # --- Accumulated quantities (patch-level) ---
-    temp.t_veg24_patch            = fill(NaN, np)
-    temp.t_veg240_patch           = fill(NaN, np)
-    temp.gdd0_patch               = fill(SPVAL, np)
-    temp.gdd8_patch               = fill(SPVAL, np)
-    temp.gdd10_patch              = fill(SPVAL, np)
-    temp.gdd020_patch             = fill(SPVAL, np)
-    temp.gdd820_patch             = fill(SPVAL, np)
-    temp.gdd1020_patch            = fill(SPVAL, np)
+    temp.t_veg24_patch            = fill(FT(NaN), np)
+    temp.t_veg240_patch           = fill(FT(NaN), np)
+    temp.gdd0_patch               = fill(FT(SPVAL), np)
+    temp.gdd8_patch               = fill(FT(SPVAL), np)
+    temp.gdd10_patch              = fill(FT(SPVAL), np)
+    temp.gdd020_patch             = fill(FT(SPVAL), np)
+    temp.gdd820_patch             = fill(FT(SPVAL), np)
+    temp.gdd1020_patch            = fill(FT(SPVAL), np)
 
     # --- Heat content ---
-    temp.beta_col                 = fill(NaN, nc)
-    temp.dynbal_baseline_heat_col = fill(NaN, nc)
-    temp.heat1_grc                = fill(NaN, ng)
-    temp.heat2_grc                = fill(NaN, ng)
-    temp.liquid_water_temp1_grc   = fill(NaN, ng)
-    temp.liquid_water_temp2_grc   = fill(NaN, ng)
+    temp.beta_col                 = fill(FT(NaN), nc)
+    temp.dynbal_baseline_heat_col = fill(FT(NaN), nc)
+    temp.heat1_grc                = fill(FT(NaN), ng)
+    temp.heat2_grc                = fill(FT(NaN), ng)
+    temp.liquid_water_temp1_grc   = fill(FT(NaN), ng)
+    temp.liquid_water_temp2_grc   = fill(FT(NaN), ng)
 
     # --- Flags ---
     temp.imelt_col                = fill(typemax(Int), nc, nlev_soisno)
 
     # --- Emissivities ---
-    temp.emv_patch                = fill(NaN, np)
-    temp.emg_col                  = fill(NaN, nc)
+    temp.emv_patch                = fill(FT(NaN), np)
+    temp.emg_col                  = fill(FT(NaN), nc)
 
     # --- Misc ---
-    temp.xmf_col                  = fill(NaN, nc)
-    temp.xmf_h2osfc_col           = fill(NaN, nc)
-    temp.fact_col                 = fill(NaN, nc, nlev_soisno)
-    temp.c_h2osfc_col             = fill(NaN, nc)
+    temp.xmf_col                  = fill(FT(NaN), nc)
+    temp.xmf_h2osfc_col           = fill(FT(NaN), nc)
+    temp.fact_col                 = fill(FT(NaN), nc, nlev_soisno)
+    temp.c_h2osfc_col             = fill(FT(NaN), nc)
 
     return nothing
 end
@@ -236,87 +236,87 @@ Deallocate (reset to empty) all fields of a `TemperatureData` instance.
 
 Ported from `temperature_type%Clean` in `TemperatureType.F90`.
 """
-function temperature_clean!(temp::TemperatureData)
+function temperature_clean!(temp::TemperatureData{FT}) where {FT}
     # Patch-level
-    temp.t_stem_patch             = Float64[]
-    temp.t_veg_patch              = Float64[]
-    temp.t_skin_patch             = Float64[]
-    temp.t_veg_day_patch          = Float64[]
-    temp.t_veg_night_patch        = Float64[]
-    temp.t_veg10_day_patch        = Float64[]
-    temp.t_veg10_night_patch      = Float64[]
+    temp.t_stem_patch             = FT[]
+    temp.t_veg_patch              = FT[]
+    temp.t_skin_patch             = FT[]
+    temp.t_veg_day_patch          = FT[]
+    temp.t_veg_night_patch        = FT[]
+    temp.t_veg10_day_patch        = FT[]
+    temp.t_veg10_night_patch      = FT[]
     temp.ndaysteps_patch          = Int[]
     temp.nnightsteps_patch        = Int[]
-    temp.dt_veg_patch             = Float64[]
-    temp.thm_patch                = Float64[]
-    temp.t_ref2m_patch            = Float64[]
-    temp.t_ref2m_r_patch          = Float64[]
-    temp.t_ref2m_u_patch          = Float64[]
-    temp.t_ref2m_min_patch        = Float64[]
-    temp.t_ref2m_min_r_patch      = Float64[]
-    temp.t_ref2m_min_u_patch      = Float64[]
-    temp.t_ref2m_max_patch        = Float64[]
-    temp.t_ref2m_max_r_patch      = Float64[]
-    temp.t_ref2m_max_u_patch      = Float64[]
-    temp.t_ref2m_min_inst_patch   = Float64[]
-    temp.t_ref2m_min_inst_r_patch = Float64[]
-    temp.t_ref2m_min_inst_u_patch = Float64[]
-    temp.t_ref2m_max_inst_patch   = Float64[]
-    temp.t_ref2m_max_inst_r_patch = Float64[]
-    temp.t_ref2m_max_inst_u_patch = Float64[]
-    temp.t_a10_patch              = Float64[]
-    temp.t_a10min_patch           = Float64[]
-    temp.t_a5min_patch            = Float64[]
-    temp.t_veg24_patch            = Float64[]
-    temp.t_veg240_patch           = Float64[]
-    temp.gdd0_patch               = Float64[]
-    temp.gdd8_patch               = Float64[]
-    temp.gdd10_patch              = Float64[]
-    temp.gdd020_patch             = Float64[]
-    temp.gdd820_patch             = Float64[]
-    temp.gdd1020_patch            = Float64[]
-    temp.emv_patch                = Float64[]
+    temp.dt_veg_patch             = FT[]
+    temp.thm_patch                = FT[]
+    temp.t_ref2m_patch            = FT[]
+    temp.t_ref2m_r_patch          = FT[]
+    temp.t_ref2m_u_patch          = FT[]
+    temp.t_ref2m_min_patch        = FT[]
+    temp.t_ref2m_min_r_patch      = FT[]
+    temp.t_ref2m_min_u_patch      = FT[]
+    temp.t_ref2m_max_patch        = FT[]
+    temp.t_ref2m_max_r_patch      = FT[]
+    temp.t_ref2m_max_u_patch      = FT[]
+    temp.t_ref2m_min_inst_patch   = FT[]
+    temp.t_ref2m_min_inst_r_patch = FT[]
+    temp.t_ref2m_min_inst_u_patch = FT[]
+    temp.t_ref2m_max_inst_patch   = FT[]
+    temp.t_ref2m_max_inst_r_patch = FT[]
+    temp.t_ref2m_max_inst_u_patch = FT[]
+    temp.t_a10_patch              = FT[]
+    temp.t_a10min_patch           = FT[]
+    temp.t_a5min_patch            = FT[]
+    temp.t_veg24_patch            = FT[]
+    temp.t_veg240_patch           = FT[]
+    temp.gdd0_patch               = FT[]
+    temp.gdd8_patch               = FT[]
+    temp.gdd10_patch              = FT[]
+    temp.gdd020_patch             = FT[]
+    temp.gdd820_patch             = FT[]
+    temp.gdd1020_patch            = FT[]
+    temp.emv_patch                = FT[]
 
     # Column-level
-    temp.t_h2osfc_col             = Float64[]
-    temp.t_h2osfc_bef_col         = Float64[]
-    temp.tsl_col                  = Float64[]
-    temp.t_soi10cm_col            = Float64[]
-    temp.t_soi17cm_col            = Float64[]
-    temp.t_sno_mul_mss_col        = Float64[]
-    temp.t_grnd_col               = Float64[]
-    temp.t_grnd_r_col             = Float64[]
-    temp.t_grnd_u_col             = Float64[]
-    temp.snot_top_col             = Float64[]
-    temp.dTdz_top_col             = Float64[]
-    temp.dt_grnd_col              = Float64[]
-    temp.thv_col                  = Float64[]
-    temp.soila10_col              = Float64[]
-    temp.t_ssbef_col              = Matrix{Float64}(undef, 0, 0)
-    temp.t_soisno_col             = Matrix{Float64}(undef, 0, 0)
-    temp.t_lake_col               = Matrix{Float64}(undef, 0, 0)
-    temp.beta_col                 = Float64[]
-    temp.dynbal_baseline_heat_col = Float64[]
-    temp.emg_col                  = Float64[]
-    temp.xmf_col                  = Float64[]
-    temp.xmf_h2osfc_col           = Float64[]
-    temp.fact_col                 = Matrix{Float64}(undef, 0, 0)
-    temp.c_h2osfc_col             = Float64[]
+    temp.t_h2osfc_col             = FT[]
+    temp.t_h2osfc_bef_col         = FT[]
+    temp.tsl_col                  = FT[]
+    temp.t_soi10cm_col            = FT[]
+    temp.t_soi17cm_col            = FT[]
+    temp.t_sno_mul_mss_col        = FT[]
+    temp.t_grnd_col               = FT[]
+    temp.t_grnd_r_col             = FT[]
+    temp.t_grnd_u_col             = FT[]
+    temp.snot_top_col             = FT[]
+    temp.dTdz_top_col             = FT[]
+    temp.dt_grnd_col              = FT[]
+    temp.thv_col                  = FT[]
+    temp.soila10_col              = FT[]
+    temp.t_ssbef_col              = Matrix{FT}(undef, 0, 0)
+    temp.t_soisno_col             = Matrix{FT}(undef, 0, 0)
+    temp.t_lake_col               = Matrix{FT}(undef, 0, 0)
+    temp.beta_col                 = FT[]
+    temp.dynbal_baseline_heat_col = FT[]
+    temp.emg_col                  = FT[]
+    temp.xmf_col                  = FT[]
+    temp.xmf_h2osfc_col           = FT[]
+    temp.fact_col                 = Matrix{FT}(undef, 0, 0)
+    temp.c_h2osfc_col             = FT[]
     temp.imelt_col                = Matrix{Int}(undef, 0, 0)
 
     # Landunit-level
-    temp.t_building_lun           = Float64[]
-    temp.t_roof_inner_lun         = Float64[]
-    temp.t_sunw_inner_lun         = Float64[]
-    temp.t_shdw_inner_lun         = Float64[]
-    temp.t_floor_lun              = Float64[]
-    temp.taf_lun                  = Float64[]
+    temp.t_building_lun           = FT[]
+    temp.t_roof_inner_lun         = FT[]
+    temp.t_sunw_inner_lun         = FT[]
+    temp.t_shdw_inner_lun         = FT[]
+    temp.t_floor_lun              = FT[]
+    temp.taf_lun                  = FT[]
 
     # Gridcell-level
-    temp.heat1_grc                = Float64[]
-    temp.heat2_grc                = Float64[]
-    temp.liquid_water_temp1_grc   = Float64[]
-    temp.liquid_water_temp2_grc   = Float64[]
+    temp.heat1_grc                = FT[]
+    temp.heat2_grc                = FT[]
+    temp.liquid_water_temp1_grc   = FT[]
+    temp.liquid_water_temp2_grc   = FT[]
 
     return nothing
 end

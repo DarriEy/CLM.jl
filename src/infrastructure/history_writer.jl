@@ -56,7 +56,7 @@ function default_hist_fields()
         HistFieldDef("FSA", "absorbed solar radiation", "W/m2", "patch",
             inst -> inst.solarabs.fsa_patch),
         HistFieldDef("H2OSNO", "snow water equivalent", "mm", "column",
-            inst -> inst.water.waterstatebulk_inst.ws.h2osno_no_layers_col),
+            history_h2osno_total_col),
         HistFieldDef("TSA", "2m air temperature", "K", "patch",
             inst -> inst.temperature.t_ref2m_patch),
         HistFieldDef("RAIN", "atmospheric rain", "mm/s", "column",
@@ -70,7 +70,7 @@ function default_hist_fields()
         HistFieldDef("QRUNOFF", "total runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_runoff_col),
         HistFieldDef("ZWT", "water table depth", "m", "column",
-            inst -> inst.soilhydrology.zwt_col),
+            history_zwt_veg_col),
         HistFieldDef("TLAI", "total projected leaf area index", "m2/m2", "patch",
             inst -> inst.canopystate.tlai_patch),
         HistFieldDef("ELAI", "exposed one-sided leaf area index", "m2/m2", "patch",
@@ -86,8 +86,81 @@ function default_hist_fields()
         HistFieldDef("FRAC_SNO", "fraction of ground covered by snow", "unitless", "column",
             inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col),
         HistFieldDef("BTRAN", "transpiration beta factor", "unitless", "patch",
-            inst -> inst.energyflux.btran_patch),
+            history_btran_daily_min_patch),
     ]
+end
+
+"""
+    history_h2osno_total_col(inst) -> Vector{Float64}
+
+Return total snow water equivalent (mm) per column, including both unresolved
+snow (`h2osno_no_layers_col`) and explicit snow layers.
+"""
+function history_h2osno_total_col(inst::CLMInstances)
+    col = inst.column
+    ws = inst.water.waterstatebulk_inst.ws
+    nc = length(col.snl)
+    h2osno_total = zeros(nc)
+    waterstate_calculate_total_h2osno!(ws, trues(nc), 1:nc, col.snl, h2osno_total)
+    return h2osno_total
+end
+
+"""
+    history_btran_daily_min_patch(inst) -> Vector{Float64}
+
+Return daily minimum BTRAN when available (`btran_min_patch`) to align with
+Fortran `BTRANMN` diagnostics; fallback to instantaneous `btran_patch`.
+"""
+function history_btran_daily_min_patch(inst::CLMInstances)
+    ef = inst.energyflux
+    pch = inst.patch
+    col = inst.column
+    lun = inst.landunit
+    np = length(ef.btran_patch)
+
+    source = if length(ef.btran_min_patch) == np && !isempty(ef.btran_min_patch)
+        ef.btran_min_patch
+    else
+        ef.btran_patch
+    end
+
+    out = fill(NaN, np)
+    for p in 1:np
+        p <= length(pch.column) || continue
+        c = pch.column[p]
+        c >= 1 && c <= length(col.landunit) || continue
+        l = col.landunit[c]
+        l >= 1 && l <= length(lun.itype) || continue
+        itype = lun.itype[l]
+        if itype == ISTSOIL || itype == ISTCROP
+            out[p] = source[p]
+        end
+    end
+    return out
+end
+
+"""
+    history_zwt_veg_col(inst) -> Vector{Float64}
+
+Return water table depth for vegetated/crop landunits only, matching Fortran
+`ZWT` landunit mask semantics.
+"""
+function history_zwt_veg_col(inst::CLMInstances)
+    sh = inst.soilhydrology
+    col = inst.column
+    lun = inst.landunit
+    nc = length(sh.zwt_col)
+    out = fill(NaN, nc)
+    for c in 1:nc
+        c <= length(col.landunit) || continue
+        l = col.landunit[c]
+        l >= 1 && l <= length(lun.itype) || continue
+        itype = lun.itype[l]
+        if itype == ISTSOIL || itype == ISTCROP
+            out[c] = sh.zwt_col[c]
+        end
+    end
+    return out
 end
 
 """

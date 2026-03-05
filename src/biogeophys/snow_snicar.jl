@@ -380,6 +380,62 @@ function snicar_rt!(coszen::Vector{Float64},
 
     ncols = length(coszen)
 
+    # Pre-allocate all scratch arrays outside the column/band loops
+    # Per-column arrays (reused across columns)
+    h2osno_ice_lcl = zeros(nlevsno)
+    h2osno_liq_lcl = zeros(nlevsno)
+    snw_rds_lcl = zeros(Int, nlevsno)
+    mss_cnc_aer_lcl = zeros(nlevsno, SNO_NBR_AER)
+    albsfc_lcl = zeros(numrad_snw)
+    ss_alb_snw_lcl = zeros(nlevsno)
+    asm_prm_snw_lcl = zeros(nlevsno)
+    ext_cff_mss_snw_lcl = zeros(nlevsno)
+    ss_alb_aer_lcl = zeros(SNO_NBR_AER)
+    asm_prm_aer_lcl = zeros(SNO_NBR_AER)
+    ext_cff_mss_aer_lcl = zeros(SNO_NBR_AER)
+    sno_shp = fill(snicar_snw_shape, nlevsno)
+    sno_fs = zeros(nlevsno)
+    sno_AR = zeros(nlevsno)
+    albout_lcl = zeros(numrad_snw)
+    flx_abs_lcl = zeros(nlevsno + 1, numrad_snw)
+    flx_wgt_lcl = zeros(numrad_snw)
+
+    # Per-band arrays (reused across bands)
+    nlyr_itf = nlevsno + 1
+    g_ice_Cg_tmp = zeros(SNICAR_SEVEN_BANDS)
+    gg_ice_F07_tmp = zeros(SNICAR_SEVEN_BANDS)
+    L_snw = zeros(nlevsno)
+    tau_snw = zeros(nlevsno)
+    L_aer = zeros(nlevsno, SNO_NBR_AER)
+    tau_aer = zeros(nlevsno, SNO_NBR_AER)
+    tau_arr = zeros(nlevsno)
+    omega_arr = zeros(nlevsno)
+    g_arr = zeros(nlevsno)
+    enh_omg_bcint_tmp = zeros(SNICAR_SIXTEEN_BANDS)
+    enh_omg_bcint_tmp2 = zeros(SNICAR_SIXTEEN_BANDS)
+    enh_omg_dstint_tmp = zeros(SNICAR_SIZE_BINS)
+    enh_omg_dstint_tmp2 = zeros(SNICAR_SIZE_BINS)
+    tau_star = zeros(nlevsno)
+    omega_star = zeros(nlevsno)
+    g_star = zeros(nlevsno)
+    trndir = zeros(nlyr_itf)
+    trntdr = zeros(nlyr_itf)
+    trndif = zeros(nlyr_itf)
+    rupdir = zeros(nlyr_itf)
+    rupdif = zeros(nlyr_itf)
+    rdndif = zeros(nlyr_itf)
+    dfdir = zeros(nlyr_itf)
+    dfdif = zeros(nlyr_itf)
+    dftmp = zeros(nlyr_itf)
+    rdir = zeros(nlevsno)
+    rdif_a = zeros(nlevsno)
+    rdif_b = zeros(nlevsno)
+    tdir_arr = zeros(nlevsno)
+    tdif_a = zeros(nlevsno)
+    tdif_b = zeros(nlevsno)
+    trnlay = zeros(nlevsno)
+    F_abs = zeros(nlevsno)
+
     # Loop over columns
     for c_idx in 1:ncols
         if mask_nourbanc !== nothing && !mask_nourbanc[c_idx]
@@ -397,23 +453,24 @@ function snicar_rt!(coszen::Vector{Float64},
 
         if coszen[c_idx] > 0.0 && h2osno_lcl > MIN_SNW
 
-            # Local snow layer setup
+            # Local snow layer setup — zero and fill pre-allocated arrays
+            fill!(h2osno_ice_lcl, 0.0)
+            fill!(h2osno_liq_lcl, 0.0)
+            fill!(snw_rds_lcl, 0)
             if snl[c_idx] > -1
                 flg_nosnl = 1
                 snl_lcl = -1
-                # Allocate local arrays for snow layers (1:nlevsno), index offset joff
-                h2osno_ice_lcl = zeros(nlevsno)
-                h2osno_liq_lcl = zeros(nlevsno)
-                snw_rds_lcl = zeros(Int, nlevsno)
                 h2osno_ice_lcl[joff] = h2osno_lcl  # layer 0 -> index joff
                 h2osno_liq_lcl[joff] = 0.0
                 snw_rds_lcl[joff] = round(Int, params.snw_rds_min)
             else
                 flg_nosnl = 0
                 snl_lcl = snl[c_idx]
-                h2osno_liq_lcl = h2osno_liq[c_idx, :]
-                h2osno_ice_lcl = h2osno_ice[c_idx, :]
-                snw_rds_lcl = snw_rds[c_idx, :]
+                for i in 1:nlevsno
+                    h2osno_liq_lcl[i] = h2osno_liq[c_idx, i]
+                    h2osno_ice_lcl[i] = h2osno_ice[c_idx, i]
+                    snw_rds_lcl[i] = snw_rds[c_idx, i]
+                end
             end
 
             snl_btm = 0         # Fortran index of bottom snow layer
@@ -423,14 +480,15 @@ function snicar_rt!(coszen::Vector{Float64},
             snl_btm_j = snl_btm + joff
             snl_top_j = snl_top + joff
 
-            # Local aerosol array
-            mss_cnc_aer_lcl = zeros(nlevsno, SNO_NBR_AER)
+            # Local aerosol array — fill from pre-allocated
+            fill!(mss_cnc_aer_lcl, 0.0)
             for j in 1:SNO_NBR_AER
-                mss_cnc_aer_lcl[:, j] = mss_cnc_aer_in[c_idx, :, j]
+                for i in 1:nlevsno
+                    mss_cnc_aer_lcl[i, j] = mss_cnc_aer_in[c_idx, i, j]
+                end
             end
 
             # Set spectral underlying surface albedos
-            albsfc_lcl = zeros(numrad_snw)
             albsfc_lcl[1:(nir_bnd_bgn-1)] .= albsfc[c_idx, IVIS]
             albsfc_lcl[nir_bnd_bgn:nir_bnd_end] .= albsfc[c_idx, INIR]
 
@@ -441,34 +499,27 @@ function snicar_rt!(coszen::Vector{Float64},
                 end
             end
 
-            # Flux weights
+            # Flux weights — copy into pre-allocated buffer
             if flg_slr_in == 1
-                flx_wgt = copy(optics.flx_wgt_dir)
+                for i in eachindex(flx_wgt_lcl); flx_wgt_lcl[i] = optics.flx_wgt_dir[i]; end
             else
-                flx_wgt = copy(optics.flx_wgt_dif)
+                for i in eachindex(flx_wgt_lcl); flx_wgt_lcl[i] = optics.flx_wgt_dif[i]; end
             end
 
             exp_min = exp(-argmax_val)
 
-            # Local snow optical properties
-            ss_alb_snw_lcl = zeros(nlevsno)
-            asm_prm_snw_lcl = zeros(nlevsno)
-            ext_cff_mss_snw_lcl = zeros(nlevsno)
-            ss_alb_aer_lcl = zeros(SNO_NBR_AER)
-            asm_prm_aer_lcl = zeros(SNO_NBR_AER)
-            ext_cff_mss_aer_lcl = zeros(SNO_NBR_AER)
-
-            # Snow shape arrays
-            sno_shp = fill(snicar_snw_shape, nlevsno)
-            sno_fs = zeros(nlevsno)
-            sno_AR = zeros(nlevsno)
-
-            # Local output arrays for all spectral bands
-            albout_lcl = zeros(numrad_snw)
-            flx_abs_lcl = zeros(nlevsno + 1, numrad_snw)  # layers + ground
-
-            # Adding-doubling variables (snow layers + 1 interface)
-            nlyr_itf = nlevsno + 1  # number of interfaces
+            # Zero pre-allocated per-column scratch arrays
+            fill!(ss_alb_snw_lcl, 0.0)
+            fill!(asm_prm_snw_lcl, 0.0)
+            fill!(ext_cff_mss_snw_lcl, 0.0)
+            fill!(ss_alb_aer_lcl, 0.0)
+            fill!(asm_prm_aer_lcl, 0.0)
+            fill!(ext_cff_mss_aer_lcl, 0.0)
+            fill!(sno_shp, snicar_snw_shape)
+            fill!(sno_fs, 0.0)
+            fill!(sno_AR, 0.0)
+            fill!(albout_lcl, 0.0)
+            fill!(flx_abs_lcl, 0.0)
 
             mu_not = 0.0
 
@@ -526,8 +577,8 @@ function snicar_rt!(coszen::Vector{Float64},
                 end
 
                 # Nonspherical snow: shape-dependent asymmetry factors
-                g_ice_Cg_tmp = zeros(SNICAR_SEVEN_BANDS)
-                gg_ice_F07_tmp = zeros(SNICAR_SEVEN_BANDS)
+                fill!(g_ice_Cg_tmp, 0.0)
+                fill!(gg_ice_F07_tmp, 0.0)
 
                 for i in snl_top_j:snl_btm_j
                     if sno_shp[i] == "spheroid"
@@ -603,20 +654,20 @@ function snicar_rt!(coszen::Vector{Float64},
                 asm_prm_aer_lcl[8] = optics.asm_prm_dst4[bnd_idx]
                 ext_cff_mss_aer_lcl[8] = optics.ext_cff_mss_dst4[bnd_idx]
 
-                # Layer mass, optical depths, weighted Mie properties
+                # Layer mass, optical depths, weighted Mie properties — zero pre-allocated arrays
                 wvl_doint = wvl_ct[bnd_idx]
-                L_snw = zeros(nlevsno)
-                tau_snw = zeros(nlevsno)
-                L_aer = zeros(nlevsno, SNO_NBR_AER)
-                tau_aer = zeros(nlevsno, SNO_NBR_AER)
-                tau = zeros(nlevsno)
-                omega = zeros(nlevsno)
-                g_arr = zeros(nlevsno)
+                fill!(L_snw, 0.0)
+                fill!(tau_snw, 0.0)
+                fill!(L_aer, 0.0)
+                fill!(tau_aer, 0.0)
+                fill!(tau_arr, 0.0)
+                fill!(omega_arr, 0.0)
+                fill!(g_arr, 0.0)
 
-                enh_omg_bcint_tmp = zeros(SNICAR_SIXTEEN_BANDS)
-                enh_omg_bcint_tmp2 = zeros(SNICAR_SIXTEEN_BANDS)
-                enh_omg_dstint_tmp = zeros(SNICAR_SIZE_BINS)
-                enh_omg_dstint_tmp2 = zeros(SNICAR_SIZE_BINS)
+                fill!(enh_omg_bcint_tmp, 0.0)
+                fill!(enh_omg_bcint_tmp2, 0.0)
+                fill!(enh_omg_dstint_tmp, 0.0)
+                fill!(enh_omg_dstint_tmp2, 0.0)
 
                 for i in snl_top_j:snl_btm_j
                     # BC/dust-snow internal mixing for wavelength <= 1.2um
@@ -685,52 +736,42 @@ function snicar_rt!(coszen::Vector{Float64},
                         g_sum_val += tau_aer[i, j] * ss_alb_aer_lcl[j] * asm_prm_aer_lcl[j]
                     end
 
-                    tau[i] = tau_sum + tau_snw[i]
-                    omega[i] = (1.0 / tau[i]) * (omega_sum + ss_alb_snw_lcl[i] * tau_snw[i])
-                    g_arr[i] = (1.0 / (tau[i] * omega[i])) * (g_sum_val + asm_prm_snw_lcl[i] * ss_alb_snw_lcl[i] * tau_snw[i])
+                    tau_arr[i] = tau_sum + tau_snw[i]
+                    omega_arr[i] = (1.0 / tau_arr[i]) * (omega_sum + ss_alb_snw_lcl[i] * tau_snw[i])
+                    g_arr[i] = (1.0 / (tau_arr[i] * omega_arr[i])) * (g_sum_val + asm_prm_snw_lcl[i] * ss_alb_snw_lcl[i] * tau_snw[i])
                 end
 
-                # Delta transformations
-                tau_star = zeros(nlevsno)
-                omega_star = zeros(nlevsno)
-                g_star = zeros(nlevsno)
+                # Delta transformations — zero pre-allocated arrays
+                fill!(tau_star, 0.0)
+                fill!(omega_star, 0.0)
+                fill!(g_star, 0.0)
 
                 if DELTA == 1
                     for i in snl_top_j:snl_btm_j
                         g_star[i] = g_arr[i] / (1.0 + g_arr[i])
-                        omega_star[i] = (1.0 - g_arr[i]^2) * omega[i] / (1.0 - omega[i] * g_arr[i]^2)
-                        tau_star[i] = (1.0 - omega[i] * g_arr[i]^2) * tau[i]
+                        omega_star[i] = (1.0 - g_arr[i]^2) * omega_arr[i] / (1.0 - omega_arr[i] * g_arr[i]^2)
+                        tau_star[i] = (1.0 - omega_arr[i] * g_arr[i]^2) * tau_arr[i]
                     end
                 else
                     for i in snl_top_j:snl_btm_j
                         g_star[i] = g_arr[i]
-                        omega_star[i] = omega[i]
-                        tau_star[i] = tau[i]
+                        omega_star[i] = omega_arr[i]
+                        tau_star[i] = tau_arr[i]
                     end
                 end
 
                 # ---- Adding-Doubling RT solver ----
                 snl_btm_itf = snl_btm_j + 1  # bottom interface (1-based)
 
-                # Interface arrays: indices snl_top_j to snl_btm_itf
-                trndir = zeros(nlyr_itf)
-                trntdr = zeros(nlyr_itf)
-                trndif = zeros(nlyr_itf)
-                rupdir = zeros(nlyr_itf)
-                rupdif = zeros(nlyr_itf)
-                rdndif = zeros(nlyr_itf)
-                dfdir = zeros(nlyr_itf)
-                dfdif = zeros(nlyr_itf)
-                dftmp = zeros(nlyr_itf)
+                # Interface arrays — zero pre-allocated
+                fill!(trndir, 0.0); fill!(trntdr, 0.0); fill!(trndif, 0.0)
+                fill!(rupdir, 0.0); fill!(rupdif, 0.0); fill!(rdndif, 0.0)
+                fill!(dfdir, 0.0); fill!(dfdif, 0.0); fill!(dftmp, 0.0)
 
-                # Layer arrays
-                rdir = zeros(nlevsno)
-                rdif_a = zeros(nlevsno)
-                rdif_b = zeros(nlevsno)
-                tdir_arr = zeros(nlevsno)
-                tdif_a = zeros(nlevsno)
-                tdif_b = zeros(nlevsno)
-                trnlay = zeros(nlevsno)
+                # Layer arrays — zero pre-allocated
+                fill!(rdir, 0.0); fill!(rdif_a, 0.0); fill!(rdif_b, 0.0)
+                fill!(tdir_arr, 0.0); fill!(tdif_a, 0.0); fill!(tdif_b, 0.0)
+                fill!(trnlay, 0.0)
 
                 # Initialize top interface
                 trndir[snl_top_j] = c1
@@ -844,7 +885,7 @@ function snicar_rt!(coszen::Vector{Float64},
                 end
 
                 # Absorbed flux in each layer
-                F_abs = zeros(nlevsno)
+                fill!(F_abs, 0.0)
                 F_abs_sum = 0.0
                 for i in snl_top_j:snl_btm_j
                     F_abs[i] = dftmp[i] - dftmp[i+1]
@@ -875,17 +916,17 @@ function snicar_rt!(coszen::Vector{Float64},
             elseif numrad_snw == HIGH_NUMBER_BANDS
                 flx_sum = 0.0
                 for bnd_idx in 1:(nir_bnd_bgn-1)
-                    flx_sum += flx_wgt[bnd_idx] * albout_lcl[bnd_idx]
+                    flx_sum += flx_wgt_lcl[bnd_idx] * albout_lcl[bnd_idx]
                 end
-                albout[c_idx, IVIS] = flx_sum / sum(flx_wgt[1:(nir_bnd_bgn-1)])
+                albout[c_idx, IVIS] = flx_sum / sum(flx_wgt_lcl[1:(nir_bnd_bgn-1)])
             end
 
             # NIR band average
             flx_sum = 0.0
             for bnd_idx in nir_bnd_bgn:nir_bnd_end
-                flx_sum += flx_wgt[bnd_idx] * albout_lcl[bnd_idx]
+                flx_sum += flx_wgt_lcl[bnd_idx] * albout_lcl[bnd_idx]
             end
-            albout[c_idx, INIR] = flx_sum / sum(flx_wgt[nir_bnd_bgn:nir_bnd_end])
+            albout[c_idx, INIR] = flx_sum / sum(flx_wgt_lcl[nir_bnd_bgn:nir_bnd_end])
 
             # Weight output flx_abs into VIS/NIR bands
             if numrad_snw == DEFAULT_NUMBER_BANDS
@@ -896,9 +937,9 @@ function snicar_rt!(coszen::Vector{Float64},
                 for i in snl_top_j:(nlevsno+1)
                     flx_sum = 0.0
                     for bnd_idx in 1:(nir_bnd_bgn-1)
-                        flx_sum += flx_wgt[bnd_idx] * flx_abs_lcl[i, bnd_idx]
+                        flx_sum += flx_wgt_lcl[bnd_idx] * flx_abs_lcl[i, bnd_idx]
                     end
-                    flx_abs[c_idx, i, IVIS] = flx_sum / sum(flx_wgt[1:(nir_bnd_bgn-1)])
+                    flx_abs[c_idx, i, IVIS] = flx_sum / sum(flx_wgt_lcl[1:(nir_bnd_bgn-1)])
                 end
             end
 
@@ -906,9 +947,9 @@ function snicar_rt!(coszen::Vector{Float64},
             for i in snl_top_j:(nlevsno+1)
                 flx_sum = 0.0
                 for bnd_idx in nir_bnd_bgn:nir_bnd_end
-                    flx_sum += flx_wgt[bnd_idx] * flx_abs_lcl[i, bnd_idx]
+                    flx_sum += flx_wgt_lcl[bnd_idx] * flx_abs_lcl[i, bnd_idx]
                 end
-                flx_abs[c_idx, i, INIR] = flx_sum / sum(flx_wgt[nir_bnd_bgn:nir_bnd_end])
+                flx_abs[c_idx, i, INIR] = flx_sum / sum(flx_wgt_lcl[nir_bnd_bgn:nir_bnd_end])
             end
 
             # High solar zenith angle adjustment for NIR direct albedo
@@ -916,7 +957,7 @@ function snicar_rt!(coszen::Vector{Float64},
                 sza_c1_val = SZA_A0 + SZA_A1 * mu_not + SZA_A2 * mu_not^2
                 sza_c0_val = SZA_B0 + SZA_B1 * mu_not + SZA_B2 * mu_not^2
                 sza_factor = sza_c1_val * (log10(snw_rds_lcl[snl_top_j] * 1.0) - 6.0) + sza_c0_val
-                flx_sza_adjust = albout[c_idx, INIR] * (sza_factor - 1.0) * sum(flx_wgt[nir_bnd_bgn:nir_bnd_end])
+                flx_sza_adjust = albout[c_idx, INIR] * (sza_factor - 1.0) * sum(flx_wgt_lcl[nir_bnd_bgn:nir_bnd_end])
                 albout[c_idx, INIR] *= sza_factor
                 flx_abs[c_idx, snl_top_j, INIR] -= flx_sza_adjust
             end
@@ -1026,6 +1067,10 @@ function snowage_grain!(snl::Vector{Int},
         end
 
         for i in snl_top_j:snl_btm_j
+            if !isfinite(cdz[i]) || cdz[i] <= 0.0
+                continue
+            end
+
             # 1. DRY SNOW AGING
             h2osno_lyr = h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]
 
@@ -1045,10 +1090,16 @@ function snowage_grain!(snl::Vector{Int},
             end
 
             dTdz_val = abs((t_snotop - t_snobtm) / cdz[i])
+            if !isfinite(dTdz_val)
+                dTdz_val = 0.0
+            end
 
             # Snow density
             rhos = (h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]) / cdz[i]
             rhos = max(50.0, rhos)
+            if !isfinite(rhos)
+                rhos = 50.0
+            end
 
             # Best-fit table indices
             T_idx = round(Int, (t_soisno[c_idx, i] - 223) / 5) + 1

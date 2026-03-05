@@ -59,21 +59,21 @@ Irrigation parameters structure.
 
 Ported from `irrigation_params_type` in `IrrigationMod.F90`.
 """
-Base.@kwdef mutable struct IrrigationParamsData
+Base.@kwdef mutable struct IrrigationParamsData{FT<:AbstractFloat}
     # Minimum LAI for irrigation
-    irrig_min_lai::Float64 = 0.0
+    irrig_min_lai::FT = 0.0
     # Time of day to check whether we need irrigation, seconds (0 = midnight)
     irrig_start_time::Int = 21600
     # Desired amount of time to irrigate per day (sec)
     irrig_length::Int = 14400
     # Target soil matric potential for irrigation (mm)
-    irrig_target_smp::Float64 = -3400.0
+    irrig_target_smp::FT = -3400.0
     # Soil depth to which we measure for irrigation (m)
-    irrig_depth::Float64 = 0.6
+    irrig_depth::FT = 0.6
     # Threshold fraction for irrigation trigger (0 = wilting point, 1 = target)
-    irrig_threshold_fraction::Float64 = 1.0
+    irrig_threshold_fraction::FT = 1.0
     # Threshold for river water volume below which irrigation is shut off (fraction)
-    irrig_river_volume_threshold::Float64 = 0.1
+    irrig_river_volume_threshold::FT = 0.1
     # Whether irrigation is limited based on river storage (when ROF is enabled)
     limit_irrigation_if_rof_enabled::Bool = false
     # Use groundwater supply for irrigation
@@ -94,7 +94,7 @@ Irrigation state and flux data structure.
 
 Ported from `irrigation_type` in `IrrigationMod.F90`.
 """
-Base.@kwdef mutable struct IrrigationData
+Base.@kwdef mutable struct IrrigationData{FT<:AbstractFloat}
     # Parameters
     params::IrrigationParamsData = IrrigationParamsData()
     # Land model time step (sec)
@@ -102,19 +102,19 @@ Base.@kwdef mutable struct IrrigationData
     # Number of irrigation time steps per day
     irrig_nsteps_per_day::Int = 0
     # Relative saturation at wilting point [col, nlevsoi]
-    relsat_wilting_point_col::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    relsat_wilting_point_col::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     # Relative saturation at irrigation target [col, nlevsoi]
-    relsat_target_col::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    relsat_target_col::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     # Patch irrigation application method [patch]
     irrig_method_patch::Vector{Int} = Int[]
     # Current irrigation rate from surface water [mm/s] [patch]
-    sfc_irrig_rate_patch::Vector{Float64} = Float64[]
+    sfc_irrig_rate_patch::Vector{FT} = Float64[]
     # Current irrigation rate demand, neglecting surface water source limitation [mm/s] [patch]
-    irrig_rate_demand_patch::Vector{Float64} = Float64[]
+    irrig_rate_demand_patch::Vector{FT} = Float64[]
     # Number of time steps for which we still need to irrigate today [patch]
     n_irrig_steps_left_patch::Vector{Int} = Int[]
     # Irrigation flux neglecting surface water source limitation [mm/s] [patch]
-    qflx_irrig_demand_patch::Vector{Float64} = Float64[]
+    qflx_irrig_demand_patch::Vector{FT} = Float64[]
 end
 
 # ---------------------------------------------------------------------------
@@ -129,12 +129,12 @@ Allocate and initialize all irrigation data arrays.
 
 Ported from `IrrigationInitAllocate` in `IrrigationMod.F90`.
 """
-function irrigation_init_allocate!(irrig::IrrigationData, np::Int, nc::Int, nlevsoi::Int)
-    irrig.qflx_irrig_demand_patch    = fill(NaN, np)
-    irrig.relsat_wilting_point_col   = fill(NaN, nc, nlevsoi)
-    irrig.relsat_target_col          = fill(NaN, nc, nlevsoi)
-    irrig.sfc_irrig_rate_patch       = fill(NaN, np)
-    irrig.irrig_rate_demand_patch    = fill(NaN, np)
+function irrigation_init_allocate!(irrig::IrrigationData{FT}, np::Int, nc::Int, nlevsoi::Int) where {FT}
+    irrig.qflx_irrig_demand_patch    = fill(FT(NaN), np)
+    irrig.relsat_wilting_point_col   = fill(FT(NaN), nc, nlevsoi)
+    irrig.relsat_target_col          = fill(FT(NaN), nc, nlevsoi)
+    irrig.sfc_irrig_rate_patch       = fill(FT(NaN), np)
+    irrig.irrig_rate_demand_patch    = fill(FT(NaN), np)
     irrig.irrig_method_patch         = fill(ISPVAL, np)
     irrig.n_irrig_steps_left_patch   = fill(0, np)
     return nothing
@@ -152,7 +152,7 @@ Initialize irrigation history fields. Stub: to be filled when histFileMod is por
 
 Ported from `IrrigationInitHistory` in `IrrigationMod.F90`.
 """
-function irrigation_init_history!(irrig::IrrigationData, np::Int)
+function irrigation_init_history!(irrig::IrrigationData{FT}, np::Int) where {FT}
     irrig.qflx_irrig_demand_patch .= SPVAL
     return nothing
 end
@@ -306,12 +306,12 @@ Deallocate all irrigation data arrays.
 
 Ported from `IrrigationClean` in `IrrigationMod.F90`.
 """
-function irrigation_clean!(irrig::IrrigationData)
-    irrig.qflx_irrig_demand_patch    = Float64[]
-    irrig.relsat_wilting_point_col   = Matrix{Float64}(undef, 0, 0)
-    irrig.relsat_target_col          = Matrix{Float64}(undef, 0, 0)
-    irrig.sfc_irrig_rate_patch       = Float64[]
-    irrig.irrig_rate_demand_patch    = Float64[]
+function irrigation_clean!(irrig::IrrigationData{FT}) where {FT}
+    irrig.qflx_irrig_demand_patch    = FT[]
+    irrig.relsat_wilting_point_col   = Matrix{FT}(undef, 0, 0)
+    irrig.relsat_target_col          = Matrix{FT}(undef, 0, 0)
+    irrig.sfc_irrig_rate_patch       = FT[]
+    irrig.irrig_rate_demand_patch    = FT[]
     irrig.irrig_method_patch         = Int[]
     irrig.n_irrig_steps_left_patch   = Int[]
     return nothing
@@ -329,7 +329,7 @@ Handle restart of irrigation variables. Stub: to be filled when restart I/O is p
 
 Ported from `Restart` in `IrrigationMod.F90`.
 """
-function irrigation_restart!(irrig::IrrigationData)
+function irrigation_restart!(irrig::IrrigationData{FT}) where {FT}
     return nothing  # Stub
 end
 

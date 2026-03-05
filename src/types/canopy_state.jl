@@ -12,58 +12,58 @@ fractions, vegetation water potentials, and accumulated quantities.
 
 Ported from `canopystate_type` in `CanopyStateType.F90`.
 """
-Base.@kwdef mutable struct CanopyStateData
+Base.@kwdef mutable struct CanopyStateData{FT<:AbstractFloat}
     # --- Integer patch-level fields ---
     frac_veg_nosno_patch     ::Vector{Int}     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
     frac_veg_nosno_alb_patch ::Vector{Int}     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
 
     # --- LAI/SAI (patch-level, 1D) ---
-    tlai_patch               ::Vector{Float64} = Float64[]   # patch canopy one-sided leaf area index, no burying by snow
-    tsai_patch               ::Vector{Float64} = Float64[]   # patch canopy one-sided stem area index, no burying by snow
-    elai_patch               ::Vector{Float64} = Float64[]   # patch canopy one-sided leaf area index with burying by snow
-    esai_patch               ::Vector{Float64} = Float64[]   # patch canopy one-sided stem area index with burying by snow
+    tlai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided leaf area index, no burying by snow
+    tsai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided stem area index, no burying by snow
+    elai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided leaf area index with burying by snow
+    esai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided stem area index with burying by snow
 
     # --- SP mode history fields ---
-    tlai_hist_patch          ::Vector{Float64} = Float64[]   # patch canopy one-sided leaf area index, for SP mode
-    tsai_hist_patch          ::Vector{Float64} = Float64[]   # patch canopy one-sided stem area index, for SP mode
-    htop_hist_patch          ::Vector{Float64} = Float64[]   # patch canopy height, for SP mode
+    tlai_hist_patch          ::Vector{FT} = Float64[]   # patch canopy one-sided leaf area index, for SP mode
+    tsai_hist_patch          ::Vector{FT} = Float64[]   # patch canopy one-sided stem area index, for SP mode
+    htop_hist_patch          ::Vector{FT} = Float64[]   # patch canopy height, for SP mode
 
     # --- Sunlit/shaded LAI (patch-level) ---
-    elai240_patch            ::Vector{Float64} = Float64[]   # patch canopy one-sided LAI with burying by snow avg over 10days
-    laisun_patch             ::Vector{Float64} = Float64[]   # patch sunlit projected leaf area index
-    laisha_patch             ::Vector{Float64} = Float64[]   # patch shaded projected leaf area index
-    mlaidiff_patch           ::Vector{Float64} = Float64[]   # patch difference between lai month one and month two
+    elai240_patch            ::Vector{FT} = Float64[]   # patch canopy one-sided LAI with burying by snow avg over 10days
+    laisun_patch             ::Vector{FT} = Float64[]   # patch sunlit projected leaf area index
+    laisha_patch             ::Vector{FT} = Float64[]   # patch shaded projected leaf area index
+    mlaidiff_patch           ::Vector{FT} = Float64[]   # patch difference between lai month one and month two
 
     # --- Sunlit/shaded LAI by canopy layer (patch-level, 2D) ---
-    laisun_z_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch sunlit leaf area for canopy layer (np, nlevcan)
-    laisha_z_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch shaded leaf area for canopy layer (np, nlevcan)
+    laisun_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch sunlit leaf area for canopy layer (np, nlevcan)
+    laisha_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch shaded leaf area for canopy layer (np, nlevcan)
 
     # --- Monthly LAI (patch-level, 2D) ---
-    annlai_patch             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch 12 months of monthly lai (np, 12)
+    annlai_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch 12 months of monthly lai (np, 12)
 
     # --- Biomass (patch-level) ---
-    stem_biomass_patch       ::Vector{Float64} = Float64[]   # Aboveground stem biomass (kg/m**2)
-    leaf_biomass_patch       ::Vector{Float64} = Float64[]   # Aboveground leaf biomass (kg/m**2)
+    stem_biomass_patch       ::Vector{FT} = Float64[]   # Aboveground stem biomass (kg/m**2)
+    leaf_biomass_patch       ::Vector{FT} = Float64[]   # Aboveground leaf biomass (kg/m**2)
 
     # --- Canopy geometry (patch-level) ---
-    htop_patch               ::Vector{Float64} = Float64[]   # patch canopy top (m)
-    hbot_patch               ::Vector{Float64} = Float64[]   # patch canopy bottom (m)
-    z0m_patch                ::Vector{Float64} = Float64[]   # patch momentum roughness length (m)
-    displa_patch             ::Vector{Float64} = Float64[]   # patch displacement height (m)
+    htop_patch               ::Vector{FT} = Float64[]   # patch canopy top (m)
+    hbot_patch               ::Vector{FT} = Float64[]   # patch canopy bottom (m)
+    z0m_patch                ::Vector{FT} = Float64[]   # patch momentum roughness length (m)
+    displa_patch             ::Vector{FT} = Float64[]   # patch displacement height (m)
 
     # --- Sunlit fraction (patch-level) ---
-    fsun_patch               ::Vector{Float64} = Float64[]   # patch sunlit fraction of canopy
-    fsun24_patch             ::Vector{Float64} = Float64[]   # patch 24hr average of sunlit fraction of canopy
-    fsun240_patch            ::Vector{Float64} = Float64[]   # patch 240hr average of sunlit fraction of canopy
+    fsun_patch               ::Vector{FT} = Float64[]   # patch sunlit fraction of canopy
+    fsun24_patch             ::Vector{FT} = Float64[]   # patch 24hr average of sunlit fraction of canopy
+    fsun240_patch            ::Vector{FT} = Float64[]   # patch 240hr average of sunlit fraction of canopy
 
     # --- Leaf properties (patch-level) ---
-    dleaf_patch              ::Vector{Float64} = Float64[]   # patch characteristic leaf width (diameter) [m]
-    rscanopy_patch           ::Vector{Float64} = Float64[]   # patch canopy stomatal resistance (s/m) (ED specific)
+    dleaf_patch              ::Vector{FT} = Float64[]   # patch characteristic leaf width (diameter) [m]
+    rscanopy_patch           ::Vector{FT} = Float64[]   # patch canopy stomatal resistance (s/m) (ED specific)
 
     # --- Vegetation water potential (patch-level, 2D) ---
-    vegwp_patch              ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential (mm) (np, nvegwcs)
-    vegwp_ln_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential at local noon (mm) (np, nvegwcs)
-    vegwp_pd_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # patch predawn vegetation water matric potential (mm) (np, nvegwcs)
+    vegwp_patch              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential (mm) (np, nvegwcs)
+    vegwp_ln_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential at local noon (mm) (np, nvegwcs)
+    vegwp_pd_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch predawn vegetation water matric potential (mm) (np, nvegwcs)
 
     # --- Namelist parameter ---
     leaf_mr_vcm              ::Float64 = SPVAL               # Scalar constant of leaf respiration with Vcmax
@@ -78,7 +78,7 @@ real fields to `NaN`, matching the Fortran `InitAllocate`.
 
 Ported from `canopystate_type%InitAllocate` in `CanopyStateType.F90`.
 """
-function canopystate_init!(cs::CanopyStateData, np::Int)
+function canopystate_init!(cs::CanopyStateData{FT}, np::Int) where {FT}
     nlevcan = NLEVCAN
     nvegwcs = NVEGWCS
 
@@ -87,48 +87,48 @@ function canopystate_init!(cs::CanopyStateData, np::Int)
     cs.frac_veg_nosno_alb_patch = fill(0, np)
 
     # --- LAI/SAI 1D ---
-    cs.tlai_hist_patch          = fill(NaN, np)
-    cs.tsai_hist_patch          = fill(NaN, np)
-    cs.htop_hist_patch          = fill(NaN, np)
-    cs.tlai_patch               = fill(NaN, np)
-    cs.tsai_patch               = fill(NaN, np)
-    cs.elai_patch               = fill(NaN, np)
-    cs.elai240_patch            = fill(NaN, np)
-    cs.esai_patch               = fill(NaN, np)
-    cs.laisun_patch             = fill(NaN, np)
-    cs.laisha_patch             = fill(NaN, np)
-    cs.mlaidiff_patch           = fill(NaN, np)
+    cs.tlai_hist_patch          = fill(FT(NaN), np)
+    cs.tsai_hist_patch          = fill(FT(NaN), np)
+    cs.htop_hist_patch          = fill(FT(NaN), np)
+    cs.tlai_patch               = fill(FT(NaN), np)
+    cs.tsai_patch               = fill(FT(NaN), np)
+    cs.elai_patch               = fill(FT(NaN), np)
+    cs.elai240_patch            = fill(FT(NaN), np)
+    cs.esai_patch               = fill(FT(NaN), np)
+    cs.laisun_patch             = fill(FT(NaN), np)
+    cs.laisha_patch             = fill(FT(NaN), np)
+    cs.mlaidiff_patch           = fill(FT(NaN), np)
 
     # --- Sunlit/shaded LAI by canopy layer 2D ---
-    cs.laisun_z_patch           = fill(NaN, np, nlevcan)
-    cs.laisha_z_patch           = fill(NaN, np, nlevcan)
+    cs.laisun_z_patch           = fill(FT(NaN), np, nlevcan)
+    cs.laisha_z_patch           = fill(FT(NaN), np, nlevcan)
 
     # --- Monthly LAI 2D (Fortran: 12 × np, Julia: np × 12) ---
-    cs.annlai_patch             = fill(NaN, np, 12)
+    cs.annlai_patch             = fill(FT(NaN), np, 12)
 
     # --- Biomass ---
-    cs.stem_biomass_patch       = fill(NaN, np)
-    cs.leaf_biomass_patch       = fill(NaN, np)
+    cs.stem_biomass_patch       = fill(FT(NaN), np)
+    cs.leaf_biomass_patch       = fill(FT(NaN), np)
 
     # --- Canopy geometry ---
-    cs.htop_patch               = fill(NaN, np)
-    cs.hbot_patch               = fill(NaN, np)
-    cs.z0m_patch                = fill(NaN, np)
-    cs.displa_patch             = fill(NaN, np)
+    cs.htop_patch               = fill(FT(NaN), np)
+    cs.hbot_patch               = fill(FT(NaN), np)
+    cs.z0m_patch                = fill(FT(NaN), np)
+    cs.displa_patch             = fill(FT(NaN), np)
 
     # --- Sunlit fraction ---
-    cs.fsun_patch               = fill(NaN, np)
-    cs.fsun24_patch             = fill(NaN, np)
-    cs.fsun240_patch            = fill(NaN, np)
+    cs.fsun_patch               = fill(FT(NaN), np)
+    cs.fsun24_patch             = fill(FT(NaN), np)
+    cs.fsun240_patch            = fill(FT(NaN), np)
 
     # --- Leaf properties ---
-    cs.dleaf_patch              = fill(NaN, np)
-    cs.rscanopy_patch           = fill(NaN, np)
+    cs.dleaf_patch              = fill(FT(NaN), np)
+    cs.rscanopy_patch           = fill(FT(NaN), np)
 
     # --- Vegetation water potential 2D ---
-    cs.vegwp_patch              = fill(NaN, np, nvegwcs)
-    cs.vegwp_ln_patch           = fill(NaN, np, nvegwcs)
-    cs.vegwp_pd_patch           = fill(NaN, np, nvegwcs)
+    cs.vegwp_patch              = fill(FT(NaN), np, nvegwcs)
+    cs.vegwp_ln_patch           = fill(FT(NaN), np, nvegwcs)
+    cs.vegwp_pd_patch           = fill(FT(NaN), np, nvegwcs)
 
     return nothing
 end
@@ -138,42 +138,42 @@ end
 
 Deallocate (reset to empty) all fields of a `CanopyStateData` instance.
 """
-function canopystate_clean!(cs::CanopyStateData)
+function canopystate_clean!(cs::CanopyStateData{FT}) where {FT}
     # Integer vectors
     cs.frac_veg_nosno_patch     = Int[]
     cs.frac_veg_nosno_alb_patch = Int[]
 
     # Float64 vectors
-    cs.tlai_patch               = Float64[]
-    cs.tsai_patch               = Float64[]
-    cs.elai_patch               = Float64[]
-    cs.esai_patch               = Float64[]
-    cs.tlai_hist_patch          = Float64[]
-    cs.tsai_hist_patch          = Float64[]
-    cs.htop_hist_patch          = Float64[]
-    cs.elai240_patch            = Float64[]
-    cs.laisun_patch             = Float64[]
-    cs.laisha_patch             = Float64[]
-    cs.mlaidiff_patch           = Float64[]
-    cs.stem_biomass_patch       = Float64[]
-    cs.leaf_biomass_patch       = Float64[]
-    cs.htop_patch               = Float64[]
-    cs.hbot_patch               = Float64[]
-    cs.z0m_patch                = Float64[]
-    cs.displa_patch             = Float64[]
-    cs.fsun_patch               = Float64[]
-    cs.fsun24_patch             = Float64[]
-    cs.fsun240_patch            = Float64[]
-    cs.dleaf_patch              = Float64[]
-    cs.rscanopy_patch           = Float64[]
+    cs.tlai_patch               = FT[]
+    cs.tsai_patch               = FT[]
+    cs.elai_patch               = FT[]
+    cs.esai_patch               = FT[]
+    cs.tlai_hist_patch          = FT[]
+    cs.tsai_hist_patch          = FT[]
+    cs.htop_hist_patch          = FT[]
+    cs.elai240_patch            = FT[]
+    cs.laisun_patch             = FT[]
+    cs.laisha_patch             = FT[]
+    cs.mlaidiff_patch           = FT[]
+    cs.stem_biomass_patch       = FT[]
+    cs.leaf_biomass_patch       = FT[]
+    cs.htop_patch               = FT[]
+    cs.hbot_patch               = FT[]
+    cs.z0m_patch                = FT[]
+    cs.displa_patch             = FT[]
+    cs.fsun_patch               = FT[]
+    cs.fsun24_patch             = FT[]
+    cs.fsun240_patch            = FT[]
+    cs.dleaf_patch              = FT[]
+    cs.rscanopy_patch           = FT[]
 
     # Matrices
-    cs.laisun_z_patch           = Matrix{Float64}(undef, 0, 0)
-    cs.laisha_z_patch           = Matrix{Float64}(undef, 0, 0)
-    cs.annlai_patch             = Matrix{Float64}(undef, 0, 0)
-    cs.vegwp_patch              = Matrix{Float64}(undef, 0, 0)
-    cs.vegwp_ln_patch           = Matrix{Float64}(undef, 0, 0)
-    cs.vegwp_pd_patch           = Matrix{Float64}(undef, 0, 0)
+    cs.laisun_z_patch           = Matrix{FT}(undef, 0, 0)
+    cs.laisha_z_patch           = Matrix{FT}(undef, 0, 0)
+    cs.annlai_patch             = Matrix{FT}(undef, 0, 0)
+    cs.vegwp_patch              = Matrix{FT}(undef, 0, 0)
+    cs.vegwp_ln_patch           = Matrix{FT}(undef, 0, 0)
+    cs.vegwp_pd_patch           = Matrix{FT}(undef, 0, 0)
 
     return nothing
 end
@@ -253,7 +253,7 @@ Set namelist parameters for unit-testing (leaf_mr_vcm = 0.015).
 
 Ported from `canopystate_type%SetNMLForTesting` in `CanopyStateType.F90`.
 """
-function canopystate_set_nml_for_testing!(cs::CanopyStateData)
+function canopystate_set_nml_for_testing!(cs::CanopyStateData{FT}) where {FT}
     cs.leaf_mr_vcm = 0.015
     return nothing
 end

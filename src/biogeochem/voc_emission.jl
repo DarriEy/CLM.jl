@@ -40,20 +40,20 @@ Contains activity factor parameters for leaf age, temperature,
 and light dependence.
 Ported from `MEGANFactorsMod` in CLM Fortran.
 """
-Base.@kwdef mutable struct MEGANFactors
+Base.@kwdef mutable struct MEGANFactors{FT<:AbstractFloat}
     n_classes::Int = 20
     # Leaf age fractions (indexed by class number, 1:n_classes)
-    Agro ::Vector{Float64} = Float64[]  # growing leaves factor
-    Amat ::Vector{Float64} = Float64[]  # mature leaves factor
-    Anew ::Vector{Float64} = Float64[]  # new leaves factor
-    Aold ::Vector{Float64} = Float64[]  # old leaves factor
+    Agro ::Vector{FT} = Float64[]  # growing leaves factor
+    Amat ::Vector{FT} = Float64[]  # mature leaves factor
+    Anew ::Vector{FT} = Float64[]  # new leaves factor
+    Aold ::Vector{FT} = Float64[]  # old leaves factor
     # Temperature parameters
-    betaT::Vector{Float64} = Float64[]  # beta for T-dependent LIF
-    ct1  ::Vector{Float64} = Float64[]  # ct1 coefficient for T activity factor
-    ct2  ::Vector{Float64} = Float64[]  # ct2 coefficient for T activity factor
-    Ceo  ::Vector{Float64} = Float64[]  # Ceo coefficient for Eopt
+    betaT::Vector{FT} = Float64[]  # beta for T-dependent LIF
+    ct1  ::Vector{FT} = Float64[]  # ct1 coefficient for T activity factor
+    ct2  ::Vector{FT} = Float64[]  # ct2 coefficient for T activity factor
+    Ceo  ::Vector{FT} = Float64[]  # Ceo coefficient for Eopt
     # Light dependence fraction
-    LDF  ::Vector{Float64} = Float64[]  # light-dependent fraction (0-1)
+    LDF  ::Vector{FT} = Float64[]  # light-dependent fraction (0-1)
 end
 
 """
@@ -62,13 +62,13 @@ end
 Descriptor for a single MEGAN mega-compound.
 Ported from `shr_megan_megcomp_t` in `shr_megan_mod`.
 """
-Base.@kwdef mutable struct MEGANCompound
+Base.@kwdef mutable struct MEGANCompound{FT<:AbstractFloat}
     name          ::String          = ""        # compound name (e.g. "isoprene")
     index         ::Int             = 0         # index in mega-compound list
     class_number  ::Int             = 0         # MEGAN class number (1-20)
-    molec_weight  ::Float64         = 0.0       # molecular weight [g/mol]
-    coeff         ::Float64         = 1.0       # coefficient for mapping to mechanism compound
-    emis_factors  ::Vector{Float64} = Float64[] # emission factors per PFT [ug m-2 h-1]
+    molec_weight  ::FT         = 0.0       # molecular weight [g/mol]
+    coeff         ::FT         = 1.0       # coefficient for mapping to mechanism compound
+    emis_factors  ::Vector{FT} = Float64[] # emission factors per PFT [ug m-2 h-1]
 end
 
 """
@@ -95,39 +95,39 @@ VOC emission state and flux data.
 Contains diagnostic gamma factors and fluxes at the patch level.
 Ported from `vocemis_type` in `VOCEmissionMod.F90`.
 """
-Base.@kwdef mutable struct VOCEmisData
+Base.@kwdef mutable struct VOCEmisData{FT<:AbstractFloat}
     # Diagnostic coefficients (patch level)
-    Eopt_out_patch    ::Vector{Float64} = Float64[]  # Eopt coefficient
-    topt_out_patch    ::Vector{Float64} = Float64[]  # topt coefficient
-    alpha_out_patch   ::Vector{Float64} = Float64[]  # alpha coefficient
-    cp_out_patch      ::Vector{Float64} = Float64[]  # cp coefficient
+    Eopt_out_patch    ::Vector{FT} = Float64[]  # Eopt coefficient
+    topt_out_patch    ::Vector{FT} = Float64[]  # topt coefficient
+    alpha_out_patch   ::Vector{FT} = Float64[]  # alpha coefficient
+    cp_out_patch      ::Vector{FT} = Float64[]  # cp coefficient
 
     # PAR diagnostics (patch level)
-    paru_out_patch    ::Vector{Float64} = Float64[]  # sunlit PAR [umol/m2/s]
-    par24u_out_patch  ::Vector{Float64} = Float64[]  # sunlit PAR 24hr avg
-    par240u_out_patch ::Vector{Float64} = Float64[]  # sunlit PAR 240hr avg
-    para_out_patch    ::Vector{Float64} = Float64[]  # shade PAR [umol/m2/s]
-    par24a_out_patch  ::Vector{Float64} = Float64[]  # shade PAR 24hr avg
-    par240a_out_patch ::Vector{Float64} = Float64[]  # shade PAR 240hr avg
+    paru_out_patch    ::Vector{FT} = Float64[]  # sunlit PAR [umol/m2/s]
+    par24u_out_patch  ::Vector{FT} = Float64[]  # sunlit PAR 24hr avg
+    par240u_out_patch ::Vector{FT} = Float64[]  # sunlit PAR 240hr avg
+    para_out_patch    ::Vector{FT} = Float64[]  # shade PAR [umol/m2/s]
+    par24a_out_patch  ::Vector{FT} = Float64[]  # shade PAR 24hr avg
+    par240a_out_patch ::Vector{FT} = Float64[]  # shade PAR 240hr avg
 
     # Gamma diagnostics (patch level)
-    gamma_out_patch   ::Vector{Float64} = Float64[]  # total gamma
-    gammaL_out_patch  ::Vector{Float64} = Float64[]  # gamma for LAI
-    gammaT_out_patch  ::Vector{Float64} = Float64[]  # gamma for temperature
-    gammaP_out_patch  ::Vector{Float64} = Float64[]  # gamma for PPFD
-    gammaA_out_patch  ::Vector{Float64} = Float64[]  # gamma for leaf age
-    gammaS_out_patch  ::Vector{Float64} = Float64[]  # gamma for soil moisture
-    gammaC_out_patch  ::Vector{Float64} = Float64[]  # gamma for CO2
+    gamma_out_patch   ::Vector{FT} = Float64[]  # total gamma
+    gammaL_out_patch  ::Vector{FT} = Float64[]  # gamma for LAI
+    gammaT_out_patch  ::Vector{FT} = Float64[]  # gamma for temperature
+    gammaP_out_patch  ::Vector{FT} = Float64[]  # gamma for PPFD
+    gammaA_out_patch  ::Vector{FT} = Float64[]  # gamma for leaf age
+    gammaS_out_patch  ::Vector{FT} = Float64[]  # gamma for soil moisture
+    gammaC_out_patch  ::Vector{FT} = Float64[]  # gamma for CO2
 
     # Fluxes (patch level)
-    vocflx_tot_patch  ::Vector{Float64} = Float64[]  # total VOC flux [moles/m2/sec]
-    vocflx_patch      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # per-mechanism-compound flux [moles/m2/sec]
+    vocflx_tot_patch  ::Vector{FT} = Float64[]  # total VOC flux [moles/m2/sec]
+    vocflx_patch      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # per-mechanism-compound flux [moles/m2/sec]
 
     # Gridcell isoprene emission factors (6 × ngrc)
-    efisop_grc        ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # [ug m-2 h-1]
+    efisop_grc        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # [ug m-2 h-1]
 
     # Per-mega-compound flux output (n_megcomps × np) [kg/m2/sec] for history
-    meg_flux_out      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    meg_flux_out      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
 end
 
 # ---------------------------------------------------------------------------
@@ -187,28 +187,28 @@ end
 
 Deallocate VOC emission data arrays.
 """
-function vocemis_clean!(voc::VOCEmisData)
-    voc.Eopt_out_patch    = Float64[]
-    voc.topt_out_patch    = Float64[]
-    voc.alpha_out_patch   = Float64[]
-    voc.cp_out_patch      = Float64[]
-    voc.paru_out_patch    = Float64[]
-    voc.par24u_out_patch  = Float64[]
-    voc.par240u_out_patch = Float64[]
-    voc.para_out_patch    = Float64[]
-    voc.par24a_out_patch  = Float64[]
-    voc.par240a_out_patch = Float64[]
-    voc.gamma_out_patch   = Float64[]
-    voc.gammaL_out_patch  = Float64[]
-    voc.gammaT_out_patch  = Float64[]
-    voc.gammaP_out_patch  = Float64[]
-    voc.gammaA_out_patch  = Float64[]
-    voc.gammaS_out_patch  = Float64[]
-    voc.gammaC_out_patch  = Float64[]
-    voc.vocflx_tot_patch  = Float64[]
-    voc.vocflx_patch      = Matrix{Float64}(undef, 0, 0)
-    voc.efisop_grc        = Matrix{Float64}(undef, 0, 0)
-    voc.meg_flux_out      = Matrix{Float64}(undef, 0, 0)
+function vocemis_clean!(voc::VOCEmisData{FT}) where {FT}
+    voc.Eopt_out_patch    = FT[]
+    voc.topt_out_patch    = FT[]
+    voc.alpha_out_patch   = FT[]
+    voc.cp_out_patch      = FT[]
+    voc.paru_out_patch    = FT[]
+    voc.par24u_out_patch  = FT[]
+    voc.par240u_out_patch = FT[]
+    voc.para_out_patch    = FT[]
+    voc.par24a_out_patch  = FT[]
+    voc.par240a_out_patch = FT[]
+    voc.gamma_out_patch   = FT[]
+    voc.gammaL_out_patch  = FT[]
+    voc.gammaT_out_patch  = FT[]
+    voc.gammaP_out_patch  = FT[]
+    voc.gammaA_out_patch  = FT[]
+    voc.gammaS_out_patch  = FT[]
+    voc.gammaC_out_patch  = FT[]
+    voc.vocflx_tot_patch  = FT[]
+    voc.vocflx_patch      = Matrix{FT}(undef, 0, 0)
+    voc.efisop_grc        = Matrix{FT}(undef, 0, 0)
+    voc.meg_flux_out      = Matrix{FT}(undef, 0, 0)
     return nothing
 end
 
@@ -223,7 +223,7 @@ Initialize MEGAN factors with default values for `n_classes` compound classes.
 Ported from `megan_factors_init` in `MEGANFactorsMod.F90`.
 Default values follow MEGAN v2.1 (Guenther et al., 2012).
 """
-function megan_factors_init!(mf::MEGANFactors, n_classes::Int=20)
+function megan_factors_init!(mf::MEGANFactors{FT}, n_classes::Int=20) where {FT}
     mf.n_classes = n_classes
     mf.Agro  = ones(n_classes)
     mf.Amat  = ones(n_classes)
@@ -616,7 +616,7 @@ function voc_emission!(
     # VOC data
     voc::VOCEmisData,
     # MEGAN compound descriptors
-    meg_compounds::Vector{MEGANCompound},
+    meg_compounds::Vector{<:MEGANCompound},
     mech_comps::Vector{MEGANMechComp},
     mf::MEGANFactors,
     # Patch structure

@@ -232,14 +232,34 @@
             snomelt_accum, forc_t, snow_depth, mask, 1:nc, nlevsno)
 
         jj_zero = 0 + nlevsno
-        jj_m1 = -1 + nlevsno
         @test snl[1] == -1
         @test dz[1, jj_zero] == 0.05
         @test z[1, jj_zero] ≈ -0.025
-        @test zi[1, jj_m1] ≈ -0.05
+        @test zi[1, jj_zero] ≈ -0.05
         @test t_soisno[1, jj_zero] ≈ CLM.TFRZ - 5.0
         @test frac_iceold[1, jj_zero] == 1.0
         @test snomelt_accum[1] == 0.0
+    end
+
+    @testset "zero_empty_snow_layers! interface indexing regression" begin
+        nc = 1
+        ntot = nlevsno + 15
+        snl = [-1]
+        dz = fill(0.1, nc, ntot)
+        z = fill(-0.05, nc, ntot)
+        zi = fill(-0.1, nc, ntot + 1)
+        t_soisno = fill(CLM.TFRZ - 2.0, nc, ntot)
+        h2osoi_ice = fill(1.0, nc, ntot)
+        h2osoi_liq = fill(0.5, nc, ntot)
+        mask_snow = trues(nc)
+
+        CLM.zero_empty_snow_layers!(snl, dz, z, zi, t_soisno,
+            h2osoi_ice, h2osoi_liq, mask_snow, 1:nc, nlevsno)
+
+        # Lowest snow layer index (j = -nlevsno + 1) should be safely zeroed.
+        @test h2osoi_ice[1, 1] == 0.0
+        @test h2osoi_liq[1, 1] == 0.0
+        @test zi[1, 1] == 0.0
     end
 
     # ------------------------------------------------------------------

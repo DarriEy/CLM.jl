@@ -12,109 +12,109 @@ related diagnostic fields at column level.
 
 Ported from `soilbiogeochem_nitrogenflux_type` in `SoilBiogeochemNitrogenFluxType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemNitrogenFluxData
+Base.@kwdef mutable struct SoilBiogeochemNitrogenFluxData{FT<:AbstractFloat}
     # --- Deposition fluxes (1D col) ---
-    ndep_to_sminn_col                        ::Vector{Float64} = Float64[]  # (gN/m2/s) atmospheric N deposition to soil mineral N
-    nfix_to_sminn_col                        ::Vector{Float64} = Float64[]  # (gN/m2/s) symbiotic/asymbiotic N fixation
-    ffix_to_sminn_col                        ::Vector{Float64} = Float64[]  # (gN/m2/s) free living N fixation
-    fert_to_sminn_col                        ::Vector{Float64} = Float64[]  # (gN/m2/s) fertilizer N to soil mineral N
-    soyfixn_to_sminn_col                     ::Vector{Float64} = Float64[]  # (gN/m2/s) soybean fixation
+    ndep_to_sminn_col                        ::Vector{FT} = Float64[]  # (gN/m2/s) atmospheric N deposition to soil mineral N
+    nfix_to_sminn_col                        ::Vector{FT} = Float64[]  # (gN/m2/s) symbiotic/asymbiotic N fixation
+    ffix_to_sminn_col                        ::Vector{FT} = Float64[]  # (gN/m2/s) free living N fixation
+    fert_to_sminn_col                        ::Vector{FT} = Float64[]  # (gN/m2/s) fertilizer N to soil mineral N
+    soyfixn_to_sminn_col                     ::Vector{FT} = Float64[]  # (gN/m2/s) soybean fixation
 
     # --- Decomposition cascade fluxes ---
-    decomp_cascade_ntransfer_vr_col          ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) vr N transfer along decomp cascade
-    decomp_cascade_ntransfer_col             ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) vert-int N transfer along decomp cascade
-    decomp_cascade_sminn_flux_vr_col         ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) vr mineral N flux along decomp cascade
-    decomp_cascade_sminn_flux_col            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) vert-int mineral N flux along decomp cascade
+    decomp_cascade_ntransfer_vr_col          ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) vr N transfer along decomp cascade
+    decomp_cascade_ntransfer_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) vert-int N transfer along decomp cascade
+    decomp_cascade_sminn_flux_vr_col         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) vr mineral N flux along decomp cascade
+    decomp_cascade_sminn_flux_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) vert-int mineral N flux along decomp cascade
 
     # --- Immobilization / mineralization fluxes ---
-    potential_immob_vr_col                   ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) potential N immobilization vr
-    potential_immob_col                      ::Vector{Float64}  = Float64[]                        # (gN/m2/s) potential N immobilization
-    actual_immob_vr_col                      ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) actual N immobilization vr
-    actual_immob_col                         ::Vector{Float64}  = Float64[]                        # (gN/m2/s) actual N immobilization
-    sminn_to_plant_vr_col                    ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) plant uptake of soil mineral N vr
-    sminn_to_plant_col                       ::Vector{Float64}  = Float64[]                        # (gN/m2/s) plant uptake of soil mineral N
-    supplement_to_sminn_vr_col               ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) supplemental N supply vr
-    supplement_to_sminn_col                  ::Vector{Float64}  = Float64[]                        # (gN/m2/s) supplemental N supply
-    gross_nmin_vr_col                        ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) gross N mineralization vr
-    gross_nmin_col                           ::Vector{Float64}  = Float64[]                        # (gN/m2/s) gross N mineralization
-    net_nmin_vr_col                          ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) net N mineralization vr
-    net_nmin_col                             ::Vector{Float64}  = Float64[]                        # (gN/m2/s) net N mineralization
-    sminn_to_plant_fun_col                   ::Vector{Float64}  = Float64[]                        # (gN/m2/s) total soil N uptake of FUN
-    sminn_to_plant_fun_vr_col                ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) total layer soil N uptake of FUN
-    sminn_to_plant_fun_no3_vr_col            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) total layer no3 uptake of FUN
-    sminn_to_plant_fun_nh4_vr_col            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) total layer nh4 uptake of FUN
+    potential_immob_vr_col                   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) potential N immobilization vr
+    potential_immob_col                      ::Vector{FT} = Float64[]                        # (gN/m2/s) potential N immobilization
+    actual_immob_vr_col                      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) actual N immobilization vr
+    actual_immob_col                         ::Vector{FT} = Float64[]                        # (gN/m2/s) actual N immobilization
+    sminn_to_plant_vr_col                    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) plant uptake of soil mineral N vr
+    sminn_to_plant_col                       ::Vector{FT} = Float64[]                        # (gN/m2/s) plant uptake of soil mineral N
+    supplement_to_sminn_vr_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) supplemental N supply vr
+    supplement_to_sminn_col                  ::Vector{FT} = Float64[]                        # (gN/m2/s) supplemental N supply
+    gross_nmin_vr_col                        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) gross N mineralization vr
+    gross_nmin_col                           ::Vector{FT} = Float64[]                        # (gN/m2/s) gross N mineralization
+    net_nmin_vr_col                          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) net N mineralization vr
+    net_nmin_col                             ::Vector{FT} = Float64[]                        # (gN/m2/s) net N mineralization
+    sminn_to_plant_fun_col                   ::Vector{FT} = Float64[]                        # (gN/m2/s) total soil N uptake of FUN
+    sminn_to_plant_fun_vr_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) total layer soil N uptake of FUN
+    sminn_to_plant_fun_no3_vr_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) total layer no3 uptake of FUN
+    sminn_to_plant_fun_nh4_vr_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) total layer nh4 uptake of FUN
 
     # --- Nitrification / denitrification fluxes ---
-    f_nit_vr_col                             ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) soil nitrification flux vr
-    f_denit_vr_col                           ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) soil denitrification flux vr
-    f_nit_col                                ::Vector{Float64}  = Float64[]                        # (gN/m2/s) soil nitrification flux
-    f_denit_col                              ::Vector{Float64}  = Float64[]                        # (gN/m2/s) soil denitrification flux
-    pot_f_nit_vr_col                         ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) potential nitrification vr
-    pot_f_denit_vr_col                       ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) potential denitrification vr
-    pot_f_nit_col                            ::Vector{Float64}  = Float64[]                        # (gN/m2/s) potential nitrification
-    pot_f_denit_col                          ::Vector{Float64}  = Float64[]                        # (gN/m2/s) potential denitrification
-    n2_n2o_ratio_denit_vr_col                ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/gN) N2:N2O ratio from denitrification
-    f_n2o_denit_vr_col                       ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) N2O from denitrification vr
-    f_n2o_denit_col                          ::Vector{Float64}  = Float64[]                        # (gN/m2/s) N2O from denitrification
-    f_n2o_nit_vr_col                         ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) N2O from nitrification vr
-    f_n2o_nit_col                            ::Vector{Float64}  = Float64[]                        # (gN/m2/s) N2O from nitrification
+    f_nit_vr_col                             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) soil nitrification flux vr
+    f_denit_vr_col                           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) soil denitrification flux vr
+    f_nit_col                                ::Vector{FT} = Float64[]                        # (gN/m2/s) soil nitrification flux
+    f_denit_col                              ::Vector{FT} = Float64[]                        # (gN/m2/s) soil denitrification flux
+    pot_f_nit_vr_col                         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) potential nitrification vr
+    pot_f_denit_vr_col                       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) potential denitrification vr
+    pot_f_nit_col                            ::Vector{FT} = Float64[]                        # (gN/m2/s) potential nitrification
+    pot_f_denit_col                          ::Vector{FT} = Float64[]                        # (gN/m2/s) potential denitrification
+    n2_n2o_ratio_denit_vr_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/gN) N2:N2O ratio from denitrification
+    f_n2o_denit_vr_col                       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) N2O from denitrification vr
+    f_n2o_denit_col                          ::Vector{FT} = Float64[]                        # (gN/m2/s) N2O from denitrification
+    f_n2o_nit_vr_col                         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) N2O from nitrification vr
+    f_n2o_nit_col                            ::Vector{FT} = Float64[]                        # (gN/m2/s) N2O from nitrification
 
     # --- NO3/NH4 immobilization / uptake fluxes (nitrif_denitrif) ---
-    actual_immob_no3_vr_col                  ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) actual immobilization of NO3 vr
-    actual_immob_nh4_vr_col                  ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) actual immobilization of NH4 vr
-    smin_no3_to_plant_vr_col                 ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) plant uptake of NO3 vr
-    smin_nh4_to_plant_vr_col                 ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) plant uptake of NH4 vr
-    actual_immob_no3_col                     ::Vector{Float64}  = Float64[]                        # (gN/m2/s) actual immobilization of NO3
-    actual_immob_nh4_col                     ::Vector{Float64}  = Float64[]                        # (gN/m2/s) actual immobilization of NH4
-    smin_no3_to_plant_col                    ::Vector{Float64}  = Float64[]                        # (gN/m2/s) plant uptake of NO3
-    smin_nh4_to_plant_col                    ::Vector{Float64}  = Float64[]                        # (gN/m2/s) plant uptake of NH4
+    actual_immob_no3_vr_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) actual immobilization of NO3 vr
+    actual_immob_nh4_vr_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) actual immobilization of NH4 vr
+    smin_no3_to_plant_vr_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) plant uptake of NO3 vr
+    smin_nh4_to_plant_vr_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) plant uptake of NH4 vr
+    actual_immob_no3_col                     ::Vector{FT} = Float64[]                        # (gN/m2/s) actual immobilization of NO3
+    actual_immob_nh4_col                     ::Vector{FT} = Float64[]                        # (gN/m2/s) actual immobilization of NH4
+    smin_no3_to_plant_col                    ::Vector{FT} = Float64[]                        # (gN/m2/s) plant uptake of NO3
+    smin_nh4_to_plant_col                    ::Vector{FT} = Float64[]                        # (gN/m2/s) plant uptake of NH4
 
     # --- NO3 leaching / runoff fluxes (nitrif_denitrif) ---
-    smin_no3_leached_vr_col                  ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) NO3 loss to leaching vr
-    smin_no3_leached_col                     ::Vector{Float64}  = Float64[]                        # (gN/m2/s) NO3 loss to leaching
-    smin_no3_runoff_vr_col                   ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) NO3 loss to runoff vr
-    smin_no3_runoff_col                      ::Vector{Float64}  = Float64[]                        # (gN/m2/s) NO3 loss to runoff
+    smin_no3_leached_vr_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) NO3 loss to leaching vr
+    smin_no3_leached_col                     ::Vector{FT} = Float64[]                        # (gN/m2/s) NO3 loss to leaching
+    smin_no3_runoff_vr_col                   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) NO3 loss to runoff vr
+    smin_no3_runoff_col                      ::Vector{FT} = Float64[]                        # (gN/m2/s) NO3 loss to runoff
 
     # --- Nitrif/denitrif diagnostic quantities ---
-    smin_no3_massdens_vr_col                 ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (ugN/g soil) soil nitrate concentration
-    soil_bulkdensity_col                     ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (kg/m3) bulk density of soil
-    k_nitr_t_vr_col                          ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    k_nitr_ph_vr_col                         ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    k_nitr_h2o_vr_col                        ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    k_nitr_vr_col                            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    wfps_vr_col                              ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    fmax_denit_carbonsubstrate_vr_col        ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    fmax_denit_nitrate_vr_col                ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    f_denit_base_vr_col                      ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    diffus_col                               ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (m2/s) diffusivity
-    ratio_k1_col                             ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    ratio_no3_co2_col                        ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    soil_co2_prod_col                        ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    fr_WFPS_col                              ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    r_psi_col                                ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
-    anaerobic_frac_col                       ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)
+    smin_no3_massdens_vr_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (ugN/g soil) soil nitrate concentration
+    soil_bulkdensity_col                     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (kg/m3) bulk density of soil
+    k_nitr_t_vr_col                          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    k_nitr_ph_vr_col                         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    k_nitr_h2o_vr_col                        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    k_nitr_vr_col                            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    wfps_vr_col                              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    fmax_denit_carbonsubstrate_vr_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    fmax_denit_nitrate_vr_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    f_denit_base_vr_col                      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    diffus_col                               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (m2/s) diffusivity
+    ratio_k1_col                             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    ratio_no3_co2_col                        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    soil_co2_prod_col                        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    fr_WFPS_col                              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    r_psi_col                                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    anaerobic_frac_col                       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
 
     # --- Non-nitrif_denitrif denitrification fluxes ---
-    sminn_to_denit_decomp_cascade_vr_col     ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) denitrif along decomp cascade vr
-    sminn_to_denit_decomp_cascade_col        ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) denitrif along decomp cascade
-    sminn_to_denit_excess_vr_col             ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) excess denitrification vr
-    sminn_to_denit_excess_col                ::Vector{Float64}  = Float64[]                        # (gN/m2/s) excess denitrification
+    sminn_to_denit_decomp_cascade_vr_col     ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) denitrif along decomp cascade vr
+    sminn_to_denit_decomp_cascade_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) denitrif along decomp cascade
+    sminn_to_denit_excess_vr_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) excess denitrification vr
+    sminn_to_denit_excess_col                ::Vector{FT} = Float64[]                        # (gN/m2/s) excess denitrification
 
     # --- Non-nitrif_denitrif leaching fluxes ---
-    sminn_leached_vr_col                     ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) sminn leaching vr
-    sminn_leached_col                        ::Vector{Float64}  = Float64[]                        # (gN/m2/s) sminn leaching
+    sminn_leached_vr_col                     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m3/s) sminn leaching vr
+    sminn_leached_col                        ::Vector{FT} = Float64[]                        # (gN/m2/s) sminn leaching
 
     # --- Summary (diagnostic) flux variables ---
-    denit_col                                ::Vector{Float64}  = Float64[]  # (gN/m2/s) total denitrification
-    ninputs_col                              ::Vector{Float64}  = Float64[]  # (gN/m2/s) column N inputs
-    noutputs_col                             ::Vector{Float64}  = Float64[]  # (gN/m2/s) column N outputs
-    som_n_leached_col                        ::Vector{Float64}  = Float64[]  # (gN/m2/s) total SOM N loss from vert transport
-    decomp_npools_leached_col                ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) N loss from vert transport per pool
-    decomp_npools_transport_tendency_col     ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) N tendency due to vert transport
+    denit_col                                ::Vector{FT} = Float64[]  # (gN/m2/s) total denitrification
+    ninputs_col                              ::Vector{FT} = Float64[]  # (gN/m2/s) column N inputs
+    noutputs_col                             ::Vector{FT} = Float64[]  # (gN/m2/s) column N outputs
+    som_n_leached_col                        ::Vector{FT} = Float64[]  # (gN/m2/s) total SOM N loss from vert transport
+    decomp_npools_leached_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gN/m2/s) N loss from vert transport per pool
+    decomp_npools_transport_tendency_col     ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3/s) N tendency due to vert transport
 
     # --- All n pools involved in decomposition ---
-    decomp_npools_sourcesink_col             ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3) change in decomposing N pools
-    fates_litter_flux                        ::Vector{Float64}  = Float64[]  # (gN/m2/s) total litter flux from FATES
+    decomp_npools_sourcesink_col             ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3) change in decomposing N pools
+    fates_litter_flux                        ::Vector{FT} = Float64[]  # (gN/m2/s) total litter flux from FATES
 
     # --- Matrix-CN fields ---
     NE_AKallsoiln                            ::Int = 0

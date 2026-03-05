@@ -31,9 +31,9 @@ Module-level data that is initialized once and remains constant during
 the simulation. Corresponds to Fortran module variables `albsat`, `albdry`,
 `isoicol`, `alblakwi`, and `snowveg_affects_radiation`.
 """
-Base.@kwdef mutable struct SurfaceAlbedoConstants
-    albsat::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # wet soil albedo by color class and waveband
-    albdry::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # dry soil albedo by color class and waveband
+Base.@kwdef mutable struct SurfaceAlbedoConstants{FT<:AbstractFloat}
+    albsat::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # wet soil albedo by color class and waveband
+    albdry::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dry soil albedo by color class and waveband
     isoicol::Vector{Int} = Int[]                              # column soil color class
     alblakwi::Vector{Float64} = [0.10, 0.10]                 # albedo of melting lakes (namelist-settable)
     lake_melt_icealb::Vector{Float64} = [0.10, 0.10]         # namelist default for alblakwi

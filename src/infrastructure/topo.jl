@@ -15,8 +15,8 @@ column and a flag indicating whether the column needs atmospheric downscaling.
 
 Ported from `topo_type` in `TopoMod.F90`.
 """
-Base.@kwdef mutable struct TopoData
-    topo_col::Vector{Float64} = Float64[]                  # surface elevation (m)
+Base.@kwdef mutable struct TopoData{FT<:AbstractFloat}
+    topo_col::Vector{FT} = Float64[]                  # surface elevation (m)
     needs_downscaling_col::Vector{Bool} = Bool[]           # whether a column needs to be downscaled
 end
 
@@ -61,8 +61,8 @@ to false) for `ncols` columns.
 
 Ported from `InitAllocate` in `TopoMod.F90`.
 """
-function topo_init_allocate!(topo::TopoData, ncols::Int)
-    topo.topo_col = fill(NaN, ncols)
+function topo_init_allocate!(topo::TopoData{FT}, ncols::Int) where {FT}
+    topo.topo_col = fill(FT(NaN), ncols)
     topo.needs_downscaling_col = fill(false, ncols)
     nothing
 end
@@ -78,7 +78,7 @@ Stub for history field registration. No-op in Julia port.
 
 Ported from `InitHistory` in `TopoMod.F90`.
 """
-function topo_init_history!(topo::TopoData)
+function topo_init_history!(topo::TopoData{FT}) where {FT}
     nothing
 end
 
@@ -142,7 +142,7 @@ Stub for restart variable read/write. No-op in Julia port.
 
 Ported from `Restart` in `TopoMod.F90`.
 """
-function topo_restart!(topo::TopoData)
+function topo_restart!(topo::TopoData{FT}) where {FT}
     nothing
 end
 
@@ -251,7 +251,7 @@ downscaled column in a gridcell should not change answers for other columns.
 
 Ported from `DownscaleFilterc` in `TopoMod.F90`.
 """
-function topo_downscale_filter(topo::TopoData, ncols::Int)
+function topo_downscale_filter(topo::TopoData{FT}, ncols::Int) where {FT}
     return BitVector(topo.needs_downscaling_col[1:ncols])
 end
 
@@ -266,8 +266,8 @@ Reset all array fields to empty. Mirrors Fortran deallocation.
 
 Ported from `Clean` in `TopoMod.F90`.
 """
-function topo_clean!(topo::TopoData)
-    topo.topo_col = Float64[]
+function topo_clean!(topo::TopoData{FT}) where {FT}
+    topo.topo_col = FT[]
     topo.needs_downscaling_col = Bool[]
     nothing
 end

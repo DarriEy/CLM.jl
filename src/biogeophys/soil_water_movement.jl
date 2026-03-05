@@ -120,14 +120,15 @@ Tridiagonal matrix solution for a single column.
 
 Ported from `TridiagonalCol` in `SoilWaterMovementMod.F90`.
 """
-function tridiagonal_col!(u::AbstractVector{Float64},
-                          a::AbstractVector{Float64},
-                          b::AbstractVector{Float64},
-                          c::AbstractVector{Float64},
-                          r::AbstractVector{Float64},
+function tridiagonal_col!(u::AbstractVector{<:Real},
+                          a::AbstractVector{<:Real},
+                          b::AbstractVector{<:Real},
+                          c::AbstractVector{<:Real},
+                          r::AbstractVector{<:Real},
                           jtop::Int, lbj::Int, ubj::Int)
+    T = promote_type(eltype(a), eltype(b), eltype(c), eltype(r))
     n = ubj - lbj + 1
-    gam = zeros(n)
+    gam = zeros(T, n)
 
     bet = b[jtop]
 
@@ -163,8 +164,8 @@ Currently a placeholder that sets baseflow_sink to zero.
 
 Ported from `BaseflowSink` in `SoilWaterMovementMod.F90`.
 """
-function baseflow_sink!(baseflow_sink::Matrix{Float64},
-                        mask_hydrology::BitVector,
+function baseflow_sink!(baseflow_sink::AbstractMatrix{<:Real},
+                        mask_hydrology::AbstractVector{Bool},
                         nlevsoi::Int)
     # Placeholder — just zero out
     fill!(baseflow_sink, 0.0)
@@ -618,30 +619,44 @@ function soilwater_moisture_form!(col_data::ColumnData,
     h2osoi_liq    = waterstatebulk.ws.h2osoi_liq_col
     qflx_rootsoi  = waterfluxbulk.qflx_rootsoi_col
 
+    # Pre-allocate workspace at max size, reused across columns
+    nlevsoi = varpar.nlevsoi
+    hk_loc     = zeros(nlevsoi)
+    smp_loc    = zeros(nlevsoi)
+    dhkdw_loc  = zeros(nlevsoi)
+    dsmpdw_loc = zeros(nlevsoi)
+    imped_loc  = zeros(nlevsoi)
+    vwc_liq_loc = zeros(nlevsoi)
+    dt_dz_loc  = zeros(nlevsoi)
+    qin_loc    = zeros(nlevsoi)
+    qout_loc   = zeros(nlevsoi)
+    dqidw0_loc = zeros(nlevsoi)
+    dqidw1_loc = zeros(nlevsoi)
+    dqodw1_loc = zeros(nlevsoi)
+    dqodw2_loc = zeros(nlevsoi)
+    dwat_loc   = zeros(nlevsoi)
+    amx_loc    = zeros(nlevsoi)
+    bmx_loc    = zeros(nlevsoi)
+    cmx_loc    = zeros(nlevsoi)
+    rmx_loc    = zeros(nlevsoi)
+    fluxNet0   = zeros(nlevsoi)
+    fluxNet1   = zeros(nlevsoi)
+
     for c in eachindex(mask_hydrology)
         mask_hydrology[c] || continue
 
         nlayers = nbedrock[c]
 
-        # Local arrays
-        hk_loc     = zeros(nlayers)
-        smp_loc    = zeros(nlayers)
-        dhkdw_loc  = zeros(nlayers)
-        dsmpdw_loc = zeros(nlayers)
-        imped_loc  = zeros(nlayers)
-        vwc_liq_loc = zeros(nlayers)
-        dt_dz_loc  = zeros(nlayers)
-        qin_loc    = zeros(nlayers)
-        qout_loc   = zeros(nlayers)
-        dqidw0_loc = zeros(nlayers)
-        dqidw1_loc = zeros(nlayers)
-        dqodw1_loc = zeros(nlayers)
-        dqodw2_loc = zeros(nlayers)
-        dwat_loc   = zeros(nlayers)
-        amx_loc    = zeros(nlayers)
-        bmx_loc    = zeros(nlayers)
-        cmx_loc    = zeros(nlayers)
-        rmx_loc    = zeros(nlayers)
+        # Zero workspace for this column's active layers
+        for arr in (hk_loc, smp_loc, dhkdw_loc, dsmpdw_loc, imped_loc,
+                    vwc_liq_loc, dt_dz_loc, qin_loc, qout_loc,
+                    dqidw0_loc, dqidw1_loc, dqodw1_loc, dqodw2_loc,
+                    dwat_loc, amx_loc, bmx_loc, cmx_loc, rmx_loc,
+                    fluxNet0, fluxNet1)
+            @inbounds for j in 1:nlayers
+                arr[j] = 0.0
+            end
+        end
 
         # Initialize adaptive substeps
         nsubstep = 0
@@ -686,8 +701,10 @@ function soilwater_moisture_form!(col_data::ColumnData,
                 1, 1, nlayers)
 
             # Error estimation
-            fluxNet0 = zeros(nlayers)
-            fluxNet1 = zeros(nlayers)
+            @inbounds for j in 1:nlayers
+                fluxNet0[j] = 0.0
+                fluxNet1[j] = 0.0
+            end
 
             for j in 1:nlayers
                 if cfg.flux_calculation == cfg.expensive

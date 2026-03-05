@@ -406,7 +406,8 @@ function build_filter_snowpack_initialized!(
                            qflx_snow_grnd[c] > 0.0)
         else
             mask_out[c] = (snl[c] == 0 &&
-                           frac_sno_eff[c] * snow_depth[c] >= dzmin[1])
+                           frac_sno_eff[c] * snow_depth[c] >= dzmin[1] &&
+                           qflx_snow_grnd[c] > 0.0)
         end
     end
 end
@@ -462,8 +463,7 @@ function bulk_initialize_snow_pack!(
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    jj_zero = 0 + nlevsno  # Julia index for layer 0
-    jj_m1   = -1 + nlevsno # Julia index for layer -1
+    jj_zero = 0 + nlevsno  # Julia index for layer 0 (dz/z arrays)
 
     for c in bounds
         mask[c] || continue
@@ -471,7 +471,9 @@ function bulk_initialize_snow_pack!(
         snl[c] = -1
         dz[c, jj_zero] = snow_depth[c]
         z[c, jj_zero] = -0.5 * dz[c, jj_zero]
-        zi[c, jj_m1] = -dz[c, jj_zero]
+        # zi has one extra interface level: Fortran j -> Julia j + nlevsno + 1
+        # Set interface j=-1 (below layer 0) from the known surface interface j=0.
+        zi[c, jj_zero] = -dz[c, jj_zero]
 
         t_soisno[c, jj_zero] = min(TFRZ, forc_t[c])
         frac_iceold[c, jj_zero] = 1.0
@@ -1177,7 +1179,7 @@ function combine_snow_layers!(
     int_snow::Vector{Float64},
     snw_rds::Matrix{Float64},
     aerosol::AerosolData,
-    lun_itype::Vector{Int},     # landunit type indexed by column
+    lun_itype::Vector{Int},     # landunit type indexed by landunit
     urbpoi::Vector{Bool},       # urban point indexed by landunit
     col_landunit::Vector{Int},  # column-to-landunit mapping
     mask_snow::BitVector,
@@ -1201,7 +1203,8 @@ function combine_snow_layers!(
             jj = j + nlevsno
             if h2osoi_ice[c, jj] <= 0.01
                 l = col_landunit[c]
-                if j < 0 || (lun_itype[c] == ISTSOIL || urbpoi[l] || lun_itype[c] == ISTCROP)
+                ltype = lun_itype[l]
+                if j < 0 || (ltype == ISTSOIL || urbpoi[l] || ltype == ISTCROP)
                     # Transfer water to layer below
                     jj_next = (j + 1) + nlevsno
                     if jj_next <= size(h2osoi_liq, 2)
@@ -1260,8 +1263,9 @@ function combine_snow_layers!(
         # Check if all snow gone
         if snow_depth[c] > 0.0
             l = col_landunit[c]
-            if (lun_itype[c] == ISTDLAK && snow_depth[c] < dzmin[1] + LSADZ) ||
-               (lun_itype[c] != ISTDLAK &&
+            ltype = lun_itype[l]
+            if (ltype == ISTDLAK && snow_depth[c] < dzmin[1] + LSADZ) ||
+               (ltype != ISTDLAK &&
                 (frac_sno_eff[c] * snow_depth[c] < dzmin[1] ||
                  h2osno_total / (frac_sno_eff[c] * snow_depth[c]) < 50.0))
 
@@ -1275,7 +1279,7 @@ function combine_snow_layers!(
                 end
 
                 h2osno_no_layers[c] = zwice
-                if lun_itype[c] == ISTSOIL || urbpoi[l] || lun_itype[c] == ISTCROP
+                if ltype == ISTSOIL || urbpoi[l] || ltype == ISTCROP
                     # Transfer liquid to soil layer 1
                     jj_soil1 = 0 + nlevsno + 1  # layer index 1
                     if jj_soil1 <= size(h2osoi_liq, 2)
@@ -1407,9 +1411,8 @@ function combine_snow_layers!(
         for j in 0:-1:(-nlevsno+1)
             jj = j + nlevsno
             if j >= snl[c] + 1
-                z[c, jj] = zi[c, jj] - 0.5 * dz[c, jj]
-                jj_m1 = (j - 1) + nlevsno
-                zi[c, jj_m1] = zi[c, jj] - dz[c, jj]
+                z[c, jj] = zi[c, jj + 1] - 0.5 * dz[c, jj]
+                zi[c, jj] = zi[c, jj + 1] - dz[c, jj]
             end
         end
     end
@@ -1692,9 +1695,8 @@ function divide_snow_layers!(
         for j in 0:-1:(-nlevsno+1)
             jj = j + nlevsno
             if j >= snl[c] + 1
-                z[c, jj] = zi[c, jj] - 0.5 * dz[c, jj]
-                jj_m1 = (j - 1) + nlevsno
-                zi[c, jj_m1] = zi[c, jj] - dz[c, jj]
+                z[c, jj] = zi[c, jj + 1] - 0.5 * dz[c, jj]
+                zi[c, jj] = zi[c, jj + 1] - dz[c, jj]
             end
         end
     end
@@ -1732,8 +1734,7 @@ function zero_empty_snow_layers!(
                 t_soisno[c, jj] = 0.0
                 dz[c, jj] = 0.0
                 z[c, jj] = 0.0
-                jj_m1 = (j - 1) + nlevsno
-                zi[c, jj_m1] = 0.0
+                zi[c, jj] = 0.0
             end
         end
     end
@@ -1872,9 +1873,8 @@ function init_snow_layers!(
         # Initialize node depth and interface depth
         for j in 0:-1:(snl[c]+1)
             jj = j + nlevsno
-            z[c, jj] = zi[c, jj] - 0.5 * dz[c, jj]
-            jj_m1 = (j - 1) + nlevsno
-            zi[c, jj_m1] = zi[c, jj] - dz[c, jj]
+            z[c, jj] = zi[c, jj + 1] - 0.5 * dz[c, jj]
+            zi[c, jj] = zi[c, jj + 1] - dz[c, jj]
         end
     end
 end

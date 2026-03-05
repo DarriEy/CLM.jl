@@ -36,13 +36,13 @@ for LAI, SAI, and vegetation heights.
 
 Ported from module-level variables in `SatellitePhenologyMod.F90`.
 """
-Base.@kwdef mutable struct SatellitePhenologyData
+Base.@kwdef mutable struct SatellitePhenologyData{FT<:AbstractFloat}
     InterpMonths1::Int = -999                                          # saved month index
     timwt::Vector{Float64} = zeros(2)                                  # time weights for month 1 and month 2
-    mlai2t::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)            # lai for interpolation (np × 2)
-    msai2t::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)            # sai for interpolation (np × 2)
-    mhvt2t::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)            # top vegetation height for interpolation (np × 2)
-    mhvb2t::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)            # bottom vegetation height for interpolation (np × 2)
+    mlai2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # lai for interpolation (np × 2)
+    msai2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # sai for interpolation (np × 2)
+    mhvt2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # top vegetation height for interpolation (np × 2)
+    mhvb2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # bottom vegetation height for interpolation (np × 2)
 end
 
 # ---------------------------------------------------------------------------
@@ -58,13 +58,13 @@ Arrays are initialized to `NaN` (signaling NaN in Fortran).
 
 Ported from `SatellitePhenologyInit` in `SatellitePhenologyMod.F90`.
 """
-function satellite_phenology_init!(sp::SatellitePhenologyData, np::Int)
+function satellite_phenology_init!(sp::SatellitePhenologyData{FT}, np::Int) where {FT}
     sp.InterpMonths1 = -999
 
-    sp.mlai2t = fill(NaN, np, 2)
-    sp.msai2t = fill(NaN, np, 2)
-    sp.mhvt2t = fill(NaN, np, 2)
-    sp.mhvb2t = fill(NaN, np, 2)
+    sp.mlai2t = fill(FT(NaN), np, 2)
+    sp.msai2t = fill(FT(NaN), np, 2)
+    sp.mhvt2t = fill(FT(NaN), np, 2)
+    sp.mhvb2t = fill(FT(NaN), np, 2)
 
     sp.timwt = zeros(2)
 
@@ -80,13 +80,13 @@ end
 
 Deallocate (reset to empty) all interpolation arrays.
 """
-function satellite_phenology_clean!(sp::SatellitePhenologyData)
+function satellite_phenology_clean!(sp::SatellitePhenologyData{FT}) where {FT}
     sp.InterpMonths1 = -999
     sp.timwt = zeros(2)
-    sp.mlai2t = Matrix{Float64}(undef, 0, 0)
-    sp.msai2t = Matrix{Float64}(undef, 0, 0)
-    sp.mhvt2t = Matrix{Float64}(undef, 0, 0)
-    sp.mhvb2t = Matrix{Float64}(undef, 0, 0)
+    sp.mlai2t = Matrix{FT}(undef, 0, 0)
+    sp.msai2t = Matrix{FT}(undef, 0, 0)
+    sp.mhvt2t = Matrix{FT}(undef, 0, 0)
+    sp.mhvb2t = Matrix{FT}(undef, 0, 0)
     return nothing
 end
 

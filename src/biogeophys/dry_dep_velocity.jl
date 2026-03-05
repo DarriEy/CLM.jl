@@ -150,17 +150,17 @@ and per-species parameters needed for the Wesely resistance model.
 
 Ported from module-level arrays in `DryDepVelocity.F90`.
 """
-Base.@kwdef mutable struct DryDepVelocityData
+Base.@kwdef mutable struct DryDepVelocityData{FT<:AbstractFloat}
     # --- Configuration ---
     n_drydep::Int = 0                     # number of dry deposition species
 
     # --- Per-species properties (length n_drydep) ---
-    foxd::Vector{Float64} = Float64[]     # reactivity factor for oxidation [0-1]
-    dv::Vector{Float64}   = Float64[]     # diffusivity in air [cm^2/s]
+    foxd::Vector{FT} = Float64[]     # reactivity factor for oxidation [0-1]
+    dv::Vector{FT} = Float64[]     # diffusivity in air [cm^2/s]
     mapping::Vector{Int}  = Int[]         # mapping from species to Wesely land type category
 
     # --- Per-patch output (np x n_drydep) ---
-    velocity_patch::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # dry deposition velocity [cm/s]
+    velocity_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dry deposition velocity [cm/s]
 end
 
 # =========================================================================
@@ -219,12 +219,12 @@ end
 
 Deallocate (reset to empty) all fields of a `DryDepVelocityData` instance.
 """
-function drydep_clean!(dd::DryDepVelocityData)
+function drydep_clean!(dd::DryDepVelocityData{FT}) where {FT}
     dd.n_drydep = 0
-    dd.foxd = Float64[]
-    dd.dv = Float64[]
+    dd.foxd = FT[]
+    dd.dv = FT[]
     dd.mapping = Int[]
-    dd.velocity_patch = Matrix{Float64}(undef, 0, 0)
+    dd.velocity_patch = Matrix{FT}(undef, 0, 0)
     return nothing
 end
 

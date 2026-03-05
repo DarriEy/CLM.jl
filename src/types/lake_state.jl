@@ -12,23 +12,23 @@ velocity, aerodynamic resistance, and surface data fields.
 
 Ported from `lakestate_type` in `LakeStateType.F90`.
 """
-Base.@kwdef mutable struct LakeStateData
+Base.@kwdef mutable struct LakeStateData{FT<:AbstractFloat}
     # --- Time constant variables (from surface data) ---
-    lakefetch_col        ::Vector{Float64} = Float64[]   # col lake fetch from surface data (m)
-    etal_col             ::Vector{Float64} = Float64[]   # col lake extinction coefficient from surface data (1/m)
+    lakefetch_col        ::Vector{FT} = Float64[]   # col lake fetch from surface data (m)
+    etal_col             ::Vector{FT} = Float64[]   # col lake extinction coefficient from surface data (1/m)
 
     # --- Time varying variables ---
-    lake_raw_col         ::Vector{Float64} = Float64[]   # col aerodynamic resistance for moisture (s/m)
-    ks_col               ::Vector{Float64} = Float64[]   # col coefficient for calculation of decay of eddy diffusivity with depth
-    ws_col               ::Vector{Float64} = Float64[]   # col surface friction velocity (m/s)
-    ust_lake_col         ::Vector{Float64} = Float64[]   # col friction velocity (m/s)
-    betaprime_col        ::Vector{Float64} = Float64[]   # col effective beta: sabg_lyr(p,jtop) for snow layers, beta otherwise
-    savedtke1_col        ::Vector{Float64} = Float64[]   # col top level eddy conductivity from previous timestep (W/mK)
-    lake_icefrac_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col mass fraction of lake layer that is frozen (ncols, nlevlak)
-    lake_icefracsurf_col ::Vector{Float64} = Float64[]   # col mass fraction of surface lake layer that is frozen
-    lake_icethick_col    ::Vector{Float64} = Float64[]   # col ice thickness (m) (integrated if lakepuddling)
-    lakeresist_col       ::Vector{Float64} = Float64[]   # col [s/m] (Needed for calc. of grnd_ch4_cond)
-    ram1_lake_patch      ::Vector{Float64} = Float64[]   # patch aerodynamical resistance (s/m)
+    lake_raw_col         ::Vector{FT} = Float64[]   # col aerodynamic resistance for moisture (s/m)
+    ks_col               ::Vector{FT} = Float64[]   # col coefficient for calculation of decay of eddy diffusivity with depth
+    ws_col               ::Vector{FT} = Float64[]   # col surface friction velocity (m/s)
+    ust_lake_col         ::Vector{FT} = Float64[]   # col friction velocity (m/s)
+    betaprime_col        ::Vector{FT} = Float64[]   # col effective beta: sabg_lyr(p,jtop) for snow layers, beta otherwise
+    savedtke1_col        ::Vector{FT} = Float64[]   # col top level eddy conductivity from previous timestep (W/mK)
+    lake_icefrac_col     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col mass fraction of lake layer that is frozen (ncols, nlevlak)
+    lake_icefracsurf_col ::Vector{FT} = Float64[]   # col mass fraction of surface lake layer that is frozen
+    lake_icethick_col    ::Vector{FT} = Float64[]   # col ice thickness (m) (integrated if lakepuddling)
+    lakeresist_col       ::Vector{FT} = Float64[]   # col [s/m] (Needed for calc. of grnd_ch4_cond)
+    ram1_lake_patch      ::Vector{FT} = Float64[]   # patch aerodynamical resistance (s/m)
 end
 
 """
@@ -44,27 +44,27 @@ Most fields are initialized to `NaN`, except `savedtke1_col` and
 
 Ported from `lakestate_type%InitAllocate` in `LakeStateType.F90`.
 """
-function lakestate_init!(ls::LakeStateData, nc::Int, np::Int)
+function lakestate_init!(ls::LakeStateData{FT}, nc::Int, np::Int) where {FT}
     nlevlak = varpar.nlevlak
 
     # Time constant variables
-    ls.lakefetch_col        = fill(NaN, nc)
-    ls.etal_col             = fill(NaN, nc)
+    ls.lakefetch_col        = fill(FT(NaN), nc)
+    ls.etal_col             = fill(FT(NaN), nc)
 
     # Time varying variables — column level
-    ls.lake_raw_col         = fill(NaN, nc)
-    ls.ks_col               = fill(NaN, nc)
-    ls.ws_col               = fill(NaN, nc)
-    ls.ust_lake_col         = fill(SPVAL, nc)
-    ls.betaprime_col        = fill(NaN, nc)
-    ls.savedtke1_col        = fill(SPVAL, nc)
-    ls.lake_icefrac_col     = fill(NaN, nc, nlevlak)
-    ls.lake_icefracsurf_col = fill(NaN, nc)
-    ls.lake_icethick_col    = fill(NaN, nc)
-    ls.lakeresist_col       = fill(NaN, nc)
+    ls.lake_raw_col         = fill(FT(NaN), nc)
+    ls.ks_col               = fill(FT(NaN), nc)
+    ls.ws_col               = fill(FT(NaN), nc)
+    ls.ust_lake_col         = fill(FT(SPVAL), nc)
+    ls.betaprime_col        = fill(FT(NaN), nc)
+    ls.savedtke1_col        = fill(FT(SPVAL), nc)
+    ls.lake_icefrac_col     = fill(FT(NaN), nc, nlevlak)
+    ls.lake_icefracsurf_col = fill(FT(NaN), nc)
+    ls.lake_icethick_col    = fill(FT(NaN), nc)
+    ls.lakeresist_col       = fill(FT(NaN), nc)
 
     # Time varying variables — patch level
-    ls.ram1_lake_patch      = fill(NaN, np)
+    ls.ram1_lake_patch      = fill(FT(NaN), np)
 
     return nothing
 end
@@ -74,20 +74,20 @@ end
 
 Deallocate (reset to empty) all fields of a `LakeStateData` instance.
 """
-function lakestate_clean!(ls::LakeStateData)
-    ls.lakefetch_col        = Float64[]
-    ls.etal_col             = Float64[]
-    ls.lake_raw_col         = Float64[]
-    ls.ks_col               = Float64[]
-    ls.ws_col               = Float64[]
-    ls.ust_lake_col         = Float64[]
-    ls.betaprime_col        = Float64[]
-    ls.savedtke1_col        = Float64[]
-    ls.lake_icefrac_col     = Matrix{Float64}(undef, 0, 0)
-    ls.lake_icefracsurf_col = Float64[]
-    ls.lake_icethick_col    = Float64[]
-    ls.lakeresist_col       = Float64[]
-    ls.ram1_lake_patch      = Float64[]
+function lakestate_clean!(ls::LakeStateData{FT}) where {FT}
+    ls.lakefetch_col        = FT[]
+    ls.etal_col             = FT[]
+    ls.lake_raw_col         = FT[]
+    ls.ks_col               = FT[]
+    ls.ws_col               = FT[]
+    ls.ust_lake_col         = FT[]
+    ls.betaprime_col        = FT[]
+    ls.savedtke1_col        = FT[]
+    ls.lake_icefrac_col     = Matrix{FT}(undef, 0, 0)
+    ls.lake_icefracsurf_col = FT[]
+    ls.lake_icethick_col    = FT[]
+    ls.lakeresist_col       = FT[]
+    ls.ram1_lake_patch      = FT[]
 
     return nothing
 end

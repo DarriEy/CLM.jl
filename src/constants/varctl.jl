@@ -141,7 +141,7 @@ Base.@kwdef mutable struct VarCtl
 
     # --- Snow cover and thermal ---
     snow_cover_fraction_method::String = ""
-    snow_thermal_cond_method::String = ""
+    snow_thermal_cond_method::String = "Jordan1991"
     use_z0m_snowmelt::Bool = false
     z0param_method::String = ""
     h2osno_max::Float64 = -999.0

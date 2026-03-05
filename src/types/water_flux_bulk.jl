@@ -18,40 +18,40 @@ All water fluxes are in units of mm/s unless otherwise noted.
 
 Ported from `waterfluxbulk_type` in `WaterFluxBulkType.F90`.
 """
-Base.@kwdef mutable struct WaterFluxBulkData
+Base.@kwdef mutable struct WaterFluxBulkData{FT<:AbstractFloat}
     # --- Parent water flux fields (composition) ---
     wf::WaterFluxData = WaterFluxData()
 
     # --- Bulk-specific patch-level 1D fields ---
-    qflx_snowindunload_patch  ::Vector{Float64} = Float64[]  # patch canopy snow wind unloading (mm H2O/s)
-    qflx_snotempunload_patch  ::Vector{Float64} = Float64[]  # patch canopy snow temp unloading (mm H2O/s)
-    qflx_ev_snow_patch        ::Vector{Float64} = Float64[]  # patch evaporation heat flux from snow (mm H2O/s) [+ to atm]
-    qflx_ev_soil_patch        ::Vector{Float64} = Float64[]  # patch evaporation heat flux from soil (mm H2O/s) [+ to atm]
-    qflx_ev_h2osfc_patch      ::Vector{Float64} = Float64[]  # patch evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
-    qflx_hydr_redist_patch    ::Vector{Float64} = Float64[]  # patch hydraulic redistribution (mm H2O/s)
+    qflx_snowindunload_patch  ::Vector{FT} = Float64[]  # patch canopy snow wind unloading (mm H2O/s)
+    qflx_snotempunload_patch  ::Vector{FT} = Float64[]  # patch canopy snow temp unloading (mm H2O/s)
+    qflx_ev_snow_patch        ::Vector{FT} = Float64[]  # patch evaporation heat flux from snow (mm H2O/s) [+ to atm]
+    qflx_ev_soil_patch        ::Vector{FT} = Float64[]  # patch evaporation heat flux from soil (mm H2O/s) [+ to atm]
+    qflx_ev_h2osfc_patch      ::Vector{FT} = Float64[]  # patch evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
+    qflx_hydr_redist_patch    ::Vector{FT} = Float64[]  # patch hydraulic redistribution (mm H2O/s)
 
     # --- Bulk-specific column-level 1D fields ---
-    qflx_phs_neg_col          ::Vector{Float64} = Float64[]  # col sum of negative hydraulic redistribution fluxes (mm H2O/s) [+]
-    qflx_ev_snow_col          ::Vector{Float64} = Float64[]  # col evaporation heat flux from snow (mm H2O/s) [+ to atm]
-    qflx_ev_soil_col          ::Vector{Float64} = Float64[]  # col evaporation heat flux from soil (mm H2O/s) [+ to atm]
-    qflx_ev_h2osfc_col        ::Vector{Float64} = Float64[]  # col evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
-    qflx_sat_excess_surf_col  ::Vector{Float64} = Float64[]  # col surface runoff due to saturated surface (mm H2O/s)
-    qflx_infl_excess_col      ::Vector{Float64} = Float64[]  # col infiltration excess runoff (mm H2O/s)
-    qflx_infl_excess_surf_col ::Vector{Float64} = Float64[]  # col surface runoff due to infiltration excess (mm H2O/s)
-    qflx_h2osfc_surf_col      ::Vector{Float64} = Float64[]  # col surface water runoff (mm H2O/s)
-    qflx_in_soil_col          ::Vector{Float64} = Float64[]  # col surface input to soil (mm/s)
-    qflx_in_soil_limited_col  ::Vector{Float64} = Float64[]  # col surface input to soil, limited by max infiltration rate (mm/s)
-    qflx_h2osfc_drain_col     ::Vector{Float64} = Float64[]  # col bottom drainage from h2osfc (mm/s)
-    qflx_top_soil_to_h2osfc_col ::Vector{Float64} = Float64[]  # col portion of qflx_top_soil going to h2osfc, minus evaporation (mm/s)
-    qflx_in_h2osfc_col        ::Vector{Float64} = Float64[]  # col total surface input to h2osfc
-    qflx_deficit_col          ::Vector{Float64} = Float64[]  # col water deficit to keep non-negative liquid water content (mm H2O)
-    AnnET                     ::Vector{Float64} = Float64[]  # col annual average ET flux (mm H2O/s)
+    qflx_phs_neg_col          ::Vector{FT} = Float64[]  # col sum of negative hydraulic redistribution fluxes (mm H2O/s) [+]
+    qflx_ev_snow_col          ::Vector{FT} = Float64[]  # col evaporation heat flux from snow (mm H2O/s) [+ to atm]
+    qflx_ev_soil_col          ::Vector{FT} = Float64[]  # col evaporation heat flux from soil (mm H2O/s) [+ to atm]
+    qflx_ev_h2osfc_col        ::Vector{FT} = Float64[]  # col evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
+    qflx_sat_excess_surf_col  ::Vector{FT} = Float64[]  # col surface runoff due to saturated surface (mm H2O/s)
+    qflx_infl_excess_col      ::Vector{FT} = Float64[]  # col infiltration excess runoff (mm H2O/s)
+    qflx_infl_excess_surf_col ::Vector{FT} = Float64[]  # col surface runoff due to infiltration excess (mm H2O/s)
+    qflx_h2osfc_surf_col      ::Vector{FT} = Float64[]  # col surface water runoff (mm H2O/s)
+    qflx_in_soil_col          ::Vector{FT} = Float64[]  # col surface input to soil (mm/s)
+    qflx_in_soil_limited_col  ::Vector{FT} = Float64[]  # col surface input to soil, limited by max infiltration rate (mm/s)
+    qflx_h2osfc_drain_col     ::Vector{FT} = Float64[]  # col bottom drainage from h2osfc (mm/s)
+    qflx_top_soil_to_h2osfc_col ::Vector{FT} = Float64[]  # col portion of qflx_top_soil going to h2osfc, minus evaporation (mm/s)
+    qflx_in_h2osfc_col        ::Vector{FT} = Float64[]  # col total surface input to h2osfc
+    qflx_deficit_col          ::Vector{FT} = Float64[]  # col water deficit to keep non-negative liquid water content (mm H2O)
+    AnnET                     ::Vector{FT} = Float64[]  # col annual average ET flux (mm H2O/s)
 
     # --- Bulk-specific column-level 2D fields ---
-    qflx_adv_col              ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col advective flux across soil layer interfaces (mm H2O/s) [+ downward] (0:nlevsoi)
-    qflx_rootsoi_col          ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col root and soil water exchange (mm H2O/s) [+ into root] (1:nlevsoi)
-    qflx_snomelt_lyr_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col snow melt in each layer (mm H2O/s) (-nlevsno+1:0)
-    qflx_drain_vr_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col liquid water lost as drainage (m/time step) (1:nlevsoi)
+    qflx_adv_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col advective flux across soil layer interfaces (mm H2O/s) [+ downward] (0:nlevsoi)
+    qflx_rootsoi_col          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col root and soil water exchange (mm H2O/s) [+ into root] (1:nlevsoi)
+    qflx_snomelt_lyr_col      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow melt in each layer (mm H2O/s) (-nlevsno+1:0)
+    qflx_drain_vr_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col liquid water lost as drainage (m/time step) (1:nlevsoi)
 end
 
 """
@@ -63,7 +63,7 @@ Calls parent `waterflux_init!` plus allocates bulk-specific fields.
 
 Ported from `InitBulk` + `InitBulkAllocate` in `WaterFluxBulkType.F90`.
 """
-function waterfluxbulk_init!(wfb::WaterFluxBulkData, nc::Int, np::Int, nl::Int, ng::Int)
+function waterfluxbulk_init!(wfb::WaterFluxBulkData{FT}, nc::Int, np::Int, nl::Int, ng::Int) where {FT}
     nlevsno = varpar.nlevsno
     nlevsoi = varpar.nlevsoi
 
@@ -71,35 +71,35 @@ function waterfluxbulk_init!(wfb::WaterFluxBulkData, nc::Int, np::Int, nl::Int, 
     waterflux_init!(wfb.wf, nc, np, nl, ng)
 
     # --- Patch 1D ---
-    wfb.qflx_snowindunload_patch  = fill(NaN, np)
-    wfb.qflx_snotempunload_patch  = fill(NaN, np)
-    wfb.qflx_ev_snow_patch        = fill(NaN, np)
-    wfb.qflx_ev_soil_patch        = fill(NaN, np)
-    wfb.qflx_ev_h2osfc_patch      = fill(NaN, np)
-    wfb.qflx_hydr_redist_patch    = fill(NaN, np)
+    wfb.qflx_snowindunload_patch  = fill(FT(NaN), np)
+    wfb.qflx_snotempunload_patch  = fill(FT(NaN), np)
+    wfb.qflx_ev_snow_patch        = fill(FT(NaN), np)
+    wfb.qflx_ev_soil_patch        = fill(FT(NaN), np)
+    wfb.qflx_ev_h2osfc_patch      = fill(FT(NaN), np)
+    wfb.qflx_hydr_redist_patch    = fill(FT(NaN), np)
 
     # --- Column 1D ---
-    wfb.qflx_phs_neg_col          = fill(NaN, nc)
-    wfb.qflx_ev_snow_col          = fill(NaN, nc)
-    wfb.qflx_ev_soil_col          = fill(NaN, nc)
-    wfb.qflx_ev_h2osfc_col        = fill(NaN, nc)
-    wfb.qflx_sat_excess_surf_col  = fill(NaN, nc)
-    wfb.qflx_infl_excess_col      = fill(NaN, nc)
-    wfb.qflx_infl_excess_surf_col = fill(NaN, nc)
-    wfb.qflx_h2osfc_surf_col      = fill(NaN, nc)
-    wfb.qflx_in_soil_col          = fill(NaN, nc)
-    wfb.qflx_in_soil_limited_col  = fill(NaN, nc)
-    wfb.qflx_h2osfc_drain_col     = fill(NaN, nc)
-    wfb.qflx_top_soil_to_h2osfc_col = fill(NaN, nc)
-    wfb.qflx_in_h2osfc_col        = fill(NaN, nc)
-    wfb.qflx_deficit_col          = fill(NaN, nc)
-    wfb.AnnET                     = fill(NaN, nc)
+    wfb.qflx_phs_neg_col          = fill(FT(NaN), nc)
+    wfb.qflx_ev_snow_col          = fill(FT(NaN), nc)
+    wfb.qflx_ev_soil_col          = fill(FT(NaN), nc)
+    wfb.qflx_ev_h2osfc_col        = fill(FT(NaN), nc)
+    wfb.qflx_sat_excess_surf_col  = fill(FT(NaN), nc)
+    wfb.qflx_infl_excess_col      = fill(FT(NaN), nc)
+    wfb.qflx_infl_excess_surf_col = fill(FT(NaN), nc)
+    wfb.qflx_h2osfc_surf_col      = fill(FT(NaN), nc)
+    wfb.qflx_in_soil_col          = fill(FT(NaN), nc)
+    wfb.qflx_in_soil_limited_col  = fill(FT(NaN), nc)
+    wfb.qflx_h2osfc_drain_col     = fill(FT(NaN), nc)
+    wfb.qflx_top_soil_to_h2osfc_col = fill(FT(NaN), nc)
+    wfb.qflx_in_h2osfc_col        = fill(FT(NaN), nc)
+    wfb.qflx_deficit_col          = fill(FT(NaN), nc)
+    wfb.AnnET                     = fill(FT(NaN), nc)
 
     # --- Column 2D ---
-    wfb.qflx_adv_col              = fill(NaN, nc, nlevsoi + 1)  # (0:nlevsoi) → nlevsoi+1 columns
-    wfb.qflx_rootsoi_col          = fill(NaN, nc, nlevsoi)      # (1:nlevsoi)
-    wfb.qflx_snomelt_lyr_col      = fill(NaN, nc, nlevsno)      # (-nlevsno+1:0)
-    wfb.qflx_drain_vr_col         = fill(NaN, nc, nlevsoi)      # (1:nlevsoi)
+    wfb.qflx_adv_col              = fill(FT(NaN), nc, nlevsoi + 1)  # (0:nlevsoi) → nlevsoi+1 columns
+    wfb.qflx_rootsoi_col          = fill(FT(NaN), nc, nlevsoi)      # (1:nlevsoi)
+    wfb.qflx_snomelt_lyr_col      = fill(FT(NaN), nc, nlevsno)      # (-nlevsno+1:0)
+    wfb.qflx_drain_vr_col         = fill(FT(NaN), nc, nlevsoi)      # (1:nlevsoi)
 
     return nothing
 end
@@ -109,39 +109,39 @@ end
 
 Deallocate (reset to empty) all fields of a `WaterFluxBulkData` instance.
 """
-function waterfluxbulk_clean!(wfb::WaterFluxBulkData)
+function waterfluxbulk_clean!(wfb::WaterFluxBulkData{FT}) where {FT}
     waterflux_clean!(wfb.wf)
 
     # Patch 1D
-    wfb.qflx_snowindunload_patch  = Float64[]
-    wfb.qflx_snotempunload_patch  = Float64[]
-    wfb.qflx_ev_snow_patch        = Float64[]
-    wfb.qflx_ev_soil_patch        = Float64[]
-    wfb.qflx_ev_h2osfc_patch      = Float64[]
-    wfb.qflx_hydr_redist_patch    = Float64[]
+    wfb.qflx_snowindunload_patch  = FT[]
+    wfb.qflx_snotempunload_patch  = FT[]
+    wfb.qflx_ev_snow_patch        = FT[]
+    wfb.qflx_ev_soil_patch        = FT[]
+    wfb.qflx_ev_h2osfc_patch      = FT[]
+    wfb.qflx_hydr_redist_patch    = FT[]
 
     # Column 1D
-    wfb.qflx_phs_neg_col          = Float64[]
-    wfb.qflx_ev_snow_col          = Float64[]
-    wfb.qflx_ev_soil_col          = Float64[]
-    wfb.qflx_ev_h2osfc_col        = Float64[]
-    wfb.qflx_sat_excess_surf_col  = Float64[]
-    wfb.qflx_infl_excess_col      = Float64[]
-    wfb.qflx_infl_excess_surf_col = Float64[]
-    wfb.qflx_h2osfc_surf_col      = Float64[]
-    wfb.qflx_in_soil_col          = Float64[]
-    wfb.qflx_in_soil_limited_col  = Float64[]
-    wfb.qflx_h2osfc_drain_col     = Float64[]
-    wfb.qflx_top_soil_to_h2osfc_col = Float64[]
-    wfb.qflx_in_h2osfc_col        = Float64[]
-    wfb.qflx_deficit_col          = Float64[]
-    wfb.AnnET                     = Float64[]
+    wfb.qflx_phs_neg_col          = FT[]
+    wfb.qflx_ev_snow_col          = FT[]
+    wfb.qflx_ev_soil_col          = FT[]
+    wfb.qflx_ev_h2osfc_col        = FT[]
+    wfb.qflx_sat_excess_surf_col  = FT[]
+    wfb.qflx_infl_excess_col      = FT[]
+    wfb.qflx_infl_excess_surf_col = FT[]
+    wfb.qflx_h2osfc_surf_col      = FT[]
+    wfb.qflx_in_soil_col          = FT[]
+    wfb.qflx_in_soil_limited_col  = FT[]
+    wfb.qflx_h2osfc_drain_col     = FT[]
+    wfb.qflx_top_soil_to_h2osfc_col = FT[]
+    wfb.qflx_in_h2osfc_col        = FT[]
+    wfb.qflx_deficit_col          = FT[]
+    wfb.AnnET                     = FT[]
 
     # Column 2D
-    wfb.qflx_adv_col              = Matrix{Float64}(undef, 0, 0)
-    wfb.qflx_rootsoi_col          = Matrix{Float64}(undef, 0, 0)
-    wfb.qflx_snomelt_lyr_col      = Matrix{Float64}(undef, 0, 0)
-    wfb.qflx_drain_vr_col         = Matrix{Float64}(undef, 0, 0)
+    wfb.qflx_adv_col              = Matrix{FT}(undef, 0, 0)
+    wfb.qflx_rootsoi_col          = Matrix{FT}(undef, 0, 0)
+    wfb.qflx_snomelt_lyr_col      = Matrix{FT}(undef, 0, 0)
+    wfb.qflx_drain_vr_col         = Matrix{FT}(undef, 0, 0)
 
     return nothing
 end

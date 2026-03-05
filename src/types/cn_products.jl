@@ -11,10 +11,10 @@ Holds wood and crop product pool states and fluxes.
 
 Ported from `cn_products_type` in `CNProductsMod.F90`.
 """
-Base.@kwdef mutable struct CNProductsData
-    cropprod1_grc      ::Vector{Float64} = Float64[]  # (g/m2) crop product pool (1-year)
-    tot_woodprod_grc   ::Vector{Float64} = Float64[]  # (g/m2) total wood product pools
-    product_loss_grc   ::Vector{Float64} = Float64[]  # (g/m2/s) losses from wood & crop products
+Base.@kwdef mutable struct CNProductsData{FT<:AbstractFloat}
+    cropprod1_grc      ::Vector{FT} = Float64[]  # (g/m2) crop product pool (1-year)
+    tot_woodprod_grc   ::Vector{FT} = Float64[]  # (g/m2) total wood product pools
+    product_loss_grc   ::Vector{FT} = Float64[]  # (g/m2/s) losses from wood & crop products
 end
 
 """
@@ -22,9 +22,9 @@ end
 
 Allocate and initialize CNProductsData for `ng` gridcells.
 """
-function cn_products_init!(prod::CNProductsData, ng::Int)
-    prod.cropprod1_grc    = fill(0.0, ng)
-    prod.tot_woodprod_grc = fill(0.0, ng)
-    prod.product_loss_grc = fill(0.0, ng)
+function cn_products_init!(prod::CNProductsData{FT}, ng::Int) where {FT}
+    prod.cropprod1_grc    = fill(zero(FT), ng)
+    prod.tot_woodprod_grc = fill(zero(FT), ng)
+    prod.product_loss_grc = fill(zero(FT), ng)
     return nothing
 end

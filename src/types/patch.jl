@@ -92,14 +92,14 @@ and FATES-specific fields for each patch.
 
 Ported from `patch_type` in `PatchType.F90`.
 """
-Base.@kwdef mutable struct PatchData
+Base.@kwdef mutable struct PatchData{FT<:AbstractFloat}
     # g/l/c/p hierarchy, local g/l/c/p cells only
     column           ::Vector{Int}     = Int[]       # index into column level quantities
-    wtcol            ::Vector{Float64} = Float64[]   # weight (relative to column)
+    wtcol            ::Vector{FT} = Float64[]   # weight (relative to column)
     landunit         ::Vector{Int}     = Int[]       # index into landunit level quantities
-    wtlunit          ::Vector{Float64} = Float64[]   # weight (relative to landunit)
+    wtlunit          ::Vector{FT} = Float64[]   # weight (relative to landunit)
     gridcell         ::Vector{Int}     = Int[]       # index into gridcell level quantities
-    wtgcell          ::Vector{Float64} = Float64[]   # weight (relative to gridcell)
+    wtgcell          ::Vector{FT} = Float64[]   # weight (relative to gridcell)
 
     # Non-ED only
     itype            ::Vector{Int}     = Int[]       # patch vegetation type
@@ -109,8 +109,8 @@ Base.@kwdef mutable struct PatchData
     # FATES only
     is_veg           ::Vector{Bool}    = Bool[]      # this is an ACTIVE fates patch
     is_bareground    ::Vector{Bool}    = Bool[]      # true => bareground fates patch
-    wt_ed            ::Vector{Float64} = Float64[]   # FATES patch weight
-    sp_pftorder_index ::Vector{Float64} = Float64[]  # index to map 'p' onto the order of ED patches in SP mode
+    wt_ed            ::Vector{FT} = Float64[]   # FATES patch weight
+    sp_pftorder_index ::Vector{FT} = Float64[]  # index to map 'p' onto the order of ED patches in SP mode
 
     is_fates         ::Vector{Bool}    = Bool[]      # true for patch vector space reserved for FATES
 end
@@ -127,16 +127,16 @@ are only allocated when `varctl.use_fates` is `true`.
 
 Ported from `patch_type%Init` in `PatchType.F90`.
 """
-function patch_init!(pch::PatchData, npatches::Int)
+function patch_init!(pch::PatchData{FT}, npatches::Int) where {FT}
     # --- g/l/c/p hierarchy (set in InitGridCellsMod) ---
     pch.gridcell    = fill(ISPVAL, npatches)
-    pch.wtgcell     = fill(NaN, npatches)
+    pch.wtgcell     = fill(FT(NaN), npatches)
 
     pch.landunit    = fill(ISPVAL, npatches)
-    pch.wtlunit     = fill(NaN, npatches)
+    pch.wtlunit     = fill(FT(NaN), npatches)
 
     pch.column      = fill(ISPVAL, npatches)
-    pch.wtcol       = fill(NaN, npatches)
+    pch.wtcol       = fill(FT(NaN), npatches)
 
     pch.mxy         = fill(ISPVAL, npatches)
     pch.active      = fill(false, npatches)
@@ -149,8 +149,8 @@ function patch_init!(pch::PatchData, npatches::Int)
     if varctl.use_fates
         pch.is_veg           = fill(false, npatches)
         pch.is_bareground    = fill(false, npatches)
-        pch.wt_ed            = fill(NaN, npatches)
-        pch.sp_pftorder_index = fill(NaN, npatches)
+        pch.wt_ed            = fill(FT(NaN), npatches)
+        pch.sp_pftorder_index = fill(FT(NaN), npatches)
     end
 
     return nothing
@@ -163,13 +163,13 @@ Deallocate (reset to empty) all fields of a `PatchData` instance.
 
 Ported from `patch_type%Clean` in `PatchType.F90`.
 """
-function patch_clean!(pch::PatchData)
+function patch_clean!(pch::PatchData{FT}) where {FT}
     pch.gridcell    = Int[]
-    pch.wtgcell     = Float64[]
+    pch.wtgcell     = FT[]
     pch.landunit    = Int[]
-    pch.wtlunit     = Float64[]
+    pch.wtlunit     = FT[]
     pch.column      = Int[]
-    pch.wtcol       = Float64[]
+    pch.wtcol       = FT[]
     pch.itype       = Int[]
     pch.mxy         = Int[]
     pch.active      = Bool[]
@@ -178,8 +178,8 @@ function patch_clean!(pch::PatchData)
     if varctl.use_fates
         pch.is_veg           = Bool[]
         pch.is_bareground    = Bool[]
-        pch.wt_ed            = Float64[]
-        pch.sp_pftorder_index = Float64[]
+        pch.wt_ed            = FT[]
+        pch.sp_pftorder_index = FT[]
     end
 
     return nothing

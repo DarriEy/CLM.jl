@@ -22,11 +22,11 @@ growing degree-day accumulators, and related per-patch fields.
 
 Ported from `crop_type` in `CropType.F90`.
 """
-Base.@kwdef mutable struct CropData
+Base.@kwdef mutable struct CropData{FT<:AbstractFloat}
     # --- Scalar / config fields ---
     baset_mapping              ::String  = BASET_MAP_CONSTANT
-    baset_latvary_intercept    ::Float64 = 12.0
-    baset_latvary_slope        ::Float64 = 0.4
+    baset_latvary_intercept    ::FT = 12.0
+    baset_latvary_slope        ::FT = 0.4
 
     # --- Patch-level 1D integer fields ---
     nyrs_crop_active_patch     ::Vector{Int}     = Int[]           # years this crop patch has been active
@@ -40,36 +40,36 @@ Base.@kwdef mutable struct CropData
     sown_in_this_window        ::Vector{Bool}    = Bool[]          # true if sown during current sowing window
 
     # --- Patch-level 1D real fields ---
-    fertnitro_patch            ::Vector{Float64} = Float64[]       # fertilizer nitrogen (gN/m2/yr)
-    gddtsoi_patch              ::Vector{Float64} = Float64[]       # GDD from planting (top two soil layers) (ddays)
-    vf_patch                   ::Vector{Float64} = Float64[]       # vernalization factor for cereal
-    cphase_patch               ::Vector{Float64} = Float64[]       # phenology phase (see cphase_* constants)
-    latbaset_patch             ::Vector{Float64} = Float64[]       # latitude-varying baset for hui (degree C)
-    hui_patch                  ::Vector{Float64} = Float64[]       # heat unit index (ddays)
-    gddaccum_patch             ::Vector{Float64} = Float64[]       # GDD from planting (air) (ddays)
-    gdd20_baseline_patch       ::Vector{Float64} = Float64[]       # GDD20 baseline (ddays)
-    gdd20_season_start_patch   ::Vector{Float64} = Float64[]       # GDD20 season start (day of year)
-    gdd20_season_end_patch     ::Vector{Float64} = Float64[]       # GDD20 season end (day of year)
+    fertnitro_patch            ::Vector{FT} = Float64[]       # fertilizer nitrogen (gN/m2/yr)
+    gddtsoi_patch              ::Vector{FT} = Float64[]       # GDD from planting (top two soil layers) (ddays)
+    vf_patch                   ::Vector{FT} = Float64[]       # vernalization factor for cereal
+    cphase_patch               ::Vector{FT} = Float64[]       # phenology phase (see cphase_* constants)
+    latbaset_patch             ::Vector{FT} = Float64[]       # latitude-varying baset for hui (degree C)
+    hui_patch                  ::Vector{FT} = Float64[]       # heat unit index (ddays)
+    gddaccum_patch             ::Vector{FT} = Float64[]       # GDD from planting (air) (ddays)
+    gdd20_baseline_patch       ::Vector{FT} = Float64[]       # GDD20 baseline (ddays)
+    gdd20_season_start_patch   ::Vector{FT} = Float64[]       # GDD20 season start (day of year)
+    gdd20_season_end_patch     ::Vector{FT} = Float64[]       # GDD20 season end (day of year)
 
     # --- Patch-level 2D integer fields (patch × mxsowings) ---
     rx_swindow_starts_thisyr_patch ::Matrix{Int}     = Matrix{Int}(undef, 0, 0)     # prescribed sowing window starts
     rx_swindow_ends_thisyr_patch   ::Matrix{Int}     = Matrix{Int}(undef, 0, 0)     # prescribed sowing window ends
 
     # --- Patch-level 2D real fields (patch × mxsowings) ---
-    rx_cultivar_gdds_thisyr_patch  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # cultivar GDD targets
-    sdates_thisyr_patch            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # actual sowing dates this year
-    swindow_starts_thisyr_patch    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # sowing window starts this year
-    swindow_ends_thisyr_patch      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # sowing window ends this year
-    sowing_reason_thisyr_patch     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # reason for each sowing this year
+    rx_cultivar_gdds_thisyr_patch  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # cultivar GDD targets
+    sdates_thisyr_patch            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # actual sowing dates this year
+    swindow_starts_thisyr_patch    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # sowing window starts this year
+    swindow_ends_thisyr_patch      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # sowing window ends this year
+    sowing_reason_thisyr_patch     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # reason for each sowing this year
 
     # --- Patch-level 2D real fields (patch × mxharvests) ---
-    sdates_perharv_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # sowing dates for harvested crops
-    syears_perharv_patch           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # sowing years for harvested crops
-    hdates_thisyr_patch            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # harvest dates this year
-    gddaccum_thisyr_patch          ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # accumulated GDD at harvest this year
-    hui_thisyr_patch               ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # accumulated HUI at harvest this year
-    sowing_reason_perharv_patch    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # sowing reason for harvested crops
-    harvest_reason_thisyr_patch    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # reason for each harvest this year
+    sdates_perharv_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # sowing dates for harvested crops
+    syears_perharv_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # sowing years for harvested crops
+    hdates_thisyr_patch            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # harvest dates this year
+    gddaccum_thisyr_patch          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # accumulated GDD at harvest this year
+    hui_thisyr_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # accumulated HUI at harvest this year
+    sowing_reason_perharv_patch    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # sowing reason for harvested crops
+    harvest_reason_thisyr_patch    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0) # reason for each harvest this year
 end
 
 # ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ end
 Stub for history field registration (no-op in Julia port).
 Corresponds to `InitHistory` in the Fortran source.
 """
-function crop_init_history!(cr::CropData, bounds_patch::UnitRange{Int})
+function crop_init_history!(cr::CropData{FT}, bounds_patch::UnitRange{Int}) where {FT}
     return nothing
 end
 
@@ -234,7 +234,7 @@ end
 Stub for accumulation buffer initialization (no-op in Julia port).
 Corresponds to `InitAccBuffer` in the Fortran source.
 """
-function crop_init_acc_buffer!(cr::CropData)
+function crop_init_acc_buffer!(cr::CropData{FT}) where {FT}
     return nothing
 end
 
@@ -244,7 +244,7 @@ end
 Stub for accumulation variable extraction (no-op in Julia port).
 Corresponds to `InitAccVars` in the Fortran source.
 """
-function crop_init_acc_vars!(cr::CropData, bounds_patch::UnitRange{Int})
+function crop_init_acc_vars!(cr::CropData{FT}, bounds_patch::UnitRange{Int}) where {FT}
     return nothing
 end
 
@@ -254,7 +254,7 @@ end
 Stub for restart read/write (no-op in Julia port).
 Corresponds to `Restart` in the Fortran source.
 """
-function crop_restart!(cr::CropData, bounds_patch::UnitRange{Int})
+function crop_restart!(cr::CropData{FT}, bounds_patch::UnitRange{Int}) where {FT}
     return nothing
 end
 

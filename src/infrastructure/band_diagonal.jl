@@ -11,9 +11,9 @@ Solve band diagonal systems for multiple columns.
 Uses LAPACK's dgbsv (general band matrix solver with partial pivoting).
 
 # Arguments
-- `u::Matrix{Float64}`:       Solution [ncols × nlevs] (OUTPUT)
-- `b_matrix::Array{Float64,3}`: Band matrix [ncols × nband × nlevs]
-- `r::Matrix{Float64}`:       Right-hand side [ncols × nlevs]
+- `u::AbstractMatrix{<:Real}`:       Solution [ncols × nlevs] (OUTPUT)
+- `b_matrix::AbstractArray{<:Real,3}`: Band matrix [ncols × nband × nlevs]
+- `r::AbstractMatrix{<:Real}`:       Right-hand side [ncols × nlevs]
 - `jtop::Vector{Int}`:        Top active level per column
 - `jbot::Vector{Int}`:        Bottom active level per column
 - `nband::Int`:               Band width (must be odd; e.g., 5 for pentadiagonal)
@@ -24,8 +24,8 @@ coefficients arranged so that band index (nband+1)/2 is the diagonal.
 
 Ported from BandDiagonal() in BandDiagonalMod.F90.
 """
-function band_diagonal_solve!(u::Matrix{Float64}, b_matrix::Array{Float64,3},
-                              r::Matrix{Float64}, jtop::Vector{Int},
+function band_diagonal_solve!(u::AbstractMatrix{<:Real}, b_matrix::AbstractArray{<:Real,3},
+                              r::AbstractMatrix{<:Real}, jtop::Vector{Int},
                               jbot::Vector{Int}, nband::Int, ncols::Int)
     kl = div(nband - 1, 2)  # number of sub-diagonals
     ku = kl                   # number of super-diagonals (symmetric bandwidth)
@@ -90,15 +90,15 @@ end
 Solve a single-column band diagonal system.
 
 # Arguments
-- `u::AbstractVector{Float64}`:  Solution (OUTPUT, length nlevs)
-- `b_matrix::AbstractMatrix{Float64}`: Band matrix [nband × nlevs]
-- `r::AbstractVector{Float64}`:  Right-hand side [nlevs]
+- `u::AbstractVector{<:Real}`:  Solution (OUTPUT, length nlevs)
+- `b_matrix::AbstractMatrix{<:Real}`: Band matrix [nband × nlevs]
+- `r::AbstractVector{<:Real}`:  Right-hand side [nlevs]
 - `jtop::Int`:                   Top active level
 - `jbot::Int`:                   Bottom active level
 - `nband::Int`:                  Band width
 """
-function band_diagonal_column!(u::AbstractVector{Float64}, b_matrix::AbstractMatrix{Float64},
-                               r::AbstractVector{Float64}, jtop::Int, jbot::Int, nband::Int)
+function band_diagonal_column!(u::AbstractVector{<:Real}, b_matrix::AbstractMatrix{<:Real},
+                               r::AbstractVector{<:Real}, jtop::Int, jbot::Int, nband::Int)
     kl = div(nband - 1, 2)
     ku = kl
     n = jbot - jtop + 1

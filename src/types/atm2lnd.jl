@@ -15,7 +15,7 @@ rain/snow repartitioning, longwave downscaling, and lapse rates.
 
 Ported from `atm2lnd_params_type` in `atm2lndType.F90`.
 """
-Base.@kwdef mutable struct Atm2LndParamsData
+Base.@kwdef mutable struct Atm2LndParamsData{FT<:AbstractFloat}
     # true => repartition rain/snow from atm based on temperature
     repartition_rain_snow::Bool = false
 
@@ -23,22 +23,22 @@ Base.@kwdef mutable struct Atm2LndParamsData
     glcmec_downscale_longwave::Bool = false
 
     # Surface temperature lapse rate (K m-1)
-    lapse_rate::Float64 = NaN
+    lapse_rate::FT = NaN
 
     # longwave radiation lapse rate (W m-2 m-1)
-    lapse_rate_longwave::Float64 = NaN
+    lapse_rate_longwave::FT = NaN
 
     # Relative limit for how much longwave downscaling can be done (unitless)
-    longwave_downscaling_limit::Float64 = NaN
+    longwave_downscaling_limit::FT = NaN
 
     # Rain-snow ramp for glacier landunits
     # frac_rain = (temp - all_snow_t) * frac_rain_slope  (all_snow_t in K)
-    precip_repartition_glc_all_snow_t::Float64 = NaN
-    precip_repartition_glc_frac_rain_slope::Float64 = NaN
+    precip_repartition_glc_all_snow_t::FT = NaN
+    precip_repartition_glc_frac_rain_slope::FT = NaN
 
     # Rain-snow ramp for non-glacier landunits
-    precip_repartition_nonglc_all_snow_t::Float64 = NaN
-    precip_repartition_nonglc_frac_rain_slope::Float64 = NaN
+    precip_repartition_nonglc_all_snow_t::FT = NaN
+    precip_repartition_nonglc_frac_rain_slope::FT = NaN
 end
 
 # --------------------------------------------------------------------------
@@ -54,66 +54,66 @@ time-averaged quantities.
 
 Ported from `atm2lnd_type` in `atm2lndType.F90`.
 """
-Base.@kwdef mutable struct Atm2LndData
+Base.@kwdef mutable struct Atm2LndData{FT<:AbstractFloat}
     params::Atm2LndParamsData = Atm2LndParamsData()
 
     # --- atm->lnd not downscaled (gridcell-level) ---
-    forc_u_grc                    ::Vector{Float64} = Float64[]   # atm wind speed, east direction (m/s)
-    forc_v_grc                    ::Vector{Float64} = Float64[]   # atm wind speed, north direction (m/s)
-    forc_wind_grc                 ::Vector{Float64} = Float64[]   # atmospheric wind speed
-    forc_hgt_grc                  ::Vector{Float64} = Float64[]   # atmospheric reference height (m)
-    forc_topo_grc                 ::Vector{Float64} = Float64[]   # atmospheric surface height (m)
-    forc_hgt_u_grc                ::Vector{Float64} = Float64[]   # obs height of wind [m]
-    forc_hgt_t_grc                ::Vector{Float64} = Float64[]   # obs height of temperature [m]
-    forc_hgt_q_grc                ::Vector{Float64} = Float64[]   # obs height of humidity [m]
-    forc_vp_grc                   ::Vector{Float64} = Float64[]   # atmospheric vapor pressure (Pa)
-    forc_pco2_grc                 ::Vector{Float64} = Float64[]   # CO2 partial pressure (Pa)
-    forc_pco2_240_patch           ::Vector{Float64} = Float64[]   # 10-day mean CO2 partial pressure (Pa)
-    forc_solad_not_downscaled_grc ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # direct beam radiation (numrad)
-    forc_solai_grc                ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # diffuse radiation (numrad)
-    forc_solar_not_downscaled_grc ::Vector{Float64} = Float64[]   # incident solar radiation
-    forc_solar_downscaled_col     ::Vector{Float64} = Float64[]   # incident solar radiation (downscaled)
-    forc_ndep_grc                 ::Vector{Float64} = Float64[]   # nitrogen deposition rate (gN/m2/s)
-    forc_pc13o2_grc               ::Vector{Float64} = Float64[]   # C13O2 partial pressure (Pa)
-    forc_po2_grc                  ::Vector{Float64} = Float64[]   # O2 partial pressure (Pa)
-    forc_po2_240_patch            ::Vector{Float64} = Float64[]   # 10-day mean O2 partial pressure (Pa)
-    forc_aer_grc                  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # aerosol deposition array
-    forc_pch4_grc                 ::Vector{Float64} = Float64[]   # CH4 partial pressure (Pa)
-    forc_o3_grc                   ::Vector{Float64} = Float64[]   # ozone partial pressure (mol/mol)
+    forc_u_grc                    ::Vector{FT} = Float64[]   # atm wind speed, east direction (m/s)
+    forc_v_grc                    ::Vector{FT} = Float64[]   # atm wind speed, north direction (m/s)
+    forc_wind_grc                 ::Vector{FT} = Float64[]   # atmospheric wind speed
+    forc_hgt_grc                  ::Vector{FT} = Float64[]   # atmospheric reference height (m)
+    forc_topo_grc                 ::Vector{FT} = Float64[]   # atmospheric surface height (m)
+    forc_hgt_u_grc                ::Vector{FT} = Float64[]   # obs height of wind [m]
+    forc_hgt_t_grc                ::Vector{FT} = Float64[]   # obs height of temperature [m]
+    forc_hgt_q_grc                ::Vector{FT} = Float64[]   # obs height of humidity [m]
+    forc_vp_grc                   ::Vector{FT} = Float64[]   # atmospheric vapor pressure (Pa)
+    forc_pco2_grc                 ::Vector{FT} = Float64[]   # CO2 partial pressure (Pa)
+    forc_pco2_240_patch           ::Vector{FT} = Float64[]   # 10-day mean CO2 partial pressure (Pa)
+    forc_solad_not_downscaled_grc ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # direct beam radiation (numrad)
+    forc_solai_grc                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # diffuse radiation (numrad)
+    forc_solar_not_downscaled_grc ::Vector{FT} = Float64[]   # incident solar radiation
+    forc_solar_downscaled_col     ::Vector{FT} = Float64[]   # incident solar radiation (downscaled)
+    forc_ndep_grc                 ::Vector{FT} = Float64[]   # nitrogen deposition rate (gN/m2/s)
+    forc_pc13o2_grc               ::Vector{FT} = Float64[]   # C13O2 partial pressure (Pa)
+    forc_po2_grc                  ::Vector{FT} = Float64[]   # O2 partial pressure (Pa)
+    forc_po2_240_patch            ::Vector{FT} = Float64[]   # 10-day mean O2 partial pressure (Pa)
+    forc_aer_grc                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # aerosol deposition array
+    forc_pch4_grc                 ::Vector{FT} = Float64[]   # CH4 partial pressure (Pa)
+    forc_o3_grc                   ::Vector{FT} = Float64[]   # ozone partial pressure (mol/mol)
 
-    forc_t_not_downscaled_grc     ::Vector{Float64} = Float64[]   # not downscaled atm temperature (K)
-    forc_th_not_downscaled_grc    ::Vector{Float64} = Float64[]   # not downscaled atm potential temperature (K)
-    forc_pbot_not_downscaled_grc  ::Vector{Float64} = Float64[]   # not downscaled atm pressure (Pa)
-    forc_pbot240_downscaled_patch ::Vector{Float64} = Float64[]   # 10-day mean downscaled atm pressure (Pa)
-    forc_rho_not_downscaled_grc   ::Vector{Float64} = Float64[]   # not downscaled atm density (kg/m**3)
-    forc_lwrad_not_downscaled_grc ::Vector{Float64} = Float64[]   # not downscaled atm downwrd IR longwave radiation (W/m**2)
+    forc_t_not_downscaled_grc     ::Vector{FT} = Float64[]   # not downscaled atm temperature (K)
+    forc_th_not_downscaled_grc    ::Vector{FT} = Float64[]   # not downscaled atm potential temperature (K)
+    forc_pbot_not_downscaled_grc  ::Vector{FT} = Float64[]   # not downscaled atm pressure (Pa)
+    forc_pbot240_downscaled_patch ::Vector{FT} = Float64[]   # 10-day mean downscaled atm pressure (Pa)
+    forc_rho_not_downscaled_grc   ::Vector{FT} = Float64[]   # not downscaled atm density (kg/m**3)
+    forc_lwrad_not_downscaled_grc ::Vector{FT} = Float64[]   # not downscaled atm downwrd IR longwave radiation (W/m**2)
 
     # --- atm->lnd downscaled (column-level) ---
-    forc_t_downscaled_col         ::Vector{Float64} = Float64[]   # downscaled atm temperature (K)
-    forc_th_downscaled_col        ::Vector{Float64} = Float64[]   # downscaled atm potential temperature (K)
-    forc_pbot_downscaled_col      ::Vector{Float64} = Float64[]   # downscaled atm pressure (Pa)
-    forc_rho_downscaled_col       ::Vector{Float64} = Float64[]   # downscaled atm density (kg/m**3)
-    forc_lwrad_downscaled_col     ::Vector{Float64} = Float64[]   # downscaled atm downwrd IR longwave radiation (W/m**2)
-    forc_solad_downscaled_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # direct beam radiation downscaled (numrad)
+    forc_t_downscaled_col         ::Vector{FT} = Float64[]   # downscaled atm temperature (K)
+    forc_th_downscaled_col        ::Vector{FT} = Float64[]   # downscaled atm potential temperature (K)
+    forc_pbot_downscaled_col      ::Vector{FT} = Float64[]   # downscaled atm pressure (Pa)
+    forc_rho_downscaled_col       ::Vector{FT} = Float64[]   # downscaled atm density (kg/m**3)
+    forc_lwrad_downscaled_col     ::Vector{FT} = Float64[]   # downscaled atm downwrd IR longwave radiation (W/m**2)
+    forc_solad_downscaled_col     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # direct beam radiation downscaled (numrad)
 
     # --- atm->lnd precipitation/humidity (gridcell-level, not downscaled) ---
-    forc_rain_not_downscaled_grc      ::Vector{Float64} = Float64[]   # rain rate (mm H2O/s)
-    forc_snow_not_downscaled_grc      ::Vector{Float64} = Float64[]   # snow rate (mm H2O/s)
-    forc_q_not_downscaled_grc         ::Vector{Float64} = Float64[]   # specific humidity (kg/kg)
+    forc_rain_not_downscaled_grc      ::Vector{FT} = Float64[]   # rain rate (mm H2O/s)
+    forc_snow_not_downscaled_grc      ::Vector{FT} = Float64[]   # snow rate (mm H2O/s)
+    forc_q_not_downscaled_grc         ::Vector{FT} = Float64[]   # specific humidity (kg/kg)
 
     # --- atm->lnd precipitation/humidity (column-level, downscaled) ---
-    forc_rain_downscaled_col          ::Vector{Float64} = Float64[]   # rain rate (mm H2O/s)
-    forc_snow_downscaled_col          ::Vector{Float64} = Float64[]   # snow rate (mm H2O/s)
-    forc_q_downscaled_col             ::Vector{Float64} = Float64[]   # specific humidity (kg/kg)
+    forc_rain_downscaled_col          ::Vector{FT} = Float64[]   # rain rate (mm H2O/s)
+    forc_snow_downscaled_col          ::Vector{FT} = Float64[]   # snow rate (mm H2O/s)
+    forc_q_downscaled_col             ::Vector{FT} = Float64[]   # specific humidity (kg/kg)
 
     # --- time averaged quantities (patch-level) ---
-    fsd24_patch                   ::Vector{Float64} = Float64[]   # patch 24hr average of direct beam radiation
-    fsd240_patch                  ::Vector{Float64} = Float64[]   # patch 240hr average of direct beam radiation
-    fsi24_patch                   ::Vector{Float64} = Float64[]   # patch 24hr average of diffuse beam radiation
-    fsi240_patch                  ::Vector{Float64} = Float64[]   # patch 240hr average of diffuse beam radiation
-    wind24_patch                  ::Vector{Float64} = Float64[]   # patch 24-hour running mean of wind
-    t_mo_patch                    ::Vector{Float64} = Float64[]   # patch 30-day average temperature (K)
-    t_mo_min_patch                ::Vector{Float64} = Float64[]   # patch annual min of t_mo (K)
+    fsd24_patch                   ::Vector{FT} = Float64[]   # patch 24hr average of direct beam radiation
+    fsd240_patch                  ::Vector{FT} = Float64[]   # patch 240hr average of direct beam radiation
+    fsi24_patch                   ::Vector{FT} = Float64[]   # patch 24hr average of diffuse beam radiation
+    fsi240_patch                  ::Vector{FT} = Float64[]   # patch 240hr average of diffuse beam radiation
+    wind24_patch                  ::Vector{FT} = Float64[]   # patch 24-hour running mean of wind
+    t_mo_patch                    ::Vector{FT} = Float64[]   # patch 30-day average temperature (K)
+    t_mo_min_patch                ::Vector{FT} = Float64[]   # patch annual min of t_mo (K)
 end
 
 # --------------------------------------------------------------------------
@@ -232,7 +232,7 @@ Allocate and zero-initialize all arrays in `Atm2LndData`.
 
 Ported from `InitAllocate` in `atm2lndType.F90`.
 """
-function atm2lnd_init!(a2l::Atm2LndData, ng::Int, nc::Int, np::Int)
+function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {FT}
     ival = 0.0
 
     # atm->lnd (gridcell-level)
@@ -289,15 +289,15 @@ function atm2lnd_init!(a2l::Atm2LndData, ng::Int, nc::Int, np::Int)
     a2l.forc_q_downscaled_col         = fill(ival, nc)
 
     # time-averaged (patch-level)
-    a2l.fsd24_patch                   = fill(NaN, np)
-    a2l.fsd240_patch                  = fill(NaN, np)
-    a2l.fsi24_patch                   = fill(NaN, np)
-    a2l.fsi240_patch                  = fill(NaN, np)
+    a2l.fsd24_patch                   = fill(FT(NaN), np)
+    a2l.fsd240_patch                  = fill(FT(NaN), np)
+    a2l.fsi24_patch                   = fill(FT(NaN), np)
+    a2l.fsi240_patch                  = fill(FT(NaN), np)
     if varctl.use_fates
-        a2l.wind24_patch              = fill(NaN, np)
+        a2l.wind24_patch              = fill(FT(NaN), np)
     end
-    a2l.t_mo_patch                    = fill(NaN, np)
-    a2l.t_mo_min_patch                = fill(SPVAL, np)
+    a2l.t_mo_patch                    = fill(FT(NaN), np)
+    a2l.t_mo_min_patch                = fill(FT(SPVAL), np)
 
     nothing
 end
@@ -371,7 +371,7 @@ Stub for history field registration. No-op in Julia port.
 
 Ported from `InitHistory` in `atm2lndType.F90`.
 """
-function atm2lnd_init_history!(a2l::Atm2LndData, ng::Int, nc::Int, np::Int)
+function atm2lnd_init_history!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {FT}
     nothing
 end
 
@@ -386,7 +386,7 @@ Stub for accumulation buffer initialization. No-op in Julia port.
 
 Ported from `InitAccBuffer` in `atm2lndType.F90`.
 """
-function atm2lnd_init_acc_buffer!(a2l::Atm2LndData)
+function atm2lnd_init_acc_buffer!(a2l::Atm2LndData{FT}) where {FT}
     nothing
 end
 
@@ -401,7 +401,7 @@ Stub for accumulation variable initialization. No-op in Julia port.
 
 Ported from `InitAccVars` in `atm2lndType.F90`.
 """
-function atm2lnd_init_acc_vars!(a2l::Atm2LndData, bounds::UnitRange{Int})
+function atm2lnd_init_acc_vars!(a2l::Atm2LndData{FT}, bounds::UnitRange{Int}) where {FT}
     nothing
 end
 
@@ -489,7 +489,7 @@ Stub for restart variable read/write. No-op in Julia port.
 
 Ported from `Restart` in `atm2lndType.F90`.
 """
-function atm2lnd_restart!(a2l::Atm2LndData, bounds::UnitRange{Int})
+function atm2lnd_restart!(a2l::Atm2LndData{FT}, bounds::UnitRange{Int}) where {FT}
     nothing
 end
 
@@ -504,64 +504,64 @@ Reset all array fields to empty. Mirrors Fortran `Clean` subroutine.
 
 Ported from `Clean` in `atm2lndType.F90`.
 """
-function atm2lnd_clean!(a2l::Atm2LndData)
+function atm2lnd_clean!(a2l::Atm2LndData{FT}) where {FT}
     # atm->lnd gridcell
-    a2l.forc_u_grc                    = Float64[]
-    a2l.forc_v_grc                    = Float64[]
-    a2l.forc_wind_grc                 = Float64[]
-    a2l.forc_hgt_grc                  = Float64[]
-    a2l.forc_topo_grc                 = Float64[]
-    a2l.forc_hgt_u_grc                = Float64[]
-    a2l.forc_hgt_t_grc                = Float64[]
-    a2l.forc_hgt_q_grc                = Float64[]
-    a2l.forc_vp_grc                   = Float64[]
-    a2l.forc_pco2_grc                 = Float64[]
-    a2l.forc_solad_not_downscaled_grc = Matrix{Float64}(undef, 0, 0)
-    a2l.forc_solai_grc                = Matrix{Float64}(undef, 0, 0)
-    a2l.forc_solar_not_downscaled_grc = Float64[]
-    a2l.forc_ndep_grc                 = Float64[]
-    a2l.forc_pc13o2_grc               = Float64[]
-    a2l.forc_po2_grc                  = Float64[]
-    a2l.forc_aer_grc                  = Matrix{Float64}(undef, 0, 0)
-    a2l.forc_pch4_grc                 = Float64[]
-    a2l.forc_o3_grc                   = Float64[]
+    a2l.forc_u_grc                    = FT[]
+    a2l.forc_v_grc                    = FT[]
+    a2l.forc_wind_grc                 = FT[]
+    a2l.forc_hgt_grc                  = FT[]
+    a2l.forc_topo_grc                 = FT[]
+    a2l.forc_hgt_u_grc                = FT[]
+    a2l.forc_hgt_t_grc                = FT[]
+    a2l.forc_hgt_q_grc                = FT[]
+    a2l.forc_vp_grc                   = FT[]
+    a2l.forc_pco2_grc                 = FT[]
+    a2l.forc_solad_not_downscaled_grc = Matrix{FT}(undef, 0, 0)
+    a2l.forc_solai_grc                = Matrix{FT}(undef, 0, 0)
+    a2l.forc_solar_not_downscaled_grc = FT[]
+    a2l.forc_ndep_grc                 = FT[]
+    a2l.forc_pc13o2_grc               = FT[]
+    a2l.forc_po2_grc                  = FT[]
+    a2l.forc_aer_grc                  = Matrix{FT}(undef, 0, 0)
+    a2l.forc_pch4_grc                 = FT[]
+    a2l.forc_o3_grc                   = FT[]
 
     # atm->lnd not downscaled
-    a2l.forc_t_not_downscaled_grc     = Float64[]
-    a2l.forc_pbot_not_downscaled_grc  = Float64[]
-    a2l.forc_th_not_downscaled_grc    = Float64[]
-    a2l.forc_rho_not_downscaled_grc   = Float64[]
-    a2l.forc_lwrad_not_downscaled_grc = Float64[]
+    a2l.forc_t_not_downscaled_grc     = FT[]
+    a2l.forc_pbot_not_downscaled_grc  = FT[]
+    a2l.forc_th_not_downscaled_grc    = FT[]
+    a2l.forc_rho_not_downscaled_grc   = FT[]
+    a2l.forc_lwrad_not_downscaled_grc = FT[]
 
     # atm->lnd precipitation/humidity (gridcell-level, not downscaled)
-    a2l.forc_rain_not_downscaled_grc  = Float64[]
-    a2l.forc_snow_not_downscaled_grc  = Float64[]
-    a2l.forc_q_not_downscaled_grc     = Float64[]
+    a2l.forc_rain_not_downscaled_grc  = FT[]
+    a2l.forc_snow_not_downscaled_grc  = FT[]
+    a2l.forc_q_not_downscaled_grc     = FT[]
 
     # atm->lnd downscaled
-    a2l.forc_t_downscaled_col         = Float64[]
-    a2l.forc_pbot_downscaled_col      = Float64[]
-    a2l.forc_th_downscaled_col        = Float64[]
-    a2l.forc_rho_downscaled_col       = Float64[]
-    a2l.forc_lwrad_downscaled_col     = Float64[]
-    a2l.forc_solad_downscaled_col     = Matrix{Float64}(undef, 0, 0)
-    a2l.forc_solar_downscaled_col     = Float64[]
+    a2l.forc_t_downscaled_col         = FT[]
+    a2l.forc_pbot_downscaled_col      = FT[]
+    a2l.forc_th_downscaled_col        = FT[]
+    a2l.forc_rho_downscaled_col       = FT[]
+    a2l.forc_lwrad_downscaled_col     = FT[]
+    a2l.forc_solad_downscaled_col     = Matrix{FT}(undef, 0, 0)
+    a2l.forc_solar_downscaled_col     = FT[]
 
     # atm->lnd precipitation/humidity (column-level, downscaled)
-    a2l.forc_rain_downscaled_col      = Float64[]
-    a2l.forc_snow_downscaled_col      = Float64[]
-    a2l.forc_q_downscaled_col         = Float64[]
+    a2l.forc_rain_downscaled_col      = FT[]
+    a2l.forc_snow_downscaled_col      = FT[]
+    a2l.forc_q_downscaled_col         = FT[]
 
     # time-averaged
-    a2l.fsd24_patch                   = Float64[]
-    a2l.fsd240_patch                  = Float64[]
-    a2l.fsi24_patch                   = Float64[]
-    a2l.fsi240_patch                  = Float64[]
+    a2l.fsd24_patch                   = FT[]
+    a2l.fsd240_patch                  = FT[]
+    a2l.fsi24_patch                   = FT[]
+    a2l.fsi240_patch                  = FT[]
     if varctl.use_fates
-        a2l.wind24_patch              = Float64[]
+        a2l.wind24_patch              = FT[]
     end
-    a2l.t_mo_patch                    = Float64[]
-    a2l.t_mo_min_patch                = Float64[]
+    a2l.t_mo_patch                    = FT[]
+    a2l.t_mo_min_patch                = FT[]
 
     nothing
 end

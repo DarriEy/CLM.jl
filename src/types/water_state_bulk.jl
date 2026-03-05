@@ -15,13 +15,13 @@ column-level fields: `snow_persistence_col` and `int_snow_col`.
 
 Ported from `waterstatebulk_type` in `WaterStateBulkType.F90`.
 """
-Base.@kwdef mutable struct WaterStateBulkData
+Base.@kwdef mutable struct WaterStateBulkData{FT<:AbstractFloat}
     # --- Parent water state fields (composition) ---
     ws::WaterStateData = WaterStateData()
 
     # --- Bulk-specific column-level 1D fields ---
-    snow_persistence_col ::Vector{Float64} = Float64[]   # col length of time that ground has had non-zero snow thickness (sec)
-    int_snow_col         ::Vector{Float64} = Float64[]   # col integrated snowfall (mm H2O)
+    snow_persistence_col ::Vector{FT} = Float64[]   # col length of time that ground has had non-zero snow thickness (sec)
+    int_snow_col         ::Vector{FT} = Float64[]   # col integrated snowfall (mm H2O)
 end
 
 """
@@ -33,13 +33,13 @@ Calls parent `waterstate_init!` plus allocates bulk-specific fields.
 
 Ported from `InitBulk` + `InitBulkAllocate` in `WaterStateBulkType.F90`.
 """
-function waterstatebulk_init!(wsb::WaterStateBulkData, nc::Int, np::Int, nl::Int, ng::Int)
+function waterstatebulk_init!(wsb::WaterStateBulkData{FT}, nc::Int, np::Int, nl::Int, ng::Int) where {FT}
     # Initialize parent fields
     waterstate_init!(wsb.ws, nc, np, nl, ng)
 
     # Bulk-specific fields (InitBulkAllocate)
-    wsb.snow_persistence_col = fill(0.0, nc)
-    wsb.int_snow_col         = fill(0.0, nc)
+    wsb.snow_persistence_col = fill(zero(FT), nc)
+    wsb.int_snow_col         = fill(zero(FT), nc)
 
     return nothing
 end
@@ -49,11 +49,11 @@ end
 
 Deallocate (reset to empty) all fields of a `WaterStateBulkData` instance.
 """
-function waterstatebulk_clean!(wsb::WaterStateBulkData)
+function waterstatebulk_clean!(wsb::WaterStateBulkData{FT}) where {FT}
     waterstate_clean!(wsb.ws)
 
-    wsb.snow_persistence_col = Float64[]
-    wsb.int_snow_col         = Float64[]
+    wsb.snow_persistence_col = FT[]
+    wsb.int_snow_col         = FT[]
 
     return nothing
 end

@@ -48,29 +48,29 @@ emission fluxes, and turbulent deposition velocities.
 
 Ported from `dust_emis_base_type` in `DustEmisBase.F90`.
 """
-Base.@kwdef mutable struct DustEmisBaseData
+Base.@kwdef mutable struct DustEmisBaseData{FT<:AbstractFloat}
     # Overlap factors between source and sink distributions [dst_src_nbr × ndst]
-    ovr_src_snk_mss::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    ovr_src_snk_mss::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     # [m] Mass-weighted mean diameter resolved [ndst]
-    dmt_vwr::Vector{Float64} = Float64[]
+    dmt_vwr::Vector{FT} = Float64[]
     # [frc] Correction to Stokes settling velocity [ndst]
-    stk_crc::Vector{Float64} = Float64[]
+    stk_crc::Vector{FT} = Float64[]
     # Factor in saltation computation
-    saltation_factor::Float64 = 0.0
+    saltation_factor::FT = 0.0
     # Surface dust emission (kg/m**2/s) [np × ndst] [+ = to atm]
-    flx_mss_vrt_dst_patch::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    flx_mss_vrt_dst_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     # Total dust flux into atmosphere [np]
-    flx_mss_vrt_dst_tot_patch::Vector{Float64} = Float64[]
+    flx_mss_vrt_dst_tot_patch::Vector{FT} = Float64[]
     # Turbulent deposition velocity (m/s) [np × ndst]
-    vlc_trb_patch::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    vlc_trb_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     # Turbulent deposition velocity 1 (m/s) [np]
-    vlc_trb_1_patch::Vector{Float64} = Float64[]
+    vlc_trb_1_patch::Vector{FT} = Float64[]
     # Turbulent deposition velocity 2 (m/s) [np]
-    vlc_trb_2_patch::Vector{Float64} = Float64[]
+    vlc_trb_2_patch::Vector{FT} = Float64[]
     # Turbulent deposition velocity 3 (m/s) [np]
-    vlc_trb_3_patch::Vector{Float64} = Float64[]
+    vlc_trb_3_patch::Vector{FT} = Float64[]
     # Turbulent deposition velocity 4 (m/s) [np]
-    vlc_trb_4_patch::Vector{Float64} = Float64[]
+    vlc_trb_4_patch::Vector{FT} = Float64[]
 end
 
 # ---------------------------------------------------------------------------
@@ -87,18 +87,18 @@ Stokes correction via `init_dust_vars!`.
 
 Ported from `InitBase` / `InitAllocateBase` in `DustEmisBase.F90`.
 """
-function dust_emis_init!(dust::DustEmisBaseData, np::Int)
-    dust.flx_mss_vrt_dst_patch     = fill(NaN, np, NDST)
-    dust.flx_mss_vrt_dst_tot_patch = fill(NaN, np)
-    dust.vlc_trb_patch             = fill(NaN, np, NDST)
-    dust.vlc_trb_1_patch           = fill(NaN, np)
-    dust.vlc_trb_2_patch           = fill(NaN, np)
-    dust.vlc_trb_3_patch           = fill(NaN, np)
-    dust.vlc_trb_4_patch           = fill(NaN, np)
+function dust_emis_init!(dust::DustEmisBaseData{FT}, np::Int) where {FT}
+    dust.flx_mss_vrt_dst_patch     = fill(FT(NaN), np, NDST)
+    dust.flx_mss_vrt_dst_tot_patch = fill(FT(NaN), np)
+    dust.vlc_trb_patch             = fill(FT(NaN), np, NDST)
+    dust.vlc_trb_1_patch           = fill(FT(NaN), np)
+    dust.vlc_trb_2_patch           = fill(FT(NaN), np)
+    dust.vlc_trb_3_patch           = fill(FT(NaN), np)
+    dust.vlc_trb_4_patch           = fill(FT(NaN), np)
 
-    dust.ovr_src_snk_mss = fill(NaN, DST_SRC_NBR, NDST)
-    dust.dmt_vwr         = fill(NaN, NDST)
-    dust.stk_crc         = fill(NaN, NDST)
+    dust.ovr_src_snk_mss = fill(FT(NaN), DST_SRC_NBR, NDST)
+    dust.dmt_vwr         = fill(FT(NaN), NDST)
+    dust.stk_crc         = fill(FT(NaN), NDST)
 
     # Compute size distributions, overlap factors, saltation factor, stk_crc
     init_dust_vars!(dust)
@@ -118,18 +118,18 @@ Deallocate (reset to empty) all dust emission data arrays.
 
 Ported from `CleanBase` in `DustEmisBase.F90`.
 """
-function dust_emis_clean!(dust::DustEmisBaseData)
-    dust.flx_mss_vrt_dst_patch     = Matrix{Float64}(undef, 0, 0)
-    dust.flx_mss_vrt_dst_tot_patch = Float64[]
-    dust.vlc_trb_patch             = Matrix{Float64}(undef, 0, 0)
-    dust.vlc_trb_1_patch           = Float64[]
-    dust.vlc_trb_2_patch           = Float64[]
-    dust.vlc_trb_3_patch           = Float64[]
-    dust.vlc_trb_4_patch           = Float64[]
+function dust_emis_clean!(dust::DustEmisBaseData{FT}) where {FT}
+    dust.flx_mss_vrt_dst_patch     = Matrix{FT}(undef, 0, 0)
+    dust.flx_mss_vrt_dst_tot_patch = FT[]
+    dust.vlc_trb_patch             = Matrix{FT}(undef, 0, 0)
+    dust.vlc_trb_1_patch           = FT[]
+    dust.vlc_trb_2_patch           = FT[]
+    dust.vlc_trb_3_patch           = FT[]
+    dust.vlc_trb_4_patch           = FT[]
 
-    dust.ovr_src_snk_mss = Matrix{Float64}(undef, 0, 0)
-    dust.dmt_vwr         = Float64[]
-    dust.stk_crc         = Float64[]
+    dust.ovr_src_snk_mss = Matrix{FT}(undef, 0, 0)
+    dust.dmt_vwr         = FT[]
+    dust.stk_crc         = FT[]
 
     return nothing
 end
@@ -152,7 +152,7 @@ S. Levis (modifications).
 
 Ported from `InitDustVars` in `DustEmisBase.F90`.
 """
-function init_dust_vars!(dust::DustEmisBaseData)
+function init_dust_vars!(dust::DustEmisBaseData{FT}) where {FT}
     ndst = NDST
     dst_src_nbr = DST_SRC_NBR
     sz_nbr = SZ_NBR
@@ -487,7 +487,7 @@ Returns `true` if valid, throws an error otherwise.
 
 Ported from `CheckDustEmisIsValid` in `DustEmisBase.F90`.
 """
-function check_dust_emis_is_valid(dust::DustEmisBaseData, p::Int)
+function check_dust_emis_is_valid(dust::DustEmisBaseData{FT}, p::Int) where {FT}
     if abs(sum(dust.flx_mss_vrt_dst_patch[p, :]) - dust.flx_mss_vrt_dst_tot_patch[p]) > 0.0
         error("Sum over dust bins does NOT equal total dust for patch $p")
     end
@@ -520,7 +520,7 @@ with all flux and deposition velocity fields.
 
 Ported from `GetPatchVars` in `DustEmisBase.F90`.
 """
-function get_dust_patch_vars(dust::DustEmisBaseData, p::Int)
+function get_dust_patch_vars(dust::DustEmisBaseData{FT}, p::Int) where {FT}
     return (
         flx_mss_vrt_dst     = dust.flx_mss_vrt_dst_patch[p, :],
         flx_mss_vrt_dst_tot = dust.flx_mss_vrt_dst_tot_patch[p],
@@ -560,7 +560,7 @@ Write out information on dust emissions for the given patch.
 
 Ported from `WritePatchToLog` in `DustEmisBase.F90`.
 """
-function write_dust_patch_to_log(dust::DustEmisBaseData, p::Int)
+function write_dust_patch_to_log(dust::DustEmisBaseData{FT}, p::Int) where {FT}
     @info "flx_mss_vrt_dst_tot" dust.flx_mss_vrt_dst_tot_patch[p]
     @info "vlc_trb_1" dust.vlc_trb_1_patch[p]
     @info "vlc_trb_2" dust.vlc_trb_2_patch[p]

@@ -15,15 +15,15 @@ layer thickness (depth of thaw) at column level.
 
 Ported from `active_layer_type` in `ActiveLayerMod.F90`.
 """
-Base.@kwdef mutable struct ActiveLayerData
+Base.@kwdef mutable struct ActiveLayerData{FT<:AbstractFloat}
     # --- Public data members ---
-    altmax_col               ::Vector{Float64} = Float64[]   # col maximum annual depth of thaw (m)
-    altmax_lastyear_col      ::Vector{Float64} = Float64[]   # col prior year maximum annual depth of thaw (m)
+    altmax_col               ::Vector{FT} = Float64[]   # col maximum annual depth of thaw (m)
+    altmax_lastyear_col      ::Vector{FT} = Float64[]   # col prior year maximum annual depth of thaw (m)
     altmax_indx_col          ::Vector{Int}     = Int[]       # col maximum annual depth of thaw index
     altmax_lastyear_indx_col ::Vector{Int}     = Int[]       # col prior year maximum annual depth of thaw index
 
     # --- Private data members ---
-    alt_col                  ::Vector{Float64} = Float64[]   # col current depth of thaw (m)
+    alt_col                  ::Vector{FT} = Float64[]   # col current depth of thaw (m)
     alt_indx_col             ::Vector{Int}     = Int[]       # col current depth of thaw index
 end
 
@@ -36,10 +36,10 @@ to `typemax(Int)`.
 
 Ported from `active_layer_type%InitAllocate` in `ActiveLayerMod.F90`.
 """
-function active_layer_init!(al::ActiveLayerData, ncols::Int)
-    al.alt_col                  = fill(SPVAL, ncols)
-    al.altmax_col               = fill(SPVAL, ncols)
-    al.altmax_lastyear_col      = fill(SPVAL, ncols)
+function active_layer_init!(al::ActiveLayerData{FT}, ncols::Int) where {FT}
+    al.alt_col                  = fill(FT(SPVAL), ncols)
+    al.altmax_col               = fill(FT(SPVAL), ncols)
+    al.altmax_lastyear_col      = fill(FT(SPVAL), ncols)
     al.alt_indx_col             = fill(typemax(Int), ncols)
     al.altmax_indx_col          = fill(typemax(Int), ncols)
     al.altmax_lastyear_indx_col = fill(typemax(Int), ncols)
@@ -80,10 +80,10 @@ Deallocate (reset to empty) all fields of an `ActiveLayerData` instance.
 
 Ported from `active_layer_type%Clean`.
 """
-function active_layer_clean!(al::ActiveLayerData)
-    al.alt_col                  = Float64[]
-    al.altmax_col               = Float64[]
-    al.altmax_lastyear_col      = Float64[]
+function active_layer_clean!(al::ActiveLayerData{FT}) where {FT}
+    al.alt_col                  = FT[]
+    al.altmax_col               = FT[]
+    al.altmax_lastyear_col      = FT[]
     al.alt_indx_col             = Int[]
     al.altmax_indx_col          = Int[]
     al.altmax_lastyear_indx_col = Int[]

@@ -12,33 +12,33 @@ snow water, canopy water, aquifer water, and excess ice.
 
 Ported from `waterstate_type` in `WaterStateType.F90`.
 """
-Base.@kwdef mutable struct WaterStateData
+Base.@kwdef mutable struct WaterStateData{FT<:AbstractFloat}
     # --- Column-level 1D fields ---
-    h2osno_no_layers_col   ::Vector{Float64} = Float64[]   # col snow not resolved into layers (mm H2O)
-    h2osfc_col             ::Vector{Float64} = Float64[]   # col surface water (mm H2O)
-    wa_col                 ::Vector{Float64} = Float64[]   # col water in unconfined aquifer (mm)
-    dynbal_baseline_liq_col::Vector{Float64} = Float64[]   # col baseline liquid water for dynbal (mm H2O)
-    dynbal_baseline_ice_col::Vector{Float64} = Float64[]   # col baseline ice for dynbal (mm H2O)
-    exice_bulk_init        ::Vector{Float64} = Float64[]   # col initial excess ice concentration (unitless)
+    h2osno_no_layers_col   ::Vector{FT} = Float64[]   # col snow not resolved into layers (mm H2O)
+    h2osfc_col             ::Vector{FT} = Float64[]   # col surface water (mm H2O)
+    wa_col                 ::Vector{FT} = Float64[]   # col water in unconfined aquifer (mm)
+    dynbal_baseline_liq_col::Vector{FT} = Float64[]   # col baseline liquid water for dynbal (mm H2O)
+    dynbal_baseline_ice_col::Vector{FT} = Float64[]   # col baseline ice for dynbal (mm H2O)
+    exice_bulk_init        ::Vector{FT} = Float64[]   # col initial excess ice concentration (unitless)
 
     # --- Column-level 2D fields ---
-    h2osoi_liq_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col liquid water (kg/m2) (-nlevsno+1:nlevmaxurbgrnd)
-    h2osoi_ice_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col ice lens (kg/m2) (-nlevsno+1:nlevmaxurbgrnd)
-    h2osoi_vol_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col volumetric soil water [m3/m3] (1:nlevmaxurbgrnd)
-    excess_ice_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col excess ice (kg/m2) (-nlevsno+1:nlevmaxurbgrnd)
+    h2osoi_liq_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col liquid water (kg/m2) (-nlevsno+1:nlevmaxurbgrnd)
+    h2osoi_ice_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col ice lens (kg/m2) (-nlevsno+1:nlevmaxurbgrnd)
+    h2osoi_vol_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col volumetric soil water [m3/m3] (1:nlevmaxurbgrnd)
+    excess_ice_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col excess ice (kg/m2) (-nlevsno+1:nlevmaxurbgrnd)
 
     # --- Gridcell-level 2D fields ---
-    h2osoi_vol_prs_grc     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # grc prescribed volumetric soil water [m3/m3] (1:nlevgrnd)
+    h2osoi_vol_prs_grc     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # grc prescribed volumetric soil water [m3/m3] (1:nlevgrnd)
 
     # --- Patch-level 1D fields ---
-    snocan_patch           ::Vector{Float64} = Float64[]   # patch canopy snow water (mm H2O)
-    liqcan_patch           ::Vector{Float64} = Float64[]   # patch canopy liquid water (mm H2O)
+    snocan_patch           ::Vector{FT} = Float64[]   # patch canopy snow water (mm H2O)
+    liqcan_patch           ::Vector{FT} = Float64[]   # patch canopy liquid water (mm H2O)
 
     # --- Landunit-level 1D fields ---
-    stream_water_volume_lun::Vector{Float64} = Float64[]   # landunit volume of water in streams (m3)
+    stream_water_volume_lun::Vector{FT} = Float64[]   # landunit volume of water in streams (m3)
 
     # --- Scalar ---
-    aquifer_water_baseline ::Float64 = 0.0                 # baseline aquifer water for this bulk/tracer (mm)
+    aquifer_water_baseline ::FT = 0.0                 # baseline aquifer water for this bulk/tracer (mm)
 end
 
 """
@@ -50,35 +50,35 @@ Real fields are initialized to `NaN`.
 
 Ported from `waterstate_type%InitAllocate` in `WaterStateType.F90`.
 """
-function waterstate_init!(ws::WaterStateData, nc::Int, np::Int, nl::Int, ng::Int)
+function waterstate_init!(ws::WaterStateData{FT}, nc::Int, np::Int, nl::Int, ng::Int) where {FT}
     nlevgrnd       = varpar.nlevgrnd
     nlevsno        = varpar.nlevsno
     nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
     nlevtot        = nlevsno + nlevmaxurbgrnd  # total snow+soil levels
 
     # --- Column 1D ---
-    ws.h2osno_no_layers_col    = fill(NaN, nc)
-    ws.h2osfc_col              = fill(NaN, nc)
-    ws.wa_col                  = fill(NaN, nc)
-    ws.dynbal_baseline_liq_col = fill(NaN, nc)
-    ws.dynbal_baseline_ice_col = fill(NaN, nc)
-    ws.exice_bulk_init         = fill(NaN, nc)
+    ws.h2osno_no_layers_col    = fill(FT(NaN), nc)
+    ws.h2osfc_col              = fill(FT(NaN), nc)
+    ws.wa_col                  = fill(FT(NaN), nc)
+    ws.dynbal_baseline_liq_col = fill(FT(NaN), nc)
+    ws.dynbal_baseline_ice_col = fill(FT(NaN), nc)
+    ws.exice_bulk_init         = fill(FT(NaN), nc)
 
     # --- Column 2D ---
-    ws.h2osoi_liq_col  = fill(NaN, nc, nlevtot)   # (-nlevsno+1:nlevmaxurbgrnd)
-    ws.h2osoi_ice_col  = fill(NaN, nc, nlevtot)   # (-nlevsno+1:nlevmaxurbgrnd)
-    ws.h2osoi_vol_col  = fill(NaN, nc, nlevmaxurbgrnd)  # (1:nlevmaxurbgrnd)
-    ws.excess_ice_col  = fill(NaN, nc, nlevtot)    # (-nlevsno+1:nlevmaxurbgrnd)
+    ws.h2osoi_liq_col  = fill(FT(NaN), nc, nlevtot)   # (-nlevsno+1:nlevmaxurbgrnd)
+    ws.h2osoi_ice_col  = fill(FT(NaN), nc, nlevtot)   # (-nlevsno+1:nlevmaxurbgrnd)
+    ws.h2osoi_vol_col  = fill(FT(NaN), nc, nlevmaxurbgrnd)  # (1:nlevmaxurbgrnd)
+    ws.excess_ice_col  = fill(FT(NaN), nc, nlevtot)    # (-nlevsno+1:nlevmaxurbgrnd)
 
     # --- Gridcell 2D ---
-    ws.h2osoi_vol_prs_grc = fill(NaN, ng, nlevgrnd)
+    ws.h2osoi_vol_prs_grc = fill(FT(NaN), ng, nlevgrnd)
 
     # --- Patch 1D ---
-    ws.snocan_patch = fill(NaN, np)
-    ws.liqcan_patch = fill(NaN, np)
+    ws.snocan_patch = fill(FT(NaN), np)
+    ws.liqcan_patch = fill(FT(NaN), np)
 
     # --- Landunit 1D ---
-    ws.stream_water_volume_lun = fill(NaN, nl)
+    ws.stream_water_volume_lun = fill(FT(NaN), nl)
 
     return nothing
 end
@@ -88,23 +88,23 @@ end
 
 Deallocate (reset to empty) all fields of a `WaterStateData` instance.
 """
-function waterstate_clean!(ws::WaterStateData)
-    ws.h2osno_no_layers_col    = Float64[]
-    ws.h2osfc_col              = Float64[]
-    ws.wa_col                  = Float64[]
-    ws.dynbal_baseline_liq_col = Float64[]
-    ws.dynbal_baseline_ice_col = Float64[]
-    ws.exice_bulk_init         = Float64[]
+function waterstate_clean!(ws::WaterStateData{FT}) where {FT}
+    ws.h2osno_no_layers_col    = FT[]
+    ws.h2osfc_col              = FT[]
+    ws.wa_col                  = FT[]
+    ws.dynbal_baseline_liq_col = FT[]
+    ws.dynbal_baseline_ice_col = FT[]
+    ws.exice_bulk_init         = FT[]
 
-    ws.h2osoi_liq_col     = Matrix{Float64}(undef, 0, 0)
-    ws.h2osoi_ice_col     = Matrix{Float64}(undef, 0, 0)
-    ws.h2osoi_vol_col     = Matrix{Float64}(undef, 0, 0)
-    ws.excess_ice_col     = Matrix{Float64}(undef, 0, 0)
-    ws.h2osoi_vol_prs_grc = Matrix{Float64}(undef, 0, 0)
+    ws.h2osoi_liq_col     = Matrix{FT}(undef, 0, 0)
+    ws.h2osoi_ice_col     = Matrix{FT}(undef, 0, 0)
+    ws.h2osoi_vol_col     = Matrix{FT}(undef, 0, 0)
+    ws.excess_ice_col     = Matrix{FT}(undef, 0, 0)
+    ws.h2osoi_vol_prs_grc = Matrix{FT}(undef, 0, 0)
 
-    ws.snocan_patch            = Float64[]
-    ws.liqcan_patch            = Float64[]
-    ws.stream_water_volume_lun = Float64[]
+    ws.snocan_patch            = FT[]
+    ws.liqcan_patch            = FT[]
+    ws.stream_water_volume_lun = FT[]
 
     return nothing
 end

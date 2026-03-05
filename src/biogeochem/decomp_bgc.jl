@@ -22,20 +22,20 @@ definitions, and spinup factors for the BGC decomposition cascade.
 
 Ported from `decomp_cascade_con` in `SoilBiogeochemDecompCascadeConType.F90`.
 """
-Base.@kwdef mutable struct DecompCascadeConData
+Base.@kwdef mutable struct DecompCascadeConData{FT<:AbstractFloat}
     cascade_donor_pool             ::Vector{Int}     = Int[]
     cascade_receiver_pool          ::Vector{Int}     = Int[]
     floating_cn_ratio_decomp_pools ::BitVector        = BitVector()
     is_litter                      ::BitVector        = BitVector()
     is_soil                        ::BitVector        = BitVector()
     is_cwd                         ::BitVector        = BitVector()
-    initial_cn_ratio               ::Vector{Float64}  = Float64[]
-    initial_stock                  ::Vector{Float64}  = Float64[]
-    initial_stock_soildepth        ::Float64           = 0.3
+    initial_cn_ratio               ::Vector{FT} = Float64[]
+    initial_stock                  ::Vector{FT} = Float64[]
+    initial_stock_soildepth        ::FT           = 0.3
     is_metabolic                   ::BitVector        = BitVector()
     is_cellulose                   ::BitVector        = BitVector()
     is_lignin                      ::BitVector        = BitVector()
-    spinup_factor                  ::Vector{Float64}  = Float64[]
+    spinup_factor                  ::Vector{FT} = Float64[]
     decomp_pool_name_restart       ::Vector{String}   = String[]
     decomp_pool_name_history       ::Vector{String}   = String[]
     decomp_pool_name_long          ::Vector{String}   = String[]
@@ -56,25 +56,25 @@ fractions, turnover times, cellulose fraction, and initial C stocks.
 
 Ported from `params_type` in `SoilBiogeochemDecompCascadeBGCMod.F90`.
 """
-Base.@kwdef mutable struct DecompBGCParams
-    cn_s1_bgc               ::Float64          = 12.0
-    cn_s2_bgc               ::Float64          = 12.0
-    cn_s3_bgc               ::Float64          = 10.0
-    rf_l1s1_bgc             ::Float64          = 0.39
-    rf_l2s1_bgc             ::Float64          = 0.55
-    rf_l3s2_bgc             ::Float64          = 0.29
-    rf_s2s1_bgc             ::Float64          = 0.55
-    rf_s2s3_bgc             ::Float64          = 0.55
-    rf_s3s1_bgc             ::Float64          = 0.55
-    rf_cwdl3_bgc            ::Float64          = 0.0
-    tau_l1_bgc              ::Float64          = 1.0 / 18.5
-    tau_l2_l3_bgc           ::Float64          = 1.0 / 4.9
-    tau_s1_bgc              ::Float64          = 1.0 / 7.3
-    tau_s2_bgc              ::Float64          = 1.0 / 0.2
-    tau_s3_bgc              ::Float64          = 1.0 / 0.0045
-    cwd_fcel_bgc            ::Float64          = 0.0
-    bgc_initial_Cstocks     ::Vector{Float64}  = Float64[]
-    bgc_initial_Cstocks_depth ::Float64        = 0.3
+Base.@kwdef mutable struct DecompBGCParams{FT<:AbstractFloat}
+    cn_s1_bgc               ::FT          = 12.0
+    cn_s2_bgc               ::FT          = 12.0
+    cn_s3_bgc               ::FT          = 10.0
+    rf_l1s1_bgc             ::FT          = 0.39
+    rf_l2s1_bgc             ::FT          = 0.55
+    rf_l3s2_bgc             ::FT          = 0.29
+    rf_s2s1_bgc             ::FT          = 0.55
+    rf_s2s3_bgc             ::FT          = 0.55
+    rf_s3s1_bgc             ::FT          = 0.55
+    rf_cwdl3_bgc            ::FT          = 0.0
+    tau_l1_bgc              ::FT          = 1.0 / 18.5
+    tau_l2_l3_bgc           ::FT          = 1.0 / 4.9
+    tau_s1_bgc              ::FT          = 1.0 / 7.3
+    tau_s2_bgc              ::FT          = 1.0 / 0.2
+    tau_s3_bgc              ::FT          = 1.0 / 0.0045
+    cwd_fcel_bgc            ::FT          = 0.0
+    bgc_initial_Cstocks     ::Vector{FT} = Float64[]
+    bgc_initial_Cstocks_depth ::FT        = 0.3
 end
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ are set once during `init_decomp_cascade_bgc!` and used by
 Ported from module-level private variables in
 `SoilBiogeochemDecompCascadeBGCMod.F90`.
 """
-Base.@kwdef mutable struct DecompBGCState
+Base.@kwdef mutable struct DecompBGCState{FT<:AbstractFloat}
     # Pool indices
     i_pas_som ::Int = 0
     i_slo_som ::Int = 0
@@ -103,24 +103,24 @@ Base.@kwdef mutable struct DecompBGCState
     i_lig_lit ::Int = 0
 
     # Scalar respiration fractions
-    cwd_fcel  ::Float64 = 0.0
-    rf_l1s1   ::Float64 = 0.0
-    rf_l2s1   ::Float64 = 0.0
-    rf_l3s2   ::Float64 = 0.0
-    rf_s2s1   ::Float64 = 0.0
-    rf_s2s3   ::Float64 = 0.0
-    rf_s3s1   ::Float64 = 0.0
-    rf_cwdl3  ::Float64 = 0.0
+    cwd_fcel  ::FT = 0.0
+    rf_l1s1   ::FT = 0.0
+    rf_l2s1   ::FT = 0.0
+    rf_l3s2   ::FT = 0.0
+    rf_s2s1   ::FT = 0.0
+    rf_s2s3   ::FT = 0.0
+    rf_s3s1   ::FT = 0.0
+    rf_cwdl3  ::FT = 0.0
 
     # Spatially-varying respiration fractions (col × nlevdecomp)
-    rf_s1s2   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    rf_s1s3   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    rf_s1s2   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    rf_s1s3   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
 
     # Path fractions
-    f_s1s2    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    f_s1s3    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    f_s2s1    ::Float64 = 0.0
-    f_s2s3    ::Float64 = 0.0
+    f_s1s2    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    f_s1s3    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    f_s2s1    ::FT = 0.0
+    f_s2s3    ::FT = 0.0
 
     # Transition indices
     i_l1s1    ::Int = 0
@@ -136,7 +136,7 @@ Base.@kwdef mutable struct DecompBGCState
     # Public configuration flags
     normalize_q10_to_century_tfunc ::Bool    = true
     use_century_tfunc              ::Bool    = false
-    normalization_tref             ::Float64 = 15.0
+    normalization_tref             ::FT = 15.0
 end
 
 # ---------------------------------------------------------------------------

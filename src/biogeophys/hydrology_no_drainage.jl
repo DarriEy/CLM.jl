@@ -718,12 +718,7 @@ function handle_new_snow!(
         mask_nolake, bounds, nlevsno)
 
     # --- 2. Remove snow from thawed wetlands ---
-    # Build landunit itype lookup for each column
-    lun_itype_col = Vector{Int}(undef, nc)
-    for c in bounds
-        mask_nolake[c] || continue
-        lun_itype_col[c] = lun.itype[col.landunit[c]]
-    end
+    # Reuse lun_itype_col from Step 1c (already populated for all active columns)
 
     mask_thawed_wetland = falses(nc)
     build_filter_thawed_wetland_thin_snowpack!(
@@ -740,13 +735,6 @@ function handle_new_snow!(
         mask_thawed_wetland, bounds)
 
     # --- 3. Initialize explicit snow pack ---
-    # TODO: Re-enable explicit snow layer creation once all downstream snow
-    # physics code paths (compaction, water movement, SNICAR grain aging)
-    # are properly initialized from cold start. Currently, creating explicit
-    # layers (snl=-1) triggers NaN cascade in uninitialized code paths.
-    # For now, snow mass accumulates in h2osno_no_layers_col and diagnostics
-    # (snow_depth, frac_sno) are updated by bulkdiag_new_snow_diagnostics!.
-    #=
     mask_init_snowpack = falses(nc)
     build_filter_snowpack_initialized!(
         mask_init_snowpack,
@@ -769,7 +757,6 @@ function handle_new_snow!(
         waterdiagbulk.snomelt_accum_col,
         forc_t, waterdiagbulk.snow_depth_col,
         mask_init_snowpack, bounds, nlevsno)
-    =#
 
     return nothing
 end

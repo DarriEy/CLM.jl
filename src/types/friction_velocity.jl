@@ -13,52 +13,52 @@ computations, roughness lengths, forcing heights, and diagnostic variables.
 
 Ported from `frictionvel_type` in `FrictionVelocityMod.F90`.
 """
-Base.@kwdef mutable struct FrictionVelocityData
+Base.@kwdef mutable struct FrictionVelocityData{FT<:AbstractFloat}
     # --- Scalar parameters ---
-    zetamaxstable::Float64 = -999.0   # Max zeta under stable conditions
-    zsno::Float64          = -999.0   # Momentum roughness length for snow (m)
-    zlnd::Float64          = -999.0   # Momentum roughness length for soil, glacier, wetland (m)
-    zglc::Float64          = -999.0   # Momentum roughness length for glacier (Meier2022 only) (m)
+    zetamaxstable::FT = -999.0   # Max zeta under stable conditions
+    zsno::FT          = -999.0   # Momentum roughness length for snow (m)
+    zlnd::FT          = -999.0   # Momentum roughness length for soil, glacier, wetland (m)
+    zglc::FT          = -999.0   # Momentum roughness length for glacier (Meier2022 only) (m)
 
     # --- Patch-level fields (1D vectors) ---
-    forc_hgt_u_patch ::Vector{Float64} = Float64[]   # patch wind forcing height (10m+z0m+d) (m)
-    forc_hgt_t_patch ::Vector{Float64} = Float64[]   # patch temperature forcing height (10m+z0m+d) (m)
-    forc_hgt_q_patch ::Vector{Float64} = Float64[]   # patch specific humidity forcing height (10m+z0m+d) (m)
-    u10_patch        ::Vector{Float64} = Float64[]   # patch 10-m wind (m/s) (for dust model)
-    u10_clm_patch    ::Vector{Float64} = Float64[]   # patch 10-m wind (m/s) (for clm_map2gcell)
-    va_patch         ::Vector{Float64} = Float64[]   # patch atmospheric wind speed plus convective velocity (m/s)
-    vds_patch        ::Vector{Float64} = Float64[]   # patch deposition velocity term (m/s)
-    fv_patch         ::Vector{Float64} = Float64[]   # patch friction velocity (m/s) (for dust model)
-    rb1_patch        ::Vector{Float64} = Float64[]   # patch aerodynamical resistance (s/m)
-    rb10_patch       ::Vector{Float64} = Float64[]   # 10-day mean patch aerodynamical resistance (s/m)
-    ram1_patch       ::Vector{Float64} = Float64[]   # patch aerodynamical resistance (s/m)
-    z0mv_patch       ::Vector{Float64} = Float64[]   # patch roughness length over vegetation, momentum [m]
-    z0hv_patch       ::Vector{Float64} = Float64[]   # patch roughness length over vegetation, sensible heat [m]
-    z0qv_patch       ::Vector{Float64} = Float64[]   # patch roughness length over vegetation, latent heat [m]
-    z0mg_patch       ::Vector{Float64} = Float64[]   # patch roughness length over ground, momentum [m]
-    z0hg_patch       ::Vector{Float64} = Float64[]   # patch roughness length over ground, sensible heat [m]
-    z0qg_patch       ::Vector{Float64} = Float64[]   # patch roughness length over ground, latent heat [m]
-    kbm1_patch       ::Vector{Float64} = Float64[]   # natural logarithm of z0mg_p/z0hg_p [-]
-    rah1_patch       ::Vector{Float64} = Float64[]   # patch sensible heat flux resistance [s/m]
-    rah2_patch       ::Vector{Float64} = Float64[]   # patch below-canopy sensible heat flux resistance [s/m]
-    raw1_patch       ::Vector{Float64} = Float64[]   # patch moisture flux resistance [s/m]
-    raw2_patch       ::Vector{Float64} = Float64[]   # patch below-canopy moisture flux resistance [s/m]
-    ustar_patch      ::Vector{Float64} = Float64[]   # patch friction velocity [m/s]
-    um_patch         ::Vector{Float64} = Float64[]   # patch wind speed including the stability effect [m/s]
-    uaf_patch        ::Vector{Float64} = Float64[]   # patch canopy air speed [m/s]
-    taf_patch        ::Vector{Float64} = Float64[]   # patch canopy air temperature [K]
-    qaf_patch        ::Vector{Float64} = Float64[]   # patch canopy humidity [kg/kg]
-    obu_patch        ::Vector{Float64} = Float64[]   # patch Monin-Obukhov length [m]
-    zeta_patch       ::Vector{Float64} = Float64[]   # patch dimensionless stability parameter
-    vpd_patch        ::Vector{Float64} = Float64[]   # patch vapor pressure deficit [Pa]
-    num_iter_patch   ::Vector{Float64} = Float64[]   # patch number of iterations
-    z0m_actual_patch ::Vector{Float64} = Float64[]   # patch roughness length actually used, momentum [m]
+    forc_hgt_u_patch ::Vector{FT} = Float64[]   # patch wind forcing height (10m+z0m+d) (m)
+    forc_hgt_t_patch ::Vector{FT} = Float64[]   # patch temperature forcing height (10m+z0m+d) (m)
+    forc_hgt_q_patch ::Vector{FT} = Float64[]   # patch specific humidity forcing height (10m+z0m+d) (m)
+    u10_patch        ::Vector{FT} = Float64[]   # patch 10-m wind (m/s) (for dust model)
+    u10_clm_patch    ::Vector{FT} = Float64[]   # patch 10-m wind (m/s) (for clm_map2gcell)
+    va_patch         ::Vector{FT} = Float64[]   # patch atmospheric wind speed plus convective velocity (m/s)
+    vds_patch        ::Vector{FT} = Float64[]   # patch deposition velocity term (m/s)
+    fv_patch         ::Vector{FT} = Float64[]   # patch friction velocity (m/s) (for dust model)
+    rb1_patch        ::Vector{FT} = Float64[]   # patch aerodynamical resistance (s/m)
+    rb10_patch       ::Vector{FT} = Float64[]   # 10-day mean patch aerodynamical resistance (s/m)
+    ram1_patch       ::Vector{FT} = Float64[]   # patch aerodynamical resistance (s/m)
+    z0mv_patch       ::Vector{FT} = Float64[]   # patch roughness length over vegetation, momentum [m]
+    z0hv_patch       ::Vector{FT} = Float64[]   # patch roughness length over vegetation, sensible heat [m]
+    z0qv_patch       ::Vector{FT} = Float64[]   # patch roughness length over vegetation, latent heat [m]
+    z0mg_patch       ::Vector{FT} = Float64[]   # patch roughness length over ground, momentum [m]
+    z0hg_patch       ::Vector{FT} = Float64[]   # patch roughness length over ground, sensible heat [m]
+    z0qg_patch       ::Vector{FT} = Float64[]   # patch roughness length over ground, latent heat [m]
+    kbm1_patch       ::Vector{FT} = Float64[]   # natural logarithm of z0mg_p/z0hg_p [-]
+    rah1_patch       ::Vector{FT} = Float64[]   # patch sensible heat flux resistance [s/m]
+    rah2_patch       ::Vector{FT} = Float64[]   # patch below-canopy sensible heat flux resistance [s/m]
+    raw1_patch       ::Vector{FT} = Float64[]   # patch moisture flux resistance [s/m]
+    raw2_patch       ::Vector{FT} = Float64[]   # patch below-canopy moisture flux resistance [s/m]
+    ustar_patch      ::Vector{FT} = Float64[]   # patch friction velocity [m/s]
+    um_patch         ::Vector{FT} = Float64[]   # patch wind speed including the stability effect [m/s]
+    uaf_patch        ::Vector{FT} = Float64[]   # patch canopy air speed [m/s]
+    taf_patch        ::Vector{FT} = Float64[]   # patch canopy air temperature [K]
+    qaf_patch        ::Vector{FT} = Float64[]   # patch canopy humidity [kg/kg]
+    obu_patch        ::Vector{FT} = Float64[]   # patch Monin-Obukhov length [m]
+    zeta_patch       ::Vector{FT} = Float64[]   # patch dimensionless stability parameter
+    vpd_patch        ::Vector{FT} = Float64[]   # patch vapor pressure deficit [Pa]
+    num_iter_patch   ::Vector{FT} = Float64[]   # patch number of iterations
+    z0m_actual_patch ::Vector{FT} = Float64[]   # patch roughness length actually used, momentum [m]
 
     # --- Column-level fields (1D vectors) ---
-    z0mg_col    ::Vector{Float64} = Float64[]   # col roughness length over ground, momentum [m]
-    z0mg_2D_col ::Vector{Float64} = Float64[]   # 2-D field of input col roughness length over ground, momentum [m]
-    z0hg_col    ::Vector{Float64} = Float64[]   # col roughness length over ground, sensible heat [m]
-    z0qg_col    ::Vector{Float64} = Float64[]   # col roughness length over ground, latent heat [m]
+    z0mg_col    ::Vector{FT} = Float64[]   # col roughness length over ground, momentum [m]
+    z0mg_2D_col ::Vector{FT} = Float64[]   # 2-D field of input col roughness length over ground, momentum [m]
+    z0hg_col    ::Vector{FT} = Float64[]   # col roughness length over ground, sensible heat [m]
+    z0qg_col    ::Vector{FT} = Float64[]   # col roughness length over ground, latent heat [m]
 end
 
 # ==========================================================================
@@ -74,46 +74,46 @@ rb10_patch which is initialized to SPVAL (matching Fortran).
 
 Ported from `frictionvel_type%InitAllocate` in `FrictionVelocityMod.F90`.
 """
-function frictionvel_init!(fv::FrictionVelocityData, np::Int, nc::Int)
+function frictionvel_init!(fv::FrictionVelocityData{FT}, np::Int, nc::Int) where {FT}
     # Patch-level fields
-    fv.forc_hgt_u_patch  = fill(NaN, np)
-    fv.forc_hgt_t_patch  = fill(NaN, np)
-    fv.forc_hgt_q_patch  = fill(NaN, np)
-    fv.u10_patch         = fill(NaN, np)
-    fv.u10_clm_patch     = fill(NaN, np)
-    fv.va_patch          = fill(NaN, np)
-    fv.vds_patch         = fill(NaN, np)
-    fv.fv_patch          = fill(NaN, np)
-    fv.rb1_patch         = fill(NaN, np)
-    fv.rb10_patch        = fill(SPVAL, np)
-    fv.ram1_patch        = fill(NaN, np)
-    fv.z0mv_patch        = fill(NaN, np)
-    fv.z0hv_patch        = fill(NaN, np)
-    fv.z0qv_patch        = fill(NaN, np)
-    fv.z0mg_patch        = fill(NaN, np)
-    fv.z0hg_patch        = fill(NaN, np)
-    fv.z0qg_patch        = fill(NaN, np)
-    fv.kbm1_patch        = fill(NaN, np)
-    fv.rah1_patch        = fill(NaN, np)
-    fv.rah2_patch        = fill(NaN, np)
-    fv.raw1_patch        = fill(NaN, np)
-    fv.raw2_patch        = fill(NaN, np)
-    fv.ustar_patch       = fill(NaN, np)
-    fv.um_patch          = fill(NaN, np)
-    fv.uaf_patch         = fill(NaN, np)
-    fv.taf_patch         = fill(NaN, np)
-    fv.qaf_patch         = fill(NaN, np)
-    fv.obu_patch         = fill(NaN, np)
-    fv.zeta_patch        = fill(NaN, np)
-    fv.vpd_patch         = fill(NaN, np)
-    fv.num_iter_patch    = fill(NaN, np)
-    fv.z0m_actual_patch  = fill(NaN, np)
+    fv.forc_hgt_u_patch  = fill(FT(NaN), np)
+    fv.forc_hgt_t_patch  = fill(FT(NaN), np)
+    fv.forc_hgt_q_patch  = fill(FT(NaN), np)
+    fv.u10_patch         = fill(FT(NaN), np)
+    fv.u10_clm_patch     = fill(FT(NaN), np)
+    fv.va_patch          = fill(FT(NaN), np)
+    fv.vds_patch         = fill(FT(NaN), np)
+    fv.fv_patch          = fill(FT(NaN), np)
+    fv.rb1_patch         = fill(FT(NaN), np)
+    fv.rb10_patch        = fill(FT(SPVAL), np)
+    fv.ram1_patch        = fill(FT(NaN), np)
+    fv.z0mv_patch        = fill(FT(NaN), np)
+    fv.z0hv_patch        = fill(FT(NaN), np)
+    fv.z0qv_patch        = fill(FT(NaN), np)
+    fv.z0mg_patch        = fill(FT(NaN), np)
+    fv.z0hg_patch        = fill(FT(NaN), np)
+    fv.z0qg_patch        = fill(FT(NaN), np)
+    fv.kbm1_patch        = fill(FT(NaN), np)
+    fv.rah1_patch        = fill(FT(NaN), np)
+    fv.rah2_patch        = fill(FT(NaN), np)
+    fv.raw1_patch        = fill(FT(NaN), np)
+    fv.raw2_patch        = fill(FT(NaN), np)
+    fv.ustar_patch       = fill(FT(NaN), np)
+    fv.um_patch          = fill(FT(NaN), np)
+    fv.uaf_patch         = fill(FT(NaN), np)
+    fv.taf_patch         = fill(FT(NaN), np)
+    fv.qaf_patch         = fill(FT(NaN), np)
+    fv.obu_patch         = fill(FT(NaN), np)
+    fv.zeta_patch        = fill(FT(NaN), np)
+    fv.vpd_patch         = fill(FT(NaN), np)
+    fv.num_iter_patch    = fill(FT(NaN), np)
+    fv.z0m_actual_patch  = fill(FT(NaN), np)
 
     # Column-level fields
-    fv.z0mg_col    = fill(NaN, nc)
-    fv.z0mg_2D_col = fill(NaN, nc)
-    fv.z0hg_col    = fill(NaN, nc)
-    fv.z0qg_col    = fill(NaN, nc)
+    fv.z0mg_col    = fill(FT(NaN), nc)
+    fv.z0mg_2D_col = fill(FT(NaN), nc)
+    fv.z0hg_col    = fill(FT(NaN), nc)
+    fv.z0qg_col    = fill(FT(NaN), nc)
 
     return nothing
 end
@@ -123,43 +123,43 @@ end
 
 Deallocate (reset to empty) all fields of a `FrictionVelocityData` instance.
 """
-function frictionvel_clean!(fv::FrictionVelocityData)
-    fv.forc_hgt_u_patch  = Float64[]
-    fv.forc_hgt_t_patch  = Float64[]
-    fv.forc_hgt_q_patch  = Float64[]
-    fv.u10_patch         = Float64[]
-    fv.u10_clm_patch     = Float64[]
-    fv.va_patch          = Float64[]
-    fv.vds_patch         = Float64[]
-    fv.fv_patch          = Float64[]
-    fv.rb1_patch         = Float64[]
-    fv.rb10_patch        = Float64[]
-    fv.ram1_patch        = Float64[]
-    fv.z0mv_patch        = Float64[]
-    fv.z0hv_patch        = Float64[]
-    fv.z0qv_patch        = Float64[]
-    fv.z0mg_patch        = Float64[]
-    fv.z0hg_patch        = Float64[]
-    fv.z0qg_patch        = Float64[]
-    fv.kbm1_patch        = Float64[]
-    fv.rah1_patch        = Float64[]
-    fv.rah2_patch        = Float64[]
-    fv.raw1_patch        = Float64[]
-    fv.raw2_patch        = Float64[]
-    fv.ustar_patch       = Float64[]
-    fv.um_patch          = Float64[]
-    fv.uaf_patch         = Float64[]
-    fv.taf_patch         = Float64[]
-    fv.qaf_patch         = Float64[]
-    fv.obu_patch         = Float64[]
-    fv.zeta_patch        = Float64[]
-    fv.vpd_patch         = Float64[]
-    fv.num_iter_patch    = Float64[]
-    fv.z0m_actual_patch  = Float64[]
-    fv.z0mg_col          = Float64[]
-    fv.z0mg_2D_col       = Float64[]
-    fv.z0hg_col          = Float64[]
-    fv.z0qg_col          = Float64[]
+function frictionvel_clean!(fv::FrictionVelocityData{FT}) where {FT}
+    fv.forc_hgt_u_patch  = FT[]
+    fv.forc_hgt_t_patch  = FT[]
+    fv.forc_hgt_q_patch  = FT[]
+    fv.u10_patch         = FT[]
+    fv.u10_clm_patch     = FT[]
+    fv.va_patch          = FT[]
+    fv.vds_patch         = FT[]
+    fv.fv_patch          = FT[]
+    fv.rb1_patch         = FT[]
+    fv.rb10_patch        = FT[]
+    fv.ram1_patch        = FT[]
+    fv.z0mv_patch        = FT[]
+    fv.z0hv_patch        = FT[]
+    fv.z0qv_patch        = FT[]
+    fv.z0mg_patch        = FT[]
+    fv.z0hg_patch        = FT[]
+    fv.z0qg_patch        = FT[]
+    fv.kbm1_patch        = FT[]
+    fv.rah1_patch        = FT[]
+    fv.rah2_patch        = FT[]
+    fv.raw1_patch        = FT[]
+    fv.raw2_patch        = FT[]
+    fv.ustar_patch       = FT[]
+    fv.um_patch          = FT[]
+    fv.uaf_patch         = FT[]
+    fv.taf_patch         = FT[]
+    fv.qaf_patch         = FT[]
+    fv.obu_patch         = FT[]
+    fv.zeta_patch        = FT[]
+    fv.vpd_patch         = FT[]
+    fv.num_iter_patch    = FT[]
+    fv.z0m_actual_patch  = FT[]
+    fv.z0mg_col          = FT[]
+    fv.z0mg_2D_col       = FT[]
+    fv.z0hg_col          = FT[]
+    fv.z0qg_col          = FT[]
     return nothing
 end
 
@@ -170,7 +170,7 @@ Initialize for unit testing with hardcoded namelist and parameter values.
 
 Ported from `frictionvel_type%InitForTesting` in `FrictionVelocityMod.F90`.
 """
-function frictionvel_init_for_testing!(fv::FrictionVelocityData, np::Int, nc::Int)
+function frictionvel_init_for_testing!(fv::FrictionVelocityData{FT}, np::Int, nc::Int) where {FT}
     frictionvel_init!(fv, np, nc)
     fv.zetamaxstable = 0.5
     fv.zsno = 0.00085

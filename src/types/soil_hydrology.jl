@@ -12,42 +12,42 @@ recharge, and VIC (Variable Infiltration Capacity) model parameters.
 
 Ported from `soilhydrology_type` in `SoilHydrologyType.F90`.
 """
-Base.@kwdef mutable struct SoilHydrologyData
+Base.@kwdef mutable struct SoilHydrologyData{FT<:AbstractFloat}
     # --- Control flag ---
     h2osfcflag::Int = 1                # true => surface water is active (namelist)
 
     # --- NON-VIC state ---
-    num_substeps_col     ::Vector{Float64} = Float64[]   # col adaptive timestep counter
-    frost_table_col      ::Vector{Float64} = Float64[]   # col frost table depth (m)
-    zwt_col              ::Vector{Float64} = Float64[]   # col water table depth (m)
-    zwts_col             ::Vector{Float64} = Float64[]   # col water table depth, shallower of two water depths (m)
-    zwt_perched_col      ::Vector{Float64} = Float64[]   # col perched water table depth (m)
-    qcharge_col          ::Vector{Float64} = Float64[]   # col aquifer recharge rate (mm/s)
-    icefrac_col          ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col fraction of ice (ncols, nlevgrnd)
-    h2osfc_thresh_col    ::Vector{Float64} = Float64[]   # col level at which h2osfc "percolates" (time constant)
-    xs_urban_col         ::Vector{Float64} = Float64[]   # col excess soil water above urban ponding limit
+    num_substeps_col     ::Vector{FT} = Float64[]   # col adaptive timestep counter
+    frost_table_col      ::Vector{FT} = Float64[]   # col frost table depth (m)
+    zwt_col              ::Vector{FT} = Float64[]   # col water table depth (m)
+    zwts_col             ::Vector{FT} = Float64[]   # col water table depth, shallower of two water depths (m)
+    zwt_perched_col      ::Vector{FT} = Float64[]   # col perched water table depth (m)
+    qcharge_col          ::Vector{FT} = Float64[]   # col aquifer recharge rate (mm/s)
+    icefrac_col          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col fraction of ice (ncols, nlevgrnd)
+    h2osfc_thresh_col    ::Vector{FT} = Float64[]   # col level at which h2osfc "percolates" (time constant)
+    xs_urban_col         ::Vector{FT} = Float64[]   # col excess soil water above urban ponding limit
 
     # --- VIC parameters ---
-    hkdepth_col          ::Vector{Float64} = Float64[]   # col VIC decay factor (m) (time constant)
-    b_infil_col          ::Vector{Float64} = Float64[]   # col VIC b infiltration parameter (time constant)
-    ds_col               ::Vector{Float64} = Float64[]   # col VIC fraction of Dsmax where non-linear baseflow begins (time constant)
-    dsmax_col            ::Vector{Float64} = Float64[]   # col VIC max velocity of baseflow (mm/day) (time constant)
-    Wsvic_col            ::Vector{Float64} = Float64[]   # col VIC fraction of max soil moisture where non-linear baseflow occurs (time constant)
-    porosity_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC porosity (1-bulk_density/soil_density) (ncols, nlayer)
-    vic_clm_fract_col    ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # col VIC fraction of VIC layers in CLM layers (ncols, nlayer, nlevsoi)
-    depth_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC layer depth of upper layer (ncols, nlayert)
-    c_param_col          ::Vector{Float64} = Float64[]   # col VIC baseflow exponent (Qb)
-    expt_col             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC pore-size distribution related parameter (Q12) (ncols, nlayer)
-    ksat_col             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC saturated hydrologic conductivity (ncols, nlayer)
-    phi_s_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture diffusion parameter (ncols, nlayer)
-    moist_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture (kg/m2) for VIC soil layers (ncols, nlayert)
-    moist_vol_col        ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC volumetric soil moisture for VIC soil layers (ncols, nlayert)
-    max_moist_col        ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC max layer moist + ice (mm) (ncols, nlayer)
-    top_moist_col        ::Vector{Float64} = Float64[]   # col VIC soil moisture in top layers
-    top_max_moist_col    ::Vector{Float64} = Float64[]   # col VIC maximum soil moisture in top layers
-    top_ice_col          ::Vector{Float64} = Float64[]   # col VIC ice len in top layers
-    top_moist_limited_col::Vector{Float64} = Float64[]   # col VIC soil moisture in top layers, limited to no greater than top_max_moist_col
-    ice_col              ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # col VIC soil ice (kg/m2) for VIC soil layers (ncols, nlayert)
+    hkdepth_col          ::Vector{FT} = Float64[]   # col VIC decay factor (m) (time constant)
+    b_infil_col          ::Vector{FT} = Float64[]   # col VIC b infiltration parameter (time constant)
+    ds_col               ::Vector{FT} = Float64[]   # col VIC fraction of Dsmax where non-linear baseflow begins (time constant)
+    dsmax_col            ::Vector{FT} = Float64[]   # col VIC max velocity of baseflow (mm/day) (time constant)
+    Wsvic_col            ::Vector{FT} = Float64[]   # col VIC fraction of max soil moisture where non-linear baseflow occurs (time constant)
+    porosity_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC porosity (1-bulk_density/soil_density) (ncols, nlayer)
+    vic_clm_fract_col    ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # col VIC fraction of VIC layers in CLM layers (ncols, nlayer, nlevsoi)
+    depth_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC layer depth of upper layer (ncols, nlayert)
+    c_param_col          ::Vector{FT} = Float64[]   # col VIC baseflow exponent (Qb)
+    expt_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC pore-size distribution related parameter (Q12) (ncols, nlayer)
+    ksat_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC saturated hydrologic conductivity (ncols, nlayer)
+    phi_s_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture diffusion parameter (ncols, nlayer)
+    moist_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture (kg/m2) for VIC soil layers (ncols, nlayert)
+    moist_vol_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC volumetric soil moisture for VIC soil layers (ncols, nlayert)
+    max_moist_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC max layer moist + ice (mm) (ncols, nlayer)
+    top_moist_col        ::Vector{FT} = Float64[]   # col VIC soil moisture in top layers
+    top_max_moist_col    ::Vector{FT} = Float64[]   # col VIC maximum soil moisture in top layers
+    top_ice_col          ::Vector{FT} = Float64[]   # col VIC ice len in top layers
+    top_moist_limited_col::Vector{FT} = Float64[]   # col VIC soil moisture in top layers, limited to no greater than top_max_moist_col
+    ice_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC soil ice (kg/m2) for VIC soil layers (ncols, nlayert)
 end
 
 """
@@ -59,50 +59,50 @@ source (`InitAllocate` sets all to `nan`).
 
 Ported from `soilhydrology_type%InitAllocate` in `SoilHydrologyType.F90`.
 """
-function soilhydrology_init!(sh::SoilHydrologyData, nc::Int)
+function soilhydrology_init!(sh::SoilHydrologyData{FT}, nc::Int) where {FT}
     nlevgrnd = varpar.nlevgrnd
     nlevsoi  = varpar.nlevsoi
     nlayer   = NLAYER
     nlayert  = varpar.nlayert
 
     # --- NON-VIC 1D ---
-    sh.num_substeps_col      = fill(NaN, nc)
-    sh.frost_table_col       = fill(NaN, nc)
-    sh.zwt_col               = fill(NaN, nc)
-    sh.zwt_perched_col       = fill(NaN, nc)
-    sh.zwts_col              = fill(NaN, nc)
-    sh.qcharge_col           = fill(NaN, nc)
-    sh.h2osfc_thresh_col     = fill(NaN, nc)
-    sh.xs_urban_col          = fill(NaN, nc)
+    sh.num_substeps_col      = fill(FT(NaN), nc)
+    sh.frost_table_col       = fill(FT(NaN), nc)
+    sh.zwt_col               = fill(FT(NaN), nc)
+    sh.zwt_perched_col       = fill(FT(NaN), nc)
+    sh.zwts_col              = fill(FT(NaN), nc)
+    sh.qcharge_col           = fill(FT(NaN), nc)
+    sh.h2osfc_thresh_col     = fill(FT(NaN), nc)
+    sh.xs_urban_col          = fill(FT(NaN), nc)
 
     # --- NON-VIC 2D ---
-    sh.icefrac_col           = fill(NaN, nc, nlevgrnd)
+    sh.icefrac_col           = fill(FT(NaN), nc, nlevgrnd)
 
     # --- VIC 1D ---
-    sh.hkdepth_col           = fill(NaN, nc)
-    sh.b_infil_col           = fill(NaN, nc)
-    sh.ds_col                = fill(NaN, nc)
-    sh.dsmax_col             = fill(NaN, nc)
-    sh.Wsvic_col             = fill(NaN, nc)
-    sh.c_param_col           = fill(NaN, nc)
-    sh.top_moist_col         = fill(NaN, nc)
-    sh.top_max_moist_col     = fill(NaN, nc)
-    sh.top_ice_col           = fill(NaN, nc)
-    sh.top_moist_limited_col = fill(NaN, nc)
+    sh.hkdepth_col           = fill(FT(NaN), nc)
+    sh.b_infil_col           = fill(FT(NaN), nc)
+    sh.ds_col                = fill(FT(NaN), nc)
+    sh.dsmax_col             = fill(FT(NaN), nc)
+    sh.Wsvic_col             = fill(FT(NaN), nc)
+    sh.c_param_col           = fill(FT(NaN), nc)
+    sh.top_moist_col         = fill(FT(NaN), nc)
+    sh.top_max_moist_col     = fill(FT(NaN), nc)
+    sh.top_ice_col           = fill(FT(NaN), nc)
+    sh.top_moist_limited_col = fill(FT(NaN), nc)
 
     # --- VIC 2D ---
-    sh.porosity_col          = fill(NaN, nc, nlayer)
-    sh.depth_col             = fill(NaN, nc, nlayert)
-    sh.expt_col              = fill(NaN, nc, nlayer)
-    sh.ksat_col              = fill(NaN, nc, nlayer)
-    sh.phi_s_col             = fill(NaN, nc, nlayer)
-    sh.moist_col             = fill(NaN, nc, nlayert)
-    sh.moist_vol_col         = fill(NaN, nc, nlayert)
-    sh.max_moist_col         = fill(NaN, nc, nlayer)
-    sh.ice_col               = fill(NaN, nc, nlayert)
+    sh.porosity_col          = fill(FT(NaN), nc, nlayer)
+    sh.depth_col             = fill(FT(NaN), nc, nlayert)
+    sh.expt_col              = fill(FT(NaN), nc, nlayer)
+    sh.ksat_col              = fill(FT(NaN), nc, nlayer)
+    sh.phi_s_col             = fill(FT(NaN), nc, nlayer)
+    sh.moist_col             = fill(FT(NaN), nc, nlayert)
+    sh.moist_vol_col         = fill(FT(NaN), nc, nlayert)
+    sh.max_moist_col         = fill(FT(NaN), nc, nlayer)
+    sh.ice_col               = fill(FT(NaN), nc, nlayert)
 
     # --- VIC 3D ---
-    sh.vic_clm_fract_col     = fill(NaN, nc, nlayer, nlevsoi)
+    sh.vic_clm_fract_col     = fill(FT(NaN), nc, nlayer, nlevsoi)
 
     return nothing
 end
@@ -112,38 +112,38 @@ end
 
 Deallocate (reset to empty) all fields of a `SoilHydrologyData` instance.
 """
-function soilhydrology_clean!(sh::SoilHydrologyData)
+function soilhydrology_clean!(sh::SoilHydrologyData{FT}) where {FT}
     # 1D vectors
-    sh.num_substeps_col      = Float64[]
-    sh.frost_table_col       = Float64[]
-    sh.zwt_col               = Float64[]
-    sh.zwts_col              = Float64[]
-    sh.zwt_perched_col       = Float64[]
-    sh.qcharge_col           = Float64[]
-    sh.h2osfc_thresh_col     = Float64[]
-    sh.xs_urban_col          = Float64[]
-    sh.hkdepth_col           = Float64[]
-    sh.b_infil_col           = Float64[]
-    sh.ds_col                = Float64[]
-    sh.dsmax_col             = Float64[]
-    sh.Wsvic_col             = Float64[]
-    sh.c_param_col           = Float64[]
-    sh.top_moist_col         = Float64[]
-    sh.top_max_moist_col     = Float64[]
-    sh.top_ice_col           = Float64[]
-    sh.top_moist_limited_col = Float64[]
+    sh.num_substeps_col      = FT[]
+    sh.frost_table_col       = FT[]
+    sh.zwt_col               = FT[]
+    sh.zwts_col              = FT[]
+    sh.zwt_perched_col       = FT[]
+    sh.qcharge_col           = FT[]
+    sh.h2osfc_thresh_col     = FT[]
+    sh.xs_urban_col          = FT[]
+    sh.hkdepth_col           = FT[]
+    sh.b_infil_col           = FT[]
+    sh.ds_col                = FT[]
+    sh.dsmax_col             = FT[]
+    sh.Wsvic_col             = FT[]
+    sh.c_param_col           = FT[]
+    sh.top_moist_col         = FT[]
+    sh.top_max_moist_col     = FT[]
+    sh.top_ice_col           = FT[]
+    sh.top_moist_limited_col = FT[]
 
     # 2D matrices
-    sh.icefrac_col           = Matrix{Float64}(undef, 0, 0)
-    sh.porosity_col          = Matrix{Float64}(undef, 0, 0)
-    sh.depth_col             = Matrix{Float64}(undef, 0, 0)
-    sh.expt_col              = Matrix{Float64}(undef, 0, 0)
-    sh.ksat_col              = Matrix{Float64}(undef, 0, 0)
-    sh.phi_s_col             = Matrix{Float64}(undef, 0, 0)
-    sh.moist_col             = Matrix{Float64}(undef, 0, 0)
-    sh.moist_vol_col         = Matrix{Float64}(undef, 0, 0)
-    sh.max_moist_col         = Matrix{Float64}(undef, 0, 0)
-    sh.ice_col               = Matrix{Float64}(undef, 0, 0)
+    sh.icefrac_col           = Matrix{FT}(undef, 0, 0)
+    sh.porosity_col          = Matrix{FT}(undef, 0, 0)
+    sh.depth_col             = Matrix{FT}(undef, 0, 0)
+    sh.expt_col              = Matrix{FT}(undef, 0, 0)
+    sh.ksat_col              = Matrix{FT}(undef, 0, 0)
+    sh.phi_s_col             = Matrix{FT}(undef, 0, 0)
+    sh.moist_col             = Matrix{FT}(undef, 0, 0)
+    sh.moist_vol_col         = Matrix{FT}(undef, 0, 0)
+    sh.max_moist_col         = Matrix{FT}(undef, 0, 0)
+    sh.ice_col               = Matrix{FT}(undef, 0, 0)
 
     # 3D array
     sh.vic_clm_fract_col     = Array{Float64}(undef, 0, 0, 0)

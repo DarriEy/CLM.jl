@@ -12,48 +12,48 @@ at column level.
 
 Ported from `soilbiogeochem_carbonflux_type` in `SoilBiogeochemCarbonFluxType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemCarbonFluxData
+Base.@kwdef mutable struct SoilBiogeochemCarbonFluxData{FT<:AbstractFloat}
     # --- Fire fluxes ---
-    somc_fire_col                        ::Vector{Float64} = Float64[]  # (gC/m2/s) C emissions due to peat burning
+    somc_fire_col                        ::Vector{FT} = Float64[]  # (gC/m2/s) C emissions due to peat burning
 
     # --- Decomposition fluxes ---
-    decomp_cpools_sourcesink_col         ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/timestep) change in decomposing C pools
-    c_overflow_vr                        ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) C rejected by microbes
-    decomp_cascade_hr_vr_col            ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) het. resp. from decomposing C pools (vr)
-    decomp_cascade_hr_col               ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m2/s) het. resp. from decomposing C pools (integrated)
-    decomp_cascade_ctransfer_vr_col     ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) C transferred along decomp cascade (vr)
-    decomp_cascade_ctransfer_col        ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m2/s) C transferred along decomp cascade (integrated)
-    cn_col                               ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/gN) C:N ratio by pool
-    litr_lig_c_to_n_col                  ::Vector{Float64} = Float64[]  # (gC/gN) avg lignin C:N ratio
-    rf_decomp_cascade_col               ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (frac) respired fraction in decomp step
-    pathfrac_decomp_cascade_col         ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (frac) C fraction through given transition
-    decomp_k_col                         ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (1/s) rate coefficient for decomposition
+    decomp_cpools_sourcesink_col         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/timestep) change in decomposing C pools
+    c_overflow_vr                        ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) C rejected by microbes
+    decomp_cascade_hr_vr_col            ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) het. resp. from decomposing C pools (vr)
+    decomp_cascade_hr_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m2/s) het. resp. from decomposing C pools (integrated)
+    decomp_cascade_ctransfer_vr_col     ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) C transferred along decomp cascade (vr)
+    decomp_cascade_ctransfer_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m2/s) C transferred along decomp cascade (integrated)
+    cn_col                               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/gN) C:N ratio by pool
+    litr_lig_c_to_n_col                  ::Vector{FT} = Float64[]  # (gC/gN) avg lignin C:N ratio
+    rf_decomp_cascade_col               ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (frac) respired fraction in decomp step
+    pathfrac_decomp_cascade_col         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (frac) C fraction through given transition
+    decomp_k_col                         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (1/s) rate coefficient for decomposition
 
     # --- Soil matrix fields ---
-    hr_vr_col                            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m3/s) total vr het. resp.
-    o_scalar_col                         ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # fraction decomp limited by anoxia
-    w_scalar_col                         ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # fraction decomp limited by moisture
-    t_scalar_col                         ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # fraction decomp limited by temperature
-    som_c_leached_col                    ::Vector{Float64} = Float64[]  # (gC/m2/s) total SOM C loss from vertical transport
-    decomp_cpools_leached_col           ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m2/s) C loss from vert transport per pool
-    decomp_cpools_transport_tendency_col ::Array{Float64,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) C tendency due to vert transport
+    hr_vr_col                            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m3/s) total vr het. resp.
+    o_scalar_col                         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # fraction decomp limited by anoxia
+    w_scalar_col                         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # fraction decomp limited by moisture
+    t_scalar_col                         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # fraction decomp limited by temperature
+    som_c_leached_col                    ::Vector{FT} = Float64[]  # (gC/m2/s) total SOM C loss from vertical transport
+    decomp_cpools_leached_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m2/s) C loss from vert transport per pool
+    decomp_cpools_transport_tendency_col ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3/s) C tendency due to vert transport
 
     # --- Nitrif/denitrif ---
-    phr_vr_col                           ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # (gC/m3/s) potential hr (not N-limited)
-    fphr_col                             ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # fraction of potential het. resp.
+    phr_vr_col                           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # (gC/m3/s) potential hr (not N-limited)
+    fphr_col                             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # fraction of potential het. resp.
 
     # --- Summary HR fluxes ---
-    hr_col                               ::Vector{Float64} = Float64[]  # (gC/m2/s) total heterotrophic respiration
-    michr_col                            ::Vector{Float64} = Float64[]  # (gC/m2/s) microbial het. resp.
-    cwdhr_col                            ::Vector{Float64} = Float64[]  # (gC/m2/s) CWD het. resp.
-    lithr_col                            ::Vector{Float64} = Float64[]  # (gC/m2/s) litter het. resp.
-    somhr_col                            ::Vector{Float64} = Float64[]  # (gC/m2/s) SOM het. resp.
-    soilc_change_col                     ::Vector{Float64} = Float64[]  # (gC/m2/s) FUN used soil C
-    fates_litter_flux                    ::Vector{Float64} = Float64[]  # (gC/m2/s) total litter flux from FATES
+    hr_col                               ::Vector{FT} = Float64[]  # (gC/m2/s) total heterotrophic respiration
+    michr_col                            ::Vector{FT} = Float64[]  # (gC/m2/s) microbial het. resp.
+    cwdhr_col                            ::Vector{FT} = Float64[]  # (gC/m2/s) CWD het. resp.
+    lithr_col                            ::Vector{FT} = Float64[]  # (gC/m2/s) litter het. resp.
+    somhr_col                            ::Vector{FT} = Float64[]  # (gC/m2/s) SOM het. resp.
+    soilc_change_col                     ::Vector{FT} = Float64[]  # (gC/m2/s) FUN used soil C
+    fates_litter_flux                    ::Vector{FT} = Float64[]  # (gC/m2/s) total litter flux from FATES
 
     # --- Matrix-CN fields ---
-    matrix_decomp_fire_k_col            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # decomp rate due to fire
-    tri_ma_vr                            ::Matrix{Float64}  = Matrix{Float64}(undef, 0, 0)    # vertical C transfer rate in sparse matrix format
+    matrix_decomp_fire_k_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # decomp rate due to fire
+    tri_ma_vr                            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)    # vertical C transfer rate in sparse matrix format
     NE_AKallsoilc                        ::Int = 0
     RI_AKallsoilc                        ::Vector{Int} = Int[]
     CI_AKallsoilc                        ::Vector{Int} = Int[]
