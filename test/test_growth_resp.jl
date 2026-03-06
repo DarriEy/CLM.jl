@@ -31,11 +31,11 @@
         np = 1
         nrepr = CLM.NREPR
 
-        # PFT constants: woody tree (ivt=1)
+        # PFT constants: woody tree (ivt=1, Julia index ivt+1=2)
         pftcon = CLM.PftConGrowthResp(
-            woody  = [1.0],
-            grperc = [grperc_val],
-            grpnow = [grpnow_val],
+            woody  = [0.0, 1.0],
+            grperc = [0.0, grperc_val],
+            grpnow = [0.0, grpnow_val],
         )
 
         patch = CLM.PatchData()
@@ -132,9 +132,9 @@
         grpnow_val = 0.5
 
         pftcon = CLM.PftConGrowthResp(
-            woody  = [0.0],
-            grperc = [grperc_val],
-            grpnow = [grpnow_val],
+            woody  = [0.0, 0.0],
+            grperc = [0.0, grperc_val],
+            grpnow = [0.0, grpnow_val],
         )
 
         patch = CLM.PatchData()
@@ -197,11 +197,11 @@
         grpnow_val = 0.6
         npcropmin = 17
 
-        # PFT index 17 (first crop)
+        # PFT index 17 (first crop); Julia index = ivt+1 = 18
         pftcon = CLM.PftConGrowthResp()
-        pftcon.woody  = zeros(npcropmin)
-        pftcon.grperc = fill(grperc_val, npcropmin)
-        pftcon.grpnow = fill(grpnow_val, npcropmin)
+        pftcon.woody  = zeros(npcropmin + 1)
+        pftcon.grperc = fill(grperc_val, npcropmin + 1)
+        pftcon.grpnow = fill(grpnow_val, npcropmin + 1)
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
@@ -270,9 +270,9 @@
         nrepr = CLM.NREPR
 
         pftcon = CLM.PftConGrowthResp(
-            woody  = [1.0],
-            grperc = [0.3],
-            grpnow = [0.5],
+            woody  = [0.0, 1.0],
+            grperc = [0.0, 0.3],
+            grpnow = [0.0, 0.5],
         )
 
         patch = CLM.PatchData()
@@ -329,9 +329,9 @@
         nrepr = CLM.NREPR
 
         pftcon = CLM.PftConGrowthResp(
-            woody  = [1.0],
-            grperc = [0.3],
-            grpnow = [0.5],
+            woody  = [0.0, 1.0],
+            grperc = [0.0, 0.3],
+            grpnow = [0.0, 0.5],
         )
 
         patch = CLM.PatchData()

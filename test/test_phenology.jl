@@ -189,7 +189,7 @@
         )
 
         patch_data = CLM.PatchData()
-        patch_data.itype    = fill(5, np)   # PFT type 5
+        patch_data.itype    = fill(4, np)   # PFT type 5 in 1-based (0-based Fortran index = 4)
         patch_data.column   = fill(1, np)
         patch_data.gridcell = fill(1, np)
         patch_data.wtcol    = fill(1.0, np)
@@ -1063,7 +1063,7 @@
             mxSHplantdate = fill(350.0, 20),
         )
         patch_data = CLM.PatchData()
-        patch_data.itype = [5, 17]
+        patch_data.itype = [4, 16]  # 0-based Fortran PFT indices
         patch_data.gridcell = [1, 1]
         gridcell = CLM.GridcellData()
         gridcell.latdeg = [45.0]
@@ -1089,7 +1089,7 @@
             mxSHplantdate = fill(350.0, 20),
         )
         patch_data = CLM.PatchData()
-        patch_data.itype = [17]
+        patch_data.itype = [16]  # 0-based Fortran PFT index
         patch_data.gridcell = [1]
         gridcell = CLM.GridcellData()
         gridcell.latdeg = [-30.0]

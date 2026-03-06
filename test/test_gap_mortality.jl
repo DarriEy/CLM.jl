@@ -7,16 +7,16 @@
         # --- Params ---
         params = CLM.GapMortalityParams(
             k_mort = 0.3,
-            r_mort = fill(0.02, 20)  # 2% annual mortality for all PFTs
+            r_mort = fill(0.02, 21)  # 2% annual mortality for all PFTs (size ivt_max+1)
         )
 
         # --- PftCon ---
         pftcon = CLM.PftConGapMort(
-            woody    = vcat(fill(1.0, 8), fill(0.0, 12)),  # first 8 PFTs are woody
-            leafcn   = fill(25.0, 20),
-            livewdcn = fill(50.0, 20),
-            lf_f     = fill(1.0 / n_litr, 20, n_litr),     # equal fractions
-            fr_f     = fill(1.0 / n_litr, 20, n_litr),
+            woody    = vcat(fill(1.0, 9), fill(0.0, 12)),  # 0-based PFTs 0-8 are woody (Julia indices 1-9)
+            leafcn   = fill(25.0, 21),
+            livewdcn = fill(50.0, 21),
+            lf_f     = fill(1.0 / n_litr, 21, n_litr),     # equal fractions
+            fr_f     = fill(1.0 / n_litr, 21, n_litr),
         )
 
         # --- DGVS ---

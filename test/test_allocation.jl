@@ -79,7 +79,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 1
+        patch.itype[1] = 0  # 0-based Fortran PFT index
 
         crop = CLM.CropData()
         CLM.crop_init!(crop, np)
@@ -257,7 +257,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 1
+        patch.itype[1] = 0  # 0-based Fortran PFT index
 
         cnveg_cf = CLM.CNVegCarbonFluxData()
         CLM.cnveg_carbon_flux_init!(cnveg_cf, np, 1, 1)
@@ -321,7 +321,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 14  # C4 grass
+        patch.itype[1] = 13  # C4 grass (0-based Fortran PFT index)
 
         cnveg_cf = CLM.CNVegCarbonFluxData()
         CLM.cnveg_carbon_flux_init!(cnveg_cf, np, 1, 1)
@@ -378,7 +378,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 1
+        patch.itype[1] = 0  # 0-based Fortran PFT index
 
         cnveg_cf = CLM.CNVegCarbonFluxData()
         CLM.cnveg_carbon_flux_init!(cnveg_cf, np, 1, 1)
@@ -433,7 +433,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 1
+        patch.itype[1] = 0  # 0-based Fortran PFT index
 
         cnveg_cf = CLM.CNVegCarbonFluxData()
         CLM.cnveg_carbon_flux_init!(cnveg_cf, np, 1, 1)
@@ -488,7 +488,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 17  # crop
+        patch.itype[1] = 16  # crop (0-based Fortran PFT index)
 
         crop = CLM.CropData()
         CLM.crop_init!(crop, np)
@@ -543,7 +543,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 17
+        patch.itype[1] = 16  # 0-based Fortran PFT index
 
         crop = CLM.CropData()
         CLM.crop_init!(crop, np)
@@ -601,7 +601,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 17
+        patch.itype[1] = 16  # 0-based Fortran PFT index
 
         crop = CLM.CropData()
         CLM.crop_init!(crop, np)

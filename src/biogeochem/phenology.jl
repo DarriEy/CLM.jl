@@ -363,7 +363,7 @@ function cn_phenology_climate!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         # Update tempavg_t2m accumulator
         # This is a 10-day running mean accumulator update
@@ -395,7 +395,7 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
         if pftcon.evergreen[ivt] == 1.0
             # set background litterfall rate
             cnveg_state.bglfr_patch[p] = 1.0 / (pftcon.leaf_long[ivt] * avg_dayspyr * SECSPDAY)
@@ -455,7 +455,7 @@ function cn_season_decid_phenology!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
         c   = patch_data.column[p]
         g   = patch_data.gridcell[p]
 
@@ -608,7 +608,7 @@ function seasonal_critical_daylength(g::Int, p::Int,
                                      gridcell::GridcellData,
                                      patch_data::PatchData)
     method = _critical_daylight_method[]
-    ivt = patch_data.itype[p]
+    ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
     if method == critical_daylight_depends_on_latnveg
         if pftcon.season_decid_temperate[ivt] == 1.0
@@ -717,7 +717,7 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
         c   = patch_data.column[p]
         g   = patch_data.gridcell[p]
 
@@ -1075,7 +1075,7 @@ function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
     for p in eachindex(mask_pcropp)
         mask_pcropp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
         c   = patch_data.column[p]
         g   = patch_data.gridcell[p]
         h   = pstate.inhemi[p]
@@ -1279,7 +1279,7 @@ function cn_onset_growth!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         # onset period transfer
         if cnveg_state.onset_flag_patch[p] == 1.0
@@ -1351,7 +1351,7 @@ function cn_offset_litterfall!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         if cnveg_state.offset_flag_patch[p] != 1.0
             continue
@@ -1422,7 +1422,7 @@ function cn_background_litterfall!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         if cnveg_state.bglfr_patch[p] > 0.0
             cnveg_cf.leafc_to_litter_patch[p]  = cnveg_state.bglfr_patch[p] * cnveg_cs.leafc_patch[p]
@@ -1474,7 +1474,7 @@ function cn_livewood_turnover!(pstate::PhenologyState,
     for p in eachindex(mask_soilp)
         mask_soilp[p] || continue
 
-        ivt = patch_data.itype[p]
+        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         if pftcon.woody[ivt] <= 0.0
             continue
@@ -1570,7 +1570,7 @@ function cn_litter_to_column!(mask_soilp::BitVector,
         for p in eachindex(mask_soilp)
             mask_soilp[p] || continue
 
-            ivt = patch_data.itype[p]
+            ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
             c   = patch_data.column[p]
             wt  = patch_data.wtcol[p]
 

@@ -184,7 +184,7 @@ function calc_plant_cn_alloc!(mask_soilp::BitVector, bounds::UnitRange{Int},
         mask_soilp[p] || continue
 
         c = patch.column[p]
-        ivt = patch.itype[p]
+        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         # set local allocation variables
         f1 = pftcon.froot_leaf[ivt]
@@ -431,7 +431,7 @@ function calc_plant_nitrogen_demand!(mask_p::BitVector, bounds::UnitRange{Int},
         for p in bounds
             mask_p[p] || continue
 
-            ivt = patch.itype[p]
+            ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
             if crop.croplive_patch[p]
                 if crop_phase_vals[p] == cphase_leafemerge
@@ -501,7 +501,7 @@ function calc_plant_nitrogen_demand!(mask_p::BitVector, bounds::UnitRange{Int},
         for p in bounds
             mask_p[p] || continue
 
-            ivt = patch.itype[p]
+            ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
             # make sure available retrans N doesn't exceed storage
             cnveg_nf.avail_retransn_patch[p] = min(cnveg_nf.avail_retransn_patch[p],

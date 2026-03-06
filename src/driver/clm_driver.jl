@@ -813,7 +813,16 @@ function clm_drv!(config::CLMDriverConfig,
                    a2l.forc_hgt_t_grc, a2l.forc_hgt_u_grc, a2l.forc_hgt_q_grc,
                    grc.dayl, grc.max_dayl,
                    downreg_patch, leafn_patch,
-                   dtime)
+                   dtime;
+                   t10_patch=temp.t_a10_patch,
+                   nrad_patch=alb.nrad_patch,
+                   tlai_z_patch=alb.tlai_z_patch,
+                   vcmaxcint_sun_patch=alb.vcmaxcintsun_patch,
+                   vcmaxcint_sha_patch=alb.vcmaxcintsha_patch,
+                   parsun_z_patch=sa.parsun_z_patch,
+                   parsha_z_patch=sa.parsha_z_patch,
+                   laisun_z_patch=cs.laisun_z_patch,
+                   laisha_z_patch=cs.laisha_z_patch)
 
     # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)
     (num_nourbanl, filter_nourbanl) = bitvec_to_filter(filt.nourbanl)

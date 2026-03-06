@@ -173,7 +173,7 @@ function cnfire_calc_fire_root_wetness_li2014!(
 
             smp_node_lf = soil_suction_fn(c, j, s_node, soilstate)
 
-            ivt = patch.itype[p]
+            ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
             smp_node_lf = max(smpsc[ivt], smp_node_lf)
             btran2[p] = btran2[p] + rootfr[p, j] * max(0.0,
                 min((smp_node_lf - smpsc[ivt]) / (smpso[ivt] - smpsc[ivt]), 1.0))
@@ -550,7 +550,7 @@ function cnfire_fluxes!(
             mask_actfirep[p] = true
         end
 
-        ivt = patch.itype[p]
+        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         # Biomass burning — carbon emission fluxes
         m_gresp_storage_to_fire[p]       = gresp_storage[p]      * f * cc_other[ivt]
@@ -720,7 +720,7 @@ function cnfire_fluxes!(
         for p in bounds_p
             mask_soilp[p] || continue
             c = patch.column[p]
-            ivt = patch.itype[p]
+            ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
             fire_mortality_c_to_cwdc[c, j] = fire_mortality_c_to_cwdc[c, j] +
                 m_deadstemc_to_litter_fire[p] * patch.wtcol[p] * stem_prof[p, j]

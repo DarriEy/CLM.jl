@@ -16,8 +16,8 @@
         end
         patches_per_gc = div(np, ng)
 
-        # PFT types: use types 1..np (1-indexed)
-        patch_ivt = collect(1:np)
+        # PFT types: use types 0..np-1 (0-based Fortran indices)
+        patch_ivt = collect(0:np-1)
 
         # Build a PatchData with the minimum required fields for p2g_1d!
         pch = CLM.PatchData()

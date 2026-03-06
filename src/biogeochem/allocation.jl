@@ -94,7 +94,7 @@ function calc_gpp_mr_availc!(mask_soilp::BitVector, bounds::UnitRange{Int},
     for p in bounds
         mask_soilp[p] || continue
 
-        ivt = patch.itype[p]
+        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         # Convert psn from umol/m2/s -> gC/m2/s
         # The input psn (psnsun and psnsha) are expressed per unit LAI
@@ -210,7 +210,7 @@ function calc_crop_allocation_fractions!(mask_pcropp::BitVector, bounds::UnitRan
     for p in bounds
         mask_pcropp[p] || continue
 
-        ivt = patch.itype[p]
+        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         if crop.croplive_patch[p]
             # Phase 1 completed: leaf emergence to start of leaf decline
@@ -326,7 +326,7 @@ function calc_allometry!(mask_soilp::BitVector, bounds::UnitRange{Int},
     for p in bounds
         mask_soilp[p] || continue
 
-        ivt = patch.itype[p]
+        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         f1 = pftcon.froot_leaf[ivt]
         f2 = pftcon.croot_stem[ivt]

@@ -158,7 +158,7 @@
         lun_itype = [15, 1]  # landunit 1 is crop (istcrop=15), landunit 2 is not
         istcrop_val = 15
         patch_gridcell = [1, 1, 2]
-        patch_itype = [1, 2, 1]
+        patch_itype = [0, 1, 0]  # 0-based Fortran PFT indices
         fert_cft = [100.0 200.0; 50.0 150.0]  # (gridcell × ivt)
         pftcon_baset = [5.0, 8.0]
         grc_latdeg = [30.0, 60.0]

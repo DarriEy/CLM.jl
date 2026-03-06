@@ -239,7 +239,7 @@ function cn_products_partition_wood_fluxes!(prod::CNProductsFullData,
     # ---- Partition patch-level gross unrepresented fluxes ----
     for fp in 1:num_soilp
         p = filter_soilp[fp]
-        ivt = patch_itype[p]
+        ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         pp10  = pprod10[ivt]
         pp100 = pprod100[ivt]
@@ -270,7 +270,7 @@ function cn_products_partition_wood_fluxes!(prod::CNProductsFullData,
     # ---- Partition patch-level harvest fluxes ----
     for fp in 1:num_soilp
         p = filter_soilp[fp]
-        ivt = patch_itype[p]
+        ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         prod.hrv_deadstem_to_prod10_patch[p]  =
             wood_harvest_patch[p] * pprodharv10[ivt]
@@ -293,7 +293,7 @@ function cn_products_partition_wood_fluxes!(prod::CNProductsFullData,
     # simply sum the patch contributions to the owning gridcell.
     for p in bounds.begp:bounds.endp
         g   = patch_gridcell[p]
-        ivt = patch_itype[p]
+        ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         pp10  = pprod10[ivt]
         pp100 = pprod100[ivt]

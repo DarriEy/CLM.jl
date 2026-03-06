@@ -66,7 +66,7 @@
 
         patch = CLM.PatchData()
         patch.column = [1]
-        patch.itype  = [1]   # woody tree
+        patch.itype  = [0]   # woody tree (0-based Fortran PFT index)
 
         crop = CLM.CropData()
         crop.croplive_patch = [false]
@@ -358,7 +358,7 @@
 
         patch = CLM.PatchData()
         patch.column = [1]
-        patch.itype  = [17]   # corn (npcropmin = 17)
+        patch.itype  = [16]   # corn (0-based; npcropmin = 17 in 1-based)
 
         crop = CLM.CropData()
         crop.croplive_patch = [true]
@@ -488,7 +488,7 @@
         d.mask_soilp[2] = false  # second patch is inactive
 
         push!(d.patch.column, 1)
-        push!(d.patch.itype, 1)
+        push!(d.patch.itype, 0)  # 0-based Fortran PFT index
 
         push!(d.cnveg_cf.plant_calloc_patch, -99.0)  # sentinel
         push!(d.cnveg_cf.cpool_to_leafc_patch, -99.0)
@@ -676,7 +676,7 @@
         np = 1
         nrepr = CLM.NREPR
         dt = 1800.0
-        npft = 23  # need pftcon arrays large enough for ivt=23
+        npft = 24  # need pftcon arrays large enough for ivt=23 (+1 for 0-based→1-based)
 
         make_pft_vec2(val) = fill(val, npft)
         pftcon = CLM.PftConNutrientCompetition(

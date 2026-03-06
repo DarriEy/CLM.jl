@@ -395,7 +395,7 @@ function cnfire_area_li2014!(
                 livecrootc_xfer[p]) * patch.wtcol[p]
 
             # Fire spread rate
-            fsr_col[c] = fsr_col[c] + fsr_pft[patch.itype[p]] * patch.wtcol[p] / (1.0 - cropf_col[c])
+            fsr_col[c] = fsr_col[c] + fsr_pft[patch.itype[p] + 1] * patch.wtcol[p] / (1.0 - cropf_col[c])
 
             if lfwt[c] != 0.0
                 hdmlf = fire_li2014.forc_hdm[g]

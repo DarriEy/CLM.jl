@@ -208,7 +208,12 @@ function canopy_fluxes!(
         t10_patch       ::Vector{Float64} = Float64[],
         nrad_patch      ::Vector{Int} = Int[],
         tlai_z_patch    ::Matrix{Float64} = Matrix{Float64}(undef,0,0),
-        vcmaxcint_patch ::Vector{Float64} = Float64[],
+        vcmaxcint_sun_patch ::Vector{Float64} = Float64[],
+        vcmaxcint_sha_patch ::Vector{Float64} = Float64[],
+        parsun_z_patch  ::Matrix{Float64} = Matrix{Float64}(undef,0,0),
+        parsha_z_patch  ::Matrix{Float64} = Matrix{Float64}(undef,0,0),
+        laisun_z_patch  ::Matrix{Float64} = Matrix{Float64}(undef,0,0),
+        laisha_z_patch  ::Matrix{Float64} = Matrix{Float64}(undef,0,0),
         leaf_mr_vcm     ::Float64 = 0.015)
 
     np = length(bounds_patch)
@@ -640,9 +645,53 @@ function canopy_fluxes!(
         end
 
         # --- Photosynthesis ---
-        # (Calls to photosynthesis!, fractionation!, photosynthesis_hydrstress!
-        #  would go here. For now we use the rssun/rssha values already set
-        #  by previous calls or initialization.)
+        # Call photosynthesis for sunlit and shaded leaves to update rssun/rssha
+        if !isempty(nrad_patch) && !isempty(parsun_z_patch)
+            # Build patch-indexed forc_pbot from column-level data
+            forc_pbot_patch = zeros(endp)
+            for fi in 1:fn
+                p = filterp[fi]
+                c = patch_data.column[p]
+                forc_pbot_patch[p] = forc_pbot_col[c]
+            end
+
+            # PFT index vector (+1 for 0-based Fortran → 1-based Julia)
+            ivt_vec = patch_data.itype .+ 1
+
+            # Sunlit leaves
+            photosynthesis!(photosyns,
+                svpts, eah, o2_arr, co2_arr, rb,
+                energyflux.btran_patch, dayl_factor, leafn_patch,
+                forc_pbot_patch, temperature.t_veg_patch, t10_patch,
+                temperature.thm_patch, nrad_patch,
+                tlai_z_patch, canopystate.tlai_patch,
+                parsun_z_patch, laisun_z_patch,
+                vcmaxcint_sun_patch,
+                o3coefv_patch, o3coefg_patch,
+                c3psn_pft, leafcn_pft, flnr_pft, fnitr_pft, slatop_pft,
+                mbbopt_pft, medlynintercept_pft, medlynslope_pft,
+                ivt_vec, patch_data.column,
+                mask_exposedvegp, bounds_patch, "sun";
+                use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
+                leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft)
+
+            # Shaded leaves
+            photosynthesis!(photosyns,
+                svpts, eah, o2_arr, co2_arr, rb,
+                energyflux.btran_patch, dayl_factor, leafn_patch,
+                forc_pbot_patch, temperature.t_veg_patch, t10_patch,
+                temperature.thm_patch, nrad_patch,
+                tlai_z_patch, canopystate.tlai_patch,
+                parsha_z_patch, laisha_z_patch,
+                vcmaxcint_sha_patch,
+                o3coefv_patch, o3coefg_patch,
+                c3psn_pft, leafcn_pft, flnr_pft, fnitr_pft, slatop_pft,
+                mbbopt_pft, medlynintercept_pft, medlynslope_pft,
+                ivt_vec, patch_data.column,
+                mask_exposedvegp, bounds_patch, "sha";
+                use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
+                leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft)
+        end
 
         # --- Heat transfer conductances ---
         for fi in 1:fn

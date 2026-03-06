@@ -127,10 +127,10 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
 
             # Update the leaf area index based on leafC and SLA
             # Eq 3 from Thornton and Zimmerman, 2007, J Clim, 20, 3902-3923.
-            if dsladlai[ivt[p]] > 0.0
-                tlai[p] = (slatop[ivt[p]] * (exp(leafc[p] * dsladlai[ivt[p]]) - 1.0)) / dsladlai[ivt[p]]
+            if dsladlai[ivt[p] + 1] > 0.0
+                tlai[p] = (slatop[ivt[p] + 1] * (exp(leafc[p] * dsladlai[ivt[p] + 1]) - 1.0)) / dsladlai[ivt[p] + 1]
             else
-                tlai[p] = slatop[ivt[p]] * leafc[p]
+                tlai[p] = slatop[ivt[p] + 1] * leafc[p]
             end
             tlai[p] = max(0.0, tlai[p])
 
@@ -153,10 +153,10 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
             if use_biomass_heat_storage
                 # Assumes fbw (fraction of biomass that is water) is the same for leaves and stems
                 leaf_biomass[p] = max(0.0025, leafc[p]) *
-                    c_to_b * 1.0e-3 / (1.0 - fbw[ivt[p]])
+                    c_to_b * 1.0e-3 / (1.0 - fbw[ivt[p] + 1])
             end
 
-            if woody[ivt[p]] == 1.0
+            if woody[ivt[p] + 1] == 1.0
 
                 # Trees and shrubs: simple allometry with hard-wired stem taper
                 # and nstem from PFT parameter file
@@ -164,23 +164,23 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
                     # CNDV pathway (not commonly used)
                     # Placeholder: would use dgv_ecophyscon allom2/allom3 and nind/fpcgrid
                     # For now, use standard non-CNDV allometry
-                    htop[p] = ((3.0 * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p]] * taper[ivt[p]]) /
-                        (pi * nstem[ivt[p]] * dwood[ivt[p]]))^(1.0 / 3.0)
+                    htop[p] = ((3.0 * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p] + 1] * taper[ivt[p] + 1]) /
+                        (pi * nstem[ivt[p] + 1] * dwood[ivt[p] + 1]))^(1.0 / 3.0)
                 else
                     # correct height calculation if doing accelerated spinup
-                    htop[p] = ((3.0 * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p]] * taper[ivt[p]]) /
-                        (pi * nstem[ivt[p]] * dwood[ivt[p]]))^(1.0 / 3.0)
+                    htop[p] = ((3.0 * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p] + 1] * taper[ivt[p] + 1]) /
+                        (pi * nstem[ivt[p] + 1] * dwood[ivt[p] + 1]))^(1.0 / 3.0)
                 end
 
                 if use_biomass_heat_storage
                     # Assumes fbw (fraction of biomass that is water) is the same for leaves and stems
                     stem_biomass[p] = (spinup_factor_deadwood * deadstemc[p] + livestemc[p]) *
-                        c_to_b * 1.0e-3 / (1.0 - fbw[ivt[p]])
+                        c_to_b * 1.0e-3 / (1.0 - fbw[ivt[p] + 1])
                 end
 
                 # Keep htop from getting too close to forcing height for windspeed
                 # (Peter Thornton, 5/3/2004)
-                htop[p] = min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p]] + z0mr[ivt[p]])) - 3.0)
+                htop[p] = min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
 
                 # Constraint to keep htop from going to 0.0
                 # (Peter Thornton, 8/11/2004)
@@ -190,7 +190,7 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
 
             elseif ivt[p] >= npcropmin  # prognostic crops
 
-                if tlai[p] >= laimx[ivt[p]]
+                if tlai[p] >= laimx[ivt[p] + 1]
                     peaklai[p] = 1  # used in CNAllocation
                 end
 
@@ -212,7 +212,7 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
                 end
 
                 # canopy top and bottom heights
-                htop[p] = ztopmx[ivt[p]] * (min(tlai[p] / (laimx[ivt[p]] - 1.0), 1.0))^2
+                htop[p] = ztopmx[ivt[p] + 1] * (min(tlai[p] / (laimx[ivt[p] + 1] - 1.0), 1.0))^2
                 htmx[p] = max(htmx[p], htop[p])
                 htop[p] = max(0.05, max(htmx[p], htop[p]))
                 hbot[p] = 0.02
@@ -222,7 +222,7 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
                 # height for grasses depends only on LAI
                 htop[p] = max(0.25, tlai[p] * 0.25)
 
-                htop[p] = min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p]] + z0mr[ivt[p]])) - 3.0)
+                htop[p] = min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
 
                 # Constraint to keep htop from going to 0.0
                 htop[p] = max(htop[p], 0.01)

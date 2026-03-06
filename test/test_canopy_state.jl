@@ -48,7 +48,7 @@
 
         # --- Check 1D integer sizes and values ---
         @test length(cs.frac_veg_nosno_patch) == np
-        @test all(x -> x == typemax(Int), cs.frac_veg_nosno_patch)
+        @test all(x -> x == 0, cs.frac_veg_nosno_patch)
         @test length(cs.frac_veg_nosno_alb_patch) == np
         @test all(x -> x == 0, cs.frac_veg_nosno_alb_patch)
 

@@ -113,8 +113,8 @@
         dsladlai_val = 0.001
 
         d.cnveg_cs.leafc_patch .= [leafc]
-        d.pft.slatop[13] = slatop_val
-        d.pft.dsladlai[13] = dsladlai_val
+        d.pft.slatop[14] = slatop_val
+        d.pft.dsladlai[14] = dsladlai_val
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -140,8 +140,8 @@
         slatop_val = 0.02
 
         d.cnveg_cs.leafc_patch .= [leafc]
-        d.pft.slatop[13] = slatop_val
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = slatop_val
+        d.pft.dsladlai[14] = 0.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -165,8 +165,8 @@
 
         # zero leafc should produce zero LAI
         d.cnveg_cs.leafc_patch .= [0.0]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
 
@@ -188,8 +188,8 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [40.0]
-        d.pft.slatop[nc3crop_val] = 0.02
-        d.pft.dsladlai[nc3crop_val] = 0.0
+        d.pft.slatop[nc3crop_val + 1] = 0.02
+        d.pft.dsladlai[nc3crop_val + 1] = 0.0
 
         tlai_old = 3.0
         tsai_old = 0.8
@@ -218,8 +218,8 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [30.0]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
 
         tlai_old = 2.0
         tsai_old = 1.5
@@ -247,17 +247,17 @@
         d.patch.itype .= [2]   # needleleaf_evergreen_boreal_tree
         d.patch.column .= [1]
 
-        d.pft.woody[2] = 1.0
+        d.pft.woody[3] = 1.0
         deadstemc_val = 5000.0
         d.cnveg_cs.deadstemc_patch .= [deadstemc_val]
         d.cnveg_cs.leafc_patch .= [100.0]
-        d.pft.slatop[2] = 0.008
-        d.pft.dsladlai[2] = 0.0
-        d.pft.nstem[2] = 0.005
-        d.pft.taper[2] = 200.0
-        d.pft.dwood[2] = 2.5e5
-        d.pft.z0mr[2] = 0.055
-        d.pft.displar[2] = 0.67
+        d.pft.slatop[3] = 0.008
+        d.pft.dsladlai[3] = 0.0
+        d.pft.nstem[3] = 0.005
+        d.pft.taper[3] = 200.0
+        d.pft.dwood[3] = 2.5e5
+        d.pft.z0mr[3] = 0.055
+        d.pft.displar[3] = 0.67
 
         d.cs.tlai_patch .= [0.5]
         d.cs.tsai_patch .= [1.0]
@@ -289,15 +289,15 @@
         d.patch.itype .= [2]
         d.patch.column .= [1]
 
-        d.pft.woody[2] = 1.0
+        d.pft.woody[3] = 1.0
         # Very small deadstemc leads to very small htop
         d.cnveg_cs.deadstemc_patch .= [0.001]
         d.cnveg_cs.leafc_patch .= [1.0]
-        d.pft.slatop[2] = 0.008
-        d.pft.dsladlai[2] = 0.0
-        d.pft.nstem[2] = 0.005
-        d.pft.taper[2] = 200.0
-        d.pft.dwood[2] = 2.5e5
+        d.pft.slatop[3] = 0.008
+        d.pft.dsladlai[3] = 0.0
+        d.pft.nstem[3] = 0.005
+        d.pft.taper[3] = 200.0
+        d.pft.dwood[3] = 2.5e5
 
         d.cs.tlai_patch .= [0.5]
         d.cs.tsai_patch .= [1.0]
@@ -320,10 +320,10 @@
 
         leafc = 40.0
         d.cnveg_cs.leafc_patch .= [leafc]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
-        d.pft.z0mr[13] = 0.055
-        d.pft.displar[13] = 0.67
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
+        d.pft.z0mr[14] = 0.055
+        d.pft.displar[14] = 0.67
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -350,10 +350,10 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [100.0]
-        d.pft.slatop[npcrop] = 0.02
-        d.pft.dsladlai[npcrop] = 0.0
-        d.pft.ztopmx[npcrop] = 2.5
-        d.pft.laimx[npcrop] = 6.0
+        d.pft.slatop[npcrop + 1] = 0.02
+        d.pft.dsladlai[npcrop + 1] = 0.0
+        d.pft.ztopmx[npcrop + 1] = 2.5
+        d.pft.laimx[npcrop + 1] = 6.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [0.5]
@@ -381,10 +381,10 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [100.0]
-        d.pft.slatop[npcrop] = 0.02
-        d.pft.dsladlai[npcrop] = 0.0
-        d.pft.ztopmx[npcrop] = 2.5
-        d.pft.laimx[npcrop] = 6.0
+        d.pft.slatop[npcrop + 1] = 0.02
+        d.pft.dsladlai[npcrop + 1] = 0.0
+        d.pft.ztopmx[npcrop + 1] = 2.5
+        d.pft.laimx[npcrop + 1] = 6.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [0.5]
@@ -408,10 +408,10 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [50.0]
-        d.pft.slatop[npcrop] = 0.02
-        d.pft.dsladlai[npcrop] = 0.0
-        d.pft.ztopmx[npcrop] = 1.2
-        d.pft.laimx[npcrop] = 5.0
+        d.pft.slatop[npcrop + 1] = 0.02
+        d.pft.dsladlai[npcrop + 1] = 0.0
+        d.pft.ztopmx[npcrop + 1] = 1.2
+        d.pft.laimx[npcrop + 1] = 5.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [0.5]
@@ -435,10 +435,10 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [0.0]   # zero leafc after harvest
-        d.pft.slatop[npcrop] = 0.02
-        d.pft.dsladlai[npcrop] = 0.0
-        d.pft.ztopmx[npcrop] = 2.5
-        d.pft.laimx[npcrop] = 6.0
+        d.pft.slatop[npcrop + 1] = 0.02
+        d.pft.dsladlai[npcrop + 1] = 0.0
+        d.pft.ztopmx[npcrop + 1] = 2.5
+        d.pft.laimx[npcrop + 1] = 6.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [0.5]
@@ -467,10 +467,10 @@
         d.patch.column .= [1]
 
         # leafc enough to produce tlai >= laimx
-        d.pft.slatop[npcrop] = 0.02
-        d.pft.dsladlai[npcrop] = 0.0
-        d.pft.laimx[npcrop] = 4.0
-        d.pft.ztopmx[npcrop] = 2.5
+        d.pft.slatop[npcrop + 1] = 0.02
+        d.pft.dsladlai[npcrop + 1] = 0.0
+        d.pft.laimx[npcrop + 1] = 4.0
+        d.pft.ztopmx[npcrop + 1] = 2.5
         d.cnveg_cs.leafc_patch .= [250.0]  # tlai = 0.02 * 250 = 5.0 >= 4.0
 
         d.cs.tlai_patch .= [0.0]
@@ -493,14 +493,14 @@
         d.patch.itype .= [5]    # broadleaf_evergreen_temperate_tree
         d.patch.column .= [1]
 
-        d.pft.woody[5] = 1.0
+        d.pft.woody[6] = 1.0
         d.cnveg_cs.deadstemc_patch .= [3000.0]
         d.cnveg_cs.leafc_patch .= [80.0]
-        d.pft.slatop[5] = 0.012
-        d.pft.dsladlai[5] = 0.0
-        d.pft.nstem[5] = 0.005
-        d.pft.taper[5] = 200.0
-        d.pft.dwood[5] = 2.5e5
+        d.pft.slatop[6] = 0.012
+        d.pft.dsladlai[6] = 0.0
+        d.pft.nstem[6] = 0.005
+        d.pft.taper[6] = 200.0
+        d.pft.dwood[6] = 2.5e5
 
         d.cs.tlai_patch .= [1.0]
         d.cs.tsai_patch .= [1.0]
@@ -531,8 +531,8 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [50.0]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -560,8 +560,8 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [50.0]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -592,8 +592,8 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [50.0]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -620,8 +620,8 @@
         d.patch.column .= [1, 1]
 
         d.cnveg_cs.leafc_patch .= [50.0, 0.0]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
 
         d.cs.tlai_patch .= [0.0, 0.0]
         d.cs.tsai_patch .= [1.0, 0.0]
@@ -644,8 +644,8 @@
         d.patch.column .= [1, 1]
 
         d.cnveg_cs.leafc_patch .= [50.0, 50.0]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
 
         d.cs.tlai_patch .= [999.0, 999.0]
         d.cs.tsai_patch .= [1.0, 1.0]
@@ -676,9 +676,9 @@
         leafc = 50.0
         fbw_val = 0.6
         d.cnveg_cs.leafc_patch .= [leafc]
-        d.pft.slatop[13] = 0.02
-        d.pft.dsladlai[13] = 0.0
-        d.pft.fbw[13] = fbw_val
+        d.pft.slatop[14] = 0.02
+        d.pft.dsladlai[14] = 0.0
+        d.pft.fbw[14] = fbw_val
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -700,19 +700,19 @@
         d.patch.itype .= [2]
         d.patch.column .= [1]
 
-        d.pft.woody[2] = 1.0
+        d.pft.woody[3] = 1.0
         deadstemc_val = 3000.0
         livestemc_val = 1000.0
         fbw_val = 0.5
         d.cnveg_cs.deadstemc_patch .= [deadstemc_val]
         d.cnveg_cs.livestemc_patch .= [livestemc_val]
         d.cnveg_cs.leafc_patch .= [100.0]
-        d.pft.slatop[2] = 0.008
-        d.pft.dsladlai[2] = 0.0
-        d.pft.nstem[2] = 0.005
-        d.pft.taper[2] = 200.0
-        d.pft.dwood[2] = 2.5e5
-        d.pft.fbw[2] = fbw_val
+        d.pft.slatop[3] = 0.008
+        d.pft.dsladlai[3] = 0.0
+        d.pft.nstem[3] = 0.005
+        d.pft.taper[3] = 200.0
+        d.pft.dwood[3] = 2.5e5
+        d.pft.fbw[3] = fbw_val
 
         d.cs.tlai_patch .= [0.5]
         d.cs.tsai_patch .= [1.0]
@@ -737,14 +737,14 @@
         d1 = make_veg_struct_data(np=1, nc=1)
         d1.patch.itype .= [2]
         d1.patch.column .= [1]
-        d1.pft.woody[2] = 1.0
+        d1.pft.woody[3] = 1.0
         d1.cnveg_cs.deadstemc_patch .= [50.0]
         d1.cnveg_cs.leafc_patch .= [50.0]
-        d1.pft.slatop[2] = 0.008
-        d1.pft.dsladlai[2] = 0.0
-        d1.pft.nstem[2] = 0.005
-        d1.pft.taper[2] = 200.0
-        d1.pft.dwood[2] = 2.5e5
+        d1.pft.slatop[3] = 0.008
+        d1.pft.dsladlai[3] = 0.0
+        d1.pft.nstem[3] = 0.005
+        d1.pft.taper[3] = 200.0
+        d1.pft.dwood[3] = 2.5e5
         d1.cs.tlai_patch .= [0.5]
         d1.cs.tsai_patch .= [1.0]
         d1.fv.forc_hgt_u_patch .= [100.0]  # high forcing height to avoid ceiling
@@ -758,14 +758,14 @@
         d2 = make_veg_struct_data(np=1, nc=1)
         d2.patch.itype .= [2]
         d2.patch.column .= [1]
-        d2.pft.woody[2] = 1.0
+        d2.pft.woody[3] = 1.0
         d2.cnveg_cs.deadstemc_patch .= [50.0]
         d2.cnveg_cs.leafc_patch .= [50.0]
-        d2.pft.slatop[2] = 0.008
-        d2.pft.dsladlai[2] = 0.0
-        d2.pft.nstem[2] = 0.005
-        d2.pft.taper[2] = 200.0
-        d2.pft.dwood[2] = 2.5e5
+        d2.pft.slatop[3] = 0.008
+        d2.pft.dsladlai[3] = 0.0
+        d2.pft.nstem[3] = 0.005
+        d2.pft.taper[3] = 200.0
+        d2.pft.dwood[3] = 2.5e5
         d2.cs.tlai_patch .= [0.5]
         d2.cs.tsai_patch .= [1.0]
         d2.fv.forc_hgt_u_patch .= [100.0]  # high forcing height to avoid ceiling
@@ -789,17 +789,17 @@
         d.patch.itype .= [0, 2, 13, 17]
         d.patch.column .= [1, 1, 2, 2]
 
-        d.pft.woody[2] = 1.0
+        d.pft.woody[3] = 1.0
         d.cnveg_cs.deadstemc_patch .= [0.0, 3000.0, 0.0, 0.0]
         d.cnveg_cs.leafc_patch .= [0.0, 80.0, 50.0, 100.0]
         d.pft.slatop .= fill(0.02, 80)
-        d.pft.slatop[2] = 0.012
+        d.pft.slatop[3] = 0.012
         d.pft.dsladlai .= fill(0.0, 80)
-        d.pft.nstem[2] = 0.005
-        d.pft.taper[2] = 200.0
-        d.pft.dwood[2] = 2.5e5
-        d.pft.ztopmx[17] = 2.5
-        d.pft.laimx[17] = 6.0
+        d.pft.nstem[3] = 0.005
+        d.pft.taper[3] = 200.0
+        d.pft.dwood[3] = 2.5e5
+        d.pft.ztopmx[18] = 2.5
+        d.pft.laimx[18] = 6.0
 
         d.cs.tlai_patch .= [0.0, 0.5, 0.0, 0.0]
         d.cs.tsai_patch .= [0.0, 1.0, 1.0, 0.5]
@@ -834,14 +834,14 @@
         d.patch.itype .= [9]   # broadleaf_evergreen_shrub (ivt=9, <= 11)
         d.patch.column .= [1]
 
-        d.pft.woody[9] = 1.0
+        d.pft.woody[10] = 1.0
         d.cnveg_cs.deadstemc_patch .= [500.0]
         d.cnveg_cs.leafc_patch .= [30.0]
-        d.pft.slatop[9] = 0.015
-        d.pft.dsladlai[9] = 0.0
-        d.pft.nstem[9] = 0.01
-        d.pft.taper[9] = 100.0
-        d.pft.dwood[9] = 2.5e5
+        d.pft.slatop[10] = 0.015
+        d.pft.dsladlai[10] = 0.0
+        d.pft.nstem[10] = 0.01
+        d.pft.taper[10] = 100.0
+        d.pft.dwood[10] = 2.5e5
 
         d.cs.tlai_patch .= [0.3]
         d.cs.tsai_patch .= [0.5]
@@ -880,10 +880,10 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [20.0]
-        d.pft.slatop[14] = 0.02
-        d.pft.dsladlai[14] = 0.0
-        d.pft.z0mr[14] = 0.055
-        d.pft.displar[14] = 0.67
+        d.pft.slatop[15] = 0.02
+        d.pft.dsladlai[15] = 0.0
+        d.pft.z0mr[15] = 0.055
+        d.pft.displar[15] = 0.67
 
         d.cs.tlai_patch .= [0.0]
         d.cs.tsai_patch .= [1.0]
@@ -908,10 +908,10 @@
         d.patch.column .= [1]
 
         d.cnveg_cs.leafc_patch .= [100.0]
-        d.pft.slatop[npcrop] = 0.02
-        d.pft.dsladlai[npcrop] = 0.0
-        d.pft.ztopmx[npcrop] = 1.0
-        d.pft.laimx[npcrop] = 5.0
+        d.pft.slatop[npcrop + 1] = 0.02
+        d.pft.dsladlai[npcrop + 1] = 0.0
+        d.pft.ztopmx[npcrop + 1] = 1.0
+        d.pft.laimx[npcrop + 1] = 5.0
 
         # Set htmx to a previous high value
         d.vs.htmx_patch .= [0.8]

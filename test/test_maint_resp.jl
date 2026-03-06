@@ -59,8 +59,8 @@
         params = CLM.MaintRespParams(br=br, br_root=br_root)
         cn_params = CLM.CNSharedParamsData(Q10=Q10)
 
-        # PFT constants
-        pftcon = CLM.PftConMaintResp(woody=[woody_val])
+        # PFT constants (index ivt+1 for 1-based Julia arrays)
+        pftcon = CLM.PftConMaintResp(woody=[0.0, woody_val])
 
         # Patch data
         patch = CLM.PatchData()
@@ -255,8 +255,8 @@
         Q10 = 1.5
         npcropmin = 17
 
-        # Need PFT arrays large enough for index 17
-        pftcon = CLM.PftConMaintResp(woody=zeros(npcropmin))
+        # Need PFT arrays large enough for index ivt+1=18
+        pftcon = CLM.PftConMaintResp(woody=zeros(npcropmin + 1))
 
         params = CLM.MaintRespParams(br=br, br_root=br)
         cn_params = CLM.CNSharedParamsData(Q10=Q10)
@@ -347,7 +347,7 @@
 
         params = CLM.MaintRespParams(br=br, br_root=br)
         cn_params = CLM.CNSharedParamsData(Q10=Q10)
-        pftcon = CLM.PftConMaintResp(woody=[1.0])
+        pftcon = CLM.PftConMaintResp(woody=[0.0, 1.0])
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)

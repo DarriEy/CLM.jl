@@ -165,7 +165,7 @@ function cn_mresp!(mask_soilc::BitVector, mask_soilp::BitVector,
         end
 
         # Live stem and live coarse root MR
-        if woody[ivt[p]] == 1.0
+        if woody[ivt[p] + 1] == 1.0
             livestem_mr[p]  = livestemn[p]  * br_local * tc
             livecroot_mr[p] = livecrootn[p] * br_root_local * tc
         elseif ivt[p] >= npcropmin

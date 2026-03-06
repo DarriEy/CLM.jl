@@ -236,7 +236,7 @@ function cnfun_init!(mask_soilp::BitVector, bounds::UnitRange{Int},
     if nstep_fun > 0 && mod(nstep, nstep_fun) == 0
         for p in bounds
             mask_soilp[p] || continue
-            ivt = patch.itype[p]
+            ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
             cnveg_state.leafcn_offset_patch[p]         = pftcon.leafcn[ivt]
             cnveg_cs.storage_cdemand_patch[p]           = 0.0
             cnveg_ns.storage_ndemand_patch[p]           = 0.0
@@ -474,7 +474,7 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
     for istp in 1:NSTP
         for p in bounds_p
             mask_soilp[p] || continue
-            vt = ivt[p]
+            vt = ivt[p] + 1  # 0-based Fortran → 1-based Julia
 
             if istp == ECM_STEP
                 permyc[p, istp]    = perecm[vt]
@@ -556,7 +556,7 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
     for p in bounds_p
         mask_soilp[p] || continue
         c = patch.column[p]
-        vt = ivt[p]
+        vt = ivt[p] + 1  # 0-based Fortran → 1-based Julia
         excess_carbon_acc = 0.0
         burned_off_carbon_local = 0.0
 

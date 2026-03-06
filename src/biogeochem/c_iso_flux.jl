@@ -914,12 +914,12 @@ function c_iso_flux3!(soilbiogeochem_state::SoilBiogeochemStateData,
         cc = patch_column[p]
         for j in 1:nlevdecomp
             iso_cnveg_cf.m_c_to_litr_fire_col[cc, j, i_met_lit] +=
-                ((iso_cnveg_cf.m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p], i_met_lit] +
+                ((iso_cnveg_cf.m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p] + 1, i_met_lit] +
                   iso_cnveg_cf.m_leafc_storage_to_litter_fire_patch[p] +
                   iso_cnveg_cf.m_leafc_xfer_to_litter_fire_patch[p] +
                   iso_cnveg_cf.m_gresp_storage_to_litter_fire_patch[p] +
                   iso_cnveg_cf.m_gresp_xfer_to_litter_fire_patch[p]) * leaf_prof[p, j] +
-                 (iso_cnveg_cf.m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p], i_met_lit] +
+                 (iso_cnveg_cf.m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p] + 1, i_met_lit] +
                   iso_cnveg_cf.m_frootc_storage_to_litter_fire_patch[p] +
                   iso_cnveg_cf.m_frootc_xfer_to_litter_fire_patch[p]) * froot_prof[p, j] +
                  (iso_cnveg_cf.m_livestemc_storage_to_litter_fire_patch[p] +
@@ -933,8 +933,8 @@ function c_iso_flux3!(soilbiogeochem_state::SoilBiogeochemStateData,
 
             for i in (i_met_lit+1):i_litr_max
                 iso_cnveg_cf.m_c_to_litr_fire_col[cc, j, i] +=
-                    (iso_cnveg_cf.m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p], i] * leaf_prof[p, j] +
-                     iso_cnveg_cf.m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p], i] * froot_prof[p, j]) * wtcol[p]
+                    (iso_cnveg_cf.m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p] + 1, i] * leaf_prof[p, j] +
+                     iso_cnveg_cf.m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p] + 1, i] * froot_prof[p, j]) * wtcol[p]
             end
         end
     end
@@ -979,22 +979,22 @@ function cn_c_iso_litter_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
 
             for i in i_litr_min:i_litr_max
                 iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.leafc_to_litter_patch[p] * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j] +
-                    iso_cnveg_cf.frootc_to_litter_patch[p] * fr_f[ivt[p], i] * wtcol[p] * froot_prof[p, j]
+                    iso_cnveg_cf.leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
+                    iso_cnveg_cf.frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
             end
 
             if use_crop && ivt[p] >= npcropmin
                 # stem litter carbon fluxes
                 for i in i_litr_min:i_litr_max
                     iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                        iso_cnveg_cf.livestemc_to_litter_patch[p] * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j]
+                        iso_cnveg_cf.livestemc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
                 end
 
                 if !use_grainproduct
                     for i in i_litr_min:i_litr_max
                         for k in repr_grain_min:repr_grain_max
                             iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                                iso_cnveg_cf.repr_grainc_to_food_patch[p, k] * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j]
+                                iso_cnveg_cf.repr_grainc_to_food_patch[p, k] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
                         end
                     end
                 end
@@ -1003,7 +1003,7 @@ function cn_c_iso_litter_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                 for i in i_litr_min:i_litr_max
                     for k in repr_structure_min:repr_structure_max
                         iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                            iso_cnveg_cf.repr_structurec_to_litter_patch[p, k] * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j]
+                            iso_cnveg_cf.repr_structurec_to_litter_patch[p, k] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
                     end
                 end
             end
@@ -1047,10 +1047,10 @@ function cn_c_iso_gap_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
             for i in i_litr_min:i_litr_max
                 # leaf gap mortality
                 iso_cnveg_cf.gap_mortality_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.m_leafc_to_litter_patch[p] * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j]
+                    iso_cnveg_cf.m_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
                 # fine root gap mortality
                 iso_cnveg_cf.gap_mortality_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.m_frootc_to_litter_patch[p] * fr_f[ivt[p], i] * wtcol[p] * froot_prof[p, j]
+                    iso_cnveg_cf.m_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
             end
 
             # wood gap mortality to CWD
@@ -1118,9 +1118,9 @@ function cn_c_iso_harvest_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
 
             for i in i_litr_min:i_litr_max
                 iso_cnveg_cf.harvest_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.hrv_leafc_to_litter_patch[p] * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j]
+                    iso_cnveg_cf.hrv_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
                 iso_cnveg_cf.harvest_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.hrv_frootc_to_litter_patch[p] * fr_f[ivt[p], i] * wtcol[p] * froot_prof[p, j]
+                    iso_cnveg_cf.hrv_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
             end
 
             # wood harvest to CWD
@@ -1192,8 +1192,8 @@ function cn_c_iso_gross_unrep_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
 
             for i in i_litr_min:i_litr_max
                 iso_cnveg_cf.gru_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.gru_leafc_to_litter_patch[p] * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j] +
-                    iso_cnveg_cf.gru_frootc_to_litter_patch[p] * fr_f[ivt[p], i] * wtcol[p] * froot_prof[p, j]
+                    iso_cnveg_cf.gru_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
+                    iso_cnveg_cf.gru_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
             end
 
             # coarse root to CWD

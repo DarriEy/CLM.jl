@@ -209,14 +209,14 @@ function crop_init_cold!(cr::CropData, bounds_patch::UnitRange{Int};
             if lun_itype[l] == istcrop
                 if fert_cft !== nothing && patch_gridcell !== nothing && patch_itype !== nothing
                     g   = patch_gridcell[p]
-                    ivt = patch_itype[p]
+                    ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
                     cr.fertnitro_patch[p] = fert_cft[g, ivt]
                 end
 
                 if latvary_baset && pftcon_baset !== nothing && grc_latdeg !== nothing &&
                    patch_gridcell !== nothing && patch_itype !== nothing
                     g   = patch_gridcell[p]
-                    ivt = patch_itype[p]
+                    ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
                     cr.latbaset_patch[p] = latbaset(pftcon_baset[ivt], grc_latdeg[g],
                                                     cr.baset_latvary_intercept,
                                                     cr.baset_latvary_slope)

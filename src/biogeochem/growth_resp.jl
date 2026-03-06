@@ -115,67 +115,67 @@ function cn_gresp!(mask_soilp::BitVector, bounds::UnitRange{Int},
 
         # --- Crop-specific growth respiration (ivt >= npcropmin) ---
         if ivt[p] >= npcropmin
-            cpool_livestem_gr[p] = cpool_to_livestemc[p] * grperc[ivt[p]] * respfact_livestem
+            cpool_livestem_gr[p] = cpool_to_livestemc[p] * grperc[ivt[p] + 1] * respfact_livestem
 
-            cpool_livestem_storage_gr[p] = cpool_to_livestemc_storage[p] * grperc[ivt[p]] * grpnow[ivt[p]] *
+            cpool_livestem_storage_gr[p] = cpool_to_livestemc_storage[p] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1] *
                 respfact_livestem_storage
 
-            transfer_livestem_gr[p] = livestemc_xfer_to_livestemc[p] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]]) *
+            transfer_livestem_gr[p] = livestemc_xfer_to_livestemc[p] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1]) *
                 respfact_livestem_storage
 
             for k in 1:nrepr
                 cpool_reproductive_gr[p, k] =
-                    cpool_to_reproductivec[p, k] * grperc[ivt[p]]
+                    cpool_to_reproductivec[p, k] * grperc[ivt[p] + 1]
                 cpool_reproductive_storage_gr[p, k] =
-                    cpool_to_reproductivec_storage[p, k] * grperc[ivt[p]] * grpnow[ivt[p]]
+                    cpool_to_reproductivec_storage[p, k] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1]
                 transfer_reproductive_gr[p, k] =
-                    reproductivec_xfer_to_reproductivec[p, k] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]])
+                    reproductivec_xfer_to_reproductivec[p, k] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1])
             end
         end
 
         # --- Leaf and fine root growth respiration (all PFTs) ---
-        cpool_leaf_gr[p] = cpool_to_leafc[p] * grperc[ivt[p]] * respfact_leaf
+        cpool_leaf_gr[p] = cpool_to_leafc[p] * grperc[ivt[p] + 1] * respfact_leaf
 
-        cpool_leaf_storage_gr[p] = cpool_to_leafc_storage[p] * grperc[ivt[p]] * grpnow[ivt[p]] * respfact_leaf_storage
+        cpool_leaf_storage_gr[p] = cpool_to_leafc_storage[p] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1] * respfact_leaf_storage
 
-        transfer_leaf_gr[p] = leafc_xfer_to_leafc[p] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]]) * respfact_leaf_storage
+        transfer_leaf_gr[p] = leafc_xfer_to_leafc[p] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1]) * respfact_leaf_storage
 
         # Note: respfact_froot appears twice (matches Fortran original)
-        cpool_froot_gr[p] = cpool_to_frootc[p] * grperc[ivt[p]] * respfact_froot * respfact_froot
+        cpool_froot_gr[p] = cpool_to_frootc[p] * grperc[ivt[p] + 1] * respfact_froot * respfact_froot
 
-        cpool_froot_storage_gr[p] = cpool_to_frootc_storage[p] * grperc[ivt[p]] * grpnow[ivt[p]] * respfact_froot_storage
+        cpool_froot_storage_gr[p] = cpool_to_frootc_storage[p] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1] * respfact_froot_storage
 
-        transfer_froot_gr[p] = frootc_xfer_to_frootc[p] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]]) * respfact_froot_storage
+        transfer_froot_gr[p] = frootc_xfer_to_frootc[p] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1]) * respfact_froot_storage
 
         # --- Woody PFT growth respiration ---
-        if woody[ivt[p]] == 1.0
-            cpool_livestem_gr[p] = cpool_to_livestemc[p] * grperc[ivt[p]] * respfact_livestem
+        if woody[ivt[p] + 1] == 1.0
+            cpool_livestem_gr[p] = cpool_to_livestemc[p] * grperc[ivt[p] + 1] * respfact_livestem
 
-            cpool_livestem_storage_gr[p] = cpool_to_livestemc_storage[p] * grperc[ivt[p]] * grpnow[ivt[p]] *
+            cpool_livestem_storage_gr[p] = cpool_to_livestemc_storage[p] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1] *
                 respfact_livestem_storage
 
-            transfer_livestem_gr[p] = livestemc_xfer_to_livestemc[p] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]]) *
+            transfer_livestem_gr[p] = livestemc_xfer_to_livestemc[p] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1]) *
                 respfact_livestem_storage
 
-            cpool_deadstem_gr[p] = cpool_to_deadstemc[p] * grperc[ivt[p]]
+            cpool_deadstem_gr[p] = cpool_to_deadstemc[p] * grperc[ivt[p] + 1]
 
-            cpool_deadstem_storage_gr[p] = cpool_to_deadstemc_storage[p] * grperc[ivt[p]] * grpnow[ivt[p]]
+            cpool_deadstem_storage_gr[p] = cpool_to_deadstemc_storage[p] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1]
 
-            transfer_deadstem_gr[p] = deadstemc_xfer_to_deadstemc[p] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]])
+            transfer_deadstem_gr[p] = deadstemc_xfer_to_deadstemc[p] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1])
 
-            cpool_livecroot_gr[p] = cpool_to_livecrootc[p] * grperc[ivt[p]] * respfact_livecroot
+            cpool_livecroot_gr[p] = cpool_to_livecrootc[p] * grperc[ivt[p] + 1] * respfact_livecroot
 
-            cpool_livecroot_storage_gr[p] = cpool_to_livecrootc_storage[p] * grperc[ivt[p]] * grpnow[ivt[p]] *
+            cpool_livecroot_storage_gr[p] = cpool_to_livecrootc_storage[p] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1] *
                 respfact_livecroot_storage
 
-            transfer_livecroot_gr[p] = livecrootc_xfer_to_livecrootc[p] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]]) *
+            transfer_livecroot_gr[p] = livecrootc_xfer_to_livecrootc[p] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1]) *
                 respfact_livecroot_storage
 
-            cpool_deadcroot_gr[p] = cpool_to_deadcrootc[p] * grperc[ivt[p]]
+            cpool_deadcroot_gr[p] = cpool_to_deadcrootc[p] * grperc[ivt[p] + 1]
 
-            cpool_deadcroot_storage_gr[p] = cpool_to_deadcrootc_storage[p] * grperc[ivt[p]] * grpnow[ivt[p]]
+            cpool_deadcroot_storage_gr[p] = cpool_to_deadcrootc_storage[p] * grperc[ivt[p] + 1] * grpnow[ivt[p] + 1]
 
-            transfer_deadcroot_gr[p] = deadcrootc_xfer_to_deadcrootc[p] * grperc[ivt[p]] * (1.0 - grpnow[ivt[p]])
+            transfer_deadcroot_gr[p] = deadcrootc_xfer_to_deadcrootc[p] * grperc[ivt[p] + 1] * (1.0 - grpnow[ivt[p] + 1])
         end
     end
 

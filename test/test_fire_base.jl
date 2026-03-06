@@ -35,7 +35,7 @@
 
         # --- Patch ---
         patch = CLM.PatchData()
-        patch.itype  = [2, 10, 5]        # PFT types
+        patch.itype  = [1, 9, 4]        # PFT types (0-based Fortran indices)
         patch.column = [1, 1, 2]          # column assignments
         patch.wtcol  = [0.5, 0.3, 0.2]   # weight relative to column
 

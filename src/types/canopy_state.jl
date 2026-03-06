@@ -83,7 +83,7 @@ function canopystate_init!(cs::CanopyStateData{FT}, np::Int) where {FT}
     nvegwcs = NVEGWCS
 
     # --- Integer patch-level ---
-    cs.frac_veg_nosno_patch     = fill(typemax(Int), np)
+    cs.frac_veg_nosno_patch     = fill(0, np)
     cs.frac_veg_nosno_alb_patch = fill(0, np)
 
     # --- LAI/SAI 1D ---

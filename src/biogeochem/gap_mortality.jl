@@ -121,7 +121,7 @@ function cn_gap_mortality!(mask_soilp::BitVector,
 
         if use_cndv
             # Stress mortality from lpj's subr Mortality
-            if woody[ivt[p]] == 1.0
+            if woody[ivt[p] + 1] == 1.0
 
                 if ivt[p] == 8
                     mort_max = 0.03  # BDT boreal
@@ -137,10 +137,10 @@ function cn_gap_mortality!(mask_soilp::BitVector,
                 am = min(1.0, am + heatstress[p])
             else
                 # lpj didn't set this for grasses; cn does
-                am = params.r_mort[ivt[p]]
+                am = params.r_mort[ivt[p] + 1]
             end
         else
-            am = params.r_mort[ivt[p]]
+            am = params.r_mort[ivt[p] + 1]
         end
 
         m = am / (days_per_year * secspday)
@@ -217,7 +217,7 @@ function cn_gap_mortality!(mask_soilp::BitVector,
 
         # added by F. Li and S. Levis
         if use_cndv
-            if woody[ivt[p]] == 1.0
+            if woody[ivt[p] + 1] == 1.0
                 if cnveg_cs.livestemc_patch[p] + cnveg_cs.deadstemc_patch[p] > 0.0
                     nind[p] = nind[p] * (1.0 - m)
                 else
@@ -326,8 +326,8 @@ function cn_gap_patch_to_column!(mask_soilp::BitVector,
             # -- Leaf and fine root gap mortality C to litter pools --
             for i in i_litr_min:i_litr_max
                 gap_mortality_c_to_litr_c[c, j, i] += (
-                    m_leafc_to_litter[p]  * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j] +
-                    m_frootc_to_litter[p] * fr_f[ivt[p], i] * wtcol[p] * froot_prof[p, j]
+                    m_leafc_to_litter[p]  * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
+                    m_frootc_to_litter[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
                 )
             end
 
@@ -355,8 +355,8 @@ function cn_gap_patch_to_column!(mask_soilp::BitVector,
             # -- Leaf and fine root gap mortality N to litter pools --
             for i in i_litr_min:i_litr_max
                 gap_mortality_n_to_litr_n[c, j, i] += (
-                    m_leafn_to_litter[p]  * lf_f[ivt[p], i] * wtcol[p] * leaf_prof[p, j] +
-                    m_frootn_to_litter[p] * fr_f[ivt[p], i] * wtcol[p] * froot_prof[p, j]
+                    m_leafn_to_litter[p]  * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
+                    m_frootn_to_litter[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
                 )
             end
 

@@ -185,7 +185,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 1
+        patch.itype[1] = 0  # 0-based Fortran PFT index
         patch.column[1] = 1
         patch.wtcol[1] = 1.0
 
@@ -453,7 +453,7 @@
 
         patch = CLM.PatchData()
         CLM.patch_init!(patch, np)
-        patch.itype[1] = 1
+        patch.itype[1] = 0  # 0-based Fortran PFT index
 
         cnveg_state = CLM.CNVegStateData()
         CLM.cnveg_state_init!(cnveg_state, np, nc)
