@@ -78,6 +78,7 @@
             # ---- Time manager checks ----
             @test CLM.get_nstep(tm) == 0
             @test CLM.get_curr_calday(tm) ≈ 1.0
+            @test inst.soilhydrology.h2osfcflag == 0
 
             # ---- Active checks ----
             @test any(inst.column.active[1:bounds.endc])
@@ -87,6 +88,36 @@
             @test !isnan(inst.column.topo_slope[c_test])
             @test inst.column.topo_slope[c_test] > 0.0
             @test !isnan(inst.column.micro_sigma[c_test])
+        end
+
+        @testset "clm_initialize! h2osfcflag override" begin
+            (inst1, _, _, _) = CLM.clm_initialize!(
+                fsurdat=fsurdat,
+                paramfile=paramfile,
+                h2osfcflag=1)
+            @test inst1.soilhydrology.h2osfcflag == 1
+        end
+
+        @testset "clm_initialize! use_aquifer_layer=false initializes ZWT at bedrock" begin
+            (inst2, bounds2, _, _) = CLM.clm_initialize!(
+                fsurdat=fsurdat,
+                paramfile=paramfile,
+                use_aquifer_layer=false)
+
+            joff_zi = CLM.varpar.nlevsno + 1
+            found_soil = false
+            for c in bounds2.begc:bounds2.endc
+                l = inst2.column.landunit[c]
+                itype_l = inst2.landunit.itype[l]
+                if itype_l == CLM.ISTSOIL || itype_l == CLM.ISTCROP
+                    found_soil = true
+                    nb = inst2.column.nbedrock[c]
+                    expected = inst2.column.zi[c, joff_zi + nb]
+                    @test isfinite(inst2.soilhydrology.zwt_col[c])
+                    @test inst2.soilhydrology.zwt_col[c] ≈ expected atol=1e-10
+                end
+            end
+            @test found_soil
         end
     end
 end

@@ -315,6 +315,35 @@
         @test ef.btran_min_inst_patch[np] ≈ CLM.SPVAL
     end
 
+    @testset "energyflux_update_acc_vars! daily-min end-of-day semantics" begin
+        np = 1; nc = 1; nl = 1; ng = 1
+        ef = CLM.EnergyFluxData()
+        CLM.energyflux_init!(ef, np, nc, nl, ng)
+        CLM.energyflux_init_acc_vars!(ef, 1:np; is_startup=true)
+
+        # Mid-day updates should only update the in-day running minimum.
+        ef.btran_patch[1] = 0.80
+        CLM.energyflux_update_acc_vars!(ef, 1:np; end_cd=false)
+        @test ef.btran_min_inst_patch[1] ≈ 0.80
+        @test ef.btran_min_patch[1] ≈ CLM.SPVAL
+
+        ef.btran_patch[1] = 0.35
+        CLM.energyflux_update_acc_vars!(ef, 1:np; end_cd=false)
+        @test ef.btran_min_inst_patch[1] ≈ 0.35
+        @test ef.btran_min_patch[1] ≈ CLM.SPVAL
+
+        # End-of-day should publish daily minimum and reset in-day state.
+        ef.btran_patch[1] = 0.60
+        CLM.energyflux_update_acc_vars!(ef, 1:np; end_cd=true)
+        @test ef.btran_min_patch[1] ≈ 0.35
+        @test ef.btran_min_inst_patch[1] ≈ CLM.SPVAL
+
+        # Next day should start a fresh in-day minimum.
+        ef.btran_patch[1] = 0.50
+        CLM.energyflux_update_acc_vars!(ef, 1:np; end_cd=false)
+        @test ef.btran_min_inst_patch[1] ≈ 0.50
+    end
+
     @testset "field mutability" begin
         ef = CLM.EnergyFluxData()
         CLM.energyflux_init!(ef, 5, 3, 2, 1)

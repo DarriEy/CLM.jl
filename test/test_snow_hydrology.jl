@@ -181,13 +181,13 @@
         lun_itype_col = [CLM.ISTSOIL, CLM.ISTSOIL, CLM.ISTSOIL]
         frac_sno_eff = [1.0, 1.0, 1.0]
         snow_depth = [0.02, 0.005, 0.1]  # above dzmin, below dzmin, already has layers
-        qflx_snow_grnd = [1.0, 1.0, 0.0]
+        qflx_snow_grnd = [0.0, 1.0, 0.0]
         mask = trues(nc)
 
         CLM.build_filter_snowpack_initialized!(mask_out,
             snl, lun_itype_col, frac_sno_eff, snow_depth, qflx_snow_grnd, mask, 1:nc)
 
-        @test mask_out[1] == true   # no layers, depth >= dzmin
+        @test mask_out[1] == true   # no layers, depth >= dzmin (independent of new snowfall)
         @test mask_out[2] == false  # depth < dzmin
         @test mask_out[3] == false  # already has layers
     end
@@ -218,7 +218,7 @@
         nc = 1
         ntot = nlevsno + 15
         snl = [0]
-        zi = zeros(Float64, nc, ntot)
+        zi = fill(123.0, nc, ntot + 1)
         dz = zeros(Float64, nc, ntot)
         z = zeros(Float64, nc, ntot)
         t_soisno = fill(CLM.TFRZ, nc, ntot)
@@ -232,13 +232,33 @@
             snomelt_accum, forc_t, snow_depth, mask, 1:nc, nlevsno)
 
         jj_zero = 0 + nlevsno
+        jj_surface_zi = nlevsno + 1
         @test snl[1] == -1
         @test dz[1, jj_zero] == 0.05
         @test z[1, jj_zero] ≈ -0.025
+        @test zi[1, jj_surface_zi] == 0.0
         @test zi[1, jj_zero] ≈ -0.05
         @test t_soisno[1, jj_zero] ≈ CLM.TFRZ - 5.0
         @test frac_iceold[1, jj_zero] == 1.0
         @test snomelt_accum[1] == 0.0
+    end
+
+    @testset "init_snow_layers! surface interface indexing regression" begin
+        nc = 1
+        ntot = nlevsno + 15
+        snl = zeros(Int, nc)
+        dz = fill(0.0, nc, ntot)
+        z = fill(0.0, nc, ntot)
+        zi = fill(77.0, nc, ntot + 1)
+        snow_depth = [0.20]   # enough for explicit snow layers
+        col_landunit = [1]
+        lakpoi = [false]
+
+        CLM.init_snow_layers!(snl, dz, z, zi, snow_depth, col_landunit, lakpoi, 1:nc, nlevsno)
+
+        jj_surface_zi = nlevsno + 1
+        @test snl[1] < 0
+        @test zi[1, jj_surface_zi] == 0.0
     end
 
     @testset "zero_empty_snow_layers! interface indexing regression" begin

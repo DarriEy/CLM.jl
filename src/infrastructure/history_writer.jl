@@ -83,6 +83,8 @@ function default_hist_fields()
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col),
         HistFieldDef("SNOW_DEPTH", "snow depth", "m", "column",
             inst -> inst.water.waterdiagnosticbulk_inst.snow_depth_col),
+        HistFieldDef("SNOWDP", "area-averaged snow depth", "m", "column",
+            inst -> inst.water.waterdiagnosticbulk_inst.snowdp_col),
         HistFieldDef("FRAC_SNO", "fraction of ground covered by snow", "unitless", "column",
             inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col),
         HistFieldDef("BTRAN", "transpiration beta factor", "unitless", "patch",
@@ -108,32 +110,33 @@ end
 """
     history_btran_daily_min_patch(inst) -> Vector{Float64}
 
-Return daily minimum BTRAN when available (`btran_min_patch`) to align with
-Fortran `BTRANMN` diagnostics; fallback to instantaneous `btran_patch`.
+Return daily minimum BTRAN when available to align with Fortran `BTRANMN`
+diagnostics.
+
+Preference order:
+1. `btran_min_inst_patch` when finite (running minimum for current day)
+2. `btran_min_patch` when finite (completed-day minimum)
+3. fallback to instantaneous `btran_patch`
 """
 function history_btran_daily_min_patch(inst::CLMInstances)
     ef = inst.energyflux
     pch = inst.patch
-    col = inst.column
-    lun = inst.landunit
     np = length(ef.btran_patch)
-
-    source = if length(ef.btran_min_patch) == np && !isempty(ef.btran_min_patch)
-        ef.btran_min_patch
-    else
-        ef.btran_patch
-    end
 
     out = fill(NaN, np)
     for p in 1:np
-        p <= length(pch.column) || continue
-        c = pch.column[p]
-        c >= 1 && c <= length(col.landunit) || continue
-        l = col.landunit[c]
-        l >= 1 && l <= length(lun.itype) || continue
-        itype = lun.itype[l]
-        if itype == ISTSOIL || itype == ISTCROP
-            out[p] = source[p]
+        p <= length(pch.itype) || continue
+        # Fortran BTRANMN uses a vegetation mask: exclude bare-ground patches.
+        if pch.itype[p] != noveg
+            bt = ef.btran_patch[p]
+            if length(ef.btran_min_inst_patch) >= p && isfinite(ef.btran_min_inst_patch[p]) &&
+               ef.btran_min_inst_patch[p] != SPVAL
+                bt = ef.btran_min_inst_patch[p]
+            elseif length(ef.btran_min_patch) >= p && isfinite(ef.btran_min_patch[p]) &&
+                   ef.btran_min_patch[p] != SPVAL
+                bt = ef.btran_min_patch[p]
+            end
+            out[p] = bt
         end
     end
     return out
@@ -148,15 +151,25 @@ Return water table depth for vegetated/crop landunits only, matching Fortran
 function history_zwt_veg_col(inst::CLMInstances)
     sh = inst.soilhydrology
     col = inst.column
-    lun = inst.landunit
     nc = length(sh.zwt_col)
     out = fill(NaN, nc)
+
+    # Fortran ZWT uses a vegetation mask at column level.
+    # Mark columns with at least one vegetated patch (itype != noveg).
+    has_veg_col = falses(nc)
+    pch = inst.patch
+    for p in eachindex(pch.column)
+        p <= length(pch.itype) || continue
+        c = pch.column[p]
+        c >= 1 && c <= nc || continue
+        if pch.itype[p] != noveg
+            has_veg_col[c] = true
+        end
+    end
+
     for c in 1:nc
         c <= length(col.landunit) || continue
-        l = col.landunit[c]
-        l >= 1 && l <= length(lun.itype) || continue
-        itype = lun.itype[l]
-        if itype == ISTSOIL || itype == ISTCROP
+        if has_veg_col[c]
             out[c] = sh.zwt_col[c]
         end
     end

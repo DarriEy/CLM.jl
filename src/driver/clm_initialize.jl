@@ -21,10 +21,12 @@ state, and returns all data structures ready for `clm_drv!()`.
 - `use_cn::Bool`          — use CN biogeochemistry (default false)
 - `use_crop::Bool`        — use crop model (default false)
 - `use_bedrock::Bool`     — use bedrock (default true)
+- `use_aquifer_layer::Bool` — use aquifer lower boundary (default true)
 - `all_active::Bool`      — all points active (default false)
 - `lat::Float64`          — gridcell latitude  (default: read from surfdata)
 - `lon::Float64`          — gridcell longitude (default: read from surfdata)
 - `soil_layerstruct::String` — soil layer structure (default "20SL_8.5m")
+- `h2osfcflag::Int`       — surface water flag for soil hydrology (default 0)
 
 # Returns
 - `inst::CLMInstances`  — all physics/BGC data instances
@@ -40,10 +42,12 @@ function clm_initialize!(;
     use_cn::Bool = false,
     use_crop::Bool = false,
     use_bedrock::Bool = true,
+    use_aquifer_layer::Bool = true,
     all_active::Bool = false,
     lat::Float64 = NaN,
     lon::Float64 = NaN,
     soil_layerstruct::String = "20SL_8.5m",
+    h2osfcflag::Int = 0,
     fsnowoptics::String = "",
     fsnowaging::String = "")
 
@@ -116,7 +120,10 @@ function clm_initialize!(;
     initVertical!(bounds, inst.gridcell, inst.landunit, inst.column, surf)
 
     # ---- Step 14: Cold-start initialization ----
-    cold_start_initialize!(inst, bounds, filt, surf)
+    cold_start_initialize!(inst, bounds, filt, surf; use_aquifer_layer=use_aquifer_layer)
+
+    # ---- Step 14a: Soil hydrology runtime controls ----
+    soilhydrology_read_nl!(inst.soilhydrology; h2osfcflag=h2osfcflag)
 
     # ---- Step 15: Initialize snow layer constants ----
     _init_snow_layer_constants!()

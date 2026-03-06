@@ -328,6 +328,7 @@ function calc_root_moist_stress_clm45default!(rootfr_unf::Matrix{Float64},
                 rootr[p, j] = 0.0
             else
                 s_node = max(h2osoi_liqvol[c, j + joff] / eff_porosity[c, j], 0.01)
+                s_node = min(s_node, 1.0)
 
                 smp_node = soil_suction_clapp_hornberger(sucsat[c, j], s_node, bsw[c, j])
                 smp_node = max(smpsc[itype], smp_node)

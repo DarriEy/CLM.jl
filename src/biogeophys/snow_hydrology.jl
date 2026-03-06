@@ -402,12 +402,10 @@ function build_filter_snowpack_initialized!(
 
         if lun_itype_col[c] == ISTDLAK
             mask_out[c] = (snl[c] == 0 &&
-                           frac_sno_eff[c] * snow_depth[c] >= (dzmin[1] + LSADZ) &&
-                           qflx_snow_grnd[c] > 0.0)
+                           frac_sno_eff[c] * snow_depth[c] >= (dzmin[1] + LSADZ))
         else
             mask_out[c] = (snl[c] == 0 &&
-                           frac_sno_eff[c] * snow_depth[c] >= dzmin[1] &&
-                           qflx_snow_grnd[c] > 0.0)
+                           frac_sno_eff[c] * snow_depth[c] >= dzmin[1])
         end
     end
 end
@@ -464,16 +462,19 @@ function bulk_initialize_snow_pack!(
     nlevsno::Int
 )
     jj_zero = 0 + nlevsno  # Julia index for layer 0 (dz/z arrays)
+    jj_surface_zi = nlevsno + 1  # Julia index for interface j=0 (surface)
 
     for c in bounds
         mask[c] || continue
 
         snl[c] = -1
         dz[c, jj_zero] = snow_depth[c]
-        z[c, jj_zero] = -0.5 * dz[c, jj_zero]
+        # Keep snow-layer interfaces anchored to the fixed surface interface.
+        zi[c, jj_surface_zi] = 0.0
         # zi has one extra interface level: Fortran j -> Julia j + nlevsno + 1
-        # Set interface j=-1 (below layer 0) from the known surface interface j=0.
-        zi[c, jj_zero] = -dz[c, jj_zero]
+        # j=-1 (below layer 0) maps to jj_zero; j=0 maps to jj_surface_zi.
+        zi[c, jj_zero] = zi[c, jj_surface_zi] - dz[c, jj_zero]
+        z[c, jj_zero] = zi[c, jj_surface_zi] - 0.5 * dz[c, jj_zero]
 
         t_soisno[c, jj_zero] = min(TFRZ, forc_t[c])
         frac_iceold[c, jj_zero] = 1.0
@@ -1790,6 +1791,7 @@ function init_snow_layers!(
 
     for c in bounds
         l = col_landunit[c]
+        jj_surface_zi = nlevsno + 1
 
         # Initialize snow layers to spval/zero
         for jj in 1:nlevsno
@@ -1805,6 +1807,7 @@ function init_snow_layers!(
         # Lake: no snow layers
         if lakpoi[l]
             snl[c] = 0
+            zi[c, jj_surface_zi] = 0.0
             for jj in 1:nlevsno
                 dz[c, jj] = 0.0
                 z[c, jj] = 0.0
@@ -1820,6 +1823,7 @@ function init_snow_layers!(
         # Too little snow
         if snow_depth[c] < dzmin[1]
             snl[c] = 0
+            zi[c, jj_surface_zi] = 0.0
             for jj in 1:nlevsno
                 dz[c, jj] = 0.0
                 z[c, jj] = 0.0
@@ -1834,6 +1838,7 @@ function init_snow_layers!(
 
         # At least one layer
         snl[c] = -1
+        zi[c, jj_surface_zi] = 0.0
         minbound = dzmin[1]
         maxbound = dzmax_l_arr[1]
 

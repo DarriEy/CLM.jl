@@ -149,8 +149,47 @@ include("generate_forcing.jl")
         @test haskey(ds, "QFLX_EVAP_TOT")
         @test haskey(ds, "FSA")
         @test haskey(ds, "H2OSNO")
+        @test haskey(ds, "SNOWDP")
         close(ds)
         rm(hist_path)
+    end
+
+    # ---- Test 5b: Vegetation masks for ZWT/BTRAN history diagnostics ----
+    @testset "History vegetation masks (ZWT/BTRAN)" begin
+        (inst, bounds, _, _) = CLM.clm_initialize!(;
+            fsurdat=fsurdat, paramfile=paramfile)
+
+        np = bounds.endp
+        nc = bounds.endc
+        @test np >= 1
+        @test nc >= 1
+
+        # Force all patches to bare-ground, then make one vegetated patch.
+        inst.patch.itype .= CLM.noveg
+        inst.patch.itype[1] = 1
+
+        # Use running daily-min source path for BTRAN (preferred over completed-day min).
+        inst.energyflux.btran_min_patch .= 0.77
+        inst.energyflux.btran_min_inst_patch .= 0.66
+        inst.energyflux.btran_patch .= 0.55
+        btran_hist = CLM.history_btran_daily_min_patch(inst)
+        @test btran_hist[1] ≈ 0.66
+        for p in 2:np
+            @test isnan(btran_hist[p])
+        end
+
+        # ZWT should be retained only for columns that host at least one vegetated patch.
+        for c in 1:nc
+            inst.soilhydrology.zwt_col[c] = 1.0 + c
+        end
+        zwt_hist = CLM.history_zwt_veg_col(inst)
+        veg_col = inst.patch.column[1]
+        @test zwt_hist[veg_col] ≈ inst.soilhydrology.zwt_col[veg_col]
+        for c in 1:nc
+            if c != veg_col
+                @test isnan(zwt_hist[c])
+            end
+        end
     end
 
     # ---- Test 6: Full end-to-end simulation (1 day, 48 timesteps) ----
@@ -200,6 +239,41 @@ include("generate_forcing.jl")
         close(ds)
 
         # Cleanup
+        rm(forcing_path)
+        rm(hist_path)
+    end
+
+    # ---- Test 7: No-aquifer mode smoke test ----
+    @testset "Full simulation (no aquifer, smoke)" begin
+        forcing_path = tempname() * "_forcing.nc"
+        hist_path = tempname() * "_history.nc"
+
+        generate_forcing(forcing_path;
+            start_date=DateTime(2000, 1, 1),
+            end_date=DateTime(2000, 1, 1, 1),
+            dtime=1800)
+
+        inst = CLM.clm_run!(;
+            fsurdat=fsurdat,
+            paramfile=paramfile,
+            fforcing=forcing_path,
+            fhistory=hist_path,
+            start_date=DateTime(2000, 1, 1),
+            end_date=DateTime(2000, 1, 1, 1),
+            dtime=1800,
+            use_cn=false,
+            use_aquifer_layer=false,
+            verbose=false)
+
+        @test inst isa CLM.CLMInstances
+        @test isfile(hist_path)
+
+        ds = NCDataset(hist_path, "r")
+        @test length(ds["time"]) == 2
+        tgrnd = ds["T_GRND"][:, :]
+        @test all(isfinite, tgrnd[tgrnd .!= -9999.0])
+        close(ds)
+
         rm(forcing_path)
         rm(hist_path)
     end

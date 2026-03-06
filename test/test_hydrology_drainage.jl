@@ -319,4 +319,109 @@
         # ice_runoff_snwcp = snwcp_ice = 0.0
         @test wf.qflx_ice_runoff_snwcp_col[1] ≈ 0.0
     end
+
+    # ------------------------------------------------------------------
+    # 6. no-aquifer indexing regression
+    # ------------------------------------------------------------------
+    @testset "hydrology_drainage! no-aquifer keeps snow layers untouched" begin
+        nc = 1
+        np = 1; nl = 1; ng = 1
+
+        temperature = CLM.TemperatureData()
+        CLM.temperature_init!(temperature, np, nc, nl, ng)
+
+        soilhydrology = CLM.SoilHydrologyData()
+        CLM.soilhydrology_init!(soilhydrology, nc)
+
+        soilstate = CLM.SoilStateData()
+        CLM.soilstate_init!(soilstate, np, nc)
+
+        waterstatebulk = CLM.WaterStateBulkData()
+        CLM.waterstatebulk_init!(waterstatebulk, nc, np, nl, ng)
+
+        waterdiagbulk = CLM.WaterDiagnosticBulkData()
+        CLM.waterdiagnosticbulk_init!(waterdiagbulk, nc, np, nl, ng)
+
+        waterbalancebulk = CLM.WaterBalanceData()
+        CLM.waterbalance_init!(waterbalancebulk, nc, np, ng)
+
+        waterfluxbulk = CLM.WaterFluxBulkData()
+        CLM.waterfluxbulk_init!(waterfluxbulk, nc, np, nl, ng)
+
+        col_data = CLM.ColumnData()
+        CLM.column_init!(col_data, nc)
+
+        lun_data = CLM.LandunitData()
+        CLM.landunit_init!(lun_data, nl)
+
+        col_data.landunit[1] = 1
+        col_data.gridcell[1] = 1
+        col_data.itype[1] = 1
+        col_data.topo_slope[1] = 0.01
+        col_data.nbedrock[1] = nlevsoi
+        lun_data.itype[1] = CLM.ISTSOIL
+        lun_data.urbpoi[1] = false
+
+        joff = nlevsno
+        joff_zi = nlevsno + 1
+        nlevtot = nlevsno + nlevmaxurbgrnd
+        for jj in 1:nlevtot
+            col_data.dz[1, jj] = 0.1
+            col_data.z[1, jj] = (jj - joff - 0.5) * 0.1
+        end
+        for jj in 1:size(col_data.zi, 2)
+            col_data.zi[1, jj] = (jj - joff_zi) * 0.1
+        end
+
+        temperature.t_soisno_col .= 280.0
+        soilstate.bsw_col .= 4.0
+        soilstate.hksat_col .= 1.0e-6
+        soilstate.sucsat_col .= 100.0
+        soilstate.watsat_col .= 0.4
+        soilstate.eff_porosity_col .= 0.35
+
+        soilhydrology.zwt_col[1] = 2.2
+        soilhydrology.frost_table_col[1] = 0.01
+        soilhydrology.zwt_perched_col[1] = 0.5
+
+        ws = waterstatebulk.ws
+        ws.h2osoi_liq_col .= 0.0
+        ws.h2osoi_ice_col .= 0.0
+        ws.h2osfc_col[1] = 0.0
+        for j in 1:nlevsoi
+            ws.h2osoi_liq_col[1, j + joff] = 20.0
+        end
+
+        # Sentinel snow masses: no-aquifer soil flow must not read/write these slots.
+        snow_liq_before = fill(123.0, nlevsno)
+        snow_ice_before = fill(456.0, nlevsno)
+        for j in 1:nlevsno
+            ws.h2osoi_liq_col[1, j] = snow_liq_before[j]
+            ws.h2osoi_ice_col[1, j] = snow_ice_before[j]
+        end
+
+        mask_nolake = BitVector([true])
+        mask_hydrology = BitVector([true])
+        mask_urban = BitVector([false])
+        mask_do_smb = BitVector([false])
+        bounds = 1:nc
+        dtime = 1800.0
+        forc_rain = [0.0]
+        forc_snow = [0.0]
+        qflx_floodg = [0.0]
+
+        CLM.hydrology_drainage!(
+            temperature, soilhydrology, soilstate,
+            waterstatebulk, waterdiagbulk, waterbalancebulk, waterfluxbulk,
+            col_data, lun_data,
+            mask_nolake, mask_hydrology, mask_urban, mask_do_smb,
+            forc_rain, forc_snow, qflx_floodg,
+            bounds, dtime, nlevsno, nlevsoi, nlevgrnd, nlevurb;
+            use_vichydro=false,
+            use_aquifer_layer=false,
+            use_hillslope_routing=false)
+
+        @test ws.h2osoi_liq_col[1, 1:nlevsno] == snow_liq_before
+        @test ws.h2osoi_ice_col[1, 1:nlevsno] == snow_ice_before
+    end
 end

@@ -275,11 +275,12 @@ function hydrology_drainage!(
             nlevsno=nlevsno,
             use_vichydro=use_vichydro)
     else
-        # Perched lateral flow requires gridcell-level depth data
-        # These are passed as empty vectors when not available
-        tdepth_grc = Float64[]
-        tdepthmax_grc = Float64[]
-        grc_area = Float64[]
+        # Perched/subsurface lateral flow expects gridcell-indexed vectors.
+        # In single-point mode, use safe defaults when no external routing data exist.
+        ng = isempty(bounds) ? 0 : maximum(col.gridcell[bounds])
+        tdepth_grc = zeros(Float64, ng)
+        tdepthmax_grc = zeros(Float64, ng)
+        grc_area = ones(Float64, ng)
 
         perched_lateral_flow!(
             soilhydrology, soilstate,

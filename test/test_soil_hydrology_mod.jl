@@ -311,8 +311,10 @@
 
         ws = CLM.WaterStateData()
         CLM.waterstate_init!(ws, nc, nc, nl, ng)
-        ws.h2osoi_liq_col = fill(10.0, nc, nlevsoi)
-        ws.h2osoi_ice_col = fill(0.0, nc, nlevsoi)
+        nlevsno = CLM.varpar.nlevsno
+        nlevtot = nlevsoi + nlevsno
+        ws.h2osoi_liq_col = fill(10.0, nc, nlevtot)
+        ws.h2osoi_ice_col = fill(0.0, nc, nlevtot)
         ws.stream_water_volume_lun = fill(0.0, nl)
 
         wfb = CLM.WaterFluxBulkData()
@@ -387,8 +389,10 @@
 
         ws = CLM.WaterStateData()
         CLM.waterstate_init!(ws, nc, nc, nl, ng)
-        ws.h2osoi_liq_col = fill(10.0, nc, nlevsoi)
-        ws.h2osoi_ice_col = fill(0.0, nc, nlevsoi)
+        nlevsno = CLM.varpar.nlevsno
+        nlevtot = nlevsoi + nlevsno
+        ws.h2osoi_liq_col = fill(10.0, nc, nlevtot)
+        ws.h2osoi_ice_col = fill(0.0, nc, nlevtot)
         ws.h2osfc_col .= 0.0
         ws.stream_water_volume_lun = fill(0.0, nl)
 

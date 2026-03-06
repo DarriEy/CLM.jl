@@ -1,11 +1,13 @@
 using NCDatasets, Dates, Printf, Statistics, CLM
 
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
+const USE_AQUIFER_LAYER = !any(==("--no-aquifer"), ARGS)
 
 println("================================================================")
 println("  Julia CLM vs Fortran CLM — Full Year Comparison")
 println("  Site: Bow at Banff | Forcing: clmforc.2002.nc (real obs)")
 println("  Features: seasonal phenology, SNICAR optics, PFT roughness")
+println("  Hydrology mode: ", USE_AQUIFER_LAYER ? "aquifer" : "no-aquifer")
 println("================================================================")
 println()
 
@@ -37,6 +39,7 @@ inst = run_clm!(;
     start_date=DateTime(2002, 1, 1),
     end_date=DateTime(2003, 1, 1),
     dtime=1800, use_cn=false, verbose=true,
+    use_aquifer_layer=USE_AQUIFER_LAYER,
     fsnowoptics=isfile(fsnowoptics) ? fsnowoptics : "",
     fsnowaging=isfile(fsnowaging)   ? fsnowaging  : "")
 elapsed = time() - t0
@@ -96,6 +99,7 @@ vars = [
 new_vars = [
     ("ELAI",       "ELAI",       "m2/m2", "patch"),
     ("SNOW_DEPTH", "SNOW_DEPTH", "m",     "col"),
+    ("SNOWDP",     "SNOWDP",     "m",     "col"),
     ("ZWT",        "ZWT",        "m",     "col"),
     ("BTRAN",      "BTRANMN",    "0-1",   "patch"),
 ]

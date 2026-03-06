@@ -1591,6 +1591,9 @@ function perched_lateral_flow!(
 )
     wf = waterfluxbulk.wf
     params = soilhydrology_params
+    nlevsno = varpar.nlevsno
+    joff = nlevsno
+    joff_zi = nlevsno + 1
 
     h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
     h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
@@ -1645,16 +1648,16 @@ function perched_lateral_flow!(
 
         for k in 1:col_nbedrock[c]
             # Fortran zi(c,0) = 0.0 (ground surface); handle k-1=0 case
-            zi_km1 = k > 1 ? col_zi[c, k-1] : 0.0
-            if frost_table[c] >= zi_km1 && frost_table[c] < col_zi[c, k]
+            zi_km1 = k > 1 ? col_zi[c, k-1 + joff_zi] : 0.0
+            if frost_table[c] >= zi_km1 && frost_table[c] < col_zi[c, k + joff_zi]
                 k_frost_arr[c] = k
                 break
             end
         end
 
         for k in 1:col_nbedrock[c]
-            zi_km1 = k > 1 ? col_zi[c, k-1] : 0.0
-            if zwt_perched[c] >= zi_km1 && zwt_perched[c] < col_zi[c, k]
+            zi_km1 = k > 1 ? col_zi[c, k-1 + joff_zi] : 0.0
+            if zwt_perched[c] >= zi_km1 && zwt_perched[c] < col_zi[c, k + joff_zi]
                 k_perch_arr[c] = k
                 break
             end
@@ -1723,9 +1726,9 @@ function perched_lateral_flow!(
                             for k in k_perch_arr[c_src]:(k_frost_arr[c_src]-1)
                                 if k == k_perch_arr[c_src]
                                     transmis += 1.0e-3 * hksat[c_src, k] *
-                                        (col_zi[c_src, k] - zwt_perched[c_src])
+                                        (col_zi[c_src, k + joff_zi] - zwt_perched[c_src])
                                 else
-                                    transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k]
+                                    transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k + joff]
                                 end
                             end
                         end
@@ -1737,16 +1740,16 @@ function perched_lateral_flow!(
                                 for k in k_perch_arr[c_src]:(k_frost_arr[c_src]-1)
                                     if k == k_perch_arr[c_src]
                                         transmis += 1.0e-3 * hksat[c_src, k] *
-                                            (col_zi[c_src, k] - zwt_perched[c_src])
+                                            (col_zi[c_src, k + joff_zi] - zwt_perched[c_src])
                                     else
                                         if c_dst == ISPVAL
-                                            if (col_hill_elev[c_src] - col_z[c_src, k]) > (-stream_channel_depth)
-                                                transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k]
+                                            if (col_hill_elev[c_src] - col_z[c_src, k + joff]) > (-stream_channel_depth)
+                                                transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k + joff]
                                             end
                                         else
-                                            if (col_hill_elev[c_src] - col_z[c_src, k]) >
+                                            if (col_hill_elev[c_src] - col_z[c_src, k + joff]) >
                                                     (col_hill_elev[c_dst] - zwt_perched[c_dst])
-                                                transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k]
+                                                transmis += 1.0e-3 * hksat[c_src, k] * col_dz[c_src, k + joff]
                                             end
                                         end
                                     end
@@ -1756,7 +1759,7 @@ function perched_lateral_flow!(
                     end
                 elseif TRANSMISSIVITY_METHOD[] == TRANSMISSIVITY_UNIFORM
                     transmis = 1.0e-3 * hksat[c_src, k_perch_arr[c_src]] *
-                        (col_zi[c_src, k_frost_arr[c_src]] - zwt_perched[c_src])
+                        (col_zi[c_src, k_frost_arr[c_src] + joff_zi] - zwt_perched[c_src])
                 end
 
                 transmis = k_anisotropic * transmis
@@ -1772,8 +1775,8 @@ function perched_lateral_flow!(
                 wtsub = 0.0
                 q_perch = 0.0
                 for k in k_perch_arr[c]:(k_frost_arr[c]-1)
-                    q_perch += hksat[c, k] * col_dz[c, k]
-                    wtsub += col_dz[c, k]
+                    q_perch += hksat[c, k] * col_dz[c, k + joff]
+                    wtsub += col_dz[c, k + joff]
                 end
                 if wtsub > 0.0
                     q_perch = q_perch / wtsub
@@ -1808,14 +1811,14 @@ function perched_lateral_flow!(
             s_y = max(s_y, params.aq_sp_yield_min)
 
             if k == k_perch_arr[c]
-                drainage_layer = min(drainage_tot, s_y * (col_zi[c, k] - zwt_perched[c]) * 1.0e3)
+                drainage_layer = min(drainage_tot, s_y * (col_zi[c, k + joff_zi] - zwt_perched[c]) * 1.0e3)
             else
-                drainage_layer = min(drainage_tot, s_y * col_dz[c, k] * 1.0e3)
+                drainage_layer = min(drainage_tot, s_y * col_dz[c, k + joff] * 1.0e3)
             end
 
             drainage_layer = max(drainage_layer, 0.0)
             drainage_tot -= drainage_layer
-            h2osoi_liq[c, k] -= drainage_layer
+            h2osoi_liq[c, k + joff] -= drainage_layer
         end
 
         qflx_drain_perched[c] -= drainage_tot / dtime
@@ -1861,6 +1864,9 @@ function subsurface_lateral_flow!(
 )
     wf = waterfluxbulk.wf
     params = soilhydrology_params
+    nlevsno = varpar.nlevsno
+    joff = nlevsno
+    joff_zi = nlevsno + 1
 
     h2osfc     = waterstatebulk_ws.h2osfc_col
     h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
@@ -1933,9 +1939,9 @@ function subsurface_lateral_flow!(
     for j in 1:nlevsoi
         for c in bounds
             mask_hydrology[c] || continue
-            dzmm[c, j] = col_dz[c, j] * 1.0e3
+            dzmm[c, j] = col_dz[c, j + joff] * 1.0e3
 
-            vol_ice_val = min(watsat[c, j], h2osoi_ice[c, j] / (col_dz[c, j] * DENICE))
+            vol_ice_val = min(watsat[c, j], h2osoi_ice[c, j + joff] / (col_dz[c, j + joff] * DENICE))
             icefrac[c, j] = min(1.0, vol_ice_val / watsat[c, j])
             ice_imped_arr[c, j] = 10.0^(-params.e_ice * icefrac[c, j])
         end
@@ -1959,7 +1965,7 @@ function subsurface_lateral_flow!(
         mask_hydrology[c] || continue
         jwt[c] = nlevsoi
         for j in 1:nlevsoi
-            if zwt[c] <= col_zi[c, j]
+            if zwt[c] <= col_zi[c, j + joff_zi]
                 jwt[c] = j - 1
                 break
             end
@@ -2035,23 +2041,23 @@ function subsurface_lateral_flow!(
             # Calculate transmissivity of source column
             transmis = 0.0
             if c_src != ISPVAL
-                if zwt[c_src] <= col_zi[c_src, col_nbedrock[c_src]]
+                if zwt[c_src] <= col_zi[c_src, col_nbedrock[c_src] + joff_zi]
                     if TRANSMISSIVITY_METHOD[] == TRANSMISSIVITY_LAYERSUM
                         for j in (jwt[c_src]+1):col_nbedrock[c_src]
                             if j == jwt[c_src] + 1
                                 transmis += 1.0e-3 * ice_imped_arr[c_src, j] *
-                                    hksat[c_src, j] * (col_zi[c_src, j] - zwt[c_src])
+                                    hksat[c_src, j] * (col_zi[c_src, j + joff_zi] - zwt[c_src])
                             else
                                 if c_dst == ISPVAL
-                                    if (col_hill_elev[c_src] - col_z[c_src, j]) > (-stream_channel_depth)
+                                    if (col_hill_elev[c_src] - col_z[c_src, j + joff]) > (-stream_channel_depth)
                                         transmis += 1.0e-3 * ice_imped_arr[c_src, j] *
-                                            hksat[c_src, j] * col_dz[c_src, j]
+                                            hksat[c_src, j] * col_dz[c_src, j + joff]
                                     end
                                 else
-                                    if (col_hill_elev[c_src] - col_z[c_src, j]) >
+                                    if (col_hill_elev[c_src] - col_z[c_src, j + joff]) >
                                             (col_hill_elev[c_dst] - zwt[c_dst])
                                         transmis += 1.0e-3 * ice_imped_arr[c_src, j] *
-                                            hksat[c_src, j] * col_dz[c_src, j]
+                                            hksat[c_src, j] * col_dz[c_src, j + joff]
                                     end
                                 end
                             end
@@ -2059,7 +2065,7 @@ function subsurface_lateral_flow!(
                     elseif TRANSMISSIVITY_METHOD[] == TRANSMISSIVITY_UNIFORM
                         transmis = 1.0e-3 * ice_imped_arr[c_src, jwt[c_src]+1] *
                             hksat[c_src, jwt[c_src]+1] *
-                            (col_zi[c_src, col_nbedrock[c_src]] - zwt[c_src])
+                            (col_zi[c_src, col_nbedrock[c_src] + joff_zi] - zwt[c_src])
                     else
                         error("transmissivity_method must be LayerSum or Uniform")
                     end
@@ -2105,10 +2111,10 @@ function subsurface_lateral_flow!(
 
         else
             # Non-hillslope columns: power law baseflow
-            if zwt[c] <= col_zi[c, col_nbedrock[c]]
+            if zwt[c] <= col_zi[c, col_nbedrock[c] + joff_zi]
                 qflx_latflow_out[c] = ice_imped_col_arr[c] * BASEFLOW_SCALAR[] *
                     tan(RPI / 180.0 * col_topo_slope[c]) *
-                    (col_zi[c, col_nbedrock[c]] - zwt[c])^params.n_baseflow
+                    (col_zi[c, col_nbedrock[c] + joff_zi] - zwt[c])^params.n_baseflow
             end
             qflx_latflow_out_vol[c] = 1.0e-3 * qflx_latflow_out[c] *
                 (grc_area[g] * 1.0e6 * col_wtgcell[c])
@@ -2122,7 +2128,7 @@ function subsurface_lateral_flow!(
 
         qflx_net_latflow[c] = qflx_latflow_out[c] - qflx_latflow_in[c]
 
-        if zwt[c] <= col_zi[c, col_nbedrock[c]]
+        if zwt[c] <= col_zi[c, col_nbedrock[c] + joff_zi]
             drainage_arr[c] = qflx_net_latflow[c]
         else
             drainage_arr[c] = 0.0
@@ -2132,14 +2138,14 @@ function subsurface_lateral_flow!(
 
         if drainage_tot > 0.0  # rising water table
             for j in (jwt[c]+1):-1:1
-                if col_zi[c, j] < frost_table[c]
+                if col_zi[c, j + joff_zi] < frost_table[c]
                     s_y = watsat[c, j] *
                         (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
                     s_y = max(s_y, params.aq_sp_yield_min)
 
-                    drainage_layer = min(drainage_tot, s_y * col_dz[c, j] * 1.0e3)
+                    drainage_layer = min(drainage_tot, s_y * col_dz[c, j + joff] * 1.0e3)
                     drainage_layer = max(drainage_layer, 0.0)
-                    h2osoi_liq[c, j] += drainage_layer
+                    h2osoi_liq[c, j + joff] += drainage_layer
 
                     drainage_tot -= drainage_layer
 
@@ -2148,7 +2154,7 @@ function subsurface_lateral_flow!(
                         break
                     else
                         # Fortran zi(c,0) = 0.0 (ground surface); handle j-1=0 case
-                        zwt[c] = j > 1 ? col_zi[c, j-1] : 0.0
+                        zwt[c] = j > 1 ? col_zi[c, j - 1 + joff_zi] : 0.0
                     end
                 end
             end
@@ -2162,9 +2168,9 @@ function subsurface_lateral_flow!(
                     (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
                 s_y = max(s_y, params.aq_sp_yield_min)
 
-                drainage_layer = max(drainage_tot, -(s_y * (col_zi[c, j] - zwt[c]) * 1.0e3))
+                drainage_layer = max(drainage_tot, -(s_y * (col_zi[c, j + joff_zi] - zwt[c]) * 1.0e3))
                 drainage_layer = min(drainage_layer, 0.0)
-                h2osoi_liq[c, j] += drainage_layer
+                h2osoi_liq[c, j + joff] += drainage_layer
 
                 drainage_tot -= drainage_layer
 
@@ -2172,7 +2178,7 @@ function subsurface_lateral_flow!(
                     zwt[c] -= drainage_layer / s_y / 1000.0
                     break
                 else
-                    zwt[c] = col_zi[c, j]
+                    zwt[c] = col_zi[c, j + joff_zi]
                 end
             end
 
@@ -2188,18 +2194,18 @@ function subsurface_lateral_flow!(
     for j in nlevsoi:-1:2
         for c in bounds
             mask_hydrology[c] || continue
-            xsi_arr[c]        = max(h2osoi_liq[c, j] - eff_porosity[c, j] * dzmm[c, j], 0.0)
-            h2osoi_liq[c, j]  = min(eff_porosity[c, j] * dzmm[c, j], h2osoi_liq[c, j])
-            h2osoi_liq[c, j-1] += xsi_arr[c]
+            xsi_arr[c]        = max(h2osoi_liq[c, j + joff] - eff_porosity[c, j] * dzmm[c, j], 0.0)
+            h2osoi_liq[c, j + joff]  = min(eff_porosity[c, j] * dzmm[c, j], h2osoi_liq[c, j + joff])
+            h2osoi_liq[c, j - 1 + joff] += xsi_arr[c]
         end
     end
 
     for c in bounds
         mask_hydrology[c] || continue
 
-        xs1_arr[c] = max(max(h2osoi_liq[c, 1] - WATMIN, 0.0) -
-            max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_ice[c, 1] - WATMIN), 0.0)
-        h2osoi_liq[c, 1] -= xs1_arr[c]
+        xs1_arr[c] = max(max(h2osoi_liq[c, 1 + joff] - WATMIN, 0.0) -
+            max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_ice[c, 1 + joff] - WATMIN), 0.0)
+        h2osoi_liq[c, 1 + joff] -= xs1_arr[c]
 
         l = col_landunit[c]
         if lun_urbpoi[l]
@@ -2210,10 +2216,10 @@ function subsurface_lateral_flow!(
         end
 
         # ice check
-        xs1_arr[c] = max(max(h2osoi_ice[c, 1], 0.0) -
-            max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1]), 0.0)
-        h2osoi_ice[c, 1] = min(max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1]),
-            h2osoi_ice[c, 1])
+        xs1_arr[c] = max(max(h2osoi_ice[c, 1 + joff], 0.0) -
+            max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1 + joff]), 0.0)
+        h2osoi_ice[c, 1 + joff] = min(max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1 + joff]),
+            h2osoi_ice[c, 1 + joff])
         qflx_ice_runoff_xs[c] = xs1_arr[c] / dtime
     end
 
@@ -2221,16 +2227,16 @@ function subsurface_lateral_flow!(
     for j in 1:(nlevsoi-1)
         for c in bounds
             mask_hydrology[c] || continue
-            if h2osoi_liq[c, j] < WATMIN
-                xs_arr[c] = WATMIN - h2osoi_liq[c, j]
+            if h2osoi_liq[c, j + joff] < WATMIN
+                xs_arr[c] = WATMIN - h2osoi_liq[c, j + joff]
                 if j == jwt[c]
                     zwt[c] += xs_arr[c] / eff_porosity[c, j] / 1000.0
                 end
             else
                 xs_arr[c] = 0.0
             end
-            h2osoi_liq[c, j]   += xs_arr[c]
-            h2osoi_liq[c, j+1] -= xs_arr[c]
+            h2osoi_liq[c, j + joff]   += xs_arr[c]
+            h2osoi_liq[c, j + 1 + joff] -= xs_arr[c]
         end
     end
 
@@ -2238,25 +2244,25 @@ function subsurface_lateral_flow!(
     j = nlevsoi
     for c in bounds
         mask_hydrology[c] || continue
-        if h2osoi_liq[c, j] < WATMIN
-            xs_arr[c] = WATMIN - h2osoi_liq[c, j]
+        if h2osoi_liq[c, j + joff] < WATMIN
+            xs_arr[c] = WATMIN - h2osoi_liq[c, j + joff]
             for i in (nlevsoi-1):-1:1
-                available_h2osoi_liq = max(h2osoi_liq[c, i] - WATMIN - xs_arr[c], 0.0)
+                available_h2osoi_liq = max(h2osoi_liq[c, i + joff] - WATMIN - xs_arr[c], 0.0)
                 if available_h2osoi_liq >= xs_arr[c]
-                    h2osoi_liq[c, j] += xs_arr[c]
-                    h2osoi_liq[c, i] -= xs_arr[c]
+                    h2osoi_liq[c, j + joff] += xs_arr[c]
+                    h2osoi_liq[c, i + joff] -= xs_arr[c]
                     xs_arr[c] = 0.0
                     break
                 else
-                    h2osoi_liq[c, j] += available_h2osoi_liq
-                    h2osoi_liq[c, i] -= available_h2osoi_liq
+                    h2osoi_liq[c, j + joff] += available_h2osoi_liq
+                    h2osoi_liq[c, i + joff] -= available_h2osoi_liq
                     xs_arr[c] -= available_h2osoi_liq
                 end
             end
         else
             xs_arr[c] = 0.0
         end
-        h2osoi_liq[c, j] += xs_arr[c]
+        h2osoi_liq[c, j + joff] += xs_arr[c]
         qflx_rsub_sat[c] -= xs_arr[c] / dtime
     end
 

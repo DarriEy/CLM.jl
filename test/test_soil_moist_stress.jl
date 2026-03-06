@@ -228,6 +228,48 @@
         end
     end
 
+    @testset "calc_root_moist_stress_clm45default! — saturation ratio is capped" begin
+        CLM.set_perchroot_opt!(false, false)
+        CLM.init_root_moist_stress!()
+
+        nlevtot = nlevsno + nlevgrnd
+        rootfr_unf = zeros(np, nlevgrnd)
+        rootfr = fill(1.0 / nlevgrnd, np, nlevgrnd)
+        rootr = zeros(np, nlevgrnd)
+        btran = zeros(np)
+        rresis = zeros(np, nlevgrnd)
+
+        npft = 2
+        smpso = fill(-35000.0, npft)
+        smpsc = fill(-275000.0, npft)
+
+        t_soisno = fill(290.0, nc, nlevtot)
+        watsat = fill(0.45, nc, nlevgrnd)
+        sucsat = fill(100.0, nc, nlevgrnd)
+        bsw = fill(5.0, nc, nlevgrnd)
+        eff_porosity = fill(0.40, nc, nlevgrnd)
+        h2osoi_liqvol = fill(0.0, nc, nlevtot)
+
+        # Deliberately oversaturated volumetric liquid content (> eff_porosity).
+        for c in 1:nc, j in 1:nlevgrnd
+            h2osoi_liqvol[c, j + joff] = 0.80
+        end
+
+        patch_column = [1, 2, 3, 4]
+        patch_itype = [0, 0, 1, 0]
+        mask_patch = trues(np)
+        bounds_patch = 1:np
+
+        CLM.calc_root_moist_stress_clm45default!(rootfr_unf, rootfr, rootr, btran, rresis,
+            smpso, smpsc, t_soisno, watsat, sucsat, bsw, eff_porosity,
+            h2osoi_liqvol, patch_column, patch_itype,
+            mask_patch, bounds_patch, nlevgrnd, nlevsno)
+
+        # Cap should keep stress factors bounded even when h2osoi_liqvol > eff_porosity.
+        @test all(0.0 .<= btran .<= 1.0)
+        @test all(0.0 .<= rresis .<= 1.0)
+    end
+
     @testset "calc_root_moist_stress_clm45default! — dry soil gives zero stress" begin
         CLM.set_perchroot_opt!(false, false)
 

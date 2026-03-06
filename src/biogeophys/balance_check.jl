@@ -369,6 +369,7 @@ function begin_water_column_balance_single!(
     zi = col_data.zi
     zwt = soilhydrology.zwt_col
     nlevsoi_val = varpar.nlevsoi
+    joff_zi = varpar.nlevsno + 1
 
     ws = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
     aquifer_water_baseline = ws.aquifer_water_baseline
@@ -384,7 +385,8 @@ function begin_water_column_balance_single!(
             mask_nolake[c] || continue
             if col_data.active[c]
                 if is_hydrologically_active(col_data.itype[c], lun_data.itype[col_data.landunit[c]])
-                    if zwt[c] <= zi[c, nlevsoi_val+1]
+                    # zi is indexed on combined snow+soil interfaces.
+                    if zwt[c] <= zi[c, joff_zi + nlevsoi_val]
                         wa_reset_nonconservation_gain[c] = aquifer_water_baseline - wa[c]
                         wa[c] = aquifer_water_baseline
                     else

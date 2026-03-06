@@ -24,8 +24,11 @@ to output. This is the top-level entry point for offline CLM simulations.
 - `end_date::DateTime`   — Simulation end date (default 2000-02-01)
 - `dtime::Int`           — Timestep in seconds (default 1800)
 - `use_cn::Bool`         — Use CN biogeochemistry (default false)
+- `use_bedrock::Bool`    — Use bedrock-limited soil column (default true)
+- `use_aquifer_layer::Bool` — Use aquifer lower boundary (default true)
 - `hist_fields`          — Custom history fields (default: default_hist_fields())
 - `verbose::Bool`        — Print progress messages (default true)
+- `h2osfcflag::Int`      — Surface water flag for soil hydrology (default 0)
 
 # Returns
 - `inst::CLMInstances` — Final state of all CLM data instances
@@ -39,6 +42,9 @@ function clm_run!(;
     end_date::DateTime = DateTime(2000, 2, 1),
     dtime::Int = 1800,
     use_cn::Bool = false,
+    use_bedrock::Bool = true,
+    use_aquifer_layer::Bool = true,
+    h2osfcflag::Int = 0,
     hist_fields::Union{Vector{HistFieldDef}, Nothing} = nothing,
     verbose::Bool = true,
     fsnowoptics::String = "",
@@ -52,9 +58,12 @@ function clm_run!(;
     (inst, bounds, filt, tm) = clm_initialize!(;
         fsurdat=fsurdat, paramfile=paramfile,
         start_date=start_date, dtime=dtime, use_cn=use_cn,
+        use_bedrock=use_bedrock,
+        use_aquifer_layer=use_aquifer_layer,
+        h2osfcflag=h2osfcflag,
         fsnowoptics=fsnowoptics, fsnowaging=fsnowaging)
 
-    config = CLMDriverConfig(use_cn=use_cn)
+    config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer)
     filt_ia = clump_filter_inactive_and_active
 
     ng = bounds.endg
@@ -111,6 +120,7 @@ function clm_run!(;
         (yr, mon, d, tod) = get_curr_date(tm)
         first_step = (tm.nstep == 1)
         beg_day = is_beg_curr_day(tm)
+        end_day = is_end_curr_day(tm)
         beg_year = is_beg_curr_year(tm)
 
         # --- Run driver ---
@@ -120,6 +130,7 @@ function clm_run!(;
                  nstep=tm.nstep,
                  is_first_step=first_step,
                  is_beg_curr_day=beg_day,
+                 is_end_curr_day=end_day,
                  is_beg_curr_year=beg_year,
                  dtime=Float64(dtime),
                  mon=mon,

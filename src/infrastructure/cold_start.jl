@@ -10,17 +10,18 @@ Initialize all state variables for a cold start. Sets soil/snow temperatures,
 moisture, soil properties from surface data, and satellite phenology.
 """
 function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
-                                 filt::ClumpFilter, surf::SurfaceInputData)
+                                 filt::ClumpFilter, surf::SurfaceInputData;
+                                 use_aquifer_layer::Bool = true)
     init_soil_properties!(inst, bounds, surf)
     init_temperatures!(inst, bounds)
-    init_soil_moisture!(inst, bounds)
+    init_soil_moisture!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
     init_snow_state!(inst, bounds)
     init_water_diagnostic_state!(inst, bounds)
     init_soil_state_defaults!(inst, bounds)
     init_eff_porosity!(inst, bounds)
     init_satellite_phenology!(inst, bounds, surf)
     init_misc_state!(inst, bounds)
-    init_soil_hydrology_cold!(inst, bounds)
+    init_soil_hydrology_cold!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
     init_lake_state!(inst, bounds)
     init_root_fractions!(inst, bounds)
     nothing
@@ -138,7 +139,8 @@ end
 
 Set initial soil moisture profiles for cold start.
 """
-function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType)
+function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
+                              use_aquifer_layer::Bool = true)
     wsb = inst.water.waterstatebulk_inst
     ws = wsb.ws
     col = inst.column
@@ -147,7 +149,7 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType)
     nlevsno = varpar.nlevsno
     joff = nlevsno
 
-    VOL_INIT = 0.25  # initial volumetric soil water content
+    VOL_INIT = 0.15  # matches waterstate_type%InitCold default for non-FATES
 
     nlevtot = nlevsno + varpar.nlevmaxurbgrnd
 
@@ -177,8 +179,8 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType)
             ws.h2osoi_vol_col[c, j] = 0.0
         end
 
-        # Aquifer water (from WaterStateType%InitCold)
-        ws.wa_col[c] = 4000.0
+        # Keep cold-start aquifer state consistent with WaterStateType%InitCold.
+        ws.wa_col[c] = use_aquifer_layer ? 4000.0 : AQUIFER_WATER_BASELINE
     end
 
     nothing
@@ -513,13 +515,15 @@ metadata from the CLMInstances container.
 
 Corresponds to SoilHydrologyInitTimeConstMod + SoilHydrologyType%InitCold.
 """
-function init_soil_hydrology_cold!(inst::CLMInstances, bounds::BoundsType)
+function init_soil_hydrology_cold!(inst::CLMInstances, bounds::BoundsType;
+                                   use_aquifer_layer::Bool = true)
     col = inst.column
     lun = inst.landunit
     ws  = inst.water.waterstatebulk_inst.ws
 
     soilhydrology_init_cold!(
         inst.soilhydrology, bounds.begc:bounds.endc;
+        use_aquifer_layer=use_aquifer_layer,
         zi_col       = col.zi,
         wa_col       = ws.wa_col,
         landunit_col = col.landunit,

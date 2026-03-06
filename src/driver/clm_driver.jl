@@ -86,6 +86,7 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     bgc_mode::M
     irrigate::Bool
     use_noio::Bool
+    use_aquifer_layer::Bool
     use_soil_moisture_streams::Bool
     use_lai_streams::Bool
     n_drydep::Int
@@ -151,6 +152,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           use_matrixcn::Bool=false, ndep_from_cpl::Bool=false,
                           fates_spitfire_mode::Int=0, fates_seeddisp_cadence::Int=0,
                           irrigate::Bool=false, use_noio::Bool=false,
+                          use_aquifer_layer::Bool=true,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
                           n_drydep::Int=0,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
@@ -169,7 +171,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     else
         mode = SPMode()
     end
-    CLMDriverConfig(mode, irrigate, use_noio,
+    CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
                     use_soil_moisture_streams, use_lai_streams, n_drydep)
 end
 
@@ -389,7 +391,7 @@ end
     clm_drv!(config, inst, filt, filt_inactive_and_active, bounds_proc,
              doalb, nextsw_cday, declinp1, declin, obliqr,
              rstwr, nlend, rdate, rof_prognostic;
-             nstep, is_first_step, is_beg_curr_day, is_beg_curr_year)
+             nstep, is_first_step, is_beg_curr_day, is_end_curr_day, is_beg_curr_year)
 
 Main CLM driver — first phase of the CLM driver calling the CLM physics.
 
@@ -413,6 +415,7 @@ Main CLM driver — first phase of the CLM driver calling the CLM physics.
 - `nstep::Int`                 — current time step number
 - `is_first_step::Bool`        — true if first time step
 - `is_beg_curr_day::Bool`      — true if beginning of current day
+- `is_end_curr_day::Bool`      — true if end of current day
 - `is_beg_curr_year::Bool`     — true if beginning of current year
 - `photosyns::PhotosynthesisData` — photosynthesis state (not in CLMInstances)
 
@@ -441,6 +444,7 @@ function clm_drv!(config::CLMDriverConfig,
                    nstep::Int = 0,
                    is_first_step::Bool = false,
                    is_beg_curr_day::Bool = false,
+                   is_end_curr_day::Bool = false,
                    is_beg_curr_year::Bool = false,
                    dtime::Float64 = 1800.0,
                    mon::Int = 1,
@@ -768,8 +772,11 @@ function clm_drv!(config::CLMDriverConfig,
             filt.nolakec[c] || continue
             dz_cj = col.dz[c, j + joff]
             if dz_cj > 0.0
+                # Root stress expects volumetric liquid water bounded by the
+                # effective pore space (matches SoilMoistStressMod semantics).
+                liqvol = wsb.ws.h2osoi_liq_col[c, j + joff] / (dz_cj * DENH2O)
                 wdb.h2osoi_liqvol_col[c, j + joff] =
-                    wsb.ws.h2osoi_liq_col[c, j + joff] / (dz_cj * DENH2O)
+                    min(max(liqvol, 0.0), ss.eff_porosity_col[c, j])
             else
                 wdb.h2osoi_liqvol_col[c, j + joff] = 0.0
             end
@@ -1298,7 +1305,8 @@ function clm_drv!(config::CLMDriverConfig,
                         bc_col,
                         dtime,
                         varpar.nlevsno, varpar.nlevsoi,
-                        varpar.nlevgrnd, varpar.nlevurb)
+                        varpar.nlevgrnd, varpar.nlevurb;
+                        use_aquifer_layer=config.use_aquifer_layer)
 
     # ========================================================================
     # Ecosystem dynamics post drainage
@@ -1479,7 +1487,7 @@ function clm_drv!(config::CLMDriverConfig,
 
         # Energy flux accumulators — WIRED
         energyflux_update_acc_vars!(ef, bc_patch;
-            end_cd=is_beg_curr_day, dtime=Int(dtime))
+            end_cd=is_end_curr_day, dtime=Int(dtime))
 
         # Placeholder: bgc_vegetation_inst%UpdateAccVars!(bounds_proc, ...) [BGC accum]
 
