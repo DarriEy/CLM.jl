@@ -52,6 +52,9 @@
         col_data.snl      = fill(0, nc)
         col_data.wtgcell  = fill(1.0 / nc, nc)
         col_data.zi       = zeros(nc, nlevtot + 1)
+        col_data.hydrologically_active = fill(true, nc)
+        col_data.dz       = fill(0.1, nc, nlevtot)
+        col_data.landunit = fill(1, nc)
 
         # Landunit data
         lun_data = CLM.LandunitData()
@@ -117,11 +120,22 @@
         wdb.snow_depth_col .= 0.0
         wdb.qflx_prec_grnd_col .= 0.0
 
+        # Water diagnostic bulk - total_plant_stored_h2o
+        wdb.total_plant_stored_h2o_col .= 0.0
+
         # Water state (bulk)
         wstate = water.waterstatebulk_inst.ws
         wstate.aquifer_water_baseline = 0.0
         wstate.wa_col .= 0.0
         wstate.h2osno_no_layers_col .= 0.0
+        wstate.h2osfc_col .= 0.0
+        wstate.h2osoi_liq_col .= 0.0
+        wstate.h2osoi_ice_col .= 0.0
+        wstate.excess_ice_col .= 0.0
+        wstate.dynbal_baseline_liq_col .= 0.0
+        wstate.dynbal_baseline_ice_col .= 0.0
+        wstate.liqcan_patch .= 0.0
+        wstate.snocan_patch .= 0.0
         wstate.stream_water_volume_lun .= 0.0
 
         # Energy flux

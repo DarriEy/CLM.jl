@@ -117,6 +117,7 @@ function water_gridcell_balance!(
             bt.waterstate,
             bt.waterbalance,
             bt.waterflux,
+            bt.waterdiagnostic,
             lakestate,
             col_data, lun_data, grc_data,
             mask_nolake, mask_lake,
@@ -155,6 +156,7 @@ function water_gridcell_balance_single!(
     waterstate::Union{WaterStateData, WaterStateBulkData, Nothing},
     waterbalance::Union{WaterBalanceData, Nothing},
     waterflux::Union{WaterFluxData, WaterFluxBulkData, Nothing},
+    waterdiagnostic::Union{WaterDiagnosticBulkData, Nothing},
     lakestate::LakeStateData,
     col_data::ColumnData,
     lun_data::LandunitData,
@@ -184,10 +186,11 @@ function water_gridcell_balance_single!(
     wb_grc = zeros(ng)
 
     # Compute water mass for non-lake columns
-    compute_water_mass_non_lake_bc!(wb_col, waterstate, mask_nolake, bounds_c)
+    ws_raw = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
+    compute_water_mass_non_lake_bc!(wb_col, waterstate, waterdiagnostic, mask_nolake, bounds_c, col_data)
 
     # Compute water mass for lake columns
-    compute_water_mass_lake_bc!(wb_col, waterstate, lakestate, mask_lake, bounds_c)
+    compute_water_mass_lake_bc!(wb_col, waterstate, lakestate, mask_lake, bounds_c, col_data)
 
     # Column-to-gridcell aggregation
     c2g_unity!(wb_grc, wb_col, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
@@ -236,56 +239,74 @@ function water_gridcell_balance_single!(
 end
 
 # --------------------------------------------------------------------------
-# compute_water_mass_lake_bc! (stub)
+# compute_water_mass_lake_bc!
 # --------------------------------------------------------------------------
 
 """
     compute_water_mass_lake_bc!(water_mass, waterstate, lakestate,
-        mask_lake, bounds)
+        mask_lake, bounds, col_data)
 
 Compute total water mass for lake columns.
+Delegates to `compute_water_mass_lake!` in `total_water_heat.jl`.
 
 Ported from `ComputeWaterMassLake` in `TotalWaterAndHeatMod.F90`.
-Stub: TotalWaterAndHeatMod is not yet fully ported. Sets lake columns
-to 0.0 in water_mass (additive — non-lake values are preserved).
 """
 function compute_water_mass_lake_bc!(
     water_mass::Vector{Float64},
     waterstate::Union{WaterStateData, WaterStateBulkData},
     lakestate::LakeStateData,
     mask_lake::BitVector,
-    bounds::UnitRange{Int}
+    bounds::UnitRange{Int},
+    col_data::ColumnData
 )
-    for c in bounds
-        mask_lake[c] || continue
-        water_mass[c] = 0.0
-    end
+    ws = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
+    compute_water_mass_lake!(mask_lake, col_data, ws, lakestate, false, water_mass)
     return nothing
 end
 
 # --------------------------------------------------------------------------
-# compute_water_mass_non_lake_bc! (stub for balance check)
+# compute_water_mass_non_lake_bc!
 # --------------------------------------------------------------------------
 
 """
-    compute_water_mass_non_lake_bc!(water_mass, waterstate, mask_nolake, bounds)
+    compute_water_mass_non_lake_bc!(water_mass, waterstate, waterdiagnostic,
+        mask_nolake, bounds, col_data)
 
 Compute total water mass for non-lake columns.
-Stub: sets non-lake column water mass to 0.0.
+Delegates to `compute_water_mass_non_lake!` in `total_water_heat.jl`.
 
 Ported from `ComputeWaterMassNonLake` in `TotalWaterAndHeatMod.F90`.
-When TotalWaterAndHeatMod is fully ported, this should compute total
-water mass (liquid + ice + snow + surface water + aquifer).
 """
 function compute_water_mass_non_lake_bc!(
     water_mass::Vector{Float64},
     waterstate::Union{WaterStateData, WaterStateBulkData},
+    waterdiagnostic::Union{WaterDiagnosticBulkData, Nothing},
     mask_nolake::BitVector,
-    bounds::UnitRange{Int}
+    bounds::UnitRange{Int},
+    col_data::ColumnData
 )
-    for c in bounds
-        mask_nolake[c] || continue
-        water_mass[c] = 0.0
+    ws = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
+    if waterdiagnostic !== nothing
+        compute_water_mass_non_lake!(mask_nolake, col_data, ws, waterdiagnostic, false, water_mass)
+    else
+        # Tracer path: no waterdiagnostic available, compute without plant stored water
+        nc = length(water_mass)
+        nlevsno = varpar.nlevsno
+        for c in eachindex(mask_nolake)
+            mask_nolake[c] || continue
+            water_mass[c] = ws.h2osno_no_layers_col[c] + ws.h2osfc_col[c]
+            for j in (col_data.snl[c] + 1):0
+                jj = j + nlevsno
+                water_mass[c] += ws.h2osoi_liq_col[c, jj] + ws.h2osoi_ice_col[c, jj]
+            end
+            if col_data.hydrologically_active[c]
+                water_mass[c] += (ws.wa_col[c] - ws.aquifer_water_baseline)
+            end
+            for j in 1:varpar.nlevgrnd
+                jj = j + nlevsno
+                water_mass[c] += ws.h2osoi_liq_col[c, jj] + ws.h2osoi_ice_col[c, jj]
+            end
+        end
     end
     return nothing
 end
@@ -324,6 +345,7 @@ function begin_water_column_balance!(
         begin_water_column_balance_single!(
             bt.waterstate,
             bt.waterbalance,
+            bt.waterdiagnostic,
             soilhydrology,
             lakestate,
             col_data,
@@ -354,6 +376,7 @@ Ported from `BeginWaterColumnBalanceSingle` in `BalanceCheckMod.F90`.
 function begin_water_column_balance_single!(
     waterstate::Union{WaterStateData, WaterStateBulkData, Nothing},
     waterbalance::Union{WaterBalanceData, Nothing},
+    waterdiagnostic::Union{WaterDiagnosticBulkData, Nothing},
     soilhydrology::SoilHydrologyData,
     lakestate::LakeStateData,
     col_data::ColumnData,
@@ -398,10 +421,10 @@ function begin_water_column_balance_single!(
     end
 
     # Compute water mass for non-lake columns → begwb
-    compute_water_mass_non_lake_bc!(begwb, waterstate, mask_nolake, bounds_c)
+    compute_water_mass_non_lake_bc!(begwb, waterstate, waterdiagnostic, mask_nolake, bounds_c, col_data)
 
     # Compute water mass for lake columns → begwb
-    compute_water_mass_lake_bc!(begwb, waterstate, lakestate, mask_lake, bounds_c)
+    compute_water_mass_lake_bc!(begwb, waterstate, lakestate, mask_lake, bounds_c, col_data)
 
     # Calculate total h2osno for snow balance tracking
     snl_col = col_data.snl

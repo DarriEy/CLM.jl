@@ -181,6 +181,16 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
 
         # Keep cold-start aquifer state consistent with WaterStateType%InitCold.
         ws.wa_col[c] = use_aquifer_layer ? 4000.0 : AQUIFER_WATER_BASELINE
+
+        # Dynbal baselines (zero for cold start)
+        ws.dynbal_baseline_liq_col[c] = 0.0
+        ws.dynbal_baseline_ice_col[c] = 0.0
+    end
+
+    # Canopy water at patch level
+    for p in bounds.begp:bounds.endp
+        ws.liqcan_patch[p] = 0.0
+        ws.snocan_patch[p] = 0.0
     end
 
     nothing
@@ -237,7 +247,7 @@ function init_water_diagnostic_state!(inst::CLMInstances, bounds::BoundsType)
         wdb.dqgdT_col[c] = 0.0
 
         # Snow grain radius defaults
-        wdb.snw_rds_top_col[c] = 0.0
+        wdb.snw_rds_top_col[c] = 54.526
         wdb.h2osno_top_col[c] = 0.0
         wdb.sno_liq_top_col[c] = 0.0
 
@@ -253,10 +263,15 @@ function init_water_diagnostic_state!(inst::CLMInstances, bounds::BoundsType)
             end
         end
 
-        # Snow grain radius per layer
+        # Snow grain radius per layer (use fresh snow minimum = 54.526 microns)
         for j in 1:size(wdb.snw_rds_col, 2)
-            wdb.snw_rds_col[c, j] = 0.0
+            wdb.snw_rds_col[c, j] = 54.526
         end
+    end
+
+    # Column-level plant stored water
+    for c in bounds.begc:bounds.endc
+        wdb.total_plant_stored_h2o_col[c] = 0.0
     end
 
     # Patch-level water diagnostics
