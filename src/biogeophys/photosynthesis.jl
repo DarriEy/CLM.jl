@@ -457,7 +457,7 @@ end
 Photosynthesis temperature response function.
 """
 @inline function ft_photo(tl::Float64, ha::Float64)
-    return exp(ha / (RGAS * 1.0e-3 * (TFRZ + 25.0)) * (1.0 - (TFRZ + 25.0) / tl))
+    return exp(ha / (RGAS * (TFRZ + 25.0)) * (1.0 - (TFRZ + 25.0) / tl))
 end
 
 """
@@ -466,7 +466,7 @@ end
 Photosynthesis temperature inhibition function.
 """
 @inline function fth_photo(tl::Float64, hd::Float64, se::Float64, scaleFactor::Float64)
-    return scaleFactor / (1.0 + exp((-hd + se * tl) / (RGAS * 1.0e-3 * tl)))
+    return scaleFactor / (1.0 + exp((-hd + se * tl) / (RGAS * tl)))
 end
 
 """
@@ -475,7 +475,7 @@ end
 Scaling factor for photosynthesis temperature inhibition at 25°C.
 """
 @inline function fth25_photo(hd::Float64, se::Float64)
-    return 1.0 + exp((-hd + se * (TFRZ + 25.0)) / (RGAS * 1.0e-3 * (TFRZ + 25.0)))
+    return 1.0 + exp((-hd + se * (TFRZ + 25.0)) / (RGAS * (TFRZ + 25.0)))
 end
 
 """
@@ -586,8 +586,14 @@ function ci_func!(ci::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
     gs_mol = 0.0
 
     if c3flag
-        ac[p, iv] = vcmax_z[p, iv] * max(ci - cp_p, 0.0) / (ci + kc_p * (1.0 + oair / ko_p))
-        aj[p, iv] = je * max(ci - cp_p, 0.0) / (4.0 * ci + 8.0 * cp_p)
+        # Guard against ko_p=0 at very cold temperatures (Arrhenius → 0)
+        if ko_p > 0.0
+            ac[p, iv] = vcmax_z[p, iv] * max(ci - cp_p, 0.0) / (ci + kc_p * (1.0 + oair / ko_p))
+        else
+            ac[p, iv] = 0.0
+        end
+        denom_j = 4.0 * ci + 8.0 * cp_p
+        aj[p, iv] = denom_j > 0.0 ? je * max(ci - cp_p, 0.0) / denom_j : 0.0
         ap[p, iv] = 3.0 * tpu_z[p, iv]
     else
         ac[p, iv] = vcmax_z[p, iv]
@@ -973,8 +979,8 @@ function photosynthesis!(ps::PhotosynthesisData,
         end
 
         # Michaelis-Menten constants
-        kc25 = params_inst.kc25_coef * forc_pbot[c]
-        ko25 = params_inst.ko25_coef * forc_pbot[c]
+        kc25 = params_inst.kc25_coef * forc_pbot[p]
+        ko25 = params_inst.ko25_coef * forc_pbot[p]
         sco = 0.5 * 0.209 / params_inst.cp25_yr2000
         cp25 = 0.5 * oair[p] / sco
 
@@ -1099,7 +1105,7 @@ function photosynthesis!(ps::PhotosynthesisData,
         c = col_of_patch[p]
         ivt_p = ivt[p]
 
-        cf = forc_pbot[c] / (RGAS * 1.0e-3 * tgcm[p]) * 1.0e06
+        cf = forc_pbot[p] / (RGAS * tgcm[p]) * 1.0e06
         gb = 1.0 / rb[p]
         gb_mol[p] = gb * cf
 
@@ -1151,13 +1157,14 @@ function photosynthesis!(ps::PhotosynthesisData,
 
                 # Solve for ci and gs
                 ci_sol, gs_mol_val, _ = hybrid_solver!(ci_z[p, iv], p, iv,
-                    forc_pbot[c], gb_mol[p], je, cair[p], oair[p],
+                    forc_pbot[p], gb_mol[p], je, cair[p], oair[p],
                     lmr_z[p, iv], par_z_in[p, iv], rh_can, ps;
                     medlynslope_val=medlynslope_pft[ivt_p],
                     medlynintercept_val=medlynintercept_pft[ivt_p],
                     mbbopt_val=mbbopt_pft[ivt_p])
 
                 gs_mol[p, iv] = gs_mol_val
+
 
                 # Check for an < 0
                 if an[p, iv] < 0.0
@@ -1176,9 +1183,9 @@ function photosynthesis!(ps::PhotosynthesisData,
                 end
 
                 # Final ci
-                cs = cair[p] - 1.4 / gb_mol[p] * an[p, iv] * forc_pbot[c]
+                cs = cair[p] - 1.4 / gb_mol[p] * an[p, iv] * forc_pbot[p]
                 cs = max(cs, MAX_CS)
-                ci_z[p, iv] = cair[p] - an[p, iv] * forc_pbot[c] *
+                ci_z[p, iv] = cair[p] - an[p, iv] * forc_pbot[p] *
                     (1.4 * gs_mol[p, iv] + 1.6 * gb_mol[p]) / (gb_mol[p] * gs_mol[p, iv])
                 ci_z[p, iv] = max(ci_z[p, iv], 1.0e-06)
 
@@ -1345,7 +1352,7 @@ function fractionation!(ps::PhotosynthesisData,
                 alphapsn[p] = 1.0
             else
                 ci = co2_p - (an_ref[p, iv] *
-                    forc_pbot[c] *
+                    forc_pbot[p] *
                     (1.4 * gs_mol_ref[p, iv] + 1.6 * gb_mol[p]) /
                     (gb_mol[p] * gs_mol_ref[p, iv]))
                 alphapsn[p] = 1.0 + (((c3psn_pft[ivt[p]] *
@@ -1458,7 +1465,7 @@ function getqflx!(p::Int, c::Int, gb_mol::Float64,
                   fdry_p::Float64, forc_rho_c::Float64,
                   forc_pbot_c::Float64, tgcm_p::Float64)
 
-    cf = forc_pbot_c / (RGAS * 1.0e-3 * tgcm_p) * 1.0e6
+    cf = forc_pbot_c / (RGAS * tgcm_p) * 1.0e6
     wtl = (elai_p + esai_p) * gb_mol
     efpot = forc_rho_c * wtl * (qsatl - qaf)
 
@@ -2752,8 +2759,8 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
             mbb[p] = mbbopt_pft[ivt_p]
         end
 
-        kc25 = params_inst.kc25_coef * forc_pbot[c]
-        ko25 = params_inst.ko25_coef * forc_pbot[c]
+        kc25 = params_inst.kc25_coef * forc_pbot[p]
+        ko25 = params_inst.ko25_coef * forc_pbot[p]
         sco = 0.5 * 0.209 / params_inst.cp25_yr2000
         cp25 = 0.5 * oair[p] / sco
 
@@ -2911,7 +2918,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
         c = col_of_patch[p]
         ivt_p = ivt[p]
 
-        cf = forc_pbot[c] / (RGAS * 1.0e-3 * tgcm[p]) * 1.0e06
+        cf = forc_pbot[p] / (RGAS * tgcm[p]) * 1.0e06
         gb = 1.0 / rb[p]
         gb_mol_arr[p] = gb * cf
 
@@ -2932,7 +2939,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                     gb_mol_arr[p], gsminsun, gsminsha, qsatl[p], qaf[p],
                     k_soil_root[p, :], smp_l[c, :], z_col[c, :],
                     laisun[p], laisha[p], htop[p], tsai[p], ivt_p, nlevsoi,
-                    elai[p], esai[p], fdry[p], forc_rho[c], forc_pbot[c], tgcm[p])
+                    elai[p], esai[p], fdry[p], forc_rho[c], forc_pbot[p], tgcm[p])
                 vegwp[p, :] .= vegwp_view
                 bsun_arr[p] = bsun_val
                 bsha_arr[p] = bsha_val
@@ -3014,7 +3021,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                     lmr_z_sun[p, iv], lmr_z_sha[p, iv],
                     par_z_sun_in[p, iv], par_z_sha_in[p, iv],
                     rh_can, qsatl[p], qaf[p],
-                    ps, forc_pbot[c], vegwp_view,
+                    ps, forc_pbot[p], vegwp_view,
                     k_soil_root[p, :], smp_l[c, :], z_col[c, :],
                     laisun[p], laisha[p], htop[p], tsai[p], ivt_p, nlevsoi,
                     elai[p], esai[p], fdry[p], forc_rho[c], tgcm[p];
@@ -3056,16 +3063,16 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                 end
 
                 # Final cs and ci
-                cs_sun = cair[p] - 1.4 / gb_mol_arr[p] * an_sun[p, iv] * forc_pbot[c]
+                cs_sun = cair[p] - 1.4 / gb_mol_arr[p] * an_sun[p, iv] * forc_pbot[p]
                 cs_sun = max(cs_sun, MAX_CS)
-                ci_z_sun[p, iv] = cair[p] - an_sun[p, iv] * forc_pbot[c] *
+                ci_z_sun[p, iv] = cair[p] - an_sun[p, iv] * forc_pbot[p] *
                     (1.4 * gs_mol_sun[p, iv] + 1.6 * gb_mol_arr[p]) /
                     (gb_mol_arr[p] * gs_mol_sun[p, iv])
                 ci_z_sun[p, iv] = max(ci_z_sun[p, iv], 1.0e-06)
 
-                cs_sha = cair[p] - 1.4 / gb_mol_arr[p] * an_sha[p, iv] * forc_pbot[c]
+                cs_sha = cair[p] - 1.4 / gb_mol_arr[p] * an_sha[p, iv] * forc_pbot[p]
                 cs_sha = max(cs_sha, MAX_CS)
-                ci_z_sha[p, iv] = cair[p] - an_sha[p, iv] * forc_pbot[c] *
+                ci_z_sha[p, iv] = cair[p] - an_sha[p, iv] * forc_pbot[p] *
                     (1.4 * gs_mol_sha[p, iv] + 1.6 * gb_mol_arr[p]) /
                     (gb_mol_arr[p] * gs_mol_sha[p, iv])
                 ci_z_sha[p, iv] = max(ci_z_sha[p, iv], 1.0e-06)

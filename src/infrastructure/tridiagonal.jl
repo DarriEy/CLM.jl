@@ -84,11 +84,14 @@ function tridiagonal_multi!(u::AbstractMatrix{<:Real}, a::AbstractMatrix{<:Real}
 
         @inbounds begin
             # Forward sweep
-            cp[j] = c[col, j] / b[col, j]
-            dp[j] = r[col, j] / b[col, j]
+            bet = b[col, j]
+            if abs(bet) < 1.0e-30; bet = 1.0e-30; end
+            cp[j] = c[col, j] / bet
+            dp[j] = r[col, j] / bet
 
             for jj in (j+1):nlevs
                 denom = b[col, jj] - a[col, jj] * cp[jj-1]
+                if abs(denom) < 1.0e-30; denom = copysign(1.0e-30, denom == 0.0 ? one(denom) : denom); end
                 cp[jj] = c[col, jj] / denom
                 dp[jj] = (r[col, jj] - a[col, jj] * dp[jj-1]) / denom
             end

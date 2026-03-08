@@ -305,9 +305,11 @@ function set_filters_one_group!(filt::ClumpFilter, bounds::BoundsType,
     end
 
     # --- Hydrology column filter (soil and urban pervious road cols) ---
+    # Matches Fortran filterMod.F90: excludes lake columns (they use LakeMod)
     for c in bounds.begc:bounds.endc
         if col.active[c] || include_inactive
-            if col.hydrologically_active[c]
+            li = col.landunit[c]
+            if col.hydrologically_active[c] && lun.itype[li] != ISTDLAK
                 filt.hydrologyc[c] = true
             end
         end

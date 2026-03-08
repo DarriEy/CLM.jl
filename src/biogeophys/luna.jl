@@ -153,7 +153,7 @@ end
 Temperature response for respiration (Bernacchi PCE 2001).
 """
 function resp_t_bernacchi(tleaf::Float64)
-    return exp(18.72 - 46.39 / (RGAS * 1.0e-3 * (tleaf + TFRZ)))
+    return exp(18.72 - 46.39 / (RGAS * (tleaf + TFRZ)))
 end
 
 # ==========================================================================

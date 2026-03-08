@@ -131,6 +131,9 @@ function tridiagonal_col!(u::AbstractVector{<:Real},
     gam = zeros(T, n)
 
     bet = b[jtop]
+    if abs(bet) < 1.0e-30
+        bet = 1.0e-30
+    end
 
     for j in lbj:ubj
         if j >= jtop
@@ -139,6 +142,9 @@ function tridiagonal_col!(u::AbstractVector{<:Real},
             else
                 gam[j] = c[j-1] / bet
                 bet = b[j] - a[j] * gam[j]
+                if abs(bet) < 1.0e-30
+                    bet = copysign(1.0e-30, bet == 0.0 ? one(bet) : bet)
+                end
                 u[j] = (r[j] - a[j] * u[j-1]) / bet
             end
         end

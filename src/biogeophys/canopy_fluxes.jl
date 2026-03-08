@@ -648,9 +648,10 @@ function canopy_fluxes!(
         # Call photosynthesis for sunlit and shaded leaves to update rssun/rssha
         if !isempty(nrad_patch) && !isempty(parsun_z_patch)
             # Build patch-indexed forc_pbot from column-level data
+            # Use full mask (not reduced filterp) since photosynthesis uses mask_exposedvegp
             forc_pbot_patch = zeros(endp)
-            for fi in 1:fn
-                p = filterp[fi]
+            for p in bounds_patch
+                mask_exposedvegp[p] || continue
                 c = patch_data.column[p]
                 forc_pbot_patch[p] = forc_pbot_col[c]
             end
@@ -691,6 +692,7 @@ function canopy_fluxes!(
                 mask_exposedvegp, bounds_patch, "sha";
                 use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
                 leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft)
+
         end
 
         # --- Heat transfer conductances ---
@@ -832,13 +834,14 @@ function canopy_fluxes!(
                 waterdiagbulk.frac_h2osfc_col[c] * temperature.t_h2osfc_col[c]^4)
 
             # Newton-Raphson: dt_veg
-            dt_veg[p] = ((1.0 - frac_rad_abs_by_stem[p]) * (solarabs.sabv_patch[p] + air[p] +
+            _numer = ((1.0 - frac_rad_abs_by_stem[p]) * (solarabs.sabv_patch[p] + air[p] +
                 bir[p] * temperature.t_veg_patch[p]^4 + cir[p] * lw_grnd) -
                 efsh - efe[p] - lw_leaf[p] + lw_stem[p] -
-                (cp_leaf[p] / dtime) * (temperature.t_veg_patch[p] - tl_ini[p])) /
-                ((1.0 - frac_rad_abs_by_stem[p]) * (-4.0 * bir[p] * temperature.t_veg_patch[p]^3) +
+                (cp_leaf[p] / dtime) * (temperature.t_veg_patch[p] - tl_ini[p]))
+            _denom = ((1.0 - frac_rad_abs_by_stem[p]) * (-4.0 * bir[p] * temperature.t_veg_patch[p]^3) +
                  4.0 * sa_internal[p] * temperature.emv_patch[p] * SB * temperature.t_veg_patch[p]^3 +
                  dc1 * wtga[p] + dc2 * wtgaq * qsatldT[p] + cp_leaf[p] / dtime)
+            dt_veg[p] = _numer / _denom
 
             temperature.t_veg_patch[p] = tlbef[p] + dt_veg[p]
 

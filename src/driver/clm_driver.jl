@@ -702,6 +702,8 @@ function clm_drv!(config::CLMDriverConfig,
                      qflx_snow_drain=wfb.wf.qflx_snow_drain_col,
                      int_snow=wsb.int_snow_col)
 
+
+
     # UpdateFracH2oSfc — WIRED
     update_frac_h2osfc!(inst.water, col, filt.soilc, bc_col; dtime=dtime)
 
@@ -822,7 +824,17 @@ function clm_drv!(config::CLMDriverConfig,
                    parsun_z_patch=sa.parsun_z_patch,
                    parsha_z_patch=sa.parsha_z_patch,
                    laisun_z_patch=cs.laisun_z_patch,
-                   laisha_z_patch=cs.laisha_z_patch)
+                   laisha_z_patch=cs.laisha_z_patch,
+                   o3coefv_patch=ones(np),
+                   o3coefg_patch=ones(np),
+                   dleaf_pft=pftcon.dleaf,
+                   slatop_pft=pftcon.slatop,
+                   leafcn_pft=pftcon.leafcn,
+                   flnr_pft=pftcon.flnr,
+                   fnitr_pft=pftcon.fnitr,
+                   mbbopt_pft=pftcon.mbbopt,
+                   c3psn_pft=pftcon.c3psn,
+                   woody_pft=Float64.(pftcon.woody))
 
     # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)
     (num_nourbanl, filter_nourbanl) = bitvec_to_filter(filt.nourbanl)
@@ -905,6 +917,8 @@ function clm_drv!(config::CLMDriverConfig,
                       bc_col, bc_lun, bc_patch,
                       dtime)
 
+
+
     # Placeholder: glacier_smb_inst%HandleIceMelt!(bc, ...) [glacier ice melt]
 
     # ========================================================================
@@ -936,7 +950,6 @@ function clm_drv!(config::CLMDriverConfig,
     # --- 1. Build snow/no-snow filter ---
     build_snow_filter!(filt.snowc, filt.nosnowc, col.snl,
                        filt.nolakec, bc_col)
-
     # --- 2. SnowWater: snow percolation → qflx_rain_plus_snomelt ---
     # 2a. Apply top-layer fluxes (sublimation, dew, rain on snow)
     update_state_top_layer_fluxes!(
@@ -956,12 +969,16 @@ function clm_drv!(config::CLMDriverConfig,
         wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
         filt.snowc, bc_col, nlevsno)
 
+
+
     # 2c. Update snow layer liquid after percolation
     update_state_snow_percolation!(
         wsb.ws.h2osoi_liq_col,
         dtime, col.snl,
         wfb.wf.qflx_snow_percolation_col,
         filt.snowc, bc_col, nlevsno)
+
+
 
     # 2d. Aerosol fluxes through snow layers
     calc_and_apply_aerosol_fluxes!(
@@ -970,11 +987,15 @@ function clm_drv!(config::CLMDriverConfig,
         wfb.wf.qflx_snow_percolation_col,
         filt.snowc, bc_col, nlevsno)
 
+
+
     # 2e. Adjust layer thicknesses after percolation
     post_percolation_adjust_layer_thicknesses!(
         col.dz, col.snl,
         wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
         filt.snowc, bc_col, nlevsno)
+
+
 
     # 2f. Sum percolation out of bottom snow layer → qflx_rain_plus_snomelt
     # For snow columns: drainage from bottom + non-snow-covered rain
@@ -1134,6 +1155,8 @@ function clm_drv!(config::CLMDriverConfig,
         lun.lakpoi, lun.urbpoi,
         filt.snowc, bc_col, nlevsno)
 
+
+
     # --- 17. Combine thin snow layers ---
     combine_snow_layers!(
         col.snl, col.dz, col.zi, col.z,
@@ -1144,7 +1167,6 @@ function clm_drv!(config::CLMDriverConfig,
         wsb.int_snow_col, wdb.snw_rds_col,
         aer, lun.itype, lun.urbpoi, col.landunit,
         filt.snowc, bc_col, nlevsno)
-
     # --- 18. Divide thick snow layers ---
     divide_snow_layers!(
         col.snl, col.dz, col.zi, col.z,
@@ -1153,6 +1175,7 @@ function clm_drv!(config::CLMDriverConfig,
         wdb.frac_sno_col, wdb.snw_rds_col,
         aer, false,  # is_lake=false
         filt.snowc, bc_col, nlevsno)
+
 
     # --- 19. Zero empty snow layers ---
     zero_empty_snow_layers!(

@@ -122,7 +122,7 @@ function bareground_fluxes!(
 
         energyflux.btran_patch[p] = 0.0
         temperature.t_veg_patch[p] = forc_t_col[c]
-        cf_bare = forc_pbot_col[c] / (RGAS * 0.001 * temperature.thm_patch[p]) * 1.0e06
+        cf_bare = forc_pbot_col[c] / (RGAS * temperature.thm_patch[p]) * 1.0e06
         photosyns.rssun_patch[p] = 1.0 / 1.0e15 * cf_bare
         photosyns.rssha_patch[p] = 1.0 / 1.0e15 * cf_bare
         for j in 1:nlevgrnd

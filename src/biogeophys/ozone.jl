@@ -277,7 +277,7 @@ function calc_ozone_uptake_one_point(;
 
     # convert o3 from mol/mol to nmol m^-3
     # SHR_CONST_RGAS = 8.31446 (same as RGAS in varcon.jl)
-    o3concnmolm3 = forc_ozone * 1.0e9 * (forc_pbot / (forc_th * RGAS * 0.001))
+    o3concnmolm3 = forc_ozone * 1.0e9 * (forc_pbot / (forc_th * RGAS))
 
     # calculate instantaneous flux
     o3flux = o3concnmolm3 / (O3_KO3 * rs + rb + ram)

@@ -22,6 +22,9 @@ function readParameters!(paramfile::String)
         if haskey(ds, "fff")
             sat_excess_runoff_params.fff = ds["fff"][1]
         end
+
+        # Read photosynthesis parameters (PhotosynthesisMod)
+        readParams_photosynthesis!(ds)
     finally
         close(ds)
     end
@@ -311,5 +314,73 @@ function readParams_initVertical!(ds::NCDataset)
     _initvert_slopemax[]   = _read_scalar(ds, "slopemax", 0.0)
     _initvert_zbedrock[]   = _read_scalar(ds, "zbedrock", -1.0)
     _initvert_zbedrock_sf[] = _read_scalar(ds, "zbedrock_sf", 1.0)
+    nothing
+end
+
+"""
+    readParams_photosynthesis!(ds::NCDataset)
+
+Read photosynthesis module parameters from the parameter file.
+Initializes the global `params_inst` (PhotoParamsData).
+"""
+function readParams_photosynthesis!(ds::NCDataset)
+    photo_params_init!(params_inst)
+
+    # 1D PFT parameters
+    _read_pft_var!(ds, "theta_cj", params_inst.theta_cj)
+    _read_pft_var!(ds, "krmax", params_inst.krmax)
+    _read_pft_var!(ds, "lmr_intercept_atkin", params_inst.lmr_intercept_atkin)
+
+    # Scalar parameters (kinetics, activation/deactivation energies)
+    params_inst.theta_ip     = _read_scalar(ds, "theta_ip", 0.95)
+    params_inst.act25        = _read_scalar(ds, "act25", 72.0)
+    params_inst.fnr          = _read_scalar(ds, "fnr", 7.16)
+    params_inst.cp25_yr2000  = _read_scalar(ds, "cp25_yr2000", 42.75e-6)
+    params_inst.kc25_coef    = _read_scalar(ds, "kc25_coef", 404.9e-6)
+    params_inst.ko25_coef    = _read_scalar(ds, "ko25_coef", 278.4e-3)
+    params_inst.fnps         = _read_scalar(ds, "fnps", 0.15)
+    params_inst.theta_psii   = _read_scalar(ds, "theta_psii", 0.7)
+    params_inst.vcmaxha      = _read_scalar(ds, "vcmaxha", 65330.0)
+    params_inst.jmaxha       = _read_scalar(ds, "jmaxha", 43540.0)
+    params_inst.tpuha        = _read_scalar(ds, "tpuha", 53100.0)
+    params_inst.lmrha        = _read_scalar(ds, "lmrha", 46390.0)
+    params_inst.kcha         = _read_scalar(ds, "kcha", 79430.0)
+    params_inst.koha         = _read_scalar(ds, "koha", 36380.0)
+    params_inst.cpha         = _read_scalar(ds, "cpha", 37830.0)
+    params_inst.vcmaxhd      = _read_scalar(ds, "vcmaxhd", 149250.0)
+    params_inst.jmaxhd       = _read_scalar(ds, "jmaxhd", 152040.0)
+    params_inst.tpuhd        = _read_scalar(ds, "tpuhd", 150650.0)
+    params_inst.lmrhd        = _read_scalar(ds, "lmrhd", 150650.0)
+    params_inst.lmrse        = _read_scalar(ds, "lmrse", 490.0)
+    params_inst.tpu25ratio   = _read_scalar(ds, "tpu25ratio", 0.167)
+    params_inst.kp25ratio    = _read_scalar(ds, "kp25ratio", 20160.0)
+    params_inst.vcmaxse_sf   = _read_scalar(ds, "vcmaxse_sf", 1.0)
+    params_inst.jmaxse_sf    = _read_scalar(ds, "jmaxse_sf", 1.0)
+    params_inst.tpuse_sf     = _read_scalar(ds, "tpuse_sf", 1.0)
+    params_inst.jmax25top_sf = _read_scalar(ds, "jmax25top_sf", 1.0)
+
+    # 2D parameters (pft × nvegwcs): kmax, psi50, ck
+    if haskey(ds, "kmax")
+        data = Array(ds["kmax"])
+        data = replace(data, missing => NaN)
+        n1 = min(size(data, 1), size(params_inst.kmax, 1))
+        n2 = min(size(data, 2), size(params_inst.kmax, 2))
+        params_inst.kmax[1:n1, 1:n2] .= Float64.(data[1:n1, 1:n2])
+    end
+    if haskey(ds, "psi50")
+        data = Array(ds["psi50"])
+        data = replace(data, missing => NaN)
+        n1 = min(size(data, 1), size(params_inst.psi50, 1))
+        n2 = min(size(data, 2), size(params_inst.psi50, 2))
+        params_inst.psi50[1:n1, 1:n2] .= Float64.(data[1:n1, 1:n2])
+    end
+    if haskey(ds, "ck")
+        data = Array(ds["ck"])
+        data = replace(data, missing => NaN)
+        n1 = min(size(data, 1), size(params_inst.ck, 1))
+        n2 = min(size(data, 2), size(params_inst.ck, 2))
+        params_inst.ck[1:n1, 1:n2] .= Float64.(data[1:n1, 1:n2])
+    end
+
     nothing
 end
