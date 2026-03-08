@@ -700,7 +700,8 @@ function clm_drv!(config::CLMDriverConfig,
                      forc_wind=a2l.forc_wind_grc,
                      qflx_snow_grnd=wfb.wf.qflx_snow_grnd_col,
                      qflx_snow_drain=wfb.wf.qflx_snow_drain_col,
-                     int_snow=wsb.int_snow_col)
+                     int_snow=wsb.int_snow_col,
+                     scf_method=inst.scf_method)
 
 
 
@@ -1071,11 +1072,20 @@ function clm_drv!(config::CLMDriverConfig,
         col, lun, pch)
 
     # --- 12. Soil water movement (Richards equation) ---
+    # Configure solver to match Fortran namelist:
+    #   use_aquifer_layer=true  → Zeng-Decker 2009 with BC_AQUIFER (default)
+    #   use_aquifer_layer=false → Moisture form with BC_ZERO_FLUX
+    swm_cfg = if config.use_aquifer_layer
+        SoilWaterMovementConfig()  # ZD09 + BC_AQUIFER
+    else
+        SoilWaterMovementConfig(soilwater_movement_method=MOISTURE_FORM,
+                                lower_boundary_condition=BC_ZERO_FLUX)
+    end
     soil_water!(col,
                 filt.hydrologyc, filt.urbanc,
                 sh, ss, wfb, wsb,
                 temp, cs, ef,
-                SoilWaterRetentionCurveClappHornberg1978(), SoilWaterMovementConfig(),
+                SoilWaterRetentionCurveClappHornberg1978(), swm_cfg,
                 dtime)
 
     # --- 13. Water table ---

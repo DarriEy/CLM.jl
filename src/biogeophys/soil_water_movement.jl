@@ -323,6 +323,9 @@ function compute_moisture_fluxes_and_derivs!(c::Int, nlayers::Int,
         dqodw1::AbstractVector{Float64}, dqodw2::AbstractVector{Float64})
 
     nlevsoi    = varpar.nlevsoi
+    nlevsno    = varpar.nlevsno
+    joff       = nlevsno          # offset for z, dz arrays (snow+soil combined)
+    joff_zi    = nlevsno + 1     # offset for zi array
     watsat     = soilstate.watsat_col
     qflx_infl  = waterfluxbulk.wf.qflx_infl_col
     zwt        = soilhydrology.zwt_col
@@ -364,7 +367,7 @@ function compute_moisture_fluxes_and_derivs!(c::Int, nlayers::Int,
 
     # Compute flux at bottom of j-th layer
     num = smp[j+1] - smp[j]
-    den = M_TO_MM * (z_col[c, j+1] - z_col[c, j])
+    den = M_TO_MM * (z_col[c, joff + j+1] - z_col[c, joff + j])
     qout[j] = -hk[j] * num / den + hk[j]
 
     # Compute flux derivatives
@@ -386,7 +389,7 @@ function compute_moisture_fluxes_and_derivs!(c::Int, nlayers::Int,
         end
 
         num = smp[j+1] - smp[j]
-        den = M_TO_MM * (z_col[c, j+1] - z_col[c, j])
+        den = M_TO_MM * (z_col[c, joff + j+1] - z_col[c, joff + j])
         qout[j] = -hk[j] * num / den + hk[j]
 
         dqodw1[j] = (hk[j] * dsmpdw[j] - dhkds1 * num) / den + dhkds1
@@ -403,7 +406,7 @@ function compute_moisture_fluxes_and_derivs!(c::Int, nlayers::Int,
     if cfg.lower_boundary_condition == BC_WATERTABLE
         jwt = nlevsoi
         for jj in 1:nlevsoi
-            if zwt[c] <= zi_col[c, jj]
+            if zwt[c] <= zi_col[c, joff_zi + jj]
                 jwt = jj - 1
                 break
             end
@@ -423,7 +426,7 @@ function compute_moisture_fluxes_and_derivs!(c::Int, nlayers::Int,
             end
 
             num = -smp[j]  # assume saturation at water table depth (smp=0)
-            den = M_TO_MM * (zwt[c] - z_col[c, j])
+            den = M_TO_MM * (zwt[c] - z_col[c, joff + j])
             qout[j] = -hk[j] * num / den + hk[j]
 
             dqodw1[j] = (hk[j] * dsmpdw[j] - dhkds1_local * num) / den + dhkds1_local
@@ -543,6 +546,9 @@ function compute_qcharge!(col_data::ColumnData,
         dtime::Float64, bounds::UnitRange{Int})
 
     nlevsoi = varpar.nlevsoi
+    nlevsno = varpar.nlevsno
+    joff    = nlevsno          # offset for combined snow+soil arrays (z)
+    joff_zi = nlevsno + 1     # offset for zi
     qcharge = soilhydrology.qcharge_col
     zwt     = soilhydrology.zwt_col
     sucsat  = soilstate.sucsat_col
@@ -557,7 +563,7 @@ function compute_qcharge!(col_data::ColumnData,
         # Locate index of layer above water table
         jwt = nlevsoi
         for j in 1:nlevsoi
-            if zwt[c] <= zi[c, j]
+            if zwt[c] <= zi[c, joff_zi + j]
                 jwt = j - 1
                 break
             end
@@ -575,12 +581,12 @@ function compute_qcharge!(col_data::ColumnData,
             ka, _ = soil_hk!(swrc, c, jwt+1, s1, imped[c, jwt+1], soilstate)
 
             smp1 = max(smpmin[c], smp[c, max(1, jwt)])
-            wh = smp1 - z[c, max(1, jwt)] * M_TO_MM
+            wh = smp1 - z[c, joff + max(1, jwt)] * M_TO_MM
 
             if jwt == 0
                 qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] + 1.0e-3) * M_TO_MM)
             else
-                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, jwt]) * M_TO_MM * 2.0)
+                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, joff + jwt]) * M_TO_MM * 2.0)
             end
 
             # Limit qcharge
@@ -615,6 +621,8 @@ function soilwater_moisture_form!(col_data::ColumnData,
         dtime::Float64)
 
     nlevsoi = varpar.nlevsoi
+    nlevsno = varpar.nlevsno
+    joff    = nlevsno          # offset for combined snow+soil arrays (z, dz, h2osoi_liq/ice)
     nbedrock = col_data.nbedrock
     z  = col_data.z
     zi = col_data.zi
@@ -624,9 +632,6 @@ function soilwater_moisture_form!(col_data::ColumnData,
     qcharge       = soilhydrology.qcharge_col
     h2osoi_liq    = waterstatebulk.ws.h2osoi_liq_col
     qflx_rootsoi  = waterfluxbulk.qflx_rootsoi_col
-
-    # Pre-allocate workspace at max size, reused across columns
-    nlevsoi = varpar.nlevsoi
     hk_loc     = zeros(nlevsoi)
     smp_loc    = zeros(nlevsoi)
     dhkdw_loc  = zeros(nlevsoi)
@@ -676,8 +681,8 @@ function soilwater_moisture_form!(col_data::ColumnData,
 
             # Calculate commonly used variables
             for j in 1:nlayers
-                vwc_liq_loc[j] = max(h2osoi_liq[c, j], 1.0e-6) / (dz[c, j] * DENH2O)
-                dt_dz_loc[j] = dtsub / (M_TO_MM * dz[c, j])
+                vwc_liq_loc[j] = max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
+                dt_dz_loc[j] = dtsub / (M_TO_MM * dz[c, joff + j])
             end
 
             # Hydraulic conductivity and soil matric potential
@@ -751,7 +756,7 @@ function soilwater_moisture_form!(col_data::ColumnData,
 
             # Renew the mass of liquid water
             for j in 1:nlayers
-                h2osoi_liq[c, j] = h2osoi_liq[c, j] + dwat_loc[j] * (M_TO_MM * dz[c, j])
+                h2osoi_liq[c, joff + j] = h2osoi_liq[c, joff + j] + dwat_loc[j] * (M_TO_MM * dz[c, joff + j])
             end
 
             # Compute drainage from bottom of soil column
@@ -800,7 +805,7 @@ function soilwater_moisture_form!(col_data::ColumnData,
             mask_hydrology[c] || continue
             nlayers = nbedrock[c]
             for j in 1:min(nlayers, nlevsoi)
-                vwc_2d[c, j] = max(h2osoi_liq[c, j], 1.0e-6) / (dz[c, j] * DENH2O)
+                vwc_2d[c, j] = max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
             end
         end
 

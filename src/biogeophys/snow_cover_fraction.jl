@@ -273,6 +273,13 @@ function update_snow_depth_and_frac!(
     bounds::UnitRange{Int};
     use_subgrid_fluxes::Bool = true
 )
+    # Auto-initialize n_melt if not yet set (default: n_melt_coef/10 = 20)
+    ncols = length(frac_sno)
+    if length(scf.n_melt) < ncols
+        resize!(scf.n_melt, ncols)
+        fill!(scf.n_melt, 200.0 / 10.0)
+    end
+
     # ---- Update frac_sno ----
     for c in bounds
         mask[c] || continue
@@ -421,6 +428,13 @@ function add_newsnow_to_intsnow!(
     mask::BitVector,
     bounds::UnitRange{Int}
 )
+    # Auto-initialize n_melt if not yet set
+    ncols = length(int_snow)
+    if length(scf.n_melt) < ncols
+        resize!(scf.n_melt, ncols)
+        fill!(scf.n_melt, 200.0 / 10.0)
+    end
+
     for c in bounds
         mask[c] || continue
 

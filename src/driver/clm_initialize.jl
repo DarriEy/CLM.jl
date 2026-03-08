@@ -49,7 +49,8 @@ function clm_initialize!(;
     soil_layerstruct::String = "20SL_8.5m",
     h2osfcflag::Int = 0,
     fsnowoptics::String = "",
-    fsnowaging::String = "")
+    fsnowaging::String = "",
+    int_snow_max::Float64 = 2000.0)
 
     # ---- Step 1: Set control flags ----
     varctl.use_cn = use_cn
@@ -149,6 +150,15 @@ function clm_initialize!(;
     if isempty(varctl.snow_cover_fraction_method)
         varctl.snow_cover_fraction_method = "SwensonLawrence2012"
     end
+
+    # ---- Step 15e: Initialize snow cover fraction method ----
+    scf = SnowCoverFractionSwensonLawrence2012()
+    snow_cover_fraction_init!(scf, nc;
+        col_lun_itype = inst.column.lun_itype,
+        col_gridcell = inst.column.gridcell,
+        col_topo_std = inst.column.topo_std,
+        int_snow_max = int_snow_max)
+    inst.scf_method = scf
 
     # Initialize urban namelist if available
     if isdefined(CLM, :urban_read_nml!) && isdefined(CLM, :urban_ctrl)

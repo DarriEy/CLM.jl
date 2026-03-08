@@ -36,6 +36,9 @@ Base.@kwdef mutable struct HistoryWriter
     fields::Vector{HistFieldDef} = HistFieldDef[]
     time_index::Int = 0
     filepath::String = ""
+    # Daily averaging accumulators
+    accum::Dict{String, Vector{Float64}} = Dict{String, Vector{Float64}}()
+    accum_count::Int = 0
 end
 
 """
@@ -89,6 +92,14 @@ function default_hist_fields()
             inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col),
         HistFieldDef("BTRAN", "transpiration beta factor", "unitless", "patch",
             history_btran_daily_min_patch),
+        HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
+        HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
+            inst -> inst.sat_excess_runoff.fsat_col),
+        HistFieldDef("QFLX_RAIN_PLUS_SNOMELT", "rain plus snowmelt", "mm/s", "column",
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_rain_plus_snomelt_col),
+        HistFieldDef("QFLX_SNOMELT", "snowmelt", "mm/s", "column",
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_snomelt_col),
     ]
 end
 
@@ -214,91 +225,123 @@ function history_writer_init!(hw::HistoryWriter, filepath::String,
 end
 
 """
-    history_write_step!(hw, inst, current_time)
+    _aggregate_to_gridcell(f, inst, ng) -> Vector{Float64}
 
-Write one timestep of all registered fields to the output file.
-Patch- and column-level fields are aggregated to gridcell level using
-area weights (patch%wtgcell, col%wtgcell) before writing.
+Aggregate a field from its native level (patch/column/gridcell) to gridcell
+level using area weights with renormalization.
+"""
+function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
+    data = try
+        f.getter(inst)
+    catch
+        nothing
+    end
+    data === nothing && return nothing
+    length(data) == 0 && return nothing
+
+    gcell_val = zeros(ng)
+    gcell_wt  = zeros(ng)
+
+    pch = inst.patch
+    col = inst.column
+
+    if f.level == "patch"
+        np = length(data)
+        for p in 1:np
+            val = Float64(data[p])
+            if isfinite(val) && p <= length(pch.gridcell) && p <= length(pch.wtgcell)
+                g = pch.gridcell[p]
+                if g >= 1 && g <= ng
+                    gcell_val[g] += val * pch.wtgcell[p]
+                    gcell_wt[g]  += pch.wtgcell[p]
+                end
+            end
+        end
+    elseif f.level == "column"
+        nc = length(data)
+        for c in 1:nc
+            val = Float64(data[c])
+            if isfinite(val) && c <= length(col.gridcell) && c <= length(col.wtgcell)
+                g = col.gridcell[c]
+                if g >= 1 && g <= ng
+                    gcell_val[g] += val * col.wtgcell[c]
+                    gcell_wt[g]  += col.wtgcell[c]
+                end
+            end
+        end
+    else
+        for g in 1:min(ng, length(data))
+            val = Float64(data[g])
+            gcell_val[g] = isfinite(val) ? val : -9999.0
+            gcell_wt[g]  = isfinite(val) ? 1.0 : 0.0
+        end
+    end
+
+    for g in 1:ng
+        if gcell_wt[g] > 0.0
+            gcell_val[g] /= gcell_wt[g]
+        else
+            gcell_val[g] = -9999.0
+        end
+    end
+
+    return gcell_val
+end
+
+"""
+    history_write_step!(hw, inst, current_time; is_end_curr_day=false)
+
+Accumulate one timestep of all registered fields. When `is_end_curr_day` is
+true, write the daily average to the output file and reset accumulators.
+Matches Fortran CLM h0 daily-average output convention.
 """
 function history_write_step!(hw::HistoryWriter, inst::CLMInstances,
-                             current_time::DateTime)
+                             current_time::DateTime;
+                             is_end_curr_day::Bool=false)
     ds = hw.ds
     ds === nothing && return nothing
 
-    hw.time_index += 1
-    ti = hw.time_index
-
-    # Write time (days since 2000-01-01)
-    ref_date = DateTime(2000, 1, 1)
-    days = Dates.value(current_time - ref_date) / (1000 * 86400)  # ms → days
-    ds["time"][ti] = days
-
-    # Subgrid metadata for aggregation
-    pch = inst.patch
     col = inst.column
     ng = length(col.gridcell) > 0 ? maximum(col.gridcell) : 0
 
-    # Write each field, aggregated to gridcell level
+    # Accumulate gridcell-level values for each field
     for f in hw.fields
-        data = try
-            f.getter(inst)
-        catch
-            nothing
+        gcv = _aggregate_to_gridcell(f, inst, ng)
+        gcv === nothing && continue
+
+        if !haskey(hw.accum, f.name)
+            hw.accum[f.name] = zeros(ng)
         end
-        data === nothing && continue
-        length(data) == 0 && continue
-
-        # Aggregate to gridcell level with renormalization
-        # If some subgrid units have non-finite values (e.g. lake NaN),
-        # renormalize by the sum of contributing weights.
-        gcell_val = zeros(ng)
-        gcell_wt  = zeros(ng)  # sum of contributing weights
-
-        if f.level == "patch"
-            # Area-weighted aggregation: sum(patch_val * patch%wtgcell)
-            np = length(data)
-            for p in 1:np
-                val = Float64(data[p])
-                if isfinite(val) && p <= length(pch.gridcell) && p <= length(pch.wtgcell)
-                    g = pch.gridcell[p]
-                    if g >= 1 && g <= ng
-                        gcell_val[g] += val * pch.wtgcell[p]
-                        gcell_wt[g]  += pch.wtgcell[p]
-                    end
-                end
-            end
-        elseif f.level == "column"
-            # Area-weighted aggregation: sum(col_val * col%wtgcell)
-            nc = length(data)
-            for c in 1:nc
-                val = Float64(data[c])
-                if isfinite(val) && c <= length(col.gridcell) && c <= length(col.wtgcell)
-                    g = col.gridcell[c]
-                    if g >= 1 && g <= ng
-                        gcell_val[g] += val * col.wtgcell[c]
-                        gcell_wt[g]  += col.wtgcell[c]
-                    end
-                end
-            end
-        else
-            # Already gridcell level
-            for g in 1:min(ng, length(data))
-                val = Float64(data[g])
-                gcell_val[g] = isfinite(val) ? val : -9999.0
-                gcell_wt[g]  = isfinite(val) ? 1.0 : 0.0
-            end
-        end
-
-        # Renormalize by contributing weight sum (handles missing subgrid units)
         for g in 1:ng
-            if gcell_wt[g] > 0.0
-                gcell_val[g] /= gcell_wt[g]
-            else
-                gcell_val[g] = -9999.0
+            if gcv[g] != -9999.0
+                hw.accum[f.name][g] += gcv[g]
             end
         end
+    end
+    hw.accum_count += 1
 
-        ds[f.name][:, ti] = gcell_val
+    # Write daily average at end of day
+    if is_end_curr_day && hw.accum_count > 0
+        hw.time_index += 1
+        ti = hw.time_index
+
+        # Write time (days since 2000-01-01)
+        ref_date = DateTime(2000, 1, 1)
+        days = Dates.value(current_time - ref_date) / (1000 * 86400)  # ms → days
+        ds["time"][ti] = days
+
+        n = hw.accum_count
+        for f in hw.fields
+            haskey(hw.accum, f.name) || continue
+            avg = hw.accum[f.name] ./ n
+            ds[f.name][:, ti] = avg
+        end
+
+        # Reset accumulators
+        for k in keys(hw.accum)
+            fill!(hw.accum[k], 0.0)
+        end
+        hw.accum_count = 0
     end
 
     return nothing
@@ -311,6 +354,22 @@ Close the history NetCDF file.
 """
 function history_writer_close!(hw::HistoryWriter)
     if hw.ds !== nothing
+        # Flush partial-day data on close only if no complete day was written yet
+        # (avoids spurious partial records at simulation end, but ensures short
+        # sub-day runs still produce output)
+        if hw.accum_count > 0 && hw.time_index == 0
+            hw.time_index += 1
+            ti = hw.time_index
+            ds = hw.ds
+            ds["time"][ti] = 0.0  # placeholder
+            n = hw.accum_count
+            for f in hw.fields
+                haskey(hw.accum, f.name) || continue
+                avg = hw.accum[f.name] ./ n
+                ds[f.name][:, ti] = avg
+            end
+            hw.accum_count = 0
+        end
         close(hw.ds)
         hw.ds = nothing
     end

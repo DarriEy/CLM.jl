@@ -189,7 +189,8 @@ function bulkdiag_new_snow_diagnostics!(
     qflx_snow_drain::Vector{Float64}, # drainage from snow pack [mm H2O/s]
     mask::BitVector,                # column mask
     bounds::UnitRange{Int},         # column bounds
-    nlevsno::Int                    # max snow layers
+    nlevsno::Int;                   # max snow layers
+    scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
 )
     newsnow = zeros(Float64, length(snow_depth))
     snowmelt = zeros(Float64, length(snow_depth))
@@ -222,33 +223,11 @@ function bulkdiag_new_snow_diagnostics!(
         snowmelt[c] = qflx_snow_drain[c] * dtime
     end
 
-    # Update snow depth and fractional snow cover
-    # (Simplified: direct density-based depth update without scf_method polymorphism)
-    for c in bounds
-        mask[c] || continue
-
-        if lun_itype_col[c] == ISTICE || urbpoi[c]
-            # For glaciers and urban, snow depth computed from bifall
-            if newsnow[c] > 0.0
-                snow_depth[c] = snow_depth[c] + newsnow[c] / bifall[c]
-            end
-            frac_sno[c] = 1.0
-            frac_sno_eff[c] = 1.0
-        else
-            # For other landunits: snow depth update from bifall
-            if newsnow[c] > 0.0
-                snow_depth[c] = snow_depth[c] + newsnow[c] / bifall[c]
-            end
-            # Simple snow cover fraction update
-            if snow_depth[c] > 0.0
-                frac_sno[c] = min(1.0, snow_depth[c] / 0.05)
-                frac_sno_eff[c] = frac_sno[c]
-            else
-                frac_sno[c] = 0.0
-                frac_sno_eff[c] = 0.0
-            end
-        end
-    end
+    # Update snow depth and fractional snow cover via scf_method
+    update_snow_depth_and_frac!(scf_method,
+        frac_sno, frac_sno_eff, snow_depth,
+        lun_itype_col, urbpoi, h2osno_total, snowmelt, int_snow,
+        newsnow, bifall, mask, bounds)
 
     # Reset int_snow if snow pack started at 0
     for c in bounds
@@ -258,11 +237,10 @@ function bulkdiag_new_snow_diagnostics!(
         end
     end
 
-    # Add newsnow to int_snow
-    for c in bounds
-        mask[c] || continue
-        int_snow[c] = int_snow[c] + newsnow[c]
-    end
+    # Add newsnow to int_snow via scf_method
+    add_newsnow_to_intsnow!(scf_method,
+        int_snow, newsnow, h2osno_total, frac_sno,
+        mask, bounds)
 
     # Update top snow layer thickness
     for c in bounds

@@ -100,6 +100,9 @@ Base.@kwdef mutable struct CLMInstances
     sat_excess_runoff::SaturatedExcessRunoffData = SaturatedExcessRunoffData()
     infilt_excess_runoff::InfiltrationExcessRunoffData = InfiltrationExcessRunoffData()
 
+    # --- Snow cover fraction ---
+    scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
+
     # --- Surface input data (for monthly phenology re-reads) ---
     surfdata::Union{SurfaceInputData, Nothing} = nothing
 end

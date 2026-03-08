@@ -222,7 +222,7 @@ include("generate_forcing.jl")
         ds = NCDataset(hist_path, "r")
         @test haskey(ds, "time")
         ntimes = length(ds["time"])
-        @test ntimes == 48
+        @test ntimes == 1  # daily averaging: 48 half-hour steps → 1 daily record
 
         # Check T_GRND: should be physically reasonable (wide range for cold-start transient)
         # 0.0 is a valid default for inactive columns
@@ -269,7 +269,7 @@ include("generate_forcing.jl")
         @test isfile(hist_path)
 
         ds = NCDataset(hist_path, "r")
-        @test length(ds["time"]) == 2
+        @test length(ds["time"]) == 1  # partial day flushed on close → 1 record
         tgrnd = ds["T_GRND"][:, :]
         @test all(isfinite, tgrnd[tgrnd .!= -9999.0])
         close(ds)

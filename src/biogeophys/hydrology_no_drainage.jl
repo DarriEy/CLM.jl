@@ -654,7 +654,8 @@ function handle_new_snow!(
     forc_wind::Vector{Float64} = Float64[],
     qflx_snow_grnd::Vector{Float64},
     qflx_snow_drain::Vector{Float64} = zeros(length(mask_nolake)),
-    int_snow::Vector{Float64} = zeros(length(mask_nolake))
+    int_snow::Vector{Float64} = zeros(length(mask_nolake)),
+    scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
 )
     nc = length(mask_nolake)
 
@@ -708,7 +709,8 @@ function handle_new_snow!(
         h2osno_total,
         waterstatebulk.ws.h2osoi_ice_col, waterstatebulk.ws.h2osoi_liq_col,
         qflx_snow_grnd, qflx_snow_drain,
-        mask_nolake, bounds, nlevsno)
+        mask_nolake, bounds, nlevsno;
+        scf_method=scf_method)
 
     # Step 1d: Add new snow mass to appropriate state variable
     update_state_add_new_snow!(

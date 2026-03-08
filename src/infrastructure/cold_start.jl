@@ -180,7 +180,8 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
         end
 
         # Keep cold-start aquifer state consistent with WaterStateType%InitCold.
-        ws.wa_col[c] = use_aquifer_layer ? 4000.0 : AQUIFER_WATER_BASELINE
+        # Fortran sets wa = aquifer_water_baseline (5000 mm) for both cases.
+        ws.wa_col[c] = AQUIFER_WATER_BASELINE
 
         # Dynbal baselines (zero for cold start)
         ws.dynbal_baseline_liq_col[c] = 0.0

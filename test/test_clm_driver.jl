@@ -137,6 +137,30 @@
         # --- Config ---
         config = CLM.CLMDriverConfig()
 
+        # --- Initialize pftcon with minimal defaults for smoke test ---
+        npft = CLM.MXPFT + 1
+        p = CLM.pftcon
+        p.dleaf         = fill(0.04, npft)
+        p.slatop        = fill(0.01, npft)
+        p.leafcn        = fill(25.0, npft)
+        p.flnr          = fill(0.1, npft)
+        p.fnitr         = fill(0.1, npft)
+        p.mbbopt        = fill(9.0, npft)
+        p.c3psn         = fill(1.0, npft)
+        p.woody         = fill(0.0, npft)
+        p.smpso         = fill(-66000.0, npft)
+        p.smpsc         = fill(-275000.0, npft)
+        p.z0mr          = fill(0.055, npft)
+        p.displar       = fill(0.67, npft)
+        p.xl            = fill(0.1, npft)
+        p.rhol          = fill(0.1, npft, 2)  # (npft, numrad)
+        p.rhos          = fill(0.2, npft, 2)
+        p.taul          = fill(0.05, npft, 2)
+        p.taus          = fill(0.1, npft, 2)
+        p.medlynintercept = fill(100.0, npft)
+        p.medlynslope     = fill(6.0, npft)
+        p.crop          = fill(0.0, npft)
+
         # --- Photosynthesis ---
         photosyns = CLM.PhotosynthesisData()
         CLM.photosynthesis_data_init!(photosyns, np)

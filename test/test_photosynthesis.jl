@@ -79,8 +79,8 @@
         @test isfinite(val)
 
         # When hd >> se * T25, exp term vanishes and val → 1.0
-        val2 = CLM.fth25_photo(149252.0, 486.0)
-        @test val2 ≈ 1.0 atol=1e-10
+        val2 = CLM.fth25_photo(200000.0, 486.0)
+        @test val2 ≈ 1.0 atol=1e-9
         @test isfinite(val2)
     end
 

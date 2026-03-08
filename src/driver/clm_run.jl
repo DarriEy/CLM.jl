@@ -49,7 +49,9 @@ function clm_run!(;
     verbose::Bool = true,
     fsnowoptics::String = "",
     fsnowaging::String = "",
-    frestart::String = "")
+    frestart::String = "",
+    baseflow_scalar::Float64 = 1.0e-2,
+    int_snow_max::Float64 = 2000.0)
 
     # ========================================================================
     # Phase 1: Initialize
@@ -61,9 +63,13 @@ function clm_run!(;
         use_bedrock=use_bedrock,
         use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=h2osfcflag,
-        fsnowoptics=fsnowoptics, fsnowaging=fsnowaging)
+        fsnowoptics=fsnowoptics, fsnowaging=fsnowaging,
+        int_snow_max=int_snow_max)
 
     config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer)
+
+    # Set baseflow scalar (namelist-adjustable parameter)
+    init_soil_hydrology_config(baseflow_scalar=baseflow_scalar)
     filt_ia = clump_filter_inactive_and_active
 
     ng = bounds.endg
@@ -141,7 +147,7 @@ function clm_run!(;
         lnd2atm!(bounds, inst)
 
         # --- Write history output ---
-        history_write_step!(hw, inst, tm.current_date)
+        history_write_step!(hw, inst, tm.current_date; is_end_curr_day=end_day)
 
         # --- Progress ---
         if verbose && (step_count % 48 == 0 || step_count == total_steps)
