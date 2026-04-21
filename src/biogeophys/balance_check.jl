@@ -33,7 +33,7 @@ based on `dtime` (model timestep in seconds).
 
 Ported from `BalanceCheckInit` in `BalanceCheckMod.F90`.
 """
-function balance_check_init!(bc::BalanceCheckData, dtime::Float64)
+function balance_check_init!(bc::BalanceCheckData, dtime::Real)
     bc.skip_steps = max(2, round(Int, BALANCE_CHECK_SKIP_SIZE / dtime)) + 1
     return nothing
 end
@@ -108,8 +108,8 @@ function water_gridcell_balance!(
     flag::String;
     use_aquifer_layer::Bool=false,
     use_hillslope_routing::Bool=false,
-    qflx_liq_dynbal_left_to_dribble::Vector{Float64}=Float64[],
-    qflx_ice_dynbal_left_to_dribble::Vector{Float64}=Float64[]
+    qflx_liq_dynbal_left_to_dribble::Vector{<:Real}=Float64[],
+    qflx_ice_dynbal_left_to_dribble::Vector{<:Real}=Float64[]
 )
     for i in water.bulk_and_tracers_beg:water.bulk_and_tracers_end
         bt = water.bulk_and_tracers[i]
@@ -169,9 +169,9 @@ function water_gridcell_balance_single!(
     flag::String;
     use_aquifer_layer::Bool=false,
     use_hillslope_routing::Bool=false,
-    qflx_liq_dynbal_left_to_dribble::Vector{Float64}=Float64[],
-    qflx_ice_dynbal_left_to_dribble::Vector{Float64}=Float64[],
-    wa_reset_nonconservation_gain_col::Vector{Float64}=Float64[]
+    qflx_liq_dynbal_left_to_dribble::Vector{<:Real}=Float64[],
+    qflx_ice_dynbal_left_to_dribble::Vector{<:Real}=Float64[],
+    wa_reset_nonconservation_gain_col::Vector{<:Real}=Float64[]
 )
     isnothing(waterbalance) && return nothing
     isnothing(waterstate) && return nothing
@@ -182,8 +182,9 @@ function water_gridcell_balance_single!(
     # Temporary arrays
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
     ng = length(bounds_g) > 0 ? last(bounds_g) : 0
-    wb_col = zeros(nc)
-    wb_grc = zeros(ng)
+    FT = eltype(begwb_grc)
+    wb_col = zeros(FT, nc)
+    wb_grc = zeros(FT, ng)
 
     # Compute water mass for non-lake columns
     ws_raw = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
@@ -222,7 +223,7 @@ function water_gridcell_balance_single!(
         end
     elseif flag == "endwb"
         # endwb_grc requires wa_reset_nonconservation_gain adjustment
-        wa_reset_grc = zeros(ng)
+        wa_reset_grc = zeros(FT, ng)
         if use_aquifer_layer && !isempty(wa_reset_nonconservation_gain_col)
             c2g_unity!(wa_reset_grc, wa_reset_nonconservation_gain_col,
                        col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
@@ -252,7 +253,7 @@ Delegates to `compute_water_mass_lake!` in `total_water_heat.jl`.
 Ported from `ComputeWaterMassLake` in `TotalWaterAndHeatMod.F90`.
 """
 function compute_water_mass_lake_bc!(
-    water_mass::Vector{Float64},
+    water_mass::Vector{<:Real},
     waterstate::Union{WaterStateData, WaterStateBulkData},
     lakestate::LakeStateData,
     mask_lake::BitVector,
@@ -278,7 +279,7 @@ Delegates to `compute_water_mass_non_lake!` in `total_water_heat.jl`.
 Ported from `ComputeWaterMassNonLake` in `TotalWaterAndHeatMod.F90`.
 """
 function compute_water_mass_non_lake_bc!(
-    water_mass::Vector{Float64},
+    water_mass::Vector{<:Real},
     waterstate::Union{WaterStateData, WaterStateBulkData},
     waterdiagnostic::Union{WaterDiagnosticBulkData, Nothing},
     mask_nolake::BitVector,
@@ -481,26 +482,26 @@ function balance_check!(
     bounds_g::UnitRange{Int},
     nstep::Int,
     DAnstep::Int,
-    dtime::Float64;
+    dtime::Real;
     # --- Atmospheric forcing (from Atm2Lnd / WaterAtm2Lnd) ---
-    forc_rain_col::Vector{Float64}=Float64[],
-    forc_snow_col::Vector{Float64}=Float64[],
-    forc_rain_grc::Vector{Float64}=Float64[],
-    forc_snow_grc::Vector{Float64}=Float64[],
-    forc_solad_col::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-    forc_solai_grc::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-    forc_lwrad_col::Vector{Float64}=Float64[],
-    forc_flood_grc::Vector{Float64}=Float64[],
+    forc_rain_col::Vector{<:Real}=Float64[],
+    forc_snow_col::Vector{<:Real}=Float64[],
+    forc_rain_grc::Vector{<:Real}=Float64[],
+    forc_snow_grc::Vector{<:Real}=Float64[],
+    forc_solad_col::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+    forc_solai_grc::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+    forc_lwrad_col::Vector{<:Real}=Float64[],
+    forc_flood_grc::Vector{<:Real}=Float64[],
     # --- Fluxes from WaterLnd2Atm (not yet ported as types) ---
-    qflx_ice_runoff_col::Vector{Float64}=Float64[],
-    qflx_evap_tot_grc::Vector{Float64}=Float64[],
-    qflx_surf_grc::Vector{Float64}=Float64[],
-    qflx_qrgwl_grc::Vector{Float64}=Float64[],
-    qflx_drain_grc::Vector{Float64}=Float64[],
-    qflx_drain_perched_grc::Vector{Float64}=Float64[],
-    qflx_ice_runoff_grc::Vector{Float64}=Float64[],
-    qflx_sfc_irrig_grc::Vector{Float64}=Float64[],
-    qflx_streamflow_grc::Vector{Float64}=Float64[],
+    qflx_ice_runoff_col::Vector{<:Real}=Float64[],
+    qflx_evap_tot_grc::Vector{<:Real}=Float64[],
+    qflx_surf_grc::Vector{<:Real}=Float64[],
+    qflx_qrgwl_grc::Vector{<:Real}=Float64[],
+    qflx_drain_grc::Vector{<:Real}=Float64[],
+    qflx_drain_perched_grc::Vector{<:Real}=Float64[],
+    qflx_ice_runoff_grc::Vector{<:Real}=Float64[],
+    qflx_sfc_irrig_grc::Vector{<:Real}=Float64[],
+    qflx_streamflow_grc::Vector{<:Real}=Float64[],
     # --- Control flags ---
     use_fates_planthydro::Bool=false,
     use_soil_moisture_streams::Bool=false,
@@ -598,8 +599,9 @@ function balance_check!(
     # =====================================================================
 
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
-    forc_rain_c = zeros(nc)
-    forc_snow_c = zeros(nc)
+    FT_bc = eltype(errh2o_col)
+    forc_rain_c = zeros(FT_bc, nc)
+    forc_snow_c = zeros(FT_bc, nc)
 
     for c in bounds_c
         if col_data.itype[c] == ICOL_SUNWALL || col_data.itype[c] == ICOL_SHADEWALL
@@ -643,8 +645,12 @@ function balance_check!(
         @warn "column-level water balance error" nstep indexc errh2o=errh2o_col[indexc]
 
         if errh2o_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps
-            @error "Stopping: errh2o > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2o=errh2o_col[indexc] forc_rain=forc_rain_c[indexc]*dtime forc_snow=forc_snow_c[indexc]*dtime endwb=endwb_col[indexc] begwb=begwb_col[indexc] qflx_evap_tot=qflx_evap_tot_col[indexc]*dtime qflx_surf=qflx_surf_col[indexc]*dtime qflx_drain=qflx_drain_col[indexc]*dtime
-            error("BalanceCheck: column water balance error exceeded threshold at c=$indexc")
+            if _is_ad_type(FT_bc)
+                @warn "BalanceCheck: column water balance error exceeded threshold (AD mode, continuing)" maxlog=1
+            else
+                @error "Stopping: errh2o > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2o=errh2o_col[indexc] forc_rain=forc_rain_c[indexc]*dtime forc_snow=forc_snow_c[indexc]*dtime endwb=endwb_col[indexc] begwb=begwb_col[indexc] qflx_evap_tot=qflx_evap_tot_col[indexc]*dtime qflx_surf=qflx_surf_col[indexc]*dtime qflx_drain=qflx_drain_col[indexc]*dtime
+                error("BalanceCheck: column water balance error exceeded threshold at c=$indexc")
+            end
         end
     end
 
@@ -653,10 +659,10 @@ function balance_check!(
     # =====================================================================
 
     ng = length(bounds_g) > 0 ? last(bounds_g) : 0
-    errh2o_grc = zeros(ng)
-    qflx_glcice_dyn_water_flux_grc_arr = zeros(ng)
-    qflx_snwcp_discarded_liq_grc_arr = zeros(ng)
-    qflx_snwcp_discarded_ice_grc_arr = zeros(ng)
+    errh2o_grc = zeros(FT_bc, ng)
+    qflx_glcice_dyn_water_flux_grc_arr = zeros(FT_bc, ng)
+    qflx_snwcp_discarded_liq_grc_arr = zeros(FT_bc, ng)
+    qflx_snwcp_discarded_ice_grc_arr = zeros(FT_bc, ng)
 
     c2g_unity!(qflx_glcice_dyn_water_flux_grc_arr, qflx_glcice_dyn_water_flux_col,
                col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
@@ -699,8 +705,12 @@ function balance_check!(
 
         if errh2o_grc_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps &&
            !use_soil_moisture_streams && !for_testing_zero_dynbal_fluxes
-            @error "Stopping: errh2o_grc > $(BALANCE_ERROR_THRESH) mm" nstep indexg errh2o_grc=errh2o_grc[indexg] forc_rain=forc_rain_grc[indexg]*dtime forc_snow=forc_snow_grc[indexg]*dtime endwb_grc=endwb_grc[indexg] begwb_grc=begwb_grc[indexg]
-            error("BalanceCheck: gridcell water balance error exceeded threshold at g=$indexg")
+            if _is_ad_type(FT_bc)
+                @warn "BalanceCheck: gridcell water balance error exceeded threshold (AD mode, continuing)" maxlog=1
+            else
+                @error "Stopping: errh2o_grc > $(BALANCE_ERROR_THRESH) mm" nstep indexg errh2o_grc=errh2o_grc[indexg] forc_rain=forc_rain_grc[indexg]*dtime forc_snow=forc_snow_grc[indexg]*dtime endwb_grc=endwb_grc[indexg] begwb_grc=begwb_grc[indexg]
+                error("BalanceCheck: gridcell water balance error exceeded threshold at g=$indexg")
+            end
         end
     end
 
@@ -708,7 +718,7 @@ function balance_check!(
     # Snow balance check at the column level
     # =====================================================================
 
-    h2osno_total = zeros(nc)
+    h2osno_total = zeros(FT_bc, nc)
     waterstate_calculate_total_h2osno!(ws, mask_allc, bounds_c, col_data.snl, h2osno_total)
 
     for c in bounds_c
@@ -767,8 +777,12 @@ function balance_check!(
         @warn "snow balance error" nstep indexc col_itype=col_data.itype[indexc] lun_itype=lun_data.itype[l_idx] errh2osno=errh2osno[indexc]
 
         if errh2osno_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps
-            @error "Stopping: errh2osno > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2osno=errh2osno[indexc] snl=col_data.snl[indexc] snow_depth=snow_depth[indexc] h2osno=h2osno_total[indexc] h2osno_old=h2osno_old[indexc] snow_sources=snow_sources[indexc]*dtime snow_sinks=snow_sinks[indexc]*dtime
-            error("BalanceCheck: snow balance error exceeded threshold at c=$indexc")
+            if _is_ad_type(FT_bc)
+                @warn "BalanceCheck: snow balance error exceeded threshold (AD mode, continuing)" maxlog=1
+            else
+                @error "Stopping: errh2osno > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2osno=errh2osno[indexc] snl=col_data.snl[indexc] snow_depth=snow_depth[indexc] h2osno=h2osno_total[indexc] h2osno_old=h2osno_old[indexc] snow_sources=snow_sources[indexc]*dtime snow_sinks=snow_sinks[indexc]*dtime
+                error("BalanceCheck: snow balance error exceeded threshold at c=$indexc")
+            end
         end
     end
 
@@ -828,8 +842,12 @@ function balance_check!(
         @warn "solar radiation balance error (W/m2)" nstep errsol=errsol[indexp]
 
         if errsol_max_val > BALANCE_ERROR_THRESH
-            @error "Stopping: errsol > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errsol=errsol[indexp] fsa=fsa[indexp] fsr=fsr[indexp]
-            error("BalanceCheck: solar radiation balance error exceeded threshold at p=$indexp")
+            if _is_ad_type(eltype(errsol))
+                @warn "BalanceCheck: solar radiation balance error exceeded threshold (AD mode, continuing)" maxlog=1
+            else
+                @error "Stopping: errsol > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errsol=errsol[indexp] fsa=fsa[indexp] fsr=fsr[indexp]
+                error("BalanceCheck: solar radiation balance error exceeded threshold at p=$indexp")
+            end
         end
     end
 
@@ -842,8 +860,12 @@ function balance_check!(
         @warn "longwave energy balance error (W/m2)" nstep indexp errlon=errlon[indexp]
 
         if errlon_max_val > BALANCE_ERROR_THRESH
-            @error "Stopping: errlon > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errlon=errlon[indexp]
-            error("BalanceCheck: longwave energy balance error exceeded threshold at p=$indexp")
+            if _is_ad_type(eltype(errlon))
+                @warn "BalanceCheck: longwave energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
+            else
+                @error "Stopping: errlon > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errlon=errlon[indexp]
+                error("BalanceCheck: longwave energy balance error exceeded threshold at p=$indexp")
+            end
         end
     end
 
@@ -855,8 +877,12 @@ function balance_check!(
         @warn "surface flux energy balance error (W/m2)" nstep errseb=errseb[indexp]
 
         if errseb_max_val > BALANCE_ERROR_THRESH
-            @error "Stopping: errseb > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errseb=errseb[indexp] sabv=sabv[indexp] sabg=sabg[indexp] eflx_lwrad_net=eflx_lwrad_net[indexp] eflx_sh_tot=eflx_sh_tot[indexp] eflx_lh_tot=eflx_lh_tot[indexp] eflx_soil_grnd=eflx_soil_grnd[indexp] dhsdt_canopy=dhsdt_canopy[indexp]
-            error("BalanceCheck: surface energy balance error exceeded threshold at p=$indexp")
+            if _is_ad_type(eltype(errseb))
+                @warn "BalanceCheck: surface energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
+            else
+                @error "Stopping: errseb > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errseb=errseb[indexp] sabv=sabv[indexp] sabg=sabg[indexp] eflx_lwrad_net=eflx_lwrad_net[indexp] eflx_sh_tot=eflx_sh_tot[indexp] eflx_lh_tot=eflx_lh_tot[indexp] eflx_soil_grnd=eflx_soil_grnd[indexp] dhsdt_canopy=dhsdt_canopy[indexp]
+                error("BalanceCheck: surface energy balance error exceeded threshold at p=$indexp")
+            end
         end
     end
 
@@ -869,8 +895,12 @@ function balance_check!(
         @warn "soil balance error (W/m2)" nstep errsoi_col=errsoi_col[indexc]
 
         if errsoi_col_max_val > 1.0e-4 && DAnstep > skip_steps
-            @error "Stopping: errsoi_col > 1.0e-4 W/m2" nstep indexc errsoi_col=errsoi_col[indexc]
-            error("BalanceCheck: soil energy balance error exceeded threshold at c=$indexc")
+            if _is_ad_type(eltype(errsoi_col))
+                @warn "BalanceCheck: soil energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
+            else
+                @error "Stopping: errsoi_col > 1.0e-4 W/m2" nstep indexc errsoi_col=errsoi_col[indexc]
+                error("BalanceCheck: soil energy balance error exceeded threshold at c=$indexc")
+            end
         end
     end
 

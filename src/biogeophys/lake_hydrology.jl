@@ -38,10 +38,10 @@ CanopyHydrologyMod.)
 Ported from `SumFlux_FluxesOntoGround` in `LakeHydrologyMod.F90`.
 """
 function sum_flux_fluxes_onto_ground!(
-    forc_snow::Vector{Float64},
-    forc_rain::Vector{Float64},
-    qflx_snow_grnd::Vector{Float64},
-    qflx_liq_grnd::Vector{Float64},
+    forc_snow::Vector{<:Real},
+    forc_rain::Vector{<:Real},
+    qflx_snow_grnd::Vector{<:Real},
+    qflx_liq_grnd::Vector{<:Real},
     mask_lake::BitVector,
     bounds::UnitRange{Int}
 )
@@ -74,24 +74,24 @@ and Biogeophysics2.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 274-365).
 """
 function lake_sublimation_dew!(
-    qflx_liqevap_from_top_layer::Vector{Float64},
-    qflx_solidevap_from_top_layer::Vector{Float64},
-    qflx_soliddew_to_top_layer::Vector{Float64},
-    qflx_liqdew_to_top_layer::Vector{Float64},
-    qflx_ev_snow::Vector{Float64},
-    qflx_evap_soi::Vector{Float64},
-    h2osoi_liq::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osno_no_layers::Vector{Float64},
-    snow_depth::Vector{Float64},
-    frac_sno::Vector{Float64},
-    t_grnd::Vector{Float64},
-    t_soisno::Matrix{Float64},
+    qflx_liqevap_from_top_layer::Vector{<:Real},
+    qflx_solidevap_from_top_layer::Vector{<:Real},
+    qflx_soliddew_to_top_layer::Vector{<:Real},
+    qflx_liqdew_to_top_layer::Vector{<:Real},
+    qflx_ev_snow::Vector{<:Real},
+    qflx_evap_soi::Vector{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osno_no_layers::Vector{<:Real},
+    snow_depth::Vector{<:Real},
+    frac_sno::Vector{<:Real},
+    t_grnd::Vector{<:Real},
+    t_soisno::Matrix{<:Real},
     snl::Vector{Int},
     patch_column::Vector{Int},
     mask_lakep::BitVector,
     bounds_patch::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int
 )
     for p in bounds_patch
@@ -190,8 +190,8 @@ For lakes, frac_sno_eff = frac_sno (no subgrid snow fraction adjustment).
 Ported from `CalcFracSnoEff` call in `LakeHydrology` in `LakeHydrologyMod.F90` (line 368).
 """
 function lake_frac_sno_eff!(
-    frac_sno::Vector{Float64},
-    frac_sno_eff::Vector{Float64},
+    frac_sno::Vector{<:Real},
+    frac_sno_eff::Vector{<:Real},
     mask_lake::BitVector,
     bounds::UnitRange{Int}
 )
@@ -221,18 +221,18 @@ Copy patch-level flux averages to column level (assuming one pft per lake column
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 380-390).
 """
 function lake_patch_to_col_fluxes!(
-    qflx_evap_tot_col::Vector{Float64},
-    qflx_liqevap_from_top_layer_col::Vector{Float64},
-    qflx_liqdew_to_top_layer_col::Vector{Float64},
-    qflx_soliddew_to_top_layer_col::Vector{Float64},
-    qflx_solidevap_from_top_layer_col::Vector{Float64},
-    qflx_ev_snow_col::Vector{Float64},
-    qflx_evap_tot::Vector{Float64},
-    qflx_liqevap_from_top_layer::Vector{Float64},
-    qflx_liqdew_to_top_layer::Vector{Float64},
-    qflx_soliddew_to_top_layer::Vector{Float64},
-    qflx_solidevap_from_top_layer::Vector{Float64},
-    qflx_ev_snow::Vector{Float64},
+    qflx_evap_tot_col::Vector{<:Real},
+    qflx_liqevap_from_top_layer_col::Vector{<:Real},
+    qflx_liqdew_to_top_layer_col::Vector{<:Real},
+    qflx_soliddew_to_top_layer_col::Vector{<:Real},
+    qflx_solidevap_from_top_layer_col::Vector{<:Real},
+    qflx_ev_snow_col::Vector{<:Real},
+    qflx_evap_tot::Vector{<:Real},
+    qflx_liqevap_from_top_layer::Vector{<:Real},
+    qflx_liqdew_to_top_layer::Vector{<:Real},
+    qflx_soliddew_to_top_layer::Vector{<:Real},
+    qflx_solidevap_from_top_layer::Vector{<:Real},
+    qflx_ev_snow::Vector{<:Real},
     patch_column::Vector{Int},
     mask_lakep::BitVector,
     bounds_patch::UnitRange{Int}
@@ -267,11 +267,11 @@ reduce it.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 455-487).
 """
 function lake_soil_hydrology!(
-    h2osoi_liq::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_vol::Matrix{Float64},
-    dz::Matrix{Float64},
-    watsat::Matrix{Float64},
+    h2osoi_liq::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_vol::Matrix{<:Real},
+    dz::Matrix{<:Real},
+    watsat::Matrix{<:Real},
     mask_lake::BitVector,
     bounds::UnitRange{Int},
     nlevsoi::Int,
@@ -318,23 +318,23 @@ remove the layer entirely.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 495-535).
 """
 function lake_check_single_snow_layer!(
-    eflx_sh_tot::Vector{Float64},
-    eflx_sh_grnd::Vector{Float64},
-    eflx_soil_grnd::Vector{Float64},
-    eflx_gnet::Vector{Float64},
-    eflx_grnd_lake::Vector{Float64},
-    t_soisno::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    eflx_sh_tot::Vector{<:Real},
+    eflx_sh_grnd::Vector{<:Real},
+    eflx_soil_grnd::Vector{<:Real},
+    eflx_gnet::Vector{<:Real},
+    eflx_grnd_lake::Vector{<:Real},
+    t_soisno::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     snl::Vector{Int},
-    h2osno_no_layers::Vector{Float64},
-    h2osno_total::Vector{Float64},
-    snow_depth::Vector{Float64},
-    qflx_snow_drain::Vector{Float64},
+    h2osno_no_layers::Vector{<:Real},
+    h2osno_total::Vector{<:Real},
+    snow_depth::Vector{<:Real},
+    qflx_snow_drain::Vector{<:Real},
     patch_column::Vector{Int},
     mask_lakep::BitVector,
     bounds_patch::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int
 )
     j = 0 + nlevsno  # Julia index for snow layer 0
@@ -397,29 +397,30 @@ remove the layers. Otherwise, let snow persist and melt by diffusion.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 543-605).
 """
 function lake_snow_above_unfrozen!(
-    t_lake::Matrix{Float64},
-    lake_icefrac::Matrix{Float64},
-    t_soisno::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    t_lake::Matrix{<:Real},
+    lake_icefrac::Matrix{<:Real},
+    t_soisno::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     snl::Vector{Int},
-    h2osno_no_layers::Vector{Float64},
-    h2osno_total::Vector{Float64},
-    snow_depth::Vector{Float64},
-    qflx_snomelt::Vector{Float64},
-    eflx_snomelt::Vector{Float64},
-    qflx_snomelt_lyr::Matrix{Float64},
-    qflx_snow_drain::Vector{Float64},
-    dz_lake::Matrix{Float64},
+    h2osno_no_layers::Vector{<:Real},
+    h2osno_total::Vector{<:Real},
+    snow_depth::Vector{<:Real},
+    qflx_snomelt::Vector{<:Real},
+    eflx_snomelt::Vector{<:Real},
+    qflx_snomelt_lyr::Matrix{<:Real},
+    qflx_snow_drain::Vector{<:Real},
+    dz_lake::Matrix{<:Real},
     mask_lake::BitVector,
     bounds::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int
 )
     nc = length(mask_lake)
+    FT = eltype(t_lake)
     unfrozen = falses(nc)
-    sumsnowice = zeros(nc)
-    heatsum = zeros(nc)
+    sumsnowice = zeros(FT, nc)
+    heatsum = zeros(FT, nc)
 
     # Determine which columns have unfrozen top lake layer with snow
     for c in bounds
@@ -505,12 +506,12 @@ over all snow layers for history output.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 619-651).
 """
 function lake_snow_diagnostics!(
-    snowice::Vector{Float64},
-    snowliq::Vector{Float64},
-    t_sno_mul_mss::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    t_soisno::Matrix{Float64},
+    snowice::Vector{<:Real},
+    snowliq::Vector{<:Real},
+    t_sno_mul_mss::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    t_soisno::Matrix{<:Real},
     snl::Vector{Int},
     mask_lake::BitVector,
     mask_lakesnow::BitVector,
@@ -569,37 +570,37 @@ Computes qflx_qrgwl to balance the water budget.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 660-688).
 """
 function lake_water_balance!(
-    qflx_drain_perched::Vector{Float64},
-    qflx_rsub_sat::Vector{Float64},
-    qflx_infl::Vector{Float64},
-    qflx_surf::Vector{Float64},
-    qflx_drain::Vector{Float64},
-    qflx_qrgwl::Vector{Float64},
-    qflx_floodc::Vector{Float64},
-    qflx_runoff::Vector{Float64},
-    qflx_rain_plus_snomelt::Vector{Float64},
-    qflx_top_soil::Vector{Float64},
-    qflx_ice_runoff_snwcp::Vector{Float64},
-    h2osoi_liq::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_vol::Matrix{Float64},
-    forc_rain::Vector{Float64},
-    forc_snow::Vector{Float64},
-    qflx_evap_tot::Vector{Float64},
-    qflx_snwcp_ice::Vector{Float64},
-    qflx_snwcp_discarded_ice::Vector{Float64},
-    qflx_snwcp_discarded_liq::Vector{Float64},
-    qflx_liq_grnd::Vector{Float64},
-    qflx_snow_drain::Vector{Float64},
-    qflx_floodg::Vector{Float64},
-    begwb::Vector{Float64},
-    endwb::Vector{Float64},
-    dz::Matrix{Float64},
+    qflx_drain_perched::Vector{<:Real},
+    qflx_rsub_sat::Vector{<:Real},
+    qflx_infl::Vector{<:Real},
+    qflx_surf::Vector{<:Real},
+    qflx_drain::Vector{<:Real},
+    qflx_qrgwl::Vector{<:Real},
+    qflx_floodc::Vector{<:Real},
+    qflx_runoff::Vector{<:Real},
+    qflx_rain_plus_snomelt::Vector{<:Real},
+    qflx_top_soil::Vector{<:Real},
+    qflx_ice_runoff_snwcp::Vector{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_vol::Matrix{<:Real},
+    forc_rain::Vector{<:Real},
+    forc_snow::Vector{<:Real},
+    qflx_evap_tot::Vector{<:Real},
+    qflx_snwcp_ice::Vector{<:Real},
+    qflx_snwcp_discarded_ice::Vector{<:Real},
+    qflx_snwcp_discarded_liq::Vector{<:Real},
+    qflx_liq_grnd::Vector{<:Real},
+    qflx_snow_drain::Vector{<:Real},
+    qflx_floodg::Vector{<:Real},
+    begwb::Vector{<:Real},
+    endwb::Vector{<:Real},
+    dz::Matrix{<:Real},
     patch_column::Vector{Int},
     patch_gridcell::Vector{Int},
     mask_lakep::BitVector,
     bounds_patch::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int,
     nlevgrnd::Int
 )
@@ -642,10 +643,10 @@ Update volumetric soil water content from liquid and ice for lake columns.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 660-665).
 """
 function lake_update_h2osoi_vol!(
-    h2osoi_liq::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_vol::Matrix{Float64},
-    dz::Matrix{Float64},
+    h2osoi_liq::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_vol::Matrix{<:Real},
+    dz::Matrix{<:Real},
     mask_lake::BitVector,
     bounds::UnitRange{Int},
     nlevgrnd::Int,
@@ -680,14 +681,14 @@ Update top-layer snow diagnostics for history output.
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 692-709).
 """
 function lake_top_layer_diagnostics!(
-    h2osno_top::Vector{Float64},
-    snw_rds::Matrix{Float64},
-    snot_top::Vector{Float64},
-    dTdz_top::Vector{Float64},
-    snw_rds_top::Vector{Float64},
-    sno_liq_top::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    h2osno_top::Vector{<:Real},
+    snw_rds::Matrix{<:Real},
+    snot_top::Vector{<:Real},
+    dTdz_top::Vector{<:Real},
+    snw_rds_top::Vector{<:Real},
+    sno_liq_top::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     snl::Vector{Int},
     mask_lakesnow::BitVector,
     mask_lakenosnow::BitVector,
@@ -761,12 +762,12 @@ function lake_hydrology!(
     patch_data::PatchData,
     mask_lake::BitVector,
     mask_lakep::BitVector,
-    forc_rain::Vector{Float64},
-    forc_snow::Vector{Float64},
-    qflx_floodg::Vector{Float64},
+    forc_rain::Vector{<:Real},
+    forc_snow::Vector{<:Real},
+    qflx_floodg::Vector{<:Real},
     bounds_col::UnitRange{Int},
     bounds_patch::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int,
     nlevsoi::Int,
     nlevgrnd::Int
@@ -923,7 +924,8 @@ function lake_hydrology!(
     # =====================================================================
     # 6. Recompute h2osno_total
     # =====================================================================
-    h2osno_total = zeros(nc)
+    FT_lh = eltype(t_grnd)
+    h2osno_total = zeros(FT_lh, nc)
     waterstate_calculate_total_h2osno!(ws, mask_lake, bounds_col, snl, h2osno_total)
 
     # =====================================================================

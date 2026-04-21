@@ -23,9 +23,9 @@ const bareground_fluxes_params = BareGroundFluxesParamsData()
 Set BareGroundFluxes module parameters (replaces Fortran readParams).
 """
 function bareground_fluxes_read_params!(;
-        a_coef   ::Float64 = bareground_fluxes_params.a_coef,
-        a_exp    ::Float64 = bareground_fluxes_params.a_exp,
-        wind_min ::Float64 = bareground_fluxes_params.wind_min)
+        a_coef   ::Real = bareground_fluxes_params.a_coef,
+        a_exp    ::Real = bareground_fluxes_params.a_exp,
+        wind_min ::Real = bareground_fluxes_params.wind_min)
     bareground_fluxes_params.a_coef   = a_coef
     bareground_fluxes_params.a_exp    = a_exp
     bareground_fluxes_params.wind_min = wind_min
@@ -61,22 +61,22 @@ function bareground_fluxes!(
         mask_noexposedvegp ::BitVector,
         bounds_patch     ::UnitRange{Int},
         # Atmospheric forcing (column-level)
-        forc_q_col       ::Vector{Float64},
-        forc_pbot_col    ::Vector{Float64},
-        forc_th_col      ::Vector{Float64},
-        forc_rho_col     ::Vector{Float64},
-        forc_t_col       ::Vector{Float64},
+        forc_q_col       ::Vector{<:Real},
+        forc_pbot_col    ::Vector{<:Real},
+        forc_th_col      ::Vector{<:Real},
+        forc_rho_col     ::Vector{<:Real},
+        forc_t_col       ::Vector{<:Real},
         # Atmospheric forcing (gridcell-level)
-        forc_u_grc       ::Vector{Float64},
-        forc_v_grc       ::Vector{Float64},
-        forc_hgt_t_grc   ::Vector{Float64},
-        forc_hgt_u_grc   ::Vector{Float64},
-        forc_hgt_q_grc   ::Vector{Float64};
+        forc_u_grc       ::Vector{<:Real},
+        forc_v_grc       ::Vector{<:Real},
+        forc_hgt_t_grc   ::Vector{<:Real},
+        forc_hgt_u_grc   ::Vector{<:Real},
+        forc_hgt_q_grc   ::Vector{<:Real};
         # Feature flags
         use_lch4         ::Bool   = false,
         z0param_method   ::String = "ZengWang2007",
         # CH4 conductance output (optional)
-        grnd_ch4_cond_patch ::Vector{Float64} = Float64[])
+        grnd_ch4_cond_patch ::Vector{<:Real} = Float64[])
 
     np   = length(bounds_patch)
     begp = first(bounds_patch)
@@ -99,18 +99,19 @@ function bareground_fluxes!(
     end
 
     # --- Local work arrays (patch-indexed) ---
-    zldis  = zeros(endp)
-    dth    = zeros(endp)
-    dqh    = zeros(endp)
-    obu    = zeros(endp)
-    ur     = zeros(endp)
-    um     = zeros(endp)
-    temp1  = zeros(endp)
-    temp12m = zeros(endp)
-    temp2  = zeros(endp)
-    temp22m = zeros(endp)
-    ustar  = zeros(endp)
-    fm     = zeros(endp)
+    FT = eltype(forc_t_col)
+    zldis  = zeros(FT, endp)
+    dth    = zeros(FT, endp)
+    dqh    = zeros(FT, endp)
+    obu    = zeros(FT, endp)
+    ur     = zeros(FT, endp)
+    um     = zeros(FT, endp)
+    temp1  = zeros(FT, endp)
+    temp12m = zeros(FT, endp)
+    temp2  = zeros(FT, endp)
+    temp22m = zeros(FT, endp)
+    ustar  = zeros(FT, endp)
+    fm     = zeros(FT, endp)
 
     # =========================================================================
     # Phase 1: Initialization — simple settings for no-exposed-veg patches
@@ -150,7 +151,7 @@ function bareground_fluxes!(
         energyflux.dhsdt_canopy_patch[p] = 0.0
         energyflux.eflx_sh_stem_patch[p] = 0.0
 
-        ur[p]  = max(params.wind_min, sqrt(forc_u_grc[g]^2 + forc_v_grc[g]^2))
+        ur[p]  = smooth_max(params.wind_min, sqrt(forc_u_grc[g]^2 + forc_v_grc[g]^2))
         dth[p] = temperature.thm_patch[p] - temperature.t_grnd_col[c]
         dqh[p] = forc_q_col[c] - waterdiagbulk.qg_col[c]
         dthv   = dth[p] * (1.0 + 0.61 * forc_q_col[c]) + 0.61 * forc_th_col[c] * dqh[p]
@@ -203,7 +204,7 @@ function bareground_fluxes!(
             elseif z0param_method == "Meier2022"
                 # After Yang et al. (2008)
                 frictionvel.z0hg_patch[p] = MEIER_PARAM3 * NU_PARAM / ustar[p] *
-                    exp(-BETA_PARAM * ustar[p]^0.5 * abs(tstar)^0.25)
+                    exp(-BETA_PARAM * ustar[p]^0.5 * smooth_abs(tstar)^0.25)
             end
 
             frictionvel.z0qg_patch[p] = frictionvel.z0hg_patch[p]
@@ -217,11 +218,11 @@ function bareground_fluxes!(
             frictionvel.zeta_patch[p] = zldis[p] * VKC * GRAV * thvstar / (ustar[p]^2 * temperature.thv_col[c])
 
             if frictionvel.zeta_patch[p] >= 0.0  # stable
-                frictionvel.zeta_patch[p] = min(frictionvel.zetamaxstable, max(frictionvel.zeta_patch[p], 0.01))
-                um[p] = max(ur[p], 0.1)
+                frictionvel.zeta_patch[p] = smooth_clamp(frictionvel.zeta_patch[p], 0.01, frictionvel.zetamaxstable)
+                um[p] = smooth_max(ur[p], 0.1)
             else  # unstable
-                frictionvel.zeta_patch[p] = max(-100.0, min(frictionvel.zeta_patch[p], -0.01))
-                wc_arg = max(-GRAV * ustar[p] * thvstar * col_data.zii[c] / temperature.thv_col[c], 0.0)
+                frictionvel.zeta_patch[p] = smooth_clamp(frictionvel.zeta_patch[p], -100.0, -0.01)
+                wc_arg = smooth_max(-GRAV * ustar[p] * thvstar * col_data.zii[c] / temperature.thv_col[c], 0.0)
                 wc = temperature.beta_col[c] * wc_arg^0.333
                 um[p] = sqrt(ur[p]^2 + wc^2)
             end
@@ -256,7 +257,7 @@ function bareground_fluxes!(
         www = (waterstatebulk.ws.h2osoi_liq_col[c, 1 + nlevsno] / DENH2O +
                waterstatebulk.ws.h2osoi_ice_col[c, 1 + nlevsno] / DENICE) /
               col_data.dz[c, 1 + nlevsno] / soilstate.watsat_col[c, 1]
-        www = min(max(www, 0.0), 1.0)
+        www = smooth_clamp(www, 0.0, 1.0)
 
         # Soil evaporation: beta or resistance method
         if dqh[p] > 0.0  # dew (beta not applied)
@@ -315,7 +316,7 @@ function bareground_fluxes!(
 
         # 2 m height relative humidity
         (qsat_ref2m, e_ref2m, _, _) = qsat(temperature.t_ref2m_patch[p], forc_pbot_col[c])
-        waterdiagbulk.rh_ref2m_patch[p] = min(100.0,
+        waterdiagbulk.rh_ref2m_patch[p] = smooth_min(100.0,
             waterdiagbulk.q_ref2m_patch[p] / qsat_ref2m * 100.0)
 
         if lun_data.itype[l] == ISTSOIL || lun_data.itype[l] == ISTCROP

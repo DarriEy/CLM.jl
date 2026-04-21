@@ -35,7 +35,7 @@ function n_state_update_leaching!(ns_soil::SoilBiogeochemNitrogenStateData,
                                    bounds_col::UnitRange{Int},
                                    nlevdecomp::Int,
                                    use_nitrif_denitrif::Bool = false,
-                                   dt::Float64)
+                                   dt::Real)
 
     for j in 1:nlevdecomp
         for c in bounds_col
@@ -94,7 +94,7 @@ function n_state_update3!(ns_veg::CNVegNitrogenStateData,
                            i_cwd::Int,
                            use_matrixcn::Bool = false,
                            use_soil_matrixcn::Bool = false,
-                           dt::Float64)
+                           dt::Real)
 
     # --- Column loop: fire mortality fluxes to soil decomposition pools ---
     for j in 1:nlevdecomp

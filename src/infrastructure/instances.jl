@@ -96,12 +96,24 @@ Base.@kwdef mutable struct CLMInstances
     # --- Decomposition cascade ---
     decomp_cascade::DecompCascadeConData = DecompCascadeConData()
 
+    # --- BGC decomposition state and params ---
+    decomp_bgc_state::DecompBGCState = DecompBGCState()
+    decomp_bgc_params::DecompBGCParams = DecompBGCParams()
+    cn_shared_params::CNSharedParamsData = CNSharedParamsData()
+    decomp_params::DecompParams = DecompParams()
+    competition_state::SoilBGCCompetitionState = SoilBGCCompetitionState()
+    competition_params::SoilBGCCompetitionParams = SoilBGCCompetitionParams()
+    litter_params::LitterVertTranspParams = LitterVertTranspParams()
+
     # --- Saturated / infiltration excess runoff ---
     sat_excess_runoff::SaturatedExcessRunoffData = SaturatedExcessRunoffData()
     infilt_excess_runoff::InfiltrationExcessRunoffData = InfiltrationExcessRunoffData()
 
     # --- Snow cover fraction ---
     scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
+
+    # --- Calibration overrides (NaN = use default) ---
+    overrides::CalibrationOverrides = CalibrationOverrides()
 
     # --- Surface input data (for monthly phenology re-reads) ---
     surfdata::Union{SurfaceInputData, Nothing} = nothing

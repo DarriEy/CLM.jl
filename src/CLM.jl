@@ -62,6 +62,12 @@ include("infrastructure/decomp.jl")
 include("infrastructure/filters.jl")
 include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
+include("infrastructure/smooth_ad.jl")
+
+# ===========================================================================
+# Calibration overrides struct (needed by physics modules for override kwargs)
+# ===========================================================================
+include("calibration/overrides.jl")
 include("infrastructure/topo.jl")
 include("infrastructure/subgrid_ave.jl")
 include("infrastructure/accumul.jl")
@@ -197,5 +203,15 @@ include("infrastructure/cold_start.jl")
 include("driver/clm_driver.jl")
 include("driver/clm_initialize.jl")
 include("driver/clm_run.jl")
+
+# ===========================================================================
+# Calibration framework (depends on driver + all modules)
+# ===========================================================================
+include("calibration/calibration.jl")
+include("calibration/parameters.jl")
+include("calibration/optimize.jl")
+include("calibration/enzyme_ad.jl")
+include("calibration/fluxnet_reader.jl")
+include("calibration/site_calibration.jl")
 
 end # module CLM

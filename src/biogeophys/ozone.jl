@@ -83,7 +83,7 @@ Fields from ozone_type:
   - o3uptakesha_patch, o3uptakesun_patch: ozone dose (mmol O3/m^2)
   - tlai_old_patch: tlai from last time step
 """
-Base.@kwdef mutable struct OzoneData{FT<:AbstractFloat}
+Base.@kwdef mutable struct OzoneData{FT<:Real}
     # Stress method selector
     stress_method::Int = STRESS_METHOD_LOMBARDOZZI2015
 
@@ -112,9 +112,9 @@ Allocate and initialize ozone data for `npatches` patches.
 
 Ported from `Init`, `InitAllocate`, `InitHistory`, and `InitCold` in OzoneMod.F90.
 """
-function ozone_init!(oz::OzoneData, npatches::Int;
+function ozone_init!(oz::OzoneData{FT}, npatches::Int;
                      stress_method::String = "stress_lombardozzi2015",
-                     use_luna::Bool = false)
+                     use_luna::Bool = false) where {FT}
     # Set stress method
     if stress_method == "stress_lombardozzi2015"
         oz.stress_method = STRESS_METHOD_LOMBARDOZZI2015
@@ -128,17 +128,17 @@ function ozone_init!(oz::OzoneData, npatches::Int;
     end
 
     # InitAllocateBase: base type fields initialized to NaN, then cold-start to 1.0
-    oz.o3coefvsha_patch    = fill(1.0, npatches)
-    oz.o3coefvsun_patch    = fill(1.0, npatches)
-    oz.o3coefgsha_patch    = fill(1.0, npatches)
-    oz.o3coefgsun_patch    = fill(1.0, npatches)
-    oz.o3coefjmaxsha_patch = fill(1.0, npatches)
-    oz.o3coefjmaxsun_patch = fill(1.0, npatches)
+    oz.o3coefvsha_patch    = fill(one(FT), npatches)
+    oz.o3coefvsun_patch    = fill(one(FT), npatches)
+    oz.o3coefgsha_patch    = fill(one(FT), npatches)
+    oz.o3coefgsun_patch    = fill(one(FT), npatches)
+    oz.o3coefjmaxsha_patch = fill(one(FT), npatches)
+    oz.o3coefjmaxsun_patch = fill(one(FT), npatches)
 
     # InitAllocate + InitCold: derived type fields
-    oz.o3uptakesha_patch   = fill(0.0, npatches)
-    oz.o3uptakesun_patch   = fill(0.0, npatches)
-    oz.tlai_old_patch      = fill(0.0, npatches)
+    oz.o3uptakesha_patch   = fill(zero(FT), npatches)
+    oz.o3uptakesun_patch   = fill(zero(FT), npatches)
+    oz.tlai_old_patch      = fill(zero(FT), npatches)
 
     return nothing
 end
@@ -179,33 +179,33 @@ Ported from `CalcOzoneUptake` in OzoneMod.F90.
 - `patchdata::PatchData`: patch hierarchy data
 - `mask_exposedvegp::BitVector`: mask for non-snow-covered vegetation patches
 - `bounds::UnitRange{Int}`: patch index range
-- `forc_pbot::Vector{Float64}`: atmospheric pressure (Pa), column-indexed
-- `forc_th::Vector{Float64}`: atmospheric potential temperature (K), column-indexed
-- `rssun::Vector{Float64}`: leaf stomatal resistance, sunlit leaves (s/m)
-- `rssha::Vector{Float64}`: leaf stomatal resistance, shaded leaves (s/m)
-- `rb::Vector{Float64}`: boundary layer resistance (s/m)
-- `ram::Vector{Float64}`: aerodynamical resistance (s/m)
-- `tlai::Vector{Float64}`: one-sided leaf area index, no burying by snow
-- `forc_o3::Vector{Float64}`: ozone partial pressure (mol/mol), gridcell-indexed
-- `evergreen_pft::Vector{Float64}`: evergreen flag per PFT (1=evergreen)
-- `leaf_long_pft::Vector{Float64}`: leaf longevity per PFT (years)
+- `forc_pbot::Vector{<:Real}`: atmospheric pressure (Pa), column-indexed
+- `forc_th::Vector{<:Real}`: atmospheric potential temperature (K), column-indexed
+- `rssun::Vector{<:Real}`: leaf stomatal resistance, sunlit leaves (s/m)
+- `rssha::Vector{<:Real}`: leaf stomatal resistance, shaded leaves (s/m)
+- `rb::Vector{<:Real}`: boundary layer resistance (s/m)
+- `ram::Vector{<:Real}`: aerodynamical resistance (s/m)
+- `tlai::Vector{<:Real}`: one-sided leaf area index, no burying by snow
+- `forc_o3::Vector{<:Real}`: ozone partial pressure (mol/mol), gridcell-indexed
+- `evergreen_pft::Vector{<:Real}`: evergreen flag per PFT (1=evergreen)
+- `leaf_long_pft::Vector{<:Real}`: leaf longevity per PFT (years)
 - `dtime::Float64`: time step size (seconds)
 """
 function calc_ozone_uptake!(oz::OzoneData,
                             patchdata::PatchData,
                             mask_exposedvegp::BitVector,
                             bounds::UnitRange{Int},
-                            forc_pbot::Vector{Float64},
-                            forc_th::Vector{Float64},
-                            rssun::Vector{Float64},
-                            rssha::Vector{Float64},
-                            rb::Vector{Float64},
-                            ram::Vector{Float64},
-                            tlai::Vector{Float64},
-                            forc_o3::Vector{Float64},
-                            evergreen_pft::Vector{Float64},
-                            leaf_long_pft::Vector{Float64},
-                            dtime::Float64)
+                            forc_pbot::Vector{<:Real},
+                            forc_th::Vector{<:Real},
+                            rssun::Vector{<:Real},
+                            rssha::Vector{<:Real},
+                            rb::Vector{<:Real},
+                            ram::Vector{<:Real},
+                            tlai::Vector{<:Real},
+                            forc_o3::Vector{<:Real},
+                            evergreen_pft::Vector{<:Real},
+                            leaf_long_pft::Vector{<:Real},
+                            dtime::Real)
     for p in bounds
         mask_exposedvegp[p] || continue
 
@@ -261,19 +261,19 @@ Returns the updated o3uptake value.
 Ported from `CalcOzoneUptakeOnePoint` in OzoneMod.F90.
 """
 function calc_ozone_uptake_one_point(;
-        forc_ozone::Float64,
-        forc_pbot::Float64,
-        forc_th::Float64,
-        rs::Float64,
-        rb::Float64,
-        ram::Float64,
-        tlai_val::Float64,
-        tlai_old::Float64,
+        forc_ozone::Real,
+        forc_pbot::Real,
+        forc_th::Real,
+        rs::Real,
+        rb::Real,
+        ram::Real,
+        tlai_val::Real,
+        tlai_old::Real,
         pft_type::Int,
-        o3uptake::Float64,
-        evergreen_pft::Vector{Float64},
-        leaf_long_pft::Vector{Float64},
-        dtime::Float64)
+        o3uptake::Real,
+        evergreen_pft::Vector{<:Real},
+        leaf_long_pft::Vector{<:Real},
+        dtime::Real)
 
     # convert o3 from mol/mol to nmol m^-3
     # SHR_CONST_RGAS = 8.31446 (same as RGAS in varcon.jl)
@@ -337,7 +337,7 @@ function calc_ozone_stress!(oz::OzoneData,
                             mask_noexposedvegp::BitVector,
                             bounds::UnitRange{Int},
                             patchdata::PatchData,
-                            woody_pft::Vector{Float64};
+                            woody_pft::Vector{<:Real};
                             is_time_to_run_luna::Bool = false)
     if oz.stress_method == STRESS_METHOD_LOMBARDOZZI2015
         calc_ozone_stress_lombardozzi2015!(oz, mask_exposedvegp, mask_noexposedvegp,
@@ -369,7 +369,7 @@ function calc_ozone_stress_lombardozzi2015!(oz::OzoneData,
                                             mask_noexposedvegp::BitVector,
                                             bounds::UnitRange{Int},
                                             patchdata::PatchData,
-                                            woody_pft::Vector{Float64})
+                                            woody_pft::Vector{<:Real})
     for p in bounds
         if mask_exposedvegp[p]
             pft_type = patchdata.itype[p]
@@ -412,8 +412,8 @@ Ported from `CalcOzoneStressLombardozzi2015OnePoint` in OzoneMod.F90.
 """
 function calc_ozone_stress_lombardozzi2015_one_point(;
         pft_type::Int,
-        o3uptake::Float64,
-        woody_pft::Vector{Float64})
+        o3uptake::Real,
+        woody_pft::Vector{<:Real})
 
     if o3uptake == 0.0
         # No o3 damage if no o3 uptake
@@ -466,7 +466,7 @@ function calc_ozone_stress_falk!(oz::OzoneData,
                                  mask_noexposedvegp::BitVector,
                                  bounds::UnitRange{Int},
                                  patchdata::PatchData,
-                                 woody_pft::Vector{Float64};
+                                 woody_pft::Vector{<:Real};
                                  is_time_to_run_luna::Bool = false)
     if !is_time_to_run_luna
         return nothing
@@ -510,9 +510,9 @@ Ported from `CalcOzoneStressFalkOnePoint` in OzoneMod.F90.
 """
 function calc_ozone_stress_falk_one_point(;
         pft_type::Int,
-        o3uptake::Float64,
-        o3coefjmax::Float64,
-        woody_pft::Vector{Float64})
+        o3uptake::Real,
+        o3coefjmax::Real,
+        woody_pft::Vector{<:Real})
 
     if o3uptake == 0.0
         return 1.0

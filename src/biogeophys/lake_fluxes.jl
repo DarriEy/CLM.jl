@@ -60,22 +60,22 @@ function lake_fluxes!(temperature::TemperatureData,
                        col_data::ColumnData,
                        patch_data::PatchData,
                        lun_data::LandunitData,
-                       forc_t::Vector{Float64},
-                       forc_th::Vector{Float64},
-                       forc_q::Vector{Float64},
-                       forc_pbot::Vector{Float64},
-                       forc_rho::Vector{Float64},
-                       forc_lwrad::Vector{Float64},
-                       forc_u::Vector{Float64},
-                       forc_v::Vector{Float64},
-                       forc_hgt_u_grc::Vector{Float64},
-                       forc_hgt_t_grc::Vector{Float64},
-                       forc_hgt_q_grc::Vector{Float64},
+                       forc_t::Vector{<:Real},
+                       forc_th::Vector{<:Real},
+                       forc_q::Vector{<:Real},
+                       forc_pbot::Vector{<:Real},
+                       forc_rho::Vector{<:Real},
+                       forc_lwrad::Vector{<:Real},
+                       forc_u::Vector{<:Real},
+                       forc_v::Vector{<:Real},
+                       forc_hgt_u_grc::Vector{<:Real},
+                       forc_hgt_t_grc::Vector{<:Real},
+                       forc_hgt_q_grc::Vector{<:Real},
                        mask_lakec::BitVector,
                        mask_lakep::BitVector,
                        bounds_col::UnitRange{Int},
                        bounds_patch::UnitRange{Int};
-                       dtime::Float64 = 1800.0)
+                       dtime::Real = 1800.0)
 
     nlevsno_val = varpar.nlevsno
     niters = 4  # stability iterations
@@ -132,7 +132,7 @@ function lake_fluxes!(temperature::TemperatureData,
 
         # Solar absorbed at surface
         sabg = solarabs.sabg_patch[p]
-        sabg = max(sabg, 0.0)
+        sabg = smooth_max(sabg, 0.0)
 
         # Betaprime: fraction of solar absorbed at surface
         if snl < 0
@@ -145,7 +145,7 @@ function lake_fluxes!(temperature::TemperatureData,
         thv = forc_th[c] * (1.0 + 0.61 * forc_q[c])
 
         # Wind speed
-        ur = max(sqrt(forc_u[g]^2 + forc_v[g]^2), wind_min)
+        ur = smooth_max(sqrt(forc_u[g]^2 + forc_v[g]^2), wind_min)
 
         # Forcing heights
         forc_hgt_u = forc_hgt_u_grc[g]
@@ -167,7 +167,7 @@ function lake_fluxes!(temperature::TemperatureData,
         # Initial roughness lengths
         # ============================================================
         if tgbef > TFRZ  # Unfrozen
-            z0mg = max(MINZ0LAKE, CUS * kva / max(ur * 0.1, 1e-4))
+            z0mg = smooth_max(MINZ0LAKE, CUS * kva / smooth_max(ur * 0.1, 1e-4))
         else  # Frozen
             if snl < 0
                 z0mg = 0.00085  # snow roughness
@@ -176,26 +176,26 @@ function lake_fluxes!(temperature::TemperatureData,
             end
         end
 
-        sqre0 = sqrt(max(z0mg * ur * 0.1 / kva, 0.1))
+        sqre0 = sqrt(smooth_max(z0mg * ur * 0.1 / kva, 0.1))
         z0hg = z0mg * exp(-VKC / PRN_AIR * (4.0 * sqre0 - 3.2))
         z0qg = z0mg * exp(-VKC / SCH_WATER * (4.0 * sqre0 - 4.2))
-        z0mg = max(z0mg, 1.0e-10)
-        z0hg = max(z0hg, 1.0e-10)
-        z0qg = max(z0qg, 1.0e-10)
+        z0mg = smooth_max(z0mg, 1.0e-10)
+        z0hg = smooth_max(z0hg, 1.0e-10)
+        z0qg = smooth_max(z0qg, 1.0e-10)
 
         # Reference displacement height (zero for lakes)
         displa = 0.0
 
         # Monin-Obukhov initialization
         zldis = forc_hgt_u - displa
-        zldis = max(zldis, z0mg + 0.01)
+        zldis = smooth_max(zldis, z0mg + 0.01)
         dth = thm - tgbef
         dqh = forc_q[c] - qsat_water(tgbef, forc_pbot[c])
         dthv = dth * (1.0 + 0.61 * forc_q[c]) + 0.61 * forc_th[c] * dqh
 
         # Initial ustar estimate
         ustar = VKC * ur / log(zldis / z0mg)
-        ustar = max(ustar, 0.001)
+        ustar = smooth_max(ustar, 0.001)
 
         # Initial Obukhov length
         tstar = VKC * dth / log(forc_hgt_t / z0hg)
@@ -221,9 +221,9 @@ function lake_fluxes!(temperature::TemperatureData,
             zldis_u = forc_hgt_u - displa
             zldis_t = forc_hgt_t - displa
             zldis_q = forc_hgt_q - displa
-            zldis_u = max(zldis_u, z0mg + 0.01)
-            zldis_t = max(zldis_t, z0hg + 0.01)
-            zldis_q = max(zldis_q, z0qg + 0.01)
+            zldis_u = smooth_max(zldis_u, z0mg + 0.01)
+            zldis_t = smooth_max(zldis_t, z0hg + 0.01)
+            zldis_q = smooth_max(zldis_q, z0qg + 0.01)
 
             # Stability functions
             zeta_u = zldis_u / obu
@@ -243,7 +243,7 @@ function lake_fluxes!(temperature::TemperatureData,
 
             # Friction velocity
             ustar = VKC * um / (log(zldis_u / z0mg) - stability_func1(zeta_u) + stability_func1(zeta0m))
-            ustar = max(ustar, 0.001)
+            ustar = smooth_max(ustar, 0.001)
 
             # Transfer coefficients
             temp1 = VKC / (log(zldis_t / z0hg) - stability_func2(zeta_t) + stability_func2(zeta0h))
@@ -253,9 +253,9 @@ function lake_fluxes!(temperature::TemperatureData,
             ram = 1.0 / (ustar * VKC / (log(zldis_u / z0mg) - stability_func1(zeta_u) + stability_func1(zeta0m)))
             rah = 1.0 / (temp1 * ustar)
             raw = 1.0 / (temp2 * ustar)
-            ram = max(ram, 1.0)
-            rah = max(rah, 1.0)
-            raw = max(raw, 1.0)
+            ram = smooth_max(ram, 1.0)
+            rah = smooth_max(rah, 1.0)
+            raw = smooth_max(raw, 1.0)
 
             # Saturation specific humidity at surface
             qsatg, qsatgdT = qsat_water(tgbef, forc_pbot[c]), qsat_water_dT(tgbef, forc_pbot[c])
@@ -275,7 +275,7 @@ function lake_fluxes!(temperature::TemperatureData,
                  htvp * forc_rho[c] / raw * qsatgdT +
                  tksur / dzsur
 
-            bx = max(bx, 1.0e-10)
+            bx = smooth_max(bx, 1.0e-10)
             t_grnd_new = ax / bx
 
             # Surface fluxes
@@ -297,7 +297,7 @@ function lake_fluxes!(temperature::TemperatureData,
 
             if zeta_val >= 0.0
                 zeta_val = clamp(zeta_val, 0.01, ZETAMAX_LAKE)
-                um = max(ur, wind_min)
+                um = smooth_max(ur, wind_min)
             else
                 zeta_val = clamp(zeta_val, -100.0, -0.01)
                 wc = BETA1 * (-GRAV * ustar * thvstar * 1000.0 / thv)^(1.0/3.0)
@@ -308,14 +308,14 @@ function lake_fluxes!(temperature::TemperatureData,
 
             # Update roughness for unfrozen lakes
             if tgbef > TFRZ
-                z0mg = max(MINZ0LAKE, CUS * kva / max(ustar, 1e-6),
+                z0mg = smooth_max(smooth_max(MINZ0LAKE, CUS * kva / smooth_max(ustar, 1e-6)),
                            CUR0 * ustar^2 / GRAV)
-                sqre0 = sqrt(max(z0mg * ustar / kva, 0.1))
+                sqre0 = sqrt(smooth_max(z0mg * ustar / kva, 0.1))
                 z0hg = z0mg * exp(-VKC / PRN_AIR * (4.0 * sqre0 - 3.2))
                 z0qg = z0mg * exp(-VKC / SCH_WATER * (4.0 * sqre0 - 4.2))
-                z0mg = max(z0mg, 1.0e-10)
-                z0hg = max(z0hg, 1.0e-10)
-                z0qg = max(z0qg, 1.0e-10)
+                z0mg = smooth_max(z0mg, 1.0e-10)
+                z0hg = smooth_max(z0hg, 1.0e-10)
+                z0qg = smooth_max(z0qg, 1.0e-10)
             end
         end
 
@@ -348,12 +348,12 @@ function lake_fluxes!(temperature::TemperatureData,
         thm_local = forc_t[c] + 0.0098 * forc_hgt_t_grc[g]
 
         # Aerodynamic resistances (use final iteration values)
-        zldis_t = max(forc_hgt_t - displa, z0hg + 0.01)
-        zldis_q = max(forc_hgt_q - displa, z0qg + 0.01)
-        zldis_u = max(forc_hgt_u - displa, z0mg + 0.01)
+        zldis_t = smooth_max(forc_hgt_t - displa, z0hg + 0.01)
+        zldis_q = smooth_max(forc_hgt_q - displa, z0qg + 0.01)
+        zldis_u = smooth_max(forc_hgt_u - displa, z0mg + 0.01)
 
-        rah_final = max(zldis_t / (VKC * ustar), 1.0)
-        raw_final = max(zldis_q / (VKC * ustar), 1.0)
+        rah_final = smooth_max(zldis_t / (VKC * ustar), 1.0)
+        raw_final = smooth_max(zldis_q / (VKC * ustar), 1.0)
 
         eflx_sh_grnd = forc_rho[c] * CPAIR * (t_grnd_new - thm_local) / rah_final
         qflx_evap_soi = forc_rho[c] * (qsatg_final - forc_q[c]) / raw_final
@@ -383,15 +383,15 @@ function lake_fluxes!(temperature::TemperatureData,
         frictionvel.z0qg_patch[p] = z0qg
 
         # Momentum stress
-        ram_final = max(zldis_u / (VKC * ustar), 1.0)
+        ram_final = smooth_max(zldis_u / (VKC * ustar), 1.0)
         energyflux.taux_patch[p] = -forc_rho[c] * forc_u[g] / ram_final
         energyflux.tauy_patch[p] = -forc_rho[c] * forc_v[g] / ram_final
 
         # 2m wind speed for mixing parameters
-        u2m = max(0.1, ustar / VKC * log(2.0 / z0mg))
+        u2m = smooth_max(0.1, ustar / VKC * log(2.0 / z0mg))
         lakestate.ws_col[c] = 1.2e-3 * u2m
         g_idx = col_data.gridcell[c]
-        lakestate.ks_col[c] = 6.6 * sqrt(abs(sin(0.0))) * u2m^(-1.84)  # lat from gridcell, simplified
+        lakestate.ks_col[c] = 6.6 * sqrt(smooth_abs(sin(0.0))) * u2m^(-1.84)  # lat from gridcell, simplified
 
         energyflux.htvp_col[c] = htvp
     end
@@ -400,14 +400,14 @@ function lake_fluxes!(temperature::TemperatureData,
 end
 
 # Helper: saturation specific humidity for liquid water
-function qsat_water(t::Float64, p::Float64)
+function qsat_water(t::Real, p::Real)
     # Tetens formula for saturation vapor pressure over water
     es = 611.2 * exp(17.67 * (t - TFRZ) / (t - TFRZ + 243.5))
     return 0.622 * es / (p - 0.378 * es)
 end
 
 # Helper: derivative of qsat w.r.t. temperature
-function qsat_water_dT(t::Float64, p::Float64)
+function qsat_water_dT(t::Real, p::Real)
     es = 611.2 * exp(17.67 * (t - TFRZ) / (t - TFRZ + 243.5))
     desdT = es * 17.67 * 243.5 / (t - TFRZ + 243.5)^2
     qs = 0.622 * es / (p - 0.378 * es)

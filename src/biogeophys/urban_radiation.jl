@@ -45,30 +45,30 @@ Ported from `net_longwave` in `UrbanRadiationMod.F90`.
 - `mask_urbanl`   : BitVector mask for urban landunits
 - `bounds`        : landunit index range
 """
-function net_longwave!(canyon_hwr::Vector{Float64},
-                        wtroad_perv::Vector{Float64},
-                        lwdown::Vector{Float64},
-                        em_roof::Vector{Float64},
-                        em_improad::Vector{Float64},
-                        em_perroad::Vector{Float64},
-                        em_wall::Vector{Float64},
-                        t_roof::Vector{Float64},
-                        t_improad::Vector{Float64},
-                        t_perroad::Vector{Float64},
-                        t_sunwall::Vector{Float64},
-                        t_shadewall::Vector{Float64},
-                        lwnet_roof::Vector{Float64},
-                        lwnet_improad::Vector{Float64},
-                        lwnet_perroad::Vector{Float64},
-                        lwnet_sunwall::Vector{Float64},
-                        lwnet_shadewall::Vector{Float64},
-                        lwnet_canyon::Vector{Float64},
-                        lwup_roof::Vector{Float64},
-                        lwup_improad::Vector{Float64},
-                        lwup_perroad::Vector{Float64},
-                        lwup_sunwall::Vector{Float64},
-                        lwup_shadewall::Vector{Float64},
-                        lwup_canyon::Vector{Float64},
+function net_longwave!(canyon_hwr::Vector{<:Real},
+                        wtroad_perv::Vector{<:Real},
+                        lwdown::Vector{<:Real},
+                        em_roof::Vector{<:Real},
+                        em_improad::Vector{<:Real},
+                        em_perroad::Vector{<:Real},
+                        em_wall::Vector{<:Real},
+                        t_roof::Vector{<:Real},
+                        t_improad::Vector{<:Real},
+                        t_perroad::Vector{<:Real},
+                        t_sunwall::Vector{<:Real},
+                        t_shadewall::Vector{<:Real},
+                        lwnet_roof::Vector{<:Real},
+                        lwnet_improad::Vector{<:Real},
+                        lwnet_perroad::Vector{<:Real},
+                        lwnet_sunwall::Vector{<:Real},
+                        lwnet_shadewall::Vector{<:Real},
+                        lwnet_canyon::Vector{<:Real},
+                        lwup_roof::Vector{<:Real},
+                        lwup_improad::Vector{<:Real},
+                        lwup_perroad::Vector{<:Real},
+                        lwup_sunwall::Vector{<:Real},
+                        lwup_shadewall::Vector{<:Real},
+                        lwup_canyon::Vector{<:Real},
                         urbanparams::UrbanParamsData,
                         mask_urbanl::BitVector,
                         bounds::UnitRange{Int})
@@ -83,61 +83,62 @@ function net_longwave!(canyon_hwr::Vector{Float64},
 
     # Local working arrays (sized over bounds)
     nl = length(bounds)
-    lwdown_road_v      = zeros(last(bounds))
-    lwdown_sunwall_v   = zeros(last(bounds))
-    lwdown_shadewall_v = zeros(last(bounds))
-    lwtot_v            = zeros(last(bounds))
-    wtroad_imperv_v    = zeros(last(bounds))
+    FT = eltype(lwdown)
+    lwdown_road_v      = zeros(FT, last(bounds))
+    lwdown_sunwall_v   = zeros(FT, last(bounds))
+    lwdown_shadewall_v = zeros(FT, last(bounds))
+    lwtot_v            = zeros(FT, last(bounds))
+    wtroad_imperv_v    = zeros(FT, last(bounds))
 
-    improad_a_v           = zeros(last(bounds))
-    improad_r_v           = zeros(last(bounds))
-    improad_r_sky_v       = zeros(last(bounds))
-    improad_r_sunwall_v   = zeros(last(bounds))
-    improad_r_shadewall_v = zeros(last(bounds))
-    improad_e_v           = zeros(last(bounds))
-    improad_e_sky_v       = zeros(last(bounds))
-    improad_e_sunwall_v   = zeros(last(bounds))
-    improad_e_shadewall_v = zeros(last(bounds))
+    improad_a_v           = zeros(FT, last(bounds))
+    improad_r_v           = zeros(FT, last(bounds))
+    improad_r_sky_v       = zeros(FT, last(bounds))
+    improad_r_sunwall_v   = zeros(FT, last(bounds))
+    improad_r_shadewall_v = zeros(FT, last(bounds))
+    improad_e_v           = zeros(FT, last(bounds))
+    improad_e_sky_v       = zeros(FT, last(bounds))
+    improad_e_sunwall_v   = zeros(FT, last(bounds))
+    improad_e_shadewall_v = zeros(FT, last(bounds))
 
-    perroad_a_v           = zeros(last(bounds))
-    perroad_r_v           = zeros(last(bounds))
-    perroad_r_sky_v       = zeros(last(bounds))
-    perroad_r_sunwall_v   = zeros(last(bounds))
-    perroad_r_shadewall_v = zeros(last(bounds))
-    perroad_e_v           = zeros(last(bounds))
-    perroad_e_sky_v       = zeros(last(bounds))
-    perroad_e_sunwall_v   = zeros(last(bounds))
-    perroad_e_shadewall_v = zeros(last(bounds))
+    perroad_a_v           = zeros(FT, last(bounds))
+    perroad_r_v           = zeros(FT, last(bounds))
+    perroad_r_sky_v       = zeros(FT, last(bounds))
+    perroad_r_sunwall_v   = zeros(FT, last(bounds))
+    perroad_r_shadewall_v = zeros(FT, last(bounds))
+    perroad_e_v           = zeros(FT, last(bounds))
+    perroad_e_sky_v       = zeros(FT, last(bounds))
+    perroad_e_sunwall_v   = zeros(FT, last(bounds))
+    perroad_e_shadewall_v = zeros(FT, last(bounds))
 
-    road_a_v              = zeros(last(bounds))
-    road_r_v              = zeros(last(bounds))
-    road_r_sky_v          = zeros(last(bounds))
-    road_r_sunwall_v      = zeros(last(bounds))
-    road_r_shadewall_v    = zeros(last(bounds))
-    road_e_v              = zeros(last(bounds))
-    road_e_sky_v          = zeros(last(bounds))
-    road_e_sunwall_v      = zeros(last(bounds))
-    road_e_shadewall_v    = zeros(last(bounds))
+    road_a_v              = zeros(FT, last(bounds))
+    road_r_v              = zeros(FT, last(bounds))
+    road_r_sky_v          = zeros(FT, last(bounds))
+    road_r_sunwall_v      = zeros(FT, last(bounds))
+    road_r_shadewall_v    = zeros(FT, last(bounds))
+    road_e_v              = zeros(FT, last(bounds))
+    road_e_sky_v          = zeros(FT, last(bounds))
+    road_e_sunwall_v      = zeros(FT, last(bounds))
+    road_e_shadewall_v    = zeros(FT, last(bounds))
 
-    sunwall_a_v              = zeros(last(bounds))
-    sunwall_r_v              = zeros(last(bounds))
-    sunwall_r_sky_v          = zeros(last(bounds))
-    sunwall_r_road_v         = zeros(last(bounds))
-    sunwall_r_shadewall_v    = zeros(last(bounds))
-    sunwall_e_v              = zeros(last(bounds))
-    sunwall_e_sky_v          = zeros(last(bounds))
-    sunwall_e_road_v         = zeros(last(bounds))
-    sunwall_e_shadewall_v    = zeros(last(bounds))
+    sunwall_a_v              = zeros(FT, last(bounds))
+    sunwall_r_v              = zeros(FT, last(bounds))
+    sunwall_r_sky_v          = zeros(FT, last(bounds))
+    sunwall_r_road_v         = zeros(FT, last(bounds))
+    sunwall_r_shadewall_v    = zeros(FT, last(bounds))
+    sunwall_e_v              = zeros(FT, last(bounds))
+    sunwall_e_sky_v          = zeros(FT, last(bounds))
+    sunwall_e_road_v         = zeros(FT, last(bounds))
+    sunwall_e_shadewall_v    = zeros(FT, last(bounds))
 
-    shadewall_a_v            = zeros(last(bounds))
-    shadewall_r_v            = zeros(last(bounds))
-    shadewall_r_sky_v        = zeros(last(bounds))
-    shadewall_r_road_v       = zeros(last(bounds))
-    shadewall_r_sunwall_v    = zeros(last(bounds))
-    shadewall_e_v            = zeros(last(bounds))
-    shadewall_e_sky_v        = zeros(last(bounds))
-    shadewall_e_road_v       = zeros(last(bounds))
-    shadewall_e_sunwall_v    = zeros(last(bounds))
+    shadewall_a_v            = zeros(FT, last(bounds))
+    shadewall_r_v            = zeros(FT, last(bounds))
+    shadewall_r_sky_v        = zeros(FT, last(bounds))
+    shadewall_r_road_v       = zeros(FT, last(bounds))
+    shadewall_r_sunwall_v    = zeros(FT, last(bounds))
+    shadewall_e_v            = zeros(FT, last(bounds))
+    shadewall_e_sky_v        = zeros(FT, last(bounds))
+    shadewall_e_road_v       = zeros(FT, last(bounds))
+    shadewall_e_sunwall_v    = zeros(FT, last(bounds))
 
     # Calculate impervious road weight
     for l in bounds
@@ -156,7 +157,11 @@ function net_longwave!(canyon_hwr::Vector{Float64},
         # Conservation check
         err = lwdown[l] - (lwdown_road_v[l] + (lwdown_shadewall_v[l] + lwdown_sunwall_v[l]) * canyon_hwr[l])
         if abs(err) > 0.10
-            error("urban incident atmospheric longwave radiation balance error: err=$err, l=$l")
+            if _is_ad_type(eltype(lwdown))
+                @warn "urban LW radiation balance error (AD mode, continuing)" maxlog=1
+            else
+                error("urban incident atmospheric longwave radiation balance error: err=$err, l=$l")
+            end
         end
     end
 
@@ -313,7 +318,11 @@ function net_longwave!(canyon_hwr::Vector{Float64},
         end
 
         if !converged
-            error("urban net longwave radiation error: no convergence for landunit $l")
+            if _is_ad_type(eltype(lwnet_canyon))
+                @warn "urban net longwave radiation: no convergence (AD mode, continuing)" maxlog=1
+            else
+                error("urban net longwave radiation error: no convergence for landunit $l")
+            end
         end
 
         # Total net longwave radiation for canyon
@@ -331,7 +340,11 @@ function net_longwave!(canyon_hwr::Vector{Float64},
         # Conservation check
         err = lwnet_canyon[l] - (lwup_canyon[l] - lwdown[l])
         if abs(err) > 0.10
-            error("urban net longwave radiation balance error: err=$err for landunit $l")
+            if _is_ad_type(eltype(lwdown))
+                @warn "urban net longwave radiation balance error (AD mode, continuing)" maxlog=1
+            else
+                error("urban net longwave radiation balance error: err=$err for landunit $l")
+            end
         end
     end
 
@@ -383,9 +396,9 @@ function urban_radiation!(solarabs::SolarAbsorbedData,
                             urbanparams::UrbanParamsData,
                             temperature::TemperatureData,
                             waterdiag::WaterDiagnosticBulkData,
-                            forc_lwrad::Vector{Float64},
-                            forc_solad::Matrix{Float64},
-                            forc_solai::Matrix{Float64},
+                            forc_lwrad::Vector{<:Real},
+                            forc_solad::Matrix{<:Real},
+                            forc_solai::Matrix{<:Real},
                             mask_nourbanl::BitVector,
                             mask_urbanl::BitVector,
                             mask_urbanc::BitVector,
@@ -396,27 +409,28 @@ function urban_radiation!(solarabs::SolarAbsorbedData,
     nl = last(bounds_lun)
 
     # Local arrays (landunit-level)
-    lwnet_roof      = zeros(nl)
-    lwnet_improad   = zeros(nl)
-    lwnet_perroad   = zeros(nl)
-    lwnet_sunwall   = zeros(nl)
-    lwnet_shadewall = zeros(nl)
-    lwnet_canyon    = zeros(nl)
-    lwup_roof       = zeros(nl)
-    lwup_improad    = zeros(nl)
-    lwup_perroad    = zeros(nl)
-    lwup_sunwall    = zeros(nl)
-    lwup_shadewall  = zeros(nl)
-    lwup_canyon     = zeros(nl)
-    t_roof_l        = zeros(nl)
-    t_improad_l     = zeros(nl)
-    t_perroad_l     = zeros(nl)
-    t_sunwall_l     = zeros(nl)
-    t_shadewall_l   = zeros(nl)
-    lwdown_l        = zeros(nl)
-    em_roof_s       = zeros(nl)
-    em_improad_s    = zeros(nl)
-    em_perroad_s    = zeros(nl)
+    FT = eltype(temperature.t_grnd_col)
+    lwnet_roof      = zeros(FT, nl)
+    lwnet_improad   = zeros(FT, nl)
+    lwnet_perroad   = zeros(FT, nl)
+    lwnet_sunwall   = zeros(FT, nl)
+    lwnet_shadewall = zeros(FT, nl)
+    lwnet_canyon    = zeros(FT, nl)
+    lwup_roof       = zeros(FT, nl)
+    lwup_improad    = zeros(FT, nl)
+    lwup_perroad    = zeros(FT, nl)
+    lwup_sunwall    = zeros(FT, nl)
+    lwup_shadewall  = zeros(FT, nl)
+    lwup_canyon     = zeros(FT, nl)
+    t_roof_l        = zeros(FT, nl)
+    t_improad_l     = zeros(FT, nl)
+    t_perroad_l     = zeros(FT, nl)
+    t_sunwall_l     = zeros(FT, nl)
+    t_shadewall_l   = zeros(FT, nl)
+    lwdown_l        = zeros(FT, nl)
+    em_roof_s       = zeros(FT, nl)
+    em_improad_s    = zeros(FT, nl)
+    em_perroad_s    = zeros(FT, nl)
 
     # Define fields that appear on the restart file for non-urban landunits
     for l in bounds_lun

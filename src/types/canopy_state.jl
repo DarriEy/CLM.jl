@@ -12,7 +12,7 @@ fractions, vegetation water potentials, and accumulated quantities.
 
 Ported from `canopystate_type` in `CanopyStateType.F90`.
 """
-Base.@kwdef mutable struct CanopyStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CanopyStateData{FT<:Real}
     # --- Integer patch-level fields ---
     frac_veg_nosno_patch     ::Vector{Int}     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
     frac_veg_nosno_alb_patch ::Vector{Int}     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
@@ -241,7 +241,7 @@ Set namelist parameters for canopy state.
 Ported from `canopystate_type%ReadNML` in `CanopyStateType.F90`.
 In Julia, namelist values are passed directly instead of reading from a file.
 """
-function canopystate_read_nml!(cs::CanopyStateData; leaf_mr_vcm::Float64 = 0.015)
+function canopystate_read_nml!(cs::CanopyStateData; leaf_mr_vcm::Real = 0.015)
     cs.leaf_mr_vcm = leaf_mr_vcm
     return nothing
 end

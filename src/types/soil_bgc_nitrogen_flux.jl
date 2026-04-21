@@ -12,7 +12,7 @@ related diagnostic fields at column level.
 
 Ported from `soilbiogeochem_nitrogenflux_type` in `SoilBiogeochemNitrogenFluxType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemNitrogenFluxData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SoilBiogeochemNitrogenFluxData{FT<:Real}
     # --- Deposition fluxes (1D col) ---
     ndep_to_sminn_col                        ::Vector{FT} = Float64[]  # (gN/m2/s) atmospheric N deposition to soil mineral N
     nfix_to_sminn_col                        ::Vector{FT} = Float64[]  # (gN/m2/s) symbiotic/asymbiotic N fixation
@@ -298,7 +298,7 @@ Corresponds to `SetValues` in the Fortran source.
 """
 function soil_bgc_nitrogen_flux_set_values!(nf::SoilBiogeochemNitrogenFluxData,
                                              mask_col::BitVector,
-                                             value_column::Float64;
+                                             value_column::Real;
                                              nlevdecomp_full::Int=size(nf.potential_immob_vr_col, 2),
                                              nlevdecomp::Int=nlevdecomp_full,
                                              ndecomp_pools::Int=size(nf.decomp_npools_leached_col, 2),
@@ -485,7 +485,7 @@ function soil_bgc_nitrogen_flux_summary!(nf::SoilBiogeochemNitrogenFluxData,
                                           ndecomp_cascade_transitions::Int=size(nf.decomp_cascade_ntransfer_col, 2),
                                           nlevdecomp::Int=size(nf.potential_immob_vr_col, 2),
                                           ndecomp_pools::Int=size(nf.decomp_npools_leached_col, 2),
-                                          dzsoi_decomp_vals::Vector{Float64},
+                                          dzsoi_decomp_vals::Vector{<:Real},
                                           use_nitrif_denitrif::Bool=false)
 
     # Initialize column-level accumulators

@@ -12,7 +12,7 @@ snow water, canopy water, aquifer water, and excess ice.
 
 Ported from `waterstate_type` in `WaterStateType.F90`.
 """
-Base.@kwdef mutable struct WaterStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct WaterStateData{FT<:Real}
     # --- Column-level 1D fields ---
     h2osno_no_layers_col   ::Vector{FT} = Float64[]   # col snow not resolved into layers (mm H2O)
     h2osfc_col             ::Vector{FT} = Float64[]   # col surface water (mm H2O)
@@ -135,13 +135,13 @@ function waterstate_init_cold!(ws::WaterStateData,
                                 bounds_patch::UnitRange{Int},
                                 bounds_lun::UnitRange{Int},
                                 bounds_grc::UnitRange{Int};
-                                h2osno_input_col::Vector{Float64},
-                                watsat_col::Matrix{Float64},
-                                t_soisno_col::Matrix{Float64},
+                                h2osno_input_col::Vector{<:Real},
+                                watsat_col::Matrix{<:Real},
+                                t_soisno_col::Matrix{<:Real},
                                 use_aquifer_layer::Bool,
-                                ratio::Float64 = 1.0,
+                                ratio::Real = 1.0,
                                 snl_col::Vector{Int},
-                                dz_col::Matrix{Float64},
+                                dz_col::Matrix{<:Real},
                                 landunit_col::Vector{Int},
                                 lakpoi::BitVector,
                                 urbpoi::BitVector,
@@ -149,8 +149,8 @@ function waterstate_init_cold!(ws::WaterStateData,
                                 col_itype::Vector{Int},
                                 nbedrock_col::Vector{Int},
                                 gridcell_col::Vector{Int},
-                                exice_coldstart_depth::Float64 = 0.5,
-                                exice_init_conc_col::Vector{Float64})
+                                exice_coldstart_depth::Real = 0.5,
+                                exice_init_conc_col::Vector{<:Real})
     nlevgrnd       = varpar.nlevgrnd
     nlevsoi        = varpar.nlevsoi
     nlevurb        = varpar.nlevurb
@@ -424,7 +424,7 @@ end
 Find the soil layer index containing the given depth.
 Equivalent to Fortran `find_soil_layer_containing_depth`.
 """
-function _find_soil_layer_containing_depth(depth::Float64, nlevsoi::Int)
+function _find_soil_layer_containing_depth(depth::Real, nlevsoi::Int)
     zi = zisoi[]
     for j in 1:nlevsoi
         if zi[j+1] > depth
@@ -439,7 +439,7 @@ end
                                        mask::BitVector,
                                        bounds_col::UnitRange{Int},
                                        snl_col::Vector{Int},
-                                       h2osno_total::Vector{Float64})
+                                       h2osno_total::Vector{<:Real})
 
 Calculate total snow water (h2osno_total) over the given column mask.
 Sums h2osno_no_layers_col plus liquid and ice in snow layers.
@@ -450,7 +450,7 @@ function waterstate_calculate_total_h2osno!(ws::WaterStateData,
                                              mask::BitVector,
                                              bounds_col::UnitRange{Int},
                                              snl_col::Vector{Int},
-                                             h2osno_total::Vector{Float64})
+                                             h2osno_total::Vector{<:Real})
     nlevsno = varpar.nlevsno
     for c in bounds_col
         mask[c] || continue

@@ -29,11 +29,11 @@ given calendar day using simplified Berger (1978) orbital parameters.
 
 Ported from `shr_orb_decl` in `shr_orb_mod.F90`.
 """
-function compute_orbital(calday::Float64;
-                         eccen::Float64 = ORB_ECCEN_DEFAULT,
-                         obliqr::Float64 = ORB_OBLIQR_DEFAULT,
-                         mvelpp::Float64 = deg2rad(ORB_MVELP_DEFAULT + 180.0),
-                         lambm0::Float64 = NaN)
+function compute_orbital(calday::Real;
+                         eccen::Real = ORB_ECCEN_DEFAULT,
+                         obliqr::Real = ORB_OBLIQR_DEFAULT,
+                         mvelpp::Real = deg2rad(ORB_MVELP_DEFAULT + 180.0),
+                         lambm0::Real = NaN)
     dayspy = 365.0
     ve = 80.5  # vernal equinox calendar day
 

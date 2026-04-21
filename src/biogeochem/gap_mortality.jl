@@ -90,14 +90,14 @@ function cn_gap_mortality!(mask_soilp::BitVector,
                            cnveg_cf::CNVegCarbonFluxData,
                            cnveg_ns::CNVegNitrogenStateData,
                            cnveg_nf::CNVegNitrogenFluxData;
-                           dt::Float64 = 1800.0,
-                           days_per_year::Float64 = 365.0,
+                           dt::Real = 1800.0,
+                           days_per_year::Real = 365.0,
                            use_cndv::Bool = false,
                            use_matrixcn::Bool = false,
                            spinup_state::Int = 0,
                            npcropmin::Int = 17,
-                           spinup_factor_deadwood::Float64 = SPINUP_FACTOR_DEADWOOD_DEFAULT,
-                           secspday::Float64 = SECSPDAY)
+                           spinup_factor_deadwood::Real = SPINUP_FACTOR_DEADWOOD_DEFAULT,
+                           secspday::Real = SECSPDAY)
 
     # --- Aliases (matching Fortran associate block) ---
     ivt   = patch.itype
@@ -252,10 +252,10 @@ function cn_gap_patch_to_column!(mask_soilp::BitVector,
                                  patch::PatchData,
                                  cnveg_cf::CNVegCarbonFluxData,
                                  cnveg_nf::CNVegNitrogenFluxData,
-                                 leaf_prof::Matrix{Float64},
-                                 froot_prof::Matrix{Float64},
-                                 croot_prof::Matrix{Float64},
-                                 stem_prof::Matrix{Float64};
+                                 leaf_prof::Matrix{<:Real},
+                                 froot_prof::Matrix{<:Real},
+                                 croot_prof::Matrix{<:Real},
+                                 stem_prof::Matrix{<:Real};
                                  nlevdecomp::Int = 1,
                                  i_litr_min::Int = 1,
                                  i_litr_max::Int = 3,

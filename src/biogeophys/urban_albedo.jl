@@ -41,11 +41,11 @@ Determine urban snow albedos.
 Ported from `SnowAlbedo` in `UrbanAlbedoMod.F90`.
 """
 function snow_albedo!(mask_urbanc::BitVector, col::ColumnData,
-                      coszen::Vector{Float64}, ind::Int,
-                      albsn_roof::Matrix{Float64},
-                      albsn_improad::Matrix{Float64},
-                      albsn_perroad::Matrix{Float64},
-                      h2osno_total::Vector{Float64})
+                      coszen::Vector{<:Real}, ind::Int,
+                      albsn_roof::Matrix{<:Real},
+                      albsn_improad::Matrix{<:Real},
+                      albsn_perroad::Matrix{<:Real},
+                      h2osno_total::Vector{<:Real})
 
     for c in eachindex(mask_urbanc)
         mask_urbanc[c] || continue
@@ -97,17 +97,18 @@ budget in atmospheric models. Boundary-Layer Meteorology 94:357-397.
 Ported from `incident_direct` in `UrbanAlbedoMod.F90`.
 """
 function incident_direct!(mask_urbanl::BitVector,
-                           canyon_hwr::Vector{Float64},
-                           coszen::Vector{Float64},
-                           zen::Vector{Float64},
-                           sdir::Matrix{Float64},
-                           sdir_road::Matrix{Float64},
-                           sdir_sunwall::Matrix{Float64},
-                           sdir_shadewall::Matrix{Float64})
+                           canyon_hwr::Vector{<:Real},
+                           coszen::Vector{<:Real},
+                           zen::Vector{<:Real},
+                           sdir::Matrix{<:Real},
+                           sdir_road::Matrix{<:Real},
+                           sdir_sunwall::Matrix{<:Real},
+                           sdir_shadewall::Matrix{<:Real})
 
     nl = length(mask_urbanl)
-    theta0 = zeros(nl)
-    tanzen = zeros(nl)
+    FT = eltype(coszen)
+    theta0 = zeros(FT, nl)
+    tanzen = zeros(FT, nl)
 
     for l in eachindex(mask_urbanl)
         mask_urbanl[l] || continue
@@ -163,11 +164,11 @@ Conservation check: Total incoming diffuse (sdif) =
 Ported from `incident_diffuse` in `UrbanAlbedoMod.F90`.
 """
 function incident_diffuse!(mask_urbanl::BitVector,
-                            canyon_hwr::Vector{Float64},
-                            sdif::Matrix{Float64},
-                            sdif_road::Matrix{Float64},
-                            sdif_sunwall::Matrix{Float64},
-                            sdif_shadewall::Matrix{Float64},
+                            canyon_hwr::Vector{<:Real},
+                            sdif::Matrix{<:Real},
+                            sdif_road::Matrix{<:Real},
+                            sdif_sunwall::Matrix{<:Real},
+                            sdif_shadewall::Matrix{<:Real},
                             urbanparams::UrbanParamsData)
 
     vf_sr = urbanparams.vf_sr
@@ -214,35 +215,35 @@ for multiple reflection.
 Ported from `net_solar` in `UrbanAlbedoMod.F90`.
 """
 function net_solar!(mask_urbanl::BitVector,
-                    coszen::Vector{Float64},
-                    canyon_hwr::Vector{Float64},
-                    wtroad_perv::Vector{Float64},
-                    sdir::Matrix{Float64},
-                    sdif::Matrix{Float64},
-                    alb_improad_dir::Matrix{Float64},
-                    alb_perroad_dir::Matrix{Float64},
-                    alb_wall_dir::Matrix{Float64},
-                    alb_roof_dir::Matrix{Float64},
-                    alb_improad_dif::Matrix{Float64},
-                    alb_perroad_dif::Matrix{Float64},
-                    alb_wall_dif::Matrix{Float64},
-                    alb_roof_dif::Matrix{Float64},
-                    sdir_road::Matrix{Float64},
-                    sdir_sunwall::Matrix{Float64},
-                    sdir_shadewall::Matrix{Float64},
-                    sdif_road::Matrix{Float64},
-                    sdif_sunwall::Matrix{Float64},
-                    sdif_shadewall::Matrix{Float64},
-                    sref_improad_dir::Matrix{Float64},
-                    sref_perroad_dir::Matrix{Float64},
-                    sref_sunwall_dir::Matrix{Float64},
-                    sref_shadewall_dir::Matrix{Float64},
-                    sref_roof_dir::Matrix{Float64},
-                    sref_improad_dif::Matrix{Float64},
-                    sref_perroad_dif::Matrix{Float64},
-                    sref_sunwall_dif::Matrix{Float64},
-                    sref_shadewall_dif::Matrix{Float64},
-                    sref_roof_dif::Matrix{Float64},
+                    coszen::Vector{<:Real},
+                    canyon_hwr::Vector{<:Real},
+                    wtroad_perv::Vector{<:Real},
+                    sdir::Matrix{<:Real},
+                    sdif::Matrix{<:Real},
+                    alb_improad_dir::Matrix{<:Real},
+                    alb_perroad_dir::Matrix{<:Real},
+                    alb_wall_dir::Matrix{<:Real},
+                    alb_roof_dir::Matrix{<:Real},
+                    alb_improad_dif::Matrix{<:Real},
+                    alb_perroad_dif::Matrix{<:Real},
+                    alb_wall_dif::Matrix{<:Real},
+                    alb_roof_dif::Matrix{<:Real},
+                    sdir_road::Matrix{<:Real},
+                    sdir_sunwall::Matrix{<:Real},
+                    sdir_shadewall::Matrix{<:Real},
+                    sdif_road::Matrix{<:Real},
+                    sdif_sunwall::Matrix{<:Real},
+                    sdif_shadewall::Matrix{<:Real},
+                    sref_improad_dir::Matrix{<:Real},
+                    sref_perroad_dir::Matrix{<:Real},
+                    sref_sunwall_dir::Matrix{<:Real},
+                    sref_shadewall_dir::Matrix{<:Real},
+                    sref_roof_dir::Matrix{<:Real},
+                    sref_improad_dif::Matrix{<:Real},
+                    sref_perroad_dif::Matrix{<:Real},
+                    sref_sunwall_dif::Matrix{<:Real},
+                    sref_shadewall_dif::Matrix{<:Real},
+                    sref_roof_dif::Matrix{<:Real},
                     urbanparams::UrbanParamsData,
                     solarabs::SolarAbsorbedData)
 
@@ -267,38 +268,39 @@ function net_solar!(mask_urbanl::BitVector,
     n = 50              # number of iterations for multiple reflection
     errcrit = 0.00001   # error criteria for convergence
 
+    FT = eltype(coszen)
     # Per-landunit working arrays
-    wtroad_imperv = zeros(nl)
+    wtroad_imperv = zeros(FT, nl)
 
-    improad_a_dir = zeros(nl);  improad_r_dir = zeros(nl)
-    improad_r_sky_dir = zeros(nl); improad_r_sunwall_dir = zeros(nl); improad_r_shadewall_dir = zeros(nl)
-    improad_a_dif = zeros(nl);  improad_r_dif = zeros(nl)
-    improad_r_sky_dif = zeros(nl); improad_r_sunwall_dif = zeros(nl); improad_r_shadewall_dif = zeros(nl)
+    improad_a_dir = zeros(FT, nl);  improad_r_dir = zeros(FT, nl)
+    improad_r_sky_dir = zeros(FT, nl); improad_r_sunwall_dir = zeros(FT, nl); improad_r_shadewall_dir = zeros(FT, nl)
+    improad_a_dif = zeros(FT, nl);  improad_r_dif = zeros(FT, nl)
+    improad_r_sky_dif = zeros(FT, nl); improad_r_sunwall_dif = zeros(FT, nl); improad_r_shadewall_dif = zeros(FT, nl)
 
-    perroad_a_dir = zeros(nl);  perroad_r_dir = zeros(nl)
-    perroad_r_sky_dir = zeros(nl); perroad_r_sunwall_dir = zeros(nl); perroad_r_shadewall_dir = zeros(nl)
-    perroad_a_dif = zeros(nl);  perroad_r_dif = zeros(nl)
-    perroad_r_sky_dif = zeros(nl); perroad_r_sunwall_dif = zeros(nl); perroad_r_shadewall_dif = zeros(nl)
+    perroad_a_dir = zeros(FT, nl);  perroad_r_dir = zeros(FT, nl)
+    perroad_r_sky_dir = zeros(FT, nl); perroad_r_sunwall_dir = zeros(FT, nl); perroad_r_shadewall_dir = zeros(FT, nl)
+    perroad_a_dif = zeros(FT, nl);  perroad_r_dif = zeros(FT, nl)
+    perroad_r_sky_dif = zeros(FT, nl); perroad_r_sunwall_dif = zeros(FT, nl); perroad_r_shadewall_dif = zeros(FT, nl)
 
-    road_a_dir = zeros(nl); road_r_dir = zeros(nl)
-    road_r_sky_dir = zeros(nl); road_r_sunwall_dir = zeros(nl); road_r_shadewall_dir = zeros(nl)
-    road_a_dif = zeros(nl); road_r_dif = zeros(nl)
-    road_r_sky_dif = zeros(nl); road_r_sunwall_dif = zeros(nl); road_r_shadewall_dif = zeros(nl)
+    road_a_dir = zeros(FT, nl); road_r_dir = zeros(FT, nl)
+    road_r_sky_dir = zeros(FT, nl); road_r_sunwall_dir = zeros(FT, nl); road_r_shadewall_dir = zeros(FT, nl)
+    road_a_dif = zeros(FT, nl); road_r_dif = zeros(FT, nl)
+    road_r_sky_dif = zeros(FT, nl); road_r_sunwall_dif = zeros(FT, nl); road_r_shadewall_dif = zeros(FT, nl)
 
-    sunwall_a_dir = zeros(nl); sunwall_r_dir = zeros(nl)
-    sunwall_r_sky_dir = zeros(nl); sunwall_r_road_dir = zeros(nl); sunwall_r_shadewall_dir = zeros(nl)
-    sunwall_a_dif = zeros(nl); sunwall_r_dif = zeros(nl)
-    sunwall_r_sky_dif = zeros(nl); sunwall_r_road_dif = zeros(nl); sunwall_r_shadewall_dif = zeros(nl)
+    sunwall_a_dir = zeros(FT, nl); sunwall_r_dir = zeros(FT, nl)
+    sunwall_r_sky_dir = zeros(FT, nl); sunwall_r_road_dir = zeros(FT, nl); sunwall_r_shadewall_dir = zeros(FT, nl)
+    sunwall_a_dif = zeros(FT, nl); sunwall_r_dif = zeros(FT, nl)
+    sunwall_r_sky_dif = zeros(FT, nl); sunwall_r_road_dif = zeros(FT, nl); sunwall_r_shadewall_dif = zeros(FT, nl)
 
-    shadewall_a_dir = zeros(nl); shadewall_r_dir = zeros(nl)
-    shadewall_r_sky_dir = zeros(nl); shadewall_r_road_dir = zeros(nl); shadewall_r_sunwall_dir = zeros(nl)
-    shadewall_a_dif = zeros(nl); shadewall_r_dif = zeros(nl)
-    shadewall_r_sky_dif = zeros(nl); shadewall_r_road_dif = zeros(nl); shadewall_r_sunwall_dif = zeros(nl)
+    shadewall_a_dir = zeros(FT, nl); shadewall_r_dir = zeros(FT, nl)
+    shadewall_r_sky_dir = zeros(FT, nl); shadewall_r_road_dir = zeros(FT, nl); shadewall_r_sunwall_dir = zeros(FT, nl)
+    shadewall_a_dif = zeros(FT, nl); shadewall_r_dif = zeros(FT, nl)
+    shadewall_r_sky_dif = zeros(FT, nl); shadewall_r_road_dif = zeros(FT, nl); shadewall_r_sunwall_dif = zeros(FT, nl)
 
-    stot = zeros(nl)
-    sref_canyon_dir = zeros(nl); sref_canyon_dif = zeros(nl)
-    sabs_canyon_dir = zeros(nl); sabs_canyon_dif = zeros(nl)
-    stot_dir = zeros(nl); stot_dif = zeros(nl)
+    stot = zeros(FT, nl)
+    sref_canyon_dir = zeros(FT, nl); sref_canyon_dif = zeros(FT, nl)
+    sabs_canyon_dir = zeros(FT, nl); sabs_canyon_dif = zeros(FT, nl)
+    stot_dir = zeros(FT, nl); stot_dif = zeros(FT, nl)
 
     # Calculate impervious road weight
     for l in eachindex(mask_urbanl)
@@ -652,8 +654,9 @@ function urban_albedo!(mask_urbanl::BitVector,
     vf_sw      = urbanparams.vf_sw
 
     # ---- Cosine solar zenith angle ----
-    coszen = zeros(nl)
-    zen    = zeros(nl)
+    FT = eltype(surfalb.coszen_col)
+    coszen = zeros(FT, nl)
+    zen    = zeros(FT, nl)
     for l in eachindex(mask_urbanl)
         mask_urbanl[l] || continue
         coszen[l] = surfalb.coszen_col[lun.coli[l]]
@@ -718,16 +721,16 @@ function urban_albedo!(mask_urbanl::BitVector,
     sabs_perroad_dif   = solarabs.sabs_perroad_dif_lun
 
     # Local arrays for sref (landunit × numrad)
-    sref_roof_dir      = ones(nl, numrad)
-    sref_roof_dif      = ones(nl, numrad)
-    sref_sunwall_dir   = zeros(nl, numrad)
-    sref_sunwall_dif   = zeros(nl, numrad)
-    sref_shadewall_dir = zeros(nl, numrad)
-    sref_shadewall_dif = zeros(nl, numrad)
-    sref_improad_dir   = zeros(nl, numrad)
-    sref_improad_dif   = zeros(nl, numrad)
-    sref_perroad_dir   = zeros(nl, numrad)
-    sref_perroad_dif   = zeros(nl, numrad)
+    sref_roof_dir      = ones(FT, nl, numrad)
+    sref_roof_dif      = ones(FT, nl, numrad)
+    sref_sunwall_dir   = zeros(FT, nl, numrad)
+    sref_sunwall_dif   = zeros(FT, nl, numrad)
+    sref_shadewall_dir = zeros(FT, nl, numrad)
+    sref_shadewall_dif = zeros(FT, nl, numrad)
+    sref_improad_dir   = zeros(FT, nl, numrad)
+    sref_improad_dif   = zeros(FT, nl, numrad)
+    sref_perroad_dir   = zeros(FT, nl, numrad)
+    sref_perroad_dif   = zeros(FT, nl, numrad)
 
     for ib in 1:numrad
         for l in eachindex(mask_urbanl)
@@ -766,38 +769,38 @@ function urban_albedo!(mask_urbanl::BitVector,
 
     if num_solar > 0
         # Set constants - solar fluxes are per unit incoming flux
-        sdir = ones(nl, numrad)
-        sdif = ones(nl, numrad)
+        sdir = ones(FT, nl, numrad)
+        sdif = ones(FT, nl, numrad)
 
         # Local arrays for incident radiation
-        sdir_road      = zeros(nl, numrad)
-        sdif_road      = zeros(nl, numrad)
-        sdir_sunwall   = zeros(nl, numrad)
-        sdif_sunwall   = zeros(nl, numrad)
-        sdir_shadewall = zeros(nl, numrad)
-        sdif_shadewall = zeros(nl, numrad)
+        sdir_road      = zeros(FT, nl, numrad)
+        sdif_road      = zeros(FT, nl, numrad)
+        sdir_sunwall   = zeros(FT, nl, numrad)
+        sdif_sunwall   = zeros(FT, nl, numrad)
+        sdir_shadewall = zeros(FT, nl, numrad)
+        sdif_shadewall = zeros(FT, nl, numrad)
 
         # Snow albedos
-        albsnd_roof    = zeros(nl, numrad)
-        albsni_roof    = zeros(nl, numrad)
-        albsnd_improad = zeros(nl, numrad)
-        albsni_improad = zeros(nl, numrad)
-        albsnd_perroad = zeros(nl, numrad)
-        albsni_perroad = zeros(nl, numrad)
+        albsnd_roof    = zeros(FT, nl, numrad)
+        albsni_roof    = zeros(FT, nl, numrad)
+        albsnd_improad = zeros(FT, nl, numrad)
+        albsni_improad = zeros(FT, nl, numrad)
+        albsnd_perroad = zeros(FT, nl, numrad)
+        albsni_perroad = zeros(FT, nl, numrad)
 
         # Combined albedos with snow
-        alb_roof_dir_s    = zeros(nl, numrad)
-        alb_roof_dif_s    = zeros(nl, numrad)
-        alb_improad_dir_s = zeros(nl, numrad)
-        alb_perroad_dir_s = zeros(nl, numrad)
-        alb_improad_dif_s = zeros(nl, numrad)
-        alb_perroad_dif_s = zeros(nl, numrad)
+        alb_roof_dir_s    = zeros(FT, nl, numrad)
+        alb_roof_dif_s    = zeros(FT, nl, numrad)
+        alb_improad_dir_s = zeros(FT, nl, numrad)
+        alb_perroad_dir_s = zeros(FT, nl, numrad)
+        alb_improad_dif_s = zeros(FT, nl, numrad)
+        alb_perroad_dif_s = zeros(FT, nl, numrad)
 
         # Compute total h2osno for urban columns
         # (inline version of CalculateTotalH2osno)
         nlevsno = varpar.nlevsno
         nc = length(mask_urbanc)
-        h2osno_total = zeros(nc)
+        h2osno_total = zeros(FT, nc)
         for c in eachindex(mask_urbanc)
             mask_urbanc[c] || continue
             h2osno_total[c] = waterstatebulk.ws.h2osno_no_layers_col[c]

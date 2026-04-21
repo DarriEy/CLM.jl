@@ -12,7 +12,7 @@ radiation, wind stress, transpiration, conductances, and balance checks.
 
 Ported from `energyflux_type` in `EnergyFluxType.F90`.
 """
-Base.@kwdef mutable struct EnergyFluxData{FT<:AbstractFloat}
+Base.@kwdef mutable struct EnergyFluxData{FT<:Real}
     # --- Sensible heat fluxes (patch-level) ---
     eflx_sh_stem_patch           ::Vector{FT} = Float64[]   # patch sensible heat flux from stem (W/m**2) [+ to atm]
     eflx_sh_grnd_patch           ::Vector{FT} = Float64[]   # patch sensible heat flux from ground (W/m**2) [+ to atm]
@@ -395,7 +395,7 @@ function energyflux_init_cold!(ef::EnergyFluxData,
                                 col::ColumnData,
                                 lun::LandunitData,
                                 patch_data::PatchData,
-                                t_grnd_col::Vector{Float64},
+                                t_grnd_col::Vector{<:Real},
                                 bounds_col::UnitRange{Int},
                                 bounds_patch::UnitRange{Int},
                                 bounds_lun::UnitRange{Int};

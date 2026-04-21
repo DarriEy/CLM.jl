@@ -82,7 +82,7 @@ end
 
 Set the ratio metadata on a water info instance.
 """
-function set_metadata!(info::WaterInfoBaseType, ratio::Float64)
+function set_metadata!(info::WaterInfoBaseType, ratio::Real)
     info.ratio = ratio
     return nothing
 end

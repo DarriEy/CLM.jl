@@ -14,7 +14,7 @@ topography, and layer classification.
 function initVertical!(bounds::BoundsType, grc::GridcellData,
                         lun::LandunitData, col::ColumnData,
                         surf::SurfaceInputData;
-                        thick_wall::Float64=0.5, thick_roof::Float64=0.5)
+                        thick_wall::Real=0.5, thick_roof::Real=0.5)
     begc, endc = bounds.begc, bounds.endc
     begl, endl = bounds.begl, bounds.endl
     begg, endg = bounds.begg, bounds.endg
@@ -148,8 +148,8 @@ Copy global soil coordinates into column c.
 """
 function _set_standard_soil!(col::ColumnData, c::Int, joff::Int,
                               nlevgrnd::Int, nlevmaxurbgrnd::Int,
-                              zsoi_g::Vector{Float64}, dzsoi_g::Vector{Float64},
-                              zisoi_g::Vector{Float64})
+                              zsoi_g::Vector{<:Real}, dzsoi_g::Vector{<:Real},
+                              zisoi_g::Vector{<:Real})
     for j in 1:nlevgrnd
         col.z[c, j + joff]  = zsoi_g[j]
         col.dz[c, j + joff] = dzsoi_g[j]
@@ -228,9 +228,9 @@ Set lake depth, z_lake, dz_lake for lake columns. Also set soil layers below lak
 """
 function init_lake_layers!(bounds::BoundsType, col::ColumnData,
                             lun::LandunitData, surf::SurfaceInputData,
-                            zlak_g::Vector{Float64}, dzlak_g::Vector{Float64},
-                            zsoi_g::Vector{Float64}, dzsoi_g::Vector{Float64},
-                            zisoi_g::Vector{Float64},
+                            zlak_g::Vector{<:Real}, dzlak_g::Vector{<:Real},
+                            zsoi_g::Vector{<:Real}, dzsoi_g::Vector{<:Real},
+                            zisoi_g::Vector{<:Real},
                             joff::Int, nlevgrnd::Int, nlevlak::Int,
                             nlevmaxurbgrnd::Int)
     # Copy lakedepth from surface data
@@ -387,7 +387,7 @@ end
 
 Find the soil layer that contains the given depth (m).
 """
-function find_soil_layer_containing_depth(depth::Float64)
+function find_soil_layer_containing_depth(depth::Real)
     zisoi_g = zisoi[]
     nlevgrnd = varpar.nlevgrnd
 

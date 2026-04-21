@@ -55,7 +55,8 @@ function compute_effec_rootfrac_and_vert_tran_sink_default!(
     rootr_col            = soilstate_inst.rootr_col
 
     # Accumulator for transpiration-weighted denominator
-    temp = zeros(Float64, length(bounds_col))
+    FT = eltype(rootr_patch)
+    temp = zeros(FT, length(bounds_col))
     # Map column index to temp array index
     c_offset = first(bounds_col) - 1
 
@@ -133,7 +134,8 @@ function compute_effec_rootfrac_and_vert_tran_sink_hydstress_roads!(
     rootr_col            = soilstate_inst.rootr_col
 
     # Accumulator for transpiration-weighted denominator
-    temp = zeros(Float64, length(bounds_col))
+    FT = eltype(rootr_patch)
+    temp = zeros(FT, length(bounds_col))
     c_offset = first(bounds_col) - 1
 
     # Zero out rootr_col for filter columns

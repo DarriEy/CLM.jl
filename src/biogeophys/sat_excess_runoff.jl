@@ -47,9 +47,9 @@ level, plus the fsat_method flag.
 
 Ported from `saturated_excess_runoff_type` in `SaturatedExcessRunoffMod.F90`.
 """
-Base.@kwdef mutable struct SaturatedExcessRunoffData
-    fsat_col::Vector{Float64} = Float64[]    # col fractional area with water table at surface
-    fcov_col::Vector{Float64} = Float64[]    # col fractional impermeable area
+Base.@kwdef mutable struct SaturatedExcessRunoffData{FT<:Real}
+    fsat_col::Vector{FT} = Float64[]    # col fractional area with water table at surface
+    fcov_col::Vector{FT} = Float64[]    # col fractional impermeable area
     fsat_method::Int = FSAT_METHOD_TOPMODEL  # method selector
 end
 
@@ -100,12 +100,12 @@ end
 
 """
     compute_fsat_topmodel!(mask_hydrology::BitVector, bounds_col::UnitRange{Int},
-                           frost_table::Vector{Float64},
-                           zwt::Vector{Float64},
-                           zwt_perched::Vector{Float64},
-                           wtfact::Vector{Float64},
+                           frost_table::Vector{<:Real},
+                           zwt::Vector{<:Real},
+                           zwt_perched::Vector{<:Real},
+                           wtfact::Vector{<:Real},
                            fff::Float64,
-                           fsat::Vector{Float64})
+                           fsat::Vector{<:Real})
 
 Compute fsat using the TOPModel-based parameterization (CLM default).
 
@@ -117,12 +117,12 @@ Ported from `ComputeFsatTopmodel` in `SaturatedExcessRunoffMod.F90`.
 """
 function compute_fsat_topmodel!(mask_hydrology::BitVector,
                                  bounds_col::UnitRange{Int},
-                                 frost_table::Vector{Float64},
-                                 zwt::Vector{Float64},
-                                 zwt_perched::Vector{Float64},
-                                 wtfact::Vector{Float64},
-                                 fff::Float64,
-                                 fsat::Vector{Float64})
+                                 frost_table::Vector{<:Real},
+                                 zwt::Vector{<:Real},
+                                 zwt_perched::Vector{<:Real},
+                                 wtfact::Vector{<:Real},
+                                 fff::Real,
+                                 fsat::Vector{<:Real})
     for c in bounds_col
         mask_hydrology[c] || continue
 
@@ -139,10 +139,10 @@ end
 
 """
     compute_fsat_vic!(mask_hydrology::BitVector, bounds_col::UnitRange{Int},
-                      b_infil::Vector{Float64},
-                      top_max_moist::Vector{Float64},
-                      top_moist_limited::Vector{Float64},
-                      fsat::Vector{Float64})
+                      b_infil::Vector{<:Real},
+                      top_max_moist::Vector{<:Real},
+                      top_moist_limited::Vector{<:Real},
+                      fsat::Vector{<:Real})
 
 Compute fsat using the VIC-based parameterization.
 
@@ -155,10 +155,10 @@ Ported from `ComputeFsatVic` in `SaturatedExcessRunoffMod.F90`.
 """
 function compute_fsat_vic!(mask_hydrology::BitVector,
                             bounds_col::UnitRange{Int},
-                            b_infil::Vector{Float64},
-                            top_max_moist::Vector{Float64},
-                            top_moist_limited::Vector{Float64},
-                            fsat::Vector{Float64})
+                            b_infil::Vector{<:Real},
+                            top_max_moist::Vector{<:Real},
+                            top_moist_limited::Vector{<:Real},
+                            fsat::Vector{<:Real})
     for c in bounds_col
         mask_hydrology[c] || continue
 

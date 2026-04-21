@@ -35,7 +35,7 @@ conversion.
 
 Ported from `lnd2atm_type` in `lnd2atmType.F90`.
 """
-Base.@kwdef mutable struct Lnd2AtmData{FT<:AbstractFloat}
+Base.@kwdef mutable struct Lnd2AtmData{FT<:Real}
     params::Lnd2AtmParamsData = Lnd2AtmParamsData()
 
     # lnd->atm (gridcell-level)

@@ -15,7 +15,7 @@ rain/snow repartitioning, longwave downscaling, and lapse rates.
 
 Ported from `atm2lnd_params_type` in `atm2lndType.F90`.
 """
-Base.@kwdef mutable struct Atm2LndParamsData{FT<:AbstractFloat}
+Base.@kwdef mutable struct Atm2LndParamsData{FT<:Real}
     # true => repartition rain/snow from atm based on temperature
     repartition_rain_snow::Bool = false
 
@@ -54,7 +54,7 @@ time-averaged quantities.
 
 Ported from `atm2lnd_type` in `atm2lndType.F90`.
 """
-Base.@kwdef mutable struct Atm2LndData{FT<:AbstractFloat}
+Base.@kwdef mutable struct Atm2LndData{FT<:Real}
     params::Atm2LndParamsData = Atm2LndParamsData()
 
     # --- atm->lnd not downscaled (gridcell-level) ---
@@ -126,7 +126,7 @@ end
 Convert rain/snow ramp temperature endpoints (in Celsius) into the all-snow
 temperature in Kelvin and the fractional rain slope.
 """
-function compute_ramp_params(all_snow_t_c::Float64, all_rain_t_c::Float64)
+function compute_ramp_params(all_snow_t_c::Real, all_rain_t_c::Real)
     frac_rain_slope = 1.0 / (all_rain_t_c - all_snow_t_c)
     all_snow_t_k = all_snow_t_c + TFRZ
     return (all_snow_t_k, frac_rain_slope)
@@ -150,13 +150,13 @@ Ported from `atm2lnd_params_constructor` in `atm2lndType.F90`.
 function atm2lnd_params_init!(params::Atm2LndParamsData;
         repartition_rain_snow::Bool,
         glcmec_downscale_longwave::Bool,
-        lapse_rate::Float64,
-        lapse_rate_longwave::Float64 = NaN,
-        longwave_downscaling_limit::Float64 = NaN,
-        precip_repartition_glc_all_snow_t::Float64 = NaN,
-        precip_repartition_glc_all_rain_t::Float64 = NaN,
-        precip_repartition_nonglc_all_snow_t::Float64 = NaN,
-        precip_repartition_nonglc_all_rain_t::Float64 = NaN)
+        lapse_rate::Real,
+        lapse_rate_longwave::Real = NaN,
+        longwave_downscaling_limit::Real = NaN,
+        precip_repartition_glc_all_snow_t::Real = NaN,
+        precip_repartition_glc_all_rain_t::Real = NaN,
+        precip_repartition_nonglc_all_snow_t::Real = NaN,
+        precip_repartition_nonglc_all_rain_t::Real = NaN)
 
     params.repartition_rain_snow = repartition_rain_snow
     params.glcmec_downscale_longwave = glcmec_downscale_longwave
@@ -339,13 +339,13 @@ Set parameters from keyword arguments (replaces Fortran namelist read).
 function atm2lnd_read_namelist!(a2l::Atm2LndData;
         repartition_rain_snow::Bool = false,
         glcmec_downscale_longwave::Bool = false,
-        lapse_rate::Float64 = NaN,
-        lapse_rate_longwave::Float64 = NaN,
-        longwave_downscaling_limit::Float64 = NaN,
-        precip_repartition_glc_all_snow_t::Float64 = NaN,
-        precip_repartition_glc_all_rain_t::Float64 = NaN,
-        precip_repartition_nonglc_all_snow_t::Float64 = NaN,
-        precip_repartition_nonglc_all_rain_t::Float64 = NaN)
+        lapse_rate::Real = NaN,
+        lapse_rate_longwave::Real = NaN,
+        longwave_downscaling_limit::Real = NaN,
+        precip_repartition_glc_all_snow_t::Real = NaN,
+        precip_repartition_glc_all_rain_t::Real = NaN,
+        precip_repartition_nonglc_all_snow_t::Real = NaN,
+        precip_repartition_nonglc_all_rain_t::Real = NaN)
 
     atm2lnd_params_init!(a2l.params;
         repartition_rain_snow = repartition_rain_snow,

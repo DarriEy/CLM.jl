@@ -19,7 +19,7 @@ violated (|lat| ≥ pole + ε, or |decl| ≥ pole).
 
 Ported from elemental function `daylength` in `DaylengthMod.F90`.
 """
-function daylength(lat::Float64, decl::Float64)::Float64
+function daylength(lat::Real, decl::Real)::Real
     # lat must be less than π/2 within a small tolerance
     if abs(lat) >= (POLE + LAT_EPSILON)
         return NaN
@@ -45,9 +45,9 @@ Compute maximum daylength for each grid cell.
 
 Ported from subroutine `ComputeMaxDaylength` in `DaylengthMod.F90`.
 """
-function compute_max_daylength!(lat::Vector{Float64},
-                                obliquity::Float64,
-                                max_daylength::Vector{Float64},
+function compute_max_daylength!(lat::Vector{<:Real},
+                                obliquity::Real,
+                                max_daylength::Vector{<:Real},
                                 bounds::UnitRange{Int})
     for g in bounds
         max_decl = obliquity
@@ -70,9 +70,9 @@ and `declinm1` to the value for the previous time step.
 Ported from subroutine `InitDaylength` in `DaylengthMod.F90`.
 """
 function init_daylength!(grc::GridcellData,
-                         declin::Float64,
-                         declinm1::Float64,
-                         obliquity::Float64,
+                         declin::Real,
+                         declinm1::Real,
+                         obliquity::Real,
                          bounds::UnitRange{Int})
     for g in bounds
         grc.prev_dayl[g] = daylength(grc.lat[g], declinm1)
@@ -96,8 +96,8 @@ were set during initialization).
 Ported from subroutine `UpdateDaylength` in `DaylengthMod.F90`.
 """
 function update_daylength!(grc::GridcellData,
-                           declin::Float64,
-                           obliquity::Float64,
+                           declin::Real,
+                           obliquity::Real,
                            is_first_step::Bool,
                            bounds::UnitRange{Int})
     if !is_first_step

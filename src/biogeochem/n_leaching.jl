@@ -37,8 +37,8 @@ Set N-leaching parameters from keyword arguments.
 Corresponds to `readParams` in the Fortran source (reads from params file).
 """
 function n_leaching_read_params!(params::NLeachingParams;
-                                  sf::Float64,
-                                  sf_no3::Float64)
+                                  sf::Real,
+                                  sf_no3::Real)
     params.sf     = sf
     params.sf_no3 = sf_no3
     return nothing
@@ -67,16 +67,16 @@ function n_leaching!(
     bounds::UnitRange{Int},
     nlevdecomp::Int,
     nlevsoi::Int,
-    dt::Float64,
+    dt::Real,
     # Water state arrays
-    h2osoi_liq::Matrix{Float64},
+    h2osoi_liq::Matrix{<:Real},
     # Water flux arrays
-    qflx_drain::Vector{Float64},
-    qflx_surf::Vector{Float64},
+    qflx_drain::Vector{<:Real},
+    qflx_surf::Vector{<:Real},
     # Column geometry
-    col_dz::Matrix{Float64},
+    col_dz::Matrix{<:Real},
     # Vertical coordinate
-    zisoi::Vector{Float64},
+    zisoi::Vector{<:Real},
     # Control flag
     use_nitrif_denitrif::Bool)
 
@@ -86,9 +86,10 @@ function n_leaching!(
     nc = length(bounds)
 
     # --- Allocate local work arrays ---
-    tot_water     = zeros(Float64, last(bounds))
-    surface_water = zeros(Float64, last(bounds))
-    drain_tot     = zeros(Float64, last(bounds))
+    FT = eltype(h2osoi_liq)
+    tot_water     = zeros(FT, last(bounds))
+    surface_water = zeros(FT, last(bounds))
+    drain_tot     = zeros(FT, last(bounds))
 
     # --- Select soluble fraction based on mode ---
     if !use_nitrif_denitrif

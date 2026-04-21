@@ -31,7 +31,7 @@ Module-level data that is initialized once and remains constant during
 the simulation. Corresponds to Fortran module variables `albsat`, `albdry`,
 `isoicol`, `alblakwi`, and `snowveg_affects_radiation`.
 """
-Base.@kwdef mutable struct SurfaceAlbedoConstants{FT<:AbstractFloat}
+Base.@kwdef mutable struct SurfaceAlbedoConstants{FT<:Real}
     albsat::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # wet soil albedo by color class and waveband
     albdry::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dry soil albedo by color class and waveband
     isoicol::Vector{Int} = Int[]                              # column soil color class
@@ -122,7 +122,7 @@ function soil_albedo!(surfalb::SurfaceAlbedoData,
                       con::SurfaceAlbedoConstants,
                       col::ColumnData,
                       lun::LandunitData,
-                      coszen_col::Vector{Float64},
+                      coszen_col::Vector{<:Real},
                       temperature::TemperatureData,
                       waterstatebulk::WaterStateBulkData,
                       lakestate::LakeStateData,
@@ -140,7 +140,7 @@ function soil_albedo!(surfalb::SurfaceAlbedoData,
 
                 if lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP
                     # Soil
-                    inc = max(0.11 - 0.40 * waterstatebulk.ws.h2osoi_vol_col[c, 1], 0.0)
+                    inc = smooth_max(0.11 - 0.40 * waterstatebulk.ws.h2osoi_vol_col[c, 1], 0.0)
                     soilcol = con.isoicol[c]
                     surfalb.albsod_col[c, ib] = min(con.albsat[soilcol, ib] + inc,
                                                     con.albdry[soilcol, ib])
@@ -157,22 +157,39 @@ function soil_albedo!(surfalb::SurfaceAlbedoData,
                         lakestate.lake_icefrac_col[c, 1] < 1.0 &&
                         lakestate.lake_icefrac_col[c, 2] > 0.0)
                     # Unfrozen lake/wetland
-                    surfalb.albsod_col[c, ib] = 0.05 / (max(0.001, coszen_col[c]) + 0.15)
+                    albsod_unfrozen = 0.05 / (smooth_max(0.001, coszen_col[c]) + 0.15)
                     if lun.itype[l] == ISTDLAK
-                        surfalb.albsoi_col[c, ib] = 0.10
+                        albsoi_unfrozen = 0.10
                     else
-                        surfalb.albsoi_col[c, ib] = surfalb.albsod_col[c, ib]
+                        albsoi_unfrozen = albsod_unfrozen
                     end
+
+                    # Blend with frozen albedo via smooth_heaviside for AD
+                    if lun.itype[l] == ISTDLAK && !lakepuddling && col.snl[c] == 0
+                        sicefr = 1.0 - exp(-CALB * (TFRZ - temperature.t_grnd_col[c]) / TFRZ)
+                        albsod_frozen = sicefr * ALBLAK[ib] +
+                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib],
+                                                  0.05 / (smooth_max(0.001, coszen_col[c]) + 0.15))
+                        albsoi_frozen = sicefr * ALBLAK[ib] +
+                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib], 0.10)
+                    else
+                        albsod_frozen = convert(eltype(temperature.t_grnd_col), ALBLAK[ib])
+                        albsoi_frozen = albsod_frozen
+                    end
+
+                    w_unfrozen = smooth_heaviside(temperature.t_grnd_col[c] - TFRZ)
+                    surfalb.albsod_col[c, ib] = w_unfrozen * albsod_unfrozen + (1.0 - w_unfrozen) * albsod_frozen
+                    surfalb.albsoi_col[c, ib] = w_unfrozen * albsoi_unfrozen + (1.0 - w_unfrozen) * albsoi_frozen
 
                 else
                     # Frozen lake/wetland
                     if lun.itype[l] == ISTDLAK && !lakepuddling && col.snl[c] == 0
                         sicefr = 1.0 - exp(-CALB * (TFRZ - temperature.t_grnd_col[c]) / TFRZ)
                         surfalb.albsod_col[c, ib] = sicefr * ALBLAK[ib] +
-                            (1.0 - sicefr) * max(con.alblakwi[ib],
-                                                  0.05 / (max(0.001, coszen_col[c]) + 0.15))
+                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib],
+                                                  0.05 / (smooth_max(0.001, coszen_col[c]) + 0.15))
                         surfalb.albsoi_col[c, ib] = sicefr * ALBLAK[ib] +
-                            (1.0 - sicefr) * max(con.alblakwi[ib], 0.10)
+                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib], 0.10)
                     else
                         surfalb.albsod_col[c, ib] = ALBLAK[ib]
                         surfalb.albsoi_col[c, ib] = surfalb.albsod_col[c, ib]
@@ -213,10 +230,10 @@ function two_stream!(surfalb::SurfaceAlbedoData,
                      canopystate::CanopyStateData,
                      temperature::TemperatureData,
                      waterdiagbulk::WaterDiagnosticBulkData,
-                     coszen_patch::Vector{Float64},
-                     rho_in::Matrix{Float64},
-                     tau_in::Matrix{Float64},
-                     pftcon_xl::Vector{Float64},
+                     coszen_patch::Vector{<:Real},
+                     rho_in::Matrix{<:Real},
+                     tau_in::Matrix{<:Real},
+                     pftcon_xl::Vector{<:Real},
                      mask_vegsol::BitVector,
                      bounds_patch::UnitRange{Int};
                      SFonly::Bool = false)
@@ -241,21 +258,22 @@ function two_stream!(surfalb::SurfaceAlbedoData,
 
     # Pre-allocate per-patch arrays
     np = length(bounds_patch)
-    chil = zeros(np)
-    gdir_arr = zeros(np)
-    twostext = zeros(np)
-    avmu = zeros(np)
-    temp0_arr = zeros(np)
-    temp2_arr = zeros(np)
-    omega = zeros(np, numrad)
+    FT = eltype(coszen_patch)
+    chil = zeros(FT, np)
+    gdir_arr = zeros(FT, np)
+    twostext = zeros(FT, np)
+    avmu = zeros(FT, np)
+    temp0_arr = zeros(FT, np)
+    temp2_arr = zeros(FT, np)
+    omega = zeros(FT, np, numrad)
 
     # Calculate two-stream parameters independent of waveband
     for p in bounds_patch
         mask_vegsol[p] || continue
 
-        cosz = max(0.001, coszen_patch[p])
+        cosz = smooth_max(0.001, coszen_patch[p])
 
-        chil[p] = min(max(pftcon_xl[patchdata.itype[p] + 1], -0.4), 0.6)
+        chil[p] = smooth_clamp(pftcon_xl[patchdata.itype[p] + 1], -0.4, 0.6)
         if abs(chil[p]) <= 0.01
             chil[p] = 0.01
         end
@@ -264,7 +282,7 @@ function two_stream!(surfalb::SurfaceAlbedoData,
         gdir_arr[p] = phi1 + phi2 * cosz
         twostext[p] = gdir_arr[p] / cosz
         avmu[p] = (1.0 - phi1 / phi2 * log((phi1 + phi2) / phi1)) / phi2
-        temp0_arr[p] = max(gdir_arr[p] + phi2 * cosz, 1.0e-6)
+        temp0_arr[p] = smooth_max(gdir_arr[p] + phi2 * cosz, 1.0e-6)
         temp1_val = phi1 * cosz
         temp2_arr[p] = (1.0 - temp1_val / temp0_arr[p] * log((temp1_val + temp0_arr[p]) / temp1_val))
     end
@@ -275,7 +293,7 @@ function two_stream!(surfalb::SurfaceAlbedoData,
             mask_vegsol[p] || continue
             c = patchdata.column[p]
 
-            cosz = max(0.001, coszen_patch[p])
+            cosz = smooth_max(0.001, coszen_patch[p])
 
             # Two-stream parameters omega, betad, betai
             omegal = rho_in[p, ib] + tau_in[p, ib]
@@ -321,9 +339,9 @@ function two_stream!(surfalb::SurfaceAlbedoData,
             p4 = b - tmp0_val
 
             # Absorbed, reflected, transmitted fluxes for full canopy
-            t1 = min(h * (elai[p] + esai[p]), 40.0)
+            t1 = smooth_min(h * (elai[p] + esai[p]), 40.0)
             s1 = exp(-t1)
-            t1 = min(twostext[p] * (elai[p] + esai[p]), 40.0)
+            t1 = smooth_min(twostext[p] * (elai[p] + esai[p]), 40.0)
             s2 = exp(-t1)
 
             # ---- Direct beam ----
@@ -458,9 +476,9 @@ function two_stream!(surfalb::SurfaceAlbedoData,
                                     (tlai_z[p, iv] + tsai_z[p, iv]))
                             end
 
-                            t1_l = min(h * laisum_l, 40.0)
+                            t1_l = smooth_min(h * laisum_l, 40.0)
                             s1_l = exp(-t1_l)
-                            t1_l = min(twostext[p] * laisum_l, 40.0)
+                            t1_l = smooth_min(twostext[p] * laisum_l, 40.0)
                             s2_l = exp(-t1_l)
                             surfalb.fsun_z_patch[p, iv] = s2_l
 
@@ -527,9 +545,9 @@ function two_stream!(surfalb::SurfaceAlbedoData,
                                 (twostext[p] * s2_l + 1.0 / avmu[p] * (da1 + da2))
                             d_fabd_sha = d_fabd - d_fabd_sun
 
-                            surfalb.fabd_sun_z_patch[p, iv] = max(d_fabd_sun, 0.0) /
+                            surfalb.fabd_sun_z_patch[p, iv] = smooth_max(d_fabd_sun, 0.0) /
                                 surfalb.fsun_z_patch[p, iv]
-                            surfalb.fabd_sha_z_patch[p, iv] = max(d_fabd_sha, 0.0) /
+                            surfalb.fabd_sha_z_patch[p, iv] = smooth_max(d_fabd_sha, 0.0) /
                                 (1.0 - surfalb.fsun_z_patch[p, iv])
 
                             # ---- Diffuse derivatives ----
@@ -587,9 +605,9 @@ function two_stream!(surfalb::SurfaceAlbedoData,
                             d_fabi_sun = (1.0 - omega[p, ib]) / avmu[p] * (da1 + da2)
                             d_fabi_sha = d_fabi - d_fabi_sun
 
-                            surfalb.fabi_sun_z_patch[p, iv] = max(d_fabi_sun, 0.0) /
+                            surfalb.fabi_sun_z_patch[p, iv] = smooth_max(d_fabi_sun, 0.0) /
                                 surfalb.fsun_z_patch[p, iv]
-                            surfalb.fabi_sha_z_patch[p, iv] = max(d_fabi_sha, 0.0) /
+                            surfalb.fabi_sha_z_patch[p, iv] = smooth_max(d_fabi_sha, 0.0) /
                                 (1.0 - surfalb.fsun_z_patch[p, iv])
                         end  # iv loop
                     end  # nlevcan
@@ -639,16 +657,16 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                          aerosol::AerosolData,
                          mask_nourbanc::BitVector,
                          mask_nourbanp::BitVector,
-                         nextsw_cday::Float64,
-                         declinp1::Float64,
+                         nextsw_cday::Real,
+                         declinp1::Real,
                          bounds_grc::UnitRange{Int},
                          bounds_col::UnitRange{Int},
                          bounds_patch::UnitRange{Int},
-                         pftcon_rhol::Matrix{Float64},
-                         pftcon_rhos::Matrix{Float64},
-                         pftcon_taul::Matrix{Float64},
-                         pftcon_taus::Matrix{Float64},
-                         pftcon_xl::Vector{Float64},
+                         pftcon_rhol::Matrix{<:Real},
+                         pftcon_rhos::Matrix{<:Real},
+                         pftcon_taul::Matrix{<:Real},
+                         pftcon_taus::Matrix{<:Real},
+                         pftcon_xl::Vector{<:Real},
                          coszen_func::Function;
                          use_SSRE::Bool = false,
                          use_snicar_frc::Bool = false,
@@ -688,7 +706,8 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
         coszen_grc[g] = coszen_func(nextsw_cday, grc.lat[g], grc.lon[g], declinp1)
     end
 
-    coszen_patch_arr = zeros(length(bounds_patch))
+    FT = eltype(coszen_col_arr)
+    coszen_patch_arr = zeros(FT, length(bounds_patch))
 
     for c in bounds_col
         g = col.gridcell[c]
@@ -776,12 +795,12 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                  any(x -> x != 0.0, @view snicar_optics.ext_cff_mss_snw_drc[1:min(10, end), 1:min(1, end)])
 
     # Prepare SNICAR input arrays
-    h2osno_liq_snw = zeros(nc, nlevsno_val)
-    h2osno_ice_snw = zeros(nc, nlevsno_val)
-    h2osno_total_arr = zeros(nc)
+    h2osno_liq_snw = zeros(FT, nc, nlevsno_val)
+    h2osno_ice_snw = zeros(FT, nc, nlevsno_val)
+    h2osno_total_arr = zeros(FT, nc)
     snw_rds_int = fill(round(Int, snicar_params.snw_rds_min), nc, nlevsno_val)
-    mss_cnc_aer = zeros(nc, nlevsno_val, SNO_NBR_AER)
-    albsfc_snw = zeros(nc, numrad)
+    mss_cnc_aer = zeros(FT, nc, nlevsno_val, SNO_NBR_AER)
+    albsfc_snw = zeros(FT, nc, numrad)
 
     # Compute total h2osno using the proper method (includes h2osno_no_layers_col)
     waterstate_calculate_total_h2osno!(waterstatebulk.ws, mask_nourbanc,
@@ -791,8 +810,8 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
         mask_nourbanc[c] || continue
         # Snow layer water content (first nlevsno slots are snow layers)
         for j in 1:nlevsno_val
-            h2osno_liq_snw[c, j] = max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, j])
-            h2osno_ice_snw[c, j] = max(0.0, waterstatebulk.ws.h2osoi_ice_col[c, j])
+            h2osno_liq_snw[c, j] = smooth_max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, j])
+            h2osno_ice_snw[c, j] = smooth_max(0.0, waterstatebulk.ws.h2osoi_ice_col[c, j])
         end
         # Snow grain radius (Float64 → Int, microns)
         for j in 1:nlevsno_val
@@ -821,10 +840,10 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     end
 
     # Output arrays
-    albsnd = zeros(nc, numrad)
-    albsni = zeros(nc, numrad)
-    flx_absd_snw = zeros(nc, nlevsno_val + 1, numrad)
-    flx_absi_snw = zeros(nc, nlevsno_val + 1, numrad)
+    albsnd = zeros(FT, nc, numrad)
+    albsni = zeros(FT, nc, numrad)
+    flx_absd_snw = zeros(FT, nc, nlevsno_val + 1, numrad)
+    flx_absi_snw = zeros(FT, nc, nlevsno_val + 1, numrad)
 
     if use_snicar
         # Call SNICAR_RT for direct beam (flg_slr=1)
@@ -954,13 +973,13 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                     if ((elai[p] + esai[p]) - dincmax_sum) > 1.0e-06
                         nrad[p] = iv
                         dinc = dincmax
-                        tlai_z[p, iv] = dinc * elai[p] / max(elai[p] + esai[p], mpe)
-                        tsai_z[p, iv] = dinc * esai[p] / max(elai[p] + esai[p], mpe)
+                        tlai_z[p, iv] = dinc * elai[p] / smooth_max(elai[p] + esai[p], mpe)
+                        tsai_z[p, iv] = dinc * esai[p] / smooth_max(elai[p] + esai[p], mpe)
                     else
                         nrad[p] = iv
                         dinc = dincmax - (dincmax_sum - (elai[p] + esai[p]))
-                        tlai_z[p, iv] = dinc * elai[p] / max(elai[p] + esai[p], mpe)
-                        tsai_z[p, iv] = dinc * esai[p] / max(elai[p] + esai[p], mpe)
+                        tlai_z[p, iv] = dinc * elai[p] / smooth_max(elai[p] + esai[p], mpe)
+                        tsai_z[p, iv] = dinc * esai[p] / smooth_max(elai[p] + esai[p], mpe)
                         break
                     end
                 end
@@ -987,13 +1006,13 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                     if ((blai + bsai) - dincmax_sum) > 1.0e-06
                         ncan[p] = iv
                         dinc = dincmax
-                        tlai_z[p, iv] = dinc * blai / max(blai + bsai, mpe)
-                        tsai_z[p, iv] = dinc * bsai / max(blai + bsai, mpe)
+                        tlai_z[p, iv] = dinc * blai / smooth_max(blai + bsai, mpe)
+                        tsai_z[p, iv] = dinc * bsai / smooth_max(blai + bsai, mpe)
                     else
                         ncan[p] = iv
                         dinc = dincmax - (dincmax_sum - (blai + bsai))
-                        tlai_z[p, iv] = dinc * blai / max(blai + bsai, mpe)
-                        tsai_z[p, iv] = dinc * bsai / max(blai + bsai, mpe)
+                        tlai_z[p, iv] = dinc * blai / smooth_max(blai + bsai, mpe)
+                        tsai_z[p, iv] = dinc * bsai / smooth_max(blai + bsai, mpe)
                         break
                     end
                 end
@@ -1050,23 +1069,23 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
 
     # --- Weight reflectance/transmittance by LAI and SAI ---
     np = length(bounds_patch)
-    wl = zeros(np)
-    ws_arr = zeros(np)
-    rho = zeros(np, numrad)
-    tau = zeros(np, numrad)
+    wl = zeros(FT, np)
+    ws_arr = zeros(FT, np)
+    rho = zeros(FT, np, numrad)
+    tau = zeros(FT, np, numrad)
 
     for p in bounds_patch
         mask_vegsol[p] || continue
-        wl[p] = elai[p] / max(elai[p] + esai[p], mpe)
-        ws_arr[p] = esai[p] / max(elai[p] + esai[p], mpe)
+        wl[p] = elai[p] / smooth_max(elai[p] + esai[p], mpe)
+        ws_arr[p] = esai[p] / smooth_max(elai[p] + esai[p], mpe)
     end
 
     for ib in 1:numrad
         for p in bounds_patch
             mask_vegsol[p] || continue
             itype = patchdata.itype[p] + 1  # +1: Fortran 0-based PFT → Julia 1-based array
-            rho[p, ib] = max(pftcon_rhol[itype, ib] * wl[p] + pftcon_rhos[itype, ib] * ws_arr[p], mpe)
-            tau[p, ib] = max(pftcon_taul[itype, ib] * wl[p] + pftcon_taus[itype, ib] * ws_arr[p], mpe)
+            rho[p, ib] = smooth_max(pftcon_rhol[itype, ib] * wl[p] + pftcon_rhos[itype, ib] * ws_arr[p], mpe)
+            tau[p, ib] = smooth_max(pftcon_taul[itype, ib] * wl[p] + pftcon_taus[itype, ib] * ws_arr[p], mpe)
         end
     end
 

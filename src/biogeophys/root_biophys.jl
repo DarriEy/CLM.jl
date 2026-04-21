@@ -100,10 +100,10 @@ Arguments:
 
 Ported from `init_vegrootfr` in `RootBiophysMod.F90`.
 """
-function init_vegrootfr!(rootfr::Matrix{Float64},
-                         col_zi::Matrix{Float64},
-                         col_z::Matrix{Float64},
-                         col_dz::Matrix{Float64},
+function init_vegrootfr!(rootfr::Matrix{<:Real},
+                         col_zi::Matrix{<:Real},
+                         col_z::Matrix{<:Real},
+                         col_dz::Matrix{<:Real},
                          col_nbedrock::Vector{Int},
                          patch_column::Vector{Int},
                          patch_itype::Vector{Int},
@@ -206,8 +206,8 @@ explicitly when lev-1 = 0.
 
 Ported from `zeng2001_rootfr` in `RootBiophysMod.F90`.
 """
-function zeng2001_rootfr!(rootfr::Matrix{Float64},
-                          col_zi::Matrix{Float64},
+function zeng2001_rootfr!(rootfr::Matrix{<:Real},
+                          col_zi::Matrix{<:Real},
                           patch_column::Vector{Int},
                           patch_itype::Vector{Int},
                           patch_is_fates::Vector{Bool},
@@ -267,8 +267,8 @@ where beta is a PFT-specific shape parameter from pftcon.rootprof_beta.
 
 Ported from `jackson1996_rootfr` in `RootBiophysMod.F90`.
 """
-function jackson1996_rootfr!(rootfr::Matrix{Float64},
-                             col_zi::Matrix{Float64},
+function jackson1996_rootfr!(rootfr::Matrix{<:Real},
+                             col_zi::Matrix{<:Real},
                              patch_column::Vector{Int},
                              patch_itype::Vector{Int},
                              patch_is_fates::Vector{Bool},
@@ -327,9 +327,9 @@ where rootprof_exp = 3.0 (1/m) is the e-folding depth parameter.
 
 Ported from `exponential_rootfr` in `RootBiophysMod.F90`.
 """
-function exponential_rootfr!(rootfr::Matrix{Float64},
-                             col_z::Matrix{Float64},
-                             col_dz::Matrix{Float64},
+function exponential_rootfr!(rootfr::Matrix{<:Real},
+                             col_z::Matrix{<:Real},
+                             col_dz::Matrix{<:Real},
                              patch_column::Vector{Int},
                              patch_itype::Vector{Int},
                              patch_is_fates::Vector{Bool},

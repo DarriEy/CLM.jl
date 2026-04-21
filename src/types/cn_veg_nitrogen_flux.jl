@@ -11,7 +11,7 @@ column, and gridcell levels.
 
 Ported from `cnveg_nitrogenflux_type` in `CNVegNitrogenFluxType.F90`.
 """
-Base.@kwdef mutable struct CNVegNitrogenFluxData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CNVegNitrogenFluxData{FT<:Real}
     # --- Gap mortality fluxes (gN/m2/s) patch-level ---
     m_leafn_to_litter_patch                   ::Vector{FT} = Float64[]
     m_frootn_to_litter_patch                  ::Vector{FT} = Float64[]
@@ -664,8 +664,8 @@ end
 Set all nitrogen flux variables to given values for masked patches/columns.
 """
 function cnveg_nitrogen_flux_set_values!(nf::CNVegNitrogenFluxData,
-                                          mask_patch::BitVector, value_patch::Float64,
-                                          mask_col::BitVector, value_column::Float64;
+                                          mask_patch::BitVector, value_patch::Real,
+                                          mask_col::BitVector, value_column::Real;
                                           use_matrixcn::Bool=false,
                                           use_crop::Bool=false,
                                           nrepr::Int=NREPR,

@@ -215,7 +215,7 @@ Returns interpolated value at `xi` given data points `(xd, yd)`.
 
 Ported from `piecewise_linear_interp1d` in `SnowSnicarMod.F90`.
 """
-function piecewise_linear_interp1d(xd::AbstractVector{Float64}, yd::AbstractVector{Float64}, xi::Float64)
+function piecewise_linear_interp1d(xd::AbstractVector{<:Real}, yd::AbstractVector{<:Real}, xi::Real)
     nd = length(xd)
     yi = 0.0
 
@@ -254,7 +254,7 @@ Returns fresh snow grain radius [microns], linearly dependent on temperature.
 
 Ported from `FreshSnowRadius` in `SnowSnicarMod.F90`.
 """
-function fresh_snow_radius(forc_t::Float64; params::SnicarParams=snicar_params)
+function fresh_snow_radius(forc_t::Real; params::SnicarParams=snicar_params)
     tmin = TFRZ - 30.0
     tmax = TFRZ
 
@@ -293,35 +293,35 @@ snow with impurities using the Adding-Doubling radiative transfer solver
 Ported from `SNICAR_RT` in `SnowSnicarMod.F90`.
 
 # Arguments
-- `coszen::Vector{Float64}`: cosine of solar zenith angle (col)
+- `coszen::Vector{<:Real}`: cosine of solar zenith angle (col)
 - `flg_slr_in::Int`: 1=direct-beam, 2=diffuse incident flux
-- `h2osno_liq::Matrix{Float64}`: liquid water content (col,lyr) [kg/m2], 1-based snow layers
-- `h2osno_ice::Matrix{Float64}`: ice content (col,lyr) [kg/m2], 1-based snow layers
-- `h2osno_total::Vector{Float64}`: total snow content (col) [kg/m2]
+- `h2osno_liq::Matrix{<:Real}`: liquid water content (col,lyr) [kg/m2], 1-based snow layers
+- `h2osno_ice::Matrix{<:Real}`: ice content (col,lyr) [kg/m2], 1-based snow layers
+- `h2osno_total::Vector{<:Real}`: total snow content (col) [kg/m2]
 - `snw_rds::Matrix{Int}`: snow effective radius (col,lyr) [microns], 1-based snow layers
-- `mss_cnc_aer_in::Array{Float64,3}`: aerosol mass concentration (col,lyr,aer) [kg/kg]
-- `albsfc::Matrix{Float64}`: albedo of underlying surface (col,bnd) [frc]
+- `mss_cnc_aer_in::Array{<:Real,3}`: aerosol mass concentration (col,lyr,aer) [kg/kg]
+- `albsfc::Matrix{<:Real}`: albedo of underlying surface (col,bnd) [frc]
 - `snl::Vector{Int}`: negative number of snow layers (col)
-- `frac_sno::Vector{Float64}`: fraction of ground covered by snow (col)
-- `albout::Matrix{Float64}`: output snow albedo (col,bnd) [frc]
-- `flx_abs::Array{Float64,3}`: output absorbed flux (col,lyr,bnd) per unit incident flux
+- `frac_sno::Vector{<:Real}`: fraction of ground covered by snow (col)
+- `albout::Matrix{<:Real}`: output snow albedo (col,bnd) [frc]
+- `flx_abs::Array{<:Real,3}`: output absorbed flux (col,lyr,bnd) per unit incident flux
 - `nlevsno::Int`: maximum number of snow layers
 - `optics::SnicarOpticsData`: snow optics lookup tables
 - `params::SnicarParams`: SNICAR parameters
 - `mask_nourbanc::Union{BitVector,Nothing}`: column mask (if nothing, process all)
 """
-function snicar_rt!(coszen::Vector{Float64},
+function snicar_rt!(coszen::Vector{<:Real},
                     flg_slr_in::Int,
-                    h2osno_liq::Matrix{Float64},
-                    h2osno_ice::Matrix{Float64},
-                    h2osno_total::Vector{Float64},
+                    h2osno_liq::Matrix{<:Real},
+                    h2osno_ice::Matrix{<:Real},
+                    h2osno_total::Vector{<:Real},
                     snw_rds::Matrix{Int},
-                    mss_cnc_aer_in::Array{Float64,3},
-                    albsfc::Matrix{Float64},
+                    mss_cnc_aer_in::Array{<:Real,3},
+                    albsfc::Matrix{<:Real},
                     snl::Vector{Int},
-                    frac_sno::Vector{Float64},
-                    albout::Matrix{Float64},
-                    flx_abs::Array{Float64,3},
+                    frac_sno::Vector{<:Real},
+                    albout::Matrix{<:Real},
+                    flx_abs::Array{<:Real,3},
                     nlevsno::Int;
                     optics::SnicarOpticsData=snicar_optics,
                     params::SnicarParams=snicar_params,
@@ -347,7 +347,8 @@ function snicar_rt!(coszen::Vector{Float64},
     nir_bnd_end = numrad_snw
 
     # Band center wavelengths
-    wvl_ct = zeros(numrad_snw)
+    FT = eltype(coszen)
+    wvl_ct = zeros(FT, numrad_snw)
     if numrad_snw == DEFAULT_NUMBER_BANDS
         wvl_ct .= [0.5, 0.85, 1.1, 1.35, 3.25]
     elseif numrad_snw == HIGH_NUMBER_BANDS
@@ -357,15 +358,15 @@ function snicar_rt!(coszen::Vector{Float64},
     end
 
     # Nonspherical snow grain constants
-    g_wvl_ct = zeros(SNICAR_SEVEN_BANDS)
+    g_wvl_ct = zeros(FT, SNICAR_SEVEN_BANDS)
     for igb in 1:SNICAR_SEVEN_BANDS
         g_wvl_ct[igb] = SNICAR_G_WVL[igb+1] * 0.5 + SNICAR_G_WVL[igb] * 0.5
     end
-    dstint_wvl_ct = zeros(SNICAR_SIZE_BINS)
+    dstint_wvl_ct = zeros(FT, SNICAR_SIZE_BINS)
     for idb in 1:SNICAR_SIZE_BINS
         dstint_wvl_ct[idb] = DSTINT_WVL[idb+1] * 0.5 + DSTINT_WVL[idb] * 0.5
     end
-    bcint_wvl_ct = zeros(SNICAR_SIXTEEN_BANDS)
+    bcint_wvl_ct = zeros(FT, SNICAR_SIXTEEN_BANDS)
     for ibb in 1:SNICAR_SIXTEEN_BANDS
         bcint_wvl_ct[ibb] = BCINT_WVL[ibb+1] * 0.5 + BCINT_WVL[ibb] * 0.5
     end
@@ -382,59 +383,59 @@ function snicar_rt!(coszen::Vector{Float64},
 
     # Pre-allocate all scratch arrays outside the column/band loops
     # Per-column arrays (reused across columns)
-    h2osno_ice_lcl = zeros(nlevsno)
-    h2osno_liq_lcl = zeros(nlevsno)
+    h2osno_ice_lcl = zeros(FT, nlevsno)
+    h2osno_liq_lcl = zeros(FT, nlevsno)
     snw_rds_lcl = zeros(Int, nlevsno)
-    mss_cnc_aer_lcl = zeros(nlevsno, SNO_NBR_AER)
-    albsfc_lcl = zeros(numrad_snw)
-    ss_alb_snw_lcl = zeros(nlevsno)
-    asm_prm_snw_lcl = zeros(nlevsno)
-    ext_cff_mss_snw_lcl = zeros(nlevsno)
-    ss_alb_aer_lcl = zeros(SNO_NBR_AER)
-    asm_prm_aer_lcl = zeros(SNO_NBR_AER)
-    ext_cff_mss_aer_lcl = zeros(SNO_NBR_AER)
+    mss_cnc_aer_lcl = zeros(FT, nlevsno, SNO_NBR_AER)
+    albsfc_lcl = zeros(FT, numrad_snw)
+    ss_alb_snw_lcl = zeros(FT, nlevsno)
+    asm_prm_snw_lcl = zeros(FT, nlevsno)
+    ext_cff_mss_snw_lcl = zeros(FT, nlevsno)
+    ss_alb_aer_lcl = zeros(FT, SNO_NBR_AER)
+    asm_prm_aer_lcl = zeros(FT, SNO_NBR_AER)
+    ext_cff_mss_aer_lcl = zeros(FT, SNO_NBR_AER)
     sno_shp = fill(snicar_snw_shape, nlevsno)
-    sno_fs = zeros(nlevsno)
-    sno_AR = zeros(nlevsno)
-    albout_lcl = zeros(numrad_snw)
-    flx_abs_lcl = zeros(nlevsno + 1, numrad_snw)
-    flx_wgt_lcl = zeros(numrad_snw)
+    sno_fs = zeros(FT, nlevsno)
+    sno_AR = zeros(FT, nlevsno)
+    albout_lcl = zeros(FT, numrad_snw)
+    flx_abs_lcl = zeros(FT, nlevsno + 1, numrad_snw)
+    flx_wgt_lcl = zeros(FT, numrad_snw)
 
     # Per-band arrays (reused across bands)
     nlyr_itf = nlevsno + 1
-    g_ice_Cg_tmp = zeros(SNICAR_SEVEN_BANDS)
-    gg_ice_F07_tmp = zeros(SNICAR_SEVEN_BANDS)
-    L_snw = zeros(nlevsno)
-    tau_snw = zeros(nlevsno)
-    L_aer = zeros(nlevsno, SNO_NBR_AER)
-    tau_aer = zeros(nlevsno, SNO_NBR_AER)
-    tau_arr = zeros(nlevsno)
-    omega_arr = zeros(nlevsno)
-    g_arr = zeros(nlevsno)
-    enh_omg_bcint_tmp = zeros(SNICAR_SIXTEEN_BANDS)
-    enh_omg_bcint_tmp2 = zeros(SNICAR_SIXTEEN_BANDS)
-    enh_omg_dstint_tmp = zeros(SNICAR_SIZE_BINS)
-    enh_omg_dstint_tmp2 = zeros(SNICAR_SIZE_BINS)
-    tau_star = zeros(nlevsno)
-    omega_star = zeros(nlevsno)
-    g_star = zeros(nlevsno)
-    trndir = zeros(nlyr_itf)
-    trntdr = zeros(nlyr_itf)
-    trndif = zeros(nlyr_itf)
-    rupdir = zeros(nlyr_itf)
-    rupdif = zeros(nlyr_itf)
-    rdndif = zeros(nlyr_itf)
-    dfdir = zeros(nlyr_itf)
-    dfdif = zeros(nlyr_itf)
-    dftmp = zeros(nlyr_itf)
-    rdir = zeros(nlevsno)
-    rdif_a = zeros(nlevsno)
-    rdif_b = zeros(nlevsno)
-    tdir_arr = zeros(nlevsno)
-    tdif_a = zeros(nlevsno)
-    tdif_b = zeros(nlevsno)
-    trnlay = zeros(nlevsno)
-    F_abs = zeros(nlevsno)
+    g_ice_Cg_tmp = zeros(FT, SNICAR_SEVEN_BANDS)
+    gg_ice_F07_tmp = zeros(FT, SNICAR_SEVEN_BANDS)
+    L_snw = zeros(FT, nlevsno)
+    tau_snw = zeros(FT, nlevsno)
+    L_aer = zeros(FT, nlevsno, SNO_NBR_AER)
+    tau_aer = zeros(FT, nlevsno, SNO_NBR_AER)
+    tau_arr = zeros(FT, nlevsno)
+    omega_arr = zeros(FT, nlevsno)
+    g_arr = zeros(FT, nlevsno)
+    enh_omg_bcint_tmp = zeros(FT, SNICAR_SIXTEEN_BANDS)
+    enh_omg_bcint_tmp2 = zeros(FT, SNICAR_SIXTEEN_BANDS)
+    enh_omg_dstint_tmp = zeros(FT, SNICAR_SIZE_BINS)
+    enh_omg_dstint_tmp2 = zeros(FT, SNICAR_SIZE_BINS)
+    tau_star = zeros(FT, nlevsno)
+    omega_star = zeros(FT, nlevsno)
+    g_star = zeros(FT, nlevsno)
+    trndir = zeros(FT, nlyr_itf)
+    trntdr = zeros(FT, nlyr_itf)
+    trndif = zeros(FT, nlyr_itf)
+    rupdir = zeros(FT, nlyr_itf)
+    rupdif = zeros(FT, nlyr_itf)
+    rdndif = zeros(FT, nlyr_itf)
+    dfdir = zeros(FT, nlyr_itf)
+    dfdif = zeros(FT, nlyr_itf)
+    dftmp = zeros(FT, nlyr_itf)
+    rdir = zeros(FT, nlevsno)
+    rdif_a = zeros(FT, nlevsno)
+    rdif_b = zeros(FT, nlevsno)
+    tdir_arr = zeros(FT, nlevsno)
+    tdif_a = zeros(FT, nlevsno)
+    tdif_b = zeros(FT, nlevsno)
+    trnlay = zeros(FT, nlevsno)
+    F_abs = zeros(FT, nlevsno)
 
     # Loop over columns
     for c_idx in 1:ncols
@@ -495,7 +496,12 @@ function snicar_rt!(coszen::Vector{Float64},
             # Error check snow grain size
             for i in snl_top_j:snl_btm_j
                 if snw_rds_lcl[i] < SNW_RDS_MIN_TBL || snw_rds_lcl[i] > SNW_RDS_MAX_TBL
-                    error("SNICAR ERROR: snow grain radius of $(snw_rds_lcl[i]) out of bounds at column $c_idx layer $i")
+                    if _is_ad_type(eltype(snw_rds_lcl))
+                        @warn "SNICAR: snow grain radius out of bounds (AD mode, clamping)" maxlog=1
+                        snw_rds_lcl[i] = clamp(snw_rds_lcl[i], SNW_RDS_MIN_TBL, SNW_RDS_MAX_TBL)
+                    else
+                        error("SNICAR ERROR: snow grain radius of $(snw_rds_lcl[i]) out of bounds at column $c_idx layer $i")
+                    end
                 end
             end
 
@@ -525,7 +531,7 @@ function snicar_rt!(coszen::Vector{Float64},
 
             # Loop over spectral bands
             for bnd_idx in 1:numrad_snw
-                mu_not = max(coszen[c_idx], cp01)
+                mu_not = smooth_max(coszen[c_idx], cp01)
 
                 # Restore aerosol concentrations that may have been zeroed
                 if flg_nosnl == 0
@@ -625,7 +631,7 @@ function snicar_rt!(coszen::Vector{Float64},
                         asm_prm_snw_lcl[i] = g_ice_F07 * g_Cg_intp
                     end
 
-                    asm_prm_snw_lcl[i] = min(0.99, asm_prm_snw_lcl[i])
+                    asm_prm_snw_lcl[i] = smooth_min(0.99, asm_prm_snw_lcl[i])
                 end
 
                 # Aerosol optical properties from lookup table
@@ -688,13 +694,13 @@ function snicar_rt!(coszen::Vector{Float64},
                                 bcint_dd = (RE_BC / RADIUS_2_BC)^bcint_m_tmp
                                 bcint_dd2 = (RADIUS_1_BC / RADIUS_2_BC)^bcint_m_tmp
                                 bcint_f = (RE_BC / RADIUS_1_BC)^bcint_n_tmp
-                                enh_omg_bcint_tmp2[ibb] = log10(max(1.0, bcint_dd * ((enh_omg_bcint_tmp[ibb] / bcint_dd2)^bcint_f)))
+                                enh_omg_bcint_tmp2[ibb] = log10(smooth_max(1.0, bcint_dd * ((enh_omg_bcint_tmp[ibb] / bcint_dd2)^bcint_f)))
                             end
                             enh_omg_bcint_intp = piecewise_linear_interp1d(bcint_wvl_ct, enh_omg_bcint_tmp2, wvl_doint)
                             enh_omg_bcint_intp2 = 10.0^enh_omg_bcint_intp
-                            enh_omg_bcint_intp2 = min(ENH_OMG_MAX, max(enh_omg_bcint_intp2, 1.0))
+                            enh_omg_bcint_intp2 = smooth_min(ENH_OMG_MAX, smooth_max(enh_omg_bcint_intp2, 1.0))
                             ss_alb_snw_lcl[i] = 1.0 - (1.0 - ss_alb_snw_lcl[i]) * enh_omg_bcint_intp2
-                            ss_alb_snw_lcl[i] = max(0.5, min(ss_alb_snw_lcl[i], 1.0))
+                            ss_alb_snw_lcl[i] = smooth_max(0.5, smooth_min(ss_alb_snw_lcl[i], 1.0))
                             ss_alb_aer_lcl[1] = 0.0
                             asm_prm_aer_lcl[1] = 0.0
                             ext_cff_mss_aer_lcl[1] = 0.0
@@ -706,13 +712,13 @@ function snicar_rt!(coszen::Vector{Float64},
                         if snicar_snodst_intmix && tot_dst_snw_conc > 0.0
                             for idb in 1:SNICAR_SIZE_BINS
                                 enh_omg_dstint_tmp[idb] = DSTINT_A1[idb] + DSTINT_A2[idb] * (tot_dst_snw_conc^DSTINT_A3[idb])
-                                enh_omg_dstint_tmp2[idb] = log10(max(enh_omg_dstint_tmp[idb], 1.0))
+                                enh_omg_dstint_tmp2[idb] = log10(smooth_max(enh_omg_dstint_tmp[idb], 1.0))
                             end
                             enh_omg_dstint_intp = piecewise_linear_interp1d(dstint_wvl_ct, enh_omg_dstint_tmp2, wvl_doint)
                             enh_omg_dstint_intp2 = 10.0^enh_omg_dstint_intp
-                            enh_omg_dstint_intp2 = min(ENH_OMG_MAX, max(enh_omg_dstint_intp2, 1.0))
+                            enh_omg_dstint_intp2 = smooth_min(ENH_OMG_MAX, smooth_max(enh_omg_dstint_intp2, 1.0))
                             ss_alb_snw_lcl[i] = 1.0 - (1.0 - ss_alb_snw_lcl[i]) * enh_omg_dstint_intp2
-                            ss_alb_snw_lcl[i] = max(0.5, min(ss_alb_snw_lcl[i], 1.0))
+                            ss_alb_snw_lcl[i] = smooth_max(0.5, smooth_min(ss_alb_snw_lcl[i], 1.0))
                             ss_alb_aer_lcl[5:8] .= 0.0
                             asm_prm_aer_lcl[5:8] .= 0.0
                             ext_cff_mss_aer_lcl[5:8] .= 0.0
@@ -787,13 +793,13 @@ function snicar_rt!(coszen::Vector{Float64},
 
                         lm = sqrt(c3 * (c1 - ws) * (c1 - ws * gs))
                         ue = c1p5 * (c1 - ws * gs) / lm
-                        extins = max(exp_min, exp(-lm * ts))
+                        extins = smooth_max(exp_min, exp(-lm * ts))
                         ne_val = ((ue + c1)^2 / extins) - ((ue - c1)^2 * extins)
 
                         rdif_a[i] = (ue^2 - c1) * (1.0/extins - extins) / ne_val
                         tdif_a[i] = c4 * ue / ne_val
 
-                        trnlay[i] = max(exp_min, exp(-ts / mu_not))
+                        trnlay[i] = smooth_max(exp_min, exp(-ts / mu_not))
 
                         alp = cp75 * ws * mu_not * ((c1 + gs * (c1 - ws)) / (c1 - lm^2 * mu_not^2))
                         gam = cp5 * ws * ((c1 + c3 * gs * (c1 - ws) * mu_not^2) / (c1 - lm^2 * mu_not^2))
@@ -810,7 +816,7 @@ function snicar_rt!(coszen::Vector{Float64},
                             mu = SNICAR_DIFGAUSPT[ng]
                             gwt = SNICAR_DIFGAUSWT[ng]
                             swt += mu * gwt
-                            trn = max(exp_min, exp(-ts / mu))
+                            trn = smooth_max(exp_min, exp(-ts / mu))
                             alp = cp75 * ws * mu * ((c1 + gs * (c1 - ws)) / (c1 - lm^2 * mu^2))
                             gam = cp5 * ws * ((c1 + c3 * gs * (c1 - ws) * mu^2) / (c1 - lm^2 * mu^2))
                             apg = alp + gam
@@ -904,7 +910,7 @@ function snicar_rt!(coszen::Vector{Float64},
 
                 # Underflow check
                 for i in snl_top_j:snl_btm_itf
-                    flx_abs_lcl[i, bnd_idx] = max(0.0, flx_abs_lcl[i, bnd_idx])
+                    flx_abs_lcl[i, bnd_idx] = smooth_max(0.0, flx_abs_lcl[i, bnd_idx])
                 end
 
                 albout_lcl[bnd_idx] = albedo
@@ -1001,42 +1007,42 @@ Ported from `SnowAge_grain` in `SnowSnicarMod.F90`.
 
 # Arguments
 - `snl::Vector{Int}`: negative number of snow layers (col)
-- `dz::Matrix{Float64}`: layer thickness (col,lyr) [m]
-- `frac_sno::Vector{Float64}`: fraction of ground covered by snow (col)
-- `h2osoi_liq::Matrix{Float64}`: liquid water content (col,lyr) [kg/m2]
-- `h2osoi_ice::Matrix{Float64}`: ice content (col,lyr) [kg/m2]
-- `t_soisno::Matrix{Float64}`: soil and snow temperature (col,lyr) [K]
-- `t_grnd::Vector{Float64}`: ground temperature (col) [K]
-- `qflx_snow_grnd_col::Vector{Float64}`: snow on ground after interception [kg/m2/s]
-- `qflx_snofrz_lyr::Matrix{Float64}`: snow freezing rate (col,lyr) [kg/m2/s]
-- `h2osno_no_layers::Vector{Float64}`: snow not resolved into layers [mm H2O]
-- `forc_t::Vector{Float64}`: atmospheric temperature (col) [K]
-- `snw_rds::Matrix{Float64}`: (in/out) effective grain radius (col,lyr) [microns]
-- `snw_rds_top::Vector{Float64}`: (out) effective grain radius top layer [microns]
-- `sno_liq_top::Vector{Float64}`: (out) liquid water fraction in top layer [frc]
-- `snot_top::Vector{Float64}`: (out) temperature in top snow layer [K]
-- `dTdz_top::Vector{Float64}`: (out) temperature gradient in top layer [K/m]
+- `dz::Matrix{<:Real}`: layer thickness (col,lyr) [m]
+- `frac_sno::Vector{<:Real}`: fraction of ground covered by snow (col)
+- `h2osoi_liq::Matrix{<:Real}`: liquid water content (col,lyr) [kg/m2]
+- `h2osoi_ice::Matrix{<:Real}`: ice content (col,lyr) [kg/m2]
+- `t_soisno::Matrix{<:Real}`: soil and snow temperature (col,lyr) [K]
+- `t_grnd::Vector{<:Real}`: ground temperature (col) [K]
+- `qflx_snow_grnd_col::Vector{<:Real}`: snow on ground after interception [kg/m2/s]
+- `qflx_snofrz_lyr::Matrix{<:Real}`: snow freezing rate (col,lyr) [kg/m2/s]
+- `h2osno_no_layers::Vector{<:Real}`: snow not resolved into layers [mm H2O]
+- `forc_t::Vector{<:Real}`: atmospheric temperature (col) [K]
+- `snw_rds::Matrix{<:Real}`: (in/out) effective grain radius (col,lyr) [microns]
+- `snw_rds_top::Vector{<:Real}`: (out) effective grain radius top layer [microns]
+- `sno_liq_top::Vector{<:Real}`: (out) liquid water fraction in top layer [frc]
+- `snot_top::Vector{<:Real}`: (out) temperature in top snow layer [K]
+- `dTdz_top::Vector{<:Real}`: (out) temperature gradient in top layer [K/m]
 - `nlevsno::Int`: maximum number of snow layers
 - `dtime::Float64`: time step [sec]
 """
 function snowage_grain!(snl::Vector{Int},
-                        dz::Matrix{Float64},
-                        frac_sno::Vector{Float64},
-                        h2osoi_liq::Matrix{Float64},
-                        h2osoi_ice::Matrix{Float64},
-                        t_soisno::Matrix{Float64},
-                        t_grnd::Vector{Float64},
-                        qflx_snow_grnd_col::Vector{Float64},
-                        qflx_snofrz_lyr::Matrix{Float64},
-                        h2osno_no_layers::Vector{Float64},
-                        forc_t::Vector{Float64},
-                        snw_rds::Matrix{Float64},
-                        snw_rds_top::Vector{Float64},
-                        sno_liq_top::Vector{Float64},
-                        snot_top::Vector{Float64},
-                        dTdz_top::Vector{Float64},
+                        dz::Matrix{<:Real},
+                        frac_sno::Vector{<:Real},
+                        h2osoi_liq::Matrix{<:Real},
+                        h2osoi_ice::Matrix{<:Real},
+                        t_soisno::Matrix{<:Real},
+                        t_grnd::Vector{<:Real},
+                        qflx_snow_grnd_col::Vector{<:Real},
+                        qflx_snofrz_lyr::Matrix{<:Real},
+                        h2osno_no_layers::Vector{<:Real},
+                        forc_t::Vector{<:Real},
+                        snw_rds::Matrix{<:Real},
+                        snw_rds_top::Vector{<:Real},
+                        sno_liq_top::Vector{<:Real},
+                        snot_top::Vector{<:Real},
+                        dTdz_top::Vector{<:Real},
                         nlevsno::Int,
-                        dtime::Float64;
+                        dtime::Real;
                         mask_snowc::Union{BitVector,Nothing}=nothing,
                         mask_nosnowc::Union{BitVector,Nothing}=nothing,
                         params::SnicarParams=snicar_params,
@@ -1061,7 +1067,8 @@ function snowage_grain!(snl::Vector{Int},
         snl_top_j = snl_top + joff
 
         # Column average layer thickness
-        cdz = zeros(nlevsno)
+        FT_sg = eltype(dz)
+        cdz = zeros(FT_sg, nlevsno)
         for i in snl_top_j:snl_btm_j
             cdz[i] = frac_sno[c_idx] * dz[c_idx, i]
         end
@@ -1089,14 +1096,14 @@ function snowage_grain!(snl::Vector{Int},
                            (dz[c_idx, i] + dz[c_idx, i+1])
             end
 
-            dTdz_val = abs((t_snotop - t_snobtm) / cdz[i])
+            dTdz_val = smooth_abs((t_snotop - t_snobtm) / cdz[i])
             if !isfinite(dTdz_val)
                 dTdz_val = 0.0
             end
 
             # Snow density
             rhos = (h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]) / cdz[i]
-            rhos = max(50.0, rhos)
+            rhos = smooth_max(50.0, rhos)
             if !isfinite(rhos)
                 rhos = 50.0
             end
@@ -1115,14 +1122,14 @@ function snowage_grain!(snl::Vector{Int},
             bst_drdt0 = aging.snowage_drdt0[rhos_idx, Tgrd_idx, T_idx]
 
             # Boundary check
-            snw_rds[c_idx, i] = max(snw_rds[c_idx, i], params.snw_rds_min)
+            snw_rds[c_idx, i] = smooth_max(snw_rds[c_idx, i], params.snw_rds_min)
 
             # Change in effective radius
             dr_fresh = snw_rds[c_idx, i] - params.snw_rds_min
             dr = (bst_drdt0 * (bst_tau / (dr_fresh + bst_tau))^(1.0 / bst_kappa)) * (dtime / SECSPHR)
 
             # 2. WET SNOW AGING
-            frc_liq = min(0.1, h2osoi_liq[c_idx, i] / (h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]))
+            frc_liq = smooth_min(0.1, h2osoi_liq[c_idx, i] / (h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]))
             dr_wet = 1.0e18 * (dtime * (params.C2_liq_Brun89 * frc_liq^3) /
                      (4.0 * π * snw_rds[c_idx, i] * snw_rds[c_idx, i]))
 
@@ -1132,8 +1139,8 @@ function snowage_grain!(snl::Vector{Int},
             dr *= params.xdrdt
 
             # 4. INCREMENT EFFECTIVE RADIUS
-            newsnow = max(0.0, qflx_snow_grnd_col[c_idx] * dtime)
-            refrzsnow = max(0.0, qflx_snofrz_lyr[c_idx, i] * dtime)
+            newsnow = smooth_max(0.0, qflx_snow_grnd_col[c_idx] * dtime)
+            refrzsnow = smooth_max(0.0, qflx_snofrz_lyr[c_idx, i] * dtime)
 
             frc_refrz = refrzsnow / h2osno_lyr
 
@@ -1158,8 +1165,8 @@ function snowage_grain!(snl::Vector{Int},
                                  params.snw_rds_refrz * frc_refrz
 
             # 5. BOUNDARY CHECK
-            snw_rds[c_idx, i] = max(snw_rds[c_idx, i], params.snw_rds_min)
-            snw_rds[c_idx, i] = min(snw_rds[c_idx, i], SNW_RDS_MAX)
+            snw_rds[c_idx, i] = smooth_max(snw_rds[c_idx, i], params.snw_rds_min)
+            snw_rds[c_idx, i] = smooth_min(snw_rds[c_idx, i], SNW_RDS_MAX)
 
             # Top layer variables for history
             if i == snl_top_j

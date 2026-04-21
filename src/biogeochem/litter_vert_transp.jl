@@ -44,9 +44,9 @@ Set parameters for litter vertical transport.
 Ported from `readParams` in `SoilBiogeochemLittVertTranspMod.F90`.
 """
 function litter_vert_transp_readparams!(params::LitterVertTranspParams;
-                                        som_diffus::Float64,
-                                        cryoturb_diffusion_k::Float64,
-                                        max_altdepth_cryoturbation::Float64)
+                                        som_diffus::Real,
+                                        cryoturb_diffusion_k::Real,
+                                        max_altdepth_cryoturbation::Real)
     params.som_diffus = som_diffus
     params.cryoturb_diffusion_k = cryoturb_diffusion_k
     params.max_altdepth_cryoturbation = max_altdepth_cryoturbation
@@ -63,7 +63,7 @@ end
 Patankar's "A" function (Table 5.2, pg 95).
 Returns max(0, (1 - 0.1*|pe|)^5).
 """
-@inline function patankar_A(pe::Float64)
+@inline function patankar_A(pe::Real)
     return max(0.0, (1.0 - 0.1 * abs(pe))^5)
 end
 
@@ -101,9 +101,9 @@ Ported from `SoilBiogeochemLittVertTransp` in `SoilBiogeochemLittVertTranspMod.F
 - `dtime::Float64`                       : timestep size (s) (in)
 - `nlevdecomp::Int`                      : number of decomposition levels (in)
 - `ndecomp_pools::Int`                   : number of decomposition pools (in)
-- `zsoi_vals::Vector{Float64}`           : soil node depths, 1-indexed (m) (in)
-- `dzsoi_decomp_vals::Vector{Float64}`   : decomposition layer thicknesses (m) (in)
-- `zisoi_vals::Vector{Float64}`          : soil interface depths (m), 1-indexed with zisoi_vals[1]=0 (surface), zisoi_vals[j+1]=bottom of layer j (in)
+- `zsoi_vals::Vector{<:Real}`           : soil node depths, 1-indexed (m) (in)
+- `dzsoi_decomp_vals::Vector{<:Real}`   : decomposition layer thicknesses (m) (in)
+- `zisoi_vals::Vector{<:Real}`          : soil interface depths (m), 1-indexed with zisoi_vals[1]=0 (surface), zisoi_vals[j+1]=bottom of layer j (in)
 - `spinup_state::Int`                    : spinup state flag (in)
 - `use_soil_matrixcn::Bool`              : whether to use soil matrix solution (in)
 - `som_adv_flux_val::Float64`            : SOM advective flux value (m/s) (in)
@@ -122,16 +122,16 @@ function litter_vert_transp!(
         params::LitterVertTranspParams;
         mask_bgc_soilc::BitVector,
         bounds::UnitRange{Int},
-        dtime::Float64,
+        dtime::Real,
         nlevdecomp::Int,
         ndecomp_pools::Int,
-        zsoi_vals::Vector{Float64},
-        dzsoi_decomp_vals::Vector{Float64},
-        zisoi_vals::Vector{Float64},
+        zsoi_vals::Vector{<:Real},
+        dzsoi_decomp_vals::Vector{<:Real},
+        zisoi_vals::Vector{<:Real},
         spinup_state::Int = 0,
         use_soil_matrixcn::Bool = false,
-        som_adv_flux_val::Float64 = 0.0,
-        max_depth_cryoturb_val::Float64 = 3.0)
+        som_adv_flux_val::Real = 0.0,
+        max_depth_cryoturb_val::Real = 3.0)
 
     # Unpack cascade configuration
     is_cwd        = cascade_con.is_cwd
@@ -202,14 +202,17 @@ function litter_vert_transp!(
         end
     end
 
+    # Infer floating-point type for AD compatibility
+    FT = eltype(zsoi_vals)
+
     # Extend zsoi with a virtual bottom node for boundary calculations
     # (Fortran typically has zsoi dimensioned to nlevgrnd > nlevdecomp)
-    zsoi_ext = zeros(nlevdecomp + 1)
+    zsoi_ext = zeros(FT, nlevdecomp + 1)
     zsoi_ext[1:nlevdecomp] .= zsoi_vals[1:nlevdecomp]
     zsoi_ext[nlevdecomp + 1] = zisoi_vals[nlevdecomp + 1]
 
     # Set the distance between nodes
-    dz_node = zeros(nlevdecomp + 1)
+    dz_node = zeros(FT, nlevdecomp + 1)
     dz_node[1] = zsoi_ext[1]
     for j in 2:(nlevdecomp + 1)
         dz_node[j] = zsoi_ext[j] - zsoi_ext[j - 1]
@@ -219,19 +222,19 @@ function litter_vert_transp!(
     nj = nlevdecomp + 2  # levels 0:(nlevdecomp+1), stored as 1:(nlevdecomp+2)
     ncols = length(mask_bgc_soilc)
 
-    diffus     = zeros(ncols, nlevdecomp + 1)
-    adv_flux   = zeros(ncols, nlevdecomp + 1)
-    a_tri      = zeros(ncols, nj)  # indices 0..nlevdecomp+1 mapped to 1..nj
-    b_tri      = zeros(ncols, nj)
-    c_tri      = zeros(ncols, nj)
-    r_tri      = zeros(ncols, nj)
-    d_p1_zp1   = zeros(ncols, nlevdecomp + 1)
-    d_m1_zm1   = zeros(ncols, nlevdecomp + 1)
-    f_p1       = zeros(ncols, nlevdecomp + 1)
-    f_m1       = zeros(ncols, nlevdecomp + 1)
-    pe_p1      = zeros(ncols, nlevdecomp + 1)
-    pe_m1      = zeros(ncols, nlevdecomp + 1)
-    conc_trcr  = zeros(ncols, nj)  # indices 0..nlevdecomp+1 mapped to 1..nj
+    diffus     = zeros(FT, ncols, nlevdecomp + 1)
+    adv_flux   = zeros(FT, ncols, nlevdecomp + 1)
+    a_tri      = zeros(FT, ncols, nj)  # indices 0..nlevdecomp+1 mapped to 1..nj
+    b_tri      = zeros(FT, ncols, nj)
+    c_tri      = zeros(FT, ncols, nj)
+    r_tri      = zeros(FT, ncols, nj)
+    d_p1_zp1   = zeros(FT, ncols, nlevdecomp + 1)
+    d_m1_zm1   = zeros(FT, ncols, nlevdecomp + 1)
+    f_p1       = zeros(FT, ncols, nlevdecomp + 1)
+    f_m1       = zeros(FT, ncols, nlevdecomp + 1)
+    pe_p1      = zeros(FT, ncols, nlevdecomp + 1)
+    pe_m1      = zeros(FT, ncols, nlevdecomp + 1)
+    conc_trcr  = zeros(FT, ncols, nj)  # indices 0..nlevdecomp+1 mapped to 1..nj
 
     # Offset helper: Fortran j=0..nlevdecomp+1 -> Julia index j+1=1..nlevdecomp+2
     # So conc_trcr(c,0) -> conc_trcr[c,1], conc_trcr(c,j) -> conc_trcr[c,j+1]
@@ -425,7 +428,7 @@ function litter_vert_transp!(
                         b_col = b_tri[c, 1:nlev_tri]
                         c_col = c_tri[c, 1:nlev_tri]
                         r_col = r_tri[c, 1:nlev_tri]
-                        u_col = zeros(nlev_tri)
+                        u_col = zeros(FT, nlev_tri)
 
                         # Solve using the single-column tridiagonal solver
                         # jtop = 1 (index 1 = Fortran level 0)

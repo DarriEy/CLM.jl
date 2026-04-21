@@ -48,7 +48,7 @@ emission fluxes, and turbulent deposition velocities.
 
 Ported from `dust_emis_base_type` in `DustEmisBase.F90`.
 """
-Base.@kwdef mutable struct DustEmisBaseData{FT<:AbstractFloat}
+Base.@kwdef mutable struct DustEmisBaseData{FT<:Real}
     # Overlap factors between source and sink distributions [dst_src_nbr × ndst]
     ovr_src_snk_mss::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     # [m] Mass-weighted mean diameter resolved [ndst]
@@ -394,22 +394,23 @@ function dust_dry_dep!(
     patch_column::Vector{Int},
     bounds_p::UnitRange{Int},
     # Atmospheric forcing (column-level)
-    forc_pbot::Vector{Float64},      # [Pa] atm pressure
-    forc_rho::Vector{Float64},       # [kg/m3] atm density
-    forc_t::Vector{Float64},         # [K] atm temperature
+    forc_pbot::Vector{<:Real},      # [Pa] atm pressure
+    forc_rho::Vector{<:Real},       # [kg/m3] atm density
+    forc_t::Vector{<:Real},         # [K] atm temperature
     # Friction velocity (patch-level)
-    ram1::Vector{Float64},           # [s/m] aerodynamical resistance
-    fv::Vector{Float64}              # [m/s] friction velocity
+    ram1::Vector{<:Real},           # [s/m] aerodynamical resistance
+    fv::Vector{<:Real}              # [m/s] friction velocity
 )
     ndst = NDST
     shm_nbr_xpn_lnd = -2.0 / 3.0  # [frc] shm_nbr_xpn over land
 
     np = length(patch_active)
-    vsc_dyn_atm = zeros(np)
-    vsc_knm_atm = zeros(np)
-    slp_crc = zeros(np, ndst)
-    vlc_grv = zeros(np, ndst)
-    rss_lmn = zeros(np, ndst)
+    FT = eltype(forc_t)
+    vsc_dyn_atm = zeros(FT, np)
+    vsc_knm_atm = zeros(FT, np)
+    slp_crc = zeros(FT, np, ndst)
+    vlc_grv = zeros(FT, np, ndst)
+    rss_lmn = zeros(FT, np, ndst)
 
     # First pass: size-independent thermokinetic properties and settling velocity
     for p in bounds_p

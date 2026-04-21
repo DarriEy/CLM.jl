@@ -13,7 +13,7 @@ computations, roughness lengths, forcing heights, and diagnostic variables.
 
 Ported from `frictionvel_type` in `FrictionVelocityMod.F90`.
 """
-Base.@kwdef mutable struct FrictionVelocityData{FT<:AbstractFloat}
+Base.@kwdef mutable struct FrictionVelocityData{FT<:Real}
     # --- Scalar parameters ---
     zetamaxstable::FT = -999.0   # Max zeta under stable conditions
     zsno::FT          = -999.0   # Momentum roughness length for snow (m)
@@ -262,7 +262,7 @@ In Julia, namelist values are passed directly instead of reading from a file.
 Ported from `frictionvel_type%ReadNamelist` in `FrictionVelocityMod.F90`.
 """
 function frictionvel_read_nml!(fv::FrictionVelocityData;
-                                zetamaxstable::Float64 = 0.5)
+                                zetamaxstable::Real = 0.5)
     fv.zetamaxstable = zetamaxstable
     return nothing
 end
@@ -289,8 +289,8 @@ Parameters:
 Ported from `frictionvel_type%ReadParams` in `FrictionVelocityMod.F90`.
 """
 function frictionvel_read_params!(fv::FrictionVelocityData;
-                                   zsno::Float64 = 0.00085,
-                                   zlnd::Float64 = 0.000775,
+                                   zsno::Real = 0.00085,
+                                   zlnd::Real = 0.000775,
                                    zglc::Union{Float64,Nothing} = nothing,
                                    z0param_method::String = "")
     fv.zsno = zsno
@@ -311,7 +311,7 @@ end
 Stability function for rib < 0 (wind profile).
 Ported from `StabilityFunc1` in `FrictionVelocityMod.F90`.
 """
-function stability_func1(zeta::Float64)
+function stability_func1(zeta::Real)
     # Guard: this function is only valid for zeta <= 0 (unstable conditions)
     zeta = min(zeta, 0.0)
     chik2 = sqrt(1.0 - 16.0 * zeta)
@@ -327,7 +327,7 @@ end
 Stability function for rib < 0 (temperature/humidity profile).
 Ported from `StabilityFunc2` in `FrictionVelocityMod.F90`.
 """
-function stability_func2(zeta::Float64)
+function stability_func2(zeta::Real)
     # Guard: this function is only valid for zeta <= 0 (unstable conditions)
     zeta = min(zeta, 0.0)
     chik2 = sqrt(1.0 - 16.0 * zeta)
@@ -350,8 +350,8 @@ the Monin-Obukhov length.
 
 Ported from `frictionvel_type%MoninObukIni` in `FrictionVelocityMod.F90`.
 """
-function monin_obuk_ini(zetamaxstable::Float64, ur::Float64, thv::Float64,
-                        dthv::Float64, zldis::Float64, z0m::Float64)
+function monin_obuk_ini(zetamaxstable::Real, ur::Real, thv::Real,
+                        dthv::Real, zldis::Real, z0m::Real)
     ustar = 0.06
     wc = 0.5
     if dthv >= 0.0
@@ -399,22 +399,22 @@ function set_roughness_and_forc_heights_nonlake!(
         mask_nolakep::BitVector,
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
-        frac_sno::Vector{Float64},
-        snomelt_accum::Vector{Float64},
+        frac_sno::Vector{<:Real},
+        snomelt_accum::Vector{<:Real},
         frac_veg_nosno::Vector{Int},
-        z0m::Vector{Float64},
-        displa::Vector{Float64},
-        forc_hgt_u::Vector{Float64},
-        forc_hgt_t::Vector{Float64},
-        forc_hgt_q::Vector{Float64},
+        z0m::Vector{<:Real},
+        displa::Vector{<:Real},
+        forc_hgt_u::Vector{<:Real},
+        forc_hgt_t::Vector{<:Real},
+        forc_hgt_q::Vector{<:Real},
         col_landunit::Vector{Int},
         patch_gridcell::Vector{Int},
         patch_landunit::Vector{Int},
         patch_column::Vector{Int},
         lun_itype::Vector{Int},
         lun_urbpoi::Vector{Bool},
-        lun_z_0_town::Vector{Float64},
-        lun_z_d_town::Vector{Float64};
+        lun_z_0_town::Vector{<:Real},
+        lun_z_d_town::Vector{<:Real};
         z0param_method::String = "",
         use_z0m_snowmelt::Bool = false)
 
@@ -521,7 +521,7 @@ function set_actual_roughness_lengths!(
         bounds_patch::UnitRange{Int},
         patch_column::Vector{Int},
         patch_landunit::Vector{Int},
-        lun_z_0_town::Vector{Float64})
+        lun_z_0_town::Vector{<:Real})
 
     for p in bounds_patch
         if mask_exposedvegp[p]
@@ -569,20 +569,20 @@ function friction_velocity!(
         fv::FrictionVelocityData,
         fn::Int,
         filtern::Vector{Int},
-        displa::Vector{Float64},
-        z0m::Vector{Float64},
-        z0h::Vector{Float64},
-        z0q::Vector{Float64},
-        obu::Vector{Float64},
+        displa::Vector{<:Real},
+        z0m::Vector{<:Real},
+        z0h::Vector{<:Real},
+        z0q::Vector{<:Real},
+        obu::Vector{<:Real},
         iter::Int,
-        ur::Vector{Float64},
-        um::Vector{Float64},
-        ustar::Vector{Float64},
-        temp1::Vector{Float64},
-        temp2::Vector{Float64},
-        temp12m::Vector{Float64},
-        temp22m::Vector{Float64},
-        fm::Vector{Float64};
+        ur::Vector{<:Real},
+        um::Vector{<:Real},
+        ustar::Vector{<:Real},
+        temp1::Vector{<:Real},
+        temp2::Vector{<:Real},
+        temp12m::Vector{<:Real},
+        temp22m::Vector{<:Real},
+        fm::Vector{<:Real};
         landunit_index::Bool = false,
         lun_gridcell::Union{Vector{Int},Nothing} = nothing,
         lun_patchi::Union{Vector{Int},Nothing} = nothing,

@@ -30,7 +30,7 @@ end
 Read potential decomposition parameters.
 Corresponds to `readParams` in `SoilBiogeochemPotentialMod.F90`.
 """
-function decomp_potential_read_params!(params::DecompPotentialParams; dnp::Float64)
+function decomp_potential_read_params!(params::DecompPotentialParams; dnp::Real)
     params.dnp = dnp
     return nothing
 end
@@ -76,11 +76,11 @@ Corresponds to `SoilBiogeochemPotential` in `SoilBiogeochemPotentialMod.F90`.
 - `nlevdecomp::Int`: number of decomposition levels
 - `ndecomp_pools::Int`: number of decomposition pools
 - `ndecomp_cascade_transitions::Int`: number of cascade transitions
-- `cn_decomp_pools::Array{Float64,3}`: (out) C:N ratios of pools [col x lev x pool]
-- `p_decomp_cpool_loss::Array{Float64,3}`: (out) potential C loss [col x lev x trans]
-- `p_decomp_cn_gain::Array{Float64,3}`: (out) C:N of flux gained by receiver [col x lev x pool]
-- `pmnf_decomp_cascade::Array{Float64,3}`: (out) potential mineral N flux [col x lev x trans]
-- `p_decomp_npool_to_din::Array{Float64,3}`: (out) potential flux to DIN [col x lev x trans]
+- `cn_decomp_pools::Array{<:Real,3}`: (out) C:N ratios of pools [col x lev x pool]
+- `p_decomp_cpool_loss::Array{<:Real,3}`: (out) potential C loss [col x lev x trans]
+- `p_decomp_cn_gain::Array{<:Real,3}`: (out) C:N of flux gained by receiver [col x lev x pool]
+- `pmnf_decomp_cascade::Array{<:Real,3}`: (out) potential mineral N flux [col x lev x trans]
+- `p_decomp_npool_to_din::Array{<:Real,3}`: (out) potential flux to DIN [col x lev x trans]
 - `use_mimics::Bool`: whether MIMICS decomposition is active
 - `i_cop_mic::Int`: index of copiotrophic microbe pool (only used when use_mimics=true)
 - `i_oli_mic::Int`: index of oligotrophic microbe pool (only used when use_mimics=true)
@@ -97,11 +97,11 @@ function soil_bgc_potential!(
         nlevdecomp::Int,
         ndecomp_pools::Int,
         ndecomp_cascade_transitions::Int,
-        cn_decomp_pools::Array{Float64,3},
-        p_decomp_cpool_loss::Array{Float64,3},
-        p_decomp_cn_gain::Array{Float64,3},
-        pmnf_decomp_cascade::Array{Float64,3},
-        p_decomp_npool_to_din::Array{Float64,3},
+        cn_decomp_pools::Array{<:Real,3},
+        p_decomp_cpool_loss::Array{<:Real,3},
+        p_decomp_cn_gain::Array{<:Real,3},
+        pmnf_decomp_cascade::Array{<:Real,3},
+        p_decomp_npool_to_din::Array{<:Real,3},
         use_mimics::Bool=false,
         i_cop_mic::Int=0,
         i_oli_mic::Int=0)
@@ -133,13 +133,14 @@ function soil_bgc_potential!(
     gross_nmin_vr      = nf.gross_nmin_vr_col
 
     # Local arrays for MIMICS pathway
-    p_decomp_cpool_gain = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
-    p_decomp_npool_gain = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
-    p_decomp_cpool_gain_sum = zeros(ndecomp_pools)
-    p_decomp_npool_gain_sum = zeros(ndecomp_pools)
+    FT = eltype(decomp_cpools_vr)
+    p_decomp_cpool_gain = zeros(FT, nc, nlevdecomp, ndecomp_cascade_transitions)
+    p_decomp_npool_gain = zeros(FT, nc, nlevdecomp, ndecomp_cascade_transitions)
+    p_decomp_cpool_gain_sum = zeros(FT, ndecomp_pools)
+    p_decomp_npool_gain_sum = zeros(FT, ndecomp_pools)
 
     # Local immobilization accumulator
-    immob = zeros(nc, nlevdecomp)
+    immob = zeros(FT, nc, nlevdecomp)
 
     # -------------------------------------------------------------------
     # Set initial values for potential C and N fluxes

@@ -23,8 +23,8 @@ const SURFPROF_EXP = 10.0
         mask_bgc_vegp::BitVector,
         nlevdecomp::Int,
         nlevdecomp_full::Int,
-        dzsoi_decomp::Vector{Float64},
-        zsoi::Vector{Float64},
+        dzsoi_decomp::Vector{<:Real},
+        zsoi::Vector{<:Real},
         use_bedrock::Bool=false,
         zmin_bedrock::Float64=ZMIN_BEDROCK)
 
@@ -56,10 +56,10 @@ function soil_bgc_vertical_profile!(
         mask_bgc_vegp::BitVector,
         nlevdecomp::Int,
         nlevdecomp_full::Int,
-        dzsoi_decomp::Vector{Float64},
-        zsoi::Vector{Float64},
+        dzsoi_decomp::Vector{<:Real},
+        zsoi::Vector{<:Real},
         use_bedrock::Bool=false,
-        zmin_bedrock::Float64=ZMIN_BEDROCK)
+        zmin_bedrock::Real=ZMIN_BEDROCK)
 
     # --- Aliases (matching Fortran associate block) ---
     altmax_lastyear_indx = active_layer.altmax_lastyear_indx_col
@@ -76,8 +76,9 @@ function soil_bgc_vertical_profile!(
     np = length(mask_bgc_vegp)
 
     # --- Local workspace ---
-    cinput_rootfr     = zeros(Float64, np, nlevdecomp_full)
-    col_cinput_rootfr = zeros(Float64, nc, nlevdecomp_full)
+    FT = eltype(soilstate.crootfr_patch)
+    cinput_rootfr     = zeros(FT, np, nlevdecomp_full)
+    col_cinput_rootfr = zeros(FT, nc, nlevdecomp_full)
 
     delta = 1.0e-10
 
@@ -85,7 +86,7 @@ function soil_bgc_vertical_profile!(
     # 1. Surface profile: shallow exponential, optionally zeroed below
     #    bedrock when use_bedrock is true.
     # ------------------------------------------------------------------
-    surface_prof = zeros(Float64, nlevdecomp)
+    surface_prof = zeros(FT, nlevdecomp)
     for j in 1:nlevdecomp
         surface_prof[j] = exp(-SURFPROF_EXP * zsoi[j]) / dzsoi_decomp[j]
         if use_bedrock

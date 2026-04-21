@@ -12,7 +12,7 @@ heat content, and accumulated quantities.
 
 Ported from `temperature_type` in `TemperatureType.F90`.
 """
-Base.@kwdef mutable struct TemperatureData{FT<:AbstractFloat}
+Base.@kwdef mutable struct TemperatureData{FT<:Real}
     # --- Temperatures (patch-level) ---
     t_stem_patch             ::Vector{FT} = Float64[]   # patch stem temperature (K)
     t_veg_patch              ::Vector{FT} = Float64[]   # patch vegetation temperature (K)
@@ -353,10 +353,10 @@ function temperature_init_cold!(temp::TemperatureData,
                                 bounds_col::UnitRange{Int},
                                 bounds_patch::UnitRange{Int},
                                 bounds_lun::UnitRange{Int};
-                                em_roof_lun::Vector{Float64},
-                                em_wall_lun::Vector{Float64},
-                                em_improad_lun::Vector{Float64},
-                                em_perroad_lun::Vector{Float64},
+                                em_roof_lun::Vector{<:Real},
+                                em_wall_lun::Vector{<:Real},
+                                em_improad_lun::Vector{<:Real},
+                                em_perroad_lun::Vector{<:Real},
                                 is_prog_buildtemp::Bool = false)
 
     nlevgrnd       = varpar.nlevgrnd
@@ -707,9 +707,9 @@ Requires accumulation infrastructure (accumulMod) and crop type — stub until t
 """
 function temperature_update_acc_vars_crop_gdds!(temp::TemperatureData,
                                                 bounds_patch::UnitRange{Int},
-                                                gddx_patch::Vector{Float64};
+                                                gddx_patch::Vector{<:Real};
                                                 basetemp::Int = 0,
-                                                max_accum::Float64 = 26.0,
+                                                max_accum::Real = 26.0,
                                                 dtime::Int = 0)
     # Stub: When accumulMod and CropType are ported, this will:
     # 1. Determine if each patch is in its GDD accumulation season
@@ -729,8 +729,8 @@ Ported from `temperature_type%ReadNL` in `TemperatureType.F90`.
 In Julia, namelist values are passed directly instead of reading from a file.
 """
 function temperature_read_namelist!(temp::TemperatureData;
-                                   excess_ice_coldstart_depth::Float64 = 0.5,
-                                   excess_ice_coldstart_temp::Float64 = -5.0)
+                                   excess_ice_coldstart_depth::Real = 0.5,
+                                   excess_ice_coldstart_temp::Real = -5.0)
     if excess_ice_coldstart_depth <= 0.0
         error("excess_ice_coldstart_depth must be positive, got $excess_ice_coldstart_depth")
     end

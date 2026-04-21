@@ -22,7 +22,7 @@ growing degree-day accumulators, and related per-patch fields.
 
 Ported from `crop_type` in `CropType.F90`.
 """
-Base.@kwdef mutable struct CropData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CropData{FT<:Real}
     # --- Scalar / config fields ---
     baset_mapping              ::String  = BASET_MAP_CONSTANT
     baset_latvary_intercept    ::FT = 12.0
@@ -146,8 +146,8 @@ Corresponds to `ReadNML` in the Fortran source.
 """
 function crop_read_nml!(cr::CropData;
                         baset_mapping::String=BASET_MAP_CONSTANT,
-                        baset_latvary_intercept::Float64=12.0,
-                        baset_latvary_slope::Float64=0.4)
+                        baset_latvary_intercept::Real=12.0,
+                        baset_latvary_slope::Real=0.4)
 
     if baset_mapping != BASET_MAP_CONSTANT && baset_mapping != BASET_MAP_LATVARY
         error("Bad value for baset_mapping: $baset_mapping")
@@ -272,8 +272,8 @@ In the Fortran source this routine:
 Corresponds to `CropUpdateAccVars` in the Fortran source.
 """
 function crop_update_acc_vars!(cr::CropData, bounds_patch::UnitRange{Int},
-                                t_ref2m_patch::Vector{Float64},
-                                t_soisno_col::Matrix{Float64})
+                                t_ref2m_patch::Vector{<:Real},
+                                t_soisno_col::Matrix{<:Real})
     return nothing
 end
 
@@ -308,9 +308,9 @@ Compute latitude-varying base temperature for heat unit index calculation.
 
 Ported from `latbaset` function in `CropType.F90`.
 """
-function latbaset(baset::Float64, latdeg::Float64,
-                  baset_latvary_intercept::Float64,
-                  baset_latvary_slope::Float64)
+function latbaset(baset::Real, latdeg::Real,
+                  baset_latvary_intercept::Real,
+                  baset_latvary_slope::Real)
     return baset + baset_latvary_intercept - min(baset_latvary_intercept,
                                                   baset_latvary_slope * abs(latdeg))
 end

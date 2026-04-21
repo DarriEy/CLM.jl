@@ -10,7 +10,7 @@
 Add a landunit at index `li[] + 1`. `li` is a `Ref{Int}` incremented in place.
 Sets gridcell, weight, itype, and landunit classification flags.
 """
-function add_landunit!(lun::LandunitData, li::Ref{Int}, gi::Int, ltype::Int, wtgcell::Float64)
+function add_landunit!(lun::LandunitData, li::Ref{Int}, gi::Int, ltype::Int, wtgcell::Real)
     li[] += 1
     l = li[]
 
@@ -33,7 +33,7 @@ Add a column at index `ci[] + 1`. `ci` is a `Ref{Int}` incremented in place.
 Sets landunit, gridcell, weight, itype, and derived flags.
 """
 function add_column!(col::ColumnData, lun::LandunitData, ci::Ref{Int},
-                     li::Int, ctype::Int, wtlunit::Float64;
+                     li::Int, ctype::Int, wtlunit::Real;
                      type_is_dynamic::Bool=false)
     ci[] += 1
     c = ci[]
@@ -57,7 +57,7 @@ Add a patch at index `pi[] + 1`. `pi` is a `Ref{Int}` incremented in place.
 Sets column, landunit, gridcell, weight, itype, and mxy.
 """
 function add_patch!(pch::PatchData, col::ColumnData, lun::LandunitData,
-                    pi::Ref{Int}, ci::Int, ptype::Int, wtcol::Float64)
+                    pi::Ref{Int}, ci::Int, ptype::Int, wtcol::Real)
     pi[] += 1
     p = pi[]
 

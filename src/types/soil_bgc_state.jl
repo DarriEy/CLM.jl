@@ -12,7 +12,7 @@ N fixation/deposition profiles, and plant N demand.
 
 Ported from `soilbiogeochem_state_type` in `SoilBiogeochemStateType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SoilBiogeochemStateData{FT<:Real}
     # --- Patch-level vertical profiles (patch × nlevdecomp_full) ---
     leaf_prof_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of leaves
     froot_prof_patch            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of fine roots
@@ -153,6 +153,6 @@ accelerated in high latitude regions.
 
 Ported from `get_spinup_latitude_term` in `SoilBiogeochemStateType.F90`.
 """
-function get_spinup_latitude_term(latitude::Float64)
+function get_spinup_latitude_term(latitude::Real)
     return 1.0 + 50.0 / (1.0 + exp(-0.15 * (abs(latitude) - 60.0)))
 end

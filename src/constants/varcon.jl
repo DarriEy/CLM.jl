@@ -88,7 +88,7 @@ const AQUIFER_WATER_BASELINE = 5000.0  # baseline aquifer water [mm]
 # --- Error function approximation ---
 # Abramowitz & Stegun 7.1.26, ~1.5e-7 accuracy
 # Avoids SpecialFunctions.jl dependency
-function erf(x::Float64)
+function erf(x::Real)
     a1 =  0.254829592
     a2 = -0.284496736
     a3 =  1.421413741
@@ -196,6 +196,10 @@ const D_CON_G = [
 # Henry's law constants [ngases]
 const C_H_INV = [600.0, 1.3, 36.0]
 const KH_THETA = [1600.0, 1500.0, 2400.0]
+
+# Snow capping constants
+const H2OSNO_MAX = 10000.0       # Maximum allowed SWE [mm H2O]
+const MIN_SNOW_TO_KEEP = 1.0e-3  # Minimum fraction of snow mass to retain during capping
 
 # --- Runtime-allocated vertical coordinate arrays ---
 # These get populated during initialization

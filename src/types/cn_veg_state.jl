@@ -12,7 +12,7 @@ and annual accumulator variables at patch and column levels.
 
 Ported from `cnveg_state_type` in `CNVegStateType.F90`.
 """
-Base.@kwdef mutable struct CNVegStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CNVegStateData{FT<:Real}
     # --- Patch-level integer fields ---
     burndate_patch              ::Vector{Int}     = Int[]       # patch crop burn date
     peaklai_patch               ::Vector{Int}     = Int[]       # patch 1: max allowed lai; 0: not at max

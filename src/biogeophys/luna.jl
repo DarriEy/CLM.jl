@@ -100,8 +100,8 @@ end
 
 Temperature response for Vcmax, with temperature acclimation (Kattge & Knorr 2007).
 """
-function vcmx_t_kattge(tgrow::Float64, tleaf::Float64)
-    TlimVcmx = 668.39 - 1.07 * min(max(tgrow, 11.0), 35.0)
+function vcmx_t_kattge(tgrow::Real, tleaf::Real)
+    TlimVcmx = 668.39 - 1.07 * smooth_min(smooth_max(tgrow, 11.0), 35.0)
     Vcmxf1 = 1.0 + exp((TlimVcmx * (25.0 + TFRZ) - 200000.0) / (RGAS * (25.0 + TFRZ)))
     Vcmxf2 = exp((72000.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
     Vcmxf3 = 1.0 + exp((TlimVcmx * (tleaf + TFRZ) - 200000.0) / (RGAS * (tleaf + TFRZ)))
@@ -113,8 +113,8 @@ end
 
 Temperature response for Jmax, with temperature acclimation (Kattge & Knorr 2007).
 """
-function jmx_t_kattge(tgrow::Float64, tleaf::Float64)
-    TlimJmx = 659.7 - 0.75 * min(max(tgrow, 11.0), 35.0)
+function jmx_t_kattge(tgrow::Real, tleaf::Real)
+    TlimJmx = 659.7 - 0.75 * smooth_min(smooth_max(tgrow, 11.0), 35.0)
     Jmxf1 = 1.0 + exp((TlimJmx * (25.0 + TFRZ) - 200000.0) / (RGAS * (25.0 + TFRZ)))
     Jmxf2 = exp((50000.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (tleaf + TFRZ)))
     Jmxf3 = 1.0 + exp((TlimJmx * (tleaf + TFRZ) - 200000.0) / (RGAS * (tleaf + TFRZ)))
@@ -126,7 +126,7 @@ end
 
 Temperature response for Vcmax without temperature acclimation (Leuning 2002).
 """
-function vcmx_t_leuning(tgrow::Float64, tleaf::Float64)
+function vcmx_t_leuning(tgrow::Real, tleaf::Real)
     TlimVcmx = 486.0
     Vcmxf1 = 1.0 + exp((TlimVcmx * (25.0 + TFRZ) - 149252.0) / (RGAS * (25.0 + TFRZ)))
     Vcmxf2 = exp((73637.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
@@ -139,7 +139,7 @@ end
 
 Temperature response for Jmax without temperature acclimation (Leuning 2002).
 """
-function jmx_t_leuning(tgrow::Float64, tleaf::Float64)
+function jmx_t_leuning(tgrow::Real, tleaf::Real)
     TlimJmx = 495.0
     Jmxf1 = 1.0 + exp((TlimJmx * (25.0 + TFRZ) - 152044.0) / (RGAS * (25.0 + TFRZ)))
     Jmxf2 = exp((50300.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
@@ -152,7 +152,7 @@ end
 
 Temperature response for respiration (Bernacchi PCE 2001).
 """
-function resp_t_bernacchi(tleaf::Float64)
+function resp_t_bernacchi(tleaf::Real)
     return exp(18.72 - 46.39 / (RGAS * (tleaf + TFRZ)))
 end
 
@@ -165,7 +165,7 @@ end
 
 Solve a*x^2 + b*x + c = 0. Matches the Fortran LUNA Quadratic subroutine exactly.
 """
-function quadratic_luna(a::Float64, b::Float64, c::Float64)
+function quadratic_luna(a::Real, b::Real, c::Real)
     r1 = 1.0e36
     r2 = 1.0e36
 
@@ -211,8 +211,8 @@ function nue_ref(luna_params::LunaParamsData)
     c_p = luna_params.cp25_yr2000 * exp((37830.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
     awc = k_c * (1.0 + O2c / k_o)
     ci = 0.7 * CO2c
-    Kj = max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
-    Kc = max(ci - c_p, 0.0) / (ci + awc)
+    Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
+    Kc = smooth_max(ci - c_p, 0.0) / (ci + awc)
     NUEjref = Kj * Fj
     NUEcref = Kc * Fc
     Kj2Kcref = Kj / Kc
@@ -228,7 +228,7 @@ end
 
 Calculate nitrogen use efficiency under current environmental conditions.
 """
-function nue_calc(O2a::Float64, ci::Float64, tgrow::Float64, tleaf::Float64,
+function nue_calc(O2a::Real, ci::Real, tgrow::Real, tleaf::Real,
                   luna_params::LunaParamsData)
     Fc = vcmx_t_kattge(tgrow, tleaf) * LUNA_Fc25
     Fj = jmx_t_kattge(tgrow, tleaf) * LUNA_Fj25
@@ -236,8 +236,8 @@ function nue_calc(O2a::Float64, ci::Float64, tgrow::Float64, tleaf::Float64,
     k_o = luna_params.ko25_coef * exp((36380.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
     c_p = luna_params.cp25_yr2000 * exp((37830.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
     awc = k_c * (1.0 + O2a / k_o)
-    Kj = max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
-    Kc = max(ci - c_p, 0.0) / (ci + awc)
+    Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
+    Kc = smooth_max(ci - c_p, 0.0) / (ci + awc)
     NUEj = Kj * Fj
     NUEc = Kc * Fc
     Kj2Kc = Kj / Kc
@@ -255,16 +255,16 @@ end
 Solve photosynthesis equations for LUNA nitrogen allocation.
 Uses Ball-Berry stomatal conductance and Farquhar model.
 """
-function photosynthesis_luna!(forc_pbot::Float64, tleafd::Float64, relh::Float64,
-                              CO2a::Float64, O2a::Float64, rb::Float64,
-                              Vcmax::Float64, JmeanL::Float64,
+function photosynthesis_luna!(forc_pbot::Real, tleafd::Real, relh::Real,
+                              CO2a::Real, O2a::Real, rb::Real,
+                              Vcmax::Real, JmeanL::Real,
                               luna_params::LunaParamsData)
     rsmax0 = 2.0 * 1.0e4
     bp = 2000.0
     tleaf = tleafd
     tleafk = tleaf + TFRZ
     aquad = 1.0
-    relhc = max(luna_params.minrelh, relh)
+    relhc = smooth_max(luna_params.minrelh, relh)
     bbb = 1.0 / bp
     mbb = LUNA_mp
     CO2c = CO2a
@@ -289,21 +289,21 @@ function photosynthesis_luna!(forc_pbot::Float64, tleafd::Float64, relh::Float64
     while abs(ci - ciold) > 0.01 && i < 100
         i += 1
         ciold = ci
-        Kc_val = max(ci - c_p, 0.0) / (ci + awc)
+        Kc_val = smooth_max(ci - c_p, 0.0) / (ci + awc)
         Wc = Kc_val * Vcmax
         gs_mol = bbb + mbb * Wc / CO2c * forc_pbot * relhc
         phi = forc_pbot * (1.37 * gs_mol + 1.6 * gb_mol) / (gb_mol * gs_mol)
         bquad = awc - CO2c + phi * Vcmax
         cquad = -(c_p * phi * Vcmax + awc * CO2c)
         r1, r2 = quadratic_luna(aquad, bquad, cquad)
-        ci = max(r1, r2)
+        ci = smooth_max(r1, r2)
         if ci < 0.0
             ci = c_p + 0.5 * ciold
         end
     end
 
-    Kj = max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
-    Kc_val = max(ci - c_p, 0.0) / (ci + awc)
+    Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
+    Kc_val = smooth_max(ci - c_p, 0.0) / (ci + awc)
     Wc = Kc_val * Vcmax
     Wj = Kj * JmeanL
     ciold = ci - 0.02
@@ -319,22 +319,22 @@ function photosynthesis_luna!(forc_pbot::Float64, tleafd::Float64, relh::Float64
             bquad = 2.0 * c_p - CO2c + phi * JmeanL / 4.0
             cquad = -(c_p * phi * JmeanL / 4.0 + 2.0 * c_p * CO2c)
             r1, r2 = quadratic_luna(aquad, bquad, cquad)
-            ci = max(r1, r2)
+            ci = smooth_max(r1, r2)
             if ci < 0.0
                 ci = c_p + 0.5 * ciold
             end
-            Kj = max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
+            Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
             Wj = Kj * JmeanL
         end
-        Kj = max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
-        Kc_val = max(ci - c_p, 0.0) / (ci + awc)
+        Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
+        Kc_val = smooth_max(ci - c_p, 0.0) / (ci + awc)
         Wc = Kc_val * Vcmax
         Wj = Kj * JmeanL
     end
 
-    A = (1.0 - luna_params.luna_theta_cj) * max(Wc, Wj) + luna_params.luna_theta_cj * min(Wc, Wj)
+    A = (1.0 - luna_params.luna_theta_cj) * smooth_max(Wc, Wj) + luna_params.luna_theta_cj * smooth_min(Wc, Wj)
     rs = cf / gs_mol
-    rs = min(rsmax0, rs)
+    rs = smooth_min(rsmax0, rs)
 
     return (ci, Kc_val, Kj, A)
 end
@@ -353,19 +353,19 @@ end
 Calculate nitrogen investment for electron transport, carboxylation, respiration
 given nitrogen allocation in light capture [Nlc].
 """
-function nitrogen_investments!(KcKjFlag::Int, FNCa::Float64, Nlc::Float64,
-                               forc_pbot10::Float64, relh10::Float64,
-                               CO2a10::Float64, O2a10::Float64,
-                               PARi10::Float64, PARimx10::Float64,
-                               rb10::Float64, hourpd::Float64,
-                               tair10::Float64, tleafd10::Float64, tleafn10::Float64,
-                               Kj2Kc::Float64, JmaxCoef::Float64,
-                               Fc::Float64, Fj::Float64,
-                               NUEc::Float64, NUEj::Float64,
-                               NUEcref::Float64, NUEjref::Float64,
-                               NUEr::Float64, o3coefjmax::Float64,
-                               jmaxb0::Float64, wc2wjb0::Float64,
-                               Kc_in::Float64, Kj_in::Float64, ci_in::Float64,
+function nitrogen_investments!(KcKjFlag::Int, FNCa::Real, Nlc::Real,
+                               forc_pbot10::Real, relh10::Real,
+                               CO2a10::Real, O2a10::Real,
+                               PARi10::Real, PARimx10::Real,
+                               rb10::Real, hourpd::Real,
+                               tair10::Real, tleafd10::Real, tleafn10::Real,
+                               Kj2Kc::Real, JmaxCoef::Real,
+                               Fc::Real, Fj::Real,
+                               NUEc::Real, NUEj::Real,
+                               NUEcref::Real, NUEjref::Real,
+                               NUEr::Real, o3coefjmax::Real,
+                               jmaxb0::Real, wc2wjb0::Real,
+                               Kc_in::Real, Kj_in::Real, ci_in::Real,
                                luna_params::LunaParamsData)
     leaf_mr_vcm = 0.015
 
@@ -391,7 +391,7 @@ function nitrogen_investments!(KcKjFlag::Int, FNCa::Float64, Nlc::Float64,
     else
         Wc = Kc * Vcmax
         Wj = Kj * JmeanL
-        A = (1.0 - luna_params.luna_theta_cj) * max(Wc, Wj) + luna_params.luna_theta_cj * min(Wc, Wj)
+        A = (1.0 - luna_params.luna_theta_cj) * smooth_max(Wc, Wj) + luna_params.luna_theta_cj * smooth_min(Wc, Wj)
     end
 
     PSN = LUNA_Cv * A * hourpd
@@ -417,15 +417,15 @@ end
 
 LUNA model nitrogen partitioning optimization.
 """
-function nitrogen_allocation!(FNCa::Float64, forc_pbot10::Float64, relh10::Float64,
-                              CO2a10::Float64, O2a10::Float64,
-                              PARi10::Float64, PARimx10::Float64,
-                              rb10::Float64, hourpd::Float64,
-                              tair10::Float64, tleafd10::Float64, tleafn10::Float64,
-                              jmaxb0_val::Float64, jmaxb1_val::Float64, wc2wjb0_val::Float64,
-                              PNlcold::Float64, PNetold::Float64,
-                              PNrespold::Float64, PNcbold::Float64,
-                              dayl_factor::Float64, o3coefjmax::Float64,
+function nitrogen_allocation!(FNCa::Real, forc_pbot10::Real, relh10::Real,
+                              CO2a10::Real, O2a10::Real,
+                              PARi10::Real, PARimx10::Real,
+                              rb10::Real, hourpd::Real,
+                              tair10::Real, tleafd10::Real, tleafn10::Real,
+                              jmaxb0_val::Real, jmaxb1_val::Real, wc2wjb0_val::Real,
+                              PNlcold::Real, PNetold::Real,
+                              PNrespold::Real, PNcbold::Real,
+                              dayl_factor::Real, o3coefjmax::Real,
                               luna_params::LunaParamsData)
 
     NUEjref, NUEcref, Kj2Kcref = nue_ref(luna_params)
@@ -439,14 +439,14 @@ function nitrogen_allocation!(FNCa::Float64, forc_pbot10::Float64, relh10::Float
     chg_per_step = 0.02 * FNCa
     PNlc = PNlcold
     PNlcoldi = PNlcold - 0.001
-    PARi10c  = max(LUNA_PARLowLim, PARi10)
-    PARimx10c = max(LUNA_PARLowLim, PARimx10)
+    PARi10c  = smooth_max(LUNA_PARLowLim, PARi10)
+    PARimx10c = smooth_max(LUNA_PARLowLim, PARimx10)
     increase_flag = 0
     jj = 1
-    tleafd10c = min(max(tleafd10, LUNA_Trange1), LUNA_Trange2)
-    tleafn10c = min(max(tleafn10, LUNA_Trange1), LUNA_Trange2)
+    tleafd10c = smooth_min(smooth_max(tleafd10, LUNA_Trange1), LUNA_Trange2)
+    tleafn10c = smooth_min(smooth_max(tleafn10, LUNA_Trange1), LUNA_Trange2)
     ci = 0.7 * CO2a10
-    JmaxCoef = jmaxb1_val * dayl_factor * (1.0 - exp(-luna_params.relhExp * max(relh10 -
+    JmaxCoef = jmaxb1_val * dayl_factor * (1.0 - exp(-luna_params.relhExp * smooth_max(relh10 -
         luna_params.minrelh, 0.0) / (1.0 - luna_params.minrelh)))
 
     # Initialize Kc, Kj and loop variables for proper scoping
@@ -607,7 +607,7 @@ function acc24_climate_luna!(canopystate::CanopyStateData,
                              patchdata::PatchData,
                              mask_patch::BitVector,
                              bounds::UnitRange{Int},
-                             dtime::Float64)
+                             dtime::Real)
     for p in bounds
         mask_patch[p] || continue
 
@@ -662,11 +662,11 @@ function acc240_climate_luna!(temperature::TemperatureData,
                               patchdata::PatchData,
                               mask_patch::BitVector,
                               bounds::UnitRange{Int},
-                              oair::Vector{Float64},
-                              cair::Vector{Float64},
-                              rb::Vector{Float64},
-                              rh::Vector{Float64},
-                              dtime::Float64)
+                              oair::Vector{<:Real},
+                              cair::Vector{<:Real},
+                              rb::Vector{<:Real},
+                              rh::Vector{<:Real},
+                              dtime::Real)
     for p in bounds
         mask_patch[p] || continue
 
@@ -676,7 +676,7 @@ function acc240_climate_luna!(temperature::TemperatureData,
             if ndaysteps_p > 0
                 par24d_z_i = solarabs.par24d_z_patch[p, :] ./ (dtime * ndaysteps_p)
             else
-                par24d_z_i = zeros(size(solarabs.par24d_z_patch, 2))
+                par24d_z_i = zeros(eltype(solarabs.par24d_z_patch), size(solarabs.par24d_z_patch, 2))
             end
 
             if solarabs.par240d_z_patch[p, 1] == SPVAL  # first day
@@ -715,7 +715,7 @@ function acc240_climate_luna!(temperature::TemperatureData,
             if waterdiag.rh10_af_patch[p] == SPVAL
                 waterdiag.rh10_af_patch[p] = rh[p]
             end
-            waterdiag.rh10_af_patch[p] = 0.9 * waterdiag.rh10_af_patch[p] + 0.1 * min(1.0, rh[p])
+            waterdiag.rh10_af_patch[p] = 0.9 * waterdiag.rh10_af_patch[p] + 0.1 * smooth_min(1.0, rh[p])
 
             # 10-day running mean boundary layer resistance
             if frictionvel.rb10_patch[p] == SPVAL
@@ -752,21 +752,22 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
                                          gridcell::GridcellData,
                                          mask_patch::BitVector,
                                          bounds::UnitRange{Int},
-                                         dayl_factor::Vector{Float64},
-                                         forc_pbot10::Vector{Float64},
-                                         CO2_p240::Vector{Float64},
-                                         O2_p240::Vector{Float64},
-                                         c3psn_pft::Vector{Float64},
-                                         slatop_pft::Vector{Float64},
-                                         leafcn_pft::Vector{Float64},
-                                         rhol_pft::Matrix{Float64},
-                                         taul_pft::Matrix{Float64},
-                                         o3coefjmax::Vector{Float64},
+                                         dayl_factor::Vector{<:Real},
+                                         forc_pbot10::Vector{<:Real},
+                                         CO2_p240::Vector{<:Real},
+                                         O2_p240::Vector{<:Real},
+                                         c3psn_pft::Vector{<:Real},
+                                         slatop_pft::Vector{<:Real},
+                                         leafcn_pft::Vector{<:Real},
+                                         rhol_pft::Matrix{<:Real},
+                                         taul_pft::Matrix{<:Real},
+                                         o3coefjmax::Vector{<:Real},
                                          luna_params::LunaParamsData,
-                                         dtime::Float64,
+                                         dtime::Real,
                                          nlevcan_val::Int)
     fnps = 0.15
-    FNCa_z = zeros(nlevcan_val)
+    FT = eltype(dayl_factor)
+    FNCa_z = zeros(FT, nlevcan_val)
 
     for p in bounds
         mask_patch[p] || continue
@@ -785,11 +786,11 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
             tleafn10 = temperature.t_veg10_night_patch[p] - TFRZ
             tleaf10  = (gridcell.dayl[g] * tleafd10 + (86400.0 - gridcell.dayl[g]) * tleafn10) / 86400.0
             tair10   = temperature.t_a10_patch[p] - TFRZ
-            relh10   = min(1.0, waterdiag.rh10_af_patch[p])
+            relh10   = smooth_min(1.0, waterdiag.rh10_af_patch[p])
             rb10v    = frictionvel.rb10_patch[p]
 
             # Enzyme turnover rate
-            EnzTurnoverTFactor = LUNA_Q10Enz^(0.1 * (min(40.0, tleaf10) - 25.0))
+            EnzTurnoverTFactor = LUNA_Q10Enz^(0.1 * (smooth_min(40.0, tleaf10) - 25.0))
             max_daily_pchg = EnzTurnoverTFactor * luna_params.enzyme_turnover_daily
 
             # Radiation absorption
@@ -814,8 +815,8 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
                             end
                             relRad = PARi10 / PARTop
                             relCLNCa = 0.1802 * log(relRad) + 1.0  # see Ali et al 2015
-                            relCLNCa = max(0.2, relCLNCa)
-                            relCLNCa = min(1.0, relCLNCa)
+                            relCLNCa = smooth_max(0.2, relCLNCa)
+                            relCLNCa = smooth_min(1.0, relCLNCa)
 
                             SNCa = 1.0 / slatop_pft[ft] * LUNA_SNC
                             lnc_p = photosyns.lnca_patch[p]
@@ -861,13 +862,13 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
 
                             # Constrained update of vcmx25
                             chg = vcmx25_opt - photosyns.vcmx25_z_patch[p, z]
-                            chg_constrn = min(abs(chg), photosyns.vcmx25_z_patch[p, z] * max_daily_pchg)
+                            chg_constrn = smooth_min(smooth_abs(chg), photosyns.vcmx25_z_patch[p, z] * max_daily_pchg)
                             photosyns.vcmx25_z_patch[p, z] += sign(chg) * chg_constrn
                             photosyns.vcmx25_z_last_valid_patch[p, z] = photosyns.vcmx25_z_patch[p, z]
 
                             # Constrained update of jmx25
                             chg = jmx25_opt - photosyns.jmx25_z_patch[p, z]
-                            chg_constrn = min(abs(chg), photosyns.jmx25_z_patch[p, z] * max_daily_pchg)
+                            chg_constrn = smooth_min(smooth_abs(chg), photosyns.jmx25_z_patch[p, z] * max_daily_pchg)
                             photosyns.jmx25_z_patch[p, z] += sign(chg) * chg_constrn
                             photosyns.jmx25_z_last_valid_patch[p, z] = photosyns.jmx25_z_patch[p, z]
 
@@ -879,14 +880,24 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
 
                             # Sanity checks
                             if isnan(photosyns.vcmx25_z_patch[p, z])
-                                error("LUNA: Vcmx25 is NaN for patch=$p z=$z pft=$ft")
+                                if _is_ad_type(eltype(photosyns.vcmx25_z_patch))
+                                    @warn "LUNA: Vcmx25 is NaN (AD mode, clamping to 50)" maxlog=1
+                                    photosyns.vcmx25_z_patch[p, z] = 50.0
+                                else
+                                    error("LUNA: Vcmx25 is NaN for patch=$p z=$z pft=$ft")
+                                end
                             end
                             if photosyns.vcmx25_z_patch[p, z] > 1000.0 || photosyns.vcmx25_z_patch[p, z] < 0.0
                                 @warn "LUNA: Vcmx25 unrealistic (>1000 or negative) for patch=$p z=$z pft=$ft, resetting to 50"
                                 photosyns.vcmx25_z_patch[p, z] = 50.0
                             end
                             if isnan(photosyns.jmx25_z_patch[p, z])
-                                error("LUNA: Jmx25 is NaN for patch=$p z=$z pft=$ft")
+                                if _is_ad_type(eltype(photosyns.jmx25_z_patch))
+                                    @warn "LUNA: Jmx25 is NaN (AD mode, clamping to 85)" maxlog=1
+                                    photosyns.jmx25_z_patch[p, z] = 85.0
+                                else
+                                    error("LUNA: Jmx25 is NaN for patch=$p z=$z pft=$ft")
+                                end
                             end
                             if photosyns.jmx25_z_patch[p, z] > 2000.0 || photosyns.jmx25_z_patch[p, z] < 0.0
                                 @warn "LUNA: Jmx25 unrealistic (>2000 or negative) for patch=$p z=$z pft=$ft, resetting to 85"
@@ -894,7 +905,7 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
                             end
                         end  # z loop (growth)
                     else  # decay during drought or winter
-                        max_daily_decay = min(0.5, 0.1 * max_daily_pchg)
+                        max_daily_decay = smooth_min(0.5, 0.1 * max_daily_pchg)
                         nrad_p = surfalb.nrad_patch[p]
                         for z in 1:nrad_p
                             if photosyns.enzs_z_patch[p, z] > 0.5

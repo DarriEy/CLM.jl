@@ -236,7 +236,7 @@ function read_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType)
             try
                 rv.setter!(inst, Float64.(data))
             catch e
-                @warn "Failed to restore restart variable $(rv.name): $e"
+                error("Failed to restore restart variable $(rv.name): $e")
             end
         end
     end

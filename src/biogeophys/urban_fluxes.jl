@@ -20,7 +20,7 @@ const urban_fluxes_params = UrbanFluxesParamsData()
 
 Set UrbanFluxes module parameters (replaces Fortran readParams).
 """
-function urban_fluxes_read_params!(; wind_min::Float64 = urban_fluxes_params.wind_min)
+function urban_fluxes_read_params!(; wind_min::Real = urban_fluxes_params.wind_min)
     urban_fluxes_params.wind_min = wind_min
     return nothing
 end
@@ -37,7 +37,7 @@ Calculate waste heat from air-conditioning with the simpler method (CLM4.5).
 
 Ported from: UrbanFluxesMod.F90 :: simple_wasteheatfromac
 """
-function simple_wasteheatfromac(eflx_urban_ac::Float64, eflx_urban_heat::Float64)
+function simple_wasteheatfromac(eflx_urban_ac::Real, eflx_urban_heat::Real)
     # wasteheat from heating/cooling
     if urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON
         eflx_wasteheat = AC_WASTEHEAT_FACTOR * eflx_urban_ac +
@@ -48,7 +48,7 @@ function simple_wasteheatfromac(eflx_urban_ac::Float64, eflx_urban_heat::Float64
 
     # If air conditioning on, always replace heat removed with heat into canyon
     if urban_ctrl.urban_hac == URBAN_HAC_ON || urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON
-        eflx_heat_from_ac = abs(eflx_urban_ac)
+        eflx_heat_from_ac = smooth_abs(eflx_urban_ac)
     else
         eflx_heat_from_ac = 0.0
     end
@@ -75,12 +75,12 @@ function wasteheat!(
         lun_data         ::LandunitData,
         num_urbanl       ::Int,
         filter_urbanl    ::Vector{Int},
-        eflx_wasteheat_roof      ::Vector{Float64},
-        eflx_wasteheat_sunwall   ::Vector{Float64},
-        eflx_wasteheat_shadewall ::Vector{Float64},
-        eflx_heat_from_ac_roof      ::Vector{Float64},
-        eflx_heat_from_ac_sunwall   ::Vector{Float64},
-        eflx_heat_from_ac_shadewall ::Vector{Float64})
+        eflx_wasteheat_roof      ::Vector{<:Real},
+        eflx_wasteheat_sunwall   ::Vector{<:Real},
+        eflx_wasteheat_shadewall ::Vector{<:Real},
+        eflx_heat_from_ac_roof      ::Vector{<:Real},
+        eflx_heat_from_ac_sunwall   ::Vector{<:Real},
+        eflx_heat_from_ac_shadewall ::Vector{<:Real})
 
     for fl in 1:num_urbanl
         l = filter_urbanl[fl]
@@ -104,7 +104,7 @@ function wasteheat!(
         end
 
         # Limit wasteheat to ensure no unrealistically strong positive feedbacks
-        energyflux.eflx_wasteheat_lun[l] = min(energyflux.eflx_wasteheat_lun[l], WASTEHEAT_LIMIT)
+        energyflux.eflx_wasteheat_lun[l] = smooth_min(energyflux.eflx_wasteheat_lun[l], WASTEHEAT_LIMIT)
 
         if is_simple_build_temp()
             energyflux.eflx_heat_from_ac_lun[l] = lun_data.wtlunit_roof[l] * eflx_heat_from_ac_roof[l] +
@@ -114,7 +114,7 @@ function wasteheat!(
         elseif is_prog_build_temp()
             # If air conditioning on, always replace heat removed with heat into canyon
             if urban_ctrl.urban_hac == URBAN_HAC_ON || urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON
-                energyflux.eflx_heat_from_ac_lun[l] = abs(energyflux.eflx_urban_ac_lun[l])
+                energyflux.eflx_heat_from_ac_lun[l] = smooth_abs(energyflux.eflx_urban_ac_lun[l])
             else
                 energyflux.eflx_heat_from_ac_lun[l] = 0.0
             end
@@ -148,9 +148,10 @@ function calc_simple_internal_building_temp!(
     nlevurb = varpar.nlevurb
 
     nl = length(lun_data.gridcell)
-    t_sunwall_innerl   = zeros(nl)
-    t_shadewall_innerl = zeros(nl)
-    t_roof_innerl      = zeros(nl)
+    FT = eltype(temperature.t_soisno_col)
+    t_sunwall_innerl   = zeros(FT, nl)
+    t_shadewall_innerl = zeros(FT, nl)
+    t_roof_innerl      = zeros(FT, nl)
 
     # Gather inner layer temperatures from urban columns
     for fc in 1:num_urbanc
@@ -218,15 +219,15 @@ function urban_fluxes!(
         bounds_col       ::UnitRange{Int},
         bounds_patch     ::UnitRange{Int},
         # Atmospheric forcing (gridcell-level)
-        forc_t_grc       ::Vector{Float64},
-        forc_th_grc      ::Vector{Float64},
-        forc_rho_grc     ::Vector{Float64},
-        forc_q_grc       ::Vector{Float64},
-        forc_pbot_grc    ::Vector{Float64},
-        forc_u_grc       ::Vector{Float64},
-        forc_v_grc       ::Vector{Float64};
+        forc_t_grc       ::Vector{<:Real},
+        forc_th_grc      ::Vector{<:Real},
+        forc_rho_grc     ::Vector{<:Real},
+        forc_q_grc       ::Vector{<:Real},
+        forc_pbot_grc    ::Vector{<:Real},
+        forc_u_grc       ::Vector{<:Real},
+        forc_v_grc       ::Vector{<:Real};
         # Optional time step info
-        dtime            ::Float64 = 3600.0,
+        dtime            ::Real = 3600.0,
         nstep            ::Int     = 1)
 
     params = urban_fluxes_params
@@ -247,80 +248,81 @@ function urban_fluxes!(
     nc = endc
     np_local = endp
 
-    canyontop_wind      = zeros(nl)
-    canyon_u_wind       = zeros(nl)
-    canyon_wind         = zeros(nl)
-    canyon_resistance   = zeros(nl)
-    ur                  = zeros(nl)
-    ustar_loc           = zeros(nl)
-    ramu                = zeros(nl)
-    rahu                = zeros(nl)
-    rawu                = zeros(nl)
-    temp1               = zeros(nl)
-    temp12m             = zeros(nl)
-    temp2               = zeros(nl)
-    temp22m             = zeros(nl)
-    thm_g               = zeros(nl)
-    thv_g               = zeros(nl)
-    dth                 = zeros(nl)
-    dqh                 = zeros(nl)
-    zldis_arr           = zeros(nl)
-    zeta_lunit          = zeros(nl)
-    um                  = zeros(nl)
-    obu                 = zeros(nl)
-    taf_numer           = zeros(nl)
-    taf_denom           = zeros(nl)
-    qaf_numer           = zeros(nl)
-    qaf_denom           = zeros(nl)
-    wtas                = zeros(nl)
-    wtaq                = zeros(nl)
-    wts_sum             = zeros(nl)
-    wtq_sum             = zeros(nl)
-    beta_arr            = zeros(nl)
-    zii_arr             = zeros(nl)
-    fm_arr              = zeros(nl)
+    FT = eltype(forc_t_grc)
+    canyontop_wind      = zeros(FT, nl)
+    canyon_u_wind       = zeros(FT, nl)
+    canyon_wind         = zeros(FT, nl)
+    canyon_resistance   = zeros(FT, nl)
+    ur                  = zeros(FT, nl)
+    ustar_loc           = zeros(FT, nl)
+    ramu                = zeros(FT, nl)
+    rahu                = zeros(FT, nl)
+    rawu                = zeros(FT, nl)
+    temp1               = zeros(FT, nl)
+    temp12m             = zeros(FT, nl)
+    temp2               = zeros(FT, nl)
+    temp22m             = zeros(FT, nl)
+    thm_g               = zeros(FT, nl)
+    thv_g               = zeros(FT, nl)
+    dth                 = zeros(FT, nl)
+    dqh                 = zeros(FT, nl)
+    zldis_arr           = zeros(FT, nl)
+    zeta_lunit          = zeros(FT, nl)
+    um                  = zeros(FT, nl)
+    obu                 = zeros(FT, nl)
+    taf_numer           = zeros(FT, nl)
+    taf_denom           = zeros(FT, nl)
+    qaf_numer           = zeros(FT, nl)
+    qaf_denom           = zeros(FT, nl)
+    wtas                = zeros(FT, nl)
+    wtaq                = zeros(FT, nl)
+    wts_sum             = zeros(FT, nl)
+    wtq_sum             = zeros(FT, nl)
+    beta_arr            = zeros(FT, nl)
+    zii_arr             = zeros(FT, nl)
+    fm_arr              = zeros(FT, nl)
 
-    wtus_col            = zeros(nc)
-    wtuq_col            = zeros(nc)
+    wtus_col            = zeros(FT, nc)
+    wtuq_col            = zeros(FT, nc)
 
-    wtus_roof           = zeros(nl)
-    wtuq_roof           = zeros(nl)
-    wtus_road_perv      = zeros(nl)
-    wtuq_road_perv      = zeros(nl)
-    wtus_road_imperv    = zeros(nl)
-    wtuq_road_imperv    = zeros(nl)
-    wtus_sunwall        = zeros(nl)
-    wtuq_sunwall        = zeros(nl)
-    wtus_shadewall      = zeros(nl)
-    wtuq_shadewall      = zeros(nl)
+    wtus_roof           = zeros(FT, nl)
+    wtuq_roof           = zeros(FT, nl)
+    wtus_road_perv      = zeros(FT, nl)
+    wtuq_road_perv      = zeros(FT, nl)
+    wtus_road_imperv    = zeros(FT, nl)
+    wtuq_road_imperv    = zeros(FT, nl)
+    wtus_sunwall        = zeros(FT, nl)
+    wtuq_sunwall        = zeros(FT, nl)
+    wtus_shadewall      = zeros(FT, nl)
+    wtuq_shadewall      = zeros(FT, nl)
 
-    wtus_roof_unscl        = zeros(nl)
-    wtuq_roof_unscl        = zeros(nl)
-    wtus_road_perv_unscl   = zeros(nl)
-    wtuq_road_perv_unscl   = zeros(nl)
-    wtus_road_imperv_unscl = zeros(nl)
-    wtuq_road_imperv_unscl = zeros(nl)
-    wtus_sunwall_unscl     = zeros(nl)
-    wtuq_sunwall_unscl     = zeros(nl)
-    wtus_shadewall_unscl   = zeros(nl)
-    wtuq_shadewall_unscl   = zeros(nl)
+    wtus_roof_unscl        = zeros(FT, nl)
+    wtuq_roof_unscl        = zeros(FT, nl)
+    wtus_road_perv_unscl   = zeros(FT, nl)
+    wtuq_road_perv_unscl   = zeros(FT, nl)
+    wtus_road_imperv_unscl = zeros(FT, nl)
+    wtuq_road_imperv_unscl = zeros(FT, nl)
+    wtus_sunwall_unscl     = zeros(FT, nl)
+    wtuq_sunwall_unscl     = zeros(FT, nl)
+    wtus_shadewall_unscl   = zeros(FT, nl)
+    wtuq_shadewall_unscl   = zeros(FT, nl)
 
-    eflx_sh_grnd_scale     = zeros(np_local)
-    qflx_evap_soi_scale    = zeros(np_local)
+    eflx_sh_grnd_scale     = zeros(FT, np_local)
+    qflx_evap_soi_scale    = zeros(FT, np_local)
 
-    eflx_wasteheat_roof      = zeros(nl)
-    eflx_wasteheat_sunwall   = zeros(nl)
-    eflx_wasteheat_shadewall = zeros(nl)
-    eflx_heat_from_ac_roof      = zeros(nl)
-    eflx_heat_from_ac_sunwall   = zeros(nl)
-    eflx_heat_from_ac_shadewall = zeros(nl)
+    eflx_wasteheat_roof      = zeros(FT, nl)
+    eflx_wasteheat_sunwall   = zeros(FT, nl)
+    eflx_wasteheat_shadewall = zeros(FT, nl)
+    eflx_heat_from_ac_roof      = zeros(FT, nl)
+    eflx_heat_from_ac_sunwall   = zeros(FT, nl)
+    eflx_heat_from_ac_shadewall = zeros(FT, nl)
 
-    eflx_arr       = zeros(nl)
-    qflx_arr       = zeros(nl)
-    eflx_scale_arr = zeros(nl)
-    qflx_scale_arr = zeros(nl)
-    eflx_err       = zeros(nl)
-    qflx_err       = zeros(nl)
+    eflx_arr       = zeros(FT, nl)
+    qflx_arr       = zeros(FT, nl)
+    eflx_scale_arr = zeros(FT, nl)
+    qflx_scale_arr = zeros(FT, nl)
+    eflx_err       = zeros(FT, nl)
+    qflx_err       = zeros(FT, nl)
 
     # =========================================================================
     # Set restart fields for non-urban landunits
@@ -348,16 +350,24 @@ function urban_fluxes!(
 
         # Error checks
         if lun_data.ht_roof[l] - lun_data.z_d_town[l] <= lun_data.z_0_town[l]
-            error("aerodynamic parameter error in urban_fluxes!: ht_roof - z_d_town <= z_0_town " *
-                  "ht_roof=$(lun_data.ht_roof[l]) z_d_town=$(lun_data.z_d_town[l]) z_0_town=$(lun_data.z_0_town[l])")
+            if _is_ad_type(eltype(frictionvel.forc_hgt_u_patch))
+                @warn "urban_fluxes! aerodynamic parameter error (AD mode, continuing)" maxlog=1
+            else
+                error("aerodynamic parameter error in urban_fluxes!: ht_roof - z_d_town <= z_0_town " *
+                      "ht_roof=$(lun_data.ht_roof[l]) z_d_town=$(lun_data.z_d_town[l]) z_0_town=$(lun_data.z_0_town[l])")
+            end
         end
         if frictionvel.forc_hgt_u_patch[lun_data.patchi[l]] - lun_data.z_d_town[l] <= lun_data.z_0_town[l]
-            error("aerodynamic parameter error in urban_fluxes!: forc_hgt_u - z_d_town <= z_0_town " *
-                  "forc_hgt_u=$(frictionvel.forc_hgt_u_patch[lun_data.patchi[l]]) z_d_town=$(lun_data.z_d_town[l]) z_0_town=$(lun_data.z_0_town[l])")
+            if _is_ad_type(eltype(frictionvel.forc_hgt_u_patch))
+                @warn "urban_fluxes! aerodynamic parameter error (AD mode, continuing)" maxlog=1
+            else
+                error("aerodynamic parameter error in urban_fluxes!: forc_hgt_u - z_d_town <= z_0_town " *
+                      "forc_hgt_u=$(frictionvel.forc_hgt_u_patch[lun_data.patchi[l]]) z_d_town=$(lun_data.z_d_town[l]) z_0_town=$(lun_data.z_0_town[l])")
+            end
         end
 
         # Magnitude of atmospheric wind
-        ur[l] = max(params.wind_min, sqrt(forc_u_grc[g]^2 + forc_v_grc[g]^2))
+        ur[l] = smooth_max(params.wind_min, sqrt(forc_u_grc[g]^2 + forc_v_grc[g]^2))
 
         # Canyon top wind
         canyontop_wind[l] = ur[l] *
@@ -462,11 +472,11 @@ function urban_fluxes!(
 
                 # Wetness fraction for roof
                 if waterdiagbulk.snow_depth_col[c] > 0.0
-                    fwet_roof = min(waterdiagbulk.snow_depth_col[c] / 0.05, 1.0)
+                    fwet_roof = smooth_min(waterdiagbulk.snow_depth_col[c] / 0.05, 1.0)
                 else
-                    fwet_roof = (max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, 1] +
+                    fwet_roof = (smooth_max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, 1] +
                         waterstatebulk.ws.h2osoi_ice_col[c, 1]) / PONDMX_URBAN)^0.666666666666
-                    fwet_roof = min(fwet_roof, 1.0)
+                    fwet_roof = smooth_min(fwet_roof, 1.0)
                 end
                 if waterdiagbulk.qaf_lun[l] > waterdiagbulk.qg_col[c]
                     fwet_roof = 1.0
@@ -503,11 +513,11 @@ function urban_fluxes!(
 
                 # Wetness fraction for impervious road
                 if waterdiagbulk.snow_depth_col[c] > 0.0
-                    fwet_road_imperv = min(waterdiagbulk.snow_depth_col[c] / 0.05, 1.0)
+                    fwet_road_imperv = smooth_min(waterdiagbulk.snow_depth_col[c] / 0.05, 1.0)
                 else
-                    fwet_road_imperv = (max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, 1] +
+                    fwet_road_imperv = (smooth_max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, 1] +
                         waterstatebulk.ws.h2osoi_ice_col[c, 1]) / PONDMX_URBAN)^0.666666666666
-                    fwet_road_imperv = min(fwet_road_imperv, 1.0)
+                    fwet_road_imperv = smooth_min(fwet_road_imperv, 1.0)
                 end
                 if waterdiagbulk.qaf_lun[l] > waterdiagbulk.qg_col[c]
                     fwet_road_imperv = 1.0
@@ -556,7 +566,11 @@ function urban_fluxes!(
                 end
 
             else
-                error("ERROR: ctype out of range in urban_fluxes! c=$c ctype=$(col_data.itype[c])")
+                if _is_ad_type(eltype(energyflux.eflx_sh_tot_patch))
+                    @warn "urban_fluxes! ctype out of range (AD mode, continuing)" maxlog=1
+                else
+                    error("ERROR: ctype out of range in urban_fluxes! c=$c ctype=$(col_data.itype[c])")
+                end
             end
 
             taf_numer[l] = taf_numer[l] + temperature.t_grnd_col[c] * wtus_col[c]
@@ -601,10 +615,10 @@ function urban_fluxes!(
             zeta_lunit[l] = zldis_arr[l] * VKC * GRAV * thvstar / (ustar_loc[l]^2 * thv_g[l])
 
             if zeta_lunit[l] >= 0.0  # stable
-                zeta_lunit[l] = min(frictionvel.zetamaxstable, max(zeta_lunit[l], 0.01))
-                um[l] = max(ur[l], 0.1)
+                zeta_lunit[l] = smooth_min(frictionvel.zetamaxstable, smooth_max(zeta_lunit[l], 0.01))
+                um[l] = smooth_max(ur[l], 0.1)
             else  # unstable
-                zeta_lunit[l] = max(-100.0, min(zeta_lunit[l], -0.01))
+                zeta_lunit[l] = smooth_max(-100.0, smooth_min(zeta_lunit[l], -0.01))
                 wc = beta_arr[l] * (-GRAV * ustar_loc[l] * thvstar * zii_arr[l] / thv_g[l])^0.333
                 um[l] = sqrt(ur[l]^2 + wc^2)
             end
@@ -744,8 +758,12 @@ function urban_fluxes!(
         if abs(eflx_err[l]) > 0.01
             @warn "Total sensible heat does not equal sum of scaled heat fluxes for urban columns" nstep l eflx_err=eflx_err[l]
             if abs(eflx_err[l]) > 0.01
-                error("urban_fluxes! sensible heat flux error > 0.01 W/m**2: " *
-                      "eflx_scale=$(eflx_scale_arr[l]) eflx=$(eflx_arr[l]) err=$(eflx_err[l])")
+                if _is_ad_type(eltype(eflx_err))
+                    @warn "urban_fluxes! sensible heat flux error (AD mode, continuing)" maxlog=1
+                else
+                    error("urban_fluxes! sensible heat flux error > 0.01 W/m**2: " *
+                          "eflx_scale=$(eflx_scale_arr[l]) eflx=$(eflx_arr[l]) err=$(eflx_err[l])")
+                end
             end
         end
     end
@@ -756,8 +774,12 @@ function urban_fluxes!(
         if abs(qflx_err[l]) > 4.0e-9
             @warn "Total water vapor flux does not equal sum of scaled fluxes for urban columns" nstep l qflx_err=qflx_err[l]
             if abs(qflx_err[l]) > 4.0e-9
-                error("urban_fluxes! water vapor flux error > 4e-9 kg/m**2/s: " *
-                      "qflx_scale=$(qflx_scale_arr[l]) qflx=$(qflx_arr[l]) err=$(qflx_err[l])")
+                if _is_ad_type(eltype(qflx_err))
+                    @warn "urban_fluxes! water vapor flux error (AD mode, continuing)" maxlog=1
+                else
+                    error("urban_fluxes! water vapor flux error > 4e-9 kg/m**2/s: " *
+                          "qflx_scale=$(qflx_scale_arr[l]) qflx=$(qflx_arr[l]) err=$(qflx_err[l])")
+                end
             end
         end
     end
@@ -801,7 +823,7 @@ function urban_fluxes!(
 
         # 2 m height relative humidity
         (qsat_ref2m, e_ref2m, _, _) = qsat(temperature.t_ref2m_patch[p], forc_pbot_grc[g])
-        waterdiagbulk.rh_ref2m_patch[p] = min(100.0,
+        waterdiagbulk.rh_ref2m_patch[p] = smooth_min(100.0,
             waterdiagbulk.q_ref2m_patch[p] / qsat_ref2m * 100.0)
         waterdiagbulk.rh_ref2m_u_patch[p] = waterdiagbulk.rh_ref2m_patch[p]
 

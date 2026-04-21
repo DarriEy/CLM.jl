@@ -136,7 +136,7 @@ function init_accum_field!(mgr::AccumManager;
                            accum_period::Int,
                            numlev::Int,
                            subgrid_type::String,
-                           init_value::Float64,
+                           init_value::Real,
                            active::Vector{Bool},
                            npts::Int,
                            type2d::String = "",

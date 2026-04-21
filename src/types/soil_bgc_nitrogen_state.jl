@@ -11,7 +11,7 @@ at column and gridcell levels.
 
 Ported from `soilbiogeochem_nitrogenstate_type` in `SoilBiogeochemNitrogenStateType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemNitrogenStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SoilBiogeochemNitrogenStateData{FT<:Real}
     # --- Vertically-resolved decomposition pools (col × nlev × npools) ---
     decomp_npools_vr_col              ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3)
     decomp0_npools_vr_col             ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gN/m3) baseline (initial value of this year)
@@ -165,7 +165,7 @@ Corresponds to `SetValues` in the Fortran source.
 """
 function soil_bgc_nitrogen_state_set_values!(ns::SoilBiogeochemNitrogenStateData,
                                               mask_col::BitVector,
-                                              value_column::Float64;
+                                              value_column::Real;
                                               nlevdecomp_full::Int=size(ns.ntrunc_vr_col, 2),
                                               nlevdecomp::Int=nlevdecomp_full,
                                               ndecomp_pools::Int=size(ns.decomp_npools_col, 2),
@@ -271,10 +271,10 @@ function soil_bgc_nitrogen_state_init_cold!(ns::SoilBiogeochemNitrogenStateData,
                                              nlevdecomp_full::Int=nlevdecomp,
                                              ndecomp_pools::Int=size(ns.decomp_npools_vr_col, 3),
                                              ndecomp_cascade_transitions::Int=0,
-                                             decomp_cpools_vr_col::Array{Float64,3}=zeros(0,0,0),
-                                             decomp_cpools_col::Matrix{Float64}=zeros(0,0),
-                                             decomp_cpools_1m_col::Matrix{Float64}=zeros(0,0),
-                                             initial_cn_ratio::Vector{Float64}=ones(ndecomp_pools),
+                                             decomp_cpools_vr_col::Array{<:Real,3}=zeros(0,0,0),
+                                             decomp_cpools_col::Matrix{<:Real}=zeros(0,0),
+                                             decomp_cpools_1m_col::Matrix{<:Real}=zeros(0,0),
+                                             initial_cn_ratio::Vector{<:Real}=ones(ndecomp_pools),
                                              use_soil_matrixcn::Bool=false,
                                              use_nitrif_denitrif::Bool=false,
                                              mask_soil_crop::Union{BitVector,Nothing}=nothing)
@@ -388,14 +388,14 @@ function soil_bgc_nitrogen_state_summary!(ns::SoilBiogeochemNitrogenStateData,
                                            nlevdecomp::Int,
                                            nlevdecomp_full::Int=nlevdecomp,
                                            ndecomp_pools::Int,
-                                           dzsoi_decomp_vals::Vector{Float64},
-                                           zisoi_vals::Vector{Float64}=Float64[],
+                                           dzsoi_decomp_vals::Vector{<:Real},
+                                           zisoi_vals::Vector{<:Real}=Float64[],
                                            is_litter::BitVector=falses(ndecomp_pools),
                                            is_soil::BitVector=falses(ndecomp_pools),
                                            is_microbe::BitVector=falses(ndecomp_pools),
                                            is_cwd::BitVector=falses(ndecomp_pools),
-                                           totn_p2c_col::Vector{Float64}=zeros(length(mask_allc)),
-                                           totvegn_col::Vector{Float64}=zeros(length(mask_allc)),
+                                           totn_p2c_col::Vector{<:Real}=zeros(length(mask_allc)),
+                                           totvegn_col::Vector{<:Real}=zeros(length(mask_allc)),
                                            is_fates_col::Union{BitVector,Nothing}=nothing,
                                            use_soil_matrixcn::Bool=false,
                                            use_fates_bgc::Bool=false,
@@ -626,7 +626,7 @@ Set the total vegetation carbon threshold for spinup.
 Corresponds to `SetTotVgCThresh` in the Fortran source.
 """
 function soil_bgc_nitrogen_state_set_totvegcthresh!(ns::SoilBiogeochemNitrogenStateData,
-                                                      totvegcthresh::Float64)
+                                                      totvegcthresh::Real)
     if totvegcthresh <= 0.0
         error("totvegcthresh is zero or negative and should be > 0")
     end

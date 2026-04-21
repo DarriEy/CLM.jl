@@ -73,7 +73,7 @@ Compute saturation specific humidity, vapor pressure, and their derivatives.
 
 Ported from QSat() in QSatMod.F90. Uses Flatau et al. (1992) polynomials.
 """
-function qsat(T::Float64, p::Float64)
+function qsat(T::Real, p::Real)
     td = T - TFRZ  # temperature in °C
 
     if td >= 0.0
@@ -103,7 +103,7 @@ end
 Compute saturation specific humidity and vapor pressure without derivatives.
 Slightly more efficient when derivatives are not needed.
 """
-function qsat_no_derivs(T::Float64, p::Float64)
+function qsat_no_derivs(T::Real, p::Real)
     td = T - TFRZ
 
     if td >= 0.0
@@ -119,6 +119,6 @@ function qsat_no_derivs(T::Float64, p::Float64)
 end
 
 # Evaluate 8th-degree polynomial: c[1] + c[2]*x + c[3]*x^2 + ... + c[9]*x^8
-@inline function _poly8(x::Float64, c::NTuple{9,Float64})
+@inline function _poly8(x::Real, c::NTuple{9,Float64})
     return c[1] + x*(c[2] + x*(c[3] + x*(c[4] + x*(c[5] + x*(c[6] + x*(c[7] + x*(c[8] + x*c[9])))))))
 end

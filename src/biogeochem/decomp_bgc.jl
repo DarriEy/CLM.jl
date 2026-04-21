@@ -22,7 +22,7 @@ definitions, and spinup factors for the BGC decomposition cascade.
 
 Ported from `decomp_cascade_con` in `SoilBiogeochemDecompCascadeConType.F90`.
 """
-Base.@kwdef mutable struct DecompCascadeConData{FT<:AbstractFloat}
+Base.@kwdef mutable struct DecompCascadeConData{FT<:Real}
     cascade_donor_pool             ::Vector{Int}     = Int[]
     cascade_receiver_pool          ::Vector{Int}     = Int[]
     floating_cn_ratio_decomp_pools ::BitVector        = BitVector()
@@ -56,7 +56,7 @@ fractions, turnover times, cellulose fraction, and initial C stocks.
 
 Ported from `params_type` in `SoilBiogeochemDecompCascadeBGCMod.F90`.
 """
-Base.@kwdef mutable struct DecompBGCParams{FT<:AbstractFloat}
+Base.@kwdef mutable struct DecompBGCParams{FT<:Real}
     cn_s1_bgc               ::FT          = 12.0
     cn_s2_bgc               ::FT          = 12.0
     cn_s3_bgc               ::FT          = 10.0
@@ -94,7 +94,7 @@ are set once during `init_decomp_cascade_bgc!` and used by
 Ported from module-level private variables in
 `SoilBiogeochemDecompCascadeBGCMod.F90`.
 """
-Base.@kwdef mutable struct DecompBGCState{FT<:AbstractFloat}
+Base.@kwdef mutable struct DecompBGCState{FT<:Real}
     # Pool indices
     i_pas_som ::Int = 0
     i_slo_som ::Int = 0
@@ -154,24 +154,24 @@ reading). Each keyword maps to a parameter variable name from the Fortran
 Ported from `readParams` in `SoilBiogeochemDecompCascadeBGCMod.F90`.
 """
 function decomp_bgc_read_params!(params::DecompBGCParams;
-                                  tau_l1::Float64,
-                                  tau_l2_l3::Float64,
-                                  tau_s1::Float64,
-                                  tau_s2::Float64,
-                                  tau_s3::Float64,
-                                  cn_s1::Float64,
-                                  cn_s2::Float64,
-                                  cn_s3::Float64,
-                                  rf_l1s1::Float64,
-                                  rf_l2s1::Float64,
-                                  rf_l3s2::Float64,
-                                  rf_s2s1::Float64,
-                                  rf_s2s3::Float64,
-                                  rf_s3s1::Float64,
-                                  rf_cwdl3::Float64,
-                                  cwd_fcel::Float64,
-                                  bgc_initial_Cstocks::Vector{Float64},
-                                  bgc_initial_Cstocks_depth::Float64)
+                                  tau_l1::Real,
+                                  tau_l2_l3::Real,
+                                  tau_s1::Real,
+                                  tau_s2::Real,
+                                  tau_s3::Real,
+                                  cn_s1::Real,
+                                  cn_s2::Real,
+                                  cn_s3::Real,
+                                  rf_l1s1::Real,
+                                  rf_l2s1::Real,
+                                  rf_l3s2::Real,
+                                  rf_s2s1::Real,
+                                  rf_s2s3::Real,
+                                  rf_s3s1::Real,
+                                  rf_cwdl3::Real,
+                                  cwd_fcel::Real,
+                                  bgc_initial_Cstocks::Vector{<:Real},
+                                  bgc_initial_Cstocks_depth::Real)
     params.tau_l1_bgc    = tau_l1
     params.tau_l2_l3_bgc = tau_l2_l3
     params.tau_s1_bgc    = tau_s1
@@ -216,7 +216,7 @@ Ported from `init_decompcascade_bgc` in `SoilBiogeochemDecompCascadeBGCMod.F90`.
 - `cn_params::CNSharedParamsData`: shared CN parameters
 
 # Keyword Arguments
-- `cellsand::Matrix{Float64}`: column sand fraction (col × nlevdecomp)
+- `cellsand::Matrix{<:Real}`: column sand fraction (col × nlevdecomp)
 - `bounds::UnitRange{Int}`: column bounds
 - `nlevdecomp::Int`: number of decomposition levels
 - `ndecomp_pools_max::Int`: maximum number of decomposition pools
@@ -228,7 +228,7 @@ function init_decomp_cascade_bgc!(bgc_state::DecompBGCState,
                                    cascade_con::DecompCascadeConData,
                                    params::DecompBGCParams,
                                    cn_params::CNSharedParamsData;
-                                   cellsand::Matrix{Float64},
+                                   cellsand::Matrix{<:Real},
                                    bounds::UnitRange{Int},
                                    nlevdecomp::Int,
                                    ndecomp_pools_max::Int,
@@ -239,18 +239,19 @@ function init_decomp_cascade_bgc!(bgc_state::DecompBGCState,
     nc = length(bounds)
 
     # Allocate cascade_con arrays
+    FT = typeof(cascade_con.initial_stock_soildepth)
     cascade_con.cascade_donor_pool             = zeros(Int, ndecomp_cascade_transitions_max)
     cascade_con.cascade_receiver_pool          = zeros(Int, ndecomp_cascade_transitions_max)
     cascade_con.floating_cn_ratio_decomp_pools = falses(ndecomp_pools_max)
     cascade_con.is_litter                      = falses(ndecomp_pools_max)
     cascade_con.is_soil                        = falses(ndecomp_pools_max)
     cascade_con.is_cwd                         = falses(ndecomp_pools_max)
-    cascade_con.initial_cn_ratio               = zeros(ndecomp_pools_max)
-    cascade_con.initial_stock                  = zeros(ndecomp_pools_max)
+    cascade_con.initial_cn_ratio               = zeros(FT, ndecomp_pools_max)
+    cascade_con.initial_stock                  = zeros(FT, ndecomp_pools_max)
     cascade_con.is_metabolic                   = falses(ndecomp_pools_max)
     cascade_con.is_cellulose                   = falses(ndecomp_pools_max)
     cascade_con.is_lignin                      = falses(ndecomp_pools_max)
-    cascade_con.spinup_factor                  = ones(ndecomp_pools_max)
+    cascade_con.spinup_factor                  = ones(FT, ndecomp_pools_max)
     cascade_con.decomp_pool_name_restart       = fill("", ndecomp_pools_max)
     cascade_con.decomp_pool_name_history       = fill("", ndecomp_pools_max)
     cascade_con.decomp_pool_name_long          = fill("", ndecomp_pools_max)
@@ -258,10 +259,10 @@ function init_decomp_cascade_bgc!(bgc_state::DecompBGCState,
     cascade_con.cascade_step_name              = fill("", ndecomp_cascade_transitions_max)
 
     # Allocate spatially-varying arrays
-    bgc_state.rf_s1s2 = zeros(nc, nlevdecomp)
-    bgc_state.rf_s1s3 = zeros(nc, nlevdecomp)
-    bgc_state.f_s1s2  = zeros(nc, nlevdecomp)
-    bgc_state.f_s1s3  = zeros(nc, nlevdecomp)
+    bgc_state.rf_s1s2 = zeros(FT, nc, nlevdecomp)
+    bgc_state.rf_s1s3 = zeros(FT, nc, nlevdecomp)
+    bgc_state.f_s1s2  = zeros(FT, nc, nlevdecomp)
+    bgc_state.f_s1s3  = zeros(FT, nc, nlevdecomp)
 
     # --- Time-constant coefficients ---
     cn_s1 = params.cn_s1_bgc
@@ -524,19 +525,19 @@ Ported from `decomp_rate_constants_bgc` in
 - `mask_bgc_soilc::BitVector`: mask for BGC soil columns
 - `bounds::UnitRange{Int}`: column bounds
 - `nlevdecomp::Int`: number of decomposition levels
-- `t_soisno::Matrix{Float64}`: soil temperature (K), (col × nlev)
-- `soilpsi::Matrix{Float64}`: soil water potential (MPa), (col × nlev)
+- `t_soisno::Matrix{<:Real}`: soil temperature (K), (col × nlev)
+- `soilpsi::Matrix{<:Real}`: soil water potential (MPa), (col × nlev)
 - `days_per_year::Float64`: days per year
 - `dt::Float64`: timestep (seconds)
-- `zsoi_vals::Vector{Float64}`: soil layer depths (m)
+- `zsoi_vals::Vector{<:Real}`: soil layer depths (m)
 - `spinup_state::Int`: spinup state (0=normal, >=1=accelerated)
 - `use_lch4::Bool`: whether LCH4 model is active
 - `anoxia::Bool`: whether anoxia is enabled
 - `use_fates::Bool`: whether FATES is enabled
-- `o2stress_unsat::Matrix{Float64}`: O2 stress ratio (col × nlev), for anoxia
-- `col_dz::Matrix{Float64}`: column layer thicknesses (col × nlev), for nlevdecomp==1
+- `o2stress_unsat::Matrix{<:Real}`: O2 stress ratio (col × nlev), for anoxia
+- `col_dz::Matrix{<:Real}`: column layer thicknesses (col × nlev), for nlevdecomp==1
 - `col_gridcell::Vector{Int}`: column-to-gridcell mapping, for spinup
-- `latdeg::Vector{Float64}`: gridcell latitudes (degrees), for spinup
+- `latdeg::Vector{<:Real}`: gridcell latitudes (degrees), for spinup
 """
 function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
                                      bgc_state::DecompBGCState,
@@ -546,19 +547,19 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
                                      mask_bgc_soilc::BitVector,
                                      bounds::UnitRange{Int},
                                      nlevdecomp::Int,
-                                     t_soisno::Matrix{Float64},
-                                     soilpsi::Matrix{Float64},
-                                     days_per_year::Float64,
-                                     dt::Float64,
-                                     zsoi_vals::Vector{Float64},
+                                     t_soisno::AbstractMatrix{<:Real},
+                                     soilpsi::AbstractMatrix{<:Real},
+                                     days_per_year::Real,
+                                     dt::Real,
+                                     zsoi_vals::Vector{<:Real},
                                      spinup_state::Int=0,
                                      use_lch4::Bool=false,
                                      anoxia::Bool=false,
                                      use_fates::Bool=false,
-                                     o2stress_unsat::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                                     col_dz::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
+                                     o2stress_unsat::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                     col_dz::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                      col_gridcell::Vector{Int}=Int[],
-                                     latdeg::Vector{Float64}=Float64[])
+                                     latdeg::Vector{<:Real}=Float64[])
 
     eps_val = 1.0e-6
     nc = length(bounds)
@@ -612,12 +613,13 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
     spinup_factor = cascade_con.spinup_factor
 
     # --- Compute spinup geographic terms ---
-    spinup_geogterm_l1  = ones(nc)
-    spinup_geogterm_l23 = ones(nc)
-    spinup_geogterm_cwd = ones(nc)
-    spinup_geogterm_s1  = ones(nc)
-    spinup_geogterm_s2  = ones(nc)
-    spinup_geogterm_s3  = ones(nc)
+    FT = eltype(t_soisno)
+    spinup_geogterm_l1  = ones(FT, nc)
+    spinup_geogterm_l23 = ones(FT, nc)
+    spinup_geogterm_cwd = ones(FT, nc)
+    spinup_geogterm_s1  = ones(FT, nc)
+    spinup_geogterm_s2  = ones(FT, nc)
+    spinup_geogterm_s3  = ones(FT, nc)
 
     if spinup_state >= 1
         for c in 1:nc
@@ -661,14 +663,15 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
     o_scalar = cf.o_scalar_col
     decomp_k = cf.decomp_k_col
 
-    depth_scalar = zeros(nc, nlevdecomp)
+    FT_rate = eltype(t_soisno)
+    depth_scalar = zeros(FT_rate, nc, nlevdecomp)
 
     if nlevdecomp == 1
         # ---- Single-level decomposition ----
         # Weight temperature and water potential scalars by rooting fraction
         nlev_soildecomp_standard = 5
-        frw = zeros(nc)
-        fr  = zeros(nc, nlev_soildecomp_standard)
+        frw = zeros(FT_rate, nc)
+        fr  = zeros(FT_rate, nc, nlev_soildecomp_standard)
 
         for j in 1:nlev_soildecomp_standard
             for c in 1:nc

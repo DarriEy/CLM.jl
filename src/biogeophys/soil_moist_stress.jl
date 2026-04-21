@@ -59,10 +59,10 @@ Arguments:
 - `nlevgrnd`: number of ground levels (ubj)
 - `nlevsno`: number of snow levels (for index offset)
 """
-function calc_effective_soilporosity!(watsat::Matrix{Float64},
-                                      h2osoi_ice::Matrix{Float64},
-                                      col_dz::Matrix{Float64},
-                                      eff_por::Matrix{Float64},
+function calc_effective_soilporosity!(watsat::Matrix{<:Real},
+                                      h2osoi_ice::Matrix{<:Real},
+                                      col_dz::Matrix{<:Real},
+                                      eff_por::Matrix{<:Real},
                                       mask::BitVector,
                                       bounds_col::UnitRange{Int},
                                       nlevgrnd::Int,
@@ -102,10 +102,10 @@ Arguments:
 - `lbj`: lower bound snow layer index (Fortran, e.g. -nlevsno+1)
 - `nlevsno`: number of snow levels
 """
-function calc_effective_snowporosity!(h2osoi_ice::Matrix{Float64},
-                                      col_dz::Matrix{Float64},
+function calc_effective_snowporosity!(h2osoi_ice::Matrix{<:Real},
+                                      col_dz::Matrix{<:Real},
                                       jtop::Vector{Int},
-                                      eff_por::Matrix{Float64},
+                                      eff_por::Matrix{<:Real},
                                       mask::BitVector,
                                       bounds_col::UnitRange{Int},
                                       lbj::Int,
@@ -151,11 +151,11 @@ Arguments:
 - `ubj`: upper bound layer index (Fortran)
 - `nlevsno`: number of snow levels (for index offset)
 """
-function calc_volumetric_h2oliq!(eff_porosity::Matrix{Float64},
-                                  h2osoi_liq::Matrix{Float64},
-                                  col_dz::Matrix{Float64},
+function calc_volumetric_h2oliq!(eff_porosity::Matrix{<:Real},
+                                  h2osoi_liq::Matrix{<:Real},
+                                  col_dz::Matrix{<:Real},
                                   jtop::Vector{Int},
-                                  vol_liq::Matrix{Float64},
+                                  vol_liq::Matrix{<:Real},
                                   mask::BitVector,
                                   bounds_col::UnitRange{Int},
                                   lbj::Int,
@@ -187,7 +187,7 @@ Normalize each row of `arr` (patch × nlevgrnd) so that its sum equals 1.
 If the sum is zero, the row is left as zeros.
 Ported from `array_normalization` in `SimpleMathMod.F90`.
 """
-function array_normalization!(arr::Matrix{Float64},
+function array_normalization!(arr::Matrix{<:Real},
                                mask::BitVector,
                                bounds::UnitRange{Int},
                                nlevgrnd::Int)
@@ -218,12 +218,12 @@ end
 Normalize root fraction for total unfrozen depth.
 Ported from `normalize_unfrozen_rootfr` in `SoilMoistStressMod.F90`.
 """
-function normalize_unfrozen_rootfr!(rootfr::Matrix{Float64},
-                                     t_soisno::Matrix{Float64},
-                                     altmax_lastyear_indx::Vector{Float64},
-                                     altmax_indx::Vector{Float64},
+function normalize_unfrozen_rootfr!(rootfr::Matrix{<:Real},
+                                     t_soisno::Matrix{<:Real},
+                                     altmax_lastyear_indx::Vector{<:Real},
+                                     altmax_indx::Vector{<:Real},
                                      patch_column::Vector{Int},
-                                     rootfr_unf::Matrix{Float64},
+                                     rootfr_unf::Matrix{<:Real},
                                      mask_patch::BitVector,
                                      bounds_patch::UnitRange{Int},
                                      nlevgrnd::Int,
@@ -279,7 +279,7 @@ Compute soil matric potential using the Clapp-Hornberger parameterization.
 Returns smp_node (matric potential in mm).
 Ported from `soil_suction` in `SoilWaterRetentionCurveMod.F90`.
 """
-function soil_suction_clapp_hornberger(sucsat::Float64, s_node::Float64, bsw::Float64)
+function soil_suction_clapp_hornberger(sucsat::Real, s_node::Real, bsw::Real)
     return -sucsat * s_node^(-bsw)
 end
 
@@ -293,19 +293,19 @@ end
 Compute root water stress using the default CLM4.5 approach.
 Ported from `calc_root_moist_stress_clm45default` in `SoilMoistStressMod.F90`.
 """
-function calc_root_moist_stress_clm45default!(rootfr_unf::Matrix{Float64},
-                                               rootfr::Matrix{Float64},
-                                               rootr::Matrix{Float64},
-                                               btran::Vector{Float64},
-                                               rresis::Matrix{Float64},
-                                               smpso::Vector{Float64},
-                                               smpsc::Vector{Float64},
-                                               t_soisno::Matrix{Float64},
-                                               watsat::Matrix{Float64},
-                                               sucsat::Matrix{Float64},
-                                               bsw::Matrix{Float64},
-                                               eff_porosity::Matrix{Float64},
-                                               h2osoi_liqvol::Matrix{Float64},
+function calc_root_moist_stress_clm45default!(rootfr_unf::Matrix{<:Real},
+                                               rootfr::Matrix{<:Real},
+                                               rootr::Matrix{<:Real},
+                                               btran::Vector{<:Real},
+                                               rresis::Matrix{<:Real},
+                                               smpso::Vector{<:Real},
+                                               smpsc::Vector{<:Real},
+                                               t_soisno::Matrix{<:Real},
+                                               watsat::Matrix{<:Real},
+                                               sucsat::Matrix{<:Real},
+                                               bsw::Matrix{<:Real},
+                                               eff_porosity::Matrix{<:Real},
+                                               h2osoi_liqvol::Matrix{<:Real},
                                                patch_column::Vector{Int},
                                                patch_itype::Vector{Int},
                                                mask_patch::BitVector,
@@ -379,10 +379,10 @@ function calc_root_moist_stress!(soilstate::SoilStateData,
                                   waterdiagbulk::WaterDiagnosticBulkData,
                                   col::ColumnData,
                                   patchdata::PatchData,
-                                  smpso::Vector{Float64},
-                                  smpsc::Vector{Float64},
-                                  altmax_lastyear_indx::Vector{Float64},
-                                  altmax_indx::Vector{Float64},
+                                  smpso::Vector{<:Real},
+                                  smpsc::Vector{<:Real},
+                                  altmax_lastyear_indx::Vector{<:Real},
+                                  altmax_indx::Vector{<:Real},
                                   mask_patch::BitVector,
                                   bounds_patch::UnitRange{Int},
                                   nlevgrnd::Int,
@@ -391,7 +391,8 @@ function calc_root_moist_stress!(soilstate::SoilStateData,
     np = length(bounds_patch)
 
     # Initialize rootfr_unf to zero
-    rootfr_unf = zeros(Float64, length(mask_patch), nlevgrnd)
+    FT = eltype(temperature.t_soisno_col)
+    rootfr_unf = zeros(FT, length(mask_patch), nlevgrnd)
 
     # Initialize btran to zero for accumulation
     for p in bounds_patch

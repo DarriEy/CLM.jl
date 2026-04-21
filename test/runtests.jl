@@ -132,4 +132,13 @@ using CLM
     include("test_subgrid_build.jl")
     include("test_initialization.jl")
     include("test_clm_run.jl")
+    include("test_ad_smoke.jl")
+    include("test_ad_e2e.jl")
+    include("test_ad_robustness.jl")
+    include("test_calibration.jl")
+    include("test_parameter_recovery.jl")
+    include("test_enzyme_feasibility.jl")
+    include("test_enzyme_smoke.jl")
+    include("test_multisite_calibration.jl")
+    include("test_cn_integration.jl")
 end

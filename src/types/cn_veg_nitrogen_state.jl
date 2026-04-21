@@ -11,7 +11,7 @@ and gridcell levels.
 
 Ported from `cnveg_nitrogenstate_type` in `CNVegNitrogenStateType.F90`.
 """
-Base.@kwdef mutable struct CNVegNitrogenStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CNVegNitrogenStateData{FT<:Real}
     # --- Patch-level 2D (patch x nrepr) ---
     reproductiven_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (gN/m2) reproductive (grain) N
     reproductiven_storage_patch       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (gN/m2) reproductive N storage
@@ -421,8 +421,8 @@ Set nitrogen state variables for filtered patches and columns.
 Ported from `cnveg_nitrogenstate_type%SetValues`.
 """
 function cnveg_nitrogen_state_set_values!(ns::CNVegNitrogenStateData,
-                                          mask_patch::BitVector, value_patch::Float64,
-                                          mask_col::BitVector, value_col::Float64;
+                                          mask_patch::BitVector, value_patch::Real,
+                                          mask_col::BitVector, value_col::Real;
                                           use_matrixcn::Bool=false, use_crop::Bool=false,
                                           nrepr::Int=NREPR)
     # Patch-level

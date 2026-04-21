@@ -42,8 +42,8 @@ Set N dynamics parameters from keyword arguments.
 Corresponds to `CNNDynamicsReadNML` in the Fortran source.
 """
 function n_dynamics_read_nml!(params::NDynamicsParams;
-                               freelivfix_intercept::Float64 = 0.0117,
-                               freelivfix_slope_wET::Float64 = 0.0006)
+                               freelivfix_intercept::Real = 0.0117,
+                               freelivfix_slope_wET::Real = 0.0006)
     params.freelivfix_intercept = freelivfix_intercept
     params.freelivfix_slope_wET = freelivfix_slope_wET
     return nothing
@@ -64,7 +64,7 @@ Corresponds to `CNNDeposition` in the Fortran source.
 """
 function n_deposition!(
     nf::SoilBiogeochemNitrogenFluxData;
-    forc_ndep::Vector{Float64},
+    forc_ndep::Vector{<:Real},
     col_gridcell::Vector{Int},
     bounds::UnitRange{Int})
 
@@ -94,8 +94,8 @@ function n_free_living_fixation!(
     params::NDynamicsParams;
     mask_soilc::BitVector,
     bounds::UnitRange{Int},
-    AnnET::Vector{Float64},
-    dayspyr::Float64)
+    AnnET::Vector{<:Real},
+    dayspyr::Real)
 
     secs_per_year = dayspyr * 24.0 * 3600.0
 
@@ -135,8 +135,8 @@ function n_fixation!(
     mask_soilc::BitVector,
     bounds::UnitRange{Int},
     col_is_fates::Vector{Bool},
-    dayspyr::Float64,
-    nfix_timeconst::Float64,
+    dayspyr::Real,
+    nfix_timeconst::Real,
     use_fun::Bool)
 
     cannsum_npp = cf.annsum_npp_col

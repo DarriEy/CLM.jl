@@ -12,7 +12,7 @@ ground absorption, urban surface absorption, and NIR diagnostics.
 
 Ported from `solarabs_type` in `SolarAbsorbedType.F90`.
 """
-Base.@kwdef mutable struct SolarAbsorbedData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SolarAbsorbedData{FT<:Real}
     # --- Solar reflected (patch-level 1D) ---
     fsr_patch                ::Vector{FT} = Float64[]   # patch solar radiation reflected (W/m**2)
     fsrSF_patch              ::Vector{FT} = Float64[]   # diagnostic snow-free patch solar radiation reflected (W/m**2)

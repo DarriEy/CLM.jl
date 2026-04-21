@@ -13,7 +13,7 @@ root distributions.
 
 Ported from `soilstate_type` in `SoilStateType.F90`.
 """
-Base.@kwdef mutable struct SoilStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SoilStateData{FT<:Real}
     # --- Sand / clay / organic matter ---
     sandfrac_patch           ::Vector{FT} = Float64[]   # patch sand fraction
     clayfrac_patch           ::Vector{FT} = Float64[]   # patch clay fraction

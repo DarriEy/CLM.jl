@@ -40,23 +40,23 @@ Assigns `qflx_ice_runoff_snwcp` for all non-lake columns.
 Ported from inline code in `HydrologyDrainage` in `HydrologyDrainageMod.F90`.
 """
 function compute_wetland_ice_hydrology!(
-    qflx_drain::Vector{Float64},
-    qflx_drain_perched::Vector{Float64},
-    qflx_surf::Vector{Float64},
-    qflx_infl::Vector{Float64},
-    qflx_qrgwl::Vector{Float64},
-    qflx_latflow_out::Vector{Float64},
-    qflx_rsub_sat::Vector{Float64},
-    qflx_evap_tot::Vector{Float64},
-    qflx_snwcp_ice::Vector{Float64},
-    qflx_snwcp_discarded_ice::Vector{Float64},
-    qflx_snwcp_discarded_liq::Vector{Float64},
-    qflx_ice_runoff_snwcp::Vector{Float64},
-    forc_rain::Vector{Float64},
-    forc_snow::Vector{Float64},
-    qflx_floodg::Vector{Float64},
-    begwb::Vector{Float64},
-    endwb::Vector{Float64},
+    qflx_drain::Vector{<:Real},
+    qflx_drain_perched::Vector{<:Real},
+    qflx_surf::Vector{<:Real},
+    qflx_infl::Vector{<:Real},
+    qflx_qrgwl::Vector{<:Real},
+    qflx_latflow_out::Vector{<:Real},
+    qflx_rsub_sat::Vector{<:Real},
+    qflx_evap_tot::Vector{<:Real},
+    qflx_snwcp_ice::Vector{<:Real},
+    qflx_snwcp_discarded_ice::Vector{<:Real},
+    qflx_snwcp_discarded_liq::Vector{<:Real},
+    qflx_ice_runoff_snwcp::Vector{<:Real},
+    forc_rain::Vector{<:Real},
+    forc_snow::Vector{<:Real},
+    qflx_floodg::Vector{<:Real},
+    begwb::Vector{<:Real},
+    endwb::Vector{<:Real},
     col_landunit::Vector{Int},
     col_gridcell::Vector{Int},
     col_itype::Vector{Int},
@@ -64,7 +64,7 @@ function compute_wetland_ice_hydrology!(
     lun_urbpoi::AbstractVector{Bool},
     mask_nolake::BitVector,
     bounds::UnitRange{Int},
-    dtime::Float64
+    dtime::Real
 )
     for c in bounds
         mask_nolake[c] || continue
@@ -110,13 +110,13 @@ runoff, and perched drainage. Assigns urban and rural runoff separately.
 Ported from inline code in `HydrologyDrainage` in `HydrologyDrainageMod.F90`.
 """
 function compute_total_runoff!(
-    qflx_runoff::Vector{Float64},
-    qflx_runoff_u::Vector{Float64},
-    qflx_runoff_r::Vector{Float64},
-    qflx_drain::Vector{Float64},
-    qflx_surf::Vector{Float64},
-    qflx_qrgwl::Vector{Float64},
-    qflx_drain_perched::Vector{Float64},
+    qflx_runoff::Vector{<:Real},
+    qflx_runoff_u::Vector{<:Real},
+    qflx_runoff_r::Vector{<:Real},
+    qflx_drain::Vector{<:Real},
+    qflx_surf::Vector{<:Real},
+    qflx_qrgwl::Vector{<:Real},
+    qflx_drain_perched::Vector{<:Real},
     col_landunit::Vector{Int},
     lun_itype::Vector{Int},
     lun_urbpoi::AbstractVector{Bool},
@@ -155,7 +155,7 @@ should compute total water mass (liquid + ice + snow + surface water +
 aquifer) for each non-lake column and store in endwb.
 """
 function compute_water_mass_non_lake!(
-    endwb::Vector{Float64},
+    endwb::Vector{<:Real},
     waterstatebulk::WaterStateBulkData,
     waterdiagbulk::WaterDiagnosticBulkData,
     mask_nolake::BitVector,
@@ -188,8 +188,8 @@ function should adjust qflx_qrgwl and qflx_ice_runoff_snwcp based on
 glacier SMB calculations.
 """
 function adjust_runoff_terms!(
-    qflx_qrgwl::Vector{Float64},
-    qflx_ice_runoff_snwcp::Vector{Float64},
+    qflx_qrgwl::Vector{<:Real},
+    qflx_ice_runoff_snwcp::Vector{<:Real},
     waterfluxbulk::WaterFluxBulkData,
     mask_do_smb::BitVector,
     bounds::UnitRange{Int}
@@ -235,11 +235,11 @@ function hydrology_drainage!(
     mask_hydrology::BitVector,
     mask_urban::BitVector,
     mask_do_smb::BitVector,
-    forc_rain::Vector{Float64},
-    forc_snow::Vector{Float64},
-    qflx_floodg::Vector{Float64},
+    forc_rain::Vector{<:Real},
+    forc_snow::Vector{<:Real},
+    qflx_floodg::Vector{<:Real},
     bounds::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int,
     nlevsoi::Int,
     nlevgrnd::Int,
@@ -277,10 +277,11 @@ function hydrology_drainage!(
     else
         # Perched/subsurface lateral flow expects gridcell-indexed vectors.
         # In single-point mode, use safe defaults when no external routing data exist.
+        FT = eltype(temperature.t_soisno_col)
         ng = isempty(bounds) ? 0 : maximum(col.gridcell[bounds])
-        tdepth_grc = zeros(Float64, ng)
-        tdepthmax_grc = zeros(Float64, ng)
-        grc_area = ones(Float64, ng)
+        tdepth_grc = zeros(FT, ng)
+        tdepthmax_grc = zeros(FT, ng)
+        grc_area = ones(FT, ng)
 
         perched_lateral_flow!(
             soilhydrology, soilstate,

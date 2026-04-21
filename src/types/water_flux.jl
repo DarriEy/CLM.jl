@@ -14,7 +14,7 @@ All water fluxes are in units of mm/s unless otherwise noted.
 
 Ported from `waterflux_type` in `WaterFluxType.F90`.
 """
-Base.@kwdef mutable struct WaterFluxData{FT<:AbstractFloat}
+Base.@kwdef mutable struct WaterFluxData{FT<:Real}
     # --- Patch-level 1D fields ---
     qflx_through_snow_patch             ::Vector{FT} = Float64[]  # patch canopy throughfall of snow (mm H2O/s)
     qflx_through_liq_patch              ::Vector{FT} = Float64[]  # patch canopy throughfall of liquid (rain+irrigation) (mm H2O/s)

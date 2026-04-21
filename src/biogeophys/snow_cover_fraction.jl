@@ -96,12 +96,12 @@ function snow_cover_fraction_init!(
     ncols::Int;
     col_lun_itype::Vector{Int},
     col_gridcell::Vector{Int},
-    col_topo_std::Vector{Float64},
+    col_topo_std::Vector{<:Real},
     allow_multiple_columns_grc::Vector{Bool} = Bool[],
-    int_snow_max::Float64 = 2000.0,
-    accum_factor::Float64 = 0.1,
-    n_melt_coef::Float64 = 200.0,
-    n_melt_glcmec::Float64 = 10.0
+    int_snow_max::Real = 2000.0,
+    accum_factor::Real = 0.1,
+    n_melt_coef::Real = 200.0,
+    n_melt_glcmec::Real = 10.0
 )
     # Validate
     @assert int_snow_max > 0.0 "int_snow_max must be > 0, got $int_snow_max"
@@ -140,7 +140,7 @@ Ported from `Init` and `ReadParams` in `SnowCoverFractionNiuYang2007Mod.F90`.
 """
 function snow_cover_fraction_init!(
     scf::SnowCoverFractionNiuYang2007;
-    zlnd::Float64 = 0.01,
+    zlnd::Real = 0.01,
     use_subgrid_fluxes::Bool = false
 )
     if use_subgrid_fluxes
@@ -167,8 +167,8 @@ frac_sno_eff is forced to 0 or 1. Otherwise it equals frac_sno.
 Ported from `CalcFracSnoEff` in `SnowCoverFractionBaseMod.F90`.
 """
 function calc_frac_sno_eff!(
-    frac_sno_eff::Vector{Float64},
-    frac_sno::Vector{Float64},
+    frac_sno_eff::Vector{<:Real},
+    frac_sno::Vector{<:Real},
     lun_itype_col::Vector{Int},
     urbpoi::Vector{Bool},
     mask::BitVector,
@@ -208,8 +208,8 @@ Ported from `FracSnowDuringMelt` in
 function frac_snow_during_melt(
     scf::SnowCoverFractionSwensonLawrence2012,
     c::Int,
-    h2osno_total::Float64,
-    int_snow::Float64
+    h2osno_total::Real,
+    int_snow::Real
 )
     int_snow_limited = min(int_snow, scf.int_snow_max)
     smr = min(1.0, h2osno_total / int_snow_limited)
@@ -229,8 +229,8 @@ Ported from `FracSnowDuringMelt` in `SnowCoverFractionNiuYang2007Mod.F90`.
 function frac_snow_during_melt(
     scf::SnowCoverFractionNiuYang2007,
     c::Int,
-    h2osno_total::Float64,
-    int_snow::Float64
+    h2osno_total::Real,
+    int_snow::Real
 )
     return NaN
 end
@@ -258,17 +258,17 @@ Ported from `UpdateSnowDepthAndFrac` in
 function update_snow_depth_and_frac!(
     scf::SnowCoverFractionSwensonLawrence2012,
     # Outputs (modified in place)
-    frac_sno::Vector{Float64},
-    frac_sno_eff::Vector{Float64},
-    snow_depth::Vector{Float64},
+    frac_sno::Vector{<:Real},
+    frac_sno_eff::Vector{<:Real},
+    snow_depth::Vector{<:Real},
     # Inputs
     lun_itype_col::Vector{Int},
     urbpoi::Vector{Bool},
-    h2osno_total::Vector{Float64},
-    snowmelt::Vector{Float64},
-    int_snow::Vector{Float64},
-    newsnow::Vector{Float64},
-    bifall::Vector{Float64},
+    h2osno_total::Vector{<:Real},
+    snowmelt::Vector{<:Real},
+    int_snow::Vector{<:Real},
+    newsnow::Vector{<:Real},
+    bifall::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int};
     use_subgrid_fluxes::Bool = true
@@ -358,17 +358,17 @@ Ported from `UpdateSnowDepthAndFrac` in
 function update_snow_depth_and_frac!(
     scf::SnowCoverFractionNiuYang2007,
     # Outputs (modified in place)
-    frac_sno::Vector{Float64},
-    frac_sno_eff::Vector{Float64},
-    snow_depth::Vector{Float64},
+    frac_sno::Vector{<:Real},
+    frac_sno_eff::Vector{<:Real},
+    snow_depth::Vector{<:Real},
     # Inputs
     lun_itype_col::Vector{Int},
     urbpoi::Vector{Bool},
-    h2osno_total::Vector{Float64},
-    snowmelt::Vector{Float64},
-    int_snow::Vector{Float64},
-    newsnow::Vector{Float64},
-    bifall::Vector{Float64},
+    h2osno_total::Vector{<:Real},
+    snowmelt::Vector{<:Real},
+    int_snow::Vector{<:Real},
+    newsnow::Vector{<:Real},
+    bifall::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int};
     use_subgrid_fluxes::Bool = false
@@ -421,10 +421,10 @@ Ported from `AddNewsnowToIntsnow` in
 """
 function add_newsnow_to_intsnow!(
     scf::SnowCoverFractionSwensonLawrence2012,
-    int_snow::Vector{Float64},
-    newsnow::Vector{Float64},
-    h2osno_total::Vector{Float64},
-    frac_sno::Vector{Float64},
+    int_snow::Vector{<:Real},
+    newsnow::Vector{<:Real},
+    h2osno_total::Vector{<:Real},
+    frac_sno::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )
@@ -472,10 +472,10 @@ Ported from `AddNewsnowToIntsnow` in `SnowCoverFractionNiuYang2007Mod.F90`.
 """
 function add_newsnow_to_intsnow!(
     scf::SnowCoverFractionNiuYang2007,
-    int_snow::Vector{Float64},
-    newsnow::Vector{Float64},
-    h2osno_total::Vector{Float64},
-    frac_sno::Vector{Float64},
+    int_snow::Vector{<:Real},
+    newsnow::Vector{<:Real},
+    h2osno_total::Vector{<:Real},
+    frac_sno::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )

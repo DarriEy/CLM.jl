@@ -15,7 +15,7 @@ column-level fields: `snow_persistence_col` and `int_snow_col`.
 
 Ported from `waterstatebulk_type` in `WaterStateBulkType.F90`.
 """
-Base.@kwdef mutable struct WaterStateBulkData{FT<:AbstractFloat}
+Base.@kwdef mutable struct WaterStateBulkData{FT<:Real}
     # --- Parent water state fields (composition) ---
     ws::WaterStateData = WaterStateData()
 
@@ -69,7 +69,7 @@ Ported from `InitBulkCold` in `WaterStateBulkType.F90`.
 """
 function waterstatebulk_init_cold!(wsb::WaterStateBulkData,
                                      bounds_col::UnitRange{Int};
-                                     h2osno_input_col::Vector{Float64})
+                                     h2osno_input_col::Vector{<:Real})
     for c in bounds_col
         wsb.int_snow_col[c]         = h2osno_input_col[c]
         wsb.snow_persistence_col[c] = 0.0

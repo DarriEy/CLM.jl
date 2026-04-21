@@ -204,7 +204,8 @@ function calc_crop_allocation_fractions!(mask_pcropp::BitVector, bounds::UnitRan
                                           nrepr::Int=NREPR)
 
     # Compute crop phase for all patches in the mask
-    crop_phase_out = Vector{Float64}(undef, length(mask_pcropp))
+    FT = eltype(cnveg_state.c_allometry_patch)
+    crop_phase_out = Vector{FT}(undef, length(mask_pcropp))
     crop_phase!(mask_pcropp, crop, cnveg_state, crop_phase_out)
 
     for p in bounds
@@ -366,7 +367,7 @@ function calc_allometry!(mask_soilp::BitVector, bounds::UnitRange{Int},
             cng = pftcon.graincn[ivt]
             f1 = cnveg_state.aroot_patch[p] / cnveg_state.aleaf_patch[p]
             f3 = cnveg_state.astem_patch[p] / cnveg_state.aleaf_patch[p]
-            f5 = Vector{Float64}(undef, nrepr)
+            f5 = Vector{FT}(undef, nrepr)
             for k in 1:nrepr
                 f5[k] = cnveg_state.arepr_patch[p, k] / cnveg_state.aleaf_patch[p]
             end

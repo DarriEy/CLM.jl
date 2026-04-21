@@ -58,7 +58,7 @@ function soil_bgc_precision_control_init!(
         c14cs::Union{SoilBiogeochemCarbonStateData,Nothing}=nothing,
         use_c13::Bool=false,
         use_c14::Bool=false,
-        totvegcthresh::Float64=1.0)
+        totvegcthresh::Real=1.0)
 
     ccrit = CCRIT_DEFAULT
     ncrit = NCRIT_DEFAULT
@@ -104,8 +104,8 @@ function soil_bgc_precision_control!(
         mask_bgc_soilc::BitVector,
         nlevdecomp::Int,
         ndecomp_pools::Int,
-        ccrit::Float64=CCRIT_DEFAULT,
-        ncrit::Float64=NCRIT_DEFAULT,
+        ccrit::Real=CCRIT_DEFAULT,
+        ncrit::Real=NCRIT_DEFAULT,
         c13cs::Union{SoilBiogeochemCarbonStateData,Nothing}=nothing,
         c14cs::Union{SoilBiogeochemCarbonStateData,Nothing}=nothing,
         use_c13::Bool=false,

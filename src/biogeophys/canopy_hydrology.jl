@@ -39,12 +39,12 @@ end
 # --- Parameter reader ---
 
 function canopy_hydrology_read_params!(;
-        liq_canopy_storage_scalar::Float64 = 0.04,
-        snow_canopy_storage_scalar::Float64 = 6.0,
-        snowcan_unload_temp_fact::Float64 = 1.87e5,
-        snowcan_unload_wind_fact::Float64 = 1.56e5,
-        interception_fraction::Float64 = 1.0,
-        maximum_leaf_wetted_fraction::Float64 = 1.0)
+        liq_canopy_storage_scalar::Real = 0.04,
+        snow_canopy_storage_scalar::Real = 6.0,
+        snowcan_unload_temp_fact::Real = 1.87e5,
+        snowcan_unload_wind_fact::Real = 1.56e5,
+        interception_fraction::Real = 1.0,
+        maximum_leaf_wetted_fraction::Real = 1.0)
     canopy_hydrology_params.liq_canopy_storage_scalar   = liq_canopy_storage_scalar
     canopy_hydrology_params.snow_canopy_storage_scalar  = snow_canopy_storage_scalar
     canopy_hydrology_params.snowcan_unload_temp_fact    = snowcan_unload_temp_fact
@@ -65,13 +65,13 @@ function sum_flux_top_of_canopy_inputs!(
         mask_nolakep::BitVector,
         bounds_p::UnitRange{Int},
         # Inputs (column-level)
-        forc_rain::Vector{Float64},
-        forc_snow_col::Vector{Float64},
+        forc_rain::Vector{<:Real},
+        forc_snow_col::Vector{<:Real},
         # Inputs (patch-level)
-        qflx_irrig_sprinkler::Vector{Float64},
+        qflx_irrig_sprinkler::Vector{<:Real},
         # Outputs (patch-level)
-        qflx_liq_above_canopy::Vector{Float64},
-        forc_snow_patch::Vector{Float64})
+        qflx_liq_above_canopy::Vector{<:Real},
+        forc_snow_patch::Vector{<:Real})
 
     for p in bounds_p
         mask_nolakep[p] || continue
@@ -97,15 +97,15 @@ function bulk_flux_canopy_interception_and_throughfall!(
         bounds_p::UnitRange{Int},
         # Inputs
         frac_veg_nosno::Vector{Int},
-        elai::Vector{Float64},
-        esai::Vector{Float64},
-        forc_snow::Vector{Float64},
-        qflx_liq_above_canopy::Vector{Float64},
+        elai::Vector{<:Real},
+        esai::Vector{<:Real},
+        forc_snow::Vector{<:Real},
+        qflx_liq_above_canopy::Vector{<:Real},
         # Outputs
-        qflx_through_snow::Vector{Float64},
-        qflx_through_liq::Vector{Float64},
-        qflx_intercepted_snow::Vector{Float64},
-        qflx_intercepted_liq::Vector{Float64},
+        qflx_through_snow::Vector{<:Real},
+        qflx_through_liq::Vector{<:Real},
+        qflx_intercepted_snow::Vector{<:Real},
+        qflx_intercepted_liq::Vector{<:Real},
         check_point_for_interception_and_excess::Vector{Bool})
 
     for p in bounds_p
@@ -164,20 +164,20 @@ function tracer_flux_canopy_interception_and_throughfall!(
         mask_nolakep::BitVector,
         bounds_p::UnitRange{Int},
         # Bulk inputs
-        bulk_forc_snow::Vector{Float64},
-        bulk_qflx_liq_above_canopy::Vector{Float64},
-        bulk_qflx_through_snow::Vector{Float64},
-        bulk_qflx_intercepted_snow::Vector{Float64},
-        bulk_qflx_through_liq::Vector{Float64},
-        bulk_qflx_intercepted_liq::Vector{Float64},
+        bulk_forc_snow::Vector{<:Real},
+        bulk_qflx_liq_above_canopy::Vector{<:Real},
+        bulk_qflx_through_snow::Vector{<:Real},
+        bulk_qflx_intercepted_snow::Vector{<:Real},
+        bulk_qflx_through_liq::Vector{<:Real},
+        bulk_qflx_intercepted_liq::Vector{<:Real},
         # Tracer inputs
-        trac_forc_snow::Vector{Float64},
-        trac_qflx_liq_above_canopy::Vector{Float64},
+        trac_forc_snow::Vector{<:Real},
+        trac_qflx_liq_above_canopy::Vector{<:Real},
         # Tracer outputs
-        trac_qflx_through_snow::Vector{Float64},
-        trac_qflx_intercepted_snow::Vector{Float64},
-        trac_qflx_through_liq::Vector{Float64},
-        trac_qflx_intercepted_liq::Vector{Float64})
+        trac_qflx_through_snow::Vector{<:Real},
+        trac_qflx_intercepted_snow::Vector{<:Real},
+        trac_qflx_through_liq::Vector{<:Real},
+        trac_qflx_intercepted_liq::Vector{<:Real})
 
     for p in bounds_p
         mask_nolakep[p] || continue
@@ -215,13 +215,13 @@ end
 function update_state_add_interception_to_canopy!(
         mask_soilp::BitVector,
         bounds_p::UnitRange{Int},
-        dtime::Float64,
+        dtime::Real,
         # Inputs
-        qflx_intercepted_snow::Vector{Float64},
-        qflx_intercepted_liq::Vector{Float64},
+        qflx_intercepted_snow::Vector{<:Real},
+        qflx_intercepted_liq::Vector{<:Real},
         # In/Out
-        snocan::Vector{Float64},
-        liqcan::Vector{Float64})
+        snocan::Vector{<:Real},
+        liqcan::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -242,16 +242,16 @@ end
 function bulk_flux_canopy_excess!(
         mask_soilp::BitVector,
         bounds_p::UnitRange{Int},
-        dtime::Float64,
+        dtime::Real,
         # Inputs
-        elai::Vector{Float64},
-        esai::Vector{Float64},
-        snocan::Vector{Float64},
-        liqcan::Vector{Float64},
+        elai::Vector{<:Real},
+        esai::Vector{<:Real},
+        snocan::Vector{<:Real},
+        liqcan::Vector{<:Real},
         check_point_for_interception_and_excess::Vector{Bool},
         # Outputs
-        qflx_snocanfall::Vector{Float64},
-        qflx_liqcanfall::Vector{Float64})
+        qflx_snocanfall::Vector{<:Real},
+        qflx_liqcanfall::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -280,16 +280,16 @@ function tracer_flux_canopy_excess!(
         mask_soilp::BitVector,
         bounds_p::UnitRange{Int},
         # Bulk inputs
-        bulk_liqcan::Vector{Float64},
-        bulk_snocan::Vector{Float64},
-        bulk_qflx_liqcanfall::Vector{Float64},
-        bulk_qflx_snocanfall::Vector{Float64},
+        bulk_liqcan::Vector{<:Real},
+        bulk_snocan::Vector{<:Real},
+        bulk_qflx_liqcanfall::Vector{<:Real},
+        bulk_qflx_snocanfall::Vector{<:Real},
         # Tracer inputs
-        trac_liqcan::Vector{Float64},
-        trac_snocan::Vector{Float64},
+        trac_liqcan::Vector{<:Real},
+        trac_snocan::Vector{<:Real},
         # Tracer outputs
-        trac_qflx_liqcanfall::Vector{Float64},
-        trac_qflx_snocanfall::Vector{Float64})
+        trac_qflx_liqcanfall::Vector{<:Real},
+        trac_qflx_snocanfall::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -321,13 +321,13 @@ end
 function update_state_remove_canfall_from_canopy!(
         mask_soilp::BitVector,
         bounds_p::UnitRange{Int},
-        dtime::Float64,
+        dtime::Real,
         # Inputs
-        qflx_liqcanfall::Vector{Float64},
-        qflx_snocanfall::Vector{Float64},
+        qflx_liqcanfall::Vector{<:Real},
+        qflx_snocanfall::Vector{<:Real},
         # In/Out
-        liqcan::Vector{Float64},
-        snocan::Vector{Float64})
+        liqcan::Vector{<:Real},
+        snocan::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -349,16 +349,16 @@ function bulk_flux_snow_unloading!(
         patch::PatchData,
         mask_soilp::BitVector,
         bounds_p::UnitRange{Int},
-        dtime::Float64,
+        dtime::Real,
         # Inputs
         frac_veg_nosno::Vector{Int},
-        forc_t::Vector{Float64},        # column-level
-        forc_wind::Vector{Float64},     # gridcell-level
-        snocan::Vector{Float64},
+        forc_t::Vector{<:Real},        # column-level
+        forc_wind::Vector{<:Real},     # gridcell-level
+        snocan::Vector{<:Real},
         # Outputs
-        qflx_snotempunload::Vector{Float64},
-        qflx_snowindunload::Vector{Float64},
-        qflx_snow_unload::Vector{Float64})
+        qflx_snotempunload::Vector{<:Real},
+        qflx_snowindunload::Vector{<:Real},
+        qflx_snow_unload::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -393,12 +393,12 @@ function tracer_flux_snow_unloading!(
         mask_soilp::BitVector,
         bounds_p::UnitRange{Int},
         # Bulk inputs
-        bulk_snocan::Vector{Float64},
-        bulk_qflx_snow_unload::Vector{Float64},
+        bulk_snocan::Vector{<:Real},
+        bulk_qflx_snow_unload::Vector{<:Real},
         # Tracer inputs
-        trac_snocan::Vector{Float64},
+        trac_snocan::Vector{<:Real},
         # Tracer outputs
-        trac_qflx_snow_unload::Vector{Float64})
+        trac_qflx_snow_unload::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -422,11 +422,11 @@ end
 function update_state_remove_snow_unloading!(
         mask_soilp::BitVector,
         bounds_p::UnitRange{Int},
-        dtime::Float64,
+        dtime::Real,
         # Inputs
-        qflx_snow_unload::Vector{Float64},
+        qflx_snow_unload::Vector{<:Real},
         # In/Out
-        snocan::Vector{Float64})
+        snocan::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -461,16 +461,16 @@ function sum_flux_fluxes_onto_ground!(
         bounds_p::UnitRange{Int},
         bounds_c::UnitRange{Int},
         # Inputs (patch-level)
-        qflx_through_snow::Vector{Float64},
-        qflx_snocanfall::Vector{Float64},
-        qflx_snow_unload::Vector{Float64},
-        qflx_through_liq::Vector{Float64},
-        qflx_liqcanfall::Vector{Float64},
-        qflx_irrig_drip::Vector{Float64},
+        qflx_through_snow::Vector{<:Real},
+        qflx_snocanfall::Vector{<:Real},
+        qflx_snow_unload::Vector{<:Real},
+        qflx_through_liq::Vector{<:Real},
+        qflx_liqcanfall::Vector{<:Real},
+        qflx_irrig_drip::Vector{<:Real},
         # Outputs (column-level)
-        qflx_snow_grnd_col::Vector{Float64},
-        qflx_liq_grnd_col::Vector{Float64},
-        qflx_snow_h2osfc::Vector{Float64})
+        qflx_snow_grnd_col::Vector{<:Real},
+        qflx_liq_grnd_col::Vector{<:Real},
+        qflx_snow_h2osfc::Vector{<:Real})
 
     # Initialize column-level accumulators
     for c in bounds_c
@@ -517,14 +517,14 @@ function bulk_diag_frac_wet!(
         bounds_p::UnitRange{Int},
         # Inputs
         frac_veg_nosno::Vector{Int},
-        elai::Vector{Float64},
-        esai::Vector{Float64},
-        snocan::Vector{Float64},
-        liqcan::Vector{Float64},
+        elai::Vector{<:Real},
+        esai::Vector{<:Real},
+        snocan::Vector{<:Real},
+        liqcan::Vector{<:Real},
         # Outputs
-        fwet::Vector{Float64},
-        fdry::Vector{Float64},
-        fcansno::Vector{Float64})
+        fwet::Vector{<:Real},
+        fdry::Vector{<:Real},
+        fcansno::Vector{<:Real})
 
     for p in bounds_p
         mask_soilp[p] || continue
@@ -570,7 +570,7 @@ function canopy_interception_and_throughfall!(
         col::ColumnData,
         canopystate::CanopyStateData,
         water::WaterData,
-        dtime::Float64,
+        dtime::Real,
         # Masks
         mask_soilp::BitVector,
         mask_nolakep::BitVector,
@@ -580,21 +580,22 @@ function canopy_interception_and_throughfall!(
         bounds_c::UnitRange{Int},
         bounds_g::UnitRange{Int},
         # Atmospheric forcing (column-level)
-        forc_rain::Vector{Float64},
-        forc_snow_col::Vector{Float64},
-        forc_t::Vector{Float64},
+        forc_rain::Vector{<:Real},
+        forc_snow_col::Vector{<:Real},
+        forc_t::Vector{<:Real},
         # Atmospheric forcing (gridcell-level)
-        forc_wind::Vector{Float64},
+        forc_wind::Vector{<:Real},
         # Irrigation (patch-level)
-        qflx_irrig_sprinkler::Vector{Float64},
-        qflx_irrig_drip::Vector{Float64})
+        qflx_irrig_sprinkler::Vector{<:Real},
+        qflx_irrig_drip::Vector{<:Real})
 
     np = length(bounds_p)
     nc = length(bounds_c)
 
-    # Local arrays
-    qflx_liq_above_canopy_patch = zeros(Float64, last(bounds_p))
-    forc_snow_patch = zeros(Float64, last(bounds_p))
+    # Local arrays — infer FT from forcing to support Dual
+    FT = eltype(forc_rain)
+    qflx_liq_above_canopy_patch = zeros(FT, last(bounds_p))
+    forc_snow_patch = zeros(FT, last(bounds_p))
     check_point_for_interception_and_excess = fill(false, last(bounds_p))
 
     b_wf = water.waterfluxbulk_inst

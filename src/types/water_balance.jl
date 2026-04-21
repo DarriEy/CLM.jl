@@ -11,7 +11,7 @@ patch, and gridcell levels.
 
 Ported from `waterbalance_type` in `WaterBalanceType.F90`.
 """
-Base.@kwdef mutable struct WaterBalanceData{FT<:AbstractFloat}
+Base.@kwdef mutable struct WaterBalanceData{FT<:Real}
     # --- Column-level 1D fields ---
     h2osno_old_col                       ::Vector{FT} = Float64[]  # col snow mass for previous time step (kg/m2)
     snow_sources_col                     ::Vector{FT} = Float64[]  # col snow sources (mm H2O/s)

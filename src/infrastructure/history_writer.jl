@@ -233,7 +233,8 @@ level using area weights with renormalization.
 function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
     data = try
         f.getter(inst)
-    catch
+    catch e
+        @debug "History field $(f.name) unavailable: $e"
         nothing
     end
     data === nothing && return nothing

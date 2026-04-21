@@ -166,36 +166,36 @@ reading). Each keyword maps to a parameter variable name from the Fortran
 Ported from `readParams` in `SoilBiogeochemDecompCascadeMIMICSMod.F90`.
 """
 function decomp_mimics_read_params!(params::DecompMIMICSParams;
-                                     mimics_initial_Cstocks_depth::Float64,
-                                     mimics_initial_Cstocks::Vector{Float64},
-                                     mimics_mge::Vector{Float64},
-                                     mimics_vmod::Vector{Float64},
-                                     mimics_vslope::Vector{Float64},
-                                     mimics_vint::Vector{Float64},
-                                     mimics_kmod::Vector{Float64},
-                                     mimics_kslope::Vector{Float64},
-                                     mimics_kint::Vector{Float64},
-                                     mimics_p_scalar::Vector{Float64},
-                                     mimics_desorp::Vector{Float64},
-                                     mimics_fphys_r::Vector{Float64},
-                                     mimics_fphys_k::Vector{Float64},
-                                     mimics_fmet::Vector{Float64},
-                                     mimics_fchem_r::Vector{Float64},
-                                     mimics_fchem_k::Vector{Float64},
-                                     mimics_tau_r::Vector{Float64},
-                                     mimics_tau_k::Vector{Float64},
-                                     mimics_nue_into_mic::Float64,
-                                     mimics_tau_mod_factor::Float64,
-                                     mimics_tau_mod_min::Float64,
-                                     mimics_tau_mod_max::Float64,
-                                     mimics_ko_r::Float64,
-                                     mimics_ko_k::Float64,
-                                     mimics_densdep::Float64,
-                                     mimics_desorpQ10::Float64,
-                                     mimics_t_soi_ref::Float64,
-                                     mimics_cn_mod_num::Float64,
-                                     mimics_cn_r::Float64,
-                                     mimics_cn_k::Float64)
+                                     mimics_initial_Cstocks_depth::Real,
+                                     mimics_initial_Cstocks::Vector{<:Real},
+                                     mimics_mge::Vector{<:Real},
+                                     mimics_vmod::Vector{<:Real},
+                                     mimics_vslope::Vector{<:Real},
+                                     mimics_vint::Vector{<:Real},
+                                     mimics_kmod::Vector{<:Real},
+                                     mimics_kslope::Vector{<:Real},
+                                     mimics_kint::Vector{<:Real},
+                                     mimics_p_scalar::Vector{<:Real},
+                                     mimics_desorp::Vector{<:Real},
+                                     mimics_fphys_r::Vector{<:Real},
+                                     mimics_fphys_k::Vector{<:Real},
+                                     mimics_fmet::Vector{<:Real},
+                                     mimics_fchem_r::Vector{<:Real},
+                                     mimics_fchem_k::Vector{<:Real},
+                                     mimics_tau_r::Vector{<:Real},
+                                     mimics_tau_k::Vector{<:Real},
+                                     mimics_nue_into_mic::Real,
+                                     mimics_tau_mod_factor::Real,
+                                     mimics_tau_mod_min::Real,
+                                     mimics_tau_mod_max::Real,
+                                     mimics_ko_r::Real,
+                                     mimics_ko_k::Real,
+                                     mimics_densdep::Real,
+                                     mimics_desorpQ10::Real,
+                                     mimics_t_soi_ref::Real,
+                                     mimics_cn_mod_num::Real,
+                                     mimics_cn_r::Real,
+                                     mimics_cn_k::Real)
     params.mimics_initial_Cstocks_depth = mimics_initial_Cstocks_depth
     params.mimics_initial_Cstocks       = copy(mimics_initial_Cstocks)
     params.mimics_mge                   = copy(mimics_mge)
@@ -255,7 +255,7 @@ Ported from `init_decompcascade_mimics` in
 - `cn_params::CNSharedParamsData`: shared CN parameters
 
 # Keyword Arguments
-- `cellclay::Matrix{Float64}`: column clay fraction (%), (col × nlevdecomp)
+- `cellclay::Matrix{<:Real}`: column clay fraction (%), (col × nlevdecomp)
 - `bounds::UnitRange{Int}`: column bounds
 - `nlevdecomp::Int`: number of decomposition levels
 - `ndecomp_pools_max::Int`: maximum number of decomposition pools
@@ -267,7 +267,7 @@ function init_decompcascade_mimics!(mimics_state::DecompMIMICSState,
                                      cascade_con::DecompCascadeConData,
                                      params::DecompMIMICSParams,
                                      cn_params::CNSharedParamsData;
-                                     cellclay::Matrix{Float64},
+                                     cellclay::Matrix{<:Real},
                                      bounds::UnitRange{Int},
                                      nlevdecomp::Int,
                                      ndecomp_pools_max::Int,
@@ -278,18 +278,19 @@ function init_decompcascade_mimics!(mimics_state::DecompMIMICSState,
     nc = length(bounds)
 
     # Allocate cascade_con arrays
+    FT = typeof(cascade_con.initial_stock_soildepth)
     cascade_con.cascade_donor_pool             = zeros(Int, ndecomp_cascade_transitions_max)
     cascade_con.cascade_receiver_pool          = zeros(Int, ndecomp_cascade_transitions_max)
     cascade_con.floating_cn_ratio_decomp_pools = falses(ndecomp_pools_max)
     cascade_con.is_litter                      = falses(ndecomp_pools_max)
     cascade_con.is_soil                        = falses(ndecomp_pools_max)
     cascade_con.is_cwd                         = falses(ndecomp_pools_max)
-    cascade_con.initial_cn_ratio               = zeros(ndecomp_pools_max)
-    cascade_con.initial_stock                  = zeros(ndecomp_pools_max)
+    cascade_con.initial_cn_ratio               = zeros(FT, ndecomp_pools_max)
+    cascade_con.initial_stock                  = zeros(FT, ndecomp_pools_max)
     cascade_con.is_metabolic                   = falses(ndecomp_pools_max)
     cascade_con.is_cellulose                   = falses(ndecomp_pools_max)
     cascade_con.is_lignin                      = falses(ndecomp_pools_max)
-    cascade_con.spinup_factor                  = ones(ndecomp_pools_max)
+    cascade_con.spinup_factor                  = ones(FT, ndecomp_pools_max)
     cascade_con.decomp_pool_name_restart       = fill("", ndecomp_pools_max)
     cascade_con.decomp_pool_name_history       = fill("", ndecomp_pools_max)
     cascade_con.decomp_pool_name_long          = fill("", ndecomp_pools_max)
@@ -362,11 +363,11 @@ function init_decompcascade_mimics!(mimics_state::DecompMIMICSState,
     # Compute soil texture-dependent parameters
     for c in 1:nc
         for j in 1:nlevdecomp
-            clay_frac = PCT_TO_FRAC * min(100.0, cellclay[c, j])
+            clay_frac = PCT_TO_FRAC * smooth_min(100.0, cellclay[c, j])
             mimics_state.desorp[c, j] = mimics_desorp_p1 * exp(mimics_desorp_p2 * clay_frac)
-            mimics_state.fphys_m1[c, j] = min(1.0, mimics_fphys_r_p1 *
+            mimics_state.fphys_m1[c, j] = smooth_min(1.0, mimics_fphys_r_p1 *
                                                exp(mimics_fphys_r_p2 * clay_frac))
-            mimics_state.fphys_m2[c, j] = min(1.0, mimics_fphys_k_p1 *
+            mimics_state.fphys_m2[c, j] = smooth_min(1.0, mimics_fphys_k_p1 *
                                                exp(mimics_fphys_k_p2 * clay_frac))
             mimics_state.p_scalar[c, j] = 1.0 / (mimics_p_scalar_p1 *
                                                    exp(mimics_p_scalar_p2 * sqrt(clay_frac)))
@@ -520,7 +521,7 @@ function init_decompcascade_mimics!(mimics_state::DecompMIMICSState,
     cascade_con.spinup_factor[i_met_lit] = 1.0
     cascade_con.spinup_factor[i_str_lit] = 1.0
     if !use_fates
-        cascade_con.spinup_factor[i_cwd_local] = max(1.0, speedup_fac * cn_params.tau_cwd * 0.5)
+        cascade_con.spinup_factor[i_cwd_local] = smooth_max(1.0, speedup_fac * cn_params.tau_cwd * 0.5)
     end
     cascade_con.spinup_factor[i_avl_som]  = 1.0
     cascade_con.spinup_factor[i_chem_som] = 1.0
@@ -615,7 +616,7 @@ function init_decompcascade_mimics!(mimics_state::DecompMIMICSState,
     cascade_con.cascade_receiver_pool[i_m2s3] = i_phys_som
 
     # Set NUE for all transitions
-    nue_decomp_cascade = zeros(ndecomp_cascade_transitions_max)
+    nue_decomp_cascade = zeros(FT, ndecomp_cascade_transitions_max)
     nue_decomp_cascade[i_l1m1] = mimics_nue_into_mic
     nue_decomp_cascade[i_l1m2] = mimics_nue_into_mic
     nue_decomp_cascade[i_l2m1] = mimics_nue_into_mic
@@ -672,21 +673,21 @@ Ported from `decomp_rates_mimics` in
 - `mask_bgc_soilc::BitVector`: mask for BGC soil columns
 - `bounds::UnitRange{Int}`: column bounds
 - `nlevdecomp::Int`: number of decomposition levels
-- `t_soisno::Matrix{Float64}`: soil temperature (K), (col × nlev)
-- `soilpsi::Matrix{Float64}`: soil water potential (MPa), (col × nlev)
-- `decomp_cpools_vr::Array{Float64,3}`: decomposing C pools (gC/m3), (col × nlev × npool)
-- `col_dz::Matrix{Float64}`: column layer thicknesses (m), (col × nlev)
-- `ligninNratioAvg::Vector{Float64}`: average lignin C:N ratio per column
-- `annsum_npp_col::Vector{Float64}`: annual sum of NPP at column level (gC/m2/s)
+- `t_soisno::Matrix{<:Real}`: soil temperature (K), (col × nlev)
+- `soilpsi::Matrix{<:Real}`: soil water potential (MPa), (col × nlev)
+- `decomp_cpools_vr::Array{<:Real,3}`: decomposing C pools (gC/m3), (col × nlev × npool)
+- `col_dz::Matrix{<:Real}`: column layer thicknesses (m), (col × nlev)
+- `ligninNratioAvg::Vector{<:Real}`: average lignin C:N ratio per column
+- `annsum_npp_col::Vector{<:Real}`: annual sum of NPP at column level (gC/m2/s)
 - `days_per_year::Float64`: days per year
 - `dt::Float64`: timestep (seconds)
 - `spinup_state::Int`: spinup state (0=normal)
 - `use_lch4::Bool`: whether LCH4 model is active
 - `anoxia::Bool`: whether anoxia is enabled
 - `use_fates::Bool`: whether FATES is enabled
-- `o2stress_unsat::Matrix{Float64}`: O2 stress ratio (col × nlev)
+- `o2stress_unsat::Matrix{<:Real}`: O2 stress ratio (col × nlev)
 - `col_gridcell::Vector{Int}`: column-to-gridcell mapping
-- `latdeg::Vector{Float64}`: gridcell latitudes (degrees)
+- `latdeg::Vector{<:Real}`: gridcell latitudes (degrees)
 """
 function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
                                mimics_state::DecompMIMICSState,
@@ -696,21 +697,21 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
                                mask_bgc_soilc::BitVector,
                                bounds::UnitRange{Int},
                                nlevdecomp::Int,
-                               t_soisno::Matrix{Float64},
-                               soilpsi::Matrix{Float64},
-                               decomp_cpools_vr::Array{Float64,3},
-                               col_dz::Matrix{Float64},
-                               ligninNratioAvg::Vector{Float64},
-                               annsum_npp_col::Vector{Float64},
-                               days_per_year::Float64,
-                               dt::Float64,
+                               t_soisno::Matrix{<:Real},
+                               soilpsi::Matrix{<:Real},
+                               decomp_cpools_vr::Array{<:Real,3},
+                               col_dz::Matrix{<:Real},
+                               ligninNratioAvg::Vector{<:Real},
+                               annsum_npp_col::Vector{<:Real},
+                               days_per_year::Real,
+                               dt::Real,
                                spinup_state::Int=0,
                                use_lch4::Bool=false,
                                anoxia::Bool=false,
                                use_fates::Bool=false,
-                               o2stress_unsat::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
+                               o2stress_unsat::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                col_gridcell::Vector{Int}=Int[],
-                               latdeg::Vector{Float64}=Float64[])
+                               latdeg::Vector{<:Real}=Float64[])
 
     eps_val = 1.0e-6
     nc = length(bounds)
@@ -751,14 +752,15 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
     spinup_factor = cascade_con.spinup_factor
 
     # --- Compute spinup geographic terms ---
-    spinup_geogterm_l1  = ones(nc)
-    spinup_geogterm_l2  = ones(nc)
-    spinup_geogterm_cwd = ones(nc)
-    spinup_geogterm_s1  = ones(nc)
-    spinup_geogterm_s2  = ones(nc)
-    spinup_geogterm_s3  = ones(nc)
-    spinup_geogterm_m1  = ones(nc)
-    spinup_geogterm_m2  = ones(nc)
+    FT = eltype(t_soisno)
+    spinup_geogterm_l1  = ones(FT, nc)
+    spinup_geogterm_l2  = ones(FT, nc)
+    spinup_geogterm_cwd = ones(FT, nc)
+    spinup_geogterm_s1  = ones(FT, nc)
+    spinup_geogterm_s2  = ones(FT, nc)
+    spinup_geogterm_s3  = ones(FT, nc)
+    spinup_geogterm_m1  = ones(FT, nc)
+    spinup_geogterm_m2  = ones(FT, nc)
 
     if spinup_state >= 1
         for c in 1:nc
@@ -803,12 +805,12 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
     rf_decomp_cascade       = cf.rf_decomp_cascade_col
     cn_col                  = cf.cn_col
 
-    depth_scalar = ones(nc, nlevdecomp)
+    depth_scalar = ones(FT, nc, nlevdecomp)
 
     if nlevdecomp == 1
         # --- Single-level decomposition ---
-        frw = zeros(nc)
-        fr  = zeros(nc, nlev_soildecomp_standard)
+        frw = zeros(FT, nc)
+        fr  = zeros(FT, nc, nlev_soildecomp_standard)
 
         for j in 1:nlev_soildecomp_standard
             for c in 1:nc
@@ -834,7 +836,7 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
                 if j == 1
                     w_scalar[c, :] .= 0.0
                 end
-                psi = min(soilpsi[c, j], maxpsi)
+                psi = smooth_min(soilpsi[c, j], maxpsi)
                 if psi > minpsi
                     w_scalar[c, 1] += (log(minpsi / psi) / log(minpsi / maxpsi)) * fr[c, j]
                 end
@@ -849,7 +851,7 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
                     if j == 1
                         o_scalar[c, :] .= 0.0
                     end
-                    o_scalar[c, 1] += fr[c, j] * max(o2stress_unsat[c, j], mino2lim)
+                    o_scalar[c, 1] += fr[c, j] * smooth_max(o2stress_unsat[c, j], mino2lim)
                 end
             end
         else
@@ -867,7 +869,7 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
         for j in 1:nlevdecomp
             for c in 1:nc
                 mask_bgc_soilc[c] || continue
-                psi = min(soilpsi[c, j], maxpsi)
+                psi = smooth_min(soilpsi[c, j], maxpsi)
                 if psi > minpsi
                     w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
                 else
@@ -881,7 +883,7 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
             for j in 1:nlevdecomp
                 for c in 1:nc
                     mask_bgc_soilc[c] || continue
-                    o_scalar[c, j] = max(o2stress_unsat[c, j], mino2lim)
+                    o_scalar[c, j] = smooth_max(o2stress_unsat[c, j], mino2lim)
                 end
             end
         else
@@ -973,12 +975,12 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
     for c in 1:nc
         mask_bgc_soilc[c] || continue
 
-        annsum_npp_col_scalar = max(0.0, annsum_npp_col[c])
+        annsum_npp_col_scalar = smooth_max(0.0, annsum_npp_col[c])
 
         # fmet: fraction metabolic litter
         fmet = mimics_fmet_p1 * (mimics_fmet_p2 - mimics_fmet_p3 *
-            min(mimics_fmet_p4, ligninNratioAvg[c]))
-        tau_mod = min(mimics_tau_mod_max, max(mimics_tau_mod_min,
+            smooth_min(mimics_fmet_p4, ligninNratioAvg[c]))
+        tau_mod = smooth_min(mimics_tau_mod_max, smooth_max(mimics_tau_mod_min,
             sqrt(mimics_tau_mod_factor * annsum_npp_col_scalar)))
 
         # tau_m1 is tauR and tau_m2 is tauK in Wieder et al. 2015
@@ -991,9 +993,9 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
         cn_col[c, i_oli_mic] = mimics_cn_k * sqrt(mimics_cn_mod_num / fmet)
 
         # Chemical fractionation
-        fchem_m1 = min(1.0, max(0.0, mimics_fchem_r_p1 *
+        fchem_m1 = smooth_min(1.0, smooth_max(0.0, mimics_fchem_r_p1 *
                     exp(mimics_fchem_r_p2 * fmet)))
-        fchem_m2 = min(1.0, max(0.0, mimics_fchem_k_p1 *
+        fchem_m2 = smooth_min(1.0, smooth_max(0.0, mimics_fchem_k_p1 *
                     exp(mimics_fchem_k_p2 * fmet)))
 
         for j in 1:nlevdecomp
@@ -1074,14 +1076,14 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
             # Copiotrophic microbe turnover (M1)
             decomp_k[c, j, i_cop_mic] = tau_m1 *
                    m1_conc^(mimics_densdep - 1.0) * w_d_o_scalars
-            favl = min(1.0, max(0.0, 1.0 - fphys_m1[c, j] - fchem_m1))
+            favl = smooth_min(1.0, smooth_max(0.0, 1.0 - fphys_m1[c, j] - fchem_m1))
             pathfrac_decomp_cascade[c, j, i_m1s1] = favl
             pathfrac_decomp_cascade[c, j, i_m1s2] = fchem_m1
 
             # Oligotrophic microbe turnover (M2)
             decomp_k[c, j, i_oli_mic] = tau_m2 *
                    m2_conc^(mimics_densdep - 1.0) * w_d_o_scalars
-            favl = min(1.0, max(0.0, 1.0 - fphys_m2[c, j] - fchem_m2))
+            favl = smooth_min(1.0, smooth_max(0.0, 1.0 - fphys_m2[c, j] - fchem_m2))
             pathfrac_decomp_cascade[c, j, i_m2s1] = favl
             pathfrac_decomp_cascade[c, j, i_m2s2] = fchem_m2
 

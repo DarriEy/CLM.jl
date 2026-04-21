@@ -36,7 +36,7 @@ for LAI, SAI, and vegetation heights.
 
 Ported from module-level variables in `SatellitePhenologyMod.F90`.
 """
-Base.@kwdef mutable struct SatellitePhenologyData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SatellitePhenologyData{FT<:Real}
     InterpMonths1::Int = -999                                          # saved month index
     timwt::Vector{Float64} = zeros(2)                                  # time weights for month 1 and month 2
     mlai2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # lai for interpolation (np × 2)
@@ -268,7 +268,7 @@ Ported from `readAnnualVegetation` in `SatellitePhenologyMod.F90`.
 function read_annual_vegetation!(canopystate::CanopyStateData,
                                   patch::PatchData,
                                   bounds_patch::UnitRange{Int};
-                                  monthly_lai::Array{Float64,3},
+                                  monthly_lai::Array{<:Real,3},
                                   noveg::Int = 0,
                                   maxveg::Int = 78)
     annlai = canopystate.annlai_patch
@@ -315,10 +315,10 @@ function read_monthly_vegetation!(sp::SatellitePhenologyData,
                                    canopystate::CanopyStateData,
                                    patch::PatchData,
                                    bounds_patch::UnitRange{Int};
-                                   monthly_lai::Array{Float64,3},
-                                   monthly_sai::Array{Float64,3},
-                                   monthly_height_top::Array{Float64,3},
-                                   monthly_height_bot::Array{Float64,3},
+                                   monthly_lai::Array{<:Real,3},
+                                   monthly_sai::Array{<:Real,3},
+                                   monthly_height_top::Array{<:Real,3},
+                                   monthly_height_bot::Array{<:Real,3},
                                    months::Tuple{Int,Int},
                                    noveg::Int = 0,
                                    maxveg::Int = 78)

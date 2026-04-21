@@ -43,7 +43,7 @@ function c_iso_flux_calc!(ciso_flux::AbstractVector{Float64},
                           ctot_state::AbstractVector{Float64},
                           mask::BitVector,
                           bounds::UnitRange{Int},
-                          frax_c13::Float64,
+                          frax_c13::Real,
                           isotope::String)
     # if C14, double the fractionation
     if isotope == "c14"
@@ -85,7 +85,7 @@ function c_iso_flux_calc_2d_flux!(ciso_flux::AbstractMatrix{Float64},
                                   ctot_state::AbstractVector{Float64},
                                   mask::BitVector,
                                   bounds::UnitRange{Int},
-                                  frax_c13::Float64,
+                                  frax_c13::Real,
                                   isotope::String)
     for k in axes(ciso_flux, 2)
         ciso_flux_1d = @view ciso_flux[:, k]
@@ -117,7 +117,7 @@ function c_iso_flux_calc_2d_both!(ciso_flux::AbstractMatrix{Float64},
                                    ctot_state::AbstractMatrix{Float64},
                                    mask::BitVector,
                                    bounds::UnitRange{Int},
-                                   frax_c13::Float64,
+                                   frax_c13::Real,
                                    isotope::String)
     for k in axes(ciso_flux, 2)
         ciso_flux_1d = @view ciso_flux[:, k]
@@ -180,11 +180,11 @@ function c_iso_flux1!(soilbiogeochem_state::SoilBiogeochemStateData,
                       repr_structure_max::Int=0,
                       patch_column::Vector{Int}=Int[],
                       patch_itype::Vector{Int}=Int[],
-                      patch_wtcol::Vector{Float64}=Float64[],
-                      lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      leaf_prof::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      froot_prof::Matrix{Float64}=Matrix{Float64}(undef, 0, 0))
+                      patch_wtcol::Vector{<:Real}=Float64[],
+                      lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      leaf_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      froot_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
 
     # Helper for 1D patch-level iso flux calc
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
@@ -517,9 +517,9 @@ function c_iso_flux2!(soilbiogeochem_state::SoilBiogeochemStateData,
                       isotope::String;
                       patch_column::Vector{Int}=Int[],
                       patch_itype::Vector{Int}=Int[],
-                      patch_wtcol::Vector{Float64}=Float64[],
-                      lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0))
+                      patch_wtcol::Vector{<:Real}=Float64[],
+                      lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -600,9 +600,9 @@ function c_iso_flux2h!(soilbiogeochem_state::SoilBiogeochemStateData,
                        isotope::String;
                        patch_column::Vector{Int}=Int[],
                        patch_itype::Vector{Int}=Int[],
-                       patch_wtcol::Vector{Float64}=Float64[],
-                       lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                       fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0))
+                       patch_wtcol::Vector{<:Real}=Float64[],
+                       lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                       fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -684,9 +684,9 @@ function c_iso_flux2g!(soilbiogeochem_state::SoilBiogeochemStateData,
                        isotope::String;
                        patch_column::Vector{Int}=Int[],
                        patch_itype::Vector{Int}=Int[],
-                       patch_wtcol::Vector{Float64}=Float64[],
-                       lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                       fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0))
+                       patch_wtcol::Vector{<:Real}=Float64[],
+                       lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                       fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -778,13 +778,13 @@ function c_iso_flux3!(soilbiogeochem_state::SoilBiogeochemStateData,
                       isotope::String;
                       patch_column::Vector{Int}=Int[],
                       patch_itype::Vector{Int}=Int[],
-                      patch_wtcol::Vector{Float64}=Float64[],
-                      lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      leaf_prof::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      froot_prof::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      stem_prof::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                      croot_prof::Matrix{Float64}=Matrix{Float64}(undef, 0, 0))
+                      patch_wtcol::Vector{<:Real}=Float64[],
+                      lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      leaf_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      froot_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      stem_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      croot_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -954,9 +954,9 @@ function cn_c_iso_litter_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                     nlevdecomp::Int;
                                     patch_column::Vector{Int}=Int[],
                                     patch_itype::Vector{Int}=Int[],
-                                    patch_wtcol::Vector{Float64}=Float64[],
-                                    lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                                    fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
+                                    patch_wtcol::Vector{<:Real}=Float64[],
+                                    lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                    fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                     use_crop::Bool=false,
                                     use_grainproduct::Bool=false,
                                     npcropmin::Int=NPCROPMIN,
@@ -1025,9 +1025,9 @@ function cn_c_iso_gap_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                      nlevdecomp::Int;
                                      patch_column::Vector{Int}=Int[],
                                      patch_itype::Vector{Int}=Int[],
-                                     patch_wtcol::Vector{Float64}=Float64[],
-                                     lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                                     fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
+                                     patch_wtcol::Vector{<:Real}=Float64[],
+                                     lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                     fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                      i_litr_min::Int=varpar.i_litr_min,
                                      i_litr_max::Int=varpar.i_litr_max,
                                      i_met_lit::Int=varpar.i_met_lit)
@@ -1097,9 +1097,9 @@ function cn_c_iso_harvest_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                          nlevdecomp::Int;
                                          patch_column::Vector{Int}=Int[],
                                          patch_itype::Vector{Int}=Int[],
-                                         patch_wtcol::Vector{Float64}=Float64[],
-                                         lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                                         fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
+                                         patch_wtcol::Vector{<:Real}=Float64[],
+                                         lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                         fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                          i_litr_min::Int=varpar.i_litr_min,
                                          i_litr_max::Int=varpar.i_litr_max,
                                          i_met_lit::Int=varpar.i_met_lit)
@@ -1173,9 +1173,9 @@ function cn_c_iso_gross_unrep_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                               nlevdecomp::Int;
                                               patch_column::Vector{Int}=Int[],
                                               patch_itype::Vector{Int}=Int[],
-                                              patch_wtcol::Vector{Float64}=Float64[],
-                                              lf_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
-                                              fr_f::Matrix{Float64}=Matrix{Float64}(undef, 0, 0),
+                                              patch_wtcol::Vector{<:Real}=Float64[],
+                                              lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                              fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                               i_litr_min::Int=varpar.i_litr_min,
                                               i_litr_max::Int=varpar.i_litr_max)
 

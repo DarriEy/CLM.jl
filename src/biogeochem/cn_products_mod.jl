@@ -129,7 +129,7 @@ This is typically called with `setval = 0.0` at the start of each timestep.
 Ported from `SetValues` in `CNProductsMod.F90`.
 """
 function cn_products_set_values!(prod::CNProductsFullData, bounds::BoundsType,
-                                  setval::Float64)
+                                  setval::Real)
     for g in bounds.begg:bounds.endg
         prod.dwt_prod10_gain_grc[g]           = setval
         prod.dwt_prod100_gain_grc[g]          = setval
@@ -173,14 +173,14 @@ function cn_products_update!(prod::CNProductsFullData,
                               bounds::BoundsType,
                               num_soilp::Int,
                               filter_soilp::Vector{Int},
-                              dwt_wood_product_gain_patch::Vector{Float64},
-                              gru_wood_product_gain_patch::Vector{Float64},
-                              wood_harvest_patch::Vector{Float64},
-                              dwt_crop_product_gain_patch::Vector{Float64},
-                              crop_harvest_to_cropprod_patch::Vector{Float64};
-                              pprod10::Vector{Float64},
-                              pprod100::Vector{Float64},
-                              pprodharv10::Vector{Float64},
+                              dwt_wood_product_gain_patch::Vector{<:Real},
+                              gru_wood_product_gain_patch::Vector{<:Real},
+                              wood_harvest_patch::Vector{<:Real},
+                              dwt_crop_product_gain_patch::Vector{<:Real},
+                              crop_harvest_to_cropprod_patch::Vector{<:Real};
+                              pprod10::Vector{<:Real},
+                              pprod100::Vector{<:Real},
+                              pprodharv10::Vector{<:Real},
                               patch_gridcell::Vector{Int},
                               patch_itype::Vector{Int},
                               pch::PatchData,
@@ -224,12 +224,12 @@ function cn_products_partition_wood_fluxes!(prod::CNProductsFullData,
         bounds::BoundsType,
         num_soilp::Int,
         filter_soilp::Vector{Int},
-        dwt_wood_product_gain_patch::Vector{Float64},
-        gru_wood_product_gain_patch::Vector{Float64},
-        wood_harvest_patch::Vector{Float64};
-        pprod10::Vector{Float64},
-        pprod100::Vector{Float64},
-        pprodharv10::Vector{Float64},
+        dwt_wood_product_gain_patch::Vector{<:Real},
+        gru_wood_product_gain_patch::Vector{<:Real},
+        wood_harvest_patch::Vector{<:Real};
+        pprod10::Vector{<:Real},
+        pprod100::Vector{<:Real},
+        pprodharv10::Vector{<:Real},
         patch_gridcell::Vector{Int},
         patch_itype::Vector{Int},
         pch::PatchData,
@@ -330,8 +330,8 @@ function cn_products_partition_crop_fluxes!(prod::CNProductsFullData,
         bounds::BoundsType,
         num_soilp::Int,
         filter_soilp::Vector{Int},
-        dwt_crop_product_gain_patch::Vector{Float64},
-        crop_harvest_to_cropprod_patch::Vector{Float64};
+        dwt_crop_product_gain_patch::Vector{<:Real},
+        crop_harvest_to_cropprod_patch::Vector{<:Real};
         patch_gridcell::Vector{Int},
         pch::PatchData,
         col::ColumnData,
@@ -377,7 +377,7 @@ Ported from `ComputeProductSummaryVars` in `CNProductsMod.F90`.
 """
 function cn_products_compute_product_summary!(prod::CNProductsFullData,
                                                bounds::BoundsType,
-                                               dt::Float64)
+                                               dt::Real)
     # Decay constants (1/s) for 1-yr, 10-yr, 100-yr pools
     kprod1   = 7.2e-8
     kprod10  = 7.2e-9

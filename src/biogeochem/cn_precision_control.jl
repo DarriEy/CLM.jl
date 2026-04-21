@@ -56,14 +56,14 @@ Ported from `TruncateCandNStates` in `CNPrecisionControlMod.F90`.
 function truncate_c_and_n_states!(
         carbon_patch::AbstractVector{Float64},
         nitrogen_patch::AbstractVector{Float64},
-        pc::Vector{Float64},
-        pn::Vector{Float64},
+        pc::Vector{<:Real},
+        pn::Vector{<:Real},
         filter_bgc_vegp::AbstractVector{Int},
         patch_itype::AbstractVector{Int};
-        ccrit::Float64 = CN_CCRIT_DEFAULT,
-        cnegcrit::Float64 = CN_CNEGCRIT_DEFAULT,
-        ncrit::Float64 = CN_NCRIT_DEFAULT,
-        nnegcrit::Float64 = CN_NNEGCRIT_DEFAULT,
+        ccrit::Real = CN_CCRIT_DEFAULT,
+        cnegcrit::Real = CN_CNEGCRIT_DEFAULT,
+        ncrit::Real = CN_NCRIT_DEFAULT,
+        nnegcrit::Real = CN_NNEGCRIT_DEFAULT,
         use_nguardrail::Bool = false,
         use_matrixcn::Bool = false,
         croponly::Bool = false,
@@ -134,11 +134,11 @@ Ported from `TruncateCStates` in `CNPrecisionControlMod.F90`.
 """
 function truncate_c_states!(
         carbon_patch::AbstractVector{Float64},
-        pc::Vector{Float64},
+        pc::Vector{<:Real},
         filter_bgc_vegp::AbstractVector{Int},
         patch_itype::AbstractVector{Int};
-        ccrit::Float64 = CN_CCRIT_DEFAULT,
-        cnegcrit::Float64 = CN_CNEGCRIT_DEFAULT,
+        ccrit::Real = CN_CCRIT_DEFAULT,
+        cnegcrit::Real = CN_CNEGCRIT_DEFAULT,
         croponly::Bool = false,
         allowneg::Bool = false,
         nc3crop::Int = 15)
@@ -190,10 +190,10 @@ Ported from `TruncateNStates` in `CNPrecisionControlMod.F90`.
 """
 function truncate_n_states!(
         nitrogen_patch::AbstractVector{Float64},
-        pn::Vector{Float64},
+        pn::Vector{<:Real},
         filter_bgc_vegp::AbstractVector{Int};
-        ncrit::Float64 = CN_NCRIT_DEFAULT,
-        nnegcrit::Float64 = CN_NNEGCRIT_DEFAULT)
+        ncrit::Real = CN_NCRIT_DEFAULT,
+        nnegcrit::Real = CN_NNEGCRIT_DEFAULT)
 
     for fp in eachindex(filter_bgc_vegp)
         p = filter_bgc_vegp[fp]
@@ -228,7 +228,7 @@ Ported from `TruncateAdditional` in `CNPrecisionControlMod.F90`.
 """
 function truncate_additional!(
         state_patch::AbstractVector{Float64},
-        truncation_patch::Vector{Float64},
+        truncation_patch::Vector{<:Real},
         num_truncatep::Int,
         filter_truncatep::AbstractVector{Int})
 
@@ -279,18 +279,19 @@ function cn_precision_control!(
         prec_control_for_froot::Bool = true,
         nrepr::Int = NREPR,
         nc3crop::Int = 15,
-        ccrit::Float64 = CN_CCRIT_DEFAULT,
-        cnegcrit::Float64 = CN_CNEGCRIT_DEFAULT,
-        ncrit::Float64 = CN_NCRIT_DEFAULT,
-        nnegcrit::Float64 = CN_NNEGCRIT_DEFAULT)
+        ccrit::Real = CN_CCRIT_DEFAULT,
+        cnegcrit::Real = CN_CNEGCRIT_DEFAULT,
+        ncrit::Real = CN_NCRIT_DEFAULT,
+        nnegcrit::Real = CN_NNEGCRIT_DEFAULT)
 
     np = length(cs.leafc_patch)
+    FT = eltype(cs.leafc_patch)
 
     # Initialize patch-level truncation accumulators
-    pc   = zeros(Float64, np)
-    pn   = zeros(Float64, np)
-    pc13 = use_c13 ? zeros(Float64, np) : Float64[]
-    pc14 = use_c14 ? zeros(Float64, np) : Float64[]
+    pc   = zeros(FT, np)
+    pn   = zeros(FT, np)
+    pc13 = use_c13 ? zeros(FT, np) : FT[]
+    pc14 = use_c14 ? zeros(FT, np) : FT[]
 
     # Common keyword arguments for truncate_c_and_n_states!
     cn_kw = (ccrit=ccrit, cnegcrit=cnegcrit, ncrit=ncrit, nnegcrit=nnegcrit,

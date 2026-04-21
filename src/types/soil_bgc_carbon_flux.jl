@@ -12,7 +12,7 @@ at column level.
 
 Ported from `soilbiogeochem_carbonflux_type` in `SoilBiogeochemCarbonFluxType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemCarbonFluxData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SoilBiogeochemCarbonFluxData{FT<:Real}
     # --- Fire fluxes ---
     somc_fire_col                        ::Vector{FT} = Float64[]  # (gC/m2/s) C emissions due to peat burning
 
@@ -188,7 +188,7 @@ Corresponds to `SetValues` in the Fortran source.
 """
 function soil_bgc_carbon_flux_set_values!(cf::SoilBiogeochemCarbonFluxData,
                                            mask_col::BitVector,
-                                           value_column::Float64;
+                                           value_column::Real;
                                            nlevdecomp_full::Int=size(cf.hr_vr_col, 2),
                                            nlevdecomp::Int=nlevdecomp_full,
                                            ndecomp_pools::Int=size(cf.cn_col, 2),
@@ -303,7 +303,7 @@ function soil_bgc_carbon_flux_summary!(cf::SoilBiogeochemCarbonFluxData,
                                         ndecomp_cascade_transitions::Int=size(cf.decomp_cascade_hr_col, 2),
                                         nlevdecomp::Int=size(cf.hr_vr_col, 2),
                                         ndecomp_pools::Int=size(cf.cn_col, 2),
-                                        dzsoi_decomp_vals::Vector{Float64},
+                                        dzsoi_decomp_vals::Vector{<:Real},
                                         cascade_donor_pool::Vector{Int}=ones(Int, ndecomp_cascade_transitions),
                                         is_soil::BitVector=falses(ndecomp_pools),
                                         is_litter::BitVector=falses(ndecomp_pools),

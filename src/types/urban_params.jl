@@ -67,7 +67,7 @@ Indexed by (gridcell, density_type) for 2D fields and
 
 Ported from `urbinp_type` in `UrbanParamsType.F90`.
 """
-Base.@kwdef mutable struct UrbanInputData{FT<:AbstractFloat}
+Base.@kwdef mutable struct UrbanInputData{FT<:Real}
     canyon_hwr      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     wtlunit_roof    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
     wtroad_perv     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
@@ -188,7 +188,7 @@ initialization for each urban landunit.
 
 Ported from `urbanparams_type` in `UrbanParamsType.F90`.
 """
-Base.@kwdef mutable struct UrbanParamsData{FT<:AbstractFloat}
+Base.@kwdef mutable struct UrbanParamsData{FT<:Real}
     # --- Emissivities (landunit-level 1D) ---
     wind_hgt_canyon     ::Vector{FT} = Float64[]   # lun height above road at which wind in canyon is computed (m)
     em_roof             ::Vector{FT} = Float64[]   # lun roof emissivity
@@ -487,7 +487,7 @@ function urbanparams_populate!(up::UrbanParamsData, lun::LandunitData,
 end
 
 """
-    check_urban(urbinp::UrbanInputData, pcturb::Matrix{Float64},
+    check_urban(urbinp::UrbanInputData, pcturb::Matrix{<:Real},
                 bounds_grid::UnitRange{Int}; urban_valid::Union{BitVector,Nothing}=nothing,
                 caller::String="")
 
@@ -496,7 +496,7 @@ Throws an error with diagnostic information if invalid data is found.
 
 Ported from `CheckUrban` in `UrbanParamsType.F90`.
 """
-function check_urban(urbinp::UrbanInputData, pcturb::Matrix{Float64},
+function check_urban(urbinp::UrbanInputData, pcturb::Matrix{<:Real},
                      bounds_grid::UnitRange{Int};
                      urban_valid::Union{BitVector,Nothing} = nothing,
                      caller::String = "")

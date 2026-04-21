@@ -73,8 +73,8 @@ Computes: col_out[c] = Σ_p (patch_in[p] * patch.wtcol[p]) for all p on column c
 Ported from `p2c` in `subgridAveMod.F90`.
 """
 function p2c!(
-    col_out::Vector{Float64},
-    patch_in::Vector{Float64},
+    col_out::Vector{<:Real},
+    patch_in::Vector{<:Real},
     patch_d::PatchData,
     mask_soilc::BitVector,
     bounds_c::UnitRange{Int},
@@ -132,32 +132,32 @@ function cnfire_area_li2014!(
     grc::GridcellData,
     # Soil state (for root wetness)
     soilstate::SoilStateData,
-    h2osoi_vol_col::Matrix{Float64},
+    h2osoi_vol_col::Matrix{<:Real},
     # CN Veg State and Carbon State
     cnveg_state::CNVegStateData,
     cnveg_cs::CNVegCarbonStateData,
     # Decomposition data
     decomp_cascade_con::DecompCascadeConData,
     # Input arrays
-    totlitc_col::Vector{Float64},
-    decomp_cpools_vr_col::Array{Float64,3},
-    t_soi17cm_col::Vector{Float64};
+    totlitc_col::Vector{<:Real},
+    decomp_cpools_vr_col::Array{<:Real,3},
+    t_soi17cm_col::Vector{<:Real};
     # Atmospheric forcing (keyword args)
-    forc_rh_grc::Vector{Float64} = Float64[],
-    forc_wind_grc::Vector{Float64} = Float64[],
-    forc_t_col::Vector{Float64} = Float64[],
-    forc_rain_col::Vector{Float64} = Float64[],
-    forc_snow_col::Vector{Float64} = Float64[],
-    prec60_patch::Vector{Float64} = Float64[],
-    prec10_patch::Vector{Float64} = Float64[],
+    forc_rh_grc::Vector{<:Real} = Float64[],
+    forc_wind_grc::Vector{<:Real} = Float64[],
+    forc_t_col::Vector{<:Real} = Float64[],
+    forc_rain_col::Vector{<:Real} = Float64[],
+    forc_snow_col::Vector{<:Real} = Float64[],
+    prec60_patch::Vector{<:Real} = Float64[],
+    prec10_patch::Vector{<:Real} = Float64[],
     # Saturated runoff
-    fsat_col::Vector{Float64} = Float64[],
+    fsat_col::Vector{<:Real} = Float64[],
     # Water diagnostic
-    wf_col::Vector{Float64} = Float64[],
-    wf2_col::Vector{Float64} = Float64[],
+    wf_col::Vector{<:Real} = Float64[],
+    wf2_col::Vector{<:Real} = Float64[],
     # Time/date
-    dt::Float64 = 1800.0,
-    dayspyr::Float64 = 365.0,
+    dt::Real = 1800.0,
+    dayspyr::Real = 365.0,
     kmo::Int = 1,
     kda::Int = 1,
     mcsec::Int = 0,
@@ -260,11 +260,12 @@ function cnfire_area_li2014!(
 
     # --- Local arrays ---
     nc = length(bounds_c)
-    btran_col = zeros(last(bounds_c))
+    FT = eltype(totvegc)
+    btran_col = zeros(FT, last(bounds_c))
 
     # Temporary arrays for p2c results
-    prec60_col = zeros(last(bounds_c))
-    prec10_col = zeros(last(bounds_c))
+    prec60_col = zeros(FT, last(bounds_c))
+    prec10_col = zeros(FT, last(bounds_c))
 
     # --- Patch to column averaging ---
     p2c!(prec10_col, prec10, patch, mask_soilc, bounds_c, bounds_p)
@@ -496,7 +497,7 @@ function cnfire_area_li2014!(
             fgdp = 0.01 + 0.99 * exp(-1.0 * RPI * (gdp_lf[c] / 10.0))
 
             # burned area
-            fb = max(0.0, min(1.0, (fuelc_crop[c] - lfuel) / (ufuel - lfuel)))
+            fb = smooth_max(0.0, smooth_min(1.0, (fuelc_crop[c] - lfuel) / (ufuel - lfuel)))
 
             baf_crop[c] = baf_crop[c] + cropfire_a1 / SECSPHR * fb * fhd * fgdp * patch.wtcol[p]
             if fb * fhd * fgdp * patch.wtcol[p] > 0.0
@@ -511,13 +512,13 @@ function cnfire_area_li2014!(
         g = col.gridcell[c]
         if grc.latdeg[g] < cnfire_const.borealat
             baf_peatf[c] = non_boreal_peatfire_c / SECSPHR *
-                max(0.0, min(1.0,
+                smooth_max(0.0, smooth_min(1.0,
                     (4.0 - prec60_col[c] * SECSPDAY / nonborpeat_fire_precip_denom) /
                     4.0))^2 * peatf_lf[c] * (1.0 - fsat[c])
         else
             baf_peatf[c] = boreal_peatfire_c / SECSPHR *
-                exp(-RPI * (max(wf2[c], 0.0) / borpeat_fire_soilmoist_denom)) *
-                max(0.0, min(1.0, (tsoi17[c] - TFRZ) / 10.0)) * peatf_lf[c] *
+                exp(-RPI * (smooth_max(wf2[c], 0.0) / borpeat_fire_soilmoist_denom)) *
+                smooth_max(0.0, smooth_min(1.0, (tsoi17[c] - TFRZ) / 10.0)) * peatf_lf[c] *
                 (1.0 - fsat[c])
         end
     end
@@ -539,18 +540,18 @@ function cnfire_area_li2014!(
 
         if cropf_col[c] < 1.0
             if trotr1_col[c] + trotr2_col[c] > 0.6
-                farea_burned[c] = min(1.0, baf_crop[c] + baf_peatf[c])
+                farea_burned[c] = smooth_min(1.0, baf_crop[c] + baf_peatf[c])
             else
                 fuelc[c] = totlitc[c] + totvegc[c] - rootc_col[c] - fuelc_crop[c] * cropf_col[c]
                 for j in 1:nlevdecomp
                     fuelc[c] = fuelc[c] + decomp_cpools_vr[c, j, i_cwd] * dzsoi_decomp[][j]
                 end
                 fuelc[c] = fuelc[c] / (1.0 - cropf_col[c])
-                fb       = max(0.0, min(1.0, (fuelc[c] - lfuel) / (ufuel - lfuel)))
-                m        = max(0.0, wf[c])
-                fire_m   = exp(-RPI * (m / 0.69)^2) * (1.0 - max(0.0,
-                    min(1.0, (forc_rh[g] - rh_low) / (rh_hgh - rh_low)))) *
-                    min(1.0, exp(RPI * (forc_t[c] - TFRZ) / 10.0))
+                fb       = smooth_max(0.0, smooth_min(1.0, (fuelc[c] - lfuel) / (ufuel - lfuel)))
+                m        = smooth_max(0.0, wf[c])
+                fire_m   = exp(-RPI * (m / 0.69)^2) * (1.0 - smooth_max(0.0,
+                    smooth_min(1.0, (forc_rh[g] - rh_low) / (rh_hgh - rh_low)))) *
+                    smooth_min(1.0, exp(RPI * (forc_t[c] - TFRZ) / 10.0))
                 lh       = pot_hmn_ign_counts_alpha * 6.8 * hdmlf^0.43 / 30.0 / 24.0
                 fs       = 1.0 - (0.01 + 0.98 * exp(-0.025 * hdmlf))
                 ig       = (lh + fire_li2014.forc_lnfm[g] /
@@ -559,14 +560,14 @@ function cnfire_area_li2014!(
                 nfire[c] = ig / SECSPHR * fb * fire_m * lgdp_col[c]
                 Lb_lf    = 1.0 + 10.0 * (1.0 - exp(-0.06 * forc_wind[g]))
                 if wtlf[c] > 0.0
-                    spread_m = (1.0 - max(0.0, min(1.0,
+                    spread_m = (1.0 - smooth_max(0.0, smooth_min(1.0,
                         (btran_col[c] / wtlf[c] - bt_min) /
-                        (bt_max - bt_min)))) * (1.0 - max(0.0,
-                        min(1.0, (forc_rh[g] - rh_low) / (rh_hgh - rh_low))))
+                        (bt_max - bt_min)))) * (1.0 - smooth_max(0.0,
+                        smooth_min(1.0, (forc_rh[g] - rh_low) / (rh_hgh - rh_low))))
                 else
                     spread_m = 0.0
                 end
-                farea_burned[c] = min(1.0,
+                farea_burned[c] = smooth_min(1.0,
                     (cnfire_const.g0 * spread_m * fsr_col[c] *
                     fd_col[c] / 1000.0)^2 * lgdp1_col[c] *
                     lpop_col[c] * nfire[c] * RPI * Lb_lf +
@@ -586,13 +587,13 @@ function cnfire_area_li2014!(
                                defo_fire_precip_thresh_bdt * trotr2_col[c]) /
                               (trotr1_col[c] + trotr2_col[c])
 
-                        cli = (max(0.0, min(1.0, (cri - prec60_col[c] * SECSPDAY) / cri))^0.5) *
-                              (max(0.0, min(1.0, (cri - prec10_col[c] * SECSPDAY) / cri))^0.5) *
-                              max(0.0005, min(1.0, 19.0 * dtrotr_col[c] * dayspyr * SECSPDAY / dt - 0.001)) *
-                              max(0.0, min(1.0, (0.25 - (forc_rain[c] + forc_snow[c]) * SECSPHR) / 0.25))
+                        cli = (smooth_max(0.0, smooth_min(1.0, (cri - prec60_col[c] * SECSPDAY) / cri))^0.5) *
+                              (smooth_max(0.0, smooth_min(1.0, (cri - prec10_col[c] * SECSPDAY) / cri))^0.5) *
+                              smooth_max(0.0005, smooth_min(1.0, 19.0 * dtrotr_col[c] * dayspyr * SECSPDAY / dt - 0.001)) *
+                              smooth_max(0.0, smooth_min(1.0, (0.25 - (forc_rain[c] + forc_snow[c]) * SECSPHR) / 0.25))
                         farea_burned[c] = cli * (cli_scale / SECSPDAY) + baf_crop[c] + baf_peatf[c]
                         # burned area out of conversion region due to land use fire
-                        fbac1[c] = max(0.0, cli * (cli_scale / SECSPDAY) - 2.0 * lfc[c] / dt)
+                        fbac1[c] = smooth_max(0.0, cli * (cli_scale / SECSPDAY) - 2.0 * lfc[c] / dt)
                     end
                     # total burned area out of conversion
                     fbac[c] = fbac1[c] + baf_crop[c] + baf_peatf[c]
@@ -602,7 +603,7 @@ function cnfire_area_li2014!(
             end
 
         else
-            farea_burned[c] = min(1.0, baf_crop[c] + baf_peatf[c])
+            farea_burned[c] = smooth_min(1.0, baf_crop[c] + baf_peatf[c])
         end
     end
 
@@ -647,16 +648,16 @@ function cnfire_fluxes_li2014!(
     cnveg_nf::CNVegNitrogenFluxData,
     soilbgc_cf::SoilBiogeochemCarbonFluxData,
     decomp_cascade_con::DecompCascadeConData,
-    leaf_prof_patch::Matrix{Float64},
-    froot_prof_patch::Matrix{Float64},
-    croot_prof_patch::Matrix{Float64},
-    stem_prof_patch::Matrix{Float64},
-    totsomc_col::Vector{Float64},
-    decomp_cpools_vr_col::Array{Float64,3},
-    decomp_npools_vr_col::Array{Float64,3},
-    somc_fire_col::Vector{Float64};
-    dt::Float64 = 1800.0,
-    dayspyr::Float64 = 365.0,
+    leaf_prof_patch::Matrix{<:Real},
+    froot_prof_patch::Matrix{<:Real},
+    croot_prof_patch::Matrix{<:Real},
+    stem_prof_patch::Matrix{<:Real},
+    totsomc_col::Vector{<:Real},
+    decomp_cpools_vr_col::Array{<:Real,3},
+    decomp_npools_vr_col::Array{<:Real,3},
+    somc_fire_col::Vector{<:Real};
+    dt::Real = 1800.0,
+    dayspyr::Real = 365.0,
     nlevdecomp::Int = 1,
     ndecomp_pools::Int = 7,
     i_met_lit::Int = 1,
@@ -664,8 +665,8 @@ function cnfire_fluxes_li2014!(
     transient_landcover::Bool = false,
     use_cndv::Bool = false,
     use_matrixcn::Bool = false,
-    spinup_factor_deadwood::Float64 = SPINUP_FACTOR_DEADWOOD_DEFAULT,
-    secspday::Float64 = SECSPDAY,
+    spinup_factor_deadwood::Real = SPINUP_FACTOR_DEADWOOD_DEFAULT,
+    secspday::Real = SECSPDAY,
     nc3crop::Int = 15,
     noveg::Int = 0,
     kmo::Int = 6,

@@ -28,7 +28,7 @@ Fortran snow-layer index j ∈ [-nlevsno+1, 0] to Julia index j + nlevsno.
 
 Ported from `aerosol_type` in `AerosolMod.F90`.
 """
-Base.@kwdef mutable struct AerosolData{FT<:AbstractFloat}
+Base.@kwdef mutable struct AerosolData{FT<:Real}
     # --- Mass of aerosol species in snow (col, lyr) [kg] ---
     mss_bcpho_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophobic BC
     mss_bcphi_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophilic BC
@@ -345,10 +345,10 @@ function aerosol_masses!(aer::AerosolData,
                          mask_off::BitVector,
                          bounds::UnitRange{Int},
                          snl::Vector{Int},
-                         h2osoi_ice_col::Matrix{Float64},
-                         h2osoi_liq_col::Matrix{Float64},
-                         h2osno_top_col::Vector{Float64},
-                         snw_rds_col::Matrix{Float64})
+                         h2osoi_ice_col::Matrix{<:Real},
+                         h2osoi_liq_col::Matrix{<:Real},
+                         h2osno_top_col::Vector{<:Real},
+                         snw_rds_col::Matrix{<:Real})
     nlevsno = varpar.nlevsno
 
     # --- Columns with snow ---
@@ -492,8 +492,8 @@ function aerosol_fluxes!(aer::AerosolData,
                          bounds::UnitRange{Int},
                          snl::Vector{Int},
                          col_gridcell::Vector{Int},
-                         forc_aer::Matrix{Float64},
-                         dtime::Float64;
+                         forc_aer::Matrix{<:Real},
+                         dtime::Real;
                          snicar_use_aerosol::Bool = varctl.snicar_use_aerosol)
     nlevsno = varpar.nlevsno
 
@@ -590,8 +590,8 @@ Ported from `Restart` in `AerosolMod.F90`.
 """
 function aerosol_restart!(aer::AerosolData, bounds::UnitRange{Int};
                           flag::String = "read",
-                          h2osoi_ice_col::Matrix{Float64} = Matrix{Float64}(undef, 0, 0),
-                          h2osoi_liq_col::Matrix{Float64} = Matrix{Float64}(undef, 0, 0))
+                          h2osoi_ice_col::Matrix{<:Real} = Matrix{Float64}(undef, 0, 0),
+                          h2osoi_liq_col::Matrix{<:Real} = Matrix{Float64}(undef, 0, 0))
     nlevsno = varpar.nlevsno
 
     if flag == "read" && size(h2osoi_ice_col, 1) > 0

@@ -118,9 +118,9 @@ Compute the bulk density of newly-fallen snow (kg/m3).
 Uses Alta relationship from Anderson(1976).
 """
 function new_snow_bulk_density!(
-    bifall::Vector{Float64},        # output: bulk density [kg/m3]
-    forc_t::Vector{Float64},        # input: atmospheric temperature [K]
-    forc_wind::Vector{Float64},     # input: atmospheric wind speed [m/s] (gridcell)
+    bifall::Vector{<:Real},        # output: bulk density [kg/m3]
+    forc_t::Vector{<:Real},        # input: atmospheric temperature [K]
+    forc_wind::Vector{<:Real},     # input: atmospheric wind speed [m/s] (gridcell)
     col_gridcell::Vector{Int},      # input: column-to-gridcell mapping
     mask::BitVector,                # input: column mask
     bounds::UnitRange{Int}          # input: column bounds
@@ -131,20 +131,25 @@ function new_snow_bulk_density!(
         mask[c] || continue
         g = col_gridcell[c]
 
-        if forc_t[c] > TFRZ + 2.0
-            bifall[c] = 50.0 + 1.7 * (17.0)^1.5
-        elseif forc_t[c] > TFRZ - 15.0
-            bifall[c] = 50.0 + 1.7 * (forc_t[c] - TFRZ + 15.0)^1.5
-        elseif NEW_SNOW_DENSITY[] == LO_TMP_DNS_TRUNCATED_ANDERSON1976
-            bifall[c] = 50.0
-        elseif NEW_SNOW_DENSITY[] == LO_TMP_DNS_SLATER2017
-            if forc_t[c] > TFRZ - 57.55
-                t_for_bifall_degC = forc_t[c] - TFRZ
-            else
-                t_for_bifall_degC = -57.55
-            end
-            bifall[c] = -(50.0/15.0 + 0.0333*15.0)*t_for_bifall_degC - 0.0333*t_for_bifall_degC^2
+        # Smooth TFRZ branches for AD compatibility
+        # Weight for T > TFRZ + 2.0
+        w_high = smooth_heaviside(forc_t[c] - (TFRZ + 2.0))
+        # Weight for TFRZ - 15.0 < T <= TFRZ + 2.0
+        w_mid = smooth_heaviside(forc_t[c] - (TFRZ - 15.0)) * (1.0 - w_high)
+        # Weight for T <= TFRZ - 15.0
+        w_low = 1.0 - w_high - w_mid
+
+        bifall_high = 50.0 + 1.7 * (17.0)^1.5
+        bifall_mid = 50.0 + 1.7 * smooth_max(forc_t[c] - TFRZ + 15.0, 0.0)^1.5
+
+        if NEW_SNOW_DENSITY[] == LO_TMP_DNS_TRUNCATED_ANDERSON1976
+            bifall_low = 50.0
+        else  # LO_TMP_DNS_SLATER2017
+            t_for_bifall_degC = smooth_max(forc_t[c] - TFRZ, -57.55)
+            bifall_low = -(50.0/15.0 + 0.0333*15.0)*t_for_bifall_degC - 0.0333*t_for_bifall_degC^2
         end
+
+        bifall[c] = w_high * bifall_high + w_mid * bifall_mid + w_low * bifall_low
 
         if WIND_DEPENDENT_SNOW_DENSITY[] && forc_wind[g] > 0.1
             bifall[c] = bifall[c] + 266.861 * ((1.0 +
@@ -169,32 +174,33 @@ for newly-fallen snow.
 """
 function bulkdiag_new_snow_diagnostics!(
     # Outputs (modified in place)
-    dz::Matrix{Float64},            # layer depth [m]
-    int_snow::Vector{Float64},      # integrated snowfall [mm H2O]
-    swe_old::Matrix{Float64},       # SWE before update [mm H2O]
-    frac_sno::Vector{Float64},      # fraction of ground covered by snow
-    frac_sno_eff::Vector{Float64},  # effective fraction
-    snow_depth::Vector{Float64},    # snow height [m]
-    snomelt_accum::Vector{Float64}, # accumulated snow melt for z0m [m H2O]
+    dz::Matrix{<:Real},            # layer depth [m]
+    int_snow::Vector{<:Real},      # integrated snowfall [mm H2O]
+    swe_old::Matrix{<:Real},       # SWE before update [mm H2O]
+    frac_sno::Vector{<:Real},      # fraction of ground covered by snow
+    frac_sno_eff::Vector{<:Real},  # effective fraction
+    snow_depth::Vector{<:Real},    # snow height [m]
+    snomelt_accum::Vector{<:Real}, # accumulated snow melt for z0m [m H2O]
     # Inputs
-    dtime::Float64,                 # time step [s]
+    dtime::Real,                 # time step [s]
     lun_itype_col::Vector{Int},     # landunit type per column
     urbpoi::Vector{Bool},           # urban point flags (landunit-level, indexed by col)
     snl::Vector{Int},               # number of snow layers (negative)
-    bifall::Vector{Float64},        # bulk density of new snow [kg/m3]
-    h2osno_total::Vector{Float64},  # total snow water [mm H2O]
-    h2osoi_ice::Matrix{Float64},    # ice lens [kg/m2]
-    h2osoi_liq::Matrix{Float64},    # liquid water [kg/m2]
-    qflx_snow_grnd::Vector{Float64}, # snow on ground [mm H2O/s]
-    qflx_snow_drain::Vector{Float64}, # drainage from snow pack [mm H2O/s]
+    bifall::Vector{<:Real},        # bulk density of new snow [kg/m3]
+    h2osno_total::Vector{<:Real},  # total snow water [mm H2O]
+    h2osoi_ice::Matrix{<:Real},    # ice lens [kg/m2]
+    h2osoi_liq::Matrix{<:Real},    # liquid water [kg/m2]
+    qflx_snow_grnd::Vector{<:Real}, # snow on ground [mm H2O/s]
+    qflx_snow_drain::Vector{<:Real}, # drainage from snow pack [mm H2O/s]
     mask::BitVector,                # column mask
     bounds::UnitRange{Int},         # column bounds
     nlevsno::Int;                   # max snow layers
     scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
 )
-    newsnow = zeros(Float64, length(snow_depth))
-    snowmelt = zeros(Float64, length(snow_depth))
-    temp_snow_depth = zeros(Float64, length(snow_depth))
+    FT = eltype(snow_depth)
+    newsnow = zeros(FT, length(snow_depth))
+    snowmelt = zeros(FT, length(snow_depth))
+    temp_snow_depth = zeros(FT, length(snow_depth))
 
     for c in bounds
         mask[c] || continue
@@ -214,10 +220,10 @@ function bulkdiag_new_snow_diagnostics!(
 
         # All snow falls on ground
         newsnow[c] = qflx_snow_grnd[c] * dtime
-        snomelt_accum[c] = max(0.0, snomelt_accum[c] - newsnow[c] * 1.0e-3)
+        snomelt_accum[c] = smooth_max(0.0, snomelt_accum[c] - newsnow[c] * 1.0e-3)
 
         # Update int_snow
-        int_snow[c] = max(int_snow[c], h2osno_total[c])
+        int_snow[c] = smooth_max(int_snow[c], h2osno_total[c])
 
         # Snowmelt from previous time step
         snowmelt[c] = qflx_snow_drain[c] * dtime
@@ -264,11 +270,11 @@ end
 Update h2osno_no_layers or h2osoi_ice based on new snow.
 """
 function update_state_add_new_snow!(
-    h2osno_no_layers::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    dtime::Float64,
+    h2osno_no_layers::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    dtime::Real,
     snl::Vector{Int},
-    qflx_snow_grnd::Vector{Float64},
+    qflx_snow_grnd::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -296,7 +302,7 @@ Build a column-level mask of thawed wetland columns with thin (no-layer) snow pa
 """
 function build_filter_thawed_wetland_thin_snowpack!(
     mask_out::BitVector,
-    t_grnd::Vector{Float64},
+    t_grnd::Vector{<:Real},
     lun_itype_col::Vector{Int},
     snl::Vector{Int},
     mask_nolake::BitVector,
@@ -321,7 +327,7 @@ end
 Remove snow from thawed wetlands — set h2osno_no_layers to zero.
 """
 function update_state_remove_snow_thawed_wetlands!(
-    h2osno_no_layers::Vector{Float64},
+    h2osno_no_layers::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )
@@ -341,7 +347,7 @@ end
 Remove snow from thawed wetlands — set snow_depth to zero.
 """
 function bulk_remove_snow_thawed_wetlands!(
-    snow_depth::Vector{Float64},
+    snow_depth::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )
@@ -366,9 +372,9 @@ function build_filter_snowpack_initialized!(
     mask_out::BitVector,
     snl::Vector{Int},
     lun_itype_col::Vector{Int},
-    frac_sno_eff::Vector{Float64},
-    snow_depth::Vector{Float64},
-    qflx_snow_grnd::Vector{Float64},
+    frac_sno_eff::Vector{<:Real},
+    snow_depth::Vector{<:Real},
+    qflx_snow_grnd::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )
@@ -399,9 +405,9 @@ end
 Initialize water state variables for columns with newly-initialized snow pack.
 """
 function update_state_initialize_snow_pack!(
-    h2osno_no_layers::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    h2osno_no_layers::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -427,14 +433,14 @@ Initialize an explicit snow pack in columns warranted by snow depth.
 """
 function bulk_initialize_snow_pack!(
     snl::Vector{Int},
-    zi::Matrix{Float64},
-    dz::Matrix{Float64},
-    z::Matrix{Float64},
-    t_soisno::Matrix{Float64},
-    frac_iceold::Matrix{Float64},
-    snomelt_accum::Vector{Float64},
-    forc_t::Vector{Float64},
-    snow_depth::Vector{Float64},
+    zi::Matrix{<:Real},
+    dz::Matrix{<:Real},
+    z::Matrix{<:Real},
+    t_soisno::Matrix{<:Real},
+    frac_iceold::Matrix{<:Real},
+    snomelt_accum::Vector{<:Real},
+    forc_t::Vector{<:Real},
+    snow_depth::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -454,7 +460,7 @@ function bulk_initialize_snow_pack!(
         zi[c, jj_zero] = zi[c, jj_surface_zi] - dz[c, jj_zero]
         z[c, jj_zero] = zi[c, jj_surface_zi] - 0.5 * dz[c, jj_zero]
 
-        t_soisno[c, jj_zero] = min(TFRZ, forc_t[c])
+        t_soisno[c, jj_zero] = smooth_min(TFRZ, forc_t[c])
         frac_iceold[c, jj_zero] = 1.0
         snomelt_accum[c] = 0.0
     end
@@ -474,16 +480,16 @@ end
 Update top layer of snow pack with various fluxes into and out of the top layer.
 """
 function update_state_top_layer_fluxes!(
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    dtime::Float64,
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    dtime::Real,
     snl::Vector{Int},
-    frac_sno_eff::Vector{Float64},
-    qflx_soliddew_to_top_layer::Vector{Float64},
-    qflx_solidevap_from_top_layer::Vector{Float64},
-    qflx_liq_grnd::Vector{Float64},
-    qflx_liqdew_to_top_layer::Vector{Float64},
-    qflx_liqevap_from_top_layer::Vector{Float64},
+    frac_sno_eff::Vector{<:Real},
+    qflx_soliddew_to_top_layer::Vector{<:Real},
+    qflx_solidevap_from_top_layer::Vector{<:Real},
+    qflx_liq_grnd::Vector{<:Real},
+    qflx_liqdew_to_top_layer::Vector{<:Real},
+    qflx_liqevap_from_top_layer::Vector{<:Real},
     mask_snow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -504,18 +510,28 @@ function update_state_top_layer_fluxes!(
 
         # Truncate near-zero negatives
         if abs(h2osoi_ice[c, jj]) < 1.0e-10
-            h2osoi_ice[c, jj] = max(0.0, h2osoi_ice[c, jj])
+            h2osoi_ice[c, jj] = smooth_max(0.0, h2osoi_ice[c, jj])
         end
         if abs(h2osoi_liq[c, jj]) < 1.0e-10
-            h2osoi_liq[c, jj] = max(0.0, h2osoi_liq[c, jj])
+            h2osoi_liq[c, jj] = smooth_max(0.0, h2osoi_liq[c, jj])
         end
 
         # Error check
         if h2osoi_ice[c, jj] < 0.0
-            error("update_state_top_layer_fluxes!: h2osoi_ice negative at c=$c, lev_top=$lev_top, val=$(h2osoi_ice[c, jj])")
+            if _is_ad_type(eltype(h2osoi_ice))
+                @warn "update_state_top_layer_fluxes!: h2osoi_ice negative (AD mode, clamping)" maxlog=1
+                h2osoi_ice[c, jj] = 0.0
+            else
+                error("update_state_top_layer_fluxes!: h2osoi_ice negative at c=$c, lev_top=$lev_top, val=$(h2osoi_ice[c, jj])")
+            end
         end
         if h2osoi_liq[c, jj] < 0.0
-            error("update_state_top_layer_fluxes!: h2osoi_liq negative at c=$c, lev_top=$lev_top, val=$(h2osoi_liq[c, jj])")
+            if _is_ad_type(eltype(h2osoi_liq))
+                @warn "update_state_top_layer_fluxes!: h2osoi_liq negative (AD mode, clamping)" maxlog=1
+                h2osoi_liq[c, jj] = 0.0
+            else
+                error("update_state_top_layer_fluxes!: h2osoi_liq negative at c=$c, lev_top=$lev_top, val=$(h2osoi_liq[c, jj])")
+            end
         end
     end
 end
@@ -533,13 +549,13 @@ Calculate liquid percolation through the snow pack for bulk water.
 qflx_snow_percolation[c,j] gives percolation out of bottom of layer j.
 """
 function bulk_flux_snow_percolation!(
-    qflx_snow_percolation::Matrix{Float64},
-    dtime::Float64,
+    qflx_snow_percolation::Matrix{<:Real},
+    dtime::Real,
     snl::Vector{Int},
-    dz::Matrix{Float64},
-    frac_sno_eff::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    dz::Matrix{<:Real},
+    frac_sno_eff::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     mask_snow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -548,9 +564,10 @@ function bulk_flux_snow_percolation!(
 
     # Temporary arrays for porosity/volume calculations
     nc = length(snl)
-    vol_liq = zeros(Float64, nc, nlevsno)
-    vol_ice = zeros(Float64, nc, nlevsno)
-    eff_porosity = zeros(Float64, nc, nlevsno)
+    FT = eltype(h2osoi_liq)
+    vol_liq = zeros(FT, nc, nlevsno)
+    vol_ice = zeros(FT, nc, nlevsno)
+    eff_porosity = zeros(FT, nc, nlevsno)
 
     # Porosity and partial volume
     for j in (-nlevsno+1):0
@@ -558,9 +575,9 @@ function bulk_flux_snow_percolation!(
         for c in bounds
             mask_snow[c] || continue
             if j >= snl[c] + 1
-                vol_ice[c, jj] = min(1.0, h2osoi_ice[c, jj] / (dz[c, jj] * frac_sno_eff[c] * DENICE))
+                vol_ice[c, jj] = smooth_min(1.0, h2osoi_ice[c, jj] / (dz[c, jj] * frac_sno_eff[c] * DENICE))
                 eff_porosity[c, jj] = 1.0 - vol_ice[c, jj]
-                vol_liq[c, jj] = min(eff_porosity[c, jj],
+                vol_liq[c, jj] = smooth_min(eff_porosity[c, jj],
                     h2osoi_liq[c, jj] / (dz[c, jj] * frac_sno_eff[c] * DENH2O))
             end
         end
@@ -577,15 +594,15 @@ function bulk_flux_snow_percolation!(
                     if eff_porosity[c, jj] < params.wimp || eff_porosity[c, jj_next] < params.wimp
                         qflx_snow_percolation[c, jj] = 0.0
                     else
-                        qflx_snow_percolation[c, jj] = max(0.0,
+                        qflx_snow_percolation[c, jj] = smooth_max(0.0,
                             (vol_liq[c, jj] - params.ssi * eff_porosity[c, jj]) *
                             dz[c, jj] * frac_sno_eff[c])
-                        qflx_snow_percolation[c, jj] = min(qflx_snow_percolation[c, jj],
+                        qflx_snow_percolation[c, jj] = smooth_min(qflx_snow_percolation[c, jj],
                             (1.0 - vol_ice[c, jj_next] - vol_liq[c, jj_next]) *
                             dz[c, jj_next] * frac_sno_eff[c])
                     end
                 else  # j == 0, bottom layer
-                    qflx_snow_percolation[c, jj] = max(0.0,
+                    qflx_snow_percolation[c, jj] = smooth_max(0.0,
                         (vol_liq[c, jj] - params.ssi * eff_porosity[c, jj]) *
                         dz[c, jj] * frac_sno_eff[c])
                 end
@@ -607,10 +624,10 @@ end
 Update h2osoi_liq for snow percolation (bulk or one tracer).
 """
 function update_state_snow_percolation!(
-    h2osoi_liq::Matrix{Float64},
-    dtime::Float64,
+    h2osoi_liq::Matrix{<:Real},
+    dtime::Real,
     snl::Vector{Int},
-    qflx_snow_percolation::Matrix{Float64},
+    qflx_snow_percolation::Matrix{<:Real},
     mask_snow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -644,11 +661,11 @@ Calculate and apply fluxes of aerosols through the snow pack.
 """
 function calc_and_apply_aerosol_fluxes!(
     aerosol::AerosolData,
-    dtime::Float64,
+    dtime::Real,
     snl::Vector{Int},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    qflx_snow_percolation::Matrix{Float64},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    qflx_snow_percolation::Matrix{<:Real},
     mask_snow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -657,14 +674,15 @@ function calc_and_apply_aerosol_fluxes!(
     nc = length(snl)
 
     # Initialize incoming fluxes
-    qin_bc_phi = zeros(Float64, nc)
-    qin_bc_pho = zeros(Float64, nc)
-    qin_oc_phi = zeros(Float64, nc)
-    qin_oc_pho = zeros(Float64, nc)
-    qin_dst1   = zeros(Float64, nc)
-    qin_dst2   = zeros(Float64, nc)
-    qin_dst3   = zeros(Float64, nc)
-    qin_dst4   = zeros(Float64, nc)
+    FT = eltype(h2osoi_liq)
+    qin_bc_phi = zeros(FT, nc)
+    qin_bc_pho = zeros(FT, nc)
+    qin_oc_phi = zeros(FT, nc)
+    qin_oc_pho = zeros(FT, nc)
+    qin_dst1   = zeros(FT, nc)
+    qin_dst2   = zeros(FT, nc)
+    qin_dst3   = zeros(FT, nc)
+    qin_dst4   = zeros(FT, nc)
 
     for j in (-nlevsno+1):0
         jj = j + nlevsno
@@ -792,10 +810,10 @@ end
 Adjust layer thickness for any water+ice content changes after percolation.
 """
 function post_percolation_adjust_layer_thicknesses!(
-    dz::Matrix{Float64},
+    dz::Matrix{<:Real},
     snl::Vector{Int},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     mask_snow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -805,7 +823,7 @@ function post_percolation_adjust_layer_thicknesses!(
         for c in bounds
             mask_snow[c] || continue
             if j >= snl[c] + 1
-                dz[c, jj] = max(dz[c, jj],
+                dz[c, jj] = smooth_max(dz[c, jj],
                     h2osoi_liq[c, jj] / DENH2O + h2osoi_ice[c, jj] / DENICE)
             end
         end
@@ -825,15 +843,15 @@ end
 Update int_snow, and reset accumulated snow when no snow present.
 """
 function bulkdiag_snow_water_accumulated_snow!(
-    int_snow::Vector{Float64},
-    frac_sno::Vector{Float64},
-    snow_depth::Vector{Float64},
-    dtime::Float64,
-    frac_sno_eff::Vector{Float64},
-    qflx_soliddew_to_top_layer::Vector{Float64},
-    qflx_liqdew_to_top_layer::Vector{Float64},
-    qflx_liq_grnd::Vector{Float64},
-    h2osno_no_layers::Vector{Float64},
+    int_snow::Vector{<:Real},
+    frac_sno::Vector{<:Real},
+    snow_depth::Vector{<:Real},
+    dtime::Real,
+    frac_sno_eff::Vector{<:Real},
+    qflx_soliddew_to_top_layer::Vector{<:Real},
+    qflx_liqdew_to_top_layer::Vector{<:Real},
+    qflx_liq_grnd::Vector{<:Real},
+    h2osno_no_layers::Vector{<:Real},
     mask_snow::BitVector,
     mask_nosnow::BitVector,
     bounds::UnitRange{Int}
@@ -869,12 +887,12 @@ end
 Calculate summed fluxes accounting for snow percolation.
 """
 function sum_flux_add_snow_percolation!(
-    qflx_snow_drain::Vector{Float64},
-    qflx_rain_plus_snomelt::Vector{Float64},
-    frac_sno_eff::Vector{Float64},
-    qflx_snow_percolation_bottom::Vector{Float64},
-    qflx_liq_grnd::Vector{Float64},
-    qflx_snomelt::Vector{Float64},
+    qflx_snow_drain::Vector{<:Real},
+    qflx_rain_plus_snomelt::Vector{<:Real},
+    frac_sno_eff::Vector{<:Real},
+    qflx_snow_percolation_bottom::Vector{<:Real},
+    qflx_liq_grnd::Vector{<:Real},
+    qflx_snomelt::Vector{<:Real},
     mask_snow::BitVector,
     mask_nosnow::BitVector,
     bounds::UnitRange{Int}
@@ -909,19 +927,19 @@ end
 Determine change in snow layer thickness due to compaction and settling.
 """
 function snow_compaction!(
-    dz::Matrix{Float64},
-    dtime::Float64,
+    dz::Matrix{<:Real},
+    dtime::Real,
     snl::Vector{Int},
-    t_soisno::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    t_soisno::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     imelt::Matrix{Int},
-    frac_sno::Vector{Float64},
-    frac_h2osfc::Vector{Float64},
-    swe_old::Matrix{Float64},
-    int_snow::Vector{Float64},
-    frac_iceold::Matrix{Float64},
-    forc_wind::Vector{Float64},
+    frac_sno::Vector{<:Real},
+    frac_h2osfc::Vector{<:Real},
+    swe_old::Matrix{<:Real},
+    int_snow::Vector{<:Real},
+    frac_iceold::Matrix{<:Real},
+    forc_wind::Vector{<:Real},
     col_gridcell::Vector{Int},
     col_landunit::Vector{Int},
     lakpoi::Vector{Bool},
@@ -938,8 +956,9 @@ function snow_compaction!(
     c5 = 2.0
 
     nc = length(snl)
-    burden = zeros(Float64, nc)
-    zpseudo = zeros(Float64, nc)
+    FT = eltype(t_soisno)
+    burden = zeros(FT, nc)
+    zpseudo = zeros(FT, nc)
     mobile = trues(nc)
 
     for c in bounds
@@ -991,7 +1010,7 @@ function snow_compaction!(
                     if imelt[c, jj] == 1
                         l = col_landunit[c]
                         if !lakpoi[l] && !urbpoi[l]
-                            ddz3 = max(0.0, min(1.0, (swe_old[c, jj] - wx) / wx))
+                            ddz3 = smooth_max(0.0, smooth_min(1.0, (swe_old[c, jj] - wx) / wx))
                             if (swe_old[c, jj] - wx) > 0.0
                                 # Compute total snow water
                                 wsum = 0.0
@@ -1001,18 +1020,18 @@ function snow_compaction!(
                                 end
                                 # Simple fractional snow during melt
                                 if int_snow[c] > 0.0
-                                    fsno_melt = min(1.0, wsum / int_snow[c])
+                                    fsno_melt = smooth_min(1.0, wsum / int_snow[c])
                                 else
                                     fsno_melt = 1.0
                                 end
                                 if (fsno_melt + frac_h2osfc[c]) > 1.0
                                     fsno_melt = 1.0 - frac_h2osfc[c]
                                 end
-                                ddz3 = ddz3 - max(0.0, (fsno_melt - frac_sno[c]) / frac_sno[c])
+                                ddz3 = ddz3 - smooth_max(0.0, (fsno_melt - frac_sno[c]) / frac_sno[c])
                             end
                             ddz3 = -1.0 / dtime * ddz3
                         else
-                            ddz3 = -1.0 / dtime * max(0.0,
+                            ddz3 = -1.0 / dtime * smooth_max(0.0,
                                 (frac_iceold[c, jj] - fi) / frac_iceold[c, jj])
                         end
                     else
@@ -1033,7 +1052,7 @@ function snow_compaction!(
                     pdzdtc = ddz1 + ddz2 + ddz3 + ddz4_val
 
                     # Apply compaction
-                    dz[c, jj] = max(
+                    dz[c, jj] = smooth_max(
                         dz[c, jj] * (1.0 + pdzdtc * dtime),
                         (h2osoi_ice[c, jj] / DENICE + h2osoi_liq[c, jj] / DENH2O) / frac_sno[c])
                 else
@@ -1056,8 +1075,8 @@ end
 
 Compute snow overburden compaction using Anderson 1976 formula.
 """
-function overburden_compaction_anderson1976(burden::Float64, wx::Float64,
-                                            td::Float64, bi::Float64)
+function overburden_compaction_anderson1976(burden::Real, wx::Real,
+                                            td::Real, bi::Real)
     c2 = 23.0e-3  # [m3/kg]
     return -(burden + wx / 2.0) * exp(-OVERBURDEN_COMPRESS_TFACTOR[] * td - c2 * bi) /
            snowhydrology_params.eta0_anderson
@@ -1072,9 +1091,9 @@ end
 
 Compute snow overburden compaction using Vionnet et al. 2012 formula.
 """
-function overburden_compaction_vionnet2012(h2osoi_liq::Float64, dz::Float64,
-                                           burden::Float64, wx::Float64,
-                                           td::Float64, bi::Float64)
+function overburden_compaction_vionnet2012(h2osoi_liq::Real, dz::Real,
+                                           burden::Real, wx::Real,
+                                           td::Real, bi::Real)
     params = snowhydrology_params
     aeta = 0.1
     beta = 0.023
@@ -1097,10 +1116,10 @@ Compute wind drift compaction for a single column and level.
 Updates zpseudo and mobile. Must be called top-to-bottom.
 """
 function wind_drift_compaction!(
-    bi::Float64,
-    forc_wind::Float64,
-    dz::Float64,
-    zpseudo::Vector{Float64}, zpseudo_idx::Int,
+    bi::Real,
+    forc_wind::Real,
+    dz::Real,
+    zpseudo::Vector{<:Real}, zpseudo_idx::Int,
     mobile::Vector{Bool}, mobile_idx::Int,
     compaction_rate::Ref{Float64}
 )
@@ -1109,16 +1128,16 @@ function wind_drift_compaction!(
     drift_sph = 1.0
 
     if mobile[mobile_idx]
-        Frho = 1.25 - 0.0042 * (max(rho_min, bi) - rho_min)
+        Frho = 1.25 - 0.0042 * (smooth_max(rho_min, bi) - rho_min)
         MO = 0.34 * (-0.583 * params.drift_gs - 0.833 * drift_sph + 0.833) + 0.66 * Frho
         SI = -2.868 * exp(-0.085 * forc_wind) + 1.0 + MO
 
         if SI > 0.0
-            SI = min(SI, 3.25)
+            SI = smooth_min(SI, 3.25)
             zpseudo[zpseudo_idx] = zpseudo[zpseudo_idx] + 0.5 * dz * (3.25 - SI)
             gamma_drift = SI * exp(-zpseudo[zpseudo_idx] / 0.1)
             tau_inverse = gamma_drift / params.tau_ref
-            compaction_rate[] = -max(0.0, params.rho_max - bi) * tau_inverse
+            compaction_rate[] = -smooth_max(0.0, params.rho_max - bi) * tau_inverse
             zpseudo[zpseudo_idx] = zpseudo[zpseudo_idx] + 0.5 * dz * (3.25 - SI)
         else
             mobile[mobile_idx] = false
@@ -1145,18 +1164,18 @@ Combine snow layers that are less than minimum thickness or mass.
 """
 function combine_snow_layers!(
     snl::Vector{Int},
-    dz::Matrix{Float64},
-    zi::Matrix{Float64},
-    z::Matrix{Float64},
-    t_soisno::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    h2osno_no_layers::Vector{Float64},
-    snow_depth::Vector{Float64},
-    frac_sno::Vector{Float64},
-    frac_sno_eff::Vector{Float64},
-    int_snow::Vector{Float64},
-    snw_rds::Matrix{Float64},
+    dz::Matrix{<:Real},
+    zi::Matrix{<:Real},
+    z::Matrix{<:Real},
+    t_soisno::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    h2osno_no_layers::Vector{<:Real},
+    snow_depth::Vector{<:Real},
+    frac_sno::Vector{<:Real},
+    frac_sno_eff::Vector{<:Real},
+    int_snow::Vector{<:Real},
+    snw_rds::Matrix{<:Real},
     aerosol::AerosolData,
     lun_itype::Vector{Int},     # landunit type indexed by landunit
     urbpoi::Vector{Bool},       # urban point indexed by landunit
@@ -1407,10 +1426,10 @@ end
 
 Combine two snow elements. Updates element at [c, jj] in-place.
 """
-function combo!(dz_mat::Matrix{Float64}, c::Int, jj::Int,
-                wliq_mat::Matrix{Float64}, wice_mat::Matrix{Float64},
-                t_mat::Matrix{Float64},
-                dz2::Float64, wliq2::Float64, wice2::Float64, t2::Float64)
+function combo!(dz_mat::Matrix{<:Real}, c::Int, jj::Int,
+                wliq_mat::Matrix{<:Real}, wice_mat::Matrix{<:Real},
+                t_mat::Matrix{<:Real},
+                dz2::Real, wliq2::Real, wice2::Real, t2::Real)
     dz1 = dz_mat[c, jj]
     wliq1 = wliq_mat[c, jj]
     wice1 = wice_mat[c, jj]
@@ -1442,8 +1461,8 @@ end
 
 Scalar version of combo for use in divide_snow_layers.
 """
-function combo_scalar(dz::Float64, wliq::Float64, wice::Float64, t::Float64,
-                      dz2::Float64, wliq2::Float64, wice2::Float64, t2::Float64)
+function combo_scalar(dz::Real, wliq::Real, wice::Real, t::Real,
+                      dz2::Real, wliq2::Real, wice2::Real, t2::Real)
     dzc = dz + dz2
     wicec = wice + wice2
     wliqc = wliq + wliq2
@@ -1471,15 +1490,12 @@ end
 
 Calculate mass-weighted snow radius when two layers are combined.
 """
-function mass_weighted_snow_radius(rds1::Float64, rds2::Float64,
-                                    swtot::Float64, zwtot::Float64)
+function mass_weighted_snow_radius(rds1::Real, rds2::Real,
+                                    swtot::Real, zwtot::Real)
     params = snowhydrology_params
-    result = (rds2 * swtot + rds1 * zwtot) / (swtot + zwtot)
-    if result > SNW_RDS_MAX
-        result = SNW_RDS_MAX
-    elseif result < params.snw_rds_min
-        result = params.snw_rds_min
-    end
+    total_wt = swtot + zwtot
+    result = total_wt > 0.0 ? (rds2 * swtot + rds1 * zwtot) / total_wt : 0.5 * (rds1 + rds2)
+    result = smooth_clamp(result, params.snw_rds_min, SNW_RDS_MAX)
     return result
 end
 
@@ -1496,14 +1512,14 @@ Subdivide snow layers that exceed their prescribed maximum thickness.
 """
 function divide_snow_layers!(
     snl::Vector{Int},
-    dz::Matrix{Float64},
-    zi::Matrix{Float64},
-    z::Matrix{Float64},
-    t_soisno::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    frac_sno::Vector{Float64},
-    snw_rds::Matrix{Float64},
+    dz::Matrix{<:Real},
+    zi::Matrix{<:Real},
+    z::Matrix{<:Real},
+    t_soisno::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    frac_sno::Vector{<:Real},
+    snw_rds::Matrix{<:Real},
     aerosol::AerosolData,
     is_lake::Bool,
     mask_snow::BitVector,
@@ -1519,19 +1535,20 @@ function divide_snow_layers!(
         msno = abs(snl[c])
 
         # Copy to local arrays (1-indexed, top=1)
-        dzsno  = zeros(Float64, nlevsno)
-        swice  = zeros(Float64, nlevsno)
-        swliq  = zeros(Float64, nlevsno)
-        tsno   = zeros(Float64, nlevsno)
-        mbc_phi = zeros(Float64, nlevsno)
-        mbc_pho = zeros(Float64, nlevsno)
-        moc_phi = zeros(Float64, nlevsno)
-        moc_pho = zeros(Float64, nlevsno)
-        mdst1  = zeros(Float64, nlevsno)
-        mdst2  = zeros(Float64, nlevsno)
-        mdst3  = zeros(Float64, nlevsno)
-        mdst4  = zeros(Float64, nlevsno)
-        rds    = zeros(Float64, nlevsno)
+        FT = eltype(h2osoi_ice)
+        dzsno  = zeros(FT, nlevsno)
+        swice  = zeros(FT, nlevsno)
+        swliq  = zeros(FT, nlevsno)
+        tsno   = zeros(FT, nlevsno)
+        mbc_phi = zeros(FT, nlevsno)
+        mbc_pho = zeros(FT, nlevsno)
+        moc_phi = zeros(FT, nlevsno)
+        moc_pho = zeros(FT, nlevsno)
+        mdst1  = zeros(FT, nlevsno)
+        mdst2  = zeros(FT, nlevsno)
+        mdst3  = zeros(FT, nlevsno)
+        mdst4  = zeros(FT, nlevsno)
+        rds    = zeros(FT, nlevsno)
 
         for k in 1:msno
             jj = (k + snl[c]) + nlevsno  # Fortran j+snl(c) -> Julia index
@@ -1571,12 +1588,12 @@ function divide_snow_layers!(
                         tsno[k+1] = tsno[k]
                     else
                         dtdz = (tsno[k-1] - tsno[k]) / ((dzsno[k-1] + 2*dzsno[k]) / 2.0)
-                        tsno[k+1] = tsno[k] - dtdz * dzsno[k] / 2.0
-                        if tsno[k+1] >= TFRZ
-                            tsno[k+1] = tsno[k]
-                        else
-                            tsno[k] = tsno[k] + dtdz * dzsno[k] / 2.0
-                        end
+                        tsno_kp1_candidate = tsno[k] - dtdz * dzsno[k] / 2.0
+                        tsno_k_candidate = tsno[k] + dtdz * dzsno[k] / 2.0
+                        # Smooth blend: if candidate >= TFRZ, use tsno[k]; else use candidates
+                        w_frozen = smooth_heaviside(TFRZ - tsno_kp1_candidate)
+                        tsno[k+1] = w_frozen * tsno_kp1_candidate + (1.0 - w_frozen) * tsno[k]
+                        tsno[k] = w_frozen * tsno_k_candidate + (1.0 - w_frozen) * tsno[k]
                     end
 
                     mbc_phi[k] /= 2.0; mbc_phi[k+1] = mbc_phi[k]
@@ -1693,12 +1710,12 @@ Set empty snow layers to zero.
 """
 function zero_empty_snow_layers!(
     snl::Vector{Int},
-    dz::Matrix{Float64},
-    z::Matrix{Float64},
-    zi::Matrix{Float64},
-    t_soisno::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    dz::Matrix{<:Real},
+    z::Matrix{<:Real},
+    zi::Matrix{<:Real},
+    t_soisno::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     mask_snow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int
@@ -1731,10 +1748,10 @@ Also initializes the module-level dzmin, dzmax_l, dzmax_u arrays.
 """
 function init_snow_layers!(
     snl::Vector{Int},
-    dz::Matrix{Float64},
-    z::Matrix{Float64},
-    zi::Matrix{Float64},
-    snow_depth::Vector{Float64},
+    dz::Matrix{<:Real},
+    z::Matrix{<:Real},
+    zi::Matrix{<:Real},
+    snow_depth::Vector{<:Real},
     col_landunit::Vector{Int},
     lakpoi::Vector{Bool},
     bounds::UnitRange{Int},
@@ -1902,10 +1919,10 @@ end
 Determine the excess snow that needs to be capped.
 """
 function snow_capping_excess!(
-    h2osno_excess::Vector{Float64},
+    h2osno_excess::Vector{<:Real},
     apply_runoff::AbstractVector{Bool},
-    h2osno::Vector{Float64},
-    topo::Vector{Float64},
+    h2osno::Vector{<:Real},
+    topo::Vector{<:Real},
     snl::Vector{Int},
     col_landunit::Vector{Int},
     lun_itype::Vector{Int},   # landunit type
@@ -1914,13 +1931,11 @@ function snow_capping_excess!(
     nstep::Int,
     nlevsno::Int
 )
-    h2osno_max_val = 10000.0  # Maximum allowed SWE [mm H2O]
-
     for c in bounds
         mask_snow[c] || continue
         h2osno_excess[c] = 0.0
-        if h2osno[c] > h2osno_max_val
-            h2osno_excess[c] = h2osno[c] - h2osno_max_val
+        if h2osno[c] > H2OSNO_MAX
+            h2osno_excess[c] = h2osno[c] - H2OSNO_MAX
             apply_runoff[c] = true
         end
     end
@@ -1962,10 +1977,10 @@ end
 Initialize snow capping fluxes to zero.
 """
 function init_flux_snow_capping!(
-    qflx_snwcp_ice::Vector{Float64},
-    qflx_snwcp_liq::Vector{Float64},
-    qflx_snwcp_discarded_ice::Vector{Float64},
-    qflx_snwcp_discarded_liq::Vector{Float64},
+    qflx_snwcp_ice::Vector{<:Real},
+    qflx_snwcp_liq::Vector{<:Real},
+    qflx_snwcp_discarded_ice::Vector{<:Real},
+    qflx_snwcp_discarded_liq::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )
@@ -1995,18 +2010,18 @@ Calculate snow capping fluxes and related terms for bulk water.
 """
 function bulk_flux_snow_capping_fluxes!(
     mask_capping::BitVector,
-    rho_orig_bottom::Vector{Float64},
-    frac_adjust::Vector{Float64},
-    qflx_snwcp_ice::Vector{Float64},
-    qflx_snwcp_liq::Vector{Float64},
-    qflx_snwcp_discarded_ice::Vector{Float64},
-    qflx_snwcp_discarded_liq::Vector{Float64},
-    dtime::Float64,
-    dz_bottom::Vector{Float64},
-    topo::Vector{Float64},
-    h2osno_total::Vector{Float64},
-    h2osoi_ice_bottom::Vector{Float64},
-    h2osoi_liq_bottom::Vector{Float64},
+    rho_orig_bottom::Vector{<:Real},
+    frac_adjust::Vector{<:Real},
+    qflx_snwcp_ice::Vector{<:Real},
+    qflx_snwcp_liq::Vector{<:Real},
+    qflx_snwcp_discarded_ice::Vector{<:Real},
+    qflx_snwcp_discarded_liq::Vector{<:Real},
+    dtime::Real,
+    dz_bottom::Vector{<:Real},
+    topo::Vector{<:Real},
+    h2osno_total::Vector{<:Real},
+    h2osoi_ice_bottom::Vector{<:Real},
+    h2osoi_liq_bottom::Vector{<:Real},
     col_landunit::Vector{Int},
     lun_itype::Vector{Int},
     mask_snow::BitVector,
@@ -2014,11 +2029,10 @@ function bulk_flux_snow_capping_fluxes!(
     nlevsno::Int,
     nstep::Int
 )
-    h2osno_max_val = 10000.0
-    min_snow_to_keep = 1.0e-3
 
     nc = length(h2osno_total)
-    h2osno_excess = zeros(Float64, nc)
+    FT = eltype(h2osno_total)
+    h2osno_excess = zeros(FT, nc)
     apply_runoff = falses(nc)
 
     snow_capping_excess!(h2osno_excess, apply_runoff,
@@ -2036,13 +2050,18 @@ function bulk_flux_snow_capping_fluxes!(
     for c in bounds
         mask_capping[c] || continue
 
-        rho_orig_bottom[c] = h2osoi_ice_bottom[c] / dz_bottom[c]
+        rho_orig_bottom[c] = dz_bottom[c] > eps(Float64) ?
+            h2osoi_ice_bottom[c] / dz_bottom[c] : 0.0
 
         mss_snow_bottom_lyr = h2osoi_ice_bottom[c] + h2osoi_liq_bottom[c]
-        mss_snwcp_tot = min(h2osno_excess[c],
-            mss_snow_bottom_lyr * (1.0 - min_snow_to_keep))
+        mss_snwcp_tot = smooth_min(h2osno_excess[c],
+            mss_snow_bottom_lyr * (1.0 - MIN_SNOW_TO_KEEP))
 
-        icefrac = h2osoi_ice_bottom[c] / mss_snow_bottom_lyr
+        if mss_snow_bottom_lyr > eps(Float64)
+            icefrac = h2osoi_ice_bottom[c] / mss_snow_bottom_lyr
+        else
+            icefrac = 0.0
+        end
         snwcp_flux_ice = mss_snwcp_tot / dtime * icefrac
         snwcp_flux_liq = mss_snwcp_tot / dtime * (1.0 - icefrac)
 
@@ -2054,7 +2073,8 @@ function bulk_flux_snow_capping_fluxes!(
             qflx_snwcp_discarded_liq[c] = snwcp_flux_liq
         end
 
-        frac_adjust[c] = (mss_snow_bottom_lyr - mss_snwcp_tot) / mss_snow_bottom_lyr
+        frac_adjust[c] = mss_snow_bottom_lyr > eps(Float64) ?
+            (mss_snow_bottom_lyr - mss_snwcp_tot) / mss_snow_bottom_lyr : 1.0
     end
 end
 
@@ -2071,13 +2091,13 @@ end
 Remove snow capping fluxes from h2osoi_ice and h2osoi_liq.
 """
 function update_state_remove_snow_capping_fluxes!(
-    h2osoi_ice_bottom::Vector{Float64},
-    h2osoi_liq_bottom::Vector{Float64},
-    dtime::Float64,
-    qflx_snwcp_ice::Vector{Float64},
-    qflx_snwcp_liq::Vector{Float64},
-    qflx_snwcp_discarded_ice::Vector{Float64},
-    qflx_snwcp_discarded_liq::Vector{Float64},
+    h2osoi_ice_bottom::Vector{<:Real},
+    h2osoi_liq_bottom::Vector{<:Real},
+    dtime::Real,
+    qflx_snwcp_ice::Vector{<:Real},
+    qflx_snwcp_liq::Vector{<:Real},
+    qflx_snwcp_discarded_ice::Vector{<:Real},
+    qflx_snwcp_discarded_liq::Vector{<:Real},
     mask_capping::BitVector,
     bounds::UnitRange{Int}
 )
@@ -2087,7 +2107,13 @@ function update_state_remove_snow_capping_fluxes!(
         h2osoi_liq_bottom[c] -= (qflx_snwcp_liq[c] + qflx_snwcp_discarded_liq[c]) * dtime
 
         if h2osoi_ice_bottom[c] < 0.0 || h2osoi_liq_bottom[c] < 0.0
-            error("snow capping failed: negative mass at c=$c, ice=$(h2osoi_ice_bottom[c]), liq=$(h2osoi_liq_bottom[c])")
+            if _is_ad_type(eltype(h2osoi_ice_bottom))
+                @warn "snow capping: negative mass (AD mode, clamping)" maxlog=1
+                h2osoi_ice_bottom[c] = smooth_max(0.0, h2osoi_ice_bottom[c])
+                h2osoi_liq_bottom[c] = smooth_max(0.0, h2osoi_liq_bottom[c])
+            else
+                error("snow capping failed: negative mass at c=$c, ice=$(h2osoi_ice_bottom[c]), liq=$(h2osoi_liq_bottom[c])")
+            end
         end
     end
 end
@@ -2104,12 +2130,12 @@ end
 After snow capping, adjust dz and aerosol masses in bottom snow layer.
 """
 function snow_capping_update_dz_and_aerosols!(
-    dz_bottom::Vector{Float64},
+    dz_bottom::Vector{<:Real},
     aerosol::AerosolData,
     jj_bottom::Int,
-    rho_orig_bottom::Vector{Float64},
-    h2osoi_ice_bottom::Vector{Float64},
-    frac_adjust::Vector{Float64},
+    rho_orig_bottom::Vector{<:Real},
+    h2osoi_ice_bottom::Vector{<:Real},
+    frac_adjust::Vector{<:Real},
     mask_capping::BitVector,
     bounds::UnitRange{Int}
 )

@@ -152,16 +152,16 @@ function init_hillslope!(
     nhillslope::Int,
     max_columns_hillslope::Int,
     ncolumns_hillslope::Vector{Int},
-    pct_hillslope::Matrix{Float64},
+    pct_hillslope::Matrix{<:Real},
     hill_ndx::Matrix{Int},
     col_ndx_in::Matrix{Int},
     col_dndx::Matrix{Int},
-    hill_slope_in::Matrix{Float64},
-    hill_aspect_in::Matrix{Float64},
-    hill_area_in::Matrix{Float64},
-    hill_dist_in::Matrix{Float64},
-    hill_width_in::Matrix{Float64},
-    hill_elev_in::Matrix{Float64},
+    hill_slope_in::Matrix{<:Real},
+    hill_aspect_in::Matrix{<:Real},
+    hill_area_in::Matrix{<:Real},
+    hill_dist_in::Matrix{<:Real},
+    hill_width_in::Matrix{<:Real},
+    hill_elev_in::Matrix{<:Real},
     hill_pftndx::Union{Matrix{Int}, Nothing} = nothing,
     stream_channel_depth::Union{Vector{Float64}, Nothing} = nothing,
     stream_channel_width::Union{Vector{Float64}, Nothing} = nothing,
@@ -214,8 +214,9 @@ function init_hillslope!(
             end
 
             # Calculate total hillslope area and columns per hillslope
-            ncol_per_hillslope = zeros(nhillslope)
-            hillslope_area     = zeros(nhillslope)
+            FT = eltype(col.hill_area)
+            ncol_per_hillslope = zeros(FT, nhillslope)
+            hillslope_area     = zeros(FT, nhillslope)
             for c in lun.coli[l]:lun.colf[l]
                 nh = col.hillslope_ndx[c]
                 if nh > 0
@@ -231,7 +232,7 @@ function init_hillslope!(
                 lun.stream_channel_slope[l]  = stream_channel_slope[l]
 
                 # Number of channels
-                nhill_per_landunit = zeros(nhillslope)
+                nhill_per_landunit = zeros(FT, nhillslope)
                 lun.stream_channel_number[l] = 0.0
                 for nh in 1:nhillslope
                     if hillslope_area[nh] > 0.0
@@ -289,8 +290,8 @@ function set_hillslope_soil_thickness!(
     bounds_c::UnitRange{Int};
     soil_profile_method::Int,
     nlevsoi::Int,
-    soil_depth_lowland::Float64 = 8.0,
-    soil_depth_upland::Float64 = 8.0,
+    soil_depth_lowland::Real = 8.0,
+    soil_depth_upland::Real = 8.0,
     bedrock_from_file::Union{Vector{Float64}, Nothing} = nothing
 )
     zisoi_val = zisoi[]
@@ -351,8 +352,8 @@ function hillslope_soil_thickness_profile!(
     bounds_c::UnitRange{Int};
     soil_profile_method::Int,
     nlevsoi::Int,
-    soil_depth_lowland::Float64 = 8.0,
-    soil_depth_upland::Float64 = 8.0
+    soil_depth_lowland::Real = 8.0,
+    soil_depth_upland::Real = 8.0
 )
     zisoi_val = zisoi[]
 
@@ -415,8 +416,8 @@ function hillslope_soil_thickness_profile_linear!(
     col::ColumnData,
     bounds_c::UnitRange{Int};
     nlevsoi::Int,
-    soil_depth_lowland::Float64 = 8.0,
-    soil_depth_upland::Float64 = 8.0
+    soil_depth_lowland::Real = 8.0,
+    soil_depth_upland::Real = 8.0
 )
     zisoi_val = zisoi[]
 
@@ -584,11 +585,11 @@ Handles overbank flow when stream depth exceeds channel depth.
 Ported from `HillslopeStreamOutflow` in `HillslopeHydrologyMod.F90`.
 """
 function hillslope_stream_outflow!(
-    stream_water_volume::Vector{Float64},
-    volumetric_streamflow::Vector{Float64},
+    stream_water_volume::Vector{<:Real},
+    volumetric_streamflow::Vector{<:Real},
     lun::LandunitData,
     bounds_l::UnitRange{Int},
-    dtime::Float64;
+    dtime::Real;
     streamflow_method::Int = STREAMFLOW_MANNING
 )
     manning_roughness = 0.03
@@ -679,17 +680,17 @@ for negative drainage. Computes stream water depth.
 Ported from `HillslopeUpdateStreamWater` in `HillslopeHydrologyMod.F90`.
 """
 function hillslope_update_stream_water!(
-    stream_water_volume::Vector{Float64},
-    volumetric_streamflow::Vector{Float64},
-    stream_water_depth::Vector{Float64},
-    qflx_drain::Vector{Float64},
-    qflx_drain_perched::Vector{Float64},
-    qflx_surf::Vector{Float64},
+    stream_water_volume::Vector{<:Real},
+    volumetric_streamflow::Vector{<:Real},
+    stream_water_depth::Vector{<:Real},
+    qflx_drain::Vector{<:Real},
+    qflx_drain_perched::Vector{<:Real},
+    qflx_surf::Vector{<:Real},
     col::ColumnData,
     lun::LandunitData,
     grc::GridcellData,
     bounds_l::UnitRange{Int},
-    dtime::Float64
+    dtime::Real
 )
     for l in bounds_l
         # Check for vegetated landunits with initialized stream channel properties

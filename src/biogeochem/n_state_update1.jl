@@ -34,7 +34,7 @@ function n_state_update_dyn_patch!(ns_veg::CNVegNitrogenStateData,
                                     i_litr_min::Int,
                                     i_litr_max::Int,
                                     i_cwd::Int,
-                                    dt::Float64)
+                                    dt::Real)
 
     for j in 1:nlevdecomp
         for c in bounds_col
@@ -92,7 +92,7 @@ function n_state_update1!(ns_veg::CNVegNitrogenStateData,
                            bounds_col::UnitRange{Int},
                            bounds_patch::UnitRange{Int},
                            ivt::Vector{Int},
-                           woody::Vector{Float64},
+                           woody::Vector{<:Real},
                            col_is_fates::Vector{Bool},
                            nlevdecomp::Int,
                            i_litr_min::Int,
@@ -107,7 +107,7 @@ function n_state_update1!(ns_veg::CNVegNitrogenStateData,
                            use_matrixcn::Bool = false,
                            use_soil_matrixcn::Bool = false,
                            use_fun::Bool = false,
-                           dt::Float64)
+                           dt::Real)
 
     # --- Column loop: soil decomposition input fluxes ---
     for c in bounds_col
@@ -135,6 +135,7 @@ function n_state_update1!(ns_veg::CNVegNitrogenStateData,
     # --- Patch loop: vegetation N state updates ---
     for p in bounds_patch
         mask_soilp[p] || continue
+        ivt[p] >= 1 || continue  # skip bare ground (Fortran PFT index 0)
 
         # === Phenology: transfer growth fluxes ===
         if !use_matrixcn

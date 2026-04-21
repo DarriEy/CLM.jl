@@ -59,7 +59,7 @@ Irrigation parameters structure.
 
 Ported from `irrigation_params_type` in `IrrigationMod.F90`.
 """
-Base.@kwdef mutable struct IrrigationParamsData{FT<:AbstractFloat}
+Base.@kwdef mutable struct IrrigationParamsData{FT<:Real}
     # Minimum LAI for irrigation
     irrig_min_lai::FT = 0.0
     # Time of day to check whether we need irrigation, seconds (0 = midnight)
@@ -94,7 +94,7 @@ Irrigation state and flux data structure.
 
 Ported from `irrigation_type` in `IrrigationMod.F90`.
 """
-Base.@kwdef mutable struct IrrigationData{FT<:AbstractFloat}
+Base.@kwdef mutable struct IrrigationData{FT<:Real}
     # Parameters
     params::IrrigationParamsData = IrrigationParamsData()
     # Land model time step (sec)
@@ -176,7 +176,7 @@ function irrigation_init_cold!(
     soilstate::SoilStateData,
     swrc::SoilWaterRetentionCurve,
     col_data::ColumnData,
-    pftcon_irrigated::Vector{Float64},
+    pftcon_irrigated::Vector{<:Real},
     irrig_method_surface::Matrix{Int},
     patch_data::PatchData,
     grc::GridcellData,
@@ -232,7 +232,7 @@ function irrigation_init!(
     soilstate::SoilStateData,
     swrc::SoilWaterRetentionCurve,
     col_data::ColumnData,
-    pftcon_irrigated::Vector{Float64},
+    pftcon_irrigated::Vector{<:Real},
     irrig_method_surface::Matrix{Int},
     patch_data::PatchData,
     grc::GridcellData,
@@ -271,9 +271,9 @@ function irrigation_init_for_testing!(
     irrig::IrrigationData,
     params::IrrigationParamsData,
     dtime::Int,
-    relsat_wilting_point::Matrix{Float64},
-    relsat_target::Matrix{Float64},
-    pftcon_irrigated::Vector{Float64},
+    relsat_wilting_point::Matrix{<:Real},
+    relsat_target::Matrix{<:Real},
+    pftcon_irrigated::Vector{<:Real},
     irrig_method_surface::Matrix{Int},
     patch_data::PatchData,
     grc::GridcellData,
@@ -365,7 +365,7 @@ Ported from `SetIrrigMethod` in `IrrigationMod.F90`.
 """
 function set_irrig_method!(
     irrig::IrrigationData,
-    pftcon_irrigated::Vector{Float64},
+    pftcon_irrigated::Vector{<:Real},
     irrig_method_surface::Matrix{Int},
     patch_data::PatchData,
     grc::GridcellData,
@@ -404,7 +404,7 @@ Convert relative saturation to kg/m2 water for a single column and layer.
 
 Ported from `RelsatToH2osoi` in `IrrigationMod.F90`.
 """
-function relsat_to_h2osoi(relsat::Float64, eff_porosity::Float64, dz::Float64)
+function relsat_to_h2osoi(relsat::Real, eff_porosity::Real, dz::Real)
     vol_liq = eff_porosity * relsat
     return vol_liq * DENH2O * dz
 end
@@ -425,9 +425,9 @@ Ported from `PointNeedsCheckForIrrig` in `IrrigationMod.F90`.
 function point_needs_check_for_irrig(
     irrig::IrrigationData,
     pft_type::Int,
-    elai::Float64,
-    londeg::Float64,
-    pftcon_irrigated::Vector{Float64},
+    elai::Real,
+    londeg::Real,
+    pftcon_irrigated::Vector{<:Real},
     local_time_sec::Int
 )
     if pftcon_irrigated[pft_type] == 1.0 && elai > irrig.params.irrig_min_lai
@@ -459,8 +459,8 @@ Patch-to-column area-weighted average.
 Ported from `p2c` in `subgridAveMod.F90`.
 """
 function p2c_irrig!(
-    col_out::Vector{Float64},
-    patch_in::Vector{Float64},
+    col_out::Vector{<:Real},
+    patch_in::Vector{<:Real},
     patch_data::PatchData,
     mask_soilc::BitVector,
     bounds_c::UnitRange{Int},
@@ -491,8 +491,8 @@ Column-to-gridcell area-weighted average (unity scaling).
 Ported from `c2g` in `subgridAveMod.F90`.
 """
 function c2g_irrig!(
-    garr::Vector{Float64},
-    carr::Vector{Float64},
+    garr::Vector{<:Real},
+    carr::Vector{<:Real},
     col_data::ColumnData,
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int}
@@ -525,9 +525,9 @@ Ported from `CalcDeficitVolrLimited` in `IrrigationMod.F90`.
 """
 function calc_deficit_volr_limited!(
     irrig::IrrigationData,
-    deficit::Vector{Float64},
-    volr::Vector{Float64},
-    deficit_volr_limited::Vector{Float64},
+    deficit::Vector{<:Real},
+    volr::Vector{<:Real},
+    deficit_volr_limited::Vector{<:Real},
     check_for_irrig_col::BitVector,
     col_data::ColumnData,
     grc::GridcellData,
@@ -535,8 +535,9 @@ function calc_deficit_volr_limited!(
     bounds_g::UnitRange{Int}
 )
     ng = length(bounds_g)
-    deficit_grc = zeros(Float64, length(volr))
-    deficit_limited_ratio_grc = ones(Float64, length(volr))
+    FT = eltype(deficit)
+    deficit_grc = zeros(FT, length(volr))
+    deficit_limited_ratio_grc = ones(FT, length(volr))
 
     # Average deficit to gridcell level (unity scaling)
     c2g_irrig!(deficit_grc, deficit, col_data, bounds_c, bounds_g)
@@ -588,13 +589,13 @@ Ported from `CalcIrrigationNeeded` in `IrrigationMod.F90`.
 """
 function calc_irrigation_needed!(
     irrig::IrrigationData,
-    elai::Vector{Float64},
-    t_soisno::Matrix{Float64},
-    eff_porosity::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    volr::Vector{Float64},
+    elai::Vector{<:Real},
+    t_soisno::Matrix{<:Real},
+    eff_porosity::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    volr::Vector{<:Real},
     rof_prognostic::Bool,
-    pftcon_irrigated::Vector{Float64},
+    pftcon_irrigated::Vector{<:Real},
     local_time_sec_patch::Vector{Int},
     col_data::ColumnData,
     grc::GridcellData,
@@ -630,9 +631,10 @@ function calc_irrigation_needed!(
     end
 
     # Initialize accumulators for columns that need irrigation check
-    h2osoi_liq_tot = zeros(Float64, maximum(bounds_c))
-    h2osoi_liq_target_tot = zeros(Float64, maximum(bounds_c))
-    h2osoi_liq_wilting_point_tot = zeros(Float64, maximum(bounds_c))
+    FT = eltype(h2osoi_liq)
+    h2osoi_liq_tot = zeros(FT, maximum(bounds_c))
+    h2osoi_liq_target_tot = zeros(FT, maximum(bounds_c))
+    h2osoi_liq_wilting_point_tot = zeros(FT, maximum(bounds_c))
     reached_max_depth = falses(maximum(bounds_c))
 
     # Measure soil water and see if irrigation is needed
@@ -668,7 +670,7 @@ function calc_irrigation_needed!(
     end
 
     # Compute deficits
-    deficit = zeros(Float64, maximum(bounds_c))
+    deficit = zeros(FT, maximum(bounds_c))
     for c in bounds_c
         check_for_irrig_col[c] || continue
 
@@ -689,7 +691,7 @@ function calc_irrigation_needed!(
 
     # Limit deficits by available volr if desired
     limit_irrigation = irrig.params.limit_irrigation_if_rof_enabled && rof_prognostic
-    deficit_volr_limited = zeros(Float64, maximum(bounds_c))
+    deficit_volr_limited = zeros(FT, maximum(bounds_c))
 
     if limit_irrigation
         calc_deficit_volr_limited!(irrig, deficit, volr, deficit_volr_limited,
@@ -747,10 +749,10 @@ function calc_bulk_withdrawals!(
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     nlevsoi::Int,
-    dtime::Float64,
-    qflx_sfc_irrig_bulk_patch::Vector{Float64},
-    qflx_gw_demand_bulk_patch::Vector{Float64},
-    qflx_gw_demand_bulk_col::Vector{Float64}
+    dtime::Real,
+    qflx_sfc_irrig_bulk_patch::Vector{<:Real},
+    qflx_gw_demand_bulk_patch::Vector{<:Real},
+    qflx_gw_demand_bulk_col::Vector{<:Real}
 )
     # Calculate per-patch surface irrigation and demand
     for p in bounds_p
@@ -843,10 +845,10 @@ function calc_application_fluxes!(
     irrig::IrrigationData,
     waterflux::WaterFluxData,
     is_bulk::Bool,
-    qflx_sfc_irrig_bulk_patch::Vector{Float64},
-    qflx_sfc_irrig_bulk_col::Vector{Float64},
-    qflx_gw_demand_bulk_patch::Vector{Float64},
-    qflx_gw_demand_bulk_col::Vector{Float64},
+    qflx_sfc_irrig_bulk_patch::Vector{<:Real},
+    qflx_sfc_irrig_bulk_col::Vector{<:Real},
+    qflx_gw_demand_bulk_patch::Vector{<:Real},
+    qflx_gw_demand_bulk_col::Vector{<:Real},
     patch_data::PatchData,
     mask_soilc::BitVector,
     mask_soilp::BitVector,
@@ -854,7 +856,8 @@ function calc_application_fluxes!(
     bounds_p::UnitRange{Int}
 )
     # Compute total groundwater irrigation withdrawn per column
-    qflx_gw_irrig_withdrawn_col = zeros(Float64, length(waterflux.qflx_gw_uncon_irrig_col))
+    FT = eltype(waterflux.qflx_gw_uncon_irrig_col)
+    qflx_gw_irrig_withdrawn_col = zeros(FT, length(waterflux.qflx_gw_uncon_irrig_col))
     for c in bounds_c
         mask_soilc[c] || continue
         qflx_gw_irrig_withdrawn_col[c] =
@@ -937,14 +940,15 @@ function calc_irrigation_fluxes!(
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     nlevsoi::Int,
-    dtime::Float64
+    dtime::Real
 )
     np = length(bounds_p)
     nc = length(bounds_c)
 
-    qflx_sfc_irrig_bulk_patch  = zeros(Float64, length(irrig.sfc_irrig_rate_patch))
-    qflx_gw_demand_bulk_patch  = zeros(Float64, length(irrig.sfc_irrig_rate_patch))
-    qflx_gw_demand_bulk_col   = zeros(Float64, length(waterfluxbulk.wf.qflx_sfc_irrig_col))
+    FT = eltype(irrig.sfc_irrig_rate_patch)
+    qflx_sfc_irrig_bulk_patch  = zeros(FT, length(irrig.sfc_irrig_rate_patch))
+    qflx_gw_demand_bulk_patch  = zeros(FT, length(irrig.sfc_irrig_rate_patch))
+    qflx_gw_demand_bulk_col   = zeros(FT, length(waterfluxbulk.wf.qflx_sfc_irrig_col))
 
     # Calculate bulk withdrawals
     calc_bulk_withdrawals!(irrig, waterfluxbulk, soilhydrology, soilstate,

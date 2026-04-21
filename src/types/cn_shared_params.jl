@@ -12,7 +12,7 @@ flags used across multiple CN modules.
 Ported from `CNParamsShareType` and module-level variables in
 `CNSharedParamsMod.F90`.
 """
-Base.@kwdef mutable struct CNSharedParamsData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CNSharedParamsData{FT<:Real}
     # --- Parameters from CNParamsShareType ---
     Q10                              ::FT = 1.5     # temperature dependence
     minpsi                           ::FT = -10.0   # minimum soil water potential for heterotrophic resp (MPa)
@@ -52,16 +52,16 @@ Each keyword argument maps to a NetCDF variable name from the Fortran source:
 - `organic_max` → organic_max
 """
 function cn_shared_params_read_netcdf!(params::CNSharedParamsData;
-                                       q10_mr::Float64,
-                                       minpsi_hr::Float64,
-                                       maxpsi_hr::Float64,
-                                       rf_cwdl2::Float64,
-                                       tau_cwd::Float64,
-                                       cwd_flig::Float64,
-                                       decomp_depth_efolding::Float64,
-                                       froz_q10::Float64,
-                                       mino2lim::Float64,
-                                       organic_max::Float64)
+                                       q10_mr::Real,
+                                       minpsi_hr::Real,
+                                       maxpsi_hr::Real,
+                                       rf_cwdl2::Real,
+                                       tau_cwd::Real,
+                                       cwd_flig::Real,
+                                       decomp_depth_efolding::Real,
+                                       froz_q10::Real,
+                                       mino2lim::Real,
+                                       organic_max::Real)
     params.Q10                   = q10_mr
     params.minpsi                = minpsi_hr
     params.maxpsi                = maxpsi_hr
@@ -94,16 +94,16 @@ Read all CN shared parameters (NetCDF + namelist).
 Corresponds to `CNParamsReadShared` in the Fortran source.
 """
 function cn_shared_params_read!(params::CNSharedParamsData;
-                                 q10_mr::Float64,
-                                 minpsi_hr::Float64,
-                                 maxpsi_hr::Float64,
-                                 rf_cwdl2::Float64,
-                                 tau_cwd::Float64,
-                                 cwd_flig::Float64,
-                                 decomp_depth_efolding::Float64,
-                                 froz_q10::Float64,
-                                 mino2lim::Float64,
-                                 organic_max::Float64,
+                                 q10_mr::Real,
+                                 minpsi_hr::Real,
+                                 maxpsi_hr::Real,
+                                 rf_cwdl2::Real,
+                                 tau_cwd::Real,
+                                 cwd_flig::Real,
+                                 decomp_depth_efolding::Real,
+                                 froz_q10::Real,
+                                 mino2lim::Real,
+                                 organic_max::Real,
                                  constrain_stress_deciduous_onset::Bool=false)
     cn_shared_params_read_netcdf!(params;
         q10_mr=q10_mr, minpsi_hr=minpsi_hr, maxpsi_hr=maxpsi_hr,

@@ -15,7 +15,7 @@ column and a flag indicating whether the column needs atmospheric downscaling.
 
 Ported from `topo_type` in `TopoMod.F90`.
 """
-Base.@kwdef mutable struct TopoData{FT<:AbstractFloat}
+Base.@kwdef mutable struct TopoData{FT<:Real}
     topo_col::Vector{FT} = Float64[]                  # surface elevation (m)
     needs_downscaling_col::Vector{Bool} = Bool[]           # whether a column needs to be downscaled
 end
@@ -173,7 +173,7 @@ Ported from `UpdateTopo` in `TopoMod.F90`.
 function topo_update!(topo::TopoData, ncols::Int,
                       col::ColumnData, lun::LandunitData,
                       bounds_l::UnitRange{Int},
-                      atm_topo::Vector{Float64};
+                      atm_topo::Vector{<:Real};
                       mask_ice::Union{BitVector, Nothing} = nothing,
                       ice_cols_need_downscaling!::Union{Function, Nothing} = nothing,
                       update_glc2lnd_topo!::Union{Function, Nothing} = nothing,

@@ -12,7 +12,7 @@ velocity, aerodynamic resistance, and surface data fields.
 
 Ported from `lakestate_type` in `LakeStateType.F90`.
 """
-Base.@kwdef mutable struct LakeStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct LakeStateData{FT<:Real}
     # --- Time constant variables (from surface data) ---
     lakefetch_col        ::Vector{FT} = Float64[]   # col lake fetch from surface data (m)
     etal_col             ::Vector{FT} = Float64[]   # col lake extinction coefficient from surface data (1/m)

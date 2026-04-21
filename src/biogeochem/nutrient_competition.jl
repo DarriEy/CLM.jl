@@ -73,7 +73,7 @@ function calc_plant_nutrient_demand!(mask_p::BitVector, bounds::UnitRange{Int},
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_ns::CNVegNitrogenStateData,
         cnveg_nf::CNVegNitrogenFluxData;
-        dt::Float64,
+        dt::Real,
         npcropmin::Int=NPCROPMIN,
         nrepr::Int=NREPR,
         ntmp_soybean::Int=23,
@@ -122,7 +122,7 @@ function calc_plant_nutrient_competition!(mask_soilp::BitVector, bounds::UnitRan
         cnveg_cs::CNVegCarbonStateData,
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_nf::CNVegNitrogenFluxData;
-        fpg_col::Vector{Float64},
+        fpg_col::Vector{<:Real},
         c13_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         c14_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         use_c13::Bool=false,
@@ -170,7 +170,7 @@ function calc_plant_cn_alloc!(mask_soilp::BitVector, bounds::UnitRange{Int},
         cnveg_cs::CNVegCarbonStateData,
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_nf::CNVegNitrogenFluxData;
-        fpg_col::Vector{Float64},
+        fpg_col::Vector{<:Real},
         c13_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         c14_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         use_c13::Bool=false,
@@ -179,6 +179,7 @@ function calc_plant_cn_alloc!(mask_soilp::BitVector, bounds::UnitRange{Int},
         nrepr::Int=NREPR)
 
     use_fun = cn_shared_params.use_fun
+    FT = eltype(fpg_col)
 
     for p in bounds
         mask_soilp[p] || continue
@@ -208,7 +209,7 @@ function calc_plant_cn_alloc!(mask_soilp::BitVector, bounds::UnitRange{Int},
         cndw = pftcon.deadwdcn[ivt]
         fcur = pftcon.fcur[ivt]
 
-        f5 = zeros(nrepr)
+        f5 = zeros(FT, nrepr)
 
         if ivt >= npcropmin  # skip 2 generic crops
             if crop.croplive_patch[p] && !isnan(cnveg_state.aleaf_patch[p])
@@ -394,7 +395,7 @@ function calc_plant_nitrogen_demand!(mask_p::BitVector, bounds::UnitRange{Int},
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_ns::CNVegNitrogenStateData,
         cnveg_nf::CNVegNitrogenFluxData;
-        dt::Float64,
+        dt::Real,
         npcropmin::Int=NPCROPMIN,
         nrepr::Int=NREPR,
         ntmp_soybean::Int=23,
@@ -425,7 +426,8 @@ function calc_plant_nitrogen_demand!(mask_p::BitVector, bounds::UnitRange{Int},
     # Crop grain-fill retranslocation
     if call_is_for_pcrop
         # Compute crop phase for all patches in bounds
-        crop_phase_vals = zeros(length(mask_p))
+        FT = eltype(cnveg_nf.plant_ndemand_patch)
+        crop_phase_vals = zeros(FT, length(mask_p))
         crop_phase!(mask_p, crop, cnveg_state, crop_phase_vals)
 
         for p in bounds

@@ -33,8 +33,8 @@ For columns without snow, reset counter to zero.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_snow_persistence!(
-    snow_persistence::Vector{Float64},
-    dtime::Float64,
+    snow_persistence::Vector{<:Real},
+    dtime::Real,
     mask_snow::BitVector,
     mask_nosnow::BitVector,
     bounds::UnitRange{Int}
@@ -62,10 +62,10 @@ Vertically sum h2osoi_ice and h2osoi_liq over all snow layers for history output
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function accumulate_snow_ice_liq!(
-    snowice::Vector{Float64},
-    snowliq::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    snowice::Vector{<:Real},
+    snowliq::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     snl::Vector{Int},
     mask_nolake::BitVector,
     mask_snow::BitVector,
@@ -107,9 +107,9 @@ Calculate column average snow depth = snow_depth * frac_sno_eff.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_snowdp!(
-    snowdp::Vector{Float64},
-    snow_depth::Vector{Float64},
-    frac_sno_eff::Vector{Float64},
+    snowdp::Vector{<:Real},
+    snow_depth::Vector{<:Real},
+    frac_sno_eff::Vector{<:Real},
     bounds::UnitRange{Int}
 )
     for c in bounds
@@ -135,16 +135,16 @@ snowpack, weighted by layer mass. This function computes the numerator:
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function compute_snow_internal_temperature!(
-    t_sno_mul_mss::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    t_soisno::Matrix{Float64},
+    t_sno_mul_mss::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    t_soisno::Matrix{<:Real},
     snl::Vector{Int},
     mask_nolake::BitVector,
     mask_snow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int,
-    tfrz::Float64
+    tfrz::Real
 )
     # Zero for all non-lake columns
     for c in bounds
@@ -192,19 +192,19 @@ depth-weighted soil temperatures for top 10cm and 17cm.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_ground_and_soil_temperatures!(
-    t_grnd::Vector{Float64},
-    t_grnd_u::Vector{Float64},
-    t_grnd_r::Vector{Float64},
-    tsl::Vector{Float64},
-    t_soi_10cm::Vector{Float64},
-    tsoi17::Vector{Float64},
-    t_soisno::Matrix{Float64},
-    t_h2osfc::Vector{Float64},
-    frac_sno_eff::Vector{Float64},
-    frac_h2osfc::Vector{Float64},
+    t_grnd::Vector{<:Real},
+    t_grnd_u::Vector{<:Real},
+    t_grnd_r::Vector{<:Real},
+    tsl::Vector{<:Real},
+    t_soi_10cm::Vector{<:Real},
+    tsoi17::Vector{<:Real},
+    t_soisno::Matrix{<:Real},
+    t_h2osfc::Vector{<:Real},
+    frac_sno_eff::Vector{<:Real},
+    frac_h2osfc::Vector{<:Real},
     snl::Vector{Int},
-    dz::Matrix{Float64},
-    zi::Matrix{Float64},
+    dz::Matrix{<:Real},
+    zi::Matrix{<:Real},
     col_landunit::Vector{Int},
     col_itype::Vector{Int},
     lun_urbpoi::AbstractVector{Bool},
@@ -316,10 +316,10 @@ For urban wall/roof columns: over nlevurb layers.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_h2osoi_vol!(
-    h2osoi_vol::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    h2osoi_ice::Matrix{Float64},
-    dz::Matrix{Float64},
+    h2osoi_vol::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    dz::Matrix{<:Real},
     col_itype::Vector{Int},
     mask_nolake::BitVector,
     mask_urban::BitVector,
@@ -372,12 +372,12 @@ Update soil water potential (soilpsi) in each soil layer [MPa].
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_soilpsi!(
-    soilpsi::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
-    dz::Matrix{Float64},
-    watsat::Matrix{Float64},
-    sucsat::Matrix{Float64},
-    bsw::Matrix{Float64},
+    soilpsi::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
+    dz::Matrix{<:Real},
+    watsat::Matrix{<:Real},
+    sucsat::Matrix{<:Real},
+    bsw::Matrix{<:Real},
     mask_hydrology::BitVector,
     bounds::UnitRange{Int},
     nlevgrnd::Int,
@@ -420,12 +420,12 @@ Update soil matric potential (smp_l) for history output and ch4Mod [mm].
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_smp_l!(
-    smp_l::Matrix{Float64},
-    h2osoi_vol::Matrix{Float64},
-    watsat::Matrix{Float64},
-    sucsat::Matrix{Float64},
-    bsw::Matrix{Float64},
-    smpmin::Vector{Float64},
+    smp_l::Matrix{<:Real},
+    h2osoi_vol::Matrix{<:Real},
+    watsat::Matrix{<:Real},
+    sucsat::Matrix{<:Real},
+    bsw::Matrix{<:Real},
+    smpmin::Vector{<:Real},
     mask_hydrology::BitVector,
     bounds::UnitRange{Int},
     nlevgrnd::Int
@@ -465,26 +465,27 @@ Returns wf = available / potentially_available for each column.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function compute_wf!(
-    wf_out::Vector{Float64},
-    h2osoi_vol::Matrix{Float64},
-    watsat::Matrix{Float64},
-    sucsat::Matrix{Float64},
-    bsw::Matrix{Float64},
-    z::Matrix{Float64},
-    dz::Matrix{Float64},
+    wf_out::Vector{<:Real},
+    h2osoi_vol::Matrix{<:Real},
+    watsat::Matrix{<:Real},
+    sucsat::Matrix{<:Real},
+    bsw::Matrix{<:Real},
+    z::Matrix{<:Real},
+    dz::Matrix{<:Real},
     mask_hydrology::BitVector,
     bounds::UnitRange{Int},
     nlevgrnd::Int,
     nlevsno::Int,
-    depth_limit::Float64
+    depth_limit::Real
 )
     joff = nlevsno
 
     # Temporary accumulators
+    FT = eltype(h2osoi_vol)
     nc = length(wf_out)
-    rwat = zeros(Float64, nc)
-    swat = zeros(Float64, nc)
-    rz   = zeros(Float64, nc)
+    rwat = zeros(FT, nc)
+    swat = zeros(FT, nc)
+    rz   = zeros(FT, nc)
 
     for c in bounds
         mask_hydrology[c] || continue
@@ -538,20 +539,20 @@ Update top-layer snow diagnostics:
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_snow_top_layer_diagnostics!(
-    h2osno_top::Vector{Float64},
-    snw_rds::Matrix{Float64},
-    snot_top::Vector{Float64},
-    dTdz_top::Vector{Float64},
-    snw_rds_top::Vector{Float64},
-    sno_liq_top::Vector{Float64},
-    h2osoi_ice::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    h2osno_top::Vector{<:Real},
+    snw_rds::Matrix{<:Real},
+    snot_top::Vector{<:Real},
+    dTdz_top::Vector{<:Real},
+    snw_rds_top::Vector{<:Real},
+    sno_liq_top::Vector{<:Real},
+    h2osoi_ice::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     snl::Vector{Int},
     mask_snow::BitVector,
     mask_nosnow::BitVector,
     bounds::UnitRange{Int},
     nlevsno::Int,
-    spval::Float64
+    spval::Real
 )
     # Top-layer diagnostics for columns with snow
     for c in bounds
@@ -606,7 +607,7 @@ function calc_and_withdraw_irrigation_fluxes!(
     mask_soil::BitVector,
     bounds::UnitRange{Int},
     nlevsoi::Int,
-    dtime::Float64;
+    dtime::Real;
     use_groundwater_irrigation::Bool = false
 )
     # Stub: CalcIrrigationFluxes requires IrrigationMod (not yet ported)
@@ -648,20 +649,21 @@ function handle_new_snow!(
     lun::LandunitData,
     mask_nolake::BitVector,
     bounds::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int;
-    forc_t::Vector{Float64},
-    forc_wind::Vector{Float64} = Float64[],
-    qflx_snow_grnd::Vector{Float64},
-    qflx_snow_drain::Vector{Float64} = zeros(length(mask_nolake)),
-    int_snow::Vector{Float64} = zeros(length(mask_nolake)),
+    forc_t::Vector{<:Real},
+    forc_wind::Vector{<:Real} = Float64[],
+    qflx_snow_grnd::Vector{<:Real},
+    qflx_snow_drain::Vector{<:Real} = zeros(length(mask_nolake)),
+    int_snow::Vector{<:Real} = zeros(length(mask_nolake)),
     scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
 )
     nc = length(mask_nolake)
+    FT = eltype(forc_t)
 
     # --- 1. Update quantities for new snow ---
     # Step 1a: Compute bulk density of new snow
-    bifall = fill(50.0, nc)
+    bifall = fill(FT(50.0), nc)
     if !isempty(forc_wind)
         new_snow_bulk_density!(bifall, forc_t, forc_wind, col.gridcell,
                                mask_nolake, bounds)
@@ -680,7 +682,8 @@ function handle_new_snow!(
     end
 
     # Step 1b: Calculate total H2O in snow (h2osno_total)
-    h2osno_total = zeros(nc)
+    FT_hs = eltype(forc_t)
+    h2osno_total = zeros(FT_hs, nc)
     for c in bounds
         mask_nolake[c] || continue
         h2osno_total[c] = waterstatebulk.ws.h2osno_no_layers_col[c]
@@ -804,7 +807,7 @@ function hydrology_no_drainage!(
     mask_snow::BitVector,
     mask_nosnow::BitVector,
     bounds::UnitRange{Int},
-    dtime::Float64,
+    dtime::Real,
     nlevsno::Int,
     nlevsoi::Int,
     nlevgrnd::Int,

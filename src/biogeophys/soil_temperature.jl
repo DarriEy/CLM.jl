@@ -47,13 +47,13 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                            solarabs::SolarAbsorbedData,
                            canopystate::CanopyStateData,
                            urbanparams::UrbanParamsData,
-                           urbantv_t_building_max::Vector{Float64},
-                           atm2lnd_forc_lwrad::Vector{Float64},
+                           urbantv_t_building_max::Vector{<:Real},
+                           atm2lnd_forc_lwrad::Vector{<:Real},
                            mask_nolakec::BitVector, mask_nolakep::BitVector,
                            mask_urbanl::BitVector, mask_urbanc::BitVector,
                            bounds_col::UnitRange{Int}, bounds_lun::UnitRange{Int},
                            bounds_patch::UnitRange{Int},
-                           dtime::Float64)
+                           dtime::Real)
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -65,31 +65,32 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     nc = length(bounds_col)
     nband = 5
 
-    # Local arrays
+    # Local arrays — infer FT from temperature to support Dual
+    FT = eltype(temperature.t_soisno_col)
     jtop = fill(-9999, nc)
     jbot = fill(0, nc)
-    cv = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    tk = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    fn = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    fn1 = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    tk_h2osfc = fill(NaN, nc)
-    hs_top = zeros(nc)
-    dhsdT = zeros(nc)
-    hs_soil = zeros(nc)
-    hs_top_snow = zeros(nc)
-    hs_h2osfc = zeros(nc)
-    sabg_lyr_col = zeros(nc, nlevsno + 1)  # -nlevsno+1:1
-    fn_h2osfc = zeros(nc)
-    dz_h2osfc = zeros(nc)
-    c_h2osfc = zeros(nc)
+    cv = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    tk = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    fn = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    fn1 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    tk_h2osfc = fill(FT(NaN), nc)
+    hs_top = zeros(FT, nc)
+    dhsdT = zeros(FT, nc)
+    hs_soil = zeros(FT, nc)
+    hs_top_snow = zeros(FT, nc)
+    hs_h2osfc = zeros(FT, nc)
+    sabg_lyr_col = zeros(FT, nc, nlevsno + 1)  # -nlevsno+1:1
+    fn_h2osfc = zeros(FT, nc)
+    dz_h2osfc = zeros(FT, nc)
+    c_h2osfc = zeros(FT, nc)
     cool_on = falses(length(bounds_lun))
     heat_on = falses(length(bounds_lun))
 
     # Band matrix and vectors (Fortran: -nlevsno:nlevmaxurbgrnd → nlevsno+1+nlevmaxurbgrnd levels)
     nlev_total = nlevsno + 1 + nlevmaxurbgrnd  # -nlevsno to nlevmaxurbgrnd
-    bmatrix = zeros(nc, nband, nlev_total)
-    tvector = fill(NaN, nc, nlev_total)
-    rvector = fill(NaN, nc, nlev_total)
+    bmatrix = zeros(FT, nc, nband, nlev_total)
+    tvector = fill(FT(NaN), nc, nlev_total)
+    rvector = fill(FT(NaN), nc, nlev_total)
 
     # Aliases for temperature fields
     snl = col.snl
@@ -191,8 +192,8 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     for c in bounds_col
         mask_nolakec[c] || continue
         if h2osfc[c] > THIN_SFCLAYER && frac_h2osfc[c] > THIN_SFCLAYER
-            c_h2osfc_out[c] = max(THIN_SFCLAYER, CPLIQ * h2osfc[c] / frac_h2osfc[c])
-            dz_h2osfc[c] = max(THIN_SFCLAYER, 1.0e-3 * h2osfc[c] / frac_h2osfc[c])
+            c_h2osfc_out[c] = smooth_max(THIN_SFCLAYER, CPLIQ * h2osfc[c] / frac_h2osfc[c])
+            dz_h2osfc[c] = smooth_max(THIN_SFCLAYER, 1.0e-3 * h2osfc[c] / frac_h2osfc[c])
         else
             c_h2osfc_out[c] = THIN_SFCLAYER
             dz_h2osfc[c] = THIN_SFCLAYER
@@ -246,7 +247,7 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
             continue
         end
 
-        ab = zeros(m_ab, n)
+        ab = zeros(FT, m_ab, n)
 
         for jj in 1:n
             for band_idx in 1:nband
@@ -263,16 +264,20 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
         end
 
         rhs = rvector[c, jt:jb]
-        ipiv = zeros(Int64, n)
-        rhs_mat = reshape(rhs, n, 1)
 
-        try
-            (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
-            LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
-            tvector[c, jt:jb] .= rhs
-        catch e
-            e isa LinearAlgebra.LAPACKException || rethrow()
-            # Singular matrix: leave tvector unchanged (preserves previous temperatures)
+        if FT <: AbstractFloat
+            ipiv = zeros(Int64, n)
+            rhs_mat = reshape(rhs, n, 1)
+            try
+                (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
+                LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
+                tvector[c, jt:jb] .= rhs
+            catch e
+                e isa LinearAlgebra.LAPACKException || rethrow()
+            end
+        else
+            # Pure-Julia fallback for Dual/non-LAPACK types (Enzyme-safe)
+            _band_solve_julia!(view(tvector, c, jt:jb), ab, rhs, kl, ku, n, FT)
         end
     end
 
@@ -458,8 +463,8 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
                           soilstate::SoilStateData,
                           mask_nolakec::BitVector, mask_urbanc::BitVector,
                           bounds_col::UnitRange{Int},
-                          tk_out::Matrix{Float64}, cv_out::Matrix{Float64},
-                          tk_h2osfc_out::Vector{Float64})
+                          tk_out::Matrix{<:Real}, cv_out::Matrix{<:Real},
+                          tk_h2osfc_out::Vector{<:Real})
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevurb = varpar.nlevurb
@@ -499,10 +504,10 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
 
                     satw = (h2osoi_liq[c, jj] / DENH2O + h2osoi_ice[c, jj] / DENICE +
                             excess_ice[c, j] / DENICE) / (col.dz[c, jj] * watsat[c, j])
-                    satw = min(1.0, satw)
+                    satw = smooth_min(1.0, satw)
                     if satw > 1.0e-7
                         if t_soisno[c, jj] >= TFRZ
-                            dke = max(0.0, log10(satw) + 1.0)
+                            dke = smooth_max(0.0, log10(satw) + 1.0)
                         else
                             dke = satw
                         end
@@ -537,7 +542,7 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
 
             # Thermal conductivity of snow
             if col.snl[c] + 1 < 1 && j >= col.snl[c] + 1 && j <= 0
-                denom = max(frac_sno[c], 1.0e-6) * max(col.dz[c, jj], 1.0e-6)
+                denom = smooth_max(frac_sno[c], 1.0e-6) * smooth_max(col.dz[c, jj], 1.0e-6)
                 bw[c, jj] = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / denom
                 if varctl.snow_thermal_cond_method == "Jordan1991"
                     thk[c, jj] = TKAIR + (7.75e-5 * bw[c, jj] + 1.105e-6 * bw[c, jj]^2) * (TKICE - TKAIR)
@@ -666,7 +671,7 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
             jj = j + joff
             if col.snl[c] + 1 < 1 && j >= col.snl[c] + 1
                 if frac_sno[c] > 0.0
-                    cv_out[c, jj] = max(THIN_SFCLAYER,
+                    cv_out[c, jj] = smooth_max(THIN_SFCLAYER,
                         (CPLIQ * h2osoi_liq[c, jj] + CPICE * h2osoi_ice[c, jj]) / frac_sno[c])
                 else
                     cv_out[c, jj] = THIN_SFCLAYER
@@ -686,12 +691,12 @@ function compute_ground_heat_flux_and_deriv!(
         temperature::TemperatureData, energyflux::EnergyFluxData,
         solarabs::SolarAbsorbedData, canopystate::CanopyStateData,
         waterdiagbulk::WaterDiagnosticBulkData, waterfluxbulk::WaterFluxBulkData,
-        urbanparams::UrbanParamsData, forc_lwrad::Vector{Float64},
+        urbanparams::UrbanParamsData, forc_lwrad::Vector{<:Real},
         mask_nolakec::BitVector, mask_nolakep::BitVector,
         bounds_col::UnitRange{Int}, bounds_patch::UnitRange{Int},
-        hs_h2osfc::Vector{Float64}, hs_top_snow::Vector{Float64},
-        hs_soil::Vector{Float64}, hs_top::Vector{Float64},
-        dhsdT::Vector{Float64}, sabg_lyr_col::Matrix{Float64})
+        hs_h2osfc::Vector{<:Real}, hs_top_snow::Vector{<:Real},
+        hs_soil::Vector{<:Real}, hs_top::Vector{<:Real},
+        dhsdT::Vector{<:Real}, sabg_lyr_col::Matrix{<:Real})
 
     nlevsno = varpar.nlevsno
     joff = nlevsno
@@ -707,12 +712,13 @@ function compute_ground_heat_flux_and_deriv!(
     dgnetdT = energyflux.dgnetdT_patch
 
     nc = length(bounds_col)
-    lwrad_emit = zeros(nc)
-    dlwrad_emit = zeros(nc)
-    lwrad_emit_snow = zeros(nc)
-    lwrad_emit_soil = zeros(nc)
-    lwrad_emit_h2osfc_arr = zeros(nc)
-    hs = zeros(nc)
+    FT = eltype(temperature.t_soisno_col)
+    lwrad_emit = zeros(FT, nc)
+    dlwrad_emit = zeros(FT, nc)
+    lwrad_emit_snow = zeros(FT, nc)
+    lwrad_emit_soil = zeros(FT, nc)
+    lwrad_emit_h2osfc_arr = zeros(FT, nc)
+    hs = zeros(FT, nc)
 
     for c in bounds_col
         mask_nolakec[c] || continue
@@ -868,9 +874,9 @@ function compute_heat_diff_flux_and_factor!(
         temperature::TemperatureData, energyflux::EnergyFluxData,
         urbanparams::UrbanParamsData,
         mask_nolakec::BitVector, bounds_col::UnitRange{Int},
-        dtime::Float64,
-        tk::Matrix{Float64}, cv::Matrix{Float64},
-        fn::Matrix{Float64}, fact::Matrix{Float64})
+        dtime::Real,
+        tk::Matrix{<:Real}, cv::Matrix{<:Real},
+        fn::Matrix{<:Real}, fact::Matrix{<:Real})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -952,14 +958,14 @@ function set_rhs_vec!(col::ColumnData, lun::LandunitData,
                       temperature::TemperatureData,
                       waterdiagbulk::WaterDiagnosticBulkData,
                       mask_nolakec::BitVector, bounds_col::UnitRange{Int},
-                      dtime::Float64,
-                      hs_h2osfc::Vector{Float64}, hs_top_snow::Vector{Float64},
-                      hs_soil::Vector{Float64}, hs_top::Vector{Float64},
-                      dhsdT::Vector{Float64}, sabg_lyr_col::Matrix{Float64},
-                      tk::Matrix{Float64}, tk_h2osfc::Vector{Float64},
-                      fact::Matrix{Float64}, fn::Matrix{Float64},
-                      c_h2osfc::Vector{Float64}, dz_h2osfc::Vector{Float64},
-                      rvector::Matrix{Float64})
+                      dtime::Real,
+                      hs_h2osfc::Vector{<:Real}, hs_top_snow::Vector{<:Real},
+                      hs_soil::Vector{<:Real}, hs_top::Vector{<:Real},
+                      dhsdT::Vector{<:Real}, sabg_lyr_col::Matrix{<:Real},
+                      tk::Matrix{<:Real}, tk_h2osfc::Vector{<:Real},
+                      fact::Matrix{<:Real}, fn::Matrix{<:Real},
+                      c_h2osfc::Vector{<:Real}, dz_h2osfc::Vector{<:Real},
+                      rvector::Matrix{<:Real})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -972,9 +978,10 @@ function set_rhs_vec!(col::ColumnData, lun::LandunitData,
     frac_h2osfc = waterdiagbulk.frac_h2osfc_col
     frac_sno_eff = waterdiagbulk.frac_sno_eff_col
 
-    rvector .= NaN
+    FT = eltype(t_soisno)
+    rvector .= FT(NaN)
 
-    fn_h2osfc = zeros(length(bounds_col))
+    fn_h2osfc = zeros(FT, length(bounds_col))
 
     # Snow layers RHS
     for j in (-nlevsno + 1):0
@@ -1077,11 +1084,11 @@ end
 function set_matrix!(col::ColumnData, lun::LandunitData,
                      waterdiagbulk::WaterDiagnosticBulkData,
                      mask_nolakec::BitVector, bounds_col::UnitRange{Int},
-                     dtime::Float64, nband::Int,
-                     dhsdT::Vector{Float64}, tk::Matrix{Float64},
-                     tk_h2osfc::Vector{Float64}, fact::Matrix{Float64},
-                     c_h2osfc::Vector{Float64}, dz_h2osfc::Vector{Float64},
-                     bmatrix::Array{Float64,3})
+                     dtime::Real, nband::Int,
+                     dhsdT::Vector{<:Real}, tk::Matrix{<:Real},
+                     tk_h2osfc::Vector{<:Real}, fact::Matrix{<:Real},
+                     c_h2osfc::Vector{<:Real}, dz_h2osfc::Vector{<:Real},
+                     bmatrix::Array{<:Real,3})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -1242,7 +1249,7 @@ function phase_change_h2osfc!(col::ColumnData, temperature::TemperatureData,
                               waterdiagbulk::WaterDiagnosticBulkData,
                               waterfluxbulk::WaterFluxBulkData,
                               mask_nolakec::BitVector, bounds_col::UnitRange{Int},
-                              dtime::Float64, dhsdT::Vector{Float64})
+                              dtime::Real, dhsdT::Vector{<:Real})
 
     nlevsno = varpar.nlevsno
     joff = nlevsno
@@ -1292,7 +1299,7 @@ function phase_change_h2osfc!(col::ColumnData, temperature::TemperatureData,
             end
 
             z_avg = frac_sno[c] * snow_depth[c]
-            rho_avg = z_avg > 0.0 ? min(800.0, h2osno_total / z_avg) : 200.0
+            rho_avg = z_avg > 0.0 ? smooth_min(800.0, h2osno_total / z_avg) : 200.0
 
             if temp1 >= 0.0
                 int_snow[c] -= xm
@@ -1375,7 +1382,7 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
                             waterdiagbulk::WaterDiagnosticBulkData,
                             waterfluxbulk::WaterFluxBulkData,
                             mask_nolakec::BitVector, bounds_col::UnitRange{Int},
-                            dtime::Float64, dhsdT::Vector{Float64})
+                            dtime::Real, dhsdT::Vector{<:Real})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -1424,15 +1431,16 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
     end
 
     # Local arrays
-    hm = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    xm = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    xm2 = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    wice0 = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    wliq0 = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    wexice0 = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    wmass0 = zeros(nc, nlevsno + nlevmaxurbgrnd)
-    supercool = zeros(nc, nlevmaxurbgrnd)
-    tinc = zeros(nc, nlevsno + nlevmaxurbgrnd)
+    FT = eltype(temperature.t_soisno_col)
+    hm = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    xm = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    xm2 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    wice0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    wliq0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    wexice0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    wmass0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    supercool = zeros(FT, nc, nlevmaxurbgrnd)
+    tinc = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
 
     # Initialize layer variables
     for j in (-nlevsno + 1):nlevmaxurbgrnd
@@ -1581,7 +1589,7 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
                     if j == 1
                         if h2osno_no_layers[c] > 0.0 && xm[c, jj] > 0.0
                             temp1 = h2osno_no_layers[c]
-                            h2osno_no_layers[c] = max(0.0, temp1 - xm[c, jj])
+                            h2osno_no_layers[c] = smooth_max(0.0, temp1 - xm[c, jj])
                             propor = h2osno_no_layers[c] / temp1
                             snow_depth[c] = propor * snow_depth[c]
                             heatr = hm[c, jj] - HFUS * (temp1 - h2osno_no_layers[c]) / dtime
@@ -1592,7 +1600,7 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
                                 xm[c, jj] = 0.0
                                 hm[c, jj] = 0.0
                             end
-                            qflx_snomelt[c] = max(0.0, temp1 - h2osno_no_layers[c]) / dtime
+                            qflx_snomelt[c] = smooth_max(0.0, temp1 - h2osno_no_layers[c]) / dtime
                             xmf[c] = HFUS * qflx_snomelt[c]
                             qflx_snow_drain[c] = qflx_snomelt[c]
                         end
@@ -1600,24 +1608,24 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
 
                     heatr = 0.0
                     if xm[c, jj] > 0.0
-                        h2osoi_ice[c, jj] = max(0.0, wice0[c, jj] - xm[c, jj])
+                        h2osoi_ice[c, jj] = smooth_max(0.0, wice0[c, jj] - xm[c, jj])
                         heatr = hm[c, jj] - HFUS * (wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
                         xm2[c, jj] = xm[c, jj] - h2osoi_ice[c, jj]
                         if h2osoi_ice[c, jj] == 0.0
                             if wexice0[c, jj] >= 0.0 && xm2[c, jj] > 0.0 && j >= 2
-                                excess_ice[c, j] = max(0.0, wexice0[c, jj] - xm2[c, jj])
+                                excess_ice[c, j] = smooth_max(0.0, wexice0[c, jj] - xm2[c, jj])
                                 heatr = hm[c, jj] - HFUS * (wexice0[c, jj] - excess_ice[c, j] +
                                         wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
                             end
                         end
                     elseif xm[c, jj] < 0.0
                         if j <= 0
-                            h2osoi_ice[c, jj] = min(wmass0[c, jj], wice0[c, jj] - xm[c, jj])
+                            h2osoi_ice[c, jj] = smooth_min(wmass0[c, jj], wice0[c, jj] - xm[c, jj])
                         else
                             if wmass0[c, jj] - wexice0[c, jj] < supercool[c, j]
                                 h2osoi_ice[c, jj] = 0.0
                             else
-                                h2osoi_ice[c, jj] = min(wmass0[c, jj] - wexice0[c, jj] - supercool[c, j],
+                                h2osoi_ice[c, jj] = smooth_min(wmass0[c, jj] - wexice0[c, jj] - supercool[c, j],
                                     wice0[c, jj] - xm[c, jj])
                             end
                         end
@@ -1625,7 +1633,7 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
                     end
 
                     ei_val = j >= 1 ? excess_ice[c, j] : 0.0
-                    h2osoi_liq[c, jj] = max(0.0, wmass0[c, jj] - h2osoi_ice[c, jj] - ei_val)
+                    h2osoi_liq[c, jj] = smooth_max(0.0, wmass0[c, jj] - h2osoi_ice[c, jj] - ei_val)
 
                     if abs(heatr) > 0.0
                         if j == snl[c] + 1
@@ -1661,18 +1669,18 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
                     if j >= 1
                         xmf[c] += HFUS * (wice0[c, jj] - h2osoi_ice[c, jj]) / dtime +
                             HFUS * (wexice0[c, jj] - (j >= 1 ? excess_ice[c, j] : 0.0)) / dtime
-                        exice_subs[c, j] = max(0.0, (wexice0[c, jj] - excess_ice[c, j]) / DENICE)
+                        exice_subs[c, j] = smooth_max(0.0, (wexice0[c, jj] - excess_ice[c, j]) / DENICE)
                     else
                         xmf[c] += HFUS * (wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
                     end
 
                     if imelt[c, jj] == 1 && j < 1
-                        qflx_snomelt_lyr[c, jj] = max(0.0, wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
+                        qflx_snomelt_lyr[c, jj] = smooth_max(0.0, wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
                         qflx_snomelt[c] += qflx_snomelt_lyr[c, jj]
                         waterdiagbulk.snomelt_accum_col[c] += qflx_snomelt_lyr[c, jj] * dtime * 1.0e-3
                     end
                     if imelt[c, jj] == 2 && j < 1
-                        qflx_snofrz_lyr[c, jj] = max(0.0, h2osoi_ice[c, jj] - wice0[c, jj]) / dtime
+                        qflx_snofrz_lyr[c, jj] = smooth_max(0.0, h2osoi_ice[c, jj] - wice0[c, jj]) / dtime
                         qflx_snofrz[c] += qflx_snofrz_lyr[c, jj]
                     end
                 end
@@ -1700,7 +1708,7 @@ end
 # =========================================================================
 function building_hac!(lun::LandunitData, temperature::TemperatureData,
                        urbanparams::UrbanParamsData,
-                       t_building_max::Vector{Float64},
+                       t_building_max::Vector{<:Real},
                        mask_urbanl::BitVector, bounds_lun::UnitRange{Int},
                        cool_on::BitVector, heat_on::BitVector)
 

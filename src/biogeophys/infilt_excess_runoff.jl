@@ -51,8 +51,8 @@ infiltration rate) and `qinmax_method` (method selector).
 Ported from `infiltration_excess_runoff_type` in
 `InfiltrationExcessRunoffMod.F90`.
 """
-Base.@kwdef mutable struct InfiltrationExcessRunoffData
-    qinmax_col::Vector{Float64} = Float64[]   # col maximum infiltration rate (mm H2O/s)
+Base.@kwdef mutable struct InfiltrationExcessRunoffData{FT<:Real}
+    qinmax_col::Vector{FT} = Float64[]   # col maximum infiltration rate (mm H2O/s)
     qinmax_method::Int = QINMAX_METHOD_HKSAT  # method for computing qinmax
 end
 
@@ -68,10 +68,10 @@ columns. Sets `qinmax_method` based on `use_vichydro`.
 Ported from `Init`, `InitAllocate`, and `InitCold` in
 `InfiltrationExcessRunoffMod.F90`.
 """
-function infilt_excess_runoff_init!(ier::InfiltrationExcessRunoffData, nc::Int;
-                                     use_vichydro::Bool = false)
+function infilt_excess_runoff_init!(ier::InfiltrationExcessRunoffData{FT}, nc::Int;
+                                     use_vichydro::Bool = false) where {FT}
     # InitAllocate
-    ier.qinmax_col = fill(NaN, nc)
+    ier.qinmax_col = fill(FT(NaN), nc)
 
     # InitCold
     if use_vichydro
@@ -117,7 +117,7 @@ frac_h2osfc.
 - `ier::InfiltrationExcessRunoffData`  : infiltration excess state (output: qinmax_col)
 - `soilhydrology::SoilHydrologyData`  : soil hydrology state (input: icefrac_col)
 - `soilstate::SoilStateData`          : soil state (input: hksat_col)
-- `fsat_col::Vector{Float64}`         : fractional area with water table at surface (from SaturatedExcessRunoff)
+- `fsat_col::Vector{<:Real}`         : fractional area with water table at surface (from SaturatedExcessRunoff)
 - `waterfluxbulk::WaterFluxBulkData`  : water fluxes (input: qflx_in_soil_col; output: qflx_infl_excess_col)
 - `waterdiagnosticbulk::WaterDiagnosticBulkData` : water diagnostics (input: frac_h2osfc_col)
 - `mask_hydrology::BitVector`          : column-level hydrology mask
@@ -130,7 +130,7 @@ function infiltration_excess_runoff!(
     ier::InfiltrationExcessRunoffData,
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
-    fsat_col::Vector{Float64},
+    fsat_col::Vector{<:Real},
     waterfluxbulk::WaterFluxBulkData,
     waterdiagnosticbulk::WaterDiagnosticBulkData,
     mask_hydrology::BitVector,
@@ -146,7 +146,8 @@ function infiltration_excess_runoff!(
 
     # Temporary workspace for qinmax on unsaturated area
     nc = length(bounds)
-    qinmax_on_unsaturated_area = Vector{Float64}(undef, last(bounds))
+    FT_ier = eltype(fsat_col)
+    qinmax_on_unsaturated_area = Vector{FT_ier}(undef, last(bounds))
 
     # --- Compute qinmax on unsaturated area ---
     if ier.qinmax_method == QINMAX_METHOD_NONE
@@ -189,7 +190,7 @@ For each column, computes:
 # Arguments
 - `soilhydrology::SoilHydrologyData`    : input icefrac_col (ncols, nlevgrnd)
 - `soilstate::SoilStateData`            : input hksat_col (ncols, nlevgrnd)
-- `qinmax_on_unsaturated_area::Vector{Float64}` : output
+- `qinmax_on_unsaturated_area::Vector{<:Real}` : output
 - `mask_hydrology::BitVector`            : column-level hydrology mask
 - `bounds::UnitRange{Int}`               : column bounds
 - `params::InfiltrationExcessRunoffParams` : module parameters (keyword)
@@ -199,7 +200,7 @@ Ported from `ComputeQinmaxHksat` in `InfiltrationExcessRunoffMod.F90`.
 function compute_qinmax_hksat!(
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
-    qinmax_on_unsaturated_area::Vector{Float64},
+    qinmax_on_unsaturated_area::Vector{<:Real},
     mask_hydrology::BitVector,
     bounds::UnitRange{Int};
     params::InfiltrationExcessRunoffParams = infilt_excess_params

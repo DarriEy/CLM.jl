@@ -39,8 +39,8 @@ Ported from `SoilThermProp_Lake` in `LakeTemperatureMod.F90`.
 function soil_therm_prop_lake!(col::ColumnData, soilstate::SoilStateData,
                                waterstatebulk::WaterStateBulkData,
                                temperature::TemperatureData,
-                               tk::Matrix{Float64}, cv::Matrix{Float64},
-                               tktopsoillay::Vector{Float64},
+                               tk::Matrix{<:Real}, cv::Matrix{<:Real},
+                               tktopsoillay::Vector{<:Real},
                                mask_lakec::BitVector, bounds_col::UnitRange{Int})
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -65,7 +65,8 @@ function soil_therm_prop_lake!(col::ColumnData, soilstate::SoilStateData,
     # Working array for layer thermal conductivity
     nc = length(bounds_col)
     nlevtot = nlevsno + varpar.nlevmaxurbgrnd
-    thk = zeros(nc, nlevtot)
+    FT = eltype(t_soisno)
+    thk = zeros(FT, nc, nlevtot)
 
     # Thermal conductivity of soil from Farouki (1981)
     for j in (-nlevsno + 1):nlevgrnd
@@ -79,7 +80,7 @@ function soil_therm_prop_lake!(col::ColumnData, soilstate::SoilStateData,
                 satw = 1.0
                 fl = h2osoi_liq[c, jj] / (h2osoi_ice[c, jj] + h2osoi_liq[c, jj])
                 if t_soisno[c, jj] >= TFRZ  # Unfrozen soil
-                    dke = max(0.0, log10(satw) + 1.0)
+                    dke = smooth_max(0.0, log10(satw) + 1.0)
                     dksat = tksatu[c, j]
                 else  # Frozen soil
                     dke = satw
@@ -172,10 +173,10 @@ function phase_change_lake!(col::ColumnData,
                             temperature::TemperatureData,
                             energyflux::EnergyFluxData,
                             lakestate::LakeStateData,
-                            cv::Matrix{Float64}, cv_lake::Matrix{Float64},
-                            lhabs::Vector{Float64},
+                            cv::Matrix{<:Real}, cv_lake::Matrix{<:Real},
+                            lhabs::Vector{<:Real},
                             mask_lakec::BitVector, bounds_col::UnitRange{Int},
-                            dtime::Float64)
+                            dtime::Real)
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevlak = varpar.nlevlak
@@ -231,8 +232,8 @@ function phase_change_lake!(col::ColumnData,
         mask_lakec[c] || continue
         if h2osno_no_layers[c] > 0.0 && t_lake[c, 1] > TFRZ
             heatavail = (t_lake[c, 1] - TFRZ) * cv_lake[c, 1]
-            melt = min(h2osno_no_layers[c], heatavail / HFUS)
-            heatrem = max(heatavail - melt * HFUS, 0.0)
+            melt = smooth_min(h2osno_no_layers[c], heatavail / HFUS)
+            heatrem = smooth_max(heatavail - melt * HFUS, 0.0)
             t_lake[c, 1] = TFRZ + heatrem / cv_lake[c, 1]
             snow_depth[c] = snow_depth[c] * (1.0 - melt / h2osno_no_layers[c])
             h2osno_no_layers[c] = h2osno_no_layers[c] - melt
@@ -261,13 +262,13 @@ function phase_change_lake!(col::ColumnData,
             if t_lake[c, j] > TFRZ && lake_icefrac[c, j] > 0.0  # melting
                 dophasechangeflag = true
                 heatavail = (t_lake[c, j] - TFRZ) * cv_lake[c, j]
-                melt = min(lake_icefrac[c, j] * DENH2O * dz_lake[c, j], heatavail / HFUS)
-                heatrem = max(heatavail - melt * HFUS, 0.0)
+                melt = smooth_min(lake_icefrac[c, j] * DENH2O * dz_lake[c, j], heatavail / HFUS)
+                heatrem = smooth_max(heatavail - melt * HFUS, 0.0)
             elseif t_lake[c, j] < TFRZ && lake_icefrac[c, j] < 1.0  # freezing
                 dophasechangeflag = true
                 heatavail = (t_lake[c, j] - TFRZ) * cv_lake[c, j]
-                melt = max(-(1.0 - lake_icefrac[c, j]) * DENH2O * dz_lake[c, j], heatavail / HFUS)
-                heatrem = min(heatavail - melt * HFUS, 0.0)
+                melt = smooth_max(-(1.0 - lake_icefrac[c, j]) * DENH2O * dz_lake[c, j], heatavail / HFUS)
+                heatrem = smooth_min(heatavail - melt * HFUS, 0.0)
             end
 
             if dophasechangeflag
@@ -299,8 +300,8 @@ function phase_change_lake!(col::ColumnData,
                 if t_soisno[c, jj] > TFRZ && h2osoi_ice[c, jj] > 0.0  # melting
                     dophasechangeflag = true
                     heatavail = (t_soisno[c, jj] - TFRZ) * cv[c, jj]
-                    melt = min(h2osoi_ice[c, jj], heatavail / HFUS)
-                    heatrem = max(heatavail - melt * HFUS, 0.0)
+                    melt = smooth_min(h2osoi_ice[c, jj], heatavail / HFUS)
+                    heatrem = smooth_max(heatavail - melt * HFUS, 0.0)
                     if j <= 0  # snow
                         imelt[c, jj] = 1
                         qflx_snomelt_lyr[c, jj] = melt / dtime
@@ -309,8 +310,8 @@ function phase_change_lake!(col::ColumnData,
                 elseif t_soisno[c, jj] < TFRZ && h2osoi_liq[c, jj] > 0.0  # freezing
                     dophasechangeflag = true
                     heatavail = (t_soisno[c, jj] - TFRZ) * cv[c, jj]
-                    melt = max(-h2osoi_liq[c, jj], heatavail / HFUS)
-                    heatrem = min(heatavail - melt * HFUS, 0.0)
+                    melt = smooth_max(-h2osoi_liq[c, jj], heatavail / HFUS)
+                    heatrem = smooth_min(heatavail - melt * HFUS, 0.0)
                     if j <= 0  # snow
                         imelt[c, jj] = 2
                         qflx_snofrz_lyr[c, jj] = -melt / dtime
@@ -369,10 +370,10 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
                            energyflux::EnergyFluxData,
                            temperature::TemperatureData,
                            lakestate::LakeStateData,
-                           grnd_ch4_cond::Vector{Float64},
+                           grnd_ch4_cond::Vector{<:Real},
                            mask_lakec::BitVector, mask_lakep::BitVector,
                            bounds_col::UnitRange{Int}, bounds_patch::UnitRange{Int},
-                           dtime::Float64)
+                           dtime::Real)
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevlak = varpar.nlevlak
@@ -434,54 +435,55 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
     ncol_total = nlevsno + nlevlak + nlevgrnd  # total number of levels
 
     # Local arrays (1-indexed, with offset for snow/soil indexing)
-    rhow = zeros(nc, nlevlak)
-    phi = zeros(nc, nlevlak)
-    kme = zeros(nc, nlevlak)
-    phi_soil = zeros(nc)
-    fin = zeros(nc)
-    ocvts = zeros(nc)
-    ncvts_arr = zeros(nc)
+    FT = eltype(temperature.t_grnd_col)
+    rhow = zeros(FT, nc, nlevlak)
+    phi = zeros(FT, nc, nlevlak)
+    kme = zeros(FT, nc, nlevlak)
+    phi_soil = zeros(FT, nc)
+    fin = zeros(FT, nc)
+    ocvts = zeros(FT, nc)
+    ncvts_arr = zeros(FT, nc)
     jtop = fill(1, nc)
-    cv = zeros(nc, nlevsno + varpar.nlevmaxurbgrnd)
-    tk = zeros(nc, nlevsno + varpar.nlevmaxurbgrnd)
-    cv_lake = zeros(nc, nlevlak)
-    tk_lake = zeros(nc, nlevlak)
-    tktopsoillay = zeros(nc)
-    lhabs = zeros(nc)
+    cv = zeros(FT, nc, nlevsno + varpar.nlevmaxurbgrnd)
+    tk = zeros(FT, nc, nlevsno + varpar.nlevmaxurbgrnd)
+    cv_lake = zeros(FT, nc, nlevlak)
+    tk_lake = zeros(FT, nc, nlevlak)
+    tktopsoillay = zeros(FT, nc)
+    lhabs = zeros(FT, nc)
 
     # Extended column arrays (from -nlevsno+1 to nlevlak+nlevgrnd, stored 1:ncol_total)
-    cvx = zeros(nc, ncol_total)
-    tkix = zeros(nc, ncol_total)
-    tx = zeros(nc, ncol_total)
-    phix = zeros(nc, ncol_total)
-    zx = zeros(nc, ncol_total)
-    fnx = zeros(nc, ncol_total)
-    factx = zeros(nc, ncol_total)
-    a = zeros(nc, ncol_total)
-    b = zeros(nc, ncol_total)
-    c1 = zeros(nc, ncol_total)
-    r = zeros(nc, ncol_total)
+    cvx = zeros(FT, nc, ncol_total)
+    tkix = zeros(FT, nc, ncol_total)
+    tx = zeros(FT, nc, ncol_total)
+    phix = zeros(FT, nc, ncol_total)
+    zx = zeros(FT, nc, ncol_total)
+    fnx = zeros(FT, nc, ncol_total)
+    factx = zeros(FT, nc, ncol_total)
+    a = zeros(FT, nc, ncol_total)
+    b = zeros(FT, nc, ncol_total)
+    c1 = zeros(FT, nc, ncol_total)
+    r = zeros(FT, nc, ncol_total)
 
     # Other local arrays
-    t_lake_bef = zeros(nc, nlevlak)
-    t_soisno_bef = zeros(nc, nlevsno + nlevgrnd)
-    sabg_col = zeros(nc)
-    sabg_lyr_col = zeros(nc, nlevsno + 1)  # -nlevsno+1:1
-    tav_froz = zeros(nc)
-    tav_unfr = zeros(nc)
-    nav = zeros(nc)
-    iceav = zeros(nc)
-    qav = zeros(nc)
-    zsum = zeros(nc)
-    esum1 = zeros(nc)
-    esum2 = zeros(nc)
-    h2osno_total = zeros(nc)
+    t_lake_bef = zeros(FT, nc, nlevlak)
+    t_soisno_bef = zeros(FT, nc, nlevsno + nlevgrnd)
+    sabg_col = zeros(FT, nc)
+    sabg_lyr_col = zeros(FT, nc, nlevsno + 1)  # -nlevsno+1:1
+    tav_froz = zeros(FT, nc)
+    tav_unfr = zeros(FT, nc)
+    nav = zeros(FT, nc)
+    iceav = zeros(FT, nc)
+    qav = zeros(FT, nc)
+    zsum = zeros(FT, nc)
+    esum1 = zeros(FT, nc)
+    esum2 = zeros(FT, nc)
+    h2osno_total = zeros(FT, nc)
     jconvect = zeros(Int, nc)
     jconvectbot = fill(nlevlak + 1, nc)
     bottomconvect = falses(nc)
     puddle = falses(nc)
     frzn = falses(nc)
-    icesum = zeros(nc)
+    icesum = zeros(FT, nc)
 
     # Helper: convert extended column index j (Fortran: -nlevsno+1 to nlevlak+nlevgrnd)
     # to Julia 1-based index
@@ -529,8 +531,8 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
 
         # Calculate NIR fraction of absorbed solar
         sabg_nir = fsds_nir_d[p] + fsds_nir_i[p] - fsr_nir_d[p] - fsr_nir_i[p]
-        sabg_nir = min(sabg_nir, sabg[p])
-        beta[c] = sabg_nir / max(1.0e-5, sabg[p])
+        sabg_nir = smooth_min(sabg_nir, sabg[p])
+        beta[c] = sabg_nir / smooth_max(1.0e-5, sabg[p])
         beta[c] = beta[c] + (1.0 - beta[c]) * BETAVIS
     end
 
@@ -539,7 +541,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         for c in bounds_col
             mask_lakec[c] || continue
             rhow[c, j] = (1.0 - lake_icefrac[c, j]) *
-                1000.0 * (1.0 - 1.9549e-05 * abs(t_lake[c, j] - TDMAX)^1.68) +
+                1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, j] - TDMAX)^1.68) +
                 lake_icefrac[c, j] * DENICE
         end
     end
@@ -552,8 +554,8 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
             n2 = GRAV / rhow[c, j] * drhodz
 
             num = 40.0 * n2 * (VKC * z_lake[c, j])^2.0
-            den = max(ws[c]^2.0 * exp(-2.0 * ks[c] * z_lake[c, j]), 1.0e-10)
-            ri = (-1.0 + sqrt(max(1.0 + num / den, 0.0))) / 20.0
+            den = smooth_max(ws[c]^2.0 * exp(-2.0 * ks[c] * z_lake[c, j]), 1.0e-10)
+            ri = (-1.0 + sqrt(smooth_max(1.0 + num / den, 0.0))) / 20.0
 
             if LAKEPUDDLING && j == 1
                 frzn[c] = false
@@ -565,7 +567,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
                 kme[c, j] = km + ke
 
                 if !LAKE_NO_ED
-                    fangkm = 1.039e-8 * max(n2, N2MIN)^(-0.43)
+                    fangkm = 1.039e-8 * smooth_max(n2, N2MIN)^(-0.43)
                     kme[c, j] = kme[c, j] + fangkm
                 end
                 if lakedepth[c] >= DEPTHCRIT
@@ -576,7 +578,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
             else
                 kme[c, j] = km
                 if !LAKE_NO_ED
-                    fangkm = 1.039e-8 * max(n2, N2MIN)^(-0.43)
+                    fangkm = 1.039e-8 * smooth_max(n2, N2MIN)^(-0.43)
                     kme[c, j] = kme[c, j] + fangkm
                     if lakedepth[c] >= DEPTHCRIT
                         kme[c, j] = kme[c, j] * MIXFACT
@@ -626,13 +628,13 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
             if etal[c] > 0.0
                 eta = etal[c]
             else
-                eta = 1.1925 * max(lakedepth[c], 1.0)^(-0.424)
+                eta = 1.1925 * smooth_max(lakedepth[c], 1.0)^(-0.424)
             end
 
             zin = z_lake[c, j] - 0.5 * dz_lake[c, j]
             zout = z_lake[c, j] + 0.5 * dz_lake[c, j]
-            rsfin = exp(-eta * max(zin - ZA_LAKE, 0.0))
-            rsfout = exp(-eta * max(zout - ZA_LAKE, 0.0))
+            rsfin = exp(-eta * smooth_max(zin - ZA_LAKE, 0.0))
+            rsfout = exp(-eta * smooth_max(zout - ZA_LAKE, 0.0))
 
             if t_grnd[c] > TFRZ && t_lake[c, 1] > TFRZ && snl[c] == 0
                 phidum = (rsfin - rsfout) * sabg[p] * (1.0 - beta[c])
@@ -871,7 +873,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         for c in bounds_col
             mask_lakec[c] || continue
             rhow[c, j] = (1.0 - lake_icefrac[c, j]) *
-                1000.0 * (1.0 - 1.9549e-05 * abs(t_lake[c, j] - TDMAX)^1.68) +
+                1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, j] - TDMAX)^1.68) +
                 lake_icefrac[c, j] * DENICE
         end
     end
@@ -960,7 +962,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
                     zsum[c] = zsum[c] + dz_lake[c, i]
 
                     rhow[c, i] = (1.0 - lake_icefrac[c, i]) *
-                        1000.0 * (1.0 - 1.9549e-05 * abs(t_lake[c, i] - TDMAX)^1.68) +
+                        1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, i] - TDMAX)^1.68) +
                         lake_icefrac[c, i] * DENICE
                 end
             end
@@ -1045,7 +1047,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
                     zsum[c] = zsum[c] + dz_lake[c, i]
 
                     rhow[c, i] = (1.0 - lake_icefrac[c, i]) *
-                        1000.0 * (1.0 - 1.9549e-05 * abs(t_lake[c, i] - TDMAX)^1.68) +
+                        1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, i] - TDMAX)^1.68) +
                         lake_icefrac[c, i] * DENICE
                 end
             end
@@ -1157,7 +1159,7 @@ Calculate total snow water (h2osno_no_layers + snow layer ice + liq).
 Simplified version matching `CalculateTotalH2osno` for lake columns.
 """
 function calculate_total_h2osno!(ws::WaterStateData, snl::Vector{Int},
-                                 h2osno_total::Vector{Float64},
+                                 h2osno_total::Vector{<:Real},
                                  mask::BitVector, bounds::UnitRange{Int})
     nlevsno = varpar.nlevsno
     joff = nlevsno

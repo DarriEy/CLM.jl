@@ -25,7 +25,7 @@ const I_ATM = 0
 # Ported from readParams in SoilBiogeochemDecompMod.F90
 # ---------------------------------------------------------------------------
 
-function decomp_read_params!(params::DecompParams; dnp::Float64)
+function decomp_read_params!(params::DecompParams; dnp::Real)
     params.dnp = dnp
     return nothing
 end
@@ -51,11 +51,11 @@ function soil_biogeochem_decomp!(
         nlevdecomp::Int,
         ndecomp_pools::Int,
         ndecomp_cascade_transitions::Int,
-        cn_decomp_pools::Array{Float64,3},
-        p_decomp_cpool_loss::Array{Float64,3},
-        pmnf_decomp_cascade::Array{Float64,3},
-        p_decomp_npool_to_din::Array{Float64,3},
-        dzsoi_decomp::Vector{Float64},
+        cn_decomp_pools::Array{<:Real,3},
+        p_decomp_cpool_loss::Array{<:Real,3},
+        pmnf_decomp_cascade::Array{<:Real,3},
+        p_decomp_npool_to_din::Array{<:Real,3},
+        dzsoi_decomp::Vector{<:Real},
         use_nitrif_denitrif::Bool=false,
         use_lch4::Bool=false,
         use_mimics::Bool=false,
@@ -187,7 +187,7 @@ function soil_biogeochem_decomp!(
     # Calculate total fraction of potential HR, for methane code
     # -------------------------------------------------------------------
     if use_lch4
-        hrsum = zeros(nc, nlevdecomp)
+        hrsum = zeros(eltype(decomp_cascade_hr_vr), nc, nlevdecomp)
 
         for k in 1:ndecomp_cascade_transitions
             for j in 1:nlevdecomp

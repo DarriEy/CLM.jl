@@ -176,7 +176,7 @@ function downscale_longwave!(bounds::BoundsType,
                              a2l::Atm2LndData,
                              col::ColumnData,
                              lun::LandunitData;
-                             topo_col::Vector{Float64}=Float64[])
+                             topo_col::Vector{<:Real}=Float64[])
     bc_col = bounds.begc:bounds.endc
     bc_grc = bounds.begg:bounds.endg
 

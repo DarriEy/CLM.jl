@@ -51,10 +51,10 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
                                 cnveg_state::CNVegStateData,
                                 crop::CropData,
                                 pftcon_data::PftconType;
-                                dt::Float64 = 1800.0,
+                                dt::Real = 1800.0,
                                 use_cndv::Bool = false,
                                 use_biomass_heat_storage::Bool = false,
-                                spinup_factor_deadwood::Float64 = SPINUP_FACTOR_DEADWOOD_DEFAULT,
+                                spinup_factor_deadwood::Real = SPINUP_FACTOR_DEADWOOD_DEFAULT,
                                 noveg::Int = CLM.noveg,
                                 nc3crop::Int = CLM.nc3crop,
                                 nc3irrig::Int = CLM.nc3irrig,
@@ -71,7 +71,7 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
                                 nirrig_miscanthus::Int = CLM.nirrig_miscanthus,
                                 nswitchgrass::Int = CLM.nswitchgrass,
                                 nirrig_switchgrass::Int = CLM.nirrig_switchgrass,
-                                c_to_b::Float64 = C_TO_B)
+                                c_to_b::Real = C_TO_B)
 
     # --- Aliases (matching Fortran associate block) ---
     ivt            = patch.itype
@@ -132,7 +132,7 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
             else
                 tlai[p] = slatop[ivt[p] + 1] * leafc[p]
             end
-            tlai[p] = max(0.0, tlai[p])
+            tlai[p] = smooth_max(0.0, tlai[p])
 
             # Update the stem area index and height based on LAI, stem mass, and veg type.
             # tsai formula from Zeng et al. 2002, Journal of Climate, p1835
@@ -147,12 +147,12 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
                 tsai_min = 1.0
             end
             tsai_min = tsai_min * 0.5
-            tsai[p] = max(tsai_alpha * tsai_old + max(tlai_old - tlai[p], 0.0), tsai_min)
+            tsai[p] = smooth_max(tsai_alpha * tsai_old + smooth_max(tlai_old - tlai[p], 0.0), tsai_min)
 
             # Calculate vegetation physiological parameters used in biomass heat storage
             if use_biomass_heat_storage
                 # Assumes fbw (fraction of biomass that is water) is the same for leaves and stems
-                leaf_biomass[p] = max(0.0025, leafc[p]) *
+                leaf_biomass[p] = smooth_max(0.0025, leafc[p]) *
                     c_to_b * 1.0e-3 / (1.0 - fbw[ivt[p] + 1])
             end
 
@@ -180,13 +180,13 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
 
                 # Keep htop from getting too close to forcing height for windspeed
                 # (Peter Thornton, 5/3/2004)
-                htop[p] = min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
+                htop[p] = smooth_min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
 
                 # Constraint to keep htop from going to 0.0
                 # (Peter Thornton, 8/11/2004)
-                htop[p] = max(htop[p], 0.01)
+                htop[p] = smooth_max(htop[p], 0.01)
 
-                hbot[p] = max(0.0, min(3.0, htop[p] - 1.0))
+                hbot[p] = smooth_max(0.0, smooth_min(3.0, htop[p] - 1.0))
 
             elseif ivt[p] >= npcropmin  # prognostic crops
 
@@ -212,22 +212,22 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
                 end
 
                 # canopy top and bottom heights
-                htop[p] = ztopmx[ivt[p] + 1] * (min(tlai[p] / (laimx[ivt[p] + 1] - 1.0), 1.0))^2
-                htmx[p] = max(htmx[p], htop[p])
-                htop[p] = max(0.05, max(htmx[p], htop[p]))
+                htop[p] = ztopmx[ivt[p] + 1] * (smooth_min(tlai[p] / (laimx[ivt[p] + 1] - 1.0), 1.0))^2
+                htmx[p] = smooth_max(htmx[p], htop[p])
+                htop[p] = smooth_max(0.05, smooth_max(htmx[p], htop[p]))
                 hbot[p] = 0.02
 
             else  # generic crops and grasses
 
                 # height for grasses depends only on LAI
-                htop[p] = max(0.25, tlai[p] * 0.25)
+                htop[p] = smooth_max(0.25, tlai[p] * 0.25)
 
-                htop[p] = min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
+                htop[p] = smooth_min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
 
                 # Constraint to keep htop from going to 0.0
-                htop[p] = max(htop[p], 0.01)
+                htop[p] = smooth_max(htop[p], 0.01)
 
-                hbot[p] = max(0.0, min(0.05, htop[p] - 0.20))
+                hbot[p] = smooth_max(0.0, smooth_min(0.05, htop[p] - 0.20))
             end
 
         else
@@ -247,11 +247,11 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
         # Changes in one place should be accompanied by similar changes in the other.
 
         if ivt[p] > noveg && ivt[p] <= nbrdlf_dcd_brl_shrub
-            ol = min(max(snow_depth[c] - hbot[p], 0.0), htop[p] - hbot[p])
-            fb = 1.0 - ol / max(1.0e-06, htop[p] - hbot[p])
+            ol = smooth_min(smooth_max(snow_depth[c] - hbot[p], 0.0), htop[p] - hbot[p])
+            fb = 1.0 - ol / smooth_max(1.0e-06, htop[p] - hbot[p])
         else
-            fb = 1.0 - (max(min(snow_depth[c], max(0.05, htop[p] * 0.8)), 0.0) /
-                        (max(0.05, htop[p] * 0.8)))
+            fb = 1.0 - (smooth_max(smooth_min(snow_depth[c], smooth_max(0.05, htop[p] * 0.8)), 0.0) /
+                        (smooth_max(0.05, htop[p] * 0.8)))
             # depth of snow required for complete burial of grasses
         end
 
@@ -263,8 +263,8 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
             frac_sno_adjusted = 1.0
         end
 
-        elai[p] = max(tlai[p] * (1.0 - frac_sno_adjusted) + tlai[p] * fb * frac_sno_adjusted, 0.0)
-        esai[p] = max(tsai[p] * (1.0 - frac_sno_adjusted) + tsai[p] * fb * frac_sno_adjusted, 0.0)
+        elai[p] = smooth_max(tlai[p] * (1.0 - frac_sno_adjusted) + tlai[p] * fb * frac_sno_adjusted, 0.0)
+        esai[p] = smooth_max(tsai[p] * (1.0 - frac_sno_adjusted) + tsai[p] * fb * frac_sno_adjusted, 0.0)
 
         # Fraction of vegetation free of snow
         if (elai[p] + esai[p]) > 0.0

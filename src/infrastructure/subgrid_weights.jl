@@ -195,8 +195,8 @@ end
 
 Helper: check if sumwts satisfies weight requirements.
 """
-function _check_wt_ok(sumwts::Float64, active_only::Bool, i_am_active::Bool,
-                       tol::Float64, context::String)
+function _check_wt_ok(sumwts::Real, active_only::Bool, i_am_active::Bool,
+                       tol::Real, context::String)
     wt_eq_1 = abs(sumwts - 1.0) <= tol
     if active_only
         if i_am_active

@@ -44,7 +44,7 @@ function c_state_update3!(cs_veg::CNVegCarbonStateData,
                            i_cwd::Int,
                            use_matrixcn::Bool = false,
                            use_soil_matrixcn::Bool = false,
-                           dt::Float64)
+                           dt::Real)
 
     # --- Column loop: fire mortality fluxes to soil decomposition pools ---
     for j in 1:nlevdecomp

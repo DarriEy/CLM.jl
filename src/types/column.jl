@@ -25,7 +25,7 @@ characteristics.
 
 Ported from `column_type` in `ColumnType.F90`.
 """
-Base.@kwdef mutable struct ColumnData{FT<:AbstractFloat}
+Base.@kwdef mutable struct ColumnData{FT<:Real}
     # g/l/c/p hierarchy, local g/l/c/p cells only
     landunit         ::Vector{Int}     = Int[]       # index into landunit level quantities
     wtlunit          ::Vector{FT} = Float64[]   # weight (relative to landunit)

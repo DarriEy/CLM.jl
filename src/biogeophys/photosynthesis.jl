@@ -71,7 +71,7 @@ const MAX_CS = 1.0e-06
 
 Photosynthesis parameters (from `photo_params_type` in Fortran).
 """
-Base.@kwdef mutable struct PhotoParamsData{FT<:AbstractFloat}
+Base.@kwdef mutable struct PhotoParamsData{FT<:Real}
     act25::Float64 = NaN         # Rubisco activity at 25 C (umol CO2/gRubisco/s)
     fnr::Float64 = NaN           # Mass ratio of total Rubisco molecular mass to nitrogen in Rubisco
     cp25_yr2000::Float64 = NaN   # CO2 compensation point at 25°C at present day O2 (mol/mol)
@@ -149,7 +149,7 @@ end
 Photosynthesis state data (from `photosyns_type` in Fortran).
 Holds all photosynthesis and stomatal conductance variables at patch level.
 """
-Base.@kwdef mutable struct PhotosynthesisData{FT<:AbstractFloat}
+Base.@kwdef mutable struct PhotosynthesisData{FT<:Real}
     # Logical/config
     c3flag_patch::Vector{Bool} = Bool[]
 
@@ -263,100 +263,102 @@ end
 
 Allocate and initialize all fields for `np` patches.
 """
-function photosynthesis_data_init!(ps::PhotosynthesisData, np::Int;
-                                   nlevcan::Int=NLEVCAN, use_luna::Bool=false)
+function photosynthesis_data_init!(ps::PhotosynthesisData{FT}, np::Int;
+                                   nlevcan::Int=NLEVCAN, use_luna::Bool=false) where {FT}
+    _nan = FT(NaN)
+
     ps.c3flag_patch = fill(false, np)
 
-    ps.ac_phs_patch = fill(NaN, np, 2, nlevcan)
-    ps.aj_phs_patch = fill(NaN, np, 2, nlevcan)
-    ps.ap_phs_patch = fill(NaN, np, 2, nlevcan)
-    ps.ag_phs_patch = fill(NaN, np, 2, nlevcan)
-    ps.vcmax_z_phs_patch = fill(NaN, np, 2, nlevcan)
-    ps.tpu_z_phs_patch = fill(NaN, np, 2, nlevcan)
-    ps.kp_z_phs_patch = fill(NaN, np, 2, nlevcan)
+    ps.ac_phs_patch = fill(_nan, np, 2, nlevcan)
+    ps.aj_phs_patch = fill(_nan, np, 2, nlevcan)
+    ps.ap_phs_patch = fill(_nan, np, 2, nlevcan)
+    ps.ag_phs_patch = fill(_nan, np, 2, nlevcan)
+    ps.vcmax_z_phs_patch = fill(_nan, np, 2, nlevcan)
+    ps.tpu_z_phs_patch = fill(_nan, np, 2, nlevcan)
+    ps.kp_z_phs_patch = fill(_nan, np, 2, nlevcan)
 
-    ps.an_sun_patch = fill(NaN, np, nlevcan)
-    ps.an_sha_patch = fill(NaN, np, nlevcan)
+    ps.an_sun_patch = fill(_nan, np, nlevcan)
+    ps.an_sha_patch = fill(_nan, np, nlevcan)
 
-    ps.gs_mol_sun_patch = fill(NaN, np, nlevcan)
-    ps.gs_mol_sha_patch = fill(NaN, np, nlevcan)
-    ps.gs_mol_sun_ln_patch = fill(NaN, np, nlevcan)
-    ps.gs_mol_sha_ln_patch = fill(NaN, np, nlevcan)
+    ps.gs_mol_sun_patch = fill(_nan, np, nlevcan)
+    ps.gs_mol_sha_patch = fill(_nan, np, nlevcan)
+    ps.gs_mol_sun_ln_patch = fill(_nan, np, nlevcan)
+    ps.gs_mol_sha_ln_patch = fill(_nan, np, nlevcan)
 
-    ps.ac_patch = fill(NaN, np, nlevcan)
-    ps.aj_patch = fill(NaN, np, nlevcan)
-    ps.ap_patch = fill(NaN, np, nlevcan)
-    ps.ag_patch = fill(NaN, np, nlevcan)
-    ps.an_patch = fill(NaN, np, nlevcan)
-    ps.vcmax_z_patch = fill(NaN, np, nlevcan)
-    ps.tpu_z_patch = fill(NaN, np, nlevcan)
-    ps.kp_z_patch = fill(NaN, np, nlevcan)
-    ps.gs_mol_patch = fill(NaN, np, nlevcan)
+    ps.ac_patch = fill(_nan, np, nlevcan)
+    ps.aj_patch = fill(_nan, np, nlevcan)
+    ps.ap_patch = fill(_nan, np, nlevcan)
+    ps.ag_patch = fill(_nan, np, nlevcan)
+    ps.an_patch = fill(_nan, np, nlevcan)
+    ps.vcmax_z_patch = fill(_nan, np, nlevcan)
+    ps.tpu_z_patch = fill(_nan, np, nlevcan)
+    ps.kp_z_patch = fill(_nan, np, nlevcan)
+    ps.gs_mol_patch = fill(_nan, np, nlevcan)
 
-    ps.cp_patch = fill(NaN, np)
-    ps.kc_patch = fill(NaN, np)
-    ps.ko_patch = fill(NaN, np)
-    ps.qe_patch = fill(NaN, np)
-    ps.bbb_patch = fill(NaN, np)
-    ps.mbb_patch = fill(NaN, np)
-    ps.gb_mol_patch = fill(NaN, np)
-    ps.rh_leaf_patch = fill(NaN, np)
-    ps.vpd_can_patch = fill(NaN, np)
+    ps.cp_patch = fill(_nan, np)
+    ps.kc_patch = fill(_nan, np)
+    ps.ko_patch = fill(_nan, np)
+    ps.qe_patch = fill(_nan, np)
+    ps.bbb_patch = fill(_nan, np)
+    ps.mbb_patch = fill(_nan, np)
+    ps.gb_mol_patch = fill(_nan, np)
+    ps.rh_leaf_patch = fill(_nan, np)
+    ps.vpd_can_patch = fill(_nan, np)
 
-    ps.psnsun_patch = fill(NaN, np)
-    ps.psnsha_patch = fill(NaN, np)
-    ps.c13_psnsun_patch = fill(NaN, np)
-    ps.c13_psnsha_patch = fill(NaN, np)
-    ps.c14_psnsun_patch = fill(NaN, np)
-    ps.c14_psnsha_patch = fill(NaN, np)
+    ps.psnsun_patch = fill(_nan, np)
+    ps.psnsha_patch = fill(_nan, np)
+    ps.c13_psnsun_patch = fill(_nan, np)
+    ps.c13_psnsha_patch = fill(_nan, np)
+    ps.c14_psnsun_patch = fill(_nan, np)
+    ps.c14_psnsha_patch = fill(_nan, np)
 
-    ps.psnsun_z_patch = fill(NaN, np, nlevcan)
-    ps.psnsha_z_patch = fill(NaN, np, nlevcan)
-    ps.psnsun_wc_patch = fill(NaN, np)
-    ps.psnsha_wc_patch = fill(NaN, np)
-    ps.psnsun_wj_patch = fill(NaN, np)
-    ps.psnsha_wj_patch = fill(NaN, np)
-    ps.psnsun_wp_patch = fill(NaN, np)
-    ps.psnsha_wp_patch = fill(NaN, np)
+    ps.psnsun_z_patch = fill(_nan, np, nlevcan)
+    ps.psnsha_z_patch = fill(_nan, np, nlevcan)
+    ps.psnsun_wc_patch = fill(_nan, np)
+    ps.psnsha_wc_patch = fill(_nan, np)
+    ps.psnsun_wj_patch = fill(_nan, np)
+    ps.psnsha_wj_patch = fill(_nan, np)
+    ps.psnsun_wp_patch = fill(_nan, np)
+    ps.psnsha_wp_patch = fill(_nan, np)
 
-    ps.fpsn_patch = fill(NaN, np)
-    ps.fpsn_wc_patch = fill(NaN, np)
-    ps.fpsn_wj_patch = fill(NaN, np)
-    ps.fpsn_wp_patch = fill(NaN, np)
+    ps.fpsn_patch = fill(_nan, np)
+    ps.fpsn_wc_patch = fill(_nan, np)
+    ps.fpsn_wj_patch = fill(_nan, np)
+    ps.fpsn_wp_patch = fill(_nan, np)
 
-    ps.lnca_patch = fill(NaN, np)
+    ps.lnca_patch = fill(_nan, np)
 
-    ps.lmrsun_z_patch = fill(NaN, np, nlevcan)
-    ps.lmrsha_z_patch = fill(NaN, np, nlevcan)
-    ps.lmrsun_patch = fill(NaN, np)
-    ps.lmrsha_patch = fill(NaN, np)
+    ps.lmrsun_z_patch = fill(_nan, np, nlevcan)
+    ps.lmrsha_z_patch = fill(_nan, np, nlevcan)
+    ps.lmrsun_patch = fill(_nan, np)
+    ps.lmrsha_patch = fill(_nan, np)
 
-    ps.alphapsnsun_patch = fill(NaN, np)
-    ps.alphapsnsha_patch = fill(NaN, np)
-    ps.rc13_canair_patch = fill(NaN, np)
-    ps.rc13_psnsun_patch = fill(NaN, np)
-    ps.rc13_psnsha_patch = fill(NaN, np)
+    ps.alphapsnsun_patch = fill(_nan, np)
+    ps.alphapsnsha_patch = fill(_nan, np)
+    ps.rc13_canair_patch = fill(_nan, np)
+    ps.rc13_psnsun_patch = fill(_nan, np)
+    ps.rc13_psnsha_patch = fill(_nan, np)
 
-    ps.cisun_z_patch = fill(NaN, np, nlevcan)
-    ps.cisha_z_patch = fill(NaN, np, nlevcan)
+    ps.cisun_z_patch = fill(_nan, np, nlevcan)
+    ps.cisha_z_patch = fill(_nan, np, nlevcan)
 
-    ps.rssun_z_patch = fill(2.0e4, np, nlevcan)   # large default (closed stomata)
-    ps.rssha_z_patch = fill(2.0e4, np, nlevcan)
-    ps.rssun_patch = fill(2.0e4, np)              # large default (closed stomata)
-    ps.rssha_patch = fill(2.0e4, np)
+    ps.rssun_z_patch = fill(FT(2.0e4), np, nlevcan)   # large default (closed stomata)
+    ps.rssha_z_patch = fill(FT(2.0e4), np, nlevcan)
+    ps.rssun_patch = fill(FT(2.0e4), np)              # large default (closed stomata)
+    ps.rssha_patch = fill(FT(2.0e4), np)
 
-    ps.luvcmax25top_patch = fill(NaN, np)
-    ps.lujmax25top_patch = fill(NaN, np)
-    ps.lutpu25top_patch = fill(NaN, np)
+    ps.luvcmax25top_patch = fill(_nan, np)
+    ps.lujmax25top_patch = fill(_nan, np)
+    ps.lutpu25top_patch = fill(_nan, np)
 
     if use_luna
-        ps.vcmx25_z_patch = fill(30.0, np, nlevcan)
-        ps.jmx25_z_patch = fill(60.0, np, nlevcan)
-        ps.vcmx25_z_last_valid_patch = fill(30.0, np, nlevcan)
-        ps.jmx25_z_last_valid_patch = fill(60.0, np, nlevcan)
-        ps.pnlc_z_patch = fill(0.01, np, nlevcan)
-        ps.fpsn24_patch = fill(NaN, np)
-        ps.enzs_z_patch = fill(1.0, np, nlevcan)
+        ps.vcmx25_z_patch = fill(FT(30.0), np, nlevcan)
+        ps.jmx25_z_patch = fill(FT(60.0), np, nlevcan)
+        ps.vcmx25_z_last_valid_patch = fill(FT(30.0), np, nlevcan)
+        ps.jmx25_z_last_valid_patch = fill(FT(60.0), np, nlevcan)
+        ps.pnlc_z_patch = fill(FT(0.01), np, nlevcan)
+        ps.fpsn24_patch = fill(_nan, np)
+        ps.enzs_z_patch = fill(one(FT), np, nlevcan)
     end
 
     return nothing
@@ -456,7 +458,7 @@ end
 
 Photosynthesis temperature response function.
 """
-@inline function ft_photo(tl::Float64, ha::Float64)
+@inline function ft_photo(tl::Real, ha::Real)
     return exp(ha / (RGAS * (TFRZ + 25.0)) * (1.0 - (TFRZ + 25.0) / tl))
 end
 
@@ -465,7 +467,7 @@ end
 
 Photosynthesis temperature inhibition function.
 """
-@inline function fth_photo(tl::Float64, hd::Float64, se::Float64, scaleFactor::Float64)
+@inline function fth_photo(tl::Real, hd::Real, se::Real, scaleFactor::Real)
     return scaleFactor / (1.0 + exp((-hd + se * tl) / (RGAS * tl)))
 end
 
@@ -474,7 +476,7 @@ end
 
 Scaling factor for photosynthesis temperature inhibition at 25°C.
 """
-@inline function fth25_photo(hd::Float64, se::Float64)
+@inline function fth25_photo(hd::Real, se::Real)
     return 1.0 + exp((-hd + se * (TFRZ + 25.0)) / (RGAS * (TFRZ + 25.0)))
 end
 
@@ -484,7 +486,7 @@ end
 Solve the quadratic equation `a*x^2 + b*x + c = 0` for real roots.
 Returns the two roots `(r1, r2)` where `r1 >= r2`.
 """
-function quadratic_solve(a::Float64, b::Float64, c::Float64)
+function quadratic_solve(a::Real, b::Real, c::Real)
     if a == 0.0
         if b == 0.0
             return (0.0, 0.0)
@@ -517,7 +519,7 @@ end
 Return value of vulnerability curve at water potential `x`.
 `ivt` is 1-based PFT index, `level` is segment index (SUN, SHA, XYL, ROOT_SEG).
 """
-function plc(x::Float64, ivt::Int, level::Int, plc_method::Int, params::PhotoParamsData=params_inst)
+function plc(x::Real, ivt::Int, level::Int, plc_method::Int, params::PhotoParamsData=params_inst)
     if plc_method == VEGETATION_WEIBULL
         val = 2.0^(-(x / params.psi50[ivt, level])^params.ck[ivt, level])
         if val < 0.005
@@ -534,7 +536,7 @@ end
 
 Return 1st derivative of vulnerability curve at water potential `x`.
 """
-function d1plc(x::Float64, ivt::Int, level::Int, plc_method::Int, params::PhotoParamsData=params_inst)
+function d1plc(x::Real, ivt::Int, level::Int, plc_method::Int, params::PhotoParamsData=params_inst)
     if plc_method == VEGETATION_WEIBULL
         ck_val = params.ck[ivt, level]
         psi50_val = params.psi50[ivt, level]
@@ -557,14 +559,14 @@ end
 Evaluate f(ci) = ci - (ca - (1.37rb+1.65rs))*patm*an.
 Returns `(fval, gs_mol)`.
 """
-function ci_func!(ci::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
-                  gb_mol::Float64, je::Float64, cair::Float64, oair::Float64,
-                  lmr_z::Float64, par_z::Float64, rh_can::Float64,
+function ci_func!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
+                  gb_mol::Real, je::Real, cair::Real, oair::Real,
+                  lmr_z::Real, par_z::Real, rh_can::Real,
                   ps::PhotosynthesisData;
-                  c3psn_val::Float64=1.0,
-                  medlynslope_val::Float64=6.0,
-                  medlynintercept_val::Float64=100.0,
-                  mbbopt_val::Float64=9.0)
+                  c3psn_val::Real=1.0,
+                  medlynslope_val::Real=6.0,
+                  medlynintercept_val::Real=100.0,
+                  mbbopt_val::Real=9.0)
     c3flag = ps.c3flag_patch[p]
     ac = ps.ac_patch
     aj = ps.aj_patch
@@ -588,17 +590,17 @@ function ci_func!(ci::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
     if c3flag
         # Guard against ko_p=0 at very cold temperatures (Arrhenius → 0)
         if ko_p > 0.0
-            ac[p, iv] = vcmax_z[p, iv] * max(ci - cp_p, 0.0) / (ci + kc_p * (1.0 + oair / ko_p))
+            ac[p, iv] = vcmax_z[p, iv] * smooth_max(ci - cp_p, zero(ci)) / (ci + kc_p * (1.0 + oair / ko_p))
         else
             ac[p, iv] = 0.0
         end
         denom_j = 4.0 * ci + 8.0 * cp_p
-        aj[p, iv] = denom_j > 0.0 ? je * max(ci - cp_p, 0.0) / denom_j : 0.0
+        aj[p, iv] = denom_j > 0.0 ? je * smooth_max(ci - cp_p, zero(ci)) / denom_j : 0.0
         ap[p, iv] = 3.0 * tpu_z[p, iv]
     else
         ac[p, iv] = vcmax_z[p, iv]
         aj[p, iv] = qe_p * par_z * 4.6
-        ap[p, iv] = kp_z[p, iv] * max(ci, 0.0) / forc_pbot_c
+        ap[p, iv] = kp_z[p, iv] * smooth_max(ci, zero(ci)) / forc_pbot_c
     end
 
     # Gross photosynthesis: co-limit ac and aj, then co-limit ap
@@ -606,13 +608,13 @@ function ci_func!(ci::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
     bquad = -(ac[p, iv] + aj[p, iv])
     cquad = ac[p, iv] * aj[p, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ai = min(r1, r2)
+    ai = smooth_min(r1, r2)
 
     aquad = params_inst.theta_ip
     bquad = -(ai + ap[p, iv])
     cquad = ai * ap[p, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ag[p, iv] = max(0.0, min(r1, r2))
+    ag[p, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
 
     an[p, iv] = ag[p, iv] - lmr_z
     if an[p, iv] < 0.0
@@ -620,7 +622,7 @@ function ci_func!(ci::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
     end
 
     cs = cair - 1.4 / gb_mol * an[p, iv] * forc_pbot_c
-    cs = max(cs, MAX_CS)
+    cs = smooth_max(cs, MAX_CS)
 
     if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
         term = 1.6 * an[p, iv] / (cs / forc_pbot_c * 1.0e06)
@@ -631,13 +633,13 @@ function ci_func!(ci::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
                 (2.0 * medlynintercept_val * 1.0e-06 + term *
                  (1.0 - medlynslope_val^2 / rh_can)) * term
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        gs_mol = max(r1, r2) * 1.0e06
+        gs_mol = smooth_max(r1, r2) * 1.0e06
     elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
         aquad = cs
         bquad = cs * (gb_mol - bbb_p) - mbb_p * an[p, iv] * forc_pbot_c
         cquad = -gb_mol * (cs * bbb_p + mbb_p * an[p, iv] * forc_pbot_c * rh_can)
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        gs_mol = max(r1, r2)
+        gs_mol = smooth_max(r1, r2)
     end
 
     fval = ci - cair + an[p, iv] * forc_pbot_c * (1.4 * gs_mol + 1.6 * gb_mol) / (gb_mol * gs_mol)
@@ -655,9 +657,9 @@ end
 
 Hybrid solver for ci. Returns `(ci_solution, gs_mol, niter)`.
 """
-function hybrid_solver!(x0::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
-                        gb_mol::Float64, je::Float64, cair::Float64, oair::Float64,
-                        lmr_z::Float64, par_z::Float64, rh_can::Float64,
+function hybrid_solver!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
+                        gb_mol::Real, je::Real, cair::Real, oair::Real,
+                        lmr_z::Real, par_z::Real, rh_can::Real,
                         ps::PhotosynthesisData; kwargs...)
     eps_val = 1.0e-2
     eps1 = 1.0e-4
@@ -747,10 +749,10 @@ end
 Brent's method to find the root of ci_func between x1 and x2.
 Returns the root `x`.
 """
-function brent_solver!(x1::Float64, x2::Float64, f1::Float64, f2::Float64,
-                       tol::Float64, p::Int, iv::Int, forc_pbot_c::Float64,
-                       gb_mol::Float64, je::Float64, cair::Float64, oair::Float64,
-                       lmr_z::Float64, par_z::Float64, rh_can::Float64,
+function brent_solver!(x1::Real, x2::Real, f1::Real, f2::Real,
+                       tol::Real, p::Int, iv::Int, forc_pbot_c::Real,
+                       gb_mol::Real, je::Real, cair::Real, oair::Real,
+                       lmr_z::Real, par_z::Real, rh_can::Real,
                        ps::PhotosynthesisData; kwargs...)
     itmax = 20
     eps_val = 1.0e-2
@@ -847,34 +849,34 @@ additional data types (atm2lnd, temperature, surfalb, solarabs, canopystate,
 ozone) would be passed. Here we pass the needed arrays directly.
 """
 function photosynthesis!(ps::PhotosynthesisData,
-                         esat_tv::Vector{Float64},
-                         eair::Vector{Float64},
-                         oair::Vector{Float64},
-                         cair::Vector{Float64},
-                         rb::Vector{Float64},
-                         btran::Vector{Float64},
-                         dayl_factor::Vector{Float64},
-                         leafn::Vector{Float64},
-                         forc_pbot::Vector{Float64},
-                         t_veg::Vector{Float64},
-                         t10::Vector{Float64},
-                         tgcm::Vector{Float64},
+                         esat_tv::Vector{<:Real},
+                         eair::Vector{<:Real},
+                         oair::Vector{<:Real},
+                         cair::Vector{<:Real},
+                         rb::Vector{<:Real},
+                         btran::Vector{<:Real},
+                         dayl_factor::Vector{<:Real},
+                         leafn::Vector{<:Real},
+                         forc_pbot::Vector{<:Real},
+                         t_veg::Vector{<:Real},
+                         t10::Vector{<:Real},
+                         tgcm::Vector{<:Real},
                          nrad::Vector{Int},
-                         tlai_z::Matrix{Float64},
-                         tlai::Vector{Float64},
-                         par_z_in::Matrix{Float64},
-                         lai_z_in::Matrix{Float64},
-                         vcmaxcint::Vector{Float64},
-                         o3coefv::Vector{Float64},
-                         o3coefg::Vector{Float64},
-                         c3psn_pft::Vector{Float64},
-                         leafcn_pft::Vector{Float64},
-                         flnr_pft::Vector{Float64},
-                         fnitr_pft::Vector{Float64},
-                         slatop_pft::Vector{Float64},
-                         mbbopt_pft::Vector{Float64},
-                         medlynintercept_pft::Vector{Float64},
-                         medlynslope_pft::Vector{Float64},
+                         tlai_z::Matrix{<:Real},
+                         tlai::Vector{<:Real},
+                         par_z_in::Matrix{<:Real},
+                         lai_z_in::Matrix{<:Real},
+                         vcmaxcint::Vector{<:Real},
+                         o3coefv::Vector{<:Real},
+                         o3coefg::Vector{<:Real},
+                         c3psn_pft::Vector{<:Real},
+                         leafcn_pft::Vector{<:Real},
+                         flnr_pft::Vector{<:Real},
+                         fnitr_pft::Vector{<:Real},
+                         slatop_pft::Vector{<:Real},
+                         mbbopt_pft::Vector{<:Real},
+                         medlynintercept_pft::Vector{<:Real},
+                         medlynslope_pft::Vector{<:Real},
                          ivt::Vector{Int},
                          col_of_patch::Vector{Int},
                          mask_patch::BitVector,
@@ -884,8 +886,10 @@ function photosynthesis!(ps::PhotosynthesisData,
                          use_cn::Bool=false,
                          use_luna::Bool=false,
                          use_c13::Bool=false,
-                         leaf_mr_vcm::Float64=0.015,
-                         crop_pft::Vector{Float64}=Float64[])
+                         leaf_mr_vcm::Real=0.015,
+                         crop_pft::Vector{<:Real}=Float64[],
+                         # Calibration overrides (NaN = use defaults)
+                         overrides::CalibrationOverrides=CalibrationOverrides())
     # Aliases for output arrays based on phase
     if phase == "sun"
         ci_z = ps.cisun_z_patch
@@ -938,12 +942,13 @@ function photosynthesis!(ps::PhotosynthesisData,
     lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
 
     np = length(bounds_patch)
-    jmax_z_local = zeros(np, nlevcan)
-    bbbopt = zeros(np)
-    kn = zeros(np)
-    psn_wc_z = zeros(np, nlevcan)
-    psn_wj_z = zeros(np, nlevcan)
-    psn_wp_z = zeros(np, nlevcan)
+    FT = eltype(t_veg)
+    jmax_z_local = zeros(FT, np, nlevcan)
+    bbbopt = zeros(FT, np)
+    kn = zeros(FT, np)
+    psn_wc_z = zeros(FT, np, nlevcan)
+    psn_wj_z = zeros(FT, np, nlevcan)
+    psn_wp_z = zeros(FT, np, nlevcan)
 
     rsmax0 = 2.0e4
 
@@ -974,7 +979,7 @@ function photosynthesis!(ps::PhotosynthesisData,
         end
 
         if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-            bbb[p] = max(bbbopt[p] * btran[p], 1.0)
+            bbb[p] = smooth_max(bbbopt[p] * btran[p], 1.0)
             mbb[p] = mbbopt_pft[ivt_p]
         end
 
@@ -1001,8 +1006,14 @@ function photosynthesis!(ps::PhotosynthesisData,
             vcmax25top = vcmax25top * fnitr_pft[ivt_p]
         end
 
-        jmax25top = ((2.59 - 0.035 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * vcmax25top) *
-                    params_inst.jmax25top_sf
+        # Apply calibration overrides if set
+        if !isnan(overrides.vcmax25_scale)
+            vcmax25top = vcmax25top * overrides.vcmax25_scale
+        end
+
+        jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
+        jmax25top = ((2.59 - 0.035 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * vcmax25top) *
+                    jmax25top_sf_val
         tpu25top = params_inst.tpu25ratio * vcmax25top
         kp25top = params_inst.kp25ratio * vcmax25top
 
@@ -1065,9 +1076,9 @@ function photosynthesis!(ps::PhotosynthesisData,
                 kp25 = kp25top * nscaler
 
                 # Temperature adjustment
-                vcmaxse = (668.39 - 1.07 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * params_inst.vcmaxse_sf
-                jmaxse = (659.70 - 0.75 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * params_inst.jmaxse_sf
-                tpuse = (668.39 - 1.07 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * params_inst.tpuse_sf
+                vcmaxse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.vcmaxse_sf
+                jmaxse = (659.70 - 0.75 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.jmaxse_sf
+                tpuse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.tpuse_sf
                 vcmaxc = fth25_photo(params_inst.vcmaxhd, vcmaxse)
                 jmaxc = fth25_photo(params_inst.jmaxhd, jmaxse)
                 tpuc = fth25_photo(params_inst.tpuhd, tpuse)
@@ -1105,6 +1116,9 @@ function photosynthesis!(ps::PhotosynthesisData,
         c = col_of_patch[p]
         ivt_p = ivt[p]
 
+        # Medlyn slope: use override if set, else PFT default
+        medlynslope_p = isnan(overrides.medlyn_slope) ? medlynslope_pft[ivt_p] : overrides.medlyn_slope
+
         cf = forc_pbot[p] / (RGAS * tgcm[p]) * 1.0e06
         gb = 1.0 / rb[p]
         gb_mol[p] = gb * cf
@@ -1121,19 +1135,19 @@ function photosynthesis!(ps::PhotosynthesisData,
                 psn_wj_z[p, iv] = 0.0
                 psn_wp_z[p, iv] = 0.0
                 if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                    rs_z[p, iv] = min(rsmax0, 1.0 / bbb[p] * cf)
+                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / bbb[p] * cf)
                 elseif stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
-                    rs_z[p, iv] = min(rsmax0, 1.0 / medlynintercept_pft[ivt_p] * cf)
+                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / medlynintercept_pft[ivt_p] * cf)
                 end
                 ci_z[p, iv] = 0.0
                 rh_leaf[p] = 0.0
                 gs_mol[p, iv] = stomatalcond_mtd == STOMATALCOND_MTD_BB1987 ? bbb[p] : medlynintercept_pft[ivt_p]
             else  # day time
-                ceair = min(eair[p], esat_tv[p])
+                ceair = smooth_min(eair[p], esat_tv[p])
                 if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
                     rh_can = ceair / esat_tv[p]
                 else
-                    rh_can = max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX) * MEDLYN_RH_CAN_FACT
+                    rh_can = smooth_max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX) * MEDLYN_RH_CAN_FACT
                     vpd_can[p] = rh_can
                 end
 
@@ -1143,7 +1157,7 @@ function photosynthesis!(ps::PhotosynthesisData,
                 bquad = -(qabs + jmax_z_local[p, iv])
                 cquad = qabs * jmax_z_local[p, iv]
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je = min(r1, r2)
+                je = smooth_min(r1, r2)
 
                 # Initial guess for ci
                 if c3flag[p]
@@ -1159,7 +1173,7 @@ function photosynthesis!(ps::PhotosynthesisData,
                 ci_sol, gs_mol_val, _ = hybrid_solver!(ci_z[p, iv], p, iv,
                     forc_pbot[p], gb_mol[p], je, cair[p], oair[p],
                     lmr_z[p, iv], par_z_in[p, iv], rh_can, ps;
-                    medlynslope_val=medlynslope_pft[ivt_p],
+                    medlynslope_val=medlynslope_p,
                     medlynintercept_val=medlynintercept_pft[ivt_p],
                     mbbopt_val=mbbopt_pft[ivt_p])
 
@@ -1184,14 +1198,14 @@ function photosynthesis!(ps::PhotosynthesisData,
 
                 # Final ci
                 cs = cair[p] - 1.4 / gb_mol[p] * an[p, iv] * forc_pbot[p]
-                cs = max(cs, MAX_CS)
+                cs = smooth_max(cs, MAX_CS)
                 ci_z[p, iv] = cair[p] - an[p, iv] * forc_pbot[p] *
                     (1.4 * gs_mol[p, iv] + 1.6 * gb_mol[p]) / (gb_mol[p] * gs_mol[p, iv])
-                ci_z[p, iv] = max(ci_z[p, iv], 1.0e-06)
+                ci_z[p, iv] = smooth_max(ci_z[p, iv], 1.0e-06)
 
                 # Convert to resistance
                 gs_val = gs_mol[p, iv] / cf
-                rs_z[p, iv] = min(1.0 / gs_val, rsmax0)
+                rs_z[p, iv] = smooth_min(1.0 / gs_val, rsmax0)
                 rs_z[p, iv] = rs_z[p, iv] / o3coefg[p]
 
                 # Photosynthesis
@@ -1274,8 +1288,8 @@ Determine total photosynthesis by combining sunlit and shaded fluxes.
 Ported from `subroutine PhotosynthesisTotal`.
 """
 function photosynthesis_total!(ps::PhotosynthesisData,
-                               laisun::Vector{Float64},
-                               laisha::Vector{Float64},
+                               laisun::Vector{<:Real},
+                               laisha::Vector{<:Real},
                                mask_patch::BitVector,
                                bounds_patch::UnitRange{Int};
                                use_fates::Bool=false,
@@ -1307,11 +1321,11 @@ C13 fractionation during photosynthesis.
 Ported from `subroutine Fractionation`.
 """
 function fractionation!(ps::PhotosynthesisData,
-                        forc_pbot::Vector{Float64},
-                        forc_pco2::Vector{Float64},
-                        par_z_in::Matrix{Float64},
+                        forc_pbot::Vector{<:Real},
+                        forc_pco2::Vector{<:Real},
+                        par_z_in::Matrix{<:Real},
                         nrad::Vector{Int},
-                        c3psn_pft::Vector{Float64},
+                        c3psn_pft::Vector{<:Real},
                         ivt::Vector{Int},
                         col_of_patch::Vector{Int},
                         gridcell_of_patch::Vector{Int},
@@ -1456,14 +1470,14 @@ When `havegs=true`, compute qflx from gs. When `havegs=false`, compute gs from q
 Returns `(qflx_sun, qflx_sha, gs_mol_sun, gs_mol_sha)`.
 Ported from `subroutine getqflx`.
 """
-function getqflx!(p::Int, c::Int, gb_mol::Float64,
-                  gs_mol_sun::Float64, gs_mol_sha::Float64,
-                  qflx_sun::Float64, qflx_sha::Float64,
-                  qsatl::Float64, qaf::Float64, havegs::Bool,
-                  laisun_p::Float64, laisha_p::Float64,
-                  elai_p::Float64, esai_p::Float64,
-                  fdry_p::Float64, forc_rho_c::Float64,
-                  forc_pbot_c::Float64, tgcm_p::Float64)
+function getqflx!(p::Int, c::Int, gb_mol::Real,
+                  gs_mol_sun::Real, gs_mol_sha::Real,
+                  qflx_sun::Real, qflx_sha::Real,
+                  qsatl::Real, qaf::Real, havegs::Bool,
+                  laisun_p::Real, laisha_p::Real,
+                  elai_p::Real, esai_p::Real,
+                  fdry_p::Real, forc_rho_c::Real,
+                  forc_pbot_c::Real, tgcm_p::Real)
 
     cf = forc_pbot_c / (RGAS * tgcm_p) * 1.0e6
     wtl = (elai_p + esai_p) * gb_mol
@@ -1515,13 +1529,13 @@ Returns `f`, the flux divergence across each vegetation segment
 calculated for vegwp as passed in via `x`.
 Ported from `subroutine spacF`.
 """
-function spacF!(p::Int, c::Int, x::Vector{Float64},
-                qflx_sun::Float64, qflx_sha::Float64,
+function spacF!(p::Int, c::Int, x::Vector{<:Real},
+                qflx_sun::Real, qflx_sha::Real,
                 k_soil_root_p::AbstractVector{Float64},
                 smp_c::AbstractVector{Float64},
                 z_c::AbstractVector{Float64},
-                laisun_p::Float64, laisha_p::Float64,
-                htop_p::Float64, tsai_p::Float64,
+                laisun_p::Real, laisha_p::Real,
+                htop_p::Real, tsai_p::Real,
                 ivt_p::Int, nlevsoi::Int)
     tol_lai = 0.001
 
@@ -1533,7 +1547,8 @@ function spacF!(p::Int, c::Int, x::Vector{Float64},
     fx    = plc(x[XYL], ivt_p, XYL, VEG)
     fr    = plc(x[ROOT_SEG], ivt_p, ROOT_SEG, VEG)
 
-    f = zeros(NVEGWCS)
+    FT = eltype(x)
+    f = zeros(FT, NVEGWCS)
     f[SUN] = qflx_sun * fsto1 - laisun_p * params_inst.kmax[ivt_p, SUN] * fx * (x[XYL] - x[SUN])
     f[SHA] = qflx_sha * fsto2 - laisha_p * params_inst.kmax[ivt_p, SHA] * fx * (x[XYL] - x[SHA])
     f[XYL] = laisun_p * params_inst.kmax[ivt_p, SUN] * fx * (x[XYL] - x[SUN]) +
@@ -1564,16 +1579,17 @@ Returns `(invA, flag)` where `invA` is the inverse matrix relating
 delta(vegwp) to f: d(vegwp)=invA*f. `flag` is true if matrix is singular.
 Ported from `subroutine spacA`.
 """
-function spacA!(p::Int, c::Int, x::Vector{Float64},
-                qflx_sun::Float64, qflx_sha::Float64,
+function spacA!(p::Int, c::Int, x::Vector{<:Real},
+                qflx_sun::Real, qflx_sha::Real,
                 k_soil_root_p::AbstractVector{Float64},
-                laisun_p::Float64, laisha_p::Float64,
-                htop_p::Float64, tsai_p::Float64,
+                laisun_p::Real, laisha_p::Real,
+                htop_p::Real, tsai_p::Real,
                 ivt_p::Int, nlevsoi::Int)
     tol_lai = 0.001
 
-    A = zeros(NVEGWCS, NVEGWCS)
-    invA = zeros(NVEGWCS, NVEGWCS)
+    FT = eltype(x)
+    A = zeros(FT, NVEGWCS, NVEGWCS)
+    invA = zeros(FT, NVEGWCS, NVEGWCS)
 
     grav1 = htop_p * 1000.0
 
@@ -1675,19 +1691,20 @@ Calculates transpiration and returns corresponding vegwp in x and soilflux.
 Returns `(x, soilflux)`.
 Ported from `subroutine getvegwp`.
 """
-function getvegwp!(p::Int, c::Int, gb_mol::Float64,
-                   gs_mol_sun::Float64, gs_mol_sha::Float64,
-                   qsatl::Float64, qaf::Float64,
+function getvegwp!(p::Int, c::Int, gb_mol::Real,
+                   gs_mol_sun::Real, gs_mol_sha::Real,
+                   qsatl::Real, qaf::Real,
                    k_soil_root_p::AbstractVector{Float64},
                    smp_c::AbstractVector{Float64},
                    z_c::AbstractVector{Float64},
-                   laisun_p::Float64, laisha_p::Float64,
-                   htop_p::Float64, tsai_p::Float64,
+                   laisun_p::Real, laisha_p::Real,
+                   htop_p::Real, tsai_p::Real,
                    ivt_p::Int, nlevsoi::Int,
-                   elai_p::Float64, esai_p::Float64,
-                   fdry_p::Float64, forc_rho_c::Float64,
-                   forc_pbot_c::Float64, tgcm_p::Float64)
-    x = zeros(NVEGWCS)
+                   elai_p::Real, esai_p::Real,
+                   fdry_p::Real, forc_rho_c::Real,
+                   forc_pbot_c::Real, tgcm_p::Real)
+    FT = typeof(gb_mol)
+    x = zeros(FT, NVEGWCS)
 
     grav1 = 1000.0 * htop_p
     grav2 = 1000.0 .* z_c[1:nlevsoi]
@@ -1751,18 +1768,18 @@ Compute transpiration stress using a plant hydraulics approach.
 Returns `(x, bsun, bsha)` where x is updated vegwp.
 Ported from `subroutine calcstress`.
 """
-function calcstress!(p::Int, c::Int, x::Vector{Float64},
-                     gb_mol::Float64, gs_mol_sun_in::Float64, gs_mol_sha_in::Float64,
-                     qsatl::Float64, qaf::Float64,
+function calcstress!(p::Int, c::Int, x::Vector{<:Real},
+                     gb_mol::Real, gs_mol_sun_in::Real, gs_mol_sha_in::Real,
+                     qsatl::Real, qaf::Real,
                      k_soil_root_p::AbstractVector{Float64},
                      smp_c::AbstractVector{Float64},
                      z_c::AbstractVector{Float64},
-                     laisun_p::Float64, laisha_p::Float64,
-                     htop_p::Float64, tsai_p::Float64,
+                     laisun_p::Real, laisha_p::Real,
+                     htop_p::Real, tsai_p::Real,
                      ivt_p::Int, nlevsoi::Int,
-                     elai_p::Float64, esai_p::Float64,
-                     fdry_p::Float64, forc_rho_c::Float64,
-                     forc_pbot_c::Float64, tgcm_p::Float64)
+                     elai_p::Real, esai_p::Real,
+                     fdry_p::Real, forc_rho_c::Real,
+                     forc_pbot_c::Real, tgcm_p::Real)
     itmax = 50
     tolf = 1.0e-6
     toldx = 1.0e-9
@@ -1786,7 +1803,8 @@ function calcstress!(p::Int, c::Int, x::Vector{Float64},
 
     flag = false
 
-    dx = zeros(NVEGWCS)  # Pre-allocate Newton step vector
+    FT = eltype(x)
+    dx = zeros(FT, NVEGWCS)  # Pre-allocate Newton step vector
 
     if (laisun_p > tol_lai || laisha_p > tol_lai) && (qflx_sun > 0.0 || qflx_sha > 0.0)
         # Newton's method
@@ -1942,28 +1960,28 @@ Evaluate f(ci) = ci - (ca - (1.37rb+1.65rs))*patm*an for sunlit and shaded leave
 Returns `(fvalsun, fvalsha, gs_mol_sun, gs_mol_sha, bsun, bsha)`.
 Ported from `subroutine ci_func_PHS`.
 """
-function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
+function ci_func_PHS!(x::Vector{<:Real}, cisun::Real, cisha::Real,
                       p::Int, iv::Int, c::Int,
-                      bsun::Float64, bsha::Float64, bflag::Bool,
-                      gb_mol::Float64, gs0sun::Float64, gs0sha::Float64,
-                      gs_mol_sun::Float64, gs_mol_sha::Float64,
-                      jesun::Float64, jesha::Float64,
-                      cair::Float64, oair::Float64,
-                      lmr_z_sun::Float64, lmr_z_sha::Float64,
-                      par_z_sun::Float64, par_z_sha::Float64,
-                      rh_can::Float64, qsatl::Float64, qaf::Float64,
-                      ps::PhotosynthesisData, forc_pbot_c::Float64,
+                      bsun::Real, bsha::Real, bflag::Bool,
+                      gb_mol::Real, gs0sun::Real, gs0sha::Real,
+                      gs_mol_sun::Real, gs_mol_sha::Real,
+                      jesun::Real, jesha::Real,
+                      cair::Real, oair::Real,
+                      lmr_z_sun::Real, lmr_z_sha::Real,
+                      par_z_sun::Real, par_z_sha::Real,
+                      rh_can::Real, qsatl::Real, qaf::Real,
+                      ps::PhotosynthesisData, forc_pbot_c::Real,
                       k_soil_root_p::AbstractVector{Float64},
                       smp_c::AbstractVector{Float64},
                       z_c::AbstractVector{Float64},
-                      laisun_p::Float64, laisha_p::Float64,
-                      htop_p::Float64, tsai_p::Float64,
+                      laisun_p::Real, laisha_p::Real,
+                      htop_p::Real, tsai_p::Real,
                       ivt_p::Int, nlevsoi::Int,
-                      elai_p::Float64, esai_p::Float64,
-                      fdry_p::Float64, forc_rho_c::Float64,
-                      tgcm_p::Float64;
-                      medlynslope_val::Float64=6.0,
-                      medlynintercept_val::Float64=100.0)
+                      elai_p::Real, esai_p::Real,
+                      fdry_p::Real, forc_rho_c::Real,
+                      tgcm_p::Real;
+                      medlynslope_val::Real=6.0,
+                      medlynintercept_val::Real=100.0)
     c3flag = ps.c3flag_patch[p]
     ac = ps.ac_phs_patch
     aj = ps.aj_phs_patch
@@ -1994,11 +2012,11 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
 
     if c3flag
         # C3: Rubisco-limited
-        ac[p, SUN, iv] = bsun * vcmax_z[p, SUN, iv] * max(cisun - cp_p, 0.0) / (cisun + kc_p * (1.0 + oair / ko_p))
-        ac[p, SHA, iv] = bsha * vcmax_z[p, SHA, iv] * max(cisha - cp_p, 0.0) / (cisha + kc_p * (1.0 + oair / ko_p))
+        ac[p, SUN, iv] = bsun * vcmax_z[p, SUN, iv] * smooth_max(cisun - cp_p, zero(cisun)) / (cisun + kc_p * (1.0 + oair / ko_p))
+        ac[p, SHA, iv] = bsha * vcmax_z[p, SHA, iv] * smooth_max(cisha - cp_p, zero(cisha)) / (cisha + kc_p * (1.0 + oair / ko_p))
         # C3: RuBP-limited
-        aj[p, SUN, iv] = jesun * max(cisun - cp_p, 0.0) / (4.0 * cisun + 8.0 * cp_p)
-        aj[p, SHA, iv] = jesha * max(cisha - cp_p, 0.0) / (4.0 * cisha + 8.0 * cp_p)
+        aj[p, SUN, iv] = jesun * smooth_max(cisun - cp_p, zero(cisun)) / (4.0 * cisun + 8.0 * cp_p)
+        aj[p, SHA, iv] = jesha * smooth_max(cisha - cp_p, zero(cisha)) / (4.0 * cisha + 8.0 * cp_p)
         # C3: Product-limited
         ap[p, SUN, iv] = 3.0 * tpu_z[p, SUN, iv]
         ap[p, SHA, iv] = 3.0 * tpu_z[p, SHA, iv]
@@ -2010,8 +2028,8 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
         aj[p, SUN, iv] = qe_p * par_z_sun * 4.6
         aj[p, SHA, iv] = qe_p * par_z_sha * 4.6
         # C4: PEP carboxylase-limited
-        ap[p, SUN, iv] = kp_z[p, SUN, iv] * max(cisun, 0.0) / forc_pbot_c
-        ap[p, SHA, iv] = kp_z[p, SHA, iv] * max(cisha, 0.0) / forc_pbot_c
+        ap[p, SUN, iv] = kp_z[p, SUN, iv] * smooth_max(cisun, zero(cisun)) / forc_pbot_c
+        ap[p, SHA, iv] = kp_z[p, SHA, iv] * smooth_max(cisha, zero(cisha)) / forc_pbot_c
     end
 
     # Gross photosynthesis - Sunlit
@@ -2019,26 +2037,26 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
     bquad = -(ac[p, SUN, iv] + aj[p, SUN, iv])
     cquad = ac[p, SUN, iv] * aj[p, SUN, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ai = min(r1, r2)
+    ai = smooth_min(r1, r2)
 
     aquad = params_inst.theta_ip
     bquad = -(ai + ap[p, SUN, iv])
     cquad = ai * ap[p, SUN, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ag[p, SUN, iv] = max(0.0, min(r1, r2))
+    ag[p, SUN, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
 
     # Gross photosynthesis - Shaded
     aquad = params_inst.theta_cj[ivt_p]
     bquad = -(ac[p, SHA, iv] + aj[p, SHA, iv])
     cquad = ac[p, SHA, iv] * aj[p, SHA, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ai = min(r1, r2)
+    ai = smooth_min(r1, r2)
 
     aquad = params_inst.theta_ip
     bquad = -(ai + ap[p, SHA, iv])
     cquad = ai * ap[p, SHA, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ag[p, SHA, iv] = max(0.0, min(r1, r2))
+    ag[p, SHA, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
 
     # Net photosynthesis
     an_sun[p, iv] = ag[p, SUN, iv] - bsun * lmr_z_sun
@@ -2050,7 +2068,7 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
         elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
             gs_mol_sun = bbb_p
         end
-        gs_mol_sun = max(bsun * gs_mol_sun, 1.0)
+        gs_mol_sun = smooth_max(bsun * gs_mol_sun, 1.0)
         fvalsun = 0.0
     end
     if an_sha[p, iv] < 0.0
@@ -2059,7 +2077,7 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
         elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
             gs_mol_sha = bbb_p
         end
-        gs_mol_sha = max(bsha * gs_mol_sha, 1.0)
+        gs_mol_sha = smooth_max(bsha * gs_mol_sha, 1.0)
         fvalsha = 0.0
     end
     if an_sun[p, iv] < 0.0 && an_sha[p, iv] < 0.0
@@ -2071,7 +2089,7 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
     cs_sun = 0.0
     if an_sun[p, iv] >= 0.0
         cs_sun = cair - 1.4 / gb_mol * an_sun[p, iv] * forc_pbot_c
-        cs_sun = max(cs_sun, MAX_CS)
+        cs_sun = smooth_max(cs_sun, MAX_CS)
     end
 
     if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
@@ -2084,13 +2102,13 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
                     (2.0 * medlynintercept_val * 1.0e-06 + term *
                      (1.0 - medlynslope_val^2 / rh_can)) * term
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sun = max(r1, r2) * 1.0e06
+            gs_mol_sun = smooth_max(r1, r2) * 1.0e06
         end
 
         # Shaded
         if an_sha[p, iv] >= 0.0
             cs_sha = cair - 1.4 / gb_mol * an_sha[p, iv] * forc_pbot_c
-            cs_sha = max(cs_sha, MAX_CS)
+            cs_sha = smooth_max(cs_sha, MAX_CS)
             term = 1.6 * an_sha[p, iv] / (cs_sha / forc_pbot_c * 1.0e06)
             aquad = 1.0
             bquad = -(2.0 * (medlynintercept_val * 1.0e-06 + term) +
@@ -2099,26 +2117,26 @@ function ci_func_PHS!(x::Vector{Float64}, cisun::Float64, cisha::Float64,
                     (2.0 * medlynintercept_val * 1.0e-06 + term *
                      (1.0 - medlynslope_val^2 / rh_can)) * term
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sha = max(r1, r2) * 1.0e06
+            gs_mol_sha = smooth_max(r1, r2) * 1.0e06
         end
     elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
         if an_sun[p, iv] >= 0.0
             aquad = cs_sun
-            bquad = cs_sun * (gb_mol - max(bsun * bbb_p, 1.0)) - mbb_p * an_sun[p, iv] * forc_pbot_c
-            cquad = -gb_mol * (cs_sun * max(bsun * bbb_p, 1.0) + mbb_p * an_sun[p, iv] * forc_pbot_c * rh_can)
+            bquad = cs_sun * (gb_mol - smooth_max(bsun * bbb_p, 1.0)) - mbb_p * an_sun[p, iv] * forc_pbot_c
+            cquad = -gb_mol * (cs_sun * smooth_max(bsun * bbb_p, 1.0) + mbb_p * an_sun[p, iv] * forc_pbot_c * rh_can)
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sun = max(r1, r2)
+            gs_mol_sun = smooth_max(r1, r2)
         end
 
         # Shaded
         if an_sha[p, iv] >= 0.0
             cs_sha = cair - 1.4 / gb_mol * an_sha[p, iv] * forc_pbot_c
-            cs_sha = max(cs_sha, MAX_CS)
+            cs_sha = smooth_max(cs_sha, MAX_CS)
             aquad = cs_sha
-            bquad = cs_sha * (gb_mol - max(bsha * bbb_p, 1.0)) - mbb_p * an_sha[p, iv] * forc_pbot_c
-            cquad = -gb_mol * (cs_sha * max(bsha * bbb_p, 1.0) + mbb_p * an_sha[p, iv] * forc_pbot_c * rh_can)
+            bquad = cs_sha * (gb_mol - smooth_max(bsha * bbb_p, 1.0)) - mbb_p * an_sha[p, iv] * forc_pbot_c
+            cquad = -gb_mol * (cs_sha * smooth_max(bsha * bbb_p, 1.0) + mbb_p * an_sha[p, iv] * forc_pbot_c * rh_can)
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sha = max(r1, r2)
+            gs_mol_sha = smooth_max(r1, r2)
         end
     end
 
@@ -2158,29 +2176,29 @@ Brent's method for simultaneous sun/shade ci root finding.
 Returns `(xsun, xsha, gs_mol_sun, gs_mol_sha, bsun, bsha)`.
 Ported from `subroutine brent_PHS`.
 """
-function brent_PHS!(x1sun::Float64, x2sun::Float64, f1sun::Float64, f2sun::Float64,
-                    x1sha::Float64, x2sha::Float64, f1sha::Float64, f2sha::Float64,
-                    tol::Float64, p::Int, iv::Int, c::Int,
-                    gb_mol::Float64, jesun::Float64, jesha::Float64,
-                    cair::Float64, oair::Float64,
-                    lmr_z_sun::Float64, lmr_z_sha::Float64,
-                    par_z_sun::Float64, par_z_sha::Float64,
-                    rh_can::Float64,
-                    gs_mol_sun::Float64, gs_mol_sha::Float64,
-                    bsun::Float64, bsha::Float64,
-                    qsatl::Float64, qaf::Float64,
-                    ps::PhotosynthesisData, forc_pbot_c::Float64,
+function brent_PHS!(x1sun::Real, x2sun::Real, f1sun::Real, f2sun::Real,
+                    x1sha::Real, x2sha::Real, f1sha::Real, f2sha::Real,
+                    tol::Real, p::Int, iv::Int, c::Int,
+                    gb_mol::Real, jesun::Real, jesha::Real,
+                    cair::Real, oair::Real,
+                    lmr_z_sun::Real, lmr_z_sha::Real,
+                    par_z_sun::Real, par_z_sha::Real,
+                    rh_can::Real,
+                    gs_mol_sun::Real, gs_mol_sha::Real,
+                    bsun::Real, bsha::Real,
+                    qsatl::Real, qaf::Real,
+                    ps::PhotosynthesisData, forc_pbot_c::Real,
                     k_soil_root_p::AbstractVector{Float64},
                     smp_c::AbstractVector{Float64},
                     z_c::AbstractVector{Float64},
-                    laisun_p::Float64, laisha_p::Float64,
-                    htop_p::Float64, tsai_p::Float64,
+                    laisun_p::Real, laisha_p::Real,
+                    htop_p::Real, tsai_p::Real,
                     ivt_p::Int, nlevsoi::Int,
-                    elai_p::Float64, esai_p::Float64,
-                    fdry_p::Float64, forc_rho_c::Float64,
-                    tgcm_p::Float64;
-                    medlynslope_val::Float64=6.0,
-                    medlynintercept_val::Float64=100.0)
+                    elai_p::Real, esai_p::Real,
+                    fdry_p::Real, forc_rho_c::Real,
+                    tgcm_p::Real;
+                    medlynslope_val::Real=6.0,
+                    medlynintercept_val::Real=100.0)
     nphs = 2
     itmax = 20
     eps_val = 1.0e-4
@@ -2196,13 +2214,14 @@ function brent_PHS!(x1sun::Float64, x2sun::Float64, f1sun::Float64, f2sun::Float
     d = b .- a
     e = copy(d)
 
-    x_dummy = zeros(NVEGWCS)
+    FT = typeof(x1sun)
+    x_dummy = zeros(FT, NVEGWCS)
 
     # Pre-allocate Brent iteration workspace (reused each iteration)
-    p_arr = zeros(nphs)
-    q_arr = zeros(nphs)
-    r_arr = zeros(nphs)
-    s_arr = zeros(nphs)
+    p_arr = zeros(FT, nphs)
+    q_arr = zeros(FT, nphs)
+    r_arr = zeros(FT, nphs)
+    s_arr = zeros(FT, nphs)
 
     iter = 0
     while iter < itmax
@@ -2316,27 +2335,27 @@ Hybrid solver for simultaneous sun/shade ci with plant hydraulic stress.
 Returns `(x0sun, x0sha, gs_mol_sun, gs_mol_sha, bsun, bsha, vegwp, iter1, iter2)`.
 Ported from `subroutine hybrid_PHS`.
 """
-function hybrid_PHS!(x0sun::Float64, x0sha::Float64,
+function hybrid_PHS!(x0sun::Real, x0sha::Real,
                      p::Int, iv::Int, c::Int,
-                     gb_mol::Float64,
-                     jesun::Float64, jesha::Float64,
-                     cair::Float64, oair::Float64,
-                     lmr_z_sun::Float64, lmr_z_sha::Float64,
-                     par_z_sun::Float64, par_z_sha::Float64,
-                     rh_can::Float64, qsatl::Float64, qaf::Float64,
-                     ps::PhotosynthesisData, forc_pbot_c::Float64,
-                     vegwp_p::Vector{Float64},
+                     gb_mol::Real,
+                     jesun::Real, jesha::Real,
+                     cair::Real, oair::Real,
+                     lmr_z_sun::Real, lmr_z_sha::Real,
+                     par_z_sun::Real, par_z_sha::Real,
+                     rh_can::Real, qsatl::Real, qaf::Real,
+                     ps::PhotosynthesisData, forc_pbot_c::Real,
+                     vegwp_p::Vector{<:Real},
                      k_soil_root_p::AbstractVector{Float64},
                      smp_c::AbstractVector{Float64},
                      z_c::AbstractVector{Float64},
-                     laisun_p::Float64, laisha_p::Float64,
-                     htop_p::Float64, tsai_p::Float64,
+                     laisun_p::Real, laisha_p::Real,
+                     htop_p::Real, tsai_p::Real,
                      ivt_p::Int, nlevsoi::Int,
-                     elai_p::Float64, esai_p::Float64,
-                     fdry_p::Float64, forc_rho_c::Float64,
-                     tgcm_p::Float64;
-                     medlynslope_val::Float64=6.0,
-                     medlynintercept_val::Float64=100.0)
+                     elai_p::Real, esai_p::Real,
+                     fdry_p::Real, forc_rho_c::Real,
+                     tgcm_p::Real;
+                     medlynslope_val::Real=6.0,
+                     medlynintercept_val::Real=100.0)
     toldb = 1.0e-2
     eps_val = 1.0e-2
     eps1 = 1.0e-4
@@ -2546,77 +2565,77 @@ simultaneously per Pierre Gentine/Daniel Kennedy PHS method.
 Ported from `subroutine PhotosynthesisHydraulicStress`.
 """
 function photosynthesis_hydrstress!(ps::PhotosynthesisData,
-                                    esat_tv::Vector{Float64},
-                                    eair::Vector{Float64},
-                                    oair::Vector{Float64},
-                                    cair::Vector{Float64},
-                                    rb::Vector{Float64},
-                                    btran::Vector{Float64},
-                                    dayl_factor::Vector{Float64},
-                                    leafn::Vector{Float64},
-                                    qsatl::Vector{Float64},
-                                    qaf::Vector{Float64},
-                                    forc_pbot::Vector{Float64},
-                                    forc_rho::Vector{Float64},
-                                    t_veg::Vector{Float64},
-                                    t10::Vector{Float64},
-                                    tgcm::Vector{Float64},
+                                    esat_tv::Vector{<:Real},
+                                    eair::Vector{<:Real},
+                                    oair::Vector{<:Real},
+                                    cair::Vector{<:Real},
+                                    rb::Vector{<:Real},
+                                    btran::Vector{<:Real},
+                                    dayl_factor::Vector{<:Real},
+                                    leafn::Vector{<:Real},
+                                    qsatl::Vector{<:Real},
+                                    qaf::Vector{<:Real},
+                                    forc_pbot::Vector{<:Real},
+                                    forc_rho::Vector{<:Real},
+                                    t_veg::Vector{<:Real},
+                                    t10::Vector{<:Real},
+                                    tgcm::Vector{<:Real},
                                     nrad::Vector{Int},
-                                    tlai_z::Matrix{Float64},
-                                    tlai::Vector{Float64},
-                                    tsai::Vector{Float64},
-                                    par_z_sun_in::Matrix{Float64},
-                                    par_z_sha_in::Matrix{Float64},
-                                    lai_z_sun_in::Matrix{Float64},
-                                    lai_z_sha_in::Matrix{Float64},
-                                    vcmaxcint_sun::Vector{Float64},
-                                    vcmaxcint_sha::Vector{Float64},
-                                    o3coefv_sun::Vector{Float64},
-                                    o3coefg_sun::Vector{Float64},
-                                    o3coefv_sha::Vector{Float64},
-                                    o3coefg_sha::Vector{Float64},
-                                    c3psn_pft::Vector{Float64},
-                                    leafcn_pft::Vector{Float64},
-                                    flnr_pft::Vector{Float64},
-                                    fnitr_pft::Vector{Float64},
-                                    slatop_pft::Vector{Float64},
-                                    mbbopt_pft::Vector{Float64},
-                                    medlynintercept_pft::Vector{Float64},
-                                    medlynslope_pft::Vector{Float64},
-                                    froot_leaf_pft::Vector{Float64},
-                                    root_radius_pft::Vector{Float64},
-                                    root_density_pft::Vector{Float64},
-                                    crop_pft::Vector{Float64},
+                                    tlai_z::Matrix{<:Real},
+                                    tlai::Vector{<:Real},
+                                    tsai::Vector{<:Real},
+                                    par_z_sun_in::Matrix{<:Real},
+                                    par_z_sha_in::Matrix{<:Real},
+                                    lai_z_sun_in::Matrix{<:Real},
+                                    lai_z_sha_in::Matrix{<:Real},
+                                    vcmaxcint_sun::Vector{<:Real},
+                                    vcmaxcint_sha::Vector{<:Real},
+                                    o3coefv_sun::Vector{<:Real},
+                                    o3coefg_sun::Vector{<:Real},
+                                    o3coefv_sha::Vector{<:Real},
+                                    o3coefg_sha::Vector{<:Real},
+                                    c3psn_pft::Vector{<:Real},
+                                    leafcn_pft::Vector{<:Real},
+                                    flnr_pft::Vector{<:Real},
+                                    fnitr_pft::Vector{<:Real},
+                                    slatop_pft::Vector{<:Real},
+                                    mbbopt_pft::Vector{<:Real},
+                                    medlynintercept_pft::Vector{<:Real},
+                                    medlynslope_pft::Vector{<:Real},
+                                    froot_leaf_pft::Vector{<:Real},
+                                    root_radius_pft::Vector{<:Real},
+                                    root_density_pft::Vector{<:Real},
+                                    crop_pft::Vector{<:Real},
                                     ivt::Vector{Int},
                                     col_of_patch::Vector{Int},
                                     mask_patch::BitVector,
                                     bounds_patch::UnitRange{Int},
-                                    froot_carbon::Vector{Float64},
-                                    croot_carbon::Vector{Float64},
-                                    k_soil_root::Matrix{Float64},
-                                    root_conductance_out::Matrix{Float64},
-                                    soil_conductance_out::Matrix{Float64},
-                                    rootfr::Matrix{Float64},
-                                    dz::Matrix{Float64},
-                                    z_col::Matrix{Float64},
-                                    hk_l::Matrix{Float64},
-                                    hksat::Matrix{Float64},
-                                    smp_l::Matrix{Float64},
-                                    vegwp::Matrix{Float64},
-                                    vegwp_ln::Matrix{Float64},
-                                    laisun::Vector{Float64},
-                                    laisha::Vector{Float64},
-                                    elai::Vector{Float64},
-                                    esai::Vector{Float64},
-                                    htop::Vector{Float64},
-                                    fdry::Vector{Float64},
-                                    qflx_tran_veg::Vector{Float64};
+                                    froot_carbon::Vector{<:Real},
+                                    croot_carbon::Vector{<:Real},
+                                    k_soil_root::Matrix{<:Real},
+                                    root_conductance_out::Matrix{<:Real},
+                                    soil_conductance_out::Matrix{<:Real},
+                                    rootfr::Matrix{<:Real},
+                                    dz::Matrix{<:Real},
+                                    z_col::Matrix{<:Real},
+                                    hk_l::Matrix{<:Real},
+                                    hksat::Matrix{<:Real},
+                                    smp_l::Matrix{<:Real},
+                                    vegwp::Matrix{<:Real},
+                                    vegwp_ln::Matrix{<:Real},
+                                    laisun::Vector{<:Real},
+                                    laisha::Vector{<:Real},
+                                    elai::Vector{<:Real},
+                                    esai::Vector{<:Real},
+                                    htop::Vector{<:Real},
+                                    fdry::Vector{<:Real},
+                                    qflx_tran_veg::Vector{<:Real};
                                     nlevcan::Int=NLEVCAN,
                                     nlevsoi::Int=varpar.nlevsoi,
                                     use_cn::Bool=false,
                                     use_luna::Bool=false,
                                     use_c13::Bool=false,
-                                    leaf_mr_vcm::Float64=0.015,
+                                    leaf_mr_vcm::Real=0.015,
                                     is_near_local_noon_fn::Function=(p) -> false)
     stomatalcond_mtd = ps.stomatalcond_mtd
     leafresp_method = ps.leafresp_method
@@ -2653,19 +2672,20 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
     lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
 
     np = length(bounds_patch)
-    jmax_z_local = zeros(np, 2, nlevcan)
-    bbbopt = zeros(np)
-    kn = zeros(np)
-    psn_wc_z_sun = zeros(np, nlevcan)
-    psn_wj_z_sun = zeros(np, nlevcan)
-    psn_wp_z_sun = zeros(np, nlevcan)
-    psn_wc_z_sha = zeros(np, nlevcan)
-    psn_wj_z_sha = zeros(np, nlevcan)
-    psn_wp_z_sha = zeros(np, nlevcan)
-    rh_leaf_sun = zeros(np)
-    rh_leaf_sha = zeros(np)
-    bsun_arr = ones(np)
-    bsha_arr = ones(np)
+    FT = eltype(t_veg)
+    jmax_z_local = zeros(FT, np, 2, nlevcan)
+    bbbopt = zeros(FT, np)
+    kn = zeros(FT, np)
+    psn_wc_z_sun = zeros(FT, np, nlevcan)
+    psn_wj_z_sun = zeros(FT, np, nlevcan)
+    psn_wp_z_sun = zeros(FT, np, nlevcan)
+    psn_wc_z_sha = zeros(FT, np, nlevcan)
+    psn_wj_z_sha = zeros(FT, np, nlevcan)
+    psn_wp_z_sha = zeros(FT, np, nlevcan)
+    rh_leaf_sun = zeros(FT, np)
+    rh_leaf_sha = zeros(FT, np)
+    bsun_arr = ones(FT, np)
+    bsha_arr = ones(FT, np)
 
     # Aliases for output
     ci_z_sun = ps.cisun_z_patch
@@ -2713,8 +2733,8 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
             fs_j = plc(smp_l[c, j], ivt_p, ROOT_SEG, VEG)
             root_cond = (fs_j * rai_j * params_inst.krmax[ivt_p]) / (croot_average_length + z_col[c, j])
 
-            soil_cond = max(soil_cond, 1.0e-16)
-            root_cond = max(root_cond, 1.0e-16)
+            soil_cond = smooth_max(soil_cond, 1.0e-16)
+            root_cond = smooth_max(root_cond, 1.0e-16)
 
             root_conductance_out[p, j] = root_cond
             soil_conductance_out[p, j] = soil_cond
@@ -2770,15 +2790,21 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
 
         # Nitrogen profile
         lnc[p] = 1.0 / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
-        lnc[p] = min(lnc[p], 10.0)
+        lnc[p] = smooth_min(lnc[p], 10.0)
 
         vcmax25top = lnc[p] * flnr_pft[ivt_p] * params_inst.fnr * params_inst.act25 * dayl_factor[p]
         if !use_cn
             vcmax25top = vcmax25top * fnitr_pft[ivt_p]
         end
 
-        jmax25top = ((2.59 - 0.035 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * vcmax25top) *
-                    params_inst.jmax25top_sf
+        # Apply calibration overrides if set
+        if !isnan(overrides.vcmax25_scale)
+            vcmax25top = vcmax25top * overrides.vcmax25_scale
+        end
+
+        jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
+        jmax25top = ((2.59 - 0.035 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * vcmax25top) *
+                    jmax25top_sf_val
         tpu25top = params_inst.tpu25ratio * vcmax25top
         kp25top = params_inst.kp25ratio * vcmax25top
 
@@ -2841,8 +2867,8 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
             end
 
             # Reduce lmr with low LAI
-            lmr_z_sun[p, iv] *= min(0.2 * exp(3.218 * tlai_z[p, iv]), 1.0)
-            lmr_z_sha[p, iv] *= min(0.2 * exp(3.218 * tlai_z[p, iv]), 1.0)
+            lmr_z_sun[p, iv] *= smooth_min(0.2 * exp(3.218 * tlai_z[p, iv]), 1.0)
+            lmr_z_sha[p, iv] *= smooth_min(0.2 * exp(3.218 * tlai_z[p, iv]), 1.0)
 
             if par_z_sun_in[p, iv] <= 0.0  # night time
                 vcmax_z[p, SUN, iv] = 0.0
@@ -2868,9 +2894,9 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                 kp25_sun = kp25top * nscaler_sun
                 kp25_sha = kp25top * nscaler_sha
 
-                vcmaxse = (668.39 - 1.07 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * params_inst.vcmaxse_sf
-                jmaxse = (659.70 - 0.75 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * params_inst.jmaxse_sf
-                tpuse = (668.39 - 1.07 * min(max((t10[p] - TFRZ), 11.0), 35.0)) * params_inst.tpuse_sf
+                vcmaxse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.vcmaxse_sf
+                jmaxse = (659.70 - 0.75 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.jmaxse_sf
+                tpuse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.tpuse_sf
                 vcmaxc = fth25_photo(params_inst.vcmaxhd, vcmaxse)
                 jmaxc = fth25_photo(params_inst.jmaxhd, jmaxse)
                 tpuc = fth25_photo(params_inst.tpuhd, tpuse)
@@ -2918,6 +2944,9 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
         c = col_of_patch[p]
         ivt_p = ivt[p]
 
+        # Medlyn slope: use override if set, else PFT default
+        medlynslope_p = isnan(overrides.medlyn_slope) ? medlynslope_pft[ivt_p] : overrides.medlyn_slope
+
         cf = forc_pbot[p] / (RGAS * tgcm[p]) * 1.0e06
         gb = 1.0 / rb[p]
         gb_mol_arr[p] = gb * cf
@@ -2957,7 +2986,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                 psn_wc_z_sun[p, iv] = 0.0
                 psn_wj_z_sun[p, iv] = 0.0
                 psn_wp_z_sun[p, iv] = 0.0
-                rs_z_sun[p, iv] = min(rsmax0, 1.0 / max(bsun_arr[p] * gsminsun, 1.0) * cf)
+                rs_z_sun[p, iv] = smooth_min(rsmax0, 1.0 / smooth_max(bsun_arr[p] * gsminsun, 1.0) * cf)
                 ci_z_sun[p, iv] = 0.0
                 rh_leaf_sun[p] = 0.0
 
@@ -2974,16 +3003,16 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                 psn_wc_z_sha[p, iv] = 0.0
                 psn_wj_z_sha[p, iv] = 0.0
                 psn_wp_z_sha[p, iv] = 0.0
-                rs_z_sha[p, iv] = min(rsmax0, 1.0 / max(bsha_arr[p] * gsminsha, 1.0) * cf)
+                rs_z_sha[p, iv] = smooth_min(rsmax0, 1.0 / smooth_max(bsha_arr[p] * gsminsha, 1.0) * cf)
                 ci_z_sha[p, iv] = 0.0
                 rh_leaf_sha[p] = 0.0
 
             else  # day time
-                ceair = min(eair[p], esat_tv[p])
+                ceair = smooth_min(eair[p], esat_tv[p])
                 if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
                     rh_can = ceair / esat_tv[p]
                 elseif stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
-                    rh_can = max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX) * MEDLYN_RH_CAN_FACT
+                    rh_can = smooth_max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX) * MEDLYN_RH_CAN_FACT
                     vpd_can[p] = rh_can
                 end
 
@@ -2993,7 +3022,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                 bquad = -(qabs + jmax_z_local[p, SUN, iv])
                 cquad = qabs * jmax_z_local[p, SUN, iv]
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je_sun = min(r1, r2)
+                je_sun = smooth_min(r1, r2)
 
                 # Electron transport - Shade
                 qabs = 0.5 * (1.0 - params_inst.fnps) * par_z_sha_in[p, iv] * 4.6
@@ -3001,7 +3030,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                 bquad = -(qabs + jmax_z_local[p, SHA, iv])
                 cquad = qabs * jmax_z_local[p, SHA, iv]
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je_sha = min(r1, r2)
+                je_sha = smooth_min(r1, r2)
 
                 # Initial ci guess
                 if c3flag[p]
@@ -3025,14 +3054,14 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                     k_soil_root[p, :], smp_l[c, :], z_col[c, :],
                     laisun[p], laisha[p], htop[p], tsai[p], ivt_p, nlevsoi,
                     elai[p], esai[p], fdry[p], forc_rho[c], tgcm[p];
-                    medlynslope_val=medlynslope_pft[ivt_p],
+                    medlynslope_val=medlynslope_p,
                     medlynintercept_val=medlynintercept_pft[ivt_p])
                 vegwp[p, :] .= vegwp_view
                 gs_mol_sun[p, iv] = gs_mol_sun_val
                 gs_mol_sha[p, iv] = gs_mol_sha_val
                 bsun_arr[p] = bsun_val
                 bsha_arr[p] = bsha_val
-                qflx_tran_veg[p] = max(soilflux, 0.0)
+                qflx_tran_veg[p] = smooth_max(soilflux, zero(soilflux))
 
                 # Determine gs min/slope for error checking
                 if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
@@ -3045,10 +3074,10 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
 
                 # Check an < 0
                 if an_sun[p, iv] < 0.0
-                    gs_mol_sun[p, iv] = max(bsun_arr[p] * gsminsun, 1.0)
+                    gs_mol_sun[p, iv] = smooth_max(bsun_arr[p] * gsminsun, 1.0)
                 end
                 if an_sha[p, iv] < 0.0
-                    gs_mol_sha[p, iv] = max(bsha_arr[p] * gsminsha, 1.0)
+                    gs_mol_sha[p, iv] = smooth_max(bsha_arr[p] * gsminsha, 1.0)
                 end
 
                 # Local noon gs
@@ -3064,25 +3093,25 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
 
                 # Final cs and ci
                 cs_sun = cair[p] - 1.4 / gb_mol_arr[p] * an_sun[p, iv] * forc_pbot[p]
-                cs_sun = max(cs_sun, MAX_CS)
+                cs_sun = smooth_max(cs_sun, MAX_CS)
                 ci_z_sun[p, iv] = cair[p] - an_sun[p, iv] * forc_pbot[p] *
                     (1.4 * gs_mol_sun[p, iv] + 1.6 * gb_mol_arr[p]) /
                     (gb_mol_arr[p] * gs_mol_sun[p, iv])
-                ci_z_sun[p, iv] = max(ci_z_sun[p, iv], 1.0e-06)
+                ci_z_sun[p, iv] = smooth_max(ci_z_sun[p, iv], 1.0e-06)
 
                 cs_sha = cair[p] - 1.4 / gb_mol_arr[p] * an_sha[p, iv] * forc_pbot[p]
-                cs_sha = max(cs_sha, MAX_CS)
+                cs_sha = smooth_max(cs_sha, MAX_CS)
                 ci_z_sha[p, iv] = cair[p] - an_sha[p, iv] * forc_pbot[p] *
                     (1.4 * gs_mol_sha[p, iv] + 1.6 * gb_mol_arr[p]) /
                     (gb_mol_arr[p] * gs_mol_sha[p, iv])
-                ci_z_sha[p, iv] = max(ci_z_sha[p, iv], 1.0e-06)
+                ci_z_sha[p, iv] = smooth_max(ci_z_sha[p, iv], 1.0e-06)
 
                 # Convert to resistance
                 gs = gs_mol_sun[p, iv] / cf
-                rs_z_sun[p, iv] = min(1.0 / gs, rsmax0)
+                rs_z_sun[p, iv] = smooth_min(1.0 / gs, rsmax0)
                 rs_z_sun[p, iv] = rs_z_sun[p, iv] / o3coefg_sun[p]
                 gs = gs_mol_sha[p, iv] / cf
-                rs_z_sha[p, iv] = min(1.0 / gs, rsmax0)
+                rs_z_sha[p, iv] = smooth_min(1.0 / gs, rsmax0)
                 rs_z_sha[p, iv] = rs_z_sha[p, iv] / o3coefg_sha[p]
 
                 # Photosynthesis output

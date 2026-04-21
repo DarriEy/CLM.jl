@@ -12,7 +12,7 @@ transfer variables, and SNICAR aerosol forcing diagnostics.
 
 Ported from `surfalb_type` in `SurfaceAlbedoType.F90`.
 """
-Base.@kwdef mutable struct SurfaceAlbedoData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SurfaceAlbedoData{FT<:Real}
     # --- Gridcell-level (1D) ---
     azsun_grc                ::Vector{FT} = Float64[]   # gridcell azimuth angle of sun
     coszen_grc               ::Vector{FT} = Float64[]   # gridcell cosine of solar zenith angle

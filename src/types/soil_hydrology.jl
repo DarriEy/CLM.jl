@@ -12,7 +12,7 @@ recharge, and VIC (Variable Infiltration Capacity) model parameters.
 
 Ported from `soilhydrology_type` in `SoilHydrologyType.F90`.
 """
-Base.@kwdef mutable struct SoilHydrologyData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SoilHydrologyData{FT<:Real}
     # --- Control flag ---
     h2osfcflag::Int = 1                # true => surface water is active (namelist)
 

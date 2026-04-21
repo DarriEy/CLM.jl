@@ -40,7 +40,7 @@ Contains activity factor parameters for leaf age, temperature,
 and light dependence.
 Ported from `MEGANFactorsMod` in CLM Fortran.
 """
-Base.@kwdef mutable struct MEGANFactors{FT<:AbstractFloat}
+Base.@kwdef mutable struct MEGANFactors{FT<:Real}
     n_classes::Int = 20
     # Leaf age fractions (indexed by class number, 1:n_classes)
     Agro ::Vector{FT} = Float64[]  # growing leaves factor
@@ -62,7 +62,7 @@ end
 Descriptor for a single MEGAN mega-compound.
 Ported from `shr_megan_megcomp_t` in `shr_megan_mod`.
 """
-Base.@kwdef mutable struct MEGANCompound{FT<:AbstractFloat}
+Base.@kwdef mutable struct MEGANCompound{FT<:Real}
     name          ::String          = ""        # compound name (e.g. "isoprene")
     index         ::Int             = 0         # index in mega-compound list
     class_number  ::Int             = 0         # MEGAN class number (1-20)
@@ -95,7 +95,7 @@ VOC emission state and flux data.
 Contains diagnostic gamma factors and fluxes at the patch level.
 Ported from `vocemis_type` in `VOCEmissionMod.F90`.
 """
-Base.@kwdef mutable struct VOCEmisData{FT<:AbstractFloat}
+Base.@kwdef mutable struct VOCEmisData{FT<:Real}
     # Diagnostic coefficients (patch level)
     Eopt_out_patch    ::Vector{FT} = Float64[]  # Eopt coefficient
     topt_out_patch    ::Vector{FT} = Float64[]  # topt coefficient
@@ -250,7 +250,7 @@ Returns emission factor in [ug m-2 h-1].
 
 Ported from `get_map_EF` in `VOCEmissionMod.F90`.
 """
-function get_map_EF(ivt::Int, g::Int, efisop_grc::Matrix{Float64};
+function get_map_EF(ivt::Int, g::Int, efisop_grc::Matrix{<:Real};
                     ndllf_evr_tmp_tree::Int = 1,
                     ndllf_evr_brl_tree::Int = 2,
                     ndllf_dcd_brl_tree::Int = 3,
@@ -303,11 +303,11 @@ Returns (gamma_p, cp, alpha).
 
 Ported from `get_gamma_P` in `VOCEmissionMod.F90`.
 """
-function get_gamma_P(par_sun::Float64, par24_sun::Float64, par240_sun::Float64,
-                     par_sha::Float64, par24_sha::Float64, par240_sha::Float64,
-                     fsun::Float64, fsun240::Float64,
-                     forc_solad240::Float64, forc_solai240::Float64,
-                     LDF_in::Float64)
+function get_gamma_P(par_sun::Real, par24_sun::Real, par240_sun::Real,
+                     par_sha::Real, par24_sha::Real, par240_sha::Real,
+                     fsun::Real, fsun240::Real,
+                     forc_solad240::Real, forc_solai240::Real,
+                     LDF_in::Real)
     # Empirical coefficients
     ca1 = 0.004
     ca2 = 0.0005
@@ -361,7 +361,7 @@ end
 Activity factor for LAI (Guenther et al., 2006, eq 3).
 Ported from `get_gamma_L` in `VOCEmissionMod.F90`.
 """
-function get_gamma_L(fsun240::Float64, elai::Float64)
+function get_gamma_L(fsun240::Real, elai::Real)
     cce  = 0.30   # factor to set emissions to unity @ std (accumulated vars available)
     cce1 = 0.24   # same but for non-accumulated vars
 
@@ -383,7 +383,7 @@ Activity factor for soil moisture of isoprene (Wang et al., 2022, JAMES).
 Based on eq. (11) in the paper.
 Ported from `get_gamma_SM` in `VOCEmissionMod.F90`.
 """
-function get_gamma_SM(btran::Float64)
+function get_gamma_SM(btran::Real)
     a1 = -7.4463
     b1 = 3.2552
     btran_threshold = 0.2
@@ -412,11 +412,11 @@ updates for boreal broadleaf deciduous shrub and Arctic C3 grass.
 
 Ported from `get_gamma_T` in `VOCEmissionMod.F90`.
 """
-function get_gamma_T(t_veg240::Float64, t_veg24::Float64, t_veg::Float64,
-                     ct1_in::Float64, ct2_in::Float64,
-                     betaT_in::Float64, LDF_in::Float64, Ceo_in::Float64,
+function get_gamma_T(t_veg240::Real, t_veg24::Real, t_veg::Real,
+                     ct1_in::Real, ct2_in::Real,
+                     betaT_in::Real, LDF_in::Real, Ceo_in::Real,
                      ivt::Int;
-                     tfrz::Float64 = TFRZ,
+                     tfrz::Real = TFRZ,
                      nbrdlf_dcd_brl_shrub::Int = 11,
                      nc3_arctic_grass::Int = 12)
     # Empirical coefficients
@@ -495,7 +495,7 @@ Activity factor for leaf age (Guenther et al., 2006).
 Evergreens get gamma_a=1.0; deciduous PFTs use new/growing/mature/old fractions.
 Ported from `get_gamma_A` in `VOCEmissionMod.F90`.
 """
-function get_gamma_A(ivt::Int, elai240::Float64, elai::Float64,
+function get_gamma_A(ivt::Int, elai240::Real, elai::Real,
                      nclass::Int, mf::MEGANFactors;
                      ndllf_dcd_brl_tree::Int = 3,
                      nbrdlf_dcd_trp_tree::Int = 6)
@@ -543,8 +543,8 @@ Includes both short-term (intercellular CO2) and long-term (ambient CO2)
 exposure effects.
 Ported from `get_gamma_C` in `VOCEmissionMod.F90`.
 """
-function get_gamma_C(cisun::Float64, cisha::Float64,
-                     forc_pbot::Float64, fsun::Float64, co2_ppmv::Float64)
+function get_gamma_C(cisun::Real, cisha::Real,
+                     forc_pbot::Real, fsun::Real, co2_ppmv::Real)
     # Long-term exposure coefficients
     Ismax_ca   = 1.344
     h_ca       = 1.4614
@@ -624,30 +624,30 @@ function voc_emission!(
     bounds_p::UnitRange{Int},
     mask_soilp::BitVector,
     # Atmospheric forcing (bare arrays, as in surface_radiation pattern)
-    forc_solad_col::Matrix{Float64},   # direct beam radiation (ncol, numrad) [W/m2]
-    forc_solai_grc::Matrix{Float64},   # diffuse radiation (ngrc, numrad) [W/m2]
-    forc_pbot_col::Vector{Float64},    # atmospheric pressure (ncol) [Pa]
-    forc_pco2_grc::Vector{Float64},    # partial pressure CO2 (ngrc) [Pa]
+    forc_solad_col::Matrix{<:Real},   # direct beam radiation (ncol, numrad) [W/m2]
+    forc_solai_grc::Matrix{<:Real},   # diffuse radiation (ngrc, numrad) [W/m2]
+    forc_pbot_col::Vector{<:Real},    # atmospheric pressure (ncol) [Pa]
+    forc_pco2_grc::Vector{<:Real},    # partial pressure CO2 (ngrc) [Pa]
     # Time-averaged PAR forcing (patch level)
-    fsd24_patch::Vector{Float64},      # direct beam 24hr avg [W/m2]
-    fsd240_patch::Vector{Float64},     # direct beam 240hr avg [W/m2]
-    fsi24_patch::Vector{Float64},      # diffuse 24hr avg [W/m2]
-    fsi240_patch::Vector{Float64},     # diffuse 240hr avg [W/m2]
+    fsd24_patch::Vector{<:Real},      # direct beam 24hr avg [W/m2]
+    fsd240_patch::Vector{<:Real},     # direct beam 240hr avg [W/m2]
+    fsi24_patch::Vector{<:Real},      # diffuse 24hr avg [W/m2]
+    fsi240_patch::Vector{<:Real},     # diffuse 240hr avg [W/m2]
     # Canopy state
-    fsun_patch::Vector{Float64},
-    fsun24_patch::Vector{Float64},
-    fsun240_patch::Vector{Float64},
-    elai_patch::Vector{Float64},
-    elai240_patch::Vector{Float64},
+    fsun_patch::Vector{<:Real},
+    fsun24_patch::Vector{<:Real},
+    fsun240_patch::Vector{<:Real},
+    elai_patch::Vector{<:Real},
+    elai240_patch::Vector{<:Real},
     # Photosynthesis
-    cisun_z_patch::Matrix{Float64},    # sunlit intracellular CO2 (np, nlevcan) [Pa]
-    cisha_z_patch::Matrix{Float64},    # shaded intracellular CO2 (np, nlevcan) [Pa]
+    cisun_z_patch::Matrix{<:Real},    # sunlit intracellular CO2 (np, nlevcan) [Pa]
+    cisha_z_patch::Matrix{<:Real},    # shaded intracellular CO2 (np, nlevcan) [Pa]
     # Temperature
-    t_veg_patch::Vector{Float64},
-    t_veg24_patch::Vector{Float64},
-    t_veg240_patch::Vector{Float64},
+    t_veg_patch::Vector{<:Real},
+    t_veg24_patch::Vector{<:Real},
+    t_veg240_patch::Vector{<:Real},
     # Energy flux
-    btran_patch::Vector{Float64};
+    btran_patch::Vector{<:Real};
     # Keyword arguments for PFT indices
     use_mapped_emisfctrs::Bool = true,
     ndllf_evr_tmp_tree::Int = 1,
@@ -689,7 +689,8 @@ function voc_emission!(
     end
 
     # Temporary per-mega-compound flux
-    vocflx_meg = zeros(n_megcomps)
+    FT = eltype(voc.vocflx_tot_patch)
+    vocflx_meg = zeros(FT, n_megcomps)
 
     # Begin loop over patches
     for p in bounds_p

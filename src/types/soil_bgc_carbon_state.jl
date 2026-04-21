@@ -11,7 +11,7 @@ at column and gridcell levels for C12 (and optionally C13/C14 isotopes).
 
 Ported from `soilbiogeochem_carbonstate_type` in `SoilBiogeochemCarbonStateType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemCarbonStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SoilBiogeochemCarbonStateData{FT<:Real}
     # --- Vertically-resolved decomposition pools (col × nlev × npools) ---
     decomp_cpools_vr_col              ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3)
     decomp0_cpools_vr_col             ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # (gC/m3) baseline (initial value of this year)
@@ -135,7 +135,7 @@ Corresponds to `SetValues` in the Fortran source.
 """
 function soil_bgc_carbon_state_set_values!(cs::SoilBiogeochemCarbonStateData,
                                            mask_col::BitVector,
-                                           value_column::Float64;
+                                           value_column::Real;
                                            nlevdecomp_full::Int=size(cs.ctrunc_vr_col, 2),
                                            nlevdecomp::Int=nlevdecomp_full,
                                            ndecomp_pools::Int=size(cs.decomp_cpools_col, 2),
@@ -222,14 +222,14 @@ Corresponds to `InitCold` in the Fortran source.
 """
 function soil_bgc_carbon_state_init_cold!(cs::SoilBiogeochemCarbonStateData,
                                           bounds_col::UnitRange{Int},
-                                          ratio::Float64;
+                                          ratio::Real;
                                           nlevdecomp::Int=size(cs.decomp_cpools_vr_col, 2),
                                           nlevdecomp_full::Int=nlevdecomp,
                                           ndecomp_pools::Int=size(cs.decomp_cpools_vr_col, 3),
                                           ndecomp_cascade_transitions::Int=0,
-                                          initial_stock::Vector{Float64}=zeros(ndecomp_pools),
-                                          initial_stock_soildepth::Float64=0.3,
-                                          zsoi_vals::Vector{Float64}=zeros(nlevdecomp),
+                                          initial_stock::Vector{<:Real}=zeros(ndecomp_pools),
+                                          initial_stock_soildepth::Real=0.3,
+                                          zsoi_vals::Vector{<:Real}=zeros(nlevdecomp),
                                           use_soil_matrixcn::Bool=false,
                                           mask_soil_crop::Union{BitVector,Nothing}=nothing,
                                           c12_inst::Union{SoilBiogeochemCarbonStateData,Nothing}=nothing)
@@ -361,14 +361,14 @@ function soil_bgc_carbon_state_summary!(cs::SoilBiogeochemCarbonStateData,
                                         nlevdecomp::Int,
                                         nlevdecomp_full::Int=nlevdecomp,
                                         ndecomp_pools::Int,
-                                        dzsoi_decomp_vals::Vector{Float64},
-                                        zisoi_vals::Vector{Float64}=Float64[],
+                                        dzsoi_decomp_vals::Vector{<:Real},
+                                        zisoi_vals::Vector{<:Real}=Float64[],
                                         is_litter::BitVector=falses(ndecomp_pools),
                                         is_soil::BitVector=falses(ndecomp_pools),
                                         is_microbe::BitVector=falses(ndecomp_pools),
                                         is_cwd::BitVector=falses(ndecomp_pools),
-                                        totc_p2c_col::Vector{Float64}=zeros(length(mask_allc)),
-                                        totvegc_col::Vector{Float64}=zeros(length(mask_allc)),
+                                        totc_p2c_col::Vector{<:Real}=zeros(length(mask_allc)),
+                                        totvegc_col::Vector{<:Real}=zeros(length(mask_allc)),
                                         is_fates_col::Union{BitVector,Nothing}=nothing,
                                         use_soil_matrixcn::Bool=false,
                                         use_fates_bgc::Bool=false,
@@ -573,7 +573,7 @@ Set the total vegetation carbon threshold for spinup.
 Corresponds to `SetTotVgCThresh` in the Fortran source.
 """
 function soil_bgc_carbon_state_set_totvegcthresh!(cs::SoilBiogeochemCarbonStateData,
-                                                   totvegcthresh::Float64)
+                                                   totvegcthresh::Real)
     if totvegcthresh <= 0.0
         error("totvegcthresh is zero or negative and should be > 0")
     end

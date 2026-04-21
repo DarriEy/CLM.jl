@@ -48,8 +48,8 @@ directly instead of reading from a NetCDF file.
 
 Ported from `readParams` in `SurfaceResistanceMod.F90`.
 """
-function surface_resistance_read_params!(; d_max::Float64 = 15.0,
-                                           frac_sat_soil_dsl_init::Float64 = 0.8)
+function surface_resistance_read_params!(; d_max::Real = 15.0,
+                                           frac_sat_soil_dsl_init::Real = 0.8)
     surface_resistance_params.d_max = d_max
     surface_resistance_params.frac_sat_soil_dsl_init = frac_sat_soil_dsl_init
     return nothing

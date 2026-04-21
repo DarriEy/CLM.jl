@@ -29,15 +29,15 @@ Ported from `BulkDiag_FracH2oSfc` in `SurfaceWaterMod.F90`.
 """
 function bulkdiag_frac_h2osfc!(mask_soilc::BitVector,
                                 bounds_col::UnitRange{Int},
-                                dtime::Float64,
-                                micro_sigma::Vector{Float64},
-                                h2osno_total::Vector{Float64},
-                                h2osfc::Vector{Float64},
-                                frac_sno::Vector{Float64},
-                                frac_sno_eff::Vector{Float64},
-                                frac_h2osfc::Vector{Float64},
-                                frac_h2osfc_nosnow::Vector{Float64},
-                                qflx_too_small_h2osfc_to_soil::Vector{Float64})
+                                dtime::Real,
+                                micro_sigma::Vector{<:Real},
+                                h2osno_total::Vector{<:Real},
+                                h2osfc::Vector{<:Real},
+                                frac_sno::Vector{<:Real},
+                                frac_sno_eff::Vector{<:Real},
+                                frac_h2osfc::Vector{<:Real},
+                                frac_h2osfc_nosnow::Vector{<:Real},
+                                qflx_too_small_h2osfc_to_soil::Vector{<:Real})
 
     for c in bounds_col
         mask_soilc[c] || continue
@@ -98,10 +98,10 @@ Ported from `UpdateState_TooSmallH2osfcToSoil` in `SurfaceWaterMod.F90`.
 """
 function update_state_too_small_h2osfc_to_soil!(mask_soilc::BitVector,
                                                  bounds_col::UnitRange{Int},
-                                                 dtime::Float64,
-                                                 qflx_too_small_h2osfc_to_soil::Vector{Float64},
-                                                 h2osfc::Vector{Float64},
-                                                 h2osoi_liq::Matrix{Float64},
+                                                 dtime::Real,
+                                                 qflx_too_small_h2osfc_to_soil::Vector{<:Real},
+                                                 h2osfc::Vector{<:Real},
+                                                 h2osoi_liq::Matrix{<:Real},
                                                  nlevsno::Int)
 
     for c in bounds_col
@@ -136,7 +136,7 @@ function update_frac_h2osfc!(water::WaterData,
                               col_data::ColumnData,
                               mask_soilc::BitVector,
                               bounds_col::UnitRange{Int};
-                              dtime::Float64 = 1800.0)
+                              dtime::Real = 1800.0)
 
     nlevsno_val = varpar.nlevsno
     wsb = water.waterstatebulk_inst
@@ -145,8 +145,9 @@ function update_frac_h2osfc!(water::WaterData,
 
     # Calculate total snow water equivalent
     nc_size = length(wsb.ws.h2osfc_col)
-    h2osno_total = zeros(nc_size)
-    qflx_too_small = zeros(nc_size)  # local array (not stored in WaterFluxBulkData)
+    FT = eltype(wsb.ws.h2osfc_col)
+    h2osno_total = zeros(FT, nc_size)
+    qflx_too_small = zeros(FT, nc_size)  # local array (not stored in WaterFluxBulkData)
     for c in bounds_col
         mask_soilc[c] || continue
         h2osno_total[c] = wsb.ws.h2osno_no_layers_col[c]
@@ -186,13 +187,13 @@ Ported from `QflxH2osfcSurf` in `SurfaceWaterMod.F90`.
 """
 function qflx_h2osfc_surf!(mask_hydrologyc::BitVector,
                             bounds_col::UnitRange{Int},
-                            dtime::Float64,
+                            dtime::Real,
                             h2osfcflag::Int,
-                            h2osfc::Vector{Float64},
-                            h2osfc_thresh::Vector{Float64},
-                            frac_h2osfc_nosnow::Vector{Float64},
-                            topo_slope::Vector{Float64},
-                            qflx_h2osfc_surf::Vector{Float64})
+                            h2osfc::Vector{<:Real},
+                            h2osfc_thresh::Vector{<:Real},
+                            frac_h2osfc_nosnow::Vector{<:Real},
+                            topo_slope::Vector{<:Real},
+                            qflx_h2osfc_surf::Vector{<:Real})
 
     for c in bounds_col
         mask_hydrologyc[c] || continue
@@ -242,12 +243,12 @@ Ported from `QflxH2osfcDrain` in `SurfaceWaterMod.F90`.
 """
 function qflx_h2osfc_drain!(mask_hydrologyc::BitVector,
                               bounds_col::UnitRange{Int},
-                              dtime::Float64,
+                              dtime::Real,
                               h2osfcflag::Int,
-                              h2osfc::Vector{Float64},
-                              frac_h2osfc::Vector{Float64},
-                              qinmax::Vector{Float64},
-                              qflx_h2osfc_drain::Vector{Float64})
+                              h2osfc::Vector{<:Real},
+                              frac_h2osfc::Vector{<:Real},
+                              qinmax::Vector{<:Real},
+                              qflx_h2osfc_drain::Vector{<:Real})
 
     for c in bounds_col
         mask_hydrologyc[c] || continue
@@ -285,15 +286,16 @@ function update_h2osfc!(col_data::ColumnData,
                          waterdiagbulk::WaterDiagnosticBulkData,
                          mask_hydrologyc::BitVector,
                          bounds_col::UnitRange{Int};
-                         dtime::Float64 = 1800.0,
+                         dtime::Real = 1800.0,
                          h2osfcflag::Int = 1)
 
     nc = length(waterstatebulk.ws.h2osfc_col)
-    qflx_h2osfc_surf_arr = zeros(nc)
-    qflx_h2osfc_drain_arr = zeros(nc)
-    h2osfc_thresh = zeros(nc)  # percolation threshold
-    topo_slope = zeros(nc)
-    qinmax = zeros(nc)
+    FT = eltype(waterstatebulk.ws.h2osfc_col)
+    qflx_h2osfc_surf_arr = zeros(FT, nc)
+    qflx_h2osfc_drain_arr = zeros(FT, nc)
+    h2osfc_thresh = zeros(FT, nc)  # percolation threshold
+    topo_slope = zeros(FT, nc)
+    qinmax = zeros(FT, nc)
 
     # Initialize arrays from column data
     for c in bounds_col

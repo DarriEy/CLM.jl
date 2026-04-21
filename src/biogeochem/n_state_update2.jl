@@ -45,7 +45,7 @@ function n_state_update2!(ns_veg::CNVegNitrogenStateData,
                            i_cwd::Int,
                            use_matrixcn::Bool = false,
                            use_soil_matrixcn::Bool = false,
-                           dt::Float64)
+                           dt::Real)
 
     # --- Column loop: gap-phase mortality fluxes to soil decomposition pools ---
     for j in 1:nlevdecomp
@@ -155,7 +155,7 @@ function n_state_update2h!(ns_veg::CNVegNitrogenStateData,
                             i_cwd::Int,
                             use_matrixcn::Bool = false,
                             use_soil_matrixcn::Bool = false,
-                            dt::Float64)
+                            dt::Real)
 
     # --- Column loop: harvest mortality fluxes to soil decomposition pools ---
     for j in 1:nlevdecomp
@@ -265,7 +265,7 @@ function n_state_update2g!(ns_veg::CNVegNitrogenStateData,
                             i_cwd::Int,
                             use_matrixcn::Bool = false,
                             use_soil_matrixcn::Bool = false,
-                            dt::Float64)
+                            dt::Real)
 
     # --- Column loop: gross unrepresented landcover change fluxes to soil ---
     for j in 1:nlevdecomp

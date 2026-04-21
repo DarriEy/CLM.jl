@@ -43,9 +43,9 @@ function cn_annual_update!(mask_bgc_soilc::BitVector,
                            patch::PatchData,
                            cnveg_state::CNVegStateData,
                            cnveg_carbonflux::CNVegCarbonFluxData;
-                           dt::Float64,
-                           days_per_year::Float64,
-                           secspday::Float64 = SECSPDAY)
+                           dt::Real,
+                           days_per_year::Real,
+                           secspday::Real = SECSPDAY)
 
     secspyear = days_per_year * secspday
 

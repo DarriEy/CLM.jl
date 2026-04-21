@@ -18,7 +18,7 @@ All water fluxes are in units of mm/s unless otherwise noted.
 
 Ported from `waterfluxbulk_type` in `WaterFluxBulkType.F90`.
 """
-Base.@kwdef mutable struct WaterFluxBulkData{FT<:AbstractFloat}
+Base.@kwdef mutable struct WaterFluxBulkData{FT<:Real}
     # --- Parent water flux fields (composition) ---
     wf::WaterFluxData = WaterFluxData()
 

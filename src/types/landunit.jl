@@ -22,7 +22,7 @@ urban properties, and hillslope variables for each landunit.
 
 Ported from `landunit_type` in `LandunitType.F90`.
 """
-Base.@kwdef mutable struct LandunitData{FT<:AbstractFloat}
+Base.@kwdef mutable struct LandunitData{FT<:Real}
     # g/l/c/p hierarchy, local g/l/c/p cells only
     gridcell    ::Vector{Int}     = Int[]       # index into gridcell level quantities
     wtgcell     ::Vector{FT} = Float64[]   # weight (relative to gridcell)

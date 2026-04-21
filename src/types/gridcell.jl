@@ -14,7 +14,7 @@ landunit index information for each gridcell.
 
 Ported from `gridcell_type` in `GridcellType.F90`.
 """
-Base.@kwdef mutable struct GridcellData{FT<:AbstractFloat}
+Base.@kwdef mutable struct GridcellData{FT<:Real}
     # topological mapping functionality, local 1d gdc arrays
     area     ::Vector{FT} = Float64[]   # total land area, gridcell (km^2)
     lat      ::Vector{FT} = Float64[]   # latitude (radians)

@@ -62,10 +62,10 @@ Column-to-gridcell area-weighted average with unity scaling.
 Simple reimplementation of `c2g` from `subgridAveMod.F90` used by balance checks.
 """
 function c2g_unity!(
-    garr::Vector{Float64},
-    carr::Vector{Float64},
+    garr::Vector{<:Real},
+    carr::Vector{<:Real},
     col_gridcell::Vector{Int},
-    col_wtgcell::Vector{Float64},
+    col_wtgcell::Vector{<:Real},
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int}
 )
@@ -111,9 +111,9 @@ function begin_cn_gridcell_balance!(
     n_products::CNProductsData,
     bounds_g::UnitRange{Int};
     use_fates_bgc::Bool=false,
-    hrv_xsmrpool_amount_left::Vector{Float64}=Float64[],
-    gru_conv_cflux_amount_left::Vector{Float64}=Float64[],
-    dwt_conv_cflux_amount_left::Vector{Float64}=Float64[]
+    hrv_xsmrpool_amount_left::Vector{<:Real}=Float64[],
+    gru_conv_cflux_amount_left::Vector{<:Real}=Float64[],
+    dwt_conv_cflux_amount_left::Vector{<:Real}=Float64[]
 )
     totc = soilbgc_cstate.totc_grc
     totn = soilbgc_nstate.totn_grc
@@ -216,12 +216,12 @@ function c_balance_check!(
     mask_soil::BitVector,
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int},
-    dt::Float64;
+    dt::Real;
     is_fates_col::Vector{Bool}=Bool[],
     use_fates_bgc::Bool=false,
-    hrv_xsmrpool_amount_left::Vector{Float64}=Float64[],
-    gru_conv_cflux_amount_left::Vector{Float64}=Float64[],
-    dwt_conv_cflux_amount_left::Vector{Float64}=Float64[]
+    hrv_xsmrpool_amount_left::Vector{<:Real}=Float64[],
+    gru_conv_cflux_amount_left::Vector{<:Real}=Float64[],
+    dwt_conv_cflux_amount_left::Vector{<:Real}=Float64[]
 )
     # Local aliases for column-level fields
     col_begcb = bal.begcb_col
@@ -252,8 +252,9 @@ function c_balance_check!(
     tot_woodprod_grc = c_products.tot_woodprod_grc
 
     # Column-level allocation for error tracking
+    FT = eltype(bal.begcb_col)
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
-    col_errcb = zeros(nc)
+    col_errcb = zeros(FT, nc)
 
     err_found = false
     err_index = 0
@@ -326,11 +327,11 @@ function c_balance_check!(
     totgrcc = soilbgc_cstate.totc_grc
     c2g_unity!(totgrcc, totcolc, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
-    som_c_leached_grc = zeros(length(grc_data.latdeg))
+    som_c_leached_grc = zeros(FT, length(grc_data.latdeg))
     c2g_unity!(som_c_leached_grc, som_c_leached, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
     ng = length(grc_data.latdeg)
-    grc_errcb = zeros(ng)
+    grc_errcb = zeros(FT, ng)
 
     err_found = false
     err_index = 0
@@ -429,7 +430,7 @@ function n_balance_check!(
     mask_soil::BitVector,
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int},
-    dt::Float64;
+    dt::Real;
     is_fates_col::Vector{Bool}=Bool[],
     use_fates_bgc::Bool=false,
     use_nitrif_denitrif::Bool=true,
@@ -475,12 +476,13 @@ function n_balance_check!(
     product_loss_grc = n_products.product_loss_grc
 
     # Column-level allocations
+    FT = eltype(bal.begnb_col)
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
-    col_ninputs         = zeros(nc)
-    col_noutputs        = zeros(nc)
-    col_errnb           = zeros(nc)
-    col_ninputs_partial  = zeros(nc)
-    col_noutputs_partial = zeros(nc)
+    col_ninputs         = zeros(FT, nc)
+    col_noutputs        = zeros(FT, nc)
+    col_errnb           = zeros(FT, nc)
+    col_ninputs_partial  = zeros(FT, nc)
+    col_noutputs_partial = zeros(FT, nc)
 
     err_found = false
     err_index = 0
@@ -579,15 +581,15 @@ function n_balance_check!(
         c2g_unity!(totgrcn, totcoln, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
         ng = length(grc_data.latdeg)
-        grc_ninputs_partial  = zeros(ng)
-        grc_noutputs_partial = zeros(ng)
+        grc_ninputs_partial  = zeros(FT, ng)
+        grc_noutputs_partial = zeros(FT, ng)
 
         c2g_unity!(grc_ninputs_partial, col_ninputs_partial,
                    col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
         c2g_unity!(grc_noutputs_partial, col_noutputs_partial,
                    col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
-        grc_errnb = zeros(ng)
+        grc_errnb = zeros(FT, ng)
         err_found = false
         err_index = 0
 

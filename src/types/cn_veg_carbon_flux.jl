@@ -11,7 +11,7 @@ column, and gridcell levels.
 
 Ported from `cnveg_carbonflux_type` in `CNVegCarbonFluxType.F90`.
 """
-Base.@kwdef mutable struct CNVegCarbonFluxData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CNVegCarbonFluxData{FT<:Real}
     dribble_crophrv_xsmrpool_2atm::Bool = false
 
     # --- Gap mortality fluxes (gC/m2/s) patch-level ---
@@ -456,17 +456,17 @@ end
 
 Allocate and initialize all carbon flux arrays.
 """
-function cnveg_carbon_flux_init!(cf::CNVegCarbonFluxData, np::Int, nc::Int, ng::Int;
+function cnveg_carbon_flux_init!(cf::CNVegCarbonFluxData{FT}, np::Int, nc::Int, ng::Int;
                                   use_matrixcn::Bool=false,
                                   nrepr::Int=NREPR,
                                   nlevdecomp_full::Int=1,
                                   ndecomp_pools::Int=1,
                                   mxharvests::Int=MXHARVESTS,
-                                  nvegcpool::Int=NVEGPOOL_NATVEG)
+                                  nvegcpool::Int=NVEGPOOL_NATVEG) where {FT}
     # Helper for NaN-filled arrays
-    nanvec(n) = fill(NaN, n)
-    nanmat(r, c) = fill(NaN, r, c)
-    nan3d(a, b, c) = fill(NaN, a, b, c)
+    nanvec(n) = fill(FT(NaN), n)
+    nanmat(r, c) = fill(FT(NaN), r, c)
+    nan3d(a, b, c) = fill(FT(NaN), a, b, c)
 
     # --- Gap mortality ---
     cf.m_leafc_to_litter_patch              = nanvec(np)
@@ -510,7 +510,7 @@ function cnveg_carbon_flux_init!(cf::CNVegCarbonFluxData, np::Int, nc::Int, ng::
     cf.hrv_deadcrootc_xfer_to_litter_patch  = nanvec(np)
     cf.hrv_gresp_storage_to_litter_patch    = nanvec(np)
     cf.hrv_gresp_xfer_to_litter_patch       = nanvec(np)
-    cf.hrv_xsmrpool_to_atm_patch            = zeros(np)
+    cf.hrv_xsmrpool_to_atm_patch            = zeros(FT, np)
 
     # --- Fire ---
     cf.m_leafc_to_fire_patch                = nanvec(np)
@@ -634,9 +634,9 @@ function cnveg_carbon_flux_init!(cf::CNVegCarbonFluxData, np::Int, nc::Int, ng::
     cf.cpool_to_gresp_storage_patch         = nanvec(np)
 
     # --- Growth respiration ---
-    cf.xsmrpool_to_atm_patch               = zeros(np)
-    cf.xsmrpool_to_atm_col                  = zeros(nc)
-    cf.xsmrpool_to_atm_grc                  = zeros(ng)
+    cf.xsmrpool_to_atm_patch               = zeros(FT, np)
+    cf.xsmrpool_to_atm_col                  = zeros(FT, nc)
+    cf.xsmrpool_to_atm_grc                  = zeros(FT, ng)
     cf.cpool_leaf_gr_patch                  = nanvec(np)
     cf.cpool_leaf_storage_gr_patch          = nanvec(np)
     cf.transfer_leaf_gr_patch               = nanvec(np)
@@ -783,7 +783,7 @@ function cnveg_carbon_flux_init!(cf::CNVegCarbonFluxData, np::Int, nc::Int, ng::
     cf.fire_closs_p2c_col                   = nanvec(nc)
     cf.fire_closs_col                       = nanvec(nc)
     cf.wood_harvestc_col                    = nanvec(nc)
-    cf.hrv_xsmrpool_to_atm_col             = zeros(nc)
+    cf.hrv_xsmrpool_to_atm_col             = zeros(FT, nc)
     cf.tempsum_npp_patch                    = nanvec(np)
     cf.annsum_npp_patch                     = nanvec(np)
     cf.tempsum_litfall_patch                = nanvec(np)
@@ -842,14 +842,14 @@ end
 Set all carbon flux variables to given values for masked patches/columns.
 """
 function cnveg_carbon_flux_set_values!(cf::CNVegCarbonFluxData,
-                                       mask_patch::BitVector, value_patch::Float64,
-                                       mask_col::BitVector, value_column::Float64;
+                                       mask_patch::BitVector, value_patch::Real,
+                                       mask_col::BitVector, value_column::Real;
                                        use_matrixcn::Bool=false,
                                        use_crop::Bool=false,
                                        nrepr::Int=NREPR,
                                        nlevdecomp_full::Int=1,
                                        ndecomp_pools::Int=1,
-                                       nvegcpool::Int=NVEGPOOL_NATVEG)
+                                       nvegcpool::Int=NVEGPOOL_NATVEG) where {FT}
     # Patch-level 1D fields
     for i in eachindex(mask_patch)
         mask_patch[i] || continue

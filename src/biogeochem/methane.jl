@@ -122,95 +122,95 @@ end
 Methane state and flux data arrays.
 Ported from `ch4_type` in `ch4Mod.F90`.
 """
-Base.@kwdef mutable struct CH4Data
+Base.@kwdef mutable struct CH4Data{FT<:Real}
     # Per-layer production/consumption/transport rates (nc × nlevsoi)
-    ch4_prod_depth_sat_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_prod_depth_unsat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_prod_depth_lake_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_oxid_depth_sat_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_oxid_depth_unsat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_oxid_depth_lake_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_aere_depth_sat_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_aere_depth_unsat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_tran_depth_sat_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_tran_depth_unsat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_ebul_depth_sat_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4_ebul_depth_unsat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    o2_oxid_depth_sat_col       ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    o2_oxid_depth_unsat_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    o2_aere_depth_sat_col       ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    o2_aere_depth_unsat_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    co2_decomp_depth_sat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    co2_decomp_depth_unsat_col  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    co2_oxid_depth_sat_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    co2_oxid_depth_unsat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    co2_aere_depth_sat_col      ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    co2_aere_depth_unsat_col    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    ch4_prod_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_prod_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_prod_depth_lake_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_oxid_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_oxid_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_oxid_depth_lake_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_aere_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_aere_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_tran_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_tran_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_ebul_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_ebul_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2_oxid_depth_sat_col       ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2_oxid_depth_unsat_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2_aere_depth_sat_col       ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2_aere_depth_unsat_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    co2_decomp_depth_sat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    co2_decomp_depth_unsat_col  ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    co2_oxid_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    co2_oxid_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    co2_aere_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    co2_aere_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
 
     # Column-level surface fluxes (nc)
-    ch4_ebul_total_sat_col      ::Vector{Float64} = Float64[]
-    ch4_ebul_total_unsat_col    ::Vector{Float64} = Float64[]
-    ch4_surf_aere_sat_col       ::Vector{Float64} = Float64[]
-    ch4_surf_aere_unsat_col     ::Vector{Float64} = Float64[]
-    ch4_surf_ebul_sat_col       ::Vector{Float64} = Float64[]
-    ch4_surf_ebul_unsat_col     ::Vector{Float64} = Float64[]
-    ch4_surf_ebul_lake_col      ::Vector{Float64} = Float64[]
-    ch4_surf_diff_sat_col       ::Vector{Float64} = Float64[]
-    ch4_surf_diff_unsat_col     ::Vector{Float64} = Float64[]
-    ch4_surf_diff_lake_col      ::Vector{Float64} = Float64[]
-    ch4_dfsat_flux_col          ::Vector{Float64} = Float64[]
-    ch4_surf_flux_tot_col       ::Vector{Float64} = Float64[]
+    ch4_ebul_total_sat_col      ::Vector{FT} = FT[]
+    ch4_ebul_total_unsat_col    ::Vector{FT} = FT[]
+    ch4_surf_aere_sat_col       ::Vector{FT} = FT[]
+    ch4_surf_aere_unsat_col     ::Vector{FT} = FT[]
+    ch4_surf_ebul_sat_col       ::Vector{FT} = FT[]
+    ch4_surf_ebul_unsat_col     ::Vector{FT} = FT[]
+    ch4_surf_ebul_lake_col      ::Vector{FT} = FT[]
+    ch4_surf_diff_sat_col       ::Vector{FT} = FT[]
+    ch4_surf_diff_unsat_col     ::Vector{FT} = FT[]
+    ch4_surf_diff_lake_col      ::Vector{FT} = FT[]
+    ch4_dfsat_flux_col          ::Vector{FT} = FT[]
+    ch4_surf_flux_tot_col       ::Vector{FT} = FT[]
 
     # Concentrations (nc × nlevsoi)
-    conc_ch4_sat_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    conc_ch4_unsat_col          ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    conc_ch4_lake_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    conc_o2_sat_col             ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    conc_o2_unsat_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    conc_o2_lake_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    o2_decomp_depth_sat_col     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    o2_decomp_depth_unsat_col   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    conc_ch4_sat_col            ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    conc_ch4_unsat_col          ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    conc_ch4_lake_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    conc_o2_sat_col             ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    conc_o2_unsat_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    conc_o2_lake_col            ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2_decomp_depth_sat_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2_decomp_depth_unsat_col   ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
 
     # Stress factors (nc × nlevsoi)
-    o2stress_sat_col            ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    o2stress_unsat_col          ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4stress_sat_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4stress_unsat_col         ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    o2stress_sat_col            ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2stress_unsat_col          ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4stress_sat_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4stress_unsat_col         ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
 
     # Column-level state (nc)
-    zwt_ch4_unsat_col           ::Vector{Float64} = Float64[]
-    lake_soilc_col              ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    totcolch4_col               ::Vector{Float64} = Float64[]
-    totcolch4_bef_col           ::Vector{Float64} = Float64[]
-    annsum_counter_col          ::Vector{Float64} = Float64[]
-    tempavg_somhr_col           ::Vector{Float64} = Float64[]
-    annavg_somhr_col            ::Vector{Float64} = Float64[]
-    tempavg_finrw_col           ::Vector{Float64} = Float64[]
-    annavg_finrw_col            ::Vector{Float64} = Float64[]
-    sif_col                     ::Vector{Float64} = Float64[]
-    qflx_surf_lag_col           ::Vector{Float64} = Float64[]
-    finundated_col              ::Vector{Float64} = Float64[]
-    finundated_pre_snow_col     ::Vector{Float64} = Float64[]
-    finundated_lag_col          ::Vector{Float64} = Float64[]
-    layer_sat_lag_col           ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    pH_col                      ::Vector{Float64} = Float64[]
+    zwt_ch4_unsat_col           ::Vector{FT} = FT[]
+    lake_soilc_col              ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    totcolch4_col               ::Vector{FT} = FT[]
+    totcolch4_bef_col           ::Vector{FT} = FT[]
+    annsum_counter_col          ::Vector{FT} = FT[]
+    tempavg_somhr_col           ::Vector{FT} = FT[]
+    annavg_somhr_col            ::Vector{FT} = FT[]
+    tempavg_finrw_col           ::Vector{FT} = FT[]
+    annavg_finrw_col            ::Vector{FT} = FT[]
+    sif_col                     ::Vector{FT} = FT[]
+    qflx_surf_lag_col           ::Vector{FT} = FT[]
+    finundated_col              ::Vector{FT} = FT[]
+    finundated_pre_snow_col     ::Vector{FT} = FT[]
+    finundated_lag_col          ::Vector{FT} = FT[]
+    layer_sat_lag_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    pH_col                      ::Vector{FT} = FT[]
 
     # Gridcell-level (ng)
-    c_atm_grc                   ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    ch4co2f_grc                 ::Vector{Float64} = Float64[]
-    ch4prodg_grc                ::Vector{Float64} = Float64[]
-    totcolch4_grc               ::Vector{Float64} = Float64[]
-    totcolch4_bef_grc           ::Vector{Float64} = Float64[]
+    c_atm_grc                   ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4co2f_grc                 ::Vector{FT} = FT[]
+    ch4prodg_grc                ::Vector{FT} = FT[]
+    totcolch4_grc               ::Vector{FT} = FT[]
+    totcolch4_bef_grc           ::Vector{FT} = FT[]
 
     # Patch-level aerenchyma (np)
-    annavg_agnpp_patch          ::Vector{Float64} = Float64[]
-    annavg_bgnpp_patch          ::Vector{Float64} = Float64[]
-    tempavg_agnpp_patch         ::Vector{Float64} = Float64[]
-    tempavg_bgnpp_patch         ::Vector{Float64} = Float64[]
+    annavg_agnpp_patch          ::Vector{FT} = FT[]
+    annavg_bgnpp_patch          ::Vector{FT} = FT[]
+    tempavg_agnpp_patch         ::Vector{FT} = FT[]
+    tempavg_bgnpp_patch         ::Vector{FT} = FT[]
 
     # Boundary layer conductance
-    grnd_ch4_cond_patch         ::Vector{Float64} = Float64[]
-    grnd_ch4_cond_col           ::Vector{Float64} = Float64[]
+    grnd_ch4_cond_patch         ::Vector{FT} = FT[]
+    grnd_ch4_cond_col           ::Vector{FT} = FT[]
 
     # First-time flag (ng)
     ch4_first_time_grc          ::Vector{Bool}    = Bool[]
@@ -229,9 +229,9 @@ Ported from `get_jwt` in `ch4Mod.F90`.
 """
 function get_jwt!(jwt::Vector{Int},
                   mask_soil::BitVector,
-                  watsat::Matrix{Float64},
-                  h2osoi_vol::Matrix{Float64},
-                  t_soisno::Matrix{Float64},
+                  watsat::Matrix{<:Real},
+                  h2osoi_vol::Matrix{<:Real},
+                  t_soisno::Matrix{<:Real},
                   nlevsoi::Int,
                   params::CH4Params)
 
@@ -279,11 +279,11 @@ function ch4_annualupdate!(ch4::CH4Data,
                            mask_soilp::BitVector,
                            patch_column::Vector{Int},
                            is_fates::BitVector,
-                           somhr::Vector{Float64},
-                           agnpp::Vector{Float64},
-                           bgnpp::Vector{Float64},
-                           dt::Float64,
-                           secsperyear::Float64)
+                           somhr::Vector{<:Real},
+                           agnpp::Vector{<:Real},
+                           bgnpp::Vector{<:Real},
+                           dt::Real,
+                           secsperyear::Real)
 
     for c in eachindex(mask_soil)
         mask_soil[c] || continue
@@ -343,11 +343,11 @@ end
 Compute total column CH4 by integrating concentrations across soil layers.
 Ported from `ch4_totcolch4` in `ch4Mod.F90`.
 """
-function ch4_totcolch4!(totcolch4::Vector{Float64},
+function ch4_totcolch4!(totcolch4::Vector{<:Real},
                         ch4::CH4Data,
                         mask_nolake::BitVector,
                         mask_lake::BitVector,
-                        dz::Matrix{Float64},
+                        dz::Matrix{<:Real},
                         nlevsoi::Int,
                         allowlakeprod::Bool)
 
@@ -391,7 +391,7 @@ Ported from `ch4_init_column_balance_check` in `ch4Mod.F90`.
 function ch4_init_column_balance_check!(ch4::CH4Data,
                                         mask_nolake::BitVector,
                                         mask_lake::BitVector,
-                                        dz::Matrix{Float64},
+                                        dz::Matrix{<:Real},
                                         nlevsoi::Int,
                                         allowlakeprod::Bool)
     ch4_totcolch4!(ch4.totcolch4_bef_col, ch4, mask_nolake, mask_lake,
@@ -423,32 +423,32 @@ function ch4_prod!(ch4::CH4Data,
                    mask_soilp::BitVector,
                    patch_column::Vector{Int},
                    patch_itype::Vector{Int},
-                   patch_wtcol::Vector{Float64},
+                   patch_wtcol::Vector{<:Real},
                    is_fates::BitVector,
-                   crootfr::Matrix{Float64},
-                   rootfr_col::Matrix{Float64},
-                   watsat::Matrix{Float64},
-                   h2osoi_vol::Matrix{Float64},
-                   t_soisno::Matrix{Float64},
-                   somhr::Vector{Float64},
-                   lithr::Vector{Float64},
-                   hr_vr::Matrix{Float64},
-                   o_scalar::Matrix{Float64},
-                   fphr::Matrix{Float64},
-                   pot_f_nit_vr::Matrix{Float64},
-                   rr::Vector{Float64},
+                   crootfr::Matrix{<:Real},
+                   rootfr_col::Matrix{<:Real},
+                   watsat::Matrix{<:Real},
+                   h2osoi_vol::Matrix{<:Real},
+                   t_soisno::Matrix{<:Real},
+                   somhr::Vector{<:Real},
+                   lithr::Vector{<:Real},
+                   hr_vr::Matrix{<:Real},
+                   o_scalar::Matrix{<:Real},
+                   fphr::Matrix{<:Real},
+                   pot_f_nit_vr::Matrix{<:Real},
+                   rr::Vector{<:Real},
                    jwt::Vector{Int},
                    sat::Int,
                    lake::Bool,
-                   dz::Matrix{Float64},
-                   z::Matrix{Float64},
-                   zi::Matrix{Float64},
+                   dz::Matrix{<:Real},
+                   z::Matrix{<:Real},
+                   zi::Matrix{<:Real},
                    nlevsoi::Int,
                    nlevdecomp::Int,
                    nlevdecomp_full::Int,
                    nlev_soildecomp_standard::Int,
-                   mino2lim::Float64,
-                   dtime::Float64,
+                   mino2lim::Real,
+                   dtime::Real,
                    noveg::Int,
                    use_cn::Bool,
                    use_nitrif_denitrif::Bool,
@@ -481,7 +481,8 @@ function ch4_prod!(ch4::CH4Data,
 
     # Calculate vertically resolved column-averaged root respiration
     nc = length(mask_soil)
-    rr_vr = zeros(nc, nlevsoi)
+    FT = eltype(t_soisno)
+    rr_vr = zeros(FT, nc, nlevsoi)
     if !lake
         for c in eachindex(mask_soil)
             mask_soil[c] || continue
@@ -514,7 +515,7 @@ function ch4_prod!(ch4::CH4Data,
                         ch4.sif_col[c] = 1.0
                         if !anoxia
                             if ch4.annavg_finrw_col[c] != SPVAL
-                                seasonalfin = max(ch4.finundated_col[c] - ch4.annavg_finrw_col[c], 0.0)
+                                seasonalfin = smooth_max(ch4.finundated_col[c] - ch4.annavg_finrw_col[c], 0.0)
                                 if seasonalfin > 0.0
                                     ch4.sif_col[c] = (ch4.annavg_finrw_col[c] + mino2lim * seasonalfin) / ch4.finundated_col[c]
                                     base_decomp *= ch4.sif_col[c]
@@ -583,7 +584,7 @@ function ch4_prod!(ch4::CH4Data,
                 f_ch4_adj *= ch4.layer_sat_lag_col[c, j]
             end
 
-            f_ch4_adj = min(f_ch4_adj, 0.5)
+            f_ch4_adj = smooth_min(f_ch4_adj, 0.5)
 
             # O2 decomposition demand
             o2_decomp_depth[c, j] = base_decomp * partition_z / dz[c, j]
@@ -639,15 +640,15 @@ Ported from `ch4_oxid` in `ch4Mod.F90`.
 function ch4_oxid!(ch4::CH4Data,
                    params::CH4Params,
                    mask_soil::BitVector,
-                   watsat::Matrix{Float64},
-                   h2osoi_vol::Matrix{Float64},
-                   smp_l::Matrix{Float64},
-                   t_soisno::Matrix{Float64},
+                   watsat::Matrix{<:Real},
+                   h2osoi_vol::Matrix{<:Real},
+                   smp_l::Matrix{<:Real},
+                   t_soisno::Matrix{<:Real},
                    jwt::Vector{Int},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
-                   dtime::Float64)
+                   dtime::Real)
 
     if sat == 0
         ch4_oxid_depth = ch4.ch4_oxid_depth_unsat_col
@@ -683,8 +684,8 @@ function ch4_oxid!(ch4::CH4Data,
                 vmax_eff = vmax_oxid_unsat
             end
 
-            porevol = max(watsat[c, j] - h2osoi_vol[c, j], 0.0)
-            h2osoi_vol_min = min(watsat[c, j], h2osoi_vol[c, j])
+            porevol = smooth_max(watsat[c, j] - h2osoi_vol[c, j], 0.0)
+            h2osoi_vol_min = smooth_min(watsat[c, j], h2osoi_vol[c, j])
 
             if j <= jwt[c] && smp_l[c, j] < 0.0
                 smp_fact = exp(-smp_l[c, j] / smp_crit)
@@ -736,24 +737,24 @@ end
 Site-level aerenchyma fluxes (O2 in, CH4 out, transpiration loss).
 Ported from `SiteOxAere` in `ch4Mod.F90`.
 """
-function site_ox_aere!(tranloss::Vector{Float64},
-                       aere::Vector{Float64},
-                       oxaere::Vector{Float64},
+function site_ox_aere!(tranloss::Vector{<:Real},
+                       aere::Vector{<:Real},
+                       oxaere::Vector{<:Real},
                        is_vegetated::Bool,
                        watsat::AbstractVector{Float64},
                        h2osoi_vol::AbstractVector{Float64},
                        t_soisno::AbstractVector{Float64},
                        conc_ch4::AbstractVector{Float64},
                        rootr::AbstractVector{Float64},
-                       qflx_tran_veg::Float64,
+                       qflx_tran_veg::Real,
                        jwt::Int,
-                       annsum_npp::Float64,
-                       annavg_agnpp::Float64,
-                       annavg_bgnpp::Float64,
-                       elai::Float64,
-                       poros_tiller::Float64,
+                       annsum_npp::Real,
+                       annavg_agnpp::Real,
+                       annavg_bgnpp::Real,
+                       elai::Real,
+                       poros_tiller::Real,
                        rootfr::AbstractVector{Float64},
-                       grnd_ch4_cond::Float64,
+                       grnd_ch4_cond::Real,
                        conc_o2::AbstractVector{Float64},
                        c_atm::AbstractVector{Float64},
                        z::AbstractVector{Float64},
@@ -769,19 +770,19 @@ function site_ox_aere!(tranloss::Vector{Float64},
     for j in 1:nlevsoi
         # Transpiration loss
         if ch4vc.transpirationloss && is_vegetated
-            h2osoi_vol_min = min(watsat[j], h2osoi_vol[j])
+            h2osoi_vol_min = smooth_min(watsat[j], h2osoi_vol[j])
             k_h_inv = exp(-C_H_INV[1] * (1.0 / t_soisno[j] - 1.0 / KH_TBASE) + log(KH_THETA[1]))
             k_h_cc = t_soisno[j] / k_h_inv * rgasLatm
             conc_ch4_wat = conc_ch4[j] / ((watsat[j] - h2osoi_vol_min) / k_h_cc + h2osoi_vol_min)
             tranloss[j] = conc_ch4_wat * rootr[j] * qflx_tran_veg / dz[j] / 1000.0
-            tranloss[j] = max(tranloss[j], 0.0)
+            tranloss[j] = smooth_max(tranloss[j], 0.0)
         else
             tranloss[j] = 0.0
         end
 
         # Aerenchyma diffusion
         if j > jwt && t_soisno[j] > TFRZ && is_vegetated
-            anpp = max(annsum_npp, 0.0)
+            anpp = smooth_max(annsum_npp, 0.0)
 
             if annavg_agnpp != SPVAL && annavg_bgnpp != SPVAL &&
                annavg_agnpp > 0.0 && annavg_bgnpp > 0.0
@@ -797,7 +798,7 @@ function site_ox_aere!(tranloss::Vector{Float64},
             if sat == 0
                 pt *= params.unsat_aere_ratio
             end
-            pt = max(pt, params.porosmin)
+            pt = smooth_max(pt, params.porosmin)
 
             area_tiller = params.scale_factor_aere * n_tiller * pt * RPI * 2.9e-3^2
 
@@ -807,7 +808,7 @@ function site_ox_aere!(tranloss::Vector{Float64},
             aerecond = 1.0 / (1.0 / (aerecond + smallnumber) + 1.0 / (grnd_ch4_cond + smallnumber))
 
             aere[j] = aerecond * (conc_ch4[j] / watsat[j] / k_h_cc - c_atm[1]) / dz[j]
-            aere[j] = max(aere[j], 0.0)
+            aere[j] = smooth_max(aere[j], 0.0)
 
             # O2 diffusion
             k_h_inv = exp(-C_H_INV[2] * (1.0 / t_soisno[j] - 1.0 / KH_TBASE) + log(KH_THETA[2]))
@@ -816,7 +817,7 @@ function site_ox_aere!(tranloss::Vector{Float64},
             aerecond = area_tiller * rootfr[j] * oxdiffus / (z[j] * params.rob)
             aerecond = 1.0 / (1.0 / (aerecond + smallnumber) + 1.0 / (grnd_ch4_cond + smallnumber))
             oxaere[j] = -aerecond * (conc_o2[j] / watsat[j] / k_h_cc - c_atm[2]) / dz[j]
-            oxaere[j] = max(oxaere[j], 0.0)
+            oxaere[j] = smooth_max(oxaere[j], 0.0)
 
             if !ch4vc.use_aereoxid_prog
                 oxaere[j] = 0.0
@@ -850,24 +851,24 @@ function ch4_aere!(ch4::CH4Data,
                    mask_soilp::BitVector,
                    patch_column::Vector{Int},
                    patch_itype::Vector{Int},
-                   patch_wtcol::Vector{Float64},
+                   patch_wtcol::Vector{<:Real},
                    col_gridcell::Vector{Int},
                    is_fates::BitVector,
-                   watsat::Matrix{Float64},
-                   h2osoi_vol::Matrix{Float64},
-                   t_soisno::Matrix{Float64},
-                   rootr::Matrix{Float64},
-                   rootfr::Matrix{Float64},
-                   elai::Vector{Float64},
-                   qflx_tran_veg::Vector{Float64},
-                   annsum_npp::Vector{Float64},
-                   z::Matrix{Float64},
-                   dz::Matrix{Float64},
+                   watsat::Matrix{<:Real},
+                   h2osoi_vol::Matrix{<:Real},
+                   t_soisno::Matrix{<:Real},
+                   rootr::Matrix{<:Real},
+                   rootfr::Matrix{<:Real},
+                   elai::Vector{<:Real},
+                   qflx_tran_veg::Vector{<:Real},
+                   annsum_npp::Vector{<:Real},
+                   z::Matrix{<:Real},
+                   dz::Matrix{<:Real},
                    jwt::Vector{Int},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
-                   dtime::Float64,
+                   dtime::Real,
                    noveg::Int)
 
     if sat == 0
@@ -897,9 +898,10 @@ function ch4_aere!(ch4::CH4Data,
     end
 
     if !lake
-        tranloss = zeros(nlevsoi)
-        aere = zeros(nlevsoi)
-        oxaere = zeros(nlevsoi)
+        FT_ae = eltype(t_soisno)
+        tranloss = zeros(FT_ae, nlevsoi)
+        aere = zeros(FT_ae, nlevsoi)
+        oxaere = zeros(FT_ae, nlevsoi)
 
         for p in eachindex(mask_soilp)
             mask_soilp[p] || continue
@@ -942,9 +944,9 @@ function ch4_aere!(ch4::CH4Data,
                           sat, nlevsoi, params, ch4vc)
 
             for j in 1:nlevsoi
-                aeretran = min(aere[j] + tranloss[j], conc_ch4[c, j] / dtime + ch4_prod_depth[c, j])
+                aeretran = smooth_min(aere[j] + tranloss[j], conc_ch4[c, j] / dtime + ch4_prod_depth[c, j])
                 ch4_aere_depth[c, j] += aeretran * patch_wtcol[p]
-                ch4_tran_depth[c, j] += min(tranloss[j], aeretran) * patch_wtcol[p]
+                ch4_tran_depth[c, j] += smooth_min(tranloss[j], aeretran) * patch_wtcol[p]
                 o2_aere_depth[c, j] += oxaere[j] * patch_wtcol[p]
             end
         end
@@ -967,22 +969,22 @@ Ported from `ch4_ebul` in `ch4Mod.F90`.
 function ch4_ebul!(ch4::CH4Data,
                    params::CH4Params,
                    mask_soil::BitVector,
-                   watsat::Matrix{Float64},
-                   h2osoi_vol::Matrix{Float64},
-                   t_soisno::Matrix{Float64},
-                   forc_pbot::Vector{Float64},
-                   h2osfc::Vector{Float64},
-                   frac_h2osfc::Vector{Float64},
-                   lake_icefrac::Matrix{Float64},
-                   lakedepth::Vector{Float64},
-                   z::Matrix{Float64},
-                   dz::Matrix{Float64},
-                   zi::Matrix{Float64},
+                   watsat::Matrix{<:Real},
+                   h2osoi_vol::Matrix{<:Real},
+                   t_soisno::Matrix{<:Real},
+                   forc_pbot::Vector{<:Real},
+                   h2osfc::Vector{<:Real},
+                   frac_h2osfc::Vector{<:Real},
+                   lake_icefrac::Matrix{<:Real},
+                   lakedepth::Vector{<:Real},
+                   z::Matrix{<:Real},
+                   dz::Matrix{<:Real},
+                   zi::Matrix{<:Real},
                    jwt::Vector{Int},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
-                   dtime::Float64)
+                   dtime::Real)
 
     if sat == 0
         ch4_ebul_depth = ch4.ch4_ebul_depth_unsat_col
@@ -1057,29 +1059,29 @@ function ch4_tran!(ch4::CH4Data,
                    ch4vc::CH4VarCon,
                    mask_soil::BitVector,
                    col_gridcell::Vector{Int},
-                   watsat::Matrix{Float64},
-                   h2osoi_vol::Matrix{Float64},
-                   h2osoi_liq::Matrix{Float64},
-                   h2osoi_ice::Matrix{Float64},
-                   h2osfc::Vector{Float64},
-                   bsw::Matrix{Float64},
-                   cellorg::Matrix{Float64},
-                   t_soisno::Matrix{Float64},
-                   t_grnd::Vector{Float64},
-                   t_h2osfc::Vector{Float64},
-                   frac_h2osfc::Vector{Float64},
-                   snow_depth::Vector{Float64},
+                   watsat::Matrix{<:Real},
+                   h2osoi_vol::Matrix{<:Real},
+                   h2osoi_liq::Matrix{<:Real},
+                   h2osoi_ice::Matrix{<:Real},
+                   h2osfc::Vector{<:Real},
+                   bsw::Matrix{<:Real},
+                   cellorg::Matrix{<:Real},
+                   t_soisno::Matrix{<:Real},
+                   t_grnd::Vector{<:Real},
+                   t_h2osfc::Vector{<:Real},
+                   frac_h2osfc::Vector{<:Real},
+                   snow_depth::Vector{<:Real},
                    snl::Vector{Int},
-                   z::Matrix{Float64},
-                   dz::Matrix{Float64},
-                   zi::Matrix{Float64},
+                   z::Matrix{<:Real},
+                   dz::Matrix{<:Real},
+                   zi::Matrix{<:Real},
                    jwt::Vector{Int},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
                    nlevsno::Int,
-                   dtime_ch4::Float64,
-                   organic_max::Float64)
+                   dtime_ch4::Real,
+                   organic_max::Real)
 
     smallnumber = 1.0e-12
     dtime = dtime_ch4
@@ -1148,7 +1150,7 @@ function ch4_tran!(ch4::CH4Data,
 
             ch4demand = ch4_oxid_depth[c, j] + ch4_aere_depth[c, j] + ch4_ebul_depth[c, j]
             if ch4demand > 0.0
-                ch4stress[c, j] = min((conc_ch4[c, j] / dtime + ch4_prod_depth[c, j]) / ch4demand, 1.0)
+                ch4stress[c, j] = smooth_min((conc_ch4[c, j] / dtime + ch4_prod_depth[c, j]) / ch4demand, 1.0)
             else
                 ch4stress[c, j] = 1.0
             end
@@ -1159,7 +1161,7 @@ function ch4_tran!(ch4::CH4Data,
                     if o2stress[c, j] < 1.0
                         o2demand2 = o2_decomp_depth[c, j]
                         if o2demand2 > 0.0
-                            o2stress[c, j] = min((conc_o2[c, j] / dtime + o2_aere_depth[c, j] -
+                            o2stress[c, j] = smooth_min((conc_o2[c, j] / dtime + o2_aere_depth[c, j] -
                                                    ch4stress[c, j] * o2_oxid_depth[c, j]) / o2demand2, 1.0)
                         else
                             o2stress[c, j] = 1.0
@@ -1171,7 +1173,7 @@ function ch4_tran!(ch4::CH4Data,
                     if ch4stress[c, j] < 1.0
                         ch4demand2 = ch4_aere_depth[c, j] + ch4_ebul_depth[c, j]
                         if ch4demand2 > 0.0
-                            ch4stress[c, j] = min((conc_ch4[c, j] / dtime + ch4_prod_depth[c, j] -
+                            ch4stress[c, j] = smooth_min((conc_ch4[c, j] / dtime + ch4_prod_depth[c, j] -
                                                     o2stress[c, j] * ch4_oxid_depth[c, j]) / ch4demand2, 1.0)
                         else
                             ch4stress[c, j] = 1.0
@@ -1201,14 +1203,15 @@ function ch4_tran!(ch4::CH4Data,
 
     # --- Set up and solve diffusion for each species ---
     # Allocate working arrays
-    k_h_cc_arr = zeros(nc, nlevsoi + 1, 2)  # 0:nlevsoi → 1:nlevsoi+1
-    epsilon_t = zeros(nc, nlevsoi, 2)
-    source = zeros(nc, nlevsoi, 2)
-    conc_ch4_bef = zeros(nc, nlevsoi)
-    conc_ch4_rel = zeros(nc, nlevsoi + 1)
-    conc_o2_rel = zeros(nc, nlevsoi + 1)
-    h2osoi_vol_min = zeros(nc, nlevsoi)
-    liqfrac = ones(nc, nlevsoi)
+    FT = eltype(t_soisno)
+    k_h_cc_arr = zeros(FT, nc, nlevsoi + 1, 2)  # 0:nlevsoi → 1:nlevsoi+1
+    epsilon_t = zeros(FT, nc, nlevsoi, 2)
+    source = zeros(FT, nc, nlevsoi, 2)
+    conc_ch4_bef = zeros(FT, nc, nlevsoi)
+    conc_ch4_rel = zeros(FT, nc, nlevsoi + 1)
+    conc_o2_rel = zeros(FT, nc, nlevsoi + 1)
+    h2osoi_vol_min = zeros(FT, nc, nlevsoi)
+    liqfrac = ones(FT, nc, nlevsoi)
 
     # Henry's law coefficients
     for j in 0:nlevsoi
@@ -1233,9 +1236,9 @@ function ch4_tran!(ch4::CH4Data,
             mask_soil[c] || continue
             g = col_gridcell[c]
 
-            h2osoi_vol_min[c, j] = min(watsat[c, j], h2osoi_vol[c, j])
+            h2osoi_vol_min[c, j] = smooth_min(watsat[c, j], h2osoi_vol[c, j])
             if ch4vc.ch4frzout
-                liqfrac[c, j] = max(0.05, (h2osoi_liq[c, j] / DENH2O + smallnumber) /
+                liqfrac[c, j] = smooth_max(0.05, (h2osoi_liq[c, j] / DENH2O + smallnumber) /
                                            (h2osoi_liq[c, j] / DENH2O + h2osoi_ice[c, j] / DENICE + smallnumber))
             else
                 liqfrac[c, j] = 1.0
@@ -1299,14 +1302,14 @@ function ch4_tran!(ch4::CH4Data,
     end
 
     # Tridiagonal solver arrays
-    diffus = zeros(nc, nlevsoi)
-    dp1_zp1 = zeros(nc, nlevsoi)
-    dm1_zm1 = zeros(nc, nlevsoi)
-    at_arr = zeros(nc, nlevsoi + 1)
-    bt_arr = zeros(nc, nlevsoi + 1)
-    ct_arr = zeros(nc, nlevsoi + 1)
-    rt_arr = zeros(nc, nlevsoi + 1)
-    spec_grnd_cond = zeros(nc, 2)
+    diffus = zeros(FT, nc, nlevsoi)
+    dp1_zp1 = zeros(FT, nc, nlevsoi)
+    dm1_zm1 = zeros(FT, nc, nlevsoi)
+    at_arr = zeros(FT, nc, nlevsoi + 1)
+    bt_arr = zeros(FT, nc, nlevsoi + 1)
+    ct_arr = zeros(FT, nc, nlevsoi + 1)
+    rt_arr = zeros(FT, nc, nlevsoi + 1)
+    spec_grnd_cond = zeros(FT, nc, 2)
     conc_ch4_rel_old = copy(conc_ch4_rel)
 
     for s in 1:2
@@ -1344,7 +1347,7 @@ function ch4_tran!(ch4::CH4Data,
                     f_a = 1.0 - h2osoi_vol_min[c, j] / watsat[c, j]
                     eps = watsat[c, j] - h2osoi_vol_min[c, j]
                     if organic_max > 0.0
-                        om_frac = min(params.om_frac_sf * cellorg[c, j] / organic_max, 1.0)
+                        om_frac = smooth_min(params.om_frac_sf * cellorg[c, j] / organic_max, 1.0)
                     else
                         om_frac = 1.0
                     end
@@ -1361,7 +1364,7 @@ function ch4_tran!(ch4::CH4Data,
                                         (h2osoi_liq[c, j] / DENH2O + h2osoi_ice[c, j] / DENICE + smallnumber)
                     end
                 end
-                diffus[c, j] = max(diffus[c, j], smallnumber)
+                diffus[c, j] = smooth_max(diffus[c, j], smallnumber)
             end
         end
 
@@ -1508,8 +1511,8 @@ function ch4_tran!(ch4::CH4Data,
                     mask_soil[c] || continue
                     g = col_gridcell[c]
                     jj = j + 1
-                    conc_rel[c, jj] = max(conc_rel[c, jj], 1.0e-12)
-                    conc_rel[c, jj] = min(conc_rel[c, jj], c_atm[g, 2] / epsilon_t[c, j, 2])
+                    conc_rel[c, jj] = smooth_max(conc_rel[c, jj], 1.0e-12)
+                    conc_rel[c, jj] = smooth_min(conc_rel[c, jj], c_atm[g, 2] / epsilon_t[c, j, 2])
                 end
             end
             conc_o2_rel .= conc_rel
@@ -1559,13 +1562,14 @@ function ch4_init_gridcell_balance_check!(ch4::CH4Data,
                                            mask_nolake::BitVector,
                                            mask_lake::BitVector,
                                            col_gridcell::Vector{Int},
-                                           col_wtgcell::Vector{Float64},
-                                           dz::Matrix{Float64},
+                                           col_wtgcell::Vector{<:Real},
+                                           dz::Matrix{<:Real},
                                            nlevsoi::Int,
                                            ng::Int,
                                            allowlakeprod::Bool)
     nc = length(mask_nolake)
-    totcolch4_bef_col = zeros(nc)
+    FT = eltype(dz)
+    totcolch4_bef_col = zeros(FT, nc)
 
     ch4_totcolch4!(totcolch4_bef_col, ch4, mask_nolake, mask_lake,
                    dz, nlevsoi, allowlakeprod)
@@ -1617,67 +1621,67 @@ function ch4!(ch4d::CH4Data,
               mask_lake::BitVector,
               mask_nolake::BitVector,
               col_gridcell::Vector{Int},
-              col_wtgcell::Vector{Float64},
+              col_wtgcell::Vector{<:Real},
               patch_column::Vector{Int},
               patch_itype::Vector{Int},
-              patch_wtcol::Vector{Float64},
+              patch_wtcol::Vector{<:Real},
               is_fates::BitVector,
-              latdeg::Vector{Float64},
-              forc_pbot::Vector{Float64},
-              forc_t::Vector{Float64},
-              forc_po2::Vector{Float64},
-              forc_pco2::Vector{Float64},
-              forc_pch4::Vector{Float64},
-              watsat::Matrix{Float64},
-              h2osoi_vol::Matrix{Float64},
-              h2osoi_liq::Matrix{Float64},
-              h2osoi_ice::Matrix{Float64},
-              h2osfc::Vector{Float64},
-              bsw::Matrix{Float64},
-              cellorg::Matrix{Float64},
-              smp_l::Matrix{Float64},
-              t_soisno::Matrix{Float64},
-              t_grnd::Vector{Float64},
-              t_h2osfc::Vector{Float64},
-              frac_h2osfc::Vector{Float64},
-              snow_depth::Vector{Float64},
+              latdeg::Vector{<:Real},
+              forc_pbot::Vector{<:Real},
+              forc_t::Vector{<:Real},
+              forc_po2::Vector{<:Real},
+              forc_pco2::Vector{<:Real},
+              forc_pch4::Vector{<:Real},
+              watsat::Matrix{<:Real},
+              h2osoi_vol::Matrix{<:Real},
+              h2osoi_liq::Matrix{<:Real},
+              h2osoi_ice::Matrix{<:Real},
+              h2osfc::Vector{<:Real},
+              bsw::Matrix{<:Real},
+              cellorg::Matrix{<:Real},
+              smp_l::Matrix{<:Real},
+              t_soisno::Matrix{<:Real},
+              t_grnd::Vector{<:Real},
+              t_h2osfc::Vector{<:Real},
+              frac_h2osfc::Vector{<:Real},
+              snow_depth::Vector{<:Real},
               snl::Vector{Int},
-              qflx_surf::Vector{Float64},
-              rootfr::Matrix{Float64},
-              rootfr_col::Matrix{Float64},
-              crootfr::Matrix{Float64},
-              rootr::Matrix{Float64},
-              elai::Vector{Float64},
-              qflx_tran_veg::Vector{Float64},
-              annsum_npp::Vector{Float64},
-              rr::Vector{Float64},
-              somhr::Vector{Float64},
-              lithr::Vector{Float64},
-              hr_vr::Matrix{Float64},
-              o_scalar::Matrix{Float64},
-              fphr::Matrix{Float64},
-              pot_f_nit_vr::Matrix{Float64},
-              lake_icefrac::Matrix{Float64},
-              lakedepth::Vector{Float64},
-              z::Matrix{Float64},
-              dz::Matrix{Float64},
-              zi::Matrix{Float64},
+              qflx_surf::Vector{<:Real},
+              rootfr::Matrix{<:Real},
+              rootfr_col::Matrix{<:Real},
+              crootfr::Matrix{<:Real},
+              rootr::Matrix{<:Real},
+              elai::Vector{<:Real},
+              qflx_tran_veg::Vector{<:Real},
+              annsum_npp::Vector{<:Real},
+              rr::Vector{<:Real},
+              somhr::Vector{<:Real},
+              lithr::Vector{<:Real},
+              hr_vr::Matrix{<:Real},
+              o_scalar::Matrix{<:Real},
+              fphr::Matrix{<:Real},
+              pot_f_nit_vr::Matrix{<:Real},
+              lake_icefrac::Matrix{<:Real},
+              lakedepth::Vector{<:Real},
+              z::Matrix{<:Real},
+              dz::Matrix{<:Real},
+              zi::Matrix{<:Real},
               nlevsoi::Int,
               nlevsno::Int,
               nlevdecomp::Int,
               nlevdecomp_full::Int,
               nlev_soildecomp_standard::Int,
-              mino2lim::Float64,
-              organic_max::Float64,
+              mino2lim::Real,
+              organic_max::Real,
               ng::Int,
               noveg::Int,
-              dtime::Float64,
+              dtime::Real,
               use_cn::Bool,
               use_nitrif_denitrif::Bool,
               anoxia::Bool,
-              agnpp::Vector{Float64},
-              bgnpp::Vector{Float64},
-              secsperyear::Float64)
+              agnpp::Vector{<:Real},
+              bgnpp::Vector{<:Real},
+              secsperyear::Real)
 
     nc = length(mask_soil)
     np = length(mask_soilp)
@@ -1697,15 +1701,16 @@ function ch4!(ch4d::CH4Data,
     jwt = fill(typemax(Int) >> 1, nc)  # large sentinel
 
     ch4_surf_flux_tot = ch4d.ch4_surf_flux_tot_col
-    ch4_prod_tot = zeros(nc)
-    ch4_oxid_tot = zeros(nc)
-    nem_col = zeros(nc)
-    fsat_bef = zeros(nc)
+    FT = eltype(t_soisno)
+    ch4_prod_tot = zeros(FT, nc)
+    ch4_oxid_tot = zeros(FT, nc)
+    nem_col = zeros(FT, nc)
+    fsat_bef = zeros(FT, nc)
 
     ch4_surf_flux_tot .= 0.0
 
     # Map gridcell-level forcing to column level
-    forc_pbot_col = zeros(nc)
+    forc_pbot_col = zeros(FT, nc)
     for c in 1:nc
         forc_pbot_col[c] = forc_pbot[col_gridcell[c]]
     end
@@ -1743,7 +1748,7 @@ function ch4!(ch4d::CH4Data,
         mask_soil[c] || continue
 
         if snow_depth[c] <= 0.0
-            ch4d.finundated_col[c] = max(min(ch4d.finundated_col[c], 1.0), 0.0)
+            ch4d.finundated_col[c] = smooth_max(smooth_min(ch4d.finundated_col[c], 1.0), 0.0)
             ch4d.finundated_pre_snow_col[c] = ch4d.finundated_col[c]
         else
             ch4d.finundated_col[c] = ch4d.finundated_pre_snow_col[c]
@@ -2034,8 +2039,8 @@ function ch4!(ch4d::CH4Data,
     ch4d.ch4co2f_grc .= 0.0
     ch4d.ch4prodg_grc .= 0.0
     ch4d.totcolch4_grc .= 0.0
-    nem_grc = zeros(ng)
-    ch4_surf_flux_tot_grc = zeros(ng)
+    nem_grc = zeros(FT, ng)
+    ch4_surf_flux_tot_grc = zeros(FT, ng)
 
     for c in 1:nc
         (mask_soil[c] || mask_lake[c]) || continue

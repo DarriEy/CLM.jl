@@ -38,7 +38,7 @@ Compute hydraulic conductivity.
 Ported from `soil_hk_interface` in `SoilWaterRetentionCurveMod.F90`.
 """
 function soil_hk!(swrc::SoilWaterRetentionCurve, c::Int, j::Int,
-                  s::Float64, imped::Float64, soilstate::SoilStateData)
+                  s::Real, imped::Real, soilstate::SoilStateData)
     error("soil_hk! not implemented for $(typeof(swrc))")
 end
 
@@ -61,7 +61,7 @@ Compute soil suction potential.
 Ported from `soil_suction_interface` in `SoilWaterRetentionCurveMod.F90`.
 """
 function soil_suction!(swrc::SoilWaterRetentionCurve, c::Int, j::Int,
-                       s::Float64, soilstate::SoilStateData)
+                       s::Real, soilstate::SoilStateData)
     error("soil_suction! not implemented for $(typeof(swrc))")
 end
 
@@ -84,6 +84,6 @@ This is done by inverting the soil_suction equation to solve for s.
 Ported from `soil_suction_inverse_interface` in `SoilWaterRetentionCurveMod.F90`.
 """
 function soil_suction_inverse!(swrc::SoilWaterRetentionCurve, c::Int, j::Int,
-                               smp_target::Float64, soilstate::SoilStateData)
+                               smp_target::Real, soilstate::SoilStateData)
     error("soil_suction_inverse! not implemented for $(typeof(swrc))")
 end

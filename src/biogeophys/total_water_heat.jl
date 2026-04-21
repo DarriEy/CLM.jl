@@ -27,7 +27,7 @@ Convert temperature to heat content relative to `heat_base_temp`.
 
 Ported from `TempToHeat` in `TotalWaterAndHeatMod.F90`.
 """
-@inline function _temp_to_heat(temp::Float64, cv::Float64)
+@inline function _temp_to_heat(temp::Real, cv::Real)
     return cv * (temp - heat_base_temp)
 end
 
@@ -46,10 +46,10 @@ Returns `(heat_liquid, latent_heat_liquid, cv_liquid)` as updated values.
 
 Ported from `AccumulateLiquidWaterHeat` in `TotalWaterAndHeatMod.F90`.
 """
-@inline function _accumulate_liquid_water_heat(temp::Float64, h2o::Float64,
-                                                heat_liquid::Float64,
-                                                latent_heat_liquid::Float64,
-                                                cv_liquid::Float64)
+@inline function _accumulate_liquid_water_heat(temp::Real, h2o::Real,
+                                                heat_liquid::Real,
+                                                latent_heat_liquid::Real,
+                                                cv_liquid::Real)
     cv = h2o * CPLIQ
     cv_liquid_out = cv_liquid + cv
     heat_liquid_out = heat_liquid + _temp_to_heat(temp, cv)
@@ -57,9 +57,9 @@ Ported from `AccumulateLiquidWaterHeat` in `TotalWaterAndHeatMod.F90`.
     return heat_liquid_out, latent_heat_liquid_out, cv_liquid_out
 end
 
-@inline function _accumulate_liquid_water_heat(temp::Float64, h2o::Float64,
-                                                heat_liquid::Float64,
-                                                latent_heat_liquid::Float64)
+@inline function _accumulate_liquid_water_heat(temp::Real, h2o::Real,
+                                                heat_liquid::Real,
+                                                latent_heat_liquid::Real)
     cv = h2o * CPLIQ
     heat_liquid_out = heat_liquid + _temp_to_heat(temp, cv)
     latent_heat_liquid_out = latent_heat_liquid + h2o * HFUS
@@ -78,7 +78,7 @@ water at a given temperature, using a base temperature of `heat_base_temp`.
 
 Ported from `LiquidWaterHeat` in `TotalWaterAndHeatMod.F90`.
 """
-function liquid_water_heat(temp::Float64, h2o::Float64)
+function liquid_water_heat(temp::Real, h2o::Real)
     heat_liquid = 0.0
     latent_heat_liquid = 0.0
     heat_liquid, latent_heat_liquid = _accumulate_liquid_water_heat(
@@ -111,10 +111,11 @@ function compute_water_mass_non_lake!(mask_nolake::BitVector,
                                        waterstate::WaterStateData,
                                        waterdiagnostic::WaterDiagnosticBulkData,
                                        subtract_dynbal_baselines::Bool,
-                                       water_mass::Vector{Float64})
+                                       water_mass::Vector{<:Real})
     nc = length(water_mass)
-    liquid_mass = zeros(nc)
-    ice_mass = zeros(nc)
+    FT = eltype(water_mass)
+    liquid_mass = zeros(FT, nc)
+    ice_mass = zeros(FT, nc)
 
     compute_liq_ice_mass_non_lake!(mask_nolake, col, waterstate, waterdiagnostic,
                                     subtract_dynbal_baselines, liquid_mass, ice_mass)
@@ -143,10 +144,11 @@ function compute_water_mass_lake!(mask_lake::BitVector,
                                    waterstate::WaterStateData,
                                    lakestate::LakeStateData,
                                    add_lake_water_and_subtract_dynbal_baselines::Bool,
-                                   water_mass::Vector{Float64})
+                                   water_mass::Vector{<:Real})
     nc = length(water_mass)
-    liquid_mass = zeros(nc)
-    ice_mass = zeros(nc)
+    FT = eltype(water_mass)
+    liquid_mass = zeros(FT, nc)
+    ice_mass = zeros(FT, nc)
 
     compute_liq_ice_mass_lake!(mask_lake, col, waterstate, lakestate,
                                 add_lake_water_and_subtract_dynbal_baselines,
@@ -184,8 +186,8 @@ function compute_liq_ice_mass_non_lake!(mask_nolake::BitVector,
                                           waterstate::WaterStateData,
                                           waterdiagnostic::WaterDiagnosticBulkData,
                                           subtract_dynbal_baselines::Bool,
-                                          liquid_mass::Vector{Float64},
-                                          ice_mass::Vector{Float64};
+                                          liquid_mass::Vector{<:Real},
+                                          ice_mass::Vector{<:Real};
                                           liqcan_col::Union{Vector{Float64}, Nothing}=nothing,
                                           snocan_col::Union{Vector{Float64}, Nothing}=nothing)
     nlevsno = varpar.nlevsno
@@ -198,8 +200,9 @@ function compute_liq_ice_mass_non_lake!(mask_nolake::BitVector,
     end
 
     # Canopy water: if not provided, use zero (caller should supply p2c results)
-    _liqcan = liqcan_col !== nothing ? liqcan_col : zeros(length(liquid_mass))
-    _snocan = snocan_col !== nothing ? snocan_col : zeros(length(liquid_mass))
+    FT_li = eltype(liquid_mass)
+    _liqcan = liqcan_col !== nothing ? liqcan_col : zeros(FT_li, length(liquid_mass))
+    _snocan = snocan_col !== nothing ? snocan_col : zeros(FT_li, length(liquid_mass))
 
     for c in eachindex(mask_nolake)
         mask_nolake[c] || continue
@@ -261,8 +264,8 @@ Ported from `AccumulateSoilLiqIceMassNonLake` in `TotalWaterAndHeatMod.F90`.
 function accumulate_soil_liq_ice_mass_non_lake!(mask::BitVector,
                                                   col::ColumnData,
                                                   waterstate::WaterStateData,
-                                                  liquid_mass::Vector{Float64},
-                                                  ice_mass::Vector{Float64})
+                                                  liquid_mass::Vector{<:Real},
+                                                  ice_mass::Vector{<:Real})
     nlevgrnd       = varpar.nlevgrnd
     nlevurb        = varpar.nlevurb
     nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
@@ -310,8 +313,8 @@ function compute_liq_ice_mass_lake!(mask_lake::BitVector,
                                      waterstate::WaterStateData,
                                      lakestate::LakeStateData,
                                      add_lake_water_and_subtract_dynbal_baselines::Bool,
-                                     liquid_mass::Vector{Float64},
-                                     ice_mass::Vector{Float64})
+                                     liquid_mass::Vector{<:Real},
+                                     ice_mass::Vector{<:Real})
     nlevgrnd = varpar.nlevgrnd
     nlevsno  = varpar.nlevsno
 
@@ -376,9 +379,9 @@ Ported from `AccumulateLiqIceMassLake` in `TotalWaterAndHeatMod.F90`.
 function accumulate_liq_ice_mass_lake!(mask::BitVector,
                                         col::ColumnData,
                                         lakestate::LakeStateData,
-                                        tracer_ratio::Float64,
-                                        liquid_mass::Vector{Float64},
-                                        ice_mass::Vector{Float64})
+                                        tracer_ratio::Real,
+                                        liquid_mass::Vector{<:Real},
+                                        ice_mass::Vector{<:Real})
     nlevlak = varpar.nlevlak
 
     for j in 1:nlevlak
@@ -419,9 +422,9 @@ function compute_heat_non_lake!(mask_nolake::BitVector,
                                  temperature::TemperatureData,
                                  waterstatebulk::WaterStateBulkData,
                                  waterdiagnosticbulk::WaterDiagnosticBulkData,
-                                 heat::Vector{Float64},
-                                 heat_liquid::Vector{Float64},
-                                 cv_liquid::Vector{Float64};
+                                 heat::Vector{<:Real},
+                                 heat_liquid::Vector{<:Real},
+                                 cv_liquid::Vector{<:Real};
                                  liqcan_col::Union{Vector{Float64}, Nothing}=nothing,
                                  snocan_col::Union{Vector{Float64}, Nothing}=nothing)
     nlevsno = varpar.nlevsno
@@ -431,9 +434,10 @@ function compute_heat_non_lake!(mask_nolake::BitVector,
     ws = waterstatebulk.ws
 
     # Local accumulators
-    heat_dry_mass = zeros(nc)
-    heat_ice = zeros(nc)
-    latent_heat_liquid = zeros(nc)
+    FT = eltype(heat)
+    heat_dry_mass = zeros(FT, nc)
+    heat_ice = zeros(FT, nc)
+    latent_heat_liquid = zeros(FT, nc)
 
     # Initialize outputs
     for c in eachindex(mask_nolake)
@@ -446,8 +450,8 @@ function compute_heat_non_lake!(mask_nolake::BitVector,
     end
 
     # Canopy water: if not provided, use zero
-    _liqcan = liqcan_col !== nothing ? liqcan_col : zeros(nc)
-    _snocan = snocan_col !== nothing ? snocan_col : zeros(nc)
+    _liqcan = liqcan_col !== nothing ? liqcan_col : zeros(FT, nc)
+    _snocan = snocan_col !== nothing ? snocan_col : zeros(FT, nc)
 
     for c in eachindex(mask_nolake)
         mask_nolake[c] || continue
@@ -535,9 +539,9 @@ function accumulate_soil_heat_non_lake!(mask::BitVector,
                                           soilstate::SoilStateData,
                                           temperature::TemperatureData,
                                           waterstatebulk::WaterStateBulkData,
-                                          heat::Vector{Float64},
-                                          heat_liquid::Vector{Float64},
-                                          cv_liquid::Vector{Float64})
+                                          heat::Vector{<:Real},
+                                          heat_liquid::Vector{<:Real},
+                                          cv_liquid::Vector{<:Real})
     nlevgrnd       = varpar.nlevgrnd
     nlevurb        = varpar.nlevurb
     nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
@@ -547,10 +551,11 @@ function accumulate_soil_heat_non_lake!(mask::BitVector,
     nc = length(heat)
 
     # Local accumulators
-    soil_heat_liquid = zeros(nc)
-    soil_heat_dry_mass = zeros(nc)
-    soil_heat_ice = zeros(nc)
-    soil_latent_heat_liquid = zeros(nc)
+    FT = eltype(heat)
+    soil_heat_liquid = zeros(FT, nc)
+    soil_heat_dry_mass = zeros(FT, nc)
+    soil_heat_ice = zeros(FT, nc)
+    soil_latent_heat_liquid = zeros(FT, nc)
 
     for c in eachindex(mask)
         mask[c] || continue
@@ -649,18 +654,19 @@ function compute_heat_lake!(mask_lake::BitVector,
                              temperature::TemperatureData,
                              waterstatebulk::WaterStateBulkData,
                              lakestate::LakeStateData,
-                             heat::Vector{Float64},
-                             heat_liquid::Vector{Float64},
-                             cv_liquid::Vector{Float64})
+                             heat::Vector{<:Real},
+                             heat_liquid::Vector{<:Real},
+                             cv_liquid::Vector{<:Real})
     nlevgrnd = varpar.nlevgrnd
     nlevsno  = varpar.nlevsno
     nc = length(heat)
     ws = waterstatebulk.ws
 
     # Local accumulators
-    heat_dry_mass = zeros(nc)
-    heat_ice = zeros(nc)
-    latent_heat_liquid = zeros(nc)
+    FT = eltype(heat)
+    heat_dry_mass = zeros(FT, nc)
+    heat_ice = zeros(FT, nc)
+    latent_heat_liquid = zeros(FT, nc)
 
     for c in eachindex(mask_lake)
         mask_lake[c] || continue
@@ -739,13 +745,14 @@ function accumulate_heat_lake!(mask::BitVector,
                                 col::ColumnData,
                                 temperature::TemperatureData,
                                 lakestate::LakeStateData,
-                                heat::Vector{Float64})
+                                heat::Vector{<:Real})
     nlevlak = varpar.nlevlak
     nc = length(heat)
 
-    lake_heat_liquid = zeros(nc)
-    lake_heat_ice = zeros(nc)
-    lake_latent_heat_liquid = zeros(nc)
+    FT = eltype(heat)
+    lake_heat_liquid = zeros(FT, nc)
+    lake_heat_ice = zeros(FT, nc)
+    lake_latent_heat_liquid = zeros(FT, nc)
 
     for c in eachindex(mask)
         mask[c] || continue
@@ -795,10 +802,10 @@ post-landcover change value is greater than the pre-landcover change value.
 Ported from `AdjustDeltaHeatForDeltaLiq` in `TotalWaterAndHeatMod.F90`.
 """
 function adjust_delta_heat_for_delta_liq!(bounds_grc::UnitRange{Int},
-                                            delta_liq::Vector{Float64},
-                                            liquid_water_temp1::Vector{Float64},
-                                            liquid_water_temp2::Vector{Float64},
-                                            delta_heat::Vector{Float64})
+                                            delta_liq::Vector{<:Real},
+                                            liquid_water_temp1::Vector{<:Real},
+                                            liquid_water_temp2::Vector{<:Real},
+                                            delta_heat::Vector{<:Real})
     for g in bounds_grc
         if delta_liq[g] != 0.0
             if delta_liq[g] < 0.0

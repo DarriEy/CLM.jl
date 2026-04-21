@@ -76,7 +76,7 @@ in forming grid cell averages.
 
 Ported from `build_scale_l2g` in `subgridAveMod.F90`.
 """
-function build_scale_l2g!(scale_l2g::Vector{Float64}, bounds::BoundsType,
+function build_scale_l2g!(scale_l2g::Vector{<:Real}, bounds::BoundsType,
                           l2g_scale_type::String, lun::LandunitData)
     scale_lookup = create_scale_l2g_lookup(l2g_scale_type)
     for l in bounds.begl:bounds.endl
@@ -101,7 +101,7 @@ Supported scale types:
 
 Ported from `set_c2l_scale` in `subgridAveMod.F90`.
 """
-function set_c2l_scale!(scale_c2l::Vector{Float64}, bounds::BoundsType,
+function set_c2l_scale!(scale_c2l::Vector{<:Real}, bounds::BoundsType,
                         c2l_scale_type::String,
                         col::ColumnData, lun::LandunitData)
     if c2l_scale_type == "unity"
@@ -160,7 +160,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `p2c_1d` in `subgridAveMod.F90`.
 """
-function p2c_1d!(carr::Vector{Float64}, parr::Vector{Float64},
+function p2c_1d!(carr::Vector{<:Real}, parr::Vector{<:Real},
                  bounds::BoundsType, p2c_scale_type::String,
                  pch::PatchData)
     # Set scale_p2c
@@ -219,7 +219,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `p2c_2d` in `subgridAveMod.F90`.
 """
-function p2c_2d!(carr::Matrix{Float64}, parr::Matrix{Float64},
+function p2c_2d!(carr::Matrix{<:Real}, parr::Matrix{<:Real},
                  bounds::BoundsType, num2d::Int, p2c_scale_type::String,
                  pch::PatchData)
     # Set scale_p2c
@@ -280,7 +280,7 @@ column mask. For each active column in the mask, averages over its patches.
 
 Ported from `p2c_1d_filter` in `subgridAveMod.F90`.
 """
-function p2c_1d_filter!(colarr::Vector{Float64}, patcharr::Vector{Float64},
+function p2c_1d_filter!(colarr::Vector{<:Real}, patcharr::Vector{<:Real},
                         mask_c::BitVector, col::ColumnData, pch::PatchData)
     for c in eachindex(mask_c)
         mask_c[c] || continue
@@ -303,7 +303,7 @@ for each level.
 
 Ported from `p2c_2d_filter` in `subgridAveMod.F90`.
 """
-function p2c_2d_filter!(colarr::Matrix{Float64}, patcharr::Matrix{Float64},
+function p2c_2d_filter!(colarr::Matrix{<:Real}, patcharr::Matrix{<:Real},
                         lev::Int, mask_c::BitVector,
                         col::ColumnData, pch::PatchData)
     for j in 1:lev
@@ -332,7 +332,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `p2l_1d` in `subgridAveMod.F90`.
 """
-function p2l_1d!(larr::Vector{Float64}, parr::Vector{Float64},
+function p2l_1d!(larr::Vector{<:Real}, parr::Vector{<:Real},
                  bounds::BoundsType,
                  p2c_scale_type::String, c2l_scale_type::String,
                  pch::PatchData, col::ColumnData, lun::LandunitData)
@@ -394,7 +394,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `p2l_2d` in `subgridAveMod.F90`.
 """
-function p2l_2d!(larr::Matrix{Float64}, parr::Matrix{Float64},
+function p2l_2d!(larr::Matrix{<:Real}, parr::Matrix{<:Real},
                  bounds::BoundsType, num2d::Int,
                  p2c_scale_type::String, c2l_scale_type::String,
                  pch::PatchData, col::ColumnData, lun::LandunitData)
@@ -464,7 +464,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `p2g_1d` in `subgridAveMod.F90`.
 """
-function p2g_1d!(garr::Vector{Float64}, parr::Vector{Float64},
+function p2g_1d!(garr::Vector{<:Real}, parr::Vector{<:Real},
                  bounds::BoundsType,
                  p2c_scale_type::String, c2l_scale_type::String,
                  l2g_scale_type::String,
@@ -532,7 +532,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `p2g_2d` in `subgridAveMod.F90`.
 """
-function p2g_2d!(garr::Matrix{Float64}, parr::Matrix{Float64},
+function p2g_2d!(garr::Matrix{<:Real}, parr::Matrix{<:Real},
                  bounds::BoundsType, num2d::Int,
                  p2c_scale_type::String, c2l_scale_type::String,
                  l2g_scale_type::String,
@@ -613,7 +613,7 @@ even for inactive columns.
 
 Ported from `c2l_1d` in `subgridAveMod.F90`.
 """
-function c2l_1d!(larr::Vector{Float64}, carr::Vector{Float64},
+function c2l_1d!(larr::Vector{<:Real}, carr::Vector{<:Real},
                  bounds::BoundsType, c2l_scale_type::String,
                  col::ColumnData, lun::LandunitData;
                  include_inactive::Bool=false)
@@ -664,7 +664,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `c2l_2d` in `subgridAveMod.F90`.
 """
-function c2l_2d!(larr::Matrix{Float64}, carr::Matrix{Float64},
+function c2l_2d!(larr::Matrix{<:Real}, carr::Matrix{<:Real},
                  bounds::BoundsType, num2d::Int, c2l_scale_type::String,
                  col::ColumnData, lun::LandunitData)
     # Set scale_c2l
@@ -722,7 +722,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `c2g_1d` in `subgridAveMod.F90`.
 """
-function c2g_1d!(garr::Vector{Float64}, carr::Vector{Float64},
+function c2g_1d!(garr::Vector{<:Real}, carr::Vector{<:Real},
                  bounds::BoundsType,
                  c2l_scale_type::String, l2g_scale_type::String,
                  col::ColumnData, lun::LandunitData)
@@ -778,7 +778,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `c2g_2d` in `subgridAveMod.F90`.
 """
-function c2g_2d!(garr::Matrix{Float64}, carr::Matrix{Float64},
+function c2g_2d!(garr::Matrix{<:Real}, carr::Matrix{<:Real},
                  bounds::BoundsType, num2d::Int,
                  c2l_scale_type::String, l2g_scale_type::String,
                  col::ColumnData, lun::LandunitData)
@@ -842,7 +842,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `l2g_1d` in `subgridAveMod.F90`.
 """
-function l2g_1d!(garr::Vector{Float64}, larr::Vector{Float64},
+function l2g_1d!(garr::Vector{<:Real}, larr::Vector{<:Real},
                  bounds::BoundsType, l2g_scale_type::String,
                  lun::LandunitData)
     # Build scale_l2g
@@ -892,7 +892,7 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `l2g_2d` in `subgridAveMod.F90`.
 """
-function l2g_2d!(garr::Matrix{Float64}, larr::Matrix{Float64},
+function l2g_2d!(garr::Matrix{<:Real}, larr::Matrix{<:Real},
                  bounds::BoundsType, num2d::Int, l2g_scale_type::String,
                  lun::LandunitData)
     # Build scale_l2g

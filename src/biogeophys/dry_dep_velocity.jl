@@ -150,7 +150,7 @@ and per-species parameters needed for the Wesely resistance model.
 
 Ported from module-level arrays in `DryDepVelocity.F90`.
 """
-Base.@kwdef mutable struct DryDepVelocityData{FT<:AbstractFloat}
+Base.@kwdef mutable struct DryDepVelocityData{FT<:Real}
     # --- Configuration ---
     n_drydep::Int = 0                     # number of dry deposition species
 
@@ -169,8 +169,8 @@ end
 
 """
     drydep_init!(dd::DryDepVelocityData, np::Int, n_drydep::Int;
-                 foxd::Vector{Float64}=Float64[],
-                 dv::Vector{Float64}=Float64[],
+                 foxd::Vector{<:Real}=Float64[],
+                 dv::Vector{<:Real}=Float64[],
                  mapping::Vector{Int}=Int[])
 
 Allocate and initialize all fields of a `DryDepVelocityData` instance for
@@ -184,20 +184,21 @@ Arguments:
 Ported from `DryDepVelocity%Init` in `DryDepVelocity.F90`.
 """
 function drydep_init!(dd::DryDepVelocityData, np::Int, n_drydep::Int;
-                      foxd::Vector{Float64} = Float64[],
-                      dv::Vector{Float64} = Float64[],
+                      foxd::Vector{<:Real} = Float64[],
+                      dv::Vector{<:Real} = Float64[],
                       mapping::Vector{Int} = Int[])
     dd.n_drydep = n_drydep
 
     if n_drydep > 0
+        FT = eltype(dd.foxd)
         if isempty(foxd)
-            dd.foxd = zeros(n_drydep)
+            dd.foxd = zeros(FT, n_drydep)
         else
             dd.foxd = copy(foxd)
         end
 
         if isempty(dv)
-            dd.dv = fill(0.2, n_drydep)  # default ~0.2 cm^2/s
+            dd.dv = fill(FT(0.2), n_drydep)  # default ~0.2 cm^2/s
         else
             dd.dv = copy(dv)
         end
@@ -208,7 +209,7 @@ function drydep_init!(dd::DryDepVelocityData, np::Int, n_drydep::Int;
             dd.mapping = copy(mapping)
         end
 
-        dd.velocity_patch = fill(0.0, np, n_drydep)
+        dd.velocity_patch = fill(zero(FT), np, n_drydep)
     end
 
     return nothing
@@ -245,7 +246,7 @@ Returns one of:
   4 = Winter with snow/ice
   5 = Transitional spring
 """
-function _wesely_season(lat::Float64, month::Int)
+function _wesely_season(lat::Real, month::Int)
     # Northern hemisphere months -> seasons
     #   Dec/Jan/Feb -> 4 (winter)
     #   Mar/Apr     -> 5 (transitional spring)
@@ -315,7 +316,7 @@ where:
 
 Returns R_b in s/m.
 """
-function _calc_rb(ustar::Float64, dv_species::Float64)
+function _calc_rb(ustar::Real, dv_species::Real)
     # Avoid division by zero
     ustar_safe = max(ustar, 0.001)
 
@@ -354,9 +355,9 @@ Arguments:
 
 Returns R_c in s/m (minimum 1 s/m).
 """
-function _calc_rc(season::Int, lt::Int, lai::Float64,
-                  foxd_i::Float64, heff_i::Float64,
-                  t_sfc::Float64, solar_flux::Float64,
+function _calc_rc(season::Int, lt::Int, lai::Real,
+                  foxd_i::Real, heff_i::Real,
+                  t_sfc::Real, solar_flux::Real,
                   has_snow::Bool)
 
     # Look up season-dependent resistances from tables
@@ -501,16 +502,16 @@ end
                     patch_column::Vector{Int},
                     patch_landunit::Vector{Int},
                     patch_itype::Vector{Int},
-                    ram1_patch::Vector{Float64},
-                    rb1_patch::Vector{Float64},
-                    fv_patch::Vector{Float64},
-                    elai_patch::Vector{Float64},
-                    forc_t_downscaled_col::Vector{Float64},
-                    forc_solar_col::Vector{Float64},
-                    frac_sno::Vector{Float64},
-                    lat_grc::Vector{Float64},
+                    ram1_patch::Vector{<:Real},
+                    rb1_patch::Vector{<:Real},
+                    fv_patch::Vector{<:Real},
+                    elai_patch::Vector{<:Real},
+                    forc_t_downscaled_col::Vector{<:Real},
+                    forc_solar_col::Vector{<:Real},
+                    frac_sno::Vector{<:Real},
+                    lat_grc::Vector{<:Real},
                     month::Int;
-                    heff::Vector{Float64}=Float64[])
+                    heff::Vector{<:Real}=Float64[])
 
 Calculate dry deposition velocities for all species at all active patches.
 Results are stored in `dd.velocity_patch` in cm/s.
@@ -551,16 +552,16 @@ function depvel_compute!(dd::DryDepVelocityData,
                          patch_column::Vector{Int},
                          patch_landunit::Vector{Int},
                          patch_itype::Vector{Int},
-                         ram1_patch::Vector{Float64},
-                         rb1_patch::Vector{Float64},
-                         fv_patch::Vector{Float64},
-                         elai_patch::Vector{Float64},
-                         forc_t_downscaled_col::Vector{Float64},
-                         forc_solar_col::Vector{Float64},
-                         frac_sno::Vector{Float64},
-                         lat_grc::Vector{Float64},
+                         ram1_patch::Vector{<:Real},
+                         rb1_patch::Vector{<:Real},
+                         fv_patch::Vector{<:Real},
+                         elai_patch::Vector{<:Real},
+                         forc_t_downscaled_col::Vector{<:Real},
+                         forc_solar_col::Vector{<:Real},
+                         frac_sno::Vector{<:Real},
+                         lat_grc::Vector{<:Real},
                          month::Int;
-                         heff::Vector{Float64} = Float64[])
+                         heff::Vector{<:Real} = Float64[])
     n_drydep = dd.n_drydep
     if n_drydep == 0
         return nothing
@@ -625,11 +626,11 @@ end
 
 """
     drydep_p2g!(dd::DryDepVelocityData,
-                ddvel_grc::Matrix{Float64},
+                ddvel_grc::Matrix{<:Real},
                 bounds_patch::UnitRange{Int},
                 mask_patch::BitVector,
                 patch_gridcell::Vector{Int},
-                wtgcell::Vector{Float64},
+                wtgcell::Vector{<:Real},
                 ng::Int)
 
 Average patch-level dry deposition velocities to gridcell level using
@@ -638,11 +639,11 @@ the gridcell weights. Results stored in `ddvel_grc` (ng x n_drydep) [cm/s].
 Ported from `DryDepVelocity%p2g` in `DryDepVelocity.F90`.
 """
 function drydep_p2g!(dd::DryDepVelocityData,
-                     ddvel_grc::Matrix{Float64},
+                     ddvel_grc::Matrix{<:Real},
                      bounds_patch::UnitRange{Int},
                      mask_patch::BitVector,
                      patch_gridcell::Vector{Int},
-                     wtgcell::Vector{Float64},
+                     wtgcell::Vector{<:Real},
                      ng::Int)
     n_drydep = dd.n_drydep
     if n_drydep == 0

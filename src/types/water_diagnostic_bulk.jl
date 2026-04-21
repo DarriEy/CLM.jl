@@ -13,7 +13,7 @@ Parameters read from parameter file for water diagnostic bulk type.
 
 Ported from `params_type` in `WaterDiagnosticBulkType.F90`.
 """
-Base.@kwdef mutable struct WaterDiagnosticBulkParams{FT<:AbstractFloat}
+Base.@kwdef mutable struct WaterDiagnosticBulkParams{FT<:Real}
     zlnd::FT = 0.01           # Momentum roughness length for soil, glacier, wetland (m)
     snw_rds_min::FT = 54.526  # minimum allowed snow effective radius (also cold "fresh snow" value) [microns]
 end
@@ -32,7 +32,7 @@ Includes fields from both the parent `waterdiagnostic_type` and the child
 Ported from `waterdiagnosticbulk_type` in `WaterDiagnosticBulkType.F90` and
 `waterdiagnostic_type` in `WaterDiagnosticType.F90`.
 """
-Base.@kwdef mutable struct WaterDiagnosticBulkData{FT<:AbstractFloat}
+Base.@kwdef mutable struct WaterDiagnosticBulkData{FT<:Real}
     # =====================================================================
     # Fields from parent waterdiagnostic_type (WaterDiagnosticType.F90)
     # =====================================================================
@@ -298,13 +298,13 @@ Ported from `InitBulkCold` in `WaterDiagnosticBulkType.F90`.
 function waterdiagnosticbulk_init_cold!(wd::WaterDiagnosticBulkData,
                                          bounds_col::UnitRange{Int},
                                          bounds_patch::UnitRange{Int};
-                                         snow_depth_input_col::Vector{Float64},
-                                         h2osno_input_col::Vector{Float64},
+                                         snow_depth_input_col::Vector{<:Real},
+                                         h2osno_input_col::Vector{<:Real},
                                          snl_col::Vector{Int},
                                          landunit_col::Vector{Int},
                                          urbpoi::BitVector,
-                                         snw_rds_min::Float64 = waterdiagbulk_params.snw_rds_min,
-                                         zlnd::Float64 = waterdiagbulk_params.zlnd)
+                                         snw_rds_min::Real = waterdiagbulk_params.snw_rds_min,
+                                         zlnd::Real = waterdiagbulk_params.zlnd)
     nlevsno = varpar.nlevsno
 
     # Set snow_depth and snow_layer_unity
@@ -405,16 +405,16 @@ function waterdiagnosticbulk_summary!(wd::WaterDiagnosticBulkData,
                                        mask_soilp::BitVector,
                                        mask_allc::BitVector,
                                        mask_nolakec::BitVector,
-                                       h2osoi_ice_col::Matrix{Float64},
-                                       h2osoi_liq_col::Matrix{Float64},
-                                       excess_ice_col::Matrix{Float64},
-                                       qflx_intercepted_liq_patch::Vector{Float64},
-                                       qflx_intercepted_snow_patch::Vector{Float64},
-                                       qflx_liq_grnd_col::Vector{Float64},
-                                       qflx_snow_grnd_col::Vector{Float64},
-                                       h2osno_total_col::Vector{Float64},
-                                       dz_col::Matrix{Float64},
-                                       zi_col::Matrix{Float64},
+                                       h2osoi_ice_col::Matrix{<:Real},
+                                       h2osoi_liq_col::Matrix{<:Real},
+                                       excess_ice_col::Matrix{<:Real},
+                                       qflx_intercepted_liq_patch::Vector{<:Real},
+                                       qflx_intercepted_snow_patch::Vector{<:Real},
+                                       qflx_liq_grnd_col::Vector{<:Real},
+                                       qflx_snow_grnd_col::Vector{<:Real},
+                                       h2osno_total_col::Vector{<:Real},
+                                       dz_col::Matrix{<:Real},
+                                       zi_col::Matrix{<:Real},
                                        landunit_col::Vector{Int},
                                        urbpoi::BitVector,
                                        lun_itype::Vector{Int})
@@ -514,7 +514,7 @@ Ported from `ResetBulkFilter` in `WaterDiagnosticBulkType.F90`.
 function waterdiagnosticbulk_reset_filter!(wd::WaterDiagnosticBulkData,
                                             mask::BitVector,
                                             bounds_col::UnitRange{Int};
-                                            snw_rds_min::Float64 = waterdiagbulk_params.snw_rds_min)
+                                            snw_rds_min::Real = waterdiagbulk_params.snw_rds_min)
     for c in bounds_col
         mask[c] || continue
         waterdiagnosticbulk_reset!(wd, c; snw_rds_min=snw_rds_min)
@@ -530,7 +530,7 @@ Initialize SNICAR variables for a fresh snow column.
 Ported from `ResetBulk` in `WaterDiagnosticBulkType.F90`.
 """
 function waterdiagnosticbulk_reset!(wd::WaterDiagnosticBulkData, c::Int;
-                                     snw_rds_min::Float64 = waterdiagbulk_params.snw_rds_min)
+                                     snw_rds_min::Real = waterdiagbulk_params.snw_rds_min)
     nlevsno = varpar.nlevsno
     # j=0 maps to index nlevsno in our 1-based arrays
     wd.snw_rds_col[c, nlevsno] = snw_rds_min

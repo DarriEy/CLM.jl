@@ -27,8 +27,8 @@ Combines `CNMRespReadNML` and `readParams` from `CNMRespMod.F90`.
 If `br_root` is not provided (remains SPVAL), it defaults to `br`.
 """
 function maint_resp_read_params!(params::MaintRespParams;
-                                  br::Float64 = 2.525e-6,
-                                  br_root::Float64 = SPVAL)
+                                  br::Real = 2.525e-6,
+                                  br_root::Real = SPVAL)
     params.br = br
     if br_root == SPVAL
         params.br_root = br
@@ -130,7 +130,8 @@ function cn_mresp!(mask_soilc::BitVector, mask_soilp::BitVector,
     # --- Column loop: temperature correction factors for each soil layer ---
     # Allocate tcsoi as a local array (ncols × nlevgrnd)
     nc = length(bounds_c)
-    tcsoi = Matrix{Float64}(undef, last(bounds_c), nlevgrnd)
+    FT = eltype(t_soisno)
+    tcsoi = Matrix{FT}(undef, last(bounds_c), nlevgrnd)
 
     for j in 1:nlevgrnd
         for c in bounds_c

@@ -142,7 +142,7 @@ function cnfire_calc_fire_root_wetness_li2014!(
     pftcon::PftConFireBase,
     patch::PatchData,
     soilstate::SoilStateData,
-    h2osoi_vol_col::Matrix{Float64},
+    h2osoi_vol_col::Matrix{<:Real},
     nlevgrnd::Int;
     soil_suction_fn::Function = default_soil_suction
 )
@@ -198,7 +198,7 @@ Default soil suction function placeholder. Returns suction based on
 Clapp-Hornberger parameterization. In practice, this should be replaced
 with the appropriate soil water retention curve method.
 """
-function default_soil_suction(c::Int, j::Int, s_node::Float64, soilstate::SoilStateData)
+function default_soil_suction(c::Int, j::Int, s_node::Real, soilstate::SoilStateData)
     # Clapp-Hornberger: smp = sucsat * s^(-bsw)
     sucsat = soilstate.sucsat_col[c, j]
     bsw    = soilstate.bsw_col[c, j]
@@ -225,7 +225,7 @@ function cnfire_calc_fire_root_wetness_li2021!(
     bounds::UnitRange{Int},
     patch::PatchData,
     soilstate::SoilStateData,
-    h2osoi_vol_col::Matrix{Float64},
+    h2osoi_vol_col::Matrix{<:Real},
     nlevgrnd::Int
 )
     btran2 = fire_data.btran2_patch
@@ -306,16 +306,16 @@ function cnfire_fluxes!(
     cnveg_nf::CNVegNitrogenFluxData,
     soilbgc_cf::SoilBiogeochemCarbonFluxData,
     decomp_cascade_con::DecompCascadeConData,
-    leaf_prof_patch::Matrix{Float64},
-    froot_prof_patch::Matrix{Float64},
-    croot_prof_patch::Matrix{Float64},
-    stem_prof_patch::Matrix{Float64},
-    totsomc_col::Vector{Float64},
-    decomp_cpools_vr_col::Array{Float64,3},
-    decomp_npools_vr_col::Array{Float64,3},
-    somc_fire_col::Vector{Float64};
-    dt::Float64 = 1800.0,
-    dayspyr::Float64 = 365.0,
+    leaf_prof_patch::Matrix{<:Real},
+    froot_prof_patch::Matrix{<:Real},
+    croot_prof_patch::Matrix{<:Real},
+    stem_prof_patch::Matrix{<:Real},
+    totsomc_col::Vector{<:Real},
+    decomp_cpools_vr_col::Array{<:Real,3},
+    decomp_npools_vr_col::Array{<:Real,3},
+    somc_fire_col::Vector{<:Real};
+    dt::Real = 1800.0,
+    dayspyr::Real = 365.0,
     nlevdecomp::Int = 1,
     ndecomp_pools::Int = 7,
     i_met_lit::Int = 1,
@@ -323,8 +323,8 @@ function cnfire_fluxes!(
     transient_landcover::Bool = false,
     use_cndv::Bool = false,
     use_matrixcn::Bool = false,
-    spinup_factor_deadwood::Float64 = SPINUP_FACTOR_DEADWOOD_DEFAULT,
-    secspday::Float64 = SECSPDAY,
+    spinup_factor_deadwood::Real = SPINUP_FACTOR_DEADWOOD_DEFAULT,
+    secspday::Real = SECSPDAY,
     nc3crop::Int = 15,
     noveg::Int = 0,
     kmo::Int = 6,

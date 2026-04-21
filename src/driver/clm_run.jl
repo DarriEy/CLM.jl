@@ -50,8 +50,8 @@ function clm_run!(;
     fsnowoptics::String = "",
     fsnowaging::String = "",
     frestart::String = "",
-    baseflow_scalar::Float64 = 1.0e-2,
-    int_snow_max::Float64 = 2000.0)
+    baseflow_scalar::Real = 1.0e-2,
+    int_snow_max::Real = 2000.0)
 
     # ========================================================================
     # Phase 1: Initialize

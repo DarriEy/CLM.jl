@@ -70,7 +70,7 @@ Compute soil suction potential using the Van Genuchten 1980 parameterization.
 Ported from `soil_suction` in `SoilWaterRetentionCurveVanGenuchten1980Mod.F90`.
 """
 function soil_suction!(swrc::SoilWaterRetentionCurveVanGenuchten1980, c::Int, j::Int,
-                       s::Float64, soilstate::SoilStateData)
+                       s::Real, soilstate::SoilStateData)
     bsw    = soilstate.bsw_col[c, j]
     sucsat = soilstate.sucsat_col[c, j]
 
@@ -103,7 +103,7 @@ This is done by inverting the soil_suction equation to solve for s.
 Ported from `soil_suction_inverse` in `SoilWaterRetentionCurveVanGenuchten1980Mod.F90`.
 """
 function soil_suction_inverse!(swrc::SoilWaterRetentionCurveVanGenuchten1980, c::Int, j::Int,
-                               smp_target::Float64, soilstate::SoilStateData)
+                               smp_target::Real, soilstate::SoilStateData)
     bsw    = soilstate.bsw_col[c, j]
     sucsat = soilstate.sucsat_col[c, j]
 

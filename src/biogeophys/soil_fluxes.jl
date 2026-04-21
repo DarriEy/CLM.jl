@@ -37,9 +37,9 @@ function soil_fluxes!(
         bounds_col       ::UnitRange{Int},
         bounds_patch     ::UnitRange{Int},
         # Atmospheric forcing (column-level)
-        forc_lwrad_col   ::Vector{Float64},
+        forc_lwrad_col   ::Vector{<:Real},
         # Time step
-        dtime            ::Float64)
+        dtime            ::Real)
 
     nlevsno  = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -48,9 +48,10 @@ function soil_fluxes!(
     # Local work arrays
     endc = last(bounds_col)
     endp = last(bounds_patch)
-    tinc    = zeros(endc)
-    t_grnd0 = zeros(endc)
-    eflx_lwrad_del = zeros(endp)
+    FT = eltype(temperature.t_grnd_col)
+    tinc    = zeros(FT, endc)
+    t_grnd0 = zeros(FT, endc)
+    eflx_lwrad_del = zeros(FT, endp)
 
     # =========================================================================
     # Loop 1: Calculate temperature difference for flux corrections (column)

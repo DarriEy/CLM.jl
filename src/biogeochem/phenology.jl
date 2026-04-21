@@ -196,7 +196,7 @@ end
 # cn_phenology_init!  — Initialization (after time manager & pftcon ready)
 # ==========================================================================
 function cn_phenology_init!(pstate::PhenologyState, params::PhenologyParams,
-                            dt_in::Float64;
+                            dt_in::Real;
                             use_crop::Bool=false,
                             pftcon::PftConPhenology=PftConPhenology(),
                             patch_data::PatchData=PatchData(),
@@ -277,12 +277,12 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        patch_data::PatchData,
                        gridcell::GridcellData,
                        cn_params::CNSharedParamsData,
-                       leaf_prof_patch::Matrix{Float64},
-                       froot_prof_patch::Matrix{Float64},
+                       leaf_prof_patch::Matrix{<:Real},
+                       froot_prof_patch::Matrix{<:Real},
                        phase::Int;
                        varctl::VarCtl=VarCtl(),
                        is_first_step::Bool=false,
-                       avg_dayspyr::Float64=365.0)
+                       avg_dayspyr::Real=365.0)
 
     if phase == 1
         cn_phenology_climate!(pstate, mask_soilp, temperature, cnveg_state, crop,
@@ -388,7 +388,7 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
                                  cnveg_cf::CNVegCarbonFluxData,
                                  cnveg_nf::CNVegNitrogenFluxData,
                                  patch_data::PatchData,
-                                 avg_dayspyr::Float64)
+                                 avg_dayspyr::Real)
     dt         = pstate.dt
     fstor2tran = pstate.fstor2tran
 
@@ -602,7 +602,7 @@ end
 # seasonal_critical_daylength — Critical daylength for seasonal deciduous offset
 # ==========================================================================
 function seasonal_critical_daylength(g::Int, p::Int,
-                                     crit_dayl_val::Float64,
+                                     crit_dayl_val::Real,
                                      params::PhenologyParams,
                                      pftcon::PftConPhenology,
                                      gridcell::GridcellData,
@@ -615,8 +615,8 @@ function seasonal_critical_daylength(g::Int, p::Int,
             return crit_dayl_val
         else
             cd = params.crit_dayl_at_high_lat -
-                 params.crit_dayl_lat_slope * (critical_offset_high_lat - abs(gridcell.latdeg[g]))
-            return max(cd, crit_dayl_val)
+                 params.crit_dayl_lat_slope * (critical_offset_high_lat - smooth_abs(gridcell.latdeg[g]))
+            return smooth_max(cd, crit_dayl_val)
         end
     elseif method == critical_daylight_depends_on_veg
         if pftcon.season_decid_temperate[ivt] == 1.0
@@ -626,8 +626,8 @@ function seasonal_critical_daylength(g::Int, p::Int,
         end
     elseif method == critical_daylight_depends_on_lat
         cd = params.crit_dayl_at_high_lat -
-             params.crit_dayl_lat_slope * (critical_offset_high_lat - abs(gridcell.latdeg[g]))
-        return max(cd, crit_dayl_val)
+             params.crit_dayl_lat_slope * (critical_offset_high_lat - smooth_abs(gridcell.latdeg[g]))
+        return smooth_max(cd, crit_dayl_val)
     elseif method == critical_daylight_constant
         return crit_dayl_val
     else
@@ -638,12 +638,12 @@ end
 # ==========================================================================
 # seasonal_decid_onset — Determine if seasonal deciduous onset should happen
 # ==========================================================================
-function seasonal_decid_onset(onset_gdd::Float64, onset_gddflag::Float64,
-                              soilt::Float64, soila10::Float64, t_a5min::Float64,
-                              dayl::Float64, snow_5day::Float64,
-                              ws_flag::Float64, crit_onset_gdd::Float64,
-                              season_decid_temperate::Float64,
-                              fracday::Float64, snow5d_thresh::Float64)
+function seasonal_decid_onset(onset_gdd::Real, onset_gddflag::Real,
+                              soilt::Real, soila10::Real, t_a5min::Real,
+                              dayl::Real, snow_5day::Real,
+                              ws_flag::Real, crit_onset_gdd::Real,
+                              season_decid_temperate::Real,
+                              fracday::Real, snow5d_thresh::Real)
     og      = onset_gdd
     ogf     = onset_gddflag
     result  = false
@@ -660,9 +660,9 @@ function seasonal_decid_onset(onset_gdd::Float64, onset_gddflag::Float64,
         og  = 0.0
     end
 
-    # accumulate GDD
-    if ogf == 1.0 && soilt > TFRZ
-        og += (soilt - TFRZ) * fracday
+    # accumulate GDD (smoothed TFRZ branch for AD)
+    if ogf == 1.0
+        og += smooth_max(soilt - TFRZ, 0.0) * fracday
     end
 
     if _onset_thresh_depends_on_veg[]
@@ -699,7 +699,7 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
                                     patch_data::PatchData,
                                     gridcell::GridcellData,
                                     cn_params::CNSharedParamsData;
-                                    avg_dayspyr::Float64=365.0)
+                                    avg_dayspyr::Real=365.0)
     dt              = pstate.dt
     fracday         = pstate.fracday
     ndays_off_val   = pstate.ndays_off
@@ -783,18 +783,18 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
 
         # test dormant → growth
         if cnveg_state.dormant_flag_patch[p] == 1.0
-            # freezing degree days
-            if cnveg_state.onset_gddflag_patch[p] == 0.0 && soilt < TFRZ
-                cnveg_state.onset_fdd_patch[p] += fracday
+            # freezing degree days (smoothed TFRZ branch for AD)
+            if cnveg_state.onset_gddflag_patch[p] == 0.0
+                cnveg_state.onset_fdd_patch[p] += smooth_heaviside(TFRZ - soilt) * fracday
             end
             if cnveg_state.onset_fdd_patch[p] > crit_onset_fdd
                 cnveg_state.onset_gddflag_patch[p] = 1.0
                 cnveg_state.onset_fdd_patch[p]     = 0.0
                 cnveg_state.onset_swi_patch[p]     = 0.0
             end
-            # GDD accumulation
-            if cnveg_state.onset_gddflag_patch[p] == 1.0 && soilt > TFRZ
-                cnveg_state.onset_gdd_patch[p] += (soilt - TFRZ) * fracday
+            # GDD accumulation (smoothed TFRZ branch for AD)
+            if cnveg_state.onset_gddflag_patch[p] == 1.0
+                cnveg_state.onset_gdd_patch[p] += smooth_max(soilt - TFRZ, 0.0) * fracday
             end
             # soil water index
             additional_onset_condition = true
@@ -859,19 +859,20 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
                 end
             elseif psi >= soilpsi_on
                 cnveg_state.offset_swi_patch[p] -= fracday
-                cnveg_state.offset_swi_patch[p] = max(cnveg_state.offset_swi_patch[p], 0.0)
+                cnveg_state.offset_swi_patch[p] = smooth_max(cnveg_state.offset_swi_patch[p], 0.0)
             end
-            # freezing day accumulation
-            if cnveg_state.offset_fdd_patch[p] > 0.0 && soilt > TFRZ
-                cnveg_state.offset_fdd_patch[p] -= fracday
-                cnveg_state.offset_fdd_patch[p] = max(0.0, cnveg_state.offset_fdd_patch[p])
+            # freezing day accumulation (smoothed TFRZ branch for AD)
+            # Blend thaw-decay and freeze-accumulation using smooth_heaviside
+            _hw_above = smooth_heaviside(soilt - TFRZ)   # ~1 when above freezing
+            _hw_below = 1.0 - _hw_above                  # ~1 when below freezing
+            if cnveg_state.offset_fdd_patch[p] > 0.0
+                cnveg_state.offset_fdd_patch[p] -= _hw_above * fracday
+                cnveg_state.offset_fdd_patch[p] = smooth_max(0.0, cnveg_state.offset_fdd_patch[p])
             end
-            if soilt <= TFRZ
-                cnveg_state.offset_fdd_patch[p] += fracday
-                if cnveg_state.offset_fdd_patch[p] > crit_offset_fdd &&
-                   cnveg_state.onset_flag_patch[p] == 0.0
-                    cnveg_state.offset_flag_patch[p] = 1.0
-                end
+            cnveg_state.offset_fdd_patch[p] += _hw_below * fracday
+            if cnveg_state.offset_fdd_patch[p] > crit_offset_fdd &&
+               cnveg_state.onset_flag_patch[p] == 0.0
+                cnveg_state.offset_flag_patch[p] = 1.0
             end
             # force offset if dayl < 6 hrs
             if gridcell.dayl[g] <= secspqtrday
@@ -893,9 +894,9 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
         end
 
         # long growing season factor
-        cnveg_state.lgsf_patch[p] = max(min(
+        cnveg_state.lgsf_patch[p] = smooth_clamp(
             3.0 * (cnveg_state.days_active_patch[p] - pftcon.leaf_long[ivt] * avg_dayspyr) / avg_dayspyr,
-            1.0), 0.0)
+            0.0, 1.0)
 
         # background litterfall rate
         if cnveg_state.offset_flag_patch[p] == 1.0
@@ -913,8 +914,8 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
             cnveg_state.bgtr_patch[p] = bgtr_val
 
             # non-matrix storage → transfer
-            cnveg_cf.leafc_storage_to_xfer_patch[p]  = max(0.0, cnveg_cs.leafc_storage_patch[p] - cnveg_cs.leafc_patch[p]) * bgtr_val
-            cnveg_cf.frootc_storage_to_xfer_patch[p] = max(0.0, cnveg_cs.frootc_storage_patch[p] - cnveg_cs.frootc_patch[p]) * bgtr_val
+            cnveg_cf.leafc_storage_to_xfer_patch[p]  = smooth_max(0.0, cnveg_cs.leafc_storage_patch[p] - cnveg_cs.leafc_patch[p]) * bgtr_val
+            cnveg_cf.frootc_storage_to_xfer_patch[p] = smooth_max(0.0, cnveg_cs.frootc_storage_patch[p] - cnveg_cs.frootc_patch[p]) * bgtr_val
             if pftcon.woody[ivt] == 1.0
                 cnveg_cf.livestemc_storage_to_xfer_patch[p]  = cnveg_cs.livestemc_storage_patch[p] * bgtr_val
                 cnveg_cf.deadstemc_storage_to_xfer_patch[p]  = cnveg_cs.deadstemc_storage_patch[p] * bgtr_val
@@ -1067,8 +1068,8 @@ function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
                          patch_data::PatchData,
                          gridcell::GridcellData;
                          varctl::VarCtl=VarCtl(),
-                         avg_dayspyr::Float64=365.0,
-                         jday::Int=1, kyr::Int=1, dayspyr::Float64=365.0,
+                         avg_dayspyr::Real=365.0,
+                         jday::Int=1, kyr::Int=1, dayspyr::Real=365.0,
                          use_fertilizer::Bool=false)
     dt = pstate.dt
 
@@ -1109,7 +1110,7 @@ end
 # ==========================================================================
 function crop_phase!(mask_pcropp::BitVector, crop::CropData,
                      cnveg_state::CNVegStateData,
-                     crop_phase_out::Vector{Float64})
+                     crop_phase_out::Vector{<:Real})
     for p in eachindex(mask_pcropp)
         mask_pcropp[p] || continue
 
@@ -1129,13 +1130,13 @@ end
 # ==========================================================================
 # plant_crop! — Initialize crop at planting
 # ==========================================================================
-function plant_crop!(p::Int, leafcn_in::Float64, jday::Int, kyr::Int,
+function plant_crop!(p::Int, leafcn_in::Real, jday::Int, kyr::Int,
                      crop::CropData, cnveg_state::CNVegStateData,
                      cnveg_cs::CNVegCarbonStateData,
                      cnveg_ns::CNVegNitrogenStateData,
                      cnveg_cf::CNVegCarbonFluxData,
                      cnveg_nf::CNVegNitrogenFluxData,
-                     dt::Float64)
+                     dt::Real)
     crop.croplive_patch[p]      = true
     crop.sown_in_this_window[p] = true
     cnveg_state.idop_patch[p]   = jday
@@ -1192,60 +1193,56 @@ function vernalization!(p::Int, pstate::PhenologyState,
 
     force_harvest = false
 
-    # crown temperature
-    if t_ref2m < TFRZ
-        tcrown = 2.0 + (t_ref2m - TFRZ) * (0.4 + 0.0018 *
-            (min(snow_depth * 100.0, 15.0) - 15.0)^2)
-    else
-        tcrown = t_ref2m - TFRZ
+    # crown temperature (smoothed TFRZ branch for AD)
+    _tcrown_frozen = 2.0 + (t_ref2m - TFRZ) * (0.4 + 0.0018 *
+        (smooth_min(snow_depth * 100.0, 15.0) - 15.0)^2)
+    _tcrown_unfrozen = t_ref2m - TFRZ
+    tcrown = smooth_ifelse(t_ref2m - TFRZ, _tcrown_unfrozen, _tcrown_frozen)
+
+    # vernalization factor (smoothed TFRZ branches for AD)
+    _hw_tmax_above_frz = smooth_heaviside(t_ref2m_max - TFRZ)
+    _hw_tmin_below_15  = smooth_heaviside(TFRZ + 15.0 - t_ref2m_min)
+    begin
+        vd1 = 1.4 - 0.0778 * tcrown
+        vd2 = 0.5 + 13.44 / ((t_ref2m_max - t_ref2m_min + 3.0)^2) * tcrown
+        vd  = smooth_clamp(smooth_min(vd1, vd2), 0.0, 1.0)
+        cnveg_state.cumvd_patch[p] += vd * _hw_tmax_above_frz * _hw_tmin_below_15
     end
-
-    # vernalization factor
-    if t_ref2m_max > TFRZ
-        if t_ref2m_min <= TFRZ + 15.0
-            vd1 = 1.4 - 0.0778 * tcrown
-            vd2 = 0.5 + 13.44 / ((t_ref2m_max - t_ref2m_min + 3.0)^2) * tcrown
-            vd  = max(0.0, min(1.0, vd1, vd2))
-            cnveg_state.cumvd_patch[p] += vd
-        end
-        if cnveg_state.cumvd_patch[p] < 10.0 && t_ref2m_max > TFRZ + 30.0
-            cnveg_state.cumvd_patch[p] -= 0.5 * (t_ref2m_max - TFRZ - 30.0)
-        end
-        cnveg_state.cumvd_patch[p] = max(0.0, cnveg_state.cumvd_patch[p])
-
-        crop.vf_patch[p] = 1.0 - p1v * (50.0 - cnveg_state.cumvd_patch[p])
-        crop.vf_patch[p] = max(0.0, min(crop.vf_patch[p], 1.0))
+    if cnveg_state.cumvd_patch[p] < 10.0
+        cnveg_state.cumvd_patch[p] -= 0.5 * smooth_max(t_ref2m_max - TFRZ - 30.0, 0.0) * _hw_tmax_above_frz
     end
+    cnveg_state.cumvd_patch[p] = smooth_max(0.0, cnveg_state.cumvd_patch[p])
 
-    # cold hardening
+    _vf_new = smooth_clamp(1.0 - p1v * (50.0 - cnveg_state.cumvd_patch[p]), 0.0, 1.0)
+    crop.vf_patch[p] = _vf_new * _hw_tmax_above_frz + crop.vf_patch[p] * (1.0 - _hw_tmax_above_frz)
+
+    # cold hardening (smoothed TFRZ branches for AD)
     hdidx = cnveg_state.hdidx_patch[p]
+    _hw_thaw_decay = smooth_heaviside(t_ref2m_max - tbase - TFRZ - 10.0)
+    _thaw_delta = smooth_max(t_ref2m_max - tbase - TFRZ - 10.0, 0.0)
     if t_ref2m_min <= TFRZ - 3.0 || hdidx != 0.0
         if hdidx >= hti
             hdidx += 0.083
-            hdidx = min(hdidx, hti * 2.0)
+            hdidx = smooth_min(hdidx, hti * 2.0)
         end
-        if t_ref2m_max >= tbase + TFRZ + 10.0
-            hdidx -= 0.02 * (t_ref2m_max - tbase - TFRZ - 10.0)
-            if hdidx > hti
-                hdidx -= 0.02 * (t_ref2m_max - tbase - TFRZ - 10.0)
-            end
-            hdidx = max(0.0, hdidx)
+        hdidx -= 0.02 * _thaw_delta * _hw_thaw_decay
+        if hdidx > hti
+            hdidx -= 0.02 * _thaw_delta * _hw_thaw_decay
         end
+        hdidx = smooth_max(0.0, hdidx) * _hw_thaw_decay + hdidx * (1.0 - _hw_thaw_decay)
     elseif tcrown >= tbase - 1.0
         if tcrown <= tbase + 8.0
             hdidx += 0.1 - (tcrown - tbase + 3.5)^2 / 506.0
             if hdidx >= hti && tcrown <= tbase + 0.0
                 hdidx += 0.083
-                hdidx = min(hdidx, hti * 2.0)
+                hdidx = smooth_min(hdidx, hti * 2.0)
             end
         end
-        if t_ref2m_max >= tbase + TFRZ + 10.0
-            hdidx -= 0.02 * (t_ref2m_max - tbase - TFRZ - 10.0)
-            if hdidx > hti
-                hdidx -= 0.02 * (t_ref2m_max - tbase - TFRZ - 10.0)
-            end
-            hdidx = max(0.0, hdidx)
+        hdidx -= 0.02 * _thaw_delta * _hw_thaw_decay
+        if hdidx > hti
+            hdidx -= 0.02 * _thaw_delta * _hw_thaw_decay
         end
+        hdidx = smooth_max(0.0, hdidx) * _hw_thaw_decay + hdidx * (1.0 - _hw_thaw_decay)
     end
     cnveg_state.hdidx_patch[p] = hdidx
 
@@ -1560,8 +1557,8 @@ function cn_litter_to_column!(mask_soilp::BitVector,
                               cnveg_cf::CNVegCarbonFluxData,
                               cnveg_nf::CNVegNitrogenFluxData,
                               patch_data::PatchData,
-                              leaf_prof::Matrix{Float64},
-                              froot_prof::Matrix{Float64};
+                              leaf_prof::Matrix{<:Real},
+                              froot_prof::Matrix{<:Real};
                               nlevdecomp::Int=1,
                               i_litr_min::Int=1, i_litr_max::Int=3,
                               npcropmin::Int=17,

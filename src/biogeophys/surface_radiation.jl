@@ -23,7 +23,7 @@ reflected/incident radiation diagnostics at the patch level.
 
 Ported from `surfrad_type` in `SurfaceRadiationMod.F90`.
 """
-Base.@kwdef mutable struct SurfaceRadiationData{FT<:AbstractFloat}
+Base.@kwdef mutable struct SurfaceRadiationData{FT<:Real}
     # --- Aerosol forcing (patch-level 1D) ---
     sfc_frc_aer_patch      ::Vector{FT} = Float64[]   # patch surface forcing of snow with all aerosols [W/m2]
     sfc_frc_bc_patch       ::Vector{FT} = Float64[]   # patch surface forcing of snow with BC [W/m2]
@@ -247,8 +247,8 @@ standalone version that can be called with pre-computed time-of-day.
 
 Returns `true` if within `deltasec` of local solar noon.
 """
-function is_near_local_noon(londeg::Float64; deltasec::Int = 1800,
-                             current_tod::Float64 = 43200.0)
+function is_near_local_noon(londeg::Real; deltasec::Int = 1800,
+                             current_tod::Real = 43200.0)
     # Local solar noon occurs when UTC time = 12h - longitude/15h
     # londeg > 0 is east, so local noon is earlier in UTC
     local_noon = 43200.0 - londeg * 240.0  # 240 = 3600/15
@@ -270,8 +270,8 @@ end
     canopy_sun_shade_fracs!(surfalb::SurfaceAlbedoData,
                             canopystate::CanopyStateData,
                             solarabs::SolarAbsorbedData,
-                            forc_solad_col::Matrix{Float64},
-                            forc_solai::Matrix{Float64},
+                            forc_solad_col::Matrix{<:Real},
+                            forc_solai::Matrix{<:Real},
                             pch::PatchData,
                             mask_nourbanp::BitVector,
                             bounds::UnitRange{Int})
@@ -302,8 +302,8 @@ Ported from `CanopySunShadeFracs` in `SurfaceRadiationMod.F90`.
 function canopy_sun_shade_fracs!(surfalb::SurfaceAlbedoData,
                                   canopystate::CanopyStateData,
                                   solarabs::SolarAbsorbedData,
-                                  forc_solad_col::Matrix{Float64},
-                                  forc_solai::Matrix{Float64},
+                                  forc_solad_col::Matrix{<:Real},
+                                  forc_solai::Matrix{<:Real},
                                   pch::PatchData,
                                   mask_nourbanp::BitVector,
                                   bounds::UnitRange{Int})
@@ -367,8 +367,8 @@ end
                        lun::LandunitData,
                        grc::GridcellData,
                        pch::PatchData,
-                       forc_solad_col::Matrix{Float64},
-                       forc_solai::Matrix{Float64},
+                       forc_solad_col::Matrix{<:Real},
+                       forc_solai::Matrix{<:Real},
                        mask_nourbanp::BitVector,
                        mask_urbanp::BitVector,
                        bounds::UnitRange{Int};
@@ -414,13 +414,13 @@ function surface_radiation!(surfalb::SurfaceAlbedoData,
                               lun::LandunitData,
                               grc::GridcellData,
                               pch::PatchData,
-                              forc_solad_col::Matrix{Float64},
-                              forc_solai::Matrix{Float64},
+                              forc_solad_col::Matrix{<:Real},
+                              forc_solai::Matrix{<:Real},
                               mask_nourbanp::BitVector,
                               mask_urbanp::BitVector,
                               bounds::UnitRange{Int};
-                              dtime::Float64 = 3600.0,
-                              current_tod::Float64 = 43200.0,
+                              dtime::Real = 3600.0,
+                              current_tod::Real = 43200.0,
                               use_subgrid_fluxes::Bool = true,
                               use_snicar_frc::Bool = false,
                               use_SSRE::Bool = false,
@@ -431,16 +431,17 @@ function surface_radiation!(surfalb::SurfaceAlbedoData,
     # Number of patches
     np = length(bounds)
 
-    # Temporary arrays (patch-level)
-    trd = zeros(last(bounds), nband)
-    tri = zeros(last(bounds), nband)
-    cad = zeros(last(bounds), nband)
-    cai = zeros(last(bounds), nband)
-    parveg = zeros(last(bounds))
-    sabg_pur = zeros(last(bounds))
-    sabg_bc  = zeros(last(bounds))
-    sabg_oc  = zeros(last(bounds))
-    sabg_dst = zeros(last(bounds))
+    # Temporary arrays (patch-level) — infer FT from forcing to support Dual
+    FT = eltype(forc_solad_col)
+    trd = zeros(FT, last(bounds), nband)
+    tri = zeros(FT, last(bounds), nband)
+    cad = zeros(FT, last(bounds), nband)
+    cai = zeros(FT, last(bounds), nband)
+    parveg = zeros(FT, last(bounds))
+    sabg_pur = zeros(FT, last(bounds))
+    sabg_bc  = zeros(FT, last(bounds))
+    sabg_oc  = zeros(FT, last(bounds))
+    sabg_dst = zeros(FT, last(bounds))
 
     # --- Initialize fluxes ---
     for p in bounds

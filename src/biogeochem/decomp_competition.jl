@@ -69,13 +69,13 @@ Read competition parameters from keyword arguments (replaces NetCDF file reading
 Corresponds to `readParams` in the Fortran source.
 """
 function soil_bgc_competition_params_read!(params::SoilBGCCompetitionParams;
-                                            bdnr::Float64,
-                                            compet_plant_no3::Float64,
-                                            compet_plant_nh4::Float64,
-                                            compet_decomp_no3::Float64,
-                                            compet_decomp_nh4::Float64,
-                                            compet_denit::Float64,
-                                            compet_nit::Float64)
+                                            bdnr::Real,
+                                            compet_plant_no3::Real,
+                                            compet_plant_nh4::Real,
+                                            compet_decomp_no3::Real,
+                                            compet_decomp_nh4::Real,
+                                            compet_denit::Real,
+                                            compet_nit::Real)
     params.bdnr              = bdnr
     params.compet_plant_no3  = compet_plant_no3
     params.compet_plant_nh4  = compet_plant_nh4
@@ -101,8 +101,8 @@ Corresponds to `SoilBiogeochemCompetitionInit` in the Fortran source.
 """
 function soil_bgc_competition_init!(state::SoilBGCCompetitionState,
                                      params::SoilBGCCompetitionParams;
-                                     dt::Float64,
-                                     secspday::Float64=SECSPDAY,
+                                     dt::Real,
+                                     secspday::Real=SECSPDAY,
                                      suplnitro::String=SUPLN_NONE)
     state.dt   = dt
     state.bdnr = params.bdnr * (dt / secspday)
@@ -144,9 +144,9 @@ Resolve plant/heterotroph/nitrifier/denitrifier competition for mineral N.
 - `bounds::UnitRange{Int}` -- column bounds
 - `nlevdecomp::Int` -- number of decomposition levels
 - `ndecomp_cascade_transitions::Int` -- number of decomp cascade transitions
-- `dzsoi_decomp::Vector{Float64}` -- decomposition level thicknesses
-- `pmnf_decomp_cascade::Array{Float64,3}` -- potential mineral N flux from decomp
-- `p_decomp_cn_gain::Array{Float64,3}` -- C:N ratio of flux gained by receiver pool
+- `dzsoi_decomp::Vector{<:Real}` -- decomposition level thicknesses
+- `pmnf_decomp_cascade::Array{<:Real,3}` -- potential mineral N flux from decomp
+- `p_decomp_cn_gain::Array{<:Real,3}` -- C:N ratio of flux gained by receiver pool
 - `cascade_receiver_pool::Vector{Int}` -- receiver pool index for each transition
 - `use_nitrif_denitrif::Bool` -- use nitrification/denitrification model
 - `use_fun::Bool` -- use FUN model
@@ -169,9 +169,9 @@ function soil_bgc_competition!(
         bounds::UnitRange{Int},
         nlevdecomp::Int,
         ndecomp_cascade_transitions::Int,
-        dzsoi_decomp::Vector{Float64},
-        pmnf_decomp_cascade::Array{Float64,3},
-        p_decomp_cn_gain::Array{Float64,3},
+        dzsoi_decomp::Vector{<:Real},
+        pmnf_decomp_cascade::Array{<:Real,3},
+        p_decomp_cn_gain::Array{<:Real,3},
         cascade_receiver_pool::Vector{Int},
         use_nitrif_denitrif::Bool=false,
         use_fun::Bool=false,
@@ -179,7 +179,7 @@ function soil_bgc_competition!(
         mimics_decomp::Bool=false,
         i_cop_mic::Int=0,
         i_oli_mic::Int=0,
-        nitrif_n2o_loss_frac::Float64=NITRIF_N2O_LOSS_FRAC)
+        nitrif_n2o_loss_frac::Real=NITRIF_N2O_LOSS_FRAC)
 
     dt   = state.dt
     bdnr = state.bdnr
@@ -226,11 +226,12 @@ function soil_bgc_competition!(
     local_use_fun = use_fun
 
     # Local arrays
+    FT = eltype(sminn_vr)
     n_arr = length(mask_bgc_soilc)
-    sminn_tot              = zeros(n_arr)
-    sminn_to_plant_new     = zeros(n_arr)
-    nuptake_prof           = zeros(n_arr, nlevdecomp)
-    sum_ndemand_vr         = zeros(n_arr, nlevdecomp)
+    sminn_tot              = zeros(FT, n_arr)
+    sminn_to_plant_new     = zeros(FT, n_arr)
+    nuptake_prof           = zeros(FT, n_arr, nlevdecomp)
+    sum_ndemand_vr         = zeros(FT, n_arr, nlevdecomp)
 
     if !use_nitrif_denitrif
         # ====================================================================
@@ -238,9 +239,9 @@ function soil_bgc_competition!(
         # ====================================================================
 
         nlimit             = zeros(Int, n_arr, nlevdecomp)
-        residual_sminn_vr  = zeros(n_arr, nlevdecomp)
-        residual_sminn     = zeros(n_arr)
-        residual_plant_ndemand = zeros(n_arr)
+        residual_sminn_vr  = zeros(FT, n_arr, nlevdecomp)
+        residual_sminn     = zeros(FT, n_arr)
+        residual_plant_ndemand = zeros(FT, n_arr)
 
         # init sminn_tot
         for c in bounds
@@ -443,19 +444,19 @@ function soil_bgc_competition!(
         compet_denit      = params.compet_denit
         compet_nit        = params.compet_nit
 
-        fpi_no3_vr_local       = zeros(n_arr, nlevdecomp)
-        fpi_nh4_vr_local       = zeros(n_arr, nlevdecomp)
-        sum_nh4_demand         = zeros(n_arr, nlevdecomp)
-        sum_nh4_demand_scaled  = zeros(n_arr, nlevdecomp)
-        sum_no3_demand         = zeros(n_arr, nlevdecomp)
-        sum_no3_demand_scaled  = zeros(n_arr, nlevdecomp)
+        fpi_no3_vr_local       = zeros(FT, n_arr, nlevdecomp)
+        fpi_nh4_vr_local       = zeros(FT, n_arr, nlevdecomp)
+        sum_nh4_demand         = zeros(FT, n_arr, nlevdecomp)
+        sum_nh4_demand_scaled  = zeros(FT, n_arr, nlevdecomp)
+        sum_no3_demand         = zeros(FT, n_arr, nlevdecomp)
+        sum_no3_demand_scaled  = zeros(FT, n_arr, nlevdecomp)
         nlimit_no3             = zeros(Int, n_arr, nlevdecomp)
         nlimit_nh4             = zeros(Int, n_arr, nlevdecomp)
-        residual_plant_ndemand = zeros(n_arr)
-        residual_smin_nh4_vr   = zeros(n_arr, nlevdecomp)
-        residual_smin_no3_vr   = zeros(n_arr, nlevdecomp)
-        residual_smin_nh4      = zeros(n_arr)
-        residual_smin_no3      = zeros(n_arr)
+        residual_plant_ndemand = zeros(FT, n_arr)
+        residual_smin_nh4_vr   = zeros(FT, n_arr, nlevdecomp)
+        residual_smin_no3_vr   = zeros(FT, n_arr, nlevdecomp)
+        residual_smin_nh4      = zeros(FT, n_arr)
+        residual_smin_no3      = zeros(FT, n_arr)
 
         # init total mineral N pools
         for c in bounds

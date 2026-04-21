@@ -16,7 +16,7 @@ and gridcell levels for C12 (and optionally C13/C14 isotopes).
 
 Ported from `cnveg_carbonstate_type` in `CNVegCarbonStateType.F90`.
 """
-Base.@kwdef mutable struct CNVegCarbonStateData{FT<:AbstractFloat}
+Base.@kwdef mutable struct CNVegCarbonStateData{FT<:Real}
     species::Int = 0  # carbon species: 1=C12, 2=C13, 3=C14
 
     # --- Patch-level 2D (patch x nrepr) ---
@@ -403,8 +403,8 @@ Set carbon state variables for filtered patches and columns.
 Ported from `cnveg_carbonstate_type%SetValues`.
 """
 function cnveg_carbon_state_set_values!(cs::CNVegCarbonStateData,
-                                        mask_patch::BitVector, value_patch::Float64,
-                                        mask_col::BitVector, value_col::Float64;
+                                        mask_patch::BitVector, value_patch::Real,
+                                        mask_col::BitVector, value_col::Real;
                                         use_matrixcn::Bool=false, use_crop::Bool=false,
                                         nrepr::Int=NREPR)
     # Patch-level
@@ -693,7 +693,7 @@ Ported from `cnveg_carbonstate_type%InitCold`.
 """
 function cnveg_carbon_state_init_cold!(cs::CNVegCarbonStateData,
                                        bounds_patch::UnitRange{Int};
-                                       ratio::Float64=1.0,
+                                       ratio::Real=1.0,
                                        use_matrixcn::Bool=false,
                                        use_crop::Bool=false)
     for p in bounds_patch

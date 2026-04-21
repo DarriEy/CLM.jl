@@ -48,18 +48,18 @@ Set nitrification/denitrification parameters from keyword arguments.
 Corresponds to `readParams` in the Fortran source (reads from params file).
 """
 function nitrif_denitrif_read_params!(params::NitrifDenitrifParams;
-                                       k_nitr_max_perday::Float64,
-                                       surface_tension_water::Float64,
-                                       rij_kro_a::Float64,
-                                       rij_kro_alpha::Float64,
-                                       rij_kro_beta::Float64,
-                                       rij_kro_gamma::Float64,
-                                       rij_kro_delta::Float64,
-                                       denitrif_respiration_coefficient::Float64,
-                                       denitrif_respiration_exponent::Float64,
-                                       denitrif_nitrateconc_coefficient::Float64,
-                                       denitrif_nitrateconc_exponent::Float64,
-                                       om_frac_sf::Float64)
+                                       k_nitr_max_perday::Real,
+                                       surface_tension_water::Real,
+                                       rij_kro_a::Real,
+                                       rij_kro_alpha::Real,
+                                       rij_kro_beta::Real,
+                                       rij_kro_gamma::Real,
+                                       rij_kro_delta::Real,
+                                       denitrif_respiration_coefficient::Real,
+                                       denitrif_respiration_exponent::Real,
+                                       denitrif_nitrateconc_coefficient::Real,
+                                       denitrif_nitrateconc_exponent::Real,
+                                       om_frac_sf::Real)
     params.k_nitr_max_perday                = k_nitr_max_perday
     params.surface_tension_water            = surface_tension_water
     params.rij_kro_a                        = rij_kro_a
@@ -103,23 +103,23 @@ function nitrif_denitrif!(
     bounds::UnitRange{Int},
     nlevdecomp::Int,
     # Soil state arrays
-    watsat::Matrix{Float64},
-    watfc::Matrix{Float64},
-    bd::Matrix{Float64},
-    bsw::Matrix{Float64},
-    cellorg::Matrix{Float64},
-    sucsat::Matrix{Float64},
-    soilpsi::Matrix{Float64},
+    watsat::Matrix{<:Real},
+    watfc::Matrix{<:Real},
+    bd::Matrix{<:Real},
+    bsw::Matrix{<:Real},
+    cellorg::Matrix{<:Real},
+    sucsat::Matrix{<:Real},
+    soilpsi::Matrix{<:Real},
     # Water state arrays
-    h2osoi_vol::Matrix{Float64},
-    h2osoi_liq::Matrix{Float64},
+    h2osoi_vol::Matrix{<:Real},
+    h2osoi_liq::Matrix{<:Real},
     # Temperature
-    t_soisno::Matrix{Float64},
+    t_soisno::Matrix{<:Real},
     # CH4 arrays (only needed when use_lch4=true)
-    o2_decomp_depth_unsat::Matrix{Float64} = zeros(0, 0),
-    conc_o2_unsat::Matrix{Float64} = zeros(0, 0),
+    o2_decomp_depth_unsat::Matrix{<:Real} = zeros(0, 0),
+    conc_o2_unsat::Matrix{<:Real} = zeros(0, 0),
     # Column geometry
-    col_dz::Matrix{Float64},
+    col_dz::Matrix{<:Real},
     # Control flags
     use_lch4::Bool = true,
     no_frozen_nitrif_denitrif::Bool = false)

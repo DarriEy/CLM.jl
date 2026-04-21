@@ -19,8 +19,8 @@ needed in the humidity calculations.
 - `soilstate::SoilStateData`: soil state (input/output: soilalpha_col, soilalpha_u_col, rootr_road_perv_col; input: smpmin_col, sucsat_col, watsat_col, watdry_col, watopt_col, bsw_col, rootfr_road_perv_col)
 - `waterstatebulk::WaterStateBulkData`: water state (h2osoi_ice_col, h2osoi_liq_col via ws)
 - `waterdiagbulk::WaterDiagnosticBulkData`: water diagnostics (input: frac_h2osfc_col, frac_sno_eff_col; output: qg_snow_col, qg_soil_col, qg_col, qg_h2osfc_col, dqgdT_col)
-- `forc_pbot::Vector{Float64}`: atmospheric pressure, downscaled to column (Pa)
-- `forc_q::Vector{Float64}`: atmospheric specific humidity, downscaled to column (kg/kg)
+- `forc_pbot::Vector{<:Real}`: atmospheric pressure, downscaled to column (Pa)
+- `forc_q::Vector{<:Real}`: atmospheric specific humidity, downscaled to column (kg/kg)
 - `mask_nolakec::BitVector`: non-lake column mask
 - `bounds::UnitRange{Int}`: column bounds
 
@@ -32,8 +32,8 @@ function calculate_surface_humidity!(col::ColumnData,
                                      soilstate::SoilStateData,
                                      waterstatebulk::WaterStateBulkData,
                                      waterdiagbulk::WaterDiagnosticBulkData,
-                                     forc_pbot::Vector{Float64},
-                                     forc_q::Vector{Float64},
+                                     forc_pbot::Vector{<:Real},
+                                     forc_q::Vector{<:Real},
                                      mask_nolakec::BitVector,
                                      bounds::UnitRange{Int})
 

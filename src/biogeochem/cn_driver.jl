@@ -126,13 +126,13 @@ function cn_driver_no_leaching!(
         # Patch/column metadata (from PatchData, PftCon, CropData, etc.)
         patch_column::Vector{Int},
         ivt::Vector{Int},
-        woody::Vector{Float64},
+        woody::Vector{<:Real},
         harvdate::Vector{Int},
         col_is_fates::Vector{Bool},
         cascade_donor_pool::Vector{Int},
         cascade_receiver_pool::Vector{Int},
         # Time step
-        dt::Float64,
+        dt::Real,
         # Carbon/nitrogen state and flux data structures
         cnveg_cs::CNVegCarbonStateData,
         cnveg_cf::CNVegCarbonFluxData,
@@ -143,6 +143,25 @@ function cn_driver_no_leaching!(
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
         soilbgc_state::SoilBiogeochemStateData,
+        # Decomposition cascade and params (for rate constants + potential + decomp)
+        cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
+        decomp_bgc_state::Union{DecompBGCState, Nothing} = nothing,
+        decomp_bgc_params::Union{DecompBGCParams, Nothing} = nothing,
+        cn_shared_params::Union{CNSharedParamsData, Nothing} = nothing,
+        decomp_params::Union{DecompParams, Nothing} = nothing,
+        competition_state::Union{SoilBGCCompetitionState, Nothing} = nothing,
+        competition_params::Union{SoilBGCCompetitionParams, Nothing} = nothing,
+        litter_params::Union{LitterVertTranspParams, Nothing} = nothing,
+        # Physical state for decomposition
+        t_soisno::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        soilpsi::Union{Matrix{<:Real}, Nothing} = nothing,
+        col::Union{ColumnData, Nothing} = nothing,
+        grc::Union{GridcellData, Nothing} = nothing,
+        active_layer::Union{ActiveLayerData, Nothing} = nothing,
+        # Vertical grid info
+        dzsoi_decomp::Union{Vector{<:Real}, Nothing} = nothing,
+        zsoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
+        zisoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
         # Output: fire masks (populated by fire routines)
         mask_actfirec::BitVector = falses(length(bounds_col)),
         mask_actfirep::BitVector = falses(length(bounds_patch)))
@@ -176,11 +195,81 @@ function cn_driver_no_leaching!(
     # --------------------------------------------------
     # Soil Biogeochemistry
     # --------------------------------------------------
-    # Decomposition rate constants — already ported:
-    #   decomp_rate_constants_bgc!(...) or decomp_rates_mimics!(...)
-    # SoilBiogeochemPotential — not yet ported
-    # SoilBiogeochemVerticalProfile — not yet ported
-    # SoilBiogeochemNitrifDenitrif — already ported: nitrif_denitrif!(...)
+    # Decomposition rate constants + potential + competition + actual decomp
+    _has_decomp = (cascade_con !== nothing && decomp_bgc_state !== nothing &&
+                   decomp_bgc_params !== nothing && cn_shared_params !== nothing &&
+                   t_soisno !== nothing && soilpsi !== nothing &&
+                   dzsoi_decomp !== nothing && zsoi_vals !== nothing)
+
+    nc = length(bounds_col)
+
+    # Working arrays for decomposition chain (allocated once per call)
+    cn_decomp_pools = zeros(nc, nlevdecomp, ndecomp_pools)
+    p_decomp_cpool_loss = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
+    p_decomp_cn_gain = zeros(nc, nlevdecomp, ndecomp_pools)
+    pmnf_decomp_cascade = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
+    p_decomp_npool_to_din = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
+
+    if _has_decomp
+        # 1. Decomposition rate constants (T/moisture-dependent)
+        decomp_rate_constants_bgc!(soilbgc_cf,
+            decomp_bgc_state, decomp_bgc_params, cn_shared_params, cascade_con;
+            mask_bgc_soilc=mask_bgc_soilc,
+            bounds=bounds_col,
+            nlevdecomp=nlevdecomp,
+            t_soisno=t_soisno,
+            soilpsi=soilpsi,
+            days_per_year=365.0,
+            dt=dt,
+            zsoi_vals=zsoi_vals,
+            col_dz=(col !== nothing ? @view(col.dz[:, (varpar.nlevsno+1):end]) : Matrix{Float64}(undef, 0, 0)))
+
+        # 2. Potential decomposition and mineral N flux
+        soil_bgc_potential!(soilbgc_cf, soilbgc_cs, soilbgc_nf, soilbgc_ns,
+            soilbgc_state, cascade_con;
+            mask_bgc_soilc=mask_bgc_soilc,
+            bounds=bounds_col,
+            nlevdecomp=nlevdecomp,
+            ndecomp_pools=ndecomp_pools,
+            ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+            cn_decomp_pools=cn_decomp_pools,
+            p_decomp_cpool_loss=p_decomp_cpool_loss,
+            p_decomp_cn_gain=p_decomp_cn_gain,
+            pmnf_decomp_cascade=pmnf_decomp_cascade,
+            p_decomp_npool_to_din=p_decomp_npool_to_din)
+
+        # 3. Mineral N competition (plant vs decomposers)
+        if competition_state !== nothing && competition_params !== nothing
+            soil_bgc_competition!(soilbgc_state, soilbgc_nf, soilbgc_cf, soilbgc_ns,
+                competition_state, competition_params;
+                mask_bgc_soilc=mask_bgc_soilc,
+                bounds=bounds_col,
+                nlevdecomp=nlevdecomp,
+                ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+                dzsoi_decomp=dzsoi_decomp,
+                pmnf_decomp_cascade=pmnf_decomp_cascade,
+                p_decomp_cn_gain=p_decomp_cn_gain,
+                cascade_receiver_pool=cascade_receiver_pool,
+                use_nitrif_denitrif=config.use_nitrif_denitrif)
+        end
+
+        # 4. Actual decomposition
+        if decomp_params !== nothing
+            soil_biogeochem_decomp!(soilbgc_cf, soilbgc_cs, soilbgc_nf, soilbgc_ns,
+                soilbgc_state, cascade_con, decomp_params;
+                mask_bgc_soilc=mask_bgc_soilc,
+                bounds=bounds_col,
+                nlevdecomp=nlevdecomp,
+                ndecomp_pools=ndecomp_pools,
+                ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+                cn_decomp_pools=cn_decomp_pools,
+                p_decomp_cpool_loss=p_decomp_cpool_loss,
+                pmnf_decomp_cascade=pmnf_decomp_cascade,
+                p_decomp_npool_to_din=p_decomp_npool_to_din,
+                dzsoi_decomp=dzsoi_decomp,
+                use_nitrif_denitrif=config.use_nitrif_denitrif)
+        end
+    end
 
     # --------------------------------------------------
     # Plant/heterotroph competition for mineral N
@@ -191,9 +280,10 @@ function cn_driver_no_leaching!(
         # Allocation — already ported:
         #   calc_gpp_mr_availc!(...), calc_crop_allocation_fractions!(...), calc_allometry!(...)
     end
-    # calc_plant_nutrient_demand — not yet ported
-    # SoilBiogeochemCompetition — not yet ported
-    # calc_plant_nutrient_competition — not yet ported
+    # NOTE: Plant nutrient demand, soil BGC competition, and plant CN allocation
+    # are not yet wired. These require full nutrient competition infrastructure
+    # (PatchData, CropData, CNSharedParamsData, SoilBGCCompetitionState/Params).
+    # Decomposition proceeds without N limitation in the current implementation.
 
     # --------------------------------------------------
     # Actual decomposition
@@ -272,9 +362,30 @@ function cn_driver_no_leaching!(
         use_fun=config.use_fun,
         dt=dt)
 
-    # CNPrecisionControl — not yet ported
-    # SoilBiogeochemNStateUpdate1 — not yet ported
-    # SoilBiogeochemLittVertTransp — not yet ported
+    # CNPrecisionControl — WIRED
+    # Called with integer filter built from mask (cn_precision_control! uses filter array)
+    if num_bgc_vegp > 0
+        filter_bgc_vegp = findall(mask_bgc_vegp)
+        cn_precision_control!(cnveg_cs, cnveg_ns, filter_bgc_vegp, ivt;
+            use_c13=config.use_c13, use_c14=config.use_c14,
+            use_crop=config.use_crop, use_nguardrail=config.use_nguardrail,
+            use_matrixcn=config.use_matrixcn)
+    end
+    # SoilBiogeochemLittVertTransp — litter vertical transport
+    # Skip when nlevdecomp <= 1: vertical transport is a no-op with a single level
+    if _has_decomp && nlevdecomp > 1 && litter_params !== nothing && col !== nothing &&
+       grc !== nothing && active_layer !== nothing && zisoi_vals !== nothing
+        litter_vert_transp!(soilbgc_cs, soilbgc_cf, soilbgc_ns, soilbgc_nf,
+            soilbgc_state, col, grc, cascade_con, active_layer, litter_params;
+            mask_bgc_soilc=mask_bgc_soilc,
+            bounds=bounds_col,
+            dtime=dt,
+            nlevdecomp=nlevdecomp,
+            ndecomp_pools=ndecomp_pools,
+            zsoi_vals=zsoi_vals,
+            dzsoi_decomp_vals=dzsoi_decomp,
+            zisoi_vals=zisoi_vals)
+    end
 
     # --------------------------------------------------
     # Gap mortality and Update2
@@ -370,15 +481,23 @@ function cn_driver_no_leaching!(
             dt=dt)
     end  # num_bgc_vegp > 0
 
-    # CNPrecisionControl — not yet ported
-    # Wood products — not yet ported
+    # CNPrecisionControl (post gap-mortality) — WIRED
+    if num_bgc_vegp > 0
+        filter_bgc_vegp2 = findall(mask_bgc_vegp)
+        cn_precision_control!(cnveg_cs, cnveg_ns, filter_bgc_vegp2, ivt;
+            use_c13=config.use_c13, use_c14=config.use_c14,
+            use_crop=config.use_crop, use_nguardrail=config.use_nguardrail,
+            use_matrixcn=config.use_matrixcn)
+    end
+    # NOTE: Wood product pools (cn_products) not yet wired — requires harvest fluxes
 
     # --------------------------------------------------
     # Fire and Update3
     # --------------------------------------------------
     if num_bgc_vegp > 0
-        # CNFireArea, CNFireFluxes — not yet ported
-        # CIsoFlux3 — not yet ported
+        # NOTE: Fire area/fluxes (cnfire_area_li2014!, cnfire_fluxes_li2014!) are
+        # implemented but not wired here — requires column temperature data in driver args.
+        # C isotope flux phase 3 (CIsoFlux3) not yet ported.
 
         c_state_update3!(cnveg_cs, cnveg_cf, soilbgc_cs;
             mask_soilc=mask_bgc_soilc,
@@ -397,7 +516,14 @@ function cn_driver_no_leaching!(
         # C14Decay — not yet ported
     end  # num_bgc_vegp > 0
 
-    # CNPrecisionControl — not yet ported
+    # CNPrecisionControl (post fire) — WIRED
+    if num_bgc_vegp > 0
+        filter_bgc_vegp3 = findall(mask_bgc_vegp)
+        cn_precision_control!(cnveg_cs, cnveg_ns, filter_bgc_vegp3, ivt;
+            use_c13=config.use_c13, use_c14=config.use_c14,
+            use_crop=config.use_crop, use_nguardrail=config.use_nguardrail,
+            use_matrixcn=config.use_matrixcn)
+    end
 
     return nothing
 end
@@ -433,7 +559,7 @@ function cn_driver_leaching!(
         i_litr_max::Int = 3,
         i_cwd::Int = 4,
         # Time step
-        dt::Float64,
+        dt::Real,
         # State/flux data
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,

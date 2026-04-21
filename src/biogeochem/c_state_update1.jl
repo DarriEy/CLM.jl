@@ -32,7 +32,7 @@ function c_state_update_dyn_patch!(cs_veg::CNVegCarbonStateData,
                                     i_litr_min::Int,
                                     i_litr_max::Int,
                                     i_cwd::Int,
-                                    dt::Float64)
+                                    dt::Real)
 
     for j in 1:nlevdecomp
         for c in bounds_col
@@ -74,7 +74,7 @@ function c_state_update0!(cs_veg::CNVegCarbonStateData,
                            cf_veg::CNVegCarbonFluxData;
                            mask_soilp::BitVector,
                            bounds_patch::UnitRange{Int},
-                           dt::Float64)
+                           dt::Real)
 
     for p in bounds_patch
         mask_soilp[p] || continue
@@ -123,7 +123,7 @@ function c_state_update1!(cs_veg::CNVegCarbonStateData,
                            bounds_patch::UnitRange{Int},
                            patch_column::Vector{Int},
                            ivt::Vector{Int},
-                           woody::Vector{Float64},
+                           woody::Vector{<:Real},
                            cascade_donor_pool::Vector{Int},
                            cascade_receiver_pool::Vector{Int},
                            harvdate::Vector{Int},
@@ -143,7 +143,7 @@ function c_state_update1!(cs_veg::CNVegCarbonStateData,
                            use_soil_matrixcn::Bool = false,
                            carbon_resp_opt::Int = 0,
                            dribble_crophrv_xsmrpool_2atm::Bool = false,
-                           dt::Float64)
+                           dt::Real)
 
     # Decay constant for 0.5-year product pool (1/s)
     kprod05 = 1.44e-7
@@ -191,6 +191,7 @@ function c_state_update1!(cs_veg::CNVegCarbonStateData,
     # --- Patch loop: vegetation C state updates ---
     for p in bounds_patch
         mask_soilp[p] || continue
+        ivt[p] >= 1 || continue  # skip bare ground (Fortran PFT index 0)
         c = patch_column[p]
 
         # === Phenology: transfer growth fluxes ===

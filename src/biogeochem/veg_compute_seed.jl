@@ -100,9 +100,9 @@ Ported from `LeafProportions` in `CNVegComputeSeedMod.F90`.
 """
 function leaf_proportions(ignore_current_state::Bool,
                            pft_type::Int,
-                           leaf::Float64,
-                           leaf_storage::Float64,
-                           leaf_xfer::Float64,
+                           leaf::Real,
+                           leaf_storage::Real,
+                           leaf_xfer::Real,
                            pftcon_data::PftconType)
     ji = pft_type + 1  # Julia 1-based index
 
@@ -159,15 +159,15 @@ amount internally.
 - `species::Int`: CN species identifier (CN_SPECIES_C12, etc.)
 - `leafc_seed::Float64`: seed amount for leaf C (gC/m2)
 - `deadstemc_seed::Float64`: seed amount for deadstem C (gC/m2)
-- `leaf_patch::Vector{Float64}`: current leaf C or N content (g/m2)
-- `leaf_storage_patch::Vector{Float64}`: current leaf storage C or N (g/m2)
-- `leaf_xfer_patch::Vector{Float64}`: current leaf transfer C or N (g/m2)
+- `leaf_patch::Vector{<:Real}`: current leaf C or N content (g/m2)
+- `leaf_storage_patch::Vector{<:Real}`: current leaf storage C or N (g/m2)
+- `leaf_xfer_patch::Vector{<:Real}`: current leaf transfer C or N (g/m2)
 - `compute_here_patch::Vector{Bool}`: whether to compute outputs per patch
 - `ignore_current_state_patch::Vector{Bool}`: use default proportions if true
-- `seed_leaf_patch::Vector{Float64}`: (output) seed for leaf [g/m2]
-- `seed_leaf_storage_patch::Vector{Float64}`: (output) seed for leaf storage [g/m2]
-- `seed_leaf_xfer_patch::Vector{Float64}`: (output) seed for leaf transfer [g/m2]
-- `seed_deadstem_patch::Vector{Float64}`: (output) seed for deadstem [g/m2]
+- `seed_leaf_patch::Vector{<:Real}`: (output) seed for leaf [g/m2]
+- `seed_leaf_storage_patch::Vector{<:Real}`: (output) seed for leaf storage [g/m2]
+- `seed_leaf_xfer_patch::Vector{<:Real}`: (output) seed for leaf transfer [g/m2]
+- `seed_deadstem_patch::Vector{<:Real}`: (output) seed for deadstem [g/m2]
 - `noveg_val::Int`: bare ground PFT index (Fortran 0-based, default 0)
 
 Ported from `ComputeSeedAmounts` in `CNVegComputeSeedMod.F90`.
@@ -177,17 +177,17 @@ function compute_seed_amounts!(mask_soilp::BitVector,
                                 patch::PatchData,
                                 pftcon_data::PftconType;
                                 species::Int,
-                                leafc_seed::Float64,
-                                deadstemc_seed::Float64,
-                                leaf_patch::Vector{Float64},
-                                leaf_storage_patch::Vector{Float64},
-                                leaf_xfer_patch::Vector{Float64},
+                                leafc_seed::Real,
+                                deadstemc_seed::Real,
+                                leaf_patch::Vector{<:Real},
+                                leaf_storage_patch::Vector{<:Real},
+                                leaf_xfer_patch::Vector{<:Real},
                                 compute_here_patch::Vector{Bool},
                                 ignore_current_state_patch::Vector{Bool},
-                                seed_leaf_patch::Vector{Float64},
-                                seed_leaf_storage_patch::Vector{Float64},
-                                seed_leaf_xfer_patch::Vector{Float64},
-                                seed_deadstem_patch::Vector{Float64},
+                                seed_leaf_patch::Vector{<:Real},
+                                seed_leaf_storage_patch::Vector{<:Real},
+                                seed_leaf_xfer_patch::Vector{<:Real},
+                                seed_deadstem_patch::Vector{<:Real},
                                 noveg_val::Int = noveg)
     for p in bounds
         mask_soilp[p] || continue

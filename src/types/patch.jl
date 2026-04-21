@@ -92,7 +92,7 @@ and FATES-specific fields for each patch.
 
 Ported from `patch_type` in `PatchType.F90`.
 """
-Base.@kwdef mutable struct PatchData{FT<:AbstractFloat}
+Base.@kwdef mutable struct PatchData{FT<:Real}
     # g/l/c/p hierarchy, local g/l/c/p cells only
     column           ::Vector{Int}     = Int[]       # index into column level quantities
     wtcol            ::Vector{FT} = Float64[]   # weight (relative to column)

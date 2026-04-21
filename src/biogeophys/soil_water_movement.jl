@@ -106,7 +106,7 @@ Compute the hydraulic conductivity reduction factor due to ice in pore space.
 
 Ported from `IceImpedance` in `SoilWaterMovementMod.F90`.
 """
-function ice_impedance(icefrac::Float64, e_ice::Float64)
+function ice_impedance(icefrac::Real, e_ice::Real)
     return 10.0^(-e_ice * icefrac)
 end
 
@@ -209,11 +209,12 @@ function compute_hydraulic_properties!(c::Int, nlayers::Int,
     fill!(imped_out, 0.0)
 
     # Compute relative saturation at each layer node
-    s2 = zeros(nlayers)
+    FT = eltype(vwc_liq)
+    s2 = zeros(FT, nlayers)
     for j in 1:nlayers
         s2[j] = vwc_liq[j] / watsat[c, j]
-        s2[j] = min(s2[j], 1.0)
-        s2[j] = max(0.01, s2[j])
+        s2[j] = smooth_min(s2[j], 1.0)
+        s2[j] = smooth_max(0.01, s2[j])
     end
 
     for j in 1:nlayers
@@ -227,8 +228,8 @@ function compute_hydraulic_properties!(c::Int, nlayers::Int,
         end
 
         # Impose constraints on relative saturation at interface
-        s1 = min(s1, 1.0)
-        s1 = max(0.01, s1)
+        s1 = smooth_min(s1, 1.0)
+        s1 = smooth_max(0.01, s1)
 
         # Compute hydraulic conductivity
         hk_val, dhkds = soil_hk!(swrc, c, j, s1, imped_out[j], soilstate)
@@ -310,7 +311,7 @@ end
 Full-argument version with explicit column geometry arrays.
 """
 function compute_moisture_fluxes_and_derivs!(c::Int, nlayers::Int,
-        z_col::Matrix{Float64}, zi_col::Matrix{Float64}, dz_col::Matrix{Float64},
+        z_col::Matrix{<:Real}, zi_col::Matrix{<:Real}, dz_col::Matrix{<:Real},
         soilhydrology::SoilHydrologyData, soilstate::SoilStateData,
         waterfluxbulk::WaterFluxBulkData,
         swrc::SoilWaterRetentionCurve, cfg::SoilWaterMovementConfig,
@@ -541,9 +542,9 @@ function compute_qcharge!(col_data::ColumnData,
         soilhydrology::SoilHydrologyData, soilstate::SoilStateData,
         waterstatebulk::WaterStateBulkData,
         swrc::SoilWaterRetentionCurve, cfg::SoilWaterMovementConfig,
-        dwat::Matrix{Float64}, smp::Matrix{Float64},
-        imped::Matrix{Float64}, vwc_liq::Matrix{Float64},
-        dtime::Float64, bounds::UnitRange{Int})
+        dwat::Matrix{<:Real}, smp::Matrix{<:Real},
+        imped::Matrix{<:Real}, vwc_liq::Matrix{<:Real},
+        dtime::Real, bounds::UnitRange{Int})
 
     nlevsoi = varpar.nlevsoi
     nlevsno = varpar.nlevsno
@@ -574,13 +575,13 @@ function compute_qcharge!(col_data::ColumnData,
             wh_zwt = -sucsat[c, jwt+1] - zwt[c] * M_TO_MM
 
             # Recharge rate to groundwater (positive to aquifer)
-            s1 = max(vwc_liq[c, jwt+1] / watsat[c, jwt+1], 0.01)
-            s1 = min(1.0, s1)
+            s1 = smooth_max(vwc_liq[c, jwt+1] / watsat[c, jwt+1], 0.01)
+            s1 = smooth_min(1.0, s1)
 
             # Unsaturated hydraulic conductivity
             ka, _ = soil_hk!(swrc, c, jwt+1, s1, imped[c, jwt+1], soilstate)
 
-            smp1 = max(smpmin[c], smp[c, max(1, jwt)])
+            smp1 = smooth_max(smpmin[c], smp[c, max(1, jwt)])
             wh = smp1 - z[c, joff + max(1, jwt)] * M_TO_MM
 
             if jwt == 0
@@ -590,8 +591,8 @@ function compute_qcharge!(col_data::ColumnData,
             end
 
             # Limit qcharge
-            qcharge[c] = max(-10.0 / dtime, qcharge[c])
-            qcharge[c] = min(10.0 / dtime, qcharge[c])
+            qcharge[c] = smooth_max(-10.0 / dtime, qcharge[c])
+            qcharge[c] = smooth_min(10.0 / dtime, qcharge[c])
         end
     end
 
@@ -618,7 +619,7 @@ function soilwater_moisture_form!(col_data::ColumnData,
         temperature::TemperatureData, canopystate::CanopyStateData,
         energyflux::EnergyFluxData,
         swrc::SoilWaterRetentionCurve, cfg::SoilWaterMovementConfig,
-        dtime::Float64)
+        dtime::Real)
 
     nlevsoi = varpar.nlevsoi
     nlevsno = varpar.nlevsno
@@ -632,26 +633,27 @@ function soilwater_moisture_form!(col_data::ColumnData,
     qcharge       = soilhydrology.qcharge_col
     h2osoi_liq    = waterstatebulk.ws.h2osoi_liq_col
     qflx_rootsoi  = waterfluxbulk.qflx_rootsoi_col
-    hk_loc     = zeros(nlevsoi)
-    smp_loc    = zeros(nlevsoi)
-    dhkdw_loc  = zeros(nlevsoi)
-    dsmpdw_loc = zeros(nlevsoi)
-    imped_loc  = zeros(nlevsoi)
-    vwc_liq_loc = zeros(nlevsoi)
-    dt_dz_loc  = zeros(nlevsoi)
-    qin_loc    = zeros(nlevsoi)
-    qout_loc   = zeros(nlevsoi)
-    dqidw0_loc = zeros(nlevsoi)
-    dqidw1_loc = zeros(nlevsoi)
-    dqodw1_loc = zeros(nlevsoi)
-    dqodw2_loc = zeros(nlevsoi)
-    dwat_loc   = zeros(nlevsoi)
-    amx_loc    = zeros(nlevsoi)
-    bmx_loc    = zeros(nlevsoi)
-    cmx_loc    = zeros(nlevsoi)
-    rmx_loc    = zeros(nlevsoi)
-    fluxNet0   = zeros(nlevsoi)
-    fluxNet1   = zeros(nlevsoi)
+    FT = eltype(h2osoi_liq)
+    hk_loc     = zeros(FT, nlevsoi)
+    smp_loc    = zeros(FT, nlevsoi)
+    dhkdw_loc  = zeros(FT, nlevsoi)
+    dsmpdw_loc = zeros(FT, nlevsoi)
+    imped_loc  = zeros(FT, nlevsoi)
+    vwc_liq_loc = zeros(FT, nlevsoi)
+    dt_dz_loc  = zeros(FT, nlevsoi)
+    qin_loc    = zeros(FT, nlevsoi)
+    qout_loc   = zeros(FT, nlevsoi)
+    dqidw0_loc = zeros(FT, nlevsoi)
+    dqidw1_loc = zeros(FT, nlevsoi)
+    dqodw1_loc = zeros(FT, nlevsoi)
+    dqodw2_loc = zeros(FT, nlevsoi)
+    dwat_loc   = zeros(FT, nlevsoi)
+    amx_loc    = zeros(FT, nlevsoi)
+    bmx_loc    = zeros(FT, nlevsoi)
+    cmx_loc    = zeros(FT, nlevsoi)
+    rmx_loc    = zeros(FT, nlevsoi)
+    fluxNet0   = zeros(FT, nlevsoi)
+    fluxNet1   = zeros(FT, nlevsoi)
 
     for c in eachindex(mask_hydrology)
         mask_hydrology[c] || continue
@@ -681,7 +683,7 @@ function soilwater_moisture_form!(col_data::ColumnData,
 
             # Calculate commonly used variables
             for j in 1:nlayers
-                vwc_liq_loc[j] = max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
+                vwc_liq_loc[j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
                 dt_dz_loc[j] = dtsub / (M_TO_MM * dz[c, joff + j])
             end
 
@@ -796,16 +798,17 @@ function soilwater_moisture_form!(col_data::ColumnData,
     if use_aquifer_layer(cfg)
         # Build temporary 2D arrays for compute_qcharge!
         nc = length(mask_hydrology)
-        dwat_2d  = zeros(nc, nlevsoi)
-        smp_2d   = zeros(nc, nlevsoi)
-        imped_2d = zeros(nc, nlevsoi)
-        vwc_2d   = zeros(nc, nlevsoi)
+        FT = eltype(h2osoi_liq)
+        dwat_2d  = zeros(FT, nc, nlevsoi)
+        smp_2d   = zeros(FT, nc, nlevsoi)
+        imped_2d = zeros(FT, nc, nlevsoi)
+        vwc_2d   = zeros(FT, nc, nlevsoi)
 
         for c in eachindex(mask_hydrology)
             mask_hydrology[c] || continue
             nlayers = nbedrock[c]
             for j in 1:min(nlayers, nlevsoi)
-                vwc_2d[c, j] = max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
+                vwc_2d[c, j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
             end
         end
 
@@ -837,7 +840,7 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
         temperature::TemperatureData, canopystate::CanopyStateData,
         energyflux::EnergyFluxData,
         swrc::SoilWaterRetentionCurve, cfg::SoilWaterMovementConfig,
-        dtime::Float64)
+        dtime::Real)
 
     nlevsoi  = varpar.nlevsoi
     nlevgrnd = varpar.nlevgrnd
@@ -879,35 +882,36 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     nc = length(mask_hydrology)
 
     # Local arrays
-    hk      = zeros(nc, nlevsoi)
-    dhkdw   = zeros(nc, nlevsoi)
-    smp_arr = zeros(nc, nlevsoi)
-    dsmpdw  = zeros(nc, nlevsoi)
-    imped_arr = zeros(nc, nlevsoi)
-    vol_ice = zeros(nc, nlevsoi)
-    vwc_liq = zeros(nc, nlevsoi + 1)
-    zmm     = zeros(nc, nlevsoi + 1)
-    dzmm    = zeros(nc, nlevsoi + 1)
-    zimm    = zeros(nc, 0:nlevsoi)  # Can't do 0-indexed; use offset
+    FT = eltype(h2osoi_liq)
+    hk      = zeros(FT, nc, nlevsoi)
+    dhkdw   = zeros(FT, nc, nlevsoi)
+    smp_arr = zeros(FT, nc, nlevsoi)
+    dsmpdw  = zeros(FT, nc, nlevsoi)
+    imped_arr = zeros(FT, nc, nlevsoi)
+    vol_ice = zeros(FT, nc, nlevsoi)
+    vwc_liq = zeros(FT, nc, nlevsoi + 1)
+    zmm     = zeros(FT, nc, nlevsoi + 1)
+    dzmm    = zeros(FT, nc, nlevsoi + 1)
+    zimm    = zeros(FT, nc, 0:nlevsoi)  # Can't do 0-indexed; use offset
     # Use 1-indexed with offset: zimm_arr[c, j+1] for Fortran zimm(c,j) where j=0:nlevsoi
-    zimm_arr = zeros(nc, nlevsoi + 1)  # index 1 = Fortran j=0, index nlevsoi+1 = Fortran j=nlevsoi
-    zwtmm   = zeros(nc)
+    zimm_arr = zeros(FT, nc, nlevsoi + 1)  # index 1 = Fortran j=0, index nlevsoi+1 = Fortran j=nlevsoi
+    zwtmm   = zeros(FT, nc)
     jwt     = zeros(Int, nc)
-    vwc_zwt = zeros(nc)
-    vol_eq  = zeros(nc, nlevsoi + 1)
-    zq      = zeros(nc, nlevsoi + 1)
-    qin     = zeros(nc, nlevsoi + 1)
-    qout_arr = zeros(nc, nlevsoi + 1)
-    dqidw0  = zeros(nc, nlevsoi + 1)
-    dqidw1  = zeros(nc, nlevsoi + 1)
-    dqodw1  = zeros(nc, nlevsoi + 1)
-    dqodw2  = zeros(nc, nlevsoi + 1)
-    amx     = zeros(nc, nlevsoi + 1)
-    bmx     = zeros(nc, nlevsoi + 1)
-    cmx     = zeros(nc, nlevsoi + 1)
-    rmx     = zeros(nc, nlevsoi + 1)
-    dwat2   = zeros(nc, nlevsoi + 1)
-    smp_grad = zeros(nc, nlevsoi + 1)
+    vwc_zwt = zeros(FT, nc)
+    vol_eq  = zeros(FT, nc, nlevsoi + 1)
+    zq      = zeros(FT, nc, nlevsoi + 1)
+    qin     = zeros(FT, nc, nlevsoi + 1)
+    qout_arr = zeros(FT, nc, nlevsoi + 1)
+    dqidw0  = zeros(FT, nc, nlevsoi + 1)
+    dqidw1  = zeros(FT, nc, nlevsoi + 1)
+    dqodw1  = zeros(FT, nc, nlevsoi + 1)
+    dqodw2  = zeros(FT, nc, nlevsoi + 1)
+    amx     = zeros(FT, nc, nlevsoi + 1)
+    bmx     = zeros(FT, nc, nlevsoi + 1)
+    cmx     = zeros(FT, nc, nlevsoi + 1)
+    rmx     = zeros(FT, nc, nlevsoi + 1)
+    dwat2   = zeros(FT, nc, nlevsoi + 1)
+    smp_grad = zeros(FT, nc, nlevsoi + 1)
 
     sdamp = 0.0
 
@@ -919,9 +923,9 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
             dzmm[c, j] = dz[c, joff + j] * 1.0e3
             zimm_arr[c, j+1] = zi[c, joff_zi + j] * 1.0e3  # j+1 because index 1 = Fortran j=0
 
-            vol_ice[c, j] = min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * DENICE))
-            icefrac[c, j] = min(1.0, vol_ice[c, j] / watsat[c, j])
-            vwc_liq[c, j] = max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
+            vol_ice[c, j] = smooth_min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * DENICE))
+            icefrac[c, j] = smooth_min(1.0, vol_ice[c, j] / watsat[c, j])
+            vwc_liq[c, j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
         end
     end
 
@@ -949,9 +953,9 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
             for j in nlevsoi:nlevgrnd
                 if zwt[c] <= zi[c, joff_zi + j]
                     smp1_val = HFUS * (TFRZ - t_soisno[c, joff + j]) / (GRAV * t_soisno[c, joff + j]) * 1000.0
-                    smp1_val = max(sucsat[c, nlevsoi], smp1_val)
+                    smp1_val = smooth_max(sucsat[c, nlevsoi], smp1_val)
                     vwc_zwt[c] = watsat[c, nlevsoi] * (smp1_val / sucsat[c, nlevsoi])^(-1.0 / bsw[c, nlevsoi])
-                    vwc_zwt[c] = min(vwc_zwt[c], 0.5 * (watsat[c, nlevsoi] + h2osoi_vol[c, nlevsoi]))
+                    vwc_zwt[c] = smooth_min(vwc_zwt[c], 0.5 * (watsat[c, nlevsoi] + h2osoi_vol[c, nlevsoi]))
                     break
                 end
             end
@@ -973,17 +977,17 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
                 temp0 = ((sucsat[c, j] + zwtmm[c] - zimm_jm1) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
                 voleq1 = -sucsat[c, j] * watsat[c, j] / (1.0 - 1.0 / bsw[c, j]) / (zwtmm[c] - zimm_jm1) * (tempi - temp0)
                 vol_eq[c, j] = (voleq1 * (zwtmm[c] - zimm_jm1) + watsat[c, j] * (zimm_j - zwtmm[c])) / (zimm_j - zimm_jm1)
-                vol_eq[c, j] = min(watsat[c, j], vol_eq[c, j])
-                vol_eq[c, j] = max(vol_eq[c, j], 0.0)
+                vol_eq[c, j] = smooth_min(watsat[c, j], vol_eq[c, j])
+                vol_eq[c, j] = smooth_max(vol_eq[c, j], 0.0)
             else
                 tempi = ((sucsat[c, j] + zwtmm[c] - zimm_j) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
                 temp0 = ((sucsat[c, j] + zwtmm[c] - zimm_jm1) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
                 vol_eq[c, j] = -sucsat[c, j] * watsat[c, j] / (1.0 - 1.0 / bsw[c, j]) / (zimm_j - zimm_jm1) * (tempi - temp0)
-                vol_eq[c, j] = max(vol_eq[c, j], 0.0)
-                vol_eq[c, j] = min(watsat[c, j], vol_eq[c, j])
+                vol_eq[c, j] = smooth_max(vol_eq[c, j], 0.0)
+                vol_eq[c, j] = smooth_min(watsat[c, j], vol_eq[c, j])
             end
-            zq[c, j] = -sucsat[c, j] * (max(vol_eq[c, j] / watsat[c, j], 0.01))^(-bsw[c, j])
-            zq[c, j] = max(smpmin[c], zq[c, j])
+            zq[c, j] = -sucsat[c, j] * (smooth_max(vol_eq[c, j] / watsat[c, j], 0.01))^(-bsw[c, j])
+            zq[c, j] = smooth_max(smpmin[c], zq[c, j])
         end
     end
 
@@ -996,10 +1000,10 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
             tempi = 1.0
             temp0 = ((sucsat[c, j] + zwtmm[c] - zimm_j) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
             vol_eq[c, j+1] = -sucsat[c, j] * watsat[c, j] / (1.0 - 1.0 / bsw[c, j]) / (zwtmm[c] - zimm_j) * (tempi - temp0)
-            vol_eq[c, j+1] = max(vol_eq[c, j+1], 0.0)
-            vol_eq[c, j+1] = min(watsat[c, j], vol_eq[c, j+1])
-            zq[c, j+1] = -sucsat[c, j] * (max(vol_eq[c, j+1] / watsat[c, j], 0.01))^(-bsw[c, j])
-            zq[c, j+1] = max(smpmin[c], zq[c, j+1])
+            vol_eq[c, j+1] = smooth_max(vol_eq[c, j+1], 0.0)
+            vol_eq[c, j+1] = smooth_min(watsat[c, j], vol_eq[c, j+1])
+            zq[c, j+1] = -sucsat[c, j] * (smooth_max(vol_eq[c, j+1] / watsat[c, j], 0.01))^(-bsw[c, j])
+            zq[c, j+1] = smooth_max(smpmin[c], zq[c, j+1])
         end
     end
 
@@ -1010,7 +1014,7 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
 
             s1 = 0.5 * (vwc_liq[c, j] + vwc_liq[c, min(nlevsoi, j+1)]) /
                  (0.5 * (watsat[c, j] + watsat[c, min(nlevsoi, j+1)]))
-            s1 = min(1.0, s1)
+            s1 = smooth_min(1.0, s1)
             s2 = hksat[c, j] * s1^(2.0 * bsw[c, j] + 2.0)
 
             imped_arr[c, j] = 10.0^(-cfg.e_ice * (0.5 * (icefrac[c, j] + icefrac[c, min(nlevsoi, j+1)])))
@@ -1020,11 +1024,11 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
                  (1.0 / (watsat[c, j] + watsat[c, min(nlevsoi, j+1)]))
 
             # Matric potential and derivative
-            s_node = max(vwc_liq[c, j] / watsat[c, j], 0.01)
-            s_node = min(1.0, s_node)
+            s_node = smooth_max(vwc_liq[c, j] / watsat[c, j], 0.01)
+            s_node = smooth_min(1.0, s_node)
 
             smp_arr[c, j] = -sucsat[c, j] * s_node^(-bsw[c, j])
-            smp_arr[c, j] = max(smpmin[c], smp_arr[c, j])
+            smp_arr[c, j] = smooth_max(smpmin[c], smp_arr[c, j])
 
             dsmpdw[c, j] = -bsw[c, j] * smp_arr[c, j] / vwc_liq[c, j]
 
@@ -1111,12 +1115,12 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
             cmx[c, j+1] = 0.0
         else  # water table is below soil column
             # Compute aquifer soil moisture
-            s_node = max(0.5 * ((vwc_zwt[c] + vwc_liq[c, j]) / watsat[c, j]), 0.01)
-            s_node = min(1.0, s_node)
+            s_node = smooth_max(0.5 * ((vwc_zwt[c] + vwc_liq[c, j]) / watsat[c, j]), 0.01)
+            s_node = smooth_min(1.0, s_node)
 
             # Compute smp for aquifer layer
             smp1 = -sucsat[c, j] * s_node^(-bsw[c, j])
-            smp1 = max(smpmin[c], smp1)
+            smp1 = smooth_max(smpmin[c], smp1)
 
             # Compute dsmpdw for aquifer layer
             dsmpdw1 = -bsw[c, j] * smp1 / (s_node * watsat[c, j])
@@ -1171,13 +1175,13 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
         if jwt[c] < nlevsoi
             wh_zwt = 0.0
 
-            s_node = max(h2osoi_vol[c, jwt[c]+1] / watsat[c, jwt[c]+1], 0.01)
-            s1 = min(1.0, s_node)
+            s_node = smooth_max(h2osoi_vol[c, jwt[c]+1] / watsat[c, jwt[c]+1], 0.01)
+            s1 = smooth_min(1.0, s_node)
 
             ka = imped_arr[c, jwt[c]+1] * hksat[c, jwt[c]+1] *
                  s1^(2.0 * bsw[c, jwt[c]+1] + 3.0)
 
-            smp1 = max(smpmin[c], smp_arr[c, max(1, jwt[c])])
+            smp1 = smooth_max(smpmin[c], smp_arr[c, max(1, jwt[c])])
             wh = smp1 - zq[c, max(1, jwt[c])]
 
             if jwt[c] == 0
@@ -1187,8 +1191,8 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
             end
 
             # Limit qcharge
-            qcharge[c] = max(-10.0 / dtime, qcharge[c])
-            qcharge[c] = min(10.0 / dtime, qcharge[c])
+            qcharge[c] = smooth_max(-10.0 / dtime, qcharge[c])
+            qcharge[c] = smooth_min(10.0 / dtime, qcharge[c])
         else
             # Water table below soil column
             qcharge[c] = dwat2[c, nlevsoi+1] * dzmm[c, nlevsoi+1] / dtime
@@ -1200,9 +1204,7 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
         mask_hydrology[c] || continue
         qflx_deficit[c] = 0.0
         for j in 1:nlevsoi
-            if h2osoi_liq[c, joff + j] < 0.0
-                qflx_deficit[c] = qflx_deficit[c] - h2osoi_liq[c, joff + j]
-            end
+            qflx_deficit[c] = qflx_deficit[c] + smooth_ifelse(h2osoi_liq[c, joff + j], zero(eltype(h2osoi_liq)), -h2osoi_liq[c, joff + j])
         end
     end
 
@@ -1230,7 +1232,7 @@ function soil_water!(col_data::ColumnData,
         temperature::TemperatureData, canopystate::CanopyStateData,
         energyflux::EnergyFluxData,
         swrc::SoilWaterRetentionCurve, cfg::SoilWaterMovementConfig,
-        dtime::Float64;
+        dtime::Real;
         use_flexibleCN::Bool = false)
 
     nlevsoi = varpar.nlevsoi
@@ -1264,11 +1266,7 @@ function soil_water!(col_data::ColumnData,
         for j in 1:(nlevsoi-1)
             for c in eachindex(mask_hydrology)
                 mask_hydrology[c] || continue
-                if h2osoi_liq[c, joff_ + j] < 0.0
-                    xs = watmin - h2osoi_liq[c, joff_ + j]
-                else
-                    xs = 0.0
-                end
+                xs = smooth_ifelse(h2osoi_liq[c, joff_ + j], zero(eltype(h2osoi_liq)), watmin - h2osoi_liq[c, joff_ + j])
                 h2osoi_liq[c, joff_ + j]   = h2osoi_liq[c, joff_ + j] + xs
                 h2osoi_liq[c, joff_ + j+1] = h2osoi_liq[c, joff_ + j+1] - xs
             end
@@ -1277,11 +1275,7 @@ function soil_water!(col_data::ColumnData,
         j = nlevsoi
         for c in eachindex(mask_hydrology)
             mask_hydrology[c] || continue
-            if h2osoi_liq[c, joff_ + j] < watmin
-                xs = watmin - h2osoi_liq[c, joff_ + j]
-            else
-                xs = 0.0
-            end
+            xs = smooth_ifelse(h2osoi_liq[c, joff_ + j] - watmin, zero(eltype(h2osoi_liq)), watmin - h2osoi_liq[c, joff_ + j])
             h2osoi_liq[c, joff_ + j] = h2osoi_liq[c, joff_ + j] + xs
             wa[c] = wa[c] - xs
         end

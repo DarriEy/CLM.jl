@@ -15,7 +15,7 @@ layer thickness (depth of thaw) at column level.
 
 Ported from `active_layer_type` in `ActiveLayerMod.F90`.
 """
-Base.@kwdef mutable struct ActiveLayerData{FT<:AbstractFloat}
+Base.@kwdef mutable struct ActiveLayerData{FT<:Real}
     # --- Public data members ---
     altmax_col               ::Vector{FT} = Float64[]   # col maximum annual depth of thaw (m)
     altmax_lastyear_col      ::Vector{FT} = Float64[]   # col prior year maximum annual depth of thaw (m)

@@ -44,13 +44,13 @@ function clm_initialize!(;
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
     all_active::Bool = false,
-    lat::Float64 = NaN,
-    lon::Float64 = NaN,
+    lat::Real = NaN,
+    lon::Real = NaN,
     soil_layerstruct::String = "20SL_8.5m",
     h2osfcflag::Int = 0,
     fsnowoptics::String = "",
     fsnowaging::String = "",
-    int_snow_max::Float64 = 2000.0)
+    int_snow_max::Real = 2000.0)
 
     # ---- Step 1: Set control flags ----
     varctl.use_cn = use_cn
@@ -91,9 +91,13 @@ function clm_initialize!(;
     # ---- Step 8: Allocate all instances ----
     inst = CLMInstances()
     inst.surfdata = surf
+    # Propagate CN flag to vegetation facade config before init
+    inst.bgc_vegetation.config.use_cn = use_cn
     nlevdecomp_full = varpar.nlevdecomp_full
+    ndecomp_cascade_transitions = use_cn ? 10 : 5
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
-                  nlevdecomp_full=nlevdecomp_full)
+                  nlevdecomp_full=nlevdecomp_full,
+                  ndecomp_cascade_transitions=ndecomp_cascade_transitions)
 
     # ---- Step 9: Build subgrid hierarchy ----
     # Get lat/lon from surface file if not provided
@@ -160,6 +164,59 @@ function clm_initialize!(;
         int_snow_max = int_snow_max)
     inst.scf_method = scf
 
+    # ---- Step 15f: Initialize decomposition cascade for CN mode ----
+    if use_cn
+        # Read BGC decomposition parameters from param file
+        NCDatasets.Dataset(paramfile) do ds
+            ndecomp_pools_max = 7
+            cstocks_raw = haskey(ds, "bgc_initial_Cstocks") ?
+                Float64.(ds["bgc_initial_Cstocks"][:]) :
+                [0.0, 0.0, 0.0, 200.0, 200.0, 200.0, 0.0]
+            # Clamp fill values to 0
+            cstocks = [v > 1e30 ? 0.0 : v for v in cstocks_raw[1:min(end, ndecomp_pools_max)]]
+            while length(cstocks) < ndecomp_pools_max
+                push!(cstocks, 0.0)
+            end
+            cstocks_depth = haskey(ds, "bgc_initial_Cstocks_depth") ?
+                Float64(ds["bgc_initial_Cstocks_depth"][1]) : 0.3
+
+            decomp_bgc_read_params!(inst.decomp_bgc_params;
+                tau_l1=1.0/18.5, tau_l2_l3=1.0/4.9, tau_s1=1.0/7.3,
+                tau_s2=1.0/0.2, tau_s3=1.0/0.0045,
+                cn_s1=12.0, cn_s2=12.0, cn_s3=10.0,
+                rf_l1s1=0.39, rf_l2s1=0.55, rf_l3s2=0.29,
+                rf_s2s1=0.55, rf_s2s3=0.55, rf_s3s1=0.55,
+                rf_cwdl3=0.0, cwd_fcel=0.0,
+                bgc_initial_Cstocks=cstocks,
+                bgc_initial_Cstocks_depth=cstocks_depth)
+        end
+
+        # Build cellsand matrix from soil state (sand fraction)
+        nlevdecomp_val = varpar.nlevdecomp
+        cellsand = zeros(nc, nlevdecomp_val)
+        for c in 1:nc
+            for j in 1:nlevdecomp_val
+                cellsand[c, j] = inst.soilstate.cellsand_col[c, j]
+            end
+        end
+        init_decomp_cascade_bgc!(inst.decomp_bgc_state,
+                                  inst.decomp_cascade,
+                                  inst.decomp_bgc_params,
+                                  inst.cn_shared_params;
+                                  cellsand=cellsand,
+                                  bounds=1:nc,
+                                  nlevdecomp=nlevdecomp_val,
+                                  ndecomp_pools_max=7,
+                                  ndecomp_cascade_transitions_max=10,
+                                  spinup_state=0,
+                                  use_fates=false)
+
+        # Initialize competition state
+        soil_bgc_competition_init!(inst.competition_state,
+                                    inst.competition_params;
+                                    dt=Float64(dtime))
+    end
+
     # Initialize urban namelist if available
     if isdefined(CLM, :urban_read_nml!) && isdefined(CLM, :urban_ctrl)
         urban_read_nml!(urban_ctrl)
@@ -211,7 +268,7 @@ end
 
 Read lat/lon from surface file, return scalar for single-gridcell case.
 """
-function _read_latlon(fsurdat::String, varname::String, default::Float64)
+function _read_latlon(fsurdat::String, varname::String, default::Real)
     ds = NCDataset(fsurdat, "r")
     try
         if haskey(ds, varname)

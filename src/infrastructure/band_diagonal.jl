@@ -5,6 +5,35 @@
 # ==========================================================================
 
 """
+    _band_solve_julia!(u_slice, ab, rhs, kl, ku, n, FT)
+
+Pure-Julia band diagonal solver without try/catch.
+Converts band storage to dense and uses backslash.
+Enzyme-safe: no LAPACK, no exception handling.
+
+Returns true if solve succeeded, false if singular.
+"""
+function _band_solve_julia!(u_slice, ab, rhs, kl, ku, n, ::Type{FT}) where FT
+    A_dense = zeros(FT, n, n)
+    for j in 1:n
+        for di in -kl:ku
+            i = j + di
+            if 1 <= i <= n
+                A_dense[i, j] = ab[kl + ku + 1 + i - j, j]
+            end
+        end
+    end
+    # Use LU factorization (no try/catch for Enzyme compatibility)
+    F = lu(A_dense, check=false)
+    if issuccess(F)
+        sol = F \ rhs
+        u_slice .= sol
+        return true
+    end
+    return false
+end
+
+"""
     band_diagonal_solve!(u, b_matrix, r, jtop, jbot, nband, ncols)
 
 Solve band diagonal systems for multiple columns.
@@ -42,8 +71,9 @@ function band_diagonal_solve!(u::AbstractMatrix{<:Real}, b_matrix::AbstractArray
         # Build LAPACK band storage format
         # LAPACK dgbsv expects: AB[2*kl+ku+1, n] with the band stored
         # in rows kl+1 to 2*kl+ku+1 (1-indexed)
+        FT = eltype(b_matrix)
         m = 2 * kl + ku + 1
-        ab = zeros(m, n)
+        ab = zeros(FT, m, n)
 
         for j in 1:n
             for band_idx in 1:nband
@@ -67,17 +97,21 @@ function band_diagonal_solve!(u::AbstractMatrix{<:Real}, b_matrix::AbstractArray
         # Right-hand side (copied to allow LAPACK to overwrite)
         rhs = r[col, jt:jb]
 
-        # Solve using LAPACK gbtrf! (factorize) + gbtrs! (solve)
-        ipiv = zeros(Int64, n)
-        rhs_mat = reshape(rhs, n, 1)
-
-        try
-            (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
-            LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
-            u[col, jt:jb] .= rhs
-        catch e
-            e isa LinearAlgebra.LAPACKException || rethrow()
-            # Singular matrix: leave u unchanged (preserves previous temperatures)
+        # Solve the banded system
+        if FT <: AbstractFloat
+            # Use LAPACK gbtrf!/gbtrs! for Float64/Float32
+            ipiv = zeros(Int64, n)
+            rhs_mat = reshape(rhs, n, 1)
+            try
+                (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
+                LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
+                u[col, jt:jb] .= rhs
+            catch e
+                e isa LinearAlgebra.LAPACKException || rethrow()
+            end
+        else
+            # Pure-Julia fallback for Dual/non-LAPACK types (Enzyme-safe)
+            _band_solve_julia!(view(u, col, jt:jb), ab, rhs, kl, ku, n, FT)
         end
     end
 
@@ -107,8 +141,9 @@ function band_diagonal_column!(u::AbstractVector{<:Real}, b_matrix::AbstractMatr
         return nothing
     end
 
+    FT = eltype(b_matrix)
     m = 2 * kl + ku + 1
-    ab = zeros(m, n)
+    ab = zeros(FT, m, n)
 
     for j in 1:n
         for band_idx in 1:nband
@@ -123,16 +158,35 @@ function band_diagonal_column!(u::AbstractVector{<:Real}, b_matrix::AbstractMatr
     end
 
     rhs = copy(r[jtop:jbot])
-    ipiv = zeros(Int64, n)
-    rhs_mat = reshape(rhs, n, 1)
 
-    try
-        (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
-        LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
-        u[jtop:jbot] .= rhs
-    catch e
-        e isa LinearAlgebra.LAPACKException || rethrow()
-        # Singular matrix: leave u unchanged (preserves previous temperatures)
+    if FT <: AbstractFloat
+        # Use LAPACK for Float64/Float32
+        ipiv = zeros(Int64, n)
+        rhs_mat = reshape(rhs, n, 1)
+        try
+            (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
+            LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
+            u[jtop:jbot] .= rhs
+        catch e
+            e isa LinearAlgebra.LAPACKException || rethrow()
+        end
+    else
+        # Pure-Julia fallback for Dual/non-LAPACK types
+        A_dense = zeros(FT, n, n)
+        for j in 1:n
+            for band_idx in 1:nband
+                row_offset = band_idx - (kl + 1)
+                i = j + row_offset
+                if 1 <= i <= n
+                    A_dense[i, j] = ab[kl + ku + 1 + i - j, j]
+                end
+            end
+        end
+        try
+            sol = A_dense \ rhs
+            u[jtop:jbot] .= sol
+        catch
+        end
     end
 
     nothing

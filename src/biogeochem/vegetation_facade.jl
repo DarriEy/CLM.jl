@@ -385,17 +385,34 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         nrepr::Int = 1,
         patch_column::Vector{Int},
         ivt::Vector{Int},
-        woody::Vector{Float64},
+        woody::Vector{<:Real},
         harvdate::Vector{Int},
         col_is_fates::Vector{Bool},
         cascade_donor_pool::Vector{Int},
         cascade_receiver_pool::Vector{Int},
-        dt::Float64,
+        dt::Real,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
         soilbgc_state::SoilBiogeochemStateData,
+        # Decomposition infrastructure (optional, for full BGC)
+        cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
+        decomp_bgc_state::Union{DecompBGCState, Nothing} = nothing,
+        decomp_bgc_params::Union{DecompBGCParams, Nothing} = nothing,
+        cn_shared_params::Union{CNSharedParamsData, Nothing} = nothing,
+        decomp_params::Union{DecompParams, Nothing} = nothing,
+        competition_state::Union{SoilBGCCompetitionState, Nothing} = nothing,
+        competition_params::Union{SoilBGCCompetitionParams, Nothing} = nothing,
+        litter_params::Union{LitterVertTranspParams, Nothing} = nothing,
+        t_soisno::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        soilpsi::Union{Matrix{<:Real}, Nothing} = nothing,
+        col::Union{ColumnData, Nothing} = nothing,
+        grc::Union{GridcellData, Nothing} = nothing,
+        active_layer::Union{ActiveLayerData, Nothing} = nothing,
+        dzsoi_decomp::Union{Vector{<:Real}, Nothing} = nothing,
+        zsoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
+        zisoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
         mask_actfirec::BitVector = falses(length(bounds_col)),
         mask_actfirep::BitVector = falses(length(bounds_patch)))
 
@@ -437,6 +454,22 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         soilbgc_ns=soilbgc_ns,
         soilbgc_nf=soilbgc_nf,
         soilbgc_state=soilbgc_state,
+        cascade_con=cascade_con,
+        decomp_bgc_state=decomp_bgc_state,
+        decomp_bgc_params=decomp_bgc_params,
+        cn_shared_params=cn_shared_params,
+        decomp_params=decomp_params,
+        competition_state=competition_state,
+        competition_params=competition_params,
+        litter_params=litter_params,
+        t_soisno=t_soisno,
+        soilpsi=soilpsi,
+        col=col,
+        grc=grc,
+        active_layer=active_layer,
+        dzsoi_decomp=dzsoi_decomp,
+        zsoi_vals=zsoi_vals,
+        zisoi_vals=zisoi_vals,
         mask_actfirec=mask_actfirec,
         mask_actfirep=mask_actfirep)
 
@@ -481,7 +514,7 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         i_litr_min::Int = 1,
         i_litr_max::Int = 3,
         i_cwd::Int = 4,
-        dt::Float64,
+        dt::Real,
         doalb::Bool = false,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
@@ -626,7 +659,8 @@ function get_net_carbon_exchange_grc(veg::CNVegetationData,
     if veg.config.use_cn
         return [-veg.cnveg_carbonflux_inst.nbp_grc[g] for g in bounds_grc]
     else
-        return zeros(Float64, length(bounds_grc))
+        FT = eltype(veg.cnveg_carbonflux_inst.nbp_grc)
+        return zeros(FT, length(bounds_grc))
     end
 end
 
@@ -743,14 +777,15 @@ Ported from `get_froot_carbon_patch` in `CNVegetationFacade.F90`.
 """
 function get_froot_carbon_patch(veg::CNVegetationData,
                                   bounds_patch::UnitRange{Int};
-                                  tlai::Vector{Float64} = Float64[],
-                                  slatop::Vector{Float64} = Float64[],
-                                  froot_leaf::Vector{Float64} = Float64[],
+                                  tlai::Vector{<:Real} = Float64[],
+                                  slatop::Vector{<:Real} = Float64[],
+                                  froot_leaf::Vector{<:Real} = Float64[],
                                   ivt::Vector{Int} = Int[])
     if veg.config.use_cn
         return veg.cnveg_carbonstate_inst.frootc_patch[bounds_patch]
     else
-        result = zeros(Float64, length(bounds_patch))
+        FT = eltype(tlai)
+        result = zeros(FT, length(bounds_patch))
         for (i, p) in enumerate(bounds_patch)
             pft = ivt[p]
             if slatop[pft] > 0.0
@@ -772,15 +807,16 @@ Ported from `get_croot_carbon_patch` in `CNVegetationFacade.F90`.
 """
 function get_croot_carbon_patch(veg::CNVegetationData,
                                   bounds_patch::UnitRange{Int};
-                                  tlai::Vector{Float64} = Float64[],
-                                  slatop::Vector{Float64} = Float64[],
-                                  stem_leaf::Vector{Float64} = Float64[],
-                                  croot_stem::Vector{Float64} = Float64[],
+                                  tlai::Vector{<:Real} = Float64[],
+                                  slatop::Vector{<:Real} = Float64[],
+                                  stem_leaf::Vector{<:Real} = Float64[],
+                                  croot_stem::Vector{<:Real} = Float64[],
                                   ivt::Vector{Int} = Int[])
     if veg.config.use_cn
         return veg.cnveg_carbonstate_inst.livecrootc_patch[bounds_patch]
     else
-        result = zeros(Float64, length(bounds_patch))
+        FT = eltype(tlai)
+        result = zeros(FT, length(bounds_patch))
         for (i, p) in enumerate(bounds_patch)
             pft = ivt[p]
             if slatop[pft] > 0.0
