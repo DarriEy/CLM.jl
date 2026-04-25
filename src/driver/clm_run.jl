@@ -88,52 +88,6 @@ function clm_run!(;
         inst.soilstate.hksat_col .*= overrides.ksat_scale
     end
 
-    # Wire params from params.nc into runtime module-level structs.
-    # readParameters! handles PFT params and some scalars, but snow/hydrology
-    # params need explicit wiring to their mutable structs.
-    try
-        ds = NCDataset(paramfile, "r")
-        # Snow cover fraction params → inst.scf_method
-        scf = inst.scf_method
-        if haskey(ds, "n_melt_coef")
-            nmc = Float64(ds["n_melt_coef"][1])
-            for c in 1:nc
-                topo_std = max(10.0, inst.topo.topo_std[c])
-                scf.n_melt[c] = nmc / topo_std
-            end
-        end
-        haskey(ds, "accum_factor") && (scf.accum_factor = Float64(ds["accum_factor"][1]))
-        # Snow hydrology params → snowhydrology_params (module-level)
-        haskey(ds, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds["SNOW_DENSITY_MAX"][1]))
-        haskey(ds, "SNOW_DENSITY_MIN") && (snowhydrology_params.rho_min = Float64(ds["SNOW_DENSITY_MIN"][1]))
-        haskey(ds, "fresh_snw_rds_max") && (snowhydrology_params.snw_rds_min = Float64(ds["fresh_snw_rds_max"][1]))
-        haskey(ds, "wimp") && (snowhydrology_params.wimp = Float64(ds["wimp"][1]))
-        # Snow aging rate factor (xdrdt in Fortran, snw_aging_bst in SYMFLUENCE)
-        if haskey(ds, "snw_aging_bst")
-            snicar_params.xdrdt = Float64(ds["snw_aging_bst"][1])
-        elseif haskey(ds, "xdrdt")
-            snicar_params.xdrdt = Float64(ds["xdrdt"][1])
-        end
-        # Snow roughness → inst.frictionvel
-        haskey(ds, "SNO_Z0MV") && (inst.frictionvel.zsno = Float64(ds["SNO_Z0MV"][1]))
-        # Ksat decay factor: pc → hkdepth = 1/pc
-        if haskey(ds, "pc")
-            pc_val = Float64(ds["pc"][1])
-            if pc_val > 0
-                for c in 1:nc
-                    inst.soilhydrology.hkdepth_col[c] = 1.0 / pc_val
-                end
-            end
-        end
-        # Hydrology params → soil_hydrology module-level
-        if haskey(ds, "e_ice")
-            # e_ice is used in freeze_thaw impedance calculation
-        end
-        close(ds)
-    catch e
-        @debug "Runtime param wiring: $e"
-    end
-
     filt_ia = clump_filter_inactive_and_active
 
     ng = bounds.endg
@@ -156,6 +110,38 @@ function clm_run!(;
                 end
             end
         end
+    end
+
+    # ---- Wire params from params.nc into runtime structs ----
+    # Must be after nc is defined. readParameters! handles PFT params and some
+    # scalars; snow/hydrology params need explicit wiring here.
+    try
+        ds_p = NCDataset(paramfile, "r")
+        scf = inst.scf_method
+        if haskey(ds_p, "n_melt_coef")
+            nmc = Float64(ds_p["n_melt_coef"][1])
+            for c in 1:nc
+                topo_std = max(10.0, inst.column.topo_std[c])
+                scf.n_melt[c] = nmc / topo_std
+            end
+        end
+        haskey(ds_p, "accum_factor") && (scf.accum_factor = Float64(ds_p["accum_factor"][1]))
+        haskey(ds_p, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds_p["SNOW_DENSITY_MAX"][1]))
+        haskey(ds_p, "SNOW_DENSITY_MIN") && (snowhydrology_params.rho_min = Float64(ds_p["SNOW_DENSITY_MIN"][1]))
+        haskey(ds_p, "fresh_snw_rds_max") && (snowhydrology_params.snw_rds_min = Float64(ds_p["fresh_snw_rds_max"][1]))
+        haskey(ds_p, "SNO_Z0MV") && (inst.frictionvel.zsno = Float64(ds_p["SNO_Z0MV"][1]))
+        if haskey(ds_p, "snw_aging_bst")
+            snicar_params.xdrdt = Float64(ds_p["snw_aging_bst"][1])
+        elseif haskey(ds_p, "xdrdt")
+            snicar_params.xdrdt = Float64(ds_p["xdrdt"][1])
+        end
+        if haskey(ds_p, "pc")
+            pc_val = Float64(ds_p["pc"][1])
+            pc_val > 0 && (for c in 1:nc; inst.soilhydrology.hkdepth_col[c] = 1.0 / pc_val; end)
+        end
+        close(ds_p)
+    catch e
+        @warn "Runtime param wiring failed: $e" maxlog=1
     end
 
     # ---- Read restart if provided ----
