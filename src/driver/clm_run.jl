@@ -51,7 +51,8 @@ function clm_run!(;
     fsnowaging::String = "",
     frestart::String = "",
     baseflow_scalar::Real = 1.0e-2,
-    int_snow_max::Real = 2000.0)
+    int_snow_max::Real = 2000.0,
+    overrides::Union{CalibrationOverrides, Nothing} = nothing)
 
     # ========================================================================
     # Phase 1: Initialize
@@ -66,20 +67,119 @@ function clm_run!(;
         fsnowoptics=fsnowoptics, fsnowaging=fsnowaging,
         int_snow_max=int_snow_max)
 
+    if overrides !== nothing
+        inst.overrides = overrides
+    end
+
     config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer)
 
     # Set baseflow scalar (namelist-adjustable parameter)
-    init_soil_hydrology_config(baseflow_scalar=baseflow_scalar)
+    bf = (overrides !== nothing && !isnan(overrides.baseflow_scalar)) ?
+        overrides.baseflow_scalar : baseflow_scalar
+    init_soil_hydrology_config(baseflow_scalar=bf)
+
+    # Wire fff override into sat_excess_runoff_params
+    if overrides !== nothing && !isnan(overrides.fff)
+        sat_excess_runoff_params.fff = overrides.fff
+    end
+
+    # Wire ksat_scale override: multiply hksat in soil state
+    if overrides !== nothing && !isnan(overrides.ksat_scale)
+        inst.soilstate.hksat_col .*= overrides.ksat_scale
+    end
+
+    # Wire params from params.nc into runtime module-level structs.
+    # readParameters! handles PFT params and some scalars, but snow/hydrology
+    # params need explicit wiring to their mutable structs.
+    try
+        ds = NCDataset(paramfile, "r")
+        # Snow cover fraction params → inst.scf_method
+        scf = inst.scf_method
+        if haskey(ds, "n_melt_coef")
+            nmc = Float64(ds["n_melt_coef"][1])
+            for c in 1:nc
+                topo_std = max(10.0, inst.topo.topo_std[c])
+                scf.n_melt[c] = nmc / topo_std
+            end
+        end
+        haskey(ds, "accum_factor") && (scf.accum_factor = Float64(ds["accum_factor"][1]))
+        # Snow hydrology params → snowhydrology_params (module-level)
+        haskey(ds, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds["SNOW_DENSITY_MAX"][1]))
+        haskey(ds, "SNOW_DENSITY_MIN") && (snowhydrology_params.rho_min = Float64(ds["SNOW_DENSITY_MIN"][1]))
+        haskey(ds, "fresh_snw_rds_max") && (snowhydrology_params.snw_rds_min = Float64(ds["fresh_snw_rds_max"][1]))
+        haskey(ds, "wimp") && (snowhydrology_params.wimp = Float64(ds["wimp"][1]))
+        # Snow aging rate factor (xdrdt in Fortran, snw_aging_bst in SYMFLUENCE)
+        if haskey(ds, "snw_aging_bst")
+            snicar_params.xdrdt = Float64(ds["snw_aging_bst"][1])
+        elseif haskey(ds, "xdrdt")
+            snicar_params.xdrdt = Float64(ds["xdrdt"][1])
+        end
+        # Snow roughness → inst.frictionvel
+        haskey(ds, "SNO_Z0MV") && (inst.frictionvel.zsno = Float64(ds["SNO_Z0MV"][1]))
+        # Ksat decay factor: pc → hkdepth = 1/pc
+        if haskey(ds, "pc")
+            pc_val = Float64(ds["pc"][1])
+            if pc_val > 0
+                for c in 1:nc
+                    inst.soilhydrology.hkdepth_col[c] = 1.0 / pc_val
+                end
+            end
+        end
+        # Hydrology params → soil_hydrology module-level
+        if haskey(ds, "e_ice")
+            # e_ice is used in freeze_thaw impedance calculation
+        end
+        close(ds)
+    catch e
+        @debug "Runtime param wiring: $e"
+    end
+
     filt_ia = clump_filter_inactive_and_active
 
     ng = bounds.endg
     nc = bounds.endc
     np = bounds.endp
 
+    # Apply soil property multipliers to soilstate (post-init, since CLM.jl
+    # computes bsw/watsat/sucsat from pedotransfer, ignoring surfdata values)
+    if overrides !== nothing
+        nlevsoi_l = varpar.nlevsoi
+        for (field, mult_val, lo, hi) in [
+            (:bsw_col, overrides.bsw_mult, 1.0, 30.0),
+            (:watsat_col, overrides.watsat_mult, 0.01, 0.95),
+            (:sucsat_col, overrides.sucsat_mult, 1.0, 1e6),
+        ]
+            if !isnan(mult_val) && mult_val != 1.0
+                arr = getfield(inst.soilstate, field)
+                for c in 1:nc, j in 1:nlevsoi_l
+                    arr[c, j] = clamp(arr[c, j] * mult_val, lo, hi)
+                end
+            end
+        end
+    end
+
     # ---- Read restart if provided ----
     if !isempty(frestart) && isfile(frestart)
         verbose && println("CLM.jl: Reading restart from: ", frestart)
         read_restart!(frestart, inst, bounds)
+    end
+
+    # ---- Initialize water table near bedrock for cold-start runs ----
+    # Without restart, wa_col defaults to 4000mm which puts zwt ~13m deep
+    # (well below bedrock). This disables baseflow for years. Set wa to put
+    # zwt at bedrock depth so hydrology params are immediately active.
+    if isempty(frestart) || !isfile(frestart)
+        nlevsno_l = varpar.nlevsno
+        nlevsoi_l = varpar.nlevsoi
+        for c in 1:nc
+            nbr = inst.column.nbedrock[c]
+            zi_bed = inst.column.zi[c, nbr + nlevsno_l + 1]
+            zi_bot = inst.column.zi[c, nlevsoi_l + nlevsno_l + 1]
+            target_zwt = min(zi_bed, 2.0)
+            wa_target = (25.0 + zi_bot - target_zwt) * 0.2 * 1000.0
+            inst.water.waterstatebulk_inst.ws.wa_col[c] = wa_target
+            inst.soilhydrology.zwt_col[c] = target_zwt
+        end
     end
 
     # ========================================================================

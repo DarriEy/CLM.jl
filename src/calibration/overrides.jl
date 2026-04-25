@@ -24,10 +24,14 @@ mutable struct CalibrationOverrides{FT<:Real}
     baseflow_scalar::FT   # baseflow scalar override
     fff::FT               # runoff decay factor
     ksat_scale::FT        # hksat multiplicative scale
+    bsw_mult::FT          # Clapp-Hornberger b multiplier
+    watsat_mult::FT       # porosity multiplier
+    sucsat_mult::FT       # saturated suction multiplier
 
     # Inner constructor: all NaN
     function CalibrationOverrides{FT}() where {FT<:Real}
-        new{FT}(FT(NaN), FT(NaN), FT(NaN), FT(NaN), FT(NaN), FT(NaN), FT(NaN))
+        new{FT}(FT(NaN), FT(NaN), FT(NaN), FT(NaN), FT(NaN), FT(NaN), FT(NaN),
+                FT(NaN), FT(NaN), FT(NaN))
     end
 end
 

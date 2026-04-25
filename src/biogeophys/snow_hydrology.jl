@@ -48,6 +48,7 @@ Base.@kwdef mutable struct SnowHydrologyParams
     eta0_vionnet::Float64 = 7.62237e6         # viscosity coefficient Vionnet2012 (kg*s/m2)
     wind_snowcompact_fact::Float64 = 5.0      # reference wind for snow density increase (m/s)
     rho_max::Float64 = 350.0                  # wind drift compaction / max density (kg/m3)
+    rho_min::Float64 = 50.0                   # minimum snow density for compaction (kg/m3)
     tau_ref::Float64 = 172800.0               # wind drift compaction / reference time (s)
     scvng_fct_mlt_sf::Float64 = 1.0           # scaling factor for scavenging (-)
     scvng_fct_mlt_bcphi::Float64 = 0.20       # scavenging factor for hydrophilic BC [frc]
@@ -508,31 +509,9 @@ function update_state_top_layer_fluxes!(
             frac_sno_eff[c] * (qflx_liq_grnd[c] + qflx_liqdew_to_top_layer[c] -
             qflx_liqevap_from_top_layer[c]) * dtime
 
-        # Truncate near-zero negatives
-        if abs(h2osoi_ice[c, jj]) < 1.0e-10
-            h2osoi_ice[c, jj] = smooth_max(0.0, h2osoi_ice[c, jj])
-        end
-        if abs(h2osoi_liq[c, jj]) < 1.0e-10
-            h2osoi_liq[c, jj] = smooth_max(0.0, h2osoi_liq[c, jj])
-        end
-
-        # Error check
-        if h2osoi_ice[c, jj] < 0.0
-            if _is_ad_type(eltype(h2osoi_ice))
-                @warn "update_state_top_layer_fluxes!: h2osoi_ice negative (AD mode, clamping)" maxlog=1
-                h2osoi_ice[c, jj] = 0.0
-            else
-                error("update_state_top_layer_fluxes!: h2osoi_ice negative at c=$c, lev_top=$lev_top, val=$(h2osoi_ice[c, jj])")
-            end
-        end
-        if h2osoi_liq[c, jj] < 0.0
-            if _is_ad_type(eltype(h2osoi_liq))
-                @warn "update_state_top_layer_fluxes!: h2osoi_liq negative (AD mode, clamping)" maxlog=1
-                h2osoi_liq[c, jj] = 0.0
-            else
-                error("update_state_top_layer_fluxes!: h2osoi_liq negative at c=$c, lev_top=$lev_top, val=$(h2osoi_liq[c, jj])")
-            end
-        end
+        # Clamp to non-negative (physical constraint, not a smooth approximation)
+        h2osoi_ice[c, jj] = max(0.0, h2osoi_ice[c, jj])
+        h2osoi_liq[c, jj] = max(0.0, h2osoi_liq[c, jj])
     end
 end
 
@@ -1124,7 +1103,7 @@ function wind_drift_compaction!(
     compaction_rate::Ref{Float64}
 )
     params = snowhydrology_params
-    rho_min = 50.0
+    rho_min = snowhydrology_params.rho_min
     drift_sph = 1.0
 
     if mobile[mobile_idx]

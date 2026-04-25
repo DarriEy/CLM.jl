@@ -633,13 +633,13 @@ function ci_func!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
                 (2.0 * medlynintercept_val * 1.0e-06 + term *
                  (1.0 - medlynslope_val^2 / rh_can)) * term
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        gs_mol = smooth_max(r1, r2) * 1.0e06
+        gs_mol = smooth_max(smooth_max(r1, r2) * 1.0e06, 1.0)
     elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
         aquad = cs
         bquad = cs * (gb_mol - bbb_p) - mbb_p * an[p, iv] * forc_pbot_c
         cquad = -gb_mol * (cs * bbb_p + mbb_p * an[p, iv] * forc_pbot_c * rh_can)
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        gs_mol = smooth_max(r1, r2)
+        gs_mol = smooth_max(smooth_max(r1, r2), bbb_p)
     end
 
     fval = ci - cair + an[p, iv] * forc_pbot_c * (1.4 * gs_mol + 1.6 * gb_mol) / (gb_mol * gs_mol)
@@ -1203,8 +1203,8 @@ function photosynthesis!(ps::PhotosynthesisData,
                     (1.4 * gs_mol[p, iv] + 1.6 * gb_mol[p]) / (gb_mol[p] * gs_mol[p, iv])
                 ci_z[p, iv] = smooth_max(ci_z[p, iv], 1.0e-06)
 
-                # Convert to resistance
-                gs_val = gs_mol[p, iv] / cf
+                # Convert to resistance (gs must be positive)
+                gs_val = max(gs_mol[p, iv], 1.0) / cf
                 rs_z[p, iv] = smooth_min(1.0 / gs_val, rsmax0)
                 rs_z[p, iv] = rs_z[p, iv] / o3coefg[p]
 
@@ -1252,7 +1252,7 @@ function photosynthesis!(ps::PhotosynthesisData,
             psncan_wj += psn_wj_z[p, iv] * lai_z_in[p, iv]
             psncan_wp += psn_wp_z[p, iv] * lai_z_in[p, iv]
             lmrcan += lmr_z[p, iv] * lai_z_in[p, iv]
-            gscan += lai_z_in[p, iv] / (rb[p] + rs_z[p, iv])
+            gscan += lai_z_in[p, iv] / max(rb[p] + rs_z[p, iv], 1.0e-6)
             laican += lai_z_in[p, iv]
         end
 
@@ -1262,7 +1262,7 @@ function photosynthesis!(ps::PhotosynthesisData,
             psn_wj[p] = psncan_wj / laican
             psn_wp[p] = psncan_wp / laican
             lmr_out[p] = lmrcan / laican
-            rs[p] = laican / gscan - rb[p]
+            rs[p] = max(laican / gscan - rb[p], 0.0)
         else
             psn[p] = 0.0
             psn_wc[p] = 0.0
@@ -2102,7 +2102,7 @@ function ci_func_PHS!(x::Vector{<:Real}, cisun::Real, cisha::Real,
                     (2.0 * medlynintercept_val * 1.0e-06 + term *
                      (1.0 - medlynslope_val^2 / rh_can)) * term
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sun = smooth_max(r1, r2) * 1.0e06
+            gs_mol_sun = smooth_max(smooth_max(r1, r2) * 1.0e06, 1.0)
         end
 
         # Shaded
@@ -2117,15 +2117,16 @@ function ci_func_PHS!(x::Vector{<:Real}, cisun::Real, cisha::Real,
                     (2.0 * medlynintercept_val * 1.0e-06 + term *
                      (1.0 - medlynslope_val^2 / rh_can)) * term
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sha = smooth_max(r1, r2) * 1.0e06
+            gs_mol_sha = smooth_max(smooth_max(r1, r2) * 1.0e06, 1.0)
         end
     elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
         if an_sun[p, iv] >= 0.0
             aquad = cs_sun
-            bquad = cs_sun * (gb_mol - smooth_max(bsun * bbb_p, 1.0)) - mbb_p * an_sun[p, iv] * forc_pbot_c
-            cquad = -gb_mol * (cs_sun * smooth_max(bsun * bbb_p, 1.0) + mbb_p * an_sun[p, iv] * forc_pbot_c * rh_can)
+            bsun_bbb = smooth_max(bsun * bbb_p, 1.0)
+            bquad = cs_sun * (gb_mol - bsun_bbb) - mbb_p * an_sun[p, iv] * forc_pbot_c
+            cquad = -gb_mol * (cs_sun * bsun_bbb + mbb_p * an_sun[p, iv] * forc_pbot_c * rh_can)
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sun = smooth_max(r1, r2)
+            gs_mol_sun = smooth_max(smooth_max(r1, r2), bbb_p)
         end
 
         # Shaded
@@ -2133,10 +2134,11 @@ function ci_func_PHS!(x::Vector{<:Real}, cisun::Real, cisha::Real,
             cs_sha = cair - 1.4 / gb_mol * an_sha[p, iv] * forc_pbot_c
             cs_sha = smooth_max(cs_sha, MAX_CS)
             aquad = cs_sha
-            bquad = cs_sha * (gb_mol - smooth_max(bsha * bbb_p, 1.0)) - mbb_p * an_sha[p, iv] * forc_pbot_c
-            cquad = -gb_mol * (cs_sha * smooth_max(bsha * bbb_p, 1.0) + mbb_p * an_sha[p, iv] * forc_pbot_c * rh_can)
+            bsha_bbb = smooth_max(bsha * bbb_p, 1.0)
+            bquad = cs_sha * (gb_mol - bsha_bbb) - mbb_p * an_sha[p, iv] * forc_pbot_c
+            cquad = -gb_mol * (cs_sha * bsha_bbb + mbb_p * an_sha[p, iv] * forc_pbot_c * rh_can)
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sha = smooth_max(r1, r2)
+            gs_mol_sha = smooth_max(smooth_max(r1, r2), bbb_p)
         end
     end
 
@@ -3106,11 +3108,11 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
                     (gb_mol_arr[p] * gs_mol_sha[p, iv])
                 ci_z_sha[p, iv] = smooth_max(ci_z_sha[p, iv], 1.0e-06)
 
-                # Convert to resistance
-                gs = gs_mol_sun[p, iv] / cf
+                # Convert to resistance (gs must be positive)
+                gs = max(gs_mol_sun[p, iv], 1.0) / cf
                 rs_z_sun[p, iv] = smooth_min(1.0 / gs, rsmax0)
                 rs_z_sun[p, iv] = rs_z_sun[p, iv] / o3coefg_sun[p]
-                gs = gs_mol_sha[p, iv] / cf
+                gs = max(gs_mol_sha[p, iv], 1.0) / cf
                 rs_z_sha[p, iv] = smooth_min(1.0 / gs, rsmax0)
                 rs_z_sha[p, iv] = rs_z_sha[p, iv] / o3coefg_sha[p]
 
@@ -3167,7 +3169,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
             else
                 lmrcan_sun += lmr_z_sun[p, iv] * lai_z_sun_in[p, iv]
             end
-            gscan_sun += lai_z_sun_in[p, iv] / (rb[p] + rs_z_sun[p, iv])
+            gscan_sun += lai_z_sun_in[p, iv] / max(rb[p] + rs_z_sun[p, iv], 1.0e-6)
             laican_sun += lai_z_sun_in[p, iv]
         end
         if laican_sun > 0.0
@@ -3176,7 +3178,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
             psn_wj_sun[p] = psncan_wj_sun / laican_sun
             psn_wp_sun[p] = psncan_wp_sun / laican_sun
             lmr_sun[p] = lmrcan_sun / laican_sun
-            rs_sun[p] = laican_sun / gscan_sun - rb[p]
+            rs_sun[p] = max(laican_sun / gscan_sun - rb[p], 0.0)
         else
             psn_sun[p] = 0.0; psn_wc_sun[p] = 0.0; psn_wj_sun[p] = 0.0; psn_wp_sun[p] = 0.0
             lmr_sun[p] = 0.0; rs_sun[p] = 0.0
@@ -3195,7 +3197,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
             else
                 lmrcan_sha += lmr_z_sha[p, iv] * lai_z_sha_in[p, iv]
             end
-            gscan_sha += lai_z_sha_in[p, iv] / (rb[p] + rs_z_sha[p, iv])
+            gscan_sha += lai_z_sha_in[p, iv] / max(rb[p] + rs_z_sha[p, iv], 1.0e-6)
             laican_sha += lai_z_sha_in[p, iv]
         end
         if laican_sha > 0.0
@@ -3204,7 +3206,7 @@ function photosynthesis_hydrstress!(ps::PhotosynthesisData,
             psn_wj_sha[p] = psncan_wj_sha / laican_sha
             psn_wp_sha[p] = psncan_wp_sha / laican_sha
             lmr_sha[p] = lmrcan_sha / laican_sha
-            rs_sha[p] = laican_sha / gscan_sha - rb[p]
+            rs_sha[p] = max(laican_sha / gscan_sha - rb[p], 0.0)
         else
             psn_sha[p] = 0.0; psn_wc_sha[p] = 0.0; psn_wj_sha[p] = 0.0; psn_wp_sha[p] = 0.0
             lmr_sha[p] = 0.0; rs_sha[p] = 0.0

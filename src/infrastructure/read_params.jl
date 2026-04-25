@@ -25,6 +25,22 @@ function readParameters!(paramfile::String)
 
         # Read photosynthesis parameters (PhotosynthesisMod)
         readParams_photosynthesis!(ds)
+
+        # Read soil hydrology parameters (SoilHydrologyMod)
+        haskey(ds, "n_baseflow") && (soilhydrology_params.n_baseflow = Float64(ds["n_baseflow"][1]))
+        haskey(ds, "e_ice") && (soilhydrology_params.e_ice = Float64(ds["e_ice"][1]))
+        haskey(ds, "perched_baseflow_scalar") && (soilhydrology_params.perched_baseflow_scalar = Float64(ds["perched_baseflow_scalar"][1]))
+        haskey(ds, "aq_sp_yield_min") && (soilhydrology_params.aq_sp_yield_min = Float64(ds["aq_sp_yield_min"][1]))
+
+        # Read snow hydrology parameters (SnowHydrologyMod)
+        haskey(ds, "wimp") && (snowhydrology_params.wimp = Float64(ds["wimp"][1]))
+        haskey(ds, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds["SNOW_DENSITY_MAX"][1]))
+        haskey(ds, "SNO_Z0MV") && nothing  # read in clm_run! → inst.frictionvel.zsno
+        haskey(ds, "snw_aging_bst") && nothing  # TODO: wire to snow aging routine
+
+        # Read interception parameters (CanopyHydrologyMod)
+        haskey(ds, "interception_fraction") && (canopy_hydrology_params.interception_fraction = Float64(ds["interception_fraction"][1]))
+        haskey(ds, "maximum_leaf_wetted_fraction") && (canopy_hydrology_params.maximum_leaf_wetted_fraction = Float64(ds["maximum_leaf_wetted_fraction"][1]))
     finally
         close(ds)
     end

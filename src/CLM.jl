@@ -213,5 +213,6 @@ include("calibration/optimize.jl")
 include("calibration/enzyme_ad.jl")
 include("calibration/fluxnet_reader.jl")
 include("calibration/site_calibration.jl")
+include("calibration/param_injection.jl")
 
 end # module CLM
