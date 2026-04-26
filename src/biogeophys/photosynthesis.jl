@@ -254,7 +254,7 @@ Base.@kwdef mutable struct PhotosynthesisData{FT<:Real}
     rootstem_acc::Bool = false
     light_inhibit::Bool = false
     leafresp_method::Int = LEAFRESP_MTD_RYAN1991
-    stomatalcond_mtd::Int = STOMATALCOND_MTD_BB1987
+    stomatalcond_mtd::Int = STOMATALCOND_MTD_MEDLYN2011
     modifyphoto_and_lmr_forcrop::Bool = false
 end
 
