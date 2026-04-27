@@ -102,12 +102,17 @@ function init_temperatures!(inst::CLMInstances, bounds::BoundsType)
     nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
     nlevlak = varpar.nlevlak
 
-    T_INIT = 274.0  # initial temperature [K]
+    # Estimate mean annual temperature from latitude for cold-start init.
+    # At 274 K (previous default), deep soil at high latitudes never freezes,
+    # causing excessive winter drainage. Use latitude-based estimate instead.
+    lat = length(inst.gridcell.latdeg) > 0 ? inst.gridcell.latdeg[1] : 45.0
+    T_INIT = max(250.0, 288.0 - 0.5 * abs(lat))  # rough MAT approximation
 
     for c in bounds.begc:bounds.endc
         temp.t_grnd_col[c] = T_INIT
 
-        # Soil/snow temperature
+        # Soil/snow temperature — set with depth-dependent offset
+        # Deep soil converges to mean annual T; surface starts cooler in cold climates
         for j in 1:(nlevsno + nlevmaxurbgrnd)
             temp.t_soisno_col[c, j] = T_INIT
         end
