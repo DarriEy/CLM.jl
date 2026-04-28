@@ -191,6 +191,7 @@ include("infrastructure/lnd2atm_mod.jl")
 include("infrastructure/forcing_reader.jl")
 include("infrastructure/history_writer.jl")
 include("infrastructure/restart_io.jl")
+include("infrastructure/fortran_restart.jl")
 
 # ===========================================================================
 # Initialization (depends on instances + all types)
