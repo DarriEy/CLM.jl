@@ -154,7 +154,10 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
     nlevsno = varpar.nlevsno
     joff = nlevsno
 
-    VOL_INIT = 0.15  # matches waterstate_type%InitCold default for non-FATES
+    # Initialize drier than Fortran default (0.15) to reach equilibrium faster.
+    # At 0.15, soil takes 10+ years to equilibrate at cold mountain sites because
+    # spring snowmelt recharges faster than summer ET can deplete.
+    VOL_INIT = 0.05
 
     nlevtot = nlevsno + varpar.nlevmaxurbgrnd
 

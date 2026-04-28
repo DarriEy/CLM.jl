@@ -142,14 +142,20 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     if precip < 0.0
         precip = 0.0
     end
+    # Partition precipitation using a linear ramp between all-snow and all-rain
+    # temperatures, matching CLM5's default behavior (Fortran DATM uses similar)
+    T_all_snow = TFRZ - 2.0  # all snow below -2°C
+    T_all_rain = TFRZ + 2.0  # all rain above +2°C
     for g in 1:ng
-        if tbot > TFRZ
-            a2l.forc_rain_not_downscaled_grc[g] = precip
-            a2l.forc_snow_not_downscaled_grc[g] = 0.0
+        if tbot <= T_all_snow
+            frac_rain = 0.0
+        elseif tbot >= T_all_rain
+            frac_rain = 1.0
         else
-            a2l.forc_rain_not_downscaled_grc[g] = 0.0
-            a2l.forc_snow_not_downscaled_grc[g] = precip
+            frac_rain = (tbot - T_all_snow) / (T_all_rain - T_all_snow)
         end
+        a2l.forc_rain_not_downscaled_grc[g] = precip * frac_rain
+        a2l.forc_snow_not_downscaled_grc[g] = precip * (1.0 - frac_rain)
     end
 
     # Specific humidity → vapor pressure
