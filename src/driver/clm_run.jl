@@ -186,12 +186,18 @@ function clm_run!(;
                 for g in 1:ng
                     inst.atm2lnd.forc_topo_grc[g] = forc_topo
                 end
-                # For single-point runs, topo_col = forc_topo (no lapse correction)
-                # Lapse correction only applies when column elevation differs from
-                # forcing grid elevation (e.g., elevation bands within a basin)
-                for c2 in 1:nc
-                    inst.topo.topo_col[c2] = forc_topo
-                end
+                # Set topo_col to surfdata TOPO (the physical column elevation).
+                # The forcing is at forc_topo (basin-average elevation from EASYMORE);
+                # downscale_forcings! corrects: T_col = T_forc - lapse*(topo_col - forc_topo)
+                try
+                    ds_sf2 = NCDataset(fsurdat, "r")
+                    surf_topo = haskey(ds_sf2, "TOPO") ? Float64(ds_sf2["TOPO"][1]) : forc_topo
+                    for c2 in 1:nc
+                        inst.topo.topo_col[c2] = surf_topo
+                    end
+                    close(ds_sf2)
+                    verbose && println("CLM.jl: Lapse: forcing=$(round(forc_topo,digits=0))m → surface=$(round(surf_topo,digits=0))m (ΔT=$(round(0.006*(surf_topo-forc_topo),digits=1))K)")
+                catch; end
                 verbose && println("CLM.jl: Forcing elevation: $(round(forc_topo, digits=0))m, surface: $(round(inst.topo.topo_col[1], digits=0))m")
             end
             close(ds_topo)
