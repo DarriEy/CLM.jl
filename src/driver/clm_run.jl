@@ -161,7 +161,7 @@ function clm_run!(;
             nbr = inst.column.nbedrock[c]
             zi_bed = inst.column.zi[c, nbr + nlevsno_l + 1]
             zi_bot = inst.column.zi[c, nlevsoi_l + nlevsno_l + 1]
-            target_zwt = min(zi_bed, 2.0)
+            target_zwt = zi_bed  # match Fortran equilibrium: zwt at bedrock
             wa_target = (25.0 + zi_bot - target_zwt) * 0.2 * 1000.0
             inst.water.waterstatebulk_inst.ws.wa_col[c] = wa_target
             inst.soilhydrology.zwt_col[c] = target_zwt
@@ -174,6 +174,28 @@ function clm_run!(;
     verbose && println("CLM.jl: Opening forcing file: ", fforcing)
     fr = ForcingReader()
     forcing_reader_init!(fr, fforcing)
+
+    # Read topo forcing to set atmospheric topography for lapse-rate correction.
+    # Without this, forc_topo_grc=0 and downscale_forcings! doesn't correct T.
+    topo_file = replace(fforcing, r"clmforc\.[^/]*\.nc$" => "topo_forcing.nc")
+    if isfile(topo_file)
+        try
+            ds_topo = NCDataset(topo_file, "r")
+            if haskey(ds_topo, "TOPO")
+                topo_val = Float64(ds_topo["TOPO"][1])
+                for g in 1:ng
+                    inst.atm2lnd.forc_topo_grc[g] = topo_val
+                end
+                for c2 in 1:nc
+                    inst.topo.topo_col[c2] = topo_val
+                end
+                verbose && println("CLM.jl: Topo forcing: $(round(topo_val, digits=0))m")
+            end
+            close(ds_topo)
+        catch e
+            @debug "Topo forcing read: $e"
+        end
+    end
 
     # ========================================================================
     # Phase 3: Open history writer
