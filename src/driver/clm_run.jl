@@ -182,14 +182,23 @@ function clm_run!(;
         try
             ds_topo = NCDataset(topo_file, "r")
             if haskey(ds_topo, "TOPO")
-                topo_val = Float64(ds_topo["TOPO"][1])
+                forc_topo = Float64(ds_topo["TOPO"][1])
                 for g in 1:ng
-                    inst.atm2lnd.forc_topo_grc[g] = topo_val
+                    inst.atm2lnd.forc_topo_grc[g] = forc_topo
                 end
-                for c2 in 1:nc
-                    inst.topo.topo_col[c2] = topo_val
-                end
-                verbose && println("CLM.jl: Topo forcing: $(round(topo_val, digits=0))m")
+                # Set topo_col to surfdata TOPO (column physical elevation)
+                # forc_topo_grc is the forcing grid elevation
+                # downscale_forcings! corrects: T_col = T_forc - lapse*(topo_col - forc_topo)
+                # Read surfdata TOPO for column elevation
+                try
+                    ds_sf2 = NCDataset(fsurdat, "r")
+                    surf_topo = haskey(ds_sf2, "TOPO") ? Float64(ds_sf2["TOPO"][1]) : forc_topo
+                    for c2 in 1:nc
+                        inst.topo.topo_col[c2] = surf_topo
+                    end
+                    close(ds_sf2)
+                catch; end
+                verbose && println("CLM.jl: Forcing elevation: $(round(forc_topo, digits=0))m, surface: $(round(inst.topo.topo_col[1], digits=0))m")
             end
             close(ds_topo)
         catch e
