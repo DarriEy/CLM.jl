@@ -73,6 +73,16 @@ function clm_run!(;
 
     config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer)
 
+    # Configure atm2lnd downscaling to match Fortran lnd_in defaults
+    atm2lnd_read_namelist!(inst.atm2lnd;
+        repartition_rain_snow=true,
+        lapse_rate=0.006,
+        lapse_rate_longwave=0.032,
+        precip_repartition_nonglc_all_snow_t=0.0,
+        precip_repartition_nonglc_all_rain_t=2.0,
+        precip_repartition_glc_all_snow_t=-2.0,
+        precip_repartition_glc_all_rain_t=0.0)
+
     # Set baseflow scalar (namelist-adjustable parameter)
     bf = (overrides !== nothing && !isnan(overrides.baseflow_scalar)) ?
         overrides.baseflow_scalar : baseflow_scalar
@@ -186,19 +196,13 @@ function clm_run!(;
                 for g in 1:ng
                     inst.atm2lnd.forc_topo_grc[g] = forc_topo
                 end
-                # Set topo_col to surfdata TOPO (the physical column elevation).
-                # The forcing is at forc_topo (basin-average elevation from EASYMORE);
-                # downscale_forcings! corrects: T_col = T_forc - lapse*(topo_col - forc_topo)
-                try
-                    ds_sf2 = NCDataset(fsurdat, "r")
-                    surf_topo = haskey(ds_sf2, "TOPO") ? Float64(ds_sf2["TOPO"][1]) : forc_topo
-                    for c2 in 1:nc
-                        inst.topo.topo_col[c2] = surf_topo
-                    end
-                    close(ds_sf2)
-                    verbose && println("CLM.jl: Lapse: forcing=$(round(forc_topo,digits=0))m → surface=$(round(surf_topo,digits=0))m (ΔT=$(round(0.006*(surf_topo-forc_topo),digits=1))K)")
-                catch; end
-                verbose && println("CLM.jl: Forcing elevation: $(round(forc_topo, digits=0))m, surface: $(round(inst.topo.topo_col[1], digits=0))m")
+                # Match Fortran TopoMod.UpdateTopo: for columns without glacier/hillslope
+                # downscaling, topo_col = atm_topo (line 282 of TopoMod.F90).
+                # This means no lapse correction (hsurf_c = hsurf_g → ΔT = 0).
+                for c2 in 1:nc
+                    inst.topo.topo_col[c2] = forc_topo
+                end
+                verbose && println("CLM.jl: topo_col=forc_topo=$(round(forc_topo,digits=0))m (no lapse correction)")
             end
             close(ds_topo)
         catch e

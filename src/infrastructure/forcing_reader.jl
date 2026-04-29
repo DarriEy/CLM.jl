@@ -127,13 +127,18 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
         a2l.forc_lwrad_not_downscaled_grc[g] = flds
     end
 
-    # Shortwave radiation [W/m2] — split into direct/diffuse (70/30)
+    # Shortwave radiation [W/m2] — split into VIS/NIR (50/50) then
+    # direct/diffuse using CAM-derived polynomial (Fortran DATM CLMNCEP)
     fsds = _read_var("FSDS", 0.0)
     for g in 1:ng
-        a2l.forc_solad_not_downscaled_grc[g, 1] = fsds * 0.50  # VIS direct
-        a2l.forc_solad_not_downscaled_grc[g, 2] = fsds * 0.20  # NIR direct
-        a2l.forc_solai_grc[g, 1] = fsds * 0.20  # VIS diffuse
-        a2l.forc_solai_grc[g, 2] = fsds * 0.10  # NIR diffuse
+        swndr = fsds * 0.50  # NIR half
+        ratio_nir = clamp(0.29548 + 0.00504*swndr - 1.4957e-5*swndr^2 + 1.4881e-8*swndr^3, 0.01, 0.99)
+        swvdr = fsds * 0.50  # VIS half
+        ratio_vis = clamp(0.17639 + 0.00380*swvdr - 9.0039e-6*swvdr^2 + 8.1351e-9*swvdr^3, 0.01, 0.99)
+        a2l.forc_solad_not_downscaled_grc[g, 1] = ratio_vis * swvdr        # VIS direct
+        a2l.forc_solad_not_downscaled_grc[g, 2] = ratio_nir * swndr        # NIR direct
+        a2l.forc_solai_grc[g, 1] = (1.0 - ratio_vis) * swvdr               # VIS diffuse
+        a2l.forc_solai_grc[g, 2] = (1.0 - ratio_nir) * swndr               # NIR diffuse
         a2l.forc_solar_not_downscaled_grc[g] = fsds
     end
 
@@ -142,18 +147,11 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     if precip < 0.0
         precip = 0.0
     end
-    # Partition precipitation using a linear ramp between all-snow and all-rain
-    # temperatures, matching CLM5's default behavior (Fortran DATM uses similar)
-    T_all_snow = TFRZ - 2.0  # all snow below -2°C
-    T_all_rain = TFRZ + 2.0  # all rain above +2°C
+    # Partition precipitation using a linear ramp matching Fortran DATM
+    # (shr_precip_mod.F90): frac_rain = (T - TFRZ) * 0.5, clamped to [0,1]
+    # All snow at T <= 0°C, all rain at T >= +2°C
     for g in 1:ng
-        if tbot <= T_all_snow
-            frac_rain = 0.0
-        elseif tbot >= T_all_rain
-            frac_rain = 1.0
-        else
-            frac_rain = (tbot - T_all_snow) / (T_all_rain - T_all_snow)
-        end
+        frac_rain = clamp((tbot - TFRZ) * 0.5, 0.0, 1.0)
         a2l.forc_rain_not_downscaled_grc[g] = precip * frac_rain
         a2l.forc_snow_not_downscaled_grc[g] = precip * (1.0 - frac_rain)
     end

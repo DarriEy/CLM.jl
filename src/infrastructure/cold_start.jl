@@ -154,12 +154,9 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
     nlevsno = varpar.nlevsno
     joff = nlevsno
 
-    # Initialize soil moisture with depth-dependent profile.
-    # Shallow layers get recharged by snowmelt every spring, so their init
-    # value matters less. Deep layers (j>5) determine long-term btran and take
-    # decades to equilibrate. Start them near residual to match Fortran equilibrium.
-    VOL_INIT_SHALLOW = 0.08  # top 5 layers
-    VOL_INIT_DEEP = 0.01     # layers 6+ (near residual water content)
+    # Initialize soil moisture to 75% of saturation, matching Fortran
+    # WaterStateType%InitCold: h2osoi_vol = 0.75 * watsat * ratio (ratio=1 for bulk).
+    # This ensures frozen soil has enough ice to impede baseflow in cold-start.
 
     nlevtot = nlevsno + varpar.nlevmaxurbgrnd
 
@@ -178,8 +175,7 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
 
         # Set soil layers to initial volumetric water content
         for j in 1:nlevsoi
-            vol_init = j <= 5 ? VOL_INIT_SHALLOW : VOL_INIT_DEEP
-            vol_liq = min(vol_init, ss.watsat_col[c, j])
+            vol_liq = 0.75 * ss.watsat_col[c, j]
             ws.h2osoi_vol_col[c, j] = vol_liq
             ws.h2osoi_liq_col[c, j + joff] = vol_liq * col.dz[c, j + joff] * DENH2O
             ws.h2osoi_ice_col[c, j + joff] = 0.0

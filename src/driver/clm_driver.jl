@@ -749,6 +749,10 @@ function clm_drv!(config::CLMDriverConfig,
                                 filt.nolakec, filt.nolakep, filt.urbanc,
                                 bc_col, bc_patch)
 
+    # Soil evaporation resistance (soilbeta or soilresis)
+    calc_soilevap_resis!(col, lun, ss, wsb, wdb, temp,
+                         filt.nolakec, bc_col)
+
     # CalcOzoneStress — WIRED
     calc_ozone_stress!(oz, filt.exposedvegp, filt.noexposedvegp,
                        bc_patch, pch, pftcon.woody;
@@ -1101,6 +1105,19 @@ function clm_drv!(config::CLMDriverConfig,
                  filt.hydrologyc, bc_col,
                  nlevsoi, dtime)
 
+    # Bedrock clipping: Fortran ThetaBasedWaterTable clips ZWT at bedrock depth
+    # when soil above bedrock is not saturated. Without this, ZWT drops to 80m
+    # in cold-start runs because the aquifer drains without replenishment.
+    nlevsno_l = varpar.nlevsno
+    for c in bc_col
+        filt.hydrologyc[c] || continue
+        nbr = col.nbedrock[c]
+        zi_bedrock = col.zi[c, nbr + nlevsno_l + 1]
+        if sh.zwt_col[c] > zi_bedrock
+            sh.zwt_col[c] = zi_bedrock
+        end
+    end
+
     # --- 14. Condensation renewal ---
     renew_condensation!(
         wsb.ws, wdb, wfb,
@@ -1372,6 +1389,16 @@ function clm_drv!(config::CLMDriverConfig,
                         varpar.nlevsno, varpar.nlevsoi,
                         varpar.nlevgrnd, varpar.nlevurb;
                         use_aquifer_layer=config.use_aquifer_layer)
+
+    # Bedrock clipping (post-drainage): prevent ZWT from exceeding bedrock
+    for c in bc_col
+        filt.hydrologyc[c] || continue
+        nbr = col.nbedrock[c]
+        zi_bedrock = col.zi[c, nbr + varpar.nlevsno + 1]
+        if sh.zwt_col[c] > zi_bedrock
+            sh.zwt_col[c] = zi_bedrock
+        end
+    end
 
     # ========================================================================
     # Ecosystem dynamics post drainage

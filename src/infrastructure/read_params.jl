@@ -41,6 +41,10 @@ function readParameters!(paramfile::String)
         # Read interception parameters (CanopyHydrologyMod)
         haskey(ds, "interception_fraction") && (canopy_hydrology_params.interception_fraction = Float64(ds["interception_fraction"][1]))
         haskey(ds, "maximum_leaf_wetted_fraction") && (canopy_hydrology_params.maximum_leaf_wetted_fraction = Float64(ds["maximum_leaf_wetted_fraction"][1]))
+        haskey(ds, "snowcan_unload_wind_fact") && (canopy_hydrology_params.snowcan_unload_wind_fact = Float64(ds["snowcan_unload_wind_fact"][1]))
+        haskey(ds, "snowcan_unload_temp_fact") && (canopy_hydrology_params.snowcan_unload_temp_fact = Float64(ds["snowcan_unload_temp_fact"][1]))
+        haskey(ds, "liq_canopy_storage_scalar") && (canopy_hydrology_params.liq_canopy_storage_scalar = Float64(ds["liq_canopy_storage_scalar"][1]))
+        haskey(ds, "snow_canopy_storage_scalar") && (canopy_hydrology_params.snow_canopy_storage_scalar = Float64(ds["snow_canopy_storage_scalar"][1]))
     finally
         close(ds)
     end

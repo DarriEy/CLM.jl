@@ -777,7 +777,7 @@ function canopy_fluxes!(
                         rpp = fwet_p
                         waterfluxbulk.wf.qflx_tran_veg_patch[p] = 0.0
                     end
-                    rpp = smooth_min(rpp, (waterfluxbulk.wf.qflx_tran_veg_patch[p] + h2ocan / dtime) / efpot)
+                    rpp = min(rpp, (waterfluxbulk.wf.qflx_tran_veg_patch[p] + h2ocan / dtime) / efpot)
                 else
                     rpp = 1.0
                     waterfluxbulk.wf.qflx_tran_veg_patch[p] = 0.0
@@ -875,9 +875,9 @@ function canopy_fluxes!(
 
             # Interception losses / ecidif
             if use_hydrstress
-                ecidif = smooth_max(0.0, waterfluxbulk.wf.qflx_evap_veg_patch[p] -
+                ecidif = max(0.0, waterfluxbulk.wf.qflx_evap_veg_patch[p] -
                     waterfluxbulk.wf.qflx_tran_veg_patch[p] - h2ocan / dtime)
-                waterfluxbulk.wf.qflx_evap_veg_patch[p] = smooth_min(waterfluxbulk.wf.qflx_evap_veg_patch[p],
+                waterfluxbulk.wf.qflx_evap_veg_patch[p] = min(waterfluxbulk.wf.qflx_evap_veg_patch[p],
                     waterfluxbulk.wf.qflx_tran_veg_patch[p] + h2ocan / dtime)
             else
                 ecidif = 0.0
@@ -886,9 +886,9 @@ function canopy_fluxes!(
                 else
                     waterfluxbulk.wf.qflx_tran_veg_patch[p] = 0.0
                 end
-                ecidif = smooth_max(0.0, waterfluxbulk.wf.qflx_evap_veg_patch[p] -
+                ecidif = max(0.0, waterfluxbulk.wf.qflx_evap_veg_patch[p] -
                     waterfluxbulk.wf.qflx_tran_veg_patch[p] - h2ocan / dtime)
-                waterfluxbulk.wf.qflx_evap_veg_patch[p] = smooth_min(waterfluxbulk.wf.qflx_evap_veg_patch[p],
+                waterfluxbulk.wf.qflx_evap_veg_patch[p] = min(waterfluxbulk.wf.qflx_evap_veg_patch[p],
                     waterfluxbulk.wf.qflx_tran_veg_patch[p] + h2ocan / dtime)
             end
 

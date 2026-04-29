@@ -100,6 +100,20 @@ function default_hist_fields()
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_rain_plus_snomelt_col),
         HistFieldDef("QFLX_SNOMELT", "snowmelt", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_snomelt_col),
+        HistFieldDef("FCTR", "transpiration heat flux", "W/m2", "patch",
+            inst -> inst.energyflux.eflx_lh_vegt_patch),
+        HistFieldDef("FCEV", "canopy evaporation heat flux", "W/m2", "patch",
+            inst -> inst.energyflux.eflx_lh_vege_patch),
+        HistFieldDef("FGEV", "ground evaporation heat flux", "W/m2", "patch",
+            inst -> inst.energyflux.eflx_lh_grnd_patch),
+        HistFieldDef("FSH", "sensible heat flux", "W/m2", "patch",
+            inst -> inst.energyflux.eflx_sh_tot_patch),
+        HistFieldDef("QVEGT", "canopy transpiration", "mm/s", "column",
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col),
+        HistFieldDef("QVEGE", "canopy evaporation", "mm/s", "column",
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_veg_col),
+        HistFieldDef("QSOIL", "ground evaporation", "mm/s", "column",
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_soi_col),
     ]
 end
 

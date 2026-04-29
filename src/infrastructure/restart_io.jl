@@ -93,6 +93,31 @@ function _restart_registry()
         RestartVarDef("FRAC_SNO", 1, "column",
             inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col,
             (inst, d) -> inst.water.waterdiagnosticbulk_inst.frac_sno_col .= d),
+        RestartVarDef("FRAC_SNO_EFF", 1, "column",
+            inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_eff_col,
+            (inst, d) -> inst.water.waterdiagnosticbulk_inst.frac_sno_eff_col .= d),
+        RestartVarDef("INT_SNOW", 1, "column",
+            inst -> inst.water.waterstatebulk_inst.int_snow_col,
+            (inst, d) -> inst.water.waterstatebulk_inst.int_snow_col .= d),
+
+        # Snow layer geometry (full snow+soil arrays)
+        RestartVarDef("COL_DZ", 2, "column",
+            inst -> inst.column.dz,
+            (inst, d) -> inst.column.dz .= d),
+        RestartVarDef("COL_Z", 2, "column",
+            inst -> inst.column.z,
+            (inst, d) -> inst.column.z .= d),
+        RestartVarDef("COL_ZI", 2, "column",
+            inst -> inst.column.zi,
+            (inst, d) -> inst.column.zi .= d),
+
+        # --- Canopy water ---
+        RestartVarDef("LIQCAN", 1, "patch",
+            inst -> inst.water.waterstatebulk_inst.ws.liqcan_patch,
+            (inst, d) -> inst.water.waterstatebulk_inst.ws.liqcan_patch .= d),
+        RestartVarDef("SNOCAN", 1, "patch",
+            inst -> inst.water.waterstatebulk_inst.ws.snocan_patch,
+            (inst, d) -> inst.water.waterstatebulk_inst.ws.snocan_patch .= d),
 
         # --- Lake state ---
         RestartVarDef("LAKE_ICEFRAC", 2, "column",

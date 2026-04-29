@@ -1262,7 +1262,7 @@ function photosynthesis!(ps::PhotosynthesisData,
             psn_wj[p] = psncan_wj / laican
             psn_wp[p] = psncan_wp / laican
             lmr_out[p] = lmrcan / laican
-            rs[p] = max(laican / gscan - rb[p], 0.0)
+            rs[p] = laican / gscan - rb[p]
         else
             psn[p] = 0.0
             psn_wc[p] = 0.0
