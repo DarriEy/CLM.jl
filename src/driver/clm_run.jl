@@ -67,8 +67,10 @@ function clm_run!(;
         fsnowoptics=fsnowoptics, fsnowaging=fsnowaging,
         int_snow_max=int_snow_max)
 
+    active_fields = Symbol[]
     if overrides !== nothing
         validate_overrides!(overrides)
+        active_fields = active_override_fields(overrides)
         inst.overrides = overrides
     end
 
@@ -292,6 +294,10 @@ function clm_run!(;
     history_writer_close!(hw)
 
     verbose && println("CLM.jl: Simulation complete. $step_count timesteps written to $fhistory")
+
+    if overrides !== nothing && !isempty(active_fields)
+        validate_overrides_post!(overrides, active_fields)
+    end
 
     return inst
 end

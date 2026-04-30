@@ -56,3 +56,33 @@ function validate_overrides!(overrides::CalibrationOverrides)
     end
     return nothing
 end
+
+"""
+    active_override_fields(overrides) -> Vector{Symbol}
+
+Return names of fields that have been set to non-NaN (active) values.
+Used by validate_overrides_post! to detect accidental NaN corruption.
+"""
+function active_override_fields(overrides::CalibrationOverrides)
+    return [fname for fname in fieldnames(CalibrationOverrides)
+            if !isnan(getfield(overrides, fname))]
+end
+
+"""
+    validate_overrides_post!(overrides, active_fields)
+
+Post-run validation: check that fields which were finite before the run
+are still finite after. If a field that was set to a real value has become
+NaN during the computation, this indicates numerical corruption.
+"""
+function validate_overrides_post!(overrides::CalibrationOverrides, active_fields::Vector{Symbol})
+    for fname in active_fields
+        v = getfield(overrides, fname)
+        if isnan(v) || isinf(v)
+            throw(ArgumentError(
+                "CalibrationOverrides field `$fname` became $v during computation — " *
+                "numerical corruption detected (was finite before run)"))
+        end
+    end
+    return nothing
+end
