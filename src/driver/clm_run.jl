@@ -68,6 +68,7 @@ function clm_run!(;
         int_snow_max=int_snow_max)
 
     if overrides !== nothing
+        validate_overrides!(overrides)
         inst.overrides = overrides
     end
 

@@ -37,3 +37,22 @@ end
 
 # Convenience: CalibrationOverrides() defaults to Float64
 CalibrationOverrides() = CalibrationOverrides{Float64}()
+
+"""
+    validate_overrides!(overrides::CalibrationOverrides)
+
+Check that every field is either NaN (intentional sentinel = use default) or finite
+(valid override value). Throws `ArgumentError` if any field is Inf or -Inf, which
+would indicate numerical corruption rather than an intentional sentinel.
+"""
+function validate_overrides!(overrides::CalibrationOverrides)
+    for fname in fieldnames(CalibrationOverrides)
+        v = getfield(overrides, fname)
+        if isinf(v)
+            throw(ArgumentError(
+                "CalibrationOverrides field `$fname` is $v — " *
+                "expected NaN (use default) or a finite value"))
+        end
+    end
+    return nothing
+end
