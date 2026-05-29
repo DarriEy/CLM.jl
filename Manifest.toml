@@ -40,7 +40,7 @@ uuid = "179af706-886a-5703-950a-314cd64e0468"
 version = "0.2.5"
 
 [[deps.CLM]]
-deps = ["Dates", "ForwardDiff", "JSON", "LinearAlgebra", "NCDatasets"]
+deps = ["Dates", "Enzyme", "ForwardDiff", "JSON", "LinearAlgebra", "NCDatasets"]
 path = "."
 uuid = "4245f2e0-edff-455b-b31b-2767da28c542"
 version = "0.1.0"

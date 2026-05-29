@@ -63,6 +63,7 @@ include("infrastructure/filters.jl")
 include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 include("infrastructure/smooth_ad.jl")
+include("infrastructure/enzyme_rules.jl")  # Enzyme reverse-mode rules (band_solve! adjoint)
 
 # ===========================================================================
 # Calibration overrides struct (needed by physics modules for override kwargs)

@@ -34,6 +34,39 @@ function _band_solve_julia!(u_slice, ab, rhs, kl, ku, n, ::Type{FT}) where FT
 end
 
 """
+    band_solve!(u_slice, ab, rhs, kl, ku, n)
+
+Solve a single banded linear system `A x = rhs` and write `x` into `u_slice`
+(length `n`). `ab` is LAPACK band storage of size `(2kl+ku+1, n)`.
+
+- `Float64`/`Float32`: solve with LAPACK `gbtrf!`/`gbtrs!` (factorizing a *copy*
+  so the caller's `ab` is preserved — the Enzyme reverse rule reads `A` from it).
+- Other element types (e.g. `ForwardDiff.Dual`): pure-Julia `_band_solve_julia!`.
+
+A custom `EnzymeRules` reverse rule for this function (registered when Enzyme is
+loaded) differentiates the Float64 LAPACK path via the linear-solve adjoint
+(`Aᵀ λ = x̄`), so Enzyme never needs to trace through LAPACK or its `try/catch`.
+"""
+function band_solve!(u_slice, ab::AbstractMatrix{T}, rhs::AbstractVector,
+                     kl::Int, ku::Int, n::Int) where {T}
+    if T <: AbstractFloat
+        ab_work = copy(ab)
+        rhs_work = reshape(copy(rhs), n, 1)
+        ipiv = zeros(Int64, n)
+        try
+            (ab_lu, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab_work)
+            LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab_lu, ipiv, rhs_work)
+            u_slice .= vec(rhs_work)
+        catch e
+            e isa LinearAlgebra.LAPACKException || rethrow()
+        end
+    else
+        _band_solve_julia!(u_slice, ab, rhs, kl, ku, n, T)
+    end
+    return nothing
+end
+
+"""
     band_diagonal_solve!(u, b_matrix, r, jtop, jbot, nband, ncols)
 
 Solve band diagonal systems for multiple columns.

@@ -265,28 +265,13 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
 
         rhs = rvector[c, jt:jb]
 
-        if FT <: AbstractFloat
-            ipiv = zeros(Int64, n)
-            rhs_mat = reshape(rhs, n, 1)
-            try
-                (ab, ipiv) = LinearAlgebra.LAPACK.gbtrf!(kl, ku, n, ab)
-                LinearAlgebra.LAPACK.gbtrs!('N', kl, ku, n, ab, ipiv, rhs_mat)
-                tvector[c, jt:jb] .= rhs
-            catch e
-                e isa LinearAlgebra.LAPACKException || rethrow()
-            end
-        else
-            # Pure-Julia band solve for Dual/non-LAPACK types (Enzyme-safe:
-            # no data-dependent branching). This previously had a NaN guard that
-            # skipped the solve when the RHS/matrix contained NaN partials. That
-            # was a workaround for an overflow bug in the smooth-AD sigmoid
-            # primitives (the naive 1/(1+exp(-k*x)) overflowed to Inf→NaN for
-            # large |x|); it is now fixed in _stable_sigmoid. With that fixed the
-            # RHS/matrix carry no NaN partials in any tested forcing regime
-            # (winter/freeze/snow/wet/dry/hot), so the unconditional solve is
-            # both correct and differentiable, and works for Enzyme reverse mode.
-            _band_solve_julia!(view(tvector, c, jt:jb), ab, rhs, kl, ku, n, FT)
-        end
+        # Banded solve A·t = rhs. band_solve! dispatches on eltype: LAPACK for
+        # Float64/Float32, pure-Julia for ForwardDiff.Dual. A custom Enzyme
+        # reverse-mode rule (enzyme_rules.jl) differentiates the LAPACK path via
+        # the linear-solve adjoint, so the try/catch + LAPACK no longer block
+        # Enzyme. (The prior NaN guard here was a workaround for an overflow bug
+        # in the smooth-AD sigmoid, since fixed in _stable_sigmoid.)
+        band_solve!(view(tvector, c, jt:jb), ab, rhs, kl, ku, n)
     end
 
     # Return temperatures from tvector
