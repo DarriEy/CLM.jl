@@ -125,26 +125,27 @@ end
     # ------------------------------------------------------------------
     # Test 4: band_diagonal solver (uses LAPACK for Float64)
     # ------------------------------------------------------------------
-    @testset "band_diagonal solver" begin
+    @testset "tridiagonal_multi! (pure-Julia multi-column solver)" begin
         try
             function band_test(x)
                 nc = 1; n = 5
-                a = zeros(nc, n); b = fill(2.0, nc, n); c = zeros(nc, n)
-                r = ones(nc, n)
+                T = typeof(x)
+                a = zeros(T, nc, n); b = fill(T(2.0), nc, n); c = zeros(T, nc, n)
+                r = ones(T, nc, n); u = zeros(T, nc, n)
                 b[1, 3] = x
-                for j in 2:n; a[1, j] = -0.5; end
-                for j in 1:n-1; c[1, j] = -0.5; end
-                CLM.tridiagonal_solve_multi!(a, b, c, r, 1, nc, n)
-                return r[1, 3]
+                for j in 2:n; a[1, j] = T(-0.5); end
+                for j in 1:n-1; c[1, j] = T(-0.5); end
+                CLM.tridiagonal_multi!(u, a, b, c, r, [1], Bool[true], nc, n)
+                return u[1, 3]
             end
 
             dx = Enzyme.autodiff(Enzyme.Reverse, band_test,
                 Enzyme.Active, Enzyme.Active(2.0))
             @test isfinite(dx[1][1])
-            println("  band_diagonal solver: PASS")
+            println("  tridiagonal_multi!: PASS")
         catch e
             @test_broken false
-            println("  band_diagonal solver: BLOCKED — $(sprint(showerror, e))")
+            println("  tridiagonal_multi!: BLOCKED — $(sprint(showerror, e))")
         end
     end
 

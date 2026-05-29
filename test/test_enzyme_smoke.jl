@@ -127,8 +127,9 @@ end
     @testset "tridiagonal solver reverse-mode" begin
         function tridiag_test(x)
             n = 5
-            a = zeros(n); b = fill(2.0, n); c = zeros(n)
-            r = ones(n); u = zeros(n)
+            T = typeof(x)  # match element type so ForwardDiff.Dual cross-check works too
+            a = zeros(T, n); b = fill(T(2.0), n); c = zeros(T, n)
+            r = ones(T, n); u = zeros(T, n)
             b[3] = x
             for i in 2:n; a[i] = -0.5; end
             for i in 1:n-1; c[i] = -0.5; end
