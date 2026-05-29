@@ -31,7 +31,7 @@ end
 @testset "Enzyme Smoke Tests" begin
 
     if !enzyme_available
-        @test_skip "Enzyme.jl not installed"
+        @info "Enzyme.jl not installed — skipping Enzyme Smoke Tests"
         return
     end
 

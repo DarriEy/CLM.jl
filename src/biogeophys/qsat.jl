@@ -76,15 +76,16 @@ Ported from QSat() in QSatMod.F90. Uses Flatau et al. (1992) polynomials.
 function qsat(T::Real, p::Real)
     td = T - TFRZ  # temperature in °C
 
-    if td >= 0.0
-        # Over water
-        es = 100.0 * _poly8(td, QSAT_A)
-        desdT = 100.0 * _poly8(td, QSAT_B)
-    else
-        # Over ice
-        es = 100.0 * _poly8(td, QSAT_C)
-        desdT = 100.0 * _poly8(td, QSAT_D)
-    end
+    # Saturation vapor pressure: water polynomials (td >= 0) vs ice (td < 0).
+    # smooth_ifelse is exact for Float64 (preserves Fortran parity bit-for-bit
+    # in :auto mode) but smoothly blends the kink at the freezing point for
+    # ForwardDiff.Dual, so the derivative is continuous across TFRZ for AD.
+    es = smooth_ifelse(td,
+        100.0 * _poly8(td, QSAT_A),    # over water
+        100.0 * _poly8(td, QSAT_C))    # over ice
+    desdT = smooth_ifelse(td,
+        100.0 * _poly8(td, QSAT_B),    # over water
+        100.0 * _poly8(td, QSAT_D))    # over ice
 
     # Specific humidity from vapor pressure
     # qs = 0.622 * es / (p - 0.378*es)
@@ -106,11 +107,10 @@ Slightly more efficient when derivatives are not needed.
 function qsat_no_derivs(T::Real, p::Real)
     td = T - TFRZ
 
-    if td >= 0.0
-        es = 100.0 * _poly8(td, QSAT_A)
-    else
-        es = 100.0 * _poly8(td, QSAT_C)
-    end
+    # See qsat() above: exact branch for Float64, smooth blend across TFRZ for Dual.
+    es = smooth_ifelse(td,
+        100.0 * _poly8(td, QSAT_A),    # over water
+        100.0 * _poly8(td, QSAT_C))    # over ice
 
     vp1 = min(es / (p - 0.378 * es), 1.0)
     qs = 0.622 * vp1

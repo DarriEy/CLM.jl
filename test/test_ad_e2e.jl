@@ -894,8 +894,13 @@ using CLM
                 a2l.forc_lwrad_not_downscaled_grc[g] = 250.0
                 a2l.forc_vp_grc[g] = 300.0
                 a2l.forc_hgt_grc[g] = 30.0
+                a2l.forc_hgt_u_grc[g] = 30.0
+                a2l.forc_hgt_t_grc[g] = 30.0
+                a2l.forc_hgt_q_grc[g] = 30.0
                 a2l.forc_topo_grc[g] = 0.0
                 a2l.forc_wind_grc[g] = 3.0
+                a2l.forc_u_grc[g] = 3.0
+                a2l.forc_v_grc[g] = 0.0
                 for b in 1:CLM.NUMRAD
                     a2l.forc_solad_not_downscaled_grc[g, b] = 100.0
                     a2l.forc_solai_grc[g, b] = 50.0

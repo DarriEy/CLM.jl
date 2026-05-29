@@ -276,7 +276,15 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                 e isa LinearAlgebra.LAPACKException || rethrow()
             end
         else
-            # Pure-Julia fallback for Dual/non-LAPACK types (Enzyme-safe)
+            # Pure-Julia band solve for Dual/non-LAPACK types (Enzyme-safe:
+            # no data-dependent branching). This previously had a NaN guard that
+            # skipped the solve when the RHS/matrix contained NaN partials. That
+            # was a workaround for an overflow bug in the smooth-AD sigmoid
+            # primitives (the naive 1/(1+exp(-k*x)) overflowed to Inf→NaN for
+            # large |x|); it is now fixed in _stable_sigmoid. With that fixed the
+            # RHS/matrix carry no NaN partials in any tested forcing regime
+            # (winter/freeze/snow/wet/dry/hot), so the unconditional solve is
+            # both correct and differentiable, and works for Enzyme reverse mode.
             _band_solve_julia!(view(tvector, c, jt:jb), ab, rhs, kl, ku, n, FT)
         end
     end

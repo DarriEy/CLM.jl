@@ -274,6 +274,7 @@ function bareground_fluxes!(
         end
 
         frictionvel.ram1_patch[p] = ram  # pass value to global variable
+        frictionvel.ustar_patch[p] = ustar[p]
 
         # Derivative of fluxes with respect to ground temperature
         energyflux.cgrnds_patch[p] = raih

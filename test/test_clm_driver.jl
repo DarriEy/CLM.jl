@@ -27,6 +27,7 @@
             inst.column.snl[c] = 0  # no snow layers
             inst.column.patchi[c] = 1
             inst.column.patchf[c] = 0  # no patches (will be set below for p2c)
+            inst.column.nbedrock[c] = CLM.varpar.nlevsoi
         end
         for l in 1:nl
             inst.landunit.itype[l] = CLM.ISTSOIL

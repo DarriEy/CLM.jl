@@ -121,7 +121,26 @@ function smooth_clamp(x::T, lo, hi; k::Real=50.0) where {T<:Real}
 end
 
 # --------------------------------------------------------------------------
-# smooth_heaviside — sigmoid: 1/(1 + exp(-k*x))
+# Numerically-stable logistic sigmoid σ(k*x) = 1/(1 + exp(-k*x))
+#
+# The naive form overflows: for k*x large and positive, exp(-k*x) underflows
+# to 0 (fine), but for k*x large and NEGATIVE, exp(-k*x) overflows to Inf, and
+# the ForwardDiff partial through that Inf becomes NaN. We branch on the sign of
+# k*x so the exp argument is always <= 0 (in [0,1]), which is overflow-safe and
+# keeps derivatives finite for arbitrarily large |x| (they simply saturate to 0).
+# --------------------------------------------------------------------------
+@inline function _stable_sigmoid(x::Real, k::Real)
+    kx = k * x
+    if kx >= zero(kx)
+        return one(kx) / (one(kx) + exp(-kx))
+    else
+        e = exp(kx)
+        return e / (one(e) + e)
+    end
+end
+
+# --------------------------------------------------------------------------
+# smooth_heaviside — stable sigmoid σ(k*x)
 # --------------------------------------------------------------------------
 
 """
@@ -129,15 +148,15 @@ end
 
 Smooth approximation to the Heaviside step function.
 - For `Float64`: exact `x >= 0 ? 1.0 : 0.0`.
-- For `ForwardDiff.Dual`: sigmoid `1/(1 + exp(-k*x))`.
+- For `ForwardDiff.Dual`: stable sigmoid `1/(1 + exp(-k*x))`.
 """
 function smooth_heaviside(x::Float64; k::Float64=50.0)
     _use_smooth(Float64) || return x >= 0.0 ? 1.0 : 0.0
-    return 1.0 / (1.0 + exp(-k * x))
+    return _stable_sigmoid(x, k)
 end
 
 function smooth_heaviside(x::T; k::Real=50.0) where {T<:Real}
-    return one(T) / (one(T) + exp(-k * x))
+    return _stable_sigmoid(x, k)
 end
 
 # --------------------------------------------------------------------------
@@ -175,11 +194,11 @@ Common usage: `smooth_ifelse(T - TFRZ, unfrozen_val, frozen_val)`.
 """
 function smooth_ifelse(x::Float64, a, b; k::Float64=50.0)
     _use_smooth(Float64) || return x >= 0.0 ? a : b
-    h = 1.0 / (1.0 + exp(-k * x))
+    h = _stable_sigmoid(x, k)
     return a * h + b * (1.0 - h)
 end
 
 function smooth_ifelse(x::T, a, b; k::Real=50.0) where {T<:Real}
-    h = one(T) / (one(T) + exp(-k * x))
+    h = _stable_sigmoid(x, k)
     return a * h + b * (one(T) - h)
 end

@@ -767,6 +767,7 @@ function clm_drv!(config::CLMDriverConfig,
     # DETERMINE FLUXES
     # ========================================================================
 
+
     # BareGroundFluxes — WIRED
     bareground_fluxes!(cs, ef, fv, temp, ss, wfb, wsb, wdb, ps,
                        pch, col, lun,
@@ -847,6 +848,7 @@ function clm_drv!(config::CLMDriverConfig,
                    woody_pft=Float64.(pftcon.woody),
                    overrides=inst.overrides)
 
+
     # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)
     (num_nourbanl, filter_nourbanl) = bitvec_to_filter(filt.nourbanl)
     (num_urbanl, filter_urbanl) = bitvec_to_filter(filt.urbanl)
@@ -875,6 +877,7 @@ function clm_drv!(config::CLMDriverConfig,
                  filt.lakec, filt.lakep,
                  bc_col, bc_patch;
                  dtime=dtime)
+
 
     # SetActualRoughnessLengths — WIRED
     set_actual_roughness_lengths!(fv,

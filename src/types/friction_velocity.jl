@@ -196,9 +196,15 @@ function frictionvel_init_cold!(fv::FrictionVelocityData,
                                  col_landunit::Union{Vector{Int},Nothing} = nothing,
                                  lun_lakpoi::Union{Vector{Bool},Nothing} = nothing,
                                  use_cn::Bool = false)
-    if use_cn
-        for p in bounds_patch
+    for p in bounds_patch
+        if isnan(fv.forc_hgt_u_patch[p])
             fv.forc_hgt_u_patch[p] = 30.0
+        end
+        if isnan(fv.forc_hgt_t_patch[p])
+            fv.forc_hgt_t_patch[p] = 30.0
+        end
+        if isnan(fv.forc_hgt_q_patch[p])
+            fv.forc_hgt_q_patch[p] = 30.0
         end
     end
 
@@ -207,7 +213,11 @@ function frictionvel_init_cold!(fv::FrictionVelocityData,
             l = col_landunit[c]
             if lun_lakpoi[l]
                 fv.z0mg_col[c] = 0.0004
+            else
+                fv.z0mg_col[c] = fv.zlnd
             end
+            fv.z0hg_col[c] = fv.z0mg_col[c]
+            fv.z0qg_col[c] = fv.z0mg_col[c]
         end
     end
 

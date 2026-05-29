@@ -32,17 +32,14 @@ end
 
 @testset "Enzyme Feasibility" begin
 
-    @testset "Enzyme availability" begin
-        if !enzyme_available
-            @test_skip "Enzyme.jl not installed — skipping all Enzyme tests"
-            return
-        end
-        @test enzyme_available
-        println("  Enzyme.jl loaded successfully")
+    if !enzyme_available
+        @info "Enzyme.jl not installed — skipping Enzyme Feasibility tests"
+        return
     end
 
-    if !enzyme_available
-        return
+    @testset "Enzyme availability" begin
+        @test enzyme_available
+        println("  Enzyme.jl loaded successfully")
     end
 
     # ------------------------------------------------------------------

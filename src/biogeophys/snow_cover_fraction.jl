@@ -441,8 +441,9 @@ function add_newsnow_to_intsnow!(
         if newsnow[c] > 0.0
             # Reset int_snow after accumulation events: make int_snow consistent
             # with new fsno and h2osno_total
+            fsno_base = smooth_max(1.0 - max(frac_sno[c], 1.0e-6), 1.0e-10)
             temp_intsnow = (h2osno_total[c] + newsnow[c]) /
-                (0.5 * (cos(RPI * (1.0 - max(frac_sno[c], 1.0e-6))^(1.0 / scf.n_melt[c])) + 1.0))
+                (0.5 * (cos(RPI * fsno_base^(1.0 / scf.n_melt[c])) + 1.0))
             int_snow[c] = min(1.0e8, temp_intsnow)
         end
 

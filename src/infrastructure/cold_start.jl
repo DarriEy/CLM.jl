@@ -24,6 +24,11 @@ function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
     init_soil_hydrology_cold!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
     init_lake_state!(inst, bounds)
     init_root_fractions!(inst, bounds)
+    frictionvel_init_cold!(inst.frictionvel,
+                           bounds.begc:bounds.endc,
+                           bounds.begp:bounds.endp;
+                           col_landunit=inst.column.landunit,
+                           lun_lakpoi=inst.landunit.lakpoi)
     nothing
 end
 

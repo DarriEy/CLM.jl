@@ -108,9 +108,9 @@
             lun_lakpoi=lun_lakpoi,
             use_cn=false)
 
-        @test isnan(fvd.z0mg_col[1])  # non-lake
-        @test fvd.z0mg_col[2] ≈ 0.0004  # lake
-        @test isnan(fvd.z0mg_col[3])  # non-lake
+        @test fvd.z0mg_col[1] ≈ fvd.zlnd  # non-lake: defaults to zlnd
+        @test fvd.z0mg_col[2] ≈ 0.0004   # lake
+        @test fvd.z0mg_col[3] ≈ fvd.zlnd  # non-lake: defaults to zlnd
     end
 
     @testset "stability_func1" begin

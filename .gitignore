@@ -1,2 +1,21 @@
 paper/
 .DS_Store
+
+# Archives / build artifacts
+src.zip
+*.zip
+
+# Generated data / plots from scripts
+scripts/*.csv
+scripts/*.png
+scripts/*.pdf
+
+# Julia
+/docs/build/
+*.cov
+*.jl.mem
+LocalPreferences.toml
+
+# Ralph loop state
+.ralph_last_output.log
+.ralph_state
