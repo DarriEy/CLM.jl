@@ -63,7 +63,6 @@ include("infrastructure/filters.jl")
 include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 include("infrastructure/smooth_ad.jl")
-include("infrastructure/enzyme_rules.jl")  # Enzyme reverse-mode rules (band_solve! adjoint)
 
 # ===========================================================================
 # Calibration overrides struct (needed by physics modules for override kwargs)
@@ -216,5 +215,9 @@ include("calibration/enzyme_ad.jl")
 include("calibration/fluxnet_reader.jl")
 include("calibration/site_calibration.jl")
 include("calibration/param_injection.jl")
+
+# Enzyme reverse-mode rules (band_solve! adjoint + inactive param-struct types).
+# Included last so all referenced types (param/control containers) are defined.
+include("infrastructure/enzyme_rules.jl")
 
 end # module CLM

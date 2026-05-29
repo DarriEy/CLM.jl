@@ -431,6 +431,8 @@ In this port, each call is represented; if the called function is not yet
 wired up, it is documented as a placeholder comment with the Fortran
 subroutine name.
 """
+# Keyword-argument interface used throughout the codebase and tests. Thin
+# wrapper that forwards to the fully-positional clm_drv_core! below.
 function clm_drv!(config::CLMDriverConfig,
                    inst::CLMInstances,
                    filt::ClumpFilter,
@@ -454,6 +456,38 @@ function clm_drv!(config::CLMDriverConfig,
                    mon::Int = 1,
                    day::Int = 1,
                    photosyns::PhotosynthesisData = PhotosynthesisData())
+    return clm_drv_core!(config, inst, filt, filt_inactive_and_active, bounds_proc,
+        doalb, nextsw_cday, declinp1, declin, obliqr, rstwr, nlend, rdate, rof_prognostic,
+        nstep, is_first_step, is_beg_curr_day, is_end_curr_day, is_beg_curr_year,
+        dtime, mon, day, photosyns)
+end
+
+# Fully-positional core: the differentiable entry point. Enzyme cannot build the
+# augmented kwarg NamedTuple when it contains an active struct (photosyns), so
+# reverse-mode differentiates this positional method instead.
+function clm_drv_core!(config::CLMDriverConfig,
+                   inst::CLMInstances,
+                   filt::ClumpFilter,
+                   filt_inactive_and_active::ClumpFilter,
+                   bounds_proc::BoundsType,
+                   doalb::Bool,
+                   nextsw_cday::Real,
+                   declinp1::Real,
+                   declin::Real,
+                   obliqr::Real,
+                   rstwr::Bool,
+                   nlend::Bool,
+                   rdate::String,
+                   rof_prognostic::Bool,
+                   nstep::Int,
+                   is_first_step::Bool,
+                   is_beg_curr_day::Bool,
+                   is_end_curr_day::Bool,
+                   is_beg_curr_year::Bool,
+                   dtime::Real,
+                   mon::Int,
+                   day::Int,
+                   photosyns::PhotosynthesisData)
 
     bounds_clump = bounds_proc  # single-clump mode
 

@@ -12,8 +12,24 @@
 # ==========================================================================
 
 import Enzyme
-import Enzyme.EnzymeRules: augmented_primal, reverse, AugmentedReturn
+import Enzyme.EnzymeRules: augmented_primal, reverse, AugmentedReturn, inactive_type
 using Enzyme: Const, Active, Duplicated
+
+# --------------------------------------------------------------------------
+# Constant parameter / control containers.
+#
+# These module-level structs hold physical constants and control flags that are
+# never differentiation targets (calibration parameters flow through inst state
+# — inst.overrides / inst.column — not through these globals). Declaring their
+# types inactive tells Enzyme they carry no derivative info, which resolves the
+# "mutable global param struct" class of reverse-mode blockers.
+# --------------------------------------------------------------------------
+for T in (:BareGroundFluxesParamsData, :CanopyFluxesParamsData, :CanopyFluxesControl,
+          :CanopyHydrologyParamsData, :CanopyHydrologyControl, :UrbanFluxesParamsData,
+          :UrbanControl, :SoilHydrologyParams, :SnowHydrologyParams,
+          :SurfaceResistanceControl, :SoilMoistStressControl, :PhotoParamsData)
+    @eval inactive_type(::Type{<:$T}) = true
+end
 
 function augmented_primal(config, func::Const{typeof(band_solve!)}, ::Type{RT},
                           u_slice::Duplicated, ab::Duplicated, rhs::Duplicated,

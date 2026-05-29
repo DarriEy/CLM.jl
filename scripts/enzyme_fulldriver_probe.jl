@@ -63,8 +63,13 @@ for n in 1:3
 end
 
 # Scalar objective for reverse-mode: one more timestep, read t_grnd.
+# Calls the fully-positional clm_drv_core! (no kwargs) so Enzyme need not build
+# an augmented kwarg NamedTuple containing the active photosyns struct.
 function objective!(inst)
-    step!(inst, 4)
+    CLM.clm_drv_core!(config, inst, filt, filt_ia, bounds,
+        true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
+        false, false, "", false,
+        4, false, false, false, false, 1800.0, 1, 1, inst.photosyns)
     return inst.temperature.t_grnd_col[1]
 end
 
@@ -72,14 +77,21 @@ println("Building zero shadow (make_zero)...")
 dinst = Enzyme.make_zero(inst)
 
 println("Attempting Enzyme.Reverse through clm_drv!  (this may take a while)...")
+# strictAliasing(false): CLM kernels hit small Union types in inference that
+# Enzyme's strict type analysis rejects (IllegalTypeAnalysisException). This is
+# the documented workaround.
+Enzyme.API.strictAliasing!(false)
 flush(stdout)
 try
-    Enzyme.autodiff(Enzyme.Reverse, objective!, Enzyme.Active,
+    # set_runtime_activity: many CLM kernels bundle constant PFT params with
+    # active state in the same NamedTuple/struct, which static activity analysis
+    # cannot separate. Runtime activity handles this (slight perf cost).
+    Enzyme.autodiff(Enzyme.set_runtime_activity(Enzyme.Reverse), objective!, Enzyme.Active,
                     Enzyme.Duplicated(inst, dinst))
     g = dinst.atm2lnd.forc_t_not_downscaled_grc[1]
     @printf("\nSUCCESS: d(t_grnd)/d(forc_t) [reverse] = %.6f\n", g)
 catch e
     println("\nFIRST BLOCKER:")
-    showerror(stdout, e)
+    showerror(stdout, e, catch_backtrace())
     println()
 end
