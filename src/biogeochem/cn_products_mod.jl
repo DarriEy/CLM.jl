@@ -120,6 +120,27 @@ end
 # cn_products_set_values!
 # --------------------------------------------------------------------------
 
+# GPU/CPU kernel: zero (or set) the six per-gridcell gain-flux arrays. Each
+# gridcell writes only its own index — fully independent.
+@kernel function _cnprod_set_values_kernel!(dwt_prod10, dwt_prod100, dwt_cropprod1,
+                                            crop_harv_cropprod1, hrv_prod10,
+                                            hrv_prod100, setval)
+    g = @index(Global)
+    @inbounds begin
+        dwt_prod10[g]          = setval
+        dwt_prod100[g]         = setval
+        dwt_cropprod1[g]       = setval
+        crop_harv_cropprod1[g] = setval
+        hrv_prod10[g]          = setval
+        hrv_prod100[g]         = setval
+    end
+end
+
+cnprod_set_values!(dwt_prod10, dwt_prod100, dwt_cropprod1, crop_harv_cropprod1,
+                   hrv_prod10, hrv_prod100, setval) =
+    _launch!(_cnprod_set_values_kernel!, dwt_prod10, dwt_prod100, dwt_cropprod1,
+             crop_harv_cropprod1, hrv_prod10, hrv_prod100, setval)
+
 """
     cn_products_set_values!(prod, bounds, setval)
 
@@ -130,14 +151,14 @@ Ported from `SetValues` in `CNProductsMod.F90`.
 """
 function cn_products_set_values!(prod::CNProductsFullData, bounds::BoundsType,
                                   setval::Real)
-    for g in bounds.begg:bounds.endg
-        prod.dwt_prod10_gain_grc[g]           = setval
-        prod.dwt_prod100_gain_grc[g]          = setval
-        prod.dwt_cropprod1_gain_grc[g]        = setval
-        prod.crop_harvest_to_cropprod1_grc[g] = setval
-        prod.hrv_deadstem_to_prod10_grc[g]    = setval
-        prod.hrv_deadstem_to_prod100_grc[g]   = setval
-    end
+    # Assumes a single clump with begg == 1 (ndrange = length of gridcell arrays).
+    cnprod_set_values!(prod.dwt_prod10_gain_grc,
+                       prod.dwt_prod100_gain_grc,
+                       prod.dwt_cropprod1_gain_grc,
+                       prod.crop_harvest_to_cropprod1_grc,
+                       prod.hrv_deadstem_to_prod10_grc,
+                       prod.hrv_deadstem_to_prod100_grc,
+                       Float64(setval))
     return nothing
 end
 
@@ -375,6 +396,63 @@ Decay constants (1/s) give ~90% loss of initial state over 1, 10, and
 
 Ported from `ComputeProductSummaryVars` in `CNProductsMod.F90`.
 """
+# GPU/CPU kernel: per-gridcell decay losses + pool state update. Each gridcell
+# touches only its own index in every array (loss computed then applied within
+# the same thread), so iterations are fully independent.
+@kernel function _cnprod_summary_kernel!(cropprod1_grc, prod10_grc, prod100_grc,
+                                         cropprod1_loss, prod10_loss, prod100_loss,
+                                         @Const(dwt_cropprod1_gain),
+                                         @Const(dwt_prod10_gain),
+                                         @Const(dwt_prod100_gain),
+                                         @Const(gru_prod10_gain),
+                                         @Const(gru_prod100_gain),
+                                         @Const(crop_harvest_to_cropprod1),
+                                         @Const(hrv_deadstem_to_prod10),
+                                         @Const(hrv_deadstem_to_prod100),
+                                         kprod1, kprod10, kprod100, dt)
+    g = @index(Global)
+    @inbounds begin
+        # ---- Calculate loss fluxes (g/m2/s) ----
+        cropprod1_loss[g] = cropprod1_grc[g] * kprod1
+        prod10_loss[g]    = prod10_grc[g]    * kprod10
+        prod100_loss[g]   = prod100_grc[g]   * kprod100
+
+        # ---- Gains from dynamic landcover change ----
+        cropprod1_grc[g] += dwt_cropprod1_gain[g] * dt
+        prod10_grc[g]    += dwt_prod10_gain[g]    * dt
+        prod100_grc[g]   += dwt_prod100_gain[g]   * dt
+
+        # ---- Gains from gross unrepresented landcover change ----
+        prod10_grc[g]  += gru_prod10_gain[g]  * dt
+        prod100_grc[g] += gru_prod100_gain[g] * dt
+
+        # ---- Gains from harvest ----
+        cropprod1_grc[g] += crop_harvest_to_cropprod1[g] * dt
+        prod10_grc[g]    += hrv_deadstem_to_prod10[g]    * dt
+        prod100_grc[g]   += hrv_deadstem_to_prod100[g]   * dt
+
+        # ---- Losses from decomposition ----
+        cropprod1_grc[g] -= cropprod1_loss[g] * dt
+        prod10_grc[g]    -= prod10_loss[g]    * dt
+        prod100_grc[g]   -= prod100_loss[g]   * dt
+    end
+end
+
+function cnprod_compute_product_summary!(cropprod1_grc, prod10_grc, prod100_grc,
+                                         cropprod1_loss, prod10_loss, prod100_loss,
+                                         dwt_cropprod1_gain, dwt_prod10_gain,
+                                         dwt_prod100_gain, gru_prod10_gain,
+                                         gru_prod100_gain, crop_harvest_to_cropprod1,
+                                         hrv_deadstem_to_prod10,
+                                         hrv_deadstem_to_prod100,
+                                         kprod1, kprod10, kprod100, dt)
+    _launch!(_cnprod_summary_kernel!, cropprod1_grc, prod10_grc, prod100_grc,
+             cropprod1_loss, prod10_loss, prod100_loss, dwt_cropprod1_gain,
+             dwt_prod10_gain, dwt_prod100_gain, gru_prod10_gain, gru_prod100_gain,
+             crop_harvest_to_cropprod1, hrv_deadstem_to_prod10,
+             hrv_deadstem_to_prod100, kprod1, kprod10, kprod100, dt)
+end
+
 function cn_products_compute_product_summary!(prod::CNProductsFullData,
                                                bounds::BoundsType,
                                                dt::Real)
@@ -383,33 +461,14 @@ function cn_products_compute_product_summary!(prod::CNProductsFullData,
     kprod10  = 7.2e-9
     kprod100 = 7.2e-10
 
-    for g in bounds.begg:bounds.endg
-        # ---- Calculate loss fluxes (g/m2/s) ----
-        prod.cropprod1_loss_grc[g] = prod.cropprod1_grc[g] * kprod1
-        prod.prod10_loss_grc[g]    = prod.prod10_grc[g]    * kprod10
-        prod.prod100_loss_grc[g]   = prod.prod100_grc[g]   * kprod100
-    end
-
-    for g in bounds.begg:bounds.endg
-        # ---- Gains from dynamic landcover change ----
-        prod.cropprod1_grc[g] += prod.dwt_cropprod1_gain_grc[g] * dt
-        prod.prod10_grc[g]    += prod.dwt_prod10_gain_grc[g]    * dt
-        prod.prod100_grc[g]   += prod.dwt_prod100_gain_grc[g]   * dt
-
-        # ---- Gains from gross unrepresented landcover change ----
-        prod.prod10_grc[g]  += prod.gru_prod10_gain_grc[g]  * dt
-        prod.prod100_grc[g] += prod.gru_prod100_gain_grc[g] * dt
-
-        # ---- Gains from harvest ----
-        prod.cropprod1_grc[g] += prod.crop_harvest_to_cropprod1_grc[g] * dt
-        prod.prod10_grc[g]    += prod.hrv_deadstem_to_prod10_grc[g]    * dt
-        prod.prod100_grc[g]   += prod.hrv_deadstem_to_prod100_grc[g]   * dt
-
-        # ---- Losses from decomposition ----
-        prod.cropprod1_grc[g] -= prod.cropprod1_loss_grc[g] * dt
-        prod.prod10_grc[g]    -= prod.prod10_loss_grc[g]    * dt
-        prod.prod100_grc[g]   -= prod.prod100_loss_grc[g]   * dt
-    end
+    # Assumes a single clump with begg == 1 (ndrange = length of gridcell arrays).
+    cnprod_compute_product_summary!(prod.cropprod1_grc, prod.prod10_grc,
+        prod.prod100_grc, prod.cropprod1_loss_grc, prod.prod10_loss_grc,
+        prod.prod100_loss_grc, prod.dwt_cropprod1_gain_grc,
+        prod.dwt_prod10_gain_grc, prod.dwt_prod100_gain_grc,
+        prod.gru_prod10_gain_grc, prod.gru_prod100_gain_grc,
+        prod.crop_harvest_to_cropprod1_grc, prod.hrv_deadstem_to_prod10_grc,
+        prod.hrv_deadstem_to_prod100_grc, kprod1, kprod10, kprod100, Float64(dt))
 
     return nothing
 end
@@ -425,30 +484,50 @@ Compute summary variables: sums across multiple product pools.
 
 Ported from `ComputeSummaryVars` in `CNProductsMod.F90`.
 """
+# GPU/CPU kernel: per-gridcell summary sums. Each gridcell writes only its own
+# index from read-only inputs — fully independent.
+@kernel function _cnprod_compute_summary_kernel!(tot_woodprod, tot_woodprod_loss,
+                                                 product_loss, dwt_woodprod_gain,
+                                                 gru_woodprod_gain,
+                                                 @Const(prod10_grc),
+                                                 @Const(prod100_grc),
+                                                 @Const(prod10_loss),
+                                                 @Const(prod100_loss),
+                                                 @Const(cropprod1_loss),
+                                                 @Const(dwt_prod10_gain),
+                                                 @Const(dwt_prod100_gain),
+                                                 @Const(gru_prod10_gain),
+                                                 @Const(gru_prod100_gain))
+    g = @index(Global)
+    @inbounds begin
+        tot_woodprod[g]      = prod10_grc[g] + prod100_grc[g]
+        tot_woodprod_loss[g] = prod10_loss[g] + prod100_loss[g]
+        product_loss[g]      = cropprod1_loss[g] + prod10_loss[g] + prod100_loss[g]
+        dwt_woodprod_gain[g] = dwt_prod10_gain[g] + dwt_prod100_gain[g]
+        gru_woodprod_gain[g] = gru_prod10_gain[g] + gru_prod100_gain[g]
+    end
+end
+
+function cnprod_compute_summary!(tot_woodprod, tot_woodprod_loss, product_loss,
+                                 dwt_woodprod_gain, gru_woodprod_gain, prod10_grc,
+                                 prod100_grc, prod10_loss, prod100_loss,
+                                 cropprod1_loss, dwt_prod10_gain, dwt_prod100_gain,
+                                 gru_prod10_gain, gru_prod100_gain)
+    _launch!(_cnprod_compute_summary_kernel!, tot_woodprod, tot_woodprod_loss,
+             product_loss, dwt_woodprod_gain, gru_woodprod_gain, prod10_grc,
+             prod100_grc, prod10_loss, prod100_loss, cropprod1_loss,
+             dwt_prod10_gain, dwt_prod100_gain, gru_prod10_gain, gru_prod100_gain)
+end
+
 function cn_products_compute_summary!(prod::CNProductsFullData,
                                        bounds::BoundsType)
-    for g in bounds.begg:bounds.endg
-        # Total wood products
-        prod.tot_woodprod_grc[g] =
-            prod.prod10_grc[g] + prod.prod100_grc[g]
-
-        # Total loss from wood products
-        prod.tot_woodprod_loss_grc[g] =
-            prod.prod10_loss_grc[g] + prod.prod100_loss_grc[g]
-
-        # Total loss from ALL products
-        prod.product_loss_grc[g] =
-            prod.cropprod1_loss_grc[g] +
-            prod.prod10_loss_grc[g] +
-            prod.prod100_loss_grc[g]
-
-        # Summary gain fluxes
-        prod.dwt_woodprod_gain_grc[g] =
-            prod.dwt_prod10_gain_grc[g] + prod.dwt_prod100_gain_grc[g]
-
-        prod.gru_woodprod_gain_grc[g] =
-            prod.gru_prod10_gain_grc[g] + prod.gru_prod100_gain_grc[g]
-    end
+    # Assumes a single clump with begg == 1 (ndrange = length of gridcell arrays).
+    cnprod_compute_summary!(prod.tot_woodprod_grc, prod.tot_woodprod_loss_grc,
+        prod.product_loss_grc, prod.dwt_woodprod_gain_grc,
+        prod.gru_woodprod_gain_grc, prod.prod10_grc, prod.prod100_grc,
+        prod.prod10_loss_grc, prod.prod100_loss_grc, prod.cropprod1_loss_grc,
+        prod.dwt_prod10_gain_grc, prod.dwt_prod100_gain_grc,
+        prod.gru_prod10_gain_grc, prod.gru_prod100_gain_grc)
 
     return nothing
 end

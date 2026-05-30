@@ -142,10 +142,9 @@ function init_vegrootfr!(rootfr::Matrix{<:Real},
     end
 
     # Zero out root fractions below nlevsoi (bedrock layers)
-    for lev in (nlevsoi + 1):nlevgrnd
-        for p in bounds_p
-            rootfr[p, lev] = 0.0
-        end
+    if nlevgrnd > nlevsoi && !isempty(bounds_p)
+        root_zero_bedrock!(rootfr, first(bounds_p), last(bounds_p),
+                           nlevsoi, nlevgrnd)
     end
 
     # Shift roots above bedrock boundary: redistribute roots below bedrock
@@ -215,33 +214,10 @@ function zeng2001_rootfr!(rootfr::Matrix{<:Real},
                           bounds_p::UnitRange{Int},
                           ubj::Int)
 
-    for p in bounds_p
-        if !patch_is_fates[p]
-            c = patch_column[p]
-            # patch_itype uses 0-based Fortran PFT index; Julia pftcon arrays are 1-based
-            pft_idx = patch_itype[p] + 1
-            a = pftcon.roota_par[pft_idx]
-            b = pftcon.rootb_par[pft_idx]
-
-            for lev in 1:(ubj - 1)
-                # Fortran: col%zi(c, lev-1) and col%zi(c, lev)
-                # When lev=1: zi(lev-1) = zi(0) = 0.0 (surface interface)
-                # When lev>1: zi(lev-1) = col_zi[c, lev-1]
-                zi_upper = lev == 1 ? 0.0 : col_zi[c, lev - 1]
-                zi_lower = col_zi[c, lev]
-                rootfr[p, lev] = 0.5 * (
-                    exp(-a * zi_upper) + exp(-b * zi_upper) -
-                    exp(-a * zi_lower) - exp(-b * zi_lower))
-            end
-            # Bottom layer: no lower cutoff
-            zi_upper_bot = col_zi[c, ubj - 1]
-            rootfr[p, ubj] = 0.5 * (
-                exp(-a * zi_upper_bot) + exp(-b * zi_upper_bot))
-        else
-            for lev in 1:ubj
-                rootfr[p, lev] = 0.0
-            end
-        end
+    if !isempty(bounds_p)
+        root_zeng2001!(rootfr, first(bounds_p), last(bounds_p), col_zi,
+                       patch_column, patch_itype, patch_is_fates,
+                       pftcon.roota_par, pftcon.rootb_par, ubj)
     end
 
     return nothing
@@ -277,30 +253,10 @@ function jackson1996_rootfr!(rootfr::Matrix{<:Real},
                              ubj::Int,
                              varindx::Int)
 
-    m_to_cm = 100.0
-
-    # Initialize to zero
-    for lev in 1:ubj
-        for p in bounds_p
-            rootfr[p, lev] = 0.0
-        end
-    end
-
-    for p in bounds_p
-        c = patch_column[p]
-        if !patch_is_fates[p]
-            pft_idx = patch_itype[p] + 1  # 0-based -> 1-based
-            beta = pftcon.rootprof_beta[pft_idx, varindx]
-            for lev in 1:ubj
-                zi_upper = lev == 1 ? 0.0 : col_zi[c, lev - 1]
-                zi_lower = col_zi[c, lev]
-                rootfr[p, lev] = beta^(zi_upper * m_to_cm) - beta^(zi_lower * m_to_cm)
-            end
-        else
-            for lev in 1:ubj
-                rootfr[p, lev] = 0.0
-            end
-        end
+    if !isempty(bounds_p)
+        root_jackson1996!(rootfr, first(bounds_p), last(bounds_p), col_zi,
+                          patch_column, patch_itype, patch_is_fates,
+                          pftcon.rootprof_beta, ubj, varindx)
     end
 
     return nothing
@@ -338,28 +294,152 @@ function exponential_rootfr!(rootfr::Matrix{<:Real},
 
     rootprof_exp = 3.0  # e-folding depth parameter (1/m)
 
-    # Initialize to zero
-    for lev in 1:ubj
-        for p in bounds_p
-            rootfr[p, lev] = 0.0
-        end
-    end
-
-    for p in bounds_p
-        c = patch_column[p]
-        if !patch_is_fates[p]
-            for lev in 1:ubj
-                rootfr[p, lev] = exp(-rootprof_exp * col_z[c, lev]) * col_dz[c, lev]
-            end
-        else
-            rootfr[p, 1] = 0.0
-        end
-        # Normalize (applied to all patches including FATES where rootfr is zero)
-        norm = -1.0 / rootprof_exp * (exp(-rootprof_exp * col_z[c, ubj]) - 1.0)
-        for lev in 1:ubj
-            rootfr[p, lev] = rootfr[p, lev] / norm
-        end
+    if !isempty(bounds_p)
+        root_exponential!(rootfr, first(bounds_p), last(bounds_p), col_z, col_dz,
+                          patch_column, patch_is_fates, ubj, rootprof_exp)
     end
 
     return nothing
+end
+
+# --------------------------------------------------------------------------
+# GPU kernels for root-fraction profiles (KernelAbstractions).
+# Each (patch, layer) output element is independent: profile values depend
+# only on per-patch parameters and per-column depth inputs (no loop-carried
+# / accumulation dependence within these routines). The per-patch sum-based
+# bedrock redistribution in init_vegrootfr! is intentionally NOT kernelized.
+# --------------------------------------------------------------------------
+
+# Zero out root fractions in bedrock layers (nlevsoi+1 .. nlevgrnd).
+@kernel function _root_zero_bedrock_kernel!(rootfr, pmin::Int, levoff::Int)
+    p0, j = @index(Global, NTuple)
+    @inbounds rootfr[pmin + p0 - 1, levoff + j] = 0.0
+end
+
+"""
+    root_zero_bedrock!(rootfr, pmin, pmax, nlevsoi, nlevgrnd)
+
+Zero root fractions in bedrock layers `(nlevsoi+1):nlevgrnd` over patches
+`pmin:pmax`. Backend-agnostic; one thread per (patch, bedrock layer).
+"""
+function root_zero_bedrock!(rootfr, pmin::Int, pmax::Int, nlevsoi::Int, nlevgrnd::Int)
+    np = pmax - pmin + 1
+    nbed = nlevgrnd - nlevsoi
+    _launch!(_root_zero_bedrock_kernel!, rootfr, pmin, nlevsoi;
+             ndrange = (np, nbed))
+end
+
+# Zeng (2001) two-parameter exponential root profile.
+@kernel function _root_zeng2001_kernel!(rootfr, pmin::Int, @Const(col_zi),
+                                        @Const(patch_column), @Const(patch_itype),
+                                        @Const(patch_is_fates), @Const(roota_par),
+                                        @Const(rootb_par), ubj::Int)
+    p0, lev = @index(Global, NTuple)
+    p = pmin + p0 - 1
+    @inbounds begin
+        if patch_is_fates[p]
+            rootfr[p, lev] = 0.0
+        else
+            c = patch_column[p]
+            pft_idx = patch_itype[p] + 1
+            a = roota_par[pft_idx]
+            b = rootb_par[pft_idx]
+            if lev == ubj
+                zi_upper_bot = col_zi[c, ubj - 1]
+                rootfr[p, lev] = 0.5 * (exp(-a * zi_upper_bot) + exp(-b * zi_upper_bot))
+            else
+                zi_upper = lev == 1 ? 0.0 : col_zi[c, lev - 1]
+                zi_lower = col_zi[c, lev]
+                rootfr[p, lev] = 0.5 * (
+                    exp(-a * zi_upper) + exp(-b * zi_upper) -
+                    exp(-a * zi_lower) - exp(-b * zi_lower))
+            end
+        end
+    end
+end
+
+"""
+    root_zeng2001!(rootfr, pmin, pmax, col_zi, patch_column, patch_itype,
+                   patch_is_fates, roota_par, rootb_par, ubj)
+
+Zeng (2001) root profile over patches `pmin:pmax`, layers `1:ubj`.
+Backend-agnostic; one thread per (patch, layer).
+"""
+function root_zeng2001!(rootfr, pmin::Int, pmax::Int, col_zi, patch_column,
+                        patch_itype, patch_is_fates, roota_par, rootb_par, ubj::Int)
+    np = pmax - pmin + 1
+    _launch!(_root_zeng2001_kernel!, rootfr, pmin, col_zi, patch_column,
+             patch_itype, patch_is_fates, roota_par, rootb_par, ubj;
+             ndrange = (np, ubj))
+end
+
+# Jackson (1996) beta-function root profile.
+@kernel function _root_jackson1996_kernel!(rootfr, pmin::Int, @Const(col_zi),
+                                           @Const(patch_column), @Const(patch_itype),
+                                           @Const(patch_is_fates), @Const(rootprof_beta),
+                                           ubj::Int, varindx::Int)
+    p0, lev = @index(Global, NTuple)
+    p = pmin + p0 - 1
+    @inbounds begin
+        if patch_is_fates[p]
+            rootfr[p, lev] = 0.0
+        else
+            c = patch_column[p]
+            pft_idx = patch_itype[p] + 1
+            beta = rootprof_beta[pft_idx, varindx]
+            m_to_cm = 100.0
+            zi_upper = lev == 1 ? 0.0 : col_zi[c, lev - 1]
+            zi_lower = col_zi[c, lev]
+            rootfr[p, lev] = beta^(zi_upper * m_to_cm) - beta^(zi_lower * m_to_cm)
+        end
+    end
+end
+
+"""
+    root_jackson1996!(rootfr, pmin, pmax, col_zi, patch_column, patch_itype,
+                      patch_is_fates, rootprof_beta, ubj, varindx)
+
+Jackson (1996) root profile over patches `pmin:pmax`, layers `1:ubj`.
+Backend-agnostic; one thread per (patch, layer).
+"""
+function root_jackson1996!(rootfr, pmin::Int, pmax::Int, col_zi, patch_column,
+                           patch_itype, patch_is_fates, rootprof_beta, ubj::Int,
+                           varindx::Int)
+    np = pmax - pmin + 1
+    _launch!(_root_jackson1996_kernel!, rootfr, pmin, col_zi, patch_column,
+             patch_itype, patch_is_fates, rootprof_beta, ubj, varindx;
+             ndrange = (np, ubj))
+end
+
+# Koven exponential root profile (norm recomputed per element from col_z[c,ubj]).
+@kernel function _root_exponential_kernel!(rootfr, pmin::Int, @Const(col_z),
+                                           @Const(col_dz), @Const(patch_column),
+                                           @Const(patch_is_fates), ubj::Int,
+                                           rootprof_exp)
+    p0, lev = @index(Global, NTuple)
+    p = pmin + p0 - 1
+    @inbounds begin
+        c = patch_column[p]
+        norm = -1.0 / rootprof_exp * (exp(-rootprof_exp * col_z[c, ubj]) - 1.0)
+        raw = patch_is_fates[p] ? 0.0 :
+              exp(-rootprof_exp * col_z[c, lev]) * col_dz[c, lev]
+        rootfr[p, lev] = raw / norm
+    end
+end
+
+"""
+    root_exponential!(rootfr, pmin, pmax, col_z, col_dz, patch_column,
+                      patch_is_fates, ubj, rootprof_exp)
+
+Koven exponential root profile over patches `pmin:pmax`, layers `1:ubj`.
+The per-patch normalization is recomputed per element (depends only on the
+input `col_z[c, ubj]`), so iterations remain independent. Backend-agnostic;
+one thread per (patch, layer).
+"""
+function root_exponential!(rootfr, pmin::Int, pmax::Int, col_z, col_dz,
+                           patch_column, patch_is_fates, ubj::Int, rootprof_exp)
+    np = pmax - pmin + 1
+    _launch!(_root_exponential_kernel!, rootfr, pmin, col_z, col_dz,
+             patch_column, patch_is_fates, ubj, rootprof_exp;
+             ndrange = (np, ubj))
 end

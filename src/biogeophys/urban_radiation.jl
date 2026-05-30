@@ -11,6 +11,40 @@
 const MPE_URBAN_RAD = 1.0e-06   # prevents overflow for division by zero
 const SNOEM         = 0.97      # snow emissivity
 
+# --- GPU kernels (per-element, fully independent across landunits) ---
+
+# Impervious road weight: wtroad_imperv = 1 - wtroad_perv (masked, per-landunit)
+@kernel function _urad_wtroad_imperv_kernel!(wtroad_imperv_v, @Const(wtroad_perv),
+                                             @Const(mask_urbanl), imin::Int, imax::Int)
+    l = @index(Global)
+    @inbounds begin
+        if imin <= l <= imax && mask_urbanl[l]
+            wtroad_imperv_v[l] = 1.0 - wtroad_perv[l]
+        end
+    end
+end
+function urad_wtroad_imperv!(wtroad_imperv_v, wtroad_perv, mask_urbanl, bounds)
+    _launch!(_urad_wtroad_imperv_kernel!, wtroad_imperv_v, wtroad_perv, mask_urbanl,
+             first(bounds), last(bounds); ndrange=length(wtroad_imperv_v))
+end
+
+# Net/upward longwave radiation for urban roof (masked, per-landunit, independent)
+@kernel function _urad_roof_lw_kernel!(lwup_roof, lwnet_roof, @Const(em_roof),
+                                       @Const(t_roof), @Const(lwdown),
+                                       @Const(mask_urbanl), imin::Int, imax::Int)
+    l = @index(Global)
+    @inbounds begin
+        if imin <= l <= imax && mask_urbanl[l]
+            lwup_roof[l]  = em_roof[l] * SB * (t_roof[l]^4) + (1.0 - em_roof[l]) * lwdown[l]
+            lwnet_roof[l] = lwup_roof[l] - lwdown[l]
+        end
+    end
+end
+function urad_roof_lw!(lwup_roof, lwnet_roof, em_roof, t_roof, lwdown, mask_urbanl, bounds)
+    _launch!(_urad_roof_lw_kernel!, lwup_roof, lwnet_roof, em_roof, t_roof, lwdown,
+             mask_urbanl, first(bounds), last(bounds); ndrange=length(lwup_roof))
+end
+
 """
     net_longwave!(canyon_hwr, wtroad_perv, lwdown, em_roof, em_improad,
                   em_perroad, em_wall, t_roof, t_improad, t_perroad,
@@ -141,10 +175,7 @@ function net_longwave!(canyon_hwr::Vector{<:Real},
     shadewall_e_sunwall_v    = zeros(FT, last(bounds))
 
     # Calculate impervious road weight
-    for l in bounds
-        mask_urbanl[l] || continue
-        wtroad_imperv_v[l] = 1.0 - wtroad_perv[l]
-    end
+    urad_wtroad_imperv!(wtroad_imperv_v, wtroad_perv, mask_urbanl, bounds)
 
     # Atmospheric longwave radiation incident on walls and road in urban canyon
     for l in bounds
@@ -349,11 +380,7 @@ function net_longwave!(canyon_hwr::Vector{<:Real},
     end
 
     # Net longwave radiation for roof
-    for l in bounds
-        mask_urbanl[l] || continue
-        lwup_roof[l] = em_roof[l] * SB * (t_roof[l]^4) + (1.0 - em_roof[l]) * lwdown[l]
-        lwnet_roof[l] = lwup_roof[l] - lwdown[l]
-    end
+    urad_roof_lw!(lwup_roof, lwnet_roof, em_roof, t_roof, lwdown, mask_urbanl, bounds)
 
     return nothing
 end

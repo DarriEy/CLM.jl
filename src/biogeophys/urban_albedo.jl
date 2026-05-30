@@ -19,6 +19,85 @@ const SNAL0 = 0.66  # vis albedo of urban snow
 const SNAL1 = 0.56  # nir albedo of urban snow
 
 # --------------------------------------------------------------------------
+# Kernels (KernelAbstractions) for fully-independent per-element loops.
+# --------------------------------------------------------------------------
+
+# Urban snow albedo, one thread per column. Each column writes only the
+# matrix matching its itype (roof / improad / perroad), so the three output
+# matrices never alias across columns -> independent iterations.
+@kernel function _ualb_snow_albedo_kernel!(albsn_roof, @Const(mask_urbanc),
+                                           @Const(landunit), @Const(itype),
+                                           @Const(coszen), ind::Int,
+                                           albsn_improad, albsn_perroad,
+                                           @Const(h2osno_total),
+                                           icol_roof::Int, icol_imp::Int,
+                                           icol_per::Int, snal0, snal1)
+    c = @index(Global)
+    @inbounds if mask_urbanc[c]
+        l = landunit[c]
+        if coszen[l] > 0.0 && h2osno_total[c] > 0.0
+            if itype[c] == icol_roof
+                albsn_roof[l, 1] = snal0
+                albsn_roof[l, 2] = snal1
+            elseif itype[c] == icol_imp
+                albsn_improad[l, 1] = snal0
+                albsn_improad[l, 2] = snal1
+            elseif itype[c] == icol_per
+                albsn_perroad[l, 1] = snal0
+                albsn_perroad[l, 2] = snal1
+            end
+        else
+            if itype[c] == icol_roof
+                albsn_roof[l, 1] = 0.0
+                albsn_roof[l, 2] = 0.0
+            elseif itype[c] == icol_imp
+                albsn_improad[l, 1] = 0.0
+                albsn_improad[l, 2] = 0.0
+            elseif itype[c] == icol_per
+                albsn_perroad[l, 1] = 0.0
+                albsn_perroad[l, 2] = 0.0
+            end
+        end
+    end
+end
+
+ualb_snow_albedo!(albsn_roof, mask_urbanc, landunit, itype, coszen, ind::Int,
+                  albsn_improad, albsn_perroad, h2osno_total,
+                  icol_roof::Int, icol_imp::Int, icol_per::Int, snal0, snal1) =
+    _launch!(_ualb_snow_albedo_kernel!, albsn_roof, mask_urbanc, landunit, itype,
+             coszen, ind, albsn_improad, albsn_perroad, h2osno_total,
+             icol_roof, icol_imp, icol_per, snal0, snal1;
+             ndrange = length(mask_urbanc))
+
+# Cosine solar zenith angle + zenith angle, one thread per landunit.
+@kernel function _ualb_coszen_kernel!(coszen, @Const(mask_urbanl),
+                                      @Const(coszen_col), @Const(coli), zen)
+    l = @index(Global)
+    @inbounds if mask_urbanl[l]
+        cz = coszen_col[coli[l]]
+        coszen[l] = cz
+        zen[l] = acos(cz)
+    end
+end
+
+ualb_coszen!(coszen, mask_urbanl, coszen_col, coli, zen) =
+    _launch!(_ualb_coszen_kernel!, coszen, mask_urbanl, coszen_col, coli, zen;
+             ndrange = length(mask_urbanl))
+
+# Zero ground albedo outputs over urban columns (2D: column x waveband).
+@kernel function _ualb_init_albgr_kernel!(albgrd, @Const(mask_urbanc), albgri)
+    c, ib = @index(Global, NTuple)
+    @inbounds if mask_urbanc[c]
+        albgrd[c, ib] = 0.0
+        albgri[c, ib] = 0.0
+    end
+end
+
+ualb_init_albgr!(albgrd, mask_urbanc, albgri, numrad::Int) =
+    _launch!(_ualb_init_albgr_kernel!, albgrd, mask_urbanc, albgri;
+             ndrange = (length(mask_urbanc), numrad))
+
+# --------------------------------------------------------------------------
 # snow_albedo!
 # --------------------------------------------------------------------------
 
@@ -47,33 +126,9 @@ function snow_albedo!(mask_urbanc::BitVector, col::ColumnData,
                       albsn_perroad::Matrix{<:Real},
                       h2osno_total::Vector{<:Real})
 
-    for c in eachindex(mask_urbanc)
-        mask_urbanc[c] || continue
-        l = col.landunit[c]
-        if coszen[l] > 0.0 && h2osno_total[c] > 0.0
-            if col.itype[c] == ICOL_ROOF
-                albsn_roof[l, 1] = SNAL0
-                albsn_roof[l, 2] = SNAL1
-            elseif col.itype[c] == ICOL_ROAD_IMPERV
-                albsn_improad[l, 1] = SNAL0
-                albsn_improad[l, 2] = SNAL1
-            elseif col.itype[c] == ICOL_ROAD_PERV
-                albsn_perroad[l, 1] = SNAL0
-                albsn_perroad[l, 2] = SNAL1
-            end
-        else
-            if col.itype[c] == ICOL_ROOF
-                albsn_roof[l, 1] = 0.0
-                albsn_roof[l, 2] = 0.0
-            elseif col.itype[c] == ICOL_ROAD_IMPERV
-                albsn_improad[l, 1] = 0.0
-                albsn_improad[l, 2] = 0.0
-            elseif col.itype[c] == ICOL_ROAD_PERV
-                albsn_perroad[l, 1] = 0.0
-                albsn_perroad[l, 2] = 0.0
-            end
-        end
-    end
+    ualb_snow_albedo!(albsn_roof, mask_urbanc, col.landunit, col.itype,
+                      coszen, ind, albsn_improad, albsn_perroad, h2osno_total,
+                      ICOL_ROOF, ICOL_ROAD_IMPERV, ICOL_ROAD_PERV, SNAL0, SNAL1)
 
     return nothing
 end
@@ -657,20 +712,11 @@ function urban_albedo!(mask_urbanl::BitVector,
     FT = eltype(surfalb.coszen_col)
     coszen = zeros(FT, nl)
     zen    = zeros(FT, nl)
-    for l in eachindex(mask_urbanl)
-        mask_urbanl[l] || continue
-        coszen[l] = surfalb.coszen_col[lun.coli[l]]
-        zen[l]    = acos(coszen[l])
-    end
+    ualb_coszen!(coszen, mask_urbanl, surfalb.coszen_col, lun.coli, zen)
 
     # ---- Initialize output ----
+    ualb_init_albgr!(albgrd, mask_urbanc, albgri, numrad)
     for ib in 1:numrad
-        for c in eachindex(mask_urbanc)
-            mask_urbanc[c] || continue
-            albgrd[c, ib] = 0.0
-            albgri[c, ib] = 0.0
-        end
-
         for p in eachindex(mask_urbanp)
             mask_urbanp[p] || continue
             l = pch.landunit[p]

@@ -96,6 +96,35 @@ Transfer surface water below threshold to top soil layer.
 
 Ported from `UpdateState_TooSmallH2osfcToSoil` in `SurfaceWaterMod.F90`.
 """
+# --------------------------------------------------------------------------
+# Kernel: transfer below-threshold surface water to the top soil layer.
+# One thread per column; writes h2osfc[c] and h2osoi_liq[c, 1+nlevsno].
+# Fully independent across columns (no reduction/loop-carried dependence).
+# --------------------------------------------------------------------------
+@kernel function _surfwat_too_small_to_soil_kernel!(h2osfc, h2osoi_liq,
+                                                    @Const(mask_soilc),
+                                                    @Const(qflx_too_small_h2osfc_to_soil),
+                                                    dtime, nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask_soilc[c]
+        flux = qflx_too_small_h2osfc_to_soil[c]
+        if flux > 0.0
+            hnew = h2osfc[c] - flux * dtime
+            h2osoi_liq[c, 1 + nlevsno] = h2osoi_liq[c, 1 + nlevsno] + flux * dtime
+            # Truncate small values
+            if abs(hnew) < 1.0e-10
+                hnew = 0.0
+            end
+            h2osfc[c] = hnew
+        end
+    end
+end
+
+surfwat_too_small_to_soil!(h2osfc, h2osoi_liq, mask_soilc,
+                           qflx_too_small_h2osfc_to_soil, dtime, nlevsno::Int) =
+    _launch!(_surfwat_too_small_to_soil_kernel!, h2osfc, h2osoi_liq, mask_soilc,
+             qflx_too_small_h2osfc_to_soil, dtime, nlevsno)
+
 function update_state_too_small_h2osfc_to_soil!(mask_soilc::BitVector,
                                                  bounds_col::UnitRange{Int},
                                                  dtime::Real,
@@ -104,18 +133,8 @@ function update_state_too_small_h2osfc_to_soil!(mask_soilc::BitVector,
                                                  h2osoi_liq::Matrix{<:Real},
                                                  nlevsno::Int)
 
-    for c in bounds_col
-        mask_soilc[c] || continue
-        flux = qflx_too_small_h2osfc_to_soil[c]
-        if flux > 0.0
-            h2osfc[c] = h2osfc[c] - flux * dtime
-            h2osoi_liq[c, 1 + nlevsno] = h2osoi_liq[c, 1 + nlevsno] + flux * dtime
-            # Truncate small values
-            if abs(h2osfc[c]) < 1.0e-10
-                h2osfc[c] = 0.0
-            end
-        end
-    end
+    surfwat_too_small_to_soil!(h2osfc, h2osoi_liq, mask_soilc,
+                               qflx_too_small_h2osfc_to_soil, dtime, nlevsno)
 
     return nothing
 end
@@ -185,6 +204,52 @@ linear reservoir model.
 
 Ported from `QflxH2osfcSurf` in `SurfaceWaterMod.F90`.
 """
+# --------------------------------------------------------------------------
+# Kernel: surface runoff from h2osfc (connectivity-dependent linear reservoir).
+# One thread per column; writes qflx_h2osfc_surf[c] only. Fully independent.
+# `continue` early-outs are rewritten as per-element branches (single element).
+# --------------------------------------------------------------------------
+@kernel function _surfwat_qflx_surf_kernel!(qflx_h2osfc_surf, @Const(mask_hydrologyc),
+                                            @Const(h2osfc), @Const(h2osfc_thresh),
+                                            @Const(frac_h2osfc_nosnow), @Const(topo_slope),
+                                            dtime, h2osfcflag::Int)
+    c = @index(Global)
+    @inbounds if mask_hydrologyc[c]
+        if h2osfcflag != 1
+            qflx_h2osfc_surf[c] = 0.0
+        else
+            # Fractional connectivity (power law)
+            frac_nosnow = frac_h2osfc_nosnow[c]
+            if frac_nosnow <= SURFACE_WATER_PC
+                frac_infclust = 0.0
+            else
+                frac_infclust = (frac_nosnow - SURFACE_WATER_PC)^SURFACE_WATER_MU
+            end
+
+            # Compute runoff if above threshold
+            q = 0.0
+            if h2osfc[c] > h2osfc_thresh[c] && h2osfcflag != 0
+                k_wet = 1.0e-4 * sin(π / 180.0 * topo_slope[c])
+                k_wet = max(k_wet, 1.0e-7)
+                q = k_wet * frac_infclust * (h2osfc[c] - h2osfc_thresh[c])
+                # Limit to available water
+                q = min(q, (h2osfc[c] - h2osfc_thresh[c]) / dtime)
+            end
+
+            # Cutoff small flows
+            if q < 1.0e-8
+                q = 0.0
+            end
+            qflx_h2osfc_surf[c] = q
+        end
+    end
+end
+
+surfwat_qflx_surf!(qflx_h2osfc_surf, mask_hydrologyc, h2osfc, h2osfc_thresh,
+                   frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag::Int) =
+    _launch!(_surfwat_qflx_surf_kernel!, qflx_h2osfc_surf, mask_hydrologyc, h2osfc,
+             h2osfc_thresh, frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag)
+
 function qflx_h2osfc_surf!(mask_hydrologyc::BitVector,
                             bounds_col::UnitRange{Int},
                             dtime::Real,
@@ -195,39 +260,8 @@ function qflx_h2osfc_surf!(mask_hydrologyc::BitVector,
                             topo_slope::Vector{<:Real},
                             qflx_h2osfc_surf::Vector{<:Real})
 
-    for c in bounds_col
-        mask_hydrologyc[c] || continue
-
-        if h2osfcflag != 1
-            qflx_h2osfc_surf[c] = 0.0
-            continue
-        end
-
-        # Fractional connectivity (power law)
-        frac_nosnow = frac_h2osfc_nosnow[c]
-        if frac_nosnow <= SURFACE_WATER_PC
-            frac_infclust = 0.0
-        else
-            frac_infclust = (frac_nosnow - SURFACE_WATER_PC)^SURFACE_WATER_MU
-        end
-
-        # Compute runoff if above threshold
-        if h2osfc[c] > h2osfc_thresh[c] && h2osfcflag != 0
-            k_wet = 1.0e-4 * sin(π / 180.0 * topo_slope[c])
-            k_wet = max(k_wet, 1.0e-7)
-            qflx_h2osfc_surf[c] = k_wet * frac_infclust * (h2osfc[c] - h2osfc_thresh[c])
-            # Limit to available water
-            qflx_h2osfc_surf[c] = min(qflx_h2osfc_surf[c],
-                                       (h2osfc[c] - h2osfc_thresh[c]) / dtime)
-        else
-            qflx_h2osfc_surf[c] = 0.0
-        end
-
-        # Cutoff small flows
-        if qflx_h2osfc_surf[c] < 1.0e-8
-            qflx_h2osfc_surf[c] = 0.0
-        end
-    end
+    surfwat_qflx_surf!(qflx_h2osfc_surf, mask_hydrologyc, h2osfc, h2osfc_thresh,
+                       frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag)
 
     return nothing
 end
@@ -241,6 +275,33 @@ Compute infiltration/drainage from h2osfc into soil.
 
 Ported from `QflxH2osfcDrain` in `SurfaceWaterMod.F90`.
 """
+# --------------------------------------------------------------------------
+# Kernel: infiltration/drainage from h2osfc into soil.
+# One thread per column; writes qflx_h2osfc_drain[c] only. Fully independent.
+# --------------------------------------------------------------------------
+@kernel function _surfwat_qflx_drain_kernel!(qflx_h2osfc_drain, @Const(mask_hydrologyc),
+                                             @Const(h2osfc), @Const(frac_h2osfc),
+                                             @Const(qinmax), dtime, h2osfcflag::Int)
+    c = @index(Global)
+    @inbounds if mask_hydrologyc[c]
+        if h2osfc[c] < 0.0
+            # Numerical error recovery
+            qflx_h2osfc_drain[c] = h2osfc[c] / dtime
+        else
+            q = min(frac_h2osfc[c] * qinmax[c], h2osfc[c] / dtime)
+            if h2osfcflag == 0
+                q = max(0.0, h2osfc[c] / dtime)
+            end
+            qflx_h2osfc_drain[c] = q
+        end
+    end
+end
+
+surfwat_qflx_drain!(qflx_h2osfc_drain, mask_hydrologyc, h2osfc, frac_h2osfc,
+                    qinmax, dtime, h2osfcflag::Int) =
+    _launch!(_surfwat_qflx_drain_kernel!, qflx_h2osfc_drain, mask_hydrologyc, h2osfc,
+             frac_h2osfc, qinmax, dtime, h2osfcflag)
+
 function qflx_h2osfc_drain!(mask_hydrologyc::BitVector,
                               bounds_col::UnitRange{Int},
                               dtime::Real,
@@ -250,23 +311,63 @@ function qflx_h2osfc_drain!(mask_hydrologyc::BitVector,
                               qinmax::Vector{<:Real},
                               qflx_h2osfc_drain::Vector{<:Real})
 
-    for c in bounds_col
-        mask_hydrologyc[c] || continue
-
-        if h2osfc[c] < 0.0
-            # Numerical error recovery
-            qflx_h2osfc_drain[c] = h2osfc[c] / dtime
-        else
-            qflx_h2osfc_drain[c] = min(frac_h2osfc[c] * qinmax[c],
-                                        h2osfc[c] / dtime)
-            if h2osfcflag == 0
-                qflx_h2osfc_drain[c] = max(0.0, h2osfc[c] / dtime)
-            end
-        end
-    end
+    surfwat_qflx_drain!(qflx_h2osfc_drain, mask_hydrologyc, h2osfc, frac_h2osfc,
+                        qinmax, dtime, h2osfcflag)
 
     return nothing
 end
+
+# --------------------------------------------------------------------------
+# Kernel: step-2 partial h2osfc update (inflow minus surface runoff).
+# One thread per column; writes h2osfc[c] only. Fully independent.
+# --------------------------------------------------------------------------
+@kernel function _surfwat_partial_update_kernel!(h2osfc, @Const(mask_hydrologyc),
+                                                 @Const(qflx_in_h2osfc),
+                                                 @Const(qflx_h2osfc_surf), dtime)
+    c = @index(Global)
+    @inbounds if mask_hydrologyc[c]
+        h = h2osfc[c] + (qflx_in_h2osfc[c] - qflx_h2osfc_surf[c]) * dtime
+        # Truncate small values
+        if abs(h) < 1.0e-10
+            h = 0.0
+        end
+        h2osfc[c] = h
+    end
+end
+
+surfwat_partial_update!(h2osfc, mask_hydrologyc, qflx_in_h2osfc,
+                        qflx_h2osfc_surf, dtime) =
+    _launch!(_surfwat_partial_update_kernel!, h2osfc, mask_hydrologyc,
+             qflx_in_h2osfc, qflx_h2osfc_surf, dtime)
+
+# --------------------------------------------------------------------------
+# Kernel: step-4 final h2osfc update (subtract drainage) and store diagnostics.
+# One thread per column; writes h2osfc[c], qflx_h2osfc_surf_col[c],
+# qflx_h2osfc_drain_col[c]. Fully independent across columns.
+# --------------------------------------------------------------------------
+@kernel function _surfwat_final_update_kernel!(h2osfc, qflx_h2osfc_surf_col,
+                                               qflx_h2osfc_drain_col,
+                                               @Const(mask_hydrologyc),
+                                               @Const(qflx_h2osfc_drain_arr),
+                                               @Const(qflx_h2osfc_surf_arr), dtime)
+    c = @index(Global)
+    @inbounds if mask_hydrologyc[c]
+        h = h2osfc[c] - qflx_h2osfc_drain_arr[c] * dtime
+        if abs(h) < 1.0e-10
+            h = 0.0
+        end
+        h2osfc[c] = h
+        qflx_h2osfc_surf_col[c] = qflx_h2osfc_surf_arr[c]
+        qflx_h2osfc_drain_col[c] = qflx_h2osfc_drain_arr[c]
+    end
+end
+
+surfwat_final_update!(h2osfc, qflx_h2osfc_surf_col, qflx_h2osfc_drain_col,
+                      mask_hydrologyc, qflx_h2osfc_drain_arr,
+                      qflx_h2osfc_surf_arr, dtime) =
+    _launch!(_surfwat_final_update_kernel!, h2osfc, qflx_h2osfc_surf_col,
+             qflx_h2osfc_drain_col, mask_hydrologyc, qflx_h2osfc_drain_arr,
+             qflx_h2osfc_surf_arr, dtime)
 
 """
     update_h2osfc!(col_data, soilhydrology, energyflux,
@@ -311,15 +412,9 @@ function update_h2osfc!(col_data::ColumnData,
                        topo_slope, qflx_h2osfc_surf_arr)
 
     # 2. Partially update h2osfc
-    for c in bounds_col
-        mask_hydrologyc[c] || continue
-        waterstatebulk.ws.h2osfc_col[c] += (waterfluxbulk.qflx_in_h2osfc_col[c] -
-                                         qflx_h2osfc_surf_arr[c]) * dtime
-        # Truncate small values
-        if abs(waterstatebulk.ws.h2osfc_col[c]) < 1.0e-10
-            waterstatebulk.ws.h2osfc_col[c] = 0.0
-        end
-    end
+    surfwat_partial_update!(waterstatebulk.ws.h2osfc_col, mask_hydrologyc,
+                            waterfluxbulk.qflx_in_h2osfc_col, qflx_h2osfc_surf_arr,
+                            dtime)
 
     # 3. Compute drainage
     qflx_h2osfc_drain!(mask_hydrologyc, bounds_col, dtime,
@@ -328,15 +423,11 @@ function update_h2osfc!(col_data::ColumnData,
                         qinmax, qflx_h2osfc_drain_arr)
 
     # 4. Final update
-    for c in bounds_col
-        mask_hydrologyc[c] || continue
-        waterstatebulk.ws.h2osfc_col[c] -= qflx_h2osfc_drain_arr[c] * dtime
-        if abs(waterstatebulk.ws.h2osfc_col[c]) < 1.0e-10
-            waterstatebulk.ws.h2osfc_col[c] = 0.0
-        end
-        waterfluxbulk.qflx_h2osfc_surf_col[c] = qflx_h2osfc_surf_arr[c]
-        waterfluxbulk.qflx_h2osfc_drain_col[c] = qflx_h2osfc_drain_arr[c]
-    end
+    surfwat_final_update!(waterstatebulk.ws.h2osfc_col,
+                          waterfluxbulk.qflx_h2osfc_surf_col,
+                          waterfluxbulk.qflx_h2osfc_drain_col,
+                          mask_hydrologyc, qflx_h2osfc_drain_arr,
+                          qflx_h2osfc_surf_arr, dtime)
 
     return nothing
 end
