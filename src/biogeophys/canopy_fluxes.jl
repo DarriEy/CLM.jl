@@ -105,6 +105,151 @@ function canopy_fluxes_read_params!(; lai_dl::Real = 0.5,
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# Aerodynamic-resistance inner kernel (per-patch resistances / conductances).
+#
+# Kernelized form of the FIRST per-patch `for fi in 1:fn` loop inside the
+# Newton stability iteration of canopy_fluxes!. One thread per filtered patch;
+# each patch writes only its own [p] indices (no reductions). Gather form:
+# fi = @index(Global); p = filterp[fi].
+#
+# GPU-hostile host-side items resolved before launch:
+#   - csoilc_val (calibration override vs param) is constant across patches and
+#     passed as a scalar.
+#   - The String/Bool feature flags (use_undercanopy_stability,
+#     use_biomass_heat_storage, use_lch4) are passed as scalar Bool args.
+# The 2D rah/raw[p, ABOVE_CANOPY|BELOW_CANOPY] indexing is preserved exactly.
+# ---------------------------------------------------------------------------
+@kernel function _cf_resist_kernel!(
+        # written arrays
+        tlbef, del2, ram1_patch, rah, raw, uaf_patch, uuc, dleaf_patch,
+        rb, rb1_patch, grnd_ch4_cond_patch, svpts, eah, rh_af_patch,
+        rah1_patch, raw1_patch, rah2_patch, raw2_patch, vpd_patch,
+        # read-only arrays
+        @Const(filterp), @Const(column), @Const(gridcell), @Const(itype),
+        @Const(t_veg_patch), @Const(del_arr), @Const(ustar_patch),
+        @Const(um_patch), @Const(temp1), @Const(temp2),
+        @Const(elai_patch), @Const(esai_patch), @Const(htop_patch),
+        @Const(z0mg_col), @Const(taf_patch), @Const(qaf_patch),
+        @Const(t_grnd_col), @Const(dleaf_pft), @Const(forc_pbot_col),
+        @Const(el),
+        # scalars
+        csoilc_val, use_undercanopy_stability::Bool,
+        use_biomass_heat_storage::Bool, use_lch4::Bool,
+        cv, a_coef, a_exp, vkc, grav, nu_param, ria_canopy,
+        above_canopy::Int, below_canopy::Int)
+
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        c = column[p]
+        g = gridcell[p]
+        ft = itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
+
+        tlbef[p] = t_veg_patch[p]
+        del2[p] = del_arr[p]
+
+        # Aerodynamic resistances
+        ram1_patch[p] = 1.0 / (ustar_patch[p]^2 / um_patch[p])
+        rah[p, above_canopy] = 1.0 / (temp1[p] * ustar_patch[p])
+        raw[p, above_canopy] = 1.0 / (temp2[p] * ustar_patch[p])
+
+        # Bulk boundary layer resistance
+        uaf_patch[p] = um_patch[p] *
+            sqrt(1.0 / (ram1_patch[p] * um_patch[p]))
+
+        # Empirical undercanopy wind speed
+        uuc[p] = smooth_min(0.4, 0.03 * um_patch[p] / ustar_patch[p])
+
+        # Leaf characteristic width
+        dleaf_patch[p] = dleaf_pft[ft]
+
+        cf = cv / (sqrt(uaf_patch[p]) * sqrt(dleaf_patch[p]))
+        rb[p] = 1.0 / (cf * uaf_patch[p])
+        rb1_patch[p] = rb[p]
+
+        # Soil drag coefficient (X. Zeng parameterization)
+        w = exp(-(elai_patch[p] + esai_patch[p]))
+
+        csoilb = vkc / (a_coef * (z0mg_col[c] * uaf_patch[p] / nu_param)^a_exp)
+
+        ri = (grav * htop_patch[p] *
+            (taf_patch[p] - t_grnd_col[c])) /
+            (taf_patch[p] * uaf_patch[p]^2)
+
+        if use_undercanopy_stability && (taf_patch[p] - t_grnd_col[c]) > 0.0
+            ricsoilc = csoilc_val / (1.0 + ria_canopy * smooth_min(ri, 10.0))
+            csoilcn = csoilb * w + ricsoilc * (1.0 - w)
+        else
+            csoilcn = csoilb * w + csoilc_val * (1.0 - w)
+        end
+
+        if use_biomass_heat_storage
+            rah[p, below_canopy] = 1.0 / (csoilcn * uuc[p])
+        else
+            rah[p, below_canopy] = 1.0 / (csoilcn * uaf_patch[p])
+        end
+
+        raw[p, below_canopy] = rah[p, below_canopy]
+
+        if use_lch4 && length(grnd_ch4_cond_patch) >= p
+            grnd_ch4_cond_patch[p] = 1.0 / (raw[p, above_canopy] + raw[p, below_canopy])
+        end
+
+        # Stomatal resistance intermediates
+        svpts[p] = el[p]
+        eah[p] = forc_pbot_col[c] * qaf_patch[p] / 0.622
+        rh_af_patch[p] = eah[p] / svpts[p]
+
+        # History outputs
+        rah1_patch[p] = rah[p, above_canopy]
+        raw1_patch[p] = raw[p, above_canopy]
+        rah2_patch[p] = rah[p, below_canopy]
+        raw2_patch[p] = raw[p, below_canopy]
+        vpd_patch[p]  = smooth_max((svpts[p] - eah[p]), 50.0) * 0.001
+    end
+end
+
+"""
+    cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
+                      patch_data, filterp, fn, temp1, temp2, tlbef, del2,
+                      del_arr, uuc, rb, svpts, eah, el, dleaf_pft,
+                      grnd_ch4_cond_patch, forc_pbot_col, csoilc_val,
+                      use_undercanopy_stability, use_biomass_heat_storage,
+                      use_lch4, params)
+
+Launch the canopy-fluxes aerodynamic-resistance inner-loop kernel over the
+`fn` filtered patches. Backend-agnostic (CPU loop or GPU); one thread per
+filtered patch. Replaces the first `for fi in 1:fn` resistances loop inside the
+Newton stability iteration. `csoilc_val` and the feature flags are resolved on
+the host and passed as scalars.
+"""
+function cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
+        patch_data, filterp, fn::Int,
+        temp1, temp2, tlbef, del2, del_arr, rah, raw, uuc, rb, svpts, eah, el,
+        dleaf_pft, grnd_ch4_cond_patch, forc_pbot_col,
+        csoilc_val, use_undercanopy_stability::Bool,
+        use_biomass_heat_storage::Bool, use_lch4::Bool, params)
+    _launch!(_cf_resist_kernel!, tlbef,
+        del2, frictionvel.ram1_patch, rah, raw,
+        frictionvel.uaf_patch, uuc, canopystate.dleaf_patch,
+        rb, frictionvel.rb1_patch, grnd_ch4_cond_patch, svpts, eah,
+        waterdiagbulk.rh_af_patch,
+        frictionvel.rah1_patch, frictionvel.raw1_patch,
+        frictionvel.rah2_patch, frictionvel.raw2_patch, frictionvel.vpd_patch,
+        filterp, patch_data.column, patch_data.gridcell, patch_data.itype,
+        temperature.t_veg_patch, del_arr, frictionvel.ustar_patch,
+        frictionvel.um_patch, temp1, temp2,
+        canopystate.elai_patch, canopystate.esai_patch, canopystate.htop_patch,
+        frictionvel.z0mg_col, frictionvel.taf_patch, frictionvel.qaf_patch,
+        temperature.t_grnd_col, dleaf_pft, forc_pbot_col, el,
+        csoilc_val, use_undercanopy_stability, use_biomass_heat_storage, use_lch4,
+        params.cv, params.a_coef, params.a_exp, VKC, GRAV, NU_PARAM, RIA_CANOPY,
+        ABOVE_CANOPY, BELOW_CANOPY;
+        ndrange = fn)
+    return nothing
+end
+
 # =====================================================================
 # Main canopy_fluxes! function
 # =====================================================================
@@ -558,6 +703,11 @@ function canopy_fluxes!(
     # Phase 2: Stability iteration (Newton-Raphson)
     # =========================================================================
 
+    # Soil drag coefficient: use calibration override if set, else param default.
+    # Constant across patches — resolve once on the host (a kernel cannot call
+    # isnan(overrides.csoilc) on the host struct).
+    csoilc_val = isnan(overrides.csoilc) ? params.csoilc : overrides.csoilc
+
     while itlef <= ctrl.itmax_canopy_fluxes && fn > 0
 
         # --- Friction velocity and boundary layer profiles ---
@@ -576,78 +726,15 @@ function canopy_fluxes!(
             obu_vec, itlef + 1, ur, um_vec, ustar_vec,
             temp1, temp2, temp12m, temp22m, fm)
 
-        for fi in 1:fn
-            p = filterp[fi]
-            c = patch_data.column[p]
-            g = patch_data.gridcell[p]
-            ft = patch_data.itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
-
-            tlbef[p] = temperature.t_veg_patch[p]
-            del2[p] = del_arr[p]
-
-            # Aerodynamic resistances
-            frictionvel.ram1_patch[p] = 1.0 / (frictionvel.ustar_patch[p]^2 / frictionvel.um_patch[p])
-            rah[p, ABOVE_CANOPY] = 1.0 / (temp1[p] * frictionvel.ustar_patch[p])
-            raw[p, ABOVE_CANOPY] = 1.0 / (temp2[p] * frictionvel.ustar_patch[p])
-
-            # Bulk boundary layer resistance
-            frictionvel.uaf_patch[p] = frictionvel.um_patch[p] *
-                sqrt(1.0 / (frictionvel.ram1_patch[p] * frictionvel.um_patch[p]))
-
-            # Empirical undercanopy wind speed
-            uuc[p] = smooth_min(0.4, 0.03 * frictionvel.um_patch[p] / frictionvel.ustar_patch[p])
-
-            # Leaf characteristic width
-            canopystate.dleaf_patch[p] = dleaf_pft[ft]
-
-            cf = params.cv / (sqrt(frictionvel.uaf_patch[p]) * sqrt(canopystate.dleaf_patch[p]))
-            rb[p] = 1.0 / (cf * frictionvel.uaf_patch[p])
-            frictionvel.rb1_patch[p] = rb[p]
-
-            # Soil drag coefficient (X. Zeng parameterization)
-            w = exp(-(canopystate.elai_patch[p] + canopystate.esai_patch[p]))
-
-            csoilb = VKC / (params.a_coef * (frictionvel.z0mg_col[c] * frictionvel.uaf_patch[p] / NU_PARAM)^params.a_exp)
-
-            # Stability parameter for ricsoilc
-            # Use calibration override if set, else default from params
-            csoilc_val = isnan(overrides.csoilc) ? params.csoilc : overrides.csoilc
-
-            ri = (GRAV * canopystate.htop_patch[p] *
-                (frictionvel.taf_patch[p] - temperature.t_grnd_col[c])) /
-                (frictionvel.taf_patch[p] * frictionvel.uaf_patch[p]^2)
-
-            if ctrl.use_undercanopy_stability && (frictionvel.taf_patch[p] - temperature.t_grnd_col[c]) > 0.0
-                ricsoilc = csoilc_val / (1.0 + RIA_CANOPY * smooth_min(ri, 10.0))
-                csoilcn = csoilb * w + ricsoilc * (1.0 - w)
-            else
-                csoilcn = csoilb * w + csoilc_val * (1.0 - w)
-            end
-
-            if ctrl.use_biomass_heat_storage
-                rah[p, BELOW_CANOPY] = 1.0 / (csoilcn * uuc[p])
-            else
-                rah[p, BELOW_CANOPY] = 1.0 / (csoilcn * frictionvel.uaf_patch[p])
-            end
-
-            raw[p, BELOW_CANOPY] = rah[p, BELOW_CANOPY]
-
-            if use_lch4 && length(grnd_ch4_cond_patch) >= p
-                grnd_ch4_cond_patch[p] = 1.0 / (raw[p, ABOVE_CANOPY] + raw[p, BELOW_CANOPY])
-            end
-
-            # Stomatal resistance intermediates
-            svpts[p] = el[p]
-            eah[p] = forc_pbot_col[c] * frictionvel.qaf_patch[p] / 0.622
-            waterdiagbulk.rh_af_patch[p] = eah[p] / svpts[p]
-
-            # History outputs
-            frictionvel.rah1_patch[p] = rah[p, ABOVE_CANOPY]
-            frictionvel.raw1_patch[p] = raw[p, ABOVE_CANOPY]
-            frictionvel.rah2_patch[p] = rah[p, BELOW_CANOPY]
-            frictionvel.raw2_patch[p] = raw[p, BELOW_CANOPY]
-            frictionvel.vpd_patch[p]  = smooth_max((svpts[p] - eah[p]), 50.0) * 0.001
-        end
+        # First per-patch loop: aerodynamic resistances / conductances.
+        # Kernelized (one thread per filtered patch); csoilc_val and feature
+        # flags resolved on the host and passed as scalars.
+        cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
+            patch_data, filterp, fn,
+            temp1, temp2, tlbef, del2, del_arr, rah, raw, uuc, rb, svpts, eah, el,
+            dleaf_pft, grnd_ch4_cond_patch, forc_pbot_col,
+            csoilc_val, ctrl.use_undercanopy_stability,
+            ctrl.use_biomass_heat_storage, use_lch4, params)
 
         # --- Photosynthesis ---
         # Call photosynthesis for sunlit and shaded leaves to update rssun/rssha
