@@ -160,7 +160,7 @@ as a KernelAbstractions kernel — one thread per column, dense pivoted GE. Back
 agnostic via the output `tvector`. See `_batched_band_solve_kernel!` for the layout.
 """
 function batched_band_solve!(tvector::AbstractMatrix{T}, bmatrix, rvector,
-                             jtop::Vector{Int}, jbot::Vector{Int}, mask,
+                             jtop::AbstractVector{<:Integer}, jbot::AbstractVector{<:Integer}, mask,
                              kl::Int, ku::Int, nlevsno_off::Int) where {T}
     nc = size(tvector, 1)
     nmax = size(tvector, 2)

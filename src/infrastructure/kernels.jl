@@ -41,8 +41,12 @@ end
 @kernel function _forc_q_kernel!(forc_q_col, @Const(gridcell), @Const(vp_grc), @Const(pbot_col))
     c = @index(Global)
     @inbounds begin
+        # Literals are converted to the working element type (`oftype`/`one`) so the
+        # kernel carries no Float64 on a Float32-only backend (Metal). On Float64 this
+        # is byte-identical (oftype(::Float64, 0.622) === 0.622).
         vp = vp_grc[gridcell[c]]
-        forc_q_col[c] = 0.622 * vp / max(pbot_col[c] - 0.378 * vp, 1.0)
+        pb = pbot_col[c]
+        forc_q_col[c] = oftype(vp, 0.622) * vp / max(pb - oftype(vp, 0.378) * vp, one(vp))
     end
 end
 
@@ -90,7 +94,7 @@ clamp_zwt_to_bedrock!(zwt_col, mask, nbedrock, zi, nlevsno_off::Int) =
     @inbounds if urbpoi[landunit[c]]
         sd = snow_depth_col[c]
         isfinite(sd) || (sd = zero(sd))
-        frac_sno_col[c] = min(sd / 0.05, 1.0)
+        frac_sno_col[c] = min(sd / oftype(sd, 0.05), one(sd))
     end
 end
 
@@ -113,11 +117,11 @@ update_urban_frac_sno!(frac_sno_col, landunit, urbpoi, snow_depth_col) =
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
         dz_cj = dz[c, j + joff]
-        if dz_cj > 0.0
+        if dz_cj > 0
             lv = h2osoi_liq[c, j + joff] / (dz_cj * denh2o)
-            liqvol_col[c, j + joff] = min(max(lv, 0.0), eff_porosity[c, j])
+            liqvol_col[c, j + joff] = min(max(lv, zero(lv)), eff_porosity[c, j])
         else
-            liqvol_col[c, j + joff] = 0.0
+            liqvol_col[c, j + joff] = zero(dz_cj)
         end
     end
 end
@@ -130,6 +134,9 @@ pairs — a 2D KernelAbstractions kernel. Backend-agnostic.
 """
 function compute_h2osoi_liqvol!(liqvol_col, mask, dz, h2osoi_liq, eff_porosity,
                                 joff::Int, nlevgrnd::Int; denh2o)
+    # Pass the scalar constant at the output's precision so no Float64 reaches a
+    # Float32-only backend (Metal).
+    denh2o_ft = convert(eltype(liqvol_col), denh2o)
     _launch!(_h2osoi_liqvol_kernel!, liqvol_col, mask, dz, h2osoi_liq, eff_porosity,
-             joff, denh2o; ndrange = (length(mask), nlevgrnd))
+             joff, denh2o_ft; ndrange = (length(mask), nlevgrnd))
 end

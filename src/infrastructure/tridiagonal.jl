@@ -79,15 +79,18 @@ Columns where `mask[col] == false` are skipped.
     @inbounds if mask[col]
         j = jtop[col]
 
-        # Forward sweep
+        # Forward sweep. `tiny` is the singularity guard at the working precision so the
+        # kernel carries no Float64 on a Float32-only backend (Metal); on Float64 it is
+        # exactly 1e-30 as before.
         bet = b[col, j]
-        if abs(bet) < 1.0e-30; bet = 1.0e-30; end
+        tiny = oftype(bet, 1e-30)
+        if abs(bet) < tiny; bet = tiny; end
         cp[col, j] = c[col, j] / bet
         dp[col, j] = r[col, j] / bet
 
         for jj in (j+1):nlevs
             denom = b[col, jj] - a[col, jj] * cp[col, jj-1]
-            if abs(denom) < 1.0e-30; denom = copysign(1.0e-30, denom == 0.0 ? one(denom) : denom); end
+            if abs(denom) < tiny; denom = copysign(tiny, denom == 0 ? one(denom) : denom); end
             cp[col, jj] = c[col, jj] / denom
             dp[col, jj] = (r[col, jj] - a[col, jj] * dp[col, jj-1]) / denom
         end
@@ -102,7 +105,7 @@ end
 
 function tridiagonal_multi!(u::AbstractMatrix{<:Real}, a::AbstractMatrix{<:Real}, b::AbstractMatrix{<:Real},
                             c::AbstractMatrix{<:Real}, r::AbstractMatrix{<:Real},
-                            jtop::Vector{Int}, mask::AbstractVector{Bool}, ncols::Int, nlevs::Int)
+                            jtop::AbstractVector{<:Integer}, mask::AbstractVector{Bool}, ncols::Int, nlevs::Int)
     # Per-column scratch [ncols × nlevs] (similar(u, …) keeps the array/backend type,
     # so this runs as a CPU loop on Arrays and as a GPU kernel on device arrays).
     T = promote_type(eltype(a), eltype(b), eltype(c), eltype(r))
