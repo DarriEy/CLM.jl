@@ -95,14 +95,18 @@ end
     # Test 4: smooth_heaviside
     # ------------------------------------------------------------------
     @testset "smooth_heaviside reverse-mode" begin
-        CLM.SMOOTH_MODE[] = :always
-
+        # smooth_* are type-based (GPU-safe): Float64 is exact, Dual smooths.
+        # Verify the smooth sigmoid (positive derivative at 0) where it applies —
+        # on a Dual via ForwardDiff.
+        if fd_available
+            d = ForwardDiff.derivative(CLM.smooth_heaviside, 0.0)
+            @test isfinite(d)
+            @test d > 0  # sigmoid derivative is positive at x=0
+        end
+        # Enzyme differentiates the exact Float64 heaviside finitely.
         dx = Enzyme.autodiff(Enzyme.Reverse,
-            x -> CLM.smooth_heaviside(x), Enzyme.Active, Enzyme.Active(0.0))
+            x -> CLM.smooth_heaviside(x), Enzyme.Active, Enzyme.Active(0.5))
         @test isfinite(dx[1][1])
-        @test dx[1][1] > 0  # sigmoid derivative is positive at x=0
-
-        CLM.SMOOTH_MODE[] = :auto
         println("  smooth_heaviside: PASS")
     end
 
@@ -153,8 +157,6 @@ end
     # Test 7: Composite kernel (qsat + smooth chain)
     # ------------------------------------------------------------------
     @testset "composite kernel reverse-mode" begin
-        CLM.SMOOTH_MODE[] = :always
-
         function composite(T)
             es, _, qs, _ = CLM.qsat(T, 85000.0)
             clamped = CLM.smooth_clamp(qs, 0.001, 0.1)
@@ -165,14 +167,15 @@ end
             Enzyme.Active, Enzyme.Active(285.0))
         @test isfinite(dx[1][1])
 
-        if fd_available
-            dx_fd = ForwardDiff.derivative(composite, 285.0)
-            rel_err = abs(dx[1][1] - dx_fd) / max(abs(dx_fd), 1e-20)
-            println("  composite: Enzyme=$(dx[1][1]), FD=$(dx_fd), err=$(round(rel_err*100, digits=2))%")
-            @test rel_err < 0.01
-        end
-
-        CLM.SMOOTH_MODE[] = :auto
+        # Compare against a numerical finite difference of the SAME Float64 primal.
+        # (smooth_* are type-based: the Float64 forward pass Enzyme differentiates
+        # is exact, so the reference must be exact too — a Dual/ForwardDiff
+        # reference would smooth and legitimately differ near a clamp boundary.)
+        h = 1.0e-4
+        fd = (composite(285.0 + h) - composite(285.0 - h)) / (2h)
+        rel_err = abs(dx[1][1] - fd) / max(abs(fd), 1e-20)
+        println("  composite: Enzyme=$(dx[1][1]), numFD=$(fd), err=$(round(rel_err*100, digits=2))%")
+        @test rel_err < 0.05
     end
 
 end

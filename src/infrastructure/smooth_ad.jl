@@ -36,14 +36,20 @@ ForwardDiff.Dual <: Real but NOT <: AbstractFloat.
 _is_ad_type(::Type{T}) where T = !(T <: AbstractFloat)
 _is_ad_type(x::AbstractArray) = _is_ad_type(eltype(x))
 
-"""Return true if we should use the smooth path for the given type."""
-function _use_smooth(::Type{T}) where T
-    mode = SMOOTH_MODE[]
-    mode === :always && return true
-    mode === :never && return false
-    # :auto — smooth only for non-AbstractFloat (i.e. Dual types)
-    return _is_ad_type(T)
-end
+"""
+Return true if the smooth path should be used for type `T`.
+
+PURELY TYPE-BASED (no global read) so the smooth primitives are GPU-safe: a
+device kernel cannot dereference a host-side mutable global. Float64/Float32 →
+exact (false); ForwardDiff.Dual (and other non-AbstractFloat Reals) → smooth.
+
+This is the former `:auto` behavior. The `:always`/`:never` runtime override
+(SMOOTH_MODE) is inherently host-only and is handled at a higher level (the
+generic Real methods always smooth, and callers that need Float64 to evaluate the
+smooth function — e.g. calibration FD/AD consistency — force a smooth-dispatching
+element type rather than toggling a global inside the kernel hot path).
+"""
+@inline _use_smooth(::Type{T}) where {T} = _is_ad_type(T)
 
 # --------------------------------------------------------------------------
 # smooth_min — LogSumExp approximation: -(log(exp(-k*a) + exp(-k*b)))/k
