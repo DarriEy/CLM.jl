@@ -36,40 +36,8 @@ using CLM
 using Printf
 using Random
 
-# --- backend auto-detection -------------------------------------------------
-# Load `pkg` on demand and return its module object if its GPU is functional, else
-# nothing. `@eval using $pkg` creates the binding in a *newer* world age than this
-# function body runs in, so every access to the just-loaded module is deferred
-# through `invokelatest` (otherwise: "binding too new" world-age errors).
-function _try_backend(pkg::Symbol)
-    try
-        @eval using $pkg
-        mod = Base.invokelatest(getfield, @__MODULE__, pkg)
-        Base.invokelatest(() -> mod.functional()) ? mod : nothing
-    catch
-        nothing
-    end
-end
-
-# Build the device-array converter for a loaded backend module. `ctor` is the array
-# constructor name (e.g. :MtlArray). The property lookup is done inside the
-# invokelatest closure so it, too, sees the freshly-loaded module.
-_converter(mod, ctor::Symbol) = x -> Base.invokelatest(() -> getfield(mod, ctor)(x))
-
-# Returns (name, to_device, FT) where to_device(::Array)->device array and FT is
-# the float precision the backend supports, or nothing if no GPU is functional.
-# First functional backend wins, NVIDIA → AMD → Intel → Apple.
-function detect_backend()
-    if (m = _try_backend(:CUDA))   !== nothing; return ("CUDA",   _converter(m, :cu),       Float64); end
-    if (m = _try_backend(:AMDGPU)) !== nothing; return ("AMDGPU", _converter(m, :ROCArray), Float64); end
-    if (m = _try_backend(:oneAPI)) !== nothing; return ("oneAPI", _converter(m, :oneArray), Float64); end
-    if (m = _try_backend(:Metal))  !== nothing; return ("Metal",  _converter(m, :MtlArray), Float32); end
-    return nothing
-end
-
-# Device arrays disallow BitArray and require Bool masks as Vector{Bool}.
-_dev(to, x::BitArray) = to(collect(Bool, x))
-_dev(to, x::AbstractArray) = to(x)
+# Backend auto-detection (detect_backend / _dev) is shared with gpu_ad_validate.jl.
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 maxabsdiff(a, b) = maximum(abs.(Array(a) .- Array(b)); init = 0.0)
 

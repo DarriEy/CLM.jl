@@ -1,5 +1,7 @@
 [deps]
 CLM = "4245f2e0-edff-455b-b31b-2767da28c542"
+Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
