@@ -3,6 +3,7 @@ module CLM
 using LinearAlgebra
 using Dates
 using NCDatasets
+import Adapt  # device-movable state structs (Adapt.@adapt_structure)
 
 # ===========================================================================
 # Tier 1: Constants & Parameters

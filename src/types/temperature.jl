@@ -12,106 +12,118 @@ heat content, and accumulated quantities.
 
 Ported from `temperature_type` in `TemperatureType.F90`.
 """
-Base.@kwdef mutable struct TemperatureData{FT<:Real}
+Base.@kwdef mutable struct TemperatureData{FT<:Real,
+                                           V<:AbstractVector{FT},
+                                           M<:AbstractMatrix{FT},
+                                           VI<:AbstractVector{<:Integer},
+                                           MI<:AbstractMatrix{<:Integer}}
     # --- Temperatures (patch-level) ---
-    t_stem_patch             ::Vector{FT} = Float64[]   # patch stem temperature (K)
-    t_veg_patch              ::Vector{FT} = Float64[]   # patch vegetation temperature (K)
-    t_skin_patch             ::Vector{FT} = Float64[]   # patch skin temperature (K)
-    t_veg_day_patch          ::Vector{FT} = Float64[]   # patch daytime accumulative vegetation temperature (K*nsteps), LUNA
-    t_veg_night_patch        ::Vector{FT} = Float64[]   # patch nighttime accumulative vegetation temperature (K*nsteps), LUNA
-    t_veg10_day_patch        ::Vector{FT} = Float64[]   # 10-day running mean of patch daytime vegetation temperature (K), LUNA
-    t_veg10_night_patch      ::Vector{FT} = Float64[]   # 10-day running mean of patch nighttime vegetation temperature (K), LUNA
-    ndaysteps_patch          ::Vector{Int}     = Int[]       # number of daytime steps from midnight, LUNA
-    nnightsteps_patch        ::Vector{Int}     = Int[]       # number of nighttime steps from midnight, LUNA
-    dt_veg_patch             ::Vector{FT} = Float64[]   # patch change in t_veg, last iteration (K)
-    thm_patch                ::Vector{FT} = Float64[]   # patch intermediate variable (forc_t+0.0098*forc_hgt_t_patch)
+    t_stem_patch             ::V = Float64[]   # patch stem temperature (K)
+    t_veg_patch              ::V = Float64[]   # patch vegetation temperature (K)
+    t_skin_patch             ::V = Float64[]   # patch skin temperature (K)
+    t_veg_day_patch          ::V = Float64[]   # patch daytime accumulative vegetation temperature (K*nsteps), LUNA
+    t_veg_night_patch        ::V = Float64[]   # patch nighttime accumulative vegetation temperature (K*nsteps), LUNA
+    t_veg10_day_patch        ::V = Float64[]   # 10-day running mean of patch daytime vegetation temperature (K), LUNA
+    t_veg10_night_patch      ::V = Float64[]   # 10-day running mean of patch nighttime vegetation temperature (K), LUNA
+    ndaysteps_patch          ::VI     = Int[]       # number of daytime steps from midnight, LUNA
+    nnightsteps_patch        ::VI     = Int[]       # number of nighttime steps from midnight, LUNA
+    dt_veg_patch             ::V = Float64[]   # patch change in t_veg, last iteration (K)
+    thm_patch                ::V = Float64[]   # patch intermediate variable (forc_t+0.0098*forc_hgt_t_patch)
 
     # --- Temperatures (column-level, 1D) ---
-    t_h2osfc_col             ::Vector{FT} = Float64[]   # col surface water temperature (K)
-    t_h2osfc_bef_col         ::Vector{FT} = Float64[]   # col surface water temperature from time-step before (K)
-    tsl_col                  ::Vector{FT} = Float64[]   # col temperature of near-surface soil layer (K)
-    t_soi10cm_col            ::Vector{FT} = Float64[]   # col soil temperature in top 10cm (K)
-    t_soi17cm_col            ::Vector{FT} = Float64[]   # col soil temperature in top 17cm (K)
-    t_sno_mul_mss_col        ::Vector{FT} = Float64[]   # col snow temp * layer mass, layer sum (K*kg/m2)
-    t_grnd_col               ::Vector{FT} = Float64[]   # col ground temperature (K)
-    t_grnd_r_col             ::Vector{FT} = Float64[]   # col rural ground temperature (K)
-    t_grnd_u_col             ::Vector{FT} = Float64[]   # col urban ground temperature (K)
-    snot_top_col             ::Vector{FT} = Float64[]   # col temperature of top snow layer (K)
-    dTdz_top_col             ::Vector{FT} = Float64[]   # col temperature gradient in top layer (K/m)
-    dt_grnd_col              ::Vector{FT} = Float64[]   # col change in t_grnd, last iteration (K)
-    thv_col                  ::Vector{FT} = Float64[]   # col virtual potential temperature (K)
-    soila10_col              ::Vector{FT} = Float64[]   # col 10-day running mean of 12cm soil layer temperature (K)
+    t_h2osfc_col             ::V = Float64[]   # col surface water temperature (K)
+    t_h2osfc_bef_col         ::V = Float64[]   # col surface water temperature from time-step before (K)
+    tsl_col                  ::V = Float64[]   # col temperature of near-surface soil layer (K)
+    t_soi10cm_col            ::V = Float64[]   # col soil temperature in top 10cm (K)
+    t_soi17cm_col            ::V = Float64[]   # col soil temperature in top 17cm (K)
+    t_sno_mul_mss_col        ::V = Float64[]   # col snow temp * layer mass, layer sum (K*kg/m2)
+    t_grnd_col               ::V = Float64[]   # col ground temperature (K)
+    t_grnd_r_col             ::V = Float64[]   # col rural ground temperature (K)
+    t_grnd_u_col             ::V = Float64[]   # col urban ground temperature (K)
+    snot_top_col             ::V = Float64[]   # col temperature of top snow layer (K)
+    dTdz_top_col             ::V = Float64[]   # col temperature gradient in top layer (K/m)
+    dt_grnd_col              ::V = Float64[]   # col change in t_grnd, last iteration (K)
+    thv_col                  ::V = Float64[]   # col virtual potential temperature (K)
+    soila10_col              ::V = Float64[]   # col 10-day running mean of 12cm soil layer temperature (K)
 
     # --- Temperatures (column-level, 2D) ---
-    t_ssbef_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil/snow temp before update (ncols, nlevsno+nlevmaxurbgrnd)
-    t_soisno_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil/snow temperature (K) (ncols, nlevsno+nlevmaxurbgrnd)
-    t_lake_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col lake temperature (K) (ncols, nlevlak)
+    t_ssbef_col              ::M = Matrix{Float64}(undef, 0, 0)  # col soil/snow temp before update (ncols, nlevsno+nlevmaxurbgrnd)
+    t_soisno_col             ::M = Matrix{Float64}(undef, 0, 0)  # col soil/snow temperature (K) (ncols, nlevsno+nlevmaxurbgrnd)
+    t_lake_col               ::M = Matrix{Float64}(undef, 0, 0)  # col lake temperature (K) (ncols, nlevlak)
 
     # --- Temperatures (landunit-level) ---
-    t_building_lun           ::Vector{FT} = Float64[]   # lun internal building air temperature (K)
-    t_roof_inner_lun         ::Vector{FT} = Float64[]   # lun roof inside surface temperature (K)
-    t_sunw_inner_lun         ::Vector{FT} = Float64[]   # lun sunwall inside surface temperature (K)
-    t_shdw_inner_lun         ::Vector{FT} = Float64[]   # lun shadewall inside surface temperature (K)
-    t_floor_lun              ::Vector{FT} = Float64[]   # lun floor temperature (K)
-    taf_lun                  ::Vector{FT} = Float64[]   # lun urban canopy air temperature (K)
+    t_building_lun           ::V = Float64[]   # lun internal building air temperature (K)
+    t_roof_inner_lun         ::V = Float64[]   # lun roof inside surface temperature (K)
+    t_sunw_inner_lun         ::V = Float64[]   # lun sunwall inside surface temperature (K)
+    t_shdw_inner_lun         ::V = Float64[]   # lun shadewall inside surface temperature (K)
+    t_floor_lun              ::V = Float64[]   # lun floor temperature (K)
+    taf_lun                  ::V = Float64[]   # lun urban canopy air temperature (K)
 
     # --- 2m reference temperatures (patch-level) ---
-    t_ref2m_patch            ::Vector{FT} = Float64[]   # patch 2m height surface air temperature (K)
-    t_ref2m_r_patch          ::Vector{FT} = Float64[]   # patch rural 2m height surface air temperature (K)
-    t_ref2m_u_patch          ::Vector{FT} = Float64[]   # patch urban 2m height surface air temperature (K)
-    t_ref2m_min_patch        ::Vector{FT} = Float64[]   # patch daily minimum of average 2m height surface air temperature (K)
-    t_ref2m_min_r_patch      ::Vector{FT} = Float64[]   # patch daily minimum of average 2m height surface air temperature - rural (K)
-    t_ref2m_min_u_patch      ::Vector{FT} = Float64[]   # patch daily minimum of average 2m height surface air temperature - urban (K)
-    t_ref2m_max_patch        ::Vector{FT} = Float64[]   # patch daily maximum of average 2m height surface air temperature (K)
-    t_ref2m_max_r_patch      ::Vector{FT} = Float64[]   # patch daily maximum of average 2m height surface air temperature - rural (K)
-    t_ref2m_max_u_patch      ::Vector{FT} = Float64[]   # patch daily maximum of average 2m height surface air temperature - urban (K)
-    t_ref2m_min_inst_patch   ::Vector{FT} = Float64[]   # patch instantaneous daily min of average 2m height surface air temp (K)
-    t_ref2m_min_inst_r_patch ::Vector{FT} = Float64[]   # patch instantaneous daily min - rural (K)
-    t_ref2m_min_inst_u_patch ::Vector{FT} = Float64[]   # patch instantaneous daily min - urban (K)
-    t_ref2m_max_inst_patch   ::Vector{FT} = Float64[]   # patch instantaneous daily max of average 2m height surface air temp (K)
-    t_ref2m_max_inst_r_patch ::Vector{FT} = Float64[]   # patch instantaneous daily max - rural (K)
-    t_ref2m_max_inst_u_patch ::Vector{FT} = Float64[]   # patch instantaneous daily max - urban (K)
+    t_ref2m_patch            ::V = Float64[]   # patch 2m height surface air temperature (K)
+    t_ref2m_r_patch          ::V = Float64[]   # patch rural 2m height surface air temperature (K)
+    t_ref2m_u_patch          ::V = Float64[]   # patch urban 2m height surface air temperature (K)
+    t_ref2m_min_patch        ::V = Float64[]   # patch daily minimum of average 2m height surface air temperature (K)
+    t_ref2m_min_r_patch      ::V = Float64[]   # patch daily minimum of average 2m height surface air temperature - rural (K)
+    t_ref2m_min_u_patch      ::V = Float64[]   # patch daily minimum of average 2m height surface air temperature - urban (K)
+    t_ref2m_max_patch        ::V = Float64[]   # patch daily maximum of average 2m height surface air temperature (K)
+    t_ref2m_max_r_patch      ::V = Float64[]   # patch daily maximum of average 2m height surface air temperature - rural (K)
+    t_ref2m_max_u_patch      ::V = Float64[]   # patch daily maximum of average 2m height surface air temperature - urban (K)
+    t_ref2m_min_inst_patch   ::V = Float64[]   # patch instantaneous daily min of average 2m height surface air temp (K)
+    t_ref2m_min_inst_r_patch ::V = Float64[]   # patch instantaneous daily min - rural (K)
+    t_ref2m_min_inst_u_patch ::V = Float64[]   # patch instantaneous daily min - urban (K)
+    t_ref2m_max_inst_patch   ::V = Float64[]   # patch instantaneous daily max of average 2m height surface air temp (K)
+    t_ref2m_max_inst_r_patch ::V = Float64[]   # patch instantaneous daily max - rural (K)
+    t_ref2m_max_inst_u_patch ::V = Float64[]   # patch instantaneous daily max - urban (K)
 
     # --- Running mean temperatures (patch-level) ---
-    t_a10_patch              ::Vector{FT} = Float64[]   # patch 10-day running mean of 2m temperature (K)
-    t_a10min_patch           ::Vector{FT} = Float64[]   # patch 10-day running mean of min 2m temperature (K)
-    t_a5min_patch            ::Vector{FT} = Float64[]   # patch 5-day running mean of min 2m temperature (K)
+    t_a10_patch              ::V = Float64[]   # patch 10-day running mean of 2m temperature (K)
+    t_a10min_patch           ::V = Float64[]   # patch 10-day running mean of min 2m temperature (K)
+    t_a5min_patch            ::V = Float64[]   # patch 5-day running mean of min 2m temperature (K)
 
     # --- Accumulated quantities (patch-level) ---
-    t_veg24_patch            ::Vector{FT} = Float64[]   # patch 24hr average vegetation temperature (K)
-    t_veg240_patch           ::Vector{FT} = Float64[]   # patch 240hr average vegetation temperature (K)
-    gdd0_patch               ::Vector{FT} = Float64[]   # patch growing degree-days base  0C from planting (ddays)
-    gdd8_patch               ::Vector{FT} = Float64[]   # patch growing degree-days base  8C from planting (ddays)
-    gdd10_patch              ::Vector{FT} = Float64[]   # patch growing degree-days base 10C from planting (ddays)
-    gdd020_patch             ::Vector{FT} = Float64[]   # patch 20-year average of gdd0 (ddays)
-    gdd820_patch             ::Vector{FT} = Float64[]   # patch 20-year average of gdd8 (ddays)
-    gdd1020_patch            ::Vector{FT} = Float64[]   # patch 20-year average of gdd10 (ddays)
+    t_veg24_patch            ::V = Float64[]   # patch 24hr average vegetation temperature (K)
+    t_veg240_patch           ::V = Float64[]   # patch 240hr average vegetation temperature (K)
+    gdd0_patch               ::V = Float64[]   # patch growing degree-days base  0C from planting (ddays)
+    gdd8_patch               ::V = Float64[]   # patch growing degree-days base  8C from planting (ddays)
+    gdd10_patch              ::V = Float64[]   # patch growing degree-days base 10C from planting (ddays)
+    gdd020_patch             ::V = Float64[]   # patch 20-year average of gdd0 (ddays)
+    gdd820_patch             ::V = Float64[]   # patch 20-year average of gdd8 (ddays)
+    gdd1020_patch            ::V = Float64[]   # patch 20-year average of gdd10 (ddays)
 
     # --- Heat content ---
-    beta_col                 ::Vector{FT} = Float64[]   # col coefficient of convective velocity (-)
-    dynbal_baseline_heat_col ::Vector{FT} = Float64[]   # col baseline heat content subtracted from total (J/m^2)
-    heat1_grc                ::Vector{FT} = Float64[]   # grc initial gridcell total heat content (J/m^2)
-    heat2_grc                ::Vector{FT} = Float64[]   # grc post land cover change total heat content (J/m^2)
-    liquid_water_temp1_grc   ::Vector{FT} = Float64[]   # grc initial weighted average liquid water temperature (K)
-    liquid_water_temp2_grc   ::Vector{FT} = Float64[]   # grc post land cover change weighted average liquid water temperature (K)
+    beta_col                 ::V = Float64[]   # col coefficient of convective velocity (-)
+    dynbal_baseline_heat_col ::V = Float64[]   # col baseline heat content subtracted from total (J/m^2)
+    heat1_grc                ::V = Float64[]   # grc initial gridcell total heat content (J/m^2)
+    heat2_grc                ::V = Float64[]   # grc post land cover change total heat content (J/m^2)
+    liquid_water_temp1_grc   ::V = Float64[]   # grc initial weighted average liquid water temperature (K)
+    liquid_water_temp2_grc   ::V = Float64[]   # grc post land cover change weighted average liquid water temperature (K)
 
     # --- Flags ---
-    imelt_col                ::Matrix{Int}     = Matrix{Int}(undef, 0, 0)  # flag for melting (=1), freezing (=2), Not=0 (ncols, nlevsno+nlevmaxurbgrnd)
+    imelt_col                ::MI     = Matrix{Int}(undef, 0, 0)  # flag for melting (=1), freezing (=2), Not=0 (ncols, nlevsno+nlevmaxurbgrnd)
 
     # --- Emissivities ---
-    emv_patch                ::Vector{FT} = Float64[]   # patch vegetation emissivity
-    emg_col                  ::Vector{FT} = Float64[]   # col ground emissivity
+    emv_patch                ::V = Float64[]   # patch vegetation emissivity
+    emg_col                  ::V = Float64[]   # col ground emissivity
 
     # --- Misc ---
-    xmf_col                  ::Vector{FT} = Float64[]   # col total latent heat of phase change of ground water
-    xmf_h2osfc_col           ::Vector{FT} = Float64[]   # col latent heat of phase change of surface water
-    fact_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col used in computing tridiagonal matrix (ncols, nlevsno+nlevmaxurbgrnd)
-    c_h2osfc_col             ::Vector{FT} = Float64[]   # col heat capacity of surface water
+    xmf_col                  ::V = Float64[]   # col total latent heat of phase change of ground water
+    xmf_h2osfc_col           ::V = Float64[]   # col latent heat of phase change of surface water
+    fact_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col used in computing tridiagonal matrix (ncols, nlevsno+nlevmaxurbgrnd)
+    c_h2osfc_col             ::V = Float64[]   # col heat capacity of surface water
 
     # --- Namelist parameters ---
     excess_ice_coldstart_depth ::FT = 0.5   # depth below which excess ice will be present (m)
     excess_ice_coldstart_temp  ::FT = -5.0  # coldstart temperature of layers with excess ice (deg C)
 end
+
+# Convenience constructor preserving the TemperatureData{FT}() call sites (cold
+# start, make_dual_copy): defaults the array type params to CPU Arrays. Adapt
+# (below) rebuilds the struct with device array types (e.g. CuArray) on demand.
+TemperatureData{FT}(; kwargs...) where {FT<:Real} =
+    TemperatureData{FT, Vector{FT}, Matrix{FT}, Vector{Int}, Matrix{Int}}(; kwargs...)
+
+Adapt.@adapt_structure TemperatureData
 
 """
     temperature_init!(temp::TemperatureData, np::Int, nc::Int, nl::Int, ng::Int)
