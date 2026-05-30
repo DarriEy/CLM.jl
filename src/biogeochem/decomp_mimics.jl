@@ -9,6 +9,116 @@
 #   decomp_rates_mimics!             — Calculate decomposition rates
 # ==========================================================================
 
+# --------------------------------------------------------------------------
+# GPU kernels for per-(column, level) MIMICS loops with fully independent
+# iterations. @kernel/@index/@Const and _launch! come from
+# src/infrastructure/kernels.jl. Each kernel is backend-agnostic.
+# --------------------------------------------------------------------------
+
+# Soil texture-dependent MIMICS coefficients (per column AND decomp level).
+# Each (c,j) writes desorp/fphys_m1/fphys_m2/p_scalar from cellclay[c,j] only —
+# fully independent. desorp is the launch `out` (sets backend/ndrange).
+@kernel function _mimics_texture_kernel!(desorp, fphys_m1, fphys_m2, p_scalar,
+                                         @Const(cellclay),
+                                         desorp_p1, desorp_p2,
+                                         fphys_r_p1, fphys_r_p2,
+                                         fphys_k_p1, fphys_k_p2,
+                                         p_scalar_p1, p_scalar_p2, pct_to_frac)
+    c, j = @index(Global, NTuple)
+    @inbounds begin
+        clay_frac = pct_to_frac * smooth_min(100.0, cellclay[c, j])
+        desorp[c, j]   = desorp_p1 * exp(desorp_p2 * clay_frac)
+        fphys_m1[c, j] = smooth_min(1.0, fphys_r_p1 * exp(fphys_r_p2 * clay_frac))
+        fphys_m2[c, j] = smooth_min(1.0, fphys_k_p1 * exp(fphys_k_p2 * clay_frac))
+        p_scalar[c, j] = 1.0 / (p_scalar_p1 * exp(p_scalar_p2 * sqrt(clay_frac)))
+    end
+end
+
+"""
+    mimics_texture_params!(desorp, fphys_m1, fphys_m2, p_scalar, cellclay,
+        desorp_p1, desorp_p2, fphys_r_p1, fphys_r_p2, fphys_k_p1, fphys_k_p2,
+        p_scalar_p1, p_scalar_p2, pct_to_frac; nc, nlevdecomp)
+
+Soil texture-dependent MIMICS coefficients over all (column, decomp level)
+pairs — a 2D backend-agnostic kernel. One thread per (c,j).
+"""
+function mimics_texture_params!(desorp, fphys_m1, fphys_m2, p_scalar, cellclay,
+                                desorp_p1, desorp_p2, fphys_r_p1, fphys_r_p2,
+                                fphys_k_p1, fphys_k_p2, p_scalar_p1, p_scalar_p2,
+                                pct_to_frac; nc::Int, nlevdecomp::Int)
+    _launch!(_mimics_texture_kernel!, desorp, fphys_m1, fphys_m2, p_scalar, cellclay,
+             desorp_p1, desorp_p2, fphys_r_p1, fphys_r_p2, fphys_k_p1, fphys_k_p2,
+             p_scalar_p1, p_scalar_p2, pct_to_frac; ndrange = (nc, nlevdecomp))
+end
+
+# Multi-level MIMICS water scalar (per column AND decomp level), masked.
+# w_scalar[c,j] depends only on soilpsi[c,j] — fully independent.
+@kernel function _mimics_wscalar_kernel!(w_scalar, @Const(mask), @Const(soilpsi),
+                                         minpsi, maxpsi)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        psi = smooth_min(soilpsi[c, j], maxpsi)
+        if psi > minpsi
+            w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
+        else
+            w_scalar[c, j] = 0.0
+        end
+    end
+end
+
+"""
+    mimics_water_scalar!(w_scalar, mask, soilpsi, minpsi, maxpsi; nc, nlevdecomp)
+
+Multi-level MIMICS water scalar over all (column, decomp level) pairs (masked).
+Backend-agnostic; one thread per (c,j).
+"""
+function mimics_water_scalar!(w_scalar, mask, soilpsi, minpsi, maxpsi;
+                              nc::Int, nlevdecomp::Int)
+    _launch!(_mimics_wscalar_kernel!, w_scalar, mask, soilpsi, minpsi, maxpsi;
+             ndrange = (nc, nlevdecomp))
+end
+
+# Multi-level MIMICS O2 scalar under anoxia (per column AND level), masked.
+# o_scalar[c,j] depends only on o2stress_unsat[c,j] — fully independent.
+@kernel function _mimics_oscalar_anoxia_kernel!(o_scalar, @Const(mask),
+                                                @Const(o2stress_unsat), mino2lim)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        o_scalar[c, j] = smooth_max(o2stress_unsat[c, j], mino2lim)
+    end
+end
+
+"""
+    mimics_oscalar_anoxia!(o_scalar, mask, o2stress_unsat, mino2lim; nc, nlevdecomp)
+
+Multi-level MIMICS O2 scalar under anoxia over all (column, decomp level) pairs
+(masked). Backend-agnostic; one thread per (c,j).
+"""
+function mimics_oscalar_anoxia!(o_scalar, mask, o2stress_unsat, mino2lim;
+                                nc::Int, nlevdecomp::Int)
+    _launch!(_mimics_oscalar_anoxia_kernel!, o_scalar, mask, o2stress_unsat, mino2lim;
+             ndrange = (nc, nlevdecomp))
+end
+
+# Multi-level MIMICS depth scalar (per column AND level), masked: set to 1.0.
+@kernel function _mimics_depth_scalar_kernel!(depth_scalar, @Const(mask))
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        depth_scalar[c, j] = 1.0
+    end
+end
+
+"""
+    mimics_depth_scalar!(depth_scalar, mask; nc, nlevdecomp)
+
+Set the masked columns' MIMICS depth scalar to 1.0 over all (column, level)
+pairs (placeholder, as in Fortran). Backend-agnostic; one thread per (c,j).
+"""
+function mimics_depth_scalar!(depth_scalar, mask; nc::Int, nlevdecomp::Int)
+    _launch!(_mimics_depth_scalar_kernel!, depth_scalar, mask;
+             ndrange = (nc, nlevdecomp))
+end
+
 # ---------------------------------------------------------------------------
 # DecompMIMICSParams — MIMICS decomposition parameters
 # Ported from params_type in SoilBiogeochemDecompCascadeMIMICSMod.F90
@@ -360,19 +470,14 @@ function init_decompcascade_mimics!(mimics_state::DecompMIMICSState,
     mimics_state.kint_l2_m2 = params.mimics_kint[5]
     mimics_state.kint_s1_m2 = params.mimics_kint[6]
 
-    # Compute soil texture-dependent parameters
-    for c in 1:nc
-        for j in 1:nlevdecomp
-            clay_frac = PCT_TO_FRAC * smooth_min(100.0, cellclay[c, j])
-            mimics_state.desorp[c, j] = mimics_desorp_p1 * exp(mimics_desorp_p2 * clay_frac)
-            mimics_state.fphys_m1[c, j] = smooth_min(1.0, mimics_fphys_r_p1 *
-                                               exp(mimics_fphys_r_p2 * clay_frac))
-            mimics_state.fphys_m2[c, j] = smooth_min(1.0, mimics_fphys_k_p1 *
-                                               exp(mimics_fphys_k_p2 * clay_frac))
-            mimics_state.p_scalar[c, j] = 1.0 / (mimics_p_scalar_p1 *
-                                                   exp(mimics_p_scalar_p2 * sqrt(clay_frac)))
-        end
-    end
+    # Compute soil texture-dependent parameters (2D kernel; each (c,j) independent)
+    mimics_texture_params!(mimics_state.desorp, mimics_state.fphys_m1,
+                           mimics_state.fphys_m2, mimics_state.p_scalar, cellclay,
+                           mimics_desorp_p1, mimics_desorp_p2,
+                           mimics_fphys_r_p1, mimics_fphys_r_p2,
+                           mimics_fphys_k_p1, mimics_fphys_k_p2,
+                           mimics_p_scalar_p1, mimics_p_scalar_p2, PCT_TO_FRAC;
+                           nc = nc, nlevdecomp = nlevdecomp)
     cascade_con.initial_stock_soildepth = params.mimics_initial_Cstocks_depth
 
     # --- List of pools and their attributes ---
@@ -865,27 +970,14 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
     else
         # --- Multi-level decomposition ---
 
-        # Water scalar
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                psi = smooth_min(soilpsi[c, j], maxpsi)
-                if psi > minpsi
-                    w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
-                else
-                    w_scalar[c, j] = 0.0
-                end
-            end
-        end
+        # Water scalar (2D kernel; each (c,j) independent)
+        mimics_water_scalar!(w_scalar, mask_bgc_soilc, soilpsi, minpsi, maxpsi;
+                             nc = nc, nlevdecomp = nlevdecomp)
 
         # O2 scalar
         if anoxia
-            for j in 1:nlevdecomp
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    o_scalar[c, j] = smooth_max(o2stress_unsat[c, j], mino2lim)
-                end
-            end
+            mimics_oscalar_anoxia!(o_scalar, mask_bgc_soilc, o2stress_unsat, mino2lim;
+                                   nc = nc, nlevdecomp = nlevdecomp)
         else
             for c in 1:nc
                 for j in 1:nlevdecomp
@@ -896,12 +988,9 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
     end
 
     # Depth scalar — currently set to 1.0 (placeholder, as in Fortran)
-    for j in 1:nlevdecomp
-        for c in 1:nc
-            mask_bgc_soilc[c] || continue
-            depth_scalar[c, j] = 1.0
-        end
-    end
+    # (2D kernel; each (c,j) independent)
+    mimics_depth_scalar!(depth_scalar, mask_bgc_soilc;
+                         nc = nc, nlevdecomp = nlevdecomp)
 
     # Unpack MIMICS parameters for decomp rate calculation
     mimics_fmet_p1       = params.mimics_fmet[1]

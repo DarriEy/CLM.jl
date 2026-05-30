@@ -36,6 +36,73 @@ const BC_AQUIFER     = 4
 # ---- Unit conversion ----
 const M_TO_MM = 1.0e3
 
+# ===========================================================================
+# GPU kernels (KernelAbstractions) for fully per-element soil-water loops.
+# Each (column, layer) element is computed from inputs at its OWN index
+# (with constant snow offsets); no neighbor-layer reads, no accumulation,
+# no tridiagonal coupling. See src/infrastructure/kernels.jl for the API.
+# ===========================================================================
+
+# --------------------------------------------------------------------------
+# Convert geometry to mm and compute per-layer ice/liquid volume fractions
+# (Zeng-Decker 2009 prep). 2D over (column, soil layer); masked in-kernel.
+# Writes zmm/dzmm at [c,j], zimm_arr at [c,j+1] (unique per j), and
+# vol_ice/icefrac/vwc_liq at [c,j]. All reads are at the element's own index.
+# --------------------------------------------------------------------------
+@kernel function _soilwm_mm_icefrac_kernel!(zmm, dzmm, zimm_arr, vol_ice, icefrac,
+        vwc_liq, @Const(mask), @Const(z), @Const(dz), @Const(zi),
+        @Const(watsat), @Const(h2osoi_ice), @Const(h2osoi_liq),
+        joff::Int, joff_zi::Int, denice, denh2o)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        zmm[c, j]  = z[c, joff + j] * 1.0e3
+        dzmm[c, j] = dz[c, joff + j] * 1.0e3
+        zimm_arr[c, j+1] = zi[c, joff_zi + j] * 1.0e3  # j+1: index 1 = Fortran j=0
+
+        vol_ice[c, j] = smooth_min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * denice))
+        icefrac[c, j] = smooth_min(1.0, vol_ice[c, j] / watsat[c, j])
+        vwc_liq[c, j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * denh2o)
+    end
+end
+
+"""
+    soilwm_mm_icefrac!(zmm, dzmm, zimm_arr, vol_ice, icefrac, vwc_liq, mask,
+        z, dz, zi, watsat, h2osoi_ice, h2osoi_liq, joff, joff_zi, nlevsoi; denice, denh2o)
+
+Convert column geometry to mm and compute per-layer ice/liquid volume
+fractions over all active (column, soil layer) pairs. Backend-agnostic 2D
+kernel; replaces the inline double loop in `soilwater_zengdecker2009!`.
+"""
+function soilwm_mm_icefrac!(zmm, dzmm, zimm_arr, vol_ice, icefrac, vwc_liq,
+        mask, z, dz, zi, watsat, h2osoi_ice, h2osoi_liq,
+        joff::Int, joff_zi::Int, nlevsoi::Int; denice, denh2o)
+    _launch!(_soilwm_mm_icefrac_kernel!, zmm, dzmm, zimm_arr, vol_ice, icefrac,
+             vwc_liq, mask, z, dz, zi, watsat, h2osoi_ice, h2osoi_liq,
+             joff, joff_zi, denice, denh2o; ndrange = (length(mask), nlevsoi))
+end
+
+# --------------------------------------------------------------------------
+# Water-table depth to mm and the top zimm entry (Zeng-Decker 2009 prep).
+# 1D over columns; masked in-kernel. Each column writes only its own entries.
+# --------------------------------------------------------------------------
+@kernel function _soilwm_zwtmm_kernel!(zwtmm, zimm_arr, @Const(mask), @Const(zwt))
+    c = @index(Global)
+    @inbounds if mask[c]
+        zimm_arr[c, 1] = 0.0       # Fortran zimm(c,0) = 0
+        zwtmm[c] = zwt[c] * 1.0e3
+    end
+end
+
+"""
+    soilwm_zwtmm!(zwtmm, zimm_arr, mask, zwt)
+
+Set water-table depth in mm and the top zimm entry for each active column.
+Backend-agnostic 1D kernel; replaces an inline per-column loop in
+`soilwater_zengdecker2009!`.
+"""
+soilwm_zwtmm!(zwtmm, zimm_arr, mask, zwt) =
+    _launch!(_soilwm_zwtmm_kernel!, zwtmm, zimm_arr, mask, zwt)
+
 """
     SoilWaterMovementConfig
 
@@ -915,25 +982,12 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
 
     sdamp = 0.0
 
-    # Convert to mm and compute ice fractions
-    for j in 1:nlevsoi
-        for c in eachindex(mask_hydrology)
-            mask_hydrology[c] || continue
-            zmm[c, j]  = z[c, joff + j] * 1.0e3
-            dzmm[c, j] = dz[c, joff + j] * 1.0e3
-            zimm_arr[c, j+1] = zi[c, joff_zi + j] * 1.0e3  # j+1 because index 1 = Fortran j=0
+    # Convert to mm and compute ice fractions (per-(column,layer) kernel)
+    soilwm_mm_icefrac!(zmm, dzmm, zimm_arr, vol_ice, icefrac, vwc_liq,
+        mask_hydrology, z, dz, zi, watsat, h2osoi_ice, h2osoi_liq,
+        joff, joff_zi, nlevsoi; denice = DENICE, denh2o = DENH2O)
 
-            vol_ice[c, j] = smooth_min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * DENICE))
-            icefrac[c, j] = smooth_min(1.0, vol_ice[c, j] / watsat[c, j])
-            vwc_liq[c, j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
-        end
-    end
-
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
-        zimm_arr[c, 1] = 0.0  # Fortran zimm(c,0) = 0
-        zwtmm[c] = zwt[c] * 1.0e3
-    end
+    soilwm_zwtmm!(zwtmm, zimm_arr, mask_hydrology, zwt)
 
     # Compute jwt index — layer right above water table
     for c in eachindex(mask_hydrology)

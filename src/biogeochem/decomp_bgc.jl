@@ -194,6 +194,149 @@ function decomp_bgc_read_params!(params::DecompBGCParams;
 end
 
 # ---------------------------------------------------------------------------
+# Kernels for fully-independent per-element loops in this file.
+# ---------------------------------------------------------------------------
+
+# Sand-dependent path/respiration fractions (per column AND decomp level — 2D).
+# Each (c,j) is independent. Four output arrays share the intermediate `t`;
+# the backend is taken from the first (f_s1s2). All written arrays passed plain.
+@kernel function _decompb_sandfrac_kernel!(f_s1s2, f_s1s3, rf_s1s2, rf_s1s3,
+                                           @Const(cellsand))
+    c, j = @index(Global, NTuple)
+    @inbounds begin
+        t = 0.85 - 0.68 * 0.01 * (100.0 - cellsand[c, j])
+        f_s1s2[c, j]  = 1.0 - 0.004 / (1.0 - t)
+        f_s1s3[c, j]  = 0.004 / (1.0 - t)
+        rf_s1s2[c, j] = t
+        rf_s1s3[c, j] = t
+    end
+end
+
+"""
+    decompb_sandfrac!(f_s1s2, f_s1s3, rf_s1s2, rf_s1s3, cellsand, nc, nlevdecomp)
+
+Sand-dependent S1->S2/S3 path and respiration fractions over all
+(column, decomp level) pairs. Backend-agnostic 2D kernel.
+"""
+decompb_sandfrac!(f_s1s2, f_s1s3, rf_s1s2, rf_s1s3, cellsand, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_sandfrac_kernel!, f_s1s2, f_s1s3, rf_s1s2, rf_s1s3, cellsand;
+             ndrange = (nc, nlevdecomp))
+
+# Multi-level Q10 temperature scalar (per column AND decomp level — 2D, masked).
+# Each (c,j) independent; freezing branch uses froz_q10.
+@kernel function _decompb_tscalar_q10_kernel!(t_scalar, @Const(mask), @Const(t_soisno),
+                                              Q10, froz_q10, tfrz)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        ts = t_soisno[c, j]
+        if ts >= tfrz
+            t_scalar[c, j] = Q10^((ts - (tfrz + 25.0)) / 10.0)
+        else
+            t_scalar[c, j] = (Q10^(-25.0 / 10.0)) * (froz_q10^((ts - tfrz) / 10.0))
+        end
+    end
+end
+
+"""
+    decompb_tscalar_q10!(t_scalar, mask, t_soisno, Q10, froz_q10, tfrz, nc, nlevdecomp)
+
+Q10 temperature scalar for multi-level decomposition. Backend-agnostic 2D kernel.
+"""
+decompb_tscalar_q10!(t_scalar, mask, t_soisno, Q10, froz_q10, tfrz, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_tscalar_q10_kernel!, t_scalar, mask, t_soisno, Q10, froz_q10, tfrz;
+             ndrange = (nc, nlevdecomp))
+
+# Multi-level water scalar (per column AND decomp level — 2D, masked).
+@kernel function _decompb_wscalar_kernel!(w_scalar, @Const(mask), @Const(soilpsi),
+                                          minpsi, maxpsi)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        psi = min(soilpsi[c, j], maxpsi)
+        if psi > minpsi
+            w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
+        else
+            w_scalar[c, j] = 0.0
+        end
+    end
+end
+
+"""
+    decompb_wscalar!(w_scalar, mask, soilpsi, minpsi, maxpsi, nc, nlevdecomp)
+
+Soil-water-potential scalar for multi-level decomposition. Backend-agnostic 2D kernel.
+"""
+decompb_wscalar!(w_scalar, mask, soilpsi, minpsi, maxpsi, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_wscalar_kernel!, w_scalar, mask, soilpsi, minpsi, maxpsi;
+             ndrange = (nc, nlevdecomp))
+
+# Multi-level anoxia O2 scalar (per column AND decomp level — 2D, masked).
+@kernel function _decompb_oscalar_anox_kernel!(o_scalar, @Const(mask),
+                                               @Const(o2stress_unsat), mino2lim)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        o_scalar[c, j] = max(o2stress_unsat[c, j], mino2lim)
+    end
+end
+
+"""
+    decompb_oscalar_anox!(o_scalar, mask, o2stress_unsat, mino2lim, nc, nlevdecomp)
+
+O2 stress scalar (anoxia path) for multi-level decomposition. Backend-agnostic.
+"""
+decompb_oscalar_anox!(o_scalar, mask, o2stress_unsat, mino2lim, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_oscalar_anox_kernel!, o_scalar, mask, o2stress_unsat, mino2lim;
+             ndrange = (nc, nlevdecomp))
+
+# Unconditional unit O2 scalar (per column AND decomp level — 2D, no mask).
+@kernel function _decompb_oscalar_one_kernel!(o_scalar)
+    c, j = @index(Global, NTuple)
+    @inbounds o_scalar[c, j] = 1.0
+end
+
+"""
+    decompb_oscalar_one!(o_scalar, nc, nlevdecomp)
+
+Set the O2 scalar to 1.0 for all (column, decomp level). Backend-agnostic.
+"""
+decompb_oscalar_one!(o_scalar, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_oscalar_one_kernel!, o_scalar; ndrange = (nc, nlevdecomp))
+
+# Normalize t_scalar by a precomputed scalar factor (per column AND level — 2D, masked).
+@kernel function _decompb_tscalar_norm_kernel!(t_scalar, @Const(mask), factor)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        t_scalar[c, j] *= factor
+    end
+end
+
+"""
+    decompb_tscalar_norm!(t_scalar, mask, factor, nc, nlevdecomp)
+
+Multiply t_scalar by the Q10->CENTURY normalization factor. Backend-agnostic.
+"""
+decompb_tscalar_norm!(t_scalar, mask, factor, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_tscalar_norm_kernel!, t_scalar, mask, factor;
+             ndrange = (nc, nlevdecomp))
+
+# Depth scalar — fixed e-folding depth (per column AND decomp level — 2D, masked).
+@kernel function _decompb_depthscalar_kernel!(depth_scalar, @Const(mask),
+                                              @Const(zsoi_vals), efolding)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        depth_scalar[c, j] = exp(-zsoi_vals[j] / efolding)
+    end
+end
+
+"""
+    decompb_depthscalar!(depth_scalar, mask, zsoi_vals, efolding, nc, nlevdecomp)
+
+Fixed e-folding depth scalar for multi-level decomposition. Backend-agnostic.
+"""
+decompb_depthscalar!(depth_scalar, mask, zsoi_vals, efolding, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_depthscalar_kernel!, depth_scalar, mask, zsoi_vals, efolding;
+             ndrange = (nc, nlevdecomp))
+
+# ---------------------------------------------------------------------------
 # init_decomp_cascade_bgc! — Initialize cascade pathways and coefficients
 # Ported from init_decompcascade_bgc in SoilBiogeochemDecompCascadeBGCMod.F90
 # ---------------------------------------------------------------------------
@@ -286,15 +429,9 @@ function init_decomp_cascade_bgc!(bgc_state::DecompBGCState,
     bgc_state.f_s2s3 = 0.03 / 0.45
 
     # Sand-dependent fractions
-    for c in 1:nc
-        for j in 1:nlevdecomp
-            t = 0.85 - 0.68 * 0.01 * (100.0 - cellsand[c, j])
-            bgc_state.f_s1s2[c, j]  = 1.0 - 0.004 / (1.0 - t)
-            bgc_state.f_s1s3[c, j]  = 0.004 / (1.0 - t)
-            bgc_state.rf_s1s2[c, j] = t
-            bgc_state.rf_s1s3[c, j] = t
-        end
-    end
+    decompb_sandfrac!(bgc_state.f_s1s2, bgc_state.f_s1s3,
+                      bgc_state.rf_s1s2, bgc_state.rf_s1s3,
+                      cellsand, nc, nlevdecomp)
     cascade_con.initial_stock_soildepth = params.bgc_initial_Cstocks_depth
 
     # --- List of pools and their attributes ---
@@ -757,17 +894,8 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
 
         if !bgc_state.use_century_tfunc
             # Q10 temperature scalar
-            for j in 1:nlevdecomp
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    if t_soisno[c, j] >= TFRZ
-                        t_scalar[c, j] = Q10^((t_soisno[c, j] - (TFRZ + 25.0)) / 10.0)
-                    else
-                        t_scalar[c, j] = (Q10^(-25.0 / 10.0)) *
-                            (froz_q10^((t_soisno[c, j] - TFRZ) / 10.0))
-                    end
-                end
-            end
+            decompb_tscalar_q10!(t_scalar, mask_bgc_soilc, t_soisno,
+                                 Q10, froz_q10, TFRZ, nc, nlevdecomp)
         else
             # CENTURY arctangent temperature function
             for j in 1:nlevdecomp
@@ -779,32 +907,14 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
         end
 
         # Water scalar
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                psi = min(soilpsi[c, j], maxpsi)
-                if psi > minpsi
-                    w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
-                else
-                    w_scalar[c, j] = 0.0
-                end
-            end
-        end
+        decompb_wscalar!(w_scalar, mask_bgc_soilc, soilpsi, minpsi, maxpsi, nc, nlevdecomp)
 
         # O2 scalar
         if use_lch4 && anoxia
-            for j in 1:nlevdecomp
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    o_scalar[c, j] = max(o2stress_unsat[c, j], mino2lim)
-                end
-            end
+            decompb_oscalar_anox!(o_scalar, mask_bgc_soilc, o2stress_unsat, mino2lim,
+                                  nc, nlevdecomp)
         else
-            for c in 1:nc
-                for j in 1:nlevdecomp
-                    o_scalar[c, j] = 1.0
-                end
-            end
+            decompb_oscalar_one!(o_scalar, nc, nlevdecomp)
         end
     end
 
@@ -812,21 +922,12 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
     if bgc_state.normalize_q10_to_century_tfunc
         normalization_factor = (catanf(bgc_state.normalization_tref) / catanf_30) /
             (Q10^((bgc_state.normalization_tref - 25.0) / 10.0))
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                t_scalar[c, j] *= normalization_factor
-            end
-        end
+        decompb_tscalar_norm!(t_scalar, mask_bgc_soilc, normalization_factor, nc, nlevdecomp)
     end
 
     # Depth scalar — fixed e-folding depth
-    for j in 1:nlevdecomp
-        for c in 1:nc
-            mask_bgc_soilc[c] || continue
-            depth_scalar[c, j] = exp(-zsoi_vals[j] / decomp_depth_efolding)
-        end
-    end
+    decompb_depthscalar!(depth_scalar, mask_bgc_soilc, zsoi_vals,
+                         decomp_depth_efolding, nc, nlevdecomp)
 
     # --- Calculate rate constants for all pools ---
     for j in 1:nlevdecomp

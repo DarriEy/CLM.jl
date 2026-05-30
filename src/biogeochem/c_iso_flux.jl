@@ -20,6 +20,57 @@
 # ==========================================================================
 
 # ---------------------------------------------------------------------------
+# GPU kernels (KernelAbstractions) for fully-independent per-element loops.
+# ---------------------------------------------------------------------------
+
+# Per-element isotopic flux: ciso_flux[i] = ctot_flux[i]*(ciso_state[i]/ctot_state[i])*frax,
+# with the exact zero-state guard preserved. One thread per index i in cmin:cmax
+# (gated by the mask). frax is a precomputed scalar (C13/C14 fractionation).
+@kernel function _ciso_flux_calc_kernel!(ciso_flux, @Const(ctot_flux),
+                                         @Const(ciso_state), @Const(ctot_state),
+                                         @Const(mask), cmin::Int, cmax::Int, frax)
+    i = @index(Global)
+    @inbounds if cmin <= i <= cmax && mask[i]
+        if ctot_state[i] != 0.0 && ciso_state[i] != 0.0
+            ciso_flux[i] = ctot_flux[i] * (ciso_state[i] / ctot_state[i]) * frax
+        else
+            ciso_flux[i] = 0.0
+        end
+    end
+end
+
+ciso_flux_calc!(ciso_flux, ctot_flux, ciso_state, ctot_state, mask, cmin::Int, cmax::Int, frax) =
+    _launch!(_ciso_flux_calc_kernel!, ciso_flux, ctot_flux, ciso_state, ctot_state,
+             mask, cmin, cmax, frax; ndrange = length(ciso_flux))
+
+# Column-level decomposition isotopic flux over (c, j, l):
+#   out[c,j,l] = tot_flux[c,j,l] * (iso_cpool[c,j,cdp]/tot_cpool[c,j,cdp])
+# guarded by tot_cpool[c,j,cdp] != 0, with cdp = cascade_donor_pool[l].
+# One thread per (c,j,l); column gated by cmin:cmax and the mask.
+@kernel function _ciso_decomp_cascade_kernel!(out, @Const(tot_flux),
+                                              @Const(iso_cpool), @Const(tot_cpool),
+                                              @Const(mask), @Const(cascade_donor_pool),
+                                              cmin::Int, cmax::Int)
+    c, j, l = @index(Global, NTuple)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        cdp = cascade_donor_pool[l]
+        if tot_cpool[c, j, cdp] != 0.0
+            out[c, j, l] = tot_flux[c, j, l] * (iso_cpool[c, j, cdp] / tot_cpool[c, j, cdp])
+        else
+            out[c, j, l] = 0.0
+        end
+    end
+end
+
+function ciso_decomp_cascade!(out, tot_flux, iso_cpool, tot_cpool, mask,
+                              cascade_donor_pool, cmin::Int, cmax::Int,
+                              nlevdecomp::Int, ndecomp_cascade_transitions::Int)
+    _launch!(_ciso_decomp_cascade_kernel!, out, tot_flux, iso_cpool, tot_cpool,
+             mask, cascade_donor_pool, cmin, cmax;
+             ndrange = (size(out, 1), nlevdecomp, ndecomp_cascade_transitions))
+end
+
+# ---------------------------------------------------------------------------
 # c_iso_flux_calc! — Core 1D isotopic flux calculation
 # Ported from: CIsoFluxCalc1d in CNCIsoFluxMod.F90
 # ---------------------------------------------------------------------------
@@ -54,14 +105,9 @@ function c_iso_flux_calc!(ciso_flux::AbstractVector{Float64},
         error("c_iso_flux_calc!: isotope must be either \"c13\" or \"c14\", got \"$isotope\"")
     end
 
-    for i in bounds
-        mask[i] || continue
-        if ctot_state[i] != 0.0 && ciso_state[i] != 0.0
-            ciso_flux[i] = ctot_flux[i] * (ciso_state[i] / ctot_state[i]) * frax
-        else
-            ciso_flux[i] = 0.0
-        end
-    end
+    isempty(bounds) && return nothing
+    ciso_flux_calc!(ciso_flux, ctot_flux, ciso_state, ctot_state,
+                    mask, first(bounds), last(bounds), frax)
     return nothing
 end
 
@@ -454,38 +500,23 @@ function c_iso_flux1!(soilbiogeochem_state::SoilBiogeochemStateData,
                                repr_structure_min=repr_structure_min, repr_structure_max=repr_structure_max)
 
     # --- Column-level decomposition fluxes ---
-    for c in bounds_c
-        mask_soilc[c] || continue
-        for j in 1:nlevdecomp
-            for l in 1:ndecomp_cascade_transitions
-                cdp = cascade_donor_pool[l]
-                if soilbiogeochem_cs.decomp_cpools_vr_col[c, j, cdp] != 0.0
-                    iso_soilbiogeochem_cf.decomp_cascade_hr_vr_col[c, j, l] =
-                        soilbiogeochem_cf.decomp_cascade_hr_vr_col[c, j, l] *
-                        (iso_soilbiogeochem_cs.decomp_cpools_vr_col[c, j, cdp] /
-                         soilbiogeochem_cs.decomp_cpools_vr_col[c, j, cdp])
-                else
-                    iso_soilbiogeochem_cf.decomp_cascade_hr_vr_col[c, j, l] = 0.0
-                end
-            end
-        end
-    end
+    if !isempty(bounds_c)
+        cmin_c = first(bounds_c)
+        cmax_c = last(bounds_c)
 
-    for c in bounds_c
-        mask_soilc[c] || continue
-        for j in 1:nlevdecomp
-            for l in 1:ndecomp_cascade_transitions
-                cdp = cascade_donor_pool[l]
-                if soilbiogeochem_cs.decomp_cpools_vr_col[c, j, cdp] != 0.0
-                    iso_soilbiogeochem_cf.decomp_cascade_ctransfer_vr_col[c, j, l] =
-                        soilbiogeochem_cf.decomp_cascade_ctransfer_vr_col[c, j, l] *
-                        (iso_soilbiogeochem_cs.decomp_cpools_vr_col[c, j, cdp] /
-                         soilbiogeochem_cs.decomp_cpools_vr_col[c, j, cdp])
-                else
-                    iso_soilbiogeochem_cf.decomp_cascade_ctransfer_vr_col[c, j, l] = 0.0
-                end
-            end
-        end
+        ciso_decomp_cascade!(iso_soilbiogeochem_cf.decomp_cascade_hr_vr_col,
+                             soilbiogeochem_cf.decomp_cascade_hr_vr_col,
+                             iso_soilbiogeochem_cs.decomp_cpools_vr_col,
+                             soilbiogeochem_cs.decomp_cpools_vr_col,
+                             mask_soilc, cascade_donor_pool, cmin_c, cmax_c,
+                             nlevdecomp, ndecomp_cascade_transitions)
+
+        ciso_decomp_cascade!(iso_soilbiogeochem_cf.decomp_cascade_ctransfer_vr_col,
+                             soilbiogeochem_cf.decomp_cascade_ctransfer_vr_col,
+                             iso_soilbiogeochem_cs.decomp_cpools_vr_col,
+                             soilbiogeochem_cs.decomp_cpools_vr_col,
+                             mask_soilc, cascade_donor_pool, cmin_c, cmax_c,
+                             nlevdecomp, ndecomp_cascade_transitions)
     end
 
     return nothing

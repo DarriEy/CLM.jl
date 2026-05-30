@@ -93,6 +93,52 @@ function p2c!(
 end
 
 # ---------------------------------------------------------------------------
+# Kernelized per-column peatland fire (Li2014)
+# Each column is fully independent: baf_peatf[c] depends only on column c's
+# own inputs (its gridcell g). No accumulation / loop-carried deps.
+# ---------------------------------------------------------------------------
+@kernel function _fire_peatland_kernel!(
+    baf_peatf,
+    @Const(mask_soilc), @Const(gridcell), @Const(latdeg),
+    @Const(prec60_col), @Const(peatf_lf), @Const(fsat),
+    @Const(wf2), @Const(tsoi17),
+    borealat, non_boreal_peatfire_c, boreal_peatfire_c,
+    nonborpeat_fire_precip_denom, borpeat_fire_soilmoist_denom,
+    secsphr, secspday, tfrz, rpi
+)
+    c = @index(Global)
+    @inbounds if mask_soilc[c]
+        g = gridcell[c]
+        if latdeg[g] < borealat
+            baf_peatf[c] = non_boreal_peatfire_c / secsphr *
+                smooth_max(0.0, smooth_min(1.0,
+                    (4.0 - prec60_col[c] * secspday / nonborpeat_fire_precip_denom) /
+                    4.0))^2 * peatf_lf[c] * (1.0 - fsat[c])
+        else
+            baf_peatf[c] = boreal_peatfire_c / secsphr *
+                exp(-rpi * (smooth_max(wf2[c], 0.0) / borpeat_fire_soilmoist_denom)) *
+                smooth_max(0.0, smooth_min(1.0, (tsoi17[c] - tfrz) / 10.0)) * peatf_lf[c] *
+                (1.0 - fsat[c])
+        end
+    end
+end
+
+function fire_peatland!(
+    baf_peatf, mask_soilc, gridcell, latdeg, prec60_col, peatf_lf, fsat,
+    wf2, tsoi17, borealat, non_boreal_peatfire_c, boreal_peatfire_c,
+    nonborpeat_fire_precip_denom, borpeat_fire_soilmoist_denom,
+    secsphr, secspday, tfrz, rpi
+)
+    _launch!(_fire_peatland_kernel!, baf_peatf,
+        mask_soilc, gridcell, latdeg, prec60_col, peatf_lf, fsat,
+        wf2, tsoi17, borealat, non_boreal_peatfire_c, boreal_peatfire_c,
+        nonborpeat_fire_precip_denom, borpeat_fire_soilmoist_denom,
+        secsphr, secspday, tfrz, rpi;
+        ndrange = length(baf_peatf))
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # cnfire_area_li2014! — Compute column-level burned area
 # ---------------------------------------------------------------------------
 
@@ -506,22 +552,14 @@ function cnfire_area_li2014!(
         end
     end
 
-    # --- Calculate peatland fire ---
-    for c in bounds_c
-        mask_soilc[c] || continue
-        g = col.gridcell[c]
-        if grc.latdeg[g] < cnfire_const.borealat
-            baf_peatf[c] = non_boreal_peatfire_c / SECSPHR *
-                smooth_max(0.0, smooth_min(1.0,
-                    (4.0 - prec60_col[c] * SECSPDAY / nonborpeat_fire_precip_denom) /
-                    4.0))^2 * peatf_lf[c] * (1.0 - fsat[c])
-        else
-            baf_peatf[c] = boreal_peatfire_c / SECSPHR *
-                exp(-RPI * (smooth_max(wf2[c], 0.0) / borpeat_fire_soilmoist_denom)) *
-                smooth_max(0.0, smooth_min(1.0, (tsoi17[c] - TFRZ) / 10.0)) * peatf_lf[c] *
-                (1.0 - fsat[c])
-        end
-    end
+    # --- Calculate peatland fire (kernelized; per-column independent) ---
+    fire_peatland!(
+        baf_peatf, mask_soilc, col.gridcell, grc.latdeg, prec60_col,
+        peatf_lf, fsat, wf2, tsoi17,
+        cnfire_const.borealat, non_boreal_peatfire_c, boreal_peatfire_c,
+        nonborpeat_fire_precip_denom, borpeat_fire_soilmoist_denom,
+        SECSPHR, SECSPDAY, TFRZ, RPI
+    )
 
     # --- Find which pool is the CWD pool ---
     i_cwd = 0
