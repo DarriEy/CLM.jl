@@ -242,41 +242,16 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     ku = kl
     m_ab = 2 * kl + ku + 1
 
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        jt = jtop[c] + nlevsno + 1  # map to Julia 1-based
-        jb = jbot[c] + nlevsno + 1
-        n = jb - jt + 1
-        if n <= 0
-            continue
-        end
-
-        ab = zeros(FT, m_ab, n)
-
-        for jj in 1:n
-            for band_idx in 1:nband
-                row_offset = band_idx - (kl + 1)
-                i = jj + row_offset
-                if 1 <= i <= n
-                    ab_row = kl + ku + 1 + i - jj
-                    # Fortran BandDiagonal shifts source index by row_offset for off-diagonals:
-                    # diagonal reads from jtop+j-1, sub/super-diagonals shift ±1, ±2
-                    src_idx = jt + jj - 1 + row_offset
-                    ab[ab_row, jj] = bmatrix[c, band_idx, src_idx]
-                end
-            end
-        end
-
-        rhs = rvector[c, jt:jb]
-
-        # Banded solve A·t = rhs. band_solve! dispatches on eltype: LAPACK for
-        # Float64/Float32, pure-Julia for ForwardDiff.Dual. A custom Enzyme
-        # reverse-mode rule (enzyme_rules.jl) differentiates the LAPACK path via
-        # the linear-solve adjoint, so the try/catch + LAPACK no longer block
-        # Enzyme. (The prior NaN guard here was a workaround for an overflow bug
-        # in the smooth-AD sigmoid, since fixed in _stable_sigmoid.)
-        band_solve!(view(tvector, c, jt:jb), ab, rhs, kl, ku, n)
-    end
+    # Batched pentadiagonal solve: one thread per column. Builds each column's dense
+    # system directly from bmatrix (A[i,j] = bmatrix[c,(i-j)+kl+1,jt+i-1]) and solves
+    # by partial-pivoted Gaussian elimination on per-column scratch — backend-agnostic
+    # (CPU loop on Arrays, GPU kernel on device arrays), matching the prior per-column
+    # LAPACK/pure-Julia band_solve! to round-off. ForwardDiff flows through the GE; the
+    # host band_solve! + its Enzyme reverse rule remain for the non-kernel/Enzyme path.
+    # (The prior NaN guard here was a workaround for an overflow bug in the smooth-AD
+    # sigmoid, since fixed in _stable_sigmoid.)
+    batched_band_solve!(tvector, bmatrix, rvector, jtop, jbot, mask_nolakec,
+                        kl, ku, nlevsno)
 
     # Return temperatures from tvector
     for c in bounds_col

@@ -66,6 +66,111 @@ function band_solve!(u_slice, ab::AbstractMatrix{T}, rhs::AbstractVector,
     return nothing
 end
 
+# ==========================================================================
+# Batched banded solve (GPU): one thread per column, each solving its own
+# banded system by dense Gaussian elimination WITH partial pivoting (matching
+# LAPACK gbsv / lu() to round-off). Per-column scratch is allocation-free inside
+# the kernel. Used by the soil-temperature pentadiagonal solve.
+#
+# Band -> dense mapping (derived from set_matrix!'s band storage + the densify in
+# _band_solve_julia!):  A[i,j] = bmatrix[c, (i-j)+kl+1, jt+i-1]  on the band
+# (max(1,j-kl) <= i <= min(n,j+ku)), where jt = jtop[c]+nlevsno_off+1 and
+# n = jbot[c]-jtop[c]+1. rhs[i] = rvector[c, jt+i-1]; solution -> tvector[c, jt+i-1].
+#
+# This deliberately replicates the pure-Julia (Dual) path's "densify + pivoted LU"
+# rather than the host LAPACK band factorization — both are partial-pivoting GE and
+# agree to round-off. The host band_solve! (and its Enzyme reverse rule) is left
+# intact for the non-kernel / Enzyme path. ForwardDiff flows through: the pivot
+# selection compares abs(.) on the value component, derivatives propagate through
+# the eliminations/solves.
+# ==========================================================================
+@kernel function _batched_band_solve_kernel!(tvector, @Const(bmatrix), @Const(rvector),
+                                             @Const(jtop), @Const(jbot), @Const(mask),
+                                             A, x, kl::Int, ku::Int, nlevsno_off::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        jt = jtop[c] + nlevsno_off + 1
+        n = jbot[c] - jtop[c] + 1
+        if n > 0
+            # Build dense A[c,:,:] and rhs x[c,:] for this column.
+            for j in 1:n
+                for i in 1:n
+                    A[c, i, j] = zero(eltype(A))
+                end
+            end
+            for j in 1:n
+                ilo = max(1, j - kl)
+                ihi = min(n, j + ku)
+                for i in ilo:ihi
+                    A[c, i, j] = bmatrix[c, (i - j) + kl + 1, jt + i - 1]
+                end
+            end
+            for i in 1:n
+                x[c, i] = rvector[c, jt + i - 1]
+            end
+
+            # Gaussian elimination with partial pivoting (in place).
+            for k in 1:(n - 1)
+                piv = k
+                maxv = abs(A[c, k, k])
+                for i in (k + 1):n
+                    v = abs(A[c, i, k])
+                    if v > maxv
+                        maxv = v
+                        piv = i
+                    end
+                end
+                if piv != k
+                    for j in k:n
+                        t = A[c, k, j]; A[c, k, j] = A[c, piv, j]; A[c, piv, j] = t
+                    end
+                    tx = x[c, k]; x[c, k] = x[c, piv]; x[c, piv] = tx
+                end
+                akk = A[c, k, k]
+                for i in (k + 1):n
+                    f = A[c, i, k] / akk
+                    for j in k:n
+                        A[c, i, j] = A[c, i, j] - f * A[c, k, j]
+                    end
+                    x[c, i] = x[c, i] - f * x[c, k]
+                end
+            end
+
+            # Back substitution (solution overwrites x[c,:]).
+            for i in n:-1:1
+                s = x[c, i]
+                for j in (i + 1):n
+                    s = s - A[c, i, j] * x[c, j]
+                end
+                x[c, i] = s / A[c, i, i]
+            end
+
+            for i in 1:n
+                tvector[c, jt + i - 1] = x[c, i]
+            end
+        end
+    end
+end
+
+"""
+    batched_band_solve!(tvector, bmatrix, rvector, jtop, jbot, mask, kl, ku, nlevsno_off)
+
+Solve one banded system per active column (pentadiagonal soil temperature), batched
+as a KernelAbstractions kernel — one thread per column, dense pivoted GE. Backend-
+agnostic via the output `tvector`. See `_batched_band_solve_kernel!` for the layout.
+"""
+function batched_band_solve!(tvector::AbstractMatrix{T}, bmatrix, rvector,
+                             jtop::Vector{Int}, jbot::Vector{Int}, mask,
+                             kl::Int, ku::Int, nlevsno_off::Int) where {T}
+    nc = size(tvector, 1)
+    nmax = size(tvector, 2)
+    A = similar(tvector, T, nc, nmax, nmax)
+    x = similar(tvector, T, nc, nmax)
+    _launch!(_batched_band_solve_kernel!, tvector, bmatrix, rvector, jtop, jbot, mask,
+             A, x, kl, ku, nlevsno_off; ndrange = nc)
+    return nothing
+end
+
 """
     band_diagonal_solve!(u, b_matrix, r, jtop, jbot, nband, ncols)
 
