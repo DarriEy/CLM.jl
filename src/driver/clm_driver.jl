@@ -527,13 +527,10 @@ function clm_drv_core!(config::CLMDriverConfig,
     # q = 0.622 * e / (p - 0.378 * e), where e = forc_vp, p = forc_pbot
     nc = length(a2l.forc_pbot_downscaled_col)
     FT = eltype(a2l.forc_pbot_downscaled_col)
+    # Column specific humidity from vapor pressure — KernelAbstractions kernel
+    # (runs on CPU or GPU depending on where the arrays live). See kernels.jl.
     forc_q_col = zeros(FT, nc)
-    for c in bc_col
-        g = col.gridcell[c]
-        vp = a2l.forc_vp_grc[g]
-        pbot = a2l.forc_pbot_downscaled_col[c]
-        forc_q_col[c] = 0.622 * vp / max(pbot - 0.378 * vp, 1.0)
-    end
+    compute_forc_q!(forc_q_col, col.gridcell, a2l.forc_vp_grc, a2l.forc_pbot_downscaled_col)
 
     # ========================================================================
     # Glacier area initialization on first timestep

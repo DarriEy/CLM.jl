@@ -4,6 +4,7 @@ using LinearAlgebra
 using Dates
 using NCDatasets
 import Adapt  # device-movable state structs (Adapt.@adapt_structure)
+import KernelAbstractions  # backend-agnostic physics kernels (CPU/GPU)
 
 # ===========================================================================
 # Tier 1: Constants & Parameters
@@ -64,6 +65,7 @@ include("infrastructure/filters.jl")
 include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 include("infrastructure/smooth_ad.jl")
+include("infrastructure/kernels.jl")  # KernelAbstractions physics kernels (Phase 4)
 
 # ===========================================================================
 # Calibration overrides struct (needed by physics modules for override kwargs)
