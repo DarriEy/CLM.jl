@@ -31,6 +31,95 @@
 const rgasLatm = 0.0821  # L.atm/mol.K
 
 # ---------------------------------------------------------------------------
+# KernelAbstractions kernels for fully-independent per-(column, layer) loops.
+# Module-level constants (TFRZ, C_H_INV, ...) are passed in as scalar/array
+# args because GPU kernels cannot close over globals. Semantics are identical
+# to the inline loops they replace (validated vs Fortran parity and AD).
+# ---------------------------------------------------------------------------
+
+# Ebullition rate per (column, soil layer). One thread per (c, j); each element
+# writes only ch4_ebul_depth[c, j] from inputs at that index — fully independent.
+@kernel function _meth_ebul_kernel!(ch4_ebul_depth, @Const(mask), @Const(jwt),
+                                    @Const(t_soisno), @Const(conc_ch4), @Const(watsat),
+                                    @Const(forc_pbot), @Const(h2osfc), @Const(frac_h2osfc),
+                                    @Const(lake_icefrac), @Const(lakedepth),
+                                    @Const(z), @Const(zi),
+                                    sat::Int, lake::Bool, vgc_max, vgc_min, bubble_f,
+                                    ebul_timescale, rgasm, rgaslatm,
+                                    c_h_inv1, kh_theta1, kh_tbase, tfrz, denh2o, grav)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        if j > jwt[c] && t_soisno[c, j] > tfrz
+            k_h_inv = exp(-c_h_inv1 * (1.0 / t_soisno[c, j] - 1.0 / kh_tbase) + log(kh_theta1))
+            k_h = 1.0 / k_h_inv
+            k_h_cc = t_soisno[c, j] * k_h * rgaslatm
+
+            if !lake
+                zi_jwt = jwt[c] > 0 ? zi[c, jwt[c]] : 0.0
+                pressure = forc_pbot[c] + denh2o * grav * (z[c, j] - zi_jwt)
+                if sat == 1 && frac_h2osfc[c] > 0.0
+                    pressure += denh2o * grav * h2osfc[c] / 1000.0 / frac_h2osfc[c]
+                end
+            else
+                pressure = forc_pbot[c] + denh2o * grav * (z[c, j] + lakedepth[c])
+            end
+
+            vgc = conc_ch4[c, j] / watsat[c, j] / k_h_cc * rgasm * t_soisno[c, j] / pressure
+
+            if vgc > vgc_max * bubble_f
+                ch4_ebul_depth[c, j] = (vgc - vgc_min * bubble_f) * conc_ch4[c, j] / ebul_timescale
+            else
+                ch4_ebul_depth[c, j] = 0.0
+            end
+        else
+            ch4_ebul_depth[c, j] = 0.0
+        end
+
+        if lake && lake_icefrac[c, 1] > 0.1
+            ch4_ebul_depth[c, j] = 0.0
+        end
+    end
+end
+
+function meth_ebul!(ch4_ebul_depth, mask, jwt, t_soisno, conc_ch4, watsat,
+                    forc_pbot, h2osfc, frac_h2osfc, lake_icefrac, lakedepth, z, zi,
+                    sat::Int, lake::Bool, vgc_max, vgc_min, bubble_f,
+                    ebul_timescale, rgasm, rgaslatm, nc::Int, nlevsoi::Int)
+    _launch!(_meth_ebul_kernel!, ch4_ebul_depth, mask, jwt, t_soisno, conc_ch4, watsat,
+             forc_pbot, h2osfc, frac_h2osfc, lake_icefrac, lakedepth, z, zi,
+             sat, lake, vgc_max, vgc_min, bubble_f, ebul_timescale, rgasm, rgasLatm,
+             C_H_INV[1], KH_THETA[1], KH_TBASE, TFRZ, DENH2O, GRAV;
+             ndrange = (nc, nlevsoi))
+end
+
+# Henry's-law solubility coefficients k_h_cc_arr[c, jj, s] for the transport
+# solver. One thread per (c, jj) where jj == j+1 (Fortran j runs 0:nlevsoi, with
+# j==0 using t_grnd). Each element is independent; the species loop (s=1:2) is a
+# fixed 2-iteration inner loop with no cross-element coupling.
+@kernel function _meth_khcc_kernel!(k_h_cc_arr, @Const(mask), @Const(t_grnd),
+                                    @Const(t_soisno), @Const(c_h_inv), @Const(kh_theta),
+                                    kh_tbase, rgaslatm)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        for s in 1:2
+            if jj == 1  # Fortran j == 0 → ground temperature
+                k_h_inv = exp(-c_h_inv[s] * (1.0 / t_grnd[c] - 1.0 / kh_tbase) + log(kh_theta[s]))
+                k_h_cc_arr[c, jj, s] = t_grnd[c] / k_h_inv * rgaslatm
+            else
+                k_h_inv = exp(-c_h_inv[s] * (1.0 / t_soisno[c, jj-1] - 1.0 / kh_tbase) + log(kh_theta[s]))
+                k_h_cc_arr[c, jj, s] = t_soisno[c, jj-1] / k_h_inv * rgaslatm
+            end
+        end
+    end
+end
+
+function meth_khcc!(k_h_cc_arr, mask, t_grnd, t_soisno, nc::Int, nlevsoi::Int)
+    _launch!(_meth_khcc_kernel!, k_h_cc_arr, mask, t_grnd, t_soisno,
+             C_H_INV, KH_THETA, KH_TBASE, rgasLatm;
+             ndrange = (nc, nlevsoi + 1))
+end
+
+# ---------------------------------------------------------------------------
 # ch4varcon — Methane control flags
 # ---------------------------------------------------------------------------
 
@@ -1000,41 +1089,11 @@ function ch4_ebul!(ch4::CH4Data,
     ebul_timescale = dtime
     rgasm = RGAS / 1000.0
 
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-
-            if j > jwt[c] && t_soisno[c, j] > TFRZ
-                k_h_inv = exp(-C_H_INV[1] * (1.0 / t_soisno[c, j] - 1.0 / KH_TBASE) + log(KH_THETA[1]))
-                k_h = 1.0 / k_h_inv
-                k_h_cc = t_soisno[c, j] * k_h * rgasLatm
-
-                if !lake
-                    zi_jwt = jwt[c] > 0 ? zi[c, jwt[c]] : 0.0
-                    pressure = forc_pbot[c] + DENH2O * GRAV * (z[c, j] - zi_jwt)
-                    if sat == 1 && frac_h2osfc[c] > 0.0
-                        pressure += DENH2O * GRAV * h2osfc[c] / 1000.0 / frac_h2osfc[c]
-                    end
-                else
-                    pressure = forc_pbot[c] + DENH2O * GRAV * (z[c, j] + lakedepth[c])
-                end
-
-                vgc = conc_ch4[c, j] / watsat[c, j] / k_h_cc * rgasm * t_soisno[c, j] / pressure
-
-                if vgc > vgc_max * bubble_f
-                    ch4_ebul_depth[c, j] = (vgc - vgc_min * bubble_f) * conc_ch4[c, j] / ebul_timescale
-                else
-                    ch4_ebul_depth[c, j] = 0.0
-                end
-            else
-                ch4_ebul_depth[c, j] = 0.0
-            end
-
-            if lake && lake_icefrac[c, 1] > 0.1
-                ch4_ebul_depth[c, j] = 0.0
-            end
-        end
-    end
+    nc = length(mask_soil)
+    meth_ebul!(ch4_ebul_depth, mask_soil, jwt, t_soisno, conc_ch4, watsat,
+               forc_pbot, h2osfc, frac_h2osfc, lake_icefrac, lakedepth, z, zi,
+               sat, lake, vgc_max, vgc_min, bubble_f, ebul_timescale, rgasm, rgasLatm,
+               nc, nlevsoi)
     nothing
 end
 
@@ -1214,21 +1273,7 @@ function ch4_tran!(ch4::CH4Data,
     liqfrac = ones(FT, nc, nlevsoi)
 
     # Henry's law coefficients
-    for j in 0:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            g = col_gridcell[c]
-            for s in 1:2
-                if j == 0
-                    k_h_inv = exp(-C_H_INV[s] * (1.0 / t_grnd[c] - 1.0 / KH_TBASE) + log(KH_THETA[s]))
-                    k_h_cc_arr[c, j+1, s] = t_grnd[c] / k_h_inv * rgasLatm
-                else
-                    k_h_inv = exp(-C_H_INV[s] * (1.0 / t_soisno[c, j] - 1.0 / KH_TBASE) + log(KH_THETA[s]))
-                    k_h_cc_arr[c, j+1, s] = t_soisno[c, j] / k_h_inv * rgasLatm
-                end
-            end
-        end
-    end
+    meth_khcc!(k_h_cc_arr, mask_soil, t_grnd, t_soisno, nc, nlevsoi)
 
     # Source terms and epsilon_t
     for j in 1:nlevsoi

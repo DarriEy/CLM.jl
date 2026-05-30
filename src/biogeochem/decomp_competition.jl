@@ -121,6 +121,139 @@ function soil_bgc_competition_init!(state::SoilBGCCompetitionState,
 end
 
 # ---------------------------------------------------------------------------
+# KernelAbstractions kernels for the non-nitrif/denitrif competition pathway.
+# Each kernel covers a (column, decomp-level) loop nest whose iterations are
+# fully independent (no accumulation / loop-carried dependency); reductions
+# remain as scalar loops. Mask is applied in-kernel (one thread per (c,j)).
+# ---------------------------------------------------------------------------
+
+# N uptake profile: nuptake_prof[c,j] = sminn_vr/sminn_tot, else nfixation_prof.
+@kernel function _decompc_nuptake_prof_kernel!(nuptake_prof, @Const(mask),
+        @Const(sminn_vr), @Const(sminn_tot), @Const(nfixation_prof))
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        if sminn_tot[c] > 0.0
+            nuptake_prof[c, j] = sminn_vr[c, j] / sminn_tot[c]
+        else
+            nuptake_prof[c, j] = nfixation_prof[c, j]
+        end
+    end
+end
+
+decompc_nuptake_prof!(nuptake_prof, mask, sminn_vr, sminn_tot, nfixation_prof, nlevdecomp::Int) =
+    _launch!(_decompc_nuptake_prof_kernel!, nuptake_prof, mask, sminn_vr, sminn_tot,
+             nfixation_prof; ndrange = (length(mask), nlevdecomp))
+
+# Total N demand per level: sum_ndemand_vr = plant_ndemand*nuptake_prof + potential_immob_vr.
+@kernel function _decompc_sum_ndemand_kernel!(sum_ndemand_vr, @Const(mask),
+        @Const(plant_ndemand), @Const(nuptake_prof), @Const(potential_immob_vr))
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        sum_ndemand_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j] + potential_immob_vr[c, j]
+    end
+end
+
+decompc_sum_ndemand!(sum_ndemand_vr, mask, plant_ndemand, nuptake_prof, potential_immob_vr, nlevdecomp::Int) =
+    _launch!(_decompc_sum_ndemand_kernel!, sum_ndemand_vr, mask, plant_ndemand,
+             nuptake_prof, potential_immob_vr; ndrange = (length(mask), nlevdecomp))
+
+# Resolve plant/decomposer competition at each (column, level). Writes nlimit,
+# fpi_vr, actual_immob_vr, sminn_to_plant_vr, supplement_to_sminn_vr; all inputs
+# are per-(c,j) or per-column. Fully independent across (c,j).
+@kernel function _decompc_resolve_kernel!(actual_immob_vr, @Const(mask), nlimit,
+        fpi_vr, sminn_to_plant_vr, supplement_to_sminn_vr, @Const(sum_ndemand_vr),
+        @Const(sminn_vr), @Const(potential_immob_vr), @Const(plant_ndemand),
+        @Const(nuptake_prof), dt, carbon_only::Bool)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        if sum_ndemand_vr[c, j] * dt < sminn_vr[c, j]
+            nlimit[c, j] = 0
+            fpi_vr[c, j] = 1.0
+            actual_immob_vr[c, j] = potential_immob_vr[c, j]
+            sminn_to_plant_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j]
+        elseif carbon_only
+            nlimit[c, j] = 1
+            fpi_vr[c, j] = 1.0
+            actual_immob_vr[c, j] = potential_immob_vr[c, j]
+            sminn_to_plant_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j]
+            supplement_to_sminn_vr[c, j] = sum_ndemand_vr[c, j] - (sminn_vr[c, j] / dt)
+        else
+            nlimit[c, j] = 1
+            if sum_ndemand_vr[c, j] > 0.0
+                actual_immob_vr[c, j] = (sminn_vr[c, j] / dt) * (potential_immob_vr[c, j] / sum_ndemand_vr[c, j])
+            else
+                actual_immob_vr[c, j] = 0.0
+            end
+            if potential_immob_vr[c, j] > 0.0
+                fpi_vr[c, j] = actual_immob_vr[c, j] / potential_immob_vr[c, j]
+            else
+                fpi_vr[c, j] = 0.0
+            end
+            sminn_to_plant_vr[c, j] = (sminn_vr[c, j] / dt) - actual_immob_vr[c, j]
+        end
+    end
+end
+
+function decompc_resolve!(actual_immob_vr, mask, nlimit, fpi_vr, sminn_to_plant_vr,
+        supplement_to_sminn_vr, sum_ndemand_vr, sminn_vr, potential_immob_vr,
+        plant_ndemand, nuptake_prof, dt, carbon_only::Bool, nlevdecomp::Int)
+    _launch!(_decompc_resolve_kernel!, actual_immob_vr, mask, nlimit, fpi_vr,
+             sminn_to_plant_vr, supplement_to_sminn_vr, sum_ndemand_vr, sminn_vr,
+             potential_immob_vr, plant_ndemand, nuptake_prof, dt, carbon_only;
+             ndrange = (length(mask), nlevdecomp))
+end
+
+# Distribute residual N to plants: per-(c,j) increment using per-column residual
+# totals (computed by the preceding scalar reduction). Independent across (c,j).
+@kernel function _decompc_distribute_residual_kernel!(sminn_to_plant_vr, @Const(mask),
+        @Const(residual_plant_ndemand), @Const(residual_sminn), @Const(residual_sminn_vr),
+        @Const(nlimit), dt)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        if residual_plant_ndemand[c] > 0.0 && residual_sminn[c] > 0.0 && nlimit[c, j] == 0
+            sminn_to_plant_vr[c, j] += residual_sminn_vr[c, j] *
+                min((residual_plant_ndemand[c] * dt) / residual_sminn[c], 1.0) / dt
+        end
+    end
+end
+
+decompc_distribute_residual!(sminn_to_plant_vr, mask, residual_plant_ndemand,
+        residual_sminn, residual_sminn_vr, nlimit, dt, nlevdecomp::Int) =
+    _launch!(_decompc_distribute_residual_kernel!, sminn_to_plant_vr, mask,
+             residual_plant_ndemand, residual_sminn, residual_sminn_vr, nlimit, dt;
+             ndrange = (length(mask), nlevdecomp))
+
+# Excess denitrification per (column, level). Independent across (c,j).
+@kernel function _decompc_denit_excess_kernel!(sminn_to_denit_excess_vr, @Const(mask),
+        @Const(sminn_to_plant_vr), @Const(sminn_to_plant_fun_vr), @Const(actual_immob_vr),
+        @Const(sminn_vr), @Const(sum_ndemand_vr), dt, bdnr, local_use_fun::Bool)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        if !local_use_fun
+            if (sminn_to_plant_vr[c, j] + actual_immob_vr[c, j]) * dt < sminn_vr[c, j]
+                sminn_to_denit_excess_vr[c, j] = max(bdnr * ((sminn_vr[c, j] / dt) - sum_ndemand_vr[c, j]), 0.0)
+            else
+                sminn_to_denit_excess_vr[c, j] = 0.0
+            end
+        else
+            if (sminn_to_plant_fun_vr[c, j] + actual_immob_vr[c, j]) * dt < sminn_vr[c, j]
+                sminn_to_denit_excess_vr[c, j] = max(bdnr * ((sminn_vr[c, j] / dt) - sum_ndemand_vr[c, j]), 0.0)
+            else
+                sminn_to_denit_excess_vr[c, j] = 0.0
+            end
+        end
+    end
+end
+
+function decompc_denit_excess!(sminn_to_denit_excess_vr, mask, sminn_to_plant_vr,
+        sminn_to_plant_fun_vr, actual_immob_vr, sminn_vr, sum_ndemand_vr, dt, bdnr,
+        local_use_fun::Bool, nlevdecomp::Int)
+    _launch!(_decompc_denit_excess_kernel!, sminn_to_denit_excess_vr, mask,
+             sminn_to_plant_vr, sminn_to_plant_fun_vr, actual_immob_vr, sminn_vr,
+             sum_ndemand_vr, dt, bdnr, local_use_fun; ndrange = (length(mask), nlevdecomp))
+end
+
+# ---------------------------------------------------------------------------
 # soil_bgc_competition! -- Main competition routine
 # Ported from SoilBiogeochemCompetition in SoilBiogeochemCompetitionMod.F90
 #
@@ -258,64 +391,18 @@ function soil_bgc_competition!(
         end
 
         # define N uptake profile
-        for j in 1:nlevdecomp
-            for c in bounds
-                mask_bgc_soilc[c] || continue
-                if sminn_tot[c] > 0.0
-                    nuptake_prof[c, j] = sminn_vr[c, j] / sminn_tot[c]
-                else
-                    nuptake_prof[c, j] = nfixation_prof[c, j]
-                end
-            end
-        end
+        decompc_nuptake_prof!(nuptake_prof, mask_bgc_soilc, sminn_vr, sminn_tot,
+                              nfixation_prof, nlevdecomp)
 
         # total N demand at each level
-        for j in 1:nlevdecomp
-            for c in bounds
-                mask_bgc_soilc[c] || continue
-                sum_ndemand_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j] + potential_immob_vr[c, j]
-            end
-        end
+        decompc_sum_ndemand!(sum_ndemand_vr, mask_bgc_soilc, plant_ndemand,
+                             nuptake_prof, potential_immob_vr, nlevdecomp)
 
         # resolve competition at each level
-        for j in 1:nlevdecomp
-            for c in bounds
-                mask_bgc_soilc[c] || continue
-
-                if sum_ndemand_vr[c, j] * dt < sminn_vr[c, j]
-                    # N availability is not limiting
-                    nlimit[c, j] = 0
-                    fpi_vr[c, j] = 1.0
-                    actual_immob_vr[c, j] = potential_immob_vr[c, j]
-                    sminn_to_plant_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j]
-
-                elseif carbon_only
-                    # Carbon-only mode: supplement N to eliminate limitation
-                    nlimit[c, j] = 1
-                    fpi_vr[c, j] = 1.0
-                    actual_immob_vr[c, j] = potential_immob_vr[c, j]
-                    sminn_to_plant_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j]
-                    supplement_to_sminn_vr[c, j] = sum_ndemand_vr[c, j] - (sminn_vr[c, j] / dt)
-
-                else
-                    # N limited: competition between plant and decomposers
-                    nlimit[c, j] = 1
-                    if sum_ndemand_vr[c, j] > 0.0
-                        actual_immob_vr[c, j] = (sminn_vr[c, j] / dt) * (potential_immob_vr[c, j] / sum_ndemand_vr[c, j])
-                    else
-                        actual_immob_vr[c, j] = 0.0
-                    end
-
-                    if potential_immob_vr[c, j] > 0.0
-                        fpi_vr[c, j] = actual_immob_vr[c, j] / potential_immob_vr[c, j]
-                    else
-                        fpi_vr[c, j] = 0.0
-                    end
-
-                    sminn_to_plant_vr[c, j] = (sminn_vr[c, j] / dt) - actual_immob_vr[c, j]
-                end
-            end
-        end
+        decompc_resolve!(actual_immob_vr, mask_bgc_soilc, nlimit, fpi_vr,
+                         sminn_to_plant_vr, supplement_to_sminn_vr, sum_ndemand_vr,
+                         sminn_vr, potential_immob_vr, plant_ndemand, nuptake_prof,
+                         dt, carbon_only, nlevdecomp)
 
         # sum up N fluxes to plant
         for j in 1:nlevdecomp
@@ -353,15 +440,9 @@ function soil_bgc_competition!(
         end
 
         # distribute residual N to plants
-        for j in 1:nlevdecomp
-            for c in bounds
-                mask_bgc_soilc[c] || continue
-                if residual_plant_ndemand[c] > 0.0 && residual_sminn[c] > 0.0 && nlimit[c, j] == 0
-                    sminn_to_plant_vr[c, j] += residual_sminn_vr[c, j] *
-                        min((residual_plant_ndemand[c] * dt) / residual_sminn[c], 1.0) / dt
-                end
-            end
-        end
+        decompc_distribute_residual!(sminn_to_plant_vr, mask_bgc_soilc,
+                                     residual_plant_ndemand, residual_sminn,
+                                     residual_sminn_vr, nlimit, dt, nlevdecomp)
 
         # re-sum up N fluxes to plant
         for c in bounds
@@ -382,24 +463,9 @@ function soil_bgc_competition!(
         end
 
         # excess denitrification
-        for j in 1:nlevdecomp
-            for c in bounds
-                mask_bgc_soilc[c] || continue
-                if !local_use_fun
-                    if (sminn_to_plant_vr[c, j] + actual_immob_vr[c, j]) * dt < sminn_vr[c, j]
-                        sminn_to_denit_excess_vr[c, j] = max(bdnr * ((sminn_vr[c, j] / dt) - sum_ndemand_vr[c, j]), 0.0)
-                    else
-                        sminn_to_denit_excess_vr[c, j] = 0.0
-                    end
-                else
-                    if (sminn_to_plant_fun_vr[c, j] + actual_immob_vr[c, j]) * dt < sminn_vr[c, j]
-                        sminn_to_denit_excess_vr[c, j] = max(bdnr * ((sminn_vr[c, j] / dt) - sum_ndemand_vr[c, j]), 0.0)
-                    else
-                        sminn_to_denit_excess_vr[c, j] = 0.0
-                    end
-                end
-            end
-        end
+        decompc_denit_excess!(sminn_to_denit_excess_vr, mask_bgc_soilc,
+                              sminn_to_plant_vr, sminn_to_plant_fun_vr, actual_immob_vr,
+                              sminn_vr, sum_ndemand_vr, dt, bdnr, local_use_fun, nlevdecomp)
 
         # sum up N fluxes to immobilization
         for j in 1:nlevdecomp

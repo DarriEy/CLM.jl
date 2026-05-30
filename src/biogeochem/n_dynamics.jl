@@ -54,6 +54,19 @@ end
 # Ported from CNNDeposition in CNNDynamicsMod.F90
 # ---------------------------------------------------------------------------
 
+# Per-column gather of atmospheric N deposition. cmin/cmax gate the active
+# bounds range (one thread per column over 1:length(out)).
+@kernel function _ndyn_deposition_kernel!(ndep_to_sminn_col, @Const(col_gridcell),
+                                          @Const(forc_ndep), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        ndep_to_sminn_col[c] = forc_ndep[col_gridcell[c]]
+    end
+end
+
+ndyn_deposition!(ndep_to_sminn_col, col_gridcell, forc_ndep, cmin::Int, cmax::Int) =
+    _launch!(_ndyn_deposition_kernel!, ndep_to_sminn_col, col_gridcell, forc_ndep, cmin, cmax)
+
 """
     n_deposition!(nf; forc_ndep, col_gridcell, bounds)
 
@@ -68,10 +81,9 @@ function n_deposition!(
     col_gridcell::Vector{Int},
     bounds::UnitRange{Int})
 
-    for c in bounds
-        g = col_gridcell[c]
-        nf.ndep_to_sminn_col[c] = forc_ndep[g]
-    end
+    isempty(bounds) && return nothing
+    ndyn_deposition!(nf.ndep_to_sminn_col, col_gridcell, forc_ndep,
+                     first(bounds), last(bounds))
 
     return nothing
 end
@@ -80,6 +92,21 @@ end
 # n_free_living_fixation! — free-living N fixation as f(ET)
 # Ported from CNFreeLivingFixation in CNNDynamicsMod.F90
 # ---------------------------------------------------------------------------
+
+# Per-column free-living N fixation from annual ET (masked). Pure arithmetic,
+# fully independent per column. units: gN/m2/s.
+@kernel function _ndyn_freelivfix_kernel!(ffix_to_sminn_col, @Const(mask), @Const(AnnET),
+                                          freelivfix_slope, freelivfix_inter, secs_per_year)
+    c = @index(Global)
+    @inbounds if mask[c]
+        ffix_to_sminn_col[c] =
+            (freelivfix_slope * (max(0.0, AnnET[c]) * secs_per_year) + freelivfix_inter) / secs_per_year
+    end
+end
+
+ndyn_freelivfix!(ffix_to_sminn_col, mask, AnnET, freelivfix_slope, freelivfix_inter, secs_per_year) =
+    _launch!(_ndyn_freelivfix_kernel!, ffix_to_sminn_col, mask, AnnET,
+             freelivfix_slope, freelivfix_inter, secs_per_year)
 
 """
     n_free_living_fixation!(nf, params; mask_soilc, bounds, AnnET, dayspyr)
@@ -102,11 +129,8 @@ function n_free_living_fixation!(
     freelivfix_slope = params.freelivfix_slope_wET
     freelivfix_inter = params.freelivfix_intercept
 
-    for c in bounds
-        mask_soilc[c] || continue
-        # units: gN/m2/s
-        nf.ffix_to_sminn_col[c] = (freelivfix_slope * (max(0.0, AnnET[c]) * secs_per_year) + freelivfix_inter) / secs_per_year
-    end
+    ndyn_freelivfix!(nf.ffix_to_sminn_col, mask_soilc, AnnET,
+                     freelivfix_slope, freelivfix_inter, secs_per_year)
 
     return nothing
 end
@@ -115,6 +139,55 @@ end
 # n_fixation! — symbiotic/asymbiotic N fixation as f(NPP)
 # Ported from CNNFixation in CNNDynamicsMod.F90
 # ---------------------------------------------------------------------------
+
+# Per-column symbiotic N fixation using exponential relaxation with lagged NPP
+# (masked, fully independent per column). col_is_fates[c] forces npp=0; SPVAL npp
+# yields zero flux. secs_per_year = SECSPDAY * dayspyr.
+@kernel function _ndyn_fixation_lag_kernel!(nfix_to_sminn_col, @Const(mask),
+                                            @Const(col_lag_npp), @Const(col_is_fates),
+                                            secs_per_year, spval)
+    c = @index(Global)
+    @inbounds if mask[c]
+        npp = col_is_fates[c] ? 0.0 : col_lag_npp[c]
+        if npp != spval
+            t = (1.8 * (1.0 - exp(-0.003 * npp * secs_per_year))) / secs_per_year
+            nfix_to_sminn_col[c] = max(0.0, t)
+        else
+            nfix_to_sminn_col[c] = 0.0
+        end
+    end
+end
+
+ndyn_fixation_lag!(nfix_to_sminn_col, mask, col_lag_npp, col_is_fates, secs_per_year, spval) =
+    _launch!(_ndyn_fixation_lag_kernel!, nfix_to_sminn_col, mask, col_lag_npp,
+             col_is_fates, secs_per_year, spval)
+
+# Per-column symbiotic N fixation using annual-mean NPP (masked, independent).
+@kernel function _ndyn_fixation_annsum_kernel!(nfix_to_sminn_col, @Const(mask),
+                                               @Const(cannsum_npp), @Const(col_is_fates),
+                                               secs_per_year)
+    c = @index(Global)
+    @inbounds if mask[c]
+        npp = col_is_fates[c] ? 0.0 : cannsum_npp[c]
+        t = (1.8 * (1.0 - exp(-0.003 * npp))) / secs_per_year
+        nfix_to_sminn_col[c] = max(0.0, t)
+    end
+end
+
+ndyn_fixation_annsum!(nfix_to_sminn_col, mask, cannsum_npp, col_is_fates, secs_per_year) =
+    _launch!(_ndyn_fixation_annsum_kernel!, nfix_to_sminn_col, mask, cannsum_npp,
+             col_is_fates, secs_per_year)
+
+# Masked per-column zero (independent). Used to disable symbiotic fixation under
+# FUN and to zero column-level accumulators before p2c aggregation.
+@kernel function _ndyn_col_zero_kernel!(out, @Const(mask))
+    c = @index(Global)
+    @inbounds if mask[c]
+        out[c] = 0.0
+    end
+end
+
+ndyn_col_zero!(out, mask) = _launch!(_ndyn_col_zero_kernel!, out, mask)
 
 """
     n_fixation!(nf, cf; mask_soilc, bounds, col_is_fates, dayspyr,
@@ -142,48 +215,22 @@ function n_fixation!(
     cannsum_npp = cf.annsum_npp_col
     col_lag_npp = cf.lag_npp_col
 
+    secs_per_year = SECSPDAY * dayspyr
+
     if nfix_timeconst > 0.0 && nfix_timeconst < 500.0
         # Use exponential relaxation with time constant nfix_timeconst for NPP - NFIX relation
-        for c in bounds
-            mask_soilc[c] || continue
-
-            if col_is_fates[c]
-                # FATES N cycling not yet active; set npp to 0
-                npp = 0.0
-            else
-                npp = col_lag_npp[c]
-            end
-
-            if npp != SPVAL
-                # Need to put npp in units of gC/m^2/year here first
-                t = (1.8 * (1.0 - exp(-0.003 * npp * (SECSPDAY * dayspyr)))) / (SECSPDAY * dayspyr)
-                nf.nfix_to_sminn_col[c] = max(0.0, t)
-            else
-                nf.nfix_to_sminn_col[c] = 0.0
-            end
-        end
+        # (npp put in units of gC/m^2/year inside the kernel via secs_per_year)
+        ndyn_fixation_lag!(nf.nfix_to_sminn_col, mask_soilc, col_lag_npp,
+                           col_is_fates, secs_per_year, SPVAL)
     else
         # Use annual-mean values for NPP-NFIX relation
-        for c in bounds
-            mask_soilc[c] || continue
-
-            if col_is_fates[c]
-                npp = 0.0
-            else
-                npp = cannsum_npp[c]
-            end
-
-            t = (1.8 * (1.0 - exp(-0.003 * npp))) / (SECSPDAY * dayspyr)
-            nf.nfix_to_sminn_col[c] = max(0.0, t)
-        end
+        ndyn_fixation_annsum!(nf.nfix_to_sminn_col, mask_soilc, cannsum_npp,
+                              col_is_fates, secs_per_year)
     end
 
     # When FUN is active, disable symbiotic fixation
     if use_fun
-        for c in bounds
-            mask_soilc[c] || continue
-            nf.nfix_to_sminn_col[c] = 0.0
-        end
+        ndyn_col_zero!(nf.nfix_to_sminn_col, mask_soilc)
     end
 
     return nothing
@@ -216,13 +263,11 @@ function n_fert!(
     fert          = cnveg_nf.fert_patch
     fert_to_sminn = soilbgc_nf.fert_to_sminn_col
 
-    # Zero out column-level accumulator
-    for c in bounds
-        mask_soilc[c] || continue
-        fert_to_sminn[c] = 0.0
-    end
+    # Zero out column-level accumulator (masked, independent per column)
+    ndyn_col_zero!(fert_to_sminn, mask_soilc)
 
-    # Patch-to-column weighted aggregation (replaces Fortran p2c call)
+    # Patch-to-column weighted aggregation (replaces Fortran p2c call).
+    # SKIPPED for kernelization: scatter-reduction into shared columns.
     for p in bounds_p
         mask_soilp[p] || continue
         c = patch.column[p]
@@ -236,6 +281,86 @@ end
 # n_soyfix! — soybean N fixation
 # Ported from CNSoyfix in CNNDynamicsMod.F90
 # ---------------------------------------------------------------------------
+
+# Per-patch soybean N fixation (EPICPHASE). Each patch writes only soyfixn[p];
+# column-indexed fields (fpg, wf, sminn) are read-only gathers, so iterations are
+# fully independent. Branch structure and thresholds mirror the Fortran exactly.
+@kernel function _ndyn_soyfix_patch_kernel!(soyfixn, @Const(mask_p), @Const(pcol),
+                                            @Const(itype), @Const(croplive),
+                                            @Const(plant_ndemand), @Const(hui),
+                                            @Const(gddmaturity), @Const(fpg),
+                                            @Const(wf), @Const(sminn),
+                                            ntmp_soybean::Int, nirrig_tmp_soybean::Int,
+                                            ntrp_soybean::Int, nirrig_trp_soybean::Int)
+    p = @index(Global)
+    @inbounds if mask_p[p]
+        c = pcol[p]
+
+        sminnthreshold1   = 30.0
+        sminnthreshold2   = 10.0
+        GDDfracthreshold1 = 0.15
+        GDDfracthreshold2 = 0.30
+        GDDfracthreshold3 = 0.55
+        GDDfracthreshold4 = 0.75
+
+        if croplive[p] &&
+           (itype[p] == ntmp_soybean ||
+            itype[p] == nirrig_tmp_soybean ||
+            itype[p] == ntrp_soybean ||
+            itype[p] == nirrig_trp_soybean)
+
+            if fpg[c] < 1.0
+                soy_ndemand = plant_ndemand[p] - plant_ndemand[p] * fpg[c]
+
+                # Soil water factor
+                fxw = wf[c] / 0.85
+
+                # Soil nitrogen factor
+                fxn = 0.0
+                if sminn[c] > sminnthreshold1
+                    fxn = 0.0
+                elseif sminn[c] > sminnthreshold2 && sminn[c] <= sminnthreshold1
+                    fxn = 1.5 - 0.005 * (sminn[c] * 10.0)
+                elseif sminn[c] <= sminnthreshold2
+                    fxn = 1.0
+                end
+
+                # Growth stage factor
+                GDDfrac = hui[p] / gddmaturity[p]
+                fxg = 0.0
+                if GDDfrac <= GDDfracthreshold1
+                    fxg = 0.0
+                elseif GDDfrac > GDDfracthreshold1 && GDDfrac <= GDDfracthreshold2
+                    fxg = 6.67 * GDDfrac - 1.0
+                elseif GDDfrac > GDDfracthreshold2 && GDDfrac <= GDDfracthreshold3
+                    fxg = 1.0
+                elseif GDDfrac > GDDfracthreshold3 && GDDfrac <= GDDfracthreshold4
+                    fxg = 3.75 - 5.0 * GDDfrac
+                else
+                    fxg = 0.0
+                end
+
+                # Calculate the nitrogen fixed by the soybean
+                fxr = min(1.0, fxw, fxn) * fxg
+                fxr = max(0.0, fxr)
+                s = fxr * soy_ndemand
+                soyfixn[p] = min(s, soy_ndemand)
+            else
+                soyfixn[p] = 0.0
+            end
+        else
+            soyfixn[p] = 0.0
+        end
+    end
+end
+
+function ndyn_soyfix_patch!(soyfixn, mask_p, pcol, itype, croplive, plant_ndemand,
+                            hui, gddmaturity, fpg, wf, sminn,
+                            ntmp_soybean, nirrig_tmp_soybean, ntrp_soybean, nirrig_trp_soybean)
+    _launch!(_ndyn_soyfix_patch_kernel!, soyfixn, mask_p, pcol, itype, croplive,
+             plant_ndemand, hui, gddmaturity, fpg, wf, sminn,
+             ntmp_soybean, nirrig_tmp_soybean, ntrp_soybean, nirrig_trp_soybean)
+end
 
 """
     n_soyfix!(soilbgc_nf, cnveg_nf, soilbgc_state, soilbgc_ns, cnveg_state, crop, wdiag;
@@ -278,79 +403,15 @@ function n_soyfix!(
     sminn         = soilbgc_ns.sminn_col
     soyfixn_to_sminn = soilbgc_nf.soyfixn_to_sminn_col
 
-    # Thresholds (same as Fortran)
-    sminnthreshold1    = 30.0
-    sminnthreshold2    = 10.0
-    GDDfracthreshold1  = 0.15
-    GDDfracthreshold2  = 0.30
-    GDDfracthreshold3  = 0.55
-    GDDfracthreshold4  = 0.75
-
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-
-        # If soybean currently growing then calculate fixation
-        if croplive[p] &&
-            (patch.itype[p] == ntmp_soybean ||
-             patch.itype[p] == nirrig_tmp_soybean ||
-             patch.itype[p] == ntrp_soybean ||
-             patch.itype[p] == nirrig_trp_soybean)
-
-            # Difference between supply and demand
-            if fpg[c] < 1.0
-                soy_ndemand = 0.0
-                soy_ndemand = plant_ndemand[p] - plant_ndemand[p] * fpg[c]
-
-                # Soil water factor
-                fxw = 0.0
-                fxw = wf[c] / 0.85
-
-                # Soil nitrogen factor (CHECK UNITS)
-                if sminn[c] > sminnthreshold1
-                    fxn = 0.0
-                elseif sminn[c] > sminnthreshold2 && sminn[c] <= sminnthreshold1
-                    fxn = 1.5 - 0.005 * (sminn[c] * 10.0)
-                elseif sminn[c] <= sminnthreshold2
-                    fxn = 1.0
-                end
-
-                # Growth stage factor
-                GDDfrac = hui[p] / gddmaturity[p]
-
-                if GDDfrac <= GDDfracthreshold1
-                    fxg = 0.0
-                elseif GDDfrac > GDDfracthreshold1 && GDDfrac <= GDDfracthreshold2
-                    fxg = 6.67 * GDDfrac - 1.0
-                elseif GDDfrac > GDDfracthreshold2 && GDDfrac <= GDDfracthreshold3
-                    fxg = 1.0
-                elseif GDDfrac > GDDfracthreshold3 && GDDfrac <= GDDfracthreshold4
-                    fxg = 3.75 - 5.0 * GDDfrac
-                else  # GDDfrac > GDDfracthreshold4
-                    fxg = 0.0
-                end
-
-                # Calculate the nitrogen fixed by the soybean
-                fxr = min(1.0, fxw, fxn) * fxg
-                fxr = max(0.0, fxr)
-                soyfixn[p] = fxr * soy_ndemand
-                soyfixn[p] = min(soyfixn[p], soy_ndemand)
-
-            else  # Nitrogen demand met, no fixation
-                soyfixn[p] = 0.0
-            end
-
-        else  # Not live soybean, no fixation
-            soyfixn[p] = 0.0
-        end
-    end
+    # Per-patch soybean fixation (independent per patch; thresholds inside kernel)
+    ndyn_soyfix_patch!(soyfixn, mask_soilp, patch.column, patch.itype, croplive,
+                       plant_ndemand, hui, gddmaturity, fpg, wf, sminn,
+                       ntmp_soybean, nirrig_tmp_soybean, ntrp_soybean, nirrig_trp_soybean)
 
     # Patch-to-column aggregation (replaces Fortran p2c call)
-    for c in bounds
-        mask_soilc[c] || continue
-        soyfixn_to_sminn[c] = 0.0
-    end
+    ndyn_col_zero!(soyfixn_to_sminn, mask_soilc)
 
+    # SKIPPED for kernelization: scatter-reduction into shared columns.
     for p in bounds_p
         mask_soilp[p] || continue
         c = patch.column[p]

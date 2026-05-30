@@ -20,6 +20,130 @@
 # ==========================================================================
 
 # =========================================================================
+# KernelAbstractions kernels for simple independent per-element loops.
+# (`@kernel`, `@index`, `@Const`, `_launch!` come from infrastructure/kernels.jl.)
+# Each kernel mirrors the scalar loop it replaces exactly (same masks, offsets,
+# branches) to preserve Fortran parity and AD behavior.
+# =========================================================================
+
+# --- update_snow_persistence! : per-column, fully independent ---
+@kernel function _hydrond_snow_persistence_kernel!(snow_persistence, @Const(mask_snow),
+                                                   @Const(mask_nosnow), dtime, cmin::Int)
+    i = @index(Global)
+    @inbounds begin
+        c = cmin + i - 1
+        if mask_snow[c]
+            snow_persistence[c] = snow_persistence[c] + dtime
+        elseif mask_nosnow[c]
+            snow_persistence[c] = 0.0
+        end
+    end
+end
+hydrond_snow_persistence!(snow_persistence, mask_snow, mask_nosnow, dtime, bounds) =
+    _launch!(_hydrond_snow_persistence_kernel!, snow_persistence, mask_snow, mask_nosnow,
+             dtime, first(bounds); ndrange = length(bounds))
+
+# --- update_snowdp! : per-column, fully independent ---
+@kernel function _hydrond_snowdp_kernel!(snowdp, @Const(snow_depth), @Const(frac_sno_eff),
+                                         cmin::Int)
+    i = @index(Global)
+    @inbounds begin
+        c = cmin + i - 1
+        snowdp[c] = snow_depth[c] * frac_sno_eff[c]
+    end
+end
+hydrond_snowdp!(snowdp, snow_depth, frac_sno_eff, bounds) =
+    _launch!(_hydrond_snowdp_kernel!, snowdp, snow_depth, frac_sno_eff,
+             first(bounds); ndrange = length(bounds))
+
+# --- update_h2osoi_vol! : 2D (column, layer), each [c,j] independent ---
+# Non-urban (non sunwall/shadewall/roof) branch.
+@kernel function _hydrond_h2osoi_vol_nonurban_kernel!(h2osoi_vol, @Const(h2osoi_liq),
+        @Const(h2osoi_ice), @Const(dz), @Const(col_itype), @Const(mask_nolake),
+        joff::Int, cmin::Int, denh2o, denice)
+    i, j = @index(Global, NTuple)
+    @inbounds begin
+        c = cmin + i - 1
+        if mask_nolake[c] &&
+           col_itype[c] != ICOL_SUNWALL && col_itype[c] != ICOL_SHADEWALL &&
+           col_itype[c] != ICOL_ROOF
+            h2osoi_vol[c, j] = h2osoi_liq[c, j + joff] / (dz[c, j + joff] * denh2o) +
+                               h2osoi_ice[c, j + joff] / (dz[c, j + joff] * denice)
+        end
+    end
+end
+hydrond_h2osoi_vol_nonurban!(h2osoi_vol, h2osoi_liq, h2osoi_ice, dz, col_itype,
+        mask_nolake, joff, bounds, nlevgrnd) =
+    _launch!(_hydrond_h2osoi_vol_nonurban_kernel!, h2osoi_vol, h2osoi_liq, h2osoi_ice,
+             dz, col_itype, mask_nolake, joff, first(bounds), DENH2O, DENICE;
+             ndrange = (length(bounds), nlevgrnd))
+
+# Urban (sunwall/shadewall/roof) branch.
+@kernel function _hydrond_h2osoi_vol_urban_kernel!(h2osoi_vol, @Const(h2osoi_liq),
+        @Const(h2osoi_ice), @Const(dz), @Const(col_itype), @Const(mask_urban),
+        joff::Int, cmin::Int, denh2o, denice)
+    i, j = @index(Global, NTuple)
+    @inbounds begin
+        c = cmin + i - 1
+        if mask_urban[c] &&
+           (col_itype[c] == ICOL_SUNWALL || col_itype[c] == ICOL_SHADEWALL ||
+            col_itype[c] == ICOL_ROOF)
+            h2osoi_vol[c, j] = h2osoi_liq[c, j + joff] / (dz[c, j + joff] * denh2o) +
+                               h2osoi_ice[c, j + joff] / (dz[c, j + joff] * denice)
+        end
+    end
+end
+hydrond_h2osoi_vol_urban!(h2osoi_vol, h2osoi_liq, h2osoi_ice, dz, col_itype,
+        mask_urban, joff, bounds, nlevurb) =
+    _launch!(_hydrond_h2osoi_vol_urban_kernel!, h2osoi_vol, h2osoi_liq, h2osoi_ice,
+             dz, col_itype, mask_urban, joff, first(bounds), DENH2O, DENICE;
+             ndrange = (length(bounds), nlevurb))
+
+# --- update_soilpsi! : 2D (column, layer), each [c,j] independent ---
+@kernel function _hydrond_soilpsi_kernel!(soilpsi, @Const(h2osoi_liq), @Const(dz),
+        @Const(watsat), @Const(sucsat), @Const(bsw), @Const(mask_hydrology),
+        joff::Int, cmin::Int, denh2o)
+    i, j = @index(Global, NTuple)
+    @inbounds begin
+        c = cmin + i - 1
+        if mask_hydrology[c]
+            if h2osoi_liq[c, j + joff] > 0.0
+                vwc = h2osoi_liq[c, j + joff] / (dz[c, j + joff] * denh2o)
+                fsattmp = max(vwc / watsat[c, j], 0.001)
+                psi = sucsat[c, j] * (-9.8e-6) * (fsattmp)^(-bsw[c, j])
+                soilpsi[c, j] = min(max(psi, -15.0), 0.0)
+            else
+                soilpsi[c, j] = -15.0
+            end
+        end
+    end
+end
+hydrond_soilpsi!(soilpsi, h2osoi_liq, dz, watsat, sucsat, bsw, mask_hydrology,
+        joff, bounds, nlevgrnd) =
+    _launch!(_hydrond_soilpsi_kernel!, soilpsi, h2osoi_liq, dz, watsat, sucsat, bsw,
+             mask_hydrology, joff, first(bounds), DENH2O;
+             ndrange = (length(bounds), nlevgrnd))
+
+# --- update_smp_l! : 2D (column, layer), each [c,j] independent ---
+@kernel function _hydrond_smp_l_kernel!(smp_l, @Const(h2osoi_vol), @Const(watsat),
+        @Const(sucsat), @Const(bsw), @Const(smpmin), @Const(mask_hydrology), cmin::Int)
+    i, j = @index(Global, NTuple)
+    @inbounds begin
+        c = cmin + i - 1
+        if mask_hydrology[c]
+            s_node = max(h2osoi_vol[c, j] / watsat[c, j], 0.01)
+            s_node = min(1.0, s_node)
+            smp_l[c, j] = -sucsat[c, j] * s_node^(-bsw[c, j])
+            smp_l[c, j] = max(smpmin[c], smp_l[c, j])
+        end
+    end
+end
+hydrond_smp_l!(smp_l, h2osoi_vol, watsat, sucsat, bsw, smpmin, mask_hydrology,
+        bounds, nlevgrnd) =
+    _launch!(_hydrond_smp_l_kernel!, smp_l, h2osoi_vol, watsat, sucsat, bsw, smpmin,
+             mask_hydrology, first(bounds); ndrange = (length(bounds), nlevgrnd))
+
+# =========================================================================
 # update_snow_persistence!
 # =========================================================================
 
@@ -39,13 +163,7 @@ function update_snow_persistence!(
     mask_nosnow::BitVector,
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        if mask_snow[c]
-            snow_persistence[c] = snow_persistence[c] + dtime
-        elseif mask_nosnow[c]
-            snow_persistence[c] = 0.0
-        end
-    end
+    hydrond_snow_persistence!(snow_persistence, mask_snow, mask_nosnow, dtime, bounds)
     return nothing
 end
 
@@ -112,9 +230,7 @@ function update_snowdp!(
     frac_sno_eff::Vector{<:Real},
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        snowdp[c] = snow_depth[c] * frac_sno_eff[c]
-    end
+    hydrond_snowdp!(snowdp, snow_depth, frac_sno_eff, bounds)
     return nothing
 end
 
@@ -333,28 +449,12 @@ function update_h2osoi_vol!(
     # Non-urban columns (excluding sunwall, shadewall, roof)
     # h2osoi_vol is soil-only (1:nlevmaxurbgrnd), no offset needed
     # h2osoi_liq/ice and dz are snow+soil arrays, need joff offset for soil layer j
-    for j in 1:nlevgrnd
-        for c in bounds
-            mask_nolake[c] || continue
-            if col_itype[c] != ICOL_SUNWALL && col_itype[c] != ICOL_SHADEWALL &&
-               col_itype[c] != ICOL_ROOF
-                h2osoi_vol[c, j] = h2osoi_liq[c, j + joff] / (dz[c, j + joff] * DENH2O) +
-                                   h2osoi_ice[c, j + joff] / (dz[c, j + joff] * DENICE)
-            end
-        end
-    end
+    hydrond_h2osoi_vol_nonurban!(h2osoi_vol, h2osoi_liq, h2osoi_ice, dz, col_itype,
+                                 mask_nolake, joff, bounds, nlevgrnd)
 
     # Urban columns (sunwall, shadewall, roof) — only nlevurb layers
-    for j in 1:nlevurb
-        for c in bounds
-            mask_urban[c] || continue
-            if col_itype[c] == ICOL_SUNWALL || col_itype[c] == ICOL_SHADEWALL ||
-               col_itype[c] == ICOL_ROOF
-                h2osoi_vol[c, j] = h2osoi_liq[c, j + joff] / (dz[c, j + joff] * DENH2O) +
-                                   h2osoi_ice[c, j + joff] / (dz[c, j + joff] * DENICE)
-            end
-        end
-    end
+    hydrond_h2osoi_vol_urban!(h2osoi_vol, h2osoi_liq, h2osoi_ice, dz, col_itype,
+                              mask_urban, joff, bounds, nlevurb)
 
     return nothing
 end
@@ -387,22 +487,8 @@ function update_soilpsi!(
 
     # h2osoi_liq and dz are snow+soil arrays, need joff offset for soil layer j
     # soilpsi, watsat, sucsat, bsw are soil-only arrays (1-based)
-    for j in 1:nlevgrnd
-        for c in bounds
-            mask_hydrology[c] || continue
-
-            if h2osoi_liq[c, j + joff] > 0.0
-                vwc = h2osoi_liq[c, j + joff] / (dz[c, j + joff] * DENH2O)
-
-                # Limit fractional saturation to avoid numerical crash
-                fsattmp = max(vwc / watsat[c, j], 0.001)
-                psi = sucsat[c, j] * (-9.8e-6) * (fsattmp)^(-bsw[c, j])  # MPa
-                soilpsi[c, j] = min(max(psi, -15.0), 0.0)
-            else
-                soilpsi[c, j] = -15.0
-            end
-        end
-    end
+    hydrond_soilpsi!(soilpsi, h2osoi_liq, dz, watsat, sucsat, bsw, mask_hydrology,
+                     joff, bounds, nlevgrnd)
 
     return nothing
 end
@@ -430,17 +516,8 @@ function update_smp_l!(
     bounds::UnitRange{Int},
     nlevgrnd::Int
 )
-    for j in 1:nlevgrnd
-        for c in bounds
-            mask_hydrology[c] || continue
-
-            s_node = max(h2osoi_vol[c, j] / watsat[c, j], 0.01)
-            s_node = min(1.0, s_node)
-
-            smp_l[c, j] = -sucsat[c, j] * s_node^(-bsw[c, j])
-            smp_l[c, j] = max(smpmin[c], smp_l[c, j])
-        end
-    end
+    hydrond_smp_l!(smp_l, h2osoi_vol, watsat, sucsat, bsw, smpmin, mask_hydrology,
+                   bounds, nlevgrnd)
 
     return nothing
 end

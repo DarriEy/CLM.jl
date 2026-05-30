@@ -157,6 +157,422 @@ const _min_gdd20_baseline = Ref(0.0)
 const _min_critical_daylength_onset = 39300.0 / 2.0
 
 # ==========================================================================
+# KernelAbstractions kernels for simple, fully-independent per-patch loops.
+# Each thread handles one patch p, reading/writing only patch-p indices.
+# Backend is taken from the written output array (CPU loop or GPU). The patch
+# mask is a BitVector (CPU backend); read-only args are @Const.
+# ==========================================================================
+
+# --- cn_phenology_climate!: 10-day running-mean t2m accumulator ----------
+@kernel function _phen_climate_kernel!(tempavg_t2m, @Const(mask),
+                                       @Const(t_ref2m), fracday::Float64,
+                                       spval::Float64)
+    p = @index(Global)
+    @inbounds if mask[p]
+        if t_ref2m[p] != spval
+            tempavg_t2m[p] = tempavg_t2m[p] + fracday * (t_ref2m[p] - tempavg_t2m[p])
+        end
+    end
+end
+
+phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, spval) =
+    _launch!(_phen_climate_kernel!, tempavg_t2m, mask, t_ref2m, fracday, spval)
+
+# --- cn_evergreen_phenology!: storage→transfer for evergreen patches -----
+@kernel function _phen_evergreen_kernel!(bglfr,
+        bgtr, lgsf,
+        leafc_stor2xfer, frootc_stor2xfer,
+        livestemc_stor2xfer, deadstemc_stor2xfer, livecrootc_stor2xfer,
+        deadcrootc_stor2xfer, gresp_stor2xfer,
+        leafn_stor2xfer, frootn_stor2xfer,
+        livestemn_stor2xfer, deadstemn_stor2xfer, livecrootn_stor2xfer,
+        deadcrootn_stor2xfer,
+        @Const(mask), @Const(itype), @Const(evergreen), @Const(woody),
+        @Const(leaf_long),
+        @Const(leafc_storage), @Const(frootc_storage),
+        @Const(livestemc_storage), @Const(deadstemc_storage),
+        @Const(livecrootc_storage), @Const(deadcrootc_storage),
+        @Const(gresp_storage),
+        @Const(leafn_storage), @Const(frootn_storage),
+        @Const(livestemn_storage), @Const(deadstemn_storage),
+        @Const(livecrootn_storage), @Const(deadcrootn_storage),
+        dt::Float64, fstor2tran::Float64, avg_dayspyr::Float64, secspday::Float64)
+    p = @index(Global)
+    @inbounds if mask[p]
+        ivt = itype[p] + 1
+        if evergreen[ivt] == 1.0
+            bglfr[p] = 1.0 / (leaf_long[ivt] * avg_dayspyr * secspday)
+            bgtr[p]  = 0.0
+            lgsf[p]  = 0.0
+            leafc_stor2xfer[p]  = fstor2tran * leafc_storage[p] / dt
+            frootc_stor2xfer[p] = fstor2tran * frootc_storage[p] / dt
+            if woody[ivt] == 1.0
+                livestemc_stor2xfer[p]  = fstor2tran * livestemc_storage[p] / dt
+                deadstemc_stor2xfer[p]  = fstor2tran * deadstemc_storage[p] / dt
+                livecrootc_stor2xfer[p] = fstor2tran * livecrootc_storage[p] / dt
+                deadcrootc_stor2xfer[p] = fstor2tran * deadcrootc_storage[p] / dt
+                gresp_stor2xfer[p]      = fstor2tran * gresp_storage[p] / dt
+            end
+            leafn_stor2xfer[p]  = fstor2tran * leafn_storage[p] / dt
+            frootn_stor2xfer[p] = fstor2tran * frootn_storage[p] / dt
+            if woody[ivt] == 1.0
+                livestemn_stor2xfer[p]  = fstor2tran * livestemn_storage[p] / dt
+                deadstemn_stor2xfer[p]  = fstor2tran * deadstemn_storage[p] / dt
+                livecrootn_stor2xfer[p] = fstor2tran * livecrootn_storage[p] / dt
+                deadcrootn_stor2xfer[p] = fstor2tran * deadcrootn_storage[p] / dt
+            end
+        end
+    end
+end
+
+function phen_evergreen!(bglfr, bgtr, lgsf,
+        leafc_stor2xfer, frootc_stor2xfer,
+        livestemc_stor2xfer, deadstemc_stor2xfer, livecrootc_stor2xfer,
+        deadcrootc_stor2xfer, gresp_stor2xfer,
+        leafn_stor2xfer, frootn_stor2xfer,
+        livestemn_stor2xfer, deadstemn_stor2xfer, livecrootn_stor2xfer,
+        deadcrootn_stor2xfer,
+        mask, itype, evergreen, woody, leaf_long,
+        leafc_storage, frootc_storage,
+        livestemc_storage, deadstemc_storage, livecrootc_storage,
+        deadcrootc_storage, gresp_storage,
+        leafn_storage, frootn_storage,
+        livestemn_storage, deadstemn_storage, livecrootn_storage,
+        deadcrootn_storage,
+        dt, fstor2tran, avg_dayspyr, secspday)
+    _launch!(_phen_evergreen_kernel!, bglfr, bgtr, lgsf,
+        leafc_stor2xfer, frootc_stor2xfer,
+        livestemc_stor2xfer, deadstemc_stor2xfer, livecrootc_stor2xfer,
+        deadcrootc_stor2xfer, gresp_stor2xfer,
+        leafn_stor2xfer, frootn_stor2xfer,
+        livestemn_stor2xfer, deadstemn_stor2xfer, livecrootn_stor2xfer,
+        deadcrootn_stor2xfer,
+        mask, itype, evergreen, woody, leaf_long,
+        leafc_storage, frootc_storage,
+        livestemc_storage, deadstemc_storage, livecrootc_storage,
+        deadcrootc_storage, gresp_storage,
+        leafn_storage, frootn_storage,
+        livestemn_storage, deadstemn_storage, livecrootn_storage,
+        deadcrootn_storage,
+        dt, fstor2tran, avg_dayspyr, secspday)
+end
+
+# --- crop_phase!: derive current crop phase into an output array ----------
+@kernel function _phen_crop_phase_kernel!(crop_phase_out, @Const(mask),
+        @Const(croplive), @Const(gddtsoi), @Const(hui),
+        @Const(huileaf), @Const(huigrain),
+        planted::Float64, leafemerge::Float64, grainfill::Float64)
+    p = @index(Global)
+    @inbounds if mask[p]
+        if croplive[p]
+            crop_phase_out[p] = planted
+            if gddtsoi[p] >= huileaf[p] && hui[p] < huigrain[p]
+                crop_phase_out[p] = leafemerge
+            elseif hui[p] >= huigrain[p]
+                crop_phase_out[p] = grainfill
+            end
+        end
+    end
+end
+
+phen_crop_phase!(crop_phase_out, mask, croplive, gddtsoi, hui, huileaf,
+                 huigrain, planted, leafemerge, grainfill) =
+    _launch!(_phen_crop_phase_kernel!, crop_phase_out, mask, croplive, gddtsoi,
+             hui, huileaf, huigrain, planted, leafemerge, grainfill)
+
+# --- cn_onset_growth!: transfer→display fluxes during onset --------------
+@kernel function _phen_onset_growth_kernel!(
+        leafc_xfer_to_leafc, frootc_xfer_to_frootc,
+        leafn_xfer_to_leafn, frootn_xfer_to_frootn,
+        livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc,
+        livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc,
+        livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn,
+        livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn,
+        @Const(mask), @Const(itype), @Const(woody),
+        @Const(onset_flag), @Const(onset_counter), @Const(bgtr),
+        @Const(leafc_xfer), @Const(frootc_xfer),
+        @Const(leafn_xfer), @Const(frootn_xfer),
+        @Const(livestemc_xfer), @Const(deadstemc_xfer),
+        @Const(livecrootc_xfer), @Const(deadcrootc_xfer),
+        @Const(livestemn_xfer), @Const(deadstemn_xfer),
+        @Const(livecrootn_xfer), @Const(deadcrootn_xfer),
+        dt::Float64)
+    p = @index(Global)
+    @inbounds if mask[p]
+        ivt = itype[p] + 1
+        if onset_flag[p] == 1.0
+            if abs(onset_counter[p] - dt) <= dt / 2.0
+                t1 = 1.0 / dt
+            else
+                t1 = 2.0 / onset_counter[p]
+            end
+            leafc_xfer_to_leafc[p]   = t1 * leafc_xfer[p]
+            frootc_xfer_to_frootc[p] = t1 * frootc_xfer[p]
+            leafn_xfer_to_leafn[p]   = t1 * leafn_xfer[p]
+            frootn_xfer_to_frootn[p] = t1 * frootn_xfer[p]
+            if woody[ivt] == 1.0
+                livestemc_xfer_to_livestemc[p]   = t1 * livestemc_xfer[p]
+                deadstemc_xfer_to_deadstemc[p]   = t1 * deadstemc_xfer[p]
+                livecrootc_xfer_to_livecrootc[p] = t1 * livecrootc_xfer[p]
+                deadcrootc_xfer_to_deadcrootc[p] = t1 * deadcrootc_xfer[p]
+                livestemn_xfer_to_livestemn[p]   = t1 * livestemn_xfer[p]
+                deadstemn_xfer_to_deadstemn[p]   = t1 * deadstemn_xfer[p]
+                livecrootn_xfer_to_livecrootn[p] = t1 * livecrootn_xfer[p]
+                deadcrootn_xfer_to_deadcrootn[p] = t1 * deadcrootn_xfer[p]
+            end
+        end
+        if bgtr[p] > 0.0
+            leafc_xfer_to_leafc[p]   = leafc_xfer[p] / dt
+            frootc_xfer_to_frootc[p] = frootc_xfer[p] / dt
+            leafn_xfer_to_leafn[p]   = leafn_xfer[p] / dt
+            frootn_xfer_to_frootn[p] = frootn_xfer[p] / dt
+            if woody[ivt] == 1.0
+                livestemc_xfer_to_livestemc[p]   = livestemc_xfer[p] / dt
+                deadstemc_xfer_to_deadstemc[p]   = deadstemc_xfer[p] / dt
+                livecrootc_xfer_to_livecrootc[p] = livecrootc_xfer[p] / dt
+                deadcrootc_xfer_to_deadcrootc[p] = deadcrootc_xfer[p] / dt
+                livestemn_xfer_to_livestemn[p]   = livestemn_xfer[p] / dt
+                deadstemn_xfer_to_deadstemn[p]   = deadstemn_xfer[p] / dt
+                livecrootn_xfer_to_livecrootn[p] = livecrootn_xfer[p] / dt
+                deadcrootn_xfer_to_deadcrootn[p] = deadcrootn_xfer[p] / dt
+            end
+        end
+    end
+end
+
+function phen_onset_growth!(
+        leafc_xfer_to_leafc, frootc_xfer_to_frootc,
+        leafn_xfer_to_leafn, frootn_xfer_to_frootn,
+        livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc,
+        livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc,
+        livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn,
+        livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn,
+        mask, itype, woody, onset_flag, onset_counter, bgtr,
+        leafc_xfer, frootc_xfer, leafn_xfer, frootn_xfer,
+        livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer,
+        livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer,
+        dt)
+    _launch!(_phen_onset_growth_kernel!,
+        leafc_xfer_to_leafc, frootc_xfer_to_frootc,
+        leafn_xfer_to_leafn, frootn_xfer_to_frootn,
+        livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc,
+        livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc,
+        livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn,
+        livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn,
+        mask, itype, woody, onset_flag, onset_counter, bgtr,
+        leafc_xfer, frootc_xfer, leafn_xfer, frootn_xfer,
+        livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer,
+        livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer,
+        dt)
+end
+
+# --- cn_offset_litterfall!: display→litter fluxes during offset ----------
+@kernel function _phen_offset_litterfall_kernel!(
+        leafc_to_litter, frootc_to_litter,
+        prev_leafc_to_litter, prev_frootc_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        @Const(mask), @Const(itype),
+        @Const(offset_flag), @Const(offset_counter),
+        @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
+        @Const(lflitcn), @Const(leafcn), @Const(frootcn),
+        dt::Float64, CNratio_floating::Bool)
+    p = @index(Global)
+    @inbounds if mask[p]
+        if offset_flag[p] == 1.0
+            ivt = itype[p] + 1
+            if abs(offset_counter[p] - dt) <= dt / 2.0
+                t1 = 1.0 / dt
+                frootc_to_litter[p] = t1 * frootc[p]
+                leafc_to_litter[p]  = t1 * leafc[p]
+            else
+                t1 = dt * 2.0 / (offset_counter[p]^2)
+                leafc_to_litter[p]  = prev_leafc_to_litter[p] +
+                    t1 * (leafc[p] - prev_leafc_to_litter[p] * offset_counter[p])
+                frootc_to_litter[p] = prev_frootc_to_litter[p] +
+                    t1 * (frootc[p] - prev_frootc_to_litter[p] * offset_counter[p])
+            end
+
+            if CNratio_floating
+                fr_leafn_to_litter = 0.5
+                if leafc[p] == 0.0
+                    ntovr_leaf = 0.0
+                else
+                    ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
+                end
+                leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
+                leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
+                if frootc[p] == 0.0
+                    frootn_to_litter[p] = 0.0
+                else
+                    frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
+                end
+            else
+                leafn_to_litter[p]   = leafc_to_litter[p] / lflitcn[ivt]
+                leafn_to_retransn[p] = (leafc_to_litter[p] / leafcn[ivt]) - leafn_to_litter[p]
+                frootn_to_litter[p]  = frootc_to_litter[p] / frootcn[ivt]
+            end
+
+            prev_leafc_to_litter[p]  = leafc_to_litter[p]
+            prev_frootc_to_litter[p] = frootc_to_litter[p]
+        end
+    end
+end
+
+function phen_offset_litterfall!(
+        leafc_to_litter, frootc_to_litter,
+        prev_leafc_to_litter, prev_frootc_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        mask, itype, offset_flag, offset_counter,
+        leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
+        dt, CNratio_floating)
+    _launch!(_phen_offset_litterfall_kernel!,
+        leafc_to_litter, frootc_to_litter,
+        prev_leafc_to_litter, prev_frootc_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        mask, itype, offset_flag, offset_counter,
+        leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
+        dt, CNratio_floating)
+end
+
+# --- cn_background_litterfall!: background litter fluxes ------------------
+@kernel function _phen_background_litterfall_kernel!(
+        leafc_to_litter, frootc_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        @Const(mask), @Const(itype), @Const(bglfr),
+        @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
+        @Const(lflitcn), @Const(leafcn), @Const(frootcn),
+        CNratio_floating::Bool)
+    p = @index(Global)
+    @inbounds if mask[p]
+        if bglfr[p] > 0.0
+            ivt = itype[p] + 1
+            leafc_to_litter[p]  = bglfr[p] * leafc[p]
+            frootc_to_litter[p] = bglfr[p] * frootc[p]
+            if CNratio_floating
+                fr_leafn_to_litter = 0.5
+                if leafc[p] == 0.0
+                    ntovr_leaf = 0.0
+                else
+                    ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
+                end
+                leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
+                leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
+                if frootc[p] == 0.0
+                    frootn_to_litter[p] = 0.0
+                else
+                    frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
+                end
+            else
+                leafn_to_litter[p]   = leafc_to_litter[p] / lflitcn[ivt]
+                leafn_to_retransn[p] = (leafc_to_litter[p] / leafcn[ivt]) - leafn_to_litter[p]
+                frootn_to_litter[p]  = frootc_to_litter[p] / frootcn[ivt]
+            end
+        end
+    end
+end
+
+function phen_background_litterfall!(
+        leafc_to_litter, frootc_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        mask, itype, bglfr, leafc, frootc, leafn, frootn,
+        lflitcn, leafcn, frootcn, CNratio_floating)
+    _launch!(_phen_background_litterfall_kernel!,
+        leafc_to_litter, frootc_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        mask, itype, bglfr, leafc, frootc, leafn, frootn,
+        lflitcn, leafcn, frootcn, CNratio_floating)
+end
+
+# --- cn_livewood_turnover!: live wood → dead wood turnover ----------------
+@kernel function _phen_livewood_turnover_kernel!(
+        livestemc_to_deadstemc, livestemn_to_deadstemn, livestemn_to_retransn,
+        livecrootc_to_deadcrootc, livecrootn_to_deadcrootn, livecrootn_to_retransn,
+        @Const(mask), @Const(itype), @Const(woody),
+        @Const(livewdcn), @Const(deadwdcn),
+        @Const(livestemc), @Const(livestemn),
+        @Const(livecrootc), @Const(livecrootn),
+        lwtop::Float64, CNratio_floating::Bool)
+    p = @index(Global)
+    @inbounds if mask[p]
+        ivt = itype[p] + 1
+        if woody[ivt] > 0.0
+            ctovr = livestemc[p] * lwtop
+            ntovr = ctovr / livewdcn[ivt]
+            livestemc_to_deadstemc[p] = ctovr
+            livestemn_to_deadstemn[p] = ctovr / deadwdcn[ivt]
+            if CNratio_floating
+                if livestemc[p] == 0.0
+                    ntovr = 0.0
+                    livestemn_to_deadstemn[p] = 0.0
+                else
+                    ntovr = ctovr * (livestemn[p] / livestemc[p])
+                    livestemn_to_deadstemn[p] = ctovr / deadwdcn[ivt]
+                end
+            end
+            livestemn_to_retransn[p] = ntovr - livestemn_to_deadstemn[p]
+
+            ctovr = livecrootc[p] * lwtop
+            ntovr = ctovr / livewdcn[ivt]
+            livecrootc_to_deadcrootc[p] = ctovr
+            livecrootn_to_deadcrootn[p] = ctovr / deadwdcn[ivt]
+            if CNratio_floating
+                if livecrootc[p] == 0.0
+                    ntovr = 0.0
+                    livecrootn_to_deadcrootn[p] = 0.0
+                else
+                    ntovr = ctovr * (livecrootn[p] / livecrootc[p])
+                    livecrootn_to_deadcrootn[p] = ctovr / deadwdcn[ivt]
+                end
+            end
+            livecrootn_to_retransn[p] = ntovr - livecrootn_to_deadcrootn[p]
+        end
+    end
+end
+
+function phen_livewood_turnover!(
+        livestemc_to_deadstemc, livestemn_to_deadstemn, livestemn_to_retransn,
+        livecrootc_to_deadcrootc, livecrootn_to_deadcrootn, livecrootn_to_retransn,
+        mask, itype, woody, livewdcn, deadwdcn,
+        livestemc, livestemn, livecrootc, livecrootn,
+        lwtop, CNratio_floating)
+    _launch!(_phen_livewood_turnover_kernel!,
+        livestemc_to_deadstemc, livestemn_to_deadstemn, livestemn_to_retransn,
+        livecrootc_to_deadcrootc, livecrootn_to_deadcrootn, livecrootn_to_retransn,
+        mask, itype, woody, livewdcn, deadwdcn,
+        livestemc, livestemn, livecrootc, livecrootn,
+        lwtop, CNratio_floating)
+end
+
+# --- cn_crop_harvest_to_product_pools!: per-patch harvest sums ------------
+@kernel function _phen_crop_harvest_kernel!(
+        harvestc_to_cropprodc, harvestn_to_cropprodn,
+        @Const(mask),
+        @Const(leafc_to_biofuelc), @Const(livestemc_to_biofuelc),
+        @Const(leafc_to_removedresiduec), @Const(livestemc_to_removedresiduec),
+        @Const(leafn_to_biofueln), @Const(livestemn_to_biofueln),
+        @Const(leafn_to_removedresiduen), @Const(livestemn_to_removedresiduen))
+    p = @index(Global)
+    @inbounds if mask[p]
+        harvestc_to_cropprodc[p] = leafc_to_biofuelc[p] + livestemc_to_biofuelc[p] +
+            leafc_to_removedresiduec[p] + livestemc_to_removedresiduec[p]
+        harvestn_to_cropprodn[p] = leafn_to_biofueln[p] + livestemn_to_biofueln[p] +
+            leafn_to_removedresiduen[p] + livestemn_to_removedresiduen[p]
+    end
+end
+
+phen_crop_harvest!(harvestc_to_cropprodc, harvestn_to_cropprodn, mask,
+        leafc_to_biofuelc, livestemc_to_biofuelc,
+        leafc_to_removedresiduec, livestemc_to_removedresiduec,
+        leafn_to_biofueln, livestemn_to_biofueln,
+        leafn_to_removedresiduen, livestemn_to_removedresiduen) =
+    _launch!(_phen_crop_harvest_kernel!, harvestc_to_cropprodc,
+        harvestn_to_cropprodn, mask,
+        leafc_to_biofuelc, livestemc_to_biofuelc,
+        leafc_to_removedresiduec, livestemc_to_removedresiduec,
+        leafn_to_biofueln, livestemn_to_biofueln,
+        leafn_to_removedresiduen, livestemn_to_removedresiduen)
+
+# ==========================================================================
 # cn_phenology_set_params!  — Set parameter defaults for unit testing
 # ==========================================================================
 function cn_phenology_set_params!(params::PhenologyParams)
@@ -357,21 +773,11 @@ function cn_phenology_climate!(pstate::PhenologyState,
                                crop::CropData,
                                patch_data::PatchData,
                                pftcon::PftConPhenology)
-    dt      = pstate.dt
     fracday = pstate.fracday
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        # Update tempavg_t2m accumulator
-        # This is a 10-day running mean accumulator update
-        if temperature.t_ref2m_patch[p] != SPVAL
-            cnveg_state.tempavg_t2m_patch[p] = cnveg_state.tempavg_t2m_patch[p] +
-                fracday * (temperature.t_ref2m_patch[p] - cnveg_state.tempavg_t2m_patch[p])
-        end
-    end
+    # Update tempavg_t2m accumulator (10-day running mean) — per-patch independent.
+    phen_climate!(cnveg_state.tempavg_t2m_patch, mask_soilp,
+                  temperature.t_ref2m_patch, fracday, SPVAL)
 
     return nothing
 end
@@ -392,38 +798,25 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
     dt         = pstate.dt
     fstor2tran = pstate.fstor2tran
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-        if pftcon.evergreen[ivt] == 1.0
-            # set background litterfall rate
-            cnveg_state.bglfr_patch[p] = 1.0 / (pftcon.leaf_long[ivt] * avg_dayspyr * SECSPDAY)
-            cnveg_state.bgtr_patch[p]  = 0.0
-            cnveg_state.lgsf_patch[p]  = 0.0
-
-            # move storage pools to transfer pools
-            cnveg_cf.leafc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.leafc_storage_patch[p] / dt
-            cnveg_cf.frootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.frootc_storage_patch[p] / dt
-
-            if pftcon.woody[ivt] == 1.0
-                cnveg_cf.livestemc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.livestemc_storage_patch[p] / dt
-                cnveg_cf.deadstemc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.deadstemc_storage_patch[p] / dt
-                cnveg_cf.livecrootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.livecrootc_storage_patch[p] / dt
-                cnveg_cf.deadcrootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.deadcrootc_storage_patch[p] / dt
-                cnveg_cf.gresp_storage_to_xfer_patch[p]      = fstor2tran * cnveg_cs.gresp_storage_patch[p] / dt
-            end
-
-            cnveg_nf.leafn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.leafn_storage_patch[p] / dt
-            cnveg_nf.frootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.frootn_storage_patch[p] / dt
-            if pftcon.woody[ivt] == 1.0
-                cnveg_nf.livestemn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.livestemn_storage_patch[p] / dt
-                cnveg_nf.deadstemn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.deadstemn_storage_patch[p] / dt
-                cnveg_nf.livecrootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.livecrootn_storage_patch[p] / dt
-                cnveg_nf.deadcrootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.deadcrootn_storage_patch[p] / dt
-            end
-        end
-    end
+    # Per-patch independent: evergreen background rates + storage→transfer.
+    phen_evergreen!(
+        cnveg_state.bglfr_patch, cnveg_state.bgtr_patch, cnveg_state.lgsf_patch,
+        cnveg_cf.leafc_storage_to_xfer_patch, cnveg_cf.frootc_storage_to_xfer_patch,
+        cnveg_cf.livestemc_storage_to_xfer_patch, cnveg_cf.deadstemc_storage_to_xfer_patch,
+        cnveg_cf.livecrootc_storage_to_xfer_patch, cnveg_cf.deadcrootc_storage_to_xfer_patch,
+        cnveg_cf.gresp_storage_to_xfer_patch,
+        cnveg_nf.leafn_storage_to_xfer_patch, cnveg_nf.frootn_storage_to_xfer_patch,
+        cnveg_nf.livestemn_storage_to_xfer_patch, cnveg_nf.deadstemn_storage_to_xfer_patch,
+        cnveg_nf.livecrootn_storage_to_xfer_patch, cnveg_nf.deadcrootn_storage_to_xfer_patch,
+        mask_soilp, patch_data.itype, pftcon.evergreen, pftcon.woody, pftcon.leaf_long,
+        cnveg_cs.leafc_storage_patch, cnveg_cs.frootc_storage_patch,
+        cnveg_cs.livestemc_storage_patch, cnveg_cs.deadstemc_storage_patch,
+        cnveg_cs.livecrootc_storage_patch, cnveg_cs.deadcrootc_storage_patch,
+        cnveg_cs.gresp_storage_patch,
+        cnveg_ns.leafn_storage_patch, cnveg_ns.frootn_storage_patch,
+        cnveg_ns.livestemn_storage_patch, cnveg_ns.deadstemn_storage_patch,
+        cnveg_ns.livecrootn_storage_patch, cnveg_ns.deadcrootn_storage_patch,
+        dt, fstor2tran, Float64(avg_dayspyr), SECSPDAY)
 
     return nothing
 end
@@ -1111,19 +1504,11 @@ end
 function crop_phase!(mask_pcropp::BitVector, crop::CropData,
                      cnveg_state::CNVegStateData,
                      crop_phase_out::Vector{<:Real})
-    for p in eachindex(mask_pcropp)
-        mask_pcropp[p] || continue
-
-        if crop.croplive_patch[p]
-            crop_phase_out[p] = cphase_planted
-            if crop.gddtsoi_patch[p] >= cnveg_state.huileaf_patch[p] &&
-               crop.hui_patch[p] < cnveg_state.huigrain_patch[p]
-                crop_phase_out[p] = cphase_leafemerge
-            elseif crop.hui_patch[p] >= cnveg_state.huigrain_patch[p]
-                crop_phase_out[p] = cphase_grainfill
-            end
-        end
-    end
+    # Per-patch independent: derive crop phase into output array.
+    phen_crop_phase!(crop_phase_out, mask_pcropp, crop.croplive_patch,
+                     crop.gddtsoi_patch, crop.hui_patch,
+                     cnveg_state.huileaf_patch, cnveg_state.huigrain_patch,
+                     cphase_planted, cphase_leafemerge, cphase_grainfill)
     return nothing
 end
 
@@ -1273,56 +1658,23 @@ function cn_onset_growth!(pstate::PhenologyState,
                           patch_data::PatchData)
     dt = pstate.dt
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        # onset period transfer
-        if cnveg_state.onset_flag_patch[p] == 1.0
-            if abs(cnveg_state.onset_counter_patch[p] - dt) <= dt / 2.0
-                t1 = 1.0 / dt
-            else
-                t1 = 2.0 / cnveg_state.onset_counter_patch[p]
-            end
-
-            cnveg_cf.leafc_xfer_to_leafc_patch[p]   = t1 * cnveg_cs.leafc_xfer_patch[p]
-            cnveg_cf.frootc_xfer_to_frootc_patch[p] = t1 * cnveg_cs.frootc_xfer_patch[p]
-            cnveg_nf.leafn_xfer_to_leafn_patch[p]   = t1 * cnveg_ns.leafn_xfer_patch[p]
-            cnveg_nf.frootn_xfer_to_frootn_patch[p] = t1 * cnveg_ns.frootn_xfer_patch[p]
-
-            if pftcon.woody[ivt] == 1.0
-                cnveg_cf.livestemc_xfer_to_livestemc_patch[p]   = t1 * cnveg_cs.livestemc_xfer_patch[p]
-                cnveg_cf.deadstemc_xfer_to_deadstemc_patch[p]   = t1 * cnveg_cs.deadstemc_xfer_patch[p]
-                cnveg_cf.livecrootc_xfer_to_livecrootc_patch[p] = t1 * cnveg_cs.livecrootc_xfer_patch[p]
-                cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch[p] = t1 * cnveg_cs.deadcrootc_xfer_patch[p]
-                cnveg_nf.livestemn_xfer_to_livestemn_patch[p]   = t1 * cnveg_ns.livestemn_xfer_patch[p]
-                cnveg_nf.deadstemn_xfer_to_deadstemn_patch[p]   = t1 * cnveg_ns.deadstemn_xfer_patch[p]
-                cnveg_nf.livecrootn_xfer_to_livecrootn_patch[p] = t1 * cnveg_ns.livecrootn_xfer_patch[p]
-                cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch[p] = t1 * cnveg_ns.deadcrootn_xfer_patch[p]
-            end
-        end
-
-        # background transfer growth
-        if cnveg_state.bgtr_patch[p] > 0.0
-            cnveg_cf.leafc_xfer_to_leafc_patch[p]   = cnveg_cs.leafc_xfer_patch[p] / dt
-            cnveg_cf.frootc_xfer_to_frootc_patch[p] = cnveg_cs.frootc_xfer_patch[p] / dt
-            cnveg_nf.leafn_xfer_to_leafn_patch[p]   = cnveg_ns.leafn_xfer_patch[p] / dt
-            cnveg_nf.frootn_xfer_to_frootn_patch[p] = cnveg_ns.frootn_xfer_patch[p] / dt
-
-            if pftcon.woody[ivt] == 1.0
-                cnveg_cf.livestemc_xfer_to_livestemc_patch[p]   = cnveg_cs.livestemc_xfer_patch[p] / dt
-                cnveg_cf.deadstemc_xfer_to_deadstemc_patch[p]   = cnveg_cs.deadstemc_xfer_patch[p] / dt
-                cnveg_cf.livecrootc_xfer_to_livecrootc_patch[p] = cnveg_cs.livecrootc_xfer_patch[p] / dt
-                cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch[p] = cnveg_cs.deadcrootc_xfer_patch[p] / dt
-                cnveg_nf.livestemn_xfer_to_livestemn_patch[p]   = cnveg_ns.livestemn_xfer_patch[p] / dt
-                cnveg_nf.deadstemn_xfer_to_deadstemn_patch[p]   = cnveg_ns.deadstemn_xfer_patch[p] / dt
-                cnveg_nf.livecrootn_xfer_to_livecrootn_patch[p] = cnveg_ns.livecrootn_xfer_patch[p] / dt
-                cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch[p] = cnveg_ns.deadcrootn_xfer_patch[p] / dt
-            end
-        end
-
-    end # patch loop
+    # Per-patch independent: transfer→display growth fluxes.
+    phen_onset_growth!(
+        cnveg_cf.leafc_xfer_to_leafc_patch, cnveg_cf.frootc_xfer_to_frootc_patch,
+        cnveg_nf.leafn_xfer_to_leafn_patch, cnveg_nf.frootn_xfer_to_frootn_patch,
+        cnveg_cf.livestemc_xfer_to_livestemc_patch, cnveg_cf.deadstemc_xfer_to_deadstemc_patch,
+        cnveg_cf.livecrootc_xfer_to_livecrootc_patch, cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch,
+        cnveg_nf.livestemn_xfer_to_livestemn_patch, cnveg_nf.deadstemn_xfer_to_deadstemn_patch,
+        cnveg_nf.livecrootn_xfer_to_livecrootn_patch, cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch,
+        mask_soilp, patch_data.itype, pftcon.woody,
+        cnveg_state.onset_flag_patch, cnveg_state.onset_counter_patch, cnveg_state.bgtr_patch,
+        cnveg_cs.leafc_xfer_patch, cnveg_cs.frootc_xfer_patch,
+        cnveg_ns.leafn_xfer_patch, cnveg_ns.frootn_xfer_patch,
+        cnveg_cs.livestemc_xfer_patch, cnveg_cs.deadstemc_xfer_patch,
+        cnveg_cs.livecrootc_xfer_patch, cnveg_cs.deadcrootc_xfer_patch,
+        cnveg_ns.livestemn_xfer_patch, cnveg_ns.deadstemn_xfer_patch,
+        cnveg_ns.livecrootn_xfer_patch, cnveg_ns.deadcrootn_xfer_patch,
+        dt)
 
     return nothing
 end
@@ -1345,59 +1697,18 @@ function cn_offset_litterfall!(pstate::PhenologyState,
                                for_testing_no_crop_seed_replenishment::Bool=false)
     dt = pstate.dt
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        if cnveg_state.offset_flag_patch[p] != 1.0
-            continue
-        end
-
-        if abs(cnveg_state.offset_counter_patch[p] - dt) <= dt / 2.0
-            # last timestep of offset: dump all remaining
-            t1 = 1.0 / dt
-            cnveg_cf.frootc_to_litter_patch[p] = t1 * cnveg_cs.frootc_patch[p]
-            cnveg_cf.leafc_to_litter_patch[p]  = t1 * cnveg_cs.leafc_patch[p]
-        else
-            t1 = dt * 2.0 / (cnveg_state.offset_counter_patch[p]^2)
-            cnveg_cf.leafc_to_litter_patch[p]  = cnveg_cf.prev_leafc_to_litter_patch[p] +
-                t1 * (cnveg_cs.leafc_patch[p] - cnveg_cf.prev_leafc_to_litter_patch[p] *
-                      cnveg_state.offset_counter_patch[p])
-            cnveg_cf.frootc_to_litter_patch[p] = cnveg_cf.prev_frootc_to_litter_patch[p] +
-                t1 * (cnveg_cs.frootc_patch[p] - cnveg_cf.prev_frootc_to_litter_patch[p] *
-                      cnveg_state.offset_counter_patch[p])
-        end
-
-        # Nitrogen litterfall
-        if CNratio_floating
-            fr_leafn_to_litter = 0.5
-            if cnveg_cs.leafc_patch[p] == 0.0
-                ntovr_leaf = 0.0
-            else
-                ntovr_leaf = cnveg_cf.leafc_to_litter_patch[p] *
-                    (cnveg_ns.leafn_patch[p] / cnveg_cs.leafc_patch[p])
-            end
-            cnveg_nf.leafn_to_litter_patch[p]   = fr_leafn_to_litter * ntovr_leaf
-            cnveg_nf.leafn_to_retransn_patch[p] = ntovr_leaf - cnveg_nf.leafn_to_litter_patch[p]
-            if cnveg_cs.frootc_patch[p] == 0.0
-                cnveg_nf.frootn_to_litter_patch[p] = 0.0
-            else
-                cnveg_nf.frootn_to_litter_patch[p] = cnveg_cf.frootc_to_litter_patch[p] *
-                    (cnveg_ns.frootn_patch[p] / cnveg_cs.frootc_patch[p])
-            end
-        else
-            cnveg_nf.leafn_to_litter_patch[p]   = cnveg_cf.leafc_to_litter_patch[p] / pftcon.lflitcn[ivt]
-            cnveg_nf.leafn_to_retransn_patch[p] = (cnveg_cf.leafc_to_litter_patch[p] / pftcon.leafcn[ivt]) -
-                cnveg_nf.leafn_to_litter_patch[p]
-            cnveg_nf.frootn_to_litter_patch[p]  = cnveg_cf.frootc_to_litter_patch[p] / pftcon.frootcn[ivt]
-        end
-
-        # save current litterfall fluxes
-        cnveg_cf.prev_leafc_to_litter_patch[p]  = cnveg_cf.leafc_to_litter_patch[p]
-        cnveg_cf.prev_frootc_to_litter_patch[p] = cnveg_cf.frootc_to_litter_patch[p]
-
-    end # patch loop
+    # Per-patch independent: display→litter fluxes during offset.
+    phen_offset_litterfall!(
+        cnveg_cf.leafc_to_litter_patch, cnveg_cf.frootc_to_litter_patch,
+        cnveg_cf.prev_leafc_to_litter_patch, cnveg_cf.prev_frootc_to_litter_patch,
+        cnveg_nf.leafn_to_litter_patch, cnveg_nf.leafn_to_retransn_patch,
+        cnveg_nf.frootn_to_litter_patch,
+        mask_soilp, patch_data.itype,
+        cnveg_state.offset_flag_patch, cnveg_state.offset_counter_patch,
+        cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
+        cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
+        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn,
+        dt, CNratio_floating)
 
     return nothing
 end
@@ -1416,40 +1727,15 @@ function cn_background_litterfall!(pstate::PhenologyState,
                                    patch_data::PatchData;
                                    use_fun::Bool=false,
                                    CNratio_floating::Bool=false)
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        if cnveg_state.bglfr_patch[p] > 0.0
-            cnveg_cf.leafc_to_litter_patch[p]  = cnveg_state.bglfr_patch[p] * cnveg_cs.leafc_patch[p]
-            cnveg_cf.frootc_to_litter_patch[p] = cnveg_state.bglfr_patch[p] * cnveg_cs.frootc_patch[p]
-
-            if CNratio_floating
-                fr_leafn_to_litter = 0.5
-                if cnveg_cs.leafc_patch[p] == 0.0
-                    ntovr_leaf = 0.0
-                else
-                    ntovr_leaf = cnveg_cf.leafc_to_litter_patch[p] *
-                        (cnveg_ns.leafn_patch[p] / cnveg_cs.leafc_patch[p])
-                end
-                cnveg_nf.leafn_to_litter_patch[p]   = fr_leafn_to_litter * ntovr_leaf
-                cnveg_nf.leafn_to_retransn_patch[p] = ntovr_leaf - cnveg_nf.leafn_to_litter_patch[p]
-                if cnveg_cs.frootc_patch[p] == 0.0
-                    cnveg_nf.frootn_to_litter_patch[p] = 0.0
-                else
-                    cnveg_nf.frootn_to_litter_patch[p] = cnveg_cf.frootc_to_litter_patch[p] *
-                        (cnveg_ns.frootn_patch[p] / cnveg_cs.frootc_patch[p])
-                end
-            else
-                cnveg_nf.leafn_to_litter_patch[p]   = cnveg_cf.leafc_to_litter_patch[p] / pftcon.lflitcn[ivt]
-                cnveg_nf.leafn_to_retransn_patch[p] = (cnveg_cf.leafc_to_litter_patch[p] / pftcon.leafcn[ivt]) -
-                    cnveg_nf.leafn_to_litter_patch[p]
-                cnveg_nf.frootn_to_litter_patch[p]  = cnveg_cf.frootc_to_litter_patch[p] / pftcon.frootcn[ivt]
-            end
-        end
-
-    end # patch loop
+    # Per-patch independent: background litterfall fluxes.
+    phen_background_litterfall!(
+        cnveg_cf.leafc_to_litter_patch, cnveg_cf.frootc_to_litter_patch,
+        cnveg_nf.leafn_to_litter_patch, cnveg_nf.leafn_to_retransn_patch,
+        cnveg_nf.frootn_to_litter_patch,
+        mask_soilp, patch_data.itype, cnveg_state.bglfr_patch,
+        cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
+        cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
+        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn, CNratio_floating)
 
     return nothing
 end
@@ -1468,50 +1754,17 @@ function cn_livewood_turnover!(pstate::PhenologyState,
                                CNratio_floating::Bool=false)
     lwtop = pstate.lwtop
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        if pftcon.woody[ivt] <= 0.0
-            continue
-        end
-
-        # live stem → dead stem
-        ctovr = cnveg_cs.livestemc_patch[p] * lwtop
-        ntovr = ctovr / pftcon.livewdcn[ivt]
-        cnveg_cf.livestemc_to_deadstemc_patch[p] = ctovr
-        cnveg_nf.livestemn_to_deadstemn_patch[p] = ctovr / pftcon.deadwdcn[ivt]
-
-        if CNratio_floating
-            if cnveg_cs.livestemc_patch[p] == 0.0
-                ntovr = 0.0
-                cnveg_nf.livestemn_to_deadstemn_patch[p] = 0.0
-            else
-                ntovr = ctovr * (cnveg_ns.livestemn_patch[p] / cnveg_cs.livestemc_patch[p])
-                cnveg_nf.livestemn_to_deadstemn_patch[p] = ctovr / pftcon.deadwdcn[ivt]
-            end
-        end
-        cnveg_nf.livestemn_to_retransn_patch[p] = ntovr - cnveg_nf.livestemn_to_deadstemn_patch[p]
-
-        # live coarse root → dead coarse root
-        ctovr = cnveg_cs.livecrootc_patch[p] * lwtop
-        ntovr = ctovr / pftcon.livewdcn[ivt]
-        cnveg_cf.livecrootc_to_deadcrootc_patch[p] = ctovr
-        cnveg_nf.livecrootn_to_deadcrootn_patch[p] = ctovr / pftcon.deadwdcn[ivt]
-
-        if CNratio_floating
-            if cnveg_cs.livecrootc_patch[p] == 0.0
-                ntovr = 0.0
-                cnveg_nf.livecrootn_to_deadcrootn_patch[p] = 0.0
-            else
-                ntovr = ctovr * (cnveg_ns.livecrootn_patch[p] / cnveg_cs.livecrootc_patch[p])
-                cnveg_nf.livecrootn_to_deadcrootn_patch[p] = ctovr / pftcon.deadwdcn[ivt]
-            end
-        end
-        cnveg_nf.livecrootn_to_retransn_patch[p] = ntovr - cnveg_nf.livecrootn_to_deadcrootn_patch[p]
-
-    end # patch loop
+    # Per-patch independent: live wood → dead wood turnover.
+    phen_livewood_turnover!(
+        cnveg_cf.livestemc_to_deadstemc_patch, cnveg_nf.livestemn_to_deadstemn_patch,
+        cnveg_nf.livestemn_to_retransn_patch,
+        cnveg_cf.livecrootc_to_deadcrootc_patch, cnveg_nf.livecrootn_to_deadcrootn_patch,
+        cnveg_nf.livecrootn_to_retransn_patch,
+        mask_soilp, patch_data.itype, pftcon.woody,
+        pftcon.livewdcn, pftcon.deadwdcn,
+        cnveg_cs.livestemc_patch, cnveg_ns.livestemn_patch,
+        cnveg_cs.livecrootc_patch, cnveg_ns.livecrootn_patch,
+        lwtop, CNratio_floating)
 
     return nothing
 end
@@ -1529,21 +1782,14 @@ function cn_crop_harvest_to_product_pools!(mask_soilp::BitVector,
         return nothing
     end
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-
-        cnveg_cf.crop_harvestc_to_cropprodc_patch[p] =
-            cnveg_cf.leafc_to_biofuelc_patch[p] +
-            cnveg_cf.livestemc_to_biofuelc_patch[p] +
-            cnveg_cf.leafc_to_removedresiduec_patch[p] +
-            cnveg_cf.livestemc_to_removedresiduec_patch[p]
-
-        cnveg_nf.crop_harvestn_to_cropprodn_patch[p] =
-            cnveg_nf.leafn_to_biofueln_patch[p] +
-            cnveg_nf.livestemn_to_biofueln_patch[p] +
-            cnveg_nf.leafn_to_removedresiduen_patch[p] +
-            cnveg_nf.livestemn_to_removedresiduen_patch[p]
-    end
+    # Per-patch independent: harvest C/N to crop-product pools.
+    phen_crop_harvest!(
+        cnveg_cf.crop_harvestc_to_cropprodc_patch,
+        cnveg_nf.crop_harvestn_to_cropprodn_patch, mask_soilp,
+        cnveg_cf.leafc_to_biofuelc_patch, cnveg_cf.livestemc_to_biofuelc_patch,
+        cnveg_cf.leafc_to_removedresiduec_patch, cnveg_cf.livestemc_to_removedresiduec_patch,
+        cnveg_nf.leafn_to_biofueln_patch, cnveg_nf.livestemn_to_biofueln_patch,
+        cnveg_nf.leafn_to_removedresiduen_patch, cnveg_nf.livestemn_to_removedresiduen_patch)
 
     return nothing
 end
