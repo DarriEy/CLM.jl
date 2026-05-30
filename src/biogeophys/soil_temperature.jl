@@ -140,10 +140,14 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
         end
     end
 
-    # Excess ice vertical coordinate adjustment (save originals)
-    dz_0 = nothing
-    zi_0 = nothing
-    z_0 = nothing
+    # Excess ice vertical coordinate adjustment (save originals).
+    # Use typed empty arrays rather than `nothing`: a Union{Nothing,Matrix}
+    # local breaks Enzyme reverse-mode codegen (SSA "does not dominate all uses").
+    # These are only indexed when use_excess_ice is true (both save and restore
+    # blocks are guarded), where they hold concrete copies.
+    dz_0 = similar(col.dz, 0, 0)
+    zi_0 = similar(col.zi, 0, 0)
+    z_0 = similar(col.z, 0, 0)
     if varctl.use_excess_ice
         dz_0 = copy(col.dz)
         zi_0 = copy(col.zi)
