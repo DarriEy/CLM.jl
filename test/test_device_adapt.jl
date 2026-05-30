@@ -40,13 +40,22 @@ Adapt.adapt_storage(::Type{<:FakeDev}, x::Array) = FakeDev(x)
     inst.column.dz = rand(3, 4)
     inst.energyflux.eflx_lh_tot_patch = rand(3)
     inst.atm2lnd.forc_t_not_downscaled_grc = rand(3)
+    wsf = first(n for n in fieldnames(typeof(inst.water.waterstatebulk_inst))
+                if fieldtype(typeof(inst.water.waterstatebulk_inst), n) <: AbstractVector)
+    setfield!(inst.water.waterstatebulk_inst, wsf, rand(3))
+    # bulk_and_tracers element aliasing the bulk state (as init sets up)
+    push!(inst.water.bulk_and_tracers,
+          CLM.BulkOrTracerData(waterstate=inst.water.waterstatebulk_inst,
+                               waterflux=inst.water.waterfluxbulk_inst))
     idev = adapt(FakeDev, inst)
     @test idev.temperature.t_grnd_col isa FakeDev
     @test idev.column.dz isa FakeDev
     @test idev.energyflux.eflx_lh_tot_patch isa FakeDev
     @test idev.atm2lnd.forc_t_not_downscaled_grc isa FakeDev   # forcing moves too
-    # WaterData is intentionally not yet device-movable (bulk_and_tracers
-    # reference-aliasing) — it passes through unchanged.
-    @test typeof(idev.water) === typeof(inst.water)
+    # WaterData moves via a custom rule, rebuilding bulk_and_tracers aliasing.
+    @test getfield(idev.water.waterstatebulk_inst, wsf) isa FakeDev
+    @test idev.water.bulk_and_tracers[1].waterstate === idev.water.waterstatebulk_inst
+    # A constants struct (not registered) still passes through unchanged.
+    @test typeof(idev.surfalb_con) === typeof(inst.surfalb_con)
     println("  device-adapt: CLMInstances tree moves registered sub-structs to device")
 end

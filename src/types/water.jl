@@ -149,6 +149,42 @@ Base.@kwdef mutable struct WaterData
     bulk_tracer_index::Int = -1     # index of tracer replicating bulk (-1 if none)
 end
 
+# Custom Adapt rule for WaterData. The default @adapt_structure can't be used:
+# `bulk_and_tracers` holds BulkOrTracerData elements that *alias* the direct bulk
+# sub-struct fields (waterstatebulk_inst, ...). We move the bulk sub-structs to the
+# device, then rebuild the iteration vector so its references point at the moved
+# instances — preserving the aliasing that the bulk/tracer loops rely on.
+function Adapt.adapt_structure(to, w::WaterData)
+    wf = Adapt.adapt(to, w.waterfluxbulk_inst)
+    ws = Adapt.adapt(to, w.waterstatebulk_inst)
+    wd = Adapt.adapt(to, w.waterdiagnosticbulk_inst)
+    wb = Adapt.adapt(to, w.waterbalancebulk_inst)
+    # substitute moved bulk insts where an element aliases them; adapt other
+    # (tracer) references directly; leave `nothing` as-is.
+    sub(x, orig, moved) = x === orig ? moved : (x === nothing ? nothing : Adapt.adapt(to, x))
+    bt = [BulkOrTracerData(
+              waterflux       = sub(e.waterflux, w.waterfluxbulk_inst, wf),
+              waterstate      = sub(e.waterstate, w.waterstatebulk_inst, ws),
+              waterdiagnostic = sub(e.waterdiagnostic, w.waterdiagnosticbulk_inst, wd),
+              waterbalance    = sub(e.waterbalance, w.waterbalancebulk_inst, wb),
+              is_isotope      = e.is_isotope,
+              info            = e.info)
+          for e in w.bulk_and_tracers]
+    return WaterData(
+        bulk_and_tracers_beg = w.bulk_and_tracers_beg,
+        bulk_and_tracers_end = w.bulk_and_tracers_end,
+        tracers_beg = w.tracers_beg,
+        tracers_end = w.tracers_end,
+        i_bulk = w.i_bulk,
+        waterfluxbulk_inst = wf,
+        waterstatebulk_inst = ws,
+        waterdiagnosticbulk_inst = wd,
+        waterbalancebulk_inst = wb,
+        bulk_and_tracers = bt,
+        params = w.params,
+        bulk_tracer_index = w.bulk_tracer_index)
+end
+
 # -----------------------------------------------------------------------
 # water_init! — Main initialization
 # Ported from Init in WaterType.F90
