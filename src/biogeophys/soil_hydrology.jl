@@ -89,6 +89,249 @@ function init_soil_hydrology_config(;
 end
 
 # =========================================================================
+# KernelAbstractions kernels for independent per-element loops
+# (each (column) or (column,layer) iteration is fully independent — no
+#  loop-carried dependencies, accumulation, or inter-column coupling).
+# =========================================================================
+
+# ---- set_soil_water_fractions! : per-(column,layer) diagnostic fractions ----
+@kernel function _soilhyd_water_fractions_kernel!(eff_porosity, icefrac, @Const(mask),
+                                                  @Const(watsat), @Const(col_dz),
+                                                  @Const(h2osoi_ice), @Const(excess_ice),
+                                                  joff::Int, denice)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        dz_ext = col_dz[c, j + joff] + excess_ice[c, j] / denice
+        vol_ice_val = smooth_min(watsat[c, j], (h2osoi_ice[c, j + joff] + excess_ice[c, j]) / (dz_ext * denice))
+        eff_porosity[c, j] = smooth_max(0.01, watsat[c, j] - vol_ice_val)
+        icefrac[c, j] = smooth_min(1.0, vol_ice_val / watsat[c, j])
+    end
+end
+
+soilhyd_water_fractions!(eff_porosity, icefrac, mask, watsat, col_dz,
+                         h2osoi_ice, excess_ice, joff::Int, nlevsoi::Int, denice) =
+    _launch!(_soilhyd_water_fractions_kernel!, eff_porosity, icefrac, mask, watsat,
+             col_dz, h2osoi_ice, excess_ice, joff, denice;
+             ndrange = (length(mask), nlevsoi))
+
+# ---- set_floodc! : apply gridcell flood flux to non-lake columns ----
+@kernel function _soilhyd_floodc_kernel!(qflx_floodc, @Const(qflx_floodg),
+                                         @Const(col_gridcell), @Const(col_itype),
+                                         @Const(mask_nolake), icol_sunwall::Int,
+                                         icol_shadewall::Int)
+    c = @index(Global)
+    @inbounds if mask_nolake[c]
+        g = col_gridcell[c]
+        if col_itype[c] != icol_sunwall && col_itype[c] != icol_shadewall
+            qflx_floodc[c] = qflx_floodg[g]
+        else
+            qflx_floodc[c] = 0.0
+        end
+    end
+end
+
+soilhyd_floodc!(qflx_floodc, qflx_floodg, col_gridcell, col_itype, mask_nolake,
+                icol_sunwall::Int, icol_shadewall::Int) =
+    _launch!(_soilhyd_floodc_kernel!, qflx_floodc, qflx_floodg, col_gridcell,
+             col_itype, mask_nolake, icol_sunwall, icol_shadewall)
+
+# ---- set_qflx_inputs! : partition surface inputs between soil and h2osfc ----
+@kernel function _soilhyd_qflx_inputs_kernel!(qflx_top_soil, qflx_in_soil,
+                                              qflx_top_soil_to_h2osfc, @Const(mask),
+                                              @Const(col_snl), @Const(qflx_rain_plus_snomelt),
+                                              @Const(qflx_snow_h2osfc), @Const(qflx_floodc),
+                                              @Const(qflx_liqevap_from_top_layer),
+                                              @Const(qflx_ev_soil), @Const(qflx_ev_h2osfc),
+                                              @Const(qflx_sat_excess_surf), @Const(frac_sno),
+                                              @Const(frac_h2osfc))
+    c = @index(Global)
+    @inbounds if mask[c]
+        qflx_top_soil[c] = qflx_rain_plus_snomelt[c] + qflx_snow_h2osfc[c] + qflx_floodc[c]
+
+        if col_snl[c] >= 0
+            fsno = 0.0
+            qflx_evap = qflx_liqevap_from_top_layer[c]
+        else
+            fsno = frac_sno[c]
+            qflx_evap = qflx_ev_soil[c]
+        end
+
+        qflx_in_soil[c] = (1.0 - frac_h2osfc[c]) * (qflx_top_soil[c] - qflx_sat_excess_surf[c])
+        qflx_top_soil_to_h2osfc[c] = frac_h2osfc[c] * (qflx_top_soil[c] - qflx_sat_excess_surf[c])
+
+        qflx_in_soil[c] = qflx_in_soil[c] - (1.0 - fsno - frac_h2osfc[c]) * qflx_evap
+        qflx_top_soil_to_h2osfc[c] = qflx_top_soil_to_h2osfc[c] - frac_h2osfc[c] * qflx_ev_h2osfc[c]
+    end
+end
+
+soilhyd_qflx_inputs!(qflx_top_soil, qflx_in_soil, qflx_top_soil_to_h2osfc, mask,
+                     col_snl, qflx_rain_plus_snomelt, qflx_snow_h2osfc, qflx_floodc,
+                     qflx_liqevap_from_top_layer, qflx_ev_soil, qflx_ev_h2osfc,
+                     qflx_sat_excess_surf, frac_sno, frac_h2osfc) =
+    _launch!(_soilhyd_qflx_inputs_kernel!, qflx_top_soil, qflx_in_soil,
+             qflx_top_soil_to_h2osfc, mask, col_snl, qflx_rain_plus_snomelt,
+             qflx_snow_h2osfc, qflx_floodc, qflx_liqevap_from_top_layer,
+             qflx_ev_soil, qflx_ev_h2osfc, qflx_sat_excess_surf, frac_sno, frac_h2osfc)
+
+# ---- route_infiltration_excess! : route infiltration excess runoff ----
+@kernel function _soilhyd_route_infl_excess_kernel!(qflx_in_soil_limited, qflx_in_h2osfc,
+                                                    qflx_infl_excess_surf, @Const(mask),
+                                                    @Const(col_landunit), @Const(lun_itype),
+                                                    @Const(qflx_in_soil),
+                                                    @Const(qflx_top_soil_to_h2osfc),
+                                                    @Const(qflx_infl_excess),
+                                                    h2osfcflag::Int, istsoil::Int, istcrop::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        l = col_landunit[c]
+        if lun_itype[l] == istsoil || lun_itype[l] == istcrop
+            qflx_in_soil_limited[c] = qflx_in_soil[c] - qflx_infl_excess[c]
+            if h2osfcflag != 0
+                qflx_in_h2osfc[c] = qflx_top_soil_to_h2osfc[c] + qflx_infl_excess[c]
+                qflx_infl_excess_surf[c] = 0.0
+            else
+                qflx_in_h2osfc[c] = qflx_top_soil_to_h2osfc[c]
+                qflx_infl_excess_surf[c] = qflx_infl_excess[c]
+            end
+        else
+            qflx_in_soil_limited[c] = qflx_in_soil[c]
+            qflx_in_h2osfc[c] = 0.0
+            qflx_infl_excess_surf[c] = 0.0
+        end
+    end
+end
+
+soilhyd_route_infl_excess!(qflx_in_soil_limited, qflx_in_h2osfc, qflx_infl_excess_surf,
+                           mask, col_landunit, lun_itype, qflx_in_soil,
+                           qflx_top_soil_to_h2osfc, qflx_infl_excess,
+                           h2osfcflag::Int, istsoil::Int, istcrop::Int) =
+    _launch!(_soilhyd_route_infl_excess_kernel!, qflx_in_soil_limited, qflx_in_h2osfc,
+             qflx_infl_excess_surf, mask, col_landunit, lun_itype, qflx_in_soil,
+             qflx_top_soil_to_h2osfc, qflx_infl_excess, h2osfcflag, istsoil, istcrop)
+
+# ---- infiltration! : total infiltration ----
+@kernel function _soilhyd_infiltration_kernel!(qflx_infl, @Const(mask),
+                                               @Const(qflx_in_soil_limited),
+                                               @Const(qflx_h2osfc_drain))
+    c = @index(Global)
+    @inbounds if mask[c]
+        qflx_infl[c] = qflx_in_soil_limited[c] + qflx_h2osfc_drain[c]
+    end
+end
+
+soilhyd_infiltration!(qflx_infl, mask, qflx_in_soil_limited, qflx_h2osfc_drain) =
+    _launch!(_soilhyd_infiltration_kernel!, qflx_infl, mask, qflx_in_soil_limited,
+             qflx_h2osfc_drain)
+
+# ---- total_surface_runoff! : qflx_surf for hydrologically-active columns ----
+@kernel function _soilhyd_surf_runoff_kernel!(qflx_surf, @Const(mask),
+                                              @Const(qflx_sat_excess_surf),
+                                              @Const(qflx_infl_excess_surf),
+                                              @Const(qflx_h2osfc_surf))
+    c = @index(Global)
+    @inbounds if mask[c]
+        qflx_surf[c] = qflx_sat_excess_surf[c] + qflx_infl_excess_surf[c] + qflx_h2osfc_surf[c]
+    end
+end
+
+soilhyd_surf_runoff!(qflx_surf, mask, qflx_sat_excess_surf, qflx_infl_excess_surf,
+                     qflx_h2osfc_surf) =
+    _launch!(_soilhyd_surf_runoff_kernel!, qflx_surf, mask, qflx_sat_excess_surf,
+             qflx_infl_excess_surf, qflx_h2osfc_surf)
+
+# ---- total_surface_runoff! : qflx_surf for non-hydrologic urban columns ----
+@kernel function _soilhyd_surf_runoff_urban_kernel!(qflx_surf, xs_urban, @Const(mask_urban),
+                                                    @Const(col_itype), @Const(col_snl),
+                                                    @Const(qflx_rain_plus_snomelt),
+                                                    @Const(h2osoi_liq),
+                                                    @Const(qflx_liqevap_from_top_layer),
+                                                    @Const(qflx_floodc),
+                                                    icol_roof::Int, icol_road_imperv::Int,
+                                                    icol_sunwall::Int, icol_shadewall::Int,
+                                                    pondmx_urban, dtime)
+    c = @index(Global)
+    @inbounds if mask_urban[c]
+        if col_itype[c] == icol_roof || col_itype[c] == icol_road_imperv
+            if col_snl[c] < 0
+                qflx_surf[c] = smooth_max(0.0, qflx_rain_plus_snomelt[c])
+            else
+                xs_urban[c] = smooth_max(0.0,
+                    h2osoi_liq[c, 1] / dtime + qflx_rain_plus_snomelt[c] -
+                    qflx_liqevap_from_top_layer[c] - pondmx_urban / dtime)
+                qflx_surf[c] = xs_urban[c]
+            end
+            qflx_surf[c] = qflx_surf[c] + qflx_floodc[c]
+        elseif col_itype[c] == icol_sunwall || col_itype[c] == icol_shadewall
+            qflx_surf[c] = 0.0
+        end
+    end
+end
+
+soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
+                           qflx_rain_plus_snomelt, h2osoi_liq, qflx_liqevap_from_top_layer,
+                           qflx_floodc, icol_roof::Int, icol_road_imperv::Int,
+                           icol_sunwall::Int, icol_shadewall::Int, pondmx_urban, dtime) =
+    _launch!(_soilhyd_surf_runoff_urban_kernel!, qflx_surf, xs_urban, mask_urban,
+             col_itype, col_snl, qflx_rain_plus_snomelt, h2osoi_liq,
+             qflx_liqevap_from_top_layer, qflx_floodc, icol_roof, icol_road_imperv,
+             icol_sunwall, icol_shadewall, pondmx_urban, dtime)
+
+# ---- update_urban_ponding! : ponding state on urban surfaces ----
+@kernel function _soilhyd_urban_ponding_kernel!(h2osoi_liq, @Const(mask_urban),
+                                                @Const(col_itype), @Const(col_snl),
+                                                @Const(xs_urban),
+                                                @Const(qflx_rain_plus_snomelt),
+                                                @Const(qflx_liqevap_from_top_layer),
+                                                icol_roof::Int, icol_road_imperv::Int,
+                                                pondmx_urban, dtime)
+    c = @index(Global)
+    @inbounds if mask_urban[c]
+        if col_itype[c] == icol_roof || col_itype[c] == icol_road_imperv
+            if col_snl[c] >= 0
+                if xs_urban[c] > 0.0
+                    h2osoi_liq[c, 1] = pondmx_urban
+                else
+                    h2osoi_liq[c, 1] = smooth_max(0.0, h2osoi_liq[c, 1] +
+                        (qflx_rain_plus_snomelt[c] - qflx_liqevap_from_top_layer[c]) * dtime)
+                end
+            end
+        end
+    end
+end
+
+soilhyd_urban_ponding!(h2osoi_liq, mask_urban, col_itype, col_snl, xs_urban,
+                       qflx_rain_plus_snomelt, qflx_liqevap_from_top_layer,
+                       icol_roof::Int, icol_road_imperv::Int, pondmx_urban, dtime) =
+    _launch!(_soilhyd_urban_ponding_kernel!, h2osoi_liq, mask_urban, col_itype,
+             col_snl, xs_urban, qflx_rain_plus_snomelt, qflx_liqevap_from_top_layer,
+             icol_roof, icol_road_imperv, pondmx_urban, dtime)
+
+# ---- withdraw_groundwater_irrigation! : per-(column,layer) liq withdrawal ----
+@kernel function _soilhyd_withdraw_gw_lyr_kernel!(h2osoi_liq, @Const(mask),
+                                                  @Const(qflx_gw_uncon_irrig_lyr), dtime)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        h2osoi_liq[c, j] = h2osoi_liq[c, j] - qflx_gw_uncon_irrig_lyr[c, j] * dtime
+    end
+end
+
+soilhyd_withdraw_gw_lyr!(h2osoi_liq, mask, qflx_gw_uncon_irrig_lyr, nlevsoi::Int, dtime) =
+    _launch!(_soilhyd_withdraw_gw_lyr_kernel!, h2osoi_liq, mask, qflx_gw_uncon_irrig_lyr,
+             dtime; ndrange = (length(mask), nlevsoi))
+
+# ---- withdraw_groundwater_irrigation! : per-column confined aquifer ----
+@kernel function _soilhyd_withdraw_gw_con_kernel!(wa, @Const(mask),
+                                                  @Const(qflx_gw_con_irrig), dtime)
+    c = @index(Global)
+    @inbounds if mask[c]
+        wa[c] = wa[c] - qflx_gw_con_irrig[c] * dtime
+    end
+end
+
+soilhyd_withdraw_gw_con!(wa, mask, qflx_gw_con_irrig, dtime) =
+    _launch!(_soilhyd_withdraw_gw_con_kernel!, wa, mask, qflx_gw_con_irrig, dtime)
+
+# =========================================================================
 # SetSoilWaterFractions
 # =========================================================================
 
@@ -118,16 +361,8 @@ function set_soil_water_fractions!(
     excess_ice   = waterstatebulk_ws.excess_ice_col
     icefrac      = soilhydrology.icefrac_col
 
-    for j in 1:nlevsoi
-        for c in bounds
-            mask_hydrology[c] || continue
-
-            dz_ext = col_dz[c, j + joff] + excess_ice[c, j] / DENICE
-            vol_ice_val = smooth_min(watsat[c, j], (h2osoi_ice[c, j + joff] + excess_ice[c, j]) / (dz_ext * DENICE))
-            eff_porosity[c, j] = smooth_max(0.01, watsat[c, j] - vol_ice_val)
-            icefrac[c, j] = smooth_min(1.0, vol_ice_val / watsat[c, j])
-        end
-    end
+    soilhyd_water_fractions!(eff_porosity, icefrac, mask_hydrology, watsat, col_dz,
+                             h2osoi_ice, excess_ice, joff, nlevsoi, DENICE)
 
     return nothing
 end
@@ -152,15 +387,8 @@ function set_floodc!(
     mask_nolake::BitVector,
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        mask_nolake[c] || continue
-        g = col_gridcell[c]
-        if col_itype[c] != ICOL_SUNWALL && col_itype[c] != ICOL_SHADEWALL
-            qflx_floodc[c] = qflx_floodg[g]
-        else
-            qflx_floodc[c] = 0.0
-        end
-    end
+    soilhyd_floodc!(qflx_floodc, qflx_floodg, col_gridcell, col_itype, mask_nolake,
+                    ICOL_SUNWALL, ICOL_SHADEWALL)
 
     return nothing
 end
@@ -200,27 +428,10 @@ function set_qflx_inputs!(
     frac_sno    = waterdiagbulk.frac_sno_eff_col
     frac_h2osfc = waterdiagbulk.frac_h2osfc_col
 
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        qflx_top_soil[c] = qflx_rain_plus_snomelt[c] + qflx_snow_h2osfc[c] + qflx_floodc[c]
-
-        # Partition surface inputs between soil and h2osfc
-        if col_snl[c] >= 0
-            fsno = 0.0
-            qflx_evap = qflx_liqevap_from_top_layer[c]
-        else
-            fsno = frac_sno[c]
-            qflx_evap = qflx_ev_soil[c]
-        end
-
-        qflx_in_soil[c] = (1.0 - frac_h2osfc[c]) * (qflx_top_soil[c] - qflx_sat_excess_surf[c])
-        qflx_top_soil_to_h2osfc[c] = frac_h2osfc[c] * (qflx_top_soil[c] - qflx_sat_excess_surf[c])
-
-        # remove evaporation (snow treated in SnowHydrology)
-        qflx_in_soil[c] = qflx_in_soil[c] - (1.0 - fsno - frac_h2osfc[c]) * qflx_evap
-        qflx_top_soil_to_h2osfc[c] = qflx_top_soil_to_h2osfc[c] - frac_h2osfc[c] * qflx_ev_h2osfc[c]
-    end
+    soilhyd_qflx_inputs!(qflx_top_soil, qflx_in_soil, qflx_top_soil_to_h2osfc,
+                         mask_hydrology, col_snl, qflx_rain_plus_snomelt, qflx_snow_h2osfc,
+                         qflx_floodc, qflx_liqevap_from_top_layer, qflx_ev_soil,
+                         qflx_ev_h2osfc, qflx_sat_excess_surf, frac_sno, frac_h2osfc)
 
     return nothing
 end
@@ -257,24 +468,10 @@ function route_infiltration_excess!(
 
     h2osfcflag = soilhydrology.h2osfcflag
 
-    for c in bounds
-        mask_hydrology[c] || continue
-        l = col_landunit[c]
-        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-            qflx_in_soil_limited[c] = qflx_in_soil[c] - qflx_infl_excess[c]
-            if h2osfcflag != 0
-                qflx_in_h2osfc[c] = qflx_top_soil_to_h2osfc[c] + qflx_infl_excess[c]
-                qflx_infl_excess_surf[c] = 0.0
-            else
-                qflx_in_h2osfc[c] = qflx_top_soil_to_h2osfc[c]
-                qflx_infl_excess_surf[c] = qflx_infl_excess[c]
-            end
-        else
-            qflx_in_soil_limited[c] = qflx_in_soil[c]
-            qflx_in_h2osfc[c] = 0.0
-            qflx_infl_excess_surf[c] = 0.0
-        end
-    end
+    soilhyd_route_infl_excess!(qflx_in_soil_limited, qflx_in_h2osfc, qflx_infl_excess_surf,
+                               mask_hydrology, col_landunit, lun_itype, qflx_in_soil,
+                               qflx_top_soil_to_h2osfc, qflx_infl_excess,
+                               h2osfcflag, ISTSOIL, ISTCROP)
 
     return nothing
 end
@@ -301,10 +498,7 @@ function infiltration!(
     qflx_in_soil_limited = waterfluxbulk.qflx_in_soil_limited_col
     qflx_h2osfc_drain    = waterfluxbulk.qflx_h2osfc_drain_col
 
-    for c in bounds
-        mask_hydrology[c] || continue
-        qflx_infl[c] = qflx_in_soil_limited[c] + qflx_h2osfc_drain[c]
-    end
+    soilhyd_infiltration!(qflx_infl, mask_hydrology, qflx_in_soil_limited, qflx_h2osfc_drain)
 
     return nothing
 end
@@ -349,29 +543,14 @@ function total_surface_runoff!(
     h2osoi_liq  = waterstatebulk_ws.h2osoi_liq_col
 
     # Set qflx_surf for hydrologically-active columns
-    for c in bounds
-        mask_hydrology[c] || continue
-        qflx_surf[c] = qflx_sat_excess_surf[c] + qflx_infl_excess_surf[c] + qflx_h2osfc_surf[c]
-    end
+    soilhyd_surf_runoff!(qflx_surf, mask_hydrology, qflx_sat_excess_surf,
+                         qflx_infl_excess_surf, qflx_h2osfc_surf)
 
     # Set qflx_surf for non-hydrologically-active urban columns
-    for c in bounds
-        mask_urban[c] || continue
-        if col_itype[c] == ICOL_ROOF || col_itype[c] == ICOL_ROAD_IMPERV
-            if col_snl[c] < 0
-                qflx_surf[c] = smooth_max(0.0, qflx_rain_plus_snomelt[c])
-            else
-                xs_urban[c] = smooth_max(0.0,
-                    h2osoi_liq[c, 1] / dtime + qflx_rain_plus_snomelt[c] -
-                    qflx_liqevap_from_top_layer[c] - PONDMX_URBAN / dtime)
-                qflx_surf[c] = xs_urban[c]
-            end
-            # send flood water flux to runoff for all urban columns
-            qflx_surf[c] = qflx_surf[c] + qflx_floodc[c]
-        elseif col_itype[c] == ICOL_SUNWALL || col_itype[c] == ICOL_SHADEWALL
-            qflx_surf[c] = 0.0
-        end
-    end
+    soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
+                               qflx_rain_plus_snomelt, h2osoi_liq, qflx_liqevap_from_top_layer,
+                               qflx_floodc, ICOL_ROOF, ICOL_ROAD_IMPERV, ICOL_SUNWALL,
+                               ICOL_SHADEWALL, PONDMX_URBAN, dtime)
 
     return nothing
 end
@@ -405,20 +584,9 @@ function update_urban_ponding!(
     qflx_rain_plus_snomelt = wf.qflx_rain_plus_snomelt_col
     qflx_liqevap_from_top_layer = wf.qflx_liqevap_from_top_layer_col
 
-    for c in bounds
-        mask_urban[c] || continue
-
-        if col_itype[c] == ICOL_ROOF || col_itype[c] == ICOL_ROAD_IMPERV
-            if col_snl[c] >= 0
-                if xs_urban[c] > 0.0
-                    h2osoi_liq[c, 1] = PONDMX_URBAN
-                else
-                    h2osoi_liq[c, 1] = smooth_max(0.0, h2osoi_liq[c, 1] +
-                        (qflx_rain_plus_snomelt[c] - qflx_liqevap_from_top_layer[c]) * dtime)
-                end
-            end
-        end
-    end
+    soilhyd_urban_ponding!(h2osoi_liq, mask_urban, col_itype, col_snl, xs_urban,
+                           qflx_rain_plus_snomelt, qflx_liqevap_from_top_layer,
+                           ICOL_ROOF, ICOL_ROAD_IMPERV, PONDMX_URBAN, dtime)
 
     return nothing
 end
@@ -1556,17 +1724,9 @@ function withdraw_groundwater_irrigation!(
     wa                       = waterstate_ws.wa_col
     h2osoi_liq               = waterstate_ws.h2osoi_liq_col
 
-    for j in 1:nlevsoi
-        for c in bounds
-            mask_soil[c] || continue
-            h2osoi_liq[c, j] = h2osoi_liq[c, j] - qflx_gw_uncon_irrig_lyr[c, j] * dtime
-        end
-    end
+    soilhyd_withdraw_gw_lyr!(h2osoi_liq, mask_soil, qflx_gw_uncon_irrig_lyr, nlevsoi, dtime)
 
-    for c in bounds
-        mask_soil[c] || continue
-        wa[c] = wa[c] - qflx_gw_con_irrig[c] * dtime
-    end
+    soilhyd_withdraw_gw_con!(wa, mask_soil, qflx_gw_con_irrig, dtime)
 
     return nothing
 end

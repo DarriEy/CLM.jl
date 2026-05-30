@@ -19,9 +19,16 @@ using KernelAbstractions: @kernel, @index, @Const
 Run a KernelAbstractions `kernel` over `ndrange` on the backend of `out`
 (one thread per index). No-op for empty `out`.
 """
+# Backend of the output array. BitArray masks have no KernelAbstractions backend
+# (packed bits aren't a device array type), so kernels writing a BitVector mask run
+# on the CPU. Moving such masks to GPU requires converting them to Vector{Bool}
+# (a documented follow-up); until then this keeps the CPU path correct.
+_kernel_backend(out) = KA.get_backend(out)
+_kernel_backend(::BitArray) = KA.CPU()
+
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
-    backend = KA.get_backend(out)
+    backend = _kernel_backend(out)
     kernel(backend)(out, args...; ndrange = ndrange)
     KA.synchronize(backend)
     return out

@@ -43,6 +43,69 @@ end
 const surfalb_con = SurfaceAlbedoConstants()
 
 # --------------------------------------------------------------------------
+# KernelAbstractions kernels for simple, iteration-independent per-element
+# loops in this file. Each replaces an inline loop with identical semantics.
+# Assumes single-clump indexing (begc==1/begp==1) so output array length
+# equals the iteration range, consistent with src/infrastructure/kernels.jl.
+# --------------------------------------------------------------------------
+
+# coszen_col_arr[c] = coszen_grc[gridcell[c]]  (both downscale branches are
+# identical no-ops, so the result is unconditional)
+@kernel function _surfalb_coszen_col_kernel!(coszen_col_arr, @Const(gridcell), @Const(coszen_grc))
+    c = @index(Global)
+    @inbounds coszen_col_arr[c] = coszen_grc[gridcell[c]]
+end
+
+surfalb_coszen_col!(coszen_col_arr, gridcell, coszen_grc) =
+    _launch!(_surfalb_coszen_col_kernel!, coszen_col_arr, gridcell, coszen_grc)
+
+# coszen_patch_arr[p] = coszen_col_arr[column[p]]  (masked per patch)
+@kernel function _surfalb_coszen_patch_kernel!(coszen_patch_arr, @Const(mask),
+                                               @Const(column), @Const(coszen_col_arr))
+    p = @index(Global)
+    @inbounds if mask[p]
+        coszen_patch_arr[p] = coszen_col_arr[column[p]]
+    end
+end
+
+surfalb_coszen_patch!(coszen_patch_arr, mask, column, coszen_col_arr) =
+    _launch!(_surfalb_coszen_patch_kernel!, coszen_patch_arr, mask, column, coszen_col_arr)
+
+# Leaf/stem weighting fractions wl, ws_arr (masked per patch)
+@kernel function _surfalb_lai_weight_kernel!(wl, ws_arr, @Const(mask),
+                                             @Const(elai), @Const(esai), mpe)
+    p = @index(Global)
+    @inbounds if mask[p]
+        denom = smooth_max(elai[p] + esai[p], mpe)
+        wl[p] = elai[p] / denom
+        ws_arr[p] = esai[p] / denom
+    end
+end
+
+surfalb_lai_weight!(wl, ws_arr, mask, elai, esai, mpe) =
+    _launch!(_surfalb_lai_weight_kernel!, wl, ws_arr, mask, elai, esai, mpe; ndrange = length(wl))
+
+# rho/tau weighted reflectance/transmittance (2D: patch x waveband, masked per patch)
+@kernel function _surfalb_rho_tau_kernel!(rho, tau, @Const(mask), @Const(itype_p),
+                                          @Const(wl), @Const(ws_arr),
+                                          @Const(pftcon_rhol), @Const(pftcon_rhos),
+                                          @Const(pftcon_taul), @Const(pftcon_taus), mpe)
+    p, ib = @index(Global, NTuple)
+    @inbounds if mask[p]
+        itype = itype_p[p] + 1  # Fortran 0-based PFT -> Julia 1-based
+        rho[p, ib] = smooth_max(pftcon_rhol[itype, ib] * wl[p] + pftcon_rhos[itype, ib] * ws_arr[p], mpe)
+        tau[p, ib] = smooth_max(pftcon_taul[itype, ib] * wl[p] + pftcon_taus[itype, ib] * ws_arr[p], mpe)
+    end
+end
+
+function surfalb_rho_tau!(rho, tau, mask, itype_p, wl, ws_arr,
+                          pftcon_rhol, pftcon_rhos, pftcon_taul, pftcon_taus, mpe, numrad::Int)
+    _launch!(_surfalb_rho_tau_kernel!, rho, tau, mask, itype_p, wl, ws_arr,
+             pftcon_rhol, pftcon_rhos, pftcon_taul, pftcon_taus, mpe;
+             ndrange = (size(rho, 1), numrad))
+end
+
+# --------------------------------------------------------------------------
 # surface_albedo_init_time_const!
 # --------------------------------------------------------------------------
 
@@ -709,21 +772,11 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     FT = eltype(coszen_col_arr)
     coszen_patch_arr = zeros(FT, length(bounds_patch))
 
-    for c in bounds_col
-        g = col.gridcell[c]
-        if col.is_hillslope_column[c] && downscale_hillslope_meteorology
-            # Hillslope meteorology downscaling (stub — use gridcell coszen)
-            coszen_col_arr[c] = coszen_grc[g]
-        else
-            coszen_col_arr[c] = coszen_grc[g]
-        end
-    end
+    # Hillslope downscaling branch is currently a no-op (both branches identical),
+    # so coszen_col[c] = coszen_grc[gridcell[c]] unconditionally.
+    surfalb_coszen_col!(coszen_col_arr, col.gridcell, coszen_grc)
 
-    for p in bounds_patch
-        mask_nourbanp[p] || continue
-        c = patchdata.column[p]
-        coszen_patch_arr[p] = coszen_col_arr[c]
-    end
+    surfalb_coszen_patch!(coszen_patch_arr, mask_nourbanp, patchdata.column, coszen_col_arr)
 
     # --- Initialize output ---
     for ib in 1:numrad
@@ -1074,20 +1127,10 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     rho = zeros(FT, np, numrad)
     tau = zeros(FT, np, numrad)
 
-    for p in bounds_patch
-        mask_vegsol[p] || continue
-        wl[p] = elai[p] / smooth_max(elai[p] + esai[p], mpe)
-        ws_arr[p] = esai[p] / smooth_max(elai[p] + esai[p], mpe)
-    end
+    surfalb_lai_weight!(wl, ws_arr, mask_vegsol, elai, esai, mpe)
 
-    for ib in 1:numrad
-        for p in bounds_patch
-            mask_vegsol[p] || continue
-            itype = patchdata.itype[p] + 1  # +1: Fortran 0-based PFT → Julia 1-based array
-            rho[p, ib] = smooth_max(pftcon_rhol[itype, ib] * wl[p] + pftcon_rhos[itype, ib] * ws_arr[p], mpe)
-            tau[p, ib] = smooth_max(pftcon_taul[itype, ib] * wl[p] + pftcon_taus[itype, ib] * ws_arr[p], mpe)
-        end
-    end
+    surfalb_rho_tau!(rho, tau, mask_vegsol, patchdata.itype, wl, ws_arr,
+                     pftcon_rhol, pftcon_rhos, pftcon_taul, pftcon_taus, mpe, numrad)
 
     # --- Two-stream calculation ---
     if !use_fates

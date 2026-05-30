@@ -270,6 +270,24 @@ end
 
 Update h2osno_no_layers or h2osoi_ice based on new snow.
 """
+@kernel function _snowhyd_add_new_snow_kernel!(h2osno_no_layers, @Const(mask),
+        @Const(snl), @Const(qflx_snow_grnd), h2osoi_ice, dtime, nlevsno::Int,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        if snl[c] == 0
+            h2osno_no_layers[c] = h2osno_no_layers[c] + qflx_snow_grnd[c] * dtime
+        else
+            jj = (snl[c] + 1) + nlevsno  # top snow layer Julia index
+            h2osoi_ice[c, jj] = h2osoi_ice[c, jj] + qflx_snow_grnd[c] * dtime
+        end
+    end
+end
+
+snowhyd_add_new_snow!(h2osno_no_layers, mask, snl, qflx_snow_grnd, h2osoi_ice, dtime, nlevsno, bounds) =
+    _launch!(_snowhyd_add_new_snow_kernel!, h2osno_no_layers, mask, snl, qflx_snow_grnd,
+             h2osoi_ice, dtime, nlevsno, first(bounds), last(bounds))
+
 function update_state_add_new_snow!(
     h2osno_no_layers::Vector{<:Real},
     h2osoi_ice::Matrix{<:Real},
@@ -280,15 +298,8 @@ function update_state_add_new_snow!(
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    for c in bounds
-        mask[c] || continue
-        if snl[c] == 0
-            h2osno_no_layers[c] = h2osno_no_layers[c] + qflx_snow_grnd[c] * dtime
-        else
-            jj = (snl[c] + 1) + nlevsno  # top snow layer Julia index
-            h2osoi_ice[c, jj] = h2osoi_ice[c, jj] + qflx_snow_grnd[c] * dtime
-        end
-    end
+    snowhyd_add_new_snow!(h2osno_no_layers, mask, snl, qflx_snow_grnd,
+                          h2osoi_ice, dtime, nlevsno, bounds)
 end
 
 # =========================================================================
@@ -301,6 +312,18 @@ end
 
 Build a column-level mask of thawed wetland columns with thin (no-layer) snow pack.
 """
+@kernel function _snowhyd_thawed_wetland_filter_kernel!(mask_out, @Const(t_grnd),
+        @Const(lun_itype_col), @Const(snl), @Const(mask_nolake), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        mask_out[c] = (lun_itype_col[c] == ISTWET && t_grnd[c] > TFRZ && snl[c] == 0)
+    end
+end
+
+snowhyd_thawed_wetland_filter!(mask_out, t_grnd, lun_itype_col, snl, mask_nolake, bounds) =
+    _launch!(_snowhyd_thawed_wetland_filter_kernel!, mask_out, t_grnd, lun_itype_col,
+             snl, mask_nolake, first(bounds), last(bounds))
+
 function build_filter_thawed_wetland_thin_snowpack!(
     mask_out::BitVector,
     t_grnd::Vector{<:Real},
@@ -310,12 +333,7 @@ function build_filter_thawed_wetland_thin_snowpack!(
     bounds::UnitRange{Int}
 )
     fill!(mask_out, false)
-    for c in bounds
-        mask_nolake[c] || continue
-        if lun_itype_col[c] == ISTWET && t_grnd[c] > TFRZ && snl[c] == 0
-            mask_out[c] = true
-        end
-    end
+    snowhyd_thawed_wetland_filter!(mask_out, t_grnd, lun_itype_col, snl, mask_nolake, bounds)
 end
 
 # =========================================================================
@@ -327,15 +345,24 @@ end
 
 Remove snow from thawed wetlands — set h2osno_no_layers to zero.
 """
+@kernel function _snowhyd_remove_snow_wetlands_kernel!(h2osno_no_layers, @Const(mask),
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        h2osno_no_layers[c] = 0.0
+    end
+end
+
+snowhyd_remove_snow_wetlands!(h2osno_no_layers, mask, bounds) =
+    _launch!(_snowhyd_remove_snow_wetlands_kernel!, h2osno_no_layers, mask,
+             first(bounds), last(bounds))
+
 function update_state_remove_snow_thawed_wetlands!(
     h2osno_no_layers::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        mask[c] || continue
-        h2osno_no_layers[c] = 0.0
-    end
+    snowhyd_remove_snow_wetlands!(h2osno_no_layers, mask, bounds)
 end
 
 # =========================================================================
@@ -347,15 +374,24 @@ end
 
 Remove snow from thawed wetlands — set snow_depth to zero.
 """
+@kernel function _snowhyd_bulk_remove_snow_wetlands_kernel!(snow_depth, @Const(mask),
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        snow_depth[c] = 0.0
+    end
+end
+
+snowhyd_bulk_remove_snow_wetlands!(snow_depth, mask, bounds) =
+    _launch!(_snowhyd_bulk_remove_snow_wetlands_kernel!, snow_depth, mask,
+             first(bounds), last(bounds))
+
 function bulk_remove_snow_thawed_wetlands!(
     snow_depth::Vector{<:Real},
     mask::BitVector,
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        mask[c] || continue
-        snow_depth[c] = 0.0
-    end
+    snowhyd_bulk_remove_snow_wetlands!(snow_depth, mask, bounds)
 end
 
 # =========================================================================
@@ -369,6 +405,25 @@ end
 
 Build a column-level mask of columns where an explicit snow pack needs initialization.
 """
+@kernel function _snowhyd_snowpack_init_filter_kernel!(mask_out, @Const(snl),
+        @Const(lun_itype_col), @Const(frac_sno_eff), @Const(snow_depth),
+        @Const(mask), dzmin1, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        if lun_itype_col[c] == ISTDLAK
+            mask_out[c] = (snl[c] == 0 &&
+                           frac_sno_eff[c] * snow_depth[c] >= (dzmin1 + LSADZ))
+        else
+            mask_out[c] = (snl[c] == 0 &&
+                           frac_sno_eff[c] * snow_depth[c] >= dzmin1)
+        end
+    end
+end
+
+snowhyd_snowpack_init_filter!(mask_out, snl, lun_itype_col, frac_sno_eff, snow_depth, mask, dzmin1, bounds) =
+    _launch!(_snowhyd_snowpack_init_filter_kernel!, mask_out, snl, lun_itype_col,
+             frac_sno_eff, snow_depth, mask, dzmin1, first(bounds), last(bounds))
+
 function build_filter_snowpack_initialized!(
     mask_out::BitVector,
     snl::Vector{Int},
@@ -382,17 +437,8 @@ function build_filter_snowpack_initialized!(
     dzmin = SNOW_DZMIN[]
 
     fill!(mask_out, false)
-    for c in bounds
-        mask[c] || continue
-
-        if lun_itype_col[c] == ISTDLAK
-            mask_out[c] = (snl[c] == 0 &&
-                           frac_sno_eff[c] * snow_depth[c] >= (dzmin[1] + LSADZ))
-        else
-            mask_out[c] = (snl[c] == 0 &&
-                           frac_sno_eff[c] * snow_depth[c] >= dzmin[1])
-        end
-    end
+    snowhyd_snowpack_init_filter!(mask_out, snl, lun_itype_col, frac_sno_eff,
+                                  snow_depth, mask, dzmin[1], bounds)
 end
 
 # =========================================================================
@@ -405,6 +451,20 @@ end
 
 Initialize water state variables for columns with newly-initialized snow pack.
 """
+@kernel function _snowhyd_initialize_snow_pack_kernel!(h2osno_no_layers, @Const(mask),
+        h2osoi_ice, h2osoi_liq, jj_zero::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        h2osoi_ice[c, jj_zero] = h2osno_no_layers[c]
+        h2osoi_liq[c, jj_zero] = 0.0
+        h2osno_no_layers[c] = 0.0
+    end
+end
+
+snowhyd_initialize_snow_pack!(h2osno_no_layers, mask, h2osoi_ice, h2osoi_liq, jj_zero, bounds) =
+    _launch!(_snowhyd_initialize_snow_pack_kernel!, h2osno_no_layers, mask,
+             h2osoi_ice, h2osoi_liq, jj_zero, first(bounds), last(bounds))
+
 function update_state_initialize_snow_pack!(
     h2osno_no_layers::Vector{<:Real},
     h2osoi_ice::Matrix{<:Real},
@@ -414,12 +474,8 @@ function update_state_initialize_snow_pack!(
     nlevsno::Int
 )
     jj_zero = 0 + nlevsno  # Julia index for layer 0
-    for c in bounds
-        mask[c] || continue
-        h2osoi_ice[c, jj_zero] = h2osno_no_layers[c]
-        h2osoi_liq[c, jj_zero] = 0.0
-        h2osno_no_layers[c] = 0.0
-    end
+    snowhyd_initialize_snow_pack!(h2osno_no_layers, mask, h2osoi_ice, h2osoi_liq,
+                                  jj_zero, bounds)
 end
 
 # =========================================================================
@@ -449,9 +505,15 @@ function bulk_initialize_snow_pack!(
     jj_zero = 0 + nlevsno  # Julia index for layer 0 (dz/z arrays)
     jj_surface_zi = nlevsno + 1  # Julia index for interface j=0 (surface)
 
-    for c in bounds
-        mask[c] || continue
+    snowhyd_initialize_snow_pack_bulk!(snl, mask, zi, dz, z, t_soisno, frac_iceold,
+        snomelt_accum, forc_t, snow_depth, jj_zero, jj_surface_zi, bounds)
+end
 
+@kernel function _snowhyd_initialize_snow_pack_bulk_kernel!(snl, @Const(mask),
+        zi, dz, z, t_soisno, frac_iceold, snomelt_accum, @Const(forc_t),
+        @Const(snow_depth), jj_zero::Int, jj_surface_zi::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
         snl[c] = -1
         dz[c, jj_zero] = snow_depth[c]
         # Keep snow-layer interfaces anchored to the fixed surface interface.
@@ -466,6 +528,12 @@ function bulk_initialize_snow_pack!(
         snomelt_accum[c] = 0.0
     end
 end
+
+snowhyd_initialize_snow_pack_bulk!(snl, mask, zi, dz, z, t_soisno, frac_iceold,
+        snomelt_accum, forc_t, snow_depth, jj_zero, jj_surface_zi, bounds) =
+    _launch!(_snowhyd_initialize_snow_pack_bulk_kernel!, snl, mask, zi, dz, z,
+             t_soisno, frac_iceold, snomelt_accum, forc_t, snow_depth,
+             jj_zero, jj_surface_zi, first(bounds), last(bounds))
 
 # =========================================================================
 # UpdateState_TopLayerFluxes
@@ -495,9 +563,18 @@ function update_state_top_layer_fluxes!(
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    for c in bounds
-        mask_snow[c] || continue
+    snowhyd_top_layer_fluxes!(h2osoi_ice, h2osoi_liq, mask_snow, snl, frac_sno_eff,
+        qflx_soliddew_to_top_layer, qflx_solidevap_from_top_layer, qflx_liq_grnd,
+        qflx_liqdew_to_top_layer, qflx_liqevap_from_top_layer, dtime, nlevsno, bounds)
+end
 
+@kernel function _snowhyd_top_layer_fluxes_kernel!(h2osoi_ice, @Const(mask_snow),
+        @Const(snl), @Const(frac_sno_eff), @Const(qflx_soliddew_to_top_layer),
+        @Const(qflx_solidevap_from_top_layer), @Const(qflx_liq_grnd),
+        @Const(qflx_liqdew_to_top_layer), @Const(qflx_liqevap_from_top_layer),
+        h2osoi_liq, dtime, nlevsno::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
         lev_top = snl[c] + 1
         jj = lev_top + nlevsno  # Julia index for top snow layer
 
@@ -514,6 +591,14 @@ function update_state_top_layer_fluxes!(
         h2osoi_liq[c, jj] = max(0.0, h2osoi_liq[c, jj])
     end
 end
+
+snowhyd_top_layer_fluxes!(h2osoi_ice, h2osoi_liq, mask_snow, snl, frac_sno_eff,
+        qflx_soliddew_to_top_layer, qflx_solidevap_from_top_layer, qflx_liq_grnd,
+        qflx_liqdew_to_top_layer, qflx_liqevap_from_top_layer, dtime, nlevsno, bounds) =
+    _launch!(_snowhyd_top_layer_fluxes_kernel!, h2osoi_ice, mask_snow, snl, frac_sno_eff,
+             qflx_soliddew_to_top_layer, qflx_solidevap_from_top_layer, qflx_liq_grnd,
+             qflx_liqdew_to_top_layer, qflx_liqevap_from_top_layer, h2osoi_liq,
+             dtime, nlevsno, first(bounds), last(bounds))
 
 # =========================================================================
 # BulkFlux_SnowPercolation
@@ -611,22 +696,32 @@ function update_state_snow_percolation!(
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    for j in (-nlevsno+1):0
-        jj = j + nlevsno
-        for c in bounds
-            mask_snow[c] || continue
-            if j >= snl[c] + 1
-                # Add percolation from layer above
-                if j >= snl[c] + 2
-                    jj_above = (j - 1) + nlevsno
-                    h2osoi_liq[c, jj] = h2osoi_liq[c, jj] + qflx_snow_percolation[c, jj_above] * dtime
-                end
-                # Subtract percolation out of this layer
-                h2osoi_liq[c, jj] = h2osoi_liq[c, jj] - qflx_snow_percolation[c, jj] * dtime
+    snowhyd_snow_percolation!(h2osoi_liq, mask_snow, snl, qflx_snow_percolation,
+        dtime, nlevsno, bounds)
+end
+
+@kernel function _snowhyd_snow_percolation_kernel!(h2osoi_liq, @Const(mask_snow),
+        @Const(snl), @Const(qflx_snow_percolation), dtime, nlevsno::Int,
+        cmin::Int, cmax::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        j = jj - nlevsno  # Fortran layer index
+        if j >= snl[c] + 1
+            # Add percolation from layer above
+            if j >= snl[c] + 2
+                jj_above = (j - 1) + nlevsno
+                h2osoi_liq[c, jj] = h2osoi_liq[c, jj] + qflx_snow_percolation[c, jj_above] * dtime
             end
+            # Subtract percolation out of this layer
+            h2osoi_liq[c, jj] = h2osoi_liq[c, jj] - qflx_snow_percolation[c, jj] * dtime
         end
     end
 end
+
+snowhyd_snow_percolation!(h2osoi_liq, mask_snow, snl, qflx_snow_percolation, dtime, nlevsno, bounds) =
+    _launch!(_snowhyd_snow_percolation_kernel!, h2osoi_liq, mask_snow, snl,
+             qflx_snow_percolation, dtime, nlevsno, first(bounds), last(bounds);
+             ndrange = (length(snl), nlevsno))
 
 # =========================================================================
 # CalcAndApplyAerosolFluxes
@@ -797,17 +892,27 @@ function post_percolation_adjust_layer_thicknesses!(
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    for j in (-nlevsno+1):0
-        jj = j + nlevsno
-        for c in bounds
-            mask_snow[c] || continue
-            if j >= snl[c] + 1
-                dz[c, jj] = smooth_max(dz[c, jj],
-                    h2osoi_liq[c, jj] / DENH2O + h2osoi_ice[c, jj] / DENICE)
-            end
+    snowhyd_adjust_layer_thicknesses!(dz, mask_snow, snl, h2osoi_ice, h2osoi_liq,
+        nlevsno, bounds)
+end
+
+@kernel function _snowhyd_adjust_layer_thicknesses_kernel!(dz, @Const(mask_snow),
+        @Const(snl), @Const(h2osoi_ice), @Const(h2osoi_liq), nlevsno::Int,
+        cmin::Int, cmax::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        j = jj - nlevsno  # Fortran layer index
+        if j >= snl[c] + 1
+            dz[c, jj] = smooth_max(dz[c, jj],
+                h2osoi_liq[c, jj] / DENH2O + h2osoi_ice[c, jj] / DENICE)
         end
     end
 end
+
+snowhyd_adjust_layer_thicknesses!(dz, mask_snow, snl, h2osoi_ice, h2osoi_liq, nlevsno, bounds) =
+    _launch!(_snowhyd_adjust_layer_thicknesses_kernel!, dz, mask_snow, snl,
+             h2osoi_ice, h2osoi_liq, nlevsno, first(bounds), last(bounds);
+             ndrange = (length(snl), nlevsno))
 
 # =========================================================================
 # BulkDiag_SnowWaterAccumulatedSnow
@@ -1699,21 +1804,31 @@ function zero_empty_snow_layers!(
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    for j in (-nlevsno+1):0
-        jj = j + nlevsno
-        for c in bounds
-            mask_snow[c] || continue
-            if j <= snl[c] && snl[c] > -nlevsno
-                h2osoi_ice[c, jj] = 0.0
-                h2osoi_liq[c, jj] = 0.0
-                t_soisno[c, jj] = 0.0
-                dz[c, jj] = 0.0
-                z[c, jj] = 0.0
-                zi[c, jj] = 0.0
-            end
+    snowhyd_zero_empty_snow_layers!(snl, dz, z, zi, t_soisno, h2osoi_ice, h2osoi_liq,
+        mask_snow, nlevsno, bounds)
+end
+
+@kernel function _snowhyd_zero_empty_layers_kernel!(h2osoi_ice, @Const(mask_snow),
+        @Const(snl), h2osoi_liq, t_soisno, dz, z, zi, nlevsno::Int,
+        cmin::Int, cmax::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        j = jj - nlevsno  # Fortran layer index
+        if j <= snl[c] && snl[c] > -nlevsno
+            h2osoi_ice[c, jj] = 0.0
+            h2osoi_liq[c, jj] = 0.0
+            t_soisno[c, jj] = 0.0
+            dz[c, jj] = 0.0
+            z[c, jj] = 0.0
+            zi[c, jj] = 0.0
         end
     end
 end
+
+snowhyd_zero_empty_snow_layers!(snl, dz, z, zi, t_soisno, h2osoi_ice, h2osoi_liq, mask_snow, nlevsno, bounds) =
+    _launch!(_snowhyd_zero_empty_layers_kernel!, h2osoi_ice, mask_snow, snl,
+             h2osoi_liq, t_soisno, dz, z, zi, nlevsno, first(bounds), last(bounds);
+             ndrange = (length(snl), nlevsno))
 
 # =========================================================================
 # InitSnowLayers
@@ -1876,8 +1991,13 @@ function build_snow_filter!(
 )
     fill!(mask_snow, false)
     fill!(mask_nosnow, false)
-    for c in bounds
-        mask_nolake[c] || continue
+    snowhyd_build_snow_filter!(mask_snow, mask_nosnow, snl, mask_nolake, bounds)
+end
+
+@kernel function _snowhyd_build_snow_filter_kernel!(mask_snow, @Const(snl),
+        @Const(mask_nolake), mask_nosnow, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
         if snl[c] < 0
             mask_snow[c] = true
         else
@@ -1885,6 +2005,10 @@ function build_snow_filter!(
         end
     end
 end
+
+snowhyd_build_snow_filter!(mask_snow, mask_nosnow, snl, mask_nolake, bounds) =
+    _launch!(_snowhyd_build_snow_filter_kernel!, mask_snow, snl, mask_nolake,
+             mask_nosnow, first(bounds), last(bounds))
 
 # =========================================================================
 # SnowCappingExcess
@@ -1963,14 +2087,26 @@ function init_flux_snow_capping!(
     mask::BitVector,
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        mask[c] || continue
+    snowhyd_init_flux_snow_capping!(qflx_snwcp_ice, qflx_snwcp_liq,
+        qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq, mask, bounds)
+end
+
+@kernel function _snowhyd_init_flux_capping_kernel!(qflx_snwcp_ice, @Const(mask),
+        qflx_snwcp_liq, qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
         qflx_snwcp_ice[c] = 0.0
         qflx_snwcp_liq[c] = 0.0
         qflx_snwcp_discarded_ice[c] = 0.0
         qflx_snwcp_discarded_liq[c] = 0.0
     end
 end
+
+snowhyd_init_flux_snow_capping!(qflx_snwcp_ice, qflx_snwcp_liq, qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq, mask, bounds) =
+    _launch!(_snowhyd_init_flux_capping_kernel!, qflx_snwcp_ice, mask, qflx_snwcp_liq,
+             qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq,
+             first(bounds), last(bounds))
 
 # =========================================================================
 # BulkFlux_SnowCappingFluxes

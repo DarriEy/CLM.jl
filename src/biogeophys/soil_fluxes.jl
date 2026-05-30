@@ -4,6 +4,135 @@
 # Update surface fluxes based on the new ground temperature.
 # ==========================================================================
 
+# --------------------------------------------------------------------------
+# Kernel: temperature difference for flux corrections (per column, masked).
+# Writes t_grnd0[c] and tinc[c]; both fully independent per column.
+# --------------------------------------------------------------------------
+@kernel function _soilflux_tinc_kernel!(tinc, @Const(mask), t_grnd0,
+                                        @Const(snl), @Const(frac_sno_eff_col),
+                                        @Const(frac_h2osfc_col), @Const(t_ssbef_col),
+                                        @Const(t_h2osfc_bef_col), @Const(t_grnd_col),
+                                        nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        if snl[c] < 0
+            t_grnd0[c] = frac_sno_eff_col[c] *
+                    t_ssbef_col[c, snl[c] + 1 + nlevsno] +
+                (1.0 - frac_sno_eff_col[c] - frac_h2osfc_col[c]) *
+                    t_ssbef_col[c, 1 + nlevsno] +
+                frac_h2osfc_col[c] * t_h2osfc_bef_col[c]
+        else
+            t_grnd0[c] = (1.0 - frac_h2osfc_col[c]) *
+                    t_ssbef_col[c, 1 + nlevsno] +
+                frac_h2osfc_col[c] * t_h2osfc_bef_col[c]
+        end
+        tinc[c] = t_grnd_col[c] - t_grnd0[c]
+    end
+end
+
+soilflux_tinc!(tinc, mask, t_grnd0, snl, frac_sno_eff_col, frac_h2osfc_col,
+               t_ssbef_col, t_h2osfc_bef_col, t_grnd_col, nlevsno::Int) =
+    _launch!(_soilflux_tinc_kernel!, tinc, mask, t_grnd0, snl, frac_sno_eff_col,
+             frac_h2osfc_col, t_ssbef_col, t_h2osfc_bef_col, t_grnd_col, nlevsno)
+
+# --------------------------------------------------------------------------
+# Kernel: correct fluxes to present soil temperature (per patch, masked).
+# Each patch updates only its own index; no cross-patch dependence.
+# --------------------------------------------------------------------------
+@kernel function _soilflux_correct_kernel!(eflx_sh_grnd_patch, @Const(mask),
+                                           @Const(column), @Const(landunit),
+                                           @Const(urbpoi), @Const(tinc),
+                                           @Const(cgrnds_patch), @Const(cgrndl_patch),
+                                           qflx_evap_soi_patch, qflx_ev_soil_patch,
+                                           qflx_ev_h2osfc_patch, qflx_ev_snow_patch)
+    p = @index(Global)
+    @inbounds if mask[p]
+        c = column[p]
+        eflx_sh_grnd_patch[p] += tinc[c] * cgrnds_patch[p]
+        qflx_evap_soi_patch[p] += tinc[c] * cgrndl_patch[p]
+
+        l = landunit[p]
+        if urbpoi[l]
+            qflx_ev_soil_patch[p] = 0.0
+            qflx_ev_h2osfc_patch[p] = 0.0
+            qflx_ev_snow_patch[p] = qflx_evap_soi_patch[p]
+        else
+            qflx_ev_snow_patch[p] += tinc[c] * cgrndl_patch[p]
+            qflx_ev_soil_patch[p] += tinc[c] * cgrndl_patch[p]
+            qflx_ev_h2osfc_patch[p] += tinc[c] * cgrndl_patch[p]
+        end
+    end
+end
+
+soilflux_correct!(eflx_sh_grnd_patch, mask, column, landunit, urbpoi, tinc,
+                  cgrnds_patch, cgrndl_patch, qflx_evap_soi_patch, qflx_ev_soil_patch,
+                  qflx_ev_h2osfc_patch, qflx_ev_snow_patch) =
+    _launch!(_soilflux_correct_kernel!, eflx_sh_grnd_patch, mask, column, landunit,
+             urbpoi, tinc, cgrnds_patch, cgrndl_patch, qflx_evap_soi_patch,
+             qflx_ev_soil_patch, qflx_ev_h2osfc_patch, qflx_ev_snow_patch)
+
+# --------------------------------------------------------------------------
+# Kernel: base soil energy balance error (per patch, masked).
+# Covers the per-patch terms only; the layer-summation contributions
+# (loop-carried over j) are intentionally left as scalar loops.
+# --------------------------------------------------------------------------
+@kernel function _soilflux_errsoi_base_kernel!(errsoi_patch, @Const(mask),
+                                               @Const(column), @Const(itype),
+                                               @Const(eflx_soil_grnd_patch),
+                                               @Const(xmf_col), @Const(xmf_h2osfc_col),
+                                               @Const(frac_h2osfc_col),
+                                               @Const(t_h2osfc_col),
+                                               @Const(t_h2osfc_bef_col),
+                                               @Const(c_h2osfc_col),
+                                               @Const(eflx_h2osfc_to_snow_col),
+                                               @Const(eflx_building_heat_errsoi_col),
+                                               dtime,
+                                               icol_sunwall::Int, icol_shadewall::Int,
+                                               icol_roof::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        c = column[p]
+        errsoi_patch[p] = eflx_soil_grnd_patch[p] -
+            xmf_col[c] - xmf_h2osfc_col[c] -
+            frac_h2osfc_col[c] *
+            (t_h2osfc_col[c] - t_h2osfc_bef_col[c]) *
+            (c_h2osfc_col[c] / dtime)
+        errsoi_patch[p] += eflx_h2osfc_to_snow_col[c]
+
+        if itype[c] == icol_sunwall || itype[c] == icol_shadewall || itype[c] == icol_roof
+            errsoi_patch[p] += eflx_building_heat_errsoi_col[c]
+        end
+    end
+end
+
+soilflux_errsoi_base!(errsoi_patch, mask, column, itype, eflx_soil_grnd_patch,
+                      xmf_col, xmf_h2osfc_col, frac_h2osfc_col, t_h2osfc_col,
+                      t_h2osfc_bef_col, c_h2osfc_col, eflx_h2osfc_to_snow_col,
+                      eflx_building_heat_errsoi_col, dtime,
+                      icol_sunwall::Int, icol_shadewall::Int, icol_roof::Int) =
+    _launch!(_soilflux_errsoi_base_kernel!, errsoi_patch, mask, column, itype,
+             eflx_soil_grnd_patch, xmf_col, xmf_h2osfc_col, frac_h2osfc_col,
+             t_h2osfc_col, t_h2osfc_bef_col, c_h2osfc_col, eflx_h2osfc_to_snow_col,
+             eflx_building_heat_errsoi_col, dtime, icol_sunwall, icol_shadewall, icol_roof)
+
+# --------------------------------------------------------------------------
+# Kernel: urban patch skin temperature from column top-layer soil temp.
+# Per patch, masked; independent.
+# --------------------------------------------------------------------------
+@kernel function _soilflux_urban_tskin_kernel!(t_skin_patch, @Const(mask),
+                                               @Const(column), @Const(snl),
+                                               @Const(t_soisno_col), nlevsno::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        c = column[p]
+        t_skin_patch[p] = t_soisno_col[c, snl[c] + 1 + nlevsno]
+    end
+end
+
+soilflux_urban_tskin!(t_skin_patch, mask, column, snl, t_soisno_col, nlevsno::Int) =
+    _launch!(_soilflux_urban_tskin_kernel!, t_skin_patch, mask, column, snl,
+             t_soisno_col, nlevsno)
+
 """
     soil_fluxes!(...)
 
@@ -57,47 +186,20 @@ function soil_fluxes!(
     # Loop 1: Calculate temperature difference for flux corrections (column)
     # =========================================================================
 
-    for c in bounds_col
-        mask_nolakec[c] || continue
-
-        if col_data.snl[c] < 0
-            t_grnd0[c] = waterdiagbulk.frac_sno_eff_col[c] *
-                    temperature.t_ssbef_col[c, col_data.snl[c] + 1 + nlevsno] +
-                (1.0 - waterdiagbulk.frac_sno_eff_col[c] - waterdiagbulk.frac_h2osfc_col[c]) *
-                    temperature.t_ssbef_col[c, 1 + nlevsno] +
-                waterdiagbulk.frac_h2osfc_col[c] * temperature.t_h2osfc_bef_col[c]
-        else
-            t_grnd0[c] = (1.0 - waterdiagbulk.frac_h2osfc_col[c]) *
-                    temperature.t_ssbef_col[c, 1 + nlevsno] +
-                waterdiagbulk.frac_h2osfc_col[c] * temperature.t_h2osfc_bef_col[c]
-        end
-
-        tinc[c] = temperature.t_grnd_col[c] - t_grnd0[c]
-    end
+    soilflux_tinc!(tinc, mask_nolakec, t_grnd0, col_data.snl,
+                   waterdiagbulk.frac_sno_eff_col, waterdiagbulk.frac_h2osfc_col,
+                   temperature.t_ssbef_col, temperature.t_h2osfc_bef_col,
+                   temperature.t_grnd_col, nlevsno)
 
     # =========================================================================
     # Loop 2: Correct fluxes to present soil temperature (patch)
     # =========================================================================
 
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        c = patch_data.column[p]
-
-        energyflux.eflx_sh_grnd_patch[p] += tinc[c] * energyflux.cgrnds_patch[p]
-        waterfluxbulk.wf.qflx_evap_soi_patch[p] += tinc[c] * energyflux.cgrndl_patch[p]
-
-        # Set ev_soil, ev_h2osfc, ev_snow for urban landunits
-        l = patch_data.landunit[p]
-        if lun_data.urbpoi[l]
-            waterfluxbulk.qflx_ev_soil_patch[p] = 0.0
-            waterfluxbulk.qflx_ev_h2osfc_patch[p] = 0.0
-            waterfluxbulk.qflx_ev_snow_patch[p] = waterfluxbulk.wf.qflx_evap_soi_patch[p]
-        else
-            waterfluxbulk.qflx_ev_snow_patch[p] += tinc[c] * energyflux.cgrndl_patch[p]
-            waterfluxbulk.qflx_ev_soil_patch[p] += tinc[c] * energyflux.cgrndl_patch[p]
-            waterfluxbulk.qflx_ev_h2osfc_patch[p] += tinc[c] * energyflux.cgrndl_patch[p]
-        end
-    end
+    soilflux_correct!(energyflux.eflx_sh_grnd_patch, mask_nolakep, patch_data.column,
+                      patch_data.landunit, lun_data.urbpoi, tinc,
+                      energyflux.cgrnds_patch, energyflux.cgrndl_patch,
+                      waterfluxbulk.wf.qflx_evap_soi_patch, waterfluxbulk.qflx_ev_soil_patch,
+                      waterfluxbulk.qflx_ev_h2osfc_patch, waterfluxbulk.qflx_ev_snow_patch)
 
     # =========================================================================
     # Loop 3: Partition evaporation into liquid and solid (patch)
@@ -295,22 +397,14 @@ function soil_fluxes!(
     # Loop 6: Soil energy balance check (errsoi_patch)
     # =========================================================================
 
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        c = patch_data.column[p]
-
-        energyflux.errsoi_patch[p] = energyflux.eflx_soil_grnd_patch[p] -
-            temperature.xmf_col[c] - temperature.xmf_h2osfc_col[c] -
-            waterdiagbulk.frac_h2osfc_col[c] *
-            (temperature.t_h2osfc_col[c] - temperature.t_h2osfc_bef_col[c]) *
-            (temperature.c_h2osfc_col[c] / dtime)
-        energyflux.errsoi_patch[p] += energyflux.eflx_h2osfc_to_snow_col[c]
-
-        # For urban sunwall, shadewall, and roof columns, include building heat flux
-        if col_data.itype[c] == ICOL_SUNWALL || col_data.itype[c] == ICOL_SHADEWALL || col_data.itype[c] == ICOL_ROOF
-            energyflux.errsoi_patch[p] += energyflux.eflx_building_heat_errsoi_col[c]
-        end
-    end
+    soilflux_errsoi_base!(energyflux.errsoi_patch, mask_nolakep, patch_data.column,
+                          col_data.itype, energyflux.eflx_soil_grnd_patch,
+                          temperature.xmf_col, temperature.xmf_h2osfc_col,
+                          waterdiagbulk.frac_h2osfc_col, temperature.t_h2osfc_col,
+                          temperature.t_h2osfc_bef_col, temperature.c_h2osfc_col,
+                          energyflux.eflx_h2osfc_to_snow_col,
+                          energyflux.eflx_building_heat_errsoi_col, dtime,
+                          ICOL_SUNWALL, ICOL_SHADEWALL, ICOL_ROOF)
 
     # Nested loop: errsoi contributions for non-urban columns (j from -nlevsno+1 to nlevgrnd)
     for j_f in (-nlevsno + 1):nlevgrnd
@@ -415,11 +509,8 @@ function soil_fluxes!(
     # Assign column-level t_soisno(snl+1) to t_skin for urban patches
     # =========================================================================
 
-    for p in bounds_patch
-        mask_urbanp[p] || continue
-        c = patch_data.column[p]
-        temperature.t_skin_patch[p] = temperature.t_soisno_col[c, col_data.snl[c] + 1 + nlevsno]
-    end
+    soilflux_urban_tskin!(temperature.t_skin_patch, mask_urbanp, patch_data.column,
+                          col_data.snl, temperature.t_soisno_col, nlevsno)
 
     return nothing
 end
