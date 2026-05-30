@@ -5,6 +5,10 @@ using Dates
 using NCDatasets
 import Adapt  # device-movable state structs (Adapt.@adapt_structure)
 import KernelAbstractions  # backend-agnostic physics kernels (CPU/GPU)
+# Bring the KA macros into module scope HERE (before any include) so kernels can be
+# defined in early-included files too (e.g. types/friction_velocity.jl), not just in
+# infrastructure/kernels.jl. Macros must be in scope at each file's include/lower time.
+using KernelAbstractions: @kernel, @index, @Const
 
 # ===========================================================================
 # Tier 1: Constants & Parameters

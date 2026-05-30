@@ -608,6 +608,7 @@ function friction_velocity!(
     zetam = 1.574  # transition point of flux-gradient relation (wind profile)
     zetat = 0.465  # transition point of flux-gradient relation (temp. profile)
 
+    if landunit_index
     for f in 1:fn
         n = filtern[f]
 
@@ -850,6 +851,231 @@ function friction_velocity!(
         end
 
     end  # end filter loop
+    else
+        fv_profile_update!(fv, fn, filtern, displa, z0m, z0h, z0q, obu, iter, ur, um,
+                           ustar, temp1, temp2, temp12m, temp22m, fm)
+    end
 
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Kernelized default (non-landunit) Monin-Obukhov profile update
+# ---------------------------------------------------------------------------
+
+@kernel function _fv_profile_kernel!(
+        # written arrays (ustar is written then read; fm is read+written when iter>1)
+        ustar, temp1, temp2, temp12m, temp22m, fm,
+        vds_patch, u10_clm_patch, va_patch, u10_patch, fv_patch,
+        # read-only arrays
+        @Const(filtern), @Const(displa), @Const(z0m), @Const(z0h), @Const(z0q),
+        @Const(obu), @Const(ur), @Const(um),
+        @Const(forc_hgt_u_patch), @Const(forc_hgt_t_patch), @Const(forc_hgt_q_patch),
+        # scalars
+        iter::Int, VKC, zetam, zetat)
+
+    f = @index(Global)
+    @inbounds begin
+        n = filtern[f]
+
+        # ------- Wind profile -------
+        zldis = forc_hgt_u_patch[n] - displa[n]
+        zeta = zldis / obu[n]
+
+        if zeta < -zetam
+            ustar[n] = VKC * um[n] / (log(-zetam * obu[n] / z0m[n]) -
+                stability_func1(-zetam) +
+                stability_func1(z0m[n] / obu[n]) +
+                1.14 * ((-zeta)^0.333 - (zetam)^0.333))
+        elseif zeta < 0.0
+            ustar[n] = VKC * um[n] / (log(zldis / z0m[n]) -
+                stability_func1(zeta) +
+                stability_func1(z0m[n] / obu[n]))
+        elseif zeta <= 1.0
+            ustar[n] = VKC * um[n] / (log(zldis / z0m[n]) + 5.0 * zeta - 5.0 * z0m[n] / obu[n])
+        else
+            ustar[n] = VKC * um[n] / (log(obu[n] / z0m[n]) + 5.0 - 5.0 * z0m[n] / obu[n] +
+                (5.0 * log(zeta) + zeta - 1.0))
+        end
+
+        # Deposition velocity
+        if zeta < 0.0
+            vds_tmp = 2.0e-3 * ustar[n] * (1.0 + (300.0 / max(-obu[n], 1.0e-10))^0.666)
+        else
+            vds_tmp = 2.0e-3 * ustar[n]
+        end
+        vds_patch[n] = vds_tmp
+
+        # ------- 10-m wind (CLM) -------
+        if zldis - z0m[n] <= 10.0
+            u10_clm_patch[n] = um[n]
+        else
+            if zeta < -zetam
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(-zetam * obu[n] / (10.0 + z0m[n])) -
+                    stability_func1(-zetam) +
+                    stability_func1((10.0 + z0m[n]) / obu[n]) +
+                    1.14 * ((-zeta)^0.333 - (zetam)^0.333)))
+            elseif zeta < 0.0
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(zldis / (10.0 + z0m[n])) -
+                    stability_func1(zeta) +
+                    stability_func1((10.0 + z0m[n]) / obu[n])))
+            elseif zeta <= 1.0
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(zldis / (10.0 + z0m[n])) +
+                    5.0 * zeta - 5.0 * (10.0 + z0m[n]) / obu[n]))
+            else
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(obu[n] / (10.0 + z0m[n])) +
+                    5.0 - 5.0 * (10.0 + z0m[n]) / obu[n] +
+                    (5.0 * log(zeta) + zeta - 1.0)))
+            end
+        end
+        va_patch[n] = um[n]
+
+        # ------- Temperature profile -------
+        zldis = forc_hgt_t_patch[n] - displa[n]
+        zeta = zldis / obu[n]
+
+        if zeta < -zetat
+            temp1[n] = VKC / (log(-zetat * obu[n] / z0h[n]) -
+                stability_func2(-zetat) +
+                stability_func2(z0h[n] / obu[n]) +
+                0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
+        elseif zeta < 0.0
+            temp1[n] = VKC / (log(zldis / z0h[n]) -
+                stability_func2(zeta) +
+                stability_func2(z0h[n] / obu[n]))
+        elseif zeta <= 1.0
+            temp1[n] = VKC / (log(zldis / z0h[n]) + 5.0 * zeta - 5.0 * z0h[n] / obu[n])
+        else
+            temp1[n] = VKC / (log(obu[n] / z0h[n]) + 5.0 - 5.0 * z0h[n] / obu[n] +
+                (5.0 * log(zeta) + zeta - 1.0))
+        end
+
+        # ------- Humidity profile -------
+        hgt_q = forc_hgt_q_patch[n]
+        hgt_t = forc_hgt_t_patch[n]
+
+        if hgt_q == hgt_t && z0q[n] == z0h[n]
+            temp2[n] = temp1[n]
+        else
+            zldis = hgt_q - displa[n]
+            zeta = zldis / obu[n]
+            if zeta < -zetat
+                temp2[n] = VKC / (log(-zetat * obu[n] / z0q[n]) -
+                    stability_func2(-zetat) +
+                    stability_func2(z0q[n] / obu[n]) +
+                    0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
+            elseif zeta < 0.0
+                temp2[n] = VKC / (log(zldis / z0q[n]) -
+                    stability_func2(zeta) +
+                    stability_func2(z0q[n] / obu[n]))
+            elseif zeta <= 1.0
+                temp2[n] = VKC / (log(zldis / z0q[n]) + 5.0 * zeta - 5.0 * z0q[n] / obu[n])
+            else
+                temp2[n] = VKC / (log(obu[n] / z0q[n]) + 5.0 - 5.0 * z0q[n] / obu[n] +
+                    (5.0 * log(zeta) + zeta - 1.0))
+            end
+        end
+
+        # ------- Temperature profile at 2m -------
+        zldis = 2.0 + z0h[n]
+        zeta = zldis / obu[n]
+        if zeta < -zetat
+            temp12m[n] = VKC / (log(-zetat * obu[n] / z0h[n]) -
+                stability_func2(-zetat) +
+                stability_func2(z0h[n] / obu[n]) +
+                0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
+        elseif zeta < 0.0
+            temp12m[n] = VKC / (log(zldis / z0h[n]) -
+                stability_func2(zeta) +
+                stability_func2(z0h[n] / obu[n]))
+        elseif zeta <= 1.0
+            temp12m[n] = VKC / (log(zldis / z0h[n]) + 5.0 * zeta - 5.0 * z0h[n] / obu[n])
+        else
+            temp12m[n] = VKC / (log(obu[n] / z0h[n]) + 5.0 - 5.0 * z0h[n] / obu[n] +
+                (5.0 * log(zeta) + zeta - 1.0))
+        end
+
+        # ------- Humidity profile at 2m -------
+        if z0q[n] == z0h[n]
+            temp22m[n] = temp12m[n]
+        else
+            zldis = 2.0 + z0q[n]
+            zeta = zldis / obu[n]
+            if zeta < -zetat
+                temp22m[n] = VKC / (log(-zetat * obu[n] / z0q[n]) -
+                    stability_func2(-zetat) +
+                    stability_func2(z0q[n] / obu[n]) +
+                    0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
+            elseif zeta < 0.0
+                temp22m[n] = VKC / (log(zldis / z0q[n]) -
+                    stability_func2(zeta) +
+                    stability_func2(z0q[n] / obu[n]))
+            elseif zeta <= 1.0
+                temp22m[n] = VKC / (log(zldis / z0q[n]) + 5.0 * zeta - 5.0 * z0q[n] / obu[n])
+            else
+                temp22m[n] = VKC / (log(obu[n] / z0q[n]) + 5.0 - 5.0 * z0q[n] / obu[n] +
+                    (5.0 * log(zeta) + zeta - 1.0))
+            end
+        end
+
+        # ------- 10-m wind for dust model -------
+        zldis = forc_hgt_u_patch[n] - displa[n]
+        zeta = zldis / obu[n]
+
+        if min(zeta, 1.0) < 0.0
+            tmp1 = (1.0 - 16.0 * min(zeta, 1.0))^0.25
+            tmp2 = log((1.0 + tmp1 * tmp1) / 2.0)
+            tmp3 = log((1.0 + tmp1) / 2.0)
+            fmnew = 2.0 * tmp3 + tmp2 - 2.0 * atan(tmp1) + 1.5707963
+        else
+            fmnew = -5.0 * min(zeta, 1.0)
+        end
+        if iter == 1
+            fm[n] = fmnew
+        else
+            fm[n] = 0.5 * (fm[n] + fmnew)
+        end
+
+        zeta10 = min(10.0 / obu[n], 1.0)
+        if zeta == 0.0
+            zeta10 = 0.0
+        end
+        if zeta10 < 0.0
+            tmp1 = (1.0 - 16.0 * zeta10)^0.25
+            tmp2 = log((1.0 + tmp1 * tmp1) / 2.0)
+            tmp3 = log((1.0 + tmp1) / 2.0)
+            fm10 = 2.0 * tmp3 + tmp2 - 2.0 * atan(tmp1) + 1.5707963
+        else
+            fm10 = -5.0 * zeta10
+        end
+
+        tmp4 = log(max(1.0, forc_hgt_u_patch[n] / 10.0))
+
+        u10_patch[n] = ur[n] - ustar[n] / VKC * (tmp4 - fm[n] + fm10)
+        fv_patch[n] = ustar[n]
+    end
+end
+
+"""
+    fv_profile_update!(fv, fn, filtern, displa, z0m, z0h, z0q, obu, iter, ur, um,
+                       ustar, temp1, temp2, temp12m, temp22m, fm)
+
+Launch the kernelized default (non-landunit) Monin-Obukhov wind/temperature/
+humidity profile update over the `fn` filtered patches. One thread per filtered
+patch; backend-agnostic (CPU loop or GPU). Implements the `landunit_index=false`
+path of `friction_velocity!`.
+"""
+function fv_profile_update!(fv::FrictionVelocityData, fn::Int,
+        filtern::Vector{Int}, displa, z0m, z0h, z0q, obu, iter::Int, ur, um,
+        ustar, temp1, temp2, temp12m, temp22m, fm)
+    zetam = 1.574  # transition point of flux-gradient relation (wind profile)
+    zetat = 0.465  # transition point of flux-gradient relation (temp. profile)
+    _launch!(_fv_profile_kernel!, ustar,
+        temp1, temp2, temp12m, temp22m, fm,
+        fv.vds_patch, fv.u10_clm_patch, fv.va_patch, fv.u10_patch, fv.fv_patch,
+        filtern, displa, z0m, z0h, z0q, obu, ur, um,
+        fv.forc_hgt_u_patch, fv.forc_hgt_t_patch, fv.forc_hgt_q_patch,
+        iter, VKC, zetam, zetat;
+        ndrange = fn)
     return nothing
 end
