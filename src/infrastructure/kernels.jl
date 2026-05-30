@@ -48,3 +48,49 @@ Assumes columns are indexed 1:nc (single clump, begc==1).
 """
 compute_forc_q!(forc_q_col, gridcell, vp_grc, pbot_col) =
     _launch!(_forc_q_kernel!, forc_q_col, gridcell, vp_grc, pbot_col)
+
+# --------------------------------------------------------------------------
+# Clamp water-table depth to the bedrock interface (masked per-column).
+# nbedrock[c] is a per-column bedrock layer index; the interface depth is
+# zi[c, nbedrock[c] + nlevsno_off + 1]. Mask in-kernel (one thread per column).
+# --------------------------------------------------------------------------
+@kernel function _clamp_zwt_bedrock_kernel!(zwt_col, @Const(mask), @Const(nbedrock),
+                                            @Const(zi), nlevsno_off::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        zi_bedrock = zi[c, nbedrock[c] + nlevsno_off + 1]
+        if zwt_col[c] > zi_bedrock
+            zwt_col[c] = zi_bedrock
+        end
+    end
+end
+
+"""
+    clamp_zwt_to_bedrock!(zwt_col, mask, nbedrock, zi, nlevsno_off)
+
+Clamp each active column's water-table depth to its bedrock interface.
+Backend-agnostic; one thread per column.
+"""
+clamp_zwt_to_bedrock!(zwt_col, mask, nbedrock, zi, nlevsno_off::Int) =
+    _launch!(_clamp_zwt_bedrock_kernel!, zwt_col, mask, nbedrock, zi, nlevsno_off)
+
+# --------------------------------------------------------------------------
+# Urban snow-cover fraction from snow depth (masked per-column, urban only).
+# --------------------------------------------------------------------------
+@kernel function _urban_frac_sno_kernel!(frac_sno_col, @Const(landunit),
+                                         @Const(urbpoi), @Const(snow_depth_col))
+    c = @index(Global)
+    @inbounds if urbpoi[landunit[c]]
+        sd = snow_depth_col[c]
+        isfinite(sd) || (sd = zero(sd))
+        frac_sno_col[c] = min(sd / 0.05, 1.0)
+    end
+end
+
+"""
+    update_urban_frac_sno!(frac_sno_col, landunit, urbpoi, snow_depth_col)
+
+Set urban columns' snow-cover fraction from snow depth. Backend-agnostic.
+"""
+update_urban_frac_sno!(frac_sno_col, landunit, urbpoi, snow_depth_col) =
+    _launch!(_urban_frac_sno_kernel!, frac_sno_col, landunit, urbpoi, snow_depth_col)

@@ -1143,14 +1143,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # when soil above bedrock is not saturated. Without this, ZWT drops to 80m
     # in cold-start runs because the aquifer drains without replenishment.
     nlevsno_l = varpar.nlevsno
-    for c in bc_col
-        filt.hydrologyc[c] || continue
-        nbr = col.nbedrock[c]
-        zi_bedrock = col.zi[c, nbr + nlevsno_l + 1]
-        if sh.zwt_col[c] > zi_bedrock
-            sh.zwt_col[c] = zi_bedrock
-        end
-    end
+    clamp_zwt_to_bedrock!(sh.zwt_col, filt.hydrologyc, col.nbedrock, col.zi, nlevsno_l)
 
     # --- 14. Condensation renewal ---
     renew_condensation!(
@@ -1305,16 +1298,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Urban snow fraction
     # ========================================================================
-    for c in bc_col
-        l = col.landunit[c]
-        if lun.urbpoi[l]
-            snow_depth = wdb.snow_depth_col[c]
-            if !isfinite(snow_depth)
-                snow_depth = 0.0
-            end
-            wdb.frac_sno_col[c] = min(snow_depth / 0.05, 1.0)
-        end
-    end
+    update_urban_frac_sno!(wdb.frac_sno_col, col.landunit, lun.urbpoi, wdb.snow_depth_col)
 
     # ========================================================================
     # Snow aging
@@ -1425,14 +1409,7 @@ function clm_drv_core!(config::CLMDriverConfig,
                         use_aquifer_layer=config.use_aquifer_layer)
 
     # Bedrock clipping (post-drainage): prevent ZWT from exceeding bedrock
-    for c in bc_col
-        filt.hydrologyc[c] || continue
-        nbr = col.nbedrock[c]
-        zi_bedrock = col.zi[c, nbr + varpar.nlevsno + 1]
-        if sh.zwt_col[c] > zi_bedrock
-            sh.zwt_col[c] = zi_bedrock
-        end
-    end
+    clamp_zwt_to_bedrock!(sh.zwt_col, filt.hydrologyc, col.nbedrock, col.zi, varpar.nlevsno)
 
     # ========================================================================
     # Ecosystem dynamics post drainage
