@@ -568,14 +568,13 @@ end
 Evaluate f(ci) = ci - (ca - (1.37rb+1.65rs))*patm*an.
 Returns `(fval, gs_mol)`.
 """
-function ci_func!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
+function _ci_func_core!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
                   gb_mol::Real, je::Real, cair::Real, oair::Real,
                   lmr_z::Real, par_z::Real, rh_can::Real,
-                  ps::PhotosynthesisData;
-                  c3psn_val::Real=1.0,
-                  medlynslope_val::Real=6.0,
-                  medlynintercept_val::Real=100.0,
-                  mbbopt_val::Real=9.0)
+                  ps::PhotosynthesisData,
+                  c3psn_val::Real, medlynslope_val::Real,
+                  medlynintercept_val::Real, mbbopt_val::Real,
+                  theta_cj_val::Real, theta_ip_val::Real)
     c3flag = ps.c3flag_patch[p]
     ac = ps.ac_patch
     aj = ps.aj_patch
@@ -592,7 +591,8 @@ function ci_func!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
     bbb_p = ps.bbb_patch[p]
     mbb_p = ps.mbb_patch[p]
     stomatalcond_mtd = ps.stomatalcond_mtd
-    theta_cj_val = params_inst.theta_cj[1]  # default; overridden by ivt in real usage
+    # theta_cj_val / theta_ip_val are passed in (were params_inst.theta_cj[1] /
+    # params_inst.theta_ip); threaded as args so this core is GPU-kernel callable.
 
     gs_mol = 0.0
 
@@ -619,7 +619,7 @@ function ci_func!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
     ai = smooth_min(r1, r2)
 
-    aquad = params_inst.theta_ip
+    aquad = theta_ip_val
     bquad = -(ai + ap[p, iv])
     cquad = ai * ap[p, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
@@ -656,6 +656,23 @@ function ci_func!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
     return (fval, gs_mol)
 end
 
+# Back-compat / host wrapper: reads the module-global photosynthesis params
+# (theta_cj[1], theta_ip) and forwards to the positional core. Callers on the host
+# (tests, the non-kernel path) use this; GPU kernels call _ci_func_core! directly.
+function ci_func!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
+                  gb_mol::Real, je::Real, cair::Real, oair::Real,
+                  lmr_z::Real, par_z::Real, rh_can::Real,
+                  ps::PhotosynthesisData;
+                  c3psn_val::Real=1.0,
+                  medlynslope_val::Real=6.0,
+                  medlynintercept_val::Real=100.0,
+                  mbbopt_val::Real=9.0)
+    return _ci_func_core!(ci, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                          lmr_z, par_z, rh_can, ps,
+                          c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                          params_inst.theta_cj[1], params_inst.theta_ip)
+end
+
 # =====================================================================
 # hybrid_solver! — hybrid Newton-secant / Brent solver for ci
 # =====================================================================
@@ -666,16 +683,21 @@ end
 
 Hybrid solver for ci. Returns `(ci_solution, gs_mol, niter)`.
 """
-function hybrid_solver!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
+function _hybrid_solver_core!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
                         gb_mol::Real, je::Real, cair::Real, oair::Real,
                         lmr_z::Real, par_z::Real, rh_can::Real,
-                        ps::PhotosynthesisData; kwargs...)
+                        ps::PhotosynthesisData,
+                        c3psn_val::Real, medlynslope_val::Real,
+                        medlynintercept_val::Real, mbbopt_val::Real,
+                        theta_cj_val::Real, theta_ip_val::Real)
     eps_val = 1.0e-2
     eps1 = 1.0e-4
     itmax = 40
 
-    f0, gs_mol = ci_func!(x0, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
-                           lmr_z, par_z, rh_can, ps; kwargs...)
+    f0, gs_mol = _ci_func_core!(x0, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                           lmr_z, par_z, rh_can, ps,
+                           c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                           theta_cj_val, theta_ip_val)
 
     if f0 == 0.0
         return (x0, gs_mol, 0)
@@ -685,8 +707,10 @@ function hybrid_solver!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
     minf = abs(f0)
     x1 = x0 * 0.99
 
-    f1, gs_mol = ci_func!(x1, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
-                           lmr_z, par_z, rh_can, ps; kwargs...)
+    f1, gs_mol = _ci_func_core!(x1, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                           lmr_z, par_z, rh_can, ps,
+                           c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                           theta_cj_val, theta_ip_val)
 
     if f1 == 0.0
         return (x1, gs_mol, 0)
@@ -713,8 +737,10 @@ function hybrid_solver!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
         f0 = f1
         x1 = x
 
-        f1, gs_mol = ci_func!(x1, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
-                               lmr_z, par_z, rh_can, ps; kwargs...)
+        f1, gs_mol = _ci_func_core!(x1, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                               lmr_z, par_z, rh_can, ps,
+                               c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                               theta_cj_val, theta_ip_val)
 
         if abs(f1) < minf
             minx = x1
@@ -726,25 +752,44 @@ function hybrid_solver!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
         end
 
         if f1 * f0 < 0.0
-            x_brent = brent_solver!(x0, x1, f0, f1, tol, p, iv, forc_pbot_c,
+            x_brent = _brent_solver_core!(x0, x1, f0, f1, tol, p, iv, forc_pbot_c,
                                      gb_mol, je, cair, oair, lmr_z, par_z,
-                                     rh_can, ps; kwargs...)
+                                     rh_can, ps,
+                                     c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                                     theta_cj_val, theta_ip_val)
             x0 = x_brent
             # get final gs_mol
-            _, gs_mol = ci_func!(x0, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
-                                  lmr_z, par_z, rh_can, ps; kwargs...)
+            _, gs_mol = _ci_func_core!(x0, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                                  lmr_z, par_z, rh_can, ps,
+                                  c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                                  theta_cj_val, theta_ip_val)
             break
         end
 
         if iter > itmax
-            _, gs_mol = ci_func!(minx, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
-                                  lmr_z, par_z, rh_can, ps; kwargs...)
+            _, gs_mol = _ci_func_core!(minx, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                                  lmr_z, par_z, rh_can, ps,
+                                  c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                                  theta_cj_val, theta_ip_val)
             x0 = minx
             break
         end
     end
 
     return (x0, gs_mol, iter)
+end
+
+# Back-compat / host wrapper (reads module-global theta_cj[1]/theta_ip).
+function hybrid_solver!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
+                        gb_mol::Real, je::Real, cair::Real, oair::Real,
+                        lmr_z::Real, par_z::Real, rh_can::Real,
+                        ps::PhotosynthesisData;
+                        c3psn_val::Real=1.0, medlynslope_val::Real=6.0,
+                        medlynintercept_val::Real=100.0, mbbopt_val::Real=9.0)
+    return _hybrid_solver_core!(x0, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                          lmr_z, par_z, rh_can, ps,
+                          c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                          params_inst.theta_cj[1], params_inst.theta_ip)
 end
 
 # =====================================================================
@@ -758,11 +803,14 @@ end
 Brent's method to find the root of ci_func between x1 and x2.
 Returns the root `x`.
 """
-function brent_solver!(x1::Real, x2::Real, f1::Real, f2::Real,
+function _brent_solver_core!(x1::Real, x2::Real, f1::Real, f2::Real,
                        tol::Real, p::Int, iv::Int, forc_pbot_c::Real,
                        gb_mol::Real, je::Real, cair::Real, oair::Real,
                        lmr_z::Real, par_z::Real, rh_can::Real,
-                       ps::PhotosynthesisData; kwargs...)
+                       ps::PhotosynthesisData,
+                       c3psn_val::Real, medlynslope_val::Real,
+                       medlynintercept_val::Real, mbbopt_val::Real,
+                       theta_cj_val::Real, theta_ip_val::Real)
     itmax = 20
     eps_val = 1.0e-2
 
@@ -832,8 +880,10 @@ function brent_solver!(x1::Real, x2::Real, f1::Real, f2::Real,
             b = b + copysign(tol1, xm)
         end
 
-        fb, _ = ci_func!(b, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
-                          lmr_z, par_z, rh_can, ps; kwargs...)
+        fb, _ = _ci_func_core!(b, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
+                          lmr_z, par_z, rh_can, ps,
+                          c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                          theta_cj_val, theta_ip_val)
 
         if fb == 0.0
             return b
@@ -841,6 +891,20 @@ function brent_solver!(x1::Real, x2::Real, f1::Real, f2::Real,
     end
 
     return b
+end
+
+# Back-compat / host wrapper (reads module-global theta_cj[1]/theta_ip).
+function brent_solver!(x1::Real, x2::Real, f1::Real, f2::Real,
+                       tol::Real, p::Int, iv::Int, forc_pbot_c::Real,
+                       gb_mol::Real, je::Real, cair::Real, oair::Real,
+                       lmr_z::Real, par_z::Real, rh_can::Real,
+                       ps::PhotosynthesisData;
+                       c3psn_val::Real=1.0, medlynslope_val::Real=6.0,
+                       medlynintercept_val::Real=100.0, mbbopt_val::Real=9.0)
+    return _brent_solver_core!(x1, x2, f1, f2, tol, p, iv, forc_pbot_c,
+                          gb_mol, je, cair, oair, lmr_z, par_z, rh_can, ps,
+                          c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
+                          params_inst.theta_cj[1], params_inst.theta_ip)
 end
 
 # =====================================================================
