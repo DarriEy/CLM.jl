@@ -125,36 +125,65 @@ Master water container. Holds all water-related data for bulk water and tracers.
 
 Ported from `water_type` in `WaterType.F90`.
 """
-Base.@kwdef mutable struct WaterData
+# Parametric on working precision FT. FT is a *construction-precision tag*: the keyword
+# constructor builds the bulk sub-instances at FT, but the bulk fields stay LOOSE
+# (un-pinned UnionAll) types so the AD path can swap in `Dual`-typed sub-instances on a
+# Float64 container (and so device adapt can swap array storage). NOT @kwdef: a single
+# type parameter can't keep @kwdef's synthesised constructors and also build children at
+# FT via `WaterData{FT}()` (same signature), so the keyword constructor is explicit below.
+mutable struct WaterData{FT<:Real}
     # --- Public index bounds (1-based; Fortran used 0-based) ---
-    bulk_and_tracers_beg::Int = 1   # first index for bulk & tracers
-    bulk_and_tracers_end::Int = 1   # last index for bulk & tracers
-    tracers_beg::Int = 2            # first index for just tracers
-    tracers_end::Int = 1            # last index for just tracers (empty range = no tracers)
-    i_bulk::Int = 1                 # index of bulk in bulk_and_tracers
+    bulk_and_tracers_beg::Int   # first index for bulk & tracers
+    bulk_and_tracers_end::Int   # last index for bulk & tracers
+    tracers_beg::Int            # first index for just tracers
+    tracers_end::Int            # last index for just tracers (empty range = no tracers)
+    i_bulk::Int                 # index of bulk in bulk_and_tracers
 
-    # --- Direct bulk instance access ---
-    waterfluxbulk_inst::WaterFluxBulkData = WaterFluxBulkData()
-    waterstatebulk_inst::WaterStateBulkData = WaterStateBulkData()
-    waterdiagnosticbulk_inst::WaterDiagnosticBulkData = WaterDiagnosticBulkData()
-    waterbalancebulk_inst::WaterBalanceData = WaterBalanceData()
+    # --- Direct bulk instance access (loose types: see note above) ---
+    waterfluxbulk_inst::WaterFluxBulkData
+    waterstatebulk_inst::WaterStateBulkData
+    waterdiagnosticbulk_inst::WaterDiagnosticBulkData
+    waterbalancebulk_inst::WaterBalanceData
     # waterlnd2atmbulk_inst  — not yet ported
     # wateratm2lndbulk_inst  — not yet ported
 
     # --- Iteration array for bulk + tracers ---
-    bulk_and_tracers::Vector{BulkOrTracerData} = BulkOrTracerData[]
+    bulk_and_tracers::Vector{BulkOrTracerData}
 
     # --- Private ---
-    params::WaterParams = WaterParams()
-    bulk_tracer_index::Int = -1     # index of tracer replicating bulk (-1 if none)
+    params::WaterParams
+    bulk_tracer_index::Int      # index of tracer replicating bulk (-1 if none)
 end
+
+# Keyword constructor (field-name keyword API used by the Adapt rule and callers). Bulk
+# sub-instances default to working precision FT.
+function WaterData{FT}(;
+        bulk_and_tracers_beg::Int = 1,
+        bulk_and_tracers_end::Int = 1,
+        tracers_beg::Int = 2,
+        tracers_end::Int = 1,
+        i_bulk::Int = 1,
+        waterfluxbulk_inst::WaterFluxBulkData       = WaterFluxBulkData{FT}(),
+        waterstatebulk_inst::WaterStateBulkData     = WaterStateBulkData{FT}(),
+        waterdiagnosticbulk_inst::WaterDiagnosticBulkData = WaterDiagnosticBulkData{FT}(),
+        waterbalancebulk_inst::WaterBalanceData     = WaterBalanceData{FT}(),
+        bulk_and_tracers::Vector{BulkOrTracerData}  = BulkOrTracerData[],
+        params::WaterParams                         = WaterParams(),
+        bulk_tracer_index::Int = -1) where {FT<:Real}
+    WaterData{FT}(bulk_and_tracers_beg, bulk_and_tracers_end, tracers_beg, tracers_end,
+                  i_bulk, waterfluxbulk_inst, waterstatebulk_inst, waterdiagnosticbulk_inst,
+                  waterbalancebulk_inst, bulk_and_tracers, params, bulk_tracer_index)
+end
+
+# Default precision is Float64; legacy callers that don't specify FT get a Float64 tree.
+WaterData(; kwargs...) = WaterData{Float64}(; kwargs...)
 
 # Custom Adapt rule for WaterData. The default @adapt_structure can't be used:
 # `bulk_and_tracers` holds BulkOrTracerData elements that *alias* the direct bulk
 # sub-struct fields (waterstatebulk_inst, ...). We move the bulk sub-structs to the
 # device, then rebuild the iteration vector so its references point at the moved
 # instances — preserving the aliasing that the bulk/tracer loops rely on.
-function Adapt.adapt_structure(to, w::WaterData)
+function Adapt.adapt_structure(to, w::WaterData{FT}) where {FT}
     wf = Adapt.adapt(to, w.waterfluxbulk_inst)
     ws = Adapt.adapt(to, w.waterstatebulk_inst)
     wd = Adapt.adapt(to, w.waterdiagnosticbulk_inst)
@@ -170,7 +199,7 @@ function Adapt.adapt_structure(to, w::WaterData)
               is_isotope      = e.is_isotope,
               info            = e.info)
           for e in w.bulk_and_tracers]
-    return WaterData(
+    return WaterData{FT}(
         bulk_and_tracers_beg = w.bulk_and_tracers_beg,
         bulk_and_tracers_end = w.bulk_and_tracers_end,
         tracers_beg = w.tracers_beg,
@@ -379,13 +408,13 @@ end
 # Ported from AllocateTracer in WaterType.F90
 # -----------------------------------------------------------------------
 
-function water_allocate_tracer!(water::WaterData, i::Int)
+function water_allocate_tracer!(water::WaterData{FT}, i::Int) where {FT}
     bt = water.bulk_and_tracers[i]
 
-    bt.waterflux = WaterFluxData()
-    bt.waterstate = WaterStateData()
+    bt.waterflux = WaterFluxData{FT}()
+    bt.waterstate = WaterStateData{FT}()
     # bt.waterdiagnostic — requires base WaterDiagnosticData (not yet ported)
-    bt.waterbalance = WaterBalanceData()
+    bt.waterbalance = WaterBalanceData{FT}()
     # bt.waterlnd2atm — not yet ported
     # bt.wateratm2lnd — not yet ported
 

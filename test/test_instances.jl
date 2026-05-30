@@ -72,4 +72,47 @@
         @test length(inst1.patch.gridcell) == 8
         @test length(inst2.patch.gridcell) == 24
     end
+
+    @testset "Working-precision factory (make_instances)" begin
+        # Float64 default must be structurally identical to CLMInstances().
+        default = CLM.CLMInstances()
+        f64 = CLM.make_instances(Float64)
+        @test all(typeof(getfield(default, fld)) == typeof(getfield(f64, fld))
+                  for fld in fieldnames(CLM.CLMInstances))
+
+        # Float32 reparametrises the parametric state types, including the two
+        # aggregate state containers (water, bgc_vegetation).
+        f32 = CLM.make_instances(Float32)
+        @test f32.temperature    isa CLM.TemperatureData{Float32}
+        @test f32.soilstate      isa CLM.SoilStateData{Float32}
+        @test f32.photosyns      isa CLM.PhotosynthesisData{Float32}
+        @test f32.water          isa CLM.WaterData{Float32}
+        @test f32.bgc_vegetation isa CLM.CNVegetationData{Float32}
+
+        # ... and cold-inits cleanly into Float32 arrays (dims unaffected).
+        CLM.clm_instInit!(f32; ng=ng, nl=nl, nc=nc, np=np,
+                          nlevdecomp_full=nlevdecomp_full,
+                          ndecomp_pools=ndecomp_pools,
+                          ndecomp_cascade_transitions=ndecomp_cascade_transitions)
+        @test eltype(f32.temperature.t_soisno_col) == Float32
+        @test eltype(f32.soilstate.watsat_col) == Float32
+        @test eltype(f32.energyflux.eflx_sh_tot_patch) == Float32
+        @test eltype(f32.water.waterstatebulk_inst.int_snow_col) == Float32
+        @test eltype(f32.bgc_vegetation.cnveg_state_inst.dormant_flag_patch) == Float32
+        @test size(f32.temperature.t_soisno_col, 1) == nc
+    end
+
+    @testset "clm_float_type precision policy" begin
+        @test CLM.clm_float_type() == Float64
+        @test CLM.clm_float_type(backend = :cpu) == Float64
+        @test CLM.clm_float_type(backend = :cuda) == Float64
+        @test CLM.clm_float_type(backend = :metal) == Float32   # Apple GPUs: Float32 only
+        withenv("CLM_FLOAT" => "Float32") do
+            @test CLM.clm_float_type() == Float32                # env overrides policy
+            @test CLM.clm_float_type(backend = :cuda) == Float32
+        end
+        withenv("CLM_FLOAT" => "Float64") do
+            @test CLM.clm_float_type(backend = :metal) == Float64
+        end
+    end
 end

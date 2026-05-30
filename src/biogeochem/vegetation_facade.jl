@@ -74,30 +74,59 @@ configuration.
 
 Ported from `cn_vegetation_type` in `CNVegetationFacade.F90`.
 """
-Base.@kwdef mutable struct CNVegetationData
+# Parametric on working precision FT. FT is a *construction-precision tag*: the keyword
+# constructor builds the state children at FT, but the fields stay LOOSE (un-pinned
+# UnionAll) types so the AD path can swap in `Dual`-typed sub-instances on a Float64
+# container. NOT @kwdef: a single type parameter can't both build children at FT via
+# `CNVegetationData{FT}()` and keep @kwdef's synthesised constructors (same signature),
+# so we use explicit constructors instead.
+mutable struct CNVegetationData{FT<:Real}
     # Configuration
-    config::CNVegetationConfig = CNVegetationConfig()
+    config::CNVegetationConfig
 
     # CN driver config (passed to cn_driver functions)
-    driver_config::CNDriverConfig = CNDriverConfig()
+    driver_config::CNDriverConfig
 
-    # Vegetation state
-    cnveg_state_inst::CNVegStateData = CNVegStateData()
+    # Vegetation state (loose types: see note above)
+    cnveg_state_inst::CNVegStateData
 
     # Carbon state (C12, C13, C14)
-    cnveg_carbonstate_inst::CNVegCarbonStateData = CNVegCarbonStateData()
-    c13_cnveg_carbonstate_inst::CNVegCarbonStateData = CNVegCarbonStateData()
-    c14_cnveg_carbonstate_inst::CNVegCarbonStateData = CNVegCarbonStateData()
+    cnveg_carbonstate_inst::CNVegCarbonStateData
+    c13_cnveg_carbonstate_inst::CNVegCarbonStateData
+    c14_cnveg_carbonstate_inst::CNVegCarbonStateData
 
     # Carbon flux (C12, C13, C14)
-    cnveg_carbonflux_inst::CNVegCarbonFluxData = CNVegCarbonFluxData()
-    c13_cnveg_carbonflux_inst::CNVegCarbonFluxData = CNVegCarbonFluxData()
-    c14_cnveg_carbonflux_inst::CNVegCarbonFluxData = CNVegCarbonFluxData()
+    cnveg_carbonflux_inst::CNVegCarbonFluxData
+    c13_cnveg_carbonflux_inst::CNVegCarbonFluxData
+    c14_cnveg_carbonflux_inst::CNVegCarbonFluxData
 
     # Nitrogen state and flux
-    cnveg_nitrogenstate_inst::CNVegNitrogenStateData = CNVegNitrogenStateData()
-    cnveg_nitrogenflux_inst::CNVegNitrogenFluxData = CNVegNitrogenFluxData()
+    cnveg_nitrogenstate_inst::CNVegNitrogenStateData
+    cnveg_nitrogenflux_inst::CNVegNitrogenFluxData
 end
+
+# Keyword constructor (field-name keyword API replacing @kwdef's). State children
+# default to working precision FT; config sub-structs are overridable as before.
+function CNVegetationData{FT}(;
+        config::CNVegetationConfig = CNVegetationConfig(),
+        driver_config::CNDriverConfig = CNDriverConfig(),
+        cnveg_state_inst::CNVegStateData            = CNVegStateData{FT}(),
+        cnveg_carbonstate_inst::CNVegCarbonStateData     = CNVegCarbonStateData{FT}(),
+        c13_cnveg_carbonstate_inst::CNVegCarbonStateData = CNVegCarbonStateData{FT}(),
+        c14_cnveg_carbonstate_inst::CNVegCarbonStateData = CNVegCarbonStateData{FT}(),
+        cnveg_carbonflux_inst::CNVegCarbonFluxData       = CNVegCarbonFluxData{FT}(),
+        c13_cnveg_carbonflux_inst::CNVegCarbonFluxData   = CNVegCarbonFluxData{FT}(),
+        c14_cnveg_carbonflux_inst::CNVegCarbonFluxData   = CNVegCarbonFluxData{FT}(),
+        cnveg_nitrogenstate_inst::CNVegNitrogenStateData = CNVegNitrogenStateData{FT}(),
+        cnveg_nitrogenflux_inst::CNVegNitrogenFluxData   = CNVegNitrogenFluxData{FT}()) where {FT<:Real}
+    CNVegetationData{FT}(config, driver_config, cnveg_state_inst,
+        cnveg_carbonstate_inst, c13_cnveg_carbonstate_inst, c14_cnveg_carbonstate_inst,
+        cnveg_carbonflux_inst, c13_cnveg_carbonflux_inst, c14_cnveg_carbonflux_inst,
+        cnveg_nitrogenstate_inst, cnveg_nitrogenflux_inst)
+end
+
+# Default precision is Float64; legacy callers that don't specify FT get a Float64 tree.
+CNVegetationData(; kwargs...) = CNVegetationData{Float64}(; kwargs...)
 
 # ---------------------------------------------------------------------------
 # cn_vegetation_init! — Initialize the vegetation facade

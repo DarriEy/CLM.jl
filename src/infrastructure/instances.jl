@@ -124,6 +124,47 @@ end
 # Adapt.@adapt_structure) to the backend's array type and passes the rest through.
 Adapt.@adapt_structure CLMInstances
 
+# --- working-precision factory ----------------------------------------------
+# Rebuild a default-constructed field at working precision FT. Parametric state
+# types expose a `T{FT}()` convenience constructor (T parametric on `FT<:Real`);
+# types without one are returned at their default. The `hasmethod` probe is what
+# makes this self-maintaining — newly added parametric state fields are picked up
+# with no change here. Guarded so a parametric type whose first type parameter is
+# not `<:Real` is simply left alone rather than throwing.
+function _instance_at(::Type{FT}, x) where {FT}
+    W = Base.typename(typeof(x)).wrapper
+    if W isa UnionAll
+        try
+            hasmethod(W{FT}, Tuple{}) && return (W{FT})()
+        catch
+        end
+    end
+    return x
+end
+
+"""
+    make_instances(::Type{FT} = Float64) -> CLMInstances
+
+Construct a `CLMInstances` whose state types use working precision `FT`. With the
+default `Float64` this is equivalent to `CLMInstances()`. With `Float32`, every
+parametric state type (temperature, energy flux, soil state/hydrology, water
+state, photosynthesis, the biogeochem states/fluxes, …) is allocated in Float32 —
+the precision required by the Apple Metal GPU backend, which has no Float64.
+
+Not yet reparametrised (kept Float64): the non-parametric *container* structs
+`water` and `bgc_vegetation`, and the decomposition/competition *parameter* sets.
+These are physical-parameter or aggregate types, not on the current GPU kernel
+path; threading `FT` through them (and a fully-Float32 model run) additionally
+requires finishing driver kernelisation — see the PRD.
+
+Pair with [`clm_float_type`](@ref) to choose `FT` from the target backend, e.g.
+`make_instances(clm_float_type(backend = :metal))`.
+"""
+function make_instances(::Type{FT} = Float64) where {FT}
+    base = CLMInstances()
+    return CLMInstances((_instance_at(FT, getfield(base, f)) for f in fieldnames(CLMInstances))...)
+end
+
 """
     clm_instInit!(inst::CLMInstances;
                   ng, nl, nc, np,

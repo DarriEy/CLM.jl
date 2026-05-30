@@ -13,6 +13,7 @@ using KernelAbstractions: @kernel, @index, @Const
 # ===========================================================================
 # Tier 1: Constants & Parameters
 # ===========================================================================
+include("constants/precision.jl")
 include("constants/varctl.jl")
 include("constants/landunit_varcon.jl")
 include("constants/column_varcon.jl")
