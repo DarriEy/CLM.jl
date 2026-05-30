@@ -150,18 +150,26 @@ and per-species parameters needed for the Wesely resistance model.
 
 Ported from module-level arrays in `DryDepVelocity.F90`.
 """
-Base.@kwdef mutable struct DryDepVelocityData{FT<:Real}
+Base.@kwdef mutable struct DryDepVelocityData{FT<:Real,
+                                  V<:AbstractVector{FT},
+                                  M<:AbstractMatrix{FT},
+                                  VI<:AbstractVector{<:Integer}}
     # --- Configuration ---
     n_drydep::Int = 0                     # number of dry deposition species
 
     # --- Per-species properties (length n_drydep) ---
-    foxd::Vector{FT} = Float64[]     # reactivity factor for oxidation [0-1]
-    dv::Vector{FT} = Float64[]     # diffusivity in air [cm^2/s]
-    mapping::Vector{Int}  = Int[]         # mapping from species to Wesely land type category
+    foxd::V = Float64[]     # reactivity factor for oxidation [0-1]
+    dv::V = Float64[]     # diffusivity in air [cm^2/s]
+    mapping::VI  = Int[]         # mapping from species to Wesely land type category
 
     # --- Per-patch output (np x n_drydep) ---
-    velocity_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dry deposition velocity [cm/s]
+    velocity_patch::M = Matrix{Float64}(undef, 0, 0)  # dry deposition velocity [cm/s]
 end
+
+DryDepVelocityData{FT}(; kwargs...) where {FT<:Real} =
+    DryDepVelocityData{FT, Vector{FT}, Matrix{FT}, Vector{Int}}(; kwargs...)
+Adapt.@adapt_structure DryDepVelocityData
+
 
 # =========================================================================
 # Allocation / initialization

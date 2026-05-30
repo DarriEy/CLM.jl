@@ -15,10 +15,17 @@ column and a flag indicating whether the column needs atmospheric downscaling.
 
 Ported from `topo_type` in `TopoMod.F90`.
 """
-Base.@kwdef mutable struct TopoData{FT<:Real}
-    topo_col::Vector{FT} = Float64[]                  # surface elevation (m)
-    needs_downscaling_col::Vector{Bool} = Bool[]           # whether a column needs to be downscaled
+Base.@kwdef mutable struct TopoData{FT<:Real,
+                        V<:AbstractVector{FT},
+                        VB<:AbstractVector{Bool}}
+    topo_col::V = Float64[]                  # surface elevation (m)
+    needs_downscaling_col::VB = Bool[]           # whether a column needs to be downscaled
 end
+
+TopoData{FT}(; kwargs...) where {FT<:Real} =
+    TopoData{FT, Vector{FT}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure TopoData
+
 
 # --------------------------------------------------------------------------
 # Init (mirrors Fortran Init = InitAllocate + InitHistory + InitCold)

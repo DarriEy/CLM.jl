@@ -35,37 +35,44 @@ conversion.
 
 Ported from `lnd2atm_type` in `lnd2atmType.F90`.
 """
-Base.@kwdef mutable struct Lnd2AtmData{FT<:Real}
+Base.@kwdef mutable struct Lnd2AtmData{FT<:Real,
+                           V<:AbstractVector{FT},
+                           M<:AbstractMatrix{FT}}
     params::Lnd2AtmParamsData = Lnd2AtmParamsData()
 
     # lnd->atm (gridcell-level)
-    t_rad_grc                      ::Vector{FT} = Float64[]   # radiative temperature (K)
-    t_ref2m_grc                    ::Vector{FT} = Float64[]   # 2m surface air temperature (K)
-    u_ref10m_grc                   ::Vector{FT} = Float64[]   # 10m surface wind speed (m/s)
-    albd_grc                       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # surface albedo (direct) (numrad)
-    albi_grc                       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # surface albedo (diffuse) (numrad)
-    taux_grc                       ::Vector{FT} = Float64[]   # wind stress: e-w (kg/m/s**2)
-    tauy_grc                       ::Vector{FT} = Float64[]   # wind stress: n-s (kg/m/s**2)
-    eflx_lh_tot_grc                ::Vector{FT} = Float64[]   # total latent HF (W/m**2) [+ to atm]
-    eflx_sh_tot_grc                ::Vector{FT} = Float64[]   # total sensible HF (W/m**2) [+ to atm]
-    eflx_sh_precip_conversion_grc  ::Vector{FT} = Float64[]   # sensible HF from precip conversion (W/m**2) [+ to atm]
-    eflx_lwrad_out_grc             ::Vector{FT} = Float64[]   # IR (longwave) radiation (W/m**2)
-    fsa_grc                        ::Vector{FT} = Float64[]   # solar rad absorbed (total) (W/m**2)
-    z0m_grc                        ::Vector{FT} = Float64[]   # roughness length, momentum (m)
-    net_carbon_exchange_grc        ::Vector{FT} = Float64[]   # net CO2 flux (kg CO2/m**2/s) [+ to atm]
-    nem_grc                        ::Vector{FT} = Float64[]   # gridcell average net methane correction to CO2 flux (g C/m^2/s)
-    ram1_grc                       ::Vector{FT} = Float64[]   # aerodynamical resistance (s/m)
-    fv_grc                         ::Vector{FT} = Float64[]   # friction velocity (m/s) (for dust model)
-    flxdst_grc                     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust flux (size bins)
-    ddvel_grc                      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dry deposition velocities
-    flxvoc_grc                     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # VOC flux (size bins)
-    fireflx_grc                    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # Wild Fire Emissions
-    fireztop_grc                   ::Vector{FT} = Float64[]   # Wild Fire Emissions vertical distribution top
-    ch4_surf_flux_tot_grc          ::Vector{FT} = Float64[]   # net CH4 flux (kg C/m**2/s) [+ to atm]
+    t_rad_grc                      ::V = Float64[]   # radiative temperature (K)
+    t_ref2m_grc                    ::V = Float64[]   # 2m surface air temperature (K)
+    u_ref10m_grc                   ::V = Float64[]   # 10m surface wind speed (m/s)
+    albd_grc                       ::M = Matrix{Float64}(undef, 0, 0)  # surface albedo (direct) (numrad)
+    albi_grc                       ::M = Matrix{Float64}(undef, 0, 0)  # surface albedo (diffuse) (numrad)
+    taux_grc                       ::V = Float64[]   # wind stress: e-w (kg/m/s**2)
+    tauy_grc                       ::V = Float64[]   # wind stress: n-s (kg/m/s**2)
+    eflx_lh_tot_grc                ::V = Float64[]   # total latent HF (W/m**2) [+ to atm]
+    eflx_sh_tot_grc                ::V = Float64[]   # total sensible HF (W/m**2) [+ to atm]
+    eflx_sh_precip_conversion_grc  ::V = Float64[]   # sensible HF from precip conversion (W/m**2) [+ to atm]
+    eflx_lwrad_out_grc             ::V = Float64[]   # IR (longwave) radiation (W/m**2)
+    fsa_grc                        ::V = Float64[]   # solar rad absorbed (total) (W/m**2)
+    z0m_grc                        ::V = Float64[]   # roughness length, momentum (m)
+    net_carbon_exchange_grc        ::V = Float64[]   # net CO2 flux (kg CO2/m**2/s) [+ to atm]
+    nem_grc                        ::V = Float64[]   # gridcell average net methane correction to CO2 flux (g C/m^2/s)
+    ram1_grc                       ::V = Float64[]   # aerodynamical resistance (s/m)
+    fv_grc                         ::V = Float64[]   # friction velocity (m/s) (for dust model)
+    flxdst_grc                     ::M = Matrix{Float64}(undef, 0, 0)  # dust flux (size bins)
+    ddvel_grc                      ::M = Matrix{Float64}(undef, 0, 0)  # dry deposition velocities
+    flxvoc_grc                     ::M = Matrix{Float64}(undef, 0, 0)  # VOC flux (size bins)
+    fireflx_grc                    ::M = Matrix{Float64}(undef, 0, 0)  # Wild Fire Emissions
+    fireztop_grc                   ::V = Float64[]   # Wild Fire Emissions vertical distribution top
+    ch4_surf_flux_tot_grc          ::V = Float64[]   # net CH4 flux (kg C/m**2/s) [+ to atm]
 
     # lnd->atm (column-level)
-    eflx_sh_ice_to_liq_col         ::Vector{FT} = Float64[]   # sensible HF from ice runoff to liquid conversion (W/m**2) [+ to atm]
+    eflx_sh_ice_to_liq_col         ::V = Float64[]   # sensible HF from ice runoff to liquid conversion (W/m**2) [+ to atm]
 end
+
+Lnd2AtmData{FT}(; kwargs...) where {FT<:Real} =
+    Lnd2AtmData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure Lnd2AtmData
+
 
 # --------------------------------------------------------------------------
 # Parameters constructor (mirrors lnd2atm_params_constructor)

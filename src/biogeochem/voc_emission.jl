@@ -95,40 +95,47 @@ VOC emission state and flux data.
 Contains diagnostic gamma factors and fluxes at the patch level.
 Ported from `vocemis_type` in `VOCEmissionMod.F90`.
 """
-Base.@kwdef mutable struct VOCEmisData{FT<:Real}
+Base.@kwdef mutable struct VOCEmisData{FT<:Real,
+                           V<:AbstractVector{FT},
+                           M<:AbstractMatrix{FT}}
     # Diagnostic coefficients (patch level)
-    Eopt_out_patch    ::Vector{FT} = Float64[]  # Eopt coefficient
-    topt_out_patch    ::Vector{FT} = Float64[]  # topt coefficient
-    alpha_out_patch   ::Vector{FT} = Float64[]  # alpha coefficient
-    cp_out_patch      ::Vector{FT} = Float64[]  # cp coefficient
+    Eopt_out_patch    ::V = Float64[]  # Eopt coefficient
+    topt_out_patch    ::V = Float64[]  # topt coefficient
+    alpha_out_patch   ::V = Float64[]  # alpha coefficient
+    cp_out_patch      ::V = Float64[]  # cp coefficient
 
     # PAR diagnostics (patch level)
-    paru_out_patch    ::Vector{FT} = Float64[]  # sunlit PAR [umol/m2/s]
-    par24u_out_patch  ::Vector{FT} = Float64[]  # sunlit PAR 24hr avg
-    par240u_out_patch ::Vector{FT} = Float64[]  # sunlit PAR 240hr avg
-    para_out_patch    ::Vector{FT} = Float64[]  # shade PAR [umol/m2/s]
-    par24a_out_patch  ::Vector{FT} = Float64[]  # shade PAR 24hr avg
-    par240a_out_patch ::Vector{FT} = Float64[]  # shade PAR 240hr avg
+    paru_out_patch    ::V = Float64[]  # sunlit PAR [umol/m2/s]
+    par24u_out_patch  ::V = Float64[]  # sunlit PAR 24hr avg
+    par240u_out_patch ::V = Float64[]  # sunlit PAR 240hr avg
+    para_out_patch    ::V = Float64[]  # shade PAR [umol/m2/s]
+    par24a_out_patch  ::V = Float64[]  # shade PAR 24hr avg
+    par240a_out_patch ::V = Float64[]  # shade PAR 240hr avg
 
     # Gamma diagnostics (patch level)
-    gamma_out_patch   ::Vector{FT} = Float64[]  # total gamma
-    gammaL_out_patch  ::Vector{FT} = Float64[]  # gamma for LAI
-    gammaT_out_patch  ::Vector{FT} = Float64[]  # gamma for temperature
-    gammaP_out_patch  ::Vector{FT} = Float64[]  # gamma for PPFD
-    gammaA_out_patch  ::Vector{FT} = Float64[]  # gamma for leaf age
-    gammaS_out_patch  ::Vector{FT} = Float64[]  # gamma for soil moisture
-    gammaC_out_patch  ::Vector{FT} = Float64[]  # gamma for CO2
+    gamma_out_patch   ::V = Float64[]  # total gamma
+    gammaL_out_patch  ::V = Float64[]  # gamma for LAI
+    gammaT_out_patch  ::V = Float64[]  # gamma for temperature
+    gammaP_out_patch  ::V = Float64[]  # gamma for PPFD
+    gammaA_out_patch  ::V = Float64[]  # gamma for leaf age
+    gammaS_out_patch  ::V = Float64[]  # gamma for soil moisture
+    gammaC_out_patch  ::V = Float64[]  # gamma for CO2
 
     # Fluxes (patch level)
-    vocflx_tot_patch  ::Vector{FT} = Float64[]  # total VOC flux [moles/m2/sec]
-    vocflx_patch      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # per-mechanism-compound flux [moles/m2/sec]
+    vocflx_tot_patch  ::V = Float64[]  # total VOC flux [moles/m2/sec]
+    vocflx_patch      ::M = Matrix{Float64}(undef, 0, 0)  # per-mechanism-compound flux [moles/m2/sec]
 
     # Gridcell isoprene emission factors (6 × ngrc)
-    efisop_grc        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # [ug m-2 h-1]
+    efisop_grc        ::M = Matrix{Float64}(undef, 0, 0)  # [ug m-2 h-1]
 
     # Per-mega-compound flux output (n_megcomps × np) [kg/m2/sec] for history
-    meg_flux_out      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    meg_flux_out      ::M = Matrix{Float64}(undef, 0, 0)
 end
+
+VOCEmisData{FT}(; kwargs...) where {FT<:Real} =
+    VOCEmisData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure VOCEmisData
+
 
 # ---------------------------------------------------------------------------
 # vocemis_init! — Initialize VOC emission data

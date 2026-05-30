@@ -83,23 +83,29 @@ Fields from ozone_type:
   - o3uptakesha_patch, o3uptakesun_patch: ozone dose (mmol O3/m^2)
   - tlai_old_patch: tlai from last time step
 """
-Base.@kwdef mutable struct OzoneData{FT<:Real}
+Base.@kwdef mutable struct OzoneData{FT<:Real,
+                         V<:AbstractVector{FT}}
     # Stress method selector
     stress_method::Int = STRESS_METHOD_LOMBARDOZZI2015
 
     # --- Base type fields (from ozone_base_type) ---
-    o3coefvsha_patch    ::Vector{FT} = Float64[]   # ozone coef for photosynthesis, shaded (0-1)
-    o3coefvsun_patch    ::Vector{FT} = Float64[]   # ozone coef for photosynthesis, sunlit (0-1)
-    o3coefgsha_patch    ::Vector{FT} = Float64[]   # ozone coef for conductance, shaded (0-1)
-    o3coefgsun_patch    ::Vector{FT} = Float64[]   # ozone coef for conductance, sunlit (0-1)
-    o3coefjmaxsha_patch ::Vector{FT} = Float64[]   # ozone coef for Jmax, shaded (0-1)
-    o3coefjmaxsun_patch ::Vector{FT} = Float64[]   # ozone coef for Jmax, sunlit (0-1)
+    o3coefvsha_patch    ::V = Float64[]   # ozone coef for photosynthesis, shaded (0-1)
+    o3coefvsun_patch    ::V = Float64[]   # ozone coef for photosynthesis, sunlit (0-1)
+    o3coefgsha_patch    ::V = Float64[]   # ozone coef for conductance, shaded (0-1)
+    o3coefgsun_patch    ::V = Float64[]   # ozone coef for conductance, sunlit (0-1)
+    o3coefjmaxsha_patch ::V = Float64[]   # ozone coef for Jmax, shaded (0-1)
+    o3coefjmaxsun_patch ::V = Float64[]   # ozone coef for Jmax, sunlit (0-1)
 
     # --- Derived type fields (from ozone_type) ---
-    o3uptakesha_patch   ::Vector{FT} = Float64[]   # ozone dose, shaded leaves (mmol O3/m^2)
-    o3uptakesun_patch   ::Vector{FT} = Float64[]   # ozone dose, sunlit leaves (mmol O3/m^2)
-    tlai_old_patch      ::Vector{FT} = Float64[]   # tlai from last time step
+    o3uptakesha_patch   ::V = Float64[]   # ozone dose, shaded leaves (mmol O3/m^2)
+    o3uptakesun_patch   ::V = Float64[]   # ozone dose, sunlit leaves (mmol O3/m^2)
+    tlai_old_patch      ::V = Float64[]   # tlai from last time step
 end
+
+OzoneData{FT}(; kwargs...) where {FT<:Real} =
+    OzoneData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure OzoneData
+
 
 # ==========================================================================
 # Init / clean functions

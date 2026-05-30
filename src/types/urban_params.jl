@@ -196,46 +196,54 @@ initialization for each urban landunit.
 
 Ported from `urbanparams_type` in `UrbanParamsType.F90`.
 """
-Base.@kwdef mutable struct UrbanParamsData{FT<:Real}
+Base.@kwdef mutable struct UrbanParamsData{FT<:Real,
+                               V<:AbstractVector{FT},
+                               M<:AbstractMatrix{FT},
+                               VI<:AbstractVector{<:Integer}}
     # --- Emissivities (landunit-level 1D) ---
-    wind_hgt_canyon     ::Vector{FT} = Float64[]   # lun height above road at which wind in canyon is computed (m)
-    em_roof             ::Vector{FT} = Float64[]   # lun roof emissivity
-    em_improad          ::Vector{FT} = Float64[]   # lun impervious road emissivity
-    em_perroad          ::Vector{FT} = Float64[]   # lun pervious road emissivity
-    em_wall             ::Vector{FT} = Float64[]   # lun wall emissivity
+    wind_hgt_canyon     ::V = Float64[]   # lun height above road at which wind in canyon is computed (m)
+    em_roof             ::V = Float64[]   # lun roof emissivity
+    em_improad          ::V = Float64[]   # lun impervious road emissivity
+    em_perroad          ::V = Float64[]   # lun pervious road emissivity
+    em_wall             ::V = Float64[]   # lun wall emissivity
 
     # --- Albedos (landunit-level 2D: nlun × numrad) ---
-    alb_roof_dir        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct roof albedo
-    alb_roof_dif        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse roof albedo
-    alb_improad_dir     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct impervious road albedo
-    alb_improad_dif     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse impervious road albedo
-    alb_perroad_dir     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct pervious road albedo
-    alb_perroad_dif     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse pervious road albedo
-    alb_wall_dir        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct wall albedo
-    alb_wall_dif        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse wall albedo
+    alb_roof_dir        ::M = Matrix{Float64}(undef, 0, 0)  # lun direct roof albedo
+    alb_roof_dif        ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse roof albedo
+    alb_improad_dir     ::M = Matrix{Float64}(undef, 0, 0)  # lun direct impervious road albedo
+    alb_improad_dif     ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse impervious road albedo
+    alb_perroad_dir     ::M = Matrix{Float64}(undef, 0, 0)  # lun direct pervious road albedo
+    alb_perroad_dif     ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse pervious road albedo
+    alb_wall_dir        ::M = Matrix{Float64}(undef, 0, 0)  # lun direct wall albedo
+    alb_wall_dif        ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse wall albedo
 
     # --- Thermal properties (landunit-level 2D: nlun × nlevurb) ---
-    nlev_improad        ::Vector{Int}     = Int[]       # lun number of impervious road layers (-)
-    tk_wall             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun thermal conductivity of wall (W/m/K)
-    tk_roof             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun thermal conductivity of roof (W/m/K)
-    tk_improad          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun thermal conductivity of impervious road (W/m/K)
-    cv_wall             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun heat capacity of wall (J/m^3/K)
-    cv_roof             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun heat capacity of roof (J/m^3/K)
-    cv_improad          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun heat capacity of impervious road (J/m^3/K)
-    thick_wall          ::Vector{FT} = Float64[]   # lun total thickness of wall (m)
-    thick_roof          ::Vector{FT} = Float64[]   # lun total thickness of roof (m)
+    nlev_improad        ::VI     = Int[]       # lun number of impervious road layers (-)
+    tk_wall             ::M = Matrix{Float64}(undef, 0, 0)  # lun thermal conductivity of wall (W/m/K)
+    tk_roof             ::M = Matrix{Float64}(undef, 0, 0)  # lun thermal conductivity of roof (W/m/K)
+    tk_improad          ::M = Matrix{Float64}(undef, 0, 0)  # lun thermal conductivity of impervious road (W/m/K)
+    cv_wall             ::M = Matrix{Float64}(undef, 0, 0)  # lun heat capacity of wall (J/m^3/K)
+    cv_roof             ::M = Matrix{Float64}(undef, 0, 0)  # lun heat capacity of roof (J/m^3/K)
+    cv_improad          ::M = Matrix{Float64}(undef, 0, 0)  # lun heat capacity of impervious road (J/m^3/K)
+    thick_wall          ::V = Float64[]   # lun total thickness of wall (m)
+    thick_roof          ::V = Float64[]   # lun total thickness of roof (m)
 
     # --- View factors (landunit-level 1D) ---
-    vf_sr               ::Vector{FT} = Float64[]   # lun view factor of sky for road
-    vf_wr               ::Vector{FT} = Float64[]   # lun view factor of one wall for road
-    vf_sw               ::Vector{FT} = Float64[]   # lun view factor of sky for one wall
-    vf_rw               ::Vector{FT} = Float64[]   # lun view factor of road for one wall
-    vf_ww               ::Vector{FT} = Float64[]   # lun view factor of opposing wall for one wall
+    vf_sr               ::V = Float64[]   # lun view factor of sky for road
+    vf_wr               ::V = Float64[]   # lun view factor of one wall for road
+    vf_sw               ::V = Float64[]   # lun view factor of sky for one wall
+    vf_rw               ::V = Float64[]   # lun view factor of road for one wall
+    vf_ww               ::V = Float64[]   # lun view factor of opposing wall for one wall
 
     # --- Building / traffic parameters (landunit-level 1D) ---
-    t_building_min      ::Vector{FT} = Float64[]   # lun minimum internal building air temperature (K)
-    eflx_traffic_factor ::Vector{FT} = Float64[]   # lun multiplicative traffic factor for sensible heat flux (-)
+    t_building_min      ::V = Float64[]   # lun minimum internal building air temperature (K)
+    eflx_traffic_factor ::V = Float64[]   # lun multiplicative traffic factor for sensible heat flux (-)
 end
+
+UrbanParamsData{FT}(; kwargs...) where {FT<:Real} =
+    UrbanParamsData{FT, Vector{FT}, Matrix{FT}, Vector{Int}}(; kwargs...)
+Adapt.@adapt_structure UrbanParamsData
+
 
 """
     urbanparams_init!(up::UrbanParamsData, nl::Int; nlevurb::Int=0, numrad::Int=NUMRAD)

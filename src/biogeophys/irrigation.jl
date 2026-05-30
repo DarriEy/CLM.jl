@@ -94,7 +94,10 @@ Irrigation state and flux data structure.
 
 Ported from `irrigation_type` in `IrrigationMod.F90`.
 """
-Base.@kwdef mutable struct IrrigationData{FT<:Real}
+Base.@kwdef mutable struct IrrigationData{FT<:Real,
+                              V<:AbstractVector{FT},
+                              M<:AbstractMatrix{FT},
+                              VI<:AbstractVector{<:Integer}}
     # Parameters
     params::IrrigationParamsData = IrrigationParamsData()
     # Land model time step (sec)
@@ -102,20 +105,25 @@ Base.@kwdef mutable struct IrrigationData{FT<:Real}
     # Number of irrigation time steps per day
     irrig_nsteps_per_day::Int = 0
     # Relative saturation at wilting point [col, nlevsoi]
-    relsat_wilting_point_col::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    relsat_wilting_point_col::M = Matrix{Float64}(undef, 0, 0)
     # Relative saturation at irrigation target [col, nlevsoi]
-    relsat_target_col::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    relsat_target_col::M = Matrix{Float64}(undef, 0, 0)
     # Patch irrigation application method [patch]
-    irrig_method_patch::Vector{Int} = Int[]
+    irrig_method_patch::VI = Int[]
     # Current irrigation rate from surface water [mm/s] [patch]
-    sfc_irrig_rate_patch::Vector{FT} = Float64[]
+    sfc_irrig_rate_patch::V = Float64[]
     # Current irrigation rate demand, neglecting surface water source limitation [mm/s] [patch]
-    irrig_rate_demand_patch::Vector{FT} = Float64[]
+    irrig_rate_demand_patch::V = Float64[]
     # Number of time steps for which we still need to irrigate today [patch]
-    n_irrig_steps_left_patch::Vector{Int} = Int[]
+    n_irrig_steps_left_patch::VI = Int[]
     # Irrigation flux neglecting surface water source limitation [mm/s] [patch]
-    qflx_irrig_demand_patch::Vector{FT} = Float64[]
+    qflx_irrig_demand_patch::V = Float64[]
 end
+
+IrrigationData{FT}(; kwargs...) where {FT<:Real} =
+    IrrigationData{FT, Vector{FT}, Matrix{FT}, Vector{Int}}(; kwargs...)
+Adapt.@adapt_structure IrrigationData
+
 
 # ---------------------------------------------------------------------------
 # irrigation_init_allocate! — Allocate irrigation data arrays

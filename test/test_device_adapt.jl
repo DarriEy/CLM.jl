@@ -39,12 +39,14 @@ Adapt.adapt_storage(::Type{<:FakeDev}, x::Array) = FakeDev(x)
     inst.temperature.t_grnd_col = rand(3)
     inst.column.dz = rand(3, 4)
     inst.energyflux.eflx_lh_tot_patch = rand(3)
+    inst.atm2lnd.forc_t_not_downscaled_grc = rand(3)
     idev = adapt(FakeDev, inst)
     @test idev.temperature.t_grnd_col isa FakeDev
     @test idev.column.dz isa FakeDev
     @test idev.energyflux.eflx_lh_tot_patch isa FakeDev
-    # Non-registered sub-structs are passed through unchanged.
+    @test idev.atm2lnd.forc_t_not_downscaled_grc isa FakeDev   # forcing moves too
+    # WaterData is intentionally not yet device-movable (bulk_and_tracers
+    # reference-aliasing) — it passes through unchanged.
     @test typeof(idev.water) === typeof(inst.water)
-    @test typeof(idev.atm2lnd) === typeof(inst.atm2lnd)
     println("  device-adapt: CLMInstances tree moves registered sub-structs to device")
 end

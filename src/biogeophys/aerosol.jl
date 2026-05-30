@@ -28,61 +28,68 @@ Fortran snow-layer index j ∈ [-nlevsno+1, 0] to Julia index j + nlevsno.
 
 Ported from `aerosol_type` in `AerosolMod.F90`.
 """
-Base.@kwdef mutable struct AerosolData{FT<:Real}
+Base.@kwdef mutable struct AerosolData{FT<:Real,
+                           V<:AbstractVector{FT},
+                           M<:AbstractMatrix{FT}}
     # --- Mass of aerosol species in snow (col, lyr) [kg] ---
-    mss_bcpho_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophobic BC
-    mss_bcphi_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophilic BC
-    mss_bctot_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # total BC (pho+phi)
-    mss_bc_col_col  ::Vector{FT} = Float64[]                      # column-integrated BC
-    mss_bc_top_col  ::Vector{FT} = Float64[]                      # top-layer BC
+    mss_bcpho_col   ::M = Matrix{Float64}(undef, 0, 0)  # hydrophobic BC
+    mss_bcphi_col   ::M = Matrix{Float64}(undef, 0, 0)  # hydrophilic BC
+    mss_bctot_col   ::M = Matrix{Float64}(undef, 0, 0)  # total BC (pho+phi)
+    mss_bc_col_col  ::V = Float64[]                      # column-integrated BC
+    mss_bc_top_col  ::V = Float64[]                      # top-layer BC
 
-    mss_ocpho_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophobic OC
-    mss_ocphi_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # hydrophilic OC
-    mss_octot_col   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # total OC (pho+phi)
-    mss_oc_col_col  ::Vector{FT} = Float64[]                      # column-integrated OC
-    mss_oc_top_col  ::Vector{FT} = Float64[]                      # top-layer OC
+    mss_ocpho_col   ::M = Matrix{Float64}(undef, 0, 0)  # hydrophobic OC
+    mss_ocphi_col   ::M = Matrix{Float64}(undef, 0, 0)  # hydrophilic OC
+    mss_octot_col   ::M = Matrix{Float64}(undef, 0, 0)  # total OC (pho+phi)
+    mss_oc_col_col  ::V = Float64[]                      # column-integrated OC
+    mss_oc_top_col  ::V = Float64[]                      # top-layer OC
 
-    mss_dst1_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 1
-    mss_dst2_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 2
-    mss_dst3_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 3
-    mss_dst4_col    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # dust species 4
-    mss_dsttot_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # total dust
-    mss_dst_col_col ::Vector{FT} = Float64[]                      # column-integrated dust
-    mss_dst_top_col ::Vector{FT} = Float64[]                      # top-layer dust
+    mss_dst1_col    ::M = Matrix{Float64}(undef, 0, 0)  # dust species 1
+    mss_dst2_col    ::M = Matrix{Float64}(undef, 0, 0)  # dust species 2
+    mss_dst3_col    ::M = Matrix{Float64}(undef, 0, 0)  # dust species 3
+    mss_dst4_col    ::M = Matrix{Float64}(undef, 0, 0)  # dust species 4
+    mss_dsttot_col  ::M = Matrix{Float64}(undef, 0, 0)  # total dust
+    mss_dst_col_col ::V = Float64[]                      # column-integrated dust
+    mss_dst_top_col ::V = Float64[]                      # top-layer dust
 
     # --- Mass concentrations in snow (col, lyr) [kg/kg] ---
-    mss_cnc_bcphi_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_bcpho_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_ocphi_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_ocpho_col ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst1_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst2_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst3_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    mss_cnc_dst4_col  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_bcphi_col ::M = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_bcpho_col ::M = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_ocphi_col ::M = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_ocpho_col ::M = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst1_col  ::M = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst2_col  ::M = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst3_col  ::M = Matrix{Float64}(undef, 0, 0)
+    mss_cnc_dst4_col  ::M = Matrix{Float64}(undef, 0, 0)
 
     # --- Deposition fluxes (col) [kg/m2/s] ---
-    flx_dst_dep_dry1_col ::Vector{FT} = Float64[]
-    flx_dst_dep_wet1_col ::Vector{FT} = Float64[]
-    flx_dst_dep_dry2_col ::Vector{FT} = Float64[]
-    flx_dst_dep_wet2_col ::Vector{FT} = Float64[]
-    flx_dst_dep_dry3_col ::Vector{FT} = Float64[]
-    flx_dst_dep_wet3_col ::Vector{FT} = Float64[]
-    flx_dst_dep_dry4_col ::Vector{FT} = Float64[]
-    flx_dst_dep_wet4_col ::Vector{FT} = Float64[]
-    flx_dst_dep_col      ::Vector{FT} = Float64[]
+    flx_dst_dep_dry1_col ::V = Float64[]
+    flx_dst_dep_wet1_col ::V = Float64[]
+    flx_dst_dep_dry2_col ::V = Float64[]
+    flx_dst_dep_wet2_col ::V = Float64[]
+    flx_dst_dep_dry3_col ::V = Float64[]
+    flx_dst_dep_wet3_col ::V = Float64[]
+    flx_dst_dep_dry4_col ::V = Float64[]
+    flx_dst_dep_wet4_col ::V = Float64[]
+    flx_dst_dep_col      ::V = Float64[]
 
-    flx_bc_dep_dry_col   ::Vector{FT} = Float64[]
-    flx_bc_dep_wet_col   ::Vector{FT} = Float64[]
-    flx_bc_dep_pho_col   ::Vector{FT} = Float64[]
-    flx_bc_dep_phi_col   ::Vector{FT} = Float64[]
-    flx_bc_dep_col       ::Vector{FT} = Float64[]
+    flx_bc_dep_dry_col   ::V = Float64[]
+    flx_bc_dep_wet_col   ::V = Float64[]
+    flx_bc_dep_pho_col   ::V = Float64[]
+    flx_bc_dep_phi_col   ::V = Float64[]
+    flx_bc_dep_col       ::V = Float64[]
 
-    flx_oc_dep_dry_col   ::Vector{FT} = Float64[]
-    flx_oc_dep_wet_col   ::Vector{FT} = Float64[]
-    flx_oc_dep_pho_col   ::Vector{FT} = Float64[]
-    flx_oc_dep_phi_col   ::Vector{FT} = Float64[]
-    flx_oc_dep_col       ::Vector{FT} = Float64[]
+    flx_oc_dep_dry_col   ::V = Float64[]
+    flx_oc_dep_wet_col   ::V = Float64[]
+    flx_oc_dep_pho_col   ::V = Float64[]
+    flx_oc_dep_phi_col   ::V = Float64[]
+    flx_oc_dep_col       ::V = Float64[]
 end
+
+AerosolData{FT}(; kwargs...) where {FT<:Real} =
+    AerosolData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure AerosolData
+
 
 # --------------------------------------------------------------------------
 # Initialization

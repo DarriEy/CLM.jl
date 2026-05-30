@@ -54,67 +54,74 @@ time-averaged quantities.
 
 Ported from `atm2lnd_type` in `atm2lndType.F90`.
 """
-Base.@kwdef mutable struct Atm2LndData{FT<:Real}
+Base.@kwdef mutable struct Atm2LndData{FT<:Real,
+                           V<:AbstractVector{FT},
+                           M<:AbstractMatrix{FT}}
     params::Atm2LndParamsData = Atm2LndParamsData()
 
     # --- atm->lnd not downscaled (gridcell-level) ---
-    forc_u_grc                    ::Vector{FT} = Float64[]   # atm wind speed, east direction (m/s)
-    forc_v_grc                    ::Vector{FT} = Float64[]   # atm wind speed, north direction (m/s)
-    forc_wind_grc                 ::Vector{FT} = Float64[]   # atmospheric wind speed
-    forc_hgt_grc                  ::Vector{FT} = Float64[]   # atmospheric reference height (m)
-    forc_topo_grc                 ::Vector{FT} = Float64[]   # atmospheric surface height (m)
-    forc_hgt_u_grc                ::Vector{FT} = Float64[]   # obs height of wind [m]
-    forc_hgt_t_grc                ::Vector{FT} = Float64[]   # obs height of temperature [m]
-    forc_hgt_q_grc                ::Vector{FT} = Float64[]   # obs height of humidity [m]
-    forc_vp_grc                   ::Vector{FT} = Float64[]   # atmospheric vapor pressure (Pa)
-    forc_pco2_grc                 ::Vector{FT} = Float64[]   # CO2 partial pressure (Pa)
-    forc_pco2_240_patch           ::Vector{FT} = Float64[]   # 10-day mean CO2 partial pressure (Pa)
-    forc_solad_not_downscaled_grc ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # direct beam radiation (numrad)
-    forc_solai_grc                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # diffuse radiation (numrad)
-    forc_solar_not_downscaled_grc ::Vector{FT} = Float64[]   # incident solar radiation
-    forc_solar_downscaled_col     ::Vector{FT} = Float64[]   # incident solar radiation (downscaled)
-    forc_ndep_grc                 ::Vector{FT} = Float64[]   # nitrogen deposition rate (gN/m2/s)
-    forc_pc13o2_grc               ::Vector{FT} = Float64[]   # C13O2 partial pressure (Pa)
-    forc_po2_grc                  ::Vector{FT} = Float64[]   # O2 partial pressure (Pa)
-    forc_po2_240_patch            ::Vector{FT} = Float64[]   # 10-day mean O2 partial pressure (Pa)
-    forc_aer_grc                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # aerosol deposition array
-    forc_pch4_grc                 ::Vector{FT} = Float64[]   # CH4 partial pressure (Pa)
-    forc_o3_grc                   ::Vector{FT} = Float64[]   # ozone partial pressure (mol/mol)
+    forc_u_grc                    ::V = Float64[]   # atm wind speed, east direction (m/s)
+    forc_v_grc                    ::V = Float64[]   # atm wind speed, north direction (m/s)
+    forc_wind_grc                 ::V = Float64[]   # atmospheric wind speed
+    forc_hgt_grc                  ::V = Float64[]   # atmospheric reference height (m)
+    forc_topo_grc                 ::V = Float64[]   # atmospheric surface height (m)
+    forc_hgt_u_grc                ::V = Float64[]   # obs height of wind [m]
+    forc_hgt_t_grc                ::V = Float64[]   # obs height of temperature [m]
+    forc_hgt_q_grc                ::V = Float64[]   # obs height of humidity [m]
+    forc_vp_grc                   ::V = Float64[]   # atmospheric vapor pressure (Pa)
+    forc_pco2_grc                 ::V = Float64[]   # CO2 partial pressure (Pa)
+    forc_pco2_240_patch           ::V = Float64[]   # 10-day mean CO2 partial pressure (Pa)
+    forc_solad_not_downscaled_grc ::M = Matrix{Float64}(undef, 0, 0)  # direct beam radiation (numrad)
+    forc_solai_grc                ::M = Matrix{Float64}(undef, 0, 0)  # diffuse radiation (numrad)
+    forc_solar_not_downscaled_grc ::V = Float64[]   # incident solar radiation
+    forc_solar_downscaled_col     ::V = Float64[]   # incident solar radiation (downscaled)
+    forc_ndep_grc                 ::V = Float64[]   # nitrogen deposition rate (gN/m2/s)
+    forc_pc13o2_grc               ::V = Float64[]   # C13O2 partial pressure (Pa)
+    forc_po2_grc                  ::V = Float64[]   # O2 partial pressure (Pa)
+    forc_po2_240_patch            ::V = Float64[]   # 10-day mean O2 partial pressure (Pa)
+    forc_aer_grc                  ::M = Matrix{Float64}(undef, 0, 0)  # aerosol deposition array
+    forc_pch4_grc                 ::V = Float64[]   # CH4 partial pressure (Pa)
+    forc_o3_grc                   ::V = Float64[]   # ozone partial pressure (mol/mol)
 
-    forc_t_not_downscaled_grc     ::Vector{FT} = Float64[]   # not downscaled atm temperature (K)
-    forc_th_not_downscaled_grc    ::Vector{FT} = Float64[]   # not downscaled atm potential temperature (K)
-    forc_pbot_not_downscaled_grc  ::Vector{FT} = Float64[]   # not downscaled atm pressure (Pa)
-    forc_pbot240_downscaled_patch ::Vector{FT} = Float64[]   # 10-day mean downscaled atm pressure (Pa)
-    forc_rho_not_downscaled_grc   ::Vector{FT} = Float64[]   # not downscaled atm density (kg/m**3)
-    forc_lwrad_not_downscaled_grc ::Vector{FT} = Float64[]   # not downscaled atm downwrd IR longwave radiation (W/m**2)
+    forc_t_not_downscaled_grc     ::V = Float64[]   # not downscaled atm temperature (K)
+    forc_th_not_downscaled_grc    ::V = Float64[]   # not downscaled atm potential temperature (K)
+    forc_pbot_not_downscaled_grc  ::V = Float64[]   # not downscaled atm pressure (Pa)
+    forc_pbot240_downscaled_patch ::V = Float64[]   # 10-day mean downscaled atm pressure (Pa)
+    forc_rho_not_downscaled_grc   ::V = Float64[]   # not downscaled atm density (kg/m**3)
+    forc_lwrad_not_downscaled_grc ::V = Float64[]   # not downscaled atm downwrd IR longwave radiation (W/m**2)
 
     # --- atm->lnd downscaled (column-level) ---
-    forc_t_downscaled_col         ::Vector{FT} = Float64[]   # downscaled atm temperature (K)
-    forc_th_downscaled_col        ::Vector{FT} = Float64[]   # downscaled atm potential temperature (K)
-    forc_pbot_downscaled_col      ::Vector{FT} = Float64[]   # downscaled atm pressure (Pa)
-    forc_rho_downscaled_col       ::Vector{FT} = Float64[]   # downscaled atm density (kg/m**3)
-    forc_lwrad_downscaled_col     ::Vector{FT} = Float64[]   # downscaled atm downwrd IR longwave radiation (W/m**2)
-    forc_solad_downscaled_col     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # direct beam radiation downscaled (numrad)
+    forc_t_downscaled_col         ::V = Float64[]   # downscaled atm temperature (K)
+    forc_th_downscaled_col        ::V = Float64[]   # downscaled atm potential temperature (K)
+    forc_pbot_downscaled_col      ::V = Float64[]   # downscaled atm pressure (Pa)
+    forc_rho_downscaled_col       ::V = Float64[]   # downscaled atm density (kg/m**3)
+    forc_lwrad_downscaled_col     ::V = Float64[]   # downscaled atm downwrd IR longwave radiation (W/m**2)
+    forc_solad_downscaled_col     ::M = Matrix{Float64}(undef, 0, 0)  # direct beam radiation downscaled (numrad)
 
     # --- atm->lnd precipitation/humidity (gridcell-level, not downscaled) ---
-    forc_rain_not_downscaled_grc      ::Vector{FT} = Float64[]   # rain rate (mm H2O/s)
-    forc_snow_not_downscaled_grc      ::Vector{FT} = Float64[]   # snow rate (mm H2O/s)
-    forc_q_not_downscaled_grc         ::Vector{FT} = Float64[]   # specific humidity (kg/kg)
+    forc_rain_not_downscaled_grc      ::V = Float64[]   # rain rate (mm H2O/s)
+    forc_snow_not_downscaled_grc      ::V = Float64[]   # snow rate (mm H2O/s)
+    forc_q_not_downscaled_grc         ::V = Float64[]   # specific humidity (kg/kg)
 
     # --- atm->lnd precipitation/humidity (column-level, downscaled) ---
-    forc_rain_downscaled_col          ::Vector{FT} = Float64[]   # rain rate (mm H2O/s)
-    forc_snow_downscaled_col          ::Vector{FT} = Float64[]   # snow rate (mm H2O/s)
-    forc_q_downscaled_col             ::Vector{FT} = Float64[]   # specific humidity (kg/kg)
+    forc_rain_downscaled_col          ::V = Float64[]   # rain rate (mm H2O/s)
+    forc_snow_downscaled_col          ::V = Float64[]   # snow rate (mm H2O/s)
+    forc_q_downscaled_col             ::V = Float64[]   # specific humidity (kg/kg)
 
     # --- time averaged quantities (patch-level) ---
-    fsd24_patch                   ::Vector{FT} = Float64[]   # patch 24hr average of direct beam radiation
-    fsd240_patch                  ::Vector{FT} = Float64[]   # patch 240hr average of direct beam radiation
-    fsi24_patch                   ::Vector{FT} = Float64[]   # patch 24hr average of diffuse beam radiation
-    fsi240_patch                  ::Vector{FT} = Float64[]   # patch 240hr average of diffuse beam radiation
-    wind24_patch                  ::Vector{FT} = Float64[]   # patch 24-hour running mean of wind
-    t_mo_patch                    ::Vector{FT} = Float64[]   # patch 30-day average temperature (K)
-    t_mo_min_patch                ::Vector{FT} = Float64[]   # patch annual min of t_mo (K)
+    fsd24_patch                   ::V = Float64[]   # patch 24hr average of direct beam radiation
+    fsd240_patch                  ::V = Float64[]   # patch 240hr average of direct beam radiation
+    fsi24_patch                   ::V = Float64[]   # patch 24hr average of diffuse beam radiation
+    fsi240_patch                  ::V = Float64[]   # patch 240hr average of diffuse beam radiation
+    wind24_patch                  ::V = Float64[]   # patch 24-hour running mean of wind
+    t_mo_patch                    ::V = Float64[]   # patch 30-day average temperature (K)
+    t_mo_min_patch                ::V = Float64[]   # patch annual min of t_mo (K)
 end
+
+Atm2LndData{FT}(; kwargs...) where {FT<:Real} =
+    Atm2LndData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure Atm2LndData
+
 
 # --------------------------------------------------------------------------
 # Helper: compute ramp parameters from snow/rain temperature endpoints

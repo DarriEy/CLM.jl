@@ -23,53 +23,59 @@ reflected/incident radiation diagnostics at the patch level.
 
 Ported from `surfrad_type` in `SurfaceRadiationMod.F90`.
 """
-Base.@kwdef mutable struct SurfaceRadiationData{FT<:Real}
+Base.@kwdef mutable struct SurfaceRadiationData{FT<:Real,
+                                    V<:AbstractVector{FT}}
     # --- Aerosol forcing (patch-level 1D) ---
-    sfc_frc_aer_patch      ::Vector{FT} = Float64[]   # patch surface forcing of snow with all aerosols [W/m2]
-    sfc_frc_bc_patch       ::Vector{FT} = Float64[]   # patch surface forcing of snow with BC [W/m2]
-    sfc_frc_oc_patch       ::Vector{FT} = Float64[]   # patch surface forcing of snow with OC [W/m2]
-    sfc_frc_dst_patch      ::Vector{FT} = Float64[]   # patch surface forcing of snow with dust [W/m2]
-    sfc_frc_aer_sno_patch  ::Vector{FT} = Float64[]   # patch surface forcing of snow with all aerosols, snow-only avg [W/m2]
-    sfc_frc_bc_sno_patch   ::Vector{FT} = Float64[]   # patch surface forcing of snow with BC, snow-only avg [W/m2]
-    sfc_frc_oc_sno_patch   ::Vector{FT} = Float64[]   # patch surface forcing of snow with OC, snow-only avg [W/m2]
-    sfc_frc_dst_sno_patch  ::Vector{FT} = Float64[]   # patch surface forcing of snow with dust, snow-only avg [W/m2]
+    sfc_frc_aer_patch      ::V = Float64[]   # patch surface forcing of snow with all aerosols [W/m2]
+    sfc_frc_bc_patch       ::V = Float64[]   # patch surface forcing of snow with BC [W/m2]
+    sfc_frc_oc_patch       ::V = Float64[]   # patch surface forcing of snow with OC [W/m2]
+    sfc_frc_dst_patch      ::V = Float64[]   # patch surface forcing of snow with dust [W/m2]
+    sfc_frc_aer_sno_patch  ::V = Float64[]   # patch surface forcing of snow with all aerosols, snow-only avg [W/m2]
+    sfc_frc_bc_sno_patch   ::V = Float64[]   # patch surface forcing of snow with BC, snow-only avg [W/m2]
+    sfc_frc_oc_sno_patch   ::V = Float64[]   # patch surface forcing of snow with OC, snow-only avg [W/m2]
+    sfc_frc_dst_sno_patch  ::V = Float64[]   # patch surface forcing of snow with dust, snow-only avg [W/m2]
 
     # --- Vegetation PAR at local noon (patch-level 1D) ---
-    parveg_ln_patch        ::Vector{FT} = Float64[]   # patch absorbed par by vegetation at local noon [W/m**2]
+    parveg_ln_patch        ::V = Float64[]   # patch absorbed par by vegetation at local noon [W/m**2]
 
     # --- Reflected solar from snow (patch-level 1D) ---
-    fsr_sno_vd_patch       ::Vector{FT} = Float64[]   # patch reflected direct beam vis solar radiation from snow [W/m**2]
-    fsr_sno_nd_patch       ::Vector{FT} = Float64[]   # patch reflected direct beam NIR solar radiation from snow [W/m**2]
-    fsr_sno_vi_patch       ::Vector{FT} = Float64[]   # patch reflected diffuse vis solar radiation from snow [W/m**2]
-    fsr_sno_ni_patch       ::Vector{FT} = Float64[]   # patch reflected diffuse NIR solar radiation from snow [W/m**2]
+    fsr_sno_vd_patch       ::V = Float64[]   # patch reflected direct beam vis solar radiation from snow [W/m**2]
+    fsr_sno_nd_patch       ::V = Float64[]   # patch reflected direct beam NIR solar radiation from snow [W/m**2]
+    fsr_sno_vi_patch       ::V = Float64[]   # patch reflected diffuse vis solar radiation from snow [W/m**2]
+    fsr_sno_ni_patch       ::V = Float64[]   # patch reflected diffuse NIR solar radiation from snow [W/m**2]
 
     # --- Reflected solar VIS (patch-level 1D) ---
-    fsr_vis_d_patch        ::Vector{FT} = Float64[]   # patch reflected direct beam vis solar radiation [W/m**2]
-    fsr_vis_i_patch        ::Vector{FT} = Float64[]   # patch reflected diffuse vis solar radiation [W/m**2]
-    fsr_vis_d_ln_patch     ::Vector{FT} = Float64[]   # patch reflected direct beam vis solar radiation at local noon [W/m**2]
+    fsr_vis_d_patch        ::V = Float64[]   # patch reflected direct beam vis solar radiation [W/m**2]
+    fsr_vis_i_patch        ::V = Float64[]   # patch reflected diffuse vis solar radiation [W/m**2]
+    fsr_vis_d_ln_patch     ::V = Float64[]   # patch reflected direct beam vis solar radiation at local noon [W/m**2]
 
     # --- Snow-free reflected VIS diagnostics (patch-level 1D) ---
-    fsrSF_vis_d_patch      ::Vector{FT} = Float64[]   # snow-free patch reflected direct beam vis solar radiation [W/m**2]
-    fsrSF_vis_i_patch      ::Vector{FT} = Float64[]   # snow-free patch reflected diffuse vis solar radiation [W/m**2]
-    fsrSF_vis_d_ln_patch   ::Vector{FT} = Float64[]   # snow-free patch reflected direct beam vis solar rad at local noon [W/m**2]
+    fsrSF_vis_d_patch      ::V = Float64[]   # snow-free patch reflected direct beam vis solar radiation [W/m**2]
+    fsrSF_vis_i_patch      ::V = Float64[]   # snow-free patch reflected diffuse vis solar radiation [W/m**2]
+    fsrSF_vis_d_ln_patch   ::V = Float64[]   # snow-free patch reflected direct beam vis solar rad at local noon [W/m**2]
 
     # --- Snow radiative effect VIS (patch-level 1D) ---
-    ssre_fsr_vis_d_patch   ::Vector{FT} = Float64[]   # snow radiative effect on direct vis reflected [W/m**2]
-    ssre_fsr_vis_i_patch   ::Vector{FT} = Float64[]   # snow radiative effect on diffuse vis reflected [W/m**2]
-    ssre_fsr_vis_d_ln_patch ::Vector{FT} = Float64[]  # snow radiative effect on direct vis reflected at local noon [W/m**2]
+    ssre_fsr_vis_d_patch   ::V = Float64[]   # snow radiative effect on direct vis reflected [W/m**2]
+    ssre_fsr_vis_i_patch   ::V = Float64[]   # snow radiative effect on diffuse vis reflected [W/m**2]
+    ssre_fsr_vis_d_ln_patch ::V = Float64[]  # snow radiative effect on direct vis reflected at local noon [W/m**2]
 
     # --- Incident solar on snow (patch-level 1D) ---
-    fsds_sno_vd_patch      ::Vector{FT} = Float64[]   # patch incident visible, direct radiation on snow [W/m2]
-    fsds_sno_nd_patch      ::Vector{FT} = Float64[]   # patch incident near-IR, direct radiation on snow [W/m2]
-    fsds_sno_vi_patch      ::Vector{FT} = Float64[]   # patch incident visible, diffuse radiation on snow [W/m2]
-    fsds_sno_ni_patch      ::Vector{FT} = Float64[]   # patch incident near-IR, diffuse radiation on snow [W/m2]
+    fsds_sno_vd_patch      ::V = Float64[]   # patch incident visible, direct radiation on snow [W/m2]
+    fsds_sno_nd_patch      ::V = Float64[]   # patch incident near-IR, direct radiation on snow [W/m2]
+    fsds_sno_vi_patch      ::V = Float64[]   # patch incident visible, diffuse radiation on snow [W/m2]
+    fsds_sno_ni_patch      ::V = Float64[]   # patch incident near-IR, diffuse radiation on snow [W/m2]
 
     # --- Incident solar VIS (patch-level 1D) ---
-    fsds_vis_d_patch       ::Vector{FT} = Float64[]   # patch incident direct beam vis solar radiation [W/m**2]
-    fsds_vis_i_patch       ::Vector{FT} = Float64[]   # patch incident diffuse vis solar radiation [W/m**2]
-    fsds_vis_d_ln_patch    ::Vector{FT} = Float64[]   # patch incident direct beam vis solar rad at local noon [W/m**2]
-    fsds_vis_i_ln_patch    ::Vector{FT} = Float64[]   # patch incident diffuse beam vis solar rad at local noon [W/m**2]
+    fsds_vis_d_patch       ::V = Float64[]   # patch incident direct beam vis solar radiation [W/m**2]
+    fsds_vis_i_patch       ::V = Float64[]   # patch incident diffuse vis solar radiation [W/m**2]
+    fsds_vis_d_ln_patch    ::V = Float64[]   # patch incident direct beam vis solar rad at local noon [W/m**2]
+    fsds_vis_i_ln_patch    ::V = Float64[]   # patch incident diffuse beam vis solar rad at local noon [W/m**2]
 end
+
+SurfaceRadiationData{FT}(; kwargs...) where {FT<:Real} =
+    SurfaceRadiationData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure SurfaceRadiationData
+
 
 """
     surfrad_init!(sr::SurfaceRadiationData, np::Int)

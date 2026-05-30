@@ -48,30 +48,37 @@ emission fluxes, and turbulent deposition velocities.
 
 Ported from `dust_emis_base_type` in `DustEmisBase.F90`.
 """
-Base.@kwdef mutable struct DustEmisBaseData{FT<:Real}
+Base.@kwdef mutable struct DustEmisBaseData{FT<:Real,
+                                V<:AbstractVector{FT},
+                                M<:AbstractMatrix{FT}}
     # Overlap factors between source and sink distributions [dst_src_nbr × ndst]
-    ovr_src_snk_mss::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    ovr_src_snk_mss::M = Matrix{Float64}(undef, 0, 0)
     # [m] Mass-weighted mean diameter resolved [ndst]
-    dmt_vwr::Vector{FT} = Float64[]
+    dmt_vwr::V = Float64[]
     # [frc] Correction to Stokes settling velocity [ndst]
-    stk_crc::Vector{FT} = Float64[]
+    stk_crc::V = Float64[]
     # Factor in saltation computation
     saltation_factor::FT = 0.0
     # Surface dust emission (kg/m**2/s) [np × ndst] [+ = to atm]
-    flx_mss_vrt_dst_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    flx_mss_vrt_dst_patch::M = Matrix{Float64}(undef, 0, 0)
     # Total dust flux into atmosphere [np]
-    flx_mss_vrt_dst_tot_patch::Vector{FT} = Float64[]
+    flx_mss_vrt_dst_tot_patch::V = Float64[]
     # Turbulent deposition velocity (m/s) [np × ndst]
-    vlc_trb_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    vlc_trb_patch::M = Matrix{Float64}(undef, 0, 0)
     # Turbulent deposition velocity 1 (m/s) [np]
-    vlc_trb_1_patch::Vector{FT} = Float64[]
+    vlc_trb_1_patch::V = Float64[]
     # Turbulent deposition velocity 2 (m/s) [np]
-    vlc_trb_2_patch::Vector{FT} = Float64[]
+    vlc_trb_2_patch::V = Float64[]
     # Turbulent deposition velocity 3 (m/s) [np]
-    vlc_trb_3_patch::Vector{FT} = Float64[]
+    vlc_trb_3_patch::V = Float64[]
     # Turbulent deposition velocity 4 (m/s) [np]
-    vlc_trb_4_patch::Vector{FT} = Float64[]
+    vlc_trb_4_patch::V = Float64[]
 end
+
+DustEmisBaseData{FT}(; kwargs...) where {FT<:Real} =
+    DustEmisBaseData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure DustEmisBaseData
+
 
 # ---------------------------------------------------------------------------
 # dust_emis_init! — Allocate and initialize

@@ -149,106 +149,110 @@ end
 Photosynthesis state data (from `photosyns_type` in Fortran).
 Holds all photosynthesis and stomatal conductance variables at patch level.
 """
-Base.@kwdef mutable struct PhotosynthesisData{FT<:Real}
+Base.@kwdef mutable struct PhotosynthesisData{FT<:Real,
+                                  V<:AbstractVector{FT},
+                                  M<:AbstractMatrix{FT},
+                                  A3<:AbstractArray{FT,3},
+                                  VB<:AbstractVector{Bool}}
     # Logical/config
-    c3flag_patch::Vector{Bool} = Bool[]
+    c3flag_patch::VB = Bool[]
 
     # PHS-specific 3D arrays (np, 2, nlevcan)
-    ac_phs_patch::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    aj_phs_patch::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    ap_phs_patch::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    ag_phs_patch::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    vcmax_z_phs_patch::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    tpu_z_phs_patch::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    kp_z_phs_patch::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
+    ac_phs_patch::A3 = Array{Float64}(undef, 0, 0, 0)
+    aj_phs_patch::A3 = Array{Float64}(undef, 0, 0, 0)
+    ap_phs_patch::A3 = Array{Float64}(undef, 0, 0, 0)
+    ag_phs_patch::A3 = Array{Float64}(undef, 0, 0, 0)
+    vcmax_z_phs_patch::A3 = Array{Float64}(undef, 0, 0, 0)
+    tpu_z_phs_patch::A3 = Array{Float64}(undef, 0, 0, 0)
+    kp_z_phs_patch::A3 = Array{Float64}(undef, 0, 0, 0)
 
     # Sunlit/shaded net photosynthesis (np, nlevcan)
-    an_sun_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    an_sha_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    an_sun_patch::M = Matrix{Float64}(undef, 0, 0)
+    an_sha_patch::M = Matrix{Float64}(undef, 0, 0)
 
     # Stomatal conductance sunlit/shaded (np, nlevcan)
-    gs_mol_sun_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    gs_mol_sha_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    gs_mol_sun_ln_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    gs_mol_sha_ln_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    gs_mol_sun_patch::M = Matrix{Float64}(undef, 0, 0)
+    gs_mol_sha_patch::M = Matrix{Float64}(undef, 0, 0)
+    gs_mol_sun_ln_patch::M = Matrix{Float64}(undef, 0, 0)
+    gs_mol_sha_ln_patch::M = Matrix{Float64}(undef, 0, 0)
 
     # Standard (non-PHS) 2D arrays (np, nlevcan)
-    ac_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    aj_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    ap_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    ag_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    an_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    vcmax_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    tpu_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    kp_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    gs_mol_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    ac_patch::M = Matrix{Float64}(undef, 0, 0)
+    aj_patch::M = Matrix{Float64}(undef, 0, 0)
+    ap_patch::M = Matrix{Float64}(undef, 0, 0)
+    ag_patch::M = Matrix{Float64}(undef, 0, 0)
+    an_patch::M = Matrix{Float64}(undef, 0, 0)
+    vcmax_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    tpu_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    kp_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    gs_mol_patch::M = Matrix{Float64}(undef, 0, 0)
 
     # 1D patch-level
-    cp_patch::Vector{FT} = Float64[]
-    kc_patch::Vector{FT} = Float64[]
-    ko_patch::Vector{FT} = Float64[]
-    qe_patch::Vector{FT} = Float64[]
-    bbb_patch::Vector{FT} = Float64[]
-    mbb_patch::Vector{FT} = Float64[]
-    gb_mol_patch::Vector{FT} = Float64[]
-    rh_leaf_patch::Vector{FT} = Float64[]
-    vpd_can_patch::Vector{FT} = Float64[]
+    cp_patch::V = Float64[]
+    kc_patch::V = Float64[]
+    ko_patch::V = Float64[]
+    qe_patch::V = Float64[]
+    bbb_patch::V = Float64[]
+    mbb_patch::V = Float64[]
+    gb_mol_patch::V = Float64[]
+    rh_leaf_patch::V = Float64[]
+    vpd_can_patch::V = Float64[]
 
     # Photosynthesis outputs
-    psnsun_patch::Vector{FT} = Float64[]
-    psnsha_patch::Vector{FT} = Float64[]
-    c13_psnsun_patch::Vector{FT} = Float64[]
-    c13_psnsha_patch::Vector{FT} = Float64[]
-    c14_psnsun_patch::Vector{FT} = Float64[]
-    c14_psnsha_patch::Vector{FT} = Float64[]
+    psnsun_patch::V = Float64[]
+    psnsha_patch::V = Float64[]
+    c13_psnsun_patch::V = Float64[]
+    c13_psnsha_patch::V = Float64[]
+    c14_psnsun_patch::V = Float64[]
+    c14_psnsha_patch::V = Float64[]
 
-    psnsun_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    psnsha_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    psnsun_wc_patch::Vector{FT} = Float64[]
-    psnsha_wc_patch::Vector{FT} = Float64[]
-    psnsun_wj_patch::Vector{FT} = Float64[]
-    psnsha_wj_patch::Vector{FT} = Float64[]
-    psnsun_wp_patch::Vector{FT} = Float64[]
-    psnsha_wp_patch::Vector{FT} = Float64[]
+    psnsun_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    psnsha_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    psnsun_wc_patch::V = Float64[]
+    psnsha_wc_patch::V = Float64[]
+    psnsun_wj_patch::V = Float64[]
+    psnsha_wj_patch::V = Float64[]
+    psnsun_wp_patch::V = Float64[]
+    psnsha_wp_patch::V = Float64[]
 
-    fpsn_patch::Vector{FT} = Float64[]
-    fpsn_wc_patch::Vector{FT} = Float64[]
-    fpsn_wj_patch::Vector{FT} = Float64[]
-    fpsn_wp_patch::Vector{FT} = Float64[]
+    fpsn_patch::V = Float64[]
+    fpsn_wc_patch::V = Float64[]
+    fpsn_wj_patch::V = Float64[]
+    fpsn_wp_patch::V = Float64[]
 
-    lnca_patch::Vector{FT} = Float64[]
+    lnca_patch::V = Float64[]
 
-    lmrsun_patch::Vector{FT} = Float64[]
-    lmrsha_patch::Vector{FT} = Float64[]
-    lmrsun_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    lmrsha_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    lmrsun_patch::V = Float64[]
+    lmrsha_patch::V = Float64[]
+    lmrsun_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    lmrsha_z_patch::M = Matrix{Float64}(undef, 0, 0)
 
-    alphapsnsun_patch::Vector{FT} = Float64[]
-    alphapsnsha_patch::Vector{FT} = Float64[]
-    rc13_canair_patch::Vector{FT} = Float64[]
-    rc13_psnsun_patch::Vector{FT} = Float64[]
-    rc13_psnsha_patch::Vector{FT} = Float64[]
+    alphapsnsun_patch::V = Float64[]
+    alphapsnsha_patch::V = Float64[]
+    rc13_canair_patch::V = Float64[]
+    rc13_psnsun_patch::V = Float64[]
+    rc13_psnsha_patch::V = Float64[]
 
-    cisun_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    cisha_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    cisun_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    cisha_z_patch::M = Matrix{Float64}(undef, 0, 0)
 
-    rssun_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    rssha_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    rssun_patch::Vector{FT} = Float64[]
-    rssha_patch::Vector{FT} = Float64[]
+    rssun_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    rssha_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    rssun_patch::V = Float64[]
+    rssha_patch::V = Float64[]
 
-    luvcmax25top_patch::Vector{FT} = Float64[]
-    lujmax25top_patch::Vector{FT} = Float64[]
-    lutpu25top_patch::Vector{FT} = Float64[]
+    luvcmax25top_patch::V = Float64[]
+    lujmax25top_patch::V = Float64[]
+    lutpu25top_patch::V = Float64[]
 
     # LUNA-specific
-    vcmx25_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    jmx25_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    vcmx25_z_last_valid_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    jmx25_z_last_valid_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    pnlc_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    enzs_z_patch::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    fpsn24_patch::Vector{FT} = Float64[]
+    vcmx25_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    jmx25_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    vcmx25_z_last_valid_patch::M = Matrix{Float64}(undef, 0, 0)
+    jmx25_z_last_valid_patch::M = Matrix{Float64}(undef, 0, 0)
+    pnlc_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    enzs_z_patch::M = Matrix{Float64}(undef, 0, 0)
+    fpsn24_patch::V = Float64[]
 
     # Configuration switches
     rootstem_acc::Bool = false
@@ -257,6 +261,11 @@ Base.@kwdef mutable struct PhotosynthesisData{FT<:Real}
     stomatalcond_mtd::Int = STOMATALCOND_MTD_MEDLYN2011
     modifyphoto_and_lmr_forcrop::Bool = false
 end
+
+PhotosynthesisData{FT}(; kwargs...) where {FT<:Real} =
+    PhotosynthesisData{FT, Vector{FT}, Matrix{FT}, Array{FT,3}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure PhotosynthesisData
+
 
 """
     photosynthesis_data_init!(ps::PhotosynthesisData, np::Int; nlevcan::Int=NLEVCAN, use_luna::Bool=false)
