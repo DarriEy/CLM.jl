@@ -250,6 +250,386 @@ function cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# Energy-balance inner kernel (per-patch heat-transfer conductances + Newton
+# update of leaf temperature + Monin-Obukhov refresh).
+#
+# Kernelized form of the SECOND per-patch `for fi in 1:fn` loop inside the
+# Newton stability iteration of canopy_fluxes! (the largest / most complex
+# per-patch loop). One thread per filtered patch; each patch writes only its
+# own [p] indices (no reductions). Gather form:
+#   fi = @index(Global); p = filterp[fi].
+#
+# GPU-hostile host-side items resolved before launch and passed as scalars:
+#   - do_soilevap_beta() / do_soil_resistance_sl14() are control-flag functions
+#     reading module globals; evaluated once on the host as `soilevap_beta` /
+#     `soil_resis_sl14` Bool scalars, branched on in-kernel.
+#   - length(energyflux.canopy_cond_patch) is passed as `canopy_cond_len::Int`;
+#     the methane guard becomes `if use_lch4 && canopy_cond_len >= p`.
+#   - Feature flags use_lch4 / use_hydrstress passed as scalar Bools.
+#   - frictionvel.zetamaxstable passed as the scalar `zetamaxstable`.
+# qsat(...) is kernel-safe and kept as-is (4-tuple destructuring preserved).
+# 2D indexing of rah/raw[p, ABOVE_CANOPY|BELOW_CANOPY] and t_soisno_col is
+# preserved exactly. Note line ~854 uses smooth_min but line ~867 uses plain
+# min — that exact difference is preserved.
+# ---------------------------------------------------------------------------
+@kernel function _cf_energy_kernel!(
+        # written arrays
+        wtg, wtl0, wta0, wtstem0, wtga, wtal, lw_stem, lw_leaf,
+        wtgq, wtlq0, wtaq0, wtalq, efe, dt_veg, del_arr, err_arr,
+        qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
+        canopy_cond_patch, eflx_sh_stem_patch, eflx_sh_veg_patch,
+        qflx_tran_veg_patch, qflx_evap_veg_patch, t_veg_patch,
+        taf_patch, qaf_patch, zeta_patch, um_patch, obu_patch,
+        # read-only arrays
+        @Const(filterp), @Const(column), @Const(gridcell),
+        @Const(rah), @Const(raw), @Const(rb), @Const(rstem),
+        @Const(sa_leaf), @Const(sa_stem), @Const(sa_internal),
+        @Const(frac_rad_abs_by_stem), @Const(air), @Const(bir), @Const(cir),
+        @Const(cp_leaf), @Const(tl_ini), @Const(tlbef), @Const(zldis),
+        @Const(temp1), @Const(temp2), @Const(ur), @Const(efeb),
+        @Const(emv_patch), @Const(t_stem_patch), @Const(btran_patch),
+        @Const(fdry_patch), @Const(fwet_patch), @Const(elai_patch),
+        @Const(esai_patch), @Const(laisun_patch), @Const(laisha_patch),
+        @Const(rssun_patch), @Const(rssha_patch), @Const(qg_col),
+        @Const(frac_sno_eff_col), @Const(frac_h2osfc_col), @Const(t_soisno_col),
+        @Const(t_h2osfc_col), @Const(snow_depth_col), @Const(soilbeta_col),
+        @Const(soilresis_col), @Const(forc_rho_col), @Const(forc_q_col),
+        @Const(forc_th_col), @Const(thv_col), @Const(thm_patch),
+        @Const(t_grnd_col), @Const(sabv_patch), @Const(snl),
+        @Const(frac_veg_nosno_patch), @Const(liqcan_patch), @Const(snocan_patch),
+        @Const(uaf_patch), @Const(forc_pbot_col), @Const(ustar_patch),
+        # scalars
+        soilevap_beta::Bool, soil_resis_sl14::Bool,
+        use_lch4::Bool, use_hydrstress::Bool, canopy_cond_len::Int,
+        above_canopy::Int, below_canopy::Int,
+        sb, cpair, hvap, vkc, grav, btran0, delmax_canopy, zii_canopy,
+        beta_canopy, nlevsno::Int, dtime, z_dl, lai_dl, zetamaxstable)
+
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        c = column[p]
+        g = gridcell[p]
+
+        # Sensible heat conductance for air, leaf, ground, stem
+        wta  = 1.0 / rah[p, above_canopy]       # air
+        wtl  = sa_leaf[p] / rb[p]                # leaf
+        wtg[p] = 1.0 / rah[p, below_canopy]     # ground
+        wtstem = sa_stem[p] / (rstem[p] + rb[p]) # stem
+
+        wtshi = 1.0 / (wta + wtl + wtstem + wtg[p])
+
+        wtl0[p]    = wtl * wtshi
+        wtg0       = wtg[p] * wtshi
+        wta0[p]    = wta * wtshi
+        wtstem0[p] = wtstem * wtshi
+        wtga[p]    = wta0[p] + wtg0 + wtstem0[p]
+        wtal[p]    = wta0[p] + wtl0[p] + wtstem0[p]
+
+        # Internal longwave between leaf and stem
+        lw_stem[p] = sa_internal[p] * emv_patch[p] * sb * t_stem_patch[p]^4
+        lw_leaf[p] = sa_internal[p] * emv_patch[p] * sb * t_veg_patch[p]^4
+
+        # Fraction of potential evaporation from leaf
+        fdry_p = fdry_patch[p]
+        elai_p = elai_patch[p]
+        esai_p = esai_patch[p]
+        laisun_p = laisun_patch[p]
+        laisha_p = laisha_patch[p]
+        rssun_p = rssun_patch[p]
+        rssha_p = rssha_patch[p]
+
+        if fdry_p > 0.0
+            rppdry = fdry_p * rb[p] *
+                (laisun_p / (rb[p] + rssun_p) + laisha_p / (rb[p] + rssha_p)) / elai_p
+        else
+            rppdry = 0.0
+        end
+
+        # Canopy conductance for methane
+        if use_lch4 && canopy_cond_len >= p
+            canopy_cond_patch[p] = (laisun_p / (rb[p] + rssun_p) +
+                laisha_p / (rb[p] + rssha_p)) / smooth_max(elai_p, 0.01)
+        end
+
+        efpot = forc_rho_col[c] * ((elai_p + esai_p) / rb[p]) *
+            (qsatl[p] - qaf_patch[p])
+        h2ocan = liqcan_patch[p] + snocan_patch[p]
+
+        fwet_p = fwet_patch[p]
+        btran_p = btran_patch[p]
+        qflx_tran_veg_p = qflx_tran_veg_patch[p]
+
+        if use_hydrstress
+            if efpot > 0.0
+                if btran_p > btran0
+                    rpp = rppdry + fwet_p
+                else
+                    rpp = fwet_p
+                end
+                rpp = smooth_min(rpp, (qflx_tran_veg_p + h2ocan / dtime) / efpot)
+            else
+                rpp = 1.0
+            end
+        else
+            if efpot > 0.0
+                if btran_p > btran0
+                    qflx_tran_veg_patch[p] = efpot * rppdry
+                    rpp = rppdry + fwet_p
+                else
+                    rpp = fwet_p
+                    qflx_tran_veg_patch[p] = 0.0
+                end
+                rpp = min(rpp, (qflx_tran_veg_patch[p] + h2ocan / dtime) / efpot)
+            else
+                rpp = 1.0
+                qflx_tran_veg_patch[p] = 0.0
+            end
+        end
+
+        # Latent heat conductances
+        fvn = frac_veg_nosno_patch[p]
+        wtaq  = fvn / raw[p, above_canopy]
+        wtlq  = fvn * (elai_p + esai_p) / rb[p] * rpp
+
+        # Litter layer resistance (Sakaguchi)
+        snow_depth_c = z_dl
+        fsno_dl = snow_depth_col[c] / snow_depth_c
+        elai_dl = lai_dl * (1.0 - smooth_min(fsno_dl, 1.0))
+        rdl = (1.0 - exp(-elai_dl)) / (0.004 * uaf_patch[p])
+
+        if delq[p] < 0.0
+            wtgq[p] = fvn / (raw[p, below_canopy] + rdl)
+        else
+            if soilevap_beta
+                wtgq[p] = soilbeta_col[c] * fvn / (raw[p, below_canopy] + rdl)
+            end
+            if soil_resis_sl14
+                wtgq[p] = fvn / (raw[p, below_canopy] + soilresis_col[c])
+            end
+        end
+
+        wtsqi  = 1.0 / (wtaq + wtlq + wtgq[p])
+        wtgq0  = wtgq[p] * wtsqi
+        wtlq0[p] = wtlq * wtsqi
+        wtaq0[p] = wtaq * wtsqi
+        wtgaq  = wtaq0[p] + wtgq0
+        wtalq[p] = wtaq0[p] + wtlq0[p]
+
+        dc1 = forc_rho_col[c] * cpair * wtl
+        dc2 = hvap * forc_rho_col[c] * wtlq
+
+        efsh = dc1 * (wtga[p] * t_veg_patch[p] - wtg0 * t_grnd_col[c] -
+            wta0[p] * thm_patch[p] - wtstem0[p] * t_stem_patch[p])
+        eflx_sh_stem_patch[p] = forc_rho_col[c] * cpair * wtstem *
+            ((wta0[p] + wtg0 + wtl0[p]) * t_stem_patch[p] -
+             wtg0 * t_grnd_col[c] - wta0[p] * thm_patch[p] -
+             wtl0[p] * t_veg_patch[p])
+        efe[p] = dc2 * (wtgaq * qsatl[p] - wtgq0 * qg_col[c] -
+            wtaq0[p] * forc_q_col[c])
+
+        # Evaporation flux sign change limiter
+        erre = 0.0
+        if efe[p] * efeb[p] < 0.0
+            efeold = efe[p]
+            efe[p] = 0.1 * efeold
+            erre = efe[p] - efeold
+        end
+
+        # Fractionate ground emitted longwave
+        snl_c = snl[c]
+        lw_grnd = (frac_sno_eff_col[c] * t_soisno_col[c, snl_c + 1 + nlevsno]^4 +
+            (1.0 - frac_sno_eff_col[c] - frac_h2osfc_col[c]) *
+                t_soisno_col[c, 1 + nlevsno]^4 +
+            frac_h2osfc_col[c] * t_h2osfc_col[c]^4)
+
+        # Newton-Raphson: dt_veg
+        _numer = ((1.0 - frac_rad_abs_by_stem[p]) * (sabv_patch[p] + air[p] +
+            bir[p] * t_veg_patch[p]^4 + cir[p] * lw_grnd) -
+            efsh - efe[p] - lw_leaf[p] + lw_stem[p] -
+            (cp_leaf[p] / dtime) * (t_veg_patch[p] - tl_ini[p]))
+        _denom = ((1.0 - frac_rad_abs_by_stem[p]) * (-4.0 * bir[p] * t_veg_patch[p]^3) +
+             4.0 * sa_internal[p] * emv_patch[p] * sb * t_veg_patch[p]^3 +
+             dc1 * wtga[p] + dc2 * wtgaq * qsatldT[p] + cp_leaf[p] / dtime)
+        dt_veg[p] = _numer / _denom
+
+        t_veg_patch[p] = tlbef[p] + dt_veg[p]
+
+        dels = dt_veg[p]
+        del_arr[p] = abs(dels)
+        err_arr[p] = 0.0
+        if del_arr[p] > delmax_canopy
+            dt_veg[p] = delmax_canopy * dels / del_arr[p]
+            t_veg_patch[p] = tlbef[p] + dt_veg[p]
+            err_arr[p] = (1.0 - frac_rad_abs_by_stem[p]) * (sabv_patch[p] + air[p] +
+                bir[p] * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) + cir[p] * lw_grnd) -
+                sa_internal[p] * emv_patch[p] * sb * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) +
+                lw_stem[p] -
+                (efsh + dc1 * wtga[p] * dt_veg[p]) -
+                (efe[p] + dc2 * wtgaq * qsatldT[p] * dt_veg[p]) -
+                (cp_leaf[p] / dtime) * (t_veg_patch[p] - tl_ini[p])
+        end
+
+        # Updated fluxes
+        efpot = forc_rho_col[c] * ((elai_p + esai_p) / rb[p]) *
+            (wtgaq * (qsatl[p] + qsatldT[p] * dt_veg[p]) -
+             wtgq0 * qg_col[c] - wtaq0[p] * forc_q_col[c])
+        qflx_evap_veg_patch[p] = rpp * efpot
+
+        # Interception losses / ecidif
+        if use_hydrstress
+            ecidif = max(0.0, qflx_evap_veg_patch[p] -
+                qflx_tran_veg_patch[p] - h2ocan / dtime)
+            qflx_evap_veg_patch[p] = min(qflx_evap_veg_patch[p],
+                qflx_tran_veg_patch[p] + h2ocan / dtime)
+        else
+            ecidif = 0.0
+            if efpot > 0.0 && btran_patch[p] > btran0
+                qflx_tran_veg_patch[p] = efpot * rppdry
+            else
+                qflx_tran_veg_patch[p] = 0.0
+            end
+            ecidif = max(0.0, qflx_evap_veg_patch[p] -
+                qflx_tran_veg_patch[p] - h2ocan / dtime)
+            qflx_evap_veg_patch[p] = min(qflx_evap_veg_patch[p],
+                qflx_tran_veg_patch[p] + h2ocan / dtime)
+        end
+
+        # Sensible heat from leaves
+        eflx_sh_veg_patch[p] = efsh + dc1 * wtga[p] * dt_veg[p] +
+            err_arr[p] + erre + hvap * ecidif
+
+        # Update SH and lw_leaf for changes in t_veg
+        eflx_sh_stem_patch[p] = eflx_sh_stem_patch[p] +
+            forc_rho_col[c] * cpair * wtstem * (-wtl0[p] * dt_veg[p])
+        lw_leaf[p] = sa_internal[p] * emv_patch[p] * sb *
+            tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p])
+
+        # Re-calculate QSat at updated leaf temperature
+        (qs_tmp, es_tmp, dqsdT_tmp, _) = qsat(t_veg_patch[p], forc_pbot_col[c])
+        qsatl[p] = qs_tmp
+        el[p] = es_tmp
+        qsatldT[p] = dqsdT_tmp
+
+        # Update canopy air temperature and humidity
+        taf_patch[p] = wtg0 * t_grnd_col[c] +
+            wta0[p] * thm_patch[p] +
+            wtl0[p] * t_veg_patch[p] +
+            wtstem0[p] * t_stem_patch[p]
+        qaf_patch[p] = wtlq0[p] * qsatl[p] +
+            wtgq0 * qg_col[c] +
+            forc_q_col[c] * wtaq0[p]
+
+        # Update Monin-Obukhov length and wind speed
+        dth[p] = thm_patch[p] - taf_patch[p]
+        dqh[p] = forc_q_col[c] - qaf_patch[p]
+        delq[p] = wtalq[p] * qg_col[c] - wtlq0[p] * qsatl[p] - wtaq0[p] * forc_q_col[c]
+
+        tstar = temp1[p] * dth[p]
+        qstar = temp2[p] * dqh[p]
+        thvstar = tstar * (1.0 + 0.61 * forc_q_col[c]) + 0.61 * forc_th_col[c] * qstar
+        zeta_patch[p] = zldis[p] * vkc * grav * thvstar /
+            (ustar_patch[p]^2 * thv_col[c])
+
+        if zeta_patch[p] >= 0.0  # stable
+            zeta_patch[p] = smooth_clamp(zeta_patch[p], 0.01, zetamaxstable)
+            um_patch[p] = smooth_max(ur[p], 0.1)
+        else  # unstable
+            zeta_patch[p] = smooth_clamp(zeta_patch[p], -100.0, -0.01)
+            if ustar_patch[p] * thvstar > 0.0
+                wc = 0.0
+            else
+                wc_arg = smooth_max(-grav * ustar_patch[p] * thvstar *
+                    zii_canopy / thv_col[c], 0.0)
+                wc = beta_canopy * wc_arg^0.333
+            end
+            um_patch[p] = sqrt(ur[p]^2 + wc^2)
+        end
+        obu_patch[p] = zldis[p] / zeta_patch[p]
+
+        if obuold[p] * obu_patch[p] < 0.0
+            nmozsgn[p] += 1
+        end
+        if nmozsgn[p] >= 4
+            obu_patch[p] = zldis[p] / (-0.01)
+        end
+        obuold[p] = obu_patch[p]
+    end
+end
+
+"""
+    cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
+                      solarabs, soilstate, waterfluxbulk, waterstatebulk,
+                      waterdiagbulk, photosyns, patch_data, col_data, filterp,
+                      fn, rah, raw, rb, rstem, sa_leaf, sa_stem, sa_internal,
+                      frac_rad_abs_by_stem, air, bir, cir, cp_leaf, tl_ini,
+                      tlbef, zldis, temp1, temp2, ur, efeb, wtg, wtl0, wta0,
+                      wtstem0, wtga, wtal, lw_stem, lw_leaf, wtgq, wtlq0, wtaq0,
+                      wtalq, efe, dt_veg, del_arr, err_arr, qsatl, el, qsatldT,
+                      dth, dqh, delq, obuold, nmozsgn, qg_col, forc_rho_col,
+                      forc_q_col, forc_th_col, forc_pbot_col,
+                      soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
+                      grnd_ch4_cond_patch, dtime, params)
+
+Launch the canopy-fluxes energy-balance inner-loop kernel over the `fn`
+filtered patches. Backend-agnostic (CPU loop or GPU); one thread per filtered
+patch. Replaces the second `for fi in 1:fn` heat-transfer / Newton-update loop
+inside the Newton stability iteration. The two control-flag functions
+(`do_soilevap_beta`, `do_soil_resistance_sl14`), the methane conductance
+array length guard, and the feature flags are resolved on the host and passed
+as scalars; `frictionvel.zetamaxstable` is passed as a scalar value.
+"""
+function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
+        solarabs, soilstate, waterfluxbulk, waterstatebulk, waterdiagbulk,
+        photosyns, patch_data, col_data, filterp, fn::Int,
+        rah, raw, rb, rstem, sa_leaf, sa_stem, sa_internal,
+        frac_rad_abs_by_stem, air, bir, cir, cp_leaf, tl_ini, tlbef, zldis,
+        temp1, temp2, ur, efeb, wtg, wtl0, wta0, wtstem0, wtga, wtal,
+        lw_stem, lw_leaf, wtgq, wtlq0, wtaq0, wtalq, efe, dt_veg, del_arr,
+        err_arr, qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
+        forc_q_col, forc_th_col, forc_pbot_col, forc_rho_col,
+        soilevap_beta::Bool, soil_resis_sl14::Bool, use_lch4::Bool,
+        use_hydrstress::Bool, nlevsno::Int, dtime, params)
+    _launch!(_cf_energy_kernel!,
+        # written arrays
+        wtg, wtl0, wta0, wtstem0, wtga, wtal, lw_stem, lw_leaf,
+        wtgq, wtlq0, wtaq0, wtalq, efe, dt_veg, del_arr, err_arr,
+        qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
+        energyflux.canopy_cond_patch, energyflux.eflx_sh_stem_patch,
+        energyflux.eflx_sh_veg_patch, waterfluxbulk.wf.qflx_tran_veg_patch,
+        waterfluxbulk.wf.qflx_evap_veg_patch, temperature.t_veg_patch,
+        frictionvel.taf_patch, frictionvel.qaf_patch, frictionvel.zeta_patch,
+        frictionvel.um_patch, frictionvel.obu_patch,
+        # read-only arrays
+        filterp, patch_data.column, patch_data.gridcell,
+        rah, raw, rb, rstem, sa_leaf, sa_stem, sa_internal,
+        frac_rad_abs_by_stem, air, bir, cir, cp_leaf, tl_ini, tlbef, zldis,
+        temp1, temp2, ur, efeb,
+        temperature.emv_patch, temperature.t_stem_patch, energyflux.btran_patch,
+        waterdiagbulk.fdry_patch, waterdiagbulk.fwet_patch,
+        canopystate.elai_patch, canopystate.esai_patch,
+        canopystate.laisun_patch, canopystate.laisha_patch,
+        photosyns.rssun_patch, photosyns.rssha_patch, waterdiagbulk.qg_col,
+        waterdiagbulk.frac_sno_eff_col, waterdiagbulk.frac_h2osfc_col,
+        temperature.t_soisno_col, temperature.t_h2osfc_col,
+        waterdiagbulk.snow_depth_col, soilstate.soilbeta_col,
+        soilstate.soilresis_col, forc_rho_col, forc_q_col,
+        forc_th_col, temperature.thv_col, temperature.thm_patch,
+        temperature.t_grnd_col, solarabs.sabv_patch, col_data.snl,
+        canopystate.frac_veg_nosno_patch, waterstatebulk.ws.liqcan_patch,
+        waterstatebulk.ws.snocan_patch, frictionvel.uaf_patch,
+        forc_pbot_col, frictionvel.ustar_patch,
+        # scalars
+        soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
+        length(energyflux.canopy_cond_patch), ABOVE_CANOPY, BELOW_CANOPY,
+        SB, CPAIR, HVAP, VKC, GRAV, BTRAN0, DELMAX_CANOPY, ZII_CANOPY,
+        BETA_CANOPY, nlevsno, dtime, params.z_dl, params.lai_dl,
+        frictionvel.zetamaxstable;
+        ndrange = fn)
+    return nothing
+end
+
 # =====================================================================
 # Main canopy_fluxes! function
 # =====================================================================
@@ -708,6 +1088,11 @@ function canopy_fluxes!(
     # isnan(overrides.csoilc) on the host struct).
     csoilc_val = isnan(overrides.csoilc) ? params.csoilc : overrides.csoilc
 
+    # Control-flag functions read module globals — not GPU-safe. Resolve once on
+    # the host to Bool scalars and pass into the energy-balance kernel.
+    soilevap_beta   = do_soilevap_beta()
+    soil_resis_sl14 = do_soil_resistance_sl14()
+
     while itlef <= ctrl.itmax_canopy_fluxes && fn > 0
 
         # --- Friction velocity and boundary layer profiles ---
@@ -789,256 +1174,22 @@ function canopy_fluxes!(
 
         end
 
-        # --- Heat transfer conductances ---
-        for fi in 1:fn
-            p = filterp[fi]
-            c = patch_data.column[p]
-            g = patch_data.gridcell[p]
-
-            # Sensible heat conductance for air, leaf, ground, stem
-            wta  = 1.0 / rah[p, ABOVE_CANOPY]       # air
-            wtl  = sa_leaf[p] / rb[p]                # leaf
-            wtg[p] = 1.0 / rah[p, BELOW_CANOPY]     # ground
-            wtstem = sa_stem[p] / (rstem[p] + rb[p]) # stem
-
-            wtshi = 1.0 / (wta + wtl + wtstem + wtg[p])
-
-            wtl0[p]    = wtl * wtshi
-            wtg0       = wtg[p] * wtshi
-            wta0[p]    = wta * wtshi
-            wtstem0[p] = wtstem * wtshi
-            wtga[p]    = wta0[p] + wtg0 + wtstem0[p]
-            wtal[p]    = wta0[p] + wtl0[p] + wtstem0[p]
-
-            # Internal longwave between leaf and stem
-            lw_stem[p] = sa_internal[p] * temperature.emv_patch[p] * SB * temperature.t_stem_patch[p]^4
-            lw_leaf[p] = sa_internal[p] * temperature.emv_patch[p] * SB * temperature.t_veg_patch[p]^4
-
-            # Fraction of potential evaporation from leaf
-            fdry_p = waterdiagbulk.fdry_patch[p]
-            elai_p = canopystate.elai_patch[p]
-            esai_p = canopystate.esai_patch[p]
-            laisun_p = canopystate.laisun_patch[p]
-            laisha_p = canopystate.laisha_patch[p]
-            rssun_p = photosyns.rssun_patch[p]
-            rssha_p = photosyns.rssha_patch[p]
-
-            if fdry_p > 0.0
-                rppdry = fdry_p * rb[p] *
-                    (laisun_p / (rb[p] + rssun_p) + laisha_p / (rb[p] + rssha_p)) / elai_p
-            else
-                rppdry = 0.0
-            end
-
-            # Canopy conductance for methane
-            if use_lch4 && length(energyflux.canopy_cond_patch) >= p
-                energyflux.canopy_cond_patch[p] = (laisun_p / (rb[p] + rssun_p) +
-                    laisha_p / (rb[p] + rssha_p)) / smooth_max(elai_p, 0.01)
-            end
-
-            efpot = forc_rho_col[c] * ((elai_p + esai_p) / rb[p]) *
-                (qsatl[p] - frictionvel.qaf_patch[p])
-            h2ocan = waterstatebulk.ws.liqcan_patch[p] + waterstatebulk.ws.snocan_patch[p]
-
-            fwet_p = waterdiagbulk.fwet_patch[p]
-            btran_p = energyflux.btran_patch[p]
-            qflx_tran_veg_p = waterfluxbulk.wf.qflx_tran_veg_patch[p]
-
-            if use_hydrstress
-                if efpot > 0.0
-                    if btran_p > BTRAN0
-                        rpp = rppdry + fwet_p
-                    else
-                        rpp = fwet_p
-                    end
-                    rpp = smooth_min(rpp, (qflx_tran_veg_p + h2ocan / dtime) / efpot)
-                else
-                    rpp = 1.0
-                end
-            else
-                if efpot > 0.0
-                    if btran_p > BTRAN0
-                        waterfluxbulk.wf.qflx_tran_veg_patch[p] = efpot * rppdry
-                        rpp = rppdry + fwet_p
-                    else
-                        rpp = fwet_p
-                        waterfluxbulk.wf.qflx_tran_veg_patch[p] = 0.0
-                    end
-                    rpp = min(rpp, (waterfluxbulk.wf.qflx_tran_veg_patch[p] + h2ocan / dtime) / efpot)
-                else
-                    rpp = 1.0
-                    waterfluxbulk.wf.qflx_tran_veg_patch[p] = 0.0
-                end
-            end
-
-            # Latent heat conductances
-            fvn = canopystate.frac_veg_nosno_patch[p]
-            wtaq  = fvn / raw[p, ABOVE_CANOPY]
-            wtlq  = fvn * (elai_p + esai_p) / rb[p] * rpp
-
-            # Litter layer resistance (Sakaguchi)
-            snow_depth_c = params.z_dl
-            fsno_dl = waterdiagbulk.snow_depth_col[c] / snow_depth_c
-            elai_dl = params.lai_dl * (1.0 - smooth_min(fsno_dl, 1.0))
-            rdl = (1.0 - exp(-elai_dl)) / (0.004 * frictionvel.uaf_patch[p])
-
-            if delq[p] < 0.0
-                wtgq[p] = fvn / (raw[p, BELOW_CANOPY] + rdl)
-            else
-                if do_soilevap_beta()
-                    wtgq[p] = soilstate.soilbeta_col[c] * fvn / (raw[p, BELOW_CANOPY] + rdl)
-                end
-                if do_soil_resistance_sl14()
-                    wtgq[p] = fvn / (raw[p, BELOW_CANOPY] + soilstate.soilresis_col[c])
-                end
-            end
-
-            wtsqi  = 1.0 / (wtaq + wtlq + wtgq[p])
-            wtgq0  = wtgq[p] * wtsqi
-            wtlq0[p] = wtlq * wtsqi
-            wtaq0[p] = wtaq * wtsqi
-            wtgaq  = wtaq0[p] + wtgq0
-            wtalq[p] = wtaq0[p] + wtlq0[p]
-
-            dc1 = forc_rho_col[c] * CPAIR * wtl
-            dc2 = HVAP * forc_rho_col[c] * wtlq
-
-            efsh = dc1 * (wtga[p] * temperature.t_veg_patch[p] - wtg0 * temperature.t_grnd_col[c] -
-                wta0[p] * temperature.thm_patch[p] - wtstem0[p] * temperature.t_stem_patch[p])
-            energyflux.eflx_sh_stem_patch[p] = forc_rho_col[c] * CPAIR * wtstem *
-                ((wta0[p] + wtg0 + wtl0[p]) * temperature.t_stem_patch[p] -
-                 wtg0 * temperature.t_grnd_col[c] - wta0[p] * temperature.thm_patch[p] -
-                 wtl0[p] * temperature.t_veg_patch[p])
-            efe[p] = dc2 * (wtgaq * qsatl[p] - wtgq0 * waterdiagbulk.qg_col[c] -
-                wtaq0[p] * forc_q_col[c])
-
-            # Evaporation flux sign change limiter
-            erre = 0.0
-            if efe[p] * efeb[p] < 0.0
-                efeold = efe[p]
-                efe[p] = 0.1 * efeold
-                erre = efe[p] - efeold
-            end
-
-            # Fractionate ground emitted longwave
-            snl_c = col_data.snl[c]
-            lw_grnd = (waterdiagbulk.frac_sno_eff_col[c] * temperature.t_soisno_col[c, snl_c + 1 + nlevsno]^4 +
-                (1.0 - waterdiagbulk.frac_sno_eff_col[c] - waterdiagbulk.frac_h2osfc_col[c]) *
-                    temperature.t_soisno_col[c, 1 + nlevsno]^4 +
-                waterdiagbulk.frac_h2osfc_col[c] * temperature.t_h2osfc_col[c]^4)
-
-            # Newton-Raphson: dt_veg
-            _numer = ((1.0 - frac_rad_abs_by_stem[p]) * (solarabs.sabv_patch[p] + air[p] +
-                bir[p] * temperature.t_veg_patch[p]^4 + cir[p] * lw_grnd) -
-                efsh - efe[p] - lw_leaf[p] + lw_stem[p] -
-                (cp_leaf[p] / dtime) * (temperature.t_veg_patch[p] - tl_ini[p]))
-            _denom = ((1.0 - frac_rad_abs_by_stem[p]) * (-4.0 * bir[p] * temperature.t_veg_patch[p]^3) +
-                 4.0 * sa_internal[p] * temperature.emv_patch[p] * SB * temperature.t_veg_patch[p]^3 +
-                 dc1 * wtga[p] + dc2 * wtgaq * qsatldT[p] + cp_leaf[p] / dtime)
-            dt_veg[p] = _numer / _denom
-
-            temperature.t_veg_patch[p] = tlbef[p] + dt_veg[p]
-
-            dels = dt_veg[p]
-            del_arr[p] = abs(dels)
-            err_arr[p] = 0.0
-            if del_arr[p] > DELMAX_CANOPY
-                dt_veg[p] = DELMAX_CANOPY * dels / del_arr[p]
-                temperature.t_veg_patch[p] = tlbef[p] + dt_veg[p]
-                err_arr[p] = (1.0 - frac_rad_abs_by_stem[p]) * (solarabs.sabv_patch[p] + air[p] +
-                    bir[p] * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) + cir[p] * lw_grnd) -
-                    sa_internal[p] * temperature.emv_patch[p] * SB * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) +
-                    lw_stem[p] -
-                    (efsh + dc1 * wtga[p] * dt_veg[p]) -
-                    (efe[p] + dc2 * wtgaq * qsatldT[p] * dt_veg[p]) -
-                    (cp_leaf[p] / dtime) * (temperature.t_veg_patch[p] - tl_ini[p])
-            end
-
-            # Updated fluxes
-            efpot = forc_rho_col[c] * ((elai_p + esai_p) / rb[p]) *
-                (wtgaq * (qsatl[p] + qsatldT[p] * dt_veg[p]) -
-                 wtgq0 * waterdiagbulk.qg_col[c] - wtaq0[p] * forc_q_col[c])
-            waterfluxbulk.wf.qflx_evap_veg_patch[p] = rpp * efpot
-
-            # Interception losses / ecidif
-            if use_hydrstress
-                ecidif = max(0.0, waterfluxbulk.wf.qflx_evap_veg_patch[p] -
-                    waterfluxbulk.wf.qflx_tran_veg_patch[p] - h2ocan / dtime)
-                waterfluxbulk.wf.qflx_evap_veg_patch[p] = min(waterfluxbulk.wf.qflx_evap_veg_patch[p],
-                    waterfluxbulk.wf.qflx_tran_veg_patch[p] + h2ocan / dtime)
-            else
-                ecidif = 0.0
-                if efpot > 0.0 && energyflux.btran_patch[p] > BTRAN0
-                    waterfluxbulk.wf.qflx_tran_veg_patch[p] = efpot * rppdry
-                else
-                    waterfluxbulk.wf.qflx_tran_veg_patch[p] = 0.0
-                end
-                ecidif = max(0.0, waterfluxbulk.wf.qflx_evap_veg_patch[p] -
-                    waterfluxbulk.wf.qflx_tran_veg_patch[p] - h2ocan / dtime)
-                waterfluxbulk.wf.qflx_evap_veg_patch[p] = min(waterfluxbulk.wf.qflx_evap_veg_patch[p],
-                    waterfluxbulk.wf.qflx_tran_veg_patch[p] + h2ocan / dtime)
-            end
-
-            # Sensible heat from leaves
-            energyflux.eflx_sh_veg_patch[p] = efsh + dc1 * wtga[p] * dt_veg[p] +
-                err_arr[p] + erre + HVAP * ecidif
-
-            # Update SH and lw_leaf for changes in t_veg
-            energyflux.eflx_sh_stem_patch[p] = energyflux.eflx_sh_stem_patch[p] +
-                forc_rho_col[c] * CPAIR * wtstem * (-wtl0[p] * dt_veg[p])
-            lw_leaf[p] = sa_internal[p] * temperature.emv_patch[p] * SB *
-                tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p])
-
-            # Re-calculate QSat at updated leaf temperature
-            (qs_tmp, es_tmp, dqsdT_tmp, _) = qsat(temperature.t_veg_patch[p], forc_pbot_col[c])
-            qsatl[p] = qs_tmp
-            el[p] = es_tmp
-            qsatldT[p] = dqsdT_tmp
-
-            # Update canopy air temperature and humidity
-            frictionvel.taf_patch[p] = wtg0 * temperature.t_grnd_col[c] +
-                wta0[p] * temperature.thm_patch[p] +
-                wtl0[p] * temperature.t_veg_patch[p] +
-                wtstem0[p] * temperature.t_stem_patch[p]
-            frictionvel.qaf_patch[p] = wtlq0[p] * qsatl[p] +
-                wtgq0 * waterdiagbulk.qg_col[c] +
-                forc_q_col[c] * wtaq0[p]
-
-            # Update Monin-Obukhov length and wind speed
-            dth[p] = temperature.thm_patch[p] - frictionvel.taf_patch[p]
-            dqh[p] = forc_q_col[c] - frictionvel.qaf_patch[p]
-            delq[p] = wtalq[p] * waterdiagbulk.qg_col[c] - wtlq0[p] * qsatl[p] - wtaq0[p] * forc_q_col[c]
-
-            tstar = temp1[p] * dth[p]
-            qstar = temp2[p] * dqh[p]
-            thvstar = tstar * (1.0 + 0.61 * forc_q_col[c]) + 0.61 * forc_th_col[c] * qstar
-            frictionvel.zeta_patch[p] = zldis[p] * VKC * GRAV * thvstar /
-                (frictionvel.ustar_patch[p]^2 * temperature.thv_col[c])
-
-            if frictionvel.zeta_patch[p] >= 0.0  # stable
-                frictionvel.zeta_patch[p] = smooth_clamp(frictionvel.zeta_patch[p], 0.01, frictionvel.zetamaxstable)
-                frictionvel.um_patch[p] = smooth_max(ur[p], 0.1)
-            else  # unstable
-                frictionvel.zeta_patch[p] = smooth_clamp(frictionvel.zeta_patch[p], -100.0, -0.01)
-                if frictionvel.ustar_patch[p] * thvstar > 0.0
-                    wc = 0.0
-                else
-                    wc_arg = smooth_max(-GRAV * frictionvel.ustar_patch[p] * thvstar *
-                        ZII_CANOPY / temperature.thv_col[c], 0.0)
-                    wc = BETA_CANOPY * wc_arg^0.333
-                end
-                frictionvel.um_patch[p] = sqrt(ur[p]^2 + wc^2)
-            end
-            frictionvel.obu_patch[p] = zldis[p] / frictionvel.zeta_patch[p]
-
-            if obuold[p] * frictionvel.obu_patch[p] < 0.0
-                nmozsgn[p] += 1
-            end
-            if nmozsgn[p] >= 4
-                frictionvel.obu_patch[p] = zldis[p] / (-0.01)
-            end
-            obuold[p] = frictionvel.obu_patch[p]
-        end  # end filtered patch loop
+        # --- Heat transfer conductances + Newton update of leaf temperature ---
+        # Second per-patch loop: kernelized (one thread per filtered patch).
+        # The two control-flag functions (do_soilevap_beta /
+        # do_soil_resistance_sl14), the methane conductance length guard, and
+        # the feature flags are resolved on the host and passed as scalars.
+        cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
+            solarabs, soilstate, waterfluxbulk, waterstatebulk, waterdiagbulk,
+            photosyns, patch_data, col_data, filterp, fn,
+            rah, raw, rb, rstem, sa_leaf, sa_stem, sa_internal,
+            frac_rad_abs_by_stem, air, bir, cir, cp_leaf, tl_ini, tlbef, zldis,
+            temp1, temp2, ur, efeb, wtg, wtl0, wta0, wtstem0, wtga, wtal,
+            lw_stem, lw_leaf, wtgq, wtlq0, wtaq0, wtalq, efe, dt_veg, del_arr,
+            err_arr, qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
+            forc_q_col, forc_th_col, forc_pbot_col, forc_rho_col,
+            soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
+            nlevsno, dtime, params)
 
         # --- Test for convergence ---
         itlef += 1
