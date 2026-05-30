@@ -4,6 +4,26 @@
 # ==========================================================================
 
 """
+    _tile_surface_data!(surf, n)
+
+Replicate single-gridcell surface input data into `n` identical gridcells by
+repeating every per-gridcell array along its first (gridcell) dimension. Used by
+`clm_initialize!(; ncopies=n)` to build a batched run of `n` independent,
+identical columns — the data-parallel layout the GPU port batches over.
+"""
+function _tile_surface_data!(surf::SurfaceInputData, n::Int)
+    n == 1 && return surf
+    for name in fieldnames(SurfaceInputData)
+        v = getfield(surf, name)
+        if v isa AbstractArray && !isempty(v)
+            reps = ntuple(d -> d == 1 ? n : 1, ndims(v))
+            setfield!(surf, name, repeat(v, reps...))
+        end
+    end
+    return surf
+end
+
+"""
     clm_initialize!(; fsurdat, paramfile, kwargs...)
     -> (inst, bounds, filt, tm)
 
@@ -37,6 +57,7 @@ state, and returns all data structures ready for `clm_drv!()`.
 function clm_initialize!(;
     fsurdat::String,
     paramfile::String,
+    ncopies::Int = 1,
     start_date::DateTime = DateTime(2000, 1, 1),
     dtime::Int = 1800,
     use_cn::Bool = false,
@@ -71,9 +92,12 @@ function clm_initialize!(;
     varcon_init!()
 
     # ---- Step 5: Read surface data ----
-    ng = 1  # single gridcell
+    # Read the single gridcell from file, then tile to `ncopies` identical
+    # gridcells (a batched run of independent columns for the GPU data axis).
+    ng = max(1, ncopies)
     surf = SurfaceInputData()
-    surfrd_get_data!(surf, 1, ng, fsurdat)
+    surfrd_get_data!(surf, 1, 1, fsurdat)
+    _tile_surface_data!(surf, ng)
 
     # ---- Step 6: Count subgrid elements ----
     (nl, nc, np) = count_subgrid_elements(surf, ng)
