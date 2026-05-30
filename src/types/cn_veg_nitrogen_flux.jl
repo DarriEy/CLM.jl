@@ -11,277 +11,281 @@ column, and gridcell levels.
 
 Ported from `cnveg_nitrogenflux_type` in `CNVegNitrogenFluxType.F90`.
 """
-Base.@kwdef mutable struct CNVegNitrogenFluxData{FT<:Real}
+Base.@kwdef mutable struct CNVegNitrogenFluxData{FT<:Real,
+                                     V<:AbstractVector{FT},
+                                     M<:AbstractMatrix{FT},
+                                     A3<:AbstractArray{FT,3},
+                                     VI<:AbstractVector{<:Integer}}
     # --- Gap mortality fluxes (gN/m2/s) patch-level ---
-    m_leafn_to_litter_patch                   ::Vector{FT} = Float64[]
-    m_frootn_to_litter_patch                  ::Vector{FT} = Float64[]
-    m_leafn_storage_to_litter_patch           ::Vector{FT} = Float64[]
-    m_frootn_storage_to_litter_patch          ::Vector{FT} = Float64[]
-    m_livestemn_storage_to_litter_patch       ::Vector{FT} = Float64[]
-    m_deadstemn_storage_to_litter_patch       ::Vector{FT} = Float64[]
-    m_livecrootn_storage_to_litter_patch      ::Vector{FT} = Float64[]
-    m_deadcrootn_storage_to_litter_patch      ::Vector{FT} = Float64[]
-    m_leafn_xfer_to_litter_patch              ::Vector{FT} = Float64[]
-    m_frootn_xfer_to_litter_patch             ::Vector{FT} = Float64[]
-    m_livestemn_xfer_to_litter_patch          ::Vector{FT} = Float64[]
-    m_deadstemn_xfer_to_litter_patch          ::Vector{FT} = Float64[]
-    m_livecrootn_xfer_to_litter_patch         ::Vector{FT} = Float64[]
-    m_deadcrootn_xfer_to_litter_patch         ::Vector{FT} = Float64[]
-    m_livestemn_to_litter_patch               ::Vector{FT} = Float64[]
-    m_deadstemn_to_litter_patch               ::Vector{FT} = Float64[]
-    m_livecrootn_to_litter_patch              ::Vector{FT} = Float64[]
-    m_deadcrootn_to_litter_patch              ::Vector{FT} = Float64[]
-    m_retransn_to_litter_patch                ::Vector{FT} = Float64[]
+    m_leafn_to_litter_patch                   ::V = Float64[]
+    m_frootn_to_litter_patch                  ::V = Float64[]
+    m_leafn_storage_to_litter_patch           ::V = Float64[]
+    m_frootn_storage_to_litter_patch          ::V = Float64[]
+    m_livestemn_storage_to_litter_patch       ::V = Float64[]
+    m_deadstemn_storage_to_litter_patch       ::V = Float64[]
+    m_livecrootn_storage_to_litter_patch      ::V = Float64[]
+    m_deadcrootn_storage_to_litter_patch      ::V = Float64[]
+    m_leafn_xfer_to_litter_patch              ::V = Float64[]
+    m_frootn_xfer_to_litter_patch             ::V = Float64[]
+    m_livestemn_xfer_to_litter_patch          ::V = Float64[]
+    m_deadstemn_xfer_to_litter_patch          ::V = Float64[]
+    m_livecrootn_xfer_to_litter_patch         ::V = Float64[]
+    m_deadcrootn_xfer_to_litter_patch         ::V = Float64[]
+    m_livestemn_to_litter_patch               ::V = Float64[]
+    m_deadstemn_to_litter_patch               ::V = Float64[]
+    m_livecrootn_to_litter_patch              ::V = Float64[]
+    m_deadcrootn_to_litter_patch              ::V = Float64[]
+    m_retransn_to_litter_patch                ::V = Float64[]
 
     # --- Harvest fluxes (gN/m2/s) patch-level ---
-    hrv_leafn_to_litter_patch                 ::Vector{FT} = Float64[]
-    hrv_frootn_to_litter_patch                ::Vector{FT} = Float64[]
-    hrv_leafn_storage_to_litter_patch         ::Vector{FT} = Float64[]
-    hrv_frootn_storage_to_litter_patch        ::Vector{FT} = Float64[]
-    hrv_livestemn_storage_to_litter_patch     ::Vector{FT} = Float64[]
-    hrv_deadstemn_storage_to_litter_patch     ::Vector{FT} = Float64[]
-    hrv_livecrootn_storage_to_litter_patch    ::Vector{FT} = Float64[]
-    hrv_deadcrootn_storage_to_litter_patch    ::Vector{FT} = Float64[]
-    hrv_leafn_xfer_to_litter_patch            ::Vector{FT} = Float64[]
-    hrv_frootn_xfer_to_litter_patch           ::Vector{FT} = Float64[]
-    hrv_livestemn_xfer_to_litter_patch        ::Vector{FT} = Float64[]
-    hrv_deadstemn_xfer_to_litter_patch        ::Vector{FT} = Float64[]
-    hrv_livecrootn_xfer_to_litter_patch       ::Vector{FT} = Float64[]
-    hrv_deadcrootn_xfer_to_litter_patch       ::Vector{FT} = Float64[]
-    hrv_livestemn_to_litter_patch             ::Vector{FT} = Float64[]
-    hrv_livecrootn_to_litter_patch            ::Vector{FT} = Float64[]
-    hrv_deadcrootn_to_litter_patch            ::Vector{FT} = Float64[]
-    hrv_retransn_to_litter_patch              ::Vector{FT} = Float64[]
-    crop_harvestn_to_cropprodn_patch          ::Vector{FT} = Float64[]
-    crop_harvestn_to_cropprodn_col            ::Vector{FT} = Float64[]
+    hrv_leafn_to_litter_patch                 ::V = Float64[]
+    hrv_frootn_to_litter_patch                ::V = Float64[]
+    hrv_leafn_storage_to_litter_patch         ::V = Float64[]
+    hrv_frootn_storage_to_litter_patch        ::V = Float64[]
+    hrv_livestemn_storage_to_litter_patch     ::V = Float64[]
+    hrv_deadstemn_storage_to_litter_patch     ::V = Float64[]
+    hrv_livecrootn_storage_to_litter_patch    ::V = Float64[]
+    hrv_deadcrootn_storage_to_litter_patch    ::V = Float64[]
+    hrv_leafn_xfer_to_litter_patch            ::V = Float64[]
+    hrv_frootn_xfer_to_litter_patch           ::V = Float64[]
+    hrv_livestemn_xfer_to_litter_patch        ::V = Float64[]
+    hrv_deadstemn_xfer_to_litter_patch        ::V = Float64[]
+    hrv_livecrootn_xfer_to_litter_patch       ::V = Float64[]
+    hrv_deadcrootn_xfer_to_litter_patch       ::V = Float64[]
+    hrv_livestemn_to_litter_patch             ::V = Float64[]
+    hrv_livecrootn_to_litter_patch            ::V = Float64[]
+    hrv_deadcrootn_to_litter_patch            ::V = Float64[]
+    hrv_retransn_to_litter_patch              ::V = Float64[]
+    crop_harvestn_to_cropprodn_patch          ::V = Float64[]
+    crop_harvestn_to_cropprodn_col            ::V = Float64[]
 
     # --- Fire N fluxes (gN/m2/s) patch-level ---
-    m_leafn_to_fire_patch                     ::Vector{FT} = Float64[]
-    m_leafn_storage_to_fire_patch             ::Vector{FT} = Float64[]
-    m_leafn_xfer_to_fire_patch                ::Vector{FT} = Float64[]
-    m_livestemn_to_fire_patch                 ::Vector{FT} = Float64[]
-    m_livestemn_storage_to_fire_patch         ::Vector{FT} = Float64[]
-    m_livestemn_xfer_to_fire_patch            ::Vector{FT} = Float64[]
-    m_deadstemn_to_fire_patch                 ::Vector{FT} = Float64[]
-    m_deadstemn_storage_to_fire_patch         ::Vector{FT} = Float64[]
-    m_deadstemn_xfer_to_fire_patch            ::Vector{FT} = Float64[]
-    m_frootn_to_fire_patch                    ::Vector{FT} = Float64[]
-    m_frootn_storage_to_fire_patch            ::Vector{FT} = Float64[]
-    m_frootn_xfer_to_fire_patch               ::Vector{FT} = Float64[]
-    m_livecrootn_to_fire_patch                ::Vector{FT} = Float64[]
-    m_livecrootn_storage_to_fire_patch        ::Vector{FT} = Float64[]
-    m_livecrootn_xfer_to_fire_patch           ::Vector{FT} = Float64[]
-    m_deadcrootn_to_fire_patch                ::Vector{FT} = Float64[]
-    m_deadcrootn_storage_to_fire_patch        ::Vector{FT} = Float64[]
-    m_deadcrootn_xfer_to_fire_patch           ::Vector{FT} = Float64[]
-    m_retransn_to_fire_patch                  ::Vector{FT} = Float64[]
+    m_leafn_to_fire_patch                     ::V = Float64[]
+    m_leafn_storage_to_fire_patch             ::V = Float64[]
+    m_leafn_xfer_to_fire_patch                ::V = Float64[]
+    m_livestemn_to_fire_patch                 ::V = Float64[]
+    m_livestemn_storage_to_fire_patch         ::V = Float64[]
+    m_livestemn_xfer_to_fire_patch            ::V = Float64[]
+    m_deadstemn_to_fire_patch                 ::V = Float64[]
+    m_deadstemn_storage_to_fire_patch         ::V = Float64[]
+    m_deadstemn_xfer_to_fire_patch            ::V = Float64[]
+    m_frootn_to_fire_patch                    ::V = Float64[]
+    m_frootn_storage_to_fire_patch            ::V = Float64[]
+    m_frootn_xfer_to_fire_patch               ::V = Float64[]
+    m_livecrootn_to_fire_patch                ::V = Float64[]
+    m_livecrootn_storage_to_fire_patch        ::V = Float64[]
+    m_livecrootn_xfer_to_fire_patch           ::V = Float64[]
+    m_deadcrootn_to_fire_patch                ::V = Float64[]
+    m_deadcrootn_storage_to_fire_patch        ::V = Float64[]
+    m_deadcrootn_xfer_to_fire_patch           ::V = Float64[]
+    m_retransn_to_fire_patch                  ::V = Float64[]
 
     # --- Fire-to-litter fluxes (gN/m2/s) patch-level ---
-    m_leafn_to_litter_fire_patch              ::Vector{FT} = Float64[]
-    m_leafn_storage_to_litter_fire_patch      ::Vector{FT} = Float64[]
-    m_leafn_xfer_to_litter_fire_patch         ::Vector{FT} = Float64[]
-    m_livestemn_to_litter_fire_patch          ::Vector{FT} = Float64[]
-    m_livestemn_storage_to_litter_fire_patch  ::Vector{FT} = Float64[]
-    m_livestemn_xfer_to_litter_fire_patch     ::Vector{FT} = Float64[]
-    m_livestemn_to_deadstemn_fire_patch       ::Vector{FT} = Float64[]
-    m_deadstemn_to_litter_fire_patch          ::Vector{FT} = Float64[]
-    m_deadstemn_storage_to_litter_fire_patch  ::Vector{FT} = Float64[]
-    m_deadstemn_xfer_to_litter_fire_patch     ::Vector{FT} = Float64[]
-    m_frootn_to_litter_fire_patch             ::Vector{FT} = Float64[]
-    m_frootn_storage_to_litter_fire_patch     ::Vector{FT} = Float64[]
-    m_frootn_xfer_to_litter_fire_patch        ::Vector{FT} = Float64[]
-    m_livecrootn_to_litter_fire_patch         ::Vector{FT} = Float64[]
-    m_livecrootn_storage_to_litter_fire_patch ::Vector{FT} = Float64[]
-    m_livecrootn_xfer_to_litter_fire_patch    ::Vector{FT} = Float64[]
-    m_livecrootn_to_deadcrootn_fire_patch     ::Vector{FT} = Float64[]
-    m_deadcrootn_to_litter_fire_patch         ::Vector{FT} = Float64[]
-    m_deadcrootn_storage_to_litter_fire_patch ::Vector{FT} = Float64[]
-    m_deadcrootn_xfer_to_litter_fire_patch    ::Vector{FT} = Float64[]
-    m_retransn_to_litter_fire_patch           ::Vector{FT} = Float64[]
+    m_leafn_to_litter_fire_patch              ::V = Float64[]
+    m_leafn_storage_to_litter_fire_patch      ::V = Float64[]
+    m_leafn_xfer_to_litter_fire_patch         ::V = Float64[]
+    m_livestemn_to_litter_fire_patch          ::V = Float64[]
+    m_livestemn_storage_to_litter_fire_patch  ::V = Float64[]
+    m_livestemn_xfer_to_litter_fire_patch     ::V = Float64[]
+    m_livestemn_to_deadstemn_fire_patch       ::V = Float64[]
+    m_deadstemn_to_litter_fire_patch          ::V = Float64[]
+    m_deadstemn_storage_to_litter_fire_patch  ::V = Float64[]
+    m_deadstemn_xfer_to_litter_fire_patch     ::V = Float64[]
+    m_frootn_to_litter_fire_patch             ::V = Float64[]
+    m_frootn_storage_to_litter_fire_patch     ::V = Float64[]
+    m_frootn_xfer_to_litter_fire_patch        ::V = Float64[]
+    m_livecrootn_to_litter_fire_patch         ::V = Float64[]
+    m_livecrootn_storage_to_litter_fire_patch ::V = Float64[]
+    m_livecrootn_xfer_to_litter_fire_patch    ::V = Float64[]
+    m_livecrootn_to_deadcrootn_fire_patch     ::V = Float64[]
+    m_deadcrootn_to_litter_fire_patch         ::V = Float64[]
+    m_deadcrootn_storage_to_litter_fire_patch ::V = Float64[]
+    m_deadcrootn_xfer_to_litter_fire_patch    ::V = Float64[]
+    m_retransn_to_litter_fire_patch           ::V = Float64[]
 
     # --- Fire summary (gN/m2/s) ---
-    fire_nloss_patch                          ::Vector{FT} = Float64[]
-    fire_nloss_col                            ::Vector{FT} = Float64[]
-    fire_nloss_p2c_col                        ::Vector{FT} = Float64[]
-    fire_mortality_n_to_cwdn_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    fire_nloss_patch                          ::V = Float64[]
+    fire_nloss_col                            ::V = Float64[]
+    fire_nloss_p2c_col                        ::V = Float64[]
+    fire_mortality_n_to_cwdn_col              ::M = Matrix{Float64}(undef, 0, 0)
 
     # --- Column-level decomposition fire fluxes ---
-    m_decomp_npools_to_fire_vr_col            ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    m_decomp_npools_to_fire_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    m_n_to_litr_fire_col                      ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
+    m_decomp_npools_to_fire_vr_col            ::A3 = Array{Float64}(undef, 0, 0, 0)
+    m_decomp_npools_to_fire_col               ::M = Matrix{Float64}(undef, 0, 0)
+    m_n_to_litr_fire_col                      ::A3 = Array{Float64}(undef, 0, 0, 0)
 
     # --- Phenology fluxes from transfer pool (gN/m2/s) ---
-    reproductiven_xfer_to_reproductiven_patch ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    leafn_xfer_to_leafn_patch                 ::Vector{FT} = Float64[]
-    frootn_xfer_to_frootn_patch               ::Vector{FT} = Float64[]
-    livestemn_xfer_to_livestemn_patch         ::Vector{FT} = Float64[]
-    deadstemn_xfer_to_deadstemn_patch         ::Vector{FT} = Float64[]
-    livecrootn_xfer_to_livecrootn_patch       ::Vector{FT} = Float64[]
-    deadcrootn_xfer_to_deadcrootn_patch       ::Vector{FT} = Float64[]
+    reproductiven_xfer_to_reproductiven_patch ::M = Matrix{Float64}(undef, 0, 0)
+    leafn_xfer_to_leafn_patch                 ::V = Float64[]
+    frootn_xfer_to_frootn_patch               ::V = Float64[]
+    livestemn_xfer_to_livestemn_patch         ::V = Float64[]
+    deadstemn_xfer_to_deadstemn_patch         ::V = Float64[]
+    livecrootn_xfer_to_livecrootn_patch       ::V = Float64[]
+    deadcrootn_xfer_to_deadcrootn_patch       ::V = Float64[]
 
     # --- Litterfall fluxes (gN/m2/s) ---
-    livestemn_to_litter_patch                 ::Vector{FT} = Float64[]
-    repr_grainn_to_food_patch                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    repr_grainn_to_food_perharv_patch         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    repr_grainn_to_food_thisyr_patch          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    repr_structuren_to_cropprod_patch         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    repr_structuren_to_litter_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    leafn_to_biofueln_patch                   ::Vector{FT} = Float64[]
-    livestemn_to_biofueln_patch               ::Vector{FT} = Float64[]
-    leafn_to_removedresiduen_patch            ::Vector{FT} = Float64[]
-    livestemn_to_removedresiduen_patch        ::Vector{FT} = Float64[]
-    repr_grainn_to_seed_patch                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    repr_grainn_to_seed_perharv_patch         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    repr_grainn_to_seed_thisyr_patch          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    leafn_to_litter_patch                     ::Vector{FT} = Float64[]
-    leafn_to_retransn_patch                   ::Vector{FT} = Float64[]
-    frootn_to_retransn_patch                  ::Vector{FT} = Float64[]
-    frootn_to_litter_patch                    ::Vector{FT} = Float64[]
+    livestemn_to_litter_patch                 ::V = Float64[]
+    repr_grainn_to_food_patch                 ::M = Matrix{Float64}(undef, 0, 0)
+    repr_grainn_to_food_perharv_patch         ::A3 = Array{Float64}(undef, 0, 0, 0)
+    repr_grainn_to_food_thisyr_patch          ::M = Matrix{Float64}(undef, 0, 0)
+    repr_structuren_to_cropprod_patch         ::M = Matrix{Float64}(undef, 0, 0)
+    repr_structuren_to_litter_patch           ::M = Matrix{Float64}(undef, 0, 0)
+    leafn_to_biofueln_patch                   ::V = Float64[]
+    livestemn_to_biofueln_patch               ::V = Float64[]
+    leafn_to_removedresiduen_patch            ::V = Float64[]
+    livestemn_to_removedresiduen_patch        ::V = Float64[]
+    repr_grainn_to_seed_patch                 ::M = Matrix{Float64}(undef, 0, 0)
+    repr_grainn_to_seed_perharv_patch         ::A3 = Array{Float64}(undef, 0, 0, 0)
+    repr_grainn_to_seed_thisyr_patch          ::M = Matrix{Float64}(undef, 0, 0)
+    leafn_to_litter_patch                     ::V = Float64[]
+    leafn_to_retransn_patch                   ::V = Float64[]
+    frootn_to_retransn_patch                  ::V = Float64[]
+    frootn_to_litter_patch                    ::V = Float64[]
 
     # --- Allocation fluxes (gN/m2/s) ---
-    retransn_to_npool_patch                   ::Vector{FT} = Float64[]
-    free_retransn_to_npool_patch              ::Vector{FT} = Float64[]
-    sminn_to_npool_patch                      ::Vector{FT} = Float64[]
-    npool_to_reproductiven_patch              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    npool_to_reproductiven_storage_patch      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    npool_to_leafn_patch                      ::Vector{FT} = Float64[]
-    npool_to_leafn_storage_patch              ::Vector{FT} = Float64[]
-    npool_to_frootn_patch                     ::Vector{FT} = Float64[]
-    npool_to_frootn_storage_patch             ::Vector{FT} = Float64[]
-    npool_to_livestemn_patch                  ::Vector{FT} = Float64[]
-    npool_to_livestemn_storage_patch          ::Vector{FT} = Float64[]
-    npool_to_deadstemn_patch                  ::Vector{FT} = Float64[]
-    npool_to_deadstemn_storage_patch          ::Vector{FT} = Float64[]
-    npool_to_livecrootn_patch                 ::Vector{FT} = Float64[]
-    npool_to_livecrootn_storage_patch         ::Vector{FT} = Float64[]
-    npool_to_deadcrootn_patch                 ::Vector{FT} = Float64[]
-    npool_to_deadcrootn_storage_patch         ::Vector{FT} = Float64[]
+    retransn_to_npool_patch                   ::V = Float64[]
+    free_retransn_to_npool_patch              ::V = Float64[]
+    sminn_to_npool_patch                      ::V = Float64[]
+    npool_to_reproductiven_patch              ::M = Matrix{Float64}(undef, 0, 0)
+    npool_to_reproductiven_storage_patch      ::M = Matrix{Float64}(undef, 0, 0)
+    npool_to_leafn_patch                      ::V = Float64[]
+    npool_to_leafn_storage_patch              ::V = Float64[]
+    npool_to_frootn_patch                     ::V = Float64[]
+    npool_to_frootn_storage_patch             ::V = Float64[]
+    npool_to_livestemn_patch                  ::V = Float64[]
+    npool_to_livestemn_storage_patch          ::V = Float64[]
+    npool_to_deadstemn_patch                  ::V = Float64[]
+    npool_to_deadstemn_storage_patch          ::V = Float64[]
+    npool_to_livecrootn_patch                 ::V = Float64[]
+    npool_to_livecrootn_storage_patch         ::V = Float64[]
+    npool_to_deadcrootn_patch                 ::V = Float64[]
+    npool_to_deadcrootn_storage_patch         ::V = Float64[]
 
     # --- Storage to transfer turnover (gN/m2/s) ---
-    reproductiven_storage_to_xfer_patch       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    leafn_storage_to_xfer_patch               ::Vector{FT} = Float64[]
-    frootn_storage_to_xfer_patch              ::Vector{FT} = Float64[]
-    livestemn_storage_to_xfer_patch           ::Vector{FT} = Float64[]
-    deadstemn_storage_to_xfer_patch           ::Vector{FT} = Float64[]
-    livecrootn_storage_to_xfer_patch          ::Vector{FT} = Float64[]
-    deadcrootn_storage_to_xfer_patch          ::Vector{FT} = Float64[]
-    fert_patch                                ::Vector{FT} = Float64[]
-    fert_counter_patch                        ::Vector{FT} = Float64[]
-    soyfixn_patch                             ::Vector{FT} = Float64[]
+    reproductiven_storage_to_xfer_patch       ::M = Matrix{Float64}(undef, 0, 0)
+    leafn_storage_to_xfer_patch               ::V = Float64[]
+    frootn_storage_to_xfer_patch              ::V = Float64[]
+    livestemn_storage_to_xfer_patch           ::V = Float64[]
+    deadstemn_storage_to_xfer_patch           ::V = Float64[]
+    livecrootn_storage_to_xfer_patch          ::V = Float64[]
+    deadcrootn_storage_to_xfer_patch          ::V = Float64[]
+    fert_patch                                ::V = Float64[]
+    fert_counter_patch                        ::V = Float64[]
+    soyfixn_patch                             ::V = Float64[]
 
     # --- Livewood to deadwood turnover (gN/m2/s) ---
-    livestemn_to_deadstemn_patch              ::Vector{FT} = Float64[]
-    livestemn_to_retransn_patch               ::Vector{FT} = Float64[]
-    livecrootn_to_deadcrootn_patch            ::Vector{FT} = Float64[]
-    livecrootn_to_retransn_patch              ::Vector{FT} = Float64[]
+    livestemn_to_deadstemn_patch              ::V = Float64[]
+    livestemn_to_retransn_patch               ::V = Float64[]
+    livecrootn_to_deadcrootn_patch            ::V = Float64[]
+    livecrootn_to_retransn_patch              ::V = Float64[]
 
     # --- Summary/diagnostic ---
-    ndeploy_patch                             ::Vector{FT} = Float64[]
-    wood_harvestn_patch                       ::Vector{FT} = Float64[]
-    wood_harvestn_col                         ::Vector{FT} = Float64[]
+    ndeploy_patch                             ::V = Float64[]
+    wood_harvestn_patch                       ::V = Float64[]
+    wood_harvestn_col                         ::V = Float64[]
 
     # --- Column-level phenology/mortality/harvest fluxes (gN/m3/s) ---
-    phenology_n_to_litr_n_col                 ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    gap_mortality_n_to_litr_n_col             ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    gap_mortality_n_to_cwdn_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    harvest_n_to_litr_n_col                   ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    harvest_n_to_cwdn_col                     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    phenology_n_to_litr_n_col                 ::A3 = Array{Float64}(undef, 0, 0, 0)
+    gap_mortality_n_to_litr_n_col             ::A3 = Array{Float64}(undef, 0, 0, 0)
+    gap_mortality_n_to_cwdn_col               ::M = Matrix{Float64}(undef, 0, 0)
+    harvest_n_to_litr_n_col                   ::A3 = Array{Float64}(undef, 0, 0, 0)
+    harvest_n_to_cwdn_col                     ::M = Matrix{Float64}(undef, 0, 0)
 
     # --- Dynamic landcover fluxes ---
-    dwt_seedn_to_leaf_patch                   ::Vector{FT} = Float64[]
-    dwt_seedn_to_leaf_grc                     ::Vector{FT} = Float64[]
-    dwt_seedn_to_deadstem_patch               ::Vector{FT} = Float64[]
-    dwt_seedn_to_deadstem_grc                 ::Vector{FT} = Float64[]
-    dwt_conv_nflux_patch                      ::Vector{FT} = Float64[]
-    dwt_conv_nflux_grc                        ::Vector{FT} = Float64[]
-    dwt_wood_productn_gain_patch              ::Vector{FT} = Float64[]
-    dwt_crop_productn_gain_patch              ::Vector{FT} = Float64[]
-    dwt_frootn_to_litr_n_col                  ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    dwt_livecrootn_to_cwdn_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    dwt_deadcrootn_to_cwdn_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    dwt_seedn_to_leaf_patch                   ::V = Float64[]
+    dwt_seedn_to_leaf_grc                     ::V = Float64[]
+    dwt_seedn_to_deadstem_patch               ::V = Float64[]
+    dwt_seedn_to_deadstem_grc                 ::V = Float64[]
+    dwt_conv_nflux_patch                      ::V = Float64[]
+    dwt_conv_nflux_grc                        ::V = Float64[]
+    dwt_wood_productn_gain_patch              ::V = Float64[]
+    dwt_crop_productn_gain_patch              ::V = Float64[]
+    dwt_frootn_to_litr_n_col                  ::A3 = Array{Float64}(undef, 0, 0, 0)
+    dwt_livecrootn_to_cwdn_col                ::M = Matrix{Float64}(undef, 0, 0)
+    dwt_deadcrootn_to_cwdn_col                ::M = Matrix{Float64}(undef, 0, 0)
 
     # --- Gross unrepresented landcover fluxes ---
-    gru_leafn_to_litter_patch                 ::Vector{FT} = Float64[]
-    gru_leafn_storage_to_atm_patch            ::Vector{FT} = Float64[]
-    gru_leafn_xfer_to_atm_patch               ::Vector{FT} = Float64[]
-    gru_frootn_to_litter_patch                ::Vector{FT} = Float64[]
-    gru_frootn_storage_to_atm_patch           ::Vector{FT} = Float64[]
-    gru_frootn_xfer_to_atm_patch              ::Vector{FT} = Float64[]
-    gru_livestemn_to_atm_patch                ::Vector{FT} = Float64[]
-    gru_livestemn_storage_to_atm_patch        ::Vector{FT} = Float64[]
-    gru_livestemn_xfer_to_atm_patch           ::Vector{FT} = Float64[]
-    gru_deadstemn_to_atm_patch                ::Vector{FT} = Float64[]
-    gru_deadstemn_storage_to_atm_patch        ::Vector{FT} = Float64[]
-    gru_deadstemn_xfer_to_atm_patch           ::Vector{FT} = Float64[]
-    gru_livecrootn_to_litter_patch            ::Vector{FT} = Float64[]
-    gru_livecrootn_storage_to_atm_patch       ::Vector{FT} = Float64[]
-    gru_livecrootn_xfer_to_atm_patch          ::Vector{FT} = Float64[]
-    gru_deadcrootn_to_litter_patch            ::Vector{FT} = Float64[]
-    gru_deadcrootn_storage_to_atm_patch       ::Vector{FT} = Float64[]
-    gru_deadcrootn_xfer_to_atm_patch          ::Vector{FT} = Float64[]
-    gru_retransn_to_litter_patch              ::Vector{FT} = Float64[]
-    gru_conv_nflux_patch                      ::Vector{FT} = Float64[]
-    gru_conv_nflux_col                        ::Vector{FT} = Float64[]
-    gru_conv_nflux_grc                        ::Vector{FT} = Float64[]
-    gru_wood_productn_gain_patch              ::Vector{FT} = Float64[]
-    gru_wood_productn_gain_col                ::Vector{FT} = Float64[]
-    gru_wood_productn_gain_grc                ::Vector{FT} = Float64[]
-    gru_n_to_litr_n_col                       ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    gru_n_to_cwdn_col                         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    gru_leafn_to_litter_patch                 ::V = Float64[]
+    gru_leafn_storage_to_atm_patch            ::V = Float64[]
+    gru_leafn_xfer_to_atm_patch               ::V = Float64[]
+    gru_frootn_to_litter_patch                ::V = Float64[]
+    gru_frootn_storage_to_atm_patch           ::V = Float64[]
+    gru_frootn_xfer_to_atm_patch              ::V = Float64[]
+    gru_livestemn_to_atm_patch                ::V = Float64[]
+    gru_livestemn_storage_to_atm_patch        ::V = Float64[]
+    gru_livestemn_xfer_to_atm_patch           ::V = Float64[]
+    gru_deadstemn_to_atm_patch                ::V = Float64[]
+    gru_deadstemn_storage_to_atm_patch        ::V = Float64[]
+    gru_deadstemn_xfer_to_atm_patch           ::V = Float64[]
+    gru_livecrootn_to_litter_patch            ::V = Float64[]
+    gru_livecrootn_storage_to_atm_patch       ::V = Float64[]
+    gru_livecrootn_xfer_to_atm_patch          ::V = Float64[]
+    gru_deadcrootn_to_litter_patch            ::V = Float64[]
+    gru_deadcrootn_storage_to_atm_patch       ::V = Float64[]
+    gru_deadcrootn_xfer_to_atm_patch          ::V = Float64[]
+    gru_retransn_to_litter_patch              ::V = Float64[]
+    gru_conv_nflux_patch                      ::V = Float64[]
+    gru_conv_nflux_col                        ::V = Float64[]
+    gru_conv_nflux_grc                        ::V = Float64[]
+    gru_wood_productn_gain_patch              ::V = Float64[]
+    gru_wood_productn_gain_col                ::V = Float64[]
+    gru_wood_productn_gain_grc                ::V = Float64[]
+    gru_n_to_litr_n_col                       ::A3 = Array{Float64}(undef, 0, 0, 0)
+    gru_n_to_cwdn_col                         ::M = Matrix{Float64}(undef, 0, 0)
 
     # --- Crop fluxes ---
-    crop_seedn_to_leaf_patch                  ::Vector{FT} = Float64[]
+    crop_seedn_to_leaf_patch                  ::V = Float64[]
 
     # --- Misc / FUN fluxes (gN/m2/s) ---
-    plant_ndemand_patch                       ::Vector{FT} = Float64[]
-    avail_retransn_patch                      ::Vector{FT} = Float64[]
-    plant_nalloc_patch                        ::Vector{FT} = Float64[]
-    plant_ndemand_retrans_patch               ::Vector{FT} = Float64[]
-    plant_ndemand_season_patch                ::Vector{FT} = Float64[]
-    plant_ndemand_stress_patch                ::Vector{FT} = Float64[]
-    Nactive_patch                             ::Vector{FT} = Float64[]
-    Nnonmyc_patch                             ::Vector{FT} = Float64[]
-    Nam_patch                                 ::Vector{FT} = Float64[]
-    Necm_patch                                ::Vector{FT} = Float64[]
-    Nactive_no3_patch                         ::Vector{FT} = Float64[]
-    Nactive_nh4_patch                         ::Vector{FT} = Float64[]
-    Nnonmyc_no3_patch                         ::Vector{FT} = Float64[]
-    Nnonmyc_nh4_patch                         ::Vector{FT} = Float64[]
-    Nam_no3_patch                             ::Vector{FT} = Float64[]
-    Nam_nh4_patch                             ::Vector{FT} = Float64[]
-    Necm_no3_patch                            ::Vector{FT} = Float64[]
-    Necm_nh4_patch                            ::Vector{FT} = Float64[]
-    Nfix_patch                                ::Vector{FT} = Float64[]
-    Npassive_patch                            ::Vector{FT} = Float64[]
-    Nretrans_patch                            ::Vector{FT} = Float64[]
-    Nretrans_org_patch                        ::Vector{FT} = Float64[]
-    Nretrans_season_patch                     ::Vector{FT} = Float64[]
-    Nretrans_stress_patch                     ::Vector{FT} = Float64[]
-    Nuptake_patch                             ::Vector{FT} = Float64[]
-    sminn_to_plant_fun_patch                  ::Vector{FT} = Float64[]
-    sminn_to_plant_fun_vr_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    sminn_to_plant_fun_no3_vr_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    sminn_to_plant_fun_nh4_vr_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    cost_nfix_patch                           ::Vector{FT} = Float64[]
-    cost_nactive_patch                        ::Vector{FT} = Float64[]
-    cost_nretrans_patch                       ::Vector{FT} = Float64[]
-    nuptake_npp_fraction_patch                ::Vector{FT} = Float64[]
+    plant_ndemand_patch                       ::V = Float64[]
+    avail_retransn_patch                      ::V = Float64[]
+    plant_nalloc_patch                        ::V = Float64[]
+    plant_ndemand_retrans_patch               ::V = Float64[]
+    plant_ndemand_season_patch                ::V = Float64[]
+    plant_ndemand_stress_patch                ::V = Float64[]
+    Nactive_patch                             ::V = Float64[]
+    Nnonmyc_patch                             ::V = Float64[]
+    Nam_patch                                 ::V = Float64[]
+    Necm_patch                                ::V = Float64[]
+    Nactive_no3_patch                         ::V = Float64[]
+    Nactive_nh4_patch                         ::V = Float64[]
+    Nnonmyc_no3_patch                         ::V = Float64[]
+    Nnonmyc_nh4_patch                         ::V = Float64[]
+    Nam_no3_patch                             ::V = Float64[]
+    Nam_nh4_patch                             ::V = Float64[]
+    Necm_no3_patch                            ::V = Float64[]
+    Necm_nh4_patch                            ::V = Float64[]
+    Nfix_patch                                ::V = Float64[]
+    Npassive_patch                            ::V = Float64[]
+    Nretrans_patch                            ::V = Float64[]
+    Nretrans_org_patch                        ::V = Float64[]
+    Nretrans_season_patch                     ::V = Float64[]
+    Nretrans_stress_patch                     ::V = Float64[]
+    Nuptake_patch                             ::V = Float64[]
+    sminn_to_plant_fun_patch                  ::V = Float64[]
+    sminn_to_plant_fun_vr_patch               ::M = Matrix{Float64}(undef, 0, 0)
+    sminn_to_plant_fun_no3_vr_patch           ::M = Matrix{Float64}(undef, 0, 0)
+    sminn_to_plant_fun_nh4_vr_patch           ::M = Matrix{Float64}(undef, 0, 0)
+    cost_nfix_patch                           ::V = Float64[]
+    cost_nactive_patch                        ::V = Float64[]
+    cost_nretrans_patch                       ::V = Float64[]
+    nuptake_npp_fraction_patch                ::V = Float64[]
 
     # --- Matrix CN arrays ---
-    matrix_nalloc_patch                       ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    matrix_Ninput_patch                       ::Vector{FT} = Float64[]
-    matrix_nphtransfer_patch                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    matrix_nphturnover_patch                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    matrix_nphtransfer_doner_patch            ::Vector{Int} = Int[]
-    matrix_nphtransfer_receiver_patch         ::Vector{Int} = Int[]
-    matrix_ngmtransfer_patch                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    matrix_ngmturnover_patch                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    matrix_ngmtransfer_doner_patch            ::Vector{Int} = Int[]
-    matrix_ngmtransfer_receiver_patch         ::Vector{Int} = Int[]
-    matrix_nfitransfer_patch                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    matrix_nfiturnover_patch                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    matrix_nfitransfer_doner_patch            ::Vector{Int} = Int[]
-    matrix_nfitransfer_receiver_patch         ::Vector{Int} = Int[]
+    matrix_nalloc_patch                       ::M = Matrix{Float64}(undef, 0, 0)
+    matrix_Ninput_patch                       ::V = Float64[]
+    matrix_nphtransfer_patch                  ::M = Matrix{Float64}(undef, 0, 0)
+    matrix_nphturnover_patch                  ::M = Matrix{Float64}(undef, 0, 0)
+    matrix_nphtransfer_doner_patch            ::VI = Int[]
+    matrix_nphtransfer_receiver_patch         ::VI = Int[]
+    matrix_ngmtransfer_patch                  ::M = Matrix{Float64}(undef, 0, 0)
+    matrix_ngmturnover_patch                  ::M = Matrix{Float64}(undef, 0, 0)
+    matrix_ngmtransfer_doner_patch            ::VI = Int[]
+    matrix_ngmtransfer_receiver_patch         ::VI = Int[]
+    matrix_nfitransfer_patch                  ::M = Matrix{Float64}(undef, 0, 0)
+    matrix_nfiturnover_patch                  ::M = Matrix{Float64}(undef, 0, 0)
+    matrix_nfitransfer_doner_patch            ::VI = Int[]
+    matrix_nfitransfer_receiver_patch         ::VI = Int[]
 
     # --- Matrix index scalars (phenology) ---
     ileaf_to_iretransn_ph::Int = 0
@@ -370,6 +374,11 @@ Base.@kwdef mutable struct CNVegNitrogenFluxData{FT<:Real}
     ideadcrootxf_to_iout_fi::Int = 0
     iretransn_to_iout_fi::Int = 0
 end
+
+CNVegNitrogenFluxData{FT}(; kwargs...) where {FT<:Real} =
+    CNVegNitrogenFluxData{FT, Vector{FT}, Matrix{FT}, Array{FT,3}, Vector{Int}}(; kwargs...)
+Adapt.@adapt_structure CNVegNitrogenFluxData
+
 
 # ==========================================================================
 # Init function — allocates all arrays

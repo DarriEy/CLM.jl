@@ -14,91 +14,98 @@ All water fluxes are in units of mm/s unless otherwise noted.
 
 Ported from `waterflux_type` in `WaterFluxType.F90`.
 """
-Base.@kwdef mutable struct WaterFluxData{FT<:Real}
+Base.@kwdef mutable struct WaterFluxData{FT<:Real,
+                             V<:AbstractVector{FT},
+                             M<:AbstractMatrix{FT}}
     # --- Patch-level 1D fields ---
-    qflx_through_snow_patch             ::Vector{FT} = Float64[]  # patch canopy throughfall of snow (mm H2O/s)
-    qflx_through_liq_patch              ::Vector{FT} = Float64[]  # patch canopy throughfall of liquid (rain+irrigation) (mm H2O/s)
-    qflx_intercepted_snow_patch         ::Vector{FT} = Float64[]  # patch canopy interception of snow (mm H2O/s)
-    qflx_intercepted_liq_patch          ::Vector{FT} = Float64[]  # patch canopy interception of liquid (rain+irrigation) (mm H2O/s)
-    qflx_snocanfall_patch               ::Vector{FT} = Float64[]  # patch rate of excess canopy snow falling off canopy (mm H2O/s)
-    qflx_liqcanfall_patch               ::Vector{FT} = Float64[]  # patch rate of excess canopy liquid falling off canopy (mm H2O/s)
-    qflx_snow_unload_patch              ::Vector{FT} = Float64[]  # patch rate of canopy snow unloading (mm H2O/s)
-    qflx_solidevap_from_top_layer_patch ::Vector{FT} = Float64[]  # patch rate of ice sublimation from top layer (mm H2O/s) [+]
-    qflx_tran_veg_patch                 ::Vector{FT} = Float64[]  # patch vegetation transpiration (mm H2O/s) (+ = to atm)
-    qflx_liqdew_to_top_layer_patch      ::Vector{FT} = Float64[]  # patch rate of liquid dew on top layer (mm H2O/s) [+]
-    qflx_soliddew_to_top_layer_patch    ::Vector{FT} = Float64[]  # patch rate of frost on top layer (mm H2O/s) [+]
-    qflx_evap_veg_patch                 ::Vector{FT} = Float64[]  # patch vegetation evaporation (mm H2O/s) (+ = to atm)
-    qflx_evap_can_patch                 ::Vector{FT} = Float64[]  # patch evaporation from leaves and stems (mm H2O/s) (+ = to atm)
-    qflx_evap_soi_patch                 ::Vector{FT} = Float64[]  # patch soil evaporation (mm H2O/s) (+ = to atm)
-    qflx_evap_tot_patch                 ::Vector{FT} = Float64[]  # patch total evaporation (mm H2O/s)
-    qflx_liqevap_from_top_layer_patch   ::Vector{FT} = Float64[]  # patch rate of liquid evaporation from top layer (mm H2O/s) [+]
-    qflx_ev_snow_patch                  ::Vector{FT} = Float64[]  # patch evaporation heat flux from snow (mm H2O/s)
-    qflx_ev_soil_patch                  ::Vector{FT} = Float64[]  # patch evaporation heat flux from soil (mm H2O/s)
-    qflx_ev_h2osfc_patch                ::Vector{FT} = Float64[]  # patch evaporation heat flux from surface water (mm H2O/s)
-    qflx_irrig_drip_patch               ::Vector{FT} = Float64[]  # patch drip irrigation (mm H2O/s)
-    qflx_irrig_sprinkler_patch          ::Vector{FT} = Float64[]  # patch sprinkler irrigation (mm H2O/s)
+    qflx_through_snow_patch             ::V = Float64[]  # patch canopy throughfall of snow (mm H2O/s)
+    qflx_through_liq_patch              ::V = Float64[]  # patch canopy throughfall of liquid (rain+irrigation) (mm H2O/s)
+    qflx_intercepted_snow_patch         ::V = Float64[]  # patch canopy interception of snow (mm H2O/s)
+    qflx_intercepted_liq_patch          ::V = Float64[]  # patch canopy interception of liquid (rain+irrigation) (mm H2O/s)
+    qflx_snocanfall_patch               ::V = Float64[]  # patch rate of excess canopy snow falling off canopy (mm H2O/s)
+    qflx_liqcanfall_patch               ::V = Float64[]  # patch rate of excess canopy liquid falling off canopy (mm H2O/s)
+    qflx_snow_unload_patch              ::V = Float64[]  # patch rate of canopy snow unloading (mm H2O/s)
+    qflx_solidevap_from_top_layer_patch ::V = Float64[]  # patch rate of ice sublimation from top layer (mm H2O/s) [+]
+    qflx_tran_veg_patch                 ::V = Float64[]  # patch vegetation transpiration (mm H2O/s) (+ = to atm)
+    qflx_liqdew_to_top_layer_patch      ::V = Float64[]  # patch rate of liquid dew on top layer (mm H2O/s) [+]
+    qflx_soliddew_to_top_layer_patch    ::V = Float64[]  # patch rate of frost on top layer (mm H2O/s) [+]
+    qflx_evap_veg_patch                 ::V = Float64[]  # patch vegetation evaporation (mm H2O/s) (+ = to atm)
+    qflx_evap_can_patch                 ::V = Float64[]  # patch evaporation from leaves and stems (mm H2O/s) (+ = to atm)
+    qflx_evap_soi_patch                 ::V = Float64[]  # patch soil evaporation (mm H2O/s) (+ = to atm)
+    qflx_evap_tot_patch                 ::V = Float64[]  # patch total evaporation (mm H2O/s)
+    qflx_liqevap_from_top_layer_patch   ::V = Float64[]  # patch rate of liquid evaporation from top layer (mm H2O/s) [+]
+    qflx_ev_snow_patch                  ::V = Float64[]  # patch evaporation heat flux from snow (mm H2O/s)
+    qflx_ev_soil_patch                  ::V = Float64[]  # patch evaporation heat flux from soil (mm H2O/s)
+    qflx_ev_h2osfc_patch                ::V = Float64[]  # patch evaporation heat flux from surface water (mm H2O/s)
+    qflx_irrig_drip_patch               ::V = Float64[]  # patch drip irrigation (mm H2O/s)
+    qflx_irrig_sprinkler_patch          ::V = Float64[]  # patch sprinkler irrigation (mm H2O/s)
 
     # --- Column-level 1D fields ---
-    qflx_liq_grnd_col                   ::Vector{FT} = Float64[]  # col liquid on ground after interception (mm H2O/s) [+]
-    qflx_snow_grnd_col                  ::Vector{FT} = Float64[]  # col snow on ground after interception (mm H2O/s) [+]
-    qflx_rain_plus_snomelt_col          ::Vector{FT} = Float64[]  # col rain plus snow melt on soil (mm/s)
-    qflx_solidevap_from_top_layer_col   ::Vector{FT} = Float64[]  # col rate of ice sublimation from top layer (mm H2O/s) [+]
-    qflx_snwcp_liq_col                  ::Vector{FT} = Float64[]  # col excess liquid from snow capping (mm H2O/s)
-    qflx_snwcp_ice_col                  ::Vector{FT} = Float64[]  # col excess solid from snow capping (mm H2O/s)
-    qflx_snwcp_discarded_liq_col        ::Vector{FT} = Float64[]  # col discarded excess liquid from snow capping (mm H2O/s)
-    qflx_snwcp_discarded_ice_col        ::Vector{FT} = Float64[]  # col discarded excess solid from snow capping (mm H2O/s)
-    qflx_glcice_col                     ::Vector{FT} = Float64[]  # col net glacial ice flux (mm H2O/s)
-    qflx_glcice_frz_col                 ::Vector{FT} = Float64[]  # col ice growth (mm H2O/s) [+]
-    qflx_glcice_melt_col                ::Vector{FT} = Float64[]  # col ice melt (mm H2O/s) [+]
-    qflx_glcice_dyn_water_flux_col      ::Vector{FT} = Float64[]  # col dynamic water flux for glc routing (mm H2O/s)
-    qflx_tran_veg_col                   ::Vector{FT} = Float64[]  # col vegetation transpiration (mm H2O/s) (+ = to atm)
-    qflx_evap_veg_col                   ::Vector{FT} = Float64[]  # col vegetation evaporation (mm H2O/s) (+ = to atm)
-    qflx_evap_can_col                   ::Vector{FT} = Float64[]  # col evaporation from leaves and stems (mm H2O/s) (+ = to atm)
-    qflx_evap_soi_col                   ::Vector{FT} = Float64[]  # col soil evaporation (mm H2O/s) (+ = to atm)
-    qflx_evap_tot_col                   ::Vector{FT} = Float64[]  # col total evaporation (mm H2O/s)
-    qflx_liqevap_from_top_layer_col     ::Vector{FT} = Float64[]  # col rate of liquid evaporation from top layer (mm H2O/s) [+]
-    qflx_liqdew_to_top_layer_col        ::Vector{FT} = Float64[]  # col rate of liquid dew on top layer (mm H2O/s) [+]
-    qflx_soliddew_to_top_layer_col      ::Vector{FT} = Float64[]  # col rate of frost on top layer (mm H2O/s) [+]
-    qflx_infl_col                       ::Vector{FT} = Float64[]  # col infiltration (mm H2O/s)
-    qflx_surf_col                       ::Vector{FT} = Float64[]  # col total surface runoff (mm H2O/s)
-    qflx_drain_col                      ::Vector{FT} = Float64[]  # col sub-surface runoff (mm H2O/s)
-    qflx_drain_perched_col              ::Vector{FT} = Float64[]  # col perched water table drainage (mm H2O/s)
-    qflx_latflow_in_col                 ::Vector{FT} = Float64[]  # col hillslope lateral flow input (mm/s)
-    qflx_latflow_out_col                ::Vector{FT} = Float64[]  # col hillslope lateral flow output (mm/s)
-    volumetric_discharge_col            ::Vector{FT} = Float64[]  # col hillslope discharge (m3/s)
-    qflx_top_soil_col                   ::Vector{FT} = Float64[]  # col net water input into soil from top (mm/s)
-    qflx_floodc_col                     ::Vector{FT} = Float64[]  # col flood water flux
-    qflx_sl_top_soil_col                ::Vector{FT} = Float64[]  # col liquid+ice from above soil to top soil or qrgwl (mm H2O/s)
-    qflx_snomelt_col                    ::Vector{FT} = Float64[]  # col snow melt (mm H2O/s)
-    qflx_qrgwl_col                      ::Vector{FT} = Float64[]  # col surface runoff at glaciers/wetlands/lakes
-    qflx_runoff_col                     ::Vector{FT} = Float64[]  # col total runoff (mm H2O/s)
-    qflx_runoff_r_col                   ::Vector{FT} = Float64[]  # col rural total runoff (mm H2O/s)
-    qflx_runoff_u_col                   ::Vector{FT} = Float64[]  # col urban total runoff (mm H2O/s)
-    qflx_rsub_sat_col                   ::Vector{FT} = Float64[]  # col soil saturation excess (mm/s)
-    qflx_snofrz_col                     ::Vector{FT} = Float64[]  # col column-integrated snow freezing rate (kg m-2 s-1)
-    qflx_snow_drain_col                 ::Vector{FT} = Float64[]  # col drainage from snow pack
-    qflx_ice_runoff_snwcp_col           ::Vector{FT} = Float64[]  # col solid runoff from snow capping (mm H2O/s)
-    qflx_ice_runoff_xs_col              ::Vector{FT} = Float64[]  # col solid runoff from excess ice (mm H2O/s)
-    qflx_h2osfc_to_ice_col              ::Vector{FT} = Float64[]  # col conversion of h2osfc to ice
-    qflx_snow_h2osfc_col                ::Vector{FT} = Float64[]  # col snow falling on surface water
-    qflx_too_small_h2osfc_to_soil_col   ::Vector{FT} = Float64[]  # col h2osfc transferred to soil if below threshold (mm H2O/s)
-    qflx_sfc_irrig_col                  ::Vector{FT} = Float64[]  # col surface irrigation flux (mm H2O/s) [+]
-    qflx_gw_uncon_irrig_col             ::Vector{FT} = Float64[]  # col unconfined groundwater irrigation flux (mm H2O/s)
-    qflx_gw_con_irrig_col               ::Vector{FT} = Float64[]  # col confined groundwater irrigation flux (mm H2O/s)
+    qflx_liq_grnd_col                   ::V = Float64[]  # col liquid on ground after interception (mm H2O/s) [+]
+    qflx_snow_grnd_col                  ::V = Float64[]  # col snow on ground after interception (mm H2O/s) [+]
+    qflx_rain_plus_snomelt_col          ::V = Float64[]  # col rain plus snow melt on soil (mm/s)
+    qflx_solidevap_from_top_layer_col   ::V = Float64[]  # col rate of ice sublimation from top layer (mm H2O/s) [+]
+    qflx_snwcp_liq_col                  ::V = Float64[]  # col excess liquid from snow capping (mm H2O/s)
+    qflx_snwcp_ice_col                  ::V = Float64[]  # col excess solid from snow capping (mm H2O/s)
+    qflx_snwcp_discarded_liq_col        ::V = Float64[]  # col discarded excess liquid from snow capping (mm H2O/s)
+    qflx_snwcp_discarded_ice_col        ::V = Float64[]  # col discarded excess solid from snow capping (mm H2O/s)
+    qflx_glcice_col                     ::V = Float64[]  # col net glacial ice flux (mm H2O/s)
+    qflx_glcice_frz_col                 ::V = Float64[]  # col ice growth (mm H2O/s) [+]
+    qflx_glcice_melt_col                ::V = Float64[]  # col ice melt (mm H2O/s) [+]
+    qflx_glcice_dyn_water_flux_col      ::V = Float64[]  # col dynamic water flux for glc routing (mm H2O/s)
+    qflx_tran_veg_col                   ::V = Float64[]  # col vegetation transpiration (mm H2O/s) (+ = to atm)
+    qflx_evap_veg_col                   ::V = Float64[]  # col vegetation evaporation (mm H2O/s) (+ = to atm)
+    qflx_evap_can_col                   ::V = Float64[]  # col evaporation from leaves and stems (mm H2O/s) (+ = to atm)
+    qflx_evap_soi_col                   ::V = Float64[]  # col soil evaporation (mm H2O/s) (+ = to atm)
+    qflx_evap_tot_col                   ::V = Float64[]  # col total evaporation (mm H2O/s)
+    qflx_liqevap_from_top_layer_col     ::V = Float64[]  # col rate of liquid evaporation from top layer (mm H2O/s) [+]
+    qflx_liqdew_to_top_layer_col        ::V = Float64[]  # col rate of liquid dew on top layer (mm H2O/s) [+]
+    qflx_soliddew_to_top_layer_col      ::V = Float64[]  # col rate of frost on top layer (mm H2O/s) [+]
+    qflx_infl_col                       ::V = Float64[]  # col infiltration (mm H2O/s)
+    qflx_surf_col                       ::V = Float64[]  # col total surface runoff (mm H2O/s)
+    qflx_drain_col                      ::V = Float64[]  # col sub-surface runoff (mm H2O/s)
+    qflx_drain_perched_col              ::V = Float64[]  # col perched water table drainage (mm H2O/s)
+    qflx_latflow_in_col                 ::V = Float64[]  # col hillslope lateral flow input (mm/s)
+    qflx_latflow_out_col                ::V = Float64[]  # col hillslope lateral flow output (mm/s)
+    volumetric_discharge_col            ::V = Float64[]  # col hillslope discharge (m3/s)
+    qflx_top_soil_col                   ::V = Float64[]  # col net water input into soil from top (mm/s)
+    qflx_floodc_col                     ::V = Float64[]  # col flood water flux
+    qflx_sl_top_soil_col                ::V = Float64[]  # col liquid+ice from above soil to top soil or qrgwl (mm H2O/s)
+    qflx_snomelt_col                    ::V = Float64[]  # col snow melt (mm H2O/s)
+    qflx_qrgwl_col                      ::V = Float64[]  # col surface runoff at glaciers/wetlands/lakes
+    qflx_runoff_col                     ::V = Float64[]  # col total runoff (mm H2O/s)
+    qflx_runoff_r_col                   ::V = Float64[]  # col rural total runoff (mm H2O/s)
+    qflx_runoff_u_col                   ::V = Float64[]  # col urban total runoff (mm H2O/s)
+    qflx_rsub_sat_col                   ::V = Float64[]  # col soil saturation excess (mm/s)
+    qflx_snofrz_col                     ::V = Float64[]  # col column-integrated snow freezing rate (kg m-2 s-1)
+    qflx_snow_drain_col                 ::V = Float64[]  # col drainage from snow pack
+    qflx_ice_runoff_snwcp_col           ::V = Float64[]  # col solid runoff from snow capping (mm H2O/s)
+    qflx_ice_runoff_xs_col              ::V = Float64[]  # col solid runoff from excess ice (mm H2O/s)
+    qflx_h2osfc_to_ice_col              ::V = Float64[]  # col conversion of h2osfc to ice
+    qflx_snow_h2osfc_col                ::V = Float64[]  # col snow falling on surface water
+    qflx_too_small_h2osfc_to_soil_col   ::V = Float64[]  # col h2osfc transferred to soil if below threshold (mm H2O/s)
+    qflx_sfc_irrig_col                  ::V = Float64[]  # col surface irrigation flux (mm H2O/s) [+]
+    qflx_gw_uncon_irrig_col             ::V = Float64[]  # col unconfined groundwater irrigation flux (mm H2O/s)
+    qflx_gw_con_irrig_col               ::V = Float64[]  # col confined groundwater irrigation flux (mm H2O/s)
 
     # --- Column-level 2D fields ---
-    qflx_snofrz_lyr_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow freezing rate per layer (kg m-2 s-1) (-nlevsno+1:0)
-    qflx_snomelt_lyr_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow melt rate per layer (kg m-2 s-1) (-nlevsno+1:0)
-    qflx_snow_percolation_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col liquid percolation from snow layer (mm H2O/s) (-nlevsno+1:0)
-    qflx_gw_uncon_irrig_lyr_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col unconfined gw irrigation by layer (mm H2O/s) (1:nlevsoi)
+    qflx_snofrz_lyr_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col snow freezing rate per layer (kg m-2 s-1) (-nlevsno+1:0)
+    qflx_snomelt_lyr_col                ::M = Matrix{Float64}(undef, 0, 0)  # col snow melt rate per layer (kg m-2 s-1) (-nlevsno+1:0)
+    qflx_snow_percolation_col           ::M = Matrix{Float64}(undef, 0, 0)  # col liquid percolation from snow layer (mm H2O/s) (-nlevsno+1:0)
+    qflx_gw_uncon_irrig_lyr_col         ::M = Matrix{Float64}(undef, 0, 0)  # col unconfined gw irrigation by layer (mm H2O/s) (1:nlevsoi)
 
     # --- Landunit-level 1D fields ---
-    volumetric_streamflow_lun           ::Vector{FT} = Float64[]  # lun stream discharge (m3/s)
+    volumetric_streamflow_lun           ::V = Float64[]  # lun stream discharge (m3/s)
 
     # --- Gridcell-level 1D fields ---
-    qflx_liq_dynbal_grc                 ::Vector{FT} = Float64[]  # grc liq dynamic land cover change runoff flux
-    qflx_ice_dynbal_grc                 ::Vector{FT} = Float64[]  # grc ice dynamic land cover change runoff flux
+    qflx_liq_dynbal_grc                 ::V = Float64[]  # grc liq dynamic land cover change runoff flux
+    qflx_ice_dynbal_grc                 ::V = Float64[]  # grc ice dynamic land cover change runoff flux
 end
+
+WaterFluxData{FT}(; kwargs...) where {FT<:Real} =
+    WaterFluxData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure WaterFluxData
+
 
 """
     waterflux_init!(wf::WaterFluxData, nc::Int, np::Int, nl::Int, ng::Int)

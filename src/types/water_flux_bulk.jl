@@ -18,41 +18,48 @@ All water fluxes are in units of mm/s unless otherwise noted.
 
 Ported from `waterfluxbulk_type` in `WaterFluxBulkType.F90`.
 """
-Base.@kwdef mutable struct WaterFluxBulkData{FT<:Real}
+Base.@kwdef mutable struct WaterFluxBulkData{FT<:Real,
+                                 V<:AbstractVector{FT},
+                                 M<:AbstractMatrix{FT}}
     # --- Parent water flux fields (composition) ---
     wf::WaterFluxData = WaterFluxData()
 
     # --- Bulk-specific patch-level 1D fields ---
-    qflx_snowindunload_patch  ::Vector{FT} = Float64[]  # patch canopy snow wind unloading (mm H2O/s)
-    qflx_snotempunload_patch  ::Vector{FT} = Float64[]  # patch canopy snow temp unloading (mm H2O/s)
-    qflx_ev_snow_patch        ::Vector{FT} = Float64[]  # patch evaporation heat flux from snow (mm H2O/s) [+ to atm]
-    qflx_ev_soil_patch        ::Vector{FT} = Float64[]  # patch evaporation heat flux from soil (mm H2O/s) [+ to atm]
-    qflx_ev_h2osfc_patch      ::Vector{FT} = Float64[]  # patch evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
-    qflx_hydr_redist_patch    ::Vector{FT} = Float64[]  # patch hydraulic redistribution (mm H2O/s)
+    qflx_snowindunload_patch  ::V = Float64[]  # patch canopy snow wind unloading (mm H2O/s)
+    qflx_snotempunload_patch  ::V = Float64[]  # patch canopy snow temp unloading (mm H2O/s)
+    qflx_ev_snow_patch        ::V = Float64[]  # patch evaporation heat flux from snow (mm H2O/s) [+ to atm]
+    qflx_ev_soil_patch        ::V = Float64[]  # patch evaporation heat flux from soil (mm H2O/s) [+ to atm]
+    qflx_ev_h2osfc_patch      ::V = Float64[]  # patch evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
+    qflx_hydr_redist_patch    ::V = Float64[]  # patch hydraulic redistribution (mm H2O/s)
 
     # --- Bulk-specific column-level 1D fields ---
-    qflx_phs_neg_col          ::Vector{FT} = Float64[]  # col sum of negative hydraulic redistribution fluxes (mm H2O/s) [+]
-    qflx_ev_snow_col          ::Vector{FT} = Float64[]  # col evaporation heat flux from snow (mm H2O/s) [+ to atm]
-    qflx_ev_soil_col          ::Vector{FT} = Float64[]  # col evaporation heat flux from soil (mm H2O/s) [+ to atm]
-    qflx_ev_h2osfc_col        ::Vector{FT} = Float64[]  # col evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
-    qflx_sat_excess_surf_col  ::Vector{FT} = Float64[]  # col surface runoff due to saturated surface (mm H2O/s)
-    qflx_infl_excess_col      ::Vector{FT} = Float64[]  # col infiltration excess runoff (mm H2O/s)
-    qflx_infl_excess_surf_col ::Vector{FT} = Float64[]  # col surface runoff due to infiltration excess (mm H2O/s)
-    qflx_h2osfc_surf_col      ::Vector{FT} = Float64[]  # col surface water runoff (mm H2O/s)
-    qflx_in_soil_col          ::Vector{FT} = Float64[]  # col surface input to soil (mm/s)
-    qflx_in_soil_limited_col  ::Vector{FT} = Float64[]  # col surface input to soil, limited by max infiltration rate (mm/s)
-    qflx_h2osfc_drain_col     ::Vector{FT} = Float64[]  # col bottom drainage from h2osfc (mm/s)
-    qflx_top_soil_to_h2osfc_col ::Vector{FT} = Float64[]  # col portion of qflx_top_soil going to h2osfc, minus evaporation (mm/s)
-    qflx_in_h2osfc_col        ::Vector{FT} = Float64[]  # col total surface input to h2osfc
-    qflx_deficit_col          ::Vector{FT} = Float64[]  # col water deficit to keep non-negative liquid water content (mm H2O)
-    AnnET                     ::Vector{FT} = Float64[]  # col annual average ET flux (mm H2O/s)
+    qflx_phs_neg_col          ::V = Float64[]  # col sum of negative hydraulic redistribution fluxes (mm H2O/s) [+]
+    qflx_ev_snow_col          ::V = Float64[]  # col evaporation heat flux from snow (mm H2O/s) [+ to atm]
+    qflx_ev_soil_col          ::V = Float64[]  # col evaporation heat flux from soil (mm H2O/s) [+ to atm]
+    qflx_ev_h2osfc_col        ::V = Float64[]  # col evaporation heat flux from h2osfc (mm H2O/s) [+ to atm]
+    qflx_sat_excess_surf_col  ::V = Float64[]  # col surface runoff due to saturated surface (mm H2O/s)
+    qflx_infl_excess_col      ::V = Float64[]  # col infiltration excess runoff (mm H2O/s)
+    qflx_infl_excess_surf_col ::V = Float64[]  # col surface runoff due to infiltration excess (mm H2O/s)
+    qflx_h2osfc_surf_col      ::V = Float64[]  # col surface water runoff (mm H2O/s)
+    qflx_in_soil_col          ::V = Float64[]  # col surface input to soil (mm/s)
+    qflx_in_soil_limited_col  ::V = Float64[]  # col surface input to soil, limited by max infiltration rate (mm/s)
+    qflx_h2osfc_drain_col     ::V = Float64[]  # col bottom drainage from h2osfc (mm/s)
+    qflx_top_soil_to_h2osfc_col ::V = Float64[]  # col portion of qflx_top_soil going to h2osfc, minus evaporation (mm/s)
+    qflx_in_h2osfc_col        ::V = Float64[]  # col total surface input to h2osfc
+    qflx_deficit_col          ::V = Float64[]  # col water deficit to keep non-negative liquid water content (mm H2O)
+    AnnET                     ::V = Float64[]  # col annual average ET flux (mm H2O/s)
 
     # --- Bulk-specific column-level 2D fields ---
-    qflx_adv_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col advective flux across soil layer interfaces (mm H2O/s) [+ downward] (0:nlevsoi)
-    qflx_rootsoi_col          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col root and soil water exchange (mm H2O/s) [+ into root] (1:nlevsoi)
-    qflx_snomelt_lyr_col      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow melt in each layer (mm H2O/s) (-nlevsno+1:0)
-    qflx_drain_vr_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col liquid water lost as drainage (m/time step) (1:nlevsoi)
+    qflx_adv_col              ::M = Matrix{Float64}(undef, 0, 0)  # col advective flux across soil layer interfaces (mm H2O/s) [+ downward] (0:nlevsoi)
+    qflx_rootsoi_col          ::M = Matrix{Float64}(undef, 0, 0)  # col root and soil water exchange (mm H2O/s) [+ into root] (1:nlevsoi)
+    qflx_snomelt_lyr_col      ::M = Matrix{Float64}(undef, 0, 0)  # col snow melt in each layer (mm H2O/s) (-nlevsno+1:0)
+    qflx_drain_vr_col         ::M = Matrix{Float64}(undef, 0, 0)  # col liquid water lost as drainage (m/time step) (1:nlevsoi)
 end
+
+WaterFluxBulkData{FT}(; kwargs...) where {FT<:Real} =
+    WaterFluxBulkData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure WaterFluxBulkData
+
 
 """
     waterfluxbulk_init!(wfb, nc, np, nl, ng)

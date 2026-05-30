@@ -11,11 +11,17 @@ Holds wood and crop product pool states and fluxes.
 
 Ported from `cn_products_type` in `CNProductsMod.F90`.
 """
-Base.@kwdef mutable struct CNProductsData{FT<:Real}
-    cropprod1_grc      ::Vector{FT} = Float64[]  # (g/m2) crop product pool (1-year)
-    tot_woodprod_grc   ::Vector{FT} = Float64[]  # (g/m2) total wood product pools
-    product_loss_grc   ::Vector{FT} = Float64[]  # (g/m2/s) losses from wood & crop products
+Base.@kwdef mutable struct CNProductsData{FT<:Real,
+                              V<:AbstractVector{FT}}
+    cropprod1_grc      ::V = Float64[]  # (g/m2) crop product pool (1-year)
+    tot_woodprod_grc   ::V = Float64[]  # (g/m2) total wood product pools
+    product_loss_grc   ::V = Float64[]  # (g/m2/s) losses from wood & crop products
 end
+
+CNProductsData{FT}(; kwargs...) where {FT<:Real} =
+    CNProductsData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure CNProductsData
+
 
 """
     cn_products_init!(prod::CNProductsData, ng::Int)

@@ -12,101 +12,109 @@ and annual accumulator variables at patch and column levels.
 
 Ported from `cnveg_state_type` in `CNVegStateType.F90`.
 """
-Base.@kwdef mutable struct CNVegStateData{FT<:Real}
+Base.@kwdef mutable struct CNVegStateData{FT<:Real,
+                              V<:AbstractVector{FT},
+                              M<:AbstractMatrix{FT},
+                              VI<:AbstractVector{<:Integer}}
     # --- Patch-level integer fields ---
-    burndate_patch              ::Vector{Int}     = Int[]       # patch crop burn date
-    peaklai_patch               ::Vector{Int}     = Int[]       # patch 1: max allowed lai; 0: not at max
-    idop_patch                  ::Vector{Int}     = Int[]       # patch date of planting (day of year)
-    iyop_patch                  ::Vector{Int}     = Int[]       # patch year of planting
+    burndate_patch              ::VI     = Int[]       # patch crop burn date
+    peaklai_patch               ::VI     = Int[]       # patch 1: max allowed lai; 0: not at max
+    idop_patch                  ::VI     = Int[]       # patch date of planting (day of year)
+    iyop_patch                  ::VI     = Int[]       # patch year of planting
 
     # --- Dynamic weight smoothing ---
     # dwt_dribbler_patch is an annual_flux_dribbler_type in Fortran;
     # stub: will be added when AnnualFluxDribbler is ported
-    dwt_smoothed_patch          ::Vector{FT} = Float64[]   # patch change in patch weight (-1 to 1) on gridcell
+    dwt_smoothed_patch          ::V = Float64[]   # patch change in patch weight (-1 to 1) on gridcell
 
     # --- Prognostic crop model (patch-level) ---
-    hdidx_patch                 ::Vector{FT} = Float64[]   # patch cold hardening index
-    cumvd_patch                 ::Vector{FT} = Float64[]   # patch cumulative vernalization dependence
-    gddmaturity_patch           ::Vector{FT} = Float64[]   # patch growing degree days needed to harvest (ddays)
-    gddmaturity_thisyr          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # at-harvest GDD this year (patch x mxharvests)
-    huileaf_patch               ::Vector{FT} = Float64[]   # patch heat unit index needed from planting to leaf emergence
-    huigrain_patch              ::Vector{FT} = Float64[]   # patch heat unit index needed to reach vegetative maturity
-    aleafi_patch                ::Vector{FT} = Float64[]   # patch saved leaf allocation coefficient from phase 2
-    astemi_patch                ::Vector{FT} = Float64[]   # patch saved stem allocation coefficient from phase 2
+    hdidx_patch                 ::V = Float64[]   # patch cold hardening index
+    cumvd_patch                 ::V = Float64[]   # patch cumulative vernalization dependence
+    gddmaturity_patch           ::V = Float64[]   # patch growing degree days needed to harvest (ddays)
+    gddmaturity_thisyr          ::M = Matrix{Float64}(undef, 0, 0)  # at-harvest GDD this year (patch x mxharvests)
+    huileaf_patch               ::V = Float64[]   # patch heat unit index needed from planting to leaf emergence
+    huigrain_patch              ::V = Float64[]   # patch heat unit index needed to reach vegetative maturity
+    aleafi_patch                ::V = Float64[]   # patch saved leaf allocation coefficient from phase 2
+    astemi_patch                ::V = Float64[]   # patch saved stem allocation coefficient from phase 2
 
     # --- Allocation coefficients (patch-level) ---
-    aleaf_patch                 ::Vector{FT} = Float64[]   # patch leaf allocation coefficient
-    astem_patch                 ::Vector{FT} = Float64[]   # patch stem allocation coefficient
-    aroot_patch                 ::Vector{FT} = Float64[]   # patch root allocation coefficient
-    arepr_patch                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch reproductive allocation coefficient(s) (patch x nrepr)
+    aleaf_patch                 ::V = Float64[]   # patch leaf allocation coefficient
+    astem_patch                 ::V = Float64[]   # patch stem allocation coefficient
+    aroot_patch                 ::V = Float64[]   # patch root allocation coefficient
+    arepr_patch                 ::M = Matrix{Float64}(undef, 0, 0)  # patch reproductive allocation coefficient(s) (patch x nrepr)
 
     # --- AgSys nitrogen allocation coefficients (patch-level) ---
-    aleaf_n_patch               ::Vector{FT} = Float64[]   # patch leaf allocation coefficient for N
-    astem_n_patch               ::Vector{FT} = Float64[]   # patch stem allocation coefficient for N
-    aroot_n_patch               ::Vector{FT} = Float64[]   # patch root allocation coefficient for N
-    arepr_n_patch               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch reproductive allocation coefficient(s) for N (patch x nrepr)
+    aleaf_n_patch               ::V = Float64[]   # patch leaf allocation coefficient for N
+    astem_n_patch               ::V = Float64[]   # patch stem allocation coefficient for N
+    aroot_n_patch               ::V = Float64[]   # patch root allocation coefficient for N
+    arepr_n_patch               ::M = Matrix{Float64}(undef, 0, 0)  # patch reproductive allocation coefficient(s) for N (patch x nrepr)
 
     # --- Crop height/LAI (patch-level) ---
-    htmx_patch                  ::Vector{FT} = Float64[]   # patch max hgt attained by a crop during yr (m)
+    htmx_patch                  ::V = Float64[]   # patch max hgt attained by a crop during yr (m)
 
     # --- Column-level GDP/population fire factors ---
-    lgdp_col                    ::Vector{FT} = Float64[]   # col gdp limitation factor for fire occurrence (0-1)
-    lgdp1_col                   ::Vector{FT} = Float64[]   # col gdp limitation factor for fire spreading (0-1)
-    lpop_col                    ::Vector{FT} = Float64[]   # col pop limitation factor for fire spreading (0-1)
+    lgdp_col                    ::V = Float64[]   # col gdp limitation factor for fire occurrence (0-1)
+    lgdp1_col                   ::V = Float64[]   # col gdp limitation factor for fire spreading (0-1)
+    lpop_col                    ::V = Float64[]   # col pop limitation factor for fire spreading (0-1)
 
     # --- Temperature averages ---
-    tempavg_t2m_patch           ::Vector{FT} = Float64[]   # patch temporary average 2m air temperature (K)
-    annavg_t2m_patch            ::Vector{FT} = Float64[]   # patch annual average 2m air temperature (K)
-    annavg_t2m_col              ::Vector{FT} = Float64[]   # col annual average of 2m air temperature (K)
-    annsum_counter_col          ::Vector{FT} = Float64[]   # col seconds since last annual accumulator turnover
+    tempavg_t2m_patch           ::V = Float64[]   # patch temporary average 2m air temperature (K)
+    annavg_t2m_patch            ::V = Float64[]   # patch annual average 2m air temperature (K)
+    annavg_t2m_col              ::V = Float64[]   # col annual average of 2m air temperature (K)
+    annsum_counter_col          ::V = Float64[]   # col seconds since last annual accumulator turnover
 
     # --- Fire (column-level) ---
-    nfire_col                   ::Vector{FT} = Float64[]   # col fire counts (count/km2/sec)
-    fsr_col                     ::Vector{FT} = Float64[]   # col fire spread rate (m/s)
-    fd_col                      ::Vector{FT} = Float64[]   # col fire duration (hr)
-    lfc_col                     ::Vector{FT} = Float64[]   # col conversion area fraction of BET and BDT that haven't burned before (/timestep)
-    lfc2_col                    ::Vector{FT} = Float64[]   # col conversion area fraction of BET and BDT that burned (/sec)
-    dtrotr_col                  ::Vector{FT} = Float64[]   # col annual decreased fraction coverage of BET on gridcell (0-1)
-    trotr1_col                  ::Vector{FT} = Float64[]   # col patch weight of BET on column (0-1)
-    trotr2_col                  ::Vector{FT} = Float64[]   # col patch weight of BDT on column (0-1)
-    cropf_col                   ::Vector{FT} = Float64[]   # col crop fraction in veg column (0-1)
-    baf_crop_col                ::Vector{FT} = Float64[]   # col baf for cropland (/sec)
-    baf_peatf_col               ::Vector{FT} = Float64[]   # col baf for peatland (/sec)
-    fbac_col                    ::Vector{FT} = Float64[]   # col total burned area out of conversion (/sec)
-    fbac1_col                   ::Vector{FT} = Float64[]   # col burned area out of conversion region due to land use fire (/sec)
-    wtlf_col                    ::Vector{FT} = Float64[]   # col fractional coverage of non-crop patches (0-1)
-    lfwt_col                    ::Vector{FT} = Float64[]   # col fractional coverage of non-crop and non-bare-soil patches (0-1)
-    farea_burned_col            ::Vector{FT} = Float64[]   # col fractional area burned (/sec)
+    nfire_col                   ::V = Float64[]   # col fire counts (count/km2/sec)
+    fsr_col                     ::V = Float64[]   # col fire spread rate (m/s)
+    fd_col                      ::V = Float64[]   # col fire duration (hr)
+    lfc_col                     ::V = Float64[]   # col conversion area fraction of BET and BDT that haven't burned before (/timestep)
+    lfc2_col                    ::V = Float64[]   # col conversion area fraction of BET and BDT that burned (/sec)
+    dtrotr_col                  ::V = Float64[]   # col annual decreased fraction coverage of BET on gridcell (0-1)
+    trotr1_col                  ::V = Float64[]   # col patch weight of BET on column (0-1)
+    trotr2_col                  ::V = Float64[]   # col patch weight of BDT on column (0-1)
+    cropf_col                   ::V = Float64[]   # col crop fraction in veg column (0-1)
+    baf_crop_col                ::V = Float64[]   # col baf for cropland (/sec)
+    baf_peatf_col               ::V = Float64[]   # col baf for peatland (/sec)
+    fbac_col                    ::V = Float64[]   # col total burned area out of conversion (/sec)
+    fbac1_col                   ::V = Float64[]   # col burned area out of conversion region due to land use fire (/sec)
+    wtlf_col                    ::V = Float64[]   # col fractional coverage of non-crop patches (0-1)
+    lfwt_col                    ::V = Float64[]   # col fractional coverage of non-crop and non-bare-soil patches (0-1)
+    farea_burned_col            ::V = Float64[]   # col fractional area burned (/sec)
 
     # --- Phenology flags (patch-level) ---
-    dormant_flag_patch          ::Vector{FT} = Float64[]   # patch dormancy flag
-    days_active_patch           ::Vector{FT} = Float64[]   # patch number of days since last dormancy
-    onset_flag_patch            ::Vector{FT} = Float64[]   # patch onset flag
-    onset_counter_patch         ::Vector{FT} = Float64[]   # patch onset days counter
-    onset_gddflag_patch         ::Vector{FT} = Float64[]   # patch onset flag for growing degree day sum
-    onset_fdd_patch             ::Vector{FT} = Float64[]   # patch onset freezing degree days counter
-    onset_gdd_patch             ::Vector{FT} = Float64[]   # patch onset growing degree days
-    onset_swi_patch             ::Vector{FT} = Float64[]   # patch onset soil water index
-    offset_flag_patch           ::Vector{FT} = Float64[]   # patch offset flag
-    offset_counter_patch        ::Vector{FT} = Float64[]   # patch offset days counter
-    offset_fdd_patch            ::Vector{FT} = Float64[]   # patch offset freezing degree days counter
-    offset_swi_patch            ::Vector{FT} = Float64[]   # patch offset soil water index
-    grain_flag_patch            ::Vector{FT} = Float64[]   # patch 1: grain fill stage; 0: not
-    lgsf_patch                  ::Vector{FT} = Float64[]   # patch long growing season factor [0-1]
-    bglfr_patch                 ::Vector{FT} = Float64[]   # patch background litterfall rate (1/s)
-    bgtr_patch                  ::Vector{FT} = Float64[]   # patch background transfer growth rate (1/s)
+    dormant_flag_patch          ::V = Float64[]   # patch dormancy flag
+    days_active_patch           ::V = Float64[]   # patch number of days since last dormancy
+    onset_flag_patch            ::V = Float64[]   # patch onset flag
+    onset_counter_patch         ::V = Float64[]   # patch onset days counter
+    onset_gddflag_patch         ::V = Float64[]   # patch onset flag for growing degree day sum
+    onset_fdd_patch             ::V = Float64[]   # patch onset freezing degree days counter
+    onset_gdd_patch             ::V = Float64[]   # patch onset growing degree days
+    onset_swi_patch             ::V = Float64[]   # patch onset soil water index
+    offset_flag_patch           ::V = Float64[]   # patch offset flag
+    offset_counter_patch        ::V = Float64[]   # patch offset days counter
+    offset_fdd_patch            ::V = Float64[]   # patch offset freezing degree days counter
+    offset_swi_patch            ::V = Float64[]   # patch offset soil water index
+    grain_flag_patch            ::V = Float64[]   # patch 1: grain fill stage; 0: not
+    lgsf_patch                  ::V = Float64[]   # patch long growing season factor [0-1]
+    bglfr_patch                 ::V = Float64[]   # patch background litterfall rate (1/s)
+    bgtr_patch                  ::V = Float64[]   # patch background transfer growth rate (1/s)
 
     # --- Allometry and GPP accumulators (patch-level) ---
-    c_allometry_patch           ::Vector{FT} = Float64[]   # patch C allocation index (DIM)
-    n_allometry_patch           ::Vector{FT} = Float64[]   # patch N allocation index (DIM)
-    tempsum_potential_gpp_patch ::Vector{FT} = Float64[]   # patch temporary annual sum of potential GPP
-    annsum_potential_gpp_patch  ::Vector{FT} = Float64[]   # patch annual sum of potential GPP
-    tempmax_retransn_patch      ::Vector{FT} = Float64[]   # patch temporary annual max of retranslocated N pool (gN/m2)
-    annmax_retransn_patch       ::Vector{FT} = Float64[]   # patch annual max of retranslocated N pool (gN/m2)
-    downreg_patch               ::Vector{FT} = Float64[]   # patch fractional reduction in GPP due to N limitation (DIM)
-    leafcn_offset_patch         ::Vector{FT} = Float64[]   # patch leaf C:N used by FUN
-    plantCN_patch               ::Vector{FT} = Float64[]   # patch plant C:N used by FUN
+    c_allometry_patch           ::V = Float64[]   # patch C allocation index (DIM)
+    n_allometry_patch           ::V = Float64[]   # patch N allocation index (DIM)
+    tempsum_potential_gpp_patch ::V = Float64[]   # patch temporary annual sum of potential GPP
+    annsum_potential_gpp_patch  ::V = Float64[]   # patch annual sum of potential GPP
+    tempmax_retransn_patch      ::V = Float64[]   # patch temporary annual max of retranslocated N pool (gN/m2)
+    annmax_retransn_patch       ::V = Float64[]   # patch annual max of retranslocated N pool (gN/m2)
+    downreg_patch               ::V = Float64[]   # patch fractional reduction in GPP due to N limitation (DIM)
+    leafcn_offset_patch         ::V = Float64[]   # patch leaf C:N used by FUN
+    plantCN_patch               ::V = Float64[]   # patch plant C:N used by FUN
 end
+
+CNVegStateData{FT}(; kwargs...) where {FT<:Real} =
+    CNVegStateData{FT, Vector{FT}, Matrix{FT}, Vector{Int}}(; kwargs...)
+Adapt.@adapt_structure CNVegStateData
+
 
 """
     cnveg_state_init!(vs::CNVegStateData, np::Int, nc::Int;

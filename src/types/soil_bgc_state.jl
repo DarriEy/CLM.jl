@@ -12,28 +12,35 @@ N fixation/deposition profiles, and plant N demand.
 
 Ported from `soilbiogeochem_state_type` in `SoilBiogeochemStateType.F90`.
 """
-Base.@kwdef mutable struct SoilBiogeochemStateData{FT<:Real}
+Base.@kwdef mutable struct SoilBiogeochemStateData{FT<:Real,
+                                       V<:AbstractVector{FT},
+                                       M<:AbstractMatrix{FT}}
     # --- Patch-level vertical profiles (patch × nlevdecomp_full) ---
-    leaf_prof_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of leaves
-    froot_prof_patch            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of fine roots
-    croot_prof_patch            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of coarse roots
-    stem_prof_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of stems
+    leaf_prof_patch             ::M = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of leaves
+    froot_prof_patch            ::M = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of fine roots
+    croot_prof_patch            ::M = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of coarse roots
+    stem_prof_patch             ::M = Matrix{Float64}(undef, 0, 0)  # (1/m) profile of stems
 
     # --- Column-level vertically-resolved (col × nlevdecomp_full) ---
-    fpi_vr_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (no units) fraction of potential immobilization vr
-    nfixation_prof_col          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile for N fixation additions
-    ndep_prof_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (1/m) profile for N deposition additions
-    som_adv_coef_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (m/s) SOM advective flux
-    som_diffus_coef_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # (m2/s) SOM diffusivity due to bio/cryo-turbation
+    fpi_vr_col                  ::M = Matrix{Float64}(undef, 0, 0)  # (no units) fraction of potential immobilization vr
+    nfixation_prof_col          ::M = Matrix{Float64}(undef, 0, 0)  # (1/m) profile for N fixation additions
+    ndep_prof_col               ::M = Matrix{Float64}(undef, 0, 0)  # (1/m) profile for N deposition additions
+    som_adv_coef_col            ::M = Matrix{Float64}(undef, 0, 0)  # (m/s) SOM advective flux
+    som_diffus_coef_col         ::M = Matrix{Float64}(undef, 0, 0)  # (m2/s) SOM diffusivity due to bio/cryo-turbation
 
     # --- Column-level 1D ---
-    fpi_col                     ::Vector{FT} = Float64[]  # (no units) fraction of potential immobilization
-    fpg_col                     ::Vector{FT} = Float64[]  # (no units) fraction of potential gpp
-    plant_ndemand_col           ::Vector{FT} = Float64[]  # column-level plant N demand
+    fpi_col                     ::V = Float64[]  # (no units) fraction of potential immobilization
+    fpg_col                     ::V = Float64[]  # (no units) fraction of potential gpp
+    plant_ndemand_col           ::V = Float64[]  # column-level plant N demand
 
     # --- Transition-level 1D ---
-    nue_decomp_cascade_col      ::Vector{FT} = Float64[]  # (gN/gN) N use efficiency for a given transition
+    nue_decomp_cascade_col      ::V = Float64[]  # (gN/gN) N use efficiency for a given transition
 end
+
+SoilBiogeochemStateData{FT}(; kwargs...) where {FT<:Real} =
+    SoilBiogeochemStateData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure SoilBiogeochemStateData
+
 
 # ---------------------------------------------------------------------------
 # Helper constructors (reuse if already defined from carbon/nitrogen state)
