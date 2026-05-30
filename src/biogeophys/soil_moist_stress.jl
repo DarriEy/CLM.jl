@@ -59,6 +59,23 @@ Arguments:
 - `nlevgrnd`: number of ground levels (ubj)
 - `nlevsno`: number of snow levels (for index offset)
 """
+# --- Kernel: effective soil porosity over (column, soil layer) ---
+@kernel function _smstress_effsoilpor_kernel!(eff_por, @Const(mask), @Const(watsat),
+                                              @Const(h2osoi_ice), @Const(col_dz),
+                                              joff::Int, denice)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        # compute the volumetric ice content
+        vol_ice = min(watsat[c, j], h2osoi_ice[c, j + joff] / (denice * col_dz[c, j + joff]))
+        # compute the maximum soil space to fill liquid water and air
+        eff_por[c, j] = watsat[c, j] - vol_ice
+    end
+end
+
+smstress_effsoilpor!(eff_por, mask, watsat, h2osoi_ice, col_dz, joff::Int, nlevgrnd::Int, denice) =
+    _launch!(_smstress_effsoilpor_kernel!, eff_por, mask, watsat, h2osoi_ice, col_dz,
+             joff, denice; ndrange = (length(mask), nlevgrnd))
+
 function calc_effective_soilporosity!(watsat::Matrix{<:Real},
                                       h2osoi_ice::Matrix{<:Real},
                                       col_dz::Matrix{<:Real},
@@ -68,16 +85,7 @@ function calc_effective_soilporosity!(watsat::Matrix{<:Real},
                                       nlevgrnd::Int,
                                       nlevsno::Int)
     joff = nlevsno  # offset for combined snow+soil indexing
-
-    for j in 1:nlevgrnd
-        for c in bounds_col
-            mask[c] || continue
-            # compute the volumetric ice content
-            vol_ice = min(watsat[c, j], h2osoi_ice[c, j + joff] / (DENICE * col_dz[c, j + joff]))
-            # compute the maximum soil space to fill liquid water and air
-            eff_por[c, j] = watsat[c, j] - vol_ice
-        end
-    end
+    smstress_effsoilpor!(eff_por, mask, watsat, h2osoi_ice, col_dz, joff, nlevgrnd, DENICE)
     return nothing
 end
 
@@ -102,6 +110,28 @@ Arguments:
 - `lbj`: lower bound snow layer index (Fortran, e.g. -nlevsno+1)
 - `nlevsno`: number of snow levels
 """
+# --- Kernel: effective snow porosity over (column, snow layer) ---
+# jj is the Julia 1-based combined index (1..nlevsno); the Fortran snow index is
+# j = jj - joff. Only layers at or below the column top (j >= jtop) are written.
+@kernel function _smstress_effsnowpor_kernel!(eff_por, @Const(mask), @Const(jtop),
+                                              @Const(h2osoi_ice), @Const(col_dz),
+                                              joff::Int, denice)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        j = jj - joff  # Fortran snow layer index (negative)
+        if j >= jtop[c]
+            # compute the volumetric ice content
+            vol_ice = min(1.0, h2osoi_ice[c, jj] / (denice * col_dz[c, jj]))
+            # compute the maximum snow void space to fill liquid water and air
+            eff_por[c, jj] = 1.0 - vol_ice
+        end
+    end
+end
+
+smstress_effsnowpor!(eff_por, mask, jtop, h2osoi_ice, col_dz, joff::Int, nlevsno::Int, denice) =
+    _launch!(_smstress_effsnowpor_kernel!, eff_por, mask, jtop, h2osoi_ice, col_dz,
+             joff, denice; ndrange = (length(mask), nlevsno))
+
 function calc_effective_snowporosity!(h2osoi_ice::Matrix{<:Real},
                                       col_dz::Matrix{<:Real},
                                       jtop::Vector{Int},
@@ -111,20 +141,8 @@ function calc_effective_snowporosity!(h2osoi_ice::Matrix{<:Real},
                                       lbj::Int,
                                       nlevsno::Int)
     joff = nlevsno  # offset: Fortran j → Julia index j + nlevsno
-
-    # Loop over snow layers: Fortran j from lbj to 0
-    for j in lbj:0
-        jj = j + joff  # Julia 1-based index
-        for c in bounds_col
-            mask[c] || continue
-            if j >= jtop[c]
-                # compute the volumetric ice content
-                vol_ice = min(1.0, h2osoi_ice[c, jj] / (DENICE * col_dz[c, jj]))
-                # compute the maximum snow void space to fill liquid water and air
-                eff_por[c, jj] = 1.0 - vol_ice
-            end
-        end
-    end
+    # Fortran snow layers run lbj:0, i.e. Julia combined indices 1:nlevsno.
+    smstress_effsnowpor!(eff_por, mask, jtop, h2osoi_ice, col_dz, joff, nlevsno, DENICE)
     return nothing
 end
 
@@ -151,6 +169,31 @@ Arguments:
 - `ubj`: upper bound layer index (Fortran)
 - `nlevsno`: number of snow levels (for index offset)
 """
+# --- Kernel: volumetric liquid water content over (column, layer) ---
+# jrel is 1-based over the layer span lbj:ubj; the combined Julia index is
+# jj = jrel + lbj - 1 + joff and the Fortran layer index is j = jj - joff.
+# Only layers at or below the column top (j >= jtop) are written.
+@kernel function _smstress_volh2oliq_kernel!(vol_liq, @Const(mask), @Const(jtop),
+                                             @Const(eff_porosity), @Const(h2osoi_liq),
+                                             @Const(col_dz), lbj::Int, joff::Int, denh2o)
+    c, jrel = @index(Global, NTuple)
+    @inbounds if mask[c]
+        j = lbj + (jrel - 1)            # Fortran layer index
+        jj = j + joff                   # Julia 1-based combined index
+        if j >= jtop[c]
+            # volume of liquid is no greater than effective void space
+            vol_liq[c, jj] = min(eff_porosity[c, jj], h2osoi_liq[c, jj] / (col_dz[c, jj] * denh2o))
+        end
+    end
+end
+
+function smstress_volh2oliq!(vol_liq, mask, jtop, eff_porosity, h2osoi_liq, col_dz,
+                             lbj::Int, ubj::Int, joff::Int, denh2o)
+    nlay = ubj - lbj + 1
+    _launch!(_smstress_volh2oliq_kernel!, vol_liq, mask, jtop, eff_porosity, h2osoi_liq,
+             col_dz, lbj, joff, denh2o; ndrange = (length(mask), nlay))
+end
+
 function calc_volumetric_h2oliq!(eff_porosity::Matrix{<:Real},
                                   h2osoi_liq::Matrix{<:Real},
                                   col_dz::Matrix{<:Real},
@@ -162,17 +205,8 @@ function calc_volumetric_h2oliq!(eff_porosity::Matrix{<:Real},
                                   ubj::Int,
                                   nlevsno::Int)
     joff = nlevsno  # offset: Fortran j → Julia index j + nlevsno
-
-    for j in lbj:ubj
-        jj = j + joff  # Julia 1-based index into combined arrays
-        for c in bounds_col
-            mask[c] || continue
-            if j >= jtop[c]
-                # volume of liquid is no greater than effective void space
-                vol_liq[c, jj] = min(eff_porosity[c, jj], h2osoi_liq[c, jj] / (col_dz[c, jj] * DENH2O))
-            end
-        end
-    end
+    smstress_volh2oliq!(vol_liq, mask, jtop, eff_porosity, h2osoi_liq, col_dz,
+                        lbj, ubj, joff, DENH2O)
     return nothing
 end
 
@@ -218,6 +252,48 @@ end
 Normalize root fraction for total unfrozen depth.
 Ported from `normalize_unfrozen_rootfr` in `SoilMoistStressMod.F90`.
 """
+# --- Kernel: unfrozen rootfr from active layer depth, over (patch, layer) ---
+@kernel function _smstress_rootfr_unf_alt_kernel!(rootfr_unf, @Const(mask_patch),
+                                                  @Const(patch_column), @Const(rootfr),
+                                                  @Const(altmax_lastyear_indx),
+                                                  @Const(altmax_indx))
+    p, j = @index(Global, NTuple)
+    @inbounds if mask_patch[p]
+        c = patch_column[p]
+        if j <= max(altmax_lastyear_indx[c], altmax_indx[c], 1.0)
+            rootfr_unf[p, j] = rootfr[p, j]
+        else
+            rootfr_unf[p, j] = 0.0
+        end
+    end
+end
+
+smstress_rootfr_unf_alt!(rootfr_unf, mask_patch, patch_column, rootfr,
+                         altmax_lastyear_indx, altmax_indx, nlevgrnd::Int) =
+    _launch!(_smstress_rootfr_unf_alt_kernel!, rootfr_unf, mask_patch, patch_column,
+             rootfr, altmax_lastyear_indx, altmax_indx;
+             ndrange = (length(mask_patch), nlevgrnd))
+
+# --- Kernel: unfrozen rootfr from instantaneous temperature, over (patch, layer) ---
+@kernel function _smstress_rootfr_unf_temp_kernel!(rootfr_unf, @Const(mask_patch),
+                                                   @Const(patch_column), @Const(rootfr),
+                                                   @Const(t_soisno), joff::Int, tfrz)
+    p, j = @index(Global, NTuple)
+    @inbounds if mask_patch[p]
+        c = patch_column[p]
+        if t_soisno[c, j + joff] >= tfrz
+            rootfr_unf[p, j] = rootfr[p, j]
+        else
+            rootfr_unf[p, j] = 0.0
+        end
+    end
+end
+
+smstress_rootfr_unf_temp!(rootfr_unf, mask_patch, patch_column, rootfr, t_soisno,
+                          joff::Int, nlevgrnd::Int, tfrz) =
+    _launch!(_smstress_rootfr_unf_temp_kernel!, rootfr_unf, mask_patch, patch_column,
+             rootfr, t_soisno, joff, tfrz; ndrange = (length(mask_patch), nlevgrnd))
+
 function normalize_unfrozen_rootfr!(rootfr::Matrix{<:Real},
                                      t_soisno::Matrix{<:Real},
                                      altmax_lastyear_indx::Vector{<:Real},
@@ -235,30 +311,12 @@ function normalize_unfrozen_rootfr!(rootfr::Matrix{<:Real},
     if perchroot || perchroot_alt
         if perchroot_alt
             # use total active layer (max thaw depth for current and prior year)
-            for j in 1:nlevgrnd
-                for p in bounds_patch
-                    mask_patch[p] || continue
-                    c = patch_column[p]
-                    if j <= max(altmax_lastyear_indx[c], altmax_indx[c], 1.0)
-                        rootfr_unf[p, j] = rootfr[p, j]
-                    else
-                        rootfr_unf[p, j] = 0.0
-                    end
-                end
-            end
+            smstress_rootfr_unf_alt!(rootfr_unf, mask_patch, patch_column, rootfr,
+                                     altmax_lastyear_indx, altmax_indx, nlevgrnd)
         else
             # use instantaneous temperature
-            for j in 1:nlevgrnd
-                for p in bounds_patch
-                    mask_patch[p] || continue
-                    c = patch_column[p]
-                    if t_soisno[c, j + joff] >= TFRZ
-                        rootfr_unf[p, j] = rootfr[p, j]
-                    else
-                        rootfr_unf[p, j] = 0.0
-                    end
-                end
-            end
+            smstress_rootfr_unf_temp!(rootfr_unf, mask_patch, patch_column, rootfr,
+                                      t_soisno, joff, nlevgrnd, TFRZ)
         end
     end
 
@@ -286,6 +344,23 @@ end
 # --------------------------------------------------------------------------
 # calc_root_moist_stress_clm45default!
 # --------------------------------------------------------------------------
+
+# --- Kernel: normalize root resistances by btran, over (patch, layer) ---
+@kernel function _smstress_normalize_rootr_kernel!(rootr, @Const(mask_patch),
+                                                   @Const(btran), btran0)
+    p, j = @index(Global, NTuple)
+    @inbounds if mask_patch[p]
+        if btran[p] > btran0
+            rootr[p, j] = rootr[p, j] / btran[p]
+        else
+            rootr[p, j] = 0.0
+        end
+    end
+end
+
+smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd::Int) =
+    _launch!(_smstress_normalize_rootr_kernel!, rootr, mask_patch, btran, btran0;
+             ndrange = (length(mask_patch), nlevgrnd))
 
 """
     calc_root_moist_stress_clm45default!(...)
@@ -347,17 +422,10 @@ function calc_root_moist_stress_clm45default!(rootfr_unf::Matrix{<:Real},
         end
     end
 
-    # Normalize root resistances to get layer contribution to ET
-    for j in 1:nlevgrnd
-        for p in bounds_patch
-            mask_patch[p] || continue
-            if btran[p] > btran0
-                rootr[p, j] = rootr[p, j] / btran[p]
-            else
-                rootr[p, j] = 0.0
-            end
-        end
-    end
+    # Normalize root resistances to get layer contribution to ET.
+    # btran[p] is fully accumulated above; here it is read-only, so each
+    # (patch, layer) is independent.
+    smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd)
 
     return nothing
 end

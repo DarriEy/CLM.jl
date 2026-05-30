@@ -1,4 +1,255 @@
 # ==========================================================================
+# KernelAbstractions kernels for pre-flux per-column/per-patch setup.
+# Each kernel iterates one independent element (column or patch). The masked
+# Fortran filter loop becomes an in-kernel `if mask[i]` guard; globals/params
+# are passed as @Const/scalar args. Backend taken from the (written) output
+# array via the module-wide _launch! helper. See src/infrastructure/kernels.jl.
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# z0m / displa for non-lake patches. PFT-specific coefficients are looked up
+# from z0mr/displar with a fallback (matches the scalar code; both z0param
+# branches were identical so the common expression is used).
+# --------------------------------------------------------------------------
+@kernel function _preflux_z0m_displa_kernel!(z0m_patch, displa_patch,
+                                             @Const(mask), @Const(itype),
+                                             @Const(htop_patch), @Const(z0mr),
+                                             @Const(displar))
+    p = @index(Global)
+    @inbounds if mask[p]
+        htop = htop_patch[p]
+        pft_idx = itype[p] + 1  # Fortran 0-based PFT index -> Julia 1-based
+        z0mr_val = (pft_idx >= 1 && pft_idx <= length(z0mr) && z0mr[pft_idx] > 0.0) ?
+                   z0mr[pft_idx] : 0.055
+        displar_val = (pft_idx >= 1 && pft_idx <= length(displar) && displar[pft_idx] > 0.0) ?
+                      displar[pft_idx] : 0.67
+        z0m_patch[p] = z0mr_val * htop
+        displa_patch[p] = displar_val * htop
+    end
+end
+
+"""
+    preflux_z0m_displa!(z0m_patch, displa_patch, mask, itype, htop_patch, z0mr, displar)
+
+Set momentum roughness length and displacement height for non-lake patches,
+one thread per patch. Backend-agnostic.
+"""
+preflux_z0m_displa!(z0m_patch, displa_patch, mask, itype, htop_patch, z0mr, displar) =
+    _launch!(_preflux_z0m_displa_kernel!, z0m_patch, displa_patch, mask, itype,
+             htop_patch, z0mr, displar)
+
+# --------------------------------------------------------------------------
+# Save current temperatures (tssbef) for flux calculations — 2D over
+# (column, level), pure copy of t_soisno into t_ssbef on active columns.
+# --------------------------------------------------------------------------
+@kernel function _preflux_tssbef_kernel!(t_ssbef_col, @Const(mask), @Const(t_soisno_col))
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        t_ssbef_col[c, j] = t_soisno_col[c, j]
+    end
+end
+
+"""
+    preflux_tssbef!(t_ssbef_col, mask, t_soisno_col, nlev)
+
+Copy t_soisno into t_ssbef over all (column, level) pairs for active columns.
+2D backend-agnostic kernel.
+"""
+preflux_tssbef!(t_ssbef_col, mask, t_soisno_col, nlev::Int) =
+    _launch!(_preflux_tssbef_kernel!, t_ssbef_col, mask, t_soisno_col;
+             ndrange = (length(mask), nlev))
+
+# --------------------------------------------------------------------------
+# Ground temperature: weighted average of snow / soil / surface water.
+# --------------------------------------------------------------------------
+@kernel function _preflux_t_grnd_kernel!(t_grnd_col, @Const(mask), @Const(snl),
+                                         @Const(frac_sno_eff_col), @Const(frac_h2osfc_col),
+                                         @Const(t_soisno_col), @Const(t_h2osfc_col),
+                                         nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        snl_c = snl[c]
+        frac_sno_eff = frac_sno_eff_col[c]
+        frac_h2osfc = frac_h2osfc_col[c]
+        t_soil_1 = t_soisno_col[c, 1 + nlevsno]
+        t_h2osfc = t_h2osfc_col[c]
+        if snl_c < 0
+            jtop = snl_c + 1 + nlevsno
+            t_snow_top = t_soisno_col[c, jtop]
+            t_grnd_col[c] = frac_sno_eff * t_snow_top +
+                            (1.0 - frac_sno_eff - frac_h2osfc) * t_soil_1 +
+                            frac_h2osfc * t_h2osfc
+        else
+            t_grnd_col[c] = (1.0 - frac_h2osfc) * t_soil_1 +
+                            frac_h2osfc * t_h2osfc
+        end
+    end
+end
+
+"""
+    preflux_t_grnd!(t_grnd_col, mask, snl, frac_sno_eff_col, frac_h2osfc_col,
+                    t_soisno_col, t_h2osfc_col, nlevsno)
+
+Ground temperature as snow/soil/surface-water weighted average, per column.
+"""
+preflux_t_grnd!(t_grnd_col, mask, snl, frac_sno_eff_col, frac_h2osfc_col,
+                t_soisno_col, t_h2osfc_col, nlevsno::Int) =
+    _launch!(_preflux_t_grnd_kernel!, t_grnd_col, mask, snl, frac_sno_eff_col,
+             frac_h2osfc_col, t_soisno_col, t_h2osfc_col, nlevsno)
+
+# --------------------------------------------------------------------------
+# Ground emissivity (non-urban columns; urban set elsewhere).
+# --------------------------------------------------------------------------
+@kernel function _preflux_emg_kernel!(emg_col, @Const(mask), @Const(landunit),
+                                      @Const(urbpoi), @Const(lun_itype),
+                                      @Const(frac_sno_col), istice::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        l = landunit[c]
+        if !urbpoi[l]
+            frac_sno = frac_sno_col[c]
+            if lun_itype[l] == istice
+                emg_col[c] = 0.97
+            else
+                emg_col[c] = (1.0 - frac_sno) * 0.96 + frac_sno * 0.97
+            end
+        end
+    end
+end
+
+"""
+    preflux_emg!(emg_col, mask, landunit, urbpoi, lun_itype, frac_sno_col, istice)
+
+Ground emissivity for non-urban columns, per column.
+"""
+preflux_emg!(emg_col, mask, landunit, urbpoi, lun_itype, frac_sno_col, istice::Int) =
+    _launch!(_preflux_emg_kernel!, emg_col, mask, landunit, urbpoi, lun_itype,
+             frac_sno_col, istice)
+
+# --------------------------------------------------------------------------
+# Latent heat: sublimation (HSUB) if top layer has ice but no liquid, else
+# evaporation (HVAP).
+# --------------------------------------------------------------------------
+@kernel function _preflux_htvp_kernel!(htvp_col, @Const(mask), @Const(snl),
+                                       @Const(h2osoi_liq_col), @Const(h2osoi_ice_col),
+                                       nlevsno::Int, hsub, hvap)
+    c = @index(Global)
+    @inbounds if mask[c]
+        jtop = snl[c] + 1 + nlevsno
+        h2o_liq = h2osoi_liq_col[c, jtop]
+        h2o_ice = h2osoi_ice_col[c, jtop]
+        htvp_col[c] = (h2o_liq <= 0.0 && h2o_ice > 0.0) ? hsub : hvap
+    end
+end
+
+"""
+    preflux_htvp!(htvp_col, mask, snl, h2osoi_liq_col, h2osoi_ice_col, nlevsno, hsub, hvap)
+
+Latent heat of vaporization/sublimation per column.
+"""
+preflux_htvp!(htvp_col, mask, snl, h2osoi_liq_col, h2osoi_ice_col, nlevsno::Int, hsub, hvap) =
+    _launch!(_preflux_htvp_kernel!, htvp_col, mask, snl, h2osoi_liq_col,
+             h2osoi_ice_col, nlevsno, hsub, hvap)
+
+# --------------------------------------------------------------------------
+# Virtual potential temperature, beta, convective BL height (zii).
+# --------------------------------------------------------------------------
+@kernel function _preflux_thv_kernel!(thv_col, beta_col, zii,
+                                      @Const(mask), @Const(forc_th), @Const(forc_q))
+    c = @index(Global)
+    @inbounds if mask[c]
+        thv_col[c] = forc_th[c] * (1.0 + 0.61 * forc_q[c])
+        beta_col[c] = 1.0
+        zii[c] = 1000.0
+    end
+end
+
+"""
+    preflux_thv!(thv_col, beta_col, zii, mask, forc_th, forc_q)
+
+Virtual potential temperature, beta, and convective boundary-layer height per column.
+"""
+preflux_thv!(thv_col, beta_col, zii, mask, forc_th, forc_q) =
+    _launch!(_preflux_thv_kernel!, thv_col, beta_col, zii, mask, forc_th, forc_q)
+
+# --------------------------------------------------------------------------
+# Zero out per-patch sensible/latent heat fluxes and ground heat derivatives.
+# --------------------------------------------------------------------------
+@kernel function _preflux_zero_fluxes_kernel!(eflx_sh_tot, @Const(mask),
+                                              eflx_sh_tot_r, eflx_sh_tot_u,
+                                              eflx_lh_tot, eflx_lh_tot_r,
+                                              eflx_lh_tot_u, eflx_sh_veg,
+                                              cgrnd, cgrnds, cgrndl)
+    p = @index(Global)
+    @inbounds if mask[p]
+        eflx_sh_tot[p] = 0.0
+        eflx_sh_tot_r[p] = 0.0
+        eflx_sh_tot_u[p] = 0.0
+        eflx_lh_tot[p] = 0.0
+        eflx_lh_tot_r[p] = 0.0
+        eflx_lh_tot_u[p] = 0.0
+        eflx_sh_veg[p] = 0.0
+        cgrnd[p] = 0.0
+        cgrnds[p] = 0.0
+        cgrndl[p] = 0.0
+    end
+end
+
+"""
+    preflux_zero_fluxes!(eflx_sh_tot, eflx_sh_tot_r, eflx_sh_tot_u, eflx_lh_tot,
+                         eflx_lh_tot_r, eflx_lh_tot_u, eflx_sh_veg, cgrnd, cgrnds,
+                         cgrndl, mask)
+
+Zero per-patch flux/derivative arrays for active patches.
+"""
+function preflux_zero_fluxes!(eflx_sh_tot, eflx_sh_tot_r, eflx_sh_tot_u, eflx_lh_tot,
+                              eflx_lh_tot_r, eflx_lh_tot_u, eflx_sh_veg, cgrnd, cgrnds,
+                              cgrndl, mask)
+    _launch!(_preflux_zero_fluxes_kernel!, eflx_sh_tot, mask, eflx_sh_tot_r,
+             eflx_sh_tot_u, eflx_lh_tot, eflx_lh_tot_r, eflx_lh_tot_u, eflx_sh_veg,
+             cgrnd, cgrnds, cgrndl)
+end
+
+# --------------------------------------------------------------------------
+# Vegetation emissivity from exposed leaf + stem area.
+# --------------------------------------------------------------------------
+@kernel function _preflux_emv_kernel!(emv_patch, @Const(mask), @Const(elai_patch),
+                                      @Const(esai_patch))
+    p = @index(Global)
+    @inbounds if mask[p]
+        avmuir = 1.0  # inverse optical depth per unit leaf+stem area
+        emv_patch[p] = 1.0 - exp(-(elai_patch[p] + esai_patch[p]) / avmuir)
+    end
+end
+
+"""
+    preflux_emv!(emv_patch, mask, elai_patch, esai_patch)
+
+Vegetation emissivity per patch.
+"""
+preflux_emv!(emv_patch, mask, elai_patch, esai_patch) =
+    _launch!(_preflux_emv_kernel!, emv_patch, mask, elai_patch, esai_patch)
+
+# --------------------------------------------------------------------------
+# Intermediate temperature variable thm = forc_t(column) + lapse * forc_hgt_t.
+# --------------------------------------------------------------------------
+@kernel function _preflux_thm_kernel!(thm_patch, @Const(mask), @Const(column),
+                                      @Const(forc_t), @Const(forc_hgt_t_patch))
+    p = @index(Global)
+    @inbounds if mask[p]
+        thm_patch[p] = forc_t[column[p]] + 0.0098 * forc_hgt_t_patch[p]
+    end
+end
+
+"""
+    preflux_thm!(thm_patch, mask, column, forc_t, forc_hgt_t_patch)
+
+Intermediate temperature variable thm per patch.
+"""
+preflux_thm!(thm_patch, mask, column, forc_t, forc_hgt_t_patch) =
+    _launch!(_preflux_thm_kernel!, thm_patch, mask, column, forc_t, forc_hgt_t_patch)
+
+# ==========================================================================
 # Ported from: src/biogeophys/BiogeophysPreFluxCalcsMod.F90
 # Pre-flux biogeophysics calculations
 #
@@ -38,30 +289,10 @@ function set_z0m_displa!(canopystate::CanopyStateData,
                           z0mr::Vector{<:Real} = pftcon.z0mr,
                           displar::Vector{<:Real} = pftcon.displar)
 
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-
-        c = patch_data.column[p]
-        l = patch_data.landunit[p]
-        pft = patch_data.itype[p]
-
-        htop = canopystate.htop_patch[p]
-
-        # Look up PFT-specific values (1-indexed in Julia)
-        pft_idx = pft + 1  # Fortran 0-based PFT index → Julia 1-based
-        z0mr_val = (pft_idx >= 1 && pft_idx <= length(z0mr) && z0mr[pft_idx] > 0.0) ?
-                   z0mr[pft_idx] : 0.055
-        displar_val = (pft_idx >= 1 && pft_idx <= length(displar) && displar[pft_idx] > 0.0) ?
-                      displar[pft_idx] : 0.67
-
-        if z0param_method == "ZengWang2007"
-            canopystate.z0m_patch[p] = z0mr_val * htop
-            canopystate.displa_patch[p] = displar_val * htop
-        else
-            canopystate.z0m_patch[p] = z0mr_val * htop
-            canopystate.displa_patch[p] = displar_val * htop
-        end
-    end
+    # Both z0param_method branches are identical, so the common expression is used.
+    preflux_z0m_displa!(canopystate.z0m_patch, canopystate.displa_patch,
+                        mask_nolakep, patch_data.itype, canopystate.htop_patch,
+                        z0mr, displar)
 
     return nothing
 end
@@ -112,127 +343,56 @@ function calc_initial_temp_energy!(temperature::TemperatureData,
     # ---------------------------------------------------------------
     # 1. Save current temperatures (tssbef) for flux calculations
     # ---------------------------------------------------------------
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        l = col_data.landunit[c]
-
-        for j in 1:(nlevsno_val + nlevgrnd_val)
-            # Fortran j ranges from -nlevsno+1 to nlevgrnd
-            # Julia j_jl = j (already 1-based in the matrix)
-            temperature.t_ssbef_col[c, j] = temperature.t_soisno_col[c, j]
-        end
-    end
+    preflux_tssbef!(temperature.t_ssbef_col, mask_nolakec, temperature.t_soisno_col,
+                    nlevsno_val + nlevgrnd_val)
 
     # ---------------------------------------------------------------
     # 2. Ground temperature: weighted average of snow, soil, surface water
     # ---------------------------------------------------------------
-    for c in bounds_col
-        mask_nolakec[c] || continue
-
-        snl = col_data.snl[c]
-        frac_sno_eff = waterdiagbulk.frac_sno_eff_col[c]
-        frac_h2osfc = waterdiagbulk.frac_h2osfc_col[c]
-
-        if snl < 0
-            # Has snow layers — top snow layer index in Julia: snl + 1 + nlevsno
-            jtop = snl + 1 + nlevsno_val
-            t_snow_top = temperature.t_soisno_col[c, jtop]
-            t_soil_1 = temperature.t_soisno_col[c, 1 + nlevsno_val]
-            t_h2osfc = temperature.t_h2osfc_col[c]
-            temperature.t_grnd_col[c] = frac_sno_eff * t_snow_top +
-                                        (1.0 - frac_sno_eff - frac_h2osfc) * t_soil_1 +
-                                        frac_h2osfc * t_h2osfc
-        else
-            # No snow
-            t_soil_1 = temperature.t_soisno_col[c, 1 + nlevsno_val]
-            t_h2osfc = temperature.t_h2osfc_col[c]
-            temperature.t_grnd_col[c] = (1.0 - frac_h2osfc) * t_soil_1 +
-                                        frac_h2osfc * t_h2osfc
-        end
-    end
+    preflux_t_grnd!(temperature.t_grnd_col, mask_nolakec, col_data.snl,
+                    waterdiagbulk.frac_sno_eff_col, waterdiagbulk.frac_h2osfc_col,
+                    temperature.t_soisno_col, temperature.t_h2osfc_col, nlevsno_val)
 
     # ---------------------------------------------------------------
     # 3. Ground emissivity
     # ---------------------------------------------------------------
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        l = col_data.landunit[c]
-
-        if !lun_data.urbpoi[l]
-            frac_sno = waterdiagbulk.frac_sno_col[c]
-            if lun_data.itype[l] == ISTICE
-                temperature.emg_col[c] = 0.97
-            else
-                temperature.emg_col[c] = (1.0 - frac_sno) * 0.96 + frac_sno * 0.97
-            end
-        end
-        # Urban emissivity is set elsewhere (from surface data)
-    end
+    # Urban emissivity is set elsewhere (from surface data)
+    preflux_emg!(temperature.emg_col, mask_nolakec, col_data.landunit,
+                 lun_data.urbpoi, lun_data.itype, waterdiagbulk.frac_sno_col, ISTICE)
 
     # ---------------------------------------------------------------
     # 4. Latent heat of vaporization/sublimation
     # ---------------------------------------------------------------
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        snl = col_data.snl[c]
-        jtop = snl + 1 + nlevsno_val
-
-        h2o_liq = waterstatebulk.ws.h2osoi_liq_col[c, jtop]
-        h2o_ice = waterstatebulk.ws.h2osoi_ice_col[c, jtop]
-
-        if h2o_liq <= 0.0 && h2o_ice > 0.0
-            energyflux.htvp_col[c] = HSUB  # sublimation
-        else
-            energyflux.htvp_col[c] = HVAP  # evaporation
-        end
-    end
+    preflux_htvp!(energyflux.htvp_col, mask_nolakec, col_data.snl,
+                  waterstatebulk.ws.h2osoi_liq_col, waterstatebulk.ws.h2osoi_ice_col,
+                  nlevsno_val, HSUB, HVAP)
 
     # ---------------------------------------------------------------
     # 5. Virtual potential temperature, beta, zii
     # ---------------------------------------------------------------
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        temperature.thv_col[c] = forc_th[c] * (1.0 + 0.61 * forc_q[c])
-        temperature.beta_col[c] = 1.0
-        col_data.zii[c] = 1000.0  # convective boundary layer height [m]
-    end
+    preflux_thv!(temperature.thv_col, temperature.beta_col, col_data.zii,
+                 mask_nolakec, forc_th, forc_q)
 
     # ---------------------------------------------------------------
     # 6. Initialize energy fluxes to zero
     # ---------------------------------------------------------------
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        energyflux.eflx_sh_tot_patch[p] = 0.0
-        energyflux.eflx_sh_tot_r_patch[p] = 0.0
-        energyflux.eflx_sh_tot_u_patch[p] = 0.0
-        energyflux.eflx_lh_tot_patch[p] = 0.0
-        energyflux.eflx_lh_tot_r_patch[p] = 0.0
-        energyflux.eflx_lh_tot_u_patch[p] = 0.0
-        energyflux.eflx_sh_veg_patch[p] = 0.0
-        energyflux.cgrnd_patch[p] = 0.0
-        energyflux.cgrnds_patch[p] = 0.0
-        energyflux.cgrndl_patch[p] = 0.0
-    end
+    preflux_zero_fluxes!(energyflux.eflx_sh_tot_patch, energyflux.eflx_sh_tot_r_patch,
+                         energyflux.eflx_sh_tot_u_patch, energyflux.eflx_lh_tot_patch,
+                         energyflux.eflx_lh_tot_r_patch, energyflux.eflx_lh_tot_u_patch,
+                         energyflux.eflx_sh_veg_patch, energyflux.cgrnd_patch,
+                         energyflux.cgrnds_patch, energyflux.cgrndl_patch, mask_nolakep)
 
     # ---------------------------------------------------------------
     # 7. Vegetation emissivity
     # ---------------------------------------------------------------
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        avmuir = 1.0  # inverse optical depth per unit leaf+stem area
-        elai = canopystate.elai_patch[p]
-        esai = canopystate.esai_patch[p]
-        temperature.emv_patch[p] = 1.0 - exp(-(elai + esai) / avmuir)
-    end
+    preflux_emv!(temperature.emv_patch, mask_nolakep, canopystate.elai_patch,
+                 canopystate.esai_patch)
 
     # ---------------------------------------------------------------
     # 8. Intermediate temperature variable thm
     # ---------------------------------------------------------------
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        c = patch_data.column[p]
-        temperature.thm_patch[p] = forc_t[c] + 0.0098 * frictionvel.forc_hgt_t_patch[p]
-    end
+    preflux_thm!(temperature.thm_patch, mask_nolakep, patch_data.column,
+                 forc_t, frictionvel.forc_hgt_t_patch)
 
     return nothing
 end

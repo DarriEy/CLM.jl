@@ -17,6 +17,62 @@
 # ==========================================================================
 
 # ---------------------------------------------------------------------------
+# KernelAbstractions kernels for fire base per-element loops.
+# @kernel / @index / @Const / _launch! are module-wide (infrastructure/kernels.jl).
+# Each kernel below replaces a simple, fully-independent per-element loop.
+# `cmin`/`cmax` reproduce the original `for p in bounds` / `for c in bounds`
+# iteration range while ndrange spans the full mask length (one thread per index).
+# ---------------------------------------------------------------------------
+
+# Zero btran2[p] for every masked patch in [cmin, cmax] (used for both the
+# exposed and non-exposed veg zeroing loops in the Li2014/Li2021 root-wetness
+# routines — same operation, called per mask).
+@kernel function _fireb_zero_btran2_kernel!(btran2, @Const(mask), cmin::Int, cmax::Int)
+    p = @index(Global)
+    @inbounds if cmin <= p <= cmax && mask[p]
+        btran2[p] = 0.0
+    end
+end
+
+fireb_zero_btran2!(btran2, mask, cmin::Int, cmax::Int) =
+    _launch!(_fireb_zero_btran2_kernel!, btran2, mask, cmin, cmax)
+
+# Clamp btran2[p] to <= 1.0 for every masked patch in [cmin, cmax].
+@kernel function _fireb_clamp_btran2_kernel!(btran2, @Const(mask), cmin::Int, cmax::Int)
+    p = @index(Global)
+    @inbounds if cmin <= p <= cmax && mask[p]
+        if btran2[p] > 1.0
+            btran2[p] = 1.0
+        end
+    end
+end
+
+fireb_clamp_btran2!(btran2, mask, cmin::Int, cmax::Int) =
+    _launch!(_fireb_clamp_btran2_kernel!, btran2, mask, cmin, cmax)
+
+# Carbon loss to peat fires (per-column, fully independent). Branches on
+# gridcell latitude vs. borealat; no accumulation.
+@kernel function _fireb_peatfire_somc_kernel!(somc_fire, @Const(mask), @Const(gridcell),
+                                              @Const(latdeg), @Const(totsomc),
+                                              @Const(baf_peatf), cmin::Int, cmax::Int,
+                                              borealat)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        g = gridcell[c]
+        if latdeg[g] < borealat
+            somc_fire[c] = totsomc[c] * baf_peatf[c] * 6.0 / 33.9
+        else
+            somc_fire[c] = baf_peatf[c] * 2.2e3
+        end
+    end
+end
+
+fireb_peatfire_somc!(somc_fire, mask, gridcell, latdeg, totsomc, baf_peatf,
+                     cmin::Int, cmax::Int, borealat) =
+    _launch!(_fireb_peatfire_somc_kernel!, somc_fire, mask, gridcell, latdeg,
+             totsomc, baf_peatf, cmin, cmax, borealat)
+
+# ---------------------------------------------------------------------------
 # Constants for fire (from cnfire_const_type)
 # ---------------------------------------------------------------------------
 
@@ -152,17 +208,14 @@ function cnfire_calc_fire_root_wetness_li2014!(
     watsat   = soilstate.watsat_col
     rootfr   = soilstate.rootfr_patch
 
+    cmin = first(bounds)
+    cmax = last(bounds)
+
     # Zero out non-exposed vegetation patches
-    for p in bounds
-        mask_noexposedveg[p] || continue
-        btran2[p] = 0.0
-    end
+    fireb_zero_btran2!(btran2, mask_noexposedveg, cmin, cmax)
 
     # Initialize exposed veg patches to zero
-    for p in bounds
-        mask_exposedveg[p] || continue
-        btran2[p] = 0.0
-    end
+    fireb_zero_btran2!(btran2, mask_exposedveg, cmin, cmax)
 
     # Accumulate root-weighted soil wetness across layers
     for j in 1:nlevgrnd
@@ -181,12 +234,7 @@ function cnfire_calc_fire_root_wetness_li2014!(
     end
 
     # Clamp to [0, 1]
-    for p in bounds
-        mask_exposedveg[p] || continue
-        if btran2[p] > 1.0
-            btran2[p] = 1.0
-        end
-    end
+    fireb_clamp_btran2!(btran2, mask_exposedveg, cmin, cmax)
 
     return nothing
 end
@@ -232,17 +280,14 @@ function cnfire_calc_fire_root_wetness_li2021!(
     watsat = soilstate.watsat_col
     rootfr = soilstate.rootfr_patch
 
+    cmin = first(bounds)
+    cmax = last(bounds)
+
     # Zero out non-exposed vegetation patches
-    for p in bounds
-        mask_noexposedveg[p] || continue
-        btran2[p] = 0.0
-    end
+    fireb_zero_btran2!(btran2, mask_noexposedveg, cmin, cmax)
 
     # Initialize exposed veg patches to zero
-    for p in bounds
-        mask_exposedveg[p] || continue
-        btran2[p] = 0.0
-    end
+    fireb_zero_btran2!(btran2, mask_exposedveg, cmin, cmax)
 
     # Accumulate root-weighted s_node across layers
     for j in 1:nlevgrnd
@@ -255,12 +300,7 @@ function cnfire_calc_fire_root_wetness_li2021!(
     end
 
     # Clamp to [0, 1]
-    for p in bounds
-        mask_exposedveg[p] || continue
-        if btran2[p] > 1.0
-            btran2[p] = 1.0
-        end
-    end
+    fireb_clamp_btran2!(btran2, mask_exposedveg, cmin, cmax)
 
     return nothing
 end
@@ -857,15 +897,9 @@ function cnfire_fluxes!(
     # ===================================================================
     # Carbon loss due to peat fires
     # ===================================================================
-    for c in bounds_c
-        mask_soilc[c] || continue
-        g = col.gridcell[c]
-        if grc.latdeg[g] < cnfire_const.borealat
-            somc_fire[c] = totsomc[c] * baf_peatf[c] * 6.0 / 33.9
-        else
-            somc_fire[c] = baf_peatf[c] * 2.2e3
-        end
-    end
+    fireb_peatfire_somc!(somc_fire, mask_soilc, col.gridcell, grc.latdeg,
+                         totsomc, baf_peatf, first(bounds_c), last(bounds_c),
+                         cnfire_const.borealat)
 
     return (mask_actfirec, mask_actfirep)
 end
