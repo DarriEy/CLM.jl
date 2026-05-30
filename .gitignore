@@ -19,3 +19,10 @@ LocalPreferences.toml
 # Ralph loop state
 .ralph_last_output.log
 .ralph_state
+
+# Claude Code: personal/local settings + worktrees (keep project settings.json)
+.claude/settings.local.json
+.claude/worktrees/
+
+# GPU validation script env: resolved per-machine (Metal is macOS-only), keep Project.toml
+scripts/Manifest.toml
