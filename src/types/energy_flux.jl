@@ -12,127 +12,134 @@ radiation, wind stress, transpiration, conductances, and balance checks.
 
 Ported from `energyflux_type` in `EnergyFluxType.F90`.
 """
-Base.@kwdef mutable struct EnergyFluxData{FT<:Real}
+Base.@kwdef mutable struct EnergyFluxData{FT<:Real,
+                              V<:AbstractVector{FT},
+                              M<:AbstractMatrix{FT}}
     # --- Sensible heat fluxes (patch-level) ---
-    eflx_sh_stem_patch           ::Vector{FT} = Float64[]   # patch sensible heat flux from stem (W/m**2) [+ to atm]
-    eflx_sh_grnd_patch           ::Vector{FT} = Float64[]   # patch sensible heat flux from ground (W/m**2) [+ to atm]
-    eflx_sh_veg_patch            ::Vector{FT} = Float64[]   # patch sensible heat flux from leaves (W/m**2) [+ to atm]
-    eflx_sh_snow_patch           ::Vector{FT} = Float64[]   # patch sensible heat flux from snow (W/m**2) [+ to atm]
-    eflx_sh_soil_patch           ::Vector{FT} = Float64[]   # patch sensible heat flux from soil (W/m**2) [+ to atm]
-    eflx_sh_h2osfc_patch         ::Vector{FT} = Float64[]   # patch sensible heat flux from surface water (W/m**2) [+ to atm]
-    eflx_sh_tot_patch            ::Vector{FT} = Float64[]   # patch total sensible heat flux (W/m**2) [+ to atm]
-    eflx_sh_tot_u_patch          ::Vector{FT} = Float64[]   # patch urban total sensible heat flux (W/m**2) [+ to atm]
-    eflx_sh_tot_r_patch          ::Vector{FT} = Float64[]   # patch rural total sensible heat flux (W/m**2) [+ to atm]
+    eflx_sh_stem_patch           ::V = Float64[]   # patch sensible heat flux from stem (W/m**2) [+ to atm]
+    eflx_sh_grnd_patch           ::V = Float64[]   # patch sensible heat flux from ground (W/m**2) [+ to atm]
+    eflx_sh_veg_patch            ::V = Float64[]   # patch sensible heat flux from leaves (W/m**2) [+ to atm]
+    eflx_sh_snow_patch           ::V = Float64[]   # patch sensible heat flux from snow (W/m**2) [+ to atm]
+    eflx_sh_soil_patch           ::V = Float64[]   # patch sensible heat flux from soil (W/m**2) [+ to atm]
+    eflx_sh_h2osfc_patch         ::V = Float64[]   # patch sensible heat flux from surface water (W/m**2) [+ to atm]
+    eflx_sh_tot_patch            ::V = Float64[]   # patch total sensible heat flux (W/m**2) [+ to atm]
+    eflx_sh_tot_u_patch          ::V = Float64[]   # patch urban total sensible heat flux (W/m**2) [+ to atm]
+    eflx_sh_tot_r_patch          ::V = Float64[]   # patch rural total sensible heat flux (W/m**2) [+ to atm]
 
     # --- Sensible heat fluxes (column-level) ---
-    eflx_sh_precip_conversion_col ::Vector{FT} = Float64[]  # col sensible heat flux from precipitation conversion (W/m**2) [+ to atm]
+    eflx_sh_precip_conversion_col ::V = Float64[]  # col sensible heat flux from precipitation conversion (W/m**2) [+ to atm]
 
     # --- Latent heat fluxes (patch-level) ---
-    eflx_lh_tot_patch            ::Vector{FT} = Float64[]   # patch total latent heat flux (W/m**2) [+ to atm]
-    eflx_lh_tot_u_patch          ::Vector{FT} = Float64[]   # patch urban total latent heat flux (W/m**2) [+ to atm]
-    eflx_lh_tot_r_patch          ::Vector{FT} = Float64[]   # patch rural total latent heat flux (W/m**2) [+ to atm]
-    eflx_lh_vegt_patch           ::Vector{FT} = Float64[]   # patch transpiration heat flux from veg (W/m**2) [+ to atm]
-    eflx_lh_vege_patch           ::Vector{FT} = Float64[]   # patch evaporation heat flux from veg (W/m**2) [+ to atm]
-    eflx_lh_grnd_patch           ::Vector{FT} = Float64[]   # patch evaporation heat flux from ground (W/m**2) [+ to atm]
+    eflx_lh_tot_patch            ::V = Float64[]   # patch total latent heat flux (W/m**2) [+ to atm]
+    eflx_lh_tot_u_patch          ::V = Float64[]   # patch urban total latent heat flux (W/m**2) [+ to atm]
+    eflx_lh_tot_r_patch          ::V = Float64[]   # patch rural total latent heat flux (W/m**2) [+ to atm]
+    eflx_lh_vegt_patch           ::V = Float64[]   # patch transpiration heat flux from veg (W/m**2) [+ to atm]
+    eflx_lh_vege_patch           ::V = Float64[]   # patch evaporation heat flux from veg (W/m**2) [+ to atm]
+    eflx_lh_grnd_patch           ::V = Float64[]   # patch evaporation heat flux from ground (W/m**2) [+ to atm]
 
     # --- Soil/ground heat fluxes (patch-level) ---
-    eflx_soil_grnd_patch         ::Vector{FT} = Float64[]   # patch soil heat flux (W/m**2) [+ = into soil]
-    eflx_soil_grnd_u_patch       ::Vector{FT} = Float64[]   # patch urban soil heat flux (W/m**2) [+ = into soil]
-    eflx_soil_grnd_r_patch       ::Vector{FT} = Float64[]   # patch rural soil heat flux (W/m**2) [+ = into soil]
+    eflx_soil_grnd_patch         ::V = Float64[]   # patch soil heat flux (W/m**2) [+ = into soil]
+    eflx_soil_grnd_u_patch       ::V = Float64[]   # patch urban soil heat flux (W/m**2) [+ = into soil]
+    eflx_soil_grnd_r_patch       ::V = Float64[]   # patch rural soil heat flux (W/m**2) [+ = into soil]
 
     # --- Longwave radiation (patch-level) ---
-    eflx_lwrad_net_patch         ::Vector{FT} = Float64[]   # patch net infrared (longwave) rad (W/m**2) [+ = to atm]
-    eflx_lwrad_net_r_patch       ::Vector{FT} = Float64[]   # patch rural net infrared (longwave) rad (W/m**2) [+ = to atm]
-    eflx_lwrad_net_u_patch       ::Vector{FT} = Float64[]   # patch urban net infrared (longwave) rad (W/m**2) [+ = to atm]
-    eflx_lwrad_out_patch         ::Vector{FT} = Float64[]   # patch emitted infrared (longwave) radiation (W/m**2)
-    eflx_lwrad_out_r_patch       ::Vector{FT} = Float64[]   # patch rural emitted infrared (longwave) rad (W/m**2)
-    eflx_lwrad_out_u_patch       ::Vector{FT} = Float64[]   # patch urban emitted infrared (longwave) rad (W/m**2)
+    eflx_lwrad_net_patch         ::V = Float64[]   # patch net infrared (longwave) rad (W/m**2) [+ = to atm]
+    eflx_lwrad_net_r_patch       ::V = Float64[]   # patch rural net infrared (longwave) rad (W/m**2) [+ = to atm]
+    eflx_lwrad_net_u_patch       ::V = Float64[]   # patch urban net infrared (longwave) rad (W/m**2) [+ = to atm]
+    eflx_lwrad_out_patch         ::V = Float64[]   # patch emitted infrared (longwave) radiation (W/m**2)
+    eflx_lwrad_out_r_patch       ::V = Float64[]   # patch rural emitted infrared (longwave) rad (W/m**2)
+    eflx_lwrad_out_u_patch       ::V = Float64[]   # patch urban emitted infrared (longwave) rad (W/m**2)
 
     # --- Snow melt fluxes (column-level) ---
-    eflx_snomelt_col             ::Vector{FT} = Float64[]   # col snow melt heat flux (W/m**2)
-    eflx_snomelt_r_col           ::Vector{FT} = Float64[]   # col rural snow melt heat flux (W/m**2)
-    eflx_snomelt_u_col           ::Vector{FT} = Float64[]   # col urban snow melt heat flux (W/m**2)
-    eflx_h2osfc_to_snow_col      ::Vector{FT} = Float64[]   # col snow melt to h2osfc heat flux (W/m**2)
+    eflx_snomelt_col             ::V = Float64[]   # col snow melt heat flux (W/m**2)
+    eflx_snomelt_r_col           ::V = Float64[]   # col rural snow melt heat flux (W/m**2)
+    eflx_snomelt_u_col           ::V = Float64[]   # col urban snow melt heat flux (W/m**2)
+    eflx_h2osfc_to_snow_col      ::V = Float64[]   # col snow melt to h2osfc heat flux (W/m**2)
 
     # --- Ground/net heat fluxes (patch-level) ---
-    eflx_gnet_patch              ::Vector{FT} = Float64[]   # patch net heat flux into ground (W/m**2)
-    eflx_grnd_lake_patch         ::Vector{FT} = Float64[]   # patch net heat flux into lake/snow surface, excluding light transmission (W/m**2)
+    eflx_gnet_patch              ::V = Float64[]   # patch net heat flux into ground (W/m**2)
+    eflx_grnd_lake_patch         ::V = Float64[]   # patch net heat flux into lake/snow surface, excluding light transmission (W/m**2)
 
     # --- Dynamic balance flux (gridcell-level) ---
-    eflx_dynbal_grc              ::Vector{FT} = Float64[]   # grc dynamic land cover change conversion energy flux (W/m**2)
+    eflx_dynbal_grc              ::V = Float64[]   # grc dynamic land cover change conversion energy flux (W/m**2)
 
     # --- Bottom/layer heat fluxes (column-level) ---
-    eflx_bot_col                 ::Vector{FT} = Float64[]   # col heat flux from beneath the soil or ice column (W/m**2)
-    eflx_fgr12_col               ::Vector{FT} = Float64[]   # col ground heat flux between soil layers 1 and 2 (W/m**2)
-    eflx_fgr_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col (rural) soil downward heat flux (W/m2) (ncols, nlevgrnd)
-    eflx_building_heat_errsoi_col ::Vector{FT} = Float64[]  # col heat flux to interior surface of walls and roof for errsoi check (W/m**2)
+    eflx_bot_col                 ::V = Float64[]   # col heat flux from beneath the soil or ice column (W/m**2)
+    eflx_fgr12_col               ::V = Float64[]   # col ground heat flux between soil layers 1 and 2 (W/m**2)
+    eflx_fgr_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col (rural) soil downward heat flux (W/m2) (ncols, nlevgrnd)
+    eflx_building_heat_errsoi_col ::V = Float64[]  # col heat flux to interior surface of walls and roof for errsoi check (W/m**2)
 
     # --- Urban energy fluxes (column-level) ---
-    eflx_urban_ac_col            ::Vector{FT} = Float64[]   # col urban air conditioning flux (W/m**2)
-    eflx_urban_heat_col          ::Vector{FT} = Float64[]   # col urban heating flux (W/m**2)
+    eflx_urban_ac_col            ::V = Float64[]   # col urban air conditioning flux (W/m**2)
+    eflx_urban_heat_col          ::V = Float64[]   # col urban heating flux (W/m**2)
 
     # --- Urban energy fluxes (patch-level) ---
-    eflx_anthro_patch            ::Vector{FT} = Float64[]   # patch total anthropogenic heat flux (W/m**2)
-    eflx_traffic_patch           ::Vector{FT} = Float64[]   # patch traffic sensible heat flux (W/m**2)
-    eflx_wasteheat_patch         ::Vector{FT} = Float64[]   # patch sensible heat flux from domestic heating/cooling sources of waste heat (W/m**2)
-    eflx_ventilation_patch       ::Vector{FT} = Float64[]   # patch sensible heat flux from building ventilation (W/m**2)
-    eflx_heat_from_ac_patch      ::Vector{FT} = Float64[]   # patch sensible heat flux put back into canyon due to removal by AC (W/m**2)
+    eflx_anthro_patch            ::V = Float64[]   # patch total anthropogenic heat flux (W/m**2)
+    eflx_traffic_patch           ::V = Float64[]   # patch traffic sensible heat flux (W/m**2)
+    eflx_wasteheat_patch         ::V = Float64[]   # patch sensible heat flux from domestic heating/cooling sources of waste heat (W/m**2)
+    eflx_ventilation_patch       ::V = Float64[]   # patch sensible heat flux from building ventilation (W/m**2)
+    eflx_heat_from_ac_patch      ::V = Float64[]   # patch sensible heat flux put back into canyon due to removal by AC (W/m**2)
 
     # --- Urban energy fluxes (landunit-level) ---
-    eflx_traffic_lun             ::Vector{FT} = Float64[]   # lun traffic sensible heat flux (W/m**2)
-    eflx_wasteheat_lun           ::Vector{FT} = Float64[]   # lun sensible heat flux from domestic heating/cooling sources of waste heat (W/m**2)
-    eflx_ventilation_lun         ::Vector{FT} = Float64[]   # lun sensible heat flux from building ventilation (W/m**2)
-    eflx_heat_from_ac_lun        ::Vector{FT} = Float64[]   # lun sensible heat flux to be put back into canyon due to removal by AC (W/m**2)
-    eflx_building_lun            ::Vector{FT} = Float64[]   # lun building heat flux from change in interior building air temperature (W/m**2)
-    eflx_urban_ac_lun            ::Vector{FT} = Float64[]   # lun urban air conditioning flux (W/m**2)
-    eflx_urban_heat_lun          ::Vector{FT} = Float64[]   # lun urban heating flux (W/m**2)
+    eflx_traffic_lun             ::V = Float64[]   # lun traffic sensible heat flux (W/m**2)
+    eflx_wasteheat_lun           ::V = Float64[]   # lun sensible heat flux from domestic heating/cooling sources of waste heat (W/m**2)
+    eflx_ventilation_lun         ::V = Float64[]   # lun sensible heat flux from building ventilation (W/m**2)
+    eflx_heat_from_ac_lun        ::V = Float64[]   # lun sensible heat flux to be put back into canyon due to removal by AC (W/m**2)
+    eflx_building_lun            ::V = Float64[]   # lun building heat flux from change in interior building air temperature (W/m**2)
+    eflx_urban_ac_lun            ::V = Float64[]   # lun urban air conditioning flux (W/m**2)
+    eflx_urban_heat_lun          ::V = Float64[]   # lun urban heating flux (W/m**2)
 
     # --- Derivatives of energy fluxes (patch-level) ---
-    dgnetdT_patch                ::Vector{FT} = Float64[]   # patch derivative of net ground heat flux wrt soil temp (W/m**2 K)
-    netrad_patch                 ::Vector{FT} = Float64[]   # patch net radiation (W/m**2) [+ = to sfc]
-    cgrnd_patch                  ::Vector{FT} = Float64[]   # patch deriv. of soil energy flux wrt to soil temp [W/m2/K]
-    cgrndl_patch                 ::Vector{FT} = Float64[]   # patch deriv. of soil latent heat flux wrt soil temp [W/m**2/K]
-    cgrnds_patch                 ::Vector{FT} = Float64[]   # patch deriv. of soil sensible heat flux wrt soil temp [W/m2/K]
+    dgnetdT_patch                ::V = Float64[]   # patch derivative of net ground heat flux wrt soil temp (W/m**2 K)
+    netrad_patch                 ::V = Float64[]   # patch net radiation (W/m**2) [+ = to sfc]
+    cgrnd_patch                  ::V = Float64[]   # patch deriv. of soil energy flux wrt to soil temp [W/m2/K]
+    cgrndl_patch                 ::V = Float64[]   # patch deriv. of soil latent heat flux wrt soil temp [W/m**2/K]
+    cgrnds_patch                 ::V = Float64[]   # patch deriv. of soil sensible heat flux wrt soil temp [W/m2/K]
 
     # --- Canopy radiation (patch-level) ---
-    dlrad_patch                  ::Vector{FT} = Float64[]   # patch downward longwave radiation below the canopy [W/m2]
-    ulrad_patch                  ::Vector{FT} = Float64[]   # patch upward longwave radiation above the canopy [W/m2]
+    dlrad_patch                  ::V = Float64[]   # patch downward longwave radiation below the canopy [W/m2]
+    ulrad_patch                  ::V = Float64[]   # patch upward longwave radiation above the canopy [W/m2]
 
     # --- Wind stress (patch-level) ---
-    taux_patch                   ::Vector{FT} = Float64[]   # patch wind (shear) stress: e-w (kg/m/s**2)
-    tauy_patch                   ::Vector{FT} = Float64[]   # patch wind (shear) stress: n-s (kg/m/s**2)
+    taux_patch                   ::V = Float64[]   # patch wind (shear) stress: e-w (kg/m/s**2)
+    tauy_patch                   ::V = Float64[]   # patch wind (shear) stress: n-s (kg/m/s**2)
 
     # --- Conductance (patch-level) ---
-    canopy_cond_patch            ::Vector{FT} = Float64[]   # patch tracer conductance for canopy [m/s]
+    canopy_cond_patch            ::V = Float64[]   # patch tracer conductance for canopy [m/s]
 
     # --- Transpiration (patch-level) ---
-    btran_patch                  ::Vector{FT} = Float64[]   # patch transpiration wetness factor (0 to 1)
-    btran_min_patch              ::Vector{FT} = Float64[]   # patch daily minimum transpiration wetness factor (0 to 1)
-    btran_min_inst_patch         ::Vector{FT} = Float64[]   # patch instantaneous daily minimum transpiration wetness factor (0 to 1)
-    bsun_patch                   ::Vector{FT} = Float64[]   # patch sunlit canopy transpiration wetness factor (0 to 1)
-    bsha_patch                   ::Vector{FT} = Float64[]   # patch shaded canopy transpiration wetness factor (0 to 1)
+    btran_patch                  ::V = Float64[]   # patch transpiration wetness factor (0 to 1)
+    btran_min_patch              ::V = Float64[]   # patch daily minimum transpiration wetness factor (0 to 1)
+    btran_min_inst_patch         ::V = Float64[]   # patch instantaneous daily minimum transpiration wetness factor (0 to 1)
+    bsun_patch                   ::V = Float64[]   # patch sunlit canopy transpiration wetness factor (0 to 1)
+    bsha_patch                   ::V = Float64[]   # patch shaded canopy transpiration wetness factor (0 to 1)
 
     # --- Roots (patch-level, 2D) ---
-    rresis_patch                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch root resistance by layer (0-1) (npatches, nlevgrnd)
+    rresis_patch                 ::M = Matrix{Float64}(undef, 0, 0)  # patch root resistance by layer (0-1) (npatches, nlevgrnd)
 
     # --- Latent heat (column-level) ---
-    htvp_col                     ::Vector{FT} = Float64[]   # latent heat of vapor of water (or sublimation) [J/kg]
+    htvp_col                     ::V = Float64[]   # latent heat of vapor of water (or sublimation) [J/kg]
 
     # --- Canopy heat (patch-level) ---
-    dhsdt_canopy_patch           ::Vector{FT} = Float64[]   # patch change in heat content of canopy (leaf+stem) (W/m**2) [+ to atm]
+    dhsdt_canopy_patch           ::V = Float64[]   # patch change in heat content of canopy (leaf+stem) (W/m**2) [+ to atm]
 
     # --- Balance checks (patch-level) ---
-    errsoi_patch                 ::Vector{FT} = Float64[]   # soil/lake energy conservation error (W/m**2)
-    errseb_patch                 ::Vector{FT} = Float64[]   # surface energy conservation error (W/m**2)
-    errsol_patch                 ::Vector{FT} = Float64[]   # solar radiation conservation error (W/m**2)
-    errlon_patch                 ::Vector{FT} = Float64[]   # longwave radiation conservation error (W/m**2)
+    errsoi_patch                 ::V = Float64[]   # soil/lake energy conservation error (W/m**2)
+    errseb_patch                 ::V = Float64[]   # surface energy conservation error (W/m**2)
+    errsol_patch                 ::V = Float64[]   # solar radiation conservation error (W/m**2)
+    errlon_patch                 ::V = Float64[]   # longwave radiation conservation error (W/m**2)
 
     # --- Balance checks (column-level) ---
-    errsoi_col                   ::Vector{FT} = Float64[]   # soil/lake energy conservation error (W/m**2)
-    errseb_col                   ::Vector{FT} = Float64[]   # surface energy conservation error (W/m**2)
-    errsol_col                   ::Vector{FT} = Float64[]   # solar radiation conservation error (W/m**2)
-    errlon_col                   ::Vector{FT} = Float64[]   # longwave radiation conservation error (W/m**2)
+    errsoi_col                   ::V = Float64[]   # soil/lake energy conservation error (W/m**2)
+    errseb_col                   ::V = Float64[]   # surface energy conservation error (W/m**2)
+    errsol_col                   ::V = Float64[]   # solar radiation conservation error (W/m**2)
+    errlon_col                   ::V = Float64[]   # longwave radiation conservation error (W/m**2)
 end
+
+EnergyFluxData{FT}(; kwargs...) where {FT<:Real} =
+    EnergyFluxData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure EnergyFluxData
+
 
 """
     energyflux_init!(ef::EnergyFluxData, np::Int, nc::Int, nl::Int, ng::Int)

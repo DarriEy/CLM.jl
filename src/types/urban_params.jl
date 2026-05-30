@@ -67,35 +67,43 @@ Indexed by (gridcell, density_type) for 2D fields and
 
 Ported from `urbinp_type` in `UrbanParamsType.F90`.
 """
-Base.@kwdef mutable struct UrbanInputData{FT<:Real}
-    canyon_hwr      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    wtlunit_roof    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    wtroad_perv     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    em_roof         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    em_improad      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    em_perroad      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    em_wall         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    alb_roof_dir    ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    alb_roof_dif    ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    alb_improad_dir ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    alb_improad_dif ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    alb_perroad_dir ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    alb_perroad_dif ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    alb_wall_dir    ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    alb_wall_dif    ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    ht_roof         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    wind_hgt_canyon ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    tk_wall         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    tk_roof         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    tk_improad      ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    cv_wall         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    cv_roof         ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    cv_improad      ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)
-    thick_wall      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    thick_roof      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    nlev_improad    ::Matrix{Int}      = Matrix{Int}(undef, 0, 0)
-    t_building_min  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+Base.@kwdef mutable struct UrbanInputData{FT<:Real,
+                              M<:AbstractMatrix{FT},
+                              A3<:AbstractArray{FT,3},
+                              MI<:AbstractMatrix{<:Integer}}
+    canyon_hwr      ::M = Matrix{Float64}(undef, 0, 0)
+    wtlunit_roof    ::M = Matrix{Float64}(undef, 0, 0)
+    wtroad_perv     ::M = Matrix{Float64}(undef, 0, 0)
+    em_roof         ::M = Matrix{Float64}(undef, 0, 0)
+    em_improad      ::M = Matrix{Float64}(undef, 0, 0)
+    em_perroad      ::M = Matrix{Float64}(undef, 0, 0)
+    em_wall         ::M = Matrix{Float64}(undef, 0, 0)
+    alb_roof_dir    ::A3 = Array{Float64}(undef, 0, 0, 0)
+    alb_roof_dif    ::A3 = Array{Float64}(undef, 0, 0, 0)
+    alb_improad_dir ::A3 = Array{Float64}(undef, 0, 0, 0)
+    alb_improad_dif ::A3 = Array{Float64}(undef, 0, 0, 0)
+    alb_perroad_dir ::A3 = Array{Float64}(undef, 0, 0, 0)
+    alb_perroad_dif ::A3 = Array{Float64}(undef, 0, 0, 0)
+    alb_wall_dir    ::A3 = Array{Float64}(undef, 0, 0, 0)
+    alb_wall_dif    ::A3 = Array{Float64}(undef, 0, 0, 0)
+    ht_roof         ::M = Matrix{Float64}(undef, 0, 0)
+    wind_hgt_canyon ::M = Matrix{Float64}(undef, 0, 0)
+    tk_wall         ::A3 = Array{Float64}(undef, 0, 0, 0)
+    tk_roof         ::A3 = Array{Float64}(undef, 0, 0, 0)
+    tk_improad      ::A3 = Array{Float64}(undef, 0, 0, 0)
+    cv_wall         ::A3 = Array{Float64}(undef, 0, 0, 0)
+    cv_roof         ::A3 = Array{Float64}(undef, 0, 0, 0)
+    cv_improad      ::A3 = Array{Float64}(undef, 0, 0, 0)
+    thick_wall      ::M = Matrix{Float64}(undef, 0, 0)
+    thick_roof      ::M = Matrix{Float64}(undef, 0, 0)
+    nlev_improad    ::MI      = Matrix{Int}(undef, 0, 0)
+    t_building_min  ::M = Matrix{Float64}(undef, 0, 0)
 end
+
+UrbanInputData{FT}(; kwargs...) where {FT<:Real} =
+    UrbanInputData{FT, Matrix{FT}, Array{FT,3}, Matrix{Int}}(; kwargs...)
+Adapt.@adapt_structure UrbanInputData
+
 
 """
     urbinp_init!(ui::UrbanInputData, ng::Int, numurbl::Int, numrad::Int, nlevurb::Int)

@@ -15,14 +15,20 @@ column-level fields: `snow_persistence_col` and `int_snow_col`.
 
 Ported from `waterstatebulk_type` in `WaterStateBulkType.F90`.
 """
-Base.@kwdef mutable struct WaterStateBulkData{FT<:Real}
+Base.@kwdef mutable struct WaterStateBulkData{FT<:Real,
+                                  V<:AbstractVector{FT}}
     # --- Parent water state fields (composition) ---
     ws::WaterStateData = WaterStateData()
 
     # --- Bulk-specific column-level 1D fields ---
-    snow_persistence_col ::Vector{FT} = Float64[]   # col length of time that ground has had non-zero snow thickness (sec)
-    int_snow_col         ::Vector{FT} = Float64[]   # col integrated snowfall (mm H2O)
+    snow_persistence_col ::V = Float64[]   # col length of time that ground has had non-zero snow thickness (sec)
+    int_snow_col         ::V = Float64[]   # col integrated snowfall (mm H2O)
 end
+
+WaterStateBulkData{FT}(; kwargs...) where {FT<:Real} =
+    WaterStateBulkData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure WaterStateBulkData
+
 
 """
     waterstatebulk_init!(wsb, nc, np, nl, ng)

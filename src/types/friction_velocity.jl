@@ -13,7 +13,8 @@ computations, roughness lengths, forcing heights, and diagnostic variables.
 
 Ported from `frictionvel_type` in `FrictionVelocityMod.F90`.
 """
-Base.@kwdef mutable struct FrictionVelocityData{FT<:Real}
+Base.@kwdef mutable struct FrictionVelocityData{FT<:Real,
+                                    V<:AbstractVector{FT}}
     # --- Scalar parameters ---
     zetamaxstable::FT = -999.0   # Max zeta under stable conditions
     zsno::FT          = -999.0   # Momentum roughness length for snow (m)
@@ -21,45 +22,50 @@ Base.@kwdef mutable struct FrictionVelocityData{FT<:Real}
     zglc::FT          = -999.0   # Momentum roughness length for glacier (Meier2022 only) (m)
 
     # --- Patch-level fields (1D vectors) ---
-    forc_hgt_u_patch ::Vector{FT} = Float64[]   # patch wind forcing height (10m+z0m+d) (m)
-    forc_hgt_t_patch ::Vector{FT} = Float64[]   # patch temperature forcing height (10m+z0m+d) (m)
-    forc_hgt_q_patch ::Vector{FT} = Float64[]   # patch specific humidity forcing height (10m+z0m+d) (m)
-    u10_patch        ::Vector{FT} = Float64[]   # patch 10-m wind (m/s) (for dust model)
-    u10_clm_patch    ::Vector{FT} = Float64[]   # patch 10-m wind (m/s) (for clm_map2gcell)
-    va_patch         ::Vector{FT} = Float64[]   # patch atmospheric wind speed plus convective velocity (m/s)
-    vds_patch        ::Vector{FT} = Float64[]   # patch deposition velocity term (m/s)
-    fv_patch         ::Vector{FT} = Float64[]   # patch friction velocity (m/s) (for dust model)
-    rb1_patch        ::Vector{FT} = Float64[]   # patch aerodynamical resistance (s/m)
-    rb10_patch       ::Vector{FT} = Float64[]   # 10-day mean patch aerodynamical resistance (s/m)
-    ram1_patch       ::Vector{FT} = Float64[]   # patch aerodynamical resistance (s/m)
-    z0mv_patch       ::Vector{FT} = Float64[]   # patch roughness length over vegetation, momentum [m]
-    z0hv_patch       ::Vector{FT} = Float64[]   # patch roughness length over vegetation, sensible heat [m]
-    z0qv_patch       ::Vector{FT} = Float64[]   # patch roughness length over vegetation, latent heat [m]
-    z0mg_patch       ::Vector{FT} = Float64[]   # patch roughness length over ground, momentum [m]
-    z0hg_patch       ::Vector{FT} = Float64[]   # patch roughness length over ground, sensible heat [m]
-    z0qg_patch       ::Vector{FT} = Float64[]   # patch roughness length over ground, latent heat [m]
-    kbm1_patch       ::Vector{FT} = Float64[]   # natural logarithm of z0mg_p/z0hg_p [-]
-    rah1_patch       ::Vector{FT} = Float64[]   # patch sensible heat flux resistance [s/m]
-    rah2_patch       ::Vector{FT} = Float64[]   # patch below-canopy sensible heat flux resistance [s/m]
-    raw1_patch       ::Vector{FT} = Float64[]   # patch moisture flux resistance [s/m]
-    raw2_patch       ::Vector{FT} = Float64[]   # patch below-canopy moisture flux resistance [s/m]
-    ustar_patch      ::Vector{FT} = Float64[]   # patch friction velocity [m/s]
-    um_patch         ::Vector{FT} = Float64[]   # patch wind speed including the stability effect [m/s]
-    uaf_patch        ::Vector{FT} = Float64[]   # patch canopy air speed [m/s]
-    taf_patch        ::Vector{FT} = Float64[]   # patch canopy air temperature [K]
-    qaf_patch        ::Vector{FT} = Float64[]   # patch canopy humidity [kg/kg]
-    obu_patch        ::Vector{FT} = Float64[]   # patch Monin-Obukhov length [m]
-    zeta_patch       ::Vector{FT} = Float64[]   # patch dimensionless stability parameter
-    vpd_patch        ::Vector{FT} = Float64[]   # patch vapor pressure deficit [Pa]
-    num_iter_patch   ::Vector{FT} = Float64[]   # patch number of iterations
-    z0m_actual_patch ::Vector{FT} = Float64[]   # patch roughness length actually used, momentum [m]
+    forc_hgt_u_patch ::V = Float64[]   # patch wind forcing height (10m+z0m+d) (m)
+    forc_hgt_t_patch ::V = Float64[]   # patch temperature forcing height (10m+z0m+d) (m)
+    forc_hgt_q_patch ::V = Float64[]   # patch specific humidity forcing height (10m+z0m+d) (m)
+    u10_patch        ::V = Float64[]   # patch 10-m wind (m/s) (for dust model)
+    u10_clm_patch    ::V = Float64[]   # patch 10-m wind (m/s) (for clm_map2gcell)
+    va_patch         ::V = Float64[]   # patch atmospheric wind speed plus convective velocity (m/s)
+    vds_patch        ::V = Float64[]   # patch deposition velocity term (m/s)
+    fv_patch         ::V = Float64[]   # patch friction velocity (m/s) (for dust model)
+    rb1_patch        ::V = Float64[]   # patch aerodynamical resistance (s/m)
+    rb10_patch       ::V = Float64[]   # 10-day mean patch aerodynamical resistance (s/m)
+    ram1_patch       ::V = Float64[]   # patch aerodynamical resistance (s/m)
+    z0mv_patch       ::V = Float64[]   # patch roughness length over vegetation, momentum [m]
+    z0hv_patch       ::V = Float64[]   # patch roughness length over vegetation, sensible heat [m]
+    z0qv_patch       ::V = Float64[]   # patch roughness length over vegetation, latent heat [m]
+    z0mg_patch       ::V = Float64[]   # patch roughness length over ground, momentum [m]
+    z0hg_patch       ::V = Float64[]   # patch roughness length over ground, sensible heat [m]
+    z0qg_patch       ::V = Float64[]   # patch roughness length over ground, latent heat [m]
+    kbm1_patch       ::V = Float64[]   # natural logarithm of z0mg_p/z0hg_p [-]
+    rah1_patch       ::V = Float64[]   # patch sensible heat flux resistance [s/m]
+    rah2_patch       ::V = Float64[]   # patch below-canopy sensible heat flux resistance [s/m]
+    raw1_patch       ::V = Float64[]   # patch moisture flux resistance [s/m]
+    raw2_patch       ::V = Float64[]   # patch below-canopy moisture flux resistance [s/m]
+    ustar_patch      ::V = Float64[]   # patch friction velocity [m/s]
+    um_patch         ::V = Float64[]   # patch wind speed including the stability effect [m/s]
+    uaf_patch        ::V = Float64[]   # patch canopy air speed [m/s]
+    taf_patch        ::V = Float64[]   # patch canopy air temperature [K]
+    qaf_patch        ::V = Float64[]   # patch canopy humidity [kg/kg]
+    obu_patch        ::V = Float64[]   # patch Monin-Obukhov length [m]
+    zeta_patch       ::V = Float64[]   # patch dimensionless stability parameter
+    vpd_patch        ::V = Float64[]   # patch vapor pressure deficit [Pa]
+    num_iter_patch   ::V = Float64[]   # patch number of iterations
+    z0m_actual_patch ::V = Float64[]   # patch roughness length actually used, momentum [m]
 
     # --- Column-level fields (1D vectors) ---
-    z0mg_col    ::Vector{FT} = Float64[]   # col roughness length over ground, momentum [m]
-    z0mg_2D_col ::Vector{FT} = Float64[]   # 2-D field of input col roughness length over ground, momentum [m]
-    z0hg_col    ::Vector{FT} = Float64[]   # col roughness length over ground, sensible heat [m]
-    z0qg_col    ::Vector{FT} = Float64[]   # col roughness length over ground, latent heat [m]
+    z0mg_col    ::V = Float64[]   # col roughness length over ground, momentum [m]
+    z0mg_2D_col ::V = Float64[]   # 2-D field of input col roughness length over ground, momentum [m]
+    z0hg_col    ::V = Float64[]   # col roughness length over ground, sensible heat [m]
+    z0qg_col    ::V = Float64[]   # col roughness length over ground, latent heat [m]
 end
+
+FrictionVelocityData{FT}(; kwargs...) where {FT<:Real} =
+    FrictionVelocityData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure FrictionVelocityData
+
 
 # ==========================================================================
 # Allocation / initialization
