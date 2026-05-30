@@ -359,6 +359,26 @@ function canopy_sun_shade_fracs!(surfalb::SurfaceAlbedoData,
     return nothing
 end
 
+# --------------------------------------------------------------------------
+# Zero-out canopy sunlit fraction for urban patches (masked, one thread per
+# patch). Fully independent per patch — no accumulation or cross-patch reads.
+# --------------------------------------------------------------------------
+@kernel function _surfrad_zero_fsun_urban_kernel!(fsun_patch, @Const(mask_urbanp))
+    p = @index(Global)
+    @inbounds if mask_urbanp[p]
+        fsun_patch[p] = 0.0
+    end
+end
+
+"""
+    surfrad_zero_fsun_urban!(fsun_patch, mask_urbanp)
+
+Set the canopy sunlit fraction to zero for urban patches. Backend-agnostic
+(CPU loop or GPU); one thread per patch.
+"""
+surfrad_zero_fsun_urban!(fsun_patch, mask_urbanp) =
+    _launch!(_surfrad_zero_fsun_urban_kernel!, fsun_patch, mask_urbanp)
+
 # ==========================================================================
 # SurfaceRadiation
 # ==========================================================================
@@ -470,10 +490,7 @@ function surface_radiation!(surfalb::SurfaceAlbedoData,
     end
 
     # Zero-out fsun for urban patches
-    for p in bounds
-        mask_urbanp[p] || continue
-        canopystate.fsun_patch[p] = 0.0
-    end
+    surfrad_zero_fsun_urban!(canopystate.fsun_patch, mask_urbanp)
 
     # --- Loop over nband wavebands ---
     for ib in 1:nband

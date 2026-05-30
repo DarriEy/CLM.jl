@@ -522,6 +522,50 @@ end
 # Ported from: CalcDeficitVolrLimited in IrrigationMod.F90
 # ---------------------------------------------------------------------------
 
+# Per-gridcell deficit-limited ratio from available river volume (independent
+# per gridcell). Gated on [gmin, gmax] so entries outside bounds_g keep their
+# initialized value (1.0).
+@kernel function _irrig_volr_ratio_kernel!(ratio_grc, @Const(volr), @Const(area),
+                                           river_volume_threshold, deficit_grc_arg,
+                                           gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        if volr[g] > 0.0
+            available_volr = volr[g] * (1.0 - river_volume_threshold)
+            max_deficit_supported_by_volr = available_volr / area[g] * M3_OVER_KM2_TO_MM
+        else
+            max_deficit_supported_by_volr = 0.0
+        end
+        if deficit_grc_arg[g] > max_deficit_supported_by_volr
+            ratio_grc[g] = max_deficit_supported_by_volr / deficit_grc_arg[g]
+        else
+            ratio_grc[g] = 1.0
+        end
+    end
+end
+
+irrig_volr_ratio!(ratio_grc, volr, area, river_volume_threshold, deficit_grc_arg,
+                  gmin::Int, gmax::Int) =
+    _launch!(_irrig_volr_ratio_kernel!, ratio_grc, volr, area, river_volume_threshold,
+             deficit_grc_arg, gmin, gmax)
+
+# Per-column deficit scaled by its gridcell's limited ratio (independent per
+# column). Gated on the check_for_irrig mask; unmasked columns keep their
+# pre-zeroed value.
+@kernel function _irrig_deficit_limited_kernel!(deficit_volr_limited, @Const(mask),
+                                                @Const(deficit), @Const(ratio_grc),
+                                                @Const(gridcell), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        deficit_volr_limited[c] = deficit[c] * ratio_grc[gridcell[c]]
+    end
+end
+
+irrig_deficit_limited!(deficit_volr_limited, mask, deficit, ratio_grc, gridcell,
+                       cmin::Int, cmax::Int) =
+    _launch!(_irrig_deficit_limited_kernel!, deficit_volr_limited, mask, deficit,
+             ratio_grc, gridcell, cmin, cmax)
+
 """
     calc_deficit_volr_limited!(irrig, deficit, volr, deficit_volr_limited,
                                check_for_irrig_col, col_data, grc,
@@ -550,30 +594,14 @@ function calc_deficit_volr_limited!(
     # Average deficit to gridcell level (unity scaling)
     c2g_irrig!(deficit_grc, deficit, col_data, bounds_c, bounds_g)
 
-    for g in bounds_g
-        if volr[g] > 0.0
-            available_volr = volr[g] * (1.0 - irrig.params.irrig_river_volume_threshold)
-            max_deficit_supported_by_volr = available_volr / grc.area[g] * M3_OVER_KM2_TO_MM
-        else
-            # Negative volr treated as 0
-            max_deficit_supported_by_volr = 0.0
-        end
-
-        if deficit_grc[g] > max_deficit_supported_by_volr
-            # Inadequate river storage, adjust irrigation demand
-            deficit_limited_ratio_grc[g] = max_deficit_supported_by_volr / deficit_grc[g]
-        else
-            # Adequate river storage, no adjustment
-            deficit_limited_ratio_grc[g] = 1.0
-        end
-    end
+    irrig_volr_ratio!(deficit_limited_ratio_grc, volr, grc.area,
+                      irrig.params.irrig_river_volume_threshold, deficit_grc,
+                      first(bounds_g), last(bounds_g))
 
     deficit_volr_limited[bounds_c] .= 0.0
-    for c in bounds_c
-        check_for_irrig_col[c] || continue
-        g = col_data.gridcell[c]
-        deficit_volr_limited[c] = deficit[c] * deficit_limited_ratio_grc[g]
-    end
+    irrig_deficit_limited!(deficit_volr_limited, check_for_irrig_col, deficit,
+                           deficit_limited_ratio_grc, col_data.gridcell,
+                           first(bounds_c), last(bounds_c))
 
     return nothing
 end

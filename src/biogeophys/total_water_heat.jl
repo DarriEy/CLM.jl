@@ -4,6 +4,115 @@
 # ==========================================================================
 
 # ---------------------------------------------------------------------------
+# KernelAbstractions kernels for fully-independent per-column finalize loops.
+#
+# NOTE: The dominant pattern in this file is per-column TOTALS accumulated by
+# summing water/heat over soil/snow/lake LAYERS (`total[c] += x[c,j]`). Those
+# loops are loop-carried reductions over j and are intentionally NOT kernelized.
+# Only the masked per-column "combine"/"finalize" loops below — where each
+# column element is written independently from other-array values at the same
+# index `[c]` (no accumulation over j) — are kernelized here.
+# ---------------------------------------------------------------------------
+
+# water_mass[c] = liquid_mass[c] + ice_mass[c]   (masked, per-column independent)
+@kernel function _twh_water_mass_combine_kernel!(water_mass, @Const(mask),
+                                                 @Const(liquid_mass), @Const(ice_mass))
+    c = @index(Global)
+    @inbounds if mask[c]
+        water_mass[c] = liquid_mass[c] + ice_mass[c]
+    end
+end
+
+twh_water_mass_combine!(water_mass, mask, liquid_mass, ice_mass) =
+    _launch!(_twh_water_mass_combine_kernel!, water_mass, mask, liquid_mass, ice_mass)
+
+# heat[c] = heat_dry_mass[c] + heat_ice[c] + heat_liquid[c] + latent_heat_liquid[c]
+@kernel function _twh_heat_combine_kernel!(heat, @Const(mask), @Const(heat_dry_mass),
+                                           @Const(heat_ice), @Const(heat_liquid),
+                                           @Const(latent_heat_liquid))
+    c = @index(Global)
+    @inbounds if mask[c]
+        heat[c] = heat_dry_mass[c] + heat_ice[c] + heat_liquid[c] + latent_heat_liquid[c]
+    end
+end
+
+twh_heat_combine!(heat, mask, heat_dry_mass, heat_ice, heat_liquid, latent_heat_liquid) =
+    _launch!(_twh_heat_combine_kernel!, heat, mask, heat_dry_mass, heat_ice,
+             heat_liquid, latent_heat_liquid)
+
+# heat[c] -= dynbal_baseline_heat_col[c]   (masked, per-column independent)
+@kernel function _twh_subtract_baseline_heat_kernel!(heat, @Const(mask),
+                                                     @Const(dynbal_baseline_heat))
+    c = @index(Global)
+    @inbounds if mask[c]
+        heat[c] -= dynbal_baseline_heat[c]
+    end
+end
+
+twh_subtract_baseline_heat!(heat, mask, dynbal_baseline_heat) =
+    _launch!(_twh_subtract_baseline_heat_kernel!, heat, mask, dynbal_baseline_heat)
+
+# heat[c] += heat_dry_mass[c] + heat_ice[c] + heat_liquid[c] + latent_heat_liquid[c]
+@kernel function _twh_heat_accumulate_kernel!(heat, @Const(mask), @Const(heat_dry_mass),
+                                              @Const(heat_ice), @Const(heat_liquid),
+                                              @Const(latent_heat_liquid))
+    c = @index(Global)
+    @inbounds if mask[c]
+        heat[c] += heat_dry_mass[c] + heat_ice[c] + heat_liquid[c] + latent_heat_liquid[c]
+    end
+end
+
+twh_heat_accumulate!(heat, mask, heat_dry_mass, heat_ice, heat_liquid, latent_heat_liquid) =
+    _launch!(_twh_heat_accumulate_kernel!, heat, mask, heat_dry_mass, heat_ice,
+             heat_liquid, latent_heat_liquid)
+
+# heat[c] += a[c] + b[c] + c3[c]   (masked, per-column independent; lake water heat)
+@kernel function _twh_heat_accumulate3_kernel!(heat, @Const(mask), @Const(a),
+                                               @Const(b), @Const(c3))
+    c = @index(Global)
+    @inbounds if mask[c]
+        heat[c] += a[c] + b[c] + c3[c]
+    end
+end
+
+twh_heat_accumulate3!(heat, mask, a, b, c3) =
+    _launch!(_twh_heat_accumulate3_kernel!, heat, mask, a, b, c3)
+
+# Soil-heat finalize (two independent per-column outputs):
+#   heat_liquid[c] += soil_heat_liquid[c]
+#   heat[c]        += soil_heat_dry_mass[c] + soil_heat_ice[c]
+#                     + soil_heat_liquid[c] + soil_latent_heat_liquid[c]
+@kernel function _twh_soil_heat_finalize_kernel!(heat, @Const(mask), heat_liquid,
+                                                 @Const(soil_heat_liquid),
+                                                 @Const(soil_heat_dry_mass),
+                                                 @Const(soil_heat_ice),
+                                                 @Const(soil_latent_heat_liquid))
+    c = @index(Global)
+    @inbounds if mask[c]
+        heat_liquid[c] += soil_heat_liquid[c]
+        heat[c] += soil_heat_dry_mass[c] + soil_heat_ice[c] +
+                   soil_heat_liquid[c] + soil_latent_heat_liquid[c]
+    end
+end
+
+twh_soil_heat_finalize!(heat, mask, heat_liquid, soil_heat_liquid, soil_heat_dry_mass,
+                        soil_heat_ice, soil_latent_heat_liquid) =
+    _launch!(_twh_soil_heat_finalize_kernel!, heat, mask, heat_liquid, soil_heat_liquid,
+             soil_heat_dry_mass, soil_heat_ice, soil_latent_heat_liquid)
+
+# heat[c] = -dynbal_baseline_heat_col[c]   (masked, per-column independent)
+@kernel function _twh_init_neg_baseline_heat_kernel!(heat, @Const(mask),
+                                                     @Const(dynbal_baseline_heat))
+    c = @index(Global)
+    @inbounds if mask[c]
+        heat[c] = -dynbal_baseline_heat[c]
+    end
+end
+
+twh_init_neg_baseline_heat!(heat, mask, dynbal_baseline_heat) =
+    _launch!(_twh_init_neg_baseline_heat_kernel!, heat, mask, dynbal_baseline_heat)
+
+# ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
 
@@ -120,10 +229,7 @@ function compute_water_mass_non_lake!(mask_nolake::BitVector,
     compute_liq_ice_mass_non_lake!(mask_nolake, col, waterstate, waterdiagnostic,
                                     subtract_dynbal_baselines, liquid_mass, ice_mass)
 
-    for c in eachindex(mask_nolake)
-        mask_nolake[c] || continue
-        water_mass[c] = liquid_mass[c] + ice_mass[c]
-    end
+    twh_water_mass_combine!(water_mass, mask_nolake, liquid_mass, ice_mass)
     return nothing
 end
 
@@ -154,10 +260,7 @@ function compute_water_mass_lake!(mask_lake::BitVector,
                                 add_lake_water_and_subtract_dynbal_baselines,
                                 liquid_mass, ice_mass)
 
-    for c in eachindex(mask_lake)
-        mask_lake[c] || continue
-        water_mass[c] = liquid_mass[c] + ice_mass[c]
-    end
+    twh_water_mass_combine!(water_mass, mask_lake, liquid_mass, ice_mass)
     return nothing
 end
 
@@ -498,10 +601,8 @@ function compute_heat_non_lake!(mask_nolake::BitVector,
     end
 
     # Combine into heat
-    for c in eachindex(mask_nolake)
-        mask_nolake[c] || continue
-        heat[c] = heat_dry_mass[c] + heat_ice[c] + heat_liquid[c] + latent_heat_liquid[c]
-    end
+    twh_heat_combine!(heat, mask_nolake, heat_dry_mass, heat_ice,
+                      heat_liquid, latent_heat_liquid)
 
     # Soil heat
     accumulate_soil_heat_non_lake!(mask_nolake, col, lun, urbanparams, soilstate,
@@ -509,10 +610,7 @@ function compute_heat_non_lake!(mask_nolake::BitVector,
                                     heat, heat_liquid, cv_liquid)
 
     # Subtract baseline heat
-    for c in eachindex(mask_nolake)
-        mask_nolake[c] || continue
-        heat[c] -= temperature.dynbal_baseline_heat_col[c]
-    end
+    twh_subtract_baseline_heat!(heat, mask_nolake, temperature.dynbal_baseline_heat_col)
 
     return nothing
 end
@@ -623,12 +721,8 @@ function accumulate_soil_heat_non_lake!(mask::BitVector,
         end
     end
 
-    for c in eachindex(mask)
-        mask[c] || continue
-        heat_liquid[c] += soil_heat_liquid[c]
-        heat[c] += soil_heat_dry_mass[c] + soil_heat_ice[c] +
-                   soil_heat_liquid[c] + soil_latent_heat_liquid[c]
-    end
+    twh_soil_heat_finalize!(heat, mask, heat_liquid, soil_heat_liquid,
+                            soil_heat_dry_mass, soil_heat_ice, soil_latent_heat_liquid)
 
     return nothing
 end
@@ -678,10 +772,7 @@ function compute_heat_lake!(mask_lake::BitVector,
     end
 
     # Subtract baseline heat (large canceling term first)
-    for c in eachindex(mask_lake)
-        mask_lake[c] || continue
-        heat[c] = -temperature.dynbal_baseline_heat_col[c]
-    end
+    twh_init_neg_baseline_heat!(heat, mask_lake, temperature.dynbal_baseline_heat_col)
 
     # Lake water heat content (NOT accumulated in heat_liquid/cv_liquid)
     accumulate_heat_lake!(mask_lake, col, temperature, lakestate, heat)
@@ -720,10 +811,8 @@ function compute_heat_lake!(mask_lake::BitVector,
         end
     end
 
-    for c in eachindex(mask_lake)
-        mask_lake[c] || continue
-        heat[c] += heat_dry_mass[c] + heat_ice[c] + heat_liquid[c] + latent_heat_liquid[c]
-    end
+    twh_heat_accumulate!(heat, mask_lake, heat_dry_mass, heat_ice,
+                         heat_liquid, latent_heat_liquid)
 
     return nothing
 end
@@ -777,10 +866,8 @@ function accumulate_heat_lake!(mask::BitVector,
         end
     end
 
-    for c in eachindex(mask)
-        mask[c] || continue
-        heat[c] += lake_heat_ice[c] + lake_heat_liquid[c] + lake_latent_heat_liquid[c]
-    end
+    twh_heat_accumulate3!(heat, mask, lake_heat_ice, lake_heat_liquid,
+                          lake_latent_heat_liquid)
 
     return nothing
 end

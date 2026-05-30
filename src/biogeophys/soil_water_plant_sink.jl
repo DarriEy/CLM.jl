@@ -15,6 +15,47 @@
 # ==========================================================================
 
 # --------------------------------------------------------------------------
+# Kernels: per-(column, soil-layer) element loops.
+# Columns are gathered in a filter list `filterc`; the kernel is launched over
+# (length(filterc), nlevsoi) with `c = filterc[i]`. Each (i, j) iteration is
+# fully independent (no reduction / loop-carried dependence). The backend is
+# taken from `rootr_col` (the written matrix), so these run as plain CPU loops
+# on Array and as GPU kernels on device arrays.
+# --------------------------------------------------------------------------
+
+# Zero out rootr_col[c, j] for every filter column and soil layer.
+@kernel function _plantsink_zero_rootr_kernel!(rootr_col, @Const(filterc))
+    i, j = @index(Global, NTuple)
+    @inbounds rootr_col[filterc[i], j] = 0.0
+end
+
+plantsink_zero_rootr!(rootr_col, filterc, nlevsoi::Int) =
+    _launch!(_plantsink_zero_rootr_kernel!, rootr_col, filterc;
+             ndrange = (length(filterc), nlevsoi))
+
+# Normalize rootr_col by the transpiration-weighted denominator `temp` and
+# compute the vertical root-soil sink. `temp` is indexed by (c - c_offset).
+@kernel function _plantsink_normalize_kernel!(rootr_col, qflx_rootsoi_col,
+                                              @Const(filterc), @Const(temp),
+                                              @Const(qflx_tran_veg_col), c_offset::Int)
+    i, j = @index(Global, NTuple)
+    @inbounds begin
+        c = filterc[i]
+        t = temp[c - c_offset]
+        if t != 0.0
+            rootr_col[c, j] /= t
+        end
+        qflx_rootsoi_col[c, j] = rootr_col[c, j] * qflx_tran_veg_col[c]
+    end
+end
+
+function plantsink_normalize_and_sink!(rootr_col, qflx_rootsoi_col, filterc, temp,
+                                       qflx_tran_veg_col, c_offset::Int, nlevsoi::Int)
+    _launch!(_plantsink_normalize_kernel!, rootr_col, qflx_rootsoi_col, filterc, temp,
+             qflx_tran_veg_col, c_offset; ndrange = (length(filterc), nlevsoi))
+end
+
+# --------------------------------------------------------------------------
 # compute_effec_rootfrac_and_vert_tran_sink_default!
 # --------------------------------------------------------------------------
 
@@ -60,12 +101,8 @@ function compute_effec_rootfrac_and_vert_tran_sink_default!(
     # Map column index to temp array index
     c_offset = first(bounds_col) - 1
 
-    # Zero out rootr_col for filter columns
-    for j in 1:nlevsoi
-        for c in filterc
-            rootr_col[c, j] = 0.0
-        end
-    end
+    # Zero out rootr_col for filter columns (independent per (column, layer))
+    plantsink_zero_rootr!(rootr_col, filterc, nlevsoi)
 
     # Accumulate transpiration-weighted root fraction
     for j in 1:nlevsoi
@@ -88,15 +125,9 @@ function compute_effec_rootfrac_and_vert_tran_sink_default!(
         end
     end
 
-    # Normalize rootr_col and compute qflx_rootsoi_col
-    for j in 1:nlevsoi
-        for c in filterc
-            if temp[c - c_offset] != 0.0
-                rootr_col[c, j] /= temp[c - c_offset]
-            end
-            qflx_rootsoi_col[c, j] = rootr_col[c, j] * qflx_tran_veg_col[c]
-        end
-    end
+    # Normalize rootr_col and compute qflx_rootsoi_col (independent per element)
+    plantsink_normalize_and_sink!(rootr_col, qflx_rootsoi_col, filterc, temp,
+                                  qflx_tran_veg_col, c_offset, nlevsoi)
 
     return nothing
 end
@@ -138,12 +169,8 @@ function compute_effec_rootfrac_and_vert_tran_sink_hydstress_roads!(
     temp = zeros(FT, length(bounds_col))
     c_offset = first(bounds_col) - 1
 
-    # Zero out rootr_col for filter columns
-    for j in 1:nlevsoi
-        for c in filterc
-            rootr_col[c, j] = 0.0
-        end
-    end
+    # Zero out rootr_col for filter columns (independent per (column, layer))
+    plantsink_zero_rootr!(rootr_col, filterc, nlevsoi)
 
     # Accumulate transpiration-weighted root fraction
     for j in 1:nlevsoi
@@ -166,15 +193,9 @@ function compute_effec_rootfrac_and_vert_tran_sink_hydstress_roads!(
         end
     end
 
-    # Normalize rootr_col and compute qflx_rootsoi_col
-    for j in 1:nlevsoi
-        for c in filterc
-            if temp[c - c_offset] != 0.0
-                rootr_col[c, j] /= temp[c - c_offset]
-            end
-            qflx_rootsoi_col[c, j] = rootr_col[c, j] * qflx_tran_veg_col[c]
-        end
-    end
+    # Normalize rootr_col and compute qflx_rootsoi_col (independent per element)
+    plantsink_normalize_and_sink!(rootr_col, qflx_rootsoi_col, filterc, temp,
+                                  qflx_tran_veg_col, c_offset, nlevsoi)
 
     return nothing
 end

@@ -23,6 +23,192 @@ const FRAC_SNO_SMALL = 1.0e-6   # small value of frac_sno used when initiating a
 const SNOW_BD_LAKE   = 250.0    # assumed snow bulk density (for lakes w/out resolved snow layers) [kg/m^3]
 
 # =========================================================================
+# KernelAbstractions kernels (GPU-ready per-element physics)
+#
+# Each kernel below replaces a clearly-independent per-element loop in this
+# file. Only loops with fully independent iterations (no accumulation,
+# reduction, inter-layer, or loop-carried dependency) are kernelized.
+# Snow combine/divide, water-balance accumulation, and reduction loops are
+# intentionally left as scalar loops.
+# =========================================================================
+
+# --- sum_flux_fluxes_onto_ground!: copy precip fluxes onto lake surface ---
+@kernel function _lakehyd_flux_onto_ground_kernel!(
+    qflx_snow_grnd, qflx_liq_grnd, @Const(mask_lake),
+    @Const(forc_snow), @Const(forc_rain))
+    c = @index(Global)
+    @inbounds if mask_lake[c]
+        qflx_snow_grnd[c] = forc_snow[c]
+        qflx_liq_grnd[c]  = forc_rain[c]
+    end
+end
+
+lakehyd_flux_onto_ground!(qflx_snow_grnd, qflx_liq_grnd, mask_lake, forc_snow, forc_rain) =
+    _launch!(_lakehyd_flux_onto_ground_kernel!, qflx_snow_grnd, qflx_liq_grnd,
+             mask_lake, forc_snow, forc_rain)
+
+# --- lake_frac_sno_eff!: frac_sno_eff = frac_sno for lake columns ---
+@kernel function _lakehyd_frac_sno_eff_kernel!(frac_sno_eff, @Const(mask_lake), @Const(frac_sno))
+    c = @index(Global)
+    @inbounds if mask_lake[c]
+        frac_sno_eff[c] = frac_sno[c]
+    end
+end
+
+lakehyd_frac_sno_eff!(frac_sno_eff, mask_lake, frac_sno) =
+    _launch!(_lakehyd_frac_sno_eff_kernel!, frac_sno_eff, mask_lake, frac_sno)
+
+# --- lake_patch_to_col_fluxes!: copy patch-level fluxes to column averages ---
+# (assumes one pft per lake column, so the c=patch_column[p] writes do not collide)
+@kernel function _lakehyd_patch_to_col_kernel!(
+    qflx_evap_tot_col, qflx_liqevap_from_top_layer_col,
+    qflx_liqdew_to_top_layer_col, qflx_soliddew_to_top_layer_col,
+    qflx_solidevap_from_top_layer_col, qflx_ev_snow_col,
+    @Const(qflx_evap_tot), @Const(qflx_liqevap_from_top_layer),
+    @Const(qflx_liqdew_to_top_layer), @Const(qflx_soliddew_to_top_layer),
+    @Const(qflx_solidevap_from_top_layer), @Const(qflx_ev_snow),
+    @Const(patch_column), @Const(mask_lakep))
+    p = @index(Global)
+    @inbounds if mask_lakep[p]
+        c = patch_column[p]
+        qflx_evap_tot_col[c]                 = qflx_evap_tot[p]
+        qflx_liqevap_from_top_layer_col[c]   = qflx_liqevap_from_top_layer[p]
+        qflx_liqdew_to_top_layer_col[c]      = qflx_liqdew_to_top_layer[p]
+        qflx_soliddew_to_top_layer_col[c]    = qflx_soliddew_to_top_layer[p]
+        qflx_solidevap_from_top_layer_col[c] = qflx_solidevap_from_top_layer[p]
+        qflx_ev_snow_col[c]                  = qflx_ev_snow[p]
+    end
+end
+
+lakehyd_patch_to_col!(
+    qflx_evap_tot_col, qflx_liqevap_from_top_layer_col,
+    qflx_liqdew_to_top_layer_col, qflx_soliddew_to_top_layer_col,
+    qflx_solidevap_from_top_layer_col, qflx_ev_snow_col,
+    qflx_evap_tot, qflx_liqevap_from_top_layer,
+    qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+    qflx_solidevap_from_top_layer, qflx_ev_snow,
+    patch_column, mask_lakep) =
+    _launch!(_lakehyd_patch_to_col_kernel!,
+             qflx_evap_tot_col, qflx_liqevap_from_top_layer_col,
+             qflx_liqdew_to_top_layer_col, qflx_soliddew_to_top_layer_col,
+             qflx_solidevap_from_top_layer_col, qflx_ev_snow_col,
+             qflx_evap_tot, qflx_liqevap_from_top_layer,
+             qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+             qflx_solidevap_from_top_layer, qflx_ev_snow,
+             patch_column, mask_lakep)
+
+# --- lake_soil_hydrology!: maintain soil saturation (per column AND soil layer) ---
+@kernel function _lakehyd_soil_hydrology_kernel!(
+    h2osoi_liq, h2osoi_vol, @Const(mask_lake),
+    @Const(h2osoi_ice), @Const(dz), @Const(watsat),
+    nlevsno::Int, denh2o, denice)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask_lake[c]
+        jj = j + nlevsno
+        h2osoi_vol[c, j] = h2osoi_liq[c, jj] / (dz[c, jj] * denh2o) +
+                           h2osoi_ice[c, jj] / (dz[c, jj] * denice)
+        if h2osoi_vol[c, j] < watsat[c, j]
+            h2osoi_liq[c, jj] = (watsat[c, j] * dz[c, jj] -
+                h2osoi_ice[c, jj] / denice) * denh2o
+        elseif h2osoi_liq[c, jj] > watsat[c, j] * denh2o * dz[c, jj]
+            h2osoi_liq[c, jj] = watsat[c, j] * denh2o * dz[c, jj]
+        end
+    end
+end
+
+function lakehyd_soil_hydrology!(h2osoi_liq, h2osoi_vol, mask_lake,
+                                 h2osoi_ice, dz, watsat, nlevsno::Int, nlevsoi::Int,
+                                 denh2o, denice)
+    _launch!(_lakehyd_soil_hydrology_kernel!, h2osoi_liq, h2osoi_vol, mask_lake,
+             h2osoi_ice, dz, watsat, nlevsno, denh2o, denice;
+             ndrange = (length(mask_lake), nlevsoi))
+end
+
+# --- lake_water_balance!: per-patch water balance & runoff ---
+@kernel function _lakehyd_water_balance_kernel!(
+    qflx_drain_perched, qflx_rsub_sat, qflx_infl, qflx_surf, qflx_drain,
+    qflx_qrgwl, qflx_floodc, qflx_runoff, qflx_rain_plus_snomelt,
+    qflx_top_soil, qflx_ice_runoff_snwcp,
+    @Const(forc_rain), @Const(forc_snow), @Const(qflx_evap_tot),
+    @Const(qflx_snwcp_ice), @Const(qflx_snwcp_discarded_ice),
+    @Const(qflx_snwcp_discarded_liq), @Const(qflx_liq_grnd),
+    @Const(qflx_snow_drain), @Const(qflx_floodg), @Const(begwb), @Const(endwb),
+    @Const(patch_column), @Const(patch_gridcell), @Const(mask_lakep), dtime)
+    p = @index(Global)
+    @inbounds if mask_lakep[p]
+        c = patch_column[p]
+        g = patch_gridcell[p]
+
+        qflx_drain_perched[c] = 0.0
+        qflx_rsub_sat[c]      = 0.0
+        qflx_infl[c]          = 0.0
+        qflx_surf[c]          = 0.0
+        qflx_drain[c]         = 0.0
+
+        qflx_qrgwl[c] = forc_rain[c] + forc_snow[c] - qflx_evap_tot[p] -
+            qflx_snwcp_ice[c] -
+            qflx_snwcp_discarded_ice[c] - qflx_snwcp_discarded_liq[c] -
+            (endwb[c] - begwb[c]) / dtime + qflx_floodg[g]
+        qflx_floodc[c]    = qflx_floodg[g]
+        qflx_runoff[c]    = qflx_drain[c] + qflx_qrgwl[c]
+        qflx_rain_plus_snomelt[c] = qflx_liq_grnd[c] + qflx_snow_drain[c]
+        qflx_top_soil[c]  = qflx_rain_plus_snomelt[c]
+        qflx_ice_runoff_snwcp[c] = qflx_snwcp_ice[c]
+    end
+end
+
+lakehyd_water_balance!(
+    qflx_drain_perched, qflx_rsub_sat, qflx_infl, qflx_surf, qflx_drain,
+    qflx_qrgwl, qflx_floodc, qflx_runoff, qflx_rain_plus_snomelt,
+    qflx_top_soil, qflx_ice_runoff_snwcp,
+    forc_rain, forc_snow, qflx_evap_tot,
+    qflx_snwcp_ice, qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq,
+    qflx_liq_grnd, qflx_snow_drain, qflx_floodg, begwb, endwb,
+    patch_column, patch_gridcell, mask_lakep, dtime) =
+    _launch!(_lakehyd_water_balance_kernel!,
+             qflx_drain_perched, qflx_rsub_sat, qflx_infl, qflx_surf, qflx_drain,
+             qflx_qrgwl, qflx_floodc, qflx_runoff, qflx_rain_plus_snomelt,
+             qflx_top_soil, qflx_ice_runoff_snwcp,
+             forc_rain, forc_snow, qflx_evap_tot,
+             qflx_snwcp_ice, qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq,
+             qflx_liq_grnd, qflx_snow_drain, qflx_floodg, begwb, endwb,
+             patch_column, patch_gridcell, mask_lakep, dtime)
+
+# --- lake_update_h2osoi_vol!: update volumetric soil water (column AND layer) ---
+@kernel function _lakehyd_update_h2osoi_vol_kernel!(
+    h2osoi_vol, @Const(mask_lake), @Const(h2osoi_liq), @Const(h2osoi_ice),
+    @Const(dz), nlevsno::Int, denh2o, denice)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask_lake[c]
+        jj = j + nlevsno
+        h2osoi_vol[c, j] = h2osoi_liq[c, jj] / (dz[c, jj] * denh2o) +
+                           h2osoi_ice[c, jj] / (dz[c, jj] * denice)
+    end
+end
+
+function lakehyd_update_h2osoi_vol!(h2osoi_vol, mask_lake, h2osoi_liq, h2osoi_ice,
+                                    dz, nlevsno::Int, nlevgrnd::Int, denh2o, denice)
+    _launch!(_lakehyd_update_h2osoi_vol_kernel!, h2osoi_vol, mask_lake,
+             h2osoi_liq, h2osoi_ice, dz, nlevsno, denh2o, denice;
+             ndrange = (length(mask_lake), nlevgrnd))
+end
+
+# --- lake_top_layer_diagnostics! (snow columns only): top-layer mass ---
+@kernel function _lakehyd_top_layer_snow_kernel!(
+    h2osno_top, @Const(mask_lakesnow), @Const(h2osoi_ice),
+    @Const(h2osoi_liq), @Const(snl), nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask_lakesnow[c]
+        jtop = snl[c] + 1 + nlevsno
+        h2osno_top[c] = h2osoi_ice[c, jtop] + h2osoi_liq[c, jtop]
+    end
+end
+
+lakehyd_top_layer_snow!(h2osno_top, mask_lakesnow, h2osoi_ice, h2osoi_liq, snl, nlevsno::Int) =
+    _launch!(_lakehyd_top_layer_snow_kernel!, h2osno_top, mask_lakesnow,
+             h2osoi_ice, h2osoi_liq, snl, nlevsno)
+
+# =========================================================================
 # sum_flux_fluxes_onto_ground!
 # =========================================================================
 
@@ -45,11 +231,7 @@ function sum_flux_fluxes_onto_ground!(
     mask_lake::BitVector,
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        mask_lake[c] || continue
-        qflx_snow_grnd[c] = forc_snow[c]
-        qflx_liq_grnd[c]  = forc_rain[c]
-    end
+    lakehyd_flux_onto_ground!(qflx_snow_grnd, qflx_liq_grnd, mask_lake, forc_snow, forc_rain)
     return nothing
 end
 
@@ -195,10 +377,7 @@ function lake_frac_sno_eff!(
     mask_lake::BitVector,
     bounds::UnitRange{Int}
 )
-    for c in bounds
-        mask_lake[c] || continue
-        frac_sno_eff[c] = frac_sno[c]
-    end
+    lakehyd_frac_sno_eff!(frac_sno_eff, mask_lake, frac_sno)
     return nothing
 end
 
@@ -237,18 +416,14 @@ function lake_patch_to_col_fluxes!(
     mask_lakep::BitVector,
     bounds_patch::UnitRange{Int}
 )
-    for p in bounds_patch
-        mask_lakep[p] || continue
-        c = patch_column[p]
-
-        qflx_evap_tot_col[c]                = qflx_evap_tot[p]
-        qflx_liqevap_from_top_layer_col[c]  = qflx_liqevap_from_top_layer[p]
-        qflx_liqdew_to_top_layer_col[c]     = qflx_liqdew_to_top_layer[p]
-        qflx_soliddew_to_top_layer_col[c]   = qflx_soliddew_to_top_layer[p]
-        qflx_solidevap_from_top_layer_col[c] = qflx_solidevap_from_top_layer[p]
-        qflx_ev_snow_col[c]                 = qflx_ev_snow[p]
-    end
-
+    lakehyd_patch_to_col!(
+        qflx_evap_tot_col, qflx_liqevap_from_top_layer_col,
+        qflx_liqdew_to_top_layer_col, qflx_soliddew_to_top_layer_col,
+        qflx_solidevap_from_top_layer_col, qflx_ev_snow_col,
+        qflx_evap_tot, qflx_liqevap_from_top_layer,
+        qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+        qflx_solidevap_from_top_layer, qflx_ev_snow,
+        patch_column, mask_lakep)
     return nothing
 end
 
@@ -277,23 +452,9 @@ function lake_soil_hydrology!(
     nlevsoi::Int,
     nlevsno::Int
 )
-    for j in 1:nlevsoi
-        jj = j + nlevsno  # Julia 1-based index for combined snow+soil array
-        for c in bounds
-            mask_lake[c] || continue
-
-            h2osoi_vol[c, j] = h2osoi_liq[c, jj] / (dz[c, jj] * DENH2O) +
-                               h2osoi_ice[c, jj] / (dz[c, jj] * DENICE)
-
-            if h2osoi_vol[c, j] < watsat[c, j]
-                h2osoi_liq[c, jj] = (watsat[c, j] * dz[c, jj] -
-                    h2osoi_ice[c, jj] / DENICE) * DENH2O
-            elseif h2osoi_liq[c, jj] > watsat[c, j] * DENH2O * dz[c, jj]
-                h2osoi_liq[c, jj] = watsat[c, j] * DENH2O * dz[c, jj]
-            end
-        end
-    end
-
+    lakehyd_soil_hydrology!(h2osoi_liq, h2osoi_vol, mask_lake,
+                            h2osoi_ice, dz, watsat, nlevsno, nlevsoi,
+                            DENH2O, DENICE)
     return nothing
 end
 
@@ -604,29 +765,14 @@ function lake_water_balance!(
     nlevsno::Int,
     nlevgrnd::Int
 )
-    for p in bounds_patch
-        mask_lakep[p] || continue
-        c = patch_column[p]
-        g = patch_gridcell[p]
-
-        qflx_drain_perched[c] = 0.0
-        qflx_rsub_sat[c]      = 0.0
-        qflx_infl[c]          = 0.0
-        qflx_surf[c]          = 0.0
-        qflx_drain[c]         = 0.0
-
-        # Insure water balance using qflx_qrgwl
-        qflx_qrgwl[c] = forc_rain[c] + forc_snow[c] - qflx_evap_tot[p] -
-            qflx_snwcp_ice[c] -
-            qflx_snwcp_discarded_ice[c] - qflx_snwcp_discarded_liq[c] -
-            (endwb[c] - begwb[c]) / dtime + qflx_floodg[g]
-        qflx_floodc[c]    = qflx_floodg[g]
-        qflx_runoff[c]    = qflx_drain[c] + qflx_qrgwl[c]
-        qflx_rain_plus_snomelt[c] = qflx_liq_grnd[c] + qflx_snow_drain[c]
-        qflx_top_soil[c]  = qflx_rain_plus_snomelt[c]
-        qflx_ice_runoff_snwcp[c] = qflx_snwcp_ice[c]
-    end
-
+    lakehyd_water_balance!(
+        qflx_drain_perched, qflx_rsub_sat, qflx_infl, qflx_surf, qflx_drain,
+        qflx_qrgwl, qflx_floodc, qflx_runoff, qflx_rain_plus_snomelt,
+        qflx_top_soil, qflx_ice_runoff_snwcp,
+        forc_rain, forc_snow, qflx_evap_tot,
+        qflx_snwcp_ice, qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq,
+        qflx_liq_grnd, qflx_snow_drain, qflx_floodg, begwb, endwb,
+        patch_column, patch_gridcell, mask_lakep, dtime)
     return nothing
 end
 
@@ -652,15 +798,8 @@ function lake_update_h2osoi_vol!(
     nlevgrnd::Int,
     nlevsno::Int
 )
-    for j in 1:nlevgrnd
-        jj = j + nlevsno
-        for c in bounds
-            mask_lake[c] || continue
-            h2osoi_vol[c, j] = h2osoi_liq[c, jj] / (dz[c, jj] * DENH2O) +
-                               h2osoi_ice[c, jj] / (dz[c, jj] * DENICE)
-        end
-    end
-
+    lakehyd_update_h2osoi_vol!(h2osoi_vol, mask_lake, h2osoi_liq, h2osoi_ice,
+                               dz, nlevsno, nlevgrnd, DENH2O, DENICE)
     return nothing
 end
 
@@ -696,11 +835,7 @@ function lake_top_layer_diagnostics!(
     nlevsno::Int
 )
     # Snow columns: top-layer mass
-    for c in bounds
-        mask_lakesnow[c] || continue
-        jtop = snl[c] + 1 + nlevsno  # Julia index
-        h2osno_top[c] = h2osoi_ice[c, jtop] + h2osoi_liq[c, jtop]
-    end
+    lakehyd_top_layer_snow!(h2osno_top, mask_lakesnow, h2osoi_ice, h2osoi_liq, snl, nlevsno)
 
     # Non-snow columns: zero / spval
     for c in bounds
