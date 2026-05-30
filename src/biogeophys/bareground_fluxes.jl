@@ -33,6 +33,105 @@ function bareground_fluxes_read_params!(;
 end
 
 # ---------------------------------------------------------------------------
+# Stability-iteration inner kernel (per-patch stability/roughness update).
+#
+# Kernelized form of the inner `for fi in 1:fn` loop in Phase 3 of
+# bareground_fluxes!. One thread per filtered patch; each patch writes only its
+# own [p] indices (no reductions). The String z0param_method branch is resolved
+# on the host into z0flag (1 = ZengWang2007, 2 = Meier2022) and branched on here.
+# ---------------------------------------------------------------------------
+@kernel function _bgf_stability_kernel!(
+        # written arrays
+        z0hg_patch, z0qg_patch, forc_hgt_u_patch, forc_hgt_t_patch, forc_hgt_q_patch,
+        zeta_patch, um, obu, num_iter_patch,
+        # read-only arrays
+        @Const(filterp), @Const(column), @Const(gridcell),
+        @Const(temp1), @Const(temp2), @Const(dth), @Const(dqh),
+        @Const(z0mg_patch), @Const(displa_patch),
+        @Const(forc_hgt_u_grc), @Const(forc_hgt_t_grc), @Const(forc_hgt_q_grc),
+        @Const(forc_q_col), @Const(forc_th_col), @Const(zldis), @Const(ustar),
+        @Const(ur), @Const(thv_col), @Const(beta_col), @Const(zii),
+        # scalars
+        iter::Int, z0flag::Int, a_coef, a_exp, zetamaxstable,
+        nu_param, meier_param3, beta_param, vkc, grav)
+
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        c = column[p]
+        g = gridcell[p]
+
+        tstar = temp1[p] * dth[p]
+        qstar = temp2[p] * dqh[p]
+
+        if z0flag == 2
+            # Meier2022 — after Yang et al. (2008)
+            z0hg_patch[p] = meier_param3 * nu_param / ustar[p] *
+                exp(-beta_param * ustar[p]^0.5 * smooth_abs(tstar)^0.25)
+        else
+            # ZengWang2007
+            z0hg_patch[p] = z0mg_patch[p] /
+                exp(a_coef * (ustar[p] * z0mg_patch[p] / nu_param)^a_exp)
+        end
+
+        z0qg_patch[p] = z0hg_patch[p]
+
+        # Update the forcing heights for new roughness lengths
+        forc_hgt_u_patch[p] = forc_hgt_u_grc[g] + z0mg_patch[p] + displa_patch[p]
+        forc_hgt_t_patch[p] = forc_hgt_t_grc[g] + z0hg_patch[p] + displa_patch[p]
+        forc_hgt_q_patch[p] = forc_hgt_q_grc[g] + z0qg_patch[p] + displa_patch[p]
+
+        thvstar = tstar * (1.0 + 0.61 * forc_q_col[c]) + 0.61 * forc_th_col[c] * qstar
+        zeta_patch[p] = zldis[p] * vkc * grav * thvstar / (ustar[p]^2 * thv_col[c])
+
+        if zeta_patch[p] >= 0.0  # stable
+            zeta_patch[p] = smooth_clamp(zeta_patch[p], 0.01, zetamaxstable)
+            um[p] = smooth_max(ur[p], 0.1)
+        else  # unstable
+            zeta_patch[p] = smooth_clamp(zeta_patch[p], -100.0, -0.01)
+            wc_arg = smooth_max(-grav * ustar[p] * thvstar * zii[c] / thv_col[c], 0.0)
+            wc = beta_col[c] * wc_arg^0.333
+            um[p] = sqrt(ur[p]^2 + wc^2)
+        end
+        obu[p] = zldis[p] / zeta_patch[p]
+
+        num_iter_patch[p] = Float64(iter)
+    end
+end
+
+"""
+    bgf_stability_update!(frictionvel, canopystate, temperature, col_data,
+                          patch_data, filterp, fn, temp1, temp2, dth, dqh,
+                          zldis, ustar, ur, um, obu, forc_q_col, forc_th_col,
+                          forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc,
+                          iter, z0flag, params)
+
+Launch the bare-ground stability inner-loop kernel over the `fn` filtered
+patches. Backend-agnostic (CPU loop or GPU); one thread per filtered patch.
+Replaces the inner `for fi in 1:fn` stability/roughness update in Phase 3.
+"""
+function bgf_stability_update!(frictionvel, canopystate, temperature, col_data,
+        patch_data, filterp, fn::Int,
+        temp1, temp2, dth, dqh, zldis, ustar, ur, um, obu,
+        forc_q_col, forc_th_col, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc,
+        iter::Int, z0flag::Int, params)
+    _launch!(_bgf_stability_kernel!, frictionvel.z0hg_patch,
+        frictionvel.z0qg_patch, frictionvel.forc_hgt_u_patch,
+        frictionvel.forc_hgt_t_patch, frictionvel.forc_hgt_q_patch,
+        frictionvel.zeta_patch, um, obu, frictionvel.num_iter_patch,
+        filterp, patch_data.column, patch_data.gridcell,
+        temp1, temp2, dth, dqh,
+        frictionvel.z0mg_patch, canopystate.displa_patch,
+        forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc,
+        forc_q_col, forc_th_col, zldis, ustar, ur,
+        temperature.thv_col, temperature.beta_col, col_data.zii,
+        iter, z0flag, params.a_coef, params.a_exp, frictionvel.zetamaxstable,
+        NU_PARAM, MEIER_PARAM3, BETA_PARAM, VKC, GRAV;
+        ndrange = fn)
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Main subroutine
 # ---------------------------------------------------------------------------
 
@@ -176,6 +275,10 @@ function bareground_fluxes!(
     # Phase 3: Stability iteration
     # =========================================================================
 
+    # Resolve the String z0param_method to an Int flag on the host (a kernel
+    # cannot compare Strings): 1 = ZengWang2007 (default), 2 = Meier2022.
+    z0flag = z0param_method == "Meier2022" ? 2 : 1
+
     for iter in 1:niters
 
         # Friction velocity calculation
@@ -190,46 +293,11 @@ function bareground_fluxes!(
             obu, iter, ur, um, ustar,
             temp1, temp2, temp12m, temp22m, fm)
 
-        for fi in 1:fn
-            p = filterp[fi]
-            c = patch_data.column[p]
-            g = patch_data.gridcell[p]
-
-            tstar = temp1[p] * dth[p]
-            qstar = temp2[p] * dqh[p]
-
-            if z0param_method == "ZengWang2007"
-                frictionvel.z0hg_patch[p] = frictionvel.z0mg_patch[p] /
-                    exp(params.a_coef * (ustar[p] * frictionvel.z0mg_patch[p] / NU_PARAM)^params.a_exp)
-            elseif z0param_method == "Meier2022"
-                # After Yang et al. (2008)
-                frictionvel.z0hg_patch[p] = MEIER_PARAM3 * NU_PARAM / ustar[p] *
-                    exp(-BETA_PARAM * ustar[p]^0.5 * smooth_abs(tstar)^0.25)
-            end
-
-            frictionvel.z0qg_patch[p] = frictionvel.z0hg_patch[p]
-
-            # Update the forcing heights for new roughness lengths
-            frictionvel.forc_hgt_u_patch[p] = forc_hgt_u_grc[g] + frictionvel.z0mg_patch[p] + canopystate.displa_patch[p]
-            frictionvel.forc_hgt_t_patch[p] = forc_hgt_t_grc[g] + frictionvel.z0hg_patch[p] + canopystate.displa_patch[p]
-            frictionvel.forc_hgt_q_patch[p] = forc_hgt_q_grc[g] + frictionvel.z0qg_patch[p] + canopystate.displa_patch[p]
-
-            thvstar = tstar * (1.0 + 0.61 * forc_q_col[c]) + 0.61 * forc_th_col[c] * qstar
-            frictionvel.zeta_patch[p] = zldis[p] * VKC * GRAV * thvstar / (ustar[p]^2 * temperature.thv_col[c])
-
-            if frictionvel.zeta_patch[p] >= 0.0  # stable
-                frictionvel.zeta_patch[p] = smooth_clamp(frictionvel.zeta_patch[p], 0.01, frictionvel.zetamaxstable)
-                um[p] = smooth_max(ur[p], 0.1)
-            else  # unstable
-                frictionvel.zeta_patch[p] = smooth_clamp(frictionvel.zeta_patch[p], -100.0, -0.01)
-                wc_arg = smooth_max(-GRAV * ustar[p] * thvstar * col_data.zii[c] / temperature.thv_col[c], 0.0)
-                wc = temperature.beta_col[c] * wc_arg^0.333
-                um[p] = sqrt(ur[p]^2 + wc^2)
-            end
-            obu[p] = zldis[p] / frictionvel.zeta_patch[p]
-
-            frictionvel.num_iter_patch[p] = Float64(iter)
-        end
+        bgf_stability_update!(frictionvel, canopystate, temperature, col_data,
+            patch_data, filterp, fn,
+            temp1, temp2, dth, dqh, zldis, ustar, ur, um, obu,
+            forc_q_col, forc_th_col, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc,
+            iter, z0flag, params)
     end  # end stability iteration
 
     # =========================================================================
