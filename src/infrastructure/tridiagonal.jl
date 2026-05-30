@@ -69,40 +69,48 @@ Columns where `mask[col] == false` are skipped.
 - `ncols::Int`:              Number of columns
 - `nlevs::Int`:              Number of levels
 """
+# Batched Thomas-algorithm kernel: one thread per column, each solving its own
+# tridiagonal system. The forward-sweep workspace (cp, dp) is per-column scratch
+# [ncols × nlevs] so threads never share state (the serial version reused 1D cp/dp,
+# which is not thread-safe). Backend-agnostic via the output `u`.
+@kernel function _tridiag_multi_kernel!(u, @Const(a), @Const(b), @Const(c), @Const(r),
+                                        @Const(jtop), @Const(mask), cp, dp, nlevs::Int)
+    col = @index(Global)
+    @inbounds if mask[col]
+        j = jtop[col]
+
+        # Forward sweep
+        bet = b[col, j]
+        if abs(bet) < 1.0e-30; bet = 1.0e-30; end
+        cp[col, j] = c[col, j] / bet
+        dp[col, j] = r[col, j] / bet
+
+        for jj in (j+1):nlevs
+            denom = b[col, jj] - a[col, jj] * cp[col, jj-1]
+            if abs(denom) < 1.0e-30; denom = copysign(1.0e-30, denom == 0.0 ? one(denom) : denom); end
+            cp[col, jj] = c[col, jj] / denom
+            dp[col, jj] = (r[col, jj] - a[col, jj] * dp[col, jj-1]) / denom
+        end
+
+        # Back substitution
+        u[col, nlevs] = dp[col, nlevs]
+        for jj in (nlevs-1):-1:j
+            u[col, jj] = dp[col, jj] - cp[col, jj] * u[col, jj+1]
+        end
+    end
+end
+
 function tridiagonal_multi!(u::AbstractMatrix{<:Real}, a::AbstractMatrix{<:Real}, b::AbstractMatrix{<:Real},
                             c::AbstractMatrix{<:Real}, r::AbstractMatrix{<:Real},
                             jtop::Vector{Int}, mask::AbstractVector{Bool}, ncols::Int, nlevs::Int)
-    # Workspace allocated once, reused across all columns
+    # Per-column scratch [ncols × nlevs] (similar(u, …) keeps the array/backend type,
+    # so this runs as a CPU loop on Arrays and as a GPU kernel on device arrays).
     T = promote_type(eltype(a), eltype(b), eltype(c), eltype(r))
-    cp = Vector{T}(undef, nlevs)
-    dp = Vector{T}(undef, nlevs)
+    cp = similar(u, T, ncols, nlevs)
+    dp = similar(u, T, ncols, nlevs)
 
-    for col in 1:ncols
-        mask[col] || continue
-
-        j = jtop[col]
-
-        @inbounds begin
-            # Forward sweep
-            bet = b[col, j]
-            if abs(bet) < 1.0e-30; bet = 1.0e-30; end
-            cp[j] = c[col, j] / bet
-            dp[j] = r[col, j] / bet
-
-            for jj in (j+1):nlevs
-                denom = b[col, jj] - a[col, jj] * cp[jj-1]
-                if abs(denom) < 1.0e-30; denom = copysign(1.0e-30, denom == 0.0 ? one(denom) : denom); end
-                cp[jj] = c[col, jj] / denom
-                dp[jj] = (r[col, jj] - a[col, jj] * dp[jj-1]) / denom
-            end
-
-            # Back substitution
-            u[col, nlevs] = dp[nlevs]
-            for jj in (nlevs-1):-1:j
-                u[col, jj] = dp[jj] - cp[jj] * u[col, jj+1]
-            end
-        end
-    end
+    _launch!(_tridiag_multi_kernel!, u, a, b, c, r, jtop, mask, cp, dp, nlevs;
+             ndrange = ncols)
 
     nothing
 end
