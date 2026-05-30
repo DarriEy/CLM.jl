@@ -77,6 +77,9 @@ println("phase! primal value = ", phase!(inst))
 dinst = Enzyme.make_zero(inst)
 println("Attempting Enzyme.Reverse on soil_temperature! alone...")
 Enzyme.API.strictAliasing!(false)
+if get(ENV, "CLM_ENZYME_VERBOSE", "0") == "1"
+    Enzyme.Compiler.VERBOSE_ERRORS[] = true
+end
 flush(stdout)
 try
     Enzyme.autodiff(Enzyme.set_runtime_activity(Enzyme.Reverse), phase!, Enzyme.Active,
