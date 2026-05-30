@@ -12,43 +12,51 @@ recharge, and VIC (Variable Infiltration Capacity) model parameters.
 
 Ported from `soilhydrology_type` in `SoilHydrologyType.F90`.
 """
-Base.@kwdef mutable struct SoilHydrologyData{FT<:Real}
+Base.@kwdef mutable struct SoilHydrologyData{FT<:Real,
+                                 V<:AbstractVector{FT},
+                                 M<:AbstractMatrix{FT},
+                                 A3<:AbstractArray{FT,3}}
     # --- Control flag ---
     h2osfcflag::Int = 1                # true => surface water is active (namelist)
 
     # --- NON-VIC state ---
-    num_substeps_col     ::Vector{FT} = Float64[]   # col adaptive timestep counter
-    frost_table_col      ::Vector{FT} = Float64[]   # col frost table depth (m)
-    zwt_col              ::Vector{FT} = Float64[]   # col water table depth (m)
-    zwts_col             ::Vector{FT} = Float64[]   # col water table depth, shallower of two water depths (m)
-    zwt_perched_col      ::Vector{FT} = Float64[]   # col perched water table depth (m)
-    qcharge_col          ::Vector{FT} = Float64[]   # col aquifer recharge rate (mm/s)
-    icefrac_col          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col fraction of ice (ncols, nlevgrnd)
-    h2osfc_thresh_col    ::Vector{FT} = Float64[]   # col level at which h2osfc "percolates" (time constant)
-    xs_urban_col         ::Vector{FT} = Float64[]   # col excess soil water above urban ponding limit
+    num_substeps_col     ::V = Float64[]   # col adaptive timestep counter
+    frost_table_col      ::V = Float64[]   # col frost table depth (m)
+    zwt_col              ::V = Float64[]   # col water table depth (m)
+    zwts_col             ::V = Float64[]   # col water table depth, shallower of two water depths (m)
+    zwt_perched_col      ::V = Float64[]   # col perched water table depth (m)
+    qcharge_col          ::V = Float64[]   # col aquifer recharge rate (mm/s)
+    icefrac_col          ::M = Matrix{Float64}(undef, 0, 0)  # col fraction of ice (ncols, nlevgrnd)
+    h2osfc_thresh_col    ::V = Float64[]   # col level at which h2osfc "percolates" (time constant)
+    xs_urban_col         ::V = Float64[]   # col excess soil water above urban ponding limit
 
     # --- VIC parameters ---
-    hkdepth_col          ::Vector{FT} = Float64[]   # col VIC decay factor (m) (time constant)
-    b_infil_col          ::Vector{FT} = Float64[]   # col VIC b infiltration parameter (time constant)
-    ds_col               ::Vector{FT} = Float64[]   # col VIC fraction of Dsmax where non-linear baseflow begins (time constant)
-    dsmax_col            ::Vector{FT} = Float64[]   # col VIC max velocity of baseflow (mm/day) (time constant)
-    Wsvic_col            ::Vector{FT} = Float64[]   # col VIC fraction of max soil moisture where non-linear baseflow occurs (time constant)
-    porosity_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC porosity (1-bulk_density/soil_density) (ncols, nlayer)
-    vic_clm_fract_col    ::Array{FT,3} = Array{Float64}(undef, 0, 0, 0)  # col VIC fraction of VIC layers in CLM layers (ncols, nlayer, nlevsoi)
-    depth_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC layer depth of upper layer (ncols, nlayert)
-    c_param_col          ::Vector{FT} = Float64[]   # col VIC baseflow exponent (Qb)
-    expt_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC pore-size distribution related parameter (Q12) (ncols, nlayer)
-    ksat_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC saturated hydrologic conductivity (ncols, nlayer)
-    phi_s_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture diffusion parameter (ncols, nlayer)
-    moist_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture (kg/m2) for VIC soil layers (ncols, nlayert)
-    moist_vol_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC volumetric soil moisture for VIC soil layers (ncols, nlayert)
-    max_moist_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC max layer moist + ice (mm) (ncols, nlayer)
-    top_moist_col        ::Vector{FT} = Float64[]   # col VIC soil moisture in top layers
-    top_max_moist_col    ::Vector{FT} = Float64[]   # col VIC maximum soil moisture in top layers
-    top_ice_col          ::Vector{FT} = Float64[]   # col VIC ice len in top layers
-    top_moist_limited_col::Vector{FT} = Float64[]   # col VIC soil moisture in top layers, limited to no greater than top_max_moist_col
-    ice_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col VIC soil ice (kg/m2) for VIC soil layers (ncols, nlayert)
+    hkdepth_col          ::V = Float64[]   # col VIC decay factor (m) (time constant)
+    b_infil_col          ::V = Float64[]   # col VIC b infiltration parameter (time constant)
+    ds_col               ::V = Float64[]   # col VIC fraction of Dsmax where non-linear baseflow begins (time constant)
+    dsmax_col            ::V = Float64[]   # col VIC max velocity of baseflow (mm/day) (time constant)
+    Wsvic_col            ::V = Float64[]   # col VIC fraction of max soil moisture where non-linear baseflow occurs (time constant)
+    porosity_col         ::M = Matrix{Float64}(undef, 0, 0)  # col VIC porosity (1-bulk_density/soil_density) (ncols, nlayer)
+    vic_clm_fract_col    ::A3 = Array{Float64}(undef, 0, 0, 0)  # col VIC fraction of VIC layers in CLM layers (ncols, nlayer, nlevsoi)
+    depth_col            ::M = Matrix{Float64}(undef, 0, 0)  # col VIC layer depth of upper layer (ncols, nlayert)
+    c_param_col          ::V = Float64[]   # col VIC baseflow exponent (Qb)
+    expt_col             ::M = Matrix{Float64}(undef, 0, 0)  # col VIC pore-size distribution related parameter (Q12) (ncols, nlayer)
+    ksat_col             ::M = Matrix{Float64}(undef, 0, 0)  # col VIC saturated hydrologic conductivity (ncols, nlayer)
+    phi_s_col            ::M = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture diffusion parameter (ncols, nlayer)
+    moist_col            ::M = Matrix{Float64}(undef, 0, 0)  # col VIC soil moisture (kg/m2) for VIC soil layers (ncols, nlayert)
+    moist_vol_col        ::M = Matrix{Float64}(undef, 0, 0)  # col VIC volumetric soil moisture for VIC soil layers (ncols, nlayert)
+    max_moist_col        ::M = Matrix{Float64}(undef, 0, 0)  # col VIC max layer moist + ice (mm) (ncols, nlayer)
+    top_moist_col        ::V = Float64[]   # col VIC soil moisture in top layers
+    top_max_moist_col    ::V = Float64[]   # col VIC maximum soil moisture in top layers
+    top_ice_col          ::V = Float64[]   # col VIC ice len in top layers
+    top_moist_limited_col::V = Float64[]   # col VIC soil moisture in top layers, limited to no greater than top_max_moist_col
+    ice_col              ::M = Matrix{Float64}(undef, 0, 0)  # col VIC soil ice (kg/m2) for VIC soil layers (ncols, nlayert)
 end
+
+SoilHydrologyData{FT}(; kwargs...) where {FT<:Real} =
+    SoilHydrologyData{FT, Vector{FT}, Matrix{FT}, Array{FT,3}}(; kwargs...)
+Adapt.@adapt_structure SoilHydrologyData
+
 
 """
     soilhydrology_init!(sh::SoilHydrologyData, nc::Int)

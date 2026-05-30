@@ -12,62 +12,70 @@ fractions, vegetation water potentials, and accumulated quantities.
 
 Ported from `canopystate_type` in `CanopyStateType.F90`.
 """
-Base.@kwdef mutable struct CanopyStateData{FT<:Real}
+Base.@kwdef mutable struct CanopyStateData{FT<:Real,
+                               V<:AbstractVector{FT},
+                               M<:AbstractMatrix{FT},
+                               VI<:AbstractVector{<:Integer}}
     # --- Integer patch-level fields ---
-    frac_veg_nosno_patch     ::Vector{Int}     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
-    frac_veg_nosno_alb_patch ::Vector{Int}     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
+    frac_veg_nosno_patch     ::VI     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
+    frac_veg_nosno_alb_patch ::VI     = Int[]       # patch fraction of vegetation not covered by snow (0 OR 1) [-]
 
     # --- LAI/SAI (patch-level, 1D) ---
-    tlai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided leaf area index, no burying by snow
-    tsai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided stem area index, no burying by snow
-    elai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided leaf area index with burying by snow
-    esai_patch               ::Vector{FT} = Float64[]   # patch canopy one-sided stem area index with burying by snow
+    tlai_patch               ::V = Float64[]   # patch canopy one-sided leaf area index, no burying by snow
+    tsai_patch               ::V = Float64[]   # patch canopy one-sided stem area index, no burying by snow
+    elai_patch               ::V = Float64[]   # patch canopy one-sided leaf area index with burying by snow
+    esai_patch               ::V = Float64[]   # patch canopy one-sided stem area index with burying by snow
 
     # --- SP mode history fields ---
-    tlai_hist_patch          ::Vector{FT} = Float64[]   # patch canopy one-sided leaf area index, for SP mode
-    tsai_hist_patch          ::Vector{FT} = Float64[]   # patch canopy one-sided stem area index, for SP mode
-    htop_hist_patch          ::Vector{FT} = Float64[]   # patch canopy height, for SP mode
+    tlai_hist_patch          ::V = Float64[]   # patch canopy one-sided leaf area index, for SP mode
+    tsai_hist_patch          ::V = Float64[]   # patch canopy one-sided stem area index, for SP mode
+    htop_hist_patch          ::V = Float64[]   # patch canopy height, for SP mode
 
     # --- Sunlit/shaded LAI (patch-level) ---
-    elai240_patch            ::Vector{FT} = Float64[]   # patch canopy one-sided LAI with burying by snow avg over 10days
-    laisun_patch             ::Vector{FT} = Float64[]   # patch sunlit projected leaf area index
-    laisha_patch             ::Vector{FT} = Float64[]   # patch shaded projected leaf area index
-    mlaidiff_patch           ::Vector{FT} = Float64[]   # patch difference between lai month one and month two
+    elai240_patch            ::V = Float64[]   # patch canopy one-sided LAI with burying by snow avg over 10days
+    laisun_patch             ::V = Float64[]   # patch sunlit projected leaf area index
+    laisha_patch             ::V = Float64[]   # patch shaded projected leaf area index
+    mlaidiff_patch           ::V = Float64[]   # patch difference between lai month one and month two
 
     # --- Sunlit/shaded LAI by canopy layer (patch-level, 2D) ---
-    laisun_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch sunlit leaf area for canopy layer (np, nlevcan)
-    laisha_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch shaded leaf area for canopy layer (np, nlevcan)
+    laisun_z_patch           ::M = Matrix{Float64}(undef, 0, 0)  # patch sunlit leaf area for canopy layer (np, nlevcan)
+    laisha_z_patch           ::M = Matrix{Float64}(undef, 0, 0)  # patch shaded leaf area for canopy layer (np, nlevcan)
 
     # --- Monthly LAI (patch-level, 2D) ---
-    annlai_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch 12 months of monthly lai (np, 12)
+    annlai_patch             ::M = Matrix{Float64}(undef, 0, 0)  # patch 12 months of monthly lai (np, 12)
 
     # --- Biomass (patch-level) ---
-    stem_biomass_patch       ::Vector{FT} = Float64[]   # Aboveground stem biomass (kg/m**2)
-    leaf_biomass_patch       ::Vector{FT} = Float64[]   # Aboveground leaf biomass (kg/m**2)
+    stem_biomass_patch       ::V = Float64[]   # Aboveground stem biomass (kg/m**2)
+    leaf_biomass_patch       ::V = Float64[]   # Aboveground leaf biomass (kg/m**2)
 
     # --- Canopy geometry (patch-level) ---
-    htop_patch               ::Vector{FT} = Float64[]   # patch canopy top (m)
-    hbot_patch               ::Vector{FT} = Float64[]   # patch canopy bottom (m)
-    z0m_patch                ::Vector{FT} = Float64[]   # patch momentum roughness length (m)
-    displa_patch             ::Vector{FT} = Float64[]   # patch displacement height (m)
+    htop_patch               ::V = Float64[]   # patch canopy top (m)
+    hbot_patch               ::V = Float64[]   # patch canopy bottom (m)
+    z0m_patch                ::V = Float64[]   # patch momentum roughness length (m)
+    displa_patch             ::V = Float64[]   # patch displacement height (m)
 
     # --- Sunlit fraction (patch-level) ---
-    fsun_patch               ::Vector{FT} = Float64[]   # patch sunlit fraction of canopy
-    fsun24_patch             ::Vector{FT} = Float64[]   # patch 24hr average of sunlit fraction of canopy
-    fsun240_patch            ::Vector{FT} = Float64[]   # patch 240hr average of sunlit fraction of canopy
+    fsun_patch               ::V = Float64[]   # patch sunlit fraction of canopy
+    fsun24_patch             ::V = Float64[]   # patch 24hr average of sunlit fraction of canopy
+    fsun240_patch            ::V = Float64[]   # patch 240hr average of sunlit fraction of canopy
 
     # --- Leaf properties (patch-level) ---
-    dleaf_patch              ::Vector{FT} = Float64[]   # patch characteristic leaf width (diameter) [m]
-    rscanopy_patch           ::Vector{FT} = Float64[]   # patch canopy stomatal resistance (s/m) (ED specific)
+    dleaf_patch              ::V = Float64[]   # patch characteristic leaf width (diameter) [m]
+    rscanopy_patch           ::V = Float64[]   # patch canopy stomatal resistance (s/m) (ED specific)
 
     # --- Vegetation water potential (patch-level, 2D) ---
-    vegwp_patch              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential (mm) (np, nvegwcs)
-    vegwp_ln_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential at local noon (mm) (np, nvegwcs)
-    vegwp_pd_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch predawn vegetation water matric potential (mm) (np, nvegwcs)
+    vegwp_patch              ::M = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential (mm) (np, nvegwcs)
+    vegwp_ln_patch           ::M = Matrix{Float64}(undef, 0, 0)  # patch vegetation water matric potential at local noon (mm) (np, nvegwcs)
+    vegwp_pd_patch           ::M = Matrix{Float64}(undef, 0, 0)  # patch predawn vegetation water matric potential (mm) (np, nvegwcs)
 
     # --- Namelist parameter ---
     leaf_mr_vcm              ::Float64 = SPVAL               # Scalar constant of leaf respiration with Vcmax
 end
+
+CanopyStateData{FT}(; kwargs...) where {FT<:Real} =
+    CanopyStateData{FT, Vector{FT}, Matrix{FT}, Vector{Int}}(; kwargs...)
+Adapt.@adapt_structure CanopyStateData
+
 
 """
     canopystate_init!(cs::CanopyStateData, np::Int)

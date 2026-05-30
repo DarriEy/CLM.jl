@@ -11,28 +11,34 @@ patch, and gridcell levels.
 
 Ported from `waterbalance_type` in `WaterBalanceType.F90`.
 """
-Base.@kwdef mutable struct WaterBalanceData{FT<:Real}
+Base.@kwdef mutable struct WaterBalanceData{FT<:Real,
+                                V<:AbstractVector{FT}}
     # --- Column-level 1D fields ---
-    h2osno_old_col                       ::Vector{FT} = Float64[]  # col snow mass for previous time step (kg/m2)
-    snow_sources_col                     ::Vector{FT} = Float64[]  # col snow sources (mm H2O/s)
-    snow_sinks_col                       ::Vector{FT} = Float64[]  # col snow sinks (mm H2O/s)
-    wa_reset_nonconservation_gain_col    ::Vector{FT} = Float64[]  # col mass gained from resetting wa_col (mm) [negative = mass lost]
-    begwb_col                            ::Vector{FT} = Float64[]  # col water mass beginning of time step
-    endwb_col                            ::Vector{FT} = Float64[]  # col water mass end of time step
-    errh2o_col                           ::Vector{FT} = Float64[]  # col water conservation error (mm H2O)
-    errh2osno_col                        ::Vector{FT} = Float64[]  # col snow water conservation error (mm H2O)
+    h2osno_old_col                       ::V = Float64[]  # col snow mass for previous time step (kg/m2)
+    snow_sources_col                     ::V = Float64[]  # col snow sources (mm H2O/s)
+    snow_sinks_col                       ::V = Float64[]  # col snow sinks (mm H2O/s)
+    wa_reset_nonconservation_gain_col    ::V = Float64[]  # col mass gained from resetting wa_col (mm) [negative = mass lost]
+    begwb_col                            ::V = Float64[]  # col water mass beginning of time step
+    endwb_col                            ::V = Float64[]  # col water mass end of time step
+    errh2o_col                           ::V = Float64[]  # col water conservation error (mm H2O)
+    errh2osno_col                        ::V = Float64[]  # col snow water conservation error (mm H2O)
 
     # --- Patch-level 1D fields ---
-    errh2o_patch                         ::Vector{FT} = Float64[]  # patch water conservation error (mm H2O)
+    errh2o_patch                         ::V = Float64[]  # patch water conservation error (mm H2O)
 
     # --- Gridcell-level 1D fields ---
-    liq1_grc                             ::Vector{FT} = Float64[]  # grc initial gridcell total h2o liq content
-    liq2_grc                             ::Vector{FT} = Float64[]  # grc post land cover change total liq content
-    ice1_grc                             ::Vector{FT} = Float64[]  # grc initial gridcell total h2o ice content
-    ice2_grc                             ::Vector{FT} = Float64[]  # grc post land cover change total ice content
-    begwb_grc                            ::Vector{FT} = Float64[]  # grc water mass beginning of time step
-    endwb_grc                            ::Vector{FT} = Float64[]  # grc water mass end of time step
+    liq1_grc                             ::V = Float64[]  # grc initial gridcell total h2o liq content
+    liq2_grc                             ::V = Float64[]  # grc post land cover change total liq content
+    ice1_grc                             ::V = Float64[]  # grc initial gridcell total h2o ice content
+    ice2_grc                             ::V = Float64[]  # grc post land cover change total ice content
+    begwb_grc                            ::V = Float64[]  # grc water mass beginning of time step
+    endwb_grc                            ::V = Float64[]  # grc water mass end of time step
 end
+
+WaterBalanceData{FT}(; kwargs...) where {FT<:Real} =
+    WaterBalanceData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure WaterBalanceData
+
 
 """
     waterbalance_init!(wb, nc, np, ng)

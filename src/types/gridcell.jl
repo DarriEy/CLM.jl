@@ -14,29 +14,38 @@ landunit index information for each gridcell.
 
 Ported from `gridcell_type` in `GridcellType.F90`.
 """
-Base.@kwdef mutable struct GridcellData{FT<:Real}
+Base.@kwdef mutable struct GridcellData{FT<:Real,
+                            V<:AbstractVector{FT},
+                            VI<:AbstractVector{<:Integer},
+                            MI<:AbstractMatrix{<:Integer},
+                            VB<:AbstractVector{Bool}}
     # topological mapping functionality, local 1d gdc arrays
-    area     ::Vector{FT} = Float64[]   # total land area, gridcell (km^2)
-    lat      ::Vector{FT} = Float64[]   # latitude (radians)
-    lon      ::Vector{FT} = Float64[]   # longitude (radians)
-    latdeg   ::Vector{FT} = Float64[]   # latitude (degrees)
-    londeg   ::Vector{FT} = Float64[]   # longitude (degrees)
-    active   ::Vector{Bool}    = Bool[]      # just needed for symmetry with other subgrid types
+    area     ::V = Float64[]   # total land area, gridcell (km^2)
+    lat      ::V = Float64[]   # latitude (radians)
+    lon      ::V = Float64[]   # longitude (radians)
+    latdeg   ::V = Float64[]   # latitude (degrees)
+    londeg   ::V = Float64[]   # longitude (degrees)
+    active   ::VB    = Bool[]      # just needed for symmetry with other subgrid types
 
-    nbedrock ::Vector{Int}     = Int[]       # index of uppermost bedrock layer
+    nbedrock ::VI     = Int[]       # index of uppermost bedrock layer
 
     # Daylength
-    max_dayl  ::Vector{FT} = Float64[]  # maximum daylength for this grid cell (s)
-    dayl      ::Vector{FT} = Float64[]  # daylength (seconds)
-    prev_dayl ::Vector{FT} = Float64[]  # daylength from previous timestep (seconds)
+    max_dayl  ::V = Float64[]  # maximum daylength for this grid cell (s)
+    dayl      ::V = Float64[]  # daylength (seconds)
+    prev_dayl ::V = Float64[]  # daylength from previous timestep (seconds)
 
     # indices into landunit-level arrays for landunits in this grid cell
     # (ispval implies this landunit doesn't exist on this grid cell)
     # [1:max_lunit, begg:endg]
     # (note: spatial dimension is last for efficiency — outer loop over g,
     #  inner loop over landunit type)
-    landunit_indices ::Matrix{Int} = Matrix{Int}(undef, 0, 0)
+    landunit_indices ::MI = Matrix{Int}(undef, 0, 0)
 end
+
+GridcellData{FT}(; kwargs...) where {FT<:Real} =
+    GridcellData{FT, Vector{FT}, Vector{Int}, Matrix{Int}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure GridcellData
+
 
 """
     gridcell_init!(grc::GridcellData, ngridcells::Int)

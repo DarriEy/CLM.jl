@@ -12,24 +12,31 @@ velocity, aerodynamic resistance, and surface data fields.
 
 Ported from `lakestate_type` in `LakeStateType.F90`.
 """
-Base.@kwdef mutable struct LakeStateData{FT<:Real}
+Base.@kwdef mutable struct LakeStateData{FT<:Real,
+                             V<:AbstractVector{FT},
+                             M<:AbstractMatrix{FT}}
     # --- Time constant variables (from surface data) ---
-    lakefetch_col        ::Vector{FT} = Float64[]   # col lake fetch from surface data (m)
-    etal_col             ::Vector{FT} = Float64[]   # col lake extinction coefficient from surface data (1/m)
+    lakefetch_col        ::V = Float64[]   # col lake fetch from surface data (m)
+    etal_col             ::V = Float64[]   # col lake extinction coefficient from surface data (1/m)
 
     # --- Time varying variables ---
-    lake_raw_col         ::Vector{FT} = Float64[]   # col aerodynamic resistance for moisture (s/m)
-    ks_col               ::Vector{FT} = Float64[]   # col coefficient for calculation of decay of eddy diffusivity with depth
-    ws_col               ::Vector{FT} = Float64[]   # col surface friction velocity (m/s)
-    ust_lake_col         ::Vector{FT} = Float64[]   # col friction velocity (m/s)
-    betaprime_col        ::Vector{FT} = Float64[]   # col effective beta: sabg_lyr(p,jtop) for snow layers, beta otherwise
-    savedtke1_col        ::Vector{FT} = Float64[]   # col top level eddy conductivity from previous timestep (W/mK)
-    lake_icefrac_col     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col mass fraction of lake layer that is frozen (ncols, nlevlak)
-    lake_icefracsurf_col ::Vector{FT} = Float64[]   # col mass fraction of surface lake layer that is frozen
-    lake_icethick_col    ::Vector{FT} = Float64[]   # col ice thickness (m) (integrated if lakepuddling)
-    lakeresist_col       ::Vector{FT} = Float64[]   # col [s/m] (Needed for calc. of grnd_ch4_cond)
-    ram1_lake_patch      ::Vector{FT} = Float64[]   # patch aerodynamical resistance (s/m)
+    lake_raw_col         ::V = Float64[]   # col aerodynamic resistance for moisture (s/m)
+    ks_col               ::V = Float64[]   # col coefficient for calculation of decay of eddy diffusivity with depth
+    ws_col               ::V = Float64[]   # col surface friction velocity (m/s)
+    ust_lake_col         ::V = Float64[]   # col friction velocity (m/s)
+    betaprime_col        ::V = Float64[]   # col effective beta: sabg_lyr(p,jtop) for snow layers, beta otherwise
+    savedtke1_col        ::V = Float64[]   # col top level eddy conductivity from previous timestep (W/mK)
+    lake_icefrac_col     ::M = Matrix{Float64}(undef, 0, 0)  # col mass fraction of lake layer that is frozen (ncols, nlevlak)
+    lake_icefracsurf_col ::V = Float64[]   # col mass fraction of surface lake layer that is frozen
+    lake_icethick_col    ::V = Float64[]   # col ice thickness (m) (integrated if lakepuddling)
+    lakeresist_col       ::V = Float64[]   # col [s/m] (Needed for calc. of grnd_ch4_cond)
+    ram1_lake_patch      ::V = Float64[]   # patch aerodynamical resistance (s/m)
 end
+
+LakeStateData{FT}(; kwargs...) where {FT<:Real} =
+    LakeStateData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure LakeStateData
+
 
 """
     lakestate_init!(ls::LakeStateData, nc::Int, np::Int)

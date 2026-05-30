@@ -22,41 +22,49 @@ urban properties, and hillslope variables for each landunit.
 
 Ported from `landunit_type` in `LandunitType.F90`.
 """
-Base.@kwdef mutable struct LandunitData{FT<:Real}
+Base.@kwdef mutable struct LandunitData{FT<:Real,
+                            V<:AbstractVector{FT},
+                            VI<:AbstractVector{<:Integer},
+                            VB<:AbstractVector{Bool}}
     # g/l/c/p hierarchy, local g/l/c/p cells only
-    gridcell    ::Vector{Int}     = Int[]       # index into gridcell level quantities
-    wtgcell     ::Vector{FT} = Float64[]   # weight (relative to gridcell)
-    coli        ::Vector{Int}     = Int[]       # beginning column index per landunit
-    colf        ::Vector{Int}     = Int[]       # ending column index for each landunit
-    ncolumns    ::Vector{Int}     = Int[]       # number of columns for each landunit
-    nhillslopes ::Vector{Int}     = Int[]       # number of hillslopes for each landunit
-    patchi      ::Vector{Int}     = Int[]       # beginning patch index for each landunit
-    patchf      ::Vector{Int}     = Int[]       # ending patch index for each landunit
-    npatches    ::Vector{Int}     = Int[]       # number of patches for each landunit
+    gridcell    ::VI     = Int[]       # index into gridcell level quantities
+    wtgcell     ::V = Float64[]   # weight (relative to gridcell)
+    coli        ::VI     = Int[]       # beginning column index per landunit
+    colf        ::VI     = Int[]       # ending column index for each landunit
+    ncolumns    ::VI     = Int[]       # number of columns for each landunit
+    nhillslopes ::VI     = Int[]       # number of hillslopes for each landunit
+    patchi      ::VI     = Int[]       # beginning patch index for each landunit
+    patchf      ::VI     = Int[]       # ending patch index for each landunit
+    npatches    ::VI     = Int[]       # number of patches for each landunit
 
     # topological mapping functionality
-    itype       ::Vector{Int}     = Int[]       # landunit type
-    ifspecial   ::Vector{Bool}    = Bool[]      # true => landunit is not vegetated
-    lakpoi      ::Vector{Bool}    = Bool[]      # true => lake point
-    urbpoi      ::Vector{Bool}    = Bool[]      # true => urban point
-    glcpoi      ::Vector{Bool}    = Bool[]      # true => glacier point
-    active      ::Vector{Bool}    = Bool[]      # true => do computations on this landunit
+    itype       ::VI     = Int[]       # landunit type
+    ifspecial   ::VB    = Bool[]      # true => landunit is not vegetated
+    lakpoi      ::VB    = Bool[]      # true => lake point
+    urbpoi      ::VB    = Bool[]      # true => urban point
+    glcpoi      ::VB    = Bool[]      # true => glacier point
+    active      ::VB    = Bool[]      # true => do computations on this landunit
 
     # urban properties
-    canyon_hwr   ::Vector{FT} = Float64[]  # canyon height to width ratio (-)
-    wtroad_perv  ::Vector{FT} = Float64[]  # weight of pervious road column to total road (-)
-    wtlunit_roof ::Vector{FT} = Float64[]  # weight of roof with respect to urban landunit (-)
-    ht_roof      ::Vector{FT} = Float64[]  # height of urban roof (m)
-    z_0_town     ::Vector{FT} = Float64[]  # urban momentum roughness length (m)
-    z_d_town     ::Vector{FT} = Float64[]  # urban displacement height (m)
+    canyon_hwr   ::V = Float64[]  # canyon height to width ratio (-)
+    wtroad_perv  ::V = Float64[]  # weight of pervious road column to total road (-)
+    wtlunit_roof ::V = Float64[]  # weight of roof with respect to urban landunit (-)
+    ht_roof      ::V = Float64[]  # height of urban roof (m)
+    z_0_town     ::V = Float64[]  # urban momentum roughness length (m)
+    z_d_town     ::V = Float64[]  # urban displacement height (m)
 
     # hillslope variables
-    stream_channel_depth  ::Vector{FT} = Float64[]  # stream channel bankfull depth (m)
-    stream_channel_width  ::Vector{FT} = Float64[]  # stream channel bankfull width (m)
-    stream_channel_length ::Vector{FT} = Float64[]  # stream channel length (m)
-    stream_channel_slope  ::Vector{FT} = Float64[]  # stream channel slope (m/m)
-    stream_channel_number ::Vector{FT} = Float64[]  # number of channels in landunit
+    stream_channel_depth  ::V = Float64[]  # stream channel bankfull depth (m)
+    stream_channel_width  ::V = Float64[]  # stream channel bankfull width (m)
+    stream_channel_length ::V = Float64[]  # stream channel length (m)
+    stream_channel_slope  ::V = Float64[]  # stream channel slope (m/m)
+    stream_channel_number ::V = Float64[]  # number of channels in landunit
 end
+
+LandunitData{FT}(; kwargs...) where {FT<:Real} =
+    LandunitData{FT, Vector{FT}, Vector{Int}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure LandunitData
+
 
 """
     landunit_init!(lun::LandunitData, nlandunits::Int)

@@ -25,61 +25,71 @@ characteristics.
 
 Ported from `column_type` in `ColumnType.F90`.
 """
-Base.@kwdef mutable struct ColumnData{FT<:Real}
+Base.@kwdef mutable struct ColumnData{FT<:Real,
+                          V<:AbstractVector{FT},
+                          M<:AbstractMatrix{FT},
+                          VI<:AbstractVector{<:Integer},
+                          MI<:AbstractMatrix{<:Integer},
+                          VB<:AbstractVector{Bool}}
     # g/l/c/p hierarchy, local g/l/c/p cells only
-    landunit         ::Vector{Int}     = Int[]       # index into landunit level quantities
-    wtlunit          ::Vector{FT} = Float64[]   # weight (relative to landunit)
-    gridcell         ::Vector{Int}     = Int[]       # index into gridcell level quantities
-    wtgcell          ::Vector{FT} = Float64[]   # weight (relative to gridcell)
-    patchi           ::Vector{Int}     = Int[]       # beginning patch index for each column
-    patchf           ::Vector{Int}     = Int[]       # ending patch index for each column
-    npatches         ::Vector{Int}     = Int[]       # number of patches for each column
+    landunit         ::VI     = Int[]       # index into landunit level quantities
+    wtlunit          ::V = Float64[]   # weight (relative to landunit)
+    gridcell         ::VI     = Int[]       # index into gridcell level quantities
+    wtgcell          ::V = Float64[]   # weight (relative to gridcell)
+    patchi           ::VI     = Int[]       # beginning patch index for each column
+    patchf           ::VI     = Int[]       # ending patch index for each column
+    npatches         ::VI     = Int[]       # number of patches for each column
 
     # topological mapping functionality
-    itype            ::Vector{Int}     = Int[]       # column type
-    lun_itype        ::Vector{Int}     = Int[]       # landunit type (convenience copy)
-    active           ::Vector{Bool}    = Bool[]      # true => do computations on this column
-    type_is_dynamic  ::Vector{Bool}    = Bool[]      # true => itype can change throughout the run
+    itype            ::VI     = Int[]       # column type
+    lun_itype        ::VI     = Int[]       # landunit type (convenience copy)
+    active           ::VB    = Bool[]      # true => do computations on this column
+    type_is_dynamic  ::VB    = Bool[]      # true => itype can change throughout the run
 
-    is_fates         ::Vector{Bool}    = Bool[]      # true => this is a fates column
+    is_fates         ::VB    = Bool[]      # true => this is a fates column
 
     # topography
-    micro_sigma      ::Vector{FT} = Float64[]   # microtopography pdf sigma (m)
-    topo_slope       ::Vector{FT} = Float64[]   # gridcell topographic slope
-    topo_std         ::Vector{FT} = Float64[]   # gridcell elevation standard deviation
+    micro_sigma      ::V = Float64[]   # microtopography pdf sigma (m)
+    topo_slope       ::V = Float64[]   # gridcell topographic slope
+    topo_std         ::V = Float64[]   # gridcell elevation standard deviation
 
     # vertical levels
-    snl              ::Vector{Int}     = Int[]       # number of snow layers
-    dz               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # layer thickness (m)
-    z                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # layer depth (m)
-    zi               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # interface level below a "z" level (m)
-    zii              ::Vector{FT} = Float64[]   # convective boundary height (m)
-    dz_lake          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lake layer thickness (m)
-    z_lake           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # layer depth for lake (m)
-    lakedepth        ::Vector{FT} = Float64[]   # variable lake depth (m)
-    nbedrock         ::Vector{Int}     = Int[]       # variable depth to bedrock index
+    snl              ::VI     = Int[]       # number of snow layers
+    dz               ::M = Matrix{Float64}(undef, 0, 0)  # layer thickness (m)
+    z                ::M = Matrix{Float64}(undef, 0, 0)  # layer depth (m)
+    zi               ::M = Matrix{Float64}(undef, 0, 0)  # interface level below a "z" level (m)
+    zii              ::V = Float64[]   # convective boundary height (m)
+    dz_lake          ::M = Matrix{Float64}(undef, 0, 0)  # lake layer thickness (m)
+    z_lake           ::M = Matrix{Float64}(undef, 0, 0)  # layer depth for lake (m)
+    lakedepth        ::V = Float64[]   # variable lake depth (m)
+    nbedrock         ::VI     = Int[]       # variable depth to bedrock index
 
     # hillslope hydrology variables
-    col_ndx          ::Vector{Int}     = Int[]       # column index of column
-    colu             ::Vector{Int}     = Int[]       # column index of uphill column
-    cold             ::Vector{Int}     = Int[]       # column index of downhill column
-    hillslope_ndx    ::Vector{Int}     = Int[]       # hillslope identifier
-    hill_elev        ::Vector{FT} = Float64[]   # mean elevation relative to stream channel (m)
-    hill_slope       ::Vector{FT} = Float64[]   # mean along-hill slope (m/m)
-    hill_area        ::Vector{FT} = Float64[]   # mean surface area (m2)
-    hill_width       ::Vector{FT} = Float64[]   # across-hill width of bottom boundary (m)
-    hill_distance    ::Vector{FT} = Float64[]   # along-hill distance from bottom (m)
-    hill_aspect      ::Vector{FT} = Float64[]   # azimuth angle wrt north (radians)
+    col_ndx          ::VI     = Int[]       # column index of column
+    colu             ::VI     = Int[]       # column index of uphill column
+    cold             ::VI     = Int[]       # column index of downhill column
+    hillslope_ndx    ::VI     = Int[]       # hillslope identifier
+    hill_elev        ::V = Float64[]   # mean elevation relative to stream channel (m)
+    hill_slope       ::V = Float64[]   # mean along-hill slope (m/m)
+    hill_area        ::V = Float64[]   # mean surface area (m2)
+    hill_width       ::V = Float64[]   # across-hill width of bottom boundary (m)
+    hill_distance    ::V = Float64[]   # along-hill distance from bottom (m)
+    hill_aspect      ::V = Float64[]   # azimuth angle wrt north (radians)
 
     # other column characteristics
-    is_hillslope_column   ::Vector{Bool}    = Bool[]  # true if hillslope element
-    hydrologically_active ::Vector{Bool}    = Bool[]  # true if hydrologically active type
-    urbpoi                ::Vector{Bool}    = Bool[]  # true => urban point
+    is_hillslope_column   ::VB    = Bool[]  # true if hillslope element
+    hydrologically_active ::VB    = Bool[]  # true if hydrologically active type
+    urbpoi                ::VB    = Bool[]  # true => urban point
 
     # levgrnd_class: class in which each layer falls (e.g., soil vs. bedrock).
     # ispval indicates the layer is completely unused for this column.
-    levgrnd_class    ::Matrix{Int}     = Matrix{Int}(undef, 0, 0)  # (ncols, nlevmaxurbgrnd)
+    levgrnd_class    ::MI     = Matrix{Int}(undef, 0, 0)  # (ncols, nlevmaxurbgrnd)
 end
+
+ColumnData{FT}(; kwargs...) where {FT<:Real} =
+    ColumnData{FT, Vector{FT}, Matrix{FT}, Vector{Int}, Matrix{Int}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure ColumnData
+
 
 """
     column_init!(col::ColumnData, ncols::Int)

@@ -12,67 +12,74 @@ ground absorption, urban surface absorption, and NIR diagnostics.
 
 Ported from `solarabs_type` in `SolarAbsorbedType.F90`.
 """
-Base.@kwdef mutable struct SolarAbsorbedData{FT<:Real}
+Base.@kwdef mutable struct SolarAbsorbedData{FT<:Real,
+                                 V<:AbstractVector{FT},
+                                 M<:AbstractMatrix{FT}}
     # --- Solar reflected (patch-level 1D) ---
-    fsr_patch                ::Vector{FT} = Float64[]   # patch solar radiation reflected (W/m**2)
-    fsrSF_patch              ::Vector{FT} = Float64[]   # diagnostic snow-free patch solar radiation reflected (W/m**2)
-    ssre_fsr_patch           ::Vector{FT} = Float64[]   # snow radiative effect on patch solar radiation reflected (W/m**2)
+    fsr_patch                ::V = Float64[]   # patch solar radiation reflected (W/m**2)
+    fsrSF_patch              ::V = Float64[]   # diagnostic snow-free patch solar radiation reflected (W/m**2)
+    ssre_fsr_patch           ::V = Float64[]   # snow radiative effect on patch solar radiation reflected (W/m**2)
 
     # --- Solar absorbed (patch-level 1D) ---
-    fsa_patch                ::Vector{FT} = Float64[]   # patch solar radiation absorbed (total) (W/m**2)
-    fsa_u_patch              ::Vector{FT} = Float64[]   # patch urban solar radiation absorbed (total) (W/m**2)
-    fsa_r_patch              ::Vector{FT} = Float64[]   # patch rural solar radiation absorbed (total) (W/m**2)
+    fsa_patch                ::V = Float64[]   # patch solar radiation absorbed (total) (W/m**2)
+    fsa_u_patch              ::V = Float64[]   # patch urban solar radiation absorbed (total) (W/m**2)
+    fsa_r_patch              ::V = Float64[]   # patch rural solar radiation absorbed (total) (W/m**2)
 
     # --- Canopy PAR absorption (patch-level 2D: npatch × nlevcan) ---
-    parsun_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch absorbed PAR for sunlit leaves in canopy layer (W/m**2)
-    parsha_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch absorbed PAR for shaded leaves in canopy layer (W/m**2)
-    par240d_z_patch          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # 10-day running mean of daytime patch absorbed PAR (W/m**2)
-    par240x_z_patch          ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # 10-day running mean of maximum patch absorbed PAR (W/m**2)
-    par24d_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # daily accumulated absorbed PAR (J/m**2)
-    par24x_z_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # daily max of patch absorbed PAR (W/m**2)
+    parsun_z_patch           ::M = Matrix{Float64}(undef, 0, 0)  # patch absorbed PAR for sunlit leaves in canopy layer (W/m**2)
+    parsha_z_patch           ::M = Matrix{Float64}(undef, 0, 0)  # patch absorbed PAR for shaded leaves in canopy layer (W/m**2)
+    par240d_z_patch          ::M = Matrix{Float64}(undef, 0, 0)  # 10-day running mean of daytime patch absorbed PAR (W/m**2)
+    par240x_z_patch          ::M = Matrix{Float64}(undef, 0, 0)  # 10-day running mean of maximum patch absorbed PAR (W/m**2)
+    par24d_z_patch           ::M = Matrix{Float64}(undef, 0, 0)  # daily accumulated absorbed PAR (J/m**2)
+    par24x_z_patch           ::M = Matrix{Float64}(undef, 0, 0)  # daily max of patch absorbed PAR (W/m**2)
 
     # --- Ground absorption (patch-level 1D) ---
-    sabg_soil_patch          ::Vector{FT} = Float64[]   # patch solar radiation absorbed by soil (W/m**2)
-    sabg_snow_patch          ::Vector{FT} = Float64[]   # patch solar radiation absorbed by snow (W/m**2)
-    sabg_patch               ::Vector{FT} = Float64[]   # patch solar radiation absorbed by ground (W/m**2)
-    sabg_chk_patch           ::Vector{FT} = Float64[]   # patch fsno weighted sum (W/m**2)
-    sabg_pen_patch           ::Vector{FT} = Float64[]   # patch shortwave radiation penetrating top soisno layer (W/m2)
-    sub_surf_abs_SW_patch    ::Vector{FT} = Float64[]   # patch fraction of solar radiation absorbed below first snow layer
+    sabg_soil_patch          ::V = Float64[]   # patch solar radiation absorbed by soil (W/m**2)
+    sabg_snow_patch          ::V = Float64[]   # patch solar radiation absorbed by snow (W/m**2)
+    sabg_patch               ::V = Float64[]   # patch solar radiation absorbed by ground (W/m**2)
+    sabg_chk_patch           ::V = Float64[]   # patch fsno weighted sum (W/m**2)
+    sabg_pen_patch           ::V = Float64[]   # patch shortwave radiation penetrating top soisno layer (W/m2)
+    sub_surf_abs_SW_patch    ::V = Float64[]   # patch fraction of solar radiation absorbed below first snow layer
 
     # --- Ground absorption per layer (patch-level 2D: npatch × (nlevsno+1)) ---
-    sabg_lyr_patch           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch absorbed radiation in each snow layer and top soil layer (W/m2)
+    sabg_lyr_patch           ::M = Matrix{Float64}(undef, 0, 0)  # patch absorbed radiation in each snow layer and top soil layer (W/m2)
 
     # --- Vegetation absorption (patch-level 1D) ---
-    sabv_patch               ::Vector{FT} = Float64[]   # patch solar radiation absorbed by vegetation (W/m**2)
+    sabv_patch               ::V = Float64[]   # patch solar radiation absorbed by vegetation (W/m**2)
 
     # --- Urban surface absorption (landunit-level 2D: nlun × numrad) ---
-    sabs_roof_dir_lun        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by roof
-    sabs_roof_dif_lun        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by roof
-    sabs_sunwall_dir_lun     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by sunwall
-    sabs_sunwall_dif_lun     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by sunwall
-    sabs_shadewall_dir_lun   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by shadewall
-    sabs_shadewall_dif_lun   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by shadewall
-    sabs_improad_dir_lun     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by impervious road
-    sabs_improad_dif_lun     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by impervious road
-    sabs_perroad_dir_lun     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by pervious road
-    sabs_perroad_dif_lun     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by pervious road
+    sabs_roof_dir_lun        ::M = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by roof
+    sabs_roof_dif_lun        ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by roof
+    sabs_sunwall_dir_lun     ::M = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by sunwall
+    sabs_sunwall_dif_lun     ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by sunwall
+    sabs_shadewall_dir_lun   ::M = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by shadewall
+    sabs_shadewall_dif_lun   ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by shadewall
+    sabs_improad_dir_lun     ::M = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by impervious road
+    sabs_improad_dif_lun     ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by impervious road
+    sabs_perroad_dir_lun     ::M = Matrix{Float64}(undef, 0, 0)  # lun direct solar absorbed by pervious road
+    sabs_perroad_dif_lun     ::M = Matrix{Float64}(undef, 0, 0)  # lun diffuse solar absorbed by pervious road
 
     # --- NIR diagnostics (patch-level 1D) ---
-    fsds_nir_d_patch         ::Vector{FT} = Float64[]   # patch incident direct beam nir solar radiation (W/m**2)
-    fsds_nir_i_patch         ::Vector{FT} = Float64[]   # patch incident diffuse nir solar radiation (W/m**2)
-    fsds_nir_d_ln_patch      ::Vector{FT} = Float64[]   # patch incident direct beam nir solar radiation at local noon (W/m**2)
-    fsr_nir_d_patch          ::Vector{FT} = Float64[]   # patch reflected direct beam nir solar radiation (W/m**2)
-    fsr_nir_i_patch          ::Vector{FT} = Float64[]   # patch reflected diffuse nir solar radiation (W/m**2)
-    fsr_nir_d_ln_patch       ::Vector{FT} = Float64[]   # patch reflected direct beam nir solar radiation at local noon (W/m**2)
+    fsds_nir_d_patch         ::V = Float64[]   # patch incident direct beam nir solar radiation (W/m**2)
+    fsds_nir_i_patch         ::V = Float64[]   # patch incident diffuse nir solar radiation (W/m**2)
+    fsds_nir_d_ln_patch      ::V = Float64[]   # patch incident direct beam nir solar radiation at local noon (W/m**2)
+    fsr_nir_d_patch          ::V = Float64[]   # patch reflected direct beam nir solar radiation (W/m**2)
+    fsr_nir_i_patch          ::V = Float64[]   # patch reflected diffuse nir solar radiation (W/m**2)
+    fsr_nir_d_ln_patch       ::V = Float64[]   # patch reflected direct beam nir solar radiation at local noon (W/m**2)
 
     # --- Snow-free NIR diagnostics (patch-level 1D) ---
-    fsrSF_nir_d_patch        ::Vector{FT} = Float64[]   # snow-free patch reflected direct beam nir solar radiation (W/m**2)
-    fsrSF_nir_i_patch        ::Vector{FT} = Float64[]   # snow-free patch reflected diffuse nir solar radiation (W/m**2)
-    fsrSF_nir_d_ln_patch     ::Vector{FT} = Float64[]   # snow-free patch reflected direct beam nir solar radiation at local noon (W/m**2)
-    ssre_fsr_nir_d_patch     ::Vector{FT} = Float64[]   # snow radiative effect on direct beam nir reflected (W/m**2)
-    ssre_fsr_nir_i_patch     ::Vector{FT} = Float64[]   # snow radiative effect on diffuse nir reflected (W/m**2)
-    ssre_fsr_nir_d_ln_patch  ::Vector{FT} = Float64[]   # snow radiative effect on direct beam nir reflected at local noon (W/m**2)
+    fsrSF_nir_d_patch        ::V = Float64[]   # snow-free patch reflected direct beam nir solar radiation (W/m**2)
+    fsrSF_nir_i_patch        ::V = Float64[]   # snow-free patch reflected diffuse nir solar radiation (W/m**2)
+    fsrSF_nir_d_ln_patch     ::V = Float64[]   # snow-free patch reflected direct beam nir solar radiation at local noon (W/m**2)
+    ssre_fsr_nir_d_patch     ::V = Float64[]   # snow radiative effect on direct beam nir reflected (W/m**2)
+    ssre_fsr_nir_i_patch     ::V = Float64[]   # snow radiative effect on diffuse nir reflected (W/m**2)
+    ssre_fsr_nir_d_ln_patch  ::V = Float64[]   # snow radiative effect on direct beam nir reflected at local noon (W/m**2)
 end
+
+SolarAbsorbedData{FT}(; kwargs...) where {FT<:Real} =
+    SolarAbsorbedData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure SolarAbsorbedData
+
 
 """
     solarabs_init!(sa::SolarAbsorbedData, np::Int, nl::Int;

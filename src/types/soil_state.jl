@@ -13,65 +13,72 @@ root distributions.
 
 Ported from `soilstate_type` in `SoilStateType.F90`.
 """
-Base.@kwdef mutable struct SoilStateData{FT<:Real}
+Base.@kwdef mutable struct SoilStateData{FT<:Real,
+                             V<:AbstractVector{FT},
+                             M<:AbstractMatrix{FT}}
     # --- Sand / clay / organic matter ---
-    sandfrac_patch           ::Vector{FT} = Float64[]   # patch sand fraction
-    clayfrac_patch           ::Vector{FT} = Float64[]   # patch clay fraction
-    mss_frc_cly_vld_col      ::Vector{FT} = Float64[]   # col mass fraction clay limited to 0.20
-    cellorg_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col organic matter (ncols, nlevsoi)
-    cellsand_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col sand value (ncols, nlevsoi)
-    cellclay_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col clay value (ncols, nlevsoi)
-    bd_col                   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col bulk density of dry soil [kg/m^3] (ncols, nlevgrnd)
+    sandfrac_patch           ::V = Float64[]   # patch sand fraction
+    clayfrac_patch           ::V = Float64[]   # patch clay fraction
+    mss_frc_cly_vld_col      ::V = Float64[]   # col mass fraction clay limited to 0.20
+    cellorg_col              ::M = Matrix{Float64}(undef, 0, 0)  # col organic matter (ncols, nlevsoi)
+    cellsand_col             ::M = Matrix{Float64}(undef, 0, 0)  # col sand value (ncols, nlevsoi)
+    cellclay_col             ::M = Matrix{Float64}(undef, 0, 0)  # col clay value (ncols, nlevsoi)
+    bd_col                   ::M = Matrix{Float64}(undef, 0, 0)  # col bulk density of dry soil [kg/m^3] (ncols, nlevgrnd)
 
     # --- Hydraulic properties ---
-    hksat_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col hydraulic conductivity at saturation (mm H2O/s) (ncols, nlevgrnd)
-    hksat_min_col            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col mineral hydraulic conductivity at saturation (mm/s) (ncols, nlevgrnd)
-    hk_l_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col hydraulic conductivity (mm/s) (ncols, nlevgrnd)
-    smp_l_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil matric potential (mm) (ncols, nlevgrnd)
-    smpmin_col               ::Vector{FT} = Float64[]   # col restriction for min of soil potential (mm)
-    bsw_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col Clapp and Hornberger "b" (ncols, nlevgrnd)
-    watsat_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col volumetric soil water at saturation (porosity) (ncols, nlevmaxurbgrnd)
-    watdry_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col btran parameter for btran=0 (ncols, nlevgrnd)
-    watopt_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col btran parameter for btran=1 (ncols, nlevgrnd)
-    watfc_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col volumetric soil water at field capacity (ncols, nlevgrnd)
-    sucsat_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col minimum soil suction (mm) (ncols, nlevgrnd)
-    dsl_col                  ::Vector{FT} = Float64[]   # col dry surface layer thickness (mm)
-    soilresis_col            ::Vector{FT} = Float64[]   # col soil evaporative resistance S&L14 (s/m)
-    soilbeta_col             ::Vector{FT} = Float64[]   # col factor that reduces ground evaporation L&P1992 (-)
-    soilalpha_col            ::Vector{FT} = Float64[]   # col factor that reduces ground saturated specific humidity (-)
-    soilalpha_u_col          ::Vector{FT} = Float64[]   # col urban factor that reduces ground saturated specific humidity (-)
-    soilpsi_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil water potential in each soil layer (MPa) (ncols, nlevgrnd)
-    wtfact_col               ::Vector{FT} = Float64[]   # col maximum saturated fraction for a gridcell
-    porosity_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col soil porosity (1-bulk_density/soil_density) (VIC) (ncols, nlayer)
-    eff_porosity_col         ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col effective porosity = porosity - vol_ice (ncols, nlevgrnd)
-    gwc_thr_col              ::Vector{FT} = Float64[]   # col threshold soil moisture based on clay content
+    hksat_col                ::M = Matrix{Float64}(undef, 0, 0)  # col hydraulic conductivity at saturation (mm H2O/s) (ncols, nlevgrnd)
+    hksat_min_col            ::M = Matrix{Float64}(undef, 0, 0)  # col mineral hydraulic conductivity at saturation (mm/s) (ncols, nlevgrnd)
+    hk_l_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col hydraulic conductivity (mm/s) (ncols, nlevgrnd)
+    smp_l_col                ::M = Matrix{Float64}(undef, 0, 0)  # col soil matric potential (mm) (ncols, nlevgrnd)
+    smpmin_col               ::V = Float64[]   # col restriction for min of soil potential (mm)
+    bsw_col                  ::M = Matrix{Float64}(undef, 0, 0)  # col Clapp and Hornberger "b" (ncols, nlevgrnd)
+    watsat_col               ::M = Matrix{Float64}(undef, 0, 0)  # col volumetric soil water at saturation (porosity) (ncols, nlevmaxurbgrnd)
+    watdry_col               ::M = Matrix{Float64}(undef, 0, 0)  # col btran parameter for btran=0 (ncols, nlevgrnd)
+    watopt_col               ::M = Matrix{Float64}(undef, 0, 0)  # col btran parameter for btran=1 (ncols, nlevgrnd)
+    watfc_col                ::M = Matrix{Float64}(undef, 0, 0)  # col volumetric soil water at field capacity (ncols, nlevgrnd)
+    sucsat_col               ::M = Matrix{Float64}(undef, 0, 0)  # col minimum soil suction (mm) (ncols, nlevgrnd)
+    dsl_col                  ::V = Float64[]   # col dry surface layer thickness (mm)
+    soilresis_col            ::V = Float64[]   # col soil evaporative resistance S&L14 (s/m)
+    soilbeta_col             ::V = Float64[]   # col factor that reduces ground evaporation L&P1992 (-)
+    soilalpha_col            ::V = Float64[]   # col factor that reduces ground saturated specific humidity (-)
+    soilalpha_u_col          ::V = Float64[]   # col urban factor that reduces ground saturated specific humidity (-)
+    soilpsi_col              ::M = Matrix{Float64}(undef, 0, 0)  # col soil water potential in each soil layer (MPa) (ncols, nlevgrnd)
+    wtfact_col               ::V = Float64[]   # col maximum saturated fraction for a gridcell
+    porosity_col             ::M = Matrix{Float64}(undef, 0, 0)  # col soil porosity (1-bulk_density/soil_density) (VIC) (ncols, nlayer)
+    eff_porosity_col         ::M = Matrix{Float64}(undef, 0, 0)  # col effective porosity = porosity - vol_ice (ncols, nlevgrnd)
+    gwc_thr_col              ::V = Float64[]   # col threshold soil moisture based on clay content
 
     # --- Van Genuchten parameters ---
-    msw_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col vanGenuchtenClapp "m" (ncols, nlevgrnd)
-    nsw_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col vanGenuchtenClapp "n" (ncols, nlevgrnd)
-    alphasw_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col vanGenuchtenClapp "alpha" (ncols, nlevgrnd)
-    watres_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col residual soil water content (ncols, nlevgrnd)
+    msw_col                  ::M = Matrix{Float64}(undef, 0, 0)  # col vanGenuchtenClapp "m" (ncols, nlevgrnd)
+    nsw_col                  ::M = Matrix{Float64}(undef, 0, 0)  # col vanGenuchtenClapp "n" (ncols, nlevgrnd)
+    alphasw_col              ::M = Matrix{Float64}(undef, 0, 0)  # col vanGenuchtenClapp "alpha" (ncols, nlevgrnd)
+    watres_col               ::M = Matrix{Float64}(undef, 0, 0)  # col residual soil water content (ncols, nlevgrnd)
 
     # --- Thermal conductivity / heat capacity ---
-    thk_col                  ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity [W/m-K] (ncols, nlevsno+nlevmaxurbgrnd)
-    tkmg_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity, soil minerals [W/m-K] (ncols, nlevgrnd)
-    tkdry_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity, dry soil (W/m/K) (ncols, nlevgrnd)
-    tksatu_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity, saturated soil [W/m-K] (ncols, nlevgrnd)
-    csol_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col heat capacity, soil solids (J/m^3/K) (ncols, nlevgrnd)
+    thk_col                  ::M = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity [W/m-K] (ncols, nlevsno+nlevmaxurbgrnd)
+    tkmg_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity, soil minerals [W/m-K] (ncols, nlevgrnd)
+    tkdry_col                ::M = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity, dry soil (W/m/K) (ncols, nlevgrnd)
+    tksatu_col               ::M = Matrix{Float64}(undef, 0, 0)  # col thermal conductivity, saturated soil [W/m-K] (ncols, nlevgrnd)
+    csol_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col heat capacity, soil solids (J/m^3/K) (ncols, nlevgrnd)
 
     # --- Roots ---
-    rootr_patch              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch effective fraction of roots in each soil layer (SMS) (npatches, nlevgrnd)
-    rootr_col                ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col effective fraction of roots in each soil layer (SMS) (ncols, nlevgrnd)
-    rootfr_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col fraction of roots in each soil layer (ncols, nlevgrnd)
-    rootfr_patch             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch fraction of roots for water (npatches, nlevgrnd)
-    crootfr_patch            ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch fraction of roots for carbon (npatches, nlevgrnd)
-    root_depth_patch         ::Vector{FT} = Float64[]   # patch root depth
-    rootr_road_perv_col      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col effective root fraction in urban pervious road (ncols, nlevgrnd)
-    rootfr_road_perv_col     ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col root fraction in urban pervious road (ncols, nlevgrnd)
-    k_soil_root_patch        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch soil-root interface conductance [mm/s] (npatches, nlevsoi)
-    root_conductance_patch   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch root conductance [mm/s] (npatches, nlevsoi)
-    soil_conductance_patch   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # patch soil conductance [mm/s] (npatches, nlevsoi)
+    rootr_patch              ::M = Matrix{Float64}(undef, 0, 0)  # patch effective fraction of roots in each soil layer (SMS) (npatches, nlevgrnd)
+    rootr_col                ::M = Matrix{Float64}(undef, 0, 0)  # col effective fraction of roots in each soil layer (SMS) (ncols, nlevgrnd)
+    rootfr_col               ::M = Matrix{Float64}(undef, 0, 0)  # col fraction of roots in each soil layer (ncols, nlevgrnd)
+    rootfr_patch             ::M = Matrix{Float64}(undef, 0, 0)  # patch fraction of roots for water (npatches, nlevgrnd)
+    crootfr_patch            ::M = Matrix{Float64}(undef, 0, 0)  # patch fraction of roots for carbon (npatches, nlevgrnd)
+    root_depth_patch         ::V = Float64[]   # patch root depth
+    rootr_road_perv_col      ::M = Matrix{Float64}(undef, 0, 0)  # col effective root fraction in urban pervious road (ncols, nlevgrnd)
+    rootfr_road_perv_col     ::M = Matrix{Float64}(undef, 0, 0)  # col root fraction in urban pervious road (ncols, nlevgrnd)
+    k_soil_root_patch        ::M = Matrix{Float64}(undef, 0, 0)  # patch soil-root interface conductance [mm/s] (npatches, nlevsoi)
+    root_conductance_patch   ::M = Matrix{Float64}(undef, 0, 0)  # patch root conductance [mm/s] (npatches, nlevsoi)
+    soil_conductance_patch   ::M = Matrix{Float64}(undef, 0, 0)  # patch soil conductance [mm/s] (npatches, nlevsoi)
 end
+
+SoilStateData{FT}(; kwargs...) where {FT<:Real} =
+    SoilStateData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure SoilStateData
+
 
 """
     soilstate_init!(ss::SoilStateData, np::Int, nc::Int)

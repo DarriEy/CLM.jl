@@ -92,28 +92,36 @@ and FATES-specific fields for each patch.
 
 Ported from `patch_type` in `PatchType.F90`.
 """
-Base.@kwdef mutable struct PatchData{FT<:Real}
+Base.@kwdef mutable struct PatchData{FT<:Real,
+                         V<:AbstractVector{FT},
+                         VI<:AbstractVector{<:Integer},
+                         VB<:AbstractVector{Bool}}
     # g/l/c/p hierarchy, local g/l/c/p cells only
-    column           ::Vector{Int}     = Int[]       # index into column level quantities
-    wtcol            ::Vector{FT} = Float64[]   # weight (relative to column)
-    landunit         ::Vector{Int}     = Int[]       # index into landunit level quantities
-    wtlunit          ::Vector{FT} = Float64[]   # weight (relative to landunit)
-    gridcell         ::Vector{Int}     = Int[]       # index into gridcell level quantities
-    wtgcell          ::Vector{FT} = Float64[]   # weight (relative to gridcell)
+    column           ::VI     = Int[]       # index into column level quantities
+    wtcol            ::V = Float64[]   # weight (relative to column)
+    landunit         ::VI     = Int[]       # index into landunit level quantities
+    wtlunit          ::V = Float64[]   # weight (relative to landunit)
+    gridcell         ::VI     = Int[]       # index into gridcell level quantities
+    wtgcell          ::V = Float64[]   # weight (relative to gridcell)
 
     # Non-ED only
-    itype            ::Vector{Int}     = Int[]       # patch vegetation type
-    mxy              ::Vector{Int}     = Int[]       # m index for laixy(i,j,m),etc. (undefined for special landunits)
-    active           ::Vector{Bool}    = Bool[]      # true => do computations on this patch
+    itype            ::VI     = Int[]       # patch vegetation type
+    mxy              ::VI     = Int[]       # m index for laixy(i,j,m),etc. (undefined for special landunits)
+    active           ::VB    = Bool[]      # true => do computations on this patch
 
     # FATES only
-    is_veg           ::Vector{Bool}    = Bool[]      # this is an ACTIVE fates patch
-    is_bareground    ::Vector{Bool}    = Bool[]      # true => bareground fates patch
-    wt_ed            ::Vector{FT} = Float64[]   # FATES patch weight
-    sp_pftorder_index ::Vector{FT} = Float64[]  # index to map 'p' onto the order of ED patches in SP mode
+    is_veg           ::VB    = Bool[]      # this is an ACTIVE fates patch
+    is_bareground    ::VB    = Bool[]      # true => bareground fates patch
+    wt_ed            ::V = Float64[]   # FATES patch weight
+    sp_pftorder_index ::V = Float64[]  # index to map 'p' onto the order of ED patches in SP mode
 
-    is_fates         ::Vector{Bool}    = Bool[]      # true for patch vector space reserved for FATES
+    is_fates         ::VB    = Bool[]      # true for patch vector space reserved for FATES
 end
+
+PatchData{FT}(; kwargs...) where {FT<:Real} =
+    PatchData{FT, Vector{FT}, Vector{Int}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure PatchData
+
 
 """
     patch_init!(pch::PatchData, npatches::Int)
