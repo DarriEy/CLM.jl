@@ -908,6 +908,211 @@ function brent_solver!(x1::Real, x2::Real, f1::Real, f2::Real,
 end
 
 # =====================================================================
+# Pass 3 kernel — leaf-level photosynthesis & stomatal conductance
+#
+# ONE THREAD PER PATCH: p = @index(Global) over ndrange = length(bounds_patch)
+# (bounds_patch is 1:np; the per-(p,iv) state matrices are allocated np×nlevcan
+# and indexed [p,iv]). The inner `for iv in 1:nrad[p]` loop stays INSIDE the
+# kernel so each thread walks its own iv's serially — the per-patch outputs
+# gb_mol[p], vpd_can[p], rh_leaf[p] are written within the iv loop, so flattening
+# to (p,iv) would race; per-patch is race-free and matches serial semantics.
+#
+# This kernel calls the GPU-callable Ci-solver chain (_hybrid_solver_core! →
+# _ci_func_core! → _brent_solver_core!) which read NO globals.
+#
+# ps (PhotosynthesisData) is passed so the solver cores can index its fields. The
+# bare array args (ac, aj, ... ci_z, gs_mol, ...) are LOCAL aliases of ps fields /
+# scratch matrices established in photosynthesis!; on the CPU backend they are the
+# SAME memory as the corresponding ps fields the solver writes, so writes stay
+# consistent. Written arrays are non-@Const; read-only are @Const.
+# =====================================================================
+@kernel function _photosynth_ci_kernel!(
+        # written arrays (aliases of ps fields / scratch)
+        ac, aj, ap, ag, an, psn_z, psn_wc_z, psn_wj_z, psn_wp_z,
+        rs_z, ci_z, gs_mol, rh_leaf, gb_mol, vpd_can,
+        # ps struct (solver cores index/write it; is_sun branch writes gs_mol_sun/sha)
+        ps,
+        # read-only arrays
+        @Const(mask_patch), @Const(ivt),
+        @Const(medlynslope_pft), @Const(medlynintercept_pft), @Const(mbbopt_pft),
+        @Const(forc_pbot), @Const(tgcm), @Const(rb), @Const(par_z_in),
+        @Const(lmr_z), @Const(jmax_z_local), @Const(c3flag),
+        @Const(eair), @Const(esat_tv), @Const(cair), @Const(oair),
+        @Const(bbb), @Const(o3coefg), @Const(o3coefv), @Const(nrad),
+        # scalars
+        fnps, theta_psii, theta_cj_1, theta_ip_val, medlyn_slope_override,
+        is_sun::Bool, stomatalcond_mtd::Int,
+        RGAS_, MAX_CS_, MEDLYN_RH_CAN_MAX_, MEDLYN_RH_CAN_FACT_, rsmax0,
+        STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
+
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        ivt_p = ivt[p]
+
+        # Medlyn slope: use override if set, else PFT default
+        medlynslope_p = isnan(medlyn_slope_override) ? medlynslope_pft[ivt_p] : medlyn_slope_override
+
+        cf = forc_pbot[p] / (RGAS_ * tgcm[p]) * 1.0e06
+        gb = 1.0 / rb[p]
+        gb_mol[p] = gb * cf
+
+        for iv in 1:nrad[p]
+            if par_z_in[p, iv] <= 0.0  # night time
+                ac[p, iv] = 0.0
+                aj[p, iv] = 0.0
+                ap[p, iv] = 0.0
+                ag[p, iv] = 0.0
+                an[p, iv] = ag[p, iv] - lmr_z[p, iv]
+                psn_z[p, iv] = 0.0
+                psn_wc_z[p, iv] = 0.0
+                psn_wj_z[p, iv] = 0.0
+                psn_wp_z[p, iv] = 0.0
+                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / bbb[p] * cf)
+                elseif stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011_
+                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / medlynintercept_pft[ivt_p] * cf)
+                end
+                ci_z[p, iv] = 0.0
+                rh_leaf[p] = 0.0
+                gs_mol[p, iv] = stomatalcond_mtd == STOMATALCOND_MTD_BB1987_ ? bbb[p] : medlynintercept_pft[ivt_p]
+            else  # day time
+                ceair = smooth_min(eair[p], esat_tv[p])
+                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                    rh_can = ceair / esat_tv[p]
+                else
+                    rh_can = smooth_max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX_) * MEDLYN_RH_CAN_FACT_
+                    vpd_can[p] = rh_can
+                end
+
+                # Electron transport rate
+                qabs = 0.5 * (1.0 - fnps) * par_z_in[p, iv] * 4.6
+                aquad = theta_psii
+                bquad = -(qabs + jmax_z_local[p, iv])
+                cquad = qabs * jmax_z_local[p, iv]
+                r1, r2 = quadratic_solve(aquad, bquad, cquad)
+                je = smooth_min(r1, r2)
+
+                # Initial guess for ci
+                if c3flag[p]
+                    ci_z[p, iv] = 0.7 * cair[p]
+                else
+                    ci_z[p, iv] = 0.4 * cair[p]
+                end
+
+                # Solve for ci and gs (positional GPU-callable core).
+                # c3psn_val = 1.0 (wrapper default); theta_cj_1 = params_inst.theta_cj[1]
+                # (NOT theta_cj[ivt_p] — that was dead code never threaded to the solver).
+                ci_sol, gs_mol_val, _ = _hybrid_solver_core!(ci_z[p, iv], p, iv,
+                    forc_pbot[p], gb_mol[p], je, cair[p], oair[p],
+                    lmr_z[p, iv], par_z_in[p, iv], rh_can, ps,
+                    1.0, medlynslope_p, medlynintercept_pft[ivt_p], mbbopt_pft[ivt_p],
+                    theta_cj_1, theta_ip_val)
+
+                gs_mol[p, iv] = gs_mol_val
+
+                # Check for an < 0
+                if an[p, iv] < 0.0
+                    if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                        gs_mol[p, iv] = bbb[p]
+                    else
+                        gs_mol[p, iv] = medlynintercept_pft[ivt_p]
+                    end
+                end
+
+                # Store sunlit/shaded gs
+                if is_sun
+                    ps.gs_mol_sun_patch[p, iv] = gs_mol[p, iv]
+                else
+                    ps.gs_mol_sha_patch[p, iv] = gs_mol[p, iv]
+                end
+
+                # Final ci
+                cs = cair[p] - 1.4 / gb_mol[p] * an[p, iv] * forc_pbot[p]
+                cs = smooth_max(cs, MAX_CS_)
+                ci_z[p, iv] = cair[p] - an[p, iv] * forc_pbot[p] *
+                    (1.4 * gs_mol[p, iv] + 1.6 * gb_mol[p]) / (gb_mol[p] * gs_mol[p, iv])
+                ci_z[p, iv] = smooth_max(ci_z[p, iv], 1.0e-06)
+
+                # Convert to resistance (gs must be positive)
+                gs_val = max(gs_mol[p, iv], 1.0) / cf
+                rs_z[p, iv] = smooth_min(1.0 / gs_val, rsmax0)
+                rs_z[p, iv] = rs_z[p, iv] / o3coefg[p]
+
+                # Photosynthesis
+                psn_z[p, iv] = ag[p, iv]
+                psn_z[p, iv] = psn_z[p, iv] * o3coefv[p]
+
+                psn_wc_z[p, iv] = 0.0
+                psn_wj_z[p, iv] = 0.0
+                psn_wp_z[p, iv] = 0.0
+
+                if ac[p, iv] <= aj[p, iv] && ac[p, iv] <= ap[p, iv]
+                    psn_wc_z[p, iv] = psn_z[p, iv]
+                elseif aj[p, iv] < ac[p, iv] && aj[p, iv] <= ap[p, iv]
+                    psn_wj_z[p, iv] = psn_z[p, iv]
+                elseif ap[p, iv] < ac[p, iv] && ap[p, iv] < aj[p, iv]
+                    psn_wp_z[p, iv] = psn_z[p, iv]
+                end
+
+                # Ball-Berry error check
+                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                    hs = (gb_mol[p] * ceair + gs_mol[p, iv] * esat_tv[p]) /
+                         ((gb_mol[p] + gs_mol[p, iv]) * esat_tv[p])
+                    rh_leaf[p] = hs
+                end
+            end
+        end
+    end
+end
+
+"""
+    photosynth_ci_solve!(ps, ac, aj, ..., bounds_patch, ...)
+
+Host launcher for the Pass-3 leaf photosynthesis / stomatal-conductance kernel
+(`_photosynth_ci_kernel!`). GPU-hostile values (params_inst fields, the Medlyn
+override, the `phase == "sun"` string compare, module-global constants) are
+resolved to host scalars before the launch; the kernel reads no globals/Strings.
+One thread per patch; the per-canopy-layer `iv` loop runs serially inside.
+"""
+function photosynth_ci_solve!(ps::PhotosynthesisData,
+        ac, aj, ap, ag, an, psn_z, psn_wc_z, psn_wj_z, psn_wp_z,
+        rs_z, ci_z, gs_mol, rh_leaf, gb_mol, vpd_can,
+        mask_patch, ivt,
+        medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+        forc_pbot, tgcm, rb, par_z_in, lmr_z, jmax_z_local, c3flag,
+        eair, esat_tv, cair, oair, bbb, o3coefg, o3coefv, nrad,
+        bounds_patch::UnitRange{Int}, phase::String,
+        stomatalcond_mtd::Int, rsmax0,
+        overrides::CalibrationOverrides)
+    # Resolve GPU-hostile values to host scalars (compute ONCE before launch).
+    fnps = params_inst.fnps
+    theta_psii = params_inst.theta_psii
+    theta_cj_1 = params_inst.theta_cj[1]
+    theta_ip_val = params_inst.theta_ip
+    medlyn_slope_override = overrides.medlyn_slope
+    is_sun = (phase == "sun")
+
+    _launch!(_photosynth_ci_kernel!,
+        # written arrays
+        ac, aj, ap, ag, an, psn_z, psn_wc_z, psn_wj_z, psn_wp_z,
+        rs_z, ci_z, gs_mol, rh_leaf, gb_mol, vpd_can,
+        # ps struct
+        ps,
+        # read-only arrays
+        mask_patch, ivt,
+        medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+        forc_pbot, tgcm, rb, par_z_in, lmr_z, jmax_z_local, c3flag,
+        eair, esat_tv, cair, oair, bbb, o3coefg, o3coefv, nrad,
+        # scalars
+        fnps, theta_psii, theta_cj_1, theta_ip_val, medlyn_slope_override,
+        is_sun, stomatalcond_mtd,
+        RGAS, MAX_CS, MEDLYN_RH_CAN_MAX, MEDLYN_RH_CAN_FACT, rsmax0,
+        STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
+        ndrange = length(bounds_patch))
+    return ps
+end
+
+# =====================================================================
 # photosynthesis! — Main leaf photosynthesis and stomatal conductance
 # =====================================================================
 
@@ -1184,128 +1389,18 @@ function photosynthesis!(ps::PhotosynthesisData,
     end
 
     # ---- Pass 3: Leaf-level photosynthesis and stomatal conductance ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-        c = col_of_patch[p]
-        ivt_p = ivt[p]
-
-        # Medlyn slope: use override if set, else PFT default
-        medlynslope_p = isnan(overrides.medlyn_slope) ? medlynslope_pft[ivt_p] : overrides.medlyn_slope
-
-        cf = forc_pbot[p] / (RGAS * tgcm[p]) * 1.0e06
-        gb = 1.0 / rb[p]
-        gb_mol[p] = gb * cf
-
-        for iv in 1:nrad[p]
-            if par_z_in[p, iv] <= 0.0  # night time
-                ac[p, iv] = 0.0
-                aj[p, iv] = 0.0
-                ap[p, iv] = 0.0
-                ag[p, iv] = 0.0
-                an[p, iv] = ag[p, iv] - lmr_z[p, iv]
-                psn_z[p, iv] = 0.0
-                psn_wc_z[p, iv] = 0.0
-                psn_wj_z[p, iv] = 0.0
-                psn_wp_z[p, iv] = 0.0
-                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / bbb[p] * cf)
-                elseif stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
-                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / medlynintercept_pft[ivt_p] * cf)
-                end
-                ci_z[p, iv] = 0.0
-                rh_leaf[p] = 0.0
-                gs_mol[p, iv] = stomatalcond_mtd == STOMATALCOND_MTD_BB1987 ? bbb[p] : medlynintercept_pft[ivt_p]
-            else  # day time
-                ceair = smooth_min(eair[p], esat_tv[p])
-                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                    rh_can = ceair / esat_tv[p]
-                else
-                    rh_can = smooth_max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX) * MEDLYN_RH_CAN_FACT
-                    vpd_can[p] = rh_can
-                end
-
-                # Electron transport rate
-                qabs = 0.5 * (1.0 - params_inst.fnps) * par_z_in[p, iv] * 4.6
-                aquad = params_inst.theta_psii
-                bquad = -(qabs + jmax_z_local[p, iv])
-                cquad = qabs * jmax_z_local[p, iv]
-                r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je = smooth_min(r1, r2)
-
-                # Initial guess for ci
-                if c3flag[p]
-                    ci_z[p, iv] = 0.7 * cair[p]
-                else
-                    ci_z[p, iv] = 0.4 * cair[p]
-                end
-
-                # Use theta_cj for this PFT
-                theta_cj_val = params_inst.theta_cj[ivt_p]
-
-                # Solve for ci and gs
-                ci_sol, gs_mol_val, _ = hybrid_solver!(ci_z[p, iv], p, iv,
-                    forc_pbot[p], gb_mol[p], je, cair[p], oair[p],
-                    lmr_z[p, iv], par_z_in[p, iv], rh_can, ps;
-                    medlynslope_val=medlynslope_p,
-                    medlynintercept_val=medlynintercept_pft[ivt_p],
-                    mbbopt_val=mbbopt_pft[ivt_p])
-
-                gs_mol[p, iv] = gs_mol_val
-
-
-                # Check for an < 0
-                if an[p, iv] < 0.0
-                    if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                        gs_mol[p, iv] = bbb[p]
-                    else
-                        gs_mol[p, iv] = medlynintercept_pft[ivt_p]
-                    end
-                end
-
-                # Store sunlit/shaded gs
-                if phase == "sun"
-                    ps.gs_mol_sun_patch[p, iv] = gs_mol[p, iv]
-                else
-                    ps.gs_mol_sha_patch[p, iv] = gs_mol[p, iv]
-                end
-
-                # Final ci
-                cs = cair[p] - 1.4 / gb_mol[p] * an[p, iv] * forc_pbot[p]
-                cs = smooth_max(cs, MAX_CS)
-                ci_z[p, iv] = cair[p] - an[p, iv] * forc_pbot[p] *
-                    (1.4 * gs_mol[p, iv] + 1.6 * gb_mol[p]) / (gb_mol[p] * gs_mol[p, iv])
-                ci_z[p, iv] = smooth_max(ci_z[p, iv], 1.0e-06)
-
-                # Convert to resistance (gs must be positive)
-                gs_val = max(gs_mol[p, iv], 1.0) / cf
-                rs_z[p, iv] = smooth_min(1.0 / gs_val, rsmax0)
-                rs_z[p, iv] = rs_z[p, iv] / o3coefg[p]
-
-                # Photosynthesis
-                psn_z[p, iv] = ag[p, iv]
-                psn_z[p, iv] = psn_z[p, iv] * o3coefv[p]
-
-                psn_wc_z[p, iv] = 0.0
-                psn_wj_z[p, iv] = 0.0
-                psn_wp_z[p, iv] = 0.0
-
-                if ac[p, iv] <= aj[p, iv] && ac[p, iv] <= ap[p, iv]
-                    psn_wc_z[p, iv] = psn_z[p, iv]
-                elseif aj[p, iv] < ac[p, iv] && aj[p, iv] <= ap[p, iv]
-                    psn_wj_z[p, iv] = psn_z[p, iv]
-                elseif ap[p, iv] < ac[p, iv] && ap[p, iv] < aj[p, iv]
-                    psn_wp_z[p, iv] = psn_z[p, iv]
-                end
-
-                # Ball-Berry error check
-                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                    hs = (gb_mol[p] * ceair + gs_mol[p, iv] * esat_tv[p]) /
-                         ((gb_mol[p] + gs_mol[p, iv]) * esat_tv[p])
-                    rh_leaf[p] = hs
-                end
-            end
-        end
-    end
+    # Kernelized: one thread per patch, with the per-canopy-layer iv loop running
+    # serially inside each thread (per-patch outputs gb_mol/vpd_can/rh_leaf are
+    # written within the iv loop, so a (p,iv) flatten would race). See
+    # _photosynth_ci_kernel! / photosynth_ci_solve! above.
+    photosynth_ci_solve!(ps,
+        ac, aj, ap, ag, an, psn_z, psn_wc_z, psn_wj_z, psn_wp_z,
+        rs_z, ci_z, gs_mol, rh_leaf, gb_mol, vpd_can,
+        mask_patch, ivt,
+        medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+        forc_pbot, tgcm, rb, par_z_in, lmr_z, jmax_z_local, c3flag,
+        eair, esat_tv, cair, oair, bbb, o3coefg, o3coefv, nrad,
+        bounds_patch, phase, stomatalcond_mtd, rsmax0, overrides)
 
     # ---- Pass 4: Canopy integration ----
     for p in bounds_patch
