@@ -119,6 +119,11 @@ Base.@kwdef mutable struct CLMInstances
     surfdata::Union{SurfaceInputData, Nothing} = nothing
 end
 
+# Make the whole instance tree device-movable: adapt(backend, inst) recursively
+# moves the device-movable sub-structs (state structs registered with
+# Adapt.@adapt_structure) to the backend's array type and passes the rest through.
+Adapt.@adapt_structure CLMInstances
+
 """
     clm_instInit!(inst::CLMInstances;
                   ng, nl, nc, np,

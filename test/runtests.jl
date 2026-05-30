@@ -132,6 +132,7 @@ using CLM
     include("test_subgrid_build.jl")
     include("test_initialization.jl")
     include("test_multicolumn.jl")
+    include("test_device_adapt.jl")
     include("test_clm_run.jl")
     include("test_ad_smoke.jl")
     include("test_ad_e2e.jl")
