@@ -19,8 +19,8 @@ using KernelAbstractions: @kernel, @index, @Const
 Run a KernelAbstractions `kernel` over `ndrange` on the backend of `out`
 (one thread per index). No-op for empty `out`.
 """
-@inline function _launch!(kernel, out, args...; ndrange::Int = length(out))
-    ndrange == 0 && return out
+@inline function _launch!(kernel, out, args...; ndrange = length(out))
+    (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
     backend = KA.get_backend(out)
     kernel(backend)(out, args...; ndrange = ndrange)
     KA.synchronize(backend)
@@ -94,3 +94,35 @@ Set urban columns' snow-cover fraction from snow depth. Backend-agnostic.
 """
 update_urban_frac_sno!(frac_sno_col, landunit, urbpoi, snow_depth_col) =
     _launch!(_urban_frac_sno_kernel!, frac_sno_col, landunit, urbpoi, snow_depth_col)
+
+# --------------------------------------------------------------------------
+# Volumetric liquid water content (per column AND soil layer — a 2D kernel).
+#   liqvol[c,j+joff] = clamp(h2osoi_liq/(dz*DENH2O), 0, eff_porosity[c,j]) if dz>0
+# Soil/snow arrays carry an nlevsno offset; eff_porosity is layer-indexed.
+# --------------------------------------------------------------------------
+@kernel function _h2osoi_liqvol_kernel!(liqvol_col, @Const(mask), @Const(dz),
+                                        @Const(h2osoi_liq), @Const(eff_porosity),
+                                        joff::Int, denh2o)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        dz_cj = dz[c, j + joff]
+        if dz_cj > 0.0
+            lv = h2osoi_liq[c, j + joff] / (dz_cj * denh2o)
+            liqvol_col[c, j + joff] = min(max(lv, 0.0), eff_porosity[c, j])
+        else
+            liqvol_col[c, j + joff] = 0.0
+        end
+    end
+end
+
+"""
+    compute_h2osoi_liqvol!(liqvol_col, mask, dz, h2osoi_liq, eff_porosity, joff, nlevgrnd; denh2o)
+
+Volumetric liquid water for root moisture stress, over all (column, soil layer)
+pairs — a 2D KernelAbstractions kernel. Backend-agnostic.
+"""
+function compute_h2osoi_liqvol!(liqvol_col, mask, dz, h2osoi_liq, eff_porosity,
+                                joff::Int, nlevgrnd::Int; denh2o)
+    _launch!(_h2osoi_liqvol_kernel!, liqvol_col, mask, dz, h2osoi_liq, eff_porosity,
+             joff, denh2o; ndrange = (length(mask), nlevgrnd))
+end

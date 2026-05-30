@@ -809,23 +809,12 @@ function clm_drv_core!(config::CLMDriverConfig,
                        a2l.forc_u_grc, a2l.forc_v_grc,
                        a2l.forc_hgt_t_grc, a2l.forc_hgt_u_grc, a2l.forc_hgt_q_grc)
 
-    # Compute volumetric liquid water content for root moisture stress
+    # Volumetric liquid water content for root moisture stress — 2D kernel
+    # over (column, soil layer). See kernels.jl.
     joff = varpar.nlevsno
-    for j in 1:varpar.nlevgrnd
-        for c in bc_col
-            filt.nolakec[c] || continue
-            dz_cj = col.dz[c, j + joff]
-            if dz_cj > 0.0
-                # Root stress expects volumetric liquid water bounded by the
-                # effective pore space (matches SoilMoistStressMod semantics).
-                liqvol = wsb.ws.h2osoi_liq_col[c, j + joff] / (dz_cj * DENH2O)
-                wdb.h2osoi_liqvol_col[c, j + joff] =
-                    min(max(liqvol, 0.0), ss.eff_porosity_col[c, j])
-            else
-                wdb.h2osoi_liqvol_col[c, j + joff] = 0.0
-            end
-        end
-    end
+    compute_h2osoi_liqvol!(wdb.h2osoi_liqvol_col, filt.nolakec, col.dz,
+                           wsb.ws.h2osoi_liq_col, ss.eff_porosity_col,
+                           joff, varpar.nlevgrnd; denh2o=DENH2O)
 
     # SoilMoistStress (root moisture stress / BTRAN) — WIRED
     al = inst.active_layer
