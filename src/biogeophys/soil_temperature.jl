@@ -1042,6 +1042,68 @@ end
 # =========================================================================
 # compute_heat_diff_flux_and_factor!
 # =========================================================================
+# Per-(column, level) heat-diffusion flux fn and time-step factor fact. Pure elementwise
+# (no scatter); one thread per (c, jj). Constants (CNFAC, CAPR) and the dtime scalar are at
+# the working element type. simple_build: building-temp config resolved on host.
+@kernel function _heat_diff_kernel!(fact, fn, @Const(mask), @Const(itype), @Const(snl),
+        @Const(landunit), @Const(z), @Const(zi), @Const(dz), @Const(tk), @Const(cv),
+        @Const(t_soisno), @Const(eflx_bot), @Const(t_building), @Const(t_roof_inner),
+        @Const(t_sunw_inner), @Const(t_shdw_inner), dtime, nlevsno::Int, nlevurb::Int,
+        nlevgrnd::Int, simple_build::Bool)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(fact)
+        j = jj - nlevsno
+        l = landunit[c]
+        it = itype[c]
+        cnfac = T(CNFAC)
+        wallroof = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF)
+        if wallroof && j <= nlevurb
+            if j >= snl[c] + 1
+                if j == snl[c] + 1
+                    fact[c, jj] = dtime / cv[c, jj]
+                    fn[c, jj] = tk[c, jj] * (t_soisno[c, jj+1] - t_soisno[c, jj]) / (z[c, jj+1] - z[c, jj])
+                elseif j <= nlevurb - 1
+                    fact[c, jj] = dtime / cv[c, jj]
+                    fn[c, jj] = tk[c, jj] * (t_soisno[c, jj+1] - t_soisno[c, jj]) / (z[c, jj+1] - z[c, jj])
+                elseif j == nlevurb
+                    fact[c, jj] = dtime / cv[c, jj]
+                    if simple_build
+                        fn[c, jj] = tk[c, jj] * (t_building[l] - cnfac * t_soisno[c, jj]) / (zi[c, jj+1] - z[c, jj])
+                    else
+                        tinner = it == ICOL_SUNWALL ? t_sunw_inner[l] :
+                                 it == ICOL_SHADEWALL ? t_shdw_inner[l] : t_roof_inner[l]
+                        fn[c, jj] = tk[c, jj] * (tinner - cnfac * t_soisno[c, jj]) / (zi[c, jj+1] - z[c, jj])
+                    end
+                end
+            end
+        elseif !wallroof && j <= nlevgrnd
+            if j >= snl[c] + 1
+                if j == snl[c] + 1
+                    fact[c, jj] = dtime / cv[c, jj] * dz[c, jj] /
+                        (T(0.5) * (z[c, jj] - zi[c, jj] + T(CAPR) * (z[c, jj+1] - zi[c, jj])))
+                    fn[c, jj] = tk[c, jj] * (t_soisno[c, jj+1] - t_soisno[c, jj]) / (z[c, jj+1] - z[c, jj])
+                elseif j <= nlevgrnd - 1
+                    fact[c, jj] = dtime / cv[c, jj]
+                    fn[c, jj] = tk[c, jj] * (t_soisno[c, jj+1] - t_soisno[c, jj]) / (z[c, jj+1] - z[c, jj])
+                elseif j == nlevgrnd
+                    fact[c, jj] = dtime / cv[c, jj]
+                    fn[c, jj] = eflx_bot[c]
+                end
+            end
+        end
+    end
+end
+function compute_heat_diff!(fact, fn, mask, itype, snl, landunit, z, zi, dz, tk, cv,
+        t_soisno, eflx_bot, t_building, t_roof_inner, t_sunw_inner, t_shdw_inner,
+        dtime, nlevsno::Int, nlevurb::Int, nlevgrnd::Int, nlevmaxurbgrnd::Int, simple_build::Bool)
+    dt = convert(eltype(fact), dtime)
+    _launch!(_heat_diff_kernel!, fact, fn, mask, itype, snl, landunit, z, zi, dz, tk, cv,
+        t_soisno, eflx_bot, t_building, t_roof_inner, t_sunw_inner, t_shdw_inner,
+        dt, nlevsno, nlevurb, nlevgrnd, simple_build;
+        ndrange = (size(fact, 1), nlevsno + nlevmaxurbgrnd))
+end
+
 function compute_heat_diff_flux_and_factor!(
         col::ColumnData, lun::LandunitData,
         temperature::TemperatureData, energyflux::EnergyFluxData,
@@ -1064,62 +1126,10 @@ function compute_heat_diff_flux_and_factor!(
     t_shdw_inner = temperature.t_shdw_inner_lun
     eflx_bot = energyflux.eflx_bot_col
 
-    for j in (-nlevsno + 1):nlevmaxurbgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            jj = j + joff
-
-            if (col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL ||
-                col.itype[c] == ICOL_ROOF) && j <= nlevurb
-                if j >= col.snl[c] + 1
-                    if j == col.snl[c] + 1
-                        fact[c, jj] = dtime / cv[c, jj]
-                        fn[c, jj] = tk[c, jj] * (t_soisno[c, jj + 1] - t_soisno[c, jj]) /
-                                    (col.z[c, jj + 1] - col.z[c, jj])
-                    elseif j <= nlevurb - 1
-                        fact[c, jj] = dtime / cv[c, jj]
-                        fn[c, jj] = tk[c, jj] * (t_soisno[c, jj + 1] - t_soisno[c, jj]) /
-                                    (col.z[c, jj + 1] - col.z[c, jj])
-                    elseif j == nlevurb
-                        fact[c, jj] = dtime / cv[c, jj]
-                        if is_simple_build_temp()
-                            fn[c, jj] = tk[c, jj] * (t_building[l] - CNFAC * t_soisno[c, jj]) /
-                                        (col.zi[c, jj + 1] - col.z[c, jj])
-                        else
-                            if col.itype[c] == ICOL_SUNWALL
-                                fn[c, jj] = tk[c, jj] * (t_sunw_inner[l] - CNFAC * t_soisno[c, jj]) /
-                                            (col.zi[c, jj + 1] - col.z[c, jj])
-                            elseif col.itype[c] == ICOL_SHADEWALL
-                                fn[c, jj] = tk[c, jj] * (t_shdw_inner[l] - CNFAC * t_soisno[c, jj]) /
-                                            (col.zi[c, jj + 1] - col.z[c, jj])
-                            elseif col.itype[c] == ICOL_ROOF
-                                fn[c, jj] = tk[c, jj] * (t_roof_inner[l] - CNFAC * t_soisno[c, jj]) /
-                                            (col.zi[c, jj + 1] - col.z[c, jj])
-                            end
-                        end
-                    end
-                end
-            elseif col.itype[c] != ICOL_SUNWALL && col.itype[c] != ICOL_SHADEWALL &&
-                   col.itype[c] != ICOL_ROOF && j <= nlevgrnd
-                if j >= col.snl[c] + 1
-                    if j == col.snl[c] + 1
-                        fact[c, jj] = dtime / cv[c, jj] * col.dz[c, jj] /
-                            (0.5 * (col.z[c, jj] - col.zi[c, jj] + CAPR * (col.z[c, jj + 1] - col.zi[c, jj])))
-                        fn[c, jj] = tk[c, jj] * (t_soisno[c, jj + 1] - t_soisno[c, jj]) /
-                                    (col.z[c, jj + 1] - col.z[c, jj])
-                    elseif j <= nlevgrnd - 1
-                        fact[c, jj] = dtime / cv[c, jj]
-                        fn[c, jj] = tk[c, jj] * (t_soisno[c, jj + 1] - t_soisno[c, jj]) /
-                                    (col.z[c, jj + 1] - col.z[c, jj])
-                    elseif j == nlevgrnd
-                        fact[c, jj] = dtime / cv[c, jj]
-                        fn[c, jj] = eflx_bot[c]
-                    end
-                end
-            end
-        end
-    end
+    # Heat-diffusion flux + factor (kernelized; one thread per (c, jj)).
+    compute_heat_diff!(fact, fn, mask_nolakec, col.itype, col.snl, col.landunit, col.z,
+        col.zi, col.dz, tk, cv, t_soisno, eflx_bot, t_building, t_roof_inner, t_sunw_inner,
+        t_shdw_inner, dtime, nlevsno, nlevurb, nlevgrnd, nlevmaxurbgrnd, is_simple_build_temp())
 
     return nothing
 end
