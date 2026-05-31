@@ -729,6 +729,52 @@ end
     end
 end
 
+# Aerodynamic Z0 / displacement-height adjustment (cf3). z0param_method resolved to
+# an Int code on the host (1=ZengWang2007, 2=Meier2022; unknown → host error), so no
+# String compare or error() runs in the kernel. The Meier2022 branch's iterative
+# U_ustar solve runs as an in-thread while loop. Constants eltype-converted.
+@kernel function _cf_z0_kernel!(displa, z0mv, z0hv, z0qv, forc_hgt_u, forc_hgt_t,
+        forc_hgt_q, @Const(filterp), @Const(column), @Const(gridcell), @Const(itype),
+        @Const(elai), @Const(esai), @Const(htop), @Const(z0mg), @Const(forc_hgt_u_grc),
+        @Const(forc_hgt_t_grc), @Const(forc_hgt_q_grc), @Const(z0v_LAImax_pft),
+        @Const(z0v_Cs_pft), @Const(z0v_Cr_pft), @Const(z0v_c_pft), @Const(z0v_cw_pft),
+        z0_method::Int)
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        T = eltype(displa)
+        c = column[p]; g = gridcell[p]; ft = itype[p] + 1
+        if z0_method == 1   # ZengWang2007
+            lt = smooth_min(elai[p] + esai[p], T(TLSAI_CRIT))
+            egvf = (one(T) - T(ALPHA_AERO) * exp(-lt)) / (one(T) - T(ALPHA_AERO) * exp(-T(TLSAI_CRIT)))
+            displa[p] = egvf * displa[p]
+            z0mv[p] = exp(egvf * log(z0mv[p]) + (one(T) - egvf) * log(z0mg[c]))
+        else                # Meier2022 (z0_method == 2; host-validated)
+            lt = smooth_max(T(1.0e-5), elai[p] + esai[p])
+            displa[p] = htop[p] *
+                (one(T) - (one(T) - exp(-(T(CD1_PARAM) * lt)^T(0.5))) / (T(CD1_PARAM) * lt)^T(0.5))
+            lt = smooth_min(lt, z0v_LAImax_pft[ft])
+            delt_iter = T(2.0)
+            U_ustar_ini = (z0v_Cs_pft[ft] + z0v_Cr_pft[ft] * lt * T(0.5))^T(-0.5) *
+                z0v_c_pft[ft] * lt * T(0.25)
+            U_ustar = U_ustar_ini
+            while delt_iter > T(1.0e-4)
+                U_ustar_prev = U_ustar
+                U_ustar = U_ustar_ini * exp(U_ustar_prev)
+                delt_iter = abs(U_ustar - U_ustar_prev)
+            end
+            U_ustar = T(4.0) * U_ustar / lt / z0v_c_pft[ft]
+            z0mv[p] = htop[p] * (one(T) - displa[p] / htop[p]) *
+                exp(-T(VKC) * U_ustar + log(z0v_cw_pft[ft]) - one(T) + z0v_cw_pft[ft]^T(-1.0))
+        end
+        z0hv[p] = z0mv[p]
+        z0qv[p] = z0mv[p]
+        forc_hgt_u[p] = forc_hgt_u_grc[g] + z0mv[p] + displa[p]
+        forc_hgt_t[p] = forc_hgt_t_grc[g] + z0hv[p] + displa[p]
+        forc_hgt_q[p] = forc_hgt_q_grc[g] + z0qv[p] + displa[p]
+    end
+end
+
 # =====================================================================
 # Main canopy_fluxes! function
 # =====================================================================
@@ -974,51 +1020,18 @@ function canopy_fluxes!(
     # In a full implementation, this would call calc_root_moist_stress.
 
     # --- Modify aerodynamic parameters for sparse/dense canopy (X. Zeng) ---
-    for fi in 1:fn
-        p = filterp[fi]
-        c = patch_data.column[p]
-        g = patch_data.gridcell[p]
-        ft = patch_data.itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
-
-        if z0param_method == "ZengWang2007"
-            lt = smooth_min(canopystate.elai_patch[p] + canopystate.esai_patch[p], TLSAI_CRIT)
-            egvf = (1.0 - ALPHA_AERO * exp(-lt)) / (1.0 - ALPHA_AERO * exp(-TLSAI_CRIT))
-            canopystate.displa_patch[p] = egvf * canopystate.displa_patch[p]
-            frictionvel.z0mv_patch[p] = exp(egvf * log(frictionvel.z0mv_patch[p]) +
-                (1.0 - egvf) * log(frictionvel.z0mg_col[c]))
-
-        elseif z0param_method == "Meier2022"
-            lt = smooth_max(1.0e-5, canopystate.elai_patch[p] + canopystate.esai_patch[p])
-            canopystate.displa_patch[p] = canopystate.htop_patch[p] *
-                (1.0 - (1.0 - exp(-(CD1_PARAM * lt)^0.5)) / (CD1_PARAM * lt)^0.5)
-
-            lt = smooth_min(lt, z0v_LAImax_pft[ft])
-            delt_iter = 2.0
-            U_ustar_ini = (z0v_Cs_pft[ft] + z0v_Cr_pft[ft] * lt * 0.5)^(-0.5) *
-                z0v_c_pft[ft] * lt * 0.25
-            U_ustar = U_ustar_ini
-            while delt_iter > 1.0e-4
-                U_ustar_prev = U_ustar
-                U_ustar = U_ustar_ini * exp(U_ustar_prev)
-                delt_iter = abs(U_ustar - U_ustar_prev)
-            end
-            U_ustar = 4.0 * U_ustar / lt / z0v_c_pft[ft]
-
-            frictionvel.z0mv_patch[p] = canopystate.htop_patch[p] *
-                (1.0 - canopystate.displa_patch[p] / canopystate.htop_patch[p]) *
-                exp(-VKC * U_ustar + log(z0v_cw_pft[ft]) - 1.0 + z0v_cw_pft[ft]^(-1.0))
-        else
-            error("canopy_fluxes!: unknown z0param_method: $z0param_method")
-        end
-
-        frictionvel.z0hv_patch[p] = frictionvel.z0mv_patch[p]
-        frictionvel.z0qv_patch[p] = frictionvel.z0mv_patch[p]
-
-        # Update forcing heights
-        frictionvel.forc_hgt_u_patch[p] = forc_hgt_u_grc[g] + frictionvel.z0mv_patch[p] + canopystate.displa_patch[p]
-        frictionvel.forc_hgt_t_patch[p] = forc_hgt_t_grc[g] + frictionvel.z0hv_patch[p] + canopystate.displa_patch[p]
-        frictionvel.forc_hgt_q_patch[p] = forc_hgt_q_grc[g] + frictionvel.z0qv_patch[p] + canopystate.displa_patch[p]
-    end
+    # Resolve the method String to an Int code on the host (so no String compare or
+    # error() runs in the kernel); validate here.
+    z0_method = z0param_method == "ZengWang2007" ? 1 :
+                z0param_method == "Meier2022" ? 2 :
+                error("canopy_fluxes!: unknown z0param_method: $z0param_method")
+    _launch!(_cf_z0_kernel!, canopystate.displa_patch, frictionvel.z0mv_patch,
+        frictionvel.z0hv_patch, frictionvel.z0qv_patch, frictionvel.forc_hgt_u_patch,
+        frictionvel.forc_hgt_t_patch, frictionvel.forc_hgt_q_patch, filterp,
+        patch_data.column, patch_data.gridcell, patch_data.itype, canopystate.elai_patch,
+        canopystate.esai_patch, canopystate.htop_patch, frictionvel.z0mg_col,
+        forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc, z0v_LAImax_pft, z0v_Cs_pft,
+        z0v_Cr_pft, z0v_c_pft, z0v_cw_pft, z0_method; ndrange = fn)
 
     # --- Net absorbed longwave radiation, QSat, CO2/O2, flux initialization ---
     found = false
