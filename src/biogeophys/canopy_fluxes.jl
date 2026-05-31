@@ -775,6 +775,39 @@ end
     end
 end
 
+# Net absorbed longwave + QSat + CO2/O2 + flux-profile init (cf4). Per-filtered-patch;
+# qsat() is kernel-safe (4-tuple unpack preserved). The forcing-height-below-canopy
+# warning stays on the host (scans zldis after the launch — diagnostic, not in kernel).
+@kernel function _cf_longwave_qsat_kernel!(air, bir, cir, qsatl, el, qsatldT, co2_arr,
+        o2_arr, nmozsgn, taf, qaf, ur, dth, dqh, delq, dthv, zldis, @Const(filterp),
+        @Const(column), @Const(gridcell), @Const(emv), @Const(emg), @Const(forc_lwrad),
+        @Const(t_veg), @Const(forc_pbot), @Const(forc_pco2), @Const(forc_po2),
+        @Const(t_grnd), @Const(thm), @Const(forc_q), @Const(qg), @Const(forc_u),
+        @Const(forc_v), @Const(forc_th), @Const(forc_hgt_u), @Const(displa), wind_min)
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        T = eltype(air)
+        c = column[p]; g = gridcell[p]
+        emv_p = emv[p]; emg_c = emg[c]
+        air[p] = emv_p * (one(T) + (one(T) - emv_p) * (one(T) - emg_c)) * forc_lwrad[c]
+        bir[p] = -(T(2.0) - emv_p * (one(T) - emg_c)) * emv_p * T(SB)
+        cir[p] = emv_p * emg_c * T(SB)
+        (qs_tmp, es_tmp, dqsdT_tmp, _) = qsat(t_veg[p], forc_pbot[c])
+        qsatl[p] = qs_tmp; el[p] = es_tmp; qsatldT[p] = dqsdT_tmp
+        co2_arr[p] = forc_pco2[g]; o2_arr[p] = forc_po2[g]
+        nmozsgn[p] = 0
+        taf[p] = (t_grnd[c] + thm[p]) / T(2.0)
+        qaf[p] = (forc_q[c] + qg[c]) / T(2.0)
+        ur[p] = smooth_max(wind_min, sqrt(forc_u[g]^2 + forc_v[g]^2))
+        dth[p] = thm[p] - taf[p]
+        dqh[p] = forc_q[c] - qaf[p]
+        delq[p] = qg[c] - qaf[p]
+        dthv[p] = dth[p] * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * dqh[p]
+        zldis[p] = forc_hgt_u[p] - displa[p]
+    end
+end
+
 # =====================================================================
 # Main canopy_fluxes! function
 # =====================================================================
@@ -1034,49 +1067,24 @@ function canopy_fluxes!(
         z0v_Cr_pft, z0v_c_pft, z0v_cw_pft, z0_method; ndrange = fn)
 
     # --- Net absorbed longwave radiation, QSat, CO2/O2, flux initialization ---
-    found = false
-    found_index = 0
+    _launch!(_cf_longwave_qsat_kernel!, air, bir, cir, qsatl, el, qsatldT, co2_arr, o2_arr,
+        nmozsgn, frictionvel.taf_patch, frictionvel.qaf_patch, ur, dth, dqh, delq, dthv,
+        zldis, filterp, patch_data.column, patch_data.gridcell, temperature.emv_patch,
+        temperature.emg_col, forc_lwrad_col, temperature.t_veg_patch, forc_pbot_col,
+        forc_pco2_grc, forc_po2_grc, temperature.t_grnd_col, temperature.thm_patch,
+        forc_q_col, waterdiagbulk.qg_col, forc_u_grc, forc_v_grc, forc_th_col,
+        frictionvel.forc_hgt_u_patch, canopystate.displa_patch,
+        convert(eltype(air), params.wind_min); ndrange = fn)
+
+    # Forcing-height-below-canopy warning (host-side diagnostic; matches the scalar
+    # version — last patch with zldis<0 reported once).
+    found = false; found_index = 0
     for fi in 1:fn
         p = filterp[fi]
-        c = patch_data.column[p]
-        g = patch_data.gridcell[p]
-
-        emv_p = temperature.emv_patch[p]
-        emg_c = temperature.emg_col[c]
-
-        # Net absorbed longwave = air + bir*t_veg^4 + cir*t_grnd^4
-        air[p] =  emv_p * (1.0 + (1.0 - emv_p) * (1.0 - emg_c)) * forc_lwrad_col[c]
-        bir[p] = -(2.0 - emv_p * (1.0 - emg_c)) * emv_p * SB
-        cir[p] =  emv_p * emg_c * SB
-
-        # Saturated vapor pressure at leaf surface
-        (qs_tmp, es_tmp, dqsdT_tmp, _) = qsat(temperature.t_veg_patch[p], forc_pbot_col[c])
-        qsatl[p] = qs_tmp
-        el[p] = es_tmp
-        qsatldT[p] = dqsdT_tmp
-
-        # Atmospheric CO2 and O2
-        co2_arr[p] = forc_pco2_grc[g]
-        o2_arr[p]  = forc_po2_grc[g]
-
-        # Initialize flux profile
-        nmozsgn[p] = 0
-        frictionvel.taf_patch[p] = (temperature.t_grnd_col[c] + temperature.thm_patch[p]) / 2.0
-        frictionvel.qaf_patch[p] = (forc_q_col[c] + waterdiagbulk.qg_col[c]) / 2.0
-
-        ur[p] = smooth_max(params.wind_min, sqrt(forc_u_grc[g]^2 + forc_v_grc[g]^2))
-        dth[p] = temperature.thm_patch[p] - frictionvel.taf_patch[p]
-        dqh[p] = forc_q_col[c] - frictionvel.qaf_patch[p]
-        delq[p] = waterdiagbulk.qg_col[c] - frictionvel.qaf_patch[p]
-        dthv[p] = dth[p] * (1.0 + 0.61 * forc_q_col[c]) + 0.61 * forc_th_col[c] * dqh[p]
-        zldis[p] = frictionvel.forc_hgt_u_patch[p] - canopystate.displa_patch[p]
-
         if zldis[p] < 0.0
-            found = true
-            found_index = p
+            found = true; found_index = p
         end
     end
-
     if found && !use_fates
         @warn "canopy_fluxes!: forcing height below canopy height at patch $found_index"
     end
