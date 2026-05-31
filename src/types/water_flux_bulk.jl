@@ -56,8 +56,10 @@ Base.@kwdef mutable struct WaterFluxBulkData{FT<:Real,
     qflx_drain_vr_col         ::M = Matrix{Float64}(undef, 0, 0)  # col liquid water lost as drainage (m/time step) (1:nlevsoi)
 end
 
-WaterFluxBulkData{FT}(; kwargs...) where {FT<:Real} =
-    WaterFluxBulkData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+# Default the nested base instance to working precision FT (the @kwdef struct default
+# is Float64, used only by the no-FT path); the `wf` field stays loose so AD can swap it.
+WaterFluxBulkData{FT}(; wf = WaterFluxData{FT}(), kwargs...) where {FT<:Real} =
+    WaterFluxBulkData{FT, Vector{FT}, Matrix{FT}}(; wf = wf, kwargs...)
 Adapt.@adapt_structure WaterFluxBulkData
 
 

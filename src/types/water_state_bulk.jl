@@ -25,8 +25,10 @@ Base.@kwdef mutable struct WaterStateBulkData{FT<:Real,
     int_snow_col         ::V = Float64[]   # col integrated snowfall (mm H2O)
 end
 
-WaterStateBulkData{FT}(; kwargs...) where {FT<:Real} =
-    WaterStateBulkData{FT, Vector{FT}}(; kwargs...)
+# Default the nested base instance to working precision FT (the @kwdef struct default
+# is Float64, used only by the no-FT path); the `ws` field stays loose so AD can swap it.
+WaterStateBulkData{FT}(; ws = WaterStateData{FT}(), kwargs...) where {FT<:Real} =
+    WaterStateBulkData{FT, Vector{FT}}(; ws = ws, kwargs...)
 Adapt.@adapt_structure WaterStateBulkData
 
 
