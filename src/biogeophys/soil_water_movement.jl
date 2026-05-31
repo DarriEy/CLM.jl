@@ -103,6 +103,120 @@ Backend-agnostic 1D kernel; replaces an inline per-column loop in
 soilwm_zwtmm!(zwtmm, zimm_arr, mask, zwt) =
     _launch!(_soilwm_zwtmm_kernel!, zwtmm, zimm_arr, mask, zwt)
 
+# --------------------------------------------------------------------------
+# Equilibrium volumetric water content vol_eq and equilibrium matric
+# potential zq based on water-table depth (Zeng-Decker 2009). 2D over
+# (column, soil layer); masked in-kernel. Each (c,j) reads its own layer plus
+# the precomputed interface depths zimm_arr[c,j] (Fortran zimm(c,j-1)) and
+# zimm_arr[c,j+1] (Fortran zimm(c,j)) — both read-only — so writes are
+# disjoint and order-independent. Literals are eltype-converted so no Float64
+# reaches a Float32-only backend (byte-identical on Float64).
+# --------------------------------------------------------------------------
+@kernel function _soilwm_voleq_zq_kernel!(vol_eq, zq, @Const(mask), @Const(zwtmm),
+        @Const(zimm_arr), @Const(watsat), @Const(sucsat), @Const(bsw), @Const(smpmin))
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(vol_eq)
+        zimm_jm1 = zimm_arr[c, j]      # Fortran zimm(c,j-1)
+        zimm_j   = zimm_arr[c, j+1]    # Fortran zimm(c,j)
+        ws   = watsat[c, j]
+        suc  = sucsat[c, j]
+        b    = bsw[c, j]
+        zwt  = zwtmm[c]
+        onem1b = one(T) - one(T) / b   # (1 - 1/bsw); matches Fortran exactly on Float64
+        if zwt <= zimm_jm1
+            vol_eq[c, j] = ws
+        elseif zwt < zimm_j && zwt > zimm_jm1
+            tempi  = one(T)
+            temp0  = ((suc + zwt - zimm_jm1) / suc)^onem1b
+            voleq1 = -suc * ws / onem1b / (zwt - zimm_jm1) * (tempi - temp0)
+            v = (voleq1 * (zwt - zimm_jm1) + ws * (zimm_j - zwt)) / (zimm_j - zimm_jm1)
+            v = smooth_min(ws, v)
+            vol_eq[c, j] = smooth_max(v, zero(T))
+        else
+            tempi = ((suc + zwt - zimm_j) / suc)^onem1b
+            temp0 = ((suc + zwt - zimm_jm1) / suc)^onem1b
+            v = -suc * ws / onem1b / (zimm_j - zimm_jm1) * (tempi - temp0)
+            v = smooth_max(v, zero(T))
+            vol_eq[c, j] = smooth_min(ws, v)
+        end
+        zqv = -suc * (smooth_max(vol_eq[c, j] / ws, T(0.01)))^(-b)
+        zq[c, j] = smooth_max(smpmin[c], zqv)
+    end
+end
+
+"""
+    soilwm_voleq_zq!(vol_eq, zq, mask, zwtmm, zimm_arr, watsat, sucsat, bsw, smpmin, nlevsoi)
+
+Equilibrium water content and matric potential over all active (column, soil
+layer) pairs (Zeng-Decker 2009). Backend-agnostic 2D kernel; replaces the inline
+double loop in `soilwater_zengdecker2009!`.
+"""
+soilwm_voleq_zq!(vol_eq, zq, mask, zwtmm, zimm_arr, watsat, sucsat, bsw, smpmin,
+        nlevsoi::Int) =
+    _launch!(_soilwm_voleq_zq_kernel!, vol_eq, zq, mask, zwtmm, zimm_arr,
+             watsat, sucsat, bsw, smpmin; ndrange = (length(mask), nlevsoi))
+
+# --------------------------------------------------------------------------
+# Hydraulic conductivity hk, matric potential smp and their derivatives
+# (Zeng-Decker 2009 interface/node values). 2D over (column, soil layer);
+# masked in-kernel. The interface value reads layer j and j+1 (clamped to
+# nlevsoi) — read-only — so the per-(c,j) writes are disjoint. Writes hk,
+# dhkdw, imped, smp, dsmpdw and mirrors smp/hk to the per-layer state outputs.
+# --------------------------------------------------------------------------
+@kernel function _soilwm_hk_smp_kernel!(hk, dhkdw, imped_arr, smp_arr, dsmpdw,
+        smp_l, hk_l, @Const(mask), @Const(vwc_liq), @Const(watsat), @Const(hksat),
+        @Const(bsw), @Const(icefrac), @Const(sucsat), @Const(smpmin),
+        nlevsoi::Int, e_ice)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T   = eltype(hk)
+        jp1 = min(nlevsoi, j + 1)
+        b   = bsw[c, j]
+
+        s1 = T(0.5) * (vwc_liq[c, j] + vwc_liq[c, jp1]) /
+             (T(0.5) * (watsat[c, j] + watsat[c, jp1]))
+        s1 = smooth_min(one(T), s1)
+        s2 = hksat[c, j] * s1^(T(2.0) * b + T(2.0))
+
+        imp = T(10.0)^(-e_ice * (T(0.5) * (icefrac[c, j] + icefrac[c, jp1])))
+        imped_arr[c, j] = imp
+
+        hk[c, j] = imp * s1 * s2
+        dhkdw[c, j] = imp * (T(2.0) * b + T(3.0)) * s2 *
+                      (one(T) / (watsat[c, j] + watsat[c, jp1]))
+
+        s_node = smooth_max(vwc_liq[c, j] / watsat[c, j], T(0.01))
+        s_node = smooth_min(one(T), s_node)
+
+        smpv = -sucsat[c, j] * s_node^(-b)
+        smpv = smooth_max(smpmin[c], smpv)
+        smp_arr[c, j] = smpv
+
+        dsmpdw[c, j] = -b * smpv / vwc_liq[c, j]
+
+        smp_l[c, j] = smpv
+        hk_l[c, j]  = hk[c, j]
+    end
+end
+
+"""
+    soilwm_hk_smp!(hk, dhkdw, imped_arr, smp_arr, dsmpdw, smp_l, hk_l, mask,
+        vwc_liq, watsat, hksat, bsw, icefrac, sucsat, smpmin, nlevsoi, e_ice)
+
+Hydraulic conductivity, matric potential and derivatives over all active
+(column, soil layer) pairs (Zeng-Decker 2009). Backend-agnostic 2D kernel;
+replaces the inline double loop in `soilwater_zengdecker2009!`.
+"""
+function soilwm_hk_smp!(hk, dhkdw, imped_arr, smp_arr, dsmpdw, smp_l, hk_l,
+        mask, vwc_liq, watsat, hksat, bsw, icefrac, sucsat, smpmin,
+        nlevsoi::Int, e_ice)
+    ee = convert(eltype(hk), e_ice)
+    _launch!(_soilwm_hk_smp_kernel!, hk, dhkdw, imped_arr, smp_arr, dsmpdw,
+             smp_l, hk_l, mask, vwc_liq, watsat, hksat, bsw, icefrac, sucsat,
+             smpmin, nlevsoi, ee; ndrange = (length(mask), nlevsoi))
+end
+
 """
     SoilWaterMovementConfig
 
@@ -948,37 +1062,40 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
 
     nc = length(mask_hydrology)
 
-    # Local arrays
+    # Local scratch — allocated on the backend of the state via similar()+fill!
+    # (NOT zeros(), which is always host memory) so the kernels below run
+    # device-resident on GPU. zerocol2(m) → nc×m float matrix of zeros.
     FT = eltype(h2osoi_liq)
-    hk      = zeros(FT, nc, nlevsoi)
-    dhkdw   = zeros(FT, nc, nlevsoi)
-    smp_arr = zeros(FT, nc, nlevsoi)
-    dsmpdw  = zeros(FT, nc, nlevsoi)
-    imped_arr = zeros(FT, nc, nlevsoi)
-    vol_ice = zeros(FT, nc, nlevsoi)
-    vwc_liq = zeros(FT, nc, nlevsoi + 1)
-    zmm     = zeros(FT, nc, nlevsoi + 1)
-    dzmm    = zeros(FT, nc, nlevsoi + 1)
-    zimm    = zeros(FT, nc, 0:nlevsoi)  # Can't do 0-indexed; use offset
-    # Use 1-indexed with offset: zimm_arr[c, j+1] for Fortran zimm(c,j) where j=0:nlevsoi
-    zimm_arr = zeros(FT, nc, nlevsoi + 1)  # index 1 = Fortran j=0, index nlevsoi+1 = Fortran j=nlevsoi
-    zwtmm   = zeros(FT, nc)
-    jwt     = zeros(Int, nc)
-    vwc_zwt = zeros(FT, nc)
-    vol_eq  = zeros(FT, nc, nlevsoi + 1)
-    zq      = zeros(FT, nc, nlevsoi + 1)
-    qin     = zeros(FT, nc, nlevsoi + 1)
-    qout_arr = zeros(FT, nc, nlevsoi + 1)
-    dqidw0  = zeros(FT, nc, nlevsoi + 1)
-    dqidw1  = zeros(FT, nc, nlevsoi + 1)
-    dqodw1  = zeros(FT, nc, nlevsoi + 1)
-    dqodw2  = zeros(FT, nc, nlevsoi + 1)
-    amx     = zeros(FT, nc, nlevsoi + 1)
-    bmx     = zeros(FT, nc, nlevsoi + 1)
-    cmx     = zeros(FT, nc, nlevsoi + 1)
-    rmx     = zeros(FT, nc, nlevsoi + 1)
-    dwat2   = zeros(FT, nc, nlevsoi + 1)
-    smp_grad = zeros(FT, nc, nlevsoi + 1)
+    zerocol2(m::Int) = fill!(similar(h2osoi_liq, FT, nc, m), zero(FT))
+    zerocol1()       = fill!(similar(h2osoi_liq, FT, nc), zero(FT))
+    hk      = zerocol2(nlevsoi)
+    dhkdw   = zerocol2(nlevsoi)
+    smp_arr = zerocol2(nlevsoi)
+    dsmpdw  = zerocol2(nlevsoi)
+    imped_arr = zerocol2(nlevsoi)
+    vol_ice = zerocol2(nlevsoi)
+    vwc_liq = zerocol2(nlevsoi + 1)
+    zmm     = zerocol2(nlevsoi + 1)
+    dzmm    = zerocol2(nlevsoi + 1)
+    # 1-indexed with offset: zimm_arr[c, j+1] for Fortran zimm(c,j), j=0:nlevsoi
+    # (index 1 = Fortran j=0, index nlevsoi+1 = Fortran j=nlevsoi)
+    zimm_arr = zerocol2(nlevsoi + 1)
+    zwtmm   = zerocol1()
+    jwt     = fill!(similar(h2osoi_liq, Int, nc), 0)
+    vwc_zwt = zerocol1()
+    vol_eq  = zerocol2(nlevsoi + 1)
+    zq      = zerocol2(nlevsoi + 1)
+    qin     = zerocol2(nlevsoi + 1)
+    qout_arr = zerocol2(nlevsoi + 1)
+    dqidw0  = zerocol2(nlevsoi + 1)
+    dqidw1  = zerocol2(nlevsoi + 1)
+    dqodw1  = zerocol2(nlevsoi + 1)
+    dqodw2  = zerocol2(nlevsoi + 1)
+    amx     = zerocol2(nlevsoi + 1)
+    bmx     = zerocol2(nlevsoi + 1)
+    cmx     = zerocol2(nlevsoi + 1)
+    rmx     = zerocol2(nlevsoi + 1)
+    dwat2   = zerocol2(nlevsoi + 1)
 
     sdamp = 0.0
 
@@ -1017,33 +1134,9 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     end
 
     # Calculate equilibrium water content based on water table depth
-    for j in 1:nlevsoi
-        for c in eachindex(mask_hydrology)
-            mask_hydrology[c] || continue
-            # zimm_arr index: j maps to Fortran zimm(c,j-1), j+1 maps to Fortran zimm(c,j)
-            zimm_jm1 = zimm_arr[c, j]      # Fortran zimm(c,j-1)
-            zimm_j   = zimm_arr[c, j+1]    # Fortran zimm(c,j)
-
-            if zwtmm[c] <= zimm_jm1
-                vol_eq[c, j] = watsat[c, j]
-            elseif zwtmm[c] < zimm_j && zwtmm[c] > zimm_jm1
-                tempi = 1.0
-                temp0 = ((sucsat[c, j] + zwtmm[c] - zimm_jm1) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
-                voleq1 = -sucsat[c, j] * watsat[c, j] / (1.0 - 1.0 / bsw[c, j]) / (zwtmm[c] - zimm_jm1) * (tempi - temp0)
-                vol_eq[c, j] = (voleq1 * (zwtmm[c] - zimm_jm1) + watsat[c, j] * (zimm_j - zwtmm[c])) / (zimm_j - zimm_jm1)
-                vol_eq[c, j] = smooth_min(watsat[c, j], vol_eq[c, j])
-                vol_eq[c, j] = smooth_max(vol_eq[c, j], 0.0)
-            else
-                tempi = ((sucsat[c, j] + zwtmm[c] - zimm_j) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
-                temp0 = ((sucsat[c, j] + zwtmm[c] - zimm_jm1) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
-                vol_eq[c, j] = -sucsat[c, j] * watsat[c, j] / (1.0 - 1.0 / bsw[c, j]) / (zimm_j - zimm_jm1) * (tempi - temp0)
-                vol_eq[c, j] = smooth_max(vol_eq[c, j], 0.0)
-                vol_eq[c, j] = smooth_min(watsat[c, j], vol_eq[c, j])
-            end
-            zq[c, j] = -sucsat[c, j] * (smooth_max(vol_eq[c, j] / watsat[c, j], 0.01))^(-bsw[c, j])
-            zq[c, j] = smooth_max(smpmin[c], zq[c, j])
-        end
-    end
+    # (per-(column, soil layer) kernel; reads its own layer + interface depths).
+    soilwm_voleq_zq!(vol_eq, zq, mask_hydrology, zwtmm, zimm_arr,
+        watsat, sucsat, bsw, smpmin, nlevsoi)
 
     # If water table is below soil column, calculate zq for the 11th layer
     j = nlevsoi
@@ -1062,34 +1155,10 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     end
 
     # Hydraulic conductivity and soil matric potential
-    for j in 1:nlevsoi
-        for c in eachindex(mask_hydrology)
-            mask_hydrology[c] || continue
-
-            s1 = 0.5 * (vwc_liq[c, j] + vwc_liq[c, min(nlevsoi, j+1)]) /
-                 (0.5 * (watsat[c, j] + watsat[c, min(nlevsoi, j+1)]))
-            s1 = smooth_min(1.0, s1)
-            s2 = hksat[c, j] * s1^(2.0 * bsw[c, j] + 2.0)
-
-            imped_arr[c, j] = 10.0^(-cfg.e_ice * (0.5 * (icefrac[c, j] + icefrac[c, min(nlevsoi, j+1)])))
-
-            hk[c, j] = imped_arr[c, j] * s1 * s2
-            dhkdw[c, j] = imped_arr[c, j] * (2.0 * bsw[c, j] + 3.0) * s2 *
-                 (1.0 / (watsat[c, j] + watsat[c, min(nlevsoi, j+1)]))
-
-            # Matric potential and derivative
-            s_node = smooth_max(vwc_liq[c, j] / watsat[c, j], 0.01)
-            s_node = smooth_min(1.0, s_node)
-
-            smp_arr[c, j] = -sucsat[c, j] * s_node^(-bsw[c, j])
-            smp_arr[c, j] = smooth_max(smpmin[c], smp_arr[c, j])
-
-            dsmpdw[c, j] = -bsw[c, j] * smp_arr[c, j] / vwc_liq[c, j]
-
-            smp_l[c, j] = smp_arr[c, j]
-            hk_l[c, j] = hk[c, j]
-        end
-    end
+    # (per-(column, soil layer) kernel; interface value reads layer j and j+1).
+    soilwm_hk_smp!(hk, dhkdw, imped_arr, smp_arr, dsmpdw, smp_l, hk_l,
+        mask_hydrology, vwc_liq, watsat, hksat, bsw, icefrac, sucsat, smpmin,
+        nlevsoi, cfg.e_ice)
 
     # Aquifer (11th) layer
     for c in eachindex(mask_hydrology)
@@ -1212,7 +1281,7 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     end
 
     # Solve for dwat using multi-column tridiagonal solver
-    jtop_arr = fill(1, nc)
+    jtop_arr = fill!(similar(h2osoi_liq, Int, nc), 1)
     mask_jtop = mask_hydrology
     tridiagonal_multi!(dwat2, amx, bmx, cmx, rmx,
         jtop_arr, mask_jtop, nc, nlevsoi + 1)
