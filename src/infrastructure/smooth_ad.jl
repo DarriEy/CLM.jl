@@ -70,7 +70,7 @@ end
 smooth_min(a::Float64, b::Int; k::Float64=50.0) = smooth_min(a, Float64(b); k=k)
 smooth_min(a::Int, b::Float64; k::Float64=50.0) = smooth_min(Float64(a), b; k=k)
 
-function smooth_min(a::T, b::S; k::Real=50.0) where {T<:Real, S<:Real}
+function smooth_min(a::T, b::S; k::Real=50) where {T<:Real, S<:Real}
     R = promote_type(T, S)
     _use_smooth(R) || return min(a, b)   # exact for non-AD (Float32/Float64); GPU-safe
     kk = R(k)                            # sharpness at working precision (no Float64 pin)
@@ -100,7 +100,7 @@ end
 smooth_max(a::Float64, b::Int; k::Float64=50.0) = smooth_max(a, Float64(b); k=k)
 smooth_max(a::Int, b::Float64; k::Float64=50.0) = smooth_max(Float64(a), b; k=k)
 
-function smooth_max(a::T, b::S; k::Real=50.0) where {T<:Real, S<:Real}
+function smooth_max(a::T, b::S; k::Real=50) where {T<:Real, S<:Real}
     R = promote_type(T, S)
     _use_smooth(R) || return max(a, b)   # exact for non-AD (Float32/Float64); GPU-safe
     kk = R(k)                            # sharpness at working precision (no Float64 pin)
@@ -126,7 +126,7 @@ function smooth_clamp(x::Float64, lo::Float64, hi::Float64; k::Float64=50.0)
     return smooth_max(lo, smooth_min(x, hi; k=k); k=k)
 end
 
-function smooth_clamp(x::T, lo, hi; k::Real=50.0) where {T<:Real}
+function smooth_clamp(x::T, lo, hi; k::Real=50) where {T<:Real}
     return smooth_max(lo, smooth_min(x, hi; k=k); k=k)
 end
 
@@ -165,7 +165,7 @@ function smooth_heaviside(x::Float64; k::Float64=50.0)
     return _stable_sigmoid(x, k)
 end
 
-function smooth_heaviside(x::T; k::Real=50.0) where {T<:Real}
+function smooth_heaviside(x::T; k::Real=50) where {T<:Real}
     return _stable_sigmoid(x, k)
 end
 
@@ -185,7 +185,7 @@ function smooth_abs(x::Float64; k::Float64=50.0)
     return x * tanh(k * x)
 end
 
-function smooth_abs(x::T; k::Real=50.0) where {T<:Real}
+function smooth_abs(x::T; k::Real=50) where {T<:Real}
     return x * tanh(k * x)
 end
 
@@ -208,7 +208,7 @@ function smooth_ifelse(x::Float64, a, b; k::Float64=50.0)
     return a * h + b * (1.0 - h)
 end
 
-function smooth_ifelse(x::T, a, b; k::Real=50.0) where {T<:Real}
+function smooth_ifelse(x::T, a, b; k::Real=50) where {T<:Real}
     h = _stable_sigmoid(x, k)
     return a * h + b * (one(T) - h)
 end
