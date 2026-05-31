@@ -26,6 +26,173 @@
 const THIN_SFCLAYER = 1.0e-6  # Threshold for thin surface layer
 
 # =========================================================================
+# Kernels for the soil_temperature! orchestrator's own per-column/-level loops
+# (so the whole driver runs on a device, not just its sub-functions). Each is the
+# backend-agnostic form of a loop in soil_temperature! below; constants carried at
+# the working element type via T = eltype(out). One thread per column unless noted.
+# =========================================================================
+
+# jtop = snl; jbot = nlevurb (wall/roof) or nlevgrnd. Int outputs.
+@kernel function _jtop_jbot_kernel!(jtop, jbot, @Const(mask), @Const(snl), @Const(itype),
+        nlevurb::Int, nlevgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        jtop[c] = snl[c]
+        it = itype[c]
+        jbot[c] = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF) ? nlevurb : nlevgrnd
+    end
+end
+
+# Surface-water heat capacity and thickness (smooth_max-clamped).
+@kernel function _h2osfc_thermprop_kernel!(c_h2osfc_out, dz_h2osfc, @Const(mask),
+        @Const(h2osfc), @Const(frac_h2osfc))
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(c_h2osfc_out)
+        thin = T(THIN_SFCLAYER)
+        if h2osfc[c] > thin && frac_h2osfc[c] > thin
+            c_h2osfc_out[c] = smooth_max(thin, T(CPLIQ) * h2osfc[c] / frac_h2osfc[c])
+            dz_h2osfc[c] = smooth_max(thin, T(1.0e-3) * h2osfc[c] / frac_h2osfc[c])
+        else
+            c_h2osfc_out[c] = thin
+            dz_h2osfc[c] = thin
+        end
+    end
+end
+
+# Pack t_soisno/t_h2osfc into the solver's tvector (one thread per column, internal j-loops).
+@kernel function _tvector_init_kernel!(tvector, @Const(mask), @Const(snl), @Const(t_soisno),
+        @Const(t_h2osfc), nlevsno::Int, nlevmaxurbgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        joff = nlevsno
+        for j in (snl[c] + 1):0
+            tvector[c, j - 1 + nlevsno + 1] = t_soisno[c, j + joff]
+        end
+        tvector[c, nlevsno + 1] = t_h2osfc[c]
+        for j in 1:nlevmaxurbgrnd
+            tvector[c, j + nlevsno + 1] = t_soisno[c, j + joff]
+        end
+    end
+end
+
+# Unpack the solved tvector back into t_soisno/t_h2osfc.
+@kernel function _tvector_extract_kernel!(t_soisno, t_h2osfc, @Const(mask), @Const(snl),
+        @Const(tvector), @Const(frac_h2osfc), nlevsno::Int, nlevmaxurbgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_soisno)
+        joff = nlevsno
+        for j in (snl[c] + 1):0
+            t_soisno[c, j + joff] = tvector[c, j - 1 + nlevsno + 1]
+        end
+        for j in 1:nlevmaxurbgrnd
+            t_soisno[c, j + joff] = tvector[c, j + nlevsno + 1]
+        end
+        if frac_h2osfc[c] == zero(T)
+            t_h2osfc[c] = t_soisno[c, 1 + joff]
+        else
+            t_h2osfc[c] = tvector[c, nlevsno + 1]
+        end
+    end
+end
+
+# Post-solve interface flux fn1 (and the building fn at nlevurb); one thread per (c, jj).
+@kernel function _fn1_kernel!(fn1, fn, @Const(mask), @Const(itype), @Const(snl),
+        @Const(landunit), @Const(t_soisno), @Const(tssbef), @Const(tk), @Const(z), @Const(zi),
+        @Const(t_building), @Const(t_sunw_inner), @Const(t_shdw_inner), @Const(t_roof_inner),
+        nlevsno::Int, nlevurb::Int, nlevgrnd::Int, simple_build::Bool)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        j = jj - nlevsno
+        l = landunit[c]
+        it = itype[c]
+        wallroof = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF)
+        if wallroof && j <= nlevurb
+            if j >= snl[c] + 1
+                if j <= nlevurb - 1
+                    fn1[c, jj] = tk[c, jj] * (t_soisno[c, jj+1] - t_soisno[c, jj]) / (z[c, jj+1] - z[c, jj])
+                elseif j == nlevurb
+                    if simple_build
+                        fn1[c, jj] = tk[c, jj] * (t_building[l] - t_soisno[c, jj]) / (zi[c, jj+1] - z[c, jj])
+                        fn[c, jj]  = tk[c, jj] * (t_building[l] - tssbef[c, jj]) / (zi[c, jj+1] - z[c, jj])
+                    else
+                        tinner = it == ICOL_SUNWALL ? t_sunw_inner[l] :
+                                 it == ICOL_SHADEWALL ? t_shdw_inner[l] : t_roof_inner[l]
+                        fn1[c, jj] = tk[c, jj] * (tinner - t_soisno[c, jj]) / (zi[c, jj+1] - z[c, jj])
+                        fn[c, jj]  = tk[c, jj] * (tinner - tssbef[c, jj]) / (zi[c, jj+1] - z[c, jj])
+                    end
+                end
+            end
+        elseif !wallroof
+            if j >= snl[c] + 1
+                if j <= nlevgrnd - 1
+                    fn1[c, jj] = tk[c, jj] * (t_soisno[c, jj+1] - t_soisno[c, jj]) / (z[c, jj+1] - z[c, jj])
+                elseif j == nlevgrnd
+                    fn1[c, jj] = zero(eltype(fn1))
+                end
+            end
+        end
+    end
+end
+
+# Masked zero of a per-column vector (matches `for c (mask): out[c] = 0`).
+@kernel function _mask_zero_kernel!(out, @Const(mask))
+    c = @index(Global)
+    @inbounds if mask[c]
+        out[c] = zero(eltype(out))
+    end
+end
+
+# Ground temperature from snow/soil/surface-water blend.
+@kernel function _tgrnd_kernel!(t_grnd, @Const(mask), @Const(snl), @Const(t_soisno),
+        @Const(t_h2osfc), @Const(frac_sno_eff), @Const(frac_h2osfc), nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_grnd)
+        joff = nlevsno
+        if snl[c] < 0
+            if frac_h2osfc[c] != zero(T)
+                t_grnd[c] = frac_sno_eff[c] * t_soisno[c, snl[c]+1+joff] +
+                    (one(T) - frac_sno_eff[c] - frac_h2osfc[c]) * t_soisno[c, 1+joff] +
+                    frac_h2osfc[c] * t_h2osfc[c]
+            else
+                t_grnd[c] = frac_sno_eff[c] * t_soisno[c, snl[c]+1+joff] +
+                    (one(T) - frac_sno_eff[c]) * t_soisno[c, 1+joff]
+            end
+        else
+            if frac_h2osfc[c] != zero(T)
+                t_grnd[c] = (one(T) - frac_h2osfc[c]) * t_soisno[c, 1+joff] + frac_h2osfc[c] * t_h2osfc[c]
+            else
+                t_grnd[c] = t_soisno[c, 1+joff]
+            end
+        end
+    end
+end
+
+# Soil heat content: eflx_fgr12 (j==1) and eflx_fgr (soil/crop layers). One thread per (c, j>=1).
+@kernel function _eflx_fgr_kernel!(eflx_fgr, eflx_fgr12, @Const(mask), @Const(landunit),
+        @Const(lun_itype), @Const(fn), @Const(fn1), nlevsno::Int, nlevgrnd::Int)
+    c, j = @index(Global, NTuple)   # j = 1..nlevgrnd (snow layers j<=0 are no-ops here)
+    @inbounds if mask[c]
+        T = eltype(eflx_fgr)
+        cnfac = T(CNFAC)
+        joff = nlevsno
+        jj = j + joff
+        l = landunit[c]
+        if j == 1
+            eflx_fgr12[c] = -cnfac * fn[c, 1+joff] - (one(T) - cnfac) * fn1[c, 1+joff]
+        end
+        issoilcrop = (lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP)
+        if j > 0 && j < nlevgrnd && issoilcrop
+            eflx_fgr[c, j] = -cnfac * fn[c, jj] - (one(T) - cnfac) * fn1[c, jj]
+        elseif j == nlevgrnd && issoilcrop
+            eflx_fgr[c, j] = zero(T)
+        end
+    end
+end
+
+# =========================================================================
 # soil_temperature! — Main driver
 # =========================================================================
 """
@@ -129,16 +296,8 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                       mask_urbanl, bounds_lun, cool_on, heat_on)
     end
 
-    # Set jtop and jbot
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        jtop[c] = snl[c]
-        if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL || col.itype[c] == ICOL_ROOF
-            jbot[c] = nlevurb
-        else
-            jbot[c] = nlevgrnd
-        end
-    end
+    # Set jtop and jbot (kernelized; one thread per column).
+    _launch!(_jtop_jbot_kernel!, jtop, jbot, mask_nolakec, snl, col.itype, nlevurb, nlevgrnd)
 
     # Excess ice vertical coordinate adjustment (save originals).
     # Use typed empty arrays rather than `nothing`: a Union{Nothing,Matrix}
@@ -192,17 +351,8 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                                        mask_nolakec, bounds_col, dtime,
                                        tk, cv, fn, fact)
 
-    # Thermal properties of h2osfc
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        if h2osfc[c] > THIN_SFCLAYER && frac_h2osfc[c] > THIN_SFCLAYER
-            c_h2osfc_out[c] = smooth_max(THIN_SFCLAYER, CPLIQ * h2osfc[c] / frac_h2osfc[c])
-            dz_h2osfc[c] = smooth_max(THIN_SFCLAYER, 1.0e-3 * h2osfc[c] / frac_h2osfc[c])
-        else
-            c_h2osfc_out[c] = THIN_SFCLAYER
-            dz_h2osfc[c] = THIN_SFCLAYER
-        end
-    end
+    # Thermal properties of h2osfc (kernelized).
+    _launch!(_h2osfc_thermprop_kernel!, c_h2osfc_out, dz_h2osfc, mask_nolakec, h2osfc, frac_h2osfc)
 
     # Set up RHS vector
     set_rhs_vec!(col, lun, temperature, waterdiagbulk,
@@ -217,22 +367,9 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                 dhsdT, tk, tk_h2osfc, fact, c_h2osfc_out, dz_h2osfc,
                 bmatrix)
 
-    # Initialize temperature vector
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        # Snow layers: tvector index = j-1 in Fortran → j-1 + nlevsno + 1 in Julia
-        for j in (snl[c] + 1):0
-            # Fortran tvector(c, j-1) = t_soisno(c, j)
-            # j-1 maps to Julia index: (j-1) + nlevsno + 1
-            tvector[c, j - 1 + nlevsno + 1] = t_soisno[c, j + joff]
-        end
-        # Surface water: tvector(c, 0) → index nlevsno+1
-        tvector[c, nlevsno + 1] = t_h2osfc[c]
-        # Soil layers: tvector(c, 1:nlevmaxurbgrnd)
-        for j in 1:nlevmaxurbgrnd
-            tvector[c, j + nlevsno + 1] = t_soisno[c, j + joff]
-        end
-    end
+    # Initialize temperature vector (kernelized; one thread per column, internal j-loops).
+    _launch!(_tvector_init_kernel!, tvector, mask_nolakec, snl, t_soisno, t_h2osfc,
+             nlevsno, nlevmaxurbgrnd; ndrange = size(tvector, 1))
 
     # Solve the band diagonal system
     # Convert jtop/jbot to indices in the tvector space
@@ -253,74 +390,15 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     batched_band_solve!(tvector, bmatrix, rvector, jtop, jbot, mask_nolakec,
                         kl, ku, nlevsno)
 
-    # Return temperatures from tvector
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        for j in (snl[c] + 1):0
-            t_soisno[c, j + joff] = tvector[c, j - 1 + nlevsno + 1]
-        end
-        for j in 1:nlevmaxurbgrnd
-            t_soisno[c, j + joff] = tvector[c, j + nlevsno + 1]
-        end
-        if frac_h2osfc[c] == 0.0
-            t_h2osfc[c] = t_soisno[c, 1 + joff]
-        else
-            t_h2osfc[c] = tvector[c, nlevsno + 1]
-        end
-    end
+    # Return temperatures from tvector (kernelized; one thread per column, internal j-loops).
+    _launch!(_tvector_extract_kernel!, t_soisno, t_h2osfc, mask_nolakec, snl, tvector,
+             frac_h2osfc, nlevsno, nlevmaxurbgrnd; ndrange = size(t_soisno, 1))
 
-    # Compute fn1 for melting/freezing
-    for j in (-nlevsno + 1):nlevmaxurbgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            jj = j + joff  # Julia index for t_soisno, z, etc.
-
-            if (col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL ||
-                col.itype[c] == ICOL_ROOF) && j <= nlevurb
-                if j >= snl[c] + 1
-                    if j <= nlevurb - 1
-                        fn1[c, jj] = tk[c, jj] * (t_soisno[c, jj + 1] - t_soisno[c, jj]) /
-                                     (col.z[c, jj + 1] - col.z[c, jj])
-                    elseif j == nlevurb
-                        if is_simple_build_temp()
-                            fn1[c, jj] = tk[c, jj] * (t_building[l] - t_soisno[c, jj]) /
-                                         (col.zi[c, jj + 1] - col.z[c, jj])
-                            fn[c, jj] = tk[c, jj] * (t_building[l] - tssbef[c, jj]) /
-                                        (col.zi[c, jj + 1] - col.z[c, jj])
-                        else
-                            if col.itype[c] == ICOL_SUNWALL
-                                fn1[c, jj] = tk[c, jj] * (t_sunw_inner[l] - t_soisno[c, jj]) /
-                                             (col.zi[c, jj + 1] - col.z[c, jj])
-                                fn[c, jj] = tk[c, jj] * (t_sunw_inner[l] - tssbef[c, jj]) /
-                                            (col.zi[c, jj + 1] - col.z[c, jj])
-                            elseif col.itype[c] == ICOL_SHADEWALL
-                                fn1[c, jj] = tk[c, jj] * (t_shdw_inner[l] - t_soisno[c, jj]) /
-                                             (col.zi[c, jj + 1] - col.z[c, jj])
-                                fn[c, jj] = tk[c, jj] * (t_shdw_inner[l] - tssbef[c, jj]) /
-                                            (col.zi[c, jj + 1] - col.z[c, jj])
-                            elseif col.itype[c] == ICOL_ROOF
-                                fn1[c, jj] = tk[c, jj] * (t_roof_inner[l] - t_soisno[c, jj]) /
-                                             (col.zi[c, jj + 1] - col.z[c, jj])
-                                fn[c, jj] = tk[c, jj] * (t_roof_inner[l] - tssbef[c, jj]) /
-                                            (col.zi[c, jj + 1] - col.z[c, jj])
-                            end
-                        end
-                    end
-                end
-            elseif col.itype[c] != ICOL_SUNWALL && col.itype[c] != ICOL_SHADEWALL &&
-                   col.itype[c] != ICOL_ROOF
-                if j >= snl[c] + 1
-                    if j <= nlevgrnd - 1
-                        fn1[c, jj] = tk[c, jj] * (t_soisno[c, jj + 1] - t_soisno[c, jj]) /
-                                     (col.z[c, jj + 1] - col.z[c, jj])
-                    elseif j == nlevgrnd
-                        fn1[c, jj] = 0.0
-                    end
-                end
-            end
-        end
-    end
+    # Compute fn1 for melting/freezing (kernelized; one thread per (c, jj)).
+    _launch!(_fn1_kernel!, fn1, fn, mask_nolakec, col.itype, snl, col.landunit, t_soisno,
+             tssbef, tk, col.z, col.zi, t_building, t_sunw_inner, t_shdw_inner, t_roof_inner,
+             nlevsno, nlevurb, nlevgrnd, is_simple_build_temp();
+             ndrange = (size(fn1, 1), nlevsno + nlevmaxurbgrnd))
 
     # Urban building heat flux
     for c in bounds_col
@@ -348,11 +426,8 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
         end
     end
 
-    # Phase change of h2osfc
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        xmf_h2osfc_arr[c] = 0.0
-    end
+    # Phase change of h2osfc (zero accumulator; kernelized).
+    _launch!(_mask_zero_kernel!, xmf_h2osfc_arr, mask_nolakec)
 
     phase_change_h2osfc!(col, temperature, energyflux, waterstatebulk, waterdiagbulk, waterfluxbulk,
                          mask_nolakec, bounds_col, dtime, dhsdT)
@@ -377,50 +452,14 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
         end
     end
 
-    # Ground temperature
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        if snl[c] < 0
-            if frac_h2osfc[c] != 0.0
-                t_grnd[c] = frac_sno_eff[c] * t_soisno[c, snl[c] + 1 + joff] +
-                    (1.0 - frac_sno_eff[c] - frac_h2osfc[c]) * t_soisno[c, 1 + joff] +
-                    frac_h2osfc[c] * t_h2osfc[c]
-            else
-                t_grnd[c] = frac_sno_eff[c] * t_soisno[c, snl[c] + 1 + joff] +
-                    (1.0 - frac_sno_eff[c]) * t_soisno[c, 1 + joff]
-            end
-        else
-            if frac_h2osfc[c] != 0.0
-                t_grnd[c] = (1.0 - frac_h2osfc[c]) * t_soisno[c, 1 + joff] +
-                    frac_h2osfc[c] * t_h2osfc[c]
-            else
-                t_grnd[c] = t_soisno[c, 1 + joff]
-            end
-        end
-    end
+    # Ground temperature (kernelized; one thread per column).
+    _launch!(_tgrnd_kernel!, t_grnd, mask_nolakec, snl, t_soisno, t_h2osfc,
+             frac_sno_eff, frac_h2osfc, nlevsno)
 
-    # Soil heat content
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        eflx_fgr12[c] = 0.0
-    end
-
-    for j in (-nlevsno + 1):nlevgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            jj = j + joff
-
-            if j == 1
-                eflx_fgr12[c] = -CNFAC * fn[c, 1 + joff] - (1.0 - CNFAC) * fn1[c, 1 + joff]
-            end
-            if j > 0 && j < nlevgrnd && (lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP)
-                eflx_fgr[c, j] = -CNFAC * fn[c, jj] - (1.0 - CNFAC) * fn1[c, jj]
-            elseif j == nlevgrnd && (lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP)
-                eflx_fgr[c, j] = 0.0
-            end
-        end
-    end
+    # Soil heat content: zero eflx_fgr12, then eflx_fgr12/eflx_fgr (kernelized; thread per (c, j)).
+    _launch!(_mask_zero_kernel!, eflx_fgr12, mask_nolakec)
+    _launch!(_eflx_fgr_kernel!, eflx_fgr, eflx_fgr12, mask_nolakec, col.landunit, lun.itype,
+             fn, fn1, nlevsno, nlevgrnd; ndrange = (size(eflx_fgr, 1), nlevgrnd))
 
     return nothing
 end
