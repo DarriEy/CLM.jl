@@ -631,6 +631,36 @@ function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
 end
 
 # =====================================================================
+# canopy_fluxes! Phase-1 init kernels (cf1). Per-filtered-patch (fi → p=filterp[fi]),
+# elementwise; literals eltype-converted. (canopy_fluxes! does not run whole-function
+# on GPU — the Newton iteration uses host-side filter compaction — so these add to
+# its incremental GPU coverage; the expensive Newton physics is already kernelized.)
+# =====================================================================
+@kernel function _cf_init_zero_kernel!(del_arr, efeb, wtlq0, wtalq, wtgq, wtaq0, obuold,
+        dhsdt_canopy, eflx_sh_stem, @Const(filterp))
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        T = eltype(del_arr)
+        del_arr[p] = zero(T); efeb[p] = zero(T); wtlq0[p] = zero(T); wtalq[p] = zero(T)
+        wtgq[p] = zero(T); wtaq0[p] = zero(T); obuold[p] = zero(T)
+        dhsdt_canopy[p] = zero(T); eflx_sh_stem[p] = zero(T)
+    end
+end
+
+@kernel function _cf_daylength_kernel!(dayl_factor, @Const(filterp), @Const(gridcell),
+        @Const(dayl_grc), @Const(max_dayl_grc))
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        g = gridcell[p]
+        T = eltype(dayl_factor)
+        dayl_factor[p] = smooth_clamp(
+            (dayl_grc[g] * dayl_grc[g]) / (max_dayl_grc[g] * max_dayl_grc[g]), T(0.01), one(T))
+    end
+end
+
+# =====================================================================
 # Main canopy_fluxes! function
 # =====================================================================
 
@@ -838,22 +868,8 @@ function canopy_fluxes!(
     # Phase 1: Initialization
     # =========================================================================
 
-    for fi in 1:fn
-        p = filterp[fi]
-        c = patch_data.column[p]
-        g = patch_data.gridcell[p]
-
-        del_arr[p] = 0.0
-        efeb[p]    = 0.0
-        wtlq0[p]   = 0.0
-        wtalq[p]   = 0.0
-        wtgq[p]    = 0.0
-        wtaq0[p]   = 0.0
-        obuold[p]  = 0.0
-        # btran_patch is computed by calc_root_moist_stress! — do NOT reset here
-        energyflux.dhsdt_canopy_patch[p] = 0.0
-        energyflux.eflx_sh_stem_patch[p] = 0.0
-    end
+    _launch!(_cf_init_zero_kernel!, del_arr, efeb, wtlq0, wtalq, wtgq, wtaq0, obuold,
+        energyflux.dhsdt_canopy_patch, energyflux.eflx_sh_stem_patch, filterp; ndrange = fn)
 
     # --- Calculate biomass heat capacities ---
     if ctrl.use_biomass_heat_storage
@@ -941,16 +957,11 @@ function canopy_fluxes!(
     end
 
     # --- Daylength control for Vcmax ---
-    for fi in 1:fn
-        p = filterp[fi]
-        g = patch_data.gridcell[p]
-        dayl_factor[p] = smooth_clamp((dayl_grc[g] * dayl_grc[g]) / (max_dayl_grc[g] * max_dayl_grc[g]), 0.01, 1.0)
-    end
+    _launch!(_cf_daylength_kernel!, dayl_factor, filterp, patch_data.gridcell,
+        dayl_grc, max_dayl_grc; ndrange = fn)
 
-    # Zero boundary layer resistance
-    for p in bounds_patch
-        frictionvel.rb1_patch[p] = 0.0
-    end
+    # Zero boundary layer resistance (broadcast over the patch range; backend-agnostic).
+    @views frictionvel.rb1_patch[bounds_patch] .= zero(eltype(frictionvel.rb1_patch))
 
     # --- Compute effective soil porosity and volumetric liquid water ---
     # (These are done inline rather than calling separate functions,
