@@ -766,6 +766,120 @@ end
 end
 
 # =========================================================================
+# lake_temperature! convective-mixing kernels (lt6). The outer layer loop is
+# loop-carried (each layer's convection check reads rhow that an earlier layer's
+# redistribution updated), so each is ONE per-column kernel running the full
+# nested layer loops sequentially in-thread, with thread-local qav/nav/iceav/zsum
+# accumulators (no per-column scratch, no atomics). LAKEPUDDLING is const false so
+# its guard folds to true. Constants/cwat/cice_eff eltype-converted.
+# =========================================================================
+@kernel function _lake_top_convection_kernel!(lake_icefrac, t_lake, rhow, jconvect,
+        @Const(mask), @Const(dz_lake), nlevlak::Int, cwat, cice_eff, use_lch4::Bool)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_lake)
+        for j in 1:(nlevlak - 2)
+            doconv = rhow[c, j] > rhow[c, j+1] ||
+                (lake_icefrac[c, j] < one(T) && lake_icefrac[c, j+1] > zero(T))
+            if doconv
+                qav = zero(T); nav = zero(T); iceav = zero(T)
+                for i in 1:(j + 1)
+                    qav += dz_lake[c, i] * (t_lake[c, i] - T(TFRZ)) *
+                        ((one(T) - lake_icefrac[c, i]) * cwat + lake_icefrac[c, i] * cice_eff)
+                    iceav += lake_icefrac[c, i] * dz_lake[c, i]
+                    nav += dz_lake[c, i]
+                end
+                if use_lch4
+                    jconvect[c] = j + 1
+                end
+                qav /= nav; iceav /= nav
+                tav_froz = zero(T); tav_unfr = zero(T)
+                if qav > zero(T)
+                    tav_unfr = qav / ((one(T) - iceav) * cwat)
+                elseif qav < zero(T)
+                    tav_froz = qav / (iceav * cice_eff)
+                end
+                zsum = zero(T)
+                for i in 1:(j + 1)
+                    if (zsum + dz_lake[c, i]) / nav <= iceav
+                        lake_icefrac[c, i] = one(T)
+                        t_lake[c, i] = tav_froz + T(TFRZ)
+                    elseif zsum / nav < iceav
+                        lake_icefrac[c, i] = (iceav * nav - zsum) / dz_lake[c, i]
+                        t_lake[c, i] = (lake_icefrac[c, i] * tav_froz * cice_eff +
+                            (one(T) - lake_icefrac[c, i]) * tav_unfr * cwat) /
+                            (lake_icefrac[c, i] * cice_eff + (one(T) - lake_icefrac[c, i]) * cwat) + T(TFRZ)
+                    else
+                        lake_icefrac[c, i] = zero(T)
+                        t_lake[c, i] = tav_unfr + T(TFRZ)
+                    end
+                    zsum += dz_lake[c, i]
+                    rhow[c, i] = (one(T) - lake_icefrac[c, i]) *
+                        T(1000.0) * (one(T) - T(1.9549e-05) * smooth_abs(t_lake[c, i] - T(TDMAX))^T(1.68)) +
+                        lake_icefrac[c, i] * T(DENICE)
+                end
+            end
+        end
+    end
+end
+
+@kernel function _lake_bottom_convection_kernel!(lake_icefrac, t_lake, rhow, jconvectbot,
+        bottomconvect, @Const(mask), @Const(dz_lake), nlevlak::Int, cwat, cice_eff,
+        use_lch4::Bool)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_lake)
+        jb = nlevlak - 1
+        if rhow[c, jb] > rhow[c, jb+1] ||
+           (lake_icefrac[c, jb] < one(T) && lake_icefrac[c, jb+1] > zero(T))
+            bottomconvect[c] = true
+        end
+        for j in (nlevlak - 1):-1:1
+            doconv = bottomconvect[c] && (rhow[c, j] > rhow[c, j+1] ||
+                (lake_icefrac[c, j] < one(T) && lake_icefrac[c, j+1] > zero(T)))
+            if doconv
+                qav = zero(T); nav = zero(T); iceav = zero(T)
+                for i in j:nlevlak
+                    qav += dz_lake[c, i] * (t_lake[c, i] - T(TFRZ)) *
+                        ((one(T) - lake_icefrac[c, i]) * cwat + lake_icefrac[c, i] * cice_eff)
+                    iceav += lake_icefrac[c, i] * dz_lake[c, i]
+                    nav += dz_lake[c, i]
+                end
+                if use_lch4
+                    jconvectbot[c] = j
+                end
+                qav /= nav; iceav /= nav
+                tav_froz = zero(T); tav_unfr = zero(T)
+                if qav > zero(T)
+                    tav_unfr = qav / ((one(T) - iceav) * cwat)
+                elseif qav < zero(T)
+                    tav_froz = qav / (iceav * cice_eff)
+                end
+                zsum = zero(T)
+                for i in j:nlevlak
+                    if (zsum + dz_lake[c, i]) / nav <= iceav
+                        lake_icefrac[c, i] = one(T)
+                        t_lake[c, i] = tav_froz + T(TFRZ)
+                    elseif zsum / nav < iceav
+                        lake_icefrac[c, i] = (iceav * nav - zsum) / dz_lake[c, i]
+                        t_lake[c, i] = (lake_icefrac[c, i] * tav_froz * cice_eff +
+                            (one(T) - lake_icefrac[c, i]) * tav_unfr * cwat) /
+                            (lake_icefrac[c, i] * cice_eff + (one(T) - lake_icefrac[c, i]) * cwat) + T(TFRZ)
+                    else
+                        lake_icefrac[c, i] = zero(T)
+                        t_lake[c, i] = tav_unfr + T(TFRZ)
+                    end
+                    zsum += dz_lake[c, i]
+                    rhow[c, i] = (one(T) - lake_icefrac[c, i]) *
+                        T(1000.0) * (one(T) - T(1.9549e-05) * smooth_abs(t_lake[c, i] - T(TDMAX))^T(1.68)) +
+                        lake_icefrac[c, i] * T(DENICE)
+                end
+            end
+        end
+    end
+end
+
+# =========================================================================
 """
     lake_temperature!(col, patch_data, solarabs, soilstate, waterstatebulk,
                       waterdiagbulk, waterfluxbulk, energyflux, temperature,
@@ -985,15 +1099,9 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
                        cv, cv_lake, lhabs, mask_lakec, bounds_col, dtime)
 
     # 10!) Convective mixing
-    # Recalculate density
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-            rhow[c, j] = (1.0 - lake_icefrac[c, j]) *
-                1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, j] - TDMAX)^1.68) +
-                lake_icefrac[c, j] * DENICE
-        end
-    end
+    # Recalculate density (reuse the density kernel from the pre-solve stage).
+    _launch!(_lake_density_kernel!, rhow, mask_lakec, lake_icefrac, t_lake, nlevlak;
+        ndrange = (nc, nlevlak))
 
     if LAKEPUDDLING
         for j in 1:nlevlak
@@ -1013,163 +1121,14 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         end
     end
 
-    # Top nlevlak-2 layers convection
-    for j in 1:(nlevlak - 2)
-        for c in bounds_col
-            mask_lakec[c] || continue
-            qav[c] = 0.0
-            nav[c] = 0.0
-            iceav[c] = 0.0
-        end
-
-        for i in 1:(j + 1)
-            for c in bounds_col
-                mask_lakec[c] || continue
-                if (!LAKEPUDDLING || !puddle[c]) && (rhow[c, j] > rhow[c, j+1] ||
-                    (lake_icefrac[c, j] < 1.0 && lake_icefrac[c, j+1] > 0.0))
-                    qav[c] = qav[c] + dz_lake[c, i] * (t_lake[c, i] - TFRZ) *
-                        ((1.0 - lake_icefrac[c, i]) * cwat + lake_icefrac[c, i] * cice_eff)
-                    iceav[c] = iceav[c] + lake_icefrac[c, i] * dz_lake[c, i]
-                    nav[c] = nav[c] + dz_lake[c, i]
-                    if varctl.use_lch4
-                        jconvect[c] = j + 1
-                    end
-                end
-            end
-        end
-
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if (!LAKEPUDDLING || !puddle[c]) && (rhow[c, j] > rhow[c, j+1] ||
-                (lake_icefrac[c, j] < 1.0 && lake_icefrac[c, j+1] > 0.0))
-                qav[c] = qav[c] / nav[c]
-                iceav[c] = iceav[c] / nav[c]
-                if qav[c] > 0.0
-                    tav_froz[c] = 0.0
-                    tav_unfr[c] = qav[c] / ((1.0 - iceav[c]) * cwat)
-                elseif qav[c] < 0.0
-                    tav_froz[c] = qav[c] / (iceav[c] * cice_eff)
-                    tav_unfr[c] = 0.0
-                else
-                    tav_froz[c] = 0.0
-                    tav_unfr[c] = 0.0
-                end
-            end
-        end
-
-        for i in 1:(j + 1)
-            for c in bounds_col
-                mask_lakec[c] || continue
-                if nav[c] > 0.0
-                    if i == 1
-                        zsum[c] = 0.0
-                    end
-                    if (zsum[c] + dz_lake[c, i]) / nav[c] <= iceav[c]
-                        lake_icefrac[c, i] = 1.0
-                        t_lake[c, i] = tav_froz[c] + TFRZ
-                    elseif zsum[c] / nav[c] < iceav[c]
-                        lake_icefrac[c, i] = (iceav[c] * nav[c] - zsum[c]) / dz_lake[c, i]
-                        t_lake[c, i] = (lake_icefrac[c, i] * tav_froz[c] * cice_eff +
-                            (1.0 - lake_icefrac[c, i]) * tav_unfr[c] * cwat) /
-                            (lake_icefrac[c, i] * cice_eff + (1 - lake_icefrac[c, i]) * cwat) + TFRZ
-                    else
-                        lake_icefrac[c, i] = 0.0
-                        t_lake[c, i] = tav_unfr[c] + TFRZ
-                    end
-                    zsum[c] = zsum[c] + dz_lake[c, i]
-
-                    rhow[c, i] = (1.0 - lake_icefrac[c, i]) *
-                        1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, i] - TDMAX)^1.68) +
-                        lake_icefrac[c, i] * DENICE
-                end
-            end
-        end
-    end
-
-    # Check bottom layer for convection
-    j = nlevlak - 1
-    for c in bounds_col
-        mask_lakec[c] || continue
-        if (!LAKEPUDDLING || !puddle[c]) && (rhow[c, j] > rhow[c, j+1] ||
-            (lake_icefrac[c, j] < 1.0 && lake_icefrac[c, j+1] > 0.0))
-            bottomconvect[c] = true
-        end
-    end
-
-    # Bottom-up convective mixing
-    for j in (nlevlak - 1):-1:1
-        for c in bounds_col
-            mask_lakec[c] || continue
-            qav[c] = 0.0
-            nav[c] = 0.0
-            iceav[c] = 0.0
-        end
-
-        for i in j:nlevlak
-            for c in bounds_col
-                mask_lakec[c] || continue
-                if bottomconvect[c] &&
-                   (!LAKEPUDDLING || !puddle[c]) && (rhow[c, j] > rhow[c, j+1] ||
-                    (lake_icefrac[c, j] < 1.0 && lake_icefrac[c, j+1] > 0.0))
-                    qav[c] = qav[c] + dz_lake[c, i] * (t_lake[c, i] - TFRZ) *
-                        ((1.0 - lake_icefrac[c, i]) * cwat + lake_icefrac[c, i] * cice_eff)
-                    iceav[c] = iceav[c] + lake_icefrac[c, i] * dz_lake[c, i]
-                    nav[c] = nav[c] + dz_lake[c, i]
-                    if varctl.use_lch4
-                        jconvectbot[c] = j
-                    end
-                end
-            end
-        end
-
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if bottomconvect[c] &&
-               (!LAKEPUDDLING || !puddle[c]) && (rhow[c, j] > rhow[c, j+1] ||
-                (lake_icefrac[c, j] < 1.0 && lake_icefrac[c, j+1] > 0.0))
-                qav[c] = qav[c] / nav[c]
-                iceav[c] = iceav[c] / nav[c]
-                if qav[c] > 0.0
-                    tav_froz[c] = 0.0
-                    tav_unfr[c] = qav[c] / ((1.0 - iceav[c]) * cwat)
-                elseif qav[c] < 0.0
-                    tav_froz[c] = qav[c] / (iceav[c] * cice_eff)
-                    tav_unfr[c] = 0.0
-                else
-                    tav_froz[c] = 0.0
-                    tav_unfr[c] = 0.0
-                end
-            end
-        end
-
-        for i in j:nlevlak
-            for c in bounds_col
-                mask_lakec[c] || continue
-                if bottomconvect[c] && nav[c] > 0.0
-                    if i == j
-                        zsum[c] = 0.0
-                    end
-                    if (zsum[c] + dz_lake[c, i]) / nav[c] <= iceav[c]
-                        lake_icefrac[c, i] = 1.0
-                        t_lake[c, i] = tav_froz[c] + TFRZ
-                    elseif zsum[c] / nav[c] < iceav[c]
-                        lake_icefrac[c, i] = (iceav[c] * nav[c] - zsum[c]) / dz_lake[c, i]
-                        t_lake[c, i] = (lake_icefrac[c, i] * tav_froz[c] * cice_eff +
-                            (1.0 - lake_icefrac[c, i]) * tav_unfr[c] * cwat) /
-                            (lake_icefrac[c, i] * cice_eff + (1 - lake_icefrac[c, i]) * cwat) + TFRZ
-                    else
-                        lake_icefrac[c, i] = 0.0
-                        t_lake[c, i] = tav_unfr[c] + TFRZ
-                    end
-                    zsum[c] = zsum[c] + dz_lake[c, i]
-
-                    rhow[c, i] = (1.0 - lake_icefrac[c, i]) *
-                        1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, i] - TDMAX)^1.68) +
-                        lake_icefrac[c, i] * DENICE
-                end
-            end
-        end
-    end
+    # Top-down and bottom-up convective mixing (per-column kernels; the layer loop
+    # is sequential per column because each layer's check reads rhow updated by an
+    # earlier layer's redistribution).
+    _launch!(_lake_top_convection_kernel!, lake_icefrac, t_lake, rhow, jconvect,
+        mask_lakec, dz_lake, nlevlak, FT(cwat), FT(cice_eff), use_lch4; ndrange = nc)
+    _launch!(_lake_bottom_convection_kernel!, lake_icefrac, t_lake, rhow, jconvectbot,
+        bottomconvect, mask_lakec, dz_lake, nlevlak, FT(cwat), FT(cice_eff), use_lch4;
+        ndrange = nc)
 
     # Calculate lakeresist and grnd_ch4_cond for CH4 module
     if varctl.use_lch4
