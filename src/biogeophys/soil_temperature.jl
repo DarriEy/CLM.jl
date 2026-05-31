@@ -1968,18 +1968,15 @@ end
 # =========================================================================
 # building_hac! — Building Heating and Cooling (simple method)
 # =========================================================================
-function building_hac!(lun::LandunitData, temperature::TemperatureData,
-                       urbanparams::UrbanParamsData,
-                       t_building_max::Vector{<:Real},
-                       mask_urbanl::BitVector, bounds_lun::UnitRange{Int},
-                       cool_on::BitVector, heat_on::BitVector)
-
-    t_building = temperature.t_building_lun
-    t_building_min = urbanparams.t_building_min
-
-    for l in bounds_lun
-        mask_urbanl[l] || continue
-        if lun.urbpoi[l]
+# Per-landunit building HAC. cool_on/heat_on are BitVector scratch, so this kernel runs on
+# the CPU backend (_kernel_backend(::BitArray) = KA.CPU()) — matching the documented
+# BitVector-writing-kernel convention; moving the build-temp landunit scratch to device is
+# the same follow-up as the other masks. One thread per landunit.
+@kernel function _building_hac_kernel!(cool_on, heat_on, t_building, @Const(mask),
+        @Const(urbpoi), @Const(t_building_max), @Const(t_building_min))
+    l = @index(Global)
+    @inbounds if mask[l]
+        if urbpoi[l]
             cool_on[l] = false
             heat_on[l] = false
             if t_building[l] > t_building_max[l]
@@ -1993,6 +1990,20 @@ function building_hac!(lun::LandunitData, temperature::TemperatureData,
             end
         end
     end
+end
+
+function building_hac!(lun::LandunitData, temperature::TemperatureData,
+                       urbanparams::UrbanParamsData,
+                       t_building_max::Vector{<:Real},
+                       mask_urbanl::BitVector, bounds_lun::UnitRange{Int},
+                       cool_on::BitVector, heat_on::BitVector)
+
+    t_building = temperature.t_building_lun
+    t_building_min = urbanparams.t_building_min
+
+    # One thread per landunit; keyed on cool_on (BitVector) → CPU backend.
+    _launch!(_building_hac_kernel!, cool_on, heat_on, t_building, mask_urbanl,
+        lun.urbpoi, t_building_max, t_building_min)
 
     return nothing
 end
