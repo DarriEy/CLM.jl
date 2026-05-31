@@ -101,6 +101,34 @@ function tests(to, ::Type{FT}) where {FT}
                NS), ())))
 
     push!(results, test_phase_change(to, FT))
+
+    # ---- lt3: lake density + diffusivity (the Metal-risk ones: smooth_abs, exp, pow) ----
+    rng2 = MersenneTwister(37)
+    rnd2(d...) = FT.(rand(rng2, d...))
+    icefrac = rnd2(NC, NLAK) .* FT(0.5)
+    t_lake  = FT[272.0 + 4.0 * sinpi((c + j) / 5) for c in 1:NC, j in 1:NLAK]
+    z_lake  = FT[0.5 * j for c in 1:NC, j in 1:NLAK]
+    rhow_in = FT(999.0) .+ rnd2(NC, NLAK) .* 2
+    ws_in = FT(0.05) .+ rnd2(NC); ks_in = FT(0.1) .+ rnd2(NC) .* FT(0.1)
+    t_grnd = FT[274.0, 271.0, 275.0, 272.0, 274.0, 270.0, 276.0, 273.0]
+    snl = Int[0, 0, 0, -1, 0, -2, 0, 0]
+    lakedepth = FT[2.0, 60.0, 5.0, 80.0, 3.0, 50.0, 10.0, 100.0]
+    cwat = FT(CLM.CPLIQ * CLM.DENH2O); tkice_eff = FT(CLM.TKICE * CLM.DENICE / CLM.DENH2O)
+    km = FT(CLM.TKWAT) / cwat; p0 = FT(1.0)
+
+    rho0 = zeros(FT, NC, NLAK)
+    push!(results, _parity("lake_density", to, FT, CLM._lake_density_kernel!, (NC, NLAK), rho0,
+        f -> ((f(trues(NC)), f(icefrac), f(t_lake), NLAK), ())))
+
+    kme0 = zeros(FT, NC, NLAK)
+    push!(results, _parity("diffusivity", to, FT, CLM._lake_diffusivity_kernel!,
+        (NC, NLAK - 1), kme0,
+        f -> begin
+            tkl = f(zeros(FT, NC, NLAK)); frzn = f(fill(false, NC))
+            ((tkl, frzn, f(trues(NC)), f(rhow_in), f(z_lake), f(ws_in), f(ks_in), f(t_grnd),
+              f(t_lake), f(snl), f(lakedepth), f(icefrac), NLAK, km, p0, cwat, tkice_eff),
+             (tkl,))
+        end))
     return results
 end
 

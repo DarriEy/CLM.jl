@@ -381,6 +381,143 @@ end
 # =========================================================================
 # lake_temperature! — Main driver for lake temperature calculation
 # =========================================================================
+# lake_temperature! pre-solve kernels (lt3). Per-column / per-(column,layer) /
+# per-patch. LAKEPUDDLING and LAKE_NO_ED are compile-time `const false`, so their
+# branches (and the frzn state) constant-fold away exactly as in the scalar loop;
+# they are kept referenced for fidelity. Constants + local scalars (km/p0/cwat/
+# tkice_eff) eltype-converted so no Float64 reaches a Float32-only backend.
+# =========================================================================
+@kernel function _lake_init_kernel!(ocvts, ncvts, esum1, esum2, jconvect, jconvectbot,
+        lakeresist, bottomconvect, @Const(mask), nlevlak::Int, use_lch4::Bool)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(ocvts)
+        ocvts[c] = zero(T); ncvts[c] = zero(T); esum1[c] = zero(T); esum2[c] = zero(T)
+        if use_lch4
+            jconvect[c] = 0
+            jconvectbot[c] = nlevlak + 1
+            lakeresist[c] = zero(T)
+        end
+        bottomconvect[c] = false
+    end
+end
+
+@kernel function _lake_prior_ice_kernel!(frac_iceold, @Const(mask), @Const(snl),
+        @Const(h2osoi_liq), @Const(h2osoi_ice), nlevsno::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        j = jj - nlevsno
+        if j >= snl[c] + 1
+            frac_iceold[c, jj] = h2osoi_ice[c, jj] / (h2osoi_liq[c, jj] + h2osoi_ice[c, jj])
+        end
+    end
+end
+
+# Per-patch: fin (= ground net heat flux) + NIR-fraction beta. Lake columns have
+# one patch each, so the patch→column writes are 1:1 (no scatter conflict).
+@kernel function _lake_solar_nir_kernel!(fin, beta, @Const(maskp), @Const(column),
+        @Const(eflx_gnet), @Const(fsds_nir_d), @Const(fsds_nir_i), @Const(fsr_nir_d),
+        @Const(fsr_nir_i), @Const(sabg))
+    p = @index(Global)
+    @inbounds if maskp[p]
+        T = eltype(fin)
+        c = column[p]
+        fin[c] = eflx_gnet[p]
+        sabg_nir = fsds_nir_d[p] + fsds_nir_i[p] - fsr_nir_d[p] - fsr_nir_i[p]
+        sabg_nir = smooth_min(sabg_nir, sabg[p])
+        beta[c] = sabg_nir / smooth_max(T(1.0e-5), sabg[p])
+        beta[c] = beta[c] + (one(T) - beta[c]) * T(BETAVIS)
+    end
+end
+
+@kernel function _lake_density_kernel!(rhow, @Const(mask), @Const(lake_icefrac),
+        @Const(t_lake), nlevlak::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(rhow)
+        rhow[c, j] = (one(T) - lake_icefrac[c, j]) *
+            T(1000.0) * (one(T) - T(1.9549e-05) * smooth_abs(t_lake[c, j] - T(TDMAX))^T(1.68)) +
+            lake_icefrac[c, j] * T(DENICE)
+    end
+end
+
+# Diffusivity / implied thermal conductivity for interior lake layers j=1:nlevlak-1.
+@kernel function _lake_diffusivity_kernel!(kme, tk_lake, frzn, @Const(mask), @Const(rhow),
+        @Const(z_lake), @Const(ws), @Const(ks), @Const(t_grnd), @Const(t_lake),
+        @Const(snl), @Const(lakedepth), @Const(lake_icefrac),
+        nlevlak::Int, km, p0, cwat, tkice_eff)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(kme)
+        drhodz = (rhow[c, j+1] - rhow[c, j]) / (z_lake[c, j+1] - z_lake[c, j])
+        n2 = T(GRAV) / rhow[c, j] * drhodz
+        num = T(40.0) * n2 * (T(VKC) * z_lake[c, j])^T(2.0)
+        den = smooth_max(ws[c]^T(2.0) * exp(-T(2.0) * ks[c] * z_lake[c, j]), T(1.0e-10))
+        ri = (-one(T) + sqrt(smooth_max(one(T) + num / den, zero(T)))) / T(20.0)
+        if LAKEPUDDLING && j == 1
+            frzn[c] = false
+        end
+        if t_grnd[c] > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl[c] == 0 &&
+           (!LAKEPUDDLING || (lake_icefrac[c, j] == zero(T) && !frzn[c]))
+            ke = T(VKC) * ws[c] * z_lake[c, j] / p0 * exp(-ks[c] * z_lake[c, j]) /
+                 (one(T) + T(37.0) * ri * ri)
+            kme[c, j] = km + ke
+            if !LAKE_NO_ED
+                fangkm = T(1.039e-8) * smooth_max(n2, T(N2MIN))^T(-0.43)
+                kme[c, j] = kme[c, j] + fangkm
+            end
+            if lakedepth[c] >= T(DEPTHCRIT)
+                kme[c, j] = kme[c, j] * T(MIXFACT)
+            end
+            tk_lake[c, j] = kme[c, j] * cwat
+        else
+            kme[c, j] = km
+            if !LAKE_NO_ED
+                fangkm = T(1.039e-8) * smooth_max(n2, T(N2MIN))^T(-0.43)
+                kme[c, j] = kme[c, j] + fangkm
+                if lakedepth[c] >= T(DEPTHCRIT)
+                    kme[c, j] = kme[c, j] * T(MIXFACT)
+                end
+                tk_lake[c, j] = kme[c, j] * cwat * tkice_eff /
+                    ((one(T) - lake_icefrac[c, j]) * tkice_eff + kme[c, j] * cwat * lake_icefrac[c, j])
+            else
+                tk_lake[c, j] = T(TKWAT) * tkice_eff /
+                    ((one(T) - lake_icefrac[c, j]) * tkice_eff + T(TKWAT) * lake_icefrac[c, j])
+            end
+            if LAKEPUDDLING
+                frzn[c] = true
+            end
+        end
+    end
+end
+
+# Bottom lake layer conductivity + savedtke1 + jtop (per column).
+@kernel function _lake_diffusivity_bottom_kernel!(kme, tk_lake, savedtke1, jtop,
+        @Const(mask), @Const(frzn), @Const(t_grnd), @Const(t_lake), @Const(snl),
+        @Const(lake_icefrac), nlevlak::Int, cwat, tkice_eff)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(kme)
+        j = nlevlak
+        kme[c, nlevlak] = kme[c, nlevlak - 1]
+        if t_grnd[c] > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl[c] == 0 &&
+           (!LAKEPUDDLING || (lake_icefrac[c, j] == zero(T) && !frzn[c]))
+            tk_lake[c, j] = tk_lake[c, j - 1]
+        else
+            if !LAKE_NO_ED
+                tk_lake[c, j] = kme[c, j] * cwat * tkice_eff /
+                    ((one(T) - lake_icefrac[c, j]) * tkice_eff + kme[c, j] * cwat * lake_icefrac[c, j])
+            else
+                tk_lake[c, j] = T(TKWAT) * tkice_eff /
+                    ((one(T) - lake_icefrac[c, j]) * tkice_eff + T(TKWAT) * lake_icefrac[c, j])
+            end
+        end
+        savedtke1[c] = kme[c, 1] * cwat
+        jtop[c] = snl[c] + 1
+    end
+end
+
+# =========================================================================
 """
     lake_temperature!(col, patch_data, solarabs, soilstate, waterstatebulk,
                       waterdiagbulk, waterfluxbulk, energyflux, temperature,
@@ -467,56 +604,60 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
     # Total column levels for tridiagonal: from -nlevsno+1 to nlevlak+nlevgrnd
     ncol_total = nlevsno + nlevlak + nlevgrnd  # total number of levels
 
-    # Local arrays (1-indexed, with offset for snow/soil indexing)
+    # Local scratch — device-resident via similar()+fill! (referenced off t_lake, a
+    # state matrix) so the kernelized loops below run on the state's backend (GPU).
     FT = eltype(temperature.t_grnd_col)
-    rhow = zeros(FT, nc, nlevlak)
-    phi = zeros(FT, nc, nlevlak)
-    kme = zeros(FT, nc, nlevlak)
-    phi_soil = zeros(FT, nc)
-    fin = zeros(FT, nc)
-    ocvts = zeros(FT, nc)
-    ncvts_arr = zeros(FT, nc)
-    jtop = fill(1, nc)
-    cv = zeros(FT, nc, nlevsno + varpar.nlevmaxurbgrnd)
-    tk = zeros(FT, nc, nlevsno + varpar.nlevmaxurbgrnd)
-    cv_lake = zeros(FT, nc, nlevlak)
-    tk_lake = zeros(FT, nc, nlevlak)
-    tktopsoillay = zeros(FT, nc)
-    lhabs = zeros(FT, nc)
+    mF(m::Int)  = fill!(similar(t_lake, FT, nc, m), zero(FT))       # nc×m float matrix
+    vF()        = fill!(similar(t_lake, FT, nc), zero(FT))          # nc float vector
+    nlevtot = nlevsno + varpar.nlevmaxurbgrnd
+    rhow = mF(nlevlak)
+    phi = mF(nlevlak)
+    kme = mF(nlevlak)
+    phi_soil = vF()
+    fin = vF()
+    ocvts = vF()
+    ncvts_arr = vF()
+    jtop = fill!(similar(t_lake, Int, nc), 1)
+    cv = mF(nlevtot)
+    tk = mF(nlevtot)
+    cv_lake = mF(nlevlak)
+    tk_lake = mF(nlevlak)
+    tktopsoillay = vF()
+    lhabs = vF()
 
     # Extended column arrays (from -nlevsno+1 to nlevlak+nlevgrnd, stored 1:ncol_total)
-    cvx = zeros(FT, nc, ncol_total)
-    tkix = zeros(FT, nc, ncol_total)
-    tx = zeros(FT, nc, ncol_total)
-    phix = zeros(FT, nc, ncol_total)
-    zx = zeros(FT, nc, ncol_total)
-    fnx = zeros(FT, nc, ncol_total)
-    factx = zeros(FT, nc, ncol_total)
-    a = zeros(FT, nc, ncol_total)
-    b = zeros(FT, nc, ncol_total)
-    c1 = zeros(FT, nc, ncol_total)
-    r = zeros(FT, nc, ncol_total)
+    cvx = mF(ncol_total)
+    tkix = mF(ncol_total)
+    tx = mF(ncol_total)
+    phix = mF(ncol_total)
+    zx = mF(ncol_total)
+    fnx = mF(ncol_total)
+    factx = mF(ncol_total)
+    a = mF(ncol_total)
+    b = mF(ncol_total)
+    c1 = mF(ncol_total)
+    r = mF(ncol_total)
 
     # Other local arrays
-    t_lake_bef = zeros(FT, nc, nlevlak)
-    t_soisno_bef = zeros(FT, nc, nlevsno + nlevgrnd)
-    sabg_col = zeros(FT, nc)
-    sabg_lyr_col = zeros(FT, nc, nlevsno + 1)  # -nlevsno+1:1
-    tav_froz = zeros(FT, nc)
-    tav_unfr = zeros(FT, nc)
-    nav = zeros(FT, nc)
-    iceav = zeros(FT, nc)
-    qav = zeros(FT, nc)
-    zsum = zeros(FT, nc)
-    esum1 = zeros(FT, nc)
-    esum2 = zeros(FT, nc)
-    h2osno_total = zeros(FT, nc)
-    jconvect = zeros(Int, nc)
-    jconvectbot = fill(nlevlak + 1, nc)
-    bottomconvect = falses(nc)
-    puddle = falses(nc)
-    frzn = falses(nc)
-    icesum = zeros(FT, nc)
+    t_lake_bef = mF(nlevlak)
+    t_soisno_bef = mF(nlevsno + nlevgrnd)
+    sabg_col = vF()
+    sabg_lyr_col = mF(nlevsno + 1)  # -nlevsno+1:1
+    tav_froz = vF()
+    tav_unfr = vF()
+    nav = vF()
+    iceav = vF()
+    qav = vF()
+    zsum = vF()
+    esum1 = vF()
+    esum2 = vF()
+    h2osno_total = vF()
+    jconvect = fill!(similar(t_lake, Int, nc), 0)
+    jconvectbot = fill!(similar(t_lake, Int, nc), nlevlak + 1)
+    bottomconvect = fill!(similar(t_lake, Bool, nc), false)
+    puddle = fill!(similar(t_lake, Bool, nc), false)
+    frzn = fill!(similar(t_lake, Bool, nc), false)
+    icesum = vF()
 
     # Helper: convert extended column index j (Fortran: -nlevsno+1 to nlevlak+nlevgrnd)
     # to Julia 1-based index
@@ -530,127 +671,24 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
     # BUT for extended column, max j_ext = nlevlak+nlevgrnd
     # Julia index = nlevlak + nlevgrnd + nlevsno = ncol_total ✓
 
-    # 1!) Initialization
-    for c in bounds_col
-        mask_lakec[c] || continue
-        ocvts[c] = 0.0
-        ncvts_arr[c] = 0.0
-        esum1[c] = 0.0
-        esum2[c] = 0.0
-        if varctl.use_lch4
-            jconvect[c] = 0
-            jconvectbot[c] = nlevlak + 1
-            lakeresist[c] = 0.0
-        end
-        bottomconvect[c] = false
-    end
-
-    # Ice fraction of snow at previous time step
-    for j in (-nlevsno + 1):0
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if j >= snl[c] + 1
-                frac_iceold[c, jj] = h2osoi_ice[c, jj] / (h2osoi_liq[c, jj] + h2osoi_ice[c, jj])
-            end
-        end
-    end
-
-    # Prepare for lake layer temperature calculations
-    for p in bounds_patch
-        mask_lakep[p] || continue
-        c = patch_data.column[p]
-        fin[c] = eflx_gnet[p]
-
-        # Calculate NIR fraction of absorbed solar
-        sabg_nir = fsds_nir_d[p] + fsds_nir_i[p] - fsr_nir_d[p] - fsr_nir_i[p]
-        sabg_nir = smooth_min(sabg_nir, sabg[p])
-        beta[c] = sabg_nir / smooth_max(1.0e-5, sabg[p])
-        beta[c] = beta[c] + (1.0 - beta[c]) * BETAVIS
-    end
-
-    # 2!) Lake density
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-            rhow[c, j] = (1.0 - lake_icefrac[c, j]) *
-                1000.0 * (1.0 - 1.9549e-05 * smooth_abs(t_lake[c, j] - TDMAX)^1.68) +
-                lake_icefrac[c, j] * DENICE
-        end
-    end
-
-    # 3!) Diffusivity and implied thermal "conductivity"
-    for j in 1:(nlevlak - 1)
-        for c in bounds_col
-            mask_lakec[c] || continue
-            drhodz = (rhow[c, j+1] - rhow[c, j]) / (z_lake[c, j+1] - z_lake[c, j])
-            n2 = GRAV / rhow[c, j] * drhodz
-
-            num = 40.0 * n2 * (VKC * z_lake[c, j])^2.0
-            den = smooth_max(ws[c]^2.0 * exp(-2.0 * ks[c] * z_lake[c, j]), 1.0e-10)
-            ri = (-1.0 + sqrt(smooth_max(1.0 + num / den, 0.0))) / 20.0
-
-            if LAKEPUDDLING && j == 1
-                frzn[c] = false
-            end
-
-            if t_grnd[c] > TFRZ && t_lake[c, 1] > TFRZ && snl[c] == 0 &&
-               (!LAKEPUDDLING || (lake_icefrac[c, j] == 0.0 && !frzn[c]))
-                ke = VKC * ws[c] * z_lake[c, j] / p0 * exp(-ks[c] * z_lake[c, j]) / (1.0 + 37.0 * ri * ri)
-                kme[c, j] = km + ke
-
-                if !LAKE_NO_ED
-                    fangkm = 1.039e-8 * smooth_max(n2, N2MIN)^(-0.43)
-                    kme[c, j] = kme[c, j] + fangkm
-                end
-                if lakedepth[c] >= DEPTHCRIT
-                    kme[c, j] = kme[c, j] * MIXFACT
-                end
-
-                tk_lake[c, j] = kme[c, j] * cwat
-            else
-                kme[c, j] = km
-                if !LAKE_NO_ED
-                    fangkm = 1.039e-8 * smooth_max(n2, N2MIN)^(-0.43)
-                    kme[c, j] = kme[c, j] + fangkm
-                    if lakedepth[c] >= DEPTHCRIT
-                        kme[c, j] = kme[c, j] * MIXFACT
-                    end
-                    tk_lake[c, j] = kme[c, j] * cwat * tkice_eff /
-                        ((1.0 - lake_icefrac[c, j]) * tkice_eff + kme[c, j] * cwat * lake_icefrac[c, j])
-                else
-                    tk_lake[c, j] = TKWAT * tkice_eff /
-                        ((1.0 - lake_icefrac[c, j]) * tkice_eff + TKWAT * lake_icefrac[c, j])
-                end
-                if LAKEPUDDLING
-                    frzn[c] = true
-                end
-            end
-        end
-    end
-
-    # Bottom lake layer
-    for c in bounds_col
-        mask_lakec[c] || continue
-        j = nlevlak
-        kme[c, nlevlak] = kme[c, nlevlak - 1]
-
-        if t_grnd[c] > TFRZ && t_lake[c, 1] > TFRZ && snl[c] == 0 &&
-           (!LAKEPUDDLING || (lake_icefrac[c, j] == 0.0 && !frzn[c]))
-            tk_lake[c, j] = tk_lake[c, j - 1]
-        else
-            if !LAKE_NO_ED
-                tk_lake[c, j] = kme[c, j] * cwat * tkice_eff /
-                    ((1.0 - lake_icefrac[c, j]) * tkice_eff + kme[c, j] * cwat * lake_icefrac[c, j])
-            else
-                tk_lake[c, j] = TKWAT * tkice_eff /
-                    ((1.0 - lake_icefrac[c, j]) * tkice_eff + TKWAT * lake_icefrac[c, j])
-            end
-        end
-
-        savedtke1[c] = kme[c, 1] * cwat
-        jtop[c] = snl[c] + 1
-    end
+    # 1-3) Init, prior-ice, solar NIR, lake density, diffusivity (per-column /
+    # per-(column,layer) / per-patch kernels; launched in order — the diffusivity
+    # reads rhow produced by the density kernel; the bottom kernel reads kme).
+    use_lch4 = varctl.use_lch4
+    _launch!(_lake_init_kernel!, ocvts, ncvts_arr, esum1, esum2, jconvect, jconvectbot,
+        lakeresist, bottomconvect, mask_lakec, nlevlak, use_lch4; ndrange = nc)
+    _launch!(_lake_prior_ice_kernel!, frac_iceold, mask_lakec, snl, h2osoi_liq, h2osoi_ice,
+        nlevsno; ndrange = (nc, nlevsno))
+    _launch!(_lake_solar_nir_kernel!, fin, beta, mask_lakep, patch_data.column, eflx_gnet,
+        fsds_nir_d, fsds_nir_i, fsr_nir_d, fsr_nir_i, sabg; ndrange = length(mask_lakep))
+    _launch!(_lake_density_kernel!, rhow, mask_lakec, lake_icefrac, t_lake, nlevlak;
+        ndrange = (nc, nlevlak))
+    _launch!(_lake_diffusivity_kernel!, kme, tk_lake, frzn, mask_lakec, rhow, z_lake, ws,
+        ks, t_grnd, t_lake, snl, lakedepth, lake_icefrac, nlevlak,
+        FT(km), FT(p0), FT(cwat), FT(tkice_eff); ndrange = (nc, nlevlak - 1))
+    _launch!(_lake_diffusivity_bottom_kernel!, kme, tk_lake, savedtke1, jtop, mask_lakec,
+        frzn, t_grnd, t_lake, snl, lake_icefrac, nlevlak, FT(cwat), FT(tkice_eff);
+        ndrange = nc)
 
     # 4!) Heat source term from solar radiation penetrating lake
     for j in 1:nlevlak
