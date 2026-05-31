@@ -345,6 +345,147 @@ soilwm_aqu_zmm!(zmm, dzmm, mask, jwt, zwt, nlevsoi::Int) =
     _launch!(_soilwm_aqu_zmm_kernel!, zmm, dzmm, mask, jwt, zwt, nlevsoi;
              ndrange = length(mask))
 
+# ==========================================================================
+# Zeng-Decker 2009 tridiagonal-system assembly (top + interior + bottom/aquifer
+# nodes). The loop touches ~25 distinct arrays — past the per-array kernel-arg
+# limit — so they are grouped into two immutable device-view structs (the
+# soil_temperature! grouped-struct template). The three original loops write
+# DISJOINT rows (row 1; rows 2..nlevsoi-1; rows nlevsoi & nlevsoi+1) with no
+# cross-row output reads, so they fuse into ONE per-column kernel that runs the
+# interior as an internal j-loop — one launch, fully parallel over columns.
+# ==========================================================================
+Base.@kwdef struct SwmTriOut{M}   # tridiagonal outputs (all nc×(nlevsoi+1) matrices)
+    qin::M; qout::M; dqidw0::M; dqidw1::M; dqodw1::M; dqodw2::M
+    rmx::M; amx::M; bmx::M; cmx::M
+end
+Base.@kwdef struct SwmTriIn{M,V}  # read-only inputs (M = per-layer matrix, V = per-column vector)
+    zmm::M; dzmm::M; zq::M; smp::M; hk::M; dhkdw::M; dsmpdw::M
+    qflx_rootsoi::M; watsat::M; sucsat::M; bsw::M; vwc_liq::M
+    qflx_infl::V; vwc_zwt::V; smpmin::V
+end
+Adapt.@adapt_structure SwmTriOut
+Adapt.@adapt_structure SwmTriIn
+
+@kernel function _soilwm_tridiag_assemble_kernel!(out, tin, @Const(mask), @Const(jwt),
+        sdamp, dtime, nlevsoi::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(out.amx)
+
+        # ---- Node j=1 (top) ----
+        j = 1
+        out.qin[c, j] = tin.qflx_infl[c]
+        den = tin.zmm[c, j+1] - tin.zmm[c, j]
+        dzq = tin.zq[c, j+1] - tin.zq[c, j]
+        num = (tin.smp[c, j+1] - tin.smp[c, j]) - dzq
+        out.qout[c, j] = -tin.hk[c, j] * num / den
+        out.dqodw1[c, j] = -(-tin.hk[c, j] * tin.dsmpdw[c, j] + num * tin.dhkdw[c, j]) / den
+        out.dqodw2[c, j] = -(tin.hk[c, j] * tin.dsmpdw[c, j+1] + num * tin.dhkdw[c, j]) / den
+        out.rmx[c, j] = out.qin[c, j] - out.qout[c, j] - tin.qflx_rootsoi[c, j]
+        out.amx[c, j] = zero(T)
+        # NOTE: top uses (sdamp + 1/dtime) [reciprocal], interior/bottom use /dtime
+        # [division] — kept as distinct forms to stay byte-identical on Float64.
+        out.bmx[c, j] = tin.dzmm[c, j] * (sdamp + one(T) / dtime) + out.dqodw1[c, j]
+        out.cmx[c, j] = out.dqodw2[c, j]
+
+        # ---- Interior nodes j=2..nlevsoi-1 ----
+        for j in 2:(nlevsoi - 1)
+            den = tin.zmm[c, j] - tin.zmm[c, j-1]
+            dzq = tin.zq[c, j] - tin.zq[c, j-1]
+            num = (tin.smp[c, j] - tin.smp[c, j-1]) - dzq
+            out.qin[c, j] = -tin.hk[c, j-1] * num / den
+            out.dqidw0[c, j] = -(-tin.hk[c, j-1] * tin.dsmpdw[c, j-1] + num * tin.dhkdw[c, j-1]) / den
+            out.dqidw1[c, j] = -(tin.hk[c, j-1] * tin.dsmpdw[c, j] + num * tin.dhkdw[c, j-1]) / den
+            den = tin.zmm[c, j+1] - tin.zmm[c, j]
+            dzq = tin.zq[c, j+1] - tin.zq[c, j]
+            num = (tin.smp[c, j+1] - tin.smp[c, j]) - dzq
+            out.qout[c, j] = -tin.hk[c, j] * num / den
+            out.dqodw1[c, j] = -(-tin.hk[c, j] * tin.dsmpdw[c, j] + num * tin.dhkdw[c, j]) / den
+            out.dqodw2[c, j] = -(tin.hk[c, j] * tin.dsmpdw[c, j+1] + num * tin.dhkdw[c, j]) / den
+            out.rmx[c, j] = out.qin[c, j] - out.qout[c, j] - tin.qflx_rootsoi[c, j]
+            out.amx[c, j] = -out.dqidw0[c, j]
+            out.bmx[c, j] = tin.dzmm[c, j] / dtime - out.dqidw1[c, j] + out.dqodw1[c, j]
+            out.cmx[c, j] = out.dqodw2[c, j]
+        end
+
+        # ---- Node j=nlevsoi (bottom) ----
+        j = nlevsoi
+        if j > jwt[c]   # water table is in soil column
+            den = tin.zmm[c, j] - tin.zmm[c, j-1]
+            dzq = tin.zq[c, j] - tin.zq[c, j-1]
+            num = (tin.smp[c, j] - tin.smp[c, j-1]) - dzq
+            out.qin[c, j] = -tin.hk[c, j-1] * num / den
+            out.dqidw0[c, j] = -(-tin.hk[c, j-1] * tin.dsmpdw[c, j-1] + num * tin.dhkdw[c, j-1]) / den
+            out.dqidw1[c, j] = -(tin.hk[c, j-1] * tin.dsmpdw[c, j] + num * tin.dhkdw[c, j-1]) / den
+            out.qout[c, j] = zero(T)
+            out.dqodw1[c, j] = zero(T)
+            out.rmx[c, j] = out.qin[c, j] - out.qout[c, j] - tin.qflx_rootsoi[c, j]
+            out.amx[c, j] = -out.dqidw0[c, j]
+            out.bmx[c, j] = tin.dzmm[c, j] / dtime - out.dqidw1[c, j] + out.dqodw1[c, j]
+            out.cmx[c, j] = zero(T)
+
+            # Aquifer layer — hydrologically inactive
+            out.rmx[c, j+1] = zero(T)
+            out.amx[c, j+1] = zero(T)
+            out.bmx[c, j+1] = tin.dzmm[c, j+1] / dtime
+            out.cmx[c, j+1] = zero(T)
+        else            # water table is below soil column
+            s_node = smooth_max(T(0.5) * ((tin.vwc_zwt[c] + tin.vwc_liq[c, j]) / tin.watsat[c, j]), T(0.01))
+            s_node = smooth_min(one(T), s_node)
+            smp1 = -tin.sucsat[c, j] * s_node^(-tin.bsw[c, j])
+            smp1 = smooth_max(tin.smpmin[c], smp1)
+            dsmpdw1 = -tin.bsw[c, j] * smp1 / (s_node * tin.watsat[c, j])
+
+            den = tin.zmm[c, j] - tin.zmm[c, j-1]
+            dzq = tin.zq[c, j] - tin.zq[c, j-1]
+            num = (tin.smp[c, j] - tin.smp[c, j-1]) - dzq
+            out.qin[c, j] = -tin.hk[c, j-1] * num / den
+            out.dqidw0[c, j] = -(-tin.hk[c, j-1] * tin.dsmpdw[c, j-1] + num * tin.dhkdw[c, j-1]) / den
+            out.dqidw1[c, j] = -(tin.hk[c, j-1] * tin.dsmpdw[c, j] + num * tin.dhkdw[c, j-1]) / den
+            den = tin.zmm[c, j+1] - tin.zmm[c, j]
+            dzq = tin.zq[c, j+1] - tin.zq[c, j]
+            num = (smp1 - tin.smp[c, j]) - dzq
+            out.qout[c, j] = -tin.hk[c, j] * num / den
+            out.dqodw1[c, j] = -(-tin.hk[c, j] * tin.dsmpdw[c, j] + num * tin.dhkdw[c, j]) / den
+            out.dqodw2[c, j] = -(tin.hk[c, j] * dsmpdw1 + num * tin.dhkdw[c, j]) / den
+            out.rmx[c, j] = out.qin[c, j] - out.qout[c, j] - tin.qflx_rootsoi[c, j]
+            out.amx[c, j] = -out.dqidw0[c, j]
+            out.bmx[c, j] = tin.dzmm[c, j] / dtime - out.dqidw1[c, j] + out.dqodw1[c, j]
+            out.cmx[c, j] = out.dqodw2[c, j]
+
+            # Aquifer layer
+            out.qin[c, j+1] = out.qout[c, j]
+            out.dqidw0[c, j+1] = -(-tin.hk[c, j] * tin.dsmpdw[c, j] + num * tin.dhkdw[c, j]) / den
+            out.dqidw1[c, j+1] = -(tin.hk[c, j] * dsmpdw1 + num * tin.dhkdw[c, j]) / den
+            out.qout[c, j+1] = zero(T)
+            out.dqodw1[c, j+1] = zero(T)
+            out.rmx[c, j+1] = out.qin[c, j+1] - out.qout[c, j+1]
+            out.amx[c, j+1] = -out.dqidw0[c, j+1]
+            out.bmx[c, j+1] = tin.dzmm[c, j+1] / dtime - out.dqidw1[c, j+1] + out.dqodw1[c, j+1]
+            out.cmx[c, j+1] = zero(T)
+        end
+    end
+end
+
+"""
+    soilwm_tridiag_assemble!(out::SwmTriOut, tin::SwmTriIn, mask, jwt, sdamp, dtime, nlevsoi)
+
+Assemble the Zeng-Decker 2009 tridiagonal system (a/b/c/r + flux/derivative
+arrays) for all active columns. One per-column kernel; scalars are
+eltype-converted so no Float64 reaches a Float32-only backend.
+"""
+function soilwm_tridiag_assemble!(out::SwmTriOut, tin::SwmTriIn, mask, jwt,
+        sdamp, dtime, nlevsoi::Int)
+    nc = length(mask)
+    nc == 0 && return nothing
+    T = eltype(out.amx)
+    backend = _kernel_backend(out.amx)
+    _soilwm_tridiag_assemble_kernel!(backend)(out, tin, mask, jwt,
+        convert(T, sdamp), convert(T, dtime), nlevsoi; ndrange = nc)
+    KA.synchronize(backend)
+    return nothing
+end
+
 """
     SoilWaterMovementConfig
 
@@ -1258,114 +1399,16 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     # Aquifer (11th) layer geometry (per-column kernel).
     soilwm_aqu_zmm!(zmm, dzmm, mask_hydrology, jwt, zwt, nlevsoi)
 
-    # ---- Set up tridiagonal system ----
-
-    # Node j=1 (top)
-    j = 1
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
-        qin[c, j] = qflx_infl[c]
-        den = zmm[c, j+1] - zmm[c, j]
-        dzq = zq[c, j+1] - zq[c, j]
-        num = (smp_arr[c, j+1] - smp_arr[c, j]) - dzq
-        qout_arr[c, j] = -hk[c, j] * num / den
-        dqodw1[c, j] = -(-hk[c, j] * dsmpdw[c, j] + num * dhkdw[c, j]) / den
-        dqodw2[c, j] = -(hk[c, j] * dsmpdw[c, j+1] + num * dhkdw[c, j]) / den
-        rmx[c, j] = qin[c, j] - qout_arr[c, j] - qflx_rootsoi[c, j]
-        amx[c, j] = 0.0
-        bmx[c, j] = dzmm[c, j] * (sdamp + 1.0 / dtime) + dqodw1[c, j]
-        cmx[c, j] = dqodw2[c, j]
-    end
-
-    # Nodes j=2 to j=nlevsoi-1
-    for j in 2:(nlevsoi-1)
-        for c in eachindex(mask_hydrology)
-            mask_hydrology[c] || continue
-            den = zmm[c, j] - zmm[c, j-1]
-            dzq = zq[c, j] - zq[c, j-1]
-            num = (smp_arr[c, j] - smp_arr[c, j-1]) - dzq
-            qin[c, j] = -hk[c, j-1] * num / den
-            dqidw0[c, j] = -(-hk[c, j-1] * dsmpdw[c, j-1] + num * dhkdw[c, j-1]) / den
-            dqidw1[c, j] = -(hk[c, j-1] * dsmpdw[c, j] + num * dhkdw[c, j-1]) / den
-            den = zmm[c, j+1] - zmm[c, j]
-            dzq = zq[c, j+1] - zq[c, j]
-            num = (smp_arr[c, j+1] - smp_arr[c, j]) - dzq
-            qout_arr[c, j] = -hk[c, j] * num / den
-            dqodw1[c, j] = -(-hk[c, j] * dsmpdw[c, j] + num * dhkdw[c, j]) / den
-            dqodw2[c, j] = -(hk[c, j] * dsmpdw[c, j+1] + num * dhkdw[c, j]) / den
-            rmx[c, j] = qin[c, j] - qout_arr[c, j] - qflx_rootsoi[c, j]
-            amx[c, j] = -dqidw0[c, j]
-            bmx[c, j] = dzmm[c, j] / dtime - dqidw1[c, j] + dqodw1[c, j]
-            cmx[c, j] = dqodw2[c, j]
-        end
-    end
-
-    # Node j=nlevsoi (bottom)
-    j = nlevsoi
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
-        if j > jwt[c]  # water table is in soil column
-            den = zmm[c, j] - zmm[c, j-1]
-            dzq = zq[c, j] - zq[c, j-1]
-            num = (smp_arr[c, j] - smp_arr[c, j-1]) - dzq
-            qin[c, j] = -hk[c, j-1] * num / den
-            dqidw0[c, j] = -(-hk[c, j-1] * dsmpdw[c, j-1] + num * dhkdw[c, j-1]) / den
-            dqidw1[c, j] = -(hk[c, j-1] * dsmpdw[c, j] + num * dhkdw[c, j-1]) / den
-            qout_arr[c, j] = 0.0
-            dqodw1[c, j] = 0.0
-            rmx[c, j] = qin[c, j] - qout_arr[c, j] - qflx_rootsoi[c, j]
-            amx[c, j] = -dqidw0[c, j]
-            bmx[c, j] = dzmm[c, j] / dtime - dqidw1[c, j] + dqodw1[c, j]
-            cmx[c, j] = 0.0
-
-            # Aquifer layer — hydrologically inactive
-            rmx[c, j+1] = 0.0
-            amx[c, j+1] = 0.0
-            bmx[c, j+1] = dzmm[c, j+1] / dtime
-            cmx[c, j+1] = 0.0
-        else  # water table is below soil column
-            # Compute aquifer soil moisture
-            s_node = smooth_max(0.5 * ((vwc_zwt[c] + vwc_liq[c, j]) / watsat[c, j]), 0.01)
-            s_node = smooth_min(1.0, s_node)
-
-            # Compute smp for aquifer layer
-            smp1 = -sucsat[c, j] * s_node^(-bsw[c, j])
-            smp1 = smooth_max(smpmin[c], smp1)
-
-            # Compute dsmpdw for aquifer layer
-            dsmpdw1 = -bsw[c, j] * smp1 / (s_node * watsat[c, j])
-
-            # Bottom layer of soil column
-            den = zmm[c, j] - zmm[c, j-1]
-            dzq = zq[c, j] - zq[c, j-1]
-            num = (smp_arr[c, j] - smp_arr[c, j-1]) - dzq
-            qin[c, j] = -hk[c, j-1] * num / den
-            dqidw0[c, j] = -(-hk[c, j-1] * dsmpdw[c, j-1] + num * dhkdw[c, j-1]) / den
-            dqidw1[c, j] = -(hk[c, j-1] * dsmpdw[c, j] + num * dhkdw[c, j-1]) / den
-            den = zmm[c, j+1] - zmm[c, j]
-            dzq = zq[c, j+1] - zq[c, j]
-            num = (smp1 - smp_arr[c, j]) - dzq
-            qout_arr[c, j] = -hk[c, j] * num / den
-            dqodw1[c, j] = -(-hk[c, j] * dsmpdw[c, j] + num * dhkdw[c, j]) / den
-            dqodw2[c, j] = -(hk[c, j] * dsmpdw1 + num * dhkdw[c, j]) / den
-
-            rmx[c, j] = qin[c, j] - qout_arr[c, j] - qflx_rootsoi[c, j]
-            amx[c, j] = -dqidw0[c, j]
-            bmx[c, j] = dzmm[c, j] / dtime - dqidw1[c, j] + dqodw1[c, j]
-            cmx[c, j] = dqodw2[c, j]
-
-            # Aquifer layer
-            qin[c, j+1] = qout_arr[c, j]
-            dqidw0[c, j+1] = -(-hk[c, j] * dsmpdw[c, j] + num * dhkdw[c, j]) / den
-            dqidw1[c, j+1] = -(hk[c, j] * dsmpdw1 + num * dhkdw[c, j]) / den
-            qout_arr[c, j+1] = 0.0
-            dqodw1[c, j+1] = 0.0
-            rmx[c, j+1] = qin[c, j+1] - qout_arr[c, j+1]
-            amx[c, j+1] = -dqidw0[c, j+1]
-            bmx[c, j+1] = dzmm[c, j+1] / dtime - dqidw1[c, j+1] + dqodw1[c, j+1]
-            cmx[c, j+1] = 0.0
-        end
-    end
+    # ---- Set up tridiagonal system (single per-column kernel: top node + an
+    # internal interior j-loop + bottom/aquifer node; writes disjoint rows). The
+    # ~25 arrays are grouped into two device-view structs (grouped-struct template).
+    tri_out = SwmTriOut(; qin = qin, qout = qout_arr, dqidw0 = dqidw0, dqidw1 = dqidw1,
+        dqodw1 = dqodw1, dqodw2 = dqodw2, rmx = rmx, amx = amx, bmx = bmx, cmx = cmx)
+    tri_in = SwmTriIn(; zmm = zmm, dzmm = dzmm, zq = zq, smp = smp_arr, hk = hk,
+        dhkdw = dhkdw, dsmpdw = dsmpdw, qflx_rootsoi = qflx_rootsoi, watsat = watsat,
+        sucsat = sucsat, bsw = bsw, vwc_liq = vwc_liq, qflx_infl = qflx_infl,
+        vwc_zwt = vwc_zwt, smpmin = smpmin)
+    soilwm_tridiag_assemble!(tri_out, tri_in, mask_hydrology, jwt, sdamp, dtime, nlevsoi)
 
     # Solve for dwat using multi-column tridiagonal solver
     jtop_arr = fill!(similar(h2osoi_liq, Int, nc), 1)

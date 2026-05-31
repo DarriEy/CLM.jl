@@ -7,7 +7,7 @@
 #
 #   julia --project=scripts scripts/gpu_validate_soilwater.jl
 #
-# Kernels covered (swm-zd1 + swm-zd2 increments of soilwater_zengdecker2009!):
+# Kernels covered (swm-zd1..zd3 increments of soilwater_zengdecker2009!):
 #   _soilwm_voleq_zq_kernel!      : equilibrium water content vol_eq + matric pot. zq
 #   _soilwm_hk_smp_kernel!        : hydraulic conductivity hk, matric pot. smp, derivs
 #   _soilwm_jwt_vwczwt_kernel!    : water-table layer index jwt + vwc at WT depth
@@ -94,13 +94,26 @@ function build_inputs(::Type{FT}) where {FT}
     h2osoi_vol = FT(0.2) .+ rnd(NC, NLEVSOI) .* FT(0.15)
     # jwt mix: several == NLEVSOI (water table below column → aquifer branch active)
     jwt_in = Int[NLEVSOI, 3, NLEVSOI, 7, NLEVSOI, 0, 5, NLEVSOI]
-    # zmm/dzmm pre-filled (aquifer kernel reads [c,nlevsoi], writes [c,nlevsoi+1])
+    # zmm/dzmm pre-filled (aquifer kernel reads [c,nlevsoi], writes [c,nlevsoi+1]);
+    # zmm strictly increasing in j so den = zmm[j+1]-zmm[j] = 100 > 0 (no /0).
     zmm_in  = FT[100.0 * j for c in 1:NC, j in 1:(NLEVSOI + 1)]
     dzmm_in = fill(FT(100.0), NC, NLEVSOI + 1)
 
+    # --- extra inputs for the tridiagonal-assembly kernel (swm-zd3) ---
+    zq_in     = FT[-(50.0 + 5.0 * j) for c in 1:NC, j in 1:(NLEVSOI + 1)]
+    smp_in    = FT[-(200.0 + 7.0 * j) - 3.0 * c for c in 1:NC, j in 1:(NLEVSOI + 1)]
+    hk_in     = FT(1.0e-6) .+ rnd(NC, NLEVSOI) .* FT(1.0e-6)
+    dhkdw_in  = FT(1.0e-7) .+ rnd(NC, NLEVSOI) .* FT(1.0e-7)
+    dsmpdw_in = FT(-5.0e3) .- rnd(NC, NLEVSOI) .* FT(1.0e3)
+    qflx_rootsoi_in = rnd(NC, NLEVSOI) .* FT(1.0e-4)
+    qflx_infl_in    = rnd(NC) .* FT(1.0e-3)
+    vwc_zwt_in      = FT(0.2) .+ rnd(NC) .* FT(0.15)
+
     return (; mask, zimm_arr, zwtmm, watsat, sucsat, bsw, smpmin,
             hksat, icefrac, vwc_liq, e_ice = FT(6.0),
-            zi, zwt, t_soisno, h2osoi_vol, jwt_in, zmm_in, dzmm_in)
+            zi, zwt, t_soisno, h2osoi_vol, jwt_in, zmm_in, dzmm_in,
+            zq_in, smp_in, hk_in, dhkdw_in, dsmpdw_in, qflx_rootsoi_in,
+            qflx_infl_in, vwc_zwt_in, sdamp = FT(0.0), dtime = FT(1800.0))
 end
 
 function tests(to, ::Type{FT}) where {FT}
@@ -163,12 +176,42 @@ function tests(to, ::Type{FT}) where {FT}
             ((dzmm, f(I.mask), f(I.jwt_in), f(I.zwt), NLEVSOI), (dzmm,))
         end))
 
+    # ---- tridiagonal assembly (device-view structs SwmTriOut/SwmTriIn) ----
+    push!(results, test_tridiag(to, FT, I))
+
     return results
+end
+
+# tridiagonal-assembly kernel: build the SwmTriOut/SwmTriIn structs on each
+# backend, run, and compare every output array. Mirrors test_pc_beta in
+# gpu_validate_soiltemp.jl (struct-arg kernel → manual backend + synchronize).
+function test_tridiag(to, ::Type{FT}, I) where {FT}
+    z2() = zeros(FT, NC, NLEVSOI + 1)
+    mkout(cv) = CLM.SwmTriOut(; qin = cv(z2()), qout = cv(z2()), dqidw0 = cv(z2()),
+        dqidw1 = cv(z2()), dqodw1 = cv(z2()), dqodw2 = cv(z2()), rmx = cv(z2()),
+        amx = cv(z2()), bmx = cv(z2()), cmx = cv(z2()))
+    mkin(cv) = CLM.SwmTriIn(; zmm = cv(copy(I.zmm_in)), dzmm = cv(copy(I.dzmm_in)),
+        zq = cv(copy(I.zq_in)), smp = cv(copy(I.smp_in)), hk = cv(copy(I.hk_in)),
+        dhkdw = cv(copy(I.dhkdw_in)), dsmpdw = cv(copy(I.dsmpdw_in)),
+        qflx_rootsoi = cv(copy(I.qflx_rootsoi_in)), watsat = cv(copy(I.watsat)),
+        sucsat = cv(copy(I.sucsat)), bsw = cv(copy(I.bsw)), vwc_liq = cv(copy(I.vwc_liq)),
+        qflx_infl = cv(copy(I.qflx_infl_in)), vwc_zwt = cv(copy(I.vwc_zwt_in)),
+        smpmin = cv(copy(I.smpmin)))
+
+    run!(out, tin, to_) = CLM.soilwm_tridiag_assemble!(out, tin,
+        _dev(to_, I.mask), _dev(to_, I.jwt_in), I.sdamp, I.dtime, NLEVSOI)
+
+    oc = mkout(identity); ic = mkin(identity); run!(oc, ic, identity)
+    cv = x -> _dev(to, x)
+    od = mkout(cv); id = mkin(cv); run!(od, id, to)
+
+    d = maximum(reldiff(getfield(oc, f), getfield(od, f)) for f in fieldnames(CLM.SwmTriOut))
+    return ("tridiag_assemble", d, d < TOL(FT))
 end
 
 function main(backend)
     println("=" ^ 70)
-    println("METAL PARITY for soilwater_zengdecker2009! kernels (swm-zd1 + swm-zd2)")
+    println("METAL PARITY for soilwater_zengdecker2009! kernels (swm-zd1..zd3)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend detected — nothing to validate (kernels run on KA CPU in the suite).")
@@ -183,7 +226,7 @@ function main(backend)
         ok ? (npass += 1) : (nfail += 1)
     end
     @printf("\n  %d passed, %d failed\n", npass, nfail)
-    println(nfail == 0 ? "\n  ALL ZD09 swm-zd1/zd2 kernels MATCH CPU ON $name ($FT) ✓" :
+    println(nfail == 0 ? "\n  ALL ZD09 swm-zd1..zd3 kernels MATCH CPU ON $name ($FT) ✓" :
                           "\n  SOME KERNELS DIVERGED — investigate.")
     return nfail == 0 ? 0 : 1
 end
