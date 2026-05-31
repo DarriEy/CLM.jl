@@ -28,7 +28,9 @@ const NC = 8
 const NS = 5          # nlevsno
 const NG = 10         # nlevgrnd
 const NSOI = 10       # nlevsoi
+const NLAK = 10       # nlevlak
 const NLEV = NS + NG  # layer-array 2nd dim (15)
+const HFUS = CLM.HFUS; const TFRZ = CLM.TFRZ
 
 function _parity(name, to, FT, K, ndr, out0, mk; tol = TOL(FT))
     out_cpu = copy(out0)
@@ -97,7 +99,58 @@ function tests(to, ::Type{FT}) where {FT}
     push!(results, _parity("total_h2osno", to, FT, CLM._lake_total_h2osno_kernel!, NC, h0,
         f -> ((f(I.mask), f(I.snl), f(I.h2osno_no_layers), f(I.h2osoi_ice), f(I.h2osoi_liq),
                NS), ())))
+
+    push!(results, test_phase_change(to, FT))
     return results
+end
+
+# phase_change_lake!: run BOTH per-column kernels (water then soil) on CPU and on
+# device with identical inputs, compare every mutated array. Inputs trigger melt
+# (t>TFRZ + ice) and freeze (t<TFRZ + liquid) on both lake and snow/soil sides.
+function test_phase_change(to, ::Type{FT}) where {FT}
+    rng = MersenneTwister(31)
+    rnd(d...) = FT.(rand(rng, d...))
+    mask = trues(NC)
+    snl  = Int[0, -1, -2, -3, -1, -2, 0, -3]
+    dz_lake = fill(FT(1.0), NC, NLAK)
+    # alternate warm/cold lake layers; ice present so both branches fire
+    t_lake0 = FT[(c + j) % 2 == 0 ? 274.0 : 271.0 for c in 1:NC, j in 1:NLAK]
+    icefrac0 = fill(FT(0.5), NC, NLAK)
+    cvlake0 = FT(4.0e6) .+ rnd(NC, NLAK) .* FT(1.0e5)
+    snowd0 = FT(0.1) .+ rnd(NC)
+    h2osno0 = FT[0.0, 2.0, 0.0, 5.0, 1.0, 0.0, 3.0, 0.0]
+    t_soisno0 = FT[273.15 + 1.5 * sinpi((c + jj) / 4) for c in 1:NC, jj in 1:NLEV]
+    ice0 = FT(2.0) .+ rnd(NC, NLEV) .* 3
+    liq0 = FT(2.0) .+ rnd(NC, NLEV) .* 3
+    cv0  = FT(2.0e6) .+ rnd(NC, NLEV) .* FT(1.0e5)
+    dt = FT(1800)
+
+    # mutable set: copies of every read/written array, on backend `cv`(=identity/device)
+    mkset(cv) = (
+        t_lake = cv(copy(t_lake0)), snow_depth = cv(copy(snowd0)),
+        h2osno = cv(copy(h2osno0)), cv_lake = cv(copy(cvlake0)),
+        icefrac = cv(copy(icefrac0)), qsm = cv(zeros(FT, NC)), qsf = cv(zeros(FT, NC)),
+        qsd = cv(zeros(FT, NC)), lhabs = cv(zeros(FT, NC)),
+        qsm_lyr = cv(zeros(FT, NC, NLEV)), qsf_lyr = cv(zeros(FT, NC, NLEV)),
+        imelt = cv(zeros(Int, NC, NLEV)), t_soisno = cv(copy(t_soisno0)),
+        ice = cv(copy(ice0)), liq = cv(copy(liq0)), cv = cv(copy(cv0)),
+        eflx = cv(zeros(FT, NC)))
+    run!(s, to_) = begin
+        m = _dev(to_, mask); sn = _dev(to_, snl); dzl = _dev(to_, dz_lake)
+        CLM._launch!(CLM._phase_change_lake_water_kernel!, s.t_lake, s.snow_depth, s.h2osno,
+            s.cv_lake, s.icefrac, s.qsm, s.qsf, s.qsd, s.lhabs, s.qsm_lyr, s.qsf_lyr,
+            s.imelt, m, dzl, NS, NLAK, dt; ndrange = NC)
+        CLM._launch!(CLM._phase_change_lake_soil_kernel!, s.t_soisno, s.ice, s.liq, s.cv,
+            s.lhabs, s.qsm, s.qsf, s.eflx, s.imelt, s.qsm_lyr, s.qsf_lyr, m, sn, NS, NG, dt;
+            ndrange = NC)
+        s
+    end
+    cpu = run!(mkset(identity), identity)
+    dev = run!(mkset(x -> _dev(to, x)), to)
+    flds = (:t_lake, :snow_depth, :h2osno, :cv_lake, :icefrac, :qsm, :qsf, :qsd, :lhabs,
+            :qsm_lyr, :qsf_lyr, :imelt, :t_soisno, :ice, :liq, :cv, :eflx)
+    d = maximum(reldiff(getfield(cpu, f), getfield(dev, f)) for f in flds)
+    return ("phase_change", d, d < TOL(FT))
 end
 
 function main(backend)
