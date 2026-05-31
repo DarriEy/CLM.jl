@@ -880,6 +880,111 @@ end
 end
 
 # =========================================================================
+# lake_temperature! post-solve kernels (lt7). Per-column energy sums accumulate
+# ncvts/fin/lakeresist in-thread (no atomics); energy conservation is per-patch.
+# The scalar @warn for large errsoi is dropped on the kernel path (diagnostic
+# only — the numeric eflx/errsoi updates are preserved). Constants eltype-converted.
+# =========================================================================
+@kernel function _lake_ch4_kernel!(lakeresist, grnd_ch4_cond, @Const(mask),
+        @Const(jconvect), @Const(jconvectbot), @Const(dz_lake), @Const(kme),
+        @Const(lake_icefrac), @Const(lake_raw), nlevlak::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(lakeresist)
+        lr = lakeresist[c]
+        for j in 1:nlevlak
+            if j > jconvect[c] && j < jconvectbot[c]
+                lr += dz_lake[c, j] / kme[c, j]
+            end
+        end
+        lakeresist[c] = lr
+        gc = one(T) / (lr + lake_raw[c])
+        if lake_icefrac[c, 1] > T(0.1)
+            gc = zero(T)
+        end
+        grnd_ch4_cond[c] = gc
+    end
+end
+
+@kernel function _lake_ncvts_lake_kernel!(ncvts, fin, @Const(mask), @Const(cv_lake),
+        @Const(t_lake), @Const(lake_icefrac), @Const(dz_lake), @Const(phi),
+        nlevlak::Int, cfus)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(ncvts)
+        s = ncvts[c]; fn = fin[c]
+        for j in 1:nlevlak
+            s += cv_lake[c, j] * (t_lake[c, j] - T(TFRZ)) + cfus * dz_lake[c, j] * (one(T) - lake_icefrac[c, j])
+            fn += phi[c, j]
+        end
+        ncvts[c] = s; fin[c] = fn
+    end
+end
+
+@kernel function _lake_ncvts_soil_kernel!(ncvts, fin, @Const(mask), @Const(jtop),
+        @Const(cv), @Const(t_soisno), @Const(h2osoi_liq), @Const(h2osno_total),
+        @Const(phix), @Const(phi_soil), nlevsno::Int, nlevgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(ncvts)
+        extoff = nlevsno
+        s = ncvts[c]; fn = fin[c]
+        for j in (-nlevsno + 1):nlevgrnd
+            jj = j + nlevsno
+            if j >= jtop[c]
+                s += cv[c, jj] * (t_soisno[c, jj] - T(TFRZ)) + T(HFUS) * h2osoi_liq[c, jj]
+                if j < 1
+                    fn += phix[c, j + extoff]
+                end
+                if j == 1 && h2osno_total[c] > zero(T) && j == jtop[c]
+                    s -= h2osno_total[c] * T(HFUS)
+                end
+            end
+            if j == 1
+                fn += phi_soil[c]
+            end
+        end
+        ncvts[c] = s; fin[c] = fn
+    end
+end
+
+# Energy conservation (per-patch). @warn for large residuals omitted (diagnostic).
+@kernel function _lake_energy_conservation_kernel!(errsoi, eflx_sh_tot, eflx_sh_grnd,
+        eflx_soil_grnd, eflx_gnet, @Const(maskp), @Const(column), @Const(ncvts),
+        @Const(ocvts), @Const(fin), dtime)
+    p = @index(Global)
+    @inbounds if maskp[p]
+        T = eltype(errsoi)
+        c = column[p]
+        e = (ncvts[c] - ocvts[c]) / dtime - fin[c]
+        if abs(e) < T(0.10)
+            eflx_sh_tot[p] -= e
+            eflx_sh_grnd[p] -= e
+            eflx_soil_grnd[p] += e
+            eflx_gnet[p] += e
+            e = zero(T)
+        end
+        errsoi[c] = e
+    end
+end
+
+@kernel function _lake_icethick_kernel!(lake_icethick, lake_icefracsurf, @Const(mask),
+        @Const(lake_icefrac), @Const(dz_lake), nlevlak::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(lake_icethick)
+        thick = zero(T)
+        for j in 1:nlevlak
+            if j == 1
+                lake_icefracsurf[c] = lake_icefrac[c, 1]
+            end
+            thick += lake_icefrac[c, j] * dz_lake[c, j] * T(DENH2O) / T(DENICE)
+        end
+        lake_icethick[c] = thick
+    end
+end
+
+# =========================================================================
 """
     lake_temperature!(col, patch_data, solarabs, soilstate, waterstatebulk,
                       waterdiagbulk, waterfluxbulk, energyflux, temperature,
@@ -902,8 +1007,8 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
                            energyflux::EnergyFluxData,
                            temperature::TemperatureData,
                            lakestate::LakeStateData,
-                           grnd_ch4_cond::Vector{<:Real},
-                           mask_lakec::BitVector, mask_lakep::BitVector,
+                           grnd_ch4_cond::AbstractVector{<:Real},
+                           mask_lakec::AbstractVector{Bool}, mask_lakep::AbstractVector{Bool},
                            bounds_col::UnitRange{Int}, bounds_patch::UnitRange{Int},
                            dtime::Real)
     nlevsno = varpar.nlevsno
@@ -1130,97 +1235,29 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         bottomconvect, mask_lakec, dz_lake, nlevlak, FT(cwat), FT(cice_eff), use_lch4;
         ndrange = nc)
 
-    # Calculate lakeresist and grnd_ch4_cond for CH4 module
-    if varctl.use_lch4
-        for j in 1:nlevlak
-            for c in bounds_col
-                mask_lakec[c] || continue
-                if j > jconvect[c] && j < jconvectbot[c]
-                    lakeresist[c] = lakeresist[c] + dz_lake[c, j] / kme[c, j]
-                end
-                if j == nlevlak
-                    grnd_ch4_cond[c] = 1.0 / (lakeresist[c] + lake_raw[c])
-                    if lake_icefrac[c, 1] > 0.1
-                        grnd_ch4_cond[c] = 0.0
-                    end
-                end
-            end
-        end
+    # CH4 lake resistance / conductance (per-column; only when use_lch4).
+    if use_lch4
+        _launch!(_lake_ch4_kernel!, lakeresist, grnd_ch4_cond, mask_lakec, jconvect,
+            jconvectbot, dz_lake, kme, lake_icefrac, lake_raw, nlevlak; ndrange = nc)
     end
 
-    # 11!) Re-evaluate thermal properties and sum energy content
-    # Lake thermal properties
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-            cv_lake[c, j] = dz_lake[c, j] * (cwat * (1.0 - lake_icefrac[c, j]) + cice_eff * lake_icefrac[c, j])
-        end
-    end
-
-    # Snow/soil thermal properties
+    # 11!) Re-evaluate thermal properties + post-solve energy content.
+    _launch!(_lake_cv_lake_kernel!, cv_lake, mask_lakec, dz_lake, lake_icefrac, nlevlak,
+        FT(cwat), FT(cice_eff); ndrange = (nc, nlevlak))
     soil_therm_prop_lake!(col, soilstate, waterstatebulk, temperature,
                           tk, cv, tktopsoillay, mask_lakec, bounds_col)
-
-    # Sum energy content
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-            ncvts_arr[c] = ncvts_arr[c] + cv_lake[c, j] * (t_lake[c, j] - TFRZ) +
-                cfus * dz_lake[c, j] * (1.0 - lake_icefrac[c, j])
-            fin[c] = fin[c] + phi[c, j]
-        end
-    end
-
+    _launch!(_lake_ncvts_lake_kernel!, ncvts_arr, fin, mask_lakec, cv_lake, t_lake,
+        lake_icefrac, dz_lake, phi, nlevlak, FT(cfus); ndrange = nc)
     calculate_total_h2osno!(waterstatebulk.ws, snl, h2osno_total, mask_lakec, bounds_col)
+    _launch!(_lake_ncvts_soil_kernel!, ncvts_arr, fin, mask_lakec, jtop, cv, t_soisno,
+        h2osoi_liq, h2osno_total, phix, phi_soil, nlevsno, nlevgrnd; ndrange = nc)
 
-    for j in (-nlevsno + 1):nlevgrnd
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if j >= jtop[c]
-                ncvts_arr[c] = ncvts_arr[c] + cv[c, jj] * (t_soisno[c, jj] - TFRZ) +
-                    HFUS * h2osoi_liq[c, jj]
-                if j < 1
-                    fin[c] = fin[c] + phix[c, j + ext_off]
-                end
-                if j == 1 && h2osno_total[c] > 0.0 && j == jtop[c]
-                    ncvts_arr[c] = ncvts_arr[c] - h2osno_total[c] * HFUS
-                end
-            end
-            if j == 1
-                fin[c] = fin[c] + phi_soil[c]
-            end
-        end
-    end
-
-    # Check energy conservation
-    for p in bounds_patch
-        mask_lakep[p] || continue
-        c = patch_data.column[p]
-        errsoi[c] = (ncvts_arr[c] - ocvts[c]) / dtime - fin[c]
-        if abs(errsoi[c]) < 0.10
-            eflx_sh_tot[p] = eflx_sh_tot[p] - errsoi[c]
-            eflx_sh_grnd[p] = eflx_sh_grnd[p] - errsoi[c]
-            eflx_soil_grnd[p] = eflx_soil_grnd[p] + errsoi[c]
-            eflx_gnet[p] = eflx_gnet[p] + errsoi[c]
-            if abs(errsoi[c]) > 1.0e-3
-                @warn "errsoi incorporated into sensible heat in lake_temperature!: c=$c, errsoi=$(errsoi[c]) W/m^2"
-            end
-            errsoi[c] = 0.0
-        end
-    end
-
-    # Lake ice thickness and surface ice fraction diagnostic
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if j == 1
-                lake_icethick[c] = 0.0
-                lake_icefracsurf[c] = lake_icefrac[c, 1]
-            end
-            lake_icethick[c] = lake_icethick[c] + lake_icefrac[c, j] * dz_lake[c, j] * DENH2O / DENICE
-        end
-    end
+    # Energy conservation (per-patch) + lake ice-thickness diagnostic.
+    _launch!(_lake_energy_conservation_kernel!, errsoi, eflx_sh_tot, eflx_sh_grnd,
+        eflx_soil_grnd, eflx_gnet, mask_lakep, patch_data.column, ncvts_arr, ocvts, fin,
+        FT(dtime); ndrange = length(mask_lakep))
+    _launch!(_lake_icethick_kernel!, lake_icethick, lake_icefracsurf, mask_lakec,
+        lake_icefrac, dz_lake, nlevlak; ndrange = (nc, nlevlak))
 
     return nothing
 end
