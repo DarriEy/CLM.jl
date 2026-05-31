@@ -656,6 +656,116 @@ end
 end
 
 # =========================================================================
+# lake_temperature! tridiagonal-assembly kernels (lt5). All 2D (column, extended
+# level ji=j_ext+nlevsno); neighbor reads (zx/tx/tkix/fnx at ji±1) are into arrays
+# fully written by earlier kernels, so no intra-kernel race. Constants/dtime
+# eltype-converted. The batched solve (tridiagonal_multi!) is already kernelized.
+# =========================================================================
+@kernel function _lake_tkix_kernel!(tkix, @Const(mask), @Const(jtop), @Const(tk),
+        @Const(tk_lake), @Const(z), @Const(z_lake), @Const(dz_lake), @Const(tktopsoillay),
+        @Const(zx), nlevsno::Int, nlevlak::Int, nlevgrnd::Int)
+    c, ji = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(tkix)
+        j_ext = ji - nlevsno
+        jprime = j_ext - nlevlak
+        jj = j_ext + nlevsno
+        if j_ext >= jtop[c]
+            if j_ext < 0
+                tkix[c, ji] = tk[c, jj]
+            elseif j_ext == 0
+                dzp = zx[c, ji + 1] - zx[c, ji]
+                tkix[c, ji] = tk_lake[c, 1] * tk[c, jj] * dzp /
+                    (tk[c, jj] * z_lake[c, 1] + tk_lake[c, 1] * (-z[c, jj]))
+            elseif j_ext < nlevlak
+                tkix[c, ji] = (tk_lake[c, j_ext] * tk_lake[c, j_ext + 1] * (dz_lake[c, j_ext + 1] + dz_lake[c, j_ext])) /
+                    (tk_lake[c, j_ext] * dz_lake[c, j_ext + 1] + tk_lake[c, j_ext + 1] * dz_lake[c, j_ext])
+            elseif j_ext == nlevlak
+                dzp = zx[c, ji + 1] - zx[c, ji]
+                jprime_jj = 1 + nlevsno
+                tkix[c, ji] = tktopsoillay[c] * tk_lake[c, j_ext] * dzp /
+                    (tktopsoillay[c] * dz_lake[c, j_ext] / T(2.0) + tk_lake[c, j_ext] * z[c, jprime_jj])
+            else
+                jprime_jj = jprime + nlevsno
+                tkix[c, ji] = tk[c, jprime_jj]
+            end
+        end
+    end
+end
+
+@kernel function _lake_tridiag_factors_kernel!(factx, fnx, @Const(mask), @Const(jtop),
+        @Const(cvx), @Const(tkix), @Const(tx), @Const(zx), nlevsno::Int, nlevlak::Int,
+        nlevgrnd::Int, dtime)
+    c, ji = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(factx)
+        j_ext = ji - nlevsno
+        if j_ext >= jtop[c]
+            if j_ext < nlevlak + nlevgrnd
+                factx[c, ji] = dtime / cvx[c, ji]
+                fnx[c, ji] = tkix[c, ji] * (tx[c, ji + 1] - tx[c, ji]) / (zx[c, ji + 1] - zx[c, ji])
+            else
+                factx[c, ji] = dtime / cvx[c, ji]
+                fnx[c, ji] = zero(T)
+            end
+        end
+    end
+end
+
+@kernel function _lake_tridiag_coeffs_kernel!(a, b, c1, r, @Const(mask), @Const(jtop),
+        @Const(zx), @Const(factx), @Const(tkix), @Const(tx), @Const(fin), @Const(phix),
+        @Const(fnx), nlevsno::Int, nlevlak::Int, nlevgrnd::Int, cnfac)
+    c, ji = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(a)
+        j_ext = ji - nlevsno
+        if j_ext >= jtop[c]
+            omc = one(T) - cnfac
+            if j_ext == jtop[c]
+                dzp = zx[c, ji + 1] - zx[c, ji]
+                a[c, ji] = zero(T)
+                b[c, ji] = one(T) + omc * factx[c, ji] * tkix[c, ji] / dzp
+                c1[c, ji] = -omc * factx[c, ji] * tkix[c, ji] / dzp
+                r[c, ji] = tx[c, ji] + factx[c, ji] * (fin[c] + phix[c, ji] + cnfac * fnx[c, ji])
+            elseif j_ext < nlevlak + nlevgrnd
+                dzm = zx[c, ji] - zx[c, ji - 1]
+                dzp = zx[c, ji + 1] - zx[c, ji]
+                a[c, ji] = -omc * factx[c, ji] * tkix[c, ji - 1] / dzm
+                b[c, ji] = one(T) + omc * factx[c, ji] * (tkix[c, ji] / dzp + tkix[c, ji - 1] / dzm)
+                c1[c, ji] = -omc * factx[c, ji] * tkix[c, ji] / dzp
+                r[c, ji] = tx[c, ji] + cnfac * factx[c, ji] * (fnx[c, ji] - fnx[c, ji - 1]) + factx[c, ji] * phix[c, ji]
+            else
+                dzm = zx[c, ji] - zx[c, ji - 1]
+                a[c, ji] = -omc * factx[c, ji] * tkix[c, ji - 1] / dzm
+                b[c, ji] = one(T) + omc * factx[c, ji] * tkix[c, ji - 1] / dzm
+                c1[c, ji] = zero(T)
+                r[c, ji] = tx[c, ji] - cnfac * factx[c, ji] * fnx[c, ji - 1]
+            end
+        end
+    end
+end
+
+@kernel function _lake_unpack_kernel!(t_soisno, t_lake, @Const(mask), @Const(jtop),
+        @Const(tx), nlevsno::Int, nlevlak::Int, nlevgrnd::Int)
+    c, ji = @index(Global, NTuple)
+    @inbounds if mask[c]
+        j_ext = ji - nlevsno
+        jprime = j_ext - nlevlak
+        jj = j_ext + nlevsno
+        if j_ext >= jtop[c]
+            if j_ext < 1
+                t_soisno[c, jj] = tx[c, ji]
+            elseif j_ext <= nlevlak
+                t_lake[c, j_ext] = tx[c, ji]
+            else
+                jprime_jj = jprime + nlevsno
+                t_soisno[c, jprime_jj] = tx[c, ji]
+            end
+        end
+    end
+end
+
+# =========================================================================
 """
     lake_temperature!(col, patch_data, solarabs, soilstate, waterstatebulk,
                       waterdiagbulk, waterfluxbulk, energyflux, temperature,
@@ -852,115 +962,22 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         sabg_lyr_col, z_lake, cv_lake, phi, t_lake, dz_lake, phi_soil, t_soisno,
         nlevsno, nlevlak, nlevgrnd; ndrange = nc)
 
-    # Determine interface thermal conductivities, tkix
-    for j_ext in (-nlevsno + 1):(nlevlak + nlevgrnd)
-        ji = j_ext + ext_off
-        for c in bounds_col
-            mask_lakec[c] || continue
+    # Interface conductivity + Crank-Nicolson tridiagonal assembly (2D kernels).
+    _launch!(_lake_tkix_kernel!, tkix, mask_lakec, jtop, tk, tk_lake, z, z_lake, dz_lake,
+        tktopsoillay, zx, nlevsno, nlevlak, nlevgrnd; ndrange = (nc, ncol_total))
+    _launch!(_lake_tridiag_factors_kernel!, factx, fnx, mask_lakec, jtop, cvx, tkix, tx, zx,
+        nlevsno, nlevlak, nlevgrnd, FT(dtime); ndrange = (nc, ncol_total))
+    _launch!(_lake_tridiag_coeffs_kernel!, a, b, c1, r, mask_lakec, jtop, zx, factx, tkix,
+        tx, fin, phix, fnx, nlevsno, nlevlak, nlevgrnd, FT(CNFAC); ndrange = (nc, ncol_total))
 
-            jprime = j_ext - nlevlak
-            jj = j_ext + joff
-
-            if j_ext >= jtop[c]
-                if j_ext < 0  # non-bottom snow layer
-                    tkix[c, ji] = tk[c, jj]
-                elseif j_ext == 0  # bottom snow layer
-                    dzp = zx[c, ji + 1] - zx[c, ji]
-                    tkix[c, ji] = tk_lake[c, 1] * tk[c, jj] * dzp /
-                        (tk[c, jj] * z_lake[c, 1] + tk_lake[c, 1] * (-z[c, jj]))
-                elseif j_ext < nlevlak  # non-bottom lake layer
-                    tkix[c, ji] = (tk_lake[c, j_ext] * tk_lake[c, j_ext + 1] * (dz_lake[c, j_ext + 1] + dz_lake[c, j_ext])) /
-                        (tk_lake[c, j_ext] * dz_lake[c, j_ext + 1] + tk_lake[c, j_ext + 1] * dz_lake[c, j_ext])
-                elseif j_ext == nlevlak  # bottom lake layer
-                    dzp = zx[c, ji + 1] - zx[c, ji]
-                    jprime_jj = 1 + joff  # soil layer 1
-                    tkix[c, ji] = tktopsoillay[c] * tk_lake[c, j_ext] * dzp /
-                        (tktopsoillay[c] * dz_lake[c, j_ext] / 2.0 + tk_lake[c, j_ext] * z[c, jprime_jj])
-                else  # soil layer
-                    jprime_jj = jprime + joff
-                    tkix[c, ji] = tk[c, jprime_jj]
-                end
-            end
-        end
-    end
-
-    # Set up tridiagonal matrix vectors
-    for j_ext in (-nlevsno + 1):(nlevlak + nlevgrnd)
-        ji = j_ext + ext_off
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if j_ext >= jtop[c]
-                if j_ext < nlevlak + nlevgrnd  # top or interior layer
-                    factx[c, ji] = dtime / cvx[c, ji]
-                    fnx[c, ji] = tkix[c, ji] * (tx[c, ji + 1] - tx[c, ji]) / (zx[c, ji + 1] - zx[c, ji])
-                else  # bottom soil layer
-                    factx[c, ji] = dtime / cvx[c, ji]
-                    fnx[c, ji] = 0.0
-                end
-            end
-        end
-    end
-
-    for j_ext in (-nlevsno + 1):(nlevlak + nlevgrnd)
-        ji = j_ext + ext_off
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if j_ext >= jtop[c]
-                if j_ext == jtop[c]  # top layer
-                    dzp = zx[c, ji + 1] - zx[c, ji]
-                    a[c, ji] = 0.0
-                    b[c, ji] = 1.0 + (1.0 - CNFAC) * factx[c, ji] * tkix[c, ji] / dzp
-                    c1[c, ji] = -(1.0 - CNFAC) * factx[c, ji] * tkix[c, ji] / dzp
-                    r[c, ji] = tx[c, ji] + factx[c, ji] * (fin[c] + phix[c, ji] + CNFAC * fnx[c, ji])
-                elseif j_ext < nlevlak + nlevgrnd  # middle layer
-                    dzm = zx[c, ji] - zx[c, ji - 1]
-                    dzp = zx[c, ji + 1] - zx[c, ji]
-                    a[c, ji] = -(1.0 - CNFAC) * factx[c, ji] * tkix[c, ji - 1] / dzm
-                    b[c, ji] = 1.0 + (1.0 - CNFAC) * factx[c, ji] * (tkix[c, ji] / dzp + tkix[c, ji - 1] / dzm)
-                    c1[c, ji] = -(1.0 - CNFAC) * factx[c, ji] * tkix[c, ji] / dzp
-                    r[c, ji] = tx[c, ji] + CNFAC * factx[c, ji] * (fnx[c, ji] - fnx[c, ji - 1]) + factx[c, ji] * phix[c, ji]
-                else  # bottom soil layer
-                    dzm = zx[c, ji] - zx[c, ji - 1]
-                    a[c, ji] = -(1.0 - CNFAC) * factx[c, ji] * tkix[c, ji - 1] / dzm
-                    b[c, ji] = 1.0 + (1.0 - CNFAC) * factx[c, ji] * tkix[c, ji - 1] / dzm
-                    c1[c, ji] = 0.0
-                    r[c, ji] = tx[c, ji] - CNFAC * factx[c, ji] * fnx[c, ji - 1]
-                end
-            end
-        end
-    end
-
-    # 7!) Solve tridiagonal system
+    # 7!) Solve the batched tridiagonal system (already a kernel).
     nlevs_total = ncol_total
-    # Convert jtop to extended column index
-    jtop_ext = Vector{Int}(undef, nc)
-    for c in bounds_col
-        mask_lakec[c] || continue
-        jtop_ext[c] = jtop[c] + ext_off  # convert to 1-based extended index
-    end
-
+    jtop_ext = jtop .+ ext_off   # extended-column jtop (device-friendly broadcast)
     tridiagonal_multi!(tx, a, b, c1, r, jtop_ext, mask_lakec, nc, nlevs_total)
 
-    # Set t_soisno and t_lake from solution
-    for j_ext in (-nlevsno + 1):(nlevlak + nlevgrnd)
-        ji = j_ext + ext_off
-        for c in bounds_col
-            mask_lakec[c] || continue
-            jprime = j_ext - nlevlak
-            jj = j_ext + joff
-
-            if j_ext >= jtop[c]
-                if j_ext < 1  # snow layer
-                    t_soisno[c, jj] = tx[c, ji]
-                elseif j_ext <= nlevlak  # lake layer
-                    t_lake[c, j_ext] = tx[c, ji]
-                else  # soil layer
-                    jprime_jj = jprime + joff
-                    t_soisno[c, jprime_jj] = tx[c, ji]
-                end
-            end
-        end
-    end
+    # Unpack the solution back into t_soisno / t_lake.
+    _launch!(_lake_unpack_kernel!, t_soisno, t_lake, mask_lakec, jtop, tx,
+        nlevsno, nlevlak, nlevgrnd; ndrange = (nc, ncol_total))
 
     # 9!) Phase change
     phase_change_lake!(col, waterstatebulk, waterdiagbulk, waterfluxbulk,
