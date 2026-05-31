@@ -486,6 +486,91 @@ function soilwm_tridiag_assemble!(out::SwmTriOut, tin::SwmTriIn, mask, jwt,
     return nothing
 end
 
+# --------------------------------------------------------------------------
+# Post-solve: renew the layer liquid water mass from the tridiagonal solution
+# dwat2 and compute aquifer recharge qcharge. 1D per column; masked in-kernel.
+# Each column updates its own h2osoi_liq[joff+1..joff+nlevsoi] (internal j-loop)
+# and writes qcharge[c], branching on whether the water table is in the soil
+# column (jwt < nlevsoi) or below it. ~15 array args (under the grouped-struct
+# threshold). Literals eltype-converted; /dtime kept as division (byte-identical).
+# --------------------------------------------------------------------------
+@kernel function _soilwm_renew_qcharge_kernel!(h2osoi_liq, qcharge, @Const(mask),
+        @Const(jwt), @Const(dwat2), @Const(dzmm), @Const(h2osoi_vol), @Const(watsat),
+        @Const(imped_arr), @Const(hksat), @Const(bsw), @Const(smpmin), @Const(smp_arr),
+        @Const(zq), @Const(zwt), @Const(z), joff::Int, nlevsoi::Int, dtime)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(h2osoi_liq)
+        for j in 1:nlevsoi
+            h2osoi_liq[c, joff + j] = h2osoi_liq[c, joff + j] + dwat2[c, j] * dzmm[c, j]
+        end
+
+        jw = jwt[c]
+        if jw < nlevsoi
+            wh_zwt = zero(T)
+            s_node = smooth_max(h2osoi_vol[c, jw+1] / watsat[c, jw+1], T(0.01))
+            s1 = smooth_min(one(T), s_node)
+            ka = imped_arr[c, jw+1] * hksat[c, jw+1] * s1^(T(2.0) * bsw[c, jw+1] + T(3.0))
+            smp1 = smooth_max(smpmin[c], smp_arr[c, max(1, jw)])
+            wh = smp1 - zq[c, max(1, jw)]
+            if jw == 0
+                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] + T(1.0e-3)) * T(1000.0))
+            else
+                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, joff + jw]) * T(1000.0) * T(2.0))
+            end
+            qcharge[c] = smooth_max(-T(10.0) / dtime, qcharge[c])
+            qcharge[c] = smooth_min(T(10.0) / dtime, qcharge[c])
+        else
+            qcharge[c] = dwat2[c, nlevsoi+1] * dzmm[c, nlevsoi+1] / dtime
+        end
+    end
+end
+
+"""
+    soilwm_renew_qcharge!(h2osoi_liq, qcharge, mask, jwt, dwat2, dzmm, h2osoi_vol,
+        watsat, imped_arr, hksat, bsw, smpmin, smp_arr, zq, zwt, z, joff, nlevsoi, dtime)
+
+Update layer liquid water mass and aquifer recharge after the tridiagonal solve,
+for each active column. Backend-agnostic 1D kernel.
+"""
+function soilwm_renew_qcharge!(h2osoi_liq, qcharge, mask, jwt, dwat2, dzmm,
+        h2osoi_vol, watsat, imped_arr, hksat, bsw, smpmin, smp_arr, zq, zwt, z,
+        joff::Int, nlevsoi::Int, dtime)
+    dt = convert(eltype(h2osoi_liq), dtime)
+    _launch!(_soilwm_renew_qcharge_kernel!, h2osoi_liq, qcharge, mask, jwt, dwat2,
+        dzmm, h2osoi_vol, watsat, imped_arr, hksat, bsw, smpmin, smp_arr, zq, zwt,
+        z, joff, nlevsoi, dt; ndrange = length(mask))
+end
+
+# --------------------------------------------------------------------------
+# Water deficit: per-column sum of any negative layer liquid water (as a
+# positive deficit) via smooth_ifelse. 1D per column; internal j-reduction in
+# ascending order (matches the scalar accumulation).
+# --------------------------------------------------------------------------
+@kernel function _soilwm_deficit_kernel!(qflx_deficit, @Const(mask),
+        @Const(h2osoi_liq), joff::Int, nlevsoi::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(qflx_deficit)
+        acc = zero(T)
+        for j in 1:nlevsoi
+            acc = acc + smooth_ifelse(h2osoi_liq[c, joff + j], zero(T),
+                                      -h2osoi_liq[c, joff + j])
+        end
+        qflx_deficit[c] = acc
+    end
+end
+
+"""
+    soilwm_deficit!(qflx_deficit, mask, h2osoi_liq, joff, nlevsoi)
+
+Per-column water deficit (sum of negative layer liquid water as positive)
+for each active column. Backend-agnostic 1D kernel.
+"""
+soilwm_deficit!(qflx_deficit, mask, h2osoi_liq, joff::Int, nlevsoi::Int) =
+    _launch!(_soilwm_deficit_kernel!, qflx_deficit, mask, h2osoi_liq, joff, nlevsoi;
+             ndrange = length(mask))
+
 """
     SoilWaterMovementConfig
 
@@ -1416,50 +1501,14 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     tridiagonal_multi!(dwat2, amx, bmx, cmx, rmx,
         jtop_arr, mask_jtop, nc, nlevsoi + 1)
 
-    # Renew the mass of liquid water and compute qcharge
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
+    # Renew the layer liquid water mass and compute qcharge (per-column kernel;
+    # internal j-loop for the mass update, then the jwt-branched recharge).
+    soilwm_renew_qcharge!(h2osoi_liq, qcharge, mask_hydrology, jwt, dwat2, dzmm,
+        h2osoi_vol, watsat, imped_arr, hksat, bsw, smpmin, smp_arr, zq, zwt, z,
+        joff, nlevsoi, dtime)
 
-        for j in 1:nlevsoi
-            h2osoi_liq[c, joff + j] = h2osoi_liq[c, joff + j] + dwat2[c, j] * dzmm[c, j]
-        end
-
-        # Calculate qcharge
-        if jwt[c] < nlevsoi
-            wh_zwt = 0.0
-
-            s_node = smooth_max(h2osoi_vol[c, jwt[c]+1] / watsat[c, jwt[c]+1], 0.01)
-            s1 = smooth_min(1.0, s_node)
-
-            ka = imped_arr[c, jwt[c]+1] * hksat[c, jwt[c]+1] *
-                 s1^(2.0 * bsw[c, jwt[c]+1] + 3.0)
-
-            smp1 = smooth_max(smpmin[c], smp_arr[c, max(1, jwt[c])])
-            wh = smp1 - zq[c, max(1, jwt[c])]
-
-            if jwt[c] == 0
-                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] + 1.0e-3) * 1000.0)
-            else
-                qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, joff + jwt[c]]) * 1000.0 * 2.0)
-            end
-
-            # Limit qcharge
-            qcharge[c] = smooth_max(-10.0 / dtime, qcharge[c])
-            qcharge[c] = smooth_min(10.0 / dtime, qcharge[c])
-        else
-            # Water table below soil column
-            qcharge[c] = dwat2[c, nlevsoi+1] * dzmm[c, nlevsoi+1] / dtime
-        end
-    end
-
-    # Compute water deficit and reset negative liquid water
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
-        qflx_deficit[c] = 0.0
-        for j in 1:nlevsoi
-            qflx_deficit[c] = qflx_deficit[c] + smooth_ifelse(h2osoi_liq[c, joff + j], zero(eltype(h2osoi_liq)), -h2osoi_liq[c, joff + j])
-        end
-    end
+    # Compute water deficit (per-column reduction over the soil layers).
+    soilwm_deficit!(qflx_deficit, mask_hydrology, h2osoi_liq, joff, nlevsoi)
 
     nothing
 end

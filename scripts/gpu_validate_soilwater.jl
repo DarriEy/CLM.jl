@@ -7,7 +7,7 @@
 #
 #   julia --project=scripts scripts/gpu_validate_soilwater.jl
 #
-# Kernels covered (swm-zd1..zd3 increments of soilwater_zengdecker2009!):
+# Kernels covered (swm-zd1..zd4 increments of soilwater_zengdecker2009!):
 #   _soilwm_voleq_zq_kernel!      : equilibrium water content vol_eq + matric pot. zq
 #   _soilwm_hk_smp_kernel!        : hydraulic conductivity hk, matric pot. smp, derivs
 #   _soilwm_jwt_vwczwt_kernel!    : water-table layer index jwt + vwc at WT depth
@@ -109,11 +109,21 @@ function build_inputs(::Type{FT}) where {FT}
     qflx_infl_in    = rnd(NC) .* FT(1.0e-3)
     vwc_zwt_in      = FT(0.2) .+ rnd(NC) .* FT(0.15)
 
+    # --- extra inputs for the post-solve kernels (swm-zd4) ---
+    # h2osoi_liq over snow+soil (JOFF+NLEVSOI cols); soil layers carry a few
+    # slightly negative values so the deficit smooth_ifelse branch fires.
+    h2osoi_liq_in = FT[ (k > JOFF && (c + k) % 7 == 0) ? -0.5 : 2.0 + 0.3 * k
+                        for c in 1:NC, k in 1:(JOFF + NLEVSOI) ]
+    z_in     = FT[0.1 * k for c in 1:NC, k in 1:(JOFF + NLEVSOI)]   # increasing depth (m)
+    dwat2_in = (rnd(NC, NLEVSOI + 1) .- FT(0.5)) .* FT(1.0e-3)
+    imped_in = FT(0.3) .+ rnd(NC, NLEVSOI) .* FT(0.7)              # ice impedance in (0,1]
+
     return (; mask, zimm_arr, zwtmm, watsat, sucsat, bsw, smpmin,
             hksat, icefrac, vwc_liq, e_ice = FT(6.0),
             zi, zwt, t_soisno, h2osoi_vol, jwt_in, zmm_in, dzmm_in,
             zq_in, smp_in, hk_in, dhkdw_in, dsmpdw_in, qflx_rootsoi_in,
-            qflx_infl_in, vwc_zwt_in, sdamp = FT(0.0), dtime = FT(1800.0))
+            qflx_infl_in, vwc_zwt_in, sdamp = FT(0.0), dtime = FT(1800.0),
+            h2osoi_liq_in, z_in, dwat2_in, imped_in)
 end
 
 function tests(to, ::Type{FT}) where {FT}
@@ -179,6 +189,22 @@ function tests(to, ::Type{FT}) where {FT}
     # ---- tridiagonal assembly (device-view structs SwmTriOut/SwmTriIn) ----
     push!(results, test_tridiag(to, FT, I))
 
+    # ---- post-solve: renew liquid + qcharge (out = h2osoi_liq, extra = qcharge) ----
+    push!(results, _parity("renew_qcharge", to, FT, CLM._soilwm_renew_qcharge_kernel!,
+        NC, I.h2osoi_liq_in,
+        f -> begin
+            qcharge = f(zeros(FT, NC))
+            ((qcharge, f(I.mask), f(I.jwt_in), f(I.dwat2_in), f(I.dzmm_in),
+              f(I.h2osoi_vol), f(I.watsat), f(I.imped_in), f(I.hksat), f(I.bsw),
+              f(I.smpmin), f(I.smp_in), f(I.zq_in), f(I.zwt), f(I.z_in),
+              JOFF, NLEVSOI, FT(I.dtime)), (qcharge,))
+        end))
+
+    # ---- post-solve: water deficit reduction (out = qflx_deficit) ----
+    push!(results, _parity("deficit", to, FT, CLM._soilwm_deficit_kernel!,
+        NC, zeros(FT, NC),
+        f -> ((f(I.mask), f(I.h2osoi_liq_in), JOFF, NLEVSOI), ())))
+
     return results
 end
 
@@ -211,7 +237,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("METAL PARITY for soilwater_zengdecker2009! kernels (swm-zd1..zd3)")
+    println("METAL PARITY for soilwater_zengdecker2009! kernels (swm-zd1..zd4)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend detected — nothing to validate (kernels run on KA CPU in the suite).")
@@ -226,7 +252,7 @@ function main(backend)
         ok ? (npass += 1) : (nfail += 1)
     end
     @printf("\n  %d passed, %d failed\n", npass, nfail)
-    println(nfail == 0 ? "\n  ALL ZD09 swm-zd1..zd3 kernels MATCH CPU ON $name ($FT) ✓" :
+    println(nfail == 0 ? "\n  ALL ZD09 swm-zd1..zd4 kernels MATCH CPU ON $name ($FT) ✓" :
                           "\n  SOME KERNELS DIVERGED — investigate.")
     return nfail == 0 ? 0 : 1
 end
