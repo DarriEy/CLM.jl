@@ -1257,7 +1257,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         eflx_soil_grnd, eflx_gnet, mask_lakep, patch_data.column, ncvts_arr, ocvts, fin,
         FT(dtime); ndrange = length(mask_lakep))
     _launch!(_lake_icethick_kernel!, lake_icethick, lake_icefracsurf, mask_lakec,
-        lake_icefrac, dz_lake, nlevlak; ndrange = (nc, nlevlak))
+        lake_icefrac, dz_lake, nlevlak; ndrange = nc)
 
     return nothing
 end
