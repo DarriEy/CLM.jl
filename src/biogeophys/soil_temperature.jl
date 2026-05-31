@@ -473,6 +473,225 @@ function compute_soil_tk_interface!(tk_out, mask, itype, snl, z, zi, thk,
              nlevsno, nlevurb, nlevgrnd; ndrange = (size(tk_out, 1), njlev))
 end
 
+# Per-layer soil + snow thermal conductivity thk (Farouki 1981 soil; Jordan1991 or
+# Sturm1997 snow). One thread per (c, jj); j = jj - nlevsno. Physical constants are
+# converted to the working element type `T` so the kernel carries no Float64 on a
+# Float32-only backend. `snow_code`: 1=Jordan1991, 2=Sturm1997 (resolved on the host).
+@kernel function _soil_snow_tk_kernel!(thk, bw, @Const(mask), @Const(landunit),
+        @Const(itype), @Const(lun_itype), @Const(nlev_improad), @Const(dz),
+        @Const(nbedrock), @Const(snl), @Const(t_soisno),
+        @Const(h2osoi_liq), @Const(h2osoi_ice), @Const(excess_ice),
+        @Const(watsat), @Const(tkmg), @Const(tkdry), @Const(frac_sno),
+        nlevsno::Int, nlevgrnd::Int, nlevsoi::Int, snow_code::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(thk)
+        j = jj - nlevsno
+        if j >= 1
+            l = landunit[c]
+            it = itype[c]
+            lit = lun_itype[l]
+            is_special = (lit == ISTWET || lit == ISTICE ||
+                          it == ICOL_SUNWALL || it == ICOL_SHADEWALL ||
+                          it == ICOL_ROOF || it == ICOL_ROAD_IMPERV)
+            if (!is_special) || (it == ICOL_ROAD_IMPERV && j > nlev_improad[l])
+                satw = (h2osoi_liq[c, jj] / T(DENH2O) + h2osoi_ice[c, jj] / T(DENICE) +
+                        excess_ice[c, j] / T(DENICE)) / (dz[c, jj] * watsat[c, j])
+                satw = smooth_min(one(T), satw)
+                if satw > T(1.0e-7)
+                    if t_soisno[c, jj] >= T(TFRZ)
+                        dke = smooth_max(zero(T), log10(satw) + one(T))
+                    else
+                        dke = satw
+                    end
+                    fl_denom = h2osoi_liq[c, jj] / (T(DENH2O) * dz[c, jj]) +
+                               h2osoi_ice[c, jj] / (T(DENICE) * dz[c, jj]) +
+                               excess_ice[c, j] / (T(DENICE) * dz[c, jj])
+                    fl = (h2osoi_liq[c, jj] / (T(DENH2O) * dz[c, jj])) / fl_denom
+                    dksat = tkmg[c, j] * T(TKWAT)^(fl * watsat[c, j]) *
+                            T(TKICE)^((one(T) - fl) * watsat[c, j])
+                    thk[c, jj] = dke * dksat + (one(T) - dke) * tkdry[c, j]
+                else
+                    thk[c, jj] = tkdry[c, j]
+                end
+                if j > nbedrock[c]
+                    thk[c, jj] = T(THK_BEDROCK)
+                end
+            elseif lit == ISTICE
+                thk[c, jj] = t_soisno[c, jj] < T(TFRZ) ? T(TKICE) : T(TKWAT)
+            elseif lit == ISTWET
+                if j > nlevsoi
+                    thk[c, jj] = T(THK_BEDROCK)
+                else
+                    thk[c, jj] = t_soisno[c, jj] < T(TFRZ) ? T(TKICE) : T(TKWAT)
+                end
+            end
+        end
+
+        # Thermal conductivity of snow
+        if snl[c] + 1 < 1 && j >= snl[c] + 1 && j <= 0
+            denom = smooth_max(frac_sno[c], T(1.0e-6)) * smooth_max(dz[c, jj], T(1.0e-6))
+            bwv = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / denom
+            bw[c, jj] = bwv
+            if snow_code == 1            # Jordan1991
+                thk[c, jj] = T(TKAIR) + (T(7.75e-5) * bwv + T(1.105e-6) * bwv^2) *
+                                        (T(TKICE) - T(TKAIR))
+            elseif snow_code == 2        # Sturm1997
+                if bwv <= T(156.0)
+                    thk[c, jj] = T(0.023) + T(0.234) * (bwv / T(1000.0))
+                else
+                    thk[c, jj] = T(0.138) - T(1.01) * (bwv / T(1000.0)) +
+                                 T(3.233) * (bwv / T(1000.0))^2
+                end
+            end
+        end
+    end
+end
+
+"""
+    compute_soil_snow_tk!(thk, bw, mask, landunit, itype, lun_itype, nlev_improad, dz,
+                          nbedrock, snl, t_soisno, h2osoi_liq, h2osoi_ice, excess_ice,
+                          watsat, tkmg, tkdry, frac_sno, nlevsno, nlevgrnd, nlevsoi,
+                          snow_thermal_cond_method)
+
+Soil + snow per-layer thermal conductivity over all active (column, level) pairs.
+Resolves the `snow_thermal_cond_method` String to an integer code on the host (kernels
+cannot compare Strings), then launches the backend-agnostic kernel.
+"""
+function compute_soil_snow_tk!(thk, bw, mask, landunit, itype, lun_itype, nlev_improad,
+        dz, nbedrock, snl, t_soisno, h2osoi_liq, h2osoi_ice, excess_ice,
+        watsat, tkmg, tkdry, frac_sno, nlevsno::Int, nlevgrnd::Int, nlevsoi::Int,
+        snow_thermal_cond_method::AbstractString)
+    snow_code = snow_thermal_cond_method == "Jordan1991" ? 1 :
+                snow_thermal_cond_method == "Sturm1997"  ? 2 :
+                error("Unknown snow_thermal_cond_method: $(snow_thermal_cond_method)")
+    _launch!(_soil_snow_tk_kernel!, thk, bw, mask, landunit, itype, lun_itype, nlev_improad,
+             dz, nbedrock, snl, t_soisno, h2osoi_liq, h2osoi_ice, excess_ice,
+             watsat, tkmg, tkdry, frac_sno, nlevsno, nlevgrnd, nlevsoi, snow_code;
+             ndrange = (size(thk, 1), nlevsno + nlevgrnd))
+end
+
+# Urban per-layer thermal conductivity from urban params (thread per (c, j), j in 1:nlevurb).
+@kernel function _urban_tk_kernel!(thk, @Const(mask), @Const(itype), @Const(landunit),
+        @Const(tk_wall), @Const(tk_roof), @Const(tk_improad), @Const(nlev_improad), joff::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        l = landunit[c]; jj = j + joff; it = itype[c]
+        if it == ICOL_SUNWALL || it == ICOL_SHADEWALL
+            thk[c, jj] = tk_wall[l, j]
+        elseif it == ICOL_ROOF
+            thk[c, jj] = tk_roof[l, j]
+        elseif it == ICOL_ROAD_IMPERV && j <= nlev_improad[l]
+            thk[c, jj] = tk_improad[l, j]
+        end
+    end
+end
+compute_urban_tk!(thk, mask, itype, landunit, tk_wall, tk_roof, tk_improad, nlev_improad,
+                  joff::Int, nlevurb::Int) =
+    _launch!(_urban_tk_kernel!, thk, mask, itype, landunit, tk_wall, tk_roof, tk_improad,
+             nlev_improad, joff; ndrange = (size(thk, 1), nlevurb))
+
+# Surface-water (h2osfc) thermal conductivity (thread per column).
+@kernel function _tk_h2osfc_kernel!(tk_h2osfc, @Const(mask), @Const(h2osfc), @Const(z),
+                                    @Const(thk), joff::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(tk_h2osfc)
+        zh2osfc = T(1.0e-3) * (T(0.5) * h2osfc[c])
+        z1 = z[c, 1 + joff]; tk1 = thk[c, 1 + joff]
+        tk_h2osfc[c] = T(TKWAT) * tk1 * (z1 + zh2osfc) / (T(TKWAT) * z1 + tk1 * zh2osfc)
+    end
+end
+compute_tk_h2osfc!(tk_h2osfc, mask, h2osfc, z, thk, joff::Int) =
+    _launch!(_tk_h2osfc_kernel!, tk_h2osfc, mask, h2osfc, z, thk, joff; ndrange = length(tk_h2osfc))
+
+# Soil heat capacity, de Vries 1963 (thread per (c, j), j in 1:nlevgrnd).
+@kernel function _soil_cv_kernel!(cv, @Const(mask), @Const(landunit), @Const(itype),
+        @Const(lun_itype), @Const(nlev_improad), @Const(csol), @Const(watsat),
+        @Const(dz), @Const(h2osoi_ice), @Const(h2osoi_liq), @Const(excess_ice),
+        @Const(nbedrock), nlevsno::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(cv); jj = j + nlevsno; l = landunit[c]; it = itype[c]; lit = lun_itype[l]
+        is_special = (lit == ISTWET || lit == ISTICE || it == ICOL_SUNWALL ||
+                      it == ICOL_SHADEWALL || it == ICOL_ROOF || it == ICOL_ROAD_IMPERV)
+        if (!is_special) || (it == ICOL_ROAD_IMPERV && j > nlev_improad[l])
+            cv[c, jj] = csol[c, j] * (one(T) - watsat[c, j]) * dz[c, jj] +
+                (h2osoi_ice[c, jj] * T(CPICE) + h2osoi_liq[c, jj] * T(CPLIQ)) +
+                excess_ice[c, j] * T(CPICE)
+            if j > nbedrock[c]
+                cv[c, jj] = T(CSOL_BEDROCK) * dz[c, jj]
+            end
+        elseif lit == ISTWET
+            cv[c, jj] = h2osoi_ice[c, jj] * T(CPICE) + h2osoi_liq[c, jj] * T(CPLIQ)
+            if j > nbedrock[c]
+                cv[c, jj] = T(CSOL_BEDROCK) * dz[c, jj]
+            end
+        elseif lit == ISTICE
+            cv[c, jj] = h2osoi_ice[c, jj] * T(CPICE) + h2osoi_liq[c, jj] * T(CPLIQ)
+        end
+    end
+end
+compute_soil_cv!(cv, mask, landunit, itype, lun_itype, nlev_improad, csol, watsat, dz,
+                 h2osoi_ice, h2osoi_liq, excess_ice, nbedrock, nlevsno::Int, nlevgrnd::Int) =
+    _launch!(_soil_cv_kernel!, cv, mask, landunit, itype, lun_itype, nlev_improad, csol,
+             watsat, dz, h2osoi_ice, h2osoi_liq, excess_ice, nbedrock, nlevsno;
+             ndrange = (size(cv, 1), nlevgrnd))
+
+# Urban heat capacity (thread per (c, j), j in 1:nlevurb).
+@kernel function _urban_cv_kernel!(cv, @Const(mask), @Const(itype), @Const(landunit),
+        @Const(cv_wall), @Const(cv_roof), @Const(cv_improad), @Const(nlev_improad),
+        @Const(dz), joff::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        l = landunit[c]; jj = j + joff; it = itype[c]
+        if it == ICOL_SUNWALL || it == ICOL_SHADEWALL
+            cv[c, jj] = cv_wall[l, j] * dz[c, jj]
+        elseif it == ICOL_ROOF
+            cv[c, jj] = cv_roof[l, j] * dz[c, jj]
+        elseif it == ICOL_ROAD_IMPERV && j <= nlev_improad[l]
+            cv[c, jj] = cv_improad[l, j] * dz[c, jj]
+        end
+    end
+end
+compute_urban_cv!(cv, mask, itype, landunit, cv_wall, cv_roof, cv_improad, nlev_improad,
+                  dz, joff::Int, nlevurb::Int) =
+    _launch!(_urban_cv_kernel!, cv, mask, itype, landunit, cv_wall, cv_roof, cv_improad,
+             nlev_improad, dz, joff; ndrange = (size(cv, 1), nlevurb))
+
+# Add unresolved (no-layer) snow heat capacity to the top soil layer (thread per column).
+@kernel function _unresolved_snow_cv_kernel!(cv, @Const(mask), @Const(h2osno_no_layers), joff::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(cv)
+        if h2osno_no_layers[c] > zero(T)
+            cv[c, 1 + joff] += T(CPICE) * h2osno_no_layers[c]
+        end
+    end
+end
+add_unresolved_snow_cv!(cv, mask, h2osno_no_layers, joff::Int) =
+    _launch!(_unresolved_snow_cv_kernel!, cv, mask, h2osno_no_layers, joff; ndrange = size(cv, 1))
+
+# Snow-layer heat capacity (thread per (c, jj), jj in 1:nlevsno → j = jj - nlevsno).
+@kernel function _snow_cv_kernel!(cv, @Const(mask), @Const(snl), @Const(frac_sno),
+        @Const(h2osoi_liq), @Const(h2osoi_ice), nlevsno::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(cv); j = jj - nlevsno
+        if snl[c] + 1 < 1 && j >= snl[c] + 1
+            if frac_sno[c] > zero(T)
+                cv[c, jj] = smooth_max(T(THIN_SFCLAYER),
+                    (T(CPLIQ) * h2osoi_liq[c, jj] + T(CPICE) * h2osoi_ice[c, jj]) / frac_sno[c])
+            else
+                cv[c, jj] = T(THIN_SFCLAYER)
+            end
+        end
+    end
+end
+compute_snow_cv!(cv, mask, snl, frac_sno, h2osoi_liq, h2osoi_ice, nlevsno::Int) =
+    _launch!(_snow_cv_kernel!, cv, mask, snl, frac_sno, h2osoi_liq, h2osoi_ice, nlevsno;
+             ndrange = (size(cv, 1), nlevsno))
+
 function soil_therm_prop!(col::ColumnData, lun::LandunitData,
                           urbanparams::UrbanParamsData, temperature::TemperatureData,
                           waterstatebulk::WaterStateBulkData,
@@ -504,175 +723,41 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
     watsat = soilstate.watsat_col
     tksatu = soilstate.tksatu_col
 
-    # Thermal conductivity of soil (Farouki 1981)
-    for j in (-nlevsno + 1):nlevgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
+    # Soil + snow thermal conductivity, Farouki 1981 (kernelized; thread per (c, jj)).
+    compute_soil_snow_tk!(thk, bw, mask_nolakec, col.landunit, col.itype, lun.itype,
+                          urbanparams.nlev_improad, col.dz, col.nbedrock, col.snl,
+                          t_soisno, h2osoi_liq, h2osoi_ice, excess_ice,
+                          watsat, tkmg, tkdry, frac_sno, nlevsno, nlevgrnd, nlevsoi,
+                          varctl.snow_thermal_cond_method)
 
-            if j >= 1
-                l = col.landunit[c]
-                nlev_improad_l = urbanparams.nlev_improad[l]
-
-                if (lun.itype[l] != ISTWET && lun.itype[l] != ISTICE &&
-                    col.itype[c] != ICOL_SUNWALL && col.itype[c] != ICOL_SHADEWALL &&
-                    col.itype[c] != ICOL_ROOF && col.itype[c] != ICOL_ROAD_IMPERV) ||
-                   (col.itype[c] == ICOL_ROAD_IMPERV && j > nlev_improad_l)
-
-                    satw = (h2osoi_liq[c, jj] / DENH2O + h2osoi_ice[c, jj] / DENICE +
-                            excess_ice[c, j] / DENICE) / (col.dz[c, jj] * watsat[c, j])
-                    satw = smooth_min(1.0, satw)
-                    if satw > 1.0e-7
-                        if t_soisno[c, jj] >= TFRZ
-                            dke = smooth_max(0.0, log10(satw) + 1.0)
-                        else
-                            dke = satw
-                        end
-                        fl_denom = h2osoi_liq[c, jj] / (DENH2O * col.dz[c, jj]) +
-                                   h2osoi_ice[c, jj] / (DENICE * col.dz[c, jj]) +
-                                   excess_ice[c, j] / (DENICE * col.dz[c, jj])
-                        fl = (h2osoi_liq[c, jj] / (DENH2O * col.dz[c, jj])) / fl_denom
-                        dksat = tkmg[c, j] * TKWAT^(fl * watsat[c, j]) * TKICE^((1.0 - fl) * watsat[c, j])
-                        thk[c, jj] = dke * dksat + (1.0 - dke) * tkdry[c, j]
-                    else
-                        thk[c, jj] = tkdry[c, j]
-                    end
-                    if j > col.nbedrock[c]
-                        thk[c, jj] = THK_BEDROCK
-                    end
-                elseif lun.itype[l] == ISTICE
-                    thk[c, jj] = TKWAT
-                    if t_soisno[c, jj] < TFRZ
-                        thk[c, jj] = TKICE
-                    end
-                elseif lun.itype[l] == ISTWET
-                    if j > nlevsoi
-                        thk[c, jj] = THK_BEDROCK
-                    else
-                        thk[c, jj] = TKWAT
-                        if t_soisno[c, jj] < TFRZ
-                            thk[c, jj] = TKICE
-                        end
-                    end
-                end
-            end
-
-            # Thermal conductivity of snow
-            if col.snl[c] + 1 < 1 && j >= col.snl[c] + 1 && j <= 0
-                denom = smooth_max(frac_sno[c], 1.0e-6) * smooth_max(col.dz[c, jj], 1.0e-6)
-                bw[c, jj] = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / denom
-                if varctl.snow_thermal_cond_method == "Jordan1991"
-                    thk[c, jj] = TKAIR + (7.75e-5 * bw[c, jj] + 1.105e-6 * bw[c, jj]^2) * (TKICE - TKAIR)
-                elseif varctl.snow_thermal_cond_method == "Sturm1997"
-                    if bw[c, jj] <= 156
-                        thk[c, jj] = 0.023 + 0.234 * (bw[c, jj] / 1000)
-                    else
-                        thk[c, jj] = 0.138 - 1.01 * (bw[c, jj] / 1000) +
-                                     3.233 * (bw[c, jj] / 1000)^2
-                    end
-                else
-                    error("Unknown snow_thermal_cond_method: $(varctl.snow_thermal_cond_method)")
-                end
-            end
-        end
-    end
-
-    # Urban columns
-    for j in 1:nlevurb
-        for c in bounds_col
-            mask_urbanc[c] || continue
-            l = col.landunit[c]
-            jj = j + joff
-            if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL
-                thk[c, jj] = urbanparams.tk_wall[l, j]
-            elseif col.itype[c] == ICOL_ROOF
-                thk[c, jj] = urbanparams.tk_roof[l, j]
-            elseif col.itype[c] == ICOL_ROAD_IMPERV && j <= urbanparams.nlev_improad[l]
-                thk[c, jj] = urbanparams.tk_improad[l, j]
-            end
-        end
-    end
+    # Urban per-layer thermal conductivity (kernelized).
+    compute_urban_tk!(thk, mask_urbanc, col.itype, col.landunit, urbanparams.tk_wall,
+                      urbanparams.tk_roof, urbanparams.tk_improad, urbanparams.nlev_improad,
+                      joff, nlevurb)
 
     # Thermal conductivity at layer interface (kernelized; one thread per (c, jj)).
     compute_soil_tk_interface!(tk_out, mask_nolakec, col.itype, col.snl, col.z, col.zi,
                                thk, nlevsno, nlevurb, nlevgrnd, nlevsno + nlevmaxurbgrnd)
 
-    # Thermal conductivity of h2osfc
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        zh2osfc = 1.0e-3 * (0.5 * h2osfc[c])
-        tk_h2osfc_out[c] = TKWAT * thk[c, 1 + joff] * (col.z[c, 1 + joff] + zh2osfc) /
-            (TKWAT * col.z[c, 1 + joff] + thk[c, 1 + joff] * zh2osfc)
-    end
+    # Surface-water thermal conductivity (kernelized).
+    compute_tk_h2osfc!(tk_h2osfc_out, mask_nolakec, h2osfc, col.z, thk, joff)
 
-    # Soil heat capacity (de Vries 1963)
-    for j in 1:nlevgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            jj = j + joff
-            nlev_improad_l = urbanparams.nlev_improad[l]
+    # Soil heat capacity, de Vries 1963 (kernelized).
+    compute_soil_cv!(cv_out, mask_nolakec, col.landunit, col.itype, lun.itype,
+                     urbanparams.nlev_improad, csol, watsat, col.dz, h2osoi_ice,
+                     h2osoi_liq, excess_ice, col.nbedrock, nlevsno, nlevgrnd)
 
-            if (lun.itype[l] != ISTWET && lun.itype[l] != ISTICE &&
-                col.itype[c] != ICOL_SUNWALL && col.itype[c] != ICOL_SHADEWALL &&
-                col.itype[c] != ICOL_ROOF && col.itype[c] != ICOL_ROAD_IMPERV) ||
-               (col.itype[c] == ICOL_ROAD_IMPERV && j > nlev_improad_l)
-                cv_out[c, jj] = csol[c, j] * (1.0 - watsat[c, j]) * col.dz[c, jj] +
-                    (h2osoi_ice[c, jj] * CPICE + h2osoi_liq[c, jj] * CPLIQ) +
-                    excess_ice[c, j] * CPICE
-                if j > col.nbedrock[c]
-                    cv_out[c, jj] = CSOL_BEDROCK * col.dz[c, jj]
-                end
-            elseif lun.itype[l] == ISTWET
-                cv_out[c, jj] = h2osoi_ice[c, jj] * CPICE + h2osoi_liq[c, jj] * CPLIQ
-                if j > col.nbedrock[c]
-                    cv_out[c, jj] = CSOL_BEDROCK * col.dz[c, jj]
-                end
-            elseif lun.itype[l] == ISTICE
-                cv_out[c, jj] = h2osoi_ice[c, jj] * CPICE + h2osoi_liq[c, jj] * CPLIQ
-            end
-        end
-    end
+    # Urban heat capacity (kernelized).
+    compute_urban_cv!(cv_out, mask_urbanc, col.itype, col.landunit, urbanparams.cv_wall,
+                      urbanparams.cv_roof, urbanparams.cv_improad, urbanparams.nlev_improad,
+                      col.dz, joff, nlevurb)
 
-    # Urban heat capacity
-    for j in 1:nlevurb
-        for c in bounds_col
-            mask_urbanc[c] || continue
-            l = col.landunit[c]
-            jj = j + joff
-            if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL
-                cv_out[c, jj] = urbanparams.cv_wall[l, j] * col.dz[c, jj]
-            elseif col.itype[c] == ICOL_ROOF
-                cv_out[c, jj] = urbanparams.cv_roof[l, j] * col.dz[c, jj]
-            elseif col.itype[c] == ICOL_ROAD_IMPERV && j <= urbanparams.nlev_improad[l]
-                cv_out[c, jj] = urbanparams.cv_improad[l, j] * col.dz[c, jj]
-            end
-        end
-    end
+    # Unresolved (no-layer) snow heat capacity on the top soil layer (kernelized;
+    # runs after the soil heat capacity, which it adds to).
+    add_unresolved_snow_cv!(cv_out, mask_nolakec, h2osno_no_layers, joff)
 
-    # Unresolved snow on top layer
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        if h2osno_no_layers[c] > 0.0
-            cv_out[c, 1 + joff] += CPICE * h2osno_no_layers[c]
-        end
-    end
-
-    # Snow heat capacity
-    for j in (-nlevsno + 1):0
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
-            if col.snl[c] + 1 < 1 && j >= col.snl[c] + 1
-                if frac_sno[c] > 0.0
-                    cv_out[c, jj] = smooth_max(THIN_SFCLAYER,
-                        (CPLIQ * h2osoi_liq[c, jj] + CPICE * h2osoi_ice[c, jj]) / frac_sno[c])
-                else
-                    cv_out[c, jj] = THIN_SFCLAYER
-                end
-            end
-        end
-    end
+    # Snow-layer heat capacity (kernelized).
+    compute_snow_cv!(cv_out, mask_nolakec, col.snl, frac_sno, h2osoi_liq, h2osoi_ice, nlevsno)
 
     return nothing
 end

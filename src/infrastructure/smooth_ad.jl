@@ -72,11 +72,13 @@ smooth_min(a::Int, b::Float64; k::Float64=50.0) = smooth_min(Float64(a), b; k=k)
 
 function smooth_min(a::T, b::S; k::Real=50.0) where {T<:Real, S<:Real}
     R = promote_type(T, S)
-    ak = -k * a
-    bk = -k * b
+    _use_smooth(R) || return min(a, b)   # exact for non-AD (Float32/Float64); GPU-safe
+    kk = R(k)                            # sharpness at working precision (no Float64 pin)
+    ak = -kk * a
+    bk = -kk * b
     # Numerically stable: shift by max to avoid overflow
     m = max(ak, bk)
-    return -R(m + log(exp(ak - m) + exp(bk - m))) / k
+    return -(m + log(exp(ak - m) + exp(bk - m))) / kk
 end
 
 # --------------------------------------------------------------------------
@@ -100,10 +102,12 @@ smooth_max(a::Int, b::Float64; k::Float64=50.0) = smooth_max(Float64(a), b; k=k)
 
 function smooth_max(a::T, b::S; k::Real=50.0) where {T<:Real, S<:Real}
     R = promote_type(T, S)
-    ak = k * a
-    bk = k * b
+    _use_smooth(R) || return max(a, b)   # exact for non-AD (Float32/Float64); GPU-safe
+    kk = R(k)                            # sharpness at working precision (no Float64 pin)
+    ak = kk * a
+    bk = kk * b
     m = max(ak, bk)
-    return R(m + log(exp(ak - m) + exp(bk - m))) / k
+    return (m + log(exp(ak - m) + exp(bk - m))) / kk
 end
 
 # --------------------------------------------------------------------------
