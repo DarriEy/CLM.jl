@@ -1648,6 +1648,290 @@ end
 # =========================================================================
 # phase_change_beta! — Phase change within snow and soil layers
 # =========================================================================
+# Device-view structs grouping the phase-change arrays by role so the kernel takes a few
+# struct args instead of ~30 loose ones (same Adapt pattern as the gnet kernel). Int/Bool
+# arrays (imelt, masks, snl, landunit/itype indices) stay loose. PcbTmp holds the per-call
+# scratch the scalar version allocated locally (hm/xm/.../tinc), passed in so each column
+# thread owns its row; allocated with `similar` so it lands on the same backend as the state.
+Base.@kwdef struct PcbIn{M,V}    # read-only float inputs (M = per-layer matrix, V = per-column vector)
+    dz::M; fact::M; bsw::M; sucsat::M; watsat::M
+    dhsdT::V; frac_sno_eff::V; frac_h2osfc::V
+end
+Base.@kwdef struct PcbLyr{V}     # read-write per-(column, layer) float arrays
+    t_soisno::V; h2osoi_ice::V; h2osoi_liq::V; excess_ice::V; exice_subs::V
+    qflx_snomelt_lyr::V; qflx_snofrz_lyr::V
+end
+Base.@kwdef struct PcbCol{V}     # read-write per-column float arrays
+    xmf::V; qflx_snomelt::V; qflx_snofrz::V; qflx_snow_drain::V
+    h2osno_no_layers::V; snow_depth::V; snomelt_accum::V
+    eflx_snomelt::V; eflx_snomelt_r::V; eflx_snomelt_u::V
+end
+Base.@kwdef struct PcbTmp{V}     # per-call scratch (was local arrays in the scalar version)
+    hm::V; xm::V; xm2::V; wice0::V; wliq0::V; wexice0::V; wmass0::V; supercool::V; tinc::V
+end
+Adapt.@adapt_structure PcbIn
+Adapt.@adapt_structure PcbLyr
+Adapt.@adapt_structure PcbCol
+Adapt.@adapt_structure PcbTmp
+
+# One thread per column: the four original (j-outer, c-inner) loops run as four sequential
+# j-loops inside the per-column thread — a loop interchange of independent column iterations,
+# byte-identical to the scalar version (no column reads another column). The per-column
+# accumulators (xmf, qflx_snomelt/snofrz, snomelt_accum) sum over j in the same ascending
+# order, preserving the floating-point result. Constants and the dtime scalar are at the
+# working element type. supercool is indexed [c, j]; everything else [c, jj], jj = j + nlevsno.
+@kernel function _phase_change_beta_kernel!(lyr::PcbLyr, colv::PcbCol, pin::PcbIn,
+        tmp::PcbTmp, imelt, @Const(mask), @Const(urbpoi), @Const(snl), @Const(landunit),
+        @Const(itype), @Const(lun_itype), dtime, nlevsno::Int, nlevgrnd::Int,
+        nlevurb::Int, nlevmaxurbgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(lyr.t_soisno)
+        joff = nlevsno
+        tfrz = T(TFRZ); hfus = T(HFUS); grav = T(GRAV); denice = T(DENICE); thou = T(1000.0)
+        l = landunit[c]
+        it = itype[c]
+        wallroof = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF)
+
+        # Initialization (per-column scalars)
+        colv.xmf[c] = zero(T)
+        colv.qflx_snomelt[c] = zero(T)
+        colv.qflx_snofrz[c] = zero(T)
+        colv.qflx_snow_drain[c] = zero(T)
+
+        # Initialize layer variables
+        for j in (-nlevsno + 1):nlevmaxurbgrnd
+            jj = j + joff
+            if j >= snl[c] + 1
+                imelt[c, jj] = 0
+                tmp.hm[c, jj] = zero(T)
+                tmp.xm[c, jj] = zero(T)
+                tmp.xm2[c, jj] = zero(T)
+                tmp.wice0[c, jj] = lyr.h2osoi_ice[c, jj]
+                tmp.wliq0[c, jj] = lyr.h2osoi_liq[c, jj]
+                tmp.wexice0[c, jj] = j >= 1 ? lyr.excess_ice[c, j] : zero(T)
+                tmp.wmass0[c, jj] = lyr.h2osoi_ice[c, jj] + lyr.h2osoi_liq[c, jj] + tmp.wexice0[c, jj]
+                if j >= 1
+                    lyr.exice_subs[c, j] = zero(T)
+                end
+            end
+            if j <= 0
+                lyr.qflx_snomelt_lyr[c, jj] = zero(T)
+                lyr.qflx_snofrz_lyr[c, jj] = zero(T)
+            end
+        end
+
+        # Snow layers: melting/freezing identification
+        for j in (-nlevsno + 1):0
+            jj = j + joff
+            if j >= snl[c] + 1
+                if lyr.h2osoi_ice[c, jj] > zero(T) && lyr.t_soisno[c, jj] > tfrz
+                    imelt[c, jj] = 1
+                    tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                    lyr.t_soisno[c, jj] = tfrz
+                end
+                if lyr.h2osoi_liq[c, jj] > zero(T) && lyr.t_soisno[c, jj] < tfrz
+                    imelt[c, jj] = 2
+                    tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                    lyr.t_soisno[c, jj] = tfrz
+                end
+            end
+        end
+
+        # Soil layers: melting/freezing identification
+        for j in 1:nlevmaxurbgrnd
+            jj = j + joff
+            tmp.supercool[c, j] = zero(T)
+            active = (!wallroof && j <= nlevgrnd) || (wallroof && j <= nlevurb)
+            if active
+                if lyr.h2osoi_ice[c, jj] > zero(T) && lyr.t_soisno[c, jj] > tfrz
+                    imelt[c, jj] = 1
+                    tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                    lyr.t_soisno[c, jj] = tfrz
+                end
+
+                if lyr.excess_ice[c, j] > zero(T) && lyr.t_soisno[c, jj] > tfrz
+                    imelt[c, jj] = 1
+                    tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                    lyr.t_soisno[c, jj] = tfrz
+                end
+
+                tmp.supercool[c, j] = zero(T)
+                if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP || it == ICOL_ROAD_PERV
+                    if lyr.t_soisno[c, jj] < tfrz
+                        smp = hfus * (tfrz - lyr.t_soisno[c, jj]) / (grav * lyr.t_soisno[c, jj]) * thou
+                        tmp.supercool[c, j] = pin.watsat[c, j] * (smp / pin.sucsat[c, j])^(-one(T) / pin.bsw[c, j])
+                        tmp.supercool[c, j] *= pin.dz[c, jj] * thou
+                    end
+                end
+
+                if lyr.h2osoi_liq[c, jj] > tmp.supercool[c, j] && lyr.t_soisno[c, jj] < tfrz
+                    imelt[c, jj] = 2
+                    tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                    lyr.t_soisno[c, jj] = tfrz
+                end
+
+                if colv.h2osno_no_layers[c] > zero(T) && j == 1
+                    if lyr.t_soisno[c, jj] > tfrz
+                        imelt[c, jj] = 1
+                        tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                        lyr.t_soisno[c, jj] = tfrz
+                    end
+                end
+            end
+        end
+
+        # Energy surplus/loss and rate of phase change
+        for j in (-nlevsno + 1):nlevmaxurbgrnd
+            jj = j + joff
+            active = (!wallroof && j <= nlevgrnd) || (wallroof && j <= nlevurb)
+            if active && j >= snl[c] + 1
+                if imelt[c, jj] > 0
+                    if j == snl[c] + 1
+                        if j > 0
+                            tmp.hm[c, jj] = pin.dhsdT[c] * tmp.tinc[c, jj] - tmp.tinc[c, jj] / pin.fact[c, jj]
+                        else
+                            tmp.hm[c, jj] = pin.frac_sno_eff[c] * (pin.dhsdT[c] * tmp.tinc[c, jj] - tmp.tinc[c, jj] / pin.fact[c, jj])
+                        end
+                        if j == 1 && pin.frac_h2osfc[c] != zero(T)
+                            tmp.hm[c, jj] -= pin.frac_h2osfc[c] * pin.dhsdT[c] * tmp.tinc[c, jj]
+                        end
+                    elseif j == 1
+                        tmp.hm[c, jj] = (one(T) - pin.frac_sno_eff[c] - pin.frac_h2osfc[c]) *
+                            pin.dhsdT[c] * tmp.tinc[c, jj] - tmp.tinc[c, jj] / pin.fact[c, jj]
+                    else
+                        if j < 1
+                            tmp.hm[c, jj] = -pin.frac_sno_eff[c] * tmp.tinc[c, jj] / pin.fact[c, jj]
+                        else
+                            tmp.hm[c, jj] = -tmp.tinc[c, jj] / pin.fact[c, jj]
+                        end
+                    end
+                end
+
+                if imelt[c, jj] == 1 && tmp.hm[c, jj] < zero(T)
+                    tmp.hm[c, jj] = zero(T)
+                    imelt[c, jj] = 0
+                end
+                if imelt[c, jj] == 2 && tmp.hm[c, jj] > zero(T)
+                    tmp.hm[c, jj] = zero(T)
+                    imelt[c, jj] = 0
+                end
+
+                if imelt[c, jj] > 0 && abs(tmp.hm[c, jj]) > zero(T)
+                    tmp.xm[c, jj] = tmp.hm[c, jj] * dtime / hfus
+
+                    # Unresolved snow melting
+                    if j == 1
+                        if colv.h2osno_no_layers[c] > zero(T) && tmp.xm[c, jj] > zero(T)
+                            temp1 = colv.h2osno_no_layers[c]
+                            colv.h2osno_no_layers[c] = smooth_max(zero(T), temp1 - tmp.xm[c, jj])
+                            propor = colv.h2osno_no_layers[c] / temp1
+                            colv.snow_depth[c] = propor * colv.snow_depth[c]
+                            heatr = tmp.hm[c, jj] - hfus * (temp1 - colv.h2osno_no_layers[c]) / dtime
+                            if heatr > zero(T)
+                                tmp.xm[c, jj] = heatr * dtime / hfus
+                                tmp.hm[c, jj] = heatr
+                            else
+                                tmp.xm[c, jj] = zero(T)
+                                tmp.hm[c, jj] = zero(T)
+                            end
+                            colv.qflx_snomelt[c] = smooth_max(zero(T), temp1 - colv.h2osno_no_layers[c]) / dtime
+                            colv.xmf[c] = hfus * colv.qflx_snomelt[c]
+                            colv.qflx_snow_drain[c] = colv.qflx_snomelt[c]
+                        end
+                    end
+
+                    heatr = zero(T)
+                    if tmp.xm[c, jj] > zero(T)
+                        lyr.h2osoi_ice[c, jj] = smooth_max(zero(T), tmp.wice0[c, jj] - tmp.xm[c, jj])
+                        heatr = tmp.hm[c, jj] - hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
+                        tmp.xm2[c, jj] = tmp.xm[c, jj] - lyr.h2osoi_ice[c, jj]
+                        if lyr.h2osoi_ice[c, jj] == zero(T)
+                            if tmp.wexice0[c, jj] >= zero(T) && tmp.xm2[c, jj] > zero(T) && j >= 2
+                                lyr.excess_ice[c, j] = smooth_max(zero(T), tmp.wexice0[c, jj] - tmp.xm2[c, jj])
+                                heatr = tmp.hm[c, jj] - hfus * (tmp.wexice0[c, jj] - lyr.excess_ice[c, j] +
+                                        tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
+                            end
+                        end
+                    elseif tmp.xm[c, jj] < zero(T)
+                        if j <= 0
+                            lyr.h2osoi_ice[c, jj] = smooth_min(tmp.wmass0[c, jj], tmp.wice0[c, jj] - tmp.xm[c, jj])
+                        else
+                            if tmp.wmass0[c, jj] - tmp.wexice0[c, jj] < tmp.supercool[c, j]
+                                lyr.h2osoi_ice[c, jj] = zero(T)
+                            else
+                                lyr.h2osoi_ice[c, jj] = smooth_min(tmp.wmass0[c, jj] - tmp.wexice0[c, jj] - tmp.supercool[c, j],
+                                    tmp.wice0[c, jj] - tmp.xm[c, jj])
+                            end
+                        end
+                        heatr = tmp.hm[c, jj] - hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
+                    end
+
+                    ei_val = j >= 1 ? lyr.excess_ice[c, j] : zero(T)
+                    lyr.h2osoi_liq[c, jj] = smooth_max(zero(T), tmp.wmass0[c, jj] - lyr.h2osoi_ice[c, jj] - ei_val)
+
+                    if abs(heatr) > zero(T)
+                        if j == snl[c] + 1
+                            if j == 1
+                                lyr.t_soisno[c, jj] += pin.fact[c, jj] * heatr /
+                                    (one(T) - (one(T) - pin.frac_h2osfc[c]) * pin.fact[c, jj] * pin.dhsdT[c])
+                            else
+                                if pin.frac_sno_eff[c] > zero(T)
+                                    lyr.t_soisno[c, jj] += (pin.fact[c, jj] / pin.frac_sno_eff[c]) * heatr /
+                                        (one(T) - pin.fact[c, jj] * pin.dhsdT[c])
+                                end
+                            end
+                        elseif j == 1
+                            lyr.t_soisno[c, jj] += pin.fact[c, jj] * heatr /
+                                (one(T) - (one(T) - pin.frac_sno_eff[c] - pin.frac_h2osfc[c]) * pin.fact[c, jj] * pin.dhsdT[c])
+                        else
+                            if j > 0
+                                lyr.t_soisno[c, jj] += pin.fact[c, jj] * heatr
+                            else
+                                if pin.frac_sno_eff[c] > zero(T)
+                                    lyr.t_soisno[c, jj] += (pin.fact[c, jj] / pin.frac_sno_eff[c]) * heatr
+                                end
+                            end
+                        end
+
+                        if j <= 0
+                            if lyr.h2osoi_liq[c, jj] * lyr.h2osoi_ice[c, jj] > zero(T)
+                                lyr.t_soisno[c, jj] = tfrz
+                            end
+                        end
+                    end
+
+                    if j >= 1
+                        colv.xmf[c] += hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime +
+                            hfus * (tmp.wexice0[c, jj] - (j >= 1 ? lyr.excess_ice[c, j] : zero(T))) / dtime
+                        lyr.exice_subs[c, j] = smooth_max(zero(T), (tmp.wexice0[c, jj] - lyr.excess_ice[c, j]) / denice)
+                    else
+                        colv.xmf[c] += hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
+                    end
+
+                    if imelt[c, jj] == 1 && j < 1
+                        lyr.qflx_snomelt_lyr[c, jj] = smooth_max(zero(T), tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
+                        colv.qflx_snomelt[c] += lyr.qflx_snomelt_lyr[c, jj]
+                        colv.snomelt_accum[c] += lyr.qflx_snomelt_lyr[c, jj] * dtime * T(1.0e-3)
+                    end
+                    if imelt[c, jj] == 2 && j < 1
+                        lyr.qflx_snofrz_lyr[c, jj] = smooth_max(zero(T), lyr.h2osoi_ice[c, jj] - tmp.wice0[c, jj]) / dtime
+                        colv.qflx_snofrz[c] += lyr.qflx_snofrz_lyr[c, jj]
+                    end
+                end
+            end
+        end
+
+        # History output
+        colv.eflx_snomelt[c] = colv.qflx_snomelt[c] * hfus
+        if urbpoi[l]
+            colv.eflx_snomelt_u[c] = colv.eflx_snomelt[c]
+        elseif lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+            colv.eflx_snomelt_r[c] = colv.eflx_snomelt[c]
+        end
+    end
+end
+
 function phase_change_beta!(col::ColumnData, lun::LandunitData,
                             temperature::TemperatureData, energyflux::EnergyFluxData,
                             soilstate::SoilStateData,
@@ -1661,317 +1945,47 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
     nlevgrnd = varpar.nlevgrnd
     nlevurb = varpar.nlevurb
     nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
-    joff = nlevsno
 
-    snl = col.snl
     t_soisno = temperature.t_soisno_col
-    xmf = temperature.xmf_col
-    fact = temperature.fact_col
-    imelt = temperature.imelt_col
-
-    frac_sno_eff = waterdiagbulk.frac_sno_eff_col
-    frac_h2osfc = waterdiagbulk.frac_h2osfc_col
-    snow_depth = waterdiagbulk.snow_depth_col
-    h2osno_no_layers = waterstatebulk.ws.h2osno_no_layers_col
-    h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col
-    h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col
-    excess_ice = waterstatebulk.ws.excess_ice_col
-
-    bsw = soilstate.bsw_col
-    sucsat = soilstate.sucsat_col
-    watsat = soilstate.watsat_col
-
-    qflx_snomelt = waterfluxbulk.wf.qflx_snomelt_col
-    qflx_snofrz = waterfluxbulk.wf.qflx_snofrz_col
-    qflx_snow_drain = waterfluxbulk.wf.qflx_snow_drain_col
-    qflx_snofrz_lyr = waterfluxbulk.wf.qflx_snofrz_lyr_col
-    qflx_snomelt_lyr = waterfluxbulk.wf.qflx_snomelt_lyr_col
-
-    eflx_snomelt = energyflux.eflx_snomelt_col
-    eflx_snomelt_r = energyflux.eflx_snomelt_r_col
-    eflx_snomelt_u = energyflux.eflx_snomelt_u_col
-    exice_subs = waterdiagbulk.exice_subs_col
-
     nc = length(bounds_col)
+    FT = eltype(t_soisno)
+    nc == 0 && return nothing
 
-    # Initialization
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        xmf[c] = 0.0
-        qflx_snomelt[c] = 0.0
-        qflx_snofrz[c] = 0.0
-        qflx_snow_drain[c] = 0.0
-    end
+    lyr = PcbLyr(; t_soisno = t_soisno,
+        h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col,
+        h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col,
+        excess_ice = waterstatebulk.ws.excess_ice_col,
+        exice_subs = waterdiagbulk.exice_subs_col,
+        qflx_snomelt_lyr = waterfluxbulk.wf.qflx_snomelt_lyr_col,
+        qflx_snofrz_lyr = waterfluxbulk.wf.qflx_snofrz_lyr_col)
+    colv = PcbCol(; xmf = temperature.xmf_col,
+        qflx_snomelt = waterfluxbulk.wf.qflx_snomelt_col,
+        qflx_snofrz = waterfluxbulk.wf.qflx_snofrz_col,
+        qflx_snow_drain = waterfluxbulk.wf.qflx_snow_drain_col,
+        h2osno_no_layers = waterstatebulk.ws.h2osno_no_layers_col,
+        snow_depth = waterdiagbulk.snow_depth_col,
+        snomelt_accum = waterdiagbulk.snomelt_accum_col,
+        eflx_snomelt = energyflux.eflx_snomelt_col,
+        eflx_snomelt_r = energyflux.eflx_snomelt_r_col,
+        eflx_snomelt_u = energyflux.eflx_snomelt_u_col)
+    pin = PcbIn(; dz = col.dz, fact = temperature.fact_col, dhsdT = dhsdT,
+        frac_sno_eff = waterdiagbulk.frac_sno_eff_col,
+        frac_h2osfc = waterdiagbulk.frac_h2osfc_col,
+        bsw = soilstate.bsw_col, sucsat = soilstate.sucsat_col, watsat = soilstate.watsat_col)
 
-    # Local arrays
-    FT = eltype(temperature.t_soisno_col)
-    hm = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    xm = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    xm2 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    wice0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    wliq0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    wexice0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    wmass0 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    supercool = zeros(FT, nc, nlevmaxurbgrnd)
-    tinc = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
+    # Per-call scratch on the same backend as the state (was local zeros() in the loop).
+    nlev = nlevsno + nlevmaxurbgrnd
+    mk(d2) = fill!(similar(t_soisno, FT, nc, d2), zero(FT))
+    tmp = PcbTmp(; hm = mk(nlev), xm = mk(nlev), xm2 = mk(nlev), wice0 = mk(nlev),
+        wliq0 = mk(nlev), wexice0 = mk(nlev), wmass0 = mk(nlev),
+        supercool = mk(nlevmaxurbgrnd), tinc = mk(nlev))
 
-    # Initialize layer variables
-    for j in (-nlevsno + 1):nlevmaxurbgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
-            if j >= snl[c] + 1
-                imelt[c, jj] = 0
-                hm[c, jj] = 0.0
-                xm[c, jj] = 0.0
-                xm2[c, jj] = 0.0
-                wice0[c, jj] = h2osoi_ice[c, jj]
-                wliq0[c, jj] = h2osoi_liq[c, jj]
-                wexice0[c, jj] = j >= 1 ? excess_ice[c, j] : 0.0
-                wmass0[c, jj] = h2osoi_ice[c, jj] + h2osoi_liq[c, jj] + wexice0[c, jj]
-                if j >= 1
-                    exice_subs[c, j] = 0.0
-                end
-            end
-            if j <= 0
-                qflx_snomelt_lyr[c, jj] = 0.0
-                qflx_snofrz_lyr[c, jj] = 0.0
-            end
-        end
-    end
-
-    # Snow layers: melting/freezing identification
-    for j in (-nlevsno + 1):0
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
-            if j >= snl[c] + 1
-                if h2osoi_ice[c, jj] > 0.0 && t_soisno[c, jj] > TFRZ
-                    imelt[c, jj] = 1
-                    tinc[c, jj] = TFRZ - t_soisno[c, jj]
-                    t_soisno[c, jj] = TFRZ
-                end
-                if h2osoi_liq[c, jj] > 0.0 && t_soisno[c, jj] < TFRZ
-                    imelt[c, jj] = 2
-                    tinc[c, jj] = TFRZ - t_soisno[c, jj]
-                    t_soisno[c, jj] = TFRZ
-                end
-            end
-        end
-    end
-
-    # Soil layers: melting/freezing identification
-    for j in 1:nlevmaxurbgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            jj = j + joff
-            supercool[c, j] = 0.0
-
-            active = (col.itype[c] != ICOL_SUNWALL && col.itype[c] != ICOL_SHADEWALL &&
-                      col.itype[c] != ICOL_ROOF && j <= nlevgrnd) ||
-                     ((col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL ||
-                       col.itype[c] == ICOL_ROOF) && j <= nlevurb)
-
-            if active
-                if h2osoi_ice[c, jj] > 0.0 && t_soisno[c, jj] > TFRZ
-                    imelt[c, jj] = 1
-                    tinc[c, jj] = TFRZ - t_soisno[c, jj]
-                    t_soisno[c, jj] = TFRZ
-                end
-
-                if excess_ice[c, j] > 0.0 && t_soisno[c, jj] > TFRZ
-                    imelt[c, jj] = 1
-                    tinc[c, jj] = TFRZ - t_soisno[c, jj]
-                    t_soisno[c, jj] = TFRZ
-                end
-
-                supercool[c, j] = 0.0
-                if lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP || col.itype[c] == ICOL_ROAD_PERV
-                    if t_soisno[c, jj] < TFRZ
-                        smp = HFUS * (TFRZ - t_soisno[c, jj]) / (GRAV * t_soisno[c, jj]) * 1000.0
-                        supercool[c, j] = watsat[c, j] * (smp / sucsat[c, j])^(-1.0 / bsw[c, j])
-                        supercool[c, j] *= col.dz[c, jj] * 1000.0
-                    end
-                end
-
-                if h2osoi_liq[c, jj] > supercool[c, j] && t_soisno[c, jj] < TFRZ
-                    imelt[c, jj] = 2
-                    tinc[c, jj] = TFRZ - t_soisno[c, jj]
-                    t_soisno[c, jj] = TFRZ
-                end
-
-                if h2osno_no_layers[c] > 0.0 && j == 1
-                    if t_soisno[c, jj] > TFRZ
-                        imelt[c, jj] = 1
-                        tinc[c, jj] = TFRZ - t_soisno[c, jj]
-                        t_soisno[c, jj] = TFRZ
-                    end
-                end
-            end
-        end
-    end
-
-    # Energy surplus/loss and rate of phase change
-    for j in (-nlevsno + 1):nlevmaxurbgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
-
-            active = (col.itype[c] != ICOL_SUNWALL && col.itype[c] != ICOL_SHADEWALL &&
-                      col.itype[c] != ICOL_ROOF && j <= nlevgrnd) ||
-                     ((col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL ||
-                       col.itype[c] == ICOL_ROOF) && j <= nlevurb)
-
-            if active && j >= snl[c] + 1
-                if imelt[c, jj] > 0
-                    if j == snl[c] + 1
-                        if j > 0
-                            hm[c, jj] = dhsdT[c] * tinc[c, jj] - tinc[c, jj] / fact[c, jj]
-                        else
-                            hm[c, jj] = frac_sno_eff[c] * (dhsdT[c] * tinc[c, jj] - tinc[c, jj] / fact[c, jj])
-                        end
-                        if j == 1 && frac_h2osfc[c] != 0.0
-                            hm[c, jj] -= frac_h2osfc[c] * dhsdT[c] * tinc[c, jj]
-                        end
-                    elseif j == 1
-                        hm[c, jj] = (1.0 - frac_sno_eff[c] - frac_h2osfc[c]) *
-                            dhsdT[c] * tinc[c, jj] - tinc[c, jj] / fact[c, jj]
-                    else
-                        if j < 1
-                            hm[c, jj] = -frac_sno_eff[c] * tinc[c, jj] / fact[c, jj]
-                        else
-                            hm[c, jj] = -tinc[c, jj] / fact[c, jj]
-                        end
-                    end
-                end
-
-                if imelt[c, jj] == 1 && hm[c, jj] < 0.0
-                    hm[c, jj] = 0.0
-                    imelt[c, jj] = 0
-                end
-                if imelt[c, jj] == 2 && hm[c, jj] > 0.0
-                    hm[c, jj] = 0.0
-                    imelt[c, jj] = 0
-                end
-
-                if imelt[c, jj] > 0 && abs(hm[c, jj]) > 0.0
-                    xm[c, jj] = hm[c, jj] * dtime / HFUS
-
-                    # Unresolved snow melting
-                    if j == 1
-                        if h2osno_no_layers[c] > 0.0 && xm[c, jj] > 0.0
-                            temp1 = h2osno_no_layers[c]
-                            h2osno_no_layers[c] = smooth_max(0.0, temp1 - xm[c, jj])
-                            propor = h2osno_no_layers[c] / temp1
-                            snow_depth[c] = propor * snow_depth[c]
-                            heatr = hm[c, jj] - HFUS * (temp1 - h2osno_no_layers[c]) / dtime
-                            if heatr > 0.0
-                                xm[c, jj] = heatr * dtime / HFUS
-                                hm[c, jj] = heatr
-                            else
-                                xm[c, jj] = 0.0
-                                hm[c, jj] = 0.0
-                            end
-                            qflx_snomelt[c] = smooth_max(0.0, temp1 - h2osno_no_layers[c]) / dtime
-                            xmf[c] = HFUS * qflx_snomelt[c]
-                            qflx_snow_drain[c] = qflx_snomelt[c]
-                        end
-                    end
-
-                    heatr = 0.0
-                    if xm[c, jj] > 0.0
-                        h2osoi_ice[c, jj] = smooth_max(0.0, wice0[c, jj] - xm[c, jj])
-                        heatr = hm[c, jj] - HFUS * (wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
-                        xm2[c, jj] = xm[c, jj] - h2osoi_ice[c, jj]
-                        if h2osoi_ice[c, jj] == 0.0
-                            if wexice0[c, jj] >= 0.0 && xm2[c, jj] > 0.0 && j >= 2
-                                excess_ice[c, j] = smooth_max(0.0, wexice0[c, jj] - xm2[c, jj])
-                                heatr = hm[c, jj] - HFUS * (wexice0[c, jj] - excess_ice[c, j] +
-                                        wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
-                            end
-                        end
-                    elseif xm[c, jj] < 0.0
-                        if j <= 0
-                            h2osoi_ice[c, jj] = smooth_min(wmass0[c, jj], wice0[c, jj] - xm[c, jj])
-                        else
-                            if wmass0[c, jj] - wexice0[c, jj] < supercool[c, j]
-                                h2osoi_ice[c, jj] = 0.0
-                            else
-                                h2osoi_ice[c, jj] = smooth_min(wmass0[c, jj] - wexice0[c, jj] - supercool[c, j],
-                                    wice0[c, jj] - xm[c, jj])
-                            end
-                        end
-                        heatr = hm[c, jj] - HFUS * (wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
-                    end
-
-                    ei_val = j >= 1 ? excess_ice[c, j] : 0.0
-                    h2osoi_liq[c, jj] = smooth_max(0.0, wmass0[c, jj] - h2osoi_ice[c, jj] - ei_val)
-
-                    if abs(heatr) > 0.0
-                        if j == snl[c] + 1
-                            if j == 1
-                                t_soisno[c, jj] += fact[c, jj] * heatr /
-                                    (1.0 - (1.0 - frac_h2osfc[c]) * fact[c, jj] * dhsdT[c])
-                            else
-                                if frac_sno_eff[c] > 0.0
-                                    t_soisno[c, jj] += (fact[c, jj] / frac_sno_eff[c]) * heatr /
-                                        (1.0 - fact[c, jj] * dhsdT[c])
-                                end
-                            end
-                        elseif j == 1
-                            t_soisno[c, jj] += fact[c, jj] * heatr /
-                                (1.0 - (1.0 - frac_sno_eff[c] - frac_h2osfc[c]) * fact[c, jj] * dhsdT[c])
-                        else
-                            if j > 0
-                                t_soisno[c, jj] += fact[c, jj] * heatr
-                            else
-                                if frac_sno_eff[c] > 0.0
-                                    t_soisno[c, jj] += (fact[c, jj] / frac_sno_eff[c]) * heatr
-                                end
-                            end
-                        end
-
-                        if j <= 0
-                            if h2osoi_liq[c, jj] * h2osoi_ice[c, jj] > 0.0
-                                t_soisno[c, jj] = TFRZ
-                            end
-                        end
-                    end
-
-                    if j >= 1
-                        xmf[c] += HFUS * (wice0[c, jj] - h2osoi_ice[c, jj]) / dtime +
-                            HFUS * (wexice0[c, jj] - (j >= 1 ? excess_ice[c, j] : 0.0)) / dtime
-                        exice_subs[c, j] = smooth_max(0.0, (wexice0[c, jj] - excess_ice[c, j]) / DENICE)
-                    else
-                        xmf[c] += HFUS * (wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
-                    end
-
-                    if imelt[c, jj] == 1 && j < 1
-                        qflx_snomelt_lyr[c, jj] = smooth_max(0.0, wice0[c, jj] - h2osoi_ice[c, jj]) / dtime
-                        qflx_snomelt[c] += qflx_snomelt_lyr[c, jj]
-                        waterdiagbulk.snomelt_accum_col[c] += qflx_snomelt_lyr[c, jj] * dtime * 1.0e-3
-                    end
-                    if imelt[c, jj] == 2 && j < 1
-                        qflx_snofrz_lyr[c, jj] = smooth_max(0.0, h2osoi_ice[c, jj] - wice0[c, jj]) / dtime
-                        qflx_snofrz[c] += qflx_snofrz_lyr[c, jj]
-                    end
-                end
-            end
-        end
-    end
-
-    # History output
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        eflx_snomelt[c] = qflx_snomelt[c] * HFUS
-        l = col.landunit[c]
-        if lun.urbpoi[l]
-            eflx_snomelt_u[c] = eflx_snomelt[c]
-        elseif lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP
-            eflx_snomelt_r[c] = eflx_snomelt[c]
-        end
-    end
+    dt = convert(FT, dtime)
+    backend = _kernel_backend(t_soisno)
+    _phase_change_beta_kernel!(backend)(lyr, colv, pin, tmp, temperature.imelt_col,
+        mask_nolakec, lun.urbpoi, col.snl, col.landunit, col.itype, lun.itype,
+        dt, nlevsno, nlevgrnd, nlevurb, nlevmaxurbgrnd; ndrange = nc)
+    KernelAbstractions.synchronize(backend)
 
     return nothing
 end
