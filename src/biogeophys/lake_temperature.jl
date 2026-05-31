@@ -26,6 +26,117 @@ const PUDZ         = 0.2       # min total ice thickness for puddling (m)
 # soil_therm_prop_lake! — Set thermal conductivities and heat capacities
 #                         of snow/soil layers for lake columns
 # =========================================================================
+# ==========================================================================
+# GPU kernels for soil_therm_prop_lake! and calculate_total_h2osno!. 2D (column,
+# layer) kernels indexed by jj = j + nlevsno (so jj in 1:(nlevsno+nlevgrnd) maps
+# Fortran j in -nlevsno+1 : nlevgrnd); per-column kernels for the snow reduction.
+# Physical constants are eltype-converted (T(...)/one/zero) so no Float64 reaches
+# a Float32-only backend (byte-identical on Float64). Lake soil is saturated
+# (satw=1), so the Farouki branch is simpler than soil_temperature's.
+# ==========================================================================
+
+# Soil/snow layer thermal conductivity thk (Farouki 1981 soil; Jordan 1991 snow).
+@kernel function _lake_soil_tk_kernel!(thk, @Const(mask), @Const(snl), @Const(dz),
+        @Const(t_soisno), @Const(h2osoi_liq), @Const(h2osoi_ice),
+        @Const(watsat), @Const(tksatu), @Const(tkmg), @Const(tkdry),
+        nlevsno::Int, nlevsoi::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(thk)
+        j = jj - nlevsno
+        if j >= 1 && j <= nlevsoi
+            satw = one(T)
+            fl = h2osoi_liq[c, jj] / (h2osoi_ice[c, jj] + h2osoi_liq[c, jj])
+            if t_soisno[c, jj] >= T(TFRZ)
+                dke = smooth_max(zero(T), log10(satw) + one(T))
+                dksat = tksatu[c, j]
+            else
+                dke = satw
+                dksat = tkmg[c, j] * T(0.249)^(fl * watsat[c, j]) * T(2.29)^watsat[c, j]
+            end
+            thk[c, jj] = dke * dksat + (one(T) - dke) * tkdry[c, j]
+            satw = (h2osoi_liq[c, jj] / T(DENH2O) + h2osoi_ice[c, jj] / T(DENICE)) /
+                   (dz[c, jj] * watsat[c, j])
+            if satw > one(T)
+                xicevol = (satw - one(T)) * watsat[c, j]
+                thk[c, jj] = (thk[c, jj] + xicevol * T(TKICE)) / (one(T) + xicevol) / (one(T) + xicevol)
+            end
+        elseif j > nlevsoi
+            thk[c, jj] = T(THK_BEDROCK)
+        end
+        if snl[c] + 1 < 1 && j >= snl[c] + 1 && j <= 0
+            bw = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / dz[c, jj]
+            thk[c, jj] = T(TKAIR) + (T(7.75e-5) * bw + T(1.105e-6) * bw * bw) * (T(TKICE) - T(TKAIR))
+        end
+    end
+end
+
+# Thermal conductivity at the layer interface + top-soil-layer value.
+@kernel function _lake_tk_interface_kernel!(tk, tktopsoillay, @Const(thk), @Const(mask),
+        @Const(snl), @Const(z), @Const(zi), nlevsno::Int, nlevgrnd::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(tk)
+        j = jj - nlevsno
+        if j >= snl[c] + 1 && j <= nlevgrnd - 1 && j != 0
+            jj1 = jj + 1
+            tk[c, jj] = thk[c, jj] * thk[c, jj1] * (z[c, jj1] - z[c, jj]) /
+                (thk[c, jj] * (z[c, jj1] - zi[c, jj + 1]) + thk[c, jj1] * (zi[c, jj + 1] - z[c, jj]))
+        elseif j == 0 && j >= snl[c] + 1
+            tk[c, jj] = thk[c, jj]
+        elseif j == nlevgrnd
+            tk[c, jj] = zero(T)
+        end
+        if j == 1
+            tktopsoillay[c] = thk[c, jj]
+        end
+    end
+end
+
+# Soil heat capacity (de Vries 1963). Indexed by soil layer j in 1:nlevgrnd.
+@kernel function _lake_soil_cv_kernel!(cv, @Const(mask), @Const(csol), @Const(watsat),
+        @Const(dz), @Const(h2osoi_ice), @Const(h2osoi_liq), nlevsno::Int, nlevsoi::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(cv)
+        jj = j + nlevsno
+        cv[c, jj] = csol[c, j] * (one(T) - watsat[c, j]) * dz[c, jj] +
+            (h2osoi_ice[c, jj] * T(CPICE) + h2osoi_liq[c, jj] * T(CPLIQ))
+        if j > nlevsoi
+            cv[c, jj] = T(CSOL_BEDROCK) * dz[c, jj]
+        end
+    end
+end
+
+# Snow layer heat capacity. Indexed by jj in 1:nlevsno (j = jj - nlevsno ≤ 0).
+@kernel function _lake_snow_cv_kernel!(cv, @Const(mask), @Const(snl),
+        @Const(h2osoi_liq), @Const(h2osoi_ice), nlevsno::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(cv)
+        j = jj - nlevsno
+        if snl[c] + 1 < 1 && j >= snl[c] + 1
+            cv[c, jj] = T(CPLIQ) * h2osoi_liq[c, jj] + T(CPICE) * h2osoi_ice[c, jj]
+        end
+    end
+end
+
+# Total column snow water = no-layer reservoir + resolved snow ice+liquid.
+@kernel function _lake_total_h2osno_kernel!(h2osno_total, @Const(mask), @Const(snl),
+        @Const(h2osno_no_layers), @Const(h2osoi_ice), @Const(h2osoi_liq), nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        tot = h2osno_no_layers[c]
+        for jj in 1:nlevsno
+            j = jj - nlevsno
+            if j >= snl[c] + 1
+                tot += h2osoi_ice[c, jj] + h2osoi_liq[c, jj]
+            end
+        end
+        h2osno_total[c] = tot
+    end
+end
+
 """
     soil_therm_prop_lake!(col, soilstate, waterstatebulk, temperature,
                           tk, cv, tktopsoillay,
@@ -39,13 +150,12 @@ Ported from `SoilThermProp_Lake` in `LakeTemperatureMod.F90`.
 function soil_therm_prop_lake!(col::ColumnData, soilstate::SoilStateData,
                                waterstatebulk::WaterStateBulkData,
                                temperature::TemperatureData,
-                               tk::Matrix{<:Real}, cv::Matrix{<:Real},
-                               tktopsoillay::Vector{<:Real},
-                               mask_lakec::BitVector, bounds_col::UnitRange{Int})
+                               tk::AbstractMatrix{<:Real}, cv::AbstractMatrix{<:Real},
+                               tktopsoillay::AbstractVector{<:Real},
+                               mask_lakec::AbstractVector{Bool}, bounds_col::UnitRange{Int})
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevsoi = varpar.nlevsoi
-    joff = nlevsno  # offset: Fortran j → Julia j+joff
 
     snl = col.snl
     dz = col.dz
@@ -62,94 +172,22 @@ function soil_therm_prop_lake!(col::ColumnData, soilstate::SoilStateData,
     h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col
     t_soisno = temperature.t_soisno_col
 
-    # Working array for layer thermal conductivity
-    nc = length(bounds_col)
+    # Working array for layer thermal conductivity (device-resident via similar()).
+    nc = length(mask_lakec)
     nlevtot = nlevsno + varpar.nlevmaxurbgrnd
     FT = eltype(t_soisno)
-    thk = zeros(FT, nc, nlevtot)
+    thk = fill!(similar(tk, FT, nc, nlevtot), zero(FT))
 
-    # Thermal conductivity of soil from Farouki (1981)
-    for j in (-nlevsno + 1):nlevgrnd
-        jj = j + joff  # Julia index
-        for c in bounds_col
-            mask_lakec[c] || continue
-
-            # Only examine levels from 1->nlevsoi
-            if j >= 1 && j <= nlevsoi
-                # Soil should be saturated in LakeHydrology
-                satw = 1.0
-                fl = h2osoi_liq[c, jj] / (h2osoi_ice[c, jj] + h2osoi_liq[c, jj])
-                if t_soisno[c, jj] >= TFRZ  # Unfrozen soil
-                    dke = smooth_max(0.0, log10(satw) + 1.0)
-                    dksat = tksatu[c, j]
-                else  # Frozen soil
-                    dke = satw
-                    dksat = tkmg[c, j] * 0.249^(fl * watsat[c, j]) * 2.29^watsat[c, j]
-                end
-                thk[c, jj] = dke * dksat + (1.0 - dke) * tkdry[c, j]
-                satw = (h2osoi_liq[c, jj] / DENH2O + h2osoi_ice[c, jj] / DENICE) / (dz[c, jj] * watsat[c, j])
-                if satw > 1.0
-                    xicevol = (satw - 1.0) * watsat[c, j]
-                    thk[c, jj] = (thk[c, jj] + xicevol * TKICE) / (1.0 + xicevol) / (1.0 + xicevol)
-                end
-            elseif j > nlevsoi
-                thk[c, jj] = THK_BEDROCK
-            end
-
-            # Thermal conductivity of snow, which from Jordan (1991) pp. 18
-            if snl[c] + 1 < 1 && j >= snl[c] + 1 && j <= 0
-                bw = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / dz[c, jj]
-                thk[c, jj] = TKAIR + (7.75e-5 * bw + 1.105e-6 * bw * bw) * (TKICE - TKAIR)
-            end
-        end
-    end
-
-    # Thermal conductivity at the layer interface
-    for j in (-nlevsno + 1):nlevgrnd
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if j >= snl[c] + 1 && j <= nlevgrnd - 1 && j != 0
-                jj1 = (j + 1) + joff
-                # zi(c,j) in Fortran → zi[c, j + nlevsno + 1] = zi[c, jj + 1] in Julia
-                tk[c, jj] = thk[c, jj] * thk[c, jj1] * (z[c, jj1] - z[c, jj]) /
-                    (thk[c, jj] * (z[c, jj1] - zi[c, jj + 1]) + thk[c, jj1] * (zi[c, jj + 1] - z[c, jj]))
-            elseif j == 0 && j >= snl[c] + 1
-                tk[c, jj] = thk[c, jj]
-            elseif j == nlevgrnd
-                tk[c, jj] = 0.0
-            end
-            # For top soil layer
-            if j == 1
-                tktopsoillay[c] = thk[c, jj]
-            end
-        end
-    end
-
-    # Soil heat capacity, from de Vries (1963)
-    for j in 1:nlevgrnd
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            cv[c, jj] = csol[c, j] * (1 - watsat[c, j]) * dz[c, jj] +
-                (h2osoi_ice[c, jj] * CPICE + h2osoi_liq[c, jj] * CPLIQ)
-            if j > nlevsoi
-                cv[c, jj] = CSOL_BEDROCK * dz[c, jj]
-            end
-        end
-    end
-
-    # Snow heat capacity
-    for j in (-nlevsno + 1):0
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if snl[c] + 1 < 1 && j >= snl[c] + 1
-                cv[c, jj] = CPLIQ * h2osoi_liq[c, jj] + CPICE * h2osoi_ice[c, jj]
-            end
-        end
-    end
-
+    # Per-(column, layer) kernels; each launch is ordered (interface tk reads thk).
+    _launch!(_lake_soil_tk_kernel!, thk, mask_lakec, snl, dz, t_soisno, h2osoi_liq,
+             h2osoi_ice, watsat, tksatu, tkmg, tkdry, nlevsno, nlevsoi;
+             ndrange = (nc, nlevsno + nlevgrnd))
+    _launch!(_lake_tk_interface_kernel!, tk, tktopsoillay, thk, mask_lakec, snl, z, zi,
+             nlevsno, nlevgrnd; ndrange = (nc, nlevsno + nlevgrnd))
+    _launch!(_lake_soil_cv_kernel!, cv, mask_lakec, csol, watsat, dz, h2osoi_ice,
+             h2osoi_liq, nlevsno, nlevsoi; ndrange = (nc, nlevgrnd))
+    _launch!(_lake_snow_cv_kernel!, cv, mask_lakec, snl, h2osoi_liq, h2osoi_ice,
+             nlevsno; ndrange = (nc, nlevsno))
     return nothing
 end
 
@@ -1158,21 +1196,12 @@ end
 Calculate total snow water (h2osno_no_layers + snow layer ice + liq).
 Simplified version matching `CalculateTotalH2osno` for lake columns.
 """
-function calculate_total_h2osno!(ws::WaterStateData, snl::Vector{Int},
-                                 h2osno_total::Vector{<:Real},
-                                 mask::BitVector, bounds::UnitRange{Int})
+function calculate_total_h2osno!(ws::WaterStateData, snl::AbstractVector{<:Integer},
+                                 h2osno_total::AbstractVector{<:Real},
+                                 mask::AbstractVector{Bool}, bounds::UnitRange{Int})
     nlevsno = varpar.nlevsno
-    joff = nlevsno
-
-    for c in bounds
-        mask[c] || continue
-        h2osno_total[c] = ws.h2osno_no_layers_col[c]
-        for j in (-nlevsno + 1):0
-            jj = j + joff
-            if j >= snl[c] + 1
-                h2osno_total[c] += ws.h2osoi_ice_col[c, jj] + ws.h2osoi_liq_col[c, jj]
-            end
-        end
-    end
+    _launch!(_lake_total_h2osno_kernel!, h2osno_total, mask, snl,
+             ws.h2osno_no_layers_col, ws.h2osoi_ice_col, ws.h2osoi_liq_col, nlevsno;
+             ndrange = length(mask))
     return nothing
 end
