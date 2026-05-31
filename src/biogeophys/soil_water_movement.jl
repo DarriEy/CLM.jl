@@ -217,6 +217,134 @@ function soilwm_hk_smp!(hk, dhkdw, imped_arr, smp_arr, dsmpdw, smp_l, hk_l,
              smpmin, nlevsoi, ee; ndrange = (length(mask), nlevsoi))
 end
 
+# --------------------------------------------------------------------------
+# Locate the layer index jwt right above the water table, and the volumetric
+# water content vwc_zwt at the water-table depth (Zeng-Decker 2009). 1D per
+# column; masked in-kernel. Each column runs two short sequential search loops
+# (with break) — the per-column-kernel-with-internal-loops pattern — and writes
+# only its own jwt[c] (Int) and vwc_zwt[c]. Physical constants are
+# eltype-converted so no Float64 reaches a Float32-only backend.
+# --------------------------------------------------------------------------
+@kernel function _soilwm_jwt_vwczwt_kernel!(vwc_zwt, jwt, @Const(mask), @Const(zwt),
+        @Const(zi), @Const(watsat), @Const(vwc_liq), @Const(t_soisno),
+        @Const(sucsat), @Const(bsw), @Const(h2osoi_vol),
+        joff::Int, joff_zi::Int, nlevsoi::Int, nlevgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(vwc_zwt)
+        # layer right above the water table
+        jw = nlevsoi
+        for j in 1:nlevsoi
+            if zwt[c] <= zi[c, joff_zi + j]
+                jw = j - 1
+                break
+            end
+        end
+        jwt[c] = jw
+
+        # vwc at water-table depth
+        vwc_zwt[c] = watsat[c, nlevsoi]
+        if t_soisno[c, joff + jw + 1] < T(TFRZ)
+            v = vwc_liq[c, nlevsoi]
+            for j in nlevsoi:nlevgrnd
+                if zwt[c] <= zi[c, joff_zi + j]
+                    smp1 = T(HFUS) * (T(TFRZ) - t_soisno[c, joff + j]) /
+                           (T(GRAV) * t_soisno[c, joff + j]) * T(1000.0)
+                    smp1 = smooth_max(sucsat[c, nlevsoi], smp1)
+                    v = watsat[c, nlevsoi] *
+                        (smp1 / sucsat[c, nlevsoi])^(-one(T) / bsw[c, nlevsoi])
+                    v = smooth_min(v, T(0.5) * (watsat[c, nlevsoi] + h2osoi_vol[c, nlevsoi]))
+                    break
+                end
+            end
+            vwc_zwt[c] = v
+        end
+    end
+end
+
+"""
+    soilwm_jwt_vwczwt!(vwc_zwt, jwt, mask, zwt, zi, watsat, vwc_liq, t_soisno,
+        sucsat, bsw, h2osoi_vol, joff, joff_zi, nlevsoi, nlevgrnd)
+
+Water-table layer index jwt and water-table-depth water content vwc_zwt for each
+active column. Backend-agnostic 1D kernel; replaces an inline per-column loop in
+`soilwater_zengdecker2009!`.
+"""
+soilwm_jwt_vwczwt!(vwc_zwt, jwt, mask, zwt, zi, watsat, vwc_liq, t_soisno,
+        sucsat, bsw, h2osoi_vol, joff::Int, joff_zi::Int, nlevsoi::Int,
+        nlevgrnd::Int) =
+    _launch!(_soilwm_jwt_vwczwt_kernel!, vwc_zwt, jwt, mask, zwt, zi, watsat,
+             vwc_liq, t_soisno, sucsat, bsw, h2osoi_vol, joff, joff_zi,
+             nlevsoi, nlevgrnd; ndrange = length(mask))
+
+# --------------------------------------------------------------------------
+# Equilibrium water content / matric potential for the aquifer (11th) layer
+# when the water table is below the soil column (jwt == nlevsoi). 1D per column;
+# masked in-kernel; writes only its own [c, nlevsoi+1] entries.
+# --------------------------------------------------------------------------
+@kernel function _soilwm_voleq_zq_aqu_kernel!(vol_eq, zq, @Const(mask), @Const(jwt),
+        @Const(zwtmm), @Const(zimm_arr), @Const(watsat), @Const(sucsat),
+        @Const(bsw), @Const(smpmin), nlevsoi::Int)
+    c = @index(Global)
+    @inbounds if mask[c] && jwt[c] == nlevsoi
+        T = eltype(vol_eq)
+        j = nlevsoi
+        suc = sucsat[c, j]; ws = watsat[c, j]; b = bsw[c, j]
+        zwt = zwtmm[c]
+        zimm_j = zimm_arr[c, j+1]
+        onem1b = one(T) - one(T) / b
+        tempi  = one(T)
+        temp0  = ((suc + zwt - zimm_j) / suc)^onem1b
+        v = -suc * ws / onem1b / (zwt - zimm_j) * (tempi - temp0)
+        v = smooth_max(v, zero(T))
+        v = smooth_min(ws, v)
+        vol_eq[c, j+1] = v
+        zqv = -suc * (smooth_max(v / ws, T(0.01)))^(-b)
+        zq[c, j+1] = smooth_max(smpmin[c], zqv)
+    end
+end
+
+"""
+    soilwm_voleq_zq_aqu!(vol_eq, zq, mask, jwt, zwtmm, zimm_arr, watsat, sucsat,
+        bsw, smpmin, nlevsoi)
+
+Aquifer-layer equilibrium water content/matric potential for columns whose water
+table is below the soil column. Backend-agnostic 1D kernel.
+"""
+soilwm_voleq_zq_aqu!(vol_eq, zq, mask, jwt, zwtmm, zimm_arr, watsat, sucsat,
+        bsw, smpmin, nlevsoi::Int) =
+    _launch!(_soilwm_voleq_zq_aqu_kernel!, vol_eq, zq, mask, jwt, zwtmm,
+             zimm_arr, watsat, sucsat, bsw, smpmin, nlevsoi;
+             ndrange = length(mask))
+
+# --------------------------------------------------------------------------
+# Aquifer (11th) layer geometry: mid-depth zmm and thickness dzmm. 1D per
+# column; masked in-kernel; writes only its own [c, nlevsoi+1] entries.
+# --------------------------------------------------------------------------
+@kernel function _soilwm_aqu_zmm_kernel!(zmm, dzmm, @Const(mask), @Const(jwt),
+        @Const(zwt), nlevsoi::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(zmm)
+        zmm[c, nlevsoi+1] = T(0.5) * (T(1.0e3) * zwt[c] + zmm[c, nlevsoi])
+        if jwt[c] < nlevsoi
+            dzmm[c, nlevsoi+1] = dzmm[c, nlevsoi]
+        else
+            dzmm[c, nlevsoi+1] = T(1.0e3) * zwt[c] - zmm[c, nlevsoi]
+        end
+    end
+end
+
+"""
+    soilwm_aqu_zmm!(zmm, dzmm, mask, jwt, zwt, nlevsoi)
+
+Aquifer-layer mid-depth and thickness for each active column. Backend-agnostic
+1D kernel.
+"""
+soilwm_aqu_zmm!(zmm, dzmm, mask, jwt, zwt, nlevsoi::Int) =
+    _launch!(_soilwm_aqu_zmm_kernel!, zmm, dzmm, mask, jwt, zwt, nlevsoi;
+             ndrange = length(mask))
+
 """
     SoilWaterMovementConfig
 
@@ -1106,53 +1234,20 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
 
     soilwm_zwtmm!(zwtmm, zimm_arr, mask_hydrology, zwt)
 
-    # Compute jwt index — layer right above water table
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
-        jwt[c] = nlevsoi
-        for j in 1:nlevsoi
-            if zwt[c] <= zi[c, joff_zi + j]
-                jwt[c] = j - 1
-                break
-            end
-        end
-
-        # Compute vwc at water table depth
-        vwc_zwt[c] = watsat[c, nlevsoi]
-        if t_soisno[c, joff + jwt[c]+1] < TFRZ
-            vwc_zwt[c] = vwc_liq[c, nlevsoi]
-            for j in nlevsoi:nlevgrnd
-                if zwt[c] <= zi[c, joff_zi + j]
-                    smp1_val = HFUS * (TFRZ - t_soisno[c, joff + j]) / (GRAV * t_soisno[c, joff + j]) * 1000.0
-                    smp1_val = smooth_max(sucsat[c, nlevsoi], smp1_val)
-                    vwc_zwt[c] = watsat[c, nlevsoi] * (smp1_val / sucsat[c, nlevsoi])^(-1.0 / bsw[c, nlevsoi])
-                    vwc_zwt[c] = smooth_min(vwc_zwt[c], 0.5 * (watsat[c, nlevsoi] + h2osoi_vol[c, nlevsoi]))
-                    break
-                end
-            end
-        end
-    end
+    # Compute jwt index (layer above water table) and vwc at water-table depth
+    # (per-column kernel; each column runs the two short search loops internally).
+    soilwm_jwt_vwczwt!(vwc_zwt, jwt, mask_hydrology, zwt, zi, watsat, vwc_liq,
+        t_soisno, sucsat, bsw, h2osoi_vol, joff, joff_zi, nlevsoi, nlevgrnd)
 
     # Calculate equilibrium water content based on water table depth
     # (per-(column, soil layer) kernel; reads its own layer + interface depths).
     soilwm_voleq_zq!(vol_eq, zq, mask_hydrology, zwtmm, zimm_arr,
         watsat, sucsat, bsw, smpmin, nlevsoi)
 
-    # If water table is below soil column, calculate zq for the 11th layer
-    j = nlevsoi
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
-        if jwt[c] == nlevsoi
-            zimm_j = zimm_arr[c, j+1]  # Fortran zimm(c,j)
-            tempi = 1.0
-            temp0 = ((sucsat[c, j] + zwtmm[c] - zimm_j) / sucsat[c, j])^(1.0 - 1.0 / bsw[c, j])
-            vol_eq[c, j+1] = -sucsat[c, j] * watsat[c, j] / (1.0 - 1.0 / bsw[c, j]) / (zwtmm[c] - zimm_j) * (tempi - temp0)
-            vol_eq[c, j+1] = smooth_max(vol_eq[c, j+1], 0.0)
-            vol_eq[c, j+1] = smooth_min(watsat[c, j], vol_eq[c, j+1])
-            zq[c, j+1] = -sucsat[c, j] * (smooth_max(vol_eq[c, j+1] / watsat[c, j], 0.01))^(-bsw[c, j])
-            zq[c, j+1] = smooth_max(smpmin[c], zq[c, j+1])
-        end
-    end
+    # If water table is below soil column, calculate vol_eq/zq for the 11th
+    # (aquifer) layer (per-column kernel; only columns with jwt==nlevsoi write).
+    soilwm_voleq_zq_aqu!(vol_eq, zq, mask_hydrology, jwt, zwtmm, zimm_arr,
+        watsat, sucsat, bsw, smpmin, nlevsoi)
 
     # Hydraulic conductivity and soil matric potential
     # (per-(column, soil layer) kernel; interface value reads layer j and j+1).
@@ -1160,16 +1255,8 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
         mask_hydrology, vwc_liq, watsat, hksat, bsw, icefrac, sucsat, smpmin,
         nlevsoi, cfg.e_ice)
 
-    # Aquifer (11th) layer
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
-        zmm[c, nlevsoi+1] = 0.5 * (1.0e3 * zwt[c] + zmm[c, nlevsoi])
-        if jwt[c] < nlevsoi
-            dzmm[c, nlevsoi+1] = dzmm[c, nlevsoi]
-        else
-            dzmm[c, nlevsoi+1] = (1.0e3 * zwt[c] - zmm[c, nlevsoi])
-        end
-    end
+    # Aquifer (11th) layer geometry (per-column kernel).
+    soilwm_aqu_zmm!(zmm, dzmm, mask_hydrology, jwt, zwt, nlevsoi)
 
     # ---- Set up tridiagonal system ----
 
