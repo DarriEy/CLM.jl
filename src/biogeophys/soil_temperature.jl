@@ -1505,6 +1505,109 @@ end
 # =========================================================================
 # phase_change_h2osfc! — Phase change of surface water
 # =========================================================================
+# Surface-water phase change, one thread per column (no cross-column coupling: every
+# write is to column c's own cells, layer 0 = index joff). The init zeroing is folded in
+# (each thread zeros its outputs first). Constants (TFRZ/HFUS/CPLIQ/DENICE) and the dtime
+# scalar are at the working element type; smooth_min is the same GPU-safe form as the loop.
+@kernel function _phase_change_h2osfc_kernel!(t_h2osfc, t_soisno, h2osfc, h2osno_no_layers,
+        h2osoi_ice, snow_depth, int_snow, xmf_h2osfc, qflx_h2osfc_to_ice, eflx_h2osfc_to_snow,
+        @Const(mask), @Const(snl), @Const(fact), @Const(c_h2osfc), @Const(frac_sno),
+        @Const(frac_h2osfc), @Const(h2osoi_liq), @Const(dhsdT), dtime, nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_soisno)
+        joff = nlevsno
+        tfrz = T(TFRZ); hfus = T(HFUS); cpliq = T(CPLIQ); denice = T(DENICE)
+        xmf_h2osfc[c] = zero(T)
+        qflx_h2osfc_to_ice[c] = zero(T)
+        eflx_h2osfc_to_snow[c] = zero(T)
+        if frac_h2osfc[c] > zero(T) && t_h2osfc[c] <= tfrz
+            tinc = tfrz - t_h2osfc[c]
+            t_h2osfc[c] = tfrz
+
+            hm = frac_h2osfc[c] * (dhsdT[c] * tinc - tinc * c_h2osfc[c] / dtime)
+            xm = hm * dtime / hfus
+            temp1 = h2osfc[c] + xm
+
+            h2osno_total = h2osno_no_layers[c]
+            if snl[c] < 0
+                for j in (snl[c] + 1):0
+                    h2osno_total += h2osoi_ice[c, j + joff] + h2osoi_liq[c, j + joff]
+                end
+            end
+
+            z_avg = frac_sno[c] * snow_depth[c]
+            rho_avg = z_avg > zero(T) ? smooth_min(T(800.0), h2osno_total / z_avg) : T(200.0)
+
+            if temp1 >= zero(T)
+                int_snow[c] -= xm
+                if snl[c] == 0
+                    h2osno_no_layers[c] -= xm
+                else
+                    h2osoi_ice[c, joff] -= xm  # layer 0
+                end
+                h2osno_total -= xm
+                h2osfc[c] += xm
+                xmf_h2osfc[c] = hm
+                qflx_h2osfc_to_ice[c] = -xm / dtime
+
+                if frac_sno[c] > zero(T) && snl[c] < 0
+                    snow_depth[c] = h2osno_total / (rho_avg * frac_sno[c])
+                else
+                    snow_depth[c] = h2osno_total / denice
+                end
+
+                if snl[c] == 0
+                    t_soisno[c, joff] = t_h2osfc[c]
+                    eflx_h2osfc_to_snow[c] = zero(T)
+                else
+                    if snl[c] == -1
+                        c1 = frac_sno[c] * (dtime / fact[c, joff] - dhsdT[c] * dtime)
+                    else
+                        c1 = frac_sno[c] / fact[c, joff] * dtime
+                    end
+                    c2 = frac_h2osfc[c] != zero(T) ? (-cpliq * xm - frac_h2osfc[c] * dhsdT[c] * dtime) : zero(T)
+                    t_soisno[c, joff] = (c1 * t_soisno[c, joff] + c2 * t_h2osfc[c]) / (c1 + c2)
+                    eflx_h2osfc_to_snow[c] = (t_h2osfc[c] - t_soisno[c, joff]) * c2 / dtime
+                end
+            else
+                rho_avg = (h2osno_total * rho_avg + h2osfc[c] * denice) / (h2osno_total + h2osfc[c])
+                int_snow[c] += h2osfc[c]
+                if snl[c] == 0
+                    h2osno_no_layers[c] += h2osfc[c]
+                else
+                    h2osoi_ice[c, joff] += h2osfc[c]
+                end
+                h2osno_total += h2osfc[c]
+                qflx_h2osfc_to_ice[c] = h2osfc[c] / dtime
+                t_h2osfc[c] -= temp1 * hfus / (dtime * dhsdT[c] - c_h2osfc[c])
+                xmf_h2osfc[c] = hm - frac_h2osfc[c] * temp1 * hfus / dtime
+
+                if snl[c] == 0
+                    t_soisno[c, joff] = t_h2osfc[c]
+                elseif snl[c] == -1
+                    c1 = frac_sno[c] * (dtime / fact[c, joff] - dhsdT[c] * dtime)
+                    c2 = frac_h2osfc[c] != zero(T) ? frac_h2osfc[c] * (c_h2osfc[c] - dtime * dhsdT[c]) : zero(T)
+                    t_soisno[c, joff] = (c1 * t_soisno[c, joff] + c2 * t_h2osfc[c]) / (c1 + c2)
+                    t_h2osfc[c] = t_soisno[c, joff]
+                else
+                    c1 = frac_sno[c] / fact[c, joff] * dtime
+                    c2 = frac_h2osfc[c] != zero(T) ? frac_h2osfc[c] * (c_h2osfc[c] - dtime * dhsdT[c]) : zero(T)
+                    t_soisno[c, joff] = (c1 * t_soisno[c, joff] + c2 * t_h2osfc[c]) / (c1 + c2)
+                    t_h2osfc[c] = t_soisno[c, joff]
+                end
+
+                h2osfc[c] = zero(T)
+                if frac_sno[c] > zero(T) && snl[c] < 0
+                    snow_depth[c] = h2osno_total / (rho_avg * frac_sno[c])
+                else
+                    snow_depth[c] = h2osno_total / denice
+                end
+            end
+        end
+    end
+end
+
 function phase_change_h2osfc!(col::ColumnData, temperature::TemperatureData,
                               energyflux::EnergyFluxData,
                               waterstatebulk::WaterStateBulkData,
@@ -1514,9 +1617,7 @@ function phase_change_h2osfc!(col::ColumnData, temperature::TemperatureData,
                               dtime::Real, dhsdT::Vector{<:Real})
 
     nlevsno = varpar.nlevsno
-    joff = nlevsno
 
-    snl = col.snl
     t_soisno = temperature.t_soisno_col
     t_h2osfc = temperature.t_h2osfc_col
     fact = temperature.fact_col
@@ -1529,107 +1630,17 @@ function phase_change_h2osfc!(col::ColumnData, temperature::TemperatureData,
     h2osfc = waterstatebulk.ws.h2osfc_col
     h2osno_no_layers = waterstatebulk.ws.h2osno_no_layers_col
     h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col
+    h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col
     int_snow = waterstatebulk.int_snow_col
     qflx_h2osfc_to_ice = waterfluxbulk.wf.qflx_h2osfc_to_ice_col
     eflx_h2osfc_to_snow = energyflux.eflx_h2osfc_to_snow_col
 
-    # Initialize
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        xmf_h2osfc[c] = 0.0
-        qflx_h2osfc_to_ice[c] = 0.0
-        eflx_h2osfc_to_snow[c] = 0.0
-    end
-
-    # Freezing identification
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        if frac_h2osfc[c] > 0.0 && t_h2osfc[c] <= TFRZ
-            tinc = TFRZ - t_h2osfc[c]
-            t_h2osfc[c] = TFRZ
-
-            hm = frac_h2osfc[c] * (dhsdT[c] * tinc - tinc * c_h2osfc[c] / dtime)
-            xm = hm * dtime / HFUS
-            temp1 = h2osfc[c] + xm
-
-            # Compute h2osno_total
-            h2osno_total = h2osno_no_layers[c]
-            if snl[c] < 0
-                for j in (snl[c] + 1):0
-                    h2osno_total += h2osoi_ice[c, j + joff] + waterstatebulk.ws.h2osoi_liq_col[c, j + joff]
-                end
-            end
-
-            z_avg = frac_sno[c] * snow_depth[c]
-            rho_avg = z_avg > 0.0 ? smooth_min(800.0, h2osno_total / z_avg) : 200.0
-
-            if temp1 >= 0.0
-                int_snow[c] -= xm
-                if snl[c] == 0
-                    h2osno_no_layers[c] -= xm
-                else
-                    h2osoi_ice[c, joff] -= xm  # layer 0
-                end
-                h2osno_total -= xm
-                h2osfc[c] += xm
-                xmf_h2osfc[c] = hm
-                qflx_h2osfc_to_ice[c] = -xm / dtime
-
-                if frac_sno[c] > 0 && snl[c] < 0
-                    snow_depth[c] = h2osno_total / (rho_avg * frac_sno[c])
-                else
-                    snow_depth[c] = h2osno_total / DENICE
-                end
-
-                if snl[c] == 0
-                    t_soisno[c, joff] = t_h2osfc[c]
-                    eflx_h2osfc_to_snow[c] = 0.0
-                else
-                    if snl[c] == -1
-                        c1 = frac_sno[c] * (dtime / fact[c, joff] - dhsdT[c] * dtime)
-                    else
-                        c1 = frac_sno[c] / fact[c, joff] * dtime
-                    end
-                    c2 = frac_h2osfc[c] != 0.0 ? (-CPLIQ * xm - frac_h2osfc[c] * dhsdT[c] * dtime) : 0.0
-                    t_soisno[c, joff] = (c1 * t_soisno[c, joff] + c2 * t_h2osfc[c]) / (c1 + c2)
-                    eflx_h2osfc_to_snow[c] = (t_h2osfc[c] - t_soisno[c, joff]) * c2 / dtime
-                end
-            else
-                rho_avg = (h2osno_total * rho_avg + h2osfc[c] * DENICE) / (h2osno_total + h2osfc[c])
-                int_snow[c] += h2osfc[c]
-                if snl[c] == 0
-                    h2osno_no_layers[c] += h2osfc[c]
-                else
-                    h2osoi_ice[c, joff] += h2osfc[c]
-                end
-                h2osno_total += h2osfc[c]
-                qflx_h2osfc_to_ice[c] = h2osfc[c] / dtime
-                t_h2osfc[c] -= temp1 * HFUS / (dtime * dhsdT[c] - c_h2osfc[c])
-                xmf_h2osfc[c] = hm - frac_h2osfc[c] * temp1 * HFUS / dtime
-
-                if snl[c] == 0
-                    t_soisno[c, joff] = t_h2osfc[c]
-                elseif snl[c] == -1
-                    c1 = frac_sno[c] * (dtime / fact[c, joff] - dhsdT[c] * dtime)
-                    c2 = frac_h2osfc[c] != 0.0 ? frac_h2osfc[c] * (c_h2osfc[c] - dtime * dhsdT[c]) : 0.0
-                    t_soisno[c, joff] = (c1 * t_soisno[c, joff] + c2 * t_h2osfc[c]) / (c1 + c2)
-                    t_h2osfc[c] = t_soisno[c, joff]
-                else
-                    c1 = frac_sno[c] / fact[c, joff] * dtime
-                    c2 = frac_h2osfc[c] != 0.0 ? frac_h2osfc[c] * (c_h2osfc[c] - dtime * dhsdT[c]) : 0.0
-                    t_soisno[c, joff] = (c1 * t_soisno[c, joff] + c2 * t_h2osfc[c]) / (c1 + c2)
-                    t_h2osfc[c] = t_soisno[c, joff]
-                end
-
-                h2osfc[c] = 0.0
-                if frac_sno[c] > 0 && snl[c] < 0
-                    snow_depth[c] = h2osno_total / (rho_avg * frac_sno[c])
-                else
-                    snow_depth[c] = h2osno_total / DENICE
-                end
-            end
-        end
-    end
+    dt = convert(eltype(t_soisno), dtime)
+    # One thread per column (no cross-column coupling).
+    _launch!(_phase_change_h2osfc_kernel!, t_h2osfc, t_soisno, h2osfc, h2osno_no_layers,
+        h2osoi_ice, snow_depth, int_snow, xmf_h2osfc, qflx_h2osfc_to_ice, eflx_h2osfc_to_snow,
+        mask_nolakec, col.snl, fact, c_h2osfc, frac_sno, frac_h2osfc, h2osoi_liq, dhsdT,
+        dt, nlevsno)
 
     return nothing
 end
