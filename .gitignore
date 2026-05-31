@@ -16,6 +16,11 @@ scripts/*.pdf
 *.jl.mem
 LocalPreferences.toml
 
+# Resolved env: keep Project.toml only, so each Julia version (CI matrix down to
+# the 1.10 minimum) resolves its own compatible Manifest. A committed Manifest
+# resolved on a newer Julia (e.g. 1.12) breaks `buildpkg` on older legs.
+/Manifest.toml
+
 # Ralph loop state
 .ralph_last_output.log
 .ralph_state
