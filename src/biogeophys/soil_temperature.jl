@@ -786,6 +786,132 @@ function compute_ground_lwrad_emit!(lwrad_emit, dlwrad_emit, lwrad_emit_snow,
              ndrange = length(lwrad_emit))
 end
 
+# --------------------------------------------------------------------------
+# Device-view structs for the ground-heat-flux patch kernel. Each groups a set of
+# same-typed (float) arrays so a kernel touching ~49 fields takes a few struct args
+# instead of ~49 loose ones. Adapt-registered, so adapt(backend, s) moves the arrays
+# to the device and the struct passes into a KernelAbstractions kernel (its fields are
+# indexed inside). @kwdef gives name-based (mis-order-proof) construction.
+# --------------------------------------------------------------------------
+Base.@kwdef struct GnetPatchIn{V}      # per-patch float inputs (frac_veg_nosno is Int → loose arg)
+    sabg::V; sabg_soil::V; sabg_snow::V
+    dlrad::V; cgrnd::V
+    eflx_sh_grnd::V; eflx_sh_snow::V; eflx_sh_soil::V; eflx_sh_h2osfc::V
+    qflx_evap_soi::V; qflx_ev_snow::V; qflx_ev_soil::V; qflx_ev_h2osfc::V
+    eflx_lwrad_net::V; qflx_tran_veg::V; wtcol::V
+end
+Base.@kwdef struct GnetColIn{V}        # per-column float inputs
+    lwrad_emit::V; lwrad_emit_snow::V; lwrad_emit_soil::V; lwrad_emit_h2osfc::V
+    dlwrad_emit::V; emg::V; forc_lwrad::V; htvp::V; frac_sno_eff::V
+end
+Base.@kwdef struct GnetLunIn{V}        # per-landunit float inputs
+    eflx_wasteheat_lun::V; eflx_ventilation_lun::V; eflx_heat_from_ac_lun::V
+    eflx_traffic_lun::V; wtlunit_roof::V
+end
+Base.@kwdef struct GnetOut{V}          # per-patch float outputs
+    eflx_gnet::V; dgnetdT::V; sabg_chk::V
+    eflx_wasteheat::V; eflx_ventilation::V; eflx_heat_from_ac::V; eflx_traffic::V; eflx_anthro::V
+end
+Adapt.@adapt_structure GnetPatchIn
+Adapt.@adapt_structure GnetColIn
+Adapt.@adapt_structure GnetLunIn
+Adapt.@adapt_structure GnetOut
+
+# Per-patch ground net heat flux + atomic scatter of hs/dhsdT/hs_soil/hs_h2osfc into
+# columns. One thread per patch; c = column[p], l = landunit[p]. HVAP converted to the
+# working type. `simple_build`/`prog_build`: building-temperature config resolved on host.
+@kernel function _gnet_patch_kernel!(out::GnetOut, pin::GnetPatchIn, cin::GnetColIn,
+        lin::GnetLunIn, @Const(mask), @Const(column), @Const(landunit), @Const(itype),
+        @Const(urbpoi), @Const(frac_veg_nosno), hs, dhsdT, hs_soil, hs_h2osfc,
+        simple_build::Bool, prog_build::Bool)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(hs)
+        c = column[p]; l = landunit[p]; wt = pin.wtcol[p]
+        local eflx_gnet_soil, eflx_gnet_h2osfc
+        if !urbpoi[l]
+            base = pin.dlrad[p] + (one(T) - frac_veg_nosno[p]) * cin.emg[c] * cin.forc_lwrad[c]
+            out.eflx_gnet[p] = pin.sabg[p] + base - cin.lwrad_emit[c] -
+                (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c])
+            out.sabg_chk[p] = cin.frac_sno_eff[c] * pin.sabg_snow[p] +
+                (one(T) - cin.frac_sno_eff[c]) * pin.sabg_soil[p]
+            eflx_gnet_soil = pin.sabg_soil[p] + base - cin.lwrad_emit_soil[c] -
+                (pin.eflx_sh_soil[p] + pin.qflx_ev_soil[p] * cin.htvp[c])
+            eflx_gnet_h2osfc = pin.sabg_soil[p] + base - cin.lwrad_emit_h2osfc[c] -
+                (pin.eflx_sh_h2osfc[p] + pin.qflx_ev_h2osfc[p] * cin.htvp[c])
+        else
+            it = itype[c]
+            denom = one(T) - lin.wtlunit_roof[l]
+            if it == ICOL_ROAD_PERV || it == ICOL_ROAD_IMPERV
+                out.eflx_wasteheat[p] = lin.eflx_wasteheat_lun[l] / denom
+                if simple_build
+                    out.eflx_ventilation[p] = zero(T)
+                elseif prog_build
+                    out.eflx_ventilation[p] = lin.eflx_ventilation_lun[l] / denom
+                end
+                out.eflx_heat_from_ac[p] = lin.eflx_heat_from_ac_lun[l] / denom
+                out.eflx_traffic[p] = lin.eflx_traffic_lun[l] / denom
+            else
+                out.eflx_wasteheat[p] = zero(T)
+                out.eflx_ventilation[p] = zero(T)
+                out.eflx_heat_from_ac[p] = zero(T)
+                out.eflx_traffic[p] = zero(T)
+            end
+            out.eflx_gnet[p] = pin.sabg[p] + pin.dlrad[p] - pin.eflx_lwrad_net[p] -
+                (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c] +
+                 pin.qflx_tran_veg[p] * T(HVAP)) +
+                out.eflx_wasteheat[p] + out.eflx_heat_from_ac[p] +
+                out.eflx_traffic[p] + out.eflx_ventilation[p]
+            if simple_build
+                out.eflx_anthro[p] = out.eflx_wasteheat[p] + out.eflx_traffic[p]
+            end
+            eflx_gnet_soil = out.eflx_gnet[p]
+            eflx_gnet_h2osfc = out.eflx_gnet[p]
+        end
+        out.dgnetdT[p] = -pin.cgrnd[p] - cin.dlwrad_emit[c]
+        _scatter_add!(hs,        c, out.eflx_gnet[p] * wt)
+        _scatter_add!(dhsdT,     c, out.dgnetdT[p]   * wt)
+        _scatter_add!(hs_soil,   c, eflx_gnet_soil   * wt)
+        _scatter_add!(hs_h2osfc, c, eflx_gnet_h2osfc * wt)
+    end
+end
+
+function compute_gnet_patch!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,
+        patch_data, mask_nolakep, lwrad_emit, dlwrad_emit, lwrad_emit_snow, lwrad_emit_soil,
+        lwrad_emit_h2osfc, emg, forc_lwrad, htvp, frac_sno_eff, hs, dhsdT, hs_soil, hs_h2osfc,
+        simple_build::Bool, prog_build::Bool)
+    pin = GnetPatchIn(;
+        sabg = solarabs.sabg_patch, sabg_soil = solarabs.sabg_soil_patch,
+        sabg_snow = solarabs.sabg_snow_patch, dlrad = energyflux.dlrad_patch,
+        cgrnd = energyflux.cgrnd_patch, eflx_sh_grnd = energyflux.eflx_sh_grnd_patch,
+        eflx_sh_snow = energyflux.eflx_sh_snow_patch, eflx_sh_soil = energyflux.eflx_sh_soil_patch,
+        eflx_sh_h2osfc = energyflux.eflx_sh_h2osfc_patch,
+        qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch,
+        qflx_ev_snow = waterfluxbulk.qflx_ev_snow_patch, qflx_ev_soil = waterfluxbulk.qflx_ev_soil_patch,
+        qflx_ev_h2osfc = waterfluxbulk.qflx_ev_h2osfc_patch,
+        eflx_lwrad_net = energyflux.eflx_lwrad_net_patch,
+        qflx_tran_veg = waterfluxbulk.wf.qflx_tran_veg_patch, wtcol = patch_data.wtcol)
+    cin = GnetColIn(; lwrad_emit, lwrad_emit_snow, lwrad_emit_soil, lwrad_emit_h2osfc,
+        dlwrad_emit, emg, forc_lwrad, htvp, frac_sno_eff)
+    lin = GnetLunIn(; eflx_wasteheat_lun = energyflux.eflx_wasteheat_lun,
+        eflx_ventilation_lun = energyflux.eflx_ventilation_lun,
+        eflx_heat_from_ac_lun = energyflux.eflx_heat_from_ac_lun,
+        eflx_traffic_lun = energyflux.eflx_traffic_lun, wtlunit_roof = lun.wtlunit_roof)
+    out = GnetOut(; eflx_gnet = energyflux.eflx_gnet_patch, dgnetdT = energyflux.dgnetdT_patch,
+        sabg_chk = solarabs.sabg_chk_patch, eflx_wasteheat = energyflux.eflx_wasteheat_patch,
+        eflx_ventilation = energyflux.eflx_ventilation_patch,
+        eflx_heat_from_ac = energyflux.eflx_heat_from_ac_patch,
+        eflx_traffic = energyflux.eflx_traffic_patch, eflx_anthro = energyflux.eflx_anthro_patch)
+    backend = _kernel_backend(hs)
+    np = length(mask_nolakep)
+    np == 0 && return nothing
+    _gnet_patch_kernel!(backend)(out, pin, cin, lin, mask_nolakep, patch_data.column,
+        patch_data.landunit, col.itype, lun.urbpoi, canopystate.frac_veg_nosno_patch,
+        hs, dhsdT, hs_soil, hs_h2osfc, simple_build, prog_build; ndrange = np)
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 # =========================================================================
 # compute_ground_heat_flux_and_deriv!
 # =========================================================================
@@ -832,89 +958,11 @@ function compute_ground_heat_flux_and_deriv!(
     hs .= 0.0
     dhsdT .= 0.0
 
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        c = patch_data.column[p]
-        l = patch_data.landunit[p]
-
-        frac_veg_nosno = canopystate.frac_veg_nosno_patch[p]
-        sabg = solarabs.sabg_patch[p]
-        sabg_soil = solarabs.sabg_soil_patch[p]
-        sabg_snow = solarabs.sabg_snow_patch[p]
-        dlrad = energyflux.dlrad_patch[p]
-        cgrnd = energyflux.cgrnd_patch[p]
-        eflx_sh_grnd = energyflux.eflx_sh_grnd_patch[p]
-        eflx_sh_snow = energyflux.eflx_sh_snow_patch[p]
-        eflx_sh_soil = energyflux.eflx_sh_soil_patch[p]
-        eflx_sh_h2osfc = energyflux.eflx_sh_h2osfc_patch[p]
-        qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch[p]
-        qflx_ev_snow = waterfluxbulk.qflx_ev_snow_patch[p]
-        qflx_ev_soil = waterfluxbulk.qflx_ev_soil_patch[p]
-        qflx_ev_h2osfc = waterfluxbulk.qflx_ev_h2osfc_patch[p]
-
-        if !lun.urbpoi[l]
-            eflx_gnet[p] = sabg + dlrad +
-                (1.0 - frac_veg_nosno) * emg[c] * forc_lwrad[c] - lwrad_emit[c] -
-                (eflx_sh_grnd + qflx_evap_soi * htvp[c])
-
-            solarabs.sabg_chk_patch[p] = frac_sno_eff[c] * sabg_snow +
-                (1.0 - frac_sno_eff[c]) * sabg_soil
-
-            eflx_gnet_snow = sabg_snow + dlrad +
-                (1.0 - frac_veg_nosno) * emg[c] * forc_lwrad[c] - lwrad_emit_snow[c] -
-                (eflx_sh_snow + qflx_ev_snow * htvp[c])
-
-            eflx_gnet_soil = sabg_soil + dlrad +
-                (1.0 - frac_veg_nosno) * emg[c] * forc_lwrad[c] - lwrad_emit_soil[c] -
-                (eflx_sh_soil + qflx_ev_soil * htvp[c])
-
-            eflx_gnet_h2osfc = sabg_soil + dlrad +
-                (1.0 - frac_veg_nosno) * emg[c] * forc_lwrad[c] - lwrad_emit_h2osfc_arr[c] -
-                (eflx_sh_h2osfc + qflx_ev_h2osfc * htvp[c])
-        else
-            eflx_lwrad_net = energyflux.eflx_lwrad_net_patch[p]
-            qflx_tran_veg = waterfluxbulk.wf.qflx_tran_veg_patch[p]
-
-            if col.itype[c] == ICOL_ROAD_PERV || col.itype[c] == ICOL_ROAD_IMPERV
-                energyflux.eflx_wasteheat_patch[p] = energyflux.eflx_wasteheat_lun[l] /
-                    (1.0 - lun.wtlunit_roof[l])
-                if is_simple_build_temp()
-                    energyflux.eflx_ventilation_patch[p] = 0.0
-                elseif is_prog_build_temp()
-                    energyflux.eflx_ventilation_patch[p] = energyflux.eflx_ventilation_lun[l] /
-                        (1.0 - lun.wtlunit_roof[l])
-                end
-                energyflux.eflx_heat_from_ac_patch[p] = energyflux.eflx_heat_from_ac_lun[l] /
-                    (1.0 - lun.wtlunit_roof[l])
-                energyflux.eflx_traffic_patch[p] = energyflux.eflx_traffic_lun[l] /
-                    (1.0 - lun.wtlunit_roof[l])
-            else
-                energyflux.eflx_wasteheat_patch[p] = 0.0
-                energyflux.eflx_ventilation_patch[p] = 0.0
-                energyflux.eflx_heat_from_ac_patch[p] = 0.0
-                energyflux.eflx_traffic_patch[p] = 0.0
-            end
-
-            eflx_gnet[p] = sabg + dlrad - eflx_lwrad_net -
-                (eflx_sh_grnd + qflx_evap_soi * htvp[c] + qflx_tran_veg * HVAP) +
-                energyflux.eflx_wasteheat_patch[p] + energyflux.eflx_heat_from_ac_patch[p] +
-                energyflux.eflx_traffic_patch[p] + energyflux.eflx_ventilation_patch[p]
-
-            if is_simple_build_temp()
-                energyflux.eflx_anthro_patch[p] = energyflux.eflx_wasteheat_patch[p] +
-                    energyflux.eflx_traffic_patch[p]
-            end
-            eflx_gnet_snow = eflx_gnet[p]
-            eflx_gnet_soil = eflx_gnet[p]
-            eflx_gnet_h2osfc = eflx_gnet[p]
-        end
-
-        dgnetdT[p] = -cgrnd - dlwrad_emit[c]
-        hs[c] += eflx_gnet[p] * patch_data.wtcol[p]
-        dhsdT[c] += dgnetdT[p] * patch_data.wtcol[p]
-        hs_soil[c] += eflx_gnet_soil * patch_data.wtcol[p]
-        hs_h2osfc[c] += eflx_gnet_h2osfc * patch_data.wtcol[p]
-    end
+    # Per-patch ground net heat flux + atomic patch→column scatter (kernelized).
+    compute_gnet_patch!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,
+        patch_data, mask_nolakep, lwrad_emit, dlwrad_emit, lwrad_emit_snow, lwrad_emit_soil,
+        lwrad_emit_h2osfc_arr, emg, forc_lwrad, htvp, frac_sno_eff, hs, dhsdT, hs_soil,
+        hs_h2osfc, is_simple_build_temp(), is_prog_build_temp())
 
     # SNICAR: sabg_lyr_col and hs_top
     sabg_lyr_col .= 0.0

@@ -34,6 +34,15 @@ _kernel_backend(::BitArray) = KA.CPU()
     return out
 end
 
+# Scatter-add `arr[i] += x` for kernels with a many-to-one (e.g. patch→column) write.
+# Atomic for hardware-real element types — the parallel GPU path (Atomix has a Metal
+# extension). Plain `+=` for ForwardDiff.Dual (and any non-hardware-atomic eltype):
+# such arrays only occur on the sequential KA CPU backend (forward-mode AD), where there
+# is no race and atomic-modify is not even defined for Dual.
+@inline _scatter_add!(arr::AbstractArray{<:Union{AbstractFloat,Integer}}, i, x) =
+    (Atomix.@atomic arr[i] += x; nothing)
+@inline _scatter_add!(arr, i, x) = (@inbounds arr[i] += x; nothing)
+
 # --------------------------------------------------------------------------
 # forc_q: column specific humidity from vapor pressure
 #   forc_q_col[c] = 0.622 * vp / max(pbot - 0.378*vp, 1)  (vp from the gridcell)

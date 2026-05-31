@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "20e2d020972d4e174fefe35ba099b72e610ff4f6"
+project_hash = "5eeba316dd3bc6e831f66838cbdb2a1a3933b52a"
 
 [[deps.Adapt]]
 deps = ["LinearAlgebra"]
@@ -69,7 +69,7 @@ uuid = "179af706-886a-5703-950a-314cd64e0468"
 version = "0.2.5"
 
 [[deps.CLM]]
-deps = ["Dates", "Enzyme", "ForwardDiff", "JSON", "LinearAlgebra", "NCDatasets"]
+deps = ["Adapt", "Atomix", "Dates", "Enzyme", "ForwardDiff", "JSON", "KernelAbstractions", "LinearAlgebra", "NCDatasets"]
 path = "."
 uuid = "4245f2e0-edff-455b-b31b-2767da28c542"
 version = "0.1.0"
