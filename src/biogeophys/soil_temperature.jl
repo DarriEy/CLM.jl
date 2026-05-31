@@ -1137,6 +1137,127 @@ end
 # =========================================================================
 # set_rhs_vec! — Combines snow, SSW, and soil RHS vectors
 # =========================================================================
+# Snow-layer RHS. One thread per (column, snow level s = 1..nlevsno); j = s - nlevsno
+# (Fortran -nlevsno+1..0) and rv_idx = jj = s (j + nlevsno). CNFAC at the working type.
+@kernel function _rhs_snow_kernel!(rvector, @Const(mask), @Const(itype), @Const(snl),
+        @Const(t_soisno), @Const(fact), @Const(fn), @Const(dhsdT), @Const(hs_top_snow),
+        @Const(hs_top), @Const(sabg_lyr_col), nlevsno::Int)
+    c, s = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(rvector)
+        cnfac = T(CNFAC)
+        j = s - nlevsno
+        jj = s
+        it = itype[c]
+        hs_top_lev = hs_top_snow[c]
+        if it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF
+            hs_top_lev = hs_top[c]
+        end
+        if j == snl[c] + 1
+            rvector[c, s] = t_soisno[c, jj] + fact[c, jj] * (hs_top_lev -
+                dhsdT[c] * t_soisno[c, jj] + cnfac * fn[c, jj])
+        elseif j > snl[c] + 1
+            rvector[c, s] = t_soisno[c, jj] + cnfac * fact[c, jj] * (fn[c, jj] - fn[c, jj - 1])
+            rvector[c, s] += fact[c, jj] * sabg_lyr_col[c, s]
+        end
+    end
+end
+
+# Standing surface water RHS (one thread per column). Also fills fn_h2osfc[c] for the
+# surface-water correction kernel below. dtime arrives converted to the working type.
+@kernel function _rhs_ssw_kernel!(rvector, @Const(mask), @Const(t_soisno), @Const(t_h2osfc),
+        @Const(z), @Const(tk_h2osfc), @Const(dz_h2osfc), @Const(c_h2osfc),
+        @Const(hs_h2osfc), @Const(dhsdT), fn_h2osfc, dtime, nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(rvector)
+        cnfac = T(CNFAC)
+        joff = nlevsno
+        dzm = T(0.5) * dz_h2osfc[c] + z[c, 1 + joff]
+        fnh = tk_h2osfc[c] * (t_soisno[c, 1 + joff] - t_h2osfc[c]) / dzm
+        fn_h2osfc[c] = fnh
+        rvector[c, nlevsno + 1] = t_h2osfc[c] + (dtime / c_h2osfc[c]) *
+            (hs_h2osfc[c] - dhsdT[c] * t_h2osfc[c] + cnfac * fnh)
+    end
+end
+
+# Soil-layer RHS — urban non-road (wall/roof). One thread per (column, soil level j=1..nlevurb).
+@kernel function _rhs_soil_urban_kernel!(rvector, @Const(mask), @Const(itype), @Const(snl),
+        @Const(t_soisno), @Const(fact), @Const(fn), @Const(dhsdT), @Const(hs_top),
+        @Const(sabg_lyr_col), nlevsno::Int, nlevurb::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        it = itype[c]
+        if it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF
+            T = eltype(rvector)
+            cnfac = T(CNFAC)
+            jj = j + nlevsno
+            rv_idx = j + nlevsno + 1
+            if j == snl[c] + 1
+                rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] * (hs_top[c] -
+                    dhsdT[c] * t_soisno[c, jj] + cnfac * fn[c, jj])
+            elseif j <= nlevurb - 1
+                rvector[c, rv_idx] = t_soisno[c, jj] + cnfac * fact[c, jj] * (fn[c, jj] - fn[c, jj - 1])
+                if j == 1
+                    rvector[c, rv_idx] += fact[c, jj] * sabg_lyr_col[c, j + nlevsno]
+                end
+            elseif j == nlevurb
+                rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] * (fn[c, jj] - cnfac * fn[c, jj - 1])
+            end
+        end
+    end
+end
+
+# Soil-layer RHS — non-urban and urban road. One thread per (column, soil level j=1..nlevgrnd).
+@kernel function _rhs_soil_kernel!(rvector, @Const(mask), @Const(itype), @Const(snl),
+        @Const(landunit), @Const(urbpoi), @Const(t_soisno), @Const(fact), @Const(fn),
+        @Const(dhsdT), @Const(frac_sno_eff), @Const(hs_top_snow), @Const(hs_soil),
+        @Const(sabg_lyr_col), nlevsno::Int, nlevgrnd::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        l = landunit[c]
+        it = itype[c]
+        if !urbpoi[l] || it == ICOL_ROAD_IMPERV || it == ICOL_ROAD_PERV
+            T = eltype(rvector)
+            cnfac = T(CNFAC)
+            jj = j + nlevsno
+            rv_idx = j + nlevsno + 1
+            if j == snl[c] + 1
+                rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] * (hs_top_snow[c] -
+                    dhsdT[c] * t_soisno[c, jj] + cnfac * fn[c, jj])
+            elseif j == 1
+                rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] *
+                    ((one(T) - frac_sno_eff[c]) * (hs_soil[c] - dhsdT[c] * t_soisno[c, jj]) +
+                     cnfac * (fn[c, jj] - frac_sno_eff[c] * fn[c, jj - 1]))
+                rvector[c, rv_idx] += frac_sno_eff[c] * fact[c, jj] * sabg_lyr_col[c, j + nlevsno]
+            elseif j <= nlevgrnd - 1
+                rvector[c, rv_idx] = t_soisno[c, jj] + cnfac * fact[c, jj] * (fn[c, jj] - fn[c, jj - 1])
+            elseif j == nlevgrnd
+                rvector[c, rv_idx] = t_soisno[c, jj] - cnfac * fact[c, jj] * fn[c, jj - 1] +
+                    fact[c, jj] * fn[c, jj]
+            end
+        end
+    end
+end
+
+# Surface-water correction to soil layer 1 (one thread per column). Reads fn_h2osfc filled
+# by the SSW kernel and the rvector[soil-1] value written by the soil kernel; must run last.
+@kernel function _rhs_h2osfc_corr_kernel!(rvector, @Const(mask), @Const(frac_h2osfc),
+        @Const(fact), @Const(dhsdT), @Const(t_soisno), @Const(hs_soil),
+        @Const(fn_h2osfc), nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        if frac_h2osfc[c] != 0
+            T = eltype(rvector)
+            cnfac = T(CNFAC)
+            jj = 1 + nlevsno
+            rv_idx = 1 + nlevsno + 1
+            rvector[c, rv_idx] -= frac_h2osfc[c] * fact[c, jj] *
+                ((hs_soil[c] - dhsdT[c] * t_soisno[c, jj]) + cnfac * fn_h2osfc[c])
+        end
+    end
+end
+
 function set_rhs_vec!(col::ColumnData, lun::LandunitData,
                       temperature::TemperatureData,
                       waterdiagbulk::WaterDiagnosticBulkData,
@@ -1153,8 +1274,6 @@ function set_rhs_vec!(col::ColumnData, lun::LandunitData,
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevurb = varpar.nlevurb
-    nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
-    joff = nlevsno
 
     t_soisno = temperature.t_soisno_col
     t_h2osfc = temperature.t_h2osfc_col
@@ -1163,100 +1282,26 @@ function set_rhs_vec!(col::ColumnData, lun::LandunitData,
 
     FT = eltype(t_soisno)
     rvector .= FT(NaN)
+    nc = size(rvector, 1)
+    fn_h2osfc = zeros(FT, nc)
+    dt = convert(FT, dtime)
 
-    fn_h2osfc = zeros(FT, length(bounds_col))
-
-    # Snow layers RHS
-    for j in (-nlevsno + 1):0
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
-            # rv_idx: Fortran rvector index j-1 → Julia j-1+nlevsno+1
-            rv_idx = j - 1 + nlevsno + 1
-
-            hs_top_lev = hs_top_snow[c]
-            if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL || col.itype[c] == ICOL_ROOF
-                hs_top_lev = hs_top[c]
-            end
-
-            if j == col.snl[c] + 1
-                rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] * (hs_top_lev -
-                    dhsdT[c] * t_soisno[c, jj] + CNFAC * fn[c, jj])
-            elseif j > col.snl[c] + 1
-                rvector[c, rv_idx] = t_soisno[c, jj] + CNFAC * fact[c, jj] * (fn[c, jj] - fn[c, jj - 1])
-                rvector[c, rv_idx] += fact[c, jj] * sabg_lyr_col[c, j + nlevsno]
-            end
-        end
-    end
-
-    # Standing surface water RHS
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        dzm = 0.5 * dz_h2osfc[c] + col.z[c, 1 + joff]
-        fn_h2osfc[c] = tk_h2osfc[c] * (t_soisno[c, 1 + joff] - t_h2osfc[c]) / dzm
-        # SSW RHS at index nlevsno+1 (Fortran index 0)
-        rvector[c, nlevsno + 1] = t_h2osfc[c] + (dtime / c_h2osfc[c]) *
-            (hs_h2osfc[c] - dhsdT[c] * t_h2osfc[c] + CNFAC * fn_h2osfc[c])
-    end
-
-    # Soil layers RHS — urban non-road
-    for j in 1:nlevurb
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL || col.itype[c] == ICOL_ROOF
-                jj = j + joff
-                rv_idx = j + nlevsno + 1
-                if j == col.snl[c] + 1
-                    rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] * (hs_top[c] -
-                        dhsdT[c] * t_soisno[c, jj] + CNFAC * fn[c, jj])
-                elseif j <= nlevurb - 1
-                    rvector[c, rv_idx] = t_soisno[c, jj] + CNFAC * fact[c, jj] * (fn[c, jj] - fn[c, jj - 1])
-                    if j == 1
-                        rvector[c, rv_idx] += fact[c, jj] * sabg_lyr_col[c, j + nlevsno]
-                    end
-                elseif j == nlevurb
-                    rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] * (fn[c, jj] - CNFAC * fn[c, jj - 1])
-                end
-            end
-        end
-    end
-
-    # Soil layers RHS — non-urban and urban road
-    for j in 1:nlevgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            if !lun.urbpoi[l] || col.itype[c] == ICOL_ROAD_IMPERV || col.itype[c] == ICOL_ROAD_PERV
-                jj = j + joff
-                rv_idx = j + nlevsno + 1
-                if j == col.snl[c] + 1
-                    rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] * (hs_top_snow[c] -
-                        dhsdT[c] * t_soisno[c, jj] + CNFAC * fn[c, jj])
-                elseif j == 1
-                    rvector[c, rv_idx] = t_soisno[c, jj] + fact[c, jj] *
-                        ((1.0 - frac_sno_eff[c]) * (hs_soil[c] - dhsdT[c] * t_soisno[c, jj]) +
-                         CNFAC * (fn[c, jj] - frac_sno_eff[c] * fn[c, jj - 1]))
-                    rvector[c, rv_idx] += frac_sno_eff[c] * fact[c, jj] * sabg_lyr_col[c, j + nlevsno]
-                elseif j <= nlevgrnd - 1
-                    rvector[c, rv_idx] = t_soisno[c, jj] + CNFAC * fact[c, jj] * (fn[c, jj] - fn[c, jj - 1])
-                elseif j == nlevgrnd
-                    rvector[c, rv_idx] = t_soisno[c, jj] - CNFAC * fact[c, jj] * fn[c, jj - 1] +
-                        fact[c, jj] * fn[c, jj]
-                end
-            end
-        end
-    end
-
-    # Surface water correction to soil layer 1
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        if frac_h2osfc[c] != 0.0
-            rv_idx = 1 + nlevsno + 1
-            jj = 1 + joff
-            rvector[c, rv_idx] -= frac_h2osfc[c] * fact[c, jj] *
-                ((hs_soil[c] - dhsdT[c] * t_soisno[c, jj]) + CNFAC * fn_h2osfc[c])
-        end
-    end
+    # Snow-layer RHS (one thread per (column, snow level)).
+    _launch!(_rhs_snow_kernel!, rvector, mask_nolakec, col.itype, col.snl, t_soisno,
+        fact, fn, dhsdT, hs_top_snow, hs_top, sabg_lyr_col, nlevsno; ndrange = (nc, nlevsno))
+    # Standing surface water RHS (also fills fn_h2osfc for the correction below).
+    _launch!(_rhs_ssw_kernel!, rvector, mask_nolakec, t_soisno, t_h2osfc, col.z, tk_h2osfc,
+        dz_h2osfc, c_h2osfc, hs_h2osfc, dhsdT, fn_h2osfc, dt, nlevsno; ndrange = nc)
+    # Soil RHS — urban non-road (wall/roof).
+    _launch!(_rhs_soil_urban_kernel!, rvector, mask_nolakec, col.itype, col.snl, t_soisno,
+        fact, fn, dhsdT, hs_top, sabg_lyr_col, nlevsno, nlevurb; ndrange = (nc, nlevurb))
+    # Soil RHS — non-urban and urban road.
+    _launch!(_rhs_soil_kernel!, rvector, mask_nolakec, col.itype, col.snl, col.landunit,
+        lun.urbpoi, t_soisno, fact, fn, dhsdT, frac_sno_eff, hs_top_snow, hs_soil,
+        sabg_lyr_col, nlevsno, nlevgrnd; ndrange = (nc, nlevgrnd))
+    # Surface-water correction to soil layer 1 (reads fn_h2osfc; must run last).
+    _launch!(_rhs_h2osfc_corr_kernel!, rvector, mask_nolakec, frac_h2osfc, fact, dhsdT,
+        t_soisno, hs_soil, fn_h2osfc, nlevsno; ndrange = nc)
 
     return nothing
 end
