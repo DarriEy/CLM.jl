@@ -1309,6 +1309,158 @@ end
 # =========================================================================
 # set_matrix! — Assembles band diagonal matrix from submatrices
 # =========================================================================
+# Snow submatrix. One thread per (column, snow level s=1..nlevsno); j=s-nlevsno, bm_idx=jj=s.
+# omc = 1-CNFAC folded once at the working type (byte-identical to inline (1.0-CNFAC) on Float64).
+@kernel function _mat_snow_kernel!(bmatrix, @Const(mask), @Const(snl), @Const(z),
+        @Const(tk), @Const(fact), @Const(dhsdT), nlevsno::Int)
+    c, s = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(bmatrix)
+        omc = one(T) - T(CNFAC)
+        j = s - nlevsno
+        jj = s
+        bm_idx = s
+        if j >= snl[c] + 1
+            dzp = z[c, jj + 1] - z[c, jj]
+            if j == snl[c] + 1
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] * tk[c, jj] / dzp -
+                    fact[c, jj] * dhsdT[c]
+            else
+                dzm = z[c, jj] - z[c, jj - 1]
+                bmatrix[c, 4, bm_idx] = -omc * fact[c, jj] * tk[c, jj - 1] / dzm
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] *
+                    (tk[c, jj] / dzp + tk[c, jj - 1] / dzm)
+            end
+            if j != 0
+                bmatrix[c, 2, bm_idx] = -omc * fact[c, jj] * tk[c, jj] / dzp
+            else
+                # snow-soil coupling (band 1)
+                bmatrix[c, 1, bm_idx] = -omc * fact[c, jj] * tk[c, jj] / dzp
+            end
+        end
+    end
+end
+
+# Standing surface water submatrix (one thread per column). dtime arrives converted.
+@kernel function _mat_ssw_kernel!(bmatrix, @Const(mask), @Const(z), @Const(tk_h2osfc),
+        @Const(dz_h2osfc), @Const(c_h2osfc), @Const(dhsdT), dtime, nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(bmatrix)
+        omc = one(T) - T(CNFAC)
+        joff = nlevsno
+        ssw_idx = nlevsno + 1
+        dzm = T(0.5) * dz_h2osfc[c] + z[c, 1 + joff]
+        bmatrix[c, 3, ssw_idx] = one(T) + omc * (dtime / c_h2osfc[c]) *
+            tk_h2osfc[c] / dzm - (dtime / c_h2osfc[c]) * dhsdT[c]
+        bmatrix[c, 2, ssw_idx] = -omc * (dtime / c_h2osfc[c]) * tk_h2osfc[c] / dzm
+    end
+end
+
+# Soil submatrix — urban non-road (wall/roof). One thread per (column, soil level j=1..nlevurb).
+@kernel function _mat_soil_urban_kernel!(bmatrix, @Const(mask), @Const(itype), @Const(snl),
+        @Const(z), @Const(zi), @Const(tk), @Const(fact), @Const(dhsdT),
+        nlevsno::Int, nlevurb::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        it = itype[c]
+        if it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF
+            T = eltype(bmatrix)
+            omc = one(T) - T(CNFAC)
+            jj = j + nlevsno
+            bm_idx = j + nlevsno + 1
+            if j == snl[c] + 1
+                dzp = z[c, jj + 1] - z[c, jj]
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] * tk[c, jj] / dzp -
+                    fact[c, jj] * dhsdT[c]
+                bmatrix[c, 2, bm_idx] = -omc * fact[c, jj] * tk[c, jj] / dzp
+            elseif j <= nlevurb - 1
+                dzm = z[c, jj] - z[c, jj - 1]
+                dzp = z[c, jj + 1] - z[c, jj]
+                if j != 1
+                    bmatrix[c, 4, bm_idx] = -omc * fact[c, jj] * tk[c, jj - 1] / dzm
+                else
+                    bmatrix[c, 5, bm_idx] = -omc * fact[c, jj] * tk[c, jj - 1] / dzm
+                end
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] *
+                    (tk[c, jj] / dzp + tk[c, jj - 1] / dzm)
+                bmatrix[c, 2, bm_idx] = -omc * fact[c, jj] * tk[c, jj] / dzp
+            elseif j == nlevurb
+                dzm = z[c, jj] - z[c, jj - 1]
+                dzp = zi[c, jj + 1] - z[c, jj]
+                bmatrix[c, 4, bm_idx] = -omc * fact[c, jj] * tk[c, jj - 1] / dzm
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] *
+                    (tk[c, jj - 1] / dzm + tk[c, jj] / dzp)
+            end
+        end
+    end
+end
+
+# Soil submatrix — non-urban and urban road. One thread per (column, soil level j=1..nlevgrnd).
+@kernel function _mat_soil_kernel!(bmatrix, @Const(mask), @Const(itype), @Const(snl),
+        @Const(landunit), @Const(urbpoi), @Const(z), @Const(tk), @Const(fact),
+        @Const(dhsdT), @Const(frac_sno_eff), nlevsno::Int, nlevgrnd::Int)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        l = landunit[c]
+        it = itype[c]
+        if it == ICOL_ROAD_IMPERV || it == ICOL_ROAD_PERV || !urbpoi[l]
+            T = eltype(bmatrix)
+            omc = one(T) - T(CNFAC)
+            jj = j + nlevsno
+            bm_idx = j + nlevsno + 1
+            if j == snl[c] + 1
+                dzp = z[c, jj + 1] - z[c, jj]
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] * tk[c, jj] / dzp -
+                    fact[c, jj] * dhsdT[c]
+                bmatrix[c, 2, bm_idx] = -omc * fact[c, jj] * tk[c, jj] / dzp
+            elseif j == 1
+                dzm = z[c, jj] - z[c, jj - 1]
+                dzp = z[c, jj + 1] - z[c, jj]
+                bmatrix[c, 2, bm_idx] = -omc * fact[c, jj] * tk[c, jj] / dzp
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] *
+                    (tk[c, jj] / dzp + frac_sno_eff[c] * tk[c, jj - 1] / dzm) -
+                    (one(T) - frac_sno_eff[c]) * fact[c, jj] * dhsdT[c]
+                bmatrix[c, 5, bm_idx] = -frac_sno_eff[c] * omc * fact[c, jj] *
+                    tk[c, jj - 1] / dzm
+            elseif j <= nlevgrnd - 1
+                dzm = z[c, jj] - z[c, jj - 1]
+                dzp = z[c, jj + 1] - z[c, jj]
+                bmatrix[c, 2, bm_idx] = -omc * fact[c, jj] * tk[c, jj] / dzp
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] *
+                    (tk[c, jj] / dzp + tk[c, jj - 1] / dzm)
+                bmatrix[c, 4, bm_idx] = -omc * fact[c, jj] * tk[c, jj - 1] / dzm
+            elseif j == nlevgrnd
+                dzm = z[c, jj] - z[c, jj - 1]
+                bmatrix[c, 3, bm_idx] = one(T) + omc * fact[c, jj] * tk[c, jj - 1] / dzm
+                bmatrix[c, 4, bm_idx] = -omc * fact[c, jj] * tk[c, jj - 1] / dzm
+            end
+        end
+    end
+end
+
+# h2osfc correction to the soil-layer-1 diagonal (one thread per column). Reads the soil-1
+# cell written by the soil kernels above; must run last.
+@kernel function _mat_h2osfc_corr_kernel!(bmatrix, @Const(mask), @Const(frac_h2osfc),
+        @Const(z), @Const(tk_h2osfc), @Const(dz_h2osfc), @Const(fact), @Const(dhsdT),
+        nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        if frac_h2osfc[c] != 0
+            T = eltype(bmatrix)
+            omc = one(T) - T(CNFAC)
+            joff = nlevsno
+            dzm = T(0.5) * dz_h2osfc[c] + z[c, 1 + joff]
+            bm_idx = 1 + nlevsno + 1
+            bmatrix[c, 3, bm_idx] += frac_h2osfc[c] *
+                (omc * fact[c, 1 + joff] * tk_h2osfc[c] / dzm +
+                 fact[c, 1 + joff] * dhsdT[c])
+            bmatrix[c, 4, bm_idx] = -frac_h2osfc[c] * omc * fact[c, 1 + joff] *
+                tk_h2osfc[c] / dzm
+        end
+    end
+end
+
 function set_matrix!(col::ColumnData, lun::LandunitData,
                      waterdiagbulk::WaterDiagnosticBulkData,
                      mask_nolakec::BitVector, bounds_col::UnitRange{Int},
@@ -1321,149 +1473,31 @@ function set_matrix!(col::ColumnData, lun::LandunitData,
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevurb = varpar.nlevurb
-    nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
-    joff = nlevsno
 
     frac_h2osfc = waterdiagbulk.frac_h2osfc_col
     frac_sno_eff = waterdiagbulk.frac_sno_eff_col
 
-    bmatrix .= 0.0
+    FT = eltype(bmatrix)
+    bmatrix .= zero(FT)
+    nc = size(bmatrix, 1)
+    dt = convert(FT, dtime)
 
-    # ---- Snow submatrix ----
-    for j in (-nlevsno + 1):0
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
-            # bmatrix index: j-1+nlevsno+1 = j+nlevsno
-            bm_idx = j - 1 + nlevsno + 1  # maps to tvector index space
-
-            # Determine nlev_thresh
-            nlev_thresh = nlevgrnd
-            if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL || col.itype[c] == ICOL_ROOF
-                nlev_thresh = nlevurb
-            end
-
-            if j >= col.snl[c] + 1
-                dzp = col.z[c, jj + 1] - col.z[c, jj]
-                if j == col.snl[c] + 1
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp -
-                        fact[c, jj] * dhsdT[c]
-                else
-                    dzm = col.z[c, jj] - col.z[c, jj - 1]
-                    bmatrix[c, 4, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj - 1] / dzm
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] *
-                        (tk[c, jj] / dzp + tk[c, jj - 1] / dzm)
-                end
-                if j != 0
-                    bmatrix[c, 2, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp
-                else
-                    # snow-soil coupling: goes to soil layer 1 (2 rows below in band)
-                    # bmatrix_snow_soil → band 1
-                    bmatrix[c, 1, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp
-                end
-            end
-        end
-    end
-
-    # ---- Standing surface water submatrix ----
-    ssw_idx = nlevsno + 1  # index for SSW row in bmatrix
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        dzm = 0.5 * dz_h2osfc[c] + col.z[c, 1 + joff]
-        bmatrix[c, 3, ssw_idx] = 1.0 + (1.0 - CNFAC) * (dtime / c_h2osfc[c]) *
-            tk_h2osfc[c] / dzm - (dtime / c_h2osfc[c]) * dhsdT[c]
-        # SSW-Soil coupling (band 2)
-        bmatrix[c, 2, ssw_idx] = -(1.0 - CNFAC) * (dtime / c_h2osfc[c]) * tk_h2osfc[c] / dzm
-    end
-
-    # ---- Soil submatrix — urban non-road ----
-    for j in 1:nlevurb
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL || col.itype[c] == ICOL_ROOF
-                jj = j + joff
-                bm_idx = j + nlevsno + 1
-
-                if j == col.snl[c] + 1
-                    dzp = col.z[c, jj + 1] - col.z[c, jj]
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp -
-                        fact[c, jj] * dhsdT[c]
-                    bmatrix[c, 2, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp
-                elseif j <= nlevurb - 1
-                    dzm = col.z[c, jj] - col.z[c, jj - 1]
-                    dzp = col.z[c, jj + 1] - col.z[c, jj]
-                    if j != 1
-                        bmatrix[c, 4, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj - 1] / dzm
-                    else
-                        bmatrix[c, 5, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj - 1] / dzm
-                    end
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] *
-                        (tk[c, jj] / dzp + tk[c, jj - 1] / dzm)
-                    bmatrix[c, 2, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp
-                elseif j == nlevurb
-                    dzm = col.z[c, jj] - col.z[c, jj - 1]
-                    dzp = col.zi[c, jj + 1] - col.z[c, jj]
-                    bmatrix[c, 4, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj - 1] / dzm
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] *
-                        (tk[c, jj - 1] / dzm + tk[c, jj] / dzp)
-                end
-            end
-        end
-    end
-
-    # ---- Soil submatrix — non-urban and urban road ----
-    for j in 1:nlevgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            if col.itype[c] == ICOL_ROAD_IMPERV || col.itype[c] == ICOL_ROAD_PERV || !lun.urbpoi[l]
-                jj = j + joff
-                bm_idx = j + nlevsno + 1
-
-                if j == col.snl[c] + 1
-                    dzp = col.z[c, jj + 1] - col.z[c, jj]
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp -
-                        fact[c, jj] * dhsdT[c]
-                    bmatrix[c, 2, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp
-                elseif j == 1
-                    dzm = col.z[c, jj] - col.z[c, jj - 1]
-                    dzp = col.z[c, jj + 1] - col.z[c, jj]
-                    bmatrix[c, 2, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] *
-                        (tk[c, jj] / dzp + frac_sno_eff[c] * tk[c, jj - 1] / dzm) -
-                        (1.0 - frac_sno_eff[c]) * fact[c, jj] * dhsdT[c]
-                    bmatrix[c, 5, bm_idx] = -frac_sno_eff[c] * (1.0 - CNFAC) * fact[c, jj] *
-                        tk[c, jj - 1] / dzm
-                elseif j <= nlevgrnd - 1
-                    dzm = col.z[c, jj] - col.z[c, jj - 1]
-                    dzp = col.z[c, jj + 1] - col.z[c, jj]
-                    bmatrix[c, 2, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj] / dzp
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] *
-                        (tk[c, jj] / dzp + tk[c, jj - 1] / dzm)
-                    bmatrix[c, 4, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj - 1] / dzm
-                elseif j == nlevgrnd
-                    dzm = col.z[c, jj] - col.z[c, jj - 1]
-                    bmatrix[c, 3, bm_idx] = 1.0 + (1.0 - CNFAC) * fact[c, jj] * tk[c, jj - 1] / dzm
-                    bmatrix[c, 4, bm_idx] = -(1.0 - CNFAC) * fact[c, jj] * tk[c, jj - 1] / dzm
-                end
-            end
-        end
-    end
-
-    # h2osfc correction to soil layer 1 diagonal
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        if frac_h2osfc[c] != 0.0
-            dzm = 0.5 * dz_h2osfc[c] + col.z[c, 1 + joff]
-            bm_idx = 1 + nlevsno + 1
-            bmatrix[c, 3, bm_idx] += frac_h2osfc[c] *
-                ((1.0 - CNFAC) * fact[c, 1 + joff] * tk_h2osfc[c] / dzm +
-                 fact[c, 1 + joff] * dhsdT[c])
-            # Soil-SSW coupling (band 4)
-            bmatrix[c, 4, bm_idx] = -frac_h2osfc[c] * (1.0 - CNFAC) * fact[c, 1 + joff] *
-                tk_h2osfc[c] / dzm
-        end
-    end
+    # Snow submatrix (one thread per (column, snow level)).
+    _launch!(_mat_snow_kernel!, bmatrix, mask_nolakec, col.snl, col.z, tk, fact, dhsdT,
+        nlevsno; ndrange = (nc, nlevsno))
+    # Standing surface water submatrix.
+    _launch!(_mat_ssw_kernel!, bmatrix, mask_nolakec, col.z, tk_h2osfc, dz_h2osfc,
+        c_h2osfc, dhsdT, dt, nlevsno; ndrange = nc)
+    # Soil submatrix — urban non-road (wall/roof).
+    _launch!(_mat_soil_urban_kernel!, bmatrix, mask_nolakec, col.itype, col.snl, col.z,
+        col.zi, tk, fact, dhsdT, nlevsno, nlevurb; ndrange = (nc, nlevurb))
+    # Soil submatrix — non-urban and urban road.
+    _launch!(_mat_soil_kernel!, bmatrix, mask_nolakec, col.itype, col.snl, col.landunit,
+        lun.urbpoi, col.z, tk, fact, dhsdT, frac_sno_eff, nlevsno, nlevgrnd;
+        ndrange = (nc, nlevgrnd))
+    # h2osfc correction to soil layer 1 (reads soil-1 diagonal; must run last).
+    _launch!(_mat_h2osfc_corr_kernel!, bmatrix, mask_nolakec, frac_h2osfc, col.z,
+        tk_h2osfc, dz_h2osfc, fact, dhsdT, nlevsno; ndrange = nc)
 
     return nothing
 end
