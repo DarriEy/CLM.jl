@@ -32,88 +32,98 @@ Includes fields from both the parent `waterdiagnostic_type` and the child
 Ported from `waterdiagnosticbulk_type` in `WaterDiagnosticBulkType.F90` and
 `waterdiagnostic_type` in `WaterDiagnosticType.F90`.
 """
-Base.@kwdef mutable struct WaterDiagnosticBulkData{FT<:Real}
+Base.@kwdef mutable struct WaterDiagnosticBulkData{FT<:Real,
+                                  V<:AbstractVector{FT}, M<:AbstractMatrix{FT}}
     # =====================================================================
     # Fields from parent waterdiagnostic_type (WaterDiagnosticType.F90)
     # =====================================================================
 
     # --- Column-level 1D (parent) ---
-    snowice_col                 ::Vector{FT} = Float64[]   # col average snow ice lens
-    snowliq_col                 ::Vector{FT} = Float64[]   # col average snow liquid water
-    total_plant_stored_h2o_col  ::Vector{FT} = Float64[]   # col water bound in plants (kg/m2 H2O)
-    h2osoi_liqice_10cm_col      ::Vector{FT} = Float64[]   # col liquid water + ice lens in top 10cm of soil (kg/m2)
-    qg_snow_col                 ::Vector{FT} = Float64[]   # col ground specific humidity [kg/kg]
-    qg_soil_col                 ::Vector{FT} = Float64[]   # col ground specific humidity [kg/kg]
-    qg_h2osfc_col               ::Vector{FT} = Float64[]   # col ground specific humidity [kg/kg]
-    qg_col                      ::Vector{FT} = Float64[]   # col ground specific humidity [kg/kg]
+    snowice_col                 ::V = Float64[]   # col average snow ice lens
+    snowliq_col                 ::V = Float64[]   # col average snow liquid water
+    total_plant_stored_h2o_col  ::V = Float64[]   # col water bound in plants (kg/m2 H2O)
+    h2osoi_liqice_10cm_col      ::V = Float64[]   # col liquid water + ice lens in top 10cm of soil (kg/m2)
+    qg_snow_col                 ::V = Float64[]   # col ground specific humidity [kg/kg]
+    qg_soil_col                 ::V = Float64[]   # col ground specific humidity [kg/kg]
+    qg_h2osfc_col               ::V = Float64[]   # col ground specific humidity [kg/kg]
+    qg_col                      ::V = Float64[]   # col ground specific humidity [kg/kg]
 
     # --- Patch-level 1D (parent) ---
-    h2ocan_patch                ::Vector{FT} = Float64[]   # patch total canopy water (liq+ice) (mm H2O)
-    q_ref2m_patch               ::Vector{FT} = Float64[]   # patch 2 m height surface specific humidity (kg/kg)
+    h2ocan_patch                ::V = Float64[]   # patch total canopy water (liq+ice) (mm H2O)
+    q_ref2m_patch               ::V = Float64[]   # patch 2 m height surface specific humidity (kg/kg)
 
     # --- Landunit-level 1D (parent) ---
-    qaf_lun                     ::Vector{FT} = Float64[]   # lun urban canopy air specific humidity (kg/kg)
+    qaf_lun                     ::V = Float64[]   # lun urban canopy air specific humidity (kg/kg)
 
     # --- Gridcell-level 1D (parent) ---
-    tws_grc                     ::Vector{FT} = Float64[]   # grc total water storage (mm H2O)
+    tws_grc                     ::V = Float64[]   # grc total water storage (mm H2O)
 
     # =====================================================================
     # Fields from waterdiagnosticbulk_type (WaterDiagnosticBulkType.F90)
     # =====================================================================
 
     # --- Column-level 1D ---
-    h2osno_total_col            ::Vector{FT} = Float64[]   # col total snow water (mm H2O)
-    snow_depth_col              ::Vector{FT} = Float64[]   # col snow height of snow covered area (m)
-    snow_5day_col               ::Vector{FT} = Float64[]   # col snow height 5 day avg (m)
-    snowdp_col                  ::Vector{FT} = Float64[]   # col area-averaged snow height (m)
-    snomelt_accum_col           ::Vector{FT} = Float64[]   # col accumulated snow melt for z0m calculation (m H2O)
-    h2osoi_liq_tot_col          ::Vector{FT} = Float64[]   # col vertically summed liquid water (kg/m2)
-    h2osoi_ice_tot_col          ::Vector{FT} = Float64[]   # col vertically summed ice lens (kg/m2)
-    exice_subs_tot_col          ::Vector{FT} = Float64[]   # col total subsidence due to excess ice melt (m)
-    exice_vol_tot_col           ::Vector{FT} = Float64[]   # col averaged volumetric excess ice content (m3/m3)
-    snw_rds_top_col             ::Vector{FT} = Float64[]   # col snow grain radius (top layer) [microns]
-    h2osno_top_col              ::Vector{FT} = Float64[]   # col top-layer mass of snow [kg]
-    sno_liq_top_col             ::Vector{FT} = Float64[]   # col snow liquid water fraction (mass), top layer [fraction]
-    dqgdT_col                   ::Vector{FT} = Float64[]   # col d(qg)/dT
+    h2osno_total_col            ::V = Float64[]   # col total snow water (mm H2O)
+    snow_depth_col              ::V = Float64[]   # col snow height of snow covered area (m)
+    snow_5day_col               ::V = Float64[]   # col snow height 5 day avg (m)
+    snowdp_col                  ::V = Float64[]   # col area-averaged snow height (m)
+    snomelt_accum_col           ::V = Float64[]   # col accumulated snow melt for z0m calculation (m H2O)
+    h2osoi_liq_tot_col          ::V = Float64[]   # col vertically summed liquid water (kg/m2)
+    h2osoi_ice_tot_col          ::V = Float64[]   # col vertically summed ice lens (kg/m2)
+    exice_subs_tot_col          ::V = Float64[]   # col total subsidence due to excess ice melt (m)
+    exice_vol_tot_col           ::V = Float64[]   # col averaged volumetric excess ice content (m3/m3)
+    snw_rds_top_col             ::V = Float64[]   # col snow grain radius (top layer) [microns]
+    h2osno_top_col              ::V = Float64[]   # col top-layer mass of snow [kg]
+    sno_liq_top_col             ::V = Float64[]   # col snow liquid water fraction (mass), top layer [fraction]
+    dqgdT_col                   ::V = Float64[]   # col d(qg)/dT
 
     # Fractions (column 1D)
-    frac_sno_col                ::Vector{FT} = Float64[]   # col fraction of ground covered by snow (0 to 1)
-    frac_sno_eff_col            ::Vector{FT} = Float64[]   # col effective fraction of ground covered by snow (0 to 1)
-    frac_h2osfc_col             ::Vector{FT} = Float64[]   # col fractional area with surface water > 0
-    frac_h2osfc_nosnow_col      ::Vector{FT} = Float64[]   # col fractional area with surface water > 0 (if no snow)
-    wf_col                      ::Vector{FT} = Float64[]   # col soil water as frac. of whc for top 0.05 m (0-1)
-    wf2_col                     ::Vector{FT} = Float64[]   # col soil water as frac. of whc for top 0.17 m (0-1)
+    frac_sno_col                ::V = Float64[]   # col fraction of ground covered by snow (0 to 1)
+    frac_sno_eff_col            ::V = Float64[]   # col effective fraction of ground covered by snow (0 to 1)
+    frac_h2osfc_col             ::V = Float64[]   # col fractional area with surface water > 0
+    frac_h2osfc_nosnow_col      ::V = Float64[]   # col fractional area with surface water > 0 (if no snow)
+    wf_col                      ::V = Float64[]   # col soil water as frac. of whc for top 0.05 m (0-1)
+    wf2_col                     ::V = Float64[]   # col soil water as frac. of whc for top 0.17 m (0-1)
 
     # Summed fluxes (column 1D)
-    qflx_prec_grnd_col          ::Vector{FT} = Float64[]   # col water onto ground including canopy runoff (mm H2O/s)
+    qflx_prec_grnd_col          ::V = Float64[]   # col water onto ground including canopy runoff (mm H2O/s)
 
     # --- Column-level 2D ---
-    snow_layer_unity_col        ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col unity values for snow layers (-nlevsno+1:0)
-    bw_col                      ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col partial density of water in snow (kg/m3) (-nlevsno+1:0)
-    air_vol_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col air filled porosity (1:nlevgrnd)
-    h2osoi_liqvol_col           ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col volumetric liquid water content (v/v) (-nlevsno+1:nlevgrnd)
-    swe_old_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col initial snow water (-nlevsno+1:0)
-    exice_subs_col              ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col per layer subsidence due to excess ice melt (m) (1:nlevmaxurbgrnd)
-    exice_vol_col               ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col per layer volumetric excess ice content (m3/m3) (1:nlevsoi)
-    snw_rds_col                 ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col snow grain radius (col,lyr) [microns] (-nlevsno+1:0)
-    frac_iceold_col             ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)  # col fraction of ice relative to tot water (-nlevsno+1:nlevgrnd)
+    snow_layer_unity_col        ::M = Matrix{Float64}(undef, 0, 0)  # col unity values for snow layers (-nlevsno+1:0)
+    bw_col                      ::M = Matrix{Float64}(undef, 0, 0)  # col partial density of water in snow (kg/m3) (-nlevsno+1:0)
+    air_vol_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col air filled porosity (1:nlevgrnd)
+    h2osoi_liqvol_col           ::M = Matrix{Float64}(undef, 0, 0)  # col volumetric liquid water content (v/v) (-nlevsno+1:nlevgrnd)
+    swe_old_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col initial snow water (-nlevsno+1:0)
+    exice_subs_col              ::M = Matrix{Float64}(undef, 0, 0)  # col per layer subsidence due to excess ice melt (m) (1:nlevmaxurbgrnd)
+    exice_vol_col               ::M = Matrix{Float64}(undef, 0, 0)  # col per layer volumetric excess ice content (m3/m3) (1:nlevsoi)
+    snw_rds_col                 ::M = Matrix{Float64}(undef, 0, 0)  # col snow grain radius (col,lyr) [microns] (-nlevsno+1:0)
+    frac_iceold_col             ::M = Matrix{Float64}(undef, 0, 0)  # col fraction of ice relative to tot water (-nlevsno+1:nlevgrnd)
 
     # --- Patch-level 1D ---
-    iwue_ln_patch               ::Vector{FT} = Float64[]   # patch intrinsic water use efficiency near local noon (umolCO2/molH2O)
-    vpd_ref2m_patch             ::Vector{FT} = Float64[]   # patch 2 m height surface vapor pressure deficit (Pa)
-    rh_ref2m_patch              ::Vector{FT} = Float64[]   # patch 2 m height surface relative humidity (%)
-    rh_ref2m_r_patch            ::Vector{FT} = Float64[]   # patch 2 m height surface relative humidity - rural (%)
-    rh_ref2m_u_patch            ::Vector{FT} = Float64[]   # patch 2 m height surface relative humidity - urban (%)
-    rh_af_patch                 ::Vector{FT} = Float64[]   # patch fractional humidity of canopy air (dimensionless)
-    rh10_af_patch               ::Vector{FT} = Float64[]   # patch 10-day mean fractional humidity of canopy air (dimensionless)
-    fwet_patch                  ::Vector{FT} = Float64[]   # patch canopy fraction that is wet (0 to 1)
-    fcansno_patch               ::Vector{FT} = Float64[]   # patch canopy fraction that is snow covered (0 to 1)
-    fdry_patch                  ::Vector{FT} = Float64[]   # patch canopy fraction of foliage that is green and dry [-]
-    qflx_prec_intr_patch        ::Vector{FT} = Float64[]   # patch interception of precipitation (mm H2O/s)
+    iwue_ln_patch               ::V = Float64[]   # patch intrinsic water use efficiency near local noon (umolCO2/molH2O)
+    vpd_ref2m_patch             ::V = Float64[]   # patch 2 m height surface vapor pressure deficit (Pa)
+    rh_ref2m_patch              ::V = Float64[]   # patch 2 m height surface relative humidity (%)
+    rh_ref2m_r_patch            ::V = Float64[]   # patch 2 m height surface relative humidity - rural (%)
+    rh_ref2m_u_patch            ::V = Float64[]   # patch 2 m height surface relative humidity - urban (%)
+    rh_af_patch                 ::V = Float64[]   # patch fractional humidity of canopy air (dimensionless)
+    rh10_af_patch               ::V = Float64[]   # patch 10-day mean fractional humidity of canopy air (dimensionless)
+    fwet_patch                  ::V = Float64[]   # patch canopy fraction that is wet (0 to 1)
+    fcansno_patch               ::V = Float64[]   # patch canopy fraction that is snow covered (0 to 1)
+    fdry_patch                  ::V = Float64[]   # patch canopy fraction of foliage that is green and dry [-]
+    qflx_prec_intr_patch        ::V = Float64[]   # patch interception of precipitation (mm H2O/s)
 
     # --- Landunit-level 1D ---
-    stream_water_depth_lun      ::Vector{FT} = Float64[]   # lun depth of water in streams (m)
+    stream_water_depth_lun      ::V = Float64[]   # lun depth of water in streams (m)
 end
+
+# Array-type params V/M stay loose (un-pinned) so `adapt(MtlArray/CuArray, wd)` can swap the
+# storage to a device array (and AD can swap Dual-typed arrays in). The `{FT}` convenience
+# ctor defaults them to Vector{FT}/Matrix{FT} at the working precision; @kwdef still gives
+# the no-FT `WaterDiagnosticBulkData()` (infers Float64 from the defaults). Same pattern as
+# WaterStateBulkData. Adapt.@adapt_structure rebuilds the struct with each field adapted.
+WaterDiagnosticBulkData{FT}(; kwargs...) where {FT<:Real} =
+    WaterDiagnosticBulkData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure WaterDiagnosticBulkData
 
 """
     waterdiagnosticbulk_init!(wd, nc, np, nl, ng)

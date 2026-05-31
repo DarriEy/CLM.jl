@@ -19,7 +19,16 @@ include(joinpath(@__DIR__, "gpu_backends.jl"))
 const NS = 5; const NG = 10; const NU = 5; const NMAX = 10; const NSOI = 8
 const JOFF = NS
 
-maxabsdiff(a, b) = maximum(abs.(Array(a) .- Array(b)); init = 0.0)
+# NaN-aware: inactive (unmasked) columns hold NaN scratch on BOTH backends (rvector/tvector
+# init), so both-NaN counts as agreement; a one-sided NaN stays NaN and flags real divergence.
+function maxabsdiff(a, b)
+    A = Array(a); B = Array(b); m = 0.0
+    for i in eachindex(A, B)
+        (isnan(A[i]) && isnan(B[i])) && continue
+        m = max(m, abs(A[i] - B[i]))
+    end
+    return m
+end
 
 # Build the 12 state structs (+ masks/forcing/bounds) at precision FT, sizes nc=np=nl=4.
 function build(::Type{FT}) where {FT}
