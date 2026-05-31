@@ -192,6 +192,49 @@ end
     end
 end
 
+# Excess-ice vertical-coordinate adjustment (use_excess_ice): inflate dz by the excess-ice
+# thickness and recompute the layer interfaces zi and midpoints z. One thread per column;
+# the interface recompute carries a running prefix sum of excess_ice over layers (ascending
+# j → byte-identical to the original per-j re-summation). zi_0 is the pre-adjust copy.
+@kernel function _excess_ice_adjust_kernel!(dz, zi, z, @Const(mask), @Const(landunit),
+        @Const(lun_itype), @Const(excess_ice), @Const(zi_0), nlevsno::Int, nlevmaxurbgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(dz)
+        joff = nlevsno
+        denice = T(DENICE)
+        l = landunit[c]
+        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+            for j in 1:nlevmaxurbgrnd
+                dz[c, j + joff] += excess_ice[c, j] / denice
+            end
+            ei_sum = zero(T)
+            for j in 1:nlevmaxurbgrnd
+                ei_sum += excess_ice[c, j]
+                zi[c, j + joff + 1] = zi_0[c, j + joff + 1] + ei_sum / denice
+                z[c, j + joff] = (zi[c, j - 1 + joff + 1] + zi[c, j + joff + 1]) * T(0.5)
+            end
+        end
+    end
+end
+
+# Restore dz/zi/z from the saved pre-adjust copies (after the solve). One thread per column.
+@kernel function _excess_ice_restore_kernel!(dz, zi, z, @Const(mask), @Const(landunit),
+        @Const(lun_itype), @Const(dz_0), @Const(zi_0), @Const(z_0), nlevsno::Int, nlevmaxurbgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        joff = nlevsno
+        l = landunit[c]
+        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+            for j in 1:nlevmaxurbgrnd
+                dz[c, j + joff] = dz_0[c, j + joff]
+                zi[c, j + joff + 1] = zi_0[c, j + joff + 1]
+                z[c, j + joff] = z_0[c, j + joff]
+            end
+        end
+    end
+end
+
 # =========================================================================
 # soil_temperature! — Main driver
 # =========================================================================
@@ -311,25 +354,9 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
         dz_0 = copy(col.dz)
         zi_0 = copy(col.zi)
         z_0 = copy(col.z)
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            if lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP
-                for j in 1:nlevmaxurbgrnd
-                    col.dz[c, j + joff] += excess_ice[c, j] / DENICE
-                end
-                for j in 1:nlevmaxurbgrnd
-                    col.zi[c, j + joff + 1] = col.zi[c, joff + 1] # zi(c,0) offset
-                    # Recompute: zi(c,j) = zi(c,j) + sum(excess_ice(c,1:j))/denice
-                    ei_sum = 0.0
-                    for jj in 1:j
-                        ei_sum += excess_ice[c, jj]
-                    end
-                    col.zi[c, j + joff + 1] = zi_0[c, j + joff + 1] + ei_sum / DENICE
-                    col.z[c, j + joff] = (col.zi[c, j - 1 + joff + 1] + col.zi[c, j + joff + 1]) * 0.5
-                end
-            end
-        end
+        _launch!(_excess_ice_adjust_kernel!, col.dz, col.zi, col.z, mask_nolakec,
+                 col.landunit, lun.itype, excess_ice, zi_0, nlevsno, nlevmaxurbgrnd;
+                 ndrange = size(col.dz, 1))
     end
 
     # Thermal conductivity and heat capacity
@@ -437,19 +464,11 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                        waterstatebulk, waterdiagbulk, waterfluxbulk,
                        mask_nolakec, bounds_col, dtime, dhsdT)
 
-    # Restore excess ice vertical coordinates
+    # Restore excess ice vertical coordinates (kernelized; one thread per column).
     if varctl.use_excess_ice
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = col.landunit[c]
-            if lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP
-                for j in 1:nlevmaxurbgrnd
-                    col.dz[c, j + joff] = dz_0[c, j + joff]
-                    col.zi[c, j + joff + 1] = zi_0[c, j + joff + 1]
-                    col.z[c, j + joff] = z_0[c, j + joff]
-                end
-            end
-        end
+        _launch!(_excess_ice_restore_kernel!, col.dz, col.zi, col.z, mask_nolakec,
+                 col.landunit, lun.itype, dz_0, zi_0, z_0, nlevsno, nlevmaxurbgrnd;
+                 ndrange = size(col.dz, 1))
     end
 
     # Ground temperature (kernelized; one thread per column).
