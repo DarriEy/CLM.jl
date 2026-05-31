@@ -428,6 +428,51 @@ end
 # =========================================================================
 # soil_therm_prop! — Thermal conductivities and heat capacities
 # =========================================================================
+# Harmonic-mean thermal conductivity at the interface below layer jj (Patankar form).
+@inline _tk_iface(tkj, tkj1, zj, zj1, zij1) =
+    tkj * tkj1 * (zj1 - zj) / (tkj * (zj1 - zij1) + tkj1 * (zij1 - zj))
+
+# Per-(column, level) interface thermal conductivity tk_out from the per-layer thk.
+# Backend-agnostic 2D kernel (one thread per (c, jj)); jj = j + nlevsno so the global
+# level index maps directly. Replaces the host `for j … for c` loop in soil_therm_prop!.
+@kernel function _soil_tk_interface_kernel!(tk_out, @Const(mask), @Const(itype),
+        @Const(snl), @Const(z), @Const(zi), @Const(thk),
+        nlevsno::Int, nlevurb::Int, nlevgrnd::Int)
+    c, jj = @index(Global, NTuple)
+    @inbounds if mask[c]
+        j = jj - nlevsno
+        it = itype[c]
+        wallroof = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF)
+        if wallroof
+            if j <= nlevurb
+                if j >= snl[c] + 1 && j <= nlevurb - 1
+                    tk_out[c, jj] = _tk_iface(thk[c,jj], thk[c,jj+1], z[c,jj], z[c,jj+1], zi[c,jj+1])
+                elseif j == nlevurb
+                    tk_out[c, jj] = thk[c, jj]
+                end
+            end
+        else
+            if j >= snl[c] + 1 && j <= nlevgrnd - 1
+                tk_out[c, jj] = _tk_iface(thk[c,jj], thk[c,jj+1], z[c,jj], z[c,jj+1], zi[c,jj+1])
+            elseif j == nlevgrnd
+                tk_out[c, jj] = zero(eltype(tk_out))
+            end
+        end
+    end
+end
+
+"""
+    compute_soil_tk_interface!(tk_out, mask, itype, snl, z, zi, thk,
+                               nlevsno, nlevurb, nlevgrnd, njlev)
+
+Interface thermal conductivity for all active (column, level) pairs. Backend-agnostic.
+"""
+function compute_soil_tk_interface!(tk_out, mask, itype, snl, z, zi, thk,
+                                    nlevsno::Int, nlevurb::Int, nlevgrnd::Int, njlev::Int)
+    _launch!(_soil_tk_interface_kernel!, tk_out, mask, itype, snl, z, zi, thk,
+             nlevsno, nlevurb, nlevgrnd; ndrange = (size(tk_out, 1), njlev))
+end
+
 function soil_therm_prop!(col::ColumnData, lun::LandunitData,
                           urbanparams::UrbanParamsData, temperature::TemperatureData,
                           waterstatebulk::WaterStateBulkData,
@@ -548,32 +593,9 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
         end
     end
 
-    # Thermal conductivity at layer interface
-    for j in (-nlevsno + 1):nlevmaxurbgrnd
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            jj = j + joff
-            if (col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL ||
-                col.itype[c] == ICOL_ROOF) && j <= nlevurb
-                if j >= col.snl[c] + 1 && j <= nlevurb - 1
-                    tk_out[c, jj] = thk[c, jj] * thk[c, jj + 1] * (col.z[c, jj + 1] - col.z[c, jj]) /
-                        (thk[c, jj] * (col.z[c, jj + 1] - col.zi[c, jj + 1]) +
-                         thk[c, jj + 1] * (col.zi[c, jj + 1] - col.z[c, jj]))
-                elseif j == nlevurb
-                    tk_out[c, jj] = thk[c, jj]
-                end
-            elseif col.itype[c] != ICOL_SUNWALL && col.itype[c] != ICOL_SHADEWALL &&
-                   col.itype[c] != ICOL_ROOF
-                if j >= col.snl[c] + 1 && j <= nlevgrnd - 1
-                    tk_out[c, jj] = thk[c, jj] * thk[c, jj + 1] * (col.z[c, jj + 1] - col.z[c, jj]) /
-                        (thk[c, jj] * (col.z[c, jj + 1] - col.zi[c, jj + 1]) +
-                         thk[c, jj + 1] * (col.zi[c, jj + 1] - col.z[c, jj]))
-                elseif j == nlevgrnd
-                    tk_out[c, jj] = 0.0
-                end
-            end
-        end
-    end
+    # Thermal conductivity at layer interface (kernelized; one thread per (c, jj)).
+    compute_soil_tk_interface!(tk_out, mask_nolakec, col.itype, col.snl, col.z, col.zi,
+                               thk, nlevsno, nlevurb, nlevgrnd, nlevsno + nlevmaxurbgrnd)
 
     # Thermal conductivity of h2osfc
     for c in bounds_col
