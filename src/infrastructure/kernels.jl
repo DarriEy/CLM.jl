@@ -42,6 +42,10 @@ end
 @inline _scatter_add!(arr::AbstractArray{<:Union{AbstractFloat,Integer}}, i, x) =
     (Atomix.@atomic arr[i] += x; nothing)
 @inline _scatter_add!(arr, i, x) = (@inbounds arr[i] += x; nothing)
+# 2D variant (e.g. per-(column, layer) scatter).
+@inline _scatter_add!(arr::AbstractArray{<:Union{AbstractFloat,Integer}}, i, j, x) =
+    (Atomix.@atomic arr[i, j] += x; nothing)
+@inline _scatter_add!(arr, i, j, x) = (@inbounds arr[i, j] += x; nothing)
 
 # --------------------------------------------------------------------------
 # forc_q: column specific humidity from vapor pressure

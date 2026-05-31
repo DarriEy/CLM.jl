@@ -912,6 +912,67 @@ function compute_gnet_patch!(energyflux, solarabs, canopystate, waterfluxbulk, c
     return nothing
 end
 
+# SNICAR per-patch top-layer net heat flux + per-snow-layer solar; atomically scatters
+# hs_top / hs_top_snow (per column) and sabg_lyr_col (per column, layer). Reuses the
+# GnetPatchIn/GnetColIn device-view structs (its fields are a subset). One thread per patch.
+@kernel function _gnet_snicar_kernel!(pin::GnetPatchIn, cin::GnetColIn, @Const(mask),
+        @Const(column), @Const(landunit), @Const(urbpoi), @Const(frac_veg_nosno),
+        @Const(snl), @Const(sabg_lyr), @Const(eflx_gnet),
+        hs_top, hs_top_snow, sabg_lyr_col, nlevsno::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(hs_top)
+        c = column[p]; l = landunit[p]; wt = pin.wtcol[p]; joff = nlevsno
+        lyr_top = snl[c] + 1
+        if !urbpoi[l]
+            base = pin.dlrad[p] + (one(T) - frac_veg_nosno[p]) * cin.emg[c] * cin.forc_lwrad[c]
+            sab = sabg_lyr[p, lyr_top + joff]
+            eflx_gnet_top = sab + base - cin.lwrad_emit[c] -
+                (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c])
+            _scatter_add!(hs_top, c, eflx_gnet_top * wt)
+            eflx_gnet_snow = sab + base - cin.lwrad_emit_snow[c] -
+                (pin.eflx_sh_snow[p] + pin.qflx_ev_snow[p] * cin.htvp[c])
+            _scatter_add!(hs_top_snow, c, eflx_gnet_snow * wt)
+            for j in lyr_top:1
+                _scatter_add!(sabg_lyr_col, c, j + nlevsno, sabg_lyr[p, j + joff] * wt)
+            end
+        else
+            g = eflx_gnet[p]
+            _scatter_add!(hs_top, c, g * wt)
+            _scatter_add!(hs_top_snow, c, g * wt)
+            _scatter_add!(sabg_lyr_col, c, lyr_top + nlevsno, pin.sabg[p] * wt)
+        end
+    end
+end
+
+function compute_gnet_snicar!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,
+        patch_data, mask_nolakep, lwrad_emit, dlwrad_emit, lwrad_emit_snow, lwrad_emit_soil,
+        lwrad_emit_h2osfc, emg, forc_lwrad, htvp, frac_sno_eff, hs_top, hs_top_snow,
+        sabg_lyr_col, nlevsno::Int)
+    pin = GnetPatchIn(;
+        sabg = solarabs.sabg_patch, sabg_soil = solarabs.sabg_soil_patch,
+        sabg_snow = solarabs.sabg_snow_patch, dlrad = energyflux.dlrad_patch,
+        cgrnd = energyflux.cgrnd_patch, eflx_sh_grnd = energyflux.eflx_sh_grnd_patch,
+        eflx_sh_snow = energyflux.eflx_sh_snow_patch, eflx_sh_soil = energyflux.eflx_sh_soil_patch,
+        eflx_sh_h2osfc = energyflux.eflx_sh_h2osfc_patch,
+        qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch,
+        qflx_ev_snow = waterfluxbulk.qflx_ev_snow_patch, qflx_ev_soil = waterfluxbulk.qflx_ev_soil_patch,
+        qflx_ev_h2osfc = waterfluxbulk.qflx_ev_h2osfc_patch,
+        eflx_lwrad_net = energyflux.eflx_lwrad_net_patch,
+        qflx_tran_veg = waterfluxbulk.wf.qflx_tran_veg_patch, wtcol = patch_data.wtcol)
+    cin = GnetColIn(; lwrad_emit, lwrad_emit_snow, lwrad_emit_soil, lwrad_emit_h2osfc,
+        dlwrad_emit, emg, forc_lwrad, htvp, frac_sno_eff)
+    backend = _kernel_backend(hs_top)
+    np = length(mask_nolakep)
+    np == 0 && return nothing
+    _gnet_snicar_kernel!(backend)(pin, cin, mask_nolakep, patch_data.column,
+        patch_data.landunit, lun.urbpoi, canopystate.frac_veg_nosno_patch, col.snl,
+        solarabs.sabg_lyr_patch, energyflux.eflx_gnet_patch,
+        hs_top, hs_top_snow, sabg_lyr_col, nlevsno; ndrange = np)
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 # =========================================================================
 # compute_ground_heat_flux_and_deriv!
 # =========================================================================
@@ -969,45 +1030,11 @@ function compute_ground_heat_flux_and_deriv!(
     hs_top .= 0.0
     hs_top_snow .= 0.0
 
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        c = patch_data.column[p]
-        l = patch_data.landunit[p]
-        lyr_top = snl[c] + 1
-
-        frac_veg_nosno = canopystate.frac_veg_nosno_patch[p]
-        dlrad = energyflux.dlrad_patch[p]
-        eflx_sh_grnd = energyflux.eflx_sh_grnd_patch[p]
-        qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch[p]
-        sabg_lyr = solarabs.sabg_lyr_patch
-
-        if !lun.urbpoi[l]
-            eflx_gnet_top = sabg_lyr[p, lyr_top + joff] + dlrad +
-                (1.0 - frac_veg_nosno) * emg[c] * forc_lwrad[c] - lwrad_emit[c] -
-                (eflx_sh_grnd + qflx_evap_soi * htvp[c])
-
-            hs_top[c] += eflx_gnet_top * patch_data.wtcol[p]
-
-            eflx_sh_snow = energyflux.eflx_sh_snow_patch[p]
-            qflx_ev_snow = waterfluxbulk.qflx_ev_snow_patch[p]
-            eflx_gnet_snow = sabg_lyr[p, lyr_top + joff] + dlrad +
-                (1.0 - frac_veg_nosno) * emg[c] * forc_lwrad[c] - lwrad_emit_snow[c] -
-                (eflx_sh_snow + qflx_ev_snow * htvp[c])
-
-            hs_top_snow[c] += eflx_gnet_snow * patch_data.wtcol[p]
-
-            for j in lyr_top:1
-                jj_slyr = j + joff  # index into sabg_lyr_col
-                # sabg_lyr_col is indexed [c, j_in_col_space] where j ranges -nlevsno+1:1
-                # Map to matrix column: j - (-nlevsno+1) + 1 = j + nlevsno
-                sabg_lyr_col[c, j + nlevsno] += sabg_lyr[p, j + joff] * patch_data.wtcol[p]
-            end
-        else
-            hs_top[c] += eflx_gnet[p] * patch_data.wtcol[p]
-            hs_top_snow[c] += eflx_gnet[p] * patch_data.wtcol[p]
-            sabg_lyr_col[c, lyr_top + nlevsno] += solarabs.sabg_patch[p] * patch_data.wtcol[p]
-        end
-    end
+    # SNICAR top-layer net heat flux + per-layer solar (kernelized; atomic scatter).
+    compute_gnet_snicar!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,
+        patch_data, mask_nolakep, lwrad_emit, dlwrad_emit, lwrad_emit_snow, lwrad_emit_soil,
+        lwrad_emit_h2osfc_arr, emg, forc_lwrad, htvp, frac_sno_eff, hs_top, hs_top_snow,
+        sabg_lyr_col, nlevsno)
 
     return nothing
 end
