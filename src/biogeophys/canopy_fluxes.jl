@@ -660,6 +660,75 @@ end
     end
 end
 
+# Biomass heat capacities (cf2): per-filtered-patch, PFT-parameter-indexed (ft =
+# itype[p]+1). use_cn passed as a Bool; constants eltype-converted.
+@kernel function _cf_biomass_heat_kernel!(frac_rad_abs_by_stem, dbh, sa_leaf, sa_stem,
+        sa_internal, cp_leaf, cp_stem, rstem, leaf_biomass, stem_biomass,
+        @Const(filterp), @Const(itype), @Const(elai), @Const(esai), @Const(htop),
+        @Const(fbw_pft), @Const(nstem_pft), @Const(wood_density_pft), @Const(dbh_pft),
+        @Const(slatop_pft), @Const(rstem_per_dbh_pft), @Const(is_tree_pft),
+        @Const(is_shrub_pft), use_cn::Bool)
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        T = eltype(sa_leaf)
+        ft = itype[p] + 1
+        elai_p = elai[p]; esai_p = esai[p]
+        if (elai_p + esai_p) > zero(T)
+            frac_rad_abs_by_stem[p] = esai_p / (elai_p + esai_p)
+        else
+            frac_rad_abs_by_stem[p] = zero(T)
+        end
+        if elai_p > zero(T)
+            frac_rad_abs_by_stem[p] = T(K_VERT_CANOPY) * frac_rad_abs_by_stem[p]
+        end
+        if use_cn
+            if stem_biomass[p] > zero(T)
+                dbh[p] = T(2.0) * sqrt(stem_biomass[p] * (one(T) - fbw_pft[ft]) /
+                    (T(RPI) * htop[p] * T(K_CYL_VOL_CANOPY) * nstem_pft[ft] * wood_density_pft[ft]))
+            else
+                dbh[p] = zero(T)
+            end
+        else
+            dbh[p] = dbh_pft[ft]
+        end
+        sa_leaf[p] = T(2.0) * elai_p
+        sa_stem[p] = nstem_pft[ft] * htop[p] * T(RPI) * dbh[p]
+        sa_stem[p] = T(K_CYL_AREA_CANOPY) * sa_stem[p]
+        if !(is_tree_pft[ft] || is_shrub_pft[ft]) || dbh[p] < T(MIN_STEM_DIAMETER)
+            frac_rad_abs_by_stem[p] = zero(T)
+            sa_stem[p] = zero(T)
+            sa_leaf[p] = sa_leaf[p] + esai_p
+        end
+        if !use_cn
+            leaf_biomass[p] = (T(1.0e-3) * T(C_TO_B) / slatop_pft[ft]) *
+                smooth_max(T(0.01), T(0.5) * sa_leaf[p]) / (one(T) - fbw_pft[ft])
+            carea_stem = T(RPI) * (dbh[p] * T(0.5))^2
+            stem_biomass[p] = carea_stem * htop[p] * T(K_CYL_VOL_CANOPY) *
+                nstem_pft[ft] * wood_density_pft[ft] / (one(T) - fbw_pft[ft])
+        end
+        sa_internal[p] = min(sa_leaf[p], sa_stem[p])
+        sa_internal[p] = T(K_INTERNAL_CANOPY) * sa_internal[p]
+        cp_leaf[p] = leaf_biomass[p] * (T(C_DRY_BIOMASS) * (one(T) - fbw_pft[ft]) + fbw_pft[ft] * T(C_WATER))
+        cp_stem[p] = stem_biomass[p] * (T(C_DRY_BIOMASS) * (one(T) - fbw_pft[ft]) + fbw_pft[ft] * T(C_WATER))
+        cp_stem[p] = T(K_CYL_VOL_CANOPY) * cp_stem[p]
+        rstem[p] = rstem_per_dbh_pft[ft] * dbh[p]
+    end
+end
+
+@kernel function _cf_no_biomass_kernel!(frac_rad_abs_by_stem, sa_leaf, sa_stem,
+        sa_internal, cp_leaf, cp_stem, rstem, @Const(filterp), @Const(elai), @Const(esai))
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        T = eltype(sa_leaf)
+        sa_leaf[p] = elai[p] + esai[p]
+        frac_rad_abs_by_stem[p] = zero(T)
+        sa_stem[p] = zero(T); sa_internal[p] = zero(T)
+        cp_leaf[p] = zero(T); cp_stem[p] = zero(T); rstem[p] = zero(T)
+    end
+end
+
 # =====================================================================
 # Main canopy_fluxes! function
 # =====================================================================
@@ -871,89 +940,18 @@ function canopy_fluxes!(
     _launch!(_cf_init_zero_kernel!, del_arr, efeb, wtlq0, wtalq, wtgq, wtaq0, obuold,
         energyflux.dhsdt_canopy_patch, energyflux.eflx_sh_stem_patch, filterp; ndrange = fn)
 
-    # --- Calculate biomass heat capacities ---
+    # --- Calculate biomass heat capacities (per-filtered-patch kernels) ---
     if ctrl.use_biomass_heat_storage
-        for fi in 1:fn
-            p = filterp[fi]
-            c = patch_data.column[p]
-            ft = patch_data.itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
-
-            elai_p = canopystate.elai_patch[p]
-            esai_p = canopystate.esai_patch[p]
-
-            # fraction of stem receiving incoming radiation
-            if (elai_p + esai_p) > 0.0
-                frac_rad_abs_by_stem[p] = esai_p / (elai_p + esai_p)
-            else
-                frac_rad_abs_by_stem[p] = 0.0
-            end
-            if elai_p > 0.0
-                frac_rad_abs_by_stem[p] = K_VERT_CANOPY * frac_rad_abs_by_stem[p]
-            end
-
-            # calculate dbh from stem biomass or parameter file
-            if use_cn
-                if canopystate.stem_biomass_patch[p] > 0.0
-                    dbh[p] = 2.0 * sqrt(canopystate.stem_biomass_patch[p] * (1.0 - fbw_pft[ft]) /
-                        (RPI * canopystate.htop_patch[p] * K_CYL_VOL_CANOPY *
-                         nstem_pft[ft] * wood_density_pft[ft]))
-                else
-                    dbh[p] = 0.0
-                end
-            else
-                dbh[p] = dbh_pft[ft]
-            end
-
-            # leaf and stem surface area
-            sa_leaf[p] = 2.0 * elai_p  # double for full surface area (sensible heat)
-
-            # stem surface area
-            sa_stem[p] = nstem_pft[ft] * canopystate.htop_patch[p] * RPI * dbh[p]
-            sa_stem[p] = K_CYL_AREA_CANOPY * sa_stem[p]
-
-            # only separate leaf/stem heat capacity for trees/shrubs with sufficient dbh
-            if !(is_tree_pft[ft] || is_shrub_pft[ft]) || dbh[p] < MIN_STEM_DIAMETER
-                frac_rad_abs_by_stem[p] = 0.0
-                sa_stem[p] = 0.0
-                sa_leaf[p] = sa_leaf[p] + esai_p
-            end
-
-            # SP mode: calculate leaf and stem biomass
-            if !use_cn
-                canopystate.leaf_biomass_patch[p] = (1.0e-3 * C_TO_B / slatop_pft[ft]) *
-                    smooth_max(0.01, 0.5 * sa_leaf[p]) / (1.0 - fbw_pft[ft])
-                carea_stem = RPI * (dbh[p] * 0.5)^2
-                canopystate.stem_biomass_patch[p] = carea_stem * canopystate.htop_patch[p] *
-                    K_CYL_VOL_CANOPY * nstem_pft[ft] * wood_density_pft[ft] /
-                    (1.0 - fbw_pft[ft])
-            end
-
-            # internal longwave fluxes between leaf and stem
-            sa_internal[p] = min(sa_leaf[p], sa_stem[p])
-            sa_internal[p] = K_INTERNAL_CANOPY * sa_internal[p]
-
-            # heat capacity of vegetation
-            cp_leaf[p] = canopystate.leaf_biomass_patch[p] *
-                (C_DRY_BIOMASS * (1.0 - fbw_pft[ft]) + fbw_pft[ft] * C_WATER)
-            cp_stem[p] = canopystate.stem_biomass_patch[p] *
-                (C_DRY_BIOMASS * (1.0 - fbw_pft[ft]) + fbw_pft[ft] * C_WATER)
-            cp_stem[p] = K_CYL_VOL_CANOPY * cp_stem[p]
-
-            # resistance between internal stem temperature and canopy air
-            rstem[p] = rstem_per_dbh_pft[ft] * dbh[p]
-        end
+        _launch!(_cf_biomass_heat_kernel!, frac_rad_abs_by_stem, dbh, sa_leaf, sa_stem,
+            sa_internal, cp_leaf, cp_stem, rstem, canopystate.leaf_biomass_patch,
+            canopystate.stem_biomass_patch, filterp, patch_data.itype,
+            canopystate.elai_patch, canopystate.esai_patch, canopystate.htop_patch,
+            fbw_pft, nstem_pft, wood_density_pft, dbh_pft, slatop_pft, rstem_per_dbh_pft,
+            is_tree_pft, is_shrub_pft, use_cn; ndrange = fn)
     else
-        # No biomass heat storage: set terms to zero
-        for fi in 1:fn
-            p = filterp[fi]
-            sa_leaf[p] = canopystate.elai_patch[p] + canopystate.esai_patch[p]
-            frac_rad_abs_by_stem[p] = 0.0
-            sa_stem[p] = 0.0
-            sa_internal[p] = 0.0
-            cp_leaf[p] = 0.0
-            cp_stem[p] = 0.0
-            rstem[p] = 0.0
-        end
+        _launch!(_cf_no_biomass_kernel!, frac_rad_abs_by_stem, sa_leaf, sa_stem,
+            sa_internal, cp_leaf, cp_stem, rstem, filterp, canopystate.elai_patch,
+            canopystate.esai_patch; ndrange = fn)
     end
 
     # --- Daylength control for Vcmax ---
