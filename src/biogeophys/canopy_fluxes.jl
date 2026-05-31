@@ -808,6 +808,127 @@ end
     end
 end
 
+# Post-iteration diagnostics (cf5): the field-heaviest canopy loop (~84 arrays),
+# grouped into device-view structs (the soil_temperature! template). Per-filtered-
+# patch; the cgrnds/cgrndl/liqcan/snocan/t_stem updates are per-patch own-index
+# read-modify-write (no scatter). qsat()/smooth_* are kernel-safe; use_biomass_heat
+# passed as a Bool; constants eltype-converted. (canopy is CPU-only — the Newton
+# filter compaction blocks a whole-function GPU run — but this keeps every canopy
+# loop in kernel form and GPU-ready.)
+Base.@kwdef struct CfDiagOut{V}   # written per-patch outputs
+    err_arr::V; dt_stem::V; dhsdt_canopy::V; t_stem::V; taux::V; tauy::V
+    eflx_sh_grnd::V; eflx_sh_snow::V; eflx_sh_soil::V; eflx_sh_h2osfc::V
+    qflx_evap_soi::V; qflx_ev_snow::V; qflx_ev_soil::V; qflx_ev_h2osfc::V
+    t_ref2m::V; t_ref2m_r::V; q_ref2m::V; rh_ref2m::V; rh_ref2m_r::V; vpd_ref2m::V
+    dlrad::V; ulrad::V; t_skin::V; cgrnds::V; cgrndl::V; cgrnd::V
+    snocan_baseline::V; liqcan::V; snocan::V
+end
+Base.@kwdef struct CfDiagP{V}     # read-only per-patch inputs
+    frac_rad_abs_by_stem::V; sabv::V; air::V; bir::V; tlbef::V; dt_veg::V; cir::V
+    lw_leaf::V; lw_stem::V; eflx_sh_veg::V; qflx_evap_veg::V; tl_ini::V; cp_leaf::V
+    cp_stem::V; ts_ini::V; eflx_sh_stem::V; stem_biomass::V; wtal::V; wtl0::V; wta0::V
+    wtstem0::V; wtg::V; thm::V; ram1::V; wtgq::V; delq::V; wtalq::V; wtlq0::V; wtaq0::V
+    qsatl::V; temp1::V; temp12m::V; dth::V; temp2::V; temp22m::V; dqh::V; emv::V
+    qflx_tran_veg::V; t_veg::V
+end
+Base.@kwdef struct CfDiagC{V}     # read-only per-column inputs
+    frac_sno_eff::V; t_h2osfc::V; frac_h2osfc::V; t_grnd::V; forc_rho::V
+    qg_snow::V; qg_soil::V; qg_h2osfc::V; dqgdT::V; htvp::V; emg::V
+    forc_q::V; forc_pbot::V; forc_lwrad::V
+end
+Adapt.@adapt_structure CfDiagOut
+Adapt.@adapt_structure CfDiagP
+Adapt.@adapt_structure CfDiagC
+
+@kernel function _cf_postiter_kernel!(out, pp, cc, @Const(t_soisno), @Const(filterp),
+        @Const(column), @Const(gridcell), @Const(snl), @Const(forc_u), @Const(forc_v),
+        use_biomass::Bool, nlevsno::Int, dtime)
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        T = eltype(out.err_arr)
+        c = column[p]; g = gridcell[p]
+        snl_c = snl[c]
+        rho = cc.forc_rho[c]; tveg = pp.t_veg[p]; thm = pp.thm[p]; frac_rad = pp.frac_rad_abs_by_stem[p]
+        lw_grnd = cc.frac_sno_eff[c] * t_soisno[c, snl_c + 1 + nlevsno]^4 +
+            (one(T) - cc.frac_sno_eff[c] - cc.frac_h2osfc[c]) * t_soisno[c, 1 + nlevsno]^4 +
+            cc.frac_h2osfc[c] * cc.t_h2osfc[c]^4
+
+        out.err_arr[p] = (one(T) - frac_rad) * (pp.sabv[p] + pp.air[p] +
+            pp.bir[p] * pp.tlbef[p]^3 * (pp.tlbef[p] + T(4.0) * pp.dt_veg[p]) + pp.cir[p] * lw_grnd) -
+            pp.lw_leaf[p] + pp.lw_stem[p] - pp.eflx_sh_veg[p] - T(HVAP) * pp.qflx_evap_veg[p] -
+            ((tveg - pp.tl_ini[p]) * pp.cp_leaf[p] / dtime)
+
+        # Stem temperature update
+        if use_biomass
+            if pp.stem_biomass[p] > zero(T)
+                out.dt_stem[p] = (frac_rad * (pp.sabv[p] + pp.air[p] + pp.bir[p] * pp.ts_ini[p]^4 +
+                    pp.cir[p] * lw_grnd) - pp.eflx_sh_stem[p] + pp.lw_leaf[p] - pp.lw_stem[p]) /
+                    (pp.cp_stem[p] / dtime - frac_rad * pp.bir[p] * T(4.0) * pp.ts_ini[p]^3)
+            else
+                out.dt_stem[p] = zero(T)
+            end
+            out.dhsdt_canopy[p] = out.dt_stem[p] * pp.cp_stem[p] / dtime +
+                (tveg - pp.tl_ini[p]) * pp.cp_leaf[p] / dtime
+            out.t_stem[p] = out.t_stem[p] + out.dt_stem[p]
+        else
+            out.dt_stem[p] = zero(T)
+        end
+        tstem = out.t_stem[p]
+
+        delt_val = pp.wtal[p] * cc.t_grnd[c] - pp.wtl0[p] * tveg - pp.wta0[p] * thm - pp.wtstem0[p] * tstem
+        out.taux[p] = -rho * forc_u[g] / pp.ram1[p]
+        out.tauy[p] = -rho * forc_v[g] / pp.ram1[p]
+        out.eflx_sh_grnd[p] = T(CPAIR) * rho * pp.wtg[p] * delt_val
+
+        delt_snow = pp.wtal[p] * t_soisno[c, snl_c + 1 + nlevsno] - pp.wtl0[p] * tveg - pp.wta0[p] * thm - pp.wtstem0[p] * tstem
+        delt_soil = pp.wtal[p] * t_soisno[c, 1 + nlevsno] - pp.wtl0[p] * tveg - pp.wta0[p] * thm - pp.wtstem0[p] * tstem
+        delt_h2osfc = pp.wtal[p] * cc.t_h2osfc[c] - pp.wtl0[p] * tveg - pp.wta0[p] * thm - pp.wtstem0[p] * tstem
+        out.eflx_sh_snow[p] = T(CPAIR) * rho * pp.wtg[p] * delt_snow
+        out.eflx_sh_soil[p] = T(CPAIR) * rho * pp.wtg[p] * delt_soil
+        out.eflx_sh_h2osfc[p] = T(CPAIR) * rho * pp.wtg[p] * delt_h2osfc
+        out.qflx_evap_soi[p] = rho * pp.wtgq[p] * pp.delq[p]
+
+        delq_snow = pp.wtalq[p] * cc.qg_snow[c] - pp.wtlq0[p] * pp.qsatl[p] - pp.wtaq0[p] * cc.forc_q[c]
+        out.qflx_ev_snow[p] = rho * pp.wtgq[p] * delq_snow
+        delq_soil = pp.wtalq[p] * cc.qg_soil[c] - pp.wtlq0[p] * pp.qsatl[p] - pp.wtaq0[p] * cc.forc_q[c]
+        out.qflx_ev_soil[p] = rho * pp.wtgq[p] * delq_soil
+        delq_h2osfc = pp.wtalq[p] * cc.qg_h2osfc[c] - pp.wtlq0[p] * pp.qsatl[p] - pp.wtaq0[p] * cc.forc_q[c]
+        out.qflx_ev_h2osfc[p] = rho * pp.wtgq[p] * delq_h2osfc
+
+        out.t_ref2m[p] = thm + pp.temp1[p] * pp.dth[p] * (one(T) / pp.temp12m[p] - one(T) / pp.temp1[p])
+        out.t_ref2m_r[p] = out.t_ref2m[p]
+        out.q_ref2m[p] = cc.forc_q[c] + pp.temp2[p] * pp.dqh[p] * (one(T) / pp.temp22m[p] - one(T) / pp.temp2[p])
+        (qsat_ref2m, e_ref2m, _, _) = qsat(out.t_ref2m[p], cc.forc_pbot[c])
+        out.rh_ref2m[p] = smooth_min(T(100.0), out.q_ref2m[p] / qsat_ref2m * T(100.0))
+        out.rh_ref2m_r[p] = out.rh_ref2m[p]
+        out.vpd_ref2m[p] = e_ref2m * (one(T) - out.rh_ref2m[p] / T(100.0))
+
+        emv_p = pp.emv[p]; emg_c = cc.emg[c]
+        out.dlrad[p] = (one(T) - emv_p) * emg_c * cc.forc_lwrad[c] +
+            emv_p * emg_c * T(SB) * pp.tlbef[p]^3 * (pp.tlbef[p] + T(4.0) * pp.dt_veg[p]) * (one(T) - frac_rad) +
+            emv_p * emg_c * T(SB) * pp.ts_ini[p]^3 * (pp.ts_ini[p] + T(4.0) * out.dt_stem[p]) * frac_rad
+        out.ulrad[p] = ((one(T) - emg_c) * (one(T) - emv_p) * (one(T) - emv_p) * cc.forc_lwrad[c] +
+            emv_p * (one(T) + (one(T) - emg_c) * (one(T) - emv_p)) * T(SB) *
+            pp.tlbef[p]^3 * (pp.tlbef[p] + T(4.0) * pp.dt_veg[p]) * (one(T) - frac_rad) +
+            emv_p * (one(T) + (one(T) - emg_c) * (one(T) - emv_p)) * T(SB) *
+            pp.ts_ini[p]^3 * (pp.ts_ini[p] + T(4.0) * out.dt_stem[p]) * frac_rad +
+            emg_c * (one(T) - emv_p) * T(SB) * lw_grnd)
+        out.t_skin[p] = emv_p * tveg + (one(T) - emv_p) * sqrt(sqrt(lw_grnd))
+
+        out.cgrnds[p] = out.cgrnds[p] + T(CPAIR) * rho * pp.wtg[p] * pp.wtal[p]
+        out.cgrndl[p] = out.cgrndl[p] + rho * pp.wtgq[p] * pp.wtalq[p] * cc.dqgdT[c]
+        out.cgrnd[p] = out.cgrnds[p] + out.cgrndl[p] * cc.htvp[c]
+
+        out.snocan_baseline[p] = out.snocan[p]
+        _frac_liq = smooth_heaviside(tveg - T(TFRZ); k = T(200.0))
+        _frac_ice = one(T) - _frac_liq
+        _net_evap = (pp.qflx_tran_veg[p] - pp.qflx_evap_veg[p]) * dtime
+        out.liqcan[p] = smooth_max(zero(T), out.liqcan[p] + _frac_liq * _net_evap)
+        out.snocan[p] = smooth_max(zero(T), out.snocan[p] + _frac_ice * _net_evap)
+    end
+end
+
 # =====================================================================
 # Main canopy_fluxes! function
 # =====================================================================
@@ -1251,143 +1372,45 @@ function canopy_fluxes!(
     fn = fnorig
     filterp[1:fn] .= fporig[1:fn]
 
-    for fi in 1:fn
-        p = filterp[fi]
-        c = patch_data.column[p]
-        g = patch_data.gridcell[p]
-
-        # Energy balance check
-        snl_c = col_data.snl[c]
-        lw_grnd = (waterdiagbulk.frac_sno_eff_col[c] * temperature.t_soisno_col[c, snl_c + 1 + nlevsno]^4 +
-            (1.0 - waterdiagbulk.frac_sno_eff_col[c] - waterdiagbulk.frac_h2osfc_col[c]) *
-                temperature.t_soisno_col[c, 1 + nlevsno]^4 +
-            waterdiagbulk.frac_h2osfc_col[c] * temperature.t_h2osfc_col[c]^4)
-
-        err_arr[p] = (1.0 - frac_rad_abs_by_stem[p]) * (solarabs.sabv_patch[p] + air[p] +
-            bir[p] * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) + cir[p] * lw_grnd) -
-            lw_leaf[p] + lw_stem[p] - energyflux.eflx_sh_veg_patch[p] -
-            HVAP * waterfluxbulk.wf.qflx_evap_veg_patch[p] -
-            ((temperature.t_veg_patch[p] - tl_ini[p]) * cp_leaf[p] / dtime)
-
-        # Update stem temperature
-        if ctrl.use_biomass_heat_storage
-            if canopystate.stem_biomass_patch[p] > 0.0
-                dt_stem[p] = (frac_rad_abs_by_stem[p] * (solarabs.sabv_patch[p] + air[p] +
-                    bir[p] * ts_ini[p]^4 + cir[p] * lw_grnd) -
-                    energyflux.eflx_sh_stem_patch[p] +
-                    lw_leaf[p] - lw_stem[p]) /
-                    (cp_stem[p] / dtime - frac_rad_abs_by_stem[p] * bir[p] * 4.0 * ts_ini[p]^3)
-            else
-                dt_stem[p] = 0.0
-            end
-
-            energyflux.dhsdt_canopy_patch[p] = dt_stem[p] * cp_stem[p] / dtime +
-                (temperature.t_veg_patch[p] - tl_ini[p]) * cp_leaf[p] / dtime
-            temperature.t_stem_patch[p] = temperature.t_stem_patch[p] + dt_stem[p]
-        else
-            dt_stem[p] = 0.0
-        end
-
-        delt_val = wtal[p] * temperature.t_grnd_col[c] - wtl0[p] * temperature.t_veg_patch[p] -
-            wta0[p] * temperature.thm_patch[p] - wtstem0[p] * temperature.t_stem_patch[p]
-
-        # Ground fluxes
-        energyflux.taux_patch[p] = -forc_rho_col[c] * forc_u_grc[g] / frictionvel.ram1_patch[p]
-        energyflux.tauy_patch[p] = -forc_rho_col[c] * forc_v_grc[g] / frictionvel.ram1_patch[p]
-        energyflux.eflx_sh_grnd_patch[p] = CPAIR * forc_rho_col[c] * wtg[p] * delt_val
-
-        # Individual sensible heat fluxes
-        delt_snow = wtal[p] * temperature.t_soisno_col[c, snl_c + 1 + nlevsno] -
-            wtl0[p] * temperature.t_veg_patch[p] - wta0[p] * temperature.thm_patch[p] -
-            wtstem0[p] * temperature.t_stem_patch[p]
-        delt_soil = wtal[p] * temperature.t_soisno_col[c, 1 + nlevsno] -
-            wtl0[p] * temperature.t_veg_patch[p] - wta0[p] * temperature.thm_patch[p] -
-            wtstem0[p] * temperature.t_stem_patch[p]
-        delt_h2osfc = wtal[p] * temperature.t_h2osfc_col[c] -
-            wtl0[p] * temperature.t_veg_patch[p] - wta0[p] * temperature.thm_patch[p] -
-            wtstem0[p] * temperature.t_stem_patch[p]
-
-        energyflux.eflx_sh_snow_patch[p] = CPAIR * forc_rho_col[c] * wtg[p] * delt_snow
-        energyflux.eflx_sh_soil_patch[p] = CPAIR * forc_rho_col[c] * wtg[p] * delt_soil
-        energyflux.eflx_sh_h2osfc_patch[p] = CPAIR * forc_rho_col[c] * wtg[p] * delt_h2osfc
-        waterfluxbulk.wf.qflx_evap_soi_patch[p] = forc_rho_col[c] * wtgq[p] * delq[p]
-
-        # Individual latent heat fluxes
-        delq_snow = wtalq[p] * waterdiagbulk.qg_snow_col[c] - wtlq0[p] * qsatl[p] - wtaq0[p] * forc_q_col[c]
-        waterfluxbulk.qflx_ev_snow_patch[p] = forc_rho_col[c] * wtgq[p] * delq_snow
-
-        delq_soil = wtalq[p] * waterdiagbulk.qg_soil_col[c] - wtlq0[p] * qsatl[p] - wtaq0[p] * forc_q_col[c]
-        waterfluxbulk.qflx_ev_soil_patch[p] = forc_rho_col[c] * wtgq[p] * delq_soil
-
-        delq_h2osfc = wtalq[p] * waterdiagbulk.qg_h2osfc_col[c] - wtlq0[p] * qsatl[p] - wtaq0[p] * forc_q_col[c]
-        waterfluxbulk.qflx_ev_h2osfc_patch[p] = forc_rho_col[c] * wtgq[p] * delq_h2osfc
-
-        # 2m reference height temperature
-        temperature.t_ref2m_patch[p] = temperature.thm_patch[p] +
-            temp1[p] * dth[p] * (1.0 / temp12m[p] - 1.0 / temp1[p])
-        temperature.t_ref2m_r_patch[p] = temperature.t_ref2m_patch[p]
-
-        # 2m specific humidity
-        waterdiagbulk.q_ref2m_patch[p] = forc_q_col[c] +
-            temp2[p] * dqh[p] * (1.0 / temp22m[p] - 1.0 / temp2[p])
-
-        # 2m relative humidity
-        (qsat_ref2m, e_ref2m, _, _) = qsat(temperature.t_ref2m_patch[p], forc_pbot_col[c])
-        waterdiagbulk.rh_ref2m_patch[p] = smooth_min(100.0,
-            waterdiagbulk.q_ref2m_patch[p] / qsat_ref2m * 100.0)
-        waterdiagbulk.rh_ref2m_r_patch[p] = waterdiagbulk.rh_ref2m_patch[p]
-
-        # 2m vapor pressure deficit
-        waterdiagbulk.vpd_ref2m_patch[p] = e_ref2m * (1.0 - waterdiagbulk.rh_ref2m_patch[p] / 100.0)
-
-        # Human heat stress indices (stub — HumanIndexMod not yet ported)
-        # Would be called here in full implementation
-
-        # Downward longwave below canopy
-        emv_p = temperature.emv_patch[p]
-        emg_c = temperature.emg_col[c]
-        energyflux.dlrad_patch[p] = (1.0 - emv_p) * emg_c * forc_lwrad_col[c] +
-            emv_p * emg_c * SB * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) *
-            (1.0 - frac_rad_abs_by_stem[p]) +
-            emv_p * emg_c * SB * ts_ini[p]^3 * (ts_ini[p] + 4.0 * dt_stem[p]) *
-            frac_rad_abs_by_stem[p]
-
-        # Upward longwave above canopy
-        energyflux.ulrad_patch[p] = ((1.0 - emg_c) * (1.0 - emv_p) * (1.0 - emv_p) * forc_lwrad_col[c] +
-            emv_p * (1.0 + (1.0 - emg_c) * (1.0 - emv_p)) * SB *
-            tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) * (1.0 - frac_rad_abs_by_stem[p]) +
-            emv_p * (1.0 + (1.0 - emg_c) * (1.0 - emv_p)) * SB *
-            ts_ini[p]^3 * (ts_ini[p] + 4.0 * dt_stem[p]) * frac_rad_abs_by_stem[p] +
-            emg_c * (1.0 - emv_p) * SB * lw_grnd)
-
-        # Skin temperature
-        temperature.t_skin_patch[p] = emv_p * temperature.t_veg_patch[p] +
-            (1.0 - emv_p) * sqrt(sqrt(lw_grnd))
-
-        # Derivative of soil energy flux
-        energyflux.cgrnds_patch[p] = energyflux.cgrnds_patch[p] +
-            CPAIR * forc_rho_col[c] * wtg[p] * wtal[p]
-        energyflux.cgrndl_patch[p] = energyflux.cgrndl_patch[p] +
-            forc_rho_col[c] * wtgq[p] * wtalq[p] * waterdiagbulk.dqgdT_col[c]
-        energyflux.cgrnd_patch[p] = energyflux.cgrnds_patch[p] +
-            energyflux.cgrndl_patch[p] * energyflux.htvp_col[c]
-
-        # Save baseline snocan
-        snocan_baseline[p] = waterstatebulk.ws.snocan_patch[p]
-
-        # Update dew accumulation
-        t_veg_p = temperature.t_veg_patch[p]
-        qflx_evap_veg_p = waterfluxbulk.wf.qflx_evap_veg_patch[p]
-        qflx_tran_veg_p = waterfluxbulk.wf.qflx_tran_veg_patch[p]
-
-        # Smooth freeze/thaw partitioning for AD
-        _frac_liq = smooth_heaviside(t_veg_p - TFRZ; k=200.0)
-        _frac_ice = one(t_veg_p) - _frac_liq
-        _net_evap = (qflx_tran_veg_p - qflx_evap_veg_p) * dtime
-        waterstatebulk.ws.liqcan_patch[p] = smooth_max(zero(t_veg_p),
-            waterstatebulk.ws.liqcan_patch[p] + _frac_liq * _net_evap)
-        waterstatebulk.ws.snocan_patch[p] = smooth_max(zero(t_veg_p),
-            waterstatebulk.ws.snocan_patch[p] + _frac_ice * _net_evap)
+    diag_out = CfDiagOut(; err_arr = err_arr, dt_stem = dt_stem,
+        dhsdt_canopy = energyflux.dhsdt_canopy_patch, t_stem = temperature.t_stem_patch,
+        taux = energyflux.taux_patch, tauy = energyflux.tauy_patch,
+        eflx_sh_grnd = energyflux.eflx_sh_grnd_patch, eflx_sh_snow = energyflux.eflx_sh_snow_patch,
+        eflx_sh_soil = energyflux.eflx_sh_soil_patch, eflx_sh_h2osfc = energyflux.eflx_sh_h2osfc_patch,
+        qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch,
+        qflx_ev_snow = waterfluxbulk.qflx_ev_snow_patch, qflx_ev_soil = waterfluxbulk.qflx_ev_soil_patch,
+        qflx_ev_h2osfc = waterfluxbulk.qflx_ev_h2osfc_patch, t_ref2m = temperature.t_ref2m_patch,
+        t_ref2m_r = temperature.t_ref2m_r_patch, q_ref2m = waterdiagbulk.q_ref2m_patch,
+        rh_ref2m = waterdiagbulk.rh_ref2m_patch, rh_ref2m_r = waterdiagbulk.rh_ref2m_r_patch,
+        vpd_ref2m = waterdiagbulk.vpd_ref2m_patch, dlrad = energyflux.dlrad_patch,
+        ulrad = energyflux.ulrad_patch, t_skin = temperature.t_skin_patch,
+        cgrnds = energyflux.cgrnds_patch, cgrndl = energyflux.cgrndl_patch, cgrnd = energyflux.cgrnd_patch,
+        snocan_baseline = snocan_baseline, liqcan = waterstatebulk.ws.liqcan_patch,
+        snocan = waterstatebulk.ws.snocan_patch)
+    diag_p = CfDiagP(; frac_rad_abs_by_stem = frac_rad_abs_by_stem, sabv = solarabs.sabv_patch,
+        air = air, bir = bir, tlbef = tlbef, dt_veg = dt_veg, cir = cir, lw_leaf = lw_leaf,
+        lw_stem = lw_stem, eflx_sh_veg = energyflux.eflx_sh_veg_patch,
+        qflx_evap_veg = waterfluxbulk.wf.qflx_evap_veg_patch, tl_ini = tl_ini, cp_leaf = cp_leaf,
+        cp_stem = cp_stem, ts_ini = ts_ini, eflx_sh_stem = energyflux.eflx_sh_stem_patch,
+        stem_biomass = canopystate.stem_biomass_patch, wtal = wtal, wtl0 = wtl0, wta0 = wta0,
+        wtstem0 = wtstem0, wtg = wtg, thm = temperature.thm_patch, ram1 = frictionvel.ram1_patch,
+        wtgq = wtgq, delq = delq, wtalq = wtalq, wtlq0 = wtlq0, wtaq0 = wtaq0, qsatl = qsatl,
+        temp1 = temp1, temp12m = temp12m, dth = dth, temp2 = temp2, temp22m = temp22m, dqh = dqh,
+        emv = temperature.emv_patch, qflx_tran_veg = waterfluxbulk.wf.qflx_tran_veg_patch,
+        t_veg = temperature.t_veg_patch)
+    diag_c = CfDiagC(; frac_sno_eff = waterdiagbulk.frac_sno_eff_col,
+        t_h2osfc = temperature.t_h2osfc_col, frac_h2osfc = waterdiagbulk.frac_h2osfc_col,
+        t_grnd = temperature.t_grnd_col, forc_rho = forc_rho_col,
+        qg_snow = waterdiagbulk.qg_snow_col, qg_soil = waterdiagbulk.qg_soil_col,
+        qg_h2osfc = waterdiagbulk.qg_h2osfc_col, dqgdT = waterdiagbulk.dqgdT_col,
+        htvp = energyflux.htvp_col, emg = temperature.emg_col, forc_q = forc_q_col,
+        forc_pbot = forc_pbot_col, forc_lwrad = forc_lwrad_col)
+    if fn > 0
+        be = _kernel_backend(err_arr)
+        _cf_postiter_kernel!(be)(diag_out, diag_p, diag_c, temperature.t_soisno_col, filterp,
+            patch_data.column, patch_data.gridcell, col_data.snl, forc_u_grc, forc_v_grc,
+            ctrl.use_biomass_heat_storage, nlevsno, dtime; ndrange = fn)
+        KA.synchronize(be)
     end
 
     # --- Post-photosynthesis: PhotosynthesisTotal ---
