@@ -192,6 +192,128 @@ function soil_therm_prop_lake!(col::ColumnData, soilstate::SoilStateData,
 end
 
 # =========================================================================
+# phase_change_lake! kernels. The 6 scalar loops share the lhabs / qflx_snomelt /
+# qflx_snofrz accumulators across loops, so they fuse into TWO per-column kernels
+# (lake-water side + snow/soil side) that run the internal j-loops sequentially in
+# each thread with local accumulators — no atomics. The water kernel runs first
+# (writes the partial accumulators); the soil kernel adds its contribution and
+# writes the final eflx_snomelt. Constants eltype-converted; imelt is Int.
+# =========================================================================
+
+# Init snow-layer fluxes + snow-without-layers melt + lake-layer phase change.
+@kernel function _phase_change_lake_water_kernel!(t_lake, snow_depth, h2osno_no_layers,
+        cv_lake, lake_icefrac, qflx_snomelt, qflx_snofrz, qflx_snow_drain, lhabs,
+        qflx_snomelt_lyr, qflx_snofrz_lyr, imelt, @Const(mask), @Const(dz_lake),
+        nlevsno::Int, nlevlak::Int, dtime)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_lake)
+        small = T(1.0e-12)
+        qsm = zero(T); qsd = zero(T); lh = zero(T)
+        for jj in 1:nlevsno
+            qflx_snomelt_lyr[c, jj] = zero(T)
+            qflx_snofrz_lyr[c, jj] = zero(T)
+            imelt[c, jj] = 0
+        end
+        # snow without snow layers + top lake layer above freezing
+        if h2osno_no_layers[c] > zero(T) && t_lake[c, 1] > T(TFRZ)
+            heatavail = (t_lake[c, 1] - T(TFRZ)) * cv_lake[c, 1]
+            melt = smooth_min(h2osno_no_layers[c], heatavail / T(HFUS))
+            heatrem = smooth_max(heatavail - melt * T(HFUS), zero(T))
+            t_lake[c, 1] = T(TFRZ) + heatrem / cv_lake[c, 1]
+            snow_depth[c] = snow_depth[c] * (one(T) - melt / h2osno_no_layers[c])
+            h2osno_no_layers[c] = h2osno_no_layers[c] - melt
+            lh += melt * T(HFUS)
+            qsm += melt / dtime
+            qsd += melt / dtime
+            if h2osno_no_layers[c] < small; h2osno_no_layers[c] = zero(T); end
+            if snow_depth[c] < small; snow_depth[c] = zero(T); end
+        end
+        # lake phase change
+        for j in 1:nlevlak
+            dophase = false
+            heatavail = zero(T); melt = zero(T); heatrem = zero(T)
+            if t_lake[c, j] > T(TFRZ) && lake_icefrac[c, j] > zero(T)
+                dophase = true
+                heatavail = (t_lake[c, j] - T(TFRZ)) * cv_lake[c, j]
+                melt = smooth_min(lake_icefrac[c, j] * T(DENH2O) * dz_lake[c, j], heatavail / T(HFUS))
+                heatrem = smooth_max(heatavail - melt * T(HFUS), zero(T))
+            elseif t_lake[c, j] < T(TFRZ) && lake_icefrac[c, j] < one(T)
+                dophase = true
+                heatavail = (t_lake[c, j] - T(TFRZ)) * cv_lake[c, j]
+                melt = smooth_max(-(one(T) - lake_icefrac[c, j]) * T(DENH2O) * dz_lake[c, j], heatavail / T(HFUS))
+                heatrem = smooth_min(heatavail - melt * T(HFUS), zero(T))
+            end
+            if dophase
+                lake_icefrac[c, j] = lake_icefrac[c, j] - melt / (T(DENH2O) * dz_lake[c, j])
+                lh += melt * T(HFUS)
+                cv_lake[c, j] = cv_lake[c, j] + melt * (T(CPLIQ) - T(CPICE))
+                t_lake[c, j] = T(TFRZ) + heatrem / cv_lake[c, j]
+                if lake_icefrac[c, j] > one(T) - small; lake_icefrac[c, j] = one(T); end
+                if lake_icefrac[c, j] < small; lake_icefrac[c, j] = zero(T); end
+            end
+        end
+        qflx_snomelt[c]    = qsm
+        qflx_snofrz[c]     = zero(T)
+        qflx_snow_drain[c] = qsd
+        lhabs[c]           = lh
+    end
+end
+
+# Snow/soil phase change (adds to lhabs/qflx_snomelt/qflx_snofrz) + final eflx_snomelt.
+@kernel function _phase_change_lake_soil_kernel!(t_soisno, h2osoi_ice, h2osoi_liq, cv,
+        lhabs, qflx_snomelt, qflx_snofrz, eflx_snomelt, imelt, qflx_snomelt_lyr,
+        qflx_snofrz_lyr, @Const(mask), @Const(snl), nlevsno::Int, nlevgrnd::Int, dtime)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_soisno)
+        small = T(1.0e-12)
+        lh = lhabs[c]; qsm = qflx_snomelt[c]; qsf = qflx_snofrz[c]
+        for j in (-nlevsno + 1):nlevgrnd
+            jj = j + nlevsno
+            if j >= snl[c] + 1
+                dophase = false
+                heatavail = zero(T); melt = zero(T); heatrem = zero(T)
+                if t_soisno[c, jj] > T(TFRZ) && h2osoi_ice[c, jj] > zero(T)
+                    dophase = true
+                    heatavail = (t_soisno[c, jj] - T(TFRZ)) * cv[c, jj]
+                    melt = smooth_min(h2osoi_ice[c, jj], heatavail / T(HFUS))
+                    heatrem = smooth_max(heatavail - melt * T(HFUS), zero(T))
+                    if j <= 0
+                        imelt[c, jj] = 1
+                        qflx_snomelt_lyr[c, jj] = melt / dtime
+                        qsm += qflx_snomelt_lyr[c, jj]
+                    end
+                elseif t_soisno[c, jj] < T(TFRZ) && h2osoi_liq[c, jj] > zero(T)
+                    dophase = true
+                    heatavail = (t_soisno[c, jj] - T(TFRZ)) * cv[c, jj]
+                    melt = smooth_max(-h2osoi_liq[c, jj], heatavail / T(HFUS))
+                    heatrem = smooth_min(heatavail - melt * T(HFUS), zero(T))
+                    if j <= 0
+                        imelt[c, jj] = 2
+                        qflx_snofrz_lyr[c, jj] = -melt / dtime
+                        qsf += qflx_snofrz_lyr[c, jj]
+                    end
+                end
+                if dophase
+                    h2osoi_ice[c, jj] = h2osoi_ice[c, jj] - melt
+                    h2osoi_liq[c, jj] = h2osoi_liq[c, jj] + melt
+                    lh += melt * T(HFUS)
+                    cv[c, jj] = cv[c, jj] + melt * (T(CPLIQ) - T(CPICE))
+                    t_soisno[c, jj] = T(TFRZ) + heatrem / cv[c, jj]
+                    if h2osoi_ice[c, jj] < small; h2osoi_ice[c, jj] = zero(T); end
+                    if h2osoi_liq[c, jj] < small; h2osoi_liq[c, jj] = zero(T); end
+                end
+            end
+        end
+        lhabs[c]        = lh
+        qflx_snomelt[c] = qsm
+        qflx_snofrz[c]  = qsf
+        eflx_snomelt[c] = qsm * T(HFUS)
+    end
+end
+
+# =========================================================================
 # phase_change_lake! — Phase change within snow, soil, and lake layers
 # =========================================================================
 """
@@ -211,19 +333,15 @@ function phase_change_lake!(col::ColumnData,
                             temperature::TemperatureData,
                             energyflux::EnergyFluxData,
                             lakestate::LakeStateData,
-                            cv::Matrix{<:Real}, cv_lake::Matrix{<:Real},
-                            lhabs::Vector{<:Real},
-                            mask_lakec::BitVector, bounds_col::UnitRange{Int},
+                            cv::AbstractMatrix{<:Real}, cv_lake::AbstractMatrix{<:Real},
+                            lhabs::AbstractVector{<:Real},
+                            mask_lakec::AbstractVector{Bool}, bounds_col::UnitRange{Int},
                             dtime::Real)
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevlak = varpar.nlevlak
-    joff = nlevsno  # offset for snow/soil layers
-
-    smallnumber = 1.0e-12
 
     dz_lake = col.dz_lake
-    dz = col.dz
     snl = col.snl
 
     snow_depth = waterdiagbulk.snow_depth_col
@@ -245,141 +363,18 @@ function phase_change_lake!(col::ColumnData,
 
     eflx_snomelt = energyflux.eflx_snomelt_col
 
-    # Initialization
-    for c in bounds_col
-        mask_lakec[c] || continue
-        qflx_snomelt[c] = 0.0
-        qflx_snofrz[c] = 0.0
-        eflx_snomelt[c] = 0.0
-        lhabs[c] = 0.0
-        qflx_snow_drain[c] = 0.0
-    end
+    nc = length(mask_lakec)
+    dt = convert(eltype(t_lake), dtime)
 
-    for j in (-nlevsno + 1):0
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            qflx_snomelt_lyr[c, jj] = 0.0
-            qflx_snofrz_lyr[c, jj] = 0.0
-            imelt[c, jj] = 0
-        end
-    end
-
-    # Check for case of snow without snow layers and top lake layer temp above freezing
-    for c in bounds_col
-        mask_lakec[c] || continue
-        if h2osno_no_layers[c] > 0.0 && t_lake[c, 1] > TFRZ
-            heatavail = (t_lake[c, 1] - TFRZ) * cv_lake[c, 1]
-            melt = smooth_min(h2osno_no_layers[c], heatavail / HFUS)
-            heatrem = smooth_max(heatavail - melt * HFUS, 0.0)
-            t_lake[c, 1] = TFRZ + heatrem / cv_lake[c, 1]
-            snow_depth[c] = snow_depth[c] * (1.0 - melt / h2osno_no_layers[c])
-            h2osno_no_layers[c] = h2osno_no_layers[c] - melt
-            lhabs[c] = lhabs[c] + melt * HFUS
-            qflx_snomelt[c] = qflx_snomelt[c] + melt / dtime
-            qflx_snow_drain[c] = qflx_snow_drain[c] + melt / dtime
-            if h2osno_no_layers[c] < smallnumber
-                h2osno_no_layers[c] = 0.0
-            end
-            if snow_depth[c] < smallnumber
-                snow_depth[c] = 0.0
-            end
-        end
-    end
-
-    # Lake phase change
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-
-            dophasechangeflag = false
-            heatavail = 0.0
-            melt = 0.0
-            heatrem = 0.0
-
-            if t_lake[c, j] > TFRZ && lake_icefrac[c, j] > 0.0  # melting
-                dophasechangeflag = true
-                heatavail = (t_lake[c, j] - TFRZ) * cv_lake[c, j]
-                melt = smooth_min(lake_icefrac[c, j] * DENH2O * dz_lake[c, j], heatavail / HFUS)
-                heatrem = smooth_max(heatavail - melt * HFUS, 0.0)
-            elseif t_lake[c, j] < TFRZ && lake_icefrac[c, j] < 1.0  # freezing
-                dophasechangeflag = true
-                heatavail = (t_lake[c, j] - TFRZ) * cv_lake[c, j]
-                melt = smooth_max(-(1.0 - lake_icefrac[c, j]) * DENH2O * dz_lake[c, j], heatavail / HFUS)
-                heatrem = smooth_min(heatavail - melt * HFUS, 0.0)
-            end
-
-            if dophasechangeflag
-                lake_icefrac[c, j] = lake_icefrac[c, j] - melt / (DENH2O * dz_lake[c, j])
-                lhabs[c] = lhabs[c] + melt * HFUS
-                cv_lake[c, j] = cv_lake[c, j] + melt * (CPLIQ - CPICE)
-                t_lake[c, j] = TFRZ + heatrem / cv_lake[c, j]
-                if lake_icefrac[c, j] > 1.0 - smallnumber
-                    lake_icefrac[c, j] = 1.0
-                end
-                if lake_icefrac[c, j] < smallnumber
-                    lake_icefrac[c, j] = 0.0
-                end
-            end
-        end
-    end
-
-    # Snow & soil phase change
-    for j in (-nlevsno + 1):nlevgrnd
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            dophasechangeflag = false
-            heatavail = 0.0
-            melt = 0.0
-            heatrem = 0.0
-
-            if j >= snl[c] + 1
-                if t_soisno[c, jj] > TFRZ && h2osoi_ice[c, jj] > 0.0  # melting
-                    dophasechangeflag = true
-                    heatavail = (t_soisno[c, jj] - TFRZ) * cv[c, jj]
-                    melt = smooth_min(h2osoi_ice[c, jj], heatavail / HFUS)
-                    heatrem = smooth_max(heatavail - melt * HFUS, 0.0)
-                    if j <= 0  # snow
-                        imelt[c, jj] = 1
-                        qflx_snomelt_lyr[c, jj] = melt / dtime
-                        qflx_snomelt[c] = qflx_snomelt[c] + qflx_snomelt_lyr[c, jj]
-                    end
-                elseif t_soisno[c, jj] < TFRZ && h2osoi_liq[c, jj] > 0.0  # freezing
-                    dophasechangeflag = true
-                    heatavail = (t_soisno[c, jj] - TFRZ) * cv[c, jj]
-                    melt = smooth_max(-h2osoi_liq[c, jj], heatavail / HFUS)
-                    heatrem = smooth_min(heatavail - melt * HFUS, 0.0)
-                    if j <= 0  # snow
-                        imelt[c, jj] = 2
-                        qflx_snofrz_lyr[c, jj] = -melt / dtime
-                        qflx_snofrz[c] = qflx_snofrz[c] + qflx_snofrz_lyr[c, jj]
-                    end
-                end
-
-                if dophasechangeflag
-                    h2osoi_ice[c, jj] = h2osoi_ice[c, jj] - melt
-                    h2osoi_liq[c, jj] = h2osoi_liq[c, jj] + melt
-                    lhabs[c] = lhabs[c] + melt * HFUS
-                    cv[c, jj] = cv[c, jj] + melt * (CPLIQ - CPICE)
-                    t_soisno[c, jj] = TFRZ + heatrem / cv[c, jj]
-                    if h2osoi_ice[c, jj] < smallnumber
-                        h2osoi_ice[c, jj] = 0.0
-                    end
-                    if h2osoi_liq[c, jj] < smallnumber
-                        h2osoi_liq[c, jj] = 0.0
-                    end
-                end
-            end
-        end
-    end
-
-    # Update eflx_snomelt
-    for c in bounds_col
-        mask_lakec[c] || continue
-        eflx_snomelt[c] = qflx_snomelt[c] * HFUS
-    end
-
+    # Two fused per-column kernels (water side then snow/soil side); the soil
+    # kernel reads the partial lhabs/qflx accumulators the water kernel wrote.
+    _launch!(_phase_change_lake_water_kernel!, t_lake, snow_depth, h2osno_no_layers,
+        cv_lake, lake_icefrac, qflx_snomelt, qflx_snofrz, qflx_snow_drain, lhabs,
+        qflx_snomelt_lyr, qflx_snofrz_lyr, imelt, mask_lakec, dz_lake, nlevsno, nlevlak,
+        dt; ndrange = nc)
+    _launch!(_phase_change_lake_soil_kernel!, t_soisno, h2osoi_ice, h2osoi_liq, cv,
+        lhabs, qflx_snomelt, qflx_snofrz, eflx_snomelt, imelt, qflx_snomelt_lyr,
+        qflx_snofrz_lyr, mask_lakec, snl, nlevsno, nlevgrnd, dt; ndrange = nc)
     return nothing
 end
 
