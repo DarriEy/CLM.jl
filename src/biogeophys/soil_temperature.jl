@@ -235,6 +235,37 @@ end
     end
 end
 
+# Urban building heat flux + (simple-build) AC/heating partition. One thread per column;
+# reads the landunit-indexed cool_on/heat_on Bool flags. simple_build resolved on host.
+@kernel function _urban_building_heat_kernel!(eflx_bhe, eflx_ac, eflx_heat, @Const(mask),
+        @Const(itype), @Const(landunit), @Const(urbpoi), @Const(cool_on), @Const(heat_on),
+        @Const(fn), @Const(fn1), nlevsno::Int, nlevurb::Int, simple_build::Bool)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(eflx_bhe)
+        cnfac = T(CNFAC)
+        joff = nlevsno
+        l = landunit[c]
+        if urbpoi[l]
+            it = itype[c]
+            if it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF
+                eflx_bhe[c] = cnfac * fn[c, nlevurb+joff] + (one(T) - cnfac) * fn1[c, nlevurb+joff]
+            else
+                eflx_bhe[c] = zero(T)
+            end
+            if simple_build
+                if cool_on[l]
+                    eflx_ac[c] = abs(eflx_bhe[c]); eflx_heat[c] = zero(T)
+                elseif heat_on[l]
+                    eflx_ac[c] = zero(T); eflx_heat[c] = abs(eflx_bhe[c])
+                else
+                    eflx_ac[c] = zero(T); eflx_heat[c] = zero(T)
+                end
+            end
+        end
+    end
+end
+
 # =========================================================================
 # soil_temperature! — Main driver
 # =========================================================================
@@ -293,8 +324,11 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     fn_h2osfc = zeros(FT, nc)
     dz_h2osfc = zeros(FT, nc)
     c_h2osfc = zeros(FT, nc)
-    cool_on = falses(length(bounds_lun))
-    heat_on = falses(length(bounds_lun))
+    # cool_on/heat_on are Bool scratch matched to the state's backend (device-resident Bool
+    # arrays on GPU, Vector{Bool} on CPU) so building_hac! and the urban-building-heat kernel
+    # can write/read them on-device — replaces the host-only `falses(...)` BitVector.
+    cool_on = fill!(similar(temperature.t_building_lun, Bool, length(bounds_lun)), false)
+    heat_on = fill!(similar(temperature.t_building_lun, Bool, length(bounds_lun)), false)
 
     # Band matrix and vectors (Fortran: -nlevsno:nlevmaxurbgrnd → nlevsno+1+nlevmaxurbgrnd levels)
     nlev_total = nlevsno + 1 + nlevmaxurbgrnd  # -nlevsno to nlevmaxurbgrnd
@@ -427,31 +461,10 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
              nlevsno, nlevurb, nlevgrnd, is_simple_build_temp();
              ndrange = (size(fn1, 1), nlevsno + nlevmaxurbgrnd))
 
-    # Urban building heat flux
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        l = col.landunit[c]
-        if lun.urbpoi[l]
-            if col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL || col.itype[c] == ICOL_ROOF
-                eflx_building_heat_errsoi[c] = CNFAC * fn[c, nlevurb + joff] +
-                    (1.0 - CNFAC) * fn1[c, nlevurb + joff]
-            else
-                eflx_building_heat_errsoi[c] = 0.0
-            end
-            if is_simple_build_temp()
-                if cool_on[l]
-                    eflx_urban_ac_col[c] = abs(eflx_building_heat_errsoi[c])
-                    eflx_urban_heat_col[c] = 0.0
-                elseif heat_on[l]
-                    eflx_urban_ac_col[c] = 0.0
-                    eflx_urban_heat_col[c] = abs(eflx_building_heat_errsoi[c])
-                else
-                    eflx_urban_ac_col[c] = 0.0
-                    eflx_urban_heat_col[c] = 0.0
-                end
-            end
-        end
-    end
+    # Urban building heat flux (kernelized; one thread per column).
+    _launch!(_urban_building_heat_kernel!, eflx_building_heat_errsoi, eflx_urban_ac_col,
+             eflx_urban_heat_col, mask_nolakec, col.itype, col.landunit, lun.urbpoi,
+             cool_on, heat_on, fn, fn1, nlevsno, nlevurb, is_simple_build_temp())
 
     # Phase change of h2osfc (zero accumulator; kernelized).
     _launch!(_mask_zero_kernel!, xmf_h2osfc_arr, mask_nolakec)
@@ -2051,10 +2064,10 @@ end
 # =========================================================================
 # building_hac! — Building Heating and Cooling (simple method)
 # =========================================================================
-# Per-landunit building HAC. cool_on/heat_on are BitVector scratch, so this kernel runs on
-# the CPU backend (_kernel_backend(::BitArray) = KA.CPU()) — matching the documented
-# BitVector-writing-kernel convention; moving the build-temp landunit scratch to device is
-# the same follow-up as the other masks. One thread per landunit.
+# Per-landunit building HAC. cool_on/heat_on are now backend-matched Bool arrays (Vector{Bool}
+# on CPU, device Bool on GPU), so this runs on whatever backend the arrays live on — the launch
+# keys on cool_on. A BitVector still works (test path): _kernel_backend(::BitArray)=KA.CPU().
+# One thread per landunit.
 @kernel function _building_hac_kernel!(cool_on, heat_on, t_building, @Const(mask),
         @Const(urbpoi), @Const(t_building_max), @Const(t_building_min))
     l = @index(Global)
@@ -2077,14 +2090,14 @@ end
 
 function building_hac!(lun::LandunitData, temperature::TemperatureData,
                        urbanparams::UrbanParamsData,
-                       t_building_max::Vector{<:Real},
-                       mask_urbanl::BitVector, bounds_lun::UnitRange{Int},
-                       cool_on::BitVector, heat_on::BitVector)
+                       t_building_max::AbstractVector{<:Real},
+                       mask_urbanl::AbstractVector{Bool}, bounds_lun::UnitRange{Int},
+                       cool_on::AbstractVector{Bool}, heat_on::AbstractVector{Bool})
 
     t_building = temperature.t_building_lun
     t_building_min = urbanparams.t_building_min
 
-    # One thread per landunit; keyed on cool_on (BitVector) → CPU backend.
+    # One thread per landunit; the launch keys on cool_on's backend.
     _launch!(_building_hac_kernel!, cool_on, heat_on, t_building, mask_urbanl,
         lun.urbpoi, t_building_max, t_building_min)
 
