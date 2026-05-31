@@ -762,6 +762,30 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
     return nothing
 end
 
+# Longwave radiation emitted by ground / snow / soil / surface-water (thread per column).
+# Constants converted to the working element type so no Float64 reaches a Float32 backend.
+@kernel function _ground_lwrad_emit_kernel!(lwrad_emit, dlwrad_emit, lwrad_emit_snow,
+        lwrad_emit_soil, lwrad_emit_h2osfc, @Const(mask), @Const(emg), @Const(t_grnd),
+        @Const(t_soisno), @Const(t_h2osfc), @Const(snl), joff::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(lwrad_emit)
+        sb = T(SB)
+        eg = emg[c]
+        lwrad_emit[c]        = eg * sb * t_grnd[c]^4
+        dlwrad_emit[c]       = T(4) * eg * sb * t_grnd[c]^3
+        lwrad_emit_snow[c]   = eg * sb * t_soisno[c, snl[c] + 1 + joff]^4
+        lwrad_emit_soil[c]   = eg * sb * t_soisno[c, 1 + joff]^4
+        lwrad_emit_h2osfc[c] = eg * sb * t_h2osfc[c]^4
+    end
+end
+function compute_ground_lwrad_emit!(lwrad_emit, dlwrad_emit, lwrad_emit_snow,
+        lwrad_emit_soil, lwrad_emit_h2osfc, mask, emg, t_grnd, t_soisno, t_h2osfc, snl, joff::Int)
+    _launch!(_ground_lwrad_emit_kernel!, lwrad_emit, dlwrad_emit, lwrad_emit_snow,
+             lwrad_emit_soil, lwrad_emit_h2osfc, mask, emg, t_grnd, t_soisno, t_h2osfc, snl, joff;
+             ndrange = length(lwrad_emit))
+end
+
 # =========================================================================
 # compute_ground_heat_flux_and_deriv!
 # =========================================================================
@@ -799,14 +823,9 @@ function compute_ground_heat_flux_and_deriv!(
     lwrad_emit_h2osfc_arr = zeros(FT, nc)
     hs = zeros(FT, nc)
 
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        lwrad_emit[c] = emg[c] * SB * t_grnd[c]^4
-        dlwrad_emit[c] = 4.0 * emg[c] * SB * t_grnd[c]^3
-        lwrad_emit_snow[c] = emg[c] * SB * t_soisno[c, snl[c] + 1 + joff]^4
-        lwrad_emit_soil[c] = emg[c] * SB * t_soisno[c, 1 + joff]^4
-        lwrad_emit_h2osfc_arr[c] = emg[c] * SB * t_h2osfc[c]^4
-    end
+    compute_ground_lwrad_emit!(lwrad_emit, dlwrad_emit, lwrad_emit_snow, lwrad_emit_soil,
+                               lwrad_emit_h2osfc_arr, mask_nolakec, emg, t_grnd, t_soisno,
+                               t_h2osfc, snl, joff)
 
     hs_soil .= 0.0
     hs_h2osfc .= 0.0
