@@ -1139,6 +1139,262 @@ function compute_qcharge!(col_data::ColumnData,
 end
 
 # ===========================================================================
+# Moisture-form Richards solver as ONE per-column kernel. Each thread runs the
+# full adaptive-substep while-loop for its column (thread-divergent substep
+# counts), with the hydraulic properties (Clapp-Hornberger inlined — the only
+# SWRC the driver uses), boundary fluxes, RHS/LHS assembly, and the
+# single-column tridiagonal solve all done in-thread on row `c` of ~22 grouped
+# scratch matrices. Float64 literals + cfg scalars eltype-converted; boundary
+# conditions resolved to Int codes on the host (so no error() branches run in
+# the kernel). This is the moisture_form analogue of the soil_temperature!
+# grouped-struct kernels.
+# ===========================================================================
+Base.@kwdef struct MfState{M,V}   # read/write column+layer state
+    h2osoi_liq::M; smp_l::M; hk_l::M
+    qcharge::V; nsubsteps::V
+end
+Base.@kwdef struct MfIn{M,V}      # read-only inputs (M = layer matrix, V = per-column vector)
+    z::M; zi::M; dz::M; qflx_rootsoi::M
+    watsat::M; hksat::M; bsw::M; sucsat::M; icefrac::M
+    zwt::V; qflx_infl::V
+end
+Base.@kwdef struct MfScr{M}       # per-column scratch rows (nc × nlevsoi)
+    hk::M; smp::M; dhkdw::M; dsmpdw::M; imped::M; s2::M
+    vwc_liq::M; dt_dz::M; qin::M; qout::M
+    dqidw0::M; dqidw1::M; dqodw1::M; dqodw2::M
+    dwat::M; amx::M; bmx::M; cmx::M; rmx::M; gam::M
+    fluxNet0::M; fluxNet1::M
+end
+Adapt.@adapt_structure MfState
+Adapt.@adapt_structure MfIn
+Adapt.@adapt_structure MfScr
+
+@kernel function _soilwm_moisture_form_kernel!(st, scr, mfin, @Const(mask), @Const(nbedrock),
+        joff::Int, joff_zi::Int, nlevsoi::Int, dtime, e_ice, dtmin, xtu, xtl, verysmall,
+        expensive::Bool, lower_bc::Int, denh2o, m_to_mm)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(scr.hk)
+        nlayers = nbedrock[c]
+
+        nsubstep = 0
+        dtsub  = dtime
+        dtdone = zero(T)
+        qc     = zero(T)
+
+        while true
+            nsubstep += 1
+
+            for j in 1:nlayers
+                scr.vwc_liq[c, j] = smooth_max(st.h2osoi_liq[c, joff + j], T(1.0e-6)) / (mfin.dz[c, joff + j] * denh2o)
+                scr.dt_dz[c, j]   = dtsub / (m_to_mm * mfin.dz[c, joff + j])
+            end
+
+            # ---- hydraulic properties (Clapp-Hornberger inlined) ----
+            for j in 1:nlayers
+                s = scr.vwc_liq[c, j] / mfin.watsat[c, j]
+                s = smooth_min(s, one(T)); s = smooth_max(T(0.01), s)
+                scr.s2[c, j] = s
+            end
+            for j in 1:nlayers
+                if j == nlayers
+                    s1  = scr.s2[c, j]
+                    imp = T(10.0)^(-e_ice * mfin.icefrac[c, j])
+                else
+                    s1  = T(0.5) * (scr.s2[c, j] + scr.s2[c, j+1])
+                    imp = T(10.0)^(-e_ice * (T(0.5) * (mfin.icefrac[c, j] + mfin.icefrac[c, j+1])))
+                end
+                scr.imped[c, j] = imp
+                s1 = smooth_min(s1, one(T)); s1 = smooth_max(T(0.01), s1)
+                b  = mfin.bsw[c, j]
+                hkv   = imp * mfin.hksat[c, j] * s1^(T(2.0) * b + T(3.0))
+                dhkds = (T(2.0) * b + T(3.0)) * hkv / s1
+                sn    = scr.s2[c, j]
+                smpv  = -mfin.sucsat[c, j] * sn^(-b)
+                dsmpds = -b * smpv / sn
+                scr.hk[c, j]     = hkv
+                scr.smp[c, j]    = smpv
+                scr.dhkdw[c, j]  = dhkds
+                scr.dsmpdw[c, j] = dsmpds / mfin.watsat[c, j]
+                st.smp_l[c, j]   = smpv
+                st.hk_l[c, j]    = hkv
+            end
+
+            # ---- fluxes & derivatives (zero the 6 flux arrays first, as the
+            # scalar helper's fill! does — not every entry is written each call) ----
+            for j in 1:nlayers
+                scr.qin[c, j] = zero(T); scr.qout[c, j] = zero(T)
+                scr.dqidw0[c, j] = zero(T); scr.dqidw1[c, j] = zero(T)
+                scr.dqodw1[c, j] = zero(T); scr.dqodw2[c, j] = zero(T)
+            end
+            # top j=1 (upper BC = BC_FLUX; validated on host)
+            scr.qin[c, 1] = mfin.qflx_infl[c]
+            scr.dqidw1[c, 1] = zero(T)
+            let
+                dhkds1 = T(0.5) * scr.dhkdw[c, 1] / mfin.watsat[c, 1]
+                dhkds2 = T(0.5) * scr.dhkdw[c, 1] / mfin.watsat[c, 2]
+                num = scr.smp[c, 2] - scr.smp[c, 1]
+                den = m_to_mm * (mfin.z[c, joff + 2] - mfin.z[c, joff + 1])
+                scr.qout[c, 1]   = -scr.hk[c, 1] * num / den + scr.hk[c, 1]
+                scr.dqodw1[c, 1] = (scr.hk[c, 1] * scr.dsmpdw[c, 1] - dhkds1 * num) / den + dhkds1
+                scr.dqodw2[c, 1] = (-scr.hk[c, 1] * scr.dsmpdw[c, 2] - dhkds2 * num) / den + dhkds2
+            end
+            for j in 2:(nlayers - 1)
+                scr.qin[c, j]    = scr.qout[c, j-1]
+                scr.dqidw0[c, j] = scr.dqodw1[c, j-1]
+                scr.dqidw1[c, j] = scr.dqodw2[c, j-1]
+                dhkds1 = T(0.5) * scr.dhkdw[c, j] / mfin.watsat[c, j]
+                dhkds2 = T(0.5) * scr.dhkdw[c, j] / mfin.watsat[c, j+1]
+                num = scr.smp[c, j+1] - scr.smp[c, j]
+                den = m_to_mm * (mfin.z[c, joff + j+1] - mfin.z[c, joff + j])
+                scr.qout[c, j]   = -scr.hk[c, j] * num / den + scr.hk[c, j]
+                scr.dqodw1[c, j] = (scr.hk[c, j] * scr.dsmpdw[c, j] - dhkds1 * num) / den + dhkds1
+                scr.dqodw2[c, j] = (-scr.hk[c, j] * scr.dsmpdw[c, j+1] - dhkds2 * num) / den + dhkds2
+            end
+            # bottom node j=nlayers
+            if nlayers >= 2
+                scr.qin[c, nlayers]    = scr.qout[c, nlayers-1]
+                scr.dqidw0[c, nlayers] = scr.dqodw1[c, nlayers-1]
+                scr.dqidw1[c, nlayers] = scr.dqodw2[c, nlayers-1]
+            end
+            let j = nlayers
+                if lower_bc == BC_WATERTABLE
+                    jwt = nlevsoi
+                    for jj in 1:nlevsoi
+                        if mfin.zwt[c] <= mfin.zi[c, joff_zi + jj]; jwt = jj - 1; break; end
+                    end
+                    if j > jwt
+                        scr.qout[c, j] = zero(T); scr.dqodw1[c, j] = zero(T); scr.dqodw2[c, j] = zero(T)
+                    else
+                        dhkds1l = scr.dhkdw[c, j] / mfin.watsat[c, j]
+                        num = -scr.smp[c, j]
+                        den = m_to_mm * (mfin.zwt[c] - mfin.z[c, joff + j])
+                        scr.qout[c, j]   = -scr.hk[c, j] * num / den + scr.hk[c, j]
+                        scr.dqodw1[c, j] = (scr.hk[c, j] * scr.dsmpdw[c, j] - dhkds1l * num) / den + dhkds1l
+                        scr.dqodw2[c, j] = zero(T)
+                    end
+                elseif lower_bc == BC_FLUX
+                    scr.qout[c, j]   = scr.hk[c, j]
+                    scr.dqodw1[c, j] = scr.dhkdw[c, j] / mfin.watsat[c, j]
+                else   # BC_ZERO_FLUX
+                    scr.qout[c, j]   = zero(T)
+                    scr.dqodw1[c, j] = zero(T)
+                end
+            end
+
+            # ---- RHS ----
+            for j in 1:nlayers
+                fluxNet = scr.qin[c, j] - scr.qout[c, j] - mfin.qflx_rootsoi[c, j]
+                scr.rmx[c, j] = -fluxNet * scr.dt_dz[c, j]
+            end
+
+            # ---- LHS (tridiagonal a/b/c) ----
+            scr.amx[c, 1] = zero(T)
+            scr.bmx[c, 1] = -one(T) - (-scr.dqidw1[c, 1] + scr.dqodw1[c, 1]) * scr.dt_dz[c, 1]
+            scr.cmx[c, 1] = -scr.dqodw2[c, 1] * scr.dt_dz[c, 1]
+            for j in 2:(nlayers - 1)
+                scr.amx[c, j] = scr.dqidw0[c, j] * scr.dt_dz[c, j]
+                scr.bmx[c, j] = -one(T) - (-scr.dqidw1[c, j] + scr.dqodw1[c, j]) * scr.dt_dz[c, j]
+                scr.cmx[c, j] = -scr.dqodw2[c, j] * scr.dt_dz[c, j]
+            end
+            scr.amx[c, nlayers] = scr.dqidw0[c, nlayers] * scr.dt_dz[c, nlayers]
+            scr.bmx[c, nlayers] = -one(T) - (-scr.dqidw1[c, nlayers] + scr.dqodw1[c, nlayers]) * scr.dt_dz[c, nlayers]
+            scr.cmx[c, nlayers] = zero(T)
+
+            # ---- tridiagonal solve (single column, jtop=1) ----
+            bet = scr.bmx[c, 1]
+            if abs(bet) < T(1.0e-30); bet = T(1.0e-30); end
+            scr.dwat[c, 1] = scr.rmx[c, 1] / bet
+            for j in 2:nlayers
+                scr.gam[c, j] = scr.cmx[c, j-1] / bet
+                bet = scr.bmx[c, j] - scr.amx[c, j] * scr.gam[c, j]
+                if abs(bet) < T(1.0e-30); bet = copysign(T(1.0e-30), bet == zero(T) ? one(T) : bet); end
+                scr.dwat[c, j] = (scr.rmx[c, j] - scr.amx[c, j] * scr.dwat[c, j-1]) / bet
+            end
+            for j in (nlayers - 1):-1:1
+                scr.dwat[c, j] = scr.dwat[c, j] - scr.gam[c, j+1] * scr.dwat[c, j+1]
+            end
+
+            # ---- error estimation ----
+            errorMax = zero(T)
+            for j in 1:nlayers
+                if expensive
+                    qin_test = j == 1 ? scr.qin[c, j] + scr.dqidw1[c, j] * scr.dwat[c, j] :
+                        scr.qin[c, j] + scr.dqidw0[c, j] * scr.dwat[c, j-1] + scr.dqidw1[c, j] * scr.dwat[c, j]
+                    qout_test = j == nlayers ? scr.qout[c, j] + scr.dqodw1[c, j] * scr.dwat[c, j] :
+                        scr.qout[c, j] + scr.dqodw1[c, j] * scr.dwat[c, j] + scr.dqodw2[c, j] * scr.dwat[c, j+1]
+                    scr.fluxNet0[c, j] = qin_test - qout_test - mfin.qflx_rootsoi[c, j]
+                else
+                    scr.fluxNet0[c, j] = scr.dwat[c, j] / scr.dt_dz[c, j]
+                end
+                scr.fluxNet1[c, j] = scr.qin[c, j] - scr.qout[c, j] - mfin.qflx_rootsoi[c, j]
+            end
+            for j in 1:nlayers
+                ev = abs(scr.fluxNet1[c, j] - scr.fluxNet0[c, j]) * dtsub * T(0.5)
+                errorMax = max(errorMax, ev)
+            end
+
+            # reject substep and retry with a halved step
+            if errorMax > xtu && dtsub > dtmin
+                dtsub = max(dtsub / T(2.0), dtmin)
+                continue
+            end
+
+            # accept: renew liquid water mass
+            for j in 1:nlayers
+                st.h2osoi_liq[c, joff + j] = st.h2osoi_liq[c, joff + j] + scr.dwat[c, j] * (m_to_mm * mfin.dz[c, joff + j])
+            end
+
+            # drainage from column bottom → qcharge increment
+            qcTemp = if lower_bc == BC_FLUX
+                scr.hk[c, nlayers] + scr.dhkdw[c, nlayers] * scr.dwat[c, nlayers]
+            elseif lower_bc == BC_ZERO_FLUX
+                zero(T)
+            else  # BC_WATERTABLE
+                scr.qout[c, nlayers] + scr.dqodw1[c, nlayers] * scr.dwat[c, nlayers]
+            end
+            qc += qcTemp * (dtsub / dtime)
+
+            dtdone += dtsub
+            if abs(dtime - dtdone) < verysmall; break; end
+            if errorMax < xtl; dtsub = dtsub * T(2.0); end
+            dtsub = min(dtsub, dtime - dtdone)
+        end
+
+        st.qcharge[c]   = qc
+        st.nsubsteps[c] = T(nsubstep)
+    end
+end
+
+"""
+    soilwm_moisture_form_solve!(st, scr, mfin, mask, nbedrock, joff, joff_zi, nlevsoi, dtime, cfg)
+
+Run the moisture-form adaptive-substep Richards solver for all active columns as
+one per-column kernel. Upper BC must be BC_FLUX; lower BC ∈ {WATERTABLE, FLUX,
+ZERO_FLUX} (validated here so no error() runs in the kernel).
+"""
+function soilwm_moisture_form_solve!(st::MfState, scr::MfScr, mfin::MfIn, mask,
+        nbedrock, joff::Int, joff_zi::Int, nlevsoi::Int, dtime, cfg::SoilWaterMovementConfig)
+    cfg.upper_boundary_condition == BC_FLUX ||
+        error("soilwm_moisture_form_solve!: upper boundary condition must be BC_FLUX")
+    (cfg.lower_boundary_condition == BC_WATERTABLE ||
+     cfg.lower_boundary_condition == BC_FLUX ||
+     cfg.lower_boundary_condition == BC_ZERO_FLUX) ||
+        error("soilwm_moisture_form_solve!: unsupported lower boundary condition")
+    nc = length(mask)
+    nc == 0 && return nothing
+    T = eltype(scr.hk)
+    backend = _kernel_backend(scr.hk)
+    expensive = (cfg.flux_calculation == cfg.expensive)
+    _soilwm_moisture_form_kernel!(backend)(st, scr, mfin, mask, nbedrock,
+        joff, joff_zi, nlevsoi, T(dtime), T(cfg.e_ice), T(cfg.dtmin),
+        T(cfg.xTolerUpper), T(cfg.xTolerLower), T(cfg.verySmall), expensive,
+        cfg.lower_boundary_condition, T(DENH2O), T(M_TO_MM); ndrange = nc)
+    KA.synchronize(backend)
+    return nothing
+end
+
+# ===========================================================================
 # soilwater_moisture_form! — moisture-based Richards equation solver
 # ===========================================================================
 """
@@ -1163,175 +1419,33 @@ function soilwater_moisture_form!(col_data::ColumnData,
     nlevsoi = varpar.nlevsoi
     nlevsno = varpar.nlevsno
     joff    = nlevsno          # offset for combined snow+soil arrays (z, dz, h2osoi_liq/ice)
+    joff_zi  = nlevsno + 1
     nbedrock = col_data.nbedrock
-    z  = col_data.z
-    zi = col_data.zi
     dz = col_data.dz
-
-    nsubsteps_col = soilhydrology.num_substeps_col
-    qcharge       = soilhydrology.qcharge_col
-    h2osoi_liq    = waterstatebulk.ws.h2osoi_liq_col
-    qflx_rootsoi  = waterfluxbulk.qflx_rootsoi_col
+    nc = length(mask_hydrology)
+    h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col
     FT = eltype(h2osoi_liq)
-    hk_loc     = zeros(FT, nlevsoi)
-    smp_loc    = zeros(FT, nlevsoi)
-    dhkdw_loc  = zeros(FT, nlevsoi)
-    dsmpdw_loc = zeros(FT, nlevsoi)
-    imped_loc  = zeros(FT, nlevsoi)
-    vwc_liq_loc = zeros(FT, nlevsoi)
-    dt_dz_loc  = zeros(FT, nlevsoi)
-    qin_loc    = zeros(FT, nlevsoi)
-    qout_loc   = zeros(FT, nlevsoi)
-    dqidw0_loc = zeros(FT, nlevsoi)
-    dqidw1_loc = zeros(FT, nlevsoi)
-    dqodw1_loc = zeros(FT, nlevsoi)
-    dqodw2_loc = zeros(FT, nlevsoi)
-    dwat_loc   = zeros(FT, nlevsoi)
-    amx_loc    = zeros(FT, nlevsoi)
-    bmx_loc    = zeros(FT, nlevsoi)
-    cmx_loc    = zeros(FT, nlevsoi)
-    rmx_loc    = zeros(FT, nlevsoi)
-    fluxNet0   = zeros(FT, nlevsoi)
-    fluxNet1   = zeros(FT, nlevsoi)
 
-    for c in eachindex(mask_hydrology)
-        mask_hydrology[c] || continue
+    # Per-column scratch rows (nc × nlevsoi), device-resident via similar()+fill!,
+    # grouped so the whole adaptive substep loop runs as one per-column kernel.
+    scrow() = fill!(similar(h2osoi_liq, FT, nc, nlevsoi), zero(FT))
+    scr = MfScr(; hk = scrow(), smp = scrow(), dhkdw = scrow(), dsmpdw = scrow(),
+        imped = scrow(), s2 = scrow(), vwc_liq = scrow(), dt_dz = scrow(),
+        qin = scrow(), qout = scrow(), dqidw0 = scrow(), dqidw1 = scrow(),
+        dqodw1 = scrow(), dqodw2 = scrow(), dwat = scrow(), amx = scrow(),
+        bmx = scrow(), cmx = scrow(), rmx = scrow(), gam = scrow(),
+        fluxNet0 = scrow(), fluxNet1 = scrow())
+    st = MfState(; h2osoi_liq = h2osoi_liq, smp_l = soilstate.smp_l_col,
+        hk_l = soilstate.hk_l_col, qcharge = soilhydrology.qcharge_col,
+        nsubsteps = soilhydrology.num_substeps_col)
+    mfin = MfIn(; z = col_data.z, zi = col_data.zi, dz = dz,
+        qflx_rootsoi = waterfluxbulk.qflx_rootsoi_col, watsat = soilstate.watsat_col,
+        hksat = soilstate.hksat_col, bsw = soilstate.bsw_col, sucsat = soilstate.sucsat_col,
+        icefrac = soilhydrology.icefrac_col, zwt = soilhydrology.zwt_col,
+        qflx_infl = waterfluxbulk.wf.qflx_infl_col)
 
-        nlayers = nbedrock[c]
-
-        # Zero workspace for this column's active layers
-        for arr in (hk_loc, smp_loc, dhkdw_loc, dsmpdw_loc, imped_loc,
-                    vwc_liq_loc, dt_dz_loc, qin_loc, qout_loc,
-                    dqidw0_loc, dqidw1_loc, dqodw1_loc, dqodw2_loc,
-                    dwat_loc, amx_loc, bmx_loc, cmx_loc, rmx_loc,
-                    fluxNet0, fluxNet1)
-            @inbounds for j in 1:nlayers
-                arr[j] = 0.0
-            end
-        end
-
-        # Initialize adaptive substeps
-        nsubstep = 0
-        dtsub = dtime
-        dtdone = 0.0
-        qcharge[c] = 0.0
-
-        # Adaptive sub-step loop
-        while true
-            nsubstep += 1
-
-            # Calculate commonly used variables
-            for j in 1:nlayers
-                vwc_liq_loc[j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
-                dt_dz_loc[j] = dtsub / (M_TO_MM * dz[c, joff + j])
-            end
-
-            # Hydraulic conductivity and soil matric potential
-            compute_hydraulic_properties!(c, nlayers,
-                soilhydrology, soilstate, swrc, cfg,
-                vwc_liq_loc, hk_loc, smp_loc, dhkdw_loc, dsmpdw_loc, imped_loc)
-
-            # Soil moisture fluxes and derivatives
-            compute_moisture_fluxes_and_derivs!(c, nlayers, z, zi, dz,
-                soilhydrology, soilstate, waterfluxbulk, swrc, cfg,
-                vwc_liq_loc, hk_loc, smp_loc, dhkdw_loc, dsmpdw_loc, imped_loc,
-                qin_loc, qout_loc, dqidw0_loc, dqidw1_loc, dqodw1_loc, dqodw2_loc)
-
-            # RHS
-            rootsoi_slice = view(qflx_rootsoi, c, 1:nlayers)
-            compute_RHS_moisture_form!(c, nlayers,
-                rootsoi_slice,
-                vwc_liq_loc, qin_loc, qout_loc, dt_dz_loc, rmx_loc)
-
-            # LHS
-            compute_LHS_moisture_form!(c, nlayers,
-                dt_dz_loc, dqidw0_loc, dqidw1_loc, dqodw1_loc, dqodw2_loc,
-                amx_loc, bmx_loc, cmx_loc)
-
-            # Solve tridiagonal system
-            tridiagonal_col!(dwat_loc, amx_loc, bmx_loc, cmx_loc, rmx_loc,
-                1, 1, nlayers)
-
-            # Error estimation
-            @inbounds for j in 1:nlayers
-                fluxNet0[j] = 0.0
-                fluxNet1[j] = 0.0
-            end
-
-            for j in 1:nlayers
-                if cfg.flux_calculation == cfg.expensive
-                    # Expensive option
-                    if j == 1
-                        qin_test = qin_loc[j] + dqidw1_loc[j] * dwat_loc[j]
-                    else
-                        qin_test = qin_loc[j] + dqidw0_loc[j] * dwat_loc[j-1] + dqidw1_loc[j] * dwat_loc[j]
-                    end
-
-                    if j == nlayers
-                        qout_test = qout_loc[j] + dqodw1_loc[j] * dwat_loc[j]
-                    else
-                        qout_test = qout_loc[j] + dqodw1_loc[j] * dwat_loc[j] + dqodw2_loc[j] * dwat_loc[j+1]
-                    end
-
-                    fluxNet0[j] = qin_test - qout_test - qflx_rootsoi[c, j]
-                else
-                    # Inexpensive: convert iteration increment to net flux
-                    fluxNet0[j] = dwat_loc[j] / dt_dz_loc[j]
-                end
-
-                fluxNet1[j] = qin_loc[j] - qout_loc[j] - qflx_rootsoi[c, j]
-            end
-
-            # Compute absolute errors
-            errorMax = 0.0
-            for j in 1:nlayers
-                err_val = abs(fluxNet1[j] - fluxNet0[j]) * dtsub * 0.5
-                errorMax = max(errorMax, err_val)
-            end
-
-            # Check if error is above upper tolerance
-            if errorMax > cfg.xTolerUpper && dtsub > cfg.dtmin
-                dtsub = max(dtsub / 2.0, cfg.dtmin)
-                continue  # substep rejected; try again
-            end
-
-            # Renew the mass of liquid water
-            for j in 1:nlayers
-                h2osoi_liq[c, joff + j] = h2osoi_liq[c, joff + j] + dwat_loc[j] * (M_TO_MM * dz[c, joff + j])
-            end
-
-            # Compute drainage from bottom of soil column
-            if cfg.lower_boundary_condition == BC_FLUX
-                qcTemp = hk_loc[nlayers] + dhkdw_loc[nlayers] * dwat_loc[nlayers]
-            elseif cfg.lower_boundary_condition == BC_ZERO_FLUX
-                qcTemp = 0.0
-            elseif cfg.lower_boundary_condition == BC_WATERTABLE
-                qcTemp = qout_loc[nlayers] + dqodw1_loc[nlayers] * dwat_loc[nlayers]
-            else
-                error("soilwater_moisture_form!: lower boundary condition must be specified!")
-            end
-
-            # Increment qcharge flux
-            qcharge[c] = qcharge[c] + qcTemp * (dtsub / dtime)
-
-            # Increment substep and check for completion
-            dtdone = dtdone + dtsub
-            if abs(dtime - dtdone) < cfg.verySmall
-                break  # time step completed
-            end
-
-            # Check if error is below lower tolerance
-            if errorMax < cfg.xTolerLower
-                dtsub = dtsub * 2.0
-            end
-
-            # Ensure substep does not exceed time remaining
-            dtsub = min(dtsub, dtime - dtdone)
-        end  # substep loop
-
-        # Save number of adaptive substeps
-        nsubsteps_col[c] = Float64(nsubstep)
-    end  # spatial loop
+    soilwm_moisture_form_solve!(st, scr, mfin, mask_hydrology, nbedrock,
+        joff, joff_zi, nlevsoi, dtime, cfg)
 
     # Calculate qcharge when water table is in soil column (bc_watertable)
     if use_aquifer_layer(cfg)
