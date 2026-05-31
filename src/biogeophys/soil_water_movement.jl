@@ -55,13 +55,14 @@ const M_TO_MM = 1.0e3
         joff::Int, joff_zi::Int, denice, denh2o)
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
-        zmm[c, j]  = z[c, joff + j] * 1.0e3
-        dzmm[c, j] = dz[c, joff + j] * 1.0e3
-        zimm_arr[c, j+1] = zi[c, joff_zi + j] * 1.0e3  # j+1: index 1 = Fortran j=0
+        T = eltype(zmm)
+        zmm[c, j]  = z[c, joff + j] * T(1.0e3)
+        dzmm[c, j] = dz[c, joff + j] * T(1.0e3)
+        zimm_arr[c, j+1] = zi[c, joff_zi + j] * T(1.0e3)  # j+1: index 1 = Fortran j=0
 
         vol_ice[c, j] = smooth_min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * denice))
-        icefrac[c, j] = smooth_min(1.0, vol_ice[c, j] / watsat[c, j])
-        vwc_liq[c, j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * denh2o)
+        icefrac[c, j] = smooth_min(one(T), vol_ice[c, j] / watsat[c, j])
+        vwc_liq[c, j] = smooth_max(h2osoi_liq[c, joff + j], T(1.0e-6)) / (dz[c, joff + j] * denh2o)
     end
 end
 
@@ -76,9 +77,11 @@ kernel; replaces the inline double loop in `soilwater_zengdecker2009!`.
 function soilwm_mm_icefrac!(zmm, dzmm, zimm_arr, vol_ice, icefrac, vwc_liq,
         mask, z, dz, zi, watsat, h2osoi_ice, h2osoi_liq,
         joff::Int, joff_zi::Int, nlevsoi::Int; denice, denh2o)
+    T = eltype(zmm)
     _launch!(_soilwm_mm_icefrac_kernel!, zmm, dzmm, zimm_arr, vol_ice, icefrac,
              vwc_liq, mask, z, dz, zi, watsat, h2osoi_ice, h2osoi_liq,
-             joff, joff_zi, denice, denh2o; ndrange = (length(mask), nlevsoi))
+             joff, joff_zi, convert(T, denice), convert(T, denh2o);
+             ndrange = (length(mask), nlevsoi))
 end
 
 # --------------------------------------------------------------------------
@@ -88,8 +91,9 @@ end
 @kernel function _soilwm_zwtmm_kernel!(zwtmm, zimm_arr, @Const(mask), @Const(zwt))
     c = @index(Global)
     @inbounds if mask[c]
-        zimm_arr[c, 1] = 0.0       # Fortran zimm(c,0) = 0
-        zwtmm[c] = zwt[c] * 1.0e3
+        T = eltype(zwtmm)
+        zimm_arr[c, 1] = zero(T)       # Fortran zimm(c,0) = 0
+        zwtmm[c] = zwt[c] * T(1.0e3)
     end
 end
 
@@ -1073,7 +1077,7 @@ Calculate additional aquifer recharge terms for the moisture form method.
 Ported from `compute_qcharge` in `SoilWaterMovementMod.F90`.
 """
 function compute_qcharge!(col_data::ColumnData,
-        mask_hydrology::BitVector,
+        mask_hydrology::AbstractVector{Bool},
         soilhydrology::SoilHydrologyData, soilstate::SoilStateData,
         waterstatebulk::WaterStateBulkData,
         swrc::SoilWaterRetentionCurve, cfg::SoilWaterMovementConfig,
@@ -1148,7 +1152,7 @@ time stepping.
 Ported from `soilwater_moisture_form` in `SoilWaterMovementMod.F90`.
 """
 function soilwater_moisture_form!(col_data::ColumnData,
-        mask_hydrology::BitVector, mask_urban::BitVector,
+        mask_hydrology::AbstractVector{Bool}, mask_urban::AbstractVector{Bool},
         soilhydrology::SoilHydrologyData, soilstate::SoilStateData,
         waterfluxbulk::WaterFluxBulkData, waterstatebulk::WaterStateBulkData,
         temperature::TemperatureData, canopystate::CanopyStateData,
@@ -1369,7 +1373,7 @@ matric potential and coupled aquifer layer.
 Ported from `soilwater_zengdecker2009` in `SoilWaterMovementMod.F90`.
 """
 function soilwater_zengdecker2009!(col_data::ColumnData,
-        mask_hydrology::BitVector, mask_urban::BitVector,
+        mask_hydrology::AbstractVector{Bool}, mask_urban::AbstractVector{Bool},
         soilhydrology::SoilHydrologyData, soilstate::SoilStateData,
         waterfluxbulk::WaterFluxBulkData, waterstatebulk::WaterStateBulkData,
         temperature::TemperatureData, canopystate::CanopyStateData,
@@ -1528,7 +1532,7 @@ solver method based on `cfg.soilwater_movement_method`.
 Ported from `SoilWater` in `SoilWaterMovementMod.F90`.
 """
 function soil_water!(col_data::ColumnData,
-        mask_hydrology::BitVector, mask_urban::BitVector,
+        mask_hydrology::AbstractVector{Bool}, mask_urban::AbstractVector{Bool},
         soilhydrology::SoilHydrologyData, soilstate::SoilStateData,
         waterfluxbulk::WaterFluxBulkData, waterstatebulk::WaterStateBulkData,
         temperature::TemperatureData, canopystate::CanopyStateData,
