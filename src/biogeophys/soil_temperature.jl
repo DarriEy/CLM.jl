@@ -1080,21 +1080,23 @@ function compute_ground_heat_flux_and_deriv!(
 
     nc = length(bounds_col)
     FT = eltype(temperature.t_soisno_col)
-    lwrad_emit = zeros(FT, nc)
-    dlwrad_emit = zeros(FT, nc)
-    lwrad_emit_snow = zeros(FT, nc)
-    lwrad_emit_soil = zeros(FT, nc)
-    lwrad_emit_h2osfc_arr = zeros(FT, nc)
-    hs = zeros(FT, nc)
+    # Per-call scratch on the state's backend (device on GPU) — not host zeros().
+    _z(n) = fill!(similar(temperature.t_grnd_col, FT, n), zero(FT))
+    lwrad_emit = _z(nc)
+    dlwrad_emit = _z(nc)
+    lwrad_emit_snow = _z(nc)
+    lwrad_emit_soil = _z(nc)
+    lwrad_emit_h2osfc_arr = _z(nc)
+    hs = _z(nc)
 
     compute_ground_lwrad_emit!(lwrad_emit, dlwrad_emit, lwrad_emit_snow, lwrad_emit_soil,
                                lwrad_emit_h2osfc_arr, mask_nolakec, emg, t_grnd, t_soisno,
                                t_h2osfc, snl, joff)
 
-    hs_soil .= 0.0
-    hs_h2osfc .= 0.0
-    hs .= 0.0
-    dhsdT .= 0.0
+    hs_soil .= zero(FT)
+    hs_h2osfc .= zero(FT)
+    hs .= zero(FT)
+    dhsdT .= zero(FT)
 
     # Per-patch ground net heat flux + atomic patch→column scatter (kernelized).
     compute_gnet_patch!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,
@@ -1103,9 +1105,9 @@ function compute_ground_heat_flux_and_deriv!(
         hs_h2osfc, is_simple_build_temp(), is_prog_build_temp())
 
     # SNICAR: sabg_lyr_col and hs_top
-    sabg_lyr_col .= 0.0
-    hs_top .= 0.0
-    hs_top_snow .= 0.0
+    sabg_lyr_col .= zero(FT)
+    hs_top .= zero(FT)
+    hs_top_snow .= zero(FT)
 
     # SNICAR top-layer net heat flux + per-layer solar (kernelized; atomic scatter).
     compute_gnet_snicar!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,
@@ -1360,7 +1362,7 @@ function set_rhs_vec!(col::ColumnData, lun::LandunitData,
     FT = eltype(t_soisno)
     rvector .= FT(NaN)
     nc = size(rvector, 1)
-    fn_h2osfc = zeros(FT, nc)
+    fn_h2osfc = fill!(similar(t_soisno, FT, nc), zero(FT))  # scratch on the state's backend
     dt = convert(FT, dtime)
 
     # Snow-layer RHS (one thread per (column, snow level)).
