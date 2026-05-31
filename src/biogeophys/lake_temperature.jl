@@ -518,6 +518,144 @@ end
 end
 
 # =========================================================================
+# lake_temperature! pre-solve part 2 kernels (lt4).
+# =========================================================================
+# Solar heat source penetrating the lake (per-patch × lake layer).
+@kernel function _lake_heat_source_kernel!(phi, phi_soil, @Const(maskp), @Const(column),
+        @Const(etal), @Const(lakedepth), @Const(z_lake), @Const(dz_lake), @Const(t_grnd),
+        @Const(t_lake), @Const(snl), @Const(sabg), @Const(beta), @Const(sabg_lyr),
+        nlevlak::Int)
+    p, j = @index(Global, NTuple)
+    @inbounds if maskp[p]
+        T = eltype(phi)
+        c = column[p]
+        eta = etal[c] > zero(T) ? etal[c] : T(1.1925) * smooth_max(lakedepth[c], one(T))^T(-0.424)
+        zin  = z_lake[c, j] - T(0.5) * dz_lake[c, j]
+        zout = z_lake[c, j] + T(0.5) * dz_lake[c, j]
+        rsfin  = exp(-eta * smooth_max(zin - T(ZA_LAKE), zero(T)))
+        rsfout = exp(-eta * smooth_max(zout - T(ZA_LAKE), zero(T)))
+        phidum = zero(T)
+        if t_grnd[c] > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl[c] == 0
+            phidum = (rsfin - rsfout) * sabg[p] * (one(T) - beta[c])
+            if j == nlevlak
+                phi_soil[c] = rsfout * sabg[p] * (one(T) - beta[c])
+            end
+        elseif j == 1 && snl[c] == 0
+            phidum = sabg[p] * (one(T) - beta[c])
+        elseif j == 1
+            phidum = sabg_lyr[p, j]
+        else
+            phidum = zero(T)
+            if j == nlevlak
+                phi_soil[c] = zero(T)
+            end
+        end
+        phi[c, j] = phidum
+    end
+end
+
+# Lake-layer volumetric heat capacity.
+@kernel function _lake_cv_lake_kernel!(cv_lake, @Const(mask), @Const(dz_lake),
+        @Const(lake_icefrac), nlevlak::Int, cwat, cice_eff)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(cv_lake)
+        cv_lake[c, j] = dz_lake[c, j] * (cwat * (one(T) - lake_icefrac[c, j]) + cice_eff * lake_icefrac[c, j])
+    end
+end
+
+# Initial lake internal energy sum (per-column, accumulates ocvts) + t_lake_bef.
+@kernel function _lake_energy_sum_lake_kernel!(ocvts, t_lake_bef, @Const(mask),
+        @Const(cv_lake), @Const(t_lake), @Const(lake_icefrac), @Const(dz_lake),
+        nlevlak::Int, cfus)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(ocvts)
+        acc = ocvts[c]
+        for j in 1:nlevlak
+            acc += cv_lake[c, j] * (t_lake[c, j] - T(TFRZ)) + cfus * dz_lake[c, j] * (one(T) - lake_icefrac[c, j])
+            t_lake_bef[c, j] = t_lake[c, j]
+        end
+        ocvts[c] = acc
+    end
+end
+
+# Initial snow/soil internal energy sum (per-column, accumulates ocvts) + t_soisno_bef.
+@kernel function _lake_energy_sum_soil_kernel!(ocvts, t_soisno_bef, @Const(mask),
+        @Const(jtop), @Const(cv), @Const(t_soisno), @Const(h2osoi_liq),
+        @Const(h2osno_total), nlevsno::Int, nlevgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(ocvts)
+        acc = ocvts[c]
+        for j in (-nlevsno + 1):nlevgrnd
+            jj = j + nlevsno
+            if j >= jtop[c]
+                acc += cv[c, jj] * (t_soisno[c, jj] - T(TFRZ)) + T(HFUS) * h2osoi_liq[c, jj]
+                if j == 1 && h2osno_total[c] > zero(T) && j == jtop[c]
+                    acc -= h2osno_total[c] * T(HFUS)
+                end
+                t_soisno_bef[c, jj] = t_soisno[c, jj]
+            end
+        end
+        ocvts[c] = acc
+    end
+end
+
+# Transfer patch sabg / sabg_lyr to column level (per-patch × snow level).
+@kernel function _lake_solar_transfer_kernel!(sabg_col, sabg_lyr_col, @Const(maskp),
+        @Const(column), @Const(jtop), @Const(sabg), @Const(sabg_lyr), nlevsno::Int)
+    p, jidx = @index(Global, NTuple)
+    @inbounds if maskp[p]
+        c = column[p]
+        j = jidx - nlevsno
+        if j >= jtop[c]
+            if j == jtop[c]
+                sabg_col[c] = sabg[p]
+            end
+            sabg_lyr_col[c, jidx] = sabg_lyr[p, jidx]
+        end
+    end
+end
+
+# Extended-column arrays zx/cvx/phix/tx (per-column; internal ascending j_ext loop
+# because the soil branch reads zx[c, nlevlak+nlevsno] written by the lake branch).
+@kernel function _lake_extcol_setup_kernel!(zx, cvx, phix, tx, @Const(mask), @Const(jtop),
+        @Const(z), @Const(cv), @Const(sabg_lyr_col), @Const(z_lake), @Const(cv_lake),
+        @Const(phi), @Const(t_lake), @Const(dz_lake), @Const(phi_soil), @Const(t_soisno),
+        nlevsno::Int, nlevlak::Int, nlevgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(zx)
+        extoff = nlevsno
+        for j_ext in (-nlevsno + 1):(nlevlak + nlevgrnd)
+            ji = j_ext + extoff
+            jprime = j_ext - nlevlak
+            jj = j_ext + nlevsno
+            if j_ext >= jtop[c]
+                if j_ext < 1
+                    zx[c, ji] = z[c, jj]
+                    cvx[c, ji] = cv[c, jj]
+                    phix[c, ji] = j_ext == jtop[c] ? zero(T) : sabg_lyr_col[c, j_ext + nlevsno]
+                    tx[c, ji] = t_soisno[c, jj]
+                elseif j_ext <= nlevlak
+                    zx[c, ji] = z_lake[c, j_ext]
+                    cvx[c, ji] = cv_lake[c, j_ext]
+                    phix[c, ji] = phi[c, j_ext]
+                    tx[c, ji] = t_lake[c, j_ext]
+                else
+                    jprime_jj = jprime + nlevsno
+                    zx[c, ji] = zx[c, nlevlak + extoff] + dz_lake[c, nlevlak] / T(2.0) + z[c, jprime_jj]
+                    cvx[c, ji] = cv[c, jprime_jj]
+                    phix[c, ji] = j_ext == nlevlak + 1 ? phi_soil[c] : zero(T)
+                    tx[c, ji] = t_soisno[c, jprime_jj]
+                end
+            end
+        end
+    end
+end
+
+# =========================================================================
 """
     lake_temperature!(col, patch_data, solarabs, soilstate, waterstatebulk,
                       waterdiagbulk, waterfluxbulk, energyflux, temperature,
@@ -690,138 +828,29 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         frzn, t_grnd, t_lake, snl, lake_icefrac, nlevlak, FT(cwat), FT(tkice_eff);
         ndrange = nc)
 
-    # 4!) Heat source term from solar radiation penetrating lake
-    for j in 1:nlevlak
-        for p in bounds_patch
-            mask_lakep[p] || continue
-            c = patch_data.column[p]
+    # 4!) Solar heat source penetrating the lake (per-patch × lake layer).
+    _launch!(_lake_heat_source_kernel!, phi, phi_soil, mask_lakep, patch_data.column,
+        etal, lakedepth, z_lake, dz_lake, t_grnd, t_lake, snl, sabg, beta, sabg_lyr,
+        nlevlak; ndrange = (length(mask_lakep), nlevlak))
 
-            if etal[c] > 0.0
-                eta = etal[c]
-            else
-                eta = 1.1925 * smooth_max(lakedepth[c], 1.0)^(-0.424)
-            end
-
-            zin = z_lake[c, j] - 0.5 * dz_lake[c, j]
-            zout = z_lake[c, j] + 0.5 * dz_lake[c, j]
-            rsfin = exp(-eta * smooth_max(zin - ZA_LAKE, 0.0))
-            rsfout = exp(-eta * smooth_max(zout - ZA_LAKE, 0.0))
-
-            if t_grnd[c] > TFRZ && t_lake[c, 1] > TFRZ && snl[c] == 0
-                phidum = (rsfin - rsfout) * sabg[p] * (1.0 - beta[c])
-                if j == nlevlak
-                    phi_soil[c] = rsfout * sabg[p] * (1.0 - beta[c])
-                end
-            elseif j == 1 && snl[c] == 0  # frozen but no snow layers
-                phidum = sabg[p] * (1.0 - beta[c])
-            elseif j == 1  # snow layers present
-                phidum = sabg_lyr[p, j]
-            else
-                phidum = 0.0
-                if j == nlevlak
-                    phi_soil[c] = 0.0
-                end
-            end
-            phi[c, j] = phidum
-        end
-    end
-
-    # 5!) Set thermal properties and check initial energy content
-    # Lake thermal properties
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-            cv_lake[c, j] = dz_lake[c, j] * (cwat * (1.0 - lake_icefrac[c, j]) + cice_eff * lake_icefrac[c, j])
-        end
-    end
-
-    # Snow/soil thermal properties
+    # 5!) Thermal properties + initial energy content.
+    _launch!(_lake_cv_lake_kernel!, cv_lake, mask_lakec, dz_lake, lake_icefrac, nlevlak,
+        FT(cwat), FT(cice_eff); ndrange = (nc, nlevlak))
     soil_therm_prop_lake!(col, soilstate, waterstatebulk, temperature,
                           tk, cv, tktopsoillay, mask_lakec, bounds_col)
-
-    # Sum cv*t_lake for energy check
-    for j in 1:nlevlak
-        for c in bounds_col
-            mask_lakec[c] || continue
-            ocvts[c] = ocvts[c] + cv_lake[c, j] * (t_lake[c, j] - TFRZ) +
-                cfus * dz_lake[c, j] * (1.0 - lake_icefrac[c, j])
-            t_lake_bef[c, j] = t_lake[c, j]
-        end
-    end
-
-    # Calculate total h2osno for energy check
+    _launch!(_lake_energy_sum_lake_kernel!, ocvts, t_lake_bef, mask_lakec, cv_lake, t_lake,
+        lake_icefrac, dz_lake, nlevlak, FT(cfus); ndrange = nc)
     calculate_total_h2osno!(waterstatebulk.ws, snl, h2osno_total, mask_lakec, bounds_col)
+    _launch!(_lake_energy_sum_soil_kernel!, ocvts, t_soisno_bef, mask_lakec, jtop, cv,
+        t_soisno, h2osoi_liq, h2osno_total, nlevsno, nlevgrnd; ndrange = nc)
 
-    # Now do for soil / snow layers
-    for j in (-nlevsno + 1):nlevgrnd
-        jj = j + joff
-        for c in bounds_col
-            mask_lakec[c] || continue
-            if j >= jtop[c]
-                ocvts[c] = ocvts[c] + cv[c, jj] * (t_soisno[c, jj] - TFRZ) +
-                    HFUS * h2osoi_liq[c, jj]
-                if j == 1 && h2osno_total[c] > 0.0 && j == jtop[c]
-                    ocvts[c] = ocvts[c] - h2osno_total[c] * HFUS
-                end
-                t_soisno_bef[c, jj] = t_soisno[c, jj]
-            end
-        end
-    end
-
-    # 6!) Set up vectors for tridiagonal matrix solution
-    # Transfer sabg and sabg_lyr to column level
-    for j in (-nlevsno + 1):1
-        jj_sabg = j + nlevsno  # index into sabg_lyr_col (1-based)
-        for p in bounds_patch
-            mask_lakep[p] || continue
-            c = patch_data.column[p]
-            if j >= jtop[c]
-                if j == jtop[c]
-                    sabg_col[c] = sabg[p]
-                end
-                sabg_lyr_col[c, jj_sabg] = sabg_lyr[p, jj_sabg]
-            end
-        end
-    end
-
-    # Set up extended column arrays: zx, cvx, phix, tx
-    for j_ext in (-nlevsno + 1):(nlevlak + nlevgrnd)
-        ji = j_ext + ext_off  # Julia 1-based index into extended arrays
-        for c in bounds_col
-            mask_lakec[c] || continue
-
-            jprime = j_ext - nlevlak
-            jj = j_ext + joff  # Julia index into snow/soil arrays
-
-            if j_ext >= jtop[c]
-                if j_ext < 1  # snow layer
-                    zx[c, ji] = z[c, jj]
-                    cvx[c, ji] = cv[c, jj]
-                    if j_ext == jtop[c]
-                        phix[c, ji] = 0.0
-                    else
-                        phix[c, ji] = sabg_lyr_col[c, j_ext + nlevsno]
-                    end
-                    tx[c, ji] = t_soisno[c, jj]
-                elseif j_ext <= nlevlak  # lake layer
-                    zx[c, ji] = z_lake[c, j_ext]
-                    cvx[c, ji] = cv_lake[c, j_ext]
-                    phix[c, ji] = phi[c, j_ext]
-                    tx[c, ji] = t_lake[c, j_ext]
-                else  # soil layer
-                    jprime_jj = jprime + joff  # Julia index for soil layer
-                    zx[c, ji] = zx[c, nlevlak + ext_off] + dz_lake[c, nlevlak] / 2.0 + z[c, jprime_jj]
-                    cvx[c, ji] = cv[c, jprime_jj]
-                    if j_ext == nlevlak + 1  # top soil layer
-                        phix[c, ji] = phi_soil[c]
-                    else
-                        phix[c, ji] = 0.0
-                    end
-                    tx[c, ji] = t_soisno[c, jprime_jj]
-                end
-            end
-        end
-    end
+    # 6!) Transfer solar to column level + build extended-column arrays.
+    _launch!(_lake_solar_transfer_kernel!, sabg_col, sabg_lyr_col, mask_lakep,
+        patch_data.column, jtop, sabg, sabg_lyr, nlevsno;
+        ndrange = (length(mask_lakep), nlevsno + 1))
+    _launch!(_lake_extcol_setup_kernel!, zx, cvx, phix, tx, mask_lakec, jtop, z, cv,
+        sabg_lyr_col, z_lake, cv_lake, phi, t_lake, dz_lake, phi_soil, t_soisno,
+        nlevsno, nlevlak, nlevgrnd; ndrange = nc)
 
     # Determine interface thermal conductivities, tkix
     for j_ext in (-nlevsno + 1):(nlevlak + nlevgrnd)
