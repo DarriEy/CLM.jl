@@ -288,10 +288,10 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                            solarabs::SolarAbsorbedData,
                            canopystate::CanopyStateData,
                            urbanparams::UrbanParamsData,
-                           urbantv_t_building_max::Vector{<:Real},
-                           atm2lnd_forc_lwrad::Vector{<:Real},
-                           mask_nolakec::BitVector, mask_nolakep::BitVector,
-                           mask_urbanl::BitVector, mask_urbanc::BitVector,
+                           urbantv_t_building_max::AbstractVector{<:Real},
+                           atm2lnd_forc_lwrad::AbstractVector{<:Real},
+                           mask_nolakec::AbstractVector{Bool}, mask_nolakep::AbstractVector{Bool},
+                           mask_urbanl::AbstractVector{Bool}, mask_urbanc::AbstractVector{Bool},
                            bounds_col::UnitRange{Int}, bounds_lun::UnitRange{Int},
                            bounds_patch::UnitRange{Int},
                            dtime::Real)
@@ -306,35 +306,41 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     nc = length(bounds_col)
     nband = 5
 
-    # Local arrays — infer FT from temperature to support Dual
+    # Local scratch — infer FT from temperature (supports Dual) and allocate on the SAME
+    # backend as the state via `similar(<state array>, …)`, so the whole driver (kernels +
+    # scratch) is device-resident on GPU and host on CPU. `pf`/`pi` are float/int prototypes.
     FT = eltype(temperature.t_soisno_col)
-    jtop = fill(-9999, nc)
-    jbot = fill(0, nc)
-    cv = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    tk = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    fn = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    fn1 = zeros(FT, nc, nlevsno + nlevmaxurbgrnd)
-    tk_h2osfc = fill(FT(NaN), nc)
-    hs_top = zeros(FT, nc)
-    dhsdT = zeros(FT, nc)
-    hs_soil = zeros(FT, nc)
-    hs_top_snow = zeros(FT, nc)
-    hs_h2osfc = zeros(FT, nc)
-    sabg_lyr_col = zeros(FT, nc, nlevsno + 1)  # -nlevsno+1:1
-    fn_h2osfc = zeros(FT, nc)
-    dz_h2osfc = zeros(FT, nc)
-    c_h2osfc = zeros(FT, nc)
-    # cool_on/heat_on are Bool scratch matched to the state's backend (device-resident Bool
-    # arrays on GPU, Vector{Bool} on CPU) so building_hac! and the urban-building-heat kernel
-    # can write/read them on-device — replaces the host-only `falses(...)` BitVector.
-    cool_on = fill!(similar(temperature.t_building_lun, Bool, length(bounds_lun)), false)
-    heat_on = fill!(similar(temperature.t_building_lun, Bool, length(bounds_lun)), false)
+    pf = temperature.t_soisno_col          # float prototype (backend + FT)
+    pint = col.snl                         # int prototype (backend)
+    _z(d...)  = fill!(similar(pf, FT, d...), zero(FT))    # zero-filled FT array
+    _nan(d...) = fill!(similar(pf, FT, d...), FT(NaN))    # NaN-filled FT array
+    nlev = nlevsno + nlevmaxurbgrnd
+    jtop = fill!(similar(pint, Int, nc), -9999)
+    jbot = fill!(similar(pint, Int, nc), 0)
+    cv = _z(nc, nlev)
+    tk = _z(nc, nlev)
+    fn = _z(nc, nlev)
+    fn1 = _z(nc, nlev)
+    tk_h2osfc = _nan(nc)
+    hs_top = _z(nc)
+    dhsdT = _z(nc)
+    hs_soil = _z(nc)
+    hs_top_snow = _z(nc)
+    hs_h2osfc = _z(nc)
+    sabg_lyr_col = _z(nc, nlevsno + 1)  # -nlevsno+1:1
+    fn_h2osfc = _z(nc)
+    dz_h2osfc = _z(nc)
+    c_h2osfc = _z(nc)
+    # cool_on/heat_on are Bool scratch matched to the state's backend (device-resident on GPU,
+    # Vector{Bool} on CPU) so building_hac! and the urban-building-heat kernel work on-device.
+    cool_on = fill!(similar(pf, Bool, length(bounds_lun)), false)
+    heat_on = fill!(similar(pf, Bool, length(bounds_lun)), false)
 
     # Band matrix and vectors (Fortran: -nlevsno:nlevmaxurbgrnd → nlevsno+1+nlevmaxurbgrnd levels)
     nlev_total = nlevsno + 1 + nlevmaxurbgrnd  # -nlevsno to nlevmaxurbgrnd
-    bmatrix = zeros(FT, nc, nband, nlev_total)
-    tvector = fill(FT(NaN), nc, nlev_total)
-    rvector = fill(FT(NaN), nc, nlev_total)
+    bmatrix = _z(nc, nband, nlev_total)
+    tvector = _nan(nc, nlev_total)
+    rvector = _nan(nc, nlev_total)
 
     # Aliases for temperature fields
     snl = col.snl
@@ -768,10 +774,10 @@ function soil_therm_prop!(col::ColumnData, lun::LandunitData,
                           waterstatebulk::WaterStateBulkData,
                           waterdiagbulk::WaterDiagnosticBulkData,
                           soilstate::SoilStateData,
-                          mask_nolakec::BitVector, mask_urbanc::BitVector,
+                          mask_nolakec::AbstractVector{Bool}, mask_urbanc::AbstractVector{Bool},
                           bounds_col::UnitRange{Int},
-                          tk_out::Matrix{<:Real}, cv_out::Matrix{<:Real},
-                          tk_h2osfc_out::Vector{<:Real})
+                          tk_out::AbstractMatrix{<:Real}, cv_out::AbstractMatrix{<:Real},
+                          tk_h2osfc_out::AbstractVector{<:Real})
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
     nlevurb = varpar.nlevurb
@@ -1052,12 +1058,12 @@ function compute_ground_heat_flux_and_deriv!(
         temperature::TemperatureData, energyflux::EnergyFluxData,
         solarabs::SolarAbsorbedData, canopystate::CanopyStateData,
         waterdiagbulk::WaterDiagnosticBulkData, waterfluxbulk::WaterFluxBulkData,
-        urbanparams::UrbanParamsData, forc_lwrad::Vector{<:Real},
-        mask_nolakec::BitVector, mask_nolakep::BitVector,
+        urbanparams::UrbanParamsData, forc_lwrad::AbstractVector{<:Real},
+        mask_nolakec::AbstractVector{Bool}, mask_nolakep::AbstractVector{Bool},
         bounds_col::UnitRange{Int}, bounds_patch::UnitRange{Int},
-        hs_h2osfc::Vector{<:Real}, hs_top_snow::Vector{<:Real},
-        hs_soil::Vector{<:Real}, hs_top::Vector{<:Real},
-        dhsdT::Vector{<:Real}, sabg_lyr_col::Matrix{<:Real})
+        hs_h2osfc::AbstractVector{<:Real}, hs_top_snow::AbstractVector{<:Real},
+        hs_soil::AbstractVector{<:Real}, hs_top::AbstractVector{<:Real},
+        dhsdT::AbstractVector{<:Real}, sabg_lyr_col::AbstractMatrix{<:Real})
 
     nlevsno = varpar.nlevsno
     joff = nlevsno
@@ -1179,10 +1185,10 @@ function compute_heat_diff_flux_and_factor!(
         col::ColumnData, lun::LandunitData,
         temperature::TemperatureData, energyflux::EnergyFluxData,
         urbanparams::UrbanParamsData,
-        mask_nolakec::BitVector, bounds_col::UnitRange{Int},
+        mask_nolakec::AbstractVector{Bool}, bounds_col::UnitRange{Int},
         dtime::Real,
-        tk::Matrix{<:Real}, cv::Matrix{<:Real},
-        fn::Matrix{<:Real}, fact::Matrix{<:Real})
+        tk::AbstractMatrix{<:Real}, cv::AbstractMatrix{<:Real},
+        fn::AbstractMatrix{<:Real}, fact::AbstractMatrix{<:Real})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -1332,15 +1338,15 @@ end
 function set_rhs_vec!(col::ColumnData, lun::LandunitData,
                       temperature::TemperatureData,
                       waterdiagbulk::WaterDiagnosticBulkData,
-                      mask_nolakec::BitVector, bounds_col::UnitRange{Int},
+                      mask_nolakec::AbstractVector{Bool}, bounds_col::UnitRange{Int},
                       dtime::Real,
-                      hs_h2osfc::Vector{<:Real}, hs_top_snow::Vector{<:Real},
-                      hs_soil::Vector{<:Real}, hs_top::Vector{<:Real},
-                      dhsdT::Vector{<:Real}, sabg_lyr_col::Matrix{<:Real},
-                      tk::Matrix{<:Real}, tk_h2osfc::Vector{<:Real},
-                      fact::Matrix{<:Real}, fn::Matrix{<:Real},
-                      c_h2osfc::Vector{<:Real}, dz_h2osfc::Vector{<:Real},
-                      rvector::Matrix{<:Real})
+                      hs_h2osfc::AbstractVector{<:Real}, hs_top_snow::AbstractVector{<:Real},
+                      hs_soil::AbstractVector{<:Real}, hs_top::AbstractVector{<:Real},
+                      dhsdT::AbstractVector{<:Real}, sabg_lyr_col::AbstractMatrix{<:Real},
+                      tk::AbstractMatrix{<:Real}, tk_h2osfc::AbstractVector{<:Real},
+                      fact::AbstractMatrix{<:Real}, fn::AbstractMatrix{<:Real},
+                      c_h2osfc::AbstractVector{<:Real}, dz_h2osfc::AbstractVector{<:Real},
+                      rvector::AbstractMatrix{<:Real})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -1534,12 +1540,12 @@ end
 
 function set_matrix!(col::ColumnData, lun::LandunitData,
                      waterdiagbulk::WaterDiagnosticBulkData,
-                     mask_nolakec::BitVector, bounds_col::UnitRange{Int},
+                     mask_nolakec::AbstractVector{Bool}, bounds_col::UnitRange{Int},
                      dtime::Real, nband::Int,
-                     dhsdT::Vector{<:Real}, tk::Matrix{<:Real},
-                     tk_h2osfc::Vector{<:Real}, fact::Matrix{<:Real},
-                     c_h2osfc::Vector{<:Real}, dz_h2osfc::Vector{<:Real},
-                     bmatrix::Array{<:Real,3})
+                     dhsdT::AbstractVector{<:Real}, tk::AbstractMatrix{<:Real},
+                     tk_h2osfc::AbstractVector{<:Real}, fact::AbstractMatrix{<:Real},
+                     c_h2osfc::AbstractVector{<:Real}, dz_h2osfc::AbstractVector{<:Real},
+                     bmatrix::AbstractArray{<:Real,3})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -1684,8 +1690,8 @@ function phase_change_h2osfc!(col::ColumnData, temperature::TemperatureData,
                               waterstatebulk::WaterStateBulkData,
                               waterdiagbulk::WaterDiagnosticBulkData,
                               waterfluxbulk::WaterFluxBulkData,
-                              mask_nolakec::BitVector, bounds_col::UnitRange{Int},
-                              dtime::Real, dhsdT::Vector{<:Real})
+                              mask_nolakec::AbstractVector{Bool}, bounds_col::UnitRange{Int},
+                              dtime::Real, dhsdT::AbstractVector{<:Real})
 
     nlevsno = varpar.nlevsno
 
@@ -2009,8 +2015,8 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
                             waterstatebulk::WaterStateBulkData,
                             waterdiagbulk::WaterDiagnosticBulkData,
                             waterfluxbulk::WaterFluxBulkData,
-                            mask_nolakec::BitVector, bounds_col::UnitRange{Int},
-                            dtime::Real, dhsdT::Vector{<:Real})
+                            mask_nolakec::AbstractVector{Bool}, bounds_col::UnitRange{Int},
+                            dtime::Real, dhsdT::AbstractVector{<:Real})
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
