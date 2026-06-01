@@ -120,93 +120,102 @@ end
 #     use_biomass_heat_storage, use_lch4) are passed as scalar Bool args.
 # The 2D rah/raw[p, ABOVE_CANOPY|BELOW_CANOPY] indexing is preserved exactly.
 # ---------------------------------------------------------------------------
-@kernel function _cf_resist_kernel!(
-        # written arrays
-        tlbef, del2, ram1_patch, rah, raw, uaf_patch, uuc, dleaf_patch,
-        rb, rb1_patch, grnd_ch4_cond_patch, svpts, eah, rh_af_patch,
-        rah1_patch, raw1_patch, rah2_patch, raw2_patch, vpd_patch,
-        # read-only arrays
-        @Const(filterp), @Const(column), @Const(gridcell), @Const(itype),
-        @Const(t_veg_patch), @Const(del_arr), @Const(ustar_patch),
-        @Const(um_patch), @Const(temp1), @Const(temp2),
-        @Const(elai_patch), @Const(esai_patch), @Const(htop_patch),
-        @Const(z0mg_col), @Const(taf_patch), @Const(qaf_patch),
-        @Const(t_grnd_col), @Const(dleaf_pft), @Const(forc_pbot_col),
-        @Const(el),
-        # scalars
+# Arrays grouped into device-view structs (Metal 31-buffer limit; the flat form
+# had ~41). rah/raw are 2D → CfResOut needs {M,V}. Int gather indices + active
+# (Bool) stay loose; the Float64 scalar constants are eltype-converted in the
+# wrapper. Launched via manual backend + KA.synchronize (struct-arg kernel).
+# rah/raw are 2D → M. grnd_ch4_cond_patch / dleaf_pft come from Float64 kwarg
+# defaults and stay Float64 even when the state is ForwardDiff.Dual (AD path) —
+# they get their own type params (Vg/Vp) so the struct accepts the mixed eltypes
+# (a single V would force all fields to one type and fail to construct under AD).
+Base.@kwdef struct CfResOut{M,V,Vg}   # written outputs
+    tlbef::V; del2::V; ram1_patch::V; rah::M; raw::M; uaf_patch::V; uuc::V
+    dleaf_patch::V; rb::V; rb1_patch::V; grnd_ch4_cond_patch::Vg; svpts::V; eah::V
+    rh_af_patch::V; rah1_patch::V; raw1_patch::V; rah2_patch::V; raw2_patch::V; vpd_patch::V
+end
+Base.@kwdef struct CfResIn{V,Vp}      # read-only float inputs
+    t_veg_patch::V; del_arr::V; ustar_patch::V; um_patch::V; temp1::V; temp2::V
+    elai_patch::V; esai_patch::V; htop_patch::V; z0mg_col::V; taf_patch::V; qaf_patch::V
+    t_grnd_col::V; dleaf_pft::Vp; forc_pbot_col::V; el::V
+end
+Adapt.@adapt_structure CfResOut
+Adapt.@adapt_structure CfResIn
+
+@kernel function _cf_resist_kernel!(o, in, @Const(filterp), @Const(column),
+        @Const(gridcell), @Const(itype), @Const(active),
         csoilc_val, use_undercanopy_stability::Bool,
         use_biomass_heat_storage::Bool, use_lch4::Bool,
         cv, a_coef, a_exp, vkc, grav, nu_param, ria_canopy,
         above_canopy::Int, below_canopy::Int)
 
     fi = @index(Global)
-    @inbounds begin
+    @inbounds if active[filterp[fi]]
         p = filterp[fi]
         c = column[p]
-        g = gridcell[p]
+        T = eltype(o.tlbef)
         ft = itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
 
-        tlbef[p] = t_veg_patch[p]
-        del2[p] = del_arr[p]
+        o.tlbef[p] = in.t_veg_patch[p]
+        o.del2[p] = in.del_arr[p]
 
         # Aerodynamic resistances
-        ram1_patch[p] = 1.0 / (ustar_patch[p]^2 / um_patch[p])
-        rah[p, above_canopy] = 1.0 / (temp1[p] * ustar_patch[p])
-        raw[p, above_canopy] = 1.0 / (temp2[p] * ustar_patch[p])
+        o.ram1_patch[p] = one(T) / (in.ustar_patch[p]^2 / in.um_patch[p])
+        o.rah[p, above_canopy] = one(T) / (in.temp1[p] * in.ustar_patch[p])
+        o.raw[p, above_canopy] = one(T) / (in.temp2[p] * in.ustar_patch[p])
 
         # Bulk boundary layer resistance
-        uaf_patch[p] = um_patch[p] *
-            sqrt(1.0 / (ram1_patch[p] * um_patch[p]))
+        o.uaf_patch[p] = in.um_patch[p] *
+            sqrt(one(T) / (o.ram1_patch[p] * in.um_patch[p]))
 
         # Empirical undercanopy wind speed
-        uuc[p] = smooth_min(0.4, 0.03 * um_patch[p] / ustar_patch[p])
+        o.uuc[p] = smooth_min(T(0.4), T(0.03) * in.um_patch[p] / in.ustar_patch[p])
 
         # Leaf characteristic width
-        dleaf_patch[p] = dleaf_pft[ft]
+        o.dleaf_patch[p] = in.dleaf_pft[ft]
 
-        cf = cv / (sqrt(uaf_patch[p]) * sqrt(dleaf_patch[p]))
-        rb[p] = 1.0 / (cf * uaf_patch[p])
-        rb1_patch[p] = rb[p]
+        cf = cv / (sqrt(o.uaf_patch[p]) * sqrt(o.dleaf_patch[p]))
+        o.rb[p] = one(T) / (cf * o.uaf_patch[p])
+        o.rb1_patch[p] = o.rb[p]
 
         # Soil drag coefficient (X. Zeng parameterization)
-        w = exp(-(elai_patch[p] + esai_patch[p]))
+        w = exp(-(in.elai_patch[p] + in.esai_patch[p]))
 
-        csoilb = vkc / (a_coef * (z0mg_col[c] * uaf_patch[p] / nu_param)^a_exp)
+        csoilb = vkc / (a_coef * (in.z0mg_col[c] * o.uaf_patch[p] / nu_param)^a_exp)
 
-        ri = (grav * htop_patch[p] *
-            (taf_patch[p] - t_grnd_col[c])) /
-            (taf_patch[p] * uaf_patch[p]^2)
+        ri = (grav * in.htop_patch[p] *
+            (in.taf_patch[p] - in.t_grnd_col[c])) /
+            (in.taf_patch[p] * o.uaf_patch[p]^2)
 
-        if use_undercanopy_stability && (taf_patch[p] - t_grnd_col[c]) > 0.0
-            ricsoilc = csoilc_val / (1.0 + ria_canopy * smooth_min(ri, 10.0))
-            csoilcn = csoilb * w + ricsoilc * (1.0 - w)
+        if use_undercanopy_stability && (in.taf_patch[p] - in.t_grnd_col[c]) > zero(T)
+            ricsoilc = csoilc_val / (one(T) + ria_canopy * smooth_min(ri, T(10.0)))
+            csoilcn = csoilb * w + ricsoilc * (one(T) - w)
         else
-            csoilcn = csoilb * w + csoilc_val * (1.0 - w)
+            csoilcn = csoilb * w + csoilc_val * (one(T) - w)
         end
 
         if use_biomass_heat_storage
-            rah[p, below_canopy] = 1.0 / (csoilcn * uuc[p])
+            o.rah[p, below_canopy] = one(T) / (csoilcn * o.uuc[p])
         else
-            rah[p, below_canopy] = 1.0 / (csoilcn * uaf_patch[p])
+            o.rah[p, below_canopy] = one(T) / (csoilcn * o.uaf_patch[p])
         end
 
-        raw[p, below_canopy] = rah[p, below_canopy]
+        o.raw[p, below_canopy] = o.rah[p, below_canopy]
 
-        if use_lch4 && length(grnd_ch4_cond_patch) >= p
-            grnd_ch4_cond_patch[p] = 1.0 / (raw[p, above_canopy] + raw[p, below_canopy])
+        if use_lch4 && length(o.grnd_ch4_cond_patch) >= p
+            o.grnd_ch4_cond_patch[p] = one(T) / (o.raw[p, above_canopy] + o.raw[p, below_canopy])
         end
 
         # Stomatal resistance intermediates
-        svpts[p] = el[p]
-        eah[p] = forc_pbot_col[c] * qaf_patch[p] / 0.622
-        rh_af_patch[p] = eah[p] / svpts[p]
+        o.svpts[p] = in.el[p]
+        o.eah[p] = in.forc_pbot_col[c] * in.qaf_patch[p] / T(0.622)
+        o.rh_af_patch[p] = o.eah[p] / o.svpts[p]
 
         # History outputs
-        rah1_patch[p] = rah[p, above_canopy]
-        raw1_patch[p] = raw[p, above_canopy]
-        rah2_patch[p] = rah[p, below_canopy]
-        raw2_patch[p] = raw[p, below_canopy]
-        vpd_patch[p]  = smooth_max((svpts[p] - eah[p]), 50.0) * 0.001
+        o.rah1_patch[p] = o.rah[p, above_canopy]
+        o.raw1_patch[p] = o.raw[p, above_canopy]
+        o.rah2_patch[p] = o.rah[p, below_canopy]
+        o.raw2_patch[p] = o.raw[p, below_canopy]
+        o.vpd_patch[p]  = smooth_max((o.svpts[p] - o.eah[p]), T(50.0)) * T(0.001)
     end
 end
 
@@ -225,28 +234,34 @@ Newton stability iteration. `csoilc_val` and the feature flags are resolved on
 the host and passed as scalars.
 """
 function cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
-        patch_data, filterp, fn::Int,
+        patch_data, filterp, fn::Int, active,
         temp1, temp2, tlbef, del2, del_arr, rah, raw, uuc, rb, svpts, eah, el,
         dleaf_pft, grnd_ch4_cond_patch, forc_pbot_col,
         csoilc_val, use_undercanopy_stability::Bool,
         use_biomass_heat_storage::Bool, use_lch4::Bool, params)
-    _launch!(_cf_resist_kernel!, tlbef,
-        del2, frictionvel.ram1_patch, rah, raw,
-        frictionvel.uaf_patch, uuc, canopystate.dleaf_patch,
-        rb, frictionvel.rb1_patch, grnd_ch4_cond_patch, svpts, eah,
-        waterdiagbulk.rh_af_patch,
-        frictionvel.rah1_patch, frictionvel.raw1_patch,
-        frictionvel.rah2_patch, frictionvel.raw2_patch, frictionvel.vpd_patch,
-        filterp, patch_data.column, patch_data.gridcell, patch_data.itype,
-        temperature.t_veg_patch, del_arr, frictionvel.ustar_patch,
-        frictionvel.um_patch, temp1, temp2,
-        canopystate.elai_patch, canopystate.esai_patch, canopystate.htop_patch,
-        frictionvel.z0mg_col, frictionvel.taf_patch, frictionvel.qaf_patch,
-        temperature.t_grnd_col, dleaf_pft, forc_pbot_col, el,
-        csoilc_val, use_undercanopy_stability, use_biomass_heat_storage, use_lch4,
-        params.cv, params.a_coef, params.a_exp, VKC, GRAV, NU_PARAM, RIA_CANOPY,
-        ABOVE_CANOPY, BELOW_CANOPY;
-        ndrange = fn)
+    o = CfResOut(; tlbef = tlbef, del2 = del2, ram1_patch = frictionvel.ram1_patch,
+        rah = rah, raw = raw, uaf_patch = frictionvel.uaf_patch, uuc = uuc,
+        dleaf_patch = canopystate.dleaf_patch, rb = rb, rb1_patch = frictionvel.rb1_patch,
+        grnd_ch4_cond_patch = grnd_ch4_cond_patch, svpts = svpts, eah = eah,
+        rh_af_patch = waterdiagbulk.rh_af_patch, rah1_patch = frictionvel.rah1_patch,
+        raw1_patch = frictionvel.raw1_patch, rah2_patch = frictionvel.rah2_patch,
+        raw2_patch = frictionvel.raw2_patch, vpd_patch = frictionvel.vpd_patch)
+    inp = CfResIn(; t_veg_patch = temperature.t_veg_patch, del_arr = del_arr,
+        ustar_patch = frictionvel.ustar_patch, um_patch = frictionvel.um_patch,
+        temp1 = temp1, temp2 = temp2, elai_patch = canopystate.elai_patch,
+        esai_patch = canopystate.esai_patch, htop_patch = canopystate.htop_patch,
+        z0mg_col = frictionvel.z0mg_col, taf_patch = frictionvel.taf_patch,
+        qaf_patch = frictionvel.qaf_patch, t_grnd_col = temperature.t_grnd_col,
+        dleaf_pft = dleaf_pft, forc_pbot_col = forc_pbot_col, el = el)
+    T = eltype(tlbef)
+    let be = _kernel_backend(tlbef)
+        _cf_resist_kernel!(be)(o, inp, filterp, patch_data.column, patch_data.gridcell,
+            patch_data.itype, active, T(csoilc_val), use_undercanopy_stability,
+            use_biomass_heat_storage, use_lch4, T(params.cv), T(params.a_coef),
+            T(params.a_exp), T(VKC), T(GRAV), T(NU_PARAM), T(RIA_CANOPY),
+            ABOVE_CANOPY, BELOW_CANOPY; ndrange = fn)
+        KA.synchronize(be)
+    end
     return nothing
 end
 
@@ -273,52 +288,113 @@ end
 # preserved exactly. Note line ~854 uses smooth_min but line ~867 uses plain
 # min — that exact difference is preserved.
 # ---------------------------------------------------------------------------
-@kernel function _cf_energy_kernel!(
-        # written arrays
-        wtg, wtl0, wta0, wtstem0, wtga, wtal, lw_stem, lw_leaf,
-        wtgq, wtlq0, wtaq0, wtalq, efe, dt_veg, del_arr, err_arr,
-        qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
-        canopy_cond_patch, eflx_sh_stem_patch, eflx_sh_veg_patch,
-        qflx_tran_veg_patch, qflx_evap_veg_patch, t_veg_patch,
-        taf_patch, qaf_patch, zeta_patch, um_patch, obu_patch,
-        # read-only arrays
-        @Const(filterp), @Const(column), @Const(gridcell),
-        @Const(rah), @Const(raw), @Const(rb), @Const(rstem),
-        @Const(sa_leaf), @Const(sa_stem), @Const(sa_internal),
-        @Const(frac_rad_abs_by_stem), @Const(air), @Const(bir), @Const(cir),
-        @Const(cp_leaf), @Const(tl_ini), @Const(tlbef), @Const(zldis),
-        @Const(temp1), @Const(temp2), @Const(ur), @Const(efeb),
-        @Const(emv_patch), @Const(t_stem_patch), @Const(btran_patch),
-        @Const(fdry_patch), @Const(fwet_patch), @Const(elai_patch),
-        @Const(esai_patch), @Const(laisun_patch), @Const(laisha_patch),
-        @Const(rssun_patch), @Const(rssha_patch), @Const(qg_col),
-        @Const(frac_sno_eff_col), @Const(frac_h2osfc_col), @Const(t_soisno_col),
-        @Const(t_h2osfc_col), @Const(snow_depth_col), @Const(soilbeta_col),
-        @Const(soilresis_col), @Const(forc_rho_col), @Const(forc_q_col),
-        @Const(forc_th_col), @Const(thv_col), @Const(thm_patch),
-        @Const(t_grnd_col), @Const(sabv_patch), @Const(snl),
-        @Const(frac_veg_nosno_patch), @Const(liqcan_patch), @Const(snocan_patch),
-        @Const(uaf_patch), @Const(forc_pbot_col), @Const(ustar_patch),
+# Arrays grouped into device-view structs (Metal 31-buffer limit; the flat form
+# had ~88 args). All energy arrays are state/scratch/forcing → uniform eltype
+# even on the AD path (no Float64-kwarg fields like resist's dleaf_pft), so
+# single {V}/{M} params suffice. nmozsgn + the Int gather/index arrays stay
+# loose. Float64 scalar constants are eltype-converted in cf_energy_update!.
+# Inside, the struct fields are aliased to locals (zero-cost array bindings) so
+# the physics body reads unchanged except Float64 literals → T(). Launched via
+# manual backend + KA.synchronize (struct-arg kernel).
+# Metal allows at most ~31 array resources per indirect-argument-buffer (struct),
+# so the 34-field output/patch-input bags are each split in two (≤17 fields each).
+Base.@kwdef struct CfEnOutA{V}    # written per-patch float outputs (1/2)
+    wtg::V; wtl0::V; wta0::V; wtstem0::V; wtga::V; wtal::V; lw_stem::V; lw_leaf::V
+    wtgq::V; wtlq0::V; wtaq0::V; wtalq::V; efe::V; dt_veg::V; del_arr::V; err_arr::V; qsatl::V
+end
+Base.@kwdef struct CfEnOutB{V}    # written per-patch float outputs (2/2)
+    el::V; qsatldT::V; dth::V; dqh::V; delq::V; obuold::V; canopy_cond_patch::V
+    eflx_sh_stem_patch::V; eflx_sh_veg_patch::V; qflx_tran_veg_patch::V
+    qflx_evap_veg_patch::V; t_veg_patch::V; taf_patch::V; qaf_patch::V
+    zeta_patch::V; um_patch::V; obu_patch::V
+end
+Base.@kwdef struct CfEnPA{V}      # read-only per-patch floats (1/2)
+    rb::V; rstem::V; sa_leaf::V; sa_stem::V; sa_internal::V; frac_rad_abs_by_stem::V
+    air::V; bir::V; cir::V; cp_leaf::V; tl_ini::V; tlbef::V; zldis::V; temp1::V; temp2::V
+    ur::V; efeb::V
+end
+Base.@kwdef struct CfEnPB{V}      # read-only per-patch floats (2/2)
+    emv_patch::V; t_stem_patch::V; btran_patch::V; fdry_patch::V
+    fwet_patch::V; elai_patch::V; esai_patch::V; laisun_patch::V; laisha_patch::V
+    rssun_patch::V; rssha_patch::V; thm_patch::V; sabv_patch::V; liqcan_patch::V
+    snocan_patch::V; uaf_patch::V; ustar_patch::V
+end
+Base.@kwdef struct CfEnC{V}       # read-only per-column floats
+    qg_col::V; frac_sno_eff_col::V; frac_h2osfc_col::V; t_h2osfc_col::V
+    snow_depth_col::V; soilbeta_col::V; soilresis_col::V; forc_rho_col::V
+    forc_q_col::V; forc_th_col::V; thv_col::V; t_grnd_col::V; forc_pbot_col::V
+end
+Base.@kwdef struct CfEnM{M}       # read-only 2D arrays
+    rah::M; raw::M; t_soisno_col::M
+end
+Adapt.@adapt_structure CfEnOutA
+Adapt.@adapt_structure CfEnOutB
+Adapt.@adapt_structure CfEnPA
+Adapt.@adapt_structure CfEnPB
+Adapt.@adapt_structure CfEnC
+Adapt.@adapt_structure CfEnM
+
+# Scalar constants bundled into one isbits arg (Metal caps total kernel args
+# ~31; 13 separate Float scalars would each count). All fields share precision S.
+struct CfEnScalars{S}
+    sb::S; cpair::S; hvap::S; vkc::S; grav::S; btran0::S; delmax_canopy::S
+    zii_canopy::S; beta_canopy::S; dtime::S; z_dl::S; lai_dl::S; zetamaxstable::S
+end
+
+@kernel function _cf_energy_kernel!(o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
+        @Const(filterp), @Const(active), @Const(column),
+        @Const(snl), @Const(frac_veg_nosno_patch),
         # scalars
         soilevap_beta::Bool, soil_resis_sl14::Bool,
         use_lch4::Bool, use_hydrstress::Bool, canopy_cond_len::Int,
-        above_canopy::Int, below_canopy::Int,
-        sb, cpair, hvap, vkc, grav, btran0, delmax_canopy, zii_canopy,
-        beta_canopy, nlevsno::Int, dtime, z_dl, lai_dl, zetamaxstable)
+        above_canopy::Int, below_canopy::Int, nlevsno::Int)
 
     fi = @index(Global)
-    @inbounds begin
+    @inbounds if active[filterp[fi]]
         p = filterp[fi]
         c = column[p]
-        g = gridcell[p]
+        T = eltype(o1.wtg)
+        # Alias grouped struct fields to locals (zero-cost array bindings) so the
+        # physics body below is unchanged except for Float64 literals → T(...).
+        wtg = o1.wtg; wtl0 = o1.wtl0; wta0 = o1.wta0; wtstem0 = o1.wtstem0; wtga = o1.wtga
+        wtal = o1.wtal; lw_stem = o1.lw_stem; lw_leaf = o1.lw_leaf; wtgq = o1.wtgq
+        wtlq0 = o1.wtlq0; wtaq0 = o1.wtaq0; wtalq = o1.wtalq; efe = o1.efe; dt_veg = o1.dt_veg
+        del_arr = o1.del_arr; err_arr = o1.err_arr; qsatl = o1.qsatl; el = o2.el
+        qsatldT = o2.qsatldT; dth = o2.dth; dqh = o2.dqh; delq = o2.delq; obuold = o2.obuold
+        canopy_cond_patch = o2.canopy_cond_patch; eflx_sh_stem_patch = o2.eflx_sh_stem_patch
+        eflx_sh_veg_patch = o2.eflx_sh_veg_patch; qflx_tran_veg_patch = o2.qflx_tran_veg_patch
+        qflx_evap_veg_patch = o2.qflx_evap_veg_patch; t_veg_patch = o2.t_veg_patch
+        taf_patch = o2.taf_patch; qaf_patch = o2.qaf_patch; zeta_patch = o2.zeta_patch
+        um_patch = o2.um_patch; obu_patch = o2.obu_patch
+        rb = ep1.rb; rstem = ep1.rstem; sa_leaf = ep1.sa_leaf; sa_stem = ep1.sa_stem
+        sa_internal = ep1.sa_internal; frac_rad_abs_by_stem = ep1.frac_rad_abs_by_stem
+        air = ep1.air; bir = ep1.bir; cir = ep1.cir; cp_leaf = ep1.cp_leaf; tl_ini = ep1.tl_ini
+        tlbef = ep1.tlbef; zldis = ep1.zldis; temp1 = ep1.temp1; temp2 = ep1.temp2; ur = ep1.ur
+        efeb = ep1.efeb; emv_patch = ep2.emv_patch; t_stem_patch = ep2.t_stem_patch
+        btran_patch = ep2.btran_patch; fdry_patch = ep2.fdry_patch; fwet_patch = ep2.fwet_patch
+        elai_patch = ep2.elai_patch; esai_patch = ep2.esai_patch; laisun_patch = ep2.laisun_patch
+        laisha_patch = ep2.laisha_patch; rssun_patch = ep2.rssun_patch; rssha_patch = ep2.rssha_patch
+        thm_patch = ep2.thm_patch; sabv_patch = ep2.sabv_patch; liqcan_patch = ep2.liqcan_patch
+        snocan_patch = ep2.snocan_patch; uaf_patch = ep2.uaf_patch; ustar_patch = ep2.ustar_patch
+        qg_col = ec.qg_col; frac_sno_eff_col = ec.frac_sno_eff_col
+        frac_h2osfc_col = ec.frac_h2osfc_col; t_h2osfc_col = ec.t_h2osfc_col
+        snow_depth_col = ec.snow_depth_col; soilbeta_col = ec.soilbeta_col
+        soilresis_col = ec.soilresis_col; forc_rho_col = ec.forc_rho_col
+        forc_q_col = ec.forc_q_col; forc_th_col = ec.forc_th_col; thv_col = ec.thv_col
+        t_grnd_col = ec.t_grnd_col; forc_pbot_col = ec.forc_pbot_col
+        rah = em.rah; raw = em.raw; t_soisno_col = em.t_soisno_col
+        sb = sc.sb; cpair = sc.cpair; hvap = sc.hvap; vkc = sc.vkc; grav = sc.grav
+        btran0 = sc.btran0; delmax_canopy = sc.delmax_canopy; zii_canopy = sc.zii_canopy
+        beta_canopy = sc.beta_canopy; dtime = sc.dtime; z_dl = sc.z_dl; lai_dl = sc.lai_dl
+        zetamaxstable = sc.zetamaxstable
 
         # Sensible heat conductance for air, leaf, ground, stem
-        wta  = 1.0 / rah[p, above_canopy]       # air
+        wta  = one(T) / rah[p, above_canopy]       # air
         wtl  = sa_leaf[p] / rb[p]                # leaf
-        wtg[p] = 1.0 / rah[p, below_canopy]     # ground
+        wtg[p] = one(T) / rah[p, below_canopy]     # ground
         wtstem = sa_stem[p] / (rstem[p] + rb[p]) # stem
 
-        wtshi = 1.0 / (wta + wtl + wtstem + wtg[p])
+        wtshi = one(T) / (wta + wtl + wtstem + wtg[p])
 
         wtl0[p]    = wtl * wtshi
         wtg0       = wtg[p] * wtshi
@@ -340,17 +416,17 @@ end
         rssun_p = rssun_patch[p]
         rssha_p = rssha_patch[p]
 
-        if fdry_p > 0.0
+        if fdry_p > zero(T)
             rppdry = fdry_p * rb[p] *
                 (laisun_p / (rb[p] + rssun_p) + laisha_p / (rb[p] + rssha_p)) / elai_p
         else
-            rppdry = 0.0
+            rppdry = zero(T)
         end
 
         # Canopy conductance for methane
         if use_lch4 && canopy_cond_len >= p
             canopy_cond_patch[p] = (laisun_p / (rb[p] + rssun_p) +
-                laisha_p / (rb[p] + rssha_p)) / smooth_max(elai_p, 0.01)
+                laisha_p / (rb[p] + rssha_p)) / smooth_max(elai_p, T(0.01))
         end
 
         efpot = forc_rho_col[c] * ((elai_p + esai_p) / rb[p]) *
@@ -362,7 +438,7 @@ end
         qflx_tran_veg_p = qflx_tran_veg_patch[p]
 
         if use_hydrstress
-            if efpot > 0.0
+            if efpot > zero(T)
                 if btran_p > btran0
                     rpp = rppdry + fwet_p
                 else
@@ -370,21 +446,21 @@ end
                 end
                 rpp = smooth_min(rpp, (qflx_tran_veg_p + h2ocan / dtime) / efpot)
             else
-                rpp = 1.0
+                rpp = one(T)
             end
         else
-            if efpot > 0.0
+            if efpot > zero(T)
                 if btran_p > btran0
                     qflx_tran_veg_patch[p] = efpot * rppdry
                     rpp = rppdry + fwet_p
                 else
                     rpp = fwet_p
-                    qflx_tran_veg_patch[p] = 0.0
+                    qflx_tran_veg_patch[p] = zero(T)
                 end
                 rpp = min(rpp, (qflx_tran_veg_patch[p] + h2ocan / dtime) / efpot)
             else
-                rpp = 1.0
-                qflx_tran_veg_patch[p] = 0.0
+                rpp = one(T)
+                qflx_tran_veg_patch[p] = zero(T)
             end
         end
 
@@ -396,10 +472,10 @@ end
         # Litter layer resistance (Sakaguchi)
         snow_depth_c = z_dl
         fsno_dl = snow_depth_col[c] / snow_depth_c
-        elai_dl = lai_dl * (1.0 - smooth_min(fsno_dl, 1.0))
-        rdl = (1.0 - exp(-elai_dl)) / (0.004 * uaf_patch[p])
+        elai_dl = lai_dl * (one(T) - smooth_min(fsno_dl, one(T)))
+        rdl = (one(T) - exp(-elai_dl)) / (T(0.004) * uaf_patch[p])
 
-        if delq[p] < 0.0
+        if delq[p] < zero(T)
             wtgq[p] = fvn / (raw[p, below_canopy] + rdl)
         else
             if soilevap_beta
@@ -410,7 +486,7 @@ end
             end
         end
 
-        wtsqi  = 1.0 / (wtaq + wtlq + wtgq[p])
+        wtsqi  = one(T) / (wtaq + wtlq + wtgq[p])
         wtgq0  = wtgq[p] * wtsqi
         wtlq0[p] = wtlq * wtsqi
         wtaq0[p] = wtaq * wtsqi
@@ -430,27 +506,27 @@ end
             wtaq0[p] * forc_q_col[c])
 
         # Evaporation flux sign change limiter
-        erre = 0.0
-        if efe[p] * efeb[p] < 0.0
+        erre = zero(T)
+        if efe[p] * efeb[p] < zero(T)
             efeold = efe[p]
-            efe[p] = 0.1 * efeold
+            efe[p] = T(0.1) * efeold
             erre = efe[p] - efeold
         end
 
         # Fractionate ground emitted longwave
         snl_c = snl[c]
         lw_grnd = (frac_sno_eff_col[c] * t_soisno_col[c, snl_c + 1 + nlevsno]^4 +
-            (1.0 - frac_sno_eff_col[c] - frac_h2osfc_col[c]) *
+            (one(T) - frac_sno_eff_col[c] - frac_h2osfc_col[c]) *
                 t_soisno_col[c, 1 + nlevsno]^4 +
             frac_h2osfc_col[c] * t_h2osfc_col[c]^4)
 
         # Newton-Raphson: dt_veg
-        _numer = ((1.0 - frac_rad_abs_by_stem[p]) * (sabv_patch[p] + air[p] +
+        _numer = ((one(T) - frac_rad_abs_by_stem[p]) * (sabv_patch[p] + air[p] +
             bir[p] * t_veg_patch[p]^4 + cir[p] * lw_grnd) -
             efsh - efe[p] - lw_leaf[p] + lw_stem[p] -
             (cp_leaf[p] / dtime) * (t_veg_patch[p] - tl_ini[p]))
-        _denom = ((1.0 - frac_rad_abs_by_stem[p]) * (-4.0 * bir[p] * t_veg_patch[p]^3) +
-             4.0 * sa_internal[p] * emv_patch[p] * sb * t_veg_patch[p]^3 +
+        _denom = ((one(T) - frac_rad_abs_by_stem[p]) * (-T(4.0) * bir[p] * t_veg_patch[p]^3) +
+             T(4.0) * sa_internal[p] * emv_patch[p] * sb * t_veg_patch[p]^3 +
              dc1 * wtga[p] + dc2 * wtgaq * qsatldT[p] + cp_leaf[p] / dtime)
         dt_veg[p] = _numer / _denom
 
@@ -458,13 +534,13 @@ end
 
         dels = dt_veg[p]
         del_arr[p] = abs(dels)
-        err_arr[p] = 0.0
+        err_arr[p] = zero(T)
         if del_arr[p] > delmax_canopy
             dt_veg[p] = delmax_canopy * dels / del_arr[p]
             t_veg_patch[p] = tlbef[p] + dt_veg[p]
-            err_arr[p] = (1.0 - frac_rad_abs_by_stem[p]) * (sabv_patch[p] + air[p] +
-                bir[p] * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) + cir[p] * lw_grnd) -
-                sa_internal[p] * emv_patch[p] * sb * tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p]) +
+            err_arr[p] = (one(T) - frac_rad_abs_by_stem[p]) * (sabv_patch[p] + air[p] +
+                bir[p] * tlbef[p]^3 * (tlbef[p] + T(4.0) * dt_veg[p]) + cir[p] * lw_grnd) -
+                sa_internal[p] * emv_patch[p] * sb * tlbef[p]^3 * (tlbef[p] + T(4.0) * dt_veg[p]) +
                 lw_stem[p] -
                 (efsh + dc1 * wtga[p] * dt_veg[p]) -
                 (efe[p] + dc2 * wtgaq * qsatldT[p] * dt_veg[p]) -
@@ -479,18 +555,18 @@ end
 
         # Interception losses / ecidif
         if use_hydrstress
-            ecidif = max(0.0, qflx_evap_veg_patch[p] -
+            ecidif = max(zero(T), qflx_evap_veg_patch[p] -
                 qflx_tran_veg_patch[p] - h2ocan / dtime)
             qflx_evap_veg_patch[p] = min(qflx_evap_veg_patch[p],
                 qflx_tran_veg_patch[p] + h2ocan / dtime)
         else
-            ecidif = 0.0
-            if efpot > 0.0 && btran_patch[p] > btran0
+            ecidif = zero(T)
+            if efpot > zero(T) && btran_patch[p] > btran0
                 qflx_tran_veg_patch[p] = efpot * rppdry
             else
-                qflx_tran_veg_patch[p] = 0.0
+                qflx_tran_veg_patch[p] = zero(T)
             end
-            ecidif = max(0.0, qflx_evap_veg_patch[p] -
+            ecidif = max(zero(T), qflx_evap_veg_patch[p] -
                 qflx_tran_veg_patch[p] - h2ocan / dtime)
             qflx_evap_veg_patch[p] = min(qflx_evap_veg_patch[p],
                 qflx_tran_veg_patch[p] + h2ocan / dtime)
@@ -504,7 +580,7 @@ end
         eflx_sh_stem_patch[p] = eflx_sh_stem_patch[p] +
             forc_rho_col[c] * cpair * wtstem * (-wtl0[p] * dt_veg[p])
         lw_leaf[p] = sa_internal[p] * emv_patch[p] * sb *
-            tlbef[p]^3 * (tlbef[p] + 4.0 * dt_veg[p])
+            tlbef[p]^3 * (tlbef[p] + T(4.0) * dt_veg[p])
 
         # Re-calculate QSat at updated leaf temperature
         (qs_tmp, es_tmp, dqsdT_tmp, _) = qsat(t_veg_patch[p], forc_pbot_col[c])
@@ -528,31 +604,31 @@ end
 
         tstar = temp1[p] * dth[p]
         qstar = temp2[p] * dqh[p]
-        thvstar = tstar * (1.0 + 0.61 * forc_q_col[c]) + 0.61 * forc_th_col[c] * qstar
+        thvstar = tstar * (one(T) + T(0.61) * forc_q_col[c]) + T(0.61) * forc_th_col[c] * qstar
         zeta_patch[p] = zldis[p] * vkc * grav * thvstar /
             (ustar_patch[p]^2 * thv_col[c])
 
-        if zeta_patch[p] >= 0.0  # stable
-            zeta_patch[p] = smooth_clamp(zeta_patch[p], 0.01, zetamaxstable)
-            um_patch[p] = smooth_max(ur[p], 0.1)
+        if zeta_patch[p] >= zero(T)  # stable
+            zeta_patch[p] = smooth_clamp(zeta_patch[p], T(0.01), zetamaxstable)
+            um_patch[p] = smooth_max(ur[p], T(0.1))
         else  # unstable
-            zeta_patch[p] = smooth_clamp(zeta_patch[p], -100.0, -0.01)
-            if ustar_patch[p] * thvstar > 0.0
-                wc = 0.0
+            zeta_patch[p] = smooth_clamp(zeta_patch[p], T(-100.0), T(-0.01))
+            if ustar_patch[p] * thvstar > zero(T)
+                wc = zero(T)
             else
                 wc_arg = smooth_max(-grav * ustar_patch[p] * thvstar *
-                    zii_canopy / thv_col[c], 0.0)
-                wc = beta_canopy * wc_arg^0.333
+                    zii_canopy / thv_col[c], zero(T))
+                wc = beta_canopy * wc_arg^T(0.333)
             end
             um_patch[p] = sqrt(ur[p]^2 + wc^2)
         end
         obu_patch[p] = zldis[p] / zeta_patch[p]
 
-        if obuold[p] * obu_patch[p] < 0.0
+        if obuold[p] * obu_patch[p] < zero(T)
             nmozsgn[p] += 1
         end
         if nmozsgn[p] >= 4
-            obu_patch[p] = zldis[p] / (-0.01)
+            obu_patch[p] = zldis[p] / (-T(0.01))
         end
         obuold[p] = obu_patch[p]
     end
@@ -582,7 +658,7 @@ as scalars; `frictionvel.zetamaxstable` is passed as a scalar value.
 """
 function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
         solarabs, soilstate, waterfluxbulk, waterstatebulk, waterdiagbulk,
-        photosyns, patch_data, col_data, filterp, fn::Int,
+        photosyns, patch_data, col_data, filterp, fn::Int, active,
         rah, raw, rb, rstem, sa_leaf, sa_stem, sa_internal,
         frac_rad_abs_by_stem, air, bir, cir, cp_leaf, tl_ini, tlbef, zldis,
         temp1, temp2, ur, efeb, wtg, wtl0, wta0, wtstem0, wtga, wtal,
@@ -591,50 +667,214 @@ function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
         forc_q_col, forc_th_col, forc_pbot_col, forc_rho_col,
         soilevap_beta::Bool, soil_resis_sl14::Bool, use_lch4::Bool,
         use_hydrstress::Bool, nlevsno::Int, dtime, params)
-    _launch!(_cf_energy_kernel!,
-        # written arrays
-        wtg, wtl0, wta0, wtstem0, wtga, wtal, lw_stem, lw_leaf,
-        wtgq, wtlq0, wtaq0, wtalq, efe, dt_veg, del_arr, err_arr,
-        qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
-        energyflux.canopy_cond_patch, energyflux.eflx_sh_stem_patch,
-        energyflux.eflx_sh_veg_patch, waterfluxbulk.wf.qflx_tran_veg_patch,
-        waterfluxbulk.wf.qflx_evap_veg_patch, temperature.t_veg_patch,
-        frictionvel.taf_patch, frictionvel.qaf_patch, frictionvel.zeta_patch,
-        frictionvel.um_patch, frictionvel.obu_patch,
-        # read-only arrays
-        filterp, patch_data.column, patch_data.gridcell,
-        rah, raw, rb, rstem, sa_leaf, sa_stem, sa_internal,
-        frac_rad_abs_by_stem, air, bir, cir, cp_leaf, tl_ini, tlbef, zldis,
-        temp1, temp2, ur, efeb,
-        temperature.emv_patch, temperature.t_stem_patch, energyflux.btran_patch,
-        waterdiagbulk.fdry_patch, waterdiagbulk.fwet_patch,
-        canopystate.elai_patch, canopystate.esai_patch,
-        canopystate.laisun_patch, canopystate.laisha_patch,
-        photosyns.rssun_patch, photosyns.rssha_patch, waterdiagbulk.qg_col,
-        waterdiagbulk.frac_sno_eff_col, waterdiagbulk.frac_h2osfc_col,
-        temperature.t_soisno_col, temperature.t_h2osfc_col,
-        waterdiagbulk.snow_depth_col, soilstate.soilbeta_col,
-        soilstate.soilresis_col, forc_rho_col, forc_q_col,
-        forc_th_col, temperature.thv_col, temperature.thm_patch,
-        temperature.t_grnd_col, solarabs.sabv_patch, col_data.snl,
-        canopystate.frac_veg_nosno_patch, waterstatebulk.ws.liqcan_patch,
-        waterstatebulk.ws.snocan_patch, frictionvel.uaf_patch,
-        forc_pbot_col, frictionvel.ustar_patch,
-        # scalars
-        soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
-        length(energyflux.canopy_cond_patch), ABOVE_CANOPY, BELOW_CANOPY,
-        SB, CPAIR, HVAP, VKC, GRAV, BTRAN0, DELMAX_CANOPY, ZII_CANOPY,
-        BETA_CANOPY, nlevsno, dtime, params.z_dl, params.lai_dl,
-        frictionvel.zetamaxstable;
+    o1 = CfEnOutA(; wtg = wtg, wtl0 = wtl0, wta0 = wta0, wtstem0 = wtstem0, wtga = wtga,
+        wtal = wtal, lw_stem = lw_stem, lw_leaf = lw_leaf, wtgq = wtgq, wtlq0 = wtlq0,
+        wtaq0 = wtaq0, wtalq = wtalq, efe = efe, dt_veg = dt_veg, del_arr = del_arr,
+        err_arr = err_arr, qsatl = qsatl)
+    o2 = CfEnOutB(; el = el, qsatldT = qsatldT, dth = dth, dqh = dqh, delq = delq,
+        obuold = obuold, canopy_cond_patch = energyflux.canopy_cond_patch,
+        eflx_sh_stem_patch = energyflux.eflx_sh_stem_patch,
+        eflx_sh_veg_patch = energyflux.eflx_sh_veg_patch,
+        qflx_tran_veg_patch = waterfluxbulk.wf.qflx_tran_veg_patch,
+        qflx_evap_veg_patch = waterfluxbulk.wf.qflx_evap_veg_patch,
+        t_veg_patch = temperature.t_veg_patch, taf_patch = frictionvel.taf_patch,
+        qaf_patch = frictionvel.qaf_patch, zeta_patch = frictionvel.zeta_patch,
+        um_patch = frictionvel.um_patch, obu_patch = frictionvel.obu_patch)
+    ep1 = CfEnPA(; rb = rb, rstem = rstem, sa_leaf = sa_leaf, sa_stem = sa_stem,
+        sa_internal = sa_internal, frac_rad_abs_by_stem = frac_rad_abs_by_stem,
+        air = air, bir = bir, cir = cir, cp_leaf = cp_leaf, tl_ini = tl_ini,
+        tlbef = tlbef, zldis = zldis, temp1 = temp1, temp2 = temp2, ur = ur, efeb = efeb)
+    ep2 = CfEnPB(; emv_patch = temperature.emv_patch, t_stem_patch = temperature.t_stem_patch,
+        btran_patch = energyflux.btran_patch, fdry_patch = waterdiagbulk.fdry_patch,
+        fwet_patch = waterdiagbulk.fwet_patch, elai_patch = canopystate.elai_patch,
+        esai_patch = canopystate.esai_patch, laisun_patch = canopystate.laisun_patch,
+        laisha_patch = canopystate.laisha_patch, rssun_patch = photosyns.rssun_patch,
+        rssha_patch = photosyns.rssha_patch, thm_patch = temperature.thm_patch,
+        sabv_patch = solarabs.sabv_patch, liqcan_patch = waterstatebulk.ws.liqcan_patch,
+        snocan_patch = waterstatebulk.ws.snocan_patch, uaf_patch = frictionvel.uaf_patch,
+        ustar_patch = frictionvel.ustar_patch)
+    ec = CfEnC(; qg_col = waterdiagbulk.qg_col,
+        frac_sno_eff_col = waterdiagbulk.frac_sno_eff_col,
+        frac_h2osfc_col = waterdiagbulk.frac_h2osfc_col,
+        t_h2osfc_col = temperature.t_h2osfc_col, snow_depth_col = waterdiagbulk.snow_depth_col,
+        soilbeta_col = soilstate.soilbeta_col, soilresis_col = soilstate.soilresis_col,
+        forc_rho_col = forc_rho_col, forc_q_col = forc_q_col, forc_th_col = forc_th_col,
+        thv_col = temperature.thv_col, t_grnd_col = temperature.t_grnd_col,
+        forc_pbot_col = forc_pbot_col)
+    em = CfEnM(; rah = rah, raw = raw, t_soisno_col = temperature.t_soisno_col)
+    T = eltype(wtg)
+    sc = CfEnScalars{T}(T(SB), T(CPAIR), T(HVAP), T(VKC), T(GRAV), T(BTRAN0),
+        T(DELMAX_CANOPY), T(ZII_CANOPY), T(BETA_CANOPY), T(dtime), T(params.z_dl),
+        T(params.lai_dl), T(frictionvel.zetamaxstable))
+    let be = _kernel_backend(wtg)
+        _cf_energy_kernel!(be)(o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
+            filterp, active, patch_data.column,
+            col_data.snl, canopystate.frac_veg_nosno_patch,
+            soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
+            length(energyflux.canopy_cond_patch), ABOVE_CANOPY, BELOW_CANOPY,
+            nlevsno; ndrange = fn)
+        KA.synchronize(be)
+    end
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Convergence test (cf-newton): replaces the host-side filter compaction inside
+# the Newton stability iteration. Per-filtered-patch; for each still-active
+# patch it computes the energy-flux / temperature convergence metrics and
+# clears `active[p]` once both fall below tolerance. The filter stays fixed at
+# the original patch set; converged patches are skipped on subsequent
+# iterations via the in-kernel `active[p]` guard rather than being compacted
+# out, so the physics arrays never need a device→host copy mid-iteration. The
+# caller only launches this past ITMIN_CANOPY (matching the scalar version).
+# ---------------------------------------------------------------------------
+@kernel function _cf_converge_kernel!(active, efeb, dele, det_arr, num_iter_patch,
+        @Const(filterp), @Const(efe), @Const(del_arr), @Const(del2),
+        niter, dtmin, dlemin)
+    fi = @index(Global)
+    @inbounds if active[filterp[fi]]
+        p = filterp[fi]
+        dele[p] = abs(efe[p] - efeb[p])
+        efeb[p] = efe[p]
+        det_arr[p] = max(del_arr[p], del2[p])
+        num_iter_patch[p] = niter
+        if det_arr[p] < dtmin && dele[p] < dlemin
+            active[p] = false
+        end
+    end
+end
+
+"""
+    cf_converge_update!(active, efeb, dele, det_arr, num_iter_patch,
+                        filterp, fn, efe, del_arr, del2, itlef)
+
+Launch the canopy-fluxes convergence-test kernel over the `fn` filtered patches.
+Updates the convergence metrics for still-active patches and clears `active[p]`
+on convergence. Backend-agnostic (CPU loop or GPU); one thread per filtered
+patch.
+"""
+function cf_converge_update!(active, efeb, dele, det_arr, num_iter_patch,
+        filterp, fn::Int, efe, del_arr, del2, itlef::Int)
+    _launch!(_cf_converge_kernel!, active, efeb, dele, det_arr, num_iter_patch,
+        filterp, efe, del_arr, del2,
+        convert(eltype(num_iter_patch), itlef),
+        convert(eltype(efe), DTMIN_CANOPY), convert(eltype(efe), DLEMIN_CANOPY);
         ndrange = fn)
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Monin-Obukhov length initialization (cf-newton): per-filtered-patch. Inlines
+# monin_obuk_ini with eltype-generic literals + grav passed as a scalar (the
+# host monin_obuk_ini uses Float64 literals and the GRAV module global, neither
+# Metal-safe). Sets um/obu/num_iter and the leaf/stem initial temperatures.
+# (The host monin_obuk_ini also sets an unused local `ustar`; dropped here — it
+# never affects the (um,obu) result.)
+# ---------------------------------------------------------------------------
+@kernel function _cf_moninobukini_kernel!(um_patch, obu_patch, num_iter_patch,
+        tl_ini, ts_ini,
+        @Const(filterp), @Const(column), @Const(ur), @Const(thv_col),
+        @Const(dthv), @Const(zldis), @Const(z0mv_patch),
+        @Const(t_veg_patch), @Const(t_stem_patch),
+        zetamaxstable, grav)
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        c = column[p]
+        T = eltype(um_patch)
+        ur_p    = ur[p]
+        dthv_p  = dthv[p]
+        zldis_p = zldis[p]
+        z0m_p   = z0mv_patch[p]
+
+        wc = T(0.5)
+        um = dthv_p >= zero(T) ? max(ur_p, T(0.1)) : sqrt(ur_p * ur_p + wc * wc)
+        rib = grav * zldis_p * dthv_p / (thv_col[c] * um * um)
+        if rib >= zero(T)
+            zeta = rib * log(zldis_p / z0m_p) / (one(T) - T(5.0) * min(rib, T(0.19)))
+            zeta = min(zetamaxstable, max(zeta, T(0.01)))
+        else
+            zeta = rib * log(zldis_p / z0m_p)
+            zeta = max(T(-100.0), min(zeta, T(-0.01)))
+        end
+
+        um_patch[p] = um
+        obu_patch[p] = zldis_p / zeta
+        num_iter_patch[p] = zero(eltype(num_iter_patch))
+        tl_ini[p] = t_veg_patch[p]
+        ts_ini[p] = t_stem_patch[p]
+    end
+end
+
+function cf_moninobukini_update!(frictionvel, temperature, patch_data, filterp,
+        fn::Int, ur, dthv, zldis, tl_ini, ts_ini)
+    _launch!(_cf_moninobukini_kernel!, frictionvel.um_patch, frictionvel.obu_patch,
+        frictionvel.num_iter_patch, tl_ini, ts_ini,
+        filterp, patch_data.column, ur, temperature.thv_col, dthv, zldis,
+        frictionvel.z0mv_patch, temperature.t_veg_patch, temperature.t_stem_patch,
+        convert(eltype(frictionvel.um_patch), frictionvel.zetamaxstable),
+        convert(eltype(frictionvel.um_patch), GRAV); ndrange = fn)
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Device-safe (filterp-gather) variants of photosynthesis_timestep_init! and
+# photosynthesis_total! for the canopy_fluxes! call sites. canopy calls both
+# with default flags (use_c13/use_c14/use_cn/use_fates = false), so only the
+# base path runs; the filter (built from mask_exposedvegp) selects exactly the
+# same patches as the host mask guard. The original host functions in
+# photosynthesis.jl are kept for their other callers.
+# ---------------------------------------------------------------------------
+@kernel function _cf_psn_init_kernel!(psnsun, psnsun_wc, psnsun_wj, psnsun_wp,
+        psnsha, psnsha_wc, psnsha_wj, psnsha_wp, fpsn, fpsn_wc, fpsn_wj, fpsn_wp,
+        @Const(filterp))
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        z = zero(eltype(psnsun))
+        psnsun[p] = z; psnsun_wc[p] = z; psnsun_wj[p] = z; psnsun_wp[p] = z
+        psnsha[p] = z; psnsha_wc[p] = z; psnsha_wj[p] = z; psnsha_wp[p] = z
+        fpsn[p]   = z; fpsn_wc[p]   = z; fpsn_wj[p]   = z; fpsn_wp[p]   = z
+    end
+end
+
+function cf_psn_init_update!(ps, filterp, fn::Int)
+    _launch!(_cf_psn_init_kernel!, ps.psnsun_patch, ps.psnsun_wc_patch,
+        ps.psnsun_wj_patch, ps.psnsun_wp_patch, ps.psnsha_patch, ps.psnsha_wc_patch,
+        ps.psnsha_wj_patch, ps.psnsha_wp_patch, ps.fpsn_patch, ps.fpsn_wc_patch,
+        ps.fpsn_wj_patch, ps.fpsn_wp_patch, filterp; ndrange = fn)
+    return nothing
+end
+
+@kernel function _cf_psn_total_kernel!(fpsn, fpsn_wc, fpsn_wj, fpsn_wp,
+        @Const(filterp), @Const(psnsun), @Const(psnsun_wc), @Const(psnsun_wj),
+        @Const(psnsun_wp), @Const(psnsha), @Const(psnsha_wc), @Const(psnsha_wj),
+        @Const(psnsha_wp), @Const(laisun), @Const(laisha))
+    fi = @index(Global)
+    @inbounds begin
+        p = filterp[fi]
+        ls = laisun[p]; lh = laisha[p]
+        fpsn[p]    = psnsun[p]    * ls + psnsha[p]    * lh
+        fpsn_wc[p] = psnsun_wc[p] * ls + psnsha_wc[p] * lh
+        fpsn_wj[p] = psnsun_wj[p] * ls + psnsha_wj[p] * lh
+        fpsn_wp[p] = psnsun_wp[p] * ls + psnsha_wp[p] * lh
+    end
+end
+
+function cf_psn_total_update!(ps, laisun, laisha, filterp, fn::Int)
+    _launch!(_cf_psn_total_kernel!, ps.fpsn_patch, ps.fpsn_wc_patch, ps.fpsn_wj_patch,
+        ps.fpsn_wp_patch, filterp, ps.psnsun_patch, ps.psnsun_wc_patch,
+        ps.psnsun_wj_patch, ps.psnsun_wp_patch, ps.psnsha_patch, ps.psnsha_wc_patch,
+        ps.psnsha_wj_patch, ps.psnsha_wp_patch, laisun, laisha; ndrange = fn)
     return nothing
 end
 
 # =====================================================================
 # canopy_fluxes! Phase-1 init kernels (cf1). Per-filtered-patch (fi → p=filterp[fi]),
-# elementwise; literals eltype-converted. (canopy_fluxes! does not run whole-function
-# on GPU — the Newton iteration uses host-side filter compaction — so these add to
-# its incremental GPU coverage; the expensive Newton physics is already kernelized.)
+# elementwise; literals eltype-converted. The Newton iteration is fully
+# kernelized: a per-patch `active` mask (cleared by _cf_converge_kernel!)
+# replaces host-side filter compaction, so the whole iteration runs without a
+# device→host sync of the physics arrays.
 # =====================================================================
 @kernel function _cf_init_zero_kernel!(del_arr, efeb, wtlq0, wtalq, wtgq, wtaq0, obuold,
         dhsdt_canopy, eflx_sh_stem, @Const(filterp))
@@ -778,33 +1018,50 @@ end
 # Net absorbed longwave + QSat + CO2/O2 + flux-profile init (cf4). Per-filtered-patch;
 # qsat() is kernel-safe (4-tuple unpack preserved). The forcing-height-below-canopy
 # warning stays on the host (scans zldis after the launch — diagnostic, not in kernel).
-@kernel function _cf_longwave_qsat_kernel!(air, bir, cir, qsatl, el, qsatldT, co2_arr,
-        o2_arr, nmozsgn, taf, qaf, ur, dth, dqh, delq, dthv, zldis, @Const(filterp),
-        @Const(column), @Const(gridcell), @Const(emv), @Const(emg), @Const(forc_lwrad),
-        @Const(t_veg), @Const(forc_pbot), @Const(forc_pco2), @Const(forc_po2),
-        @Const(t_grnd), @Const(thm), @Const(forc_q), @Const(qg), @Const(forc_u),
-        @Const(forc_v), @Const(forc_th), @Const(forc_hgt_u), @Const(displa), wind_min)
+# Arrays are grouped into device-view structs (Metal caps a kernel at 31 buffer args;
+# the flat form had 38). nmozsgn (Int) + the Int gather indices stay loose. Launched
+# via manual backend + KA.synchronize (struct-arg kernel, like _cf_postiter_kernel!).
+Base.@kwdef struct CfLwqOut{V}   # written per-patch float outputs
+    air::V; bir::V; cir::V; qsatl::V; el::V; qsatldT::V; co2_arr::V; o2_arr::V
+    taf::V; qaf::V; ur::V; dth::V; dqh::V; delq::V; dthv::V; zldis::V
+end
+Base.@kwdef struct CfLwqP{V}     # read-only per-patch floats
+    emv::V; t_veg::V; thm::V; forc_hgt_u::V; displa::V
+end
+Base.@kwdef struct CfLwqC{V}     # read-only per-column floats
+    emg::V; forc_lwrad::V; forc_pbot::V; t_grnd::V; forc_q::V; qg::V; forc_th::V
+end
+Base.@kwdef struct CfLwqG{V}     # read-only per-gridcell floats
+    forc_pco2::V; forc_po2::V; forc_u::V; forc_v::V
+end
+Adapt.@adapt_structure CfLwqOut
+Adapt.@adapt_structure CfLwqP
+Adapt.@adapt_structure CfLwqC
+Adapt.@adapt_structure CfLwqG
+
+@kernel function _cf_longwave_qsat_kernel!(out, pp, cc, gg, nmozsgn,
+        @Const(filterp), @Const(column), @Const(gridcell), wind_min)
     fi = @index(Global)
     @inbounds begin
         p = filterp[fi]
-        T = eltype(air)
+        T = eltype(out.air)
         c = column[p]; g = gridcell[p]
-        emv_p = emv[p]; emg_c = emg[c]
-        air[p] = emv_p * (one(T) + (one(T) - emv_p) * (one(T) - emg_c)) * forc_lwrad[c]
-        bir[p] = -(T(2.0) - emv_p * (one(T) - emg_c)) * emv_p * T(SB)
-        cir[p] = emv_p * emg_c * T(SB)
-        (qs_tmp, es_tmp, dqsdT_tmp, _) = qsat(t_veg[p], forc_pbot[c])
-        qsatl[p] = qs_tmp; el[p] = es_tmp; qsatldT[p] = dqsdT_tmp
-        co2_arr[p] = forc_pco2[g]; o2_arr[p] = forc_po2[g]
+        emv_p = pp.emv[p]; emg_c = cc.emg[c]
+        out.air[p] = emv_p * (one(T) + (one(T) - emv_p) * (one(T) - emg_c)) * cc.forc_lwrad[c]
+        out.bir[p] = -(T(2.0) - emv_p * (one(T) - emg_c)) * emv_p * T(SB)
+        out.cir[p] = emv_p * emg_c * T(SB)
+        (qs_tmp, es_tmp, dqsdT_tmp, _) = qsat(pp.t_veg[p], cc.forc_pbot[c])
+        out.qsatl[p] = qs_tmp; out.el[p] = es_tmp; out.qsatldT[p] = dqsdT_tmp
+        out.co2_arr[p] = gg.forc_pco2[g]; out.o2_arr[p] = gg.forc_po2[g]
         nmozsgn[p] = 0
-        taf[p] = (t_grnd[c] + thm[p]) / T(2.0)
-        qaf[p] = (forc_q[c] + qg[c]) / T(2.0)
-        ur[p] = smooth_max(wind_min, sqrt(forc_u[g]^2 + forc_v[g]^2))
-        dth[p] = thm[p] - taf[p]
-        dqh[p] = forc_q[c] - qaf[p]
-        delq[p] = qg[c] - qaf[p]
-        dthv[p] = dth[p] * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * dqh[p]
-        zldis[p] = forc_hgt_u[p] - displa[p]
+        out.taf[p] = (cc.t_grnd[c] + pp.thm[p]) / T(2.0)
+        out.qaf[p] = (cc.forc_q[c] + cc.qg[c]) / T(2.0)
+        out.ur[p] = smooth_max(wind_min, sqrt(gg.forc_u[g]^2 + gg.forc_v[g]^2))
+        out.dth[p] = pp.thm[p] - out.taf[p]
+        out.dqh[p] = cc.forc_q[c] - out.qaf[p]
+        out.delq[p] = cc.qg[c] - out.qaf[p]
+        out.dthv[p] = out.dth[p] * (one(T) + T(0.61) * cc.forc_q[c]) + T(0.61) * cc.forc_th[c] * out.dqh[p]
+        out.zldis[p] = pp.forc_hgt_u[p] - pp.displa[p]
     end
 end
 
@@ -968,52 +1225,52 @@ function canopy_fluxes!(
         bounds_patch    ::UnitRange{Int},
         bounds_col      ::UnitRange{Int},
         # Atmospheric forcing (column-level)
-        forc_lwrad_col  ::Vector{<:Real},
-        forc_q_col      ::Vector{<:Real},
-        forc_pbot_col   ::Vector{<:Real},
-        forc_th_col     ::Vector{<:Real},
-        forc_rho_col    ::Vector{<:Real},
-        forc_t_col      ::Vector{<:Real},
+        forc_lwrad_col  ::AbstractVector{<:Real},
+        forc_q_col      ::AbstractVector{<:Real},
+        forc_pbot_col   ::AbstractVector{<:Real},
+        forc_th_col     ::AbstractVector{<:Real},
+        forc_rho_col    ::AbstractVector{<:Real},
+        forc_t_col      ::AbstractVector{<:Real},
         # Atmospheric forcing (gridcell-level)
-        forc_u_grc      ::Vector{<:Real},
-        forc_v_grc      ::Vector{<:Real},
-        forc_pco2_grc   ::Vector{<:Real},
-        forc_po2_grc    ::Vector{<:Real},
-        forc_hgt_t_grc  ::Vector{<:Real},
-        forc_hgt_u_grc  ::Vector{<:Real},
-        forc_hgt_q_grc  ::Vector{<:Real},
+        forc_u_grc      ::AbstractVector{<:Real},
+        forc_v_grc      ::AbstractVector{<:Real},
+        forc_pco2_grc   ::AbstractVector{<:Real},
+        forc_po2_grc    ::AbstractVector{<:Real},
+        forc_hgt_t_grc  ::AbstractVector{<:Real},
+        forc_hgt_u_grc  ::AbstractVector{<:Real},
+        forc_hgt_q_grc  ::AbstractVector{<:Real},
         # Daylength (gridcell-level)
-        dayl_grc        ::Vector{<:Real},
-        max_dayl_grc    ::Vector{<:Real},
+        dayl_grc        ::AbstractVector{<:Real},
+        max_dayl_grc    ::AbstractVector{<:Real},
         # CN inputs (patch-level)
-        downreg_patch   ::Vector{<:Real},
-        leafn_patch     ::Vector{<:Real},
+        downreg_patch   ::AbstractVector{<:Real},
+        leafn_patch     ::AbstractVector{<:Real},
         # Time step
         dtime           ::Real;
         # PFT parameters (patch-indexed via ivt)
-        dleaf_pft       ::Vector{<:Real} = fill(0.04, MXPFT+1),
-        dbh_pft         ::Vector{<:Real} = fill(0.1, MXPFT+1),
-        slatop_pft      ::Vector{<:Real} = fill(0.01, MXPFT+1),
-        fbw_pft         ::Vector{<:Real} = fill(0.1, MXPFT+1),
-        nstem_pft       ::Vector{<:Real} = fill(1.0, MXPFT+1),
-        woody_pft       ::Vector{<:Real} = fill(0.0, MXPFT+1),
-        rstem_per_dbh_pft::Vector{<:Real} = fill(0.0, MXPFT+1),
-        wood_density_pft::Vector{<:Real} = fill(500.0, MXPFT+1),
-        is_tree_pft     ::Vector{Bool} = fill(false, MXPFT+1),
-        is_shrub_pft    ::Vector{Bool} = fill(false, MXPFT+1),
-        c3psn_pft       ::Vector{<:Real} = fill(1.0, MXPFT+1),
-        leafcn_pft      ::Vector{<:Real} = fill(25.0, MXPFT+1),
-        flnr_pft        ::Vector{<:Real} = fill(0.08, MXPFT+1),
-        fnitr_pft       ::Vector{<:Real} = fill(0.1, MXPFT+1),
-        mbbopt_pft      ::Vector{<:Real} = fill(0.0, MXPFT+1),
-        medlynintercept_pft::Vector{<:Real} = fill(100.0, MXPFT+1),
-        medlynslope_pft ::Vector{<:Real} = fill(6.0, MXPFT+1),
-        crop_pft        ::Vector{<:Real} = Float64[],
-        z0v_Cr_pft      ::Vector{<:Real} = fill(0.35, MXPFT+1),
-        z0v_Cs_pft      ::Vector{<:Real} = fill(0.003, MXPFT+1),
-        z0v_c_pft       ::Vector{<:Real} = fill(0.25, MXPFT+1),
-        z0v_cw_pft      ::Vector{<:Real} = fill(2.0, MXPFT+1),
-        z0v_LAImax_pft  ::Vector{<:Real} = fill(8.0, MXPFT+1),
+        dleaf_pft       ::AbstractVector{<:Real} = fill(0.04, MXPFT+1),
+        dbh_pft         ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
+        slatop_pft      ::AbstractVector{<:Real} = fill(0.01, MXPFT+1),
+        fbw_pft         ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
+        nstem_pft       ::AbstractVector{<:Real} = fill(1.0, MXPFT+1),
+        woody_pft       ::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
+        rstem_per_dbh_pft::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
+        wood_density_pft::AbstractVector{<:Real} = fill(500.0, MXPFT+1),
+        is_tree_pft     ::AbstractVector{Bool} = fill(false, MXPFT+1),
+        is_shrub_pft    ::AbstractVector{Bool} = fill(false, MXPFT+1),
+        c3psn_pft       ::AbstractVector{<:Real} = fill(1.0, MXPFT+1),
+        leafcn_pft      ::AbstractVector{<:Real} = fill(25.0, MXPFT+1),
+        flnr_pft        ::AbstractVector{<:Real} = fill(0.08, MXPFT+1),
+        fnitr_pft       ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
+        mbbopt_pft      ::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
+        medlynintercept_pft::AbstractVector{<:Real} = fill(100.0, MXPFT+1),
+        medlynslope_pft ::AbstractVector{<:Real} = fill(6.0, MXPFT+1),
+        crop_pft        ::AbstractVector{<:Real} = Float64[],
+        z0v_Cr_pft      ::AbstractVector{<:Real} = fill(0.35, MXPFT+1),
+        z0v_Cs_pft      ::AbstractVector{<:Real} = fill(0.003, MXPFT+1),
+        z0v_c_pft       ::AbstractVector{<:Real} = fill(0.25, MXPFT+1),
+        z0v_cw_pft      ::AbstractVector{<:Real} = fill(2.0, MXPFT+1),
+        z0v_LAImax_pft  ::AbstractVector{<:Real} = fill(8.0, MXPFT+1),
         # Feature flags
         use_cn          ::Bool = false,
         use_lch4        ::Bool = false,
@@ -1023,17 +1280,17 @@ function canopy_fluxes!(
         use_luna        ::Bool = false,
         z0param_method  ::String = "ZengWang2007",
         # Ozone stress arrays (optional)
-        o3coefv_patch   ::Vector{<:Real} = Float64[],
-        o3coefg_patch   ::Vector{<:Real} = Float64[],
+        o3coefv_patch   ::AbstractVector{<:Real} = Float64[],
+        o3coefg_patch   ::AbstractVector{<:Real} = Float64[],
         # CH4 conductance output (optional)
-        grnd_ch4_cond_patch::Vector{<:Real} = Float64[],
+        grnd_ch4_cond_patch::AbstractVector{<:Real} = Float64[],
         # Photosynthesis extras
-        forc_pc13o2_grc ::Vector{<:Real} = Float64[],
-        t10_patch       ::Vector{<:Real} = Float64[],
+        forc_pc13o2_grc ::AbstractVector{<:Real} = Float64[],
+        t10_patch       ::AbstractVector{<:Real} = Float64[],
         nrad_patch      ::Vector{Int} = Int[],
         tlai_z_patch    ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
-        vcmaxcint_sun_patch ::Vector{<:Real} = Float64[],
-        vcmaxcint_sha_patch ::Vector{<:Real} = Float64[],
+        vcmaxcint_sun_patch ::AbstractVector{<:Real} = Float64[],
+        vcmaxcint_sha_patch ::AbstractVector{<:Real} = Float64[],
         parsun_z_patch  ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
         parsha_z_patch  ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
         laisun_z_patch  ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
@@ -1052,86 +1309,96 @@ function canopy_fluxes!(
     params = canopy_fluxes_params
     ctrl   = canopy_fluxes_ctrl
 
-    # Local work arrays (patch-indexed)
+    # Local work arrays (patch-indexed). Allocated via similar() of an input
+    # state array (NOT zeros()) + fill!, so they share the state's backend —
+    # device-resident on GPU. A bare zeros() forces a host Array and would break
+    # a whole-function GPU run. `_sc`/`_sci` are the float/Int scratch factories.
     FT = eltype(forc_t_col)
-    zldis     = zeros(FT, endp)
-    dth       = zeros(FT, endp)
-    dthv      = zeros(FT, endp)
-    dqh       = zeros(FT, endp)
-    ur        = zeros(FT, endp)
-    temp1     = zeros(FT, endp)
-    temp12m   = zeros(FT, endp)
-    temp2     = zeros(FT, endp)
-    temp22m   = zeros(FT, endp)
-    rb        = zeros(FT, endp)
-    rah       = zeros(FT, endp, 2)
-    raw       = zeros(FT, endp, 2)
-    wtg       = zeros(FT, endp)
-    wta0      = zeros(FT, endp)
-    wtl0      = zeros(FT, endp)
-    wtstem0   = zeros(FT, endp)
-    wtal      = zeros(FT, endp)
-    wtga      = zeros(FT, endp)
-    wtgq      = zeros(FT, endp)
-    wtaq0     = zeros(FT, endp)
-    wtlq0     = zeros(FT, endp)
-    wtalq     = zeros(FT, endp)
-    el        = zeros(FT, endp)
-    qsatl     = zeros(FT, endp)
-    qsatldT   = zeros(FT, endp)
-    air       = zeros(FT, endp)
-    bir       = zeros(FT, endp)
-    cir       = zeros(FT, endp)
-    del_arr   = zeros(FT, endp)  # "del" in Fortran (reserved word in Julia context for clarity)
-    del2      = zeros(FT, endp)
-    dele      = zeros(FT, endp)
-    delq      = zeros(FT, endp)
-    det_arr   = zeros(FT, endp)
-    efeb      = zeros(FT, endp)
-    efe       = zeros(FT, endp)
-    err_arr   = zeros(FT, endp)
-    obuold    = zeros(FT, endp)
-    tlbef     = zeros(FT, endp)
-    tl_ini    = zeros(FT, endp)
-    ts_ini    = zeros(FT, endp)
-    co2_arr   = zeros(FT, endp)
-    o2_arr    = zeros(FT, endp)
-    svpts     = zeros(FT, endp)
-    eah       = zeros(FT, endp)
-    dt_veg    = zeros(FT, endp)
-    fm        = zeros(FT, endp)
-    nmozsgn   = zeros(Int, endp)
-    dayl_factor = zeros(FT, endp)
-    rootsum   = zeros(FT, endp)
-    dbh       = zeros(FT, endp)
-    cp_leaf   = zeros(FT, endp)
-    cp_stem   = zeros(FT, endp)
-    rstem     = zeros(FT, endp)
-    dt_stem   = zeros(FT, endp)
-    frac_rad_abs_by_stem = zeros(FT, endp)
-    lw_stem   = zeros(FT, endp)
-    lw_leaf   = zeros(FT, endp)
-    sa_stem   = zeros(FT, endp)
-    sa_leaf   = zeros(FT, endp)
-    sa_internal = zeros(FT, endp)
-    uuc       = zeros(FT, endp)
-    snocan_baseline = zeros(FT, endp)
+    _sc(dims...)  = fill!(similar(temperature.t_veg_patch, FT,  dims...), zero(FT))
+    _sci(dims...) = fill!(similar(patch_data.column,       Int, dims...), 0)
+    zldis     = _sc(endp)
+    dth       = _sc(endp)
+    dthv      = _sc(endp)
+    dqh       = _sc(endp)
+    ur        = _sc(endp)
+    temp1     = _sc(endp)
+    temp12m   = _sc(endp)
+    temp2     = _sc(endp)
+    temp22m   = _sc(endp)
+    rb        = _sc(endp)
+    rah       = _sc(endp, 2)
+    raw       = _sc(endp, 2)
+    wtg       = _sc(endp)
+    wta0      = _sc(endp)
+    wtl0      = _sc(endp)
+    wtstem0   = _sc(endp)
+    wtal      = _sc(endp)
+    wtga      = _sc(endp)
+    wtgq      = _sc(endp)
+    wtaq0     = _sc(endp)
+    wtlq0     = _sc(endp)
+    wtalq     = _sc(endp)
+    el        = _sc(endp)
+    qsatl     = _sc(endp)
+    qsatldT   = _sc(endp)
+    air       = _sc(endp)
+    bir       = _sc(endp)
+    cir       = _sc(endp)
+    del_arr   = _sc(endp)  # "del" in Fortran (reserved word in Julia context for clarity)
+    del2      = _sc(endp)
+    dele      = _sc(endp)
+    delq      = _sc(endp)
+    det_arr   = _sc(endp)
+    efeb      = _sc(endp)
+    efe       = _sc(endp)
+    err_arr   = _sc(endp)
+    obuold    = _sc(endp)
+    tlbef     = _sc(endp)
+    tl_ini    = _sc(endp)
+    ts_ini    = _sc(endp)
+    co2_arr   = _sc(endp)
+    o2_arr    = _sc(endp)
+    svpts     = _sc(endp)
+    eah       = _sc(endp)
+    dt_veg    = _sc(endp)
+    fm        = _sc(endp)
+    nmozsgn   = _sci(endp)
+    dayl_factor = _sc(endp)
+    rootsum   = _sc(endp)
+    dbh       = _sc(endp)
+    cp_leaf   = _sc(endp)
+    cp_stem   = _sc(endp)
+    rstem     = _sc(endp)
+    dt_stem   = _sc(endp)
+    frac_rad_abs_by_stem = _sc(endp)
+    lw_stem   = _sc(endp)
+    lw_leaf   = _sc(endp)
+    sa_stem   = _sc(endp)
+    sa_leaf   = _sc(endp)
+    sa_internal = _sc(endp)
+    uuc       = _sc(endp)
+    snocan_baseline = _sc(endp)
 
-    # Integer filter arrays (Fortran-style, for convergence testing)
-    filterp = zeros(Int, np)
-    fporig  = zeros(Int, np)
-
-    # Build initial filter from mask
+    # Integer filter array (Fortran-style). Stays fixed through the Newton
+    # iteration — convergence is tracked by the `active` mask, not by compaction.
+    # Built on the host from the (host-only) exposed-veg mask, then copied to the
+    # device backend in bulk (copyto! is a transfer, not device scalar indexing);
+    # the kernels only ever read filterp. filterp_host is kept for the few
+    # remaining host-side diagnostic scans.
+    filterp = _sci(np)
+    filterp_host = zeros(Int, np)
     fn = 0
     for p in bounds_patch
         if mask_exposedvegp[p]
             fn += 1
-            filterp[fn] = p
+            filterp_host[fn] = p
         end
     end
+    copyto!(filterp, filterp_host)
 
-    # Time step initialization of photosynthesis variables
-    photosynthesis_timestep_init!(photosyns, mask_exposedvegp, bounds_patch)
+    # Time step initialization of photosynthesis variables (kernelized over the
+    # filtered patches; canopy uses the base path — use_c13/use_c14 = false).
+    cf_psn_init_update!(photosyns, filterp, fn)
 
     # =========================================================================
     # Phase 1: Initialization
@@ -1188,21 +1455,35 @@ function canopy_fluxes!(
         z0v_Cr_pft, z0v_c_pft, z0v_cw_pft, z0_method; ndrange = fn)
 
     # --- Net absorbed longwave radiation, QSat, CO2/O2, flux initialization ---
-    _launch!(_cf_longwave_qsat_kernel!, air, bir, cir, qsatl, el, qsatldT, co2_arr, o2_arr,
-        nmozsgn, frictionvel.taf_patch, frictionvel.qaf_patch, ur, dth, dqh, delq, dthv,
-        zldis, filterp, patch_data.column, patch_data.gridcell, temperature.emv_patch,
-        temperature.emg_col, forc_lwrad_col, temperature.t_veg_patch, forc_pbot_col,
-        forc_pco2_grc, forc_po2_grc, temperature.t_grnd_col, temperature.thm_patch,
-        forc_q_col, waterdiagbulk.qg_col, forc_u_grc, forc_v_grc, forc_th_col,
-        frictionvel.forc_hgt_u_patch, canopystate.displa_patch,
-        convert(eltype(air), params.wind_min); ndrange = fn)
+    # Arrays grouped into device-view structs (Metal 31-buffer limit); struct-arg
+    # kernel launched via manual backend + KA.synchronize.
+    lwq_out = CfLwqOut(; air = air, bir = bir, cir = cir, qsatl = qsatl, el = el,
+        qsatldT = qsatldT, co2_arr = co2_arr, o2_arr = o2_arr,
+        taf = frictionvel.taf_patch, qaf = frictionvel.qaf_patch, ur = ur,
+        dth = dth, dqh = dqh, delq = delq, dthv = dthv, zldis = zldis)
+    lwq_p = CfLwqP(; emv = temperature.emv_patch, t_veg = temperature.t_veg_patch,
+        thm = temperature.thm_patch, forc_hgt_u = frictionvel.forc_hgt_u_patch,
+        displa = canopystate.displa_patch)
+    lwq_c = CfLwqC(; emg = temperature.emg_col, forc_lwrad = forc_lwrad_col,
+        forc_pbot = forc_pbot_col, t_grnd = temperature.t_grnd_col, forc_q = forc_q_col,
+        qg = waterdiagbulk.qg_col, forc_th = forc_th_col)
+    lwq_g = CfLwqG(; forc_pco2 = forc_pco2_grc, forc_po2 = forc_po2_grc,
+        forc_u = forc_u_grc, forc_v = forc_v_grc)
+    let be = _kernel_backend(air)
+        _cf_longwave_qsat_kernel!(be)(lwq_out, lwq_p, lwq_c, lwq_g, nmozsgn,
+            filterp, patch_data.column, patch_data.gridcell,
+            convert(eltype(air), params.wind_min); ndrange = fn)
+        KA.synchronize(be)
+    end
 
     # Forcing-height-below-canopy warning (host-side diagnostic; matches the scalar
-    # version — last patch with zldis<0 reported once).
+    # version — last patch with zldis<0 reported once). Pull zldis to the host
+    # once (bulk copy, not device scalar indexing) so this stays GPU-safe.
+    zldis_host = Array(zldis)
     found = false; found_index = 0
     for fi in 1:fn
-        p = filterp[fi]
-        if zldis[p] < 0.0
+        p = filterp_host[fi]
+        if zldis_host[p] < 0.0
             found = true; found_index = p
         end
     end
@@ -1210,25 +1491,24 @@ function canopy_fluxes!(
         @warn "canopy_fluxes!: forcing height below canopy height at patch $found_index"
     end
 
-    # --- Initialize Monin-Obukhov length ---
-    for fi in 1:fn
-        p = filterp[fi]
-        c = patch_data.column[p]
+    # --- Initialize Monin-Obukhov length (kernelized) ---
+    cf_moninobukini_update!(frictionvel, temperature, patch_data, filterp, fn,
+        ur, dthv, zldis, tl_ini, ts_ini)
 
-        (um_val, obu_val) = monin_obuk_ini(frictionvel.zetamaxstable,
-            ur[p], temperature.thv_col[c], dthv[p], zldis[p], frictionvel.z0mv_patch[p])
-        frictionvel.um_patch[p] = um_val
-        frictionvel.obu_patch[p] = obu_val
-        frictionvel.num_iter_patch[p] = 0.0
-
-        tl_ini[p] = temperature.t_veg_patch[p]
-        ts_ini[p] = temperature.t_stem_patch[p]
-    end
-
-    # --- Save original filter for post-iteration ---
+    # --- Save original filter size for post-iteration ---
     itlef = 0
     fnorig = fn
-    fporig[1:fn] .= filterp[1:fn]
+
+    # Per-patch active mask for the Newton iteration. The filter stays fixed at
+    # the original `fnorig` patches (ndrange = fnorig every iteration); converged
+    # patches are skipped in-kernel via `active[p]` instead of host-side filter
+    # compaction, so no device→host sync is needed mid-iteration.
+    active_host = fill(false, endp)
+    for fi in 1:fn
+        active_host[filterp_host[fi]] = true
+    end
+    active = fill!(similar(patch_data.active, Bool, endp), false)
+    copyto!(active, active_host)
 
     # =========================================================================
     # Phase 2: Stability iteration (Newton-Raphson)
@@ -1244,7 +1524,7 @@ function canopy_fluxes!(
     soilevap_beta   = do_soilevap_beta()
     soil_resis_sl14 = do_soil_resistance_sl14()
 
-    while itlef <= ctrl.itmax_canopy_fluxes && fn > 0
+    while itlef <= ctrl.itmax_canopy_fluxes && any(active)
 
         # --- Friction velocity and boundary layer profiles ---
         # Build filter arrays for friction_velocity! call
@@ -1260,13 +1540,13 @@ function canopy_fluxes!(
         friction_velocity!(frictionvel, fn, filt_arr,
             disp_vec, z0m_vec, z0h_vec, z0q_vec,
             obu_vec, itlef + 1, ur, um_vec, ustar_vec,
-            temp1, temp2, temp12m, temp22m, fm)
+            temp1, temp2, temp12m, temp22m, fm; active = active)
 
         # First per-patch loop: aerodynamic resistances / conductances.
         # Kernelized (one thread per filtered patch); csoilc_val and feature
         # flags resolved on the host and passed as scalars.
         cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
-            patch_data, filterp, fn,
+            patch_data, filterp, fn, active,
             temp1, temp2, tlbef, del2, del_arr, rah, raw, uuc, rb, svpts, eah, el,
             dleaf_pft, grnd_ch4_cond_patch, forc_pbot_col,
             csoilc_val, ctrl.use_undercanopy_stability,
@@ -1332,7 +1612,7 @@ function canopy_fluxes!(
         # the feature flags are resolved on the host and passed as scalars.
         cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
             solarabs, soilstate, waterfluxbulk, waterstatebulk, waterdiagbulk,
-            photosyns, patch_data, col_data, filterp, fn,
+            photosyns, patch_data, col_data, filterp, fn, active,
             rah, raw, rb, rstem, sa_leaf, sa_stem, sa_internal,
             frac_rad_abs_by_stem, air, bir, cir, cp_leaf, tl_ini, tlbef, zldis,
             temp1, temp2, ur, efeb, wtg, wtl0, wta0, wtstem0, wtga, wtal,
@@ -1343,24 +1623,16 @@ function canopy_fluxes!(
             nlevsno, dtime, params)
 
         # --- Test for convergence ---
+        # Kernelized: updates the convergence metrics for still-active patches
+        # and clears active[p] on convergence. The filter stays fixed at the
+        # original patch set (fn == fnorig throughout); converged patches are
+        # skipped on subsequent iterations via the in-kernel active[p] guard
+        # instead of host-side filter compaction, so the physics arrays are
+        # never copied back to the host mid-iteration.
         itlef += 1
         if itlef > ITMIN_CANOPY
-            for fi in 1:fn
-                p = filterp[fi]
-                dele[p] = abs(efe[p] - efeb[p])
-                efeb[p] = efe[p]
-                det_arr[p] = max(del_arr[p], del2[p])
-                frictionvel.num_iter_patch[p] = Float64(itlef)
-            end
-            fnold = fn
-            fn = 0
-            for fi in 1:fnold
-                p = filterp[fi]
-                if !(det_arr[p] < DTMIN_CANOPY && dele[p] < DLEMIN_CANOPY)
-                    fn += 1
-                    filterp[fn] = p
-                end
-            end
+            cf_converge_update!(active, efeb, dele, det_arr,
+                frictionvel.num_iter_patch, filterp, fn, efe, del_arr, del2, itlef)
         end
     end  # End stability iteration
 
@@ -1368,9 +1640,9 @@ function canopy_fluxes!(
     # Phase 3: Post-iteration diagnostics
     # =========================================================================
 
-    # Restore original filter
+    # The filter stayed fixed through the iteration (mask-based convergence),
+    # so filterp already holds the original patch set; just restore the count.
     fn = fnorig
-    filterp[1:fn] .= fporig[1:fn]
 
     diag_out = CfDiagOut(; err_arr = err_arr, dt_stem = dt_stem,
         dhsdt_canopy = energyflux.dhsdt_canopy_patch, t_stem = temperature.t_stem_patch,
@@ -1413,27 +1685,22 @@ function canopy_fluxes!(
         KA.synchronize(be)
     end
 
-    # --- Post-photosynthesis: PhotosynthesisTotal ---
-    photosynthesis_total!(photosyns,
-        canopystate.laisun_patch, canopystate.laisha_patch,
-        mask_exposedvegp, bounds_patch)
+    # --- Post-photosynthesis: PhotosynthesisTotal (kernelized; base path) ---
+    cf_psn_total_update!(photosyns, canopystate.laisun_patch,
+        canopystate.laisha_patch, filterp, fn)
 
     # Water use efficiency (iwue) — stub for local noon check
     # LUNA and ozone updates would go here in full implementation
 
-    # Filter out patches with small energy balance errors, report large ones
-    fnold = fn
-    fn = 0
-    for fi in 1:fnold
-        p = filterp[fi]
-        if abs(err_arr[p]) > 0.1
-            fn += 1
-            filterp[fn] = p
-        end
-    end
+    # Report patches with large energy-balance errors (host-side diagnostic).
+    # Post-iteration only — pull err_arr to the host once (bulk copy) and scan
+    # against the host filter; no device scalar indexing, no device filter mutate.
+    err_host = Array(err_arr)
     for fi in 1:fn
-        p = filterp[fi]
-        @warn "canopy_fluxes!: energy balance error at patch $p, err=$(err_arr[p])"
+        p = filterp_host[fi]
+        if abs(err_host[p]) > 0.1
+            @warn "canopy_fluxes!: energy balance error at patch $p, err=$(err_host[p])"
+        end
     end
 
     return nothing

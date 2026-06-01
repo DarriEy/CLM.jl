@@ -328,13 +328,16 @@ Stability function for rib < 0 (wind profile).
 Ported from `StabilityFunc1` in `FrictionVelocityMod.F90`.
 """
 function stability_func1(zeta::Real)
-    # Guard: this function is only valid for zeta <= 0 (unstable conditions)
-    zeta = min(zeta, 0.0)
-    chik2 = sqrt(1.0 - 16.0 * zeta)
+    # Guard: this function is only valid for zeta <= 0 (unstable conditions).
+    # Type-preserving (eltype-generic) so it lowers to valid Metal IR under
+    # Float32; byte-identical to the Float64 literals on the CPU path.
+    T = typeof(zeta)
+    z = min(zeta, zero(T))
+    chik2 = sqrt(one(T) - T(16.0) * z)
     chik = sqrt(chik2)
-    return 2.0 * log((1.0 + chik) * 0.5) +
-           log((1.0 + chik2) * 0.5) -
-           2.0 * atan(chik) + π * 0.5
+    return T(2.0) * log((one(T) + chik) * T(0.5)) +
+           log((one(T) + chik2) * T(0.5)) -
+           T(2.0) * atan(chik) + T(π) * T(0.5)
 end
 
 """
@@ -344,10 +347,12 @@ Stability function for rib < 0 (temperature/humidity profile).
 Ported from `StabilityFunc2` in `FrictionVelocityMod.F90`.
 """
 function stability_func2(zeta::Real)
-    # Guard: this function is only valid for zeta <= 0 (unstable conditions)
-    zeta = min(zeta, 0.0)
-    chik2 = sqrt(1.0 - 16.0 * zeta)
-    return 2.0 * log((1.0 + chik2) * 0.5)
+    # Guard: this function is only valid for zeta <= 0 (unstable conditions).
+    # Type-preserving (see stability_func1).
+    T = typeof(zeta)
+    z = min(zeta, zero(T))
+    chik2 = sqrt(one(T) - T(16.0) * z)
+    return T(2.0) * log((one(T) + chik2) * T(0.5))
 end
 
 # ==========================================================================
@@ -584,22 +589,23 @@ Ported from `frictionvel_type%FrictionVelocity` in `FrictionVelocityMod.F90`.
 function friction_velocity!(
         fv::FrictionVelocityData,
         fn::Int,
-        filtern::Vector{Int},
-        displa::Vector{<:Real},
-        z0m::Vector{<:Real},
-        z0h::Vector{<:Real},
-        z0q::Vector{<:Real},
-        obu::Vector{<:Real},
+        filtern::AbstractVector{<:Integer},
+        displa::AbstractVector{<:Real},
+        z0m::AbstractVector{<:Real},
+        z0h::AbstractVector{<:Real},
+        z0q::AbstractVector{<:Real},
+        obu::AbstractVector{<:Real},
         iter::Int,
-        ur::Vector{<:Real},
-        um::Vector{<:Real},
-        ustar::Vector{<:Real},
-        temp1::Vector{<:Real},
-        temp2::Vector{<:Real},
-        temp12m::Vector{<:Real},
-        temp22m::Vector{<:Real},
-        fm::Vector{<:Real};
+        ur::AbstractVector{<:Real},
+        um::AbstractVector{<:Real},
+        ustar::AbstractVector{<:Real},
+        temp1::AbstractVector{<:Real},
+        temp2::AbstractVector{<:Real},
+        temp12m::AbstractVector{<:Real},
+        temp22m::AbstractVector{<:Real},
+        fm::AbstractVector{<:Real};
         landunit_index::Bool = false,
+        active = nothing,
         lun_gridcell::Union{Vector{Int},Nothing} = nothing,
         lun_patchi::Union{Vector{Int},Nothing} = nothing,
         lun_patchf::Union{Vector{Int},Nothing} = nothing,
@@ -853,7 +859,7 @@ function friction_velocity!(
     end  # end filter loop
     else
         fv_profile_update!(fv, fn, filtern, displa, z0m, z0h, z0q, obu, iter, ur, um,
-                           ustar, temp1, temp2, temp12m, temp22m, fm)
+                           ustar, temp1, temp2, temp12m, temp22m, fm; active = active)
     end
 
     return nothing
@@ -868,15 +874,16 @@ end
         ustar, temp1, temp2, temp12m, temp22m, fm,
         vds_patch, u10_clm_patch, va_patch, u10_patch, fv_patch,
         # read-only arrays
-        @Const(filtern), @Const(displa), @Const(z0m), @Const(z0h), @Const(z0q),
+        @Const(filtern), @Const(active), @Const(displa), @Const(z0m), @Const(z0h), @Const(z0q),
         @Const(obu), @Const(ur), @Const(um),
         @Const(forc_hgt_u_patch), @Const(forc_hgt_t_patch), @Const(forc_hgt_q_patch),
         # scalars
         iter::Int, VKC, zetam, zetat)
 
     f = @index(Global)
-    @inbounds begin
+    @inbounds if active[filtern[f]]
         n = filtern[f]
+        T = eltype(ustar)
 
         # ------- Wind profile -------
         zldis = forc_hgt_u_patch[n] - displa[n]
@@ -886,46 +893,46 @@ end
             ustar[n] = VKC * um[n] / (log(-zetam * obu[n] / z0m[n]) -
                 stability_func1(-zetam) +
                 stability_func1(z0m[n] / obu[n]) +
-                1.14 * ((-zeta)^0.333 - (zetam)^0.333))
-        elseif zeta < 0.0
+                T(1.14) * ((-zeta)^T(0.333) - (zetam)^T(0.333)))
+        elseif zeta < zero(T)
             ustar[n] = VKC * um[n] / (log(zldis / z0m[n]) -
                 stability_func1(zeta) +
                 stability_func1(z0m[n] / obu[n]))
-        elseif zeta <= 1.0
-            ustar[n] = VKC * um[n] / (log(zldis / z0m[n]) + 5.0 * zeta - 5.0 * z0m[n] / obu[n])
+        elseif zeta <= one(T)
+            ustar[n] = VKC * um[n] / (log(zldis / z0m[n]) + T(5.0) * zeta - T(5.0) * z0m[n] / obu[n])
         else
-            ustar[n] = VKC * um[n] / (log(obu[n] / z0m[n]) + 5.0 - 5.0 * z0m[n] / obu[n] +
-                (5.0 * log(zeta) + zeta - 1.0))
+            ustar[n] = VKC * um[n] / (log(obu[n] / z0m[n]) + T(5.0) - T(5.0) * z0m[n] / obu[n] +
+                (T(5.0) * log(zeta) + zeta - one(T)))
         end
 
         # Deposition velocity
-        if zeta < 0.0
-            vds_tmp = 2.0e-3 * ustar[n] * (1.0 + (300.0 / max(-obu[n], 1.0e-10))^0.666)
+        if zeta < zero(T)
+            vds_tmp = T(2.0e-3) * ustar[n] * (one(T) + (T(300.0) / max(-obu[n], T(1.0e-10)))^T(0.666))
         else
-            vds_tmp = 2.0e-3 * ustar[n]
+            vds_tmp = T(2.0e-3) * ustar[n]
         end
         vds_patch[n] = vds_tmp
 
         # ------- 10-m wind (CLM) -------
-        if zldis - z0m[n] <= 10.0
+        if zldis - z0m[n] <= T(10.0)
             u10_clm_patch[n] = um[n]
         else
             if zeta < -zetam
-                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(-zetam * obu[n] / (10.0 + z0m[n])) -
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(-zetam * obu[n] / (T(10.0) + z0m[n])) -
                     stability_func1(-zetam) +
-                    stability_func1((10.0 + z0m[n]) / obu[n]) +
-                    1.14 * ((-zeta)^0.333 - (zetam)^0.333)))
-            elseif zeta < 0.0
-                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(zldis / (10.0 + z0m[n])) -
+                    stability_func1((T(10.0) + z0m[n]) / obu[n]) +
+                    T(1.14) * ((-zeta)^T(0.333) - (zetam)^T(0.333))))
+            elseif zeta < zero(T)
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(zldis / (T(10.0) + z0m[n])) -
                     stability_func1(zeta) +
-                    stability_func1((10.0 + z0m[n]) / obu[n])))
-            elseif zeta <= 1.0
-                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(zldis / (10.0 + z0m[n])) +
-                    5.0 * zeta - 5.0 * (10.0 + z0m[n]) / obu[n]))
+                    stability_func1((T(10.0) + z0m[n]) / obu[n])))
+            elseif zeta <= one(T)
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(zldis / (T(10.0) + z0m[n])) +
+                    T(5.0) * zeta - T(5.0) * (T(10.0) + z0m[n]) / obu[n]))
             else
-                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(obu[n] / (10.0 + z0m[n])) +
-                    5.0 - 5.0 * (10.0 + z0m[n]) / obu[n] +
-                    (5.0 * log(zeta) + zeta - 1.0)))
+                u10_clm_patch[n] = um[n] - (ustar[n] / VKC * (log(obu[n] / (T(10.0) + z0m[n])) +
+                    T(5.0) - T(5.0) * (T(10.0) + z0m[n]) / obu[n] +
+                    (T(5.0) * log(zeta) + zeta - one(T))))
             end
         end
         va_patch[n] = um[n]
@@ -938,16 +945,16 @@ end
             temp1[n] = VKC / (log(-zetat * obu[n] / z0h[n]) -
                 stability_func2(-zetat) +
                 stability_func2(z0h[n] / obu[n]) +
-                0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
-        elseif zeta < 0.0
+                T(0.8) * ((zetat)^(-T(0.333)) - (-zeta)^(-T(0.333))))
+        elseif zeta < zero(T)
             temp1[n] = VKC / (log(zldis / z0h[n]) -
                 stability_func2(zeta) +
                 stability_func2(z0h[n] / obu[n]))
-        elseif zeta <= 1.0
-            temp1[n] = VKC / (log(zldis / z0h[n]) + 5.0 * zeta - 5.0 * z0h[n] / obu[n])
+        elseif zeta <= one(T)
+            temp1[n] = VKC / (log(zldis / z0h[n]) + T(5.0) * zeta - T(5.0) * z0h[n] / obu[n])
         else
-            temp1[n] = VKC / (log(obu[n] / z0h[n]) + 5.0 - 5.0 * z0h[n] / obu[n] +
-                (5.0 * log(zeta) + zeta - 1.0))
+            temp1[n] = VKC / (log(obu[n] / z0h[n]) + T(5.0) - T(5.0) * z0h[n] / obu[n] +
+                (T(5.0) * log(zeta) + zeta - one(T)))
         end
 
         # ------- Humidity profile -------
@@ -963,58 +970,58 @@ end
                 temp2[n] = VKC / (log(-zetat * obu[n] / z0q[n]) -
                     stability_func2(-zetat) +
                     stability_func2(z0q[n] / obu[n]) +
-                    0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
-            elseif zeta < 0.0
+                    T(0.8) * ((zetat)^(-T(0.333)) - (-zeta)^(-T(0.333))))
+            elseif zeta < zero(T)
                 temp2[n] = VKC / (log(zldis / z0q[n]) -
                     stability_func2(zeta) +
                     stability_func2(z0q[n] / obu[n]))
-            elseif zeta <= 1.0
-                temp2[n] = VKC / (log(zldis / z0q[n]) + 5.0 * zeta - 5.0 * z0q[n] / obu[n])
+            elseif zeta <= one(T)
+                temp2[n] = VKC / (log(zldis / z0q[n]) + T(5.0) * zeta - T(5.0) * z0q[n] / obu[n])
             else
-                temp2[n] = VKC / (log(obu[n] / z0q[n]) + 5.0 - 5.0 * z0q[n] / obu[n] +
-                    (5.0 * log(zeta) + zeta - 1.0))
+                temp2[n] = VKC / (log(obu[n] / z0q[n]) + T(5.0) - T(5.0) * z0q[n] / obu[n] +
+                    (T(5.0) * log(zeta) + zeta - one(T)))
             end
         end
 
         # ------- Temperature profile at 2m -------
-        zldis = 2.0 + z0h[n]
+        zldis = T(2.0) + z0h[n]
         zeta = zldis / obu[n]
         if zeta < -zetat
             temp12m[n] = VKC / (log(-zetat * obu[n] / z0h[n]) -
                 stability_func2(-zetat) +
                 stability_func2(z0h[n] / obu[n]) +
-                0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
-        elseif zeta < 0.0
+                T(0.8) * ((zetat)^(-T(0.333)) - (-zeta)^(-T(0.333))))
+        elseif zeta < zero(T)
             temp12m[n] = VKC / (log(zldis / z0h[n]) -
                 stability_func2(zeta) +
                 stability_func2(z0h[n] / obu[n]))
-        elseif zeta <= 1.0
-            temp12m[n] = VKC / (log(zldis / z0h[n]) + 5.0 * zeta - 5.0 * z0h[n] / obu[n])
+        elseif zeta <= one(T)
+            temp12m[n] = VKC / (log(zldis / z0h[n]) + T(5.0) * zeta - T(5.0) * z0h[n] / obu[n])
         else
-            temp12m[n] = VKC / (log(obu[n] / z0h[n]) + 5.0 - 5.0 * z0h[n] / obu[n] +
-                (5.0 * log(zeta) + zeta - 1.0))
+            temp12m[n] = VKC / (log(obu[n] / z0h[n]) + T(5.0) - T(5.0) * z0h[n] / obu[n] +
+                (T(5.0) * log(zeta) + zeta - one(T)))
         end
 
         # ------- Humidity profile at 2m -------
         if z0q[n] == z0h[n]
             temp22m[n] = temp12m[n]
         else
-            zldis = 2.0 + z0q[n]
+            zldis = T(2.0) + z0q[n]
             zeta = zldis / obu[n]
             if zeta < -zetat
                 temp22m[n] = VKC / (log(-zetat * obu[n] / z0q[n]) -
                     stability_func2(-zetat) +
                     stability_func2(z0q[n] / obu[n]) +
-                    0.8 * ((zetat)^(-0.333) - (-zeta)^(-0.333)))
-            elseif zeta < 0.0
+                    T(0.8) * ((zetat)^(-T(0.333)) - (-zeta)^(-T(0.333))))
+            elseif zeta < zero(T)
                 temp22m[n] = VKC / (log(zldis / z0q[n]) -
                     stability_func2(zeta) +
                     stability_func2(z0q[n] / obu[n]))
-            elseif zeta <= 1.0
-                temp22m[n] = VKC / (log(zldis / z0q[n]) + 5.0 * zeta - 5.0 * z0q[n] / obu[n])
+            elseif zeta <= one(T)
+                temp22m[n] = VKC / (log(zldis / z0q[n]) + T(5.0) * zeta - T(5.0) * z0q[n] / obu[n])
             else
-                temp22m[n] = VKC / (log(obu[n] / z0q[n]) + 5.0 - 5.0 * z0q[n] / obu[n] +
-                    (5.0 * log(zeta) + zeta - 1.0))
+                temp22m[n] = VKC / (log(obu[n] / z0q[n]) + T(5.0) - T(5.0) * z0q[n] / obu[n] +
+                    (T(5.0) * log(zeta) + zeta - one(T)))
             end
         end
 
@@ -1022,34 +1029,34 @@ end
         zldis = forc_hgt_u_patch[n] - displa[n]
         zeta = zldis / obu[n]
 
-        if min(zeta, 1.0) < 0.0
-            tmp1 = (1.0 - 16.0 * min(zeta, 1.0))^0.25
-            tmp2 = log((1.0 + tmp1 * tmp1) / 2.0)
-            tmp3 = log((1.0 + tmp1) / 2.0)
-            fmnew = 2.0 * tmp3 + tmp2 - 2.0 * atan(tmp1) + 1.5707963
+        if min(zeta, one(T)) < zero(T)
+            tmp1 = (one(T) - T(16.0) * min(zeta, one(T)))^T(0.25)
+            tmp2 = log((one(T) + tmp1 * tmp1) / T(2.0))
+            tmp3 = log((one(T) + tmp1) / T(2.0))
+            fmnew = T(2.0) * tmp3 + tmp2 - T(2.0) * atan(tmp1) + T(1.5707963)
         else
-            fmnew = -5.0 * min(zeta, 1.0)
+            fmnew = -T(5.0) * min(zeta, one(T))
         end
         if iter == 1
             fm[n] = fmnew
         else
-            fm[n] = 0.5 * (fm[n] + fmnew)
+            fm[n] = T(0.5) * (fm[n] + fmnew)
         end
 
-        zeta10 = min(10.0 / obu[n], 1.0)
-        if zeta == 0.0
-            zeta10 = 0.0
+        zeta10 = min(T(10.0) / obu[n], one(T))
+        if zeta == zero(T)
+            zeta10 = zero(T)
         end
-        if zeta10 < 0.0
-            tmp1 = (1.0 - 16.0 * zeta10)^0.25
-            tmp2 = log((1.0 + tmp1 * tmp1) / 2.0)
-            tmp3 = log((1.0 + tmp1) / 2.0)
-            fm10 = 2.0 * tmp3 + tmp2 - 2.0 * atan(tmp1) + 1.5707963
+        if zeta10 < zero(T)
+            tmp1 = (one(T) - T(16.0) * zeta10)^T(0.25)
+            tmp2 = log((one(T) + tmp1 * tmp1) / T(2.0))
+            tmp3 = log((one(T) + tmp1) / T(2.0))
+            fm10 = T(2.0) * tmp3 + tmp2 - T(2.0) * atan(tmp1) + T(1.5707963)
         else
-            fm10 = -5.0 * zeta10
+            fm10 = -T(5.0) * zeta10
         end
 
-        tmp4 = log(max(1.0, forc_hgt_u_patch[n] / 10.0))
+        tmp4 = log(max(one(T), forc_hgt_u_patch[n] / T(10.0)))
 
         u10_patch[n] = ur[n] - ustar[n] / VKC * (tmp4 - fm[n] + fm10)
         fv_patch[n] = ustar[n]
@@ -1066,16 +1073,23 @@ patch; backend-agnostic (CPU loop or GPU). Implements the `landunit_index=false`
 path of `friction_velocity!`.
 """
 function fv_profile_update!(fv::FrictionVelocityData, fn::Int,
-        filtern::Vector{Int}, displa, z0m, z0h, z0q, obu, iter::Int, ur, um,
-        ustar, temp1, temp2, temp12m, temp22m, fm)
-    zetam = 1.574  # transition point of flux-gradient relation (wind profile)
-    zetat = 0.465  # transition point of flux-gradient relation (temp. profile)
+        filtern::AbstractVector{<:Integer}, displa, z0m, z0h, z0q, obu, iter::Int, ur, um,
+        ustar, temp1, temp2, temp12m, temp22m, fm; active = nothing)
+    # Transition points of the flux-gradient relation, eltype-converted (with VKC)
+    # so the kernel lowers to valid Metal IR under Float32; byte-identical on CPU.
+    T = eltype(ustar)
+    zetam = T(1.574)  # wind profile
+    zetat = T(0.465)  # temperature profile
+    # Active mask: when unset (single-pass callers), all filtered patches are
+    # active. The canopy Newton loop passes a persistent mask so converged
+    # patches are skipped — fm[n] is non-idempotent (fm = 0.5*(fm+fmnew)).
+    act = active === nothing ? fill(true, length(ustar)) : active
     _launch!(_fv_profile_kernel!, ustar,
         temp1, temp2, temp12m, temp22m, fm,
         fv.vds_patch, fv.u10_clm_patch, fv.va_patch, fv.u10_patch, fv.fv_patch,
-        filtern, displa, z0m, z0h, z0q, obu, ur, um,
+        filtern, act, displa, z0m, z0h, z0q, obu, ur, um,
         fv.forc_hgt_u_patch, fv.forc_hgt_t_patch, fv.forc_hgt_q_patch,
-        iter, VKC, zetam, zetat;
+        iter, T(VKC), zetam, zetat;
         ndrange = fn)
     return nothing
 end
