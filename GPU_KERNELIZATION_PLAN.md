@@ -5,7 +5,8 @@ Status as of 2026-06-01. Goal: full `clm_drv!` timestep on GPU + AD-on-GPU.
 **Done (whole-function GPU, Metal-validated at parity):** `soil_temperature!`,
 `soil_water!` (ZD09 + moisture_form), `lake_temperature!`, `canopy_fluxes!`,
 `photosynthesis!` (A1), `bareground_fluxes!` (A2), `lake_fluxes!` (A3),
-`soil_fluxes!` (A4), `canopy_interception_and_throughfall!` (A6).
+`soil_fluxes!` (A4), `surface_radiation!` + `canopy_sun_shade_fracs!` (A5),
+`canopy_interception_and_throughfall!` (A6).
 Plus ~156 element-wise ops, both batched linear solvers, and the
 friction-velocity / photosynthesis-Ci-core kernels.
 
@@ -33,7 +34,7 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 | A2 | **bareground_fluxes!** | ✅ DONE (Metal whole-fn, 24/25 fields 0.0, kbm1 6.6e-08 F32) | stability iteration — SAME shape as canopy_fluxes Newton (active-mask rework + eltype literals + device-view structs) | Also fixed a latent AD bug: grnd_ch4_cond_patch needed its own Vg type param (Float64 kwarg vs Dual state). |
 | A3 | **lake_fluxes!** | ✅ DONE (Metal whole-fn, 19 outputs ≤3.7e-05) | per-column Newton-Raphson | mirrors lake_temperature approach; LakeFluxDV device-view struct. |
 | A4 | **soil_fluxes!** | ✅ DONE (Metal whole-fn, 17 fields exact 0.0) | per-col/per-patch energy partitioning | feeds soil_temperature outputs; 3 device-view bundles + _scatter_add! errsoi average. |
-| A5 | **surface_radiation! + canopy_sun_shade_fracs!** | HOST | per-patch/per-band/per-layer, branchy | radiation pair. **Next.** |
+| A5 | **surface_radiation! + canopy_sun_shade_fracs!** | ✅ DONE (Metal whole-fn, 43 fields exact 0.0) | per-patch/per-band/per-layer, branchy | radiation pair; 5 device-view bundles, both snow/no-snow + urban/veg/bare + near-local-noon branches exercised. |
 | A6 | **canopy_interception_and_throughfall!** | ✅ DONE (Metal whole-fn, 15 fields, 12 at 0.0) | finished patch→column scatter (`_scatter_add!`) | scatter exercised by a 2-patch→1-col harness. |
 | A7 | **Snow suite**: handle_new_snow!, build_snow_filter!, bulk_flux_snow_percolation!, update_state_snow_percolation!, calc_and_apply_aerosol_fluxes!, post_percolation_adjust_layer_thicknesses!, sum_flux_add_snow_percolation!, snow capping (4 fns), snow_compaction! | HOST | variable-`snl` snow-layer loops, loop-carried across layers, per-species aerosol scatter | hardest mechanical cluster (combine/divide/compaction). |
 | A8 | **Hydrology/runoff**: set_soil_water_fractions!, set_floodc!, saturated_excess_runoff!, set_qflx_inputs!, infiltration_excess_runoff!, route_infiltration_excess!, infiltration!, total_surface_runoff!, compute_effec_rootfrac_and_vert_tran_sink!, water_table!, renew_condensation! | mixed (water_table! is the most complex, 12+ nested loops) | per-col + sequential water-table search | water_table! is the long pole here. |
@@ -73,8 +74,8 @@ reuse; A7/A8 hardest). Phase B: many sessions (it's ~half the total loop volume)
 Phase C: blocked — scaffolding only until hardware.
 
 ### Recommended immediate sequence
-~~A1 → A2 → A3~~ DONE, plus A4 + A6 (batch-parallelized in isolated worktrees,
-all merged to main at 15681/15681). Remaining Phase A: A5 (radiation pair) next,
-then A7 (snow, hardest), A8 (hydrology, water_table! long pole), A9 (urban, defer),
-A10 (small partials — quick wins). Phase C scaffolding can be written anytime
-(no validation feedback). Phase B after Phase A biogeophys is GPU-complete.
+~~A1 → A2 → A3 → A4 → A5 → A6~~ DONE (all merged to main at 15681/15681).
+Remaining Phase A: A7 (snow, hardest), A8 (hydrology, water_table! long pole),
+A9 (urban, defer), A10 (small partials — quick wins). Phase C scaffolding can be
+written anytime (no validation feedback). Phase B after Phase A biogeophys is
+GPU-complete.
