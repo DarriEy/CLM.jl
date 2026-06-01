@@ -938,29 +938,41 @@ end
 # SAME memory as the corresponding ps fields the solver writes, so writes stay
 # consistent. Written arrays are non-@Const; read-only are @Const.
 # =====================================================================
-@kernel function _photosynth_ci_kernel!(
-        # written arrays (aliases of ps fields / scratch)
-        ac, aj, ap, ag, an, psn_z, psn_wc_z, psn_wj_z, psn_wp_z,
-        rs_z, ci_z, gs_mol, rh_leaf, gb_mol, vpd_can,
-        # ps struct (solver cores index/write it; is_sun branch writes gs_mol_sun/sha)
-        ps,
-        # read-only arrays
+# Scalar constants bundled into one isbits arg (Metal ~31 kernel-arg limit; the
+# flat form passed ~50 args). The "written" arrays are ps fields, accessed via ps
+# inside (phase ones selected by is_sun) rather than passed individually; only the
+# local scratch psn_w*_z stay as args.
+struct PsnCiScalars{S}
+    fnps::S; theta_psii::S; theta_cj_1::S; theta_ip_val::S; medlyn_slope_override::S
+    RGAS_::S; MAX_CS_::S; MEDLYN_RH_CAN_MAX_::S; MEDLYN_RH_CAN_FACT_::S; rsmax0::S
+end
+
+@kernel function _photosynth_ci_kernel!(ps, psn_wc_z, psn_wj_z, psn_wp_z,
         @Const(mask_patch), @Const(ivt),
         @Const(medlynslope_pft), @Const(medlynintercept_pft), @Const(mbbopt_pft),
         @Const(forc_pbot), @Const(tgcm), @Const(rb), @Const(par_z_in),
-        @Const(lmr_z), @Const(jmax_z_local), @Const(c3flag),
-        @Const(eair), @Const(esat_tv), @Const(cair), @Const(oair),
-        @Const(bbb), @Const(o3coefg), @Const(o3coefv), @Const(nrad),
-        # scalars
-        fnps, theta_psii, theta_cj_1, theta_ip_val, medlyn_slope_override,
-        is_sun::Bool, stomatalcond_mtd::Int,
-        RGAS_, MAX_CS_, MEDLYN_RH_CAN_MAX_, MEDLYN_RH_CAN_FACT_, rsmax0,
+        @Const(jmax_z_local), @Const(eair), @Const(esat_tv), @Const(cair),
+        @Const(oair), @Const(o3coefg), @Const(o3coefv), @Const(nrad),
+        sc, is_sun::Bool, stomatalcond_mtd::Int,
         STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
 
     p = @index(Global)
     @inbounds if mask_patch[p]
         ivt_p = ivt[p]
         T = eltype(forc_pbot)
+        # Unpack the scalar bundle + alias ps fields (phase-selected via is_sun)
+        # to locals so the body below is unchanged.
+        fnps = sc.fnps; theta_psii = sc.theta_psii; theta_cj_1 = sc.theta_cj_1
+        theta_ip_val = sc.theta_ip_val; medlyn_slope_override = sc.medlyn_slope_override
+        RGAS_ = sc.RGAS_; MAX_CS_ = sc.MAX_CS_; MEDLYN_RH_CAN_MAX_ = sc.MEDLYN_RH_CAN_MAX_
+        MEDLYN_RH_CAN_FACT_ = sc.MEDLYN_RH_CAN_FACT_; rsmax0 = sc.rsmax0
+        ac = ps.ac_patch; aj = ps.aj_patch; ap = ps.ap_patch; ag = ps.ag_patch; an = ps.an_patch
+        gs_mol = ps.gs_mol_patch; rh_leaf = ps.rh_leaf_patch; gb_mol = ps.gb_mol_patch
+        vpd_can = ps.vpd_can_patch; bbb = ps.bbb_patch; c3flag = ps.c3flag_patch
+        lmr_z = is_sun ? ps.lmrsun_z_patch : ps.lmrsha_z_patch
+        psn_z = is_sun ? ps.psnsun_z_patch : ps.psnsha_z_patch
+        rs_z  = is_sun ? ps.rssun_z_patch  : ps.rssha_z_patch
+        ci_z  = is_sun ? ps.cisun_z_patch  : ps.cisha_z_patch
 
         # Medlyn slope: use override if set, else PFT default
         medlynslope_p = isnan(medlyn_slope_override) ? medlynslope_pft[ivt_p] : medlyn_slope_override
@@ -1097,34 +1109,23 @@ function photosynth_ci_solve!(ps::PhotosynthesisData,
         bounds_patch::UnitRange{Int}, phase::String,
         stomatalcond_mtd::Int, rsmax0,
         overrides::CalibrationOverrides)
-    # Resolve GPU-hostile values to host scalars (compute ONCE before launch),
-    # eltype-converted to the working precision so the kernel is Float32-clean on
-    # Metal (byte-identical on the Float64 CPU path).
+    # Resolve GPU-hostile params to host scalars, eltype-converted + bundled into
+    # one isbits arg (Metal ~31-arg limit). The ps-field arrays (ac/aj/.../ci_z/
+    # rs_z/psn_z/gs_mol/…) are accessed via ps inside the kernel, not passed.
+    # Struct-first kernel → manual backend + KA.synchronize.
     T = eltype(forc_pbot)
-    fnps = T(params_inst.fnps)
-    theta_psii = T(params_inst.theta_psii)
-    theta_cj_1 = T(params_inst.theta_cj[1])
-    theta_ip_val = T(params_inst.theta_ip)
-    medlyn_slope_override = T(overrides.medlyn_slope)
+    sc = PsnCiScalars{T}(T(params_inst.fnps), T(params_inst.theta_psii),
+        T(params_inst.theta_cj[1]), T(params_inst.theta_ip), T(overrides.medlyn_slope),
+        T(RGAS), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT), T(rsmax0))
     is_sun = (phase == "sun")
-
-    _launch!(_photosynth_ci_kernel!,
-        # written arrays
-        ac, aj, ap, ag, an, psn_z, psn_wc_z, psn_wj_z, psn_wp_z,
-        rs_z, ci_z, gs_mol, rh_leaf, gb_mol, vpd_can,
-        # ps struct
-        ps,
-        # read-only arrays
-        mask_patch, ivt,
-        medlynslope_pft, medlynintercept_pft, mbbopt_pft,
-        forc_pbot, tgcm, rb, par_z_in, lmr_z, jmax_z_local, c3flag,
-        eair, esat_tv, cair, oair, bbb, o3coefg, o3coefv, nrad,
-        # scalars
-        fnps, theta_psii, theta_cj_1, theta_ip_val, medlyn_slope_override,
-        is_sun, stomatalcond_mtd,
-        T(RGAS), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT), T(rsmax0),
+    be = _kernel_backend(forc_pbot)
+    _photosynth_ci_kernel!(be)(ps, psn_wc_z, psn_wj_z, psn_wp_z,
+        mask_patch, ivt, medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+        forc_pbot, tgcm, rb, par_z_in, jmax_z_local, eair, esat_tv, cair, oair,
+        o3coefg, o3coefv, nrad, sc, is_sun, stomatalcond_mtd,
         STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
         ndrange = length(bounds_patch))
+    KA.synchronize(be)
     return ps
 end
 
