@@ -74,26 +74,29 @@ Compute saturation specific humidity, vapor pressure, and their derivatives.
 Ported from QSat() in QSatMod.F90. Uses Flatau et al. (1992) polynomials.
 """
 function qsat(T::Real, p::Real)
-    td = T - TFRZ  # temperature in °C
+    # eltype-generic (R = working precision) so this lowers to valid Metal IR
+    # under Float32; byte-identical to the Float64 literals on the CPU path.
+    R = typeof(T)
+    td = T - R(TFRZ)  # temperature in °C
 
     # Saturation vapor pressure: water polynomials (td >= 0) vs ice (td < 0).
     # smooth_ifelse is exact for Float64 (preserves Fortran parity bit-for-bit
     # in :auto mode) but smoothly blends the kink at the freezing point for
     # ForwardDiff.Dual, so the derivative is continuous across TFRZ for AD.
     es = smooth_ifelse(td,
-        100.0 * _poly8(td, QSAT_A),    # over water
-        100.0 * _poly8(td, QSAT_C))    # over ice
+        R(100.0) * _poly8(td, QSAT_A),    # over water
+        R(100.0) * _poly8(td, QSAT_C))    # over ice
     desdT = smooth_ifelse(td,
-        100.0 * _poly8(td, QSAT_B),    # over water
-        100.0 * _poly8(td, QSAT_D))    # over ice
+        R(100.0) * _poly8(td, QSAT_B),    # over water
+        R(100.0) * _poly8(td, QSAT_D))    # over ice
 
     # Specific humidity from vapor pressure
     # qs = 0.622 * es / (p - 0.378*es)
     # dqs/dT = 0.622 * desdT * p / (p - 0.378*es)^2   (quotient rule)
-    vp = 1.0 / (p - 0.378 * es)
-    vp1 = min(es * vp, 1.0)
-    qs = 0.622 * vp1
-    dqsdT = 0.622 * p * desdT * vp * vp
+    vp = one(R) / (p - R(0.378) * es)
+    vp1 = min(es * vp, one(R))
+    qs = R(0.622) * vp1
+    dqsdT = R(0.622) * p * desdT * vp * vp
 
     return (qs, es, dqsdT, desdT)
 end
@@ -105,20 +108,26 @@ Compute saturation specific humidity and vapor pressure without derivatives.
 Slightly more efficient when derivatives are not needed.
 """
 function qsat_no_derivs(T::Real, p::Real)
-    td = T - TFRZ
+    R = typeof(T)
+    td = T - R(TFRZ)
 
     # See qsat() above: exact branch for Float64, smooth blend across TFRZ for Dual.
     es = smooth_ifelse(td,
-        100.0 * _poly8(td, QSAT_A),    # over water
-        100.0 * _poly8(td, QSAT_C))    # over ice
+        R(100.0) * _poly8(td, QSAT_A),    # over water
+        R(100.0) * _poly8(td, QSAT_C))    # over ice
 
-    vp1 = min(es / (p - 0.378 * es), 1.0)
-    qs = 0.622 * vp1
+    vp1 = min(es / (p - R(0.378) * es), one(R))
+    qs = R(0.622) * vp1
 
     return (qs, es)
 end
 
-# Evaluate 8th-degree polynomial: c[1] + c[2]*x + c[3]*x^2 + ... + c[9]*x^8
-@inline function _poly8(x::Real, c::NTuple{9,Float64})
-    return c[1] + x*(c[2] + x*(c[3] + x*(c[4] + x*(c[5] + x*(c[6] + x*(c[7] + x*(c[8] + x*c[9])))))))
+# Evaluate 8th-degree polynomial: c[1] + c[2]*x + c[3]*x^2 + ... + c[9]*x^8.
+# Coefficients are converted to the eltype of x (R) so the result stays in the
+# working precision — Float64 coefficients would otherwise force a Float64
+# result (and break Metal under Float32). Byte-identical when x is Float64.
+@inline function _poly8(x::Real, c::NTuple{9,<:Real})
+    R = typeof(x)
+    return R(c[1]) + x*(R(c[2]) + x*(R(c[3]) + x*(R(c[4]) + x*(R(c[5]) +
+           x*(R(c[6]) + x*(R(c[7]) + x*(R(c[8]) + x*R(c[9]))))))))
 end
