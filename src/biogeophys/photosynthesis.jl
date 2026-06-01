@@ -468,7 +468,10 @@ end
 Photosynthesis temperature response function.
 """
 @inline function ft_photo(tl::Real, ha::Real)
-    return exp(ha / (RGAS * (TFRZ + 25.0)) * (1.0 - (TFRZ + 25.0) / tl))
+    # eltype-generic (T from tl) so it lowers to valid Metal IR under Float32;
+    # byte-identical to the Float64 literals on the CPU path.
+    T = typeof(tl)
+    return exp(T(ha) / (T(RGAS) * (T(TFRZ) + T(25.0))) * (one(T) - (T(TFRZ) + T(25.0)) / tl))
 end
 
 """
@@ -477,7 +480,8 @@ end
 Photosynthesis temperature inhibition function.
 """
 @inline function fth_photo(tl::Real, hd::Real, se::Real, scaleFactor::Real)
-    return scaleFactor / (1.0 + exp((-hd + se * tl) / (RGAS * tl)))
+    T = typeof(tl)
+    return T(scaleFactor) / (one(T) + exp((-T(hd) + T(se) * tl) / (T(RGAS) * tl)))
 end
 
 """
@@ -486,7 +490,8 @@ end
 Scaling factor for photosynthesis temperature inhibition at 25°C.
 """
 @inline function fth25_photo(hd::Real, se::Real)
-    return 1.0 + exp((-hd + se * (TFRZ + 25.0)) / (RGAS * (TFRZ + 25.0)))
+    T = typeof(se)
+    return one(T) + exp((-T(hd) + T(se) * (T(TFRZ) + T(25.0))) / (T(RGAS) * (T(TFRZ) + T(25.0))))
 end
 
 """
@@ -1113,6 +1118,253 @@ function photosynth_ci_solve!(ps::PhotosynthesisData,
 end
 
 # =====================================================================
+# photosynthesis! per-patch passes (kernelized). `ps` (PhotosynthesisData,
+# @adapt_structure'd) is passed whole as ONE arg and its fields are written
+# directly inside the kernels; params_inst scalar fields are bundled into an
+# isbits NamedTuple built on the host (module globals are not GPU-safe). All
+# Float64 literals are eltype-converted (T = eltype of an input). Launched via
+# manual backend + KA.synchronize (struct-first kernel). One thread per patch.
+# =====================================================================
+
+# Pass 1: C3/C4 flag, quantum efficiency, Ball-Berry intercept, Michaelis-Menten.
+@kernel function _psn_pass1_kernel!(ps, @Const(mask_patch), @Const(ivt),
+        @Const(c3psn_pft), @Const(mbbopt_pft), @Const(forc_pbot), @Const(oair),
+        @Const(t_veg), @Const(btran), prm, stomatalcond_mtd::Int,
+        bbbopt_c3, bbbopt_c4, stomatal_bb::Int)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(forc_pbot)
+        ivt_p = ivt[p]
+        if round(Int, c3psn_pft[ivt_p]) == 1
+            ps.c3flag_patch[p] = true
+            ps.qe_patch[p] = zero(T)
+            bbbopt_p = bbbopt_c3
+        else
+            ps.c3flag_patch[p] = false
+            ps.qe_patch[p] = T(0.05)
+            bbbopt_p = bbbopt_c4
+        end
+        if stomatalcond_mtd == stomatal_bb
+            ps.bbb_patch[p] = smooth_max(bbbopt_p * btran[p], one(T))
+            ps.mbb_patch[p] = mbbopt_pft[ivt_p]
+        end
+        kc25 = prm.kc25_coef * forc_pbot[p]
+        ko25 = prm.ko25_coef * forc_pbot[p]
+        sco  = T(0.5) * T(0.209) / prm.cp25_yr2000
+        cp25 = T(0.5) * oair[p] / sco
+        ps.kc_patch[p] = kc25 * ft_photo(t_veg[p], prm.kcha)
+        ps.ko_patch[p] = ko25 * ft_photo(t_veg[p], prm.koha)
+        ps.cp_patch[p] = cp25 * ft_photo(t_veg[p], prm.cpha)
+    end
+end
+
+function psn_pass1_update!(ps, mask_patch, ivt, c3psn_pft, mbbopt_pft,
+        forc_pbot, oair, t_veg, btran, stomatalcond_mtd::Int, bounds_patch)
+    T = eltype(forc_pbot)
+    prm = (kc25_coef = T(params_inst.kc25_coef), ko25_coef = T(params_inst.ko25_coef),
+           cp25_yr2000 = T(params_inst.cp25_yr2000), kcha = T(params_inst.kcha),
+           koha = T(params_inst.koha), cpha = T(params_inst.cpha))
+    be = _kernel_backend(forc_pbot)
+    _psn_pass1_kernel!(be)(ps, mask_patch, ivt, c3psn_pft, mbbopt_pft,
+        forc_pbot, oair, t_veg, btran, prm, stomatalcond_mtd,
+        T(BBBOPT_C3), T(BBBOPT_C4), STOMATALCOND_MTD_BB1987;
+        ndrange = length(bounds_patch))
+    KA.synchronize(be)
+    return nothing
+end
+
+# Pass 4: canopy integration over layers → per-patch psn/rs/lmr. Phase-dependent
+# ps fields selected via is_sun (no String compare in-kernel). Internal iv loop
+# runs serially per thread (per-patch reduction, no race). psn_wc_z/wj_z/wp_z are
+# the local scratch matrices written by the Ci solve (Pass 3).
+@kernel function _psn_pass4_kernel!(ps, @Const(mask_patch), @Const(nrad),
+        @Const(lai_z_in), @Const(rb), @Const(psn_wc_z), @Const(psn_wj_z),
+        @Const(psn_wp_z), is_sun::Bool)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(rb)
+        psn_z   = is_sun ? ps.psnsun_z_patch  : ps.psnsha_z_patch
+        lmr_z   = is_sun ? ps.lmrsun_z_patch  : ps.lmrsha_z_patch
+        rs_z    = is_sun ? ps.rssun_z_patch   : ps.rssha_z_patch
+        psn_o   = is_sun ? ps.psnsun_patch    : ps.psnsha_patch
+        psnwc_o = is_sun ? ps.psnsun_wc_patch : ps.psnsha_wc_patch
+        psnwj_o = is_sun ? ps.psnsun_wj_patch : ps.psnsha_wj_patch
+        psnwp_o = is_sun ? ps.psnsun_wp_patch : ps.psnsha_wp_patch
+        lmr_o   = is_sun ? ps.lmrsun_patch    : ps.lmrsha_patch
+        rs_o    = is_sun ? ps.rssun_patch     : ps.rssha_patch
+
+        psncan = zero(T); psncan_wc = zero(T); psncan_wj = zero(T); psncan_wp = zero(T)
+        lmrcan = zero(T); gscan = zero(T); laican = zero(T)
+        for iv in 1:nrad[p]
+            psncan    += psn_z[p, iv]    * lai_z_in[p, iv]
+            psncan_wc += psn_wc_z[p, iv] * lai_z_in[p, iv]
+            psncan_wj += psn_wj_z[p, iv] * lai_z_in[p, iv]
+            psncan_wp += psn_wp_z[p, iv] * lai_z_in[p, iv]
+            lmrcan    += lmr_z[p, iv]    * lai_z_in[p, iv]
+            gscan     += lai_z_in[p, iv] / max(rb[p] + rs_z[p, iv], T(1.0e-6))
+            laican    += lai_z_in[p, iv]
+        end
+        if laican > zero(T)
+            psn_o[p]   = psncan / laican
+            psnwc_o[p] = psncan_wc / laican
+            psnwj_o[p] = psncan_wj / laican
+            psnwp_o[p] = psncan_wp / laican
+            lmr_o[p]   = lmrcan / laican
+            rs_o[p]    = laican / gscan - rb[p]
+        else
+            psn_o[p] = zero(T); psnwc_o[p] = zero(T); psnwj_o[p] = zero(T)
+            psnwp_o[p] = zero(T); lmr_o[p] = zero(T); rs_o[p] = zero(T)
+        end
+    end
+end
+
+function psn_pass4_update!(ps, mask_patch, nrad, lai_z_in, rb,
+        psn_wc_z, psn_wj_z, psn_wp_z, is_sun::Bool, bounds_patch)
+    be = _kernel_backend(rb)
+    _psn_pass4_kernel!(be)(ps, mask_patch, nrad, lai_z_in, rb,
+        psn_wc_z, psn_wj_z, psn_wp_z, is_sun; ndrange = length(bounds_patch))
+    KA.synchronize(be)
+    return nothing
+end
+
+# Pass 2: nitrogen profile + per-canopy-layer vcmax/jmax/tpu/kp/lmr. Per-patch
+# with an internal serial iv loop. params_inst scalars bundled in `prm`; overrides
+# / leaf_mr_vcm / flags / lmrc resolved on the host. kn + jmax_z_local are local
+# scratch matrices; lmr_z is the phase-selected ps field.
+@kernel function _psn_pass2_kernel!(ps, kn, jmax_z_local, @Const(mask_patch),
+        @Const(ivt), @Const(slatop_pft), @Const(leafcn_pft), @Const(flnr_pft),
+        @Const(fnitr_pft), @Const(dayl_factor), @Const(t10), @Const(t_veg),
+        @Const(btran), @Const(tlai_z), @Const(par_z_in), @Const(vcmaxcint),
+        @Const(nrad), prm, vcmax25_scale, jmax25top_sf_val, leaf_mr_vcm,
+        use_cn::Bool, light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
+        is_sun::Bool, leafresp_ryan::Int)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(t_veg)
+        ivt_p = ivt[p]
+        lmr_z = is_sun ? ps.lmrsun_z_patch : ps.lmrsha_z_patch
+        vcmax_z = ps.vcmax_z_patch; tpu_z = ps.tpu_z_patch; kp_z = ps.kp_z_patch
+        c3flag_p = ps.c3flag_patch[p]
+
+        lnc_p = one(T) / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
+        ps.lnca_patch[p] = lnc_p
+        vcmax25top = lnc_p * flnr_pft[ivt_p] * prm.fnr * prm.act25 * dayl_factor[p]
+        if !use_cn
+            vcmax25top = vcmax25top * fnitr_pft[ivt_p]
+        end
+        if !isnan(vcmax25_scale)
+            vcmax25top = vcmax25top * vcmax25_scale
+        end
+        jmax25top = ((T(2.59) - T(0.035) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) *
+                     vcmax25top) * jmax25top_sf_val
+        tpu25top = prm.tpu25ratio * vcmax25top
+        kp25top  = prm.kp25ratio * vcmax25top
+
+        if dayl_factor[p] < T(1.0e-12)
+            kn[p] = zero(T)
+        else
+            kn[p] = exp(T(0.00963) * vcmax25top / dayl_factor[p] - T(2.43))
+        end
+
+        if use_cn
+            if leafresp_method == leafresp_ryan
+                lmr25top = T(2.525e-6) * (T(1.5)^((T(25.0) - T(20.0)) / T(10.0)))
+                lmr25top = lmr25top * lnc_p / T(12.0e-06)
+            else
+                lmr25top = zero(T)
+            end
+        else
+            if c3flag_p
+                lmr25top = vcmax25top * T(leaf_mr_vcm)
+            else
+                lmr25top = vcmax25top * T(0.025)
+            end
+        end
+
+        laican = zero(T)
+        for iv in 1:nrad[p]
+            if iv == 1
+                laican = T(0.5) * tlai_z[p, iv]
+            else
+                laican = laican + T(0.5) * (tlai_z[p, iv-1] + tlai_z[p, iv])
+            end
+            if nlevcan == 1
+                nscaler = vcmaxcint[p]
+            else
+                nscaler = exp(-kn[p] * laican)
+            end
+            lmr25 = lmr25top * nscaler
+            if c3flag_p
+                lmr_z[p, iv] = lmr25 * ft_photo(t_veg[p], prm.lmrha) *
+                               fth_photo(t_veg[p], prm.lmrhd, prm.lmrse, prm.lmrc)
+            else
+                lmr_z[p, iv] = lmr25 * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+                lmr_z[p, iv] = lmr_z[p, iv] / (one(T) + exp(T(1.3) * (t_veg[p] - (T(TFRZ) + T(55.0)))))
+            end
+            if par_z_in[p, iv] <= zero(T)
+                vcmax_z[p, iv] = zero(T); jmax_z_local[p, iv] = zero(T)
+                tpu_z[p, iv] = zero(T); kp_z[p, iv] = zero(T)
+            else
+                vcmax25 = vcmax25top * nscaler
+                jmax25  = jmax25top * nscaler
+                tpu25   = tpu25top * nscaler
+                kp25    = kp25top * nscaler
+                vcmaxse = (T(668.39) - T(1.07) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.vcmaxse_sf
+                jmaxse  = (T(659.70) - T(0.75) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.jmaxse_sf
+                tpuse   = (T(668.39) - T(1.07) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.tpuse_sf
+                vcmaxc = fth25_photo(prm.vcmaxhd, vcmaxse)
+                jmaxc  = fth25_photo(prm.jmaxhd, jmaxse)
+                tpuc   = fth25_photo(prm.tpuhd, tpuse)
+                vcmax_z[p, iv] = vcmax25 * ft_photo(t_veg[p], prm.vcmaxha) *
+                                 fth_photo(t_veg[p], prm.vcmaxhd, vcmaxse, vcmaxc)
+                jmax_z_local[p, iv] = jmax25 * ft_photo(t_veg[p], prm.jmaxha) *
+                                      fth_photo(t_veg[p], prm.jmaxhd, jmaxse, jmaxc)
+                tpu_z[p, iv] = tpu25 * ft_photo(t_veg[p], prm.tpuha) *
+                               fth_photo(t_veg[p], prm.tpuhd, tpuse, tpuc)
+                if !c3flag_p
+                    vcmax_z[p, iv] = vcmax25 * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+                    vcmax_z[p, iv] = vcmax_z[p, iv] / (one(T) + exp(T(0.2) * ((T(TFRZ) + T(15.0)) - t_veg[p])))
+                    vcmax_z[p, iv] = vcmax_z[p, iv] / (one(T) + exp(T(0.3) * (t_veg[p] - (T(TFRZ) + T(40.0)))))
+                end
+                kp_z[p, iv] = kp25 * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+            end
+            vcmax_z[p, iv] = vcmax_z[p, iv] * btran[p]
+            lmr_z[p, iv]   = lmr_z[p, iv] * btran[p]
+            if light_inhibit && par_z_in[p, 1] > zero(T)
+                lmr_z[p, iv] = lmr_z[p, iv] * T(0.67)
+            end
+        end
+    end
+end
+
+function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
+        leafcn_pft, flnr_pft, fnitr_pft, dayl_factor, t10, t_veg, btran, tlai_z,
+        par_z_in, vcmaxcint, nrad, use_cn::Bool, leaf_mr_vcm, nlevcan::Int,
+        is_sun::Bool, overrides, bounds_patch)
+    T = eltype(t_veg)
+    lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
+    prm = (fnr = T(params_inst.fnr), act25 = T(params_inst.act25),
+           tpu25ratio = T(params_inst.tpu25ratio), kp25ratio = T(params_inst.kp25ratio),
+           lmrha = T(params_inst.lmrha), lmrhd = T(params_inst.lmrhd),
+           lmrse = T(params_inst.lmrse), lmrc = T(lmrc),
+           vcmaxse_sf = T(params_inst.vcmaxse_sf), jmaxse_sf = T(params_inst.jmaxse_sf),
+           tpuse_sf = T(params_inst.tpuse_sf), vcmaxhd = T(params_inst.vcmaxhd),
+           jmaxhd = T(params_inst.jmaxhd), tpuhd = T(params_inst.tpuhd),
+           vcmaxha = T(params_inst.vcmaxha), jmaxha = T(params_inst.jmaxha),
+           tpuha = T(params_inst.tpuha))
+    jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
+    be = _kernel_backend(t_veg)
+    _psn_pass2_kernel!(be)(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
+        leafcn_pft, flnr_pft, fnitr_pft, dayl_factor, t10, t_veg, btran, tlai_z,
+        par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
+        T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
+        ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991;
+        ndrange = length(bounds_patch))
+    KA.synchronize(be)
+    return nothing
+end
+
+# =====================================================================
 # photosynthesis! — Main leaf photosynthesis and stomatal conductance
 # =====================================================================
 
@@ -1217,176 +1469,30 @@ function photosynthesis!(ps::PhotosynthesisData,
     leafresp_method = ps.leafresp_method
     light_inhibit = ps.light_inhibit
 
-    lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
-
     np = length(bounds_patch)
     FT = eltype(t_veg)
-    jmax_z_local = zeros(FT, np, nlevcan)
-    bbbopt = zeros(FT, np)
-    kn = zeros(FT, np)
-    psn_wc_z = zeros(FT, np, nlevcan)
-    psn_wj_z = zeros(FT, np, nlevcan)
-    psn_wp_z = zeros(FT, np, nlevcan)
+    # Scratch via similar() of an input (device-resident on GPU) + fill!; the _z
+    # matrices feed the kernelized passes. lmrc/bbbopt are no longer needed here —
+    # the Pass 1/2 kernels resolve them internally.
+    jmax_z_local = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    kn           = fill!(similar(t_veg, FT, np), zero(FT))
+    psn_wc_z     = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    psn_wj_z     = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    psn_wp_z     = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
 
     rsmax0 = 2.0e4
 
-    # ---- Pass 1: Compute kinetics, N scaling, respiration ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-        c = col_of_patch[p]
-        ivt_p = ivt[p]
+    # ---- Pass 1: Compute kinetics, N scaling, respiration (kernelized) ----
+    # bbbopt is now a kernel-local scalar (was a per-patch scratch array used only
+    # within this pass). Writes ps.c3flag/qe/bbb/mbb/kc/ko/cp (== local aliases).
+    psn_pass1_update!(ps, mask_patch, ivt, c3psn_pft, mbbopt_pft,
+        forc_pbot, oair, t_veg, btran, stomatalcond_mtd, bounds_patch)
 
-        # C3 or C4
-        if round(Int, c3psn_pft[ivt_p]) == 1
-            c3flag[p] = true
-        else
-            c3flag[p] = false
-        end
-
-        # C3/C4 dependent parameters
-        if c3flag[p]
-            qe[p] = 0.0
-            if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                bbbopt[p] = BBBOPT_C3
-            end
-        else
-            qe[p] = 0.05
-            if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                bbbopt[p] = BBBOPT_C4
-            end
-        end
-
-        if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-            bbb[p] = smooth_max(bbbopt[p] * btran[p], 1.0)
-            mbb[p] = mbbopt_pft[ivt_p]
-        end
-
-        # Michaelis-Menten constants
-        kc25 = params_inst.kc25_coef * forc_pbot[p]
-        ko25 = params_inst.ko25_coef * forc_pbot[p]
-        sco = 0.5 * 0.209 / params_inst.cp25_yr2000
-        cp25 = 0.5 * oair[p] / sco
-
-        kc[p] = kc25 * ft_photo(t_veg[p], params_inst.kcha)
-        ko[p] = ko25 * ft_photo(t_veg[p], params_inst.koha)
-        cp[p] = cp25 * ft_photo(t_veg[p], params_inst.cpha)
-    end
-
-    # ---- Pass 2: Nitrogen profile and vcmax ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-        ivt_p = ivt[p]
-
-        lnc[p] = 1.0 / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
-
-        vcmax25top = lnc[p] * flnr_pft[ivt_p] * params_inst.fnr * params_inst.act25 * dayl_factor[p]
-        if !use_cn
-            vcmax25top = vcmax25top * fnitr_pft[ivt_p]
-        end
-
-        # Apply calibration overrides if set
-        if !isnan(overrides.vcmax25_scale)
-            vcmax25top = vcmax25top * overrides.vcmax25_scale
-        end
-
-        jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
-        jmax25top = ((2.59 - 0.035 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * vcmax25top) *
-                    jmax25top_sf_val
-        tpu25top = params_inst.tpu25ratio * vcmax25top
-        kp25top = params_inst.kp25ratio * vcmax25top
-
-        if dayl_factor[p] < 1.0e-12
-            kn[p] = 0.0
-        else
-            kn[p] = exp(0.00963 * vcmax25top / dayl_factor[p] - 2.43)
-        end
-
-        if use_cn
-            if leafresp_method == LEAFRESP_MTD_RYAN1991
-                lmr25top = 2.525e-6 * (1.5^((25.0 - 20.0) / 10.0))
-                lmr25top = lmr25top * lnc[p] / 12.0e-06
-            else
-                lmr25top = 0.0
-            end
-        else
-            if c3flag[p]
-                lmr25top = vcmax25top * leaf_mr_vcm
-            else
-                lmr25top = vcmax25top * 0.025
-            end
-        end
-
-        # Loop through canopy layers
-        laican = 0.0
-        for iv in 1:nrad[p]
-            if iv == 1
-                laican = 0.5 * tlai_z[p, iv]
-            else
-                laican = laican + 0.5 * (tlai_z[p, iv-1] + tlai_z[p, iv])
-            end
-
-            if nlevcan == 1
-                nscaler = vcmaxcint[p]
-            else
-                nscaler = exp(-kn[p] * laican)
-            end
-
-            # Maintenance respiration
-            lmr25 = lmr25top * nscaler
-
-            if c3flag[p]
-                lmr_z[p, iv] = lmr25 * ft_photo(t_veg[p], params_inst.lmrha) *
-                               fth_photo(t_veg[p], params_inst.lmrhd, params_inst.lmrse, lmrc)
-            else
-                lmr_z[p, iv] = lmr25 * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-                lmr_z[p, iv] = lmr_z[p, iv] / (1.0 + exp(1.3 * (t_veg[p] - (TFRZ + 55.0))))
-            end
-
-            if par_z_in[p, iv] <= 0.0  # night time
-                vcmax_z[p, iv] = 0.0
-                jmax_z_local[p, iv] = 0.0
-                tpu_z[p, iv] = 0.0
-                kp_z[p, iv] = 0.0
-            else  # day time
-                vcmax25 = vcmax25top * nscaler
-                jmax25 = jmax25top * nscaler
-                tpu25 = tpu25top * nscaler
-                kp25 = kp25top * nscaler
-
-                # Temperature adjustment
-                vcmaxse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.vcmaxse_sf
-                jmaxse = (659.70 - 0.75 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.jmaxse_sf
-                tpuse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.tpuse_sf
-                vcmaxc = fth25_photo(params_inst.vcmaxhd, vcmaxse)
-                jmaxc = fth25_photo(params_inst.jmaxhd, jmaxse)
-                tpuc = fth25_photo(params_inst.tpuhd, tpuse)
-
-                vcmax_z[p, iv] = vcmax25 * ft_photo(t_veg[p], params_inst.vcmaxha) *
-                                  fth_photo(t_veg[p], params_inst.vcmaxhd, vcmaxse, vcmaxc)
-                jmax_z_local[p, iv] = jmax25 * ft_photo(t_veg[p], params_inst.jmaxha) *
-                                       fth_photo(t_veg[p], params_inst.jmaxhd, jmaxse, jmaxc)
-                tpu_z[p, iv] = tpu25 * ft_photo(t_veg[p], params_inst.tpuha) *
-                                fth_photo(t_veg[p], params_inst.tpuhd, tpuse, tpuc)
-
-                if !c3flag[p]
-                    vcmax_z[p, iv] = vcmax25 * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-                    vcmax_z[p, iv] = vcmax_z[p, iv] / (1.0 + exp(0.2 * ((TFRZ + 15.0) - t_veg[p])))
-                    vcmax_z[p, iv] = vcmax_z[p, iv] / (1.0 + exp(0.3 * (t_veg[p] - (TFRZ + 40.0))))
-                end
-
-                kp_z[p, iv] = kp25 * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-            end
-
-            # Soil water stress
-            vcmax_z[p, iv] = vcmax_z[p, iv] * btran[p]
-            lmr_z[p, iv] = lmr_z[p, iv] * btran[p]
-
-            # Light inhibition
-            if light_inhibit && par_z_in[p, 1] > 0.0
-                lmr_z[p, iv] = lmr_z[p, iv] * 0.67
-            end
-        end
-    end
+    # ---- Pass 2: Nitrogen profile and vcmax (kernelized) ----
+    psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
+        leafcn_pft, flnr_pft, fnitr_pft, dayl_factor, t10, t_veg, btran, tlai_z,
+        par_z_in, vcmaxcint, nrad, use_cn, leaf_mr_vcm, nlevcan,
+        phase == "sun", overrides, bounds_patch)
 
     # ---- Pass 3: Leaf-level photosynthesis and stomatal conductance ----
     # Kernelized: one thread per patch, with the per-canopy-layer iv loop running
@@ -1402,44 +1508,9 @@ function photosynthesis!(ps::PhotosynthesisData,
         eair, esat_tv, cair, oair, bbb, o3coefg, o3coefv, nrad,
         bounds_patch, phase, stomatalcond_mtd, rsmax0, overrides)
 
-    # ---- Pass 4: Canopy integration ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-
-        psncan = 0.0
-        psncan_wc = 0.0
-        psncan_wj = 0.0
-        psncan_wp = 0.0
-        lmrcan = 0.0
-        gscan = 0.0
-        laican = 0.0
-
-        for iv in 1:nrad[p]
-            psncan += psn_z[p, iv] * lai_z_in[p, iv]
-            psncan_wc += psn_wc_z[p, iv] * lai_z_in[p, iv]
-            psncan_wj += psn_wj_z[p, iv] * lai_z_in[p, iv]
-            psncan_wp += psn_wp_z[p, iv] * lai_z_in[p, iv]
-            lmrcan += lmr_z[p, iv] * lai_z_in[p, iv]
-            gscan += lai_z_in[p, iv] / max(rb[p] + rs_z[p, iv], 1.0e-6)
-            laican += lai_z_in[p, iv]
-        end
-
-        if laican > 0.0
-            psn[p] = psncan / laican
-            psn_wc[p] = psncan_wc / laican
-            psn_wj[p] = psncan_wj / laican
-            psn_wp[p] = psncan_wp / laican
-            lmr_out[p] = lmrcan / laican
-            rs[p] = laican / gscan - rb[p]
-        else
-            psn[p] = 0.0
-            psn_wc[p] = 0.0
-            psn_wj[p] = 0.0
-            psn_wp[p] = 0.0
-            lmr_out[p] = 0.0
-            rs[p] = 0.0
-        end
-    end
+    # ---- Pass 4: Canopy integration (kernelized) ----
+    psn_pass4_update!(ps, mask_patch, nrad, lai_z_in, rb,
+        psn_wc_z, psn_wj_z, psn_wp_z, phase == "sun", bounds_patch)
 
     return nothing
 end
