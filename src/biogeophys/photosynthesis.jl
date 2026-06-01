@@ -268,7 +268,7 @@ Adapt.@adapt_structure PhotosynthesisData
 
 
 """
-    photosynthesis_data_init!(ps::PhotosynthesisData, np::Int; nlevcan::Int=NLEVCAN, use_luna::Bool=false)
+    photosynthesis_data_init!(ps, np::Int; nlevcan::Int=NLEVCAN, use_luna::Bool=false)
 
 Allocate and initialize all fields for `np` patches.
 """
@@ -569,6 +569,52 @@ end
 # ci_func! — evaluate f(ci) for the standard (non-PHS) method
 # =====================================================================
 
+# Immutable device-view of the PhotosynthesisData fields the GPU kernels + solver
+# cores touch. PhotosynthesisData is a MUTABLE struct → non-bitstype → cannot be
+# passed by value to a Metal kernel; this immutable bundle (built per launch from
+# ps via _psn_dv) can. Field NAMES mirror PhotosynthesisData exactly, so the
+# kernel/core bodies (ps.ac_patch, …) are unchanged — `ps` just becomes a PsnDV
+# on the device path (and the real mutable struct on the host/back-compat path,
+# since the cores take `ps` untyped). {Vb=Bool vec, V=float vec, M=float matrix}.
+Base.@kwdef struct PsnDV{Vb,V,M}
+    c3flag_patch::Vb
+    qe_patch::V; bbb_patch::V; mbb_patch::V; kc_patch::V; ko_patch::V; cp_patch::V
+    lnca_patch::V; gb_mol_patch::V; rh_leaf_patch::V; vpd_can_patch::V
+    psnsun_patch::V; psnsha_patch::V
+    psnsun_wc_patch::V; psnsun_wj_patch::V; psnsun_wp_patch::V
+    psnsha_wc_patch::V; psnsha_wj_patch::V; psnsha_wp_patch::V
+    rssun_patch::V; rssha_patch::V; lmrsun_patch::V; lmrsha_patch::V
+    vcmax_z_patch::M; tpu_z_patch::M; kp_z_patch::M
+    ac_patch::M; aj_patch::M; ap_patch::M; ag_patch::M; an_patch::M
+    gs_mol_patch::M; gs_mol_sun_patch::M; gs_mol_sha_patch::M
+    lmrsun_z_patch::M; lmrsha_z_patch::M; psnsun_z_patch::M; psnsha_z_patch::M
+    rssun_z_patch::M; rssha_z_patch::M; cisun_z_patch::M; cisha_z_patch::M
+    stomatalcond_mtd::Int
+end
+Adapt.@adapt_structure PsnDV   # so KA adapts MtlArray fields -> MtlDeviceArray (bitstype) at launch
+
+# Build a PsnDV from ps (array fields are shared refs — writes flow back to ps).
+_psn_dv(ps) = PsnDV(; c3flag_patch = ps.c3flag_patch,
+    qe_patch = ps.qe_patch, bbb_patch = ps.bbb_patch, mbb_patch = ps.mbb_patch,
+    kc_patch = ps.kc_patch, ko_patch = ps.ko_patch, cp_patch = ps.cp_patch,
+    lnca_patch = ps.lnca_patch, gb_mol_patch = ps.gb_mol_patch,
+    rh_leaf_patch = ps.rh_leaf_patch, vpd_can_patch = ps.vpd_can_patch,
+    psnsun_patch = ps.psnsun_patch, psnsha_patch = ps.psnsha_patch,
+    psnsun_wc_patch = ps.psnsun_wc_patch, psnsun_wj_patch = ps.psnsun_wj_patch,
+    psnsun_wp_patch = ps.psnsun_wp_patch, psnsha_wc_patch = ps.psnsha_wc_patch,
+    psnsha_wj_patch = ps.psnsha_wj_patch, psnsha_wp_patch = ps.psnsha_wp_patch,
+    rssun_patch = ps.rssun_patch, rssha_patch = ps.rssha_patch,
+    lmrsun_patch = ps.lmrsun_patch, lmrsha_patch = ps.lmrsha_patch,
+    vcmax_z_patch = ps.vcmax_z_patch, tpu_z_patch = ps.tpu_z_patch,
+    kp_z_patch = ps.kp_z_patch, ac_patch = ps.ac_patch, aj_patch = ps.aj_patch,
+    ap_patch = ps.ap_patch, ag_patch = ps.ag_patch, an_patch = ps.an_patch,
+    gs_mol_patch = ps.gs_mol_patch, gs_mol_sun_patch = ps.gs_mol_sun_patch,
+    gs_mol_sha_patch = ps.gs_mol_sha_patch, lmrsun_z_patch = ps.lmrsun_z_patch,
+    lmrsha_z_patch = ps.lmrsha_z_patch, psnsun_z_patch = ps.psnsun_z_patch,
+    psnsha_z_patch = ps.psnsha_z_patch, rssun_z_patch = ps.rssun_z_patch,
+    rssha_z_patch = ps.rssha_z_patch, cisun_z_patch = ps.cisun_z_patch,
+    cisha_z_patch = ps.cisha_z_patch, stomatalcond_mtd = ps.stomatalcond_mtd)
+
 """
     ci_func!(ci, p, iv, forc_pbot_c, gb_mol, je, cair, oair, lmr_z, par_z,
              rh_can, photosyns)
@@ -579,7 +625,7 @@ Returns `(fval, gs_mol)`.
 function _ci_func_core!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
                   gb_mol::Real, je::Real, cair::Real, oair::Real,
                   lmr_z::Real, par_z::Real, rh_can::Real,
-                  ps::PhotosynthesisData,
+                  ps,
                   c3psn_val::Real, medlynslope_val::Real,
                   medlynintercept_val::Real, mbbopt_val::Real,
                   theta_cj_val::Real, theta_ip_val::Real)
@@ -696,7 +742,7 @@ Hybrid solver for ci. Returns `(ci_solution, gs_mol, niter)`.
 function _hybrid_solver_core!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
                         gb_mol::Real, je::Real, cair::Real, oair::Real,
                         lmr_z::Real, par_z::Real, rh_can::Real,
-                        ps::PhotosynthesisData,
+                        ps,
                         c3psn_val::Real, medlynslope_val::Real,
                         medlynintercept_val::Real, mbbopt_val::Real,
                         theta_cj_val::Real, theta_ip_val::Real)
@@ -818,7 +864,7 @@ function _brent_solver_core!(x1::Real, x2::Real, f1::Real, f2::Real,
                        tol::Real, p::Int, iv::Int, forc_pbot_c::Real,
                        gb_mol::Real, je::Real, cair::Real, oair::Real,
                        lmr_z::Real, par_z::Real, rh_can::Real,
-                       ps::PhotosynthesisData,
+                       ps,
                        c3psn_val::Real, medlynslope_val::Real,
                        medlynintercept_val::Real, mbbopt_val::Real,
                        theta_cj_val::Real, theta_ip_val::Real)
@@ -1099,7 +1145,7 @@ override, the `phase == "sun"` string compare, module-global constants) are
 resolved to host scalars before the launch; the kernel reads no globals/Strings.
 One thread per patch; the per-canopy-layer `iv` loop runs serially inside.
 """
-function photosynth_ci_solve!(ps::PhotosynthesisData,
+function photosynth_ci_solve!(ps,
         ac, aj, ap, ag, an, psn_z, psn_wc_z, psn_wj_z, psn_wp_z,
         rs_z, ci_z, gs_mol, rh_leaf, gb_mol, vpd_can,
         mask_patch, ivt,
@@ -1118,8 +1164,9 @@ function photosynth_ci_solve!(ps::PhotosynthesisData,
         T(params_inst.theta_cj[1]), T(params_inst.theta_ip), T(overrides.medlyn_slope),
         T(RGAS), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT), T(rsmax0))
     is_sun = (phase == "sun")
+    dv = _psn_dv(ps)
     be = _kernel_backend(forc_pbot)
-    _photosynth_ci_kernel!(be)(ps, psn_wc_z, psn_wj_z, psn_wp_z,
+    _photosynth_ci_kernel!(be)(dv, psn_wc_z, psn_wj_z, psn_wp_z,
         mask_patch, ivt, medlynslope_pft, medlynintercept_pft, mbbopt_pft,
         forc_pbot, tgcm, rb, par_z_in, jmax_z_local, eair, esat_tv, cair, oair,
         o3coefg, o3coefv, nrad, sc, is_sun, stomatalcond_mtd,
@@ -1147,7 +1194,9 @@ end
     @inbounds if mask_patch[p]
         T = eltype(forc_pbot)
         ivt_p = ivt[p]
-        if round(Int, c3psn_pft[ivt_p]) == 1
+        # c3psn is 0/1; round(Int,·)==1 ⟺ >0.5. round(Int,Float32) heap-allocates
+        # on Metal (gpu_malloc), so use the comparison (byte-identical for 0/1).
+        if c3psn_pft[ivt_p] > T(0.5)
             ps.c3flag_patch[p] = true
             ps.qe_patch[p] = zero(T)
             bbbopt_p = bbbopt_c3
@@ -1176,8 +1225,9 @@ function psn_pass1_update!(ps, mask_patch, ivt, c3psn_pft, mbbopt_pft,
     prm = (kc25_coef = T(params_inst.kc25_coef), ko25_coef = T(params_inst.ko25_coef),
            cp25_yr2000 = T(params_inst.cp25_yr2000), kcha = T(params_inst.kcha),
            koha = T(params_inst.koha), cpha = T(params_inst.cpha))
+    dv = _psn_dv(ps)
     be = _kernel_backend(forc_pbot)
-    _psn_pass1_kernel!(be)(ps, mask_patch, ivt, c3psn_pft, mbbopt_pft,
+    _psn_pass1_kernel!(be)(dv, mask_patch, ivt, c3psn_pft, mbbopt_pft,
         forc_pbot, oair, t_veg, btran, prm, stomatalcond_mtd,
         T(BBBOPT_C3), T(BBBOPT_C4), STOMATALCOND_MTD_BB1987;
         ndrange = length(bounds_patch))
@@ -1232,8 +1282,9 @@ end
 
 function psn_pass4_update!(ps, mask_patch, nrad, lai_z_in, rb,
         psn_wc_z, psn_wj_z, psn_wp_z, is_sun::Bool, bounds_patch)
+    dv = _psn_dv(ps)
     be = _kernel_backend(rb)
-    _psn_pass4_kernel!(be)(ps, mask_patch, nrad, lai_z_in, rb,
+    _psn_pass4_kernel!(be)(dv, mask_patch, nrad, lai_z_in, rb,
         psn_wc_z, psn_wj_z, psn_wp_z, is_sun; ndrange = length(bounds_patch))
     KA.synchronize(be)
     return nothing
@@ -1365,8 +1416,9 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
            vcmaxha = T(params_inst.vcmaxha), jmaxha = T(params_inst.jmaxha),
            tpuha = T(params_inst.tpuha))
     jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
+    dv = _psn_dv(ps)
     be = _kernel_backend(t_veg)
-    _psn_pass2_kernel!(be)(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
+    _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
         leafcn_pft, flnr_pft, fnitr_pft, dayl_factor, t10, t_veg, btran, tlai_z,
         par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
         T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
@@ -1381,7 +1433,7 @@ end
 # =====================================================================
 
 """
-    photosynthesis!(ps::PhotosynthesisData, ...)
+    photosynthesis!(ps, ...)
 
 Leaf photosynthesis and stomatal conductance calculation.
 Ported from `subroutine Photosynthesis` in `PhotosynthesisMod.F90`.
@@ -1390,7 +1442,7 @@ This is a simplified interface for unit testing. In production CLM,
 additional data types (atm2lnd, temperature, surfalb, solarabs, canopystate,
 ozone) would be passed. Here we pass the needed arrays directly.
 """
-function photosynthesis!(ps::PhotosynthesisData,
+function photosynthesis!(ps,
                          esat_tv::AbstractVector{<:Real},
                          eair::AbstractVector{<:Real},
                          oair::AbstractVector{<:Real},
@@ -1532,13 +1584,13 @@ end
 # =====================================================================
 
 """
-    photosynthesis_total!(ps::PhotosynthesisData, laisun, laisha, mask_patch, bounds_patch;
+    photosynthesis_total!(ps, laisun, laisha, mask_patch, bounds_patch;
                           use_fates=false, use_cn=false, use_c13=false, use_c14=false)
 
 Determine total photosynthesis by combining sunlit and shaded fluxes.
 Ported from `subroutine PhotosynthesisTotal`.
 """
-function photosynthesis_total!(ps::PhotosynthesisData,
+function photosynthesis_total!(ps,
                                laisun::AbstractVector{<:Real},
                                laisha::AbstractVector{<:Real},
                                mask_patch::AbstractVector{Bool},
@@ -1566,12 +1618,12 @@ end
 # =====================================================================
 
 """
-    fractionation!(ps::PhotosynthesisData, ...)
+    fractionation!(ps, ...)
 
 C13 fractionation during photosynthesis.
 Ported from `subroutine Fractionation`.
 """
-function fractionation!(ps::PhotosynthesisData,
+function fractionation!(ps,
                         forc_pbot::AbstractVector{<:Real},
                         forc_pco2::AbstractVector{<:Real},
                         par_z_in::AbstractMatrix{<:Real},
@@ -1635,12 +1687,12 @@ end
 # =====================================================================
 
 """
-    photosynthesis_timestep_init!(ps::PhotosynthesisData, mask_nolake, bounds_patch;
+    photosynthesis_timestep_init!(ps, mask_nolake, bounds_patch;
                                   use_c13=false, use_c14=false)
 
 Time step initialization. Zeros out photosynthesis fluxes for non-lake patches.
 """
-function photosynthesis_timestep_init!(ps::PhotosynthesisData,
+function photosynthesis_timestep_init!(ps,
                                        mask_nolake::AbstractVector{Bool},
                                        bounds_patch::UnitRange{Int};
                                        use_c13::Bool=false,
@@ -2221,7 +2273,7 @@ function ci_func_PHS!(x::AbstractVector{<:Real}, cisun::Real, cisha::Real,
                       lmr_z_sun::Real, lmr_z_sha::Real,
                       par_z_sun::Real, par_z_sha::Real,
                       rh_can::Real, qsatl::Real, qaf::Real,
-                      ps::PhotosynthesisData, forc_pbot_c::Real,
+                      ps, forc_pbot_c::Real,
                       k_soil_root_p::AbstractVector{Float64},
                       smp_c::AbstractVector{Float64},
                       z_c::AbstractVector{Float64},
@@ -2440,7 +2492,7 @@ function brent_PHS!(x1sun::Real, x2sun::Real, f1sun::Real, f2sun::Real,
                     gs_mol_sun::Real, gs_mol_sha::Real,
                     bsun::Real, bsha::Real,
                     qsatl::Real, qaf::Real,
-                    ps::PhotosynthesisData, forc_pbot_c::Real,
+                    ps, forc_pbot_c::Real,
                     k_soil_root_p::AbstractVector{Float64},
                     smp_c::AbstractVector{Float64},
                     z_c::AbstractVector{Float64},
@@ -2596,7 +2648,7 @@ function hybrid_PHS!(x0sun::Real, x0sha::Real,
                      lmr_z_sun::Real, lmr_z_sha::Real,
                      par_z_sun::Real, par_z_sha::Real,
                      rh_can::Real, qsatl::Real, qaf::Real,
-                     ps::PhotosynthesisData, forc_pbot_c::Real,
+                     ps, forc_pbot_c::Real,
                      vegwp_p::AbstractVector{<:Real},
                      k_soil_root_p::AbstractVector{Float64},
                      smp_c::AbstractVector{Float64},
@@ -2810,14 +2862,14 @@ end
 # =====================================================================
 
 """
-    photosynthesis_hydrstress!(ps::PhotosynthesisData, ...)
+    photosynthesis_hydrstress!(ps, ...)
 
 Leaf photosynthesis and stomatal conductance with plant hydraulic stress.
 Sunlit and shaded photosynthesis and stomatal conductance are solved
 simultaneously per Pierre Gentine/Daniel Kennedy PHS method.
 Ported from `subroutine PhotosynthesisHydraulicStress`.
 """
-function photosynthesis_hydrstress!(ps::PhotosynthesisData,
+function photosynthesis_hydrstress!(ps,
                                     esat_tv::AbstractVector{<:Real},
                                     eair::AbstractVector{<:Real},
                                     oair::AbstractVector{<:Real},
