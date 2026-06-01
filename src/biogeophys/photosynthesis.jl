@@ -501,22 +501,25 @@ Solve the quadratic equation `a*x^2 + b*x + c = 0` for real roots.
 Returns the two roots `(r1, r2)` where `r1 >= r2`.
 """
 function quadratic_solve(a::Real, b::Real, c::Real)
-    if a == 0.0
-        if b == 0.0
-            return (0.0, 0.0)
+    # eltype-generic (promote a/b/c) so it lowers to valid Metal IR under Float32;
+    # byte-identical to the Float64 literals on the CPU path.
+    T = promote_type(typeof(a), typeof(b), typeof(c))
+    if a == zero(a)
+        if b == zero(b)
+            return (zero(T), zero(T))
         else
             r1 = -c / b
             return (r1, r1)
         end
     end
-    discriminant = b * b - 4.0 * a * c
-    if discriminant < 0.0
-        discriminant = 0.0
+    discriminant = b * b - T(4.0) * a * c
+    if discriminant < zero(T)
+        discriminant = zero(T)
     end
-    q = -0.5 * (b + sign(b) * sqrt(discriminant))
-    if q == 0.0
-        r1 = 0.0
-        r2 = 0.0
+    q = -T(0.5) * (b + sign(b) * sqrt(discriminant))
+    if q == zero(q)
+        r1 = zero(T)
+        r2 = zero(T)
     else
         r1 = q / a
         r2 = c / q
@@ -598,22 +601,24 @@ function _ci_func_core!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
     stomatalcond_mtd = ps.stomatalcond_mtd
     # theta_cj_val / theta_ip_val are passed in (were params_inst.theta_cj[1] /
     # params_inst.theta_ip); threaded as args so this core is GPU-kernel callable.
+    # eltype-generic (T from ci); byte-identical to Float64 literals on CPU.
+    T = typeof(ci)
 
-    gs_mol = 0.0
+    gs_mol = zero(T)
 
     if c3flag
         # Guard against ko_p=0 at very cold temperatures (Arrhenius → 0)
-        if ko_p > 0.0
-            ac[p, iv] = vcmax_z[p, iv] * smooth_max(ci - cp_p, zero(ci)) / (ci + kc_p * (1.0 + oair / ko_p))
+        if ko_p > zero(T)
+            ac[p, iv] = vcmax_z[p, iv] * smooth_max(ci - cp_p, zero(ci)) / (ci + kc_p * (one(T) + oair / ko_p))
         else
-            ac[p, iv] = 0.0
+            ac[p, iv] = zero(T)
         end
-        denom_j = 4.0 * ci + 8.0 * cp_p
-        aj[p, iv] = denom_j > 0.0 ? je * smooth_max(ci - cp_p, zero(ci)) / denom_j : 0.0
-        ap[p, iv] = 3.0 * tpu_z[p, iv]
+        denom_j = T(4.0) * ci + T(8.0) * cp_p
+        aj[p, iv] = denom_j > zero(T) ? je * smooth_max(ci - cp_p, zero(ci)) / denom_j : zero(T)
+        ap[p, iv] = T(3.0) * tpu_z[p, iv]
     else
         ac[p, iv] = vcmax_z[p, iv]
-        aj[p, iv] = qe_p * par_z * 4.6
+        aj[p, iv] = qe_p * par_z * T(4.6)
         ap[p, iv] = kp_z[p, iv] * smooth_max(ci, zero(ci)) / forc_pbot_c
     end
 
@@ -631,23 +636,23 @@ function _ci_func_core!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
     ag[p, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
 
     an[p, iv] = ag[p, iv] - lmr_z
-    if an[p, iv] < 0.0
-        return (0.0, gs_mol)
+    if an[p, iv] < zero(T)
+        return (zero(T), gs_mol)
     end
 
-    cs = cair - 1.4 / gb_mol * an[p, iv] * forc_pbot_c
-    cs = smooth_max(cs, MAX_CS)
+    cs = cair - T(1.4) / gb_mol * an[p, iv] * forc_pbot_c
+    cs = smooth_max(cs, T(MAX_CS))
 
     if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
-        term = 1.6 * an[p, iv] / (cs / forc_pbot_c * 1.0e06)
-        aquad = 1.0
-        bquad = -(2.0 * (medlynintercept_val * 1.0e-06 + term) +
-                  (medlynslope_val * term)^2 / (gb_mol * 1.0e-06 * rh_can))
-        cquad = medlynintercept_val^2 * 1.0e-12 +
-                (2.0 * medlynintercept_val * 1.0e-06 + term *
-                 (1.0 - medlynslope_val^2 / rh_can)) * term
+        term = T(1.6) * an[p, iv] / (cs / forc_pbot_c * T(1.0e06))
+        aquad = one(T)
+        bquad = -(T(2.0) * (medlynintercept_val * T(1.0e-06) + term) +
+                  (medlynslope_val * term)^2 / (gb_mol * T(1.0e-06) * rh_can))
+        cquad = medlynintercept_val^2 * T(1.0e-12) +
+                (T(2.0) * medlynintercept_val * T(1.0e-06) + term *
+                 (one(T) - medlynslope_val^2 / rh_can)) * term
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        gs_mol = smooth_max(smooth_max(r1, r2) * 1.0e06, 1.0)
+        gs_mol = smooth_max(smooth_max(r1, r2) * T(1.0e06), one(T))
     elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
         aquad = cs
         bquad = cs * (gb_mol - bbb_p) - mbb_p * an[p, iv] * forc_pbot_c
@@ -656,7 +661,7 @@ function _ci_func_core!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
         gs_mol = smooth_max(smooth_max(r1, r2), bbb_p)
     end
 
-    fval = ci - cair + an[p, iv] * forc_pbot_c * (1.4 * gs_mol + 1.6 * gb_mol) / (gb_mol * gs_mol)
+    fval = ci - cair + an[p, iv] * forc_pbot_c * (T(1.4) * gs_mol + T(1.6) * gb_mol) / (gb_mol * gs_mol)
 
     return (fval, gs_mol)
 end
@@ -695,8 +700,9 @@ function _hybrid_solver_core!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
                         c3psn_val::Real, medlynslope_val::Real,
                         medlynintercept_val::Real, mbbopt_val::Real,
                         theta_cj_val::Real, theta_ip_val::Real)
-    eps_val = 1.0e-2
-    eps1 = 1.0e-4
+    T = typeof(x0)
+    eps_val = T(1.0e-2)
+    eps1 = T(1.0e-4)
     itmax = 40
 
     f0, gs_mol = _ci_func_core!(x0, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
@@ -704,20 +710,20 @@ function _hybrid_solver_core!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
                            c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
                            theta_cj_val, theta_ip_val)
 
-    if f0 == 0.0
+    if f0 == zero(T)
         return (x0, gs_mol, 0)
     end
 
     minx = x0
     minf = abs(f0)
-    x1 = x0 * 0.99
+    x1 = x0 * T(0.99)
 
     f1, gs_mol = _ci_func_core!(x1, p, iv, forc_pbot_c, gb_mol, je, cair, oair,
                            lmr_z, par_z, rh_can, ps,
                            c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
                            theta_cj_val, theta_ip_val)
 
-    if f1 == 0.0
+    if f1 == zero(T)
         return (x1, gs_mol, 0)
     end
     if abs(f1) < minf
@@ -728,7 +734,7 @@ function _hybrid_solver_core!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
     iter = 0
     while true
         iter += 1
-        if (f1 - f0) == 0.0
+        if (f1 - f0) == zero(T)
             break
         end
         dx = -f1 * (x1 - x0) / (f1 - f0)
@@ -756,7 +762,7 @@ function _hybrid_solver_core!(x0::Real, p::Int, iv::Int, forc_pbot_c::Real,
             break
         end
 
-        if f1 * f0 < 0.0
+        if f1 * f0 < zero(T)
             x_brent = _brent_solver_core!(x0, x1, f0, f1, tol, p, iv, forc_pbot_c,
                                      gb_mol, je, cair, oair, lmr_z, par_z,
                                      rh_can, ps,
@@ -816,8 +822,9 @@ function _brent_solver_core!(x1::Real, x2::Real, f1::Real, f2::Real,
                        c3psn_val::Real, medlynslope_val::Real,
                        medlynintercept_val::Real, mbbopt_val::Real,
                        theta_cj_val::Real, theta_ip_val::Real)
+    T = typeof(x1)
     itmax = 20
-    eps_val = 1.0e-2
+    eps_val = T(1.0e-2)
 
     a = x1
     b = x2
@@ -830,7 +837,7 @@ function _brent_solver_core!(x1::Real, x2::Real, f1::Real, f2::Real,
     e = d
 
     for iter in 1:itmax
-        if (fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0)
+        if (fb > zero(T) && fc > zero(T)) || (fb < zero(T) && fc < zero(T))
             c = a
             fc = fa
             d = b - a
@@ -844,29 +851,29 @@ function _brent_solver_core!(x1::Real, x2::Real, f1::Real, f2::Real,
             fb = fc
             fc = fa
         end
-        tol1 = 2.0 * eps_val * abs(b) + 0.5 * tol
-        xm = 0.5 * (c - b)
+        tol1 = T(2.0) * eps_val * abs(b) + T(0.5) * tol
+        xm = T(0.5) * (c - b)
 
-        if abs(xm) <= tol1 || fb == 0.0
+        if abs(xm) <= tol1 || fb == zero(T)
             return b
         end
 
         if abs(e) >= tol1 && abs(fa) > abs(fb)
             s = fb / fa
             if a == c
-                p_val = 2.0 * xm * s
-                q_val = 1.0 - s
+                p_val = T(2.0) * xm * s
+                q_val = one(T) - s
             else
                 q_val = fa / fc
                 r_val = fb / fc
-                p_val = s * (2.0 * xm * q_val * (q_val - r_val) - (b - a) * (r_val - 1.0))
-                q_val = (q_val - 1.0) * (r_val - 1.0) * (s - 1.0)
+                p_val = s * (T(2.0) * xm * q_val * (q_val - r_val) - (b - a) * (r_val - one(T)))
+                q_val = (q_val - one(T)) * (r_val - one(T)) * (s - one(T))
             end
-            if p_val > 0.0
+            if p_val > zero(T)
                 q_val = -q_val
             end
             p_val = abs(p_val)
-            if 2.0 * p_val < min(3.0 * xm * q_val - abs(tol1 * q_val), abs(e * q_val))
+            if T(2.0) * p_val < min(T(3.0) * xm * q_val - abs(tol1 * q_val), abs(e * q_val))
                 e = d
                 d = p_val / q_val
             else
@@ -890,7 +897,7 @@ function _brent_solver_core!(x1::Real, x2::Real, f1::Real, f2::Real,
                           c3psn_val, medlynslope_val, medlynintercept_val, mbbopt_val,
                           theta_cj_val, theta_ip_val)
 
-        if fb == 0.0
+        if fb == zero(T)
             return b
         end
     end
@@ -953,32 +960,33 @@ end
     p = @index(Global)
     @inbounds if mask_patch[p]
         ivt_p = ivt[p]
+        T = eltype(forc_pbot)
 
         # Medlyn slope: use override if set, else PFT default
         medlynslope_p = isnan(medlyn_slope_override) ? medlynslope_pft[ivt_p] : medlyn_slope_override
 
-        cf = forc_pbot[p] / (RGAS_ * tgcm[p]) * 1.0e06
-        gb = 1.0 / rb[p]
+        cf = forc_pbot[p] / (RGAS_ * tgcm[p]) * T(1.0e06)
+        gb = one(T) / rb[p]
         gb_mol[p] = gb * cf
 
         for iv in 1:nrad[p]
-            if par_z_in[p, iv] <= 0.0  # night time
-                ac[p, iv] = 0.0
-                aj[p, iv] = 0.0
-                ap[p, iv] = 0.0
-                ag[p, iv] = 0.0
+            if par_z_in[p, iv] <= zero(T)  # night time
+                ac[p, iv] = zero(T)
+                aj[p, iv] = zero(T)
+                ap[p, iv] = zero(T)
+                ag[p, iv] = zero(T)
                 an[p, iv] = ag[p, iv] - lmr_z[p, iv]
-                psn_z[p, iv] = 0.0
-                psn_wc_z[p, iv] = 0.0
-                psn_wj_z[p, iv] = 0.0
-                psn_wp_z[p, iv] = 0.0
+                psn_z[p, iv] = zero(T)
+                psn_wc_z[p, iv] = zero(T)
+                psn_wj_z[p, iv] = zero(T)
+                psn_wp_z[p, iv] = zero(T)
                 if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
-                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / bbb[p] * cf)
+                    rs_z[p, iv] = smooth_min(rsmax0, one(T) / bbb[p] * cf)
                 elseif stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011_
-                    rs_z[p, iv] = smooth_min(rsmax0, 1.0 / medlynintercept_pft[ivt_p] * cf)
+                    rs_z[p, iv] = smooth_min(rsmax0, one(T) / medlynintercept_pft[ivt_p] * cf)
                 end
-                ci_z[p, iv] = 0.0
-                rh_leaf[p] = 0.0
+                ci_z[p, iv] = zero(T)
+                rh_leaf[p] = zero(T)
                 gs_mol[p, iv] = stomatalcond_mtd == STOMATALCOND_MTD_BB1987_ ? bbb[p] : medlynintercept_pft[ivt_p]
             else  # day time
                 ceair = smooth_min(eair[p], esat_tv[p])
@@ -990,7 +998,7 @@ end
                 end
 
                 # Electron transport rate
-                qabs = 0.5 * (1.0 - fnps) * par_z_in[p, iv] * 4.6
+                qabs = T(0.5) * (one(T) - fnps) * par_z_in[p, iv] * T(4.6)
                 aquad = theta_psii
                 bquad = -(qabs + jmax_z_local[p, iv])
                 cquad = qabs * jmax_z_local[p, iv]
@@ -999,9 +1007,9 @@ end
 
                 # Initial guess for ci
                 if c3flag[p]
-                    ci_z[p, iv] = 0.7 * cair[p]
+                    ci_z[p, iv] = T(0.7) * cair[p]
                 else
-                    ci_z[p, iv] = 0.4 * cair[p]
+                    ci_z[p, iv] = T(0.4) * cair[p]
                 end
 
                 # Solve for ci and gs (positional GPU-callable core).
@@ -1010,13 +1018,13 @@ end
                 ci_sol, gs_mol_val, _ = _hybrid_solver_core!(ci_z[p, iv], p, iv,
                     forc_pbot[p], gb_mol[p], je, cair[p], oair[p],
                     lmr_z[p, iv], par_z_in[p, iv], rh_can, ps,
-                    1.0, medlynslope_p, medlynintercept_pft[ivt_p], mbbopt_pft[ivt_p],
+                    one(T), medlynslope_p, medlynintercept_pft[ivt_p], mbbopt_pft[ivt_p],
                     theta_cj_1, theta_ip_val)
 
                 gs_mol[p, iv] = gs_mol_val
 
                 # Check for an < 0
-                if an[p, iv] < 0.0
+                if an[p, iv] < zero(T)
                     if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
                         gs_mol[p, iv] = bbb[p]
                     else
@@ -1032,24 +1040,24 @@ end
                 end
 
                 # Final ci
-                cs = cair[p] - 1.4 / gb_mol[p] * an[p, iv] * forc_pbot[p]
+                cs = cair[p] - T(1.4) / gb_mol[p] * an[p, iv] * forc_pbot[p]
                 cs = smooth_max(cs, MAX_CS_)
                 ci_z[p, iv] = cair[p] - an[p, iv] * forc_pbot[p] *
-                    (1.4 * gs_mol[p, iv] + 1.6 * gb_mol[p]) / (gb_mol[p] * gs_mol[p, iv])
-                ci_z[p, iv] = smooth_max(ci_z[p, iv], 1.0e-06)
+                    (T(1.4) * gs_mol[p, iv] + T(1.6) * gb_mol[p]) / (gb_mol[p] * gs_mol[p, iv])
+                ci_z[p, iv] = smooth_max(ci_z[p, iv], T(1.0e-06))
 
                 # Convert to resistance (gs must be positive)
-                gs_val = max(gs_mol[p, iv], 1.0) / cf
-                rs_z[p, iv] = smooth_min(1.0 / gs_val, rsmax0)
+                gs_val = max(gs_mol[p, iv], one(T)) / cf
+                rs_z[p, iv] = smooth_min(one(T) / gs_val, rsmax0)
                 rs_z[p, iv] = rs_z[p, iv] / o3coefg[p]
 
                 # Photosynthesis
                 psn_z[p, iv] = ag[p, iv]
                 psn_z[p, iv] = psn_z[p, iv] * o3coefv[p]
 
-                psn_wc_z[p, iv] = 0.0
-                psn_wj_z[p, iv] = 0.0
-                psn_wp_z[p, iv] = 0.0
+                psn_wc_z[p, iv] = zero(T)
+                psn_wj_z[p, iv] = zero(T)
+                psn_wp_z[p, iv] = zero(T)
 
                 if ac[p, iv] <= aj[p, iv] && ac[p, iv] <= ap[p, iv]
                     psn_wc_z[p, iv] = psn_z[p, iv]
@@ -1089,12 +1097,15 @@ function photosynth_ci_solve!(ps::PhotosynthesisData,
         bounds_patch::UnitRange{Int}, phase::String,
         stomatalcond_mtd::Int, rsmax0,
         overrides::CalibrationOverrides)
-    # Resolve GPU-hostile values to host scalars (compute ONCE before launch).
-    fnps = params_inst.fnps
-    theta_psii = params_inst.theta_psii
-    theta_cj_1 = params_inst.theta_cj[1]
-    theta_ip_val = params_inst.theta_ip
-    medlyn_slope_override = overrides.medlyn_slope
+    # Resolve GPU-hostile values to host scalars (compute ONCE before launch),
+    # eltype-converted to the working precision so the kernel is Float32-clean on
+    # Metal (byte-identical on the Float64 CPU path).
+    T = eltype(forc_pbot)
+    fnps = T(params_inst.fnps)
+    theta_psii = T(params_inst.theta_psii)
+    theta_cj_1 = T(params_inst.theta_cj[1])
+    theta_ip_val = T(params_inst.theta_ip)
+    medlyn_slope_override = T(overrides.medlyn_slope)
     is_sun = (phase == "sun")
 
     _launch!(_photosynth_ci_kernel!,
@@ -1111,7 +1122,7 @@ function photosynth_ci_solve!(ps::PhotosynthesisData,
         # scalars
         fnps, theta_psii, theta_cj_1, theta_ip_val, medlyn_slope_override,
         is_sun, stomatalcond_mtd,
-        RGAS, MAX_CS, MEDLYN_RH_CAN_MAX, MEDLYN_RH_CAN_FACT, rsmax0,
+        T(RGAS), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT), T(rsmax0),
         STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
         ndrange = length(bounds_patch))
     return ps
