@@ -29,9 +29,19 @@ end
 # scalars before each launch). theta_cj/theta_ip are NaN after init → set real
 # values (mirrors test_photosynthesis component tests).
 function setparams!()
-    CLM.photo_params_init!(CLM.params_inst)
-    CLM.params_inst.theta_cj = fill(0.98, CLM.MXPFT + 1)
-    CLM.params_inst.theta_ip = 0.95
+    CLM.photo_params_init!(CLM.params_inst)   # allocates array params (NaN)
+    p = CLM.params_inst
+    # photo_params_init! leaves the SCALAR params NaN (read from a param file in
+    # production). Set them to the CLM defaults (from read_params.jl _read_scalar
+    # defaults) so the full photosynthesis! produces finite values.
+    p.theta_cj = fill(0.98, CLM.MXPFT + 1)
+    p.theta_ip = 0.95; p.act25 = 72.0; p.fnr = 7.16; p.cp25_yr2000 = 42.75e-6
+    p.kc25_coef = 404.9e-6; p.ko25_coef = 278.4e-3; p.fnps = 0.15; p.theta_psii = 0.7
+    p.vcmaxha = 65330.0; p.jmaxha = 43540.0; p.tpuha = 53100.0; p.lmrha = 46390.0
+    p.kcha = 79430.0; p.koha = 36380.0; p.cpha = 37830.0
+    p.vcmaxhd = 149250.0; p.jmaxhd = 152040.0; p.tpuhd = 150650.0; p.lmrhd = 150650.0
+    p.lmrse = 490.0; p.tpu25ratio = 0.167; p.kp25ratio = 20160.0
+    p.vcmaxse_sf = 1.0; p.jmaxse_sf = 1.0; p.tpuse_sf = 1.0; p.jmax25top_sf = 1.0
 end
 
 function build(::Type{FT}) where {FT}
