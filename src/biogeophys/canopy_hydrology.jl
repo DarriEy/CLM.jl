@@ -82,16 +82,16 @@ canhyd_top_of_canopy!(qflx_liq_above_canopy, forc_snow_patch, mask_nolakep, colu
 
 function sum_flux_top_of_canopy_inputs!(
         patch::PatchData,
-        mask_nolakep::BitVector,
+        mask_nolakep::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         # Inputs (column-level)
-        forc_rain::Vector{<:Real},
-        forc_snow_col::Vector{<:Real},
+        forc_rain::AbstractVector{<:Real},
+        forc_snow_col::AbstractVector{<:Real},
         # Inputs (patch-level)
-        qflx_irrig_sprinkler::Vector{<:Real},
+        qflx_irrig_sprinkler::AbstractVector{<:Real},
         # Outputs (patch-level)
-        qflx_liq_above_canopy::Vector{<:Real},
-        forc_snow_patch::Vector{<:Real})
+        qflx_liq_above_canopy::AbstractVector{<:Real},
+        forc_snow_patch::AbstractVector{<:Real})
 
     canhyd_top_of_canopy!(qflx_liq_above_canopy, forc_snow_patch, mask_nolakep,
         patch.column, forc_rain, forc_snow_col, qflx_irrig_sprinkler,
@@ -117,23 +117,25 @@ end
         p = pstart + i - 1
         if mask_nolakep[p]
             c = column[p]
+            T = eltype(forc_snow)
+            lai = elai[p] + esai[p]
 
-            chk = (frac_veg_nosno[p] == 1 && (forc_snow[p] + qflx_liq_above_canopy[p]) > 0.0)
+            chk = (frac_veg_nosno[p] == 1 && (forc_snow[p] + qflx_liq_above_canopy[p]) > zero(T))
             check_point[p] = chk
 
             if chk
                 # Coefficient of interception
                 if use_clm5_fpi
-                    fpiliq = interception_fraction * tanh(elai[p] + esai[p])
+                    fpiliq = oftype(lai, interception_fraction) * tanh(lai)
                 else
-                    fpiliq = 0.25 * (1.0 - exp(-0.5 * (elai[p] + esai[p])))
+                    fpiliq = oftype(lai, 0.25) * (one(lai) - exp(oftype(lai, -0.5) * lai))
                 end
 
-                fpisnow = (1.0 - exp(-0.5 * (elai[p] + esai[p])))  # max interception of 1
+                fpisnow = (one(lai) - exp(oftype(lai, -0.5) * lai))  # max interception of 1
 
                 # Direct throughfall
-                qflx_through_snow[p] = forc_snow[p] * (1.0 - fpisnow)
-                qflx_through_liq[p]  = qflx_liq_above_canopy[p] * (1.0 - fpiliq)
+                qflx_through_snow[p] = forc_snow[p] * (one(lai) - fpisnow)
+                qflx_through_liq[p]  = qflx_liq_above_canopy[p] * (one(lai) - fpiliq)
 
                 # Canopy interception
                 qflx_intercepted_snow[p] = forc_snow[p] * fpisnow
@@ -141,11 +143,11 @@ end
             else
                 # Note that special landunits will be handled here, in addition to soil points
                 # with frac_veg_nosno == 0.
-                qflx_intercepted_snow[p] = 0.0
-                qflx_intercepted_liq[p]  = 0.0
+                qflx_intercepted_snow[p] = zero(T)
+                qflx_intercepted_liq[p]  = zero(T)
                 if itype[c] == icol_sunwall || itype[c] == icol_shadewall
-                    qflx_through_snow[p] = 0.0
-                    qflx_through_liq[p]  = 0.0
+                    qflx_through_snow[p] = zero(T)
+                    qflx_through_liq[p]  = zero(T)
                 else
                     qflx_through_snow[p] = forc_snow[p]
                     qflx_through_liq[p]  = qflx_liq_above_canopy[p]
@@ -162,25 +164,26 @@ canhyd_intercept_throughfall!(qflx_through_snow, qflx_through_liq, qflx_intercep
     _launch!(_canhyd_intercept_throughfall_kernel!, qflx_through_snow, qflx_through_liq,
         qflx_intercepted_snow, qflx_intercepted_liq, check_point, mask_nolakep, column,
         itype, frac_veg_nosno, elai, esai, forc_snow, qflx_liq_above_canopy, use_clm5_fpi,
-        interception_fraction, icol_sunwall, icol_shadewall, pstart; ndrange=np)
+        convert(eltype(forc_snow), interception_fraction),
+        icol_sunwall, icol_shadewall, pstart; ndrange=np)
 
 function bulk_flux_canopy_interception_and_throughfall!(
         patch::PatchData,
         col::ColumnData,
-        mask_nolakep::BitVector,
+        mask_nolakep::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         # Inputs
-        frac_veg_nosno::Vector{Int},
-        elai::Vector{<:Real},
-        esai::Vector{<:Real},
-        forc_snow::Vector{<:Real},
-        qflx_liq_above_canopy::Vector{<:Real},
+        frac_veg_nosno::AbstractVector{<:Integer},
+        elai::AbstractVector{<:Real},
+        esai::AbstractVector{<:Real},
+        forc_snow::AbstractVector{<:Real},
+        qflx_liq_above_canopy::AbstractVector{<:Real},
         # Outputs
-        qflx_through_snow::Vector{<:Real},
-        qflx_through_liq::Vector{<:Real},
-        qflx_intercepted_snow::Vector{<:Real},
-        qflx_intercepted_liq::Vector{<:Real},
-        check_point_for_interception_and_excess::Vector{Bool})
+        qflx_through_snow::AbstractVector{<:Real},
+        qflx_through_liq::AbstractVector{<:Real},
+        qflx_intercepted_snow::AbstractVector{<:Real},
+        qflx_intercepted_liq::AbstractVector{<:Real},
+        check_point_for_interception_and_excess::AbstractVector{Bool})
 
     canhyd_intercept_throughfall!(qflx_through_snow, qflx_through_liq, qflx_intercepted_snow,
         qflx_intercepted_liq, check_point_for_interception_and_excess,
@@ -203,23 +206,23 @@ end
 # -----------------------------------------------------------------------
 
 function tracer_flux_canopy_interception_and_throughfall!(
-        mask_nolakep::BitVector,
+        mask_nolakep::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         # Bulk inputs
-        bulk_forc_snow::Vector{<:Real},
-        bulk_qflx_liq_above_canopy::Vector{<:Real},
-        bulk_qflx_through_snow::Vector{<:Real},
-        bulk_qflx_intercepted_snow::Vector{<:Real},
-        bulk_qflx_through_liq::Vector{<:Real},
-        bulk_qflx_intercepted_liq::Vector{<:Real},
+        bulk_forc_snow::AbstractVector{<:Real},
+        bulk_qflx_liq_above_canopy::AbstractVector{<:Real},
+        bulk_qflx_through_snow::AbstractVector{<:Real},
+        bulk_qflx_intercepted_snow::AbstractVector{<:Real},
+        bulk_qflx_through_liq::AbstractVector{<:Real},
+        bulk_qflx_intercepted_liq::AbstractVector{<:Real},
         # Tracer inputs
-        trac_forc_snow::Vector{<:Real},
-        trac_qflx_liq_above_canopy::Vector{<:Real},
+        trac_forc_snow::AbstractVector{<:Real},
+        trac_qflx_liq_above_canopy::AbstractVector{<:Real},
         # Tracer outputs
-        trac_qflx_through_snow::Vector{<:Real},
-        trac_qflx_intercepted_snow::Vector{<:Real},
-        trac_qflx_through_liq::Vector{<:Real},
-        trac_qflx_intercepted_liq::Vector{<:Real})
+        trac_qflx_through_snow::AbstractVector{<:Real},
+        trac_qflx_intercepted_snow::AbstractVector{<:Real},
+        trac_qflx_through_liq::AbstractVector{<:Real},
+        trac_qflx_intercepted_liq::AbstractVector{<:Real})
 
     canhyd_tracer_intercept_throughfall!(
         trac_qflx_through_snow, trac_qflx_intercepted_snow,
@@ -289,15 +292,15 @@ canhyd_tracer_intercept_throughfall!(
 # -----------------------------------------------------------------------
 
 function update_state_add_interception_to_canopy!(
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         dtime::Real,
         # Inputs
-        qflx_intercepted_snow::Vector{<:Real},
-        qflx_intercepted_liq::Vector{<:Real},
+        qflx_intercepted_snow::AbstractVector{<:Real},
+        qflx_intercepted_liq::AbstractVector{<:Real},
         # In/Out
-        snocan::Vector{<:Real},
-        liqcan::Vector{<:Real})
+        snocan::AbstractVector{<:Real},
+        liqcan::AbstractVector{<:Real})
 
     canhyd_add_interception!(snocan, liqcan, mask_soilp, dtime,
         qflx_intercepted_snow, qflx_intercepted_liq,
@@ -313,15 +316,17 @@ end
     @inbounds begin
         p = pstart + i - 1
         if mask_soilp[p]
-            snocan[p] = max(0.0, snocan[p] + dtime * qflx_intercepted_snow[p])
-            liqcan[p] = max(0.0, liqcan[p] + dtime * qflx_intercepted_liq[p])
+            dt = oftype(snocan[p], dtime)
+            snocan[p] = max(zero(snocan[p]), snocan[p] + dt * qflx_intercepted_snow[p])
+            liqcan[p] = max(zero(liqcan[p]), liqcan[p] + dt * qflx_intercepted_liq[p])
         end
     end
 end
 
 canhyd_add_interception!(snocan, liqcan, mask_soilp, dtime,
         qflx_intercepted_snow, qflx_intercepted_liq, pstart, np) =
-    _launch!(_canhyd_add_interception_kernel!, snocan, liqcan, mask_soilp, dtime,
+    _launch!(_canhyd_add_interception_kernel!, snocan, liqcan, mask_soilp,
+        convert(eltype(snocan), dtime),
         qflx_intercepted_snow, qflx_intercepted_liq, pstart; ndrange=np)
 
 # -----------------------------------------------------------------------
@@ -331,18 +336,18 @@ canhyd_add_interception!(snocan, liqcan, mask_soilp, dtime,
 # -----------------------------------------------------------------------
 
 function bulk_flux_canopy_excess!(
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         dtime::Real,
         # Inputs
-        elai::Vector{<:Real},
-        esai::Vector{<:Real},
-        snocan::Vector{<:Real},
-        liqcan::Vector{<:Real},
-        check_point_for_interception_and_excess::Vector{Bool},
+        elai::AbstractVector{<:Real},
+        esai::AbstractVector{<:Real},
+        snocan::AbstractVector{<:Real},
+        liqcan::AbstractVector{<:Real},
+        check_point_for_interception_and_excess::AbstractVector{Bool},
         # Outputs
-        qflx_snocanfall::Vector{<:Real},
-        qflx_liqcanfall::Vector{<:Real})
+        qflx_snocanfall::AbstractVector{<:Real},
+        qflx_liqcanfall::AbstractVector{<:Real})
 
     canhyd_canopy_excess!(qflx_snocanfall, qflx_liqcanfall, mask_soilp, dtime,
         elai, esai, snocan, liqcan, check_point_for_interception_and_excess,
@@ -362,14 +367,17 @@ end
     @inbounds begin
         p = pstart + i - 1
         if mask_soilp[p]
-            qflx_liqcanfall[p] = 0.0
-            qflx_snocanfall[p] = 0.0
+            T = eltype(qflx_liqcanfall)
+            qflx_liqcanfall[p] = zero(T)
+            qflx_snocanfall[p] = zero(T)
 
             if check_point[p]
-                liqcanmx = liq_canopy_storage_scalar * (elai[p] + esai[p])
-                qflx_liqcanfall[p] = max((liqcan[p] - liqcanmx) / dtime, 0.0)
-                snocanmx = snow_canopy_storage_scalar * (elai[p] + esai[p])
-                qflx_snocanfall[p] = max((snocan[p] - snocanmx) / dtime, 0.0)
+                lai = elai[p] + esai[p]
+                dt = oftype(lai, dtime)
+                liqcanmx = oftype(lai, liq_canopy_storage_scalar) * lai
+                qflx_liqcanfall[p] = max((liqcan[p] - liqcanmx) / dt, zero(lai))
+                snocanmx = oftype(lai, snow_canopy_storage_scalar) * lai
+                qflx_snocanfall[p] = max((snocan[p] - snocanmx) / dt, zero(lai))
             end
         end
     end
@@ -379,8 +387,9 @@ canhyd_canopy_excess!(qflx_snocanfall, qflx_liqcanfall, mask_soilp, dtime,
         elai, esai, snocan, liqcan, check_point,
         liq_canopy_storage_scalar, snow_canopy_storage_scalar, pstart, np) =
     _launch!(_canhyd_canopy_excess_kernel!, qflx_snocanfall, qflx_liqcanfall, mask_soilp,
-        dtime, elai, esai, snocan, liqcan, check_point,
-        liq_canopy_storage_scalar, snow_canopy_storage_scalar, pstart; ndrange=np)
+        convert(eltype(qflx_snocanfall), dtime), elai, esai, snocan, liqcan, check_point,
+        convert(eltype(qflx_snocanfall), liq_canopy_storage_scalar),
+        convert(eltype(qflx_snocanfall), snow_canopy_storage_scalar), pstart; ndrange=np)
 
 # -----------------------------------------------------------------------
 # TracerFlux_CanopyExcess
@@ -389,19 +398,19 @@ canhyd_canopy_excess!(qflx_snocanfall, qflx_liqcanfall, mask_soilp, dtime,
 # -----------------------------------------------------------------------
 
 function tracer_flux_canopy_excess!(
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         # Bulk inputs
-        bulk_liqcan::Vector{<:Real},
-        bulk_snocan::Vector{<:Real},
-        bulk_qflx_liqcanfall::Vector{<:Real},
-        bulk_qflx_snocanfall::Vector{<:Real},
+        bulk_liqcan::AbstractVector{<:Real},
+        bulk_snocan::AbstractVector{<:Real},
+        bulk_qflx_liqcanfall::AbstractVector{<:Real},
+        bulk_qflx_snocanfall::AbstractVector{<:Real},
         # Tracer inputs
-        trac_liqcan::Vector{<:Real},
-        trac_snocan::Vector{<:Real},
+        trac_liqcan::AbstractVector{<:Real},
+        trac_snocan::AbstractVector{<:Real},
         # Tracer outputs
-        trac_qflx_liqcanfall::Vector{<:Real},
-        trac_qflx_snocanfall::Vector{<:Real})
+        trac_qflx_liqcanfall::AbstractVector{<:Real},
+        trac_qflx_snocanfall::AbstractVector{<:Real})
 
     canhyd_tracer_canopy_excess!(trac_qflx_liqcanfall, trac_qflx_snocanfall,
         mask_soilp, bulk_liqcan, bulk_snocan, bulk_qflx_liqcanfall, bulk_qflx_snocanfall,
@@ -449,15 +458,15 @@ canhyd_tracer_canopy_excess!(trac_qflx_liqcanfall, trac_qflx_snocanfall,
 # -----------------------------------------------------------------------
 
 function update_state_remove_canfall_from_canopy!(
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         dtime::Real,
         # Inputs
-        qflx_liqcanfall::Vector{<:Real},
-        qflx_snocanfall::Vector{<:Real},
+        qflx_liqcanfall::AbstractVector{<:Real},
+        qflx_snocanfall::AbstractVector{<:Real},
         # In/Out
-        liqcan::Vector{<:Real},
-        snocan::Vector{<:Real})
+        liqcan::AbstractVector{<:Real},
+        snocan::AbstractVector{<:Real})
 
     canhyd_remove_canfall!(liqcan, snocan, mask_soilp, dtime,
         qflx_liqcanfall, qflx_snocanfall, first(bounds_p), length(bounds_p))
@@ -471,15 +480,17 @@ end
     @inbounds begin
         p = pstart + i - 1
         if mask_soilp[p]
-            liqcan[p] = liqcan[p] - dtime * qflx_liqcanfall[p]
-            snocan[p] = snocan[p] - dtime * qflx_snocanfall[p]
+            dt = oftype(liqcan[p], dtime)
+            liqcan[p] = liqcan[p] - dt * qflx_liqcanfall[p]
+            snocan[p] = snocan[p] - dt * qflx_snocanfall[p]
         end
     end
 end
 
 canhyd_remove_canfall!(liqcan, snocan, mask_soilp, dtime,
         qflx_liqcanfall, qflx_snocanfall, pstart, np) =
-    _launch!(_canhyd_remove_canfall_kernel!, liqcan, snocan, mask_soilp, dtime,
+    _launch!(_canhyd_remove_canfall_kernel!, liqcan, snocan, mask_soilp,
+        convert(eltype(liqcan), dtime),
         qflx_liqcanfall, qflx_snocanfall, pstart; ndrange=np)
 
 # -----------------------------------------------------------------------
@@ -490,18 +501,18 @@ canhyd_remove_canfall!(liqcan, snocan, mask_soilp, dtime,
 
 function bulk_flux_snow_unloading!(
         patch::PatchData,
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         dtime::Real,
         # Inputs
-        frac_veg_nosno::Vector{Int},
-        forc_t::Vector{<:Real},        # column-level
-        forc_wind::Vector{<:Real},     # gridcell-level
-        snocan::Vector{<:Real},
+        frac_veg_nosno::AbstractVector{<:Integer},
+        forc_t::AbstractVector{<:Real},        # column-level
+        forc_wind::AbstractVector{<:Real},     # gridcell-level
+        snocan::AbstractVector{<:Real},
         # Outputs
-        qflx_snotempunload::Vector{<:Real},
-        qflx_snowindunload::Vector{<:Real},
-        qflx_snow_unload::Vector{<:Real})
+        qflx_snotempunload::AbstractVector{<:Real},
+        qflx_snowindunload::AbstractVector{<:Real},
+        qflx_snow_unload::AbstractVector{<:Real})
 
     canhyd_snow_unloading!(qflx_snotempunload, qflx_snowindunload, qflx_snow_unload,
         mask_soilp, patch.column, patch.gridcell, dtime, frac_veg_nosno,
@@ -522,20 +533,22 @@ end
     @inbounds begin
         p = pstart + i - 1
         if mask_soilp[p]
-            if frac_veg_nosno[p] == 1 && snocan[p] > 0.0
+            T = eltype(snocan)
+            if frac_veg_nosno[p] == 1 && snocan[p] > zero(T)
                 c = column[p]
                 g = gridcell[p]
+                dt = oftype(snocan[p], dtime)
 
-                qflx_snotempunload[p] = max(0.0, snocan[p] * (forc_t[c] - 270.15) /
-                                            snowcan_unload_temp_fact)
-                qflx_snowindunload[p] = snowcan_unload_wind_fact *
-                                        snocan[p] * forc_wind[g] / 1.56e5
+                qflx_snotempunload[p] = max(zero(T), snocan[p] * (forc_t[c] - oftype(snocan[p], 270.15)) /
+                                            oftype(snocan[p], snowcan_unload_temp_fact))
+                qflx_snowindunload[p] = oftype(snocan[p], snowcan_unload_wind_fact) *
+                                        snocan[p] * forc_wind[g] / oftype(snocan[p], 1.56e5)
                 qflx_snow_unload[p] = min(qflx_snotempunload[p] + qflx_snowindunload[p],
-                                          snocan[p] / dtime)
+                                          snocan[p] / dt)
             else
-                qflx_snotempunload[p] = 0.0
-                qflx_snowindunload[p] = 0.0
-                qflx_snow_unload[p] = 0.0
+                qflx_snotempunload[p] = zero(T)
+                qflx_snowindunload[p] = zero(T)
+                qflx_snow_unload[p] = zero(T)
             end
         end
     end
@@ -545,8 +558,11 @@ canhyd_snow_unloading!(qflx_snotempunload, qflx_snowindunload, qflx_snow_unload,
         mask_soilp, column, gridcell, dtime, frac_veg_nosno, forc_t, forc_wind, snocan,
         snowcan_unload_temp_fact, snowcan_unload_wind_fact, pstart, np) =
     _launch!(_canhyd_snow_unloading_kernel!, qflx_snotempunload, qflx_snowindunload,
-        qflx_snow_unload, mask_soilp, column, gridcell, dtime, frac_veg_nosno,
-        forc_t, forc_wind, snocan, snowcan_unload_temp_fact, snowcan_unload_wind_fact,
+        qflx_snow_unload, mask_soilp, column, gridcell,
+        convert(eltype(snocan), dtime), frac_veg_nosno,
+        forc_t, forc_wind, snocan,
+        convert(eltype(snocan), snowcan_unload_temp_fact),
+        convert(eltype(snocan), snowcan_unload_wind_fact),
         pstart; ndrange=np)
 
 # -----------------------------------------------------------------------
@@ -556,15 +572,15 @@ canhyd_snow_unloading!(qflx_snotempunload, qflx_snowindunload, qflx_snow_unload,
 # -----------------------------------------------------------------------
 
 function tracer_flux_snow_unloading!(
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         # Bulk inputs
-        bulk_snocan::Vector{<:Real},
-        bulk_qflx_snow_unload::Vector{<:Real},
+        bulk_snocan::AbstractVector{<:Real},
+        bulk_qflx_snow_unload::AbstractVector{<:Real},
         # Tracer inputs
-        trac_snocan::Vector{<:Real},
+        trac_snocan::AbstractVector{<:Real},
         # Tracer outputs
-        trac_qflx_snow_unload::Vector{<:Real})
+        trac_qflx_snow_unload::AbstractVector{<:Real})
 
     canhyd_tracer_snow_unloading!(trac_qflx_snow_unload, mask_soilp,
         bulk_snocan, bulk_qflx_snow_unload, trac_snocan,
@@ -601,13 +617,13 @@ canhyd_tracer_snow_unloading!(trac_qflx_snow_unload, mask_soilp,
 # -----------------------------------------------------------------------
 
 function update_state_remove_snow_unloading!(
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         dtime::Real,
         # Inputs
-        qflx_snow_unload::Vector{<:Real},
+        qflx_snow_unload::AbstractVector{<:Real},
         # In/Out
-        snocan::Vector{<:Real})
+        snocan::AbstractVector{<:Real})
 
     canhyd_remove_snow_unloading!(snocan, mask_soilp, dtime, qflx_snow_unload,
         first(bounds_p), length(bounds_p))
@@ -624,18 +640,19 @@ end
             # NOTE(wjs, 2019-05-09) The following check sets snocan to exactly 0 if it would
             # be set to close to 0. The use of exact equality of these floating point values
             # in the conditional is kept for bit-for-bit answers during the refactor.
-            if qflx_snow_unload[p] == snocan[p] / dtime
-                snocan[p] = 0.0
+            dt = oftype(snocan[p], dtime)
+            if qflx_snow_unload[p] == snocan[p] / dt
+                snocan[p] = zero(snocan[p])
             else
-                snocan[p] = snocan[p] - qflx_snow_unload[p] * dtime
+                snocan[p] = snocan[p] - qflx_snow_unload[p] * dt
             end
         end
     end
 end
 
 canhyd_remove_snow_unloading!(snocan, mask_soilp, dtime, qflx_snow_unload, pstart, np) =
-    _launch!(_canhyd_remove_snow_unloading_kernel!, snocan, mask_soilp, dtime,
-        qflx_snow_unload, pstart; ndrange=np)
+    _launch!(_canhyd_remove_snow_unloading_kernel!, snocan, mask_soilp,
+        convert(eltype(snocan), dtime), qflx_snow_unload, pstart; ndrange=np)
 
 # -----------------------------------------------------------------------
 # SumFlux_FluxesOntoGround
@@ -649,46 +666,35 @@ canhyd_remove_snow_unloading!(snocan, mask_soilp, dtime, qflx_snow_unload, pstar
 function sum_flux_fluxes_onto_ground!(
         patch::PatchData,
         col::ColumnData,
-        mask_nolakep::BitVector,
-        mask_nolakec::BitVector,
+        mask_nolakep::AbstractVector{Bool},
+        mask_nolakec::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         bounds_c::UnitRange{Int},
         # Inputs (patch-level)
-        qflx_through_snow::Vector{<:Real},
-        qflx_snocanfall::Vector{<:Real},
-        qflx_snow_unload::Vector{<:Real},
-        qflx_through_liq::Vector{<:Real},
-        qflx_liqcanfall::Vector{<:Real},
-        qflx_irrig_drip::Vector{<:Real},
+        qflx_through_snow::AbstractVector{<:Real},
+        qflx_snocanfall::AbstractVector{<:Real},
+        qflx_snow_unload::AbstractVector{<:Real},
+        qflx_through_liq::AbstractVector{<:Real},
+        qflx_liqcanfall::AbstractVector{<:Real},
+        qflx_irrig_drip::AbstractVector{<:Real},
         # Outputs (column-level)
-        qflx_snow_grnd_col::Vector{<:Real},
-        qflx_liq_grnd_col::Vector{<:Real},
-        qflx_snow_h2osfc::Vector{<:Real})
+        qflx_snow_grnd_col::AbstractVector{<:Real},
+        qflx_liq_grnd_col::AbstractVector{<:Real},
+        qflx_snow_h2osfc::AbstractVector{<:Real})
 
     # Initialize column-level accumulators
     canhyd_init_grnd_col!(qflx_snow_grnd_col, qflx_liq_grnd_col, mask_nolakec,
         first(bounds_c), length(bounds_c))
 
-    # Compute patch-level sums and accumulate to column via p2c
-    # NOTE: kept as a scalar loop — this is a patch-to-column scatter (+=) with a
-    # loop-carried accumulation across patches sharing a column, so it is not a
-    # safe per-element kernel.
-    for p in bounds_p
-        mask_nolakep[p] || continue
-
-        qflx_snow_grnd_patch = qflx_through_snow[p] +
-                               qflx_snocanfall[p] +
-                               qflx_snow_unload[p]
-
-        qflx_liq_grnd_patch = qflx_through_liq[p] +
-                              qflx_liqcanfall[p] +
-                              qflx_irrig_drip[p]
-
-        # Patch-to-column weighted average (inline p2c)
-        c = patch.column[p]
-        qflx_snow_grnd_col[c] += qflx_snow_grnd_patch * patch.wtcol[p]
-        qflx_liq_grnd_col[c]  += qflx_liq_grnd_patch * patch.wtcol[p]
-    end
+    # Compute patch-level sums and accumulate to column via p2c.
+    # This is a patch→column scatter (weighted +=): multiple patches may share a
+    # column, so the per-patch kernel uses _scatter_add! (atomic on GPU, plain +=
+    # on the sequential CPU/Dual backend) to avoid races on the column accumulators.
+    canhyd_fluxes_onto_ground!(qflx_snow_grnd_col, qflx_liq_grnd_col,
+        mask_nolakep, patch.column, patch.wtcol,
+        qflx_through_snow, qflx_snocanfall, qflx_snow_unload,
+        qflx_through_liq, qflx_liqcanfall, qflx_irrig_drip,
+        first(bounds_p), length(bounds_p))
 
     # For now, no snow on surface water
     canhyd_zero_h2osfc!(qflx_snow_h2osfc, mask_nolakec,
@@ -697,14 +703,45 @@ function sum_flux_fluxes_onto_ground!(
     return nothing
 end
 
+# Patch→column weighted scatter of snow/liquid fluxes onto the ground.
+# One thread per patch; multiple patches write the same column, so use _scatter_add!
+# (atomic on a hardware GPU, plain += on the sequential CPU/Dual backend).
+@kernel function _canhyd_fluxes_onto_ground_kernel!(qflx_snow_grnd_col, qflx_liq_grnd_col,
+        @Const(mask_nolakep), @Const(column), @Const(wtcol),
+        @Const(qflx_through_snow), @Const(qflx_snocanfall), @Const(qflx_snow_unload),
+        @Const(qflx_through_liq), @Const(qflx_liqcanfall), @Const(qflx_irrig_drip),
+        @Const(pstart))
+    i = @index(Global)
+    @inbounds begin
+        p = pstart + i - 1
+        if mask_nolakep[p]
+            c = column[p]
+            w = wtcol[p]
+            qflx_snow_grnd_patch = qflx_through_snow[p] + qflx_snocanfall[p] +
+                                   qflx_snow_unload[p]
+            qflx_liq_grnd_patch = qflx_through_liq[p] + qflx_liqcanfall[p] +
+                                  qflx_irrig_drip[p]
+            _scatter_add!(qflx_snow_grnd_col, c, qflx_snow_grnd_patch * w)
+            _scatter_add!(qflx_liq_grnd_col, c, qflx_liq_grnd_patch * w)
+        end
+    end
+end
+
+canhyd_fluxes_onto_ground!(qflx_snow_grnd_col, qflx_liq_grnd_col, mask_nolakep, column,
+        wtcol, qflx_through_snow, qflx_snocanfall, qflx_snow_unload, qflx_through_liq,
+        qflx_liqcanfall, qflx_irrig_drip, pstart, np) =
+    _launch!(_canhyd_fluxes_onto_ground_kernel!, qflx_snow_grnd_col, qflx_liq_grnd_col,
+        mask_nolakep, column, wtcol, qflx_through_snow, qflx_snocanfall, qflx_snow_unload,
+        qflx_through_liq, qflx_liqcanfall, qflx_irrig_drip, pstart; ndrange=np)
+
 @kernel function _canhyd_init_grnd_col_kernel!(qflx_snow_grnd_col, qflx_liq_grnd_col,
         @Const(mask_nolakec), @Const(cstart))
     i = @index(Global)
     @inbounds begin
         c = cstart + i - 1
         if mask_nolakec[c]
-            qflx_snow_grnd_col[c] = 0.0
-            qflx_liq_grnd_col[c] = 0.0
+            qflx_snow_grnd_col[c] = zero(eltype(qflx_snow_grnd_col))
+            qflx_liq_grnd_col[c] = zero(eltype(qflx_liq_grnd_col))
         end
     end
 end
@@ -719,7 +756,7 @@ canhyd_init_grnd_col!(qflx_snow_grnd_col, qflx_liq_grnd_col, mask_nolakec, cstar
     @inbounds begin
         c = cstart + i - 1
         if mask_nolakec[c]
-            qflx_snow_h2osfc[c] = 0.0
+            qflx_snow_h2osfc[c] = zero(eltype(qflx_snow_h2osfc))
         end
     end
 end
@@ -734,18 +771,18 @@ canhyd_zero_h2osfc!(qflx_snow_h2osfc, mask_nolakec, cstart, nc) =
 # -----------------------------------------------------------------------
 
 function bulk_diag_frac_wet!(
-        mask_soilp::BitVector,
+        mask_soilp::AbstractVector{Bool},
         bounds_p::UnitRange{Int},
         # Inputs
-        frac_veg_nosno::Vector{Int},
-        elai::Vector{<:Real},
-        esai::Vector{<:Real},
-        snocan::Vector{<:Real},
-        liqcan::Vector{<:Real},
+        frac_veg_nosno::AbstractVector{<:Integer},
+        elai::AbstractVector{<:Real},
+        esai::AbstractVector{<:Real},
+        snocan::AbstractVector{<:Real},
+        liqcan::AbstractVector{<:Real},
         # Outputs
-        fwet::Vector{<:Real},
-        fdry::Vector{<:Real},
-        fcansno::Vector{<:Real})
+        fwet::AbstractVector{<:Real},
+        fdry::AbstractVector{<:Real},
+        fcansno::AbstractVector{<:Real})
 
     canhyd_frac_wet!(fwet, fdry, fcansno, mask_soilp, frac_veg_nosno,
         elai, esai, snocan, liqcan,
@@ -765,27 +802,28 @@ end
     @inbounds begin
         p = pstart + i - 1
         if mask_soilp[p]
+            T = eltype(fwet)
             if frac_veg_nosno[p] == 1
                 h2ocan = snocan[p] + liqcan[p]
 
-                if h2ocan > 0.0
+                if h2ocan > zero(h2ocan)
                     vegt = frac_veg_nosno[p] * (elai[p] + esai[p])
-                    fwet[p] = (h2ocan / (vegt * liq_canopy_storage_scalar))^0.666666666666
-                    fwet[p] = min(fwet[p], maximum_leaf_wetted_fraction)
-                    if snocan[p] > 0.0
-                        fcansno[p] = (snocan[p] / (vegt * snow_canopy_storage_scalar))^0.15
-                        fcansno[p] = min(fcansno[p], 1.0)
+                    fwet[p] = (h2ocan / (vegt * oftype(h2ocan, liq_canopy_storage_scalar)))^oftype(h2ocan, 0.666666666666)
+                    fwet[p] = min(fwet[p], oftype(fwet[p], maximum_leaf_wetted_fraction))
+                    if snocan[p] > zero(T)
+                        fcansno[p] = (snocan[p] / (vegt * oftype(h2ocan, snow_canopy_storage_scalar)))^oftype(h2ocan, 0.15)
+                        fcansno[p] = min(fcansno[p], one(fcansno[p]))
                     else
-                        fcansno[p] = 0.0
+                        fcansno[p] = zero(T)
                     end
                 else
-                    fwet[p] = 0.0
-                    fcansno[p] = 0.0
+                    fwet[p] = zero(T)
+                    fcansno[p] = zero(T)
                 end
-                fdry[p] = (1.0 - fwet[p]) * elai[p] / (elai[p] + esai[p])
+                fdry[p] = (one(T) - fwet[p]) * elai[p] / (elai[p] + esai[p])
             else
-                fwet[p] = 0.0
-                fdry[p] = 0.0
+                fwet[p] = zero(T)
+                fdry[p] = zero(T)
             end
         end
     end
@@ -796,8 +834,10 @@ canhyd_frac_wet!(fwet, fdry, fcansno, mask_soilp, frac_veg_nosno,
         liq_canopy_storage_scalar, snow_canopy_storage_scalar,
         maximum_leaf_wetted_fraction, pstart, np) =
     _launch!(_canhyd_frac_wet_kernel!, fwet, fdry, fcansno, mask_soilp, frac_veg_nosno,
-        elai, esai, snocan, liqcan, liq_canopy_storage_scalar, snow_canopy_storage_scalar,
-        maximum_leaf_wetted_fraction, pstart; ndrange=np)
+        elai, esai, snocan, liqcan,
+        convert(eltype(fwet), liq_canopy_storage_scalar),
+        convert(eltype(fwet), snow_canopy_storage_scalar),
+        convert(eltype(fwet), maximum_leaf_wetted_fraction), pstart; ndrange=np)
 
 # -----------------------------------------------------------------------
 # CanopyInterceptionAndThroughfall (top-level coordinator)
@@ -815,35 +855,39 @@ function canopy_interception_and_throughfall!(
         water::WaterData,
         dtime::Real,
         # Masks
-        mask_soilp::BitVector,
-        mask_nolakep::BitVector,
-        mask_nolakec::BitVector,
+        mask_soilp::AbstractVector{Bool},
+        mask_nolakep::AbstractVector{Bool},
+        mask_nolakec::AbstractVector{Bool},
         # Bounds
         bounds_p::UnitRange{Int},
         bounds_c::UnitRange{Int},
         bounds_g::UnitRange{Int},
         # Atmospheric forcing (column-level)
-        forc_rain::Vector{<:Real},
-        forc_snow_col::Vector{<:Real},
-        forc_t::Vector{<:Real},
+        forc_rain::AbstractVector{<:Real},
+        forc_snow_col::AbstractVector{<:Real},
+        forc_t::AbstractVector{<:Real},
         # Atmospheric forcing (gridcell-level)
-        forc_wind::Vector{<:Real},
+        forc_wind::AbstractVector{<:Real},
         # Irrigation (patch-level)
-        qflx_irrig_sprinkler::Vector{<:Real},
-        qflx_irrig_drip::Vector{<:Real})
+        qflx_irrig_sprinkler::AbstractVector{<:Real},
+        qflx_irrig_drip::AbstractVector{<:Real})
 
     np = length(bounds_p)
     nc = length(bounds_c)
 
-    # Local arrays — infer FT from forcing to support Dual
-    FT = eltype(forc_rain)
-    qflx_liq_above_canopy_patch = zeros(FT, last(bounds_p))
-    forc_snow_patch = zeros(FT, last(bounds_p))
-    check_point_for_interception_and_excess = fill(false, last(bounds_p))
-
     b_wf = water.waterfluxbulk_inst
     b_ws = water.waterstatebulk_inst
     b_wd = water.waterdiagnosticbulk_inst
+
+    # Local scratch — allocate via similar() of a device-resident state array so the
+    # scratch lives on the same backend (CPU/Metal) as the rest of the call. FT is the
+    # working element type (Float64 on CPU, Float32 on Metal, Dual under AD).
+    FT = eltype(forc_rain)
+    proto = b_wf.wf.qflx_through_snow_patch
+    qflx_liq_above_canopy_patch = fill!(similar(proto, FT, last(bounds_p)), zero(FT))
+    forc_snow_patch             = fill!(similar(proto, FT, last(bounds_p)), zero(FT))
+    check_point_for_interception_and_excess =
+        fill!(similar(proto, Bool, last(bounds_p)), false)
 
     # --- Step 1: Top-of-canopy inputs for bulk ---
     sum_flux_top_of_canopy_inputs!(
