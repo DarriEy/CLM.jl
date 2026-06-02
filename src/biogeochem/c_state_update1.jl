@@ -12,6 +12,39 @@
 # c_state_update_dyn_patch! — Dynamic patch carbon state update
 # ---------------------------------------------------------------------------
 
+# --- Kernel: per-column litter/CWD input from dyn_cnbal_patch (one thread per column) ---
+# The internal j (decomp level) and i (litter pool) loops run sequentially in-thread;
+# every write is to the thread's own column, so it is byte-identical + race-free.
+@kernel function _csu_dyn_col_kernel!(@Const(mask_soilc_with_inactive),
+        decomp_cpools_vr_col, @Const(dwt_frootc_to_litr_c_col),
+        @Const(dwt_livecrootc_to_cwdc_col), @Const(dwt_deadcrootc_to_cwdc_col),
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int, dt)
+    c = @index(Global)
+    @inbounds if mask_soilc_with_inactive[c]
+        for j in 1:nlevdecomp
+            for i in i_litr_min:i_litr_max
+                decomp_cpools_vr_col[c, j, i] =
+                    decomp_cpools_vr_col[c, j, i] +
+                    dwt_frootc_to_litr_c_col[c, j, i] * dt
+            end
+            decomp_cpools_vr_col[c, j, i_cwd] =
+                decomp_cpools_vr_col[c, j, i_cwd] +
+                (dwt_livecrootc_to_cwdc_col[c, j] +
+                 dwt_deadcrootc_to_cwdc_col[c, j]) * dt
+        end
+    end
+end
+
+# --- Kernel: per-gridcell seed carbon update (one thread per gridcell) ---
+@kernel function _csu_dyn_grc_kernel!(seedc_grc, @Const(dwt_seedc_to_leaf_grc),
+        @Const(dwt_seedc_to_deadstem_grc), dt)
+    g = @index(Global)
+    @inbounds begin
+        seedc_grc[g] = seedc_grc[g] - dwt_seedc_to_leaf_grc[g] * dt
+        seedc_grc[g] = seedc_grc[g] - dwt_seedc_to_deadstem_grc[g] * dt
+    end
+end
+
 """
     c_state_update_dyn_patch!(cs_veg, cf_veg, cs_soil;
         mask_soilc_with_inactive, bounds_col, bounds_grc,
@@ -20,12 +53,15 @@
 Update carbon states based on fluxes from dyn_cnbal_patch.
 This routine is not called with FATES active.
 
-Ported from `CStateUpdateDynPatch` in `CNCStateUpdate1Mod.F90`.
+Ported from `CStateUpdateDynPatch` in `CNCStateUpdate1Mod.F90`. Runs as two
+KernelAbstractions kernels (one per soil column, one per gridcell); the internal
+decomp-level / litter-pool loops stay sequential in-thread (each thread owns its
+own column/gridcell index, so no cross-thread writes). The CPU path is byte-identical.
 """
 function c_state_update_dyn_patch!(cs_veg::CNVegCarbonStateData,
                                     cf_veg::CNVegCarbonFluxData,
                                     cs_soil::SoilBiogeochemCarbonStateData;
-                                    mask_soilc_with_inactive::BitVector,
+                                    mask_soilc_with_inactive::AbstractVector{Bool},
                                     bounds_col::UnitRange{Int},
                                     bounds_grc::UnitRange{Int},
                                     nlevdecomp::Int,
@@ -34,25 +70,15 @@ function c_state_update_dyn_patch!(cs_veg::CNVegCarbonStateData,
                                     i_cwd::Int,
                                     dt::Real)
 
-    for j in 1:nlevdecomp
-        for c in bounds_col
-            mask_soilc_with_inactive[c] || continue
-            for i in i_litr_min:i_litr_max
-                cs_soil.decomp_cpools_vr_col[c, j, i] =
-                    cs_soil.decomp_cpools_vr_col[c, j, i] +
-                    cf_veg.dwt_frootc_to_litr_c_col[c, j, i] * dt
-            end
-            cs_soil.decomp_cpools_vr_col[c, j, i_cwd] =
-                cs_soil.decomp_cpools_vr_col[c, j, i_cwd] +
-                (cf_veg.dwt_livecrootc_to_cwdc_col[c, j] +
-                 cf_veg.dwt_deadcrootc_to_cwdc_col[c, j]) * dt
-        end
-    end
+    # --- Column loop: litter/CWD input fluxes (one thread per column) ---
+    _launch!(_csu_dyn_col_kernel!, mask_soilc_with_inactive,
+        cs_soil.decomp_cpools_vr_col, cf_veg.dwt_frootc_to_litr_c_col,
+        cf_veg.dwt_livecrootc_to_cwdc_col, cf_veg.dwt_deadcrootc_to_cwdc_col,
+        nlevdecomp, i_litr_min, i_litr_max, i_cwd, dt)
 
-    for g in bounds_grc
-        cs_veg.seedc_grc[g] = cs_veg.seedc_grc[g] - cf_veg.dwt_seedc_to_leaf_grc[g] * dt
-        cs_veg.seedc_grc[g] = cs_veg.seedc_grc[g] - cf_veg.dwt_seedc_to_deadstem_grc[g] * dt
-    end
+    # --- Gridcell loop: seed carbon update (one thread per gridcell) ---
+    _launch!(_csu_dyn_grc_kernel!, cs_veg.seedc_grc,
+        cf_veg.dwt_seedc_to_leaf_grc, cf_veg.dwt_seedc_to_deadstem_grc, dt)
 
     return nothing
 end
@@ -61,6 +87,16 @@ end
 # c_state_update0! — Photosynthesis cpool update
 # ---------------------------------------------------------------------------
 
+# --- Kernel: per-patch cpool update from photosynthesis (one thread per patch) ---
+@kernel function _csu0_patch_kernel!(@Const(mask_soilp), cpool_patch,
+        @Const(psnsun_to_cpool_patch), @Const(psnshade_to_cpool_patch), dt)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        cpool_patch[p] = cpool_patch[p] + psnsun_to_cpool_patch[p] * dt
+        cpool_patch[p] = cpool_patch[p] + psnshade_to_cpool_patch[p] * dt
+    end
+end
+
 """
     c_state_update0!(cs_veg, cf_veg;
         mask_soilp, bounds_patch, dt)
@@ -68,19 +104,17 @@ end
 On the radiation time step, update cpool carbon state from gross
 photosynthesis fluxes.
 
-Ported from `CStateUpdate0` in `CNCStateUpdate1Mod.F90`.
+Ported from `CStateUpdate0` in `CNCStateUpdate1Mod.F90`. Runs as one
+KernelAbstractions kernel (one thread per patch); the CPU path is byte-identical.
 """
 function c_state_update0!(cs_veg::CNVegCarbonStateData,
                            cf_veg::CNVegCarbonFluxData;
-                           mask_soilp::BitVector,
+                           mask_soilp::AbstractVector{Bool},
                            bounds_patch::UnitRange{Int},
                            dt::Real)
 
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        cs_veg.cpool_patch[p] = cs_veg.cpool_patch[p] + cf_veg.psnsun_to_cpool_patch[p] * dt
-        cs_veg.cpool_patch[p] = cs_veg.cpool_patch[p] + cf_veg.psnshade_to_cpool_patch[p] * dt
-    end
+    _launch!(_csu0_patch_kernel!, mask_soilp, cs_veg.cpool_patch,
+        cf_veg.psnsun_to_cpool_patch, cf_veg.psnshade_to_cpool_patch, dt)
 
     return nothing
 end
