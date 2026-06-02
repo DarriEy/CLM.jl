@@ -1383,6 +1383,107 @@ end
 # PerchedWaterTable
 # =========================================================================
 
+# --------------------------------------------------------------------------
+# perched_water_table! : ONE thread per (hydrology) column. The whole
+# PerchedWaterTable subroutine is per-column with an internal SEQUENTIAL frost-
+# table search (2→nlevsoi) carrying loop-carried k_frz state, then a bottom-up
+# k_frz→1 saturation search carrying k_perch, then an interpolation branch.
+# Mirrors water_table!'s device-view layout: read-only inputs and written
+# outputs grouped into two immutable Adapt.@adapt_structure'd bundles whose
+# field names mirror the host locals so the kernel body reads verbatim. On the
+# host path the same bundles wrap CPU arrays, so CPU stays byte-identical.
+#
+# Indexing is direct [c,k] (no snow offset) — matching the host loop.
+# --------------------------------------------------------------------------
+
+# Read-only inputs (all matrices + the read-only zwt vector).
+Base.@kwdef struct _PWTInDV{V,M}
+    col_dz::M; col_z::M; col_zi::M
+    t_soisno::M; watsat::M
+    h2osoi_liq::M; h2osoi_ice::M
+    zwt::V
+end
+Adapt.@adapt_structure _PWTInDV
+
+# Written outputs (zwt_perched + frost_table vectors, h2osoi_vol matrix).
+Base.@kwdef struct _PWTOutDV{V,M}
+    zwt_perched::V; frost_table::V; h2osoi_vol::M
+end
+Adapt.@adapt_structure _PWTOutDV
+
+@kernel function _perched_water_table_kernel!(zwt_perched_out, odv, @Const(idv), @Const(mask),
+        nlevsoi::Int, tfrz, denh2o, denice)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(zwt_perched_out)
+        zr    = zero(T)
+        TFRZl = T(tfrz)
+        DH2O  = T(denh2o)
+        DICE  = T(denice)
+        sat_lev = T(0.9)
+
+        # define frost table as first frozen layer with unfrozen layer above it
+        if idv.t_soisno[c, 1] > TFRZl
+            k_frz = nlevsoi
+        else
+            k_frz = 1
+        end
+
+        for k in 2:nlevsoi
+            if idv.t_soisno[c, k-1] > TFRZl && idv.t_soisno[c, k] <= TFRZl
+                k_frz = k
+                break
+            end
+        end
+
+        # frost table is top of frozen layer
+        odv.frost_table[c] = idv.col_zi[c, k_frz - 1]
+        odv.zwt_perched[c] = odv.frost_table[c]
+
+        # water table above frost table: do nothing
+        if idv.zwt[c] < odv.frost_table[c] && idv.t_soisno[c, k_frz] <= TFRZl
+            # do nothing
+        elseif k_frz > 1
+            # water table below frost table
+            k_perch = 1
+            for k in k_frz:-1:1
+                odv.h2osoi_vol[c, k] = idv.h2osoi_liq[c, k] / (idv.col_dz[c, k] * DH2O) +
+                    idv.h2osoi_ice[c, k] / (idv.col_dz[c, k] * DICE)
+
+                if odv.h2osoi_vol[c, k] / idv.watsat[c, k] <= sat_lev
+                    k_perch = k
+                    break
+                end
+            end
+
+            if idv.t_soisno[c, k_frz] > TFRZl
+                k_perch = k_frz
+            end
+
+            if k_frz > k_perch
+                s1 = (idv.h2osoi_liq[c, k_perch] / (idv.col_dz[c, k_perch] * DH2O) +
+                    idv.h2osoi_ice[c, k_perch] / (idv.col_dz[c, k_perch] * DICE)) / idv.watsat[c, k_perch]
+                s2 = (idv.h2osoi_liq[c, k_perch+1] / (idv.col_dz[c, k_perch+1] * DH2O) +
+                    idv.h2osoi_ice[c, k_perch+1] / (idv.col_dz[c, k_perch+1] * DICE)) / idv.watsat[c, k_perch+1]
+
+                if s1 > s2
+                    odv.zwt_perched[c] = idv.col_zi[c, k_perch - 1]
+                else
+                    m_val = (idv.col_z[c, k_perch+1] - idv.col_z[c, k_perch]) / (s2 - s1)
+                    b_val = idv.col_z[c, k_perch+1] - m_val * s2
+                    odv.zwt_perched[c] = smooth_max(zr, m_val * sat_lev + b_val)
+                end
+            end
+        end
+    end
+end
+
+function soilhyd_perched_water_table!(odv, idv, mask, nlevsoi::Int, tfrz, denh2o, denice)
+    T = eltype(odv.zwt_perched)
+    _launch!(_perched_water_table_kernel!, odv.zwt_perched, odv, idv, mask, nlevsoi,
+             T(tfrz), T(denh2o), T(denice); ndrange = length(mask))
+end
+
 """
     perched_water_table!(soilhydrology, soilstate, temperature_t_soisno,
                           waterstatebulk_ws, col_dz, col_z, col_zi,
@@ -1395,83 +1496,31 @@ Ported from `PerchedWaterTable` in `SoilHydrologyMod.F90`.
 function perched_water_table!(
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
-    temperature_t_soisno::Matrix{<:Real},
+    temperature_t_soisno::AbstractMatrix{<:Real},
     waterstatebulk_ws::WaterStateData,
-    col_dz::Matrix{<:Real},
-    col_z::Matrix{<:Real},
-    col_zi::Matrix{<:Real},
-    mask_hydrology::BitVector,
+    col_dz::AbstractMatrix{<:Real},
+    col_z::AbstractMatrix{<:Real},
+    col_zi::AbstractMatrix{<:Real},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int
 )
-    t_soisno   = temperature_t_soisno
-    h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
-    h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
-    h2osoi_vol = waterstatebulk_ws.h2osoi_vol_col
-    watsat     = soilstate.watsat_col
-    zwt        = soilhydrology.zwt_col
-    zwt_perched = soilhydrology.zwt_perched_col
-    frost_table = soilhydrology.frost_table_col
+    idv = _PWTInDV(;
+        col_dz     = col_dz,
+        col_z      = col_z,
+        col_zi     = col_zi,
+        t_soisno   = temperature_t_soisno,
+        watsat     = soilstate.watsat_col,
+        h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col,
+        h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col,
+        zwt        = soilhydrology.zwt_col)
 
-    sat_lev = 0.9
+    odv = _PWTOutDV(;
+        zwt_perched = soilhydrology.zwt_perched_col,
+        frost_table = soilhydrology.frost_table_col,
+        h2osoi_vol  = waterstatebulk_ws.h2osoi_vol_col)
 
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        # define frost table
-        if t_soisno[c, 1] > TFRZ
-            k_frz = nlevsoi
-        else
-            k_frz = 1
-        end
-
-        for k in 2:nlevsoi
-            if t_soisno[c, k-1] > TFRZ && t_soisno[c, k] <= TFRZ
-                k_frz = k
-                break
-            end
-        end
-
-        # frost table is top of frozen layer
-        frost_table[c] = col_zi[c, k_frz - 1]
-        zwt_perched[c] = frost_table[c]
-
-        # water table above frost table: do nothing
-        if zwt[c] < frost_table[c] && t_soisno[c, k_frz] <= TFRZ
-            # do nothing
-        elseif k_frz > 1
-            # water table below frost table
-            k_perch = 1
-            for k in k_frz:-1:1
-                h2osoi_vol[c, k] = h2osoi_liq[c, k] / (col_dz[c, k] * DENH2O) +
-                    h2osoi_ice[c, k] / (col_dz[c, k] * DENICE)
-
-                if h2osoi_vol[c, k] / watsat[c, k] <= sat_lev
-                    k_perch = k
-                    break
-                end
-            end
-
-            if t_soisno[c, k_frz] > TFRZ
-                k_perch = k_frz
-            end
-
-            if k_frz > k_perch
-                s1 = (h2osoi_liq[c, k_perch] / (col_dz[c, k_perch] * DENH2O) +
-                    h2osoi_ice[c, k_perch] / (col_dz[c, k_perch] * DENICE)) / watsat[c, k_perch]
-                s2 = (h2osoi_liq[c, k_perch+1] / (col_dz[c, k_perch+1] * DENH2O) +
-                    h2osoi_ice[c, k_perch+1] / (col_dz[c, k_perch+1] * DENICE)) / watsat[c, k_perch+1]
-
-                if s1 > s2
-                    zwt_perched[c] = col_zi[c, k_perch - 1]
-                else
-                    m_val = (col_z[c, k_perch+1] - col_z[c, k_perch]) / (s2 - s1)
-                    b_val = col_z[c, k_perch+1] - m_val * s2
-                    zwt_perched[c] = smooth_max(0.0, m_val * sat_lev + b_val)
-                end
-            end
-        end
-    end
+    soilhyd_perched_water_table!(odv, idv, mask_hydrology, nlevsoi, TFRZ, DENH2O, DENICE)
 
     return nothing
 end
@@ -1479,6 +1528,87 @@ end
 # =========================================================================
 # ThetaBasedWaterTable
 # =========================================================================
+
+# --------------------------------------------------------------------------
+# theta_based_water_table! : ONE thread per (hydrology) column. The whole
+# ThetaBasedWaterTable subroutine is per-column with an internal SEQUENTIAL
+# nbedrock→1 saturation search carrying loop-carried k_zwt / sat_flag state,
+# then a branch on k_zwt for the water-table depth. Mirrors water_table!'s
+# device-view layout: read-only inputs and written outputs grouped into two
+# immutable Adapt.@adapt_structure'd bundles whose field names mirror the
+# host locals so the kernel body reads verbatim. On the host path the same
+# bundles wrap CPU arrays, so CPU stays byte-identical.
+#
+# Indexing is direct [c,k] (no snow offset) — matching the host loop and the
+# existing test geometry.
+# --------------------------------------------------------------------------
+
+# Read-only inputs the search loop touches (all matrices + the Int nbedrock vec).
+Base.@kwdef struct _TBWTInDV{M,VI}
+    col_dz::M; col_z::M; col_zi::M
+    watsat::M; h2osoi_liq::M; h2osoi_ice::M
+    col_nbedrock::VI
+end
+Adapt.@adapt_structure _TBWTInDV
+
+# Written outputs (zwt vector + h2osoi_vol matrix).
+Base.@kwdef struct _TBWTOutDV{V,M}
+    zwt::V; h2osoi_vol::M
+end
+Adapt.@adapt_structure _TBWTOutDV
+
+@kernel function _theta_based_water_table_kernel!(zwt_out, odv, @Const(idv), @Const(mask),
+        nlevsoi::Int, denh2o, denice)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(zwt_out)
+        zr   = zero(T)
+        DH2O = T(denh2o)
+        DICE = T(denice)
+        sat_lev = T(0.9)
+
+        nbed = idv.col_nbedrock[c]
+
+        odv.zwt[c] = idv.col_zi[c, nlevsoi]
+
+        k_zwt = nbed
+        sat_flag = 1
+        for k in nbed:-1:1
+            odv.h2osoi_vol[c, k] = idv.h2osoi_liq[c, k] / (idv.col_dz[c, k] * DH2O) +
+                idv.h2osoi_ice[c, k] / (idv.col_dz[c, k] * DICE)
+
+            if odv.h2osoi_vol[c, k] / idv.watsat[c, k] <= sat_lev
+                k_zwt = k
+                sat_flag = 0
+                break
+            end
+        end
+        if sat_flag == 1
+            k_zwt = 1
+        end
+
+        if k_zwt == 1
+            odv.zwt[c] = idv.col_zi[c, 1]
+        elseif k_zwt < nbed
+            s1 = (idv.h2osoi_liq[c, k_zwt] / (idv.col_dz[c, k_zwt] * DH2O) +
+                idv.h2osoi_ice[c, k_zwt] / (idv.col_dz[c, k_zwt] * DICE)) / idv.watsat[c, k_zwt]
+            s2 = (idv.h2osoi_liq[c, k_zwt+1] / (idv.col_dz[c, k_zwt+1] * DH2O) +
+                idv.h2osoi_ice[c, k_zwt+1] / (idv.col_dz[c, k_zwt+1] * DICE)) / idv.watsat[c, k_zwt+1]
+
+            m_val = (idv.col_z[c, k_zwt+1] - idv.col_z[c, k_zwt]) / (s2 - s1)
+            b_val = idv.col_z[c, k_zwt+1] - m_val * s2
+            odv.zwt[c] = smooth_max(zr, m_val * sat_lev + b_val)
+        else
+            odv.zwt[c] = idv.col_zi[c, nbed]
+        end
+    end
+end
+
+function soilhyd_theta_based_water_table!(odv, idv, mask, nlevsoi::Int, denh2o, denice)
+    T = eltype(odv.zwt)
+    _launch!(_theta_based_water_table_kernel!, odv.zwt, odv, idv, mask, nlevsoi,
+             T(denh2o), T(denice); ndrange = length(mask))
+end
 
 """
     theta_based_water_table!(soilhydrology, soilstate, waterstatebulk_ws,
@@ -1493,58 +1623,28 @@ function theta_based_water_table!(
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
     waterstatebulk_ws::WaterStateData,
-    col_dz::Matrix{<:Real},
-    col_z::Matrix{<:Real},
-    col_zi::Matrix{<:Real},
-    col_nbedrock::Vector{Int},
-    mask_hydrology::BitVector,
+    col_dz::AbstractMatrix{<:Real},
+    col_z::AbstractMatrix{<:Real},
+    col_zi::AbstractMatrix{<:Real},
+    col_nbedrock::AbstractVector{<:Integer},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int
 )
-    h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
-    h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
-    h2osoi_vol = waterstatebulk_ws.h2osoi_vol_col
-    watsat     = soilstate.watsat_col
-    zwt        = soilhydrology.zwt_col
+    idv = _TBWTInDV(;
+        col_dz       = col_dz,
+        col_z        = col_z,
+        col_zi       = col_zi,
+        watsat       = soilstate.watsat_col,
+        h2osoi_liq   = waterstatebulk_ws.h2osoi_liq_col,
+        h2osoi_ice   = waterstatebulk_ws.h2osoi_ice_col,
+        col_nbedrock = col_nbedrock)
 
-    sat_lev = 0.9
+    odv = _TBWTOutDV(;
+        zwt        = soilhydrology.zwt_col,
+        h2osoi_vol = waterstatebulk_ws.h2osoi_vol_col)
 
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        zwt[c] = col_zi[c, nlevsoi]
-
-        k_zwt = col_nbedrock[c]
-        sat_flag = 1
-        for k in col_nbedrock[c]:-1:1
-            h2osoi_vol[c, k] = h2osoi_liq[c, k] / (col_dz[c, k] * DENH2O) +
-                h2osoi_ice[c, k] / (col_dz[c, k] * DENICE)
-
-            if h2osoi_vol[c, k] / watsat[c, k] <= sat_lev
-                k_zwt = k
-                sat_flag = 0
-                break
-            end
-        end
-        if sat_flag == 1
-            k_zwt = 1
-        end
-
-        if k_zwt == 1
-            zwt[c] = col_zi[c, 1]
-        elseif k_zwt < col_nbedrock[c]
-            s1 = (h2osoi_liq[c, k_zwt] / (col_dz[c, k_zwt] * DENH2O) +
-                h2osoi_ice[c, k_zwt] / (col_dz[c, k_zwt] * DENICE)) / watsat[c, k_zwt]
-            s2 = (h2osoi_liq[c, k_zwt+1] / (col_dz[c, k_zwt+1] * DENH2O) +
-                h2osoi_ice[c, k_zwt+1] / (col_dz[c, k_zwt+1] * DENICE)) / watsat[c, k_zwt+1]
-
-            m_val = (col_z[c, k_zwt+1] - col_z[c, k_zwt]) / (s2 - s1)
-            b_val = col_z[c, k_zwt+1] - m_val * s2
-            zwt[c] = smooth_max(0.0, m_val * sat_lev + b_val)
-        else
-            zwt[c] = col_zi[c, col_nbedrock[c]]
-        end
-    end
+    soilhyd_theta_based_water_table!(odv, idv, mask_hydrology, nlevsoi, DENH2O, DENICE)
 
     return nothing
 end
