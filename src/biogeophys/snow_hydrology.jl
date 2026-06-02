@@ -1983,10 +1983,10 @@ end
 Construct snow/no-snow masks for snow hydrology.
 """
 function build_snow_filter!(
-    mask_snow::BitVector,
-    mask_nosnow::BitVector,
-    snl::Vector{Int},
-    mask_nolake::BitVector,
+    mask_snow::AbstractVector{Bool},
+    mask_nosnow::AbstractVector{Bool},
+    snl::AbstractVector{Int},
+    mask_nolake::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     fill!(mask_snow, false)
@@ -2021,27 +2021,61 @@ snowhyd_build_snow_filter!(mask_snow, mask_nosnow, snl, mask_nolake, bounds) =
 
 Determine the excess snow that needs to be capped.
 """
+# Standard capping check (per-column). Mirrors the first Fortran loop: zero out
+# h2osno_excess, then set excess + apply_runoff where h2osno exceeds H2OSNO_MAX.
+# h2osno_max passed at the working precision so no Float64 reaches a Float32-only
+# backend (Metal); byte-identical on Float64.
+@kernel function _snowhyd_capping_excess_kernel!(h2osno_excess, @Const(mask_snow),
+        @Const(h2osno), apply_runoff, h2osno_max, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        h2osno_excess[c] = zero(eltype(h2osno_excess))
+        if h2osno[c] > h2osno_max
+            h2osno_excess[c] = h2osno[c] - h2osno_max
+            apply_runoff[c] = true
+        end
+    end
+end
+
+# Snow-resetting override (per-column). Config flags are resolved on the host into
+# isbits scalars (do_reset / do_reset_glc / reset_h2osno / reset_glc_ela) so no host
+# Ref is dereferenced inside the kernel. istice is the landunit-type code; the
+# landunit type per column is read in-kernel as lun_itype[col_landunit[c]] (both
+# device-resident), avoiding a host gather that would mismatch the device backend.
+@kernel function _snowhyd_capping_reset_kernel!(h2osno_excess, @Const(mask_snow),
+        @Const(h2osno), @Const(topo), @Const(col_landunit), @Const(lun_itype),
+        apply_runoff, do_reset::Bool, do_reset_glc::Bool, reset_h2osno, reset_glc_ela,
+        istice::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        lit = lun_itype[col_landunit[c]]
+        if lit != istice && do_reset && h2osno[c] > reset_h2osno
+            h2osno_excess[c] = h2osno[c] - reset_h2osno
+            apply_runoff[c] = false
+        elseif lit == istice && do_reset_glc &&
+               h2osno[c] > reset_h2osno && topo[c] <= reset_glc_ela
+            h2osno_excess[c] = h2osno[c] - reset_h2osno
+            apply_runoff[c] = false
+        end
+    end
+end
+
 function snow_capping_excess!(
-    h2osno_excess::Vector{<:Real},
+    h2osno_excess::AbstractVector{<:Real},
     apply_runoff::AbstractVector{Bool},
-    h2osno::Vector{<:Real},
-    topo::Vector{<:Real},
-    snl::Vector{Int},
-    col_landunit::Vector{Int},
-    lun_itype::Vector{Int},   # landunit type
-    mask_snow::BitVector,
+    h2osno::AbstractVector{<:Real},
+    topo::AbstractVector{<:Real},
+    snl::AbstractVector{Int},
+    col_landunit::AbstractVector{Int},
+    lun_itype::AbstractVector{Int},   # landunit type
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nstep::Int,
     nlevsno::Int
 )
-    for c in bounds
-        mask_snow[c] || continue
-        h2osno_excess[c] = 0.0
-        if h2osno[c] > H2OSNO_MAX
-            h2osno_excess[c] = h2osno[c] - H2OSNO_MAX
-            apply_runoff[c] = true
-        end
-    end
+    FT = eltype(h2osno_excess)
+    _launch!(_snowhyd_capping_excess_kernel!, h2osno_excess, mask_snow, h2osno,
+             apply_runoff, FT(H2OSNO_MAX), first(bounds), last(bounds))
 
     # Snow resetting
     is_reset_snow_active = false
@@ -2053,18 +2087,11 @@ function snow_capping_excess!(
     end
 
     if is_reset_snow_active
-        for c in bounds
-            mask_snow[c] || continue
-            l = col_landunit[c]
-            if lun_itype[l] != ISTICE && RESET_SNOW[] && h2osno[c] > RESET_SNOW_H2OSNO
-                h2osno_excess[c] = h2osno[c] - RESET_SNOW_H2OSNO
-                apply_runoff[c] = false
-            elseif lun_itype[l] == ISTICE && RESET_SNOW_GLC[] &&
-                   h2osno[c] > RESET_SNOW_H2OSNO && topo[c] <= RESET_SNOW_GLC_ELA[]
-                h2osno_excess[c] = h2osno[c] - RESET_SNOW_H2OSNO
-                apply_runoff[c] = false
-            end
-        end
+        _launch!(_snowhyd_capping_reset_kernel!, h2osno_excess, mask_snow, h2osno,
+                 topo, col_landunit, lun_itype, apply_runoff,
+                 RESET_SNOW[], RESET_SNOW_GLC[],
+                 FT(RESET_SNOW_H2OSNO), FT(RESET_SNOW_GLC_ELA[]), ISTICE,
+                 first(bounds), last(bounds))
     end
 end
 
@@ -2080,11 +2107,11 @@ end
 Initialize snow capping fluxes to zero.
 """
 function init_flux_snow_capping!(
-    qflx_snwcp_ice::Vector{<:Real},
-    qflx_snwcp_liq::Vector{<:Real},
-    qflx_snwcp_discarded_ice::Vector{<:Real},
-    qflx_snwcp_discarded_liq::Vector{<:Real},
-    mask::BitVector,
+    qflx_snwcp_ice::AbstractVector{<:Real},
+    qflx_snwcp_liq::AbstractVector{<:Real},
+    qflx_snwcp_discarded_ice::AbstractVector{<:Real},
+    qflx_snwcp_discarded_liq::AbstractVector{<:Real},
+    mask::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     snowhyd_init_flux_snow_capping!(qflx_snwcp_ice, qflx_snwcp_liq,
@@ -2096,10 +2123,11 @@ end
         cmin::Int, cmax::Int)
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask[c]
-        qflx_snwcp_ice[c] = 0.0
-        qflx_snwcp_liq[c] = 0.0
-        qflx_snwcp_discarded_ice[c] = 0.0
-        qflx_snwcp_discarded_liq[c] = 0.0
+        z = zero(eltype(qflx_snwcp_ice))
+        qflx_snwcp_ice[c] = z
+        qflx_snwcp_liq[c] = z
+        qflx_snwcp_discarded_ice[c] = z
+        qflx_snwcp_discarded_liq[c] = z
     end
 end
 
@@ -2123,8 +2151,53 @@ snowhyd_init_flux_snow_capping!(qflx_snwcp_ice, qflx_snwcp_liq, qflx_snwcp_disca
 
 Calculate snow capping fluxes and related terms for bulk water.
 """
+# Per-column capping-flux kernel. Each column recomputes its own capping flag in
+# the same thread (mask_snow & h2osno_excess > 0) — no separate host mask-build
+# loop — then partitions the capped mass into ice/liquid runoff or discarded
+# fluxes per apply_runoff. eps_ft / one_ft / min_keep are passed at the working
+# precision so no Float64 reaches a Float32-only backend (Metal); byte-identical
+# on Float64. mask_capping is written here for the downstream remove / dz-aerosol
+# kernels; it is a plain Bool array so it stays device-resident.
+@kernel function _snowhyd_capping_fluxes_kernel!(rho_orig_bottom, @Const(mask_snow),
+        @Const(h2osno_excess), @Const(apply_runoff), @Const(dz_bottom),
+        @Const(h2osoi_ice_bottom), @Const(h2osoi_liq_bottom), frac_adjust,
+        qflx_snwcp_ice, qflx_snwcp_liq, qflx_snwcp_discarded_ice,
+        qflx_snwcp_discarded_liq, mask_capping, dtime, eps_ft, one_ft, min_keep,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c] && h2osno_excess[c] > zero(eps_ft)
+        mask_capping[c] = true
+
+        rho_orig_bottom[c] = dz_bottom[c] > eps_ft ?
+            h2osoi_ice_bottom[c] / dz_bottom[c] : zero(eps_ft)
+
+        mss_snow_bottom_lyr = h2osoi_ice_bottom[c] + h2osoi_liq_bottom[c]
+        mss_snwcp_tot = smooth_min(h2osno_excess[c],
+            mss_snow_bottom_lyr * (one_ft - min_keep))
+
+        if mss_snow_bottom_lyr > eps_ft
+            icefrac = h2osoi_ice_bottom[c] / mss_snow_bottom_lyr
+        else
+            icefrac = zero(eps_ft)
+        end
+        snwcp_flux_ice = mss_snwcp_tot / dtime * icefrac
+        snwcp_flux_liq = mss_snwcp_tot / dtime * (one_ft - icefrac)
+
+        if apply_runoff[c]
+            qflx_snwcp_ice[c] = snwcp_flux_ice
+            qflx_snwcp_liq[c] = snwcp_flux_liq
+        else
+            qflx_snwcp_discarded_ice[c] = snwcp_flux_ice
+            qflx_snwcp_discarded_liq[c] = snwcp_flux_liq
+        end
+
+        frac_adjust[c] = mss_snow_bottom_lyr > eps_ft ?
+            (mss_snow_bottom_lyr - mss_snwcp_tot) / mss_snow_bottom_lyr : one_ft
+    end
+end
+
 function bulk_flux_snow_capping_fluxes!(
-    mask_capping::BitVector,
+    mask_capping::AbstractVector{Bool},
     rho_orig_bottom::Vector{<:Real},
     frac_adjust::Vector{<:Real},
     qflx_snwcp_ice::Vector{<:Real},
@@ -2155,42 +2228,57 @@ function bulk_flux_snow_capping_fluxes!(
         mask_snow, bounds, nstep, nlevsno)
 
     fill!(mask_capping, false)
-    for c in bounds
-        mask_snow[c] || continue
-        if h2osno_excess[c] > 0.0
-            mask_capping[c] = true
-        end
-    end
+    _launch!(_snowhyd_capping_fluxes_kernel!, rho_orig_bottom, mask_snow,
+             h2osno_excess, apply_runoff, dz_bottom, h2osoi_ice_bottom,
+             h2osoi_liq_bottom, frac_adjust, qflx_snwcp_ice, qflx_snwcp_liq,
+             qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq, mask_capping,
+             dtime, FT(eps(Float64)), one(FT), FT(MIN_SNOW_TO_KEEP),
+             first(bounds), last(bounds))
+end
 
-    for c in bounds
-        mask_capping[c] || continue
+# Device-resident overload: when the snow/capping masks already live on a device
+# (e.g. Metal Vector{Bool}), snow_capping_excess! needs Bool/device scratch for
+# h2osno_excess + apply_runoff rather than host zeros()/falses(). This method runs
+# the whole capping-flux computation in-thread on the device.
+function bulk_flux_snow_capping_fluxes!(
+    mask_capping::AbstractVector{Bool},
+    rho_orig_bottom::AbstractVector{<:Real},
+    frac_adjust::AbstractVector{<:Real},
+    qflx_snwcp_ice::AbstractVector{<:Real},
+    qflx_snwcp_liq::AbstractVector{<:Real},
+    qflx_snwcp_discarded_ice::AbstractVector{<:Real},
+    qflx_snwcp_discarded_liq::AbstractVector{<:Real},
+    dtime::Real,
+    dz_bottom::AbstractVector{<:Real},
+    topo::AbstractVector{<:Real},
+    h2osno_total::AbstractVector{<:Real},
+    h2osoi_ice_bottom::AbstractVector{<:Real},
+    h2osoi_liq_bottom::AbstractVector{<:Real},
+    col_landunit::AbstractVector{Int},
+    lun_itype::AbstractVector{Int},
+    mask_snow::AbstractVector{Bool},
+    bounds::UnitRange{Int},
+    nlevsno::Int,
+    nstep::Int
+)
+    nc = length(h2osno_total)
+    FT = eltype(h2osno_total)
+    h2osno_excess = similar(h2osno_total); fill!(h2osno_excess, zero(FT))
+    apply_runoff = similar(mask_snow, Bool); fill!(apply_runoff, false)
 
-        rho_orig_bottom[c] = dz_bottom[c] > eps(Float64) ?
-            h2osoi_ice_bottom[c] / dz_bottom[c] : 0.0
+    # snl is unused by snow_capping_excess!; pass col_landunit (a device Int vector)
+    # as a placeholder so the array stays device-resident.
+    snow_capping_excess!(h2osno_excess, apply_runoff,
+        h2osno_total, topo, col_landunit, col_landunit, lun_itype,
+        mask_snow, bounds, nstep, nlevsno)
 
-        mss_snow_bottom_lyr = h2osoi_ice_bottom[c] + h2osoi_liq_bottom[c]
-        mss_snwcp_tot = smooth_min(h2osno_excess[c],
-            mss_snow_bottom_lyr * (1.0 - MIN_SNOW_TO_KEEP))
-
-        if mss_snow_bottom_lyr > eps(Float64)
-            icefrac = h2osoi_ice_bottom[c] / mss_snow_bottom_lyr
-        else
-            icefrac = 0.0
-        end
-        snwcp_flux_ice = mss_snwcp_tot / dtime * icefrac
-        snwcp_flux_liq = mss_snwcp_tot / dtime * (1.0 - icefrac)
-
-        if apply_runoff[c]
-            qflx_snwcp_ice[c] = snwcp_flux_ice
-            qflx_snwcp_liq[c] = snwcp_flux_liq
-        else
-            qflx_snwcp_discarded_ice[c] = snwcp_flux_ice
-            qflx_snwcp_discarded_liq[c] = snwcp_flux_liq
-        end
-
-        frac_adjust[c] = mss_snow_bottom_lyr > eps(Float64) ?
-            (mss_snow_bottom_lyr - mss_snwcp_tot) / mss_snow_bottom_lyr : 1.0
-    end
+    fill!(mask_capping, false)
+    _launch!(_snowhyd_capping_fluxes_kernel!, rho_orig_bottom, mask_snow,
+             h2osno_excess, apply_runoff, dz_bottom, h2osoi_ice_bottom,
+             h2osoi_liq_bottom, frac_adjust, qflx_snwcp_ice, qflx_snwcp_liq,
+             qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq, mask_capping,
+             dtime, FT(eps(Float64)), one(FT), FT(MIN_SNOW_TO_KEEP),
+             first(bounds), last(bounds))
 end
 
 # =========================================================================
@@ -2213,7 +2301,7 @@ function update_state_remove_snow_capping_fluxes!(
     qflx_snwcp_liq::Vector{<:Real},
     qflx_snwcp_discarded_ice::Vector{<:Real},
     qflx_snwcp_discarded_liq::Vector{<:Real},
-    mask_capping::BitVector,
+    mask_capping::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     for c in bounds
@@ -2233,6 +2321,39 @@ function update_state_remove_snow_capping_fluxes!(
     end
 end
 
+# Device overload: subtract the capping fluxes per active column on the device.
+# The negative-mass host assertion/error (and AD clamp) cannot run inside a GPU
+# kernel; on the device the in-thread subtraction matches the CPU arithmetic
+# exactly for valid (non-negative) inputs. Validity is the caller's invariant —
+# the CPU path above keeps the strict check.
+@kernel function _snowhyd_remove_capping_kernel!(h2osoi_ice_bottom, @Const(mask_capping),
+        h2osoi_liq_bottom, @Const(qflx_snwcp_ice), @Const(qflx_snwcp_liq),
+        @Const(qflx_snwcp_discarded_ice), @Const(qflx_snwcp_discarded_liq), dtime,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_capping[c]
+        h2osoi_ice_bottom[c] -= (qflx_snwcp_ice[c] + qflx_snwcp_discarded_ice[c]) * dtime
+        h2osoi_liq_bottom[c] -= (qflx_snwcp_liq[c] + qflx_snwcp_discarded_liq[c]) * dtime
+    end
+end
+
+function update_state_remove_snow_capping_fluxes!(
+    h2osoi_ice_bottom::AbstractVector{<:Real},
+    h2osoi_liq_bottom::AbstractVector{<:Real},
+    dtime::Real,
+    qflx_snwcp_ice::AbstractVector{<:Real},
+    qflx_snwcp_liq::AbstractVector{<:Real},
+    qflx_snwcp_discarded_ice::AbstractVector{<:Real},
+    qflx_snwcp_discarded_liq::AbstractVector{<:Real},
+    mask_capping::AbstractVector{Bool},
+    bounds::UnitRange{Int}
+)
+    _launch!(_snowhyd_remove_capping_kernel!, h2osoi_ice_bottom, mask_capping,
+             h2osoi_liq_bottom, qflx_snwcp_ice, qflx_snwcp_liq,
+             qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq, dtime,
+             first(bounds), last(bounds))
+end
+
 # =========================================================================
 # SnowCappingUpdateDzAndAerosols
 # =========================================================================
@@ -2244,32 +2365,50 @@ end
 
 After snow capping, adjust dz and aerosol masses in bottom snow layer.
 """
-function snow_capping_update_dz_and_aerosols!(
-    dz_bottom::Vector{<:Real},
-    aerosol::AerosolData,
-    jj_bottom::Int,
-    rho_orig_bottom::Vector{<:Real},
-    h2osoi_ice_bottom::Vector{<:Real},
-    frac_adjust::Vector{<:Real},
-    mask_capping::BitVector,
-    bounds::UnitRange{Int}
-)
-    for c in bounds
-        mask_capping[c] || continue
-
-        if rho_orig_bottom[c] > 1.0
+# Per-column post-capping update: rescale the bottom snow layer thickness by the
+# original density (where defined) and scale the 8 aerosol-species masses in the
+# bottom layer by frac_adjust. The aerosol matrices are passed individually so the
+# kernel stays a flat arg list (no struct field access in-kernel). one_ft is at the
+# working precision so no Float64 reaches a Float32-only backend (Metal).
+@kernel function _snowhyd_capping_dz_aerosol_kernel!(dz_bottom, @Const(mask_capping),
+        @Const(rho_orig_bottom), @Const(h2osoi_ice_bottom), @Const(frac_adjust),
+        mss_bcphi, mss_bcpho, mss_ocphi, mss_ocpho, mss_dst1, mss_dst2, mss_dst3,
+        mss_dst4, jj_bottom::Int, one_ft, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_capping[c]
+        if rho_orig_bottom[c] > one_ft
             dz_bottom[c] = h2osoi_ice_bottom[c] / rho_orig_bottom[c]
         end
-
-        aerosol.mss_bcphi_col[c, jj_bottom] *= frac_adjust[c]
-        aerosol.mss_bcpho_col[c, jj_bottom] *= frac_adjust[c]
-        aerosol.mss_ocphi_col[c, jj_bottom] *= frac_adjust[c]
-        aerosol.mss_ocpho_col[c, jj_bottom] *= frac_adjust[c]
-        aerosol.mss_dst1_col[c, jj_bottom]  *= frac_adjust[c]
-        aerosol.mss_dst2_col[c, jj_bottom]  *= frac_adjust[c]
-        aerosol.mss_dst3_col[c, jj_bottom]  *= frac_adjust[c]
-        aerosol.mss_dst4_col[c, jj_bottom]  *= frac_adjust[c]
+        fa = frac_adjust[c]
+        mss_bcphi[c, jj_bottom] *= fa
+        mss_bcpho[c, jj_bottom] *= fa
+        mss_ocphi[c, jj_bottom] *= fa
+        mss_ocpho[c, jj_bottom] *= fa
+        mss_dst1[c, jj_bottom]  *= fa
+        mss_dst2[c, jj_bottom]  *= fa
+        mss_dst3[c, jj_bottom]  *= fa
+        mss_dst4[c, jj_bottom]  *= fa
     end
+end
+
+function snow_capping_update_dz_and_aerosols!(
+    dz_bottom::AbstractVector{<:Real},
+    aerosol::AerosolData,
+    jj_bottom::Int,
+    rho_orig_bottom::AbstractVector{<:Real},
+    h2osoi_ice_bottom::AbstractVector{<:Real},
+    frac_adjust::AbstractVector{<:Real},
+    mask_capping::AbstractVector{Bool},
+    bounds::UnitRange{Int}
+)
+    one_ft = one(eltype(dz_bottom))
+    _launch!(_snowhyd_capping_dz_aerosol_kernel!, dz_bottom, mask_capping,
+             rho_orig_bottom, h2osoi_ice_bottom, frac_adjust,
+             aerosol.mss_bcphi_col, aerosol.mss_bcpho_col,
+             aerosol.mss_ocphi_col, aerosol.mss_ocpho_col,
+             aerosol.mss_dst1_col, aerosol.mss_dst2_col,
+             aerosol.mss_dst3_col, aerosol.mss_dst4_col,
+             jj_bottom, one_ft, first(bounds), last(bounds))
 end
 
 # =========================================================================
