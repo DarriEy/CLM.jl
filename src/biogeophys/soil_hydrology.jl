@@ -1806,6 +1806,116 @@ end
 # PerchedLateralFlow
 # =========================================================================
 
+# --------------------------------------------------------------------------
+# perched_lateral_flow! : ONE thread per (hydrology) column for the
+# NON-HILLSLOPE path. That path is fully per-column independent (no cross-
+# column scatter — `cold[c] == ISPVAL` so the hillslope donor/receiver
+# branch is never entered), so the whole subroutine maps to one thread per
+# column running the in-thread frost/perch-table search, the q_perch
+# drainage, and the per-layer storage removal. The hillslope path carries a
+# downhill scatter (`qflx_drain_perched[cold[c]] -= …`) that needs exact
+# ordering, so it stays on the sequential CPU branch below. Device arrays
+# (Metal/CUDA/…) take the kernel; CPU arrays take the byte-identical scalar
+# body verbatim.
+#
+# Soil-column arrays are grouped into two immutable device-view bundles
+# (Adapt.@adapt_structure'd); field names mirror the original Julia locals so
+# the kernel body reads like the scalar loops.
+# --------------------------------------------------------------------------
+Base.@kwdef struct _PLInDV{V,M,VI}
+    col_dz::M; col_zi::M
+    hksat::M; sucsat::M; watsat::M; bsw::M
+    topo_slope::V; nbedrock::VI
+    frost_table::V; zwt_perched::V
+end
+Adapt.@adapt_structure _PLInDV
+
+Base.@kwdef struct _PLOutDV{V,M}
+    qflx_drain_perched::V; h2osoi_liq::M
+end
+Adapt.@adapt_structure _PLOutDV
+
+@kernel function _perched_lateral_flow_kernel!(qfdp_out, odv, @Const(idv), @Const(mask),
+        nlevsoi::Int, joff::Int, joff_zi::Int, dtime, perched_baseflow_scalar,
+        aq_sp_yield_min, rpi)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T   = eltype(qfdp_out)
+        zr  = zero(T)
+        on  = one(T)
+        e3  = T(1.0e3)
+        thou = T(1000.0)
+        aqy = T(aq_sp_yield_min)
+        nb  = idv.nbedrock[c]
+
+        # ---- locate frost table and perched water table layers ----
+        k_frost = nb
+        for k in 1:nb
+            zi_km1 = k > 1 ? idv.col_zi[c, k - 1 + joff_zi] : zr
+            if idv.frost_table[c] >= zi_km1 && idv.frost_table[c] < idv.col_zi[c, k + joff_zi]
+                k_frost = k
+                break
+            end
+        end
+        k_perch = nb
+        for k in 1:nb
+            zi_km1 = k > 1 ? idv.col_zi[c, k - 1 + joff_zi] : zr
+            if idv.zwt_perched[c] >= zi_km1 && idv.zwt_perched[c] < idv.col_zi[c, k + joff_zi]
+                k_perch = k
+                break
+            end
+        end
+
+        # ---- drainage from perched saturated region (non-hillslope) ----
+        qfdp = zr
+        out  = zr
+        if idv.frost_table[c] > idv.zwt_perched[c]
+            q_perch_max = T(perched_baseflow_scalar) * sin(idv.topo_slope[c] * (T(rpi) / T(180.0)))
+            wtsub = zr
+            q_perch = zr
+            for k in k_perch:(k_frost - 1)
+                q_perch += idv.hksat[c, k] * idv.col_dz[c, k + joff]
+                wtsub += idv.col_dz[c, k + joff]
+            end
+            if wtsub > zr
+                q_perch = q_perch / wtsub
+            end
+            out = q_perch_max * q_perch * (idv.frost_table[c] - idv.zwt_perched[c])
+        end
+
+        # ---- net drainage (no scatter on the non-hillslope path) ----
+        qfdp += out
+
+        # ---- remove drainage from soil moisture storage ----
+        drainage_tot = qfdp * dtime
+        for k in k_perch:(k_frost - 1)
+            s_y = idv.watsat[c, k] *
+                (on - (on + e3 * idv.zwt_perched[c] / idv.sucsat[c, k])^(-on / idv.bsw[c, k]))
+            s_y = smooth_max(s_y, aqy)
+
+            if k == k_perch
+                drainage_layer = smooth_min(drainage_tot, s_y * (idv.col_zi[c, k + joff_zi] - idv.zwt_perched[c]) * e3)
+            else
+                drainage_layer = smooth_min(drainage_tot, s_y * idv.col_dz[c, k + joff] * e3)
+            end
+            drainage_layer = smooth_max(drainage_layer, zr)
+            drainage_tot -= drainage_layer
+            odv.h2osoi_liq[c, k + joff] -= drainage_layer
+        end
+
+        qfdp -= drainage_tot / dtime
+        odv.qflx_drain_perched[c] = qfdp
+    end
+end
+
+function soilhyd_perched_lateral_flow!(odv, idv, mask, nlevsoi::Int, joff::Int, joff_zi::Int,
+                                       dtime, perched_baseflow_scalar, aq_sp_yield_min, rpi)
+    T = eltype(odv.qflx_drain_perched)
+    _launch!(_perched_lateral_flow_kernel!, odv.qflx_drain_perched, odv, idv, mask,
+             nlevsoi, joff, joff_zi, T(dtime), T(perched_baseflow_scalar),
+             T(aq_sp_yield_min), T(rpi); ndrange = length(mask))
+end
+
 """
     perched_lateral_flow!(soilhydrology, soilstate, waterstatebulk_ws,
                            waterfluxbulk, col_data, lun_data,
@@ -1824,9 +1934,9 @@ function perched_lateral_flow!(
     waterfluxbulk::WaterFluxBulkData,
     col_data::ColumnData,
     lun_data::LandunitData,
-    tdepth_grc::Vector{<:Real},
-    tdepthmax_grc::Vector{<:Real},
-    mask_hydrology::BitVector,
+    tdepth_grc::AbstractVector{<:Real},
+    tdepthmax_grc::AbstractVector{<:Real},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     dtime::Real;
@@ -1837,6 +1947,30 @@ function perched_lateral_flow!(
     nlevsno = varpar.nlevsno
     joff = nlevsno
     joff_zi = nlevsno + 1
+
+    # Device path (Metal/CUDA/…): the non-hillslope, per-column-independent
+    # subroutine runs as one thread per column. The hillslope donor/receiver
+    # scatter is not expressible as a race-free per-column kernel, so device
+    # execution is restricted to the non-hillslope case (asserted below). The
+    # CPU branch (KA.CPU backend) falls through to the byte-identical scalar
+    # body that handles both paths.
+    if !(KA.get_backend(soilhydrology.zwt_perched_col) isa KA.CPU)
+        any(col_data.is_hillslope_column) &&
+            error("perched_lateral_flow! device kernel supports non-hillslope columns only")
+        idv = _PLInDV(;
+            col_dz = col_data.dz, col_zi = col_data.zi,
+            hksat = soilstate.hksat_col, sucsat = soilstate.sucsat_col,
+            watsat = soilstate.watsat_col, bsw = soilstate.bsw_col,
+            topo_slope = col_data.topo_slope, nbedrock = col_data.nbedrock,
+            frost_table = soilhydrology.frost_table_col,
+            zwt_perched = soilhydrology.zwt_perched_col)
+        odv = _PLOutDV(;
+            qflx_drain_perched = wf.qflx_drain_perched_col,
+            h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col)
+        soilhyd_perched_lateral_flow!(odv, idv, mask_hydrology, nlevsoi, joff, joff_zi,
+            dtime, params.perched_baseflow_scalar, params.aq_sp_yield_min, RPI)
+        return nothing
+    end
 
     h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
     h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
@@ -2075,6 +2209,232 @@ end
 # SubsurfaceLateralFlow
 # =========================================================================
 
+# --------------------------------------------------------------------------
+# subsurface_lateral_flow! : ONE thread per (hydrology) column for the
+# NON-HILLSLOPE path. As with perched_lateral_flow!, that path is fully
+# per-column independent (`cold[c] == ISPVAL` so the hillslope inflow scatter
+# `qflx_latflow_in[cold[c]] += …` is never entered). Each thread runs the full
+# per-column sequence in-thread: icefrac/impedance, jwt search, power-law
+# baseflow, topographic-runoff water-table rise/deepen cascade (loop-carried
+# zwt), the upward excess redistribution, the surface/ice overflow, and the
+# watmin back-fill — writing only its own column. The hillslope downhill
+# scatter needs exact ordering and stays on the sequential CPU branch.
+#
+# All soil-column arrays are grouped into Adapt'd device-view bundles whose
+# field names mirror the scalar locals so the kernel body reads verbatim.
+# --------------------------------------------------------------------------
+Base.@kwdef struct _SLInDV{V,M,VI}
+    col_dz::M; col_zi::M
+    hksat::M; sucsat::M; watsat::M; bsw::M; eff_porosity::M
+    topo_slope::V; wtgcell::V; nbedrock::VI
+    itype::VI; landunit::VI; gridcell::VI
+    grc_area::V; frost_table::V
+    qflx_snwcp_liq::V
+end
+Adapt.@adapt_structure _SLInDV
+
+Base.@kwdef struct _SLOutDV{V,M}
+    zwt::V; h2osfc::V
+    h2osoi_liq::M; h2osoi_ice::M; icefrac::M
+    qflx_latflow_out::V; qflx_latflow_in::V; volumetric_discharge::V
+    qflx_drain::V; qflx_qrgwl::V; qflx_rsub_sat::V; qflx_ice_runoff_xs::V
+end
+Adapt.@adapt_structure _SLOutDV
+
+@kernel function _subsurface_lateral_flow_kernel!(zwt_out, odv, @Const(idv),
+        @Const(mask), @Const(mask_urban), @Const(urbpoi),
+        nlevsoi::Int, joff::Int, joff_zi::Int, dtime,
+        e_ice, n_baseflow, aq_sp_yield_min, baseflow_scalar, rpi,
+        denice, watmin, pondmx, icol_road_perv)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T    = eltype(zwt_out)
+        zr   = zero(T)
+        on   = one(T)
+        e3   = T(1.0e3)
+        em3  = T(1.0e-3)
+        e6   = T(1.0e6)
+        thou = T(1000.0)
+        aqy  = T(aq_sp_yield_min)
+        eice = T(e_ice)
+        DICE = T(denice)
+        WMIN = T(watmin)
+        PMX  = T(pondmx)
+        nb   = idv.nbedrock[c]
+        l    = idv.landunit[c]
+        g    = idv.gridcell[c]
+
+        # ---- icefrac / impedance, column-average impedance, jwt ----
+        zi_bedrock = idv.col_zi[c, nb + joff_zi]
+        jwt = nlevsoi
+        for j in 1:nlevsoi
+            if odv.zwt[c] <= idv.col_zi[c, j + joff_zi]
+                jwt = j - 1
+                break
+            end
+        end
+
+        dzsum = zr
+        icefracsum = zr
+        for j in max(jwt, 1):nlevsoi
+            dzmm_j = idv.col_dz[c, j + joff] * e3
+            vol_ice_val = smooth_min(idv.watsat[c, j], odv.h2osoi_ice[c, j + joff] / (idv.col_dz[c, j + joff] * DICE))
+            ic = smooth_min(on, vol_ice_val / idv.watsat[c, j])
+            odv.icefrac[c, j] = ic
+            dzsum += dzmm_j
+            icefracsum += ic * dzmm_j
+        end
+        ice_imped_col = T(10.0)^(-eice * (icefracsum / dzsum))
+
+        # ---- init fluxes ----
+        odv.qflx_drain[c]            = zr
+        odv.qflx_rsub_sat[c]         = zr
+        odv.qflx_latflow_in[c]       = zr
+        odv.qflx_latflow_out[c]      = zr
+        odv.volumetric_discharge[c]  = zr
+        drainage = zr
+
+        # ---- power-law baseflow (non-hillslope) ----
+        if odv.zwt[c] <= zi_bedrock
+            odv.qflx_latflow_out[c] = ice_imped_col * T(baseflow_scalar) *
+                tan(T(rpi) / T(180.0) * idv.topo_slope[c]) *
+                (zi_bedrock - odv.zwt[c])^T(n_baseflow)
+        end
+        qflx_latflow_out_vol = em3 * odv.qflx_latflow_out[c] *
+            (idv.grc_area[g] * e6 * idv.wtgcell[c])
+        odv.volumetric_discharge[c] = qflx_latflow_out_vol
+
+        # ---- topographic runoff: remove water via drainage ----
+        qflx_net_latflow = odv.qflx_latflow_out[c] - odv.qflx_latflow_in[c]
+        drainage = odv.zwt[c] <= zi_bedrock ? qflx_net_latflow : zr
+
+        drainage_tot = -drainage * dtime
+        if drainage_tot > zr  # rising water table
+            for j in (jwt + 1):-1:1
+                if idv.col_zi[c, j + joff_zi] < idv.frost_table[c]
+                    s_y = idv.watsat[c, j] *
+                        (on - (on + e3 * odv.zwt[c] / idv.sucsat[c, j])^(-on / idv.bsw[c, j]))
+                    s_y = smooth_max(s_y, aqy)
+                    drainage_layer = smooth_min(drainage_tot, s_y * idv.col_dz[c, j + joff] * e3)
+                    drainage_layer = smooth_max(drainage_layer, zr)
+                    odv.h2osoi_liq[c, j + joff] += drainage_layer
+                    drainage_tot -= drainage_layer
+                    if drainage_tot <= zr
+                        odv.zwt[c] -= drainage_layer / s_y / thou
+                        break
+                    else
+                        odv.zwt[c] = j > 1 ? idv.col_zi[c, j - 1 + joff_zi] : zr
+                    end
+                end
+            end
+            odv.h2osfc[c] += drainage_tot
+        else  # deepening water table
+            for j in (jwt + 1):nb
+                s_y = idv.watsat[c, j] *
+                    (on - (on + e3 * odv.zwt[c] / idv.sucsat[c, j])^(-on / idv.bsw[c, j]))
+                s_y = smooth_max(s_y, aqy)
+                drainage_layer = smooth_max(drainage_tot, -(s_y * (idv.col_zi[c, j + joff_zi] - odv.zwt[c]) * e3))
+                drainage_layer = smooth_min(drainage_layer, zr)
+                odv.h2osoi_liq[c, j + joff] += drainage_layer
+                drainage_tot -= drainage_layer
+                if drainage_tot >= zr
+                    odv.zwt[c] -= drainage_layer / s_y / thou
+                    break
+                else
+                    odv.zwt[c] = idv.col_zi[c, j + joff_zi]
+                end
+            end
+            drainage += drainage_tot / dtime
+        end
+        odv.zwt[c] = smooth_max(zr, odv.zwt[c])
+        odv.zwt[c] = smooth_min(T(80.0), odv.zwt[c])
+
+        # ---- excessive water above saturation: redistribute upward ----
+        for j in nlevsoi:-1:2
+            dzmm_j = idv.col_dz[c, j + joff] * e3
+            xsi = smooth_max(odv.h2osoi_liq[c, j + joff] - idv.eff_porosity[c, j] * dzmm_j, zr)
+            odv.h2osoi_liq[c, j + joff] = smooth_min(idv.eff_porosity[c, j] * dzmm_j, odv.h2osoi_liq[c, j + joff])
+            odv.h2osoi_liq[c, j - 1 + joff] += xsi
+        end
+
+        # ---- top-layer surface / ice overflow ----
+        dzmm_1 = idv.col_dz[c, 1 + joff] * e3
+        xs1 = smooth_max(smooth_max(odv.h2osoi_liq[c, 1 + joff] - WMIN, zr) -
+            smooth_max(zr, PMX + idv.watsat[c, 1] * dzmm_1 - odv.h2osoi_ice[c, 1 + joff] - WMIN), zr)
+        odv.h2osoi_liq[c, 1 + joff] -= xs1
+        if urbpoi[l]
+            odv.qflx_rsub_sat[c] = xs1 / dtime
+        else
+            odv.h2osfc[c] += xs1
+            odv.qflx_rsub_sat[c] = zr
+        end
+
+        xs1 = smooth_max(smooth_max(odv.h2osoi_ice[c, 1 + joff], zr) -
+            smooth_max(zr, PMX + idv.watsat[c, 1] * dzmm_1 - odv.h2osoi_liq[c, 1 + joff]), zr)
+        odv.h2osoi_ice[c, 1 + joff] = smooth_min(smooth_max(zr, PMX + idv.watsat[c, 1] * dzmm_1 - odv.h2osoi_liq[c, 1 + joff]),
+            odv.h2osoi_ice[c, 1 + joff])
+        odv.qflx_ice_runoff_xs[c] = xs1 / dtime
+
+        # ---- limit h2osoi_liq >= watmin (top nlevsoi-1 layers cascade down) ----
+        for j in 1:(nlevsoi - 1)
+            if odv.h2osoi_liq[c, j + joff] < WMIN
+                xs = WMIN - odv.h2osoi_liq[c, j + joff]
+                if j == jwt
+                    odv.zwt[c] += xs / idv.eff_porosity[c, j] / thou
+                end
+            else
+                xs = zr
+            end
+            odv.h2osoi_liq[c, j + joff]     += xs
+            odv.h2osoi_liq[c, j + 1 + joff] -= xs
+        end
+
+        # ---- bottom layer: pull water from above ----
+        jb = nlevsoi
+        if odv.h2osoi_liq[c, jb + joff] < WMIN
+            xs = WMIN - odv.h2osoi_liq[c, jb + joff]
+            for i in (nlevsoi - 1):-1:1
+                avail = smooth_max(odv.h2osoi_liq[c, i + joff] - WMIN - xs, zr)
+                if avail >= xs
+                    odv.h2osoi_liq[c, jb + joff] += xs
+                    odv.h2osoi_liq[c, i + joff]  -= xs
+                    xs = zr
+                    break
+                else
+                    odv.h2osoi_liq[c, jb + joff] += avail
+                    odv.h2osoi_liq[c, i + joff]  -= avail
+                    xs -= avail
+                end
+            end
+        else
+            xs = zr
+        end
+        odv.h2osoi_liq[c, jb + joff] += xs
+        odv.qflx_rsub_sat[c] -= xs / dtime
+
+        # ---- final fluxes ----
+        odv.qflx_drain[c] = odv.qflx_rsub_sat[c] + drainage
+        odv.qflx_qrgwl[c] = idv.qflx_snwcp_liq[c]
+
+        # ---- urban: no drainage except pervious road ----
+        if mask_urban[c] && idv.itype[c] != icol_road_perv
+            odv.qflx_drain[c] = zr
+            odv.qflx_qrgwl[c] = idv.qflx_snwcp_liq[c]
+        end
+    end
+end
+
+function soilhyd_subsurface_lateral_flow!(odv, idv, mask, mask_urban, urbpoi,
+        nlevsoi::Int, joff::Int, joff_zi::Int, dtime,
+        e_ice, n_baseflow, aq_sp_yield_min, baseflow_scalar, rpi,
+        denice, watmin, pondmx, icol_road_perv)
+    T = eltype(odv.zwt)
+    _launch!(_subsurface_lateral_flow_kernel!, odv.zwt, odv, idv, mask, mask_urban, urbpoi,
+             nlevsoi, joff, joff_zi, T(dtime), T(e_ice), T(n_baseflow), T(aq_sp_yield_min),
+             T(baseflow_scalar), T(rpi), T(denice), T(watmin), T(pondmx), icol_road_perv;
+             ndrange = length(mask))
+end
+
 """
     subsurface_lateral_flow!(soilhydrology, soilstate, waterstatebulk_ws,
                               waterfluxbulk, col_data, lun_data,
@@ -2095,11 +2455,11 @@ function subsurface_lateral_flow!(
     waterfluxbulk::WaterFluxBulkData,
     col_data::ColumnData,
     lun_data::LandunitData,
-    tdepth_grc::Vector{<:Real},
-    tdepthmax_grc::Vector{<:Real},
-    grc_area::Vector{<:Real},
-    mask_hydrology::BitVector,
-    mask_urban::BitVector,
+    tdepth_grc::AbstractVector{<:Real},
+    tdepthmax_grc::AbstractVector{<:Real},
+    grc_area::AbstractVector{<:Real},
+    mask_hydrology::AbstractVector{Bool},
+    mask_urban::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     dtime::Real;
@@ -2111,6 +2471,43 @@ function subsurface_lateral_flow!(
     nlevsno = varpar.nlevsno
     joff = nlevsno
     joff_zi = nlevsno + 1
+
+    # Device path (Metal/CUDA/…): one thread per column for the non-hillslope,
+    # per-column-independent subroutine. The hillslope inflow scatter
+    # (`qflx_latflow_in[cold[c]] += …`) needs exact ordering and is not a
+    # race-free per-column kernel, so device execution is restricted to the
+    # non-hillslope case. CPU arrays fall through to the byte-identical scalar
+    # body that handles both paths.
+    if !(KA.get_backend(soilhydrology.zwt_col) isa KA.CPU)
+        any(col_data.is_hillslope_column) &&
+            error("subsurface_lateral_flow! device kernel supports non-hillslope columns only")
+        idv = _SLInDV(;
+            col_dz = col_data.dz, col_zi = col_data.zi,
+            hksat = soilstate.hksat_col, sucsat = soilstate.sucsat_col,
+            watsat = soilstate.watsat_col, bsw = soilstate.bsw_col,
+            eff_porosity = soilstate.eff_porosity_col,
+            topo_slope = col_data.topo_slope, wtgcell = col_data.wtgcell,
+            nbedrock = col_data.nbedrock, itype = col_data.itype,
+            landunit = col_data.landunit, gridcell = col_data.gridcell,
+            grc_area = grc_area, frost_table = soilhydrology.frost_table_col,
+            qflx_snwcp_liq = wf.qflx_snwcp_liq_col)
+        odv = _SLOutDV(;
+            zwt = soilhydrology.zwt_col, h2osfc = waterstatebulk_ws.h2osfc_col,
+            h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col,
+            h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col,
+            icefrac = soilhydrology.icefrac_col,
+            qflx_latflow_out = wf.qflx_latflow_out_col,
+            qflx_latflow_in = wf.qflx_latflow_in_col,
+            volumetric_discharge = wf.volumetric_discharge_col,
+            qflx_drain = wf.qflx_drain_col, qflx_qrgwl = wf.qflx_qrgwl_col,
+            qflx_rsub_sat = wf.qflx_rsub_sat_col,
+            qflx_ice_runoff_xs = wf.qflx_ice_runoff_xs_col)
+        soilhyd_subsurface_lateral_flow!(odv, idv, mask_hydrology, mask_urban,
+            lun_data.urbpoi, nlevsoi, joff, joff_zi, dtime,
+            params.e_ice, params.n_baseflow, params.aq_sp_yield_min,
+            BASEFLOW_SCALAR[], RPI, DENICE, WATMIN, PONDMX, ICOL_ROAD_PERV)
+        return nothing
+    end
 
     h2osfc     = waterstatebulk_ws.h2osfc_col
     h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
