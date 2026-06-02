@@ -10,7 +10,12 @@ Status as of 2026-06-01. Goal: full `clm_drv!` timestep on GPU + AD-on-GPU.
 `water_table!`, `set_soil_water_fractions!`, `set_floodc!`, `set_qflx_inputs!`,
 `route_infiltration_excess!`, `infiltration!`, `total_surface_runoff!`,
 `renew_condensation!`, `saturated_excess_runoff!`, `infiltration_excess_runoff!`,
-`compute_effec_rootfrac_and_vert_tran_sink!`.
+`compute_effec_rootfrac_and_vert_tran_sink!`, and the **A7 snow suite**:
+`combine_snow_layers!`, `divide_snow_layers!`, `snow_compaction!`, the
+snow-percolation chain (`bulk_flux_snow_percolation!`, `update_state_snow_percolation!`,
+`calc_and_apply_aerosol_fluxes!`, `post_percolation_adjust_layer_thicknesses!`,
+`sum_flux_add_snow_percolation!`), `build_snow_filter!`, the 5 snow-capping fns,
+and `handle_new_snow!`'s inline loops.
 Plus ~156 element-wise ops, both batched linear solvers, and the
 friction-velocity / photosynthesis-Ci-core kernels.
 
@@ -40,7 +45,7 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 | A4 | **soil_fluxes!** | ✅ DONE (Metal whole-fn, 17 fields exact 0.0) | per-col/per-patch energy partitioning | feeds soil_temperature outputs; 3 device-view bundles + _scatter_add! errsoi average. |
 | A5 | **surface_radiation! + canopy_sun_shade_fracs!** | ✅ DONE (Metal whole-fn, 43 fields exact 0.0) | per-patch/per-band/per-layer, branchy | radiation pair; 5 device-view bundles, both snow/no-snow + urban/veg/bare + near-local-noon branches exercised. |
 | A6 | **canopy_interception_and_throughfall!** | ✅ DONE (Metal whole-fn, 15 fields, 12 at 0.0) | finished patch→column scatter (`_scatter_add!`) | scatter exercised by a 2-patch→1-col harness. |
-| A7 | **Snow suite**: handle_new_snow!, build_snow_filter!, bulk_flux_snow_percolation!, update_state_snow_percolation!, calc_and_apply_aerosol_fluxes!, post_percolation_adjust_layer_thicknesses!, sum_flux_add_snow_percolation!, snow capping (4 fns), snow_compaction! | HOST | variable-`snl` snow-layer loops, loop-carried across layers, per-species aerosol scatter | hardest mechanical cluster (combine/divide/compaction). |
+| A7 | **Snow suite**: handle_new_snow!, build_snow_filter!, bulk_flux_snow_percolation!, update_state_snow_percolation!, calc_and_apply_aerosol_fluxes!, post_percolation_adjust_layer_thicknesses!, sum_flux_add_snow_percolation!, snow capping (5 fns), snow_compaction!, combine/divide_snow_layers! | ✅ DONE (all whole-fn on Metal at 0.0; re-validated post-merge across snl=0/-1/-2/-3) | variable-`snl` snow-layer loops, loop-carried across layers, per-species aerosol scatter | hardest mechanical cluster — done via per-column kernels w/ in-thread sequential layer restructuring (combine/divide mutate snl in padded arrays); 4 agents, disjoint line-regions. **Follow-up:** handle_new_snow! orchestrator still calls host loops in snow_cover_fraction.jl (bulkdiag_new_snow_diagnostics!, update_snow_depth_and_frac!) — finish in A10. |
 | A8 | **Hydrology/runoff**: set_soil_water_fractions!, set_floodc!, saturated_excess_runoff!, set_qflx_inputs!, infiltration_excess_runoff!, route_infiltration_excess!, infiltration!, total_surface_runoff!, compute_effec_rootfrac_and_vert_tran_sink!, water_table!, renew_condensation! | ✅ DONE (all 11 whole-fn on Metal at 0.0/round-off; re-validated post-merge) | per-col + sequential water-table search | water_table! long pole done: 6 host loops (3 sequential nlevsoi searches w/ loop-carried state) → one per-column kernel, 2 device-view bundles. NOT done in this file: drainage!, perched/lateral flow, clm_vic_map!, irrigation. |
 | A9 | **Urban path**: urban_radiation!, urban_fluxes! | HOST | per-landunit/per-patch urban canyon | defer if urban not a near-term priority. |
 | A10 | **Smaller/init**: biogeophys_pre_flux_calcs! (partial), calc_root_moist_stress! (partial), calc_soilevap_resis!, calc_ozone_stress!, calculate_surface_humidity!, set_actual_roughness_lengths!, dust_dry_dep!, alt_calc!, update_daylength!, clm_drv_init! | mostly HOST | small per-col/per-patch loops | quick wins; finish the partials first. |
@@ -78,9 +83,9 @@ reuse; A7/A8 hardest). Phase B: many sessions (it's ~half the total loop volume)
 Phase C: blocked — scaffolding only until hardware.
 
 ### Recommended immediate sequence
-~~A1 → A2 → A3 → A4 → A5 → A6 → A8~~ DONE (all merged to main at 15681/15681).
-Remaining Phase A: A7 (snow, hardest mechanical cluster — combine/divide/compaction
-with variable-snl loops), A9 (urban, defer), A10 (small partials — quick wins).
-Also still HOST within soil_hydrology.jl: drainage!, perched/subsurface lateral flow,
-clm_vic_map!, irrigation withdrawals. Phase C scaffolding can be written anytime
-(no validation feedback). Phase B after Phase A biogeophys is GPU-complete.
+~~A1 → A2 → A3 → A4 → A5 → A6 → A7 → A8~~ DONE (all merged to main at 15681/15681).
+Remaining Phase A: A9 (urban, defer), A10 (small partials — quick wins; also finish
+handle_new_snow!'s snow_cover_fraction.jl helpers). Also still HOST within
+soil_hydrology.jl: drainage!, perched/subsurface lateral flow, clm_vic_map!,
+irrigation withdrawals. Phase C scaffolding can be written anytime (no validation
+feedback). Phase B after Phase A biogeophys is GPU-complete.
