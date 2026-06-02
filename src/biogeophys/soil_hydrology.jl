@@ -852,6 +852,367 @@ end
 # Drainage
 # =========================================================================
 
+# --------------------------------------------------------------------------
+# drainage! : ONE thread per column. The whole Drainage subroutine is per-column
+# with internal SEQUENTIAL nlevsoi level sweeps (jwt search, perched/baseflow
+# saturated-layer cascades with loop-carried zwt, the upward saturation-excess
+# redistribution and the watmin pull-from-below sweeps). All sweeps live inside
+# a column, so each thread runs the full subroutine in-thread and writes only
+# its own column's outputs (no cross-column dependence). The per-column scratch
+# vectors of the scalar version (jwt, rsub_top, fff, xs*_arr) become in-thread
+# locals; dzmm is recomputed inline as col_dz*1e3.
+#
+# Read-only inputs and read/write outputs are grouped into two immutable
+# device-view bundles (Adapt.@adapt_structure'd); field names mirror the
+# original Julia locals so the kernel body reads verbatim. On the host path the
+# same bundles are built from CPU arrays, so CPU stays byte-identical.
+# --------------------------------------------------------------------------
+
+# Soil-state / geometry / forcing inputs (read-only) the sweeps touch.
+Base.@kwdef struct _DrInDV{VR,VI,VB,M}
+    col_dz::M; col_z::M; col_zi::M; t_soisno::M
+    watsat::M; sucsat::M; bsw::M; hksat::M; eff_porosity::M
+    hkdepth::VR; col_topo_slope::VR; qflx_snwcp_liq::VR
+    col_itype::VI; col_landunit::VI; lun_urbpoi::VB
+end
+Adapt.@adapt_structure _DrInDV
+
+# State outputs (written and/or read-modified) the sweeps touch.
+Base.@kwdef struct _DrOutDV{VR,M}
+    zwt::VR; zwt_perched::VR; frost_table::VR; wa::VR; h2osfc::VR
+    h2osoi_liq::M; h2osoi_ice::M; icefrac::M
+    qflx_drain::VR; qflx_rsub_sat::VR; qflx_drain_perched::VR
+    qflx_qrgwl::VR; qflx_ice_runoff_xs::VR
+end
+Adapt.@adapt_structure _DrOutDV
+
+@kernel function _drainage_kernel!(zwt_out, odv, @Const(idv), @Const(mask_hydrology),
+        @Const(mask_urban), nlevsoi::Int, joff::Int, joff_zi::Int, dtime,
+        perched_baseflow_scalar, e_ice, aq_sp_yield_min, aquifer_water_baseline,
+        h2osfcflag::Int, icol_road_perv::Int, tfrz, denh2o, denice, watmin, pondmx, rpi)
+    c = @index(Global)
+    @inbounds begin
+        T     = eltype(zwt_out)
+        zr    = zero(T)
+        on    = one(T)
+        e3    = T(1.0e3)
+        thou  = T(1000.0)
+        TFRZl = T(tfrz)
+        DH2O  = T(denh2o)
+        DICE  = T(denice)
+        WMIN  = T(watmin)
+        PMX   = T(pondmx)
+        EICE  = T(e_ice)
+        AQY   = T(aq_sp_yield_min)
+        PBFS  = T(perched_baseflow_scalar)
+        AQWB  = T(aquifer_water_baseline)
+        deg2rad = T(rpi) / T(180.0)
+
+        rsub_top = zr   # per-column carried scalar (init 0)
+
+        if mask_hydrology[c]
+            # ---- icefrac (per layer) ----
+            for j in 1:nlevsoi
+                vol_ice_val = smooth_min(idv.watsat[c, j],
+                    odv.h2osoi_ice[c, j + joff] / (idv.col_dz[c, j + joff] * DICE))
+                odv.icefrac[c, j] = smooth_min(on, vol_ice_val / idv.watsat[c, j])
+            end
+
+            # ---- init drainage fluxes ----
+            odv.qflx_drain[c]    = zr
+            odv.qflx_rsub_sat[c] = zr
+
+            # ---- jwt: layer index right above water table ----
+            jwt = nlevsoi
+            for j in 1:nlevsoi
+                if odv.zwt[c] <= idv.col_zi[c, j + joff_zi]
+                    jwt = j - 1
+                    break
+                end
+            end
+
+            # ============================ BASEFLOW ============================
+            q_perch_max = PBFS * sin(idv.col_topo_slope[c] * deg2rad)
+
+            # define frost table
+            if idv.t_soisno[c, 1 + joff] > TFRZl
+                k_frz = nlevsoi
+            else
+                k_frz = 1
+            end
+            for k in 2:nlevsoi
+                if idv.t_soisno[c, k-1 + joff] > TFRZl && idv.t_soisno[c, k + joff] <= TFRZl
+                    k_frz = k
+                    break
+                end
+            end
+
+            odv.frost_table[c] = idv.col_z[c, k_frz + joff]
+            odv.zwt_perched[c] = odv.frost_table[c]
+            odv.qflx_drain_perched[c] = zr
+
+            if odv.zwt[c] < odv.frost_table[c] && idv.t_soisno[c, k_frz + joff] <= TFRZl
+                # ======= water table above frost table =======
+                wtsub = zr
+                q_perch = zr
+                for k in (jwt+1):k_frz
+                    imped = T(10.0)^(-EICE * (T(0.5) * (odv.icefrac[c, k] + odv.icefrac[c, min(nlevsoi, k+1)])))
+                    q_perch = q_perch + imped * idv.hksat[c, k] * (idv.col_dz[c, k + joff] * e3)
+                    wtsub = wtsub + (idv.col_dz[c, k + joff] * e3)
+                end
+                if wtsub > zr
+                    q_perch = q_perch / wtsub
+                end
+
+                odv.qflx_drain_perched[c] = q_perch_max * q_perch * (odv.frost_table[c] - odv.zwt[c])
+
+                rsub_top_tot = -odv.qflx_drain_perched[c] * dtime
+                for k in (jwt+1):k_frz
+                    rsub_top_layer = smooth_max(rsub_top_tot, -(odv.h2osoi_liq[c, k + joff] - WMIN))
+                    rsub_top_layer = smooth_min(rsub_top_layer, zr)
+                    rsub_top_tot = rsub_top_tot - rsub_top_layer
+
+                    odv.h2osoi_liq[c, k + joff] = odv.h2osoi_liq[c, k + joff] + rsub_top_layer
+
+                    if rsub_top_tot >= zr
+                        odv.zwt[c] = odv.zwt[c] - rsub_top_layer / idv.eff_porosity[c, k] / thou
+                        break
+                    else
+                        odv.zwt[c] = idv.col_zi[c, k + joff_zi]
+                    end
+                end
+
+                odv.qflx_drain_perched[c] = odv.qflx_drain_perched[c] + rsub_top_tot / dtime
+
+                # recompute jwt
+                jwt = nlevsoi
+                for j in 1:nlevsoi
+                    if odv.zwt[c] <= idv.col_zi[c, j + joff_zi]
+                        jwt = j - 1
+                        break
+                    end
+                end
+            else
+                # ======= water table below frost table =======
+                sat_lev = T(0.9)
+
+                k_perch = 1
+                for k in k_frz:-1:1
+                    h2osoi_vol_val = odv.h2osoi_liq[c, k + joff] / (idv.col_dz[c, k + joff] * DH2O) +
+                        odv.h2osoi_ice[c, k + joff] / (idv.col_dz[c, k + joff] * DICE)
+                    if h2osoi_vol_val / idv.watsat[c, k] <= sat_lev
+                        k_perch = k
+                        break
+                    end
+                end
+
+                if idv.t_soisno[c, k_frz + joff] > TFRZl
+                    k_perch = k_frz
+                end
+
+                if k_frz > k_perch
+                    s1 = (odv.h2osoi_liq[c, k_perch + joff] / (idv.col_dz[c, k_perch + joff] * DH2O) +
+                        odv.h2osoi_ice[c, k_perch + joff] / (idv.col_dz[c, k_perch + joff] * DICE)) / idv.watsat[c, k_perch]
+                    s2 = (odv.h2osoi_liq[c, k_perch+1 + joff] / (idv.col_dz[c, k_perch+1 + joff] * DH2O) +
+                        odv.h2osoi_ice[c, k_perch+1 + joff] / (idv.col_dz[c, k_perch+1 + joff] * DICE)) / idv.watsat[c, k_perch+1]
+
+                    m_val = (idv.col_z[c, k_perch+1 + joff] - idv.col_z[c, k_perch + joff]) / (s2 - s1)
+                    b_val = idv.col_z[c, k_perch+1 + joff] - m_val * s2
+                    odv.zwt_perched[c] = smooth_max(zr, m_val * sat_lev + b_val)
+
+                    wtsub = zr
+                    q_perch = zr
+                    for k in k_perch:k_frz
+                        imped = T(10.0)^(-EICE * (T(0.5) * (odv.icefrac[c, k] + odv.icefrac[c, min(nlevsoi, k+1)])))
+                        q_perch = q_perch + imped * idv.hksat[c, k] * (idv.col_dz[c, k + joff] * e3)
+                        wtsub = wtsub + (idv.col_dz[c, k + joff] * e3)
+                    end
+                    if wtsub > zr
+                        q_perch = q_perch / wtsub
+                    end
+
+                    odv.qflx_drain_perched[c] = q_perch_max * q_perch * (odv.frost_table[c] - odv.zwt_perched[c])
+
+                    rsub_top_tot = -odv.qflx_drain_perched[c] * dtime
+                    for k in (k_perch+1):k_frz
+                        rsub_top_layer = smooth_max(rsub_top_tot, -(odv.h2osoi_liq[c, k + joff] - WMIN))
+                        rsub_top_layer = smooth_min(rsub_top_layer, zr)
+                        rsub_top_tot = rsub_top_tot - rsub_top_layer
+
+                        odv.h2osoi_liq[c, k + joff] = odv.h2osoi_liq[c, k + joff] + rsub_top_layer
+
+                        if rsub_top_tot >= zr
+                            odv.zwt_perched[c] = odv.zwt_perched[c] - rsub_top_layer / idv.eff_porosity[c, k] / thou
+                            break
+                        else
+                            odv.zwt_perched[c] = idv.col_zi[c, k + joff_zi]
+                        end
+                    end
+
+                    odv.qflx_drain_perched[c] = odv.qflx_drain_perched[c] + rsub_top_tot / dtime
+                else
+                    odv.qflx_drain_perched[c] = zr
+                end
+
+                # -- Topographic runoff --
+                fff = on / idv.hkdepth[c]
+                dzsum = zr
+                icefracsum = zr
+                for j in max(jwt, 1):nlevsoi
+                    dzj = idv.col_dz[c, j + joff] * e3
+                    dzsum = dzsum + dzj
+                    icefracsum = icefracsum + odv.icefrac[c, j] * dzj
+                end
+
+                imped = T(10.0)^(-EICE * (icefracsum / dzsum))
+                rsub_top_max = T(10.0) * sin(deg2rad * idv.col_topo_slope[c])
+
+                rsub_top = imped * rsub_top_max * exp(-fff * odv.zwt[c])
+
+                # analytical expression for aquifer specific yield
+                _rous_base = on + e3 * odv.zwt[c] / idv.sucsat[c, nlevsoi]
+                _rous_exp = -on / idv.bsw[c, nlevsoi]
+                rous_local = idv.watsat[c, nlevsoi] * (on - _rous_base^_rous_exp)
+                rous_local = smooth_max(rous_local, AQY)
+
+                if jwt == nlevsoi
+                    # water table below soil column
+                    odv.wa[c] = odv.wa[c] - rsub_top * dtime
+                    odv.zwt[c] = odv.zwt[c] + (rsub_top * dtime) / thou / rous_local
+                    odv.h2osoi_liq[c, nlevsoi + joff] = odv.h2osoi_liq[c, nlevsoi + joff] +
+                        smooth_max(zr, odv.wa[c] - AQWB)
+                    odv.wa[c] = smooth_min(odv.wa[c], AQWB)
+                else
+                    # water table within soil layers
+                    rsub_top_tot = -rsub_top * dtime
+
+                    # rsub_top_tot <= 0 for valid inputs; positive branch is a no-op
+                    # here (the scalar CPU version errors / warns — never reached for
+                    # physically valid forcing, so this stays byte-identical).
+                    if rsub_top_tot <= zr
+                        for j in (jwt+1):nlevsoi
+                            s_y = idv.watsat[c, j] *
+                                (on - (on + e3 * odv.zwt[c] / idv.sucsat[c, j])^(-on / idv.bsw[c, j]))
+                            s_y = smooth_max(s_y, AQY)
+
+                            rsub_top_layer = smooth_max(rsub_top_tot,
+                                -(s_y * (idv.col_zi[c, j + joff_zi] - odv.zwt[c]) * e3))
+                            rsub_top_layer = smooth_min(rsub_top_layer, zr)
+                            odv.h2osoi_liq[c, j + joff] = odv.h2osoi_liq[c, j + joff] + rsub_top_layer
+
+                            rsub_top_tot = rsub_top_tot - rsub_top_layer
+
+                            if rsub_top_tot >= zr
+                                odv.zwt[c] = odv.zwt[c] - rsub_top_layer / s_y / thou
+                                break
+                            else
+                                odv.zwt[c] = idv.col_zi[c, j + joff_zi]
+                            end
+                        end
+
+                        odv.zwt[c] = odv.zwt[c] - rsub_top_tot / thou / rous_local
+                        odv.wa[c] = odv.wa[c] + rsub_top_tot
+                    end
+
+                    # recompute jwt
+                    jwt = nlevsoi
+                    for j in 1:nlevsoi
+                        if odv.zwt[c] <= idv.col_zi[c, j + joff_zi]
+                            jwt = j - 1
+                            break
+                        end
+                    end
+                end
+
+                odv.zwt[c] = smooth_max(zr, odv.zwt[c])
+                odv.zwt[c] = smooth_min(T(80.0), odv.zwt[c])
+            end
+
+            # ---- Excessive water above saturation: redistribute upward ----
+            for j in nlevsoi:-1:2
+                effp_dz = idv.eff_porosity[c, j] * (idv.col_dz[c, j + joff] * e3)
+                xsi = smooth_max(odv.h2osoi_liq[c, j + joff] - effp_dz, zr)
+                odv.h2osoi_liq[c, j + joff]   = smooth_min(effp_dz, odv.h2osoi_liq[c, j + joff])
+                odv.h2osoi_liq[c, j-1 + joff] = odv.h2osoi_liq[c, j-1 + joff] + xsi
+            end
+
+            # ---- watmin addition to fix water balance errors ----
+            dzmm1 = idv.col_dz[c, 1 + joff] * e3
+            xs1 = smooth_max(smooth_max(odv.h2osoi_liq[c, 1 + joff] - WMIN, zr) -
+                smooth_max(zr, PMX + idv.watsat[c, 1] * dzmm1 - odv.h2osoi_ice[c, 1 + joff] - WMIN), zr)
+            odv.h2osoi_liq[c, 1 + joff] = odv.h2osoi_liq[c, 1 + joff] - xs1
+
+            l = idv.col_landunit[c]
+            if idv.lun_urbpoi[l]
+                odv.qflx_rsub_sat[c] = xs1 / dtime
+            else
+                if h2osfcflag == 1
+                    odv.h2osfc[c] = odv.h2osfc[c] + xs1
+                    odv.qflx_rsub_sat[c] = zr
+                else
+                    odv.qflx_rsub_sat[c] = xs1 / dtime
+                end
+            end
+
+            # ---- ice check ----
+            xs1 = smooth_max(smooth_max(odv.h2osoi_ice[c, 1 + joff], zr) -
+                smooth_max(zr, PMX + idv.watsat[c, 1] * dzmm1 - odv.h2osoi_liq[c, 1 + joff]), zr)
+            odv.h2osoi_ice[c, 1 + joff] = smooth_min(
+                smooth_max(zr, PMX + idv.watsat[c, 1] * dzmm1 - odv.h2osoi_liq[c, 1 + joff]),
+                odv.h2osoi_ice[c, 1 + joff])
+            odv.qflx_ice_runoff_xs[c] = xs1 / dtime
+
+            # ---- Limit h2osoi_liq >= watmin: pull from below ----
+            for j in 1:(nlevsoi-1)
+                if odv.h2osoi_liq[c, j + joff] < WMIN
+                    xs = WMIN - odv.h2osoi_liq[c, j + joff]
+                    if j == jwt
+                        odv.zwt[c] = odv.zwt[c] + xs / idv.eff_porosity[c, j] / thou
+                    end
+                else
+                    xs = zr
+                end
+                odv.h2osoi_liq[c, j + joff]   = odv.h2osoi_liq[c, j + joff]   + xs
+                odv.h2osoi_liq[c, j+1 + joff] = odv.h2osoi_liq[c, j+1 + joff] - xs
+            end
+
+            # ---- Get water for bottom layer from layers above ----
+            jb = nlevsoi
+            if odv.h2osoi_liq[c, jb + joff] < WMIN
+                xs = WMIN - odv.h2osoi_liq[c, jb + joff]
+                for i in (nlevsoi-1):-1:1
+                    available = smooth_max(odv.h2osoi_liq[c, i + joff] - WMIN - xs, zr)
+                    if available >= xs
+                        odv.h2osoi_liq[c, jb + joff] = odv.h2osoi_liq[c, jb + joff] + xs
+                        odv.h2osoi_liq[c, i + joff]  = odv.h2osoi_liq[c, i + joff] - xs
+                        xs = zr
+                        break
+                    else
+                        odv.h2osoi_liq[c, jb + joff] = odv.h2osoi_liq[c, jb + joff] + available
+                        odv.h2osoi_liq[c, i + joff]  = odv.h2osoi_liq[c, i + joff] - available
+                        xs = xs - available
+                    end
+                end
+            else
+                xs = zr
+            end
+            odv.h2osoi_liq[c, jb + joff] = odv.h2osoi_liq[c, jb + joff] + xs
+            rsub_top = rsub_top - xs / dtime
+
+            odv.qflx_drain[c] = odv.qflx_rsub_sat[c] + rsub_top
+            odv.qflx_qrgwl[c] = idv.qflx_snwcp_liq[c]
+        end
+
+        # ---- No drainage for urban columns (except pervious road) ----
+        if mask_urban[c]
+            if idv.col_itype[c] != icol_road_perv
+                odv.qflx_drain[c] = zr
+                odv.qflx_qrgwl[c] = idv.qflx_snwcp_liq[c]
+            end
+        end
+    end
+end
+
 """
     drainage!(temperature_t_soisno, soilhydrology, soilstate,
               waterstatebulk_ws, waterfluxbulk, col_dz, col_z, col_zi,
@@ -865,21 +1226,21 @@ Calculate subsurface drainage.
 Ported from `Drainage` in `SoilHydrologyMod.F90`.
 """
 function drainage!(
-    temperature_t_soisno::Matrix{<:Real},
+    temperature_t_soisno::AbstractMatrix{<:Real},
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
     waterstatebulk_ws::WaterStateData,
     waterfluxbulk::WaterFluxBulkData,
-    col_dz::Matrix{<:Real},
-    col_z::Matrix{<:Real},
-    col_zi::Matrix{<:Real},
-    col_snl::Vector{Int},
-    col_itype::Vector{Int},
-    col_landunit::Vector{Int},
-    col_topo_slope::Vector{<:Real},
-    lun_urbpoi::Vector{Bool},
-    mask_hydrology::BitVector,
-    mask_urban::BitVector,
+    col_dz::AbstractMatrix{<:Real},
+    col_z::AbstractMatrix{<:Real},
+    col_zi::AbstractMatrix{<:Real},
+    col_snl::AbstractVector{Int},
+    col_itype::AbstractVector{Int},
+    col_landunit::AbstractVector{Int},
+    col_topo_slope::AbstractVector{<:Real},
+    lun_urbpoi::AbstractVector{Bool},
+    mask_hydrology::AbstractVector{Bool},
+    mask_urban::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     dtime::Real;
@@ -894,389 +1255,48 @@ function drainage!(
     joff = nlevsno
     joff_zi = nlevsno + 1
 
-    t_soisno   = temperature_t_soisno
-    h2osfc     = waterstatebulk_ws.h2osfc_col
-    h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
-    h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
-    wa         = waterstatebulk_ws.wa_col
-    aquifer_water_baseline = waterstatebulk_ws.aquifer_water_baseline
+    idv = _DrInDV(;
+        col_dz         = col_dz,
+        col_z          = col_z,
+        col_zi         = col_zi,
+        t_soisno       = temperature_t_soisno,
+        watsat         = soilstate.watsat_col,
+        sucsat         = soilstate.sucsat_col,
+        bsw            = soilstate.bsw_col,
+        hksat          = soilstate.hksat_col,
+        eff_porosity   = soilstate.eff_porosity_col,
+        hkdepth        = soilhydrology.hkdepth_col,
+        col_topo_slope = col_topo_slope,
+        qflx_snwcp_liq = wf.qflx_snwcp_liq_col,
+        col_itype      = col_itype,
+        col_landunit   = col_landunit,
+        lun_urbpoi     = lun_urbpoi)
 
-    bsw          = soilstate.bsw_col
-    hksat        = soilstate.hksat_col
-    sucsat       = soilstate.sucsat_col
-    watsat       = soilstate.watsat_col
-    eff_porosity = soilstate.eff_porosity_col
-    hk_l         = soilstate.hk_l_col
+    odv = _DrOutDV(;
+        zwt                = soilhydrology.zwt_col,
+        zwt_perched        = soilhydrology.zwt_perched_col,
+        frost_table        = soilhydrology.frost_table_col,
+        wa                 = waterstatebulk_ws.wa_col,
+        h2osfc             = waterstatebulk_ws.h2osfc_col,
+        h2osoi_liq         = waterstatebulk_ws.h2osoi_liq_col,
+        h2osoi_ice         = waterstatebulk_ws.h2osoi_ice_col,
+        icefrac            = soilhydrology.icefrac_col,
+        qflx_drain         = wf.qflx_drain_col,
+        qflx_rsub_sat      = wf.qflx_rsub_sat_col,
+        qflx_drain_perched = wf.qflx_drain_perched_col,
+        qflx_qrgwl         = wf.qflx_qrgwl_col,
+        qflx_ice_runoff_xs = wf.qflx_ice_runoff_xs_col)
 
-    icefrac      = soilhydrology.icefrac_col
-    hkdepth      = soilhydrology.hkdepth_col
-    frost_table  = soilhydrology.frost_table_col
-    zwt          = soilhydrology.zwt_col
-    zwt_perched  = soilhydrology.zwt_perched_col
-    h2osfcflag   = soilhydrology.h2osfcflag
-
-    qflx_snwcp_liq     = wf.qflx_snwcp_liq_col
-    qflx_ice_runoff_xs = wf.qflx_ice_runoff_xs_col
-    qflx_drain         = wf.qflx_drain_col
-    qflx_qrgwl         = wf.qflx_qrgwl_col
-    qflx_rsub_sat      = wf.qflx_rsub_sat_col
-    qflx_drain_perched = wf.qflx_drain_perched_col
-
-    # Local arrays
-    nb = last(bounds)
-    jwt      = Vector{Int}(undef, nb)
-    FT_dr = eltype(col_dz)
-    rsub_top = Vector{FT_dr}(undef, nb)
-    fff      = Vector{FT_dr}(undef, nb)
-    xsi_arr  = Vector{FT_dr}(undef, nb)
-    xs1_arr  = Vector{FT_dr}(undef, nb)
-    xs_arr   = Vector{FT_dr}(undef, nb)
-
-    dzmm = Matrix{FT_dr}(undef, nb, nlevsoi)
-
-    # Convert layer thicknesses and compute icefrac
-    for j in 1:nlevsoi
-        for c in bounds
-            mask_hydrology[c] || continue
-            dzmm[c, j] = col_dz[c, j + joff] * 1.0e3
-
-            vol_ice_val = smooth_min(watsat[c, j], h2osoi_ice[c, j + joff] / (col_dz[c, j + joff] * DENICE))
-            icefrac[c, j] = smooth_min(1.0, vol_ice_val / watsat[c, j])
-        end
-    end
-
-    # Initial set
-    for c in bounds
-        mask_hydrology[c] || continue
-        qflx_drain[c]    = 0.0
-        qflx_rsub_sat[c] = 0.0
-        rsub_top[c]       = 0.0
-    end
-
-    # jwt: layer index right above water table
-    for c in bounds
-        mask_hydrology[c] || continue
-        jwt[c] = nlevsoi
-        for j in 1:nlevsoi
-            if zwt[c] <= col_zi[c, j + joff_zi]
-                jwt[c] = j - 1
-                break
-            end
-        end
-    end
-
-    rous = 0.2
-
-    # ========================== BASEFLOW ====================================
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        q_perch_max = params.perched_baseflow_scalar * sin(col_topo_slope[c] * (RPI / 180.0))
-
-        # define frost table
-        if t_soisno[c, 1 + joff] > TFRZ
-            k_frz = nlevsoi
-        else
-            k_frz = 1
-        end
-
-        for k in 2:nlevsoi
-            if t_soisno[c, k-1 + joff] > TFRZ && t_soisno[c, k + joff] <= TFRZ
-                k_frz = k
-                break
-            end
-        end
-
-        frost_table[c] = col_z[c, k_frz + joff]
-        zwt_perched[c] = frost_table[c]
-        qflx_drain_perched[c] = 0.0
-
-        # ======= water table above frost table ========
-        if zwt[c] < frost_table[c] && t_soisno[c, k_frz + joff] <= TFRZ
-            # compute drainage from perched saturated region
-            wtsub = 0.0
-            q_perch = 0.0
-            for k in (jwt[c]+1):k_frz
-                imped = 10.0^(-params.e_ice * (0.5 * (icefrac[c, k] + icefrac[c, min(nlevsoi, k+1)])))
-                q_perch = q_perch + imped * hksat[c, k] * dzmm[c, k]
-                wtsub = wtsub + dzmm[c, k]
-            end
-            if wtsub > 0.0
-                q_perch = q_perch / wtsub
-            end
-
-            qflx_drain_perched[c] = q_perch_max * q_perch * (frost_table[c] - zwt[c])
-
-            # remove drainage from perched saturated layers
-            rsub_top_tot = -qflx_drain_perched[c] * dtime
-            for k in (jwt[c]+1):k_frz
-                rsub_top_layer = smooth_max(rsub_top_tot, -(h2osoi_liq[c, k + joff] - WATMIN))
-                rsub_top_layer = smooth_min(rsub_top_layer, 0.0)
-                rsub_top_tot = rsub_top_tot - rsub_top_layer
-
-                h2osoi_liq[c, k + joff] = h2osoi_liq[c, k + joff] + rsub_top_layer
-
-                if rsub_top_tot >= 0.0
-                    zwt[c] = zwt[c] - rsub_top_layer / eff_porosity[c, k] / 1000.0
-                    break
-                else
-                    zwt[c] = col_zi[c, k + joff_zi]
-                end
-            end
-
-            qflx_drain_perched[c] = qflx_drain_perched[c] + rsub_top_tot / dtime
-
-            # recompute jwt
-            jwt[c] = nlevsoi
-            for j in 1:nlevsoi
-                if zwt[c] <= col_zi[c, j + joff_zi]
-                    jwt[c] = j - 1
-                    break
-                end
-            end
-        else
-            # ======= water table below frost table ========
-            sat_lev = 0.9
-
-            k_perch = 1
-            for k in k_frz:-1:1
-                h2osoi_vol_val = h2osoi_liq[c, k + joff] / (col_dz[c, k + joff] * DENH2O) +
-                    h2osoi_ice[c, k + joff] / (col_dz[c, k + joff] * DENICE)
-
-                if h2osoi_vol_val / watsat[c, k] <= sat_lev
-                    k_perch = k
-                    break
-                end
-            end
-
-            if t_soisno[c, k_frz + joff] > TFRZ
-                k_perch = k_frz
-            end
-
-            # if perched water table exists
-            if k_frz > k_perch
-                s1 = (h2osoi_liq[c, k_perch + joff] / (col_dz[c, k_perch + joff] * DENH2O) +
-                    h2osoi_ice[c, k_perch + joff] / (col_dz[c, k_perch + joff] * DENICE)) / watsat[c, k_perch]
-                s2 = (h2osoi_liq[c, k_perch+1 + joff] / (col_dz[c, k_perch+1 + joff] * DENH2O) +
-                    h2osoi_ice[c, k_perch+1 + joff] / (col_dz[c, k_perch+1 + joff] * DENICE)) / watsat[c, k_perch+1]
-
-                m_val = (col_z[c, k_perch+1 + joff] - col_z[c, k_perch + joff]) / (s2 - s1)
-                b_val = col_z[c, k_perch+1 + joff] - m_val * s2
-                zwt_perched[c] = smooth_max(0.0, m_val * sat_lev + b_val)
-
-                # compute drainage from perched saturated region
-                wtsub = 0.0
-                q_perch = 0.0
-                for k in k_perch:k_frz
-                    imped = 10.0^(-params.e_ice * (0.5 * (icefrac[c, k] + icefrac[c, min(nlevsoi, k+1)])))
-                    q_perch = q_perch + imped * hksat[c, k] * dzmm[c, k]
-                    wtsub = wtsub + dzmm[c, k]
-                end
-                if wtsub > 0.0
-                    q_perch = q_perch / wtsub
-                end
-
-                qflx_drain_perched[c] = q_perch_max * q_perch * (frost_table[c] - zwt_perched[c])
-
-                # remove drainage from perched saturated layers
-                rsub_top_tot = -qflx_drain_perched[c] * dtime
-                for k in (k_perch+1):k_frz
-                    rsub_top_layer = smooth_max(rsub_top_tot, -(h2osoi_liq[c, k + joff] - WATMIN))
-                    rsub_top_layer = smooth_min(rsub_top_layer, 0.0)
-                    rsub_top_tot = rsub_top_tot - rsub_top_layer
-
-                    h2osoi_liq[c, k + joff] = h2osoi_liq[c, k + joff] + rsub_top_layer
-
-                    if rsub_top_tot >= 0.0
-                        zwt_perched[c] = zwt_perched[c] - rsub_top_layer / eff_porosity[c, k] / 1000.0
-                        break
-                    else
-                        zwt_perched[c] = col_zi[c, k + joff_zi]
-                    end
-                end
-
-                qflx_drain_perched[c] = qflx_drain_perched[c] + rsub_top_tot / dtime
-            else
-                qflx_drain_perched[c] = 0.0
-            end
-
-            # -- Topographic runoff --
-            fff[c] = 1.0 / hkdepth[c]
-            dzsum = 0.0
-            icefracsum = 0.0
-            for j in max(jwt[c], 1):nlevsoi
-                dzsum = dzsum + dzmm[c, j]
-                icefracsum = icefracsum + icefrac[c, j] * dzmm[c, j]
-            end
-
-            if !use_vichydro
-                imped = 10.0^(-params.e_ice * (icefracsum / dzsum))
-                rsub_top_max = 10.0 * sin((RPI / 180.0) * col_topo_slope[c])
-            else
-                # VIC hydrology path — not commonly used, stubbed
-                imped = 10.0^(-params.e_ice * (icefracsum / dzsum))
-                rsub_top_max = 10.0 * sin((RPI / 180.0) * col_topo_slope[c])
-            end
-
-            rsub_top[c] = imped * rsub_top_max * exp(-fff[c] * zwt[c])
-
-            # analytical expression for aquifer specific yield
-            _rous_base = 1.0 + 1.0e3 * zwt[c] / sucsat[c, nlevsoi]
-            _rous_exp = -1.0 / bsw[c, nlevsoi]
-            rous_local = watsat[c, nlevsoi] * (1.0 - _rous_base^_rous_exp)
-            rous_local = smooth_max(rous_local, params.aq_sp_yield_min)
-
-            if jwt[c] == nlevsoi
-                # water table below soil column
-                wa[c] = wa[c] - rsub_top[c] * dtime
-                zwt[c] = zwt[c] + (rsub_top[c] * dtime) / 1000.0 / rous_local
-                h2osoi_liq[c, nlevsoi + joff] = h2osoi_liq[c, nlevsoi + joff] + smooth_max(0.0, wa[c] - aquifer_water_baseline)
-                wa[c] = smooth_min(wa[c], aquifer_water_baseline)
-            else
-                # water table within soil layers
-                rsub_top_tot = -rsub_top[c] * dtime
-
-                if rsub_top_tot > 0.0
-                    if _is_ad_type(eltype(rsub_top))
-                        @warn "RSUB_TOP IS POSITIVE in Drainage (AD mode, continuing)" maxlog=1
-                    else
-                        error("RSUB_TOP IS POSITIVE in Drainage!")
-                    end
-                else
-                    for j in (jwt[c]+1):nlevsoi
-                        s_y = watsat[c, j] *
-                            (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
-                        s_y = smooth_max(s_y, params.aq_sp_yield_min)
-
-                        rsub_top_layer = smooth_max(rsub_top_tot, -(s_y * (col_zi[c, j + joff_zi] - zwt[c]) * 1.0e3))
-                        rsub_top_layer = smooth_min(rsub_top_layer, 0.0)
-                        h2osoi_liq[c, j + joff] = h2osoi_liq[c, j + joff] + rsub_top_layer
-
-                        rsub_top_tot = rsub_top_tot - rsub_top_layer
-
-                        if rsub_top_tot >= 0.0
-                            zwt[c] = zwt[c] - rsub_top_layer / s_y / 1000.0
-                            break
-                        else
-                            zwt[c] = col_zi[c, j + joff_zi]
-                        end
-                    end
-
-                    # remove residual
-                    zwt[c] = zwt[c] - rsub_top_tot / 1000.0 / rous_local
-                    wa[c] = wa[c] + rsub_top_tot
-                end
-
-                # recompute jwt
-                jwt[c] = nlevsoi
-                for j in 1:nlevsoi
-                    if zwt[c] <= col_zi[c, j + joff_zi]
-                        jwt[c] = j - 1
-                        break
-                    end
-                end
-            end
-
-            zwt[c] = smooth_max(0.0, zwt[c])
-            zwt[c] = smooth_min(80.0, zwt[c])
-        end
-    end
-
-    # Excessive water above saturation: redistribute upward
-    for j in nlevsoi:-1:2
-        for c in bounds
-            mask_hydrology[c] || continue
-            xsi_arr[c]             = smooth_max(h2osoi_liq[c, j + joff] - eff_porosity[c, j] * dzmm[c, j], 0.0)
-            h2osoi_liq[c, j + joff]   = smooth_min(eff_porosity[c, j] * dzmm[c, j], h2osoi_liq[c, j + joff])
-            h2osoi_liq[c, j-1 + joff] = h2osoi_liq[c, j-1 + joff] + xsi_arr[c]
-        end
-    end
-
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        # watmin addition to fix water balance errors
-        xs1_arr[c] = smooth_max(smooth_max(h2osoi_liq[c, 1 + joff] - WATMIN, 0.0) -
-            smooth_max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_ice[c, 1 + joff] - WATMIN), 0.0)
-        h2osoi_liq[c, 1 + joff] = h2osoi_liq[c, 1 + joff] - xs1_arr[c]
-
-        l = col_landunit[c]
-        if lun_urbpoi[l]
-            qflx_rsub_sat[c] = xs1_arr[c] / dtime
-        else
-            if h2osfcflag == 1
-                h2osfc[c] = h2osfc[c] + xs1_arr[c]
-                qflx_rsub_sat[c] = 0.0
-            else
-                qflx_rsub_sat[c] = xs1_arr[c] / dtime
-            end
-        end
-
-        # ice check
-        xs1_arr[c] = smooth_max(smooth_max(h2osoi_ice[c, 1 + joff], 0.0) -
-            smooth_max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1 + joff]), 0.0)
-        h2osoi_ice[c, 1 + joff] = smooth_min(smooth_max(0.0, PONDMX + watsat[c, 1] * dzmm[c, 1] - h2osoi_liq[c, 1 + joff]),
-            h2osoi_ice[c, 1 + joff])
-        qflx_ice_runoff_xs[c] = xs1_arr[c] / dtime
-    end
-
-    # Limit h2osoi_liq >= watmin: pull from below
-    for j in 1:(nlevsoi-1)
-        for c in bounds
-            mask_hydrology[c] || continue
-            if h2osoi_liq[c, j + joff] < WATMIN
-                xs_arr[c] = WATMIN - h2osoi_liq[c, j + joff]
-                if j == jwt[c]
-                    zwt[c] = zwt[c] + xs_arr[c] / eff_porosity[c, j] / 1000.0
-                end
-            else
-                xs_arr[c] = 0.0
-            end
-            h2osoi_liq[c, j + joff]   = h2osoi_liq[c, j + joff]   + xs_arr[c]
-            h2osoi_liq[c, j+1 + joff] = h2osoi_liq[c, j+1 + joff] - xs_arr[c]
-        end
-    end
-
-    # Get water for bottom layer from layers above if possible
-    j = nlevsoi
-    for c in bounds
-        mask_hydrology[c] || continue
-        if h2osoi_liq[c, j + joff] < WATMIN
-            xs_arr[c] = WATMIN - h2osoi_liq[c, j + joff]
-            for i in (nlevsoi-1):-1:1
-                available_h2osoi_liq = smooth_max(h2osoi_liq[c, i + joff] - WATMIN - xs_arr[c], 0.0)
-                if available_h2osoi_liq >= xs_arr[c]
-                    h2osoi_liq[c, j + joff] = h2osoi_liq[c, j + joff] + xs_arr[c]
-                    h2osoi_liq[c, i + joff] = h2osoi_liq[c, i + joff] - xs_arr[c]
-                    xs_arr[c] = 0.0
-                    break
-                else
-                    h2osoi_liq[c, j + joff] = h2osoi_liq[c, j + joff] + available_h2osoi_liq
-                    h2osoi_liq[c, i + joff] = h2osoi_liq[c, i + joff] - available_h2osoi_liq
-                    xs_arr[c] = xs_arr[c] - available_h2osoi_liq
-                end
-            end
-        else
-            xs_arr[c] = 0.0
-        end
-        h2osoi_liq[c, j + joff] = h2osoi_liq[c, j + joff] + xs_arr[c]
-        rsub_top[c] = rsub_top[c] - xs_arr[c] / dtime
-    end
-
-    for c in bounds
-        mask_hydrology[c] || continue
-        qflx_drain[c] = qflx_rsub_sat[c] + rsub_top[c]
-        qflx_qrgwl[c] = qflx_snwcp_liq[c]
-    end
-
-    # No drainage for urban columns (except pervious road)
-    for c in bounds
-        mask_urban[c] || continue
-        if col_itype[c] != ICOL_ROAD_PERV
-            qflx_drain[c] = 0.0
-            qflx_qrgwl[c] = qflx_snwcp_liq[c]
-        end
-    end
+    # Convert every scalar real to the working precision of the device arrays so
+    # no Float64 literal reaches the Float32-only Metal backend (byte-identical on
+    # a Float64 CPU run: T(x) === x there).
+    T = eltype(odv.zwt)
+    _launch!(_drainage_kernel!, odv.zwt, odv, idv, mask_hydrology, mask_urban,
+             nlevsoi, joff, joff_zi, T(dtime),
+             T(params.perched_baseflow_scalar), T(params.e_ice), T(params.aq_sp_yield_min),
+             T(waterstatebulk_ws.aquifer_water_baseline), soilhydrology.h2osfcflag,
+             ICOL_ROAD_PERV, T(TFRZ), T(DENH2O), T(DENICE), T(WATMIN), T(PONDMX), T(RPI);
+             ndrange = length(mask_hydrology))
 
     return nothing
 end
@@ -1284,6 +1304,86 @@ end
 # =========================================================================
 # CLMVICMap
 # =========================================================================
+
+# --------------------------------------------------------------------------
+# clm_vic_map! : ONE thread per (hydrology) column. The CLM->VIC layer map is
+# fully per-column: each thread sums its own CLM layers into VIC layers, then
+# accumulates the per-column top-layer totals. No cross-column dependence, so
+# the whole subroutine runs in-thread; writes touch only the thread's column.
+#
+# All read-only inputs + read/write outputs are grouped into two immutable
+# device-view bundles (Adapt.@adapt_structure'd); field names mirror the
+# original Julia locals so the kernel body reads verbatim. On the host path the
+# same bundles are built from CPU arrays, so CPU stays byte-identical.
+# --------------------------------------------------------------------------
+
+# Read-only inputs the map touches.
+Base.@kwdef struct _VicInDV{M,A3}
+    h2osoi_liq::M; h2osoi_ice::M; h2osoi_vol::M
+    depth::M; porosity::M; max_moist::M
+    vic_clm_fract::A3
+end
+Adapt.@adapt_structure _VicInDV
+
+# State outputs (written / read-modified) the map touches.
+Base.@kwdef struct _VicOutDV{V,M}
+    moist::M; ice::M; moist_vol::M
+    top_moist::V; top_max_moist::V; top_ice::V; top_moist_limited::V
+end
+Adapt.@adapt_structure _VicOutDV
+
+@kernel function _clm_vic_map_kernel!(moist_out, odv, @Const(idv), @Const(mask),
+        nlevsoi::Int, nlevgrnd::Int, nlayer::Int, nlayert::Int, watmin, denh2o, denice)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T   = eltype(moist_out)
+        zr  = zero(T)
+        WMIN = T(watmin)
+        DH2O = T(denh2o)
+        DICE = T(denice)
+        small = T(0.01)
+
+        for i in 1:nlayer
+            ice0   = odv.ice[c, i]
+            moist0 = odv.moist[c, i]
+            odv.ice[c, i]   = zr
+            odv.moist[c, i] = zr
+            for j in 1:nlevsoi
+                odv.ice[c, i]   = odv.ice[c, i]   + idv.h2osoi_ice[c, j] * idv.vic_clm_fract[c, i, j]
+                odv.moist[c, i] = odv.moist[c, i] + idv.h2osoi_liq[c, j] * idv.vic_clm_fract[c, i, j]
+            end
+            odv.ice[c, i]       = smooth_min(moist0 + ice0, odv.ice[c, i])
+            odv.ice[c, i]       = smooth_max(zr, odv.ice[c, i])
+            odv.moist[c, i]     = smooth_max(WMIN, odv.moist[c, i])
+            odv.moist[c, i]     = smooth_min(idv.max_moist[c, i] - odv.ice[c, i], odv.moist[c, i])
+            odv.moist_vol[c, i] = odv.moist[c, i] / (idv.depth[c, i] * DICE) +
+                                  odv.ice[c, i]   / (idv.depth[c, i] * DH2O)
+            odv.moist_vol[c, i] = smooth_min(idv.porosity[c, i], odv.moist_vol[c, i])
+            odv.moist_vol[c, i] = smooth_max(small, odv.moist_vol[c, i])
+        end
+
+        # hydrologic inactive layers
+        for k in (nlayer+1):nlayert
+            j_clm = nlevsoi + (k - nlayer)
+            if j_clm <= nlevgrnd
+                odv.ice[c, k]       = idv.h2osoi_ice[c, j_clm]
+                odv.moist[c, k]     = idv.h2osoi_liq[c, j_clm]
+                odv.moist_vol[c, k] = idv.h2osoi_vol[c, j_clm]
+            end
+        end
+
+        # top VIC layer totals
+        odv.top_moist[c]     = zr
+        odv.top_ice[c]       = zr
+        odv.top_max_moist[c] = zr
+        for j in 1:(nlayer - 1)
+            odv.top_ice[c]       = odv.top_ice[c]   + odv.ice[c, j]
+            odv.top_moist[c]     = odv.top_moist[c] + odv.moist[c, j] + odv.ice[c, j]
+            odv.top_max_moist[c] = odv.top_max_moist[c] + idv.max_moist[c, j]
+        end
+        odv.top_moist_limited[c] = smooth_min(odv.top_moist[c], odv.top_max_moist[c])
+    end
+end
 
 """
     clm_vic_map!(soilhydrology, waterstatebulk_ws, col_dz, col_zi, col_z,
@@ -1296,85 +1396,40 @@ Ported from `CLMVICMap` in `SoilHydrologyMod.F90`.
 function clm_vic_map!(
     soilhydrology::SoilHydrologyData,
     waterstatebulk_ws::WaterStateData,
-    col_dz::Matrix{<:Real},
-    col_zi::Matrix{<:Real},
-    col_z::Matrix{<:Real},
-    mask::BitVector,
+    col_dz::AbstractMatrix{<:Real},
+    col_zi::AbstractMatrix{<:Real},
+    col_z::AbstractMatrix{<:Real},
+    mask::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     nlevgrnd::Int,
     nlayer::Int,
     nlayert::Int
 )
-    h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
-    h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
-    h2osoi_vol = waterstatebulk_ws.h2osoi_vol_col
+    idv = _VicInDV(;
+        h2osoi_liq    = waterstatebulk_ws.h2osoi_liq_col,
+        h2osoi_ice    = waterstatebulk_ws.h2osoi_ice_col,
+        h2osoi_vol    = waterstatebulk_ws.h2osoi_vol_col,
+        depth         = soilhydrology.depth_col,
+        porosity      = soilhydrology.porosity_col,
+        max_moist     = soilhydrology.max_moist_col,
+        vic_clm_fract = soilhydrology.vic_clm_fract_col)
 
-    depth         = soilhydrology.depth_col
-    porosity      = soilhydrology.porosity_col
-    max_moist     = soilhydrology.max_moist_col
-    vic_clm_fract = soilhydrology.vic_clm_fract_col
-    moist         = soilhydrology.moist_col
-    ice           = soilhydrology.ice_col
-    moist_vol     = soilhydrology.moist_vol_col
-    top_moist     = soilhydrology.top_moist_col
-    top_max_moist = soilhydrology.top_max_moist_col
-    top_ice       = soilhydrology.top_ice_col
-    top_moist_limited = soilhydrology.top_moist_limited_col
+    odv = _VicOutDV(;
+        moist             = soilhydrology.moist_col,
+        ice               = soilhydrology.ice_col,
+        moist_vol         = soilhydrology.moist_vol_col,
+        top_moist         = soilhydrology.top_moist_col,
+        top_max_moist     = soilhydrology.top_max_moist_col,
+        top_ice           = soilhydrology.top_ice_col,
+        top_moist_limited = soilhydrology.top_moist_limited_col)
 
-    for c in bounds
-        mask[c] || continue
-
-        for i in 1:nlayer
-            ice0 = ice[c, i]
-            moist0 = moist[c, i]
-            ice[c, i] = 0.0
-            moist[c, i] = 0.0
-            for j in 1:nlevsoi
-                ice[c, i] = ice[c, i] + h2osoi_ice[c, j] * vic_clm_fract[c, i, j]
-                moist[c, i] = moist[c, i] + h2osoi_liq[c, j] * vic_clm_fract[c, i, j]
-            end
-            ice[c, i]       = smooth_min(moist0 + ice0, ice[c, i])
-            ice[c, i]       = smooth_max(0.0, ice[c, i])
-            moist[c, i]     = smooth_max(WATMIN, moist[c, i])
-            moist[c, i]     = smooth_min(max_moist[c, i] - ice[c, i], moist[c, i])
-            moist_vol[c, i] = moist[c, i] / (depth[c, i] * DENICE) + ice[c, i] / (depth[c, i] * DENH2O)
-            moist_vol[c, i] = smooth_min(porosity[c, i], moist_vol[c, i])
-            moist_vol[c, i] = smooth_max(0.01, moist_vol[c, i])
-        end
-
-        # hydrologic inactive layers
-        for k in (nlayer+1):nlayert
-            j_clm = nlevsoi + (k - nlayer)
-            if j_clm <= nlevgrnd
-                ice[c, k]       = h2osoi_ice[c, j_clm]
-                moist[c, k]     = h2osoi_liq[c, j_clm]
-                moist_vol[c, k] = h2osoi_vol[c, j_clm]
-            end
-        end
-    end
-
-    # Set values related to top VIC layers
-    for c in bounds
-        mask[c] || continue
-        top_moist[c]     = 0.0
-        top_ice[c]       = 0.0
-        top_max_moist[c] = 0.0
-    end
-
-    for j in 1:(nlayer - 1)
-        for c in bounds
-            mask[c] || continue
-            top_ice[c]       = top_ice[c] + ice[c, j]
-            top_moist[c]     = top_moist[c] + moist[c, j] + ice[c, j]
-            top_max_moist[c] = top_max_moist[c] + max_moist[c, j]
-        end
-    end
-
-    for c in bounds
-        mask[c] || continue
-        top_moist_limited[c] = smooth_min(top_moist[c], top_max_moist[c])
-    end
+    # Convert scalar constants to the device working precision (no Float64 reaches
+    # the Float32-only Metal backend; identity on a Float64 CPU run).
+    T = eltype(odv.moist)
+    _launch!(_clm_vic_map_kernel!, odv.moist, odv, idv, mask,
+             nlevsoi, nlevgrnd, nlayer, nlayert, T(WATMIN), T(DENH2O), T(DENICE);
+             ndrange = length(mask))
 
     return nothing
 end
