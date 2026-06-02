@@ -718,6 +718,57 @@ Coordinates:
 
 Ported from `HandleNewSnow` in `HydrologyNoDrainageMod.F90`.
 """
+# Fallback temperature-only new-snow bulk density (used only when no wind forcing
+# is supplied). Mirrors the scalar branches; literals carried at the working
+# precision so no Float64 reaches a Float32-only backend (Metal). Byte-identical on
+# Float64.
+@kernel function _hydrond_bifall_fallback_kernel!(bifall, @Const(mask_nolake),
+        @Const(forc_t), tfrz, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        T = eltype(bifall)
+        ft = forc_t[c]
+        if ft > tfrz + T(2.0)
+            bifall[c] = T(50.0) + T(1.7) * T(17.0)^T(1.5)
+        elseif ft > tfrz - T(15.0)
+            bifall[c] = T(50.0) + T(1.7) * (ft - tfrz + T(15.0))^T(1.5)
+        else
+            bifall[c] = T(50.0)
+        end
+    end
+end
+
+# Total H2O in the snow pack per column: the no-layer reservoir plus the sum of
+# ice+liquid over the resolved snow layers [snl+1 .. 0]. This is a per-column kernel
+# with an INTERNAL sequential snow-layer loop (loop-carried accumulation), the
+# established pattern for variable-snl reductions.
+@kernel function _hydrond_h2osno_total_kernel!(h2osno_total, @Const(mask_nolake),
+        @Const(snl), @Const(h2osno_no_layers), @Const(h2osoi_ice), @Const(h2osoi_liq),
+        nlevsno::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        tot = h2osno_no_layers[c]
+        for j in (snl[c] + 1):0
+            jj = j + nlevsno
+            tot += h2osoi_ice[c, jj] + h2osoi_liq[c, jj]
+        end
+        h2osno_total[c] = tot
+    end
+end
+
+# Gather per-column landunit type and urban flag (landunit-indexed reads) so the
+# downstream diagnostics see flat column-indexed inputs.
+@kernel function _hydrond_gather_lun_kernel!(lun_itype_col, @Const(mask_nolake),
+        @Const(col_landunit), @Const(lun_itype), @Const(lun_urbpoi), urbpoi_col,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        l = col_landunit[c]
+        lun_itype_col[c] = lun_itype[l]
+        urbpoi_col[c] = lun_urbpoi[l]
+    end
+end
+
 function handle_new_snow!(
     temperature::TemperatureData,
     waterstatebulk::WaterStateBulkData,
@@ -746,40 +797,24 @@ function handle_new_snow!(
                                mask_nolake, bounds)
     else
         # Fallback: use temperature-only bulk density
-        for c in bounds
-            mask_nolake[c] || continue
-            if forc_t[c] > TFRZ + 2.0
-                bifall[c] = 50.0 + 1.7 * (17.0)^1.5
-            elseif forc_t[c] > TFRZ - 15.0
-                bifall[c] = 50.0 + 1.7 * (forc_t[c] - TFRZ + 15.0)^1.5
-            else
-                bifall[c] = 50.0
-            end
-        end
+        _launch!(_hydrond_bifall_fallback_kernel!, bifall, mask_nolake, forc_t,
+                 FT(TFRZ), first(bounds), last(bounds))
     end
 
-    # Step 1b: Calculate total H2O in snow (h2osno_total)
+    # Step 1b: Calculate total H2O in snow (h2osno_total) — per-column kernel with
+    # an internal sequential snow-layer loop (loop-carried accumulation).
     FT_hs = eltype(forc_t)
     h2osno_total = zeros(FT_hs, nc)
-    for c in bounds
-        mask_nolake[c] || continue
-        h2osno_total[c] = waterstatebulk.ws.h2osno_no_layers_col[c]
-        for j in (col.snl[c]+1):0
-            jj = j + nlevsno
-            h2osno_total[c] += waterstatebulk.ws.h2osoi_ice_col[c, jj] +
-                               waterstatebulk.ws.h2osoi_liq_col[c, jj]
-        end
-    end
+    _launch!(_hydrond_h2osno_total_kernel!, h2osno_total, mask_nolake, col.snl,
+             waterstatebulk.ws.h2osno_no_layers_col,
+             waterstatebulk.ws.h2osoi_ice_col, waterstatebulk.ws.h2osoi_liq_col,
+             nlevsno, first(bounds), last(bounds))
 
     # Step 1c: Update snow diagnostics (snow_depth, frac_sno, int_snow, swe_old)
     lun_itype_col = Vector{Int}(undef, nc)
     urbpoi_col = Vector{Bool}(undef, nc)
-    for c in bounds
-        mask_nolake[c] || continue
-        l = col.landunit[c]
-        lun_itype_col[c] = lun.itype[l]
-        urbpoi_col[c] = lun.urbpoi[l]
-    end
+    _launch!(_hydrond_gather_lun_kernel!, lun_itype_col, mask_nolake, col.landunit,
+             lun.itype, lun.urbpoi, urbpoi_col, first(bounds), last(bounds))
 
     bulkdiag_new_snow_diagnostics!(
         col.dz, int_snow, waterdiagbulk.swe_old_col,
