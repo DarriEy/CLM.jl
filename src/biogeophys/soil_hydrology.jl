@@ -294,12 +294,14 @@ soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
                                                 pondmx_urban, dtime)
     c = @index(Global)
     @inbounds if mask_urban[c]
+        T = eltype(h2osoi_liq)        # working precision (Float32 on Metal); no Float64 literals
+        zr = zero(T)
         if col_itype[c] == icol_roof || col_itype[c] == icol_road_imperv
             if col_snl[c] >= 0
-                if xs_urban[c] > 0.0
+                if xs_urban[c] > zr
                     h2osoi_liq[c, 1] = pondmx_urban
                 else
-                    h2osoi_liq[c, 1] = smooth_max(0.0, h2osoi_liq[c, 1] +
+                    h2osoi_liq[c, 1] = smooth_max(zr, h2osoi_liq[c, 1] +
                         (qflx_rain_plus_snomelt[c] - qflx_liqevap_from_top_layer[c]) * dtime)
                 end
             end
@@ -312,7 +314,8 @@ soilhyd_urban_ponding!(h2osoi_liq, mask_urban, col_itype, col_snl, xs_urban,
                        icol_roof::Int, icol_road_imperv::Int, pondmx_urban, dtime) =
     _launch!(_soilhyd_urban_ponding_kernel!, h2osoi_liq, mask_urban, col_itype,
              col_snl, xs_urban, qflx_rain_plus_snomelt, qflx_liqevap_from_top_layer,
-             icol_roof, icol_road_imperv, pondmx_urban, dtime)
+             icol_roof, icol_road_imperv, convert(eltype(h2osoi_liq), pondmx_urban),
+             convert(eltype(h2osoi_liq), dtime))
 
 # ---- withdraw_groundwater_irrigation! : per-(column,layer) liq withdrawal ----
 @kernel function _soilhyd_withdraw_gw_lyr_kernel!(h2osoi_liq, @Const(mask),
@@ -325,7 +328,7 @@ end
 
 soilhyd_withdraw_gw_lyr!(h2osoi_liq, mask, qflx_gw_uncon_irrig_lyr, nlevsoi::Int, dtime) =
     _launch!(_soilhyd_withdraw_gw_lyr_kernel!, h2osoi_liq, mask, qflx_gw_uncon_irrig_lyr,
-             dtime; ndrange = (length(mask), nlevsoi))
+             convert(eltype(h2osoi_liq), dtime); ndrange = (length(mask), nlevsoi))
 
 # ---- withdraw_groundwater_irrigation! : per-column confined aquifer ----
 @kernel function _soilhyd_withdraw_gw_con_kernel!(wa, @Const(mask),
@@ -337,7 +340,8 @@ soilhyd_withdraw_gw_lyr!(h2osoi_liq, mask, qflx_gw_uncon_irrig_lyr, nlevsoi::Int
 end
 
 soilhyd_withdraw_gw_con!(wa, mask, qflx_gw_con_irrig, dtime) =
-    _launch!(_soilhyd_withdraw_gw_con_kernel!, wa, mask, qflx_gw_con_irrig, dtime)
+    _launch!(_soilhyd_withdraw_gw_con_kernel!, wa, mask, qflx_gw_con_irrig,
+             convert(eltype(wa), dtime))
 
 # =========================================================================
 # SetSoilWaterFractions
@@ -579,9 +583,9 @@ function update_urban_ponding!(
     waterstatebulk_ws::WaterStateData,
     soilhydrology::SoilHydrologyData,
     waterfluxbulk::WaterFluxBulkData,
-    col_snl::Vector{Int},
-    col_itype::Vector{Int},
-    mask_urban::BitVector,
+    col_snl::AbstractVector{<:Integer},
+    col_itype::AbstractVector{<:Integer},
+    mask_urban::AbstractVector{Bool},
     bounds::UnitRange{Int},
     dtime::Real
 )
@@ -1785,7 +1789,7 @@ Ported from `WithdrawGroundwaterIrrigation` in `SoilHydrologyMod.F90`.
 function withdraw_groundwater_irrigation!(
     waterflux_wf::WaterFluxData,
     waterstate_ws::WaterStateData,
-    mask_soil::BitVector,
+    mask_soil::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     dtime::Real
