@@ -47,8 +47,8 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 | A6 | **canopy_interception_and_throughfall!** | ✅ DONE (Metal whole-fn, 15 fields, 12 at 0.0) | finished patch→column scatter (`_scatter_add!`) | scatter exercised by a 2-patch→1-col harness. |
 | A7 | **Snow suite**: handle_new_snow!, build_snow_filter!, bulk_flux_snow_percolation!, update_state_snow_percolation!, calc_and_apply_aerosol_fluxes!, post_percolation_adjust_layer_thicknesses!, sum_flux_add_snow_percolation!, snow capping (5 fns), snow_compaction!, combine/divide_snow_layers! | ✅ DONE (all whole-fn on Metal at 0.0; re-validated post-merge across snl=0/-1/-2/-3) | variable-`snl` snow-layer loops, loop-carried across layers, per-species aerosol scatter | hardest mechanical cluster — done via per-column kernels w/ in-thread sequential layer restructuring (combine/divide mutate snl in padded arrays); 4 agents, disjoint line-regions. **Follow-up:** handle_new_snow! orchestrator still calls host loops in snow_cover_fraction.jl (bulkdiag_new_snow_diagnostics!, update_snow_depth_and_frac!) — finish in A10. |
 | A8 | **Hydrology/runoff**: set_soil_water_fractions!, set_floodc!, saturated_excess_runoff!, set_qflx_inputs!, infiltration_excess_runoff!, route_infiltration_excess!, infiltration!, total_surface_runoff!, compute_effec_rootfrac_and_vert_tran_sink!, water_table!, renew_condensation! | ✅ DONE (all 11 whole-fn on Metal at 0.0/round-off; re-validated post-merge) | per-col + sequential water-table search | water_table! long pole done: 6 host loops (3 sequential nlevsoi searches w/ loop-carried state) → one per-column kernel, 2 device-view bundles. **Tail also DONE** (separate batch): drainage! + clm_vic_map!, perched_water_table! + theta_based_water_table!, perched/subsurface_lateral_flow!, update_urban_ponding! + irrigation withdrawals — all whole-fn on Metal at 0.0/round-off, validated post-merge. Still HOST: hillslope-connectivity path of lateral flow (kept on CPU; device asserts non-hillslope). |
-| A9 | **Urban path**: urban_radiation!, urban_fluxes! | HOST | per-landunit/per-patch urban canyon | defer if urban not a near-term priority. |
-| A10 | **Smaller/init**: biogeophys_pre_flux_calcs! (partial), calc_root_moist_stress! (partial), calc_soilevap_resis!, calc_ozone_stress!, calculate_surface_humidity!, set_actual_roughness_lengths!, dust_dry_dep!, alt_calc!, update_daylength!, clm_drv_init! | mostly HOST | small per-col/per-patch loops | quick wins; finish the partials first. |
+| A9 | **Urban path**: urban_radiation!, urban_fluxes! | 🟡 urban_radiation! DONE (whole-fn on Metal, day+night); urban_fluxes! PARTIAL (column-independent canyon-surface block + diagnostics on Metal at 0.0) | per-landunit/per-patch urban canyon | **Follow-up:** urban_fluxes! iterative canyon-air solve still HOST — 3-iter stability loop, loop-carried + patch→landunit reduction into taf/qaf + sum()-based error check. Needs the canopy_fluxes! Newton-active-mask + _scatter_add! treatment in a focused session. |
+| A10 | **Smaller/init**: biogeophys_pre_flux_calcs!, calc_root_moist_stress!, calc_soilevap_resis!, calc_ozone_stress!, calculate_surface_humidity!, set_actual_roughness_lengths!, dust_dry_dep!, alt_calc!, update_daylength!, clm_drv_init! | ✅ DONE (all whole-fn on Metal at 0.0/round-off; re-validated post-merge via 11 e2e harnesses) | small per-col/per-patch loops | also kernelized the handle_new_snow! tail (bulkdiag_new_snow_diagnostics! + update_snow_depth_and_frac! + add_newsnow_to_intsnow! in snow_cover_fraction.jl), closing A7's follow-up. |
 
 ## Phase B — BGC / `use_cn` path (deferred biogeochemistry)
 
@@ -84,8 +84,10 @@ Phase C: blocked — scaffolding only until hardware.
 
 ### Recommended immediate sequence
 ~~A1 → A2 → A3 → A4 → A5 → A6 → A7 → A8~~ DONE (all merged to main at 15681/15681).
-Remaining Phase A: A9 (urban, defer), A10 (small partials — quick wins; also finish
-handle_new_snow!'s snow_cover_fraction.jl helpers). The soil_hydrology.jl tail
+Remaining Phase A: just the urban_fluxes! iterative canyon-air solve (A9 tail —
+the last HOST piece of the biogeophys driver). A10 quick-wins DONE; A9
+urban_radiation! DONE; handle_new_snow!'s snow_cover_fraction.jl helpers DONE.
+The soil_hydrology.jl tail
 (drainage! + clm_vic_map!, perched/subsurface lateral flow, perched/theta water-table
 variants, irrigation withdrawals + urban ponding) is now DONE — all whole-fn on Metal
 at 0.0/round-off, validated post-merge. Phase C scaffolding can be written anytime
