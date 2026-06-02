@@ -181,6 +181,49 @@ function calc_simple_internal_building_temp!(
 end
 
 # ---------------------------------------------------------------------------
+# Device-capable internal building temperature — ONE THREAD PER URBAN LANDUNIT.
+# Each thread gathers its member columns' (coli:colf) inner-layer temperatures
+# (t_soisno at nlevurb) for roof/sunwall/shadewall, then computes t_building_lun.
+# Runs WHOLE on the device; CPU byte-identical to calc_simple_internal_building_temp!.
+# (urban_fluxes! always has coli/colf set; the standalone scalar function above is
+# kept for callers that build only col_data.landunit.)
+# ---------------------------------------------------------------------------
+@kernel function _uf_building_temp_kernel!(t_building_lun, @Const(mask),
+        @Const(t_soisno_col), @Const(col_itype), @Const(coli), @Const(colf),
+        @Const(ht_roof), @Const(canyon_hwr), @Const(wtlunit_roof), nlevurb::Int)
+    fl = @index(Global)
+    @inbounds if mask[fl]
+        l = fl
+        T = eltype(t_building_lun)
+        t_roof = zero(T); t_sun = zero(T); t_sha = zero(T)
+        for c in coli[l]:colf[l]
+            ct = col_itype[c]
+            if ct == ICOL_ROOF
+                t_roof = t_soisno_col[c, nlevurb]
+            elseif ct == ICOL_SUNWALL
+                t_sun = t_soisno_col[c, nlevurb]
+            elseif ct == ICOL_SHADEWALL
+                t_sha = t_soisno_col[c, nlevurb]
+            end
+        end
+        ht = ht_roof[l]
+        lngth_roof = (ht / canyon_hwr[l]) * wtlunit_roof[l] / (one(T) - wtlunit_roof[l])
+        t_building_lun[l] = (ht * (t_sha + t_sun) + lngth_roof * t_roof) /
+            (T(2.0) * ht + lngth_roof)
+    end
+end
+
+function calc_simple_internal_building_temp_dev!(temperature, col_data, lun_data,
+        m_urbanl::AbstractVector{Bool})
+    nlevurb = varpar.nlevurb
+    _launch!(_uf_building_temp_kernel!, temperature.t_building_lun, m_urbanl,
+        temperature.t_soisno_col, col_data.itype, lun_data.coli, lun_data.colf,
+        lun_data.ht_roof, lun_data.canyon_hwr, lun_data.wtlunit_roof, nlevurb;
+        ndrange = length(temperature.t_building_lun))
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # GPU kernels for the column-INDEPENDENT, element-wise passes of urban_fluxes!.
 #
 # These passes have no cross-index coupling (each landunit/column/patch writes
@@ -616,6 +659,634 @@ function urban_fluxes_canyon_surface!(
 end
 
 # ---------------------------------------------------------------------------
+# ITERATIVE CANYON-AIR SOLVE — the last HOST piece, now a single device kernel.
+#
+# ONE THREAD PER URBAN LANDUNIT. Each thread runs the whole solve for its
+# landunit in-thread: canyontop-wind setup (Masson 2000), monin_obuk_ini init,
+# the niters=3 stability iteration loop with the FrictionVelocity landunit-path
+# math INLINED (urban uses z0m=z0h=z0q=z_0_town and displa=z_d_town), the gather
+# over the landunit's member COLUMNS (coli[l]:colf[l], contiguous — same FP
+# accumulation order as the host filter_urbanc loop) into taf/qaf, the per-member
+# PATCH friction-velocity side-effects (u10/u10_clm/va/fv/vds, over patchi:patchf),
+# wasteheat / heat-from-AC / traffic, and the final stability update.
+#
+# Because each landunit owns its own accumulation, taf/qaf and every reduction are
+# in-thread scalars — NO cross-thread reduction is needed. The aerodynamic-parameter
+# guards (which `error()`/`@warn`) stay on the host (validation only, no state).
+#
+# Literals are eltype-converted (T(...)/zero/one) so no Float64 reaches a
+# Float32-only backend; on Float64 CPU this is byte-identical to the scalar loops.
+# Feature flags (simple/prog build temp, urban_hac) and the AC/HT wasteheat
+# factors are module globals -> resolved on the host and passed as scalars.
+# ---------------------------------------------------------------------------
+
+# Per-landunit work + lun geometry + gridcell forcing (everything the iteration
+# reads/writes at landunit granularity). Split into two bundles to stay well under
+# Metal's ~31-arg kernel cap.
+Base.@kwdef struct _UfIterLunDV{V,VI}
+    # outputs consumed downstream (canyon-surface kernel + error check)
+    ramu::V
+    rahu::V
+    rawu::V
+    zeta_lunit::V
+    taf_lun::V
+    qaf_lun::V
+    wtas::V
+    wtaq::V
+    wts_sum::V
+    wtq_sum::V
+    wtus_roof::V
+    wtuq_roof::V
+    wtus_road_perv::V
+    wtuq_road_perv::V
+    wtus_road_imperv::V
+    wtuq_road_imperv::V
+    wtus_sunwall::V
+    wtuq_sunwall::V
+    wtus_shadewall::V
+    wtuq_shadewall::V
+    wtus_roof_unscl::V
+    wtuq_roof_unscl::V
+    wtus_road_perv_unscl::V
+    wtuq_road_perv_unscl::V
+    wtus_road_imperv_unscl::V
+    wtuq_road_imperv_unscl::V
+    wtus_sunwall_unscl::V
+    wtus_shadewall_unscl::V
+    # energyflux landunit-level outputs
+    eflx_wasteheat_lun::V
+    eflx_heat_from_ac_lun::V
+    eflx_traffic_lun::V
+    # lun geometry / indexing
+    lun_gridcell::VI
+    coli::VI
+    colf::VI
+    patchi::VI
+    patchf::VI
+    ht_roof::V
+    z_d_town::V
+    z_0_town::V
+    canyon_hwr::V
+    wtlunit_roof::V
+    wtroad_perv::V
+    wind_hgt_canyon::V
+    eflx_traffic_factor::V
+    # gridcell forcing
+    forc_u_grc::V
+    forc_v_grc::V
+    forc_t_grc::V
+    forc_th_grc::V
+    forc_q_grc::V
+    forc_rho_grc::V
+    # patch forcing heights (indexed by lun.patchi[l])
+    forc_hgt_u_patch::V
+    forc_hgt_t_patch::V
+end
+Adapt.@adapt_structure _UfIterLunDV
+
+# Per-column + per-member-patch state the iteration reads/writes, plus the friction-
+# velocity per-patch side-effect outputs.
+Base.@kwdef struct _UfIterColDV{V,M,VI}
+    # per-column outputs / state
+    wtus_col::V
+    wtuq_col::V
+    t_grnd_col::V
+    qg_col::V
+    snow_depth_col::V
+    h2osoi_liq_col::M   # (column, layer) — only layer 1 is read
+    h2osoi_ice_col::M
+    eflx_urban_ac_col::V
+    eflx_urban_heat_col::V
+    col_itype::VI
+    # friction-velocity per-PATCH side effects (written for every member patch)
+    u10_clm_patch::V
+    va_patch::V
+    u10_patch::V
+    fv_patch::V
+    vds_patch::V
+end
+Adapt.@adapt_structure _UfIterColDV
+
+# The whole iterative canyon-air solve for one urban landunit.
+# `taf_lun` is the standalone first arg (drives backend detection in _launch!).
+@kernel function _uf_iter_kernel!(taf_lun_out, @Const(mask),
+        o::_UfIterLunDV, c_::_UfIterColDV,
+        niters::Int, zetamaxstable, wind_min,
+        VKC_, GRAV_, CPAIR_, RPI_, PONDMX_URBAN_, lapse_rate_,
+        is_simple::Bool, urban_hac_on::Bool, wasteheat_on::Bool,
+        ac_wh_factor, ht_wh_factor, wasteheat_limit)
+    fl = @index(Global)
+    @inbounds if mask[fl]
+        l = fl
+        T = eltype(taf_lun_out)
+        vkc   = T(VKC_)
+        grav  = T(GRAV_)
+        cpair = T(CPAIR_)
+        rpi   = T(RPI_)
+        pondmx = T(PONDMX_URBAN_)
+        lapse = T(lapse_rate_)
+        zetamax = T(zetamaxstable)
+        wmin  = T(wind_min)
+        zetam = T(1.574)
+        zetat = T(0.465)
+
+        g  = o.lun_gridcell[l]
+        pi_ = o.patchi[l]                # representative patch (forcing heights)
+        ci  = o.coli[l]; cf = o.colf[l]
+        ppi = o.patchi[l]; ppf = o.patchf[l]
+
+        z_d   = o.z_d_town[l]
+        z_0   = o.z_0_town[l]
+        ht    = o.ht_roof[l]
+        hwr   = o.canyon_hwr[l]
+        wtroof = o.wtlunit_roof[l]
+        wtrp   = o.wtroad_perv[l]
+
+        # --- canyontop wind (Masson 2000) ---
+        ur = max(wmin, sqrt(o.forc_u_grc[g]^2 + o.forc_v_grc[g]^2))
+        canyontop_wind = ur *
+            log((ht - z_d) / z_0) /
+            log((o.forc_hgt_u_patch[pi_] - z_d) / z_0)
+
+        whc = o.wind_hgt_canyon[l]
+        if hwr < T(0.5)
+            canyon_u_wind = canyontop_wind * exp(-T(0.5) * hwr * (one(T) - (whc / ht)))
+        elseif hwr < one(T)
+            canyon_u_wind = canyontop_wind * (one(T) + T(2.0) * (T(2.0) / rpi - one(T)) *
+                (ht / (ht / hwr) - T(0.5))) *
+                exp(-T(0.5) * hwr * (one(T) - (whc / ht)))
+        else
+            canyon_u_wind = canyontop_wind * (T(2.0) / rpi) *
+                exp(-T(0.5) * hwr * (one(T) - (whc / ht)))
+        end
+
+        # --- initialize Monin-Obukhov length and wind speed ---
+        thm_g = o.forc_t_grc[g] + lapse * o.forc_hgt_t_patch[pi_]
+        thv_g = o.forc_th_grc[g] * (one(T) + T(0.61) * o.forc_q_grc[g])
+        dth = thm_g - taf_lun_out[l]
+        dqh = o.forc_q_grc[g] - o.qaf_lun[l]
+        dthv = dth * (one(T) + T(0.61) * o.forc_q_grc[g]) + T(0.61) * o.forc_th_grc[g] * dqh
+        zldis = o.forc_hgt_u_patch[pi_] - z_d
+
+        # monin_obuk_ini (inlined; unused local `ustar=0.06` dropped)
+        wc = T(0.5)
+        um = dthv >= zero(T) ? max(ur, T(0.1)) : sqrt(ur * ur + wc * wc)
+        rib = grav * zldis * dthv / (thv_g * um * um)
+        if rib >= zero(T)
+            zeta = rib * log(zldis / z_0) / (one(T) - T(5.0) * min(rib, T(0.19)))
+            zeta = min(zetamax, max(zeta, T(0.01)))
+        else
+            zeta = rib * log(zldis / z_0)
+            zeta = max(T(-100.0), min(zeta, T(-0.01)))
+        end
+        obu = zldis / zeta
+
+        # scratch carried across iterations
+        ustar = zero(T); temp1 = zero(T); temp2 = zero(T)
+        temp12m = zero(T); temp22m = zero(T); fm = zero(T)
+        rahu = zero(T); rawu = zero(T)
+        canyon_resistance = zero(T)
+
+        # ============== stability iteration ==============
+        for iter in 1:niters
+            # ---- FrictionVelocity (landunit path), z0m=z0h=z0q=z_0, displa=z_d ----
+            # Wind profile -> ustar
+            zldisw = o.forc_hgt_u_patch[pi_] - z_d
+            zeta_w = zldisw / obu
+            if zeta_w < -zetam
+                ustar = vkc * um / (log(-zetam * obu / z_0) -
+                    stability_func1(-zetam) + stability_func1(z_0 / obu) +
+                    T(1.14) * ((-zeta_w)^T(0.333) - (zetam)^T(0.333)))
+            elseif zeta_w < zero(T)
+                ustar = vkc * um / (log(zldisw / z_0) -
+                    stability_func1(zeta_w) + stability_func1(z_0 / obu))
+            elseif zeta_w <= one(T)
+                ustar = vkc * um / (log(zldisw / z_0) + T(5.0) * zeta_w - T(5.0) * z_0 / obu)
+            else
+                ustar = vkc * um / (log(obu / z_0) + T(5.0) - T(5.0) * z_0 / obu +
+                    (T(5.0) * log(zeta_w) + zeta_w - one(T)))
+            end
+
+            # Deposition velocity (per member patch)
+            if zeta_w < zero(T)
+                vds_tmp = T(2.0e-3) * ustar * (one(T) + (T(300.0) / max(-obu, T(1.0e-10)))^T(0.666))
+            else
+                vds_tmp = T(2.0e-3) * ustar
+            end
+            for pp in ppi:ppf
+                c_.vds_patch[pp] = vds_tmp
+            end
+
+            # 10-m wind (CLM) per member patch
+            for pp in ppi:ppf
+                if zldisw - z_0 <= T(10.0)
+                    c_.u10_clm_patch[pp] = um
+                else
+                    if zeta_w < -zetam
+                        c_.u10_clm_patch[pp] = um - (ustar / vkc * (log(-zetam * obu / (T(10.0) + z_0)) -
+                            stability_func1(-zetam) + stability_func1((T(10.0) + z_0) / obu) +
+                            T(1.14) * ((-zeta_w)^T(0.333) - (zetam)^T(0.333))))
+                    elseif zeta_w < zero(T)
+                        c_.u10_clm_patch[pp] = um - (ustar / vkc * (log(zldisw / (T(10.0) + z_0)) -
+                            stability_func1(zeta_w) + stability_func1((T(10.0) + z_0) / obu)))
+                    elseif zeta_w <= one(T)
+                        c_.u10_clm_patch[pp] = um - (ustar / vkc * (log(zldisw / (T(10.0) + z_0)) +
+                            T(5.0) * zeta_w - T(5.0) * (T(10.0) + z_0) / obu))
+                    else
+                        c_.u10_clm_patch[pp] = um - (ustar / vkc * (log(obu / (T(10.0) + z_0)) +
+                            T(5.0) - T(5.0) * (T(10.0) + z_0) / obu +
+                            (T(5.0) * log(zeta_w) + zeta_w - one(T))))
+                    end
+                end
+                c_.va_patch[pp] = um
+            end
+
+            # Temperature profile -> temp1
+            zldist = o.forc_hgt_t_patch[pi_] - z_d
+            zeta_t = zldist / obu
+            if zeta_t < -zetat
+                temp1 = vkc / (log(-zetat * obu / z_0) -
+                    stability_func2(-zetat) + stability_func2(z_0 / obu) +
+                    T(0.8) * ((zetat)^(-T(0.333)) - (-zeta_t)^(-T(0.333))))
+            elseif zeta_t < zero(T)
+                temp1 = vkc / (log(zldist / z_0) -
+                    stability_func2(zeta_t) + stability_func2(z_0 / obu))
+            elseif zeta_t <= one(T)
+                temp1 = vkc / (log(zldist / z_0) + T(5.0) * zeta_t - T(5.0) * z_0 / obu)
+            else
+                temp1 = vkc / (log(obu / z_0) + T(5.0) - T(5.0) * z_0 / obu +
+                    (T(5.0) * log(zeta_t) + zeta_t - one(T)))
+            end
+
+            # Humidity profile: hgt_q==hgt_t and z0q==z0h -> temp2 = temp1
+            temp2 = temp1
+
+            # Temperature profile at 2m -> temp12m
+            zldis2 = T(2.0) + z_0
+            zeta2 = zldis2 / obu
+            if zeta2 < -zetat
+                temp12m = vkc / (log(-zetat * obu / z_0) -
+                    stability_func2(-zetat) + stability_func2(z_0 / obu) +
+                    T(0.8) * ((zetat)^(-T(0.333)) - (-zeta2)^(-T(0.333))))
+            elseif zeta2 < zero(T)
+                temp12m = vkc / (log(zldis2 / z_0) -
+                    stability_func2(zeta2) + stability_func2(z_0 / obu))
+            elseif zeta2 <= one(T)
+                temp12m = vkc / (log(zldis2 / z_0) + T(5.0) * zeta2 - T(5.0) * z_0 / obu)
+            else
+                temp12m = vkc / (log(obu / z_0) + T(5.0) - T(5.0) * z_0 / obu +
+                    (T(5.0) * log(zeta2) + zeta2 - one(T)))
+            end
+            # Humidity profile at 2m: z0q==z0h -> temp22m = temp12m
+            temp22m = temp12m
+
+            # 10-m wind for dust model (per member patch), needs fm
+            zldisd = o.forc_hgt_u_patch[pi_] - z_d
+            zeta_d = zldisd / obu
+            if min(zeta_d, one(T)) < zero(T)
+                tmp1 = (one(T) - T(16.0) * min(zeta_d, one(T)))^T(0.25)
+                tmp2 = log((one(T) + tmp1 * tmp1) / T(2.0))
+                tmp3 = log((one(T) + tmp1) / T(2.0))
+                fmnew = T(2.0) * tmp3 + tmp2 - T(2.0) * atan(tmp1) + T(1.5707963)
+            else
+                fmnew = -T(5.0) * min(zeta_d, one(T))
+            end
+            if iter == 1
+                fm = fmnew
+            else
+                fm = T(0.5) * (fm + fmnew)
+            end
+
+            zeta10 = min(T(10.0) / obu, one(T))
+            if zeta_d == zero(T)
+                zeta10 = zero(T)
+            end
+            if zeta10 < zero(T)
+                tmp1 = (one(T) - T(16.0) * zeta10)^T(0.25)
+                tmp2 = log((one(T) + tmp1 * tmp1) / T(2.0))
+                tmp3 = log((one(T) + tmp1) / T(2.0))
+                fm10 = T(2.0) * tmp3 + tmp2 - T(2.0) * atan(tmp1) + T(1.5707963)
+            else
+                fm10 = -T(5.0) * zeta10
+            end
+            tmp4 = log(max(one(T), o.forc_hgt_u_patch[pi_] / T(10.0)))
+            for pp in ppi:ppf
+                c_.u10_patch[pp] = ur - ustar / vkc * (tmp4 - fm + fm10)
+                c_.fv_patch[pp] = ustar
+            end
+
+            # ---- aerodynamic resistances ----
+            ramu = one(T) / (ustar^2 / um)
+            rahu = one(T) / (temp1 * ustar)
+            rawu = one(T) / (temp2 * ustar)
+
+            canyon_wind = sqrt(canyon_u_wind^T(2.0) + ustar^T(2.0))
+            canyon_resistance = cpair * o.forc_rho_grc[g] / (T(11.8) + T(4.2) * canyon_wind)
+
+            # ---- first term in taf/qaf equations ----
+            taf_numer = thm_g / rahu
+            taf_denom = one(T) / rahu
+            qaf_numer = o.forc_q_grc[g] / rawu
+            qaf_denom = one(T) / rawu
+            wtas = one(T) / rahu
+            wtaq = one(T) / rawu
+
+            # reset per-iteration the per-landunit weight accumulators
+            wtus_roof = zero(T); wtuq_roof = zero(T)
+            wtus_road_perv = zero(T); wtuq_road_perv = zero(T)
+            wtus_road_imperv = zero(T); wtuq_road_imperv = zero(T)
+            wtus_sunwall = zero(T); wtuq_sunwall = zero(T)
+            wtus_shadewall = zero(T); wtuq_shadewall = zero(T)
+            wtus_roof_unscl = zero(T); wtuq_roof_unscl = zero(T)
+            wtus_road_perv_unscl = zero(T); wtuq_road_perv_unscl = zero(T)
+            wtus_road_imperv_unscl = zero(T); wtuq_road_imperv_unscl = zero(T)
+            wtus_sunwall_unscl = zero(T)
+            wtus_shadewall_unscl = zero(T)
+
+            # ---- gather over member columns (coli:colf = column-index order) ----
+            for c in ci:cf
+                ct = c_.col_itype[c]
+                wtus_c = zero(T); wtuq_c = zero(T)
+                if ct == ICOL_ROOF
+                    wtus_c = wtroof / canyon_resistance
+                    wtus_roof = wtus_c
+                    wtus_roof_unscl = one(T) / canyon_resistance
+                    if c_.snow_depth_col[c] > zero(T)
+                        fwet = min(c_.snow_depth_col[c] / T(0.05), one(T))
+                    else
+                        fwet = (max(zero(T), c_.h2osoi_liq_col[c, 1] + c_.h2osoi_ice_col[c, 1]) / pondmx)^T(0.666666666666)
+                        fwet = min(fwet, one(T))
+                    end
+                    if o.qaf_lun[l] > c_.qg_col[c]
+                        fwet = one(T)
+                    end
+                    wtuq_c = fwet * (wtroof / canyon_resistance)
+                    wtuq_roof = wtuq_c
+                    wtuq_roof_unscl = fwet * (one(T) / canyon_resistance)
+                elseif ct == ICOL_ROAD_PERV
+                    wtus_c = wtrp * (one(T) - wtroof) / canyon_resistance
+                    wtus_road_perv = wtus_c
+                    wtus_road_perv_unscl = one(T) / canyon_resistance
+                    wtuq_c = wtrp * (one(T) - wtroof) / canyon_resistance
+                    wtuq_road_perv = wtuq_c
+                    wtuq_road_perv_unscl = one(T) / canyon_resistance
+                elseif ct == ICOL_ROAD_IMPERV
+                    wtus_c = (one(T) - wtrp) * (one(T) - wtroof) / canyon_resistance
+                    wtus_road_imperv = wtus_c
+                    wtus_road_imperv_unscl = one(T) / canyon_resistance
+                    if c_.snow_depth_col[c] > zero(T)
+                        fwet = min(c_.snow_depth_col[c] / T(0.05), one(T))
+                    else
+                        fwet = (max(zero(T), c_.h2osoi_liq_col[c, 1] + c_.h2osoi_ice_col[c, 1]) / pondmx)^T(0.666666666666)
+                        fwet = min(fwet, one(T))
+                    end
+                    if o.qaf_lun[l] > c_.qg_col[c]
+                        fwet = one(T)
+                    end
+                    wtuq_c = fwet * (one(T) - wtrp) * (one(T) - wtroof) / canyon_resistance
+                    wtuq_road_imperv = wtuq_c
+                    wtuq_road_imperv_unscl = fwet * (one(T) / canyon_resistance)
+                elseif ct == ICOL_SUNWALL
+                    wtus_c = hwr * (one(T) - wtroof) / canyon_resistance
+                    wtus_sunwall = wtus_c
+                    wtus_sunwall_unscl = one(T) / canyon_resistance
+                    wtuq_c = zero(T)
+                    wtuq_sunwall = zero(T)
+                elseif ct == ICOL_SHADEWALL
+                    wtus_c = hwr * (one(T) - wtroof) / canyon_resistance
+                    wtus_shadewall = wtus_c
+                    wtus_shadewall_unscl = one(T) / canyon_resistance
+                    wtuq_c = zero(T)
+                    wtuq_shadewall = zero(T)
+                end
+                c_.wtus_col[c] = wtus_c
+                c_.wtuq_col[c] = wtuq_c
+
+                taf_numer = taf_numer + c_.t_grnd_col[c] * wtus_c
+                taf_denom = taf_denom + wtus_c
+                qaf_numer = qaf_numer + c_.qg_col[c] * wtuq_c
+                qaf_denom = qaf_denom + wtuq_c
+            end
+
+            # ---- wasteheat / heat-from-AC at landunit level (simple build) ----
+            if is_simple
+                # recompute per-surface wasteheat the same way the host wasteheat! does
+                # (roof + (1-wtroof)*(hwr*(sunwall+shadewall))). Recompute each surface's
+                # wh/hfac from its column's AC/heat (walls share canyon_hwr weighting).
+                wh_roof = zero(T); hf_roof = zero(T)
+                wh_sun = zero(T);  hf_sun = zero(T)
+                wh_sha = zero(T);  hf_sha = zero(T)
+                for c in ci:cf
+                    ct = c_.col_itype[c]
+                    wh = wasteheat_on ?
+                        ac_wh_factor * c_.eflx_urban_ac_col[c] + ht_wh_factor * c_.eflx_urban_heat_col[c] :
+                        zero(T)
+                    hf = (urban_hac_on || wasteheat_on) ? abs(c_.eflx_urban_ac_col[c]) : zero(T)
+                    if ct == ICOL_ROOF
+                        wh_roof = wh; hf_roof = hf
+                    elseif ct == ICOL_SUNWALL
+                        wh_sun = wh; hf_sun = hf
+                    elseif ct == ICOL_SHADEWALL
+                        wh_sha = wh; hf_sha = hf
+                    end
+                end
+                eflx_wh_lun = wtroof * wh_roof + (one(T) - wtroof) * (hwr * (wh_sun + wh_sha))
+                eflx_wh_lun = min(eflx_wh_lun, wasteheat_limit)
+                eflx_hfac_lun = wtroof * hf_roof + (one(T) - wtroof) * (hwr * (hf_sun + hf_sha))
+                o.eflx_wasteheat_lun[l] = eflx_wh_lun
+                o.eflx_heat_from_ac_lun[l] = eflx_hfac_lun
+            else
+                # prog build temp: wasteheat from landunit-level AC/heat (handled on host
+                # via energyflux.eflx_urban_*_lun; not exercised here). Leave untouched.
+            end
+
+            # traffic heat flux (impervious road only)
+            o.eflx_traffic_lun[l] = (one(T) - wtroof) * (one(T) - wtrp) * o.eflx_traffic_factor[l]
+
+            # ---- new canopy-air temperature/humidity ----
+            taf_lun_out[l] = taf_numer / taf_denom
+            o.qaf_lun[l] = qaf_numer / qaf_denom
+
+            wts_sum = wtas + wtus_roof + wtus_road_perv + wtus_road_imperv + wtus_sunwall + wtus_shadewall
+            wtq_sum = wtaq + wtuq_roof + wtuq_road_perv + wtuq_road_imperv + wtuq_sunwall + wtuq_shadewall
+
+            # ---- stability update using new taf/qaf ----
+            dth2 = thm_g - taf_lun_out[l]
+            dqh2 = o.forc_q_grc[g] - o.qaf_lun[l]
+            tstar = temp1 * dth2
+            qstar = temp2 * dqh2
+            thvstar = tstar * (one(T) + T(0.61) * o.forc_q_grc[g]) + T(0.61) * o.forc_th_grc[g] * qstar
+            zeta_l = zldis * vkc * grav * thvstar / (ustar^2 * thv_g)
+            if zeta_l >= zero(T)
+                zeta_l = min(zetamax, max(zeta_l, T(0.01)))
+                um = max(ur, T(0.1))
+            else
+                zeta_l = max(T(-100.0), min(zeta_l, T(-0.01)))
+                wc2 = one(T) * (-grav * ustar * thvstar * T(1000.0) / thv_g)^T(0.333)
+                um = sqrt(ur^2 + wc2^2)
+            end
+            obu = zldis / zeta_l
+
+            # commit per-landunit outputs every iteration (last iteration wins,
+            # matching the host which leaves these at their final-iteration values)
+            o.ramu[l] = ramu
+            o.rahu[l] = rahu
+            o.rawu[l] = rawu
+            o.zeta_lunit[l] = zeta_l
+            o.wtas[l] = wtas; o.wtaq[l] = wtaq
+            o.wts_sum[l] = wts_sum; o.wtq_sum[l] = wtq_sum
+            o.wtus_roof[l] = wtus_roof; o.wtuq_roof[l] = wtuq_roof
+            o.wtus_road_perv[l] = wtus_road_perv; o.wtuq_road_perv[l] = wtuq_road_perv
+            o.wtus_road_imperv[l] = wtus_road_imperv; o.wtuq_road_imperv[l] = wtuq_road_imperv
+            o.wtus_sunwall[l] = wtus_sunwall; o.wtuq_sunwall[l] = wtuq_sunwall
+            o.wtus_shadewall[l] = wtus_shadewall; o.wtuq_shadewall[l] = wtuq_shadewall
+            o.wtus_roof_unscl[l] = wtus_roof_unscl; o.wtuq_roof_unscl[l] = wtuq_roof_unscl
+            o.wtus_road_perv_unscl[l] = wtus_road_perv_unscl; o.wtuq_road_perv_unscl[l] = wtuq_road_perv_unscl
+            o.wtus_road_imperv_unscl[l] = wtus_road_imperv_unscl; o.wtuq_road_imperv_unscl[l] = wtuq_road_imperv_unscl
+            o.wtus_sunwall_unscl[l] = wtus_sunwall_unscl
+            o.wtus_shadewall_unscl[l] = wtus_shadewall_unscl
+        end
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Error-check kernel: per-landunit, in-thread sum over the landunit's member
+# patches of the scaled fluxes vs the bulk fluxes (matches the host sum()-based
+# reduction). Writes eflx_err/qflx_err which the host reads back for the warn/error.
+# ---------------------------------------------------------------------------
+@kernel function _uf_errcheck_kernel!(eflx_err, @Const(mask), @Const(qflx_err_in),
+        @Const(eflx_sh_grnd_scale), @Const(qflx_evap_soi_scale),
+        @Const(patchi), @Const(patchf), @Const(lun_gridcell),
+        @Const(forc_rho_grc), @Const(forc_q_grc), @Const(thm_g_lun),
+        @Const(taf_lun), @Const(qaf_lun), @Const(rahu), @Const(rawu),
+        qflx_err, eflx_arr_out, qflx_arr_out, eflx_scale_out, qflx_scale_out,
+        CPAIR_)
+    fl = @index(Global)
+    @inbounds if mask[fl]
+        l = fl
+        T = eltype(eflx_err)
+        cpair = T(CPAIR_)
+        g = lun_gridcell[l]
+        eflx_arr = -(forc_rho_grc[g] * cpair / rahu[l]) * (thm_g_lun[l] - taf_lun[l])
+        qflx_arr = -(forc_rho_grc[g] / rawu[l]) * (forc_q_grc[g] - qaf_lun[l])
+        es = zero(T); qs = zero(T)
+        for p in patchi[l]:patchf[l]
+            es += eflx_sh_grnd_scale[p]
+            qs += qflx_evap_soi_scale[p]
+        end
+        eflx_arr_out[l] = eflx_arr
+        qflx_arr_out[l] = qflx_arr
+        eflx_scale_out[l] = es
+        qflx_scale_out[l] = qs
+        eflx_err[l] = es - eflx_arr
+        qflx_err[l] = qs - qflx_arr
+    end
+end
+
+"""
+    urban_fluxes_iterate!(energyflux, frictionvel, temperature, soilstate,
+        urbanparams, waterstatebulk, waterdiagbulk, lun_data, col_data,
+        m_urbanl, num_urbanl, filter_urbanl,
+        ramu, zeta_lunit, wtus_col, wtuq_col, rahu, rawu, thm_g_lun, wts, wtq,
+        forc_*, niters) -> nothing
+
+Run the WHOLE iterative canyon-air solve (canyontop wind, monin_obuk_ini init, the
+niters stability loop with the FrictionVelocity landunit math inlined, the
+per-column gather into taf/qaf, wasteheat/traffic, and the stability update) as a
+single KernelAbstractions kernel — ONE THREAD PER URBAN LANDUNIT. Runs WHOLE on the
+device (Metal) when the state structs + masks live there, and is CPU byte-identical
+on the host path. Writes the per-landunit solved scalars / weights, the per-column
+wtus/wtuq, and the per-member-patch friction-velocity side effects.
+"""
+function urban_fluxes_iterate!(
+        energyflux, frictionvel, temperature, soilstate, urbanparams,
+        waterstatebulk, waterdiagbulk, lun_data, col_data,
+        m_urbanl::AbstractVector{Bool}, num_urbanl::Int, filter_urbanl::Vector{Int},
+        ramu, zeta_lunit, wtus_col, wtuq_col, rahu, rawu, thm_g_lun,
+        wts::_UfWtsDV, wtq::_UfWtqDV,
+        forc_t_grc, forc_th_grc, forc_rho_grc, forc_q_grc, forc_u_grc, forc_v_grc,
+        niters::Int; lapse_rate::Real = 0.0098)
+
+    proto = temperature.taf_lun
+    FT = eltype(proto)
+    b(v) = _uf_to_backend(proto, v)
+
+    # Host-only feature flags + wasteheat factors resolved to scalars / Bools.
+    is_simple    = is_simple_build_temp()
+    urban_hac_on = (urban_ctrl.urban_hac == URBAN_HAC_ON || urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON)
+    wasteheat_on = (urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON)
+
+    o = _UfIterLunDV(
+        ramu = ramu, rahu = rahu, rawu = rawu, zeta_lunit = zeta_lunit,
+        taf_lun = temperature.taf_lun, qaf_lun = waterdiagbulk.qaf_lun,
+        wtas = wts.wtas, wtaq = wtq.wtaq, wts_sum = wts.wts_sum, wtq_sum = wtq.wtq_sum,
+        wtus_roof = wts.wtus_roof, wtuq_roof = wtq.wtuq_roof,
+        wtus_road_perv = wts.wtus_road_perv, wtuq_road_perv = wtq.wtuq_road_perv,
+        wtus_road_imperv = wts.wtus_road_imperv, wtuq_road_imperv = wtq.wtuq_road_imperv,
+        wtus_sunwall = wts.wtus_sunwall, wtuq_sunwall = wtq.wtuq_sunwall,
+        wtus_shadewall = wts.wtus_shadewall, wtuq_shadewall = wtq.wtuq_shadewall,
+        wtus_roof_unscl = wts.wtus_roof_unscl, wtuq_roof_unscl = wtq.wtuq_roof_unscl,
+        wtus_road_perv_unscl = wts.wtus_road_perv_unscl, wtuq_road_perv_unscl = wtq.wtuq_road_perv_unscl,
+        wtus_road_imperv_unscl = wts.wtus_road_imperv_unscl, wtuq_road_imperv_unscl = wtq.wtuq_road_imperv_unscl,
+        wtus_sunwall_unscl = wts.wtus_sunwall_unscl,
+        wtus_shadewall_unscl = wts.wtus_shadewall_unscl,
+        eflx_wasteheat_lun = energyflux.eflx_wasteheat_lun,
+        eflx_heat_from_ac_lun = energyflux.eflx_heat_from_ac_lun,
+        eflx_traffic_lun = energyflux.eflx_traffic_lun,
+        lun_gridcell = lun_data.gridcell, coli = lun_data.coli, colf = lun_data.colf,
+        patchi = lun_data.patchi, patchf = lun_data.patchf,
+        ht_roof = lun_data.ht_roof, z_d_town = lun_data.z_d_town, z_0_town = lun_data.z_0_town,
+        canyon_hwr = lun_data.canyon_hwr, wtlunit_roof = lun_data.wtlunit_roof,
+        wtroad_perv = lun_data.wtroad_perv,
+        wind_hgt_canyon = urbanparams.wind_hgt_canyon,
+        eflx_traffic_factor = urbanparams.eflx_traffic_factor,
+        forc_u_grc = b(forc_u_grc), forc_v_grc = b(forc_v_grc),
+        forc_t_grc = b(forc_t_grc), forc_th_grc = b(forc_th_grc),
+        forc_q_grc = b(forc_q_grc), forc_rho_grc = b(forc_rho_grc),
+        forc_hgt_u_patch = frictionvel.forc_hgt_u_patch,
+        forc_hgt_t_patch = frictionvel.forc_hgt_t_patch)
+
+    c_ = _UfIterColDV(
+        wtus_col = wtus_col, wtuq_col = wtuq_col,
+        t_grnd_col = temperature.t_grnd_col, qg_col = waterdiagbulk.qg_col,
+        snow_depth_col = waterdiagbulk.snow_depth_col,
+        h2osoi_liq_col = waterstatebulk.ws.h2osoi_liq_col,
+        h2osoi_ice_col = waterstatebulk.ws.h2osoi_ice_col,
+        eflx_urban_ac_col = energyflux.eflx_urban_ac_col,
+        eflx_urban_heat_col = energyflux.eflx_urban_heat_col,
+        col_itype = col_data.itype,
+        u10_clm_patch = frictionvel.u10_clm_patch, va_patch = frictionvel.va_patch,
+        u10_patch = frictionvel.u10_patch, fv_patch = frictionvel.fv_patch,
+        vds_patch = frictionvel.vds_patch)
+
+    # thm_g per landunit (needed by the error check downstream); iteration-invariant,
+    # so computed once here (host) rather than threaded out of the kernel. Host copies
+    # of the forcing + forc_hgt avoid scalar-indexing a device array. thm_g_lun itself
+    # may be device-resident, so it is written via a host staging vector + copyto!.
+    forc_t_h    = Array(forc_t_grc)
+    forc_hgt_h  = Array(frictionvel.forc_hgt_t_patch)
+    gridcell_h  = Array(lun_data.gridcell)
+    patchi_h    = Array(lun_data.patchi)
+    thm_g_h     = zeros(FT, length(thm_g_lun))
+    @inbounds for fl in 1:num_urbanl
+        l = filter_urbanl[fl]
+        g = gridcell_h[l]
+        thm_g_h[l] = forc_t_h[g] + FT(lapse_rate) * forc_hgt_h[patchi_h[l]]
+    end
+    copyto!(thm_g_lun, thm_g_h)
+
+    _launch!(_uf_iter_kernel!, temperature.taf_lun, m_urbanl, o, c_,
+        niters, convert(FT, frictionvel.zetamaxstable), convert(FT, urban_fluxes_params.wind_min),
+        convert(FT, VKC), convert(FT, GRAV), convert(FT, CPAIR), convert(FT, RPI),
+        convert(FT, PONDMX_URBAN), convert(FT, lapse_rate),
+        is_simple, urban_hac_on, wasteheat_on,
+        convert(FT, AC_WASTEHEAT_FACTOR), convert(FT, HT_WASTEHEAT_FACTOR),
+        convert(FT, WASTEHEAT_LIMIT);
+        ndrange = length(temperature.taf_lun))
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Main subroutine: urban_fluxes!
 # ---------------------------------------------------------------------------
 
@@ -653,14 +1324,15 @@ function urban_fluxes!(
         bounds_lun       ::UnitRange{Int},
         bounds_col       ::UnitRange{Int},
         bounds_patch     ::UnitRange{Int},
-        # Atmospheric forcing (gridcell-level)
-        forc_t_grc       ::Vector{<:Real},
-        forc_th_grc      ::Vector{<:Real},
-        forc_rho_grc     ::Vector{<:Real},
-        forc_q_grc       ::Vector{<:Real},
-        forc_pbot_grc    ::Vector{<:Real},
-        forc_u_grc       ::Vector{<:Real},
-        forc_v_grc       ::Vector{<:Real};
+        # Atmospheric forcing (gridcell-level). Widened to AbstractVector so device
+        # (MtlArray) forcing dispatches; plain-Vector callsites are unaffected.
+        forc_t_grc       ::AbstractVector{<:Real},
+        forc_th_grc      ::AbstractVector{<:Real},
+        forc_rho_grc     ::AbstractVector{<:Real},
+        forc_q_grc       ::AbstractVector{<:Real},
+        forc_pbot_grc    ::AbstractVector{<:Real},
+        forc_u_grc       ::AbstractVector{<:Real},
+        forc_v_grc       ::AbstractVector{<:Real};
         # Optional masks for the device-resident element-wise passes. When omitted
         # they are built from the integer filters on the host (CPU byte-identical).
         # The iterative canyon-air solve always runs on the host (CPU state).
@@ -688,81 +1360,53 @@ function urban_fluxes!(
     nc = endc
     np_local = endp
 
-    FT = eltype(forc_t_grc)
-    canyontop_wind      = zeros(FT, nl)
-    canyon_u_wind       = zeros(FT, nl)
-    canyon_wind         = zeros(FT, nl)
-    canyon_resistance   = zeros(FT, nl)
-    ur                  = zeros(FT, nl)
-    ustar_loc           = zeros(FT, nl)
-    ramu                = zeros(FT, nl)
-    rahu                = zeros(FT, nl)
-    rawu                = zeros(FT, nl)
-    temp1               = zeros(FT, nl)
-    temp12m             = zeros(FT, nl)
-    temp2               = zeros(FT, nl)
-    temp22m             = zeros(FT, nl)
-    thm_g               = zeros(FT, nl)
-    thv_g               = zeros(FT, nl)
-    dth                 = zeros(FT, nl)
-    dqh                 = zeros(FT, nl)
-    zldis_arr           = zeros(FT, nl)
-    zeta_lunit          = zeros(FT, nl)
-    um                  = zeros(FT, nl)
-    obu                 = zeros(FT, nl)
-    taf_numer           = zeros(FT, nl)
-    taf_denom           = zeros(FT, nl)
-    qaf_numer           = zeros(FT, nl)
-    qaf_denom           = zeros(FT, nl)
-    wtas                = zeros(FT, nl)
-    wtaq                = zeros(FT, nl)
-    wts_sum             = zeros(FT, nl)
-    wtq_sum             = zeros(FT, nl)
-    beta_arr            = zeros(FT, nl)
-    zii_arr             = zeros(FT, nl)
-    fm_arr              = zeros(FT, nl)
+    FT = eltype(temperature.taf_lun)
 
-    wtus_col            = zeros(FT, nc)
-    wtuq_col            = zeros(FT, nc)
+    # Per-landunit / per-column solved outputs of the iterative canyon-air solve.
+    # These are allocated on the STATE backend (device-resident on Metal) so the
+    # iteration kernel and the downstream canyon-surface kernel both read/write them
+    # in place — no host<->device round trips. `_uf_dev_zeros` mirrors the working
+    # precision + backend of the state. Bundled (wts/wtq) so the iteration and the
+    # canyon-surface pass share the same device arrays.
+    proto_l = temperature.taf_lun
+    dz(n) = (a = similar(proto_l, FT, n); fill!(a, zero(FT)); a)
+    proto_c = temperature.t_grnd_col
+    dzc(n) = (a = similar(proto_c, FT, n); fill!(a, zero(FT)); a)
 
-    wtus_roof           = zeros(FT, nl)
-    wtuq_roof           = zeros(FT, nl)
-    wtus_road_perv      = zeros(FT, nl)
-    wtuq_road_perv      = zeros(FT, nl)
-    wtus_road_imperv    = zeros(FT, nl)
-    wtuq_road_imperv    = zeros(FT, nl)
-    wtus_sunwall        = zeros(FT, nl)
-    wtuq_sunwall        = zeros(FT, nl)
-    wtus_shadewall      = zeros(FT, nl)
-    wtuq_shadewall      = zeros(FT, nl)
+    ramu       = dz(nl)
+    rahu       = dz(nl)
+    rawu       = dz(nl)
+    zeta_lunit = dz(nl)
+    thm_g_lun  = dz(nl)
+    wtus_col   = dzc(nc)
+    wtuq_col   = dzc(nc)
 
-    wtus_roof_unscl        = zeros(FT, nl)
-    wtuq_roof_unscl        = zeros(FT, nl)
-    wtus_road_perv_unscl   = zeros(FT, nl)
-    wtuq_road_perv_unscl   = zeros(FT, nl)
-    wtus_road_imperv_unscl = zeros(FT, nl)
-    wtuq_road_imperv_unscl = zeros(FT, nl)
-    wtus_sunwall_unscl     = zeros(FT, nl)
-    wtuq_sunwall_unscl     = zeros(FT, nl)
-    wtus_shadewall_unscl   = zeros(FT, nl)
-    wtuq_shadewall_unscl   = zeros(FT, nl)
+    wts_dv = _UfWtsDV(
+        wtas = dz(nl),
+        wtus_roof = dz(nl), wtus_road_perv = dz(nl),
+        wtus_road_imperv = dz(nl), wtus_sunwall = dz(nl),
+        wtus_shadewall = dz(nl),
+        wtus_roof_unscl = dz(nl), wtus_road_perv_unscl = dz(nl),
+        wtus_road_imperv_unscl = dz(nl), wtus_sunwall_unscl = dz(nl),
+        wtus_shadewall_unscl = dz(nl), wts_sum = dz(nl))
+    wtq_dv = _UfWtqDV(
+        wtaq = dz(nl),
+        wtuq_roof = dz(nl), wtuq_road_perv = dz(nl),
+        wtuq_road_imperv = dz(nl), wtuq_sunwall = dz(nl),
+        wtuq_shadewall = dz(nl),
+        wtuq_roof_unscl = dz(nl), wtuq_road_perv_unscl = dz(nl),
+        wtuq_road_imperv_unscl = dz(nl), wtq_sum = dz(nl))
 
-    eflx_sh_grnd_scale     = zeros(FT, np_local)
-    qflx_evap_soi_scale    = zeros(FT, np_local)
+    proto_pp = energyflux.cgrnd_patch
+    eflx_sh_grnd_scale  = (a = similar(proto_pp, FT, np_local); fill!(a, zero(FT)); a)
+    qflx_evap_soi_scale = (a = similar(proto_pp, FT, np_local); fill!(a, zero(FT)); a)
 
-    eflx_wasteheat_roof      = zeros(FT, nl)
-    eflx_wasteheat_sunwall   = zeros(FT, nl)
-    eflx_wasteheat_shadewall = zeros(FT, nl)
-    eflx_heat_from_ac_roof      = zeros(FT, nl)
-    eflx_heat_from_ac_sunwall   = zeros(FT, nl)
-    eflx_heat_from_ac_shadewall = zeros(FT, nl)
-
-    eflx_arr       = zeros(FT, nl)
-    qflx_arr       = zeros(FT, nl)
-    eflx_scale_arr = zeros(FT, nl)
-    qflx_scale_arr = zeros(FT, nl)
-    eflx_err       = zeros(FT, nl)
-    qflx_err       = zeros(FT, nl)
+    eflx_err       = dz(nl)
+    qflx_err       = dz(nl)
+    eflx_arr       = dz(nl)
+    qflx_arr       = dz(nl)
+    eflx_scale_arr = dz(nl)
+    qflx_scale_arr = dz(nl)
 
     # =========================================================================
     # Set restart fields for non-urban landunits
@@ -775,373 +1419,118 @@ function urban_fluxes!(
     m_urbanp = mask_urbanp === nothing ?
         _uf_device_mask(temperature.t_ref2m_patch, filter_urbanp, num_urbanp, np_local) :
         mask_urbanp
+    # Per-landunit URBAN mask (over the full landunit range) for the iteration +
+    # error-check kernels; one thread per landunit, urban ones do work.
+    m_urbanl = _uf_device_mask(temperature.taf_lun, filter_urbanl, num_urbanl, nl)
 
     spval = convert(FT, SPVAL)
     _launch!(_uf_nourban_restart_kernel!, temperature.taf_lun,
              waterdiagbulk.qaf_lun, m_nourbanl, spval)
 
     # =========================================================================
-    # Set constants
+    # Aerodynamic-parameter guards (HOST, validation only — no state change). The
+    # iteration kernel cannot `error()`/`@warn`; these checks read host-resident
+    # lun geometry + forcing heights and gate exactly the original error paths.
+    # Host copies (single small read-back) so a device-resident state doesn't trip
+    # GPU scalar-indexing; the validation is identical to the original.
     # =========================================================================
-    for l in begl:endl
-        beta_arr[l] = 1.0
-        zii_arr[l]  = 1000.0
-    end
-
-    # =========================================================================
-    # Compute canyontop wind using Masson (2000)
-    # =========================================================================
+    htr_h   = Array(lun_data.ht_roof)
+    zdt_h   = Array(lun_data.z_d_town)
+    z0t_h   = Array(lun_data.z_0_town)
+    hgtu_h  = Array(frictionvel.forc_hgt_u_patch)
+    lpatchi = Array(lun_data.patchi)
     for fl in 1:num_urbanl
         l = filter_urbanl[fl]
-        g = lun_data.gridcell[l]
-
-        # Error checks
-        if lun_data.ht_roof[l] - lun_data.z_d_town[l] <= lun_data.z_0_town[l]
+        if htr_h[l] - zdt_h[l] <= z0t_h[l]
             if _is_ad_type(eltype(frictionvel.forc_hgt_u_patch))
                 @warn "urban_fluxes! aerodynamic parameter error (AD mode, continuing)" maxlog=1
             else
                 error("aerodynamic parameter error in urban_fluxes!: ht_roof - z_d_town <= z_0_town " *
-                      "ht_roof=$(lun_data.ht_roof[l]) z_d_town=$(lun_data.z_d_town[l]) z_0_town=$(lun_data.z_0_town[l])")
+                      "ht_roof=$(htr_h[l]) z_d_town=$(zdt_h[l]) z_0_town=$(z0t_h[l])")
             end
         end
-        if frictionvel.forc_hgt_u_patch[lun_data.patchi[l]] - lun_data.z_d_town[l] <= lun_data.z_0_town[l]
+        if hgtu_h[lpatchi[l]] - zdt_h[l] <= z0t_h[l]
             if _is_ad_type(eltype(frictionvel.forc_hgt_u_patch))
                 @warn "urban_fluxes! aerodynamic parameter error (AD mode, continuing)" maxlog=1
             else
                 error("aerodynamic parameter error in urban_fluxes!: forc_hgt_u - z_d_town <= z_0_town " *
-                      "forc_hgt_u=$(frictionvel.forc_hgt_u_patch[lun_data.patchi[l]]) z_d_town=$(lun_data.z_d_town[l]) z_0_town=$(lun_data.z_0_town[l])")
+                      "forc_hgt_u=$(hgtu_h[lpatchi[l]]) z_d_town=$(zdt_h[l]) z_0_town=$(z0t_h[l])")
             end
-        end
-
-        # Magnitude of atmospheric wind
-        ur[l] = smooth_max(params.wind_min, sqrt(forc_u_grc[g]^2 + forc_v_grc[g]^2))
-
-        # Canyon top wind
-        canyontop_wind[l] = ur[l] *
-            log((lun_data.ht_roof[l] - lun_data.z_d_town[l]) / lun_data.z_0_town[l]) /
-            log((frictionvel.forc_hgt_u_patch[lun_data.patchi[l]] - lun_data.z_d_town[l]) / lun_data.z_0_town[l])
-
-        # U component of canyon wind
-        if lun_data.canyon_hwr[l] < 0.5  # isolated roughness flow
-            canyon_u_wind[l] = canyontop_wind[l] * exp(-0.5 * lun_data.canyon_hwr[l] *
-                (1.0 - (urbanparams.wind_hgt_canyon[l] / lun_data.ht_roof[l])))
-        elseif lun_data.canyon_hwr[l] < 1.0  # wake interference flow
-            canyon_u_wind[l] = canyontop_wind[l] * (1.0 + 2.0 * (2.0 / RPI - 1.0) *
-                (lun_data.ht_roof[l] / (lun_data.ht_roof[l] / lun_data.canyon_hwr[l]) - 0.5)) *
-                exp(-0.5 * lun_data.canyon_hwr[l] * (1.0 - (urbanparams.wind_hgt_canyon[l] / lun_data.ht_roof[l])))
-        else  # skimming flow
-            canyon_u_wind[l] = canyontop_wind[l] * (2.0 / RPI) *
-                exp(-0.5 * lun_data.canyon_hwr[l] * (1.0 - (urbanparams.wind_hgt_canyon[l] / lun_data.ht_roof[l])))
         end
     end
 
     # =========================================================================
-    # Compute fluxes — follows CLM approach for bare soils
+    # ITERATIVE CANYON-AIR SOLVE — WHOLE on device, one thread per urban landunit.
+    # (canyontop wind + monin_obuk_ini + niters stability loop + column gather +
+    #  wasteheat/traffic + stability update). See urban_fluxes_iterate!.
     # =========================================================================
-    for fl in 1:num_urbanl
-        l = filter_urbanl[fl]
-        g = lun_data.gridcell[l]
+    urban_fluxes_iterate!(
+        energyflux, frictionvel, temperature, soilstate, urbanparams,
+        waterstatebulk, waterdiagbulk, lun_data, col_data,
+        m_urbanl, num_urbanl, filter_urbanl,
+        ramu, zeta_lunit, wtus_col, wtuq_col, rahu, rawu, thm_g_lun,
+        wts_dv, wtq_dv,
+        forc_t_grc, forc_th_grc, forc_rho_grc, forc_q_grc, forc_u_grc, forc_v_grc,
+        niters; lapse_rate = lapse_rate)
 
-        thm_g[l] = forc_t_grc[g] + lapse_rate * frictionvel.forc_hgt_t_patch[lun_data.patchi[l]]
-        thv_g[l] = forc_th_grc[g] * (1.0 + 0.61 * forc_q_grc[g])
-        dth[l]   = thm_g[l] - temperature.taf_lun[l]
-        dqh[l]   = forc_q_grc[g] - waterdiagbulk.qaf_lun[l]
-        dthv     = dth[l] * (1.0 + 0.61 * forc_q_grc[g]) + 0.61 * forc_th_grc[g] * dqh[l]
-        zldis_arr[l] = frictionvel.forc_hgt_u_patch[lun_data.patchi[l]] - lun_data.z_d_town[l]
-
-        # Initialize Monin-Obukhov length and wind speed
-        (um_val, obu_val) = monin_obuk_ini(frictionvel.zetamaxstable,
-            ur[l], thv_g[l], dthv, zldis_arr[l], lun_data.z_0_town[l])
-        um[l]  = um_val
-        obu[l] = obu_val
-    end
-
-    # =========================================================================
-    # Stability iteration
-    # =========================================================================
-    for iter in 1:niters
-
-        # Get friction velocity
-        if num_urbanl > 0
-            z_d_vec  = lun_data.z_d_town
-            z_0_vec  = lun_data.z_0_town
-
-            friction_velocity!(frictionvel, num_urbanl, filter_urbanl,
-                z_d_vec, z_0_vec, z_0_vec, z_0_vec,
-                obu, iter, ur, um, ustar_loc,
-                temp1, temp2, temp12m, temp22m, fm_arr;
-                landunit_index=true,
-                lun_gridcell=lun_data.gridcell,
-                lun_patchi=lun_data.patchi,
-                lun_patchf=lun_data.patchf)
-        end
-
-        for fl in 1:num_urbanl
-            l = filter_urbanl[fl]
-            g = lun_data.gridcell[l]
-
-            # Aerodynamic resistance from urban canopy air to atmosphere
-            ramu[l] = 1.0 / (ustar_loc[l]^2 / um[l])
-            rahu[l] = 1.0 / (temp1[l] * ustar_loc[l])
-            rawu[l] = 1.0 / (temp2[l] * ustar_loc[l])
-
-            # Canyon wind magnitude
-            canyon_wind[l] = sqrt(canyon_u_wind[l]^2.0 + ustar_loc[l]^2.0)
-
-            # Canyon resistance (Masson 2000)
-            canyon_resistance[l] = CPAIR * forc_rho_grc[g] / (11.8 + 4.2 * canyon_wind[l])
-        end
-
-        # First term in taf/qaf equations
-        for fl in 1:num_urbanl
-            l = filter_urbanl[fl]
-            g = lun_data.gridcell[l]
-
-            taf_numer[l] = thm_g[l] / rahu[l]
-            taf_denom[l] = 1.0 / rahu[l]
-            qaf_numer[l] = forc_q_grc[g] / rawu[l]
-            qaf_denom[l] = 1.0 / rawu[l]
-
-            wtas[l] = 1.0 / rahu[l]
-            wtaq[l] = 1.0 / rawu[l]
-        end
-
-        # Gather terms from urban columns
-        for fc in 1:num_urbanc
-            c = filter_urbanc[fc]
-            l = col_data.landunit[c]
-
-            if col_data.itype[c] == ICOL_ROOF
-                # Scaled sensible heat conductance
-                wtus_col[c] = lun_data.wtlunit_roof[l] / canyon_resistance[l]
-                wtus_roof[l] = wtus_col[c]
-                wtus_roof_unscl[l] = 1.0 / canyon_resistance[l]
-
-                # Wetness fraction for roof
-                if waterdiagbulk.snow_depth_col[c] > 0.0
-                    fwet_roof = smooth_min(waterdiagbulk.snow_depth_col[c] / 0.05, 1.0)
-                else
-                    fwet_roof = (smooth_max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, 1] +
-                        waterstatebulk.ws.h2osoi_ice_col[c, 1]) / PONDMX_URBAN)^0.666666666666
-                    fwet_roof = smooth_min(fwet_roof, 1.0)
-                end
-                if waterdiagbulk.qaf_lun[l] > waterdiagbulk.qg_col[c]
-                    fwet_roof = 1.0
-                end
-
-                # Scaled latent heat conductance
-                wtuq_col[c] = fwet_roof * (lun_data.wtlunit_roof[l] / canyon_resistance[l])
-                wtuq_roof[l] = wtuq_col[c]
-                wtuq_roof_unscl[l] = fwet_roof * (1.0 / canyon_resistance[l])
-
-                if is_simple_build_temp()
-                    (wh, hfac) = simple_wasteheatfromac(
-                        energyflux.eflx_urban_ac_col[c], energyflux.eflx_urban_heat_col[c])
-                    eflx_wasteheat_roof[l] = wh
-                    eflx_heat_from_ac_roof[l] = hfac
-                end
-
-            elseif col_data.itype[c] == ICOL_ROAD_PERV
-                # Scaled sensible heat conductance
-                wtus_col[c] = lun_data.wtroad_perv[l] * (1.0 - lun_data.wtlunit_roof[l]) / canyon_resistance[l]
-                wtus_road_perv[l] = wtus_col[c]
-                wtus_road_perv_unscl[l] = 1.0 / canyon_resistance[l]
-
-                # Scaled latent heat conductance
-                wtuq_col[c] = lun_data.wtroad_perv[l] * (1.0 - lun_data.wtlunit_roof[l]) / canyon_resistance[l]
-                wtuq_road_perv[l] = wtuq_col[c]
-                wtuq_road_perv_unscl[l] = 1.0 / canyon_resistance[l]
-
-            elseif col_data.itype[c] == ICOL_ROAD_IMPERV
-                # Scaled sensible heat conductance
-                wtus_col[c] = (1.0 - lun_data.wtroad_perv[l]) * (1.0 - lun_data.wtlunit_roof[l]) / canyon_resistance[l]
-                wtus_road_imperv[l] = wtus_col[c]
-                wtus_road_imperv_unscl[l] = 1.0 / canyon_resistance[l]
-
-                # Wetness fraction for impervious road
-                if waterdiagbulk.snow_depth_col[c] > 0.0
-                    fwet_road_imperv = smooth_min(waterdiagbulk.snow_depth_col[c] / 0.05, 1.0)
-                else
-                    fwet_road_imperv = (smooth_max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, 1] +
-                        waterstatebulk.ws.h2osoi_ice_col[c, 1]) / PONDMX_URBAN)^0.666666666666
-                    fwet_road_imperv = smooth_min(fwet_road_imperv, 1.0)
-                end
-                if waterdiagbulk.qaf_lun[l] > waterdiagbulk.qg_col[c]
-                    fwet_road_imperv = 1.0
-                end
-
-                # Scaled latent heat conductance
-                wtuq_col[c] = fwet_road_imperv * (1.0 - lun_data.wtroad_perv[l]) *
-                    (1.0 - lun_data.wtlunit_roof[l]) / canyon_resistance[l]
-                wtuq_road_imperv[l] = wtuq_col[c]
-                wtuq_road_imperv_unscl[l] = fwet_road_imperv * (1.0 / canyon_resistance[l])
-
-            elseif col_data.itype[c] == ICOL_SUNWALL
-                # Scaled sensible heat conductance
-                wtus_col[c] = lun_data.canyon_hwr[l] * (1.0 - lun_data.wtlunit_roof[l]) / canyon_resistance[l]
-                wtus_sunwall[l] = wtus_col[c]
-                wtus_sunwall_unscl[l] = 1.0 / canyon_resistance[l]
-
-                # Walls have zero latent heat conductance
-                wtuq_col[c] = 0.0
-                wtuq_sunwall[l] = 0.0
-                wtuq_sunwall_unscl[l] = 0.0
-
-                if is_simple_build_temp()
-                    (wh, hfac) = simple_wasteheatfromac(
-                        energyflux.eflx_urban_ac_col[c], energyflux.eflx_urban_heat_col[c])
-                    eflx_wasteheat_sunwall[l] = wh
-                    eflx_heat_from_ac_sunwall[l] = hfac
-                end
-
-            elseif col_data.itype[c] == ICOL_SHADEWALL
-                # Scaled sensible heat conductance
-                wtus_col[c] = lun_data.canyon_hwr[l] * (1.0 - lun_data.wtlunit_roof[l]) / canyon_resistance[l]
-                wtus_shadewall[l] = wtus_col[c]
-                wtus_shadewall_unscl[l] = 1.0 / canyon_resistance[l]
-
-                # Walls have zero latent heat conductance
-                wtuq_col[c] = 0.0
-                wtuq_shadewall[l] = 0.0
-                wtuq_shadewall_unscl[l] = 0.0
-
-                if is_simple_build_temp()
-                    (wh, hfac) = simple_wasteheatfromac(
-                        energyflux.eflx_urban_ac_col[c], energyflux.eflx_urban_heat_col[c])
-                    eflx_wasteheat_shadewall[l] = wh
-                    eflx_heat_from_ac_shadewall[l] = hfac
-                end
-
-            else
-                if _is_ad_type(eltype(energyflux.eflx_sh_tot_patch))
-                    @warn "urban_fluxes! ctype out of range (AD mode, continuing)" maxlog=1
-                else
-                    error("ERROR: ctype out of range in urban_fluxes! c=$c ctype=$(col_data.itype[c])")
-                end
-            end
-
-            taf_numer[l] = taf_numer[l] + temperature.t_grnd_col[c] * wtus_col[c]
-            taf_denom[l] = taf_denom[l] + wtus_col[c]
-            qaf_numer[l] = qaf_numer[l] + waterdiagbulk.qg_col[c] * wtuq_col[c]
-            qaf_denom[l] = qaf_denom[l] + wtuq_col[c]
-        end
-
-        # Calculate new urban canopy air temperature and specific humidity
+    # Prog build temp: wasteheat is computed from landunit-level AC/heat (untouched
+    # by the simple-build kernel path). Run the host wasteheat! to fill it. (Simple
+    # build temp is handled inside the iteration kernel.)
+    if is_prog_build_temp()
+        empty_l = FT[]
         wasteheat!(energyflux, lun_data, num_urbanl, filter_urbanl,
-            eflx_wasteheat_roof, eflx_wasteheat_sunwall, eflx_wasteheat_shadewall,
-            eflx_heat_from_ac_roof, eflx_heat_from_ac_sunwall, eflx_heat_from_ac_shadewall)
-
-        for fl in 1:num_urbanl
-            l = filter_urbanl[fl]
-            g = lun_data.gridcell[l]
-
-            # Calculate traffic heat flux (only from impervious road)
-            energyflux.eflx_traffic_lun[l] = (1.0 - lun_data.wtlunit_roof[l]) *
-                (1.0 - lun_data.wtroad_perv[l]) * urbanparams.eflx_traffic_factor[l]
-
-            temperature.taf_lun[l] = taf_numer[l] / taf_denom[l]
-            waterdiagbulk.qaf_lun[l] = qaf_numer[l] / qaf_denom[l]
-
-            wts_sum[l] = wtas[l] + wtus_roof[l] + wtus_road_perv[l] +
-                wtus_road_imperv[l] + wtus_sunwall[l] + wtus_shadewall[l]
-
-            wtq_sum[l] = wtaq[l] + wtuq_roof[l] + wtuq_road_perv[l] +
-                wtuq_road_imperv[l] + wtuq_sunwall[l] + wtuq_shadewall[l]
-        end
-
-        # Determine stability using new taf and qaf
-        for fl in 1:num_urbanl
-            l = filter_urbanl[fl]
-            g = lun_data.gridcell[l]
-
-            dth[l] = thm_g[l] - temperature.taf_lun[l]
-            dqh[l] = forc_q_grc[g] - waterdiagbulk.qaf_lun[l]
-            tstar = temp1[l] * dth[l]
-            qstar = temp2[l] * dqh[l]
-            thvstar = tstar * (1.0 + 0.61 * forc_q_grc[g]) + 0.61 * forc_th_grc[g] * qstar
-            zeta_lunit[l] = zldis_arr[l] * VKC * GRAV * thvstar / (ustar_loc[l]^2 * thv_g[l])
-
-            if zeta_lunit[l] >= 0.0  # stable
-                zeta_lunit[l] = smooth_min(frictionvel.zetamaxstable, smooth_max(zeta_lunit[l], 0.01))
-                um[l] = smooth_max(ur[l], 0.1)
-            else  # unstable
-                zeta_lunit[l] = smooth_max(-100.0, smooth_min(zeta_lunit[l], -0.01))
-                wc = beta_arr[l] * (-GRAV * ustar_loc[l] * thvstar * zii_arr[l] / thv_g[l])^0.333
-                um[l] = sqrt(ur[l]^2 + wc^2)
-            end
-
-            obu[l] = zldis_arr[l] / zeta_lunit[l]
-        end
-    end  # end stability iteration
+            empty_l, empty_l, empty_l, empty_l, empty_l, empty_l)
+    end
 
     # =========================================================================
     # Determine fluxes from canyon surfaces
     # =========================================================================
     # Per-patch + column-INDEPENDENT given the SOLVED canopy-air state: runs WHOLE
     # on the device as a single kernel (see urban_fluxes_canyon_surface!). The
-    # per-landunit work arrays are host-local here; _uf_to_backend moves them onto
-    # the state structs' backend (identity / byte-identical on Float64 CPU). The
-    # scaled-flux scratch is initialised to zero on-device via fill! over the full
-    # patch range (matches the original begp:endp init), then overwritten for urban
-    # patches by the kernel.
-    proto_pp = energyflux.cgrnd_patch
-    fill!(eflx_sh_grnd_scale, zero(eltype(eflx_sh_grnd_scale)))
-    fill!(qflx_evap_soi_scale, zero(eltype(qflx_evap_soi_scale)))
-
-    b(v) = _uf_to_backend(proto_pp, v)
-    wts_dv = _UfWtsDV(
-        wtas = b(wtas),
-        wtus_roof = b(wtus_roof), wtus_road_perv = b(wtus_road_perv),
-        wtus_road_imperv = b(wtus_road_imperv), wtus_sunwall = b(wtus_sunwall),
-        wtus_shadewall = b(wtus_shadewall),
-        wtus_roof_unscl = b(wtus_roof_unscl), wtus_road_perv_unscl = b(wtus_road_perv_unscl),
-        wtus_road_imperv_unscl = b(wtus_road_imperv_unscl), wtus_sunwall_unscl = b(wtus_sunwall_unscl),
-        wtus_shadewall_unscl = b(wtus_shadewall_unscl), wts_sum = b(wts_sum))
-    wtq_dv = _UfWtqDV(
-        wtaq = b(wtaq),
-        wtuq_roof = b(wtuq_roof), wtuq_road_perv = b(wtuq_road_perv),
-        wtuq_road_imperv = b(wtuq_road_imperv), wtuq_sunwall = b(wtuq_sunwall),
-        wtuq_shadewall = b(wtuq_shadewall),
-        wtuq_roof_unscl = b(wtuq_roof_unscl), wtuq_road_perv_unscl = b(wtuq_road_perv_unscl),
-        wtuq_road_imperv_unscl = b(wtuq_road_imperv_unscl), wtq_sum = b(wtq_sum))
-
+    # per-landunit weight arrays (wts_dv/wtq_dv) and ramu/zeta_lunit/wtus_col/
+    # wtuq_col are ALREADY device-resident (written by the iteration kernel above),
+    # so they pass straight through. Only the gridcell forcing vectors are still
+    # host-resident; _uf_to_backend moves them onto the state backend (identity /
+    # byte-identical on Float64 CPU). The scaled-flux scratch was zero-initialised
+    # on-device (matches the begp:endp init), then overwritten for urban patches.
+    bf(v) = _uf_to_backend(energyflux.cgrnd_patch, v)
     urban_fluxes_canyon_surface!(
         energyflux, frictionvel, waterfluxbulk, waterdiagbulk, soilstate,
         temperature, patch_data, col_data, m_urbanp, wts_dv, wtq_dv,
-        b(ramu), b(zeta_lunit), b(wtus_col), b(wtuq_col),
+        ramu, zeta_lunit, wtus_col, wtuq_col,
         eflx_sh_grnd_scale, qflx_evap_soi_scale,
-        b(forc_rho_grc), b(forc_u_grc), b(forc_v_grc))
-
-    # Host copies of the scaled-flux scratch for the sum()-based error check below
-    # (the check is a reduction over each landunit's patch range and stays HOST).
-    eflx_sh_grnd_scale = collect(eflx_sh_grnd_scale)
-    qflx_evap_soi_scale = collect(qflx_evap_soi_scale)
+        bf(forc_rho_grc), bf(forc_u_grc), bf(forc_v_grc))
 
     # =========================================================================
-    # Error checking: total fluxes should equal sum of scaled fluxes
+    # Error checking: total fluxes should equal sum of scaled fluxes — per-landunit
+    # in-thread reduction over the landunit's member patches (one thread per
+    # landunit), so the whole check runs on-device. The warn/error gating reads the
+    # small per-landunit err arrays back on the host (a kernel cannot error()/@warn).
     # =========================================================================
-    for fl in 1:num_urbanl
-        l = filter_urbanl[fl]
-        g = lun_data.gridcell[l]
-        eflx_arr[l] = -(forc_rho_grc[g] * CPAIR / rahu[l]) * (thm_g[l] - temperature.taf_lun[l])
-        qflx_arr[l] = -(forc_rho_grc[g] / rawu[l]) * (forc_q_grc[g] - waterdiagbulk.qaf_lun[l])
-        eflx_scale_arr[l] = sum(eflx_sh_grnd_scale[lun_data.patchi[l]:lun_data.patchf[l]])
-        qflx_scale_arr[l] = sum(qflx_evap_soi_scale[lun_data.patchi[l]:lun_data.patchf[l]])
-        eflx_err[l] = eflx_scale_arr[l] - eflx_arr[l]
-        qflx_err[l] = qflx_scale_arr[l] - qflx_arr[l]
-    end
+    _launch!(_uf_errcheck_kernel!, eflx_err, m_urbanl, qflx_err,
+        eflx_sh_grnd_scale, qflx_evap_soi_scale,
+        lun_data.patchi, lun_data.patchf, lun_data.gridcell,
+        bf(forc_rho_grc), bf(forc_q_grc), thm_g_lun,
+        temperature.taf_lun, waterdiagbulk.qaf_lun, rahu, rawu,
+        qflx_err, eflx_arr, qflx_arr, eflx_scale_arr, qflx_scale_arr,
+        convert(FT, CPAIR); ndrange = nl)
+
+    # Read back the small per-landunit error arrays for the host warn/error gating.
+    eflx_err_h = collect(eflx_err); qflx_err_h = collect(qflx_err)
+    eflx_arr_h = collect(eflx_arr); qflx_arr_h = collect(qflx_arr)
+    eflx_scale_h = collect(eflx_scale_arr); qflx_scale_h = collect(qflx_scale_arr)
 
     # Check sensible heat flux error
     for fl in 1:num_urbanl
         l = filter_urbanl[fl]
-        if abs(eflx_err[l]) > 0.01
-            @warn "Total sensible heat does not equal sum of scaled heat fluxes for urban columns" nstep l eflx_err=eflx_err[l]
-            if abs(eflx_err[l]) > 0.01
+        if abs(eflx_err_h[l]) > 0.01
+            @warn "Total sensible heat does not equal sum of scaled heat fluxes for urban columns" nstep l eflx_err=eflx_err_h[l]
+            if abs(eflx_err_h[l]) > 0.01
                 if _is_ad_type(eltype(eflx_err))
                     @warn "urban_fluxes! sensible heat flux error (AD mode, continuing)" maxlog=1
                 else
                     error("urban_fluxes! sensible heat flux error > 0.01 W/m**2: " *
-                          "eflx_scale=$(eflx_scale_arr[l]) eflx=$(eflx_arr[l]) err=$(eflx_err[l])")
+                          "eflx_scale=$(eflx_scale_h[l]) eflx=$(eflx_arr_h[l]) err=$(eflx_err_h[l])")
                 end
             end
         end
@@ -1150,14 +1539,14 @@ function urban_fluxes!(
     # Check water vapor flux error
     for fl in 1:num_urbanl
         l = filter_urbanl[fl]
-        if abs(qflx_err[l]) > 4.0e-9
-            @warn "Total water vapor flux does not equal sum of scaled fluxes for urban columns" nstep l qflx_err=qflx_err[l]
-            if abs(qflx_err[l]) > 4.0e-9
+        if abs(qflx_err_h[l]) > 4.0e-9
+            @warn "Total water vapor flux does not equal sum of scaled fluxes for urban columns" nstep l qflx_err=qflx_err_h[l]
+            if abs(qflx_err_h[l]) > 4.0e-9
                 if _is_ad_type(eltype(qflx_err))
                     @warn "urban_fluxes! water vapor flux error (AD mode, continuing)" maxlog=1
                 else
                     error("urban_fluxes! water vapor flux error > 4e-9 kg/m**2/s: " *
-                          "qflx_scale=$(qflx_scale_arr[l]) qflx=$(qflx_arr[l]) err=$(qflx_err[l])")
+                          "qflx_scale=$(qflx_scale_h[l]) qflx=$(qflx_arr_h[l]) err=$(qflx_err_h[l])")
                 end
             end
         end
@@ -1167,8 +1556,7 @@ function urban_fluxes!(
     # Internal building temperature (simple method)
     # =========================================================================
     if is_simple_build_temp()
-        calc_simple_internal_building_temp!(temperature, col_data, lun_data,
-            num_urbanc, filter_urbanc, num_urbanl, filter_urbanl)
+        calc_simple_internal_building_temp_dev!(temperature, col_data, lun_data, m_urbanl)
     end
 
     # =========================================================================
