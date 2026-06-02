@@ -106,7 +106,7 @@ function calc_soilevap_resis!(col::ColumnData,
                                waterstatebulk::WaterStateBulkData,
                                waterdiagbulk::WaterDiagnosticBulkData,
                                temperature::TemperatureData,
-                               mask_nolakec::BitVector,
+                               mask_nolakec::AbstractVector{Bool},
                                bounds::UnitRange{Int})
     if surface_resistance_ctrl.soil_resis_method == SOIL_RESIS_LEEPIELKE_1992
         calc_beta_leepielke1992!(col, lun, soilstate, waterstatebulk,
@@ -118,6 +118,46 @@ function calc_soilevap_resis!(col::ColumnData,
         error("calc_soilevap_resis!: a soilevap resis function must be specified!")
     end
     return nothing
+end
+
+# --------------------------------------------------------------------------
+# Kernel: Lee-Pielke (1992) beta factor (per column, masked). Each column
+# writes only soilbeta[c]; fully independent. Literals eltype-converted so no
+# Float64 reaches a Float32-only backend (Metal); byte-identical on Float64.
+# --------------------------------------------------------------------------
+@kernel function _beta_leepielke_kernel!(soilbeta, @Const(mask), @Const(landunit),
+                                         @Const(col_itype), @Const(lun_itype),
+                                         @Const(dz), @Const(watsat), @Const(watfc),
+                                         @Const(h2osoi_ice), @Const(h2osoi_liq),
+                                         @Const(frac_sno), @Const(frac_h2osfc),
+                                         joff::Int, denh2o, denice)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(soilbeta)
+        l = landunit[c]
+        if lun_itype[l] != ISTWET && lun_itype[l] != ISTICE
+            if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+                wx  = (h2osoi_liq[c, 1 + joff] / denh2o + h2osoi_ice[c, 1 + joff] / denice) / dz[c, 1 + joff]
+                if wx < watfc[c, 1]
+                    fac_fc = min(one(T), wx / watfc[c, 1])
+                    fac_fc = max(fac_fc, T(0.01))
+                    soilbeta[c] = (one(T) - frac_sno[c] - frac_h2osfc[c]) *
+                                  T(0.25) * (one(T) - cos(T(π) * fac_fc))^T(2.0) +
+                                  frac_sno[c] + frac_h2osfc[c]
+                else
+                    soilbeta[c] = one(T)
+                end
+            elseif col_itype[c] == ICOL_ROAD_PERV
+                soilbeta[c] = zero(T)
+            elseif col_itype[c] == ICOL_SUNWALL || col_itype[c] == ICOL_SHADEWALL
+                soilbeta[c] = zero(T)
+            elseif col_itype[c] == ICOL_ROOF || col_itype[c] == ICOL_ROAD_IMPERV
+                soilbeta[c] = zero(T)
+            end
+        else
+            soilbeta[c] = one(T)
+        end
+    end
 end
 
 """
@@ -136,53 +176,71 @@ function calc_beta_leepielke1992!(col::ColumnData,
                                    soilstate::SoilStateData,
                                    waterstatebulk::WaterStateBulkData,
                                    waterdiagbulk::WaterDiagnosticBulkData,
-                                   mask_nolakec::BitVector,
+                                   mask_nolakec::AbstractVector{Bool},
                                    bounds::UnitRange{Int})
     nlevsno = varpar.nlevsno
     joff = nlevsno  # offset for combined snow+soil indexing
 
-    # Shorthand references (matching Fortran associate block)
-    watsat      = soilstate.watsat_col
-    watfc       = soilstate.watfc_col
-    soilbeta    = soilstate.soilbeta_col
-    h2osoi_ice  = waterstatebulk.ws.h2osoi_ice_col
-    h2osoi_liq  = waterstatebulk.ws.h2osoi_liq_col
-    frac_sno    = waterdiagbulk.frac_sno_col
-    frac_h2osfc = waterdiagbulk.frac_h2osfc_col
-
-    for c in bounds
-        mask_nolakec[c] || continue
-        l = col.landunit[c]
-
-        if lun.itype[l] != ISTWET && lun.itype[l] != ISTICE
-            if lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP
-                wx  = (h2osoi_liq[c, 1 + joff] / DENH2O + h2osoi_ice[c, 1 + joff] / DENICE) / col.dz[c, 1 + joff]
-                fac = min(1.0, wx / watsat[c, 1])
-                fac = max(fac, 0.01)
-                # Lee and Pielke 1992 beta, added by K.Sakaguchi
-                if wx < watfc[c, 1]  # water content of top layer < field capacity
-                    fac_fc = min(1.0, wx / watfc[c, 1])  # eqn5.66 but divided by theta at F.C.
-                    fac_fc = max(fac_fc, 0.01)
-                    # modify soil beta by snow cover. soilbeta for snow surface is one
-                    soilbeta[c] = (1.0 - frac_sno[c] - frac_h2osfc[c]) *
-                                  0.25 * (1.0 - cos(π * fac_fc))^2.0 +
-                                  frac_sno[c] + frac_h2osfc[c]
-                else  # water content of top layer >= field capacity
-                    soilbeta[c] = 1.0
-                end
-            elseif col.itype[c] == ICOL_ROAD_PERV
-                soilbeta[c] = 0.0
-            elseif col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL
-                soilbeta[c] = 0.0
-            elseif col.itype[c] == ICOL_ROOF || col.itype[c] == ICOL_ROAD_IMPERV
-                soilbeta[c] = 0.0
-            end
-        else
-            soilbeta[c] = 1.0
-        end
-    end
+    soilbeta = soilstate.soilbeta_col
+    T = eltype(soilbeta)
+    _launch!(_beta_leepielke_kernel!, soilbeta, mask_nolakec, col.landunit,
+             col.itype, lun.itype, col.dz, soilstate.watsat_col, soilstate.watfc_col,
+             waterstatebulk.ws.h2osoi_ice_col, waterstatebulk.ws.h2osoi_liq_col,
+             waterdiagbulk.frac_sno_col, waterdiagbulk.frac_h2osfc_col,
+             joff, T(DENH2O), T(DENICE))
 
     return nothing
+end
+
+# --------------------------------------------------------------------------
+# Kernel: Swenson & Lawrence (2014) dry-surface-layer resistance (per column,
+# masked). Each column writes only dsl[c] and soilresis[c]; independent.
+# d_max / frac_sat_soil_dsl_init are host-resolved module params, passed at the
+# output eltype so no Float64 reaches a Float32-only backend.
+# --------------------------------------------------------------------------
+@kernel function _soilresist_sl14_kernel!(soilresis, @Const(mask), @Const(landunit),
+                                          @Const(col_itype), @Const(lun_itype),
+                                          dsl, @Const(dz), @Const(watsat),
+                                          @Const(bsw), @Const(sucsat), @Const(t_soisno),
+                                          @Const(h2osoi_ice), @Const(h2osoi_liq),
+                                          joff::Int, d_max, frac_sat_soil_dsl_init,
+                                          denh2o, denice)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(soilresis)
+        l = landunit[c]
+        if lun_itype[l] != ISTWET && lun_itype[l] != ISTICE
+            if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+                vwc_liq = max(h2osoi_liq[c, 1 + joff], T(1.0e-6)) / (dz[c, 1 + joff] * denh2o)
+
+                eff_por_top = max(T(0.01), watsat[c, 1] - min(watsat[c, 1],
+                                  h2osoi_ice[c, 1 + joff] / (dz[c, 1 + joff] * denice)))
+
+                aird = watsat[c, 1] * (sucsat[c, 1] / T(1.0e7))^(one(T) / bsw[c, 1])
+                d0 = T(2.12e-5) * (t_soisno[c, 1 + joff] / T(273.15))^T(1.75)
+                eps = watsat[c, 1] - aird
+                dg = eps * d0 * (eps / watsat[c, 1])^(T(3.0) / max(T(3.0), bsw[c, 1]))
+
+                dsl[c] = d_max * max(T(0.001), (frac_sat_soil_dsl_init * eff_por_top - vwc_liq)) /
+                         max(T(0.001), (frac_sat_soil_dsl_init * watsat[c, 1] - aird))
+
+                dsl[c] = max(dsl[c], zero(T))
+                dsl[c] = min(dsl[c], T(200.0))
+
+                soilresis[c] = dsl[c] / (dg * eps * T(1.0e3)) + T(20.0)
+                soilresis[c] = min(T(1.0e6), soilresis[c])
+
+            elseif col_itype[c] == ICOL_ROAD_PERV
+                soilresis[c] = T(1.0e6)
+            elseif col_itype[c] == ICOL_SUNWALL || col_itype[c] == ICOL_SHADEWALL
+                soilresis[c] = T(1.0e6)
+            elseif col_itype[c] == ICOL_ROOF || col_itype[c] == ICOL_ROAD_IMPERV
+                soilresis[c] = T(1.0e6)
+            end
+        else
+            soilresis[c] = zero(T)
+        end
+    end
 end
 
 """
@@ -201,63 +259,22 @@ function calc_soil_resistance_sl14!(col::ColumnData,
                                      soilstate::SoilStateData,
                                      waterstatebulk::WaterStateBulkData,
                                      temperature::TemperatureData,
-                                     mask_nolakec::BitVector,
+                                     mask_nolakec::AbstractVector{Bool},
                                      bounds::UnitRange{Int})
     nlevsno = varpar.nlevsno
     joff = nlevsno  # offset for combined snow+soil indexing
 
-    # Shorthand references (matching Fortran associate block)
-    dz         = col.dz
-    watsat     = soilstate.watsat_col
-    bsw        = soilstate.bsw_col
-    sucsat     = soilstate.sucsat_col
-    dsl        = soilstate.dsl_col
-    soilresis  = soilstate.soilresis_col
-    t_soisno   = temperature.t_soisno_col
-    h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col
-    h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col
+    soilresis = soilstate.soilresis_col
+    T = eltype(soilresis)
 
     d_max = surface_resistance_params.d_max
     frac_sat_soil_dsl_init = surface_resistance_params.frac_sat_soil_dsl_init
 
-    for c in bounds
-        mask_nolakec[c] || continue
-        l = col.landunit[c]
-
-        if lun.itype[l] != ISTWET && lun.itype[l] != ISTICE
-            if lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP
-                vwc_liq = max(h2osoi_liq[c, 1 + joff], 1.0e-6) / (dz[c, 1 + joff] * DENH2O)
-
-                # eff_porosity not calculated til SoilHydrology
-                eff_por_top = max(0.01, watsat[c, 1] - min(watsat[c, 1],
-                                  h2osoi_ice[c, 1 + joff] / (dz[c, 1 + joff] * DENICE)))
-
-                # calculate diffusivity and air free pore space
-                aird = watsat[c, 1] * (sucsat[c, 1] / 1.0e7)^(1.0 / bsw[c, 1])
-                d0 = 2.12e-5 * (t_soisno[c, 1 + joff] / 273.15)^1.75  # [Bitelli et al., JH, 08]
-                eps = watsat[c, 1] - aird
-                dg = eps * d0 * (eps / watsat[c, 1])^(3.0 / max(3.0, bsw[c, 1]))
-
-                dsl[c] = d_max * max(0.001, (frac_sat_soil_dsl_init * eff_por_top - vwc_liq)) /
-                         max(0.001, (frac_sat_soil_dsl_init * watsat[c, 1] - aird))
-
-                dsl[c] = max(dsl[c], 0.0)
-                dsl[c] = min(dsl[c], 200.0)
-
-                soilresis[c] = dsl[c] / (dg * eps * 1.0e3) + 20.0
-                soilresis[c] = min(1.0e6, soilresis[c])
-
-            elseif col.itype[c] == ICOL_ROAD_PERV
-                soilresis[c] = 1.0e6
-            elseif col.itype[c] == ICOL_SUNWALL || col.itype[c] == ICOL_SHADEWALL
-                soilresis[c] = 1.0e6
-            elseif col.itype[c] == ICOL_ROOF || col.itype[c] == ICOL_ROAD_IMPERV
-                soilresis[c] = 1.0e6
-            end
-        else
-            soilresis[c] = 0.0
-        end
-    end
+    _launch!(_soilresist_sl14_kernel!, soilresis, mask_nolakec, col.landunit,
+             col.itype, lun.itype, soilstate.dsl_col, col.dz, soilstate.watsat_col,
+             soilstate.bsw_col, soilstate.sucsat_col, temperature.t_soisno_col,
+             waterstatebulk.ws.h2osoi_ice_col, waterstatebulk.ws.h2osoi_liq_col,
+             joff, T(d_max), T(frac_sat_soil_dsl_init), T(DENH2O), T(DENICE))
 
     return nothing
 end
