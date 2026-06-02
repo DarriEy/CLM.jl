@@ -197,62 +197,95 @@ Ported from `CalcOzoneUptake` in OzoneMod.F90.
 - `leaf_long_pft::Vector{<:Real}`: leaf longevity per PFT (years)
 - `dtime::Float64`: time step size (seconds)
 """
+# --------------------------------------------------------------------------
+# Device-callable per-point ozone uptake (positional, eltype-generic). Mirrors
+# calc_ozone_uptake_one_point verbatim; literals converted to the working type
+# so no Float64 reaches a Float32-only backend (byte-identical on Float64).
+# --------------------------------------------------------------------------
+@inline function _calc_ozone_uptake_one_point(forc_ozone::T, forc_pbot::T, forc_th::T,
+                                              rs::T, rb::T, ram::T, tlai_val::T,
+                                              tlai_old::T, pft_type::Integer, o3uptake::T,
+                                              evergreen_pft, leaf_long_pft,
+                                              dtime::T, rgas::T) where {T}
+    o3concnmolm3 = forc_ozone * T(1.0e9) * (forc_pbot / (forc_th * rgas))
+    o3flux = o3concnmolm3 / (T(O3_KO3) * rs + rb + ram)
+
+    o3fluxcrit = o3flux < T(O3_FLUX_THRESHOLD) ? zero(T) : o3flux - T(O3_FLUX_THRESHOLD)
+
+    dtimeh = dtime / T(3600.0)
+    o3fluxperdt = o3fluxcrit * dtime * T(0.000001)
+
+    if tlai_val > T(O3_LAI_THRESH)
+        if tlai_val - tlai_old > zero(T)
+            heal = max(zero(T), ((tlai_val - tlai_old) / tlai_val) * o3fluxperdt)
+        else
+            heal = zero(T)
+        end
+
+        if evergreen_pft[pft_type] == one(T)
+            leafturn = one(T) / (leaf_long_pft[pft_type] * T(365.0) * T(24.0))
+        else
+            leafturn = zero(T)
+        end
+
+        decay = o3uptake * leafturn * dtimeh
+        o3uptake_new = max(zero(T), o3uptake + o3fluxperdt - decay - heal)
+    else
+        o3uptake_new = zero(T)
+    end
+    return o3uptake_new
+end
+
+@kernel function _ozone_uptake_kernel!(o3uptakesha, @Const(mask), @Const(column),
+                                       @Const(gridcell), @Const(pft_itype),
+                                       o3uptakesun, tlai_old,
+                                       @Const(forc_pbot), @Const(forc_th),
+                                       @Const(rssun), @Const(rssha), @Const(rb),
+                                       @Const(ram), @Const(tlai), @Const(forc_o3),
+                                       @Const(evergreen_pft), @Const(leaf_long_pft),
+                                       dtime, rgas)
+    p = @index(Global)
+    @inbounds if mask[p]
+        c = column[p]
+        g = gridcell[p]
+        pft_type = pft_itype[p]
+        told = tlai_old[p]
+
+        o3uptakesha[p] = _calc_ozone_uptake_one_point(
+            forc_o3[g], forc_pbot[c], forc_th[c], rssha[p], rb[p], ram[p],
+            tlai[p], told, pft_type, o3uptakesha[p],
+            evergreen_pft, leaf_long_pft, dtime, rgas)
+
+        o3uptakesun[p] = _calc_ozone_uptake_one_point(
+            forc_o3[g], forc_pbot[c], forc_th[c], rssun[p], rb[p], ram[p],
+            tlai[p], told, pft_type, o3uptakesun[p],
+            evergreen_pft, leaf_long_pft, dtime, rgas)
+
+        tlai_old[p] = tlai[p]
+    end
+end
+
 function calc_ozone_uptake!(oz::OzoneData,
                             patchdata::PatchData,
-                            mask_exposedvegp::BitVector,
+                            mask_exposedvegp::AbstractVector{Bool},
                             bounds::UnitRange{Int},
-                            forc_pbot::Vector{<:Real},
-                            forc_th::Vector{<:Real},
-                            rssun::Vector{<:Real},
-                            rssha::Vector{<:Real},
-                            rb::Vector{<:Real},
-                            ram::Vector{<:Real},
-                            tlai::Vector{<:Real},
-                            forc_o3::Vector{<:Real},
-                            evergreen_pft::Vector{<:Real},
-                            leaf_long_pft::Vector{<:Real},
+                            forc_pbot::AbstractVector{<:Real},
+                            forc_th::AbstractVector{<:Real},
+                            rssun::AbstractVector{<:Real},
+                            rssha::AbstractVector{<:Real},
+                            rb::AbstractVector{<:Real},
+                            ram::AbstractVector{<:Real},
+                            tlai::AbstractVector{<:Real},
+                            forc_o3::AbstractVector{<:Real},
+                            evergreen_pft::AbstractVector{<:Real},
+                            leaf_long_pft::AbstractVector{<:Real},
                             dtime::Real)
-    for p in bounds
-        mask_exposedvegp[p] || continue
-
-        c = patchdata.column[p]
-        g = patchdata.gridcell[p]
-        pft_type = patchdata.itype[p]
-
-        # Ozone uptake for shaded leaves
-        oz.o3uptakesha_patch[p] = calc_ozone_uptake_one_point(
-            forc_ozone = forc_o3[g],
-            forc_pbot  = forc_pbot[c],
-            forc_th    = forc_th[c],
-            rs         = rssha[p],
-            rb         = rb[p],
-            ram        = ram[p],
-            tlai_val   = tlai[p],
-            tlai_old   = oz.tlai_old_patch[p],
-            pft_type   = pft_type,
-            o3uptake   = oz.o3uptakesha_patch[p],
-            evergreen_pft = evergreen_pft,
-            leaf_long_pft = leaf_long_pft,
-            dtime      = dtime)
-
-        # Ozone uptake for sunlit leaves
-        oz.o3uptakesun_patch[p] = calc_ozone_uptake_one_point(
-            forc_ozone = forc_o3[g],
-            forc_pbot  = forc_pbot[c],
-            forc_th    = forc_th[c],
-            rs         = rssun[p],
-            rb         = rb[p],
-            ram        = ram[p],
-            tlai_val   = tlai[p],
-            tlai_old   = oz.tlai_old_patch[p],
-            pft_type   = pft_type,
-            o3uptake   = oz.o3uptakesun_patch[p],
-            evergreen_pft = evergreen_pft,
-            leaf_long_pft = leaf_long_pft,
-            dtime      = dtime)
-
-        oz.tlai_old_patch[p] = tlai[p]
-    end
+    T = eltype(oz.o3uptakesha_patch)
+    _launch!(_ozone_uptake_kernel!, oz.o3uptakesha_patch, mask_exposedvegp,
+             patchdata.column, patchdata.gridcell, patchdata.itype,
+             oz.o3uptakesun_patch, oz.tlai_old_patch,
+             forc_pbot, forc_th, rssun, rssha, rb, ram, tlai, forc_o3,
+             evergreen_pft, leaf_long_pft, T(dtime), T(RGAS))
     return nothing
 end
 
@@ -339,11 +372,11 @@ Calculate ozone stress, dispatching to the appropriate method.
 Ported from `CalcOzoneStress` in OzoneMod.F90.
 """
 function calc_ozone_stress!(oz::OzoneData,
-                            mask_exposedvegp::BitVector,
-                            mask_noexposedvegp::BitVector,
+                            mask_exposedvegp::AbstractVector{Bool},
+                            mask_noexposedvegp::AbstractVector{Bool},
                             bounds::UnitRange{Int},
                             patchdata::PatchData,
-                            woody_pft::Vector{<:Real};
+                            woody_pft::AbstractVector{<:Real};
                             is_time_to_run_luna::Bool = false)
     if oz.stress_method == STRESS_METHOD_LOMBARDOZZI2015
         calc_ozone_stress_lombardozzi2015!(oz, mask_exposedvegp, mask_noexposedvegp,
@@ -370,40 +403,77 @@ Calculate ozone stress using the Lombardozzi 2015 formulation.
 
 Ported from `CalcOzoneStressLombardozzi2015` in OzoneMod.F90.
 """
-function calc_ozone_stress_lombardozzi2015!(oz::OzoneData,
-                                            mask_exposedvegp::BitVector,
-                                            mask_noexposedvegp::BitVector,
-                                            bounds::UnitRange{Int},
-                                            patchdata::PatchData,
-                                            woody_pft::Vector{<:Real})
-    for p in bounds
-        if mask_exposedvegp[p]
-            pft_type = patchdata.itype[p]
+# --------------------------------------------------------------------------
+# Device-callable per-point Lombardozzi2015 stress (positional, eltype-generic).
+# Returns (o3coefv, o3coefg). Mirrors the kwarg one_point verbatim.
+# --------------------------------------------------------------------------
+@inline function _calc_ozone_stress_lombardozzi2015_one_point(pft_type::Integer,
+                                                              o3uptake::T,
+                                                              woody_pft) where {T}
+    if o3uptake == zero(T)
+        return (one(T), one(T))
+    else
+        if pft_type > 3
+            if woody_pft[pft_type] == zero(T)
+                photoInt   = T(O3_NONWOODY_PHOTO_INT)
+                photoSlope = T(O3_NONWOODY_PHOTO_SLOPE)
+                condInt    = T(O3_NONWOODY_COND_INT)
+                condSlope  = T(O3_NONWOODY_COND_SLOPE)
+            else
+                photoInt   = T(O3_BROADLEAF_PHOTO_INT)
+                photoSlope = T(O3_BROADLEAF_PHOTO_SLOPE)
+                condInt    = T(O3_BROADLEAF_COND_INT)
+                condSlope  = T(O3_BROADLEAF_COND_SLOPE)
+            end
+        else
+            photoInt   = T(O3_NEEDLELEAF_PHOTO_INT)
+            photoSlope = T(O3_NEEDLELEAF_PHOTO_SLOPE)
+            condInt    = T(O3_NEEDLELEAF_COND_INT)
+            condSlope  = T(O3_NEEDLELEAF_COND_SLOPE)
+        end
+        o3coefv = max(zero(T), min(one(T), photoInt + photoSlope * o3uptake))
+        o3coefg = max(zero(T), min(one(T), condInt  + condSlope  * o3uptake))
+        return (o3coefv, o3coefg)
+    end
+end
 
-            # Ozone stress for shaded leaves
-            o3coefv_sha, o3coefg_sha = calc_ozone_stress_lombardozzi2015_one_point(
-                pft_type = pft_type,
-                o3uptake = oz.o3uptakesha_patch[p],
-                woody_pft = woody_pft)
-            oz.o3coefvsha_patch[p] = o3coefv_sha
-            oz.o3coefgsha_patch[p] = o3coefg_sha
-
-            # Ozone stress for sunlit leaves
-            o3coefv_sun, o3coefg_sun = calc_ozone_stress_lombardozzi2015_one_point(
-                pft_type = pft_type,
-                o3uptake = oz.o3uptakesun_patch[p],
-                woody_pft = woody_pft)
-            oz.o3coefvsun_patch[p] = o3coefv_sun
-            oz.o3coefgsun_patch[p] = o3coefg_sun
-
-        elseif mask_noexposedvegp[p]
-            # Reset to 1 over non-exposed veg points
-            oz.o3coefvsha_patch[p] = 1.0
-            oz.o3coefgsha_patch[p] = 1.0
-            oz.o3coefvsun_patch[p] = 1.0
-            oz.o3coefgsun_patch[p] = 1.0
+@kernel function _ozone_stress_lombardozzi_kernel!(o3coefvsha, @Const(mask_exp),
+                                                   @Const(mask_noexp), @Const(pft_itype),
+                                                   o3coefgsha, o3coefvsun, o3coefgsun,
+                                                   @Const(o3uptakesha), @Const(o3uptakesun),
+                                                   @Const(woody_pft))
+    p = @index(Global)
+    @inbounds begin
+        T = eltype(o3coefvsha)
+        if mask_exp[p]
+            pft_type = pft_itype[p]
+            cv_sha, cg_sha = _calc_ozone_stress_lombardozzi2015_one_point(
+                pft_type, o3uptakesha[p], woody_pft)
+            o3coefvsha[p] = cv_sha
+            o3coefgsha[p] = cg_sha
+            cv_sun, cg_sun = _calc_ozone_stress_lombardozzi2015_one_point(
+                pft_type, o3uptakesun[p], woody_pft)
+            o3coefvsun[p] = cv_sun
+            o3coefgsun[p] = cg_sun
+        elseif mask_noexp[p]
+            o3coefvsha[p] = one(T)
+            o3coefgsha[p] = one(T)
+            o3coefvsun[p] = one(T)
+            o3coefgsun[p] = one(T)
         end
     end
+end
+
+function calc_ozone_stress_lombardozzi2015!(oz::OzoneData,
+                                            mask_exposedvegp::AbstractVector{Bool},
+                                            mask_noexposedvegp::AbstractVector{Bool},
+                                            bounds::UnitRange{Int},
+                                            patchdata::PatchData,
+                                            woody_pft::AbstractVector{<:Real})
+    _launch!(_ozone_stress_lombardozzi_kernel!, oz.o3coefvsha_patch,
+             mask_exposedvegp, mask_noexposedvegp, patchdata.itype,
+             oz.o3coefgsha_patch, oz.o3coefvsun_patch, oz.o3coefgsun_patch,
+             oz.o3uptakesha_patch, oz.o3uptakesun_patch, woody_pft)
     return nothing
 end
 
@@ -467,41 +537,65 @@ Only runs when it is time to run LUNA.
 
 Ported from `CalcOzoneStressFalk` in OzoneMod.F90.
 """
+# --------------------------------------------------------------------------
+# Device-callable per-point Falk stress (positional, eltype-generic).
+# --------------------------------------------------------------------------
+@inline function _calc_ozone_stress_falk_one_point(pft_type::Integer, o3uptake::T,
+                                                   o3coefjmax::T, woody_pft) where {T}
+    if o3uptake == zero(T)
+        return one(T)
+    else
+        if pft_type > 3
+            if woody_pft[pft_type] == zero(T)
+                jmaxInt   = T(O3_NONWOODY_JMAX_INT)
+                jmaxSlope = T(O3_NONWOODY_JMAX_SLOPE)
+            else
+                jmaxInt   = T(O3_BROADLEAF_JMAX_INT)
+                jmaxSlope = T(O3_BROADLEAF_JMAX_SLOPE)
+            end
+        else
+            jmaxInt   = T(O3_NEEDLELEAF_JMAX_INT)
+            jmaxSlope = T(O3_NEEDLELEAF_JMAX_SLOPE)
+        end
+        return max(zero(T), min(one(T), jmaxInt + jmaxSlope * o3uptake))
+    end
+end
+
+@kernel function _ozone_stress_falk_kernel!(o3coefjmaxsha, @Const(mask_exp),
+                                            @Const(mask_noexp), @Const(pft_itype),
+                                            o3coefjmaxsun, @Const(o3uptakesha),
+                                            @Const(o3uptakesun), @Const(woody_pft))
+    p = @index(Global)
+    @inbounds begin
+        T = eltype(o3coefjmaxsha)
+        if mask_exp[p]
+            pft_type = pft_itype[p]
+            o3coefjmaxsha[p] = _calc_ozone_stress_falk_one_point(
+                pft_type, o3uptakesha[p], o3coefjmaxsha[p], woody_pft)
+            o3coefjmaxsun[p] = _calc_ozone_stress_falk_one_point(
+                pft_type, o3uptakesun[p], o3coefjmaxsun[p], woody_pft)
+        elseif mask_noexp[p]
+            o3coefjmaxsha[p] = one(T)
+            o3coefjmaxsun[p] = one(T)
+        end
+    end
+end
+
 function calc_ozone_stress_falk!(oz::OzoneData,
-                                 mask_exposedvegp::BitVector,
-                                 mask_noexposedvegp::BitVector,
+                                 mask_exposedvegp::AbstractVector{Bool},
+                                 mask_noexposedvegp::AbstractVector{Bool},
                                  bounds::UnitRange{Int},
                                  patchdata::PatchData,
-                                 woody_pft::Vector{<:Real};
+                                 woody_pft::AbstractVector{<:Real};
                                  is_time_to_run_luna::Bool = false)
     if !is_time_to_run_luna
         return nothing
     end
 
-    for p in bounds
-        if mask_exposedvegp[p]
-            pft_type = patchdata.itype[p]
-
-            # Ozone stress for shaded leaves
-            oz.o3coefjmaxsha_patch[p] = calc_ozone_stress_falk_one_point(
-                pft_type = pft_type,
-                o3uptake = oz.o3uptakesha_patch[p],
-                o3coefjmax = oz.o3coefjmaxsha_patch[p],
-                woody_pft = woody_pft)
-
-            # Ozone stress for sunlit leaves
-            oz.o3coefjmaxsun_patch[p] = calc_ozone_stress_falk_one_point(
-                pft_type = pft_type,
-                o3uptake = oz.o3uptakesun_patch[p],
-                o3coefjmax = oz.o3coefjmaxsun_patch[p],
-                woody_pft = woody_pft)
-
-        elseif mask_noexposedvegp[p]
-            # Reset to 1 over non-exposed veg points
-            oz.o3coefjmaxsha_patch[p] = 1.0
-            oz.o3coefjmaxsun_patch[p] = 1.0
-        end
-    end
+    _launch!(_ozone_stress_falk_kernel!, oz.o3coefjmaxsha_patch,
+             mask_exposedvegp, mask_noexposedvegp, patchdata.itype,
+             oz.o3coefjmaxsun_patch, oz.o3uptakesha_patch, oz.o3uptakesun_patch,
+             woody_pft)
     return nothing
 end
 
