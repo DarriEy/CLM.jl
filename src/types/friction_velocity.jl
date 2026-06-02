@@ -533,31 +533,48 @@ Set the roughness lengths actually used in flux calculations.
 Ported from `frictionvel_type%SetActualRoughnessLengths`
 in `FrictionVelocityMod.F90`.
 """
-function set_actual_roughness_lengths!(
-        fv::FrictionVelocityData,
-        mask_exposedvegp::BitVector,
-        mask_noexposedvegp::BitVector,
-        mask_urbanp::BitVector,
-        mask_lakep::BitVector,
-        bounds_patch::UnitRange{Int},
-        patch_column::Vector{Int},
-        patch_landunit::Vector{Int},
-        lun_z_0_town::Vector{<:Real})
-
-    for p in bounds_patch
+# --------------------------------------------------------------------------
+# Kernel: select the actual momentum roughness length per patch by priority
+# (exposed-veg > no-exposed-veg > urban > lake). Each patch writes only its own
+# index; fully independent. `lo` = first(bounds_patch).
+# --------------------------------------------------------------------------
+@kernel function _set_actual_z0m_kernel!(z0m_actual_patch, @Const(z0mv_patch),
+                                         @Const(z0mg_col), @Const(lun_z_0_town),
+                                         @Const(mask_exposedvegp), @Const(mask_noexposedvegp),
+                                         @Const(mask_urbanp), @Const(mask_lakep),
+                                         @Const(patch_column), @Const(patch_landunit),
+                                         lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        p = lo + i - 1
         if mask_exposedvegp[p]
-            fv.z0m_actual_patch[p] = fv.z0mv_patch[p]
+            z0m_actual_patch[p] = z0mv_patch[p]
         elseif mask_noexposedvegp[p]
-            c = patch_column[p]
-            fv.z0m_actual_patch[p] = fv.z0mg_col[c]
+            z0m_actual_patch[p] = z0mg_col[patch_column[p]]
         elseif mask_urbanp[p]
-            l = patch_landunit[p]
-            fv.z0m_actual_patch[p] = lun_z_0_town[l]
+            z0m_actual_patch[p] = lun_z_0_town[patch_landunit[p]]
         elseif mask_lakep[p]
-            c = patch_column[p]
-            fv.z0m_actual_patch[p] = fv.z0mg_col[c]
+            z0m_actual_patch[p] = z0mg_col[patch_column[p]]
         end
     end
+end
+
+function set_actual_roughness_lengths!(
+        fv::FrictionVelocityData,
+        mask_exposedvegp::AbstractVector{Bool},
+        mask_noexposedvegp::AbstractVector{Bool},
+        mask_urbanp::AbstractVector{Bool},
+        mask_lakep::AbstractVector{Bool},
+        bounds_patch::UnitRange{Int},
+        patch_column::AbstractVector{<:Integer},
+        patch_landunit::AbstractVector{<:Integer},
+        lun_z_0_town::AbstractVector{<:Real})
+
+    isempty(bounds_patch) && return nothing
+    _launch!(_set_actual_z0m_kernel!, fv.z0m_actual_patch, fv.z0mv_patch,
+             fv.z0mg_col, lun_z_0_town, mask_exposedvegp, mask_noexposedvegp,
+             mask_urbanp, mask_lakep, patch_column, patch_landunit,
+             first(bounds_patch); ndrange = length(bounds_patch))
 
     return nothing
 end
