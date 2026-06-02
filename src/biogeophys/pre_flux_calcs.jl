@@ -17,12 +17,13 @@
                                              @Const(displar))
     p = @index(Global)
     @inbounds if mask[p]
+        T = eltype(z0m_patch)
         htop = htop_patch[p]
         pft_idx = itype[p] + 1  # Fortran 0-based PFT index -> Julia 1-based
-        z0mr_val = (pft_idx >= 1 && pft_idx <= length(z0mr) && z0mr[pft_idx] > 0.0) ?
-                   z0mr[pft_idx] : 0.055
-        displar_val = (pft_idx >= 1 && pft_idx <= length(displar) && displar[pft_idx] > 0.0) ?
-                      displar[pft_idx] : 0.67
+        z0mr_val = (pft_idx >= 1 && pft_idx <= length(z0mr) && z0mr[pft_idx] > zero(T)) ?
+                   z0mr[pft_idx] : T(0.055)
+        displar_val = (pft_idx >= 1 && pft_idx <= length(displar) && displar[pft_idx] > zero(T)) ?
+                      displar[pft_idx] : T(0.67)
         z0m_patch[p] = z0mr_val * htop
         displa_patch[p] = displar_val * htop
     end
@@ -68,6 +69,7 @@ preflux_tssbef!(t_ssbef_col, mask, t_soisno_col, nlev::Int) =
                                          nlevsno::Int)
     c = @index(Global)
     @inbounds if mask[c]
+        T = eltype(t_grnd_col)
         snl_c = snl[c]
         frac_sno_eff = frac_sno_eff_col[c]
         frac_h2osfc = frac_h2osfc_col[c]
@@ -77,10 +79,10 @@ preflux_tssbef!(t_ssbef_col, mask, t_soisno_col, nlev::Int) =
             jtop = snl_c + 1 + nlevsno
             t_snow_top = t_soisno_col[c, jtop]
             t_grnd_col[c] = frac_sno_eff * t_snow_top +
-                            (1.0 - frac_sno_eff - frac_h2osfc) * t_soil_1 +
+                            (one(T) - frac_sno_eff - frac_h2osfc) * t_soil_1 +
                             frac_h2osfc * t_h2osfc
         else
-            t_grnd_col[c] = (1.0 - frac_h2osfc) * t_soil_1 +
+            t_grnd_col[c] = (one(T) - frac_h2osfc) * t_soil_1 +
                             frac_h2osfc * t_h2osfc
         end
     end
@@ -105,13 +107,14 @@ preflux_t_grnd!(t_grnd_col, mask, snl, frac_sno_eff_col, frac_h2osfc_col,
                                       @Const(frac_sno_col), istice::Int)
     c = @index(Global)
     @inbounds if mask[c]
+        T = eltype(emg_col)
         l = landunit[c]
         if !urbpoi[l]
             frac_sno = frac_sno_col[c]
             if lun_itype[l] == istice
-                emg_col[c] = 0.97
+                emg_col[c] = T(0.97)
             else
-                emg_col[c] = (1.0 - frac_sno) * 0.96 + frac_sno * 0.97
+                emg_col[c] = (one(T) - frac_sno) * T(0.96) + frac_sno * T(0.97)
             end
         end
     end
@@ -135,10 +138,11 @@ preflux_emg!(emg_col, mask, landunit, urbpoi, lun_itype, frac_sno_col, istice::I
                                        nlevsno::Int, hsub, hvap)
     c = @index(Global)
     @inbounds if mask[c]
+        T = eltype(htvp_col)
         jtop = snl[c] + 1 + nlevsno
         h2o_liq = h2osoi_liq_col[c, jtop]
         h2o_ice = h2osoi_ice_col[c, jtop]
-        htvp_col[c] = (h2o_liq <= 0.0 && h2o_ice > 0.0) ? hsub : hvap
+        htvp_col[c] = (h2o_liq <= zero(T) && h2o_ice > zero(T)) ? hsub : hvap
     end
 end
 
@@ -147,9 +151,11 @@ end
 
 Latent heat of vaporization/sublimation per column.
 """
-preflux_htvp!(htvp_col, mask, snl, h2osoi_liq_col, h2osoi_ice_col, nlevsno::Int, hsub, hvap) =
+function preflux_htvp!(htvp_col, mask, snl, h2osoi_liq_col, h2osoi_ice_col, nlevsno::Int, hsub, hvap)
+    T = eltype(htvp_col)
     _launch!(_preflux_htvp_kernel!, htvp_col, mask, snl, h2osoi_liq_col,
-             h2osoi_ice_col, nlevsno, hsub, hvap)
+             h2osoi_ice_col, nlevsno, T(hsub), T(hvap))
+end
 
 # --------------------------------------------------------------------------
 # Virtual potential temperature, beta, convective BL height (zii).
@@ -158,9 +164,10 @@ preflux_htvp!(htvp_col, mask, snl, h2osoi_liq_col, h2osoi_ice_col, nlevsno::Int,
                                       @Const(mask), @Const(forc_th), @Const(forc_q))
     c = @index(Global)
     @inbounds if mask[c]
-        thv_col[c] = forc_th[c] * (1.0 + 0.61 * forc_q[c])
-        beta_col[c] = 1.0
-        zii[c] = 1000.0
+        T = eltype(thv_col)
+        thv_col[c] = forc_th[c] * (one(T) + T(0.61) * forc_q[c])
+        beta_col[c] = one(eltype(beta_col))
+        zii[c] = T(1000.0)
     end
 end
 
@@ -182,16 +189,17 @@ preflux_thv!(thv_col, beta_col, zii, mask, forc_th, forc_q) =
                                               cgrnd, cgrnds, cgrndl)
     p = @index(Global)
     @inbounds if mask[p]
-        eflx_sh_tot[p] = 0.0
-        eflx_sh_tot_r[p] = 0.0
-        eflx_sh_tot_u[p] = 0.0
-        eflx_lh_tot[p] = 0.0
-        eflx_lh_tot_r[p] = 0.0
-        eflx_lh_tot_u[p] = 0.0
-        eflx_sh_veg[p] = 0.0
-        cgrnd[p] = 0.0
-        cgrnds[p] = 0.0
-        cgrndl[p] = 0.0
+        z = zero(eltype(eflx_sh_tot))
+        eflx_sh_tot[p] = z
+        eflx_sh_tot_r[p] = z
+        eflx_sh_tot_u[p] = z
+        eflx_lh_tot[p] = z
+        eflx_lh_tot_r[p] = z
+        eflx_lh_tot_u[p] = z
+        eflx_sh_veg[p] = z
+        cgrnd[p] = z
+        cgrnds[p] = z
+        cgrndl[p] = z
     end
 end
 
@@ -217,8 +225,9 @@ end
                                       @Const(esai_patch))
     p = @index(Global)
     @inbounds if mask[p]
-        avmuir = 1.0  # inverse optical depth per unit leaf+stem area
-        emv_patch[p] = 1.0 - exp(-(elai_patch[p] + esai_patch[p]) / avmuir)
+        T = eltype(emv_patch)
+        avmuir = one(T)  # inverse optical depth per unit leaf+stem area
+        emv_patch[p] = one(T) - exp(-(elai_patch[p] + esai_patch[p]) / avmuir)
     end
 end
 
@@ -237,7 +246,8 @@ preflux_emv!(emv_patch, mask, elai_patch, esai_patch) =
                                       @Const(forc_t), @Const(forc_hgt_t_patch))
     p = @index(Global)
     @inbounds if mask[p]
-        thm_patch[p] = forc_t[column[p]] + 0.0098 * forc_hgt_t_patch[p]
+        T = eltype(thm_patch)
+        thm_patch[p] = forc_t[column[p]] + T(0.0098) * forc_hgt_t_patch[p]
     end
 end
 
@@ -283,11 +293,11 @@ function set_z0m_displa!(canopystate::CanopyStateData,
                           frictionvel::FrictionVelocityData,
                           patch_data::PatchData,
                           lun_data::LandunitData,
-                          mask_nolakep::BitVector,
+                          mask_nolakep::AbstractVector{Bool},
                           bounds_patch::UnitRange{Int};
                           z0param_method::String = "ZengWang2007",
-                          z0mr::Vector{<:Real} = pftcon.z0mr,
-                          displar::Vector{<:Real} = pftcon.displar)
+                          z0mr::AbstractVector{<:Real} = pftcon.z0mr,
+                          displar::AbstractVector{<:Real} = pftcon.displar)
 
     # Both z0param_method branches are identical, so the common expression is used.
     preflux_z0m_displa!(canopystate.z0m_patch, canopystate.displa_patch,
@@ -329,11 +339,11 @@ function calc_initial_temp_energy!(temperature::TemperatureData,
                                     col_data::ColumnData,
                                     lun_data::LandunitData,
                                     patch_data::PatchData,
-                                    forc_t::Vector{<:Real},
-                                    forc_th::Vector{<:Real},
-                                    forc_q::Vector{<:Real},
-                                    mask_nolakec::BitVector,
-                                    mask_nolakep::BitVector,
+                                    forc_t::AbstractVector{<:Real},
+                                    forc_th::AbstractVector{<:Real},
+                                    forc_q::AbstractVector{<:Real},
+                                    mask_nolakec::AbstractVector{Bool},
+                                    mask_nolakep::AbstractVector{Bool},
                                     bounds_col::UnitRange{Int},
                                     bounds_patch::UnitRange{Int})
 
@@ -427,15 +437,15 @@ function biogeophys_pre_flux_calcs!(canopystate::CanopyStateData,
                                      col_data::ColumnData,
                                      lun_data::LandunitData,
                                      patch_data::PatchData,
-                                     forc_t::Vector{<:Real},
-                                     forc_th::Vector{<:Real},
-                                     forc_q::Vector{<:Real},
-                                     forc_hgt_u::Vector{<:Real},
-                                     forc_hgt_t::Vector{<:Real},
-                                     forc_hgt_q::Vector{<:Real},
-                                     mask_nolakec::BitVector,
-                                     mask_nolakep::BitVector,
-                                     mask_urbanc::BitVector,
+                                     forc_t::AbstractVector{<:Real},
+                                     forc_th::AbstractVector{<:Real},
+                                     forc_q::AbstractVector{<:Real},
+                                     forc_hgt_u::AbstractVector{<:Real},
+                                     forc_hgt_t::AbstractVector{<:Real},
+                                     forc_hgt_q::AbstractVector{<:Real},
+                                     mask_nolakec::AbstractVector{Bool},
+                                     mask_nolakep::AbstractVector{Bool},
+                                     mask_urbanc::AbstractVector{Bool},
                                      bounds_col::UnitRange{Int},
                                      bounds_patch::UnitRange{Int};
                                      z0param_method::String = "ZengWang2007")
@@ -445,13 +455,18 @@ function biogeophys_pre_flux_calcs!(canopystate::CanopyStateData,
                     mask_nolakep, bounds_patch;
                     z0param_method=z0param_method)
 
-    # 2. Set roughness lengths and forcing heights for non-lake points
+    # 2. Set roughness lengths and forcing heights for non-lake points.
+    # snomelt_accum is a placeholder (only read on the Meier2022 + snowmelt path);
+    # allocate it device-resident (similar+fill!) so it matches the backend of the
+    # state arrays and nothing host-side leaks onto the device.
+    snomelt_accum = similar(waterdiagbulk.frac_sno_col)
+    fill!(snomelt_accum, zero(eltype(snomelt_accum)))
     set_roughness_and_forc_heights_nonlake!(
         frictionvel,
         mask_nolakec, mask_nolakep,
         bounds_col, bounds_patch,
         waterdiagbulk.frac_sno_col,
-        zeros(length(waterdiagbulk.frac_sno_col)),  # snomelt_accum placeholder
+        snomelt_accum,
         canopystate.frac_veg_nosno_patch,
         canopystate.z0m_patch,
         canopystate.displa_patch,
