@@ -47,11 +47,22 @@ level, plus the fsat_method flag.
 
 Ported from `saturated_excess_runoff_type` in `SaturatedExcessRunoffMod.F90`.
 """
-Base.@kwdef mutable struct SaturatedExcessRunoffData{FT<:Real}
-    fsat_col::Vector{FT} = Float64[]    # col fractional area with water table at surface
-    fcov_col::Vector{FT} = Float64[]    # col fractional impermeable area
+Base.@kwdef mutable struct SaturatedExcessRunoffData{FT<:Real,
+                             V<:AbstractVector{FT}}
+    fsat_col::V = Float64[]    # col fractional area with water table at surface
+    fcov_col::V = Float64[]    # col fractional impermeable area
     fsat_method::Int = FSAT_METHOD_TOPMODEL  # method selector
 end
+
+# Convenience constructor: SaturatedExcessRunoffData{FT}() resolves the array
+# type to Vector{FT} (mirrors the other Data structs; needed because @kwdef does
+# not synthesize a single-parameter keyword constructor).
+SaturatedExcessRunoffData{FT}(; kwargs...) where {FT<:Real} =
+    SaturatedExcessRunoffData{FT, Vector{FT}}(; kwargs...)
+
+# Device-movable: lets the whole struct be Adapt.adapt'd onto a GPU backend
+# (fields become device arrays). The Int fsat_method is left untouched by adapt.
+Adapt.@adapt_structure SaturatedExcessRunoffData
 
 # ---------------------------------------------------------------------------
 # Initialization
@@ -170,9 +181,125 @@ function compute_fsat_vic!(mask_hydrology::BitVector,
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# GPU-kernelized whole-function path for saturated_excess_runoff!
+#
+# Every loop in this routine is fully independent per-column (no loop-carried
+# deps, no inter-column coupling), so the entire routine fuses into ONE
+# per-column kernel. fsat_method and the two host flags are resolved on the
+# host and passed as scalars; the per-column arrays are grouped into immutable
+# device-view bundles (Adapt.@adapt_structure) to stay under the Metal arg cap.
+# Literals are converted to the working eltype (T(...)) so no Float64 reaches a
+# Float32-only backend, while remaining byte-identical on Float64 CPU.
+#
+# These definitions live directly above saturated_excess_runoff! for
+# merge-hygiene (disjoint line-region).
+# ---------------------------------------------------------------------------
+
+# Column-level hydrology / soilstate inputs the fsat computation reads.
+Base.@kwdef struct _SERHydDV{V}
+    frost_table_col::V
+    zwt_col::V
+    zwt_perched_col::V
+    wtfact_col::V
+    b_infil_col::V
+    top_max_moist_col::V
+    top_moist_limited_col::V
+end
+Adapt.@adapt_structure _SERHydDV
+
+_ser_hyd_dv(sh, ss) = _SERHydDV(;
+    frost_table_col       = sh.frost_table_col,
+    zwt_col               = sh.zwt_col,
+    zwt_perched_col       = sh.zwt_perched_col,
+    wtfact_col            = ss.wtfact_col,
+    b_infil_col           = sh.b_infil_col,
+    top_max_moist_col     = sh.top_max_moist_col,
+    top_moist_limited_col = sh.top_moist_limited_col)
+
+# Column / landunit topology + flux arrays the branch logic and outputs touch.
+Base.@kwdef struct _SERColDV{V,VB,VI}
+    landunit::VI
+    itype_lun::VI
+    is_hillslope_column::VB
+    active::VB
+    cold::VI
+    urbpoi::VB
+    qflx_floodc_col::V
+    qflx_rain_plus_snomelt_col::V
+end
+Adapt.@adapt_structure _SERColDV
+
+_ser_col_dv(col, lun, wfb) = _SERColDV(;
+    landunit                   = col.landunit,
+    itype_lun                  = lun.itype,
+    is_hillslope_column        = col.is_hillslope_column,
+    active                     = col.active,
+    cold                       = col.cold,
+    urbpoi                     = col.urbpoi,
+    qflx_floodc_col            = wfb.wf.qflx_floodc_col,
+    qflx_rain_plus_snomelt_col = wfb.wf.qflx_rain_plus_snomelt_col)
+
+# Whole-function per-column kernel. fsat_method/flags are Int/Bool host scalars.
+@kernel function _sat_excess_runoff_kernel!(fsat, fcov, qflx_sat_excess_surf,
+        @Const(mask), hyd, cdv, fff,
+        fsat_method::Int, crop_zero::Bool, hillslope_zero::Bool,
+        istcrop::Int, ispval::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = typeof(fff)
+
+        # --- 1. Compute fsat (TOPModel or VIC) ---
+        if fsat_method == FSAT_METHOD_TOPMODEL
+            ft = hyd.frost_table_col[c]
+            zw = hyd.zwt_col[c]
+            zwp = hyd.zwt_perched_col[c]
+            wt = hyd.wtfact_col[c]
+            if ft > zwp && ft <= zw
+                fs = wt * exp(-T(0.5) * fff * zwp)
+            else
+                fs = wt * exp(-T(0.5) * fff * zw)
+            end
+        else
+            bi = hyd.b_infil_col[c]
+            ex = bi / (one(T) + bi)
+            fs = one(T) - (one(T) - hyd.top_moist_limited_col[c] / hyd.top_max_moist_col[c])^ex
+        end
+
+        # --- 2. Zero fsat for crop columns ---
+        if crop_zero
+            l = cdv.landunit[c]
+            if cdv.itype_lun[l] == istcrop
+                fs = zero(T)
+            end
+        end
+
+        # --- 3. Zero fsat for upland hillslope columns ---
+        if hillslope_zero
+            if cdv.is_hillslope_column[c] && cdv.active[c]
+                if cdv.cold[c] != ispval
+                    fs = zero(T)
+                end
+            end
+        end
+
+        fsat[c] = fs
+
+        # --- 4. qflx_sat_excess_surf and fcov ---
+        q = fs * cdv.qflx_rain_plus_snomelt_col[c]
+        fcov[c] = fs
+
+        # --- 5. Urban flood water added to runoff ---
+        if cdv.urbpoi[c]
+            q = q + cdv.qflx_floodc_col[c]
+        end
+        qflx_sat_excess_surf[c] = q
+    end
+end
+
 """
     saturated_excess_runoff!(ser::SaturatedExcessRunoffData,
-                              mask_hydrology::BitVector,
+                              mask_hydrology::AbstractVector{Bool},
                               bounds_col::UnitRange{Int},
                               col::ColumnData,
                               lun::LandunitData,
@@ -198,7 +325,7 @@ Steps:
 Ported from `SaturatedExcessRunoff` in `SaturatedExcessRunoffMod.F90`.
 """
 function saturated_excess_runoff!(ser::SaturatedExcessRunoffData,
-                                   mask_hydrology::BitVector,
+                                   mask_hydrology::AbstractVector{Bool},
                                    bounds_col::UnitRange{Int},
                                    col::ColumnData,
                                    lun::LandunitData,
@@ -212,79 +339,25 @@ function saturated_excess_runoff!(ser::SaturatedExcessRunoffData,
     fsat                   = ser.fsat_col
     fcov                   = ser.fcov_col
     qflx_sat_excess_surf   = waterfluxbulk_inst.qflx_sat_excess_surf_col
-    qflx_floodc            = waterfluxbulk_inst.wf.qflx_floodc_col
-    qflx_rain_plus_snomelt = waterfluxbulk_inst.wf.qflx_rain_plus_snomelt_col
 
-    # -------------------------------------------------------------------
-    # 1. Compute fsat
-    # -------------------------------------------------------------------
-    if ser.fsat_method == FSAT_METHOD_TOPMODEL
-        compute_fsat_topmodel!(mask_hydrology, bounds_col,
-            soilhydrology_inst.frost_table_col,
-            soilhydrology_inst.zwt_col,
-            soilhydrology_inst.zwt_perched_col,
-            soilstate_inst.wtfact_col,
-            sat_excess_runoff_params.fff,
-            fsat)
-    elseif ser.fsat_method == FSAT_METHOD_VIC
-        compute_fsat_vic!(mask_hydrology, bounds_col,
-            soilhydrology_inst.b_infil_col,
-            soilhydrology_inst.top_max_moist_col,
-            soilhydrology_inst.top_moist_limited_col,
-            fsat)
-    else
+    # Validate fsat_method on the host (preserves the scalar error path; the
+    # device kernel only sees a valid method selector).
+    if ser.fsat_method != FSAT_METHOD_TOPMODEL && ser.fsat_method != FSAT_METHOD_VIC
         error("saturated_excess_runoff!: Unrecognized fsat_method: $(ser.fsat_method)")
     end
 
-    # -------------------------------------------------------------------
-    # 2. Set fsat to zero for crop columns
-    # -------------------------------------------------------------------
-    if crop_fsat_equals_zero
-        for c in bounds_col
-            mask_hydrology[c] || continue
-            l = col.landunit[c]
-            if lun.itype[l] == ISTCROP
-                fsat[c] = 0.0
-            end
-        end
-    end
+    # Convert the host Float64 fff parameter to the working eltype so a
+    # Float32-only backend (Metal) carries no Float64 (byte-identical on F64).
+    fff = oftype(zero(eltype(fsat)), sat_excess_runoff_params.fff)
 
-    # -------------------------------------------------------------------
-    # 3. Set fsat to zero for upland hillslope columns
-    # -------------------------------------------------------------------
-    if hillslope_fsat_equals_zero
-        for c in bounds_col
-            mask_hydrology[c] || continue
-            if col.is_hillslope_column[c] && col.active[c]
-                # Set fsat to zero for upland columns (cold != ISPVAL)
-                if col.cold[c] != ISPVAL
-                    fsat[c] = 0.0
-                end
-            end
-        end
-    end
+    hyd = _ser_hyd_dv(soilhydrology_inst, soilstate_inst)
+    cdv = _ser_col_dv(col, lun, waterfluxbulk_inst)
 
-    # -------------------------------------------------------------------
-    # 4. Compute qflx_sat_excess_surf and set fcov
-    # -------------------------------------------------------------------
-    for c in bounds_col
-        mask_hydrology[c] || continue
-        # only send fast runoff directly to streams
-        qflx_sat_excess_surf[c] = fsat[c] * qflx_rain_plus_snomelt[c]
-        # Set fcov just to have it on the history file
-        fcov[c] = fsat[c]
-    end
-
-    # -------------------------------------------------------------------
-    # 5. For urban columns, send flood water flux to runoff
-    # -------------------------------------------------------------------
-    for c in bounds_col
-        mask_hydrology[c] || continue
-        if col.urbpoi[c]
-            # send flood water flux to runoff for all urban columns
-            qflx_sat_excess_surf[c] = qflx_sat_excess_surf[c] + qflx_floodc[c]
-        end
-    end
+    # Whole routine in one per-column kernel (all loops are independent).
+    _launch!(_sat_excess_runoff_kernel!, fsat, fcov, qflx_sat_excess_surf,
+        mask_hydrology, hyd, cdv, fff,
+        ser.fsat_method, crop_fsat_equals_zero, hillslope_fsat_equals_zero,
+        ISTCROP, ISPVAL; ndrange = length(mask_hydrology))
 
     return nothing
 end
