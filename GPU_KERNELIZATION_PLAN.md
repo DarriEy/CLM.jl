@@ -52,12 +52,14 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 
 ## Phase B — BGC / `use_cn` path (deferred biogeochemistry)
 
-**Scope: ~562 host loops across 42 files (~25.5k LOC); only ~98 kernel refs in
-11 files → ~83% still host.** Far larger than Phase A. Sub-order by module:
+**Scope: ~562 host loops across 42 files (~25.5k LOC).** Far larger than Phase A.
+**Module 1 of 7 (C/N state-update cascade, ~100 loops) is now COMPLETE** — every
+state-update fn runs whole-function on Metal at parity. Remaining ~460 loops across
+decomposition / methane / phenology / fire / N-cycling / tail. Sub-order by module:
 
 | Module | Files | ~Loops | Kernelized | Priority/notes |
 |--------|-------|--------|-----------|----------------|
-| Carbon/Nitrogen state updates | 8 | ~100 | STARTED — `c_state_update1!` ✅ (whole-fn on Metal, 22 fields ≤1.5e-7) | core cascade; do first (element-wise, high reuse). Pattern-setter done: 2 kernels (`_csu1_col_kernel!` per-col w/ in-thread j/k cascade RMW; `_csu1_patch_kernel!` per-patch w/ `_CSU1CS{V,M}`/`_CSU1CF{V,M}` device-view bundles). Harness uses a **Float32-down-converting Adapt adaptor (`MetalF32`)** — CN `*_init!` allocate Float64 (`fill(NaN,…)`) regardless of struct param; reuse this for all BGC harnesses. Remaining in this module: `c_state_update0!`/`c_state_update_dyn_patch!` (trivial, same file), `n_state_update1/2/3!`, `c_state_update2/3!`, `cn_precision_control!`. |
+| Carbon/Nitrogen state updates | 8 | ~100 | ✅ **DONE** — entire C/N state-update cascade whole-fn on Metal at 0.0/round-off parity | core cascade complete (element-wise, high reuse). Pattern-setter `c_state_update1!` done by hand; the rest done in one parallel workflow batch (7 disjoint-file agents + per-file review, cherry-picked onto main): `c_state_update0!`/`c_state_update_dyn_patch!`, `c_state_update2!/2h!/2g!`, `c_state_update3!`, `n_state_update1!`/`n_state_update_dyn_patch!`, `n_state_update2!/2h!/2g!`, `n_state_update3!`/`n_state_update_leaching!`, `cn_precision_control!` + `truncate_*`. Every fn: per-col/per-patch kernels (in-thread j/k/l loops, own-index — NO scatter), device-view `@adapt_structure` bundles for field-heavy patch loops, eltype-converted literals, `MetalF32` Float32-down-convert harness. Each gated: full suite 15681/15681 + `--check-bounds` + its own `scripts/gpu_validate_*_e2e.jl` Metal harness. **BGC-harness gotchas that ONLY the Metal harness caught (CPU-green missed both):** (1) crit-threshold scalars passed Float64 → invalid Metal IR; convert to `eltype(state)` at the launch site. (2) a host-built Int index vector (`filter_truncatep`) moved to device via `adapt(typeof(float_ref), …)` coerces indices to Float32 → can't index device arrays; use `similar(ref, Int, n)`+`copyto!` to preserve Int eltype. |
 | Decomposition & soil cycling (bgc/mimics/competition) | 6 | ~200 | PARTIAL ~20% | biggest; multiple methods |
 | Methane (CH4) | 1 | ~80 | MINIMAL <5% | loop-heavy, low coverage |
 | Phenology | 2 | ~25 | PARTIAL ~16% | crop/seasonal |

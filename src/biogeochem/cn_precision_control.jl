@@ -173,7 +173,15 @@ end
 # backend `Adapt.adapt(typeof(ref), f)` produces the matching device vector so
 # the kernel can read the filter without host scalar-indexing the device array.
 @inline _cnprec_match_backend(ref::Array, f) = f
-@inline _cnprec_match_backend(ref, f) = Adapt.adapt(typeof(ref), f)
+# `f` is a host index Vector{Int}; move it onto `ref`'s backend while PRESERVING
+# its integer eltype. Adapting via `typeof(ref)` (a float array type) would coerce
+# the indices to Float, producing a float "index" array that can't index a device
+# array (invalid GPU IR). `similar(ref, eltype(f), …)` keeps Int on the backend.
+@inline function _cnprec_match_backend(ref, f)
+    d = similar(ref, eltype(f), length(f))
+    copyto!(d, f)
+    return d
+end
 
 # Build filter_truncatep (in filter order) from the per-fp did_truncate flags.
 # This is host bookkeeping (a dynamic-length result); the truncation decision
@@ -252,9 +260,13 @@ function truncate_c_and_n_states!(
     end
 
     did_truncate = fill!(similar(carbon_patch, Bool, length(filter_bgc_vegp)), false)
+    # Convert the crit thresholds to the state working precision so the kernel
+    # carries no Float64 on a Float32-only backend (Metal). On Float64 _T(x)===x
+    # (byte-identical). The host pre-scan above keeps the original Float64 crits.
+    _T = eltype(carbon_patch)
     _launch!(_cnprec_cn_kernel!, carbon_patch, nitrogen_patch, pc, pn,
              did_truncate, filter_bgc_vegp, patch_itype,
-             ccrit, cnegcrit, ncrit, nnegcrit,
+             _T(ccrit), _T(cnegcrit), _T(ncrit), _T(nnegcrit),
              croponly, use_nguardrail, use_matrixcn, allowneg, nc3crop;
              ndrange = length(filter_bgc_vegp))
 
@@ -312,8 +324,9 @@ function truncate_c_states!(
     end
 
     did_truncate = fill!(similar(carbon_patch, Bool, length(filter_bgc_vegp)), false)
+    _T = eltype(carbon_patch)   # Float32 on device → no Float64 in the kernel
     _launch!(_cnprec_c_kernel!, carbon_patch, pc, did_truncate,
-             filter_bgc_vegp, patch_itype, ccrit, croponly, nc3crop;
+             filter_bgc_vegp, patch_itype, _T(ccrit), croponly, nc3crop;
              ndrange = length(filter_bgc_vegp))
 
     filter_truncatep = _build_truncate_filter(filter_bgc_vegp, did_truncate)
@@ -346,8 +359,9 @@ function truncate_n_states!(
 
     isempty(filter_bgc_vegp) && return nothing
 
+    _T = eltype(nitrogen_patch)   # Float32 on device → no Float64 in the kernel
     _launch!(_cnprec_n_kernel!, nitrogen_patch, pn, filter_bgc_vegp,
-             ncrit, nnegcrit; ndrange = length(filter_bgc_vegp))
+             _T(ncrit), _T(nnegcrit); ndrange = length(filter_bgc_vegp))
 
     return nothing
 end

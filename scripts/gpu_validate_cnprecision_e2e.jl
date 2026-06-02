@@ -230,6 +230,33 @@ function main(backend)
             c13H=c13H, c13D=c13D, c14H=c14H, c14D=c14D)
     end
 
+    # ----------------------------------------------------------------------
+    # Case 4: matrix-CN guardrail path (use_matrixcn=true + use_nguardrail=true).
+    # This is the ONLY kernel branch carrying numeric literals — the
+    # `-ccrit*T(1.0e+6)` / `-ncrit*T(1.0e+6)` window check — so it must be
+    # exercised on Metal. Values are placed inside the (-crit*1e6, crit) window
+    # so truncation actually fires under the matrixcn predicate.
+    # ----------------------------------------------------------------------
+    let np = 4
+        csH = make_cs(Float32, np; val=1.0f0)
+        nsH = make_ns(Float32, np; val=1.0f0)
+        # mix: tiny+, tiny-, mid-negative (inside the 1e6 window), large (kept)
+        csH.leafc_patch  .= Float32[tiny, -tiny, -1.0e-4, 1.0]
+        nsH.leafn_patch  .= Float32[tiny, -tiny, -1.0e-4, 0.5]
+        csH.cpool_patch  .= Float32[-tiny, tiny, -1.0e-5, 2.0]
+        nsH.npool_patch  .= Float32[-tiny, tiny, -1.0e-5, 1.0]
+        filter = [1, 2, 3, 4]; itype = [1, 1, 1, 1]
+
+        csD = to_metal(deepcopy(csH)); nsD = to_metal(deepcopy(nsH))
+        fD = Metal.MtlArray(filter); iD = Metal.MtlArray(itype)
+
+        CLM.cn_precision_control!(csH, nsH, filter, itype;
+            use_matrixcn=true, use_nguardrail=true)
+        CLM.cn_precision_control!(csD, nsD, fD, iD;
+            use_matrixcn=true, use_nguardrail=true)
+        nfail += compare("Case 4: matrixcn guardrail", csH, nsH, csD, nsD)
+    end
+
     println(nfail == 0 ?
         "  WHOLE cn_precision_control! MATCHES CPU ON $name ($FT)" :
         "  DIVERGENCE — investigate ($nfail field(s) failed).")
