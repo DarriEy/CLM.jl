@@ -57,7 +57,7 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 
 | Module | Files | ~Loops | Kernelized | Priority/notes |
 |--------|-------|--------|-----------|----------------|
-| Carbon/Nitrogen state updates | 8 | ~100 | NONE | core cascade; do first (element-wise, high reuse) |
+| Carbon/Nitrogen state updates | 8 | ~100 | STARTED — `c_state_update1!` ✅ (whole-fn on Metal, 22 fields ≤1.5e-7) | core cascade; do first (element-wise, high reuse). Pattern-setter done: 2 kernels (`_csu1_col_kernel!` per-col w/ in-thread j/k cascade RMW; `_csu1_patch_kernel!` per-patch w/ `_CSU1CS{V,M}`/`_CSU1CF{V,M}` device-view bundles). Harness uses a **Float32-down-converting Adapt adaptor (`MetalF32`)** — CN `*_init!` allocate Float64 (`fill(NaN,…)`) regardless of struct param; reuse this for all BGC harnesses. Remaining in this module: `c_state_update0!`/`c_state_update_dyn_patch!` (trivial, same file), `n_state_update1/2/3!`, `c_state_update2/3!`, `cn_precision_control!`. |
 | Decomposition & soil cycling (bgc/mimics/competition) | 6 | ~200 | PARTIAL ~20% | biggest; multiple methods |
 | Methane (CH4) | 1 | ~80 | MINIMAL <5% | loop-heavy, low coverage |
 | Phenology | 2 | ~25 | PARTIAL ~16% | crop/seasonal |
