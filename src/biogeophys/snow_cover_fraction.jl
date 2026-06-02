@@ -166,28 +166,34 @@ frac_sno_eff is forced to 0 or 1. Otherwise it equals frac_sno.
 
 Ported from `CalcFracSnoEff` in `SnowCoverFractionBaseMod.F90`.
 """
-function calc_frac_sno_eff!(
-    frac_sno_eff::Vector{<:Real},
-    frac_sno::Vector{<:Real},
-    lun_itype_col::Vector{Int},
-    urbpoi::Vector{Bool},
-    mask::BitVector,
-    bounds::UnitRange{Int};
-    use_subgrid_fluxes::Bool = true
-)
-    for c in bounds
-        mask[c] || continue
-
-        # Determine whether fractional frac_sno_eff is allowed
-        allow_fractional = !(urbpoi[c] || lun_itype_col[c] == ISTDLAK || !use_subgrid_fluxes)
-
+# Per-column kernel: effective snow-covered fraction. `use_subgrid` carried as a
+# Bool; ISTDLAK as an Int literal. Byte-identical on CPU Float64.
+@kernel function _calc_frac_sno_eff_kernel!(frac_sno_eff, @Const(frac_sno),
+        @Const(lun_itype_col), @Const(urbpoi), @Const(mask), use_subgrid::Bool,
+        istdlak::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        allow_fractional = !(urbpoi[c] || lun_itype_col[c] == istdlak || !use_subgrid)
         if allow_fractional
             frac_sno_eff[c] = frac_sno[c]
         else
-            frac_sno_eff[c] = frac_sno[c] > 0.0 ? 1.0 : 0.0
+            frac_sno_eff[c] = frac_sno[c] > zero(eltype(frac_sno)) ?
+                one(eltype(frac_sno_eff)) : zero(eltype(frac_sno_eff))
         end
     end
+end
 
+function calc_frac_sno_eff!(
+    frac_sno_eff::AbstractVector{<:Real},
+    frac_sno::AbstractVector{<:Real},
+    lun_itype_col::AbstractVector{<:Integer},
+    urbpoi::AbstractVector{Bool},
+    mask::AbstractVector{Bool},
+    bounds::UnitRange{Int};
+    use_subgrid_fluxes::Bool = true
+)
+    _launch!(_calc_frac_sno_eff_kernel!, frac_sno_eff, frac_sno, lun_itype_col,
+             urbpoi, mask, use_subgrid_fluxes, ISTDLAK, first(bounds), last(bounds))
     return nothing
 end
 
@@ -255,83 +261,103 @@ FSCA is based on *changes* in SWE:
 Ported from `UpdateSnowDepthAndFrac` in
 `SnowCoverFractionSwensonLawrence2012Mod.F90`.
 """
-function update_snow_depth_and_frac!(
-    scf::SnowCoverFractionSwensonLawrence2012,
-    # Outputs (modified in place)
-    frac_sno::Vector{<:Real},
-    frac_sno_eff::Vector{<:Real},
-    snow_depth::Vector{<:Real},
-    # Inputs
-    lun_itype_col::Vector{Int},
-    urbpoi::Vector{Bool},
-    h2osno_total::Vector{<:Real},
-    snowmelt::Vector{<:Real},
-    int_snow::Vector{<:Real},
-    newsnow::Vector{<:Real},
-    bifall::Vector{<:Real},
-    mask::BitVector,
-    bounds::UnitRange{Int};
-    use_subgrid_fluxes::Bool = true
-)
-    # Auto-initialize n_melt if not yet set (default: n_melt_coef/10 = 20)
-    ncols = length(frac_sno)
-    if length(scf.n_melt) < ncols
-        resize!(scf.n_melt, ncols)
-        fill!(scf.n_melt, 200.0 / 10.0)
-    end
-
-    # ---- Update frac_sno ----
-    for c in bounds
-        mask[c] || continue
-
-        # FSCA parameterization based on *changes* in SWE
-        if h2osno_total[c] == 0.0
-            if newsnow[c] > 0.0
-                frac_sno[c] = tanh(scf.accum_factor * newsnow[c])
+# Per-column kernel: SwensonLawrence2012 frac_sno update. frac_snow_during_melt is
+# folded inline (uses acos, RPI, n_melt[c]). Scalar params (accum_factor, int_snow_max,
+# RPI) carried at the working precision; n_melt is a device-resident vector. Byte-
+# identical on CPU Float64.
+@kernel function _sl12_update_fracsno_kernel!(frac_sno, @Const(h2osno_total),
+        @Const(snowmelt), @Const(int_snow), @Const(newsnow), @Const(n_melt),
+        @Const(mask), accum_factor, int_snow_max, rpi, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        T = eltype(frac_sno)
+        if h2osno_total[c] == zero(T)
+            if newsnow[c] > zero(T)
+                frac_sno[c] = tanh(accum_factor * newsnow[c])
             else
-                # Reset frac_sno when no snow
-                frac_sno[c] = 0.0
+                frac_sno[c] = zero(T)
             end
         else  # h2osno_total > 0
-            if snowmelt[c] > 0.0
-                # Compute change from melt during previous time step
-                frac_sno[c] = frac_snow_during_melt(scf,
-                    c, h2osno_total[c], int_snow[c])
+            if snowmelt[c] > zero(T)
+                int_snow_limited = min(int_snow[c], int_snow_max)
+                smr = min(one(T), h2osno_total[c] / int_snow_limited)
+                frac_sno[c] = one(T) -
+                    (acos(min(one(T), T(2.0) * smr - one(T))) / rpi) ^ n_melt[c]
             end
-
-            if newsnow[c] > 0.0
-                # Update fsca by new snow event, add to previous fsca
-                # Algebraically equivalent to Swenson & Lawrence 2012 eqn. 3,
-                # but simpler and less prone to roundoff errors
-                # (see https://github.com/ESCOMP/ctsm/issues/784)
-                frac_sno[c] = frac_sno[c] + tanh(scf.accum_factor * newsnow[c]) * (1.0 - frac_sno[c])
+            if newsnow[c] > zero(T)
+                frac_sno[c] = frac_sno[c] +
+                    tanh(accum_factor * newsnow[c]) * (one(T) - frac_sno[c])
             end
         end
     end
+end
+
+# Per-column kernel: SwensonLawrence2012 snow_depth update.
+@kernel function _sl12_update_snowdepth_kernel!(snow_depth, @Const(h2osno_total),
+        @Const(newsnow), @Const(bifall), @Const(frac_sno_eff), @Const(mask),
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        T = eltype(snow_depth)
+        if h2osno_total[c] > zero(T)
+            if frac_sno_eff[c] > zero(T)
+                snow_depth[c] = snow_depth[c] + newsnow[c] / (bifall[c] * frac_sno_eff[c])
+            else
+                snow_depth[c] = zero(T)
+            end
+        else  # h2osno_total == 0
+            if newsnow[c] > zero(T)
+                z_avg = newsnow[c] / bifall[c]
+                snow_depth[c] = z_avg / frac_sno_eff[c]
+            else
+                snow_depth[c] = zero(T)
+            end
+        end
+    end
+end
+
+function update_snow_depth_and_frac!(
+    scf::SnowCoverFractionSwensonLawrence2012,
+    # Outputs (modified in place)
+    frac_sno::AbstractVector{<:Real},
+    frac_sno_eff::AbstractVector{<:Real},
+    snow_depth::AbstractVector{<:Real},
+    # Inputs
+    lun_itype_col::AbstractVector{<:Integer},
+    urbpoi::AbstractVector{Bool},
+    h2osno_total::AbstractVector{<:Real},
+    snowmelt::AbstractVector{<:Real},
+    int_snow::AbstractVector{<:Real},
+    newsnow::AbstractVector{<:Real},
+    bifall::AbstractVector{<:Real},
+    mask::AbstractVector{Bool},
+    bounds::UnitRange{Int};
+    use_subgrid_fluxes::Bool = true,
+    n_melt_dev::AbstractVector{<:Real} = scf.n_melt
+)
+    T = eltype(frac_sno)
+    # Auto-initialize n_melt if not yet set (default: n_melt_coef/10 = 20).
+    # Only applies to the host-resident default vector.
+    ncols = length(frac_sno)
+    if n_melt_dev === scf.n_melt && length(scf.n_melt) < ncols
+        resize!(scf.n_melt, ncols)
+        fill!(scf.n_melt, 200.0 / 10.0)
+        n_melt_dev = scf.n_melt
+    end
+
+    # ---- Update frac_sno (folds frac_snow_during_melt inline) ----
+    _launch!(_sl12_update_fracsno_kernel!, frac_sno, h2osno_total, snowmelt,
+             int_snow, newsnow, n_melt_dev, mask,
+             T(scf.accum_factor), T(scf.int_snow_max), T(RPI),
+             first(bounds), last(bounds))
 
     # ---- Calculate frac_sno_eff ----
     calc_frac_sno_eff!(frac_sno_eff, frac_sno, lun_itype_col, urbpoi,
         mask, bounds; use_subgrid_fluxes=use_subgrid_fluxes)
 
     # ---- Update snow_depth ----
-    for c in bounds
-        mask[c] || continue
-
-        if h2osno_total[c] > 0.0
-            if frac_sno_eff[c] > 0.0
-                snow_depth[c] = snow_depth[c] + newsnow[c] / (bifall[c] * frac_sno_eff[c])
-            else
-                snow_depth[c] = 0.0
-            end
-        else  # h2osno_total == 0
-            if newsnow[c] > 0.0
-                z_avg = newsnow[c] / bifall[c]
-                snow_depth[c] = z_avg / frac_sno_eff[c]
-            else
-                snow_depth[c] = 0.0
-            end
-        end
-    end
+    _launch!(_sl12_update_snowdepth_kernel!, snow_depth, h2osno_total, newsnow,
+             bifall, frac_sno_eff, mask, first(bounds), last(bounds))
 
     return nothing
 end
@@ -355,46 +381,51 @@ roughness length.
 Ported from `UpdateSnowDepthAndFrac` in
 `SnowCoverFractionNiuYang2007Mod.F90`.
 """
-function update_snow_depth_and_frac!(
-    scf::SnowCoverFractionNiuYang2007,
-    # Outputs (modified in place)
-    frac_sno::Vector{<:Real},
-    frac_sno_eff::Vector{<:Real},
-    snow_depth::Vector{<:Real},
-    # Inputs
-    lun_itype_col::Vector{Int},
-    urbpoi::Vector{Bool},
-    h2osno_total::Vector{<:Real},
-    snowmelt::Vector{<:Real},
-    int_snow::Vector{<:Real},
-    newsnow::Vector{<:Real},
-    bifall::Vector{<:Real},
-    mask::BitVector,
-    bounds::UnitRange{Int};
-    use_subgrid_fluxes::Bool = false
-)
-    for c in bounds
-        mask[c] || continue
-
-        if h2osno_total[c] == 0.0
-            # Reset snow_depth when no snow
-            snow_depth[c] = 0.0
+# Per-column kernel: NiuYang2007 snow_depth + frac_sno update. zlnd carried at the
+# working precision; literals eltype-converted. Byte-identical on CPU Float64.
+@kernel function _ny07_update_depthfrac_kernel!(snow_depth, frac_sno,
+        @Const(h2osno_total), @Const(newsnow), @Const(bifall), @Const(mask),
+        zlnd, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        T = eltype(snow_depth)
+        if h2osno_total[c] == zero(T)
+            snow_depth[c] = zero(T)
         end
-
         snow_depth[c] = snow_depth[c] + newsnow[c] / bifall[c]
-
-        if snow_depth[c] > 0.0
-            frac_sno[c] = tanh(snow_depth[c] / (2.5 * scf.zlnd *
-                (min(800.0, (h2osno_total[c] + newsnow[c]) / snow_depth[c]) / 100.0)^1.0))
+        if snow_depth[c] > zero(T)
+            frac_sno[c] = tanh(snow_depth[c] / (T(2.5) * zlnd *
+                (min(T(800.0), (h2osno_total[c] + newsnow[c]) / snow_depth[c]) / T(100.0))^one(T)))
         else
-            frac_sno[c] = 0.0
+            frac_sno[c] = zero(T)
         end
-
-        # Limit frac_sno when snow water is small but nonzero
-        if h2osno_total[c] > 0.0 && h2osno_total[c] < 1.0
+        if h2osno_total[c] > zero(T) && h2osno_total[c] < one(T)
             frac_sno[c] = min(frac_sno[c], h2osno_total[c])
         end
     end
+end
+
+function update_snow_depth_and_frac!(
+    scf::SnowCoverFractionNiuYang2007,
+    # Outputs (modified in place)
+    frac_sno::AbstractVector{<:Real},
+    frac_sno_eff::AbstractVector{<:Real},
+    snow_depth::AbstractVector{<:Real},
+    # Inputs
+    lun_itype_col::AbstractVector{<:Integer},
+    urbpoi::AbstractVector{Bool},
+    h2osno_total::AbstractVector{<:Real},
+    snowmelt::AbstractVector{<:Real},
+    int_snow::AbstractVector{<:Real},
+    newsnow::AbstractVector{<:Real},
+    bifall::AbstractVector{<:Real},
+    mask::AbstractVector{Bool},
+    bounds::UnitRange{Int};
+    use_subgrid_fluxes::Bool = false
+)
+    T = eltype(frac_sno)
+    _launch!(_ny07_update_depthfrac_kernel!, snow_depth, frac_sno, h2osno_total,
+             newsnow, bifall, mask, T(scf.zlnd), first(bounds), last(bounds))
 
     # Calculate frac_sno_eff
     calc_frac_sno_eff!(frac_sno_eff, frac_sno, lun_itype_col, urbpoi,
@@ -419,41 +450,49 @@ frac_sno and h2osno_total.
 Ported from `AddNewsnowToIntsnow` in
 `SnowCoverFractionSwensonLawrence2012Mod.F90`.
 """
-function add_newsnow_to_intsnow!(
-    scf::SnowCoverFractionSwensonLawrence2012,
-    int_snow::Vector{<:Real},
-    newsnow::Vector{<:Real},
-    h2osno_total::Vector{<:Real},
-    frac_sno::Vector{<:Real},
-    mask::BitVector,
-    bounds::UnitRange{Int}
-)
-    # Auto-initialize n_melt if not yet set
-    ncols = length(int_snow)
-    if length(scf.n_melt) < ncols
-        resize!(scf.n_melt, ncols)
-        fill!(scf.n_melt, 200.0 / 10.0)
-    end
-
-    for c in bounds
-        mask[c] || continue
-
-        if newsnow[c] > 0.0
-            # Reset int_snow after accumulation events: make int_snow consistent
-            # with new fsno and h2osno_total
-            fsno_base = smooth_max(1.0 - max(frac_sno[c], 1.0e-6), 1.0e-10)
+# Per-column kernel: SwensonLawrence2012 int_snow accumulation. smooth_max on a
+# non-AD eltype (Float32/Float64) is exact `max` (GPU-safe). n_melt is a device
+# vector; RPI and the limit constants carried at the working precision. Byte-
+# identical on CPU Float64.
+@kernel function _sl12_add_intsnow_kernel!(int_snow, @Const(newsnow),
+        @Const(h2osno_total), @Const(frac_sno), @Const(n_melt), @Const(mask),
+        rpi, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        T = eltype(int_snow)
+        if newsnow[c] > zero(T)
+            fsno_base = smooth_max(one(T) - max(frac_sno[c], T(1.0e-6)), T(1.0e-10))
             temp_intsnow = (h2osno_total[c] + newsnow[c]) /
-                (0.5 * (cos(RPI * fsno_base^(1.0 / scf.n_melt[c])) + 1.0))
-            int_snow[c] = min(1.0e8, temp_intsnow)
+                (T(0.5) * (cos(rpi * fsno_base^(one(T) / n_melt[c])) + one(T)))
+            int_snow[c] = min(T(1.0e8), temp_intsnow)
         end
-
-        # NOTE(wjs, 2019-07-25): Sean Swenson and Bill Sacks aren't sure whether this
-        # extra addition of new_snow is correct: it seems to be double-adding newsnow,
-        # but we're not positive that it's wrong. This seems to have been in place ever
-        # since the clm45 branch came to the trunk.
+        # NOTE(wjs, 2019-07-25): extra addition of new_snow kept for bit-for-bit
+        # consistency with the Fortran (see clm45 branch history).
         int_snow[c] = int_snow[c] + newsnow[c]
     end
+end
 
+function add_newsnow_to_intsnow!(
+    scf::SnowCoverFractionSwensonLawrence2012,
+    int_snow::AbstractVector{<:Real},
+    newsnow::AbstractVector{<:Real},
+    h2osno_total::AbstractVector{<:Real},
+    frac_sno::AbstractVector{<:Real},
+    mask::AbstractVector{Bool},
+    bounds::UnitRange{Int};
+    n_melt_dev::AbstractVector{<:Real} = scf.n_melt
+)
+    T = eltype(int_snow)
+    # Auto-initialize n_melt if not yet set (host-resident default vector only).
+    ncols = length(int_snow)
+    if n_melt_dev === scf.n_melt && length(scf.n_melt) < ncols
+        resize!(scf.n_melt, ncols)
+        fill!(scf.n_melt, 200.0 / 10.0)
+        n_melt_dev = scf.n_melt
+    end
+
+    _launch!(_sl12_add_intsnow_kernel!, int_snow, newsnow, h2osno_total, frac_sno,
+             n_melt_dev, mask, T(RPI), first(bounds), last(bounds))
     return nothing
 end
 
@@ -471,20 +510,27 @@ Straightforward addition.
 
 Ported from `AddNewsnowToIntsnow` in `SnowCoverFractionNiuYang2007Mod.F90`.
 """
-function add_newsnow_to_intsnow!(
-    scf::SnowCoverFractionNiuYang2007,
-    int_snow::Vector{<:Real},
-    newsnow::Vector{<:Real},
-    h2osno_total::Vector{<:Real},
-    frac_sno::Vector{<:Real},
-    mask::BitVector,
-    bounds::UnitRange{Int}
-)
-    for c in bounds
-        mask[c] || continue
+# Per-column kernel: NiuYang2007 int_snow accumulation (straight add).
+@kernel function _ny07_add_intsnow_kernel!(int_snow, @Const(newsnow), @Const(mask),
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
         int_snow[c] = int_snow[c] + newsnow[c]
     end
+end
 
+function add_newsnow_to_intsnow!(
+    scf::SnowCoverFractionNiuYang2007,
+    int_snow::AbstractVector{<:Real},
+    newsnow::AbstractVector{<:Real},
+    h2osno_total::AbstractVector{<:Real},
+    frac_sno::AbstractVector{<:Real},
+    mask::AbstractVector{Bool},
+    bounds::UnitRange{Int};
+    n_melt_dev::AbstractVector{<:Real} = newsnow
+)
+    _launch!(_ny07_add_intsnow_kernel!, int_snow, newsnow, mask,
+             first(bounds), last(bounds))
     return nothing
 end
 
