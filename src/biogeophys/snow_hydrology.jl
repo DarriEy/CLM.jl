@@ -1236,46 +1236,51 @@ end
 # CombineSnowLayers
 # =========================================================================
 
-"""
-    combine_snow_layers!(snl, dz, zi, z, t_soisno,
-        h2osoi_ice, h2osoi_liq, h2osno_no_layers,
-        snow_depth, frac_sno, frac_sno_eff, int_snow,
-        snw_rds, aerosol,
-        lun_itype, urbpoi,
-        mask_snow, bounds, nlevsno)
+# GPU helper: move a small host float vector (the per-layer dzmin/dzmax thresholds)
+# onto the backend of a device prototype array so a kernel indexing device arrays can
+# read it. On the plain CPU backend this is the identity (byte-identical). Private to
+# the combine/divide snow-layer kernels below.
+@inline _snow_thresh_to_device(proto, v::AbstractVector) =
+    _snow_thresh_to_device(KA.get_backend(proto), proto, v)
+@inline _snow_thresh_to_device(::KA.CPU, proto, v::AbstractVector) = v
+@inline function _snow_thresh_to_device(backend, proto, v::AbstractVector)
+    d = similar(proto, eltype(v), length(v))
+    copyto!(d, v)
+    return d
+end
 
-Combine snow layers that are less than minimum thickness or mass.
-"""
-function combine_snow_layers!(
-    snl::Vector{Int},
-    dz::Matrix{<:Real},
-    zi::Matrix{<:Real},
-    z::Matrix{<:Real},
-    t_soisno::Matrix{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    h2osno_no_layers::Vector{<:Real},
-    snow_depth::Vector{<:Real},
-    frac_sno::Vector{<:Real},
-    frac_sno_eff::Vector{<:Real},
-    int_snow::Vector{<:Real},
-    snw_rds::Matrix{<:Real},
-    aerosol::AerosolData,
-    lun_itype::Vector{Int},     # landunit type indexed by landunit
-    urbpoi::Vector{Bool},       # urban point indexed by landunit
-    col_landunit::Vector{Int},  # column-to-landunit mapping
-    mask_snow::BitVector,
-    bounds::UnitRange{Int},
-    nlevsno::Int
-)
-    dzmin = SNOW_DZMIN[]
-    nc = length(snl)
+# Device-view bundles for combine_snow_layers! (placed directly above the function
+# so insertions stay in a disjoint line-region for clean auto-merge). Each groups
+# same-typed (float) arrays so the per-column kernel takes a few struct args instead
+# of ~21 loose ones (Metal caps total kernel args ~31). Adapt-registered.
+Base.@kwdef struct CombineSnowMat{M}      # per-(col,layer) snow-state float matrices
+    dz::M; zi::M; z::M; t_soisno::M
+    h2osoi_ice::M; h2osoi_liq::M; snw_rds::M
+end
+Base.@kwdef struct CombineSnowAero{M}     # per-(col,layer) aerosol mass matrices
+    mss_bcphi::M; mss_bcpho::M; mss_ocphi::M; mss_ocpho::M
+    mss_dst1::M; mss_dst2::M; mss_dst3::M; mss_dst4::M
+end
+Base.@kwdef struct CombineSnowCol{V}      # per-column float vectors
+    h2osno_no_layers::V; snow_depth::V; frac_sno::V; frac_sno_eff::V; int_snow::V
+end
+Adapt.@adapt_structure CombineSnowMat
+Adapt.@adapt_structure CombineSnowAero
+Adapt.@adapt_structure CombineSnowCol
 
-    # Determine dzmin adjustments for lake
-    dzminloc = copy(dzmin)
-
-    for c in bounds
-        mask_snow[c] || continue
+# One thread per column runs the full sequential layer search + merge in-thread on its
+# own padded slice (writes only column c). dzmin/dzminloc passed as a device array (small,
+# indexed by mssi). Literals converted to the working eltype T (oftype) so no Float64
+# reaches a Float32-only backend (Metal) while staying byte-identical on Float64 CPU.
+@kernel function _snowhyd_combine_kernel!(snl, m::CombineSnowMat, a::CombineSnowAero,
+        cv::CombineSnowCol, @Const(mask_snow), @Const(lun_itype), @Const(urbpoi),
+        @Const(col_landunit), @Const(dzmin), nlevsno::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        T = eltype(m.dz)
+        zr = zero(T); thresh50 = T(50.0); ice_thresh = T(0.01); half = T(0.5)
+        dzmin1 = T(dzmin[1]); lsadz = T(LSADZ)
+        ncol_lyr = size(m.h2osoi_liq, 2)
 
         msn_old = snl[c]
 
@@ -1283,29 +1288,29 @@ function combine_snow_layers!(
         j = msn_old + 1
         while j <= 0
             jj = j + nlevsno
-            if h2osoi_ice[c, jj] <= 0.01
+            if m.h2osoi_ice[c, jj] <= ice_thresh
                 l = col_landunit[c]
                 ltype = lun_itype[l]
                 if j < 0 || (ltype == ISTSOIL || urbpoi[l] || ltype == ISTCROP)
                     # Transfer water to layer below
                     jj_next = (j + 1) + nlevsno
-                    if jj_next <= size(h2osoi_liq, 2)
-                        h2osoi_liq[c, jj_next] += h2osoi_liq[c, jj]
-                        h2osoi_ice[c, jj_next] += h2osoi_ice[c, jj]
+                    if jj_next <= ncol_lyr
+                        m.h2osoi_liq[c, jj_next] += m.h2osoi_liq[c, jj]
+                        m.h2osoi_ice[c, jj_next] += m.h2osoi_ice[c, jj]
                     end
                 end
 
                 if j < 0
                     jj_next = (j + 1) + nlevsno
-                    dz[c, jj_next] += dz[c, jj]
-                    aerosol.mss_bcphi_col[c, jj_next] += aerosol.mss_bcphi_col[c, jj]
-                    aerosol.mss_bcpho_col[c, jj_next] += aerosol.mss_bcpho_col[c, jj]
-                    aerosol.mss_ocphi_col[c, jj_next] += aerosol.mss_ocphi_col[c, jj]
-                    aerosol.mss_ocpho_col[c, jj_next] += aerosol.mss_ocpho_col[c, jj]
-                    aerosol.mss_dst1_col[c, jj_next]  += aerosol.mss_dst1_col[c, jj]
-                    aerosol.mss_dst2_col[c, jj_next]  += aerosol.mss_dst2_col[c, jj]
-                    aerosol.mss_dst3_col[c, jj_next]  += aerosol.mss_dst3_col[c, jj]
-                    aerosol.mss_dst4_col[c, jj_next]  += aerosol.mss_dst4_col[c, jj]
+                    m.dz[c, jj_next] += m.dz[c, jj]
+                    a.mss_bcphi[c, jj_next] += a.mss_bcphi[c, jj]
+                    a.mss_bcpho[c, jj_next] += a.mss_bcpho[c, jj]
+                    a.mss_ocphi[c, jj_next] += a.mss_ocphi[c, jj]
+                    a.mss_ocpho[c, jj_next] += a.mss_ocpho[c, jj]
+                    a.mss_dst1[c, jj_next]  += a.mss_dst1[c, jj]
+                    a.mss_dst2[c, jj_next]  += a.mss_dst2[c, jj]
+                    a.mss_dst3[c, jj_next]  += a.mss_dst3[c, jj]
+                    a.mss_dst4[c, jj_next]  += a.mss_dst4[c, jj]
                 end
 
                 # Shift all elements above this down one
@@ -1313,19 +1318,19 @@ function combine_snow_layers!(
                     for i in j:-1:(snl[c]+2)
                         ii = i + nlevsno
                         ii_above = (i - 1) + nlevsno
-                        h2osoi_liq[c, ii] = h2osoi_liq[c, ii_above]
-                        h2osoi_ice[c, ii] = h2osoi_ice[c, ii_above]
-                        t_soisno[c, ii] = t_soisno[c, ii_above]
-                        dz[c, ii] = dz[c, ii_above]
-                        aerosol.mss_bcphi_col[c, ii] = aerosol.mss_bcphi_col[c, ii_above]
-                        aerosol.mss_bcpho_col[c, ii] = aerosol.mss_bcpho_col[c, ii_above]
-                        aerosol.mss_ocphi_col[c, ii] = aerosol.mss_ocphi_col[c, ii_above]
-                        aerosol.mss_ocpho_col[c, ii] = aerosol.mss_ocpho_col[c, ii_above]
-                        aerosol.mss_dst1_col[c, ii] = aerosol.mss_dst1_col[c, ii_above]
-                        aerosol.mss_dst2_col[c, ii] = aerosol.mss_dst2_col[c, ii_above]
-                        aerosol.mss_dst3_col[c, ii] = aerosol.mss_dst3_col[c, ii_above]
-                        aerosol.mss_dst4_col[c, ii] = aerosol.mss_dst4_col[c, ii_above]
-                        snw_rds[c, ii] = snw_rds[c, ii_above]
+                        m.h2osoi_liq[c, ii] = m.h2osoi_liq[c, ii_above]
+                        m.h2osoi_ice[c, ii] = m.h2osoi_ice[c, ii_above]
+                        m.t_soisno[c, ii] = m.t_soisno[c, ii_above]
+                        m.dz[c, ii] = m.dz[c, ii_above]
+                        a.mss_bcphi[c, ii] = a.mss_bcphi[c, ii_above]
+                        a.mss_bcpho[c, ii] = a.mss_bcpho[c, ii_above]
+                        a.mss_ocphi[c, ii] = a.mss_ocphi[c, ii_above]
+                        a.mss_ocpho[c, ii] = a.mss_ocpho[c, ii_above]
+                        a.mss_dst1[c, ii] = a.mss_dst1[c, ii_above]
+                        a.mss_dst2[c, ii] = a.mss_dst2[c, ii_above]
+                        a.mss_dst3[c, ii] = a.mss_dst3[c, ii_above]
+                        a.mss_dst4[c, ii] = a.mss_dst4[c, ii_above]
+                        m.snw_rds[c, ii] = m.snw_rds[c, ii_above]
                     end
                 end
                 snl[c] = snl[c] + 1
@@ -1334,67 +1339,67 @@ function combine_snow_layers!(
         end
 
         # Recompute snow depth and total water
-        snow_depth[c] = 0.0
-        h2osno_total = 0.0
-        for j in (snl[c]+1):0
-            jj = j + nlevsno
-            snow_depth[c] += dz[c, jj]
-            h2osno_total += h2osoi_ice[c, jj] + h2osoi_liq[c, jj]
+        cv.snow_depth[c] = zr
+        h2osno_total = zr
+        for jl in (snl[c]+1):0
+            jj = jl + nlevsno
+            cv.snow_depth[c] += m.dz[c, jj]
+            h2osno_total += m.h2osoi_ice[c, jj] + m.h2osoi_liq[c, jj]
         end
 
         # Check if all snow gone
-        if snow_depth[c] > 0.0
+        if cv.snow_depth[c] > zr
             l = col_landunit[c]
             ltype = lun_itype[l]
-            if (ltype == ISTDLAK && snow_depth[c] < dzmin[1] + LSADZ) ||
+            if (ltype == ISTDLAK && cv.snow_depth[c] < dzmin1 + lsadz) ||
                (ltype != ISTDLAK &&
-                (frac_sno_eff[c] * snow_depth[c] < dzmin[1] ||
-                 h2osno_total / (frac_sno_eff[c] * snow_depth[c]) < 50.0))
+                (cv.frac_sno_eff[c] * cv.snow_depth[c] < dzmin1 ||
+                 h2osno_total / (cv.frac_sno_eff[c] * cv.snow_depth[c]) < thresh50))
 
                 # Transfer ice to h2osno_no_layers, liquid to top soil layer
-                zwice = 0.0
-                zwliq = 0.0
-                for j in (snl[c]+1):0
-                    jj = j + nlevsno
-                    zwice += h2osoi_ice[c, jj]
-                    zwliq += h2osoi_liq[c, jj]
+                zwice = zr
+                zwliq = zr
+                for jl in (snl[c]+1):0
+                    jj = jl + nlevsno
+                    zwice += m.h2osoi_ice[c, jj]
+                    zwliq += m.h2osoi_liq[c, jj]
                 end
 
-                h2osno_no_layers[c] = zwice
+                cv.h2osno_no_layers[c] = zwice
                 if ltype == ISTSOIL || urbpoi[l] || ltype == ISTCROP
                     # Transfer liquid to soil layer 1
                     jj_soil1 = 0 + nlevsno + 1  # layer index 1
-                    if jj_soil1 <= size(h2osoi_liq, 2)
-                        h2osoi_liq[c, jj_soil1] += zwliq
+                    if jj_soil1 <= ncol_lyr
+                        m.h2osoi_liq[c, jj_soil1] += zwliq
                     end
                 end
 
                 snl[c] = 0
-                h2osno_total = h2osno_no_layers[c]
+                h2osno_total = cv.h2osno_no_layers[c]
 
                 # Zero out aerosol masses
                 for jj in 1:nlevsno
-                    aerosol.mss_bcphi_col[c, jj] = 0.0
-                    aerosol.mss_bcpho_col[c, jj] = 0.0
-                    aerosol.mss_ocphi_col[c, jj] = 0.0
-                    aerosol.mss_ocpho_col[c, jj] = 0.0
-                    aerosol.mss_dst1_col[c, jj] = 0.0
-                    aerosol.mss_dst2_col[c, jj] = 0.0
-                    aerosol.mss_dst3_col[c, jj] = 0.0
-                    aerosol.mss_dst4_col[c, jj] = 0.0
+                    a.mss_bcphi[c, jj] = zr
+                    a.mss_bcpho[c, jj] = zr
+                    a.mss_ocphi[c, jj] = zr
+                    a.mss_ocpho[c, jj] = zr
+                    a.mss_dst1[c, jj] = zr
+                    a.mss_dst2[c, jj] = zr
+                    a.mss_dst3[c, jj] = zr
+                    a.mss_dst4[c, jj] = zr
                 end
 
-                if h2osno_no_layers[c] <= 0.0
-                    snow_depth[c] = 0.0
+                if cv.h2osno_no_layers[c] <= zr
+                    cv.snow_depth[c] = zr
                 end
             end
         end
 
-        if h2osno_total <= 0.0
-            snow_depth[c] = 0.0
-            frac_sno[c] = 0.0
-            frac_sno_eff[c] = 0.0
-            int_snow[c] = 0.0
+        if h2osno_total <= zr
+            cv.snow_depth[c] = zr
+            cv.frac_sno[c] = zr
+            cv.frac_sno_eff[c] = zr
+            cv.int_snow[c] = zr
         end
 
         # Combine thin layers (two or more layers)
@@ -1403,9 +1408,9 @@ function combine_snow_layers!(
             i = snl[c] + 1
             while i <= 0
                 jj_i = i + nlevsno
-                if (frac_sno_eff[c] * dz[c, jj_i] < dzminloc[mssi]) ||
-                   ((h2osoi_ice[c, jj_i] + h2osoi_liq[c, jj_i]) /
-                    (frac_sno_eff[c] * dz[c, jj_i]) < 50.0)
+                if (cv.frac_sno_eff[c] * m.dz[c, jj_i] < T(dzmin[mssi])) ||
+                   ((m.h2osoi_ice[c, jj_i] + m.h2osoi_liq[c, jj_i]) /
+                    (cv.frac_sno_eff[c] * m.dz[c, jj_i]) < thresh50)
 
                     if i == snl[c] + 1
                         neibor = i + 1
@@ -1415,7 +1420,7 @@ function combine_snow_layers!(
                         neibor = i + 1
                         jj_im1 = (i - 1) + nlevsno
                         jj_ip1 = (i + 1) + nlevsno
-                        if (dz[c, jj_im1] + dz[c, jj_i]) < (dz[c, jj_ip1] + dz[c, jj_i])
+                        if (m.dz[c, jj_im1] + m.dz[c, jj_i]) < (m.dz[c, jj_ip1] + m.dz[c, jj_i])
                             neibor = i - 1
                         end
                     end
@@ -1433,48 +1438,48 @@ function combine_snow_layers!(
                     jj_remove = l_remove + nlevsno
 
                     # Combine aerosol masses
-                    aerosol.mss_bcphi_col[c, jj_keep] += aerosol.mss_bcphi_col[c, jj_remove]
-                    aerosol.mss_bcpho_col[c, jj_keep] += aerosol.mss_bcpho_col[c, jj_remove]
-                    aerosol.mss_ocphi_col[c, jj_keep] += aerosol.mss_ocphi_col[c, jj_remove]
-                    aerosol.mss_ocpho_col[c, jj_keep] += aerosol.mss_ocpho_col[c, jj_remove]
-                    aerosol.mss_dst1_col[c, jj_keep]  += aerosol.mss_dst1_col[c, jj_remove]
-                    aerosol.mss_dst2_col[c, jj_keep]  += aerosol.mss_dst2_col[c, jj_remove]
-                    aerosol.mss_dst3_col[c, jj_keep]  += aerosol.mss_dst3_col[c, jj_remove]
-                    aerosol.mss_dst4_col[c, jj_keep]  += aerosol.mss_dst4_col[c, jj_remove]
+                    a.mss_bcphi[c, jj_keep] += a.mss_bcphi[c, jj_remove]
+                    a.mss_bcpho[c, jj_keep] += a.mss_bcpho[c, jj_remove]
+                    a.mss_ocphi[c, jj_keep] += a.mss_ocphi[c, jj_remove]
+                    a.mss_ocpho[c, jj_keep] += a.mss_ocpho[c, jj_remove]
+                    a.mss_dst1[c, jj_keep]  += a.mss_dst1[c, jj_remove]
+                    a.mss_dst2[c, jj_keep]  += a.mss_dst2[c, jj_remove]
+                    a.mss_dst3[c, jj_keep]  += a.mss_dst3[c, jj_remove]
+                    a.mss_dst4[c, jj_keep]  += a.mss_dst4[c, jj_remove]
 
                     # Mass-weighted snow grain size
-                    total_mass = h2osoi_liq[c, jj_keep] + h2osoi_ice[c, jj_keep] +
-                                 h2osoi_liq[c, jj_remove] + h2osoi_ice[c, jj_remove]
-                    if total_mass > 0.0
-                        snw_rds[c, jj_keep] = (snw_rds[c, jj_keep] *
-                            (h2osoi_liq[c, jj_keep] + h2osoi_ice[c, jj_keep]) +
-                            snw_rds[c, jj_remove] *
-                            (h2osoi_liq[c, jj_remove] + h2osoi_ice[c, jj_remove])) / total_mass
+                    total_mass = m.h2osoi_liq[c, jj_keep] + m.h2osoi_ice[c, jj_keep] +
+                                 m.h2osoi_liq[c, jj_remove] + m.h2osoi_ice[c, jj_remove]
+                    if total_mass > zr
+                        m.snw_rds[c, jj_keep] = (m.snw_rds[c, jj_keep] *
+                            (m.h2osoi_liq[c, jj_keep] + m.h2osoi_ice[c, jj_keep]) +
+                            m.snw_rds[c, jj_remove] *
+                            (m.h2osoi_liq[c, jj_remove] + m.h2osoi_ice[c, jj_remove])) / total_mass
                     end
 
                     # Combine elements using combo
-                    combo!(dz, c, jj_keep, h2osoi_liq, h2osoi_ice, t_soisno,
-                           dz[c, jj_remove], h2osoi_liq[c, jj_remove],
-                           h2osoi_ice[c, jj_remove], t_soisno[c, jj_remove])
+                    combo!(m.dz, c, jj_keep, m.h2osoi_liq, m.h2osoi_ice, m.t_soisno,
+                           m.dz[c, jj_remove], m.h2osoi_liq[c, jj_remove],
+                           m.h2osoi_ice[c, jj_remove], m.t_soisno[c, jj_remove])
 
                     # Shift elements above
                     if j_keep - 1 > snl[c] + 1
                         for k in (j_keep-1):-1:(snl[c]+2)
                             kk = k + nlevsno
                             kk_above = (k - 1) + nlevsno
-                            h2osoi_ice[c, kk] = h2osoi_ice[c, kk_above]
-                            h2osoi_liq[c, kk] = h2osoi_liq[c, kk_above]
-                            t_soisno[c, kk] = t_soisno[c, kk_above]
-                            dz[c, kk] = dz[c, kk_above]
-                            aerosol.mss_bcphi_col[c, kk] = aerosol.mss_bcphi_col[c, kk_above]
-                            aerosol.mss_bcpho_col[c, kk] = aerosol.mss_bcpho_col[c, kk_above]
-                            aerosol.mss_ocphi_col[c, kk] = aerosol.mss_ocphi_col[c, kk_above]
-                            aerosol.mss_ocpho_col[c, kk] = aerosol.mss_ocpho_col[c, kk_above]
-                            aerosol.mss_dst1_col[c, kk] = aerosol.mss_dst1_col[c, kk_above]
-                            aerosol.mss_dst2_col[c, kk] = aerosol.mss_dst2_col[c, kk_above]
-                            aerosol.mss_dst3_col[c, kk] = aerosol.mss_dst3_col[c, kk_above]
-                            aerosol.mss_dst4_col[c, kk] = aerosol.mss_dst4_col[c, kk_above]
-                            snw_rds[c, kk] = snw_rds[c, kk_above]
+                            m.h2osoi_ice[c, kk] = m.h2osoi_ice[c, kk_above]
+                            m.h2osoi_liq[c, kk] = m.h2osoi_liq[c, kk_above]
+                            m.t_soisno[c, kk] = m.t_soisno[c, kk_above]
+                            m.dz[c, kk] = m.dz[c, kk_above]
+                            a.mss_bcphi[c, kk] = a.mss_bcphi[c, kk_above]
+                            a.mss_bcpho[c, kk] = a.mss_bcpho[c, kk_above]
+                            a.mss_ocphi[c, kk] = a.mss_ocphi[c, kk_above]
+                            a.mss_ocpho[c, kk] = a.mss_ocpho[c, kk_above]
+                            a.mss_dst1[c, kk] = a.mss_dst1[c, kk_above]
+                            a.mss_dst2[c, kk] = a.mss_dst2[c, kk_above]
+                            a.mss_dst3[c, kk] = a.mss_dst3[c, kk_above]
+                            a.mss_dst4[c, kk] = a.mss_dst4[c, kk_above]
+                            m.snw_rds[c, kk] = m.snw_rds[c, kk_above]
                         end
                     end
 
@@ -1490,14 +1495,66 @@ function combine_snow_layers!(
         end
 
         # Reset node depth and interface depth
-        for j in 0:-1:(-nlevsno+1)
-            jj = j + nlevsno
-            if j >= snl[c] + 1
-                z[c, jj] = zi[c, jj + 1] - 0.5 * dz[c, jj]
-                zi[c, jj] = zi[c, jj + 1] - dz[c, jj]
+        for jl in 0:-1:(-nlevsno+1)
+            jj = jl + nlevsno
+            if jl >= snl[c] + 1
+                m.z[c, jj] = m.zi[c, jj + 1] - half * m.dz[c, jj]
+                m.zi[c, jj] = m.zi[c, jj + 1] - m.dz[c, jj]
             end
         end
     end
+end
+
+"""
+    combine_snow_layers!(snl, dz, zi, z, t_soisno,
+        h2osoi_ice, h2osoi_liq, h2osno_no_layers,
+        snow_depth, frac_sno, frac_sno_eff, int_snow,
+        snw_rds, aerosol,
+        lun_itype, urbpoi,
+        mask_snow, bounds, nlevsno)
+
+Combine snow layers that are less than minimum thickness or mass. One per-column
+kernel; backend-agnostic (CPU loop or whole-function on GPU).
+"""
+function combine_snow_layers!(
+    snl::AbstractVector{Int},
+    dz::AbstractMatrix{<:Real},
+    zi::AbstractMatrix{<:Real},
+    z::AbstractMatrix{<:Real},
+    t_soisno::AbstractMatrix{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    h2osno_no_layers::AbstractVector{<:Real},
+    snow_depth::AbstractVector{<:Real},
+    frac_sno::AbstractVector{<:Real},
+    frac_sno_eff::AbstractVector{<:Real},
+    int_snow::AbstractVector{<:Real},
+    snw_rds::AbstractMatrix{<:Real},
+    aerosol::AerosolData,
+    lun_itype::AbstractVector{Int},     # landunit type indexed by landunit
+    urbpoi::AbstractVector{Bool},       # urban point indexed by landunit
+    col_landunit::AbstractVector{Int},  # column-to-landunit mapping
+    mask_snow::AbstractVector{Bool},
+    bounds::UnitRange{Int},
+    nlevsno::Int
+)
+    # dzmin/dzminloc as a device-resident array (small, indexed by layer); built to the
+    # working precision so no Float64 reaches a Float32-only backend.
+    FT = eltype(dz)
+    dzmin = _snow_thresh_to_device(dz, FT.(SNOW_DZMIN[]))
+
+    m = CombineSnowMat(; dz, zi, z, t_soisno, h2osoi_ice, h2osoi_liq, snw_rds)
+    a = CombineSnowAero(;
+        mss_bcphi = aerosol.mss_bcphi_col, mss_bcpho = aerosol.mss_bcpho_col,
+        mss_ocphi = aerosol.mss_ocphi_col, mss_ocpho = aerosol.mss_ocpho_col,
+        mss_dst1 = aerosol.mss_dst1_col, mss_dst2 = aerosol.mss_dst2_col,
+        mss_dst3 = aerosol.mss_dst3_col, mss_dst4 = aerosol.mss_dst4_col)
+    cv = CombineSnowCol(; h2osno_no_layers, snow_depth, frac_sno, frac_sno_eff, int_snow)
+
+    _launch!(_snowhyd_combine_kernel!, snl, m, a, cv, mask_snow, lun_itype, urbpoi,
+             col_landunit, dzmin, nlevsno, first(bounds), last(bounds);
+             ndrange = length(snl))
+    return nothing
 end
 
 # =========================================================================
@@ -1510,29 +1567,16 @@ end
 
 Combine two snow elements. Updates element at [c, jj] in-place.
 """
-function combo!(dz_mat::Matrix{<:Real}, c::Int, jj::Int,
-                wliq_mat::Matrix{<:Real}, wice_mat::Matrix{<:Real},
-                t_mat::Matrix{<:Real},
+function combo!(dz_mat::AbstractMatrix{<:Real}, c::Int, jj::Int,
+                wliq_mat::AbstractMatrix{<:Real}, wice_mat::AbstractMatrix{<:Real},
+                t_mat::AbstractMatrix{<:Real},
                 dz2::Real, wliq2::Real, wice2::Real, t2::Real)
     dz1 = dz_mat[c, jj]
     wliq1 = wliq_mat[c, jj]
     wice1 = wice_mat[c, jj]
     t1 = t_mat[c, jj]
 
-    dzc = dz1 + dz2
-    wicec = wice1 + wice2
-    wliqc = wliq1 + wliq2
-
-    h1 = (CPICE * wice1 + CPLIQ * wliq1) * (t1 - TFRZ) + HFUS * wliq1
-    h2 = (CPICE * wice2 + CPLIQ * wliq2) * (t2 - TFRZ) + HFUS * wliq2
-    hc = h1 + h2
-
-    denom = CPICE * wicec + CPLIQ * wliqc
-    if denom > 0.0
-        tc = TFRZ + (hc - HFUS * wliqc) / denom
-    else
-        tc = TFRZ
-    end
+    (dzc, wliqc, wicec, tc) = combo_scalar(dz1, wliq1, wice1, t1, dz2, wliq2, wice2, t2)
 
     dz_mat[c, jj] = dzc
     wice_mat[c, jj] = wicec
@@ -1545,21 +1589,28 @@ end
 
 Scalar version of combo for use in divide_snow_layers.
 """
-function combo_scalar(dz::Real, wliq::Real, wice::Real, t::Real,
+@inline function combo_scalar(dz::Real, wliq::Real, wice::Real, t::Real,
                       dz2::Real, wliq2::Real, wice2::Real, t2::Real)
+    # eltype-generic so the same code is device-safe (Metal/Float32) and byte-identical
+    # on Float64 CPU: each Float64 constant is converted to the working precision via
+    # oftype (oftype(::Float64, x) === x).
+    T = promote_type(typeof(dz), typeof(wliq), typeof(wice), typeof(t),
+                     typeof(dz2), typeof(wliq2), typeof(wice2), typeof(t2))
+    cpice = T(CPICE); cpliq = T(CPLIQ); hfus = T(HFUS); tfrz = T(TFRZ)
+
     dzc = dz + dz2
     wicec = wice + wice2
     wliqc = wliq + wliq2
 
-    h = (CPICE * wice + CPLIQ * wliq) * (t - TFRZ) + HFUS * wliq
-    h2val = (CPICE * wice2 + CPLIQ * wliq2) * (t2 - TFRZ) + HFUS * wliq2
+    h = (cpice * wice + cpliq * wliq) * (t - tfrz) + hfus * wliq
+    h2val = (cpice * wice2 + cpliq * wliq2) * (t2 - tfrz) + hfus * wliq2
     hc = h + h2val
 
-    denom = CPICE * wicec + CPLIQ * wliqc
-    if denom > 0.0
-        tc = TFRZ + (hc - HFUS * wliqc) / denom
+    denom = cpice * wicec + cpliq * wliqc
+    if denom > zero(T)
+        tc = tfrz + (hc - hfus * wliqc) / denom
     else
-        tc = TFRZ
+        tc = tfrz
     end
 
     return (dzc, wliqc, wicec, tc)
@@ -1574,12 +1625,24 @@ end
 
 Calculate mass-weighted snow radius when two layers are combined.
 """
+# Host-facing convenience method: reads the module-level params/const (host only).
 function mass_weighted_snow_radius(rds1::Real, rds2::Real,
                                     swtot::Real, zwtot::Real)
     params = snowhydrology_params
+    return mass_weighted_snow_radius(rds1, rds2, swtot, zwtot,
+                                     params.snw_rds_min, SNW_RDS_MAX)
+end
+
+# Device-safe eltype-generic core: snw_rds_min / snw_rds_max passed in (no host-global
+# deref inside a GPU kernel). Byte-identical on Float64 (oftype(::Float64, x) === x).
+@inline function mass_weighted_snow_radius(rds1::Real, rds2::Real,
+                                    swtot::Real, zwtot::Real,
+                                    snw_rds_min::Real, snw_rds_max::Real)
+    T = promote_type(typeof(rds1), typeof(rds2), typeof(swtot), typeof(zwtot))
     total_wt = swtot + zwtot
-    result = total_wt > 0.0 ? (rds2 * swtot + rds1 * zwtot) / total_wt : 0.5 * (rds1 + rds2)
-    result = smooth_clamp(result, params.snw_rds_min, SNW_RDS_MAX)
+    result = total_wt > zero(T) ? (rds2 * swtot + rds1 * zwtot) / total_wt :
+                                  T(0.5) * (rds1 + rds2)
+    result = smooth_clamp(result, T(snw_rds_min), T(snw_rds_max))
     return result
 end
 
@@ -1587,72 +1650,67 @@ end
 # DivideSnowLayers
 # =========================================================================
 
-"""
-    divide_snow_layers!(snl, dz, zi, z, t_soisno,
-        h2osoi_ice, h2osoi_liq, frac_sno, snw_rds, aerosol,
-        is_lake, mask_snow, bounds, nlevsno)
+# Per-column device-resident scratch for divide_snow_layers! (the Fortran "local arrays"
+# dzsno/swice/… indexed 1..nlevsno, top=1). One row per column so each thread owns a
+# disjoint slice; bundled into two structs to stay under the Metal ~31-arg kernel cap.
+# Placed directly above the function for clean auto-merge. Adapt-registered.
+Base.@kwdef struct DivideSnowScratch1{M}
+    dzsno::M; swice::M; swliq::M; tsno::M; rds::M
+end
+Base.@kwdef struct DivideSnowScratch2{M}
+    mbc_phi::M; mbc_pho::M; moc_phi::M; moc_pho::M
+    mdst1::M; mdst2::M; mdst3::M; mdst4::M
+end
+Adapt.@adapt_structure DivideSnowScratch1
+Adapt.@adapt_structure DivideSnowScratch2
 
-Subdivide snow layers that exceed their prescribed maximum thickness.
-"""
-function divide_snow_layers!(
-    snl::Vector{Int},
-    dz::Matrix{<:Real},
-    zi::Matrix{<:Real},
-    z::Matrix{<:Real},
-    t_soisno::Matrix{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    frac_sno::Vector{<:Real},
-    snw_rds::Matrix{<:Real},
-    aerosol::AerosolData,
-    is_lake::Bool,
-    mask_snow::BitVector,
-    bounds::UnitRange{Int},
-    nlevsno::Int
-)
-    dzmax_l = SNOW_DZMAX_L[]
-    dzmax_u = SNOW_DZMAX_U[]
-
-    for c in bounds
-        mask_snow[c] || continue
+# One thread per column runs the full sequential top-to-bottom split in-thread, using
+# its own scratch row (s1/s2) and writing only column c. dzmax_l/dzmax_u as device arrays;
+# is_lake/snw_rds_min/snw_rds_max resolved on host and passed as scalars. Literals converted
+# to the working eltype T so no Float64 reaches a Float32-only backend (Metal) while staying
+# byte-identical on Float64 CPU.
+@kernel function _snowhyd_divide_kernel!(snl, m::CombineSnowMat, a::CombineSnowAero,
+        s1::DivideSnowScratch1, s2::DivideSnowScratch2, @Const(frac_sno),
+        @Const(mask_snow), @Const(dzmax_l), @Const(dzmax_u), is_lake::Bool,
+        snw_rds_min, snw_rds_max, nlevsno::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        T = eltype(m.dz)
+        zr = zero(T); half = T(0.5); two = T(2.0)
+        lsadz = T(LSADZ); tfrz = T(TFRZ)
+        rmin = T(snw_rds_min); rmax = T(snw_rds_max)
 
         msno = abs(snl[c])
 
-        # Copy to local arrays (1-indexed, top=1)
-        FT = eltype(h2osoi_ice)
-        dzsno  = zeros(FT, nlevsno)
-        swice  = zeros(FT, nlevsno)
-        swliq  = zeros(FT, nlevsno)
-        tsno   = zeros(FT, nlevsno)
-        mbc_phi = zeros(FT, nlevsno)
-        mbc_pho = zeros(FT, nlevsno)
-        moc_phi = zeros(FT, nlevsno)
-        moc_pho = zeros(FT, nlevsno)
-        mdst1  = zeros(FT, nlevsno)
-        mdst2  = zeros(FT, nlevsno)
-        mdst3  = zeros(FT, nlevsno)
-        mdst4  = zeros(FT, nlevsno)
-        rds    = zeros(FT, nlevsno)
+        # Copy to scratch (1-indexed, top=1). Zero-fill the whole scratch row first
+        # (similar() is uninitialized), mirroring the original zeros(FT, nlevsno).
+        for k in 1:nlevsno
+            s1.dzsno[c, k] = zr; s1.swice[c, k] = zr; s1.swliq[c, k] = zr
+            s1.tsno[c, k] = zr; s1.rds[c, k] = zr
+            s2.mbc_phi[c, k] = zr; s2.mbc_pho[c, k] = zr
+            s2.moc_phi[c, k] = zr; s2.moc_pho[c, k] = zr
+            s2.mdst1[c, k] = zr; s2.mdst2[c, k] = zr; s2.mdst3[c, k] = zr; s2.mdst4[c, k] = zr
+        end
 
         for k in 1:msno
             jj = (k + snl[c]) + nlevsno  # Fortran j+snl(c) -> Julia index
             if is_lake
-                dzsno[k] = dz[c, jj]
+                s1.dzsno[c, k] = m.dz[c, jj]
             else
-                dzsno[k] = frac_sno[c] * dz[c, jj]
+                s1.dzsno[c, k] = frac_sno[c] * m.dz[c, jj]
             end
-            swice[k] = h2osoi_ice[c, jj]
-            swliq[k] = h2osoi_liq[c, jj]
-            tsno[k]  = t_soisno[c, jj]
-            mbc_phi[k] = aerosol.mss_bcphi_col[c, jj]
-            mbc_pho[k] = aerosol.mss_bcpho_col[c, jj]
-            moc_phi[k] = aerosol.mss_ocphi_col[c, jj]
-            moc_pho[k] = aerosol.mss_ocpho_col[c, jj]
-            mdst1[k] = aerosol.mss_dst1_col[c, jj]
-            mdst2[k] = aerosol.mss_dst2_col[c, jj]
-            mdst3[k] = aerosol.mss_dst3_col[c, jj]
-            mdst4[k] = aerosol.mss_dst4_col[c, jj]
-            rds[k]   = snw_rds[c, jj]
+            s1.swice[c, k] = m.h2osoi_ice[c, jj]
+            s1.swliq[c, k] = m.h2osoi_liq[c, jj]
+            s1.tsno[c, k]  = m.t_soisno[c, jj]
+            s2.mbc_phi[c, k] = a.mss_bcphi[c, jj]
+            s2.mbc_pho[c, k] = a.mss_bcpho[c, jj]
+            s2.moc_phi[c, k] = a.mss_ocphi[c, jj]
+            s2.moc_pho[c, k] = a.mss_ocpho[c, jj]
+            s2.mdst1[c, k] = a.mss_dst1[c, jj]
+            s2.mdst2[c, k] = a.mss_dst2[c, jj]
+            s2.mdst3[c, k] = a.mss_dst3[c, jj]
+            s2.mdst4[c, k] = a.mss_dst4[c, jj]
+            s1.rds[c, k]   = m.snw_rds[c, jj]
         end
 
         # Traverse layers top to bottom
@@ -1660,85 +1718,86 @@ function divide_snow_layers!(
         while k <= msno && k < nlevsno
             # Bottom layer case
             if k == msno
-                offset = is_lake ? 2.0 * LSADZ : 0.0
-                if dzsno[k] > dzmax_l[k] + offset
+                offset = is_lake ? two * lsadz : zr
+                if s1.dzsno[c, k] > dzmax_l[k] + offset
                     msno += 1
-                    dzsno[k] /= 2.0
-                    dzsno[k+1] = dzsno[k]
-                    swice[k] /= 2.0; swice[k+1] = swice[k]
-                    swliq[k] /= 2.0; swliq[k+1] = swliq[k]
+                    s1.dzsno[c, k] /= two
+                    s1.dzsno[c, k+1] = s1.dzsno[c, k]
+                    s1.swice[c, k] /= two; s1.swice[c, k+1] = s1.swice[c, k]
+                    s1.swliq[c, k] /= two; s1.swliq[c, k+1] = s1.swliq[c, k]
 
                     if k == 1
-                        tsno[k+1] = tsno[k]
+                        s1.tsno[c, k+1] = s1.tsno[c, k]
                     else
-                        dtdz = (tsno[k-1] - tsno[k]) / ((dzsno[k-1] + 2*dzsno[k]) / 2.0)
-                        tsno_kp1_candidate = tsno[k] - dtdz * dzsno[k] / 2.0
-                        tsno_k_candidate = tsno[k] + dtdz * dzsno[k] / 2.0
+                        dtdz = (s1.tsno[c, k-1] - s1.tsno[c, k]) /
+                               ((s1.dzsno[c, k-1] + two*s1.dzsno[c, k]) / two)
+                        tsno_kp1_candidate = s1.tsno[c, k] - dtdz * s1.dzsno[c, k] / two
+                        tsno_k_candidate = s1.tsno[c, k] + dtdz * s1.dzsno[c, k] / two
                         # Smooth blend: if candidate >= TFRZ, use tsno[k]; else use candidates
-                        w_frozen = smooth_heaviside(TFRZ - tsno_kp1_candidate)
-                        tsno[k+1] = w_frozen * tsno_kp1_candidate + (1.0 - w_frozen) * tsno[k]
-                        tsno[k] = w_frozen * tsno_k_candidate + (1.0 - w_frozen) * tsno[k]
+                        w_frozen = smooth_heaviside(tfrz - tsno_kp1_candidate)
+                        s1.tsno[c, k+1] = w_frozen * tsno_kp1_candidate + (one(T) - w_frozen) * s1.tsno[c, k]
+                        s1.tsno[c, k] = w_frozen * tsno_k_candidate + (one(T) - w_frozen) * s1.tsno[c, k]
                     end
 
-                    mbc_phi[k] /= 2.0; mbc_phi[k+1] = mbc_phi[k]
-                    mbc_pho[k] /= 2.0; mbc_pho[k+1] = mbc_pho[k]
-                    moc_phi[k] /= 2.0; moc_phi[k+1] = moc_phi[k]
-                    moc_pho[k] /= 2.0; moc_pho[k+1] = moc_pho[k]
-                    mdst1[k] /= 2.0; mdst1[k+1] = mdst1[k]
-                    mdst2[k] /= 2.0; mdst2[k+1] = mdst2[k]
-                    mdst3[k] /= 2.0; mdst3[k+1] = mdst3[k]
-                    mdst4[k] /= 2.0; mdst4[k+1] = mdst4[k]
-                    rds[k+1] = rds[k]
+                    s2.mbc_phi[c, k] /= two; s2.mbc_phi[c, k+1] = s2.mbc_phi[c, k]
+                    s2.mbc_pho[c, k] /= two; s2.mbc_pho[c, k+1] = s2.mbc_pho[c, k]
+                    s2.moc_phi[c, k] /= two; s2.moc_phi[c, k+1] = s2.moc_phi[c, k]
+                    s2.moc_pho[c, k] /= two; s2.moc_pho[c, k+1] = s2.moc_pho[c, k]
+                    s2.mdst1[c, k] /= two; s2.mdst1[c, k+1] = s2.mdst1[c, k]
+                    s2.mdst2[c, k] /= two; s2.mdst2[c, k+1] = s2.mdst2[c, k]
+                    s2.mdst3[c, k] /= two; s2.mdst3[c, k+1] = s2.mdst3[c, k]
+                    s2.mdst4[c, k] /= two; s2.mdst4[c, k+1] = s2.mdst4[c, k]
+                    s1.rds[c, k+1] = s1.rds[c, k]
                 end
             end
 
             # Layers below exist
             if k < msno
-                offset = is_lake ? LSADZ : 0.0
-                if dzsno[k] > dzmax_u[k] + offset
-                    drr = dzsno[k] - dzmax_u[k] - offset
-                    propor = drr / dzsno[k]
+                offset = is_lake ? lsadz : zr
+                if s1.dzsno[c, k] > dzmax_u[k] + offset
+                    drr = s1.dzsno[c, k] - dzmax_u[k] - offset
+                    propor = drr / s1.dzsno[c, k]
 
-                    zwice = propor * swice[k]
-                    zwliq = propor * swliq[k]
-                    zmbc_phi = propor * mbc_phi[k]
-                    zmbc_pho = propor * mbc_pho[k]
-                    zmoc_phi = propor * moc_phi[k]
-                    zmoc_pho = propor * moc_pho[k]
-                    zmdst1 = propor * mdst1[k]
-                    zmdst2 = propor * mdst2[k]
-                    zmdst3 = propor * mdst3[k]
-                    zmdst4 = propor * mdst4[k]
+                    zwice = propor * s1.swice[c, k]
+                    zwliq = propor * s1.swliq[c, k]
+                    zmbc_phi = propor * s2.mbc_phi[c, k]
+                    zmbc_pho = propor * s2.mbc_pho[c, k]
+                    zmoc_phi = propor * s2.moc_phi[c, k]
+                    zmoc_pho = propor * s2.moc_pho[c, k]
+                    zmdst1 = propor * s2.mdst1[c, k]
+                    zmdst2 = propor * s2.mdst2[c, k]
+                    zmdst3 = propor * s2.mdst3[c, k]
+                    zmdst4 = propor * s2.mdst4[c, k]
 
-                    propor_keep = (dzmax_u[k] + offset) / dzsno[k]
-                    swice[k] *= propor_keep
-                    swliq[k] *= propor_keep
-                    mbc_phi[k] *= propor_keep
-                    mbc_pho[k] *= propor_keep
-                    moc_phi[k] *= propor_keep
-                    moc_pho[k] *= propor_keep
-                    mdst1[k] *= propor_keep
-                    mdst2[k] *= propor_keep
-                    mdst3[k] *= propor_keep
-                    mdst4[k] *= propor_keep
+                    propor_keep = (dzmax_u[k] + offset) / s1.dzsno[c, k]
+                    s1.swice[c, k] *= propor_keep
+                    s1.swliq[c, k] *= propor_keep
+                    s2.mbc_phi[c, k] *= propor_keep
+                    s2.mbc_pho[c, k] *= propor_keep
+                    s2.moc_phi[c, k] *= propor_keep
+                    s2.moc_pho[c, k] *= propor_keep
+                    s2.mdst1[c, k] *= propor_keep
+                    s2.mdst2[c, k] *= propor_keep
+                    s2.mdst3[c, k] *= propor_keep
+                    s2.mdst4[c, k] *= propor_keep
 
-                    dzsno[k] = dzmax_u[k] + offset
+                    s1.dzsno[c, k] = dzmax_u[k] + offset
 
-                    mbc_phi[k+1] += zmbc_phi
-                    mbc_pho[k+1] += zmbc_pho
-                    moc_phi[k+1] += zmoc_phi
-                    moc_pho[k+1] += zmoc_pho
-                    mdst1[k+1] += zmdst1
-                    mdst2[k+1] += zmdst2
-                    mdst3[k+1] += zmdst3
-                    mdst4[k+1] += zmdst4
+                    s2.mbc_phi[c, k+1] += zmbc_phi
+                    s2.mbc_pho[c, k+1] += zmbc_pho
+                    s2.moc_phi[c, k+1] += zmoc_phi
+                    s2.moc_pho[c, k+1] += zmoc_pho
+                    s2.mdst1[c, k+1] += zmdst1
+                    s2.mdst2[c, k+1] += zmdst2
+                    s2.mdst3[c, k+1] += zmdst3
+                    s2.mdst4[c, k+1] += zmdst4
 
-                    rds[k+1] = mass_weighted_snow_radius(rds[k], rds[k+1],
-                        swliq[k+1] + swice[k+1], zwliq + zwice)
+                    s1.rds[c, k+1] = mass_weighted_snow_radius(s1.rds[c, k], s1.rds[c, k+1],
+                        s1.swliq[c, k+1] + s1.swice[c, k+1], zwliq + zwice, rmin, rmax)
 
-                    (dzsno[k+1], swliq[k+1], swice[k+1], tsno[k+1]) =
-                        combo_scalar(dzsno[k+1], swliq[k+1], swice[k+1], tsno[k+1],
-                                     drr, zwliq, zwice, tsno[k])
+                    (s1.dzsno[c, k+1], s1.swliq[c, k+1], s1.swice[c, k+1], s1.tsno[c, k+1]) =
+                        combo_scalar(s1.dzsno[c, k+1], s1.swliq[c, k+1], s1.swice[c, k+1], s1.tsno[c, k+1],
+                                     drr, zwliq, zwice, s1.tsno[c, k])
                 end
             end
             k += 1
@@ -1746,40 +1805,97 @@ function divide_snow_layers!(
 
         snl[c] = -msno
 
-        # Copy back from local arrays to column arrays
-        for j in (-nlevsno+1):0
-            jj = j + nlevsno
-            if j >= snl[c] + 1
-                k_idx = j - snl[c]
+        # Copy back from scratch to column arrays
+        for jl in (-nlevsno+1):0
+            jj = jl + nlevsno
+            if jl >= snl[c] + 1
+                k_idx = jl - snl[c]
                 if is_lake
-                    dz[c, jj] = dzsno[k_idx]
+                    m.dz[c, jj] = s1.dzsno[c, k_idx]
                 else
-                    dz[c, jj] = dzsno[k_idx] / frac_sno[c]
+                    m.dz[c, jj] = s1.dzsno[c, k_idx] / frac_sno[c]
                 end
-                h2osoi_ice[c, jj] = swice[k_idx]
-                h2osoi_liq[c, jj] = swliq[k_idx]
-                t_soisno[c, jj] = tsno[k_idx]
-                aerosol.mss_bcphi_col[c, jj] = mbc_phi[k_idx]
-                aerosol.mss_bcpho_col[c, jj] = mbc_pho[k_idx]
-                aerosol.mss_ocphi_col[c, jj] = moc_phi[k_idx]
-                aerosol.mss_ocpho_col[c, jj] = moc_pho[k_idx]
-                aerosol.mss_dst1_col[c, jj] = mdst1[k_idx]
-                aerosol.mss_dst2_col[c, jj] = mdst2[k_idx]
-                aerosol.mss_dst3_col[c, jj] = mdst3[k_idx]
-                aerosol.mss_dst4_col[c, jj] = mdst4[k_idx]
-                snw_rds[c, jj] = rds[k_idx]
+                m.h2osoi_ice[c, jj] = s1.swice[c, k_idx]
+                m.h2osoi_liq[c, jj] = s1.swliq[c, k_idx]
+                m.t_soisno[c, jj] = s1.tsno[c, k_idx]
+                a.mss_bcphi[c, jj] = s2.mbc_phi[c, k_idx]
+                a.mss_bcpho[c, jj] = s2.mbc_pho[c, k_idx]
+                a.mss_ocphi[c, jj] = s2.moc_phi[c, k_idx]
+                a.mss_ocpho[c, jj] = s2.moc_pho[c, k_idx]
+                a.mss_dst1[c, jj] = s2.mdst1[c, k_idx]
+                a.mss_dst2[c, jj] = s2.mdst2[c, k_idx]
+                a.mss_dst3[c, jj] = s2.mdst3[c, k_idx]
+                a.mss_dst4[c, jj] = s2.mdst4[c, k_idx]
+                m.snw_rds[c, jj] = s1.rds[c, k_idx]
             end
         end
 
         # Reset node depth and interface depth
-        for j in 0:-1:(-nlevsno+1)
-            jj = j + nlevsno
-            if j >= snl[c] + 1
-                z[c, jj] = zi[c, jj + 1] - 0.5 * dz[c, jj]
-                zi[c, jj] = zi[c, jj + 1] - dz[c, jj]
+        for jl in 0:-1:(-nlevsno+1)
+            jj = jl + nlevsno
+            if jl >= snl[c] + 1
+                m.z[c, jj] = m.zi[c, jj + 1] - half * m.dz[c, jj]
+                m.zi[c, jj] = m.zi[c, jj + 1] - m.dz[c, jj]
             end
         end
     end
+end
+
+"""
+    divide_snow_layers!(snl, dz, zi, z, t_soisno,
+        h2osoi_ice, h2osoi_liq, frac_sno, snw_rds, aerosol,
+        is_lake, mask_snow, bounds, nlevsno)
+
+Subdivide snow layers that exceed their prescribed maximum thickness. One per-column
+kernel; backend-agnostic (CPU loop or whole-function on GPU).
+"""
+function divide_snow_layers!(
+    snl::AbstractVector{Int},
+    dz::AbstractMatrix{<:Real},
+    zi::AbstractMatrix{<:Real},
+    z::AbstractMatrix{<:Real},
+    t_soisno::AbstractMatrix{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    frac_sno::AbstractVector{<:Real},
+    snw_rds::AbstractMatrix{<:Real},
+    aerosol::AerosolData,
+    is_lake::Bool,
+    mask_snow::AbstractVector{Bool},
+    bounds::UnitRange{Int},
+    nlevsno::Int
+)
+    FT = eltype(dz)
+    dzmax_l = _snow_thresh_to_device(dz, FT.(SNOW_DZMAX_L[]))
+    dzmax_u = _snow_thresh_to_device(dz, FT.(SNOW_DZMAX_U[]))
+
+    nc = length(snl)
+    # Per-column device-resident scratch (one row per column; columns [1..nlevsno]).
+    # similar() is device-resident (NOT zeros()); the kernel zero-fills its own row.
+    sc1 = DivideSnowScratch1(;
+        dzsno = similar(dz, FT, nc, nlevsno), swice = similar(dz, FT, nc, nlevsno),
+        swliq = similar(dz, FT, nc, nlevsno), tsno = similar(dz, FT, nc, nlevsno),
+        rds = similar(dz, FT, nc, nlevsno))
+    sc2 = DivideSnowScratch2(;
+        mbc_phi = similar(dz, FT, nc, nlevsno), mbc_pho = similar(dz, FT, nc, nlevsno),
+        moc_phi = similar(dz, FT, nc, nlevsno), moc_pho = similar(dz, FT, nc, nlevsno),
+        mdst1 = similar(dz, FT, nc, nlevsno), mdst2 = similar(dz, FT, nc, nlevsno),
+        mdst3 = similar(dz, FT, nc, nlevsno), mdst4 = similar(dz, FT, nc, nlevsno))
+
+    m = CombineSnowMat(; dz, zi, z, t_soisno, h2osoi_ice, h2osoi_liq, snw_rds)
+    a = CombineSnowAero(;
+        mss_bcphi = aerosol.mss_bcphi_col, mss_bcpho = aerosol.mss_bcpho_col,
+        mss_ocphi = aerosol.mss_ocphi_col, mss_ocpho = aerosol.mss_ocpho_col,
+        mss_dst1 = aerosol.mss_dst1_col, mss_dst2 = aerosol.mss_dst2_col,
+        mss_dst3 = aerosol.mss_dst3_col, mss_dst4 = aerosol.mss_dst4_col)
+
+    snw_rds_min = FT(snowhydrology_params.snw_rds_min)
+    snw_rds_max = FT(SNW_RDS_MAX)
+
+    _launch!(_snowhyd_divide_kernel!, snl, m, a, sc1, sc2, frac_sno, mask_snow,
+             dzmax_l, dzmax_u, is_lake, snw_rds_min, snw_rds_max, nlevsno,
+             first(bounds), last(bounds); ndrange = length(snl))
+    return nothing
 end
 
 # =========================================================================
