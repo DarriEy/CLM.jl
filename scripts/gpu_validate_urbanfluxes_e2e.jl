@@ -257,6 +257,211 @@ function main_canyon(name, to, FT)
     return nfail
 end
 
+# --------------------------------------------------------------------------
+# WHOLE urban_fluxes! (INCLUDING the iterative canyon-air solve, now a per-urban-
+# landunit kernel) end-to-end on Metal vs CPU. Builds a real urban landunit (roof
+# + sunwall + shadewall + impervious-road + pervious-road under ONE urban landunit)
+# plus a non-urban landunit (SPVAL-restart branch), with sane day-time forcing. Runs
+# urban_fluxes! on the CPU reference and on the Metal-adapted state, then compares
+# every mutated field (taf_lun/qaf_lun + the patch fluxes that depend on the solve).
+# --------------------------------------------------------------------------
+function build_full(::Type{FT}; lowwind::Bool=false) where {FT}
+    CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+    nlevgrnd = CLM.varpar.nlevgrnd
+    nlevurb  = CLM.varpar.nlevurb
+    # 1 gridcell; 2 landunits (urban=1, non-urban=2); 5 urban columns; 5 urban patches.
+    ng = 1; nl = 2; nc = 5; np = 5
+
+    CLM.urban_fluxes_read_params!(wind_min = 1.0)
+    CLM.urban_ctrl.read_namelist = true
+    CLM.urban_ctrl.building_temp_method = CLM.BUILDING_TEMP_METHOD_SIMPLE
+    CLM.urban_ctrl.urban_hac = CLM.URBAN_HAC_OFF
+
+    energyflux = CLM.EnergyFluxData{FT}(); CLM.energyflux_init!(energyflux, np, nc, nl, ng)
+    for c in 1:nc
+        energyflux.htvp_col[c] = FT(CLM.HVAP)
+        energyflux.eflx_urban_ac_col[c] = FT(0.0)
+        energyflux.eflx_urban_heat_col[c] = FT(0.0)
+    end
+    energyflux.eflx_urban_ac_lun[1]   = FT(0.0)
+    energyflux.eflx_urban_heat_lun[1] = FT(0.0)
+
+    frictionvel = CLM.FrictionVelocityData{FT}(); CLM.frictionvel_init!(frictionvel, np, nc)
+    frictionvel.zetamaxstable = FT(0.5)
+    for p in 1:np
+        frictionvel.forc_hgt_u_patch[p] = FT(30.0)
+        frictionvel.forc_hgt_t_patch[p] = FT(30.0)
+        frictionvel.forc_hgt_q_patch[p] = FT(30.0)
+        frictionvel.u10_clm_patch[p]    = FT(5.0)
+    end
+
+    temperature = CLM.TemperatureData{FT}(); CLM.temperature_init!(temperature, np, nc, nl, ng)
+    temperature.taf_lun[1] = FT(290.0)        # urban
+    temperature.taf_lun[2] = FT(123.0)        # non-urban (-> SPVAL)
+    for c in 1:nc
+        temperature.t_grnd_col[c] = FT(290.0 + 0.5 * c)   # spread so every surface dth differs
+        for j in 1:size(temperature.t_soisno_col, 2)
+            temperature.t_soisno_col[c, j] = FT(290.0)
+        end
+    end
+
+    soilstate = CLM.SoilStateData{FT}(); CLM.soilstate_init!(soilstate, np, nc)
+    soilstate.soilalpha_u_col[1:nc] .= FT(0.5)
+    for c in 1:nc, j in 1:nlevgrnd
+        soilstate.rootr_road_perv_col[c, j] = (j <= 5 ? FT(0.2) * j : FT(0.0))
+    end
+
+    urbanparams = CLM.UrbanParamsData{FT}(); CLM.urbanparams_init!(urbanparams, nl; nlevurb=nlevurb, numrad=CLM.NUMRAD)
+    urbanparams.wind_hgt_canyon[1]     = FT(5.0)
+    urbanparams.eflx_traffic_factor[1] = FT(0.0)
+
+    waterfluxbulk = CLM.WaterFluxBulkData{FT}(); CLM.waterfluxbulk_init!(waterfluxbulk, nc, np, nl, ng)
+    waterstatebulk = CLM.WaterStateBulkData{FT}(); CLM.waterstatebulk_init!(waterstatebulk, nc, np, nl, ng)
+    for c in 1:nc
+        waterstatebulk.ws.h2osoi_liq_col[c, 1] = FT(0.5)
+        waterstatebulk.ws.h2osoi_ice_col[c, 1] = FT(0.0)
+    end
+    waterdiagbulk = CLM.WaterDiagnosticBulkData{FT}(); CLM.waterdiagnosticbulk_init!(waterdiagbulk, nc, np, nl, ng)
+    waterdiagbulk.qaf_lun[1] = FT(0.005)
+    waterdiagbulk.qaf_lun[2] = FT(456.0)
+    for c in 1:nc
+        waterdiagbulk.qg_col[c]         = FT(0.005)
+        waterdiagbulk.snow_depth_col[c] = FT(0.0)
+        waterdiagbulk.frac_sno_col[c]   = FT(0.0)
+        waterdiagbulk.dqgdT_col[c]      = FT(0.0003)
+    end
+
+    patch_data = CLM.PatchData{FT}(); CLM.patch_init!(patch_data, np)
+    for p in 1:np
+        patch_data.column[p]   = p
+        patch_data.gridcell[p] = 1
+        patch_data.landunit[p] = 1
+        patch_data.active[p]   = true
+    end
+
+    col_data = CLM.ColumnData{FT}(); CLM.column_init!(col_data, nc)
+    col_data.itype[1] = CLM.ICOL_ROOF
+    col_data.itype[2] = CLM.ICOL_SUNWALL
+    col_data.itype[3] = CLM.ICOL_SHADEWALL
+    col_data.itype[4] = CLM.ICOL_ROAD_IMPERV
+    col_data.itype[5] = CLM.ICOL_ROAD_PERV
+    for c in 1:nc; col_data.landunit[c] = 1; col_data.snl[c] = 0; end
+
+    lun_data = CLM.LandunitData{FT}(); CLM.landunit_init!(lun_data, nl)
+    lun_data.gridcell[1] = 1; lun_data.itype[1] = CLM.ISTURB_MIN
+    lun_data.urbpoi[1] = true; lun_data.active[1] = true
+    lun_data.patchi[1] = 1; lun_data.patchf[1] = np
+    lun_data.coli[1]   = 1; lun_data.colf[1]   = nc
+    lun_data.canyon_hwr[1] = FT(1.0); lun_data.wtroad_perv[1] = FT(0.4)
+    lun_data.wtlunit_roof[1] = FT(0.5); lun_data.ht_roof[1] = FT(10.0)
+    lun_data.z_0_town[1] = FT(0.5); lun_data.z_d_town[1] = FT(5.0)
+    # non-urban landunit 2 (only needs gridcell + non-urban itype for the restart)
+    lun_data.gridcell[2] = 1; lun_data.urbpoi[2] = false
+
+    u = lowwind ? FT(0.2) : FT(3.0)
+    v = lowwind ? FT(0.1) : FT(1.0)
+    F = (forc_t = FT[288.0], forc_th = FT[290.0], forc_rho = FT[1.2],
+         forc_q = FT[0.008], forc_pbot = FT[101325.0], forc_u = FT[u], forc_v = FT[v])
+
+    S = (; energyflux, frictionvel, temperature, soilstate, urbanparams,
+           waterfluxbulk, waterstatebulk, waterdiagbulk, patch_data, col_data, lun_data)
+    return (; nl, nc, np, ng, nlevgrnd, S, F,
+              filter_nourbanl = [2], num_nourbanl = 1,
+              filter_urbanl = [1], num_urbanl = 1,
+              filter_urbanc = [1,2,3,4,5], num_urbanc = 5,
+              filter_urbanp = [1,2,3,4,5], num_urbanp = 5)
+end
+
+function run_full!(H, S, F)
+    CLM.urban_fluxes!(
+        S.energyflux, S.frictionvel, S.temperature, S.soilstate, S.urbanparams,
+        S.waterfluxbulk, S.waterstatebulk, S.waterdiagbulk,
+        S.patch_data, S.col_data, S.lun_data,
+        H.num_nourbanl, H.filter_nourbanl, H.num_urbanl, H.filter_urbanl,
+        H.num_urbanc, H.filter_urbanc, H.num_urbanp, H.filter_urbanp,
+        1:H.nl, 1:H.nc, 1:H.np,
+        F.forc_t, F.forc_th, F.forc_rho, F.forc_q, F.forc_pbot, F.forc_u, F.forc_v;
+        nstep = 1)
+end
+
+function main_full(name, to, FT; lowwind::Bool=false)
+    tag = lowwind ? "LOW-WIND" : "DAY"
+    println("\n" * "=" ^ 70)
+    println("END-TO-END Metal parity for the WHOLE urban_fluxes! ($tag) — incl. iterative solve")
+    println("=" ^ 70)
+
+    H = build_full(FT; lowwind=lowwind)
+    B = build_full(FT; lowwind=lowwind)
+
+    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    Sd = map(ad, B.S)
+    Fd = (; forc_t = to(B.F.forc_t), forc_th = to(B.F.forc_th), forc_rho = to(B.F.forc_rho),
+            forc_q = to(B.F.forc_q), forc_pbot = to(B.F.forc_pbot),
+            forc_u = to(B.F.forc_u), forc_v = to(B.F.forc_v))
+
+    if !(Sd.temperature.taf_lun isa Metal.MtlArray)
+        println("  BLOCKED: a state struct did not move to the device under adapt.")
+        return 2
+    end
+
+    run_full!(H, H.S, H.F)    # CPU reference
+    run_full!(B, Sd, Fd)      # device
+
+    checks = [
+        ("taf_lun",        H.S.temperature.taf_lun,                 Sd.temperature.taf_lun),
+        ("qaf_lun",        H.S.waterdiagbulk.qaf_lun,               Sd.waterdiagbulk.qaf_lun),
+        ("eflx_sh_grnd",   H.S.energyflux.eflx_sh_grnd_patch,       Sd.energyflux.eflx_sh_grnd_patch),
+        ("eflx_sh_tot",    H.S.energyflux.eflx_sh_tot_patch,        Sd.energyflux.eflx_sh_tot_patch),
+        ("eflx_sh_tot_u",  H.S.energyflux.eflx_sh_tot_u_patch,      Sd.energyflux.eflx_sh_tot_u_patch),
+        ("eflx_traffic",   H.S.energyflux.eflx_traffic_lun,         Sd.energyflux.eflx_traffic_lun),
+        ("eflx_wasteheat", H.S.energyflux.eflx_wasteheat_lun,       Sd.energyflux.eflx_wasteheat_lun),
+        ("taux",           H.S.energyflux.taux_patch,               Sd.energyflux.taux_patch),
+        ("tauy",           H.S.energyflux.tauy_patch,               Sd.energyflux.tauy_patch),
+        ("cgrnds",         H.S.energyflux.cgrnds_patch,             Sd.energyflux.cgrnds_patch),
+        ("cgrndl",         H.S.energyflux.cgrndl_patch,             Sd.energyflux.cgrndl_patch),
+        ("cgrnd",          H.S.energyflux.cgrnd_patch,              Sd.energyflux.cgrnd_patch),
+        ("ram1",           H.S.frictionvel.ram1_patch,              Sd.frictionvel.ram1_patch),
+        ("zeta",           H.S.frictionvel.zeta_patch,              Sd.frictionvel.zeta_patch),
+        ("ustar(fv)",      H.S.frictionvel.fv_patch,                Sd.frictionvel.fv_patch),
+        ("u10",            H.S.frictionvel.u10_patch,               Sd.frictionvel.u10_patch),
+        ("u10_clm",        H.S.frictionvel.u10_clm_patch,           Sd.frictionvel.u10_clm_patch),
+        ("va",             H.S.frictionvel.va_patch,                Sd.frictionvel.va_patch),
+        ("vds",            H.S.frictionvel.vds_patch,               Sd.frictionvel.vds_patch),
+        ("qflx_evap_soi",  H.S.waterfluxbulk.wf.qflx_evap_soi_patch, Sd.waterfluxbulk.wf.qflx_evap_soi_patch),
+        ("qflx_tran_veg",  H.S.waterfluxbulk.wf.qflx_tran_veg_patch, Sd.waterfluxbulk.wf.qflx_tran_veg_patch),
+        ("t_ref2m",        H.S.temperature.t_ref2m_patch,           Sd.temperature.t_ref2m_patch),
+        ("q_ref2m",        H.S.waterdiagbulk.q_ref2m_patch,         Sd.waterdiagbulk.q_ref2m_patch),
+        ("rh_ref2m",       H.S.waterdiagbulk.rh_ref2m_patch,        Sd.waterdiagbulk.rh_ref2m_patch),
+        ("t_building",     H.S.temperature.t_building_lun,          Sd.temperature.t_building_lun),
+        ("rootr",          H.S.soilstate.rootr_patch,               Sd.soilstate.rootr_patch),
+    ]
+    # Assert the CPU reference taf/qaf are FINITE so a both-NaN false PASS can't slip.
+    @assert all(isfinite, Array(H.S.temperature.taf_lun)[1:1]) "CPU urban taf_lun not finite!"
+    @assert isfinite(Array(H.S.waterdiagbulk.qaf_lun)[1])      "CPU urban qaf_lun not finite!"
+
+    nfail = 0; worst = 0.0; worstnm = ""
+    for (nm, a, b) in checks
+        if !cpu_has_finite(a)
+            @printf("  [WARN] %-16s CPU reference all-NaN/Inf — skipping\n", nm)
+            continue
+        end
+        d = reldiff(a, b); ok = d < 1f-3
+        d > worst && (worst = d; worstnm = nm)
+        @printf("  [%s] %-16s rel|dev-cpu| = %.3e\n", ok ? "PASS" : "FAIL", nm, d)
+        ok || (nfail += 1)
+    end
+    @printf("\n  WORST rel|dev-cpu| = %.3e (%s)\n", worst, worstnm)
+    # Confirm branches fired: SPVAL restart on the non-urban landunit, road-perv roots.
+    @printf("  taf_lun[non-urban l2] = %.3e (expect SPVAL=%.3e)\n",
+            Array(H.S.temperature.taf_lun)[2], CLM.SPVAL)
+    rc = Array(H.S.soilstate.rootr_patch)
+    @printf("  roots[road_perv p5 j1..3] = %.3f %.3f %.3f (expect 0.2 0.4 0.6)\n",
+            rc[5,1], rc[5,2], rc[5,3])
+    println(nfail == 0 ? "  WHOLE urban_fluxes! ($tag) MATCHES CPU ON $name ($FT) ✓" :
+                         "  DIVERGENCE — investigate.")
+    return nfail
+end
+
 function main(backend)
     println("=" ^ 70)
     println("END-TO-END Metal parity for urban_fluxes_diagnostics! (device passes)")
@@ -327,10 +532,12 @@ function main(backend)
                          "  DIVERGENCE — investigate.")
 
     nfail2 = main_canyon(name, to, FT)
+    nfail3 = main_full(name, to, FT; lowwind=false)   # day case
+    nfail4 = main_full(name, to, FT; lowwind=true)    # low-wind case
 
-    total = nfail + nfail2
+    total = nfail + nfail2 + nfail3 + nfail4
     println()
-    println(total == 0 ? "  ALL urban_fluxes! device passes MATCH CPU ON $name ($FT) ✓" :
+    println(total == 0 ? "  ALL urban_fluxes! device passes (incl. iterative solve) MATCH CPU ON $name ($FT) ✓" :
                          "  DIVERGENCE — investigate.")
     return total == 0 ? 0 : 1
 end
