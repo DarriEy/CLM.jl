@@ -181,6 +181,441 @@ function calc_simple_internal_building_temp!(
 end
 
 # ---------------------------------------------------------------------------
+# GPU kernels for the column-INDEPENDENT, element-wise passes of urban_fluxes!.
+#
+# These passes have no cross-index coupling (each landunit/column/patch writes
+# only its own slot) and run WHOLE on the device. The iterative canyon-air solve
+# (canyontop wind, stability iteration via friction_velocity!'s landunit path,
+# the urban-column gather/reduction into taf/qaf, canyon-surface fluxes and the
+# sum()-based error checks) is loop-carried + reduction-coupled and stays HOST.
+#
+# Masks (Vector{Bool} over the full index range) replace the integer filters for
+# the kernelized passes so MtlArray/device-Bool dispatch works; the host core
+# keeps using the integer filters. Literals are eltype-converted (zero(T)/T(...))
+# so no Float64 reaches a Float32-only backend; on Float64 this is byte-identical.
+# ---------------------------------------------------------------------------
+
+# Pass 1: restart fields for NON-urban landunits (taf/qaf = SPVAL).
+@kernel function _uf_nourban_restart_kernel!(taf_lun, qaf_lun, @Const(mask), spval)
+    l = @index(Global)
+    @inbounds if mask[l]
+        taf_lun[l] = spval
+        qaf_lun[l] = spval
+    end
+end
+
+# Pass 2 (set-constants beta/zii) is NOT kernelized: beta_arr/zii_arr are host-only
+# local work arrays consumed exclusively by the host-resident canyon-air solve.
+
+# Pass 3: urban roots — only pervious road has roots, all others zero.
+# Per-patch; the level loop is sequential-independent and lives inside the thread.
+@kernel function _uf_roots_kernel!(rootr_patch, @Const(mask), @Const(column),
+                                   @Const(itype), @Const(rootr_road_perv_col),
+                                   nlevgrnd::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(rootr_patch)
+        c = column[p]
+        if itype[c] == ICOL_ROAD_PERV
+            for j in 1:nlevgrnd
+                rootr_patch[p, j] = rootr_road_perv_col[c, j]
+            end
+        else
+            for j in 1:nlevgrnd
+                rootr_patch[p, j] = zero(T)
+            end
+        end
+    end
+end
+
+# Pass 4: 2-m temperature, humidity, RH and t_veg diagnostics (per urban patch).
+# Bundle keeps the kernel under Metal's ~31-arg cap; field names mirror the
+# original variable paths so the body reads like the scalar loop.
+Base.@kwdef struct _UfDiagDV{V,VI}
+    t_ref2m_u_patch::V
+    t_veg_patch::V
+    q_ref2m_patch::V
+    rh_ref2m_patch::V
+    rh_ref2m_u_patch::V
+    taf_lun::V
+    qaf_lun::V
+    forc_t_grc::V
+    forc_pbot_grc::V
+    gridcell::VI
+    landunit::VI
+end
+Adapt.@adapt_structure _UfDiagDV
+
+# `t_ref2m_patch` is the standalone first arg (drives backend detection in _launch!);
+# the rest of the per-patch fields ride in the bundle (keeps under Metal's arg cap).
+@kernel function _uf_diag_kernel!(t_ref2m_patch, @Const(mask), o::_UfDiagDV)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(t_ref2m_patch)
+        g = o.gridcell[p]
+        l = o.landunit[p]
+
+        t_ref2m_patch[p]     = o.taf_lun[l]
+        o.q_ref2m_patch[p]   = o.qaf_lun[l]
+        o.t_ref2m_u_patch[p] = o.taf_lun[l]
+
+        (qsat_ref2m, _, _, _) = qsat(t_ref2m_patch[p], o.forc_pbot_grc[g])
+        o.rh_ref2m_patch[p] = smooth_min(T(100.0),
+            o.q_ref2m_patch[p] / qsat_ref2m * T(100.0))
+        o.rh_ref2m_u_patch[p] = o.rh_ref2m_patch[p]
+
+        o.t_veg_patch[p] = o.forc_t_grc[g]
+    end
+end
+
+# Move a host forcing vector onto the backend (and eltype) of a state prototype so
+# a kernel reading it dispatches on-device. CPU prototype -> converted host Vector
+# (byte-identical to the Float64 source on Float64 CPU); device prototype -> device
+# array at the prototype's working precision.
+function _uf_to_backend(proto::AbstractArray, v::AbstractVector{<:Real})
+    T = eltype(proto)
+    h = convert(Vector{T}, collect(v))
+    d = similar(proto, T, length(h))
+    copyto!(d, h)
+    return d
+end
+
+# Build a length-n Vector{Bool} mask from an integer filter, then move it to the
+# backend of `proto` (a state array) so kernels dispatch onto the same device.
+# CPU prototype -> plain Vector{Bool}; device prototype -> device Bool array.
+function _uf_device_mask(proto::AbstractArray, filter::AbstractVector{<:Integer},
+                         fn::Int, n::Int)
+    h = Vector{Bool}(undef, n); fill!(h, false)
+    @inbounds for f in 1:fn
+        h[filter[f]] = true
+    end
+    d = similar(proto, Bool, n)
+    copyto!(d, h)
+    return d
+end
+
+"""
+    urban_fluxes_diagnostics!(temperature, waterdiagbulk, soilstate, patch_data,
+        col_data, m_nourbanl, m_urbanp, forc_t_grc, forc_pbot_grc, nlevgrnd) -> nothing
+
+Run the three column-INDEPENDENT, device-resident passes of urban_fluxes! as a
+single whole-function unit: (1) the non-urban taf/qaf restart, (2) the urban-roots
+fill (pervious-road only), and (3) the 2-m temperature/humidity/RH/t_veg
+diagnostics. Every loop is a KernelAbstractions kernel, so this runs WHOLE on the
+device (Metal) when the state structs and masks live there, and is CPU
+byte-identical on the host path. The iterative canyon-air solve in urban_fluxes!
+is loop-carried + reduction-coupled and remains on the host (see that function).
+"""
+function urban_fluxes_diagnostics!(
+        temperature, waterdiagbulk, soilstate, patch_data, col_data,
+        m_nourbanl::AbstractVector{Bool}, m_urbanp::AbstractVector{Bool},
+        forc_t_grc::AbstractVector{<:Real}, forc_pbot_grc::AbstractVector{<:Real},
+        nlevgrnd::Int)
+
+    FT = eltype(temperature.taf_lun)
+    spval = convert(FT, SPVAL)
+    _launch!(_uf_nourban_restart_kernel!, temperature.taf_lun,
+             waterdiagbulk.qaf_lun, m_nourbanl, spval)
+
+    _launch!(_uf_roots_kernel!, soilstate.rootr_patch, m_urbanp, patch_data.column,
+             col_data.itype, soilstate.rootr_road_perv_col, nlevgrnd;
+             ndrange=size(soilstate.rootr_patch, 1))
+
+    proto_p = temperature.t_ref2m_patch
+    fpbot_d = _uf_to_backend(proto_p, forc_pbot_grc)
+    ft_d    = _uf_to_backend(proto_p, forc_t_grc)
+    diagdv = _UfDiagDV(
+        t_ref2m_u_patch  = temperature.t_ref2m_u_patch,
+        t_veg_patch      = temperature.t_veg_patch,
+        q_ref2m_patch    = waterdiagbulk.q_ref2m_patch,
+        rh_ref2m_patch   = waterdiagbulk.rh_ref2m_patch,
+        rh_ref2m_u_patch = waterdiagbulk.rh_ref2m_u_patch,
+        taf_lun          = temperature.taf_lun,
+        qaf_lun          = waterdiagbulk.qaf_lun,
+        forc_t_grc       = ft_d,
+        forc_pbot_grc    = fpbot_d,
+        gridcell         = patch_data.gridcell,
+        landunit         = patch_data.landunit)
+    _launch!(_uf_diag_kernel!, temperature.t_ref2m_patch, m_urbanp, diagdv;
+             ndrange=length(temperature.t_ref2m_patch))
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Canyon-surface flux pass — per-patch, column-INDEPENDENT given the SOLVED
+# per-landunit canopy-air state (taf/qaf, the resistances ramu/zeta and the
+# conductance weights wt{u,s}*). Each urban patch reads only its own landunit's
+# already-solved scalars + its own column state + gridcell forcing and writes only
+# its own patch slot, so the whole block (original lines "Determine fluxes from
+# canyon surfaces") runs WHOLE on the device as a single KernelAbstractions kernel.
+#
+# `dth`/`dqh` in the original were per-landunit scratch reused inside the per-patch
+# loop; here they are PATCH-LOCAL temporaries (read+written within the same thread),
+# which removes the false landunit coupling without changing results.
+#
+# The per-landunit weight arrays are bundled into @adapt_structure device-view
+# structs (Metal caps total kernel args ~31). Literals are eltype-converted so no
+# Float64 reaches a Float32-only backend; on Float64 CPU this is byte-identical.
+# ---------------------------------------------------------------------------
+
+# Per-landunit conductance weights, split into sensible (S) and latent (Q) bundles
+# plus the "_unscl" companions used to back out each surface's own contribution.
+Base.@kwdef struct _UfWtsDV{V}
+    wtas::V
+    wtus_roof::V
+    wtus_road_perv::V
+    wtus_road_imperv::V
+    wtus_sunwall::V
+    wtus_shadewall::V
+    wtus_roof_unscl::V
+    wtus_road_perv_unscl::V
+    wtus_road_imperv_unscl::V
+    wtus_sunwall_unscl::V
+    wtus_shadewall_unscl::V
+    wts_sum::V
+end
+Adapt.@adapt_structure _UfWtsDV
+
+Base.@kwdef struct _UfWtqDV{V}
+    wtaq::V
+    wtuq_roof::V
+    wtuq_road_perv::V
+    wtuq_road_imperv::V
+    wtuq_sunwall::V
+    wtuq_shadewall::V
+    wtuq_roof_unscl::V
+    wtuq_road_perv_unscl::V
+    wtuq_road_imperv_unscl::V
+    wtq_sum::V
+end
+Adapt.@adapt_structure _UfWtqDV
+
+# Patch-level energyflux/waterflux outputs + the per-landunit solved scalars + the
+# per-column state and gridcell forcing the kernel reads. `cgrnd_patch` is the
+# standalone first kernel arg (drives backend detection in _launch!).
+Base.@kwdef struct _UfCanyonDV{V,VI}
+    cgrnds_patch::V
+    cgrndl_patch::V
+    taux_patch::V
+    tauy_patch::V
+    ulrad_patch::V
+    dlrad_patch::V
+    eflx_sh_grnd_patch::V
+    eflx_sh_snow_patch::V
+    eflx_sh_soil_patch::V
+    eflx_sh_h2osfc_patch::V
+    eflx_sh_tot_patch::V
+    eflx_sh_tot_u_patch::V
+    qflx_evap_soi_patch::V
+    qflx_tran_veg_patch::V
+    qflx_evap_veg_patch::V
+    ram1_patch::V
+    zeta_patch::V
+    eflx_sh_grnd_scale::V
+    qflx_evap_soi_scale::V
+    # per-landunit solved scalars
+    ramu::V
+    zeta_lunit::V
+    taf_lun::V
+    qaf_lun::V
+    # per-column state
+    t_grnd_col::V
+    qg_col::V
+    htvp_col::V
+    dqgdT_col::V
+    frac_sno_col::V
+    soilalpha_u_col::V
+    wtus_col::V
+    wtuq_col::V
+    itype::VI
+    # gridcell forcing
+    forc_rho_grc::V
+    forc_u_grc::V
+    forc_v_grc::V
+    # index maps
+    column::VI
+    gridcell::VI
+    landunit::VI
+end
+Adapt.@adapt_structure _UfCanyonDV
+
+@kernel function _uf_canyon_surface_kernel!(cgrnd_patch, @Const(mask),
+        o::_UfCanyonDV, s::_UfWtsDV, q::_UfWtqDV, CPAIR_)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(cgrnd_patch)
+        c = o.column[p]
+        g = o.gridcell[p]
+        l = o.landunit[p]
+        cpair = T(CPAIR_)
+
+        o.ram1_patch[p] = o.ramu[l]
+        o.zeta_patch[p] = o.zeta_lunit[l]
+
+        # Upward and downward canopy longwave are zero
+        o.ulrad_patch[p] = zero(T)
+        o.dlrad_patch[p] = zero(T)
+
+        ct = o.itype[c]
+
+        # Derivative of sensible and latent heat fluxes wrt ground temperature
+        if ct == ICOL_ROOF
+            o.cgrnds_patch[p] = o.forc_rho_grc[g] * cpair *
+                (s.wtas[l] + s.wtus_road_perv[l] + s.wtus_road_imperv[l] + s.wtus_sunwall[l] + s.wtus_shadewall[l]) *
+                (s.wtus_roof_unscl[l] / s.wts_sum[l])
+            o.cgrndl_patch[p] = o.forc_rho_grc[g] *
+                (q.wtaq[l] + q.wtuq_road_perv[l] + q.wtuq_road_imperv[l] + q.wtuq_sunwall[l] + q.wtuq_shadewall[l]) *
+                (q.wtuq_roof_unscl[l] / q.wtq_sum[l]) * o.dqgdT_col[c]
+        elseif ct == ICOL_ROAD_PERV
+            o.cgrnds_patch[p] = o.forc_rho_grc[g] * cpair *
+                (s.wtas[l] + s.wtus_roof[l] + s.wtus_road_imperv[l] + s.wtus_sunwall[l] + s.wtus_shadewall[l]) *
+                (s.wtus_road_perv_unscl[l] / s.wts_sum[l])
+            o.cgrndl_patch[p] = o.forc_rho_grc[g] *
+                (q.wtaq[l] + q.wtuq_roof[l] + q.wtuq_road_imperv[l] + q.wtuq_sunwall[l] + q.wtuq_shadewall[l]) *
+                (q.wtuq_road_perv_unscl[l] / q.wtq_sum[l]) * o.dqgdT_col[c]
+        elseif ct == ICOL_ROAD_IMPERV
+            o.cgrnds_patch[p] = o.forc_rho_grc[g] * cpair *
+                (s.wtas[l] + s.wtus_roof[l] + s.wtus_road_perv[l] + s.wtus_sunwall[l] + s.wtus_shadewall[l]) *
+                (s.wtus_road_imperv_unscl[l] / s.wts_sum[l])
+            o.cgrndl_patch[p] = o.forc_rho_grc[g] *
+                (q.wtaq[l] + q.wtuq_roof[l] + q.wtuq_road_perv[l] + q.wtuq_sunwall[l] + q.wtuq_shadewall[l]) *
+                (q.wtuq_road_imperv_unscl[l] / q.wtq_sum[l]) * o.dqgdT_col[c]
+        elseif ct == ICOL_SUNWALL
+            o.cgrnds_patch[p] = o.forc_rho_grc[g] * cpair *
+                (s.wtas[l] + s.wtus_roof[l] + s.wtus_road_perv[l] + s.wtus_road_imperv[l] + s.wtus_shadewall[l]) *
+                (s.wtus_sunwall_unscl[l] / s.wts_sum[l])
+            o.cgrndl_patch[p] = zero(T)
+        elseif ct == ICOL_SHADEWALL
+            o.cgrnds_patch[p] = o.forc_rho_grc[g] * cpair *
+                (s.wtas[l] + s.wtus_roof[l] + s.wtus_road_perv[l] + s.wtus_road_imperv[l] + s.wtus_sunwall[l]) *
+                (s.wtus_shadewall_unscl[l] / s.wts_sum[l])
+            o.cgrndl_patch[p] = zero(T)
+        end
+        cgrnd_patch[p] = o.cgrnds_patch[p] + o.cgrndl_patch[p] * o.htvp_col[c]
+
+        # Surface fluxes of momentum
+        o.taux_patch[p] = -o.forc_rho_grc[g] * o.forc_u_grc[g] / o.ramu[l]
+        o.tauy_patch[p] = -o.forc_rho_grc[g] * o.forc_v_grc[g] / o.ramu[l]
+
+        # Sensible heat flux from ground using new canopy air temperature
+        dth = o.taf_lun[l] - o.t_grnd_col[c]
+
+        if ct == ICOL_ROOF
+            o.eflx_sh_grnd_patch[p] = -o.forc_rho_grc[g] * cpair * s.wtus_roof_unscl[l] * dth
+        elseif ct == ICOL_ROAD_PERV
+            o.eflx_sh_grnd_patch[p] = -o.forc_rho_grc[g] * cpair * s.wtus_road_perv_unscl[l] * dth
+        elseif ct == ICOL_ROAD_IMPERV
+            o.eflx_sh_grnd_patch[p] = -o.forc_rho_grc[g] * cpair * s.wtus_road_imperv_unscl[l] * dth
+        elseif ct == ICOL_SUNWALL
+            o.eflx_sh_grnd_patch[p] = -o.forc_rho_grc[g] * cpair * s.wtus_sunwall_unscl[l] * dth
+        elseif ct == ICOL_SHADEWALL
+            o.eflx_sh_grnd_patch[p] = -o.forc_rho_grc[g] * cpair * s.wtus_shadewall_unscl[l] * dth
+        end
+        o.eflx_sh_snow_patch[p]   = zero(T)
+        o.eflx_sh_soil_patch[p]   = zero(T)
+        o.eflx_sh_h2osfc_patch[p] = zero(T)
+
+        o.eflx_sh_tot_patch[p]   = o.eflx_sh_grnd_patch[p]
+        o.eflx_sh_tot_u_patch[p] = o.eflx_sh_tot_patch[p]
+
+        # Latent heat flux
+        dqh = o.qaf_lun[l] - o.qg_col[c]
+
+        if ct == ICOL_ROOF
+            o.qflx_evap_soi_patch[p] = -o.forc_rho_grc[g] * q.wtuq_roof_unscl[l] * dqh
+        elseif ct == ICOL_ROAD_PERV
+            if dqh > zero(T) || o.frac_sno_col[c] > zero(T) || o.soilalpha_u_col[c] <= zero(T)
+                o.qflx_evap_soi_patch[p] = -o.forc_rho_grc[g] * q.wtuq_road_perv_unscl[l] * dqh
+                o.qflx_tran_veg_patch[p] = zero(T)
+            else
+                o.qflx_evap_soi_patch[p] = zero(T)
+                o.qflx_tran_veg_patch[p] = -o.forc_rho_grc[g] * q.wtuq_road_perv_unscl[l] * dqh
+            end
+            o.qflx_evap_veg_patch[p] = o.qflx_tran_veg_patch[p]
+        elseif ct == ICOL_ROAD_IMPERV
+            o.qflx_evap_soi_patch[p] = -o.forc_rho_grc[g] * q.wtuq_road_imperv_unscl[l] * dqh
+        elseif ct == ICOL_SUNWALL
+            o.qflx_evap_soi_patch[p] = zero(T)
+        elseif ct == ICOL_SHADEWALL
+            o.qflx_evap_soi_patch[p] = zero(T)
+        end
+
+        # SCALED sensible and latent heat flux for error check
+        o.eflx_sh_grnd_scale[p]  = -o.forc_rho_grc[g] * cpair * o.wtus_col[c] * dth
+        o.qflx_evap_soi_scale[p] = -o.forc_rho_grc[g] * o.wtuq_col[c] * dqh
+    end
+end
+
+"""
+    urban_fluxes_canyon_surface!(energyflux, frictionvel, waterfluxbulk,
+        waterdiagbulk, soilstate, temperature, patch_data, col_data, m_urbanp,
+        wts::_UfWtsDV, wtq::_UfWtqDV, ramu, zeta_lunit, wtus_col, wtuq_col,
+        forc_rho_grc, forc_u_grc, forc_v_grc) -> nothing
+
+Run the canyon-surface flux pass (per urban patch) WHOLE on the device as a single
+kernel, given the SOLVED per-landunit canopy-air state. Writes every patch-level
+energyflux/waterflux/frictionvel output of urban_fluxes!' "Determine fluxes from
+canyon surfaces" block, plus the scaled-flux scratch used by the error check.
+CPU byte-identical on the host path.
+"""
+function urban_fluxes_canyon_surface!(
+        energyflux, frictionvel, waterfluxbulk, waterdiagbulk, soilstate,
+        temperature, patch_data, col_data,
+        m_urbanp::AbstractVector{Bool},
+        wts::_UfWtsDV, wtq::_UfWtqDV,
+        ramu, zeta_lunit, wtus_col, wtuq_col,
+        eflx_sh_grnd_scale, qflx_evap_soi_scale,
+        forc_rho_grc::AbstractVector{<:Real},
+        forc_u_grc::AbstractVector{<:Real},
+        forc_v_grc::AbstractVector{<:Real})
+
+    o = _UfCanyonDV(
+        cgrnds_patch         = energyflux.cgrnds_patch,
+        cgrndl_patch         = energyflux.cgrndl_patch,
+        taux_patch           = energyflux.taux_patch,
+        tauy_patch           = energyflux.tauy_patch,
+        ulrad_patch          = energyflux.ulrad_patch,
+        dlrad_patch          = energyflux.dlrad_patch,
+        eflx_sh_grnd_patch   = energyflux.eflx_sh_grnd_patch,
+        eflx_sh_snow_patch   = energyflux.eflx_sh_snow_patch,
+        eflx_sh_soil_patch   = energyflux.eflx_sh_soil_patch,
+        eflx_sh_h2osfc_patch = energyflux.eflx_sh_h2osfc_patch,
+        eflx_sh_tot_patch    = energyflux.eflx_sh_tot_patch,
+        eflx_sh_tot_u_patch  = energyflux.eflx_sh_tot_u_patch,
+        qflx_evap_soi_patch  = waterfluxbulk.wf.qflx_evap_soi_patch,
+        qflx_tran_veg_patch  = waterfluxbulk.wf.qflx_tran_veg_patch,
+        qflx_evap_veg_patch  = waterfluxbulk.wf.qflx_evap_veg_patch,
+        ram1_patch           = frictionvel.ram1_patch,
+        zeta_patch           = frictionvel.zeta_patch,
+        eflx_sh_grnd_scale   = eflx_sh_grnd_scale,
+        qflx_evap_soi_scale  = qflx_evap_soi_scale,
+        ramu                 = ramu,
+        zeta_lunit           = zeta_lunit,
+        taf_lun              = temperature.taf_lun,
+        qaf_lun              = waterdiagbulk.qaf_lun,
+        t_grnd_col           = temperature.t_grnd_col,
+        qg_col               = waterdiagbulk.qg_col,
+        htvp_col             = energyflux.htvp_col,
+        dqgdT_col            = waterdiagbulk.dqgdT_col,
+        frac_sno_col         = waterdiagbulk.frac_sno_col,
+        soilalpha_u_col      = soilstate.soilalpha_u_col,
+        wtus_col             = wtus_col,
+        wtuq_col             = wtuq_col,
+        itype                = col_data.itype,
+        forc_rho_grc         = forc_rho_grc,
+        forc_u_grc           = forc_u_grc,
+        forc_v_grc           = forc_v_grc,
+        column               = patch_data.column,
+        gridcell             = patch_data.gridcell,
+        landunit             = patch_data.landunit)
+
+    FT = eltype(energyflux.cgrnd_patch)
+    _launch!(_uf_canyon_surface_kernel!, energyflux.cgrnd_patch, m_urbanp, o, wts, wtq,
+             convert(FT, CPAIR); ndrange=length(energyflux.cgrnd_patch))
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Main subroutine: urban_fluxes!
 # ---------------------------------------------------------------------------
 
@@ -226,6 +661,11 @@ function urban_fluxes!(
         forc_pbot_grc    ::Vector{<:Real},
         forc_u_grc       ::Vector{<:Real},
         forc_v_grc       ::Vector{<:Real};
+        # Optional masks for the device-resident element-wise passes. When omitted
+        # they are built from the integer filters on the host (CPU byte-identical).
+        # The iterative canyon-air solve always runs on the host (CPU state).
+        mask_nourbanl    ::Union{AbstractVector{Bool},Nothing} = nothing,
+        mask_urbanp      ::Union{AbstractVector{Bool},Nothing} = nothing,
         # Optional time step info
         dtime            ::Real = 3600.0,
         nstep            ::Int     = 1)
@@ -327,11 +767,18 @@ function urban_fluxes!(
     # =========================================================================
     # Set restart fields for non-urban landunits
     # =========================================================================
-    for fl in 1:num_nourbanl
-        l = filter_nourbanl[fl]
-        temperature.taf_lun[l] = SPVAL
-        waterdiagbulk.qaf_lun[l] = SPVAL
-    end
+    # Element-wise passes that write STATE fields run as device kernels (mask-based).
+    # Masks default-built from the integer filters on the host (CPU byte-identical).
+    m_nourbanl = mask_nourbanl === nothing ?
+        _uf_device_mask(temperature.taf_lun, filter_nourbanl, num_nourbanl, nl) :
+        mask_nourbanl
+    m_urbanp = mask_urbanp === nothing ?
+        _uf_device_mask(temperature.t_ref2m_patch, filter_urbanp, num_urbanp, np_local) :
+        mask_urbanp
+
+    spval = convert(FT, SPVAL)
+    _launch!(_uf_nourban_restart_kernel!, temperature.taf_lun,
+             waterdiagbulk.qaf_lun, m_nourbanl, spval)
 
     # =========================================================================
     # Set constants
@@ -630,113 +1077,45 @@ function urban_fluxes!(
     # =========================================================================
     # Determine fluxes from canyon surfaces
     # =========================================================================
+    # Per-patch + column-INDEPENDENT given the SOLVED canopy-air state: runs WHOLE
+    # on the device as a single kernel (see urban_fluxes_canyon_surface!). The
+    # per-landunit work arrays are host-local here; _uf_to_backend moves them onto
+    # the state structs' backend (identity / byte-identical on Float64 CPU). The
+    # scaled-flux scratch is initialised to zero on-device via fill! over the full
+    # patch range (matches the original begp:endp init), then overwritten for urban
+    # patches by the kernel.
+    proto_pp = energyflux.cgrnd_patch
+    fill!(eflx_sh_grnd_scale, zero(eltype(eflx_sh_grnd_scale)))
+    fill!(qflx_evap_soi_scale, zero(eltype(qflx_evap_soi_scale)))
 
-    # Initialize scaled flux arrays
-    for p in begp:endp
-        eflx_sh_grnd_scale[p] = 0.0
-        qflx_evap_soi_scale[p] = 0.0
-    end
+    b(v) = _uf_to_backend(proto_pp, v)
+    wts_dv = _UfWtsDV(
+        wtas = b(wtas),
+        wtus_roof = b(wtus_roof), wtus_road_perv = b(wtus_road_perv),
+        wtus_road_imperv = b(wtus_road_imperv), wtus_sunwall = b(wtus_sunwall),
+        wtus_shadewall = b(wtus_shadewall),
+        wtus_roof_unscl = b(wtus_roof_unscl), wtus_road_perv_unscl = b(wtus_road_perv_unscl),
+        wtus_road_imperv_unscl = b(wtus_road_imperv_unscl), wtus_sunwall_unscl = b(wtus_sunwall_unscl),
+        wtus_shadewall_unscl = b(wtus_shadewall_unscl), wts_sum = b(wts_sum))
+    wtq_dv = _UfWtqDV(
+        wtaq = b(wtaq),
+        wtuq_roof = b(wtuq_roof), wtuq_road_perv = b(wtuq_road_perv),
+        wtuq_road_imperv = b(wtuq_road_imperv), wtuq_sunwall = b(wtuq_sunwall),
+        wtuq_shadewall = b(wtuq_shadewall),
+        wtuq_roof_unscl = b(wtuq_roof_unscl), wtuq_road_perv_unscl = b(wtuq_road_perv_unscl),
+        wtuq_road_imperv_unscl = b(wtuq_road_imperv_unscl), wtq_sum = b(wtq_sum))
 
-    for f in 1:num_urbanp
-        p = filter_urbanp[f]
-        c = patch_data.column[p]
-        g = patch_data.gridcell[p]
-        l = patch_data.landunit[p]
+    urban_fluxes_canyon_surface!(
+        energyflux, frictionvel, waterfluxbulk, waterdiagbulk, soilstate,
+        temperature, patch_data, col_data, m_urbanp, wts_dv, wtq_dv,
+        b(ramu), b(zeta_lunit), b(wtus_col), b(wtuq_col),
+        eflx_sh_grnd_scale, qflx_evap_soi_scale,
+        b(forc_rho_grc), b(forc_u_grc), b(forc_v_grc))
 
-        frictionvel.ram1_patch[p] = ramu[l]
-        frictionvel.zeta_patch[p] = zeta_lunit[l]
-
-        # Upward and downward canopy longwave are zero
-        energyflux.ulrad_patch[p] = 0.0
-        energyflux.dlrad_patch[p] = 0.0
-
-        # Derivative of sensible and latent heat fluxes wrt ground temperature
-        if col_data.itype[c] == ICOL_ROOF
-            energyflux.cgrnds_patch[p] = forc_rho_grc[g] * CPAIR *
-                (wtas[l] + wtus_road_perv[l] + wtus_road_imperv[l] + wtus_sunwall[l] + wtus_shadewall[l]) *
-                (wtus_roof_unscl[l] / wts_sum[l])
-            energyflux.cgrndl_patch[p] = forc_rho_grc[g] *
-                (wtaq[l] + wtuq_road_perv[l] + wtuq_road_imperv[l] + wtuq_sunwall[l] + wtuq_shadewall[l]) *
-                (wtuq_roof_unscl[l] / wtq_sum[l]) * waterdiagbulk.dqgdT_col[c]
-        elseif col_data.itype[c] == ICOL_ROAD_PERV
-            energyflux.cgrnds_patch[p] = forc_rho_grc[g] * CPAIR *
-                (wtas[l] + wtus_roof[l] + wtus_road_imperv[l] + wtus_sunwall[l] + wtus_shadewall[l]) *
-                (wtus_road_perv_unscl[l] / wts_sum[l])
-            energyflux.cgrndl_patch[p] = forc_rho_grc[g] *
-                (wtaq[l] + wtuq_roof[l] + wtuq_road_imperv[l] + wtuq_sunwall[l] + wtuq_shadewall[l]) *
-                (wtuq_road_perv_unscl[l] / wtq_sum[l]) * waterdiagbulk.dqgdT_col[c]
-        elseif col_data.itype[c] == ICOL_ROAD_IMPERV
-            energyflux.cgrnds_patch[p] = forc_rho_grc[g] * CPAIR *
-                (wtas[l] + wtus_roof[l] + wtus_road_perv[l] + wtus_sunwall[l] + wtus_shadewall[l]) *
-                (wtus_road_imperv_unscl[l] / wts_sum[l])
-            energyflux.cgrndl_patch[p] = forc_rho_grc[g] *
-                (wtaq[l] + wtuq_roof[l] + wtuq_road_perv[l] + wtuq_sunwall[l] + wtuq_shadewall[l]) *
-                (wtuq_road_imperv_unscl[l] / wtq_sum[l]) * waterdiagbulk.dqgdT_col[c]
-        elseif col_data.itype[c] == ICOL_SUNWALL
-            energyflux.cgrnds_patch[p] = forc_rho_grc[g] * CPAIR *
-                (wtas[l] + wtus_roof[l] + wtus_road_perv[l] + wtus_road_imperv[l] + wtus_shadewall[l]) *
-                (wtus_sunwall_unscl[l] / wts_sum[l])
-            energyflux.cgrndl_patch[p] = 0.0
-        elseif col_data.itype[c] == ICOL_SHADEWALL
-            energyflux.cgrnds_patch[p] = forc_rho_grc[g] * CPAIR *
-                (wtas[l] + wtus_roof[l] + wtus_road_perv[l] + wtus_road_imperv[l] + wtus_sunwall[l]) *
-                (wtus_shadewall_unscl[l] / wts_sum[l])
-            energyflux.cgrndl_patch[p] = 0.0
-        end
-        energyflux.cgrnd_patch[p] = energyflux.cgrnds_patch[p] +
-            energyflux.cgrndl_patch[p] * energyflux.htvp_col[c]
-
-        # Surface fluxes of momentum
-        energyflux.taux_patch[p] = -forc_rho_grc[g] * forc_u_grc[g] / ramu[l]
-        energyflux.tauy_patch[p] = -forc_rho_grc[g] * forc_v_grc[g] / ramu[l]
-
-        # Sensible heat flux from ground using new canopy air temperature
-        dth[l] = temperature.taf_lun[l] - temperature.t_grnd_col[c]
-
-        if col_data.itype[c] == ICOL_ROOF
-            energyflux.eflx_sh_grnd_patch[p] = -forc_rho_grc[g] * CPAIR * wtus_roof_unscl[l] * dth[l]
-        elseif col_data.itype[c] == ICOL_ROAD_PERV
-            energyflux.eflx_sh_grnd_patch[p] = -forc_rho_grc[g] * CPAIR * wtus_road_perv_unscl[l] * dth[l]
-        elseif col_data.itype[c] == ICOL_ROAD_IMPERV
-            energyflux.eflx_sh_grnd_patch[p] = -forc_rho_grc[g] * CPAIR * wtus_road_imperv_unscl[l] * dth[l]
-        elseif col_data.itype[c] == ICOL_SUNWALL
-            energyflux.eflx_sh_grnd_patch[p] = -forc_rho_grc[g] * CPAIR * wtus_sunwall_unscl[l] * dth[l]
-        elseif col_data.itype[c] == ICOL_SHADEWALL
-            energyflux.eflx_sh_grnd_patch[p] = -forc_rho_grc[g] * CPAIR * wtus_shadewall_unscl[l] * dth[l]
-        end
-        energyflux.eflx_sh_snow_patch[p] = 0.0
-        energyflux.eflx_sh_soil_patch[p] = 0.0
-        energyflux.eflx_sh_h2osfc_patch[p] = 0.0
-
-        energyflux.eflx_sh_tot_patch[p] = energyflux.eflx_sh_grnd_patch[p]
-        energyflux.eflx_sh_tot_u_patch[p] = energyflux.eflx_sh_tot_patch[p]
-
-        # Latent heat flux
-        dqh[l] = waterdiagbulk.qaf_lun[l] - waterdiagbulk.qg_col[c]
-
-        if col_data.itype[c] == ICOL_ROOF
-            waterfluxbulk.wf.qflx_evap_soi_patch[p] = -forc_rho_grc[g] * wtuq_roof_unscl[l] * dqh[l]
-        elseif col_data.itype[c] == ICOL_ROAD_PERV
-            if dqh[l] > 0.0 || waterdiagbulk.frac_sno_col[c] > 0.0 || soilstate.soilalpha_u_col[c] <= 0.0
-                waterfluxbulk.wf.qflx_evap_soi_patch[p] = -forc_rho_grc[g] * wtuq_road_perv_unscl[l] * dqh[l]
-                waterfluxbulk.wf.qflx_tran_veg_patch[p] = 0.0
-            else
-                waterfluxbulk.wf.qflx_evap_soi_patch[p] = 0.0
-                waterfluxbulk.wf.qflx_tran_veg_patch[p] = -forc_rho_grc[g] * wtuq_road_perv_unscl[l] * dqh[l]
-            end
-            waterfluxbulk.wf.qflx_evap_veg_patch[p] = waterfluxbulk.wf.qflx_tran_veg_patch[p]
-        elseif col_data.itype[c] == ICOL_ROAD_IMPERV
-            waterfluxbulk.wf.qflx_evap_soi_patch[p] = -forc_rho_grc[g] * wtuq_road_imperv_unscl[l] * dqh[l]
-        elseif col_data.itype[c] == ICOL_SUNWALL
-            waterfluxbulk.wf.qflx_evap_soi_patch[p] = 0.0
-        elseif col_data.itype[c] == ICOL_SHADEWALL
-            waterfluxbulk.wf.qflx_evap_soi_patch[p] = 0.0
-        end
-
-        # SCALED sensible and latent heat flux for error check
-        eflx_sh_grnd_scale[p] = -forc_rho_grc[g] * CPAIR * wtus_col[c] * dth[l]
-        qflx_evap_soi_scale[p] = -forc_rho_grc[g] * wtuq_col[c] * dqh[l]
-    end
+    # Host copies of the scaled-flux scratch for the sum()-based error check below
+    # (the check is a reduction over each landunit's patch range and stays HOST).
+    eflx_sh_grnd_scale = collect(eflx_sh_grnd_scale)
+    qflx_evap_soi_scale = collect(qflx_evap_soi_scale)
 
     # =========================================================================
     # Error checking: total fluxes should equal sum of scaled fluxes
@@ -793,45 +1172,13 @@ function urban_fluxes!(
     end
 
     # =========================================================================
-    # Roots for urban (only pervious road has roots)
+    # Roots for urban (pervious-road only) + 2-m temperature/humidity/RH/t_veg
+    # diagnostics — both column-independent device kernels. Re-runs the (idempotent)
+    # non-urban taf/qaf SPVAL restart too; the non-urban landunits are untouched by
+    # the host canyon-air solve, so this is byte-identical to setting it once.
     # =========================================================================
-    for j in 1:nlevgrnd
-        for f in 1:num_urbanp
-            p = filter_urbanp[f]
-            c = patch_data.column[p]
-            if col_data.itype[c] == ICOL_ROAD_PERV
-                soilstate.rootr_patch[p, j] = soilstate.rootr_road_perv_col[c, j]
-            else
-                soilstate.rootr_patch[p, j] = 0.0
-            end
-        end
-    end
-
-    # =========================================================================
-    # 2-m temperature, humidity, and diagnostics
-    # =========================================================================
-    for f in 1:num_urbanp
-        p = filter_urbanp[f]
-        c = patch_data.column[p]
-        g = patch_data.gridcell[p]
-        l = patch_data.landunit[p]
-
-        # Use urban canopy air temperature and specific humidity for 2-m
-        temperature.t_ref2m_patch[p] = temperature.taf_lun[l]
-        waterdiagbulk.q_ref2m_patch[p] = waterdiagbulk.qaf_lun[l]
-        temperature.t_ref2m_u_patch[p] = temperature.taf_lun[l]
-
-        # 2 m height relative humidity
-        (qsat_ref2m, e_ref2m, _, _) = qsat(temperature.t_ref2m_patch[p], forc_pbot_grc[g])
-        waterdiagbulk.rh_ref2m_patch[p] = smooth_min(100.0,
-            waterdiagbulk.q_ref2m_patch[p] / qsat_ref2m * 100.0)
-        waterdiagbulk.rh_ref2m_u_patch[p] = waterdiagbulk.rh_ref2m_patch[p]
-
-        # Human heat stress indices — stub (HumanIndexMod not yet ported)
-
-        # Variables needed by history tape
-        temperature.t_veg_patch[p] = forc_t_grc[g]
-    end
+    urban_fluxes_diagnostics!(temperature, waterdiagbulk, soilstate, patch_data,
+        col_data, m_nourbanl, m_urbanp, forc_t_grc, forc_pbot_grc, nlevgrnd)
 
     return nothing
 end
