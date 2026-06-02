@@ -173,91 +173,118 @@ end
 Update snow depth, fractional area, integrated snow and SWE diagnostics
 for newly-fallen snow.
 """
-function bulkdiag_new_snow_diagnostics!(
-    # Outputs (modified in place)
-    dz::Matrix{<:Real},            # layer depth [m]
-    int_snow::Vector{<:Real},      # integrated snowfall [mm H2O]
-    swe_old::Matrix{<:Real},       # SWE before update [mm H2O]
-    frac_sno::Vector{<:Real},      # fraction of ground covered by snow
-    frac_sno_eff::Vector{<:Real},  # effective fraction
-    snow_depth::Vector{<:Real},    # snow height [m]
-    snomelt_accum::Vector{<:Real}, # accumulated snow melt for z0m [m H2O]
-    # Inputs
-    dtime::Real,                 # time step [s]
-    lun_itype_col::Vector{Int},     # landunit type per column
-    urbpoi::Vector{Bool},           # urban point flags (landunit-level, indexed by col)
-    snl::Vector{Int},               # number of snow layers (negative)
-    bifall::Vector{<:Real},        # bulk density of new snow [kg/m3]
-    h2osno_total::Vector{<:Real},  # total snow water [mm H2O]
-    h2osoi_ice::Matrix{<:Real},    # ice lens [kg/m2]
-    h2osoi_liq::Matrix{<:Real},    # liquid water [kg/m2]
-    qflx_snow_grnd::Vector{<:Real}, # snow on ground [mm H2O/s]
-    qflx_snow_drain::Vector{<:Real}, # drainage from snow pack [mm H2O/s]
-    mask::BitVector,                # column mask
-    bounds::UnitRange{Int},         # column bounds
-    nlevsno::Int;                   # max snow layers
-    scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
-)
-    FT = eltype(snow_depth)
-    newsnow = zeros(FT, length(snow_depth))
-    snowmelt = zeros(FT, length(snow_depth))
-    temp_snow_depth = zeros(FT, length(snow_depth))
-
-    for c in bounds
-        mask[c] || continue
-
-        # Save initial snow depth
+# Per-column kernel (Loop A): save initial depth/SWE, compute newsnow, update
+# snomelt_accum + int_snow, snowmelt. Internal sequential snow-layer loops zero the
+# padded slice [-nlevsno+1 .. snl] and copy SWE over [snl+1 .. 0]. smooth_max on a
+# non-AD eltype is exact `max` (GPU-safe). Byte-identical on CPU Float64.
+@kernel function _bulkdiag_loopA_kernel!(temp_snow_depth, swe_old, newsnow,
+        snomelt_accum, int_snow, snowmelt, @Const(snow_depth), @Const(snl),
+        @Const(h2osoi_liq), @Const(h2osoi_ice), @Const(qflx_snow_grnd),
+        @Const(qflx_snow_drain), @Const(h2osno_total), @Const(mask),
+        dtime, nlevsno::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        T = eltype(snow_depth)
         temp_snow_depth[c] = snow_depth[c]
-
-        # Save initial snow water equivalent
-        for j in (-nlevsno+1):snl[c]
-            jj = j + nlevsno  # Julia index
-            swe_old[c, jj] = 0.0
+        for j in (-nlevsno + 1):snl[c]
+            jj = j + nlevsno
+            swe_old[c, jj] = zero(T)
         end
-        for j in (snl[c]+1):0
+        for j in (snl[c] + 1):0
             jj = j + nlevsno
             swe_old[c, jj] = h2osoi_liq[c, jj] + h2osoi_ice[c, jj]
         end
-
-        # All snow falls on ground
         newsnow[c] = qflx_snow_grnd[c] * dtime
-        snomelt_accum[c] = smooth_max(0.0, snomelt_accum[c] - newsnow[c] * 1.0e-3)
-
-        # Update int_snow
+        snomelt_accum[c] = smooth_max(zero(T), snomelt_accum[c] - newsnow[c] * T(1.0e-3))
         int_snow[c] = smooth_max(int_snow[c], h2osno_total[c])
-
-        # Snowmelt from previous time step
         snowmelt[c] = qflx_snow_drain[c] * dtime
     end
+end
+
+# Per-column kernel (Loop B): reset int_snow if the snow pack started at 0.
+@kernel function _bulkdiag_loopB_kernel!(int_snow, @Const(h2osno_total),
+        @Const(newsnow), @Const(mask), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        T = eltype(int_snow)
+        if h2osno_total[c] == zero(T) && newsnow[c] > zero(T)
+            int_snow[c] = zero(T)
+        end
+    end
+end
+
+# Per-column kernel (Loop C): update top snow-layer thickness with the new snowfall.
+@kernel function _bulkdiag_loopC_kernel!(dz, @Const(snow_depth),
+        @Const(temp_snow_depth), @Const(snl), @Const(mask), dtime, nlevsno::Int,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        if snl[c] < 0
+            dz_snowf = (snow_depth[c] - temp_snow_depth[c]) / dtime
+            jj = (snl[c] + 1) + nlevsno
+            dz[c, jj] = dz[c, jj] + dz_snowf * dtime
+        end
+    end
+end
+
+function bulkdiag_new_snow_diagnostics!(
+    # Outputs (modified in place)
+    dz::AbstractMatrix{<:Real},            # layer depth [m]
+    int_snow::AbstractVector{<:Real},      # integrated snowfall [mm H2O]
+    swe_old::AbstractMatrix{<:Real},       # SWE before update [mm H2O]
+    frac_sno::AbstractVector{<:Real},      # fraction of ground covered by snow
+    frac_sno_eff::AbstractVector{<:Real},  # effective fraction
+    snow_depth::AbstractVector{<:Real},    # snow height [m]
+    snomelt_accum::AbstractVector{<:Real}, # accumulated snow melt for z0m [m H2O]
+    # Inputs
+    dtime::Real,                 # time step [s]
+    lun_itype_col::AbstractVector{<:Integer},  # landunit type per column
+    urbpoi::AbstractVector{Bool},           # urban point flags (indexed by col)
+    snl::AbstractVector{<:Integer},         # number of snow layers (negative)
+    bifall::AbstractVector{<:Real},        # bulk density of new snow [kg/m3]
+    h2osno_total::AbstractVector{<:Real},  # total snow water [mm H2O]
+    h2osoi_ice::AbstractMatrix{<:Real},    # ice lens [kg/m2]
+    h2osoi_liq::AbstractMatrix{<:Real},    # liquid water [kg/m2]
+    qflx_snow_grnd::AbstractVector{<:Real}, # snow on ground [mm H2O/s]
+    qflx_snow_drain::AbstractVector{<:Real}, # drainage from snow pack [mm H2O/s]
+    mask::AbstractVector{Bool},             # column mask
+    bounds::UnitRange{Int},         # column bounds
+    nlevsno::Int;                   # max snow layers
+    scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012(),
+    n_melt_dev::AbstractVector{<:Real} = (scf_method isa SnowCoverFractionSwensonLawrence2012 ?
+                                          scf_method.n_melt : snow_depth)
+)
+    FT = eltype(snow_depth)
+    newsnow = similar(snow_depth); fill!(newsnow, zero(FT))
+    snowmelt = similar(snow_depth); fill!(snowmelt, zero(FT))
+    temp_snow_depth = similar(snow_depth); fill!(temp_snow_depth, zero(FT))
+
+    dt = FT(dtime)
+    _launch!(_bulkdiag_loopA_kernel!, temp_snow_depth, swe_old, newsnow,
+             snomelt_accum, int_snow, snowmelt, snow_depth, snl, h2osoi_liq,
+             h2osoi_ice, qflx_snow_grnd, qflx_snow_drain, h2osno_total, mask,
+             dt, nlevsno, first(bounds), last(bounds);
+             ndrange = length(snow_depth))
 
     # Update snow depth and fractional snow cover via scf_method
     update_snow_depth_and_frac!(scf_method,
         frac_sno, frac_sno_eff, snow_depth,
         lun_itype_col, urbpoi, h2osno_total, snowmelt, int_snow,
-        newsnow, bifall, mask, bounds)
+        newsnow, bifall, mask, bounds; n_melt_dev=n_melt_dev)
 
     # Reset int_snow if snow pack started at 0
-    for c in bounds
-        mask[c] || continue
-        if h2osno_total[c] == 0.0 && newsnow[c] > 0.0
-            int_snow[c] = 0.0
-        end
-    end
+    _launch!(_bulkdiag_loopB_kernel!, int_snow, h2osno_total, newsnow, mask,
+             first(bounds), last(bounds))
 
     # Add newsnow to int_snow via scf_method
     add_newsnow_to_intsnow!(scf_method,
         int_snow, newsnow, h2osno_total, frac_sno,
-        mask, bounds)
+        mask, bounds; n_melt_dev=n_melt_dev)
 
     # Update top snow layer thickness
-    for c in bounds
-        mask[c] || continue
-        if snl[c] < 0
-            dz_snowf = (snow_depth[c] - temp_snow_depth[c]) / dtime
-            jj = (snl[c] + 1) + nlevsno  # Julia index for top snow layer
-            dz[c, jj] = dz[c, jj] + dz_snowf * dtime
-        end
-    end
+    _launch!(_bulkdiag_loopC_kernel!, dz, snow_depth, temp_snow_depth, snl, mask,
+             dt, nlevsno, first(bounds), last(bounds);
+             ndrange = size(dz, 1))
 end
 
 # =========================================================================

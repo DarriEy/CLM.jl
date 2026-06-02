@@ -204,6 +204,55 @@ end
 # Ported from clm_drv_init in clm_driver.F90
 # ---------------------------------------------------------------------------
 
+# ---- clm_drv_init! per-element kernels (GPU/CPU backend-agnostic) ----
+
+# Init intracellular CO2 to -999 over patches [begp..endp] × canopy-levels.
+@kernel function _drvinit_ci_kernel!(cisun, cisha, begp::Int, endp::Int, nlevcan::Int)
+    I = @index(Global, Cartesian)
+    p = I[1]; j = I[2]
+    @inbounds if begp <= p <= endp && j <= nlevcan
+        cisun[p, j] = -oftype(cisun[p, j], 999)
+        cisha[p, j] = -oftype(cisha[p, j], 999)
+    end
+end
+
+# Reset flux from beneath soil/ice column to 0 over [begc..endc].
+@kernel function _drvinit_eflxbot_kernel!(eflx_bot, begc::Int, endc::Int)
+    c = @index(Global)
+    @inbounds if begc <= c <= endc
+        eflx_bot[c] = zero(eltype(eflx_bot))
+    end
+end
+
+# frac_veg_nosno = active ? frac_veg_nosno_alb : 0  over [begp..endp].
+@kernel function _drvinit_fracvegnosno_kernel!(fvns, @Const(fvns_alb), @Const(active),
+        begp::Int, endp::Int)
+    p = @index(Global)
+    @inbounds if begp <= p <= endp
+        fvns[p] = active[p] ? fvns_alb[p] : zero(eltype(fvns))
+    end
+end
+
+# Ice fraction of snow at previous time step over [begc..endc] × snow layers.
+# Fortran j = -nlevsno+1 : 0 ; Julia jj = j + nlevsno = 1 : nlevsno.
+@kernel function _drvinit_fraciceold_kernel!(frac_iceold, @Const(mask), @Const(snl),
+        @Const(h2osoi_liq), @Const(h2osoi_ice), begc::Int, endc::Int, nlevsno::Int)
+    c = @index(Global)
+    @inbounds if begc <= c <= endc && mask[c]
+        for jj in 1:nlevsno
+            j = jj - nlevsno            # Fortran index in [-nlevsno+1 .. 0]
+            if j >= snl[c] + 1
+                h2o_liq = h2osoi_liq[c, jj]
+                h2o_ice = h2osoi_ice[c, jj]
+                total = h2o_liq + h2o_ice
+                if total > zero(total)
+                    frac_iceold[c, jj] = h2o_ice / total
+                end
+            end
+        end
+    end
+end
+
 """
     clm_drv_init!(bounds, canopystate, waterstatebulk, waterdiagnosticbulk,
                   energyflux, photosyns, col_data, pch_data,
@@ -226,52 +275,34 @@ function clm_drv_init!(bounds::BoundsType,
                         photosyns::PhotosynthesisData,
                         col_data::ColumnData,
                         pch_data::PatchData,
-                        mask_nolakec::BitVector,
-                        mask_nolakep::BitVector,
-                        mask_soilp::BitVector)
+                        mask_nolakec::AbstractVector{Bool},
+                        mask_nolakep::AbstractVector{Bool},
+                        mask_soilp::AbstractVector{Bool})
 
     nlevsno_val = varpar.nlevsno
 
     # Initialize intracellular CO2 (Pa) parameters each timestep for VOCEmission
-    for p in bounds.begp:bounds.endp
-        for j in axes(photosyns.cisun_z_patch, 2)
-            photosyns.cisun_z_patch[p, j] = -999.0
-            photosyns.cisha_z_patch[p, j] = -999.0
-        end
-    end
+    nlevcan = size(photosyns.cisun_z_patch, 2)
+    _launch!(_drvinit_ci_kernel!, photosyns.cisun_z_patch, photosyns.cisha_z_patch,
+             bounds.begp, bounds.endp, nlevcan;
+             ndrange = (size(photosyns.cisun_z_patch, 1), nlevcan))
 
     # Reset flux from beneath soil/ice column
-    for c in bounds.begc:bounds.endc
-        energyflux.eflx_bot_col[c] = 0.0
-    end
+    _launch!(_drvinit_eflxbot_kernel!, energyflux.eflx_bot_col, bounds.begc, bounds.endc)
 
     # Initialize fraction of vegetation not covered by snow
-    for p in bounds.begp:bounds.endp
-        if pch_data.active[p]
-            canopystate.frac_veg_nosno_patch[p] = canopystate.frac_veg_nosno_alb_patch[p]
-        else
-            canopystate.frac_veg_nosno_patch[p] = 0
-        end
-    end
+    _launch!(_drvinit_fracvegnosno_kernel!, canopystate.frac_veg_nosno_patch,
+             canopystate.frac_veg_nosno_alb_patch, pch_data.active,
+             bounds.begp, bounds.endp)
 
     # Initialize set of previous time-step variables
-    # Ice fraction of snow at previous time step
-    # Fortran indices: j = -nlevsno+1 : 0
-    # Julia 1-based:   j_jl = j + nlevsno = 1 : nlevsno
-    for j in (-nlevsno_val + 1):0
-        j_jl = j + nlevsno_val  # convert to 1-based Julia index
-        for c in bounds.begc:bounds.endc
-            mask_nolakec[c] || continue
-            if j >= col_data.snl[c] + 1
-                h2o_liq = waterstatebulk.ws.h2osoi_liq_col[c, j_jl]
-                h2o_ice = waterstatebulk.ws.h2osoi_ice_col[c, j_jl]
-                total = h2o_liq + h2o_ice
-                if total > 0.0
-                    waterdiagnosticbulk.frac_iceold_col[c, j_jl] = h2o_ice / total
-                end
-            end
-        end
-    end
+    # Ice fraction of snow at previous time step (per-column kernel with an
+    # internal sequential snow-layer loop over the padded slice).
+    _launch!(_drvinit_fraciceold_kernel!, waterdiagnosticbulk.frac_iceold_col,
+             mask_nolakec, col_data.snl,
+             waterstatebulk.ws.h2osoi_liq_col, waterstatebulk.ws.h2osoi_ice_col,
+             bounds.begc, bounds.endc, nlevsno_val;
+             ndrange = size(waterdiagnosticbulk.frac_iceold_col, 1))
 
     return nothing
 end
