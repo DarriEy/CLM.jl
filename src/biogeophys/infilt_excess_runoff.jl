@@ -51,10 +51,20 @@ infiltration rate) and `qinmax_method` (method selector).
 Ported from `infiltration_excess_runoff_type` in
 `InfiltrationExcessRunoffMod.F90`.
 """
-Base.@kwdef mutable struct InfiltrationExcessRunoffData{FT<:Real}
-    qinmax_col::Vector{FT} = Float64[]   # col maximum infiltration rate (mm H2O/s)
-    qinmax_method::Int = QINMAX_METHOD_HKSAT  # method for computing qinmax
+Base.@kwdef mutable struct InfiltrationExcessRunoffData{FT<:Real,
+                                                        V<:AbstractVector{FT}}
+    qinmax_col::V = Float64[]                  # col maximum infiltration rate (mm H2O/s)
+    qinmax_method::Int = QINMAX_METHOD_HKSAT   # method for computing qinmax
 end
+
+# Single-type-parameter convenience constructor (mirrors the other state structs):
+# `InfiltrationExcessRunoffData{FT}()` defaults the storage to `Vector{FT}`, so the
+# AD dual-copy path (`wrapper{D}()`) and Float32 construction keep working.
+InfiltrationExcessRunoffData{FT}(; kwargs...) where {FT<:Real} =
+    InfiltrationExcessRunoffData{FT, Vector{FT}}(; kwargs...)
+
+# Device movement: relocate the single array field; qinmax_method is a plain Int.
+Adapt.@adapt_structure InfiltrationExcessRunoffData
 
 # ---- Init / Allocate / Cold ----
 
@@ -126,14 +136,42 @@ frac_h2osfc.
 
 Ported from `InfiltrationExcessRunoff` in `InfiltrationExcessRunoffMod.F90`.
 """
+# ---- infiltration_excess_runoff! : per-column qinmax NONE-fill kernel ----
+# Fill qinmax_on_unsaturated_area with the (effectively infinite) unlimited value
+# for the QINMAX_METHOD_NONE path. One thread per column, mask-gated.
+@kernel function _infexcess_qinmax_none_kernel!(qinmax_unsat, @Const(mask), qinmax_unlimited)
+    c = @index(Global)
+    @inbounds if mask[c]
+        qinmax_unsat[c] = qinmax_unlimited
+    end
+end
+
+# ---- infiltration_excess_runoff! : per-column column-average + excess kernel ----
+# qinmax[c]           = (1 - fsat[c]) * qinmax_on_unsaturated_area[c]
+# qflx_infl_excess[c] = max(0, qflx_in_soil[c] - (1 - frac_h2osfc[c]) * qinmax[c])
+# Each column is fully independent (no loop-carried deps). Literals converted to
+# the working eltype so no Float64 reaches a Float32-only backend (Metal).
+@kernel function _infexcess_colavg_kernel!(qinmax, qflx_infl_excess, @Const(mask),
+                                           @Const(fsat), @Const(qinmax_unsat),
+                                           @Const(qflx_in_soil), @Const(frac_h2osfc))
+    c = @index(Global)
+    @inbounds if mask[c]
+        one_ft = one(eltype(qinmax))
+        zero_ft = zero(eltype(qinmax))
+        qinmax[c] = (one_ft - fsat[c]) * qinmax_unsat[c]
+        qflx_infl_excess[c] = max(zero_ft,
+            qflx_in_soil[c] - (one_ft - frac_h2osfc[c]) * qinmax[c])
+    end
+end
+
 function infiltration_excess_runoff!(
     ier::InfiltrationExcessRunoffData,
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
-    fsat_col::Vector{<:Real},
+    fsat_col::AbstractVector{<:Real},
     waterfluxbulk::WaterFluxBulkData,
     waterdiagnosticbulk::WaterDiagnosticBulkData,
-    mask_hydrology::BitVector,
+    mask_hydrology,
     bounds::UnitRange{Int};
     params::InfiltrationExcessRunoffParams = infilt_excess_params
 )
@@ -144,33 +182,30 @@ function infiltration_excess_runoff!(
     qflx_in_soil     = waterfluxbulk.qflx_in_soil_col
     frac_h2osfc      = waterdiagnosticbulk.frac_h2osfc_col
 
-    # Temporary workspace for qinmax on unsaturated area
-    nc = length(bounds)
-    FT_ier = eltype(fsat_col)
-    qinmax_on_unsaturated_area = Vector{FT_ier}(undef, last(bounds))
+    # Validate method on host before launching (String/Int config resolved on host).
+    if ier.qinmax_method != QINMAX_METHOD_NONE && ier.qinmax_method != QINMAX_METHOD_HKSAT
+        error("InfiltrationExcessRunoff: Unrecognized qinmax_method: $(ier.qinmax_method)")
+    end
+
+    # Temporary workspace for qinmax on unsaturated area — device-resident, same
+    # backend/eltype as the output qinmax (similar(), not zeros()).
+    FT_ier = eltype(qinmax)
+    qinmax_on_unsaturated_area = similar(qinmax, last(bounds))
 
     # --- Compute qinmax on unsaturated area ---
     if ier.qinmax_method == QINMAX_METHOD_NONE
-        for c in bounds
-            mask_hydrology[c] || continue
-            qinmax_on_unsaturated_area[c] = QINMAX_UNLIMITED
-        end
-    elseif ier.qinmax_method == QINMAX_METHOD_HKSAT
+        _launch!(_infexcess_qinmax_none_kernel!, qinmax_on_unsaturated_area,
+                 mask_hydrology, FT_ier(QINMAX_UNLIMITED))
+    else  # QINMAX_METHOD_HKSAT
         compute_qinmax_hksat!(soilhydrology, soilstate,
                               qinmax_on_unsaturated_area,
                               mask_hydrology, bounds;
                               params = params)
-    else
-        error("InfiltrationExcessRunoff: Unrecognized qinmax_method: $(ier.qinmax_method)")
     end
 
     # --- Compute column-averaged qinmax and infiltration excess ---
-    for c in bounds
-        mask_hydrology[c] || continue
-        qinmax[c] = (1.0 - fsat[c]) * qinmax_on_unsaturated_area[c]
-        qflx_infl_excess[c] = max(0.0,
-            qflx_in_soil[c] - (1.0 - frac_h2osfc[c]) * qinmax[c])
-    end
+    _launch!(_infexcess_colavg_kernel!, qinmax, qflx_infl_excess, mask_hydrology,
+             fsat, qinmax_on_unsaturated_area, qflx_in_soil, frac_h2osfc)
 
     return nothing
 end
@@ -197,29 +232,43 @@ For each column, computes:
 
 Ported from `ComputeQinmaxHksat` in `InfiltrationExcessRunoffMod.F90`.
 """
+# ---- compute_qinmax_hksat! : per-column min over top-3 layers kernel ----
+# qinmax_unsat[c] = min over j in 1:3 of 10^(-e_ice * icefrac[c,j]) * hksat[c,j].
+# One thread per column with an internal SEQUENTIAL j loop (a small min reduction;
+# columns are independent). e_ice is passed as a working-eltype scalar and the
+# base 10 / Inf literals are eltype-converted so no Float64 reaches a Float32-only
+# backend (Metal); on Float64 these conversions are byte-identical.
+@kernel function _qinmax_hksat_kernel!(qinmax_unsat, @Const(mask),
+                                       @Const(icefrac), @Const(hksat), e_ice)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(qinmax_unsat)
+        ten = T(10)
+        qmin = T(Inf)
+        for j in 1:3
+            val = ten^(-e_ice * icefrac[c, j]) * hksat[c, j]
+            if val < qmin
+                qmin = val
+            end
+        end
+        qinmax_unsat[c] = qmin
+    end
+end
+
 function compute_qinmax_hksat!(
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
-    qinmax_on_unsaturated_area::Vector{<:Real},
-    mask_hydrology::BitVector,
+    qinmax_on_unsaturated_area::AbstractVector{<:Real},
+    mask_hydrology,
     bounds::UnitRange{Int};
     params::InfiltrationExcessRunoffParams = infilt_excess_params
 )
     icefrac = soilhydrology.icefrac_col
     hksat   = soilstate.hksat_col
 
-    for c in bounds
-        mask_hydrology[c] || continue
-        # Fortran: minval(10^(-e_ice * icefrac(c,1:3)) * hksat(c,1:3))
-        qmin = Inf
-        for j in 1:3
-            val = 10.0^(-params.e_ice * icefrac[c, j]) * hksat[c, j]
-            if val < qmin
-                qmin = val
-            end
-        end
-        qinmax_on_unsaturated_area[c] = qmin
-    end
+    FT = eltype(qinmax_on_unsaturated_area)
+    _launch!(_qinmax_hksat_kernel!, qinmax_on_unsaturated_area, mask_hydrology,
+             icefrac, hksat, FT(params.e_ice); ndrange = last(bounds))
 
     return nothing
 end
