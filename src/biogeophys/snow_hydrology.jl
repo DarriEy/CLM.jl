@@ -1010,144 +1010,205 @@ end
 
 Determine change in snow layer thickness due to compaction and settling.
 """
-function snow_compaction!(
-    dz::Matrix{<:Real},
-    dtime::Real,
-    snl::Vector{Int},
-    t_soisno::Matrix{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    imelt::Matrix{Int},
-    frac_sno::Vector{<:Real},
-    frac_h2osfc::Vector{<:Real},
-    swe_old::Matrix{<:Real},
-    int_snow::Vector{<:Real},
-    frac_iceold::Matrix{<:Real},
-    forc_wind::Vector{<:Real},
-    col_gridcell::Vector{Int},
-    col_landunit::Vector{Int},
-    lakpoi::Vector{Bool},
-    urbpoi::Vector{Bool},
-    mask_snow::BitVector,
-    bounds::UnitRange{Int},
-    nlevsno::Int
-)
-    params = snowhydrology_params
+# -------------------------------------------------------------------------
+# Device-view bundle for snow_compaction! — every array the per-column
+# compaction loop touches, gathered into one isbits-on-device struct
+# (Adapt.@adapt_structure). Field names mirror the kernel-body variable paths.
+# Placed directly above snow_compaction! to keep this insertion in a disjoint
+# line-region for clean auto-merge with sibling worktrees.
+# -------------------------------------------------------------------------
+# `dz` (the only output) is passed to the kernel directly as the backend-carrier /
+# writable first arg — NOT bundled here — so `_launch!` can take the device backend
+# from it and writes flow straight back into the live array.
+Base.@kwdef struct _SCompDV{M,MI,V,VI,VB}
+    t_soisno::M
+    h2osoi_ice::M
+    h2osoi_liq::M
+    imelt::MI
+    swe_old::M
+    frac_iceold::M
+    frac_sno::V
+    frac_h2osfc::V
+    int_snow::V
+    forc_wind::V
+    col_gridcell::VI
+    col_landunit::VI
+    lakpoi::VB
+    urbpoi::VB
+end
+Adapt.@adapt_structure _SCompDV
 
-    # Compaction constants
-    c3 = 2.777e-6   # [1/s]
-    c4 = 0.04        # [1/K]
-    c5 = 2.0
+# Per-column kernel: each thread runs the WHOLE sequential snow-layer compaction
+# for its column. burden / zpseudo / mobile are carried as in-thread scalars
+# down the pack (loop-carried) — exactly mirroring the Fortran column loop.
+# All configuration (overburden method, wind-density flag, tfactor) and params
+# are resolved on the host to plain scalars so no global Ref / Float64 reaches
+# a Float32-only Metal kernel. On Float64 the arithmetic is byte-identical.
+@kernel function _snowhyd_compaction_kernel!(dz, dv, @Const(mask_snow), @Const(snl),
+        dtime, nlevsno::Int, c3, c4, c5, upplim_destruct, ob_method::Int,
+        ob_tfactor, eta0_anderson, ceta, eta0_vionnet,
+        wind_dep::Bool, drift_gs, rho_min, rho_max, tau_ref,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        T = typeof(dtime)
+        burden = zero(T)
+        zpseudo = zero(T)
+        mobile = true
 
-    nc = length(snl)
-    FT = eltype(t_soisno)
-    burden = zeros(FT, nc)
-    zpseudo = zeros(FT, nc)
-    mobile = trues(nc)
-
-    for c in bounds
-        mask_snow[c] || continue
-        burden[c] = 0.0
-        zpseudo[c] = 0.0
-        mobile[c] = true
-    end
-
-    for j in (-nlevsno+1):0
-        jj = j + nlevsno
-        for c in bounds
-            mask_snow[c] || continue
+        for j in (-nlevsno + 1):0
             if j >= snl[c] + 1
-                g = col_gridcell[c]
+                jj = j + nlevsno
+                g = dv.col_gridcell[c]
 
-                wx = h2osoi_ice[c, jj] + h2osoi_liq[c, jj]
-                void = 1.0 - (h2osoi_ice[c, jj] / DENICE + h2osoi_liq[c, jj] / DENH2O) /
-                       (frac_sno[c] * dz[c, jj])
+                wx = dv.h2osoi_ice[c, jj] + dv.h2osoi_liq[c, jj]
+                void = one(T) - (dv.h2osoi_ice[c, jj] / T(DENICE) +
+                                 dv.h2osoi_liq[c, jj] / T(DENH2O)) /
+                                (dv.frac_sno[c] * dz[c, jj])
 
-                if void > 0.001 && h2osoi_ice[c, jj] > 0.1
-                    bi = h2osoi_ice[c, jj] / (frac_sno[c] * dz[c, jj])
-                    fi = h2osoi_ice[c, jj] / wx
-                    td = TFRZ - t_soisno[c, jj]
+                if void > T(0.001) && dv.h2osoi_ice[c, jj] > T(0.1)
+                    bi = dv.h2osoi_ice[c, jj] / (dv.frac_sno[c] * dz[c, jj])
+                    fi = dv.h2osoi_ice[c, jj] / wx
+                    td = T(TFRZ) - dv.t_soisno[c, jj]
                     dexpf = exp(-c4 * td)
 
                     # Destructive metamorphism
                     ddz1 = -c3 * dexpf
-                    if bi > params.upplim_destruct_metamorph
-                        ddz1 = ddz1 * exp(-46.0e-3 * (bi - params.upplim_destruct_metamorph))
+                    if bi > upplim_destruct
+                        ddz1 = ddz1 * exp(-T(46.0e-3) * (bi - upplim_destruct))
                     end
 
                     # Liquid water term
-                    if h2osoi_liq[c, jj] > 0.01 * dz[c, jj] * frac_sno[c]
+                    if dv.h2osoi_liq[c, jj] > T(0.01) * dz[c, jj] * dv.frac_sno[c]
                         ddz1 = ddz1 * c5
                     end
 
                     # Overburden compaction
-                    if OVERBURDEN_COMPACTION_METHOD[] == OVERBURDEN_COMPACTION_ANDERSON1976
-                        ddz2 = overburden_compaction_anderson1976(burden[c], wx, td, bi)
-                    elseif OVERBURDEN_COMPACTION_METHOD[] == OVERBURDEN_COMPACTION_VIONNET2012
-                        ddz2 = overburden_compaction_vionnet2012(
-                            h2osoi_liq[c, jj], dz[c, jj], burden[c], wx, td, bi)
+                    if ob_method == OVERBURDEN_COMPACTION_ANDERSON1976
+                        ddz2 = _overburden_compaction_anderson1976_dev(
+                            burden, wx, td, bi, ob_tfactor, eta0_anderson)
                     else
-                        error("Unknown overburden_compaction_method")
+                        ddz2 = _overburden_compaction_vionnet2012_dev(
+                            dv.h2osoi_liq[c, jj], dz[c, jj], burden, wx, td, bi,
+                            ceta, eta0_vionnet)
                     end
 
                     # Melt compaction
-                    if imelt[c, jj] == 1
-                        l = col_landunit[c]
-                        if !lakpoi[l] && !urbpoi[l]
-                            ddz3 = smooth_max(0.0, smooth_min(1.0, (swe_old[c, jj] - wx) / wx))
-                            if (swe_old[c, jj] - wx) > 0.0
-                                # Compute total snow water
-                                wsum = 0.0
-                                for jj2 in (snl[c]+1):0
+                    if dv.imelt[c, jj] == 1
+                        l = dv.col_landunit[c]
+                        if !dv.lakpoi[l] && !dv.urbpoi[l]
+                            ddz3 = smooth_max(zero(T),
+                                smooth_min(one(T), (dv.swe_old[c, jj] - wx) / wx))
+                            if (dv.swe_old[c, jj] - wx) > zero(T)
+                                wsum = zero(T)
+                                for jj2 in (snl[c] + 1):0
                                     jj2_idx = jj2 + nlevsno
-                                    wsum += h2osoi_liq[c, jj2_idx] + h2osoi_ice[c, jj2_idx]
+                                    wsum += dv.h2osoi_liq[c, jj2_idx] + dv.h2osoi_ice[c, jj2_idx]
                                 end
-                                # Simple fractional snow during melt
-                                if int_snow[c] > 0.0
-                                    fsno_melt = smooth_min(1.0, wsum / int_snow[c])
+                                if dv.int_snow[c] > zero(T)
+                                    fsno_melt = smooth_min(one(T), wsum / dv.int_snow[c])
                                 else
-                                    fsno_melt = 1.0
+                                    fsno_melt = one(T)
                                 end
-                                if (fsno_melt + frac_h2osfc[c]) > 1.0
-                                    fsno_melt = 1.0 - frac_h2osfc[c]
+                                if (fsno_melt + dv.frac_h2osfc[c]) > one(T)
+                                    fsno_melt = one(T) - dv.frac_h2osfc[c]
                                 end
-                                ddz3 = ddz3 - smooth_max(0.0, (fsno_melt - frac_sno[c]) / frac_sno[c])
+                                ddz3 = ddz3 - smooth_max(zero(T),
+                                    (fsno_melt - dv.frac_sno[c]) / dv.frac_sno[c])
                             end
-                            ddz3 = -1.0 / dtime * ddz3
+                            ddz3 = -one(T) / dtime * ddz3
                         else
-                            ddz3 = -1.0 / dtime * smooth_max(0.0,
-                                (frac_iceold[c, jj] - fi) / frac_iceold[c, jj])
+                            ddz3 = -one(T) / dtime * smooth_max(zero(T),
+                                (dv.frac_iceold[c, jj] - fi) / dv.frac_iceold[c, jj])
                         end
                     else
-                        ddz3 = 0.0
+                        ddz3 = zero(T)
                     end
 
-                    # Wind drift compaction
-                    if WIND_DEPENDENT_SNOW_DENSITY[]
-                        ddz4 = Ref(0.0)
-                        wind_drift_compaction!(bi, forc_wind[g], dz[c, jj],
-                            zpseudo, c, mobile, c, ddz4)
-                        ddz4_val = ddz4[]
+                    # Wind drift compaction (loop-carried via zpseudo / mobile)
+                    if wind_dep
+                        ddz4_val, zpseudo, mobile = _wind_drift_compaction_dev(
+                            bi, dv.forc_wind[g], dz[c, jj], zpseudo, mobile,
+                            drift_gs, rho_min, rho_max, tau_ref)
                     else
-                        ddz4_val = 0.0
+                        ddz4_val = zero(T)
                     end
 
                     # Total compaction rate
                     pdzdtc = ddz1 + ddz2 + ddz3 + ddz4_val
 
-                    # Apply compaction
+                    # Apply compaction (limit to fully saturated thickness)
                     dz[c, jj] = smooth_max(
-                        dz[c, jj] * (1.0 + pdzdtc * dtime),
-                        (h2osoi_ice[c, jj] / DENICE + h2osoi_liq[c, jj] / DENH2O) / frac_sno[c])
+                        dz[c, jj] * (one(T) + pdzdtc * dtime),
+                        (dv.h2osoi_ice[c, jj] / T(DENICE) +
+                         dv.h2osoi_liq[c, jj] / T(DENH2O)) / dv.frac_sno[c])
                 else
-                    mobile[c] = false
+                    mobile = false
                 end
 
                 # Pressure of overlying snow
-                burden[c] = burden[c] + wx
+                burden = burden + wx
             end
         end
     end
+end
+
+function snow_compaction!(
+    dz::AbstractMatrix{<:Real},
+    dtime::Real,
+    snl::AbstractVector{Int},
+    t_soisno::AbstractMatrix{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    imelt::AbstractMatrix{Int},
+    frac_sno::AbstractVector{<:Real},
+    frac_h2osfc::AbstractVector{<:Real},
+    swe_old::AbstractMatrix{<:Real},
+    int_snow::AbstractVector{<:Real},
+    frac_iceold::AbstractMatrix{<:Real},
+    forc_wind::AbstractVector{<:Real},
+    col_gridcell::AbstractVector{Int},
+    col_landunit::AbstractVector{Int},
+    lakpoi::AbstractVector{Bool},
+    urbpoi::AbstractVector{Bool},
+    mask_snow,
+    bounds::UnitRange{Int},
+    nlevsno::Int
+)
+    params = snowhydrology_params
+    FT = eltype(t_soisno)
+
+    # Compaction constants — at working precision (byte-identical on Float64).
+    c3 = FT(2.777e-6)   # [1/s]
+    c4 = FT(0.04)       # [1/K]
+    c5 = FT(2.0)
+
+    # Resolve config / params on the host to plain scalars (no global Ref reaches
+    # the kernel). Validate the overburden method here, on the host, where errors
+    # are well-defined (kernels cannot `error`).
+    ob_method = OVERBURDEN_COMPACTION_METHOD[]
+    if ob_method != OVERBURDEN_COMPACTION_ANDERSON1976 &&
+       ob_method != OVERBURDEN_COMPACTION_VIONNET2012
+        error("Unknown overburden_compaction_method")
+    end
+
+    dv = _SCompDV(;
+        t_soisno = t_soisno, h2osoi_ice = h2osoi_ice, h2osoi_liq = h2osoi_liq,
+        imelt = imelt, swe_old = swe_old, frac_iceold = frac_iceold,
+        frac_sno = frac_sno, frac_h2osfc = frac_h2osfc, int_snow = int_snow,
+        forc_wind = forc_wind, col_gridcell = col_gridcell, col_landunit = col_landunit,
+        lakpoi = lakpoi, urbpoi = urbpoi)
+
+    _launch!(_snowhyd_compaction_kernel!, dz, dv, mask_snow, snl,
+             FT(dtime), nlevsno, c3, c4, c5,
+             FT(params.upplim_destruct_metamorph), ob_method,
+             FT(OVERBURDEN_COMPRESS_TFACTOR[]), FT(params.eta0_anderson),
+             FT(params.ceta), FT(params.eta0_vionnet),
+             WIND_DEPENDENT_SNOW_DENSITY[], FT(params.drift_gs),
+             FT(params.rho_min), FT(params.rho_max), FT(params.tau_ref),
+             first(bounds), last(bounds);
+             ndrange = length(snl))
+    return nothing
 end
 
 # =========================================================================
@@ -1159,11 +1220,22 @@ end
 
 Compute snow overburden compaction using Anderson 1976 formula.
 """
+# Device-generic core: all configuration resolved on the host to plain scalars
+# (ob_tfactor, eta0) so no global Ref / Float64 reaches a Float32-only Metal kernel.
+# Promotes to the working precision; on Float64 this is byte-identical.
+@inline function _overburden_compaction_anderson1976_dev(burden, wx, td, bi,
+                                                         ob_tfactor, eta0)
+    R = promote_type(typeof(burden), typeof(wx), typeof(td), typeof(bi),
+                     typeof(ob_tfactor), typeof(eta0))
+    c2 = R(23.0e-3)  # [m3/kg]
+    return -(R(burden) + R(wx) / R(2)) *
+           exp(-R(ob_tfactor) * R(td) - c2 * R(bi)) / R(eta0)
+end
+
 function overburden_compaction_anderson1976(burden::Real, wx::Real,
                                             td::Real, bi::Real)
-    c2 = 23.0e-3  # [m3/kg]
-    return -(burden + wx / 2.0) * exp(-OVERBURDEN_COMPRESS_TFACTOR[] * td - c2 * bi) /
-           snowhydrology_params.eta0_anderson
+    return _overburden_compaction_anderson1976_dev(burden, wx, td, bi,
+        OVERBURDEN_COMPRESS_TFACTOR[], snowhydrology_params.eta0_anderson)
 end
 
 # =========================================================================
@@ -1175,22 +1247,64 @@ end
 
 Compute snow overburden compaction using Vionnet et al. 2012 formula.
 """
+# Device-generic core: ceta / eta0_vionnet resolved on the host to plain scalars.
+@inline function _overburden_compaction_vionnet2012_dev(h2osoi_liq, dz, burden, wx,
+                                                       td, bi, ceta, eta0)
+    R = promote_type(typeof(h2osoi_liq), typeof(dz), typeof(burden), typeof(wx),
+                     typeof(td), typeof(bi), typeof(ceta), typeof(eta0))
+    aeta = R(0.1)
+    beta = R(0.023)
+
+    f1 = R(1) / (R(1) + R(60.0) * R(h2osoi_liq) / (R(DENH2O) * R(dz)))
+    f2 = R(4.0)  # fixed to maximum value
+    eta = f1 * f2 * (R(bi) / R(ceta)) * exp(aeta * R(td) + beta * R(bi)) * R(eta0)
+    return -(R(burden) + R(wx) / R(2)) / eta
+end
+
 function overburden_compaction_vionnet2012(h2osoi_liq::Real, dz::Real,
                                            burden::Real, wx::Real,
                                            td::Real, bi::Real)
     params = snowhydrology_params
-    aeta = 0.1
-    beta = 0.023
-
-    f1 = 1.0 / (1.0 + 60.0 * h2osoi_liq / (DENH2O * dz))
-    f2 = 4.0  # fixed to maximum value
-    eta = f1 * f2 * (bi / params.ceta) * exp(aeta * td + beta * bi) * params.eta0_vionnet
-    return -(burden + wx / 2.0) / eta
+    return _overburden_compaction_vionnet2012_dev(h2osoi_liq, dz, burden, wx, td, bi,
+        params.ceta, params.eta0_vionnet)
 end
 
 # =========================================================================
 # WindDriftCompaction
 # =========================================================================
+
+# Device-generic core: returns (compaction_rate, zpseudo, mobile) as in-thread
+# scalars instead of mutating Ref/Vector cells, so it is callable inside a
+# per-column GPU kernel. drift_gs / rho_min / rho_max / tau_ref resolved on the host.
+# On Float64 this is byte-identical to the Vector/Ref version below.
+@inline function _wind_drift_compaction_dev(bi, forc_wind, dz, zpseudo, mobile,
+                                           drift_gs, rho_min, rho_max, tau_ref)
+    R = promote_type(typeof(bi), typeof(forc_wind), typeof(dz), typeof(zpseudo),
+                     typeof(drift_gs), typeof(rho_min), typeof(rho_max), typeof(tau_ref))
+    drift_sph = R(1.0)
+    rmin = R(rho_min)
+
+    if mobile
+        Frho = R(1.25) - R(0.0042) * (smooth_max(rmin, R(bi)) - rmin)
+        MO = R(0.34) * (-R(0.583) * R(drift_gs) - R(0.833) * drift_sph + R(0.833)) +
+             R(0.66) * Frho
+        SI = -R(2.868) * exp(-R(0.085) * R(forc_wind)) + R(1) + MO
+
+        if SI > R(0)
+            SI = smooth_min(SI, R(3.25))
+            zp = R(zpseudo) + R(0.5) * R(dz) * (R(3.25) - SI)
+            gamma_drift = SI * exp(-zp / R(0.1))
+            tau_inverse = gamma_drift / R(tau_ref)
+            crate = -smooth_max(R(0), R(rho_max) - R(bi)) * tau_inverse
+            zp = zp + R(0.5) * R(dz) * (R(3.25) - SI)
+            return (crate, zp, true)
+        else  # SI <= 0
+            return (R(0), R(zpseudo), false)
+        end
+    else  # .not. mobile
+        return (R(0), R(zpseudo), false)
+    end
+end
 
 """
     wind_drift_compaction!(bi, forc_wind, dz,
