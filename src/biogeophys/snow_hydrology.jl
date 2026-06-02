@@ -549,17 +549,17 @@ snowhyd_initialize_snow_pack_bulk!(snl, mask, zi, dz, z, t_soisno, frac_iceold,
 Update top layer of snow pack with various fluxes into and out of the top layer.
 """
 function update_state_top_layer_fluxes!(
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
     dtime::Real,
-    snl::Vector{Int},
-    frac_sno_eff::Vector{<:Real},
-    qflx_soliddew_to_top_layer::Vector{<:Real},
-    qflx_solidevap_from_top_layer::Vector{<:Real},
-    qflx_liq_grnd::Vector{<:Real},
-    qflx_liqdew_to_top_layer::Vector{<:Real},
-    qflx_liqevap_from_top_layer::Vector{<:Real},
-    mask_snow::BitVector,
+    snl::AbstractVector{<:Integer},
+    frac_sno_eff::AbstractVector{<:Real},
+    qflx_soliddew_to_top_layer::AbstractVector{<:Real},
+    qflx_solidevap_from_top_layer::AbstractVector{<:Real},
+    qflx_liq_grnd::AbstractVector{<:Real},
+    qflx_liqdew_to_top_layer::AbstractVector{<:Real},
+    qflx_liqevap_from_top_layer::AbstractVector{<:Real},
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int
 )
@@ -575,6 +575,7 @@ end
         h2osoi_liq, dtime, nlevsno::Int, cmin::Int, cmax::Int)
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask_snow[c]
+        T = eltype(h2osoi_ice)
         lev_top = snl[c] + 1
         jj = lev_top + nlevsno  # Julia index for top snow layer
 
@@ -587,8 +588,8 @@ end
             qflx_liqevap_from_top_layer[c]) * dtime
 
         # Clamp to non-negative (physical constraint, not a smooth approximation)
-        h2osoi_ice[c, jj] = max(0.0, h2osoi_ice[c, jj])
-        h2osoi_liq[c, jj] = max(0.0, h2osoi_liq[c, jj])
+        h2osoi_ice[c, jj] = max(zero(T), h2osoi_ice[c, jj])
+        h2osoi_liq[c, jj] = max(zero(T), h2osoi_liq[c, jj])
     end
 end
 
@@ -613,69 +614,83 @@ Calculate liquid percolation through the snow pack for bulk water.
 qflx_snow_percolation[c,j] gives percolation out of bottom of layer j.
 """
 function bulk_flux_snow_percolation!(
-    qflx_snow_percolation::Matrix{<:Real},
+    qflx_snow_percolation::AbstractMatrix{<:Real},
     dtime::Real,
-    snl::Vector{Int},
-    dz::Matrix{<:Real},
-    frac_sno_eff::Vector{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    mask_snow::BitVector,
+    snl::AbstractVector{<:Integer},
+    dz::AbstractMatrix{<:Real},
+    frac_sno_eff::AbstractVector{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int
 )
     params = snowhydrology_params
+    # Resolve scalar params to the working element type on the host so no Float64
+    # reaches a Float32-only backend (byte-identical on Float64: FT(0.05)===0.05).
+    FT = eltype(qflx_snow_percolation)
+    snowhyd_snow_percolation_flux!(qflx_snow_percolation, mask_snow, snl, dz,
+        frac_sno_eff, h2osoi_ice, h2osoi_liq, dtime, nlevsno,
+        FT(params.wimp), FT(params.ssi), bounds)
+end
 
-    # Temporary arrays for porosity/volume calculations
-    nc = length(snl)
-    FT = eltype(h2osoi_liq)
-    vol_liq = zeros(FT, nc, nlevsno)
-    vol_ice = zeros(FT, nc, nlevsno)
-    eff_porosity = zeros(FT, nc, nlevsno)
+# Partial volume of ice / effective porosity / partial volume of liquid for one
+# snow layer. eltype-generic so the same code path is byte-identical on Float64
+# (CPU) and runs on the Float32-only Metal backend.
+@inline function _snowhyd_perc_vols(h2osoi_ice_cjj, h2osoi_liq_cjj, dz_cjj, fse)
+    T = promote_type(typeof(h2osoi_liq_cjj), typeof(dz_cjj), typeof(fse))
+    vol_ice = smooth_min(one(T), h2osoi_ice_cjj / (dz_cjj * fse * T(DENICE)))
+    eff_porosity = one(T) - vol_ice
+    vol_liq = smooth_min(eff_porosity, h2osoi_liq_cjj / (dz_cjj * fse * T(DENH2O)))
+    return vol_ice, eff_porosity, vol_liq
+end
 
-    # Porosity and partial volume
-    for j in (-nlevsno+1):0
-        jj = j + nlevsno
-        for c in bounds
-            mask_snow[c] || continue
-            if j >= snl[c] + 1
-                vol_ice[c, jj] = smooth_min(1.0, h2osoi_ice[c, jj] / (dz[c, jj] * frac_sno_eff[c] * DENICE))
-                eff_porosity[c, jj] = 1.0 - vol_ice[c, jj]
-                vol_liq[c, jj] = smooth_min(eff_porosity[c, jj],
-                    h2osoi_liq[c, jj] / (dz[c, jj] * frac_sno_eff[c] * DENH2O))
-            end
-        end
-    end
-
-    # Calculate percolation
-    for j in (-nlevsno+1):0
-        jj = j + nlevsno
-        for c in bounds
-            mask_snow[c] || continue
-            if j >= snl[c] + 1
-                if j <= -1
-                    jj_next = (j + 1) + nlevsno
-                    if eff_porosity[c, jj] < params.wimp || eff_porosity[c, jj_next] < params.wimp
-                        qflx_snow_percolation[c, jj] = 0.0
-                    else
-                        qflx_snow_percolation[c, jj] = smooth_max(0.0,
-                            (vol_liq[c, jj] - params.ssi * eff_porosity[c, jj]) *
-                            dz[c, jj] * frac_sno_eff[c])
-                        qflx_snow_percolation[c, jj] = smooth_min(qflx_snow_percolation[c, jj],
-                            (1.0 - vol_ice[c, jj_next] - vol_liq[c, jj_next]) *
-                            dz[c, jj_next] * frac_sno_eff[c])
-                    end
-                else  # j == 0, bottom layer
-                    qflx_snow_percolation[c, jj] = smooth_max(0.0,
-                        (vol_liq[c, jj] - params.ssi * eff_porosity[c, jj]) *
-                        dz[c, jj] * frac_sno_eff[c])
+# Per-column kernel with an internal sequential snow-layer loop. For each layer j
+# (from the top snow layer snl+1 down to 0) percolation out of the bottom depends
+# on the layer below (j+1), so the porosity/volume of the relevant layers is
+# recomputed inline (no shared scratch arrays — device-resident, race-free).
+@kernel function _snowhyd_snow_percolation_flux_kernel!(qflx_snow_percolation,
+        @Const(mask_snow), @Const(snl), @Const(dz), @Const(frac_sno_eff),
+        @Const(h2osoi_ice), @Const(h2osoi_liq), dtime, nlevsno::Int,
+        wimp, ssi, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        T = eltype(qflx_snow_percolation)
+        fse = frac_sno_eff[c]
+        wimp_T = T(wimp)
+        ssi_T = T(ssi)
+        for j in (snl[c] + 1):0
+            jj = j + nlevsno
+            vol_ice, eff_porosity, vol_liq =
+                _snowhyd_perc_vols(h2osoi_ice[c, jj], h2osoi_liq[c, jj], dz[c, jj], fse)
+            if j <= -1
+                jj_next = (j + 1) + nlevsno
+                vol_ice_n, eff_porosity_n, vol_liq_n =
+                    _snowhyd_perc_vols(h2osoi_ice[c, jj_next], h2osoi_liq[c, jj_next],
+                                       dz[c, jj_next], fse)
+                if eff_porosity < wimp_T || eff_porosity_n < wimp_T
+                    q = zero(T)
+                else
+                    q = smooth_max(zero(T),
+                        (vol_liq - ssi_T * eff_porosity) * dz[c, jj] * fse)
+                    q = smooth_min(q,
+                        (one(T) - vol_ice_n - vol_liq_n) * dz[c, jj_next] * fse)
                 end
-                # Convert from m to mm H2O/s
-                qflx_snow_percolation[c, jj] = (qflx_snow_percolation[c, jj] * 1000.0) / dtime
+            else  # j == 0, bottom layer
+                q = smooth_max(zero(T),
+                    (vol_liq - ssi_T * eff_porosity) * dz[c, jj] * fse)
             end
+            # Convert from m to mm H2O/s
+            qflx_snow_percolation[c, jj] = (q * T(1000)) / dtime
         end
     end
 end
+
+snowhyd_snow_percolation_flux!(qflx_snow_percolation, mask_snow, snl, dz,
+        frac_sno_eff, h2osoi_ice, h2osoi_liq, dtime, nlevsno, wimp, ssi, bounds) =
+    _launch!(_snowhyd_snow_percolation_flux_kernel!, qflx_snow_percolation, mask_snow,
+             snl, dz, frac_sno_eff, h2osoi_ice, h2osoi_liq, dtime, nlevsno,
+             wimp, ssi, first(bounds), last(bounds); ndrange = length(snl))
 
 # =========================================================================
 # UpdateState_SnowPercolation
@@ -688,11 +703,11 @@ end
 Update h2osoi_liq for snow percolation (bulk or one tracer).
 """
 function update_state_snow_percolation!(
-    h2osoi_liq::Matrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
     dtime::Real,
-    snl::Vector{Int},
-    qflx_snow_percolation::Matrix{<:Real},
-    mask_snow::BitVector,
+    snl::AbstractVector{<:Integer},
+    qflx_snow_percolation::AbstractMatrix{<:Real},
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int
 )
@@ -733,145 +748,130 @@ snowhyd_snow_percolation!(h2osoi_liq, mask_snow, snl, qflx_snow_percolation, dti
 
 Calculate and apply fluxes of aerosols through the snow pack.
 """
+# Immutable device-view of just the 8 snow-layer aerosol-mass arrays the kernel
+# reads/writes. AerosolData itself is a `mutable struct` (not isbits even when its
+# fields are device arrays), so it cannot cross into a GPU kernel; this isbits
+# bundle (Adapt.@adapt_structure) can. Fields alias the same device arrays, so
+# writes land back in the original AerosolData.
+Base.@kwdef struct _AeroPercDV{M}
+    mss_bcphi_col::M
+    mss_bcpho_col::M
+    mss_ocphi_col::M
+    mss_ocpho_col::M
+    mss_dst1_col::M
+    mss_dst2_col::M
+    mss_dst3_col::M
+    mss_dst4_col::M
+end
+Adapt.@adapt_structure _AeroPercDV
+
+_aero_perc_dv(aer) = _AeroPercDV(;
+    mss_bcphi_col = aer.mss_bcphi_col, mss_bcpho_col = aer.mss_bcpho_col,
+    mss_ocphi_col = aer.mss_ocphi_col, mss_ocpho_col = aer.mss_ocpho_col,
+    mss_dst1_col  = aer.mss_dst1_col,  mss_dst2_col  = aer.mss_dst2_col,
+    mss_dst3_col  = aer.mss_dst3_col,  mss_dst4_col  = aer.mss_dst4_col)
+
 function calc_and_apply_aerosol_fluxes!(
     aerosol::AerosolData,
     dtime::Real,
-    snl::Vector{Int},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    qflx_snow_percolation::Matrix{<:Real},
-    mask_snow::BitVector,
+    snl::AbstractVector{<:Integer},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    qflx_snow_percolation::AbstractMatrix{<:Real},
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int
 )
     params = snowhydrology_params
-    nc = length(snl)
-
-    # Initialize incoming fluxes
+    # Scalar scavenging factors resolved to the working element type on the host
+    # (no Float64 reaches a Float32-only backend; byte-identical on Float64).
     FT = eltype(h2osoi_liq)
-    qin_bc_phi = zeros(FT, nc)
-    qin_bc_pho = zeros(FT, nc)
-    qin_oc_phi = zeros(FT, nc)
-    qin_oc_pho = zeros(FT, nc)
-    qin_dst1   = zeros(FT, nc)
-    qin_dst2   = zeros(FT, nc)
-    qin_dst3   = zeros(FT, nc)
-    qin_dst4   = zeros(FT, nc)
+    snowhyd_aerosol_fluxes!(_aero_perc_dv(aerosol), mask_snow, snl, h2osoi_ice, h2osoi_liq,
+        qflx_snow_percolation, dtime, nlevsno,
+        FT(params.scvng_fct_mlt_sf), FT(params.scvng_fct_mlt_bcphi),
+        FT(params.scvng_fct_mlt_bcpho), FT(SCVNG_FCT_MLT_OCPHI), FT(SCVNG_FCT_MLT_OCPHO),
+        FT(params.scvng_fct_mlt_dst1), FT(params.scvng_fct_mlt_dst2),
+        FT(params.scvng_fct_mlt_dst3), FT(params.scvng_fct_mlt_dst4), bounds)
+end
 
-    for j in (-nlevsno+1):0
-        jj = j + nlevsno
-        for c in bounds
-            mask_snow[c] || continue
-            if j >= snl[c] + 1
+# One aerosol species worth of: add incoming flux from the layer above, compute
+# the outgoing flux out the bottom (proportional to concentration × scavenging
+# ratio, capped at the available mass), update the layer mass, and return the new
+# qin to carry to the layer below. eltype-generic (GPU/AD safe).
+@inline function _snowhyd_aerosol_species(mss_cjj, qin, qflx_perc, scvng, mss_liqice, dtime)
+    T = promote_type(typeof(mss_cjj), typeof(qin), typeof(qflx_perc),
+                     typeof(scvng), typeof(mss_liqice), typeof(dtime))
+    mss = mss_cjj + qin * dtime
+    qout = qflx_perc * scvng * (mss / mss_liqice)
+    if qout * dtime > mss
+        qout = mss / dtime
+        mss = zero(T)
+    else
+        mss = mss - qout * dtime
+    end
+    return mss, qout
+end
 
-                # Add incoming flux
-                aerosol.mss_bcphi_col[c, jj] += qin_bc_phi[c] * dtime
-                aerosol.mss_bcpho_col[c, jj] += qin_bc_pho[c] * dtime
-                aerosol.mss_ocphi_col[c, jj] += qin_oc_phi[c] * dtime
-                aerosol.mss_ocpho_col[c, jj] += qin_oc_pho[c] * dtime
-                aerosol.mss_dst1_col[c, jj]  += qin_dst1[c] * dtime
-                aerosol.mss_dst2_col[c, jj]  += qin_dst2[c] * dtime
-                aerosol.mss_dst3_col[c, jj]  += qin_dst3[c] * dtime
-                aerosol.mss_dst4_col[c, jj]  += qin_dst4[c] * dtime
+# Per-column kernel: aerosol mass transport down the snow column. The outgoing
+# flux of layer j becomes the incoming flux of layer j+1, so the qin_* state is
+# loop-carried — the layer loop runs sequentially in-thread (one thread/column).
+@kernel function _snowhyd_aerosol_fluxes_kernel!(@Const(_probe), aerosol, @Const(mask_snow),
+        @Const(snl), @Const(h2osoi_ice), @Const(h2osoi_liq),
+        @Const(qflx_snow_percolation), dtime, nlevsno::Int,
+        sf, bcphi, bcpho, ocphi, ocpho, dst1, dst2, dst3, dst4, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_snow[c]
+        T = eltype(h2osoi_liq)
+        sf_T = T(sf)
+        # Loop-carried incoming fluxes (Fortran qin_*), zero at the top interface.
+        qin_bc_phi = zero(T); qin_bc_pho = zero(T)
+        qin_oc_phi = zero(T); qin_oc_pho = zero(T)
+        qin_dst1 = zero(T); qin_dst2 = zero(T); qin_dst3 = zero(T); qin_dst4 = zero(T)
+        for j in (snl[c] + 1):0
+            jj = j + nlevsno
+            qfp = qflx_snow_percolation[c, jj]
 
-                # Mass of ice+water (avoid division by zero)
-                mss_liqice = h2osoi_liq[c, jj] + h2osoi_ice[c, jj]
-                if mss_liqice < 1.0e-30
-                    mss_liqice = 1.0e-30
-                end
-
-                # Compute outgoing fluxes for each aerosol species
-                # BCPHI
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       params.scvng_fct_mlt_bcphi * (aerosol.mss_bcphi_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_bcphi_col[c, jj]
-                    qout = aerosol.mss_bcphi_col[c, jj] / dtime
-                    aerosol.mss_bcphi_col[c, jj] = 0.0
-                else
-                    aerosol.mss_bcphi_col[c, jj] -= qout * dtime
-                end
-                qin_bc_phi[c] = qout
-
-                # BCPHO
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       params.scvng_fct_mlt_bcpho * (aerosol.mss_bcpho_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_bcpho_col[c, jj]
-                    qout = aerosol.mss_bcpho_col[c, jj] / dtime
-                    aerosol.mss_bcpho_col[c, jj] = 0.0
-                else
-                    aerosol.mss_bcpho_col[c, jj] -= qout * dtime
-                end
-                qin_bc_pho[c] = qout
-
-                # OCPHI
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       SCVNG_FCT_MLT_OCPHI * (aerosol.mss_ocphi_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_ocphi_col[c, jj]
-                    qout = aerosol.mss_ocphi_col[c, jj] / dtime
-                    aerosol.mss_ocphi_col[c, jj] = 0.0
-                else
-                    aerosol.mss_ocphi_col[c, jj] -= qout * dtime
-                end
-                qin_oc_phi[c] = qout
-
-                # OCPHO
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       SCVNG_FCT_MLT_OCPHO * (aerosol.mss_ocpho_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_ocpho_col[c, jj]
-                    qout = aerosol.mss_ocpho_col[c, jj] / dtime
-                    aerosol.mss_ocpho_col[c, jj] = 0.0
-                else
-                    aerosol.mss_ocpho_col[c, jj] -= qout * dtime
-                end
-                qin_oc_pho[c] = qout
-
-                # DST1
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       params.scvng_fct_mlt_dst1 * (aerosol.mss_dst1_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_dst1_col[c, jj]
-                    qout = aerosol.mss_dst1_col[c, jj] / dtime
-                    aerosol.mss_dst1_col[c, jj] = 0.0
-                else
-                    aerosol.mss_dst1_col[c, jj] -= qout * dtime
-                end
-                qin_dst1[c] = qout
-
-                # DST2
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       params.scvng_fct_mlt_dst2 * (aerosol.mss_dst2_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_dst2_col[c, jj]
-                    qout = aerosol.mss_dst2_col[c, jj] / dtime
-                    aerosol.mss_dst2_col[c, jj] = 0.0
-                else
-                    aerosol.mss_dst2_col[c, jj] -= qout * dtime
-                end
-                qin_dst2[c] = qout
-
-                # DST3
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       params.scvng_fct_mlt_dst3 * (aerosol.mss_dst3_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_dst3_col[c, jj]
-                    qout = aerosol.mss_dst3_col[c, jj] / dtime
-                    aerosol.mss_dst3_col[c, jj] = 0.0
-                else
-                    aerosol.mss_dst3_col[c, jj] -= qout * dtime
-                end
-                qin_dst3[c] = qout
-
-                # DST4
-                qout = qflx_snow_percolation[c, jj] * params.scvng_fct_mlt_sf *
-                       params.scvng_fct_mlt_dst4 * (aerosol.mss_dst4_col[c, jj] / mss_liqice)
-                if qout * dtime > aerosol.mss_dst4_col[c, jj]
-                    qout = aerosol.mss_dst4_col[c, jj] / dtime
-                    aerosol.mss_dst4_col[c, jj] = 0.0
-                else
-                    aerosol.mss_dst4_col[c, jj] -= qout * dtime
-                end
-                qin_dst4[c] = qout
+            # Mass of ice+water (avoid division by zero)
+            mss_liqice = h2osoi_liq[c, jj] + h2osoi_ice[c, jj]
+            if mss_liqice < T(1.0e-30)
+                mss_liqice = T(1.0e-30)
             end
+
+            m, qin_bc_phi = _snowhyd_aerosol_species(aerosol.mss_bcphi_col[c, jj],
+                qin_bc_phi, qfp, sf_T * T(bcphi), mss_liqice, dtime)
+            aerosol.mss_bcphi_col[c, jj] = m
+            m, qin_bc_pho = _snowhyd_aerosol_species(aerosol.mss_bcpho_col[c, jj],
+                qin_bc_pho, qfp, sf_T * T(bcpho), mss_liqice, dtime)
+            aerosol.mss_bcpho_col[c, jj] = m
+            m, qin_oc_phi = _snowhyd_aerosol_species(aerosol.mss_ocphi_col[c, jj],
+                qin_oc_phi, qfp, sf_T * T(ocphi), mss_liqice, dtime)
+            aerosol.mss_ocphi_col[c, jj] = m
+            m, qin_oc_pho = _snowhyd_aerosol_species(aerosol.mss_ocpho_col[c, jj],
+                qin_oc_pho, qfp, sf_T * T(ocpho), mss_liqice, dtime)
+            aerosol.mss_ocpho_col[c, jj] = m
+            m, qin_dst1 = _snowhyd_aerosol_species(aerosol.mss_dst1_col[c, jj],
+                qin_dst1, qfp, sf_T * T(dst1), mss_liqice, dtime)
+            aerosol.mss_dst1_col[c, jj] = m
+            m, qin_dst2 = _snowhyd_aerosol_species(aerosol.mss_dst2_col[c, jj],
+                qin_dst2, qfp, sf_T * T(dst2), mss_liqice, dtime)
+            aerosol.mss_dst2_col[c, jj] = m
+            m, qin_dst3 = _snowhyd_aerosol_species(aerosol.mss_dst3_col[c, jj],
+                qin_dst3, qfp, sf_T * T(dst3), mss_liqice, dtime)
+            aerosol.mss_dst3_col[c, jj] = m
+            m, qin_dst4 = _snowhyd_aerosol_species(aerosol.mss_dst4_col[c, jj],
+                qin_dst4, qfp, sf_T * T(dst4), mss_liqice, dtime)
+            aerosol.mss_dst4_col[c, jj] = m
         end
     end
 end
+
+snowhyd_aerosol_fluxes!(aerosol, mask_snow, snl, h2osoi_ice, h2osoi_liq,
+        qflx_snow_percolation, dtime, nlevsno, sf, bcphi, bcpho, ocphi, ocpho,
+        dst1, dst2, dst3, dst4, bounds) =
+    _launch!(_snowhyd_aerosol_fluxes_kernel!, aerosol.mss_bcphi_col, aerosol, mask_snow,
+             snl, h2osoi_ice, h2osoi_liq, qflx_snow_percolation, dtime, nlevsno,
+             sf, bcphi, bcpho, ocphi, ocpho, dst1, dst2, dst3, dst4,
+             first(bounds), last(bounds); ndrange = length(snl))
 
 # =========================================================================
 # PostPercolation_AdjustLayerThicknesses
@@ -884,11 +884,11 @@ end
 Adjust layer thickness for any water+ice content changes after percolation.
 """
 function post_percolation_adjust_layer_thicknesses!(
-    dz::Matrix{<:Real},
-    snl::Vector{Int},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    mask_snow::BitVector,
+    dz::AbstractMatrix{<:Real},
+    snl::AbstractVector{<:Integer},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int
 )
@@ -901,10 +901,11 @@ end
         cmin::Int, cmax::Int)
     c, jj = @index(Global, NTuple)
     @inbounds if cmin <= c <= cmax && mask_snow[c]
+        T = eltype(dz)
         j = jj - nlevsno  # Fortran layer index
         if j >= snl[c] + 1
             dz[c, jj] = smooth_max(dz[c, jj],
-                h2osoi_liq[c, jj] / DENH2O + h2osoi_ice[c, jj] / DENICE)
+                h2osoi_liq[c, jj] / T(DENH2O) + h2osoi_ice[c, jj] / T(DENICE))
         end
     end
 end
@@ -927,37 +928,49 @@ snowhyd_adjust_layer_thicknesses!(dz, mask_snow, snl, h2osoi_ice, h2osoi_liq, nl
 Update int_snow, and reset accumulated snow when no snow present.
 """
 function bulkdiag_snow_water_accumulated_snow!(
-    int_snow::Vector{<:Real},
-    frac_sno::Vector{<:Real},
-    snow_depth::Vector{<:Real},
+    int_snow::AbstractVector{<:Real},
+    frac_sno::AbstractVector{<:Real},
+    snow_depth::AbstractVector{<:Real},
     dtime::Real,
-    frac_sno_eff::Vector{<:Real},
-    qflx_soliddew_to_top_layer::Vector{<:Real},
-    qflx_liqdew_to_top_layer::Vector{<:Real},
-    qflx_liq_grnd::Vector{<:Real},
-    h2osno_no_layers::Vector{<:Real},
-    mask_snow::BitVector,
-    mask_nosnow::BitVector,
+    frac_sno_eff::AbstractVector{<:Real},
+    qflx_soliddew_to_top_layer::AbstractVector{<:Real},
+    qflx_liqdew_to_top_layer::AbstractVector{<:Real},
+    qflx_liq_grnd::AbstractVector{<:Real},
+    h2osno_no_layers::AbstractVector{<:Real},
+    mask_snow::AbstractVector{Bool},
+    mask_nosnow::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
-    for c in bounds
+    snowhyd_accumulated_snow!(int_snow, frac_sno, snow_depth, mask_snow, mask_nosnow,
+        frac_sno_eff, qflx_soliddew_to_top_layer, qflx_liqdew_to_top_layer,
+        qflx_liq_grnd, h2osno_no_layers, dtime, bounds)
+end
+
+@kernel function _snowhyd_accumulated_snow_kernel!(int_snow, @Const(mask_snow),
+        @Const(mask_nosnow), frac_sno, snow_depth, @Const(frac_sno_eff),
+        @Const(qflx_soliddew_to_top_layer), @Const(qflx_liqdew_to_top_layer),
+        @Const(qflx_liq_grnd), @Const(h2osno_no_layers), dtime, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
         if mask_snow[c]
             int_snow[c] = int_snow[c] + frac_sno_eff[c] *
                 (qflx_soliddew_to_top_layer[c] + qflx_liqdew_to_top_layer[c] +
                  qflx_liq_grnd[c]) * dtime
-        end
-    end
-
-    for c in bounds
-        if mask_nosnow[c]
-            if h2osno_no_layers[c] <= 0.0
-                int_snow[c] = 0.0
-                frac_sno[c] = 0.0
-                snow_depth[c] = 0.0
-            end
+        elseif mask_nosnow[c] && h2osno_no_layers[c] <= zero(eltype(int_snow))
+            int_snow[c] = zero(eltype(int_snow))
+            frac_sno[c] = zero(eltype(frac_sno))
+            snow_depth[c] = zero(eltype(snow_depth))
         end
     end
 end
+
+snowhyd_accumulated_snow!(int_snow, frac_sno, snow_depth, mask_snow, mask_nosnow,
+        frac_sno_eff, qflx_soliddew_to_top_layer, qflx_liqdew_to_top_layer,
+        qflx_liq_grnd, h2osno_no_layers, dtime, bounds) =
+    _launch!(_snowhyd_accumulated_snow_kernel!, int_snow, mask_snow, mask_nosnow,
+             frac_sno, snow_depth, frac_sno_eff, qflx_soliddew_to_top_layer,
+             qflx_liqdew_to_top_layer, qflx_liq_grnd, h2osno_no_layers, dtime,
+             first(bounds), last(bounds))
 
 # =========================================================================
 # SumFlux_AddSnowPercolation
@@ -971,31 +984,46 @@ end
 Calculate summed fluxes accounting for snow percolation.
 """
 function sum_flux_add_snow_percolation!(
-    qflx_snow_drain::Vector{<:Real},
-    qflx_rain_plus_snomelt::Vector{<:Real},
-    frac_sno_eff::Vector{<:Real},
-    qflx_snow_percolation_bottom::Vector{<:Real},
-    qflx_liq_grnd::Vector{<:Real},
-    qflx_snomelt::Vector{<:Real},
-    mask_snow::BitVector,
-    mask_nosnow::BitVector,
+    qflx_snow_drain::AbstractVector{<:Real},
+    qflx_rain_plus_snomelt::AbstractVector{<:Real},
+    frac_sno_eff::AbstractVector{<:Real},
+    qflx_snow_percolation_bottom::AbstractVector{<:Real},
+    qflx_liq_grnd::AbstractVector{<:Real},
+    qflx_snomelt::AbstractVector{<:Real},
+    mask_snow::AbstractVector{Bool},
+    mask_nosnow::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
-    for c in bounds
+    snowhyd_sum_flux_percolation!(qflx_snow_drain, qflx_rain_plus_snomelt, mask_snow,
+        mask_nosnow, frac_sno_eff, qflx_snow_percolation_bottom, qflx_liq_grnd,
+        qflx_snomelt, bounds)
+end
+
+@kernel function _snowhyd_sum_flux_percolation_kernel!(qflx_snow_drain,
+        @Const(mask_snow), @Const(mask_nosnow), qflx_rain_plus_snomelt,
+        @Const(frac_sno_eff), @Const(qflx_snow_percolation_bottom),
+        @Const(qflx_liq_grnd), @Const(qflx_snomelt), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        T = eltype(qflx_snow_drain)
         if mask_snow[c]
             qflx_snow_drain[c] = qflx_snow_drain[c] + qflx_snow_percolation_bottom[c]
             qflx_rain_plus_snomelt[c] = qflx_snow_percolation_bottom[c] +
-                (1.0 - frac_sno_eff[c]) * qflx_liq_grnd[c]
-        end
-    end
-
-    for c in bounds
-        if mask_nosnow[c]
+                (one(T) - frac_sno_eff[c]) * qflx_liq_grnd[c]
+        elseif mask_nosnow[c]
             qflx_snow_drain[c] = qflx_snomelt[c]
             qflx_rain_plus_snomelt[c] = qflx_liq_grnd[c] + qflx_snomelt[c]
         end
     end
 end
+
+snowhyd_sum_flux_percolation!(qflx_snow_drain, qflx_rain_plus_snomelt, mask_snow,
+        mask_nosnow, frac_sno_eff, qflx_snow_percolation_bottom, qflx_liq_grnd,
+        qflx_snomelt, bounds) =
+    _launch!(_snowhyd_sum_flux_percolation_kernel!, qflx_snow_drain, mask_snow,
+             mask_nosnow, qflx_rain_plus_snomelt, frac_sno_eff,
+             qflx_snow_percolation_bottom, qflx_liq_grnd, qflx_snomelt,
+             first(bounds), last(bounds))
 
 # =========================================================================
 # SnowCompaction
