@@ -603,6 +603,189 @@ end
 # WaterTable
 # =========================================================================
 
+# --------------------------------------------------------------------------
+# water_table! : ONE thread per (hydrology) column. The whole WaterTable
+# subroutine is per-column with internal SEQUENTIAL nlevsoi level searches
+# (jwt water-table search, qcharge rise/deepen cascade with loop-carried zwt,
+# perched-table frost/saturation search) — exactly the loop-carried pattern
+# from soil_temperature.jl / soil_water.jl. Each thread runs the full nested
+# search in-thread and writes only its own column's outputs.
+#
+# The many soil-column arrays are grouped into two immutable device-view
+# bundles (Adapt.@adapt_structure'd); field names mirror the original Julia
+# locals so the kernel body reads verbatim. On the host path the same bundles
+# are built from CPU arrays, so CPU stays byte-identical.
+# --------------------------------------------------------------------------
+
+# Soil-state / geometry inputs (read-only) the search loops touch.
+Base.@kwdef struct _WTInDV{V,M}
+    col_dz::M; col_z::M; col_zi::M
+    t_soisno::M; watsat::M; sucsat::M; bsw::M
+    qcharge::V
+    h2osoi_liq::M; h2osoi_ice::M
+end
+Adapt.@adapt_structure _WTInDV
+
+# State outputs (written and/or read-modified) the search loops touch.
+Base.@kwdef struct _WTOutDV{V,M}
+    zwt::V; wa::V
+    zwt_perched::V; frost_table::V; h2osoi_vol::M
+    qflx_drain::V; qflx_rsub_sat::V; qflx_drain_perched::V
+end
+Adapt.@adapt_structure _WTOutDV
+
+@kernel function _water_table_kernel!(zwt_out, odv, @Const(idv), @Const(mask),
+        nlevsoi::Int, joff::Int, joff_zi::Int, dtime, aq_sp_yield_min, tfrz, denh2o, denice)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(zwt_out)
+        aqy   = T(aq_sp_yield_min)
+        e3    = T(1.0e3)
+        thou  = T(1000.0)
+        zr    = zero(T)
+        on    = one(T)
+        TFRZl = T(tfrz)
+        DH2O  = T(denh2o)
+        DICE  = T(denice)
+
+        # ---- init drainage fluxes ----
+        odv.qflx_drain[c]         = zr
+        odv.qflx_rsub_sat[c]      = zr
+        odv.qflx_drain_perched[c] = zr
+
+        # ---- find jwt: index of soil layer right above the water table ----
+        jwt = nlevsoi
+        for j in 1:nlevsoi
+            if odv.zwt[c] <= idv.col_zi[c, joff_zi + j]
+                jwt = j - 1
+                break
+            end
+        end
+
+        # ============================ QCHARGE ============================
+        # analytical expression for aquifer specific yield
+        rous = idv.watsat[c, nlevsoi] *
+            (on - (on + e3 * odv.zwt[c] / idv.sucsat[c, nlevsoi])^(-on / idv.bsw[c, nlevsoi]))
+        rous = smooth_max(rous, aqy)
+
+        if jwt == nlevsoi
+            # water table below soil column
+            odv.wa[c]  = odv.wa[c] + idv.qcharge[c] * dtime
+            odv.zwt[c] = odv.zwt[c] - (idv.qcharge[c] * dtime) / thou / rous
+        else
+            # water table within soil layers
+            qcharge_tot = idv.qcharge[c] * dtime
+            if qcharge_tot > zr  # rising water table
+                for j in (jwt+1):-1:1
+                    s_y = idv.watsat[c, j] *
+                        (on - (on + e3 * odv.zwt[c] / idv.sucsat[c, j])^(-on / idv.bsw[c, j]))
+                    s_y = smooth_max(s_y, aqy)
+
+                    qcharge_layer = smooth_min(qcharge_tot,
+                        s_y * (odv.zwt[c] - idv.col_zi[c, joff_zi + j - 1]) * e3)
+                    qcharge_layer = smooth_max(qcharge_layer, zr)
+
+                    if s_y > zr
+                        odv.zwt[c] = odv.zwt[c] - qcharge_layer / s_y / thou
+                    end
+
+                    qcharge_tot = qcharge_tot - qcharge_layer
+                    if qcharge_tot <= zr
+                        break
+                    end
+                end
+            else  # deepening water table
+                for j in (jwt+1):nlevsoi
+                    s_y = idv.watsat[c, j] *
+                        (on - (on + e3 * odv.zwt[c] / idv.sucsat[c, j])^(-on / idv.bsw[c, j]))
+                    s_y = smooth_max(s_y, aqy)
+
+                    qcharge_layer = smooth_max(qcharge_tot,
+                        -(s_y * (idv.col_zi[c, joff_zi + j] - odv.zwt[c]) * e3))
+                    qcharge_layer = smooth_min(qcharge_layer, zr)
+                    qcharge_tot = qcharge_tot - qcharge_layer
+                    if qcharge_tot >= zr
+                        odv.zwt[c] = odv.zwt[c] - qcharge_layer / s_y / thou
+                        break
+                    else
+                        odv.zwt[c] = idv.col_zi[c, joff_zi + j]
+                    end
+                end
+                if qcharge_tot > zr
+                    odv.zwt[c] = odv.zwt[c] - qcharge_tot / thou / rous
+                end
+            end
+
+            # recompute jwt
+            jwt = nlevsoi
+            for j in 1:nlevsoi
+                if odv.zwt[c] <= idv.col_zi[c, joff_zi + j]
+                    jwt = j - 1
+                    break
+                end
+            end
+        end
+
+        # ============================ BASEFLOW ============================
+        # define frost table as first frozen layer with unfrozen layer above it
+        if idv.t_soisno[c, joff + 1] > TFRZl
+            k_frz = nlevsoi
+        else
+            k_frz = 1
+        end
+        for k in 2:nlevsoi
+            if idv.t_soisno[c, joff + k - 1] > TFRZl && idv.t_soisno[c, joff + k] <= TFRZl
+                k_frz = k
+                break
+            end
+        end
+
+        odv.frost_table[c] = idv.col_z[c, joff + k_frz]
+        odv.zwt_perched[c] = odv.frost_table[c]
+
+        if odv.zwt[c] < odv.frost_table[c] && idv.t_soisno[c, joff + k_frz] <= TFRZl
+            # do nothing - handled in Drainage
+        else
+            sat_lev = T(0.9)
+
+            k_perch = 1
+            for k in k_frz:-1:1
+                odv.h2osoi_vol[c, k] = idv.h2osoi_liq[c, joff + k] / (idv.col_dz[c, joff + k] * DH2O) +
+                    idv.h2osoi_ice[c, joff + k] / (idv.col_dz[c, joff + k] * DICE)
+                if odv.h2osoi_vol[c, k] / idv.watsat[c, k] <= sat_lev
+                    k_perch = k
+                    break
+                end
+            end
+
+            if idv.t_soisno[c, joff + k_frz] > TFRZl
+                k_perch = k_frz
+            end
+
+            if k_frz > k_perch
+                s1 = (idv.h2osoi_liq[c, joff + k_perch] / (idv.col_dz[c, joff + k_perch] * DH2O) +
+                    idv.h2osoi_ice[c, joff + k_perch] / (idv.col_dz[c, joff + k_perch] * DICE)) / idv.watsat[c, k_perch]
+                s2 = (idv.h2osoi_liq[c, joff + k_perch + 1] / (idv.col_dz[c, joff + k_perch + 1] * DH2O) +
+                    idv.h2osoi_ice[c, joff + k_perch + 1] / (idv.col_dz[c, joff + k_perch + 1] * DICE)) / idv.watsat[c, k_perch + 1]
+
+                m_val = (idv.col_z[c, joff + k_perch + 1] - idv.col_z[c, joff + k_perch]) / (s2 - s1)
+                b_val = idv.col_z[c, joff + k_perch + 1] - m_val * s2
+                odv.zwt_perched[c] = smooth_max(zr, m_val * sat_lev + b_val)
+            end
+        end
+    end
+end
+
+function soilhyd_water_table!(odv, idv, mask, nlevsoi::Int, joff::Int, joff_zi::Int,
+                              dtime, aq_sp_yield_min, tfrz, denh2o, denice)
+    # Convert all scalar reals to the working precision of the device arrays so no
+    # Float64 reaches the Float32-only Metal backend (byte-identical on Float64 CPU).
+    T = eltype(odv.zwt)
+    _launch!(_water_table_kernel!, odv.zwt, odv, idv, mask, nlevsoi, joff, joff_zi,
+             T(dtime), T(aq_sp_yield_min), T(tfrz), T(denh2o), T(denice);
+             ndrange = length(mask))
+end
+
 """
     water_table!(soilhydrology, soilstate, temperature, waterstatebulk_ws,
                   waterfluxbulk, col_dz, col_z, col_zi,
@@ -615,13 +798,13 @@ Ported from `WaterTable` in `SoilHydrologyMod.F90`.
 function water_table!(
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
-    temperature_t_soisno::Matrix{<:Real},
+    temperature_t_soisno::AbstractMatrix{<:Real},
     waterstatebulk_ws::WaterStateData,
     waterfluxbulk::WaterFluxBulkData,
-    col_dz::Matrix{<:Real},
-    col_z::Matrix{<:Real},
-    col_zi::Matrix{<:Real},
-    mask_hydrology::BitVector,
+    col_dz::AbstractMatrix{<:Real},
+    col_z::AbstractMatrix{<:Real},
+    col_zi::AbstractMatrix{<:Real},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     dtime::Real
@@ -634,191 +817,33 @@ function water_table!(
     joff     = nlevsno          # for z, dz, h2osoi_liq/ice, t_soisno
     joff_zi  = nlevsno + 1     # for zi (has extra element at top)
 
-    t_soisno   = temperature_t_soisno
-    h2osfc     = waterstatebulk_ws.h2osfc_col
-    h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col
-    h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col
-    h2osoi_vol = waterstatebulk_ws.h2osoi_vol_col
-    wa         = waterstatebulk_ws.wa_col
+    # Device-view bundles (read-only inputs + read/write outputs). Each is built
+    # from the live state arrays so all writes flow straight back; on the host
+    # these are CPU arrays and the result is byte-identical.
+    idv = _WTInDV(;
+        col_dz     = col_dz,
+        col_z      = col_z,
+        col_zi     = col_zi,
+        t_soisno   = temperature_t_soisno,
+        watsat     = soilstate.watsat_col,
+        sucsat     = soilstate.sucsat_col,
+        bsw        = soilstate.bsw_col,
+        qcharge    = soilhydrology.qcharge_col,
+        h2osoi_liq = waterstatebulk_ws.h2osoi_liq_col,
+        h2osoi_ice = waterstatebulk_ws.h2osoi_ice_col)
 
-    bsw        = soilstate.bsw_col
-    hksat      = soilstate.hksat_col
-    sucsat     = soilstate.sucsat_col
-    watsat     = soilstate.watsat_col
-    eff_porosity = soilstate.eff_porosity_col
+    odv = _WTOutDV(;
+        zwt                = soilhydrology.zwt_col,
+        wa                 = waterstatebulk_ws.wa_col,
+        zwt_perched        = soilhydrology.zwt_perched_col,
+        frost_table        = soilhydrology.frost_table_col,
+        h2osoi_vol         = waterstatebulk_ws.h2osoi_vol_col,
+        qflx_drain         = wf.qflx_drain_col,
+        qflx_rsub_sat      = wf.qflx_rsub_sat_col,
+        qflx_drain_perched = wf.qflx_drain_perched_col)
 
-    zwt         = soilhydrology.zwt_col
-    zwt_perched = soilhydrology.zwt_perched_col
-    frost_table = soilhydrology.frost_table_col
-    qcharge     = soilhydrology.qcharge_col
-
-    qflx_drain         = wf.qflx_drain_col
-    qflx_drain_perched = wf.qflx_drain_perched_col
-    qflx_rsub_sat      = wf.qflx_rsub_sat_col
-
-    nc = length(bounds)
-
-    # Local arrays
-    jwt = Vector{Int}(undef, last(bounds))
-
-    # Convert layer thicknesses from m to mm (in-place temp)
-    FT_wt = eltype(col_dz)
-    dzmm = Matrix{FT_wt}(undef, last(bounds), nlevsoi)
-    for j in 1:nlevsoi
-        for c in bounds
-            mask_hydrology[c] || continue
-            dzmm[c, j] = col_dz[c, joff + j] * 1.0e3
-        end
-    end
-
-    # Initialize drainage fluxes
-    for c in bounds
-        mask_hydrology[c] || continue
-        qflx_drain[c]         = 0.0
-        qflx_rsub_sat[c]      = 0.0
-        qflx_drain_perched[c] = 0.0
-    end
-
-    # Find jwt: index of soil layer right above water table
-    for c in bounds
-        mask_hydrology[c] || continue
-        jwt[c] = nlevsoi
-        for j in 1:nlevsoi
-            if zwt[c] <= col_zi[c, joff_zi + j]
-                jwt[c] = j - 1
-                break
-            end
-        end
-    end
-
-    # ========================== QCHARGE ====================================
-    # Water table changes due to qcharge
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        # analytical expression for aquifer specific yield
-        rous = watsat[c, nlevsoi] *
-            (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, nlevsoi])^(-1.0 / bsw[c, nlevsoi]))
-        rous = smooth_max(rous, params.aq_sp_yield_min)
-
-        if jwt[c] == nlevsoi
-            # water table below soil column
-            wa[c]  = wa[c] + qcharge[c] * dtime
-            zwt[c] = zwt[c] - (qcharge[c] * dtime) / 1000.0 / rous
-        else
-            # water table within soil layers
-            qcharge_tot = qcharge[c] * dtime
-            if qcharge_tot > 0.0  # rising water table
-                for j in (jwt[c]+1):-1:1
-                    s_y = watsat[c, j] *
-                        (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
-                    s_y = smooth_max(s_y, params.aq_sp_yield_min)
-
-                    # col_zi: Fortran zi(c, j-1) → Julia col_zi[c, joff_zi + j - 1]
-                    qcharge_layer = smooth_min(qcharge_tot, s_y * (zwt[c] - col_zi[c, joff_zi + j - 1]) * 1.0e3)
-                    qcharge_layer = smooth_max(qcharge_layer, 0.0)
-
-                    if s_y > 0.0
-                        zwt[c] = zwt[c] - qcharge_layer / s_y / 1000.0
-                    end
-
-                    qcharge_tot = qcharge_tot - qcharge_layer
-                    if qcharge_tot <= 0.0
-                        break
-                    end
-                end
-            else  # deepening water table
-                for j in (jwt[c]+1):nlevsoi
-                    s_y = watsat[c, j] *
-                        (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
-                    s_y = smooth_max(s_y, params.aq_sp_yield_min)
-
-                    qcharge_layer = smooth_max(qcharge_tot, -(s_y * (col_zi[c, joff_zi + j] - zwt[c]) * 1.0e3))
-                    qcharge_layer = smooth_min(qcharge_layer, 0.0)
-                    qcharge_tot = qcharge_tot - qcharge_layer
-                    if qcharge_tot >= 0.0
-                        zwt[c] = zwt[c] - qcharge_layer / s_y / 1000.0
-                        break
-                    else
-                        zwt[c] = col_zi[c, joff_zi + j]
-                    end
-                end
-                if qcharge_tot > 0.0
-                    zwt[c] = zwt[c] - qcharge_tot / 1000.0 / rous
-                end
-            end
-
-            # recompute jwt
-            jwt[c] = nlevsoi
-            for j in 1:nlevsoi
-                if zwt[c] <= col_zi[c, joff_zi + j]
-                    jwt[c] = j - 1
-                    break
-                end
-            end
-        end
-    end
-
-    # ========================== BASEFLOW ====================================
-    # perched water table code
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        # define frost table as first frozen layer with unfrozen layer above it
-        if t_soisno[c, joff + 1] > TFRZ
-            k_frz = nlevsoi
-        else
-            k_frz = 1
-        end
-
-        for k in 2:nlevsoi
-            if t_soisno[c, joff + k-1] > TFRZ && t_soisno[c, joff + k] <= TFRZ
-                k_frz = k
-                break
-            end
-        end
-
-        frost_table[c] = col_z[c, joff + k_frz]
-
-        # initialize perched water table to frost table
-        zwt_perched[c] = frost_table[c]
-
-        # ======= water table above frost table ========
-        if zwt[c] < frost_table[c] && t_soisno[c, joff + k_frz] <= TFRZ
-            # do nothing - handled in Drainage
-        else
-            # ======= water table below frost table ========
-            sat_lev = 0.9
-
-            k_perch = 1
-            for k in k_frz:-1:1
-                h2osoi_vol[c, k] = h2osoi_liq[c, joff + k] / (col_dz[c, joff + k] * DENH2O) +
-                    h2osoi_ice[c, joff + k] / (col_dz[c, joff + k] * DENICE)
-
-                if h2osoi_vol[c, k] / watsat[c, k] <= sat_lev
-                    k_perch = k
-                    break
-                end
-            end
-
-            # if frost_table = nlevsoi, only compute perched water table if frozen
-            if t_soisno[c, joff + k_frz] > TFRZ
-                k_perch = k_frz
-            end
-
-            # if perched water table exists
-            if k_frz > k_perch
-                s1 = (h2osoi_liq[c, joff + k_perch] / (col_dz[c, joff + k_perch] * DENH2O) +
-                    h2osoi_ice[c, joff + k_perch] / (col_dz[c, joff + k_perch] * DENICE)) / watsat[c, k_perch]
-                s2 = (h2osoi_liq[c, joff + k_perch+1] / (col_dz[c, joff + k_perch+1] * DENH2O) +
-                    h2osoi_ice[c, joff + k_perch+1] / (col_dz[c, joff + k_perch+1] * DENICE)) / watsat[c, k_perch+1]
-
-                m_val = (col_z[c, joff + k_perch+1] - col_z[c, joff + k_perch]) / (s2 - s1)
-                b_val = col_z[c, joff + k_perch+1] - m_val * s2
-                zwt_perched[c] = smooth_max(0.0, m_val * sat_lev + b_val)
-            end
-        end
-    end
+    soilhyd_water_table!(odv, idv, mask_hydrology, nlevsoi, joff, joff_zi,
+                         dtime, params.aq_sp_yield_min, TFRZ, DENH2O, DENICE)
 
     return nothing
 end
