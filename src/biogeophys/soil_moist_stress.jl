@@ -214,6 +214,26 @@ end
 # array_normalization! (from SimpleMathMod)
 # --------------------------------------------------------------------------
 
+# --- Kernel: per-row (patch) sum-to-one normalization with internal layer loop ---
+# One thread per patch; the row sum and division are an inter-layer reduction, so
+# they stay sequential inside the thread (cf. the soil_temperature per-column
+# kernels with internal level loops). Literals carried as the array eltype.
+@kernel function _smstress_array_norm_kernel!(arr, @Const(mask), nlevgrnd::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(arr)
+        rootsum = zero(T)
+        for j in 1:nlevgrnd
+            rootsum += arr[p, j]
+        end
+        if rootsum > zero(T)
+            for j in 1:nlevgrnd
+                arr[p, j] = arr[p, j] / rootsum
+            end
+        end
+    end
+end
+
 """
     array_normalization!(arr, mask, bounds, nlevgrnd)
 
@@ -221,22 +241,11 @@ Normalize each row of `arr` (patch × nlevgrnd) so that its sum equals 1.
 If the sum is zero, the row is left as zeros.
 Ported from `array_normalization` in `SimpleMathMod.F90`.
 """
-function array_normalization!(arr::Matrix{<:Real},
-                               mask::BitVector,
+function array_normalization!(arr::AbstractMatrix{<:Real},
+                               mask::AbstractVector{Bool},
                                bounds::UnitRange{Int},
                                nlevgrnd::Int)
-    for p in bounds
-        mask[p] || continue
-        rootsum = 0.0
-        for j in 1:nlevgrnd
-            rootsum += arr[p, j]
-        end
-        if rootsum > 0.0
-            for j in 1:nlevgrnd
-                arr[p, j] /= rootsum
-            end
-        end
-    end
+    _launch!(_smstress_array_norm_kernel!, arr, mask, nlevgrnd; ndrange = length(mask))
     return nothing
 end
 
@@ -259,11 +268,14 @@ Ported from `normalize_unfrozen_rootfr` in `SoilMoistStressMod.F90`.
                                                   @Const(altmax_indx))
     p, j = @index(Global, NTuple)
     @inbounds if mask_patch[p]
+        T = eltype(rootfr_unf)
         c = patch_column[p]
-        if j <= max(altmax_lastyear_indx[c], altmax_indx[c], 1.0)
+        # active-layer index threshold (Real comparison; literal as the row eltype)
+        thresh = max(altmax_lastyear_indx[c], altmax_indx[c], one(eltype(altmax_indx)))
+        if j <= thresh
             rootfr_unf[p, j] = rootfr[p, j]
         else
-            rootfr_unf[p, j] = 0.0
+            rootfr_unf[p, j] = zero(T)
         end
     end
 end
@@ -280,11 +292,12 @@ smstress_rootfr_unf_alt!(rootfr_unf, mask_patch, patch_column, rootfr,
                                                    @Const(t_soisno), joff::Int, tfrz)
     p, j = @index(Global, NTuple)
     @inbounds if mask_patch[p]
+        T = eltype(rootfr_unf)
         c = patch_column[p]
         if t_soisno[c, j + joff] >= tfrz
             rootfr_unf[p, j] = rootfr[p, j]
         else
-            rootfr_unf[p, j] = 0.0
+            rootfr_unf[p, j] = zero(T)
         end
     end
 end
@@ -292,15 +305,16 @@ end
 smstress_rootfr_unf_temp!(rootfr_unf, mask_patch, patch_column, rootfr, t_soisno,
                           joff::Int, nlevgrnd::Int, tfrz) =
     _launch!(_smstress_rootfr_unf_temp_kernel!, rootfr_unf, mask_patch, patch_column,
-             rootfr, t_soisno, joff, tfrz; ndrange = (length(mask_patch), nlevgrnd))
+             rootfr, t_soisno, joff, eltype(rootfr_unf)(tfrz);
+             ndrange = (length(mask_patch), nlevgrnd))
 
-function normalize_unfrozen_rootfr!(rootfr::Matrix{<:Real},
-                                     t_soisno::Matrix{<:Real},
-                                     altmax_lastyear_indx::Vector{<:Real},
-                                     altmax_indx::Vector{<:Real},
-                                     patch_column::Vector{Int},
-                                     rootfr_unf::Matrix{<:Real},
-                                     mask_patch::BitVector,
+function normalize_unfrozen_rootfr!(rootfr::AbstractMatrix{<:Real},
+                                     t_soisno::AbstractMatrix{<:Real},
+                                     altmax_lastyear_indx::AbstractVector{<:Real},
+                                     altmax_indx::AbstractVector{<:Real},
+                                     patch_column::AbstractVector{<:Integer},
+                                     rootfr_unf::AbstractMatrix{<:Real},
+                                     mask_patch::AbstractVector{Bool},
                                      bounds_patch::UnitRange{Int},
                                      nlevgrnd::Int,
                                      nlevsno::Int)
@@ -350,17 +364,88 @@ end
                                                    @Const(btran), btran0)
     p, j = @index(Global, NTuple)
     @inbounds if mask_patch[p]
+        T = eltype(rootr)
         if btran[p] > btran0
             rootr[p, j] = rootr[p, j] / btran[p]
         else
-            rootr[p, j] = 0.0
+            rootr[p, j] = zero(T)
         end
     end
 end
 
 smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd::Int) =
-    _launch!(_smstress_normalize_rootr_kernel!, rootr, mask_patch, btran, btran0;
-             ndrange = (length(mask_patch), nlevgrnd))
+    _launch!(_smstress_normalize_rootr_kernel!, rootr, mask_patch, btran,
+             eltype(rootr)(btran0); ndrange = (length(mask_patch), nlevgrnd))
+
+# --- Kernel: per-patch root resistance + btran accumulation (CLM4.5 default) ---
+# One thread per patch. btran[p] is accumulated across layers (an inter-layer
+# reduction), so the layer loop stays sequential inside the thread; rresis/rootr
+# are written per layer. All literals/physical consts carried as the output
+# eltype so no Float64 reaches a Float32-only backend.
+@kernel function _smstress_rootr_btran_kernel!(rootr, rresis, btran,
+                                               @Const(mask_patch), @Const(patch_column),
+                                               @Const(patch_itype), @Const(rootfr),
+                                               @Const(rootfr_unf), @Const(smpso),
+                                               @Const(smpsc), @Const(t_soisno),
+                                               @Const(watsat), @Const(sucsat),
+                                               @Const(bsw), @Const(eff_porosity),
+                                               @Const(h2osoi_liqvol),
+                                               nlevgrnd::Int, joff::Int,
+                                               tfrz, use_unf::Bool)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(rootr)
+        c = patch_column[p]
+        itype = patch_itype[p] + 1  # 0-based Fortran PFT -> 1-based Julia
+        acc = zero(T)
+        for j in 1:nlevgrnd
+            if h2osoi_liqvol[c, j + joff] <= zero(T) || t_soisno[c, j + joff] <= tfrz - T(2.0)
+                rootr[p, j] = zero(T)
+            else
+                s_node = max(h2osoi_liqvol[c, j + joff] / eff_porosity[c, j], T(0.01))
+                s_node = min(s_node, one(T))
+
+                smp_node = soil_suction_clapp_hornberger(sucsat[c, j], s_node, bsw[c, j])
+                smp_node = max(smpsc[itype], smp_node)
+
+                rresis[p, j] = min((eff_porosity[c, j] / watsat[c, j]) *
+                    (smp_node - smpsc[itype]) / (smpso[itype] - smpsc[itype]), one(T))
+
+                if use_unf
+                    rootr[p, j] = rootfr_unf[p, j] * rresis[p, j]
+                else
+                    rootr[p, j] = rootfr[p, j] * rresis[p, j]
+                end
+
+                acc += max(rootr[p, j], zero(T))
+            end
+        end
+        btran[p] = btran[p] + acc
+    end
+end
+
+function smstress_rootr_btran!(rootr, rresis, btran, mask_patch, patch_column,
+                               patch_itype, rootfr, rootfr_unf, smpso, smpsc,
+                               t_soisno, watsat, sucsat, bsw, eff_porosity,
+                               h2osoi_liqvol, nlevgrnd::Int, joff::Int, tfrz,
+                               use_unf::Bool)
+    T = eltype(rootr)
+    _launch!(_smstress_rootr_btran_kernel!, rootr, rresis, btran, mask_patch,
+             patch_column, patch_itype, rootfr, rootfr_unf, smpso, smpsc, t_soisno,
+             watsat, sucsat, bsw, eff_porosity, h2osoi_liqvol, nlevgrnd, joff,
+             T(tfrz), use_unf; ndrange = length(mask_patch))
+end
+
+# --- Kernel: zero btran for active patches ---
+@kernel function _smstress_zero_btran_kernel!(btran, @Const(mask_patch))
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        btran[p] = zero(eltype(btran))
+    end
+end
+
+smstress_zero_btran!(btran, mask_patch) =
+    _launch!(_smstress_zero_btran_kernel!, btran, mask_patch; ndrange = length(mask_patch))
 
 """
     calc_root_moist_stress_clm45default!(...)
@@ -368,22 +453,22 @@ smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd::Int) =
 Compute root water stress using the default CLM4.5 approach.
 Ported from `calc_root_moist_stress_clm45default` in `SoilMoistStressMod.F90`.
 """
-function calc_root_moist_stress_clm45default!(rootfr_unf::Matrix{<:Real},
-                                               rootfr::Matrix{<:Real},
-                                               rootr::Matrix{<:Real},
-                                               btran::Vector{<:Real},
-                                               rresis::Matrix{<:Real},
-                                               smpso::Vector{<:Real},
-                                               smpsc::Vector{<:Real},
-                                               t_soisno::Matrix{<:Real},
-                                               watsat::Matrix{<:Real},
-                                               sucsat::Matrix{<:Real},
-                                               bsw::Matrix{<:Real},
-                                               eff_porosity::Matrix{<:Real},
-                                               h2osoi_liqvol::Matrix{<:Real},
-                                               patch_column::Vector{Int},
-                                               patch_itype::Vector{Int},
-                                               mask_patch::BitVector,
+function calc_root_moist_stress_clm45default!(rootfr_unf::AbstractMatrix{<:Real},
+                                               rootfr::AbstractMatrix{<:Real},
+                                               rootr::AbstractMatrix{<:Real},
+                                               btran::AbstractVector{<:Real},
+                                               rresis::AbstractMatrix{<:Real},
+                                               smpso::AbstractVector{<:Real},
+                                               smpsc::AbstractVector{<:Real},
+                                               t_soisno::AbstractMatrix{<:Real},
+                                               watsat::AbstractMatrix{<:Real},
+                                               sucsat::AbstractMatrix{<:Real},
+                                               bsw::AbstractMatrix{<:Real},
+                                               eff_porosity::AbstractMatrix{<:Real},
+                                               h2osoi_liqvol::AbstractMatrix{<:Real},
+                                               patch_column::AbstractVector{<:Integer},
+                                               patch_itype::AbstractVector{<:Integer},
+                                               mask_patch::AbstractVector{Bool},
                                                bounds_patch::UnitRange{Int},
                                                nlevgrnd::Int,
                                                nlevsno::Int)
@@ -391,36 +476,13 @@ function calc_root_moist_stress_clm45default!(rootfr_unf::Matrix{<:Real},
     joff = nlevsno
     perchroot = soil_moist_stress_ctrl.perchroot
     perchroot_alt = soil_moist_stress_ctrl.perchroot_alt
+    use_unf = perchroot || perchroot_alt
 
-    for j in 1:nlevgrnd
-        for p in bounds_patch
-            mask_patch[p] || continue
-            c = patch_column[p]
-            itype = patch_itype[p] + 1  # 0-based Fortran PFT → 1-based Julia
-
-            # Root resistance factors
-            if h2osoi_liqvol[c, j + joff] <= 0.0 || t_soisno[c, j + joff] <= TFRZ - 2.0
-                rootr[p, j] = 0.0
-            else
-                s_node = max(h2osoi_liqvol[c, j + joff] / eff_porosity[c, j], 0.01)
-                s_node = min(s_node, 1.0)
-
-                smp_node = soil_suction_clapp_hornberger(sucsat[c, j], s_node, bsw[c, j])
-                smp_node = max(smpsc[itype], smp_node)
-
-                rresis[p, j] = min((eff_porosity[c, j] / watsat[c, j]) *
-                    (smp_node - smpsc[itype]) / (smpso[itype] - smpsc[itype]), 1.0)
-
-                if !(perchroot || perchroot_alt)
-                    rootr[p, j] = rootfr[p, j] * rresis[p, j]
-                else
-                    rootr[p, j] = rootfr_unf[p, j] * rresis[p, j]
-                end
-
-                btran[p] = btran[p] + max(rootr[p, j], 0.0)
-            end
-        end
-    end
+    # Per-patch root resistance + btran accumulation (sequential layer loop in-kernel).
+    smstress_rootr_btran!(rootr, rresis, btran, mask_patch, patch_column,
+                          patch_itype, rootfr, rootfr_unf, smpso, smpsc, t_soisno,
+                          watsat, sucsat, bsw, eff_porosity, h2osoi_liqvol,
+                          nlevgrnd, joff, TFRZ, use_unf)
 
     # Normalize root resistances to get layer contribution to ET.
     # btran[p] is fully accumulated above; here it is read-only, so each
@@ -447,26 +509,24 @@ function calc_root_moist_stress!(soilstate::SoilStateData,
                                   waterdiagbulk::WaterDiagnosticBulkData,
                                   col::ColumnData,
                                   patchdata::PatchData,
-                                  smpso::Vector{<:Real},
-                                  smpsc::Vector{<:Real},
-                                  altmax_lastyear_indx::Vector{<:Real},
-                                  altmax_indx::Vector{<:Real},
-                                  mask_patch::BitVector,
+                                  smpso::AbstractVector{<:Real},
+                                  smpsc::AbstractVector{<:Real},
+                                  altmax_lastyear_indx::AbstractVector{<:Real},
+                                  altmax_indx::AbstractVector{<:Real},
+                                  mask_patch::AbstractVector{Bool},
                                   bounds_patch::UnitRange{Int},
                                   nlevgrnd::Int,
                                   nlevsno::Int)
 
     np = length(bounds_patch)
 
-    # Initialize rootfr_unf to zero
-    FT = eltype(temperature.t_soisno_col)
-    rootfr_unf = zeros(FT, length(mask_patch), nlevgrnd)
+    # Initialize rootfr_unf to zero. Device-resident scratch (matches the backend
+    # of an existing device array) so the whole routine runs on the GPU.
+    rootfr_unf = similar(temperature.t_soisno_col, length(mask_patch), nlevgrnd)
+    fill!(rootfr_unf, zero(eltype(rootfr_unf)))
 
-    # Initialize btran to zero for accumulation
-    for p in bounds_patch
-        mask_patch[p] || continue
-        energyflux.btran_patch[p] = 0.0
-    end
+    # Initialize btran to zero for accumulation (masked, on-device).
+    smstress_zero_btran!(energyflux.btran_patch, mask_patch)
 
     # Define normalized rootfraction for unfrozen soil
     normalize_unfrozen_rootfr!(soilstate.rootfr_patch,
