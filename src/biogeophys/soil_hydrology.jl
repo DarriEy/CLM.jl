@@ -101,17 +101,19 @@ end
                                                   joff::Int, denice)
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
-        dz_ext = col_dz[c, j + joff] + excess_ice[c, j] / denice
-        vol_ice_val = smooth_min(watsat[c, j], (h2osoi_ice[c, j + joff] + excess_ice[c, j]) / (dz_ext * denice))
-        eff_porosity[c, j] = smooth_max(0.01, watsat[c, j] - vol_ice_val)
-        icefrac[c, j] = smooth_min(1.0, vol_ice_val / watsat[c, j])
+        T = eltype(eff_porosity)
+        dn = T(denice)
+        dz_ext = col_dz[c, j + joff] + excess_ice[c, j] / dn
+        vol_ice_val = smooth_min(watsat[c, j], (h2osoi_ice[c, j + joff] + excess_ice[c, j]) / (dz_ext * dn))
+        eff_porosity[c, j] = smooth_max(T(0.01), watsat[c, j] - vol_ice_val)
+        icefrac[c, j] = smooth_min(one(T), vol_ice_val / watsat[c, j])
     end
 end
 
 soilhyd_water_fractions!(eff_porosity, icefrac, mask, watsat, col_dz,
                          h2osoi_ice, excess_ice, joff::Int, nlevsoi::Int, denice) =
     _launch!(_soilhyd_water_fractions_kernel!, eff_porosity, icefrac, mask, watsat,
-             col_dz, h2osoi_ice, excess_ice, joff, denice;
+             col_dz, h2osoi_ice, excess_ice, joff, convert(eltype(eff_porosity), denice);
              ndrange = (length(mask), nlevsoi))
 
 # ---- set_floodc! : apply gridcell flood flux to non-lake columns ----
@@ -125,7 +127,7 @@ soilhyd_water_fractions!(eff_porosity, icefrac, mask, watsat, col_dz,
         if col_itype[c] != icol_sunwall && col_itype[c] != icol_shadewall
             qflx_floodc[c] = qflx_floodg[g]
         else
-            qflx_floodc[c] = 0.0
+            qflx_floodc[c] = zero(eltype(qflx_floodc))
         end
     end
 end
@@ -146,20 +148,21 @@ soilhyd_floodc!(qflx_floodc, qflx_floodg, col_gridcell, col_itype, mask_nolake,
                                               @Const(frac_h2osfc))
     c = @index(Global)
     @inbounds if mask[c]
+        T = eltype(qflx_top_soil)
         qflx_top_soil[c] = qflx_rain_plus_snomelt[c] + qflx_snow_h2osfc[c] + qflx_floodc[c]
 
         if col_snl[c] >= 0
-            fsno = 0.0
+            fsno = zero(T)
             qflx_evap = qflx_liqevap_from_top_layer[c]
         else
             fsno = frac_sno[c]
             qflx_evap = qflx_ev_soil[c]
         end
 
-        qflx_in_soil[c] = (1.0 - frac_h2osfc[c]) * (qflx_top_soil[c] - qflx_sat_excess_surf[c])
+        qflx_in_soil[c] = (one(T) - frac_h2osfc[c]) * (qflx_top_soil[c] - qflx_sat_excess_surf[c])
         qflx_top_soil_to_h2osfc[c] = frac_h2osfc[c] * (qflx_top_soil[c] - qflx_sat_excess_surf[c])
 
-        qflx_in_soil[c] = qflx_in_soil[c] - (1.0 - fsno - frac_h2osfc[c]) * qflx_evap
+        qflx_in_soil[c] = qflx_in_soil[c] - (one(T) - fsno - frac_h2osfc[c]) * qflx_evap
         qflx_top_soil_to_h2osfc[c] = qflx_top_soil_to_h2osfc[c] - frac_h2osfc[c] * qflx_ev_h2osfc[c]
     end
 end
@@ -183,20 +186,21 @@ soilhyd_qflx_inputs!(qflx_top_soil, qflx_in_soil, qflx_top_soil_to_h2osfc, mask,
                                                     h2osfcflag::Int, istsoil::Int, istcrop::Int)
     c = @index(Global)
     @inbounds if mask[c]
+        T = eltype(qflx_in_soil_limited)
         l = col_landunit[c]
         if lun_itype[l] == istsoil || lun_itype[l] == istcrop
             qflx_in_soil_limited[c] = qflx_in_soil[c] - qflx_infl_excess[c]
             if h2osfcflag != 0
                 qflx_in_h2osfc[c] = qflx_top_soil_to_h2osfc[c] + qflx_infl_excess[c]
-                qflx_infl_excess_surf[c] = 0.0
+                qflx_infl_excess_surf[c] = zero(T)
             else
                 qflx_in_h2osfc[c] = qflx_top_soil_to_h2osfc[c]
                 qflx_infl_excess_surf[c] = qflx_infl_excess[c]
             end
         else
             qflx_in_soil_limited[c] = qflx_in_soil[c]
-            qflx_in_h2osfc[c] = 0.0
-            qflx_infl_excess_surf[c] = 0.0
+            qflx_in_h2osfc[c] = zero(T)
+            qflx_infl_excess_surf[c] = zero(T)
         end
     end
 end
@@ -251,18 +255,21 @@ soilhyd_surf_runoff!(qflx_surf, mask, qflx_sat_excess_surf, qflx_infl_excess_sur
                                                     pondmx_urban, dtime)
     c = @index(Global)
     @inbounds if mask_urban[c]
+        T = eltype(qflx_surf)
+        dt = T(dtime)
+        pmx = T(pondmx_urban)
         if col_itype[c] == icol_roof || col_itype[c] == icol_road_imperv
             if col_snl[c] < 0
-                qflx_surf[c] = smooth_max(0.0, qflx_rain_plus_snomelt[c])
+                qflx_surf[c] = smooth_max(zero(T), qflx_rain_plus_snomelt[c])
             else
-                xs_urban[c] = smooth_max(0.0,
-                    h2osoi_liq[c, 1] / dtime + qflx_rain_plus_snomelt[c] -
-                    qflx_liqevap_from_top_layer[c] - pondmx_urban / dtime)
+                xs_urban[c] = smooth_max(zero(T),
+                    h2osoi_liq[c, 1] / dt + qflx_rain_plus_snomelt[c] -
+                    qflx_liqevap_from_top_layer[c] - pmx / dt)
                 qflx_surf[c] = xs_urban[c]
             end
             qflx_surf[c] = qflx_surf[c] + qflx_floodc[c]
         elseif col_itype[c] == icol_sunwall || col_itype[c] == icol_shadewall
-            qflx_surf[c] = 0.0
+            qflx_surf[c] = zero(T)
         end
     end
 end
@@ -274,7 +281,8 @@ soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
     _launch!(_soilhyd_surf_runoff_urban_kernel!, qflx_surf, xs_urban, mask_urban,
              col_itype, col_snl, qflx_rain_plus_snomelt, h2osoi_liq,
              qflx_liqevap_from_top_layer, qflx_floodc, icol_roof, icol_road_imperv,
-             icol_sunwall, icol_shadewall, pondmx_urban, dtime)
+             icol_sunwall, icol_shadewall, convert(eltype(qflx_surf), pondmx_urban),
+             convert(eltype(qflx_surf), dtime))
 
 # ---- update_urban_ponding! : ponding state on urban surfaces ----
 @kernel function _soilhyd_urban_ponding_kernel!(h2osoi_liq, @Const(mask_urban),
@@ -347,8 +355,8 @@ function set_soil_water_fractions!(
     soilhydrology::SoilHydrologyData,
     soilstate::SoilStateData,
     waterstatebulk_ws::WaterStateData,
-    col_dz::Matrix{<:Real},
-    mask_hydrology::BitVector,
+    col_dz::AbstractMatrix{<:Real},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     nlevsno::Int
@@ -380,11 +388,11 @@ Apply gridcell flood water flux to non-lake columns.
 Ported from `SetFloodc` in `SoilHydrologyMod.F90`.
 """
 function set_floodc!(
-    qflx_floodc::Vector{<:Real},
-    qflx_floodg::Vector{<:Real},
-    col_gridcell::Vector{Int},
-    col_itype::Vector{Int},
-    mask_nolake::BitVector,
+    qflx_floodc::AbstractVector{<:Real},
+    qflx_floodg::AbstractVector{<:Real},
+    col_gridcell::AbstractVector{<:Integer},
+    col_itype::AbstractVector{<:Integer},
+    mask_nolake::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     soilhyd_floodc!(qflx_floodc, qflx_floodg, col_gridcell, col_itype, mask_nolake,
@@ -408,8 +416,8 @@ Ported from `SetQflxInputs` in `SoilHydrologyMod.F90`.
 function set_qflx_inputs!(
     waterfluxbulk::WaterFluxBulkData,
     waterdiagbulk::WaterDiagnosticBulkData,
-    col_snl::Vector{Int},
-    mask_hydrology::BitVector,
+    col_snl::AbstractVector{<:Integer},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     wf = waterfluxbulk.wf
@@ -452,9 +460,9 @@ Ported from `RouteInfiltrationExcess` in `SoilHydrologyMod.F90`.
 function route_infiltration_excess!(
     waterfluxbulk::WaterFluxBulkData,
     soilhydrology::SoilHydrologyData,
-    col_landunit::Vector{Int},
-    lun_itype::Vector{Int},
-    mask_hydrology::BitVector,
+    col_landunit::AbstractVector{<:Integer},
+    lun_itype::AbstractVector{<:Integer},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     wf = waterfluxbulk.wf
@@ -489,7 +497,7 @@ Ported from `Infiltration` in `SoilHydrologyMod.F90`.
 """
 function infiltration!(
     waterfluxbulk::WaterFluxBulkData,
-    mask_hydrology::BitVector,
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     wf = waterfluxbulk.wf
@@ -520,12 +528,12 @@ function total_surface_runoff!(
     waterfluxbulk::WaterFluxBulkData,
     soilhydrology::SoilHydrologyData,
     waterstatebulk_ws::WaterStateData,
-    col_snl::Vector{Int},
-    col_itype::Vector{Int},
-    col_landunit::Vector{Int},
-    lun_urbpoi::Vector{Bool},
-    mask_hydrology::BitVector,
-    mask_urban::BitVector,
+    col_snl::AbstractVector{<:Integer},
+    col_itype::AbstractVector{<:Integer},
+    col_landunit::AbstractVector{<:Integer},
+    lun_urbpoi::AbstractVector{Bool},
+    mask_hydrology::AbstractVector{Bool},
+    mask_urban::AbstractVector{Bool},
     bounds::UnitRange{Int},
     dtime::Real
 )
@@ -1520,6 +1528,89 @@ end
 # RenewCondensation
 # =========================================================================
 
+# ---- renew_condensation! : per-column condensation/sublimation on top layer ----
+# Hydrologically-active columns: weight dew/evap by (1 - frac_h2osfc).
+@kernel function _soilhyd_renew_cond_kernel!(h2osoi_liq, h2osoi_ice, @Const(mask),
+                                             @Const(col_snl), @Const(frac_h2osfc),
+                                             @Const(qflx_liqdew_to_top_layer),
+                                             @Const(qflx_soliddew_to_top_layer),
+                                             @Const(qflx_solidevap_from_top_layer),
+                                             nlevsno::Int, tol, dtime)
+    c = @index(Global)
+    @inbounds if mask[c]
+        if col_snl[c] + 1 >= 1
+            T = eltype(h2osoi_liq)
+            dt = T(dtime)
+            tl = T(tol)
+            jj = col_snl[c] + 1 + nlevsno
+            wgt = one(T) - frac_h2osfc[c]
+            h2osoi_liq[c, jj] = h2osoi_liq[c, jj] + wgt * qflx_liqdew_to_top_layer[c] * dt
+            h2osoi_ice[c, jj] = h2osoi_ice[c, jj] + wgt * qflx_soliddew_to_top_layer[c] * dt
+            h2osoi_ice_before = h2osoi_ice[c, jj]
+            h2osoi_ice[c, jj] = h2osoi_ice[c, jj] - wgt * qflx_solidevap_from_top_layer[c] * dt
+
+            if h2osoi_ice[c, jj] < zero(T) && abs(h2osoi_ice[c, jj]) < tl * abs(h2osoi_ice_before)
+                h2osoi_ice[c, jj] = zero(T)
+            end
+            if h2osoi_ice[c, jj] < zero(T)
+                h2osoi_ice[c, jj] = zero(T)
+            end
+        end
+    end
+end
+
+soilhyd_renew_cond!(h2osoi_liq, h2osoi_ice, mask, col_snl, frac_h2osfc,
+                    qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+                    qflx_solidevap_from_top_layer, nlevsno::Int, tol, dtime) =
+    _launch!(_soilhyd_renew_cond_kernel!, h2osoi_liq, h2osoi_ice, mask, col_snl,
+             frac_h2osfc, qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+             qflx_solidevap_from_top_layer, nlevsno,
+             convert(eltype(h2osoi_liq), tol), convert(eltype(h2osoi_liq), dtime);
+             ndrange = length(mask))
+
+# ---- renew_condensation! : per-column condensation on urban roof/road ----
+# Unweighted (frac_h2osfc not applied) for impervious urban surfaces.
+@kernel function _soilhyd_renew_cond_urban_kernel!(h2osoi_liq, h2osoi_ice, @Const(mask_urban),
+                                                   @Const(col_itype), @Const(col_snl),
+                                                   @Const(qflx_liqdew_to_top_layer),
+                                                   @Const(qflx_soliddew_to_top_layer),
+                                                   @Const(qflx_solidevap_from_top_layer),
+                                                   icol_roof::Int, icol_road_imperv::Int,
+                                                   nlevsno::Int, tol, dtime)
+    c = @index(Global)
+    @inbounds if mask_urban[c]
+        if col_itype[c] == icol_roof || col_itype[c] == icol_road_imperv
+            if col_snl[c] + 1 >= 1
+                T = eltype(h2osoi_liq)
+                dt = T(dtime)
+                tl = T(tol)
+                jj = col_snl[c] + 1 + nlevsno
+                h2osoi_liq[c, jj] = h2osoi_liq[c, jj] + qflx_liqdew_to_top_layer[c] * dt
+                h2osoi_ice[c, jj] = h2osoi_ice[c, jj] + qflx_soliddew_to_top_layer[c] * dt
+                h2osoi_ice_before = h2osoi_ice[c, jj]
+                h2osoi_ice[c, jj] = h2osoi_ice[c, jj] - qflx_solidevap_from_top_layer[c] * dt
+
+                if h2osoi_ice[c, jj] < zero(T) && abs(h2osoi_ice[c, jj]) < tl * abs(h2osoi_ice_before)
+                    h2osoi_ice[c, jj] = zero(T)
+                end
+                if h2osoi_ice[c, jj] < zero(T)
+                    h2osoi_ice[c, jj] = zero(T)
+                end
+            end
+        end
+    end
+end
+
+soilhyd_renew_cond_urban!(h2osoi_liq, h2osoi_ice, mask_urban, col_itype, col_snl,
+                          qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+                          qflx_solidevap_from_top_layer, icol_roof::Int,
+                          icol_road_imperv::Int, nlevsno::Int, tol, dtime) =
+    _launch!(_soilhyd_renew_cond_urban_kernel!, h2osoi_liq, h2osoi_ice, mask_urban,
+             col_itype, col_snl, qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+             qflx_solidevap_from_top_layer, icol_roof, icol_road_imperv, nlevsno,
+             convert(eltype(h2osoi_liq), tol), convert(eltype(h2osoi_liq), dtime);
+             ndrange = length(mask_urban))
+
 """
     renew_condensation!(waterstatebulk_ws, waterdiagbulk, waterfluxbulk,
                          col_snl, col_itype, mask_hydrology, mask_urban,
@@ -1533,10 +1624,10 @@ function renew_condensation!(
     waterstatebulk_ws::WaterStateData,
     waterdiagbulk::WaterDiagnosticBulkData,
     waterfluxbulk::WaterFluxBulkData,
-    col_snl::Vector{Int},
-    col_itype::Vector{Int},
-    mask_hydrology::BitVector,
-    mask_urban::BitVector,
+    col_snl::AbstractVector{<:Integer},
+    col_itype::AbstractVector{<:Integer},
+    mask_hydrology::AbstractVector{Bool},
+    mask_urban::AbstractVector{Bool},
     bounds::UnitRange{Int},
     dtime::Real
 )
@@ -1552,60 +1643,15 @@ function renew_condensation!(
     # Fortran layer index: snl(c)+1 → Julia: snl(c)+1+nlevsno
     nlevsno = varpar.nlevsno
 
-    for c in bounds
-        mask_hydrology[c] || continue
-
-        if col_snl[c] + 1 >= 1
-            jj = col_snl[c] + 1 + nlevsno  # top active layer (snow or soil)
-            h2osoi_liq[c, jj] = h2osoi_liq[c, jj] +
-                (1.0 - frac_h2osfc[c]) * qflx_liqdew_to_top_layer[c] * dtime
-            h2osoi_ice[c, jj] = h2osoi_ice[c, jj] +
-                (1.0 - frac_h2osfc[c]) * qflx_soliddew_to_top_layer[c] * dtime
-            h2osoi_ice_before = h2osoi_ice[c, jj]
-            h2osoi_ice[c, jj] = h2osoi_ice[c, jj] -
-                (1.0 - frac_h2osfc[c]) * qflx_solidevap_from_top_layer[c] * dtime
-
-            # truncate small values (simplified from Fortran call)
-            if h2osoi_ice[c, jj] < 0.0 && abs(h2osoi_ice[c, jj]) < TOLERANCE_SOILHYDRO * abs(h2osoi_ice_before)
-                h2osoi_ice[c, jj] = 0.0
-            end
-
-            if h2osoi_ice[c, jj] < 0.0
-                @warn "In RenewCondensation, h2osoi_ice has gone significantly negative at c=$c" maxlog=1
-                h2osoi_ice[c, jj] = zero(eltype(h2osoi_ice))
-            end
-        end
-    end
+    soilhyd_renew_cond!(h2osoi_liq, h2osoi_ice, mask_hydrology, col_snl, frac_h2osfc,
+                        qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+                        qflx_solidevap_from_top_layer, nlevsno, TOLERANCE_SOILHYDRO, dtime)
 
     # Urban columns
-    for c in bounds
-        mask_urban[c] || continue
-        if col_itype[c] == ICOL_ROOF || col_itype[c] == ICOL_ROAD_IMPERV
-            if col_snl[c] + 1 >= 1
-                jj = col_snl[c] + 1 + nlevsno
-                h2osoi_liq[c, jj] = h2osoi_liq[c, jj] +
-                    qflx_liqdew_to_top_layer[c] * dtime
-                h2osoi_ice[c, jj] = h2osoi_ice[c, jj] +
-                    qflx_soliddew_to_top_layer[c] * dtime
-                h2osoi_ice_before = h2osoi_ice[c, jj]
-                h2osoi_ice[c, jj] = h2osoi_ice[c, jj] -
-                    qflx_solidevap_from_top_layer[c] * dtime
-
-                if h2osoi_ice[c, jj] < 0.0 && abs(h2osoi_ice[c, jj]) < TOLERANCE_SOILHYDRO * abs(h2osoi_ice_before)
-                    h2osoi_ice[c, jj] = 0.0
-                end
-
-                if h2osoi_ice[c, jj] < 0.0
-                    if _is_ad_type(eltype(h2osoi_ice))
-                        @warn "RenewCondensation: h2osoi_ice negative (AD mode, clamping to 0)" maxlog=1
-                        h2osoi_ice[c, jj] = 0.0
-                    else
-                        error("In RenewCondensation (urban), h2osoi_ice has gone significantly negative at c=$c")
-                    end
-                end
-            end
-        end
-    end
+    soilhyd_renew_cond_urban!(h2osoi_liq, h2osoi_ice, mask_urban, col_itype, col_snl,
+                              qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
+                              qflx_solidevap_from_top_layer, ICOL_ROOF, ICOL_ROAD_IMPERV,
+                              nlevsno, TOLERANCE_SOILHYDRO, dtime)
 
     return nothing
 end
