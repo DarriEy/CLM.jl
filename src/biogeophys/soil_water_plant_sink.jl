@@ -15,44 +15,77 @@
 # ==========================================================================
 
 # --------------------------------------------------------------------------
-# Kernels: per-(column, soil-layer) element loops.
-# Columns are gathered in a filter list `filterc`; the kernel is launched over
-# (length(filterc), nlevsoi) with `c = filterc[i]`. Each (i, j) iteration is
-# fully independent (no reduction / loop-carried dependence). The backend is
-# taken from `rootr_col` (the written matrix), so these run as plain CPU loops
-# on Array and as GPU kernels on device arrays.
+# GPU helper: move a host filter (Vector{Int}) onto the backend of a device
+# prototype array so kernels indexing device arrays can read it. On the plain
+# CPU backend this is a no-op identity (byte-identical Vector{Int}); on a GPU
+# backend it allocates a device Int vector and copyto!s the host filter in.
 # --------------------------------------------------------------------------
-
-# Zero out rootr_col[c, j] for every filter column and soil layer.
-@kernel function _plantsink_zero_rootr_kernel!(rootr_col, @Const(filterc))
-    i, j = @index(Global, NTuple)
-    @inbounds rootr_col[filterc[i], j] = 0.0
+@inline _to_device_filter(proto, filterc::Vector{Int}) =
+    _to_device_filter(KA.get_backend(proto), proto, filterc)
+@inline _to_device_filter(::KA.CPU, proto, filterc::Vector{Int}) = filterc
+@inline function _to_device_filter(backend, proto, filterc::Vector{Int})
+    d = similar(proto, Int, length(filterc))
+    copyto!(d, filterc)
+    return d
 end
 
-plantsink_zero_rootr!(rootr_col, filterc, nlevsoi::Int) =
-    _launch!(_plantsink_zero_rootr_kernel!, rootr_col, filterc;
-             ndrange = (length(filterc), nlevsoi))
-
-# Normalize rootr_col by the transpiration-weighted denominator `temp` and
-# compute the vertical root-soil sink. `temp` is indexed by (c - c_offset).
-@kernel function _plantsink_normalize_kernel!(rootr_col, qflx_rootsoi_col,
-                                              @Const(filterc), @Const(temp),
-                                              @Const(qflx_tran_veg_col), c_offset::Int)
-    i, j = @index(Global, NTuple)
+# --------------------------------------------------------------------------
+# Default / hydstress-roads per-column kernel.
+#
+# Whole-function-on-device version of the transpiration-weighted column root
+# fraction + vertical sink. Launched over `length(filterc)` columns; `c =
+# filterc[i]`. Each column owns a disjoint, contiguous patch range
+# [patchi[c], patchi[c]+npatches[c]-1], so the per-patch accumulation needs no
+# atomics — it is an internal SEQUENTIAL reduction owned by this thread. The
+# internal layer loop (j = 1..nlevsoi) and patch loop mirror the Fortran exactly:
+#   rootr_col(c,j) = sum_p active(p) * rootr_patch(p,j)*qtran(p)*wtcol(p)
+#   temp(c)        = sum_p active(p) * qtran(p)*wtcol(p)
+#   rootr_col(c,j) /= temp(c)   (iff temp != 0)
+#   qflx_rootsoi_col(c,j) = rootr_col(c,j) * qtran_col(c)
+# Literals carry the working eltype (`zero(T)`) so no Float64 reaches a Float32
+# backend; byte-identical on Float64 CPU.
+# --------------------------------------------------------------------------
+@kernel function _plantsink_default_kernel!(rootr_col, qflx_rootsoi_col,
+        @Const(filterc), @Const(rootr_patch), @Const(qflx_tran_veg_patch),
+        @Const(qflx_tran_veg_col), @Const(patchi), @Const(npatches),
+        @Const(active), @Const(wtcol), nlevsoi::Int)
+    i = @index(Global)
     @inbounds begin
         c = filterc[i]
-        t = temp[c - c_offset]
-        if t != 0.0
-            rootr_col[c, j] /= t
+        T = eltype(rootr_col)
+        p_lo = patchi[c]
+        p_hi = patchi[c] + npatches[c] - 1
+
+        # Denominator: transpiration-weighted area sum over active patches.
+        temp_c = zero(T)
+        for p in p_lo:p_hi
+            if active[p]
+                temp_c += qflx_tran_veg_patch[p] * wtcol[p]
+            end
         end
-        qflx_rootsoi_col[c, j] = rootr_col[c, j] * qflx_tran_veg_col[c]
+
+        for j in 1:nlevsoi
+            acc = zero(T)
+            for p in p_lo:p_hi
+                if active[p]
+                    acc += rootr_patch[p, j] * qflx_tran_veg_patch[p] * wtcol[p]
+                end
+            end
+            if temp_c != zero(T)
+                acc /= temp_c
+            end
+            rootr_col[c, j] = acc
+            qflx_rootsoi_col[c, j] = acc * qflx_tran_veg_col[c]
+        end
     end
 end
 
-function plantsink_normalize_and_sink!(rootr_col, qflx_rootsoi_col, filterc, temp,
-                                       qflx_tran_veg_col, c_offset::Int, nlevsoi::Int)
-    _launch!(_plantsink_normalize_kernel!, rootr_col, qflx_rootsoi_col, filterc, temp,
-             qflx_tran_veg_col, c_offset; ndrange = (length(filterc), nlevsoi))
+function _plantsink_default_launch!(rootr_col, qflx_rootsoi_col, filterc, rootr_patch,
+        qflx_tran_veg_patch, qflx_tran_veg_col, patchi, npatches, active, wtcol,
+        nlevsoi::Int)
+    _launch!(_plantsink_default_kernel!, rootr_col, qflx_rootsoi_col, filterc,
+             rootr_patch, qflx_tran_veg_patch, qflx_tran_veg_col, patchi, npatches,
+             active, wtcol, nlevsoi; ndrange = length(filterc))
 end
 
 # --------------------------------------------------------------------------
@@ -95,39 +128,14 @@ function compute_effec_rootfrac_and_vert_tran_sink_default!(
     rootr_patch          = soilstate_inst.rootr_patch
     rootr_col            = soilstate_inst.rootr_col
 
-    # Accumulator for transpiration-weighted denominator
-    FT = eltype(rootr_patch)
-    temp = zeros(FT, length(bounds_col))
-    # Map column index to temp array index
-    c_offset = first(bounds_col) - 1
+    # Move the host filter onto the backend of the written matrix (no-op on CPU).
+    filterc_d = _to_device_filter(rootr_col, filterc)
 
-    # Zero out rootr_col for filter columns (independent per (column, layer))
-    plantsink_zero_rootr!(rootr_col, filterc, nlevsoi)
-
-    # Accumulate transpiration-weighted root fraction
-    for j in 1:nlevsoi
-        for c in filterc
-            for p in col.patchi[c]:(col.patchi[c] + col.npatches[c] - 1)
-                if patch_data.active[p]
-                    rootr_col[c, j] += rootr_patch[p, j] *
-                        qflx_tran_veg_patch[p] * patch_data.wtcol[p]
-                end
-            end
-        end
-    end
-
-    # Accumulate denominator: sum of (transpiration * weight) over active patches
-    for c in filterc
-        for p in col.patchi[c]:(col.patchi[c] + col.npatches[c] - 1)
-            if patch_data.active[p]
-                temp[c - c_offset] += qflx_tran_veg_patch[p] * patch_data.wtcol[p]
-            end
-        end
-    end
-
-    # Normalize rootr_col and compute qflx_rootsoi_col (independent per element)
-    plantsink_normalize_and_sink!(rootr_col, qflx_rootsoi_col, filterc, temp,
-                                  qflx_tran_veg_col, c_offset, nlevsoi)
+    # Whole-column kernel: zero + weighted accumulation + normalize + sink, with
+    # internal sequential layer/patch loops (each column owns its patch range).
+    _plantsink_default_launch!(rootr_col, qflx_rootsoi_col, filterc_d, rootr_patch,
+        qflx_tran_veg_patch, qflx_tran_veg_col, col.patchi, col.npatches,
+        patch_data.active, patch_data.wtcol, nlevsoi)
 
     return nothing
 end
@@ -164,38 +172,11 @@ function compute_effec_rootfrac_and_vert_tran_sink_hydstress_roads!(
     rootr_patch          = soilstate_inst.rootr_patch
     rootr_col            = soilstate_inst.rootr_col
 
-    # Accumulator for transpiration-weighted denominator
-    FT = eltype(rootr_patch)
-    temp = zeros(FT, length(bounds_col))
-    c_offset = first(bounds_col) - 1
-
-    # Zero out rootr_col for filter columns (independent per (column, layer))
-    plantsink_zero_rootr!(rootr_col, filterc, nlevsoi)
-
-    # Accumulate transpiration-weighted root fraction
-    for j in 1:nlevsoi
-        for c in filterc
-            for p in col.patchi[c]:(col.patchi[c] + col.npatches[c] - 1)
-                if patch_data.active[p]
-                    rootr_col[c, j] += rootr_patch[p, j] *
-                        qflx_tran_veg_patch[p] * patch_data.wtcol[p]
-                end
-            end
-        end
-    end
-
-    # Accumulate denominator
-    for c in filterc
-        for p in col.patchi[c]:(col.patchi[c] + col.npatches[c] - 1)
-            if patch_data.active[p]
-                temp[c - c_offset] += qflx_tran_veg_patch[p] * patch_data.wtcol[p]
-            end
-        end
-    end
-
-    # Normalize rootr_col and compute qflx_rootsoi_col (independent per element)
-    plantsink_normalize_and_sink!(rootr_col, qflx_rootsoi_col, filterc, temp,
-                                  qflx_tran_veg_col, c_offset, nlevsoi)
+    # Identical algorithm to the default method (see _plantsink_default_kernel!).
+    filterc_d = _to_device_filter(rootr_col, filterc)
+    _plantsink_default_launch!(rootr_col, qflx_rootsoi_col, filterc_d, rootr_patch,
+        qflx_tran_veg_patch, qflx_tran_veg_col, col.patchi, col.npatches,
+        patch_data.active, patch_data.wtcol, nlevsoi)
 
     return nothing
 end
@@ -224,6 +205,71 @@ Negative patchflux (water flowing from root to soil) is accumulated into
 Ported from `Compute_EffecRootFrac_And_VertTranSink_HydStress`
 in `SoilWaterPlantSinkMod.F90`.
 """
+
+# --------------------------------------------------------------------------
+# Hydraulic-stress per-column kernel.
+#
+# Whole-function-on-device version. Launched over `length(filterc)` columns;
+# `c = filterc[i]`. Each column owns a disjoint patch range, so the per-patch
+# reductions (column flux temp_c, and the per-patch hydraulic-redistribution
+# accumulation qflx_hydr_redist_patch[p] across layers) are SEQUENTIAL within
+# this thread — no atomics. Internal sequential loops over layers j and patches
+# p mirror the Fortran exactly. `nlevsno_off` is the snow-layer offset for z
+# indexing (col.z is (ncols, nlevsno + nlevmaxurbgrnd)). Literals carry the
+# working eltype (`zero(T)`, `T(1000)`) so no Float64 reaches a Float32 backend;
+# byte-identical on Float64 CPU.
+# --------------------------------------------------------------------------
+@kernel function _plantsink_hydstress_kernel!(qflx_rootsoi_col, qflx_phs_neg_col,
+        qflx_hydr_redist_patch, @Const(filterc), @Const(k_soil_root), @Const(smp),
+        @Const(vegwp), @Const(frac_veg_nosno), @Const(z), @Const(patchi),
+        @Const(npatches), @Const(active), @Const(wtcol), nlevsno_off::Int,
+        nlevsoi::Int, root_idx::Int)
+    i = @index(Global)
+    @inbounds begin
+        c = filterc[i]
+        T = eltype(qflx_rootsoi_col)
+        p_lo = patchi[c]
+        p_hi = patchi[c] + npatches[c] - 1
+
+        qflx_phs_neg_col[c] = zero(T)
+
+        for j in 1:nlevsoi
+            grav2 = z[c, j + nlevsno_off] * T(1000)
+            temp_c = zero(T)
+
+            for p in p_lo:p_hi
+                if j == 1
+                    qflx_hydr_redist_patch[p] = zero(T)
+                end
+                if active[p] && frac_veg_nosno[p] > 0
+                    if wtcol[p] > zero(T)
+                        patchflux = k_soil_root[p, j] * (smp[c, j] - vegwp[p, root_idx] - grav2)
+                        if patchflux < zero(T)
+                            qflx_hydr_redist_patch[p] += patchflux
+                        end
+                        temp_c += patchflux * wtcol[p]
+                    end
+                end
+            end
+            qflx_rootsoi_col[c, j] = temp_c
+
+            if temp_c < zero(T)
+                qflx_phs_neg_col[c] += temp_c
+            end
+        end
+    end
+end
+
+function _plantsink_hydstress_launch!(qflx_rootsoi_col, qflx_phs_neg_col,
+        qflx_hydr_redist_patch, filterc, k_soil_root, smp, vegwp, frac_veg_nosno,
+        z, patchi, npatches, active, wtcol, nlevsno_off::Int, nlevsoi::Int,
+        root_idx::Int)
+    _launch!(_plantsink_hydstress_kernel!, qflx_rootsoi_col, qflx_phs_neg_col,
+             qflx_hydr_redist_patch, filterc, k_soil_root, smp, vegwp, frac_veg_nosno,
+             z, patchi, npatches, active, wtcol, nlevsno_off, nlevsoi, root_idx;
+             ndrange = length(filterc))
+end
+
 function compute_effec_rootfrac_and_vert_tran_sink_hydstress!(
         bounds_col::UnitRange{Int},
         nlevsoi::Int,
@@ -254,34 +300,15 @@ function compute_effec_rootfrac_and_vert_tran_sink_hydstress!(
     # corresponds to index j + nlevsno in the combined array.
     nlevsno_off = varpar.nlevsno
 
-    for c in filterc
-        qflx_phs_neg_col[c] = 0.0
+    # Move the host filter onto the backend of the written matrix (no-op on CPU).
+    filterc_d = _to_device_filter(qflx_rootsoi_col, filterc)
 
-        for j in 1:nlevsoi
-            grav2 = z[c, j + nlevsno_off] * 1000.0
-            temp_c = 0.0
-
-            for p in col.patchi[c]:(col.patchi[c] + col.npatches[c] - 1)
-                if j == 1
-                    qflx_hydr_redist_patch[p] = 0.0
-                end
-                if patch_data.active[p] && frac_veg_nosno[p] > 0
-                    if patch_data.wtcol[p] > 0.0
-                        patchflux = k_soil_root[p, j] * (smp[c, j] - vegwp[p, root_idx] - grav2)
-                        if patchflux < 0.0
-                            qflx_hydr_redist_patch[p] += patchflux
-                        end
-                        temp_c += patchflux * patch_data.wtcol[p]
-                    end
-                end
-            end
-            qflx_rootsoi_col[c, j] = temp_c
-
-            if temp_c < 0.0
-                qflx_phs_neg_col[c] += temp_c
-            end
-        end
-    end
+    # Per-column kernel: internal sequential layer/patch loops, each column owns
+    # its patch range (the hydr-redist accumulation is per-patch, no atomics).
+    _plantsink_hydstress_launch!(qflx_rootsoi_col, qflx_phs_neg_col,
+        qflx_hydr_redist_patch, filterc_d, k_soil_root, smp, vegwp, frac_veg_nosno,
+        z, col.patchi, col.npatches, patch_data.active, patch_data.wtcol,
+        nlevsno_off, nlevsoi, root_idx)
 
     return nothing
 end
@@ -326,13 +353,22 @@ function compute_effec_rootfrac_and_vert_tran_sink!(
 
     num_filterc_tot = 0
 
+    # Host copies of the small integer metadata the column-group filters are
+    # built from. On the CPU these are identity (the arrays are already host
+    # Arrays); on a GPU backend this pulls the column/landunit type vectors to
+    # the host once so filter construction stays scalar-index-free on the device.
+    # The resulting Int filters are then moved back to the device per sub-call.
+    col_itype    = Array(col.itype)
+    col_landunit = Array(col.landunit)
+    lun_itype    = Array(lun.itype)
+
     # ---------------------------------------------------------------
     # 1) Pervious roads
     # ---------------------------------------------------------------
     filterc_roads = Int[]
     for c in bounds_col
         mask_hydrology[c] || continue
-        if col.itype[c] == ICOL_ROAD_PERV
+        if col_itype[c] == ICOL_ROAD_PERV
             push!(filterc_roads, c)
         end
     end
@@ -356,8 +392,8 @@ function compute_effec_rootfrac_and_vert_tran_sink!(
     filterc_other = Int[]
     for c in bounds_col
         mask_hydrology[c] || continue
-        l = col.landunit[c]
-        if col.itype[c] != ICOL_ROAD_PERV && lun.itype[l] != ISTSOIL
+        l = col_landunit[c]
+        if col_itype[c] != ICOL_ROAD_PERV && lun_itype[l] != ISTSOIL
             push!(filterc_other, c)
         end
     end
@@ -381,8 +417,8 @@ function compute_effec_rootfrac_and_vert_tran_sink!(
     filterc_natveg = Int[]
     for c in bounds_col
         mask_hydrology[c] || continue
-        l = col.landunit[c]
-        if lun.itype[l] == ISTSOIL
+        l = col_landunit[c]
+        if lun_itype[l] == ISTSOIL
             push!(filterc_natveg, c)
         end
     end
