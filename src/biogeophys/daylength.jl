@@ -19,43 +19,70 @@ violated (|lat| ≥ pole + ε, or |decl| ≥ pole).
 
 Ported from elemental function `daylength` in `DaylengthMod.F90`.
 """
-function daylength(lat::Real, decl::Real)::Real
+function daylength(lat::Real, decl::Real)
+    # Work in the promoted element type so the body carries no Float64 literals
+    # on a Float32-only backend (Metal); identity on Float64 (byte-identical).
+    T = promote_type(typeof(lat), typeof(decl))
+    lt   = T(lat)
+    dcl  = T(decl)
+    pole = T(POLE)
+    eps_lat       = T(LAT_EPSILON)
+    offset_pole   = T(OFFSET_POLE)
+    secs_per_rad  = T(SECS_PER_RADIAN)
+
     # lat must be less than π/2 within a small tolerance
-    if abs(lat) >= (POLE + LAT_EPSILON)
-        return NaN
+    if abs(lt) >= (pole + eps_lat)
+        return T(NaN)
     end
 
     # decl must be strictly less than π/2
-    if abs(decl) >= POLE
-        return NaN
+    if abs(dcl) >= pole
+        return T(NaN)
     end
 
     # Ensure latitude isn't too close to pole
-    my_lat = min(OFFSET_POLE, max(-OFFSET_POLE, lat))
+    my_lat = min(offset_pole, max(-offset_pole, lt))
 
-    temp = -(sin(my_lat) * sin(decl)) / (cos(my_lat) * cos(decl))
-    temp = min(1.0, max(-1.0, temp))
-    return 2.0 * SECS_PER_RADIAN * acos(temp)
+    temp = -(sin(my_lat) * sin(dcl)) / (cos(my_lat) * cos(dcl))
+    temp = min(one(T), max(-one(T), temp))
+    return T(2) * secs_per_rad * acos(temp)
+end
+
+# --------------------------------------------------------------------------
+# Kernel: maximum daylength per grid cell. `daylength` is eltype-generic and
+# device-callable; `obliquity` is passed pre-converted to the working eltype so
+# no Float64 reaches a Float32-only backend (Metal). One thread per grid cell;
+# `lo` is the first index of `bounds` so threads 1:length(bounds) map to g.
+# --------------------------------------------------------------------------
+@kernel function _max_daylength_kernel!(max_daylength, @Const(lat), obliquity, lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        g = lo + i - 1
+        T = eltype(max_daylength)
+        max_decl = obliquity
+        if lat[g] < zero(eltype(lat))
+            max_decl = -max_decl
+        end
+        max_daylength[g] = daylength(lat[g], max_decl)
+    end
 end
 
 """
     compute_max_daylength!(lat, obliquity, max_daylength, bounds)
 
-Compute maximum daylength for each grid cell.
+Compute maximum daylength for each grid cell. Backend-agnostic (CPU loop or
+GPU kernel); one thread per grid cell.
 
 Ported from subroutine `ComputeMaxDaylength` in `DaylengthMod.F90`.
 """
-function compute_max_daylength!(lat::Vector{<:Real},
+function compute_max_daylength!(lat::AbstractVector{<:Real},
                                 obliquity::Real,
-                                max_daylength::Vector{<:Real},
+                                max_daylength::AbstractVector{<:Real},
                                 bounds::UnitRange{Int})
-    for g in bounds
-        max_decl = obliquity
-        if lat[g] < 0.0
-            max_decl = -max_decl
-        end
-        max_daylength[g] = daylength(lat[g], max_decl)
-    end
+    isempty(bounds) && return nothing
+    obl = convert(eltype(max_daylength), obliquity)
+    _launch!(_max_daylength_kernel!, max_daylength, lat, obl, first(bounds);
+             ndrange = length(bounds))
     return nothing
 end
 
@@ -84,6 +111,20 @@ function init_daylength!(grc::GridcellData,
     return nothing
 end
 
+# --------------------------------------------------------------------------
+# Kernel: advance daylength one step. Each thread reads its OWN old dayl into
+# prev_dayl, then overwrites dayl — fully per-grid-cell independent. `declin` is
+# pre-converted to the working eltype. `lo` = first(bounds).
+# --------------------------------------------------------------------------
+@kernel function _update_dayl_kernel!(dayl, prev_dayl, @Const(lat), declin, lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        g = lo + i - 1
+        prev_dayl[g] = dayl[g]
+        dayl[g]      = daylength(lat[g], declin)
+    end
+end
+
 """
     update_daylength!(grc::GridcellData, declin, obliquity, is_first_step, bounds)
 
@@ -100,11 +141,10 @@ function update_daylength!(grc::GridcellData,
                            obliquity::Real,
                            is_first_step::Bool,
                            bounds::UnitRange{Int})
-    if !is_first_step
-        for g in bounds
-            grc.prev_dayl[g] = grc.dayl[g]
-            grc.dayl[g]      = daylength(grc.lat[g], declin)
-        end
+    if !is_first_step && !isempty(bounds)
+        decl = convert(eltype(grc.dayl), declin)
+        _launch!(_update_dayl_kernel!, grc.dayl, grc.prev_dayl, grc.lat, decl,
+                 first(bounds); ndrange = length(bounds))
     end
 
     compute_max_daylength!(grc.lat, obliquity, grc.max_dayl, bounds)

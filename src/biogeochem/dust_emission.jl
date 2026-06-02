@@ -376,6 +376,87 @@ end
 # Source: C. Zender's dry deposition code
 # ---------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Kernels for the per-patch passes of dust_dry_dep!. Float64 literals are
+# converted to the working element type T (T(...)/one/zero) so no Float64
+# reaches a Float32-only backend (Metal); on Float64 CPU this is byte-identical.
+# Each thread owns one patch index p = lo + i - 1; the ndst (=4) bin loop runs
+# in-thread. `BOLTZ`, `RAIR`, `GRAV`, `DNS_AER` are module constants (Float64);
+# they are converted at the point of use.
+# --------------------------------------------------------------------------
+@kernel function _dust_pass1_kernel!(vsc_dyn_atm, vsc_knm_atm, slp_crc, vlc_grv,
+                                     @Const(patch_active), @Const(patch_column),
+                                     @Const(forc_pbot), @Const(forc_rho), @Const(forc_t),
+                                     @Const(dmt_vwr), @Const(stk_crc), ndst::Int, lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        p = lo + i - 1
+        if patch_active[p]
+            T = eltype(vsc_dyn_atm)
+            c = patch_column[p]
+            tc = forc_t[c]
+            vsc_dyn_atm[p] = T(1.72e-5) * ((tc / T(273.0))^T(1.5)) * T(393.0) /
+                (tc + T(120.0))
+            mfp_atm = T(2.0) * vsc_dyn_atm[p] /
+                (forc_pbot[c] * sqrt(T(8.0) / (T(π) * T(RAIR) * tc)))
+            vsc_knm_atm[p] = vsc_dyn_atm[p] / forc_rho[c]
+
+            for m in 1:ndst
+                dm = dmt_vwr[m]
+                slp_crc[p, m] = one(T) + T(2.0) * mfp_atm *
+                    (T(1.257) + T(0.4) * exp(-T(1.1) * dm / (T(2.0) * mfp_atm))) / dm
+                vg = (one(T) / T(18.0)) * dm * dm * T(DNS_AER) *
+                    T(GRAV) * slp_crc[p, m] / vsc_dyn_atm[p]
+                vlc_grv[p, m] = vg * stk_crc[m]
+            end
+        end
+    end
+end
+
+@kernel function _dust_pass2_kernel!(rss_lmn, @Const(patch_active), @Const(patch_column),
+                                     @Const(forc_t), @Const(fv), @Const(vlc_grv),
+                                     @Const(vsc_knm_atm), @Const(vsc_dyn_atm),
+                                     @Const(slp_crc), @Const(dmt_vwr), ndst::Int, lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        p = lo + i - 1
+        if patch_active[p]
+            T = eltype(rss_lmn)
+            c = patch_column[p]
+            shm_nbr_xpn = -T(2.0) / T(3.0)  # shm_nbr_xpn over land
+            for m in 1:ndst
+                stk_nbr = vlc_grv[p, m] * fv[p] * fv[p] / (T(GRAV) * vsc_knm_atm[p])
+                dff_aer = T(BOLTZ) * forc_t[c] * slp_crc[p, m] /
+                    (T(3.0) * T(π) * vsc_dyn_atm[p] * dmt_vwr[m])
+                shm_nbr = vsc_knm_atm[p] / dff_aer
+                tmp = shm_nbr^shm_nbr_xpn + T(10.0)^(-T(3.0) / stk_nbr)
+                rss_lmn[p, m] = one(T) / (tmp * fv[p])
+            end
+        end
+    end
+end
+
+@kernel function _dust_pass3_kernel!(vlc_trb_patch, vlc_trb_1_patch, vlc_trb_2_patch,
+                                     vlc_trb_3_patch, vlc_trb_4_patch,
+                                     @Const(patch_active), @Const(ram1), @Const(rss_lmn),
+                                     @Const(vlc_grv), ndst::Int, lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        p = lo + i - 1
+        if patch_active[p]
+            T = eltype(vlc_trb_patch)
+            for m in 1:ndst
+                rss_trb = ram1[p] + rss_lmn[p, m] + ram1[p] * rss_lmn[p, m] * vlc_grv[p, m]
+                vlc_trb_patch[p, m] = one(T) / rss_trb
+            end
+            vlc_trb_1_patch[p] = vlc_trb_patch[p, 1]
+            vlc_trb_2_patch[p] = vlc_trb_patch[p, 2]
+            vlc_trb_3_patch[p] = vlc_trb_patch[p, 3]
+            vlc_trb_4_patch[p] = vlc_trb_patch[p, 4]
+        end
+    end
+end
+
 """
     dust_dry_dep!(dust, patch_active, patch_column, bounds_p,
                   forc_pbot, forc_rho, forc_t, ram1, fv)
@@ -397,84 +478,47 @@ Ported from `DustDryDep` in `DustEmisBase.F90`.
 """
 function dust_dry_dep!(
     dust::DustEmisBaseData,
-    patch_active::BitVector,
-    patch_column::Vector{Int},
+    patch_active::AbstractVector{Bool},
+    patch_column::AbstractVector{<:Integer},
     bounds_p::UnitRange{Int},
     # Atmospheric forcing (column-level)
-    forc_pbot::Vector{<:Real},      # [Pa] atm pressure
-    forc_rho::Vector{<:Real},       # [kg/m3] atm density
-    forc_t::Vector{<:Real},         # [K] atm temperature
+    forc_pbot::AbstractVector{<:Real},      # [Pa] atm pressure
+    forc_rho::AbstractVector{<:Real},       # [kg/m3] atm density
+    forc_t::AbstractVector{<:Real},         # [K] atm temperature
     # Friction velocity (patch-level)
-    ram1::Vector{<:Real},           # [s/m] aerodynamical resistance
-    fv::Vector{<:Real}              # [m/s] friction velocity
+    ram1::AbstractVector{<:Real},           # [s/m] aerodynamical resistance
+    fv::AbstractVector{<:Real}              # [m/s] friction velocity
 )
     ndst = NDST
-    shm_nbr_xpn_lnd = -2.0 / 3.0  # [frc] shm_nbr_xpn over land
 
     np = length(patch_active)
-    FT = eltype(forc_t)
-    vsc_dyn_atm = zeros(FT, np)
-    vsc_knm_atm = zeros(FT, np)
-    slp_crc = zeros(FT, np, ndst)
-    vlc_grv = zeros(FT, np, ndst)
-    rss_lmn = zeros(FT, np, ndst)
+    FT = eltype(dust.vlc_trb_patch)
 
-    # First pass: size-independent thermokinetic properties and settling velocity
-    for p in bounds_p
-        patch_active[p] || continue
-        c = patch_column[p]
+    # Scratch is device-resident (similar() off a device struct field) and zeroed
+    # via fill! so no host `zeros` array reaches a GPU kernel.
+    vsc_dyn_atm = fill!(similar(dust.vlc_trb_1_patch, np), zero(FT))
+    vsc_knm_atm = fill!(similar(dust.vlc_trb_1_patch, np), zero(FT))
+    slp_crc     = fill!(similar(dust.vlc_trb_patch, np, ndst), zero(FT))
+    vlc_grv     = fill!(similar(dust.vlc_trb_patch, np, ndst), zero(FT))
+    rss_lmn     = fill!(similar(dust.vlc_trb_patch, np, ndst), zero(FT))
 
-        # Quasi-laminar layer resistance: size-independent thermokinetic properties
-        vsc_dyn_atm[p] = 1.72e-5 * ((forc_t[c] / 273.0)^1.5) * 393.0 /
-            (forc_t[c] + 120.0)  # [kg m-1 s-1] RoY94 p. 102
-        mfp_atm = 2.0 * vsc_dyn_atm[p] /
-            (forc_pbot[c] * sqrt(8.0 / (π * RAIR * forc_t[c])))  # [m] SeP97 p. 455
-        vsc_knm_atm[p] = vsc_dyn_atm[p] / forc_rho[c]  # [m2 s-1] Kinematic viscosity
+    lo = first(bounds_p)
+    n  = length(bounds_p)
 
-        for m in 1:ndst
-            slp_crc[p, m] = 1.0 + 2.0 * mfp_atm *
-                (1.257 + 0.4 * exp(-1.1 * dust.dmt_vwr[m] / (2.0 * mfp_atm))) /
-                dust.dmt_vwr[m]  # [frc] Slip correction factor SeP97 p. 464
-            vlc_grv[p, m] = (1.0 / 18.0) * dust.dmt_vwr[m] * dust.dmt_vwr[m] * DNS_AER *
-                GRAV * slp_crc[p, m] / vsc_dyn_atm[p]  # [m s-1] Stokes' settling velocity
-            vlc_grv[p, m] = vlc_grv[p, m] * dust.stk_crc[m]  # [m s-1] Corrected settling velocity
-        end
-    end
+    # Pass 1: thermokinetic properties + Stokes settling velocity (per patch).
+    _launch!(_dust_pass1_kernel!, vsc_dyn_atm, vsc_knm_atm, slp_crc, vlc_grv,
+             patch_active, patch_column, forc_pbot, forc_rho, forc_t,
+             dust.dmt_vwr, dust.stk_crc, ndst, lo; ndrange = n)
 
-    # Second pass: quasi-laminar layer resistance
-    for m in 1:ndst
-        for p in bounds_p
-            patch_active[p] || continue
-            c = patch_column[p]
+    # Pass 2: quasi-laminar layer resistance (per patch).
+    _launch!(_dust_pass2_kernel!, rss_lmn, patch_active, patch_column, forc_t,
+             fv, vlc_grv, vsc_knm_atm, vsc_dyn_atm, slp_crc, dust.dmt_vwr, ndst, lo;
+             ndrange = n)
 
-            stk_nbr = vlc_grv[p, m] * fv[p] * fv[p] / (GRAV * vsc_knm_atm[p])  # [frc] SeP97 p.965
-            dff_aer = BOLTZ * forc_t[c] * slp_crc[p, m] /
-                (3.0 * π * vsc_dyn_atm[p] * dust.dmt_vwr[m])  # [m2 s-1] SeP97 p.474
-            shm_nbr = vsc_knm_atm[p] / dff_aer  # [frc] SeP97 p.972
-            shm_nbr_xpn = shm_nbr_xpn_lnd  # [frc]
-
-            tmp = shm_nbr^shm_nbr_xpn + 10.0^(-3.0 / stk_nbr)
-            rss_lmn[p, m] = 1.0 / (tmp * fv[p])  # [s m-1] SeP97 p.972,965
-        end
-    end
-
-    # Third pass: lowest layer turbulent deposition
-    for m in 1:ndst
-        for p in bounds_p
-            patch_active[p] || continue
-            rss_trb = ram1[p] + rss_lmn[p, m] + ram1[p] * rss_lmn[p, m] * vlc_grv[p, m]  # [s m-1]
-            dust.vlc_trb_patch[p, m] = 1.0 / rss_trb  # [m s-1]
-        end
-    end
-
-    # Copy to individual bin arrays
-    for p in bounds_p
-        patch_active[p] || continue
-        dust.vlc_trb_1_patch[p] = dust.vlc_trb_patch[p, 1]
-        dust.vlc_trb_2_patch[p] = dust.vlc_trb_patch[p, 2]
-        dust.vlc_trb_3_patch[p] = dust.vlc_trb_patch[p, 3]
-        dust.vlc_trb_4_patch[p] = dust.vlc_trb_patch[p, 4]
-    end
+    # Pass 3: lowest-layer turbulent deposition + copy to bin arrays (per patch).
+    _launch!(_dust_pass3_kernel!, dust.vlc_trb_patch, dust.vlc_trb_1_patch,
+             dust.vlc_trb_2_patch, dust.vlc_trb_3_patch, dust.vlc_trb_4_patch,
+             patch_active, ram1, rss_lmn, vlc_grv, ndst, lo; ndrange = n)
 
     return nothing
 end
