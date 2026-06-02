@@ -11,7 +11,28 @@
 #   truncate_n_states!              -- Truncate a nitrogen-only state vector
 #   truncate_additional!            -- Truncate an additional state (e.g. isotope)
 #                                      using a pre-computed truncation filter
+#
+# GPU kernelization note (Phase B):
+#   Each truncate_* helper's per-filter loop is a fully-independent per-patch
+#   loop (each thread fp owns its own patch index p = filter[fp]; the filter
+#   lists distinct patches, so writes never collide). The arithmetic loop is
+#   moved into a KernelAbstractions kernel (CPU + Metal) operating over the
+#   filter range (ndrange = length(filter)). Every Float64 literal inside a
+#   kernel is converted to the working element type T so the kernel carries no
+#   Float64 on a Float32-only backend (Metal); on Float64, T(x) === x so the
+#   math is byte-identical.
+#
+#   The two host-side responsibilities that cannot live inside a GPU kernel are
+#   kept on the host and are byte-identical to the original control flow:
+#     (1) the critically-negative `error()` aborts (a host pre-scan over the
+#         filter raises on exactly the same inputs as before), and
+#     (2) the dynamically-built `filter_truncatep` return value: the kernel
+#         writes a per-fp boolean `did_truncate` flag, from which the host
+#         builds `filter_truncatep` in filter order — the same order (and same
+#         contents) the original `push!` produced.
 # ==========================================================================
+
+# @kernel / @index / @Const / _launch! are module-wide (infrastructure/kernels.jl).
 
 # ---------------------------------------------------------------------------
 # Module-level constants (matching Fortran module data in CNPrecisionControlMod)
@@ -31,6 +52,145 @@ const CN_NNEGCRIT_DEFAULT = -7.0e+0
 
 """Minimum nitrogen value used when calculating CN ratio (gN/m2)."""
 const CN_N_MIN = 1.0e-9
+
+# ---------------------------------------------------------------------------
+# Kernels — one thread per filter entry fp; writes only its own patch index p.
+# ---------------------------------------------------------------------------
+
+# truncate_c_and_n_states! arithmetic. `did_truncate[fp]` records whether
+# patch p = filter[fp] was truncated, so the host can rebuild filter_truncatep
+# in the original push! order. Literals are converted to the working precision
+# T = typeof(ccrit). On Float64 every T(x) === x (byte-identical).
+@kernel function _cnprec_cn_kernel!(carbon_patch, nitrogen_patch, pc, pn,
+        did_truncate,
+        @Const(filter_bgc_vegp), @Const(patch_itype),
+        ccrit, cnegcrit, ncrit, nnegcrit,
+        croponly::Bool, use_nguardrail::Bool, use_matrixcn::Bool,
+        allowneg::Bool, nc3crop::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_bgc_vegp[fp]
+        T = typeof(ccrit)
+        did_truncate[fp] = false
+
+        skip = croponly && patch_itype[p] < nc3crop
+        if !skip
+            # The host pre-scan already raised on critically-negative states
+            # when !allowneg, so here we only perform the truncation math.
+            if use_matrixcn
+                if (carbon_patch[p] < ccrit && carbon_patch[p] > -ccrit * T(1.0e+6)) ||
+                   (use_nguardrail && nitrogen_patch[p] < ncrit &&
+                    nitrogen_patch[p] > -ncrit * T(1.0e+6))
+                    did_truncate[fp] = true
+                    pc[p] += carbon_patch[p]
+                    carbon_patch[p] = zero(eltype(carbon_patch))
+                    pn[p] += nitrogen_patch[p]
+                    nitrogen_patch[p] = zero(eltype(nitrogen_patch))
+                end
+            else
+                if abs(carbon_patch[p]) < ccrit ||
+                   (use_nguardrail && abs(nitrogen_patch[p]) < ncrit)
+                    did_truncate[fp] = true
+                    pc[p] += carbon_patch[p]
+                    carbon_patch[p] = zero(eltype(carbon_patch))
+                    pn[p] += nitrogen_patch[p]
+                    nitrogen_patch[p] = zero(eltype(nitrogen_patch))
+                end
+            end
+        end
+    end
+end
+
+# truncate_c_states! arithmetic (carbon only).
+@kernel function _cnprec_c_kernel!(carbon_patch, pc, did_truncate,
+        @Const(filter_bgc_vegp), @Const(patch_itype),
+        ccrit, croponly::Bool, nc3crop::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_bgc_vegp[fp]
+        did_truncate[fp] = false
+        skip = croponly && patch_itype[p] < nc3crop
+        if !skip
+            # Host pre-scan already raised on critically-negative C (!allowneg).
+            if abs(carbon_patch[p]) < ccrit
+                did_truncate[fp] = true
+                pc[p] += carbon_patch[p]
+                carbon_patch[p] = zero(eltype(carbon_patch))
+            end
+        end
+    end
+end
+
+# truncate_n_states! arithmetic (nitrogen only; no filter_truncatep returned).
+@kernel function _cnprec_n_kernel!(nitrogen_patch, pn,
+        @Const(filter_bgc_vegp), ncrit, nnegcrit)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_bgc_vegp[fp]
+        if nitrogen_patch[p] < nnegcrit
+            # Fortran source has the endrun call commented out here. No abort.
+        elseif abs(nitrogen_patch[p]) < ncrit
+            pn[p] += nitrogen_patch[p]
+            nitrogen_patch[p] = zero(eltype(nitrogen_patch))
+        end
+    end
+end
+
+# truncate_additional! arithmetic: zero an extra (isotope) state on a
+# pre-computed truncation filter. One thread per filter entry fp.
+@kernel function _cnprec_additional_kernel!(state_patch, truncation_patch,
+        @Const(filter_truncatep))
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_truncatep[fp]
+        truncation_patch[p] += state_patch[p]
+        state_patch[p] = zero(eltype(state_patch))
+    end
+end
+
+# Final accumulation of pc/pn (and isotopes) into the ctrunc/ntrunc sinks.
+@kernel function _cnprec_accum_kernel!(ctrunc_patch, ntrunc_patch,
+        @Const(pc), @Const(pn), @Const(filter_bgc_vegp))
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_bgc_vegp[fp]
+        ctrunc_patch[p] += pc[p]
+        ntrunc_patch[p] += pn[p]
+    end
+end
+
+@kernel function _cnprec_accum_iso_kernel!(iso_ctrunc_patch,
+        @Const(piso), @Const(filter_bgc_vegp))
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_bgc_vegp[fp]
+        iso_ctrunc_patch[p] += piso[p]
+    end
+end
+
+# Move a host index vector `f` onto the backend of `ref` (a state array). On the
+# CPU path `ref` is a plain Array and `f` is returned unchanged; on a device
+# backend `Adapt.adapt(typeof(ref), f)` produces the matching device vector so
+# the kernel can read the filter without host scalar-indexing the device array.
+@inline _cnprec_match_backend(ref::Array, f) = f
+@inline _cnprec_match_backend(ref, f) = Adapt.adapt(typeof(ref), f)
+
+# Build filter_truncatep (in filter order) from the per-fp did_truncate flags.
+# This is host bookkeeping (a dynamic-length result); the truncation decision
+# itself was made in the kernel. Preserves the exact order/contents the
+# original `push!` produced. `did_truncate` / `filter_bgc_vegp` may be device
+# arrays, so they are materialized to host once (no per-element device indexing).
+@inline function _build_truncate_filter(filter_bgc_vegp, did_truncate)
+    fh = Array(filter_bgc_vegp)
+    dh = Array(did_truncate)
+    filter_truncatep = Int[]
+    @inbounds for fp in eachindex(fh)
+        if dh[fp]
+            push!(filter_truncatep, Int(fh[fp]))
+        end
+    end
+    return filter_truncatep
+end
 
 # ---------------------------------------------------------------------------
 # truncate_c_and_n_states!
@@ -54,12 +214,12 @@ where truncation occurred, for use by `truncate_additional!`.
 Ported from `TruncateCandNStates` in `CNPrecisionControlMod.F90`.
 """
 function truncate_c_and_n_states!(
-        carbon_patch::AbstractVector{Float64},
-        nitrogen_patch::AbstractVector{Float64},
-        pc::Vector{<:Real},
-        pn::Vector{<:Real},
-        filter_bgc_vegp::AbstractVector{Int},
-        patch_itype::AbstractVector{Int};
+        carbon_patch::AbstractVector,
+        nitrogen_patch::AbstractVector,
+        pc::AbstractVector,
+        pn::AbstractVector,
+        filter_bgc_vegp::AbstractVector{<:Integer},
+        patch_itype::AbstractVector{<:Integer};
         ccrit::Real = CN_CCRIT_DEFAULT,
         cnegcrit::Real = CN_CNEGCRIT_DEFAULT,
         ncrit::Real = CN_NCRIT_DEFAULT,
@@ -70,48 +230,35 @@ function truncate_c_and_n_states!(
         allowneg::Bool = false,
         nc3crop::Int = 15)
 
-    filter_truncatep = Int[]
+    isempty(filter_bgc_vegp) && return (0, Int[])
 
-    for fp in eachindex(filter_bgc_vegp)
-        p = filter_bgc_vegp[fp]
-
-        # Skip non-crop patches when croponly is set
-        if croponly && patch_itype[p] < nc3crop
-            continue
-        end
-
-        if !allowneg && (carbon_patch[p] < cnegcrit || nitrogen_patch[p] < nnegcrit)
-            error("carbon or nitrogen state critically negative: " *
-                  "C=$(carbon_patch[p]), N=$(nitrogen_patch[p]), " *
-                  "limits: cnegcrit=$cnegcrit, nnegcrit=$nnegcrit")
-        else
-            if use_matrixcn
-                # Matrix code has a different check
-                if (carbon_patch[p] < ccrit && carbon_patch[p] > -ccrit * 1.0e+6) ||
-                   (use_nguardrail && nitrogen_patch[p] < ncrit && nitrogen_patch[p] > -ncrit * 1.0e+6)
-                    push!(filter_truncatep, p)
-
-                    pc[p] += carbon_patch[p]
-                    carbon_patch[p] = 0.0
-
-                    pn[p] += nitrogen_patch[p]
-                    nitrogen_patch[p] = 0.0
-                end
-            else
-                if abs(carbon_patch[p]) < ccrit ||
-                   (use_nguardrail && abs(nitrogen_patch[p]) < ncrit)
-                    push!(filter_truncatep, p)
-
-                    pc[p] += carbon_patch[p]
-                    carbon_patch[p] = 0.0
-
-                    pn[p] += nitrogen_patch[p]
-                    nitrogen_patch[p] = 0.0
-                end
+    # Host pre-scan: raise on critically-negative states exactly as the original
+    # in-loop check did (same inputs -> same error). Done before any mutation.
+    # Arrays are materialized to host once (no per-element device indexing).
+    if !allowneg
+        cH = Array(carbon_patch); nH = Array(nitrogen_patch)
+        fH = Array(filter_bgc_vegp); iH = Array(patch_itype)
+        @inbounds for fp in eachindex(fH)
+            p = fH[fp]
+            if croponly && iH[p] < nc3crop
+                continue
+            end
+            if cH[p] < cnegcrit || nH[p] < nnegcrit
+                error("carbon or nitrogen state critically negative: " *
+                      "C=$(cH[p]), N=$(nH[p]), " *
+                      "limits: cnegcrit=$cnegcrit, nnegcrit=$nnegcrit")
             end
         end
     end
 
+    did_truncate = fill!(similar(carbon_patch, Bool, length(filter_bgc_vegp)), false)
+    _launch!(_cnprec_cn_kernel!, carbon_patch, nitrogen_patch, pc, pn,
+             did_truncate, filter_bgc_vegp, patch_itype,
+             ccrit, cnegcrit, ncrit, nnegcrit,
+             croponly, use_nguardrail, use_matrixcn, allowneg, nc3crop;
+             ndrange = length(filter_bgc_vegp))
+
+    filter_truncatep = _build_truncate_filter(filter_bgc_vegp, did_truncate)
     return (length(filter_truncatep), filter_truncatep)
 end
 
@@ -133,10 +280,10 @@ where truncation occurred.
 Ported from `TruncateCStates` in `CNPrecisionControlMod.F90`.
 """
 function truncate_c_states!(
-        carbon_patch::AbstractVector{Float64},
-        pc::Vector{<:Real},
-        filter_bgc_vegp::AbstractVector{Int},
-        patch_itype::AbstractVector{Int};
+        carbon_patch::AbstractVector,
+        pc::AbstractVector,
+        filter_bgc_vegp::AbstractVector{<:Integer},
+        patch_itype::AbstractVector{<:Integer};
         ccrit::Real = CN_CCRIT_DEFAULT,
         cnegcrit::Real = CN_CNEGCRIT_DEFAULT,
         croponly::Bool = false,
@@ -148,26 +295,28 @@ function truncate_c_states!(
         error("cnegcrit should be less than -ccrit: cnegcrit=$cnegcrit, ccrit=$ccrit")
     end
 
-    filter_truncatep = Int[]
+    isempty(filter_bgc_vegp) && return (0, Int[])
 
-    for fp in eachindex(filter_bgc_vegp)
-        p = filter_bgc_vegp[fp]
-
-        # Skip non-crop patches when croponly is set
-        if croponly && patch_itype[p] < nc3crop
-            continue
-        end
-
-        if !allowneg && carbon_patch[p] < cnegcrit
-            error("carbon state critically negative: C=$(carbon_patch[p]), limit=$cnegcrit")
-        elseif abs(carbon_patch[p]) < ccrit
-            push!(filter_truncatep, p)
-
-            pc[p] += carbon_patch[p]
-            carbon_patch[p] = 0.0
+    # Host pre-scan: raise on critically-negative C exactly as before.
+    if !allowneg
+        cH = Array(carbon_patch); fH = Array(filter_bgc_vegp); iH = Array(patch_itype)
+        @inbounds for fp in eachindex(fH)
+            p = fH[fp]
+            if croponly && iH[p] < nc3crop
+                continue
+            end
+            if cH[p] < cnegcrit
+                error("carbon state critically negative: C=$(cH[p]), limit=$cnegcrit")
+            end
         end
     end
 
+    did_truncate = fill!(similar(carbon_patch, Bool, length(filter_bgc_vegp)), false)
+    _launch!(_cnprec_c_kernel!, carbon_patch, pc, did_truncate,
+             filter_bgc_vegp, patch_itype, ccrit, croponly, nc3crop;
+             ndrange = length(filter_bgc_vegp))
+
+    filter_truncatep = _build_truncate_filter(filter_bgc_vegp, did_truncate)
     return (length(filter_truncatep), filter_truncatep)
 end
 
@@ -189,23 +338,16 @@ that behaviour and only warn (via no-op) rather than erroring.
 Ported from `TruncateNStates` in `CNPrecisionControlMod.F90`.
 """
 function truncate_n_states!(
-        nitrogen_patch::AbstractVector{Float64},
-        pn::Vector{<:Real},
-        filter_bgc_vegp::AbstractVector{Int};
+        nitrogen_patch::AbstractVector,
+        pn::AbstractVector,
+        filter_bgc_vegp::AbstractVector{<:Integer};
         ncrit::Real = CN_NCRIT_DEFAULT,
         nnegcrit::Real = CN_NNEGCRIT_DEFAULT)
 
-    for fp in eachindex(filter_bgc_vegp)
-        p = filter_bgc_vegp[fp]
+    isempty(filter_bgc_vegp) && return nothing
 
-        if nitrogen_patch[p] < nnegcrit
-            # Fortran source has the endrun call commented out here.
-            # We follow suit and do nothing (no abort).
-        elseif abs(nitrogen_patch[p]) < ncrit
-            pn[p] += nitrogen_patch[p]
-            nitrogen_patch[p] = 0.0
-        end
-    end
+    _launch!(_cnprec_n_kernel!, nitrogen_patch, pn, filter_bgc_vegp,
+             ncrit, nnegcrit; ndrange = length(filter_bgc_vegp))
 
     return nothing
 end
@@ -227,16 +369,22 @@ into `truncation_patch`.
 Ported from `TruncateAdditional` in `CNPrecisionControlMod.F90`.
 """
 function truncate_additional!(
-        state_patch::AbstractVector{Float64},
-        truncation_patch::Vector{<:Real},
+        state_patch::AbstractVector,
+        truncation_patch::AbstractVector,
         num_truncatep::Int,
-        filter_truncatep::AbstractVector{Int})
+        filter_truncatep::AbstractVector{<:Integer})
 
-    for fp in 1:num_truncatep
-        p = filter_truncatep[fp]
-        truncation_patch[p] += state_patch[p]
-        state_patch[p] = 0.0
-    end
+    num_truncatep == 0 && return nothing
+
+    # filter_truncatep may carry trailing entries beyond num_truncatep; operate
+    # only over the active prefix (matching the original `for fp in 1:num`).
+    f = num_truncatep == length(filter_truncatep) ? filter_truncatep :
+        filter_truncatep[1:num_truncatep]
+    # The kernel reads the filter on the state array's backend, so move the
+    # (host-built) filter to that backend. On CPU this is the identity.
+    fdev = _cnprec_match_backend(state_patch, f)
+    _launch!(_cnprec_additional_kernel!, state_patch, truncation_patch, fdev;
+             ndrange = num_truncatep)
 
     return nothing
 end
@@ -267,8 +415,8 @@ Ported from `CNPrecisionControl` in `CNPrecisionControlMod.F90`.
 function cn_precision_control!(
         cs::CNVegCarbonStateData,
         ns::CNVegNitrogenStateData,
-        filter_bgc_vegp::AbstractVector{Int},
-        patch_itype::AbstractVector{Int};
+        filter_bgc_vegp::AbstractVector{<:Integer},
+        patch_itype::AbstractVector{<:Integer};
         c13cs::Union{CNVegCarbonStateData,Nothing} = nothing,
         c14cs::Union{CNVegCarbonStateData,Nothing} = nothing,
         use_c13::Bool = false,
@@ -287,11 +435,12 @@ function cn_precision_control!(
     np = length(cs.leafc_patch)
     FT = eltype(cs.leafc_patch)
 
-    # Initialize patch-level truncation accumulators
-    pc   = zeros(FT, np)
-    pn   = zeros(FT, np)
-    pc13 = use_c13 ? zeros(FT, np) : FT[]
-    pc14 = use_c14 ? zeros(FT, np) : FT[]
+    # Initialize patch-level truncation accumulators (device-resident: match
+    # the backend/eltype of the state arrays so the kernels stay on one backend).
+    pc   = zero(cs.leafc_patch)
+    pn   = zero(cs.leafc_patch)
+    pc13 = use_c13 ? zero(cs.leafc_patch) : similar(cs.leafc_patch, 0)
+    pc14 = use_c14 ? zero(cs.leafc_patch) : similar(cs.leafc_patch, 0)
 
     # Common keyword arguments for truncate_c_and_n_states!
     cn_kw = (ccrit=ccrit, cnegcrit=cnegcrit, ncrit=ncrit, nnegcrit=nnegcrit,
@@ -315,24 +464,24 @@ function cn_precision_control!(
         cs.leafc_patch, ns.leafn_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.leafc_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.leafc_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.leafc_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.leafc_patch : FT[])
 
     # --- leaf storage C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.leafc_storage_patch, ns.leafn_storage_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.leafc_storage_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.leafc_storage_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.leafc_storage_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.leafc_storage_patch : FT[])
 
     # --- leaf transfer C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.leafc_xfer_patch, ns.leafn_xfer_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.leafc_xfer_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.leafc_xfer_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.leafc_xfer_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.leafc_xfer_patch : FT[])
 
     # --- froot C and N ---
     if prec_control_for_froot
@@ -340,8 +489,8 @@ function cn_precision_control!(
             cs.frootc_patch, ns.frootn_patch, pc, pn,
             filter_bgc_vegp, patch_itype; cn_kw..., allowneg=true)
         _trunc_isotopes!(num_tp, filter_tp,
-            use_c13 && c13cs !== nothing ? c13cs.frootc_patch : Float64[],
-            use_c14 && c14cs !== nothing ? c14cs.frootc_patch : Float64[])
+            use_c13 && c13cs !== nothing ? c13cs.frootc_patch : FT[],
+            use_c14 && c14cs !== nothing ? c14cs.frootc_patch : FT[])
     end
 
     # --- froot storage C and N ---
@@ -349,16 +498,16 @@ function cn_precision_control!(
         cs.frootc_storage_patch, ns.frootn_storage_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.frootc_storage_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.frootc_storage_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.frootc_storage_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.frootc_storage_patch : FT[])
 
     # --- froot transfer C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.frootc_xfer_patch, ns.frootn_xfer_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.frootc_xfer_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.frootc_xfer_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.frootc_xfer_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.frootc_xfer_patch : FT[])
 
     # --- crop reproductive pools (grain) ---
     if use_crop
@@ -426,120 +575,120 @@ function cn_precision_control!(
         cs.livestemc_patch, ns.livestemn_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.livestemc_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.livestemc_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.livestemc_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.livestemc_patch : FT[])
 
     # --- livestem storage C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.livestemc_storage_patch, ns.livestemn_storage_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.livestemc_storage_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.livestemc_storage_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.livestemc_storage_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.livestemc_storage_patch : FT[])
 
     # --- livestem transfer C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.livestemc_xfer_patch, ns.livestemn_xfer_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.livestemc_xfer_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.livestemc_xfer_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.livestemc_xfer_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.livestemc_xfer_patch : FT[])
 
     # --- deadstem C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.deadstemc_patch, ns.deadstemn_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.deadstemc_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.deadstemc_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.deadstemc_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.deadstemc_patch : FT[])
 
     # --- deadstem storage C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.deadstemc_storage_patch, ns.deadstemn_storage_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.deadstemc_storage_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.deadstemc_storage_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.deadstemc_storage_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.deadstemc_storage_patch : FT[])
 
     # --- deadstem transfer C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.deadstemc_xfer_patch, ns.deadstemn_xfer_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.deadstemc_xfer_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.deadstemc_xfer_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.deadstemc_xfer_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.deadstemc_xfer_patch : FT[])
 
     # --- livecroot C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.livecrootc_patch, ns.livecrootn_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.livecrootc_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.livecrootc_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.livecrootc_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.livecrootc_patch : FT[])
 
     # --- livecroot storage C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.livecrootc_storage_patch, ns.livecrootn_storage_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.livecrootc_storage_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.livecrootc_storage_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.livecrootc_storage_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.livecrootc_storage_patch : FT[])
 
     # --- livecroot transfer C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.livecrootc_xfer_patch, ns.livecrootn_xfer_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.livecrootc_xfer_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.livecrootc_xfer_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.livecrootc_xfer_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.livecrootc_xfer_patch : FT[])
 
     # --- deadcroot C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.deadcrootc_patch, ns.deadcrootn_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.deadcrootc_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.deadcrootc_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.deadcrootc_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.deadcrootc_patch : FT[])
 
     # --- deadcroot storage C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.deadcrootc_storage_patch, ns.deadcrootn_storage_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.deadcrootc_storage_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.deadcrootc_storage_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.deadcrootc_storage_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.deadcrootc_storage_patch : FT[])
 
     # --- deadcroot transfer C and N ---
     (num_tp, filter_tp) = truncate_c_and_n_states!(
         cs.deadcrootc_xfer_patch, ns.deadcrootn_xfer_patch, pc, pn,
         filter_bgc_vegp, patch_itype; cn_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.deadcrootc_xfer_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.deadcrootc_xfer_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.deadcrootc_xfer_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.deadcrootc_xfer_patch : FT[])
 
     # --- gresp_storage (C only) ---
     (num_tp, filter_tp) = truncate_c_states!(
         cs.gresp_storage_patch, pc,
         filter_bgc_vegp, patch_itype; c_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.gresp_storage_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.gresp_storage_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.gresp_storage_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.gresp_storage_patch : FT[])
 
     # --- gresp_xfer (C only) ---
     (num_tp, filter_tp) = truncate_c_states!(
         cs.gresp_xfer_patch, pc,
         filter_bgc_vegp, patch_itype; c_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.gresp_xfer_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.gresp_xfer_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.gresp_xfer_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.gresp_xfer_patch : FT[])
 
     # --- cpool (C only) ---
     (num_tp, filter_tp) = truncate_c_states!(
         cs.cpool_patch, pc,
         filter_bgc_vegp, patch_itype; c_kw...)
     _trunc_isotopes!(num_tp, filter_tp,
-        use_c13 && c13cs !== nothing ? c13cs.cpool_patch : Float64[],
-        use_c14 && c14cs !== nothing ? c14cs.cpool_patch : Float64[])
+        use_c13 && c13cs !== nothing ? c13cs.cpool_patch : FT[],
+        use_c14 && c14cs !== nothing ? c14cs.cpool_patch : FT[])
 
     # --- xsmrpool (C only, crop only, allow negative) ---
     if use_crop
@@ -563,17 +712,16 @@ function cn_precision_control!(
         ncrit=ncrit, nnegcrit=nnegcrit)
 
     # --- Accumulate truncation into ctrunc/ntrunc sinks ---
-    for fp in eachindex(filter_bgc_vegp)
-        p = filter_bgc_vegp[fp]
-
-        cs.ctrunc_patch[p] += pc[p]
-        ns.ntrunc_patch[p] += pn[p]
-
+    if !isempty(filter_bgc_vegp)
+        _launch!(_cnprec_accum_kernel!, cs.ctrunc_patch, ns.ntrunc_patch,
+                 pc, pn, filter_bgc_vegp; ndrange = length(filter_bgc_vegp))
         if use_c13 && c13cs !== nothing
-            c13cs.ctrunc_patch[p] += pc13[p]
+            _launch!(_cnprec_accum_iso_kernel!, c13cs.ctrunc_patch, pc13,
+                     filter_bgc_vegp; ndrange = length(filter_bgc_vegp))
         end
         if use_c14 && c14cs !== nothing
-            c14cs.ctrunc_patch[p] += pc14[p]
+            _launch!(_cnprec_accum_iso_kernel!, c14cs.ctrunc_patch, pc14,
+                     filter_bgc_vegp; ndrange = length(filter_bgc_vegp))
         end
     end
 
