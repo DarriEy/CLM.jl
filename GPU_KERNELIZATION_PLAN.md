@@ -6,7 +6,11 @@ Status as of 2026-06-01. Goal: full `clm_drv!` timestep on GPU + AD-on-GPU.
 `soil_water!` (ZD09 + moisture_form), `lake_temperature!`, `canopy_fluxes!`,
 `photosynthesis!` (A1), `bareground_fluxes!` (A2), `lake_fluxes!` (A3),
 `soil_fluxes!` (A4), `surface_radiation!` + `canopy_sun_shade_fracs!` (A5),
-`canopy_interception_and_throughfall!` (A6).
+`canopy_interception_and_throughfall!` (A6), and the **A8 hydrology cluster**:
+`water_table!`, `set_soil_water_fractions!`, `set_floodc!`, `set_qflx_inputs!`,
+`route_infiltration_excess!`, `infiltration!`, `total_surface_runoff!`,
+`renew_condensation!`, `saturated_excess_runoff!`, `infiltration_excess_runoff!`,
+`compute_effec_rootfrac_and_vert_tran_sink!`.
 Plus ~156 element-wise ops, both batched linear solvers, and the
 friction-velocity / photosynthesis-Ci-core kernels.
 
@@ -37,7 +41,7 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 | A5 | **surface_radiation! + canopy_sun_shade_fracs!** | ✅ DONE (Metal whole-fn, 43 fields exact 0.0) | per-patch/per-band/per-layer, branchy | radiation pair; 5 device-view bundles, both snow/no-snow + urban/veg/bare + near-local-noon branches exercised. |
 | A6 | **canopy_interception_and_throughfall!** | ✅ DONE (Metal whole-fn, 15 fields, 12 at 0.0) | finished patch→column scatter (`_scatter_add!`) | scatter exercised by a 2-patch→1-col harness. |
 | A7 | **Snow suite**: handle_new_snow!, build_snow_filter!, bulk_flux_snow_percolation!, update_state_snow_percolation!, calc_and_apply_aerosol_fluxes!, post_percolation_adjust_layer_thicknesses!, sum_flux_add_snow_percolation!, snow capping (4 fns), snow_compaction! | HOST | variable-`snl` snow-layer loops, loop-carried across layers, per-species aerosol scatter | hardest mechanical cluster (combine/divide/compaction). |
-| A8 | **Hydrology/runoff**: set_soil_water_fractions!, set_floodc!, saturated_excess_runoff!, set_qflx_inputs!, infiltration_excess_runoff!, route_infiltration_excess!, infiltration!, total_surface_runoff!, compute_effec_rootfrac_and_vert_tran_sink!, water_table!, renew_condensation! | mixed (water_table! is the most complex, 12+ nested loops) | per-col + sequential water-table search | water_table! is the long pole here. |
+| A8 | **Hydrology/runoff**: set_soil_water_fractions!, set_floodc!, saturated_excess_runoff!, set_qflx_inputs!, infiltration_excess_runoff!, route_infiltration_excess!, infiltration!, total_surface_runoff!, compute_effec_rootfrac_and_vert_tran_sink!, water_table!, renew_condensation! | ✅ DONE (all 11 whole-fn on Metal at 0.0/round-off; re-validated post-merge) | per-col + sequential water-table search | water_table! long pole done: 6 host loops (3 sequential nlevsoi searches w/ loop-carried state) → one per-column kernel, 2 device-view bundles. NOT done in this file: drainage!, perched/lateral flow, clm_vic_map!, irrigation. |
 | A9 | **Urban path**: urban_radiation!, urban_fluxes! | HOST | per-landunit/per-patch urban canyon | defer if urban not a near-term priority. |
 | A10 | **Smaller/init**: biogeophys_pre_flux_calcs! (partial), calc_root_moist_stress! (partial), calc_soilevap_resis!, calc_ozone_stress!, calculate_surface_humidity!, set_actual_roughness_lengths!, dust_dry_dep!, alt_calc!, update_daylength!, clm_drv_init! | mostly HOST | small per-col/per-patch loops | quick wins; finish the partials first. |
 
@@ -74,8 +78,9 @@ reuse; A7/A8 hardest). Phase B: many sessions (it's ~half the total loop volume)
 Phase C: blocked — scaffolding only until hardware.
 
 ### Recommended immediate sequence
-~~A1 → A2 → A3 → A4 → A5 → A6~~ DONE (all merged to main at 15681/15681).
-Remaining Phase A: A7 (snow, hardest), A8 (hydrology, water_table! long pole),
-A9 (urban, defer), A10 (small partials — quick wins). Phase C scaffolding can be
-written anytime (no validation feedback). Phase B after Phase A biogeophys is
-GPU-complete.
+~~A1 → A2 → A3 → A4 → A5 → A6 → A8~~ DONE (all merged to main at 15681/15681).
+Remaining Phase A: A7 (snow, hardest mechanical cluster — combine/divide/compaction
+with variable-snl loops), A9 (urban, defer), A10 (small partials — quick wins).
+Also still HOST within soil_hydrology.jl: drainage!, perched/subsurface lateral flow,
+clm_vic_map!, irrigation withdrawals. Phase C scaffolding can be written anytime
+(no validation feedback). Phase B after Phase A biogeophys is GPU-complete.
