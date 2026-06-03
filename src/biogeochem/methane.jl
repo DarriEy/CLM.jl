@@ -1120,6 +1120,348 @@ end
 Solve reaction-diffusion equation for CH4 and O2 transport.
 Ported from `ch4_tran` in `ch4Mod.F90`.
 """
+
+# ===========================================================================
+# ch4_tran! GPU kernelization. Every loop is per-(column,level) or per-column and
+# the tridiagonal solves are per-column, so the whole routine is one big per-column
+# kernel: thread c runs competition, the ebullition/aerenchyma reductions, the
+# 2-species source/epsilon setup, then for each species s=1,2 builds the Patankar
+# tridiagonal system and runs an IN-THREAD Thomas solve (inlined to match
+# tridiagonal_solve! exactly), then the post-solve clamps + balance check. All
+# writes target the thread's own column row -> race-free, byte-identical. Scratch is
+# grouped into device-view bundles; meth_khcc! (existing 2D kernel) fills k_h_cc first.
+# ===========================================================================
+Base.@kwdef struct _Ch4TS{V,M}   # selected sat/unsat CH4 state arrays
+    o2_decomp_depth::M; o2stress::M; ch4_oxid_depth::M; ch4_prod_depth::M
+    ch4_aere_depth::M; ch4_ebul_depth::M; o2_oxid_depth::M; o2_aere_depth::M
+    ch4stress::M; conc_ch4::M; conc_o2::M
+    ch4_ebul_total::V; ch4_surf_aere::V; ch4_surf_ebul::V; ch4_surf_diff::V
+end
+Adapt.@adapt_structure _Ch4TS
+Base.@kwdef struct _Ch4TF{V,M}   # forcing
+    watsat::M; h2osoi_vol::M; h2osoi_liq::M; h2osoi_ice::M; bsw::M; cellorg::M
+    t_soisno::M; dz::M
+    h2osfc::V; t_grnd::V; t_h2osfc::V; frac_h2osfc::V
+end
+Adapt.@adapt_structure _Ch4TF
+Base.@kwdef struct _Ch4Scr{M,A3}   # per-column scratch
+    epsilon_t::A3; source::A3; k_h_cc::A3
+    conc_ch4_bef::M; conc_ch4_rel::M; conc_o2_rel::M; conc_ch4_rel_old::M; conc_work::M
+    h2osoi_vol_min::M; liqfrac::M; diffus::M; dp1_zp1::M; dm1_zm1::M
+    at::M; bt::M; ct::M; rt::M; spec_grnd_cond::M; cp::M; dp::M
+end
+Adapt.@adapt_structure _Ch4Scr
+Base.@kwdef struct _Ch4TP{T}   # isbits scalar params (at working precision)
+    satpow::T; sfgas::T; sfliq::T; capthick::T; aereoxid::T; om_frac_sf::T
+    dtime::T; organic_max::T; smallnumber::T
+end
+
+@kernel function _ch4tran_column_kernel!(ts, tf, scr, @Const(c_atm), @Const(jwt),
+        @Const(col_gridcell), grnd_ch4_cond, @Const(dcong), @Const(dconw), @Const(mask),
+        p::_Ch4TP, ch4frzout::Bool, use_aereoxid_prog::Bool, lake::Bool, sat::Int, nlevsoi::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(scr.diffus)
+        dtime = p.dtime
+        sn = p.smallnumber
+        g = col_gridcell[c]
+
+        # --- Competition for O2 and CH4 ---
+        for j in 1:nlevsoi
+            o2demand = ts.o2_decomp_depth[c, j] + ts.o2_oxid_depth[c, j]
+            if o2demand > zero(T)
+                if (ts.conc_o2[c, j] / dtime + ts.o2_aere_depth[c, j]) > o2demand
+                    ts.o2stress[c, j] = one(T)
+                else
+                    ts.o2stress[c, j] = (ts.conc_o2[c, j] / dtime + ts.o2_aere_depth[c, j]) / o2demand
+                end
+            else
+                ts.o2stress[c, j] = one(T)
+            end
+            ch4demand = ts.ch4_oxid_depth[c, j] + ts.ch4_aere_depth[c, j] + ts.ch4_ebul_depth[c, j]
+            if ch4demand > zero(T)
+                ts.ch4stress[c, j] = smooth_min((ts.conc_ch4[c, j] / dtime + ts.ch4_prod_depth[c, j]) / ch4demand, one(T))
+            else
+                ts.ch4stress[c, j] = one(T)
+            end
+            if ts.o2stress[c, j] < one(T) || ts.ch4stress[c, j] < one(T)
+                if ts.ch4stress[c, j] <= ts.o2stress[c, j]
+                    if ts.o2stress[c, j] < one(T)
+                        o2demand2 = ts.o2_decomp_depth[c, j]
+                        if o2demand2 > zero(T)
+                            ts.o2stress[c, j] = smooth_min((ts.conc_o2[c, j] / dtime + ts.o2_aere_depth[c, j] -
+                                                   ts.ch4stress[c, j] * ts.o2_oxid_depth[c, j]) / o2demand2, one(T))
+                        else
+                            ts.o2stress[c, j] = one(T)
+                        end
+                    end
+                    ts.ch4_oxid_depth[c, j] *= ts.ch4stress[c, j]
+                    ts.o2_oxid_depth[c, j] *= ts.ch4stress[c, j]
+                else
+                    if ts.ch4stress[c, j] < one(T)
+                        ch4demand2 = ts.ch4_aere_depth[c, j] + ts.ch4_ebul_depth[c, j]
+                        if ch4demand2 > zero(T)
+                            ts.ch4stress[c, j] = smooth_min((ts.conc_ch4[c, j] / dtime + ts.ch4_prod_depth[c, j] -
+                                                    ts.o2stress[c, j] * ts.ch4_oxid_depth[c, j]) / ch4demand2, one(T))
+                        else
+                            ts.ch4stress[c, j] = one(T)
+                        end
+                    end
+                    ts.ch4_oxid_depth[c, j] *= ts.o2stress[c, j]
+                    ts.o2_oxid_depth[c, j] *= ts.o2stress[c, j]
+                end
+            end
+            ts.ch4_aere_depth[c, j] *= ts.ch4stress[c, j]
+            ts.ch4_ebul_depth[c, j] *= ts.ch4stress[c, j]
+            ts.o2_decomp_depth[c, j] *= ts.o2stress[c, j]
+        end
+
+        # --- Accumulate ebullition (per-column reduction) ---
+        ts.ch4_ebul_total[c] = zero(T)
+        for j in 1:nlevsoi
+            ts.ch4_ebul_total[c] += ts.ch4_ebul_depth[c, j] * tf.dz[c, j]
+        end
+
+        # --- Source terms + epsilon_t (k_h_cc already filled) ---
+        for j in 1:nlevsoi
+            scr.h2osoi_vol_min[c, j] = smooth_min(tf.watsat[c, j], tf.h2osoi_vol[c, j])
+            if ch4frzout
+                scr.liqfrac[c, j] = smooth_max(T(0.05), (tf.h2osoi_liq[c, j] / T(DENH2O) + sn) /
+                                           (tf.h2osoi_liq[c, j] / T(DENH2O) + tf.h2osoi_ice[c, j] / T(DENICE) + sn))
+            else
+                scr.liqfrac[c, j] = one(T)
+            end
+            if j <= jwt[c]
+                for s in 1:2
+                    scr.epsilon_t[c, j, s] = tf.watsat[c, j] - (one(T) - scr.k_h_cc[c, j+1, s]) * scr.h2osoi_vol_min[c, j] * scr.liqfrac[c, j]
+                end
+            else
+                for s in 1:2
+                    scr.epsilon_t[c, j, s] = tf.watsat[c, j] * scr.liqfrac[c, j]
+                end
+            end
+            if !use_aereoxid_prog
+                ts.ch4_oxid_depth[c, j] += p.aereoxid * ts.ch4_aere_depth[c, j]
+                ts.ch4_aere_depth[c, j] -= p.aereoxid * ts.ch4_aere_depth[c, j]
+            end
+            scr.source[c, j, 1] = ts.ch4_prod_depth[c, j] - ts.ch4_oxid_depth[c, j] -
+                                  ts.ch4_aere_depth[c, j] - ts.ch4_ebul_depth[c, j]
+            scr.source[c, j, 2] = -ts.o2_oxid_depth[c, j] - ts.o2_decomp_depth[c, j] + ts.o2_aere_depth[c, j]
+            scr.conc_ch4_bef[c, j] = ts.conc_ch4[c, j]
+        end
+
+        # --- Accumulate aerenchyma surface flux (reduction) ---
+        ts.ch4_surf_aere[c] = zero(T)
+        for j in 1:nlevsoi
+            ts.ch4_surf_aere[c] += ts.ch4_aere_depth[c, j] * tf.dz[c, j]
+        end
+
+        # --- Add ebullition to source at the water-table layer ---
+        if jwt[c] != 0
+            scr.source[c, jwt[c], 1] += ts.ch4_ebul_total[c] / tf.dz[c, jwt[c]]
+        end
+
+        # --- Relative concentrations (j=0 boundary -> atmosphere) ---
+        for j in 0:nlevsoi
+            if j == 0
+                scr.conc_ch4_rel[c, 1] = c_atm[g, 1]
+                scr.conc_o2_rel[c, 1] = c_atm[g, 2]
+            else
+                scr.conc_ch4_rel[c, j+1] = ts.conc_ch4[c, j] / scr.epsilon_t[c, j, 1]
+                scr.conc_o2_rel[c, j+1] = ts.conc_o2[c, j] / scr.epsilon_t[c, j, 2]
+            end
+        end
+        for jj in 1:(nlevsoi + 1)
+            scr.conc_ch4_rel_old[c, jj] = scr.conc_ch4_rel[c, jj]
+        end
+
+        nlevs = nlevsoi + 1
+        for s in 1:2
+            if s == 1
+                for jj in 1:nlevs; scr.conc_work[c, jj] = scr.conc_ch4_rel[c, jj]; end
+            else
+                for jj in 1:nlevs; scr.conc_work[c, jj] = scr.conc_o2_rel[c, jj]; end
+            end
+
+            # Snow/pond resistance + ground conductance
+            if grnd_ch4_cond[c] < sn && s == 1
+                grnd_ch4_cond[c] = sn
+            end
+            snowres = zero(T)
+            pondres = zero(T)
+            if !lake && sat == 1 && tf.frac_h2osfc[c] > zero(T)
+                if tf.t_h2osfc[c] >= T(TFRZ)
+                    tsc = tf.t_h2osfc[c] - T(TFRZ)
+                    ponddiff = (dconw[s, 1] + dconw[s, 2] * tsc + dconw[s, 3] * tsc^2) * T(1.0e-9) * p.sfliq
+                    pondz = tf.h2osfc[c] / T(1000.0) / tf.frac_h2osfc[c]
+                    pondres = pondz / ponddiff
+                elseif tf.h2osfc[c] / tf.frac_h2osfc[c] > p.capthick
+                    pondres = one(T) / sn
+                end
+            end
+            scr.spec_grnd_cond[c, s] = one(T) / (one(T) / grnd_ch4_cond[c] + snowres + pondres)
+
+            # Gas/liquid diffusivity
+            for j in 1:nlevsoi
+                tsc = tf.t_soisno[c, j] - T(TFRZ)
+                if j <= jwt[c]
+                    f_a = one(T) - scr.h2osoi_vol_min[c, j] / tf.watsat[c, j]
+                    eps = tf.watsat[c, j] - scr.h2osoi_vol_min[c, j]
+                    if p.organic_max > zero(T)
+                        om_frac = smooth_min(p.om_frac_sf * tf.cellorg[c, j] / p.organic_max, one(T))
+                    else
+                        om_frac = one(T)
+                    end
+                    scr.diffus[c, j] = (dcong[s, 1] + dcong[s, 2] * tsc) * T(1.0e-4) *
+                                   (om_frac * f_a^(T(10.0) / T(3.0)) / tf.watsat[c, j]^2 +
+                                    (one(T) - om_frac) * eps^2 * f_a^(T(3.0) / tf.bsw[c, j])) * p.sfgas
+                else
+                    eps = tf.watsat[c, j]
+                    scr.diffus[c, j] = eps^p.satpow * (dconw[s, 1] + dconw[s, 2] * tsc + dconw[s, 3] * tsc^2) * T(1.0e-9) * p.sfliq
+                    if tf.t_soisno[c, j] <= T(TFRZ)
+                        scr.diffus[c, j] *= (tf.h2osoi_liq[c, j] / T(DENH2O) + sn) /
+                                        (tf.h2osoi_liq[c, j] / T(DENH2O) + tf.h2osoi_ice[c, j] / T(DENICE) + sn)
+                    end
+                end
+                scr.diffus[c, j] = smooth_max(scr.diffus[c, j], sn)
+            end
+
+            # Tridiagonal coefficients dm1_zm1 / dp1_zp1 (jwt-branchy)
+            for j in 1:nlevsoi
+                if j == 1 && j != jwt[c] && j != jwt[c] + 1
+                    scr.dm1_zm1[c, j] = one(T) / (one(T) / scr.spec_grnd_cond[c, s] + tf.dz[c, j] / (scr.diffus[c, j] * T(2.0)))
+                    scr.dp1_zp1[c, j] = j < nlevsoi ? T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j+1] / scr.diffus[c, j+1]) : zero(T)
+                elseif j == 1 && j == jwt[c]
+                    scr.dm1_zm1[c, j] = one(T) / (one(T) / scr.spec_grnd_cond[c, s] + tf.dz[c, j] / (scr.diffus[c, j] * T(2.0)))
+                    scr.dp1_zp1[c, j] = j < nlevsoi ? T(2.0) / (tf.dz[c, j] * scr.k_h_cc[c, j+1, s] / scr.diffus[c, j] + tf.dz[c, j+1] / scr.diffus[c, j+1]) : zero(T)
+                elseif j == 1
+                    scr.dm1_zm1[c, j] = one(T) / (scr.k_h_cc[c, j, s] / scr.spec_grnd_cond[c, s] + tf.dz[c, j] / (scr.diffus[c, j] * T(2.0)))
+                    scr.dp1_zp1[c, j] = j < nlevsoi ? T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j+1] / scr.diffus[c, j+1]) : zero(T)
+                elseif j < nlevsoi && j != jwt[c] && j != jwt[c] + 1
+                    scr.dm1_zm1[c, j] = T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j-1] / scr.diffus[c, j-1])
+                    scr.dp1_zp1[c, j] = T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j+1] / scr.diffus[c, j+1])
+                elseif j < nlevsoi && j == jwt[c]
+                    scr.dm1_zm1[c, j] = T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j-1] / scr.diffus[c, j-1])
+                    scr.dp1_zp1[c, j] = T(2.0) / (tf.dz[c, j] * scr.k_h_cc[c, j+1, s] / scr.diffus[c, j] + tf.dz[c, j+1] / scr.diffus[c, j+1])
+                elseif j < nlevsoi
+                    scr.dm1_zm1[c, j] = T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j-1] * scr.k_h_cc[c, j, s] / scr.diffus[c, j-1])
+                    scr.dp1_zp1[c, j] = T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j+1] / scr.diffus[c, j+1])
+                elseif j != jwt[c] + 1
+                    scr.dm1_zm1[c, j] = T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j-1] / scr.diffus[c, j-1])
+                else
+                    scr.dm1_zm1[c, j] = T(2.0) / (tf.dz[c, j] / scr.diffus[c, j] + tf.dz[c, j-1] * scr.k_h_cc[c, j, s] / scr.diffus[c, j-1])
+                end
+            end
+
+            # Build tridiagonal system (j=0 -> index 1)
+            for j in 0:nlevsoi
+                jj = j + 1
+                if j == 0
+                    scr.at[c, jj] = zero(T); scr.bt[c, jj] = one(T); scr.ct[c, jj] = zero(T)
+                    scr.rt[c, jj] = c_atm[g, s]
+                elseif j < nlevsoi && j == jwt[c]
+                    dzj = tf.dz[c, j]
+                    scr.at[c, jj] = -T(0.5) / dzj * scr.dm1_zm1[c, j]
+                    scr.bt[c, jj] = scr.epsilon_t[c, j, s] / dtime + T(0.5) / dzj * (scr.dp1_zp1[c, j] * scr.k_h_cc[c, j+1, s] + scr.dm1_zm1[c, j])
+                    scr.ct[c, jj] = -T(0.5) / dzj * scr.dp1_zp1[c, j]
+                    scr.rt[c, jj] = scr.epsilon_t[c, j, s] / dtime * scr.conc_work[c, jj] +
+                                    T(0.5) / dzj * (scr.dp1_zp1[c, j] * (scr.conc_work[c, jj+1] - scr.conc_work[c, jj] * scr.k_h_cc[c, j+1, s]) -
+                                                 scr.dm1_zm1[c, j] * (scr.conc_work[c, jj] - scr.conc_work[c, jj-1])) + scr.source[c, j, s]
+                elseif j < nlevsoi && j == jwt[c] + 1
+                    dzj = tf.dz[c, j]
+                    scr.at[c, jj] = -T(0.5) / dzj * scr.dm1_zm1[c, j] * scr.k_h_cc[c, j, s]
+                    scr.bt[c, jj] = scr.epsilon_t[c, j, s] / dtime + T(0.5) / dzj * (scr.dp1_zp1[c, j] + scr.dm1_zm1[c, j])
+                    scr.ct[c, jj] = -T(0.5) / dzj * scr.dp1_zp1[c, j]
+                    scr.rt[c, jj] = scr.epsilon_t[c, j, s] / dtime * scr.conc_work[c, jj] +
+                                    T(0.5) / dzj * (scr.dp1_zp1[c, j] * (scr.conc_work[c, jj+1] - scr.conc_work[c, jj]) -
+                                                 scr.dm1_zm1[c, j] * (scr.conc_work[c, jj] - scr.conc_work[c, jj-1] * scr.k_h_cc[c, j, s])) + scr.source[c, j, s]
+                elseif j < nlevsoi
+                    dzj = tf.dz[c, j]
+                    scr.at[c, jj] = -T(0.5) / dzj * scr.dm1_zm1[c, j]
+                    scr.bt[c, jj] = scr.epsilon_t[c, j, s] / dtime + T(0.5) / dzj * (scr.dp1_zp1[c, j] + scr.dm1_zm1[c, j])
+                    scr.ct[c, jj] = -T(0.5) / dzj * scr.dp1_zp1[c, j]
+                    scr.rt[c, jj] = scr.epsilon_t[c, j, s] / dtime * scr.conc_work[c, jj] +
+                                    T(0.5) / dzj * (scr.dp1_zp1[c, j] * (scr.conc_work[c, jj+1] - scr.conc_work[c, jj]) -
+                                                 scr.dm1_zm1[c, j] * (scr.conc_work[c, jj] - scr.conc_work[c, jj-1])) + scr.source[c, j, s]
+                elseif j == nlevsoi && j == jwt[c] + 1
+                    dzj = tf.dz[c, j]
+                    scr.at[c, jj] = -T(0.5) / dzj * scr.dm1_zm1[c, j] * scr.k_h_cc[c, j, s]
+                    scr.bt[c, jj] = scr.epsilon_t[c, j, s] / dtime + T(0.5) / dzj * scr.dm1_zm1[c, j]
+                    scr.ct[c, jj] = zero(T)
+                    scr.rt[c, jj] = scr.epsilon_t[c, j, s] / dtime * scr.conc_work[c, jj] +
+                                    T(0.5) / dzj * (-scr.dm1_zm1[c, j] * (scr.conc_work[c, jj] - scr.conc_work[c, jj-1] * scr.k_h_cc[c, j, s])) + scr.source[c, j, s]
+                else
+                    dzj = tf.dz[c, j]
+                    scr.at[c, jj] = -T(0.5) / dzj * scr.dm1_zm1[c, j]
+                    scr.bt[c, jj] = scr.epsilon_t[c, j, s] / dtime + T(0.5) / dzj * scr.dm1_zm1[c, j]
+                    scr.ct[c, jj] = zero(T)
+                    scr.rt[c, jj] = scr.epsilon_t[c, j, s] / dtime * scr.conc_work[c, jj] +
+                                    T(0.5) / dzj * (-scr.dm1_zm1[c, j] * (scr.conc_work[c, jj] - scr.conc_work[c, jj-1])) + scr.source[c, j, s]
+                end
+            end
+
+            # In-thread Thomas solve (jtop=1), matching tridiagonal_solve! exactly.
+            scr.cp[c, 1] = scr.ct[c, 1] / scr.bt[c, 1]
+            scr.dp[c, 1] = scr.rt[c, 1] / scr.bt[c, 1]
+            for jj in 2:nlevs
+                denom = scr.bt[c, jj] - scr.at[c, jj] * scr.cp[c, jj-1]
+                scr.cp[c, jj] = scr.ct[c, jj] / denom
+                scr.dp[c, jj] = (scr.rt[c, jj] - scr.at[c, jj] * scr.dp[c, jj-1]) / denom
+            end
+            scr.conc_work[c, nlevs] = scr.dp[c, nlevs]
+            for jj in (nlevs-1):-1:1
+                scr.conc_work[c, jj] = scr.dp[c, jj] - scr.cp[c, jj] * scr.conc_work[c, jj+1]
+            end
+
+            if s == 1
+                if jwt[c] != 0
+                    ts.ch4_surf_diff[c] = scr.dm1_zm1[c, 1] * ((scr.conc_work[c, 2] + scr.conc_ch4_rel_old[c, 2]) / T(2.0) - c_atm[g, s])
+                    ts.ch4_surf_ebul[c] = zero(T)
+                else
+                    ts.ch4_surf_diff[c] = scr.dm1_zm1[c, 1] * ((scr.conc_work[c, 2] + scr.conc_ch4_rel_old[c, 2]) / T(2.0) - c_atm[g, s] * scr.k_h_cc[c, 1, s])
+                    ts.ch4_surf_ebul[c] = ts.ch4_ebul_total[c]
+                end
+                for j in 1:nlevsoi
+                    jj = j + 1
+                    if scr.conc_work[c, jj] < zero(T)
+                        deficit = -scr.conc_work[c, jj] * scr.epsilon_t[c, j, 1] * tf.dz[c, j]
+                        scr.conc_work[c, jj] = zero(T)
+                        ts.ch4_surf_diff[c] -= deficit / dtime
+                    end
+                end
+                for jj in 1:nlevs; scr.conc_ch4_rel[c, jj] = scr.conc_work[c, jj]; end
+            else
+                for j in 1:nlevsoi
+                    jj = j + 1
+                    scr.conc_work[c, jj] = smooth_max(scr.conc_work[c, jj], T(1.0e-12))
+                    scr.conc_work[c, jj] = smooth_min(scr.conc_work[c, jj], c_atm[g, 2] / scr.epsilon_t[c, j, 2])
+                end
+                for jj in 1:nlevs; scr.conc_o2_rel[c, jj] = scr.conc_work[c, jj]; end
+            end
+        end  # species loop
+
+        # Update absolute concentrations
+        for j in 1:nlevsoi
+            ts.conc_ch4[c, j] = scr.conc_ch4_rel[c, j+1] * scr.epsilon_t[c, j, 1]
+            ts.conc_o2[c, j] = scr.conc_o2_rel[c, j+1] * scr.epsilon_t[c, j, 2]
+        end
+
+        # Balance check
+        errch4 = zero(T)
+        for j in 1:nlevsoi
+            errch4 += (ts.conc_ch4[c, j] - scr.conc_ch4_bef[c, j]) * tf.dz[c, j]
+            errch4 -= ts.ch4_prod_depth[c, j] * tf.dz[c, j] * dtime
+            errch4 += ts.ch4_oxid_depth[c, j] * tf.dz[c, j] * dtime
+        end
+        errch4 += (ts.ch4_surf_aere[c] + ts.ch4_surf_ebul[c] + ts.ch4_surf_diff[c]) * dtime
+        if abs(errch4) < T(1.0e-8)
+            ts.ch4_surf_diff[c] -= errch4 / dtime
+        end
+        grnd_ch4_cond[c] = scr.spec_grnd_cond[c, 1]
+    end
+end
+
+
 function ch4_tran!(ch4::CH4Data,
                    params::CH4Params,
                    ch4vc::CH4VarCon,
@@ -1149,452 +1491,63 @@ function ch4_tran!(ch4::CH4Data,
                    dtime_ch4::Real,
                    organic_max::Real)
 
-    smallnumber = 1.0e-12
     dtime = dtime_ch4
-
-    # Select sat/unsat arrays
-    if sat == 0
-        o2_decomp_depth = ch4.o2_decomp_depth_unsat_col
-        o2stress = ch4.o2stress_unsat_col
-        ch4_oxid_depth = ch4.ch4_oxid_depth_unsat_col
-        ch4_prod_depth = ch4.ch4_prod_depth_unsat_col
-        ch4_aere_depth = ch4.ch4_aere_depth_unsat_col
-        ch4_surf_aere = ch4.ch4_surf_aere_unsat_col
-        ch4_ebul_depth = ch4.ch4_ebul_depth_unsat_col
-        ch4_ebul_total = ch4.ch4_ebul_total_unsat_col
-        ch4_surf_ebul = ch4.ch4_surf_ebul_unsat_col
-        ch4_surf_diff = ch4.ch4_surf_diff_unsat_col
-        o2_oxid_depth = ch4.o2_oxid_depth_unsat_col
-        o2_aere_depth = ch4.o2_aere_depth_unsat_col
-        ch4stress = ch4.ch4stress_unsat_col
-        co2_decomp_depth = ch4.co2_decomp_depth_unsat_col
-        conc_ch4 = ch4.conc_ch4_unsat_col
-        conc_o2 = ch4.conc_o2_unsat_col
-    else
-        o2_decomp_depth = ch4.o2_decomp_depth_sat_col
-        o2stress = ch4.o2stress_sat_col
-        ch4_oxid_depth = ch4.ch4_oxid_depth_sat_col
-        ch4_prod_depth = ch4.ch4_prod_depth_sat_col
-        ch4_aere_depth = ch4.ch4_aere_depth_sat_col
-        ch4_surf_aere = ch4.ch4_surf_aere_sat_col
-        ch4_ebul_depth = ch4.ch4_ebul_depth_sat_col
-        ch4_ebul_total = ch4.ch4_ebul_total_sat_col
-        ch4_surf_ebul = ch4.ch4_surf_ebul_sat_col
-        ch4_surf_diff = ch4.ch4_surf_diff_sat_col
-        o2_oxid_depth = ch4.o2_oxid_depth_sat_col
-        o2_aere_depth = ch4.o2_aere_depth_sat_col
-        ch4stress = ch4.ch4stress_sat_col
-        co2_decomp_depth = ch4.co2_decomp_depth_sat_col
-        conc_ch4 = ch4.conc_ch4_sat_col
-        conc_o2 = ch4.conc_o2_sat_col
-    end
-
-    satpow = params.satpow
-    scale_factor_gasdiff = params.scale_factor_gasdiff
-    scale_factor_liqdiff = params.scale_factor_liqdiff
-    capthick = params.capthick
-    aereoxid = params.aereoxid
-
-    nc = length(mask_soil)
-    c_atm = ch4.c_atm_grc
-
-    # --- Competition for O2 and CH4 ---
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-
-            o2demand = o2_decomp_depth[c, j] + o2_oxid_depth[c, j]
-            if o2demand > 0.0
-                if (conc_o2[c, j] / dtime + o2_aere_depth[c, j]) > o2demand
-                    o2stress[c, j] = 1.0
-                else
-                    o2stress[c, j] = (conc_o2[c, j] / dtime + o2_aere_depth[c, j]) / o2demand
-                end
-            else
-                o2stress[c, j] = 1.0
-            end
-
-            ch4demand = ch4_oxid_depth[c, j] + ch4_aere_depth[c, j] + ch4_ebul_depth[c, j]
-            if ch4demand > 0.0
-                ch4stress[c, j] = smooth_min((conc_ch4[c, j] / dtime + ch4_prod_depth[c, j]) / ch4demand, 1.0)
-            else
-                ch4stress[c, j] = 1.0
-            end
-
-            # Resolve competition
-            if o2stress[c, j] < 1.0 || ch4stress[c, j] < 1.0
-                if ch4stress[c, j] <= o2stress[c, j]
-                    if o2stress[c, j] < 1.0
-                        o2demand2 = o2_decomp_depth[c, j]
-                        if o2demand2 > 0.0
-                            o2stress[c, j] = smooth_min((conc_o2[c, j] / dtime + o2_aere_depth[c, j] -
-                                                   ch4stress[c, j] * o2_oxid_depth[c, j]) / o2demand2, 1.0)
-                        else
-                            o2stress[c, j] = 1.0
-                        end
-                    end
-                    ch4_oxid_depth[c, j] *= ch4stress[c, j]
-                    o2_oxid_depth[c, j] *= ch4stress[c, j]
-                else
-                    if ch4stress[c, j] < 1.0
-                        ch4demand2 = ch4_aere_depth[c, j] + ch4_ebul_depth[c, j]
-                        if ch4demand2 > 0.0
-                            ch4stress[c, j] = smooth_min((conc_ch4[c, j] / dtime + ch4_prod_depth[c, j] -
-                                                    o2stress[c, j] * ch4_oxid_depth[c, j]) / ch4demand2, 1.0)
-                        else
-                            ch4stress[c, j] = 1.0
-                        end
-                    end
-                    ch4_oxid_depth[c, j] *= o2stress[c, j]
-                    o2_oxid_depth[c, j] *= o2stress[c, j]
-                end
-            end
-
-            ch4_aere_depth[c, j] *= ch4stress[c, j]
-            ch4_ebul_depth[c, j] *= ch4stress[c, j]
-            o2_decomp_depth[c, j] *= o2stress[c, j]
-        end
-    end
-
-    # --- Accumulate ebullition ---
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            if j == 1
-                ch4_ebul_total[c] = 0.0
-            end
-            ch4_ebul_total[c] += ch4_ebul_depth[c, j] * dz[c, j]
-        end
-    end
-
-    # --- Set up and solve diffusion for each species ---
-    # Allocate working arrays
     FT = eltype(t_soisno)
-    k_h_cc_arr = zeros(FT, nc, nlevsoi + 1, 2)  # 0:nlevsoi → 1:nlevsoi+1
-    epsilon_t = zeros(FT, nc, nlevsoi, 2)
-    source = zeros(FT, nc, nlevsoi, 2)
-    conc_ch4_bef = zeros(FT, nc, nlevsoi)
-    conc_ch4_rel = zeros(FT, nc, nlevsoi + 1)
-    conc_o2_rel = zeros(FT, nc, nlevsoi + 1)
-    h2osoi_vol_min = zeros(FT, nc, nlevsoi)
-    liqfrac = ones(FT, nc, nlevsoi)
+    nc = length(mask_soil)
 
-    # Henry's law coefficients
-    meth_khcc!(k_h_cc_arr, mask_soil, t_grnd, t_soisno, nc, nlevsoi)
+    # Select the sat/unsat CH4 arrays into the device-view state bundle.
+    ts = sat == 0 ?
+        _Ch4TS(; o2_decomp_depth=ch4.o2_decomp_depth_unsat_col, o2stress=ch4.o2stress_unsat_col,
+                 ch4_oxid_depth=ch4.ch4_oxid_depth_unsat_col, ch4_prod_depth=ch4.ch4_prod_depth_unsat_col,
+                 ch4_aere_depth=ch4.ch4_aere_depth_unsat_col, ch4_ebul_depth=ch4.ch4_ebul_depth_unsat_col,
+                 o2_oxid_depth=ch4.o2_oxid_depth_unsat_col, o2_aere_depth=ch4.o2_aere_depth_unsat_col,
+                 ch4stress=ch4.ch4stress_unsat_col, conc_ch4=ch4.conc_ch4_unsat_col, conc_o2=ch4.conc_o2_unsat_col,
+                 ch4_ebul_total=ch4.ch4_ebul_total_unsat_col, ch4_surf_aere=ch4.ch4_surf_aere_unsat_col,
+                 ch4_surf_ebul=ch4.ch4_surf_ebul_unsat_col, ch4_surf_diff=ch4.ch4_surf_diff_unsat_col) :
+        _Ch4TS(; o2_decomp_depth=ch4.o2_decomp_depth_sat_col, o2stress=ch4.o2stress_sat_col,
+                 ch4_oxid_depth=ch4.ch4_oxid_depth_sat_col, ch4_prod_depth=ch4.ch4_prod_depth_sat_col,
+                 ch4_aere_depth=ch4.ch4_aere_depth_sat_col, ch4_ebul_depth=ch4.ch4_ebul_depth_sat_col,
+                 o2_oxid_depth=ch4.o2_oxid_depth_sat_col, o2_aere_depth=ch4.o2_aere_depth_sat_col,
+                 ch4stress=ch4.ch4stress_sat_col, conc_ch4=ch4.conc_ch4_sat_col, conc_o2=ch4.conc_o2_sat_col,
+                 ch4_ebul_total=ch4.ch4_ebul_total_sat_col, ch4_surf_aere=ch4.ch4_surf_aere_sat_col,
+                 ch4_surf_ebul=ch4.ch4_surf_ebul_sat_col, ch4_surf_diff=ch4.ch4_surf_diff_sat_col)
 
-    # Source terms and epsilon_t
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            g = col_gridcell[c]
+    tf = _Ch4TF(; watsat, h2osoi_vol, h2osoi_liq, h2osoi_ice, bsw, cellorg, t_soisno, dz,
+                  h2osfc, t_grnd, t_h2osfc, frac_h2osfc)
 
-            h2osoi_vol_min[c, j] = smooth_min(watsat[c, j], h2osoi_vol[c, j])
-            if ch4vc.ch4frzout
-                liqfrac[c, j] = smooth_max(0.05, (h2osoi_liq[c, j] / DENH2O + smallnumber) /
-                                           (h2osoi_liq[c, j] / DENH2O + h2osoi_ice[c, j] / DENICE + smallnumber))
-            else
-                liqfrac[c, j] = 1.0
-            end
+    ref = t_soisno
+    _m(w) = fill!(similar(ref, FT, nc, w), zero(FT))
+    _a3(w) = fill!(similar(ref, FT, nc, w, 2), zero(FT))
+    scr = _Ch4Scr(; epsilon_t=_a3(nlevsoi), source=_a3(nlevsoi), k_h_cc=_a3(nlevsoi + 1),
+                    conc_ch4_bef=_m(nlevsoi), conc_ch4_rel=_m(nlevsoi + 1), conc_o2_rel=_m(nlevsoi + 1),
+                    conc_ch4_rel_old=_m(nlevsoi + 1), conc_work=_m(nlevsoi + 1),
+                    h2osoi_vol_min=_m(nlevsoi), liqfrac=fill!(similar(ref, FT, nc, nlevsoi), one(FT)),
+                    diffus=_m(nlevsoi), dp1_zp1=_m(nlevsoi), dm1_zm1=_m(nlevsoi),
+                    at=_m(nlevsoi + 1), bt=_m(nlevsoi + 1), ct=_m(nlevsoi + 1), rt=_m(nlevsoi + 1),
+                    spec_grnd_cond=_m(2), cp=_m(nlevsoi + 1), dp=_m(nlevsoi + 1))
 
-            if j <= jwt[c]
-                for s in 1:2
-                    epsilon_t[c, j, s] = watsat[c, j] - (1.0 - k_h_cc_arr[c, j+1, s]) * h2osoi_vol_min[c, j] * liqfrac[c, j]
-                end
-            else
-                for s in 1:2
-                    epsilon_t[c, j, s] = watsat[c, j] * liqfrac[c, j]
-                end
-            end
+    # mask + integer index vectors onto the state backend (BitVector/host non-bitstype on device).
+    mask = similar(ref, Bool, length(mask_soil)); copyto!(mask, collect(Bool, mask_soil))
+    jwt_d = similar(ref, Int, length(jwt)); copyto!(jwt_d, jwt)
+    gc_d = similar(ref, Int, length(col_gridcell)); copyto!(gc_d, col_gridcell)
+    _devm(v) = (d = similar(ref, FT, size(v)...); copyto!(d, FT.(v)); d)
+    c_atm_d = _devm(ch4.c_atm_grc)
+    dcong = _devm(D_CON_G); dconw = _devm(D_CON_W)
 
-            if !ch4vc.use_aereoxid_prog
-                ch4_oxid_depth[c, j] += aereoxid * ch4_aere_depth[c, j]
-                ch4_aere_depth[c, j] -= aereoxid * ch4_aere_depth[c, j]
-            end
+    # Henry's-law coefficients (existing 2D kernel) -> fills scr.k_h_cc.
+    meth_khcc!(scr.k_h_cc, mask, t_grnd, t_soisno, nc, nlevsoi)
 
-            source[c, j, 1] = ch4_prod_depth[c, j] - ch4_oxid_depth[c, j] -
-                              ch4_aere_depth[c, j] - ch4_ebul_depth[c, j]
-            source[c, j, 2] = -o2_oxid_depth[c, j] - o2_decomp_depth[c, j] + o2_aere_depth[c, j]
+    pp = _Ch4TP(; satpow=FT(params.satpow), sfgas=FT(params.scale_factor_gasdiff),
+                  sfliq=FT(params.scale_factor_liqdiff), capthick=FT(params.capthick),
+                  aereoxid=FT(params.aereoxid), om_frac_sf=FT(params.om_frac_sf),
+                  dtime=FT(dtime), organic_max=FT(organic_max), smallnumber=FT(1.0e-12))
 
-            conc_ch4_bef[c, j] = conc_ch4[c, j]
-        end
-    end
-
-    # Accumulate aerenchyma surface flux
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            if j == 1
-                ch4_surf_aere[c] = 0.0
-            end
-            ch4_surf_aere[c] += ch4_aere_depth[c, j] * dz[c, j]
-        end
-    end
-
-    # Add ebullition to source at jwt layer
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        if jwt[c] != 0
-            source[c, jwt[c], 1] += ch4_ebul_total[c] / dz[c, jwt[c]]
-        end
-    end
-
-    # Relative concentrations
-    for j in 0:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            g = col_gridcell[c]
-            if j == 0
-                conc_ch4_rel[c, 1] = c_atm[g, 1]
-                conc_o2_rel[c, 1] = c_atm[g, 2]
-            else
-                conc_ch4_rel[c, j+1] = conc_ch4[c, j] / epsilon_t[c, j, 1]
-                conc_o2_rel[c, j+1] = conc_o2[c, j] / epsilon_t[c, j, 2]
-            end
-        end
-    end
-
-    # Tridiagonal solver arrays
-    diffus = zeros(FT, nc, nlevsoi)
-    dp1_zp1 = zeros(FT, nc, nlevsoi)
-    dm1_zm1 = zeros(FT, nc, nlevsoi)
-    at_arr = zeros(FT, nc, nlevsoi + 1)
-    bt_arr = zeros(FT, nc, nlevsoi + 1)
-    ct_arr = zeros(FT, nc, nlevsoi + 1)
-    rt_arr = zeros(FT, nc, nlevsoi + 1)
-    spec_grnd_cond = zeros(FT, nc, 2)
-    conc_ch4_rel_old = copy(conc_ch4_rel)
-
-    for s in 1:2
-        # Snow/pond resistance and ground conductance
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            if ch4.grnd_ch4_cond_col[c] < smallnumber && s == 1
-                ch4.grnd_ch4_cond_col[c] = smallnumber
-            end
-            snowres = 0.0
-            # Simplified: skip snow layers for now, just use ground conductance
-            pondres = 0.0
-            if !lake && sat == 1 && frac_h2osfc[c] > 0.0
-                if t_h2osfc[c] >= TFRZ
-                    t_soisno_c = t_h2osfc[c] - TFRZ
-                    ponddiff = (D_CON_W[s, 1] + D_CON_W[s, 2] * t_soisno_c + D_CON_W[s, 3] * t_soisno_c^2) * 1.0e-9 *
-                               scale_factor_liqdiff
-                    pondz = h2osfc[c] / 1000.0 / frac_h2osfc[c]
-                    pondres = pondz / ponddiff
-                elseif h2osfc[c] / frac_h2osfc[c] > capthick
-                    pondres = 1.0 / smallnumber
-                end
-            end
-            spec_grnd_cond[c, s] = 1.0 / (1.0 / ch4.grnd_ch4_cond_col[c] + snowres + pondres)
-        end
-
-        # Gas diffusivity
-        for j in 1:nlevsoi
-            for c in eachindex(mask_soil)
-                mask_soil[c] || continue
-
-                t_soisno_c = t_soisno[c, j] - TFRZ
-
-                if j <= jwt[c]
-                    f_a = 1.0 - h2osoi_vol_min[c, j] / watsat[c, j]
-                    eps = watsat[c, j] - h2osoi_vol_min[c, j]
-                    if organic_max > 0.0
-                        om_frac = smooth_min(params.om_frac_sf * cellorg[c, j] / organic_max, 1.0)
-                    else
-                        om_frac = 1.0
-                    end
-                    diffus[c, j] = (D_CON_G[s, 1] + D_CON_G[s, 2] * t_soisno_c) * 1.0e-4 *
-                                   (om_frac * f_a^(10.0 / 3.0) / watsat[c, j]^2 +
-                                    (1.0 - om_frac) * eps^2 * f_a^(3.0 / bsw[c, j])) *
-                                   scale_factor_gasdiff
-                else
-                    eps = watsat[c, j]
-                    diffus[c, j] = eps^satpow * (D_CON_W[s, 1] + D_CON_W[s, 2] * t_soisno_c +
-                                                  D_CON_W[s, 3] * t_soisno_c^2) * 1.0e-9 * scale_factor_liqdiff
-                    if t_soisno[c, j] <= TFRZ
-                        diffus[c, j] *= (h2osoi_liq[c, j] / DENH2O + smallnumber) /
-                                        (h2osoi_liq[c, j] / DENH2O + h2osoi_ice[c, j] / DENICE + smallnumber)
-                    end
-                end
-                diffus[c, j] = smooth_max(diffus[c, j], smallnumber)
-            end
-        end
-
-        # Tridiagonal coefficients dm1_zm1 and dp1_zp1
-        for j in 1:nlevsoi
-            for c in eachindex(mask_soil)
-                mask_soil[c] || continue
-                if j == 1 && j != jwt[c] && j != jwt[c] + 1
-                    dm1_zm1[c, j] = 1.0 / (1.0 / spec_grnd_cond[c, s] + dz[c, j] / (diffus[c, j] * 2.0))
-                    dp1_zp1[c, j] = j < nlevsoi ? 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j+1] / diffus[c, j+1]) : 0.0
-                elseif j == 1 && j == jwt[c]
-                    dm1_zm1[c, j] = 1.0 / (1.0 / spec_grnd_cond[c, s] + dz[c, j] / (diffus[c, j] * 2.0))
-                    dp1_zp1[c, j] = j < nlevsoi ? 2.0 / (dz[c, j] * k_h_cc_arr[c, j+1, s] / diffus[c, j] + dz[c, j+1] / diffus[c, j+1]) : 0.0
-                elseif j == 1
-                    dm1_zm1[c, j] = 1.0 / (k_h_cc_arr[c, j, s] / spec_grnd_cond[c, s] + dz[c, j] / (diffus[c, j] * 2.0))
-                    dp1_zp1[c, j] = j < nlevsoi ? 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j+1] / diffus[c, j+1]) : 0.0
-                elseif j < nlevsoi && j != jwt[c] && j != jwt[c] + 1
-                    dm1_zm1[c, j] = 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j-1] / diffus[c, j-1])
-                    dp1_zp1[c, j] = 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j+1] / diffus[c, j+1])
-                elseif j < nlevsoi && j == jwt[c]
-                    dm1_zm1[c, j] = 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j-1] / diffus[c, j-1])
-                    dp1_zp1[c, j] = 2.0 / (dz[c, j] * k_h_cc_arr[c, j+1, s] / diffus[c, j] + dz[c, j+1] / diffus[c, j+1])
-                elseif j < nlevsoi  # j == jwt+1
-                    dm1_zm1[c, j] = 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j-1] * k_h_cc_arr[c, j, s] / diffus[c, j-1])
-                    dp1_zp1[c, j] = 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j+1] / diffus[c, j+1])
-                elseif j != jwt[c] + 1  # j == nlevsoi
-                    dm1_zm1[c, j] = 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j-1] / diffus[c, j-1])
-                else  # jwt == nlevsoi-1
-                    dm1_zm1[c, j] = 2.0 / (dz[c, j] / diffus[c, j] + dz[c, j-1] * k_h_cc_arr[c, j, s] / diffus[c, j-1])
-                end
-            end
-        end
-
-        # Select concentration array for this species
-        conc_rel = s == 1 ? conc_ch4_rel : conc_o2_rel
-
-        # Build tridiagonal system (j=0 is index 1 in Julia)
-        for j in 0:nlevsoi
-            for c in eachindex(mask_soil)
-                mask_soil[c] || continue
-                g = col_gridcell[c]
-
-                jj = j + 1  # Julia 1-based index
-
-                if j == 0
-                    at_arr[c, jj] = 0.0
-                    bt_arr[c, jj] = 1.0
-                    ct_arr[c, jj] = 0.0
-                    rt_arr[c, jj] = c_atm[g, s]
-                elseif j < nlevsoi && j == jwt[c]
-                    dzj = dz[c, j]
-                    at_arr[c, jj] = -0.5 / dzj * dm1_zm1[c, j]
-                    bt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 + 0.5 / dzj * (dp1_zp1[c, j] * k_h_cc_arr[c, j+1, s] + dm1_zm1[c, j])
-                    ct_arr[c, jj] = -0.5 / dzj * dp1_zp1[c, j]
-                    rt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 * conc_rel[c, jj] +
-                                    0.5 / dzj * (dp1_zp1[c, j] * (conc_rel[c, jj+1] - conc_rel[c, jj] * k_h_cc_arr[c, j+1, s]) -
-                                                 dm1_zm1[c, j] * (conc_rel[c, jj] - conc_rel[c, jj-1])) +
-                                    source[c, j, s]
-                elseif j < nlevsoi && j == jwt[c] + 1
-                    dzj = dz[c, j]
-                    at_arr[c, jj] = -0.5 / dzj * dm1_zm1[c, j] * k_h_cc_arr[c, j, s]
-                    bt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 + 0.5 / dzj * (dp1_zp1[c, j] + dm1_zm1[c, j])
-                    ct_arr[c, jj] = -0.5 / dzj * dp1_zp1[c, j]
-                    rt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 * conc_rel[c, jj] +
-                                    0.5 / dzj * (dp1_zp1[c, j] * (conc_rel[c, jj+1] - conc_rel[c, jj]) -
-                                                 dm1_zm1[c, j] * (conc_rel[c, jj] - conc_rel[c, jj-1] * k_h_cc_arr[c, j, s])) +
-                                    source[c, j, s]
-                elseif j < nlevsoi
-                    dzj = dz[c, j]
-                    at_arr[c, jj] = -0.5 / dzj * dm1_zm1[c, j]
-                    bt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 + 0.5 / dzj * (dp1_zp1[c, j] + dm1_zm1[c, j])
-                    ct_arr[c, jj] = -0.5 / dzj * dp1_zp1[c, j]
-                    rt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 * conc_rel[c, jj] +
-                                    0.5 / dzj * (dp1_zp1[c, j] * (conc_rel[c, jj+1] - conc_rel[c, jj]) -
-                                                 dm1_zm1[c, j] * (conc_rel[c, jj] - conc_rel[c, jj-1])) +
-                                    source[c, j, s]
-                elseif j == nlevsoi && j == jwt[c] + 1
-                    dzj = dz[c, j]
-                    at_arr[c, jj] = -0.5 / dzj * dm1_zm1[c, j] * k_h_cc_arr[c, j, s]
-                    bt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 + 0.5 / dzj * dm1_zm1[c, j]
-                    ct_arr[c, jj] = 0.0
-                    rt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 * conc_rel[c, jj] +
-                                    0.5 / dzj * (-dm1_zm1[c, j] * (conc_rel[c, jj] - conc_rel[c, jj-1] * k_h_cc_arr[c, j, s])) +
-                                    source[c, j, s]
-                else  # j == nlevsoi
-                    dzj = dz[c, j]
-                    at_arr[c, jj] = -0.5 / dzj * dm1_zm1[c, j]
-                    bt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 + 0.5 / dzj * dm1_zm1[c, j]
-                    ct_arr[c, jj] = 0.0
-                    rt_arr[c, jj] = epsilon_t[c, j, s] / dtime_ch4 * conc_rel[c, jj] +
-                                    0.5 / dzj * (-dm1_zm1[c, j] * (conc_rel[c, jj] - conc_rel[c, jj-1])) +
-                                    source[c, j, s]
-                end
-            end
-        end
-
-        # Solve tridiagonal system for each column
-        nlevs = nlevsoi + 1  # 0:nlevsoi → 1:nlevsoi+1
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            tridiagonal_solve!(
-                view(conc_rel, c, :),
-                view(at_arr, c, :),
-                view(bt_arr, c, :),
-                view(ct_arr, c, :),
-                view(rt_arr, c, :),
-                1, nlevs)
-        end
-
-        if s == 1  # CH4
-            # Surface flux
-            for c in eachindex(mask_soil)
-                mask_soil[c] || continue
-                g = col_gridcell[c]
-                if jwt[c] != 0
-                    ch4_surf_diff[c] = dm1_zm1[c, 1] * ((conc_rel[c, 2] + conc_ch4_rel_old[c, 2]) / 2.0 - c_atm[g, s])
-                    ch4_surf_ebul[c] = 0.0
-                else
-                    ch4_surf_diff[c] = dm1_zm1[c, 1] * ((conc_rel[c, 2] + conc_ch4_rel_old[c, 2]) / 2.0 -
-                                                          c_atm[g, s] * k_h_cc_arr[c, 1, s])
-                    ch4_surf_ebul[c] = ch4_ebul_total[c]
-                end
-            end
-
-            # Ensure non-negative concentrations
-            for j in 1:nlevsoi
-                for c in eachindex(mask_soil)
-                    mask_soil[c] || continue
-                    jj = j + 1
-                    if conc_rel[c, jj] < 0.0
-                        deficit = -conc_rel[c, jj] * epsilon_t[c, j, 1] * dz[c, j]
-                        conc_rel[c, jj] = 0.0
-                        ch4_surf_diff[c] -= deficit / dtime_ch4
-                    end
-                end
-            end
-
-            # Copy back to conc_ch4_rel for balance check
-            conc_ch4_rel .= conc_rel
-
-        elseif s == 2  # O2
-            for j in 1:nlevsoi
-                for c in eachindex(mask_soil)
-                    mask_soil[c] || continue
-                    g = col_gridcell[c]
-                    jj = j + 1
-                    conc_rel[c, jj] = smooth_max(conc_rel[c, jj], 1.0e-12)
-                    conc_rel[c, jj] = smooth_min(conc_rel[c, jj], c_atm[g, 2] / epsilon_t[c, j, 2])
-                end
-            end
-            conc_o2_rel .= conc_rel
-        end
-    end  # species loop
-
-    # Update absolute concentrations
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            conc_ch4[c, j] = conc_ch4_rel[c, j+1] * epsilon_t[c, j, 1]
-            conc_o2[c, j] = conc_o2_rel[c, j+1] * epsilon_t[c, j, 2]
-        end
-    end
-
-    # Balance check
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        errch4 = 0.0
-        for j in 1:nlevsoi
-            errch4 += (conc_ch4[c, j] - conc_ch4_bef[c, j]) * dz[c, j]
-            errch4 -= ch4_prod_depth[c, j] * dz[c, j] * dtime
-            errch4 += ch4_oxid_depth[c, j] * dz[c, j] * dtime
-        end
-        errch4 += (ch4_surf_aere[c] + ch4_surf_ebul[c] + ch4_surf_diff[c]) * dtime
-        if abs(errch4) < 1.0e-8
-            ch4_surf_diff[c] -= errch4 / dtime
-        end
-        ch4.grnd_ch4_cond_col[c] = spec_grnd_cond[c, 1]
-    end
+    # Struct-first kernel: manual backend + synchronize (the bundle args carry no backend).
+    backend = _kernel_backend(scr.diffus)
+    _ch4tran_column_kernel!(backend)(ts, tf, scr, c_atm_d, jwt_d, gc_d,
+             ch4.grnd_ch4_cond_col, dcong, dconw, mask, pp,
+             ch4vc.ch4frzout, ch4vc.use_aereoxid_prog, lake, sat, nlevsoi; ndrange = nc)
+    KA.synchronize(backend)
     nothing
 end
 
