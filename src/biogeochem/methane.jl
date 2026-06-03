@@ -1998,6 +1998,181 @@ Orchestrates production, oxidation, aerenchyma, ebullition, and transport
 for saturated and unsaturated fractions, and optionally lakes.
 Ported from `ch4` in `ch4Mod.F90`.
 """
+
+# ===========================================================================
+# ch4! orchestrator GPU kernels. The orchestrator's control flow (the sat/lake
+# dispatch to the 6 process kernels) stays on the host; its per-column/per-(c,j)
+# data loops, the patch->column grnd_ch4_cond aggregation, and the column->gridcell
+# flux aggregation become kernels (scatters via _scatter_add!). The conservation
+# @warn checks stay host (materialize the column totals once and check on the host).
+# ===========================================================================
+
+# Map gridcell atmospheric forcing to c_atm_grc (per gridcell).
+@kernel function _ch4o_atm_kernel!(c_atm, @Const(forc_pch4), @Const(forc_po2),
+        @Const(forc_pco2), @Const(forc_pbot), @Const(forc_t), ch4offline::Bool, atmch4, rgasm)
+    g = @index(Global)
+    @inbounds begin
+        T = eltype(c_atm)
+        fpch4 = ch4offline ? atmch4 * forc_pbot[g] : forc_pch4[g]
+        c_atm[g, 1] = fpch4 / rgasm / forc_t[g]
+        c_atm[g, 2] = forc_po2[g] / rgasm / forc_t[g]
+        c_atm[g, 3] = forc_pco2[g] / rgasm / forc_t[g]
+    end
+end
+
+# forc_pbot mapped to columns + fsat_bef snapshot + lagged surface runoff (per column).
+@kernel function _ch4o_pre_kernel!(forc_pbot_col, fsat_bef, qflx_surf_lag, @Const(mask),
+        @Const(col_gridcell), @Const(forc_pbot), @Const(latdeg), @Const(qflx_surf),
+        @Const(finundated), dtime, qflxlagd_s, highlatfact, secspday)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(forc_pbot_col)
+        g = col_gridcell[c]
+        forc_pbot_col[c] = forc_pbot[g]
+        fsat_bef[c] = finundated[c]
+        qflxlags = latdeg[g] < T(45.0) ? qflxlagd_s * secspday : qflxlagd_s * secspday * highlatfact
+        qflx_surf_lag[c] = qflx_surf_lag[c] * exp(-dtime / qflxlags) +
+                           qflx_surf[c] * (one(T) - exp(-dtime / qflxlags))
+    end
+end
+
+# finundated (snow-adjusted + lagged) per column.
+@kernel function _ch4o_finund_kernel!(finundated, finundated_pre_snow, finundated_lag,
+        @Const(mask), @Const(snow_depth), dtime, redoxlags)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(finundated)
+        if snow_depth[c] <= zero(T)
+            finundated[c] = smooth_max(smooth_min(finundated[c], one(T)), zero(T))
+            finundated_pre_snow[c] = finundated[c]
+        else
+            finundated[c] = finundated_pre_snow[c]
+        end
+        if redoxlags > zero(T)
+            finundated_lag[c] = finundated_lag[c] * exp(-dtime / redoxlags) +
+                                finundated[c] * (one(T) - exp(-dtime / redoxlags))
+        else
+            finundated_lag[c] = finundated[c]
+        end
+    end
+end
+
+# dfsat adjustment of conc_ch4_sat (per column; internal j-loop, own-index).
+@kernel function _ch4o_dfsat_kernel!(conc_ch4_sat, ch4_dfsat_flux, @Const(mask),
+        @Const(col_gridcell), @Const(conc_ch4_unsat), @Const(finundated), @Const(fsat_bef),
+        @Const(first_time), @Const(dz), nlevsoi::Int, dtime, catomw)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(conc_ch4_sat)
+        g = col_gridcell[c]
+        acc = zero(T)   # local accumulator (direct field-RMW in a loop mis-lowers under --check-bounds)
+        if !first_time[g]
+            for j in 1:nlevsoi
+                if finundated[c] > fsat_bef[c]
+                    dfsat = finundated[c] - fsat_bef[c]
+                    conc_ch4_sat[c, j] = (fsat_bef[c] * conc_ch4_sat[c, j] +
+                                          dfsat * conc_ch4_unsat[c, j]) / finundated[c]
+                elseif finundated[c] < fsat_bef[c]
+                    acc += (fsat_bef[c] - finundated[c]) *
+                        (conc_ch4_sat[c, j] - conc_ch4_unsat[c, j]) * dz[c, j] / dtime * catomw / T(1000.0)
+                end
+            end
+        end
+        ch4_dfsat_flux[c] = acc
+    end
+end
+
+# zwt_ch4_unsat + lagged layer saturation status (per column; internal j-loop).
+@kernel function _ch4o_zwt_satlag_kernel!(zwt_ch4_unsat, layer_sat_lag, @Const(mask),
+        @Const(zi), @Const(jwt), nlevsoi::Int, dtime, redoxlags_vertical)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(zwt_ch4_unsat)
+        zwt_ch4_unsat[c] = jwt[c] > 0 ? zi[c, jwt[c]] : zero(T)
+        for j in 1:nlevsoi
+            if j > jwt[c] && redoxlags_vertical > zero(T)
+                layer_sat_lag[c, j] = layer_sat_lag[c, j] * exp(-dtime / redoxlags_vertical) +
+                                      (one(T) - exp(-dtime / redoxlags_vertical))
+            elseif redoxlags_vertical > zero(T)
+                layer_sat_lag[c, j] = layer_sat_lag[c, j] * exp(-dtime / redoxlags_vertical)
+            elseif j > jwt[c]
+                layer_sat_lag[c, j] = one(T)
+            else
+                layer_sat_lag[c, j] = zero(T)
+            end
+        end
+    end
+end
+
+# jwt[c] = 0 on masked columns (saturated / lake set-up).
+@kernel function _ch4o_jwt_zero_kernel!(jwt, @Const(mask))
+    c = @index(Global)
+    @inbounds if mask[c]; jwt[c] = 0; end
+end
+
+# Zero a per-column field on masked columns.
+@kernel function _ch4o_zero_col_kernel!(out, @Const(mask))
+    c = @index(Global)
+    @inbounds if mask[c]; out[c] = zero(eltype(out)); end
+end
+
+# patch->column aggregation of grnd_ch4_cond (per-patch scatter).
+@kernel function _ch4o_grndcond_p2c_kernel!(grnd_col, @Const(maskp), @Const(patch_column),
+        @Const(grnd_patch), @Const(patch_wtcol))
+    p = @index(Global)
+    @inbounds if maskp[p]
+        _scatter_add!(grnd_col, patch_column[p], grnd_patch[p] * patch_wtcol[p])
+    end
+end
+
+# Surface flux + per-column oxid/prod totals + nem (per column; internal j reduction).
+@kernel function _ch4o_avg_kernel!(ch4_surf_flux_tot, ch4_oxid_tot, ch4_prod_tot, nem_col,
+        @Const(mask), @Const(finundated),
+        @Const(sd_sat), @Const(sa_sat), @Const(se_sat),
+        @Const(sd_uns), @Const(sa_uns), @Const(se_uns),
+        @Const(oxid_sat), @Const(oxid_uns), @Const(prod_sat), @Const(prod_uns),
+        @Const(dz), nlevsoi::Int, catomw)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(ch4_oxid_tot)
+        fin = finundated[c]
+        totsat = sd_sat[c] + sa_sat[c] + se_sat[c]
+        totuns = sd_uns[c] + sa_uns[c] + se_uns[c]
+        ch4_surf_flux_tot[c] = (fin * totsat + (one(T) - fin) * totuns) * catomw / T(1000.0)
+        ot = zero(T); pt = zero(T)
+        for j in 1:nlevsoi
+            ot += (fin * oxid_sat[c, j] + (one(T) - fin) * oxid_uns[c, j]) * dz[c, j] * catomw
+            pt += (fin * prod_sat[c, j] + (one(T) - fin) * prod_uns[c, j]) * dz[c, j] * catomw
+        end
+        ch4_oxid_tot[c] = ot
+        ch4_prod_tot[c] = pt
+        nem_col[c] = ot - pt
+    end
+end
+
+# Add dfsat flux correction to the surface flux total (per column).
+@kernel function _ch4o_dfsatadd_kernel!(ch4_surf_flux_tot, @Const(mask), @Const(ch4_dfsat_flux))
+    c = @index(Global)
+    @inbounds if mask[c]; ch4_surf_flux_tot[c] += ch4_dfsat_flux[c]; end
+end
+
+# column->gridcell flux aggregation (per-column scatter).
+@kernel function _ch4o_c2g_kernel!(ch4co2f_grc, ch4prodg_grc, totcolch4_grc, nem_grc,
+        surf_grc, @Const(masksoil), @Const(masklake), @Const(col_gridcell), @Const(col_wtgcell),
+        @Const(ch4_oxid_tot), @Const(ch4_prod_tot), @Const(totcolch4), @Const(nem_col),
+        @Const(ch4_surf_flux_tot))
+    c = @index(Global)
+    @inbounds if masksoil[c] || masklake[c]
+        g = col_gridcell[c]; w = col_wtgcell[c]
+        _scatter_add!(ch4co2f_grc, g, ch4_oxid_tot[c] * w)
+        _scatter_add!(ch4prodg_grc, g, ch4_prod_tot[c] * w)
+        _scatter_add!(totcolch4_grc, g, totcolch4[c] * w)
+        _scatter_add!(nem_grc, g, nem_col[c] * w)
+        _scatter_add!(surf_grc, g, ch4_surf_flux_tot[c] * w)
+    end
+end
+
+
 function ch4!(ch4d::CH4Data,
               params::CH4Params,
               ch4vc::CH4VarCon,
@@ -2067,163 +2242,74 @@ function ch4!(ch4d::CH4Data,
               agnpp::Vector{<:Real},
               bgnpp::Vector{<:Real},
               secsperyear::Real)
-
     nc = length(mask_soil)
     np = length(mask_soilp)
+    FT = eltype(t_soisno)
+    ref = t_soisno
 
     rgasm = RGAS / 1000.0
     dtime_ch4 = dtime
-
-    redoxlag = params.redoxlag
-    redoxlag_vertical = params.redoxlag_vertical
-    atmch4 = params.atmch4
-    qflxlagd = params.qflxlagd
-    highlatfact = params.highlatfact
-
+    redoxlag = params.redoxlag; redoxlag_vertical = params.redoxlag_vertical
+    atmch4 = params.atmch4; qflxlagd = params.qflxlagd; highlatfact = params.highlatfact
     redoxlags = redoxlag * SECSPDAY
     redoxlags_vertical = redoxlag_vertical * SECSPDAY
 
-    jwt = fill(typemax(Int) >> 1, nc)  # large sentinel
+    _dvec(v, U) = (d = similar(ref, U, length(v)); copyto!(d, v); d)
+    mask_s = _dvec(collect(Bool, mask_soil), Bool)
+    mask_l = _dvec(collect(Bool, mask_lake), Bool)
+    mask_p = _dvec(collect(Bool, mask_soilp), Bool)
+    gc_d   = _dvec(collect(Int, col_gridcell), Int)
+    pc_d   = _dvec(collect(Int, patch_column), Int)
+    jwt = fill!(similar(ref, Int, nc), typemax(Int) >> 1)
 
     ch4_surf_flux_tot = ch4d.ch4_surf_flux_tot_col
-    FT = eltype(t_soisno)
-    ch4_prod_tot = zeros(FT, nc)
-    ch4_oxid_tot = zeros(FT, nc)
-    nem_col = zeros(FT, nc)
-    fsat_bef = zeros(FT, nc)
+    fill!(ch4_surf_flux_tot, zero(FT))
+    ch4_prod_tot = fill!(similar(ref, FT, nc), zero(FT))
+    ch4_oxid_tot = fill!(similar(ref, FT, nc), zero(FT))
+    nem_col      = fill!(similar(ref, FT, nc), zero(FT))
+    fsat_bef     = fill!(similar(ref, FT, nc), zero(FT))
+    forc_pbot_col = fill!(similar(ref, FT, nc), zero(FT))
 
-    ch4_surf_flux_tot .= 0.0
+    # --- Atmospheric concentrations (per gridcell) ---
+    _launch!(_ch4o_atm_kernel!, ch4d.c_atm_grc, forc_pch4, forc_po2, forc_pco2,
+             forc_pbot, forc_t, ch4vc.ch4offline, FT(atmch4), FT(rgasm); ndrange = ng)
 
-    # Map gridcell-level forcing to column level
-    forc_pbot_col = zeros(FT, nc)
-    for c in 1:nc
-        forc_pbot_col[c] = forc_pbot[col_gridcell[c]]
-    end
+    # --- forc_pbot->col, fsat_bef, lagged surface runoff (per column) ---
+    _launch!(_ch4o_pre_kernel!, forc_pbot_col, fsat_bef, ch4d.qflx_surf_lag_col, mask_s,
+             gc_d, forc_pbot, latdeg, qflx_surf, ch4d.finundated_col, FT(dtime),
+             FT(qflxlagd), FT(highlatfact), FT(SECSPDAY); ndrange = nc)
 
-    # --- Atmospheric concentrations ---
-    for g in 1:ng
-        if ch4vc.ch4offline
-            forc_pch4_g = atmch4 * forc_pbot[g]
-        else
-            forc_pch4_g = forc_pch4[g]
-        end
-        ch4d.c_atm_grc[g, 1] = forc_pch4_g / rgasm / forc_t[g]
-        ch4d.c_atm_grc[g, 2] = forc_po2[g] / rgasm / forc_t[g]
-        ch4d.c_atm_grc[g, 3] = forc_pco2[g] / rgasm / forc_t[g]
-    end
+    # --- finundated (snow-adjusted + lagged) ---
+    _launch!(_ch4o_finund_kernel!, ch4d.finundated_col, ch4d.finundated_pre_snow_col,
+             ch4d.finundated_lag_col, mask_s, snow_depth, FT(dtime), FT(redoxlags); ndrange = nc)
 
-    # --- Save finundated before, calculate lagged surface runoff ---
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        g = col_gridcell[c]
+    # --- finundated change -> conc_ch4_sat adjust / dfsat flux ---
+    _launch!(_ch4o_dfsat_kernel!, ch4d.conc_ch4_sat_col, ch4d.ch4_dfsat_flux_col, mask_s,
+             gc_d, ch4d.conc_ch4_unsat_col, ch4d.finundated_col, fsat_bef,
+             ch4d.ch4_first_time_grc, dz, nlevsoi, FT(dtime), FT(CATOMW); ndrange = nc)
 
-        fsat_bef[c] = ch4d.finundated_col[c]
-
-        if latdeg[g] < 45.0
-            qflxlags = qflxlagd * SECSPDAY
-        else
-            qflxlags = qflxlagd * SECSPDAY * highlatfact
-        end
-        ch4d.qflx_surf_lag_col[c] = ch4d.qflx_surf_lag_col[c] * exp(-dtime / qflxlags) +
-                                     qflx_surf[c] * (1.0 - exp(-dtime / qflxlags))
-    end
-
-    # --- Calculate finundated before snow and lagged version ---
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-
-        if snow_depth[c] <= 0.0
-            ch4d.finundated_col[c] = smooth_max(smooth_min(ch4d.finundated_col[c], 1.0), 0.0)
-            ch4d.finundated_pre_snow_col[c] = ch4d.finundated_col[c]
-        else
-            ch4d.finundated_col[c] = ch4d.finundated_pre_snow_col[c]
-        end
-
-        if redoxlags > 0.0
-            ch4d.finundated_lag_col[c] = ch4d.finundated_lag_col[c] * exp(-dtime / redoxlags) +
-                                          ch4d.finundated_col[c] * (1.0 - exp(-dtime / redoxlags))
-        else
-            ch4d.finundated_lag_col[c] = ch4d.finundated_col[c]
-        end
-    end
-
-    # --- Check finundated changes → adjust conc_ch4_sat or add flux ---
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            g = col_gridcell[c]
-
-            if j == 1
-                ch4d.ch4_dfsat_flux_col[c] = 0.0
-            end
-
-            if !ch4d.ch4_first_time_grc[g]
-                if ch4d.finundated_col[c] > fsat_bef[c]
-                    dfsat = ch4d.finundated_col[c] - fsat_bef[c]
-                    ch4d.conc_ch4_sat_col[c, j] = (fsat_bef[c] * ch4d.conc_ch4_sat_col[c, j] +
-                                                    dfsat * ch4d.conc_ch4_unsat_col[c, j]) /
-                                                   ch4d.finundated_col[c]
-                elseif ch4d.finundated_col[c] < fsat_bef[c]
-                    ch4d.ch4_dfsat_flux_col[c] += (fsat_bef[c] - ch4d.finundated_col[c]) *
-                        (ch4d.conc_ch4_sat_col[c, j] - ch4d.conc_ch4_unsat_col[c, j]) *
-                        dz[c, j] / dtime * CATOMW / 1000.0
-                end
-            end
-        end
-    end
-
-    # --- Annual averages ---
+    # --- Annual averages (kernelized fn) ---
     ch4_annualupdate!(ch4d, mask_soil, mask_soilp, patch_column,
                       is_fates, somhr, agnpp, bgnpp, dtime, secsperyear)
 
-    # --- p2c for grnd_ch4_cond ---
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        ch4d.grnd_ch4_cond_col[c] = 0.0
-    end
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-        c = patch_column[p]
-        ch4d.grnd_ch4_cond_col[c] += ch4d.grnd_ch4_cond_patch[p] * patch_wtcol[p]
-    end
+    # --- p2c for grnd_ch4_cond (scatter) ---
+    _launch!(_ch4o_zero_col_kernel!, ch4d.grnd_ch4_cond_col, mask_s; ndrange = nc)
+    _launch!(_ch4o_grndcond_p2c_kernel!, ch4d.grnd_ch4_cond_col, mask_p, pc_d,
+             ch4d.grnd_ch4_cond_patch, patch_wtcol; ndrange = np)
 
     # ===================================================================
-    # Loop over saturated (sat=1) and unsaturated (sat=0) for soil
+    # Loop over saturated/unsaturated for soil (dispatch stays host)
     # ===================================================================
     lake = false
-
     for sat in 0:1
         if sat == 0
             get_jwt!(jwt, mask_soil, watsat, h2osoi_vol, t_soisno, nlevsoi, params)
-            for c in eachindex(mask_soil)
-                mask_soil[c] || continue
-                ch4d.zwt_ch4_unsat_col[c] = jwt[c] > 0 ? zi[c, jwt[c]] : 0.0
-            end
-
-            # Update lagged saturation status
-            for j in 1:nlevsoi
-                for c in eachindex(mask_soil)
-                    mask_soil[c] || continue
-                    if j > jwt[c] && redoxlags_vertical > 0.0
-                        ch4d.layer_sat_lag_col[c, j] = ch4d.layer_sat_lag_col[c, j] * exp(-dtime / redoxlags_vertical) +
-                                                        (1.0 - exp(-dtime / redoxlags_vertical))
-                    elseif redoxlags_vertical > 0.0
-                        ch4d.layer_sat_lag_col[c, j] = ch4d.layer_sat_lag_col[c, j] * exp(-dtime / redoxlags_vertical)
-                    elseif j > jwt[c]
-                        ch4d.layer_sat_lag_col[c, j] = 1.0
-                    else
-                        ch4d.layer_sat_lag_col[c, j] = 0.0
-                    end
-                end
-            end
-        else  # saturated
-            for c in eachindex(mask_soil)
-                mask_soil[c] || continue
-                jwt[c] = 0
-            end
+            _launch!(_ch4o_zwt_satlag_kernel!, ch4d.zwt_ch4_unsat_col, ch4d.layer_sat_lag_col,
+                     mask_s, zi, jwt, nlevsoi, FT(dtime), FT(redoxlags_vertical); ndrange = nc)
+        else
+            _launch!(_ch4o_jwt_zero_kernel!, jwt, mask_s; ndrange = nc)
         end
 
-        # CH4 production
         ch4_prod!(ch4d, params, ch4vc, mask_soil, mask_soilp,
                   patch_column, patch_itype, patch_wtcol, is_fates,
                   crootfr, rootfr_col, watsat, h2osoi_vol, t_soisno,
@@ -2232,25 +2318,17 @@ function ch4!(ch4d::CH4Data,
                   dz, z, zi, nlevsoi, nlevdecomp, nlevdecomp_full,
                   nlev_soildecomp_standard, mino2lim,
                   dtime, noveg, use_cn, use_nitrif_denitrif, anoxia)
-
-        # CH4 oxidation
         ch4_oxid!(ch4d, params, mask_soil, watsat, h2osoi_vol,
                   smp_l, t_soisno, jwt, sat, lake, nlevsoi, dtime)
-
-        # Aerenchyma transport
         ch4_aere!(ch4d, params, ch4vc, mask_soil, mask_soilp,
                   patch_column, patch_itype, patch_wtcol,
                   col_gridcell, is_fates,
                   watsat, h2osoi_vol, t_soisno, rootr, rootfr,
                   elai, qflx_tran_veg, annsum_npp,
                   z, dz, jwt, sat, lake, nlevsoi, dtime, noveg)
-
-        # Ebullition
         ch4_ebul!(ch4d, params, mask_soil, watsat, h2osoi_vol,
                   t_soisno, forc_pbot_col, h2osfc, frac_h2osfc, lake_icefrac,
                   lakedepth, z, dz, zi, jwt, sat, lake, nlevsoi, dtime)
-
-        # Transport / diffusion solve
         ch4_tran!(ch4d, params, ch4vc, mask_soil, col_gridcell,
                   watsat, h2osoi_vol, h2osoi_liq, h2osoi_ice, h2osfc,
                   bsw, cellorg, t_soisno, t_grnd, t_h2osfc,
@@ -2259,20 +2337,12 @@ function ch4!(ch4d::CH4Data,
                   nlevsoi, nlevsno, dtime_ch4, organic_max)
     end
 
-    # ===================================================================
-    # Optionally do lakes
-    # ===================================================================
+    # --- Optionally do lakes (non-default; dispatch stays host) ---
     if ch4vc.allowlakeprod
         lake = true
         sat = 1
-        for c in eachindex(mask_lake)
-            mask_lake[c] || continue
-            jwt[c] = 0
-        end
-
-        # Create empty patch mask for lakes
+        _launch!(_ch4o_jwt_zero_kernel!, jwt, mask_l; ndrange = nc)
         mask_lakep = falses(np)
-
         ch4_prod!(ch4d, params, ch4vc, mask_lake, mask_lakep,
                   patch_column, patch_itype, patch_wtcol, is_fates,
                   crootfr, rootfr_col, watsat, h2osoi_vol, t_soisno,
@@ -2281,21 +2351,17 @@ function ch4!(ch4d::CH4Data,
                   dz, z, zi, nlevsoi, nlevdecomp, nlevdecomp_full,
                   nlev_soildecomp_standard, mino2lim,
                   dtime, noveg, use_cn, use_nitrif_denitrif, anoxia)
-
         ch4_oxid!(ch4d, params, mask_lake, watsat, h2osoi_vol,
                   smp_l, t_soisno, jwt, sat, lake, nlevsoi, dtime)
-
         ch4_aere!(ch4d, params, ch4vc, mask_lake, mask_lakep,
                   patch_column, patch_itype, patch_wtcol,
                   col_gridcell, is_fates,
                   watsat, h2osoi_vol, t_soisno, rootr, rootfr,
                   elai, qflx_tran_veg, annsum_npp,
                   z, dz, jwt, sat, lake, nlevsoi, dtime, noveg)
-
         ch4_ebul!(ch4d, params, mask_lake, watsat, h2osoi_vol,
                   t_soisno, forc_pbot_col, h2osfc, frac_h2osfc, lake_icefrac,
                   lakedepth, z, dz, zi, jwt, sat, lake, nlevsoi, dtime)
-
         ch4_tran!(ch4d, params, ch4vc, mask_lake, col_gridcell,
                   watsat, h2osoi_vol, h2osoi_liq, h2osoi_ice, h2osfc,
                   bsw, cellorg, t_soisno, t_grnd, t_h2osfc,
@@ -2305,64 +2371,32 @@ function ch4!(ch4d::CH4Data,
     end
 
     # ===================================================================
-    # Average up to gridcell flux and column oxidation/production rate
+    # Average up to gridcell flux + column oxid/prod totals
     # ===================================================================
+    _launch!(_ch4o_avg_kernel!, ch4_surf_flux_tot, ch4_oxid_tot, ch4_prod_tot, nem_col,
+             mask_s, ch4d.finundated_col,
+             ch4d.ch4_surf_diff_sat_col, ch4d.ch4_surf_aere_sat_col, ch4d.ch4_surf_ebul_sat_col,
+             ch4d.ch4_surf_diff_unsat_col, ch4d.ch4_surf_aere_unsat_col, ch4d.ch4_surf_ebul_unsat_col,
+             ch4d.ch4_oxid_depth_sat_col, ch4d.ch4_oxid_depth_unsat_col,
+             ch4d.ch4_prod_depth_sat_col, ch4d.ch4_prod_depth_unsat_col,
+             dz, nlevsoi, FT(CATOMW); ndrange = nc)
+    _launch!(_ch4o_dfsatadd_kernel!, ch4_surf_flux_tot, mask_s, ch4d.ch4_dfsat_flux_col; ndrange = nc)
 
-    # Weight soil columns by finundated
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-
-            if j == 1
-                totalsat = ch4d.ch4_surf_diff_sat_col[c] + ch4d.ch4_surf_aere_sat_col[c] +
-                           ch4d.ch4_surf_ebul_sat_col[c]
-                totalunsat = ch4d.ch4_surf_diff_unsat_col[c] + ch4d.ch4_surf_aere_unsat_col[c] +
-                             ch4d.ch4_surf_ebul_unsat_col[c]
-                ch4_surf_flux_tot[c] = (ch4d.finundated_col[c] * totalsat +
-                                        (1.0 - ch4d.finundated_col[c]) * totalunsat) *
-                                       CATOMW / 1000.0
-            end
-
-            ch4_oxid_tot[c] += (ch4d.finundated_col[c] * ch4d.ch4_oxid_depth_sat_col[c, j] +
-                                (1.0 - ch4d.finundated_col[c]) * ch4d.ch4_oxid_depth_unsat_col[c, j]) *
-                               dz[c, j] * CATOMW
-
-            ch4_prod_tot[c] += (ch4d.finundated_col[c] * ch4d.ch4_prod_depth_sat_col[c, j] +
-                                (1.0 - ch4d.finundated_col[c]) * ch4d.ch4_prod_depth_unsat_col[c, j]) *
-                               dz[c, j] * CATOMW
-
-            if j == nlevsoi
-                nem_col[c] -= ch4_prod_tot[c]
-                nem_col[c] += ch4_oxid_tot[c]
-            end
-        end
-    end
-
-    # Add dfsat flux correction
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        ch4_surf_flux_tot[c] += ch4d.ch4_dfsat_flux_col[c]
-    end
-
-    # Lake flux and diagnostics
+    # --- Lake flux and diagnostics (non-default; host loop over host arrays) ---
     if ch4vc.allowlakeprod
         for j in 1:nlevsoi
             for c in eachindex(mask_lake)
                 mask_lake[c] || continue
-
                 if j == 1
                     totalsat = ch4d.ch4_surf_diff_sat_col[c] + ch4d.ch4_surf_aere_sat_col[c] +
                                ch4d.ch4_surf_ebul_sat_col[c]
                     ch4_surf_flux_tot[c] = totalsat * CATOMW / 1000.0
                 end
-
                 ch4_oxid_tot[c] += ch4d.ch4_oxid_depth_sat_col[c, j] * dz[c, j] * CATOMW
                 ch4_prod_tot[c] += ch4d.ch4_prod_depth_sat_col[c, j] * dz[c, j] * CATOMW
-
                 if !ch4vc.replenishlakec
                     ch4d.lake_soilc_col[c, j] -= 2.0 * ch4d.ch4_prod_depth_sat_col[c, j] * dtime * CATOMW
                 end
-
                 if j == nlevsoi
                     if !ch4vc.replenishlakec
                         nem_col[c] += ch4_prod_tot[c]
@@ -2371,8 +2405,6 @@ function ch4!(ch4d::CH4Data,
                     end
                     nem_col[c] += ch4_oxid_tot[c]
                 end
-
-                # Lake diagnostic output
                 ch4d.ch4_prod_depth_lake_col[c, j] = ch4d.ch4_prod_depth_sat_col[c, j]
                 ch4d.conc_ch4_lake_col[c, j] = ch4d.conc_ch4_sat_col[c, j]
                 ch4d.conc_o2_lake_col[c, j] = ch4d.conc_o2_sat_col[c, j]
@@ -2385,71 +2417,57 @@ function ch4!(ch4d::CH4Data,
         end
     end
 
-    # --- Finalize CH4 balance ---
+    # --- Finalize CH4 balance (kernelized fn) ---
     ch4_totcolch4!(ch4d.totcolch4_col, ch4d, mask_nolake, mask_lake,
                    dz, nlevsoi, ch4vc.allowlakeprod)
 
-    # Column-level balance check
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        g = col_gridcell[c]
-
-        if !ch4d.ch4_first_time_grc[g]
-            errch4 = ch4d.totcolch4_col[c] - ch4d.totcolch4_bef_col[c] -
-                     dtime * (ch4_prod_tot[c] - ch4_oxid_tot[c] -
-                              ch4_surf_flux_tot[c] * 1000.0)
-            if abs(errch4) > 1.0e-7
-                @warn "Column-level CH4 conservation error" c errch4
+    # --- Column-level conservation check (materialize once, warn on host) ---
+    let tc = Array(ch4d.totcolch4_col), tb = Array(ch4d.totcolch4_bef_col),
+        pt = Array(ch4_prod_tot), ot = Array(ch4_oxid_tot), sf = Array(ch4_surf_flux_tot),
+        ms = collect(Bool, mask_soil), ft = Array(ch4d.ch4_first_time_grc), gcc = collect(Int, col_gridcell)
+        @inbounds for c in eachindex(ms)
+            ms[c] || continue
+            if !ft[gcc[c]]
+                errch4 = tc[c] - tb[c] - dtime * (pt[c] - ot[c] - sf[c] * 1000.0)
+                abs(errch4) > 1.0e-7 && @warn "Column-level CH4 conservation error" c errch4
             end
         end
     end
 
+    # --- Lake-column conservation check (non-default; host) ---
     if ch4vc.allowlakeprod
-        for c in eachindex(mask_lake)
-            mask_lake[c] || continue
-            g = col_gridcell[c]
-
-            if !ch4d.ch4_first_time_grc[g]
-                errch4 = ch4d.totcolch4_col[c] - ch4d.totcolch4_bef_col[c] -
-                         dtime * (ch4_prod_tot[c] - ch4_oxid_tot[c] -
-                                  ch4_surf_flux_tot[c] * 1000.0)
-                if abs(errch4) > 1.0e-7
-                    @warn "Column-level CH4 conservation error (lake)" c errch4
+        let tc = Array(ch4d.totcolch4_col), tb = Array(ch4d.totcolch4_bef_col),
+            pt = Array(ch4_prod_tot), ot = Array(ch4_oxid_tot), sf = Array(ch4_surf_flux_tot),
+            ml = collect(Bool, mask_lake), ft = Array(ch4d.ch4_first_time_grc), gcc = collect(Int, col_gridcell)
+            @inbounds for c in eachindex(ml)
+                ml[c] || continue
+                if !ft[gcc[c]]
+                    errch4 = tc[c] - tb[c] - dtime * (pt[c] - ot[c] - sf[c] * 1000.0)
+                    abs(errch4) > 1.0e-7 && @warn "Column-level CH4 conservation error (lake)" c errch4
                 end
             end
         end
     end
 
-    # --- c2g aggregation ---
-    ch4d.ch4co2f_grc .= 0.0
-    ch4d.ch4prodg_grc .= 0.0
-    ch4d.totcolch4_grc .= 0.0
-    nem_grc = zeros(FT, ng)
-    ch4_surf_flux_tot_grc = zeros(FT, ng)
+    # --- c2g aggregation (scatter) ---
+    fill!(ch4d.ch4co2f_grc, zero(FT)); fill!(ch4d.ch4prodg_grc, zero(FT)); fill!(ch4d.totcolch4_grc, zero(FT))
+    nem_grc = fill!(similar(ref, FT, ng), zero(FT))
+    surf_grc = fill!(similar(ref, FT, ng), zero(FT))
+    _launch!(_ch4o_c2g_kernel!, ch4d.ch4co2f_grc, ch4d.ch4prodg_grc, ch4d.totcolch4_grc,
+             nem_grc, surf_grc, mask_s, mask_l, gc_d, col_wtgcell,
+             ch4_oxid_tot, ch4_prod_tot, ch4d.totcolch4_col, nem_col, ch4_surf_flux_tot; ndrange = nc)
 
-    for c in 1:nc
-        (mask_soil[c] || mask_lake[c]) || continue
-        g = col_gridcell[c]
-        w = col_wtgcell[c]
-        ch4d.ch4co2f_grc[g] += ch4_oxid_tot[c] * w
-        ch4d.ch4prodg_grc[g] += ch4_prod_tot[c] * w
-        ch4d.totcolch4_grc[g] += ch4d.totcolch4_col[c] * w
-        nem_grc[g] += nem_col[c] * w
-        ch4_surf_flux_tot_grc[g] += ch4_surf_flux_tot[c] * w
-    end
-
-    # Gridcell-level balance check
-    for g in 1:ng
-        if !ch4d.ch4_first_time_grc[g]
-            errch4 = ch4d.totcolch4_grc[g] - ch4d.totcolch4_bef_grc[g] +
-                     dtime * (nem_grc[g] + ch4_surf_flux_tot_grc[g] * 1000.0)
-            if abs(errch4) > 1.0e-7
-                @warn "Gridcell-level CH4 conservation error" g errch4
+    # --- Gridcell-level conservation check (host) ---
+    let tg = Array(ch4d.totcolch4_grc), tbg = Array(ch4d.totcolch4_bef_grc),
+        ng_ = Array(nem_grc), sg = Array(surf_grc), ft = Array(ch4d.ch4_first_time_grc)
+        @inbounds for g in 1:ng
+            if !ft[g]
+                errch4 = tg[g] - tbg[g] + dtime * (ng_[g] + sg[g] * 1000.0)
+                abs(errch4) > 1.0e-7 && @warn "Gridcell-level CH4 conservation error" g errch4
             end
         end
     end
 
-    ch4d.ch4_first_time_grc .= false
-
-    nothing
+    ch4d.ch4_first_time_grc .= false   # first timestep is done
+    return nothing
 end
