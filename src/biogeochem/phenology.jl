@@ -84,39 +84,46 @@ end
 # ---------------------------------------------------------------------------
 # PFT constants needed by phenology (from pftcon)
 # ---------------------------------------------------------------------------
-Base.@kwdef mutable struct PftConPhenology
-    evergreen             ::Vector{Float64} = Float64[]   # binary evergreen flag
-    season_decid          ::Vector{Float64} = Float64[]   # binary seasonal deciduous flag
-    season_decid_temperate::Vector{Float64} = Float64[]   # binary temperate seasonal deciduous flag
-    stress_decid          ::Vector{Float64} = Float64[]   # binary stress deciduous flag
-    woody                 ::Vector{Float64} = Float64[]   # binary woody flag
-    leaf_long             ::Vector{Float64} = Float64[]   # leaf longevity (yrs)
-    leafcn                ::Vector{Float64} = Float64[]   # leaf C:N (gC/gN)
-    frootcn               ::Vector{Float64} = Float64[]   # fine root C:N (gC/gN)
-    lflitcn               ::Vector{Float64} = Float64[]   # leaf litter C:N (gC/gN)
-    livewdcn              ::Vector{Float64} = Float64[]   # live wood C:N (gC/gN)
-    deadwdcn              ::Vector{Float64} = Float64[]   # dead wood C:N (gC/gN)
-    ndays_on              ::Vector{Float64} = Float64[]   # days to complete onset
-    crit_onset_gdd_sf     ::Vector{Float64} = Float64[]   # scale factor for crit_onset_gdd
-    lf_f                  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
-    fr_f                  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
-    biofuel_harvfrac      ::Vector{Float64} = Float64[]   # biofuel harvest fraction
-    repr_structure_harvfrac::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # repr structure harvest frac
+Base.@kwdef mutable struct PftConPhenology{FT<:Real,
+                                           V<:AbstractVector{FT},
+                                           M<:AbstractMatrix{FT},
+                                           VI<:AbstractVector{<:Integer},
+                                           VB<:AbstractVector{Bool}}
+    evergreen             ::V = Float64[]   # binary evergreen flag
+    season_decid          ::V = Float64[]   # binary seasonal deciduous flag
+    season_decid_temperate::V = Float64[]   # binary temperate seasonal deciduous flag
+    stress_decid          ::V = Float64[]   # binary stress deciduous flag
+    woody                 ::V = Float64[]   # binary woody flag
+    leaf_long             ::V = Float64[]   # leaf longevity (yrs)
+    leafcn                ::V = Float64[]   # leaf C:N (gC/gN)
+    frootcn               ::V = Float64[]   # fine root C:N (gC/gN)
+    lflitcn               ::V = Float64[]   # leaf litter C:N (gC/gN)
+    livewdcn              ::V = Float64[]   # live wood C:N (gC/gN)
+    deadwdcn              ::V = Float64[]   # dead wood C:N (gC/gN)
+    ndays_on              ::V = Float64[]   # days to complete onset
+    crit_onset_gdd_sf     ::V = Float64[]   # scale factor for crit_onset_gdd
+    lf_f                  ::M = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
+    fr_f                  ::M = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
+    biofuel_harvfrac      ::V = Float64[]   # biofuel harvest fraction
+    repr_structure_harvfrac::M = Matrix{Float64}(undef, 0, 0) # repr structure harvest frac
     # Crop-specific PFT parameters
-    minplanttemp          ::Vector{Float64} = Float64[]
-    planttemp             ::Vector{Float64} = Float64[]
-    gddmin                ::Vector{Float64} = Float64[]
-    lfemerg               ::Vector{Float64} = Float64[]
-    grnfill               ::Vector{Float64} = Float64[]
-    hybgdd                ::Vector{Float64} = Float64[]
-    mxmat                 ::Vector{Int}     = Int[]
-    manunitro             ::Vector{Float64} = Float64[]
-    is_pft_known_to_model ::Vector{Bool}    = Bool[]
-    mnNHplantdate         ::Vector{Float64} = Float64[]
-    mxNHplantdate         ::Vector{Float64} = Float64[]
-    mnSHplantdate         ::Vector{Float64} = Float64[]
-    mxSHplantdate         ::Vector{Float64} = Float64[]
+    minplanttemp          ::V = Float64[]
+    planttemp             ::V = Float64[]
+    gddmin                ::V = Float64[]
+    lfemerg               ::V = Float64[]
+    grnfill               ::V = Float64[]
+    hybgdd                ::V = Float64[]
+    mxmat                 ::VI = Int[]
+    manunitro             ::V = Float64[]
+    is_pft_known_to_model ::VB = Bool[]
+    mnNHplantdate         ::V = Float64[]
+    mxNHplantdate         ::V = Float64[]
+    mnSHplantdate         ::V = Float64[]
+    mxSHplantdate         ::V = Float64[]
 end
+PftConPhenology{FT}(; kwargs...) where {FT<:Real} =
+    PftConPhenology{FT, Vector{FT}, Matrix{FT}, Vector{Int}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure PftConPhenology
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -177,30 +184,90 @@ const _min_critical_daylength_onset = 39300.0 / 2.0
 end
 
 phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, spval) =
-    _launch!(_phen_climate_kernel!, tempavg_t2m, mask, t_ref2m, fracday, spval)
+    _launch!(_phen_climate_kernel!, tempavg_t2m, mask, t_ref2m,
+             eltype(tempavg_t2m)(fracday), eltype(tempavg_t2m)(spval))
 
 # --- cn_evergreen_phenology!: storage→transfer for evergreen patches -----
-@kernel function _phen_evergreen_kernel!(bglfr,
-        bgtr, lgsf,
-        leafc_stor2xfer, frootc_stor2xfer,
-        livestemc_stor2xfer, deadstemc_stor2xfer, livecrootc_stor2xfer,
-        deadcrootc_stor2xfer, gresp_stor2xfer,
-        leafn_stor2xfer, frootn_stor2xfer,
-        livestemn_stor2xfer, deadstemn_stor2xfer, livecrootn_stor2xfer,
-        deadcrootn_stor2xfer,
+# --- device-view structs for _phen_evergreen_kernel! ---------------------
+# 16 read+write per-patch output arrays (all per-patch Vectors, shared eltype V)
+Base.@kwdef struct _PhenEvergreenState{V}
+    bglfr::V; bgtr::V; lgsf::V
+    leafc_stor2xfer::V; frootc_stor2xfer::V
+    livestemc_stor2xfer::V; deadstemc_stor2xfer::V; livecrootc_stor2xfer::V
+    deadcrootc_stor2xfer::V; gresp_stor2xfer::V
+    leafn_stor2xfer::V; frootn_stor2xfer::V
+    livestemn_stor2xfer::V; deadstemn_stor2xfer::V; livecrootn_stor2xfer::V
+    deadcrootn_stor2xfer::V
+end
+Adapt.@adapt_structure _PhenEvergreenState
+
+# 13 read-only per-patch storage inputs (@Const conceptually, all per-patch Vectors)
+Base.@kwdef struct _PhenEvergreenInputs{V}
+    leafc_storage::V; frootc_storage::V
+    livestemc_storage::V; deadstemc_storage::V
+    livecrootc_storage::V; deadcrootc_storage::V
+    gresp_storage::V
+    leafn_storage::V; frootn_storage::V
+    livestemn_storage::V; deadstemn_storage::V
+    livecrootn_storage::V; deadcrootn_storage::V
+end
+Adapt.@adapt_structure _PhenEvergreenInputs
+
+# isbits scalar bundle at working precision T (routes the 4 Float64 scalars)
+Base.@kwdef struct _PhenEvergreenScalars{T}
+    dt::T; fstor2tran::T; avg_dayspyr::T; secspday::T
+end
+
+# --- cn_evergreen_phenology!: storage→transfer for evergreen patches -----
+@kernel function _phen_evergreen_kernel!(
+        st::_PhenEvergreenState, inp::_PhenEvergreenInputs,
         @Const(mask), @Const(itype), @Const(evergreen), @Const(woody),
         @Const(leaf_long),
-        @Const(leafc_storage), @Const(frootc_storage),
-        @Const(livestemc_storage), @Const(deadstemc_storage),
-        @Const(livecrootc_storage), @Const(deadcrootc_storage),
-        @Const(gresp_storage),
-        @Const(leafn_storage), @Const(frootn_storage),
-        @Const(livestemn_storage), @Const(deadstemn_storage),
-        @Const(livecrootn_storage), @Const(deadcrootn_storage),
-        dt, fstor2tran, avg_dayspyr, secspday)
-    T = eltype(bglfr)
+        ps::_PhenEvergreenScalars)
     p = @index(Global)
     @inbounds if mask[p]
+        T = eltype(st.bglfr)
+
+        # --- alias scalar bundle fields to Fortran-named locals ---
+        dt          = ps.dt
+        fstor2tran  = ps.fstor2tran
+        avg_dayspyr = ps.avg_dayspyr
+        secspday    = ps.secspday
+
+        # --- alias read+write per-patch output arrays ---
+        bglfr                = st.bglfr
+        bgtr                 = st.bgtr
+        lgsf                 = st.lgsf
+        leafc_stor2xfer      = st.leafc_stor2xfer
+        frootc_stor2xfer     = st.frootc_stor2xfer
+        livestemc_stor2xfer  = st.livestemc_stor2xfer
+        deadstemc_stor2xfer  = st.deadstemc_stor2xfer
+        livecrootc_stor2xfer = st.livecrootc_stor2xfer
+        deadcrootc_stor2xfer = st.deadcrootc_stor2xfer
+        gresp_stor2xfer      = st.gresp_stor2xfer
+        leafn_stor2xfer      = st.leafn_stor2xfer
+        frootn_stor2xfer     = st.frootn_stor2xfer
+        livestemn_stor2xfer  = st.livestemn_stor2xfer
+        deadstemn_stor2xfer  = st.deadstemn_stor2xfer
+        livecrootn_stor2xfer = st.livecrootn_stor2xfer
+        deadcrootn_stor2xfer = st.deadcrootn_stor2xfer
+
+        # --- alias read-only per-patch storage inputs ---
+        leafc_storage      = inp.leafc_storage
+        frootc_storage     = inp.frootc_storage
+        livestemc_storage  = inp.livestemc_storage
+        deadstemc_storage  = inp.deadstemc_storage
+        livecrootc_storage = inp.livecrootc_storage
+        deadcrootc_storage = inp.deadcrootc_storage
+        gresp_storage      = inp.gresp_storage
+        leafn_storage      = inp.leafn_storage
+        frootn_storage     = inp.frootn_storage
+        livestemn_storage  = inp.livestemn_storage
+        deadstemn_storage  = inp.deadstemn_storage
+        livecrootn_storage = inp.livecrootn_storage
+        deadcrootn_storage = inp.deadcrootn_storage
+
+        # --- body verbatim ---
         ivt = itype[p] + 1
         if evergreen[ivt] == one(T)
             bglfr[p] = one(T) / (leaf_long[ivt] * avg_dayspyr * secspday)
@@ -242,21 +309,42 @@ function phen_evergreen!(bglfr, bgtr, lgsf,
         livestemn_storage, deadstemn_storage, livecrootn_storage,
         deadcrootn_storage,
         dt, fstor2tran, avg_dayspyr, secspday)
-    _launch!(_phen_evergreen_kernel!, bglfr, bgtr, lgsf,
-        leafc_stor2xfer, frootc_stor2xfer,
-        livestemc_stor2xfer, deadstemc_stor2xfer, livecrootc_stor2xfer,
-        deadcrootc_stor2xfer, gresp_stor2xfer,
-        leafn_stor2xfer, frootn_stor2xfer,
-        livestemn_stor2xfer, deadstemn_stor2xfer, livecrootn_stor2xfer,
-        deadcrootn_stor2xfer,
+    # working precision = element type of the device output arrays
+    T = eltype(bglfr)
+
+    st = _PhenEvergreenState(;
+        bglfr=bglfr, bgtr=bgtr, lgsf=lgsf,
+        leafc_stor2xfer=leafc_stor2xfer, frootc_stor2xfer=frootc_stor2xfer,
+        livestemc_stor2xfer=livestemc_stor2xfer, deadstemc_stor2xfer=deadstemc_stor2xfer,
+        livecrootc_stor2xfer=livecrootc_stor2xfer, deadcrootc_stor2xfer=deadcrootc_stor2xfer,
+        gresp_stor2xfer=gresp_stor2xfer,
+        leafn_stor2xfer=leafn_stor2xfer, frootn_stor2xfer=frootn_stor2xfer,
+        livestemn_stor2xfer=livestemn_stor2xfer, deadstemn_stor2xfer=deadstemn_stor2xfer,
+        livecrootn_stor2xfer=livecrootn_stor2xfer, deadcrootn_stor2xfer=deadcrootn_stor2xfer)
+
+    inp = _PhenEvergreenInputs(;
+        leafc_storage=leafc_storage, frootc_storage=frootc_storage,
+        livestemc_storage=livestemc_storage, deadstemc_storage=deadstemc_storage,
+        livecrootc_storage=livecrootc_storage, deadcrootc_storage=deadcrootc_storage,
+        gresp_storage=gresp_storage,
+        leafn_storage=leafn_storage, frootn_storage=frootn_storage,
+        livestemn_storage=livestemn_storage, deadstemn_storage=deadstemn_storage,
+        livecrootn_storage=livecrootn_storage, deadcrootn_storage=deadcrootn_storage)
+
+    ps = _PhenEvergreenScalars(;
+        dt=T(dt), fstor2tran=T(fstor2tran),
+        avg_dayspyr=T(avg_dayspyr), secspday=T(secspday))
+
+    # Struct-first kernel: manual backend + synchronize (the bundle args carry no backend).
+    backend = _kernel_backend(st.bglfr)
+    _phen_evergreen_kernel!(backend)(
+        st, inp,
         mask, itype, evergreen, woody, leaf_long,
-        leafc_storage, frootc_storage,
-        livestemc_storage, deadstemc_storage, livecrootc_storage,
-        deadcrootc_storage, gresp_storage,
-        leafn_storage, frootn_storage,
-        livestemn_storage, deadstemn_storage, livecrootn_storage,
-        deadcrootn_storage,
-        dt, fstor2tran, avg_dayspyr, secspday)
+        ps;
+        ndrange = length(mask))
+    KA.synchronize(backend)
+
+    return nothing
 end
 
 # --- crop_phase!: derive current crop phase into an output array ----------
@@ -281,28 +369,81 @@ end
 phen_crop_phase!(crop_phase_out, mask, croplive, gddtsoi, hui, huileaf,
                  huigrain, planted, leafemerge, grainfill) =
     _launch!(_phen_crop_phase_kernel!, crop_phase_out, mask, croplive, gddtsoi,
-             hui, huileaf, huigrain, planted, leafemerge, grainfill)
+             hui, huileaf, huigrain, eltype(crop_phase_out)(planted),
+             eltype(crop_phase_out)(leafemerge), eltype(crop_phase_out)(grainfill))
+
+# --- cn_onset_growth!: transfer→display fluxes during onset --------------
+# ==========================================================================
+# cn_onset_growth! device-view structs (group >31 kernel args for Metal)
+# ==========================================================================
+Base.@kwdef struct _PhenOnsetGrowthOut{V}   # the 12 write-only transfer→display growth-flux arrays (per-patch Vectors)
+    leafc_xfer_to_leafc::V;     frootc_xfer_to_frootc::V
+    leafn_xfer_to_leafn::V;     frootn_xfer_to_frootn::V
+    livestemc_xfer_to_livestemc::V; deadstemc_xfer_to_deadstemc::V
+    livecrootc_xfer_to_livecrootc::V; deadcrootc_xfer_to_deadcrootc::V
+    livestemn_xfer_to_livestemn::V; deadstemn_xfer_to_deadstemn::V
+    livecrootn_xfer_to_livecrootn::V; deadcrootn_xfer_to_deadcrootn::V
+end
+Adapt.@adapt_structure _PhenOnsetGrowthOut
+
+Base.@kwdef struct _PhenOnsetGrowthIn{V}   # read-only per-patch inputs (@Const), all per-patch Vectors share eltype V
+    onset_flag::V; onset_counter::V; bgtr::V
+    leafc_xfer::V;  frootc_xfer::V
+    leafn_xfer::V;  frootn_xfer::V
+    livestemc_xfer::V; deadstemc_xfer::V
+    livecrootc_xfer::V; deadcrootc_xfer::V
+    livestemn_xfer::V; deadstemn_xfer::V
+    livecrootn_xfer::V; deadcrootn_xfer::V
+end
+Adapt.@adapt_structure _PhenOnsetGrowthIn
+
+Base.@kwdef struct _PhenOnsetScalars{T}   # isbits scalar bundle at working precision T
+    dt::T
+end
 
 # --- cn_onset_growth!: transfer→display fluxes during onset --------------
 @kernel function _phen_onset_growth_kernel!(
-        leafc_xfer_to_leafc, frootc_xfer_to_frootc,
-        leafn_xfer_to_leafn, frootn_xfer_to_frootn,
-        livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc,
-        livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc,
-        livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn,
-        livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn,
+        out::_PhenOnsetGrowthOut, inp::_PhenOnsetGrowthIn,
         @Const(mask), @Const(itype), @Const(woody),
-        @Const(onset_flag), @Const(onset_counter), @Const(bgtr),
-        @Const(leafc_xfer), @Const(frootc_xfer),
-        @Const(leafn_xfer), @Const(frootn_xfer),
-        @Const(livestemc_xfer), @Const(deadstemc_xfer),
-        @Const(livecrootc_xfer), @Const(deadcrootc_xfer),
-        @Const(livestemn_xfer), @Const(deadstemn_xfer),
-        @Const(livecrootn_xfer), @Const(deadcrootn_xfer),
-        dt)
-    T = eltype(leafc_xfer_to_leafc)
+        ps::_PhenOnsetScalars)
+    T = eltype(out.leafc_xfer_to_leafc)
     p = @index(Global)
     @inbounds if mask[p]
+        # --- alias scalar bundle to Fortran-named local ---
+        dt = ps.dt
+
+        # --- alias write-only outputs to Fortran-named locals ---
+        leafc_xfer_to_leafc         = out.leafc_xfer_to_leafc
+        frootc_xfer_to_frootc       = out.frootc_xfer_to_frootc
+        leafn_xfer_to_leafn         = out.leafn_xfer_to_leafn
+        frootn_xfer_to_frootn       = out.frootn_xfer_to_frootn
+        livestemc_xfer_to_livestemc = out.livestemc_xfer_to_livestemc
+        deadstemc_xfer_to_deadstemc = out.deadstemc_xfer_to_deadstemc
+        livecrootc_xfer_to_livecrootc = out.livecrootc_xfer_to_livecrootc
+        deadcrootc_xfer_to_deadcrootc = out.deadcrootc_xfer_to_deadcrootc
+        livestemn_xfer_to_livestemn = out.livestemn_xfer_to_livestemn
+        deadstemn_xfer_to_deadstemn = out.deadstemn_xfer_to_deadstemn
+        livecrootn_xfer_to_livecrootn = out.livecrootn_xfer_to_livecrootn
+        deadcrootn_xfer_to_deadcrootn = out.deadcrootn_xfer_to_deadcrootn
+
+        # --- alias read-only per-patch inputs to Fortran-named locals ---
+        onset_flag      = inp.onset_flag
+        onset_counter   = inp.onset_counter
+        bgtr            = inp.bgtr
+        leafc_xfer      = inp.leafc_xfer
+        frootc_xfer     = inp.frootc_xfer
+        leafn_xfer      = inp.leafn_xfer
+        frootn_xfer     = inp.frootn_xfer
+        livestemc_xfer  = inp.livestemc_xfer
+        deadstemc_xfer  = inp.deadstemc_xfer
+        livecrootc_xfer = inp.livecrootc_xfer
+        deadcrootc_xfer = inp.deadcrootc_xfer
+        livestemn_xfer  = inp.livestemn_xfer
+        deadstemn_xfer  = inp.deadstemn_xfer
+        livecrootn_xfer = inp.livecrootn_xfer
+        deadcrootn_xfer = inp.deadcrootn_xfer
+
+        # --- body verbatim ---
         ivt = itype[p] + 1
         if onset_flag[p] == one(T)
             if abs(onset_counter[p] - dt) <= dt / T(2)
@@ -356,18 +497,39 @@ function phen_onset_growth!(
         livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer,
         livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer,
         dt)
-    _launch!(_phen_onset_growth_kernel!,
-        leafc_xfer_to_leafc, frootc_xfer_to_frootc,
-        leafn_xfer_to_leafn, frootn_xfer_to_frootn,
-        livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc,
-        livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc,
-        livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn,
-        livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn,
-        mask, itype, woody, onset_flag, onset_counter, bgtr,
-        leafc_xfer, frootc_xfer, leafn_xfer, frootn_xfer,
-        livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer,
-        livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer,
-        dt)
+
+    # working precision = element type of the device flux arrays
+    T = eltype(leafc_xfer_to_leafc)
+
+    out = _PhenOnsetGrowthOut(;
+        leafc_xfer_to_leafc=leafc_xfer_to_leafc, frootc_xfer_to_frootc=frootc_xfer_to_frootc,
+        leafn_xfer_to_leafn=leafn_xfer_to_leafn, frootn_xfer_to_frootn=frootn_xfer_to_frootn,
+        livestemc_xfer_to_livestemc=livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc=deadstemc_xfer_to_deadstemc,
+        livecrootc_xfer_to_livecrootc=livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc=deadcrootc_xfer_to_deadcrootc,
+        livestemn_xfer_to_livestemn=livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn=deadstemn_xfer_to_deadstemn,
+        livecrootn_xfer_to_livecrootn=livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn=deadcrootn_xfer_to_deadcrootn)
+
+    inp = _PhenOnsetGrowthIn(;
+        onset_flag=onset_flag, onset_counter=onset_counter, bgtr=bgtr,
+        leafc_xfer=leafc_xfer, frootc_xfer=frootc_xfer,
+        leafn_xfer=leafn_xfer, frootn_xfer=frootn_xfer,
+        livestemc_xfer=livestemc_xfer, deadstemc_xfer=deadstemc_xfer,
+        livecrootc_xfer=livecrootc_xfer, deadcrootc_xfer=deadcrootc_xfer,
+        livestemn_xfer=livestemn_xfer, deadstemn_xfer=deadstemn_xfer,
+        livecrootn_xfer=livecrootn_xfer, deadcrootn_xfer=deadcrootn_xfer)
+
+    ps = _PhenOnsetScalars(; dt=T(dt))
+
+    # Struct-first kernel: manual backend + synchronize (the bundle args carry no backend).
+    backend = _kernel_backend(out.leafc_xfer_to_leafc)
+    _phen_onset_growth_kernel!(backend)(
+        out, inp,
+        mask, itype, woody,
+        ps;
+        ndrange = length(mask))
+    KA.synchronize(backend)
+
+    return nothing
 end
 
 # --- cn_offset_litterfall!: display→litter fluxes during offset ----------
@@ -436,7 +598,7 @@ function phen_offset_litterfall!(
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
-        dt, CNratio_floating)
+        eltype(leafc_to_litter)(dt), CNratio_floating)
 end
 
 # --- cn_background_litterfall!: background litter fluxes ------------------
@@ -547,7 +709,7 @@ function phen_livewood_turnover!(
         livecrootc_to_deadcrootc, livecrootn_to_deadcrootn, livecrootn_to_retransn,
         mask, itype, woody, livewdcn, deadwdcn,
         livestemc, livestemn, livecrootc, livecrootn,
-        lwtop, CNratio_floating)
+        eltype(livestemc_to_deadstemc)(lwtop), CNratio_floating)
 end
 
 # --- cn_crop_harvest_to_product_pools!: per-patch harvest sums ------------
@@ -684,9 +846,9 @@ end
 # ==========================================================================
 function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        pftcon::PftConPhenology,
-                       mask_soilp::BitVector,   # soil patches
-                       mask_pcropp::BitVector,   # prognostic crop patches
-                       mask_soilc::BitVector,    # soil columns
+                       mask_soilp::AbstractVector{Bool},   # soil patches
+                       mask_pcropp::AbstractVector{Bool},   # prognostic crop patches
+                       mask_soilc::AbstractVector{Bool},    # soil columns
                        temperature::TemperatureData,
                        water_diag::WaterDiagnosticBulkData,
                        canopy_state::CanopyStateData,
@@ -700,8 +862,8 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        patch_data::PatchData,
                        gridcell::GridcellData,
                        cn_params::CNSharedParamsData,
-                       leaf_prof_patch::Matrix{<:Real},
-                       froot_prof_patch::Matrix{<:Real},
+                       leaf_prof_patch::AbstractMatrix{<:Real},
+                       froot_prof_patch::AbstractMatrix{<:Real},
                        phase::Int;
                        varctl::VarCtl=VarCtl(),
                        is_first_step::Bool=false,
@@ -774,7 +936,7 @@ end
 # cn_phenology_climate!  — Climate averaging for phenology triggers
 # ==========================================================================
 function cn_phenology_climate!(pstate::PhenologyState,
-                               mask_soilp::BitVector,
+                               mask_soilp::AbstractVector{Bool},
                                temperature::TemperatureData,
                                cnveg_state::CNVegStateData,
                                crop::CropData,
@@ -793,7 +955,7 @@ end
 # cn_evergreen_phenology!
 # ==========================================================================
 function cn_evergreen_phenology!(pstate::PhenologyState,
-                                 mask_soilp::BitVector,
+                                 mask_soilp::AbstractVector{Bool},
                                  pftcon::PftConPhenology,
                                  cnveg_state::CNVegStateData,
                                  cnveg_cs::CNVegCarbonStateData,
@@ -1771,7 +1933,7 @@ end
 end
 
 function cn_stress_decid_phenology!(pstate::PhenologyState,
-                                    mask_soilp::BitVector,
+                                    mask_soilp::AbstractVector{Bool},
                                     pftcon::PftConPhenology,
                                     soil_state::SoilStateData,
                                     temperature::TemperatureData,
@@ -2081,6 +2243,7 @@ function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
                          jday::Int=1, kyr::Int=1, dayspyr::Real=365.0,
                          use_fertilizer::Bool=false)
     dt = pstate.dt
+    T = eltype(cnveg_state.bglfr_patch)   # working precision (Float32 on Metal)
 
     _launch!(_phen_crop_phenology_kernel!,
         crop.cphase_patch, cnveg_state.bglfr_patch, cnveg_state.bgtr_patch,
@@ -2088,8 +2251,8 @@ function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
         cnveg_state.offset_flag_patch, cnveg_state.onset_counter_patch,
         mask_pcropp, patch_data.itype, crop.croplive_patch,
         crop.hui_patch, cnveg_state.huigrain_patch, pftcon.leaf_long,
-        Float64(dt), Float64(avg_dayspyr), Float64(SECSPDAY),
-        Float64(cphase_planted), Float64(cphase_grainfill))
+        T(dt), T(avg_dayspyr), T(SECSPDAY),
+        T(cphase_planted), T(cphase_grainfill))
 
     return nothing
 end
@@ -2097,7 +2260,7 @@ end
 # ==========================================================================
 # crop_phase! — Get current crop phase
 # ==========================================================================
-function crop_phase!(mask_pcropp::BitVector, crop::CropData,
+function crop_phase!(mask_pcropp::AbstractVector{Bool}, crop::CropData,
                      cnveg_state::CNVegStateData,
                      crop_phase_out::Vector{<:Real})
     # Per-patch independent: derive crop phase into output array.
@@ -2244,7 +2407,7 @@ end
 # cn_onset_growth! — Transfer → display during onset
 # ==========================================================================
 function cn_onset_growth!(pstate::PhenologyState,
-                          mask_soilp::BitVector,
+                          mask_soilp::AbstractVector{Bool},
                           pftcon::PftConPhenology,
                           cnveg_state::CNVegStateData,
                           cnveg_cs::CNVegCarbonStateData,
@@ -2279,7 +2442,7 @@ end
 # cn_offset_litterfall! — Display → litter during offset
 # ==========================================================================
 function cn_offset_litterfall!(pstate::PhenologyState,
-                               mask_soilp::BitVector,
+                               mask_soilp::AbstractVector{Bool},
                                pftcon::PftConPhenology,
                                cnveg_state::CNVegStateData,
                                cnveg_cs::CNVegCarbonStateData,
@@ -2313,7 +2476,7 @@ end
 # cn_background_litterfall! — Background litterfall
 # ==========================================================================
 function cn_background_litterfall!(pstate::PhenologyState,
-                                   mask_soilp::BitVector,
+                                   mask_soilp::AbstractVector{Bool},
                                    pftcon::PftConPhenology,
                                    cnveg_state::CNVegStateData,
                                    cnveg_cs::CNVegCarbonStateData,
@@ -2340,7 +2503,7 @@ end
 # cn_livewood_turnover! — Live wood → dead wood turnover
 # ==========================================================================
 function cn_livewood_turnover!(pstate::PhenologyState,
-                               mask_soilp::BitVector,
+                               mask_soilp::AbstractVector{Bool},
                                pftcon::PftConPhenology,
                                cnveg_cs::CNVegCarbonStateData,
                                cnveg_ns::CNVegNitrogenStateData,
@@ -2368,8 +2531,8 @@ end
 # ==========================================================================
 # cn_crop_harvest_to_product_pools! — Crop harvest to product pools
 # ==========================================================================
-function cn_crop_harvest_to_product_pools!(mask_soilp::BitVector,
-                                           mask_soilc::BitVector,
+function cn_crop_harvest_to_product_pools!(mask_soilp::AbstractVector{Bool},
+                                           mask_soilc::AbstractVector{Bool},
                                            cnveg_cf::CNVegCarbonFluxData,
                                            cnveg_nf::CNVegNitrogenFluxData,
                                            patch_data::PatchData;
