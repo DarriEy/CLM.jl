@@ -211,99 +211,106 @@ end
 Methane state and flux data arrays.
 Ported from `ch4_type` in `ch4Mod.F90`.
 """
-Base.@kwdef mutable struct CH4Data{FT<:Real}
+Base.@kwdef mutable struct CH4Data{FT<:Real, V<:AbstractVector{FT}, M<:AbstractMatrix{FT}, Vb<:AbstractVector{Bool}}
     # Per-layer production/consumption/transport rates (nc × nlevsoi)
-    ch4_prod_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_prod_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_prod_depth_lake_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_oxid_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_oxid_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_oxid_depth_lake_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_aere_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_aere_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_tran_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_tran_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_ebul_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4_ebul_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    o2_oxid_depth_sat_col       ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    o2_oxid_depth_unsat_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    o2_aere_depth_sat_col       ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    o2_aere_depth_unsat_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    co2_decomp_depth_sat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    co2_decomp_depth_unsat_col  ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    co2_oxid_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    co2_oxid_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    co2_aere_depth_sat_col      ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    co2_aere_depth_unsat_col    ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    ch4_prod_depth_sat_col      ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_prod_depth_unsat_col    ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_prod_depth_lake_col     ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_oxid_depth_sat_col      ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_oxid_depth_unsat_col    ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_oxid_depth_lake_col     ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_aere_depth_sat_col      ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_aere_depth_unsat_col    ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_tran_depth_sat_col      ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_tran_depth_unsat_col    ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_ebul_depth_sat_col      ::M          = Matrix{FT}(undef, 0, 0)
+    ch4_ebul_depth_unsat_col    ::M          = Matrix{FT}(undef, 0, 0)
+    o2_oxid_depth_sat_col       ::M          = Matrix{FT}(undef, 0, 0)
+    o2_oxid_depth_unsat_col     ::M          = Matrix{FT}(undef, 0, 0)
+    o2_aere_depth_sat_col       ::M          = Matrix{FT}(undef, 0, 0)
+    o2_aere_depth_unsat_col     ::M          = Matrix{FT}(undef, 0, 0)
+    co2_decomp_depth_sat_col    ::M          = Matrix{FT}(undef, 0, 0)
+    co2_decomp_depth_unsat_col  ::M          = Matrix{FT}(undef, 0, 0)
+    co2_oxid_depth_sat_col      ::M          = Matrix{FT}(undef, 0, 0)
+    co2_oxid_depth_unsat_col    ::M          = Matrix{FT}(undef, 0, 0)
+    co2_aere_depth_sat_col      ::M          = Matrix{FT}(undef, 0, 0)
+    co2_aere_depth_unsat_col    ::M          = Matrix{FT}(undef, 0, 0)
 
     # Column-level surface fluxes (nc)
-    ch4_ebul_total_sat_col      ::Vector{FT} = FT[]
-    ch4_ebul_total_unsat_col    ::Vector{FT} = FT[]
-    ch4_surf_aere_sat_col       ::Vector{FT} = FT[]
-    ch4_surf_aere_unsat_col     ::Vector{FT} = FT[]
-    ch4_surf_ebul_sat_col       ::Vector{FT} = FT[]
-    ch4_surf_ebul_unsat_col     ::Vector{FT} = FT[]
-    ch4_surf_ebul_lake_col      ::Vector{FT} = FT[]
-    ch4_surf_diff_sat_col       ::Vector{FT} = FT[]
-    ch4_surf_diff_unsat_col     ::Vector{FT} = FT[]
-    ch4_surf_diff_lake_col      ::Vector{FT} = FT[]
-    ch4_dfsat_flux_col          ::Vector{FT} = FT[]
-    ch4_surf_flux_tot_col       ::Vector{FT} = FT[]
+    ch4_ebul_total_sat_col      ::V          = FT[]
+    ch4_ebul_total_unsat_col    ::V          = FT[]
+    ch4_surf_aere_sat_col       ::V          = FT[]
+    ch4_surf_aere_unsat_col     ::V          = FT[]
+    ch4_surf_ebul_sat_col       ::V          = FT[]
+    ch4_surf_ebul_unsat_col     ::V          = FT[]
+    ch4_surf_ebul_lake_col      ::V          = FT[]
+    ch4_surf_diff_sat_col       ::V          = FT[]
+    ch4_surf_diff_unsat_col     ::V          = FT[]
+    ch4_surf_diff_lake_col      ::V          = FT[]
+    ch4_dfsat_flux_col          ::V          = FT[]
+    ch4_surf_flux_tot_col       ::V          = FT[]
 
     # Concentrations (nc × nlevsoi)
-    conc_ch4_sat_col            ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    conc_ch4_unsat_col          ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    conc_ch4_lake_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    conc_o2_sat_col             ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    conc_o2_unsat_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    conc_o2_lake_col            ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    o2_decomp_depth_sat_col     ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    o2_decomp_depth_unsat_col   ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    conc_ch4_sat_col            ::M          = Matrix{FT}(undef, 0, 0)
+    conc_ch4_unsat_col          ::M          = Matrix{FT}(undef, 0, 0)
+    conc_ch4_lake_col           ::M          = Matrix{FT}(undef, 0, 0)
+    conc_o2_sat_col             ::M          = Matrix{FT}(undef, 0, 0)
+    conc_o2_unsat_col           ::M          = Matrix{FT}(undef, 0, 0)
+    conc_o2_lake_col            ::M          = Matrix{FT}(undef, 0, 0)
+    o2_decomp_depth_sat_col     ::M          = Matrix{FT}(undef, 0, 0)
+    o2_decomp_depth_unsat_col   ::M          = Matrix{FT}(undef, 0, 0)
 
     # Stress factors (nc × nlevsoi)
-    o2stress_sat_col            ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    o2stress_unsat_col          ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4stress_sat_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4stress_unsat_col         ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
+    o2stress_sat_col            ::M          = Matrix{FT}(undef, 0, 0)
+    o2stress_unsat_col          ::M          = Matrix{FT}(undef, 0, 0)
+    ch4stress_sat_col           ::M          = Matrix{FT}(undef, 0, 0)
+    ch4stress_unsat_col         ::M          = Matrix{FT}(undef, 0, 0)
 
     # Column-level state (nc)
-    zwt_ch4_unsat_col           ::Vector{FT} = FT[]
-    lake_soilc_col              ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    totcolch4_col               ::Vector{FT} = FT[]
-    totcolch4_bef_col           ::Vector{FT} = FT[]
-    annsum_counter_col          ::Vector{FT} = FT[]
-    tempavg_somhr_col           ::Vector{FT} = FT[]
-    annavg_somhr_col            ::Vector{FT} = FT[]
-    tempavg_finrw_col           ::Vector{FT} = FT[]
-    annavg_finrw_col            ::Vector{FT} = FT[]
-    sif_col                     ::Vector{FT} = FT[]
-    qflx_surf_lag_col           ::Vector{FT} = FT[]
-    finundated_col              ::Vector{FT} = FT[]
-    finundated_pre_snow_col     ::Vector{FT} = FT[]
-    finundated_lag_col          ::Vector{FT} = FT[]
-    layer_sat_lag_col           ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    pH_col                      ::Vector{FT} = FT[]
+    zwt_ch4_unsat_col           ::V          = FT[]
+    lake_soilc_col              ::M          = Matrix{FT}(undef, 0, 0)
+    totcolch4_col               ::V          = FT[]
+    totcolch4_bef_col           ::V          = FT[]
+    annsum_counter_col          ::V          = FT[]
+    tempavg_somhr_col           ::V          = FT[]
+    annavg_somhr_col            ::V          = FT[]
+    tempavg_finrw_col           ::V          = FT[]
+    annavg_finrw_col            ::V          = FT[]
+    sif_col                     ::V          = FT[]
+    qflx_surf_lag_col           ::V          = FT[]
+    finundated_col              ::V          = FT[]
+    finundated_pre_snow_col     ::V          = FT[]
+    finundated_lag_col          ::V          = FT[]
+    layer_sat_lag_col           ::M          = Matrix{FT}(undef, 0, 0)
+    pH_col                      ::V          = FT[]
 
     # Gridcell-level (ng)
-    c_atm_grc                   ::Matrix{FT} = Matrix{FT}(undef, 0, 0)
-    ch4co2f_grc                 ::Vector{FT} = FT[]
-    ch4prodg_grc                ::Vector{FT} = FT[]
-    totcolch4_grc               ::Vector{FT} = FT[]
-    totcolch4_bef_grc           ::Vector{FT} = FT[]
+    c_atm_grc                   ::M          = Matrix{FT}(undef, 0, 0)
+    ch4co2f_grc                 ::V          = FT[]
+    ch4prodg_grc                ::V          = FT[]
+    totcolch4_grc               ::V          = FT[]
+    totcolch4_bef_grc           ::V          = FT[]
 
     # Patch-level aerenchyma (np)
-    annavg_agnpp_patch          ::Vector{FT} = FT[]
-    annavg_bgnpp_patch          ::Vector{FT} = FT[]
-    tempavg_agnpp_patch         ::Vector{FT} = FT[]
-    tempavg_bgnpp_patch         ::Vector{FT} = FT[]
+    annavg_agnpp_patch          ::V          = FT[]
+    annavg_bgnpp_patch          ::V          = FT[]
+    tempavg_agnpp_patch         ::V          = FT[]
+    tempavg_bgnpp_patch         ::V          = FT[]
 
     # Boundary layer conductance
-    grnd_ch4_cond_patch         ::Vector{FT} = FT[]
-    grnd_ch4_cond_col           ::Vector{FT} = FT[]
+    grnd_ch4_cond_patch         ::V          = FT[]
+    grnd_ch4_cond_col           ::V          = FT[]
 
     # First-time flag (ng)
-    ch4_first_time_grc          ::Vector{Bool}    = Bool[]
+    ch4_first_time_grc          ::Vb               = Bool[]
 end
+
+# Array-type params V/M/Vb stay loose so adapt(MtlArray/CuArray, ch4) can swap the
+# storage to device arrays (and AD can swap Dual arrays in). The `{FT}` convenience
+# ctor defaults them to Vector{FT}/Matrix{FT}/Vector{Bool} at the working precision.
+CH4Data{FT}(; kwargs...) where {FT<:Real} =
+    CH4Data{FT, Vector{FT}, Matrix{FT}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure CH4Data
 
 # ---------------------------------------------------------------------------
 # get_jwt! — Water table layer identification
