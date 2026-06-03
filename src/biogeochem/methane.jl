@@ -801,21 +801,103 @@ end
 # ch4_oxid! — Methane oxidation
 # ---------------------------------------------------------------------------
 
+# Per-(column, soil layer) CH4 oxidation via double Michaelis-Menten kinetics.
+# One thread per (c, j); each thread writes only ch4_oxid_depth[c,j] and
+# o2_oxid_depth[c,j] from inputs at its own index — fully independent (no
+# reduction, no scatter). The sat/unsat variant is selected by the `sat` Int
+# and per-column water-table index jwt[c], passed as kernel args. Every Float64
+# literal/param is carried at the working element type so the kernel emits no
+# Float64 on a Float32-only backend (Metal); on Float64 this is byte-identical.
+@kernel function _ch4oxid_kernel!(ch4_oxid_depth, o2_oxid_depth,
+                                  @Const(mask), @Const(jwt),
+                                  @Const(watsat), @Const(h2osoi_vol),
+                                  @Const(smp_l), @Const(t_soisno),
+                                  @Const(conc_ch4), @Const(conc_o2),
+                                  sat::Int,
+                                  vmax_ch4_oxid, k_m, q10_ch4oxid, smp_crit,
+                                  k_m_o2, k_m_unsat, vmax_oxid_unsat,
+                                  c_h_inv1, c_h_inv2, kh_theta1, kh_theta2,
+                                  kh_tbase, rgaslatm, tfrz, t0)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(ch4_oxid_depth)
+
+        if sat == 1 || j > jwt[c]
+            k_m_eff = k_m
+            vmax_eff = vmax_ch4_oxid
+        else
+            k_m_eff = k_m_unsat
+            vmax_eff = vmax_oxid_unsat
+        end
+
+        porevol = smooth_max(watsat[c, j] - h2osoi_vol[c, j], zero(T))
+        h2osoi_vol_min = smooth_min(watsat[c, j], h2osoi_vol[c, j])
+
+        if j <= jwt[c] && smp_l[c, j] < zero(T)
+            smp_fact = exp(-smp_l[c, j] / smp_crit)
+        else
+            smp_fact = one(T)
+        end
+
+        if j <= jwt[c]
+            k_h_inv = exp(-c_h_inv1 * (one(T) / t_soisno[c, j] - one(T) / kh_tbase) + log(kh_theta1))
+            k_h_cc = t_soisno[c, j] / k_h_inv * rgaslatm
+            conc_ch4_rel = conc_ch4[c, j] / (h2osoi_vol_min + porevol / k_h_cc)
+
+            k_h_inv = exp(-c_h_inv2 * (one(T) / t_soisno[c, j] - one(T) / kh_tbase) + log(kh_theta2))
+            k_h_cc = t_soisno[c, j] / k_h_inv * rgaslatm
+            conc_o2_rel = conc_o2[c, j] / (h2osoi_vol_min + porevol / k_h_cc)
+        else
+            conc_ch4_rel = conc_ch4[c, j] / watsat[c, j]
+            conc_o2_rel = conc_o2[c, j] / watsat[c, j]
+        end
+
+        oxid_a = vmax_eff * h2osoi_vol_min * conc_ch4_rel / (k_m_eff + conc_ch4_rel) *
+                 conc_o2_rel / (k_m_o2 + conc_o2_rel) *
+                 q10_ch4oxid^((t_soisno[c, j] - t0) / T(10.0)) * smp_fact
+
+        if t_soisno[c, j] <= tfrz
+            oxid_a = zero(T)
+        end
+
+        ch4_oxid_depth[c, j] = oxid_a
+        o2_oxid_depth[c, j] = ch4_oxid_depth[c, j] * T(2.0)
+    end
+end
+
+# Loose-array launcher: extracts no struct fields, takes the sat/unsat arrays
+# directly so the harness can drive the device path with adapted arrays.
+function meth_oxid!(ch4_oxid_depth, o2_oxid_depth, mask, jwt,
+                    watsat, h2osoi_vol, smp_l, t_soisno, conc_ch4, conc_o2,
+                    sat::Int, vmax_ch4_oxid, k_m, q10_ch4oxid, smp_crit,
+                    k_m_o2, k_m_unsat, vmax_oxid_unsat, nc::Int, nlevsoi::Int)
+    FT = eltype(ch4_oxid_depth)
+    t0 = FT(TFRZ) + FT(12.0)
+    _launch!(_ch4oxid_kernel!, ch4_oxid_depth, o2_oxid_depth, mask, jwt,
+             watsat, h2osoi_vol, smp_l, t_soisno, conc_ch4, conc_o2,
+             sat, FT(vmax_ch4_oxid), FT(k_m), FT(q10_ch4oxid), FT(smp_crit),
+             FT(k_m_o2), FT(k_m_unsat), FT(vmax_oxid_unsat),
+             FT(C_H_INV[1]), FT(C_H_INV[2]), FT(KH_THETA[1]), FT(KH_THETA[2]),
+             FT(KH_TBASE), FT(rgasLatm), FT(TFRZ), t0;
+             ndrange = (nc, nlevsoi))
+end
+
 """
     ch4_oxid!(ch4, params, mask_soil, watsat, h2osoi_vol, smp_l, t_soisno,
               jwt, sat, lake, nlevsoi, dtime)
 
 Calculate CH4 oxidation in each soil layer using double Michaelis-Menten kinetics.
-Ported from `ch4_oxid` in `ch4Mod.F90`.
+Ported from `ch4_oxid` in `ch4Mod.F90`. Kernelized: a single per-(column, layer)
+KernelAbstractions kernel (`_ch4oxid_kernel!`); backend-agnostic (CPU loop or GPU).
 """
 function ch4_oxid!(ch4::CH4Data,
                    params::CH4Params,
-                   mask_soil::BitVector,
-                   watsat::Matrix{<:Real},
-                   h2osoi_vol::Matrix{<:Real},
-                   smp_l::Matrix{<:Real},
-                   t_soisno::Matrix{<:Real},
-                   jwt::Vector{Int},
+                   mask_soil::AbstractVector{Bool},
+                   watsat::AbstractMatrix{<:Real},
+                   h2osoi_vol::AbstractMatrix{<:Real},
+                   smp_l::AbstractMatrix{<:Real},
+                   t_soisno::AbstractMatrix{<:Real},
+                   jwt::AbstractVector{<:Integer},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
@@ -833,62 +915,12 @@ function ch4_oxid!(ch4::CH4Data,
         conc_o2 = ch4.conc_o2_sat_col
     end
 
-    vmax_ch4_oxid = params.vmax_ch4_oxid
-    k_m = params.k_m
-    q10_ch4oxid = params.q10_ch4oxid
-    smp_crit = params.smp_crit
-    k_m_o2 = params.k_m_o2
-    k_m_unsat = params.k_m_unsat
-    vmax_oxid_unsat = params.vmax_oxid_unsat
-
-    t0 = TFRZ + 12.0
-
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-
-            if sat == 1 || j > jwt[c]
-                k_m_eff = k_m
-                vmax_eff = vmax_ch4_oxid
-            else
-                k_m_eff = k_m_unsat
-                vmax_eff = vmax_oxid_unsat
-            end
-
-            porevol = smooth_max(watsat[c, j] - h2osoi_vol[c, j], 0.0)
-            h2osoi_vol_min = smooth_min(watsat[c, j], h2osoi_vol[c, j])
-
-            if j <= jwt[c] && smp_l[c, j] < 0.0
-                smp_fact = exp(-smp_l[c, j] / smp_crit)
-            else
-                smp_fact = 1.0
-            end
-
-            if j <= jwt[c]
-                k_h_inv = exp(-C_H_INV[1] * (1.0 / t_soisno[c, j] - 1.0 / KH_TBASE) + log(KH_THETA[1]))
-                k_h_cc = t_soisno[c, j] / k_h_inv * rgasLatm
-                conc_ch4_rel = conc_ch4[c, j] / (h2osoi_vol_min + porevol / k_h_cc)
-
-                k_h_inv = exp(-C_H_INV[2] * (1.0 / t_soisno[c, j] - 1.0 / KH_TBASE) + log(KH_THETA[2]))
-                k_h_cc = t_soisno[c, j] / k_h_inv * rgasLatm
-                conc_o2_rel = conc_o2[c, j] / (h2osoi_vol_min + porevol / k_h_cc)
-            else
-                conc_ch4_rel = conc_ch4[c, j] / watsat[c, j]
-                conc_o2_rel = conc_o2[c, j] / watsat[c, j]
-            end
-
-            oxid_a = vmax_eff * h2osoi_vol_min * conc_ch4_rel / (k_m_eff + conc_ch4_rel) *
-                     conc_o2_rel / (k_m_o2 + conc_o2_rel) *
-                     q10_ch4oxid^((t_soisno[c, j] - t0) / 10.0) * smp_fact
-
-            if t_soisno[c, j] <= TFRZ
-                oxid_a = 0.0
-            end
-
-            ch4_oxid_depth[c, j] = oxid_a
-            o2_oxid_depth[c, j] = ch4_oxid_depth[c, j] * 2.0
-        end
-    end
+    nc = length(mask_soil)
+    meth_oxid!(ch4_oxid_depth, o2_oxid_depth, mask_soil, jwt,
+               watsat, h2osoi_vol, smp_l, t_soisno, conc_ch4, conc_o2,
+               sat, params.vmax_ch4_oxid, params.k_m, params.q10_ch4oxid,
+               params.smp_crit, params.k_m_o2, params.k_m_unsat,
+               params.vmax_oxid_unsat, nc, nlevsoi)
     nothing
 end
 
