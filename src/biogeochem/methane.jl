@@ -1174,8 +1174,141 @@ function site_ox_aere!(tranloss::Vector{<:Real},
 end
 
 # ---------------------------------------------------------------------------
-# ch4_aere! — Aerenchyma transport
+# ch4_aere! — Aerenchyma transport  (kernelized: per-(c,j) zero + per-patch scatter)
 # ---------------------------------------------------------------------------
+
+# Masked per-(column, level) zeroing of the three patch→column scatter targets.
+@kernel function _ch4aere_zero_kernel!(ch4_aere_depth, @Const(mask),
+                                       ch4_tran_depth, o2_aere_depth)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(ch4_aere_depth)
+        ch4_aere_depth[c, j] = zero(T)
+        ch4_tran_depth[c, j] = zero(T)
+        o2_aere_depth[c, j]  = zero(T)
+    end
+end
+
+# Device-view bundle of the array fields the per-patch aerenchyma kernel touches.
+# Field names mirror the ch4_aere! locals so the body reads verbatim. Separate
+# index/flag vectors (Int/Bool) from float arrays so adapt keeps their eltype.
+Base.@kwdef struct _CH4AereDV{M,V,VI,VB}
+    # column [c,j] matrices (read)
+    watsat::M; h2osoi_vol::M; t_soisno::M; conc_ch4::M; conc_o2::M; z::M; dz::M
+    ch4_prod_depth::M
+    # column [c,j] matrices (scatter targets)
+    ch4_aere_depth::M; ch4_tran_depth::M; o2_aere_depth::M
+    # patch [p,j] matrices
+    rootr::M; rootfr::M
+    # gridcell [g,2] matrix
+    c_atm_grc::M
+    # patch [p] vectors
+    qflx_tran_veg::V; annsum_npp::V; annavg_agnpp_patch::V; annavg_bgnpp_patch::V
+    grnd_ch4_cond_patch::V; patch_wtcol::V
+    # index/flag vectors
+    patch_column::VI; col_gridcell::VI; patch_itype::VI; jwt::VI; is_fates::VB
+end
+Adapt.@adapt_structure _CH4AereDV
+
+# Scalar parameter/flag bundle (kept off the loose-arg list; Metal caps ~31 args).
+Base.@kwdef struct _CH4AereP{T}
+    smallnumber::T; diffus_aere::T; dcong21::T; dcong11::T; rgaslatm::T
+    unsat_aere_ratio::T; porosmin::T; scale_factor_aere::T; rob::T; nongrassporosratio::T
+    c_h_inv1::T; c_h_inv2::T; kh_theta1::T; kh_theta2::T; kh_tbase::T
+    tfrz::T; spval::T; rpi::T; poros_base::T
+    transpirationloss::Bool; use_aereoxid_prog::Bool
+    sat::Int; noveg::Int; nlevsoi::Int
+end
+Adapt.@adapt_structure _CH4AereP
+
+# Per-PATCH aerenchyma kernel. Runs site_ox_aere!'s math inline as a sequential
+# in-thread j-loop (own per-level scalars, no scratch arrays), fuses the second
+# j-loop, and _scatter_add!s the per-patch contribution into the column arrays.
+@kernel function _ch4aere_patch_kernel!(_out, d, @Const(mask), p_par, dtime)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = typeof(dtime)
+        c = d.patch_column[p]
+        g = d.col_gridcell[c]
+        wt = d.patch_wtcol[p]
+
+        # is_vegetated / poros_tiller: FATES columns force vegetated (default poros).
+        if d.is_fates[c]
+            is_vegetated = true
+        else
+            is_vegetated = d.patch_itype[p] != p_par.noveg
+        end
+        poros_tiller = p_par.poros_base * p_par.nongrassporosratio
+
+        jwt_c = d.jwt[c]
+        for j in 1:p_par.nlevsoi
+            # --- Transpiration loss ---
+            if p_par.transpirationloss && is_vegetated
+                h2osoi_vol_min = smooth_min(d.watsat[c, j], d.h2osoi_vol[c, j])
+                k_h_inv = exp(-p_par.c_h_inv1 * (one(T) / d.t_soisno[c, j] - one(T) / p_par.kh_tbase) + log(p_par.kh_theta1))
+                k_h_cc = d.t_soisno[c, j] / k_h_inv * p_par.rgaslatm
+                conc_ch4_wat = d.conc_ch4[c, j] / ((d.watsat[c, j] - h2osoi_vol_min) / k_h_cc + h2osoi_vol_min)
+                tranloss = conc_ch4_wat * d.rootr[p, j] * d.qflx_tran_veg[p] / d.dz[c, j] / T(1000.0)
+                tranloss = smooth_max(tranloss, zero(T))
+            else
+                tranloss = zero(T)
+            end
+
+            # --- Aerenchyma diffusion ---
+            if j > jwt_c && d.t_soisno[c, j] > p_par.tfrz && is_vegetated
+                anpp = smooth_max(d.annsum_npp[p], zero(T))
+
+                if d.annavg_agnpp_patch[p] != p_par.spval && d.annavg_bgnpp_patch[p] != p_par.spval &&
+                   d.annavg_agnpp_patch[p] > zero(T) && d.annavg_bgnpp_patch[p] > zero(T)
+                    nppratio = d.annavg_bgnpp_patch[p] / (d.annavg_agnpp_patch[p] + d.annavg_bgnpp_patch[p])
+                else
+                    nppratio = T(0.5)
+                end
+
+                m_tiller = anpp * nppratio * T(4.0)
+                n_tiller = m_tiller / T(0.22)
+
+                pt = poros_tiller
+                if p_par.sat == 0
+                    pt *= p_par.unsat_aere_ratio
+                end
+                pt = smooth_max(pt, p_par.porosmin)
+
+                area_tiller = p_par.scale_factor_aere * n_tiller * pt * p_par.rpi * T(2.9e-3)^2
+
+                k_h_inv = exp(-p_par.c_h_inv1 * (one(T) / d.t_soisno[c, j] - one(T) / p_par.kh_tbase) + log(p_par.kh_theta1))
+                k_h_cc = d.t_soisno[c, j] / k_h_inv * p_par.rgaslatm
+                aerecond = area_tiller * d.rootfr[p, j] * p_par.diffus_aere / (d.z[c, j] * p_par.rob)
+                aerecond = one(T) / (one(T) / (aerecond + p_par.smallnumber) + one(T) / (d.grnd_ch4_cond_patch[p] + p_par.smallnumber))
+
+                aere = aerecond * (d.conc_ch4[c, j] / d.watsat[c, j] / k_h_cc - d.c_atm_grc[g, 1]) / d.dz[c, j]
+                aere = smooth_max(aere, zero(T))
+
+                # O2 diffusion
+                k_h_inv = exp(-p_par.c_h_inv2 * (one(T) / d.t_soisno[c, j] - one(T) / p_par.kh_tbase) + log(p_par.kh_theta2))
+                k_h_cc = d.t_soisno[c, j] / k_h_inv * p_par.rgaslatm
+                oxdiffus = p_par.diffus_aere * p_par.dcong21 / p_par.dcong11
+                aerecond = area_tiller * d.rootfr[p, j] * oxdiffus / (d.z[c, j] * p_par.rob)
+                aerecond = one(T) / (one(T) / (aerecond + p_par.smallnumber) + one(T) / (d.grnd_ch4_cond_patch[p] + p_par.smallnumber))
+                oxaere = -aerecond * (d.conc_o2[c, j] / d.watsat[c, j] / k_h_cc - d.c_atm_grc[g, 2]) / d.dz[c, j]
+                oxaere = smooth_max(oxaere, zero(T))
+
+                if !p_par.use_aereoxid_prog
+                    oxaere = zero(T)
+                end
+            else
+                aere = zero(T)
+                oxaere = zero(T)
+            end
+
+            # --- Scatter the per-patch contribution into the column arrays ---
+            aeretran = smooth_min(aere + tranloss, d.conc_ch4[c, j] / dtime + d.ch4_prod_depth[c, j])
+            _scatter_add!(d.ch4_aere_depth, c, j, aeretran * wt)
+            _scatter_add!(d.ch4_tran_depth, c, j, smooth_min(tranloss, aeretran) * wt)
+            _scatter_add!(d.o2_aere_depth,  c, j, oxaere * wt)
+        end
+    end
+end
 
 """
     ch4_aere!(ch4, params, ch4vc, mask_soil, mask_soilp,
@@ -1190,24 +1323,24 @@ Ported from `ch4_aere` in `ch4Mod.F90`.
 function ch4_aere!(ch4::CH4Data,
                    params::CH4Params,
                    ch4vc::CH4VarCon,
-                   mask_soil::BitVector,
-                   mask_soilp::BitVector,
-                   patch_column::Vector{Int},
-                   patch_itype::Vector{Int},
-                   patch_wtcol::Vector{<:Real},
-                   col_gridcell::Vector{Int},
-                   is_fates::BitVector,
-                   watsat::Matrix{<:Real},
-                   h2osoi_vol::Matrix{<:Real},
-                   t_soisno::Matrix{<:Real},
-                   rootr::Matrix{<:Real},
-                   rootfr::Matrix{<:Real},
-                   elai::Vector{<:Real},
-                   qflx_tran_veg::Vector{<:Real},
-                   annsum_npp::Vector{<:Real},
-                   z::Matrix{<:Real},
-                   dz::Matrix{<:Real},
-                   jwt::Vector{Int},
+                   mask_soil::AbstractVector{Bool},
+                   mask_soilp::AbstractVector{Bool},
+                   patch_column::AbstractVector{<:Integer},
+                   patch_itype::AbstractVector{<:Integer},
+                   patch_wtcol::AbstractVector{<:Real},
+                   col_gridcell::AbstractVector{<:Integer},
+                   is_fates::AbstractVector{Bool},
+                   watsat::AbstractMatrix{<:Real},
+                   h2osoi_vol::AbstractMatrix{<:Real},
+                   t_soisno::AbstractMatrix{<:Real},
+                   rootr::AbstractMatrix{<:Real},
+                   rootfr::AbstractMatrix{<:Real},
+                   elai::AbstractVector{<:Real},
+                   qflx_tran_veg::AbstractVector{<:Real},
+                   annsum_npp::AbstractVector{<:Real},
+                   z::AbstractMatrix{<:Real},
+                   dz::AbstractMatrix{<:Real},
+                   jwt::AbstractVector{<:Integer},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
@@ -1230,69 +1363,55 @@ function ch4_aere!(ch4::CH4Data,
         ch4_prod_depth = ch4.ch4_prod_depth_sat_col
     end
 
-    # Initialize
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            ch4_aere_depth[c, j] = 0.0
-            ch4_tran_depth[c, j] = 0.0
-            o2_aere_depth[c, j] = 0.0
-        end
-    end
+    nc = length(mask_soil)
+
+    # Initialize (masked per-(column, level) zeroing kernel)
+    _launch!(_ch4aere_zero_kernel!, ch4_aere_depth, mask_soil,
+             ch4_tran_depth, o2_aere_depth; ndrange = (nc, nlevsoi))
 
     if !lake
         FT_ae = eltype(t_soisno)
-        tranloss = zeros(FT_ae, nlevsoi)
-        aere = zeros(FT_ae, nlevsoi)
-        oxaere = zeros(FT_ae, nlevsoi)
+        T = FT_ae
 
-        for p in eachindex(mask_soilp)
-            mask_soilp[p] || continue
-            c = patch_column[p]
-            g = col_gridcell[c]
+        d = _CH4AereDV(;
+            watsat = watsat, h2osoi_vol = h2osoi_vol, t_soisno = t_soisno,
+            conc_ch4 = conc_ch4, conc_o2 = conc_o2, z = z, dz = dz,
+            ch4_prod_depth = ch4_prod_depth,
+            ch4_aere_depth = ch4_aere_depth, ch4_tran_depth = ch4_tran_depth,
+            o2_aere_depth = o2_aere_depth,
+            rootr = rootr, rootfr = rootfr, c_atm_grc = ch4.c_atm_grc,
+            qflx_tran_veg = qflx_tran_veg, annsum_npp = annsum_npp,
+            annavg_agnpp_patch = ch4.annavg_agnpp_patch,
+            annavg_bgnpp_patch = ch4.annavg_bgnpp_patch,
+            grnd_ch4_cond_patch = ch4.grnd_ch4_cond_patch,
+            patch_wtcol = patch_wtcol,
+            patch_column = patch_column, col_gridcell = col_gridcell,
+            patch_itype = patch_itype, jwt = jwt, is_fates = is_fates)
 
-            if !is_fates[c]
-                is_vegetated = patch_itype[p] != noveg
-                itype = patch_itype[p]
-                # Grass porosity check (simplified: grasses get 0.3, others scaled)
-                poros_tiller = 0.3 * params.nongrassporosratio  # default non-grass
-                # Note: in full CLM, grasses (nc3_arctic_grass, etc.) would get 0.3
-                rootfr_vr = rootfr[p, 1:nlevsoi]
-            else
-                is_vegetated = true
-                poros_tiller = 0.3 * params.nongrassporosratio
-                rootfr_vr = rootfr[p, 1:nlevsoi]
-            end
+        p_par = _CH4AereP(;
+            smallnumber = T(1.0e-12),
+            diffus_aere = T(D_CON_G[1, 1] * 1.0e-4),
+            dcong21 = T(D_CON_G[2, 1]), dcong11 = T(D_CON_G[1, 1]),
+            rgaslatm = T(rgasLatm),
+            unsat_aere_ratio = T(params.unsat_aere_ratio),
+            porosmin = T(params.porosmin),
+            scale_factor_aere = T(params.scale_factor_aere),
+            rob = T(params.rob),
+            nongrassporosratio = T(params.nongrassporosratio),
+            c_h_inv1 = T(C_H_INV[1]), c_h_inv2 = T(C_H_INV[2]),
+            kh_theta1 = T(KH_THETA[1]), kh_theta2 = T(KH_THETA[2]),
+            kh_tbase = T(KH_TBASE), tfrz = T(TFRZ), spval = T(SPVAL),
+            rpi = T(RPI), poros_base = T(0.3),
+            transpirationloss = ch4vc.transpirationloss,
+            use_aereoxid_prog = ch4vc.use_aereoxid_prog,
+            sat = sat, noveg = noveg, nlevsoi = nlevsoi)
 
-            site_ox_aere!(tranloss, aere, oxaere,
-                          is_vegetated,
-                          view(watsat, c, 1:nlevsoi),
-                          view(h2osoi_vol, c, 1:nlevsoi),
-                          view(t_soisno, c, 1:nlevsoi),
-                          view(conc_ch4, c, 1:nlevsoi),
-                          view(rootr, p, 1:nlevsoi),
-                          qflx_tran_veg[p],
-                          jwt[c],
-                          annsum_npp[p],
-                          ch4.annavg_agnpp_patch[p],
-                          ch4.annavg_bgnpp_patch[p],
-                          elai[p],
-                          poros_tiller,
-                          rootfr_vr,
-                          ch4.grnd_ch4_cond_patch[p],
-                          view(conc_o2, c, 1:nlevsoi),
-                          view(ch4.c_atm_grc, g, 1:2),
-                          view(z, c, 1:nlevsoi),
-                          view(dz, c, 1:nlevsoi),
-                          sat, nlevsoi, params, ch4vc)
-
-            for j in 1:nlevsoi
-                aeretran = smooth_min(aere[j] + tranloss[j], conc_ch4[c, j] / dtime + ch4_prod_depth[c, j])
-                ch4_aere_depth[c, j] += aeretran * patch_wtcol[p]
-                ch4_tran_depth[c, j] += smooth_min(tranloss[j], aeretran) * patch_wtcol[p]
-                o2_aere_depth[c, j] += oxaere[j] * patch_wtcol[p]
-            end
-        end
+        # Per-patch kernel: site_ox_aere! math inline (sequential j-loop) +
+        # patch→column scatter into the (zeroed) column arrays. The first arg
+        # `ch4_aere_depth` is the backend carrier (also reachable via `d`).
+        np = length(mask_soilp)
+        _launch!(_ch4aere_patch_kernel!, ch4_aere_depth, d, mask_soilp, p_par, T(dtime);
+                 ndrange = np)
     end
     nothing
 end
