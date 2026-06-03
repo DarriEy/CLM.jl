@@ -94,7 +94,7 @@ are set once during `init_decomp_cascade_bgc!` and used by
 Ported from module-level private variables in
 `SoilBiogeochemDecompCascadeBGCMod.F90`.
 """
-Base.@kwdef mutable struct DecompBGCState{FT<:Real}
+Base.@kwdef mutable struct DecompBGCState{FT<:Real, M<:AbstractMatrix{FT}}
     # Pool indices
     i_pas_som ::Int = 0
     i_slo_som ::Int = 0
@@ -112,13 +112,15 @@ Base.@kwdef mutable struct DecompBGCState{FT<:Real}
     rf_s3s1   ::FT = 0.0
     rf_cwdl3  ::FT = 0.0
 
-    # Spatially-varying respiration fractions (col × nlevdecomp)
-    rf_s1s2   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    rf_s1s3   ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    # Spatially-varying respiration fractions (col × nlevdecomp). Array-type param M
+    # stays LOOSE so adapt(MtlArray/CuArray, ·) can swap device storage in (and AD can
+    # swap Dual arrays); pinning ::Matrix{FT} breaks device-movability of CLMInstances.
+    rf_s1s2   ::M = Matrix{Float64}(undef, 0, 0)
+    rf_s1s3   ::M = Matrix{Float64}(undef, 0, 0)
 
     # Path fractions
-    f_s1s2    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
-    f_s1s3    ::Matrix{FT} = Matrix{Float64}(undef, 0, 0)
+    f_s1s2    ::M = Matrix{Float64}(undef, 0, 0)
+    f_s1s3    ::M = Matrix{Float64}(undef, 0, 0)
     f_s2s1    ::FT = 0.0
     f_s2s3    ::FT = 0.0
 
@@ -138,6 +140,15 @@ Base.@kwdef mutable struct DecompBGCState{FT<:Real}
     use_century_tfunc              ::Bool    = false
     normalization_tref             ::FT = 15.0
 end
+
+# The `{FT}` convenience ctor defaults M to Matrix{FT} at the working precision; @kwdef
+# still gives the no-FT `DecompBGCState()` (infers Float64 from the defaults).
+DecompBGCState{FT}(; kwargs...) where {FT<:Real} =
+    DecompBGCState{FT, Matrix{FT}}(; kwargs...)
+
+# Device-movable: lets the spatially-varying f_s1s2/rf_s1s2/… arrays ride to the GPU
+# for decomp_rate_constants_bgc! (scalar/Int/Bool fields pass through unchanged).
+Adapt.@adapt_structure DecompBGCState
 
 # ---------------------------------------------------------------------------
 # decomp_bgc_read_params! — Read BGC decomposition parameters
@@ -204,9 +215,10 @@ end
                                            @Const(cellsand))
     c, j = @index(Global, NTuple)
     @inbounds begin
-        t = 0.85 - 0.68 * 0.01 * (100.0 - cellsand[c, j])
-        f_s1s2[c, j]  = 1.0 - 0.004 / (1.0 - t)
-        f_s1s3[c, j]  = 0.004 / (1.0 - t)
+        T = eltype(f_s1s2)
+        t = T(0.85) - T(0.68) * T(0.01) * (T(100.0) - cellsand[c, j])
+        f_s1s2[c, j]  = one(T) - T(0.004) / (one(T) - t)
+        f_s1s3[c, j]  = T(0.004) / (one(T) - t)
         rf_s1s2[c, j] = t
         rf_s1s3[c, j] = t
     end
@@ -228,11 +240,12 @@ decompb_sandfrac!(f_s1s2, f_s1s3, rf_s1s2, rf_s1s3, cellsand, nc::Int, nlevdecom
                                               Q10, froz_q10, tfrz)
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
+        T = eltype(t_scalar)
         ts = t_soisno[c, j]
         if ts >= tfrz
-            t_scalar[c, j] = Q10^((ts - (tfrz + 25.0)) / 10.0)
+            t_scalar[c, j] = Q10^((ts - (tfrz + T(25.0))) / T(10.0))
         else
-            t_scalar[c, j] = (Q10^(-25.0 / 10.0)) * (froz_q10^((ts - tfrz) / 10.0))
+            t_scalar[c, j] = (Q10^(T(-25.0) / T(10.0))) * (froz_q10^((ts - tfrz) / T(10.0)))
         end
     end
 end
@@ -242,9 +255,11 @@ end
 
 Q10 temperature scalar for multi-level decomposition. Backend-agnostic 2D kernel.
 """
-decompb_tscalar_q10!(t_scalar, mask, t_soisno, Q10, froz_q10, tfrz, nc::Int, nlevdecomp::Int) =
-    _launch!(_decompb_tscalar_q10_kernel!, t_scalar, mask, t_soisno, Q10, froz_q10, tfrz;
-             ndrange = (nc, nlevdecomp))
+function decompb_tscalar_q10!(t_scalar, mask, t_soisno, Q10, froz_q10, tfrz, nc::Int, nlevdecomp::Int)
+    _T = eltype(t_scalar)   # convert scalar args to working precision (no Float64 on Metal)
+    _launch!(_decompb_tscalar_q10_kernel!, t_scalar, mask, t_soisno,
+             _T(Q10), _T(froz_q10), _T(tfrz); ndrange = (nc, nlevdecomp))
+end
 
 # Multi-level water scalar (per column AND decomp level — 2D, masked).
 @kernel function _decompb_wscalar_kernel!(w_scalar, @Const(mask), @Const(soilpsi),
@@ -255,7 +270,7 @@ decompb_tscalar_q10!(t_scalar, mask, t_soisno, Q10, froz_q10, tfrz, nc::Int, nle
         if psi > minpsi
             w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
         else
-            w_scalar[c, j] = 0.0
+            w_scalar[c, j] = zero(eltype(w_scalar))
         end
     end
 end
@@ -265,9 +280,11 @@ end
 
 Soil-water-potential scalar for multi-level decomposition. Backend-agnostic 2D kernel.
 """
-decompb_wscalar!(w_scalar, mask, soilpsi, minpsi, maxpsi, nc::Int, nlevdecomp::Int) =
-    _launch!(_decompb_wscalar_kernel!, w_scalar, mask, soilpsi, minpsi, maxpsi;
+function decompb_wscalar!(w_scalar, mask, soilpsi, minpsi, maxpsi, nc::Int, nlevdecomp::Int)
+    _T = eltype(w_scalar)
+    _launch!(_decompb_wscalar_kernel!, w_scalar, mask, soilpsi, _T(minpsi), _T(maxpsi);
              ndrange = (nc, nlevdecomp))
+end
 
 # Multi-level anoxia O2 scalar (per column AND decomp level — 2D, masked).
 @kernel function _decompb_oscalar_anox_kernel!(o_scalar, @Const(mask),
@@ -283,14 +300,15 @@ end
 
 O2 stress scalar (anoxia path) for multi-level decomposition. Backend-agnostic.
 """
-decompb_oscalar_anox!(o_scalar, mask, o2stress_unsat, mino2lim, nc::Int, nlevdecomp::Int) =
-    _launch!(_decompb_oscalar_anox_kernel!, o_scalar, mask, o2stress_unsat, mino2lim;
-             ndrange = (nc, nlevdecomp))
+function decompb_oscalar_anox!(o_scalar, mask, o2stress_unsat, mino2lim, nc::Int, nlevdecomp::Int)
+    _launch!(_decompb_oscalar_anox_kernel!, o_scalar, mask, o2stress_unsat,
+             eltype(o_scalar)(mino2lim); ndrange = (nc, nlevdecomp))
+end
 
 # Unconditional unit O2 scalar (per column AND decomp level — 2D, no mask).
 @kernel function _decompb_oscalar_one_kernel!(o_scalar)
     c, j = @index(Global, NTuple)
-    @inbounds o_scalar[c, j] = 1.0
+    @inbounds o_scalar[c, j] = one(eltype(o_scalar))
 end
 
 """
@@ -315,7 +333,7 @@ end
 Multiply t_scalar by the Q10->CENTURY normalization factor. Backend-agnostic.
 """
 decompb_tscalar_norm!(t_scalar, mask, factor, nc::Int, nlevdecomp::Int) =
-    _launch!(_decompb_tscalar_norm_kernel!, t_scalar, mask, factor;
+    _launch!(_decompb_tscalar_norm_kernel!, t_scalar, mask, eltype(t_scalar)(factor);
              ndrange = (nc, nlevdecomp))
 
 # Depth scalar — fixed e-folding depth (per column AND decomp level — 2D, masked).
@@ -333,8 +351,282 @@ end
 Fixed e-folding depth scalar for multi-level decomposition. Backend-agnostic.
 """
 decompb_depthscalar!(depth_scalar, mask, zsoi_vals, efolding, nc::Int, nlevdecomp::Int) =
-    _launch!(_decompb_depthscalar_kernel!, depth_scalar, mask, zsoi_vals, efolding;
+    _launch!(_decompb_depthscalar_kernel!, depth_scalar, mask, zsoi_vals,
+             eltype(depth_scalar)(efolding); ndrange = (nc, nlevdecomp))
+
+# ---------------------------------------------------------------------------
+# Kernels for the remaining per-column / per-(column,level) loops of
+# decomp_rate_constants_bgc!.  These keep the function whole-fn on the GPU.
+# ---------------------------------------------------------------------------
+
+# Device-safe spinup latitude term (mirrors get_spinup_latitude_term, with all
+# Float64 literals converted to the working eltype T so it compiles under Metal).
+@inline _spinup_lat_term(lat, ::Type{T}) where {T} =
+    one(T) + T(50.0) / (one(T) + exp(T(-0.15) * (abs(T(lat)) - T(60.0))))
+
+# Spinup geographic terms (per column).  Each thread owns its column c and writes
+# its own [c] entries — race-free.  Only the columns whose spinup_factor differs
+# from 1 by more than eps_val get a non-unit term (others keep the preset 1.0).
+@kernel function _decompb_spinup_geogterm_kernel!(
+        spinup_geogterm_l1, spinup_geogterm_l23, spinup_geogterm_cwd,
+        spinup_geogterm_s1, spinup_geogterm_s2, spinup_geogterm_s3,
+        @Const(mask), @Const(col_gridcell), @Const(latdeg),
+        sf_l1, sf_l23, sf_cwd, sf_s1, sf_s2, sf_s3, eps_val, use_fates)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(spinup_geogterm_l1)
+        lat = latdeg[col_gridcell[c]]
+        slt = _spinup_lat_term(lat, T)
+        one_T = one(T)
+        if abs(sf_l1 - one_T) > eps_val
+            spinup_geogterm_l1[c] = sf_l1 * slt
+        end
+        if abs(sf_l23 - one_T) > eps_val
+            spinup_geogterm_l23[c] = sf_l23 * slt
+        end
+        if !use_fates
+            if abs(sf_cwd - one_T) > eps_val
+                spinup_geogterm_cwd[c] = sf_cwd * slt
+            end
+        end
+        if abs(sf_s1 - one_T) > eps_val
+            spinup_geogterm_s1[c] = sf_s1 * slt
+        end
+        if abs(sf_s2 - one_T) > eps_val
+            spinup_geogterm_s2[c] = sf_s2 * slt
+        end
+        if abs(sf_s3 - one_T) > eps_val
+            spinup_geogterm_s3[c] = sf_s3 * slt
+        end
+    end
+end
+
+decompb_spinup_geogterm!(gl1, gl23, gcwd, gs1, gs2, gs3, mask, col_gridcell, latdeg,
+                         sf_l1, sf_l23, sf_cwd, sf_s1, sf_s2, sf_s3, eps_val, use_fates) =
+    _launch!(_decompb_spinup_geogterm_kernel!, gl1, gl23, gcwd, gs1, gs2, gs3,
+             mask, col_gridcell, latdeg,
+             sf_l1, sf_l23, sf_cwd, sf_s1, sf_s2, sf_s3, eps_val, use_fates;
+             ndrange = length(gl1))
+
+# Single-level rooting-fraction weights (per column).  Thread c sums col_dz over
+# the 5 standard levels into its own frw[c], then fills fr[c,1..5] — race-free.
+@kernel function _decompb_singlelev_fr_kernel!(frw, fr, @Const(mask), @Const(col_dz),
+                                               nlev_std)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(fr)
+        s = zero(T)
+        for j in 1:nlev_std
+            s += col_dz[c, j]
+        end
+        frw[c] = s
+        for j in 1:nlev_std
+            if s != zero(T)
+                fr[c, j] = col_dz[c, j] / s
+            else
+                fr[c, j] = zero(T)
+            end
+        end
+    end
+end
+
+decompb_singlelev_fr!(frw, fr, mask, col_dz, nlev_std) =
+    _launch!(_decompb_singlelev_fr_kernel!, frw, fr, mask, col_dz, nlev_std;
+             ndrange = length(frw))
+
+# Single-level Q10 temperature scalar (per column; sum over 5 standard levels into
+# own t_scalar[c,1]).  Ascending-j order preserved — race-free.
+@kernel function _decompb_singlelev_tscalar_q10_kernel!(
+        t_scalar, @Const(mask), @Const(t_soisno), @Const(fr),
+        Q10, froz_q10, tfrz, nlev_std)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_scalar)
+        acc = zero(T)
+        for j in 1:nlev_std
+            ts = t_soisno[c, j]
+            if ts >= tfrz
+                acc += (Q10^((ts - (tfrz + T(25.0))) / T(10.0))) * fr[c, j]
+            else
+                acc += (Q10^(T(-25.0) / T(10.0))) *
+                       (froz_q10^((ts - tfrz) / T(10.0))) * fr[c, j]
+            end
+        end
+        t_scalar[c, 1] = acc
+    end
+end
+
+decompb_singlelev_tscalar_q10!(t_scalar, mask, t_soisno, fr, Q10, froz_q10, tfrz, nlev_std) =
+    _launch!(_decompb_singlelev_tscalar_q10_kernel!, t_scalar, mask, t_soisno, fr,
+             Q10, froz_q10, tfrz, nlev_std; ndrange = length(mask))
+
+# Single-level CENTURY arctangent temperature scalar (per column; sum over levels).
+@kernel function _decompb_singlelev_tscalar_century_kernel!(
+        t_scalar, @Const(mask), @Const(t_soisno), @Const(fr),
+        catanf_30, tfrz, rpi, nlev_std)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(t_scalar)
+        acc = zero(T)
+        for j in 1:nlev_std
+            t1 = t_soisno[c, j] - tfrz
+            cat = T(11.75) + (T(29.7) / rpi) * atan(rpi * T(0.031) * (t1 - T(15.4)))
+            acc += max(cat / catanf_30 * fr[c, j], T(0.01))
+        end
+        t_scalar[c, 1] = acc
+    end
+end
+
+decompb_singlelev_tscalar_century!(t_scalar, mask, t_soisno, fr, catanf_30, tfrz, rpi, nlev_std) =
+    _launch!(_decompb_singlelev_tscalar_century_kernel!, t_scalar, mask, t_soisno, fr,
+             catanf_30, tfrz, rpi, nlev_std; ndrange = length(mask))
+
+# Single-level water scalar (per column; sum over levels into own w_scalar[c,1]).
+@kernel function _decompb_singlelev_wscalar_kernel!(
+        w_scalar, @Const(mask), @Const(soilpsi), @Const(fr), minpsi, maxpsi, nlev_std)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(w_scalar)
+        acc = zero(T)
+        for j in 1:nlev_std
+            psi = min(soilpsi[c, j], maxpsi)
+            if psi > minpsi
+                acc += (log(minpsi / psi) / log(minpsi / maxpsi)) * fr[c, j]
+            end
+        end
+        w_scalar[c, 1] = acc
+    end
+end
+
+decompb_singlelev_wscalar!(w_scalar, mask, soilpsi, fr, minpsi, maxpsi, nlev_std) =
+    _launch!(_decompb_singlelev_wscalar_kernel!, w_scalar, mask, soilpsi, fr,
+             minpsi, maxpsi, nlev_std; ndrange = length(mask))
+
+# Single-level anoxia O2 scalar (per column; sum over levels into own o_scalar[c,1]).
+@kernel function _decompb_singlelev_oscalar_anox_kernel!(
+        o_scalar, @Const(mask), @Const(o2stress_unsat), @Const(fr), mino2lim, nlev_std)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(o_scalar)
+        acc = zero(T)
+        for j in 1:nlev_std
+            acc += fr[c, j] * max(o2stress_unsat[c, j], mino2lim)
+        end
+        o_scalar[c, 1] = acc
+    end
+end
+
+decompb_singlelev_oscalar_anox!(o_scalar, mask, o2stress_unsat, fr, mino2lim, nlev_std) =
+    _launch!(_decompb_singlelev_oscalar_anox_kernel!, o_scalar, mask, o2stress_unsat, fr,
+             mino2lim, nlev_std; ndrange = length(mask))
+
+# Multi-level CENTURY arctangent temperature scalar (per (column, level), masked).
+@kernel function _decompb_tscalar_century_kernel!(
+        t_scalar, @Const(mask), @Const(t_soisno), catanf_30, tfrz, rpi)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(t_scalar)
+        t1 = t_soisno[c, j] - tfrz
+        cat = T(11.75) + (T(29.7) / rpi) * atan(rpi * T(0.031) * (t1 - T(15.4)))
+        t_scalar[c, j] = max(cat / catanf_30, T(0.01))
+    end
+end
+
+decompb_tscalar_century!(t_scalar, mask, t_soisno, catanf_30, tfrz, rpi, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_tscalar_century_kernel!, t_scalar, mask, t_soisno, catanf_30, tfrz, rpi;
              ndrange = (nc, nlevdecomp))
+
+# Final rate-constant assembly (per (column, level), masked).  Each (c,j) writes
+# its own decomp_k entries — independent.
+@kernel function _decompb_decompk_kernel!(
+        decomp_k, @Const(mask), @Const(t_scalar), @Const(w_scalar),
+        @Const(depth_scalar), @Const(o_scalar),
+        @Const(geo_l1), @Const(geo_l23), @Const(geo_cwd),
+        @Const(geo_s1), @Const(geo_s2), @Const(geo_s3),
+        k_l1, k_l2_l3, k_s1, k_s2, k_s3, k_frag,
+        i_met_lit, i_cel_lit, i_lig_lit, i_act_som, i_slo_som, i_pas_som,
+        i_cwd_local, use_fates)
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        rate = t_scalar[c, j] * w_scalar[c, j] * depth_scalar[c, j] * o_scalar[c, j]
+        decomp_k[c, j, i_met_lit] = k_l1    * rate * geo_l1[c]
+        decomp_k[c, j, i_cel_lit] = k_l2_l3 * rate * geo_l23[c]
+        decomp_k[c, j, i_lig_lit] = k_l2_l3 * rate * geo_l23[c]
+        decomp_k[c, j, i_act_som] = k_s1    * rate * geo_s1[c]
+        decomp_k[c, j, i_slo_som] = k_s2    * rate * geo_s2[c]
+        decomp_k[c, j, i_pas_som] = k_s3    * rate * geo_s3[c]
+        if !use_fates
+            decomp_k[c, j, i_cwd_local] = k_frag * rate * geo_cwd[c]
+        end
+    end
+end
+
+decompb_decompk!(decomp_k, mask, t_scalar, w_scalar, depth_scalar, o_scalar,
+                 geo_l1, geo_l23, geo_cwd, geo_s1, geo_s2, geo_s3,
+                 k_l1, k_l2_l3, k_s1, k_s2, k_s3, k_frag,
+                 i_met_lit, i_cel_lit, i_lig_lit, i_act_som, i_slo_som, i_pas_som,
+                 i_cwd_local, use_fates, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_decompk_kernel!, decomp_k, mask, t_scalar, w_scalar, depth_scalar, o_scalar,
+             geo_l1, geo_l23, geo_cwd, geo_s1, geo_s2, geo_s3,
+             k_l1, k_l2_l3, k_s1, k_s2, k_s3, k_frag,
+             i_met_lit, i_cel_lit, i_lig_lit, i_act_som, i_slo_som, i_pas_som,
+             i_cwd_local, use_fates; ndrange = (nc, nlevdecomp))
+
+# Pathfrac / respiration-fraction cascade assembly (per (column, level)).  No mask:
+# the original host loop writes all columns (mirrors the unmasked host loop).
+@kernel function _decompb_pathfrac_rf_kernel!(
+        pathfrac, rf, @Const(f_s1s2), @Const(f_s1s3), @Const(rf_s1s2), @Const(rf_s1s3),
+        f_s2s1, f_s2s3, rf_l1s1, rf_l2s1, rf_l3s2, rf_s2s1, rf_s2s3, rf_s3s1,
+        i_l1s1, i_l2s1, i_l3s2, i_s1s2, i_s1s3, i_s2s1, i_s2s3, i_s3s1)
+    c, j = @index(Global, NTuple)
+    @inbounds begin
+        T = eltype(pathfrac)
+        one_T = one(T)
+        pathfrac[c, j, i_l1s1] = one_T
+        pathfrac[c, j, i_l2s1] = one_T
+        pathfrac[c, j, i_l3s2] = one_T
+        pathfrac[c, j, i_s1s2] = f_s1s2[c, j]
+        pathfrac[c, j, i_s1s3] = f_s1s3[c, j]
+        pathfrac[c, j, i_s2s1] = f_s2s1
+        pathfrac[c, j, i_s2s3] = f_s2s3
+        pathfrac[c, j, i_s3s1] = one_T
+
+        rf[c, j, i_l1s1] = rf_l1s1
+        rf[c, j, i_l2s1] = rf_l2s1
+        rf[c, j, i_l3s2] = rf_l3s2
+        rf[c, j, i_s1s2] = rf_s1s2[c, j]
+        rf[c, j, i_s1s3] = rf_s1s3[c, j]
+        rf[c, j, i_s2s1] = rf_s2s1
+        rf[c, j, i_s2s3] = rf_s2s3
+        rf[c, j, i_s3s1] = rf_s3s1
+    end
+end
+
+decompb_pathfrac_rf!(pathfrac, rf, f_s1s2, f_s1s3, rf_s1s2, rf_s1s3,
+                     f_s2s1, f_s2s3, rf_l1s1, rf_l2s1, rf_l3s2, rf_s2s1, rf_s2s3, rf_s3s1,
+                     i_l1s1, i_l2s1, i_l3s2, i_s1s2, i_s1s3, i_s2s1, i_s2s3, i_s3s1,
+                     nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_pathfrac_rf_kernel!, pathfrac, rf, f_s1s2, f_s1s3, rf_s1s2, rf_s1s3,
+             f_s2s1, f_s2s3, rf_l1s1, rf_l2s1, rf_l3s2, rf_s2s1, rf_s2s3, rf_s3s1,
+             i_l1s1, i_l2s1, i_l3s2, i_s1s2, i_s1s3, i_s2s1, i_s2s3, i_s3s1;
+             ndrange = (nc, nlevdecomp))
+
+# CWD->litter pathfrac / rf assembly (per (column, level), no mask).
+@kernel function _decompb_pathfrac_rf_cwd_kernel!(
+        pathfrac, rf, cwd_fcel, cwd_flig, rf_cwdl2, rf_cwdl3, i_cwdl2_local, i_cwdl3)
+    c, j = @index(Global, NTuple)
+    @inbounds begin
+        pathfrac[c, j, i_cwdl2_local] = cwd_fcel
+        pathfrac[c, j, i_cwdl3]       = cwd_flig
+        rf[c, j, i_cwdl2_local]       = rf_cwdl2
+        rf[c, j, i_cwdl3]             = rf_cwdl3
+    end
+end
+
+decompb_pathfrac_rf_cwd!(pathfrac, rf, cwd_fcel, cwd_flig, rf_cwdl2, rf_cwdl3,
+                         i_cwdl2_local, i_cwdl3, nc::Int, nlevdecomp::Int) =
+    _launch!(_decompb_pathfrac_rf_cwd_kernel!, pathfrac, rf, cwd_fcel, cwd_flig,
+             rf_cwdl2, rf_cwdl3, i_cwdl2_local, i_cwdl3; ndrange = (nc, nlevdecomp))
 
 # ---------------------------------------------------------------------------
 # init_decomp_cascade_bgc! — Initialize cascade pathways and coefficients
@@ -681,22 +973,22 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
                                      params::DecompBGCParams,
                                      cn_params::CNSharedParamsData,
                                      cascade_con::DecompCascadeConData;
-                                     mask_bgc_soilc::BitVector,
+                                     mask_bgc_soilc::AbstractVector{Bool},
                                      bounds::UnitRange{Int},
                                      nlevdecomp::Int,
                                      t_soisno::AbstractMatrix{<:Real},
                                      soilpsi::AbstractMatrix{<:Real},
                                      days_per_year::Real,
                                      dt::Real,
-                                     zsoi_vals::Vector{<:Real},
+                                     zsoi_vals::AbstractVector{<:Real},
                                      spinup_state::Int=0,
                                      use_lch4::Bool=false,
                                      anoxia::Bool=false,
                                      use_fates::Bool=false,
-                                     o2stress_unsat::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                     o2stress_unsat::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                      col_dz::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                                     col_gridcell::Vector{Int}=Int[],
-                                     latdeg::Vector{<:Real}=Float64[])
+                                     col_gridcell::AbstractVector{<:Integer}=Int[],
+                                     latdeg::AbstractVector{<:Real}=Float64[])
 
     eps_val = 1.0e-6
     nc = length(bounds)
@@ -750,48 +1042,36 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
     spinup_factor = cascade_con.spinup_factor
 
     # --- Compute spinup geographic terms ---
+    # Allocated like a state array (t_soisno) so they live on the state's backend
+    # (device on GPU): they are passed to _decompb_decompk_kernel!, and a host ones()
+    # vector would be a non-bitstype kernel argument on Metal.
     FT = eltype(t_soisno)
-    spinup_geogterm_l1  = ones(FT, nc)
-    spinup_geogterm_l23 = ones(FT, nc)
-    spinup_geogterm_cwd = ones(FT, nc)
-    spinup_geogterm_s1  = ones(FT, nc)
-    spinup_geogterm_s2  = ones(FT, nc)
-    spinup_geogterm_s3  = ones(FT, nc)
+    _geo() = fill!(similar(t_soisno, FT, nc), one(FT))
+    spinup_geogterm_l1  = _geo()
+    spinup_geogterm_l23 = _geo()
+    spinup_geogterm_cwd = _geo()
+    spinup_geogterm_s1  = _geo()
+    spinup_geogterm_s2  = _geo()
+    spinup_geogterm_s3  = _geo()
 
     if spinup_state >= 1
-        for c in 1:nc
-            if !mask_bgc_soilc[c]
-                continue
-            end
-            lat = latdeg[col_gridcell[c]]
-
-            if abs(spinup_factor[i_met_lit] - 1.0) > eps_val
-                spinup_geogterm_l1[c] = spinup_factor[i_met_lit] * get_spinup_latitude_term(lat)
-            end
-
-            if abs(spinup_factor[i_cel_lit] - 1.0) > eps_val
-                spinup_geogterm_l23[c] = spinup_factor[i_cel_lit] * get_spinup_latitude_term(lat)
-            end
-
-            if !use_fates
-                i_cwd_local = i_pas_som + 1
-                if abs(spinup_factor[i_cwd_local] - 1.0) > eps_val
-                    spinup_geogterm_cwd[c] = spinup_factor[i_cwd_local] * get_spinup_latitude_term(lat)
-                end
-            end
-
-            if abs(spinup_factor[i_act_som] - 1.0) > eps_val
-                spinup_geogterm_s1[c] = spinup_factor[i_act_som] * get_spinup_latitude_term(lat)
-            end
-
-            if abs(spinup_factor[i_slo_som] - 1.0) > eps_val
-                spinup_geogterm_s2[c] = spinup_factor[i_slo_som] * get_spinup_latitude_term(lat)
-            end
-
-            if abs(spinup_factor[i_pas_som] - 1.0) > eps_val
-                spinup_geogterm_s3[c] = spinup_factor[i_pas_som] * get_spinup_latitude_term(lat)
-            end
-        end
+        i_cwd_local = i_pas_som + 1
+        # spinup_factor entries are host scalars; pull them out and convert to the
+        # working eltype so they are valid kernel scalar args (Metal rejects raw
+        # Float64). use_fates guards the CWD pool index (i_cwd_local valid only when
+        # CWD exists); index it conditionally to stay in bounds.
+        sf_l1  = FT(spinup_factor[i_met_lit])
+        sf_l23 = FT(spinup_factor[i_cel_lit])
+        sf_cwd = use_fates ? one(FT) : FT(spinup_factor[i_cwd_local])
+        sf_s1  = FT(spinup_factor[i_act_som])
+        sf_s2  = FT(spinup_factor[i_slo_som])
+        sf_s3  = FT(spinup_factor[i_pas_som])
+        decompb_spinup_geogterm!(spinup_geogterm_l1, spinup_geogterm_l23,
+                                 spinup_geogterm_cwd, spinup_geogterm_s1,
+                                 spinup_geogterm_s2, spinup_geogterm_s3,
+                                 mask_bgc_soilc, col_gridcell, latdeg,
+                                 sf_l1, sf_l23, sf_cwd, sf_s1, sf_s2, sf_s3,
+                                 FT(eps_val), use_fates)
     end
 
     # --- Time-dependent coefficients ---
@@ -801,92 +1081,43 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
     decomp_k = cf.decomp_k_col
 
     FT_rate = eltype(t_soisno)
-    depth_scalar = zeros(FT_rate, nc, nlevdecomp)
+    # Scratch allocated like a state array (t_soisno) so it lands on the state's backend
+    # (device on GPU) — zeros() would put it on the host and a device kernel writing it
+    # trips scalar indexing.
+    depth_scalar = fill!(similar(t_soisno, FT_rate, nc, nlevdecomp), zero(FT_rate))
 
     if nlevdecomp == 1
         # ---- Single-level decomposition ----
         # Weight temperature and water potential scalars by rooting fraction
         nlev_soildecomp_standard = 5
-        frw = zeros(FT_rate, nc)
-        fr  = zeros(FT_rate, nc, nlev_soildecomp_standard)
+        frw = fill!(similar(t_soisno, FT_rate, nc), zero(FT_rate))
+        fr  = fill!(similar(t_soisno, FT_rate, nc, nlev_soildecomp_standard), zero(FT_rate))
 
-        for j in 1:nlev_soildecomp_standard
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                frw[c] += col_dz[c, j]
-            end
-        end
-        for j in 1:nlev_soildecomp_standard
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                if frw[c] != 0.0
-                    fr[c, j] = col_dz[c, j] / frw[c]
-                else
-                    fr[c, j] = 0.0
-                end
-            end
-        end
+        # Rooting-fraction weights (per column; in-thread sum over the 5 levels).
+        decompb_singlelev_fr!(frw, fr, mask_bgc_soilc, col_dz, nlev_soildecomp_standard)
 
         if !bgc_state.use_century_tfunc
             # Q10 temperature scalar
-            for j in 1:nlev_soildecomp_standard
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    if j == 1
-                        t_scalar[c, :] .= 0.0
-                    end
-                    if t_soisno[c, j] >= TFRZ
-                        t_scalar[c, 1] += (Q10^((t_soisno[c, j] - (TFRZ + 25.0)) / 10.0)) * fr[c, j]
-                    else
-                        t_scalar[c, 1] += (Q10^(-25.0 / 10.0)) *
-                            (froz_q10^((t_soisno[c, j] - TFRZ) / 10.0)) * fr[c, j]
-                    end
-                end
-            end
+            decompb_singlelev_tscalar_q10!(t_scalar, mask_bgc_soilc, t_soisno, fr,
+                                           FT_rate(Q10), FT_rate(froz_q10), FT_rate(TFRZ),
+                                           nlev_soildecomp_standard)
         else
             # CENTURY arctangent temperature function
-            for j in 1:nlev_soildecomp_standard
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    if j == 1
-                        t_scalar[c, :] .= 0.0
-                    end
-                    t_scalar[c, 1] += max(catanf(t_soisno[c, j] - TFRZ) / catanf_30 * fr[c, j], 0.01)
-                end
-            end
+            decompb_singlelev_tscalar_century!(t_scalar, mask_bgc_soilc, t_soisno, fr,
+                                               FT_rate(catanf_30), FT_rate(TFRZ), FT_rate(RPI),
+                                               nlev_soildecomp_standard)
         end
 
         # Water scalar
-        for j in 1:nlev_soildecomp_standard
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                if j == 1
-                    w_scalar[c, :] .= 0.0
-                end
-                psi = min(soilpsi[c, j], maxpsi)
-                if psi > minpsi
-                    w_scalar[c, 1] += (log(minpsi / psi) / log(minpsi / maxpsi)) * fr[c, j]
-                end
-            end
-        end
+        decompb_singlelev_wscalar!(w_scalar, mask_bgc_soilc, soilpsi, fr,
+                                   FT_rate(minpsi), FT_rate(maxpsi), nlev_soildecomp_standard)
 
         # O2 scalar
         if use_lch4 && anoxia
-            for j in 1:nlev_soildecomp_standard
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    if j == 1
-                        o_scalar[c, :] .= 0.0
-                    end
-                    o_scalar[c, 1] += fr[c, j] * max(o2stress_unsat[c, j], mino2lim)
-                end
-            end
+            decompb_singlelev_oscalar_anox!(o_scalar, mask_bgc_soilc, o2stress_unsat, fr,
+                                            FT_rate(mino2lim), nlev_soildecomp_standard)
         else
-            for c in 1:nc
-                for j in 1:nlevdecomp
-                    o_scalar[c, j] = 1.0
-                end
-            end
+            decompb_oscalar_one!(o_scalar, nc, nlevdecomp)
         end
 
     else
@@ -898,12 +1129,9 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
                                  Q10, froz_q10, TFRZ, nc, nlevdecomp)
         else
             # CENTURY arctangent temperature function
-            for j in 1:nlevdecomp
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    t_scalar[c, j] = max(catanf(t_soisno[c, j] - TFRZ) / catanf_30, 0.01)
-                end
-            end
+            decompb_tscalar_century!(t_scalar, mask_bgc_soilc, t_soisno,
+                                     FT_rate(catanf_30), FT_rate(TFRZ), FT_rate(RPI),
+                                     nc, nlevdecomp)
         end
 
         # Water scalar
@@ -930,62 +1158,37 @@ function decomp_rate_constants_bgc!(cf::SoilBiogeochemCarbonFluxData,
                          decomp_depth_efolding, nc, nlevdecomp)
 
     # --- Calculate rate constants for all pools ---
-    for j in 1:nlevdecomp
-        for c in 1:nc
-            mask_bgc_soilc[c] || continue
-
-            rate = t_scalar[c, j] * w_scalar[c, j] * depth_scalar[c, j] * o_scalar[c, j]
-
-            decomp_k[c, j, i_met_lit] = k_l1    * rate * spinup_geogterm_l1[c]
-            decomp_k[c, j, i_cel_lit] = k_l2_l3 * rate * spinup_geogterm_l23[c]
-            decomp_k[c, j, i_lig_lit] = k_l2_l3 * rate * spinup_geogterm_l23[c]
-            decomp_k[c, j, i_act_som] = k_s1    * rate * spinup_geogterm_s1[c]
-            decomp_k[c, j, i_slo_som] = k_s2    * rate * spinup_geogterm_s2[c]
-            decomp_k[c, j, i_pas_som] = k_s3    * rate * spinup_geogterm_s3[c]
-
-            if !use_fates
-                i_cwd_local = i_pas_som + 1
-                decomp_k[c, j, i_cwd_local] = k_frag * rate * spinup_geogterm_cwd[c]
-            end
-        end
-    end
+    # i_cwd_local is only valid when CWD exists (!use_fates); pass a safe in-bounds
+    # index (1) under use_fates since the kernel guards the CWD write on use_fates.
+    i_cwd_local = use_fates ? 1 : (i_pas_som + 1)
+    decompb_decompk!(decomp_k, mask_bgc_soilc, t_scalar, w_scalar, depth_scalar, o_scalar,
+                     spinup_geogterm_l1, spinup_geogterm_l23, spinup_geogterm_cwd,
+                     spinup_geogterm_s1, spinup_geogterm_s2, spinup_geogterm_s3,
+                     FT_rate(k_l1), FT_rate(k_l2_l3), FT_rate(k_s1), FT_rate(k_s2),
+                     FT_rate(k_s3), FT_rate(k_frag),
+                     i_met_lit, i_cel_lit, i_lig_lit, i_act_som, i_slo_som, i_pas_som,
+                     i_cwd_local, use_fates, nc, nlevdecomp)
 
     # --- Set pathfrac and rf for the cascade ---
     rf_decomp_cascade       = cf.rf_decomp_cascade_col
     pathfrac_decomp_cascade = cf.pathfrac_decomp_cascade_col
 
-    for j in 1:nlevdecomp
-        for c in 1:nc
-            pathfrac_decomp_cascade[c, j, i_l1s1] = 1.0
-            pathfrac_decomp_cascade[c, j, i_l2s1] = 1.0
-            pathfrac_decomp_cascade[c, j, i_l3s2] = 1.0
-            pathfrac_decomp_cascade[c, j, i_s1s2] = bgc_state.f_s1s2[c, j]
-            pathfrac_decomp_cascade[c, j, i_s1s3] = bgc_state.f_s1s3[c, j]
-            pathfrac_decomp_cascade[c, j, i_s2s1] = bgc_state.f_s2s1
-            pathfrac_decomp_cascade[c, j, i_s2s3] = bgc_state.f_s2s3
-            pathfrac_decomp_cascade[c, j, i_s3s1] = 1.0
-
-            rf_decomp_cascade[c, j, i_l1s1] = bgc_state.rf_l1s1
-            rf_decomp_cascade[c, j, i_l2s1] = bgc_state.rf_l2s1
-            rf_decomp_cascade[c, j, i_l3s2] = bgc_state.rf_l3s2
-            rf_decomp_cascade[c, j, i_s1s2] = bgc_state.rf_s1s2[c, j]
-            rf_decomp_cascade[c, j, i_s1s3] = bgc_state.rf_s1s3[c, j]
-            rf_decomp_cascade[c, j, i_s2s1] = bgc_state.rf_s2s1
-            rf_decomp_cascade[c, j, i_s2s3] = bgc_state.rf_s2s3
-            rf_decomp_cascade[c, j, i_s3s1] = bgc_state.rf_s3s1
-        end
-    end
+    decompb_pathfrac_rf!(pathfrac_decomp_cascade, rf_decomp_cascade,
+                         bgc_state.f_s1s2, bgc_state.f_s1s3,
+                         bgc_state.rf_s1s2, bgc_state.rf_s1s3,
+                         FT_rate(bgc_state.f_s2s1), FT_rate(bgc_state.f_s2s3),
+                         FT_rate(bgc_state.rf_l1s1), FT_rate(bgc_state.rf_l2s1),
+                         FT_rate(bgc_state.rf_l3s2), FT_rate(bgc_state.rf_s2s1),
+                         FT_rate(bgc_state.rf_s2s3), FT_rate(bgc_state.rf_s3s1),
+                         i_l1s1, i_l2s1, i_l3s2, i_s1s2, i_s1s3, i_s2s1, i_s2s3, i_s3s1,
+                         nc, nlevdecomp)
 
     if !use_fates
         i_cwdl2_local = i_cwdl3 - 1  # i_cwdl2 = i_cwdl3 - 1 = 9
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                pathfrac_decomp_cascade[c, j, i_cwdl2_local] = bgc_state.cwd_fcel
-                pathfrac_decomp_cascade[c, j, i_cwdl3]       = cwd_flig
-                rf_decomp_cascade[c, j, i_cwdl2_local]       = rf_cwdl2
-                rf_decomp_cascade[c, j, i_cwdl3]             = bgc_state.rf_cwdl3
-            end
-        end
+        decompb_pathfrac_rf_cwd!(pathfrac_decomp_cascade, rf_decomp_cascade,
+                                 FT_rate(bgc_state.cwd_fcel), FT_rate(cwd_flig),
+                                 FT_rate(rf_cwdl2), FT_rate(bgc_state.rf_cwdl3),
+                                 i_cwdl2_local, i_cwdl3, nc, nlevdecomp)
     end
 
     return nothing

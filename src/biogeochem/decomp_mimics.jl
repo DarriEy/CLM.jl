@@ -26,11 +26,12 @@
                                          p_scalar_p1, p_scalar_p2, pct_to_frac)
     c, j = @index(Global, NTuple)
     @inbounds begin
-        clay_frac = pct_to_frac * smooth_min(100.0, cellclay[c, j])
+        T = eltype(desorp)
+        clay_frac = pct_to_frac * smooth_min(T(100.0), cellclay[c, j])
         desorp[c, j]   = desorp_p1 * exp(desorp_p2 * clay_frac)
-        fphys_m1[c, j] = smooth_min(1.0, fphys_r_p1 * exp(fphys_r_p2 * clay_frac))
-        fphys_m2[c, j] = smooth_min(1.0, fphys_k_p1 * exp(fphys_k_p2 * clay_frac))
-        p_scalar[c, j] = 1.0 / (p_scalar_p1 * exp(p_scalar_p2 * sqrt(clay_frac)))
+        fphys_m1[c, j] = smooth_min(one(T), fphys_r_p1 * exp(fphys_r_p2 * clay_frac))
+        fphys_m2[c, j] = smooth_min(one(T), fphys_k_p1 * exp(fphys_k_p2 * clay_frac))
+        p_scalar[c, j] = one(T) / (p_scalar_p1 * exp(p_scalar_p2 * sqrt(clay_frac)))
     end
 end
 
@@ -46,9 +47,11 @@ function mimics_texture_params!(desorp, fphys_m1, fphys_m2, p_scalar, cellclay,
                                 desorp_p1, desorp_p2, fphys_r_p1, fphys_r_p2,
                                 fphys_k_p1, fphys_k_p2, p_scalar_p1, p_scalar_p2,
                                 pct_to_frac; nc::Int, nlevdecomp::Int)
+    _T = eltype(desorp)   # convert the texture scalar params to working precision
     _launch!(_mimics_texture_kernel!, desorp, fphys_m1, fphys_m2, p_scalar, cellclay,
-             desorp_p1, desorp_p2, fphys_r_p1, fphys_r_p2, fphys_k_p1, fphys_k_p2,
-             p_scalar_p1, p_scalar_p2, pct_to_frac; ndrange = (nc, nlevdecomp))
+             _T(desorp_p1), _T(desorp_p2), _T(fphys_r_p1), _T(fphys_r_p2),
+             _T(fphys_k_p1), _T(fphys_k_p2), _T(p_scalar_p1), _T(p_scalar_p2),
+             _T(pct_to_frac); ndrange = (nc, nlevdecomp))
 end
 
 # Multi-level MIMICS water scalar (per column AND decomp level), masked.
@@ -61,7 +64,7 @@ end
         if psi > minpsi
             w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
         else
-            w_scalar[c, j] = 0.0
+            w_scalar[c, j] = zero(eltype(w_scalar))
         end
     end
 end
@@ -74,7 +77,8 @@ Backend-agnostic; one thread per (c,j).
 """
 function mimics_water_scalar!(w_scalar, mask, soilpsi, minpsi, maxpsi;
                               nc::Int, nlevdecomp::Int)
-    _launch!(_mimics_wscalar_kernel!, w_scalar, mask, soilpsi, minpsi, maxpsi;
+    _T = eltype(w_scalar)
+    _launch!(_mimics_wscalar_kernel!, w_scalar, mask, soilpsi, _T(minpsi), _T(maxpsi);
              ndrange = (nc, nlevdecomp))
 end
 
@@ -96,15 +100,15 @@ Multi-level MIMICS O2 scalar under anoxia over all (column, decomp level) pairs
 """
 function mimics_oscalar_anoxia!(o_scalar, mask, o2stress_unsat, mino2lim;
                                 nc::Int, nlevdecomp::Int)
-    _launch!(_mimics_oscalar_anoxia_kernel!, o_scalar, mask, o2stress_unsat, mino2lim;
-             ndrange = (nc, nlevdecomp))
+    _launch!(_mimics_oscalar_anoxia_kernel!, o_scalar, mask, o2stress_unsat,
+             eltype(o_scalar)(mino2lim); ndrange = (nc, nlevdecomp))
 end
 
 # Multi-level MIMICS depth scalar (per column AND level), masked: set to 1.0.
 @kernel function _mimics_depth_scalar_kernel!(depth_scalar, @Const(mask))
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
-        depth_scalar[c, j] = 1.0
+        depth_scalar[c, j] = one(eltype(depth_scalar))
     end
 end
 
@@ -182,12 +186,15 @@ coefficients, and spatially-varying arrays are set once during
 Ported from module-level private variables in
 `SoilBiogeochemDecompCascadeMIMICSMod.F90`.
 """
-Base.@kwdef mutable struct DecompMIMICSState
-    # Spatially-varying arrays (col × nlevdecomp)
-    desorp    ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    fphys_m1  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    fphys_m2  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    p_scalar  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+Base.@kwdef mutable struct DecompMIMICSState{M<:AbstractMatrix}
+    # Spatially-varying arrays (col × nlevdecomp). Array-type param M stays LOOSE so
+    # adapt(MetalF32/MtlArray, ·) can reconstruct the struct with device Float32 arrays
+    # (pinning ::Matrix{Float64} forces a host-Float64 convert on assignment). The scalar
+    # coeff fields stay Float64 — they never reach a kernel (bundled into _DMRCoef{FT} at FT).
+    desorp    ::M = Matrix{Float64}(undef, 0, 0)
+    fphys_m1  ::M = Matrix{Float64}(undef, 0, 0)
+    fphys_m2  ::M = Matrix{Float64}(undef, 0, 0)
+    p_scalar  ::M = Matrix{Float64}(undef, 0, 0)
 
     # Pool indices
     i_phys_som ::Int = 0
@@ -260,6 +267,10 @@ Base.@kwdef mutable struct DecompMIMICSState
     kslope_l2_m2 ::Float64 = 0.0
     kslope_s1_m2 ::Float64 = 0.0
 end
+
+# Device-movable: lets the static texture arrays (desorp/fphys_m1/fphys_m2/p_scalar)
+# ride to the GPU for decomp_rates_mimics! (scalar/Int fields pass through unchanged).
+Adapt.@adapt_structure DecompMIMICSState
 
 # ---------------------------------------------------------------------------
 # decomp_mimics_read_params! — Read MIMICS decomposition parameters
@@ -750,6 +761,376 @@ function init_decompcascade_mimics!(mimics_state::DecompMIMICSState,
 end
 
 # ---------------------------------------------------------------------------
+# Device-view bundles + kernels for decomp_rates_mimics!
+#
+# decomp_rates_mimics! touches ~16 column/level arrays and ~60 scalar
+# coefficients/indices. To stay under the Metal ~31 kernel-arg limit the arrays
+# are bundled into one Adapt.@adapt_structure'd struct, the (Int) pool/transition
+# indices into one isbits struct, and the (working-precision) scalar coefficients
+# into a second isbits struct. Field names mirror the local variable paths so the
+# kernel bodies read verbatim. Every per-column compute loop becomes a per-column
+# kernel with internal (sequential, own-[c,j]) j/k loops — race-free and (on the
+# Float64 CPU path) byte-identical to the original host loops.
+# ---------------------------------------------------------------------------
+
+# Column/level array bundle (M = 2D col×lev, A3 = 3D col×lev×pool/transition,
+# V = per-column vectors). All writes flow back into the live SoA structs.
+Base.@kwdef struct _DMRArr{V, M, A3}
+    # outputs (written)
+    cn_col::M
+    w_scalar::M
+    o_scalar::M
+    decomp_k::A3
+    pathfrac_decomp_cascade::A3
+    rf_decomp_cascade::A3
+    depth_scalar::M
+    # inputs (read)
+    t_soisno::M
+    decomp_cpools_vr::A3
+    col_dz::M
+    fphys_m1::M
+    fphys_m2::M
+    desorp_arr::M
+    p_scalar_arr::M
+    ligninNratioAvg::V
+    annsum_npp_col::V
+end
+Adapt.@adapt_structure _DMRArr
+
+_dmr_arr(cf, mimics_state, depth_scalar, t_soisno, decomp_cpools_vr, col_dz,
+         ligninNratioAvg, annsum_npp_col) = _DMRArr(;
+    cn_col                  = cf.cn_col,
+    w_scalar                = cf.w_scalar_col,
+    o_scalar                = cf.o_scalar_col,
+    decomp_k                = cf.decomp_k_col,
+    pathfrac_decomp_cascade = cf.pathfrac_decomp_cascade_col,
+    rf_decomp_cascade       = cf.rf_decomp_cascade_col,
+    depth_scalar            = depth_scalar,
+    t_soisno                = t_soisno,
+    decomp_cpools_vr        = decomp_cpools_vr,
+    col_dz                  = col_dz,
+    fphys_m1                = mimics_state.fphys_m1,
+    fphys_m2                = mimics_state.fphys_m2,
+    desorp_arr              = mimics_state.desorp,
+    p_scalar_arr            = mimics_state.p_scalar,
+    ligninNratioAvg         = ligninNratioAvg,
+    annsum_npp_col          = annsum_npp_col)
+
+# Pool/transition indices — isbits (all Int); passed by value to kernels.
+Base.@kwdef struct _DMRIdx
+    i_met_lit::Int; i_str_lit::Int; i_avl_som::Int; i_chem_som::Int
+    i_phys_som::Int; i_cop_mic::Int; i_oli_mic::Int
+    i_l1m1::Int; i_l1m2::Int; i_l2m1::Int; i_l2m2::Int
+    i_s1m1::Int; i_s1m2::Int; i_m1s1::Int; i_m1s2::Int
+    i_m2s1::Int; i_m2s2::Int; i_s2s1::Int; i_s3s1::Int
+    i_m1s3::Int; i_m2s3::Int
+end
+
+# Scalar MIMICS regression coefficients — isbits, parametric on working precision T.
+# A Float64 scalar kernel arg is invalid Metal IR, so every coefficient is stored at
+# the state eltype; on Float64 T(x) === x (byte-identical).
+Base.@kwdef struct _DMRCoef{T}
+    eps_val::T
+    mimics_fmet_p1::T; mimics_fmet_p2::T; mimics_fmet_p3::T; mimics_fmet_p4::T
+    mimics_fchem_r_p1::T; mimics_fchem_r_p2::T; mimics_fchem_k_p1::T; mimics_fchem_k_p2::T
+    mimics_tau_mod_min::T; mimics_tau_mod_max::T; mimics_tau_mod_factor::T
+    mimics_tau_r_p1::T; mimics_tau_r_p2::T; mimics_tau_k_p1::T; mimics_tau_k_p2::T
+    mimics_ko_r::T; mimics_ko_k::T; mimics_densdep::T; mimics_desorpQ10::T
+    mimics_t_soi_ref::T; mimics_cn_mod_num::T; mimics_cn_r::T; mimics_cn_k::T
+    vslope_l1_m1::T; vslope_l2_m1::T; vslope_s1_m1::T; vslope_l1_m2::T; vslope_l2_m2::T; vslope_s1_m2::T
+    kslope_l1_m1::T; kslope_l2_m1::T; kslope_s1_m1::T; kslope_l1_m2::T; kslope_l2_m2::T; kslope_s1_m2::T
+    vint_l1_m1::T; vint_l2_m1::T; vint_s1_m1::T; vint_l1_m2::T; vint_l2_m2::T; vint_s1_m2::T
+    kint_l1_m1::T; kint_l2_m1::T; kint_s1_m1::T; kint_l1_m2::T; kint_l2_m2::T; kint_s1_m2::T
+    vmod_l1_m1::T; vmod_l2_m1::T; vmod_s1_m1::T; vmod_l1_m2::T; vmod_l2_m2::T; vmod_s1_m2::T
+    kmod_l1_m1::T; kmod_l2_m1::T; kmod_s1_m1::T; kmod_l1_m2::T; kmod_l2_m2::T; kmod_s1_m2::T
+    k_frag::T; secsphr::T; tfrz::T; g_to_mg::T; cm3_to_m3::T
+end
+
+# --- nlevdecomp==1 helper kernels (per-column reductions over standard soil levels) ---
+
+# frw[c] = sum_j col_dz[c,j]  (own-column reduction over j=1..nls; ascending order)
+@kernel function _dmr_frw_kernel!(frw, @Const(mask), @Const(col_dz), nls::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(frw)
+        s = zero(T)
+        for j in 1:nls
+            s += col_dz[c, j]
+        end
+        frw[c] = s
+    end
+end
+
+# w_scalar[c,1] = sum_j (log(minpsi/psi)/log(minpsi/maxpsi)) * fr[c,j]  (own-column).
+# fr[c,j] = col_dz[c,j]/frw[c] (or 0). Mirrors the host loop exactly: w_scalar[c,:]
+# is zeroed (here over the single level), then accumulated in ascending j order.
+@kernel function _dmr_wscalar1_kernel!(w_scalar, @Const(mask), @Const(soilpsi),
+                                       @Const(col_dz), @Const(frw),
+                                       nls::Int, minpsi, maxpsi)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = typeof(minpsi)
+        # Zero the FULL allocated row (host did `w_scalar[c, :] .= 0.0`); the array
+        # is sized (nc, nlevdecomp_full=5) even when nls==1, and leaving levels 2..5
+        # stale (NaN) would diverge from the host.
+        for jj in 1:size(w_scalar, 2)
+            w_scalar[c, jj] = zero(T)
+        end
+        for j in 1:nls
+            fr_cj = frw[c] != zero(T) ? col_dz[c, j] / frw[c] : zero(T)
+            psi = smooth_min(soilpsi[c, j], maxpsi)
+            if psi > minpsi
+                w_scalar[c, 1] += (log(minpsi / psi) / log(minpsi / maxpsi)) * fr_cj
+            end
+        end
+    end
+end
+
+# o_scalar[c,1] under anoxia = sum_j fr[c,j]*smooth_max(o2stress_unsat[c,j], mino2lim)
+@kernel function _dmr_oscalar1_anoxia_kernel!(o_scalar, @Const(mask),
+                                              @Const(o2stress_unsat), @Const(col_dz),
+                                              @Const(frw), nls::Int, mino2lim)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = typeof(mino2lim)
+        # Zero the FULL allocated row (host did `o_scalar[c, :] .= 0.0`).
+        for jj in 1:size(o_scalar, 2)
+            o_scalar[c, jj] = zero(T)
+        end
+        for j in 1:nls
+            fr_cj = frw[c] != zero(T) ? col_dz[c, j] / frw[c] : zero(T)
+            o_scalar[c, 1] += fr_cj * smooth_max(o2stress_unsat[c, j], mino2lim)
+        end
+    end
+end
+
+# o_scalar[c,j] = 1 over all levels (no anoxia path); unmasked, as in the host loop.
+@kernel function _dmr_oscalar_one_kernel!(o_scalar, nlevdecomp::Int)
+    c = @index(Global)
+    @inbounds begin
+        T = eltype(o_scalar)
+        for j in 1:nlevdecomp
+            o_scalar[c, j] = one(T)
+        end
+    end
+end
+
+# --- Spinup geographic terms (per-column; only run when spinup_state >= 1) ---
+@kernel function _dmr_spinup_geogterm_kernel!(geo_l1, geo_l2, geo_cwd, geo_s1, geo_s2,
+        geo_s3, geo_m1, geo_m2, @Const(mask), @Const(latdeg), @Const(col_gridcell),
+        @Const(spinup_factor), idx::_DMRIdx, use_fates::Bool, eps_val)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(geo_l1)
+        one_T = one(T)
+        lat = latdeg[col_gridcell[c]]
+        slt = T(1.0) + T(50.0) / (T(1.0) + exp(T(-0.15) * (abs(lat) - T(60.0))))
+        if abs(spinup_factor[idx.i_met_lit] - one_T) > eps_val
+            geo_l1[c] = spinup_factor[idx.i_met_lit] * slt
+        end
+        if abs(spinup_factor[idx.i_str_lit] - one_T) > eps_val
+            geo_l2[c] = spinup_factor[idx.i_str_lit] * slt
+        end
+        if !use_fates
+            i_cwd_local = idx.i_oli_mic + 1
+            if abs(spinup_factor[i_cwd_local] - one_T) > eps_val
+                geo_cwd[c] = spinup_factor[i_cwd_local] * slt
+            end
+        end
+        if abs(spinup_factor[idx.i_avl_som] - one_T) > eps_val
+            geo_s1[c] = spinup_factor[idx.i_avl_som] * slt
+        end
+        if abs(spinup_factor[idx.i_chem_som] - one_T) > eps_val
+            geo_s2[c] = spinup_factor[idx.i_chem_som] * slt
+        end
+        if abs(spinup_factor[idx.i_phys_som] - one_T) > eps_val
+            geo_s3[c] = spinup_factor[idx.i_phys_som] * slt
+        end
+        if abs(spinup_factor[idx.i_cop_mic] - one_T) > eps_val
+            geo_m1[c] = spinup_factor[idx.i_cop_mic] * slt
+        end
+        if abs(spinup_factor[idx.i_oli_mic] - one_T) > eps_val
+            geo_m2[c] = spinup_factor[idx.i_oli_mic] * slt
+        end
+    end
+end
+
+# --- Main per-column rate kernel: internal j loop, own-[c,j] writes ---
+# `_out` (a per-column array) only sets the launch ndrange/backend; all data lives
+# in the `arr` bundle (same shared refs), mirroring the soil_fluxes! kernel pattern.
+@kernel function _dmr_rates_kernel!(@Const(_out), arr::_DMRArr, @Const(mask), idx::_DMRIdx,
+                                    coef::_DMRCoef, nlevdecomp::Int, use_fates::Bool)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(arr.cn_col)
+        zero_T = zero(T); one_T = one(T)
+
+        annsum_npp_col_scalar = smooth_max(zero_T, arr.annsum_npp_col[c])
+
+        # fmet: fraction metabolic litter
+        fmet = coef.mimics_fmet_p1 * (coef.mimics_fmet_p2 - coef.mimics_fmet_p3 *
+            smooth_min(coef.mimics_fmet_p4, arr.ligninNratioAvg[c]))
+        tau_mod = smooth_min(coef.mimics_tau_mod_max, smooth_max(coef.mimics_tau_mod_min,
+            sqrt(coef.mimics_tau_mod_factor * annsum_npp_col_scalar)))
+
+        tau_m1 = coef.mimics_tau_r_p1 * exp(coef.mimics_tau_r_p2 * fmet) * tau_mod / coef.secsphr
+        tau_m2 = coef.mimics_tau_k_p1 * exp(coef.mimics_tau_k_p2 * fmet) * tau_mod / coef.secsphr
+
+        # Microbial C:N ratios
+        arr.cn_col[c, idx.i_cop_mic] = coef.mimics_cn_r * sqrt(coef.mimics_cn_mod_num / fmet)
+        arr.cn_col[c, idx.i_oli_mic] = coef.mimics_cn_k * sqrt(coef.mimics_cn_mod_num / fmet)
+
+        # Chemical fractionation
+        fchem_m1 = smooth_min(one_T, smooth_max(zero_T, coef.mimics_fchem_r_p1 *
+                    exp(coef.mimics_fchem_r_p2 * fmet)))
+        fchem_m2 = smooth_min(one_T, smooth_max(zero_T, coef.mimics_fchem_k_p1 *
+                    exp(coef.mimics_fchem_k_p2 * fmet)))
+
+        for j in 1:nlevdecomp
+            t_soi_degC = arr.t_soisno[c, j] - coef.tfrz
+
+            vmax_l1_m1 = exp(coef.vslope_l1_m1 * t_soi_degC + coef.vint_l1_m1) * coef.vmod_l1_m1 / coef.secsphr
+            vmax_l1_m2 = exp(coef.vslope_l1_m2 * t_soi_degC + coef.vint_l1_m2) * coef.vmod_l1_m2 / coef.secsphr
+            vmax_l2_m1 = exp(coef.vslope_l2_m1 * t_soi_degC + coef.vint_l2_m1) * coef.vmod_l2_m1 / coef.secsphr
+            vmax_l2_m2 = exp(coef.vslope_l2_m2 * t_soi_degC + coef.vint_l2_m2) * coef.vmod_l2_m2 / coef.secsphr
+            vmax_s1_m1 = exp(coef.vslope_s1_m1 * t_soi_degC + coef.vint_s1_m1) * coef.vmod_s1_m1 / coef.secsphr
+            vmax_s1_m2 = exp(coef.vslope_s1_m2 * t_soi_degC + coef.vint_s1_m2) * coef.vmod_s1_m2 / coef.secsphr
+
+            km_l1_m1 = exp(coef.kslope_l1_m1 * t_soi_degC + coef.kint_l1_m1) * coef.kmod_l1_m1
+            km_l1_m2 = exp(coef.kslope_l1_m2 * t_soi_degC + coef.kint_l1_m2) * coef.kmod_l1_m2
+            km_l2_m1 = exp(coef.kslope_l2_m1 * t_soi_degC + coef.kint_l2_m1) * coef.kmod_l2_m1
+            km_l2_m2 = exp(coef.kslope_l2_m2 * t_soi_degC + coef.kint_l2_m2) * coef.kmod_l2_m2
+            km_s1_m1 = exp(coef.kslope_s1_m1 * t_soi_degC + coef.kint_s1_m1) * coef.kmod_s1_m1 * arr.p_scalar_arr[c, j]
+            km_s1_m2 = exp(coef.kslope_s1_m2 * t_soi_degC + coef.kint_s1_m2) * coef.kmod_s1_m2 * arr.p_scalar_arr[c, j]
+
+            desorption = (arr.desorp_arr[c, j] / coef.secsphr) * coef.mimics_desorpQ10 *
+                         exp((t_soi_degC - coef.mimics_t_soi_ref) / T(10.0))
+
+            m1_conc = (arr.decomp_cpools_vr[c, j, idx.i_cop_mic] / arr.col_dz[c, j]) * coef.g_to_mg * coef.cm3_to_m3
+            m2_conc = (arr.decomp_cpools_vr[c, j, idx.i_oli_mic] / arr.col_dz[c, j]) * coef.g_to_mg * coef.cm3_to_m3
+
+            w_d_o_scalars = arr.w_scalar[c, j] * arr.depth_scalar[c, j] * arr.o_scalar[c, j]
+
+            # Metabolic litter decomposition
+            term_1 = vmax_l1_m1 * m1_conc / (km_l1_m1 + m1_conc)
+            term_2 = vmax_l1_m2 * m2_conc / (km_l1_m2 + m2_conc)
+            arr.decomp_k[c, j, idx.i_met_lit] = (term_1 + term_2) * w_d_o_scalars
+            if (term_1 + term_2) != zero_T
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l1m1] = term_1 / (term_1 + term_2)
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l1m2] = term_2 / (term_1 + term_2)
+            else
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l1m1] = zero_T
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l1m2] = zero_T
+            end
+
+            # Structural litter decomposition
+            term_1 = vmax_l2_m1 * m1_conc / (km_l2_m1 + m1_conc)
+            term_2 = vmax_l2_m2 * m2_conc / (km_l2_m2 + m2_conc)
+            arr.decomp_k[c, j, idx.i_str_lit] = (term_1 + term_2) * w_d_o_scalars
+            if (term_1 + term_2) != zero_T
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l2m1] = term_1 / (term_1 + term_2)
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l2m2] = term_2 / (term_1 + term_2)
+            else
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l2m1] = zero_T
+                arr.pathfrac_decomp_cascade[c, j, idx.i_l2m2] = zero_T
+            end
+
+            # Available SOM decomposition
+            term_1 = vmax_s1_m1 * m1_conc / (km_s1_m1 + m1_conc)
+            term_2 = vmax_s1_m2 * m2_conc / (km_s1_m2 + m2_conc)
+            arr.decomp_k[c, j, idx.i_avl_som] = (term_1 + term_2) * w_d_o_scalars
+            if (term_1 + term_2) != zero_T
+                arr.pathfrac_decomp_cascade[c, j, idx.i_s1m1] = term_1 / (term_1 + term_2)
+                arr.pathfrac_decomp_cascade[c, j, idx.i_s1m2] = term_2 / (term_1 + term_2)
+            else
+                arr.pathfrac_decomp_cascade[c, j, idx.i_s1m1] = zero_T
+                arr.pathfrac_decomp_cascade[c, j, idx.i_s1m2] = zero_T
+            end
+
+            # Physically protected SOM: desorption only
+            arr.decomp_k[c, j, idx.i_phys_som] = desorption * arr.depth_scalar[c, j]
+
+            # Chemically protected SOM: oxidation
+            term_1 = vmax_l2_m1 * m1_conc / (coef.mimics_ko_r * km_l2_m1 + m1_conc)
+            term_2 = vmax_l2_m2 * m2_conc / (coef.mimics_ko_k * km_l2_m2 + m2_conc)
+            arr.decomp_k[c, j, idx.i_chem_som] = (term_1 + term_2) * w_d_o_scalars
+
+            # Copiotrophic microbe turnover (M1)
+            arr.decomp_k[c, j, idx.i_cop_mic] = tau_m1 *
+                   m1_conc^(coef.mimics_densdep - one_T) * w_d_o_scalars
+            favl = smooth_min(one_T, smooth_max(zero_T, one_T - arr.fphys_m1[c, j] - fchem_m1))
+            arr.pathfrac_decomp_cascade[c, j, idx.i_m1s1] = favl
+            arr.pathfrac_decomp_cascade[c, j, idx.i_m1s2] = fchem_m1
+
+            # Oligotrophic microbe turnover (M2)
+            arr.decomp_k[c, j, idx.i_oli_mic] = tau_m2 *
+                   m2_conc^(coef.mimics_densdep - one_T) * w_d_o_scalars
+            favl = smooth_min(one_T, smooth_max(zero_T, one_T - arr.fphys_m2[c, j] - fchem_m2))
+            arr.pathfrac_decomp_cascade[c, j, idx.i_m2s1] = favl
+            arr.pathfrac_decomp_cascade[c, j, idx.i_m2s2] = fchem_m2
+
+            # CWD fragmentation (only if FATES not enabled)
+            if !use_fates
+                i_cwd_local = idx.i_oli_mic + 1
+                arr.decomp_k[c, j, i_cwd_local] = coef.k_frag * w_d_o_scalars
+            end
+        end
+    end
+end
+
+# Post-assignment pathfrac terms (own-[c,j], all levels; unmasked as in host loop).
+@kernel function _dmr_pathfrac_post_kernel!(@Const(_out), arr::_DMRArr, idx::_DMRIdx, nlevdecomp::Int)
+    c = @index(Global)
+    @inbounds begin
+        T = eltype(arr.pathfrac_decomp_cascade)
+        for j in 1:nlevdecomp
+            arr.pathfrac_decomp_cascade[c, j, idx.i_s2s1] = one(T)
+            arr.pathfrac_decomp_cascade[c, j, idx.i_s3s1] = one(T)
+            arr.pathfrac_decomp_cascade[c, j, idx.i_m1s3] = arr.fphys_m1[c, j]
+            arr.pathfrac_decomp_cascade[c, j, idx.i_m2s3] = arr.fphys_m2[c, j]
+        end
+    end
+end
+
+# CWD->L2 pathfrac + respiration fraction (only if FATES not enabled).
+@kernel function _dmr_cwdl2_kernel!(@Const(_out), arr::_DMRArr, i_cwdl2_local::Int, nlevdecomp::Int, rf_cwdl2)
+    c = @index(Global)
+    @inbounds begin
+        T = eltype(arr.pathfrac_decomp_cascade)
+        for j in 1:nlevdecomp
+            arr.pathfrac_decomp_cascade[c, j, i_cwdl2_local] = one(T)
+            arr.rf_decomp_cascade[c, j, i_cwdl2_local] = rf_cwdl2
+        end
+    end
+end
+
+# Respiration fractions for all transitions (own-[c,j], all levels).
+@kernel function _dmr_rf_kernel!(@Const(_out), arr::_DMRArr, idx::_DMRIdx, nlevdecomp::Int,
+        rf_l1m1, rf_l1m2, rf_l2m1, rf_l2m2, rf_s1m1, rf_s1m2)
+    c = @index(Global)
+    @inbounds begin
+        T = eltype(arr.rf_decomp_cascade)
+        z = zero(T)
+        for j in 1:nlevdecomp
+            arr.rf_decomp_cascade[c, j, idx.i_l1m1] = rf_l1m1
+            arr.rf_decomp_cascade[c, j, idx.i_l1m2] = rf_l1m2
+            arr.rf_decomp_cascade[c, j, idx.i_l2m1] = rf_l2m1
+            arr.rf_decomp_cascade[c, j, idx.i_l2m2] = rf_l2m2
+            arr.rf_decomp_cascade[c, j, idx.i_s1m1] = rf_s1m1
+            arr.rf_decomp_cascade[c, j, idx.i_s1m2] = rf_s1m2
+            arr.rf_decomp_cascade[c, j, idx.i_s2s1] = z
+            arr.rf_decomp_cascade[c, j, idx.i_s3s1] = z
+            arr.rf_decomp_cascade[c, j, idx.i_m1s1] = z
+            arr.rf_decomp_cascade[c, j, idx.i_m1s2] = z
+            arr.rf_decomp_cascade[c, j, idx.i_m1s3] = z
+            arr.rf_decomp_cascade[c, j, idx.i_m2s1] = z
+            arr.rf_decomp_cascade[c, j, idx.i_m2s2] = z
+            arr.rf_decomp_cascade[c, j, idx.i_m2s3] = z
+        end
+    end
+end
+
+# ---------------------------------------------------------------------------
 # decomp_rates_mimics! — Calculate decomposition rates
 # Ported from decomp_rates_mimics in
 # SoilBiogeochemDecompCascadeMIMICSMod.F90
@@ -799,24 +1180,24 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
                                params::DecompMIMICSParams,
                                cn_params::CNSharedParamsData,
                                cascade_con::DecompCascadeConData;
-                               mask_bgc_soilc::BitVector,
+                               mask_bgc_soilc::AbstractVector{Bool},
                                bounds::UnitRange{Int},
                                nlevdecomp::Int,
-                               t_soisno::Matrix{<:Real},
-                               soilpsi::Matrix{<:Real},
-                               decomp_cpools_vr::Array{<:Real,3},
-                               col_dz::Matrix{<:Real},
-                               ligninNratioAvg::Vector{<:Real},
-                               annsum_npp_col::Vector{<:Real},
+                               t_soisno::AbstractMatrix{<:Real},
+                               soilpsi::AbstractMatrix{<:Real},
+                               decomp_cpools_vr::AbstractArray{<:Real,3},
+                               col_dz::AbstractMatrix{<:Real},
+                               ligninNratioAvg::AbstractVector{<:Real},
+                               annsum_npp_col::AbstractVector{<:Real},
                                days_per_year::Real,
                                dt::Real,
                                spinup_state::Int=0,
                                use_lch4::Bool=false,
                                anoxia::Bool=false,
                                use_fates::Bool=false,
-                               o2stress_unsat::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                               col_gridcell::Vector{Int}=Int[],
-                               latdeg::Vector{<:Real}=Float64[])
+                               o2stress_unsat::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                               col_gridcell::AbstractVector{<:Integer}=Int[],
+                               latdeg::AbstractVector{<:Real}=Float64[])
 
     eps_val = 1.0e-6
     nc = length(bounds)
@@ -856,50 +1237,40 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
 
     spinup_factor = cascade_con.spinup_factor
 
+    # Pool/transition index bundle (isbits; passed by value to every kernel).
+    idx = _DMRIdx(; i_met_lit, i_str_lit, i_avl_som, i_chem_som, i_phys_som,
+                  i_cop_mic, i_oli_mic, i_l1m1, i_l1m2, i_l2m1, i_l2m2,
+                  i_s1m1, i_s1m2, i_m1s1, i_m1s2, i_m2s1, i_m2s2,
+                  i_s2s1, i_s3s1, i_m1s3, i_m2s3)
+
+    # Working precision: take the eltype of a mutated output array so device
+    # (Float32/Metal) and CPU (Float64) both pick the right scalar precision.
+    FT = eltype(cf.decomp_k_col)
+
     # --- Compute spinup geographic terms ---
-    FT = eltype(t_soisno)
-    spinup_geogterm_l1  = ones(FT, nc)
-    spinup_geogterm_l2  = ones(FT, nc)
-    spinup_geogterm_cwd = ones(FT, nc)
-    spinup_geogterm_s1  = ones(FT, nc)
-    spinup_geogterm_s2  = ones(FT, nc)
-    spinup_geogterm_s3  = ones(FT, nc)
-    spinup_geogterm_m1  = ones(FT, nc)
-    spinup_geogterm_m2  = ones(FT, nc)
+    # (Allocated to mirror the Fortran; not referenced downstream in this port.)
+    spinup_geogterm_l1  = similar(cf.somc_fire_col, FT, nc); fill!(spinup_geogterm_l1, one(FT))
+    spinup_geogterm_l2  = similar(spinup_geogterm_l1); fill!(spinup_geogterm_l2, one(FT))
+    spinup_geogterm_cwd = similar(spinup_geogterm_l1); fill!(spinup_geogterm_cwd, one(FT))
+    spinup_geogterm_s1  = similar(spinup_geogterm_l1); fill!(spinup_geogterm_s1, one(FT))
+    spinup_geogterm_s2  = similar(spinup_geogterm_l1); fill!(spinup_geogterm_s2, one(FT))
+    spinup_geogterm_s3  = similar(spinup_geogterm_l1); fill!(spinup_geogterm_s3, one(FT))
+    spinup_geogterm_m1  = similar(spinup_geogterm_l1); fill!(spinup_geogterm_m1, one(FT))
+    spinup_geogterm_m2  = similar(spinup_geogterm_l1); fill!(spinup_geogterm_m2, one(FT))
 
     if spinup_state >= 1
-        for c in 1:nc
-            mask_bgc_soilc[c] || continue
-            lat = latdeg[col_gridcell[c]]
-
-            if abs(spinup_factor[i_met_lit] - 1.0) > eps_val
-                spinup_geogterm_l1[c] = spinup_factor[i_met_lit] * get_spinup_latitude_term(lat)
-            end
-            if abs(spinup_factor[i_str_lit] - 1.0) > eps_val
-                spinup_geogterm_l2[c] = spinup_factor[i_str_lit] * get_spinup_latitude_term(lat)
-            end
-            if !use_fates
-                i_cwd_local = i_oli_mic + 1
-                if abs(spinup_factor[i_cwd_local] - 1.0) > eps_val
-                    spinup_geogterm_cwd[c] = spinup_factor[i_cwd_local] * get_spinup_latitude_term(lat)
-                end
-            end
-            if abs(spinup_factor[i_avl_som] - 1.0) > eps_val
-                spinup_geogterm_s1[c] = spinup_factor[i_avl_som] * get_spinup_latitude_term(lat)
-            end
-            if abs(spinup_factor[i_chem_som] - 1.0) > eps_val
-                spinup_geogterm_s2[c] = spinup_factor[i_chem_som] * get_spinup_latitude_term(lat)
-            end
-            if abs(spinup_factor[i_phys_som] - 1.0) > eps_val
-                spinup_geogterm_s3[c] = spinup_factor[i_phys_som] * get_spinup_latitude_term(lat)
-            end
-            if abs(spinup_factor[i_cop_mic] - 1.0) > eps_val
-                spinup_geogterm_m1[c] = spinup_factor[i_cop_mic] * get_spinup_latitude_term(lat)
-            end
-            if abs(spinup_factor[i_oli_mic] - 1.0) > eps_val
-                spinup_geogterm_m2[c] = spinup_factor[i_oli_mic] * get_spinup_latitude_term(lat)
-            end
-        end
+        # Move host-built index/factor vectors to the device, preserving Int eltype
+        # for col_gridcell (a Float-coerced index would break device indexing).
+        latdeg_d        = similar(cf.decomp_k_col, FT, length(latdeg)); copyto!(latdeg_d, latdeg)
+        col_gridcell_d  = similar(cf.somc_fire_col, eltype(col_gridcell), length(col_gridcell))
+        copyto!(col_gridcell_d, col_gridcell)
+        spinup_factor_d = similar(cf.decomp_k_col, FT, length(spinup_factor))
+        copyto!(spinup_factor_d, spinup_factor)
+        _launch!(_dmr_spinup_geogterm_kernel!, spinup_geogterm_l1,
+                 spinup_geogterm_l2, spinup_geogterm_cwd, spinup_geogterm_s1,
+                 spinup_geogterm_s2, spinup_geogterm_s3, spinup_geogterm_m1,
+                 spinup_geogterm_m2, mask_bgc_soilc, latdeg_d, col_gridcell_d,
+                 spinup_factor_d, idx, use_fates, FT(eps_val))
     end
 
     # --- Time-dependent coefficients ---
@@ -910,61 +1281,33 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
     rf_decomp_cascade       = cf.rf_decomp_cascade_col
     cn_col                  = cf.cn_col
 
-    depth_scalar = ones(FT, nc, nlevdecomp)
+    depth_scalar = similar(cf.decomp_k_col, FT, nc, nlevdecomp)
+    fill!(depth_scalar, one(FT))
+
+    # Working-precision scalar thresholds at the launch site (a Float64 scalar
+    # kernel arg is invalid Metal IR).
+    minpsi_ft   = FT(minpsi)
+    maxpsi_ft   = FT(maxpsi)
+    mino2lim_ft = FT(mino2lim)
 
     if nlevdecomp == 1
         # --- Single-level decomposition ---
-        frw = zeros(FT, nc)
-        fr  = zeros(FT, nc, nlev_soildecomp_standard)
+        # frw[c] = sum_j col_dz[c,j] over standard soil levels (per-column reduction).
+        frw = similar(cf.decomp_k_col, FT, nc); fill!(frw, zero(FT))
+        _launch!(_dmr_frw_kernel!, frw, mask_bgc_soilc, col_dz, nlev_soildecomp_standard)
 
-        for j in 1:nlev_soildecomp_standard
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                frw[c] += col_dz[c, j]
-            end
-        end
-        for j in 1:nlev_soildecomp_standard
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                if frw[c] != 0.0
-                    fr[c, j] = col_dz[c, j] / frw[c]
-                else
-                    fr[c, j] = 0.0
-                end
-            end
-        end
-
-        # Water scalar
-        for j in 1:nlev_soildecomp_standard
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                if j == 1
-                    w_scalar[c, :] .= 0.0
-                end
-                psi = smooth_min(soilpsi[c, j], maxpsi)
-                if psi > minpsi
-                    w_scalar[c, 1] += (log(minpsi / psi) / log(minpsi / maxpsi)) * fr[c, j]
-                end
-            end
-        end
+        # Water scalar — per-column accumulation over standard soil levels (fr[c,j]
+        # = col_dz/frw computed in-thread; ascending-j order preserved, byte-identical).
+        _launch!(_dmr_wscalar1_kernel!, w_scalar, mask_bgc_soilc, soilpsi, col_dz,
+                 frw, nlev_soildecomp_standard, minpsi_ft, maxpsi_ft; ndrange = nc)
 
         # O2 scalar
         if anoxia
-            for j in 1:nlev_soildecomp_standard
-                for c in 1:nc
-                    mask_bgc_soilc[c] || continue
-                    if j == 1
-                        o_scalar[c, :] .= 0.0
-                    end
-                    o_scalar[c, 1] += fr[c, j] * smooth_max(o2stress_unsat[c, j], mino2lim)
-                end
-            end
+            _launch!(_dmr_oscalar1_anoxia_kernel!, o_scalar, mask_bgc_soilc,
+                     o2stress_unsat, col_dz, frw, nlev_soildecomp_standard, mino2lim_ft;
+                     ndrange = nc)
         else
-            for c in 1:nc
-                for j in 1:nlevdecomp
-                    o_scalar[c, j] = 1.0
-                end
-            end
+            _launch!(_dmr_oscalar_one_kernel!, o_scalar, nlevdecomp; ndrange = nc)
         end
 
     else
@@ -979,11 +1322,7 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
             mimics_oscalar_anoxia!(o_scalar, mask_bgc_soilc, o2stress_unsat, mino2lim;
                                    nc = nc, nlevdecomp = nlevdecomp)
         else
-            for c in 1:nc
-                for j in 1:nlevdecomp
-                    o_scalar[c, j] = 1.0
-                end
-            end
+            _launch!(_dmr_oscalar_one_kernel!, o_scalar, nlevdecomp; ndrange = nc)
         end
     end
 
@@ -992,236 +1331,80 @@ function decomp_rates_mimics!(cf::SoilBiogeochemCarbonFluxData,
     mimics_depth_scalar!(depth_scalar, mask_bgc_soilc;
                          nc = nc, nlevdecomp = nlevdecomp)
 
-    # Unpack MIMICS parameters for decomp rate calculation
-    mimics_fmet_p1       = params.mimics_fmet[1]
-    mimics_fmet_p2       = params.mimics_fmet[2]
-    mimics_fmet_p3       = params.mimics_fmet[3]
-    mimics_fmet_p4       = params.mimics_fmet[4]
-    mimics_fchem_r_p1    = params.mimics_fchem_r[1]
-    mimics_fchem_r_p2    = params.mimics_fchem_r[2]
-    mimics_fchem_k_p1    = params.mimics_fchem_k[1]
-    mimics_fchem_k_p2    = params.mimics_fchem_k[2]
-    mimics_tau_mod_min   = params.mimics_tau_mod_min
-    mimics_tau_mod_max   = params.mimics_tau_mod_max
-    mimics_tau_mod_factor = params.mimics_tau_mod_factor
-    mimics_tau_r_p1      = params.mimics_tau_r[1]
-    mimics_tau_r_p2      = params.mimics_tau_r[2]
-    mimics_tau_k_p1      = params.mimics_tau_k[1]
-    mimics_tau_k_p2      = params.mimics_tau_k[2]
-    mimics_ko_r          = params.mimics_ko_r
-    mimics_ko_k          = params.mimics_ko_k
-    mimics_densdep       = params.mimics_densdep
-    mimics_desorpQ10     = params.mimics_desorpQ10
-    mimics_t_soi_ref     = params.mimics_t_soi_ref
-    mimics_cn_mod_num    = params.mimics_cn_mod_num
-    mimics_cn_r          = params.mimics_cn_r
-    mimics_cn_k          = params.mimics_cn_k
+    # Bundle the column/level arrays the rate + post kernels touch (one Adapt-moved
+    # struct keeps us under the Metal ~31-arg limit; writes flow back into cf).
+    arr = _dmr_arr(cf, mimics_state, depth_scalar, t_soisno, decomp_cpools_vr,
+                   col_dz, ligninNratioAvg, annsum_npp_col)
 
-    # Unpack regression coefficients from state
-    vslope_l1_m1 = mimics_state.vslope_l1_m1
-    vslope_l2_m1 = mimics_state.vslope_l2_m1
-    vslope_s1_m1 = mimics_state.vslope_s1_m1
-    vslope_l1_m2 = mimics_state.vslope_l1_m2
-    vslope_l2_m2 = mimics_state.vslope_l2_m2
-    vslope_s1_m2 = mimics_state.vslope_s1_m2
-    kslope_l1_m1 = mimics_state.kslope_l1_m1
-    kslope_l2_m1 = mimics_state.kslope_l2_m1
-    kslope_s1_m1 = mimics_state.kslope_s1_m1
-    kslope_l1_m2 = mimics_state.kslope_l1_m2
-    kslope_l2_m2 = mimics_state.kslope_l2_m2
-    kslope_s1_m2 = mimics_state.kslope_s1_m2
-    vint_l1_m1   = mimics_state.vint_l1_m1
-    vint_l2_m1   = mimics_state.vint_l2_m1
-    vint_s1_m1   = mimics_state.vint_s1_m1
-    vint_l1_m2   = mimics_state.vint_l1_m2
-    vint_l2_m2   = mimics_state.vint_l2_m2
-    vint_s1_m2   = mimics_state.vint_s1_m2
-    kint_l1_m1   = mimics_state.kint_l1_m1
-    kint_l2_m1   = mimics_state.kint_l2_m1
-    kint_s1_m1   = mimics_state.kint_s1_m1
-    kint_l1_m2   = mimics_state.kint_l1_m2
-    kint_l2_m2   = mimics_state.kint_l2_m2
-    kint_s1_m2   = mimics_state.kint_s1_m2
-    vmod_l1_m1   = mimics_state.vmod_l1_m1
-    vmod_l2_m1   = mimics_state.vmod_l2_m1
-    vmod_s1_m1   = mimics_state.vmod_s1_m1
-    vmod_l1_m2   = mimics_state.vmod_l1_m2
-    vmod_l2_m2   = mimics_state.vmod_l2_m2
-    vmod_s1_m2   = mimics_state.vmod_s1_m2
-    kmod_l1_m1   = mimics_state.kmod_l1_m1
-    kmod_l2_m1   = mimics_state.kmod_l2_m1
-    kmod_s1_m1   = mimics_state.kmod_s1_m1
-    kmod_l1_m2   = mimics_state.kmod_l1_m2
-    kmod_l2_m2   = mimics_state.kmod_l2_m2
-    kmod_s1_m2   = mimics_state.kmod_s1_m2
+    # Bundle the scalar coefficients at the working precision (a Float64 scalar
+    # kernel arg is invalid Metal IR; on Float64 FT(x) === x byte-identically).
+    coef = _DMRCoef{FT}(;
+        eps_val               = FT(eps_val),
+        mimics_fmet_p1        = FT(params.mimics_fmet[1]),
+        mimics_fmet_p2        = FT(params.mimics_fmet[2]),
+        mimics_fmet_p3        = FT(params.mimics_fmet[3]),
+        mimics_fmet_p4        = FT(params.mimics_fmet[4]),
+        mimics_fchem_r_p1     = FT(params.mimics_fchem_r[1]),
+        mimics_fchem_r_p2     = FT(params.mimics_fchem_r[2]),
+        mimics_fchem_k_p1     = FT(params.mimics_fchem_k[1]),
+        mimics_fchem_k_p2     = FT(params.mimics_fchem_k[2]),
+        mimics_tau_mod_min    = FT(params.mimics_tau_mod_min),
+        mimics_tau_mod_max    = FT(params.mimics_tau_mod_max),
+        mimics_tau_mod_factor = FT(params.mimics_tau_mod_factor),
+        mimics_tau_r_p1       = FT(params.mimics_tau_r[1]),
+        mimics_tau_r_p2       = FT(params.mimics_tau_r[2]),
+        mimics_tau_k_p1       = FT(params.mimics_tau_k[1]),
+        mimics_tau_k_p2       = FT(params.mimics_tau_k[2]),
+        mimics_ko_r           = FT(params.mimics_ko_r),
+        mimics_ko_k           = FT(params.mimics_ko_k),
+        mimics_densdep        = FT(params.mimics_densdep),
+        mimics_desorpQ10      = FT(params.mimics_desorpQ10),
+        mimics_t_soi_ref      = FT(params.mimics_t_soi_ref),
+        mimics_cn_mod_num     = FT(params.mimics_cn_mod_num),
+        mimics_cn_r           = FT(params.mimics_cn_r),
+        mimics_cn_k           = FT(params.mimics_cn_k),
+        vslope_l1_m1 = FT(mimics_state.vslope_l1_m1), vslope_l2_m1 = FT(mimics_state.vslope_l2_m1),
+        vslope_s1_m1 = FT(mimics_state.vslope_s1_m1), vslope_l1_m2 = FT(mimics_state.vslope_l1_m2),
+        vslope_l2_m2 = FT(mimics_state.vslope_l2_m2), vslope_s1_m2 = FT(mimics_state.vslope_s1_m2),
+        kslope_l1_m1 = FT(mimics_state.kslope_l1_m1), kslope_l2_m1 = FT(mimics_state.kslope_l2_m1),
+        kslope_s1_m1 = FT(mimics_state.kslope_s1_m1), kslope_l1_m2 = FT(mimics_state.kslope_l1_m2),
+        kslope_l2_m2 = FT(mimics_state.kslope_l2_m2), kslope_s1_m2 = FT(mimics_state.kslope_s1_m2),
+        vint_l1_m1 = FT(mimics_state.vint_l1_m1), vint_l2_m1 = FT(mimics_state.vint_l2_m1),
+        vint_s1_m1 = FT(mimics_state.vint_s1_m1), vint_l1_m2 = FT(mimics_state.vint_l1_m2),
+        vint_l2_m2 = FT(mimics_state.vint_l2_m2), vint_s1_m2 = FT(mimics_state.vint_s1_m2),
+        kint_l1_m1 = FT(mimics_state.kint_l1_m1), kint_l2_m1 = FT(mimics_state.kint_l2_m1),
+        kint_s1_m1 = FT(mimics_state.kint_s1_m1), kint_l1_m2 = FT(mimics_state.kint_l1_m2),
+        kint_l2_m2 = FT(mimics_state.kint_l2_m2), kint_s1_m2 = FT(mimics_state.kint_s1_m2),
+        vmod_l1_m1 = FT(mimics_state.vmod_l1_m1), vmod_l2_m1 = FT(mimics_state.vmod_l2_m1),
+        vmod_s1_m1 = FT(mimics_state.vmod_s1_m1), vmod_l1_m2 = FT(mimics_state.vmod_l1_m2),
+        vmod_l2_m2 = FT(mimics_state.vmod_l2_m2), vmod_s1_m2 = FT(mimics_state.vmod_s1_m2),
+        kmod_l1_m1 = FT(mimics_state.kmod_l1_m1), kmod_l2_m1 = FT(mimics_state.kmod_l2_m1),
+        kmod_s1_m1 = FT(mimics_state.kmod_s1_m1), kmod_l1_m2 = FT(mimics_state.kmod_l1_m2),
+        kmod_l2_m2 = FT(mimics_state.kmod_l2_m2), kmod_s1_m2 = FT(mimics_state.kmod_s1_m2),
+        k_frag    = FT(k_frag),
+        secsphr   = FT(SECSPHR),
+        tfrz      = FT(TFRZ),
+        g_to_mg   = FT(G_TO_MG),
+        cm3_to_m3 = FT(CM3_TO_M3))
 
-    fphys_m1 = mimics_state.fphys_m1
-    fphys_m2 = mimics_state.fphys_m2
-    desorp_arr = mimics_state.desorp
-    p_scalar_arr = mimics_state.p_scalar
+    # --- Calculate rates for all litter and SOM pools (per-column kernel, internal j loop) ---
+    _launch!(_dmr_rates_kernel!, decomp_k, arr, mask_bgc_soilc, idx, coef, nlevdecomp,
+             use_fates; ndrange = nc)
 
-    # --- Calculate rates for all litter and SOM pools ---
-    for c in 1:nc
-        mask_bgc_soilc[c] || continue
-
-        annsum_npp_col_scalar = smooth_max(0.0, annsum_npp_col[c])
-
-        # fmet: fraction metabolic litter
-        fmet = mimics_fmet_p1 * (mimics_fmet_p2 - mimics_fmet_p3 *
-            smooth_min(mimics_fmet_p4, ligninNratioAvg[c]))
-        tau_mod = smooth_min(mimics_tau_mod_max, smooth_max(mimics_tau_mod_min,
-            sqrt(mimics_tau_mod_factor * annsum_npp_col_scalar)))
-
-        # tau_m1 is tauR and tau_m2 is tauK in Wieder et al. 2015
-        # Convert from per hour to per second
-        tau_m1 = mimics_tau_r_p1 * exp(mimics_tau_r_p2 * fmet) * tau_mod / SECSPHR
-        tau_m2 = mimics_tau_k_p1 * exp(mimics_tau_k_p2 * fmet) * tau_mod / SECSPHR
-
-        # Microbial C:N ratios
-        cn_col[c, i_cop_mic] = mimics_cn_r * sqrt(mimics_cn_mod_num / fmet)
-        cn_col[c, i_oli_mic] = mimics_cn_k * sqrt(mimics_cn_mod_num / fmet)
-
-        # Chemical fractionation
-        fchem_m1 = smooth_min(1.0, smooth_max(0.0, mimics_fchem_r_p1 *
-                    exp(mimics_fchem_r_p2 * fmet)))
-        fchem_m2 = smooth_min(1.0, smooth_max(0.0, mimics_fchem_k_p1 *
-                    exp(mimics_fchem_k_p2 * fmet)))
-
-        for j in 1:nlevdecomp
-            # Temperature-dependent Vmax and Km
-            t_soi_degC = t_soisno[c, j] - TFRZ
-
-            # Vmax values (convert from per hour to per second)
-            vmax_l1_m1 = exp(vslope_l1_m1 * t_soi_degC + vint_l1_m1) * vmod_l1_m1 / SECSPHR
-            vmax_l1_m2 = exp(vslope_l1_m2 * t_soi_degC + vint_l1_m2) * vmod_l1_m2 / SECSPHR
-            vmax_l2_m1 = exp(vslope_l2_m1 * t_soi_degC + vint_l2_m1) * vmod_l2_m1 / SECSPHR
-            vmax_l2_m2 = exp(vslope_l2_m2 * t_soi_degC + vint_l2_m2) * vmod_l2_m2 / SECSPHR
-            vmax_s1_m1 = exp(vslope_s1_m1 * t_soi_degC + vint_s1_m1) * vmod_s1_m1 / SECSPHR
-            vmax_s1_m2 = exp(vslope_s1_m2 * t_soi_degC + vint_s1_m2) * vmod_s1_m2 / SECSPHR
-
-            # Km values
-            km_l1_m1 = exp(kslope_l1_m1 * t_soi_degC + kint_l1_m1) * kmod_l1_m1
-            km_l1_m2 = exp(kslope_l1_m2 * t_soi_degC + kint_l1_m2) * kmod_l1_m2
-            km_l2_m1 = exp(kslope_l2_m1 * t_soi_degC + kint_l2_m1) * kmod_l2_m1
-            km_l2_m2 = exp(kslope_l2_m2 * t_soi_degC + kint_l2_m2) * kmod_l2_m2
-            km_s1_m1 = exp(kslope_s1_m1 * t_soi_degC + kint_s1_m1) * kmod_s1_m1 * p_scalar_arr[c, j]
-            km_s1_m2 = exp(kslope_s1_m2 * t_soi_degC + kint_s1_m2) * kmod_s1_m2 * p_scalar_arr[c, j]
-
-            # Desorption: function of soil temperature and Q10
-            desorption = (desorp_arr[c, j] / SECSPHR) * mimics_desorpQ10 *
-                         exp((t_soi_degC - mimics_t_soi_ref) / 10.0)
-
-            # Microbial concentration (mgC/cm3)
-            m1_conc = (decomp_cpools_vr[c, j, i_cop_mic] / col_dz[c, j]) * G_TO_MG * CM3_TO_M3
-            m2_conc = (decomp_cpools_vr[c, j, i_oli_mic] / col_dz[c, j]) * G_TO_MG * CM3_TO_M3
-
-            # Product of w_scalar * depth_scalar * o_scalar
-            w_d_o_scalars = w_scalar[c, j] * depth_scalar[c, j] * o_scalar[c, j]
-
-            # Metabolic litter decomposition
-            term_1 = vmax_l1_m1 * m1_conc / (km_l1_m1 + m1_conc)
-            term_2 = vmax_l1_m2 * m2_conc / (km_l1_m2 + m2_conc)
-            decomp_k[c, j, i_met_lit] = (term_1 + term_2) * w_d_o_scalars
-            if (term_1 + term_2) != 0.0
-                pathfrac_decomp_cascade[c, j, i_l1m1] = term_1 / (term_1 + term_2)
-                pathfrac_decomp_cascade[c, j, i_l1m2] = term_2 / (term_1 + term_2)
-            else
-                pathfrac_decomp_cascade[c, j, i_l1m1] = 0.0
-                pathfrac_decomp_cascade[c, j, i_l1m2] = 0.0
-            end
-
-            # Structural litter decomposition
-            term_1 = vmax_l2_m1 * m1_conc / (km_l2_m1 + m1_conc)
-            term_2 = vmax_l2_m2 * m2_conc / (km_l2_m2 + m2_conc)
-            decomp_k[c, j, i_str_lit] = (term_1 + term_2) * w_d_o_scalars
-            if (term_1 + term_2) != 0.0
-                pathfrac_decomp_cascade[c, j, i_l2m1] = term_1 / (term_1 + term_2)
-                pathfrac_decomp_cascade[c, j, i_l2m2] = term_2 / (term_1 + term_2)
-            else
-                pathfrac_decomp_cascade[c, j, i_l2m1] = 0.0
-                pathfrac_decomp_cascade[c, j, i_l2m2] = 0.0
-            end
-
-            # Available SOM decomposition
-            term_1 = vmax_s1_m1 * m1_conc / (km_s1_m1 + m1_conc)
-            term_2 = vmax_s1_m2 * m2_conc / (km_s1_m2 + m2_conc)
-            decomp_k[c, j, i_avl_som] = (term_1 + term_2) * w_d_o_scalars
-            if (term_1 + term_2) != 0.0
-                pathfrac_decomp_cascade[c, j, i_s1m1] = term_1 / (term_1 + term_2)
-                pathfrac_decomp_cascade[c, j, i_s1m2] = term_2 / (term_1 + term_2)
-            else
-                pathfrac_decomp_cascade[c, j, i_s1m1] = 0.0
-                pathfrac_decomp_cascade[c, j, i_s1m2] = 0.0
-            end
-
-            # Physically protected SOM: desorption only
-            decomp_k[c, j, i_phys_som] = desorption * depth_scalar[c, j]
-
-            # Chemically protected SOM: oxidation
-            term_1 = vmax_l2_m1 * m1_conc / (mimics_ko_r * km_l2_m1 + m1_conc)
-            term_2 = vmax_l2_m2 * m2_conc / (mimics_ko_k * km_l2_m2 + m2_conc)
-            decomp_k[c, j, i_chem_som] = (term_1 + term_2) * w_d_o_scalars
-
-            # Copiotrophic microbe turnover (M1)
-            decomp_k[c, j, i_cop_mic] = tau_m1 *
-                   m1_conc^(mimics_densdep - 1.0) * w_d_o_scalars
-            favl = smooth_min(1.0, smooth_max(0.0, 1.0 - fphys_m1[c, j] - fchem_m1))
-            pathfrac_decomp_cascade[c, j, i_m1s1] = favl
-            pathfrac_decomp_cascade[c, j, i_m1s2] = fchem_m1
-
-            # Oligotrophic microbe turnover (M2)
-            decomp_k[c, j, i_oli_mic] = tau_m2 *
-                   m2_conc^(mimics_densdep - 1.0) * w_d_o_scalars
-            favl = smooth_min(1.0, smooth_max(0.0, 1.0 - fphys_m2[c, j] - fchem_m2))
-            pathfrac_decomp_cascade[c, j, i_m2s1] = favl
-            pathfrac_decomp_cascade[c, j, i_m2s2] = fchem_m2
-
-            # CWD fragmentation (only if FATES not enabled)
-            if !use_fates
-                i_cwd_local = i_oli_mic + 1
-                decomp_k[c, j, i_cwd_local] = k_frag * w_d_o_scalars
-            end
-        end
-    end
-
-    # pathfrac terms not calculated in the previous loop
-    for j in 1:nlevdecomp
-        for c in 1:nc
-            pathfrac_decomp_cascade[c, j, i_s2s1] = 1.0
-            pathfrac_decomp_cascade[c, j, i_s3s1] = 1.0
-            pathfrac_decomp_cascade[c, j, i_m1s3] = fphys_m1[c, j]
-            pathfrac_decomp_cascade[c, j, i_m2s3] = fphys_m2[c, j]
-        end
-    end
+    # pathfrac terms not calculated in the rate kernel (own-[c,j], all levels).
+    _launch!(_dmr_pathfrac_post_kernel!, pathfrac_decomp_cascade, arr, idx,
+             nlevdecomp; ndrange = nc)
     if !use_fates
         i_cwdl2_local = 15
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                pathfrac_decomp_cascade[c, j, i_cwdl2_local] = 1.0
-                rf_decomp_cascade[c, j, i_cwdl2_local] = rf_cwdl2
-            end
-        end
+        _launch!(_dmr_cwdl2_kernel!, pathfrac_decomp_cascade, arr, i_cwdl2_local,
+                 nlevdecomp, FT(rf_cwdl2); ndrange = nc)
     end
 
-    # Respiration fractions
-    for j in 1:nlevdecomp
-        for c in 1:nc
-            rf_decomp_cascade[c, j, i_l1m1] = mimics_state.rf_l1m1
-            rf_decomp_cascade[c, j, i_l1m2] = mimics_state.rf_l1m2
-            rf_decomp_cascade[c, j, i_l2m1] = mimics_state.rf_l2m1
-            rf_decomp_cascade[c, j, i_l2m2] = mimics_state.rf_l2m2
-            rf_decomp_cascade[c, j, i_s1m1] = mimics_state.rf_s1m1
-            rf_decomp_cascade[c, j, i_s1m2] = mimics_state.rf_s1m2
-            rf_decomp_cascade[c, j, i_s2s1] = 0.0
-            rf_decomp_cascade[c, j, i_s3s1] = 0.0
-            rf_decomp_cascade[c, j, i_m1s1] = 0.0
-            rf_decomp_cascade[c, j, i_m1s2] = 0.0
-            rf_decomp_cascade[c, j, i_m1s3] = 0.0
-            rf_decomp_cascade[c, j, i_m2s1] = 0.0
-            rf_decomp_cascade[c, j, i_m2s2] = 0.0
-            rf_decomp_cascade[c, j, i_m2s3] = 0.0
-        end
-    end
+    # Respiration fractions for all transitions (own-[c,j], all levels).
+    _launch!(_dmr_rf_kernel!, rf_decomp_cascade, arr, idx, nlevdecomp,
+             FT(mimics_state.rf_l1m1), FT(mimics_state.rf_l1m2),
+             FT(mimics_state.rf_l2m1), FT(mimics_state.rf_l2m2),
+             FT(mimics_state.rf_s1m1), FT(mimics_state.rf_s1m2); ndrange = nc)
 
     return nothing
 end
