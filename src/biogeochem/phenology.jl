@@ -84,39 +84,46 @@ end
 # ---------------------------------------------------------------------------
 # PFT constants needed by phenology (from pftcon)
 # ---------------------------------------------------------------------------
-Base.@kwdef mutable struct PftConPhenology
-    evergreen             ::Vector{Float64} = Float64[]   # binary evergreen flag
-    season_decid          ::Vector{Float64} = Float64[]   # binary seasonal deciduous flag
-    season_decid_temperate::Vector{Float64} = Float64[]   # binary temperate seasonal deciduous flag
-    stress_decid          ::Vector{Float64} = Float64[]   # binary stress deciduous flag
-    woody                 ::Vector{Float64} = Float64[]   # binary woody flag
-    leaf_long             ::Vector{Float64} = Float64[]   # leaf longevity (yrs)
-    leafcn                ::Vector{Float64} = Float64[]   # leaf C:N (gC/gN)
-    frootcn               ::Vector{Float64} = Float64[]   # fine root C:N (gC/gN)
-    lflitcn               ::Vector{Float64} = Float64[]   # leaf litter C:N (gC/gN)
-    livewdcn              ::Vector{Float64} = Float64[]   # live wood C:N (gC/gN)
-    deadwdcn              ::Vector{Float64} = Float64[]   # dead wood C:N (gC/gN)
-    ndays_on              ::Vector{Float64} = Float64[]   # days to complete onset
-    crit_onset_gdd_sf     ::Vector{Float64} = Float64[]   # scale factor for crit_onset_gdd
-    lf_f                  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
-    fr_f                  ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
-    biofuel_harvfrac      ::Vector{Float64} = Float64[]   # biofuel harvest fraction
-    repr_structure_harvfrac::Matrix{Float64} = Matrix{Float64}(undef, 0, 0) # repr structure harvest frac
+Base.@kwdef mutable struct PftConPhenology{FT<:Real,
+                                           V<:AbstractVector{FT},
+                                           M<:AbstractMatrix{FT},
+                                           VI<:AbstractVector{<:Integer},
+                                           VB<:AbstractVector{Bool}}
+    evergreen             ::V = Float64[]   # binary evergreen flag
+    season_decid          ::V = Float64[]   # binary seasonal deciduous flag
+    season_decid_temperate::V = Float64[]   # binary temperate seasonal deciduous flag
+    stress_decid          ::V = Float64[]   # binary stress deciduous flag
+    woody                 ::V = Float64[]   # binary woody flag
+    leaf_long             ::V = Float64[]   # leaf longevity (yrs)
+    leafcn                ::V = Float64[]   # leaf C:N (gC/gN)
+    frootcn               ::V = Float64[]   # fine root C:N (gC/gN)
+    lflitcn               ::V = Float64[]   # leaf litter C:N (gC/gN)
+    livewdcn              ::V = Float64[]   # live wood C:N (gC/gN)
+    deadwdcn              ::V = Float64[]   # dead wood C:N (gC/gN)
+    ndays_on              ::V = Float64[]   # days to complete onset
+    crit_onset_gdd_sf     ::V = Float64[]   # scale factor for crit_onset_gdd
+    lf_f                  ::M = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
+    fr_f                  ::M = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
+    biofuel_harvfrac      ::V = Float64[]   # biofuel harvest fraction
+    repr_structure_harvfrac::M = Matrix{Float64}(undef, 0, 0) # repr structure harvest frac
     # Crop-specific PFT parameters
-    minplanttemp          ::Vector{Float64} = Float64[]
-    planttemp             ::Vector{Float64} = Float64[]
-    gddmin                ::Vector{Float64} = Float64[]
-    lfemerg               ::Vector{Float64} = Float64[]
-    grnfill               ::Vector{Float64} = Float64[]
-    hybgdd                ::Vector{Float64} = Float64[]
-    mxmat                 ::Vector{Int}     = Int[]
-    manunitro             ::Vector{Float64} = Float64[]
-    is_pft_known_to_model ::Vector{Bool}    = Bool[]
-    mnNHplantdate         ::Vector{Float64} = Float64[]
-    mxNHplantdate         ::Vector{Float64} = Float64[]
-    mnSHplantdate         ::Vector{Float64} = Float64[]
-    mxSHplantdate         ::Vector{Float64} = Float64[]
+    minplanttemp          ::V = Float64[]
+    planttemp             ::V = Float64[]
+    gddmin                ::V = Float64[]
+    lfemerg               ::V = Float64[]
+    grnfill               ::V = Float64[]
+    hybgdd                ::V = Float64[]
+    mxmat                 ::VI = Int[]
+    manunitro             ::V = Float64[]
+    is_pft_known_to_model ::VB = Bool[]
+    mnNHplantdate         ::V = Float64[]
+    mxNHplantdate         ::V = Float64[]
+    mnSHplantdate         ::V = Float64[]
+    mxSHplantdate         ::V = Float64[]
 end
+PftConPhenology{FT}(; kwargs...) where {FT<:Real} =
+    PftConPhenology{FT, Vector{FT}, Matrix{FT}, Vector{Int}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure PftConPhenology
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -165,8 +172,9 @@ const _min_critical_daylength_onset = 39300.0 / 2.0
 
 # --- cn_phenology_climate!: 10-day running-mean t2m accumulator ----------
 @kernel function _phen_climate_kernel!(tempavg_t2m, @Const(mask),
-                                       @Const(t_ref2m), fracday::Float64,
-                                       spval::Float64)
+                                       @Const(t_ref2m), fracday,
+                                       spval)
+    T = eltype(tempavg_t2m)
     p = @index(Global)
     @inbounds if mask[p]
         if t_ref2m[p] != spval
@@ -176,37 +184,98 @@ const _min_critical_daylength_onset = 39300.0 / 2.0
 end
 
 phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, spval) =
-    _launch!(_phen_climate_kernel!, tempavg_t2m, mask, t_ref2m, fracday, spval)
+    _launch!(_phen_climate_kernel!, tempavg_t2m, mask, t_ref2m,
+             eltype(tempavg_t2m)(fracday), eltype(tempavg_t2m)(spval))
 
 # --- cn_evergreen_phenology!: storage→transfer for evergreen patches -----
-@kernel function _phen_evergreen_kernel!(bglfr,
-        bgtr, lgsf,
-        leafc_stor2xfer, frootc_stor2xfer,
-        livestemc_stor2xfer, deadstemc_stor2xfer, livecrootc_stor2xfer,
-        deadcrootc_stor2xfer, gresp_stor2xfer,
-        leafn_stor2xfer, frootn_stor2xfer,
-        livestemn_stor2xfer, deadstemn_stor2xfer, livecrootn_stor2xfer,
-        deadcrootn_stor2xfer,
+# --- device-view structs for _phen_evergreen_kernel! ---------------------
+# 16 read+write per-patch output arrays (all per-patch Vectors, shared eltype V)
+Base.@kwdef struct _PhenEvergreenState{V}
+    bglfr::V; bgtr::V; lgsf::V
+    leafc_stor2xfer::V; frootc_stor2xfer::V
+    livestemc_stor2xfer::V; deadstemc_stor2xfer::V; livecrootc_stor2xfer::V
+    deadcrootc_stor2xfer::V; gresp_stor2xfer::V
+    leafn_stor2xfer::V; frootn_stor2xfer::V
+    livestemn_stor2xfer::V; deadstemn_stor2xfer::V; livecrootn_stor2xfer::V
+    deadcrootn_stor2xfer::V
+end
+Adapt.@adapt_structure _PhenEvergreenState
+
+# 13 read-only per-patch storage inputs (@Const conceptually, all per-patch Vectors)
+Base.@kwdef struct _PhenEvergreenInputs{V}
+    leafc_storage::V; frootc_storage::V
+    livestemc_storage::V; deadstemc_storage::V
+    livecrootc_storage::V; deadcrootc_storage::V
+    gresp_storage::V
+    leafn_storage::V; frootn_storage::V
+    livestemn_storage::V; deadstemn_storage::V
+    livecrootn_storage::V; deadcrootn_storage::V
+end
+Adapt.@adapt_structure _PhenEvergreenInputs
+
+# isbits scalar bundle at working precision T (routes the 4 Float64 scalars)
+Base.@kwdef struct _PhenEvergreenScalars{T}
+    dt::T; fstor2tran::T; avg_dayspyr::T; secspday::T
+end
+
+# --- cn_evergreen_phenology!: storage→transfer for evergreen patches -----
+@kernel function _phen_evergreen_kernel!(
+        st::_PhenEvergreenState, inp::_PhenEvergreenInputs,
         @Const(mask), @Const(itype), @Const(evergreen), @Const(woody),
         @Const(leaf_long),
-        @Const(leafc_storage), @Const(frootc_storage),
-        @Const(livestemc_storage), @Const(deadstemc_storage),
-        @Const(livecrootc_storage), @Const(deadcrootc_storage),
-        @Const(gresp_storage),
-        @Const(leafn_storage), @Const(frootn_storage),
-        @Const(livestemn_storage), @Const(deadstemn_storage),
-        @Const(livecrootn_storage), @Const(deadcrootn_storage),
-        dt::Float64, fstor2tran::Float64, avg_dayspyr::Float64, secspday::Float64)
+        ps::_PhenEvergreenScalars)
     p = @index(Global)
     @inbounds if mask[p]
+        T = eltype(st.bglfr)
+
+        # --- alias scalar bundle fields to Fortran-named locals ---
+        dt          = ps.dt
+        fstor2tran  = ps.fstor2tran
+        avg_dayspyr = ps.avg_dayspyr
+        secspday    = ps.secspday
+
+        # --- alias read+write per-patch output arrays ---
+        bglfr                = st.bglfr
+        bgtr                 = st.bgtr
+        lgsf                 = st.lgsf
+        leafc_stor2xfer      = st.leafc_stor2xfer
+        frootc_stor2xfer     = st.frootc_stor2xfer
+        livestemc_stor2xfer  = st.livestemc_stor2xfer
+        deadstemc_stor2xfer  = st.deadstemc_stor2xfer
+        livecrootc_stor2xfer = st.livecrootc_stor2xfer
+        deadcrootc_stor2xfer = st.deadcrootc_stor2xfer
+        gresp_stor2xfer      = st.gresp_stor2xfer
+        leafn_stor2xfer      = st.leafn_stor2xfer
+        frootn_stor2xfer     = st.frootn_stor2xfer
+        livestemn_stor2xfer  = st.livestemn_stor2xfer
+        deadstemn_stor2xfer  = st.deadstemn_stor2xfer
+        livecrootn_stor2xfer = st.livecrootn_stor2xfer
+        deadcrootn_stor2xfer = st.deadcrootn_stor2xfer
+
+        # --- alias read-only per-patch storage inputs ---
+        leafc_storage      = inp.leafc_storage
+        frootc_storage     = inp.frootc_storage
+        livestemc_storage  = inp.livestemc_storage
+        deadstemc_storage  = inp.deadstemc_storage
+        livecrootc_storage = inp.livecrootc_storage
+        deadcrootc_storage = inp.deadcrootc_storage
+        gresp_storage      = inp.gresp_storage
+        leafn_storage      = inp.leafn_storage
+        frootn_storage     = inp.frootn_storage
+        livestemn_storage  = inp.livestemn_storage
+        deadstemn_storage  = inp.deadstemn_storage
+        livecrootn_storage = inp.livecrootn_storage
+        deadcrootn_storage = inp.deadcrootn_storage
+
+        # --- body verbatim ---
         ivt = itype[p] + 1
-        if evergreen[ivt] == 1.0
-            bglfr[p] = 1.0 / (leaf_long[ivt] * avg_dayspyr * secspday)
-            bgtr[p]  = 0.0
-            lgsf[p]  = 0.0
+        if evergreen[ivt] == one(T)
+            bglfr[p] = one(T) / (leaf_long[ivt] * avg_dayspyr * secspday)
+            bgtr[p]  = zero(T)
+            lgsf[p]  = zero(T)
             leafc_stor2xfer[p]  = fstor2tran * leafc_storage[p] / dt
             frootc_stor2xfer[p] = fstor2tran * frootc_storage[p] / dt
-            if woody[ivt] == 1.0
+            if woody[ivt] == one(T)
                 livestemc_stor2xfer[p]  = fstor2tran * livestemc_storage[p] / dt
                 deadstemc_stor2xfer[p]  = fstor2tran * deadstemc_storage[p] / dt
                 livecrootc_stor2xfer[p] = fstor2tran * livecrootc_storage[p] / dt
@@ -215,7 +284,7 @@ phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, spval) =
             end
             leafn_stor2xfer[p]  = fstor2tran * leafn_storage[p] / dt
             frootn_stor2xfer[p] = fstor2tran * frootn_storage[p] / dt
-            if woody[ivt] == 1.0
+            if woody[ivt] == one(T)
                 livestemn_stor2xfer[p]  = fstor2tran * livestemn_storage[p] / dt
                 deadstemn_stor2xfer[p]  = fstor2tran * deadstemn_storage[p] / dt
                 livecrootn_stor2xfer[p] = fstor2tran * livecrootn_storage[p] / dt
@@ -240,28 +309,50 @@ function phen_evergreen!(bglfr, bgtr, lgsf,
         livestemn_storage, deadstemn_storage, livecrootn_storage,
         deadcrootn_storage,
         dt, fstor2tran, avg_dayspyr, secspday)
-    _launch!(_phen_evergreen_kernel!, bglfr, bgtr, lgsf,
-        leafc_stor2xfer, frootc_stor2xfer,
-        livestemc_stor2xfer, deadstemc_stor2xfer, livecrootc_stor2xfer,
-        deadcrootc_stor2xfer, gresp_stor2xfer,
-        leafn_stor2xfer, frootn_stor2xfer,
-        livestemn_stor2xfer, deadstemn_stor2xfer, livecrootn_stor2xfer,
-        deadcrootn_stor2xfer,
+    # working precision = element type of the device output arrays
+    T = eltype(bglfr)
+
+    st = _PhenEvergreenState(;
+        bglfr=bglfr, bgtr=bgtr, lgsf=lgsf,
+        leafc_stor2xfer=leafc_stor2xfer, frootc_stor2xfer=frootc_stor2xfer,
+        livestemc_stor2xfer=livestemc_stor2xfer, deadstemc_stor2xfer=deadstemc_stor2xfer,
+        livecrootc_stor2xfer=livecrootc_stor2xfer, deadcrootc_stor2xfer=deadcrootc_stor2xfer,
+        gresp_stor2xfer=gresp_stor2xfer,
+        leafn_stor2xfer=leafn_stor2xfer, frootn_stor2xfer=frootn_stor2xfer,
+        livestemn_stor2xfer=livestemn_stor2xfer, deadstemn_stor2xfer=deadstemn_stor2xfer,
+        livecrootn_stor2xfer=livecrootn_stor2xfer, deadcrootn_stor2xfer=deadcrootn_stor2xfer)
+
+    inp = _PhenEvergreenInputs(;
+        leafc_storage=leafc_storage, frootc_storage=frootc_storage,
+        livestemc_storage=livestemc_storage, deadstemc_storage=deadstemc_storage,
+        livecrootc_storage=livecrootc_storage, deadcrootc_storage=deadcrootc_storage,
+        gresp_storage=gresp_storage,
+        leafn_storage=leafn_storage, frootn_storage=frootn_storage,
+        livestemn_storage=livestemn_storage, deadstemn_storage=deadstemn_storage,
+        livecrootn_storage=livecrootn_storage, deadcrootn_storage=deadcrootn_storage)
+
+    ps = _PhenEvergreenScalars(;
+        dt=T(dt), fstor2tran=T(fstor2tran),
+        avg_dayspyr=T(avg_dayspyr), secspday=T(secspday))
+
+    # Struct-first kernel: manual backend + synchronize (the bundle args carry no backend).
+    backend = _kernel_backend(st.bglfr)
+    _phen_evergreen_kernel!(backend)(
+        st, inp,
         mask, itype, evergreen, woody, leaf_long,
-        leafc_storage, frootc_storage,
-        livestemc_storage, deadstemc_storage, livecrootc_storage,
-        deadcrootc_storage, gresp_storage,
-        leafn_storage, frootn_storage,
-        livestemn_storage, deadstemn_storage, livecrootn_storage,
-        deadcrootn_storage,
-        dt, fstor2tran, avg_dayspyr, secspday)
+        ps;
+        ndrange = length(mask))
+    KA.synchronize(backend)
+
+    return nothing
 end
 
 # --- crop_phase!: derive current crop phase into an output array ----------
 @kernel function _phen_crop_phase_kernel!(crop_phase_out, @Const(mask),
         @Const(croplive), @Const(gddtsoi), @Const(hui),
         @Const(huileaf), @Const(huigrain),
-        planted::Float64, leafemerge::Float64, grainfill::Float64)
+        planted, leafemerge, grainfill)
+    T = eltype(crop_phase_out)
     p = @index(Global)
     @inbounds if mask[p]
         if croplive[p]
@@ -278,39 +369,93 @@ end
 phen_crop_phase!(crop_phase_out, mask, croplive, gddtsoi, hui, huileaf,
                  huigrain, planted, leafemerge, grainfill) =
     _launch!(_phen_crop_phase_kernel!, crop_phase_out, mask, croplive, gddtsoi,
-             hui, huileaf, huigrain, planted, leafemerge, grainfill)
+             hui, huileaf, huigrain, eltype(crop_phase_out)(planted),
+             eltype(crop_phase_out)(leafemerge), eltype(crop_phase_out)(grainfill))
+
+# --- cn_onset_growth!: transfer→display fluxes during onset --------------
+# ==========================================================================
+# cn_onset_growth! device-view structs (group >31 kernel args for Metal)
+# ==========================================================================
+Base.@kwdef struct _PhenOnsetGrowthOut{V}   # the 12 write-only transfer→display growth-flux arrays (per-patch Vectors)
+    leafc_xfer_to_leafc::V;     frootc_xfer_to_frootc::V
+    leafn_xfer_to_leafn::V;     frootn_xfer_to_frootn::V
+    livestemc_xfer_to_livestemc::V; deadstemc_xfer_to_deadstemc::V
+    livecrootc_xfer_to_livecrootc::V; deadcrootc_xfer_to_deadcrootc::V
+    livestemn_xfer_to_livestemn::V; deadstemn_xfer_to_deadstemn::V
+    livecrootn_xfer_to_livecrootn::V; deadcrootn_xfer_to_deadcrootn::V
+end
+Adapt.@adapt_structure _PhenOnsetGrowthOut
+
+Base.@kwdef struct _PhenOnsetGrowthIn{V}   # read-only per-patch inputs (@Const), all per-patch Vectors share eltype V
+    onset_flag::V; onset_counter::V; bgtr::V
+    leafc_xfer::V;  frootc_xfer::V
+    leafn_xfer::V;  frootn_xfer::V
+    livestemc_xfer::V; deadstemc_xfer::V
+    livecrootc_xfer::V; deadcrootc_xfer::V
+    livestemn_xfer::V; deadstemn_xfer::V
+    livecrootn_xfer::V; deadcrootn_xfer::V
+end
+Adapt.@adapt_structure _PhenOnsetGrowthIn
+
+Base.@kwdef struct _PhenOnsetScalars{T}   # isbits scalar bundle at working precision T
+    dt::T
+end
 
 # --- cn_onset_growth!: transfer→display fluxes during onset --------------
 @kernel function _phen_onset_growth_kernel!(
-        leafc_xfer_to_leafc, frootc_xfer_to_frootc,
-        leafn_xfer_to_leafn, frootn_xfer_to_frootn,
-        livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc,
-        livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc,
-        livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn,
-        livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn,
+        out::_PhenOnsetGrowthOut, inp::_PhenOnsetGrowthIn,
         @Const(mask), @Const(itype), @Const(woody),
-        @Const(onset_flag), @Const(onset_counter), @Const(bgtr),
-        @Const(leafc_xfer), @Const(frootc_xfer),
-        @Const(leafn_xfer), @Const(frootn_xfer),
-        @Const(livestemc_xfer), @Const(deadstemc_xfer),
-        @Const(livecrootc_xfer), @Const(deadcrootc_xfer),
-        @Const(livestemn_xfer), @Const(deadstemn_xfer),
-        @Const(livecrootn_xfer), @Const(deadcrootn_xfer),
-        dt::Float64)
+        ps::_PhenOnsetScalars)
+    T = eltype(out.leafc_xfer_to_leafc)
     p = @index(Global)
     @inbounds if mask[p]
+        # --- alias scalar bundle to Fortran-named local ---
+        dt = ps.dt
+
+        # --- alias write-only outputs to Fortran-named locals ---
+        leafc_xfer_to_leafc         = out.leafc_xfer_to_leafc
+        frootc_xfer_to_frootc       = out.frootc_xfer_to_frootc
+        leafn_xfer_to_leafn         = out.leafn_xfer_to_leafn
+        frootn_xfer_to_frootn       = out.frootn_xfer_to_frootn
+        livestemc_xfer_to_livestemc = out.livestemc_xfer_to_livestemc
+        deadstemc_xfer_to_deadstemc = out.deadstemc_xfer_to_deadstemc
+        livecrootc_xfer_to_livecrootc = out.livecrootc_xfer_to_livecrootc
+        deadcrootc_xfer_to_deadcrootc = out.deadcrootc_xfer_to_deadcrootc
+        livestemn_xfer_to_livestemn = out.livestemn_xfer_to_livestemn
+        deadstemn_xfer_to_deadstemn = out.deadstemn_xfer_to_deadstemn
+        livecrootn_xfer_to_livecrootn = out.livecrootn_xfer_to_livecrootn
+        deadcrootn_xfer_to_deadcrootn = out.deadcrootn_xfer_to_deadcrootn
+
+        # --- alias read-only per-patch inputs to Fortran-named locals ---
+        onset_flag      = inp.onset_flag
+        onset_counter   = inp.onset_counter
+        bgtr            = inp.bgtr
+        leafc_xfer      = inp.leafc_xfer
+        frootc_xfer     = inp.frootc_xfer
+        leafn_xfer      = inp.leafn_xfer
+        frootn_xfer     = inp.frootn_xfer
+        livestemc_xfer  = inp.livestemc_xfer
+        deadstemc_xfer  = inp.deadstemc_xfer
+        livecrootc_xfer = inp.livecrootc_xfer
+        deadcrootc_xfer = inp.deadcrootc_xfer
+        livestemn_xfer  = inp.livestemn_xfer
+        deadstemn_xfer  = inp.deadstemn_xfer
+        livecrootn_xfer = inp.livecrootn_xfer
+        deadcrootn_xfer = inp.deadcrootn_xfer
+
+        # --- body verbatim ---
         ivt = itype[p] + 1
-        if onset_flag[p] == 1.0
-            if abs(onset_counter[p] - dt) <= dt / 2.0
-                t1 = 1.0 / dt
+        if onset_flag[p] == one(T)
+            if abs(onset_counter[p] - dt) <= dt / T(2)
+                t1 = one(T) / dt
             else
-                t1 = 2.0 / onset_counter[p]
+                t1 = T(2) / onset_counter[p]
             end
             leafc_xfer_to_leafc[p]   = t1 * leafc_xfer[p]
             frootc_xfer_to_frootc[p] = t1 * frootc_xfer[p]
             leafn_xfer_to_leafn[p]   = t1 * leafn_xfer[p]
             frootn_xfer_to_frootn[p] = t1 * frootn_xfer[p]
-            if woody[ivt] == 1.0
+            if woody[ivt] == one(T)
                 livestemc_xfer_to_livestemc[p]   = t1 * livestemc_xfer[p]
                 deadstemc_xfer_to_deadstemc[p]   = t1 * deadstemc_xfer[p]
                 livecrootc_xfer_to_livecrootc[p] = t1 * livecrootc_xfer[p]
@@ -321,12 +466,12 @@ phen_crop_phase!(crop_phase_out, mask, croplive, gddtsoi, hui, huileaf,
                 deadcrootn_xfer_to_deadcrootn[p] = t1 * deadcrootn_xfer[p]
             end
         end
-        if bgtr[p] > 0.0
+        if bgtr[p] > zero(T)
             leafc_xfer_to_leafc[p]   = leafc_xfer[p] / dt
             frootc_xfer_to_frootc[p] = frootc_xfer[p] / dt
             leafn_xfer_to_leafn[p]   = leafn_xfer[p] / dt
             frootn_xfer_to_frootn[p] = frootn_xfer[p] / dt
-            if woody[ivt] == 1.0
+            if woody[ivt] == one(T)
                 livestemc_xfer_to_livestemc[p]   = livestemc_xfer[p] / dt
                 deadstemc_xfer_to_deadstemc[p]   = deadstemc_xfer[p] / dt
                 livecrootc_xfer_to_livecrootc[p] = livecrootc_xfer[p] / dt
@@ -352,18 +497,39 @@ function phen_onset_growth!(
         livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer,
         livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer,
         dt)
-    _launch!(_phen_onset_growth_kernel!,
-        leafc_xfer_to_leafc, frootc_xfer_to_frootc,
-        leafn_xfer_to_leafn, frootn_xfer_to_frootn,
-        livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc,
-        livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc,
-        livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn,
-        livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn,
-        mask, itype, woody, onset_flag, onset_counter, bgtr,
-        leafc_xfer, frootc_xfer, leafn_xfer, frootn_xfer,
-        livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer,
-        livestemn_xfer, deadstemn_xfer, livecrootn_xfer, deadcrootn_xfer,
-        dt)
+
+    # working precision = element type of the device flux arrays
+    T = eltype(leafc_xfer_to_leafc)
+
+    out = _PhenOnsetGrowthOut(;
+        leafc_xfer_to_leafc=leafc_xfer_to_leafc, frootc_xfer_to_frootc=frootc_xfer_to_frootc,
+        leafn_xfer_to_leafn=leafn_xfer_to_leafn, frootn_xfer_to_frootn=frootn_xfer_to_frootn,
+        livestemc_xfer_to_livestemc=livestemc_xfer_to_livestemc, deadstemc_xfer_to_deadstemc=deadstemc_xfer_to_deadstemc,
+        livecrootc_xfer_to_livecrootc=livecrootc_xfer_to_livecrootc, deadcrootc_xfer_to_deadcrootc=deadcrootc_xfer_to_deadcrootc,
+        livestemn_xfer_to_livestemn=livestemn_xfer_to_livestemn, deadstemn_xfer_to_deadstemn=deadstemn_xfer_to_deadstemn,
+        livecrootn_xfer_to_livecrootn=livecrootn_xfer_to_livecrootn, deadcrootn_xfer_to_deadcrootn=deadcrootn_xfer_to_deadcrootn)
+
+    inp = _PhenOnsetGrowthIn(;
+        onset_flag=onset_flag, onset_counter=onset_counter, bgtr=bgtr,
+        leafc_xfer=leafc_xfer, frootc_xfer=frootc_xfer,
+        leafn_xfer=leafn_xfer, frootn_xfer=frootn_xfer,
+        livestemc_xfer=livestemc_xfer, deadstemc_xfer=deadstemc_xfer,
+        livecrootc_xfer=livecrootc_xfer, deadcrootc_xfer=deadcrootc_xfer,
+        livestemn_xfer=livestemn_xfer, deadstemn_xfer=deadstemn_xfer,
+        livecrootn_xfer=livecrootn_xfer, deadcrootn_xfer=deadcrootn_xfer)
+
+    ps = _PhenOnsetScalars(; dt=T(dt))
+
+    # Struct-first kernel: manual backend + synchronize (the bundle args carry no backend).
+    backend = _kernel_backend(out.leafc_xfer_to_leafc)
+    _phen_onset_growth_kernel!(backend)(
+        out, inp,
+        mask, itype, woody,
+        ps;
+        ndrange = length(mask))
+    KA.synchronize(backend)
+
+    return nothing
 end
 
 # --- cn_offset_litterfall!: display→litter fluxes during offset ----------
@@ -375,17 +541,18 @@ end
         @Const(offset_flag), @Const(offset_counter),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
-        dt::Float64, CNratio_floating::Bool)
+        dt, CNratio_floating::Bool)
+    T = eltype(leafc_to_litter)
     p = @index(Global)
     @inbounds if mask[p]
-        if offset_flag[p] == 1.0
+        if offset_flag[p] == one(T)
             ivt = itype[p] + 1
-            if abs(offset_counter[p] - dt) <= dt / 2.0
-                t1 = 1.0 / dt
+            if abs(offset_counter[p] - dt) <= dt / T(2)
+                t1 = one(T) / dt
                 frootc_to_litter[p] = t1 * frootc[p]
                 leafc_to_litter[p]  = t1 * leafc[p]
             else
-                t1 = dt * 2.0 / (offset_counter[p]^2)
+                t1 = dt * T(2) / (offset_counter[p]^2)
                 leafc_to_litter[p]  = prev_leafc_to_litter[p] +
                     t1 * (leafc[p] - prev_leafc_to_litter[p] * offset_counter[p])
                 frootc_to_litter[p] = prev_frootc_to_litter[p] +
@@ -393,16 +560,16 @@ end
             end
 
             if CNratio_floating
-                fr_leafn_to_litter = 0.5
-                if leafc[p] == 0.0
-                    ntovr_leaf = 0.0
+                fr_leafn_to_litter = T(0.5)
+                if leafc[p] == zero(T)
+                    ntovr_leaf = zero(T)
                 else
                     ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
                 end
                 leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
                 leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
-                if frootc[p] == 0.0
-                    frootn_to_litter[p] = 0.0
+                if frootc[p] == zero(T)
+                    frootn_to_litter[p] = zero(T)
                 else
                     frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
                 end
@@ -431,7 +598,7 @@ function phen_offset_litterfall!(
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
-        dt, CNratio_floating)
+        eltype(leafc_to_litter)(dt), CNratio_floating)
 end
 
 # --- cn_background_litterfall!: background litter fluxes ------------------
@@ -442,23 +609,24 @@ end
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
         CNratio_floating::Bool)
+    T = eltype(leafc_to_litter)
     p = @index(Global)
     @inbounds if mask[p]
-        if bglfr[p] > 0.0
+        if bglfr[p] > zero(T)
             ivt = itype[p] + 1
             leafc_to_litter[p]  = bglfr[p] * leafc[p]
             frootc_to_litter[p] = bglfr[p] * frootc[p]
             if CNratio_floating
-                fr_leafn_to_litter = 0.5
-                if leafc[p] == 0.0
-                    ntovr_leaf = 0.0
+                fr_leafn_to_litter = T(0.5)
+                if leafc[p] == zero(T)
+                    ntovr_leaf = zero(T)
                 else
                     ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
                 end
                 leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
                 leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
-                if frootc[p] == 0.0
-                    frootn_to_litter[p] = 0.0
+                if frootc[p] == zero(T)
+                    frootn_to_litter[p] = zero(T)
                 else
                     frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
                 end
@@ -491,19 +659,20 @@ end
         @Const(livewdcn), @Const(deadwdcn),
         @Const(livestemc), @Const(livestemn),
         @Const(livecrootc), @Const(livecrootn),
-        lwtop::Float64, CNratio_floating::Bool)
+        lwtop, CNratio_floating::Bool)
+    T = eltype(livestemc_to_deadstemc)
     p = @index(Global)
     @inbounds if mask[p]
         ivt = itype[p] + 1
-        if woody[ivt] > 0.0
+        if woody[ivt] > zero(T)
             ctovr = livestemc[p] * lwtop
             ntovr = ctovr / livewdcn[ivt]
             livestemc_to_deadstemc[p] = ctovr
             livestemn_to_deadstemn[p] = ctovr / deadwdcn[ivt]
             if CNratio_floating
-                if livestemc[p] == 0.0
-                    ntovr = 0.0
-                    livestemn_to_deadstemn[p] = 0.0
+                if livestemc[p] == zero(T)
+                    ntovr = zero(T)
+                    livestemn_to_deadstemn[p] = zero(T)
                 else
                     ntovr = ctovr * (livestemn[p] / livestemc[p])
                     livestemn_to_deadstemn[p] = ctovr / deadwdcn[ivt]
@@ -516,9 +685,9 @@ end
             livecrootc_to_deadcrootc[p] = ctovr
             livecrootn_to_deadcrootn[p] = ctovr / deadwdcn[ivt]
             if CNratio_floating
-                if livecrootc[p] == 0.0
-                    ntovr = 0.0
-                    livecrootn_to_deadcrootn[p] = 0.0
+                if livecrootc[p] == zero(T)
+                    ntovr = zero(T)
+                    livecrootn_to_deadcrootn[p] = zero(T)
                 else
                     ntovr = ctovr * (livecrootn[p] / livecrootc[p])
                     livecrootn_to_deadcrootn[p] = ctovr / deadwdcn[ivt]
@@ -540,7 +709,7 @@ function phen_livewood_turnover!(
         livecrootc_to_deadcrootc, livecrootn_to_deadcrootn, livecrootn_to_retransn,
         mask, itype, woody, livewdcn, deadwdcn,
         livestemc, livestemn, livecrootc, livecrootn,
-        lwtop, CNratio_floating)
+        eltype(livestemc_to_deadstemc)(lwtop), CNratio_floating)
 end
 
 # --- cn_crop_harvest_to_product_pools!: per-patch harvest sums ------------
@@ -677,9 +846,9 @@ end
 # ==========================================================================
 function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        pftcon::PftConPhenology,
-                       mask_soilp::BitVector,   # soil patches
-                       mask_pcropp::BitVector,   # prognostic crop patches
-                       mask_soilc::BitVector,    # soil columns
+                       mask_soilp::AbstractVector{Bool},   # soil patches
+                       mask_pcropp::AbstractVector{Bool},   # prognostic crop patches
+                       mask_soilc::AbstractVector{Bool},    # soil columns
                        temperature::TemperatureData,
                        water_diag::WaterDiagnosticBulkData,
                        canopy_state::CanopyStateData,
@@ -693,8 +862,8 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        patch_data::PatchData,
                        gridcell::GridcellData,
                        cn_params::CNSharedParamsData,
-                       leaf_prof_patch::Matrix{<:Real},
-                       froot_prof_patch::Matrix{<:Real},
+                       leaf_prof_patch::AbstractMatrix{<:Real},
+                       froot_prof_patch::AbstractMatrix{<:Real},
                        phase::Int;
                        varctl::VarCtl=VarCtl(),
                        is_first_step::Bool=false,
@@ -767,7 +936,7 @@ end
 # cn_phenology_climate!  — Climate averaging for phenology triggers
 # ==========================================================================
 function cn_phenology_climate!(pstate::PhenologyState,
-                               mask_soilp::BitVector,
+                               mask_soilp::AbstractVector{Bool},
                                temperature::TemperatureData,
                                cnveg_state::CNVegStateData,
                                crop::CropData,
@@ -786,7 +955,7 @@ end
 # cn_evergreen_phenology!
 # ==========================================================================
 function cn_evergreen_phenology!(pstate::PhenologyState,
-                                 mask_soilp::BitVector,
+                                 mask_soilp::AbstractVector{Bool},
                                  pftcon::PftConPhenology,
                                  cnveg_state::CNVegStateData,
                                  cnveg_cs::CNVegCarbonStateData,
@@ -824,9 +993,360 @@ end
 # ==========================================================================
 # cn_season_decid_phenology!
 # ==========================================================================
+Base.@kwdef struct _PhenSeasonSDState{V}   # read+write per-patch state/flux arrays (all per-patch Vectors)
+    bglfr_patch::V; bgtr_patch::V; lgsf_patch::V
+    offset_flag_patch::V; offset_counter_patch::V
+    dormant_flag_patch::V; days_active_patch::V
+    onset_flag_patch::V; onset_counter_patch::V
+    onset_gdd_patch::V; onset_gddflag_patch::V
+    prev_leafc_to_litter_patch::V; prev_frootc_to_litter_patch::V
+    leafc_xfer_to_leafc_patch::V; frootc_xfer_to_frootc_patch::V
+    leafn_xfer_to_leafn_patch::V; frootn_xfer_to_frootn_patch::V
+    livestemc_xfer_to_livestemc_patch::V; deadstemc_xfer_to_deadstemc_patch::V
+    livecrootc_xfer_to_livecrootc_patch::V; deadcrootc_xfer_to_deadcrootc_patch::V
+    livestemn_xfer_to_livestemn_patch::V; deadstemn_xfer_to_deadstemn_patch::V
+    livecrootn_xfer_to_livecrootn_patch::V; deadcrootn_xfer_to_deadcrootn_patch::V
+    leafc_xfer_patch::V; leafn_xfer_patch::V; frootc_xfer_patch::V; frootn_xfer_patch::V
+    livestemc_xfer_patch::V; livestemn_xfer_patch::V; deadstemc_xfer_patch::V; deadstemn_xfer_patch::V
+    livecrootc_xfer_patch::V; livecrootn_xfer_patch::V; deadcrootc_xfer_patch::V; deadcrootn_xfer_patch::V
+    leafc_storage_to_xfer_patch::V; frootc_storage_to_xfer_patch::V
+    livestemc_storage_to_xfer_patch::V; deadstemc_storage_to_xfer_patch::V
+    livecrootc_storage_to_xfer_patch::V; deadcrootc_storage_to_xfer_patch::V
+    gresp_storage_to_xfer_patch::V
+    leafn_storage_to_xfer_patch::V; frootn_storage_to_xfer_patch::V
+    livestemn_storage_to_xfer_patch::V; deadstemn_storage_to_xfer_patch::V
+    livecrootn_storage_to_xfer_patch::V; deadcrootn_storage_to_xfer_patch::V
+end
+Adapt.@adapt_structure _PhenSeasonSDState
+
+Base.@kwdef struct _PhenSeasonSDInputs{V}   # read-only per-patch inputs (@Const), all per-patch Vectors
+    season_decid::V; woody::V; season_decid_temperate::V
+    crit_onset_gdd_sf::V; ndays_on::V
+    annavg_t2m_patch::V; t_a5min_patch::V
+    leafc_storage_patch::V; frootc_storage_patch::V
+    livestemc_storage_patch::V; deadstemc_storage_patch::V
+    livecrootc_storage_patch::V; deadcrootc_storage_patch::V
+    gresp_storage_patch::V
+    leafn_storage_patch::V; frootn_storage_patch::V
+    livestemn_storage_patch::V; deadstemn_storage_patch::V
+    livecrootn_storage_patch::V; deadcrootn_storage_patch::V
+end
+Adapt.@adapt_structure _PhenSeasonSDInputs
+
+Base.@kwdef struct _PhenSeasonSDColGrc{V,M}   # per-column matrix + per-column/per-gridcell vectors
+    t_soisno_col::M
+    snow_5day_col::V; soila10_col::V
+    dayl::V; prev_dayl::V; latdeg::V
+end
+Adapt.@adapt_structure _PhenSeasonSDColGrc
+
+Base.@kwdef struct _PhenSeasonSDScalars{T}   # isbits scalar bundle at working precision T
+    dt::T; fracday::T; crit_dayl::T; ndays_off::T
+    fstor2tran::T; snow5d_thresh::T
+    crit_dayl_at_high_lat::T; crit_dayl_lat_slope::T
+    secspday::T; tfrz::T
+    crit_offset_high_lat::T; min_critical_daylength_onset::T
+end
+
+@kernel function _phen_season_decid_kernel!(
+        st::_PhenSeasonSDState, inp::_PhenSeasonSDInputs, cg::_PhenSeasonSDColGrc,
+        @Const(mask_soilp), @Const(itype), @Const(column), @Const(gridcell_idx),
+        ps::_PhenSeasonSDScalars,
+        soil_layer::Int, use_cndv::Bool,
+        crit_dayl_method::Int, onset_thresh_depends_on_veg::Bool)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        T = eltype(st.bglfr_patch)
+
+        # --- alias scalar bundle fields to Fortran-named locals (verbatim body below) ---
+        dt                          = ps.dt
+        fracday                     = ps.fracday
+        crit_dayl                   = ps.crit_dayl
+        ndays_off                   = ps.ndays_off
+        fstor2tran                  = ps.fstor2tran
+        snow5d_thresh               = ps.snow5d_thresh
+        crit_dayl_at_high_lat       = ps.crit_dayl_at_high_lat
+        crit_dayl_lat_slope         = ps.crit_dayl_lat_slope
+        secspday                    = ps.secspday
+        tfrz                        = ps.tfrz
+        crit_offset_high_lat        = ps.crit_offset_high_lat
+        min_critical_daylength_onset = ps.min_critical_daylength_onset
+
+        # --- alias read-only per-patch inputs ---
+        season_decid           = inp.season_decid
+        woody                  = inp.woody
+        season_decid_temperate = inp.season_decid_temperate
+        crit_onset_gdd_sf      = inp.crit_onset_gdd_sf
+        ndays_on               = inp.ndays_on
+        annavg_t2m_patch       = inp.annavg_t2m_patch
+        t_a5min_patch          = inp.t_a5min_patch
+        leafc_storage_patch      = inp.leafc_storage_patch
+        frootc_storage_patch     = inp.frootc_storage_patch
+        livestemc_storage_patch  = inp.livestemc_storage_patch
+        deadstemc_storage_patch  = inp.deadstemc_storage_patch
+        livecrootc_storage_patch = inp.livecrootc_storage_patch
+        deadcrootc_storage_patch = inp.deadcrootc_storage_patch
+        gresp_storage_patch      = inp.gresp_storage_patch
+        leafn_storage_patch      = inp.leafn_storage_patch
+        frootn_storage_patch     = inp.frootn_storage_patch
+        livestemn_storage_patch  = inp.livestemn_storage_patch
+        deadstemn_storage_patch  = inp.deadstemn_storage_patch
+        livecrootn_storage_patch = inp.livecrootn_storage_patch
+        deadcrootn_storage_patch = inp.deadcrootn_storage_patch
+
+        # --- alias per-column / per-gridcell fields ---
+        t_soisno_col = cg.t_soisno_col
+        snow_5day_col = cg.snow_5day_col
+        soila10_col   = cg.soila10_col
+        dayl          = cg.dayl
+        prev_dayl     = cg.prev_dayl
+        latdeg        = cg.latdeg
+
+        # --- alias read+write per-patch state arrays ---
+        bglfr_patch          = st.bglfr_patch
+        bgtr_patch           = st.bgtr_patch
+        lgsf_patch           = st.lgsf_patch
+        offset_flag_patch    = st.offset_flag_patch
+        offset_counter_patch = st.offset_counter_patch
+        dormant_flag_patch   = st.dormant_flag_patch
+        days_active_patch    = st.days_active_patch
+        onset_flag_patch     = st.onset_flag_patch
+        onset_counter_patch  = st.onset_counter_patch
+        onset_gdd_patch      = st.onset_gdd_patch
+        onset_gddflag_patch  = st.onset_gddflag_patch
+        prev_leafc_to_litter_patch  = st.prev_leafc_to_litter_patch
+        prev_frootc_to_litter_patch = st.prev_frootc_to_litter_patch
+        leafc_xfer_to_leafc_patch   = st.leafc_xfer_to_leafc_patch
+        frootc_xfer_to_frootc_patch = st.frootc_xfer_to_frootc_patch
+        leafn_xfer_to_leafn_patch   = st.leafn_xfer_to_leafn_patch
+        frootn_xfer_to_frootn_patch = st.frootn_xfer_to_frootn_patch
+        livestemc_xfer_to_livestemc_patch   = st.livestemc_xfer_to_livestemc_patch
+        deadstemc_xfer_to_deadstemc_patch   = st.deadstemc_xfer_to_deadstemc_patch
+        livecrootc_xfer_to_livecrootc_patch = st.livecrootc_xfer_to_livecrootc_patch
+        deadcrootc_xfer_to_deadcrootc_patch = st.deadcrootc_xfer_to_deadcrootc_patch
+        livestemn_xfer_to_livestemn_patch   = st.livestemn_xfer_to_livestemn_patch
+        deadstemn_xfer_to_deadstemn_patch   = st.deadstemn_xfer_to_deadstemn_patch
+        livecrootn_xfer_to_livecrootn_patch = st.livecrootn_xfer_to_livecrootn_patch
+        deadcrootn_xfer_to_deadcrootn_patch = st.deadcrootn_xfer_to_deadcrootn_patch
+        leafc_xfer_patch  = st.leafc_xfer_patch
+        leafn_xfer_patch  = st.leafn_xfer_patch
+        frootc_xfer_patch = st.frootc_xfer_patch
+        frootn_xfer_patch = st.frootn_xfer_patch
+        livestemc_xfer_patch  = st.livestemc_xfer_patch
+        livestemn_xfer_patch  = st.livestemn_xfer_patch
+        deadstemc_xfer_patch  = st.deadstemc_xfer_patch
+        deadstemn_xfer_patch  = st.deadstemn_xfer_patch
+        livecrootc_xfer_patch = st.livecrootc_xfer_patch
+        livecrootn_xfer_patch = st.livecrootn_xfer_patch
+        deadcrootc_xfer_patch = st.deadcrootc_xfer_patch
+        deadcrootn_xfer_patch = st.deadcrootn_xfer_patch
+        leafc_storage_to_xfer_patch  = st.leafc_storage_to_xfer_patch
+        frootc_storage_to_xfer_patch = st.frootc_storage_to_xfer_patch
+        livestemc_storage_to_xfer_patch  = st.livestemc_storage_to_xfer_patch
+        deadstemc_storage_to_xfer_patch  = st.deadstemc_storage_to_xfer_patch
+        livecrootc_storage_to_xfer_patch = st.livecrootc_storage_to_xfer_patch
+        deadcrootc_storage_to_xfer_patch = st.deadcrootc_storage_to_xfer_patch
+        gresp_storage_to_xfer_patch      = st.gresp_storage_to_xfer_patch
+        leafn_storage_to_xfer_patch  = st.leafn_storage_to_xfer_patch
+        frootn_storage_to_xfer_patch = st.frootn_storage_to_xfer_patch
+        livestemn_storage_to_xfer_patch  = st.livestemn_storage_to_xfer_patch
+        deadstemn_storage_to_xfer_patch  = st.deadstemn_storage_to_xfer_patch
+        livecrootn_storage_to_xfer_patch = st.livecrootn_storage_to_xfer_patch
+        deadcrootn_storage_to_xfer_patch = st.deadcrootn_storage_to_xfer_patch
+
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+        c   = column[p]
+        g   = gridcell_idx[p]
+
+        if season_decid[ivt] == one(T)
+            # set background rates to 0
+            bglfr_patch[p] = zero(T)
+            bgtr_patch[p]  = zero(T)
+            lgsf_patch[p]  = zero(T)
+
+            # onset GDD sum
+            crit_onset_gdd = crit_onset_gdd_sf[ivt] *
+                exp(T(4.8) + T(0.13) * (annavg_t2m_patch[p] - tfrz))
+
+            # winter→summer flag
+            ws_flag = dayl[g] >= prev_dayl[g] ? one(T) : zero(T)
+
+            # update offset_counter
+            if offset_flag_patch[p] == one(T)
+                offset_counter_patch[p] -= dt
+
+                if offset_counter_patch[p] < dt / T(2)
+                    offset_flag_patch[p]    = zero(T)
+                    offset_counter_patch[p]  = zero(T)
+                    dormant_flag_patch[p]    = one(T)
+                    days_active_patch[p]     = zero(T)
+
+                    prev_leafc_to_litter_patch[p]  = zero(T)
+                    prev_frootc_to_litter_patch[p] = zero(T)
+                end
+            end
+
+            # update onset_counter
+            if onset_flag_patch[p] == one(T)
+                onset_counter_patch[p] -= dt
+
+                if onset_counter_patch[p] < dt / T(2)
+                    onset_flag_patch[p]    = zero(T)
+                    onset_counter_patch[p] = zero(T)
+                    # zero transfer growth rates
+                    leafc_xfer_to_leafc_patch[p]   = zero(T)
+                    frootc_xfer_to_frootc_patch[p] = zero(T)
+                    leafn_xfer_to_leafn_patch[p]   = zero(T)
+                    frootn_xfer_to_frootn_patch[p] = zero(T)
+                    if woody[ivt] == one(T)
+                        livestemc_xfer_to_livestemc_patch[p]   = zero(T)
+                        deadstemc_xfer_to_deadstemc_patch[p]   = zero(T)
+                        livecrootc_xfer_to_livecrootc_patch[p] = zero(T)
+                        deadcrootc_xfer_to_deadcrootc_patch[p] = zero(T)
+                        livestemn_xfer_to_livestemn_patch[p]   = zero(T)
+                        deadstemn_xfer_to_deadstemn_patch[p]   = zero(T)
+                        livecrootn_xfer_to_livecrootn_patch[p] = zero(T)
+                        deadcrootn_xfer_to_deadcrootn_patch[p] = zero(T)
+                    end
+                    # zero transfer pools
+                    leafc_xfer_patch[p]  = zero(T)
+                    leafn_xfer_patch[p]  = zero(T)
+                    frootc_xfer_patch[p] = zero(T)
+                    frootn_xfer_patch[p] = zero(T)
+                    if woody[ivt] == one(T)
+                        livestemc_xfer_patch[p]  = zero(T)
+                        livestemn_xfer_patch[p]  = zero(T)
+                        deadstemc_xfer_patch[p]  = zero(T)
+                        deadstemn_xfer_patch[p]  = zero(T)
+                        livecrootc_xfer_patch[p] = zero(T)
+                        livecrootn_xfer_patch[p] = zero(T)
+                        deadcrootc_xfer_patch[p] = zero(T)
+                        deadcrootn_xfer_patch[p] = zero(T)
+                    end
+                end
+            end
+
+            # test dormant → growth
+            if dormant_flag_patch[p] == one(T)
+                soilt = t_soisno_col[c, soil_layer]
+                snow_5day = snow_5day_col[c]
+                soila10 = soila10_col[c]
+                t_a5min = t_a5min_patch[p]
+
+                # --- INLINED seasonal_decid_onset ---
+                og  = onset_gdd_patch[p]
+                ogf = onset_gddflag_patch[p]
+                do_result = false
+
+                # switch on GDD sum at winter solstice
+                if ogf == zero(T) && ws_flag == one(T)
+                    ogf = one(T)
+                    og  = zero(T)
+                end
+
+                # reset if past summer solstice without reaching threshold
+                if ogf == one(T) && ws_flag == zero(T)
+                    ogf = zero(T)
+                    og  = zero(T)
+                end
+
+                # accumulate GDD (smoothed TFRZ branch for AD)
+                if ogf == one(T)
+                    og += smooth_max(soilt - tfrz, zero(T)) * fracday
+                end
+
+                if onset_thresh_depends_on_veg
+                    if og > crit_onset_gdd && season_decid_temperate[ivt] == one(T)
+                        do_result = true
+                    elseif season_decid_temperate[ivt] == zero(T) && ogf == one(T) &&
+                           soila10 > tfrz && t_a5min > tfrz && ws_flag == one(T) &&
+                           dayl[g] > min_critical_daylength_onset &&
+                           snow_5day < snow5d_thresh
+                        do_result = true
+                    end
+                else
+                    if og > crit_onset_gdd
+                        do_result = true
+                    end
+                end
+                # --- end INLINED seasonal_decid_onset ---
+
+                # update in/out args
+                onset_gdd_patch[p]     = og
+                onset_gddflag_patch[p]  = ogf
+
+                if do_result
+                    onset_flag_patch[p]     = one(T)
+                    dormant_flag_patch[p]    = zero(T)
+                    onset_gddflag_patch[p]   = zero(T)
+                    onset_gdd_patch[p]       = zero(T)
+                    onset_counter_patch[p]   = ndays_on[ivt] * secspday
+
+                    # storage → transfer (non-matrix)
+                    leafc_storage_to_xfer_patch[p]  = fstor2tran * leafc_storage_patch[p] / dt
+                    frootc_storage_to_xfer_patch[p] = fstor2tran * frootc_storage_patch[p] / dt
+                    if woody[ivt] == one(T)
+                        livestemc_storage_to_xfer_patch[p]  = fstor2tran * livestemc_storage_patch[p] / dt
+                        deadstemc_storage_to_xfer_patch[p]  = fstor2tran * deadstemc_storage_patch[p] / dt
+                        livecrootc_storage_to_xfer_patch[p] = fstor2tran * livecrootc_storage_patch[p] / dt
+                        deadcrootc_storage_to_xfer_patch[p] = fstor2tran * deadcrootc_storage_patch[p] / dt
+                        gresp_storage_to_xfer_patch[p]      = fstor2tran * gresp_storage_patch[p] / dt
+                    end
+                    leafn_storage_to_xfer_patch[p]  = fstor2tran * leafn_storage_patch[p] / dt
+                    frootn_storage_to_xfer_patch[p] = fstor2tran * frootn_storage_patch[p] / dt
+                    if woody[ivt] == one(T)
+                        livestemn_storage_to_xfer_patch[p]  = fstor2tran * livestemn_storage_patch[p] / dt
+                        deadstemn_storage_to_xfer_patch[p]  = fstor2tran * deadstemn_storage_patch[p] / dt
+                        livecrootn_storage_to_xfer_patch[p] = fstor2tran * livecrootn_storage_patch[p] / dt
+                        deadcrootn_storage_to_xfer_patch[p] = fstor2tran * deadcrootn_storage_patch[p] / dt
+                    end
+                end
+
+            # test growth → offset
+            elseif offset_flag_patch[p] == zero(T)
+                if use_cndv
+                    days_active_patch[p] += fracday
+                end
+
+                # --- INLINED seasonal_critical_daylength ---
+                crit_daylat = crit_dayl
+                if crit_dayl_method == critical_daylight_depends_on_latnveg
+                    if season_decid_temperate[ivt] == one(T)
+                        crit_daylat = crit_dayl
+                    else
+                        cd = crit_dayl_at_high_lat -
+                             crit_dayl_lat_slope * (crit_offset_high_lat - smooth_abs(latdeg[g]))
+                        crit_daylat = smooth_max(cd, crit_dayl)
+                    end
+                elseif crit_dayl_method == critical_daylight_depends_on_veg
+                    if season_decid_temperate[ivt] == one(T)
+                        crit_daylat = crit_dayl
+                    else
+                        crit_daylat = crit_dayl_at_high_lat
+                    end
+                elseif crit_dayl_method == critical_daylight_depends_on_lat
+                    cd = crit_dayl_at_high_lat -
+                         crit_dayl_lat_slope * (crit_offset_high_lat - smooth_abs(latdeg[g]))
+                    crit_daylat = smooth_max(cd, crit_dayl)
+                else # critical_daylight_constant (host-validated in cn_phenology_set_nml!)
+                    crit_daylat = crit_dayl
+                end
+                # --- end INLINED seasonal_critical_daylength ---
+
+                if ws_flag == zero(T) && dayl[g] < crit_daylat
+                    offset_flag_patch[p]    = one(T)
+                    offset_counter_patch[p]  = ndays_off * secspday
+                    prev_leafc_to_litter_patch[p]  = zero(T)
+                    prev_frootc_to_litter_patch[p] = zero(T)
+                end
+            end
+        end
+    end
+end
+
 function cn_season_decid_phenology!(pstate::PhenologyState,
                                     params::PhenologyParams,
-                                    mask_soilp::BitVector,
+                                    mask_soilp::AbstractVector{Bool},
                                     pftcon::PftConPhenology,
                                     temperature::TemperatureData,
                                     water_diag::WaterDiagnosticBulkData,
@@ -845,148 +1365,90 @@ function cn_season_decid_phenology!(pstate::PhenologyState,
     fstor2tran = pstate.fstor2tran
     soil_layer = pstate.phenology_soil_layer
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
+    # host-resolved config flags (never read Refs / branch on String inside kernel)
+    crit_dayl_method            = _critical_daylight_method[]
+    onset_thresh_depends_on_veg = _onset_thresh_depends_on_veg[]
 
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-        c   = patch_data.column[p]
-        g   = patch_data.gridcell[p]
+    # working precision = element type of the device state arrays
+    T = eltype(cnveg_state.bglfr_patch)
 
-        if pftcon.season_decid[ivt] != 1.0
-            continue
-        end
+    st = _PhenSeasonSDState(;
+        bglfr_patch=cnveg_state.bglfr_patch, bgtr_patch=cnveg_state.bgtr_patch, lgsf_patch=cnveg_state.lgsf_patch,
+        offset_flag_patch=cnveg_state.offset_flag_patch, offset_counter_patch=cnveg_state.offset_counter_patch,
+        dormant_flag_patch=cnveg_state.dormant_flag_patch, days_active_patch=cnveg_state.days_active_patch,
+        onset_flag_patch=cnveg_state.onset_flag_patch, onset_counter_patch=cnveg_state.onset_counter_patch,
+        onset_gdd_patch=cnveg_state.onset_gdd_patch, onset_gddflag_patch=cnveg_state.onset_gddflag_patch,
+        prev_leafc_to_litter_patch=cnveg_cf.prev_leafc_to_litter_patch,
+        prev_frootc_to_litter_patch=cnveg_cf.prev_frootc_to_litter_patch,
+        leafc_xfer_to_leafc_patch=cnveg_cf.leafc_xfer_to_leafc_patch,
+        frootc_xfer_to_frootc_patch=cnveg_cf.frootc_xfer_to_frootc_patch,
+        leafn_xfer_to_leafn_patch=cnveg_nf.leafn_xfer_to_leafn_patch,
+        frootn_xfer_to_frootn_patch=cnveg_nf.frootn_xfer_to_frootn_patch,
+        livestemc_xfer_to_livestemc_patch=cnveg_cf.livestemc_xfer_to_livestemc_patch,
+        deadstemc_xfer_to_deadstemc_patch=cnveg_cf.deadstemc_xfer_to_deadstemc_patch,
+        livecrootc_xfer_to_livecrootc_patch=cnveg_cf.livecrootc_xfer_to_livecrootc_patch,
+        deadcrootc_xfer_to_deadcrootc_patch=cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch,
+        livestemn_xfer_to_livestemn_patch=cnveg_nf.livestemn_xfer_to_livestemn_patch,
+        deadstemn_xfer_to_deadstemn_patch=cnveg_nf.deadstemn_xfer_to_deadstemn_patch,
+        livecrootn_xfer_to_livecrootn_patch=cnveg_nf.livecrootn_xfer_to_livecrootn_patch,
+        deadcrootn_xfer_to_deadcrootn_patch=cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch,
+        leafc_xfer_patch=cnveg_cs.leafc_xfer_patch, leafn_xfer_patch=cnveg_ns.leafn_xfer_patch,
+        frootc_xfer_patch=cnveg_cs.frootc_xfer_patch, frootn_xfer_patch=cnveg_ns.frootn_xfer_patch,
+        livestemc_xfer_patch=cnveg_cs.livestemc_xfer_patch, livestemn_xfer_patch=cnveg_ns.livestemn_xfer_patch,
+        deadstemc_xfer_patch=cnveg_cs.deadstemc_xfer_patch, deadstemn_xfer_patch=cnveg_ns.deadstemn_xfer_patch,
+        livecrootc_xfer_patch=cnveg_cs.livecrootc_xfer_patch, livecrootn_xfer_patch=cnveg_ns.livecrootn_xfer_patch,
+        deadcrootc_xfer_patch=cnveg_cs.deadcrootc_xfer_patch, deadcrootn_xfer_patch=cnveg_ns.deadcrootn_xfer_patch,
+        leafc_storage_to_xfer_patch=cnveg_cf.leafc_storage_to_xfer_patch,
+        frootc_storage_to_xfer_patch=cnveg_cf.frootc_storage_to_xfer_patch,
+        livestemc_storage_to_xfer_patch=cnveg_cf.livestemc_storage_to_xfer_patch,
+        deadstemc_storage_to_xfer_patch=cnveg_cf.deadstemc_storage_to_xfer_patch,
+        livecrootc_storage_to_xfer_patch=cnveg_cf.livecrootc_storage_to_xfer_patch,
+        deadcrootc_storage_to_xfer_patch=cnveg_cf.deadcrootc_storage_to_xfer_patch,
+        gresp_storage_to_xfer_patch=cnveg_cf.gresp_storage_to_xfer_patch,
+        leafn_storage_to_xfer_patch=cnveg_nf.leafn_storage_to_xfer_patch,
+        frootn_storage_to_xfer_patch=cnveg_nf.frootn_storage_to_xfer_patch,
+        livestemn_storage_to_xfer_patch=cnveg_nf.livestemn_storage_to_xfer_patch,
+        deadstemn_storage_to_xfer_patch=cnveg_nf.deadstemn_storage_to_xfer_patch,
+        livecrootn_storage_to_xfer_patch=cnveg_nf.livecrootn_storage_to_xfer_patch,
+        deadcrootn_storage_to_xfer_patch=cnveg_nf.deadcrootn_storage_to_xfer_patch)
 
-        # set background rates to 0
-        cnveg_state.bglfr_patch[p] = 0.0
-        cnveg_state.bgtr_patch[p]  = 0.0
-        cnveg_state.lgsf_patch[p]  = 0.0
+    inp = _PhenSeasonSDInputs(;
+        season_decid=pftcon.season_decid, woody=pftcon.woody,
+        season_decid_temperate=pftcon.season_decid_temperate,
+        crit_onset_gdd_sf=pftcon.crit_onset_gdd_sf, ndays_on=pftcon.ndays_on,
+        annavg_t2m_patch=cnveg_state.annavg_t2m_patch, t_a5min_patch=temperature.t_a5min_patch,
+        leafc_storage_patch=cnveg_cs.leafc_storage_patch, frootc_storage_patch=cnveg_cs.frootc_storage_patch,
+        livestemc_storage_patch=cnveg_cs.livestemc_storage_patch, deadstemc_storage_patch=cnveg_cs.deadstemc_storage_patch,
+        livecrootc_storage_patch=cnveg_cs.livecrootc_storage_patch, deadcrootc_storage_patch=cnveg_cs.deadcrootc_storage_patch,
+        gresp_storage_patch=cnveg_cs.gresp_storage_patch,
+        leafn_storage_patch=cnveg_ns.leafn_storage_patch, frootn_storage_patch=cnveg_ns.frootn_storage_patch,
+        livestemn_storage_patch=cnveg_ns.livestemn_storage_patch, deadstemn_storage_patch=cnveg_ns.deadstemn_storage_patch,
+        livecrootn_storage_patch=cnveg_ns.livecrootn_storage_patch, deadcrootn_storage_patch=cnveg_ns.deadcrootn_storage_patch)
 
-        # onset GDD sum
-        crit_onset_gdd = pftcon.crit_onset_gdd_sf[ivt] *
-            exp(4.8 + 0.13 * (cnveg_state.annavg_t2m_patch[p] - TFRZ))
+    cg = _PhenSeasonSDColGrc(;
+        t_soisno_col=temperature.t_soisno_col,
+        snow_5day_col=water_diag.snow_5day_col, soila10_col=temperature.soila10_col,
+        dayl=gridcell.dayl, prev_dayl=gridcell.prev_dayl, latdeg=gridcell.latdeg)
 
-        # winter→summer flag
-        ws_flag = gridcell.dayl[g] >= gridcell.prev_dayl[g] ? 1.0 : 0.0
+    ps = _PhenSeasonSDScalars(;
+        dt=T(dt), fracday=T(fracday), crit_dayl=T(crit_dayl), ndays_off=T(ndays_off),
+        fstor2tran=T(fstor2tran), snow5d_thresh=T(params.snow5d_thresh_for_onset),
+        crit_dayl_at_high_lat=T(params.crit_dayl_at_high_lat),
+        crit_dayl_lat_slope=T(params.crit_dayl_lat_slope),
+        secspday=T(SECSPDAY), tfrz=T(TFRZ),
+        crit_offset_high_lat=T(critical_offset_high_lat),
+        min_critical_daylength_onset=T(_min_critical_daylength_onset))
 
-        # update offset_counter
-        if cnveg_state.offset_flag_patch[p] == 1.0
-            cnveg_state.offset_counter_patch[p] -= dt
-
-            if cnveg_state.offset_counter_patch[p] < dt / 2.0
-                cnveg_state.offset_flag_patch[p]    = 0.0
-                cnveg_state.offset_counter_patch[p]  = 0.0
-                cnveg_state.dormant_flag_patch[p]    = 1.0
-                cnveg_state.days_active_patch[p]     = 0.0
-
-                cnveg_cf.prev_leafc_to_litter_patch[p]  = 0.0
-                cnveg_cf.prev_frootc_to_litter_patch[p] = 0.0
-            end
-        end
-
-        # update onset_counter
-        if cnveg_state.onset_flag_patch[p] == 1.0
-            cnveg_state.onset_counter_patch[p] -= dt
-
-            if cnveg_state.onset_counter_patch[p] < dt / 2.0
-                cnveg_state.onset_flag_patch[p]    = 0.0
-                cnveg_state.onset_counter_patch[p] = 0.0
-                # zero transfer growth rates
-                cnveg_cf.leafc_xfer_to_leafc_patch[p]   = 0.0
-                cnveg_cf.frootc_xfer_to_frootc_patch[p] = 0.0
-                cnveg_nf.leafn_xfer_to_leafn_patch[p]   = 0.0
-                cnveg_nf.frootn_xfer_to_frootn_patch[p] = 0.0
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_cf.livestemc_xfer_to_livestemc_patch[p]   = 0.0
-                    cnveg_cf.deadstemc_xfer_to_deadstemc_patch[p]   = 0.0
-                    cnveg_cf.livecrootc_xfer_to_livecrootc_patch[p] = 0.0
-                    cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch[p] = 0.0
-                    cnveg_nf.livestemn_xfer_to_livestemn_patch[p]   = 0.0
-                    cnveg_nf.deadstemn_xfer_to_deadstemn_patch[p]   = 0.0
-                    cnveg_nf.livecrootn_xfer_to_livecrootn_patch[p] = 0.0
-                    cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch[p] = 0.0
-                end
-                # zero transfer pools
-                cnveg_cs.leafc_xfer_patch[p]  = 0.0
-                cnveg_ns.leafn_xfer_patch[p]  = 0.0
-                cnveg_cs.frootc_xfer_patch[p] = 0.0
-                cnveg_ns.frootn_xfer_patch[p] = 0.0
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_cs.livestemc_xfer_patch[p]  = 0.0
-                    cnveg_ns.livestemn_xfer_patch[p]  = 0.0
-                    cnveg_cs.deadstemc_xfer_patch[p]  = 0.0
-                    cnveg_ns.deadstemn_xfer_patch[p]  = 0.0
-                    cnveg_cs.livecrootc_xfer_patch[p] = 0.0
-                    cnveg_ns.livecrootn_xfer_patch[p] = 0.0
-                    cnveg_cs.deadcrootc_xfer_patch[p] = 0.0
-                    cnveg_ns.deadcrootn_xfer_patch[p] = 0.0
-                end
-            end
-        end
-
-        # test dormant → growth
-        if cnveg_state.dormant_flag_patch[p] == 1.0
-            soilt = temperature.t_soisno_col[c, soil_layer]
-            snow_5day = water_diag.snow_5day_col[c]
-            soila10 = temperature.soila10_col[c]
-            t_a5min = temperature.t_a5min_patch[p]
-
-            do_onset = seasonal_decid_onset(
-                cnveg_state.onset_gdd_patch[p],
-                cnveg_state.onset_gddflag_patch[p],
-                soilt, soila10, t_a5min, gridcell.dayl[g],
-                snow_5day, ws_flag, crit_onset_gdd,
-                pftcon.season_decid_temperate[ivt],
-                fracday, params.snow5d_thresh_for_onset)
-
-            # update in/out args
-            cnveg_state.onset_gdd_patch[p]     = do_onset.onset_gdd
-            cnveg_state.onset_gddflag_patch[p]  = do_onset.onset_gddflag
-
-            if do_onset.result
-                cnveg_state.onset_flag_patch[p]     = 1.0
-                cnveg_state.dormant_flag_patch[p]    = 0.0
-                cnveg_state.onset_gddflag_patch[p]   = 0.0
-                cnveg_state.onset_gdd_patch[p]       = 0.0
-                cnveg_state.onset_counter_patch[p]   = pftcon.ndays_on[ivt] * SECSPDAY
-
-                # storage → transfer (non-matrix)
-                cnveg_cf.leafc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.leafc_storage_patch[p] / dt
-                cnveg_cf.frootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.frootc_storage_patch[p] / dt
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_cf.livestemc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.livestemc_storage_patch[p] / dt
-                    cnveg_cf.deadstemc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.deadstemc_storage_patch[p] / dt
-                    cnveg_cf.livecrootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.livecrootc_storage_patch[p] / dt
-                    cnveg_cf.deadcrootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.deadcrootc_storage_patch[p] / dt
-                    cnveg_cf.gresp_storage_to_xfer_patch[p]      = fstor2tran * cnveg_cs.gresp_storage_patch[p] / dt
-                end
-                cnveg_nf.leafn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.leafn_storage_patch[p] / dt
-                cnveg_nf.frootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.frootn_storage_patch[p] / dt
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_nf.livestemn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.livestemn_storage_patch[p] / dt
-                    cnveg_nf.deadstemn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.deadstemn_storage_patch[p] / dt
-                    cnveg_nf.livecrootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.livecrootn_storage_patch[p] / dt
-                    cnveg_nf.deadcrootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.deadcrootn_storage_patch[p] / dt
-                end
-            end
-
-        # test growth → offset
-        elseif cnveg_state.offset_flag_patch[p] == 0.0
-            if use_cndv
-                cnveg_state.days_active_patch[p] += fracday
-            end
-
-            crit_daylat = seasonal_critical_daylength(
-                g, p, pstate.crit_dayl, params, pftcon, gridcell, patch_data)
-
-            if ws_flag == 0.0 && gridcell.dayl[g] < crit_daylat
-                cnveg_state.offset_flag_patch[p]    = 1.0
-                cnveg_state.offset_counter_patch[p]  = ndays_off * SECSPDAY
-                cnveg_cf.prev_leafc_to_litter_patch[p]  = 0.0
-                cnveg_cf.prev_frootc_to_litter_patch[p] = 0.0
-            end
-        end
-
-    end # patch loop
+    # Struct-first kernel: manual backend + synchronize (the bundle args carry no backend).
+    backend = _kernel_backend(st.bglfr_patch)
+    _phen_season_decid_kernel!(backend)(
+        st, inp, cg,
+        mask_soilp, patch_data.itype, patch_data.column, patch_data.gridcell,
+        ps,
+        soil_layer, use_cndv,
+        crit_dayl_method, onset_thresh_depends_on_veg;
+        ndrange = length(mask_soilp))
+    KA.synchronize(backend)
 
     return nothing
 end
@@ -1079,8 +1541,399 @@ end
 # ==========================================================================
 # cn_stress_decid_phenology!
 # ==========================================================================
+# ==========================================================================
+# Device-view bundles for _phen_stress_decid_kernel! (Metal 31-arg limit).
+# All per-patch float arrays share one element type -> single Vector param V.
+# t_soisno_col / soilpsi_col are matrices -> param M in the Col bundle.
+# ==========================================================================
+
+# Read+written per-patch state — split into two bundles (<=~30 fields each).
+Base.@kwdef struct _PhenStressSD_S1{V}
+    offset_flag_patch::V; offset_counter_patch::V; dormant_flag_patch::V
+    days_active_patch::V; prev_leafc_to_litter_patch::V; prev_frootc_to_litter_patch::V
+    onset_flag_patch::V; onset_counter_patch::V
+    onset_gddflag_patch::V; onset_fdd_patch::V; onset_swi_patch::V; onset_gdd_patch::V
+    offset_swi_patch::V; offset_fdd_patch::V
+    lgsf_patch::V; bglfr_patch::V; bgtr_patch::V
+    leafc_xfer_to_leafc_patch::V; frootc_xfer_to_frootc_patch::V
+    leafn_xfer_to_leafn_patch::V; frootn_xfer_to_frootn_patch::V
+    livestemc_xfer_to_livestemc_patch::V; deadstemc_xfer_to_deadstemc_patch::V
+    livecrootc_xfer_to_livecrootc_patch::V; deadcrootc_xfer_to_deadcrootc_patch::V
+    livestemn_xfer_to_livestemn_patch::V; deadstemn_xfer_to_deadstemn_patch::V
+    livecrootn_xfer_to_livecrootn_patch::V; deadcrootn_xfer_to_deadcrootn_patch::V
+end
+Adapt.@adapt_structure _PhenStressSD_S1
+
+Base.@kwdef struct _PhenStressSD_S2{V}
+    leafc_xfer_patch::V; leafn_xfer_patch::V; frootc_xfer_patch::V; frootn_xfer_patch::V
+    livestemc_xfer_patch::V; livestemn_xfer_patch::V; deadstemc_xfer_patch::V
+    deadstemn_xfer_patch::V; livecrootc_xfer_patch::V; livecrootn_xfer_patch::V
+    deadcrootc_xfer_patch::V; deadcrootn_xfer_patch::V
+    leafc_storage_to_xfer_patch::V; frootc_storage_to_xfer_patch::V
+    livestemc_storage_to_xfer_patch::V; deadstemc_storage_to_xfer_patch::V
+    livecrootc_storage_to_xfer_patch::V; deadcrootc_storage_to_xfer_patch::V
+    gresp_storage_to_xfer_patch::V
+    leafn_storage_to_xfer_patch::V; frootn_storage_to_xfer_patch::V
+    livestemn_storage_to_xfer_patch::V; deadstemn_storage_to_xfer_patch::V
+    livecrootn_storage_to_xfer_patch::V; deadcrootn_storage_to_xfer_patch::V
+end
+Adapt.@adapt_structure _PhenStressSD_S2
+
+# Read-only per-patch inputs (the @Const float arrays + per-ivt pftcon vectors).
+Base.@kwdef struct _PhenStressSD_In{V}
+    stress_decid::V; woody::V; crit_onset_gdd_sf::V
+    ndays_on::V; leaf_long::V
+    annavg_t2m_patch::V
+    leafc_storage_patch::V; frootc_storage_patch::V
+    livestemc_storage_patch::V; deadstemc_storage_patch::V
+    livecrootc_storage_patch::V; deadcrootc_storage_patch::V
+    gresp_storage_patch::V
+    leafn_storage_patch::V; frootn_storage_patch::V
+    livestemn_storage_patch::V; deadstemn_storage_patch::V
+    livecrootn_storage_patch::V; deadcrootn_storage_patch::V
+    leafc_patch::V; frootc_patch::V
+end
+Adapt.@adapt_structure _PhenStressSD_In
+
+# Per-column matrices + per-gridcell vector.
+Base.@kwdef struct _PhenStressSD_Col{V,M}
+    t_soisno_col::M; soilpsi_col::M
+    dayl::V
+end
+Adapt.@adapt_structure _PhenStressSD_Col
+
+# isbits scalar bundle at working precision T (no Float64 reaches the kernel).
+# tfrz / secspday are the module Float64 consts routed through here.
+Base.@kwdef struct _PhenStressSDScalars{T}
+    dt::T; fracday::T; ndays_off_val::T; fstor2tran::T
+    crit_onset_fdd::T; crit_onset_swi::T; soilpsi_on::T
+    crit_offset_fdd::T; crit_offset_swi::T; soilpsi_off::T
+    secspqtrday::T; avg_dayspyr::T
+    tfrz::T; secspday::T
+end
+
+@kernel function _phen_stress_decid_kernel!(
+        s1::_PhenStressSD_S1, s2::_PhenStressSD_S2,
+        inp::_PhenStressSD_In, col::_PhenStressSD_Col,
+        @Const(mask_soilp), @Const(itype), @Const(column), @Const(gridcell_idx),
+        sc::_PhenStressSDScalars, soil_layer::Int)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        # working precision from an output array
+        T = eltype(s1.offset_flag_patch)
+
+        # --- alias scalar bundle to Fortran-named locals ---
+        dt              = sc.dt
+        fracday         = sc.fracday
+        ndays_off_val   = sc.ndays_off_val
+        fstor2tran      = sc.fstor2tran
+        crit_onset_fdd  = sc.crit_onset_fdd
+        crit_onset_swi  = sc.crit_onset_swi
+        soilpsi_on      = sc.soilpsi_on
+        crit_offset_fdd = sc.crit_offset_fdd
+        crit_offset_swi = sc.crit_offset_swi
+        soilpsi_off     = sc.soilpsi_off
+        secspqtrday     = sc.secspqtrday
+        avg_dayspyr     = sc.avg_dayspyr
+        TFRZ            = sc.tfrz
+        SECSPDAY        = sc.secspday
+
+        # --- alias S1 state arrays ---
+        offset_flag_patch              = s1.offset_flag_patch
+        offset_counter_patch           = s1.offset_counter_patch
+        dormant_flag_patch             = s1.dormant_flag_patch
+        days_active_patch              = s1.days_active_patch
+        prev_leafc_to_litter_patch     = s1.prev_leafc_to_litter_patch
+        prev_frootc_to_litter_patch    = s1.prev_frootc_to_litter_patch
+        onset_flag_patch               = s1.onset_flag_patch
+        onset_counter_patch            = s1.onset_counter_patch
+        onset_gddflag_patch            = s1.onset_gddflag_patch
+        onset_fdd_patch                = s1.onset_fdd_patch
+        onset_swi_patch                = s1.onset_swi_patch
+        onset_gdd_patch                = s1.onset_gdd_patch
+        offset_swi_patch               = s1.offset_swi_patch
+        offset_fdd_patch               = s1.offset_fdd_patch
+        lgsf_patch                     = s1.lgsf_patch
+        bglfr_patch                    = s1.bglfr_patch
+        bgtr_patch                     = s1.bgtr_patch
+        leafc_xfer_to_leafc_patch      = s1.leafc_xfer_to_leafc_patch
+        frootc_xfer_to_frootc_patch    = s1.frootc_xfer_to_frootc_patch
+        leafn_xfer_to_leafn_patch      = s1.leafn_xfer_to_leafn_patch
+        frootn_xfer_to_frootn_patch    = s1.frootn_xfer_to_frootn_patch
+        livestemc_xfer_to_livestemc_patch   = s1.livestemc_xfer_to_livestemc_patch
+        deadstemc_xfer_to_deadstemc_patch   = s1.deadstemc_xfer_to_deadstemc_patch
+        livecrootc_xfer_to_livecrootc_patch = s1.livecrootc_xfer_to_livecrootc_patch
+        deadcrootc_xfer_to_deadcrootc_patch = s1.deadcrootc_xfer_to_deadcrootc_patch
+        livestemn_xfer_to_livestemn_patch   = s1.livestemn_xfer_to_livestemn_patch
+        deadstemn_xfer_to_deadstemn_patch   = s1.deadstemn_xfer_to_deadstemn_patch
+        livecrootn_xfer_to_livecrootn_patch = s1.livecrootn_xfer_to_livecrootn_patch
+        deadcrootn_xfer_to_deadcrootn_patch = s1.deadcrootn_xfer_to_deadcrootn_patch
+
+        # --- alias S2 state arrays ---
+        leafc_xfer_patch     = s2.leafc_xfer_patch
+        leafn_xfer_patch     = s2.leafn_xfer_patch
+        frootc_xfer_patch    = s2.frootc_xfer_patch
+        frootn_xfer_patch    = s2.frootn_xfer_patch
+        livestemc_xfer_patch = s2.livestemc_xfer_patch
+        livestemn_xfer_patch = s2.livestemn_xfer_patch
+        deadstemc_xfer_patch = s2.deadstemc_xfer_patch
+        deadstemn_xfer_patch = s2.deadstemn_xfer_patch
+        livecrootc_xfer_patch = s2.livecrootc_xfer_patch
+        livecrootn_xfer_patch = s2.livecrootn_xfer_patch
+        deadcrootc_xfer_patch = s2.deadcrootc_xfer_patch
+        deadcrootn_xfer_patch = s2.deadcrootn_xfer_patch
+        leafc_storage_to_xfer_patch      = s2.leafc_storage_to_xfer_patch
+        frootc_storage_to_xfer_patch     = s2.frootc_storage_to_xfer_patch
+        livestemc_storage_to_xfer_patch  = s2.livestemc_storage_to_xfer_patch
+        deadstemc_storage_to_xfer_patch  = s2.deadstemc_storage_to_xfer_patch
+        livecrootc_storage_to_xfer_patch = s2.livecrootc_storage_to_xfer_patch
+        deadcrootc_storage_to_xfer_patch = s2.deadcrootc_storage_to_xfer_patch
+        gresp_storage_to_xfer_patch      = s2.gresp_storage_to_xfer_patch
+        leafn_storage_to_xfer_patch      = s2.leafn_storage_to_xfer_patch
+        frootn_storage_to_xfer_patch     = s2.frootn_storage_to_xfer_patch
+        livestemn_storage_to_xfer_patch  = s2.livestemn_storage_to_xfer_patch
+        deadstemn_storage_to_xfer_patch  = s2.deadstemn_storage_to_xfer_patch
+        livecrootn_storage_to_xfer_patch = s2.livecrootn_storage_to_xfer_patch
+        deadcrootn_storage_to_xfer_patch = s2.deadcrootn_storage_to_xfer_patch
+
+        # --- alias read-only inputs ---
+        stress_decid      = inp.stress_decid
+        woody             = inp.woody
+        crit_onset_gdd_sf = inp.crit_onset_gdd_sf
+        ndays_on          = inp.ndays_on
+        leaf_long         = inp.leaf_long
+        annavg_t2m_patch  = inp.annavg_t2m_patch
+        leafc_storage_patch      = inp.leafc_storage_patch
+        frootc_storage_patch     = inp.frootc_storage_patch
+        livestemc_storage_patch  = inp.livestemc_storage_patch
+        deadstemc_storage_patch  = inp.deadstemc_storage_patch
+        livecrootc_storage_patch = inp.livecrootc_storage_patch
+        deadcrootc_storage_patch = inp.deadcrootc_storage_patch
+        gresp_storage_patch      = inp.gresp_storage_patch
+        leafn_storage_patch      = inp.leafn_storage_patch
+        frootn_storage_patch     = inp.frootn_storage_patch
+        livestemn_storage_patch  = inp.livestemn_storage_patch
+        deadstemn_storage_patch  = inp.deadstemn_storage_patch
+        livecrootn_storage_patch = inp.livecrootn_storage_patch
+        deadcrootn_storage_patch = inp.deadcrootn_storage_patch
+        leafc_patch  = inp.leafc_patch
+        frootc_patch = inp.frootc_patch
+
+        # --- alias per-column / per-gridcell ---
+        t_soisno_col = col.t_soisno_col
+        soilpsi_col  = col.soilpsi_col
+        dayl         = col.dayl
+
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+        c   = column[p]
+        g   = gridcell_idx[p]
+
+        if stress_decid[ivt] == one(T)
+            soilt = t_soisno_col[c, soil_layer]
+            psi   = soilpsi_col[c, soil_layer]
+
+            crit_onset_gdd = crit_onset_gdd_sf[ivt] *
+                exp(T(4.8) + T(0.13) * (annavg_t2m_patch[p] - TFRZ))
+
+            # offset counter
+            if offset_flag_patch[p] == one(T)
+                offset_counter_patch[p] -= dt
+                if offset_counter_patch[p] < dt / T(2)
+                    offset_flag_patch[p]    = zero(T)
+                    offset_counter_patch[p]  = zero(T)
+                    dormant_flag_patch[p]    = one(T)
+                    days_active_patch[p]     = zero(T)
+                    prev_leafc_to_litter_patch[p]  = zero(T)
+                    prev_frootc_to_litter_patch[p] = zero(T)
+                end
+            end
+
+            # onset counter
+            if onset_flag_patch[p] == one(T)
+                onset_counter_patch[p] -= dt
+                if onset_counter_patch[p] < dt / T(2)
+                    onset_flag_patch[p]    = zero(T)
+                    onset_counter_patch[p] = zero(T)
+                    leafc_xfer_to_leafc_patch[p]   = zero(T)
+                    frootc_xfer_to_frootc_patch[p] = zero(T)
+                    leafn_xfer_to_leafn_patch[p]   = zero(T)
+                    frootn_xfer_to_frootn_patch[p] = zero(T)
+                    if woody[ivt] == one(T)
+                        livestemc_xfer_to_livestemc_patch[p]   = zero(T)
+                        deadstemc_xfer_to_deadstemc_patch[p]   = zero(T)
+                        livecrootc_xfer_to_livecrootc_patch[p] = zero(T)
+                        deadcrootc_xfer_to_deadcrootc_patch[p] = zero(T)
+                        livestemn_xfer_to_livestemn_patch[p]   = zero(T)
+                        deadstemn_xfer_to_deadstemn_patch[p]   = zero(T)
+                        livecrootn_xfer_to_livecrootn_patch[p] = zero(T)
+                        deadcrootn_xfer_to_deadcrootn_patch[p] = zero(T)
+                    end
+                    leafc_xfer_patch[p]  = zero(T)
+                    leafn_xfer_patch[p]  = zero(T)
+                    frootc_xfer_patch[p] = zero(T)
+                    frootn_xfer_patch[p] = zero(T)
+                    if woody[ivt] == one(T)
+                        livestemc_xfer_patch[p]  = zero(T)
+                        livestemn_xfer_patch[p]  = zero(T)
+                        deadstemc_xfer_patch[p]  = zero(T)
+                        deadstemn_xfer_patch[p]  = zero(T)
+                        livecrootc_xfer_patch[p] = zero(T)
+                        livecrootn_xfer_patch[p] = zero(T)
+                        deadcrootc_xfer_patch[p] = zero(T)
+                        deadcrootn_xfer_patch[p] = zero(T)
+                    end
+                end
+            end
+
+            # test dormant → growth
+            if dormant_flag_patch[p] == one(T)
+                # freezing degree days (smoothed TFRZ branch for AD)
+                if onset_gddflag_patch[p] == zero(T)
+                    onset_fdd_patch[p] += smooth_heaviside(TFRZ - soilt) * fracday
+                end
+                if onset_fdd_patch[p] > crit_onset_fdd
+                    onset_gddflag_patch[p] = one(T)
+                    onset_fdd_patch[p]     = zero(T)
+                    onset_swi_patch[p]     = zero(T)
+                end
+                # GDD accumulation (smoothed TFRZ branch for AD)
+                if onset_gddflag_patch[p] == one(T)
+                    onset_gdd_patch[p] += smooth_max(soilt - TFRZ, zero(T)) * fracday
+                end
+                # soil water index
+                additional_onset_condition = true  # prec10 stub: always true
+                if psi >= soilpsi_on
+                    onset_swi_patch[p] += fracday
+                end
+                if onset_swi_patch[p] > crit_onset_swi && additional_onset_condition
+                    onset_flag_patch[p] = one(T)
+                    if onset_gddflag_patch[p] == one(T) &&
+                       onset_gdd_patch[p] < crit_onset_gdd
+                        onset_flag_patch[p] = zero(T)
+                    end
+                end
+                # only allow onset if dayl > 6hrs
+                if onset_flag_patch[p] == one(T) && dayl[g] <= secspqtrday
+                    onset_flag_patch[p] = zero(T)
+                end
+                # if onset triggered, reset and do storage→transfer
+                if onset_flag_patch[p] == one(T)
+                    dormant_flag_patch[p]    = zero(T)
+                    days_active_patch[p]     = zero(T)
+                    onset_gddflag_patch[p]   = zero(T)
+                    onset_fdd_patch[p]       = zero(T)
+                    onset_gdd_patch[p]       = zero(T)
+                    onset_swi_patch[p]       = zero(T)
+                    onset_counter_patch[p]   = ndays_on[ivt] * SECSPDAY
+
+                    leafc_storage_to_xfer_patch[p]  = fstor2tran * leafc_storage_patch[p] / dt
+                    frootc_storage_to_xfer_patch[p] = fstor2tran * frootc_storage_patch[p] / dt
+                    if woody[ivt] == one(T)
+                        livestemc_storage_to_xfer_patch[p]  = fstor2tran * livestemc_storage_patch[p] / dt
+                        deadstemc_storage_to_xfer_patch[p]  = fstor2tran * deadstemc_storage_patch[p] / dt
+                        livecrootc_storage_to_xfer_patch[p] = fstor2tran * livecrootc_storage_patch[p] / dt
+                        deadcrootc_storage_to_xfer_patch[p] = fstor2tran * deadcrootc_storage_patch[p] / dt
+                        gresp_storage_to_xfer_patch[p]      = fstor2tran * gresp_storage_patch[p] / dt
+                    end
+                    leafn_storage_to_xfer_patch[p]  = fstor2tran * leafn_storage_patch[p] / dt
+                    frootn_storage_to_xfer_patch[p] = fstor2tran * frootn_storage_patch[p] / dt
+                    if woody[ivt] == one(T)
+                        livestemn_storage_to_xfer_patch[p]  = fstor2tran * livestemn_storage_patch[p] / dt
+                        deadstemn_storage_to_xfer_patch[p]  = fstor2tran * deadstemn_storage_patch[p] / dt
+                        livecrootn_storage_to_xfer_patch[p] = fstor2tran * livecrootn_storage_patch[p] / dt
+                        deadcrootn_storage_to_xfer_patch[p] = fstor2tran * deadcrootn_storage_patch[p] / dt
+                    end
+                end
+
+            # test growth → offset
+            elseif offset_flag_patch[p] == zero(T)
+                if psi <= soilpsi_off
+                    offset_swi_patch[p] += fracday
+                    if offset_swi_patch[p] >= crit_offset_swi &&
+                       onset_flag_patch[p] == zero(T)
+                        offset_flag_patch[p] = one(T)
+                    end
+                elseif psi >= soilpsi_on
+                    offset_swi_patch[p] -= fracday
+                    offset_swi_patch[p] = smooth_max(offset_swi_patch[p], zero(T))
+                end
+                # freezing day accumulation (smoothed TFRZ branch for AD)
+                # Blend thaw-decay and freeze-accumulation using smooth_heaviside
+                _hw_above = smooth_heaviside(soilt - TFRZ)   # ~1 when above freezing
+                _hw_below = one(T) - _hw_above               # ~1 when below freezing
+                if offset_fdd_patch[p] > zero(T)
+                    offset_fdd_patch[p] -= _hw_above * fracday
+                    offset_fdd_patch[p] = smooth_max(zero(T), offset_fdd_patch[p])
+                end
+                offset_fdd_patch[p] += _hw_below * fracday
+                if offset_fdd_patch[p] > crit_offset_fdd &&
+                   onset_flag_patch[p] == zero(T)
+                    offset_flag_patch[p] = one(T)
+                end
+                # force offset if dayl < 6 hrs
+                if dayl[g] <= secspqtrday
+                    offset_flag_patch[p] = one(T)
+                end
+                # set offset params
+                if offset_flag_patch[p] == one(T)
+                    offset_fdd_patch[p]     = zero(T)
+                    offset_swi_patch[p]     = zero(T)
+                    offset_counter_patch[p]  = ndays_off_val * SECSPDAY
+                    prev_leafc_to_litter_patch[p]  = zero(T)
+                    prev_frootc_to_litter_patch[p] = zero(T)
+                end
+            end
+
+            # days active tracking
+            if dormant_flag_patch[p] == zero(T)
+                days_active_patch[p] += fracday
+            end
+
+            # long growing season factor
+            lgsf_patch[p] = smooth_clamp(
+                T(3) * (days_active_patch[p] - leaf_long[ivt] * avg_dayspyr) / avg_dayspyr,
+                zero(T), one(T))
+
+            # background litterfall rate
+            if offset_flag_patch[p] == one(T)
+                bglfr_patch[p] = zero(T)
+            else
+                bglfr_patch[p] = (one(T) / (leaf_long[ivt] * avg_dayspyr * SECSPDAY)) *
+                    lgsf_patch[p]
+            end
+
+            # background transfer rate
+            if onset_flag_patch[p] == one(T)
+                bgtr_patch[p] = zero(T)
+            else
+                bgtr_val = (one(T) / (avg_dayspyr * SECSPDAY)) * lgsf_patch[p]
+                bgtr_patch[p] = bgtr_val
+
+                # non-matrix storage → transfer
+                leafc_storage_to_xfer_patch[p]  = smooth_max(zero(T), leafc_storage_patch[p] - leafc_patch[p]) * bgtr_val
+                frootc_storage_to_xfer_patch[p] = smooth_max(zero(T), frootc_storage_patch[p] - frootc_patch[p]) * bgtr_val
+                if woody[ivt] == one(T)
+                    livestemc_storage_to_xfer_patch[p]  = livestemc_storage_patch[p] * bgtr_val
+                    deadstemc_storage_to_xfer_patch[p]  = deadstemc_storage_patch[p] * bgtr_val
+                    livecrootc_storage_to_xfer_patch[p] = livecrootc_storage_patch[p] * bgtr_val
+                    deadcrootc_storage_to_xfer_patch[p] = deadcrootc_storage_patch[p] * bgtr_val
+                    gresp_storage_to_xfer_patch[p]      = gresp_storage_patch[p] * bgtr_val
+                end
+                leafn_storage_to_xfer_patch[p]  = leafn_storage_patch[p] * bgtr_val
+                frootn_storage_to_xfer_patch[p] = frootn_storage_patch[p] * bgtr_val
+                if woody[ivt] == one(T)
+                    livestemn_storage_to_xfer_patch[p]  = livestemn_storage_patch[p] * bgtr_val
+                    deadstemn_storage_to_xfer_patch[p]  = deadstemn_storage_patch[p] * bgtr_val
+                    livecrootn_storage_to_xfer_patch[p] = livecrootn_storage_patch[p] * bgtr_val
+                    deadcrootn_storage_to_xfer_patch[p] = deadcrootn_storage_patch[p] * bgtr_val
+                end
+            end
+        end
+    end
+end
+
 function cn_stress_decid_phenology!(pstate::PhenologyState,
-                                    mask_soilp::BitVector,
+                                    mask_soilp::AbstractVector{Bool},
                                     pftcon::PftConPhenology,
                                     soil_state::SoilStateData,
                                     temperature::TemperatureData,
@@ -1105,228 +1958,120 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
     crit_offset_swi = pstate.crit_offset_swi
     soilpsi_off     = pstate.soilpsi_off
     secspqtrday     = SECSPDAY / 4.0
-    rain_threshold  = 20.0
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
+    # Working precision from a representative output array.
+    T = eltype(cnveg_state.offset_flag_patch)
 
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-        c   = patch_data.column[p]
-        g   = patch_data.gridcell[p]
+    s1 = _PhenStressSD_S1(;
+        offset_flag_patch              = cnveg_state.offset_flag_patch,
+        offset_counter_patch           = cnveg_state.offset_counter_patch,
+        dormant_flag_patch             = cnveg_state.dormant_flag_patch,
+        days_active_patch              = cnveg_state.days_active_patch,
+        prev_leafc_to_litter_patch     = cnveg_cf.prev_leafc_to_litter_patch,
+        prev_frootc_to_litter_patch    = cnveg_cf.prev_frootc_to_litter_patch,
+        onset_flag_patch               = cnveg_state.onset_flag_patch,
+        onset_counter_patch            = cnveg_state.onset_counter_patch,
+        onset_gddflag_patch            = cnveg_state.onset_gddflag_patch,
+        onset_fdd_patch                = cnveg_state.onset_fdd_patch,
+        onset_swi_patch                = cnveg_state.onset_swi_patch,
+        onset_gdd_patch                = cnveg_state.onset_gdd_patch,
+        offset_swi_patch               = cnveg_state.offset_swi_patch,
+        offset_fdd_patch               = cnveg_state.offset_fdd_patch,
+        lgsf_patch                     = cnveg_state.lgsf_patch,
+        bglfr_patch                    = cnveg_state.bglfr_patch,
+        bgtr_patch                     = cnveg_state.bgtr_patch,
+        leafc_xfer_to_leafc_patch      = cnveg_cf.leafc_xfer_to_leafc_patch,
+        frootc_xfer_to_frootc_patch    = cnveg_cf.frootc_xfer_to_frootc_patch,
+        leafn_xfer_to_leafn_patch      = cnveg_nf.leafn_xfer_to_leafn_patch,
+        frootn_xfer_to_frootn_patch    = cnveg_nf.frootn_xfer_to_frootn_patch,
+        livestemc_xfer_to_livestemc_patch   = cnveg_cf.livestemc_xfer_to_livestemc_patch,
+        deadstemc_xfer_to_deadstemc_patch   = cnveg_cf.deadstemc_xfer_to_deadstemc_patch,
+        livecrootc_xfer_to_livecrootc_patch = cnveg_cf.livecrootc_xfer_to_livecrootc_patch,
+        deadcrootc_xfer_to_deadcrootc_patch = cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch,
+        livestemn_xfer_to_livestemn_patch   = cnveg_nf.livestemn_xfer_to_livestemn_patch,
+        deadstemn_xfer_to_deadstemn_patch   = cnveg_nf.deadstemn_xfer_to_deadstemn_patch,
+        livecrootn_xfer_to_livecrootn_patch = cnveg_nf.livecrootn_xfer_to_livecrootn_patch,
+        deadcrootn_xfer_to_deadcrootn_patch = cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch)
 
-        if pftcon.stress_decid[ivt] != 1.0
-            continue
-        end
+    s2 = _PhenStressSD_S2(;
+        leafc_xfer_patch     = cnveg_cs.leafc_xfer_patch,
+        leafn_xfer_patch     = cnveg_ns.leafn_xfer_patch,
+        frootc_xfer_patch    = cnveg_cs.frootc_xfer_patch,
+        frootn_xfer_patch    = cnveg_ns.frootn_xfer_patch,
+        livestemc_xfer_patch = cnveg_cs.livestemc_xfer_patch,
+        livestemn_xfer_patch = cnveg_ns.livestemn_xfer_patch,
+        deadstemc_xfer_patch = cnveg_cs.deadstemc_xfer_patch,
+        deadstemn_xfer_patch = cnveg_ns.deadstemn_xfer_patch,
+        livecrootc_xfer_patch = cnveg_cs.livecrootc_xfer_patch,
+        livecrootn_xfer_patch = cnveg_ns.livecrootn_xfer_patch,
+        deadcrootc_xfer_patch = cnveg_cs.deadcrootc_xfer_patch,
+        deadcrootn_xfer_patch = cnveg_ns.deadcrootn_xfer_patch,
+        leafc_storage_to_xfer_patch      = cnveg_cf.leafc_storage_to_xfer_patch,
+        frootc_storage_to_xfer_patch     = cnveg_cf.frootc_storage_to_xfer_patch,
+        livestemc_storage_to_xfer_patch  = cnveg_cf.livestemc_storage_to_xfer_patch,
+        deadstemc_storage_to_xfer_patch  = cnveg_cf.deadstemc_storage_to_xfer_patch,
+        livecrootc_storage_to_xfer_patch = cnveg_cf.livecrootc_storage_to_xfer_patch,
+        deadcrootc_storage_to_xfer_patch = cnveg_cf.deadcrootc_storage_to_xfer_patch,
+        gresp_storage_to_xfer_patch      = cnveg_cf.gresp_storage_to_xfer_patch,
+        leafn_storage_to_xfer_patch      = cnveg_nf.leafn_storage_to_xfer_patch,
+        frootn_storage_to_xfer_patch     = cnveg_nf.frootn_storage_to_xfer_patch,
+        livestemn_storage_to_xfer_patch  = cnveg_nf.livestemn_storage_to_xfer_patch,
+        deadstemn_storage_to_xfer_patch  = cnveg_nf.deadstemn_storage_to_xfer_patch,
+        livecrootn_storage_to_xfer_patch = cnveg_nf.livecrootn_storage_to_xfer_patch,
+        deadcrootn_storage_to_xfer_patch = cnveg_nf.deadcrootn_storage_to_xfer_patch)
 
-        soilt = temperature.t_soisno_col[c, soil_layer]
-        psi   = soil_state.soilpsi_col[c, soil_layer]
+    inp = _PhenStressSD_In(;
+        stress_decid      = pftcon.stress_decid,
+        woody             = pftcon.woody,
+        crit_onset_gdd_sf = pftcon.crit_onset_gdd_sf,
+        ndays_on          = pftcon.ndays_on,
+        leaf_long         = pftcon.leaf_long,
+        annavg_t2m_patch  = cnveg_state.annavg_t2m_patch,
+        leafc_storage_patch      = cnveg_cs.leafc_storage_patch,
+        frootc_storage_patch     = cnveg_cs.frootc_storage_patch,
+        livestemc_storage_patch  = cnveg_cs.livestemc_storage_patch,
+        deadstemc_storage_patch  = cnveg_cs.deadstemc_storage_patch,
+        livecrootc_storage_patch = cnveg_cs.livecrootc_storage_patch,
+        deadcrootc_storage_patch = cnveg_cs.deadcrootc_storage_patch,
+        gresp_storage_patch      = cnveg_cs.gresp_storage_patch,
+        leafn_storage_patch      = cnveg_ns.leafn_storage_patch,
+        frootn_storage_patch     = cnveg_ns.frootn_storage_patch,
+        livestemn_storage_patch  = cnveg_ns.livestemn_storage_patch,
+        deadstemn_storage_patch  = cnveg_ns.deadstemn_storage_patch,
+        livecrootn_storage_patch = cnveg_ns.livecrootn_storage_patch,
+        deadcrootn_storage_patch = cnveg_ns.deadcrootn_storage_patch,
+        leafc_patch  = cnveg_cs.leafc_patch,
+        frootc_patch = cnveg_cs.frootc_patch)
 
-        crit_onset_gdd = pftcon.crit_onset_gdd_sf[ivt] *
-            exp(4.8 + 0.13 * (cnveg_state.annavg_t2m_patch[p] - TFRZ))
+    col = _PhenStressSD_Col(;
+        t_soisno_col = temperature.t_soisno_col,
+        soilpsi_col  = soil_state.soilpsi_col,
+        dayl         = gridcell.dayl)
 
-        # offset counter
-        if cnveg_state.offset_flag_patch[p] == 1.0
-            cnveg_state.offset_counter_patch[p] -= dt
-            if cnveg_state.offset_counter_patch[p] < dt / 2.0
-                cnveg_state.offset_flag_patch[p]    = 0.0
-                cnveg_state.offset_counter_patch[p]  = 0.0
-                cnveg_state.dormant_flag_patch[p]    = 1.0
-                cnveg_state.days_active_patch[p]     = 0.0
-                cnveg_cf.prev_leafc_to_litter_patch[p]  = 0.0
-                cnveg_cf.prev_frootc_to_litter_patch[p] = 0.0
-            end
-        end
+    sc = _PhenStressSDScalars{T}(;
+        dt              = T(dt),
+        fracday         = T(fracday),
+        ndays_off_val   = T(ndays_off_val),
+        fstor2tran      = T(fstor2tran),
+        crit_onset_fdd  = T(crit_onset_fdd),
+        crit_onset_swi  = T(crit_onset_swi),
+        soilpsi_on      = T(soilpsi_on),
+        crit_offset_fdd = T(crit_offset_fdd),
+        crit_offset_swi = T(crit_offset_swi),
+        soilpsi_off     = T(soilpsi_off),
+        secspqtrday     = T(secspqtrday),
+        avg_dayspyr     = T(avg_dayspyr),
+        tfrz            = T(TFRZ),
+        secspday        = T(SECSPDAY))
 
-        # onset counter
-        if cnveg_state.onset_flag_patch[p] == 1.0
-            cnveg_state.onset_counter_patch[p] -= dt
-            if cnveg_state.onset_counter_patch[p] < dt / 2.0
-                cnveg_state.onset_flag_patch[p]    = 0.0
-                cnveg_state.onset_counter_patch[p] = 0.0
-                cnveg_cf.leafc_xfer_to_leafc_patch[p]   = 0.0
-                cnveg_cf.frootc_xfer_to_frootc_patch[p] = 0.0
-                cnveg_nf.leafn_xfer_to_leafn_patch[p]   = 0.0
-                cnveg_nf.frootn_xfer_to_frootn_patch[p] = 0.0
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_cf.livestemc_xfer_to_livestemc_patch[p]   = 0.0
-                    cnveg_cf.deadstemc_xfer_to_deadstemc_patch[p]   = 0.0
-                    cnveg_cf.livecrootc_xfer_to_livecrootc_patch[p] = 0.0
-                    cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch[p] = 0.0
-                    cnveg_nf.livestemn_xfer_to_livestemn_patch[p]   = 0.0
-                    cnveg_nf.deadstemn_xfer_to_deadstemn_patch[p]   = 0.0
-                    cnveg_nf.livecrootn_xfer_to_livecrootn_patch[p] = 0.0
-                    cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch[p] = 0.0
-                end
-                cnveg_cs.leafc_xfer_patch[p]  = 0.0
-                cnveg_ns.leafn_xfer_patch[p]  = 0.0
-                cnveg_cs.frootc_xfer_patch[p] = 0.0
-                cnveg_ns.frootn_xfer_patch[p] = 0.0
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_cs.livestemc_xfer_patch[p]  = 0.0
-                    cnveg_ns.livestemn_xfer_patch[p]  = 0.0
-                    cnveg_cs.deadstemc_xfer_patch[p]  = 0.0
-                    cnveg_ns.deadstemn_xfer_patch[p]  = 0.0
-                    cnveg_cs.livecrootc_xfer_patch[p] = 0.0
-                    cnveg_ns.livecrootn_xfer_patch[p] = 0.0
-                    cnveg_cs.deadcrootc_xfer_patch[p] = 0.0
-                    cnveg_ns.deadcrootn_xfer_patch[p] = 0.0
-                end
-            end
-        end
-
-        # test dormant → growth
-        if cnveg_state.dormant_flag_patch[p] == 1.0
-            # freezing degree days (smoothed TFRZ branch for AD)
-            if cnveg_state.onset_gddflag_patch[p] == 0.0
-                cnveg_state.onset_fdd_patch[p] += smooth_heaviside(TFRZ - soilt) * fracday
-            end
-            if cnveg_state.onset_fdd_patch[p] > crit_onset_fdd
-                cnveg_state.onset_gddflag_patch[p] = 1.0
-                cnveg_state.onset_fdd_patch[p]     = 0.0
-                cnveg_state.onset_swi_patch[p]     = 0.0
-            end
-            # GDD accumulation (smoothed TFRZ branch for AD)
-            if cnveg_state.onset_gddflag_patch[p] == 1.0
-                cnveg_state.onset_gdd_patch[p] += smooth_max(soilt - TFRZ, 0.0) * fracday
-            end
-            # soil water index
-            additional_onset_condition = true
-            if cn_params.constrain_stress_deciduous_onset
-                if hasfield(typeof(cnveg_state), :prec10_patch) &&
-                   length(cnveg_state.prec10_patch) >= p
-                    # prec10 check
-                else
-                    # skip (no prec10 available yet)
-                end
-            end
-            if psi >= soilpsi_on
-                cnveg_state.onset_swi_patch[p] += fracday
-            end
-            if cnveg_state.onset_swi_patch[p] > crit_onset_swi && additional_onset_condition
-                cnveg_state.onset_flag_patch[p] = 1.0
-                if cnveg_state.onset_gddflag_patch[p] == 1.0 &&
-                   cnveg_state.onset_gdd_patch[p] < crit_onset_gdd
-                    cnveg_state.onset_flag_patch[p] = 0.0
-                end
-            end
-            # only allow onset if dayl > 6hrs
-            if cnveg_state.onset_flag_patch[p] == 1.0 && gridcell.dayl[g] <= secspqtrday
-                cnveg_state.onset_flag_patch[p] = 0.0
-            end
-            # if onset triggered, reset and do storage→transfer
-            if cnveg_state.onset_flag_patch[p] == 1.0
-                cnveg_state.dormant_flag_patch[p]    = 0.0
-                cnveg_state.days_active_patch[p]     = 0.0
-                cnveg_state.onset_gddflag_patch[p]   = 0.0
-                cnveg_state.onset_fdd_patch[p]       = 0.0
-                cnveg_state.onset_gdd_patch[p]       = 0.0
-                cnveg_state.onset_swi_patch[p]       = 0.0
-                cnveg_state.onset_counter_patch[p]   = pftcon.ndays_on[ivt] * SECSPDAY
-
-                cnveg_cf.leafc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.leafc_storage_patch[p] / dt
-                cnveg_cf.frootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.frootc_storage_patch[p] / dt
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_cf.livestemc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.livestemc_storage_patch[p] / dt
-                    cnveg_cf.deadstemc_storage_to_xfer_patch[p]  = fstor2tran * cnveg_cs.deadstemc_storage_patch[p] / dt
-                    cnveg_cf.livecrootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.livecrootc_storage_patch[p] / dt
-                    cnveg_cf.deadcrootc_storage_to_xfer_patch[p] = fstor2tran * cnveg_cs.deadcrootc_storage_patch[p] / dt
-                    cnveg_cf.gresp_storage_to_xfer_patch[p]      = fstor2tran * cnveg_cs.gresp_storage_patch[p] / dt
-                end
-                cnveg_nf.leafn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.leafn_storage_patch[p] / dt
-                cnveg_nf.frootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.frootn_storage_patch[p] / dt
-                if pftcon.woody[ivt] == 1.0
-                    cnveg_nf.livestemn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.livestemn_storage_patch[p] / dt
-                    cnveg_nf.deadstemn_storage_to_xfer_patch[p]  = fstor2tran * cnveg_ns.deadstemn_storage_patch[p] / dt
-                    cnveg_nf.livecrootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.livecrootn_storage_patch[p] / dt
-                    cnveg_nf.deadcrootn_storage_to_xfer_patch[p] = fstor2tran * cnveg_ns.deadcrootn_storage_patch[p] / dt
-                end
-            end
-
-        # test growth → offset
-        elseif cnveg_state.offset_flag_patch[p] == 0.0
-            if psi <= soilpsi_off
-                cnveg_state.offset_swi_patch[p] += fracday
-                if cnveg_state.offset_swi_patch[p] >= crit_offset_swi &&
-                   cnveg_state.onset_flag_patch[p] == 0.0
-                    cnveg_state.offset_flag_patch[p] = 1.0
-                end
-            elseif psi >= soilpsi_on
-                cnveg_state.offset_swi_patch[p] -= fracday
-                cnveg_state.offset_swi_patch[p] = smooth_max(cnveg_state.offset_swi_patch[p], 0.0)
-            end
-            # freezing day accumulation (smoothed TFRZ branch for AD)
-            # Blend thaw-decay and freeze-accumulation using smooth_heaviside
-            _hw_above = smooth_heaviside(soilt - TFRZ)   # ~1 when above freezing
-            _hw_below = 1.0 - _hw_above                  # ~1 when below freezing
-            if cnveg_state.offset_fdd_patch[p] > 0.0
-                cnveg_state.offset_fdd_patch[p] -= _hw_above * fracday
-                cnveg_state.offset_fdd_patch[p] = smooth_max(0.0, cnveg_state.offset_fdd_patch[p])
-            end
-            cnveg_state.offset_fdd_patch[p] += _hw_below * fracday
-            if cnveg_state.offset_fdd_patch[p] > crit_offset_fdd &&
-               cnveg_state.onset_flag_patch[p] == 0.0
-                cnveg_state.offset_flag_patch[p] = 1.0
-            end
-            # force offset if dayl < 6 hrs
-            if gridcell.dayl[g] <= secspqtrday
-                cnveg_state.offset_flag_patch[p] = 1.0
-            end
-            # set offset params
-            if cnveg_state.offset_flag_patch[p] == 1.0
-                cnveg_state.offset_fdd_patch[p]     = 0.0
-                cnveg_state.offset_swi_patch[p]     = 0.0
-                cnveg_state.offset_counter_patch[p]  = ndays_off_val * SECSPDAY
-                cnveg_cf.prev_leafc_to_litter_patch[p]  = 0.0
-                cnveg_cf.prev_frootc_to_litter_patch[p] = 0.0
-            end
-        end
-
-        # days active tracking
-        if cnveg_state.dormant_flag_patch[p] == 0.0
-            cnveg_state.days_active_patch[p] += fracday
-        end
-
-        # long growing season factor
-        cnveg_state.lgsf_patch[p] = smooth_clamp(
-            3.0 * (cnveg_state.days_active_patch[p] - pftcon.leaf_long[ivt] * avg_dayspyr) / avg_dayspyr,
-            0.0, 1.0)
-
-        # background litterfall rate
-        if cnveg_state.offset_flag_patch[p] == 1.0
-            cnveg_state.bglfr_patch[p] = 0.0
-        else
-            cnveg_state.bglfr_patch[p] = (1.0 / (pftcon.leaf_long[ivt] * avg_dayspyr * SECSPDAY)) *
-                cnveg_state.lgsf_patch[p]
-        end
-
-        # background transfer rate
-        if cnveg_state.onset_flag_patch[p] == 1.0
-            cnveg_state.bgtr_patch[p] = 0.0
-        else
-            bgtr_val = (1.0 / (avg_dayspyr * SECSPDAY)) * cnveg_state.lgsf_patch[p]
-            cnveg_state.bgtr_patch[p] = bgtr_val
-
-            # non-matrix storage → transfer
-            cnveg_cf.leafc_storage_to_xfer_patch[p]  = smooth_max(0.0, cnveg_cs.leafc_storage_patch[p] - cnveg_cs.leafc_patch[p]) * bgtr_val
-            cnveg_cf.frootc_storage_to_xfer_patch[p] = smooth_max(0.0, cnveg_cs.frootc_storage_patch[p] - cnveg_cs.frootc_patch[p]) * bgtr_val
-            if pftcon.woody[ivt] == 1.0
-                cnveg_cf.livestemc_storage_to_xfer_patch[p]  = cnveg_cs.livestemc_storage_patch[p] * bgtr_val
-                cnveg_cf.deadstemc_storage_to_xfer_patch[p]  = cnveg_cs.deadstemc_storage_patch[p] * bgtr_val
-                cnveg_cf.livecrootc_storage_to_xfer_patch[p] = cnveg_cs.livecrootc_storage_patch[p] * bgtr_val
-                cnveg_cf.deadcrootc_storage_to_xfer_patch[p] = cnveg_cs.deadcrootc_storage_patch[p] * bgtr_val
-                cnveg_cf.gresp_storage_to_xfer_patch[p]      = cnveg_cs.gresp_storage_patch[p] * bgtr_val
-            end
-            cnveg_nf.leafn_storage_to_xfer_patch[p]  = cnveg_ns.leafn_storage_patch[p] * bgtr_val
-            cnveg_nf.frootn_storage_to_xfer_patch[p] = cnveg_ns.frootn_storage_patch[p] * bgtr_val
-            if pftcon.woody[ivt] == 1.0
-                cnveg_nf.livestemn_storage_to_xfer_patch[p]  = cnveg_ns.livestemn_storage_patch[p] * bgtr_val
-                cnveg_nf.deadstemn_storage_to_xfer_patch[p]  = cnveg_ns.deadstemn_storage_patch[p] * bgtr_val
-                cnveg_nf.livecrootn_storage_to_xfer_patch[p] = cnveg_ns.livecrootn_storage_patch[p] * bgtr_val
-                cnveg_nf.deadcrootn_storage_to_xfer_patch[p] = cnveg_ns.deadcrootn_storage_patch[p] * bgtr_val
-            end
-        end
-
-    end # patch loop
+    # Struct-first kernel: manual backend (struct args carry no backend) + synchronize.
+    isempty(mask_soilp) && return nothing
+    backend = _kernel_backend(s1.offset_flag_patch)
+    _phen_stress_decid_kernel!(backend)(
+        s1, s2, inp, col,
+        mask_soilp, patch_data.itype, patch_data.column, patch_data.gridcell,
+        sc, soil_layer; ndrange = length(mask_soilp))
+    KA.synchronize(backend)
 
     return nothing
 end
@@ -1446,8 +2191,41 @@ end
 # ==========================================================================
 # crop_phenology! — Crop lifecycle management (simplified)
 # ==========================================================================
+@kernel function _phen_crop_phenology_kernel!(
+        cphase_patch, bglfr_patch, bgtr_patch, lgsf_patch,
+        onset_flag_patch, offset_flag_patch, onset_counter_patch,
+        @Const(mask), @Const(itype), @Const(croplive_patch),
+        @Const(hui_patch), @Const(huigrain_patch), @Const(leaf_long),
+        dt, avg_dayspyr, secspday,
+        cphase_planted_in, cphase_grainfill_in)
+    T = eltype(bglfr_patch)
+    p = @index(Global)
+    @inbounds if mask[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+
+        # reset background rates
+        bglfr_patch[p] = zero(T)
+        bgtr_patch[p]  = zero(T)
+        lgsf_patch[p]  = zero(T)
+
+        onset_flag_patch[p]  = zero(T)
+        offset_flag_patch[p] = zero(T)
+
+        if croplive_patch[p]
+            cphase_patch[p] = cphase_planted_in
+            onset_counter_patch[p] -= dt
+
+            # grain fill phase: background litterfall
+            if hui_patch[p] >= huigrain_patch[p]
+                cphase_patch[p] = cphase_grainfill_in
+                bglfr_patch[p] = one(T) / (leaf_long[ivt] * avg_dayspyr * secspday)
+            end
+        end
+    end
+end
+
 function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
-                         mask_pcropp::BitVector,
+                         mask_pcropp::AbstractVector{Bool},
                          pftcon::PftConPhenology,
                          water_diag::WaterDiagnosticBulkData,
                          temperature::TemperatureData,
@@ -1465,35 +2243,16 @@ function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
                          jday::Int=1, kyr::Int=1, dayspyr::Real=365.0,
                          use_fertilizer::Bool=false)
     dt = pstate.dt
+    T = eltype(cnveg_state.bglfr_patch)   # working precision (Float32 on Metal)
 
-    for p in eachindex(mask_pcropp)
-        mask_pcropp[p] || continue
-
-        ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-        c   = patch_data.column[p]
-        g   = patch_data.gridcell[p]
-        h   = pstate.inhemi[p]
-
-        # reset background rates
-        cnveg_state.bglfr_patch[p] = 0.0
-        cnveg_state.bgtr_patch[p]  = 0.0
-        cnveg_state.lgsf_patch[p]  = 0.0
-
-        cnveg_state.onset_flag_patch[p]  = 0.0
-        cnveg_state.offset_flag_patch[p] = 0.0
-
-        if crop.croplive_patch[p]
-            crop.cphase_patch[p] = cphase_planted
-            cnveg_state.onset_counter_patch[p] -= dt
-
-            # grain fill phase: background litterfall
-            if crop.hui_patch[p] >= cnveg_state.huigrain_patch[p]
-                crop.cphase_patch[p] = cphase_grainfill
-                cnveg_state.bglfr_patch[p] = 1.0 / (pftcon.leaf_long[ivt] * avg_dayspyr * SECSPDAY)
-            end
-        end
-
-    end # patch loop
+    _launch!(_phen_crop_phenology_kernel!,
+        crop.cphase_patch, cnveg_state.bglfr_patch, cnveg_state.bgtr_patch,
+        cnveg_state.lgsf_patch, cnveg_state.onset_flag_patch,
+        cnveg_state.offset_flag_patch, cnveg_state.onset_counter_patch,
+        mask_pcropp, patch_data.itype, crop.croplive_patch,
+        crop.hui_patch, cnveg_state.huigrain_patch, pftcon.leaf_long,
+        T(dt), T(avg_dayspyr), T(SECSPDAY),
+        T(cphase_planted), T(cphase_grainfill))
 
     return nothing
 end
@@ -1501,7 +2260,7 @@ end
 # ==========================================================================
 # crop_phase! — Get current crop phase
 # ==========================================================================
-function crop_phase!(mask_pcropp::BitVector, crop::CropData,
+function crop_phase!(mask_pcropp::AbstractVector{Bool}, crop::CropData,
                      cnveg_state::CNVegStateData,
                      crop_phase_out::Vector{<:Real})
     # Per-patch independent: derive crop phase into output array.
@@ -1648,7 +2407,7 @@ end
 # cn_onset_growth! — Transfer → display during onset
 # ==========================================================================
 function cn_onset_growth!(pstate::PhenologyState,
-                          mask_soilp::BitVector,
+                          mask_soilp::AbstractVector{Bool},
                           pftcon::PftConPhenology,
                           cnveg_state::CNVegStateData,
                           cnveg_cs::CNVegCarbonStateData,
@@ -1683,7 +2442,7 @@ end
 # cn_offset_litterfall! — Display → litter during offset
 # ==========================================================================
 function cn_offset_litterfall!(pstate::PhenologyState,
-                               mask_soilp::BitVector,
+                               mask_soilp::AbstractVector{Bool},
                                pftcon::PftConPhenology,
                                cnveg_state::CNVegStateData,
                                cnveg_cs::CNVegCarbonStateData,
@@ -1717,7 +2476,7 @@ end
 # cn_background_litterfall! — Background litterfall
 # ==========================================================================
 function cn_background_litterfall!(pstate::PhenologyState,
-                                   mask_soilp::BitVector,
+                                   mask_soilp::AbstractVector{Bool},
                                    pftcon::PftConPhenology,
                                    cnveg_state::CNVegStateData,
                                    cnveg_cs::CNVegCarbonStateData,
@@ -1744,7 +2503,7 @@ end
 # cn_livewood_turnover! — Live wood → dead wood turnover
 # ==========================================================================
 function cn_livewood_turnover!(pstate::PhenologyState,
-                               mask_soilp::BitVector,
+                               mask_soilp::AbstractVector{Bool},
                                pftcon::PftConPhenology,
                                cnveg_cs::CNVegCarbonStateData,
                                cnveg_ns::CNVegNitrogenStateData,
@@ -1772,8 +2531,8 @@ end
 # ==========================================================================
 # cn_crop_harvest_to_product_pools! — Crop harvest to product pools
 # ==========================================================================
-function cn_crop_harvest_to_product_pools!(mask_soilp::BitVector,
-                                           mask_soilc::BitVector,
+function cn_crop_harvest_to_product_pools!(mask_soilp::AbstractVector{Bool},
+                                           mask_soilc::AbstractVector{Bool},
                                            cnveg_cf::CNVegCarbonFluxData,
                                            cnveg_nf::CNVegNitrogenFluxData,
                                            patch_data::PatchData;
@@ -1797,58 +2556,76 @@ end
 # ==========================================================================
 # cn_litter_to_column! — Aggregate patch litter to column level
 # ==========================================================================
-function cn_litter_to_column!(mask_soilp::BitVector,
-                              pftcon::PftConPhenology,
-                              cnveg_state::CNVegStateData,
-                              cnveg_cf::CNVegCarbonFluxData,
-                              cnveg_nf::CNVegNitrogenFluxData,
-                              patch_data::PatchData,
-                              leaf_prof::Matrix{<:Real},
-                              froot_prof::Matrix{<:Real};
-                              nlevdecomp::Int=1,
-                              i_litr_min::Int=1, i_litr_max::Int=3,
-                              npcropmin::Int=17,
-                              use_grainproduct::Bool=false)
-    for j in 1:nlevdecomp
-        for p in eachindex(mask_soilp)
-            mask_soilp[p] || continue
-
-            ivt = patch_data.itype[p] + 1  # 0-based Fortran → 1-based Julia
-            c   = patch_data.column[p]
-            wt  = patch_data.wtcol[p]
-
+@kernel function _phen_litter_to_column_kernel!(
+        phenology_c_to_litr_c_col, phenology_n_to_litr_n_col,
+        @Const(mask), @Const(itype), @Const(column), @Const(wtcol),
+        @Const(lf_f), @Const(fr_f),
+        @Const(leafc_to_litter_patch), @Const(frootc_to_litter_patch),
+        @Const(leafn_to_litter_patch), @Const(frootn_to_litter_patch),
+        @Const(livestemc_to_litter_patch), @Const(livestemn_to_litter_patch),
+        @Const(leaf_prof), @Const(froot_prof),
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, npcropmin::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+        c   = column[p]
+        wt  = wtcol[p]
+        ncol = size(phenology_c_to_litr_c_col, 1)
+        for j in 1:nlevdecomp
             for i in i_litr_min:i_litr_max
                 # leaf litter C and N
-                if size(cnveg_cf.phenology_c_to_litr_c_col, 1) >= c
-                    cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                        cnveg_cf.leafc_to_litter_patch[p] * pftcon.lf_f[ivt, i] * wt * leaf_prof[p, j]
+                if ncol >= c
+                    _scatter_add!(phenology_c_to_litr_c_col, c, j, i,
+                        leafc_to_litter_patch[p] * lf_f[ivt, i] * wt * leaf_prof[p, j])
 
-                    cnveg_nf.phenology_n_to_litr_n_col[c, j, i] +=
-                        cnveg_nf.leafn_to_litter_patch[p] * pftcon.lf_f[ivt, i] * wt * leaf_prof[p, j]
+                    _scatter_add!(phenology_n_to_litr_n_col, c, j, i,
+                        leafn_to_litter_patch[p] * lf_f[ivt, i] * wt * leaf_prof[p, j])
 
                     # fine root litter C and N
-                    cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                        cnveg_cf.frootc_to_litter_patch[p] * pftcon.fr_f[ivt, i] * wt * froot_prof[p, j]
+                    _scatter_add!(phenology_c_to_litr_c_col, c, j, i,
+                        frootc_to_litter_patch[p] * fr_f[ivt, i] * wt * froot_prof[p, j])
 
-                    cnveg_nf.phenology_n_to_litr_n_col[c, j, i] +=
-                        cnveg_nf.frootn_to_litter_patch[p] * pftcon.fr_f[ivt, i] * wt * froot_prof[p, j]
+                    _scatter_add!(phenology_n_to_litr_n_col, c, j, i,
+                        frootn_to_litter_patch[p] * fr_f[ivt, i] * wt * froot_prof[p, j])
                 end
             end
 
             # crop stem litter uses leaf litter fractions
             if ivt >= npcropmin
                 for i in i_litr_min:i_litr_max
-                    if size(cnveg_cf.phenology_c_to_litr_c_col, 1) >= c
-                        cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                            cnveg_cf.livestemc_to_litter_patch[p] * pftcon.lf_f[ivt, i] * wt * leaf_prof[p, j]
-                        cnveg_nf.phenology_n_to_litr_n_col[c, j, i] +=
-                            cnveg_nf.livestemn_to_litter_patch[p] * pftcon.lf_f[ivt, i] * wt * leaf_prof[p, j]
+                    if ncol >= c
+                        _scatter_add!(phenology_c_to_litr_c_col, c, j, i,
+                            livestemc_to_litter_patch[p] * lf_f[ivt, i] * wt * leaf_prof[p, j])
+                        _scatter_add!(phenology_n_to_litr_n_col, c, j, i,
+                            livestemn_to_litter_patch[p] * lf_f[ivt, i] * wt * leaf_prof[p, j])
                     end
                 end
             end
+        end # decomp level loop
+    end
+end
 
-        end # patch loop
-    end # decomp level loop
-
+function cn_litter_to_column!(mask_soilp::AbstractVector{Bool},
+                              pftcon::PftConPhenology,
+                              cnveg_state::CNVegStateData,
+                              cnveg_cf::CNVegCarbonFluxData,
+                              cnveg_nf::CNVegNitrogenFluxData,
+                              patch_data::PatchData,
+                              leaf_prof::AbstractMatrix{<:Real},
+                              froot_prof::AbstractMatrix{<:Real};
+                              nlevdecomp::Int=1,
+                              i_litr_min::Int=1, i_litr_max::Int=3,
+                              npcropmin::Int=17,
+                              use_grainproduct::Bool=false)
+    _launch!(_phen_litter_to_column_kernel!,
+        cnveg_cf.phenology_c_to_litr_c_col, cnveg_nf.phenology_n_to_litr_n_col,
+        mask_soilp, patch_data.itype, patch_data.column, patch_data.wtcol,
+        pftcon.lf_f, pftcon.fr_f,
+        cnveg_cf.leafc_to_litter_patch, cnveg_cf.frootc_to_litter_patch,
+        cnveg_nf.leafn_to_litter_patch, cnveg_nf.frootn_to_litter_patch,
+        cnveg_cf.livestemc_to_litter_patch, cnveg_nf.livestemn_to_litter_patch,
+        leaf_prof, froot_prof,
+        nlevdecomp, i_litr_min, i_litr_max, npcropmin;
+        ndrange = length(mask_soilp))
     return nothing
 end
