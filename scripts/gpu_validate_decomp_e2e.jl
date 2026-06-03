@@ -17,7 +17,7 @@
 using CLM
 using Printf
 import Metal   # MtlArray is the Adapt adaptor type for the device arrays
-import Adapt
+const Adapt = CLM.Adapt   # Adapt isn't in scripts/Project.toml; reach it via CLM
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 

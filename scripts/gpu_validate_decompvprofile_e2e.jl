@@ -25,7 +25,7 @@
 using CLM
 using Printf
 import Metal
-import Adapt
+const Adapt = CLM.Adapt   # Adapt isn't in scripts/Project.toml; reach it via CLM
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)

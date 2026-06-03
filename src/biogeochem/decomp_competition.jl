@@ -284,17 +284,17 @@ end
         nlevdecomp::Int, local_use_fun::Bool)
     c = @index(Global)
     @inbounds if mask[c]
-        T = eltype(sminn_to_plant)
-        s = zero(T)
+        # Accumulate DIRECTLY into the own-column field (thread c owns [c]) — matches
+        # the host loop's association exactly (byte-identical even if [c] is nonzero
+        # on entry; a local-sum + single add would reassociate).
         for j in 1:nlevdecomp
-            s += sminn_to_plant_vr[c, j] * dzsoi_decomp[j]
+            sminn_to_plant[c] += sminn_to_plant_vr[c, j] * dzsoi_decomp[j]
             if local_use_fun
                 if sminn_to_plant_fun_vr[c, j] > sminn_to_plant_vr[c, j]
                     sminn_to_plant_fun_vr[c, j] = sminn_to_plant_vr[c, j]
                 end
             end
         end
-        sminn_to_plant[c] += s
     end
 end
 
