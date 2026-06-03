@@ -122,24 +122,26 @@ run_dr!(H) = CLM.decomp_rates_mimics!(
 
 function check_case(to, FT, nlevdecomp)
     @printf("\n  --- nlevdecomp = %d ---\n", nlevdecomp)
-    H = build(FT; nlevdecomp=nlevdecomp)   # CPU reference
-    B = build(FT; nlevdecomp=nlevdecomp)   # device source snapshot
+    # Build the CPU reference entirely at Float64: init_decompcascade_mimics! allocates
+    # the texture arrays (fphys/desorp/p_scalar) at Float64 regardless of precision, so a
+    # mixed Float32-cf / Float64-mimics build can't unify in the _DMRArr device-view bundle.
+    # The device snapshot down-converts EVERY array (cf + mimics_state + forcing) to Float32
+    # via MetalF32, keeping the whole device computation at one precision.
+    H = build(Float64; nlevdecomp=nlevdecomp)   # CPU reference (uniform Float64)
+    B = build(Float64; nlevdecomp=nlevdecomp)   # device source snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    adf32(x) = CLM.Adapt.adapt(MetalF32(), x)   # Float64 -> Float32 device
     dmask(m) = to(collect(Bool, m))
 
-    # Adapt the carbon-flux struct (all outputs live here).
-    cfd = ad(B.cf)
-    # Move the MIMICS state's spatially-varying arrays to the device (the rate kernel
-    # reads fphys_m1/fphys_m2/desorp/p_scalar from the bundle). adapt-reconstruct via
-    # MetalF32 so the loose-M struct lands with device Float32 arrays (mutating the
-    # fields would reconvert to host Float64 — the instance type is fixed at construction).
-    msd = CLM.Adapt.adapt(MetalF32(), B.mimics_state)
+    cfd = adf32(B.cf)
+    # adapt-reconstruct the loose-M DecompMIMICSState with device Float32 arrays (mutating
+    # the fields would reconvert to host Float64 — the instance type is fixed at construction).
+    msd = adf32(B.mimics_state)
 
     Bd = (; B.params, B.cn_params, mimics_state=msd, B.cascade_con, cf=cfd,
-            t_soisno=to(B.t_soisno), soilpsi=to(B.soilpsi), col_dz=to(B.col_dz),
-            decomp_cpools_vr=to(B.decomp_cpools_vr),
-            ligninNratioAvg=to(B.ligninNratioAvg), annsum_npp_col=to(B.annsum_npp_col),
+            t_soisno=adf32(B.t_soisno), soilpsi=adf32(B.soilpsi), col_dz=adf32(B.col_dz),
+            decomp_cpools_vr=adf32(B.decomp_cpools_vr),
+            ligninNratioAvg=adf32(B.ligninNratioAvg), annsum_npp_col=adf32(B.annsum_npp_col),
             mask_bgc_soilc=dmask(B.mask_bgc_soilc),
             B.nc, B.nlevdecomp, B.ndecomp_pools, B.ndecomp_cascade_transitions)
 

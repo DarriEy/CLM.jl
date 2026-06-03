@@ -26,11 +26,12 @@
                                          p_scalar_p1, p_scalar_p2, pct_to_frac)
     c, j = @index(Global, NTuple)
     @inbounds begin
-        clay_frac = pct_to_frac * smooth_min(100.0, cellclay[c, j])
+        T = eltype(desorp)
+        clay_frac = pct_to_frac * smooth_min(T(100.0), cellclay[c, j])
         desorp[c, j]   = desorp_p1 * exp(desorp_p2 * clay_frac)
-        fphys_m1[c, j] = smooth_min(1.0, fphys_r_p1 * exp(fphys_r_p2 * clay_frac))
-        fphys_m2[c, j] = smooth_min(1.0, fphys_k_p1 * exp(fphys_k_p2 * clay_frac))
-        p_scalar[c, j] = 1.0 / (p_scalar_p1 * exp(p_scalar_p2 * sqrt(clay_frac)))
+        fphys_m1[c, j] = smooth_min(one(T), fphys_r_p1 * exp(fphys_r_p2 * clay_frac))
+        fphys_m2[c, j] = smooth_min(one(T), fphys_k_p1 * exp(fphys_k_p2 * clay_frac))
+        p_scalar[c, j] = one(T) / (p_scalar_p1 * exp(p_scalar_p2 * sqrt(clay_frac)))
     end
 end
 
@@ -46,9 +47,11 @@ function mimics_texture_params!(desorp, fphys_m1, fphys_m2, p_scalar, cellclay,
                                 desorp_p1, desorp_p2, fphys_r_p1, fphys_r_p2,
                                 fphys_k_p1, fphys_k_p2, p_scalar_p1, p_scalar_p2,
                                 pct_to_frac; nc::Int, nlevdecomp::Int)
+    _T = eltype(desorp)   # convert the texture scalar params to working precision
     _launch!(_mimics_texture_kernel!, desorp, fphys_m1, fphys_m2, p_scalar, cellclay,
-             desorp_p1, desorp_p2, fphys_r_p1, fphys_r_p2, fphys_k_p1, fphys_k_p2,
-             p_scalar_p1, p_scalar_p2, pct_to_frac; ndrange = (nc, nlevdecomp))
+             _T(desorp_p1), _T(desorp_p2), _T(fphys_r_p1), _T(fphys_r_p2),
+             _T(fphys_k_p1), _T(fphys_k_p2), _T(p_scalar_p1), _T(p_scalar_p2),
+             _T(pct_to_frac); ndrange = (nc, nlevdecomp))
 end
 
 # Multi-level MIMICS water scalar (per column AND decomp level), masked.
@@ -61,7 +64,7 @@ end
         if psi > minpsi
             w_scalar[c, j] = log(minpsi / psi) / log(minpsi / maxpsi)
         else
-            w_scalar[c, j] = 0.0
+            w_scalar[c, j] = zero(eltype(w_scalar))
         end
     end
 end
@@ -74,7 +77,8 @@ Backend-agnostic; one thread per (c,j).
 """
 function mimics_water_scalar!(w_scalar, mask, soilpsi, minpsi, maxpsi;
                               nc::Int, nlevdecomp::Int)
-    _launch!(_mimics_wscalar_kernel!, w_scalar, mask, soilpsi, minpsi, maxpsi;
+    _T = eltype(w_scalar)
+    _launch!(_mimics_wscalar_kernel!, w_scalar, mask, soilpsi, _T(minpsi), _T(maxpsi);
              ndrange = (nc, nlevdecomp))
 end
 
@@ -96,15 +100,15 @@ Multi-level MIMICS O2 scalar under anoxia over all (column, decomp level) pairs
 """
 function mimics_oscalar_anoxia!(o_scalar, mask, o2stress_unsat, mino2lim;
                                 nc::Int, nlevdecomp::Int)
-    _launch!(_mimics_oscalar_anoxia_kernel!, o_scalar, mask, o2stress_unsat, mino2lim;
-             ndrange = (nc, nlevdecomp))
+    _launch!(_mimics_oscalar_anoxia_kernel!, o_scalar, mask, o2stress_unsat,
+             eltype(o_scalar)(mino2lim); ndrange = (nc, nlevdecomp))
 end
 
 # Multi-level MIMICS depth scalar (per column AND level), masked: set to 1.0.
 @kernel function _mimics_depth_scalar_kernel!(depth_scalar, @Const(mask))
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
-        depth_scalar[c, j] = 1.0
+        depth_scalar[c, j] = one(eltype(depth_scalar))
     end
 end
 
