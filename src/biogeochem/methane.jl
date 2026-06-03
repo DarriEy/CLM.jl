@@ -571,6 +571,235 @@ function ch4_init_column_balance_check!(ch4::CH4Data,
 end
 
 # ---------------------------------------------------------------------------
+# ch4_prod! — Methane production : KernelAbstractions kernels + device-view bundles
+#
+# Two kernels mirror the original two loop nests verbatim:
+#   1. _ch4prod_rrvr_kernel!  — per-PATCH scatter of root respiration into the
+#      column-resolved rr_vr[c,j] (many patches -> one column) via _scatter_add!.
+#      rr_vr is zeroed by _ch4prod_zero_rrvr_kernel! first (masked-zero).
+#   2. _ch4prod_main_kernel!  — per-(column, level) production, reading rr_vr.
+#
+# The main loop touches ~14 CH4Data array fields + several loose arrays, so the
+# CH4Data views are bundled into immutable _Ch4ProdState{V,M} (field names mirror
+# CH4Data so the body reads verbatim); scalar params/flags are bundled into
+# _Ch4ProdScal{T} and _Ch4ProdFlags. Every Float64 literal/const is converted to
+# eltype(out) so no Float64 reaches a Float32-only backend (Metal).
+# ---------------------------------------------------------------------------
+
+# Bundle of CH4Data array views read/written by the main production kernel.
+# Vectors (V) and matrices (M) kept as distinct type params.
+Base.@kwdef struct _Ch4ProdState{V,M}
+    sif_col              ::V
+    annavg_finrw_col     ::V
+    finundated_col       ::V
+    finundated_lag_col   ::V
+    pH_col               ::V
+    lake_soilc_col       ::M
+    layer_sat_lag_col    ::M
+    conc_o2              ::M
+    ch4_prod_depth       ::M
+    o2_decomp_depth      ::M
+end
+Adapt.@adapt_structure _Ch4ProdState
+
+# Bundle of scalar Float64 params (converted to working precision at launch).
+Base.@kwdef struct _Ch4ProdScal{T}
+    q10ch4base    ::T
+    f_ch4         ::T
+    rootlitfrac   ::T
+    cnscalefactor ::T
+    lake_decomp_fact ::T
+    pHmax         ::T
+    pHmin         ::T
+    oxinhib       ::T
+    q10ch4        ::T
+    q10lake       ::T
+    q10lakebase   ::T
+    mino2lim      ::T
+    catomw        ::T
+    tfrz          ::T
+    spval         ::T
+end
+Adapt.@adapt_structure _Ch4ProdScal
+
+# Bundle of Bool/Int config flags (stay scalar args — small enough to pass loose,
+# but bundled to respect the Metal ~31-arg cap together with the array bundles).
+Base.@kwdef struct _Ch4ProdFlags
+    sat                ::Int
+    lake               ::Bool
+    use_cn             ::Bool
+    use_nitrif_denitrif::Bool
+    anoxia             ::Bool
+    usephfact          ::Bool
+    ch4rmcnlim         ::Bool
+    anoxicmicrosites   ::Bool
+    noveg              ::Int
+    nlevdecomp         ::Int
+    nlevdecomp_full    ::Int
+    nlev_soildecomp_standard ::Int
+end
+
+# Masked-zero of rr_vr[c, j] (per-(column, level)).
+@kernel function _ch4prod_zero_rrvr_kernel!(rr_vr, @Const(mask))
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        rr_vr[c, j] = zero(eltype(rr_vr))
+    end
+end
+
+# Per-PATCH scatter: rr_vr[col, j] += rr[p]*crootfr[p,j]*patch_wtcol[p].
+# col = patch_column[p]; MANY patches -> ONE column -> atomic via _scatter_add!.
+@kernel function _ch4prod_rrvr_kernel!(rr_vr, @Const(mask_soilp),
+                                       @Const(patch_column), @Const(patch_itype),
+                                       @Const(patch_wtcol), @Const(is_fates),
+                                       @Const(rr), @Const(crootfr),
+                                       noveg::Int, nlevsoi::Int)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        c = patch_column[p]
+        if !is_fates[c]
+            if patch_wtcol[p] > zero(eltype(patch_wtcol)) && patch_itype[p] != noveg
+                for j in 1:nlevsoi
+                    _scatter_add!(rr_vr, c, j, rr[p] * crootfr[p, j] * patch_wtcol[p])
+                end
+            end
+        end
+    end
+end
+
+# Per-(column, level) production. Body copied verbatim from the scalar loop, with
+# every Float64 literal/const -> T() and CH4Data fields read through the bundle `S`.
+@kernel function _ch4prod_main_kernel!(@Const(mask), S::_Ch4ProdState, P::_Ch4ProdScal,
+                                       F::_Ch4ProdFlags,
+                                       @Const(somhr), @Const(lithr), @Const(hr_vr),
+                                       @Const(o_scalar), @Const(fphr),
+                                       @Const(pot_f_nit_vr), @Const(rr_vr),
+                                       @Const(rootfr_col), @Const(t_soisno),
+                                       @Const(dz), @Const(zi), @Const(jwt))
+    c, j = @index(Global, NTuple)
+    @inbounds if mask[c]
+        T = eltype(S.ch4_prod_depth)
+
+        base_decomp = zero(T)
+        partition_z = one(T)
+
+        if !F.lake
+            if F.use_cn
+                base_decomp = (somhr[c] + lithr[c]) / P.catomw
+                if F.sat == 1
+                    S.sif_col[c] = one(T)
+                    if !F.anoxia
+                        if S.annavg_finrw_col[c] != P.spval
+                            seasonalfin = smooth_max(S.finundated_col[c] - S.annavg_finrw_col[c], zero(T))
+                            if seasonalfin > zero(T)
+                                S.sif_col[c] = (S.annavg_finrw_col[c] + P.mino2lim * seasonalfin) / S.finundated_col[c]
+                                base_decomp *= S.sif_col[c]
+                            end
+                        end
+                    end
+                end
+            end
+            base_decomp *= P.cnscalefactor
+        else
+            base_decomp = P.lake_decomp_fact * S.lake_soilc_col[c, j] * dz[c, j] *
+                          P.q10lake^((t_soisno[c, j] - P.q10lakebase) / T(10)) / P.catomw
+        end
+
+        if t_soisno[c, j] <= P.tfrz && (F.nlevdecomp == 1 || F.lake)
+            base_decomp = zero(T)
+        end
+
+        # Depth dependence
+        if !F.lake
+            if F.nlevdecomp == 1
+                if j <= F.nlev_soildecomp_standard
+                    partition_z = rootfr_col[c, j] * P.rootlitfrac +
+                                  (one(T) - P.rootlitfrac) * dz[c, j] / zi[c, F.nlev_soildecomp_standard]
+                else
+                    partition_z = rootfr_col[c, j] * P.rootlitfrac
+                end
+            else
+                if (somhr[c] + lithr[c]) > zero(T)
+                    partition_z = hr_vr[c, j] * dz[c, j] / (somhr[c] + lithr[c])
+                else
+                    partition_z = one(T)
+                end
+            end
+        else
+            partition_z = one(T)
+        end
+
+        # Adjust f_ch4 for temperature
+        f_ch4_adj = one(T)
+        if !F.lake
+            t_fact_ch4 = P.q10ch4^((t_soisno[c, j] - P.q10ch4base) / T(10))
+            f_ch4_adj = P.f_ch4 * t_fact_ch4
+            if F.ch4rmcnlim
+                jj = j > F.nlevdecomp ? 1 : j
+                if fphr[c, jj] > zero(T)
+                    f_ch4_adj /= fphr[c, jj]
+                end
+            end
+        else
+            f_ch4_adj = T(0.5)
+        end
+
+        # pH factor
+        if !F.lake && F.usephfact
+            if S.pH_col[c] > P.pHmin && S.pH_col[c] < P.pHmax
+                pH_fact_ch4 = T(10)^(-T(0.2235) * S.pH_col[c]^2 + T(2.7727) * S.pH_col[c] - T(8.6))
+                f_ch4_adj *= pH_fact_ch4
+            end
+        end
+
+        # Redox factor
+        if !F.lake && F.sat == 1 && S.finundated_lag_col[c] < S.finundated_col[c]
+            f_ch4_adj *= S.finundated_lag_col[c] / S.finundated_col[c]
+        elseif F.sat == 0 && j > jwt[c]
+            f_ch4_adj *= S.layer_sat_lag_col[c, j]
+        end
+
+        f_ch4_adj = smooth_min(f_ch4_adj, T(0.5))
+
+        # O2 decomposition demand
+        S.o2_decomp_depth[c, j] = base_decomp * partition_z / dz[c, j]
+        if F.anoxia
+            if !F.lake && j > F.nlevdecomp
+                if o_scalar[c, 1] > zero(T)
+                    S.o2_decomp_depth[c, j] /= o_scalar[c, 1]
+                end
+            elseif !F.lake
+                if o_scalar[c, j] > zero(T)
+                    S.o2_decomp_depth[c, j] /= o_scalar[c, j]
+                end
+            end
+        end
+
+        # Add root respiration
+        if !F.lake
+            S.o2_decomp_depth[c, j] += rr_vr[c, j] / P.catomw / dz[c, j]
+        end
+
+        # Add nitrification O2 demand
+        if F.use_nitrif_denitrif && !F.lake && j <= F.nlevdecomp_full
+            S.o2_decomp_depth[c, j] += pot_f_nit_vr[c, j] * T(2) / T(14)
+        end
+
+        # CH4 production
+        if j > jwt[c]
+            S.ch4_prod_depth[c, j] = f_ch4_adj * base_decomp * partition_z / dz[c, j]
+        else
+            if F.anoxicmicrosites
+                S.ch4_prod_depth[c, j] = f_ch4_adj * base_decomp * partition_z / dz[c, j] /
+                                         (one(T) + P.oxinhib * S.conc_o2[c, j])
+            else
+                S.ch4_prod_depth[c, j] = zero(T)
+            end
+        end
+    end
+end
+
+# ---------------------------------------------------------------------------
 # ch4_prod! — Methane production
 # ---------------------------------------------------------------------------
 
@@ -590,30 +819,30 @@ Ported from `ch4_prod` in `ch4Mod.F90`.
 function ch4_prod!(ch4::CH4Data,
                    params::CH4Params,
                    ch4vc::CH4VarCon,
-                   mask_soil::BitVector,
-                   mask_soilp::BitVector,
-                   patch_column::Vector{Int},
-                   patch_itype::Vector{Int},
-                   patch_wtcol::Vector{<:Real},
-                   is_fates::BitVector,
-                   crootfr::Matrix{<:Real},
-                   rootfr_col::Matrix{<:Real},
-                   watsat::Matrix{<:Real},
-                   h2osoi_vol::Matrix{<:Real},
-                   t_soisno::Matrix{<:Real},
-                   somhr::Vector{<:Real},
-                   lithr::Vector{<:Real},
-                   hr_vr::Matrix{<:Real},
-                   o_scalar::Matrix{<:Real},
-                   fphr::Matrix{<:Real},
-                   pot_f_nit_vr::Matrix{<:Real},
-                   rr::Vector{<:Real},
-                   jwt::Vector{Int},
+                   mask_soil::AbstractVector{Bool},
+                   mask_soilp::AbstractVector{Bool},
+                   patch_column::AbstractVector{<:Integer},
+                   patch_itype::AbstractVector{<:Integer},
+                   patch_wtcol::AbstractVector{<:Real},
+                   is_fates::AbstractVector{Bool},
+                   crootfr::AbstractMatrix{<:Real},
+                   rootfr_col::AbstractMatrix{<:Real},
+                   watsat::AbstractMatrix{<:Real},
+                   h2osoi_vol::AbstractMatrix{<:Real},
+                   t_soisno::AbstractMatrix{<:Real},
+                   somhr::AbstractVector{<:Real},
+                   lithr::AbstractVector{<:Real},
+                   hr_vr::AbstractMatrix{<:Real},
+                   o_scalar::AbstractMatrix{<:Real},
+                   fphr::AbstractMatrix{<:Real},
+                   pot_f_nit_vr::AbstractMatrix{<:Real},
+                   rr::AbstractVector{<:Real},
+                   jwt::AbstractVector{<:Integer},
                    sat::Int,
                    lake::Bool,
-                   dz::Matrix{<:Real},
-                   z::Matrix{<:Real},
-                   zi::Matrix{<:Real},
+                   dz::AbstractMatrix{<:Real},
+                   z::AbstractMatrix{<:Real},
+                   zi::AbstractMatrix{<:Real},
                    nlevsoi::Int,
                    nlevdecomp::Int,
                    nlevdecomp_full::Int,
@@ -638,162 +867,73 @@ function ch4_prod!(ch4::CH4Data,
         co2_decomp_depth = ch4.co2_decomp_depth_sat_col
     end
 
-    q10ch4 = params.q10ch4
-    q10ch4base = params.q10ch4base
-    f_ch4 = params.f_ch4
-    rootlitfrac = params.rootlitfrac
-    cnscalefactor = params.cnscalefactor
-    lake_decomp_fact = params.lake_decomp_fact
-    pHmax = params.pHmax
-    pHmin = params.pHmin
-    oxinhib = params.oxinhib
-    q10lakebase = params.q10lakebase
-    q10lake = q10ch4 * 1.5
+    q10lake = params.q10ch4 * 1.5
 
-    # Calculate vertically resolved column-averaged root respiration
     nc = length(mask_soil)
     FT = eltype(t_soisno)
-    rr_vr = zeros(FT, nc, nlevsoi)
+
+    # Calculate vertically resolved column-averaged root respiration.
+    # Zero rr_vr (device-resident scratch), then scatter the per-patch root
+    # respiration into the column-resolved rr_vr[c, j] (many patches -> one column).
+    rr_vr = fill!(similar(t_soisno, FT, nc, nlevsoi), zero(FT))
     if !lake
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
-            rr_vr[c, :] .= 0.0
-        end
-        for p in eachindex(mask_soilp)
-            mask_soilp[p] || continue
-            c = patch_column[p]
-            if !is_fates[c]
-                if patch_wtcol[p] > 0.0 && patch_itype[p] != noveg
-                    for j in 1:nlevsoi
-                        rr_vr[c, j] += rr[p] * crootfr[p, j] * patch_wtcol[p]
-                    end
-                end
-            end
-        end
+        _launch!(_ch4prod_zero_rrvr_kernel!, rr_vr, mask_soil;
+                 ndrange = (nc, nlevsoi))
+        _launch!(_ch4prod_rrvr_kernel!, rr_vr, mask_soilp,
+                 patch_column, patch_itype, patch_wtcol, is_fates,
+                 rr, crootfr, noveg, nlevsoi;
+                 ndrange = length(mask_soilp))
     end
 
-    for j in 1:nlevsoi
-        for c in eachindex(mask_soil)
-            mask_soil[c] || continue
+    # Bundle CH4Data views, scalar params (converted to FT), and flags.
+    S = _Ch4ProdState{typeof(ch4.sif_col),typeof(ch4_prod_depth)}(
+        sif_col            = ch4.sif_col,
+        annavg_finrw_col   = ch4.annavg_finrw_col,
+        finundated_col     = ch4.finundated_col,
+        finundated_lag_col = ch4.finundated_lag_col,
+        pH_col             = ch4.pH_col,
+        lake_soilc_col     = ch4.lake_soilc_col,
+        layer_sat_lag_col  = ch4.layer_sat_lag_col,
+        conc_o2            = conc_o2,
+        ch4_prod_depth     = ch4_prod_depth,
+        o2_decomp_depth    = o2_decomp_depth)
 
-            base_decomp = 0.0
-            partition_z = 1.0
+    P = _Ch4ProdScal{FT}(
+        q10ch4base       = FT(params.q10ch4base),
+        f_ch4            = FT(params.f_ch4),
+        rootlitfrac      = FT(params.rootlitfrac),
+        cnscalefactor    = FT(params.cnscalefactor),
+        lake_decomp_fact = FT(params.lake_decomp_fact),
+        pHmax            = FT(params.pHmax),
+        pHmin            = FT(params.pHmin),
+        oxinhib          = FT(params.oxinhib),
+        q10ch4           = FT(params.q10ch4),
+        q10lake          = FT(q10lake),
+        q10lakebase      = FT(params.q10lakebase),
+        mino2lim         = FT(mino2lim),
+        catomw           = FT(CATOMW),
+        tfrz             = FT(TFRZ),
+        spval            = FT(SPVAL))
 
-            if !lake
-                if use_cn
-                    base_decomp = (somhr[c] + lithr[c]) / CATOMW
-                    if sat == 1
-                        ch4.sif_col[c] = 1.0
-                        if !anoxia
-                            if ch4.annavg_finrw_col[c] != SPVAL
-                                seasonalfin = smooth_max(ch4.finundated_col[c] - ch4.annavg_finrw_col[c], 0.0)
-                                if seasonalfin > 0.0
-                                    ch4.sif_col[c] = (ch4.annavg_finrw_col[c] + mino2lim * seasonalfin) / ch4.finundated_col[c]
-                                    base_decomp *= ch4.sif_col[c]
-                                end
-                            end
-                        end
-                    end
-                end
-                base_decomp *= cnscalefactor
-            else
-                base_decomp = lake_decomp_fact * ch4.lake_soilc_col[c, j] * dz[c, j] *
-                              q10lake^((t_soisno[c, j] - q10lakebase) / 10.0) / CATOMW
-            end
+    F = _Ch4ProdFlags(
+        sat                = sat,
+        lake               = lake,
+        use_cn             = use_cn,
+        use_nitrif_denitrif = use_nitrif_denitrif,
+        anoxia             = anoxia,
+        usephfact          = ch4vc.usephfact,
+        ch4rmcnlim         = ch4vc.ch4rmcnlim,
+        anoxicmicrosites   = ch4vc.anoxicmicrosites,
+        noveg              = noveg,
+        nlevdecomp         = nlevdecomp,
+        nlevdecomp_full    = nlevdecomp_full,
+        nlev_soildecomp_standard = nlev_soildecomp_standard)
 
-            if t_soisno[c, j] <= TFRZ && (nlevdecomp == 1 || lake)
-                base_decomp = 0.0
-            end
-
-            # Depth dependence
-            if !lake
-                if nlevdecomp == 1
-                    if j <= nlev_soildecomp_standard
-                        partition_z = rootfr_col[c, j] * rootlitfrac +
-                                      (1.0 - rootlitfrac) * dz[c, j] / zi[c, nlev_soildecomp_standard]
-                    else
-                        partition_z = rootfr_col[c, j] * rootlitfrac
-                    end
-                else
-                    if (somhr[c] + lithr[c]) > 0.0
-                        partition_z = hr_vr[c, j] * dz[c, j] / (somhr[c] + lithr[c])
-                    else
-                        partition_z = 1.0
-                    end
-                end
-            else
-                partition_z = 1.0
-            end
-
-            # Adjust f_ch4 for temperature
-            f_ch4_adj = 1.0
-            if !lake
-                t_fact_ch4 = q10ch4^((t_soisno[c, j] - q10ch4base) / 10.0)
-                f_ch4_adj = f_ch4 * t_fact_ch4
-                if ch4vc.ch4rmcnlim
-                    jj = j > nlevdecomp ? 1 : j
-                    if fphr[c, jj] > 0.0
-                        f_ch4_adj /= fphr[c, jj]
-                    end
-                end
-            else
-                f_ch4_adj = 0.5
-            end
-
-            # pH factor
-            if !lake && ch4vc.usephfact
-                if ch4.pH_col[c] > pHmin && ch4.pH_col[c] < pHmax
-                    pH_fact_ch4 = 10.0^(-0.2235 * ch4.pH_col[c]^2 + 2.7727 * ch4.pH_col[c] - 8.6)
-                    f_ch4_adj *= pH_fact_ch4
-                end
-            end
-
-            # Redox factor
-            if !lake && sat == 1 && ch4.finundated_lag_col[c] < ch4.finundated_col[c]
-                f_ch4_adj *= ch4.finundated_lag_col[c] / ch4.finundated_col[c]
-            elseif sat == 0 && j > jwt[c]
-                f_ch4_adj *= ch4.layer_sat_lag_col[c, j]
-            end
-
-            f_ch4_adj = smooth_min(f_ch4_adj, 0.5)
-
-            # O2 decomposition demand
-            o2_decomp_depth[c, j] = base_decomp * partition_z / dz[c, j]
-            if anoxia
-                if !lake && j > nlevdecomp
-                    if o_scalar[c, 1] > 0.0
-                        o2_decomp_depth[c, j] /= o_scalar[c, 1]
-                    end
-                elseif !lake
-                    if o_scalar[c, j] > 0.0
-                        o2_decomp_depth[c, j] /= o_scalar[c, j]
-                    end
-                end
-            end
-
-            # Add root respiration
-            if !lake
-                o2_decomp_depth[c, j] += rr_vr[c, j] / CATOMW / dz[c, j]
-            end
-
-            # Add nitrification O2 demand
-            if use_nitrif_denitrif && !lake && j <= nlevdecomp_full
-                o2_decomp_depth[c, j] += pot_f_nit_vr[c, j] * 2.0 / 14.0
-            end
-
-            # CH4 production
-            if j > jwt[c]
-                ch4_prod_depth[c, j] = f_ch4_adj * base_decomp * partition_z / dz[c, j]
-            else
-                if ch4vc.anoxicmicrosites
-                    ch4_prod_depth[c, j] = f_ch4_adj * base_decomp * partition_z / dz[c, j] /
-                                           (1.0 + oxinhib * conc_o2[c, j])
-                else
-                    ch4_prod_depth[c, j] = 0.0
-                end
-            end
-        end
-    end
+    # Per-(column, level) production kernel (mask first so it owns the backend).
+    _launch!(_ch4prod_main_kernel!, mask_soil, S, P, F,
+             somhr, lithr, hr_vr, o_scalar, fphr, pot_f_nit_vr, rr_vr,
+             rootfr_col, t_soisno, dz, zi, jwt;
+             ndrange = (nc, nlevsoi))
     nothing
 end
 
