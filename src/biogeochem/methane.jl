@@ -316,30 +316,19 @@ Adapt.@adapt_structure CH4Data
 # get_jwt! — Water table layer identification
 # ---------------------------------------------------------------------------
 
-"""
-    get_jwt!(jwt, mask_soil, watsat, h2osoi_vol, t_soisno, nlevsoi, params)
-
-Find the first unsaturated layer going up (layer right above water table).
-Also allows perched water table over ice.
-Ported from `get_jwt` in `ch4Mod.F90`.
-"""
-function get_jwt!(jwt::Vector{Int},
-                  mask_soil::BitVector,
-                  watsat::Matrix{<:Real},
-                  h2osoi_vol::Matrix{<:Real},
-                  t_soisno::Matrix{<:Real},
-                  nlevsoi::Int,
-                  params::CH4Params)
-
-    f_sat = params.f_sat
-
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-
+# get_jwt!: one thread per column; the water-table search (frozen-saturated
+# perched scan + ascending unsaturated boundary scan) runs as in-thread
+# sequential j-loops writing only the thread's own jwt[c]. Byte-identical to the
+# masked scalar loop. f_sat/tfrz are passed at the working precision.
+@kernel function _ch4diag_jwt_kernel!(jwt, @Const(mask), @Const(watsat),
+                                      @Const(h2osoi_vol), @Const(t_soisno),
+                                      nlevsoi::Int, f_sat, tfrz)
+    c = @index(Global)
+    @inbounds if mask[c]
         # Check for frozen saturated layers → perched water table
         perch = nlevsoi
         for j in nlevsoi:-1:1
-            if t_soisno[c, j] < TFRZ && h2osoi_vol[c, j] > f_sat * watsat[c, j]
+            if t_soisno[c, j] < tfrz && h2osoi_vol[c, j] > f_sat * watsat[c, j]
                 perch = j - 1
             end
         end
@@ -355,12 +344,103 @@ function get_jwt!(jwt::Vector{Int},
             jwt[c] = 0
         end
     end
+end
+
+"""
+    get_jwt!(jwt, mask_soil, watsat, h2osoi_vol, t_soisno, nlevsoi, params)
+
+Find the first unsaturated layer going up (layer right above water table).
+Also allows perched water table over ice.
+Ported from `get_jwt` in `ch4Mod.F90`.
+"""
+function get_jwt!(jwt::AbstractVector{<:Integer},
+                  mask_soil::AbstractVector{Bool},
+                  watsat::AbstractMatrix{<:Real},
+                  h2osoi_vol::AbstractMatrix{<:Real},
+                  t_soisno::AbstractMatrix{<:Real},
+                  nlevsoi::Int,
+                  params::CH4Params)
+
+    FT = eltype(watsat)
+    _launch!(_ch4diag_jwt_kernel!, jwt, mask_soil, watsat, h2osoi_vol, t_soisno,
+             nlevsoi, FT(params.f_sat), FT(TFRZ); ndrange = length(mask_soil))
     nothing
 end
 
 # ---------------------------------------------------------------------------
 # ch4_annualupdate! — Annual average update
 # ---------------------------------------------------------------------------
+
+# ch4_annualupdate! kernels. All own-index (no cross-thread coupling):
+#   1) per-column: bump the annual-sum counter, then the somhr/finrw column update
+#      (the counter bump must complete before the >=secsperyear branch reads it,
+#       so it is a separate kernel from the update — matches the scalar two-loop
+#       order exactly).
+#   2) per-patch: agnpp/bgnpp annual update (column flag/counter read-only).
+#   3) per-column: reset the counter when a year has elapsed.
+# Literals 0.0 become zero(T); dt/secsperyear passed at the working precision.
+@kernel function _ch4annual_counter_kernel!(annsum_counter, @Const(mask), dt)
+    c = @index(Global)
+    @inbounds if mask[c]
+        annsum_counter[c] += dt
+    end
+end
+
+@kernel function _ch4annual_col_kernel!(annsum_counter, annavg_somhr, tempavg_somhr,
+                                        annavg_finrw, tempavg_finrw, @Const(finundated),
+                                        @Const(mask), @Const(somhr),
+                                        dt, secsperyear)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(annavg_somhr)
+        if annsum_counter[c] >= secsperyear
+            annavg_somhr[c] = tempavg_somhr[c]
+            tempavg_somhr[c] = zero(T)
+            if annavg_somhr[c] > zero(T)
+                annavg_finrw[c] = tempavg_finrw[c] / annavg_somhr[c]
+            else
+                annavg_finrw[c] = zero(T)
+            end
+            tempavg_finrw[c] = zero(T)
+        else
+            tempavg_somhr[c] += dt / secsperyear * somhr[c]
+            tempavg_finrw[c] += dt / secsperyear * finundated[c] * somhr[c]
+        end
+    end
+end
+
+@kernel function _ch4annual_patch_kernel!(annavg_agnpp, tempavg_agnpp, annavg_bgnpp,
+                                          tempavg_bgnpp, @Const(annsum_counter),
+                                          @Const(mask), @Const(patch_column),
+                                          @Const(is_fates), @Const(agnpp), @Const(bgnpp),
+                                          dt, secsperyear)
+    p = @index(Global)
+    @inbounds if mask[p]
+        c = patch_column[p]
+        if !is_fates[c]
+            T = eltype(annavg_agnpp)
+            if annsum_counter[c] >= secsperyear
+                annavg_agnpp[p] = tempavg_agnpp[p]
+                tempavg_agnpp[p] = zero(T)
+                annavg_bgnpp[p] = tempavg_bgnpp[p]
+                tempavg_bgnpp[p] = zero(T)
+            else
+                tempavg_agnpp[p] += dt / secsperyear * agnpp[p]
+                tempavg_bgnpp[p] += dt / secsperyear * bgnpp[p]
+            end
+        end
+    end
+end
+
+@kernel function _ch4annual_reset_kernel!(annsum_counter, @Const(mask), secsperyear)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(annsum_counter)
+        if annsum_counter[c] >= secsperyear
+            annsum_counter[c] = zero(T)
+        end
+    end
+end
 
 """
     ch4_annualupdate!(ch4, mask_soil, mask_soilp, patch_column, is_fates,
@@ -371,66 +451,76 @@ Update annual mean fields for methane-related variables.
 Ported from `ch4_annualupdate` in `ch4Mod.F90`.
 """
 function ch4_annualupdate!(ch4::CH4Data,
-                           mask_soil::BitVector,
-                           mask_soilp::BitVector,
-                           patch_column::Vector{Int},
-                           is_fates::BitVector,
-                           somhr::Vector{<:Real},
-                           agnpp::Vector{<:Real},
-                           bgnpp::Vector{<:Real},
+                           mask_soil::AbstractVector{Bool},
+                           mask_soilp::AbstractVector{Bool},
+                           patch_column::AbstractVector{<:Integer},
+                           is_fates::AbstractVector{Bool},
+                           somhr::AbstractVector{<:Real},
+                           agnpp::AbstractVector{<:Real},
+                           bgnpp::AbstractVector{<:Real},
                            dt::Real,
                            secsperyear::Real)
 
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        ch4.annsum_counter_col[c] += dt
-    end
+    FT  = eltype(ch4.annsum_counter_col)
+    dtF = FT(dt)
+    syF = FT(secsperyear)
 
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        if ch4.annsum_counter_col[c] >= secsperyear
-            ch4.annavg_somhr_col[c] = ch4.tempavg_somhr_col[c]
-            ch4.tempavg_somhr_col[c] = 0.0
-            if ch4.annavg_somhr_col[c] > 0.0
-                ch4.annavg_finrw_col[c] = ch4.tempavg_finrw_col[c] / ch4.annavg_somhr_col[c]
-            else
-                ch4.annavg_finrw_col[c] = 0.0
-            end
-            ch4.tempavg_finrw_col[c] = 0.0
-        else
-            ch4.tempavg_somhr_col[c] += dt / secsperyear * somhr[c]
-            ch4.tempavg_finrw_col[c] += dt / secsperyear * ch4.finundated_col[c] * somhr[c]
-        end
-    end
+    _launch!(_ch4annual_counter_kernel!, ch4.annsum_counter_col, mask_soil, dtF;
+             ndrange = length(mask_soil))
 
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-        c = patch_column[p]
-        if !is_fates[c]
-            if ch4.annsum_counter_col[c] >= secsperyear
-                ch4.annavg_agnpp_patch[p] = ch4.tempavg_agnpp_patch[p]
-                ch4.tempavg_agnpp_patch[p] = 0.0
-                ch4.annavg_bgnpp_patch[p] = ch4.tempavg_bgnpp_patch[p]
-                ch4.tempavg_bgnpp_patch[p] = 0.0
-            else
-                ch4.tempavg_agnpp_patch[p] += dt / secsperyear * agnpp[p]
-                ch4.tempavg_bgnpp_patch[p] += dt / secsperyear * bgnpp[p]
-            end
-        end
-    end
+    _launch!(_ch4annual_col_kernel!, ch4.annsum_counter_col, ch4.annavg_somhr_col,
+             ch4.tempavg_somhr_col, ch4.annavg_finrw_col, ch4.tempavg_finrw_col,
+             ch4.finundated_col, mask_soil, somhr, dtF, syF;
+             ndrange = length(mask_soil))
 
-    for c in eachindex(mask_soil)
-        mask_soil[c] || continue
-        if ch4.annsum_counter_col[c] >= secsperyear
-            ch4.annsum_counter_col[c] = 0.0
-        end
-    end
+    _launch!(_ch4annual_patch_kernel!, ch4.annavg_agnpp_patch, ch4.tempavg_agnpp_patch,
+             ch4.annavg_bgnpp_patch, ch4.tempavg_bgnpp_patch, ch4.annsum_counter_col,
+             mask_soilp, patch_column, is_fates, agnpp, bgnpp, dtF, syF;
+             ndrange = length(mask_soilp))
+
+    _launch!(_ch4annual_reset_kernel!, ch4.annsum_counter_col, mask_soil, syF;
+             ndrange = length(mask_soil))
     nothing
 end
 
 # ---------------------------------------------------------------------------
 # ch4_totcolch4! — Total column CH4 calculation
 # ---------------------------------------------------------------------------
+
+# ch4_totcolch4!: per-column REDUCTION over soil layers. Each thread accumulates
+# DIRECTLY into its own totcolch4[c] via an ascending in-thread j-loop (race-free,
+# byte-identical to the j-outer/c-inner scalar order — addition for a single c is
+# performed in the same ascending-j sequence). Nolake and lake are disjoint masks
+# handled by two kernels; lake only contributes when allowlakeprod. CATOMW/1.0 are
+# converted to the working precision.
+@kernel function _ch4tot_nolake_kernel!(totcolch4, @Const(mask), @Const(finundated),
+                                        @Const(conc_ch4_sat), @Const(conc_ch4_unsat),
+                                        @Const(dz), nlevsoi::Int, catomw)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(totcolch4)
+        totcolch4[c] = zero(T)
+        for j in 1:nlevsoi
+            totcolch4[c] += (finundated[c] * conc_ch4_sat[c, j] +
+                             (one(T) - finundated[c]) * conc_ch4_unsat[c, j]) *
+                            dz[c, j] * catomw
+        end
+    end
+end
+
+@kernel function _ch4tot_lake_kernel!(totcolch4, @Const(mask), @Const(conc_ch4_sat),
+                                      @Const(dz), nlevsoi::Int, allowlakeprod::Bool, catomw)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(totcolch4)
+        totcolch4[c] = zero(T)
+        if allowlakeprod
+            for j in 1:nlevsoi
+                totcolch4[c] += conc_ch4_sat[c, j] * dz[c, j] * catomw
+            end
+        end
+    end
+end
 
 """
     ch4_totcolch4!(totcolch4, ch4, mask_nolake, mask_lake,
@@ -439,38 +529,23 @@ end
 Compute total column CH4 by integrating concentrations across soil layers.
 Ported from `ch4_totcolch4` in `ch4Mod.F90`.
 """
-function ch4_totcolch4!(totcolch4::Vector{<:Real},
+function ch4_totcolch4!(totcolch4::AbstractVector{<:Real},
                         ch4::CH4Data,
-                        mask_nolake::BitVector,
-                        mask_lake::BitVector,
-                        dz::Matrix{<:Real},
+                        mask_nolake::AbstractVector{Bool},
+                        mask_lake::AbstractVector{Bool},
+                        dz::AbstractMatrix{<:Real},
                         nlevsoi::Int,
                         allowlakeprod::Bool)
 
-    for c in eachindex(mask_nolake)
-        mask_nolake[c] || continue
-        totcolch4[c] = 0.0
-    end
-    for c in eachindex(mask_lake)
-        mask_lake[c] || continue
-        totcolch4[c] = 0.0
-    end
+    FT = eltype(totcolch4)
+    catomwF = FT(CATOMW)
 
-    for j in 1:nlevsoi
-        for c in eachindex(mask_nolake)
-            mask_nolake[c] || continue
-            totcolch4[c] += (ch4.finundated_col[c] * ch4.conc_ch4_sat_col[c, j] +
-                             (1.0 - ch4.finundated_col[c]) * ch4.conc_ch4_unsat_col[c, j]) *
-                            dz[c, j] * CATOMW
-        end
+    _launch!(_ch4tot_nolake_kernel!, totcolch4, mask_nolake, ch4.finundated_col,
+             ch4.conc_ch4_sat_col, ch4.conc_ch4_unsat_col, dz, nlevsoi, catomwF;
+             ndrange = length(mask_nolake))
 
-        if allowlakeprod
-            for c in eachindex(mask_lake)
-                mask_lake[c] || continue
-                totcolch4[c] += ch4.conc_ch4_sat_col[c, j] * dz[c, j] * CATOMW
-            end
-        end
-    end
+    _launch!(_ch4tot_lake_kernel!, totcolch4, mask_lake, ch4.conc_ch4_sat_col,
+             dz, nlevsoi, allowlakeprod, catomwF; ndrange = length(mask_lake))
     nothing
 end
 
