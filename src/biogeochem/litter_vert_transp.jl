@@ -63,8 +63,251 @@ end
 Patankar's "A" function (Table 5.2, pg 95).
 Returns max(0, (1 - 0.1*|pe|)^5).
 """
-@inline function patankar_A(pe::Real)
-    return max(0.0, (1.0 - 0.1 * abs(pe))^5)
+@inline function patankar_A(pe::T) where {T<:Real}
+    # eltype-generic so it lowers to valid Metal IR (no Float64 literals); on Float64
+    # this is byte-identical (T(0.1)===0.1, etc.).
+    return max(zero(T), (one(T) - T(0.1) * abs(pe))^5)
+end
+
+# ===========================================================================
+# GPU kernelization. The only layer-coupled step is the per-column tridiagonal
+# solve (Thomas), which a single column thread runs sequentially on its own row
+# — so the WHOLE routine is two per-column kernels: a one-shot coefficient kernel,
+# and a transport kernel launched per (tracer-type, pool) that does the diffusivity/
+# Peclet build, tridiagonal assembly, in-thread Thomas solve, post-transport
+# tendency, and write-back (incl. the bedrock-leak accumulation into [c,nbedrock]).
+# Every write targets the thread's own column row → race-free, byte-identical.
+# Thomas is inlined to match tridiagonal_solve! EXACTLY (no singularity guard, unlike
+# tridiagonal_multi!) so the result is byte-identical to the host loop.
+# ===========================================================================
+
+# Per-column scratch bundle (all [ncols × *] matrices, disjoint rows per thread).
+Base.@kwdef struct _LvtScr{M}
+    diffus::M; adv_flux::M; conc_trcr::M
+    d_p1_zp1::M; d_m1_zm1::M; f_p1::M; f_m1::M; pe_p1::M; pe_m1::M
+    a_tri::M; b_tri::M; c_tri::M; r_tri::M; cp::M; dp::M
+end
+Adapt.@adapt_structure _LvtScr
+
+# Diffusivity / advection coefficients (per column; internal j-loop, own-index).
+@kernel function _lvt_coef_kernel!(som_diffus_coef, som_adv_coef, @Const(mask),
+        @Const(altmax), @Const(altmax_lastyear), @Const(nbedrock), @Const(zisoi),
+        nlevdecomp::Int, max_altdepth_cryoturbation, cryoturb_diffusion_k,
+        som_diffus_val, som_adv_flux_val, max_depth_cryoturb_val)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(som_diffus_coef)
+        alt_max_val = max(altmax[c], altmax_lastyear[c])
+        if alt_max_val <= max_altdepth_cryoturbation && alt_max_val > zero(T)
+            for j in 1:(nlevdecomp + 1)
+                if j <= nbedrock[c] + 1
+                    if zisoi[j + 1] < alt_max_val
+                        som_diffus_coef[c, j] = cryoturb_diffusion_k
+                        som_adv_coef[c, j] = zero(T)
+                    else
+                        som_diffus_coef[c, j] = max(
+                            cryoturb_diffusion_k *
+                            (one(T) - (zisoi[j + 1] - alt_max_val) /
+                            (min(max_depth_cryoturb_val, zisoi[nbedrock[c] + 2]) - alt_max_val)),
+                            zero(T))
+                        som_adv_coef[c, j] = zero(T)
+                    end
+                else
+                    som_adv_coef[c, j] = zero(T)
+                    som_diffus_coef[c, j] = zero(T)
+                end
+            end
+        elseif alt_max_val > zero(T)
+            for j in 1:(nlevdecomp + 1)
+                if j <= nbedrock[c] + 1
+                    som_adv_coef[c, j] = som_adv_flux_val
+                    som_diffus_coef[c, j] = som_diffus_val
+                else
+                    som_adv_coef[c, j] = zero(T)
+                    som_diffus_coef[c, j] = zero(T)
+                end
+            end
+        else
+            for j in 1:(nlevdecomp + 1)
+                som_adv_coef[c, j] = zero(T)
+                som_diffus_coef[c, j] = zero(T)
+            end
+        end
+    end
+end
+
+# Per-column transport for one (tracer-type, pool s). conc_ptr/source/trcr_tendency
+# are the C- or N- arrays selected on the host; `s` indexes the pool, `is_cwd_s` the
+# per-pool CWD flag, `spinup_factor_s` the per-pool spinup factor.
+@kernel function _lvt_column_kernel!(conc_ptr, source, trcr_tendency,
+        @Const(som_diffus_coef), @Const(som_adv_coef), scr,
+        @Const(zsoi_ext), @Const(dz_node), @Const(zisoi), @Const(dzsoi_decomp),
+        @Const(nbedrock), @Const(gridcell), @Const(latdeg), @Const(mask),
+        nlevdecomp::Int, s::Int, is_cwd_s::Bool, use_soil_matrixcn::Bool,
+        spinup_state::Int, spinup_factor_s, dtime, epsilon)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(conc_ptr)
+        nbr = nbedrock[c]
+      if use_soil_matrixcn
+        # Matrix-CN path: the transport is solved by the matrix infrastructure; here
+        # only the tendency is zeroed and the state is left untouched (mirrors the host).
+        for j in 1:nlevdecomp
+            trcr_tendency[c, j, s] = zero(T)
+        end
+      else
+        if is_cwd_s
+            # CWD pools: no transport, just add source.
+            for j in 1:nlevdecomp
+                scr.conc_trcr[c, j + 1] = conc_ptr[c, j, s] + source[c, j, s]
+            end
+        else
+            spinup_term = one(T)
+            if spinup_state >= 1
+                spinup_term = spinup_factor_s
+            end
+            if abs(spinup_term - one(T)) > T(1.0e-6)
+                spinup_term = spinup_term * _spinup_lat_term(latdeg[gridcell[c]], T)
+            end
+
+            for j in 1:(nlevdecomp + 1)
+                if abs(som_adv_coef[c, j]) * spinup_term < epsilon
+                    scr.adv_flux[c, j] = epsilon
+                else
+                    scr.adv_flux[c, j] = som_adv_coef[c, j] * spinup_term
+                end
+                if abs(som_diffus_coef[c, j]) * spinup_term < epsilon
+                    scr.diffus[c, j] = epsilon
+                else
+                    scr.diffus[c, j] = som_diffus_coef[c, j] * spinup_term
+                end
+            end
+
+            # Boundary values for conc_trcr (j=0 -> index 1; below bedrock -> 0).
+            scr.conc_trcr[c, 1] = zero(T)
+            for jj in (nbr + 1):(nlevdecomp + 1)
+                scr.conc_trcr[c, jj + 1] = zero(T)
+            end
+
+            # conc_trcr + D/dz, F, Pe throughout the column.
+            for j in 1:(nlevdecomp + 1)
+                if j <= nlevdecomp
+                    scr.conc_trcr[c, j + 1] = conc_ptr[c, j, s]
+                end
+                if j == 1
+                    scr.d_m1_zm1[c, j] = zero(T)
+                    w_p1 = (zsoi_ext[j + 1] - zisoi[j + 1]) / dz_node[j + 1]
+                    if scr.diffus[c, j + 1] > zero(T) && scr.diffus[c, j] > zero(T)
+                        d_p1 = one(T) / ((one(T) - w_p1) / scr.diffus[c, j] + w_p1 / scr.diffus[c, j + 1])
+                    else
+                        d_p1 = zero(T)
+                    end
+                    scr.d_p1_zp1[c, j] = d_p1 / dz_node[j + 1]
+                    scr.f_m1[c, j] = scr.adv_flux[c, j]
+                    scr.f_p1[c, j] = scr.adv_flux[c, j + 1]
+                    scr.pe_m1[c, j] = zero(T)
+                    scr.pe_p1[c, j] = scr.f_p1[c, j] / scr.d_p1_zp1[c, j]
+                elseif j >= nbr + 1
+                    w_m1 = (zisoi[j] - zsoi_ext[j - 1]) / dz_node[j]
+                    if scr.diffus[c, j] > zero(T) && scr.diffus[c, j - 1] > zero(T)
+                        d_m1 = one(T) / ((one(T) - w_m1) / scr.diffus[c, j] + w_m1 / scr.diffus[c, j - 1])
+                    else
+                        d_m1 = zero(T)
+                    end
+                    scr.d_m1_zm1[c, j] = d_m1 / dz_node[j]
+                    scr.d_p1_zp1[c, j] = scr.d_m1_zm1[c, j]
+                    scr.f_m1[c, j] = scr.adv_flux[c, j]
+                    scr.f_p1[c, j] = zero(T)
+                    scr.pe_m1[c, j] = scr.f_m1[c, j] / scr.d_m1_zm1[c, j]
+                    scr.pe_p1[c, j] = scr.f_p1[c, j] / scr.d_p1_zp1[c, j]
+                else
+                    w_m1 = (zisoi[j] - zsoi_ext[j - 1]) / dz_node[j]
+                    if scr.diffus[c, j - 1] > zero(T) && scr.diffus[c, j] > zero(T)
+                        d_m1 = one(T) / ((one(T) - w_m1) / scr.diffus[c, j] + w_m1 / scr.diffus[c, j - 1])
+                    else
+                        d_m1 = zero(T)
+                    end
+                    w_p1 = (zsoi_ext[j + 1] - zisoi[j + 1]) / dz_node[j + 1]
+                    if scr.diffus[c, j + 1] > zero(T) && scr.diffus[c, j] > zero(T)
+                        d_p1 = one(T) / ((one(T) - w_p1) / scr.diffus[c, j] + w_p1 / scr.diffus[c, j + 1])
+                    else
+                        d_p1 = (one(T) - w_m1) * scr.diffus[c, j] + w_p1 * scr.diffus[c, j + 1]
+                    end
+                    scr.d_m1_zm1[c, j] = d_m1 / dz_node[j]
+                    scr.d_p1_zp1[c, j] = d_p1 / dz_node[j + 1]
+                    scr.f_m1[c, j] = scr.adv_flux[c, j]
+                    scr.f_p1[c, j] = scr.adv_flux[c, j + 1]
+                    scr.pe_m1[c, j] = scr.f_m1[c, j] / scr.d_m1_zm1[c, j]
+                    scr.pe_p1[c, j] = scr.f_p1[c, j] / scr.d_p1_zp1[c, j]
+                end
+            end
+
+            # Tridiagonal coefficients (Fortran j=0..nlevdecomp+1 -> jj=j+1).
+            for j in 0:(nlevdecomp + 1)
+                jj = j + 1
+                a_p_0 = (j > 0 && j < nlevdecomp + 1) ? dzsoi_decomp[j] / dtime : zero(T)
+                if j == 0
+                    scr.a_tri[c, jj] = zero(T)
+                    scr.b_tri[c, jj] = one(T)
+                    scr.c_tri[c, jj] = -one(T)
+                    scr.r_tri[c, jj] = zero(T)
+                elseif j == 1
+                    scr.a_tri[c, jj] = -(scr.d_m1_zm1[c, j] * patankar_A(scr.pe_m1[c, j]) + max(scr.f_m1[c, j], zero(T)))
+                    scr.c_tri[c, jj] = -(scr.d_p1_zp1[c, j] * patankar_A(scr.pe_p1[c, j]) + max(-scr.f_p1[c, j], zero(T)))
+                    scr.b_tri[c, jj] = -scr.a_tri[c, jj] - scr.c_tri[c, jj] + a_p_0
+                    scr.r_tri[c, jj] = source[c, j, s] * dzsoi_decomp[j] / dtime +
+                                       (a_p_0 - scr.adv_flux[c, j]) * scr.conc_trcr[c, jj]
+                elseif j < nlevdecomp + 1
+                    scr.a_tri[c, jj] = -(scr.d_m1_zm1[c, j] * patankar_A(scr.pe_m1[c, j]) + max(scr.f_m1[c, j], zero(T)))
+                    scr.c_tri[c, jj] = -(scr.d_p1_zp1[c, j] * patankar_A(scr.pe_p1[c, j]) + max(-scr.f_p1[c, j], zero(T)))
+                    scr.b_tri[c, jj] = -scr.a_tri[c, jj] - scr.c_tri[c, jj] + a_p_0
+                    scr.r_tri[c, jj] = source[c, j, s] * dzsoi_decomp[j] / dtime +
+                                       a_p_0 * scr.conc_trcr[c, jj]
+                else
+                    scr.a_tri[c, jj] = -one(T)
+                    scr.b_tri[c, jj] = one(T)
+                    scr.c_tri[c, jj] = zero(T)
+                    scr.r_tri[c, jj] = zero(T)
+                end
+            end
+
+            # Tendency: subtract initial concentration + source (pre-solve).
+            for j in 1:nlevdecomp
+                trcr_tendency[c, j, s] = zero(T) - (scr.conc_trcr[c, j + 1] + source[c, j, s])
+            end
+
+            # In-thread Thomas solve over jj=1..nlevdecomp+2 (jtop=1), matching
+            # tridiagonal_solve! exactly (no singularity guard) for byte-identity.
+            nlev_tri = nlevdecomp + 2
+            scr.cp[c, 1] = scr.c_tri[c, 1] / scr.b_tri[c, 1]
+            scr.dp[c, 1] = scr.r_tri[c, 1] / scr.b_tri[c, 1]
+            for jj in 2:nlev_tri
+                denom = scr.b_tri[c, jj] - scr.a_tri[c, jj] * scr.cp[c, jj - 1]
+                scr.cp[c, jj] = scr.c_tri[c, jj] / denom
+                scr.dp[c, jj] = (scr.r_tri[c, jj] - scr.a_tri[c, jj] * scr.dp[c, jj - 1]) / denom
+            end
+            scr.conc_trcr[c, nlev_tri] = scr.dp[c, nlev_tri]
+            for jj in (nlev_tri - 1):-1:1
+                scr.conc_trcr[c, jj] = scr.dp[c, jj] - scr.cp[c, jj] * scr.conc_trcr[c, jj + 1]
+            end
+
+            # Post-transport tendency.
+            for j in 1:nlevdecomp
+                trcr_tendency[c, j, s] = (trcr_tendency[c, j, s] + scr.conc_trcr[c, j + 1]) / dtime
+            end
+        end  # is_cwd_s
+
+        # Write concentrations back; correct for tracer leaking into bedrock.
+        for j in 1:nlevdecomp
+            conc_ptr[c, j, s] = scr.conc_trcr[c, j + 1]
+            if j > nbr
+                conc_ptr[c, nbr, s] = conc_ptr[c, nbr, s] +
+                    scr.conc_trcr[c, j + 1] * (dzsoi_decomp[j] / dzsoi_decomp[nbr])
+                conc_ptr[c, j, s] = zero(T)
+            end
+        end
+      end  # use_soil_matrixcn
+    end
 end
 
 # ---------------------------------------------------------------------------
@@ -133,112 +376,72 @@ function litter_vert_transp!(
         som_adv_flux_val::Real = 0.0,
         max_depth_cryoturb_val::Real = 3.0)
 
-    # Unpack cascade configuration
+    # Unpack cascade configuration. is_cwd (BitVector) + spinup_factor (host vector)
+    # are indexed per-pool ON THE HOST and passed as scalars to the column kernel, so
+    # they need no device move.
     is_cwd        = cascade_con.is_cwd
     spinup_factor = cascade_con.spinup_factor
 
-    # Unpack active layer data
+    # Unpack SoilBiogeochemState output arrays + active-layer / column data (device-resident).
     altmax          = active_layer.altmax_col
     altmax_lastyear = active_layer.altmax_lastyear_col
-
-    # Unpack SoilBiogeochemState output arrays
     som_adv_coef    = st.som_adv_coef_col
     som_diffus_coef = st.som_diffus_coef_col
 
-    # Local parameters from params struct
-    som_diffus_val                 = params.som_diffus
-    cryoturb_diffusion_k           = params.cryoturb_diffusion_k
-    max_altdepth_cryoturbation     = params.max_altdepth_cryoturbation
-
     nc = length(bounds)
-    epsilon = 1.0e-30
+    ntype = 2   # always C and N; isotopes not implemented in this port
 
-    # Number of tracer types: always C and N; isotopes not implemented in this port
-    ntype = 2
+    FT  = eltype(cs.decomp_cpools_vr_col)
+    ref = cs.decomp_cpools_vr_col          # backend prototype for device scratch
+    epsilon = FT(1.0e-30)
 
-    # ------ Compute diffusivity / advection coefficients ------
-    for c in bounds
-        mask_bgc_soilc[c] || continue
+    # Working-precision scalar params (no Float64 reaches a Metal kernel).
+    som_diffus_val_ft        = FT(params.som_diffus)
+    cryoturb_diffusion_k_ft  = FT(params.cryoturb_diffusion_k)
+    max_altdepth_cryo_ft     = FT(params.max_altdepth_cryoturbation)
+    som_adv_flux_ft          = FT(som_adv_flux_val)
+    max_depth_cryoturb_ft    = FT(max_depth_cryoturb_val)
+    dtime_ft                 = FT(dtime)
 
-        alt_max_val = max(altmax[c], altmax_lastyear[c])
-
-        if alt_max_val <= max_altdepth_cryoturbation && alt_max_val > 0.0
-            # Cryoturbation-dominated mixing
-            for j in 1:(nlevdecomp + 1)
-                if j <= col.nbedrock[c] + 1
-                    if zisoi_vals[j + 1] < alt_max_val
-                        som_diffus_coef[c, j] = cryoturb_diffusion_k
-                        som_adv_coef[c, j] = 0.0
-                    else
-                        som_diffus_coef[c, j] = max(
-                            cryoturb_diffusion_k *
-                            (1.0 - (zisoi_vals[j + 1] - alt_max_val) /
-                            (min(max_depth_cryoturb_val, zisoi_vals[col.nbedrock[c] + 2]) - alt_max_val)),
-                            0.0)
-                        som_adv_coef[c, j] = 0.0
-                    end
-                else
-                    som_adv_coef[c, j] = 0.0
-                    som_diffus_coef[c, j] = 0.0
-                end
-            end
-        elseif alt_max_val > 0.0
-            # Bioturbation: constant advection and diffusion
-            for j in 1:(nlevdecomp + 1)
-                if j <= col.nbedrock[c] + 1
-                    som_adv_coef[c, j] = som_adv_flux_val
-                    som_diffus_coef[c, j] = som_diffus_val
-                else
-                    som_adv_coef[c, j] = 0.0
-                    som_diffus_coef[c, j] = 0.0
-                end
-            end
-        else
-            # Completely frozen soils: no mixing
-            for j in 1:(nlevdecomp + 1)
-                som_adv_coef[c, j] = 0.0
-                som_diffus_coef[c, j] = 0.0
-            end
-        end
-    end
-
-    # Infer floating-point type for AD compatibility
-    FT = eltype(zsoi_vals)
-
-    # Extend zsoi with a virtual bottom node for boundary calculations
-    # (Fortran typically has zsoi dimensioned to nlevgrnd > nlevdecomp)
-    zsoi_ext = zeros(FT, nlevdecomp + 1)
-    zsoi_ext[1:nlevdecomp] .= zsoi_vals[1:nlevdecomp]
-    zsoi_ext[nlevdecomp + 1] = zisoi_vals[nlevdecomp + 1]
-
-    # Set the distance between nodes
-    dz_node = zeros(FT, nlevdecomp + 1)
-    dz_node[1] = zsoi_ext[1]
+    # Move the host node-geometry / interface vectors onto the state backend (a host
+    # Vector is a non-bitstype kernel arg on Metal). zsoi_ext/dz_node are built on the
+    # host from the (host) zsoi/zisoi args, then moved.
+    _dev(v) = (d = similar(ref, FT, length(v)); copyto!(d, collect(FT, v)); d)
+    zsoi_ext_h = zeros(FT, nlevdecomp + 1)
+    zsoi_ext_h[1:nlevdecomp] .= FT.(zsoi_vals[1:nlevdecomp])
+    zsoi_ext_h[nlevdecomp + 1] = FT(zisoi_vals[nlevdecomp + 1])
+    dz_node_h = zeros(FT, nlevdecomp + 1)
+    dz_node_h[1] = zsoi_ext_h[1]
     for j in 2:(nlevdecomp + 1)
-        dz_node[j] = zsoi_ext[j] - zsoi_ext[j - 1]
+        dz_node_h[j] = zsoi_ext_h[j] - zsoi_ext_h[j - 1]
     end
+    zsoi_ext     = _dev(zsoi_ext_h)
+    dz_node      = _dev(dz_node_h)
+    zisoi        = _dev(zisoi_vals)
+    dzsoi_decomp = _dev(dzsoi_decomp_vals)
 
-    # ------ Allocate local work arrays ------
-    nj = nlevdecomp + 2  # levels 0:(nlevdecomp+1), stored as 1:(nlevdecomp+2)
+    # mask onto the backend as a plain Bool vector (BitVector is non-bitstype on device).
+    mask = similar(ref, Bool, length(mask_bgc_soilc))
+    copyto!(mask, collect(Bool, mask_bgc_soilc))
+
+    # ------ Compute diffusivity / advection coefficients (one thread per column) ------
+    _launch!(_lvt_coef_kernel!, som_diffus_coef, som_adv_coef, mask,
+             altmax, altmax_lastyear, col.nbedrock, zisoi, nlevdecomp,
+             max_altdepth_cryo_ft, cryoturb_diffusion_k_ft, som_diffus_val_ft,
+             som_adv_flux_ft, max_depth_cryoturb_ft; ndrange = nc)
+
+    # ------ Device-resident per-column scratch (Fortran j=0..nlevdecomp+1 -> Julia
+    # index j+1; a_tri/conc_trcr/cp/dp span nj = nlevdecomp+2; the D/F/Pe arrays span
+    # nlevdecomp+1). Allocated like the state arrays so they live on its backend. ------
+    nj   = nlevdecomp + 2
+    n1   = nlevdecomp + 1
     ncols = length(mask_bgc_soilc)
-
-    diffus     = zeros(FT, ncols, nlevdecomp + 1)
-    adv_flux   = zeros(FT, ncols, nlevdecomp + 1)
-    a_tri      = zeros(FT, ncols, nj)  # indices 0..nlevdecomp+1 mapped to 1..nj
-    b_tri      = zeros(FT, ncols, nj)
-    c_tri      = zeros(FT, ncols, nj)
-    r_tri      = zeros(FT, ncols, nj)
-    d_p1_zp1   = zeros(FT, ncols, nlevdecomp + 1)
-    d_m1_zm1   = zeros(FT, ncols, nlevdecomp + 1)
-    f_p1       = zeros(FT, ncols, nlevdecomp + 1)
-    f_m1       = zeros(FT, ncols, nlevdecomp + 1)
-    pe_p1      = zeros(FT, ncols, nlevdecomp + 1)
-    pe_m1      = zeros(FT, ncols, nlevdecomp + 1)
-    conc_trcr  = zeros(FT, ncols, nj)  # indices 0..nlevdecomp+1 mapped to 1..nj
-
-    # Offset helper: Fortran j=0..nlevdecomp+1 -> Julia index j+1=1..nlevdecomp+2
-    # So conc_trcr(c,0) -> conc_trcr[c,1], conc_trcr(c,j) -> conc_trcr[c,j+1]
-    # a_tri(c,0) -> a_tri[c,1], etc.
+    _m(w) = fill!(similar(ref, FT, ncols, w), zero(FT))
+    scr = _LvtScr(; diffus = _m(n1), adv_flux = _m(n1), conc_trcr = _m(nj),
+                    d_p1_zp1 = _m(n1), d_m1_zm1 = _m(n1), f_p1 = _m(n1), f_m1 = _m(n1),
+                    pe_p1 = _m(n1), pe_m1 = _m(n1),
+                    a_tri = _m(nj), b_tri = _m(nj), c_tri = _m(nj), r_tri = _m(nj),
+                    cp = _m(nj), dp = _m(nj))
 
     # ------ Loop over tracer types (C, N) ------
     for i_type in 1:ntype
@@ -255,228 +458,14 @@ function litter_vert_transp!(
         end
 
         for s in 1:ndecomp_pools
-            if !is_cwd[s]
-                # --- Compute diffusivity and Peclet numbers (only for first non-CWD pool
-                #     when using soil matrix, otherwise for every pool) ---
-                if !use_soil_matrixcn || s == 1
-
-                    # Build diffus and adv_flux with spinup correction
-                    for j in 1:(nlevdecomp + 1)
-                        for c in bounds
-                            mask_bgc_soilc[c] || continue
-
-                            spinup_term = 1.0
-                            if spinup_state >= 1
-                                spinup_term = spinup_factor[s]
-                            end
-                            if abs(spinup_term - 1.0) > 1.0e-6
-                                spinup_term = spinup_term * get_spinup_latitude_term(grc.latdeg[col.gridcell[c]])
-                            end
-
-                            if abs(som_adv_coef[c, j]) * spinup_term < epsilon
-                                adv_flux[c, j] = epsilon
-                            else
-                                adv_flux[c, j] = som_adv_coef[c, j] * spinup_term
-                            end
-
-                            if abs(som_diffus_coef[c, j]) * spinup_term < epsilon
-                                diffus[c, j] = epsilon
-                            else
-                                diffus[c, j] = som_diffus_coef[c, j] * spinup_term
-                            end
-                        end
-                    end
-
-                    # Set boundary values for conc_trcr
-                    for c in bounds
-                        mask_bgc_soilc[c] || continue
-                        conc_trcr[c, 1] = 0.0  # j=0 -> index 1
-                        for jj in (col.nbedrock[c] + 1):(nlevdecomp + 1)
-                            conc_trcr[c, jj + 1] = 0.0  # j -> index j+1
-                        end
-                    end
-
-                    # Set conc_trcr and compute D/dz, F, Pe throughout column
-                    for j in 1:(nlevdecomp + 1)
-                        for c in bounds
-                            mask_bgc_soilc[c] || continue
-
-                            if j <= nlevdecomp
-                            conc_trcr[c, j + 1] = conc_ptr[c, j, s]  # j -> index j+1
-                        end
-                        # j > nlevdecomp: conc_trcr already set to 0 by boundary conditions above
-
-                            if j == 1
-                                d_m1_zm1[c, j] = 0.0
-                                w_p1 = (zsoi_ext[j + 1] - zisoi_vals[j + 1]) / dz_node[j + 1]
-                                if diffus[c, j + 1] > 0.0 && diffus[c, j] > 0.0
-                                    d_p1 = 1.0 / ((1.0 - w_p1) / diffus[c, j] + w_p1 / diffus[c, j + 1])
-                                else
-                                    d_p1 = 0.0
-                                end
-                                d_p1_zp1[c, j] = d_p1 / dz_node[j + 1]
-                                f_m1[c, j] = adv_flux[c, j]
-                                f_p1[c, j] = adv_flux[c, j + 1]
-                                pe_m1[c, j] = 0.0
-                                pe_p1[c, j] = f_p1[c, j] / d_p1_zp1[c, j]
-
-                            elseif j >= col.nbedrock[c] + 1
-                                # Bottom boundary
-                                w_m1 = (zisoi_vals[j] - zsoi_ext[j - 1]) / dz_node[j]
-                                if diffus[c, j] > 0.0 && diffus[c, j - 1] > 0.0
-                                    d_m1 = 1.0 / ((1.0 - w_m1) / diffus[c, j] + w_m1 / diffus[c, j - 1])
-                                else
-                                    d_m1 = 0.0
-                                end
-                                d_m1_zm1[c, j] = d_m1 / dz_node[j]
-                                d_p1_zp1[c, j] = d_m1_zm1[c, j]
-                                f_m1[c, j] = adv_flux[c, j]
-                                f_p1[c, j] = 0.0
-                                pe_m1[c, j] = f_m1[c, j] / d_m1_zm1[c, j]
-                                pe_p1[c, j] = f_p1[c, j] / d_p1_zp1[c, j]
-
-                            else
-                                # Interior
-                                w_m1 = (zisoi_vals[j] - zsoi_ext[j - 1]) / dz_node[j]
-                                if diffus[c, j - 1] > 0.0 && diffus[c, j] > 0.0
-                                    d_m1 = 1.0 / ((1.0 - w_m1) / diffus[c, j] + w_m1 / diffus[c, j - 1])
-                                else
-                                    d_m1 = 0.0
-                                end
-                                w_p1 = (zsoi_ext[j + 1] - zisoi_vals[j + 1]) / dz_node[j + 1]
-                                if diffus[c, j + 1] > 0.0 && diffus[c, j] > 0.0
-                                    d_p1 = 1.0 / ((1.0 - w_p1) / diffus[c, j] + w_p1 / diffus[c, j + 1])
-                                else
-                                    d_p1 = (1.0 - w_m1) * diffus[c, j] + w_p1 * diffus[c, j + 1]
-                                end
-                                d_m1_zm1[c, j] = d_m1 / dz_node[j]
-                                d_p1_zp1[c, j] = d_p1 / dz_node[j + 1]
-                                f_m1[c, j] = adv_flux[c, j]
-                                f_p1[c, j] = adv_flux[c, j + 1]
-                                pe_m1[c, j] = f_m1[c, j] / d_m1_zm1[c, j]
-                                pe_p1[c, j] = f_p1[c, j] / d_p1_zp1[c, j]
-                            end
-                        end
-                    end
-                end  # !use_soil_matrixcn || s == 1
-
-                # --- Calculate tridiagonal coefficients ---
-                # j=0..nlevdecomp+1 mapped to Julia index j+1=1..nlevdecomp+2
-                for j in 0:(nlevdecomp + 1)
-                    jj = j + 1  # Julia index
-                    for c in bounds
-                        mask_bgc_soilc[c] || continue
-
-                        local a_p_0::Float64
-                        if j > 0 && j < nlevdecomp + 1
-                            a_p_0 = dzsoi_decomp_vals[j] / dtime
-                        else
-                            a_p_0 = 0.0  # not used but needs a value
-                        end
-
-                        if j == 0
-                            # Top layer (atmosphere boundary)
-                            a_tri[c, jj] = 0.0
-                            b_tri[c, jj] = 1.0
-                            c_tri[c, jj] = -1.0
-                            r_tri[c, jj] = 0.0
-                        elseif j == 1
-                            a_tri[c, jj] = -(d_m1_zm1[c, j] * patankar_A(pe_m1[c, j]) + max(f_m1[c, j], 0.0))
-                            c_tri[c, jj] = -(d_p1_zp1[c, j] * patankar_A(pe_p1[c, j]) + max(-f_p1[c, j], 0.0))
-                            b_tri[c, jj] = -a_tri[c, jj] - c_tri[c, jj] + a_p_0
-                            r_tri[c, jj] = source[c, j, s] * dzsoi_decomp_vals[j] / dtime +
-                                           (a_p_0 - adv_flux[c, j]) * conc_trcr[c, jj]
-                        elseif j < nlevdecomp + 1
-                            a_tri[c, jj] = -(d_m1_zm1[c, j] * patankar_A(pe_m1[c, j]) + max(f_m1[c, j], 0.0))
-                            c_tri[c, jj] = -(d_p1_zp1[c, j] * patankar_A(pe_p1[c, j]) + max(-f_p1[c, j], 0.0))
-                            b_tri[c, jj] = -a_tri[c, jj] - c_tri[c, jj] + a_p_0
-                            r_tri[c, jj] = source[c, j, s] * dzsoi_decomp_vals[j] / dtime +
-                                           a_p_0 * conc_trcr[c, jj]
-                        else
-                            # j == nlevdecomp+1; zero concentration gradient at bottom
-                            a_tri[c, jj] = -1.0
-                            b_tri[c, jj] = 1.0
-                            c_tri[c, jj] = 0.0
-                            r_tri[c, jj] = 0.0
-                        end
-                    end
-                end
-
-                # Subtract initial concentration and source for tendency calculation
-                for c in bounds
-                    mask_bgc_soilc[c] || continue
-                    for j in 1:nlevdecomp
-                        if !use_soil_matrixcn
-                            trcr_tendency_ptr[c, j, s] = 0.0 - (conc_trcr[c, j + 1] + source[c, j, s])
-                        else
-                            trcr_tendency_ptr[c, j, s] = 0.0
-                        end
-                    end
-                end
-
-                if !use_soil_matrixcn
-                    # Solve tridiagonal system for each column
-                    # The Fortran Tridiagonal uses levels 0:nlevdecomp+1
-                    # In our Julia mapping, these are indices 1:nlevdecomp+2 in the work arrays
-                    nlev_tri = nlevdecomp + 2  # total levels (0 through nlevdecomp+1)
-
-                    for c in bounds
-                        mask_bgc_soilc[c] || continue
-
-                        # Extract column vectors for the tridiagonal solve
-                        a_col = a_tri[c, 1:nlev_tri]
-                        b_col = b_tri[c, 1:nlev_tri]
-                        c_col = c_tri[c, 1:nlev_tri]
-                        r_col = r_tri[c, 1:nlev_tri]
-                        u_col = zeros(FT, nlev_tri)
-
-                        # Solve using the single-column tridiagonal solver
-                        # jtop = 1 (index 1 = Fortran level 0)
-                        tridiagonal_solve!(u_col, a_col, b_col, c_col, r_col, 1, nlev_tri)
-
-                        # Copy solution back to conc_trcr
-                        for jj in 1:nlev_tri
-                            conc_trcr[c, jj] = u_col[jj]
-                        end
-                    end
-
-                    # Add post-transport concentration to calculate tendency
-                    for c in bounds
-                        mask_bgc_soilc[c] || continue
-                        for j in 1:nlevdecomp
-                            trcr_tendency_ptr[c, j, s] = trcr_tendency_ptr[c, j, s] + conc_trcr[c, j + 1]
-                            trcr_tendency_ptr[c, j, s] = trcr_tendency_ptr[c, j, s] / dtime
-                        end
-                    end
-                end  # !use_soil_matrixcn
-
-            else
-                # CWD pools: just add source, no vertical transport
-                for j in 1:nlevdecomp
-                    for c in bounds
-                        mask_bgc_soilc[c] || continue
-                        if !use_soil_matrixcn
-                            conc_trcr[c, j + 1] = conc_ptr[c, j, s] + source[c, j, s]
-                        end
-                    end
-                end
-            end  # !is_cwd
-
-            if !use_soil_matrixcn
-                # Write concentrations back to state, correct for bedrock leakage
-                for j in 1:nlevdecomp
-                    for c in bounds
-                        mask_bgc_soilc[c] || continue
-                        conc_ptr[c, j, s] = conc_trcr[c, j + 1]
-                        # Correct for small amounts of tracer that leak into bedrock
-                        if j > col.nbedrock[c]
-                            conc_ptr[c, col.nbedrock[c], s] = conc_ptr[c, col.nbedrock[c], s] +
-                                conc_trcr[c, j + 1] * (dzsoi_decomp_vals[j] / dzsoi_decomp_vals[col.nbedrock[c]])
-                            conc_ptr[c, j, s] = 0.0
-                        end
-                    end
-                end
-            end  # !use_soil_matrixcn
+            # is_cwd[s] / spinup_factor[s] are read on the host and passed as scalars.
+            spinup_factor_s = FT(spinup_factor[s])
+            _launch!(_lvt_column_kernel!, conc_ptr, source, trcr_tendency_ptr,
+                     som_diffus_coef, som_adv_coef, scr,
+                     zsoi_ext, dz_node, zisoi, dzsoi_decomp,
+                     col.nbedrock, col.gridcell, grc.latdeg, mask,
+                     nlevdecomp, s, is_cwd[s], use_soil_matrixcn, spinup_state,
+                     spinup_factor_s, dtime_ft, epsilon; ndrange = nc)
         end  # s (pool loop)
     end  # i_type
 
