@@ -17,7 +17,7 @@
 # Zero a 3D [col x lev x trans] array (one thread per element).
 @kernel function _decpot_zero3d_kernel!(out)
     c, j, k = @index(Global, NTuple)
-    @inbounds out[c, j, k] = 0.0
+    @inbounds out[c, j, k] = zero(eltype(out))
 end
 decpot_zero3d!(out) = _launch!(_decpot_zero3d_kernel!, out; ndrange = size(out))
 
@@ -26,7 +26,7 @@ decpot_zero3d!(out) = _launch!(_decpot_zero3d_kernel!, out; ndrange = size(out))
 @kernel function _decpot_zero2d_kernel!(out, @Const(mask))
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
-        out[c, j] = 0.0
+        out[c, j] = zero(eltype(out))
     end
 end
 decpot_zero2d!(out, mask, nc::Int, nlev::Int) =
@@ -52,7 +52,7 @@ decpot_copy2d!(out, mask, src, nc::Int, nlev::Int) =
     c, j, l = @index(Global, NTuple)
     @inbounds if mask[c]
         if floating[l]
-            if decomp_npools_vr[c, j, l] > 0.0
+            if decomp_npools_vr[c, j, l] > zero(eltype(decomp_npools_vr))
                 cn_decomp_pools[c, j, l] = decomp_cpools_vr[c, j, l] / decomp_npools_vr[c, j, l]
             end
         else
@@ -79,8 +79,9 @@ decpot_cn_pools!(cn_decomp_pools, mask, floating, initial_cn_ratio,
         @Const(nue_decomp_cascade), use_mimics::Bool)
     c, j, k = @index(Global, NTuple)
     @inbounds if mask[c]
+        T = eltype(p_decomp_cpool_loss)
         dpool = cascade_donor_pool[k]
-        if decomp_cpools_vr[c, j, dpool] > 0.0 && decomp_k[c, j, dpool] > 0.0
+        if decomp_cpools_vr[c, j, dpool] > zero(T) && decomp_k[c, j, dpool] > zero(T)
             p_decomp_cpool_loss[c, j, k] = decomp_cpools_vr[c, j, dpool] *
                 decomp_k[c, j, dpool] * pathfrac_decomp_cascade[c, j, k]
 
@@ -89,35 +90,35 @@ decpot_cn_pools!(cn_decomp_pools, mask, floating, initial_cn_ratio,
 
             if !recv_floating
                 if recv_pool != I_ATM
-                    ratio = 0.0
-                    if decomp_npools_vr[c, j, dpool] > 0.0
+                    ratio = zero(T)
+                    if decomp_npools_vr[c, j, dpool] > zero(T)
                         ratio = cn_decomp_pools[c, j, recv_pool] /
                                 cn_decomp_pools[c, j, dpool]
                     end
                     pmnf_decomp_cascade[c, j, k] = (p_decomp_cpool_loss[c, j, k] *
-                        (1.0 - rf_decomp_cascade[c, j, k] - ratio) /
+                        (one(T) - rf_decomp_cascade[c, j, k] - ratio) /
                         cn_decomp_pools[c, j, recv_pool])
                 else
                     pmnf_decomp_cascade[c, j, k] = -p_decomp_cpool_loss[c, j, k] /
                         cn_decomp_pools[c, j, dpool]
                 end
             else
-                pmnf_decomp_cascade[c, j, k] = 0.0
+                pmnf_decomp_cascade[c, j, k] = zero(T)
                 if use_mimics
                     decomp_nc_loss_donor =
                         decomp_npools_vr[c, j, dpool] / decomp_cpools_vr[c, j, dpool]
                     p_decomp_npool_loss = p_decomp_cpool_loss[c, j, k] * decomp_nc_loss_donor
                     p_decomp_cpool_gain[c, j, k] =
-                        p_decomp_cpool_loss[c, j, k] * (1.0 - rf_decomp_cascade[c, j, k])
+                        p_decomp_cpool_loss[c, j, k] * (one(T) - rf_decomp_cascade[c, j, k])
                     p_decomp_npool_gain[c, j, k] = p_decomp_npool_loss * nue_decomp_cascade[k]
                     p_decomp_npool_to_din[c, j, k] =
                         p_decomp_npool_loss - p_decomp_npool_gain[c, j, k]
                 end
             end
         else
-            p_decomp_cpool_gain[c, j, k] = 0.0
-            p_decomp_npool_gain[c, j, k] = 0.0
-            p_decomp_npool_to_din[c, j, k] = 0.0
+            p_decomp_cpool_gain[c, j, k] = zero(T)
+            p_decomp_npool_gain[c, j, k] = zero(T)
+            p_decomp_npool_to_din[c, j, k] = zero(T)
         end
     end
 end
@@ -132,6 +133,151 @@ function decpot_fluxes!(p_decomp_cpool_loss, pmnf_decomp_cascade,
              decomp_cpools_vr, decomp_k, pathfrac_decomp_cascade, decomp_npools_vr,
              cn_decomp_pools, rf_decomp_cascade, nue_decomp_cascade, use_mimics;
              ndrange = size(p_decomp_cpool_loss))
+end
+
+# MIMICS receiver-pool gain + pmnf: ONE THREAD PER COLUMN, with internal j and k
+# loops accumulating sequentially in-thread (the c_state_update1! cascade pattern —
+# each thread owns its column c, so reading/writing [c,j,rp] is race-free and
+# byte-identical to the scalar j->c->k loop). Because the receiver pool `rp` is only
+# ever `i_cop_mic` or `i_oli_mic`, the two per-pool running sums are held in two
+# scalar accumulators (cop/oli), reset per soil level j — avoiding a per-thread
+# pool-sized scratch array (not allocatable on Metal). This loop touches < 20 arrays
+# so they are passed loose (no device-view bundle). cn_gain[c,j,rp] is written each
+# matching k so after the first k-loop the array holds the final running ratio.
+@kernel function _decpot_mimics_kernel!(p_decomp_cn_gain, pmnf_decomp_cascade,
+        @Const(mask), @Const(cascade_donor_pool), @Const(cascade_receiver_pool),
+        @Const(decomp_cpools_vr), @Const(decomp_k),
+        @Const(p_decomp_cpool_gain), @Const(p_decomp_npool_gain), @Const(cn_col),
+        nlevdecomp::Int, ndecomp_cascade_transitions::Int,
+        i_cop_mic::Int, i_oli_mic::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(p_decomp_cn_gain)
+        for j in 1:nlevdecomp
+            # Sum C & N fluxes from all transitions into the cop & oli microbe pools.
+            cop_c = zero(T); cop_n = zero(T)
+            oli_c = zero(T); oli_n = zero(T)
+            for k in 1:ndecomp_cascade_transitions
+                rp = cascade_receiver_pool[k]
+                if rp == i_cop_mic || rp == i_oli_mic
+                    dp = cascade_donor_pool[k]
+                    if decomp_cpools_vr[c, j, dp] > zero(T) && decomp_k[c, j, dp] > zero(T)
+                        if rp == i_cop_mic
+                            cop_c += p_decomp_cpool_gain[c, j, k]
+                            cop_n += p_decomp_npool_gain[c, j, k]
+                            if cop_n > zero(T)
+                                p_decomp_cn_gain[c, j, rp] = cop_c / cop_n
+                            else
+                                p_decomp_cn_gain[c, j, rp] = zero(T)
+                            end
+                        else
+                            oli_c += p_decomp_cpool_gain[c, j, k]
+                            oli_n += p_decomp_npool_gain[c, j, k]
+                            if oli_n > zero(T)
+                                p_decomp_cn_gain[c, j, rp] = oli_c / oli_n
+                            else
+                                p_decomp_cn_gain[c, j, rp] = zero(T)
+                            end
+                        end
+                    end
+                end
+            end  # first transitions loop
+
+            for k in 1:ndecomp_cascade_transitions
+                rp = cascade_receiver_pool[k]
+                if rp == i_cop_mic || rp == i_oli_mic
+                    dp = cascade_donor_pool[k]
+                    if decomp_cpools_vr[c, j, dp] > zero(T) && decomp_k[c, j, dp] > zero(T)
+                        # if p_decomp_cn_diff < 0 => N mineralization
+                        #                     > 0 => immobilization
+                        # "min" turns off immobilization flux
+                        p_decomp_cn_diff_ratio = min(zero(T),
+                            (p_decomp_cn_gain[c, j, rp] - cn_col[c, rp]) / cn_col[c, rp])
+                        pmnf_decomp_cascade[c, j, k] =
+                            p_decomp_cn_diff_ratio * p_decomp_npool_gain[c, j, k]
+                    end
+                end
+            end  # second transitions loop
+        end
+    end
+end
+function decpot_mimics!(p_decomp_cn_gain, pmnf_decomp_cascade, mask,
+        cascade_donor_pool, cascade_receiver_pool, decomp_cpools_vr, decomp_k,
+        p_decomp_cpool_gain, p_decomp_npool_gain, cn_col,
+        nlevdecomp::Int, ndecomp_cascade_transitions::Int,
+        i_cop_mic::Int, i_oli_mic::Int)
+    # First positional (p_decomp_cn_gain) sets the launch backend; ndrange is the
+    # column count (one thread per column), passed explicitly.
+    _launch!(_decpot_mimics_kernel!, p_decomp_cn_gain, pmnf_decomp_cascade, mask,
+             cascade_donor_pool, cascade_receiver_pool, decomp_cpools_vr, decomp_k,
+             p_decomp_cpool_gain, p_decomp_npool_gain, cn_col,
+             nlevdecomp, ndecomp_cascade_transitions, i_cop_mic, i_oli_mic;
+             ndrange = length(mask))
+    return nothing
+end
+
+# Per-column immobilization / gross-mineralization accumulation: ONE THREAD PER
+# COLUMN, internal j and k loops summing into the thread's own [c,j] (own-column
+# reduction — race-free, ascending-k/j order preserved -> byte-identical). The MIMICS
+# DIN term is added per (c,j,k) when use_mimics. immob is the local accumulator the
+# scalar code copies into potential_immob_vr; here we write potential_immob_vr
+# directly (it is zeroed on active columns just before).
+@kernel function _decpot_immob_kernel!(potential_immob_vr, gross_nmin_vr,
+        @Const(mask), @Const(pmnf_decomp_cascade), @Const(p_decomp_npool_to_din),
+        nlevdecomp::Int, ndecomp_cascade_transitions::Int, use_mimics::Bool)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(potential_immob_vr)
+        for j in 1:nlevdecomp
+            immob = zero(T)
+            gmin  = gross_nmin_vr[c, j]
+            for k in 1:ndecomp_cascade_transitions
+                if pmnf_decomp_cascade[c, j, k] > zero(T)
+                    immob += pmnf_decomp_cascade[c, j, k]
+                else
+                    gmin -= pmnf_decomp_cascade[c, j, k]
+                end
+                if use_mimics
+                    gmin += p_decomp_npool_to_din[c, j, k]
+                end
+            end
+            potential_immob_vr[c, j] = immob
+            gross_nmin_vr[c, j] = gmin
+        end
+    end
+end
+function decpot_immob!(potential_immob_vr, gross_nmin_vr, mask,
+        pmnf_decomp_cascade, p_decomp_npool_to_din,
+        nlevdecomp::Int, ndecomp_cascade_transitions::Int, use_mimics::Bool)
+    _launch!(_decpot_immob_kernel!, potential_immob_vr, gross_nmin_vr, mask,
+             pmnf_decomp_cascade, p_decomp_npool_to_din,
+             nlevdecomp, ndecomp_cascade_transitions, use_mimics;
+             ndrange = length(potential_immob_vr) == 0 ? 0 : size(potential_immob_vr, 1))
+end
+
+# Per-column potential-HR accumulation for methane: ONE THREAD PER COLUMN, internal
+# j and k loops summing rf*p_decomp_cpool_loss into the thread's own phr_vr[c,j]
+# (own-column reduction, ascending order -> byte-identical).
+@kernel function _decpot_phr_kernel!(phr_vr, @Const(mask),
+        @Const(rf_decomp_cascade), @Const(p_decomp_cpool_loss),
+        nlevdecomp::Int, ndecomp_cascade_transitions::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(phr_vr)
+        for j in 1:nlevdecomp
+            s = zero(T)
+            for k in 1:ndecomp_cascade_transitions
+                s += rf_decomp_cascade[c, j, k] * p_decomp_cpool_loss[c, j, k]
+            end
+            phr_vr[c, j] = s
+        end
+    end
+end
+function decpot_phr!(phr_vr, mask, rf_decomp_cascade, p_decomp_cpool_loss,
+        nlevdecomp::Int, ndecomp_cascade_transitions::Int)
+    _launch!(_decpot_phr_kernel!, phr_vr, mask, rf_decomp_cascade, p_decomp_cpool_loss,
+             nlevdecomp, ndecomp_cascade_transitions;
+             ndrange = length(phr_vr) == 0 ? 0 : size(phr_vr, 1))
 end
 
 # ---------------------------------------------------------------------------
@@ -219,16 +365,16 @@ function soil_bgc_potential!(
         ns::SoilBiogeochemNitrogenStateData,
         st::SoilBiogeochemStateData,
         cascade_con::DecompCascadeConData;
-        mask_bgc_soilc::BitVector,
+        mask_bgc_soilc::AbstractVector{Bool},
         bounds::UnitRange{Int},
         nlevdecomp::Int,
         ndecomp_pools::Int,
         ndecomp_cascade_transitions::Int,
-        cn_decomp_pools::Array{<:Real,3},
-        p_decomp_cpool_loss::Array{<:Real,3},
-        p_decomp_cn_gain::Array{<:Real,3},
-        pmnf_decomp_cascade::Array{<:Real,3},
-        p_decomp_npool_to_din::Array{<:Real,3},
+        cn_decomp_pools::AbstractArray{<:Real,3},
+        p_decomp_cpool_loss::AbstractArray{<:Real,3},
+        p_decomp_cn_gain::AbstractArray{<:Real,3},
+        pmnf_decomp_cascade::AbstractArray{<:Real,3},
+        p_decomp_npool_to_din::AbstractArray{<:Real,3},
         use_mimics::Bool=false,
         i_cop_mic::Int=0,
         i_oli_mic::Int=0)
@@ -254,20 +400,47 @@ function soil_bgc_potential!(
     # Unpack carbon state
     decomp_cpools_vr = cs.decomp_cpools_vr_col
 
+    # Move the per-pool floating-CN flag (a BitVector in cascade_con) onto the state's
+    # backend as a plain Bool vector: a BitVector is non-bitstype and cannot be passed
+    # to a device kernel. similar(state, Bool, n)+copyto! lands it on the right backend
+    # (Array{Bool} on CPU — byte-identical Bool indexing; MtlArray{Bool} on Metal).
+    floating_cn_ratio_decomp_pools = let fh = collect(Bool, floating_cn_ratio_decomp_pools)
+        d = similar(decomp_cpools_vr, Bool, length(fh))
+        copyto!(d, fh)
+        d
+    end
+
     # Unpack nitrogen state/flux
     decomp_npools_vr = ns.decomp_npools_vr_col
     potential_immob_vr = nf.potential_immob_vr_col
     gross_nmin_vr      = nf.gross_nmin_vr_col
 
-    # Local arrays for MIMICS pathway
+    # Local arrays for MIMICS pathway (device-resident scratch; allocated like the
+    # state arrays so they live on whatever backend the state does).
     FT = eltype(decomp_cpools_vr)
-    p_decomp_cpool_gain = zeros(FT, nc, nlevdecomp, ndecomp_cascade_transitions)
-    p_decomp_npool_gain = zeros(FT, nc, nlevdecomp, ndecomp_cascade_transitions)
-    p_decomp_cpool_gain_sum = zeros(FT, ndecomp_pools)
-    p_decomp_npool_gain_sum = zeros(FT, ndecomp_pools)
 
-    # Local immobilization accumulator
-    immob = zeros(FT, nc, nlevdecomp)
+    # Move the per-pool initial C:N ratios (host Vector{FT} in cascade_con) onto the
+    # state backend at working precision — a host Float64 vector is non-bitstype for a
+    # device kernel; on CPU this is byte-identical.
+    initial_cn_ratio = let r = collect(FT, initial_cn_ratio)
+        d = similar(decomp_cpools_vr, FT, length(r))
+        copyto!(d, r)
+        d
+    end
+
+    # Cascade donor/receiver pool indices (host Vector{Int}) also feed the flux kernel —
+    # move to the state backend preserving Int eltype.
+    cascade_donor_pool = let p = collect(Int, cascade_donor_pool)
+        d = similar(decomp_cpools_vr, Int, length(p)); copyto!(d, p); d
+    end
+    cascade_receiver_pool = let p = collect(Int, cascade_receiver_pool)
+        d = similar(decomp_cpools_vr, Int, length(p)); copyto!(d, p); d
+    end
+
+    p_decomp_cpool_gain = similar(decomp_cpools_vr, FT, nc, nlevdecomp, ndecomp_cascade_transitions)
+    p_decomp_npool_gain = similar(decomp_cpools_vr, FT, nc, nlevdecomp, ndecomp_cascade_transitions)
+    fill!(p_decomp_cpool_gain, zero(FT))
+    fill!(p_decomp_npool_gain, zero(FT))
 
     # -------------------------------------------------------------------
     # Set initial values for potential C and N fluxes
@@ -299,95 +472,25 @@ function soil_bgc_potential!(
     # immobilization vs. mineralization
     # -------------------------------------------------------------------
     if use_mimics
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-
-                # Sum C & N fluxes from all transitions into m1 & m2 pools
-                p_decomp_cpool_gain_sum .= 0.0
-                p_decomp_npool_gain_sum .= 0.0
-
-                for k in 1:ndecomp_cascade_transitions
-                    if cascade_receiver_pool[k] == i_cop_mic ||
-                       cascade_receiver_pool[k] == i_oli_mic
-                        if decomp_cpools_vr[c, j, cascade_donor_pool[k]] > 0.0 &&
-                           decomp_k[c, j, cascade_donor_pool[k]] > 0.0
-
-                            rp = cascade_receiver_pool[k]
-                            p_decomp_cpool_gain_sum[rp] += p_decomp_cpool_gain[c, j, k]
-                            p_decomp_npool_gain_sum[rp] += p_decomp_npool_gain[c, j, k]
-
-                            if p_decomp_npool_gain_sum[rp] > 0.0
-                                p_decomp_cn_gain[c, j, rp] =
-                                    p_decomp_cpool_gain_sum[rp] / p_decomp_npool_gain_sum[rp]
-                            else
-                                p_decomp_cn_gain[c, j, rp] = 0.0
-                            end
-                        end
-                    end
-                end  # first transitions loop
-
-                for k in 1:ndecomp_cascade_transitions
-                    if cascade_receiver_pool[k] == i_cop_mic ||
-                       cascade_receiver_pool[k] == i_oli_mic
-                        if decomp_cpools_vr[c, j, cascade_donor_pool[k]] > 0.0 &&
-                           decomp_k[c, j, cascade_donor_pool[k]] > 0.0
-
-                            rp = cascade_receiver_pool[k]
-
-                            # if p_decomp_cn_diff < 0 => N mineralization
-                            #                     > 0 => immobilization
-                            # "min" turns off immobilization flux
-                            p_decomp_cn_diff_ratio = min(0.0,
-                                (p_decomp_cn_gain[c, j, rp] - cn_col[c, rp]) / cn_col[c, rp])
-
-                            # Actual amount of N mineralized or to be immobilized
-                            # negative=mineralization, positive=immobilization
-                            pmnf_decomp_cascade[c, j, k] = p_decomp_cn_diff_ratio * p_decomp_npool_gain[c, j, k]
-                        end
-                    end
-                end  # second transitions loop
-            end  # column loop
-        end  # soil levels loop
+        decpot_mimics!(p_decomp_cn_gain, pmnf_decomp_cascade, mask_bgc_soilc,
+                       cascade_donor_pool, cascade_receiver_pool, decomp_cpools_vr,
+                       decomp_k, p_decomp_cpool_gain, p_decomp_npool_gain, cn_col,
+                       nlevdecomp, ndecomp_cascade_transitions, i_cop_mic, i_oli_mic)
     end  # use_mimics
 
     # -------------------------------------------------------------------
     # Sum up all potential immobilization fluxes (positive pmnf)
     # and all mineralization fluxes (negative pmnf)
     # -------------------------------------------------------------------
-    decpot_zero2d!(immob, mask_bgc_soilc, nc, nlevdecomp)
-
-    for k in 1:ndecomp_cascade_transitions
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                if pmnf_decomp_cascade[c, j, k] > 0.0
-                    immob[c, j] += pmnf_decomp_cascade[c, j, k]
-                else
-                    gross_nmin_vr[c, j] -= pmnf_decomp_cascade[c, j, k]
-                end
-                if use_mimics
-                    gross_nmin_vr[c, j] += p_decomp_npool_to_din[c, j, k]
-                end
-            end
-        end
-    end
-
-    decpot_copy2d!(potential_immob_vr, mask_bgc_soilc, immob, nc, nlevdecomp)
+    decpot_immob!(potential_immob_vr, gross_nmin_vr, mask_bgc_soilc,
+                  pmnf_decomp_cascade, p_decomp_npool_to_din,
+                  nlevdecomp, ndecomp_cascade_transitions, use_mimics)
 
     # -------------------------------------------------------------------
     # Add up potential HR for methane calculations
     # -------------------------------------------------------------------
-    decpot_zero2d!(phr_vr, mask_bgc_soilc, nc, nlevdecomp)
-
-    for k in 1:ndecomp_cascade_transitions
-        for j in 1:nlevdecomp
-            for c in 1:nc
-                mask_bgc_soilc[c] || continue
-                phr_vr[c, j] += rf_decomp_cascade[c, j, k] * p_decomp_cpool_loss[c, j, k]
-            end
-        end
-    end
+    decpot_phr!(phr_vr, mask_bgc_soilc, rf_decomp_cascade, p_decomp_cpool_loss,
+                nlevdecomp, ndecomp_cascade_transitions)
 
     return nothing
 end
