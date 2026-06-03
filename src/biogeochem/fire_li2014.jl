@@ -25,13 +25,18 @@ Li2014-specific fire data: population density, lightning frequency,
 GDP, peatland fraction, and crop fire timing.
 Ported from member data of `cnfire_li2014_type` in `CNFireLi2014Mod.F90`.
 """
-Base.@kwdef mutable struct CNFireLi2014Data
-    forc_hdm     ::Vector{Float64} = Float64[]  # human population density (#/km2) (gridcell)
-    forc_lnfm    ::Vector{Float64} = Float64[]  # lightning frequency (#/km2/hr) (gridcell)
-    gdp_lf_col   ::Vector{Float64} = Float64[]  # GDP data (k$/capita) (column)
-    peatf_lf_col ::Vector{Float64} = Float64[]  # peatland fraction data (0-1) (column)
-    abm_lf_col   ::Vector{Int}     = Int[]      # prescribed crop fire month (1-12) (column)
+Base.@kwdef mutable struct CNFireLi2014Data{FT<:Real,
+                                            V<:AbstractVector{FT},
+                                            VI<:AbstractVector{<:Integer}}
+    forc_hdm     ::V = Float64[]  # human population density (#/km2) (gridcell)
+    forc_lnfm    ::V = Float64[]  # lightning frequency (#/km2/hr) (gridcell)
+    gdp_lf_col   ::V = Float64[]  # GDP data (k$/capita) (column)
+    peatf_lf_col ::V = Float64[]  # peatland fraction data (0-1) (column)
+    abm_lf_col   ::VI = Int[]      # prescribed crop fire month (1-12) (column)
 end
+CNFireLi2014Data{FT}(; kwargs...) where {FT<:Real} =
+    CNFireLi2014Data{FT, Vector{FT}, Vector{Int}}(; kwargs...)
+Adapt.@adapt_structure CNFireLi2014Data
 
 # ---------------------------------------------------------------------------
 # PFT-level fire parameters specific to Li2014
@@ -43,10 +48,13 @@ end
 PFT-level fire parameters specific to the Li2014 fire module.
 Contains fire spread rate and fire duration by PFT.
 """
-Base.@kwdef mutable struct PftConFireLi2014
-    fsr_pft ::Vector{Float64} = Float64[]  # fire spread rate by PFT (km/hr)
-    fd_pft  ::Vector{Float64} = Float64[]  # fire duration by PFT (hr)
+Base.@kwdef mutable struct PftConFireLi2014{FT<:Real, V<:AbstractVector{FT}}
+    fsr_pft ::V = Float64[]  # fire spread rate by PFT (km/hr)
+    fd_pft  ::V = Float64[]  # fire duration by PFT (hr)
 end
+PftConFireLi2014{FT}(; kwargs...) where {FT<:Real} =
+    PftConFireLi2014{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure PftConFireLi2014
 
 # ---------------------------------------------------------------------------
 # need_lightning_and_popdens_li2014

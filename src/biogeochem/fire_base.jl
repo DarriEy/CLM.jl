@@ -131,23 +131,28 @@ end
 PFT-level parameters referenced by the fire base module.
 Contains the subset of `pftconMod` fields used in `CNFireBaseMod.F90`.
 """
-Base.@kwdef mutable struct PftConFireBase
-    woody    ::Vector{Float64} = Float64[]  # binary woody flag (1=woody, 0=not woody)
-    cc_leaf  ::Vector{Float64} = Float64[]  # combustion completeness factor for leaves
-    cc_lstem ::Vector{Float64} = Float64[]  # combustion completeness factor for live stems
-    cc_dstem ::Vector{Float64} = Float64[]  # combustion completeness factor for dead stems
-    cc_other ::Vector{Float64} = Float64[]  # combustion completeness factor for other pools
-    fm_leaf  ::Vector{Float64} = Float64[]  # fire mortality factor for leaves
-    fm_lstem ::Vector{Float64} = Float64[]  # fire mortality factor for live stems
-    fm_other ::Vector{Float64} = Float64[]  # fire mortality factor for other pools
-    fm_root  ::Vector{Float64} = Float64[]  # fire mortality factor for fine roots
-    fm_lroot ::Vector{Float64} = Float64[]  # fire mortality factor for live coarse roots
-    fm_droot ::Vector{Float64} = Float64[]  # fire mortality factor for dead coarse roots
-    lf_f     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
-    fr_f     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
-    smpso    ::Vector{Float64} = Float64[]  # soil water potential at full stomatal opening (mm)
-    smpsc    ::Vector{Float64} = Float64[]  # soil water potential at full stomatal closure (mm)
+Base.@kwdef mutable struct PftConFireBase{FT<:Real,
+                                          V<:AbstractVector{FT},
+                                          M<:AbstractMatrix{FT}}
+    woody    ::V = Float64[]  # binary woody flag (1=woody, 0=not woody)
+    cc_leaf  ::V = Float64[]  # combustion completeness factor for leaves
+    cc_lstem ::V = Float64[]  # combustion completeness factor for live stems
+    cc_dstem ::V = Float64[]  # combustion completeness factor for dead stems
+    cc_other ::V = Float64[]  # combustion completeness factor for other pools
+    fm_leaf  ::V = Float64[]  # fire mortality factor for leaves
+    fm_lstem ::V = Float64[]  # fire mortality factor for live stems
+    fm_other ::V = Float64[]  # fire mortality factor for other pools
+    fm_root  ::V = Float64[]  # fire mortality factor for fine roots
+    fm_lroot ::V = Float64[]  # fire mortality factor for live coarse roots
+    fm_droot ::V = Float64[]  # fire mortality factor for dead coarse roots
+    lf_f     ::M = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
+    fr_f     ::M = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
+    smpso    ::V = Float64[]  # soil water potential at full stomatal opening (mm)
+    smpsc    ::V = Float64[]  # soil water potential at full stomatal closure (mm)
 end
+PftConFireBase{FT}(; kwargs...) where {FT<:Real} =
+    PftConFireBase{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure PftConFireBase
 
 # ---------------------------------------------------------------------------
 # Fire base data (btran2_patch)
@@ -159,9 +164,11 @@ end
 Fire base data containing root zone soil wetness factor.
 Ported from `cnfire_base_type` member data in `CNFireBaseMod.F90`.
 """
-Base.@kwdef mutable struct CNFireBaseData
-    btran2_patch ::Vector{Float64} = Float64[]  # patch root zone soil wetness factor (0 to 1)
+Base.@kwdef mutable struct CNFireBaseData{FT<:Real, V<:AbstractVector{FT}}
+    btran2_patch ::V = Float64[]  # patch root zone soil wetness factor (0 to 1)
 end
+CNFireBaseData{FT}(; kwargs...) where {FT<:Real} = CNFireBaseData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure CNFireBaseData
 
 # ---------------------------------------------------------------------------
 # DGVS data needed by fire
@@ -172,9 +179,11 @@ end
 
 DGVS fields needed by fire routines (nind_patch, leafcmax_patch).
 """
-Base.@kwdef mutable struct DgvsFireData
-    nind_patch ::Vector{Float64} = Float64[]  # number of individuals (#/m2)
+Base.@kwdef mutable struct DgvsFireData{FT<:Real, V<:AbstractVector{FT}}
+    nind_patch ::V = Float64[]  # number of individuals (#/m2)
 end
+DgvsFireData{FT}(; kwargs...) where {FT<:Real} = DgvsFireData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure DgvsFireData
 
 # ---------------------------------------------------------------------------
 # cnfire_calc_fire_root_wetness_li2014! — Li 2014 root wetness
