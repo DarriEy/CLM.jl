@@ -507,12 +507,17 @@ end
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(totcolch4)
-        totcolch4[c] = zero(T)
+        # Accumulate into a thread-local then write once: a repeated array RMW
+        # (totcolch4[c] += …) inside the inner loop mis-lowers in the KA CPU backend
+        # under --check-bounds (only the last iteration sticks). Byte-identical here
+        # since the field is zero on entry.
+        acc = zero(T)
         for j in 1:nlevsoi
-            totcolch4[c] += (finundated[c] * conc_ch4_sat[c, j] +
-                             (one(T) - finundated[c]) * conc_ch4_unsat[c, j]) *
-                            dz[c, j] * catomw
+            acc += (finundated[c] * conc_ch4_sat[c, j] +
+                    (one(T) - finundated[c]) * conc_ch4_unsat[c, j]) *
+                   dz[c, j] * catomw
         end
+        totcolch4[c] = acc
     end
 end
 
@@ -521,12 +526,13 @@ end
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(totcolch4)
-        totcolch4[c] = zero(T)
+        acc = zero(T)
         if allowlakeprod
             for j in 1:nlevsoi
-                totcolch4[c] += conc_ch4_sat[c, j] * dz[c, j] * catomw
+                acc += conc_ch4_sat[c, j] * dz[c, j] * catomw
             end
         end
+        totcolch4[c] = acc
     end
 end
 
