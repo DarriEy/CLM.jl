@@ -136,27 +136,13 @@ function main(backend)
         Bc = build(Float64)
         run!(Bc, params, ch4vc, cfg)
 
-        # Device run (FT). Build a fresh FT instance, adapt every used field.
+        # Device run (FT). Adapt the WHOLE CH4Data to the device (it is
+        # @adapt_structure'd on this branch — the foundation), so every field the
+        # device-view bundle reads is a device array. Building it via CH4Data{FT}(...)
+        # would re-pin V=Vector{FT}/M=Matrix{FT} and pull the arrays back to the host.
         Bf = build(FT)
         ad(x) = _dev(to, x)
-        chf = Bf.ch4
-        # Mutate the device CH4Data fields in place via adapt (build a new struct
-        # is simplest — re-point each field to a device array).
-        dch4 = CLM.CH4Data{FT}(
-            ch4_prod_depth_sat_col    = ad(chf.ch4_prod_depth_sat_col),
-            ch4_prod_depth_unsat_col  = ad(chf.ch4_prod_depth_unsat_col),
-            o2_decomp_depth_sat_col   = ad(chf.o2_decomp_depth_sat_col),
-            o2_decomp_depth_unsat_col = ad(chf.o2_decomp_depth_unsat_col),
-            conc_o2_sat_col           = ad(chf.conc_o2_sat_col),
-            conc_o2_unsat_col         = ad(chf.conc_o2_unsat_col),
-            lake_soilc_col            = ad(chf.lake_soilc_col),
-            layer_sat_lag_col         = ad(chf.layer_sat_lag_col),
-            sif_col                   = ad(chf.sif_col),
-            annavg_finrw_col          = ad(chf.annavg_finrw_col),
-            finundated_col            = ad(chf.finundated_col),
-            finundated_lag_col        = ad(chf.finundated_lag_col),
-            pH_col                    = ad(chf.pH_col),
-        )
+        dch4 = CLM.Adapt.adapt(Metal.MtlArray, Bf.ch4)
         D = (; ch4=dch4, nc=Bf.nc, np=Bf.np, nlevsoi=Bf.nlevsoi,
              mask_soil=ad(Bf.mask_soil), mask_soilp=ad(Bf.mask_soilp),
              patch_column=ad(Bf.patch_column), patch_itype=ad(Bf.patch_itype),

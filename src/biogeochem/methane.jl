@@ -49,16 +49,17 @@ const rgasLatm = 0.0821  # L.atm/mol.K
                                     c_h_inv1, kh_theta1, kh_tbase, tfrz, denh2o, grav)
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
+        T = eltype(ch4_ebul_depth)
         if j > jwt[c] && t_soisno[c, j] > tfrz
-            k_h_inv = exp(-c_h_inv1 * (1.0 / t_soisno[c, j] - 1.0 / kh_tbase) + log(kh_theta1))
-            k_h = 1.0 / k_h_inv
+            k_h_inv = exp(-c_h_inv1 * (one(T) / t_soisno[c, j] - one(T) / kh_tbase) + log(kh_theta1))
+            k_h = one(T) / k_h_inv
             k_h_cc = t_soisno[c, j] * k_h * rgaslatm
 
             if !lake
-                zi_jwt = jwt[c] > 0 ? zi[c, jwt[c]] : 0.0
+                zi_jwt = jwt[c] > 0 ? zi[c, jwt[c]] : zero(T)
                 pressure = forc_pbot[c] + denh2o * grav * (z[c, j] - zi_jwt)
-                if sat == 1 && frac_h2osfc[c] > 0.0
-                    pressure += denh2o * grav * h2osfc[c] / 1000.0 / frac_h2osfc[c]
+                if sat == 1 && frac_h2osfc[c] > zero(T)
+                    pressure += denh2o * grav * h2osfc[c] / T(1000.0) / frac_h2osfc[c]
                 end
             else
                 pressure = forc_pbot[c] + denh2o * grav * (z[c, j] + lakedepth[c])
@@ -69,14 +70,14 @@ const rgasLatm = 0.0821  # L.atm/mol.K
             if vgc > vgc_max * bubble_f
                 ch4_ebul_depth[c, j] = (vgc - vgc_min * bubble_f) * conc_ch4[c, j] / ebul_timescale
             else
-                ch4_ebul_depth[c, j] = 0.0
+                ch4_ebul_depth[c, j] = zero(T)
             end
         else
-            ch4_ebul_depth[c, j] = 0.0
+            ch4_ebul_depth[c, j] = zero(T)
         end
 
-        if lake && lake_icefrac[c, 1] > 0.1
-            ch4_ebul_depth[c, j] = 0.0
+        if lake && lake_icefrac[c, 1] > T(0.1)
+            ch4_ebul_depth[c, j] = zero(T)
         end
     end
 end
@@ -85,11 +86,12 @@ function meth_ebul!(ch4_ebul_depth, mask, jwt, t_soisno, conc_ch4, watsat,
                     forc_pbot, h2osfc, frac_h2osfc, lake_icefrac, lakedepth, z, zi,
                     sat::Int, lake::Bool, vgc_max, vgc_min, bubble_f,
                     ebul_timescale, rgasm, rgaslatm, nc::Int, nlevsoi::Int)
+    _T = eltype(ch4_ebul_depth)   # convert all scalar args to working precision (no Float64 on Metal)
     _launch!(_meth_ebul_kernel!, ch4_ebul_depth, mask, jwt, t_soisno, conc_ch4, watsat,
              forc_pbot, h2osfc, frac_h2osfc, lake_icefrac, lakedepth, z, zi,
-             sat, lake, vgc_max, vgc_min, bubble_f, ebul_timescale, rgasm, rgasLatm,
-             C_H_INV[1], KH_THETA[1], KH_TBASE, TFRZ, DENH2O, GRAV;
-             ndrange = (nc, nlevsoi))
+             sat, lake, _T(vgc_max), _T(vgc_min), _T(bubble_f), _T(ebul_timescale),
+             _T(rgasm), _T(rgasLatm), _T(C_H_INV[1]), _T(KH_THETA[1]), _T(KH_TBASE),
+             _T(TFRZ), _T(DENH2O), _T(GRAV); ndrange = (nc, nlevsoi))
 end
 
 # Henry's-law solubility coefficients k_h_cc_arr[c, jj, s] for the transport
@@ -101,12 +103,13 @@ end
                                     kh_tbase, rgaslatm)
     c, jj = @index(Global, NTuple)
     @inbounds if mask[c]
+        T = eltype(k_h_cc_arr)
         for s in 1:2
             if jj == 1  # Fortran j == 0 → ground temperature
-                k_h_inv = exp(-c_h_inv[s] * (1.0 / t_grnd[c] - 1.0 / kh_tbase) + log(kh_theta[s]))
+                k_h_inv = exp(-c_h_inv[s] * (one(T) / t_grnd[c] - one(T) / kh_tbase) + log(kh_theta[s]))
                 k_h_cc_arr[c, jj, s] = t_grnd[c] / k_h_inv * rgaslatm
             else
-                k_h_inv = exp(-c_h_inv[s] * (1.0 / t_soisno[c, jj-1] - 1.0 / kh_tbase) + log(kh_theta[s]))
+                k_h_inv = exp(-c_h_inv[s] * (one(T) / t_soisno[c, jj-1] - one(T) / kh_tbase) + log(kh_theta[s]))
                 k_h_cc_arr[c, jj, s] = t_soisno[c, jj-1] / k_h_inv * rgaslatm
             end
         end
@@ -114,8 +117,13 @@ end
 end
 
 function meth_khcc!(k_h_cc_arr, mask, t_grnd, t_soisno, nc::Int, nlevsoi::Int)
+    # Move the const Henry-law coefficient vectors onto the state backend at working
+    # precision (host const arrays are non-bitstype on a device kernel).
+    _T = eltype(k_h_cc_arr)
+    chinv = similar(k_h_cc_arr, _T, length(C_H_INV)); copyto!(chinv, _T.(C_H_INV))
+    khth  = similar(k_h_cc_arr, _T, length(KH_THETA)); copyto!(khth, _T.(KH_THETA))
     _launch!(_meth_khcc_kernel!, k_h_cc_arr, mask, t_grnd, t_soisno,
-             C_H_INV, KH_THETA, KH_TBASE, rgasLatm;
+             chinv, khth, _T(KH_TBASE), _T(rgasLatm);
              ndrange = (nc, nlevsoi + 1))
 end
 
@@ -1441,8 +1449,8 @@ function ch4_ebul!(ch4::CH4Data,
                    lakedepth::Vector{<:Real},
                    z::Matrix{<:Real},
                    dz::Matrix{<:Real},
-                   zi::Matrix{<:Real},
-                   jwt::Vector{Int},
+                   zi::AbstractMatrix{<:Real},
+                   jwt::AbstractVector{<:Integer},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
@@ -1831,25 +1839,25 @@ end
 function ch4_tran!(ch4::CH4Data,
                    params::CH4Params,
                    ch4vc::CH4VarCon,
-                   mask_soil::BitVector,
-                   col_gridcell::Vector{Int},
-                   watsat::Matrix{<:Real},
-                   h2osoi_vol::Matrix{<:Real},
-                   h2osoi_liq::Matrix{<:Real},
-                   h2osoi_ice::Matrix{<:Real},
-                   h2osfc::Vector{<:Real},
-                   bsw::Matrix{<:Real},
-                   cellorg::Matrix{<:Real},
-                   t_soisno::Matrix{<:Real},
-                   t_grnd::Vector{<:Real},
-                   t_h2osfc::Vector{<:Real},
-                   frac_h2osfc::Vector{<:Real},
-                   snow_depth::Vector{<:Real},
-                   snl::Vector{Int},
-                   z::Matrix{<:Real},
-                   dz::Matrix{<:Real},
-                   zi::Matrix{<:Real},
-                   jwt::Vector{Int},
+                   mask_soil::AbstractVector{Bool},
+                   col_gridcell::AbstractVector{<:Integer},
+                   watsat::AbstractMatrix{<:Real},
+                   h2osoi_vol::AbstractMatrix{<:Real},
+                   h2osoi_liq::AbstractMatrix{<:Real},
+                   h2osoi_ice::AbstractMatrix{<:Real},
+                   h2osfc::AbstractVector{<:Real},
+                   bsw::AbstractMatrix{<:Real},
+                   cellorg::AbstractMatrix{<:Real},
+                   t_soisno::AbstractMatrix{<:Real},
+                   t_grnd::AbstractVector{<:Real},
+                   t_h2osfc::AbstractVector{<:Real},
+                   frac_h2osfc::AbstractVector{<:Real},
+                   snow_depth::AbstractVector{<:Real},
+                   snl::AbstractVector{<:Integer},
+                   z::AbstractMatrix{<:Real},
+                   dz::AbstractMatrix{<:Real},
+                   zi::AbstractMatrix{<:Real},
+                   jwt::AbstractVector{<:Integer},
                    sat::Int,
                    lake::Bool,
                    nlevsoi::Int,
@@ -2036,7 +2044,7 @@ function ch4!(ch4d::CH4Data,
               lakedepth::Vector{<:Real},
               z::Matrix{<:Real},
               dz::Matrix{<:Real},
-              zi::Matrix{<:Real},
+              zi::AbstractMatrix{<:Real},
               nlevsoi::Int,
               nlevsno::Int,
               nlevdecomp::Int,
