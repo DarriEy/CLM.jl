@@ -20,29 +20,31 @@ PFT-level parameters used by the nutrient competition routines. Contains a
 subset of fields from `pftconMod` referenced in
 `NutrientCompetitionCLM45defaultMod.F90`.
 """
-Base.@kwdef mutable struct PftConNutrientCompetition
-    woody       ::Vector{Float64} = Float64[]   # binary woody flag (1=woody, 0=not woody)
-    froot_leaf  ::Vector{Float64} = Float64[]   # new fine root C per new leaf C (gC/gC)
-    croot_stem  ::Vector{Float64} = Float64[]   # new coarse root C per new stem C (gC/gC)
-    stem_leaf   ::Vector{Float64} = Float64[]   # new stem C per new leaf C (gC/gC); -1 = dynamic
-    flivewd     ::Vector{Float64} = Float64[]   # fraction of new wood that is live
-    leafcn      ::Vector{Float64} = Float64[]   # leaf C:N (gC/gN)
-    frootcn     ::Vector{Float64} = Float64[]   # fine root C:N (gC/gN)
-    livewdcn    ::Vector{Float64} = Float64[]   # live wood C:N (gC/gN)
-    deadwdcn    ::Vector{Float64} = Float64[]   # dead wood C:N (gC/gN)
-    fcur        ::Vector{Float64} = Float64[]   # fraction of allocation to current growth
-    graincn     ::Vector{Float64} = Float64[]   # grain C:N (gC/gN)
-    grperc      ::Vector{Float64} = Float64[]   # growth respiration fraction
-    grpnow      ::Vector{Float64} = Float64[]   # growth respiration fraction released immediately
+Base.@kwdef mutable struct PftConNutrientCompetition{FT<:Real, V<:AbstractVector{FT}}
+    woody       ::V = Float64[]   # binary woody flag (1=woody, 0=not woody)
+    froot_leaf  ::V = Float64[]   # new fine root C per new leaf C (gC/gC)
+    croot_stem  ::V = Float64[]   # new coarse root C per new stem C (gC/gC)
+    stem_leaf   ::V = Float64[]   # new stem C per new leaf C (gC/gC); -1 = dynamic
+    flivewd     ::V = Float64[]   # fraction of new wood that is live
+    leafcn      ::V = Float64[]   # leaf C:N (gC/gN)
+    frootcn     ::V = Float64[]   # fine root C:N (gC/gN)
+    livewdcn    ::V = Float64[]   # live wood C:N (gC/gN)
+    deadwdcn    ::V = Float64[]   # dead wood C:N (gC/gN)
+    fcur        ::V = Float64[]   # fraction of allocation to current growth
+    graincn     ::V = Float64[]   # grain C:N (gC/gN)
+    grperc      ::V = Float64[]   # growth respiration fraction
+    grpnow      ::V = Float64[]   # growth respiration fraction released immediately
     # Crop grain-fill C:N override parameters
-    fleafcn     ::Vector{Float64} = Float64[]   # leaf C:N during organ fill
-    ffrootcn    ::Vector{Float64} = Float64[]   # fine root C:N during organ fill
-    fstemcn     ::Vector{Float64} = Float64[]   # stem C:N during organ fill
-    astemf      ::Vector{Float64} = Float64[]   # final stem allocation coefficient
+    fleafcn     ::V = Float64[]   # leaf C:N during organ fill
+    ffrootcn    ::V = Float64[]   # fine root C:N during organ fill
+    fstemcn     ::V = Float64[]   # stem C:N during organ fill
+    astemf      ::V = Float64[]   # final stem allocation coefficient
     # Deciduous flags
-    season_decid ::Vector{Float64} = Float64[]  # binary flag for seasonal-deciduous (0 or 1)
-    stress_decid ::Vector{Float64} = Float64[]  # binary flag for stress-deciduous (0 or 1)
+    season_decid ::V = Float64[]  # binary flag for seasonal-deciduous (0 or 1)
+    stress_decid ::V = Float64[]  # binary flag for stress-deciduous (0 or 1)
 end
+PftConNutrientCompetition{FT}(; kwargs...) where {FT<:Real} = PftConNutrientCompetition{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure PftConNutrientCompetition
 
 # ---------------------------------------------------------------------------
 # calc_plant_nutrient_demand! -- Calculate plant nitrogen demand
@@ -62,7 +64,7 @@ non-prognostic-crop points and prognostic-crop points.
 Ported from `calc_plant_nutrient_demand` in
 `NutrientCompetitionCLM45defaultMod.F90`.
 """
-function calc_plant_nutrient_demand!(mask_p::BitVector, bounds::UnitRange{Int},
+function calc_plant_nutrient_demand!(mask_p::AbstractVector{Bool}, bounds::UnitRange{Int},
         call_is_for_pcrop::Bool,
         pftcon::PftConNutrientCompetition,
         cn_shared_params::CNSharedParamsData,
@@ -113,7 +115,7 @@ between competing patches, allocate C and N to new growth and storage.
 Ported from `calc_plant_nutrient_competition` /
 `calc_plant_cn_alloc` in `NutrientCompetitionCLM45defaultMod.F90`.
 """
-function calc_plant_nutrient_competition!(mask_soilp::BitVector, bounds::UnitRange{Int},
+function calc_plant_nutrient_competition!(mask_soilp::AbstractVector{Bool}, bounds::UnitRange{Int},
         pftcon::PftConNutrientCompetition,
         cn_shared_params::CNSharedParamsData,
         patch::PatchData,
@@ -122,7 +124,7 @@ function calc_plant_nutrient_competition!(mask_soilp::BitVector, bounds::UnitRan
         cnveg_cs::CNVegCarbonStateData,
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_nf::CNVegNitrogenFluxData;
-        fpg_col::Vector{<:Real},
+        fpg_col::AbstractVector{<:Real},
         c13_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         c14_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         use_c13::Bool=false,
