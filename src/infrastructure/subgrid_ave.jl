@@ -464,11 +464,57 @@ Averaging is only done for points that are not equal to `SPVAL`.
 
 Ported from `p2g_1d` in `subgridAveMod.F90`.
 """
-function p2g_1d!(garr::Vector{<:Real}, parr::Vector{<:Real},
+# --- Kernelized unity-scale fast path for p2g_1d! (all scales = 1.0) ---
+# Straight wtgcell-weighted patch->gridcell average. Used by e.g. cn_products.
+@kernel function _p2g_unity_zero_kernel!(garr, sumwt, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        garr[g]  = zero(eltype(garr))
+        sumwt[g] = zero(eltype(sumwt))
+    end
+end
+@kernel function _p2g_unity_scatter_kernel!(garr, sumwt, @Const(parr), @Const(active),
+        @Const(wtgcell), @Const(gridcell), pmin::Int, pmax::Int, spval)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        if active[p] && wtgcell[p] != zero(eltype(wtgcell)) && parr[p] != spval
+            g = gridcell[p]
+            _scatter_add!(garr, g, parr[p] * wtgcell[p])
+            _scatter_add!(sumwt, g, wtgcell[p])
+        end
+    end
+end
+@kernel function _p2g_unity_finalize_kernel!(garr, @Const(sumwt), gmin::Int, gmax::Int, spval)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        if sumwt[g] != zero(eltype(sumwt))
+            garr[g] = garr[g] / sumwt[g]
+        else
+            garr[g] = spval
+        end
+    end
+end
+
+function p2g_1d!(garr::AbstractVector{<:Real}, parr::AbstractVector{<:Real},
                  bounds::BoundsType,
                  p2c_scale_type::String, c2l_scale_type::String,
                  l2g_scale_type::String,
                  pch::PatchData, col::ColumnData, lun::LandunitData)
+    # Unity-scale fast path (all three scales == 1.0): a kernelized
+    # wtgcell-weighted patch->gridcell average. Byte-identical to the general
+    # path below for unity scales (the SPVAL-init-then-zero-on-first-touch logic
+    # becomes zero-init + SPVAL-where-sumwt==0 at finalize). The >1.0 sumwt guard
+    # is dropped here (valid weights sum to <=1 per gridcell); the general path keeps it.
+    if p2c_scale_type == "unity" && c2l_scale_type == "unity" && l2g_scale_type == "unity"
+        FT = eltype(garr)
+        sumwt = similar(garr, bounds.endg)
+        _launch!(_p2g_unity_zero_kernel!, garr, sumwt, bounds.begg, bounds.endg)
+        _launch!(_p2g_unity_scatter_kernel!, garr, sumwt, parr, pch.active, pch.wtgcell,
+                 pch.gridcell, bounds.begp, bounds.endp, FT(SPVAL); ndrange = length(parr))
+        _launch!(_p2g_unity_finalize_kernel!, garr, sumwt, bounds.begg, bounds.endg, FT(SPVAL))
+        return nothing
+    end
+
     # Build scale_l2g
     scale_l2g = Vector{Float64}(undef, bounds.endl)
     build_scale_l2g!(scale_l2g, bounds, l2g_scale_type, lun)
