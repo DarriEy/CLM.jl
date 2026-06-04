@@ -563,4 +563,21 @@
         @test d.dgvs.agdd20_patch[1] ≈ 600.0 atol=0.01
     end
 
+    # -----------------------------------------------------------------------
+    # Configurable / autodetected atomic-counter integer width
+    # (Metal has no 64-bit atomics; numtrees etc. switch to Int32 there)
+    # -----------------------------------------------------------------------
+    @testset "atomic_int_type configurable + autodetect" begin
+        # autodetect on the CPU backend -> 64-bit (host Vector)
+        @test CLM.atomic_int_type(zeros(3)) == Int
+        # explicit overrides
+        CLM.set_atomic_int_width!(:i32)
+        @test CLM.atomic_int_type(zeros(3)) == Int32
+        CLM.set_atomic_int_width!(:i64)
+        @test CLM.atomic_int_type(zeros(3)) == Int64
+        @test_throws ArgumentError CLM.set_atomic_int_width!(:bogus)
+        CLM.set_atomic_int_width!(:auto)   # restore default
+        @test CLM.atomic_int_type(zeros(3)) == Int
+    end
+
 end

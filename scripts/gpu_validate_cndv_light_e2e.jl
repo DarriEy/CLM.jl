@@ -53,6 +53,9 @@ function make_data()
     dgvs.crownarea_patch .= [0.0, 8.0, 8.0, 1.0]
     dgvs.agdd_patch .= [10.0, 20.0, 30.0, 40.0]
     dgvs.agddtw_patch .= [1.0, 2.0, 3.0, 4.0]
+    dgvs.agdd20_patch .= [400.0, 500.0, 600.0, 700.0]
+    dgvs.tmomin20_patch .= [CLM.TFRZ + 5.0, CLM.TFRZ + 8.0, CLM.TFRZ + 6.0, CLM.TFRZ + 3.0]
+    dgvs.pftmayexist_patch .= [true, true, true, true]
     patch = CLM.PatchData(); CLM.patch_init!(patch, np)
     patch.itype .= [CLM.noveg, 1, 2, 12]; patch.gridcell .= 1; patch.column .= 1
     patch.landunit .= 1; patch.wtcol .= [0.1, 0.3, 0.3, 0.3]
@@ -61,7 +64,8 @@ function make_data()
     return (; dgvs, eco, pft, patch, lun, np, ng=1,
             deadstemc=[0.0, 5000.0, 3000.0, 0.0], leafcmax=[0.0, 200.0, 150.0, 50.0],
             t_a10=[280.0, 290.0, 300.0, 310.0], t_ref2m=[281.0, 291.0, 301.0, 311.0],
-            mask=trues(np))
+            prec365=[1.0e-5], annsum_npp=[0.0, 300.0, 250.0, 100.0],
+            annsum_litfall=[0.0, 100.0, 80.0, 40.0], mask=trues(np))
 end
 
 run_light!(d) = CLM.cndv_light!(d.dgvs, d.eco, d.deadstemc, d.leafcmax,
@@ -69,6 +73,8 @@ run_light!(d) = CLM.cndv_light!(d.dgvs, d.eco, d.deadstemc, d.leafcmax,
 run_init!(d) = CLM.dyn_cndv_init!(d.dgvs, d.patch, 1:d.np)
 run_interp!(d) = CLM.dyn_cndv_interp!(d.dgvs, d.patch, d.lun, 1:d.np; wt1=0.3, is_beg_curr_year=true)
 run_acc!(d) = CLM.cndv_update_acc_vars!(d.dgvs, d.eco, d.t_a10, d.t_ref2m, 1:d.np, 1800.0; month=6, day=15, secs=1800)
+run_estab!(d) = CLM.cndv_establishment!(d.dgvs, d.eco, d.prec365, d.annsum_npp, d.annsum_litfall,
+    d.deadstemc, d.leafcmax, d.pft, d.patch, d.lun, 1:d.np; bounds_gridcell=1:d.ng)
 
 function main(backend)
     println("="^66); println("END-TO-END Metal parity for cndv_light!"); println("="^66)
@@ -78,7 +84,9 @@ function main(backend)
     mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
     movedev(B) = (; dgvs=mf(B.dgvs), eco=B.eco, pft=B.pft, patch=mf(B.patch), lun=mf(B.lun),
         np=B.np, ng=B.ng, deadstemc=mf(B.deadstemc), leafcmax=mf(B.leafcmax),
-        t_a10=mf(B.t_a10), t_ref2m=mf(B.t_ref2m), mask=Metal.MtlArray(collect(B.mask)))
+        t_a10=mf(B.t_a10), t_ref2m=mf(B.t_ref2m), prec365=mf(B.prec365),
+        annsum_npp=mf(B.annsum_npp), annsum_litfall=mf(B.annsum_litfall),
+        mask=Metal.MtlArray(collect(B.mask)))
     checks = Tuple{String,Any,Any}[]
 
     # cndv_light! (the scatter/competition kernel) — run on its own fresh data
@@ -103,6 +111,16 @@ function main(backend)
     Ha = make_data(); Da = movedev(make_data()); run_acc!(Ha); run_acc!(Da)
     push!(checks, ("acc: agddtw", Ha.dgvs.agddtw_patch, Da.dgvs.agddtw_patch))
     push!(checks, ("acc: agdd", Ha.dgvs.agdd_patch, Da.dgvs.agdd_patch))
+
+    # cndv_establishment! (per-gridcell kernel)
+    He = make_data(); De = movedev(make_data()); run_estab!(He); run_estab!(De)
+    push!(checks, ("estab: present", He.dgvs.present_patch, De.dgvs.present_patch))
+    push!(checks, ("estab: nind", He.dgvs.nind_patch, De.dgvs.nind_patch))
+    push!(checks, ("estab: fpcgrid", He.dgvs.fpcgrid_patch, De.dgvs.fpcgrid_patch))
+    push!(checks, ("estab: crownarea", He.dgvs.crownarea_patch, De.dgvs.crownarea_patch))
+    push!(checks, ("estab: greffic", He.dgvs.greffic_patch, De.dgvs.greffic_patch))
+    push!(checks, ("estab: heatstress", He.dgvs.heatstress_patch, De.dgvs.heatstress_patch))
+    push!(checks, ("estab: leafcmax", He.leafcmax, De.leafcmax))
     nfail = 0
     for (nm, a, b) in checks
         dd = reldiff(a, b); ok = dd < 1f-3
