@@ -251,6 +251,26 @@ Corresponds to `CNNFert` in the Fortran source.
 The Fortran `p2c` call is replaced by inline weighted averaging
 using `patch.wtcol`.
 """
+# Generic per-patch p2c weighted scatter (replaces Fortran p2c). Each active patch
+# scatters patch_arr[p]*wtcol[p] into its column accumulator col_arr[column[p]].
+# pmin/pmax gate the active bounds range (one thread per patch over 1:length(mask_p)).
+# The accumulator MUST already be zeroed by the caller (ndyn_col_zero!). KA CPU
+# iterates p ascending → byte-identical to the host += loop; on GPU the add is atomic.
+@kernel function _ndyn_p2c_scatter_kernel!(col_arr, @Const(mask_p), @Const(pcol),
+                                           @Const(patch_arr), @Const(wtcol),
+                                           pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_p[p]
+        _scatter_add!(col_arr, pcol[p], patch_arr[p] * wtcol[p])
+    end
+end
+
+# ndrange is over PATCHES (length(mask_p)), not the column accumulator — the
+# kernel index p must cover every patch, so pass ndrange explicitly.
+ndyn_p2c_scatter!(col_arr, mask_p, pcol, patch_arr, wtcol, pmin::Int, pmax::Int) =
+    _launch!(_ndyn_p2c_scatter_kernel!, col_arr, mask_p, pcol, patch_arr, wtcol, pmin, pmax;
+             ndrange = length(mask_p))
+
 function n_fert!(
     soilbgc_nf::SoilBiogeochemNitrogenFluxData,
     cnveg_nf::CNVegNitrogenFluxData;
@@ -267,12 +287,9 @@ function n_fert!(
     ndyn_col_zero!(fert_to_sminn, mask_soilc)
 
     # Patch-to-column weighted aggregation (replaces Fortran p2c call).
-    # SKIPPED for kernelization: scatter-reduction into shared columns.
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        fert_to_sminn[c] += fert[p] * patch.wtcol[p]
-    end
+    # Per-patch scatter into the (already zeroed) column accumulator.
+    isempty(bounds_p) || ndyn_p2c_scatter!(fert_to_sminn, mask_soilp, patch.column,
+                                           fert, patch.wtcol, first(bounds_p), last(bounds_p))
 
     return nothing
 end
@@ -411,12 +428,9 @@ function n_soyfix!(
     # Patch-to-column aggregation (replaces Fortran p2c call)
     ndyn_col_zero!(soyfixn_to_sminn, mask_soilc)
 
-    # SKIPPED for kernelization: scatter-reduction into shared columns.
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        soyfixn_to_sminn[c] += soyfixn[p] * patch.wtcol[p]
-    end
+    # Per-patch scatter into the (already zeroed) column accumulator.
+    isempty(bounds_p) || ndyn_p2c_scatter!(soyfixn_to_sminn, mask_soilp, patch.column,
+                                           soyfixn, patch.wtcol, first(bounds_p), last(bounds_p))
 
     return nothing
 end
