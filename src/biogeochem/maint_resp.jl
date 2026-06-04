@@ -68,6 +68,97 @@ live stem, live coarse root, and crop reproductive tissues.
 
 Ported from `CNMResp` in `CNMRespMod.F90`.
 """
+# --- Kernel 1: per-column soil-layer temperature correction factors ------
+# tcsoi[c, j] = Q10^((t_soisno[c, j+joff] - TFRZ - 20) / 10) for j = 1:nlevgrnd
+@kernel function _mresp_tcsoi_kernel!(tcsoi, @Const(mask_soilc), @Const(t_soisno),
+                                      Q10, TFRZ_, joff, nlevgrnd)
+    T = eltype(tcsoi)
+    c = @index(Global)
+    @inbounds if mask_soilc[c]
+        for j in 1:nlevgrnd
+            tcsoi[c, j] = Q10^((t_soisno[c, j + joff] - T(TFRZ_) - T(20.0)) / T(10.0))
+        end
+    end
+end
+
+# --- Kernel 2: per-patch leaf and live-wood maintenance respiration ------
+@kernel function _mresp_patch_kernel!(leaf_mr, livestem_mr, livecroot_mr,
+                                      reproductive_mr, froot_mr,
+                                      @Const(mask_soilp), @Const(ivt), @Const(woody),
+                                      @Const(frac_veg_nosno),
+                                      @Const(lmrsun), @Const(laisun),
+                                      @Const(lmrsha), @Const(laisha),
+                                      @Const(t_ref2m), @Const(t10),
+                                      @Const(livestemn), @Const(livecrootn),
+                                      @Const(reproductiven),
+                                      Q10, TFRZ_, br, br_root,
+                                      rootstem_acc::Bool, npcropmin, nrepr)
+    T = eltype(leaf_mr)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        # Temperature correction from 2m air temperature
+        tc = Q10^((t_ref2m[p] - T(TFRZ_) - T(20.0)) / T(10.0))
+
+        # Local copies of base rates (may be modified by acclimation)
+        br_local      = br
+        br_root_local = br_root
+
+        # Acclimation of root and stem respiration fluxes
+        if rootstem_acc
+            acc = T(10.0)^(T(-0.00794) * ((t10[p] - T(TFRZ_)) - T(25.0)))
+            br_local      = br_local      * acc
+            br_root_local = br_root_local * acc
+        end
+
+        # Leaf maintenance respiration
+        if frac_veg_nosno[p] == 1
+            leaf_mr[p] = lmrsun[p] * laisun[p] * T(12.011e-6) +
+                         lmrsha[p] * laisha[p] * T(12.011e-6)
+        else
+            leaf_mr[p] = zero(T)
+        end
+
+        # Live stem and live coarse root MR
+        if woody[ivt[p] + 1] == one(T)
+            livestem_mr[p]  = livestemn[p]  * br_local * tc
+            livecroot_mr[p] = livecrootn[p] * br_root_local * tc
+        elseif ivt[p] >= npcropmin
+            livestem_mr[p] = livestemn[p] * br_local * tc
+            for k in 1:nrepr
+                reproductive_mr[p, k] = reproductiven[p, k] * br_local * tc
+            end
+        end
+
+        # --- Initialize fine root MR accumulation ---
+        froot_mr[p] = zero(T)
+    end
+end
+
+# --- Kernel 3: per-patch fine root MR accumulation over soil layers ------
+@kernel function _mresp_froot_kernel!(froot_mr, @Const(mask_soilp),
+                                      @Const(column), @Const(t10),
+                                      @Const(frootn), @Const(crootfr), @Const(tcsoi),
+                                      TFRZ_, br_root, rootstem_acc::Bool, nlevgrnd)
+    T = eltype(froot_mr)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        c = column[p]
+
+        # Local root base rate (may be modified by acclimation)
+        br_root_local = br_root
+        if rootstem_acc
+            br_root_local = br_root_local * T(10.0)^(T(-0.00794) * ((t10[p] - T(TFRZ_)) - T(25.0)))
+        end
+
+        # Ascending-j accumulation into a local, write froot_mr[p] once
+        acc = zero(T)
+        for j in 1:nlevgrnd
+            acc = acc + frootn[p] * br_root_local * tcsoi[c, j] * crootfr[p, j]
+        end
+        froot_mr[p] = acc
+    end
+end
+
 function cn_mresp!(mask_soilc::BitVector, mask_soilp::BitVector,
                    bounds_c::UnitRange{Int}, bounds_p::UnitRange{Int},
                    params::MaintRespParams,
@@ -129,72 +220,25 @@ function cn_mresp!(mask_soilc::BitVector, mask_soilp::BitVector,
 
     # --- Column loop: temperature correction factors for each soil layer ---
     # Allocate tcsoi as a local array (ncols × nlevgrnd)
-    nc = length(bounds_c)
     FT = eltype(t_soisno)
     tcsoi = Matrix{FT}(undef, last(bounds_c), nlevgrnd)
 
-    for j in 1:nlevgrnd
-        for c in bounds_c
-            mask_soilc[c] || continue
-            tcsoi[c, j] = Q10^((t_soisno[c, j + joff] - TFRZ - 20.0) / 10.0)
-        end
-    end
+    _launch!(_mresp_tcsoi_kernel!, tcsoi, mask_soilc, t_soisno,
+             Q10, TFRZ, joff, nlevgrnd; ndrange = size(tcsoi, 1))
 
     # --- Patch loop: leaf and live wood maintenance respiration ---
-    for p in bounds_p
-        mask_soilp[p] || continue
-
-        # Temperature correction from 2m air temperature
-        tc = Q10^((t_ref2m[p] - TFRZ - 20.0) / 10.0)
-
-        # Local copies of base rates (may be modified by acclimation)
-        br_local      = br
-        br_root_local = br_root
-
-        # Acclimation of root and stem respiration fluxes
-        if rootstem_acc
-            br_local      = br_local      * 10.0^(-0.00794 * ((t10[p] - TFRZ) - 25.0))
-            br_root_local = br_root_local * 10.0^(-0.00794 * ((t10[p] - TFRZ) - 25.0))
-        end
-
-        # Leaf maintenance respiration
-        if frac_veg_nosno[p] == 1
-            leaf_mr[p] = lmrsun[p] * laisun[p] * 12.011e-6 +
-                         lmrsha[p] * laisha[p] * 12.011e-6
-        else
-            leaf_mr[p] = 0.0
-        end
-
-        # Live stem and live coarse root MR
-        if woody[ivt[p] + 1] == 1.0
-            livestem_mr[p]  = livestemn[p]  * br_local * tc
-            livecroot_mr[p] = livecrootn[p] * br_root_local * tc
-        elseif ivt[p] >= npcropmin
-            livestem_mr[p] = livestemn[p] * br_local * tc
-            for k in 1:nrepr
-                reproductive_mr[p, k] = reproductiven[p, k] * br_local * tc
-            end
-        end
-
-        # --- Initialize fine root MR accumulation ---
-        froot_mr[p] = 0.0
-    end
+    _launch!(_mresp_patch_kernel!, leaf_mr, livestem_mr, livecroot_mr,
+             reproductive_mr, froot_mr,
+             mask_soilp, ivt, woody, frac_veg_nosno,
+             lmrsun, laisun, lmrsha, laisha,
+             t_ref2m, t10, livestemn, livecrootn, reproductiven,
+             Q10, TFRZ, br, br_root,
+             rootstem_acc, npcropmin, nrepr)
 
     # --- Soil and patch loop: fine root maintenance respiration ---
-    for j in 1:nlevgrnd
-        for p in bounds_p
-            mask_soilp[p] || continue
-            c = column[p]
-
-            # Local root base rate (may be modified by acclimation)
-            br_root_local = br_root
-            if rootstem_acc
-                br_root_local = br_root_local * 10.0^(-0.00794 * ((t10[p] - TFRZ) - 25.0))
-            end
-
-            froot_mr[p] = froot_mr[p] + frootn[p] * br_root_local * tcsoi[c, j] * crootfr[p, j]
-        end
-    end
+    _launch!(_mresp_froot_kernel!, froot_mr, mask_soilp,
+             column, t10, frootn, crootfr, tcsoi,
+             TFRZ, br_root, rootstem_acc, nlevgrnd)
 
     return nothing
 end

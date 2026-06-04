@@ -71,7 +71,113 @@ available C for allocation.
 
 Ported from `calc_gpp_mr_availc` in `CNAllocationMod.F90`.
 """
-function calc_gpp_mr_availc!(mask_soilp::BitVector, bounds::UnitRange{Int},
+@kernel function _alloc_gpp_mr_availc_kernel!(
+        psnsun_to_cpool, psnshade_to_cpool,
+        c13_psnsun_to_cpool, c13_psnshade_to_cpool,
+        c14_psnsun_to_cpool, c14_psnshade_to_cpool,
+        gpp_before_downreg, availc,
+        leaf_curmr, leaf_xsmr, froot_curmr, froot_xsmr,
+        livestem_curmr, livestem_xsmr, livecroot_curmr, livecroot_xsmr,
+        reproductive_curmr, reproductive_xsmr,
+        xsmrpool_recover_out, cpool_to_xsmrpool,
+        @Const(mask_soilp), @Const(itype),
+        @Const(psnsun_patch), @Const(psnsha_patch),
+        @Const(laisun_patch), @Const(laisha_patch),
+        @Const(c13_psnsun_patch), @Const(c13_psnsha_patch),
+        @Const(c14_psnsun_patch), @Const(c14_psnsha_patch),
+        @Const(woody),
+        @Const(leaf_mr), @Const(froot_mr),
+        @Const(livestem_mr), @Const(livecroot_mr),
+        @Const(reproductive_mr), @Const(croplive),
+        @Const(xsmrpool),
+        do_c13::Bool, do_c14::Bool, use_matrixcn::Bool,
+        dayscrecover::Float64, npcropmin::Int, nrepr::Int)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+
+        # Convert psn from umol/m2/s -> gC/m2/s
+        # The input psn (psnsun and psnsha) are expressed per unit LAI
+        # in the sunlit and shaded canopy. Scale by laisun and laisha.
+        psnsun_to_cpool[p]   = psnsun_patch[p] * laisun_patch[p] * 12.011e-6
+        psnshade_to_cpool[p] = psnsha_patch[p] * laisha_patch[p] * 12.011e-6
+
+        if do_c13
+            c13_psnsun_to_cpool[p]   = c13_psnsun_patch[p] * laisun_patch[p] * 12.011e-6
+            c13_psnshade_to_cpool[p] = c13_psnsha_patch[p] * laisha_patch[p] * 12.011e-6
+        end
+
+        if do_c14
+            c14_psnsun_to_cpool[p]   = c14_psnsun_patch[p] * laisun_patch[p] * 12.011e-6
+            c14_psnshade_to_cpool[p] = c14_psnsha_patch[p] * laisha_patch[p] * 12.011e-6
+        end
+
+        gpp = psnsun_to_cpool[p] + psnshade_to_cpool[p]
+        gpp_before_downreg[p] = gpp
+
+        # get the time step total maintenance respiration
+        mr = leaf_mr[p] + froot_mr[p]
+        if woody[ivt] == 1.0
+            mr = mr + livestem_mr[p] + livecroot_mr[p]
+        elseif ivt >= npcropmin
+            if croplive[p]
+                reproductive_mr_tot = 0.0
+                for k in 1:nrepr
+                    reproductive_mr_tot = reproductive_mr_tot + reproductive_mr[p, k]
+                end
+                mr = mr + livestem_mr[p] + reproductive_mr_tot
+            end
+        end
+
+        # For Matrix solution if mr is very small set it to zero
+        if mr < -1.0e-15 && use_matrixcn
+            mr = 0.0
+        end
+
+        # carbon flux available for allocation
+        availc_p = gpp - mr
+        availc[p] = availc_p
+
+        # If mr > gpp, then some mr comes from gpp, the rest from cpool (xsmr)
+        if mr > 0.0 && availc_p < 0.0
+            curmr = gpp
+            curmr_ratio = curmr / mr
+        else
+            curmr_ratio = 1.0
+        end
+
+        leaf_curmr[p]      = leaf_mr[p] * curmr_ratio
+        leaf_xsmr[p]       = leaf_mr[p] - leaf_curmr[p]
+        froot_curmr[p]     = froot_mr[p] * curmr_ratio
+        froot_xsmr[p]      = froot_mr[p] - froot_curmr[p]
+        livestem_curmr[p]  = livestem_mr[p] * curmr_ratio
+        livestem_xsmr[p]   = livestem_mr[p] - livestem_curmr[p]
+        livecroot_curmr[p] = livecroot_mr[p] * curmr_ratio
+        livecroot_xsmr[p]  = livecroot_mr[p] - livecroot_curmr[p]
+        for k in 1:nrepr
+            reproductive_curmr[p, k] = reproductive_mr[p, k] * curmr_ratio
+            reproductive_xsmr[p, k]  = reproductive_mr[p, k] - reproductive_curmr[p, k]
+        end
+
+        # no allocation when available c is negative
+        availc[p] = max(availc[p], 0.0)
+
+        # test for an xsmrpool deficit
+        if xsmrpool[p] < 0.0
+            xsmrpool_recover = -xsmrpool[p] / (dayscrecover * SECSPDAY)
+            if xsmrpool_recover < availc[p]
+                availc[p] = availc[p] - xsmrpool_recover
+            else
+                xsmrpool_recover = availc[p]
+                availc[p] = 0.0
+            end
+            xsmrpool_recover_out[p] = xsmrpool_recover
+            cpool_to_xsmrpool[p] = xsmrpool_recover
+        end
+    end
+end
+
+function calc_gpp_mr_availc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRange{Int},
                               alloc_params::AllocationParams,
                               pftcon::PftConAllocation,
                               cn_shared_params::CNSharedParamsData,
@@ -91,91 +197,41 @@ function calc_gpp_mr_availc!(mask_soilp::BitVector, bounds::UnitRange{Int},
     dayscrecover = alloc_params.dayscrecover
     use_matrixcn = cn_shared_params.use_matrixcn
 
-    for p in bounds
-        mask_soilp[p] || continue
+    # Resolve config branches on the host
+    do_c13 = use_c13 && c13_cnveg_cf !== nothing
+    do_c14 = use_c14 && c14_cnveg_cf !== nothing
 
-        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
+    # c13/c14 output arrays: use real arrays when active, else reuse the
+    # main psn arrays as inert placeholders (kernel never writes them when
+    # the corresponding flag is false).
+    c13_psnsun_to_cpool   = do_c13 ? c13_cnveg_cf.psnsun_to_cpool_patch   : cnveg_cf.psnsun_to_cpool_patch
+    c13_psnshade_to_cpool = do_c13 ? c13_cnveg_cf.psnshade_to_cpool_patch : cnveg_cf.psnshade_to_cpool_patch
+    c14_psnsun_to_cpool   = do_c14 ? c14_cnveg_cf.psnsun_to_cpool_patch   : cnveg_cf.psnsun_to_cpool_patch
+    c14_psnshade_to_cpool = do_c14 ? c14_cnveg_cf.psnshade_to_cpool_patch : cnveg_cf.psnshade_to_cpool_patch
 
-        # Convert psn from umol/m2/s -> gC/m2/s
-        # The input psn (psnsun and psnsha) are expressed per unit LAI
-        # in the sunlit and shaded canopy. Scale by laisun and laisha.
-        cnveg_cf.psnsun_to_cpool_patch[p]   = photosyns.psnsun_patch[p] * canopystate.laisun_patch[p] * 12.011e-6
-        cnveg_cf.psnshade_to_cpool_patch[p] = photosyns.psnsha_patch[p] * canopystate.laisha_patch[p] * 12.011e-6
-
-        if use_c13 && c13_cnveg_cf !== nothing
-            c13_cnveg_cf.psnsun_to_cpool_patch[p]   = photosyns.c13_psnsun_patch[p] * canopystate.laisun_patch[p] * 12.011e-6
-            c13_cnveg_cf.psnshade_to_cpool_patch[p] = photosyns.c13_psnsha_patch[p] * canopystate.laisha_patch[p] * 12.011e-6
-        end
-
-        if use_c14 && c14_cnveg_cf !== nothing
-            c14_cnveg_cf.psnsun_to_cpool_patch[p]   = photosyns.c14_psnsun_patch[p] * canopystate.laisun_patch[p] * 12.011e-6
-            c14_cnveg_cf.psnshade_to_cpool_patch[p] = photosyns.c14_psnsha_patch[p] * canopystate.laisha_patch[p] * 12.011e-6
-        end
-
-        gpp = cnveg_cf.psnsun_to_cpool_patch[p] + cnveg_cf.psnshade_to_cpool_patch[p]
-        cnveg_cf.gpp_before_downreg_patch[p] = gpp
-
-        # get the time step total maintenance respiration
-        mr = cnveg_cf.leaf_mr_patch[p] + cnveg_cf.froot_mr_patch[p]
-        if pftcon.woody[ivt] == 1.0
-            mr = mr + cnveg_cf.livestem_mr_patch[p] + cnveg_cf.livecroot_mr_patch[p]
-        elseif ivt >= npcropmin
-            if crop.croplive_patch[p]
-                reproductive_mr_tot = 0.0
-                for k in 1:nrepr
-                    reproductive_mr_tot = reproductive_mr_tot + cnveg_cf.reproductive_mr_patch[p, k]
-                end
-                mr = mr + cnveg_cf.livestem_mr_patch[p] + reproductive_mr_tot
-            end
-        end
-
-        # For Matrix solution if mr is very small set it to zero
-        if mr < -1.0e-15 && use_matrixcn
-            mr = 0.0
-        end
-
-        # carbon flux available for allocation
-        availc = gpp - mr
-        cnveg_cf.availc_patch[p] = availc
-
-        # If mr > gpp, then some mr comes from gpp, the rest from cpool (xsmr)
-        if mr > 0.0 && availc < 0.0
-            curmr = gpp
-            curmr_ratio = curmr / mr
-        else
-            curmr_ratio = 1.0
-        end
-
-        cnveg_cf.leaf_curmr_patch[p]      = cnveg_cf.leaf_mr_patch[p] * curmr_ratio
-        cnveg_cf.leaf_xsmr_patch[p]       = cnveg_cf.leaf_mr_patch[p] - cnveg_cf.leaf_curmr_patch[p]
-        cnveg_cf.froot_curmr_patch[p]     = cnveg_cf.froot_mr_patch[p] * curmr_ratio
-        cnveg_cf.froot_xsmr_patch[p]      = cnveg_cf.froot_mr_patch[p] - cnveg_cf.froot_curmr_patch[p]
-        cnveg_cf.livestem_curmr_patch[p]  = cnveg_cf.livestem_mr_patch[p] * curmr_ratio
-        cnveg_cf.livestem_xsmr_patch[p]   = cnveg_cf.livestem_mr_patch[p] - cnveg_cf.livestem_curmr_patch[p]
-        cnveg_cf.livecroot_curmr_patch[p] = cnveg_cf.livecroot_mr_patch[p] * curmr_ratio
-        cnveg_cf.livecroot_xsmr_patch[p]  = cnveg_cf.livecroot_mr_patch[p] - cnveg_cf.livecroot_curmr_patch[p]
-        for k in 1:nrepr
-            cnveg_cf.reproductive_curmr_patch[p, k] = cnveg_cf.reproductive_mr_patch[p, k] * curmr_ratio
-            cnveg_cf.reproductive_xsmr_patch[p, k]  = cnveg_cf.reproductive_mr_patch[p, k] - cnveg_cf.reproductive_curmr_patch[p, k]
-        end
-
-        # no allocation when available c is negative
-        cnveg_cf.availc_patch[p] = max(cnveg_cf.availc_patch[p], 0.0)
-
-        # test for an xsmrpool deficit
-        if cnveg_cs.xsmrpool_patch[p] < 0.0
-            xsmrpool_recover = -cnveg_cs.xsmrpool_patch[p] / (dayscrecover * SECSPDAY)
-            if xsmrpool_recover < cnveg_cf.availc_patch[p]
-                cnveg_cf.availc_patch[p] = cnveg_cf.availc_patch[p] - xsmrpool_recover
-            else
-                xsmrpool_recover = cnveg_cf.availc_patch[p]
-                cnveg_cf.availc_patch[p] = 0.0
-            end
-            cnveg_cf.xsmrpool_recover_patch[p] = xsmrpool_recover
-            cnveg_cf.cpool_to_xsmrpool_patch[p] = xsmrpool_recover
-        end
-
-    end
+    _launch!(_alloc_gpp_mr_availc_kernel!,
+        cnveg_cf.psnsun_to_cpool_patch, cnveg_cf.psnshade_to_cpool_patch,
+        c13_psnsun_to_cpool, c13_psnshade_to_cpool,
+        c14_psnsun_to_cpool, c14_psnshade_to_cpool,
+        cnveg_cf.gpp_before_downreg_patch, cnveg_cf.availc_patch,
+        cnveg_cf.leaf_curmr_patch, cnveg_cf.leaf_xsmr_patch,
+        cnveg_cf.froot_curmr_patch, cnveg_cf.froot_xsmr_patch,
+        cnveg_cf.livestem_curmr_patch, cnveg_cf.livestem_xsmr_patch,
+        cnveg_cf.livecroot_curmr_patch, cnveg_cf.livecroot_xsmr_patch,
+        cnveg_cf.reproductive_curmr_patch, cnveg_cf.reproductive_xsmr_patch,
+        cnveg_cf.xsmrpool_recover_patch, cnveg_cf.cpool_to_xsmrpool_patch,
+        mask_soilp, patch.itype,
+        photosyns.psnsun_patch, photosyns.psnsha_patch,
+        canopystate.laisun_patch, canopystate.laisha_patch,
+        photosyns.c13_psnsun_patch, photosyns.c13_psnsha_patch,
+        photosyns.c14_psnsun_patch, photosyns.c14_psnsha_patch,
+        pftcon.woody,
+        cnveg_cf.leaf_mr_patch, cnveg_cf.froot_mr_patch,
+        cnveg_cf.livestem_mr_patch, cnveg_cf.livecroot_mr_patch,
+        cnveg_cf.reproductive_mr_patch, crop.croplive_patch,
+        cnveg_cs.xsmrpool_patch,
+        do_c13, do_c14, use_matrixcn,
+        dayscrecover, npcropmin, nrepr)
 
     return nothing
 end
@@ -313,7 +369,76 @@ Calculate c_allometry and n_allometry terms based on allocation fractions.
 
 Ported from `calc_allometry` in `CNAllocationMod.F90`.
 """
-function calc_allometry!(mask_soilp::BitVector, bounds::UnitRange{Int},
+@kernel function _alloc_allometry_kernel!(
+        c_allometry, n_allometry,
+        @Const(mask_soilp), @Const(itype),
+        @Const(froot_leaf), @Const(croot_stem), @Const(stem_leaf),
+        @Const(annsum_npp), @Const(flivewd), @Const(grperc),
+        @Const(leafcn), @Const(frootcn), @Const(livewdcn), @Const(deadwdcn),
+        @Const(woody), @Const(graincn),
+        @Const(aroot), @Const(aleaf), @Const(astem), @Const(arepr),
+        use_fun::Bool, npcropmin::Int, nrepr::Int)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+
+        f1 = froot_leaf[ivt]
+        f2 = croot_stem[ivt]
+
+        # modified wood allocation to be 2.2 at npp=800 gC/m2/yr, 0.2 at npp=0
+        if stem_leaf[ivt] == -1.0
+            f3 = (2.7 / (1.0 + exp(-0.004 * (annsum_npp[p] - 300.0)))) - 0.4
+        else
+            f3 = stem_leaf[ivt]
+        end
+
+        f4  = flivewd[ivt]
+        if ivt >= npcropmin
+            g1 = 0.25
+        else
+            g1 = grperc[ivt]
+        end
+        cnl  = leafcn[ivt]
+        cnfr = frootcn[ivt]
+        cnlw = livewdcn[ivt]
+        cndw = deadwdcn[ivt]
+
+        # based on available C, use constant allometric relationships to
+        # determine N requirements
+        if !use_fun
+            g1a = g1
+        else
+            g1a = 0.0
+        end
+
+        if woody[ivt] == 1.0
+            c_allometry[p] = (1.0 + g1a) * (1.0 + f1 + f3 * (1.0 + f2))
+            n_allometry[p] = 1.0 / cnl + f1 / cnfr +
+                (f3 * f4 * (1.0 + f2)) / cnlw +
+                (f3 * (1.0 - f4) * (1.0 + f2)) / cndw
+        elseif ivt >= npcropmin  # skip generic crops
+            cng = graincn[ivt]
+            f1 = aroot[p] / aleaf[p]
+            f3 = astem[p] / aleaf[p]
+            f5_tot   = 0.0
+            f5_n_tot = 0.0
+            for k in 1:nrepr
+                f5k = arepr[p, k] / aleaf[p]
+                f5_tot   = f5_tot + f5k
+                f5_n_tot = f5_n_tot + f5k / cng
+            end
+            c_allometry[p] = (1.0 + g1a) * (1.0 + f1 + f5_tot + f3 * (1.0 + f2))
+            n_allometry[p] = 1.0 / cnl + f1 / cnfr + f5_n_tot +
+                (f3 * f4 * (1.0 + f2)) / cnlw +
+                (f3 * (1.0 - f4) * (1.0 + f2)) / cndw
+        else
+            c_allometry[p] = 1.0 + g1a + f1 + f1 * g1a
+            n_allometry[p] = 1.0 / cnl + f1 / cnfr
+        end
+    end
+end
+
+function calc_allometry!(mask_soilp::AbstractVector{Bool}, bounds::UnitRange{Int},
                           pftcon::PftConAllocation,
                           cn_shared_params::CNSharedParamsData,
                           patch::PatchData,
@@ -324,69 +449,16 @@ function calc_allometry!(mask_soilp::BitVector, bounds::UnitRange{Int},
 
     use_fun = cn_shared_params.use_fun
 
-    for p in bounds
-        mask_soilp[p] || continue
-
-        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        f1 = pftcon.froot_leaf[ivt]
-        f2 = pftcon.croot_stem[ivt]
-
-        # modified wood allocation to be 2.2 at npp=800 gC/m2/yr, 0.2 at npp=0
-        if pftcon.stem_leaf[ivt] == -1.0
-            f3 = (2.7 / (1.0 + exp(-0.004 * (cnveg_cf.annsum_npp_patch[p] - 300.0)))) - 0.4
-        else
-            f3 = pftcon.stem_leaf[ivt]
-        end
-
-        f4  = pftcon.flivewd[ivt]
-        if ivt >= npcropmin
-            g1 = 0.25
-        else
-            g1 = pftcon.grperc[ivt]
-        end
-        cnl  = pftcon.leafcn[ivt]
-        cnfr = pftcon.frootcn[ivt]
-        cnlw = pftcon.livewdcn[ivt]
-        cndw = pftcon.deadwdcn[ivt]
-
-        # based on available C, use constant allometric relationships to
-        # determine N requirements
-        if !use_fun
-            g1a = g1
-        else
-            g1a = 0.0
-        end
-
-        if pftcon.woody[ivt] == 1.0
-            cnveg_state.c_allometry_patch[p] = (1.0 + g1a) * (1.0 + f1 + f3 * (1.0 + f2))
-            cnveg_state.n_allometry_patch[p] = 1.0 / cnl + f1 / cnfr +
-                (f3 * f4 * (1.0 + f2)) / cnlw +
-                (f3 * (1.0 - f4) * (1.0 + f2)) / cndw
-        elseif ivt >= npcropmin  # skip generic crops
-            cng = pftcon.graincn[ivt]
-            f1 = cnveg_state.aroot_patch[p] / cnveg_state.aleaf_patch[p]
-            f3 = cnveg_state.astem_patch[p] / cnveg_state.aleaf_patch[p]
-            f5 = Vector{FT}(undef, nrepr)
-            for k in 1:nrepr
-                f5[k] = cnveg_state.arepr_patch[p, k] / cnveg_state.aleaf_patch[p]
-            end
-            f5_tot   = 0.0
-            f5_n_tot = 0.0
-            for k in 1:nrepr
-                f5_tot   = f5_tot + f5[k]
-                f5_n_tot = f5_n_tot + f5[k] / cng
-            end
-            cnveg_state.c_allometry_patch[p] = (1.0 + g1a) * (1.0 + f1 + f5_tot + f3 * (1.0 + f2))
-            cnveg_state.n_allometry_patch[p] = 1.0 / cnl + f1 / cnfr + f5_n_tot +
-                (f3 * f4 * (1.0 + f2)) / cnlw +
-                (f3 * (1.0 - f4) * (1.0 + f2)) / cndw
-        else
-            cnveg_state.c_allometry_patch[p] = 1.0 + g1a + f1 + f1 * g1a
-            cnveg_state.n_allometry_patch[p] = 1.0 / cnl + f1 / cnfr
-        end
-
-    end
+    _launch!(_alloc_allometry_kernel!,
+        cnveg_state.c_allometry_patch, cnveg_state.n_allometry_patch,
+        mask_soilp, patch.itype,
+        pftcon.froot_leaf, pftcon.croot_stem, pftcon.stem_leaf,
+        cnveg_cf.annsum_npp_patch, pftcon.flivewd, pftcon.grperc,
+        pftcon.leafcn, pftcon.frootcn, pftcon.livewdcn, pftcon.deadwdcn,
+        pftcon.woody, pftcon.graincn,
+        cnveg_state.aroot_patch, cnveg_state.aleaf_patch,
+        cnveg_state.astem_patch, cnveg_state.arepr_patch,
+        use_fun, npcropmin, nrepr)
 
     return nothing
 end
