@@ -251,9 +251,11 @@ function n_leaching!(
 
     # --- Allocate local work arrays ---
     FT = eltype(h2osoi_liq)
-    tot_water     = zeros(FT, last(bounds))
-    surface_water = zeros(FT, last(bounds))
-    drain_tot     = zeros(FT, last(bounds))
+    # device-resident scratch (similar(h2osoi_liq,…) lands on the input backend;
+    # zeroed to match the original zeros() — byte-identical on CPU)
+    tot_water     = fill!(similar(h2osoi_liq, FT, last(bounds)), zero(FT))
+    surface_water = fill!(similar(h2osoi_liq, FT, last(bounds)), zero(FT))
+    drain_tot     = fill!(similar(h2osoi_liq, FT, last(bounds)), zero(FT))
 
     # --- Select soluble fraction based on mode (config flag host-resolved) ---
     if !use_nitrif_denitrif

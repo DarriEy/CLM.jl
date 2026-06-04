@@ -77,8 +77,8 @@ Corresponds to `CNNDeposition` in the Fortran source.
 """
 function n_deposition!(
     nf::SoilBiogeochemNitrogenFluxData;
-    forc_ndep::Vector{<:Real},
-    col_gridcell::Vector{Int},
+    forc_ndep::AbstractVector{<:Real},
+    col_gridcell::AbstractVector{<:Integer},
     bounds::UnitRange{Int})
 
     isempty(bounds) && return nothing
@@ -122,9 +122,9 @@ Corresponds to `CNFreeLivingFixation` in the Fortran source.
 function n_free_living_fixation!(
     nf::SoilBiogeochemNitrogenFluxData,
     params::NDynamicsParams;
-    mask_soilc::BitVector,
+    mask_soilc::AbstractVector{Bool},
     bounds::UnitRange{Int},
-    AnnET::Vector{<:Real},
+    AnnET::AbstractVector{<:Real},
     dayspyr::Real)
 
     secs_per_year = dayspyr * 24.0 * 3600.0
@@ -214,9 +214,9 @@ Corresponds to `CNNFixation` in the Fortran source.
 function n_fixation!(
     nf::SoilBiogeochemNitrogenFluxData,
     cf::CNVegCarbonFluxData;
-    mask_soilc::BitVector,
+    mask_soilc::AbstractVector{Bool},
     bounds::UnitRange{Int},
-    col_is_fates::Vector{Bool},
+    col_is_fates::AbstractVector{Bool},
     dayspyr::Real,
     nfix_timeconst::Real,
     use_fun::Bool)
@@ -283,10 +283,10 @@ ndyn_p2c_scatter!(col_arr, mask_p, pcol, patch_arr, wtcol, pmin::Int, pmax::Int)
 function n_fert!(
     soilbgc_nf::SoilBiogeochemNitrogenFluxData,
     cnveg_nf::CNVegNitrogenFluxData;
-    mask_soilc::BitVector,
+    mask_soilc::AbstractVector{Bool},
     bounds::UnitRange{Int},
     patch::PatchData,
-    mask_soilp::BitVector,
+    mask_soilp::AbstractVector{Bool},
     bounds_p::UnitRange{Int})
 
     fert          = cnveg_nf.fert_patch
@@ -409,9 +409,9 @@ function n_soyfix!(
     cnveg_state::CNVegStateData,
     crop::CropData,
     wdiag::WaterDiagnosticBulkData;
-    mask_soilc::BitVector,
+    mask_soilc::AbstractVector{Bool},
     bounds::UnitRange{Int},
-    mask_soilp::BitVector,
+    mask_soilp::AbstractVector{Bool},
     bounds_p::UnitRange{Int},
     patch::PatchData,
     ntmp_soybean::Int,
