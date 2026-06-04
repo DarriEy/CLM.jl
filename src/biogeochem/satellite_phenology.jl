@@ -36,14 +36,19 @@ for LAI, SAI, and vegetation heights.
 
 Ported from module-level variables in `SatellitePhenologyMod.F90`.
 """
-Base.@kwdef mutable struct SatellitePhenologyData{FT<:Real}
+Base.@kwdef mutable struct SatellitePhenologyData{FT<:Real,
+                                                  V<:AbstractVector{FT},
+                                                  M<:AbstractMatrix{FT}}
     InterpMonths1::Int = -999                                          # saved month index
-    timwt::Vector{Float64} = zeros(2)                                  # time weights for month 1 and month 2
-    mlai2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # lai for interpolation (np × 2)
-    msai2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # sai for interpolation (np × 2)
-    mhvt2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # top vegetation height for interpolation (np × 2)
-    mhvb2t::Matrix{FT} = Matrix{Float64}(undef, 0, 0)            # bottom vegetation height for interpolation (np × 2)
+    timwt::V = zeros(2)                                                # time weights for month 1 and month 2
+    mlai2t::M = Matrix{Float64}(undef, 0, 0)            # lai for interpolation (np × 2)
+    msai2t::M = Matrix{Float64}(undef, 0, 0)            # sai for interpolation (np × 2)
+    mhvt2t::M = Matrix{Float64}(undef, 0, 0)            # top vegetation height for interpolation (np × 2)
+    mhvb2t::M = Matrix{Float64}(undef, 0, 0)            # bottom vegetation height for interpolation (np × 2)
 end
+SatellitePhenologyData{FT}(; kwargs...) where {FT<:Real} =
+    SatellitePhenologyData{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure SatellitePhenologyData
 
 # ---------------------------------------------------------------------------
 # satellite_phenology_init! — Allocate and initialize
@@ -109,92 +114,72 @@ as used in Lombardozzi et al. (2018) GRL 45(18), 9889-9897.
 
 Ported from `SatellitePhenology` in `SatellitePhenologyMod.F90`.
 """
-function satellite_phenology!(sp::SatellitePhenologyData,
-                               canopystate::CanopyStateData,
-                               waterdiagbulk::WaterDiagnosticBulkData,
-                               patch::PatchData,
-                               mask_patch::BitVector,
-                               bounds_patch::UnitRange{Int};
-                               noveg::Int = 0,
-                               nbrdlf_dcd_brl_shrub::Int = 11,
-                               use_lai_streams::Bool = false,
-                               use_fates_sp::Bool = false)
+# Per-patch satellite-phenology LAI/SAI/height interpolation + snow burial.
+# Fully per-patch independent (own-index reads/writes; column gather of
+# frac_sno/snow_depth). Float64 literals -> T = eltype(tlai) for Metal.
+@kernel function _satphen_kernel!(tlai, tsai, htop, hbot, elai, esai,
+        frac_veg_nosno_alb,
+        @Const(mask_patch), @Const(column), @Const(itype),
+        @Const(frac_sno), @Const(snow_depth),
+        @Const(timwt), @Const(mlai2t), @Const(msai2t), @Const(mhvt2t), @Const(mhvb2t),
+        noveg::Int, nbrdlf_dcd_brl_shrub::Int, use_lai_streams::Bool, use_fates_sp::Bool)
+    T = eltype(tlai)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        c = column[p]
 
-    # Aliases matching Fortran associate block
-    frac_sno           = waterdiagbulk.frac_sno_col
-    snow_depth         = waterdiagbulk.snow_depth_col
-    tlai               = canopystate.tlai_patch
-    tsai               = canopystate.tsai_patch
-    elai               = canopystate.elai_patch
-    esai               = canopystate.esai_patch
-    htop               = canopystate.htop_patch
-    hbot               = canopystate.hbot_patch
-    frac_veg_nosno_alb = canopystate.frac_veg_nosno_alb_patch
-
-    timwt  = sp.timwt
-    mlai2t = sp.mlai2t
-    msai2t = sp.msai2t
-    mhvt2t = sp.mhvt2t
-    mhvb2t = sp.mhvb2t
-
-    # Note: lai_interp (use_lai_streams) is not ported; skip that call here.
-    # When lai_streams infrastructure is ported, add:
-    #   if use_lai_streams
-    #       lai_interp!(bounds_patch, canopystate)
-    #   end
-
-    for p in bounds_patch
-        mask_patch[p] || continue
-        c = patch.column[p]
-
-        # Interpolate leaf area index, stem area index, and vegetation heights
-        # between two monthly values
         if !use_lai_streams
             tlai[p] = timwt[1] * mlai2t[p, 1] + timwt[2] * mlai2t[p, 2]
         end
-
         tsai[p] = timwt[1] * msai2t[p, 1] + timwt[2] * msai2t[p, 2]
         htop[p] = timwt[1] * mhvt2t[p, 1] + timwt[2] * mhvt2t[p, 2]
         hbot[p] = timwt[1] * mhvb2t[p, 1] + timwt[2] * mhvb2t[p, 2]
 
-        # Adjust lai and sai for burying by snow. If exposed lai and sai
-        # are less than 0.05, set equal to zero to prevent numerical
-        # problems associated with very small lai and sai.
-
-        # Snow burial fraction for short vegetation (e.g. grasses, crops)
-        # changes with vegetation height. Accounts for a 20% bending factor.
-        # NOTE: This snow burial code is duplicated in CNVegStructUpdateMod.
-
-        if patch.itype[p] > noveg && patch.itype[p] <= nbrdlf_dcd_brl_shrub
-            ol = min(max(snow_depth[c] - hbot[p], 0.0), htop[p] - hbot[p])
-            fb = 1.0 - ol / max(1.0e-06, htop[p] - hbot[p])
+        if itype[p] > noveg && itype[p] <= nbrdlf_dcd_brl_shrub
+            ol = min(max(snow_depth[c] - hbot[p], zero(T)), htop[p] - hbot[p])
+            fb = one(T) - ol / max(T(1.0e-06), htop[p] - hbot[p])
         else
-            fb = 1.0 - (max(min(snow_depth[c], max(0.05, htop[p] * 0.8)), 0.0) /
-                         max(0.05, htop[p] * 0.8))
+            fb = one(T) - (max(min(snow_depth[c], max(T(0.05), htop[p] * T(0.8))), zero(T)) /
+                         max(T(0.05), htop[p] * T(0.8)))
         end
 
-        # Area weight by snow covered fraction
         if !use_fates_sp
-            # Do not set these in FATES_SP mode as they turn on the 'vegsol' filter
-            # and also are duplicated by the FATES variables
-            elai[p] = max(tlai[p] * (1.0 - frac_sno[c]) + tlai[p] * fb * frac_sno[c], 0.0)
-            esai[p] = max(tsai[p] * (1.0 - frac_sno[c]) + tsai[p] * fb * frac_sno[c], 0.0)
-            if elai[p] < 0.05
-                elai[p] = 0.0
+            elai[p] = max(tlai[p] * (one(T) - frac_sno[c]) + tlai[p] * fb * frac_sno[c], zero(T))
+            esai[p] = max(tsai[p] * (one(T) - frac_sno[c]) + tsai[p] * fb * frac_sno[c], zero(T))
+            if elai[p] < T(0.05)
+                elai[p] = zero(T)
             end
-            if esai[p] < 0.05
-                esai[p] = 0.0
+            if esai[p] < T(0.05)
+                esai[p] = zero(T)
             end
-
-            # Fraction of vegetation free of snow
-            if (elai[p] + esai[p]) >= 0.05
+            if (elai[p] + esai[p]) >= T(0.05)
                 frac_veg_nosno_alb[p] = 1
             else
                 frac_veg_nosno_alb[p] = 0
             end
         end
     end
+end
 
+function satellite_phenology!(sp::SatellitePhenologyData,
+                               canopystate::CanopyStateData,
+                               waterdiagbulk::WaterDiagnosticBulkData,
+                               patch::PatchData,
+                               mask_patch::AbstractVector{Bool},
+                               bounds_patch::UnitRange{Int};
+                               noveg::Int = 0,
+                               nbrdlf_dcd_brl_shrub::Int = 11,
+                               use_lai_streams::Bool = false,
+                               use_fates_sp::Bool = false)
+    # Note: lai_interp (use_lai_streams) is not ported; skip that call here.
+    _launch!(_satphen_kernel!,
+        canopystate.tlai_patch, canopystate.tsai_patch, canopystate.htop_patch,
+        canopystate.hbot_patch, canopystate.elai_patch, canopystate.esai_patch,
+        canopystate.frac_veg_nosno_alb_patch,
+        mask_patch, patch.column, patch.itype,
+        waterdiagbulk.frac_sno_col, waterdiagbulk.snow_depth_col,
+        sp.timwt, sp.mlai2t, sp.msai2t, sp.mhvt2t, sp.mhvb2t,
+        noveg, nbrdlf_dcd_brl_shrub, use_lai_streams, use_fates_sp)
     return nothing
 end
 
@@ -265,28 +250,37 @@ Only vegetated patches get nonzero values; non-vegetated patches get 0.
 
 Ported from `readAnnualVegetation` in `SatellitePhenologyMod.F90`.
 """
-function read_annual_vegetation!(canopystate::CanopyStateData,
-                                  patch::PatchData,
-                                  bounds_patch::UnitRange{Int};
-                                  monthly_lai::Array{<:Real,3},
-                                  noveg::Int = 0,
-                                  maxveg::Int = 78)
-    annlai = canopystate.annlai_patch
-
-    for k in 1:12
-        for p in bounds_patch
-            g = patch.gridcell[p]
-            if patch.itype[p] != noveg
-                # monthly_lai is indexed [g, l+1, k] since Julia is 1-based
-                # PFT l in Fortran (0:maxveg) maps to index l+1 in Julia
-                l = patch.itype[p]
+# Per-patch annual-LAI read (internal k=1:12 loop in-thread). No mask: all
+# patches in [pmin,pmax]. monthly_lai is [g, l+1, k] (gather).
+@kernel function _satphen_annlai_kernel!(annlai, @Const(gridcell), @Const(itype),
+        @Const(monthly_lai), noveg::Int, pmin::Int, pmax::Int)
+    T = eltype(annlai)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        g = gridcell[p]
+        if itype[p] != noveg
+            l = itype[p]
+            for k in 1:12
                 annlai[p, k] = monthly_lai[g, l + 1, k]
-            else
-                annlai[p, k] = 0.0
+            end
+        else
+            for k in 1:12
+                annlai[p, k] = zero(T)
             end
         end
     end
+end
 
+function read_annual_vegetation!(canopystate::CanopyStateData,
+                                  patch::PatchData,
+                                  bounds_patch::UnitRange{Int};
+                                  monthly_lai::AbstractArray{<:Real,3},
+                                  noveg::Int = 0,
+                                  maxveg::Int = 78)
+    _launch!(_satphen_annlai_kernel!, canopystate.annlai_patch,
+        patch.gridcell, patch.itype, monthly_lai, noveg,
+        first(bounds_patch), last(bounds_patch);
+        ndrange = length(patch.itype))
     return nothing
 end
 
@@ -311,47 +305,50 @@ After reading, also computes `mlaidiff_patch` = mlai2t(:,1) - mlai2t(:,2).
 
 Ported from `readMonthlyVegetation` in `SatellitePhenologyMod.F90`.
 """
-function read_monthly_vegetation!(sp::SatellitePhenologyData,
-                                   canopystate::CanopyStateData,
-                                   patch::PatchData,
-                                   bounds_patch::UnitRange{Int};
-                                   monthly_lai::Array{<:Real,3},
-                                   monthly_sai::Array{<:Real,3},
-                                   monthly_height_top::Array{<:Real,3},
-                                   monthly_height_bot::Array{<:Real,3},
-                                   months::Tuple{Int,Int},
-                                   noveg::Int = 0,
-                                   maxveg::Int = 78)
-
-    mlai2t = sp.mlai2t
-    msai2t = sp.msai2t
-    mhvt2t = sp.mhvt2t
-    mhvb2t = sp.mhvb2t
-
-    for k in 1:2
-        mk = k == 1 ? months[1] : months[2]
-
-        for p in bounds_patch
-            g = patch.gridcell[p]
-            if patch.itype[p] != noveg
-                l = patch.itype[p]
+# Per-patch two-month veg read + mlaidiff (internal k=1:2 in-thread). months
+# passed as 2 Int scalars (m1,m2). monthly_* are [g, l+1, month] (gather).
+@kernel function _satphen_monthly_kernel!(mlai2t, msai2t, mhvt2t, mhvb2t, mlaidiff,
+        @Const(gridcell), @Const(itype),
+        @Const(monthly_lai), @Const(monthly_sai), @Const(monthly_height_top),
+        @Const(monthly_height_bot), m1::Int, m2::Int, noveg::Int, pmin::Int, pmax::Int)
+    T = eltype(mlai2t)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        g = gridcell[p]
+        for k in 1:2
+            mk = k == 1 ? m1 : m2
+            if itype[p] != noveg
+                l = itype[p]
                 mlai2t[p, k] = monthly_lai[g, l + 1, mk]
                 msai2t[p, k] = monthly_sai[g, l + 1, mk]
                 mhvt2t[p, k] = monthly_height_top[g, l + 1, mk]
                 mhvb2t[p, k] = monthly_height_bot[g, l + 1, mk]
             else
-                mlai2t[p, k] = 0.0
-                msai2t[p, k] = 0.0
-                mhvt2t[p, k] = 0.0
-                mhvb2t[p, k] = 0.0
+                mlai2t[p, k] = zero(T)
+                msai2t[p, k] = zero(T)
+                mhvt2t[p, k] = zero(T)
+                mhvb2t[p, k] = zero(T)
             end
         end
+        mlaidiff[p] = mlai2t[p, 1] - mlai2t[p, 2]
     end
+end
 
-    # Compute mlaidiff
-    for p in bounds_patch
-        canopystate.mlaidiff_patch[p] = mlai2t[p, 1] - mlai2t[p, 2]
-    end
-
+function read_monthly_vegetation!(sp::SatellitePhenologyData,
+                                   canopystate::CanopyStateData,
+                                   patch::PatchData,
+                                   bounds_patch::UnitRange{Int};
+                                   monthly_lai::AbstractArray{<:Real,3},
+                                   monthly_sai::AbstractArray{<:Real,3},
+                                   monthly_height_top::AbstractArray{<:Real,3},
+                                   monthly_height_bot::AbstractArray{<:Real,3},
+                                   months::Tuple{Int,Int},
+                                   noveg::Int = 0,
+                                   maxveg::Int = 78)
+    _launch!(_satphen_monthly_kernel!, sp.mlai2t, sp.msai2t, sp.mhvt2t, sp.mhvb2t,
+        canopystate.mlaidiff_patch, patch.gridcell, patch.itype,
+        monthly_lai, monthly_sai, monthly_height_top, monthly_height_bot,
+        months[1], months[2], noveg, first(bounds_patch), last(bounds_patch);
+        ndrange = length(patch.itype))
     return nothing
 end
