@@ -115,7 +115,10 @@ function cn_annual_update!(mask_bgc_soilc::AbstractVector{Bool},
     # Vector{Bool} over all columns; only BGC soil, non-FATES columns inside
     # bounds_c can trigger end-of-year. Loop1 (per-column kernel) writes it;
     # loop2 (per-patch kernel) reads end_of_year[col[p]].
-    end_of_year = fill(false, length(mask_bgc_soilc))
+    # device-resident scratch (similar() off a device-resident column Bool array)
+    # so the eoy/patch kernels launch on the same backend as their inputs; a bare
+    # fill(false,…) is host → would force the CPU backend.
+    end_of_year = fill!(similar(col.is_fates, Bool, length(mask_bgc_soilc)), false)
 
     # Convert Float64 scalar args to the working precision so no double is
     # materialized inside the kernels on a Float32-only backend (Metal).
@@ -141,30 +144,34 @@ function cn_annual_update!(mask_bgc_soilc::AbstractVector{Bool},
              mask_bgc_vegp, patch.column, end_of_year, col.is_fates,
              FTp(dt), first(bounds_p), last(bounds_p))
 
-    # any_vegp gates the p2c averaging: true iff some in-range, non-FATES BGC
-    # veg patch sits on an end-of-year column. Resolved on the host.
-    any_vegp = false
-    for p in bounds_p
-        mask_bgc_vegp[p] || continue
-        c = patch.column[p]
-        if end_of_year[c] && !col.is_fates[c]
-            any_vegp = true
-            break
-        end
-    end
-
     # --- Patch-to-column averaging for end-of-year columns ---
-    if any_vegp
-        # p2c_1d_filter! expects a BitVector mask; end_of_year is a Vector{Bool}
-        # (kernel-writable). Convert once for the (host-side) averaging helper.
-        eoy_mask = BitVector(end_of_year)
+    # The p2c_1d_filter! kernel is masked by end_of_year per column, so when no
+    # column is at end-of-year both calls are no-ops. On the CPU we preserve the
+    # original `any_vegp` short-circuit (and its BitVector mask) byte-for-byte;
+    # on the device we skip the scalar-indexing scan and always launch the masked
+    # p2c (numerically identical), keeping the whole function on the backend.
+    if end_of_year isa Array
+        any_vegp = false
+        for p in bounds_p
+            mask_bgc_vegp[p] || continue
+            c = patch.column[p]
+            if end_of_year[c] && !col.is_fates[c]
+                any_vegp = true
+                break
+            end
+        end
+        if any_vegp
+            eoy_mask = BitVector(end_of_year)
+            p2c_1d_filter!(cnveg_carbonflux.annsum_npp_col,
+                            cnveg_carbonflux.annsum_npp_patch, eoy_mask, col, patch)
+            p2c_1d_filter!(cnveg_state.annavg_t2m_col,
+                            cnveg_state.annavg_t2m_patch, eoy_mask, col, patch)
+        end
+    else
         p2c_1d_filter!(cnveg_carbonflux.annsum_npp_col,
-                        cnveg_carbonflux.annsum_npp_patch,
-                        eoy_mask, col, patch)
-
+                        cnveg_carbonflux.annsum_npp_patch, end_of_year, col, patch)
         p2c_1d_filter!(cnveg_state.annavg_t2m_col,
-                        cnveg_state.annavg_t2m_patch,
-                        eoy_mask, col, patch)
+                        cnveg_state.annavg_t2m_patch, end_of_year, col, patch)
     end
 
     return nothing

@@ -477,13 +477,16 @@ function calc_crop_allocation_fractions!(mask_pcropp::AbstractVector{Bool}, boun
 
     # Hoisted error guard: the original loop throws on an unexpected crop_phase
     # code for a live crop. The kernel below is error-free, so replicate the
-    # check on the host first (never fires for valid data).
-    for p in bounds
-        mask_pcropp[p] || continue
-        crop.croplive_patch[p] || continue
-        cp = crop_phase_out[p]
-        if cp != cphase_leafemerge_in && cp != cphase_grainfill_in && cp != cphase_planted_in
-            error("Unexpected crop_phase: $(cp) at patch $p")
+    # check on the host first (never fires for valid data). Gated to the CPU
+    # (`crop_phase_out isa Array`) so the device skips the scalar-indexing scan.
+    if crop_phase_out isa Array
+        for p in bounds
+            mask_pcropp[p] || continue
+            crop.croplive_patch[p] || continue
+            cp = crop_phase_out[p]
+            if cp != cphase_leafemerge_in && cp != cphase_grainfill_in && cp != cphase_planted_in
+                error("Unexpected crop_phase: $(cp) at patch $p")
+            end
         end
     end
 

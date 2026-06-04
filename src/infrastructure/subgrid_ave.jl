@@ -280,17 +280,31 @@ column mask. For each active column in the mask, averages over its patches.
 
 Ported from `p2c_1d_filter` in `subgridAveMod.F90`.
 """
-function p2c_1d_filter!(colarr::Vector{<:Real}, patcharr::Vector{<:Real},
-                        mask_c::BitVector, col::ColumnData, pch::PatchData)
-    for c in eachindex(mask_c)
-        mask_c[c] || continue
-        colarr[c] = 0.0
-        for p in col.patchi[c]:col.patchf[c]
-            if pch.active[p]
-                colarr[c] = colarr[c] + patcharr[p] * pch.wtcol[p]
+# One thread per column: gather (active-weighted) the column's patch range into
+# colarr[c]. Each column owns colarr[c] (no scatter/race). Local `acc` written
+# once is byte-identical to the host `colarr[c] += ...` chain and avoids the
+# --check-bounds mis-lowering of repeated `out[c]+=`.
+@kernel function _p2c_1d_filter_kernel!(colarr, @Const(patcharr), @Const(mask_c),
+        @Const(active), @Const(wtcol), @Const(patchi), @Const(patchf), n::Int)
+    c = @index(Global)
+    @inbounds if c <= n && mask_c[c]
+        T = eltype(colarr)
+        acc = zero(T)
+        for p in patchi[c]:patchf[c]
+            if active[p]
+                acc += patcharr[p] * wtcol[p]
             end
         end
+        colarr[c] = acc
     end
+end
+
+function p2c_1d_filter!(colarr::AbstractVector{<:Real}, patcharr::AbstractVector{<:Real},
+                        mask_c::AbstractVector{Bool}, col::ColumnData, pch::PatchData)
+    n = length(mask_c)
+    n == 0 && return nothing
+    _launch!(_p2c_1d_filter_kernel!, colarr, patcharr, mask_c,
+             pch.active, pch.wtcol, col.patchi, col.patchf, n; ndrange = length(colarr))
     return nothing
 end
 

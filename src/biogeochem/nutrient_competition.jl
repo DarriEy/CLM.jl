@@ -758,7 +758,9 @@ function calc_plant_nitrogen_demand!(mask_p::AbstractVector{Bool}, bounds::UnitR
         # Compute crop phase for all patches in bounds (host-side helper,
         # already GPU-capable; the kernel below reads its output array).
         FT = eltype(cnveg_nf.plant_ndemand_patch)
-        crop_phase_vals = zeros(FT, length(mask_p))
+        # device-resident scratch via similar() (a bare zeros(...) is host →
+        # would force the CPU backend for crop_phase! and the grainfill kernel).
+        crop_phase_vals = fill!(similar(cnveg_nf.plant_ndemand_patch, FT, length(mask_p)), zero(FT))
         crop_phase!(mask_p, crop, cnveg_state, crop_phase_vals)
 
         _launch!(_npdemand_grainfill_kernel!, cnveg_state.grain_flag_patch,
