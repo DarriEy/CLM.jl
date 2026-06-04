@@ -737,10 +737,10 @@ function cnfire_area_li2014!(
     cnfire_params::CNFireParams,
     pftcon::PftConFireBase,
     # Masks and bounds
-    mask_soilc::BitVector,
-    mask_soilp::BitVector,
-    mask_exposedveg::BitVector,
-    mask_noexposedveg::BitVector,
+    mask_soilc::AbstractVector{Bool},
+    mask_soilp::AbstractVector{Bool},
+    mask_exposedveg::AbstractVector{Bool},
+    mask_noexposedveg::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     # Core type data
@@ -749,29 +749,29 @@ function cnfire_area_li2014!(
     grc::GridcellData,
     # Soil state (for root wetness)
     soilstate::SoilStateData,
-    h2osoi_vol_col::Matrix{<:Real},
+    h2osoi_vol_col::AbstractMatrix{<:Real},
     # CN Veg State and Carbon State
     cnveg_state::CNVegStateData,
     cnveg_cs::CNVegCarbonStateData,
     # Decomposition data
     decomp_cascade_con::DecompCascadeConData,
     # Input arrays
-    totlitc_col::Vector{<:Real},
-    decomp_cpools_vr_col::Array{<:Real,3},
-    t_soi17cm_col::Vector{<:Real};
+    totlitc_col::AbstractVector{<:Real},
+    decomp_cpools_vr_col::AbstractArray{<:Real,3},
+    t_soi17cm_col::AbstractVector{<:Real};
     # Atmospheric forcing (keyword args)
-    forc_rh_grc::Vector{<:Real} = Float64[],
-    forc_wind_grc::Vector{<:Real} = Float64[],
-    forc_t_col::Vector{<:Real} = Float64[],
-    forc_rain_col::Vector{<:Real} = Float64[],
-    forc_snow_col::Vector{<:Real} = Float64[],
-    prec60_patch::Vector{<:Real} = Float64[],
-    prec10_patch::Vector{<:Real} = Float64[],
+    forc_rh_grc::AbstractVector{<:Real} = Float64[],
+    forc_wind_grc::AbstractVector{<:Real} = Float64[],
+    forc_t_col::AbstractVector{<:Real} = Float64[],
+    forc_rain_col::AbstractVector{<:Real} = Float64[],
+    forc_snow_col::AbstractVector{<:Real} = Float64[],
+    prec60_patch::AbstractVector{<:Real} = Float64[],
+    prec10_patch::AbstractVector{<:Real} = Float64[],
     # Saturated runoff
-    fsat_col::Vector{<:Real} = Float64[],
+    fsat_col::AbstractVector{<:Real} = Float64[],
     # Water diagnostic
-    wf_col::Vector{<:Real} = Float64[],
-    wf2_col::Vector{<:Real} = Float64[],
+    wf_col::AbstractVector{<:Real} = Float64[],
+    wf2_col::AbstractVector{<:Real} = Float64[],
     # Time/date
     dt::Real = 1800.0,
     dayspyr::Real = 365.0,
@@ -878,11 +878,13 @@ function cnfire_area_li2014!(
     # --- Local arrays ---
     nc = length(bounds_c)
     FT = eltype(totvegc)
-    btran_col = zeros(FT, last(bounds_c))
+    # device-resident scratch (similar(totvegc,…) lands on the input's backend;
+    # zeroed to match the original zeros() init — byte-identical on CPU)
+    btran_col = fill!(similar(totvegc, FT, last(bounds_c)), zero(FT))
 
     # Temporary arrays for p2c results
-    prec60_col = zeros(FT, last(bounds_c))
-    prec10_col = zeros(FT, last(bounds_c))
+    prec60_col = fill!(similar(totvegc, FT, last(bounds_c)), zero(FT))
+    prec10_col = fill!(similar(totvegc, FT, last(bounds_c)), zero(FT))
 
     # --- Patch to column averaging ---
     p2c!(prec10_col, prec10, patch, mask_soilc, bounds_c, bounds_p)
@@ -960,7 +962,8 @@ function cnfire_area_li2014!(
     # --- Estimate annual decreased fractional coverage of BET+BDT ---
     if transient_landcover
         _launch!(_firea_lfc_kernel!, lfc, mask_soilc, dtrotr_col,
-                 date_is_jan1_0, date_is_jan1_dt, dayspyr, SECSPDAY, dt)
+                 date_is_jan1_0, date_is_jan1_dt,
+                 eltype(lfc)(dayspyr), eltype(lfc)(SECSPDAY), eltype(lfc)(dt))
     end
 
     # --- Calculate burned area fraction in cropland ---
@@ -973,17 +976,21 @@ function cnfire_area_li2014!(
              patch.column, col.gridcell, patch.itype, patch.wtcol,
              forc_t, abm_lf, forc_rain, forc_snow, fuelc_crop, gdp_lf,
              fire_li2014.forc_hdm,
-             nc4_grass, kmo, kda, TFRZ, RPI, lfuel, ufuel, cropfire_a1, SECSPHR;
+             nc4_grass, kmo, kda,
+             eltype(baf_crop)(TFRZ), eltype(baf_crop)(RPI), eltype(baf_crop)(lfuel),
+             eltype(baf_crop)(ufuel), eltype(baf_crop)(cropfire_a1), eltype(baf_crop)(SECSPHR);
              ndrange = length(mask_soilp))
 
     # --- Calculate peatland fire (kernelized; per-column independent) ---
-    fire_peatland!(
-        baf_peatf, mask_soilc, col.gridcell, grc.latdeg, prec60_col,
-        peatf_lf, fsat, wf2, tsoi17,
-        cnfire_const.borealat, non_boreal_peatfire_c, boreal_peatfire_c,
-        nonborpeat_fire_precip_denom, borpeat_fire_soilmoist_denom,
-        SECSPHR, SECSPDAY, TFRZ, RPI
-    )
+    let TFp = eltype(baf_peatf)
+        fire_peatland!(
+            baf_peatf, mask_soilc, col.gridcell, grc.latdeg, prec60_col,
+            peatf_lf, fsat, wf2, tsoi17,
+            TFp(cnfire_const.borealat), TFp(non_boreal_peatfire_c), TFp(boreal_peatfire_c),
+            TFp(nonborpeat_fire_precip_denom), TFp(borpeat_fire_soilmoist_denom),
+            TFp(SECSPHR), TFp(SECSPDAY), TFp(TFRZ), TFp(RPI)
+        )
+    end
 
     # --- Find which pool is the CWD pool (tiny, host-resolved) ---
     i_cwd = 0
@@ -994,7 +1001,10 @@ function cnfire_area_li2014!(
     end
 
     # Resolve the global decomposition-thickness Ref to a concrete array (read on device).
-    dzsoi_decomp_arr = dzsoi_decomp[]
+    # dzsoi_decomp is a host global; copy onto the working backend/precision so it
+    # unifies with the other (device) arrays in the fire-spread input bundle.
+    dzsoi_decomp_arr = copyto!(similar(totvegc, eltype(totvegc), length(dzsoi_decomp[])),
+                               dzsoi_decomp[])
 
     # --- Main column loop: fractional area affected by fire ---
     # --- Main column loop: fractional area affected by fire ---
@@ -1070,8 +1080,8 @@ per Li et al. (2014).
 Ported from `CNFireFluxes` in `CNFireLi2014Mod.F90`.
 """
 function cnfire_fluxes_li2014!(
-    mask_soilc::BitVector,
-    mask_soilp::BitVector,
+    mask_soilc::AbstractVector{Bool},
+    mask_soilp::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     cnfire_const::CNFireConstData,
@@ -1087,14 +1097,14 @@ function cnfire_fluxes_li2014!(
     cnveg_nf::CNVegNitrogenFluxData,
     soilbgc_cf::SoilBiogeochemCarbonFluxData,
     decomp_cascade_con::DecompCascadeConData,
-    leaf_prof_patch::Matrix{<:Real},
-    froot_prof_patch::Matrix{<:Real},
-    croot_prof_patch::Matrix{<:Real},
-    stem_prof_patch::Matrix{<:Real},
-    totsomc_col::Vector{<:Real},
-    decomp_cpools_vr_col::Array{<:Real,3},
-    decomp_npools_vr_col::Array{<:Real,3},
-    somc_fire_col::Vector{<:Real};
+    leaf_prof_patch::AbstractMatrix{<:Real},
+    froot_prof_patch::AbstractMatrix{<:Real},
+    croot_prof_patch::AbstractMatrix{<:Real},
+    stem_prof_patch::AbstractMatrix{<:Real},
+    totsomc_col::AbstractVector{<:Real},
+    decomp_cpools_vr_col::AbstractArray{<:Real,3},
+    decomp_npools_vr_col::AbstractArray{<:Real,3},
+    somc_fire_col::AbstractVector{<:Real};
     dt::Real = 1800.0,
     dayspyr::Real = 365.0,
     nlevdecomp::Int = 1,

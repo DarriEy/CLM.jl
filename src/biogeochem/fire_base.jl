@@ -204,13 +204,13 @@ Ported from `CNFire_calc_fire_root_wetness_Li2014` in `CNFireBaseMod.F90`.
 """
 function cnfire_calc_fire_root_wetness_li2014!(
     fire_data::CNFireBaseData,
-    mask_exposedveg::BitVector,
-    mask_noexposedveg::BitVector,
+    mask_exposedveg::AbstractVector{Bool},
+    mask_noexposedveg::AbstractVector{Bool},
     bounds::UnitRange{Int},
     pftcon::PftConFireBase,
     patch::PatchData,
     soilstate::SoilStateData,
-    h2osoi_vol_col::Matrix{<:Real},
+    h2osoi_vol_col::AbstractMatrix{<:Real},
     nlevgrnd::Int;
     soil_suction_fn::Function = default_soil_suction
 )
@@ -337,12 +337,12 @@ fireb_accum_btran2_li2021!(btran2, mask, cmin::Int, cmax::Int, nlevgrnd::Int,
 
 function cnfire_calc_fire_root_wetness_li2021!(
     fire_data::CNFireBaseData,
-    mask_exposedveg::BitVector,
-    mask_noexposedveg::BitVector,
+    mask_exposedveg::AbstractVector{Bool},
+    mask_noexposedveg::AbstractVector{Bool},
     bounds::UnitRange{Int},
     patch::PatchData,
     soilstate::SoilStateData,
-    h2osoi_vol_col::Matrix{<:Real},
+    h2osoi_vol_col::AbstractMatrix{<:Real},
     nlevgrnd::Int
 )
     btran2 = fire_data.btran2_patch
@@ -1332,8 +1332,8 @@ columns and patches.
 Ported from `CNFireFluxes` in `CNFireBaseMod.F90`.
 """
 function cnfire_fluxes!(
-    mask_soilc::BitVector,
-    mask_soilp::BitVector,
+    mask_soilc::AbstractVector{Bool},
+    mask_soilp::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     cnfire_const::CNFireConstData,
@@ -1349,14 +1349,14 @@ function cnfire_fluxes!(
     cnveg_nf::CNVegNitrogenFluxData,
     soilbgc_cf::SoilBiogeochemCarbonFluxData,
     decomp_cascade_con::DecompCascadeConData,
-    leaf_prof_patch::Matrix{<:Real},
-    froot_prof_patch::Matrix{<:Real},
-    croot_prof_patch::Matrix{<:Real},
-    stem_prof_patch::Matrix{<:Real},
-    totsomc_col::Vector{<:Real},
-    decomp_cpools_vr_col::Array{<:Real,3},
-    decomp_npools_vr_col::Array{<:Real,3},
-    somc_fire_col::Vector{<:Real};
+    leaf_prof_patch::AbstractMatrix{<:Real},
+    froot_prof_patch::AbstractMatrix{<:Real},
+    croot_prof_patch::AbstractMatrix{<:Real},
+    stem_prof_patch::AbstractMatrix{<:Real},
+    totsomc_col::AbstractVector{<:Real},
+    decomp_cpools_vr_col::AbstractArray{<:Real,3},
+    decomp_npools_vr_col::AbstractArray{<:Real,3},
+    somc_fire_col::AbstractVector{<:Real};
     dt::Real = 1800.0,
     dayspyr::Real = 365.0,
     nlevdecomp::Int = 1,
