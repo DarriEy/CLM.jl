@@ -856,6 +856,7 @@ end
         @Const(mask_soilp), @Const(patch_column), @Const(wtcol),
         nlevdecomp::Int, ndecomp_pools::Int, pmin::Int, pmax::Int)
     p = @index(Global)
+    T = eltype(fire_mortality_c_to_cwdc_col)
     @inbounds if pmin <= p <= pmax && mask_soilp[p]
         cc = patch_column[p]
         for j in 1:nlevdecomp
@@ -871,13 +872,13 @@ end
 
         for j in 1:nlevdecomp
             for l in 1:ndecomp_pools
-                if tot_decomp_cpools_vr_col[cc, j, l] != 0.0
+                if tot_decomp_cpools_vr_col[cc, j, l] != zero(T)
                     m_decomp_cpools_to_fire_vr_col[cc, j, l] =
                         tot_m_decomp_cpools_to_fire_vr_col[cc, j, l] *
                         (iso_decomp_cpools_vr_col[cc, j, l] /
                          tot_decomp_cpools_vr_col[cc, j, l])
                 else
-                    m_decomp_cpools_to_fire_vr_col[cc, j, l] = 0.0
+                    m_decomp_cpools_to_fire_vr_col[cc, j, l] = zero(T)
                 end
             end
         end
