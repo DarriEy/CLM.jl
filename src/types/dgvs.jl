@@ -24,26 +24,34 @@ Used when `use_cndv = true`.
 
 Ported from `dgvs_type` in `CNDVType.F90`.
 """
-Base.@kwdef mutable struct DGVSData{FT<:Real}
+# Reparametrized {FT,V,VB} + @adapt_structure so the patch state vectors are
+# device-movable (cndv_light!/establishment kernels read/write them on Metal).
+Base.@kwdef mutable struct DGVSData{FT<:Real,
+                          V<:AbstractVector{FT},
+                          VB<:AbstractVector{Bool}}
     # --- Accumulated growing degree days / temperature ---
-    agdd_patch          ::Vector{FT} = Float64[]   # accumulated GDD this year (degree-days)
-    agddtw_patch        ::Vector{FT} = Float64[]   # accumulated GDD for twmax check (degree-days)
-    agdd20_patch        ::Vector{FT} = Float64[]   # 20-year running mean annual GDD (degree-days)
-    tmomin20_patch      ::Vector{FT} = Float64[]   # 20-year running mean of annual min monthly temp (K)
+    agdd_patch          ::V = Float64[]   # accumulated GDD this year (degree-days)
+    agddtw_patch        ::V = Float64[]   # accumulated GDD for twmax check (degree-days)
+    agdd20_patch        ::V = Float64[]   # 20-year running mean annual GDD (degree-days)
+    tmomin20_patch      ::V = Float64[]   # 20-year running mean of annual min monthly temp (K)
 
     # --- Vegetation state ---
-    present_patch       ::Vector{Bool} = Bool[]     # whether PFT present in gridcell
-    pftmayexist_patch   ::Vector{Bool} = Bool[]     # whether PFT may establish in gridcell
-    nind_patch          ::Vector{FT} = Float64[]    # number of individuals (#/m2)
-    lm_ind_patch        ::Vector{FT} = Float64[]    # individual leaf mass (gC/ind)
-    lai_ind_patch       ::Vector{FT} = Float64[]    # individual LAI (m2/m2)
-    fpcinc_patch        ::Vector{FT} = Float64[]    # foliar projective cover increment (fraction)
-    fpcgrid_patch       ::Vector{FT} = Float64[]    # foliar projective cover on gridcell (fraction)
-    fpcgridold_patch    ::Vector{FT} = Float64[]    # previous-year fpcgrid (fraction)
-    crownarea_patch     ::Vector{FT} = Float64[]    # crown area per individual (m2)
-    greffic_patch       ::Vector{FT} = Float64[]    # growth efficiency (gC/m2 leaf/yr)
-    heatstress_patch    ::Vector{FT} = Float64[]    # heat stress mortality factor
+    present_patch       ::VB = Bool[]     # whether PFT present in gridcell
+    pftmayexist_patch   ::VB = Bool[]     # whether PFT may establish in gridcell
+    nind_patch          ::V = Float64[]    # number of individuals (#/m2)
+    lm_ind_patch        ::V = Float64[]    # individual leaf mass (gC/ind)
+    lai_ind_patch       ::V = Float64[]    # individual LAI (m2/m2)
+    fpcinc_patch        ::V = Float64[]    # foliar projective cover increment (fraction)
+    fpcgrid_patch       ::V = Float64[]    # foliar projective cover on gridcell (fraction)
+    fpcgridold_patch    ::V = Float64[]    # previous-year fpcgrid (fraction)
+    crownarea_patch     ::V = Float64[]    # crown area per individual (m2)
+    greffic_patch       ::V = Float64[]    # growth efficiency (gC/m2 leaf/yr)
+    heatstress_patch    ::V = Float64[]    # heat stress mortality factor
 end
+
+DGVSData{FT}(; kwargs...) where {FT<:Real} =
+    DGVSData{FT, Vector{FT}, Vector{Bool}}(; kwargs...)
+Adapt.@adapt_structure DGVSData
 
 # --------------------------------------------------------------------------
 # dgvs_init! — allocate all vectors
@@ -126,17 +134,18 @@ provides allometric constants.
 
 Ported from `dgv_ecophyscon` in `CNDVEcosystemDynMod.F90`.
 """
-Base.@kwdef mutable struct DGVEcophysCon
-    crownarea_max ::Vector{Float64} = Float64[]  # max crown area (m2)         — from pftpar20
-    tcmin         ::Vector{Float64} = Float64[]  # min coldest monthly mean T  — from pftpar28
-    tcmax         ::Vector{Float64} = Float64[]  # max coldest monthly mean T  — from pftpar29
-    gddmin        ::Vector{Float64} = Float64[]  # min GDD (>= 5 deg C)       — from pftpar30
-    twmax         ::Vector{Float64} = Float64[]  # upper limit warmest month T — from pftpar31
-    reinickerp    ::Vector{Float64} = Float64[]  # Reinicke's p (allometric)   — constant 1.6
-    allom1        ::Vector{Float64} = Float64[]  # allometric param 1          — 100 (250 shrubs)
-    allom2        ::Vector{Float64} = Float64[]  # allometric param 2          — 40 (8 shrubs)
-    allom3        ::Vector{Float64} = Float64[]  # allometric param 3          — 0.5
+Base.@kwdef mutable struct DGVEcophysCon{V<:AbstractVector{<:Real}}
+    crownarea_max ::V = Float64[]  # max crown area (m2)         — from pftpar20
+    tcmin         ::V = Float64[]  # min coldest monthly mean T  — from pftpar28
+    tcmax         ::V = Float64[]  # max coldest monthly mean T  — from pftpar29
+    gddmin        ::V = Float64[]  # min GDD (>= 5 deg C)       — from pftpar30
+    twmax         ::V = Float64[]  # upper limit warmest month T — from pftpar31
+    reinickerp    ::V = Float64[]  # Reinicke's p (allometric)   — constant 1.6
+    allom1        ::V = Float64[]  # allometric param 1          — 100 (250 shrubs)
+    allom2        ::V = Float64[]  # allometric param 2          — 40 (8 shrubs)
+    allom3        ::V = Float64[]  # allometric param 3          — 0.5
 end
+Adapt.@adapt_structure DGVEcophysCon
 
 """
 Module-level singleton holding DGVS ecophysiological constants.
