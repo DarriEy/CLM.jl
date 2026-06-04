@@ -166,38 +166,118 @@ Ported from `calc_plant_cn_alloc` in
 # downregulation writes, which are handled by _cnalloc_iso_kernel! below).
 # Loop-carried scalars f5[k] are computed inline per-k (no per-patch alloc).
 # --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Device-view bundles for _cnalloc_main_kernel! (Metal ~31-arg limit).
+# V = vector field type, M = matrix field type ([p,k] reproductive arrays).
+# Each struct is ONE kernel arg and is @adapt_structure'd for device movement.
+# ---------------------------------------------------------------------------
+Base.@kwdef struct _CnAllocOut{V,M}
+    sminn_to_npool::V; plant_nalloc::V; plant_calloc::V; excess_cflux::V; downreg::V
+    psnsun_to_cpool::V; psnshade_to_cpool::V
+    cpool_to_leafc::V; cpool_to_leafc_storage::V
+    cpool_to_frootc::V; cpool_to_frootc_storage::V
+    cpool_to_livestemc::V; cpool_to_livestemc_storage::V
+    cpool_to_deadstemc::V; cpool_to_deadstemc_storage::V
+    cpool_to_livecrootc::V; cpool_to_livecrootc_storage::V
+    cpool_to_deadcrootc::V; cpool_to_deadcrootc_storage::V
+    cpool_to_reproductivec::M; cpool_to_reproductivec_storage::M
+    npool_to_leafn::V; npool_to_leafn_storage::V
+    npool_to_frootn::V; npool_to_frootn_storage::V
+    npool_to_livestemn::V; npool_to_livestemn_storage::V
+    npool_to_deadstemn::V; npool_to_deadstemn_storage::V
+    npool_to_livecrootn::V; npool_to_livecrootn_storage::V
+    npool_to_deadcrootn::V; npool_to_deadcrootn_storage::V
+    npool_to_reproductiven::M; npool_to_reproductiven_storage::M
+    cpool_to_gresp_storage::V
+end
+Adapt.@adapt_structure _CnAllocOut
+
+Base.@kwdef struct _CnAllocIn{V,M,VB}
+    froot_leaf::V; croot_stem::V; stem_leaf::V
+    annsum_npp::V; flivewd::V; grperc::V; grpnow::V
+    leafcn::V; frootcn::V; livewdcn::V; deadwdcn::V
+    fcur_arr::V; graincn::V; woody::V
+    croplive::VB; aleaf::V; aroot::V; astem::V
+    arepr::M
+    sminn_to_plant_fun::V; plant_ndemand::V; fpg_col::V
+    retransn_to_npool::V; c_allometry::V; n_allometry::V
+    availc::V; gpp_before_downreg::V
+end
+Adapt.@adapt_structure _CnAllocIn
+
 @kernel function _cnalloc_main_kernel!(
-        sminn_to_npool, plant_nalloc, plant_calloc, excess_cflux, downreg,
-        psnsun_to_cpool, psnshade_to_cpool,
-        cpool_to_leafc, cpool_to_leafc_storage,
-        cpool_to_frootc, cpool_to_frootc_storage,
-        cpool_to_livestemc, cpool_to_livestemc_storage,
-        cpool_to_deadstemc, cpool_to_deadstemc_storage,
-        cpool_to_livecrootc, cpool_to_livecrootc_storage,
-        cpool_to_deadcrootc, cpool_to_deadcrootc_storage,
-        cpool_to_reproductivec, cpool_to_reproductivec_storage,
-        npool_to_leafn, npool_to_leafn_storage,
-        npool_to_frootn, npool_to_frootn_storage,
-        npool_to_livestemn, npool_to_livestemn_storage,
-        npool_to_deadstemn, npool_to_deadstemn_storage,
-        npool_to_livecrootn, npool_to_livecrootn_storage,
-        npool_to_deadcrootn, npool_to_deadcrootn_storage,
-        npool_to_reproductiven, npool_to_reproductiven_storage,
-        cpool_to_gresp_storage,
+        out::_CnAllocOut, in::_CnAllocIn,
         @Const(mask_soilp), @Const(column), @Const(itype),
-        @Const(froot_leaf), @Const(croot_stem), @Const(stem_leaf),
-        @Const(annsum_npp), @Const(flivewd), @Const(grperc), @Const(grpnow),
-        @Const(leafcn), @Const(frootcn), @Const(livewdcn), @Const(deadwdcn),
-        @Const(fcur_arr), @Const(graincn), @Const(woody),
-        @Const(croplive), @Const(aleaf), @Const(aroot), @Const(astem),
-        @Const(arepr),
-        @Const(sminn_to_plant_fun), @Const(plant_ndemand), @Const(fpg_col),
-        @Const(retransn_to_npool), @Const(c_allometry), @Const(n_allometry),
-        @Const(availc), @Const(gpp_before_downreg),
         use_fun::Bool, npcropmin::Int, nrepr::Int)
-    T = eltype(plant_calloc)
+    T = eltype(out.plant_calloc)
     p = @index(Global)
     @inbounds if mask_soilp[p]
+        # alias every output struct field to its original loose name
+        sminn_to_npool                 = out.sminn_to_npool
+        plant_nalloc                   = out.plant_nalloc
+        plant_calloc                   = out.plant_calloc
+        excess_cflux                   = out.excess_cflux
+        downreg                        = out.downreg
+        psnsun_to_cpool                = out.psnsun_to_cpool
+        psnshade_to_cpool              = out.psnshade_to_cpool
+        cpool_to_leafc                 = out.cpool_to_leafc
+        cpool_to_leafc_storage         = out.cpool_to_leafc_storage
+        cpool_to_frootc                = out.cpool_to_frootc
+        cpool_to_frootc_storage        = out.cpool_to_frootc_storage
+        cpool_to_livestemc             = out.cpool_to_livestemc
+        cpool_to_livestemc_storage     = out.cpool_to_livestemc_storage
+        cpool_to_deadstemc             = out.cpool_to_deadstemc
+        cpool_to_deadstemc_storage     = out.cpool_to_deadstemc_storage
+        cpool_to_livecrootc            = out.cpool_to_livecrootc
+        cpool_to_livecrootc_storage    = out.cpool_to_livecrootc_storage
+        cpool_to_deadcrootc            = out.cpool_to_deadcrootc
+        cpool_to_deadcrootc_storage    = out.cpool_to_deadcrootc_storage
+        cpool_to_reproductivec         = out.cpool_to_reproductivec
+        cpool_to_reproductivec_storage = out.cpool_to_reproductivec_storage
+        npool_to_leafn                 = out.npool_to_leafn
+        npool_to_leafn_storage         = out.npool_to_leafn_storage
+        npool_to_frootn                = out.npool_to_frootn
+        npool_to_frootn_storage        = out.npool_to_frootn_storage
+        npool_to_livestemn             = out.npool_to_livestemn
+        npool_to_livestemn_storage     = out.npool_to_livestemn_storage
+        npool_to_deadstemn             = out.npool_to_deadstemn
+        npool_to_deadstemn_storage     = out.npool_to_deadstemn_storage
+        npool_to_livecrootn            = out.npool_to_livecrootn
+        npool_to_livecrootn_storage    = out.npool_to_livecrootn_storage
+        npool_to_deadcrootn            = out.npool_to_deadcrootn
+        npool_to_deadcrootn_storage    = out.npool_to_deadcrootn_storage
+        npool_to_reproductiven         = out.npool_to_reproductiven
+        npool_to_reproductiven_storage = out.npool_to_reproductiven_storage
+        cpool_to_gresp_storage         = out.cpool_to_gresp_storage
+        # alias every input struct field to its original loose name
+        froot_leaf         = in.froot_leaf
+        croot_stem         = in.croot_stem
+        stem_leaf          = in.stem_leaf
+        annsum_npp         = in.annsum_npp
+        flivewd            = in.flivewd
+        grperc             = in.grperc
+        grpnow             = in.grpnow
+        leafcn             = in.leafcn
+        frootcn            = in.frootcn
+        livewdcn           = in.livewdcn
+        deadwdcn           = in.deadwdcn
+        fcur_arr           = in.fcur_arr
+        graincn            = in.graincn
+        woody              = in.woody
+        croplive           = in.croplive
+        aleaf              = in.aleaf
+        aroot              = in.aroot
+        astem              = in.astem
+        arepr              = in.arepr
+        sminn_to_plant_fun = in.sminn_to_plant_fun
+        plant_ndemand      = in.plant_ndemand
+        fpg_col            = in.fpg_col
+        retransn_to_npool  = in.retransn_to_npool
+        c_allometry        = in.c_allometry
+        n_allometry        = in.n_allometry
+        availc             = in.availc
+        gpp_before_downreg = in.gpp_before_downreg
+
         c = column[p]
         ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
 
@@ -224,7 +304,7 @@ Ported from `calc_plant_cn_alloc` in
         fcur = fcur_arr[ivt]
 
         is_crop = ivt >= npcropmin
-        crop_alive = is_crop && croplive[p] && !isnan(aleaf[p])
+        crop_alive = is_crop && (croplive[p] != zero(eltype(croplive))) && !isnan(aleaf[p])
 
         if is_crop  # skip 2 generic crops
             if crop_alive
@@ -387,38 +467,88 @@ function calc_plant_cn_alloc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRang
 
     use_fun = cn_shared_params.use_fun
 
-    _launch!(_cnalloc_main_kernel!,
-        cnveg_nf.sminn_to_npool_patch, cnveg_nf.plant_nalloc_patch,
-        cnveg_cf.plant_calloc_patch, cnveg_cf.excess_cflux_patch,
-        cnveg_state.downreg_patch,
-        cnveg_cf.psnsun_to_cpool_patch, cnveg_cf.psnshade_to_cpool_patch,
-        cnveg_cf.cpool_to_leafc_patch, cnveg_cf.cpool_to_leafc_storage_patch,
-        cnveg_cf.cpool_to_frootc_patch, cnveg_cf.cpool_to_frootc_storage_patch,
-        cnveg_cf.cpool_to_livestemc_patch, cnveg_cf.cpool_to_livestemc_storage_patch,
-        cnveg_cf.cpool_to_deadstemc_patch, cnveg_cf.cpool_to_deadstemc_storage_patch,
-        cnveg_cf.cpool_to_livecrootc_patch, cnveg_cf.cpool_to_livecrootc_storage_patch,
-        cnveg_cf.cpool_to_deadcrootc_patch, cnveg_cf.cpool_to_deadcrootc_storage_patch,
-        cnveg_cf.cpool_to_reproductivec_patch, cnveg_cf.cpool_to_reproductivec_storage_patch,
-        cnveg_nf.npool_to_leafn_patch, cnveg_nf.npool_to_leafn_storage_patch,
-        cnveg_nf.npool_to_frootn_patch, cnveg_nf.npool_to_frootn_storage_patch,
-        cnveg_nf.npool_to_livestemn_patch, cnveg_nf.npool_to_livestemn_storage_patch,
-        cnveg_nf.npool_to_deadstemn_patch, cnveg_nf.npool_to_deadstemn_storage_patch,
-        cnveg_nf.npool_to_livecrootn_patch, cnveg_nf.npool_to_livecrootn_storage_patch,
-        cnveg_nf.npool_to_deadcrootn_patch, cnveg_nf.npool_to_deadcrootn_storage_patch,
-        cnveg_nf.npool_to_reproductiven_patch, cnveg_nf.npool_to_reproductiven_storage_patch,
-        cnveg_cf.cpool_to_gresp_storage_patch,
-        mask_soilp, patch.column, patch.itype,
-        pftcon.froot_leaf, pftcon.croot_stem, pftcon.stem_leaf,
-        cnveg_cf.annsum_npp_patch, pftcon.flivewd, pftcon.grperc, pftcon.grpnow,
-        pftcon.leafcn, pftcon.frootcn, pftcon.livewdcn, pftcon.deadwdcn,
-        pftcon.fcur, pftcon.graincn, pftcon.woody,
-        crop.croplive_patch, cnveg_state.aleaf_patch, cnveg_state.aroot_patch,
-        cnveg_state.astem_patch, cnveg_state.arepr_patch,
-        cnveg_nf.sminn_to_plant_fun_patch, cnveg_nf.plant_ndemand_patch, fpg_col,
-        cnveg_nf.retransn_to_npool_patch, cnveg_state.c_allometry_patch,
-        cnveg_state.n_allometry_patch, cnveg_cf.availc_patch,
-        cnveg_cf.gpp_before_downreg_patch,
-        use_fun, npcropmin, nrepr)
+    out = _CnAllocOut(;
+        sminn_to_npool                 = cnveg_nf.sminn_to_npool_patch,
+        plant_nalloc                   = cnveg_nf.plant_nalloc_patch,
+        plant_calloc                   = cnveg_cf.plant_calloc_patch,
+        excess_cflux                   = cnveg_cf.excess_cflux_patch,
+        downreg                        = cnveg_state.downreg_patch,
+        psnsun_to_cpool                = cnveg_cf.psnsun_to_cpool_patch,
+        psnshade_to_cpool              = cnveg_cf.psnshade_to_cpool_patch,
+        cpool_to_leafc                 = cnveg_cf.cpool_to_leafc_patch,
+        cpool_to_leafc_storage         = cnveg_cf.cpool_to_leafc_storage_patch,
+        cpool_to_frootc                = cnveg_cf.cpool_to_frootc_patch,
+        cpool_to_frootc_storage        = cnveg_cf.cpool_to_frootc_storage_patch,
+        cpool_to_livestemc             = cnveg_cf.cpool_to_livestemc_patch,
+        cpool_to_livestemc_storage     = cnveg_cf.cpool_to_livestemc_storage_patch,
+        cpool_to_deadstemc             = cnveg_cf.cpool_to_deadstemc_patch,
+        cpool_to_deadstemc_storage     = cnveg_cf.cpool_to_deadstemc_storage_patch,
+        cpool_to_livecrootc            = cnveg_cf.cpool_to_livecrootc_patch,
+        cpool_to_livecrootc_storage    = cnveg_cf.cpool_to_livecrootc_storage_patch,
+        cpool_to_deadcrootc            = cnveg_cf.cpool_to_deadcrootc_patch,
+        cpool_to_deadcrootc_storage    = cnveg_cf.cpool_to_deadcrootc_storage_patch,
+        cpool_to_reproductivec         = cnveg_cf.cpool_to_reproductivec_patch,
+        cpool_to_reproductivec_storage = cnveg_cf.cpool_to_reproductivec_storage_patch,
+        npool_to_leafn                 = cnveg_nf.npool_to_leafn_patch,
+        npool_to_leafn_storage         = cnveg_nf.npool_to_leafn_storage_patch,
+        npool_to_frootn                = cnveg_nf.npool_to_frootn_patch,
+        npool_to_frootn_storage        = cnveg_nf.npool_to_frootn_storage_patch,
+        npool_to_livestemn             = cnveg_nf.npool_to_livestemn_patch,
+        npool_to_livestemn_storage     = cnveg_nf.npool_to_livestemn_storage_patch,
+        npool_to_deadstemn             = cnveg_nf.npool_to_deadstemn_patch,
+        npool_to_deadstemn_storage     = cnveg_nf.npool_to_deadstemn_storage_patch,
+        npool_to_livecrootn            = cnveg_nf.npool_to_livecrootn_patch,
+        npool_to_livecrootn_storage    = cnveg_nf.npool_to_livecrootn_storage_patch,
+        npool_to_deadcrootn            = cnveg_nf.npool_to_deadcrootn_patch,
+        npool_to_deadcrootn_storage    = cnveg_nf.npool_to_deadcrootn_storage_patch,
+        npool_to_reproductiven         = cnveg_nf.npool_to_reproductiven_patch,
+        npool_to_reproductiven_storage = cnveg_nf.npool_to_reproductiven_storage_patch,
+        cpool_to_gresp_storage         = cnveg_cf.cpool_to_gresp_storage_patch)
+
+    in = _CnAllocIn(;
+        froot_leaf         = pftcon.froot_leaf,
+        croot_stem         = pftcon.croot_stem,
+        stem_leaf          = pftcon.stem_leaf,
+        annsum_npp         = cnveg_cf.annsum_npp_patch,
+        flivewd            = pftcon.flivewd,
+        grperc             = pftcon.grperc,
+        grpnow             = pftcon.grpnow,
+        leafcn             = pftcon.leafcn,
+        frootcn            = pftcon.frootcn,
+        livewdcn           = pftcon.livewdcn,
+        deadwdcn           = pftcon.deadwdcn,
+        fcur_arr           = pftcon.fcur,
+        graincn            = pftcon.graincn,
+        woody              = pftcon.woody,
+        croplive           = crop.croplive_patch,
+        aleaf              = cnveg_state.aleaf_patch,
+        aroot              = cnveg_state.aroot_patch,
+        astem              = cnveg_state.astem_patch,
+        arepr              = cnveg_state.arepr_patch,
+        sminn_to_plant_fun = cnveg_nf.sminn_to_plant_fun_patch,
+        plant_ndemand      = cnveg_nf.plant_ndemand_patch,
+        fpg_col            = fpg_col,
+        retransn_to_npool  = cnveg_nf.retransn_to_npool_patch,
+        c_allometry        = cnveg_state.c_allometry_patch,
+        n_allometry        = cnveg_state.n_allometry_patch,
+        availc             = cnveg_cf.availc_patch,
+        gpp_before_downreg = cnveg_cf.gpp_before_downreg_patch)
+
+    # mask + integer index vectors onto the state backend (BitVector / host
+    # non-bitstype on device). Reference array carries the backend + eltype.
+    ref = out.plant_calloc
+    FT = eltype(ref)
+    nd = length(mask_soilp)
+    mask_d = similar(ref, Bool, nd); copyto!(mask_d, collect(Bool, mask_soilp))
+    column_d = similar(ref, Int, length(patch.column)); copyto!(column_d, patch.column)
+    itype_d = similar(ref, Int, length(patch.itype)); copyto!(itype_d, patch.itype)
+
+    # Struct-first kernel: manual backend launch + synchronize (struct args carry
+    # no backend, so we take it from a known device array field).
+    backend = _kernel_backend(ref)
+    _cnalloc_main_kernel!(backend)(out, in, mask_d, column_d, itype_d,
+        use_fun, npcropmin, nrepr; ndrange = nd)
+    KA.synchronize(backend)
 
     if use_c13 && c13_cnveg_cf !== nothing
         _launch!(_cnalloc_iso_kernel!,
@@ -549,14 +679,15 @@ end
 @kernel function _npdemand_availretransn_nopcrop_kernel!(avail_retransn,
         @Const(mask), @Const(annsum_potential_gpp), @Const(annmax_retransn),
         @Const(gpp_before_downreg), dt)
+    T = eltype(avail_retransn)
     p = @index(Global)
     @inbounds if mask[p]
-        if annsum_potential_gpp[p] > zero(eltype(annsum_potential_gpp))
+        if annsum_potential_gpp[p] > zero(T)
             avail_retransn[p] =
-                (annmax_retransn[p] / oftype(annmax_retransn[p], 2.0)) *
+                (annmax_retransn[p] / T(2.0)) *
                 (gpp_before_downreg[p] / annsum_potential_gpp[p]) / dt
         else
-            avail_retransn[p] = zero(eltype(avail_retransn))
+            avail_retransn[p] = zero(T)
         end
     end
 end

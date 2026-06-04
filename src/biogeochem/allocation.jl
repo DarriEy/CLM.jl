@@ -382,7 +382,7 @@ Ported from `calc_crop_allocation_fractions` in `CNAllocationMod.F90`.
 
         if croplive[p]
             # Phase 1 completed: leaf emergence to start of leaf decline
-            if crop_phase_out[p] == cphase_leafemerge
+            if crop_phase_out[p] == cphase_leafemerge_in
 
                 for k in 1:nrepr
                     arepr[p, k] = zero(T)
@@ -406,7 +406,7 @@ Ported from `calc_crop_allocation_fractions` in `CNAllocationMod.F90`.
                 aleafi[p] = aleaf[p]
 
             # Phase 2 completed: grain fill
-            elseif crop_phase_out[p] == cphase_grainfill
+            elseif crop_phase_out[p] == cphase_grainfill_in
                 aroot[p] = max(zero(T), min(one(T), arooti[ivt] -
                     (arooti[ivt] - arootf[ivt]) *
                     min(one(T), hui[p] / gddmaturity[p])))
