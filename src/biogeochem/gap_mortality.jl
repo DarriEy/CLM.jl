@@ -84,47 +84,230 @@ Ported from `CNGapMortality` in `CNGapMortalityMod.F90`.
 # use_cndv `nind` individual-count update. Config flags (use_cndv, spinup_state,
 # npcropmin) are resolved on the host and passed as Bool/Int scalars; no branch
 # on a String and no error()/@warn in the kernel.
+# =====================================================================
+# Device-view structs for the gap-mortality patch kernel (Metal ~31-arg cap).
+# Each bundle is ONE kernel arg. Outputs split C/N (20 + 19 fields), inputs
+# split C/N (20 + 19 fields), Float64 scalars bundled into _GapScalars{T} at the
+# output's working precision. `nind` stays LOOSE (read+written for woody CNDV).
+# All are @adapt_structure'd so adapt(MtlArray, …) moves the fields to device.
+# =====================================================================
+
+# --- mortality C output flux arrays (20) ---
+Base.@kwdef struct _GapMortOutC{V}
+    m_leafc_to_litter              ::V
+    m_frootc_to_litter             ::V
+    m_livestemc_to_litter          ::V
+    m_livecrootc_to_litter         ::V
+    m_deadstemc_to_litter          ::V
+    m_deadcrootc_to_litter         ::V
+    m_leafc_storage_to_litter      ::V
+    m_frootc_storage_to_litter     ::V
+    m_livestemc_storage_to_litter  ::V
+    m_deadstemc_storage_to_litter  ::V
+    m_livecrootc_storage_to_litter ::V
+    m_deadcrootc_storage_to_litter ::V
+    m_gresp_storage_to_litter      ::V
+    m_leafc_xfer_to_litter         ::V
+    m_frootc_xfer_to_litter        ::V
+    m_livestemc_xfer_to_litter     ::V
+    m_deadstemc_xfer_to_litter     ::V
+    m_livecrootc_xfer_to_litter    ::V
+    m_deadcrootc_xfer_to_litter    ::V
+    m_gresp_xfer_to_litter         ::V
+end
+Adapt.@adapt_structure _GapMortOutC
+
+# --- mortality N output flux arrays (19) ---
+Base.@kwdef struct _GapMortOutN{V}
+    m_leafn_to_litter              ::V
+    m_frootn_to_litter             ::V
+    m_livestemn_to_litter          ::V
+    m_livecrootn_to_litter         ::V
+    m_deadstemn_to_litter          ::V
+    m_deadcrootn_to_litter         ::V
+    m_retransn_to_litter           ::V
+    m_leafn_storage_to_litter      ::V
+    m_frootn_storage_to_litter     ::V
+    m_livestemn_storage_to_litter  ::V
+    m_deadstemn_storage_to_litter  ::V
+    m_livecrootn_storage_to_litter ::V
+    m_deadcrootn_storage_to_litter ::V
+    m_leafn_xfer_to_litter         ::V
+    m_frootn_xfer_to_litter        ::V
+    m_livestemn_xfer_to_litter     ::V
+    m_deadstemn_xfer_to_litter     ::V
+    m_livecrootn_xfer_to_litter    ::V
+    m_deadcrootn_xfer_to_litter    ::V
+end
+Adapt.@adapt_structure _GapMortOutN
+
+# --- C state input arrays (20) ---
+Base.@kwdef struct _GapMortInC{V}
+    leafc              ::V
+    frootc             ::V
+    livestemc          ::V
+    livecrootc         ::V
+    deadstemc          ::V
+    deadcrootc         ::V
+    leafc_storage      ::V
+    frootc_storage     ::V
+    livestemc_storage  ::V
+    deadstemc_storage  ::V
+    livecrootc_storage ::V
+    deadcrootc_storage ::V
+    gresp_storage      ::V
+    leafc_xfer         ::V
+    frootc_xfer        ::V
+    livestemc_xfer     ::V
+    deadstemc_xfer     ::V
+    livecrootc_xfer    ::V
+    deadcrootc_xfer    ::V
+    gresp_xfer         ::V
+end
+Adapt.@adapt_structure _GapMortInC
+
+# --- N state input arrays (19) ---
+Base.@kwdef struct _GapMortInN{V}
+    leafn              ::V
+    frootn             ::V
+    livestemn          ::V
+    livecrootn         ::V
+    deadstemn          ::V
+    deadcrootn         ::V
+    retransn           ::V
+    leafn_storage      ::V
+    frootn_storage     ::V
+    livestemn_storage  ::V
+    deadstemn_storage  ::V
+    livecrootn_storage ::V
+    deadcrootn_storage ::V
+    leafn_xfer         ::V
+    frootn_xfer        ::V
+    livestemn_xfer     ::V
+    deadstemn_xfer     ::V
+    livecrootn_xfer    ::V
+    deadcrootn_xfer    ::V
+end
+Adapt.@adapt_structure _GapMortInN
+
+# --- Float64 scalar params bundled at working precision T (isbits) ---
+Base.@kwdef struct _GapScalars{T}
+    k_mort                 ::T
+    days_per_year          ::T
+    secspday               ::T
+    spinup_factor_deadwood ::T
+end
+Adapt.@adapt_structure _GapScalars
+
+# Per-patch gap-mortality kernel: each thread computes the ~20 mortality C & N
+# fluxes for one patch p (all independent per-patch outputs) plus the optional
+# use_cndv `nind` individual-count update. Array args are grouped into immutable
+# device-view structs (outc/outn/inc/inn) to respect the Metal ~31-arg cap; the
+# four Float64 mortality-rate/spinup scalars are bundled into _GapScalars{T} at the
+# output's working precision so NO Float64 is materialized on a Float32-only backend.
+# Every field is aliased to its Fortran-named local at the kernel top so the physics
+# body is verbatim except numeric literal -> T(...). Config flags (use_cndv,
+# spinup_state, npcropmin) stay loose Bool/Int scalars; no String branch, no error().
 @kernel function _gapmort_patch_kernel!(
-        m_leafc_to_litter, m_frootc_to_litter, m_livestemc_to_litter,
-        m_livecrootc_to_litter, m_deadstemc_to_litter, m_deadcrootc_to_litter,
-        m_leafc_storage_to_litter, m_frootc_storage_to_litter,
-        m_livestemc_storage_to_litter, m_deadstemc_storage_to_litter,
-        m_livecrootc_storage_to_litter, m_deadcrootc_storage_to_litter,
-        m_gresp_storage_to_litter,
-        m_leafc_xfer_to_litter, m_frootc_xfer_to_litter,
-        m_livestemc_xfer_to_litter, m_deadstemc_xfer_to_litter,
-        m_livecrootc_xfer_to_litter, m_deadcrootc_xfer_to_litter,
-        m_gresp_xfer_to_litter,
-        m_leafn_to_litter, m_frootn_to_litter, m_livestemn_to_litter,
-        m_livecrootn_to_litter, m_deadstemn_to_litter, m_deadcrootn_to_litter,
-        m_retransn_to_litter,
-        m_leafn_storage_to_litter, m_frootn_storage_to_litter,
-        m_livestemn_storage_to_litter, m_deadstemn_storage_to_litter,
-        m_livecrootn_storage_to_litter, m_deadcrootn_storage_to_litter,
-        m_leafn_xfer_to_litter, m_frootn_xfer_to_litter,
-        m_livestemn_xfer_to_litter, m_deadstemn_xfer_to_litter,
-        m_livecrootn_xfer_to_litter, m_deadcrootn_xfer_to_litter,
-        nind,
+        outc::_GapMortOutC, outn::_GapMortOutN, nind,
         @Const(mask_soilp), @Const(ivt), @Const(woody),
-        @Const(greffic), @Const(heatstress),
-        @Const(r_mort),
-        @Const(leafc), @Const(frootc), @Const(livestemc), @Const(livecrootc),
-        @Const(deadstemc), @Const(deadcrootc),
-        @Const(leafc_storage), @Const(frootc_storage), @Const(livestemc_storage),
-        @Const(deadstemc_storage), @Const(livecrootc_storage),
-        @Const(deadcrootc_storage), @Const(gresp_storage),
-        @Const(leafc_xfer), @Const(frootc_xfer), @Const(livestemc_xfer),
-        @Const(deadstemc_xfer), @Const(livecrootc_xfer), @Const(deadcrootc_xfer),
-        @Const(gresp_xfer),
-        @Const(leafn), @Const(frootn), @Const(livestemn), @Const(livecrootn),
-        @Const(deadstemn), @Const(deadcrootn), @Const(retransn),
-        @Const(leafn_storage), @Const(frootn_storage), @Const(livestemn_storage),
-        @Const(deadstemn_storage), @Const(livecrootn_storage),
-        @Const(deadcrootn_storage),
-        @Const(leafn_xfer), @Const(frootn_xfer), @Const(livestemn_xfer),
-        @Const(deadstemn_xfer), @Const(livecrootn_xfer), @Const(deadcrootn_xfer),
-        k_mort, days_per_year, secspday, spinup_factor_deadwood,
+        @Const(greffic), @Const(heatstress), @Const(r_mort),
+        inc::_GapMortInC, inn::_GapMortInN, s::_GapScalars,
         use_cndv::Bool, spinup_state::Int, npcropmin::Int)
+
+    # Working element type taken from an output array (Metal: must be Float32).
+    T = eltype(outc.m_leafc_to_litter)
+
+    # ---- alias output flux arrays (verbatim Fortran names) ----
+    m_leafc_to_litter              = outc.m_leafc_to_litter
+    m_frootc_to_litter             = outc.m_frootc_to_litter
+    m_livestemc_to_litter          = outc.m_livestemc_to_litter
+    m_livecrootc_to_litter         = outc.m_livecrootc_to_litter
+    m_deadstemc_to_litter          = outc.m_deadstemc_to_litter
+    m_deadcrootc_to_litter         = outc.m_deadcrootc_to_litter
+    m_leafc_storage_to_litter      = outc.m_leafc_storage_to_litter
+    m_frootc_storage_to_litter     = outc.m_frootc_storage_to_litter
+    m_livestemc_storage_to_litter  = outc.m_livestemc_storage_to_litter
+    m_deadstemc_storage_to_litter  = outc.m_deadstemc_storage_to_litter
+    m_livecrootc_storage_to_litter = outc.m_livecrootc_storage_to_litter
+    m_deadcrootc_storage_to_litter = outc.m_deadcrootc_storage_to_litter
+    m_gresp_storage_to_litter      = outc.m_gresp_storage_to_litter
+    m_leafc_xfer_to_litter         = outc.m_leafc_xfer_to_litter
+    m_frootc_xfer_to_litter        = outc.m_frootc_xfer_to_litter
+    m_livestemc_xfer_to_litter     = outc.m_livestemc_xfer_to_litter
+    m_deadstemc_xfer_to_litter     = outc.m_deadstemc_xfer_to_litter
+    m_livecrootc_xfer_to_litter    = outc.m_livecrootc_xfer_to_litter
+    m_deadcrootc_xfer_to_litter    = outc.m_deadcrootc_xfer_to_litter
+    m_gresp_xfer_to_litter         = outc.m_gresp_xfer_to_litter
+
+    m_leafn_to_litter              = outn.m_leafn_to_litter
+    m_frootn_to_litter             = outn.m_frootn_to_litter
+    m_livestemn_to_litter          = outn.m_livestemn_to_litter
+    m_livecrootn_to_litter         = outn.m_livecrootn_to_litter
+    m_deadstemn_to_litter          = outn.m_deadstemn_to_litter
+    m_deadcrootn_to_litter         = outn.m_deadcrootn_to_litter
+    m_retransn_to_litter           = outn.m_retransn_to_litter
+    m_leafn_storage_to_litter      = outn.m_leafn_storage_to_litter
+    m_frootn_storage_to_litter     = outn.m_frootn_storage_to_litter
+    m_livestemn_storage_to_litter  = outn.m_livestemn_storage_to_litter
+    m_deadstemn_storage_to_litter  = outn.m_deadstemn_storage_to_litter
+    m_livecrootn_storage_to_litter = outn.m_livecrootn_storage_to_litter
+    m_deadcrootn_storage_to_litter = outn.m_deadcrootn_storage_to_litter
+    m_leafn_xfer_to_litter         = outn.m_leafn_xfer_to_litter
+    m_frootn_xfer_to_litter        = outn.m_frootn_xfer_to_litter
+    m_livestemn_xfer_to_litter     = outn.m_livestemn_xfer_to_litter
+    m_deadstemn_xfer_to_litter     = outn.m_deadstemn_xfer_to_litter
+    m_livecrootn_xfer_to_litter    = outn.m_livecrootn_xfer_to_litter
+    m_deadcrootn_xfer_to_litter    = outn.m_deadcrootn_xfer_to_litter
+
+    # ---- alias C state input arrays ----
+    leafc              = inc.leafc
+    frootc             = inc.frootc
+    livestemc          = inc.livestemc
+    livecrootc         = inc.livecrootc
+    deadstemc          = inc.deadstemc
+    deadcrootc         = inc.deadcrootc
+    leafc_storage      = inc.leafc_storage
+    frootc_storage     = inc.frootc_storage
+    livestemc_storage  = inc.livestemc_storage
+    deadstemc_storage  = inc.deadstemc_storage
+    livecrootc_storage = inc.livecrootc_storage
+    deadcrootc_storage = inc.deadcrootc_storage
+    gresp_storage      = inc.gresp_storage
+    leafc_xfer         = inc.leafc_xfer
+    frootc_xfer        = inc.frootc_xfer
+    livestemc_xfer     = inc.livestemc_xfer
+    deadstemc_xfer     = inc.deadstemc_xfer
+    livecrootc_xfer    = inc.livecrootc_xfer
+    deadcrootc_xfer    = inc.deadcrootc_xfer
+    gresp_xfer         = inc.gresp_xfer
+
+    # ---- alias N state input arrays ----
+    leafn              = inn.leafn
+    frootn             = inn.frootn
+    livestemn          = inn.livestemn
+    livecrootn         = inn.livecrootn
+    deadstemn          = inn.deadstemn
+    deadcrootn         = inn.deadcrootn
+    retransn           = inn.retransn
+    leafn_storage      = inn.leafn_storage
+    frootn_storage     = inn.frootn_storage
+    livestemn_storage  = inn.livestemn_storage
+    deadstemn_storage  = inn.deadstemn_storage
+    livecrootn_storage = inn.livecrootn_storage
+    deadcrootn_storage = inn.deadcrootn_storage
+    leafn_xfer         = inn.leafn_xfer
+    frootn_xfer        = inn.frootn_xfer
+    livestemn_xfer     = inn.livestemn_xfer
+    deadstemn_xfer     = inn.deadstemn_xfer
+    livecrootn_xfer    = inn.livecrootn_xfer
+    deadcrootn_xfer    = inn.deadcrootn_xfer
+
+    # ---- alias scalar params (already at precision T) ----
+    k_mort                 = s.k_mort
+    days_per_year          = s.days_per_year
+    secspday               = s.secspday
+    spinup_factor_deadwood = s.spinup_factor_deadwood
 
     p = @index(Global)
     @inbounds if mask_soilp[p]
@@ -132,17 +315,17 @@ Ported from `CNGapMortality` in `CNGapMortalityMod.F90`.
 
         if use_cndv
             # Stress mortality from lpj's subr Mortality
-            if woody[ivtp] == 1.0
+            if woody[ivtp] == one(T)
                 if ivt[p] == 8
-                    mort_max = 0.03  # BDT boreal
+                    mort_max = T(0.03)  # BDT boreal
                 else
-                    mort_max = 0.01  # original value for all patches
+                    mort_max = T(0.01)  # original value for all patches
                 end
                 # heatstress and greffic calculated in Establishment once/yr
                 # Mortality rate inversely related to growth efficiency
                 # (Prentice et al 1993)
-                am = mort_max / (1.0 + k_mort * greffic[p])
-                am = min(1.0, am + heatstress[p])
+                am = mort_max / (one(T) + k_mort * greffic[p])
+                am = min(one(T), am + heatstress[p])
             else
                 # lpj didn't set this for grasses; cn does
                 am = r_mort[ivtp]
@@ -225,11 +408,11 @@ Ported from `CNGapMortality` in `CNGapMortalityMod.F90`.
 
         # added by F. Li and S. Levis
         if use_cndv
-            if woody[ivtp] == 1.0
-                if livestemc[p] + deadstemc[p] > 0.0
-                    nind[p] = nind[p] * (1.0 - m)
+            if woody[ivtp] == one(T)
+                if livestemc[p] + deadstemc[p] > zero(T)
+                    nind[p] = nind[p] * (one(T) - m)
                 else
-                    nind[p] = 0.0
+                    nind[p] = zero(T)
                 end
             end
         end
@@ -259,71 +442,116 @@ function cn_gap_mortality!(mask_soilp::AbstractVector{Bool},
     # The Fortran loop runs over a filtered patch range `bounds`; the mask is
     # active only on that range, so launching one thread per patch over the full
     # mask reproduces it (the kernel skips inactive patches). bounds == 1:np here.
-    _launch!(_gapmort_patch_kernel!,
-        cnveg_cf.m_leafc_to_litter_patch,
-        cnveg_cf.m_frootc_to_litter_patch,
-        cnveg_cf.m_livestemc_to_litter_patch,
-        cnveg_cf.m_livecrootc_to_litter_patch,
-        cnveg_cf.m_deadstemc_to_litter_patch,
-        cnveg_cf.m_deadcrootc_to_litter_patch,
-        cnveg_cf.m_leafc_storage_to_litter_patch,
-        cnveg_cf.m_frootc_storage_to_litter_patch,
-        cnveg_cf.m_livestemc_storage_to_litter_patch,
-        cnveg_cf.m_deadstemc_storage_to_litter_patch,
-        cnveg_cf.m_livecrootc_storage_to_litter_patch,
-        cnveg_cf.m_deadcrootc_storage_to_litter_patch,
-        cnveg_cf.m_gresp_storage_to_litter_patch,
-        cnveg_cf.m_leafc_xfer_to_litter_patch,
-        cnveg_cf.m_frootc_xfer_to_litter_patch,
-        cnveg_cf.m_livestemc_xfer_to_litter_patch,
-        cnveg_cf.m_deadstemc_xfer_to_litter_patch,
-        cnveg_cf.m_livecrootc_xfer_to_litter_patch,
-        cnveg_cf.m_deadcrootc_xfer_to_litter_patch,
-        cnveg_cf.m_gresp_xfer_to_litter_patch,
-        cnveg_nf.m_leafn_to_litter_patch,
-        cnveg_nf.m_frootn_to_litter_patch,
-        cnveg_nf.m_livestemn_to_litter_patch,
-        cnveg_nf.m_livecrootn_to_litter_patch,
-        cnveg_nf.m_deadstemn_to_litter_patch,
-        cnveg_nf.m_deadcrootn_to_litter_patch,
-        cnveg_nf.m_retransn_to_litter_patch,
-        cnveg_nf.m_leafn_storage_to_litter_patch,
-        cnveg_nf.m_frootn_storage_to_litter_patch,
-        cnveg_nf.m_livestemn_storage_to_litter_patch,
-        cnveg_nf.m_deadstemn_storage_to_litter_patch,
-        cnveg_nf.m_livecrootn_storage_to_litter_patch,
-        cnveg_nf.m_deadcrootn_storage_to_litter_patch,
-        cnveg_nf.m_leafn_xfer_to_litter_patch,
-        cnveg_nf.m_frootn_xfer_to_litter_patch,
-        cnveg_nf.m_livestemn_xfer_to_litter_patch,
-        cnveg_nf.m_deadstemn_xfer_to_litter_patch,
-        cnveg_nf.m_livecrootn_xfer_to_litter_patch,
-        cnveg_nf.m_deadcrootn_xfer_to_litter_patch,
-        dgvs.nind_patch,
-        mask_soilp, patch.itype, pftcon.woody,
-        dgvs.greffic_patch, dgvs.heatstress_patch,
-        params.r_mort,
-        cnveg_cs.leafc_patch, cnveg_cs.frootc_patch, cnveg_cs.livestemc_patch,
-        cnveg_cs.livecrootc_patch, cnveg_cs.deadstemc_patch, cnveg_cs.deadcrootc_patch,
-        cnveg_cs.leafc_storage_patch, cnveg_cs.frootc_storage_patch,
-        cnveg_cs.livestemc_storage_patch, cnveg_cs.deadstemc_storage_patch,
-        cnveg_cs.livecrootc_storage_patch, cnveg_cs.deadcrootc_storage_patch,
-        cnveg_cs.gresp_storage_patch,
-        cnveg_cs.leafc_xfer_patch, cnveg_cs.frootc_xfer_patch,
-        cnveg_cs.livestemc_xfer_patch, cnveg_cs.deadstemc_xfer_patch,
-        cnveg_cs.livecrootc_xfer_patch, cnveg_cs.deadcrootc_xfer_patch,
-        cnveg_cs.gresp_xfer_patch,
-        cnveg_ns.leafn_patch, cnveg_ns.frootn_patch, cnveg_ns.livestemn_patch,
-        cnveg_ns.livecrootn_patch, cnveg_ns.deadstemn_patch, cnveg_ns.deadcrootn_patch,
-        cnveg_ns.retransn_patch,
-        cnveg_ns.leafn_storage_patch, cnveg_ns.frootn_storage_patch,
-        cnveg_ns.livestemn_storage_patch, cnveg_ns.deadstemn_storage_patch,
-        cnveg_ns.livecrootn_storage_patch, cnveg_ns.deadcrootn_storage_patch,
-        cnveg_ns.leafn_xfer_patch, cnveg_ns.frootn_xfer_patch,
-        cnveg_ns.livestemn_xfer_patch, cnveg_ns.deadstemn_xfer_patch,
-        cnveg_ns.livecrootn_xfer_patch, cnveg_ns.deadcrootn_xfer_patch,
-        params.k_mort, days_per_year, secspday, spinup_factor_deadwood,
-        use_cndv, spinup_state, npcropmin)
+
+    # Working precision taken from an output array (Float32 on Metal, Float64 on host).
+    T = eltype(cnveg_cf.m_leafc_to_litter_patch)
+
+    outc = _GapMortOutC(;
+        m_leafc_to_litter              = cnveg_cf.m_leafc_to_litter_patch,
+        m_frootc_to_litter             = cnveg_cf.m_frootc_to_litter_patch,
+        m_livestemc_to_litter          = cnveg_cf.m_livestemc_to_litter_patch,
+        m_livecrootc_to_litter         = cnveg_cf.m_livecrootc_to_litter_patch,
+        m_deadstemc_to_litter          = cnveg_cf.m_deadstemc_to_litter_patch,
+        m_deadcrootc_to_litter         = cnveg_cf.m_deadcrootc_to_litter_patch,
+        m_leafc_storage_to_litter      = cnveg_cf.m_leafc_storage_to_litter_patch,
+        m_frootc_storage_to_litter     = cnveg_cf.m_frootc_storage_to_litter_patch,
+        m_livestemc_storage_to_litter  = cnveg_cf.m_livestemc_storage_to_litter_patch,
+        m_deadstemc_storage_to_litter  = cnveg_cf.m_deadstemc_storage_to_litter_patch,
+        m_livecrootc_storage_to_litter = cnveg_cf.m_livecrootc_storage_to_litter_patch,
+        m_deadcrootc_storage_to_litter = cnveg_cf.m_deadcrootc_storage_to_litter_patch,
+        m_gresp_storage_to_litter      = cnveg_cf.m_gresp_storage_to_litter_patch,
+        m_leafc_xfer_to_litter         = cnveg_cf.m_leafc_xfer_to_litter_patch,
+        m_frootc_xfer_to_litter        = cnveg_cf.m_frootc_xfer_to_litter_patch,
+        m_livestemc_xfer_to_litter     = cnveg_cf.m_livestemc_xfer_to_litter_patch,
+        m_deadstemc_xfer_to_litter     = cnveg_cf.m_deadstemc_xfer_to_litter_patch,
+        m_livecrootc_xfer_to_litter    = cnveg_cf.m_livecrootc_xfer_to_litter_patch,
+        m_deadcrootc_xfer_to_litter    = cnveg_cf.m_deadcrootc_xfer_to_litter_patch,
+        m_gresp_xfer_to_litter         = cnveg_cf.m_gresp_xfer_to_litter_patch)
+
+    outn = _GapMortOutN(;
+        m_leafn_to_litter              = cnveg_nf.m_leafn_to_litter_patch,
+        m_frootn_to_litter             = cnveg_nf.m_frootn_to_litter_patch,
+        m_livestemn_to_litter          = cnveg_nf.m_livestemn_to_litter_patch,
+        m_livecrootn_to_litter         = cnveg_nf.m_livecrootn_to_litter_patch,
+        m_deadstemn_to_litter          = cnveg_nf.m_deadstemn_to_litter_patch,
+        m_deadcrootn_to_litter         = cnveg_nf.m_deadcrootn_to_litter_patch,
+        m_retransn_to_litter           = cnveg_nf.m_retransn_to_litter_patch,
+        m_leafn_storage_to_litter      = cnveg_nf.m_leafn_storage_to_litter_patch,
+        m_frootn_storage_to_litter     = cnveg_nf.m_frootn_storage_to_litter_patch,
+        m_livestemn_storage_to_litter  = cnveg_nf.m_livestemn_storage_to_litter_patch,
+        m_deadstemn_storage_to_litter  = cnveg_nf.m_deadstemn_storage_to_litter_patch,
+        m_livecrootn_storage_to_litter = cnveg_nf.m_livecrootn_storage_to_litter_patch,
+        m_deadcrootn_storage_to_litter = cnveg_nf.m_deadcrootn_storage_to_litter_patch,
+        m_leafn_xfer_to_litter         = cnveg_nf.m_leafn_xfer_to_litter_patch,
+        m_frootn_xfer_to_litter        = cnveg_nf.m_frootn_xfer_to_litter_patch,
+        m_livestemn_xfer_to_litter     = cnveg_nf.m_livestemn_xfer_to_litter_patch,
+        m_deadstemn_xfer_to_litter     = cnveg_nf.m_deadstemn_xfer_to_litter_patch,
+        m_livecrootn_xfer_to_litter    = cnveg_nf.m_livecrootn_xfer_to_litter_patch,
+        m_deadcrootn_xfer_to_litter    = cnveg_nf.m_deadcrootn_xfer_to_litter_patch)
+
+    inc = _GapMortInC(;
+        leafc              = cnveg_cs.leafc_patch,
+        frootc             = cnveg_cs.frootc_patch,
+        livestemc          = cnveg_cs.livestemc_patch,
+        livecrootc         = cnveg_cs.livecrootc_patch,
+        deadstemc          = cnveg_cs.deadstemc_patch,
+        deadcrootc         = cnveg_cs.deadcrootc_patch,
+        leafc_storage      = cnveg_cs.leafc_storage_patch,
+        frootc_storage     = cnveg_cs.frootc_storage_patch,
+        livestemc_storage  = cnveg_cs.livestemc_storage_patch,
+        deadstemc_storage  = cnveg_cs.deadstemc_storage_patch,
+        livecrootc_storage = cnveg_cs.livecrootc_storage_patch,
+        deadcrootc_storage = cnveg_cs.deadcrootc_storage_patch,
+        gresp_storage      = cnveg_cs.gresp_storage_patch,
+        leafc_xfer         = cnveg_cs.leafc_xfer_patch,
+        frootc_xfer        = cnveg_cs.frootc_xfer_patch,
+        livestemc_xfer     = cnveg_cs.livestemc_xfer_patch,
+        deadstemc_xfer     = cnveg_cs.deadstemc_xfer_patch,
+        livecrootc_xfer    = cnveg_cs.livecrootc_xfer_patch,
+        deadcrootc_xfer    = cnveg_cs.deadcrootc_xfer_patch,
+        gresp_xfer         = cnveg_cs.gresp_xfer_patch)
+
+    inn = _GapMortInN(;
+        leafn              = cnveg_ns.leafn_patch,
+        frootn             = cnveg_ns.frootn_patch,
+        livestemn          = cnveg_ns.livestemn_patch,
+        livecrootn         = cnveg_ns.livecrootn_patch,
+        deadstemn          = cnveg_ns.deadstemn_patch,
+        deadcrootn         = cnveg_ns.deadcrootn_patch,
+        retransn           = cnveg_ns.retransn_patch,
+        leafn_storage      = cnveg_ns.leafn_storage_patch,
+        frootn_storage     = cnveg_ns.frootn_storage_patch,
+        livestemn_storage  = cnveg_ns.livestemn_storage_patch,
+        deadstemn_storage  = cnveg_ns.deadstemn_storage_patch,
+        livecrootn_storage = cnveg_ns.livecrootn_storage_patch,
+        deadcrootn_storage = cnveg_ns.deadcrootn_storage_patch,
+        leafn_xfer         = cnveg_ns.leafn_xfer_patch,
+        frootn_xfer        = cnveg_ns.frootn_xfer_patch,
+        livestemn_xfer     = cnveg_ns.livestemn_xfer_patch,
+        deadstemn_xfer     = cnveg_ns.deadstemn_xfer_patch,
+        livecrootn_xfer    = cnveg_ns.livecrootn_xfer_patch,
+        deadcrootn_xfer    = cnveg_ns.deadcrootn_xfer_patch)
+
+    # Float64 scalar params converted to working precision T (no Float64 in-kernel).
+    s = _GapScalars{T}(;
+        k_mort                 = T(params.k_mort),
+        days_per_year          = T(days_per_year),
+        secspday               = T(secspday),
+        spinup_factor_deadwood = T(spinup_factor_deadwood))
+
+    # Struct-first kernel: the bundle args carry no backend, so launch manually off
+    # an output array's backend and synchronize. ndrange = patch count (1:np).
+    np = length(mask_soilp)
+    if np != 0
+        backend = _kernel_backend(cnveg_cf.m_leafc_to_litter_patch)
+        _gapmort_patch_kernel!(backend)(
+            outc, outn, dgvs.nind_patch,
+            mask_soilp, patch.itype, pftcon.woody,
+            dgvs.greffic_patch, dgvs.heatstress_patch, params.r_mort,
+            inc, inn, s,
+            use_cndv, spinup_state, npcropmin; ndrange = np)
+        KA.synchronize(backend)
+    end
 
     return nothing
 end
@@ -351,37 +579,107 @@ Ported from `CNGap_PatchToColumn` in `CNGapMortalityMod.F90`.
 # floating-point accumulation order — and the result — is byte-identical on CPU.
 # The two C-to-CWD (stem then croot) and the two N-to-CWD adds are kept as two
 # separate _scatter_add! calls each, matching the host's two separate `+=`.
+## --- Device-view bundles for the gap-mortality patch->column scatter ---
+## Outputs: column litter (3D: col,level,litr-pool) + CWD (2D: col,level), C and N.
+Base.@kwdef struct _GapP2COut{V,M}
+    c_to_litr_c::M      # gap_mortality_c_to_litr_c_col  (col, level, litr)
+    c_to_cwdc::V        # gap_mortality_c_to_cwdc_col     (col, level)
+    n_to_litr_n::M      # gap_mortality_n_to_litr_n_col   (col, level, litr)
+    n_to_cwdn::V        # gap_mortality_n_to_cwdn_col      (col, level)
+end
+Adapt.@adapt_structure _GapP2COut
+
+## Profile matrices + per-PFT litter fractions (all 2D).
+Base.@kwdef struct _GapP2CProf{M}
+    lf_f::M; fr_f::M
+    leaf_prof::M; froot_prof::M; croot_prof::M; stem_prof::M
+end
+Adapt.@adapt_structure _GapP2CProf
+
+## Per-patch gap-mortality CARBON fluxes (all vectors).
+Base.@kwdef struct _GapP2CFluxC{V}
+    leafc::V; frootc::V; livestemc::V; deadstemc::V; livecrootc::V; deadcrootc::V
+    leafc_storage::V; frootc_storage::V; livestemc_storage::V; deadstemc_storage::V
+    livecrootc_storage::V; deadcrootc_storage::V; gresp_storage::V
+    leafc_xfer::V; frootc_xfer::V; livestemc_xfer::V; deadstemc_xfer::V
+    livecrootc_xfer::V; deadcrootc_xfer::V; gresp_xfer::V
+end
+Adapt.@adapt_structure _GapP2CFluxC
+
+## Per-patch gap-mortality NITROGEN fluxes (all vectors).
+Base.@kwdef struct _GapP2CFluxN{V}
+    leafn::V; frootn::V; livestemn::V; deadstemn::V; livecrootn::V; deadcrootn::V
+    retransn::V
+    leafn_storage::V; frootn_storage::V; livestemn_storage::V; deadstemn_storage::V
+    livecrootn_storage::V; deadcrootn_storage::V
+    leafn_xfer::V; frootn_xfer::V; livestemn_xfer::V; deadstemn_xfer::V
+    livecrootn_xfer::V; deadcrootn_xfer::V
+end
+Adapt.@adapt_structure _GapP2CFluxN
+
 @kernel function _gap_p2c_kernel!(
-        gap_mortality_c_to_litr_c, gap_mortality_c_to_cwdc,
-        gap_mortality_n_to_litr_n, gap_mortality_n_to_cwdn,
+        out::_GapP2COut, prof::_GapP2CProf,
+        fc::_GapP2CFluxC, fn::_GapP2CFluxN,
         @Const(mask_soilp), @Const(ivt), @Const(column), @Const(wtcol),
-        @Const(lf_f), @Const(fr_f),
-        @Const(leaf_prof), @Const(froot_prof), @Const(croot_prof), @Const(stem_prof),
-        @Const(m_leafc_to_litter), @Const(m_frootc_to_litter),
-        @Const(m_livestemc_to_litter), @Const(m_deadstemc_to_litter),
-        @Const(m_livecrootc_to_litter), @Const(m_deadcrootc_to_litter),
-        @Const(m_leafc_storage_to_litter), @Const(m_frootc_storage_to_litter),
-        @Const(m_livestemc_storage_to_litter), @Const(m_deadstemc_storage_to_litter),
-        @Const(m_livecrootc_storage_to_litter), @Const(m_deadcrootc_storage_to_litter),
-        @Const(m_gresp_storage_to_litter),
-        @Const(m_leafc_xfer_to_litter), @Const(m_frootc_xfer_to_litter),
-        @Const(m_livestemc_xfer_to_litter), @Const(m_deadstemc_xfer_to_litter),
-        @Const(m_livecrootc_xfer_to_litter), @Const(m_deadcrootc_xfer_to_litter),
-        @Const(m_gresp_xfer_to_litter),
-        @Const(m_leafn_to_litter), @Const(m_frootn_to_litter),
-        @Const(m_livestemn_to_litter), @Const(m_deadstemn_to_litter),
-        @Const(m_livecrootn_to_litter), @Const(m_deadcrootn_to_litter),
-        @Const(m_retransn_to_litter),
-        @Const(m_leafn_storage_to_litter), @Const(m_frootn_storage_to_litter),
-        @Const(m_livestemn_storage_to_litter), @Const(m_deadstemn_storage_to_litter),
-        @Const(m_livecrootn_storage_to_litter), @Const(m_deadcrootn_storage_to_litter),
-        @Const(m_leafn_xfer_to_litter), @Const(m_frootn_xfer_to_litter),
-        @Const(m_livestemn_xfer_to_litter), @Const(m_deadstemn_xfer_to_litter),
-        @Const(m_livecrootn_xfer_to_litter), @Const(m_deadcrootn_xfer_to_litter),
         nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_met_lit::Int)
 
     p = @index(Global)
     @inbounds if mask_soilp[p]
+        # Alias every device-view field to its Fortran-named local so the body
+        # below stays verbatim w.r.t. the original loose-arg kernel.
+        gap_mortality_c_to_litr_c = out.c_to_litr_c
+        gap_mortality_c_to_cwdc   = out.c_to_cwdc
+        gap_mortality_n_to_litr_n = out.n_to_litr_n
+        gap_mortality_n_to_cwdn   = out.n_to_cwdn
+
+        lf_f       = prof.lf_f
+        fr_f       = prof.fr_f
+        leaf_prof  = prof.leaf_prof
+        froot_prof = prof.froot_prof
+        croot_prof = prof.croot_prof
+        stem_prof  = prof.stem_prof
+
+        m_leafc_to_litter              = fc.leafc
+        m_frootc_to_litter             = fc.frootc
+        m_livestemc_to_litter          = fc.livestemc
+        m_deadstemc_to_litter          = fc.deadstemc
+        m_livecrootc_to_litter         = fc.livecrootc
+        m_deadcrootc_to_litter         = fc.deadcrootc
+        m_leafc_storage_to_litter      = fc.leafc_storage
+        m_frootc_storage_to_litter     = fc.frootc_storage
+        m_livestemc_storage_to_litter  = fc.livestemc_storage
+        m_deadstemc_storage_to_litter  = fc.deadstemc_storage
+        m_livecrootc_storage_to_litter = fc.livecrootc_storage
+        m_deadcrootc_storage_to_litter = fc.deadcrootc_storage
+        m_gresp_storage_to_litter      = fc.gresp_storage
+        m_leafc_xfer_to_litter         = fc.leafc_xfer
+        m_frootc_xfer_to_litter        = fc.frootc_xfer
+        m_livestemc_xfer_to_litter     = fc.livestemc_xfer
+        m_deadstemc_xfer_to_litter     = fc.deadstemc_xfer
+        m_livecrootc_xfer_to_litter    = fc.livecrootc_xfer
+        m_deadcrootc_xfer_to_litter    = fc.deadcrootc_xfer
+        m_gresp_xfer_to_litter         = fc.gresp_xfer
+
+        m_leafn_to_litter              = fn.leafn
+        m_frootn_to_litter             = fn.frootn
+        m_livestemn_to_litter          = fn.livestemn
+        m_deadstemn_to_litter          = fn.deadstemn
+        m_livecrootn_to_litter         = fn.livecrootn
+        m_deadcrootn_to_litter         = fn.deadcrootn
+        m_retransn_to_litter           = fn.retransn
+        m_leafn_storage_to_litter      = fn.leafn_storage
+        m_frootn_storage_to_litter     = fn.frootn_storage
+        m_livestemn_storage_to_litter  = fn.livestemn_storage
+        m_deadstemn_storage_to_litter  = fn.deadstemn_storage
+        m_livecrootn_storage_to_litter = fn.livecrootn_storage
+        m_deadcrootn_storage_to_litter = fn.deadcrootn_storage
+        m_leafn_xfer_to_litter         = fn.leafn_xfer
+        m_frootn_xfer_to_litter        = fn.frootn_xfer
+        m_livestemn_xfer_to_litter     = fn.livestemn_xfer
+        m_deadstemn_xfer_to_litter     = fn.deadstemn_xfer
+        m_livecrootn_xfer_to_litter    = fn.livecrootn_xfer
+        m_deadcrootn_xfer_to_litter    = fn.deadcrootn_xfer
+
         ivtp = ivt[p] + 1
         c    = column[p]
         wt   = wtcol[p]
@@ -465,36 +763,76 @@ function cn_gap_patch_to_column!(mask_soilp::AbstractVector{Bool},
 
     # The column accumulators are NOT zeroed here (the caller manages that); the
     # kernel only does `+=` scatters, matching the host loop's accumulation.
-    _launch!(_gap_p2c_kernel!,
-        cnveg_cf.gap_mortality_c_to_litr_c_col,
-        cnveg_cf.gap_mortality_c_to_cwdc_col,
-        cnveg_nf.gap_mortality_n_to_litr_n_col,
-        cnveg_nf.gap_mortality_n_to_cwdn_col,
-        mask_soilp, patch.itype, patch.column, patch.wtcol,
-        pftcon.lf_f, pftcon.fr_f,
-        leaf_prof, froot_prof, croot_prof, stem_prof,
-        cnveg_cf.m_leafc_to_litter_patch, cnveg_cf.m_frootc_to_litter_patch,
-        cnveg_cf.m_livestemc_to_litter_patch, cnveg_cf.m_deadstemc_to_litter_patch,
-        cnveg_cf.m_livecrootc_to_litter_patch, cnveg_cf.m_deadcrootc_to_litter_patch,
-        cnveg_cf.m_leafc_storage_to_litter_patch, cnveg_cf.m_frootc_storage_to_litter_patch,
-        cnveg_cf.m_livestemc_storage_to_litter_patch, cnveg_cf.m_deadstemc_storage_to_litter_patch,
-        cnveg_cf.m_livecrootc_storage_to_litter_patch, cnveg_cf.m_deadcrootc_storage_to_litter_patch,
-        cnveg_cf.m_gresp_storage_to_litter_patch,
-        cnveg_cf.m_leafc_xfer_to_litter_patch, cnveg_cf.m_frootc_xfer_to_litter_patch,
-        cnveg_cf.m_livestemc_xfer_to_litter_patch, cnveg_cf.m_deadstemc_xfer_to_litter_patch,
-        cnveg_cf.m_livecrootc_xfer_to_litter_patch, cnveg_cf.m_deadcrootc_xfer_to_litter_patch,
-        cnveg_cf.m_gresp_xfer_to_litter_patch,
-        cnveg_nf.m_leafn_to_litter_patch, cnveg_nf.m_frootn_to_litter_patch,
-        cnveg_nf.m_livestemn_to_litter_patch, cnveg_nf.m_deadstemn_to_litter_patch,
-        cnveg_nf.m_livecrootn_to_litter_patch, cnveg_nf.m_deadcrootn_to_litter_patch,
-        cnveg_nf.m_retransn_to_litter_patch,
-        cnveg_nf.m_leafn_storage_to_litter_patch, cnveg_nf.m_frootn_storage_to_litter_patch,
-        cnveg_nf.m_livestemn_storage_to_litter_patch, cnveg_nf.m_deadstemn_storage_to_litter_patch,
-        cnveg_nf.m_livecrootn_storage_to_litter_patch, cnveg_nf.m_deadcrootn_storage_to_litter_patch,
-        cnveg_nf.m_leafn_xfer_to_litter_patch, cnveg_nf.m_frootn_xfer_to_litter_patch,
-        cnveg_nf.m_livestemn_xfer_to_litter_patch, cnveg_nf.m_deadstemn_xfer_to_litter_patch,
-        cnveg_nf.m_livecrootn_xfer_to_litter_patch, cnveg_nf.m_deadcrootn_xfer_to_litter_patch,
-        nlevdecomp, i_litr_min, i_litr_max, i_met_lit)
+    #
+    # Metal's ~31-arg limit forbids passing ~52 arrays loose, so they are grouped
+    # into immutable Adapt-able device-view bundles (one kernel arg each). Index
+    # arrays (mask/itype/column) + the Int loop bounds stay loose. The kernel body
+    # aliases each bundle field back to its Fortran-named local, so the arithmetic
+    # — and the CPU float accumulation order — is byte-identical to the loose form.
+    out = _GapP2COut(;
+        c_to_litr_c = cnveg_cf.gap_mortality_c_to_litr_c_col,
+        c_to_cwdc   = cnveg_cf.gap_mortality_c_to_cwdc_col,
+        n_to_litr_n = cnveg_nf.gap_mortality_n_to_litr_n_col,
+        n_to_cwdn   = cnveg_nf.gap_mortality_n_to_cwdn_col)
+
+    prof = _GapP2CProf(;
+        lf_f = pftcon.lf_f, fr_f = pftcon.fr_f,
+        leaf_prof = leaf_prof, froot_prof = froot_prof,
+        croot_prof = croot_prof, stem_prof = stem_prof)
+
+    fc = _GapP2CFluxC(;
+        leafc              = cnveg_cf.m_leafc_to_litter_patch,
+        frootc             = cnveg_cf.m_frootc_to_litter_patch,
+        livestemc          = cnveg_cf.m_livestemc_to_litter_patch,
+        deadstemc          = cnveg_cf.m_deadstemc_to_litter_patch,
+        livecrootc         = cnveg_cf.m_livecrootc_to_litter_patch,
+        deadcrootc         = cnveg_cf.m_deadcrootc_to_litter_patch,
+        leafc_storage      = cnveg_cf.m_leafc_storage_to_litter_patch,
+        frootc_storage     = cnveg_cf.m_frootc_storage_to_litter_patch,
+        livestemc_storage  = cnveg_cf.m_livestemc_storage_to_litter_patch,
+        deadstemc_storage  = cnveg_cf.m_deadstemc_storage_to_litter_patch,
+        livecrootc_storage = cnveg_cf.m_livecrootc_storage_to_litter_patch,
+        deadcrootc_storage = cnveg_cf.m_deadcrootc_storage_to_litter_patch,
+        gresp_storage      = cnveg_cf.m_gresp_storage_to_litter_patch,
+        leafc_xfer         = cnveg_cf.m_leafc_xfer_to_litter_patch,
+        frootc_xfer        = cnveg_cf.m_frootc_xfer_to_litter_patch,
+        livestemc_xfer     = cnveg_cf.m_livestemc_xfer_to_litter_patch,
+        deadstemc_xfer     = cnveg_cf.m_deadstemc_xfer_to_litter_patch,
+        livecrootc_xfer    = cnveg_cf.m_livecrootc_xfer_to_litter_patch,
+        deadcrootc_xfer    = cnveg_cf.m_deadcrootc_xfer_to_litter_patch,
+        gresp_xfer         = cnveg_cf.m_gresp_xfer_to_litter_patch)
+
+    fn = _GapP2CFluxN(;
+        leafn              = cnveg_nf.m_leafn_to_litter_patch,
+        frootn             = cnveg_nf.m_frootn_to_litter_patch,
+        livestemn          = cnveg_nf.m_livestemn_to_litter_patch,
+        deadstemn          = cnveg_nf.m_deadstemn_to_litter_patch,
+        livecrootn         = cnveg_nf.m_livecrootn_to_litter_patch,
+        deadcrootn         = cnveg_nf.m_deadcrootn_to_litter_patch,
+        retransn           = cnveg_nf.m_retransn_to_litter_patch,
+        leafn_storage      = cnveg_nf.m_leafn_storage_to_litter_patch,
+        frootn_storage     = cnveg_nf.m_frootn_storage_to_litter_patch,
+        livestemn_storage  = cnveg_nf.m_livestemn_storage_to_litter_patch,
+        deadstemn_storage  = cnveg_nf.m_deadstemn_storage_to_litter_patch,
+        livecrootn_storage = cnveg_nf.m_livecrootn_storage_to_litter_patch,
+        deadcrootn_storage = cnveg_nf.m_deadcrootn_storage_to_litter_patch,
+        leafn_xfer         = cnveg_nf.m_leafn_xfer_to_litter_patch,
+        frootn_xfer        = cnveg_nf.m_frootn_xfer_to_litter_patch,
+        livestemn_xfer     = cnveg_nf.m_livestemn_xfer_to_litter_patch,
+        deadstemn_xfer     = cnveg_nf.m_deadstemn_xfer_to_litter_patch,
+        livecrootn_xfer    = cnveg_nf.m_livecrootn_xfer_to_litter_patch,
+        deadcrootn_xfer    = cnveg_nf.m_deadcrootn_xfer_to_litter_patch)
+
+    # Struct-first kernel: a device-view bundle carries no KA backend, so launch
+    # manually off a known device output array + synchronize (mirrors methane.jl).
+    ndrange = length(mask_soilp)
+    if ndrange != 0
+        backend = _kernel_backend(out.c_to_litr_c)
+        _gap_p2c_kernel!(backend)(out, prof, fc, fn,
+            mask_soilp, patch.itype, patch.column, patch.wtcol,
+            nlevdecomp, i_litr_min, i_litr_max, i_met_lit; ndrange = ndrange)
+        KA.synchronize(backend)
+    end
 
     return nothing
 end

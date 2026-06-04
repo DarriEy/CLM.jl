@@ -71,45 +71,126 @@ available C for allocation.
 
 Ported from `calc_gpp_mr_availc` in `CNAllocationMod.F90`.
 """
+# --- Device-view bundles for _alloc_gpp_mr_availc_kernel! (Metal arg-count safe) ---
+
+# Output arrays (mixes patch-vectors + reproductive matrices) -> {V,M}
+Base.@kwdef struct _AllocGppOut{V,M}
+    psnsun_to_cpool::V
+    psnshade_to_cpool::V
+    c13_psnsun_to_cpool::V
+    c13_psnshade_to_cpool::V
+    c14_psnsun_to_cpool::V
+    c14_psnshade_to_cpool::V
+    gpp_before_downreg::V
+    availc::V
+    leaf_curmr::V
+    leaf_xsmr::V
+    froot_curmr::V
+    froot_xsmr::V
+    livestem_curmr::V
+    livestem_xsmr::V
+    livecroot_curmr::V
+    livecroot_xsmr::V
+    reproductive_curmr::M
+    reproductive_xsmr::M
+    xsmrpool_recover_out::V
+    cpool_to_xsmrpool::V
+end
+Adapt.@adapt_structure _AllocGppOut
+
+# Read-only input arrays (mixes patch-vectors + reproductive_mr matrix) -> {V,M}
+Base.@kwdef struct _AllocGppIn{V,M}
+    psnsun_patch::V
+    psnsha_patch::V
+    laisun_patch::V
+    laisha_patch::V
+    c13_psnsun_patch::V
+    c13_psnsha_patch::V
+    c14_psnsun_patch::V
+    c14_psnsha_patch::V
+    woody::V
+    leaf_mr::V
+    froot_mr::V
+    livestem_mr::V
+    livecroot_mr::V
+    reproductive_mr::M
+    xsmrpool::V
+end
+Adapt.@adapt_structure _AllocGppIn
+
+# isbits scalar params at working precision
+Base.@kwdef struct _AllocGppScalars{T}
+    dayscrecover::T
+    secspday::T
+end
+
 @kernel function _alloc_gpp_mr_availc_kernel!(
-        psnsun_to_cpool, psnshade_to_cpool,
-        c13_psnsun_to_cpool, c13_psnshade_to_cpool,
-        c14_psnsun_to_cpool, c14_psnshade_to_cpool,
-        gpp_before_downreg, availc,
-        leaf_curmr, leaf_xsmr, froot_curmr, froot_xsmr,
-        livestem_curmr, livestem_xsmr, livecroot_curmr, livecroot_xsmr,
-        reproductive_curmr, reproductive_xsmr,
-        xsmrpool_recover_out, cpool_to_xsmrpool,
-        @Const(mask_soilp), @Const(itype),
-        @Const(psnsun_patch), @Const(psnsha_patch),
-        @Const(laisun_patch), @Const(laisha_patch),
-        @Const(c13_psnsun_patch), @Const(c13_psnsha_patch),
-        @Const(c14_psnsun_patch), @Const(c14_psnsha_patch),
-        @Const(woody),
-        @Const(leaf_mr), @Const(froot_mr),
-        @Const(livestem_mr), @Const(livecroot_mr),
-        @Const(reproductive_mr), @Const(croplive),
-        @Const(xsmrpool),
+        out::_AllocGppOut, in::_AllocGppIn,
+        @Const(mask_soilp), @Const(itype), @Const(croplive),
+        scal::_AllocGppScalars,
         do_c13::Bool, do_c14::Bool, use_matrixcn::Bool,
-        dayscrecover::Float64, npcropmin::Int, nrepr::Int)
+        npcropmin::Int, nrepr::Int)
     p = @index(Global)
     @inbounds if mask_soilp[p]
+        T = eltype(out.availc)
+
+        # alias every field to a Fortran-named local; body stays verbatim except literal -> T
+        psnsun_to_cpool      = out.psnsun_to_cpool
+        psnshade_to_cpool    = out.psnshade_to_cpool
+        c13_psnsun_to_cpool  = out.c13_psnsun_to_cpool
+        c13_psnshade_to_cpool = out.c13_psnshade_to_cpool
+        c14_psnsun_to_cpool  = out.c14_psnsun_to_cpool
+        c14_psnshade_to_cpool = out.c14_psnshade_to_cpool
+        gpp_before_downreg   = out.gpp_before_downreg
+        availc               = out.availc
+        leaf_curmr           = out.leaf_curmr
+        leaf_xsmr            = out.leaf_xsmr
+        froot_curmr          = out.froot_curmr
+        froot_xsmr           = out.froot_xsmr
+        livestem_curmr       = out.livestem_curmr
+        livestem_xsmr        = out.livestem_xsmr
+        livecroot_curmr      = out.livecroot_curmr
+        livecroot_xsmr       = out.livecroot_xsmr
+        reproductive_curmr   = out.reproductive_curmr
+        reproductive_xsmr    = out.reproductive_xsmr
+        xsmrpool_recover_out = out.xsmrpool_recover_out
+        cpool_to_xsmrpool    = out.cpool_to_xsmrpool
+
+        psnsun_patch    = in.psnsun_patch
+        psnsha_patch    = in.psnsha_patch
+        laisun_patch    = in.laisun_patch
+        laisha_patch    = in.laisha_patch
+        c13_psnsun_patch = in.c13_psnsun_patch
+        c13_psnsha_patch = in.c13_psnsha_patch
+        c14_psnsun_patch = in.c14_psnsun_patch
+        c14_psnsha_patch = in.c14_psnsha_patch
+        woody           = in.woody
+        leaf_mr         = in.leaf_mr
+        froot_mr        = in.froot_mr
+        livestem_mr     = in.livestem_mr
+        livecroot_mr    = in.livecroot_mr
+        reproductive_mr = in.reproductive_mr
+        xsmrpool        = in.xsmrpool
+
+        dayscrecover = scal.dayscrecover
+        secspday     = scal.secspday
+
         ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
 
         # Convert psn from umol/m2/s -> gC/m2/s
         # The input psn (psnsun and psnsha) are expressed per unit LAI
         # in the sunlit and shaded canopy. Scale by laisun and laisha.
-        psnsun_to_cpool[p]   = psnsun_patch[p] * laisun_patch[p] * 12.011e-6
-        psnshade_to_cpool[p] = psnsha_patch[p] * laisha_patch[p] * 12.011e-6
+        psnsun_to_cpool[p]   = psnsun_patch[p] * laisun_patch[p] * T(12.011e-6)
+        psnshade_to_cpool[p] = psnsha_patch[p] * laisha_patch[p] * T(12.011e-6)
 
         if do_c13
-            c13_psnsun_to_cpool[p]   = c13_psnsun_patch[p] * laisun_patch[p] * 12.011e-6
-            c13_psnshade_to_cpool[p] = c13_psnsha_patch[p] * laisha_patch[p] * 12.011e-6
+            c13_psnsun_to_cpool[p]   = c13_psnsun_patch[p] * laisun_patch[p] * T(12.011e-6)
+            c13_psnshade_to_cpool[p] = c13_psnsha_patch[p] * laisha_patch[p] * T(12.011e-6)
         end
 
         if do_c14
-            c14_psnsun_to_cpool[p]   = c14_psnsun_patch[p] * laisun_patch[p] * 12.011e-6
-            c14_psnshade_to_cpool[p] = c14_psnsha_patch[p] * laisha_patch[p] * 12.011e-6
+            c14_psnsun_to_cpool[p]   = c14_psnsun_patch[p] * laisun_patch[p] * T(12.011e-6)
+            c14_psnshade_to_cpool[p] = c14_psnsha_patch[p] * laisha_patch[p] * T(12.011e-6)
         end
 
         gpp = psnsun_to_cpool[p] + psnshade_to_cpool[p]
@@ -117,11 +198,11 @@ Ported from `calc_gpp_mr_availc` in `CNAllocationMod.F90`.
 
         # get the time step total maintenance respiration
         mr = leaf_mr[p] + froot_mr[p]
-        if woody[ivt] == 1.0
+        if woody[ivt] == one(T)
             mr = mr + livestem_mr[p] + livecroot_mr[p]
         elseif ivt >= npcropmin
             if croplive[p]
-                reproductive_mr_tot = 0.0
+                reproductive_mr_tot = zero(T)
                 for k in 1:nrepr
                     reproductive_mr_tot = reproductive_mr_tot + reproductive_mr[p, k]
                 end
@@ -130,8 +211,8 @@ Ported from `calc_gpp_mr_availc` in `CNAllocationMod.F90`.
         end
 
         # For Matrix solution if mr is very small set it to zero
-        if mr < -1.0e-15 && use_matrixcn
-            mr = 0.0
+        if mr < T(-1.0e-15) && use_matrixcn
+            mr = zero(T)
         end
 
         # carbon flux available for allocation
@@ -139,11 +220,11 @@ Ported from `calc_gpp_mr_availc` in `CNAllocationMod.F90`.
         availc[p] = availc_p
 
         # If mr > gpp, then some mr comes from gpp, the rest from cpool (xsmr)
-        if mr > 0.0 && availc_p < 0.0
+        if mr > zero(T) && availc_p < zero(T)
             curmr = gpp
             curmr_ratio = curmr / mr
         else
-            curmr_ratio = 1.0
+            curmr_ratio = one(T)
         end
 
         leaf_curmr[p]      = leaf_mr[p] * curmr_ratio
@@ -160,16 +241,16 @@ Ported from `calc_gpp_mr_availc` in `CNAllocationMod.F90`.
         end
 
         # no allocation when available c is negative
-        availc[p] = max(availc[p], 0.0)
+        availc[p] = max(availc[p], zero(T))
 
         # test for an xsmrpool deficit
-        if xsmrpool[p] < 0.0
-            xsmrpool_recover = -xsmrpool[p] / (dayscrecover * SECSPDAY)
+        if xsmrpool[p] < zero(T)
+            xsmrpool_recover = -xsmrpool[p] / (dayscrecover * secspday)
             if xsmrpool_recover < availc[p]
                 availc[p] = availc[p] - xsmrpool_recover
             else
                 xsmrpool_recover = availc[p]
-                availc[p] = 0.0
+                availc[p] = zero(T)
             end
             xsmrpool_recover_out[p] = xsmrpool_recover
             cpool_to_xsmrpool[p] = xsmrpool_recover
@@ -209,29 +290,59 @@ function calc_gpp_mr_availc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRange
     c14_psnsun_to_cpool   = do_c14 ? c14_cnveg_cf.psnsun_to_cpool_patch   : cnveg_cf.psnsun_to_cpool_patch
     c14_psnshade_to_cpool = do_c14 ? c14_cnveg_cf.psnshade_to_cpool_patch : cnveg_cf.psnshade_to_cpool_patch
 
-    _launch!(_alloc_gpp_mr_availc_kernel!,
-        cnveg_cf.psnsun_to_cpool_patch, cnveg_cf.psnshade_to_cpool_patch,
-        c13_psnsun_to_cpool, c13_psnshade_to_cpool,
-        c14_psnsun_to_cpool, c14_psnshade_to_cpool,
-        cnveg_cf.gpp_before_downreg_patch, cnveg_cf.availc_patch,
-        cnveg_cf.leaf_curmr_patch, cnveg_cf.leaf_xsmr_patch,
-        cnveg_cf.froot_curmr_patch, cnveg_cf.froot_xsmr_patch,
-        cnveg_cf.livestem_curmr_patch, cnveg_cf.livestem_xsmr_patch,
-        cnveg_cf.livecroot_curmr_patch, cnveg_cf.livecroot_xsmr_patch,
-        cnveg_cf.reproductive_curmr_patch, cnveg_cf.reproductive_xsmr_patch,
-        cnveg_cf.xsmrpool_recover_patch, cnveg_cf.cpool_to_xsmrpool_patch,
-        mask_soilp, patch.itype,
-        photosyns.psnsun_patch, photosyns.psnsha_patch,
-        canopystate.laisun_patch, canopystate.laisha_patch,
-        photosyns.c13_psnsun_patch, photosyns.c13_psnsha_patch,
-        photosyns.c14_psnsun_patch, photosyns.c14_psnsha_patch,
-        pftcon.woody,
-        cnveg_cf.leaf_mr_patch, cnveg_cf.froot_mr_patch,
-        cnveg_cf.livestem_mr_patch, cnveg_cf.livecroot_mr_patch,
-        cnveg_cf.reproductive_mr_patch, crop.croplive_patch,
-        cnveg_cs.xsmrpool_patch,
+    # Working precision (from an output array element type)
+    T = eltype(cnveg_cf.availc_patch)
+
+    out = _AllocGppOut(;
+        psnsun_to_cpool       = cnveg_cf.psnsun_to_cpool_patch,
+        psnshade_to_cpool     = cnveg_cf.psnshade_to_cpool_patch,
+        c13_psnsun_to_cpool   = c13_psnsun_to_cpool,
+        c13_psnshade_to_cpool = c13_psnshade_to_cpool,
+        c14_psnsun_to_cpool   = c14_psnsun_to_cpool,
+        c14_psnshade_to_cpool = c14_psnshade_to_cpool,
+        gpp_before_downreg    = cnveg_cf.gpp_before_downreg_patch,
+        availc                = cnveg_cf.availc_patch,
+        leaf_curmr            = cnveg_cf.leaf_curmr_patch,
+        leaf_xsmr             = cnveg_cf.leaf_xsmr_patch,
+        froot_curmr           = cnveg_cf.froot_curmr_patch,
+        froot_xsmr            = cnveg_cf.froot_xsmr_patch,
+        livestem_curmr        = cnveg_cf.livestem_curmr_patch,
+        livestem_xsmr         = cnveg_cf.livestem_xsmr_patch,
+        livecroot_curmr       = cnveg_cf.livecroot_curmr_patch,
+        livecroot_xsmr        = cnveg_cf.livecroot_xsmr_patch,
+        reproductive_curmr    = cnveg_cf.reproductive_curmr_patch,
+        reproductive_xsmr     = cnveg_cf.reproductive_xsmr_patch,
+        xsmrpool_recover_out  = cnveg_cf.xsmrpool_recover_patch,
+        cpool_to_xsmrpool     = cnveg_cf.cpool_to_xsmrpool_patch)
+
+    in = _AllocGppIn(;
+        psnsun_patch     = photosyns.psnsun_patch,
+        psnsha_patch     = photosyns.psnsha_patch,
+        laisun_patch     = canopystate.laisun_patch,
+        laisha_patch     = canopystate.laisha_patch,
+        c13_psnsun_patch = photosyns.c13_psnsun_patch,
+        c13_psnsha_patch = photosyns.c13_psnsha_patch,
+        c14_psnsun_patch = photosyns.c14_psnsun_patch,
+        c14_psnsha_patch = photosyns.c14_psnsha_patch,
+        woody            = pftcon.woody,
+        leaf_mr          = cnveg_cf.leaf_mr_patch,
+        froot_mr         = cnveg_cf.froot_mr_patch,
+        livestem_mr      = cnveg_cf.livestem_mr_patch,
+        livecroot_mr     = cnveg_cf.livecroot_mr_patch,
+        reproductive_mr  = cnveg_cf.reproductive_mr_patch,
+        xsmrpool         = cnveg_cs.xsmrpool_patch)
+
+    scal = _AllocGppScalars(; dayscrecover = T(dayscrecover), secspday = T(SECSPDAY))
+
+    backend = _kernel_backend(out.availc)
+    _alloc_gpp_mr_availc_kernel!(backend)(
+        out, in,
+        mask_soilp, patch.itype, crop.croplive_patch,
+        scal,
         do_c13, do_c14, use_matrixcn,
-        dayscrecover, npcropmin, nrepr)
+        npcropmin, nrepr;
+        ndrange = length(mask_soilp))
+    KA.synchronize(backend)
 
     return nothing
 end
@@ -378,6 +489,7 @@ Ported from `calc_allometry` in `CNAllocationMod.F90`.
         @Const(woody), @Const(graincn),
         @Const(aroot), @Const(aleaf), @Const(astem), @Const(arepr),
         use_fun::Bool, npcropmin::Int, nrepr::Int)
+    T = eltype(c_allometry)
     p = @index(Global)
     @inbounds if mask_soilp[p]
         ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
@@ -386,15 +498,15 @@ Ported from `calc_allometry` in `CNAllocationMod.F90`.
         f2 = croot_stem[ivt]
 
         # modified wood allocation to be 2.2 at npp=800 gC/m2/yr, 0.2 at npp=0
-        if stem_leaf[ivt] == -1.0
-            f3 = (2.7 / (1.0 + exp(-0.004 * (annsum_npp[p] - 300.0)))) - 0.4
+        if stem_leaf[ivt] == T(-1.0)
+            f3 = (T(2.7) / (one(T) + exp(T(-0.004) * (annsum_npp[p] - T(300.0))))) - T(0.4)
         else
             f3 = stem_leaf[ivt]
         end
 
         f4  = flivewd[ivt]
         if ivt >= npcropmin
-            g1 = 0.25
+            g1 = T(0.25)
         else
             g1 = grperc[ivt]
         end
@@ -408,32 +520,32 @@ Ported from `calc_allometry` in `CNAllocationMod.F90`.
         if !use_fun
             g1a = g1
         else
-            g1a = 0.0
+            g1a = zero(T)
         end
 
-        if woody[ivt] == 1.0
-            c_allometry[p] = (1.0 + g1a) * (1.0 + f1 + f3 * (1.0 + f2))
-            n_allometry[p] = 1.0 / cnl + f1 / cnfr +
-                (f3 * f4 * (1.0 + f2)) / cnlw +
-                (f3 * (1.0 - f4) * (1.0 + f2)) / cndw
+        if woody[ivt] == one(T)
+            c_allometry[p] = (one(T) + g1a) * (one(T) + f1 + f3 * (one(T) + f2))
+            n_allometry[p] = one(T) / cnl + f1 / cnfr +
+                (f3 * f4 * (one(T) + f2)) / cnlw +
+                (f3 * (one(T) - f4) * (one(T) + f2)) / cndw
         elseif ivt >= npcropmin  # skip generic crops
             cng = graincn[ivt]
             f1 = aroot[p] / aleaf[p]
             f3 = astem[p] / aleaf[p]
-            f5_tot   = 0.0
-            f5_n_tot = 0.0
+            f5_tot   = zero(T)
+            f5_n_tot = zero(T)
             for k in 1:nrepr
                 f5k = arepr[p, k] / aleaf[p]
                 f5_tot   = f5_tot + f5k
                 f5_n_tot = f5_n_tot + f5k / cng
             end
-            c_allometry[p] = (1.0 + g1a) * (1.0 + f1 + f5_tot + f3 * (1.0 + f2))
-            n_allometry[p] = 1.0 / cnl + f1 / cnfr + f5_n_tot +
-                (f3 * f4 * (1.0 + f2)) / cnlw +
-                (f3 * (1.0 - f4) * (1.0 + f2)) / cndw
+            c_allometry[p] = (one(T) + g1a) * (one(T) + f1 + f5_tot + f3 * (one(T) + f2))
+            n_allometry[p] = one(T) / cnl + f1 / cnfr + f5_n_tot +
+                (f3 * f4 * (one(T) + f2)) / cnlw +
+                (f3 * (one(T) - f4) * (one(T) + f2)) / cndw
         else
-            c_allometry[p] = 1.0 + g1a + f1 + f1 * g1a
-            n_allometry[p] = 1.0 / cnl + f1 / cnfr
+            c_allometry[p] = one(T) + g1a + f1 + f1 * g1a
+            n_allometry[p] = one(T) / cnl + f1 / cnfr
         end
     end
 end

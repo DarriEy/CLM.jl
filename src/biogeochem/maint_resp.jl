@@ -76,7 +76,7 @@ Ported from `CNMResp` in `CNMRespMod.F90`.
     c = @index(Global)
     @inbounds if mask_soilc[c]
         for j in 1:nlevgrnd
-            tcsoi[c, j] = Q10^((t_soisno[c, j + joff] - T(TFRZ_) - T(20.0)) / T(10.0))
+            tcsoi[c, j] = Q10^((t_soisno[c, j + joff] - TFRZ_ - T(20.0)) / T(10.0))
         end
     end
 end
@@ -97,7 +97,7 @@ end
     p = @index(Global)
     @inbounds if mask_soilp[p]
         # Temperature correction from 2m air temperature
-        tc = Q10^((t_ref2m[p] - T(TFRZ_) - T(20.0)) / T(10.0))
+        tc = Q10^((t_ref2m[p] - TFRZ_ - T(20.0)) / T(10.0))
 
         # Local copies of base rates (may be modified by acclimation)
         br_local      = br
@@ -105,7 +105,7 @@ end
 
         # Acclimation of root and stem respiration fluxes
         if rootstem_acc
-            acc = T(10.0)^(T(-0.00794) * ((t10[p] - T(TFRZ_)) - T(25.0)))
+            acc = T(10.0)^(T(-0.00794) * ((t10[p] - TFRZ_) - T(25.0)))
             br_local      = br_local      * acc
             br_root_local = br_root_local * acc
         end
@@ -147,7 +147,7 @@ end
         # Local root base rate (may be modified by acclimation)
         br_root_local = br_root
         if rootstem_acc
-            br_root_local = br_root_local * T(10.0)^(T(-0.00794) * ((t10[p] - T(TFRZ_)) - T(25.0)))
+            br_root_local = br_root_local * T(10.0)^(T(-0.00794) * ((t10[p] - TFRZ_) - T(25.0)))
         end
 
         # Ascending-j accumulation into a local, write froot_mr[p] once
@@ -223,22 +223,27 @@ function cn_mresp!(mask_soilc::BitVector, mask_soilp::BitVector,
     FT = eltype(t_soisno)
     tcsoi = Matrix{FT}(undef, last(bounds_c), nlevgrnd)
 
+    # Convert Float64 scalar args to the working precision so no double is
+    # materialized inside the kernel on a Float32-only backend (Metal).
+    FTc = eltype(tcsoi)
     _launch!(_mresp_tcsoi_kernel!, tcsoi, mask_soilc, t_soisno,
-             Q10, TFRZ, joff, nlevgrnd; ndrange = size(tcsoi, 1))
+             FTc(Q10), FTc(TFRZ), joff, nlevgrnd; ndrange = size(tcsoi, 1))
 
     # --- Patch loop: leaf and live wood maintenance respiration ---
+    FTp = eltype(leaf_mr)
     _launch!(_mresp_patch_kernel!, leaf_mr, livestem_mr, livecroot_mr,
              reproductive_mr, froot_mr,
              mask_soilp, ivt, woody, frac_veg_nosno,
              lmrsun, laisun, lmrsha, laisha,
              t_ref2m, t10, livestemn, livecrootn, reproductiven,
-             Q10, TFRZ, br, br_root,
+             FTp(Q10), FTp(TFRZ), FTp(br), FTp(br_root),
              rootstem_acc, npcropmin, nrepr)
 
     # --- Soil and patch loop: fine root maintenance respiration ---
+    FTf = eltype(froot_mr)
     _launch!(_mresp_froot_kernel!, froot_mr, mask_soilp,
              column, t10, frootn, crootfr, tcsoi,
-             TFRZ, br_root, rootstem_acc, nlevgrnd)
+             FTf(TFRZ), FTf(br_root), rootstem_acc, nlevgrnd)
 
     return nothing
 end

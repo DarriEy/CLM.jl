@@ -41,12 +41,13 @@ Ported from `CNAnnualUpdate` in `CNAnnualUpdateMod.F90`.
 @kernel function _cn_annual_eoy_col_kernel!(end_of_year, annsum_counter_col,
                                             @Const(mask_bgc_soilc), @Const(is_fates),
                                             dt, secspyear, c_lo, c_hi)
+    T = eltype(annsum_counter_col)
     c = @index(Global)
     @inbounds if c >= c_lo && c <= c_hi && mask_bgc_soilc[c] && !is_fates[c]
         annsum_counter_col[c] += dt
         if annsum_counter_col[c] >= secspyear
             end_of_year[c] = true
-            annsum_counter_col[c] = 0.0
+            annsum_counter_col[c] = zero(T)
         end
     end
 end
@@ -68,29 +69,30 @@ end
                                           @Const(mask_bgc_vegp), @Const(pcol),
                                           @Const(end_of_year), @Const(is_fates),
                                           dt, p_lo, p_hi)
+    T = eltype(annsum_potential_gpp_patch)
     p = @index(Global)
     @inbounds if p >= p_lo && p <= p_hi && mask_bgc_vegp[p]
         c = pcol[p]
         if end_of_year[c] && !is_fates[c]
             # update annual plant ndemand accumulator
             annsum_potential_gpp_patch[p]  = tempsum_potential_gpp_patch[p]
-            tempsum_potential_gpp_patch[p] = 0.0
+            tempsum_potential_gpp_patch[p] = zero(T)
 
             # update annual total N retranslocation accumulator
             annmax_retransn_patch[p]  = tempmax_retransn_patch[p]
-            tempmax_retransn_patch[p] = 0.0
+            tempmax_retransn_patch[p] = zero(T)
 
             # update annual average 2m air temperature accumulator
             annavg_t2m_patch[p]  = tempavg_t2m_patch[p]
-            tempavg_t2m_patch[p] = 0.0
+            tempavg_t2m_patch[p] = zero(T)
 
             # update annual NPP accumulator, convert to annual total
             annsum_npp_patch[p]  = tempsum_npp_patch[p] * dt
-            tempsum_npp_patch[p] = 0.0
+            tempsum_npp_patch[p] = zero(T)
 
             # update annual litfall accumulator, convert to annual total
             annsum_litfall_patch[p]  = tempsum_litfall_patch[p] * dt
-            tempsum_litfall_patch[p] = 0.0
+            tempsum_litfall_patch[p] = zero(T)
         end
     end
 end
@@ -115,12 +117,16 @@ function cn_annual_update!(mask_bgc_soilc::AbstractVector{Bool},
     # loop2 (per-patch kernel) reads end_of_year[col[p]].
     end_of_year = fill(false, length(mask_bgc_soilc))
 
+    # Convert Float64 scalar args to the working precision so no double is
+    # materialized inside the kernels on a Float32-only backend (Metal).
+    FTe = eltype(cnveg_state.annsum_counter_col)
     _launch!(_cn_annual_eoy_col_kernel!, end_of_year,
              cnveg_state.annsum_counter_col,
              mask_bgc_soilc, col.is_fates,
-             dt, secspyear, first(bounds_c), last(bounds_c))
+             FTe(dt), FTe(secspyear), first(bounds_c), last(bounds_c))
 
     # --- Patch-level annual update ---
+    FTp = eltype(cnveg_carbonflux.annsum_npp_patch)
     _launch!(_cn_annual_patch_kernel!,
              cnveg_state.annsum_potential_gpp_patch,
              cnveg_state.tempsum_potential_gpp_patch,
@@ -133,7 +139,7 @@ function cn_annual_update!(mask_bgc_soilc::AbstractVector{Bool},
              cnveg_carbonflux.annsum_litfall_patch,
              cnveg_carbonflux.tempsum_litfall_patch,
              mask_bgc_vegp, patch.column, end_of_year, col.is_fates,
-             dt, first(bounds_p), last(bounds_p))
+             FTp(dt), first(bounds_p), last(bounds_p))
 
     # any_vegp gates the p2c averaging: true iff some in-range, non-FATES BGC
     # veg patch sits on an end-of-year column. Resolved on the host.
