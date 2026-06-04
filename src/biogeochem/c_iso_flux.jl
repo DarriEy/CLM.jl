@@ -888,22 +888,76 @@ end
 # Per-patch fire litter scatter into the metabolic + non-metabolic litter pools.
 # One thread per patch p; internal j (and the inner i) loops accumulate into this
 # patch's column cc. Byte-identical accumulation order to the host `for p: for j`.
+# --- Device-view bundles for the CIsoFlux3 fire litter patch->column scatter ---
+# Output: column metabolic + non-metabolic litter fire flux (3D: col, level, litr-pool).
+Base.@kwdef struct _CIsoFlux3LitrFireOut{A3}
+    m_c_to_litr_fire_col::A3   # (col, level, litr)
+end
+Adapt.@adapt_structure _CIsoFlux3LitrFireOut
+
+# Per-patch fire-mortality litter CARBON fluxes (all vectors).
+Base.@kwdef struct _CIsoFlux3LitrFireFlux{V}
+    m_leafc_to_litter_fire::V
+    m_leafc_storage_to_litter_fire::V
+    m_leafc_xfer_to_litter_fire::V
+    m_gresp_storage_to_litter_fire::V
+    m_gresp_xfer_to_litter_fire::V
+    m_frootc_to_litter_fire::V
+    m_frootc_storage_to_litter_fire::V
+    m_frootc_xfer_to_litter_fire::V
+    m_livestemc_storage_to_litter_fire::V
+    m_livestemc_xfer_to_litter_fire::V
+    m_deadstemc_storage_to_litter_fire::V
+    m_deadstemc_xfer_to_litter_fire::V
+    m_livecrootc_storage_to_litter_fire::V
+    m_livecrootc_xfer_to_litter_fire::V
+    m_deadcrootc_storage_to_litter_fire::V
+    m_deadcrootc_xfer_to_litter_fire::V
+end
+Adapt.@adapt_structure _CIsoFlux3LitrFireFlux
+
+# Profile matrices + per-PFT litter fractions (all 2D).
+Base.@kwdef struct _CIsoFlux3LitrFireProf{M}
+    lf_f::M; fr_f::M
+    leaf_prof::M; froot_prof::M; stem_prof::M; croot_prof::M
+end
+Adapt.@adapt_structure _CIsoFlux3LitrFireProf
+
 @kernel function _ciso_flux3_litrfire_kernel!(
-        m_c_to_litr_fire_col,
-        @Const(m_leafc_to_litter_fire_patch), @Const(m_leafc_storage_to_litter_fire_patch),
-        @Const(m_leafc_xfer_to_litter_fire_patch), @Const(m_gresp_storage_to_litter_fire_patch),
-        @Const(m_gresp_xfer_to_litter_fire_patch), @Const(m_frootc_to_litter_fire_patch),
-        @Const(m_frootc_storage_to_litter_fire_patch), @Const(m_frootc_xfer_to_litter_fire_patch),
-        @Const(m_livestemc_storage_to_litter_fire_patch), @Const(m_livestemc_xfer_to_litter_fire_patch),
-        @Const(m_deadstemc_storage_to_litter_fire_patch), @Const(m_deadstemc_xfer_to_litter_fire_patch),
-        @Const(m_livecrootc_storage_to_litter_fire_patch), @Const(m_livecrootc_xfer_to_litter_fire_patch),
-        @Const(m_deadcrootc_storage_to_litter_fire_patch), @Const(m_deadcrootc_xfer_to_litter_fire_patch),
-        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
-        @Const(stem_prof), @Const(croot_prof),
+        out::_CIsoFlux3LitrFireOut, fl::_CIsoFlux3LitrFireFlux,
+        prof::_CIsoFlux3LitrFireProf,
         @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
         nlevdecomp::Int, i_met_lit::Int, i_litr_max::Int, pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        # Alias every device-view field to its original loose name so the body
+        # (the _scatter_add! calls) stays verbatim w.r.t. the original kernel.
+        m_c_to_litr_fire_col = out.m_c_to_litr_fire_col
+
+        m_leafc_to_litter_fire_patch          = fl.m_leafc_to_litter_fire
+        m_leafc_storage_to_litter_fire_patch  = fl.m_leafc_storage_to_litter_fire
+        m_leafc_xfer_to_litter_fire_patch     = fl.m_leafc_xfer_to_litter_fire
+        m_gresp_storage_to_litter_fire_patch  = fl.m_gresp_storage_to_litter_fire
+        m_gresp_xfer_to_litter_fire_patch     = fl.m_gresp_xfer_to_litter_fire
+        m_frootc_to_litter_fire_patch         = fl.m_frootc_to_litter_fire
+        m_frootc_storage_to_litter_fire_patch = fl.m_frootc_storage_to_litter_fire
+        m_frootc_xfer_to_litter_fire_patch    = fl.m_frootc_xfer_to_litter_fire
+        m_livestemc_storage_to_litter_fire_patch = fl.m_livestemc_storage_to_litter_fire
+        m_livestemc_xfer_to_litter_fire_patch    = fl.m_livestemc_xfer_to_litter_fire
+        m_deadstemc_storage_to_litter_fire_patch = fl.m_deadstemc_storage_to_litter_fire
+        m_deadstemc_xfer_to_litter_fire_patch    = fl.m_deadstemc_xfer_to_litter_fire
+        m_livecrootc_storage_to_litter_fire_patch = fl.m_livecrootc_storage_to_litter_fire
+        m_livecrootc_xfer_to_litter_fire_patch    = fl.m_livecrootc_xfer_to_litter_fire
+        m_deadcrootc_storage_to_litter_fire_patch = fl.m_deadcrootc_storage_to_litter_fire
+        m_deadcrootc_xfer_to_litter_fire_patch    = fl.m_deadcrootc_xfer_to_litter_fire
+
+        lf_f       = prof.lf_f
+        fr_f       = prof.fr_f
+        leaf_prof  = prof.leaf_prof
+        froot_prof = prof.froot_prof
+        stem_prof  = prof.stem_prof
+        croot_prof = prof.croot_prof
+
         cc = patch_column[p]
         for j in 1:nlevdecomp
             _scatter_add!(m_c_to_litr_fire_col, cc, j, i_met_lit,
@@ -1080,28 +1134,45 @@ function c_iso_flux3!(soilbiogeochem_state::SoilBiogeochemStateData,
             nlevdecomp, ndecomp_pools, first(bounds_p), last(bounds_p);
             ndrange = length(mask_soilp))
 
-        _launch!(_ciso_flux3_litrfire_kernel!,
-            iso_cnveg_cf.m_c_to_litr_fire_col,
-            iso_cnveg_cf.m_leafc_to_litter_fire_patch,
-            iso_cnveg_cf.m_leafc_storage_to_litter_fire_patch,
-            iso_cnveg_cf.m_leafc_xfer_to_litter_fire_patch,
-            iso_cnveg_cf.m_gresp_storage_to_litter_fire_patch,
-            iso_cnveg_cf.m_gresp_xfer_to_litter_fire_patch,
-            iso_cnveg_cf.m_frootc_to_litter_fire_patch,
-            iso_cnveg_cf.m_frootc_storage_to_litter_fire_patch,
-            iso_cnveg_cf.m_frootc_xfer_to_litter_fire_patch,
-            iso_cnveg_cf.m_livestemc_storage_to_litter_fire_patch,
-            iso_cnveg_cf.m_livestemc_xfer_to_litter_fire_patch,
-            iso_cnveg_cf.m_deadstemc_storage_to_litter_fire_patch,
-            iso_cnveg_cf.m_deadstemc_xfer_to_litter_fire_patch,
-            iso_cnveg_cf.m_livecrootc_storage_to_litter_fire_patch,
-            iso_cnveg_cf.m_livecrootc_xfer_to_litter_fire_patch,
-            iso_cnveg_cf.m_deadcrootc_storage_to_litter_fire_patch,
-            iso_cnveg_cf.m_deadcrootc_xfer_to_litter_fire_patch,
-            lf_f, fr_f, leaf_prof, froot_prof, stem_prof, croot_prof,
-            mask_soilp, ivt, patch_column, wtcol,
-            nlevdecomp, i_met_lit, i_litr_max, first(bounds_p), last(bounds_p);
-            ndrange = length(mask_soilp))
+# Replaces the `_launch!(_ciso_flux3_litrfire_kernel!, ...)` call inside `c_iso_flux3!`
+# (the second `_launch!` in the `if !isempty(bounds_p)` block, after the cwdfire launch).
+# Build the device-view bundles, then launch manually off a known device output array
+# + synchronize (a device-view bundle carries no KA backend).
+        out_lf = _CIsoFlux3LitrFireOut(;
+            m_c_to_litr_fire_col = iso_cnveg_cf.m_c_to_litr_fire_col)
+
+        fl_lf = _CIsoFlux3LitrFireFlux(;
+            m_leafc_to_litter_fire             = iso_cnveg_cf.m_leafc_to_litter_fire_patch,
+            m_leafc_storage_to_litter_fire     = iso_cnveg_cf.m_leafc_storage_to_litter_fire_patch,
+            m_leafc_xfer_to_litter_fire        = iso_cnveg_cf.m_leafc_xfer_to_litter_fire_patch,
+            m_gresp_storage_to_litter_fire     = iso_cnveg_cf.m_gresp_storage_to_litter_fire_patch,
+            m_gresp_xfer_to_litter_fire        = iso_cnveg_cf.m_gresp_xfer_to_litter_fire_patch,
+            m_frootc_to_litter_fire            = iso_cnveg_cf.m_frootc_to_litter_fire_patch,
+            m_frootc_storage_to_litter_fire    = iso_cnveg_cf.m_frootc_storage_to_litter_fire_patch,
+            m_frootc_xfer_to_litter_fire       = iso_cnveg_cf.m_frootc_xfer_to_litter_fire_patch,
+            m_livestemc_storage_to_litter_fire = iso_cnveg_cf.m_livestemc_storage_to_litter_fire_patch,
+            m_livestemc_xfer_to_litter_fire    = iso_cnveg_cf.m_livestemc_xfer_to_litter_fire_patch,
+            m_deadstemc_storage_to_litter_fire = iso_cnveg_cf.m_deadstemc_storage_to_litter_fire_patch,
+            m_deadstemc_xfer_to_litter_fire    = iso_cnveg_cf.m_deadstemc_xfer_to_litter_fire_patch,
+            m_livecrootc_storage_to_litter_fire = iso_cnveg_cf.m_livecrootc_storage_to_litter_fire_patch,
+            m_livecrootc_xfer_to_litter_fire    = iso_cnveg_cf.m_livecrootc_xfer_to_litter_fire_patch,
+            m_deadcrootc_storage_to_litter_fire = iso_cnveg_cf.m_deadcrootc_storage_to_litter_fire_patch,
+            m_deadcrootc_xfer_to_litter_fire    = iso_cnveg_cf.m_deadcrootc_xfer_to_litter_fire_patch)
+
+        prof_lf = _CIsoFlux3LitrFireProf(;
+            lf_f = lf_f, fr_f = fr_f,
+            leaf_prof = leaf_prof, froot_prof = froot_prof,
+            stem_prof = stem_prof, croot_prof = croot_prof)
+
+        ndrange_lf = length(mask_soilp)
+        if ndrange_lf != 0
+            backend_lf = _kernel_backend(out_lf.m_c_to_litr_fire_col)
+            _ciso_flux3_litrfire_kernel!(backend_lf)(out_lf, fl_lf, prof_lf,
+                mask_soilp, ivt, patch_column, wtcol,
+                nlevdecomp, i_met_lit, i_litr_max, first(bounds_p), last(bounds_p);
+                ndrange = ndrange_lf)
+            KA.synchronize(backend_lf)
+        end
     end
 
     return nothing
@@ -1221,26 +1292,99 @@ end
 # The four CWD `+=` adds are kept as four separate _scatter_add! calls in the host
 # statement order, and the metabolic-litter add keeps the host's full RHS sum, so
 # CPU float accumulation is byte-identical to the host `for j: for p`.
+# ---------------------------------------------------------------------------
+# Device-view structs for _ciso_gap_p2c_kernel! (Metal ~31-arg limit grouping).
+# Each is one immutable, @adapt_structure'd bundle so adapt(MtlArray, …) moves the
+# fields to device and the whole struct passes as ONE kernel argument.
+#   - _GapP2cFluxIn{V}: the 20 per-patch gap-mortality C flux input vectors.
+#   - _GapP2cOut{M,A3}: the column scatter outputs (3D litter _vr + 2D CWD).
+#   - _GapP2cProf{M}:   the lf_f/fr_f partition matrices + 4 profile matrices.
+# Fields keep their ORIGINAL loose names (minus the *_patch / *_col suffixes that
+# are re-aliased at the kernel top), so the _scatter_add! body stays verbatim.
+# ---------------------------------------------------------------------------
+Base.@kwdef struct _GapP2cFluxIn{V}
+    m_leafc_to_litter              ::V
+    m_frootc_to_litter             ::V
+    m_livestemc_to_litter          ::V
+    m_deadstemc_to_litter          ::V
+    m_livecrootc_to_litter         ::V
+    m_deadcrootc_to_litter         ::V
+    m_leafc_storage_to_litter      ::V
+    m_frootc_storage_to_litter     ::V
+    m_livestemc_storage_to_litter  ::V
+    m_deadstemc_storage_to_litter  ::V
+    m_livecrootc_storage_to_litter ::V
+    m_deadcrootc_storage_to_litter ::V
+    m_gresp_storage_to_litter      ::V
+    m_leafc_xfer_to_litter         ::V
+    m_frootc_xfer_to_litter        ::V
+    m_livestemc_xfer_to_litter     ::V
+    m_deadstemc_xfer_to_litter     ::V
+    m_livecrootc_xfer_to_litter    ::V
+    m_deadcrootc_xfer_to_litter    ::V
+    m_gresp_xfer_to_litter         ::V
+end
+Adapt.@adapt_structure _GapP2cFluxIn
+
+Base.@kwdef struct _GapP2cOut{M,A3}
+    gap_mortality_c_to_litr_c_col ::A3   # (col, level, litter-pool) — 3D scatter
+    gap_mortality_c_to_cwdc_col   ::M    # (col, level)             — 2D scatter
+end
+Adapt.@adapt_structure _GapP2cOut
+
+Base.@kwdef struct _GapP2cProf{M}
+    lf_f       ::M   # (ivt+1, litter-pool) leaf partition
+    fr_f       ::M   # (ivt+1, litter-pool) fine-root partition
+    leaf_prof  ::M   # (patch, level)
+    froot_prof ::M   # (patch, level)
+    croot_prof ::M   # (patch, level)
+    stem_prof  ::M   # (patch, level)
+end
+Adapt.@adapt_structure _GapP2cProf
+
+# Per-patch gap-mortality scatter into column litter/CWD pools. One thread per
+# patch p; internal j (and inner i) loops accumulate into this patch's column c.
+# Array args grouped into device-view structs (fin/out/prof) to clear the Metal
+# ~31-arg limit; every struct field is aliased to its original loose name at the
+# kernel top so the _scatter_add! body is VERBATIM (byte-identical CPU accumulation
+# to the host `for j: for p`).
 @kernel function _ciso_gap_p2c_kernel!(
-        gap_mortality_c_to_litr_c_col, gap_mortality_c_to_cwdc_col,
-        @Const(m_leafc_to_litter_patch), @Const(m_frootc_to_litter_patch),
-        @Const(m_livestemc_to_litter_patch), @Const(m_deadstemc_to_litter_patch),
-        @Const(m_livecrootc_to_litter_patch), @Const(m_deadcrootc_to_litter_patch),
-        @Const(m_leafc_storage_to_litter_patch), @Const(m_frootc_storage_to_litter_patch),
-        @Const(m_livestemc_storage_to_litter_patch), @Const(m_deadstemc_storage_to_litter_patch),
-        @Const(m_livecrootc_storage_to_litter_patch), @Const(m_deadcrootc_storage_to_litter_patch),
-        @Const(m_gresp_storage_to_litter_patch),
-        @Const(m_leafc_xfer_to_litter_patch), @Const(m_frootc_xfer_to_litter_patch),
-        @Const(m_livestemc_xfer_to_litter_patch), @Const(m_deadstemc_xfer_to_litter_patch),
-        @Const(m_livecrootc_xfer_to_litter_patch), @Const(m_deadcrootc_xfer_to_litter_patch),
-        @Const(m_gresp_xfer_to_litter_patch),
-        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
-        @Const(croot_prof), @Const(stem_prof),
+        fin::_GapP2cFluxIn, out::_GapP2cOut, prof::_GapP2cProf,
         @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
         nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_met_lit::Int,
         pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        # --- alias struct fields back to their original loose names ---
+        gap_mortality_c_to_litr_c_col = out.gap_mortality_c_to_litr_c_col
+        gap_mortality_c_to_cwdc_col   = out.gap_mortality_c_to_cwdc_col
+        lf_f       = prof.lf_f
+        fr_f       = prof.fr_f
+        leaf_prof  = prof.leaf_prof
+        froot_prof = prof.froot_prof
+        croot_prof = prof.croot_prof
+        stem_prof  = prof.stem_prof
+        m_leafc_to_litter_patch              = fin.m_leafc_to_litter
+        m_frootc_to_litter_patch             = fin.m_frootc_to_litter
+        m_livestemc_to_litter_patch          = fin.m_livestemc_to_litter
+        m_deadstemc_to_litter_patch          = fin.m_deadstemc_to_litter
+        m_livecrootc_to_litter_patch         = fin.m_livecrootc_to_litter
+        m_deadcrootc_to_litter_patch         = fin.m_deadcrootc_to_litter
+        m_leafc_storage_to_litter_patch      = fin.m_leafc_storage_to_litter
+        m_frootc_storage_to_litter_patch     = fin.m_frootc_storage_to_litter
+        m_livestemc_storage_to_litter_patch  = fin.m_livestemc_storage_to_litter
+        m_deadstemc_storage_to_litter_patch  = fin.m_deadstemc_storage_to_litter
+        m_livecrootc_storage_to_litter_patch = fin.m_livecrootc_storage_to_litter
+        m_deadcrootc_storage_to_litter_patch = fin.m_deadcrootc_storage_to_litter
+        m_gresp_storage_to_litter_patch      = fin.m_gresp_storage_to_litter
+        m_leafc_xfer_to_litter_patch         = fin.m_leafc_xfer_to_litter
+        m_frootc_xfer_to_litter_patch        = fin.m_frootc_xfer_to_litter
+        m_livestemc_xfer_to_litter_patch     = fin.m_livestemc_xfer_to_litter
+        m_deadstemc_xfer_to_litter_patch     = fin.m_deadstemc_xfer_to_litter
+        m_livecrootc_xfer_to_litter_patch    = fin.m_livecrootc_xfer_to_litter
+        m_deadcrootc_xfer_to_litter_patch    = fin.m_deadcrootc_xfer_to_litter
+        m_gresp_xfer_to_litter_patch         = fin.m_gresp_xfer_to_litter
+
         c = patch_column[p]
         for j in 1:nlevdecomp
             for i in i_litr_min:i_litr_max
@@ -1304,34 +1448,51 @@ function cn_c_iso_gap_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
     stem_prof = soilbiogeochem_state.stem_prof_patch
 
     isempty(bounds_p) && return nothing
-    _launch!(_ciso_gap_p2c_kernel!,
-        iso_cnveg_cf.gap_mortality_c_to_litr_c_col,
-        iso_cnveg_cf.gap_mortality_c_to_cwdc_col,
-        iso_cnveg_cf.m_leafc_to_litter_patch,
-        iso_cnveg_cf.m_frootc_to_litter_patch,
-        iso_cnveg_cf.m_livestemc_to_litter_patch,
-        iso_cnveg_cf.m_deadstemc_to_litter_patch,
-        iso_cnveg_cf.m_livecrootc_to_litter_patch,
-        iso_cnveg_cf.m_deadcrootc_to_litter_patch,
-        iso_cnveg_cf.m_leafc_storage_to_litter_patch,
-        iso_cnveg_cf.m_frootc_storage_to_litter_patch,
-        iso_cnveg_cf.m_livestemc_storage_to_litter_patch,
-        iso_cnveg_cf.m_deadstemc_storage_to_litter_patch,
-        iso_cnveg_cf.m_livecrootc_storage_to_litter_patch,
-        iso_cnveg_cf.m_deadcrootc_storage_to_litter_patch,
-        iso_cnveg_cf.m_gresp_storage_to_litter_patch,
-        iso_cnveg_cf.m_leafc_xfer_to_litter_patch,
-        iso_cnveg_cf.m_frootc_xfer_to_litter_patch,
-        iso_cnveg_cf.m_livestemc_xfer_to_litter_patch,
-        iso_cnveg_cf.m_deadstemc_xfer_to_litter_patch,
-        iso_cnveg_cf.m_livecrootc_xfer_to_litter_patch,
-        iso_cnveg_cf.m_deadcrootc_xfer_to_litter_patch,
-        iso_cnveg_cf.m_gresp_xfer_to_litter_patch,
-        lf_f, fr_f, leaf_prof, froot_prof, croot_prof, stem_prof,
+
+    # --- group array args into device-view structs (one kernel arg each) ---
+    fin = _GapP2cFluxIn(;
+        m_leafc_to_litter              = iso_cnveg_cf.m_leafc_to_litter_patch,
+        m_frootc_to_litter             = iso_cnveg_cf.m_frootc_to_litter_patch,
+        m_livestemc_to_litter          = iso_cnveg_cf.m_livestemc_to_litter_patch,
+        m_deadstemc_to_litter          = iso_cnveg_cf.m_deadstemc_to_litter_patch,
+        m_livecrootc_to_litter         = iso_cnveg_cf.m_livecrootc_to_litter_patch,
+        m_deadcrootc_to_litter         = iso_cnveg_cf.m_deadcrootc_to_litter_patch,
+        m_leafc_storage_to_litter      = iso_cnveg_cf.m_leafc_storage_to_litter_patch,
+        m_frootc_storage_to_litter     = iso_cnveg_cf.m_frootc_storage_to_litter_patch,
+        m_livestemc_storage_to_litter  = iso_cnveg_cf.m_livestemc_storage_to_litter_patch,
+        m_deadstemc_storage_to_litter  = iso_cnveg_cf.m_deadstemc_storage_to_litter_patch,
+        m_livecrootc_storage_to_litter = iso_cnveg_cf.m_livecrootc_storage_to_litter_patch,
+        m_deadcrootc_storage_to_litter = iso_cnveg_cf.m_deadcrootc_storage_to_litter_patch,
+        m_gresp_storage_to_litter      = iso_cnveg_cf.m_gresp_storage_to_litter_patch,
+        m_leafc_xfer_to_litter         = iso_cnveg_cf.m_leafc_xfer_to_litter_patch,
+        m_frootc_xfer_to_litter        = iso_cnveg_cf.m_frootc_xfer_to_litter_patch,
+        m_livestemc_xfer_to_litter     = iso_cnveg_cf.m_livestemc_xfer_to_litter_patch,
+        m_deadstemc_xfer_to_litter     = iso_cnveg_cf.m_deadstemc_xfer_to_litter_patch,
+        m_livecrootc_xfer_to_litter    = iso_cnveg_cf.m_livecrootc_xfer_to_litter_patch,
+        m_deadcrootc_xfer_to_litter    = iso_cnveg_cf.m_deadcrootc_xfer_to_litter_patch,
+        m_gresp_xfer_to_litter         = iso_cnveg_cf.m_gresp_xfer_to_litter_patch)
+
+    out = _GapP2cOut(;
+        gap_mortality_c_to_litr_c_col = iso_cnveg_cf.gap_mortality_c_to_litr_c_col,
+        gap_mortality_c_to_cwdc_col   = iso_cnveg_cf.gap_mortality_c_to_cwdc_col)
+
+    prof = _GapP2cProf(;
+        lf_f       = lf_f,
+        fr_f       = fr_f,
+        leaf_prof  = leaf_prof,
+        froot_prof = froot_prof,
+        croot_prof = croot_prof,
+        stem_prof  = stem_prof)
+
+    # --- manual backend launch (one thread per patch) ---
+    backend = _kernel_backend(out.gap_mortality_c_to_cwdc_col)
+    _ciso_gap_p2c_kernel!(backend)(
+        fin, out, prof,
         mask_soilp, ivt, patch_column, wtcol,
         nlevdecomp, i_litr_min, i_litr_max, i_met_lit,
         first(bounds_p), last(bounds_p);
         ndrange = length(mask_soilp))
+    KA.synchronize(backend)
 
     return nothing
 end
@@ -1345,26 +1506,76 @@ end
 # patch p; internal j (and inner i) loops accumulate into this patch's column c.
 # CWD adds kept as separate _scatter_add! ops; metabolic-litter add keeps the full
 # host RHS. Byte-identical CPU accumulation to the host `for j: for p`.
+## --- Device-view bundles for the carbon-isotope harvest patch->column scatter ---
+## Metal's ~31-arg limit forbids passing the ~28 harvest arrays loose, so they are
+## grouped into immutable Adapt-able device-view bundles (one kernel arg each). The
+## index arrays (mask/ivt/patch_column/wtcol) + the Int loop bounds stay loose. The
+## kernel body aliases each bundle field back to its Fortran-named local so the
+## arithmetic — and the CPU float accumulation order — is byte-identical.
+
+## Outputs: column litter (3D: col,level,litr-pool) + CWD (2D: col,level).
+Base.@kwdef struct _CisoHarvestP2COut{V,M}
+    c_to_litr_c::M      # harvest_c_to_litr_c_col  (col, level, litr)
+    c_to_cwdc::V        # harvest_c_to_cwdc_col     (col, level)
+end
+Adapt.@adapt_structure _CisoHarvestP2COut
+
+## Profile matrices + per-PFT litter fractions (all 2D).
+Base.@kwdef struct _CisoHarvestP2CProf{M}
+    lf_f::M; fr_f::M
+    leaf_prof::M; froot_prof::M; croot_prof::M; stem_prof::M
+end
+Adapt.@adapt_structure _CisoHarvestP2CProf
+
+## Per-patch harvest-mortality CARBON fluxes (all vectors).
+Base.@kwdef struct _CisoHarvestP2CFluxC{V}
+    leafc::V; frootc::V; livestemc::V; livecrootc::V; deadcrootc::V
+    leafc_storage::V; frootc_storage::V; livestemc_storage::V; deadstemc_storage::V
+    livecrootc_storage::V; deadcrootc_storage::V; gresp_storage::V
+    leafc_xfer::V; frootc_xfer::V; livestemc_xfer::V; deadstemc_xfer::V
+    livecrootc_xfer::V; deadcrootc_xfer::V; gresp_xfer::V
+end
+Adapt.@adapt_structure _CisoHarvestP2CFluxC
+
 @kernel function _ciso_harvest_p2c_kernel!(
-        harvest_c_to_litr_c_col, harvest_c_to_cwdc_col,
-        @Const(hrv_leafc_to_litter_patch), @Const(hrv_frootc_to_litter_patch),
-        @Const(hrv_livestemc_to_litter_patch), @Const(hrv_livecrootc_to_litter_patch),
-        @Const(hrv_deadcrootc_to_litter_patch),
-        @Const(hrv_leafc_storage_to_litter_patch), @Const(hrv_frootc_storage_to_litter_patch),
-        @Const(hrv_livestemc_storage_to_litter_patch), @Const(hrv_deadstemc_storage_to_litter_patch),
-        @Const(hrv_livecrootc_storage_to_litter_patch), @Const(hrv_deadcrootc_storage_to_litter_patch),
-        @Const(hrv_gresp_storage_to_litter_patch),
-        @Const(hrv_leafc_xfer_to_litter_patch), @Const(hrv_frootc_xfer_to_litter_patch),
-        @Const(hrv_livestemc_xfer_to_litter_patch), @Const(hrv_deadstemc_xfer_to_litter_patch),
-        @Const(hrv_livecrootc_xfer_to_litter_patch), @Const(hrv_deadcrootc_xfer_to_litter_patch),
-        @Const(hrv_gresp_xfer_to_litter_patch),
-        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
-        @Const(croot_prof), @Const(stem_prof),
+        out::_CisoHarvestP2COut, prof::_CisoHarvestP2CProf, fc::_CisoHarvestP2CFluxC,
         @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
         nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_met_lit::Int,
         pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        # Alias every device-view field to its Fortran-named local so the body
+        # below stays verbatim w.r.t. the original loose-arg kernel.
+        harvest_c_to_litr_c_col = out.c_to_litr_c
+        harvest_c_to_cwdc_col   = out.c_to_cwdc
+
+        lf_f       = prof.lf_f
+        fr_f       = prof.fr_f
+        leaf_prof  = prof.leaf_prof
+        froot_prof = prof.froot_prof
+        croot_prof = prof.croot_prof
+        stem_prof  = prof.stem_prof
+
+        hrv_leafc_to_litter_patch              = fc.leafc
+        hrv_frootc_to_litter_patch             = fc.frootc
+        hrv_livestemc_to_litter_patch          = fc.livestemc
+        hrv_livecrootc_to_litter_patch         = fc.livecrootc
+        hrv_deadcrootc_to_litter_patch         = fc.deadcrootc
+        hrv_leafc_storage_to_litter_patch      = fc.leafc_storage
+        hrv_frootc_storage_to_litter_patch     = fc.frootc_storage
+        hrv_livestemc_storage_to_litter_patch  = fc.livestemc_storage
+        hrv_deadstemc_storage_to_litter_patch  = fc.deadstemc_storage
+        hrv_livecrootc_storage_to_litter_patch = fc.livecrootc_storage
+        hrv_deadcrootc_storage_to_litter_patch = fc.deadcrootc_storage
+        hrv_gresp_storage_to_litter_patch      = fc.gresp_storage
+        hrv_leafc_xfer_to_litter_patch         = fc.leafc_xfer
+        hrv_frootc_xfer_to_litter_patch        = fc.frootc_xfer
+        hrv_livestemc_xfer_to_litter_patch     = fc.livestemc_xfer
+        hrv_deadstemc_xfer_to_litter_patch     = fc.deadstemc_xfer
+        hrv_livecrootc_xfer_to_litter_patch    = fc.livecrootc_xfer
+        hrv_deadcrootc_xfer_to_litter_patch    = fc.deadcrootc_xfer
+        hrv_gresp_xfer_to_litter_patch         = fc.gresp_xfer
+
         c = patch_column[p]
         for j in 1:nlevdecomp
             for i in i_litr_min:i_litr_max
@@ -1436,33 +1647,53 @@ function cn_c_iso_harvest_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
     stem_prof = soilbiogeochem_state.stem_prof_patch
 
     isempty(bounds_p) && return nothing
-    _launch!(_ciso_harvest_p2c_kernel!,
-        iso_cnveg_cf.harvest_c_to_litr_c_col,
-        iso_cnveg_cf.harvest_c_to_cwdc_col,
-        iso_cnveg_cf.hrv_leafc_to_litter_patch,
-        iso_cnveg_cf.hrv_frootc_to_litter_patch,
-        iso_cnveg_cf.hrv_livestemc_to_litter_patch,
-        iso_cnveg_cf.hrv_livecrootc_to_litter_patch,
-        iso_cnveg_cf.hrv_deadcrootc_to_litter_patch,
-        iso_cnveg_cf.hrv_leafc_storage_to_litter_patch,
-        iso_cnveg_cf.hrv_frootc_storage_to_litter_patch,
-        iso_cnveg_cf.hrv_livestemc_storage_to_litter_patch,
-        iso_cnveg_cf.hrv_deadstemc_storage_to_litter_patch,
-        iso_cnveg_cf.hrv_livecrootc_storage_to_litter_patch,
-        iso_cnveg_cf.hrv_deadcrootc_storage_to_litter_patch,
-        iso_cnveg_cf.hrv_gresp_storage_to_litter_patch,
-        iso_cnveg_cf.hrv_leafc_xfer_to_litter_patch,
-        iso_cnveg_cf.hrv_frootc_xfer_to_litter_patch,
-        iso_cnveg_cf.hrv_livestemc_xfer_to_litter_patch,
-        iso_cnveg_cf.hrv_deadstemc_xfer_to_litter_patch,
-        iso_cnveg_cf.hrv_livecrootc_xfer_to_litter_patch,
-        iso_cnveg_cf.hrv_deadcrootc_xfer_to_litter_patch,
-        iso_cnveg_cf.hrv_gresp_xfer_to_litter_patch,
-        lf_f, fr_f, leaf_prof, froot_prof, croot_prof, stem_prof,
-        mask_soilp, ivt, patch_column, wtcol,
-        nlevdecomp, i_litr_min, i_litr_max, i_met_lit,
-        first(bounds_p), last(bounds_p);
-        ndrange = length(mask_soilp))
+
+    # Metal's ~31-arg limit forbids passing ~28 harvest arrays loose, so they are
+    # grouped into immutable Adapt-able device-view bundles (one kernel arg each).
+    # Index arrays (mask/ivt/column/wtcol) + the Int bounds stay loose. The kernel
+    # body aliases each bundle field back to its Fortran-named local, so the CPU
+    # float accumulation order is byte-identical to the loose form.
+    out = _CisoHarvestP2COut(;
+        c_to_litr_c = iso_cnveg_cf.harvest_c_to_litr_c_col,
+        c_to_cwdc   = iso_cnveg_cf.harvest_c_to_cwdc_col)
+
+    prof = _CisoHarvestP2CProf(;
+        lf_f = lf_f, fr_f = fr_f,
+        leaf_prof = leaf_prof, froot_prof = froot_prof,
+        croot_prof = croot_prof, stem_prof = stem_prof)
+
+    fc = _CisoHarvestP2CFluxC(;
+        leafc              = iso_cnveg_cf.hrv_leafc_to_litter_patch,
+        frootc             = iso_cnveg_cf.hrv_frootc_to_litter_patch,
+        livestemc          = iso_cnveg_cf.hrv_livestemc_to_litter_patch,
+        livecrootc         = iso_cnveg_cf.hrv_livecrootc_to_litter_patch,
+        deadcrootc         = iso_cnveg_cf.hrv_deadcrootc_to_litter_patch,
+        leafc_storage      = iso_cnveg_cf.hrv_leafc_storage_to_litter_patch,
+        frootc_storage     = iso_cnveg_cf.hrv_frootc_storage_to_litter_patch,
+        livestemc_storage  = iso_cnveg_cf.hrv_livestemc_storage_to_litter_patch,
+        deadstemc_storage  = iso_cnveg_cf.hrv_deadstemc_storage_to_litter_patch,
+        livecrootc_storage = iso_cnveg_cf.hrv_livecrootc_storage_to_litter_patch,
+        deadcrootc_storage = iso_cnveg_cf.hrv_deadcrootc_storage_to_litter_patch,
+        gresp_storage      = iso_cnveg_cf.hrv_gresp_storage_to_litter_patch,
+        leafc_xfer         = iso_cnveg_cf.hrv_leafc_xfer_to_litter_patch,
+        frootc_xfer        = iso_cnveg_cf.hrv_frootc_xfer_to_litter_patch,
+        livestemc_xfer     = iso_cnveg_cf.hrv_livestemc_xfer_to_litter_patch,
+        deadstemc_xfer     = iso_cnveg_cf.hrv_deadstemc_xfer_to_litter_patch,
+        livecrootc_xfer    = iso_cnveg_cf.hrv_livecrootc_xfer_to_litter_patch,
+        deadcrootc_xfer    = iso_cnveg_cf.hrv_deadcrootc_xfer_to_litter_patch,
+        gresp_xfer         = iso_cnveg_cf.hrv_gresp_xfer_to_litter_patch)
+
+    # Struct-first kernel: a device-view bundle carries no KA backend, so launch
+    # manually off a known device output array + synchronize (mirrors gap_mortality.jl).
+    ndrange = length(mask_soilp)
+    if ndrange != 0
+        backend = _kernel_backend(out.c_to_litr_c)
+        _ciso_harvest_p2c_kernel!(backend)(out, prof, fc,
+            mask_soilp, ivt, patch_column, wtcol,
+            nlevdecomp, i_litr_min, i_litr_max, i_met_lit,
+            first(bounds_p), last(bounds_p); ndrange = ndrange)
+        KA.synchronize(backend)
+    end
 
     # wood harvest to column
     _launch!(_ciso_harvest_wood_p2c_kernel!,
