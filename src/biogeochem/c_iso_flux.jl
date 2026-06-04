@@ -199,6 +199,69 @@ On the radiation time step, set the carbon isotopic flux variables
 
 Ported from `CIsoFlux1` in `CNCIsoFluxMod.F90`.
 """
+# Per-patch crop_harvestc_to_cropprodc init (own-index, no scatter):
+#   out[p] = leafc_to_biofuelc[p] + livestemc_to_biofuelc[p]
+#          + leafc_to_removedresiduec[p] + livestemc_to_removedresiduec[p]
+@kernel function _ciso_crop_harvestc_init_kernel!(out,
+                                                  @Const(leafc_to_biofuelc),
+                                                  @Const(livestemc_to_biofuelc),
+                                                  @Const(leafc_to_removedresiduec),
+                                                  @Const(livestemc_to_removedresiduec),
+                                                  @Const(mask_soilp), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        out[p] = leafc_to_biofuelc[p] +
+                 livestemc_to_biofuelc[p] +
+                 leafc_to_removedresiduec[p] +
+                 livestemc_to_removedresiduec[p]
+    end
+end
+
+# Per-patch accumulation of repr_grainc_to_food over k (own-index += over k):
+#   out[p] += sum_{k=kmin:kmax} repr_grainc_to_food[p,k]
+@kernel function _ciso_crop_harvestc_add_grain_kernel!(out, @Const(repr_grainc_to_food),
+                                                       @Const(mask_soilp),
+                                                       kmin::Int, kmax::Int,
+                                                       pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        for k in kmin:kmax
+            out[p] += repr_grainc_to_food[p, k]
+        end
+    end
+end
+
+# Per-patch reproductive_mr[p,k] = reproductive_xsmr[p,k] + reproductive_curmr[p,k]
+# over k (own-index per (p,k); k-loop stays inside the thread):
+@kernel function _ciso_reproductive_mr_kernel!(reproductive_mr,
+                                               @Const(reproductive_xsmr),
+                                               @Const(reproductive_curmr),
+                                               @Const(mask_soilp),
+                                               kmin::Int, kmax::Int,
+                                               pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        for k in kmin:kmax
+            reproductive_mr[p, k] =
+                reproductive_xsmr[p, k] + reproductive_curmr[p, k]
+        end
+    end
+end
+
+# Per-patch accumulation of repr_structurec_to_cropprod over k (own-index += over k):
+#   out[p] += sum_{k=kmin:kmax} repr_structurec_to_cropprod[p,k]
+@kernel function _ciso_crop_harvestc_add_struct_kernel!(out, @Const(repr_structurec_to_cropprod),
+                                                        @Const(mask_soilp),
+                                                        kmin::Int, kmax::Int,
+                                                        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        for k in kmin:kmax
+            out[p] += repr_structurec_to_cropprod[p, k]
+        end
+    end
+end
+
 function c_iso_flux1!(soilbiogeochem_state::SoilBiogeochemStateData,
                       soilbiogeochem_cf::SoilBiogeochemCarbonFluxData,
                       soilbiogeochem_cs::SoilBiogeochemCarbonStateData,
@@ -208,11 +271,11 @@ function c_iso_flux1!(soilbiogeochem_state::SoilBiogeochemStateData,
                       iso_soilbiogeochem_cs::SoilBiogeochemCarbonStateData,
                       iso_cnveg_cf::CNVegCarbonFluxData,
                       iso_cnveg_cs::CNVegCarbonStateData,
-                      mask_soilc::BitVector,
-                      mask_soilp::BitVector,
+                      mask_soilc::AbstractVector{Bool},
+                      mask_soilp::AbstractVector{Bool},
                       bounds_c::UnitRange{Int},
                       bounds_p::UnitRange{Int},
-                      cascade_donor_pool::Vector{Int},
+                      cascade_donor_pool::AbstractVector{<:Integer},
                       nlevdecomp::Int,
                       ndecomp_cascade_transitions::Int,
                       isotope::String;
@@ -451,42 +514,38 @@ function c_iso_flux1!(soilbiogeochem_state::SoilBiogeochemStateData,
         calc1d!(iso_cnveg_cf.livestemc_to_litter_patch, cnveg_cf.livestemc_to_litter_patch,
                 iso_cnveg_cs.livestemc_patch, cnveg_cs.livestemc_patch)
 
-        # crop_harvestc_to_cropprodc_patch
-        for p in bounds_p
-            mask_soilp[p] || continue
-            iso_cnveg_cf.crop_harvestc_to_cropprodc_patch[p] =
-                iso_cnveg_cf.leafc_to_biofuelc_patch[p] +
-                iso_cnveg_cf.livestemc_to_biofuelc_patch[p] +
-                iso_cnveg_cf.leafc_to_removedresiduec_patch[p] +
-                iso_cnveg_cf.livestemc_to_removedresiduec_patch[p]
-        end
+        # crop_harvestc_to_cropprodc_patch (init)
+        pmin_p = first(bounds_p)
+        pmax_p = last(bounds_p)
+        _launch!(_ciso_crop_harvestc_init_kernel!,
+                 iso_cnveg_cf.crop_harvestc_to_cropprodc_patch,
+                 iso_cnveg_cf.leafc_to_biofuelc_patch,
+                 iso_cnveg_cf.livestemc_to_biofuelc_patch,
+                 iso_cnveg_cf.leafc_to_removedresiduec_patch,
+                 iso_cnveg_cf.livestemc_to_removedresiduec_patch,
+                 mask_soilp, pmin_p, pmax_p;
+                 ndrange = length(mask_soilp))
 
         if use_grainproduct
-            for k in repr_grain_min:repr_grain_max
-                for p in bounds_p
-                    mask_soilp[p] || continue
-                    iso_cnveg_cf.crop_harvestc_to_cropprodc_patch[p] +=
-                        iso_cnveg_cf.repr_grainc_to_food_patch[p, k]
-                end
-            end
+            _launch!(_ciso_crop_harvestc_add_grain_kernel!,
+                     iso_cnveg_cf.crop_harvestc_to_cropprodc_patch,
+                     iso_cnveg_cf.repr_grainc_to_food_patch,
+                     mask_soilp, repr_grain_min, repr_grain_max, pmin_p, pmax_p;
+                     ndrange = length(mask_soilp))
         end
 
-        for k in 1:nrepr
-            for p in bounds_p
-                mask_soilp[p] || continue
-                iso_cnveg_cf.reproductive_mr_patch[p, k] =
-                    iso_cnveg_cf.reproductive_xsmr_patch[p, k] +
-                    iso_cnveg_cf.reproductive_curmr_patch[p, k]
-            end
-        end
+        _launch!(_ciso_reproductive_mr_kernel!,
+                 iso_cnveg_cf.reproductive_mr_patch,
+                 iso_cnveg_cf.reproductive_xsmr_patch,
+                 iso_cnveg_cf.reproductive_curmr_patch,
+                 mask_soilp, 1, nrepr, pmin_p, pmax_p;
+                 ndrange = length(mask_soilp))
 
-        for k in repr_structure_min:repr_structure_max
-            for p in bounds_p
-                mask_soilp[p] || continue
-                iso_cnveg_cf.crop_harvestc_to_cropprodc_patch[p] +=
-                    iso_cnveg_cf.repr_structurec_to_cropprod_patch[p, k]
-            end
-        end
+        _launch!(_ciso_crop_harvestc_add_struct_kernel!,
+                 iso_cnveg_cf.crop_harvestc_to_cropprodc_patch,
+                 iso_cnveg_cf.repr_structurec_to_cropprod_patch,
+                 mask_soilp, repr_structure_min, repr_structure_max, pmin_p, pmax_p;
+                 ndrange = length(mask_soilp))
     end
 
     # --- Litter-to-column for isotopes ---
@@ -781,6 +840,98 @@ end
 # Ported from: CIsoFlux3 in CNCIsoFluxMod.F90
 # ---------------------------------------------------------------------------
 
+# Per-patch fire CWD scatter + decomp-cpool-to-fire vertical-resolved fraction.
+# One thread per patch p (gated by mask); the internal j/l loops accumulate into
+# this patch's column cc. The two CWD `+=` and the decomp `=` assignment are kept
+# as separate scatter/assign ops matching the host's statement order, so the CPU
+# float accumulation is byte-identical. (decomp `=` is column-only-valued, so the
+# many-patch overwrite is benign.)
+@kernel function _ciso_flux3_cwdfire_kernel!(
+        fire_mortality_c_to_cwdc_col, m_decomp_cpools_to_fire_vr_col,
+        @Const(m_deadstemc_to_litter_fire_patch), @Const(m_livestemc_to_litter_fire_patch),
+        @Const(m_deadcrootc_to_litter_fire_patch), @Const(m_livecrootc_to_litter_fire_patch),
+        @Const(stem_prof), @Const(croot_prof),
+        @Const(tot_m_decomp_cpools_to_fire_vr_col),
+        @Const(iso_decomp_cpools_vr_col), @Const(tot_decomp_cpools_vr_col),
+        @Const(mask_soilp), @Const(patch_column), @Const(wtcol),
+        nlevdecomp::Int, ndecomp_pools::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        cc = patch_column[p]
+        for j in 1:nlevdecomp
+            _scatter_add!(fire_mortality_c_to_cwdc_col, cc, j,
+                (m_deadstemc_to_litter_fire_patch[p] +
+                 m_livestemc_to_litter_fire_patch[p]) *
+                wtcol[p] * stem_prof[p, j])
+            _scatter_add!(fire_mortality_c_to_cwdc_col, cc, j,
+                (m_deadcrootc_to_litter_fire_patch[p] +
+                 m_livecrootc_to_litter_fire_patch[p]) *
+                wtcol[p] * croot_prof[p, j])
+        end
+
+        for j in 1:nlevdecomp
+            for l in 1:ndecomp_pools
+                if tot_decomp_cpools_vr_col[cc, j, l] != 0.0
+                    m_decomp_cpools_to_fire_vr_col[cc, j, l] =
+                        tot_m_decomp_cpools_to_fire_vr_col[cc, j, l] *
+                        (iso_decomp_cpools_vr_col[cc, j, l] /
+                         tot_decomp_cpools_vr_col[cc, j, l])
+                else
+                    m_decomp_cpools_to_fire_vr_col[cc, j, l] = 0.0
+                end
+            end
+        end
+    end
+end
+
+# Per-patch fire litter scatter into the metabolic + non-metabolic litter pools.
+# One thread per patch p; internal j (and the inner i) loops accumulate into this
+# patch's column cc. Byte-identical accumulation order to the host `for p: for j`.
+@kernel function _ciso_flux3_litrfire_kernel!(
+        m_c_to_litr_fire_col,
+        @Const(m_leafc_to_litter_fire_patch), @Const(m_leafc_storage_to_litter_fire_patch),
+        @Const(m_leafc_xfer_to_litter_fire_patch), @Const(m_gresp_storage_to_litter_fire_patch),
+        @Const(m_gresp_xfer_to_litter_fire_patch), @Const(m_frootc_to_litter_fire_patch),
+        @Const(m_frootc_storage_to_litter_fire_patch), @Const(m_frootc_xfer_to_litter_fire_patch),
+        @Const(m_livestemc_storage_to_litter_fire_patch), @Const(m_livestemc_xfer_to_litter_fire_patch),
+        @Const(m_deadstemc_storage_to_litter_fire_patch), @Const(m_deadstemc_xfer_to_litter_fire_patch),
+        @Const(m_livecrootc_storage_to_litter_fire_patch), @Const(m_livecrootc_xfer_to_litter_fire_patch),
+        @Const(m_deadcrootc_storage_to_litter_fire_patch), @Const(m_deadcrootc_xfer_to_litter_fire_patch),
+        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
+        @Const(stem_prof), @Const(croot_prof),
+        @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
+        nlevdecomp::Int, i_met_lit::Int, i_litr_max::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        cc = patch_column[p]
+        for j in 1:nlevdecomp
+            _scatter_add!(m_c_to_litr_fire_col, cc, j, i_met_lit,
+                ((m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p] + 1, i_met_lit] +
+                  m_leafc_storage_to_litter_fire_patch[p] +
+                  m_leafc_xfer_to_litter_fire_patch[p] +
+                  m_gresp_storage_to_litter_fire_patch[p] +
+                  m_gresp_xfer_to_litter_fire_patch[p]) * leaf_prof[p, j] +
+                 (m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p] + 1, i_met_lit] +
+                  m_frootc_storage_to_litter_fire_patch[p] +
+                  m_frootc_xfer_to_litter_fire_patch[p]) * froot_prof[p, j] +
+                 (m_livestemc_storage_to_litter_fire_patch[p] +
+                  m_livestemc_xfer_to_litter_fire_patch[p] +
+                  m_deadstemc_storage_to_litter_fire_patch[p] +
+                  m_deadstemc_xfer_to_litter_fire_patch[p]) * stem_prof[p, j] +
+                 (m_livecrootc_storage_to_litter_fire_patch[p] +
+                  m_livecrootc_xfer_to_litter_fire_patch[p] +
+                  m_deadcrootc_storage_to_litter_fire_patch[p] +
+                  m_deadcrootc_xfer_to_litter_fire_patch[p]) * croot_prof[p, j]) * wtcol[p])
+
+            for i in (i_met_lit+1):i_litr_max
+                _scatter_add!(m_c_to_litr_fire_col, cc, j, i,
+                    (m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p] + 1, i] * leaf_prof[p, j] +
+                     m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p] + 1, i] * froot_prof[p, j]) * wtcol[p])
+            end
+        end
+    end
+end
+
 """
     c_iso_flux3!(soilbiogeochem_state, soilbiogeochem_cs,
                  cnveg_cf, cnveg_cs,
@@ -800,22 +951,22 @@ function c_iso_flux3!(soilbiogeochem_state::SoilBiogeochemStateData,
                       iso_cnveg_cf::CNVegCarbonFluxData,
                       iso_cnveg_cs::CNVegCarbonStateData,
                       iso_soilbiogeochem_cs::SoilBiogeochemCarbonStateData,
-                      mask_soilp::BitVector,
+                      mask_soilp::AbstractVector{Bool},
                       bounds_p::UnitRange{Int},
                       nlevdecomp::Int,
                       ndecomp_pools::Int,
                       i_met_lit::Int,
                       i_litr_max::Int,
                       isotope::String;
-                      patch_column::Vector{Int}=Int[],
-                      patch_itype::Vector{Int}=Int[],
-                      patch_wtcol::Vector{<:Real}=Float64[],
-                      lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                      fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                      leaf_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                      froot_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                      stem_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                      croot_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
+                      patch_column::AbstractVector{<:Integer}=Int[],
+                      patch_itype::AbstractVector{<:Integer}=Int[],
+                      patch_wtcol::AbstractVector{<:Real}=Float64[],
+                      lf_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      fr_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      leaf_prof::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      froot_prof::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      stem_prof::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      croot_prof::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0))
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -912,62 +1063,44 @@ function c_iso_flux3!(soilbiogeochem_state::SoilBiogeochemStateData,
     ivt = patch_itype
     wtcol = patch_wtcol
 
-    for p in bounds_p
-        mask_soilp[p] || continue
-        cc = patch_column[p]
-        for j in 1:nlevdecomp
-            iso_cnveg_cf.fire_mortality_c_to_cwdc_col[cc, j] +=
-                (iso_cnveg_cf.m_deadstemc_to_litter_fire_patch[p] +
-                 iso_cnveg_cf.m_livestemc_to_litter_fire_patch[p]) *
-                wtcol[p] * stem_prof[p, j]
-            iso_cnveg_cf.fire_mortality_c_to_cwdc_col[cc, j] +=
-                (iso_cnveg_cf.m_deadcrootc_to_litter_fire_patch[p] +
-                 iso_cnveg_cf.m_livecrootc_to_litter_fire_patch[p]) *
-                wtcol[p] * croot_prof[p, j]
-        end
+    if !isempty(bounds_p)
+        _launch!(_ciso_flux3_cwdfire_kernel!,
+            iso_cnveg_cf.fire_mortality_c_to_cwdc_col,
+            iso_cnveg_cf.m_decomp_cpools_to_fire_vr_col,
+            iso_cnveg_cf.m_deadstemc_to_litter_fire_patch,
+            iso_cnveg_cf.m_livestemc_to_litter_fire_patch,
+            iso_cnveg_cf.m_deadcrootc_to_litter_fire_patch,
+            iso_cnveg_cf.m_livecrootc_to_litter_fire_patch,
+            stem_prof, croot_prof,
+            cnveg_cf.m_decomp_cpools_to_fire_vr_col,
+            iso_soilbiogeochem_cs.decomp_cpools_vr_col,
+            soilbiogeochem_cs.decomp_cpools_vr_col,
+            mask_soilp, patch_column, wtcol,
+            nlevdecomp, ndecomp_pools, first(bounds_p), last(bounds_p);
+            ndrange = length(mask_soilp))
 
-        for j in 1:nlevdecomp
-            for l in 1:ndecomp_pools
-                if soilbiogeochem_cs.decomp_cpools_vr_col[cc, j, l] != 0.0
-                    iso_cnveg_cf.m_decomp_cpools_to_fire_vr_col[cc, j, l] =
-                        cnveg_cf.m_decomp_cpools_to_fire_vr_col[cc, j, l] *
-                        (iso_soilbiogeochem_cs.decomp_cpools_vr_col[cc, j, l] /
-                         soilbiogeochem_cs.decomp_cpools_vr_col[cc, j, l])
-                else
-                    iso_cnveg_cf.m_decomp_cpools_to_fire_vr_col[cc, j, l] = 0.0
-                end
-            end
-        end
-    end
-
-    for p in bounds_p
-        mask_soilp[p] || continue
-        cc = patch_column[p]
-        for j in 1:nlevdecomp
-            iso_cnveg_cf.m_c_to_litr_fire_col[cc, j, i_met_lit] +=
-                ((iso_cnveg_cf.m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p] + 1, i_met_lit] +
-                  iso_cnveg_cf.m_leafc_storage_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_leafc_xfer_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_gresp_storage_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_gresp_xfer_to_litter_fire_patch[p]) * leaf_prof[p, j] +
-                 (iso_cnveg_cf.m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p] + 1, i_met_lit] +
-                  iso_cnveg_cf.m_frootc_storage_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_frootc_xfer_to_litter_fire_patch[p]) * froot_prof[p, j] +
-                 (iso_cnveg_cf.m_livestemc_storage_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_livestemc_xfer_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_deadstemc_storage_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_deadstemc_xfer_to_litter_fire_patch[p]) * stem_prof[p, j] +
-                 (iso_cnveg_cf.m_livecrootc_storage_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_livecrootc_xfer_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_deadcrootc_storage_to_litter_fire_patch[p] +
-                  iso_cnveg_cf.m_deadcrootc_xfer_to_litter_fire_patch[p]) * croot_prof[p, j]) * wtcol[p]
-
-            for i in (i_met_lit+1):i_litr_max
-                iso_cnveg_cf.m_c_to_litr_fire_col[cc, j, i] +=
-                    (iso_cnveg_cf.m_leafc_to_litter_fire_patch[p] * lf_f[ivt[p] + 1, i] * leaf_prof[p, j] +
-                     iso_cnveg_cf.m_frootc_to_litter_fire_patch[p] * fr_f[ivt[p] + 1, i] * froot_prof[p, j]) * wtcol[p]
-            end
-        end
+        _launch!(_ciso_flux3_litrfire_kernel!,
+            iso_cnveg_cf.m_c_to_litr_fire_col,
+            iso_cnveg_cf.m_leafc_to_litter_fire_patch,
+            iso_cnveg_cf.m_leafc_storage_to_litter_fire_patch,
+            iso_cnveg_cf.m_leafc_xfer_to_litter_fire_patch,
+            iso_cnveg_cf.m_gresp_storage_to_litter_fire_patch,
+            iso_cnveg_cf.m_gresp_xfer_to_litter_fire_patch,
+            iso_cnveg_cf.m_frootc_to_litter_fire_patch,
+            iso_cnveg_cf.m_frootc_storage_to_litter_fire_patch,
+            iso_cnveg_cf.m_frootc_xfer_to_litter_fire_patch,
+            iso_cnveg_cf.m_livestemc_storage_to_litter_fire_patch,
+            iso_cnveg_cf.m_livestemc_xfer_to_litter_fire_patch,
+            iso_cnveg_cf.m_deadstemc_storage_to_litter_fire_patch,
+            iso_cnveg_cf.m_deadstemc_xfer_to_litter_fire_patch,
+            iso_cnveg_cf.m_livecrootc_storage_to_litter_fire_patch,
+            iso_cnveg_cf.m_livecrootc_xfer_to_litter_fire_patch,
+            iso_cnveg_cf.m_deadcrootc_storage_to_litter_fire_patch,
+            iso_cnveg_cf.m_deadcrootc_xfer_to_litter_fire_patch,
+            lf_f, fr_f, leaf_prof, froot_prof, stem_prof, croot_prof,
+            mask_soilp, ivt, patch_column, wtcol,
+            nlevdecomp, i_met_lit, i_litr_max, first(bounds_p), last(bounds_p);
+            ndrange = length(mask_soilp))
     end
 
     return nothing
@@ -978,16 +1111,71 @@ end
 # Ported from: CNCIsoLitterToColumn in CNCIsoFluxMod.F90
 # ---------------------------------------------------------------------------
 
+# Per-patch phenology litterfall scatter into column litter pools. One thread per
+# patch p; the internal j (and inner i / reproductive-k) loops accumulate into this
+# patch's column c. The crop / grainproduct config flags are Bool scalars and the
+# per-patch `ivt[p] >= npcropmin` branch is kept in-kernel (the gating is interwoven
+# with the per-patch type, so it cannot be hoisted to host). Accumulation order is
+# byte-identical to the host `for j: for p`.
+@kernel function _ciso_litter_p2c_kernel!(
+        phenology_c_to_litr_c_col,
+        @Const(leafc_to_litter_patch), @Const(frootc_to_litter_patch),
+        @Const(livestemc_to_litter_patch),
+        @Const(repr_grainc_to_food_patch), @Const(repr_structurec_to_litter_patch),
+        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
+        @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int,
+        use_crop::Bool, use_grainproduct::Bool, npcropmin::Int,
+        repr_grain_min::Int, repr_grain_max::Int,
+        repr_structure_min::Int, repr_structure_max::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        c = patch_column[p]
+        for j in 1:nlevdecomp
+            for i in i_litr_min:i_litr_max
+                _scatter_add!(phenology_c_to_litr_c_col, c, j, i,
+                    leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
+                    frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j])
+            end
+
+            if use_crop && ivt[p] >= npcropmin
+                # stem litter carbon fluxes
+                for i in i_litr_min:i_litr_max
+                    _scatter_add!(phenology_c_to_litr_c_col, c, j, i,
+                        livestemc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j])
+                end
+
+                if !use_grainproduct
+                    for i in i_litr_min:i_litr_max
+                        for k in repr_grain_min:repr_grain_max
+                            _scatter_add!(phenology_c_to_litr_c_col, c, j, i,
+                                repr_grainc_to_food_patch[p, k] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j])
+                        end
+                    end
+                end
+
+                # reproductive structure litter carbon fluxes
+                for i in i_litr_min:i_litr_max
+                    for k in repr_structure_min:repr_structure_max
+                        _scatter_add!(phenology_c_to_litr_c_col, c, j, i,
+                            repr_structurec_to_litter_patch[p, k] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j])
+                    end
+                end
+            end
+        end
+    end
+end
+
 function cn_c_iso_litter_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                     soilbiogeochem_state::SoilBiogeochemStateData,
-                                    mask_soilp::BitVector,
+                                    mask_soilp::AbstractVector{Bool},
                                     bounds_p::UnitRange{Int},
                                     nlevdecomp::Int;
-                                    patch_column::Vector{Int}=Int[],
-                                    patch_itype::Vector{Int}=Int[],
-                                    patch_wtcol::Vector{<:Real}=Float64[],
-                                    lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                                    fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                    patch_column::AbstractVector{<:Integer}=Int[],
+                                    patch_itype::AbstractVector{<:Integer}=Int[],
+                                    patch_wtcol::AbstractVector{<:Real}=Float64[],
+                                    lf_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                    fr_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                     use_crop::Bool=false,
                                     use_grainproduct::Bool=false,
                                     npcropmin::Int=NPCROPMIN,
@@ -1003,43 +1191,21 @@ function cn_c_iso_litter_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
     leaf_prof = soilbiogeochem_state.leaf_prof_patch
     froot_prof = soilbiogeochem_state.froot_prof_patch
 
-    for j in 1:nlevdecomp
-        for p in bounds_p
-            mask_soilp[p] || continue
-            c = patch_column[p]
-
-            for i in i_litr_min:i_litr_max
-                iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
-                    iso_cnveg_cf.frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
-            end
-
-            if use_crop && ivt[p] >= npcropmin
-                # stem litter carbon fluxes
-                for i in i_litr_min:i_litr_max
-                    iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                        iso_cnveg_cf.livestemc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
-                end
-
-                if !use_grainproduct
-                    for i in i_litr_min:i_litr_max
-                        for k in repr_grain_min:repr_grain_max
-                            iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                                iso_cnveg_cf.repr_grainc_to_food_patch[p, k] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
-                        end
-                    end
-                end
-
-                # reproductive structure litter carbon fluxes
-                for i in i_litr_min:i_litr_max
-                    for k in repr_structure_min:repr_structure_max
-                        iso_cnveg_cf.phenology_c_to_litr_c_col[c, j, i] +=
-                            iso_cnveg_cf.repr_structurec_to_litter_patch[p, k] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
-                    end
-                end
-            end
-        end
-    end
+    isempty(bounds_p) && return nothing
+    _launch!(_ciso_litter_p2c_kernel!,
+        iso_cnveg_cf.phenology_c_to_litr_c_col,
+        iso_cnveg_cf.leafc_to_litter_patch,
+        iso_cnveg_cf.frootc_to_litter_patch,
+        iso_cnveg_cf.livestemc_to_litter_patch,
+        iso_cnveg_cf.repr_grainc_to_food_patch,
+        iso_cnveg_cf.repr_structurec_to_litter_patch,
+        lf_f, fr_f, leaf_prof, froot_prof,
+        mask_soilp, ivt, patch_column, wtcol,
+        nlevdecomp, i_litr_min, i_litr_max,
+        use_crop, use_grainproduct, npcropmin,
+        repr_grain_min, repr_grain_max, repr_structure_min, repr_structure_max,
+        first(bounds_p), last(bounds_p);
+        ndrange = length(mask_soilp))
 
     return nothing
 end
@@ -1049,16 +1215,82 @@ end
 # Ported from: CNCIsoGapPftToColumn in CNCIsoFluxMod.F90
 # ---------------------------------------------------------------------------
 
+# Per-patch gap-mortality scatter into column litter/CWD pools. One thread per
+# patch p; internal j (and inner i) loops accumulate into this patch's column c.
+# The four CWD `+=` adds are kept as four separate _scatter_add! calls in the host
+# statement order, and the metabolic-litter add keeps the host's full RHS sum, so
+# CPU float accumulation is byte-identical to the host `for j: for p`.
+@kernel function _ciso_gap_p2c_kernel!(
+        gap_mortality_c_to_litr_c_col, gap_mortality_c_to_cwdc_col,
+        @Const(m_leafc_to_litter_patch), @Const(m_frootc_to_litter_patch),
+        @Const(m_livestemc_to_litter_patch), @Const(m_deadstemc_to_litter_patch),
+        @Const(m_livecrootc_to_litter_patch), @Const(m_deadcrootc_to_litter_patch),
+        @Const(m_leafc_storage_to_litter_patch), @Const(m_frootc_storage_to_litter_patch),
+        @Const(m_livestemc_storage_to_litter_patch), @Const(m_deadstemc_storage_to_litter_patch),
+        @Const(m_livecrootc_storage_to_litter_patch), @Const(m_deadcrootc_storage_to_litter_patch),
+        @Const(m_gresp_storage_to_litter_patch),
+        @Const(m_leafc_xfer_to_litter_patch), @Const(m_frootc_xfer_to_litter_patch),
+        @Const(m_livestemc_xfer_to_litter_patch), @Const(m_deadstemc_xfer_to_litter_patch),
+        @Const(m_livecrootc_xfer_to_litter_patch), @Const(m_deadcrootc_xfer_to_litter_patch),
+        @Const(m_gresp_xfer_to_litter_patch),
+        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
+        @Const(croot_prof), @Const(stem_prof),
+        @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_met_lit::Int,
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        c = patch_column[p]
+        for j in 1:nlevdecomp
+            for i in i_litr_min:i_litr_max
+                # leaf gap mortality
+                _scatter_add!(gap_mortality_c_to_litr_c_col, c, j, i,
+                    m_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j])
+                # fine root gap mortality
+                _scatter_add!(gap_mortality_c_to_litr_c_col, c, j, i,
+                    m_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j])
+            end
+
+            # wood gap mortality to CWD
+            _scatter_add!(gap_mortality_c_to_cwdc_col, c, j,
+                m_livestemc_to_litter_patch[p] * wtcol[p] * stem_prof[p, j])
+            _scatter_add!(gap_mortality_c_to_cwdc_col, c, j,
+                m_deadstemc_to_litter_patch[p] * wtcol[p] * stem_prof[p, j])
+            _scatter_add!(gap_mortality_c_to_cwdc_col, c, j,
+                m_livecrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j])
+            _scatter_add!(gap_mortality_c_to_cwdc_col, c, j,
+                m_deadcrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j])
+
+            # metabolic litter (storage + transfer gap mortality)
+            _scatter_add!(gap_mortality_c_to_litr_c_col, c, j, i_met_lit,
+                m_leafc_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
+                m_frootc_storage_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
+                m_livestemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                m_deadstemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                m_livecrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                m_deadcrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                m_gresp_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
+                m_leafc_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
+                m_frootc_xfer_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
+                m_livestemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                m_deadstemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                m_livecrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                m_deadcrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                m_gresp_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j])
+        end
+    end
+end
+
 function cn_c_iso_gap_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                      soilbiogeochem_state::SoilBiogeochemStateData,
-                                     mask_soilp::BitVector,
+                                     mask_soilp::AbstractVector{Bool},
                                      bounds_p::UnitRange{Int},
                                      nlevdecomp::Int;
-                                     patch_column::Vector{Int}=Int[],
-                                     patch_itype::Vector{Int}=Int[],
-                                     patch_wtcol::Vector{<:Real}=Float64[],
-                                     lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                                     fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                     patch_column::AbstractVector{<:Integer}=Int[],
+                                     patch_itype::AbstractVector{<:Integer}=Int[],
+                                     patch_wtcol::AbstractVector{<:Real}=Float64[],
+                                     lf_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                     fr_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                      i_litr_min::Int=varpar.i_litr_min,
                                      i_litr_max::Int=varpar.i_litr_max,
                                      i_met_lit::Int=varpar.i_met_lit)
@@ -1070,48 +1302,35 @@ function cn_c_iso_gap_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
     croot_prof = soilbiogeochem_state.croot_prof_patch
     stem_prof = soilbiogeochem_state.stem_prof_patch
 
-    for j in 1:nlevdecomp
-        for p in bounds_p
-            mask_soilp[p] || continue
-            c = patch_column[p]
-
-            for i in i_litr_min:i_litr_max
-                # leaf gap mortality
-                iso_cnveg_cf.gap_mortality_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.m_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
-                # fine root gap mortality
-                iso_cnveg_cf.gap_mortality_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.m_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
-            end
-
-            # wood gap mortality to CWD
-            iso_cnveg_cf.gap_mortality_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.m_livestemc_to_litter_patch[p] * wtcol[p] * stem_prof[p, j]
-            iso_cnveg_cf.gap_mortality_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.m_deadstemc_to_litter_patch[p] * wtcol[p] * stem_prof[p, j]
-            iso_cnveg_cf.gap_mortality_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.m_livecrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j]
-            iso_cnveg_cf.gap_mortality_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.m_deadcrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j]
-
-            # metabolic litter (storage + transfer gap mortality)
-            iso_cnveg_cf.gap_mortality_c_to_litr_c_col[c, j, i_met_lit] +=
-                iso_cnveg_cf.m_leafc_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
-                iso_cnveg_cf.m_frootc_storage_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
-                iso_cnveg_cf.m_livestemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.m_deadstemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.m_livecrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.m_deadcrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.m_gresp_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
-                iso_cnveg_cf.m_leafc_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
-                iso_cnveg_cf.m_frootc_xfer_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
-                iso_cnveg_cf.m_livestemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.m_deadstemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.m_livecrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.m_deadcrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.m_gresp_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j]
-        end
-    end
+    isempty(bounds_p) && return nothing
+    _launch!(_ciso_gap_p2c_kernel!,
+        iso_cnveg_cf.gap_mortality_c_to_litr_c_col,
+        iso_cnveg_cf.gap_mortality_c_to_cwdc_col,
+        iso_cnveg_cf.m_leafc_to_litter_patch,
+        iso_cnveg_cf.m_frootc_to_litter_patch,
+        iso_cnveg_cf.m_livestemc_to_litter_patch,
+        iso_cnveg_cf.m_deadstemc_to_litter_patch,
+        iso_cnveg_cf.m_livecrootc_to_litter_patch,
+        iso_cnveg_cf.m_deadcrootc_to_litter_patch,
+        iso_cnveg_cf.m_leafc_storage_to_litter_patch,
+        iso_cnveg_cf.m_frootc_storage_to_litter_patch,
+        iso_cnveg_cf.m_livestemc_storage_to_litter_patch,
+        iso_cnveg_cf.m_deadstemc_storage_to_litter_patch,
+        iso_cnveg_cf.m_livecrootc_storage_to_litter_patch,
+        iso_cnveg_cf.m_deadcrootc_storage_to_litter_patch,
+        iso_cnveg_cf.m_gresp_storage_to_litter_patch,
+        iso_cnveg_cf.m_leafc_xfer_to_litter_patch,
+        iso_cnveg_cf.m_frootc_xfer_to_litter_patch,
+        iso_cnveg_cf.m_livestemc_xfer_to_litter_patch,
+        iso_cnveg_cf.m_deadstemc_xfer_to_litter_patch,
+        iso_cnveg_cf.m_livecrootc_xfer_to_litter_patch,
+        iso_cnveg_cf.m_deadcrootc_xfer_to_litter_patch,
+        iso_cnveg_cf.m_gresp_xfer_to_litter_patch,
+        lf_f, fr_f, leaf_prof, froot_prof, croot_prof, stem_prof,
+        mask_soilp, ivt, patch_column, wtcol,
+        nlevdecomp, i_litr_min, i_litr_max, i_met_lit,
+        first(bounds_p), last(bounds_p);
+        ndrange = length(mask_soilp))
 
     return nothing
 end
@@ -1121,16 +1340,89 @@ end
 # Ported from: CNCIsoHarvestPftToColumn in CNCIsoFluxMod.F90
 # ---------------------------------------------------------------------------
 
+# Per-patch harvest-mortality scatter into column litter/CWD pools. One thread per
+# patch p; internal j (and inner i) loops accumulate into this patch's column c.
+# CWD adds kept as separate _scatter_add! ops; metabolic-litter add keeps the full
+# host RHS. Byte-identical CPU accumulation to the host `for j: for p`.
+@kernel function _ciso_harvest_p2c_kernel!(
+        harvest_c_to_litr_c_col, harvest_c_to_cwdc_col,
+        @Const(hrv_leafc_to_litter_patch), @Const(hrv_frootc_to_litter_patch),
+        @Const(hrv_livestemc_to_litter_patch), @Const(hrv_livecrootc_to_litter_patch),
+        @Const(hrv_deadcrootc_to_litter_patch),
+        @Const(hrv_leafc_storage_to_litter_patch), @Const(hrv_frootc_storage_to_litter_patch),
+        @Const(hrv_livestemc_storage_to_litter_patch), @Const(hrv_deadstemc_storage_to_litter_patch),
+        @Const(hrv_livecrootc_storage_to_litter_patch), @Const(hrv_deadcrootc_storage_to_litter_patch),
+        @Const(hrv_gresp_storage_to_litter_patch),
+        @Const(hrv_leafc_xfer_to_litter_patch), @Const(hrv_frootc_xfer_to_litter_patch),
+        @Const(hrv_livestemc_xfer_to_litter_patch), @Const(hrv_deadstemc_xfer_to_litter_patch),
+        @Const(hrv_livecrootc_xfer_to_litter_patch), @Const(hrv_deadcrootc_xfer_to_litter_patch),
+        @Const(hrv_gresp_xfer_to_litter_patch),
+        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
+        @Const(croot_prof), @Const(stem_prof),
+        @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_met_lit::Int,
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        c = patch_column[p]
+        for j in 1:nlevdecomp
+            for i in i_litr_min:i_litr_max
+                _scatter_add!(harvest_c_to_litr_c_col, c, j, i,
+                    hrv_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j])
+                _scatter_add!(harvest_c_to_litr_c_col, c, j, i,
+                    hrv_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j])
+            end
+
+            # wood harvest to CWD
+            _scatter_add!(harvest_c_to_cwdc_col, c, j,
+                hrv_livestemc_to_litter_patch[p] * wtcol[p] * stem_prof[p, j])
+            _scatter_add!(harvest_c_to_cwdc_col, c, j,
+                hrv_livecrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j])
+            _scatter_add!(harvest_c_to_cwdc_col, c, j,
+                hrv_deadcrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j])
+
+            # metabolic litter (storage + transfer harvest mortality)
+            _scatter_add!(harvest_c_to_litr_c_col, c, j, i_met_lit,
+                hrv_leafc_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
+                hrv_frootc_storage_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
+                hrv_livestemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                hrv_deadstemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                hrv_livecrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                hrv_deadcrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                hrv_gresp_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
+                hrv_leafc_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
+                hrv_frootc_xfer_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
+                hrv_livestemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                hrv_deadstemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
+                hrv_livecrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                hrv_deadcrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
+                hrv_gresp_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j])
+        end
+    end
+end
+
+# Per-patch wood-harvest scatter into the column total (1D output).
+@kernel function _ciso_harvest_wood_p2c_kernel!(
+        wood_harvestc_col, @Const(wood_harvestc_patch),
+        @Const(mask_soilp), @Const(patch_column), @Const(wtcol),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        c = patch_column[p]
+        _scatter_add!(wood_harvestc_col, c, wood_harvestc_patch[p] * wtcol[p])
+    end
+end
+
 function cn_c_iso_harvest_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                          soilbiogeochem_state::SoilBiogeochemStateData,
-                                         mask_soilp::BitVector,
+                                         mask_soilp::AbstractVector{Bool},
                                          bounds_p::UnitRange{Int},
                                          nlevdecomp::Int;
-                                         patch_column::Vector{Int}=Int[],
-                                         patch_itype::Vector{Int}=Int[],
-                                         patch_wtcol::Vector{<:Real}=Float64[],
-                                         lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                                         fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                         patch_column::AbstractVector{<:Integer}=Int[],
+                                         patch_itype::AbstractVector{<:Integer}=Int[],
+                                         patch_wtcol::AbstractVector{<:Real}=Float64[],
+                                         lf_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                         fr_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                          i_litr_min::Int=varpar.i_litr_min,
                                          i_litr_max::Int=varpar.i_litr_max,
                                          i_met_lit::Int=varpar.i_met_lit)
@@ -1142,52 +1434,42 @@ function cn_c_iso_harvest_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
     croot_prof = soilbiogeochem_state.croot_prof_patch
     stem_prof = soilbiogeochem_state.stem_prof_patch
 
-    for j in 1:nlevdecomp
-        for p in bounds_p
-            mask_soilp[p] || continue
-            c = patch_column[p]
-
-            for i in i_litr_min:i_litr_max
-                iso_cnveg_cf.harvest_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.hrv_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j]
-                iso_cnveg_cf.harvest_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.hrv_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
-            end
-
-            # wood harvest to CWD
-            iso_cnveg_cf.harvest_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.hrv_livestemc_to_litter_patch[p] * wtcol[p] * stem_prof[p, j]
-            iso_cnveg_cf.harvest_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.hrv_livecrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j]
-            iso_cnveg_cf.harvest_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.hrv_deadcrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j]
-
-            # metabolic litter (storage + transfer harvest mortality)
-            iso_cnveg_cf.harvest_c_to_litr_c_col[c, j, i_met_lit] +=
-                iso_cnveg_cf.hrv_leafc_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
-                iso_cnveg_cf.hrv_frootc_storage_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
-                iso_cnveg_cf.hrv_livestemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.hrv_deadstemc_storage_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.hrv_livecrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.hrv_deadcrootc_storage_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.hrv_gresp_storage_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
-                iso_cnveg_cf.hrv_leafc_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j] +
-                iso_cnveg_cf.hrv_frootc_xfer_to_litter_patch[p] * wtcol[p] * froot_prof[p, j] +
-                iso_cnveg_cf.hrv_livestemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.hrv_deadstemc_xfer_to_litter_patch[p] * wtcol[p] * stem_prof[p, j] +
-                iso_cnveg_cf.hrv_livecrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.hrv_deadcrootc_xfer_to_litter_patch[p] * wtcol[p] * croot_prof[p, j] +
-                iso_cnveg_cf.hrv_gresp_xfer_to_litter_patch[p] * wtcol[p] * leaf_prof[p, j]
-        end
-    end
+    isempty(bounds_p) && return nothing
+    _launch!(_ciso_harvest_p2c_kernel!,
+        iso_cnveg_cf.harvest_c_to_litr_c_col,
+        iso_cnveg_cf.harvest_c_to_cwdc_col,
+        iso_cnveg_cf.hrv_leafc_to_litter_patch,
+        iso_cnveg_cf.hrv_frootc_to_litter_patch,
+        iso_cnveg_cf.hrv_livestemc_to_litter_patch,
+        iso_cnveg_cf.hrv_livecrootc_to_litter_patch,
+        iso_cnveg_cf.hrv_deadcrootc_to_litter_patch,
+        iso_cnveg_cf.hrv_leafc_storage_to_litter_patch,
+        iso_cnveg_cf.hrv_frootc_storage_to_litter_patch,
+        iso_cnveg_cf.hrv_livestemc_storage_to_litter_patch,
+        iso_cnveg_cf.hrv_deadstemc_storage_to_litter_patch,
+        iso_cnveg_cf.hrv_livecrootc_storage_to_litter_patch,
+        iso_cnveg_cf.hrv_deadcrootc_storage_to_litter_patch,
+        iso_cnveg_cf.hrv_gresp_storage_to_litter_patch,
+        iso_cnveg_cf.hrv_leafc_xfer_to_litter_patch,
+        iso_cnveg_cf.hrv_frootc_xfer_to_litter_patch,
+        iso_cnveg_cf.hrv_livestemc_xfer_to_litter_patch,
+        iso_cnveg_cf.hrv_deadstemc_xfer_to_litter_patch,
+        iso_cnveg_cf.hrv_livecrootc_xfer_to_litter_patch,
+        iso_cnveg_cf.hrv_deadcrootc_xfer_to_litter_patch,
+        iso_cnveg_cf.hrv_gresp_xfer_to_litter_patch,
+        lf_f, fr_f, leaf_prof, froot_prof, croot_prof, stem_prof,
+        mask_soilp, ivt, patch_column, wtcol,
+        nlevdecomp, i_litr_min, i_litr_max, i_met_lit,
+        first(bounds_p), last(bounds_p);
+        ndrange = length(mask_soilp))
 
     # wood harvest to column
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch_column[p]
-        iso_cnveg_cf.wood_harvestc_col[c] +=
-            iso_cnveg_cf.wood_harvestc_patch[p] * wtcol[p]
-    end
+    _launch!(_ciso_harvest_wood_p2c_kernel!,
+        iso_cnveg_cf.wood_harvestc_col,
+        iso_cnveg_cf.wood_harvestc_patch,
+        mask_soilp, patch_column, wtcol,
+        first(bounds_p), last(bounds_p);
+        ndrange = length(mask_soilp))
 
     return nothing
 end
@@ -1197,16 +1479,58 @@ end
 # Ported from: CNCIsoGrossUnrepPftToColumn in CNCIsoFluxMod.F90
 # ---------------------------------------------------------------------------
 
+# Per-patch gross-unrepresented-LC-change scatter into column litter/CWD pools.
+# One thread per patch p; internal j (and inner i) loops accumulate into column c.
+# Byte-identical CPU accumulation to the host `for j: for p`.
+@kernel function _ciso_gru_p2c_kernel!(
+        gru_c_to_litr_c_col, gru_c_to_cwdc_col,
+        @Const(gru_leafc_to_litter_patch), @Const(gru_frootc_to_litter_patch),
+        @Const(gru_livecrootc_to_litter_patch), @Const(gru_deadcrootc_to_litter_patch),
+        @Const(lf_f), @Const(fr_f), @Const(leaf_prof), @Const(froot_prof),
+        @Const(croot_prof),
+        @Const(mask_soilp), @Const(ivt), @Const(patch_column), @Const(wtcol),
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        c = patch_column[p]
+        for j in 1:nlevdecomp
+            for i in i_litr_min:i_litr_max
+                _scatter_add!(gru_c_to_litr_c_col, c, j, i,
+                    gru_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
+                    gru_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j])
+            end
+
+            # coarse root to CWD
+            _scatter_add!(gru_c_to_cwdc_col, c, j,
+                gru_livecrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j])
+            _scatter_add!(gru_c_to_cwdc_col, c, j,
+                gru_deadcrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j])
+        end
+    end
+end
+
+# Per-patch wood-product-gain scatter into the column total (1D output).
+@kernel function _ciso_gru_wood_p2c_kernel!(
+        gru_wood_productc_gain_col, @Const(gru_wood_productc_gain_patch),
+        @Const(mask_soilp), @Const(patch_column), @Const(wtcol),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        c = patch_column[p]
+        _scatter_add!(gru_wood_productc_gain_col, c, gru_wood_productc_gain_patch[p] * wtcol[p])
+    end
+end
+
 function cn_c_iso_gross_unrep_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
                                               soilbiogeochem_state::SoilBiogeochemStateData,
-                                              mask_soilp::BitVector,
+                                              mask_soilp::AbstractVector{Bool},
                                               bounds_p::UnitRange{Int},
                                               nlevdecomp::Int;
-                                              patch_column::Vector{Int}=Int[],
-                                              patch_itype::Vector{Int}=Int[],
-                                              patch_wtcol::Vector{<:Real}=Float64[],
-                                              lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                                              fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                              patch_column::AbstractVector{<:Integer}=Int[],
+                                              patch_itype::AbstractVector{<:Integer}=Int[],
+                                              patch_wtcol::AbstractVector{<:Real}=Float64[],
+                                              lf_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                                              fr_f::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                                               i_litr_min::Int=varpar.i_litr_min,
                                               i_litr_max::Int=varpar.i_litr_max)
 
@@ -1216,32 +1540,27 @@ function cn_c_iso_gross_unrep_pft_to_column!(iso_cnveg_cf::CNVegCarbonFluxData,
     froot_prof = soilbiogeochem_state.froot_prof_patch
     croot_prof = soilbiogeochem_state.croot_prof_patch
 
-    for j in 1:nlevdecomp
-        for p in bounds_p
-            mask_soilp[p] || continue
-            c = patch_column[p]
-
-            for i in i_litr_min:i_litr_max
-                iso_cnveg_cf.gru_c_to_litr_c_col[c, j, i] +=
-                    iso_cnveg_cf.gru_leafc_to_litter_patch[p] * lf_f[ivt[p] + 1, i] * wtcol[p] * leaf_prof[p, j] +
-                    iso_cnveg_cf.gru_frootc_to_litter_patch[p] * fr_f[ivt[p] + 1, i] * wtcol[p] * froot_prof[p, j]
-            end
-
-            # coarse root to CWD
-            iso_cnveg_cf.gru_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.gru_livecrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j]
-            iso_cnveg_cf.gru_c_to_cwdc_col[c, j] +=
-                iso_cnveg_cf.gru_deadcrootc_to_litter_patch[p] * wtcol[p] * croot_prof[p, j]
-        end
-    end
+    isempty(bounds_p) && return nothing
+    _launch!(_ciso_gru_p2c_kernel!,
+        iso_cnveg_cf.gru_c_to_litr_c_col,
+        iso_cnveg_cf.gru_c_to_cwdc_col,
+        iso_cnveg_cf.gru_leafc_to_litter_patch,
+        iso_cnveg_cf.gru_frootc_to_litter_patch,
+        iso_cnveg_cf.gru_livecrootc_to_litter_patch,
+        iso_cnveg_cf.gru_deadcrootc_to_litter_patch,
+        lf_f, fr_f, leaf_prof, froot_prof, croot_prof,
+        mask_soilp, ivt, patch_column, wtcol,
+        nlevdecomp, i_litr_min, i_litr_max,
+        first(bounds_p), last(bounds_p);
+        ndrange = length(mask_soilp))
 
     # wood product gain to column
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch_column[p]
-        iso_cnveg_cf.gru_wood_productc_gain_col[c] +=
-            iso_cnveg_cf.gru_wood_productc_gain_patch[p] * wtcol[p]
-    end
+    _launch!(_ciso_gru_wood_p2c_kernel!,
+        iso_cnveg_cf.gru_wood_productc_gain_col,
+        iso_cnveg_cf.gru_wood_productc_gain_patch,
+        mask_soilp, patch_column, wtcol,
+        first(bounds_p), last(bounds_p);
+        ndrange = length(mask_soilp))
 
     return nothing
 end
