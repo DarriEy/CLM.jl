@@ -48,9 +48,11 @@ end
 PFT-level parameters used by the maintenance respiration routine.
 Contains a subset of fields from `pftconMod` referenced in `CNMRespMod.F90`.
 """
-Base.@kwdef mutable struct PftConMaintResp
-    woody ::Vector{Float64} = Float64[]   # binary woody flag (1=woody, 0=not woody)
+Base.@kwdef mutable struct PftConMaintResp{FT<:Real, V<:AbstractVector{FT}}
+    woody ::V = Float64[]   # binary woody flag (1=woody, 0=not woody)
 end
+PftConMaintResp{FT}(; kwargs...) where {FT<:Real} = PftConMaintResp{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure PftConMaintResp
 
 # ---------------------------------------------------------------------------
 # cn_mresp! — Maintenance respiration

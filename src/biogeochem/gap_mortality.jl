@@ -22,10 +22,12 @@ Fields:
 
 Ported from `params_type` in `CNGapMortalityMod.F90`.
 """
-Base.@kwdef mutable struct GapMortalityParams
-    k_mort ::Float64        = 0.3     # coeff. of growth efficiency in mortality equation
-    r_mort ::Vector{Float64} = Float64[]  # mortality rate (1/yr), one per PFT
+Base.@kwdef mutable struct GapMortalityParams{FT<:Real, V<:AbstractVector{FT}}
+    k_mort ::FT        = 0.3     # coeff. of growth efficiency in mortality equation
+    r_mort ::V = Float64[]  # mortality rate (1/yr), one per PFT
 end
+GapMortalityParams{FT}(; kwargs...) where {FT<:Real} = GapMortalityParams{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure GapMortalityParams
 
 # ---------------------------------------------------------------------------
 # PFT constants needed by gap mortality (from pftcon)
@@ -38,13 +40,15 @@ PFT-level parameters referenced by the gap mortality and patch-to-column
 routines.  Contains the subset of `pftconMod` fields used in
 `CNGapMortalityMod.F90`.
 """
-Base.@kwdef mutable struct PftConGapMort
-    woody    ::Vector{Float64} = Float64[]  # binary woody flag (1=woody, 0=not woody)
-    leafcn   ::Vector{Float64} = Float64[]  # leaf C:N (gC/gN)
-    livewdcn ::Vector{Float64} = Float64[]  # live wood C:N (gC/gN)
-    lf_f     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
-    fr_f     ::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
+Base.@kwdef mutable struct PftConGapMort{FT<:Real, V<:AbstractVector{FT}, M<:AbstractMatrix{FT}}
+    woody    ::V = Float64[]  # binary woody flag (1=woody, 0=not woody)
+    leafcn   ::V = Float64[]  # leaf C:N (gC/gN)
+    livewdcn ::V = Float64[]  # live wood C:N (gC/gN)
+    lf_f     ::M = Matrix{Float64}(undef, 0, 0)  # leaf litter fractions (pft, litr)
+    fr_f     ::M = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
 end
+PftConGapMort{FT}(; kwargs...) where {FT<:Real} = PftConGapMort{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
+Adapt.@adapt_structure PftConGapMort
 
 # ---------------------------------------------------------------------------
 # DGVS (Dynamic Global Vegetation) data needed by gap mortality
@@ -58,11 +62,13 @@ enabled.
 
 Ported from `dgvs_type` fields used in `CNGapMortalityMod.F90`.
 """
-Base.@kwdef mutable struct DgvsGapMortData
-    greffic_patch    ::Vector{Float64} = Float64[]  # growth efficiency
-    heatstress_patch ::Vector{Float64} = Float64[]  # heat stress mortality
-    nind_patch       ::Vector{Float64} = Float64[]  # number of individuals (#/m2)
+Base.@kwdef mutable struct DgvsGapMortData{FT<:Real, V<:AbstractVector{FT}}
+    greffic_patch    ::V = Float64[]  # growth efficiency
+    heatstress_patch ::V = Float64[]  # heat stress mortality
+    nind_patch       ::V = Float64[]  # number of individuals (#/m2)
 end
+DgvsGapMortData{FT}(; kwargs...) where {FT<:Real} = DgvsGapMortData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure DgvsGapMortData
 
 # ---------------------------------------------------------------------------
 # cn_gap_mortality! — Main gap mortality routine

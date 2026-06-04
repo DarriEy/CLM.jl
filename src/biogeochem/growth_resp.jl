@@ -13,11 +13,13 @@
 PFT-level parameters used by the growth respiration routine. Contains a
 subset of fields from `pftconMod` that are referenced in `CNGRespMod.F90`.
 """
-Base.@kwdef mutable struct PftConGrowthResp
-    woody   ::Vector{Float64} = Float64[]   # binary woody flag (1=woody, 0=not woody)
-    grperc  ::Vector{Float64} = Float64[]   # growth respiration parameter
-    grpnow  ::Vector{Float64} = Float64[]   # growth respiration parameter (fraction now vs storage)
+Base.@kwdef mutable struct PftConGrowthResp{FT<:Real, V<:AbstractVector{FT}}
+    woody   ::V = Float64[]   # binary woody flag (1=woody, 0=not woody)
+    grperc  ::V = Float64[]   # growth respiration parameter
+    grpnow  ::V = Float64[]   # growth respiration parameter (fraction now vs storage)
 end
+PftConGrowthResp{FT}(; kwargs...) where {FT<:Real} = PftConGrowthResp{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure PftConGrowthResp
 
 # ---------------------------------------------------------------------------
 # cn_gresp! — Growth respiration

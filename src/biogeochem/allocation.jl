@@ -29,29 +29,31 @@ end
 PFT-level parameters used by allocation routines. Contains a subset of
 fields from `pftconMod` that are referenced in `CNAllocationMod.F90`.
 """
-Base.@kwdef mutable struct PftConAllocation
-    woody       ::Vector{Float64} = Float64[]   # binary woody flag (1=woody, 0=not woody)
-    froot_leaf  ::Vector{Float64} = Float64[]   # new fine root C per new leaf C (gC/gC)
-    croot_stem  ::Vector{Float64} = Float64[]   # new coarse root C per new stem C (gC/gC)
-    stem_leaf   ::Vector{Float64} = Float64[]   # new stem C per new leaf C (gC/gC); -1 = dynamic
-    flivewd     ::Vector{Float64} = Float64[]   # fraction of new wood that is live
-    leafcn      ::Vector{Float64} = Float64[]   # leaf C:N (gC/gN)
-    frootcn     ::Vector{Float64} = Float64[]   # fine root C:N (gC/gN)
-    livewdcn    ::Vector{Float64} = Float64[]   # live wood C:N (gC/gN)
-    deadwdcn    ::Vector{Float64} = Float64[]   # dead wood C:N (gC/gN)
-    graincn     ::Vector{Float64} = Float64[]   # grain C:N (gC/gN)
-    grperc      ::Vector{Float64} = Float64[]   # growth respiration fraction
+Base.@kwdef mutable struct PftConAllocation{FT<:Real, V<:AbstractVector{FT}}
+    woody       ::V = Float64[]   # binary woody flag (1=woody, 0=not woody)
+    froot_leaf  ::V = Float64[]   # new fine root C per new leaf C (gC/gC)
+    croot_stem  ::V = Float64[]   # new coarse root C per new stem C (gC/gC)
+    stem_leaf   ::V = Float64[]   # new stem C per new leaf C (gC/gC); -1 = dynamic
+    flivewd     ::V = Float64[]   # fraction of new wood that is live
+    leafcn      ::V = Float64[]   # leaf C:N (gC/gN)
+    frootcn     ::V = Float64[]   # fine root C:N (gC/gN)
+    livewdcn    ::V = Float64[]   # live wood C:N (gC/gN)
+    deadwdcn    ::V = Float64[]   # dead wood C:N (gC/gN)
+    graincn     ::V = Float64[]   # grain C:N (gC/gN)
+    grperc      ::V = Float64[]   # growth respiration fraction
     # Crop-specific allocation parameters
-    arooti      ::Vector{Float64} = Float64[]   # initial allocation to roots
-    arootf      ::Vector{Float64} = Float64[]   # final allocation to roots
-    bfact       ::Vector{Float64} = Float64[]   # exp factor for leaf allocation
-    fleafi      ::Vector{Float64} = Float64[]   # initial fraction allocated to leaf
-    aleaff      ::Vector{Float64} = Float64[]   # final leaf allocation coefficient
-    astemf      ::Vector{Float64} = Float64[]   # final stem allocation coefficient
-    allconss    ::Vector{Float64} = Float64[]   # stem allocation decline exponent
-    allconsl    ::Vector{Float64} = Float64[]   # leaf allocation decline exponent
-    declfact    ::Vector{Float64} = Float64[]   # decline factor for allocation shift
+    arooti      ::V = Float64[]   # initial allocation to roots
+    arootf      ::V = Float64[]   # final allocation to roots
+    bfact       ::V = Float64[]   # exp factor for leaf allocation
+    fleafi      ::V = Float64[]   # initial fraction allocated to leaf
+    aleaff      ::V = Float64[]   # final leaf allocation coefficient
+    astemf      ::V = Float64[]   # final stem allocation coefficient
+    allconss    ::V = Float64[]   # stem allocation decline exponent
+    allconsl    ::V = Float64[]   # leaf allocation decline exponent
+    declfact    ::V = Float64[]   # decline factor for allocation shift
 end
+PftConAllocation{FT}(; kwargs...) where {FT<:Real} = PftConAllocation{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure PftConAllocation
 
 # ---------------------------------------------------------------------------
 # calc_gpp_mr_availc! — Calculate GPP, MR, and available C
