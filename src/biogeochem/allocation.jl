@@ -365,7 +365,100 @@ Sets: aleaf, astem, aroot, arepr (and under some conditions aleafi, astemi).
 
 Ported from `calc_crop_allocation_fractions` in `CNAllocationMod.F90`.
 """
-function calc_crop_allocation_fractions!(mask_pcropp::BitVector, bounds::UnitRange{Int},
+@kernel function _alloc_crop_fractions_kernel!(
+        aleaf, astem, aroot, aleafi, astemi, arepr,
+        @Const(mask_pcropp), @Const(itype), @Const(croplive),
+        @Const(crop_phase_out), @Const(peaklai),
+        @Const(hui), @Const(gddmaturity), @Const(huigrain),
+        @Const(arooti), @Const(arootf), @Const(fleafi), @Const(bfact),
+        @Const(astemf), @Const(declfact), @Const(allconss),
+        @Const(aleaff), @Const(allconsl),
+        cphase_planted_in, cphase_leafemerge_in, cphase_grainfill_in,
+        nrepr::Int)
+    T = eltype(aleaf)
+    p = @index(Global)
+    @inbounds if mask_pcropp[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+
+        if croplive[p]
+            # Phase 1 completed: leaf emergence to start of leaf decline
+            if crop_phase_out[p] == cphase_leafemerge_in
+
+                for k in 1:nrepr
+                    arepr[p, k] = zero(T)
+                end
+                if peaklai[p] == 1  # lai at maximum allowed
+                    aleaf[p] = T(1.0e-5)
+                    astem[p] = zero(T)
+                    aroot[p] = one(T) - aleaf[p]
+                else
+                    aroot[p] = max(zero(T), min(one(T), arooti[ivt] -
+                        (arooti[ivt] - arootf[ivt]) *
+                        min(one(T), hui[p] / gddmaturity[p])))
+                    fleaf = fleafi[ivt] * (exp(-bfact[ivt]) -
+                        exp(-bfact[ivt] * hui[p] / huigrain[p])) /
+                        (exp(-bfact[ivt]) - one(T))
+                    aleaf[p] = max(T(1.0e-5), (one(T) - aroot[p]) * fleaf)
+                    astem[p] = one(T) - aleaf[p] - aroot[p]
+                end
+
+                astemi[p] = astem[p]
+                aleafi[p] = aleaf[p]
+
+            # Phase 2 completed: grain fill
+            elseif crop_phase_out[p] == cphase_grainfill_in
+                aroot[p] = max(zero(T), min(one(T), arooti[ivt] -
+                    (arooti[ivt] - arootf[ivt]) *
+                    min(one(T), hui[p] / gddmaturity[p])))
+                if astemi[p] > astemf[ivt]
+                    astem[p] = max(zero(T), max(astemf[ivt],
+                        astem[p] *
+                        (one(T) - min((hui[p] -
+                        huigrain[p]) / ((gddmaturity[p] * declfact[ivt]) -
+                        huigrain[p]), one(T))^allconss[ivt])))
+                end
+
+                if peaklai[p] == 1
+                    aleaf[p] = T(1.0e-5)
+                elseif aleafi[p] > aleaff[ivt]
+                    aleaf[p] = max(T(1.0e-5), max(aleaff[ivt],
+                        aleaf[p] *
+                        (one(T) - min((hui[p] -
+                        huigrain[p]) / ((gddmaturity[p] * declfact[ivt]) -
+                        huigrain[p]), one(T))^allconsl[ivt])))
+                end
+
+                # All repr allocation goes into the last reproductive pool
+                for k in 1:nrepr-1
+                    arepr[p, k] = zero(T)
+                end
+                arepr[p, nrepr] = one(T) - aroot[p] - astem[p] - aleaf[p]
+
+            else  # cphase_planted: pre emergence
+                aleaf[p]  = one(T)
+                aleafi[p] = one(T)
+                astem[p]  = zero(T)
+                astemi[p] = zero(T)
+                aroot[p]  = zero(T)
+                for k in 1:nrepr
+                    arepr[p, k] = zero(T)
+                end
+            end
+
+        else  # .not. croplive
+            aleaf[p]  = one(T)
+            aleafi[p] = one(T)
+            astem[p]  = zero(T)
+            astemi[p] = zero(T)
+            aroot[p]  = zero(T)
+            for k in 1:nrepr
+                arepr[p, k] = zero(T)
+            end
+        end
+    end
+end
+
+function calc_crop_allocation_fractions!(mask_pcropp::AbstractVector{Bool}, bounds::UnitRange{Int},
                                           pftcon::PftConAllocation,
                                           patch::PatchData,
                                           crop::CropData,
@@ -374,96 +467,37 @@ function calc_crop_allocation_fractions!(mask_pcropp::BitVector, bounds::UnitRan
 
     # Compute crop phase for all patches in the mask
     FT = eltype(cnveg_state.c_allometry_patch)
-    crop_phase_out = Vector{FT}(undef, length(mask_pcropp))
+    crop_phase_out = similar(cnveg_state.c_allometry_patch, length(mask_pcropp))
     crop_phase!(mask_pcropp, crop, cnveg_state, crop_phase_out)
 
+    # Crop-phase code constants at working precision (host-resolved scalars).
+    cphase_planted_in    = FT(cphase_planted)
+    cphase_leafemerge_in = FT(cphase_leafemerge)
+    cphase_grainfill_in  = FT(cphase_grainfill)
+
+    # Hoisted error guard: the original loop throws on an unexpected crop_phase
+    # code for a live crop. The kernel below is error-free, so replicate the
+    # check on the host first (never fires for valid data).
     for p in bounds
         mask_pcropp[p] || continue
-
-        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        if crop.croplive_patch[p]
-            # Phase 1 completed: leaf emergence to start of leaf decline
-            if crop_phase_out[p] == cphase_leafemerge
-
-                for k in 1:nrepr
-                    cnveg_state.arepr_patch[p, k] = 0.0
-                end
-                if cnveg_state.peaklai_patch[p] == 1  # lai at maximum allowed
-                    cnveg_state.aleaf_patch[p] = 1.0e-5
-                    cnveg_state.astem_patch[p] = 0.0
-                    cnveg_state.aroot_patch[p] = 1.0 - cnveg_state.aleaf_patch[p]
-                else
-                    cnveg_state.aroot_patch[p] = max(0.0, min(1.0, pftcon.arooti[ivt] -
-                        (pftcon.arooti[ivt] - pftcon.arootf[ivt]) *
-                        min(1.0, crop.hui_patch[p] / cnveg_state.gddmaturity_patch[p])))
-                    fleaf = pftcon.fleafi[ivt] * (exp(-pftcon.bfact[ivt]) -
-                        exp(-pftcon.bfact[ivt] * crop.hui_patch[p] / cnveg_state.huigrain_patch[p])) /
-                        (exp(-pftcon.bfact[ivt]) - 1.0)
-                    cnveg_state.aleaf_patch[p] = max(1.0e-5, (1.0 - cnveg_state.aroot_patch[p]) * fleaf)
-                    cnveg_state.astem_patch[p] = 1.0 - cnveg_state.aleaf_patch[p] - cnveg_state.aroot_patch[p]
-                end
-
-                cnveg_state.astemi_patch[p] = cnveg_state.astem_patch[p]
-                cnveg_state.aleafi_patch[p] = cnveg_state.aleaf_patch[p]
-
-            # Phase 2 completed: grain fill
-            elseif crop_phase_out[p] == cphase_grainfill
-                cnveg_state.aroot_patch[p] = max(0.0, min(1.0, pftcon.arooti[ivt] -
-                    (pftcon.arooti[ivt] - pftcon.arootf[ivt]) *
-                    min(1.0, crop.hui_patch[p] / cnveg_state.gddmaturity_patch[p])))
-                if cnveg_state.astemi_patch[p] > pftcon.astemf[ivt]
-                    cnveg_state.astem_patch[p] = max(0.0, max(pftcon.astemf[ivt],
-                        cnveg_state.astem_patch[p] *
-                        (1.0 - min((crop.hui_patch[p] -
-                        cnveg_state.huigrain_patch[p]) / ((cnveg_state.gddmaturity_patch[p] * pftcon.declfact[ivt]) -
-                        cnveg_state.huigrain_patch[p]), 1.0)^pftcon.allconss[ivt])))
-                end
-
-                if cnveg_state.peaklai_patch[p] == 1
-                    cnveg_state.aleaf_patch[p] = 1.0e-5
-                elseif cnveg_state.aleafi_patch[p] > pftcon.aleaff[ivt]
-                    cnveg_state.aleaf_patch[p] = max(1.0e-5, max(pftcon.aleaff[ivt],
-                        cnveg_state.aleaf_patch[p] *
-                        (1.0 - min((crop.hui_patch[p] -
-                        cnveg_state.huigrain_patch[p]) / ((cnveg_state.gddmaturity_patch[p] * pftcon.declfact[ivt]) -
-                        cnveg_state.huigrain_patch[p]), 1.0)^pftcon.allconsl[ivt])))
-                end
-
-                # All repr allocation goes into the last reproductive pool
-                for k in 1:nrepr-1
-                    cnveg_state.arepr_patch[p, k] = 0.0
-                end
-                cnveg_state.arepr_patch[p, nrepr] = 1.0 - cnveg_state.aroot_patch[p] -
-                    cnveg_state.astem_patch[p] - cnveg_state.aleaf_patch[p]
-
-            elseif crop_phase_out[p] == cphase_planted
-                # pre emergence
-                cnveg_state.aleaf_patch[p]  = 1.0
-                cnveg_state.aleafi_patch[p] = 1.0
-                cnveg_state.astem_patch[p]  = 0.0
-                cnveg_state.astemi_patch[p] = 0.0
-                cnveg_state.aroot_patch[p]  = 0.0
-                for k in 1:nrepr
-                    cnveg_state.arepr_patch[p, k] = 0.0
-                end
-
-            else
-                error("Unexpected crop_phase: $(crop_phase_out[p]) at patch $p")
-            end
-
-        else  # .not. croplive
-            cnveg_state.aleaf_patch[p]  = 1.0
-            cnveg_state.aleafi_patch[p] = 1.0
-            cnveg_state.astem_patch[p]  = 0.0
-            cnveg_state.astemi_patch[p] = 0.0
-            cnveg_state.aroot_patch[p]  = 0.0
-            for k in 1:nrepr
-                cnveg_state.arepr_patch[p, k] = 0.0
-            end
+        crop.croplive_patch[p] || continue
+        cp = crop_phase_out[p]
+        if cp != cphase_leafemerge_in && cp != cphase_grainfill_in && cp != cphase_planted_in
+            error("Unexpected crop_phase: $(cp) at patch $p")
         end
-
     end
+
+    _launch!(_alloc_crop_fractions_kernel!,
+        cnveg_state.aleaf_patch, cnveg_state.astem_patch, cnveg_state.aroot_patch,
+        cnveg_state.aleafi_patch, cnveg_state.astemi_patch, cnveg_state.arepr_patch,
+        mask_pcropp, patch.itype, crop.croplive_patch,
+        crop_phase_out, cnveg_state.peaklai_patch,
+        crop.hui_patch, cnveg_state.gddmaturity_patch, cnveg_state.huigrain_patch,
+        pftcon.arooti, pftcon.arootf, pftcon.fleafi, pftcon.bfact,
+        pftcon.astemf, pftcon.declfact, pftcon.allconss,
+        pftcon.aleaff, pftcon.allconsl,
+        cphase_planted_in, cphase_leafemerge_in, cphase_grainfill_in,
+        nrepr)
 
     return nothing
 end
