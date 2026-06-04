@@ -161,7 +161,7 @@ end
     end
 end
 
-function cn_mresp!(mask_soilc::BitVector, mask_soilp::BitVector,
+function cn_mresp!(mask_soilc::AbstractVector{Bool}, mask_soilp::AbstractVector{Bool},
                    bounds_c::UnitRange{Int}, bounds_p::UnitRange{Int},
                    params::MaintRespParams,
                    cn_params_share::CNSharedParamsData,
@@ -221,9 +221,11 @@ function cn_mresp!(mask_soilc::BitVector, mask_soilp::BitVector,
     joff = nlevsno
 
     # --- Column loop: temperature correction factors for each soil layer ---
-    # Allocate tcsoi as a local array (ncols × nlevgrnd)
+    # tcsoi scratch (ncols × nlevgrnd), device-resident via similar() off the
+    # device-resident t_soisno so the kernel launches on the same backend
+    # (a bare Matrix{FT}(undef,…) is host → would force the CPU backend).
     FT = eltype(t_soisno)
-    tcsoi = Matrix{FT}(undef, last(bounds_c), nlevgrnd)
+    tcsoi = similar(t_soisno, FT, last(bounds_c), nlevgrnd)
 
     # Convert Float64 scalar args to the working precision so no double is
     # materialized inside the kernel on a Float32-only backend (Metal).

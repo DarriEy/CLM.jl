@@ -2262,7 +2262,7 @@ end
 # ==========================================================================
 function crop_phase!(mask_pcropp::AbstractVector{Bool}, crop::CropData,
                      cnveg_state::CNVegStateData,
-                     crop_phase_out::Vector{<:Real})
+                     crop_phase_out::AbstractVector{<:Real})
     # Per-patch independent: derive crop phase into output array.
     phen_crop_phase!(crop_phase_out, mask_pcropp, crop.croplive_patch,
                      crop.gddtsoi_patch, crop.hui_patch,
