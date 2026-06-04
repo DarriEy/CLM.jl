@@ -161,7 +161,214 @@ relative demand, and allocate C and N to new growth and storage.
 Ported from `calc_plant_cn_alloc` in
 `NutrientCompetitionCLM45defaultMod.F90`.
 """
-function calc_plant_cn_alloc!(mask_soilp::BitVector, bounds::UnitRange{Int},
+# --------------------------------------------------------------------------
+# Per-patch C/N allocation kernel (everything except the optional C13/C14
+# downregulation writes, which are handled by _cnalloc_iso_kernel! below).
+# Loop-carried scalars f5[k] are computed inline per-k (no per-patch alloc).
+# --------------------------------------------------------------------------
+@kernel function _cnalloc_main_kernel!(
+        sminn_to_npool, plant_nalloc, plant_calloc, excess_cflux, downreg,
+        psnsun_to_cpool, psnshade_to_cpool,
+        cpool_to_leafc, cpool_to_leafc_storage,
+        cpool_to_frootc, cpool_to_frootc_storage,
+        cpool_to_livestemc, cpool_to_livestemc_storage,
+        cpool_to_deadstemc, cpool_to_deadstemc_storage,
+        cpool_to_livecrootc, cpool_to_livecrootc_storage,
+        cpool_to_deadcrootc, cpool_to_deadcrootc_storage,
+        cpool_to_reproductivec, cpool_to_reproductivec_storage,
+        npool_to_leafn, npool_to_leafn_storage,
+        npool_to_frootn, npool_to_frootn_storage,
+        npool_to_livestemn, npool_to_livestemn_storage,
+        npool_to_deadstemn, npool_to_deadstemn_storage,
+        npool_to_livecrootn, npool_to_livecrootn_storage,
+        npool_to_deadcrootn, npool_to_deadcrootn_storage,
+        npool_to_reproductiven, npool_to_reproductiven_storage,
+        cpool_to_gresp_storage,
+        @Const(mask_soilp), @Const(column), @Const(itype),
+        @Const(froot_leaf), @Const(croot_stem), @Const(stem_leaf),
+        @Const(annsum_npp), @Const(flivewd), @Const(grperc), @Const(grpnow),
+        @Const(leafcn), @Const(frootcn), @Const(livewdcn), @Const(deadwdcn),
+        @Const(fcur_arr), @Const(graincn), @Const(woody),
+        @Const(croplive), @Const(aleaf), @Const(aroot), @Const(astem),
+        @Const(arepr),
+        @Const(sminn_to_plant_fun), @Const(plant_ndemand), @Const(fpg_col),
+        @Const(retransn_to_npool), @Const(c_allometry), @Const(n_allometry),
+        @Const(availc), @Const(gpp_before_downreg),
+        use_fun::Bool, npcropmin::Int, nrepr::Int)
+    T = eltype(plant_calloc)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        c = column[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+
+        # set local allocation variables
+        f1 = froot_leaf[ivt]
+        f2 = croot_stem[ivt]
+
+        # modified wood allocation to be 2.2 at npp=800 gC/m2/yr, 0.2 at npp=0,
+        # constrained so that it does not go lower than 0.2 (under negative annsum_npp)
+        # -1.0 means dynamic allocation (trees)
+        if stem_leaf[ivt] == T(-1.0)
+            f3 = (T(2.7) / (one(T) + exp(T(-0.004) * (annsum_npp[p] - T(300.0))))) - T(0.4)
+        else
+            f3 = stem_leaf[ivt]
+        end
+
+        f4   = flivewd[ivt]
+        g1   = grperc[ivt]
+        g2   = grpnow[ivt]
+        cnl  = leafcn[ivt]
+        cnfr = frootcn[ivt]
+        cnlw = livewdcn[ivt]
+        cndw = deadwdcn[ivt]
+        fcur = fcur_arr[ivt]
+
+        is_crop = ivt >= npcropmin
+        crop_alive = is_crop && croplive[p] && !isnan(aleaf[p])
+
+        if is_crop  # skip 2 generic crops
+            if crop_alive
+                f1 = aroot[p] / aleaf[p]
+                f3 = astem[p] / aleaf[p]
+                g1 = T(0.25)
+            else
+                f1 = zero(T)
+                f3 = zero(T)
+                g1 = T(0.25)
+            end
+        end
+
+        if use_fun  # if we are using FUN, we get the N available from there
+            sminn_to_npool[p] = sminn_to_plant_fun[p]
+        else  # no FUN - get N available from the FPG calculation
+            sminn_to_npool[p] = plant_ndemand[p] * fpg_col[c]
+        end
+
+        plant_nalloc[p] = sminn_to_npool[p] + retransn_to_npool[p]
+
+        plant_calloc[p] = plant_nalloc[p] * (c_allometry[p] / n_allometry[p])
+
+        if !use_fun  # ORIGINAL CLM(CN) downregulation code
+            excess_cflux[p] = availc[p] - plant_calloc[p]
+
+            # reduce gpp fluxes due to N limitation
+            if gpp_before_downreg[p] > zero(T)
+                downreg[p] = excess_cflux[p] / gpp_before_downreg[p]
+
+                psnsun_to_cpool[p]   = psnsun_to_cpool[p]   * (one(T) - downreg[p])
+                psnshade_to_cpool[p] = psnshade_to_cpool[p] * (one(T) - downreg[p])
+            end
+        end  # use_fun
+
+        # calculate new leaf C and daily fluxes to current growth and storage pools
+        nlc = plant_calloc[p] / c_allometry[p]
+
+        cpool_to_leafc[p]          = nlc * fcur
+        cpool_to_leafc_storage[p]  = nlc * (one(T) - fcur)
+        cpool_to_frootc[p]         = nlc * f1 * fcur
+        cpool_to_frootc_storage[p] = nlc * f1 * (one(T) - fcur)
+
+        if woody[ivt] == one(T)
+            cpool_to_livestemc[p]          = nlc * f3 * f4 * fcur
+            cpool_to_livestemc_storage[p]  = nlc * f3 * f4 * (one(T) - fcur)
+            cpool_to_deadstemc[p]          = nlc * f3 * (one(T) - f4) * fcur
+            cpool_to_deadstemc_storage[p]  = nlc * f3 * (one(T) - f4) * (one(T) - fcur)
+            cpool_to_livecrootc[p]         = nlc * f2 * f3 * f4 * fcur
+            cpool_to_livecrootc_storage[p] = nlc * f2 * f3 * f4 * (one(T) - fcur)
+            cpool_to_deadcrootc[p]         = nlc * f2 * f3 * (one(T) - f4) * fcur
+            cpool_to_deadcrootc_storage[p] = nlc * f2 * f3 * (one(T) - f4) * (one(T) - fcur)
+        end
+
+        if is_crop  # skip 2 generic crops
+            cpool_to_livestemc[p]          = nlc * f3 * f4 * fcur
+            cpool_to_livestemc_storage[p]  = nlc * f3 * f4 * (one(T) - fcur)
+            cpool_to_deadstemc[p]          = nlc * f3 * (one(T) - f4) * fcur
+            cpool_to_deadstemc_storage[p]  = nlc * f3 * (one(T) - f4) * (one(T) - fcur)
+            cpool_to_livecrootc[p]         = nlc * f2 * f3 * f4 * fcur
+            cpool_to_livecrootc_storage[p] = nlc * f2 * f3 * f4 * (one(T) - fcur)
+            cpool_to_deadcrootc[p]         = nlc * f2 * f3 * (one(T) - f4) * fcur
+            cpool_to_deadcrootc_storage[p] = nlc * f2 * f3 * (one(T) - f4) * (one(T) - fcur)
+            for k in 1:nrepr
+                f5k = crop_alive ? (arepr[p, k] / aleaf[p]) : zero(T)
+                cpool_to_reproductivec[p, k]         = nlc * f5k * fcur
+                cpool_to_reproductivec_storage[p, k] = nlc * f5k * (one(T) - fcur)
+            end
+        end
+
+        # corresponding N fluxes
+        npool_to_leafn[p]          = (nlc / cnl) * fcur
+        npool_to_leafn_storage[p]  = (nlc / cnl) * (one(T) - fcur)
+        npool_to_frootn[p]         = (nlc * f1 / cnfr) * fcur
+        npool_to_frootn_storage[p] = (nlc * f1 / cnfr) * (one(T) - fcur)
+
+        if woody[ivt] == one(T)
+            npool_to_livestemn[p]          = (nlc * f3 * f4 / cnlw) * fcur
+            npool_to_livestemn_storage[p]  = (nlc * f3 * f4 / cnlw) * (one(T) - fcur)
+            npool_to_deadstemn[p]          = (nlc * f3 * (one(T) - f4) / cndw) * fcur
+            npool_to_deadstemn_storage[p]  = (nlc * f3 * (one(T) - f4) / cndw) * (one(T) - fcur)
+            npool_to_livecrootn[p]         = (nlc * f2 * f3 * f4 / cnlw) * fcur
+            npool_to_livecrootn_storage[p] = (nlc * f2 * f3 * f4 / cnlw) * (one(T) - fcur)
+            npool_to_deadcrootn[p]         = (nlc * f2 * f3 * (one(T) - f4) / cndw) * fcur
+            npool_to_deadcrootn_storage[p] = (nlc * f2 * f3 * (one(T) - f4) / cndw) * (one(T) - fcur)
+        end
+
+        if is_crop  # skip 2 generic crops
+            cng = graincn[ivt]
+            npool_to_livestemn[p]          = (nlc * f3 * f4 / cnlw) * fcur
+            npool_to_livestemn_storage[p]  = (nlc * f3 * f4 / cnlw) * (one(T) - fcur)
+            npool_to_deadstemn[p]          = (nlc * f3 * (one(T) - f4) / cndw) * fcur
+            npool_to_deadstemn_storage[p]  = (nlc * f3 * (one(T) - f4) / cndw) * (one(T) - fcur)
+            npool_to_livecrootn[p]         = (nlc * f2 * f3 * f4 / cnlw) * fcur
+            npool_to_livecrootn_storage[p] = (nlc * f2 * f3 * f4 / cnlw) * (one(T) - fcur)
+            npool_to_deadcrootn[p]         = (nlc * f2 * f3 * (one(T) - f4) / cndw) * fcur
+            npool_to_deadcrootn_storage[p] = (nlc * f2 * f3 * (one(T) - f4) / cndw) * (one(T) - fcur)
+            for k in 1:nrepr
+                f5k = crop_alive ? (arepr[p, k] / aleaf[p]) : zero(T)
+                npool_to_reproductiven[p, k]         = (nlc * f5k / cng) * fcur
+                npool_to_reproductiven_storage[p, k] = (nlc * f5k / cng) * (one(T) - fcur)
+            end
+        end
+
+        # Growth respiration storage: carbon that needs to go into growth
+        # respiration storage to satisfy all of the storage growth demands
+        gresp_storage = cpool_to_leafc_storage[p] + cpool_to_frootc_storage[p]
+        if woody[ivt] == one(T)
+            gresp_storage += cpool_to_livestemc_storage[p]
+            gresp_storage += cpool_to_deadstemc_storage[p]
+            gresp_storage += cpool_to_livecrootc_storage[p]
+            gresp_storage += cpool_to_deadcrootc_storage[p]
+        end
+        if is_crop  # skip 2 generic crops
+            gresp_storage += cpool_to_livestemc_storage[p]
+            for k in 1:nrepr
+                gresp_storage += cpool_to_reproductivec_storage[p, k]
+            end
+        end
+        cpool_to_gresp_storage[p] = gresp_storage * g1 * (one(T) - g2)
+    end
+end
+
+# Separate kernel for the optional isotope (C13 or C14) downregulation writes.
+# Launched only when the corresponding flag is true AND the flux struct exists,
+# so a `nothing` struct is never read on the device. Re-reads downreg + the same
+# guards (!use_fun, gpp>0) the main kernel used so the multiply matches exactly.
+@kernel function _cnalloc_iso_kernel!(
+        iso_psnsun_to_cpool, iso_psnshade_to_cpool,
+        @Const(mask_soilp), @Const(downreg), @Const(gpp_before_downreg),
+        use_fun::Bool)
+    T = eltype(iso_psnsun_to_cpool)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        if !use_fun
+            if gpp_before_downreg[p] > zero(T)
+                iso_psnsun_to_cpool[p]   = iso_psnsun_to_cpool[p]   * (one(T) - downreg[p])
+                iso_psnshade_to_cpool[p] = iso_psnshade_to_cpool[p] * (one(T) - downreg[p])
+            end
+        end
+    end
+end
+
+function calc_plant_cn_alloc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRange{Int},
         pftcon::PftConNutrientCompetition,
         cn_shared_params::CNSharedParamsData,
         patch::PatchData,
@@ -170,7 +377,7 @@ function calc_plant_cn_alloc!(mask_soilp::BitVector, bounds::UnitRange{Int},
         cnveg_cs::CNVegCarbonStateData,
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_nf::CNVegNitrogenFluxData;
-        fpg_col::Vector{<:Real},
+        fpg_col::AbstractVector{<:Real},
         c13_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         c14_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         use_c13::Bool=false,
@@ -179,183 +386,52 @@ function calc_plant_cn_alloc!(mask_soilp::BitVector, bounds::UnitRange{Int},
         nrepr::Int=NREPR)
 
     use_fun = cn_shared_params.use_fun
-    FT = eltype(fpg_col)
 
-    for p in bounds
-        mask_soilp[p] || continue
+    _launch!(_cnalloc_main_kernel!,
+        cnveg_nf.sminn_to_npool_patch, cnveg_nf.plant_nalloc_patch,
+        cnveg_cf.plant_calloc_patch, cnveg_cf.excess_cflux_patch,
+        cnveg_state.downreg_patch,
+        cnveg_cf.psnsun_to_cpool_patch, cnveg_cf.psnshade_to_cpool_patch,
+        cnveg_cf.cpool_to_leafc_patch, cnveg_cf.cpool_to_leafc_storage_patch,
+        cnveg_cf.cpool_to_frootc_patch, cnveg_cf.cpool_to_frootc_storage_patch,
+        cnveg_cf.cpool_to_livestemc_patch, cnveg_cf.cpool_to_livestemc_storage_patch,
+        cnveg_cf.cpool_to_deadstemc_patch, cnveg_cf.cpool_to_deadstemc_storage_patch,
+        cnveg_cf.cpool_to_livecrootc_patch, cnveg_cf.cpool_to_livecrootc_storage_patch,
+        cnveg_cf.cpool_to_deadcrootc_patch, cnveg_cf.cpool_to_deadcrootc_storage_patch,
+        cnveg_cf.cpool_to_reproductivec_patch, cnveg_cf.cpool_to_reproductivec_storage_patch,
+        cnveg_nf.npool_to_leafn_patch, cnveg_nf.npool_to_leafn_storage_patch,
+        cnveg_nf.npool_to_frootn_patch, cnveg_nf.npool_to_frootn_storage_patch,
+        cnveg_nf.npool_to_livestemn_patch, cnveg_nf.npool_to_livestemn_storage_patch,
+        cnveg_nf.npool_to_deadstemn_patch, cnveg_nf.npool_to_deadstemn_storage_patch,
+        cnveg_nf.npool_to_livecrootn_patch, cnveg_nf.npool_to_livecrootn_storage_patch,
+        cnveg_nf.npool_to_deadcrootn_patch, cnveg_nf.npool_to_deadcrootn_storage_patch,
+        cnveg_nf.npool_to_reproductiven_patch, cnveg_nf.npool_to_reproductiven_storage_patch,
+        cnveg_cf.cpool_to_gresp_storage_patch,
+        mask_soilp, patch.column, patch.itype,
+        pftcon.froot_leaf, pftcon.croot_stem, pftcon.stem_leaf,
+        cnveg_cf.annsum_npp_patch, pftcon.flivewd, pftcon.grperc, pftcon.grpnow,
+        pftcon.leafcn, pftcon.frootcn, pftcon.livewdcn, pftcon.deadwdcn,
+        pftcon.fcur, pftcon.graincn, pftcon.woody,
+        crop.croplive_patch, cnveg_state.aleaf_patch, cnveg_state.aroot_patch,
+        cnveg_state.astem_patch, cnveg_state.arepr_patch,
+        cnveg_nf.sminn_to_plant_fun_patch, cnveg_nf.plant_ndemand_patch, fpg_col,
+        cnveg_nf.retransn_to_npool_patch, cnveg_state.c_allometry_patch,
+        cnveg_state.n_allometry_patch, cnveg_cf.availc_patch,
+        cnveg_cf.gpp_before_downreg_patch,
+        use_fun, npcropmin, nrepr)
 
-        c = patch.column[p]
-        ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        # set local allocation variables
-        f1 = pftcon.froot_leaf[ivt]
-        f2 = pftcon.croot_stem[ivt]
-
-        # modified wood allocation to be 2.2 at npp=800 gC/m2/yr, 0.2 at npp=0,
-        # constrained so that it does not go lower than 0.2 (under negative annsum_npp)
-        # -1.0 means dynamic allocation (trees)
-        if pftcon.stem_leaf[ivt] == -1.0
-            f3 = (2.7 / (1.0 + exp(-0.004 * (cnveg_cf.annsum_npp_patch[p] - 300.0)))) - 0.4
-        else
-            f3 = pftcon.stem_leaf[ivt]
-        end
-
-        f4   = pftcon.flivewd[ivt]
-        g1   = pftcon.grperc[ivt]
-        g2   = pftcon.grpnow[ivt]
-        cnl  = pftcon.leafcn[ivt]
-        cnfr = pftcon.frootcn[ivt]
-        cnlw = pftcon.livewdcn[ivt]
-        cndw = pftcon.deadwdcn[ivt]
-        fcur = pftcon.fcur[ivt]
-
-        f5 = zeros(FT, nrepr)
-
-        if ivt >= npcropmin  # skip 2 generic crops
-            if crop.croplive_patch[p] && !isnan(cnveg_state.aleaf_patch[p])
-                f1 = cnveg_state.aroot_patch[p] / cnveg_state.aleaf_patch[p]
-                f3 = cnveg_state.astem_patch[p] / cnveg_state.aleaf_patch[p]
-                for k in 1:nrepr
-                    f5[k] = cnveg_state.arepr_patch[p, k] / cnveg_state.aleaf_patch[p]
-                end
-                g1 = 0.25
-            else
-                f1 = 0.0
-                f3 = 0.0
-                for k in 1:nrepr
-                    f5[k] = 0.0
-                end
-                g1 = 0.25
-            end
-        end
-
-        if use_fun  # if we are using FUN, we get the N available from there
-            cnveg_nf.sminn_to_npool_patch[p] = cnveg_nf.sminn_to_plant_fun_patch[p]
-        else  # no FUN - get N available from the FPG calculation
-            cnveg_nf.sminn_to_npool_patch[p] = cnveg_nf.plant_ndemand_patch[p] * fpg_col[c]
-        end
-
-        cnveg_nf.plant_nalloc_patch[p] = cnveg_nf.sminn_to_npool_patch[p] +
-                                          cnveg_nf.retransn_to_npool_patch[p]
-
-        cnveg_cf.plant_calloc_patch[p] = cnveg_nf.plant_nalloc_patch[p] *
-            (cnveg_state.c_allometry_patch[p] / cnveg_state.n_allometry_patch[p])
-
-        if !use_fun  # ORIGINAL CLM(CN) downregulation code
-            cnveg_cf.excess_cflux_patch[p] = cnveg_cf.availc_patch[p] -
-                                              cnveg_cf.plant_calloc_patch[p]
-
-            # reduce gpp fluxes due to N limitation
-            if cnveg_cf.gpp_before_downreg_patch[p] > 0.0
-                cnveg_state.downreg_patch[p] = cnveg_cf.excess_cflux_patch[p] /
-                    cnveg_cf.gpp_before_downreg_patch[p]
-
-                cnveg_cf.psnsun_to_cpool_patch[p] = cnveg_cf.psnsun_to_cpool_patch[p] *
-                    (1.0 - cnveg_state.downreg_patch[p])
-                cnveg_cf.psnshade_to_cpool_patch[p] = cnveg_cf.psnshade_to_cpool_patch[p] *
-                    (1.0 - cnveg_state.downreg_patch[p])
-
-                if use_c13 && c13_cnveg_cf !== nothing
-                    c13_cnveg_cf.psnsun_to_cpool_patch[p] = c13_cnveg_cf.psnsun_to_cpool_patch[p] *
-                        (1.0 - cnveg_state.downreg_patch[p])
-                    c13_cnveg_cf.psnshade_to_cpool_patch[p] = c13_cnveg_cf.psnshade_to_cpool_patch[p] *
-                        (1.0 - cnveg_state.downreg_patch[p])
-                end
-                if use_c14 && c14_cnveg_cf !== nothing
-                    c14_cnveg_cf.psnsun_to_cpool_patch[p] = c14_cnveg_cf.psnsun_to_cpool_patch[p] *
-                        (1.0 - cnveg_state.downreg_patch[p])
-                    c14_cnveg_cf.psnshade_to_cpool_patch[p] = c14_cnveg_cf.psnshade_to_cpool_patch[p] *
-                        (1.0 - cnveg_state.downreg_patch[p])
-                end
-            end
-        end  # use_fun
-
-        # calculate new leaf C and daily fluxes to current growth and storage pools
-        nlc = cnveg_cf.plant_calloc_patch[p] / cnveg_state.c_allometry_patch[p]
-
-        cnveg_cf.cpool_to_leafc_patch[p]          = nlc * fcur
-        cnveg_cf.cpool_to_leafc_storage_patch[p]  = nlc * (1.0 - fcur)
-        cnveg_cf.cpool_to_frootc_patch[p]         = nlc * f1 * fcur
-        cnveg_cf.cpool_to_frootc_storage_patch[p] = nlc * f1 * (1.0 - fcur)
-
-        if pftcon.woody[ivt] == 1.0
-            cnveg_cf.cpool_to_livestemc_patch[p]          = nlc * f3 * f4 * fcur
-            cnveg_cf.cpool_to_livestemc_storage_patch[p]  = nlc * f3 * f4 * (1.0 - fcur)
-            cnveg_cf.cpool_to_deadstemc_patch[p]          = nlc * f3 * (1.0 - f4) * fcur
-            cnveg_cf.cpool_to_deadstemc_storage_patch[p]  = nlc * f3 * (1.0 - f4) * (1.0 - fcur)
-            cnveg_cf.cpool_to_livecrootc_patch[p]         = nlc * f2 * f3 * f4 * fcur
-            cnveg_cf.cpool_to_livecrootc_storage_patch[p] = nlc * f2 * f3 * f4 * (1.0 - fcur)
-            cnveg_cf.cpool_to_deadcrootc_patch[p]         = nlc * f2 * f3 * (1.0 - f4) * fcur
-            cnveg_cf.cpool_to_deadcrootc_storage_patch[p] = nlc * f2 * f3 * (1.0 - f4) * (1.0 - fcur)
-        end
-
-        if ivt >= npcropmin  # skip 2 generic crops
-            cnveg_cf.cpool_to_livestemc_patch[p]          = nlc * f3 * f4 * fcur
-            cnveg_cf.cpool_to_livestemc_storage_patch[p]  = nlc * f3 * f4 * (1.0 - fcur)
-            cnveg_cf.cpool_to_deadstemc_patch[p]          = nlc * f3 * (1.0 - f4) * fcur
-            cnveg_cf.cpool_to_deadstemc_storage_patch[p]  = nlc * f3 * (1.0 - f4) * (1.0 - fcur)
-            cnveg_cf.cpool_to_livecrootc_patch[p]         = nlc * f2 * f3 * f4 * fcur
-            cnveg_cf.cpool_to_livecrootc_storage_patch[p] = nlc * f2 * f3 * f4 * (1.0 - fcur)
-            cnveg_cf.cpool_to_deadcrootc_patch[p]         = nlc * f2 * f3 * (1.0 - f4) * fcur
-            cnveg_cf.cpool_to_deadcrootc_storage_patch[p] = nlc * f2 * f3 * (1.0 - f4) * (1.0 - fcur)
-            for k in 1:nrepr
-                cnveg_cf.cpool_to_reproductivec_patch[p, k]         = nlc * f5[k] * fcur
-                cnveg_cf.cpool_to_reproductivec_storage_patch[p, k] = nlc * f5[k] * (1.0 - fcur)
-            end
-        end
-
-        # corresponding N fluxes
-        cnveg_nf.npool_to_leafn_patch[p]          = (nlc / cnl) * fcur
-        cnveg_nf.npool_to_leafn_storage_patch[p]  = (nlc / cnl) * (1.0 - fcur)
-        cnveg_nf.npool_to_frootn_patch[p]         = (nlc * f1 / cnfr) * fcur
-        cnveg_nf.npool_to_frootn_storage_patch[p] = (nlc * f1 / cnfr) * (1.0 - fcur)
-
-        if pftcon.woody[ivt] == 1.0
-            cnveg_nf.npool_to_livestemn_patch[p]          = (nlc * f3 * f4 / cnlw) * fcur
-            cnveg_nf.npool_to_livestemn_storage_patch[p]  = (nlc * f3 * f4 / cnlw) * (1.0 - fcur)
-            cnveg_nf.npool_to_deadstemn_patch[p]          = (nlc * f3 * (1.0 - f4) / cndw) * fcur
-            cnveg_nf.npool_to_deadstemn_storage_patch[p]  = (nlc * f3 * (1.0 - f4) / cndw) * (1.0 - fcur)
-            cnveg_nf.npool_to_livecrootn_patch[p]         = (nlc * f2 * f3 * f4 / cnlw) * fcur
-            cnveg_nf.npool_to_livecrootn_storage_patch[p] = (nlc * f2 * f3 * f4 / cnlw) * (1.0 - fcur)
-            cnveg_nf.npool_to_deadcrootn_patch[p]         = (nlc * f2 * f3 * (1.0 - f4) / cndw) * fcur
-            cnveg_nf.npool_to_deadcrootn_storage_patch[p] = (nlc * f2 * f3 * (1.0 - f4) / cndw) * (1.0 - fcur)
-        end
-
-        if ivt >= npcropmin  # skip 2 generic crops
-            cng = pftcon.graincn[ivt]
-            cnveg_nf.npool_to_livestemn_patch[p]          = (nlc * f3 * f4 / cnlw) * fcur
-            cnveg_nf.npool_to_livestemn_storage_patch[p]  = (nlc * f3 * f4 / cnlw) * (1.0 - fcur)
-            cnveg_nf.npool_to_deadstemn_patch[p]          = (nlc * f3 * (1.0 - f4) / cndw) * fcur
-            cnveg_nf.npool_to_deadstemn_storage_patch[p]  = (nlc * f3 * (1.0 - f4) / cndw) * (1.0 - fcur)
-            cnveg_nf.npool_to_livecrootn_patch[p]         = (nlc * f2 * f3 * f4 / cnlw) * fcur
-            cnveg_nf.npool_to_livecrootn_storage_patch[p] = (nlc * f2 * f3 * f4 / cnlw) * (1.0 - fcur)
-            cnveg_nf.npool_to_deadcrootn_patch[p]         = (nlc * f2 * f3 * (1.0 - f4) / cndw) * fcur
-            cnveg_nf.npool_to_deadcrootn_storage_patch[p] = (nlc * f2 * f3 * (1.0 - f4) / cndw) * (1.0 - fcur)
-            for k in 1:nrepr
-                cnveg_nf.npool_to_reproductiven_patch[p, k]         = (nlc * f5[k] / cng) * fcur
-                cnveg_nf.npool_to_reproductiven_storage_patch[p, k] = (nlc * f5[k] / cng) * (1.0 - fcur)
-            end
-        end
-
-        # Growth respiration storage: carbon that needs to go into growth
-        # respiration storage to satisfy all of the storage growth demands
-        gresp_storage = cnveg_cf.cpool_to_leafc_storage_patch[p] +
-                        cnveg_cf.cpool_to_frootc_storage_patch[p]
-        if pftcon.woody[ivt] == 1.0
-            gresp_storage += cnveg_cf.cpool_to_livestemc_storage_patch[p]
-            gresp_storage += cnveg_cf.cpool_to_deadstemc_storage_patch[p]
-            gresp_storage += cnveg_cf.cpool_to_livecrootc_storage_patch[p]
-            gresp_storage += cnveg_cf.cpool_to_deadcrootc_storage_patch[p]
-        end
-        if ivt >= npcropmin  # skip 2 generic crops
-            gresp_storage += cnveg_cf.cpool_to_livestemc_storage_patch[p]
-            for k in 1:nrepr
-                gresp_storage += cnveg_cf.cpool_to_reproductivec_storage_patch[p, k]
-            end
-        end
-        cnveg_cf.cpool_to_gresp_storage_patch[p] = gresp_storage * g1 * (1.0 - g2)
-
-    end  # end patch loop
+    if use_c13 && c13_cnveg_cf !== nothing
+        _launch!(_cnalloc_iso_kernel!,
+            c13_cnveg_cf.psnsun_to_cpool_patch, c13_cnveg_cf.psnshade_to_cpool_patch,
+            mask_soilp, cnveg_state.downreg_patch, cnveg_cf.gpp_before_downreg_patch,
+            use_fun)
+    end
+    if use_c14 && c14_cnveg_cf !== nothing
+        _launch!(_cnalloc_iso_kernel!,
+            c14_cnveg_cf.psnsun_to_cpool_patch, c14_cnveg_cf.psnshade_to_cpool_patch,
+            mask_soilp, cnveg_state.downreg_patch, cnveg_cf.gpp_before_downreg_patch,
+            use_fun)
+    end
 
     return nothing
 end
@@ -384,7 +460,138 @@ Sets the following output variables used elsewhere:
 Ported from `calc_plant_nitrogen_demand` in
 `NutrientCompetitionCLM45defaultMod.F90`.
 """
-function calc_plant_nitrogen_demand!(mask_p::BitVector, bounds::UnitRange{Int},
+# --- Loop 1: total plant N demand + per-patch tempsum/tempmax accumulation -
+# Each patch updates its OWN tempsum/tempmax accumulator (own-index read-
+# modify-write) — fully parallel, NOT a cross-patch reduction.
+@kernel function _npdemand_demand_kernel!(plant_ndemand, tempsum_potential_gpp,
+        tempmax_retransn,
+        @Const(mask), @Const(availc), @Const(n_allometry), @Const(c_allometry),
+        @Const(gpp_before_downreg), @Const(retransn))
+    p = @index(Global)
+    @inbounds if mask[p]
+        plant_ndemand[p] = availc[p] * (n_allometry[p] / c_allometry[p])
+
+        # retranslocated N deployment depends on seasonal cycle of potential GPP
+        tempsum_potential_gpp[p] = tempsum_potential_gpp[p] + gpp_before_downreg[p]
+
+        # carry max retransn info to CN Annual Update
+        tempmax_retransn[p] = max(tempmax_retransn[p], retransn[p])
+    end
+end
+
+# --- Loop 2: crop grain-fill retranslocation state machine ----------------
+# Per-patch grain-fill trigger; is_soybean derived per-patch from ivt. The
+# crop_phase values are computed on the host (crop_phase!) and read here.
+@kernel function _npdemand_grainfill_kernel!(grain_flag,
+        leafn_to_retransn, livestemn_to_retransn, frootn_to_retransn,
+        @Const(mask), @Const(itype), @Const(croplive), @Const(crop_phase_vals),
+        @Const(astem), @Const(astemf), @Const(leafc), @Const(frootc),
+        @Const(livestemc), @Const(leafcn), @Const(fleafcn), @Const(livewdcn),
+        @Const(fstemcn), @Const(frootcn), @Const(ffrootcn),
+        cphase_leafemerge_in, cphase_grainfill_in,
+        ntmp_soybean::Int, nirrig_tmp_soybean::Int,
+        ntrp_soybean::Int, nirrig_trp_soybean::Int,
+        dt, use_fun::Bool)
+    p = @index(Global)
+    @inbounds if mask[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+
+        if croplive[p]
+            if crop_phase_vals[p] == cphase_leafemerge_in
+                grain_flag[p] = zero(eltype(grain_flag))  # setting to 0 while in phase 2
+            elseif crop_phase_vals[p] == cphase_grainfill_in
+                # Beth's retranslocation of leafn, stemn, rootn to organ
+                is_soybean = (ivt == ntmp_soybean || ivt == nirrig_tmp_soybean ||
+                              ivt == ntrp_soybean || ivt == nirrig_trp_soybean)
+
+                if astem[p] == astemf[ivt] || !is_soybean
+                    if grain_flag[p] == zero(eltype(grain_flag))
+                        if !use_fun
+                            t1 = one(dt) / dt
+                            leafn_to_retransn[p] = t1 * (
+                                (leafc[p] / leafcn[ivt]) -
+                                (leafc[p] / fleafcn[ivt]))
+                            livestemn_to_retransn[p] = t1 * (
+                                (livestemc[p] / livewdcn[ivt]) -
+                                (livestemc[p] / fstemcn[ivt]))
+                            frootn_to_retransn[p] = zero(eltype(frootn_to_retransn))
+                            if ffrootcn[ivt] > zero(eltype(ffrootcn))
+                                frootn_to_retransn[p] = t1 * (
+                                    (frootc[p] / frootcn[ivt]) -
+                                    (frootc[p] / ffrootcn[ivt]))
+                            end
+                        else  # leafn retrans flux is handled in phenology
+                            frootn_to_retransn[p] = zero(eltype(frootn_to_retransn))
+                            livestemn_to_retransn[p] = zero(eltype(livestemn_to_retransn))
+                        end
+                        grain_flag[p] = one(eltype(grain_flag))
+                    end
+                end
+            end
+        end
+    end
+end
+
+# --- Loop 3a: avail_retransn for prognostic-crop call (grain-flag gated) ---
+@kernel function _npdemand_availretransn_pcrop_kernel!(avail_retransn,
+        @Const(mask), @Const(grain_flag), @Const(plant_ndemand))
+    p = @index(Global)
+    @inbounds if mask[p]
+        if grain_flag[p] == one(eltype(grain_flag))
+            avail_retransn[p] = plant_ndemand[p]
+        else
+            avail_retransn[p] = zero(eltype(avail_retransn))
+        end
+    end
+end
+
+# --- Loop 3b: avail_retransn for non-pcrop call (seasonal GPP fraction) ----
+@kernel function _npdemand_availretransn_nopcrop_kernel!(avail_retransn,
+        @Const(mask), @Const(annsum_potential_gpp), @Const(annmax_retransn),
+        @Const(gpp_before_downreg), dt)
+    p = @index(Global)
+    @inbounds if mask[p]
+        if annsum_potential_gpp[p] > zero(eltype(annsum_potential_gpp))
+            avail_retransn[p] =
+                (annmax_retransn[p] / oftype(annmax_retransn[p], 2.0)) *
+                (gpp_before_downreg[p] / annsum_potential_gpp[p]) / dt
+        else
+            avail_retransn[p] = zero(eltype(avail_retransn))
+        end
+    end
+end
+
+# --- Loop 4: clamp avail_retransn to storage + modify plant N demand -------
+@kernel function _npdemand_retransn_modify_kernel!(avail_retransn,
+        retransn_to_npool, plant_ndemand,
+        @Const(mask), @Const(itype), @Const(retransn),
+        @Const(season_decid), @Const(stress_decid), dt, use_fun::Bool)
+    p = @index(Global)
+    @inbounds if mask[p]
+        ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
+
+        # make sure available retrans N doesn't exceed storage
+        avail_retransn[p] = min(avail_retransn[p], retransn[p] / dt)
+
+        # take from retransn pool at most the flux required to meet plant ndemand
+        if plant_ndemand[p] > avail_retransn[p]
+            retransn_to_npool[p] = avail_retransn[p]
+        else
+            retransn_to_npool[p] = plant_ndemand[p]
+        end
+
+        if !use_fun
+            plant_ndemand[p] = plant_ndemand[p] - retransn_to_npool[p]
+        else
+            if season_decid[ivt] == one(eltype(season_decid)) ||
+               stress_decid[ivt] == one(eltype(stress_decid))
+                plant_ndemand[p] = plant_ndemand[p] - retransn_to_npool[p]
+            end
+        end
+    end
+end
+
+function calc_plant_nitrogen_demand!(mask_p::AbstractVector{Bool}, bounds::UnitRange{Int},
         call_is_for_pcrop::Bool,
         pftcon::PftConNutrientCompetition,
         cn_shared_params::CNSharedParamsData,
@@ -406,127 +613,58 @@ function calc_plant_nitrogen_demand!(mask_p::BitVector, bounds::UnitRange{Int},
     use_fun = cn_shared_params.use_fun
 
     # loop over patches to assess the total plant N demand
-    for p in bounds
-        mask_p[p] || continue
-
-        cnveg_nf.plant_ndemand_patch[p] = cnveg_cf.availc_patch[p] *
-            (cnveg_state.n_allometry_patch[p] / cnveg_state.c_allometry_patch[p])
-
-        # retranslocated N deployment depends on seasonal cycle of potential GPP
-        # (requires one year run to accumulate demand)
-        cnveg_state.tempsum_potential_gpp_patch[p] =
-            cnveg_state.tempsum_potential_gpp_patch[p] +
-            cnveg_cf.gpp_before_downreg_patch[p]
-
-        # carry max retransn info to CN Annual Update
-        cnveg_state.tempmax_retransn_patch[p] =
-            max(cnveg_state.tempmax_retransn_patch[p], cnveg_ns.retransn_patch[p])
-    end
+    _launch!(_npdemand_demand_kernel!, cnveg_nf.plant_ndemand_patch,
+        cnveg_state.tempsum_potential_gpp_patch,
+        cnveg_state.tempmax_retransn_patch,
+        mask_p, cnveg_cf.availc_patch, cnveg_state.n_allometry_patch,
+        cnveg_state.c_allometry_patch, cnveg_cf.gpp_before_downreg_patch,
+        cnveg_ns.retransn_patch)
 
     # Crop grain-fill retranslocation
     if call_is_for_pcrop
-        # Compute crop phase for all patches in bounds
+        # Compute crop phase for all patches in bounds (host-side helper,
+        # already GPU-capable; the kernel below reads its output array).
         FT = eltype(cnveg_nf.plant_ndemand_patch)
         crop_phase_vals = zeros(FT, length(mask_p))
         crop_phase!(mask_p, crop, cnveg_state, crop_phase_vals)
 
-        for p in bounds
-            mask_p[p] || continue
-
-            ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-            if crop.croplive_patch[p]
-                if crop_phase_vals[p] == cphase_leafemerge
-                    cnveg_state.grain_flag_patch[p] = 0.0  # setting to 0 while in phase 2
-                elseif crop_phase_vals[p] == cphase_grainfill
-                    # Beth's retranslocation of leafn, stemn, rootn to organ
-                    # Filter excess plant N to retransn pool for organ N
-                    is_soybean = (ivt == ntmp_soybean || ivt == nirrig_tmp_soybean ||
-                                  ivt == ntrp_soybean || ivt == nirrig_trp_soybean)
-
-                    if cnveg_state.astem_patch[p] == pftcon.astemf[ivt] || !is_soybean
-                        if cnveg_state.grain_flag_patch[p] == 0.0
-                            if !use_fun
-                                t1 = 1.0 / dt
-                                cnveg_nf.leafn_to_retransn_patch[p] = t1 * (
-                                    (cnveg_cs.leafc_patch[p] / pftcon.leafcn[ivt]) -
-                                    (cnveg_cs.leafc_patch[p] / pftcon.fleafcn[ivt]))
-                                cnveg_nf.livestemn_to_retransn_patch[p] = t1 * (
-                                    (cnveg_cs.livestemc_patch[p] / pftcon.livewdcn[ivt]) -
-                                    (cnveg_cs.livestemc_patch[p] / pftcon.fstemcn[ivt]))
-                                cnveg_nf.frootn_to_retransn_patch[p] = 0.0
-                                if pftcon.ffrootcn[ivt] > 0.0
-                                    cnveg_nf.frootn_to_retransn_patch[p] = t1 * (
-                                        (cnveg_cs.frootc_patch[p] / pftcon.frootcn[ivt]) -
-                                        (cnveg_cs.frootc_patch[p] / pftcon.ffrootcn[ivt]))
-                                end
-                            else  # leafn retrans flux is handled in phenology
-                                cnveg_nf.frootn_to_retransn_patch[p] = 0.0
-                                cnveg_nf.livestemn_to_retransn_patch[p] = 0.0
-                            end
-                            cnveg_state.grain_flag_patch[p] = 1.0
-                        end
-                    end
-                end
-            end
-        end
+        _launch!(_npdemand_grainfill_kernel!, cnveg_state.grain_flag_patch,
+            cnveg_nf.leafn_to_retransn_patch,
+            cnveg_nf.livestemn_to_retransn_patch,
+            cnveg_nf.frootn_to_retransn_patch,
+            mask_p, patch.itype, crop.croplive_patch, crop_phase_vals,
+            cnveg_state.astem_patch, pftcon.astemf,
+            cnveg_cs.leafc_patch, cnveg_cs.frootc_patch, cnveg_cs.livestemc_patch,
+            pftcon.leafcn, pftcon.fleafcn, pftcon.livewdcn, pftcon.fstemcn,
+            pftcon.frootcn, pftcon.ffrootcn,
+            FT(cphase_leafemerge), FT(cphase_grainfill),
+            ntmp_soybean, nirrig_tmp_soybean, ntrp_soybean, nirrig_trp_soybean,
+            FT(dt), use_fun)
     end
 
     # Beth's code: crops pull from retransn pool only during grain fill;
     # retransn pool has N from leaves, stems, and roots for retranslocation
     if !use_fun
+        FT = eltype(cnveg_nf.avail_retransn_patch)
         if call_is_for_pcrop
-            for p in bounds
-                mask_p[p] || continue
-
-                if cnveg_state.grain_flag_patch[p] == 1.0
-                    cnveg_nf.avail_retransn_patch[p] = cnveg_nf.plant_ndemand_patch[p]
-                else
-                    cnveg_nf.avail_retransn_patch[p] = 0.0
-                end
-            end
+            _launch!(_npdemand_availretransn_pcrop_kernel!,
+                cnveg_nf.avail_retransn_patch,
+                mask_p, cnveg_state.grain_flag_patch,
+                cnveg_nf.plant_ndemand_patch)
         else
-            for p in bounds
-                mask_p[p] || continue
-
-                if cnveg_state.annsum_potential_gpp_patch[p] > 0.0
-                    cnveg_nf.avail_retransn_patch[p] =
-                        (cnveg_state.annmax_retransn_patch[p] / 2.0) *
-                        (cnveg_cf.gpp_before_downreg_patch[p] /
-                         cnveg_state.annsum_potential_gpp_patch[p]) / dt
-                else
-                    cnveg_nf.avail_retransn_patch[p] = 0.0
-                end
-            end
+            _launch!(_npdemand_availretransn_nopcrop_kernel!,
+                cnveg_nf.avail_retransn_patch,
+                mask_p, cnveg_state.annsum_potential_gpp_patch,
+                cnveg_state.annmax_retransn_patch,
+                cnveg_cf.gpp_before_downreg_patch, FT(dt))
         end
 
-        for p in bounds
-            mask_p[p] || continue
-
-            ivt = patch.itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-            # make sure available retrans N doesn't exceed storage
-            cnveg_nf.avail_retransn_patch[p] = min(cnveg_nf.avail_retransn_patch[p],
-                                                     cnveg_ns.retransn_patch[p] / dt)
-
-            # modify plant N demand according to the availability of retranslocated N
-            # take from retransn pool at most the flux required to meet plant ndemand
-            if cnveg_nf.plant_ndemand_patch[p] > cnveg_nf.avail_retransn_patch[p]
-                cnveg_nf.retransn_to_npool_patch[p] = cnveg_nf.avail_retransn_patch[p]
-            else
-                cnveg_nf.retransn_to_npool_patch[p] = cnveg_nf.plant_ndemand_patch[p]
-            end
-
-            if !use_fun
-                cnveg_nf.plant_ndemand_patch[p] = cnveg_nf.plant_ndemand_patch[p] -
-                    cnveg_nf.retransn_to_npool_patch[p]
-            else
-                if pftcon.season_decid[ivt] == 1.0 || pftcon.stress_decid[ivt] == 1.0
-                    cnveg_nf.plant_ndemand_patch[p] = cnveg_nf.plant_ndemand_patch[p] -
-                        cnveg_nf.retransn_to_npool_patch[p]
-                end
-            end
-        end
+        _launch!(_npdemand_retransn_modify_kernel!,
+            cnveg_nf.avail_retransn_patch,
+            cnveg_nf.retransn_to_npool_patch,
+            cnveg_nf.plant_ndemand_patch,
+            mask_p, patch.itype, cnveg_ns.retransn_patch,
+            pftcon.season_decid, pftcon.stress_decid, FT(dt), use_fun)
     end  # use_fun
 
     return nothing
