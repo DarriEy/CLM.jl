@@ -39,156 +39,196 @@ Ported from subroutine Light in CNDVLightMod.F90.
 # Arguments
 - `bounds_gridcell`: range of gridcell indices (default 1:1)
 """
-function cndv_light!(dgvs::DGVSData,
-                     eco::DGVEcophysCon,
-                     deadstemc_patch::Vector{<:Real},
-                     leafcmax_patch::Vector{<:Real},
-                     pftcon_in::PftconType,
-                     patch::PatchData,
-                     mask_natvegp::BitVector,
-                     bounds_patch::UnitRange{Int};
-                     bounds_gridcell::UnitRange{Int} = 1:1)
+# Device-view bundle of the per-PFT params cndv_light! reads. PftconType is a
+# 148-field non-parametric struct (not device-movable) and DGVEcophysCon is
+# mutable (not isbits), so the needed fields are extracted + moved to the backend
+# (copyto!+similar) rather than passing those structs to the kernel.
+Base.@kwdef struct _CndvLightPar{V,VB}
+    dwood::V; slatop::V; dsladlai::V; woody::V
+    is_tree::VB; is_shrub::VB
+    crownarea_max::V; reinickerp::V; allom1::V
+end
+Adapt.@adapt_structure _CndvLightPar
 
-    # --- Constants ---
-    fpc_tree_max = 0.95
-    taper = 200.0
+# Pass 1: per-patch crownarea/LAI/FPC update + patch->gridcell scatter of the
+# tree/shrub/grass FPC totals (KA-CPU ascending order → byte-identical to host).
+@kernel function _cndv_light_pass1_kernel!(crownarea, fpcgrid, fpc_inc,
+        @Const(nind), @Const(deadstemc), @Const(leafcmax),
+        numtrees, fpc_tree_total, fpc_inc_tree, fpc_shrub_total, fpc_grass_total,
+        par, @Const(mask), @Const(p_itype), @Const(p_gridcell),
+        taperT, rpiT, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        T = eltype(crownarea)
+        g = p_gridcell[p]; ivp = p_itype[p] + 1
+        woody = par.woody; is_tree = par.is_tree; is_shrub = par.is_shrub
+        dwood = par.dwood; slatop = par.slatop; dsladlai = par.dsladlai
+        crownarea_max = par.crownarea_max; reinickerp_a = par.reinickerp; allom1_a = par.allom1
 
-    # --- Aliases ---
-    ivt           = patch.itype
-    crownarea_max = eco.crownarea_max
-    reinickerp_a  = eco.reinickerp
-    allom1_a      = eco.allom1
-    dwood         = pftcon_in.dwood
-    slatop        = pftcon_in.slatop
-    dsladlai      = pftcon_in.dsladlai
-    woody         = pftcon_in.woody
-    is_tree       = pftcon_in.is_tree
-    is_shrub      = pftcon_in.is_shrub
-
-    crownarea = dgvs.crownarea_patch
-    nind      = dgvs.nind_patch
-    fpcgrid   = dgvs.fpcgrid_patch
-
-    ng = length(bounds_gridcell)
-
-    # --- Gridcell-level accumulators ---
-    fpc_tree_total  = zeros(last(bounds_gridcell))
-    fpc_inc_tree    = zeros(last(bounds_gridcell))
-    fpc_grass_total = zeros(last(bounds_gridcell))
-    fpc_shrub_total = zeros(last(bounds_gridcell))
-    numtrees        = zeros(Int, last(bounds_gridcell))
-    fpc_inc         = zeros(last(bounds_patch))
-
-    # --- Pass 1: update LAI/FPC, accumulate gridcell totals ---
-    for p in bounds_patch
-        mask_natvegp[p] || continue
-        g   = patch.gridcell[p]
-        ivp = ivt[p] + 1  # +1 for Julia 1-based PFT indexing
-
-        # Update crown area for woody PFTs
-        if woody[ivp] == 1.0
-            if fpcgrid[p] > 0.0 && nind[p] > 0.0
+        if woody[ivp] == one(T)
+            if fpcgrid[p] > zero(T) && nind[p] > zero(T)
                 stocking = nind[p] / fpcgrid[p]
-                stemdiam = (24.0 * deadstemc_patch[p] /
-                           (RPI * stocking * dwood[ivp] * taper))^(1.0/3.0)
+                stemdiam = (T(24.0) * deadstemc[p] /
+                           (rpiT * stocking * dwood[ivp] * taperT))^(one(T) / T(3.0))
             else
-                stemdiam = 0.0
+                stemdiam = zero(T)
             end
-            crownarea[p] = min(crownarea_max[ivp],
-                               allom1_a[ivp] * stemdiam^reinickerp_a[ivp])
+            crownarea[p] = min(crownarea_max[ivp], allom1_a[ivp] * stemdiam^reinickerp_a[ivp])
         end
 
-        # Compute LAI per individual
-        if crownarea[p] > 0.0 && nind[p] > 0.0
-            lm_ind = leafcmax_patch[p] * fpcgrid[p] / nind[p]
-            if dsladlai[ivp] > 0.0
-                lai_ind = max(0.001,
+        if crownarea[p] > zero(T) && nind[p] > zero(T)
+            lm_ind = leafcmax[p] * fpcgrid[p] / nind[p]
+            if dsladlai[ivp] > zero(T)
+                lai_ind = max(T(0.001),
                     (exp(lm_ind * dsladlai[ivp] + log(slatop[ivp])) -
                      slatop[ivp]) / dsladlai[ivp] / crownarea[p])
             else
                 lai_ind = lm_ind * slatop[ivp] / crownarea[p]
             end
         else
-            lai_ind = 0.0
+            lai_ind = zero(T)
         end
 
-        fpc_ind = 1.0 - exp(-0.5 * lai_ind)
+        fpc_ind = one(T) - exp(-T(0.5) * lai_ind)
         fpcgrid_old = fpcgrid[p]
         fpcgrid[p] = crownarea[p] * nind[p] * fpc_ind
-        fpc_inc[p] = max(0.0, fpcgrid[p] - fpcgrid_old)
+        fpc_inc[p] = max(zero(T), fpcgrid[p] - fpcgrid_old)
 
-        if woody[ivp] == 1.0
+        if woody[ivp] == one(T)
             if is_tree[ivp]
-                numtrees[g] += 1
-                fpc_tree_total[g] += fpcgrid[p]
-                fpc_inc_tree[g] += fpc_inc[p]
+                _scatter_add!(numtrees, g, Int32(1))   # Int32: Metal has no 64-bit atomics
+                _scatter_add!(fpc_tree_total, g, fpcgrid[p])
+                _scatter_add!(fpc_inc_tree, g, fpc_inc[p])
             elseif is_shrub[ivp]
-                fpc_shrub_total[g] += fpcgrid[p]
+                _scatter_add!(fpc_shrub_total, g, fpcgrid[p])
             end
-        else  # grass
-            fpc_grass_total[g] += fpcgrid[p]
+        else
+            _scatter_add!(fpc_grass_total, g, fpcgrid[p])
         end
     end
+end
 
-    # --- Compute grass/shrub max allowed FPC ---
-    fpc_grass_max = zeros(last(bounds_gridcell))
-    fpc_shrub_max = zeros(last(bounds_gridcell))
-    for g in bounds_gridcell
-        fpc_grass_max[g] = 1.0 - min(fpc_tree_total[g], fpc_tree_max)
-        fpc_shrub_max[g] = max(0.0, fpc_grass_max[g] - fpc_grass_total[g])
+# Per-gridcell grass/shrub max-allowed FPC.
+@kernel function _cndv_light_max_kernel!(fpc_grass_max, fpc_shrub_max,
+        @Const(fpc_tree_total), @Const(fpc_grass_total), fpc_tree_maxT, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        T = eltype(fpc_grass_max)
+        fpc_grass_max[g] = one(T) - min(fpc_tree_total[g], fpc_tree_maxT)
+        fpc_shrub_max[g] = max(zero(T), fpc_grass_max[g] - fpc_grass_total[g])
     end
+end
 
-    # --- Pass 2: light competition adjustments ---
-    for p in bounds_patch
-        mask_natvegp[p] || continue
-        g   = patch.gridcell[p]
-        ivp = ivt[p] + 1
+# Pass 2: per-patch light competition (reads the gridcell totals from pass 1).
+@kernel function _cndv_light_pass2_kernel!(nind, fpcgrid,
+        @Const(fpc_inc), @Const(fpc_tree_total), @Const(fpc_inc_tree), @Const(numtrees),
+        @Const(fpc_grass_total), @Const(fpc_grass_max),
+        @Const(fpc_shrub_total), @Const(fpc_shrub_max),
+        par, @Const(mask), @Const(p_itype), @Const(p_gridcell),
+        fpc_tree_maxT, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        T = eltype(nind)
+        g = p_gridcell[p]; ivp = p_itype[p] + 1
+        woody = par.woody; is_tree = par.is_tree; is_shrub = par.is_shrub
 
-        if woody[ivp] == 1.0 && is_tree[ivp]
-            # Tree light competition
-            if fpc_tree_total[g] > fpc_tree_max
-                if fpc_inc_tree[g] > 0.0
-                    excess = (fpc_tree_total[g] - fpc_tree_max) *
-                             fpc_inc[p] / fpc_inc_tree[g]
+        if woody[ivp] == one(T) && is_tree[ivp]
+            if fpc_tree_total[g] > fpc_tree_maxT
+                if fpc_inc_tree[g] > zero(T)
+                    excess = (fpc_tree_total[g] - fpc_tree_maxT) * fpc_inc[p] / fpc_inc_tree[g]
                 else
-                    excess = (fpc_tree_total[g] - fpc_tree_max) /
-                             Float64(numtrees[g])
+                    excess = (fpc_tree_total[g] - fpc_tree_maxT) / T(numtrees[g])
                 end
-
-                if fpcgrid[p] > 0.0
+                if fpcgrid[p] > zero(T)
                     nind_kill = nind[p] * excess / fpcgrid[p]
-                    nind[p] = max(0.0, nind[p] - nind_kill)
-                    fpcgrid[p] = max(0.0, fpcgrid[p] - excess)
+                    nind[p] = max(zero(T), nind[p] - nind_kill)
+                    fpcgrid[p] = max(zero(T), fpcgrid[p] - excess)
                 else
-                    nind[p] = 0.0
-                    fpcgrid[p] = 0.0
+                    nind[p] = zero(T); fpcgrid[p] = zero(T)
                 end
             end
-
-        elseif woody[ivp] == 0.0
-            # Grass competition
+        elseif woody[ivp] == zero(T)
             if fpc_grass_total[g] > fpc_grass_max[g]
-                excess = (fpc_grass_total[g] - fpc_grass_max[g]) *
-                         fpcgrid[p] / fpc_grass_total[g]
-                fpcgrid[p] = max(0.0, fpcgrid[p] - excess)
+                excess = (fpc_grass_total[g] - fpc_grass_max[g]) * fpcgrid[p] / fpc_grass_total[g]
+                fpcgrid[p] = max(zero(T), fpcgrid[p] - excess)
             end
-
-        elseif woody[ivp] == 1.0 && is_shrub[ivp]
-            # Shrub competition
+        elseif woody[ivp] == one(T) && is_shrub[ivp]
             if fpc_shrub_total[g] > fpc_shrub_max[g]
-                excess = 1.0 - fpc_shrub_max[g] / fpc_shrub_total[g]
-
-                if fpcgrid[p] > 0.0
+                excess = one(T) - fpc_shrub_max[g] / fpc_shrub_total[g]
+                if fpcgrid[p] > zero(T)
                     nind_kill = nind[p] * excess / fpcgrid[p]
-                    nind[p] = max(0.0, nind[p] - nind_kill)
-                    fpcgrid[p] = max(0.0, fpcgrid[p] - excess)
+                    nind[p] = max(zero(T), nind[p] - nind_kill)
+                    fpcgrid[p] = max(zero(T), fpcgrid[p] - excess)
                 else
-                    nind[p] = 0.0
-                    fpcgrid[p] = 0.0
+                    nind[p] = zero(T); fpcgrid[p] = zero(T)
                 end
             end
         end
     end
+end
+
+function cndv_light!(dgvs::DGVSData,
+                     eco::DGVEcophysCon,
+                     deadstemc_patch::AbstractVector{<:Real},
+                     leafcmax_patch::AbstractVector{<:Real},
+                     pftcon_in::PftconType,
+                     patch::PatchData,
+                     mask_natvegp::AbstractVector{Bool},
+                     bounds_patch::UnitRange{Int};
+                     bounds_gridcell::UnitRange{Int} = 1:1)
+
+    FT = eltype(dgvs.nind_patch)
+    fpc_tree_maxT = FT(0.95)
+    taperT = FT(200.0)
+    rpiT   = FT(RPI)
+
+    crownarea = dgvs.crownarea_patch
+    nind      = dgvs.nind_patch
+    fpcgrid   = dgvs.fpcgrid_patch
+
+    isempty(bounds_patch) && return nothing
+    ngl = last(bounds_gridcell)
+    npl = last(bounds_patch)
+
+    # device-resident gridcell accumulators + per-patch fpc_inc
+    z(n) = fill!(similar(dgvs.nind_patch, FT, n), zero(FT))
+    fpc_tree_total = z(ngl); fpc_inc_tree = z(ngl)
+    fpc_grass_total = z(ngl); fpc_shrub_total = z(ngl)
+    numtrees = fill!(similar(dgvs.nind_patch, Int32, ngl), Int32(0))
+    fpc_inc = z(npl)
+    fpc_grass_max = z(ngl); fpc_shrub_max = z(ngl)
+
+    # extract the per-PFT params (PftconType/eco are not kernel-passable) and
+    # place them on the backend of the dgvs state. _mdf down-converts the Float64
+    # params to the working precision FT (Metal: no Float64); _mdb keeps Bool.
+    _mdf(h) = copyto!(similar(dgvs.nind_patch, FT, size(h)...), FT.(h))
+    _mdb(h) = copyto!(similar(dgvs.nind_patch, eltype(h), size(h)...), h)
+    par = _CndvLightPar(;
+        dwood = _mdf(pftcon_in.dwood), slatop = _mdf(pftcon_in.slatop),
+        dsladlai = _mdf(pftcon_in.dsladlai), woody = _mdf(pftcon_in.woody),
+        is_tree = _mdb(pftcon_in.is_tree), is_shrub = _mdb(pftcon_in.is_shrub),
+        crownarea_max = _mdf(eco.crownarea_max), reinickerp = _mdf(eco.reinickerp),
+        allom1 = _mdf(eco.allom1))
+
+    backend = _kernel_backend(dgvs.nind_patch)
+    _cndv_light_pass1_kernel!(backend)(crownarea, fpcgrid, fpc_inc,
+        nind, deadstemc_patch, leafcmax_patch,
+        numtrees, fpc_tree_total, fpc_inc_tree, fpc_shrub_total, fpc_grass_total,
+        par, mask_natvegp, patch.itype, patch.gridcell,
+        taperT, rpiT, first(bounds_patch), last(bounds_patch); ndrange = length(fpcgrid))
+    KA.synchronize(backend)
+
+    _cndv_light_max_kernel!(backend)(fpc_grass_max, fpc_shrub_max,
+        fpc_tree_total, fpc_grass_total, fpc_tree_maxT,
+        first(bounds_gridcell), last(bounds_gridcell); ndrange = ngl)
+    KA.synchronize(backend)
+
+    _cndv_light_pass2_kernel!(backend)(nind, fpcgrid,
+        fpc_inc, fpc_tree_total, fpc_inc_tree, numtrees, fpc_grass_total, fpc_grass_max,
+        fpc_shrub_total, fpc_shrub_max,
+        par, mask_natvegp, patch.itype, patch.gridcell,
+        fpc_tree_maxT, first(bounds_patch), last(bounds_patch); ndrange = length(fpcgrid))
+    KA.synchronize(backend)
 
     return nothing
 end
@@ -630,13 +670,21 @@ Sets fpcgrid = wtcol, fpcgridold = wtcol for all patches.
 
 Ported from subroutine dynCNDV_init in dynCNDVMod.F90.
 """
+@kernel function _cndv_dyninit_kernel!(fpcgrid, fpcgridold, @Const(wtcol), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        fpcgrid[p]    = wtcol[p]
+        fpcgridold[p] = wtcol[p]
+    end
+end
+
 function dyn_cndv_init!(dgvs::DGVSData,
                          patch::PatchData,
                          bounds_patch::UnitRange{Int})
-    for p in bounds_patch
-        dgvs.fpcgrid_patch[p]    = patch.wtcol[p]
-        dgvs.fpcgridold_patch[p] = patch.wtcol[p]
-    end
+    isempty(bounds_patch) && return nothing
+    _launch!(_cndv_dyninit_kernel!, dgvs.fpcgrid_patch, dgvs.fpcgridold_patch,
+        patch.wtcol, first(bounds_patch), last(bounds_patch);
+        ndrange = length(dgvs.fpcgrid_patch))
     return nothing
 end
 
@@ -652,27 +700,34 @@ Time-interpolate CNDV PFT weights from annual to time step.
 
 Ported from subroutine dynCNDV_interp in dynCNDVMod.F90.
 """
+@kernel function _cndv_interp_kernel!(wtcol, fpcgridold, @Const(fpcgrid),
+        @Const(p_landunit), @Const(lun_itype), @Const(lun_wtgcell),
+        wt1T, is_beg::Bool, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(wtcol)
+        l = p_landunit[p]
+        if lun_itype[l] == ISTSOIL && lun_wtgcell[l] > zero(T)
+            wtcol[p] = fpcgrid[p] + wt1T * (fpcgridold[p] - fpcgrid[p])
+            if is_beg
+                fpcgridold[p] = fpcgrid[p]
+            end
+        end
+    end
+end
+
 function dyn_cndv_interp!(dgvs::DGVSData,
                            patch::PatchData,
                            lun::LandunitData,
                            bounds_patch::UnitRange{Int};
                            wt1::Real = 1.0,
                            is_beg_curr_year::Bool = false)
-    fpcgrid    = dgvs.fpcgrid_patch
-    fpcgridold = dgvs.fpcgridold_patch
-
-    for p in bounds_patch
-        l = patch.landunit[p]
-
-        if lun.itype[l] == ISTSOIL && lun.wtgcell[l] > 0.0
-            patch.wtcol[p] = fpcgrid[p] + wt1 * (fpcgridold[p] - fpcgrid[p])
-
-            if is_beg_curr_year
-                fpcgridold[p] = fpcgrid[p]
-            end
-        end
-    end
-
+    isempty(bounds_patch) && return nothing
+    FT = eltype(dgvs.fpcgrid_patch)
+    _launch!(_cndv_interp_kernel!, patch.wtcol, dgvs.fpcgridold_patch, dgvs.fpcgrid_patch,
+        patch.landunit, lun.itype, lun.wtgcell,
+        FT(wt1), is_beg_curr_year, first(bounds_patch), last(bounds_patch);
+        ndrange = length(patch.wtcol))
     return nothing
 end
 
@@ -696,38 +751,53 @@ Reset annually at Jan 1.
 
 Ported from subroutine UpdateAccVars in CNDVType.F90.
 """
+@kernel function _cndv_accreset_kernel!(agddtw, agdd, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(agddtw)
+        agddtw[p] = zero(T); agdd[p] = zero(T)
+    end
+end
+
+@kernel function _cndv_accupdate_kernel!(agddtw, agdd, @Const(t_a10), @Const(t_ref2m),
+        twmax_brlT, tfrzT, dtimeT, secspdayT, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(agddtw)
+        agddtw[p] = agddtw[p] + max(zero(T), (t_a10[p] - tfrzT - twmax_brlT) * dtimeT / secspdayT)
+        agdd[p]   = agdd[p]   + max(zero(T), (t_ref2m[p] - (tfrzT + T(5.0))) * dtimeT / secspdayT)
+    end
+end
+
 function cndv_update_acc_vars!(dgvs::DGVSData,
                                 eco::DGVEcophysCon,
-                                t_a10_patch::Vector{<:Real},
-                                t_ref2m_patch::Vector{<:Real},
+                                t_a10_patch::AbstractVector{<:Real},
+                                t_ref2m_patch::AbstractVector{<:Real},
                                 bounds_patch::UnitRange{Int},
                                 dtime::Real;
                                 month::Int = 1,
                                 day::Int = 1,
                                 secs::Int = 0)
 
+    isempty(bounds_patch) && return nothing
+    FT = eltype(dgvs.agdd_patch)
+
     # Annual reset at first time step of Jan 1
     is_reset = (month == 1 && day == 1 && secs == Int(dtime))
 
+    backend = _kernel_backend(dgvs.agdd_patch)
     if is_reset
-        for p in bounds_patch
-            dgvs.agddtw_patch[p] = 0.0
-            dgvs.agdd_patch[p]   = 0.0
-        end
+        _cndv_accreset_kernel!(backend)(dgvs.agddtw_patch, dgvs.agdd_patch,
+            first(bounds_patch), last(bounds_patch); ndrange = length(dgvs.agdd_patch))
+        KA.synchronize(backend)
     end
 
     # ndllf_dcd_brl_tree = 3 (Fortran 0-based), Julia PFT index = 3+1 = 4
     twmax_brl = eco.twmax[ndllf_dcd_brl_tree + 1]
-
-    for p in bounds_patch
-        # AGDDTW: growing degree days above twmax of boreal deciduous tree
-        dgvs.agddtw_patch[p] += max(0.0,
-            (t_a10_patch[p] - TFRZ - twmax_brl) * dtime / SECSPDAY)
-
-        # AGDD: growing degree days above 5 C
-        dgvs.agdd_patch[p] += max(0.0,
-            (t_ref2m_patch[p] - (TFRZ + 5.0)) * dtime / SECSPDAY)
-    end
+    _cndv_accupdate_kernel!(backend)(dgvs.agddtw_patch, dgvs.agdd_patch,
+        t_a10_patch, t_ref2m_patch, FT(twmax_brl), FT(TFRZ), FT(dtime), FT(SECSPDAY),
+        first(bounds_patch), last(bounds_patch); ndrange = length(dgvs.agdd_patch))
+    KA.synchronize(backend)
 
     return nothing
 end
