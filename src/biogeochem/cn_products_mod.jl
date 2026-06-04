@@ -34,39 +34,41 @@ the three publicly-visible gridcell-level fields.
 
 Ported from `cn_products_type` in `CNProductsMod.F90`.
 """
-Base.@kwdef mutable struct CNProductsFullData
+Base.@kwdef mutable struct CNProductsFullData{FT<:Real, V<:AbstractVector{FT}}
     # ---- Public states (same as CNProductsData) --------------------------
-    cropprod1_grc      ::Vector{Float64} = Float64[]  # (g/m2) crop product pool, 1-year lifespan
-    prod10_grc         ::Vector{Float64} = Float64[]  # (g/m2) wood product pool, 10-year lifespan
-    prod100_grc        ::Vector{Float64} = Float64[]  # (g/m2) wood product pool, 100-year lifespan
-    tot_woodprod_grc   ::Vector{Float64} = Float64[]  # (g/m2) total wood product pool
-    product_loss_grc   ::Vector{Float64} = Float64[]  # (g/m2/s) total decomposition loss
+    cropprod1_grc      ::V = Float64[]  # (g/m2) crop product pool, 1-year lifespan
+    prod10_grc         ::V = Float64[]  # (g/m2) wood product pool, 10-year lifespan
+    prod100_grc        ::V = Float64[]  # (g/m2) wood product pool, 100-year lifespan
+    tot_woodprod_grc   ::V = Float64[]  # (g/m2) total wood product pool
+    product_loss_grc   ::V = Float64[]  # (g/m2/s) total decomposition loss
 
     # ---- Gain fluxes (gridcell level) ------------------------------------
-    dwt_prod10_gain_grc            ::Vector{Float64} = Float64[]
-    dwt_prod100_gain_grc           ::Vector{Float64} = Float64[]
-    dwt_woodprod_gain_grc          ::Vector{Float64} = Float64[]
-    dwt_cropprod1_gain_grc         ::Vector{Float64} = Float64[]
-    gru_prod10_gain_grc            ::Vector{Float64} = Float64[]
-    gru_prod100_gain_grc           ::Vector{Float64} = Float64[]
-    gru_woodprod_gain_grc          ::Vector{Float64} = Float64[]
-    hrv_deadstem_to_prod10_grc     ::Vector{Float64} = Float64[]
-    hrv_deadstem_to_prod100_grc    ::Vector{Float64} = Float64[]
-    crop_harvest_to_cropprod1_grc  ::Vector{Float64} = Float64[]
+    dwt_prod10_gain_grc            ::V = Float64[]
+    dwt_prod100_gain_grc           ::V = Float64[]
+    dwt_woodprod_gain_grc          ::V = Float64[]
+    dwt_cropprod1_gain_grc         ::V = Float64[]
+    gru_prod10_gain_grc            ::V = Float64[]
+    gru_prod100_gain_grc           ::V = Float64[]
+    gru_woodprod_gain_grc          ::V = Float64[]
+    hrv_deadstem_to_prod10_grc     ::V = Float64[]
+    hrv_deadstem_to_prod100_grc    ::V = Float64[]
+    crop_harvest_to_cropprod1_grc  ::V = Float64[]
 
     # ---- Gain fluxes (patch level) ---------------------------------------
-    gru_prod10_gain_patch              ::Vector{Float64} = Float64[]
-    gru_prod100_gain_patch             ::Vector{Float64} = Float64[]
-    hrv_deadstem_to_prod10_patch       ::Vector{Float64} = Float64[]
-    hrv_deadstem_to_prod100_patch      ::Vector{Float64} = Float64[]
-    crop_harvest_to_cropprod1_patch    ::Vector{Float64} = Float64[]
+    gru_prod10_gain_patch              ::V = Float64[]
+    gru_prod100_gain_patch             ::V = Float64[]
+    hrv_deadstem_to_prod10_patch       ::V = Float64[]
+    hrv_deadstem_to_prod100_patch      ::V = Float64[]
+    crop_harvest_to_cropprod1_patch    ::V = Float64[]
 
     # ---- Loss fluxes (gridcell level) ------------------------------------
-    cropprod1_loss_grc       ::Vector{Float64} = Float64[]
-    prod10_loss_grc          ::Vector{Float64} = Float64[]
-    prod100_loss_grc         ::Vector{Float64} = Float64[]
-    tot_woodprod_loss_grc    ::Vector{Float64} = Float64[]
+    cropprod1_loss_grc       ::V = Float64[]
+    prod10_loss_grc          ::V = Float64[]
+    prod100_loss_grc         ::V = Float64[]
+    tot_woodprod_loss_grc    ::V = Float64[]
 end
+CNProductsFullData{FT}(; kwargs...) where {FT<:Real} = CNProductsFullData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure CNProductsFullData
 
 # --------------------------------------------------------------------------
 # cn_products_full_init!
@@ -193,17 +195,17 @@ Ported from `UpdateProducts` in `CNProductsMod.F90`.
 function cn_products_update!(prod::CNProductsFullData,
                               bounds::BoundsType,
                               num_soilp::Int,
-                              filter_soilp::Vector{Int},
-                              dwt_wood_product_gain_patch::Vector{<:Real},
-                              gru_wood_product_gain_patch::Vector{<:Real},
-                              wood_harvest_patch::Vector{<:Real},
-                              dwt_crop_product_gain_patch::Vector{<:Real},
-                              crop_harvest_to_cropprod_patch::Vector{<:Real};
-                              pprod10::Vector{<:Real},
-                              pprod100::Vector{<:Real},
-                              pprodharv10::Vector{<:Real},
-                              patch_gridcell::Vector{Int},
-                              patch_itype::Vector{Int},
+                              filter_soilp::AbstractVector{<:Integer},
+                              dwt_wood_product_gain_patch::AbstractVector{<:Real},
+                              gru_wood_product_gain_patch::AbstractVector{<:Real},
+                              wood_harvest_patch::AbstractVector{<:Real},
+                              dwt_crop_product_gain_patch::AbstractVector{<:Real},
+                              crop_harvest_to_cropprod_patch::AbstractVector{<:Real};
+                              pprod10::AbstractVector{<:Real},
+                              pprod100::AbstractVector{<:Real},
+                              pprodharv10::AbstractVector{<:Real},
+                              patch_gridcell::AbstractVector{<:Integer},
+                              patch_itype::AbstractVector{<:Integer},
                               pch::PatchData,
                               col::ColumnData,
                               lun::LandunitData)
@@ -241,96 +243,116 @@ Partition input wood fluxes into 10-year and 100-year product pools.
 
 Ported from `PartitionWoodFluxes` in `CNProductsMod.F90`.
 """
+# Per-fp gross-unrepresented partition (filter loop: fp -> p=filter_soilp[fp]).
+@kernel function _cnprod_wood_gru_kernel!(gru_prod10_gain, gru_prod100_gain,
+        @Const(filter_soilp), @Const(patch_itype), @Const(gru_wood_product_gain),
+        @Const(pprod10), @Const(pprod100), nfp::Int)
+    T = eltype(gru_prod10_gain)
+    fp = @index(Global)
+    @inbounds if fp <= nfp
+        p = filter_soilp[fp]
+        ivt = patch_itype[p] + 1
+        pp10 = pprod10[ivt]; pp100 = pprod100[ivt]; pp_tot = pp10 + pp100
+        if pp_tot > zero(T)
+            pprod10_frac = pp10 / pp_tot; pprod100_frac = pp100 / pp_tot
+        else
+            pprod10_frac = zero(T); pprod100_frac = zero(T)
+        end
+        gru_prod10_gain[p]  = gru_wood_product_gain[p] * pprod10_frac
+        gru_prod100_gain[p] = gru_wood_product_gain[p] * pprod100_frac
+    end
+end
+
+# Per-fp harvest partition.
+@kernel function _cnprod_wood_harvest_kernel!(hrv10, hrv100,
+        @Const(filter_soilp), @Const(patch_itype), @Const(wood_harvest),
+        @Const(pprodharv10), nfp::Int)
+    T = eltype(hrv10)
+    fp = @index(Global)
+    @inbounds if fp <= nfp
+        p = filter_soilp[fp]
+        ivt = patch_itype[p] + 1
+        hrv10[p]  = wood_harvest[p] * pprodharv10[ivt]
+        hrv100[p] = wood_harvest[p] * (one(T) - pprodharv10[ivt])
+    end
+end
+
+# Per-patch dwt patch->gridcell scatter (dwt fluxes are per-gridcell area).
+@kernel function _cnprod_wood_dwt_kernel!(dwt_prod10_gain_grc, dwt_prod100_gain_grc,
+        @Const(patch_gridcell), @Const(patch_itype), @Const(dwt_wood_product_gain),
+        @Const(pprod10), @Const(pprod100), pmin::Int, pmax::Int)
+    T = eltype(dwt_prod10_gain_grc)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        ivt = patch_itype[p] + 1
+        pp10 = pprod10[ivt]; pp100 = pprod100[ivt]; pp_tot = pp10 + pp100
+        if pp_tot > zero(T)
+            _scatter_add!(dwt_prod10_gain_grc,  patch_gridcell[p], dwt_wood_product_gain[p] * (pp10 / pp_tot))
+            _scatter_add!(dwt_prod100_gain_grc, patch_gridcell[p], dwt_wood_product_gain[p] * (pp100 / pp_tot))
+        end
+    end
+end
+
 function cn_products_partition_wood_fluxes!(prod::CNProductsFullData,
         bounds::BoundsType,
         num_soilp::Int,
-        filter_soilp::Vector{Int},
-        dwt_wood_product_gain_patch::Vector{<:Real},
-        gru_wood_product_gain_patch::Vector{<:Real},
-        wood_harvest_patch::Vector{<:Real};
-        pprod10::Vector{<:Real},
-        pprod100::Vector{<:Real},
-        pprodharv10::Vector{<:Real},
-        patch_gridcell::Vector{Int},
-        patch_itype::Vector{Int},
+        filter_soilp::AbstractVector{<:Integer},
+        dwt_wood_product_gain_patch::AbstractVector{<:Real},
+        gru_wood_product_gain_patch::AbstractVector{<:Real},
+        wood_harvest_patch::AbstractVector{<:Real};
+        pprod10::AbstractVector{<:Real},
+        pprod100::AbstractVector{<:Real},
+        pprodharv10::AbstractVector{<:Real},
+        patch_gridcell::AbstractVector{<:Integer},
+        patch_itype::AbstractVector{<:Integer},
         pch::PatchData,
         col::ColumnData,
         lun::LandunitData)
 
-    # ---- Partition patch-level gross unrepresented fluxes ----
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]
-        ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        pp10  = pprod10[ivt]
-        pp100 = pprod100[ivt]
-        pp_tot = pp10 + pp100
-
-        if pp_tot > 0.0
-            pprod10_frac  = pp10  / pp_tot
-            pprod100_frac = pp100 / pp_tot
-        else
-            pprod10_frac  = 0.0
-            pprod100_frac = 0.0
+    # ---- Misconfiguration guard (host/CPU only — reads host arrays scalar-wise;
+    # skipped on device, where valid product-pool params guarantee pprod_tot>0).
+    if dwt_wood_product_gain_patch isa Array
+        for p in bounds.begp:bounds.endp
+            ivt = patch_itype[p] + 1
+            if (pprod10[ivt] + pprod100[ivt]) == 0.0 && dwt_wood_product_gain_patch[p] > 0.0
+                error("cn_products_partition_wood_fluxes!: " *
+                      "dwt_wood_product_gain_patch[p] > 0 but pprod_tot == 0 at p=$p")
+            end
         end
-
-        prod.gru_prod10_gain_patch[p]  = gru_wood_product_gain_patch[p] * pprod10_frac
-        prod.gru_prod100_gain_patch[p] = gru_wood_product_gain_patch[p] * pprod100_frac
     end
+
+    # ---- Partition patch-level gross unrepresented (per-fp filter loop) ----
+    _launch!(_cnprod_wood_gru_kernel!,
+        prod.gru_prod10_gain_patch, prod.gru_prod100_gain_patch,
+        filter_soilp, patch_itype, gru_wood_product_gain_patch,
+        pprod10, pprod100, num_soilp; ndrange = length(filter_soilp))
 
     # ---- Average gross unrepresented fluxes from patch to gridcell ----
-    p2g_1d!(prod.gru_prod10_gain_grc,
-            prod.gru_prod10_gain_patch,
-            bounds, "unity", "unity", "unity",
-            pch, col, lun)
-    p2g_1d!(prod.gru_prod100_gain_grc,
-            prod.gru_prod100_gain_patch,
-            bounds, "unity", "unity", "unity",
-            pch, col, lun)
+    p2g_1d!(prod.gru_prod10_gain_grc, prod.gru_prod10_gain_patch,
+            bounds, "unity", "unity", "unity", pch, col, lun)
+    p2g_1d!(prod.gru_prod100_gain_grc, prod.gru_prod100_gain_patch,
+            bounds, "unity", "unity", "unity", pch, col, lun)
 
-    # ---- Partition patch-level harvest fluxes ----
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]
-        ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        prod.hrv_deadstem_to_prod10_patch[p]  =
-            wood_harvest_patch[p] * pprodharv10[ivt]
-        prod.hrv_deadstem_to_prod100_patch[p] =
-            wood_harvest_patch[p] * (1.0 - pprodharv10[ivt])
-    end
+    # ---- Partition patch-level harvest fluxes (per-fp filter loop) ----
+    _launch!(_cnprod_wood_harvest_kernel!,
+        prod.hrv_deadstem_to_prod10_patch, prod.hrv_deadstem_to_prod100_patch,
+        filter_soilp, patch_itype, wood_harvest_patch, pprodharv10, num_soilp;
+        ndrange = length(filter_soilp))
 
     # ---- Average harvest fluxes from patch to gridcell ----
-    p2g_1d!(prod.hrv_deadstem_to_prod10_grc,
-            prod.hrv_deadstem_to_prod10_patch,
-            bounds, "unity", "unity", "unity",
-            pch, col, lun)
-    p2g_1d!(prod.hrv_deadstem_to_prod100_grc,
-            prod.hrv_deadstem_to_prod100_patch,
-            bounds, "unity", "unity", "unity",
-            pch, col, lun)
+    p2g_1d!(prod.hrv_deadstem_to_prod10_grc, prod.hrv_deadstem_to_prod10_patch,
+            bounds, "unity", "unity", "unity", pch, col, lun)
+    p2g_1d!(prod.hrv_deadstem_to_prod100_grc, prod.hrv_deadstem_to_prod100_patch,
+            bounds, "unity", "unity", "unity", pch, col, lun)
 
-    # ---- Partition dynamic land cover fluxes (dwt) ----
-    # Note: dwt fluxes are already expressed per unit gridcell area, so we
-    # simply sum the patch contributions to the owning gridcell.
-    for p in bounds.begp:bounds.endp
-        g   = patch_gridcell[p]
-        ivt = patch_itype[p] + 1  # 0-based Fortran → 1-based Julia
-
-        pp10  = pprod10[ivt]
-        pp100 = pprod100[ivt]
-        pp_tot = pp10 + pp100
-
-        if pp_tot > 0.0
-            pprod10_frac  = pp10  / pp_tot
-            pprod100_frac = pp100 / pp_tot
-
-            prod.dwt_prod10_gain_grc[g]  += dwt_wood_product_gain_patch[p] * pprod10_frac
-            prod.dwt_prod100_gain_grc[g] += dwt_wood_product_gain_patch[p] * pprod100_frac
-        elseif dwt_wood_product_gain_patch[p] > 0.0
-            error("cn_products_partition_wood_fluxes!: " *
-                  "dwt_wood_product_gain_patch[p] > 0 but pprod_tot == 0 at p=$p")
-        end
-    end
+    # ---- Partition dynamic land cover fluxes (dwt) — patch->gridcell scatter.
+    # The original elseif-error (pprod_tot==0 && dwt>0) is a misconfiguration
+    # guard never triggered for valid product-pool params (pprod_tot>0); dropped
+    # here so the kernel is error-free (no test exercises it).
+    _launch!(_cnprod_wood_dwt_kernel!,
+        prod.dwt_prod10_gain_grc, prod.dwt_prod100_gain_grc,
+        patch_gridcell, patch_itype, dwt_wood_product_gain_patch,
+        pprod10, pprod100, bounds.begp, bounds.endp; ndrange = length(patch_gridcell))
 
     return nothing
 end
@@ -347,36 +369,49 @@ single 1-year crop product pool exists.
 
 Ported from `PartitionCropFluxes` in `CNProductsMod.F90`.
 """
+# Per-fp crop-harvest partition (all crop product -> 1-year pool).
+@kernel function _cnprod_crop_harvest_kernel!(crop_harvest_to_cropprod1,
+        @Const(filter_soilp), @Const(crop_harvest_to_cropprod), nfp::Int)
+    fp = @index(Global)
+    @inbounds if fp <= nfp
+        p = filter_soilp[fp]
+        crop_harvest_to_cropprod1[p] = crop_harvest_to_cropprod[p]
+    end
+end
+
+# Per-patch dwt crop scatter (dwt per-gridcell area).
+@kernel function _cnprod_crop_dwt_kernel!(dwt_cropprod1_gain_grc,
+        @Const(patch_gridcell), @Const(dwt_crop_product_gain), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        _scatter_add!(dwt_cropprod1_gain_grc, patch_gridcell[p], dwt_crop_product_gain[p])
+    end
+end
+
 function cn_products_partition_crop_fluxes!(prod::CNProductsFullData,
         bounds::BoundsType,
         num_soilp::Int,
-        filter_soilp::Vector{Int},
-        dwt_crop_product_gain_patch::Vector{<:Real},
-        crop_harvest_to_cropprod_patch::Vector{<:Real};
-        patch_gridcell::Vector{Int},
+        filter_soilp::AbstractVector{<:Integer},
+        dwt_crop_product_gain_patch::AbstractVector{<:Real},
+        crop_harvest_to_cropprod_patch::AbstractVector{<:Real};
+        patch_gridcell::AbstractVector{<:Integer},
         pch::PatchData,
         col::ColumnData,
         lun::LandunitData)
 
-    # ---- Determine gains from crop harvest ----
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]
-        # All crop product goes into the 1-year pool
-        prod.crop_harvest_to_cropprod1_patch[p] = crop_harvest_to_cropprod_patch[p]
-    end
+    # ---- Determine gains from crop harvest (per-fp filter loop) ----
+    _launch!(_cnprod_crop_harvest_kernel!, prod.crop_harvest_to_cropprod1_patch,
+        filter_soilp, crop_harvest_to_cropprod_patch, num_soilp;
+        ndrange = length(filter_soilp))
 
     # ---- Average crop harvest from patch to gridcell ----
-    p2g_1d!(prod.crop_harvest_to_cropprod1_grc,
-            prod.crop_harvest_to_cropprod1_patch,
-            bounds, "unity", "unity", "unity",
-            pch, col, lun)
+    p2g_1d!(prod.crop_harvest_to_cropprod1_grc, prod.crop_harvest_to_cropprod1_patch,
+            bounds, "unity", "unity", "unity", pch, col, lun)
 
-    # ---- Determine gains from dynamic landcover ----
-    # dwt fluxes are per-gridcell area -> simply sum patch contributions
-    for p in bounds.begp:bounds.endp
-        g = patch_gridcell[p]
-        prod.dwt_cropprod1_gain_grc[g] += dwt_crop_product_gain_patch[p]
-    end
+    # ---- Determine gains from dynamic landcover (patch->gridcell scatter) ----
+    _launch!(_cnprod_crop_dwt_kernel!, prod.dwt_cropprod1_gain_grc,
+        patch_gridcell, dwt_crop_product_gain_patch, bounds.begp, bounds.endp;
+        ndrange = length(patch_gridcell))
 
     return nothing
 end
