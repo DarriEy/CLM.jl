@@ -29,8 +29,9 @@
 # routines — same operation, called per mask).
 @kernel function _fireb_zero_btran2_kernel!(btran2, @Const(mask), cmin::Int, cmax::Int)
     p = @index(Global)
+    T = eltype(btran2)
     @inbounds if cmin <= p <= cmax && mask[p]
-        btran2[p] = 0.0
+        btran2[p] = zero(T)
     end
 end
 
@@ -40,9 +41,10 @@ fireb_zero_btran2!(btran2, mask, cmin::Int, cmax::Int) =
 # Clamp btran2[p] to <= 1.0 for every masked patch in [cmin, cmax].
 @kernel function _fireb_clamp_btran2_kernel!(btran2, @Const(mask), cmin::Int, cmax::Int)
     p = @index(Global)
+    T = eltype(btran2)
     @inbounds if cmin <= p <= cmax && mask[p]
-        if btran2[p] > 1.0
-            btran2[p] = 1.0
+        if btran2[p] > one(T)
+            btran2[p] = one(T)
         end
     end
 end
@@ -57,12 +59,13 @@ fireb_clamp_btran2!(btran2, mask, cmin::Int, cmax::Int) =
                                               @Const(baf_peatf), cmin::Int, cmax::Int,
                                               borealat)
     c = @index(Global)
+    T = eltype(somc_fire)
     @inbounds if cmin <= c <= cmax && mask[c]
         g = gridcell[c]
         if latdeg[g] < borealat
-            somc_fire[c] = totsomc[c] * baf_peatf[c] * 6.0 / 33.9
+            somc_fire[c] = totsomc[c] * baf_peatf[c] * T(6) / T(33.9)
         else
-            somc_fire[c] = baf_peatf[c] * 2.2e3
+            somc_fire[c] = baf_peatf[c] * T(2.2e3)
         end
     end
 end
@@ -270,17 +273,18 @@ end
                                                     @Const(bsw), @Const(smpso),
                                                     @Const(smpsc))
     p = @index(Global)
+    T = eltype(btran2)
     @inbounds if cmin <= p <= cmax && mask[p]
         c = column[p]
         ivt = itype[p] + 1  # 0-based Fortran → 1-based Julia
         acc = btran2[p]
         for j in 1:nlevgrnd
-            s_node = max(h2osoi_vol_col[c, j] / watsat[c, j], 0.01)
+            s_node = max(h2osoi_vol_col[c, j] / watsat[c, j], T(0.01))
             # default_soil_suction inlined: smp = -sucsat * s^(-bsw)
             smp_node_lf = -sucsat[c, j] * s_node^(-bsw[c, j])
             smp_node_lf = max(smpsc[ivt], smp_node_lf)
-            acc = acc + rootfr[p, j] * max(0.0,
-                min((smp_node_lf - smpsc[ivt]) / (smpso[ivt] - smpsc[ivt]), 1.0))
+            acc = acc + rootfr[p, j] * max(zero(T),
+                min((smp_node_lf - smpsc[ivt]) / (smpso[ivt] - smpsc[ivt]), one(T)))
         end
         btran2[p] = acc
     end
@@ -314,11 +318,12 @@ Ported from `CNFire_calc_fire_root_wetness_Li2021` in `CNFireBaseMod.F90`.
                                                     @Const(h2osoi_vol_col), @Const(watsat),
                                                     @Const(rootfr))
     p = @index(Global)
+    T = eltype(btran2)
     @inbounds if cmin <= p <= cmax && mask[p]
         c = column[p]
         acc = btran2[p]
         for j in 1:nlevgrnd
-            s_node = max(h2osoi_vol_col[c, j] / watsat[c, j], 0.01)
+            s_node = max(h2osoi_vol_col[c, j] / watsat[c, j], T(0.01))
             acc = acc + rootfr[p, j] * s_node
         end
         btran2[p] = acc
@@ -741,9 +746,10 @@ fireb_cnfire_litterscatter!(fire_mortality_c_to_cwdc, fire_mortality_n_to_cwdn,
     cmb_cmplt_fact_litter, cmb_cmplt_fact_cwd
 )
     c = @index(Global)
+    T = eltype(m_decomp_cpools_to_fire_vr)
     @inbounds if mask_soilc[c]
         f = farea_burned[c]
-        if f != 0 || f != baf_crop[c]
+        if f != zero(T) || f != baf_crop[c]
             mask_actfirec[c] = true
         end
         for j in 1:nlevdecomp
@@ -788,15 +794,16 @@ fireb_cnfire_decompfire!(m_decomp_cpools_to_fire_vr, m_decomp_npools_to_fire_vr,
     is_newyear_start::Bool, dt, dayspyr, secspday
 )
     c = @index(Global)
+    T = eltype(lfc)
     @inbounds if mask_soilc[c]
-        lfc2[c] = 0.0
+        lfc2[c] = zero(T)
         if !is_newyear_start
-            if trotr1_col[c] + trotr2_col[c] > 0.6 && dtrotr_col[c] > 0.0 &&
-               lfc[c] > 0.0 && fbac1[c] == 0.0
-                lfc2[c] = max(0.0, min(lfc[c], (farea_burned[c] - baf_crop[c] -
-                    baf_peatf[c]) / 2.0 * dt)) / (dtrotr_col[c] * dayspyr * secspday / dt) / dt
-                lfc[c]  = lfc[c] - max(0.0, min(lfc[c], (farea_burned[c] - baf_crop[c] -
-                    baf_peatf[c]) * dt / 2.0))
+            if trotr1_col[c] + trotr2_col[c] > T(0.6) && dtrotr_col[c] > zero(T) &&
+               lfc[c] > zero(T) && fbac1[c] == zero(T)
+                lfc2[c] = max(zero(T), min(lfc[c], (farea_burned[c] - baf_crop[c] -
+                    baf_peatf[c]) / T(2) * dt)) / (dtrotr_col[c] * dayspyr * secspday / dt) / dt
+                lfc[c]  = lfc[c] - max(zero(T), min(lfc[c], (farea_burned[c] - baf_crop[c] -
+                    baf_peatf[c]) * dt / T(2)))
             end
         end
     end

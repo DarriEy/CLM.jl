@@ -83,8 +83,9 @@ Ported from `p2c` in `subgridAveMod.F90`.
 # Zero col_out[c] for every masked column in [cmin, cmax].
 @kernel function _fire_p2c_zero_kernel!(col_out, @Const(mask_soilc), cmin::Int, cmax::Int)
     c = @index(Global)
+    T = eltype(col_out)
     @inbounds if cmin <= c <= cmax && mask_soilc[c]
-        col_out[c] = 0.0
+        col_out[c] = zero(T)
     end
 end
 
@@ -136,18 +137,19 @@ end
     secsphr, secspday, tfrz, rpi
 )
     c = @index(Global)
+    T = eltype(baf_peatf)
     @inbounds if mask_soilc[c]
         g = gridcell[c]
         if latdeg[g] < borealat
             baf_peatf[c] = non_boreal_peatfire_c / secsphr *
-                smooth_max(0.0, smooth_min(1.0,
-                    (4.0 - prec60_col[c] * secspday / nonborpeat_fire_precip_denom) /
-                    4.0))^2 * peatf_lf[c] * (1.0 - fsat[c])
+                smooth_max(zero(T), smooth_min(one(T),
+                    (T(4) - prec60_col[c] * secspday / nonborpeat_fire_precip_denom) /
+                    T(4)))^2 * peatf_lf[c] * (one(T) - fsat[c])
         else
             baf_peatf[c] = boreal_peatfire_c / secsphr *
-                exp(-rpi * (smooth_max(wf2[c], 0.0) / borpeat_fire_soilmoist_denom)) *
-                smooth_max(0.0, smooth_min(1.0, (tsoi17[c] - tfrz) / 10.0)) * peatf_lf[c] *
-                (1.0 - fsat[c])
+                exp(-rpi * (smooth_max(wf2[c], zero(T)) / borpeat_fire_soilmoist_denom)) *
+                smooth_max(zero(T), smooth_min(one(T), (tsoi17[c] - tfrz) / T(10))) * peatf_lf[c] *
+                (one(T) - fsat[c])
         end
     end
 end
@@ -182,9 +184,10 @@ end
 # --- Section: zero cropf_col / lfwt (per-column) ---------------------------
 @kernel function _firea_zero_cropf_lfwt_kernel!(cropf_col, lfwt, @Const(mask_soilc))
     c = @index(Global)
+    T = eltype(cropf_col)
     @inbounds if mask_soilc[c]
-        cropf_col[c] = 0.0
-        lfwt[c]      = 0.0
+        cropf_col[c] = zero(T)
+        lfwt[c]      = zero(T)
     end
 end
 
@@ -207,8 +210,9 @@ end
 # --- Section: zero fuelc_crop (per-column) ---------------------------------
 @kernel function _firea_zero_fuelc_crop_kernel!(fuelc_crop, @Const(mask_soilc))
     c = @index(Global)
+    T = eltype(fuelc_crop)
     @inbounds if mask_soilc[c]
-        fuelc_crop[c] = 0.0
+        fuelc_crop[c] = zero(T)
     end
 end
 
@@ -220,9 +224,10 @@ end
                                            @Const(totlitc), @Const(cropf_col),
                                            nc4_grass::Int)
     p = @index(Global)
+    T = eltype(fuelc_crop)
     @inbounds if mask_soilp[p]
         c = column[p]
-        if itype[p] > nc4_grass && wtcol[p] > 0.0 && leafc_col[c] > 0.0
+        if itype[p] > nc4_grass && wtcol[p] > zero(T) && leafc_col[c] > zero(T)
             contrib = (leafc[p] + leafc_storage[p] + leafc_xfer[p]) *
                           wtcol[p] / cropf_col[c] +
                       totlitc[c] * leafc[p] / leafc_col[c] *
@@ -239,19 +244,20 @@ end
                                              @Const(mask_soilc),
                                              transient_landcover::Bool)
     c = @index(Global)
+    T = eltype(fsr_col)
     @inbounds if mask_soilc[c]
-        fsr_col[c]    = 0.0
-        fd_col[c]     = 0.0
-        rootc_col[c]  = 0.0
-        lgdp_col[c]   = 0.0
-        lgdp1_col[c]  = 0.0
-        lpop_col[c]   = 0.0
-        btran_col[c]  = 0.0
-        wtlf[c]       = 0.0
-        trotr1_col[c] = 0.0
-        trotr2_col[c] = 0.0
+        fsr_col[c]    = zero(T)
+        fd_col[c]     = zero(T)
+        rootc_col[c]  = zero(T)
+        lgdp_col[c]   = zero(T)
+        lgdp1_col[c]  = zero(T)
+        lpop_col[c]   = zero(T)
+        btran_col[c]  = zero(T)
+        wtlf[c]       = zero(T)
+        trotr1_col[c] = zero(T)
+        trotr2_col[c] = zero(T)
         if transient_landcover
-            dtrotr_col[c] = 0.0
+            dtrotr_col[c] = zero(T)
         end
     end
 end
@@ -262,9 +268,10 @@ end
                                            @Const(btran2), @Const(cropf_col),
                                            nc3crop::Int)
     p = @index(Global)
+    T = eltype(btran_col)
     @inbounds if mask_exposedveg[p]
         c = column[p]
-        if itype[p] < nc3crop && cropf_col[c] < 1.0
+        if itype[p] < nc3crop && cropf_col[c] < one(T)
             _scatter_add!(btran_col, c, btran2[p] * wtcol[p])
             _scatter_add!(wtlf, c, wtcol[p])
         end
@@ -355,16 +362,17 @@ end
                                     date_is_jan1_0::Bool, date_is_jan1_dt::Bool,
                                     dayspyr, secspday, dt)
     c = @index(Global)
+    T = eltype(lfc)
     @inbounds if mask_soilc[c]
-        if dtrotr_col[c] > 0.0
+        if dtrotr_col[c] > zero(T)
             if date_is_jan1_0
-                lfc[c] = 0.0
+                lfc[c] = zero(T)
             end
             if date_is_jan1_dt
                 lfc[c] = dtrotr_col[c] * dayspyr * secspday / dt
             end
         else
-            lfc[c] = 0.0
+            lfc[c] = zero(T)
         end
     end
 end
@@ -372,8 +380,9 @@ end
 # --- Section: zero baf_crop (per-column) -----------------------------------
 @kernel function _firea_zero_baf_crop_kernel!(baf_crop, @Const(mask_soilc))
     c = @index(Global)
+    T = eltype(baf_crop)
     @inbounds if mask_soilc[c]
-        baf_crop[c] = 0.0
+        baf_crop[c] = zero(T)
     end
 end
 
@@ -396,18 +405,19 @@ end
         nc4_grass::Int, kmo::Int, kda::Int, tfrz, rpi, lfuel, ufuel,
         cropfire_a1, secsphr)
     p = @index(Global)
+    T = eltype(baf_crop)
     @inbounds if mask_soilp[p]
         c = column[p]
         g = gridcell[c]
         if forc_t[c] >= tfrz && itype[p] > nc4_grass &&
-           kmo == abm_lf[c] && forc_rain[c] + forc_snow[c] == 0.0 &&
-           burndate[p] >= 999 && wtcol[p] > 0.0
+           kmo == abm_lf[c] && forc_rain[c] + forc_snow[c] == zero(T) &&
+           burndate[p] >= 999 && wtcol[p] > zero(T)
             hdmlf = forc_hdm[g]
-            fhd = 0.04 + 0.96 * exp(-1.0 * rpi * (hdmlf / 350.0)^0.5)
-            fgdp = 0.01 + 0.99 * exp(-1.0 * rpi * (gdp_lf[c] / 10.0))
-            fb = smooth_max(0.0, smooth_min(1.0, (fuelc_crop[c] - lfuel) / (ufuel - lfuel)))
+            fhd = T(0.04) + T(0.96) * exp(-one(T) * rpi * (hdmlf / T(350))^T(0.5))
+            fgdp = T(0.01) + T(0.99) * exp(-one(T) * rpi * (gdp_lf[c] / T(10)))
+            fb = smooth_max(zero(T), smooth_min(one(T), (fuelc_crop[c] - lfuel) / (ufuel - lfuel)))
             _scatter_add!(baf_crop, c, cropfire_a1 / secsphr * fb * fhd * fgdp * wtcol[p])
-            if fb * fhd * fgdp * wtcol[p] > 0.0
+            if fb * fhd * fgdp * wtcol[p] > zero(T)
                 burndate[p] = kda
             end
         end
