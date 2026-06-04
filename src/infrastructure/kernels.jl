@@ -26,6 +26,41 @@ Run a KernelAbstractions `kernel` over `ndrange` on the backend of `out`
 _kernel_backend(out) = KA.get_backend(out)
 _kernel_backend(::BitArray) = KA.CPU()
 
+# --------------------------------------------------------------------------
+# Atomic integer width for scatter counters
+# --------------------------------------------------------------------------
+# Some GPU backends — notably Apple Metal — have NO 64-bit atomics, so an atomic
+# `_scatter_add!` into an `Int64` counter fails to compile (gpu_gc_pool_alloc /
+# throw_methoderror). `atomic_int_type(ref)` picks the integer eltype for an
+# atomic counter from the backend of `ref`: Int32 where 64-bit atomics are
+# unavailable, Int (Int64) otherwise. AUTODETECTED by default; override with
+# `set_atomic_int_width!(:auto | :i32 | :i64)`.
+const _ATOMIC_INT_WIDTH = Ref(:auto)
+
+"""
+    set_atomic_int_width!(mode::Symbol)
+
+Control the integer width used for atomic scatter counters (e.g. `numtrees`).
+`:auto` (default) picks Int32 on backends without 64-bit atomics (Metal) and Int
+elsewhere (CPU/CUDA/ROCm); `:i32`/`:i64` force a width. Returns `mode`.
+"""
+set_atomic_int_width!(mode::Symbol) =
+    (mode in (:auto, :i32, :i64) || throw(ArgumentError("mode must be :auto, :i32 or :i64"));
+     _ATOMIC_INT_WIDTH[] = mode; mode)
+
+# Autodetection: KA.CPU and CUDA/ROCm support 64-bit atomics; Metal does not.
+# Detected by backend type name so no hard dependency on the GPU packages.
+_backend_has_64bit_atomics(::KA.CPU) = true
+_backend_has_64bit_atomics(b::KA.Backend) = !occursin("Metal", string(nameof(typeof(b))))
+
+atomic_int_type(ref::AbstractArray) = atomic_int_type(_kernel_backend(ref))
+function atomic_int_type(backend::KA.Backend)
+    mode = _ATOMIC_INT_WIDTH[]
+    mode === :i32 && return Int32
+    mode === :i64 && return Int64
+    return _backend_has_64bit_atomics(backend) ? Int : Int32
+end
+
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
     backend = _kernel_backend(out)

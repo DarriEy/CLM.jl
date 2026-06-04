@@ -96,7 +96,7 @@ Adapt.@adapt_structure _CndvLightPar
 
         if woody[ivp] == one(T)
             if is_tree[ivp]
-                _scatter_add!(numtrees, g, Int32(1))   # Int32: Metal has no 64-bit atomics
+                _scatter_add!(numtrees, g, one(eltype(numtrees)))   # width: atomic_int_type()
                 _scatter_add!(fpc_tree_total, g, fpcgrid[p])
                 _scatter_add!(fpc_inc_tree, g, fpc_inc[p])
             elseif is_shrub[ivp]
@@ -194,7 +194,10 @@ function cndv_light!(dgvs::DGVSData,
     z(n) = fill!(similar(dgvs.nind_patch, FT, n), zero(FT))
     fpc_tree_total = z(ngl); fpc_inc_tree = z(ngl)
     fpc_grass_total = z(ngl); fpc_shrub_total = z(ngl)
-    numtrees = fill!(similar(dgvs.nind_patch, Int32, ngl), Int32(0))
+    # counter eltype autodetected from the backend (Int32 on Metal — no 64-bit
+    # atomics — Int elsewhere); override with set_atomic_int_width!().
+    IntT = atomic_int_type(dgvs.nind_patch)
+    numtrees = fill!(similar(dgvs.nind_patch, IntT, ngl), zero(IntT))
     fpc_inc = z(npl)
     fpc_grass_max = z(ngl); fpc_shrub_max = z(ngl)
 
@@ -249,320 +252,290 @@ Called once per year.
 
 Ported from subroutine Establishment in CNDVEstablishmentMod.F90.
 """
+# Establishment runs ONE thread per gridcell: the "fpc_total > 1" adjustment is a
+# SEQUENTIAL read-modify-write of fpc_total[g] (each patch sees the running total),
+# so it can't be one-thread-per-patch. A per-gridcell thread loops its patches
+# (p_gridcell[p]==g) through all passes with THREAD-LOCAL scalar accumulators (no
+# scatters); survive/estab/dstemc are per-patch device scratch (each p owned by one
+# g-thread → no race). Byte-identical: gridcells are independent, so doing all
+# passes for g before g+1 gives the same per-patch result as the host's pass-by-pass.
+Base.@kwdef struct _EstabState{V,VB}
+    present::VB; pftmayexist::VB
+    nind::V; fpcgrid::V; crownarea::V; greffic::V; heatstress::V
+end
+Adapt.@adapt_structure _EstabState
+
+Base.@kwdef struct _EstabPar{V}
+    slatop::V; dsladlai::V; dwood::V; woody::V
+    crownarea_max::V; twmax::V; reinickerp::V; allom1::V
+    tcmax::V; tcmin::V; gddmin::V
+end
+Adapt.@adapt_structure _EstabPar
+
+Base.@kwdef struct _EstabIn{V}
+    prec365_col::V; annsum_npp::V; annsum_litfall::V; leafcmax::V
+    deadstemc::V; agddtw::V; agdd20::V; tmomin20::V
+end
+Adapt.@adapt_structure _EstabIn
+
+Base.@kwdef struct _EstabScr{V,VB}
+    survive::VB; estab::VB; dstemc::V
+end
+Adapt.@adapt_structure _EstabScr
+
+@kernel function _cndv_estab_kernel!(st, scr, fpc_total_out, par, inp,
+        @Const(p_gridcell), @Const(p_column), @Const(p_itype), @Const(p_landunit),
+        @Const(lun_itype),
+        ramp_agddtw, nind_min, prec_min_estab, estab_max_val, taperT, rpiT, tfrzT,
+        novegc::Int, nc3arc::Int, istsoilc::Int, pmin::Int, pmax::Int, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        T = eltype(st.nind)
+        present = st.present; pftmayexist = st.pftmayexist
+        nind = st.nind; fpcgrid = st.fpcgrid; crownarea = st.crownarea
+        greffic = st.greffic; heatstress = st.heatstress
+        survive = scr.survive; estab = scr.estab; dstemc = scr.dstemc
+        slatop = par.slatop; dsladlai = par.dsladlai; dwood = par.dwood; woody = par.woody
+        crownarea_max = par.crownarea_max; twmax = par.twmax; reinickerp_a = par.reinickerp
+        allom1_a = par.allom1; tcmax = par.tcmax; tcmin = par.tcmin; gddmin_eco = par.gddmin
+        prec365 = inp.prec365_col; annsum_npp = inp.annsum_npp; annsum_litfall = inp.annsum_litfall
+        leafcmax = inp.leafcmax; deadstemc = inp.deadstemc
+        agddtw = inp.agddtw; agdd20 = inp.agdd20; tmomin20 = inp.tmomin20
+
+        fpc_tree_total = zero(T); npft_estab = 0; ngrass = 0
+        fpc_total_new = zero(T); fpc_total = zero(T)
+
+        # Pass 1: presence init + local copies
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            if nind[p] == zero(T); present[p] = false; end
+            if !present[p]; nind[p] = zero(T); fpcgrid[p] = zero(T); end
+            survive[p] = false; estab[p] = false; dstemc[p] = deadstemc[p]
+        end
+
+        # Pass 2: bioclim survival / establishment
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            ivp = p_itype[p] + 1
+            if tmomin20[p] >= tcmin[ivp] + tfrzT
+                if tmomin20[p] <= tcmax[ivp] + tfrzT && agdd20[p] >= gddmin_eco[ivp]
+                    estab[p] = true
+                end
+                survive[p] = true
+                if !pftmayexist[p]
+                    survive[p] = false; estab[p] = false; pftmayexist[p] = true
+                end
+            end
+        end
+
+        # Pass 3: kill / introduce
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            c = p_column[p]; l = p_landunit[p]; ivp = p_itype[p] + 1
+            if present[p] && (!survive[p] || nind[p] < nind_min)
+                present[p] = false; fpcgrid[p] = zero(T); nind[p] = zero(T)
+            end
+            if lun_itype[l] == istsoilc
+                if !present[p] && prec365[c] >= prec_min_estab && estab[p]
+                    if twmax[ivp] > T(999.0) || agddtw[p] == zero(T)
+                        present[p] = true; nind[p] = zero(T); fpcgrid[p] = T(0.000844)
+                        if woody[ivp] < one(T); fpcgrid[p] = T(0.05); end
+                        leafcmax[p] = one(T)
+                        if dstemc[p] <= zero(T); dstemc[p] = T(0.1); end
+                    end
+                end
+            end
+        end
+
+        # Pass 4: woody FPC totals + counts (thread-local)
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            ivp = p_itype[p] + 1
+            if present[p]
+                if woody[ivp] == one(T)
+                    fpc_tree_total += fpcgrid[p]
+                    if estab[p]; npft_estab += 1; end
+                elseif woody[ivp] < one(T) && p_itype[p] > novegc
+                    ngrass += 1
+                end
+            end
+        end
+
+        # Pass 5: sapling establishment for trees
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            ivp = p_itype[p] + 1
+            if present[p] && woody[ivp] == one(T) && estab[p]
+                estab_rate = estab_max_val * (one(T) - exp(T(5.0) * (fpc_tree_total - one(T)))) / T(npft_estab)
+                estab_grid = estab_rate * (one(T) - fpc_tree_total)
+                nind[p] = nind[p] + estab_grid
+                lm_ind = leafcmax[p] * fpcgrid[p] / nind[p]
+                if fpcgrid[p] > zero(T) && nind[p] > zero(T)
+                    stocking = nind[p] / fpcgrid[p]
+                    stemdiam = (T(24.0) * dstemc[p] / (rpiT * stocking * dwood[ivp] * taperT))^(one(T) / T(3.0))
+                else
+                    stemdiam = zero(T)
+                end
+                crownarea[p] = min(crownarea_max[ivp], allom1_a[ivp] * stemdiam^reinickerp_a[ivp])
+                if crownarea[p] > zero(T)
+                    if dsladlai[ivp] > zero(T)
+                        lai_ind = max(T(0.001),
+                            (exp(lm_ind * dsladlai[ivp] + log(slatop[ivp])) - slatop[ivp]) / dsladlai[ivp] / crownarea[p])
+                    else
+                        lai_ind = lm_ind * slatop[ivp] / crownarea[p]
+                    end
+                else
+                    lai_ind = zero(T)
+                end
+                fpc_ind = one(T) - exp(-T(0.5) * lai_ind)
+                fpcgrid[p] = crownarea[p] * nind[p] * fpc_ind
+            end
+            if present[p] && woody[ivp] == one(T)
+                fpc_total_new += fpcgrid[p]
+            end
+        end
+
+        # Pass 6: don't allow trees to exceed 95%
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            ivp = p_itype[p] + 1
+            if fpc_total_new > T(0.95)
+                if woody[ivp] == one(T) && present[p]
+                    nind[p] = nind[p] * T(0.95) / fpc_total_new
+                    fpcgrid[p] = fpcgrid[p] * T(0.95) / fpc_total_new
+                end
+                fpc_total = T(0.95)
+            else
+                fpc_total = fpc_total_new
+            end
+        end
+
+        # Pass 7: grass establishment
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            ivp = p_itype[p] + 1
+            if present[p] && woody[ivp] < one(T)
+                if leafcmax[p] <= zero(T) || fpcgrid[p] <= zero(T)
+                    present[p] = false; nind[p] = zero(T)
+                else
+                    nind[p] = one(T); crownarea[p] = one(T)
+                    lm_ind = leafcmax[p] * fpcgrid[p] / nind[p]
+                    if dsladlai[ivp] > zero(T)
+                        lai_ind = max(T(0.001),
+                            (exp(lm_ind * dsladlai[ivp] + log(slatop[ivp])) - slatop[ivp]) / dsladlai[ivp] / crownarea[p])
+                    else
+                        lai_ind = lm_ind * slatop[ivp] / crownarea[p]
+                    end
+                    fpc_ind = one(T) - exp(-T(0.5) * lai_ind)
+                    fpcgrid[p] = crownarea[p] * nind[p] * fpc_ind
+                    fpc_total = fpc_total + fpcgrid[p]
+                end
+            end
+        end
+
+        # Pass 8: fpc_total > 1 due to grasses (SEQUENTIAL within the gridcell)
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            if fpc_total > one(T)
+                if p_itype[p] >= nc3arc && fpcgrid[p] > zero(T)
+                    fpcgridtemp = fpcgrid[p]
+                    fpcgrid[p] = max(zero(T), fpcgrid[p] - (fpc_total - one(T)))
+                    fpc_total = fpc_total - fpcgridtemp + fpcgrid[p]
+                end
+            end
+            if fpcgrid[p] < T(1.0e-15)
+                fpc_total = fpc_total - fpcgrid[p]
+                fpcgrid[p] = zero(T); present[p] = false; nind[p] = zero(T)
+            end
+            if fpc_total < one(T) && p_itype[p] == novegc
+                fpcgrid[p] = one(T) - fpc_total
+                fpc_total = fpc_total + fpcgrid[p]
+            end
+        end
+
+        # Pass 9: annual mortality diagnostics (heatstress, greffic)
+        for p in pmin:pmax
+            p_gridcell[p] == g || continue
+            ivp = p_itype[p] + 1
+            if woody[ivp] == one(T) && nind[p] > zero(T) && leafcmax[p] > zero(T) && fpcgrid[p] > zero(T)
+                if twmax[ivp] < T(999.0)
+                    heatstress[p] = max(zero(T), min(one(T), agddtw[p] / ramp_agddtw))
+                else
+                    heatstress[p] = zero(T)
+                end
+                bm_delta = max(zero(T), annsum_npp[p] - annsum_litfall[p])
+                lm_ind = leafcmax[p] * fpcgrid[p] / nind[p]
+                if dsladlai[ivp] > zero(T)
+                    greffic[p] = bm_delta /
+                        max(T(0.001), (exp(lm_ind * dsladlai[ivp] + log(slatop[ivp])) - slatop[ivp]) / dsladlai[ivp])
+                else
+                    greffic[p] = bm_delta / (lm_ind * slatop[ivp])
+                end
+            else
+                greffic[p] = zero(T); heatstress[p] = zero(T)
+            end
+        end
+
+        fpc_total_out[g] = fpc_total
+    end
+end
+
 function cndv_establishment!(dgvs::DGVSData,
                               eco::DGVEcophysCon,
-                              prec365_col::Vector{<:Real},
-                              annsum_npp_patch::Vector{<:Real},
-                              annsum_litfall_patch::Vector{<:Real},
-                              deadstemc_patch::Vector{<:Real},
-                              leafcmax_patch::Vector{<:Real},
+                              prec365_col::AbstractVector{<:Real},
+                              annsum_npp_patch::AbstractVector{<:Real},
+                              annsum_litfall_patch::AbstractVector{<:Real},
+                              deadstemc_patch::AbstractVector{<:Real},
+                              leafcmax_patch::AbstractVector{<:Real},
                               pftcon_in::PftconType,
                               patch::PatchData,
                               lun::LandunitData,
                               bounds_patch::UnitRange{Int};
                               bounds_gridcell::UnitRange{Int} = 1:1)
 
-    # --- Constants ---
-    ramp_agddtw   = 300.0
-    nind_min       = 1.0e-10
-    prec_min_estab = 100.0 / (365.0 * SECSPDAY)
-    estab_max_val  = 0.24
-    taper          = 200.0
-
-    # --- Aliases ---
-    ivt           = patch.itype
-    slatop        = pftcon_in.slatop
-    dsladlai      = pftcon_in.dsladlai
-    dwood         = pftcon_in.dwood
-    woody         = pftcon_in.woody
-
-    crownarea_max = eco.crownarea_max
-    twmax         = eco.twmax
-    reinickerp_a  = eco.reinickerp
-    allom1_a      = eco.allom1
-    tcmax         = eco.tcmax
-    tcmin         = eco.tcmin
-    gddmin_eco    = eco.gddmin
-
-    present    = dgvs.present_patch
-    nind       = dgvs.nind_patch
-    fpcgrid    = dgvs.fpcgrid_patch
-    crownarea  = dgvs.crownarea_patch
-    greffic    = dgvs.greffic_patch
-    heatstress = dgvs.heatstress_patch
-    agddtw     = dgvs.agddtw_patch
-    agdd20     = dgvs.agdd20_patch
-    tmomin20   = dgvs.tmomin20_patch
-    pftmayexist = dgvs.pftmayexist_patch
-
+    isempty(bounds_patch) && return nothing
+    FT = eltype(dgvs.nind_patch)
+    ramp_agddtw    = FT(300.0)
+    nind_min       = FT(1.0e-10)
+    prec_min_estab = FT(100.0 / (365.0 * SECSPDAY))
+    estab_max_val  = FT(0.24)
+    taperT = FT(200.0); rpiT = FT(RPI); tfrzT = FT(TFRZ)
     np = last(bounds_patch)
 
-    # --- Gridcell-level accumulators ---
-    FT = eltype(dgvs.nind_patch)
-    ngrass        = zeros(Int, last(bounds_gridcell))
-    npft_estab    = zeros(Int, last(bounds_gridcell))
-    fpc_tree_total = zeros(FT, last(bounds_gridcell))
-    fpc_total     = zeros(FT, last(bounds_gridcell))
-    fpc_total_new = zeros(FT, last(bounds_gridcell))
+    # PftconType/eco fields -> device bundle (down-convert floats to FT).
+    _mdf(h) = copyto!(similar(dgvs.nind_patch, FT, size(h)...), FT.(h))
+    par = _EstabPar(; slatop = _mdf(pftcon_in.slatop), dsladlai = _mdf(pftcon_in.dsladlai),
+        dwood = _mdf(pftcon_in.dwood), woody = _mdf(pftcon_in.woody),
+        crownarea_max = _mdf(eco.crownarea_max), twmax = _mdf(eco.twmax),
+        reinickerp = _mdf(eco.reinickerp), allom1 = _mdf(eco.allom1),
+        tcmax = _mdf(eco.tcmax), tcmin = _mdf(eco.tcmin), gddmin = _mdf(eco.gddmin))
+    st = _EstabState(; present = dgvs.present_patch, pftmayexist = dgvs.pftmayexist_patch,
+        nind = dgvs.nind_patch, fpcgrid = dgvs.fpcgrid_patch, crownarea = dgvs.crownarea_patch,
+        greffic = dgvs.greffic_patch, heatstress = dgvs.heatstress_patch)
+    inp = _EstabIn(; prec365_col = prec365_col, annsum_npp = annsum_npp_patch,
+        annsum_litfall = annsum_litfall_patch, leafcmax = leafcmax_patch,
+        deadstemc = deadstemc_patch, agddtw = dgvs.agddtw_patch,
+        agdd20 = dgvs.agdd20_patch, tmomin20 = dgvs.tmomin20_patch)
+    scr = _EstabScr(; survive = fill!(similar(dgvs.present_patch, Bool, np), false),
+        estab = fill!(similar(dgvs.present_patch, Bool, np), false),
+        dstemc = fill!(similar(dgvs.nind_patch, FT, np), zero(FT)))
+    fpc_total_out = fill!(similar(dgvs.nind_patch, FT, last(bounds_gridcell)), zero(FT))
 
-    # --- Patch-level temporaries ---
-    survive = fill(false, np)
-    estab   = fill(false, np)
-    dstemc  = zeros(FT, np)
+    backend = _kernel_backend(dgvs.nind_patch)
+    _cndv_estab_kernel!(backend)(st, scr, fpc_total_out, par, inp,
+        patch.gridcell, patch.column, patch.itype, patch.landunit, lun.itype,
+        ramp_agddtw, nind_min, prec_min_estab, estab_max_val, taperT, rpiT, tfrzT,
+        noveg, nc3_arctic_grass, ISTSOIL,
+        first(bounds_patch), last(bounds_patch), first(bounds_gridcell), last(bounds_gridcell);
+        ndrange = last(bounds_gridcell))
+    KA.synchronize(backend)
 
-    # ---------------------------------------------------------------
-    # Initialize presence and local copies
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        if nind[p] == 0.0
-            present[p] = false
-        end
-        if !present[p]
-            nind[p]    = 0.0
-            fpcgrid[p] = 0.0
-        end
-        survive[p] = false
-        estab[p]   = false
-        dstemc[p]  = deadstemc_patch[p]
-    end
-
-    # ---------------------------------------------------------------
-    # Bioclim: determine survival and establishment
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        ivp = ivt[p] + 1  # Julia 1-based PFT index
-        if tmomin20[p] >= tcmin[ivp] + TFRZ
-            if tmomin20[p] <= tcmax[ivp] + TFRZ && agdd20[p] >= gddmin_eco[ivp]
-                estab[p] = true
+    # Error check: fpc sums to 1 per gridcell (host-only @warn; device skips it)
+    if fpc_total_out isa Array
+        for g in bounds_gridcell
+            if abs(fpc_total_out[g] - 1.0) > 1.0e-6
+                @warn "CNDV Establishment: fpc_total = $(fpc_total_out[g]) at gridcell $g"
             end
-            survive[p] = true
-            # Seasonal deciduous patches that would have occurred in
-            # regions without short winter day lengths
-            if !pftmayexist[p]
-                survive[p] = false
-                estab[p]   = false
-                pftmayexist[p] = true
-            end
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Case 1: kill PFTs not adapted; Case 2: introduce new PFTs
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        c   = patch.column[p]
-        l   = patch.landunit[p]
-        ivp = ivt[p] + 1
-
-        # Case 1 — kill
-        if present[p] && (!survive[p] || nind[p] < nind_min)
-            present[p] = false
-            fpcgrid[p] = 0.0
-            nind[p]    = 0.0
-        end
-
-        # Case 2 — introduce
-        if lun.itype[l] == ISTSOIL
-            if !present[p] && prec365_col[c] >= prec_min_estab && estab[p]
-                if twmax[ivp] > 999.0 || agddtw[p] == 0.0
-                    present[p] = true
-                    nind[p]    = 0.0
-                    fpcgrid[p] = 0.000844
-                    if woody[ivp] < 1.0
-                        fpcgrid[p] = 0.05
-                    end
-                    leafcmax_patch[p] = 1.0
-                    if dstemc[p] <= 0.0
-                        dstemc[p] = 0.1
-                    end
-                end
-            end
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Calculate total woody FPC and number of woody PFTs able to establish
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        g   = patch.gridcell[p]
-        ivp = ivt[p] + 1
-        if present[p]
-            if woody[ivp] == 1.0
-                fpc_tree_total[g] += fpcgrid[p]
-                if estab[p]
-                    npft_estab[g] += 1
-                end
-            elseif woody[ivp] < 1.0 && ivt[p] > noveg
-                ngrass[g] += 1
-            end
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Sapling establishment for trees
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        g   = patch.gridcell[p]
-        ivp = ivt[p] + 1
-
-        if present[p] && woody[ivp] == 1.0 && estab[p]
-            estab_rate = estab_max_val *
-                         (1.0 - exp(5.0 * (fpc_tree_total[g] - 1.0))) /
-                         Float64(npft_estab[g])
-            estab_grid = estab_rate * (1.0 - fpc_tree_total[g])
-            nind[p] += estab_grid
-
-            lm_ind = leafcmax_patch[p] * fpcgrid[p] / nind[p]
-            if fpcgrid[p] > 0.0 && nind[p] > 0.0
-                stocking = nind[p] / fpcgrid[p]
-                stemdiam = (24.0 * dstemc[p] /
-                           (RPI * stocking * dwood[ivp] * taper))^(1.0/3.0)
-            else
-                stemdiam = 0.0
-            end
-            crownarea[p] = min(crownarea_max[ivp],
-                               allom1_a[ivp] * stemdiam^reinickerp_a[ivp])
-
-            # Update LAI and FPC
-            if crownarea[p] > 0.0
-                if dsladlai[ivp] > 0.0
-                    lai_ind = max(0.001,
-                        (exp(lm_ind * dsladlai[ivp] + log(slatop[ivp])) -
-                         slatop[ivp]) / dsladlai[ivp] / crownarea[p])
-                else
-                    lai_ind = lm_ind * slatop[ivp] / crownarea[p]
-                end
-            else
-                lai_ind = 0.0
-            end
-
-            fpc_ind    = 1.0 - exp(-0.5 * lai_ind)
-            fpcgrid[p] = crownarea[p] * nind[p] * fpc_ind
-        end
-
-        if present[p] && woody[ivp] == 1.0
-            fpc_total_new[g] += fpcgrid[p]
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Adjustment: don't allow trees to exceed 95%
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        g = patch.gridcell[p]
-        ivp = ivt[p] + 1
-        if fpc_total_new[g] > 0.95
-            if woody[ivp] == 1.0 && present[p]
-                nind[p]    = nind[p] * 0.95 / fpc_total_new[g]
-                fpcgrid[p] = fpcgrid[p] * 0.95 / fpc_total_new[g]
-            end
-            fpc_total[g] = 0.95
-        else
-            fpc_total[g] = fpc_total_new[g]
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Grass establishment
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        g   = patch.gridcell[p]
-        ivp = ivt[p] + 1
-
-        if present[p] && woody[ivp] < 1.0
-            if leafcmax_patch[p] <= 0.0 || fpcgrid[p] <= 0.0
-                present[p] = false
-                nind[p]    = 0.0
-            else
-                nind[p]      = 1.0
-                crownarea[p] = 1.0
-                lm_ind = leafcmax_patch[p] * fpcgrid[p] / nind[p]
-                if dsladlai[ivp] > 0.0
-                    lai_ind = max(0.001,
-                        (exp(lm_ind * dsladlai[ivp] + log(slatop[ivp])) -
-                         slatop[ivp]) / dsladlai[ivp] / crownarea[p])
-                else
-                    lai_ind = lm_ind * slatop[ivp] / crownarea[p]
-                end
-                fpc_ind    = 1.0 - exp(-0.5 * lai_ind)
-                fpcgrid[p] = crownarea[p] * nind[p] * fpc_ind
-                fpc_total[g] += fpcgrid[p]
-            end
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Adjustment: fpc_total > 1 due to grasses (nc3_arctic_grass and above)
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        g   = patch.gridcell[p]
-        ivp = ivt[p] + 1
-
-        if fpc_total[g] > 1.0
-            if ivt[p] >= nc3_arctic_grass && fpcgrid[p] > 0.0
-                fpcgridtemp = fpcgrid[p]
-                fpcgrid[p]  = max(0.0, fpcgrid[p] - (fpc_total[g] - 1.0))
-                fpc_total[g] = fpc_total[g] - fpcgridtemp + fpcgrid[p]
-            end
-        end
-
-        # Remove tiny fpcgrid amounts
-        if fpcgrid[p] < 1.0e-15
-            fpc_total[g] -= fpcgrid[p]
-            fpcgrid[p]   = 0.0
-            present[p]   = false
-            nind[p]      = 0.0
-        end
-
-        # Set bare ground fpcgrid so everything adds to 1
-        if fpc_total[g] < 1.0 && ivt[p] == noveg
-            fpcgrid[p]   = 1.0 - fpc_total[g]
-            fpc_total[g] += fpcgrid[p]
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Annual mortality diagnostics (heatstress, greffic)
-    # Used hourly in gap_mortality
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        g   = patch.gridcell[p]
-        ivp = ivt[p] + 1
-
-        if woody[ivp] == 1.0 && nind[p] > 0.0 &&
-           leafcmax_patch[p] > 0.0 && fpcgrid[p] > 0.0
-
-            if twmax[ivp] < 999.0
-                heatstress[p] = max(0.0, min(1.0, agddtw[p] / ramp_agddtw))
-            else
-                heatstress[p] = 0.0
-            end
-
-            # Net individual living biomass increment
-            bm_delta = max(0.0, annsum_npp_patch[p] - annsum_litfall_patch[p])
-            lm_ind   = leafcmax_patch[p] * fpcgrid[p] / nind[p]
-
-            # Growth efficiency (net biomass increment per unit leaf area)
-            if dsladlai[ivp] > 0.0
-                greffic[p] = bm_delta /
-                    max(0.001,
-                        (exp(lm_ind * dsladlai[ivp] + log(slatop[ivp])) -
-                         slatop[ivp]) / dsladlai[ivp])
-            else
-                greffic[p] = bm_delta / (lm_ind * slatop[ivp])
-            end
-        else
-            greffic[p]    = 0.0
-            heatstress[p] = 0.0
-        end
-    end
-
-    # ---------------------------------------------------------------
-    # Error check: fpc sums to 1 per gridcell
-    # ---------------------------------------------------------------
-    for g in bounds_gridcell
-        if abs(fpc_total[g] - 1.0) > 1.0e-6
-            @warn "CNDV Establishment: fpc_total = $(fpc_total[g]) at gridcell $g"
         end
     end
 
@@ -590,46 +563,66 @@ Drive the annual dynamic vegetation cycle:
 
 Ported from subroutine CNDVDriver in CNDVDriverMod.F90.
 """
+@kernel function _cndv_climate20_kernel!(tmomin20, agdd20, @Const(t_mo_min), @Const(agdd),
+        kyr::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(tmomin20)
+        if kyr == 2
+            tmomin20[p] = t_mo_min[p]
+            agdd20[p]   = agdd[p]
+        end
+        tmomin20[p] = (T(19.0) * tmomin20[p] + t_mo_min[p]) / T(20.0)
+        agdd20[p]   = (T(19.0) * agdd20[p]   + agdd[p])     / T(20.0)
+    end
+end
+
+@kernel function _cndv_filter_kernel!(mask_natvegp, @Const(present), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        mask_natvegp[p] = present[p]
+    end
+end
+
+@kernel function _cndv_reset_kernel!(leafcmax, t_mo_min, bigT, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(leafcmax)
+        leafcmax[p] = zero(T)
+        t_mo_min[p] = bigT
+    end
+end
+
 function cndv_driver!(dgvs::DGVSData,
                       eco::DGVEcophysCon,
-                      t_mo_min_patch::Vector{<:Real},
-                      prec365_col::Vector{<:Real},
-                      annsum_npp_patch::Vector{<:Real},
-                      annsum_litfall_patch::Vector{<:Real},
-                      deadstemc_patch::Vector{<:Real},
-                      leafcmax_patch::Vector{<:Real},
+                      t_mo_min_patch::AbstractVector{<:Real},
+                      prec365_col::AbstractVector{<:Real},
+                      annsum_npp_patch::AbstractVector{<:Real},
+                      annsum_litfall_patch::AbstractVector{<:Real},
+                      deadstemc_patch::AbstractVector{<:Real},
+                      leafcmax_patch::AbstractVector{<:Real},
                       pftcon_in::PftconType,
                       patch::PatchData,
                       lun::LandunitData,
-                      mask_natvegp::BitVector,
+                      mask_natvegp::AbstractVector{Bool},
                       bounds_patch::UnitRange{Int},
                       kyr::Int;
                       bounds_gridcell::UnitRange{Int} = 1:1)
 
-    # --- Aliases ---
-    fpcgrid  = dgvs.fpcgrid_patch
-    agdd20   = dgvs.agdd20_patch
-    tmomin20 = dgvs.tmomin20_patch
-    agdd     = dgvs.agdd_patch
+    isempty(bounds_patch) && return nothing
+    FT = eltype(dgvs.fpcgrid_patch)
+    backend = _kernel_backend(dgvs.fpcgrid_patch)
 
-    # ---------------------------------------------------------------
     # 1. Climate20: 20-yr running means
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        if kyr == 2
-            tmomin20[p] = t_mo_min_patch[p]
-            agdd20[p]   = agdd[p]
-        end
-        tmomin20[p] = (19.0 * tmomin20[p] + t_mo_min_patch[p]) / 20.0
-        agdd20[p]   = (19.0 * agdd20[p]   + agdd[p])           / 20.0
-    end
+    _cndv_climate20_kernel!(backend)(dgvs.tmomin20_patch, dgvs.agdd20_patch,
+        t_mo_min_patch, dgvs.agdd_patch, kyr, first(bounds_patch), last(bounds_patch);
+        ndrange = length(dgvs.tmomin20_patch))
+    KA.synchronize(backend)
 
-    # ---------------------------------------------------------------
     # 2. Rebuild natveg filter from present_patch
-    # ---------------------------------------------------------------
-    for p in bounds_patch
-        mask_natvegp[p] = dgvs.present_patch[p]
-    end
+    _cndv_filter_kernel!(backend)(mask_natvegp, dgvs.present_patch,
+        first(bounds_patch), last(bounds_patch); ndrange = length(mask_natvegp))
+    KA.synchronize(backend)
 
     # ---------------------------------------------------------------
     # 3. Light competition
@@ -650,10 +643,9 @@ function cndv_driver!(dgvs::DGVSData,
     # ---------------------------------------------------------------
     # 5. Reset annual variables
     # ---------------------------------------------------------------
-    for p in bounds_patch
-        leafcmax_patch[p]  = 0.0
-        t_mo_min_patch[p]  = 1.0e36
-    end
+    _cndv_reset_kernel!(backend)(leafcmax_patch, t_mo_min_patch, FT(1.0e36),
+        first(bounds_patch), last(bounds_patch); ndrange = length(leafcmax_patch))
+    KA.synchronize(backend)
 
     return nothing
 end
