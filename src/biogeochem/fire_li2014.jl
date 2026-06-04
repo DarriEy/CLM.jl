@@ -279,31 +279,90 @@ end
 end
 
 # --- Section: main noncrop per-patch column-var accumulation (scatter) -----
-@kernel function _firea_noncrop_main_kernel!(trotr1_col, trotr2_col, dtrotr_col,
-        rootc_col, fsr_col, lgdp_col, lgdp1_col, lpop_col, fd_col,
+# --- Device-view bundles for _firea_noncrop_main_kernel! -------------------
+# Column-output scatter targets (per-column accumulators written via _scatter_add!).
+Base.@kwdef struct _FireNCOut{V}
+    trotr1_col::V; trotr2_col::V; dtrotr_col::V
+    rootc_col::V;  fsr_col::V
+    lgdp_col::V;   lgdp1_col::V; lpop_col::V
+    fd_col::V
+end
+Adapt.@adapt_structure _FireNCOut
+
+# Read-only per-patch / per-column / per-pft float inputs (all share the working eltype).
+Base.@kwdef struct _FireNCIn{V}
+    wtcol::V; cropf_col::V; lfwt::V; dwt_smoothed::V
+    frootc::V; frootc_storage::V; frootc_xfer::V
+    deadcrootc::V; deadcrootc_storage::V; deadcrootc_xfer::V
+    livecrootc::V; livecrootc_storage::V; livecrootc_xfer::V
+    fsr_pft::V; fd_pft::V; gdp_lf::V; forc_hdm::V
+end
+Adapt.@adapt_structure _FireNCIn
+
+# isbits scalar bundle (built at working precision in the wrapper — no Float64 reaches Metal).
+Base.@kwdef struct _FireNCScalars{T}
+    occur_hi_gdp_tree::T
+    rpi::T
+    secsphr::T
+end
+
+@kernel function _firea_noncrop_main_kernel!(out::_FireNCOut, inp::_FireNCIn,
         @Const(mask_soilp), @Const(column), @Const(gridcell), @Const(itype),
-        @Const(wtcol), @Const(cropf_col), @Const(lfwt), @Const(dwt_smoothed),
-        @Const(frootc), @Const(frootc_storage), @Const(frootc_xfer),
-        @Const(deadcrootc), @Const(deadcrootc_storage), @Const(deadcrootc_xfer),
-        @Const(livecrootc), @Const(livecrootc_storage), @Const(livecrootc_xfer),
-        @Const(fsr_pft), @Const(fd_pft), @Const(gdp_lf), @Const(forc_hdm),
+        sc::_FireNCScalars,
         nc3crop::Int, nbrdlf_evr_trp_tree::Int, nbrdlf_dcd_trp_tree::Int,
-        nbrdlf_evr_shrub::Int, noveg::Int, occur_hi_gdp_tree, rpi, secsphr,
-        transient_landcover::Bool)
+        nbrdlf_evr_shrub::Int, noveg::Int, transient_landcover::Bool)
     p = @index(Global)
     @inbounds if mask_soilp[p]
+        # Working element type taken from an output array; every literal is T-converted
+        # so no Float64 is materialized on a Float32-only backend (Metal). On Float64
+        # this is byte-identical (zero(T)===0.0, one(T)===1.0, T(x)===x).
+        T = eltype(out.trotr1_col)
+
+        # Alias bundle fields to Fortran-named locals (body verbatim, literals → T).
+        trotr1_col       = out.trotr1_col
+        trotr2_col       = out.trotr2_col
+        dtrotr_col       = out.dtrotr_col
+        rootc_col        = out.rootc_col
+        fsr_col          = out.fsr_col
+        lgdp_col         = out.lgdp_col
+        lgdp1_col        = out.lgdp1_col
+        lpop_col         = out.lpop_col
+        fd_col           = out.fd_col
+
+        wtcol             = inp.wtcol
+        cropf_col         = inp.cropf_col
+        lfwt              = inp.lfwt
+        dwt_smoothed      = inp.dwt_smoothed
+        frootc            = inp.frootc
+        frootc_storage    = inp.frootc_storage
+        frootc_xfer       = inp.frootc_xfer
+        deadcrootc        = inp.deadcrootc
+        deadcrootc_storage = inp.deadcrootc_storage
+        deadcrootc_xfer   = inp.deadcrootc_xfer
+        livecrootc        = inp.livecrootc
+        livecrootc_storage = inp.livecrootc_storage
+        livecrootc_xfer   = inp.livecrootc_xfer
+        fsr_pft           = inp.fsr_pft
+        fd_pft            = inp.fd_pft
+        gdp_lf            = inp.gdp_lf
+        forc_hdm          = inp.forc_hdm
+
+        occur_hi_gdp_tree = sc.occur_hi_gdp_tree
+        rpi               = sc.rpi
+        secsphr           = sc.secsphr
+
         c = column[p]
         g = gridcell[c]
-        if itype[p] < nc3crop && cropf_col[c] < 1.0
-            if itype[p] == nbrdlf_evr_trp_tree && wtcol[p] > 0.0
+        if itype[p] < nc3crop && cropf_col[c] < one(T)
+            if itype[p] == nbrdlf_evr_trp_tree && wtcol[p] > zero(T)
                 _scatter_add!(trotr1_col, c, wtcol[p])
             end
-            if itype[p] == nbrdlf_dcd_trp_tree && wtcol[p] > 0.0
+            if itype[p] == nbrdlf_dcd_trp_tree && wtcol[p] > zero(T)
                 _scatter_add!(trotr2_col, c, wtcol[p])
             end
             if transient_landcover
                 if itype[p] == nbrdlf_evr_trp_tree || itype[p] == nbrdlf_dcd_trp_tree
-                    if dwt_smoothed[p] < 0.0
+                    if dwt_smoothed[p] < zero(T)
                         _scatter_add!(dtrotr_col, c, -dwt_smoothed[p])
                     end
                 end
@@ -313,48 +372,91 @@ end
                 deadcrootc_storage[p] + deadcrootc_xfer[p] +
                 livecrootc[p] + livecrootc_storage[p] +
                 livecrootc_xfer[p]) * wtcol[p])
-            _scatter_add!(fsr_col, c, fsr_pft[itype[p] + 1] * wtcol[p] / (1.0 - cropf_col[c]))
-            if lfwt[c] != 0.0
+            _scatter_add!(fsr_col, c, fsr_pft[itype[p] + 1] * wtcol[p] / (one(T) - cropf_col[c]))
+            if lfwt[c] != zero(T)
                 hdmlf = forc_hdm[g]
-                if hdmlf > 0.1
+                if hdmlf > T(0.1)
                     if itype[p] != noveg
                         if itype[p] >= nbrdlf_evr_shrub
-                            _scatter_add!(lgdp_col, c, (0.1 + 0.9 *
-                                exp(-1.0 * rpi * (gdp_lf[c] / 8.0)^0.5)) * wtcol[p] /
-                                (1.0 - cropf_col[c]))
-                            _scatter_add!(lgdp1_col, c, (0.2 + 0.8 *
-                                exp(-1.0 * rpi * (gdp_lf[c] / 7.0))) * wtcol[p] / lfwt[c])
-                            _scatter_add!(lpop_col, c, (0.2 + 0.8 *
-                                exp(-1.0 * rpi * (hdmlf / 450.0)^0.5)) * wtcol[p] / lfwt[c])
+                            _scatter_add!(lgdp_col, c, (T(0.1) + T(0.9) *
+                                exp(-one(T) * rpi * (gdp_lf[c] / T(8.0))^T(0.5))) * wtcol[p] /
+                                (one(T) - cropf_col[c]))
+                            _scatter_add!(lgdp1_col, c, (T(0.2) + T(0.8) *
+                                exp(-one(T) * rpi * (gdp_lf[c] / T(7.0)))) * wtcol[p] / lfwt[c])
+                            _scatter_add!(lpop_col, c, (T(0.2) + T(0.8) *
+                                exp(-one(T) * rpi * (hdmlf / T(450.0))^T(0.5))) * wtcol[p] / lfwt[c])
                         else
-                            if gdp_lf[c] > 20.0
+                            if gdp_lf[c] > T(20.0)
                                 _scatter_add!(lgdp_col, c, occur_hi_gdp_tree *
-                                    wtcol[p] / (1.0 - cropf_col[c]))
+                                    wtcol[p] / (one(T) - cropf_col[c]))
                             else
-                                _scatter_add!(lgdp_col, c, wtcol[p] / (1.0 - cropf_col[c]))
+                                _scatter_add!(lgdp_col, c, wtcol[p] / (one(T) - cropf_col[c]))
                             end
-                            if gdp_lf[c] > 20.0
-                                _scatter_add!(lgdp1_col, c, 0.62 * wtcol[p] / lfwt[c])
+                            if gdp_lf[c] > T(20.0)
+                                _scatter_add!(lgdp1_col, c, T(0.62) * wtcol[p] / lfwt[c])
                             else
-                                if gdp_lf[c] > 8.0
-                                    _scatter_add!(lgdp1_col, c, 0.83 * wtcol[p] / lfwt[c])
+                                if gdp_lf[c] > T(8.0)
+                                    _scatter_add!(lgdp1_col, c, T(0.83) * wtcol[p] / lfwt[c])
                                 else
                                     _scatter_add!(lgdp1_col, c, wtcol[p] / lfwt[c])
                                 end
                             end
-                            _scatter_add!(lpop_col, c, (0.4 + 0.6 *
-                                exp(-1.0 * rpi * (hdmlf / 125.0))) * wtcol[p] / lfwt[c])
+                            _scatter_add!(lpop_col, c, (T(0.4) + T(0.6) *
+                                exp(-one(T) * rpi * (hdmlf / T(125.0)))) * wtcol[p] / lfwt[c])
                         end
                     end
                 else
-                    _scatter_add!(lgdp_col, c, wtcol[p] / (1.0 - cropf_col[c]))
+                    _scatter_add!(lgdp_col, c, wtcol[p] / (one(T) - cropf_col[c]))
                     _scatter_add!(lgdp1_col, c, wtcol[p] / lfwt[c])
                     _scatter_add!(lpop_col, c, wtcol[p] / lfwt[c])
                 end
             end
-            _scatter_add!(fd_col, c, fd_pft[itype[p]] * wtcol[p] * secsphr / (1.0 - cropf_col[c]))
+            _scatter_add!(fd_col, c, fd_pft[itype[p]] * wtcol[p] * secsphr / (one(T) - cropf_col[c]))
         end
     end
+end
+
+# Wrapper for the noncrop main per-patch scatter loop. Positional arg order matches
+# exactly what the old inline `_launch!(_firea_noncrop_main_kernel!, ...)` passed
+# (kernel name dropped), so the orchestrator call site simply becomes
+# `_firea_noncrop_main!(...)` with the SAME arguments in the SAME order.
+#
+# Builds the device-view output/input bundles + the isbits scalar bundle (scalars
+# converted to the output eltype so no Float64 reaches Metal), then launches in the
+# struct-first manual form (backend taken from a bundle field array).
+function _firea_noncrop_main!(trotr1_col, trotr2_col, dtrotr_col,
+        rootc_col, fsr_col, lgdp_col, lgdp1_col, lpop_col, fd_col,
+        mask_soilp, column, gridcell, itype, wtcol,
+        cropf_col, lfwt, dwt_smoothed,
+        frootc, frootc_storage, frootc_xfer,
+        deadcrootc, deadcrootc_storage, deadcrootc_xfer,
+        livecrootc, livecrootc_storage, livecrootc_xfer,
+        fsr_pft, fd_pft, gdp_lf, forc_hdm,
+        nc3crop::Int, nbrdlf_evr_trp_tree::Int, nbrdlf_dcd_trp_tree::Int,
+        nbrdlf_evr_shrub::Int, noveg::Int, occur_hi_gdp_tree, rpi, secsphr,
+        transient_landcover::Bool; ndrange = length(mask_soilp))
+
+    (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return nothing
+
+    out = _FireNCOut(; trotr1_col, trotr2_col, dtrotr_col,
+                       rootc_col, fsr_col, lgdp_col, lgdp1_col, lpop_col, fd_col)
+    inp = _FireNCIn(; wtcol, cropf_col, lfwt, dwt_smoothed,
+                      frootc, frootc_storage, frootc_xfer,
+                      deadcrootc, deadcrootc_storage, deadcrootc_xfer,
+                      livecrootc, livecrootc_storage, livecrootc_xfer,
+                      fsr_pft, fd_pft, gdp_lf, forc_hdm)
+
+    T = eltype(out.trotr1_col)
+    sc = _FireNCScalars(; occur_hi_gdp_tree = T(occur_hi_gdp_tree),
+                          rpi = T(rpi), secsphr = T(secsphr))
+
+    backend = _kernel_backend(out.trotr1_col)
+    _firea_noncrop_main_kernel!(backend)(out, inp,
+        mask_soilp, column, gridcell, itype, sc,
+        nc3crop, nbrdlf_evr_trp_tree, nbrdlf_dcd_trp_tree,
+        nbrdlf_evr_shrub, noveg, transient_landcover; ndrange = ndrange)
+    KA.synchronize(backend)
+    return nothing
 end
 
 # --- Section: transient-landcover lfc (per-column, date-gated) -------------
@@ -425,79 +527,180 @@ end
 end
 
 # --- Section: main per-column fire-spread loop -----------------------------
-@kernel function _firea_fire_spread_kernel!(nfire, farea_burned, fuelc, fbac, fbac1,
-        @Const(mask_soilc), @Const(gridcell), @Const(forc_hdm), @Const(cropf_col),
-        @Const(trotr1_col), @Const(trotr2_col), @Const(baf_crop), @Const(baf_peatf),
-        @Const(totlitc), @Const(totvegc), @Const(rootc_col), @Const(fuelc_crop),
-        @Const(decomp_cpools_vr), @Const(dzsoi_decomp), @Const(wf), @Const(forc_rh),
-        @Const(forc_t), @Const(forc_lnfm), @Const(lat), @Const(forc_wind),
-        @Const(lgdp_col), @Const(lgdp1_col), @Const(lpop_col), @Const(fsr_col),
-        @Const(fd_col), @Const(btran_col), @Const(wtlf), @Const(dtrotr_col),
-        @Const(prec60_col), @Const(prec10_col), @Const(forc_rain), @Const(forc_snow),
-        @Const(lfc),
-        i_cwd::Int, nlevdecomp::Int, lfuel, ufuel, rh_low, rh_hgh, bt_min, bt_max,
-        pot_hmn_ign_counts_alpha, ignition_efficiency, g0, cli_scale,
-        defo_fire_precip_thresh_bet, defo_fire_precip_thresh_bdt,
-        tfrz, rpi, secsphr, secspday, dayspyr, dt,
+### Metal-safe device-view structs for _firea_fire_spread_kernel!
+### Place these immediately BEFORE the @kernel definition (~line 417 in fire_li2014.jl),
+### so each struct + its Adapt registration is available to the kernel and wrapper.
+
+# Write outputs (per-column float vectors). All share eltype -> single param V.
+Base.@kwdef struct _FireSpreadOut{V}
+    nfire::V; farea_burned::V; fuelc::V; fbac::V; fbac1::V
+end
+Adapt.@adapt_structure _FireSpreadOut
+
+# Read-only float vectors, group 1 (@Const). Per-column / per-gridcell. Single param V.
+Base.@kwdef struct _FireSpreadIn1{V}
+    forc_hdm::V; cropf_col::V; trotr1_col::V; trotr2_col::V; baf_crop::V
+    baf_peatf::V; totlitc::V; totvegc::V; rootc_col::V; fuelc_crop::V
+    dzsoi_decomp::V; wf::V; forc_rh::V; forc_t::V; forc_lnfm::V
+end
+Adapt.@adapt_structure _FireSpreadIn1
+
+# Read-only float vectors, group 2 (@Const). Per-column / per-gridcell. Single param V.
+Base.@kwdef struct _FireSpreadIn2{V}
+    lat::V; forc_wind::V; lgdp_col::V; lgdp1_col::V; lpop_col::V
+    fsr_col::V; fd_col::V; btran_col::V; wtlf::V; dtrotr_col::V
+    prec60_col::V; prec10_col::V; forc_rain::V; forc_snow::V; lfc::V
+end
+Adapt.@adapt_structure _FireSpreadIn2
+
+# The single (3D) matrix arg (@Const). Param M.
+Base.@kwdef struct _FireSpreadMat{M}
+    decomp_cpools_vr::M
+end
+Adapt.@adapt_structure _FireSpreadMat
+
+# isbits scalar bundle at working precision T (built in the wrapper with T(...)).
+Base.@kwdef struct _FireSpreadScalars{T}
+    lfuel::T; ufuel::T; rh_low::T; rh_hgh::T; bt_min::T; bt_max::T
+    pot_hmn_ign_counts_alpha::T; ignition_efficiency::T; g0::T; cli_scale::T
+    defo_fire_precip_thresh_bet::T; defo_fire_precip_thresh_bdt::T
+    tfrz::T; rpi::T; secsphr::T; secspday::T; dayspyr::T; dt::T
+end
+
+@kernel function _firea_fire_spread_kernel!(
+        out::_FireSpreadOut, in1::_FireSpreadIn1, in2::_FireSpreadIn2,
+        mat::_FireSpreadMat,
+        @Const(mask_soilc), @Const(gridcell),
+        sc::_FireSpreadScalars,
+        i_cwd::Int, nlevdecomp::Int,
         date_is_jan1_0::Bool, transient_landcover::Bool)
     c = @index(Global)
     @inbounds if mask_soilc[c]
+        T = eltype(out.nfire)
+
+        # --- alias write outputs to Fortran-named locals ---
+        nfire        = out.nfire
+        farea_burned = out.farea_burned
+        fuelc        = out.fuelc
+        fbac         = out.fbac
+        fbac1        = out.fbac1
+
+        # --- alias read-only group-1 arrays ---
+        forc_hdm   = in1.forc_hdm
+        cropf_col  = in1.cropf_col
+        trotr1_col = in1.trotr1_col
+        trotr2_col = in1.trotr2_col
+        baf_crop   = in1.baf_crop
+        baf_peatf  = in1.baf_peatf
+        totlitc    = in1.totlitc
+        totvegc    = in1.totvegc
+        rootc_col  = in1.rootc_col
+        fuelc_crop = in1.fuelc_crop
+        dzsoi_decomp = in1.dzsoi_decomp
+        wf         = in1.wf
+        forc_rh    = in1.forc_rh
+        forc_t     = in1.forc_t
+        forc_lnfm  = in1.forc_lnfm
+
+        # --- alias read-only group-2 arrays ---
+        lat        = in2.lat
+        forc_wind  = in2.forc_wind
+        lgdp_col   = in2.lgdp_col
+        lgdp1_col  = in2.lgdp1_col
+        lpop_col   = in2.lpop_col
+        fsr_col    = in2.fsr_col
+        fd_col     = in2.fd_col
+        btran_col  = in2.btran_col
+        wtlf       = in2.wtlf
+        dtrotr_col = in2.dtrotr_col
+        prec60_col = in2.prec60_col
+        prec10_col = in2.prec10_col
+        forc_rain  = in2.forc_rain
+        forc_snow  = in2.forc_snow
+        lfc        = in2.lfc
+
+        # --- alias matrix ---
+        decomp_cpools_vr = mat.decomp_cpools_vr
+
+        # --- alias scalar-bundle fields ---
+        lfuel      = sc.lfuel
+        ufuel      = sc.ufuel
+        rh_low     = sc.rh_low
+        rh_hgh     = sc.rh_hgh
+        bt_min     = sc.bt_min
+        bt_max     = sc.bt_max
+        pot_hmn_ign_counts_alpha = sc.pot_hmn_ign_counts_alpha
+        ignition_efficiency      = sc.ignition_efficiency
+        g0         = sc.g0
+        cli_scale  = sc.cli_scale
+        defo_fire_precip_thresh_bet = sc.defo_fire_precip_thresh_bet
+        defo_fire_precip_thresh_bdt = sc.defo_fire_precip_thresh_bdt
+        tfrz       = sc.tfrz
+        rpi        = sc.rpi
+        secsphr    = sc.secsphr
+        secspday   = sc.secspday
+        dayspyr    = sc.dayspyr
+        dt         = sc.dt
+
+        # ----------------------------------------------------------------
+        # body verbatim from the host loop, every Float64 literal -> T(...)
+        # ----------------------------------------------------------------
         g = gridcell[c]
         hdmlf = forc_hdm[g]
-        nfire[c] = 0.0
+        nfire[c] = zero(T)
 
-        if cropf_col[c] < 1.0
-            if trotr1_col[c] + trotr2_col[c] > 0.6
-                farea_burned[c] = smooth_min(1.0, baf_crop[c] + baf_peatf[c])
+        if cropf_col[c] < one(T)
+            if trotr1_col[c] + trotr2_col[c] > T(0.6)
+                farea_burned[c] = smooth_min(one(T), baf_crop[c] + baf_peatf[c])
             else
                 fc = totlitc[c] + totvegc[c] - rootc_col[c] - fuelc_crop[c] * cropf_col[c]
                 for j in 1:nlevdecomp
                     fc = fc + decomp_cpools_vr[c, j, i_cwd] * dzsoi_decomp[j]
                 end
-                fc = fc / (1.0 - cropf_col[c])
+                fc = fc / (one(T) - cropf_col[c])
                 fuelc[c] = fc
-                fb       = smooth_max(0.0, smooth_min(1.0, (fc - lfuel) / (ufuel - lfuel)))
-                m        = smooth_max(0.0, wf[c])
-                fire_m   = exp(-rpi * (m / 0.69)^2) * (1.0 - smooth_max(0.0,
-                    smooth_min(1.0, (forc_rh[g] - rh_low) / (rh_hgh - rh_low)))) *
-                    smooth_min(1.0, exp(rpi * (forc_t[c] - tfrz) / 10.0))
-                lh       = pot_hmn_ign_counts_alpha * 6.8 * hdmlf^0.43 / 30.0 / 24.0
-                fs       = 1.0 - (0.01 + 0.98 * exp(-0.025 * hdmlf))
+                fb       = smooth_max(zero(T), smooth_min(one(T), (fc - lfuel) / (ufuel - lfuel)))
+                m        = smooth_max(zero(T), wf[c])
+                fire_m   = exp(-rpi * (m / T(0.69))^2) * (one(T) - smooth_max(zero(T),
+                    smooth_min(one(T), (forc_rh[g] - rh_low) / (rh_hgh - rh_low)))) *
+                    smooth_min(one(T), exp(rpi * (forc_t[c] - tfrz) / T(10)))
+                lh       = pot_hmn_ign_counts_alpha * T(6.8) * hdmlf^T(0.43) / T(30) / T(24)
+                fs       = one(T) - (T(0.01) + T(0.98) * exp(T(-0.025) * hdmlf))
                 ig       = (lh + forc_lnfm[g] /
-                    (5.16 + 2.16 * cos(3.0 * lat[g])) *
-                    ignition_efficiency) * (1.0 - fs) * (1.0 - cropf_col[c])
+                    (T(5.16) + T(2.16) * cos(T(3) * lat[g])) *
+                    ignition_efficiency) * (one(T) - fs) * (one(T) - cropf_col[c])
                 nfire[c] = ig / secsphr * fb * fire_m * lgdp_col[c]
-                Lb_lf    = 1.0 + 10.0 * (1.0 - exp(-0.06 * forc_wind[g]))
-                if wtlf[c] > 0.0
-                    spread_m = (1.0 - smooth_max(0.0, smooth_min(1.0,
+                Lb_lf    = one(T) + T(10) * (one(T) - exp(T(-0.06) * forc_wind[g]))
+                if wtlf[c] > zero(T)
+                    spread_m = (one(T) - smooth_max(zero(T), smooth_min(one(T),
                         (btran_col[c] / wtlf[c] - bt_min) /
-                        (bt_max - bt_min)))) * (1.0 - smooth_max(0.0,
-                        smooth_min(1.0, (forc_rh[g] - rh_low) / (rh_hgh - rh_low))))
+                        (bt_max - bt_min)))) * (one(T) - smooth_max(zero(T),
+                        smooth_min(one(T), (forc_rh[g] - rh_low) / (rh_hgh - rh_low))))
                 else
-                    spread_m = 0.0
+                    spread_m = zero(T)
                 end
-                farea_burned[c] = smooth_min(1.0,
+                farea_burned[c] = smooth_min(one(T),
                     (g0 * spread_m * fsr_col[c] *
-                    fd_col[c] / 1000.0)^2 * lgdp1_col[c] *
+                    fd_col[c] / T(1000))^2 * lgdp1_col[c] *
                     lpop_col[c] * nfire[c] * rpi * Lb_lf +
                     baf_crop[c] + baf_peatf[c])
             end
 
             if transient_landcover
-                if trotr1_col[c] + trotr2_col[c] > 0.6
-                    if date_is_jan1_0 || dtrotr_col[c] <= 0.0
-                        fbac1[c]        = 0.0
+                if trotr1_col[c] + trotr2_col[c] > T(0.6)
+                    if date_is_jan1_0 || dtrotr_col[c] <= zero(T)
+                        fbac1[c]        = zero(T)
                         farea_burned[c] = baf_crop[c] + baf_peatf[c]
                     else
                         cri = (defo_fire_precip_thresh_bet * trotr1_col[c] +
                                defo_fire_precip_thresh_bdt * trotr2_col[c]) /
                               (trotr1_col[c] + trotr2_col[c])
-                        cli = (smooth_max(0.0, smooth_min(1.0, (cri - prec60_col[c] * secspday) / cri))^0.5) *
-                              (smooth_max(0.0, smooth_min(1.0, (cri - prec10_col[c] * secspday) / cri))^0.5) *
-                              smooth_max(0.0005, smooth_min(1.0, 19.0 * dtrotr_col[c] * dayspyr * secspday / dt - 0.001)) *
-                              smooth_max(0.0, smooth_min(1.0, (0.25 - (forc_rain[c] + forc_snow[c]) * secsphr) / 0.25))
+                        cli = (smooth_max(zero(T), smooth_min(one(T), (cri - prec60_col[c] * secspday) / cri))^T(0.5)) *
+                              (smooth_max(zero(T), smooth_min(one(T), (cri - prec10_col[c] * secspday) / cri))^T(0.5)) *
+                              smooth_max(T(0.0005), smooth_min(one(T), T(19) * dtrotr_col[c] * dayspyr * secspday / dt - T(0.001))) *
+                              smooth_max(zero(T), smooth_min(one(T), (T(0.25) - (forc_rain[c] + forc_snow[c]) * secsphr) / T(0.25)))
                         farea_burned[c] = cli * (cli_scale / secspday) + baf_crop[c] + baf_peatf[c]
-                        fbac1[c] = smooth_max(0.0, cli * (cli_scale / secspday) - 2.0 * lfc[c] / dt)
+                        fbac1[c] = smooth_max(zero(T), cli * (cli_scale / secspday) - T(2) * lfc[c] / dt)
                     end
                     fbac[c] = fbac1[c] + baf_crop[c] + baf_peatf[c]
                 else
@@ -505,7 +708,7 @@ end
                 end
             end
         else
-            farea_burned[c] = smooth_min(1.0, baf_crop[c] + baf_peatf[c])
+            farea_burned[c] = smooth_min(one(T), baf_crop[c] + baf_peatf[c])
         end
     end
 end
@@ -742,7 +945,7 @@ function cnfire_area_li2014!(
              nc3crop; ndrange = length(mask_exposedveg))
 
     # --- Main patch loop for noncrop column variables ---
-    _launch!(_firea_noncrop_main_kernel!, trotr1_col, trotr2_col, dtrotr_col,
+    _firea_noncrop_main!( trotr1_col, trotr2_col, dtrotr_col,
              rootc_col, fsr_col, lgdp_col, lgdp1_col, lpop_col, fd_col,
              mask_soilp, patch.column, col.gridcell, patch.itype, patch.wtcol,
              cropf_col, lfwt, dwt_smoothed,
@@ -794,21 +997,54 @@ function cnfire_area_li2014!(
     dzsoi_decomp_arr = dzsoi_decomp[]
 
     # --- Main column loop: fractional area affected by fire ---
-    _launch!(_firea_fire_spread_kernel!, nfire, farea_burned, fuelc, fbac, fbac1,
-             mask_soilc, col.gridcell, fire_li2014.forc_hdm, cropf_col,
-             trotr1_col, trotr2_col, baf_crop, baf_peatf,
-             totlitc, totvegc, rootc_col, fuelc_crop,
-             decomp_cpools_vr, dzsoi_decomp_arr, wf, forc_rh,
-             forc_t, fire_li2014.forc_lnfm, grc.lat, forc_wind,
-             lgdp_col, lgdp1_col, lpop_col, fsr_col,
-             fd_col, btran_col, wtlf, dtrotr_col,
-             prec60_col, prec10_col, forc_rain, forc_snow, lfc,
-             i_cwd, nlevdecomp, lfuel, ufuel, rh_low, rh_hgh, bt_min, bt_max,
-             pot_hmn_ign_counts_alpha, cnfire_params.ignition_efficiency,
-             cnfire_const.g0, cli_scale,
-             defo_fire_precip_thresh_bet, defo_fire_precip_thresh_bdt,
-             TFRZ, RPI, SECSPHR, SECSPDAY, dayspyr, dt,
-             date_is_jan1_0, transient_landcover)
+    # --- Main column loop: fractional area affected by fire ---
+    # Build device-view structs + isbits scalar bundle, then launch struct-first.
+    TF_fs = eltype(farea_burned)
+
+    out_fs = _FireSpreadOut(;
+        nfire=nfire, farea_burned=farea_burned, fuelc=fuelc, fbac=fbac, fbac1=fbac1)
+
+    in1_fs = _FireSpreadIn1(;
+        forc_hdm=fire_li2014.forc_hdm, cropf_col=cropf_col,
+        trotr1_col=trotr1_col, trotr2_col=trotr2_col,
+        baf_crop=baf_crop, baf_peatf=baf_peatf,
+        totlitc=totlitc, totvegc=totvegc, rootc_col=rootc_col,
+        fuelc_crop=fuelc_crop, dzsoi_decomp=dzsoi_decomp_arr,
+        wf=wf, forc_rh=forc_rh, forc_t=forc_t, forc_lnfm=fire_li2014.forc_lnfm)
+
+    in2_fs = _FireSpreadIn2(;
+        lat=grc.lat, forc_wind=forc_wind,
+        lgdp_col=lgdp_col, lgdp1_col=lgdp1_col, lpop_col=lpop_col,
+        fsr_col=fsr_col, fd_col=fd_col, btran_col=btran_col,
+        wtlf=wtlf, dtrotr_col=dtrotr_col,
+        prec60_col=prec60_col, prec10_col=prec10_col,
+        forc_rain=forc_rain, forc_snow=forc_snow, lfc=lfc)
+
+    mat_fs = _FireSpreadMat(; decomp_cpools_vr=decomp_cpools_vr)
+
+    sc_fs = _FireSpreadScalars(;
+        lfuel=TF_fs(lfuel), ufuel=TF_fs(ufuel),
+        rh_low=TF_fs(rh_low), rh_hgh=TF_fs(rh_hgh),
+        bt_min=TF_fs(bt_min), bt_max=TF_fs(bt_max),
+        pot_hmn_ign_counts_alpha=TF_fs(pot_hmn_ign_counts_alpha),
+        ignition_efficiency=TF_fs(cnfire_params.ignition_efficiency),
+        g0=TF_fs(cnfire_const.g0), cli_scale=TF_fs(cli_scale),
+        defo_fire_precip_thresh_bet=TF_fs(defo_fire_precip_thresh_bet),
+        defo_fire_precip_thresh_bdt=TF_fs(defo_fire_precip_thresh_bdt),
+        tfrz=TF_fs(TFRZ), rpi=TF_fs(RPI),
+        secsphr=TF_fs(SECSPHR), secspday=TF_fs(SECSPDAY),
+        dayspyr=TF_fs(dayspyr), dt=TF_fs(dt))
+
+    # Struct-first kernel: manual backend + synchronize (the bundle args carry no backend).
+    backend_fs = _kernel_backend(out_fs.nfire)
+    _firea_fire_spread_kernel!(backend_fs)(
+        out_fs, in1_fs, in2_fs, mat_fs,
+        mask_soilc, col.gridcell,
+        sc_fs,
+        i_cwd, nlevdecomp,
+        date_is_jan1_0, transient_landcover;
+        ndrange = length(farea_burned))
+    KA.synchronize(backend_fs)
 
     return nothing
 end
