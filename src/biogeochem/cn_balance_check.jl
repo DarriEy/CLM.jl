@@ -12,20 +12,30 @@ plus warning/error thresholds.
 
 Ported from `cn_balance_type` in `CNBalanceCheckMod.F90`.
 """
-Base.@kwdef mutable struct CNBalanceData
-    begcb_col ::Vector{Float64} = Float64[]  # (gC/m2) column carbon mass, beginning of time step
-    endcb_col ::Vector{Float64} = Float64[]  # (gC/m2) column carbon mass, end of time step
-    begnb_col ::Vector{Float64} = Float64[]  # (gN/m2) column nitrogen mass, beginning of time step
-    endnb_col ::Vector{Float64} = Float64[]  # (gN/m2) column nitrogen mass, end of time step
-    begcb_grc ::Vector{Float64} = Float64[]  # (gC/m2) gridcell carbon mass, beginning of time step
-    endcb_grc ::Vector{Float64} = Float64[]  # (gC/m2) gridcell carbon mass, end of time step
-    begnb_grc ::Vector{Float64} = Float64[]  # (gN/m2) gridcell nitrogen mass, beginning of time step
-    endnb_grc ::Vector{Float64} = Float64[]  # (gN/m2) gridcell nitrogen mass, end of time step
+# Reparametrized {FT,V} + @adapt_structure so the begin/end mass arrays are
+# device-movable (kernels write them on Metal). The 4 threshold scalars stay
+# concrete ::Float64 — they are only read in the host-side warn/error scan,
+# never inside a device kernel, so the arrays-only _F32 adaptor leaves them
+# untouched (V<:AbstractVector{FT} is satisfied independent of the scalars).
+Base.@kwdef mutable struct CNBalanceData{FT<:Real,
+                              V<:AbstractVector{FT}}
+    begcb_col ::V = Float64[]  # (gC/m2) column carbon mass, beginning of time step
+    endcb_col ::V = Float64[]  # (gC/m2) column carbon mass, end of time step
+    begnb_col ::V = Float64[]  # (gN/m2) column nitrogen mass, beginning of time step
+    endnb_col ::V = Float64[]  # (gN/m2) column nitrogen mass, end of time step
+    begcb_grc ::V = Float64[]  # (gC/m2) gridcell carbon mass, beginning of time step
+    endcb_grc ::V = Float64[]  # (gC/m2) gridcell carbon mass, end of time step
+    begnb_grc ::V = Float64[]  # (gN/m2) gridcell nitrogen mass, beginning of time step
+    endnb_grc ::V = Float64[]  # (gN/m2) gridcell nitrogen mass, end of time step
     cwarning  ::Float64 = 1.0e-8   # (gC/m2) carbon balance warning threshold
     nwarning  ::Float64 = 1.0e-7   # (gN/m2) nitrogen balance warning threshold
     cerror    ::Float64 = 1.0e-7   # (gC/m2) carbon balance error threshold
     nerror    ::Float64 = 1.0e-3   # (gN/m2) nitrogen balance error threshold
 end
+
+CNBalanceData{FT}(; kwargs...) where {FT<:Real} =
+    CNBalanceData{FT, Vector{FT}}(; kwargs...)
+Adapt.@adapt_structure CNBalanceData
 
 """
     cn_balance_init!(bal::CNBalanceData, nc::Int, ng::Int)
@@ -61,23 +71,42 @@ end
 Column-to-gridcell area-weighted average with unity scaling.
 Simple reimplementation of `c2g` from `subgridAveMod.F90` used by balance checks.
 """
+@kernel function _c2g_zero_kernel!(garr, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        garr[g] = zero(eltype(garr))
+    end
+end
+
+# Per-column scatter into the owning gridcell. KA-CPU iterates threads in
+# ascending column order, so `_scatter_add!` reproduces the host `for c` += order
+# byte-for-byte; on the GPU it is an atomic add.
+@kernel function _c2g_scatter_kernel!(garr, @Const(carr), @Const(col_gridcell),
+        @Const(col_wtgcell), cmin::Int, cmax::Int, gmin::Int, gmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        g = col_gridcell[c]
+        if gmin <= g <= gmax
+            _scatter_add!(garr, g, carr[c] * col_wtgcell[c])
+        end
+    end
+end
+
 function c2g_unity!(
-    garr::Vector{<:Real},
-    carr::Vector{<:Real},
-    col_gridcell::Vector{Int},
-    col_wtgcell::Vector{<:Real},
+    garr::AbstractVector{<:Real},
+    carr::AbstractVector{<:Real},
+    col_gridcell::AbstractVector{<:Integer},
+    col_wtgcell::AbstractVector{<:Real},
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int}
 )
-    for g in bounds_g
-        garr[g] = 0.0
-    end
-    for c in bounds_c
-        g = col_gridcell[c]
-        if g in bounds_g
-            garr[g] += carr[c] * col_wtgcell[c]
-        end
-    end
+    isempty(bounds_g) && return nothing
+    _launch!(_c2g_zero_kernel!, garr, first(bounds_g), last(bounds_g);
+        ndrange = length(garr))
+    isempty(bounds_c) && return nothing
+    _launch!(_c2g_scatter_kernel!, garr, carr, col_gridcell, col_wtgcell,
+        first(bounds_c), last(bounds_c), first(bounds_g), last(bounds_g);
+        ndrange = length(carr))
     return nothing
 end
 
@@ -103,6 +132,25 @@ The dribbler amounts (`hrv_xsmrpool_amount_left`, `gru_conv_cflux_amount_left`,
 `use_fates_bgc` is false. When `use_fates_bgc` is true, they are ignored
 and treated as zero.
 """
+# One thread per gridcell. The dribbler arrays are only indexed on the
+# !use_fates_bgc branch; under use_fates_bgc they may be empty (never read).
+@kernel function _cnbal_begin_grc_kernel!(begcb_grc, begnb_grc,
+        @Const(totc), @Const(totn), @Const(c_tot_woodprod), @Const(c_cropprod1),
+        @Const(n_tot_woodprod), @Const(n_cropprod1),
+        @Const(hrv_left), @Const(gru_left), @Const(dwt_left),
+        use_fates_bgc::Bool, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        if use_fates_bgc
+            begcb_grc[g] = totc[g] + c_tot_woodprod[g] + c_cropprod1[g]
+        else
+            begcb_grc[g] = totc[g] + c_tot_woodprod[g] + c_cropprod1[g] +
+                           hrv_left[g] + gru_left[g] + dwt_left[g]
+        end
+        begnb_grc[g] = totn[g] + n_tot_woodprod[g] + n_cropprod1[g]
+    end
+end
+
 function begin_cn_gridcell_balance!(
     bal::CNBalanceData,
     soilbgc_cstate::SoilBiogeochemCarbonStateData,
@@ -111,9 +159,9 @@ function begin_cn_gridcell_balance!(
     n_products::CNProductsData,
     bounds_g::UnitRange{Int};
     use_fates_bgc::Bool=false,
-    hrv_xsmrpool_amount_left::Vector{<:Real}=Float64[],
-    gru_conv_cflux_amount_left::Vector{<:Real}=Float64[],
-    dwt_conv_cflux_amount_left::Vector{<:Real}=Float64[]
+    hrv_xsmrpool_amount_left::AbstractVector{<:Real}=Float64[],
+    gru_conv_cflux_amount_left::AbstractVector{<:Real}=Float64[],
+    dwt_conv_cflux_amount_left::AbstractVector{<:Real}=Float64[]
 )
     totc = soilbgc_cstate.totc_grc
     totn = soilbgc_nstate.totn_grc
@@ -122,18 +170,12 @@ function begin_cn_gridcell_balance!(
     c_tot_woodprod = c_products.tot_woodprod_grc
     n_tot_woodprod = n_products.tot_woodprod_grc
 
-    for g in bounds_g
-        if use_fates_bgc
-            bal.begcb_grc[g] = totc[g] + c_tot_woodprod[g] + c_cropprod1[g]
-        else
-            bal.begcb_grc[g] = totc[g] + c_tot_woodprod[g] + c_cropprod1[g] +
-                               hrv_xsmrpool_amount_left[g] +
-                               gru_conv_cflux_amount_left[g] +
-                               dwt_conv_cflux_amount_left[g]
-        end
-        bal.begnb_grc[g] = totn[g] + n_tot_woodprod[g] + n_cropprod1[g]
-    end
-
+    isempty(bounds_g) && return nothing
+    _launch!(_cnbal_begin_grc_kernel!, bal.begcb_grc, bal.begnb_grc,
+        totc, totn, c_tot_woodprod, c_cropprod1, n_tot_woodprod, n_cropprod1,
+        hrv_xsmrpool_amount_left, gru_conv_cflux_amount_left, dwt_conv_cflux_amount_left,
+        use_fates_bgc, first(bounds_g), last(bounds_g);
+        ndrange = length(bal.begcb_grc))
     return nothing
 end
 
@@ -152,22 +194,29 @@ Should be called after CN state summaries have been recomputed for this time ste
 
 Ported from `BeginCNColumnBalance` in `CNBalanceCheckMod.F90`.
 """
+@kernel function _cnbal_begin_col_kernel!(begcb_col, begnb_col,
+        @Const(mask_soil), @Const(totcolc), @Const(totcoln), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_soil[c]
+        begcb_col[c] = totcolc[c]
+        begnb_col[c] = totcoln[c]
+    end
+end
+
 function begin_cn_column_balance!(
     bal::CNBalanceData,
     soilbgc_cstate::SoilBiogeochemCarbonStateData,
     soilbgc_nstate::SoilBiogeochemNitrogenStateData,
-    mask_soil::BitVector,
+    mask_soil::AbstractVector{Bool},
     bounds_c::UnitRange{Int}
 )
     totcolc = soilbgc_cstate.totc_col
     totcoln = soilbgc_nstate.totn_col
 
-    for c in bounds_c
-        mask_soil[c] || continue
-        bal.begcb_col[c] = totcolc[c]
-        bal.begnb_col[c] = totcoln[c]
-    end
-
+    isempty(bounds_c) && return nothing
+    _launch!(_cnbal_begin_col_kernel!, bal.begcb_col, bal.begnb_col,
+        mask_soil, totcolc, totcoln, first(bounds_c), last(bounds_c);
+        ndrange = length(bal.begcb_col))
     return nothing
 end
 
@@ -205,6 +254,66 @@ Ported from `CBalanceCheck` in `CNBalanceCheckMod.F90`.
 - `gru_conv_cflux_amount_left`: dribbler amount (end-of-step, gridcell)
 - `dwt_conv_cflux_amount_left`: dribbler amount (end-of-step, gridcell)
 """
+# One thread per column: writes col_endcb and col_errcb. has_fates encodes
+# `!isempty(is_fates_col)` (when false the empty is_fates_col is never indexed).
+# T(dt) keeps the timestep arithmetic in the device eltype (Metal has no Float64);
+# on CPU T==Float64 so it is byte-identical to the original loop.
+@kernel function _cbal_col_kernel!(col_endcb, col_errcb,
+        @Const(mask_soil), @Const(is_fates_col), has_fates::Bool,
+        @Const(totcolc), @Const(col_begcb), @Const(gpp), @Const(er),
+        @Const(col_fire_closs), @Const(col_hrv_xsmrpool_to_atm),
+        @Const(col_xsmrpool_to_atm), @Const(gru_conv_cflux), @Const(wood_harvestc),
+        @Const(gru_wood_productc_gain), @Const(crop_harvestc_to_cropprodc),
+        @Const(som_c_leached), @Const(fates_litter_flux), @Const(hr_col),
+        dt, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_soil[c]
+        T = eltype(col_errcb)
+        col_endcb[c] = totcolc[c]
+        if has_fates && is_fates_col[c]
+            col_cinputs = fates_litter_flux[c]
+            col_coutputs = hr_col[c]
+        else
+            col_cinputs = gpp[c]
+            col_coutputs = er[c] + col_fire_closs[c] + col_hrv_xsmrpool_to_atm[c] +
+                           col_xsmrpool_to_atm[c] + gru_conv_cflux[c]
+            col_coutputs += wood_harvestc[c] +
+                            gru_wood_productc_gain[c] +
+                            crop_harvestc_to_cropprodc[c]
+        end
+        col_coutputs -= som_c_leached[c]
+        col_errcb[c] = (col_cinputs - col_coutputs) * T(dt) -
+                        (col_endcb[c] - col_begcb[c])
+    end
+end
+
+# One thread per gridcell: writes grc_endcb and grc_errcb. has_dribbler encodes
+# `!isempty(hrv_xsmrpool_amount_left)`.
+@kernel function _cbal_grc_kernel!(grc_endcb, grc_errcb,
+        @Const(grc_begcb), @Const(totgrcc), @Const(tot_woodprod_grc), @Const(cropprod1_grc),
+        @Const(hrv_left), @Const(gru_left), @Const(dwt_left), has_dribbler::Bool,
+        @Const(nbp_grc), @Const(dwt_seedc_to_leaf_grc), @Const(dwt_seedc_to_deadstem_grc),
+        @Const(som_c_leached_grc), use_fates_bgc::Bool, dt, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        T = eltype(grc_errcb)
+        if !use_fates_bgc
+            grc_endcb[g] = totgrcc[g] + tot_woodprod_grc[g] + cropprod1_grc[g]
+            if has_dribbler
+                grc_endcb[g] += hrv_left[g] + gru_left[g] + dwt_left[g]
+            end
+            grc_cinputs = nbp_grc[g] +
+                          dwt_seedc_to_leaf_grc[g] + dwt_seedc_to_deadstem_grc[g]
+            grc_coutputs = -som_c_leached_grc[g]
+            grc_errcb[g] = (grc_cinputs - grc_coutputs) * T(dt) -
+                            (grc_endcb[g] - grc_begcb[g])
+        else
+            grc_endcb[g] = grc_begcb[g]
+            grc_errcb[g] = zero(T)
+        end
+    end
+end
+
 function c_balance_check!(
     bal::CNBalanceData,
     soilbgc_cflux::SoilBiogeochemCarbonFluxData,
@@ -213,15 +322,15 @@ function c_balance_check!(
     c_products::CNProductsData,
     col_data::ColumnData,
     grc_data::GridcellData,
-    mask_soil::BitVector,
+    mask_soil::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int},
     dt::Real;
-    is_fates_col::Vector{Bool}=Bool[],
+    is_fates_col::AbstractVector{Bool}=Bool[],
     use_fates_bgc::Bool=false,
-    hrv_xsmrpool_amount_left::Vector{<:Real}=Float64[],
-    gru_conv_cflux_amount_left::Vector{<:Real}=Float64[],
-    dwt_conv_cflux_amount_left::Vector{<:Real}=Float64[]
+    hrv_xsmrpool_amount_left::AbstractVector{<:Real}=Float64[],
+    gru_conv_cflux_amount_left::AbstractVector{<:Real}=Float64[],
+    dwt_conv_cflux_amount_left::AbstractVector{<:Real}=Float64[]
 )
     # Local aliases for column-level fields
     col_begcb = bal.begcb_col
@@ -251,45 +360,36 @@ function c_balance_check!(
     cropprod1_grc    = c_products.cropprod1_grc
     tot_woodprod_grc = c_products.tot_woodprod_grc
 
-    # Column-level allocation for error tracking
+    # Column-level error array (device-resident scratch via similar()).
     FT = eltype(bal.begcb_col)
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
-    col_errcb = zeros(FT, nc)
+    col_errcb = fill!(similar(bal.begcb_col, FT, nc), zero(FT))
+    has_fates = !isempty(is_fates_col)
 
+    # --- Column-level balance check (numeric pass on device/host) ---
+    if !isempty(bounds_c)
+        _launch!(_cbal_col_kernel!, col_endcb, col_errcb,
+            mask_soil, is_fates_col, has_fates,
+            totcolc, col_begcb, gpp, er, col_fire_closs, col_hrv_xsmrpool_to_atm,
+            col_xsmrpool_to_atm, gru_conv_cflux, wood_harvestc, gru_wood_productc_gain,
+            crop_harvestc_to_cropprodc, som_c_leached, fates_litter_flux, hr_col,
+            FT(dt), first(bounds_c), last(bounds_c); ndrange = length(col_endcb))
+    end
+
+    # --- Host-only warn/error scan (col_errcb is a plain Array only on the CPU;
+    #     on the GPU we skip the String-building error path entirely) ---
     err_found = false
     err_index = 0
-
-    # --- Column-level balance check ---
-    for c in bounds_c
-        mask_soil[c] || continue
-
-        col_endcb[c] = totcolc[c]
-
-        if !isempty(is_fates_col) && is_fates_col[c]
-            col_cinputs = fates_litter_flux[c]
-            col_coutputs = hr_col[c]
-        else
-            col_cinputs = gpp[c]
-            col_coutputs = er[c] + col_fire_closs[c] + col_hrv_xsmrpool_to_atm[c] +
-                           col_xsmrpool_to_atm[c] + gru_conv_cflux[c]
-            col_coutputs += wood_harvestc[c] +
-                            gru_wood_productc_gain[c] +
-                            crop_harvestc_to_cropprodc[c]
-        end
-
-        # subtract leaching flux
-        col_coutputs -= som_c_leached[c]
-
-        # calculate the total column-level carbon balance error for this time step
-        col_errcb[c] = (col_cinputs - col_coutputs) * dt -
-                        (col_endcb[c] - col_begcb[c])
-
-        if abs(col_errcb[c]) > bal.cerror
-            err_found = true
-            err_index = c
-        end
-        if abs(col_errcb[c]) > bal.cwarning
-            @warn "cbalance warning at c = $c" col_errcb=col_errcb[c] col_endcb=col_endcb[c]
+    if col_errcb isa Array
+        for c in bounds_c
+            mask_soil[c] || continue
+            if abs(col_errcb[c]) > bal.cerror
+                err_found = true
+                err_index = c
+            end
+            if abs(col_errcb[c]) > bal.cwarning
+                @warn "cbalance warning at c = $c" col_errcb=col_errcb[c] col_endcb=col_endcb[c]
+            end
         end
     end
 
@@ -323,45 +423,37 @@ function c_balance_check!(
 
     # --- Gridcell-level balance check ---
 
-    # Column-to-gridcell aggregation
+    # Column-to-gridcell aggregation (kernelized scatter; device-resident scratch)
     totgrcc = soilbgc_cstate.totc_grc
     c2g_unity!(totgrcc, totcolc, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
-    som_c_leached_grc = zeros(FT, length(grc_data.latdeg))
+    ng = length(grc_data.latdeg)
+    som_c_leached_grc = fill!(similar(bal.begcb_grc, FT, ng), zero(FT))
     c2g_unity!(som_c_leached_grc, som_c_leached, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
-    ng = length(grc_data.latdeg)
-    grc_errcb = zeros(FT, ng)
+    grc_errcb = fill!(similar(bal.begcb_grc, FT, ng), zero(FT))
+    has_dribbler = !isempty(hrv_xsmrpool_amount_left)
+
+    if !isempty(bounds_g)
+        _launch!(_cbal_grc_kernel!, grc_endcb, grc_errcb,
+            grc_begcb, totgrcc, tot_woodprod_grc, cropprod1_grc,
+            hrv_xsmrpool_amount_left, gru_conv_cflux_amount_left, dwt_conv_cflux_amount_left,
+            has_dribbler, nbp_grc, dwt_seedc_to_leaf_grc, dwt_seedc_to_deadstem_grc,
+            som_c_leached_grc, use_fates_bgc, FT(dt), first(bounds_g), last(bounds_g);
+            ndrange = length(grc_endcb))
+    end
 
     err_found = false
     err_index = 0
-
-    for g in bounds_g
-        if !use_fates_bgc
-            grc_endcb[g] = totgrcc[g] + tot_woodprod_grc[g] + cropprod1_grc[g]
-            if !isempty(hrv_xsmrpool_amount_left)
-                grc_endcb[g] += hrv_xsmrpool_amount_left[g] +
-                                gru_conv_cflux_amount_left[g] +
-                                dwt_conv_cflux_amount_left[g]
+    if grc_errcb isa Array
+        for g in bounds_g
+            if abs(grc_errcb[g]) > bal.cerror
+                err_found = true
+                err_index = g
             end
-
-            grc_cinputs = nbp_grc[g] +
-                          dwt_seedc_to_leaf_grc[g] + dwt_seedc_to_deadstem_grc[g]
-            grc_coutputs = -som_c_leached_grc[g]
-
-            grc_errcb[g] = (grc_cinputs - grc_coutputs) * dt -
-                            (grc_endcb[g] - grc_begcb[g])
-        else
-            grc_endcb[g] = grc_begcb[g]
-            grc_errcb[g] = 0.0
-        end
-
-        if abs(grc_errcb[g]) > bal.cerror
-            err_found = true
-            err_index = g
-        end
-        if abs(grc_errcb[g]) > bal.cwarning
-            @warn "cbalance warning at g = $g" grc_errcb=grc_errcb[g] grc_endcb=grc_endcb[g]
+            if abs(grc_errcb[g]) > bal.cwarning
+                @warn "cbalance warning at g = $g" grc_errcb=grc_errcb[g] grc_endcb=grc_endcb[g]
+            end
         end
     end
 
@@ -419,6 +511,104 @@ Ported from `NBalanceCheck` in `CNBalanceCheckMod.F90`.
 - `use_crop`: flag for crop model
 - `use_fun`: flag for FUN model
 """
+# Device-view bundle: the N column kernel touches 21 per-column input arrays,
+# which would blow Metal's ~31 TOTAL-arg limit if passed loose. They are grouped
+# into one immutable Adapt-able struct (one kernel arg) and aliased back to their
+# Fortran-named locals at the kernel top so the body stays verbatim.
+Base.@kwdef struct _NBalColIn{V}
+    totcoln::V; ndep_to_sminn::V; nfix_to_sminn::V; ffix_to_sminn::V
+    fert_to_sminn::V; soyfixn_to_sminn::V; supplement_to_sminn::V; denit::V
+    sminn_leached::V; smin_no3_leached::V; smin_no3_runoff::V; f_n2o_nit::V
+    som_n_leached::V; sminn_to_plant::V; fates_litter_flux::V; col_fire_nloss::V
+    wood_harvestn::V; gru_conv_nflux::V; gru_wood_productn_gain::V
+    crop_harvestn_to_cropprodn::V; col_begnb::V
+end
+Adapt.@adapt_structure _NBalColIn
+
+# One thread per column. Per-column accumulation uses locals (`ninp`, `nout`,
+# `noutp`) written once into the output arrays — byte-identical to the original
+# += chain, and avoids the --check-bounds mis-lowering of repeated `out[c]+=`.
+@kernel function _nbal_col_kernel!(col_endnb, col_ninputs, col_noutputs,
+        col_ninputs_partial, col_noutputs_partial, col_errnb,
+        nb::_NBalColIn, @Const(mask_soil), @Const(is_fates_col),
+        has_fates::Bool, use_fun::Bool, use_crop::Bool, use_nitrif_denitrif::Bool,
+        dt, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_soil[c]
+        T = eltype(col_errnb)
+        totcoln = nb.totcoln; ndep_to_sminn = nb.ndep_to_sminn; nfix_to_sminn = nb.nfix_to_sminn
+        ffix_to_sminn = nb.ffix_to_sminn; fert_to_sminn = nb.fert_to_sminn
+        soyfixn_to_sminn = nb.soyfixn_to_sminn; supplement_to_sminn = nb.supplement_to_sminn
+        denit = nb.denit; sminn_leached = nb.sminn_leached; smin_no3_leached = nb.smin_no3_leached
+        smin_no3_runoff = nb.smin_no3_runoff; f_n2o_nit = nb.f_n2o_nit; som_n_leached = nb.som_n_leached
+        sminn_to_plant = nb.sminn_to_plant; fates_litter_flux = nb.fates_litter_flux
+        col_fire_nloss = nb.col_fire_nloss; wood_harvestn = nb.wood_harvestn
+        gru_conv_nflux = nb.gru_conv_nflux; gru_wood_productn_gain = nb.gru_wood_productn_gain
+        crop_harvestn_to_cropprodn = nb.crop_harvestn_to_cropprodn; col_begnb = nb.col_begnb
+
+        is_fates = has_fates && is_fates_col[c]
+        col_endnb[c] = totcoln[c]
+
+        ninp = ndep_to_sminn[c] + nfix_to_sminn[c] + supplement_to_sminn[c]
+        if is_fates
+            ninp += fates_litter_flux[c]
+        end
+        if use_fun
+            ninp += ffix_to_sminn[c]
+        end
+        if use_crop
+            ninp += fert_to_sminn[c] + soyfixn_to_sminn[c]
+        end
+        col_ninputs[c] = ninp
+        col_ninputs_partial[c] = ninp
+
+        nout = denit[c]
+        if !is_fates
+            nout += col_fire_nloss[c] + gru_conv_nflux[c]
+            nout += wood_harvestn[c] + gru_wood_productn_gain[c] + crop_harvestn_to_cropprodn[c]
+        else
+            nout += sminn_to_plant[c]
+        end
+        if !use_nitrif_denitrif
+            nout += sminn_leached[c]
+        else
+            nout += f_n2o_nit[c]
+            nout += smin_no3_leached[c] + smin_no3_runoff[c]
+        end
+        nout -= som_n_leached[c]
+        col_noutputs[c] = nout
+
+        noutp = nout
+        if !is_fates
+            noutp -= wood_harvestn[c] + crop_harvestn_to_cropprodn[c]
+        end
+        col_noutputs_partial[c] = noutp
+
+        col_errnb[c] = (ninp - nout) * T(dt) - (col_endnb[c] - col_begnb[c])
+    end
+end
+
+# One thread per gridcell (only launched when !use_fates_bgc).
+@kernel function _nbal_grc_kernel!(grc_endnb, grc_errnb,
+        @Const(grc_begnb), @Const(totgrcn), @Const(tot_woodprod_grc), @Const(cropprod1_grc),
+        @Const(grc_ninputs_partial), @Const(grc_noutputs_partial),
+        @Const(dwt_seedn_to_leaf_grc), @Const(dwt_seedn_to_deadstem_grc),
+        @Const(dwt_conv_nflux_grc), @Const(product_loss_grc), @Const(gru_wood_productn_gain_grc),
+        dt, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        T = eltype(grc_errnb)
+        grc_endnb[g] = totgrcn[g] + tot_woodprod_grc[g] + cropprod1_grc[g]
+        grc_ninputs = grc_ninputs_partial[g] +
+                      dwt_seedn_to_leaf_grc[g] + dwt_seedn_to_deadstem_grc[g]
+        grc_noutputs = grc_noutputs_partial[g] +
+                       dwt_conv_nflux_grc[g] + product_loss_grc[g] -
+                       gru_wood_productn_gain_grc[g]
+        grc_errnb[g] = (grc_ninputs - grc_noutputs) * T(dt) -
+                        (grc_endnb[g] - grc_begnb[g])
+    end
+end
+
 function n_balance_check!(
     bal::CNBalanceData,
     soilbgc_nflux::SoilBiogeochemNitrogenFluxData,
@@ -427,11 +617,11 @@ function n_balance_check!(
     n_products::CNProductsData,
     col_data::ColumnData,
     grc_data::GridcellData,
-    mask_soil::BitVector,
+    mask_soil::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int},
     dt::Real;
-    is_fates_col::Vector{Bool}=Bool[],
+    is_fates_col::AbstractVector{Bool}=Bool[],
     use_fates_bgc::Bool=false,
     use_nitrif_denitrif::Bool=true,
     use_crop::Bool=false,
@@ -475,80 +665,45 @@ function n_balance_check!(
     tot_woodprod_grc = n_products.tot_woodprod_grc
     product_loss_grc = n_products.product_loss_grc
 
-    # Column-level allocations
+    # Column-level scratch (device-resident via similar()).
     FT = eltype(bal.begnb_col)
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
-    col_ninputs         = zeros(FT, nc)
-    col_noutputs        = zeros(FT, nc)
-    col_errnb           = zeros(FT, nc)
-    col_ninputs_partial  = zeros(FT, nc)
-    col_noutputs_partial = zeros(FT, nc)
+    col_ninputs          = fill!(similar(bal.begnb_col, FT, nc), zero(FT))
+    col_noutputs         = fill!(similar(bal.begnb_col, FT, nc), zero(FT))
+    col_errnb            = fill!(similar(bal.begnb_col, FT, nc), zero(FT))
+    col_ninputs_partial  = fill!(similar(bal.begnb_col, FT, nc), zero(FT))
+    col_noutputs_partial = fill!(similar(bal.begnb_col, FT, nc), zero(FT))
+    has_fates = !isempty(is_fates_col)
 
+    nb_in = _NBalColIn(; totcoln, ndep_to_sminn, nfix_to_sminn, ffix_to_sminn,
+        fert_to_sminn, soyfixn_to_sminn, supplement_to_sminn, denit, sminn_leached,
+        smin_no3_leached, smin_no3_runoff, f_n2o_nit, som_n_leached, sminn_to_plant,
+        fates_litter_flux, col_fire_nloss, wood_harvestn, gru_conv_nflux,
+        gru_wood_productn_gain, crop_harvestn_to_cropprodn, col_begnb)
+
+    if !isempty(bounds_c)
+        backend = _kernel_backend(col_endnb)
+        _nbal_col_kernel!(backend)(col_endnb, col_ninputs, col_noutputs,
+            col_ninputs_partial, col_noutputs_partial, col_errnb,
+            nb_in, mask_soil, is_fates_col,
+            has_fates, use_fun, use_crop, use_nitrif_denitrif,
+            FT(dt), first(bounds_c), last(bounds_c); ndrange = length(col_endnb))
+        KA.synchronize(backend)
+    end
+
+    # Host-only warn/error scan (CPU path only; device just computes numbers).
     err_found = false
     err_index = 0
-
-    for c in bounds_c
-        mask_soil[c] || continue
-
-        # calculate total column-level nitrogen storage
-        col_endnb[c] = totcoln[c]
-
-        # calculate total column-level inputs
-        col_ninputs[c] = ndep_to_sminn[c] + nfix_to_sminn[c] + supplement_to_sminn[c]
-
-        if !isempty(is_fates_col) && is_fates_col[c]
-            col_ninputs[c] += fates_litter_flux[c]
-        end
-
-        if use_fun
-            col_ninputs[c] += ffix_to_sminn[c]
-        end
-
-        if use_crop
-            col_ninputs[c] += fert_to_sminn[c] + soyfixn_to_sminn[c]
-        end
-
-        col_ninputs_partial[c] = col_ninputs[c]
-
-        # calculate total column-level outputs
-        col_noutputs[c] = denit[c]
-
-        if isempty(is_fates_col) || !is_fates_col[c]
-            col_noutputs[c] += col_fire_nloss[c] + gru_conv_nflux[c]
-            col_noutputs[c] += wood_harvestn[c] +
-                               gru_wood_productn_gain[c] +
-                               crop_harvestn_to_cropprodn[c]
-        else
-            col_noutputs[c] += sminn_to_plant[c]
-        end
-
-        if !use_nitrif_denitrif
-            col_noutputs[c] += sminn_leached[c]
-        else
-            col_noutputs[c] += f_n2o_nit[c]
-            col_noutputs[c] += smin_no3_leached[c] + smin_no3_runoff[c]
-        end
-
-        col_noutputs[c] -= som_n_leached[c]
-
-        col_noutputs_partial[c] = col_noutputs[c]
-
-        if isempty(is_fates_col) || !is_fates_col[c]
-            col_noutputs_partial[c] -= wood_harvestn[c] +
-                                       crop_harvestn_to_cropprodn[c]
-        end
-
-        # calculate column-level nitrogen balance error
-        col_errnb[c] = (col_ninputs[c] - col_noutputs[c]) * dt -
-                        (col_endnb[c] - col_begnb[c])
-
-        if abs(col_errnb[c]) > bal.nerror
-            err_found = true
-            err_index = c
-        end
-
-        if abs(col_errnb[c]) > bal.nwarning
-            @warn "nbalance warning at c = $c" col_errnb=col_errnb[c] col_endnb=col_endnb[c] inputs_ffix=ffix_to_sminn[c]*dt inputs_nfix=nfix_to_sminn[c]*dt inputs_ndep=ndep_to_sminn[c]*dt outputs_lch=smin_no3_leached[c]*dt outputs_roff=smin_no3_runoff[c]*dt outputs_dnit=f_n2o_nit[c]*dt
+    if col_errnb isa Array
+        for c in bounds_c
+            mask_soil[c] || continue
+            if abs(col_errnb[c]) > bal.nerror
+                err_found = true
+                err_index = c
+            end
+            if abs(col_errnb[c]) > bal.nwarning
+                @warn "nbalance warning at c = $c" col_errnb=col_errnb[c] col_endnb=col_endnb[c] inputs_ffix=ffix_to_sminn[c]*dt inputs_nfix=nfix_to_sminn[c]*dt inputs_ndep=ndep_to_sminn[c]*dt outputs_lch=smin_no3_leached[c]*dt outputs_roff=smin_no3_runoff[c]*dt outputs_dnit=f_n2o_nit[c]*dt
+            end
         end
     end
 
@@ -581,39 +736,36 @@ function n_balance_check!(
         c2g_unity!(totgrcn, totcoln, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
         ng = length(grc_data.latdeg)
-        grc_ninputs_partial  = zeros(FT, ng)
-        grc_noutputs_partial = zeros(FT, ng)
+        grc_ninputs_partial  = fill!(similar(bal.begnb_grc, FT, ng), zero(FT))
+        grc_noutputs_partial = fill!(similar(bal.begnb_grc, FT, ng), zero(FT))
 
         c2g_unity!(grc_ninputs_partial, col_ninputs_partial,
                    col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
         c2g_unity!(grc_noutputs_partial, col_noutputs_partial,
                    col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
-        grc_errnb = zeros(FT, ng)
+        grc_errnb = fill!(similar(bal.begnb_grc, FT, ng), zero(FT))
+
+        if !isempty(bounds_g)
+            _launch!(_nbal_grc_kernel!, grc_endnb, grc_errnb,
+                grc_begnb, totgrcn, tot_woodprod_grc, cropprod1_grc,
+                grc_ninputs_partial, grc_noutputs_partial,
+                dwt_seedn_to_leaf_grc, dwt_seedn_to_deadstem_grc,
+                dwt_conv_nflux_grc, product_loss_grc, gru_wood_productn_gain_grc,
+                FT(dt), first(bounds_g), last(bounds_g); ndrange = length(grc_endnb))
+        end
+
         err_found = false
         err_index = 0
-
-        for g in bounds_g
-            grc_endnb[g] = totgrcn[g] + tot_woodprod_grc[g] + cropprod1_grc[g]
-
-            grc_ninputs = grc_ninputs_partial[g] +
-                          dwt_seedn_to_leaf_grc[g] +
-                          dwt_seedn_to_deadstem_grc[g]
-
-            grc_noutputs = grc_noutputs_partial[g] +
-                           dwt_conv_nflux_grc[g] +
-                           product_loss_grc[g] -
-                           gru_wood_productn_gain_grc[g]
-
-            grc_errnb[g] = (grc_ninputs - grc_noutputs) * dt -
-                            (grc_endnb[g] - grc_begnb[g])
-
-            if abs(grc_errnb[g]) > bal.nerror
-                err_found = true
-                err_index = g
-            end
-            if abs(grc_errnb[g]) > bal.nwarning
-                @warn "nbalance warning at g = $g" grc_errnb=grc_errnb[g] grc_endnb=grc_endnb[g]
+        if grc_errnb isa Array
+            for g in bounds_g
+                if abs(grc_errnb[g]) > bal.nerror
+                    err_found = true
+                    err_index = g
+                end
+                if abs(grc_errnb[g]) > bal.nwarning
+                    @warn "nbalance warning at g = $g" grc_errnb=grc_errnb[g] grc_endnb=grc_endnb[g]
+                end
             end
         end
 
