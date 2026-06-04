@@ -1385,8 +1385,13 @@ function cnfire_fluxes!(
     decomp_npools_vr = decomp_npools_vr_col
     somc_fire    = somc_fire_col
 
-    is_cwd     = decomp_cascade_con.is_cwd
-    is_litter  = decomp_cascade_con.is_litter
+    # is_litter/is_cwd live in a host BitVector struct; the decompfire kernel reads
+    # them per-(c,j,l), so move them onto the working backend (device Bool on GPU,
+    # plain Bool vector on CPU — both index identically to the original BitVector).
+    is_cwd     = copyto!(similar(decomp_cpools_vr, Bool, length(decomp_cascade_con.is_cwd)),
+                         collect(decomp_cascade_con.is_cwd))
+    is_litter  = copyto!(similar(decomp_cpools_vr, Bool, length(decomp_cascade_con.is_litter)),
+                         collect(decomp_cascade_con.is_litter))
 
     woody      = pftcon.woody
     cc_leaf    = pftcon.cc_leaf
@@ -1560,8 +1565,10 @@ function cnfire_fluxes!(
     fire_mortality_n_to_cwdn    = cnveg_nf.fire_mortality_n_to_cwdn_col
 
     # Build output active-fire masks
-    mask_actfirep = falses(length(mask_soilp))
-    mask_actfirec = falses(length(mask_soilc))
+    # backend-matched: BitVector on the CPU (mask_* is a BitVector -> similar gives
+    # BitVector, as the tests assert), a device Bool vector on the GPU.
+    mask_actfirep = fill!(similar(mask_soilp, Bool, length(mask_soilp)), false)
+    mask_actfirec = fill!(similar(mask_soilc, Bool, length(mask_soilc)), false)
 
     # ===================================================================
     # Patch loop — fire emissions and mortality fluxes (kernelized)
@@ -1666,7 +1673,8 @@ function cnfire_fluxes!(
         decomp_cpools_vr, decomp_npools_vr,
         is_litter, is_cwd,
         nlevdecomp, ndecomp_pools,
-        cmb_cmplt_fact_litter, cmb_cmplt_fact_cwd)
+        eltype(m_decomp_cpools_to_fire_vr)(cmb_cmplt_fact_litter),
+        eltype(m_decomp_cpools_to_fire_vr)(cmb_cmplt_fact_cwd))
 
     # ===================================================================
     # Carbon loss due to deforestation fires (per-column kernel; the
@@ -1678,7 +1686,7 @@ function cnfire_fluxes!(
             lfc, lfc2,
             mask_soilc, trotr1_col, trotr2_col, dtrotr_col,
             fbac1, farea_burned, baf_crop, baf_peatf,
-            is_newyear_start, dt, dayspyr, secspday)
+            is_newyear_start, eltype(lfc)(dt), eltype(lfc)(dayspyr), eltype(lfc)(secspday))
     end
 
     # ===================================================================
@@ -1686,7 +1694,7 @@ function cnfire_fluxes!(
     # ===================================================================
     fireb_peatfire_somc!(somc_fire, mask_soilc, col.gridcell, grc.latdeg,
                          totsomc, baf_peatf, first(bounds_c), last(bounds_c),
-                         cnfire_const.borealat)
+                         eltype(somc_fire)(cnfire_const.borealat))
 
     return (mask_actfirec, mask_actfirep)
 end
