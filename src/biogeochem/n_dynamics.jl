@@ -97,16 +97,19 @@ end
 # fully independent per column. units: gN/m2/s.
 @kernel function _ndyn_freelivfix_kernel!(ffix_to_sminn_col, @Const(mask), @Const(AnnET),
                                           freelivfix_slope, freelivfix_inter, secs_per_year)
+    T = eltype(ffix_to_sminn_col)
     c = @index(Global)
     @inbounds if mask[c]
         ffix_to_sminn_col[c] =
-            (freelivfix_slope * (max(0.0, AnnET[c]) * secs_per_year) + freelivfix_inter) / secs_per_year
+            (freelivfix_slope * (max(zero(T), AnnET[c]) * secs_per_year) + freelivfix_inter) / secs_per_year
     end
 end
 
 ndyn_freelivfix!(ffix_to_sminn_col, mask, AnnET, freelivfix_slope, freelivfix_inter, secs_per_year) =
     _launch!(_ndyn_freelivfix_kernel!, ffix_to_sminn_col, mask, AnnET,
-             freelivfix_slope, freelivfix_inter, secs_per_year)
+             eltype(ffix_to_sminn_col)(freelivfix_slope),
+             eltype(ffix_to_sminn_col)(freelivfix_inter),
+             eltype(ffix_to_sminn_col)(secs_per_year))
 
 """
     n_free_living_fixation!(nf, params; mask_soilc, bounds, AnnET, dayspyr)
@@ -146,44 +149,50 @@ end
 @kernel function _ndyn_fixation_lag_kernel!(nfix_to_sminn_col, @Const(mask),
                                             @Const(col_lag_npp), @Const(col_is_fates),
                                             secs_per_year, spval)
+    T = eltype(nfix_to_sminn_col)
     c = @index(Global)
     @inbounds if mask[c]
-        npp = col_is_fates[c] ? 0.0 : col_lag_npp[c]
+        npp = col_is_fates[c] ? zero(T) : col_lag_npp[c]
         if npp != spval
-            t = (1.8 * (1.0 - exp(-0.003 * npp * secs_per_year))) / secs_per_year
-            nfix_to_sminn_col[c] = max(0.0, t)
+            t = (T(1.8) * (one(T) - exp(T(-0.003) * npp * secs_per_year))) / secs_per_year
+            nfix_to_sminn_col[c] = max(zero(T), t)
         else
-            nfix_to_sminn_col[c] = 0.0
+            nfix_to_sminn_col[c] = zero(T)
         end
     end
 end
 
 ndyn_fixation_lag!(nfix_to_sminn_col, mask, col_lag_npp, col_is_fates, secs_per_year, spval) =
     _launch!(_ndyn_fixation_lag_kernel!, nfix_to_sminn_col, mask, col_lag_npp,
-             col_is_fates, secs_per_year, spval)
+             col_is_fates,
+             eltype(nfix_to_sminn_col)(secs_per_year),
+             eltype(nfix_to_sminn_col)(spval))
 
 # Per-column symbiotic N fixation using annual-mean NPP (masked, independent).
 @kernel function _ndyn_fixation_annsum_kernel!(nfix_to_sminn_col, @Const(mask),
                                                @Const(cannsum_npp), @Const(col_is_fates),
                                                secs_per_year)
+    T = eltype(nfix_to_sminn_col)
     c = @index(Global)
     @inbounds if mask[c]
-        npp = col_is_fates[c] ? 0.0 : cannsum_npp[c]
-        t = (1.8 * (1.0 - exp(-0.003 * npp))) / secs_per_year
-        nfix_to_sminn_col[c] = max(0.0, t)
+        npp = col_is_fates[c] ? zero(T) : cannsum_npp[c]
+        t = (T(1.8) * (one(T) - exp(T(-0.003) * npp))) / secs_per_year
+        nfix_to_sminn_col[c] = max(zero(T), t)
     end
 end
 
 ndyn_fixation_annsum!(nfix_to_sminn_col, mask, cannsum_npp, col_is_fates, secs_per_year) =
     _launch!(_ndyn_fixation_annsum_kernel!, nfix_to_sminn_col, mask, cannsum_npp,
-             col_is_fates, secs_per_year)
+             col_is_fates,
+             eltype(nfix_to_sminn_col)(secs_per_year))
 
 # Masked per-column zero (independent). Used to disable symbiotic fixation under
 # FUN and to zero column-level accumulators before p2c aggregation.
 @kernel function _ndyn_col_zero_kernel!(out, @Const(mask))
+    T = eltype(out)
     c = @index(Global)
     @inbounds if mask[c]
-        out[c] = 0.0
+        out[c] = zero(T)
     end
 end
 
@@ -309,16 +318,17 @@ end
                                             @Const(wf), @Const(sminn),
                                             ntmp_soybean::Int, nirrig_tmp_soybean::Int,
                                             ntrp_soybean::Int, nirrig_trp_soybean::Int)
+    T = eltype(soyfixn)
     p = @index(Global)
     @inbounds if mask_p[p]
         c = pcol[p]
 
-        sminnthreshold1   = 30.0
-        sminnthreshold2   = 10.0
-        GDDfracthreshold1 = 0.15
-        GDDfracthreshold2 = 0.30
-        GDDfracthreshold3 = 0.55
-        GDDfracthreshold4 = 0.75
+        sminnthreshold1   = T(30.0)
+        sminnthreshold2   = T(10.0)
+        GDDfracthreshold1 = T(0.15)
+        GDDfracthreshold2 = T(0.30)
+        GDDfracthreshold3 = T(0.55)
+        GDDfracthreshold4 = T(0.75)
 
         if croplive[p] &&
            (itype[p] == ntmp_soybean ||
@@ -326,47 +336,47 @@ end
             itype[p] == ntrp_soybean ||
             itype[p] == nirrig_trp_soybean)
 
-            if fpg[c] < 1.0
+            if fpg[c] < one(T)
                 soy_ndemand = plant_ndemand[p] - plant_ndemand[p] * fpg[c]
 
                 # Soil water factor
-                fxw = wf[c] / 0.85
+                fxw = wf[c] / T(0.85)
 
                 # Soil nitrogen factor
-                fxn = 0.0
+                fxn = zero(T)
                 if sminn[c] > sminnthreshold1
-                    fxn = 0.0
+                    fxn = zero(T)
                 elseif sminn[c] > sminnthreshold2 && sminn[c] <= sminnthreshold1
-                    fxn = 1.5 - 0.005 * (sminn[c] * 10.0)
+                    fxn = T(1.5) - T(0.005) * (sminn[c] * T(10.0))
                 elseif sminn[c] <= sminnthreshold2
-                    fxn = 1.0
+                    fxn = one(T)
                 end
 
                 # Growth stage factor
                 GDDfrac = hui[p] / gddmaturity[p]
-                fxg = 0.0
+                fxg = zero(T)
                 if GDDfrac <= GDDfracthreshold1
-                    fxg = 0.0
+                    fxg = zero(T)
                 elseif GDDfrac > GDDfracthreshold1 && GDDfrac <= GDDfracthreshold2
-                    fxg = 6.67 * GDDfrac - 1.0
+                    fxg = T(6.67) * GDDfrac - one(T)
                 elseif GDDfrac > GDDfracthreshold2 && GDDfrac <= GDDfracthreshold3
-                    fxg = 1.0
+                    fxg = one(T)
                 elseif GDDfrac > GDDfracthreshold3 && GDDfrac <= GDDfracthreshold4
-                    fxg = 3.75 - 5.0 * GDDfrac
+                    fxg = T(3.75) - T(5.0) * GDDfrac
                 else
-                    fxg = 0.0
+                    fxg = zero(T)
                 end
 
                 # Calculate the nitrogen fixed by the soybean
-                fxr = min(1.0, fxw, fxn) * fxg
-                fxr = max(0.0, fxr)
+                fxr = min(one(T), fxw, fxn) * fxg
+                fxr = max(zero(T), fxr)
                 s = fxr * soy_ndemand
                 soyfixn[p] = min(s, soy_ndemand)
             else
-                soyfixn[p] = 0.0
+                soyfixn[p] = zero(T)
             end
         else
-            soyfixn[p] = 0.0
+            soyfixn[p] = zero(T)
         end
     end
 end

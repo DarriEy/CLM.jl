@@ -99,96 +99,231 @@ Corresponds to `SoilBiogeochemNitrifDenitrif` in the Fortran source.
 # `for j; for c` nest. D_CON_G/D_CON_W table entries and physical consts
 # (GRAV/RPI/SECSPDAY/TFRZ) are resolved to scalars on the host; config gates
 # (use_lch4, no_frozen_nitrif_denitrif) are passed as Bool scalars.
+### Device-view + scalar-bundle structs.
+### Place these immediately above the @kernel definition in nitrif_denitrif.jl.
+
+# 20 per-(column,level) output matrices, one kernel arg.
+Base.@kwdef struct _NitrifOut{M}
+    diffus_col::M
+    r_psi_col::M
+    anaerobic_frac_col::M
+    k_nitr_t_vr_col::M
+    k_nitr_ph_vr_col::M
+    k_nitr_h2o_vr_col::M
+    k_nitr_vr_col::M
+    pot_f_nit_vr_col::M
+    soil_bulkdensity_col::M
+    smin_no3_massdens_vr_col::M
+    soil_co2_prod_col::M
+    fmax_denit_carbonsubstrate_vr_col::M
+    fmax_denit_nitrate_vr_col::M
+    f_denit_base_vr_col::M
+    pot_f_denit_vr_col::M
+    ratio_k1_col::M
+    ratio_no3_co2_col::M
+    wfps_vr_col::M
+    fr_WFPS_col::M
+    n2_n2o_ratio_denit_vr_col::M
+end
+Adapt.@adapt_structure _NitrifOut
+
+# 17 per-(column,level) @Const input matrices, one kernel arg.
+Base.@kwdef struct _NitrifIn{M}
+    watsat::M
+    watfc::M
+    bd::M
+    bsw::M
+    cellorg::M
+    soilpsi::M
+    h2osoi_vol::M
+    h2osoi_liq::M
+    t_soisno::M
+    o2_decomp_depth_unsat::M
+    conc_o2_unsat::M
+    col_dz::M
+    smin_nh4_vr_col::M
+    smin_no3_vr_col::M
+    t_scalar_col::M
+    w_scalar_col::M
+    phr_vr_col::M
+end
+Adapt.@adapt_structure _NitrifIn
+
+# All Float64 scalars + D_CON table entries + physical consts, at working precision T.
+# isbits -> safe to materialize on Metal. No Adapt needed (no array fields).
+Base.@kwdef struct _NitrifScalars{T}
+    surface_tension_water::T
+    rij_kro_a::T
+    rij_kro_alpha::T
+    rij_kro_beta::T
+    rij_kro_gamma::T
+    rij_kro_delta::T
+    k_nitr_max_perday::T
+    denit_resp_coef::T
+    denit_resp_exp::T
+    denit_nitrate_coef::T
+    denit_nitrate_exp::T
+    organic_max::T
+    om_frac_sf::T
+    rho_w::T
+    dcong_21::T
+    dcong_22::T
+    dconw_21::T
+    dconw_22::T
+    dconw_23::T
+    GRAV::T
+    RPI::T
+    SECSPDAY::T
+    TFRZ::T
+end
+
 @kernel function _nitrifdenit_kernel!(
-    diffus_col, r_psi_col, anaerobic_frac_col,
-    k_nitr_t_vr_col, k_nitr_ph_vr_col, k_nitr_h2o_vr_col, k_nitr_vr_col,
-    pot_f_nit_vr_col, soil_bulkdensity_col, smin_no3_massdens_vr_col,
-    soil_co2_prod_col, fmax_denit_carbonsubstrate_vr_col, fmax_denit_nitrate_vr_col,
-    f_denit_base_vr_col, pot_f_denit_vr_col, ratio_k1_col, ratio_no3_co2_col,
-    wfps_vr_col, fr_WFPS_col, n2_n2o_ratio_denit_vr_col,
-    @Const(mask_bgc_soilc),
-    @Const(watsat), @Const(watfc), @Const(bd), @Const(bsw), @Const(cellorg),
-    @Const(soilpsi), @Const(h2osoi_vol), @Const(h2osoi_liq), @Const(t_soisno),
-    @Const(o2_decomp_depth_unsat), @Const(conc_o2_unsat), @Const(col_dz),
-    @Const(smin_nh4_vr_col), @Const(smin_no3_vr_col),
-    @Const(t_scalar_col), @Const(w_scalar_col), @Const(phr_vr_col),
-    cmin::Int, cmax::Int,
-    nlevdecomp::Int, use_lch4::Bool, no_frozen_nitrif_denitrif::Bool,
-    surface_tension_water, rij_kro_a, rij_kro_alpha, rij_kro_beta, rij_kro_gamma,
-    rij_kro_delta, k_nitr_max_perday, denit_resp_coef, denit_resp_exp,
-    denit_nitrate_coef, denit_nitrate_exp, organic_max, om_frac_sf, rho_w,
-    dcong_21, dcong_22, dconw_21, dconw_22, dconw_23)
+    out::_NitrifOut, in::_NitrifIn, @Const(mask_bgc_soilc),
+    cmin::Int, cmax::Int, nlevdecomp::Int,
+    use_lch4::Bool, no_frozen_nitrif_denitrif::Bool,
+    p::_NitrifScalars)
 
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask_bgc_soilc[c]
+        # Working element type taken from an output array (matches Float64 on CPU,
+        # Float32 on Metal). Every numeric literal below is converted through T so
+        # no Float64 is materialized in the kernel.
+        T = eltype(out.diffus_col)
+
+        # Output array aliases (Fortran-named locals; body stays verbatim).
+        diffus_col                         = out.diffus_col
+        r_psi_col                          = out.r_psi_col
+        anaerobic_frac_col                 = out.anaerobic_frac_col
+        k_nitr_t_vr_col                    = out.k_nitr_t_vr_col
+        k_nitr_ph_vr_col                   = out.k_nitr_ph_vr_col
+        k_nitr_h2o_vr_col                  = out.k_nitr_h2o_vr_col
+        k_nitr_vr_col                      = out.k_nitr_vr_col
+        pot_f_nit_vr_col                   = out.pot_f_nit_vr_col
+        soil_bulkdensity_col               = out.soil_bulkdensity_col
+        smin_no3_massdens_vr_col           = out.smin_no3_massdens_vr_col
+        soil_co2_prod_col                  = out.soil_co2_prod_col
+        fmax_denit_carbonsubstrate_vr_col  = out.fmax_denit_carbonsubstrate_vr_col
+        fmax_denit_nitrate_vr_col          = out.fmax_denit_nitrate_vr_col
+        f_denit_base_vr_col                = out.f_denit_base_vr_col
+        pot_f_denit_vr_col                 = out.pot_f_denit_vr_col
+        ratio_k1_col                       = out.ratio_k1_col
+        ratio_no3_co2_col                  = out.ratio_no3_co2_col
+        wfps_vr_col                        = out.wfps_vr_col
+        fr_WFPS_col                        = out.fr_WFPS_col
+        n2_n2o_ratio_denit_vr_col          = out.n2_n2o_ratio_denit_vr_col
+
+        # Input array aliases.
+        watsat                = in.watsat
+        watfc                 = in.watfc
+        bd                    = in.bd
+        bsw                   = in.bsw
+        cellorg               = in.cellorg
+        soilpsi               = in.soilpsi
+        h2osoi_vol            = in.h2osoi_vol
+        h2osoi_liq            = in.h2osoi_liq
+        t_soisno              = in.t_soisno
+        o2_decomp_depth_unsat = in.o2_decomp_depth_unsat
+        conc_o2_unsat         = in.conc_o2_unsat
+        col_dz                = in.col_dz
+        smin_nh4_vr_col       = in.smin_nh4_vr_col
+        smin_no3_vr_col       = in.smin_no3_vr_col
+        t_scalar_col          = in.t_scalar_col
+        w_scalar_col          = in.w_scalar_col
+        phr_vr_col            = in.phr_vr_col
+
+        # Scalar aliases (already at precision T).
+        surface_tension_water = p.surface_tension_water
+        rij_kro_a             = p.rij_kro_a
+        rij_kro_alpha         = p.rij_kro_alpha
+        rij_kro_beta          = p.rij_kro_beta
+        rij_kro_gamma         = p.rij_kro_gamma
+        rij_kro_delta         = p.rij_kro_delta
+        k_nitr_max_perday     = p.k_nitr_max_perday
+        denit_resp_coef       = p.denit_resp_coef
+        denit_resp_exp        = p.denit_resp_exp
+        denit_nitrate_coef    = p.denit_nitrate_coef
+        denit_nitrate_exp     = p.denit_nitrate_exp
+        organic_max           = p.organic_max
+        om_frac_sf            = p.om_frac_sf
+        rho_w                 = p.rho_w
+        dcong_21              = p.dcong_21
+        dcong_22              = p.dcong_22
+        dconw_21              = p.dconw_21
+        dconw_22              = p.dconw_22
+        dconw_23              = p.dconw_23
+        GRAV                  = p.GRAV
+        RPI                   = p.RPI
+        SECSPDAY              = p.SECSPDAY
+        TFRZ                  = p.TFRZ
+
         for j in 1:nlevdecomp
 
             # pH set as placeholder (all soils same pH)
-            pH_c = 6.5
+            pH_c = T(6.5)
 
             # ---- Calculate soil anoxia state ----
 
             # Gas diffusivity of soil at field capacity
             fc_air_frac = watsat[c, j] - watfc[c, j]
-            fc_air_frac_as_frac_porosity = 1.0 - watfc[c, j] / watsat[c, j]
+            fc_air_frac_as_frac_porosity = one(T) - watfc[c, j] / watsat[c, j]
 
             if use_lch4
 
                 # Calculate organic matter fraction
-                if organic_max > 0.0
-                    om_frac = min(om_frac_sf * cellorg[c, j] / organic_max, 1.0)
+                if organic_max > zero(T)
+                    om_frac = min(om_frac_sf * cellorg[c, j] / organic_max, one(T))
                 else
-                    om_frac = 1.0
+                    om_frac = one(T)
                 end
 
                 # Diffusivity after Moldrup et al. (2003)
                 # Eq. 8 in Riley et al. (2011, Biogeosciences)
-                diffus_moldrup = fc_air_frac^2 * fc_air_frac_as_frac_porosity^(3.0 / bsw[c, j])
+                diffus_moldrup = fc_air_frac^2 * fc_air_frac_as_frac_porosity^(T(3) / bsw[c, j])
 
                 # Diffusivity after Millington & Quirk (1961)
                 # Eq. 9 in Riley et al. (2011, Biogeosciences)
-                diffus_millingtonquirk = fc_air_frac^(10.0 / 3.0) / watsat[c, j]^2
+                diffus_millingtonquirk = fc_air_frac^(T(10) / T(3)) / watsat[c, j]^2
 
                 # Blended unitless diffusivity
                 diffus_col[c, j] =
                     om_frac * diffus_millingtonquirk +
-                    (1.0 - om_frac) * diffus_moldrup
+                    (one(T) - om_frac) * diffus_moldrup
 
                 # Calculate anoxic fraction using Rijtema and Kroess model
                 # after Riley et al. (2000)
-                r_min_val = 2.0 * surface_tension_water / (rho_w * GRAV * abs(soilpsi[c, j]))
-                r_max = 2.0 * surface_tension_water / (rho_w * GRAV * 0.1)
+                r_min_val = T(2) * surface_tension_water / (rho_w * GRAV * abs(soilpsi[c, j]))
+                r_max = T(2) * surface_tension_water / (rho_w * GRAV * T(0.1))
                 r_psi_col[c, j] = sqrt(r_min_val * r_max)
 
                 ratio_diffusivity_water_gas =
-                    (dcong_21 + dcong_22 * t_soisno[c, j]) * 1.0e-4 /
-                    ((dconw_21 + dconw_22 * t_soisno[c, j] + dconw_23 * t_soisno[c, j]^2) * 1.0e-9)
+                    (dcong_21 + dcong_22 * t_soisno[c, j]) * T(1.0e-4) /
+                    ((dconw_21 + dconw_22 * t_soisno[c, j] + dconw_23 * t_soisno[c, j]^2) * T(1.0e-9))
 
-                if o2_decomp_depth_unsat[c, j] > 0.0
+                if o2_decomp_depth_unsat[c, j] > zero(T)
                     anaerobic_frac_col[c, j] = exp(-rij_kro_a *
                         r_psi_col[c, j]^(-rij_kro_alpha) *
                         o2_decomp_depth_unsat[c, j]^(-rij_kro_beta) *
                         conc_o2_unsat[c, j]^rij_kro_gamma *
                         (h2osoi_vol[c, j] + ratio_diffusivity_water_gas * watsat[c, j])^rij_kro_delta)
                 else
-                    anaerobic_frac_col[c, j] = 0.0
+                    anaerobic_frac_col[c, j] = zero(T)
                 end
 
             else
                 # NITRIF_DENITRIF requires Methane model to be active,
                 # otherwise diffusivity will be zeroed out here.
-                anaerobic_frac_col[c, j] = 0.0
-                diffus_col[c, j] = 0.0
+                anaerobic_frac_col[c, j] = zero(T)
+                diffus_col[c, j] = zero(T)
             end
 
             # ---- Nitrification ----
             # Follows CENTURY nitrification scheme (Parton et al., 2001, 1996)
 
             # Assume nitrification temp function equal to the HR scalar
-            k_nitr_t_vr_col[c, j] = min(t_scalar_col[c, j], 1.0)
+            k_nitr_t_vr_col[c, j] = min(t_scalar_col[c, j], one(T))
 
             # pH function from Parton et al. (2001, 1996)
-            k_nitr_ph_vr_col[c, j] = 0.56 + atan(RPI * 0.45 * (-5.0 + pH_c)) / RPI
+            k_nitr_ph_vr_col[c, j] = T(0.56) + atan(RPI * T(0.45) * (T(-5) + pH_c)) / RPI
 
             # Moisture function — same as limits heterotrophic respiration
             k_nitr_h2o_vr_col[c, j] = w_scalar_col[c, j]
@@ -198,14 +333,14 @@ Corresponds to `SoilBiogeochemNitrifDenitrif` in the Fortran source.
                 k_nitr_t_vr_col[c, j] * k_nitr_h2o_vr_col[c, j] * k_nitr_ph_vr_col[c, j]
 
             # Potential nitrification flux (first-order decay of ammonium)
-            pot_f_nit_vr_col[c, j] = max(smin_nh4_vr_col[c, j] * k_nitr_vr_col[c, j], 0.0)
+            pot_f_nit_vr_col[c, j] = max(smin_nh4_vr_col[c, j] * k_nitr_vr_col[c, j], zero(T))
 
             # Limit to oxic fraction of soils
-            pot_f_nit_vr_col[c, j] = pot_f_nit_vr_col[c, j] * (1.0 - anaerobic_frac_col[c, j])
+            pot_f_nit_vr_col[c, j] = pot_f_nit_vr_col[c, j] * (one(T) - anaerobic_frac_col[c, j])
 
             # Limit to non-frozen soil layers
             if t_soisno[c, j] <= TFRZ && no_frozen_nitrif_denitrif
-                pot_f_nit_vr_col[c, j] = 0.0
+                pot_f_nit_vr_col[c, j] = zero(T)
             end
 
             # ---- Denitrification ----
@@ -216,11 +351,11 @@ Corresponds to `SoilBiogeochemNitrifDenitrif` in the Fortran source.
             # need to convert from volumetric to mass-based units
             soil_bulkdensity_col[c, j] = bd[c, j] + h2osoi_liq[c, j] / col_dz[c, j]
 
-            g_per_m3__to__ug_per_gsoil = 1.0e3 / soil_bulkdensity_col[c, j]
+            g_per_m3__to__ug_per_gsoil = T(1.0e3) / soil_bulkdensity_col[c, j]
 
             g_per_m3_sec__to__ug_per_gsoil_day = g_per_m3__to__ug_per_gsoil * SECSPDAY
 
-            smin_no3_massdens_vr_col[c, j] = max(smin_no3_vr_col[c, j], 0.0) * g_per_m3__to__ug_per_gsoil
+            smin_no3_massdens_vr_col[c, j] = max(smin_no3_vr_col[c, j], zero(T)) * g_per_m3__to__ug_per_gsoil
 
             soil_co2_prod_col[c, j] = soil_hr_vr * g_per_m3_sec__to__ug_per_gsoil_day
 
@@ -236,11 +371,11 @@ Corresponds to `SoilBiogeochemNitrifDenitrif` in the Fortran source.
 
             # Limiting denitrification rate
             f_denit_base_vr_col[c, j] = max(min(fmax_denit_carbonsubstrate_vr_col[c, j],
-                                                  fmax_denit_nitrate_vr_col[c, j]), 0.0)
+                                                  fmax_denit_nitrate_vr_col[c, j]), zero(T))
 
             # Limit to non-frozen soil layers
             if t_soisno[c, j] <= TFRZ && no_frozen_nitrif_denitrif
-                f_denit_base_vr_col[c, j] = 0.0
+                f_denit_base_vr_col[c, j] = zero(T)
             end
 
             # Limit to anoxic fraction of soils
@@ -251,28 +386,28 @@ Corresponds to `SoilBiogeochemNitrifDenitrif` in the Fortran source.
 
             # Diffusivity constant (figure 6b)
             # Note: diffus_col is still the unitless relative diffusivity here
-            ratio_k1_col[c, j] = max(1.7, 38.4 - 350.0 * diffus_col[c, j])
+            ratio_k1_col[c, j] = max(T(1.7), T(38.4) - T(350) * diffus_col[c, j])
 
             # Convert diffusivity to m2/s using temperature-dependent free-air
             # diffusion rate (using O2 coefficients)
-            D0 = (dcong_21 + dcong_22 * t_soisno[c, j]) * 1.0e-4
+            D0 = (dcong_21 + dcong_22 * t_soisno[c, j]) * T(1.0e-4)
             diffus_col[c, j] = diffus_col[c, j] * D0
 
             # Ratio function (figure 7c)
-            if soil_co2_prod_col[c, j] > 1.0e-9
+            if soil_co2_prod_col[c, j] > T(1.0e-9)
                 ratio_no3_co2_col[c, j] = smin_no3_massdens_vr_col[c, j] / soil_co2_prod_col[c, j]
             else
                 # Function saturates at large NO3/CO2 ratios
-                ratio_no3_co2_col[c, j] = 100.0
+                ratio_no3_co2_col[c, j] = T(100)
             end
 
             # Total water limitation function (Del Grosso et al., 2000, figure 7a)
-            wfps_vr_col[c, j] = max(min(h2osoi_vol[c, j] / watsat[c, j], 1.0), 0.0) * 100.0
-            fr_WFPS_col[c, j] = max(0.1, 0.015 * wfps_vr_col[c, j] - 0.32)
+            wfps_vr_col[c, j] = max(min(h2osoi_vol[c, j] / watsat[c, j], one(T)), zero(T)) * T(100)
+            fr_WFPS_col[c, j] = max(T(0.1), T(0.015) * wfps_vr_col[c, j] - T(0.32))
 
             # Final N2:N2O ratio expression
-            n2_n2o_ratio_denit_vr_col[c, j] = max(0.16 * ratio_k1_col[c, j],
-                ratio_k1_col[c, j] * exp(-0.8 * ratio_no3_co2_col[c, j])) * fr_WFPS_col[c, j]
+            n2_n2o_ratio_denit_vr_col[c, j] = max(T(0.16) * ratio_k1_col[c, j],
+                ratio_k1_col[c, j] * exp(-T(0.8) * ratio_no3_co2_col[c, j])) * fr_WFPS_col[c, j]
         end
     end
 end
@@ -310,48 +445,95 @@ function nitrif_denitrif!(
 
     isempty(bounds) && return nothing
 
-    # Local parameter aliases
-    surface_tension_water = params.surface_tension_water
-    rij_kro_a             = params.rij_kro_a
-    rij_kro_alpha         = params.rij_kro_alpha
-    rij_kro_beta          = params.rij_kro_beta
-    rij_kro_gamma         = params.rij_kro_gamma
-    rij_kro_delta         = params.rij_kro_delta
-    k_nitr_max_perday     = params.k_nitr_max_perday
-    denit_resp_coef       = params.denitrif_respiration_coefficient
-    denit_resp_exp        = params.denitrif_respiration_exponent
-    denit_nitrate_coef    = params.denitrif_nitrateconc_coefficient
-    denit_nitrate_exp     = params.denitrif_nitrateconc_exponent
-    om_frac_sf            = params.om_frac_sf
+    # Working element type taken from an output array; all scalars are converted to
+    # it so no Float64 reaches a Float32-only backend (Metal). On Float64 this is
+    # byte-identical (T(x) === x).
+    T = eltype(nf.diffus_col)
 
     organic_max = cn_params.organic_max
-
     rho_w = 1.0e3  # density of water (kg/m3)
 
     # Resolve constant-table entries (O2 coefficients) to scalars on the host.
     dcong_21 = D_CON_G[2, 1]; dcong_22 = D_CON_G[2, 2]
     dconw_21 = D_CON_W[2, 1]; dconw_22 = D_CON_W[2, 2]; dconw_23 = D_CON_W[2, 3]
 
-    _launch!(_nitrifdenit_kernel!, nf.diffus_col,
-        nf.r_psi_col, nf.anaerobic_frac_col,
-        nf.k_nitr_t_vr_col, nf.k_nitr_ph_vr_col, nf.k_nitr_h2o_vr_col, nf.k_nitr_vr_col,
-        nf.pot_f_nit_vr_col, nf.soil_bulkdensity_col, nf.smin_no3_massdens_vr_col,
-        nf.soil_co2_prod_col, nf.fmax_denit_carbonsubstrate_vr_col, nf.fmax_denit_nitrate_vr_col,
-        nf.f_denit_base_vr_col, nf.pot_f_denit_vr_col, nf.ratio_k1_col, nf.ratio_no3_co2_col,
-        nf.wfps_vr_col, nf.fr_WFPS_col, nf.n2_n2o_ratio_denit_vr_col,
-        mask_bgc_soilc,
-        watsat, watfc, bd, bsw, cellorg,
-        soilpsi, h2osoi_vol, h2osoi_liq, t_soisno,
-        o2_decomp_depth_unsat, conc_o2_unsat, col_dz,
-        ns.smin_nh4_vr_col, ns.smin_no3_vr_col,
-        cf.t_scalar_col, cf.w_scalar_col, cf.phr_vr_col,
-        first(bounds), last(bounds),
-        nlevdecomp, use_lch4, no_frozen_nitrif_denitrif,
-        surface_tension_water, rij_kro_a, rij_kro_alpha, rij_kro_beta, rij_kro_gamma,
-        rij_kro_delta, k_nitr_max_perday, denit_resp_coef, denit_resp_exp,
-        denit_nitrate_coef, denit_nitrate_exp, organic_max, om_frac_sf, rho_w,
-        dcong_21, dcong_22, dconw_21, dconw_22, dconw_23;
+    # Group output / input col matrices into device-view structs (one kernel arg each).
+    out = _NitrifOut(;
+        diffus_col = nf.diffus_col,
+        r_psi_col = nf.r_psi_col,
+        anaerobic_frac_col = nf.anaerobic_frac_col,
+        k_nitr_t_vr_col = nf.k_nitr_t_vr_col,
+        k_nitr_ph_vr_col = nf.k_nitr_ph_vr_col,
+        k_nitr_h2o_vr_col = nf.k_nitr_h2o_vr_col,
+        k_nitr_vr_col = nf.k_nitr_vr_col,
+        pot_f_nit_vr_col = nf.pot_f_nit_vr_col,
+        soil_bulkdensity_col = nf.soil_bulkdensity_col,
+        smin_no3_massdens_vr_col = nf.smin_no3_massdens_vr_col,
+        soil_co2_prod_col = nf.soil_co2_prod_col,
+        fmax_denit_carbonsubstrate_vr_col = nf.fmax_denit_carbonsubstrate_vr_col,
+        fmax_denit_nitrate_vr_col = nf.fmax_denit_nitrate_vr_col,
+        f_denit_base_vr_col = nf.f_denit_base_vr_col,
+        pot_f_denit_vr_col = nf.pot_f_denit_vr_col,
+        ratio_k1_col = nf.ratio_k1_col,
+        ratio_no3_co2_col = nf.ratio_no3_co2_col,
+        wfps_vr_col = nf.wfps_vr_col,
+        fr_WFPS_col = nf.fr_WFPS_col,
+        n2_n2o_ratio_denit_vr_col = nf.n2_n2o_ratio_denit_vr_col)
+
+    in = _NitrifIn(;
+        watsat = watsat,
+        watfc = watfc,
+        bd = bd,
+        bsw = bsw,
+        cellorg = cellorg,
+        soilpsi = soilpsi,
+        h2osoi_vol = h2osoi_vol,
+        h2osoi_liq = h2osoi_liq,
+        t_soisno = t_soisno,
+        o2_decomp_depth_unsat = o2_decomp_depth_unsat,
+        conc_o2_unsat = conc_o2_unsat,
+        col_dz = col_dz,
+        smin_nh4_vr_col = ns.smin_nh4_vr_col,
+        smin_no3_vr_col = ns.smin_no3_vr_col,
+        t_scalar_col = cf.t_scalar_col,
+        w_scalar_col = cf.w_scalar_col,
+        phr_vr_col = cf.phr_vr_col)
+
+    # All Float64 scalars + table entries + physical consts, converted to T.
+    p = _NitrifScalars{T}(;
+        surface_tension_water = T(params.surface_tension_water),
+        rij_kro_a             = T(params.rij_kro_a),
+        rij_kro_alpha         = T(params.rij_kro_alpha),
+        rij_kro_beta          = T(params.rij_kro_beta),
+        rij_kro_gamma         = T(params.rij_kro_gamma),
+        rij_kro_delta         = T(params.rij_kro_delta),
+        k_nitr_max_perday     = T(params.k_nitr_max_perday),
+        denit_resp_coef       = T(params.denitrif_respiration_coefficient),
+        denit_resp_exp        = T(params.denitrif_respiration_exponent),
+        denit_nitrate_coef    = T(params.denitrif_nitrateconc_coefficient),
+        denit_nitrate_exp     = T(params.denitrif_nitrateconc_exponent),
+        organic_max           = T(organic_max),
+        om_frac_sf            = T(params.om_frac_sf),
+        rho_w                 = T(rho_w),
+        dcong_21              = T(dcong_21),
+        dcong_22              = T(dcong_22),
+        dconw_21              = T(dconw_21),
+        dconw_22              = T(dconw_22),
+        dconw_23              = T(dconw_23),
+        GRAV                  = T(GRAV),
+        RPI                   = T(RPI),
+        SECSPDAY              = T(SECSPDAY),
+        TFRZ                  = T(TFRZ))
+
+    # Struct-first kernel: manual backend launch + synchronize (the bundle args
+    # carry no backend, so take it from an output array's first field).
+    backend = _kernel_backend(out.diffus_col)
+    _nitrifdenit_kernel!(backend)(
+        out, in, mask_bgc_soilc,
+        first(bounds), last(bounds), nlevdecomp,
+        use_lch4, no_frozen_nitrif_denitrif, p;
         ndrange = last(bounds))
+    KA.synchronize(backend)
 
     return nothing
 end

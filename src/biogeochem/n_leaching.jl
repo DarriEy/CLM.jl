@@ -101,7 +101,7 @@ end
 nleach_surface_water!(surface_water, mask, h2osoi_liq, col_dz, zisoi,
                       depth_runoff_Nloss, nlevsoi::Int, cmin::Int, cmax::Int) =
     _launch!(_nleach_surface_water_kernel!, surface_water, mask, h2osoi_liq, col_dz, zisoi,
-             depth_runoff_Nloss, nlevsoi, cmin, cmax)
+             eltype(surface_water)(depth_runoff_Nloss), nlevsoi, cmin, cmax)
 
 # --- (C) drain_tot gather (per-column, masked) ---
 @kernel function _nleach_drain_tot_kernel!(drain_tot, @Const(mask), @Const(qflx_drain),
@@ -120,12 +120,13 @@ nleach_drain_tot!(drain_tot, mask, qflx_drain, cmin::Int, cmax::Int) =
                                      @Const(h2osoi_liq), @Const(sminn_vr_col),
                                      @Const(col_dz), @Const(tot_water), @Const(drain_tot),
                                      sf, dt, cmin::Int, cmax::Int)
+    T = eltype(sminn_leached_vr_col)
     c, j = @index(Global, NTuple)
     @inbounds if cmin <= c <= cmax && mask[c]
         # Calculate the dissolved mineral N concentration (gN/kg water)
         # assumes that 10% of mineral nitrogen is soluble
-        disn_conc = 0.0
-        if h2osoi_liq[c, j] > 0.0
+        disn_conc = zero(T)
+        if h2osoi_liq[c, j] > zero(T)
             disn_conc = (sf * sminn_vr_col[c, j] * col_dz[c, j]) / h2osoi_liq[c, j]
         end
 
@@ -139,14 +140,15 @@ nleach_drain_tot!(drain_tot, mask, qflx_drain, cmin::Int, cmax::Int) =
         sminn_leached_vr_col[c, j] = min(sminn_leached_vr_col[c, j], (sf * sminn_vr_col[c, j]) / dt)
 
         # Limit the flux to a positive value
-        sminn_leached_vr_col[c, j] = max(sminn_leached_vr_col[c, j], 0.0)
+        sminn_leached_vr_col[c, j] = max(sminn_leached_vr_col[c, j], zero(T))
     end
 end
 
 function nleach_off!(sminn_leached_vr_col, mask, h2osoi_liq, sminn_vr_col, col_dz,
                      tot_water, drain_tot, sf, dt, nlevdecomp::Int, cmin::Int, cmax::Int)
+    T = eltype(sminn_leached_vr_col)
     _launch!(_nleach_off_kernel!, sminn_leached_vr_col, mask, h2osoi_liq, sminn_vr_col,
-             col_dz, tot_water, drain_tot, sf, dt, cmin, cmax;
+             col_dz, tot_water, drain_tot, T(sf), T(dt), cmin, cmax;
              ndrange = (size(sminn_leached_vr_col, 1), nlevdecomp))
 end
 
@@ -157,11 +159,12 @@ end
                                     @Const(tot_water), @Const(surface_water),
                                     @Const(drain_tot), @Const(qflx_surf), @Const(zisoi),
                                     sf_no3, dt, depth_runoff_Nloss, cmin::Int, cmax::Int)
+    T = eltype(smin_no3_leached_vr_col)
     c, j = @index(Global, NTuple)
     @inbounds if cmin <= c <= cmax && mask[c]
         # Calculate the dissolved mineral N concentration (gN/kg water)
-        disn_conc = 0.0
-        if h2osoi_liq[c, j] > 0.0
+        disn_conc = zero(T)
+        if h2osoi_liq[c, j] > zero(T)
             disn_conc = (sf_no3 * smin_no3_vr_col[c, j] * col_dz[c, j]) / h2osoi_liq[c, j]
         end
 
@@ -173,7 +176,7 @@ end
         smin_no3_leached_vr_col[c, j] = min(smin_no3_leached_vr_col[c, j], smin_no3_vr_col[c, j] / dt)
 
         # Limit the leaching flux to a positive value
-        smin_no3_leached_vr_col[c, j] = max(smin_no3_leached_vr_col[c, j], 0.0)
+        smin_no3_leached_vr_col[c, j] = max(smin_no3_leached_vr_col[c, j], zero(T))
 
         # Calculate the N loss from surface runoff, assuming a shallow
         # mixing of surface waters into soil and removal based on runoff
@@ -186,7 +189,7 @@ end
                 h2osoi_liq[c, j] * ((depth_runoff_Nloss - zisoi[j]) /
                 col_dz[c, j]) / (surface_water[c] * (depth_runoff_Nloss - zisoi[j]))
         else
-            smin_no3_runoff_vr_col[c, j] = 0.0
+            smin_no3_runoff_vr_col[c, j] = zero(T)
         end
 
         # Ensure that runoff rate isn't larger than soil N pool
@@ -194,7 +197,7 @@ end
             smin_no3_vr_col[c, j] / dt - smin_no3_leached_vr_col[c, j])
 
         # Limit the flux to a positive value
-        smin_no3_runoff_vr_col[c, j] = max(smin_no3_runoff_vr_col[c, j], 0.0)
+        smin_no3_runoff_vr_col[c, j] = max(smin_no3_runoff_vr_col[c, j], zero(T))
 
         # Limit the flux based on current smin_no3 state
         # only let at most the assumed soluble fraction
@@ -202,7 +205,7 @@ end
         smin_no3_leached_vr_col[c, j] = min(smin_no3_leached_vr_col[c, j], (sf_no3 * smin_no3_vr_col[c, j]) / dt)
 
         # Limit the flux to a positive value
-        smin_no3_leached_vr_col[c, j] = max(smin_no3_leached_vr_col[c, j], 0.0)
+        smin_no3_leached_vr_col[c, j] = max(smin_no3_leached_vr_col[c, j], zero(T))
     end
 end
 
@@ -210,9 +213,10 @@ function nleach_on!(smin_no3_leached_vr_col, smin_no3_runoff_vr_col, mask, h2oso
                     smin_no3_vr_col, col_dz, tot_water, surface_water, drain_tot,
                     qflx_surf, zisoi, sf_no3, dt, depth_runoff_Nloss,
                     nlevdecomp::Int, cmin::Int, cmax::Int)
+    T = eltype(smin_no3_leached_vr_col)
     _launch!(_nleach_on_kernel!, smin_no3_leached_vr_col, smin_no3_runoff_vr_col, mask,
              h2osoi_liq, smin_no3_vr_col, col_dz, tot_water, surface_water, drain_tot,
-             qflx_surf, zisoi, sf_no3, dt, depth_runoff_Nloss, cmin, cmax;
+             qflx_surf, zisoi, T(sf_no3), T(dt), T(depth_runoff_Nloss), cmin, cmax;
              ndrange = (size(smin_no3_leached_vr_col, 1), nlevdecomp))
 end
 
