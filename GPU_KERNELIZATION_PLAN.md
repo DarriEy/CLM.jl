@@ -52,6 +52,8 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 
 ## Phase B — BGC / `use_cn` path (deferred biogeochemistry)
 
+> **WHOLE-DRIVER INTEGRATION ✅ (2026-06-04).** Beyond the per-module harnesses, the actual `cn_driver_no_leaching!` orchestrator (flux-zero glue → C/N state-update cascade → precision control → summarize) now runs **end-to-end on Metal at parity** over a synthetic CN+soil state — state structs flow module→module through one driver call on-device. `scripts/gpu_validate_bgc_pipeline_e2e.jl`: 12 state/flux fields ≤4.7e-8 (F32). Required: kernelizing the 4 `_zero_*flux!` glue helpers (masked per-col/patch field-zeroing; 3D field via `size()`-driven inner loops so empty fields skip), widening the driver's `BitVector`/`Vector{Int}` mask+metadata args to `AbstractVector`, and **a real latent bug the per-module harnesses MASKED: the C/N state-update kernels never FT-converted `dt`** — the unit harnesses passed Float32 `dt` so it never surfaced; the driver passes Float64 `dt` → "unsupported use of double value". Fixed at one point: `dt = eltype(cnveg_cs.cpool_patch)(dt)` at the top of `cn_driver_no_leaching!` (CPU no-op, Float32 on device). LESSON: per-module GPU parity ≠ chained-pipeline parity; the integration harness is the only thing that catches scalar-precision leaks at the module boundaries.
+
 **Scope: ~562 host loops across 42 files (~25.5k LOC).** Far larger than Phase A.
 **Module 1 of 7 (C/N state-update cascade, ~100 loops) is now COMPLETE** — every
 state-update fn runs whole-function on Metal at parity. Remaining ~460 loops across
