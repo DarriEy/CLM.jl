@@ -565,6 +565,23 @@ function d1plc(x::Real, ivt::Int, level::Int, plc_method::Int, params::PhotoPara
     end
 end
 
+# GPU-callable positional cores for the vulnerability curve — the WEIBULL branch
+# only (the always-valid device path; the host plc/d1plc keep the method dispatch +
+# error() for back-compat/tests). psi50_v/ck_v are the per-(ivt,level) curve params
+# the caller pulls from a threaded PsnPhsParams bundle. Byte-identical to plc/d1plc
+# on Float64 (T(2.0)===2.0); eltype-generic so Float32/Metal carries no Float64.
+@inline function _plc(x::Real, psi50_v::Real, ck_v::Real)
+    T = typeof(x)
+    val = T(2.0)^(-(x / psi50_v)^ck_v)
+    return val < T(0.005) ? zero(T) : val
+end
+
+@inline function _d1plc(x::Real, psi50_v::Real, ck_v::Real)
+    T = typeof(x)
+    return -ck_v * log(T(2.0)) * (T(2.0)^(-(x / psi50_v)^ck_v)) *
+           ((x / psi50_v)^ck_v) / x
+end
+
 # =====================================================================
 # ci_func! — evaluate f(ci) for the standard (non-PHS) method
 # =====================================================================
@@ -576,7 +593,10 @@ end
 # kernel/core bodies (ps.ac_patch, …) are unchanged — `ps` just becomes a PsnDV
 # on the device path (and the real mutable struct on the host/back-compat path,
 # since the cores take `ps` untyped). {Vb=Bool vec, V=float vec, M=float matrix}.
-Base.@kwdef struct PsnDV{Vb,V,M}
+# PHS fields get their OWN type params (M3 3D, M2 2D, Vp 1D): in the non-PHS AD path
+# these are bundled but NOT written, so they stay Float64 while the active V/M fields
+# become ForwardDiff.Dual — a single shared param can't unify (the canopy CfEn lesson).
+Base.@kwdef struct PsnDV{Vb,V,M,M3,M2,Vp}
     c3flag_patch::Vb
     qe_patch::V; bbb_patch::V; mbb_patch::V; kc_patch::V; ko_patch::V; cp_patch::V
     lnca_patch::V; gb_mol_patch::V; rh_leaf_patch::V; vpd_can_patch::V
@@ -589,6 +609,11 @@ Base.@kwdef struct PsnDV{Vb,V,M}
     gs_mol_patch::M; gs_mol_sun_patch::M; gs_mol_sha_patch::M
     lmrsun_z_patch::M; lmrsha_z_patch::M; psnsun_z_patch::M; psnsha_z_patch::M
     rssun_z_patch::M; rssha_z_patch::M; cisun_z_patch::M; cisha_z_patch::M
+    # --- PHS (plant-hydraulic-stress) fields ---
+    ac_phs_patch::M3; aj_phs_patch::M3; ap_phs_patch::M3; ag_phs_patch::M3
+    vcmax_z_phs_patch::M3; tpu_z_phs_patch::M3; kp_z_phs_patch::M3
+    an_sun_patch::M2; an_sha_patch::M2; gs_mol_sun_ln_patch::M2; gs_mol_sha_ln_patch::M2
+    luvcmax25top_patch::Vp; lujmax25top_patch::Vp; lutpu25top_patch::Vp
     stomatalcond_mtd::Int
 end
 Adapt.@adapt_structure PsnDV   # so KA adapts MtlArray fields -> MtlDeviceArray (bitstype) at launch
@@ -613,7 +638,39 @@ _psn_dv(ps) = PsnDV(; c3flag_patch = ps.c3flag_patch,
     lmrsha_z_patch = ps.lmrsha_z_patch, psnsun_z_patch = ps.psnsun_z_patch,
     psnsha_z_patch = ps.psnsha_z_patch, rssun_z_patch = ps.rssun_z_patch,
     rssha_z_patch = ps.rssha_z_patch, cisun_z_patch = ps.cisun_z_patch,
-    cisha_z_patch = ps.cisha_z_patch, stomatalcond_mtd = ps.stomatalcond_mtd)
+    cisha_z_patch = ps.cisha_z_patch,
+    ac_phs_patch = ps.ac_phs_patch, aj_phs_patch = ps.aj_phs_patch,
+    ap_phs_patch = ps.ap_phs_patch, ag_phs_patch = ps.ag_phs_patch,
+    vcmax_z_phs_patch = ps.vcmax_z_phs_patch, tpu_z_phs_patch = ps.tpu_z_phs_patch,
+    kp_z_phs_patch = ps.kp_z_phs_patch, an_sun_patch = ps.an_sun_patch,
+    an_sha_patch = ps.an_sha_patch, gs_mol_sun_ln_patch = ps.gs_mol_sun_ln_patch,
+    gs_mol_sha_ln_patch = ps.gs_mol_sha_ln_patch,
+    luvcmax25top_patch = ps.luvcmax25top_patch, lujmax25top_patch = ps.lujmax25top_patch,
+    lutpu25top_patch = ps.lutpu25top_patch,
+    stomatalcond_mtd = ps.stomatalcond_mtd)
+
+# Device-view bundle of the PHS vulnerability-curve / kinetics params. params_inst
+# is a MUTABLE global PhotoParamsData (non-bitstype) → can't pass by value to a
+# Metal kernel; this immutable @adapt_structure bundle of the needed param arrays
+# can. Built device-resident at the working precision by _psn_phs_params.
+Base.@kwdef struct PsnPhsParams{V,M,S}
+    krmax::V; theta_cj::V
+    kmax::M; psi50::M; ck::M
+    theta_ip::S
+end
+Adapt.@adapt_structure PsnPhsParams
+
+# Build a PsnPhsParams on the backend of `tmpl` (any state array) at its eltype,
+# copying the needed params_inst fields. `T.(a)` first so copyto! into a Float32
+# device array converts from the Float64 host params (copyto! across eltypes on a
+# GPU array otherwise errors). CPU: T=Float64, T.(a) is a plain copy.
+function _psn_phs_params(tmpl, params::PhotoParamsData=params_inst)
+    T = eltype(tmpl)
+    cpv(a) = copyto!(similar(tmpl, T, size(a)), T.(a))
+    return PsnPhsParams(; krmax = cpv(params.krmax), theta_cj = cpv(params.theta_cj),
+        kmax = cpv(params.kmax), psi50 = cpv(params.psi50), ck = cpv(params.ck),
+        theta_ip = T(params.theta_ip))
+end
 
 """
     ci_func!(ci, p, iv, forc_pbot_c, gb_mol, je, cair, oair, lmr_z, par_z,
