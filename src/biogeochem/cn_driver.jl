@@ -103,12 +103,12 @@ Ported from `CNDriverNoLeaching` in `CNDriverMod.F90`.
 function cn_driver_no_leaching!(
         config::CNDriverConfig;
         # Masks (replace Fortran filter arrays)
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
-        mask_pcropp::BitVector = falses(0),
-        mask_soilnopcropp::BitVector = falses(0),
-        mask_exposedvegp::BitVector = falses(0),
-        mask_noexposedvegp::BitVector = falses(0),
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
+        mask_pcropp::AbstractVector{Bool} = falses(0),
+        mask_soilnopcropp::AbstractVector{Bool} = falses(0),
+        mask_exposedvegp::AbstractVector{Bool} = falses(0),
+        mask_noexposedvegp::AbstractVector{Bool} = falses(0),
         # Bounds
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
@@ -124,13 +124,13 @@ function cn_driver_no_leaching!(
         npcropmin::Int = 17,
         nrepr::Int = 1,
         # Patch/column metadata (from PatchData, PftCon, CropData, etc.)
-        patch_column::Vector{Int},
-        ivt::Vector{Int},
-        woody::Vector{<:Real},
-        harvdate::Vector{Int},
-        col_is_fates::Vector{Bool},
-        cascade_donor_pool::Vector{Int},
-        cascade_receiver_pool::Vector{Int},
+        patch_column::AbstractVector{<:Integer},
+        ivt::AbstractVector{<:Integer},
+        woody::AbstractVector{<:Real},
+        harvdate::AbstractVector{<:Integer},
+        col_is_fates::AbstractVector{Bool},
+        cascade_donor_pool::AbstractVector{<:Integer},
+        cascade_receiver_pool::AbstractVector{<:Integer},
         # Time step
         dt::Real,
         # Carbon/nitrogen state and flux data structures
@@ -163,10 +163,15 @@ function cn_driver_no_leaching!(
         zsoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
         zisoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
         # Output: fire masks (populated by fire routines)
-        mask_actfirec::BitVector = falses(length(bounds_col)),
-        mask_actfirep::BitVector = falses(length(bounds_patch)))
+        mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
+        mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
 
     num_bgc_vegp = count(mask_bgc_vegp)
+
+    # Convert the timestep to the working precision of the state once, so every
+    # sub-module kernel receives an FT scalar (Metal rejects Float64 args). On the
+    # CPU eltype is Float64 so dt is unchanged (byte-identical).
+    dt = eltype(cnveg_cs.cpool_patch)(dt)
 
     # --------------------------------------------------
     # Zero the column-level C and N fluxes
@@ -690,21 +695,27 @@ end
 Zero soil biogeochem carbon flux fields over masked columns.
 Replaces `soilbiogeochem_carbonflux_inst%SetValues(...)` in the Fortran.
 """
-function _zero_soilbgc_cflux!(cf::SoilBiogeochemCarbonFluxData;
-                                mask::BitVector,
-                                bounds::UnitRange{Int})
-    for c in bounds
-        mask[c] || continue
-        if length(cf.decomp_cascade_hr_vr_col) > 0
-            cf.decomp_cascade_hr_vr_col[c, :, :] .= 0.0
-        end
-        if length(cf.decomp_cascade_ctransfer_vr_col) > 0
-            cf.decomp_cascade_ctransfer_vr_col[c, :, :] .= 0.0
-        end
-        if length(cf.phr_vr_col) > 0
-            cf.phr_vr_col[c, :] .= 0.0
-        end
+# One thread per column; inner loops over (layer, pool) dims taken from size() so
+# an unallocated (0-sized) field simply zeros nothing — matches the host length>0 guard.
+@kernel function _zero_soilbgc_cf_kernel!(hr_vr, ctransfer_vr, phr_vr, @Const(mask),
+        nj_hr::Int, nk_hr::Int, nj_ct::Int, nk_ct::Int, nj_phr::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        Th = eltype(hr_vr); Tc = eltype(ctransfer_vr); Tp = eltype(phr_vr)
+        for k in 1:nk_hr, j in 1:nj_hr; hr_vr[c, j, k] = zero(Th); end
+        for k in 1:nk_ct, j in 1:nj_ct; ctransfer_vr[c, j, k] = zero(Tc); end
+        for j in 1:nj_phr; phr_vr[c, j] = zero(Tp); end
     end
+end
+
+function _zero_soilbgc_cflux!(cf::SoilBiogeochemCarbonFluxData;
+                                mask::AbstractVector{Bool},
+                                bounds::UnitRange{Int})
+    isempty(bounds) && return nothing
+    hr = cf.decomp_cascade_hr_vr_col; ct = cf.decomp_cascade_ctransfer_vr_col; phr = cf.phr_vr_col
+    _launch!(_zero_soilbgc_cf_kernel!, hr, ct, phr, mask,
+        size(hr, 2), size(hr, 3), size(ct, 2), size(ct, 3), size(phr, 2),
+        first(bounds), last(bounds); ndrange = length(mask))
     return nothing
 end
 
@@ -714,16 +725,22 @@ end
 Zero CN veg carbon flux fields over masked patches and columns.
 Replaces `cnveg_carbonflux_inst%SetValues(...)` in the Fortran.
 """
-function _zero_cnveg_cflux!(cf::CNVegCarbonFluxData;
-                              mask::BitVector,
-                              bounds::UnitRange{Int},
-                              mask_col::BitVector,
-                              bounds_col::UnitRange{Int})
-    for p in bounds
-        mask[p] || continue
-        cf.psnsun_to_cpool_patch[p] = 0.0
-        cf.psnshade_to_cpool_patch[p] = 0.0
+@kernel function _zero_cnveg_cf_kernel!(psnsun, psnshade, @Const(mask), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        T = eltype(psnsun)
+        psnsun[p] = zero(T); psnshade[p] = zero(T)
     end
+end
+
+function _zero_cnveg_cflux!(cf::CNVegCarbonFluxData;
+                              mask::AbstractVector{Bool},
+                              bounds::UnitRange{Int},
+                              mask_col::AbstractVector{Bool},
+                              bounds_col::UnitRange{Int})
+    isempty(bounds) && return nothing
+    _launch!(_zero_cnveg_cf_kernel!, cf.psnsun_to_cpool_patch, cf.psnshade_to_cpool_patch,
+        mask, first(bounds), last(bounds); ndrange = length(mask))
     return nothing
 end
 
@@ -733,15 +750,21 @@ end
 Zero CN veg nitrogen flux fields over masked patches and columns.
 Replaces `cnveg_nitrogenflux_inst%SetValues(...)` in the Fortran.
 """
-function _zero_cnveg_nflux!(nf::CNVegNitrogenFluxData;
-                              mask::BitVector,
-                              bounds::UnitRange{Int},
-                              mask_col::BitVector,
-                              bounds_col::UnitRange{Int})
-    for p in bounds
-        mask[p] || continue
-        nf.plant_ndemand_patch[p] = 0.0
+@kernel function _zero_cnveg_nf_kernel!(plant_ndemand, @Const(mask), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        plant_ndemand[p] = zero(eltype(plant_ndemand))
     end
+end
+
+function _zero_cnveg_nflux!(nf::CNVegNitrogenFluxData;
+                              mask::AbstractVector{Bool},
+                              bounds::UnitRange{Int},
+                              mask_col::AbstractVector{Bool},
+                              bounds_col::UnitRange{Int})
+    isempty(bounds) && return nothing
+    _launch!(_zero_cnveg_nf_kernel!, nf.plant_ndemand_patch, mask,
+        first(bounds), last(bounds); ndrange = length(mask))
     return nothing
 end
 
@@ -751,16 +774,22 @@ end
 Zero soil biogeochem nitrogen flux fields over masked columns.
 Replaces `soilbiogeochem_nitrogenflux_inst%SetValues(...)` in the Fortran.
 """
-function _zero_soilbgc_nflux!(nf::SoilBiogeochemNitrogenFluxData;
-                                mask::BitVector,
-                                bounds::UnitRange{Int})
-    for c in bounds
-        mask[c] || continue
-        nf.ndep_to_sminn_col[c] = 0.0
-        nf.nfix_to_sminn_col[c] = 0.0
-        nf.fert_to_sminn_col[c] = 0.0
-        nf.soyfixn_to_sminn_col[c] = 0.0
-        nf.ffix_to_sminn_col[c] = 0.0
+@kernel function _zero_soilbgc_nf_kernel!(ndep, nfix, fert, soyfixn, ffix, @Const(mask),
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        T = eltype(ndep)
+        ndep[c] = zero(T); nfix[c] = zero(T); fert[c] = zero(T)
+        soyfixn[c] = zero(T); ffix[c] = zero(T)
     end
+end
+
+function _zero_soilbgc_nflux!(nf::SoilBiogeochemNitrogenFluxData;
+                                mask::AbstractVector{Bool},
+                                bounds::UnitRange{Int})
+    isempty(bounds) && return nothing
+    _launch!(_zero_soilbgc_nf_kernel!, nf.ndep_to_sminn_col, nf.nfix_to_sminn_col,
+        nf.fert_to_sminn_col, nf.soyfixn_to_sminn_col, nf.ffix_to_sminn_col, mask,
+        first(bounds), last(bounds); ndrange = length(mask))
     return nothing
 end
