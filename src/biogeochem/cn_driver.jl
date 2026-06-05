@@ -231,7 +231,12 @@ function cn_driver_no_leaching!(
             days_per_year=365.0,
             dt=dt,
             zsoi_vals=zsoi_vals,
-            col_dz=(col !== nothing ? @view(col.dz[:, (varpar.nlevsno+1):end]) : Matrix{Float64}(undef, 0, 0)))
+            # Materialize the soil-layer slice as a CONTIGUOUS array (not a @view)
+            # so it is a valid device kernel arg; the empty fallback is device-resident
+            # (similar()) rather than a host Matrix{Float64} (the single-level decomp
+            # path, nlevdecomp==1, indexes col_dz on the device).
+            col_dz=(col !== nothing ? col.dz[:, (varpar.nlevsno+1):end] :
+                    similar(soilbgc_cs.decomp_cpools_vr_col, _FT, length(bounds_col), 0)))
 
         # 2. Potential decomposition and mineral N flux
         soil_bgc_potential!(soilbgc_cf, soilbgc_cs, soilbgc_nf, soilbgc_ns,
