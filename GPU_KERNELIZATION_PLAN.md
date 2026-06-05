@@ -52,7 +52,7 @@ Ordered by value × reuse-of-existing-patterns (do top-down):
 
 ## Phase B — BGC / `use_cn` path (deferred biogeochemistry)
 
-> **WHOLE-DRIVER INTEGRATION ✅ (2026-06-04).** Beyond the per-module harnesses, the actual `cn_driver_no_leaching!` orchestrator (flux-zero glue → C/N state-update cascade → precision control → summarize) now runs **end-to-end on Metal at parity** over a synthetic CN+soil state — state structs flow module→module through one driver call on-device. `scripts/gpu_validate_bgc_pipeline_e2e.jl`: 12 state/flux fields ≤4.7e-8 (F32). Required: kernelizing the 4 `_zero_*flux!` glue helpers (masked per-col/patch field-zeroing; 3D field via `size()`-driven inner loops so empty fields skip), widening the driver's `BitVector`/`Vector{Int}` mask+metadata args to `AbstractVector`, and **a real latent bug the per-module harnesses MASKED: the C/N state-update kernels never FT-converted `dt`** — the unit harnesses passed Float32 `dt` so it never surfaced; the driver passes Float64 `dt` → "unsupported use of double value". Fixed at one point: `dt = eltype(cnveg_cs.cpool_patch)(dt)` at the top of `cn_driver_no_leaching!` (CPU no-op, Float32 on device). LESSON: per-module GPU parity ≠ chained-pipeline parity; the integration harness is the only thing that catches scalar-precision leaks at the module boundaries.
+> **WHOLE-DRIVER INTEGRATION ✅ (2026-06-04/05).** Beyond the per-module harnesses, the actual `cn_driver_no_leaching!` orchestrator runs **end-to-end on Metal at parity** over a synthetic CN+soil state — state structs flow module→module through one driver call on-device. TWO harnesses: `gpu_validate_bgc_pipeline_e2e.jl` (DEFAULT path: flux-zero glue → C/N state-update cascade → precision → summarize; 12 fields ≤4.7e-8) and `gpu_validate_bgc_pipeline_decomp_e2e.jl` (**FULL-DECOMP** `_has_decomp=true`: decomp_rate_constants_bgc! → soil_bgc_potential! → soil_biogeochem_decomp! → cascade; 11 fields ≤3e-8, most at machine precision). Required: kernelizing the 4 `_zero_*flux!` glue helpers (masked field-zeroing; 3D field uses `size()`-driven inner loops so empty fields skip); making the driver's decomp working-scratch (cn_decomp_pools/p_decomp_* — were host `zeros(...)`) device-resident + FT via `similar(soilbgc_cs.decomp_cpools_vr_col, _FT, …)`; widening the driver's `BitVector`/`Vector{Int}` masks+metadata AND the `soilpsi::Matrix`/`zsoi/dzsoi::Vector` decomp kwargs to `AbstractMatrix`/`AbstractVector`. **Latent bug the per-module harnesses MASKED: the C/N state-update kernels never FT-converted `dt`** (unit harnesses passed Float32 dt; driver passes Float64 → "unsupported use of double value"). One-point fix: `dt = eltype(cnveg_cs.cpool_patch)(dt)` at the top of the driver. KNOWN EDGE: the `nlevdecomp==1` single-level decomp path needs `col_dz` which the driver builds from a `ColumnData` via `@view` / a host `Matrix{Float64}(undef,0,0)` fallback — not device-clean; the decomp harness uses `nlevdecomp=5` (multi-level, no col_dz). LESSON: per-module GPU parity ≠ chained-pipeline parity; the integration harness is the only thing that catches scalar-precision leaks + host glue/scratch at the module boundaries.
 
 **Scope: ~562 host loops across 42 files (~25.5k LOC).** Far larger than Phase A.
 **Module 1 of 7 (C/N state-update cascade, ~100 loops) is now COMPLETE** — every
@@ -84,8 +84,31 @@ decomposition / methane / phenology / fire / N-cycling / tail. Sub-order by modu
   Enzyme support → hangs compiling the adjoint). Needs **CUDA/AMD hardware**.
 - Also blocked on CPU full-driver by a Julia-1.12 codegen bug ("instruction does
   not dominate all uses") → revisit on a Julia LTS with the fix.
-- **This session: write unvalidated scaffolding** (`scripts/gpu_ad_reverse_validate.jl`)
-  ready to run when a CUDA box + fixed Julia are available. Cannot be validated here.
+
+**✅ CPU-VALIDATABLE BRING-UP DONE (2026-06-05).** Rather than write blind CUDA
+scaffolding, `scripts/gpu_ad_reverse_validate.jl` is now a CPU-FIRST harness that
+RUNS HERE: it proves Enzyme reverse-mode differentiates cleanly THROUGH the KA-CPU
+kernel launch for the four representative kernel shapes the driver is built from —
+validated by cross-AD (reverse gradient == ForwardDiff gradient); the device-parity
+leg (device-reverse vs cpu-reverse) auto-adds only when CUDA is functional. All 4
+PASS on CPU:
+  1. elementwise per-column kernel        `compute_forc_q!`        cross ~1.7e-21
+  2. loop-carried batched Thomas solve    `tridiagonal_multi!`     cross ~2.2e-16
+  3. atomic patch→column scatter          `_scatter_add!`          cross 0.0
+  4. grouped device-view struct kernel    (`_ProbeStruct{Vx,Vy}`)  cross 0.0
+LESSONS (cost real debugging): (a) scalar-RETURNING differentiated fns hit Enzyme's
+"Duplicated Returns not yet handled" → use the IN-PLACE form (Duplicated output seeded
+=1, read input shadow as the vjp). (b) grouped device-view structs bundle ACTIVE
+(state) + CONST (param/index) arrays → Enzyme static activity rejects it ("Constant
+memory is stored to a differentiable variable") → run under
+`Enzyme.set_runtime_activity(Reverse)` (harness uses it for all probes; harmless when
+unneeded). (c) a struct field that may be Dual (AD) OR Float64 (param) needs its OWN
+type param — a single `{V}` can't unify (also bites the ForwardDiff cross-check). (d)
+`_scatter_add!`'s `Atomix.@atomic` path reverse-differentiates correctly on CPU — no
+special handling. Harness stays standalone (like the other `gpu_validate_*.jl`), NOT in
+runtests. NEXT (CUDA box + Julia LTS): the device-reverse parity leg runs automatically;
+then graduate probe 4 to a REAL grouped-struct kernel (e.g. soil-temp set_rhs/set_matrix)
+and chain toward the full-driver reverse pass once the 1.12 codegen bug is gone.
 
 ---
 
