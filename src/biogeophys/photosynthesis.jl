@@ -1486,6 +1486,413 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
 end
 
 # =====================================================================
+# PHS (plant-hydraulic-stress) kernelized passes 1/2/4. These mirror the
+# single-phase Pass 1/2/4 kernels above, but the PHS path computes BOTH the
+# sunlit AND shaded phase in a single body (writing the 3D ps.*_phs fields and
+# the per-phase scratch). Pass 3 (the calcstress!/hybrid_PHS! Ci solve) stays a
+# host loop, so the 6 psn_w*_z_{sun,sha} + bsun/bsha scratch arrays it writes are
+# passed into the Pass 4 kernel as plain args (device-resident when Pass 3 is
+# kernelized later). All Float64 literals → T(·); module globals → T(GLOBAL).
+# =====================================================================
+
+# PHS Pass 4: canopy integration (sun + sha) → per-patch psn/rs/lmr + btran blend.
+# Internal iv loop runs serially per thread (per-patch reduction, no race).
+@kernel function _psn_phs_pass4_kernel!(ps, @Const(mask_patch), @Const(nrad),
+        @Const(ivt), @Const(crop_pft), @Const(lai_z_sun_in), @Const(lai_z_sha_in),
+        @Const(rb), btran,
+        @Const(psn_wc_z_sun), @Const(psn_wj_z_sun), @Const(psn_wp_z_sun),
+        @Const(psn_wc_z_sha), @Const(psn_wj_z_sha), @Const(psn_wp_z_sha),
+        @Const(bsun_arr), @Const(bsha_arr), modifyphoto_and_lmr_forcrop::Bool)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(rb)
+        ivt_p = ivt[p]
+        is_crop = crop_pft[ivt_p] > T(0.5)  # round(Int,·)==0 ⟺ <0.5 (0/1 valued)
+
+        psn_z_sun  = ps.psnsun_z_patch; psn_z_sha  = ps.psnsha_z_patch
+        lmr_z_sun  = ps.lmrsun_z_patch; lmr_z_sha  = ps.lmrsha_z_patch
+        rs_z_sun   = ps.rssun_z_patch;  rs_z_sha   = ps.rssha_z_patch
+
+        # Sunlit canopy
+        psncan_sun = zero(T); psncan_wc_sun = zero(T); psncan_wj_sun = zero(T)
+        psncan_wp_sun = zero(T); lmrcan_sun = zero(T); gscan_sun = zero(T)
+        laican_sun = zero(T)
+        for iv in 1:nrad[p]
+            psncan_sun    += psn_z_sun[p, iv]    * lai_z_sun_in[p, iv]
+            psncan_wc_sun += psn_wc_z_sun[p, iv] * lai_z_sun_in[p, iv]
+            psncan_wj_sun += psn_wj_z_sun[p, iv] * lai_z_sun_in[p, iv]
+            psncan_wp_sun += psn_wp_z_sun[p, iv] * lai_z_sun_in[p, iv]
+            if !is_crop && modifyphoto_and_lmr_forcrop
+                lmrcan_sun += lmr_z_sun[p, iv] * lai_z_sun_in[p, iv] * bsun_arr[p]
+            else
+                lmrcan_sun += lmr_z_sun[p, iv] * lai_z_sun_in[p, iv]
+            end
+            gscan_sun  += lai_z_sun_in[p, iv] / max(rb[p] + rs_z_sun[p, iv], T(1.0e-6))
+            laican_sun += lai_z_sun_in[p, iv]
+        end
+        if laican_sun > zero(T)
+            ps.psnsun_patch[p]    = psncan_sun / laican_sun
+            ps.psnsun_wc_patch[p] = psncan_wc_sun / laican_sun
+            ps.psnsun_wj_patch[p] = psncan_wj_sun / laican_sun
+            ps.psnsun_wp_patch[p] = psncan_wp_sun / laican_sun
+            ps.lmrsun_patch[p]    = lmrcan_sun / laican_sun
+            ps.rssun_patch[p]     = max(laican_sun / gscan_sun - rb[p], zero(T))
+        else
+            ps.psnsun_patch[p] = zero(T); ps.psnsun_wc_patch[p] = zero(T)
+            ps.psnsun_wj_patch[p] = zero(T); ps.psnsun_wp_patch[p] = zero(T)
+            ps.lmrsun_patch[p] = zero(T); ps.rssun_patch[p] = zero(T)
+        end
+
+        # Shaded canopy
+        psncan_sha = zero(T); psncan_wc_sha = zero(T); psncan_wj_sha = zero(T)
+        psncan_wp_sha = zero(T); lmrcan_sha = zero(T); gscan_sha = zero(T)
+        laican_sha = zero(T)
+        for iv in 1:nrad[p]
+            psncan_sha    += psn_z_sha[p, iv]    * lai_z_sha_in[p, iv]
+            psncan_wc_sha += psn_wc_z_sha[p, iv] * lai_z_sha_in[p, iv]
+            psncan_wj_sha += psn_wj_z_sha[p, iv] * lai_z_sha_in[p, iv]
+            psncan_wp_sha += psn_wp_z_sha[p, iv] * lai_z_sha_in[p, iv]
+            if !is_crop && modifyphoto_and_lmr_forcrop
+                lmrcan_sha += lmr_z_sha[p, iv] * lai_z_sha_in[p, iv] * bsha_arr[p]
+            else
+                lmrcan_sha += lmr_z_sha[p, iv] * lai_z_sha_in[p, iv]
+            end
+            gscan_sha  += lai_z_sha_in[p, iv] / max(rb[p] + rs_z_sha[p, iv], T(1.0e-6))
+            laican_sha += lai_z_sha_in[p, iv]
+        end
+        if laican_sha > zero(T)
+            ps.psnsha_patch[p]    = psncan_sha / laican_sha
+            ps.psnsha_wc_patch[p] = psncan_wc_sha / laican_sha
+            ps.psnsha_wj_patch[p] = psncan_wj_sha / laican_sha
+            ps.psnsha_wp_patch[p] = psncan_wp_sha / laican_sha
+            ps.lmrsha_patch[p]    = lmrcan_sha / laican_sha
+            ps.rssha_patch[p]     = max(laican_sha / gscan_sha - rb[p], zero(T))
+        else
+            ps.psnsha_patch[p] = zero(T); ps.psnsha_wc_patch[p] = zero(T)
+            ps.psnsha_wj_patch[p] = zero(T); ps.psnsha_wp_patch[p] = zero(T)
+            ps.lmrsha_patch[p] = zero(T); ps.rssha_patch[p] = zero(T)
+        end
+
+        # btran from LAI-weighted bsun/bsha (btran is mutated in place)
+        if laican_sha + laican_sun > zero(T)
+            btran[p] = bsun_arr[p] * (laican_sun / (laican_sun + laican_sha)) +
+                       bsha_arr[p] * (laican_sha / (laican_sun + laican_sha))
+        else
+            btran[p] = bsun_arr[p]
+        end
+    end
+end
+
+function psn_phs_pass4_update!(ps, mask_patch, nrad, ivt, crop_pft,
+        lai_z_sun_in, lai_z_sha_in, rb, btran,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop::Bool, bounds_patch)
+    dv = _psn_dv(ps)
+    be = _kernel_backend(rb)
+    _psn_phs_pass4_kernel!(be)(dv, mask_patch, nrad, ivt, crop_pft,
+        lai_z_sun_in, lai_z_sha_in, rb, btran,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop;
+        ndrange = length(bounds_patch))
+    KA.synchronize(be)
+    return nothing
+end
+
+# PHS Pass 1: root-soil conductance k_soil_root (per-patch, internal serial j loop
+# over soil levels). Vulnerability curve via _plc(smp, psi50, ck) from the threaded
+# phs_params bundle (no error()/dispatch); krmax from phs_params too.
+@kernel function _psn_phs_pass1_kernel!(@Const(mask_patch), @Const(col_of_patch),
+        @Const(ivt), phs_params, @Const(froot_carbon), @Const(rootfr), @Const(dz),
+        @Const(tsai), @Const(tlai), @Const(froot_leaf_pft), @Const(root_radius_pft),
+        @Const(root_density_pft), @Const(hksat), @Const(hk_l), @Const(smp_l),
+        @Const(z_col), k_soil_root, root_conductance_out, soil_conductance_out,
+        c_to_b, croot_lateral_length, nlevsoi::Int, root_seg::Int)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(smp_l)
+        c = col_of_patch[p]
+        ivt_p = ivt[p]
+        for j in 1:nlevsoi
+            root_biomass_density = c_to_b * froot_carbon[p] * rootfr[p, j] / dz[c, j]
+            root_biomass_density = max(c_to_b * one(T), root_biomass_density)
+
+            root_cross_sec_area = T(RPI) * root_radius_pft[ivt_p]^2
+            root_length_density = root_biomass_density / (root_density_pft[ivt_p] * root_cross_sec_area)
+
+            rai_j = (tsai[p] + tlai[p]) * froot_leaf_pft[ivt_p] * rootfr[p, j]
+
+            croot_average_length = croot_lateral_length
+            r_soil = sqrt(one(T) / (T(RPI) * root_length_density))
+            soil_cond = min(hksat[c, j], hk_l[c, j]) / (T(1.0e3) * r_soil)
+
+            fs_j = _plc(smp_l[c, j], phs_params.psi50[ivt_p, root_seg],
+                        phs_params.ck[ivt_p, root_seg])
+            root_cond = (fs_j * rai_j * phs_params.krmax[ivt_p]) /
+                        (croot_average_length + z_col[c, j])
+
+            soil_cond = smooth_max(soil_cond, T(1.0e-16))
+            root_cond = smooth_max(root_cond, T(1.0e-16))
+
+            root_conductance_out[p, j] = root_cond
+            soil_conductance_out[p, j] = soil_cond
+
+            rs_resis = one(T) / soil_cond + one(T) / root_cond
+
+            if rai_j * rootfr[p, j] > zero(T) && j > 1
+                k_soil_root[p, j] = one(T) / rs_resis
+            else
+                k_soil_root[p, j] = zero(T)
+            end
+        end
+    end
+end
+
+function psn_phs_pass1_update!(ps, mask_patch, col_of_patch, ivt, froot_carbon,
+        rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft, root_density_pft,
+        hksat, hk_l, smp_l, z_col, k_soil_root, root_conductance_out,
+        soil_conductance_out, c_to_b, croot_lateral_length, nlevsoi::Int, bounds_patch)
+    T = eltype(smp_l)
+    phs_params = _psn_phs_params(smp_l)
+    be = _kernel_backend(smp_l)
+    _psn_phs_pass1_kernel!(be)(mask_patch, col_of_patch, ivt, phs_params,
+        froot_carbon, rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft,
+        root_density_pft, hksat, hk_l, smp_l, z_col, k_soil_root,
+        root_conductance_out, soil_conductance_out, T(c_to_b),
+        T(croot_lateral_length), nlevsoi, ROOT_SEG; ndrange = length(bounds_patch))
+    KA.synchronize(be)
+    return nothing
+end
+
+# PHS Pass 2: kinetics + N-profile + vcmax/jmax/tpu/kp/lmr, BOTH phases, writing
+# the 3D ps.*_phs fields ([p,SUN,iv] & [p,SHA,iv]) in one iv pass. params_inst
+# scalars bundled in `prm`; overrides / leaf_mr_vcm resolved on the host.
+@kernel function _psn_phs_pass2_kernel!(ps, kn, jmax_z_local, @Const(mask_patch),
+        @Const(ivt), @Const(c3psn_pft), @Const(mbbopt_pft), @Const(forc_pbot),
+        @Const(oair), @Const(slatop_pft), @Const(leafcn_pft), @Const(flnr_pft),
+        @Const(fnitr_pft), @Const(dayl_factor), @Const(t10), @Const(t_veg),
+        @Const(tlai_z), @Const(par_z_sun_in), @Const(par_z_sha_in),
+        @Const(vcmaxcint_sun), @Const(vcmaxcint_sha), @Const(nrad), prm,
+        vcmax25_scale, jmax25top_sf_val, leaf_mr_vcm, use_cn::Bool, use_c13::Bool,
+        light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
+        stomatalcond_mtd::Int, stomatal_bb::Int, leafresp_ryan::Int,
+        bbbopt_c3, bbbopt_c4, sun::Int, sha::Int)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(t_veg)
+        ivt_p = ivt[p]
+        vcmax_z = ps.vcmax_z_phs_patch; tpu_z = ps.tpu_z_phs_patch
+        kp_z = ps.kp_z_phs_patch
+        lmr_z_sun = ps.lmrsun_z_patch; lmr_z_sha = ps.lmrsha_z_patch
+
+        # C3/C4 flag (round(Int,·)==1 ⟺ >0.5; 0/1 valued — heap-free on Metal)
+        if c3psn_pft[ivt_p] > T(0.5)
+            ps.c3flag_patch[p] = true
+        else
+            ps.c3flag_patch[p] = false
+        end
+        c3flag_p = ps.c3flag_patch[p]
+
+        if c3flag_p
+            ps.qe_patch[p] = zero(T)
+            bbbopt_p = bbbopt_c3
+        else
+            ps.qe_patch[p] = T(0.05)
+            bbbopt_p = bbbopt_c4
+        end
+
+        if stomatalcond_mtd == stomatal_bb
+            ps.bbb_patch[p] = bbbopt_p
+            ps.mbb_patch[p] = mbbopt_pft[ivt_p]
+        end
+
+        kc25 = prm.kc25_coef * forc_pbot[p]
+        ko25 = prm.ko25_coef * forc_pbot[p]
+        sco  = T(0.5) * T(0.209) / prm.cp25_yr2000
+        cp25 = T(0.5) * oair[p] / sco
+        ps.kc_patch[p] = kc25 * ft_photo(t_veg[p], prm.kcha)
+        ps.ko_patch[p] = ko25 * ft_photo(t_veg[p], prm.koha)
+        ps.cp_patch[p] = cp25 * ft_photo(t_veg[p], prm.cpha)
+
+        # Nitrogen profile
+        lnc_p = one(T) / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
+        lnc_p = smooth_min(lnc_p, T(10.0))
+        ps.lnca_patch[p] = lnc_p
+
+        vcmax25top = lnc_p * flnr_pft[ivt_p] * prm.fnr * prm.act25 * dayl_factor[p]
+        if !use_cn
+            vcmax25top = vcmax25top * fnitr_pft[ivt_p]
+        end
+        if !isnan(vcmax25_scale)
+            vcmax25top = vcmax25top * vcmax25_scale
+        end
+
+        jmax25top = ((T(2.59) - T(0.035) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) *
+                     vcmax25top) * jmax25top_sf_val
+        tpu25top = prm.tpu25ratio * vcmax25top
+        kp25top  = prm.kp25ratio * vcmax25top
+
+        ps.luvcmax25top_patch[p] = vcmax25top
+        ps.lujmax25top_patch[p] = jmax25top
+        ps.lutpu25top_patch[p] = tpu25top
+
+        if dayl_factor[p] < T(1.0e-12)
+            kn[p] = zero(T)
+        else
+            kn[p] = exp(T(0.00963) * vcmax25top / dayl_factor[p] - T(2.43))
+        end
+
+        if use_cn
+            if leafresp_method == leafresp_ryan
+                lmr25top = T(2.525e-6) * (T(1.5)^((T(25.0) - T(20.0)) / T(10.0)))
+                lmr25top = lmr25top * lnc_p / T(12.0e-06)
+            else
+                lmr25top = zero(T)
+            end
+        else
+            if c3flag_p
+                lmr25top = vcmax25top * T(leaf_mr_vcm)
+            else
+                lmr25top = vcmax25top * T(0.025)
+            end
+        end
+
+        laican = zero(T)
+        for iv in 1:nrad[p]
+            if iv == 1
+                laican = T(0.5) * tlai_z[p, iv]
+            else
+                laican = laican + T(0.5) * (tlai_z[p, iv-1] + tlai_z[p, iv])
+            end
+
+            if nlevcan == 1
+                nscaler_sun = vcmaxcint_sun[p]
+                nscaler_sha = vcmaxcint_sha[p]
+            else
+                nscaler_sun = exp(-kn[p] * laican)
+                nscaler_sha = exp(-kn[p] * laican)
+            end
+
+            lmr25_sun = lmr25top * nscaler_sun
+            lmr25_sha = lmr25top * nscaler_sha
+
+            if c3flag_p
+                lmr_z_sun[p, iv] = lmr25_sun * ft_photo(t_veg[p], prm.lmrha) *
+                                   fth_photo(t_veg[p], prm.lmrhd, prm.lmrse, prm.lmrc)
+                lmr_z_sha[p, iv] = lmr25_sha * ft_photo(t_veg[p], prm.lmrha) *
+                                   fth_photo(t_veg[p], prm.lmrhd, prm.lmrse, prm.lmrc)
+            else
+                lmr_z_sun[p, iv] = lmr25_sun * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+                lmr_z_sun[p, iv] = lmr_z_sun[p, iv] / (one(T) + exp(T(1.3) * (t_veg[p] - (T(TFRZ) + T(55.0)))))
+                lmr_z_sha[p, iv] = lmr25_sha * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+                lmr_z_sha[p, iv] = lmr_z_sha[p, iv] / (one(T) + exp(T(1.3) * (t_veg[p] - (T(TFRZ) + T(55.0)))))
+            end
+
+            # Reduce lmr with low LAI
+            lmr_z_sun[p, iv] *= smooth_min(T(0.2) * exp(T(3.218) * tlai_z[p, iv]), one(T))
+            lmr_z_sha[p, iv] *= smooth_min(T(0.2) * exp(T(3.218) * tlai_z[p, iv]), one(T))
+
+            if par_z_sun_in[p, iv] <= zero(T)  # night time
+                vcmax_z[p, sun, iv] = zero(T); jmax_z_local[p, sun, iv] = zero(T)
+                tpu_z[p, sun, iv] = zero(T); kp_z[p, sun, iv] = zero(T)
+                vcmax_z[p, sha, iv] = zero(T); jmax_z_local[p, sha, iv] = zero(T)
+                tpu_z[p, sha, iv] = zero(T); kp_z[p, sha, iv] = zero(T)
+
+                if use_c13
+                    ps.alphapsnsun_patch[p] = one(T)
+                    ps.alphapsnsha_patch[p] = one(T)
+                end
+            else  # day time
+                vcmax25_sun = vcmax25top * nscaler_sun
+                jmax25_sun = jmax25top * nscaler_sun
+                tpu25_sun = tpu25top * nscaler_sun
+                vcmax25_sha = vcmax25top * nscaler_sha
+                jmax25_sha = jmax25top * nscaler_sha
+                tpu25_sha = tpu25top * nscaler_sha
+                kp25_sun = kp25top * nscaler_sun
+                kp25_sha = kp25top * nscaler_sha
+
+                vcmaxse = (T(668.39) - T(1.07) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.vcmaxse_sf
+                jmaxse  = (T(659.70) - T(0.75) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.jmaxse_sf
+                tpuse   = (T(668.39) - T(1.07) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.tpuse_sf
+                vcmaxc = fth25_photo(prm.vcmaxhd, vcmaxse)
+                jmaxc  = fth25_photo(prm.jmaxhd, jmaxse)
+                tpuc   = fth25_photo(prm.tpuhd, tpuse)
+
+                vcmax_z[p, sun, iv] = vcmax25_sun * ft_photo(t_veg[p], prm.vcmaxha) *
+                                      fth_photo(t_veg[p], prm.vcmaxhd, vcmaxse, vcmaxc)
+                jmax_z_local[p, sun, iv] = jmax25_sun * ft_photo(t_veg[p], prm.jmaxha) *
+                                            fth_photo(t_veg[p], prm.jmaxhd, jmaxse, jmaxc)
+                tpu_z[p, sun, iv] = tpu25_sun * ft_photo(t_veg[p], prm.tpuha) *
+                                    fth_photo(t_veg[p], prm.tpuhd, tpuse, tpuc)
+
+                vcmax_z[p, sha, iv] = vcmax25_sha * ft_photo(t_veg[p], prm.vcmaxha) *
+                                      fth_photo(t_veg[p], prm.vcmaxhd, vcmaxse, vcmaxc)
+                jmax_z_local[p, sha, iv] = jmax25_sha * ft_photo(t_veg[p], prm.jmaxha) *
+                                            fth_photo(t_veg[p], prm.jmaxhd, jmaxse, jmaxc)
+                tpu_z[p, sha, iv] = tpu25_sha * ft_photo(t_veg[p], prm.tpuha) *
+                                    fth_photo(t_veg[p], prm.tpuhd, tpuse, tpuc)
+
+                if !c3flag_p
+                    vcmax_z[p, sun, iv] = vcmax25_sun * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+                    vcmax_z[p, sun, iv] /= (one(T) + exp(T(0.2) * ((T(TFRZ) + T(15.0)) - t_veg[p])))
+                    vcmax_z[p, sun, iv] /= (one(T) + exp(T(0.3) * (t_veg[p] - (T(TFRZ) + T(40.0)))))
+                    vcmax_z[p, sha, iv] = vcmax25_sha * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+                    vcmax_z[p, sha, iv] /= (one(T) + exp(T(0.2) * ((T(TFRZ) + T(15.0)) - t_veg[p])))
+                    vcmax_z[p, sha, iv] /= (one(T) + exp(T(0.3) * (t_veg[p] - (T(TFRZ) + T(40.0)))))
+                end
+
+                kp_z[p, sun, iv] = kp25_sun * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+                kp_z[p, sha, iv] = kp25_sha * T(2.0)^((t_veg[p] - (T(TFRZ) + T(25.0))) / T(10.0))
+            end
+
+            # Light inhibition
+            if light_inhibit && par_z_sun_in[p, 1] > zero(T)
+                lmr_z_sun[p, iv] *= T(0.67)
+            end
+            if light_inhibit && par_z_sha_in[p, 1] > zero(T)
+                lmr_z_sha[p, iv] *= T(0.67)
+            end
+        end
+    end
+end
+
+function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
+        mbbopt_pft, forc_pbot, oair, slatop_pft, leafcn_pft, flnr_pft, fnitr_pft,
+        dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
+        vcmaxcint_sha, nrad, use_cn::Bool, use_c13::Bool, leaf_mr_vcm, nlevcan::Int,
+        stomatalcond_mtd::Int, light_inhibit::Bool, leafresp_method::Int,
+        overrides, bounds_patch)
+    T = eltype(t_veg)
+    lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
+    prm = (kc25_coef = T(params_inst.kc25_coef), ko25_coef = T(params_inst.ko25_coef),
+           cp25_yr2000 = T(params_inst.cp25_yr2000), kcha = T(params_inst.kcha),
+           koha = T(params_inst.koha), cpha = T(params_inst.cpha),
+           fnr = T(params_inst.fnr), act25 = T(params_inst.act25),
+           tpu25ratio = T(params_inst.tpu25ratio), kp25ratio = T(params_inst.kp25ratio),
+           lmrha = T(params_inst.lmrha), lmrhd = T(params_inst.lmrhd),
+           lmrse = T(params_inst.lmrse), lmrc = T(lmrc),
+           vcmaxse_sf = T(params_inst.vcmaxse_sf), jmaxse_sf = T(params_inst.jmaxse_sf),
+           tpuse_sf = T(params_inst.tpuse_sf), vcmaxhd = T(params_inst.vcmaxhd),
+           jmaxhd = T(params_inst.jmaxhd), tpuhd = T(params_inst.tpuhd),
+           vcmaxha = T(params_inst.vcmaxha), jmaxha = T(params_inst.jmaxha),
+           tpuha = T(params_inst.tpuha))
+    jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
+    dv = _psn_dv(ps)
+    be = _kernel_backend(t_veg)
+    _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
+        mbbopt_pft, forc_pbot, oair, slatop_pft, leafcn_pft, flnr_pft, fnitr_pft,
+        dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
+        vcmaxcint_sha, nrad, prm, T(overrides.vcmax25_scale), T(jmax25top_sf_val),
+        T(leaf_mr_vcm), use_cn, use_c13, light_inhibit, leafresp_method, nlevcan,
+        stomatalcond_mtd, STOMATALCOND_MTD_BB1987, LEAFRESP_MTD_RYAN1991,
+        T(BBBOPT_C3), T(BBBOPT_C4), SUN, SHA; ndrange = length(bounds_patch))
+    KA.synchronize(be)
+    return nothing
+end
+
+# =====================================================================
 # photosynthesis! — Main leaf photosynthesis and stomatal conductance
 # =====================================================================
 
@@ -3062,19 +3469,21 @@ function photosynthesis_hydrstress!(ps,
 
     np = length(bounds_patch)
     FT = eltype(t_veg)
-    jmax_z_local = zeros(FT, np, 2, nlevcan)
-    bbbopt = zeros(FT, np)
-    kn = zeros(FT, np)
-    psn_wc_z_sun = zeros(FT, np, nlevcan)
-    psn_wj_z_sun = zeros(FT, np, nlevcan)
-    psn_wp_z_sun = zeros(FT, np, nlevcan)
-    psn_wc_z_sha = zeros(FT, np, nlevcan)
-    psn_wj_z_sha = zeros(FT, np, nlevcan)
-    psn_wp_z_sha = zeros(FT, np, nlevcan)
-    rh_leaf_sun = zeros(FT, np)
-    rh_leaf_sha = zeros(FT, np)
-    bsun_arr = ones(FT, np)
-    bsha_arr = ones(FT, np)
+    # Device-resident scratch (fill!(similar(t_veg,…)) so the kernelized passes
+    # write into backend arrays; on CPU this is a plain zeros/ones-filled Array).
+    # bbbopt is now a kernel-LOCAL scalar in PHS Pass 2 (was a per-patch array).
+    jmax_z_local = fill!(similar(t_veg, FT, np, 2, nlevcan), zero(FT))
+    kn           = fill!(similar(t_veg, FT, np), zero(FT))
+    psn_wc_z_sun = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    psn_wj_z_sun = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    psn_wp_z_sun = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    psn_wc_z_sha = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    psn_wj_z_sha = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    psn_wp_z_sha = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
+    rh_leaf_sun  = zeros(FT, np)   # written by Pass 3 (host) only
+    rh_leaf_sha  = zeros(FT, np)
+    bsun_arr     = fill!(similar(t_veg, FT, np), one(FT))
+    bsha_arr     = fill!(similar(t_veg, FT, np), one(FT))
 
     # Aliases for output
     ci_z_sun = ps.cisun_z_patch
@@ -3100,232 +3509,24 @@ function photosynthesis_hydrstress!(ps,
 
     rsmax0 = 2.0e4
 
-    # ---- Pass 1: Root-soil conductance ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-        c = col_of_patch[p]
-        ivt_p = ivt[p]
+    # ---- Pass 1: Root-soil conductance (kernelized) ----
+    # One thread per patch; the per-soil-level j loop runs serially inside each
+    # thread (own-index k_soil_root[p,j] writes, no race). _plc(smp,psi50,ck) +
+    # krmax come from the device-resident phs_params bundle.
+    psn_phs_pass1_update!(ps, mask_patch, col_of_patch, ivt, froot_carbon,
+        rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft, root_density_pft,
+        hksat, hk_l, smp_l, z_col, k_soil_root, root_conductance_out,
+        soil_conductance_out, c_to_b, croot_lateral_length, nlevsoi, bounds_patch)
 
-        for j in 1:nlevsoi
-            root_biomass_density = c_to_b * froot_carbon[p] * rootfr[p, j] / dz[c, j]
-            root_biomass_density = max(c_to_b * 1.0, root_biomass_density)
-
-            root_cross_sec_area = RPI * root_radius_pft[ivt_p]^2
-            root_length_density = root_biomass_density / (root_density_pft[ivt_p] * root_cross_sec_area)
-
-            rai_j = (tsai[p] + tlai[p]) * froot_leaf_pft[ivt_p] * rootfr[p, j]
-
-            croot_average_length = croot_lateral_length
-            r_soil = sqrt(1.0 / (RPI * root_length_density))
-            soil_cond = min(hksat[c, j], hk_l[c, j]) / (1.0e3 * r_soil)
-
-            fs_j = plc(smp_l[c, j], ivt_p, ROOT_SEG, VEG)
-            root_cond = (fs_j * rai_j * params_inst.krmax[ivt_p]) / (croot_average_length + z_col[c, j])
-
-            soil_cond = smooth_max(soil_cond, 1.0e-16)
-            root_cond = smooth_max(root_cond, 1.0e-16)
-
-            root_conductance_out[p, j] = root_cond
-            soil_conductance_out[p, j] = soil_cond
-
-            rs_resis = 1.0 / soil_cond + 1.0 / root_cond
-
-            if rai_j * rootfr[p, j] > 0.0 && j > 1
-                k_soil_root[p, j] = 1.0 / rs_resis
-            else
-                k_soil_root[p, j] = 0.0
-            end
-        end
-    end
-
-    # ---- Pass 2: Kinetics, N profile, vcmax, respiration ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-        c = col_of_patch[p]
-        ivt_p = ivt[p]
-
-        # C3/C4 flag
-        if round(Int, c3psn_pft[ivt_p]) == 1
-            c3flag[p] = true
-        else
-            c3flag[p] = false
-        end
-
-        if c3flag[p]
-            qe[p] = 0.0
-            if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                bbbopt[p] = BBBOPT_C3
-            end
-        else
-            qe[p] = 0.05
-            if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                bbbopt[p] = BBBOPT_C4
-            end
-        end
-
-        if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-            bbb[p] = bbbopt[p]
-            mbb[p] = mbbopt_pft[ivt_p]
-        end
-
-        kc25 = params_inst.kc25_coef * forc_pbot[p]
-        ko25 = params_inst.ko25_coef * forc_pbot[p]
-        sco = 0.5 * 0.209 / params_inst.cp25_yr2000
-        cp25 = 0.5 * oair[p] / sco
-
-        kc[p] = kc25 * ft_photo(t_veg[p], params_inst.kcha)
-        ko[p] = ko25 * ft_photo(t_veg[p], params_inst.koha)
-        cp[p] = cp25 * ft_photo(t_veg[p], params_inst.cpha)
-
-        # Nitrogen profile
-        lnc[p] = 1.0 / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
-        lnc[p] = smooth_min(lnc[p], 10.0)
-
-        vcmax25top = lnc[p] * flnr_pft[ivt_p] * params_inst.fnr * params_inst.act25 * dayl_factor[p]
-        if !use_cn
-            vcmax25top = vcmax25top * fnitr_pft[ivt_p]
-        end
-
-        # Apply calibration overrides if set
-        if !isnan(overrides.vcmax25_scale)
-            vcmax25top = vcmax25top * overrides.vcmax25_scale
-        end
-
-        jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
-        jmax25top = ((2.59 - 0.035 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * vcmax25top) *
-                    jmax25top_sf_val
-        tpu25top = params_inst.tpu25ratio * vcmax25top
-        kp25top = params_inst.kp25ratio * vcmax25top
-
-        ps.luvcmax25top_patch[p] = vcmax25top
-        ps.lujmax25top_patch[p] = jmax25top
-        ps.lutpu25top_patch[p] = tpu25top
-
-        if dayl_factor[p] < 1.0e-12
-            kn[p] = 0.0
-        else
-            kn[p] = exp(0.00963 * vcmax25top / dayl_factor[p] - 2.43)
-        end
-
-        if use_cn
-            if leafresp_method == LEAFRESP_MTD_RYAN1991
-                lmr25top = 2.525e-6 * (1.5^((25.0 - 20.0) / 10.0))
-                lmr25top = lmr25top * lnc[p] / 12.0e-06
-            else
-                lmr25top = 0.0
-            end
-        else
-            if c3flag[p]
-                lmr25top = vcmax25top * leaf_mr_vcm
-            else
-                lmr25top = vcmax25top * 0.025
-            end
-        end
-
-        # Canopy layer loop
-        laican = 0.0
-        for iv in 1:nrad[p]
-            if iv == 1
-                laican = 0.5 * tlai_z[p, iv]
-            else
-                laican = laican + 0.5 * (tlai_z[p, iv-1] + tlai_z[p, iv])
-            end
-
-            if nlevcan == 1
-                nscaler_sun = vcmaxcint_sun[p]
-                nscaler_sha = vcmaxcint_sha[p]
-            else
-                nscaler_sun = exp(-kn[p] * laican)
-                nscaler_sha = exp(-kn[p] * laican)
-            end
-
-            # Maintenance respiration
-            lmr25_sun = lmr25top * nscaler_sun
-            lmr25_sha = lmr25top * nscaler_sha
-
-            if c3flag[p]
-                lmr_z_sun[p, iv] = lmr25_sun * ft_photo(t_veg[p], params_inst.lmrha) *
-                                   fth_photo(t_veg[p], params_inst.lmrhd, params_inst.lmrse, lmrc)
-                lmr_z_sha[p, iv] = lmr25_sha * ft_photo(t_veg[p], params_inst.lmrha) *
-                                   fth_photo(t_veg[p], params_inst.lmrhd, params_inst.lmrse, lmrc)
-            else
-                lmr_z_sun[p, iv] = lmr25_sun * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-                lmr_z_sun[p, iv] = lmr_z_sun[p, iv] / (1.0 + exp(1.3 * (t_veg[p] - (TFRZ + 55.0))))
-                lmr_z_sha[p, iv] = lmr25_sha * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-                lmr_z_sha[p, iv] = lmr_z_sha[p, iv] / (1.0 + exp(1.3 * (t_veg[p] - (TFRZ + 55.0))))
-            end
-
-            # Reduce lmr with low LAI
-            lmr_z_sun[p, iv] *= smooth_min(0.2 * exp(3.218 * tlai_z[p, iv]), 1.0)
-            lmr_z_sha[p, iv] *= smooth_min(0.2 * exp(3.218 * tlai_z[p, iv]), 1.0)
-
-            if par_z_sun_in[p, iv] <= 0.0  # night time
-                vcmax_z[p, SUN, iv] = 0.0
-                jmax_z_local[p, SUN, iv] = 0.0
-                tpu_z[p, SUN, iv] = 0.0
-                kp_z[p, SUN, iv] = 0.0
-                vcmax_z[p, SHA, iv] = 0.0
-                jmax_z_local[p, SHA, iv] = 0.0
-                tpu_z[p, SHA, iv] = 0.0
-                kp_z[p, SHA, iv] = 0.0
-
-                if use_c13
-                    ps.alphapsnsun_patch[p] = 1.0
-                    ps.alphapsnsha_patch[p] = 1.0
-                end
-            else  # day time
-                vcmax25_sun = vcmax25top * nscaler_sun
-                jmax25_sun = jmax25top * nscaler_sun
-                tpu25_sun = tpu25top * nscaler_sun
-                vcmax25_sha = vcmax25top * nscaler_sha
-                jmax25_sha = jmax25top * nscaler_sha
-                tpu25_sha = tpu25top * nscaler_sha
-                kp25_sun = kp25top * nscaler_sun
-                kp25_sha = kp25top * nscaler_sha
-
-                vcmaxse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.vcmaxse_sf
-                jmaxse = (659.70 - 0.75 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.jmaxse_sf
-                tpuse = (668.39 - 1.07 * smooth_clamp(t10[p] - TFRZ, 11.0, 35.0)) * params_inst.tpuse_sf
-                vcmaxc = fth25_photo(params_inst.vcmaxhd, vcmaxse)
-                jmaxc = fth25_photo(params_inst.jmaxhd, jmaxse)
-                tpuc = fth25_photo(params_inst.tpuhd, tpuse)
-
-                vcmax_z[p, SUN, iv] = vcmax25_sun * ft_photo(t_veg[p], params_inst.vcmaxha) *
-                                      fth_photo(t_veg[p], params_inst.vcmaxhd, vcmaxse, vcmaxc)
-                jmax_z_local[p, SUN, iv] = jmax25_sun * ft_photo(t_veg[p], params_inst.jmaxha) *
-                                            fth_photo(t_veg[p], params_inst.jmaxhd, jmaxse, jmaxc)
-                tpu_z[p, SUN, iv] = tpu25_sun * ft_photo(t_veg[p], params_inst.tpuha) *
-                                    fth_photo(t_veg[p], params_inst.tpuhd, tpuse, tpuc)
-
-                vcmax_z[p, SHA, iv] = vcmax25_sha * ft_photo(t_veg[p], params_inst.vcmaxha) *
-                                      fth_photo(t_veg[p], params_inst.vcmaxhd, vcmaxse, vcmaxc)
-                jmax_z_local[p, SHA, iv] = jmax25_sha * ft_photo(t_veg[p], params_inst.jmaxha) *
-                                            fth_photo(t_veg[p], params_inst.jmaxhd, jmaxse, jmaxc)
-                tpu_z[p, SHA, iv] = tpu25_sha * ft_photo(t_veg[p], params_inst.tpuha) *
-                                    fth_photo(t_veg[p], params_inst.tpuhd, tpuse, tpuc)
-
-                if !c3flag[p]
-                    vcmax_z[p, SUN, iv] = vcmax25_sun * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-                    vcmax_z[p, SUN, iv] /= (1.0 + exp(0.2 * ((TFRZ + 15.0) - t_veg[p])))
-                    vcmax_z[p, SUN, iv] /= (1.0 + exp(0.3 * (t_veg[p] - (TFRZ + 40.0))))
-                    vcmax_z[p, SHA, iv] = vcmax25_sha * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-                    vcmax_z[p, SHA, iv] /= (1.0 + exp(0.2 * ((TFRZ + 15.0) - t_veg[p])))
-                    vcmax_z[p, SHA, iv] /= (1.0 + exp(0.3 * (t_veg[p] - (TFRZ + 40.0))))
-                end
-
-                kp_z[p, SUN, iv] = kp25_sun * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-                kp_z[p, SHA, iv] = kp25_sha * 2.0^((t_veg[p] - (TFRZ + 25.0)) / 10.0)
-            end
-
-            # Light inhibition
-            if light_inhibit && par_z_sun_in[p, 1] > 0.0
-                lmr_z_sun[p, iv] *= 0.67
-            end
-            if light_inhibit && par_z_sha_in[p, 1] > 0.0
-                lmr_z_sha[p, iv] *= 0.67
-            end
-        end
-    end
+    # ---- Pass 2: Kinetics, N profile, vcmax, respiration (kernelized) ----
+    # One thread per patch; internal serial iv loop writes both the 3D ps.*_phs
+    # fields ([p,SUN,iv] & [p,SHA,iv]) and per-phase lmr in one pass. bbbopt is a
+    # kernel-local scalar; overrides/leaf_mr_vcm/jmax25top_sf resolved on the host.
+    psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
+        mbbopt_pft, forc_pbot, oair, slatop_pft, leafcn_pft, flnr_pft, fnitr_pft,
+        dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
+        vcmaxcint_sha, nrad, use_cn, use_c13, leaf_mr_vcm, nlevcan,
+        stomatalcond_mtd, light_inhibit, leafresp_method, overrides, bounds_patch)
 
     # ---- Pass 3: Leaf-level photosynthesis ----
     for p in bounds_patch
@@ -3539,74 +3740,14 @@ function photosynthesis_hydrstress!(ps,
         end
     end
 
-    # ---- Pass 4: Canopy integration ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-
-        # Sunlit canopy
-        psncan_sun = 0.0; psncan_wc_sun = 0.0; psncan_wj_sun = 0.0; psncan_wp_sun = 0.0
-        lmrcan_sun = 0.0; gscan_sun = 0.0; laican_sun = 0.0
-        for iv in 1:nrad[p]
-            psncan_sun += psn_z_sun[p, iv] * lai_z_sun_in[p, iv]
-            psncan_wc_sun += psn_wc_z_sun[p, iv] * lai_z_sun_in[p, iv]
-            psncan_wj_sun += psn_wj_z_sun[p, iv] * lai_z_sun_in[p, iv]
-            psncan_wp_sun += psn_wp_z_sun[p, iv] * lai_z_sun_in[p, iv]
-            if round(Int, crop_pft[ivt[p]]) == 0 && modifyphoto_and_lmr_forcrop
-                lmrcan_sun += lmr_z_sun[p, iv] * lai_z_sun_in[p, iv] * bsun_arr[p]
-            else
-                lmrcan_sun += lmr_z_sun[p, iv] * lai_z_sun_in[p, iv]
-            end
-            gscan_sun += lai_z_sun_in[p, iv] / max(rb[p] + rs_z_sun[p, iv], 1.0e-6)
-            laican_sun += lai_z_sun_in[p, iv]
-        end
-        if laican_sun > 0.0
-            psn_sun[p] = psncan_sun / laican_sun
-            psn_wc_sun[p] = psncan_wc_sun / laican_sun
-            psn_wj_sun[p] = psncan_wj_sun / laican_sun
-            psn_wp_sun[p] = psncan_wp_sun / laican_sun
-            lmr_sun[p] = lmrcan_sun / laican_sun
-            rs_sun[p] = max(laican_sun / gscan_sun - rb[p], 0.0)
-        else
-            psn_sun[p] = 0.0; psn_wc_sun[p] = 0.0; psn_wj_sun[p] = 0.0; psn_wp_sun[p] = 0.0
-            lmr_sun[p] = 0.0; rs_sun[p] = 0.0
-        end
-
-        # Shaded canopy
-        psncan_sha = 0.0; psncan_wc_sha = 0.0; psncan_wj_sha = 0.0; psncan_wp_sha = 0.0
-        lmrcan_sha = 0.0; gscan_sha = 0.0; laican_sha = 0.0
-        for iv in 1:nrad[p]
-            psncan_sha += psn_z_sha[p, iv] * lai_z_sha_in[p, iv]
-            psncan_wc_sha += psn_wc_z_sha[p, iv] * lai_z_sha_in[p, iv]
-            psncan_wj_sha += psn_wj_z_sha[p, iv] * lai_z_sha_in[p, iv]
-            psncan_wp_sha += psn_wp_z_sha[p, iv] * lai_z_sha_in[p, iv]
-            if round(Int, crop_pft[ivt[p]]) == 0 && modifyphoto_and_lmr_forcrop
-                lmrcan_sha += lmr_z_sha[p, iv] * lai_z_sha_in[p, iv] * bsha_arr[p]
-            else
-                lmrcan_sha += lmr_z_sha[p, iv] * lai_z_sha_in[p, iv]
-            end
-            gscan_sha += lai_z_sha_in[p, iv] / max(rb[p] + rs_z_sha[p, iv], 1.0e-6)
-            laican_sha += lai_z_sha_in[p, iv]
-        end
-        if laican_sha > 0.0
-            psn_sha[p] = psncan_sha / laican_sha
-            psn_wc_sha[p] = psncan_wc_sha / laican_sha
-            psn_wj_sha[p] = psncan_wj_sha / laican_sha
-            psn_wp_sha[p] = psncan_wp_sha / laican_sha
-            lmr_sha[p] = lmrcan_sha / laican_sha
-            rs_sha[p] = max(laican_sha / gscan_sha - rb[p], 0.0)
-        else
-            psn_sha[p] = 0.0; psn_wc_sha[p] = 0.0; psn_wj_sha[p] = 0.0; psn_wp_sha[p] = 0.0
-            lmr_sha[p] = 0.0; rs_sha[p] = 0.0
-        end
-
-        # btran from LAI-weighted bsun/bsha
-        if laican_sha + laican_sun > 0.0
-            btran[p] = bsun_arr[p] * (laican_sun / (laican_sun + laican_sha)) +
-                       bsha_arr[p] * (laican_sha / (laican_sun + laican_sha))
-        else
-            btran[p] = bsun_arr[p]
-        end
-    end
+    # ---- Pass 4: Canopy integration (kernelized) ----
+    # One thread per patch; internal serial iv loops reduce sun+sha per-canopy
+    # fluxes → per-patch psn/rs/lmr, then blend btran from LAI-weighted bsun/bsha.
+    psn_phs_pass4_update!(ps, mask_patch, nrad, ivt, crop_pft,
+        lai_z_sun_in, lai_z_sha_in, rb, btran,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop, bounds_patch)
 
     return nothing
 end
