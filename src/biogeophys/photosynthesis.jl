@@ -2701,6 +2701,7 @@ function hybrid_PHS!(x0sun::Real, x0sha::Real,
     bsun = 1.0
     bsha = 1.0
     iter1 = 0
+    iter2 = 0          # hoisted out of the while body so it's bound for the return tuple
     gs_mol_sun = 0.0
     gs_mol_sha = 0.0
 
@@ -2966,6 +2967,7 @@ function photosynthesis_hydrstress!(ps,
                                     use_luna::Bool=false,
                                     use_c13::Bool=false,
                                     leaf_mr_vcm::Real=0.015,
+                                    overrides::CalibrationOverrides=CalibrationOverrides(),
                                     is_near_local_noon_fn::Function=(p) -> false)
     stomatalcond_mtd = ps.stomatalcond_mtd
     leafresp_method = ps.leafresp_method
