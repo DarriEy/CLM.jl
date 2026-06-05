@@ -86,22 +86,38 @@ function build(::Type{FT}) where {FT}
         medlynslope_pft     = fill(FT(6.0), mp),
         ivt         = fill(2, np),                       # 1-based PFT index
         col_of_patch = fill(1, np),
+        gridcell_of_patch = fill(1, np),                 # for fractionation!
+        forc_pco2   = fill(FT(40.0), 1),                 # per-gridcell CO2 partial pressure
+        laisun      = fill(FT(0.5), np),                 # for photosynthesis_total!
+        laisha      = fill(FT(0.5), np),
     )
     mask = fill(true, np)                                # Vector{Bool} (device-able)
     return (; np, ps, inp, mask)
 end
 
-run_psn!(ps, inp, mask, np) = CLM.photosynthesis!(ps,
+run_psn!(ps, inp, mask, np, phase) = CLM.photosynthesis!(ps,
     inp.esat_tv, inp.eair, inp.oair, inp.cair, inp.rb, inp.btran, inp.dayl_factor,
     inp.leafn, inp.forc_pbot, inp.t_veg, inp.t10, inp.tgcm, inp.nrad, inp.tlai_z,
     inp.tlai, inp.par_z_in, inp.lai_z_in, inp.vcmaxcint, inp.o3coefv, inp.o3coefg,
     inp.c3psn_pft, inp.leafcn_pft, inp.flnr_pft, inp.fnitr_pft, inp.slatop_pft,
     inp.mbbopt_pft, inp.medlynintercept_pft, inp.medlynslope_pft, inp.ivt,
-    inp.col_of_patch, mask, 1:np, "sun"; use_cn = false)
+    inp.col_of_patch, mask, 1:np, phase; use_cn = false)
+
+# Full default-path sequence: timestep-init zero → sun + sha leaf photosynthesis →
+# total combine → C13 fractionation. Exercises the 3 newly-kernelized tail fns.
+function run_full!(ps, inp, mask, np)
+    CLM.photosynthesis_timestep_init!(ps, mask, 1:np; use_c13 = true)
+    run_psn!(ps, inp, mask, np, "sun")
+    run_psn!(ps, inp, mask, np, "sha")
+    CLM.photosynthesis_total!(ps, inp.laisun, inp.laisha, mask, 1:np)
+    CLM.fractionation!(ps, inp.forc_pbot, inp.forc_pco2, inp.par_z_in, inp.nrad,
+        inp.c3psn_pft, inp.ivt, inp.col_of_patch, inp.gridcell_of_patch, mask, 1:np, "sun")
+    return nothing
+end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for photosynthesis! (non-hydrstress, sun phase)")
+    println("END-TO-END Metal parity for photosynthesis! + tail (init/total/fractionation)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -126,8 +142,8 @@ function main(backend)
         return 2
     end
 
-    run_psn!(H.ps, H.inp, H.mask, H.np)        # CPU
-    run_psn!(ps_d, inp_d, mask_d, B.np)        # device
+    run_full!(H.ps, H.inp, H.mask, H.np)       # CPU
+    run_full!(ps_d, inp_d, mask_d, B.np)       # device
 
     checks = [
         ("rssun",     H.ps.rssun_patch,     ps_d.rssun_patch),
@@ -135,6 +151,7 @@ function main(backend)
         ("psnsun_wc", H.ps.psnsun_wc_patch, ps_d.psnsun_wc_patch),
         ("psnsun_wj", H.ps.psnsun_wj_patch, ps_d.psnsun_wj_patch),
         ("lmrsun",    H.ps.lmrsun_patch,    ps_d.lmrsun_patch),
+        ("psnsha",    H.ps.psnsha_patch,    ps_d.psnsha_patch),    # sha phase ran
         ("ac",        H.ps.ac_patch,        ps_d.ac_patch),
         ("aj",        H.ps.aj_patch,        ps_d.aj_patch),
         ("an",        H.ps.an_patch,        ps_d.an_patch),
@@ -144,6 +161,12 @@ function main(backend)
         ("vcmax_z",   H.ps.vcmax_z_patch,   ps_d.vcmax_z_patch),
         ("kc",        H.ps.kc_patch,        ps_d.kc_patch),
         ("cp",        H.ps.cp_patch,        ps_d.cp_patch),
+        # --- newly-kernelized tail fns ---
+        ("fpsn",      H.ps.fpsn_patch,      ps_d.fpsn_patch),      # photosynthesis_total!
+        ("fpsn_wc",   H.ps.fpsn_wc_patch,   ps_d.fpsn_wc_patch),
+        ("fpsn_wj",   H.ps.fpsn_wj_patch,   ps_d.fpsn_wj_patch),
+        ("fpsn_wp",   H.ps.fpsn_wp_patch,   ps_d.fpsn_wp_patch),
+        ("alphapsnsun", H.ps.alphapsnsun_patch, ps_d.alphapsnsun_patch),  # fractionation!
     ]
     nfail = 0
     for (nm, a, b) in checks
