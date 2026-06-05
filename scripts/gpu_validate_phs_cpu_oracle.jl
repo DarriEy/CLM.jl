@@ -222,4 +222,8 @@ function main()
     end
 end
 
-exit(main())
+# Run only when invoked directly (so the Metal e2e harness can `include` this file
+# to reuse setparams!/build/run_phs! without triggering the CPU run).
+if abspath(PROGRAM_FILE) == @__FILE__
+    exit(main())
+end
