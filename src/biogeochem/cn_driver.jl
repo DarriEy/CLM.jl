@@ -154,14 +154,14 @@ function cn_driver_no_leaching!(
         litter_params::Union{LitterVertTranspParams, Nothing} = nothing,
         # Physical state for decomposition
         t_soisno::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
-        soilpsi::Union{Matrix{<:Real}, Nothing} = nothing,
+        soilpsi::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         col::Union{ColumnData, Nothing} = nothing,
         grc::Union{GridcellData, Nothing} = nothing,
         active_layer::Union{ActiveLayerData, Nothing} = nothing,
         # Vertical grid info
-        dzsoi_decomp::Union{Vector{<:Real}, Nothing} = nothing,
-        zsoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
-        zisoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
+        dzsoi_decomp::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        zsoi_vals::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        zisoi_vals::Union{AbstractVector{<:Real}, Nothing} = nothing,
         # Output: fire masks (populated by fire routines)
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
@@ -208,12 +208,16 @@ function cn_driver_no_leaching!(
 
     nc = length(bounds_col)
 
-    # Working arrays for decomposition chain (allocated once per call)
-    cn_decomp_pools = zeros(nc, nlevdecomp, ndecomp_pools)
-    p_decomp_cpool_loss = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
-    p_decomp_cn_gain = zeros(nc, nlevdecomp, ndecomp_pools)
-    pmnf_decomp_cascade = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
-    p_decomp_npool_to_din = zeros(nc, nlevdecomp, ndecomp_cascade_transitions)
+    # Working arrays for the decomposition chain — device-resident (similar() off a
+    # soil-BGC state field) + working precision FT, so the decomp kernels receive
+    # device FT scratch rather than host Float64 (which would force the CPU backend).
+    _FT = eltype(soilbgc_cs.decomp_cpools_vr_col)
+    _z3(d3) = fill!(similar(soilbgc_cs.decomp_cpools_vr_col, _FT, nc, nlevdecomp, d3), zero(_FT))
+    cn_decomp_pools       = _z3(ndecomp_pools)
+    p_decomp_cpool_loss   = _z3(ndecomp_cascade_transitions)
+    p_decomp_cn_gain      = _z3(ndecomp_pools)
+    pmnf_decomp_cascade   = _z3(ndecomp_cascade_transitions)
+    p_decomp_npool_to_din = _z3(ndecomp_cascade_transitions)
 
     if _has_decomp
         # 1. Decomposition rate constants (T/moisture-dependent)
