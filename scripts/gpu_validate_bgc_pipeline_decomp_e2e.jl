@@ -49,10 +49,11 @@ make_cn_params() = CLM.CNSharedParamsData(Q10=1.5, minpsi=-10.0, maxpsi=-0.1,
     rf_cwdl2=0.0, tau_cwd=10.0, cwd_flig=0.24, froz_q10=1.5,
     decomp_depth_efolding=0.5, mino2lim=0.0)
 
-function make_data()
-    # nlevdecomp=5 (multi-level): the single-level path needs col_dz (built from a
-    # ColumnData in the driver); multi-level reads per-layer t_soisno/soilpsi directly.
-    nc=4; np=6; ng=2; nlevdecomp=5; ndecomp_pools=7; ncascade_max=10; nrepr=1
+function make_data(; nlevdecomp=5)
+    # nlevdecomp=5 → multi-level decomp (reads per-layer t_soisno/soilpsi directly).
+    # nlevdecomp=1 → single-level decomp, which needs col_dz — the driver builds it
+    # from a ColumnData (col.dz slice), so we supply a col below.
+    nc=4; np=6; ng=2; ndecomp_pools=7; ncascade_max=10; nrepr=1
     nlevfull=5
     i_litr_min=1; i_litr_max=3; i_cwd=4; dt=1800.0
     mask_soilc = trues(nc); mask_soilp = trues(np)
@@ -94,7 +95,17 @@ function make_data()
     CLM.soil_bgc_nitrogen_flux_set_values!(nf_soil, mask_soilc, 0.0)
     soilbgc_st = CLM.SoilBiogeochemStateData(); CLM.soil_bgc_state_init!(soilbgc_st, nc, np, nlevdecomp, ndct)
 
-    return (; config=CLM.CNDriverConfig(), bgc_params, cn_params, bgc_state, cascade_con, decomp_params,
+    # single-level decomp needs a ColumnData so the driver can build col_dz from
+    # col.dz[:, nlevsno+1:end]; only col.dz is read on the decomp path.
+    col = nothing
+    if nlevdecomp == 1
+        CLM.varpar_init!(CLM.varpar, 17, 17, 0, 5)
+        nls = CLM.varpar.nlevsno
+        col = CLM.ColumnData()
+        col.dz = fill(0.1, nc, nls + 10)   # slice [:, nls+1:end] = (nc,10), first 5 used
+    end
+
+    return (; config=CLM.CNDriverConfig(), bgc_params, cn_params, bgc_state, cascade_con, decomp_params, col,
             cs_veg, cf_veg, ns_veg, nf_veg, cs_soil, cf_soil, ns_soil, nf_soil, soilbgc_st,
             cascade_donor_pool=copy(cascade_con.cascade_donor_pool),
             cascade_receiver_pool=copy(cascade_con.cascade_receiver_pool),
@@ -119,23 +130,23 @@ function run_driver!(d)
         soilbgc_state=d.soilbgc_st,
         # --- full-decomp infrastructure (triggers _has_decomp) ---
         cascade_con=d.cascade_con, decomp_bgc_state=d.bgc_state, decomp_bgc_params=d.bgc_params,
-        cn_shared_params=d.cn_params, decomp_params=d.decomp_params,
+        cn_shared_params=d.cn_params, decomp_params=d.decomp_params, col=d.col,
         t_soisno=d.t_soisno, soilpsi=d.soilpsi, dzsoi_decomp=d.dzsoi_decomp, zsoi_vals=d.zsoi_vals)
 end
 
-function main(backend)
-    println("="^66); println("WHOLE-DRIVER Metal parity — FULL-DECOMP branch (_has_decomp)"); println("="^66)
-    if backend === nothing; println("  No GPU backend."); return 0; end
+function scenario(backend, nlevdecomp)
     name, _, FT = backend
-    @printf("  Backend: %s   (precision: %s)\n", name, FT)
-    H = make_data(); B = make_data()
+    @printf("\n  -- scenario: nlevdecomp=%d (%s) --\n", nlevdecomp,
+            nlevdecomp == 1 ? "single-level, col_dz path" : "multi-level")
+    H = make_data(; nlevdecomp); B = make_data(; nlevdecomp)
     run_driver!(H)
     mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
     mfS(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))
     mm(b) = Metal.MtlArray(collect(b))
-    # state structs + decomp_bgc_state + forcing -> device; cascade_con + params stay host
+    # state structs + decomp_bgc_state + forcing + col -> device; cascade_con + params stay host
     D = (; config=B.config, bgc_params=B.bgc_params, cn_params=B.cn_params,
          bgc_state=mfS(B.bgc_state), cascade_con=B.cascade_con, decomp_params=B.decomp_params,
+         col=(B.col === nothing ? nothing : mf(B.col)),
          cs_veg=mf(B.cs_veg), cf_veg=mf(B.cf_veg), ns_veg=mf(B.ns_veg), nf_veg=mf(B.nf_veg),
          cs_soil=mf(B.cs_soil), cf_soil=mf(B.cf_soil), ns_soil=mf(B.ns_soil), nf_soil=mf(B.nf_soil),
          soilbgc_st=mf(B.soilbgc_st),
@@ -145,7 +156,7 @@ function main(backend)
          t_soisno=mf(B.t_soisno), soilpsi=mf(B.soilpsi), dzsoi_decomp=mf(B.dzsoi_decomp), zsoi_vals=mf(B.zsoi_vals),
          nc=B.nc, np=B.np, ng=B.ng, dt=B.dt, nlevdecomp=B.nlevdecomp, ndecomp_pools=B.ndecomp_pools,
          ndct=B.ndct, nrepr=B.nrepr, i_litr_min=B.i_litr_min, i_litr_max=B.i_litr_max, i_cwd=B.i_cwd)
-    if !(D.cf_soil.decomp_k_col isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.cf_soil.decomp_k_col isa Metal.MtlArray); println("  BLOCKED."); return 1; end
     run_driver!(D)
     checks = [
         ("cf_soil.decomp_k (rates)", H.cf_soil.decomp_k_col, D.cf_soil.decomp_k_col),
@@ -161,11 +172,21 @@ function main(backend)
         ("ns_veg.leafn", H.ns_veg.leafn_patch, D.ns_veg.leafn_patch)]
     nfail = 0
     for (nm, a, b) in checks
-        if !finite_ok(a); @printf("  [WARN] %-28s CPU all-NaN, skip\n", nm); continue; end
+        if !finite_ok(a); @printf("    [WARN] %-28s CPU all-NaN, skip\n", nm); continue; end
         dd = reldiff(a, b); ok = dd < 1f-3
-        @printf("  [%s] %-28s rel = %.3e\n", ok ? "PASS" : "FAIL", nm, dd); ok || (nfail += 1)
+        @printf("    [%s] %-28s rel = %.3e\n", ok ? "PASS" : "FAIL", nm, dd); ok || (nfail += 1)
     end
-    println(); println(nfail == 0 ? "  FULL-DECOMP BGC DRIVER MATCHES CPU ON $name ($FT)" : "  DIVERGENCE ($nfail).")
+    return nfail
+end
+
+function main(backend)
+    println("="^66); println("WHOLE-DRIVER Metal parity — FULL-DECOMP branch (_has_decomp)"); println("="^66)
+    if backend === nothing; println("  No GPU backend."); return 0; end
+    name, _, FT = backend
+    @printf("  Backend: %s   (precision: %s)\n", name, FT)
+    nfail = scenario(backend, 5) + scenario(backend, 1)
+    println(); println(nfail == 0 ? "  FULL-DECOMP BGC DRIVER (single+multi level) MATCHES CPU ON $name ($FT)" :
+                       "  DIVERGENCE ($nfail).")
     return nfail == 0 ? 0 : 1
 end
 const BACKEND = detect_backend()
