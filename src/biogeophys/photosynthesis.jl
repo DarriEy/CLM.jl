@@ -1583,6 +1583,22 @@ end
 # photosynthesis_total! — Determine total photosynthesis
 # =====================================================================
 
+# Per-patch combine of sunlit + shaded fluxes (mask-based standalone form; the
+# canopy_fluxes! call site uses the filterp-gather variant _cf_psn_total_kernel!).
+@kernel function _psn_total_kernel!(fpsn, fpsn_wc, fpsn_wj, fpsn_wp,
+        @Const(mask_patch), @Const(psnsun), @Const(psnsun_wc), @Const(psnsun_wj),
+        @Const(psnsun_wp), @Const(psnsha), @Const(psnsha_wc), @Const(psnsha_wj),
+        @Const(psnsha_wp), @Const(laisun), @Const(laisha))
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        ls = laisun[p]; lh = laisha[p]
+        fpsn[p]    = psnsun[p]    * ls + psnsha[p]    * lh
+        fpsn_wc[p] = psnsun_wc[p] * ls + psnsha_wc[p] * lh
+        fpsn_wj[p] = psnsun_wj[p] * ls + psnsha_wj[p] * lh
+        fpsn_wp[p] = psnsun_wp[p] * ls + psnsha_wp[p] * lh
+    end
+end
+
 """
     photosynthesis_total!(ps, laisun, laisha, mask_patch, bounds_patch;
                           use_fates=false, use_cn=false, use_c13=false, use_c14=false)
@@ -1599,15 +1615,12 @@ function photosynthesis_total!(ps,
                                use_cn::Bool=false,
                                use_c13::Bool=false,
                                use_c14::Bool=false)
-    for p in bounds_patch
-        mask_patch[p] || continue
-
-        if !use_fates
-            ps.fpsn_patch[p] = ps.psnsun_patch[p] * laisun[p] + ps.psnsha_patch[p] * laisha[p]
-            ps.fpsn_wc_patch[p] = ps.psnsun_wc_patch[p] * laisun[p] + ps.psnsha_wc_patch[p] * laisha[p]
-            ps.fpsn_wj_patch[p] = ps.psnsun_wj_patch[p] * laisun[p] + ps.psnsha_wj_patch[p] * laisha[p]
-            ps.fpsn_wp_patch[p] = ps.psnsun_wp_patch[p] * laisun[p] + ps.psnsha_wp_patch[p] * laisha[p]
-        end
+    if !use_fates
+        _launch!(_psn_total_kernel!, ps.fpsn_patch, ps.fpsn_wc_patch, ps.fpsn_wj_patch,
+            ps.fpsn_wp_patch, mask_patch, ps.psnsun_patch, ps.psnsun_wc_patch,
+            ps.psnsun_wj_patch, ps.psnsun_wp_patch, ps.psnsha_patch, ps.psnsha_wc_patch,
+            ps.psnsha_wj_patch, ps.psnsha_wp_patch, laisun, laisha;
+            ndrange = length(bounds_patch))
     end
 
     return nothing
@@ -1616,6 +1629,34 @@ end
 # =====================================================================
 # fractionation! — C13 fractionation during photosynthesis
 # =====================================================================
+
+# Per-patch C13 fractionation. alphapsn/gs_mol_ref/an_ref are resolved on the host
+# (phase + use_hydrstress) then passed loose; the per-canopy-layer iv loop runs
+# serially in-thread (alphapsn[p] is an own-index write — last iv wins, no race).
+# col_of_patch is unused in the body (Fortran kept `c` but never reads it).
+@kernel function _psn_fractionation_kernel!(alphapsn, @Const(mask_patch), @Const(nrad),
+        @Const(par_z_in), @Const(an_ref), @Const(gs_mol_ref), @Const(gb_mol),
+        @Const(forc_pbot), @Const(forc_pco2), @Const(c3psn_pft), @Const(ivt),
+        @Const(gridcell_of_patch))
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(par_z_in)
+        g = gridcell_of_patch[p]
+        co2_p = forc_pco2[g]
+        for iv in 1:nrad[p]
+            if par_z_in[p, iv] <= zero(T)
+                alphapsn[p] = one(T)
+            else
+                ci = co2_p - (an_ref[p, iv] * forc_pbot[p] *
+                    (T(1.4) * gs_mol_ref[p, iv] + T(1.6) * gb_mol[p]) /
+                    (gb_mol[p] * gs_mol_ref[p, iv]))
+                alphapsn[p] = one(T) + (((c3psn_pft[ivt[p]] *
+                    (T(4.4) + (T(22.6) * (ci / co2_p)))) +
+                    ((one(T) - c3psn_pft[ivt[p]]) * T(4.4))) / T(1000.0))
+            end
+        end
+    end
+end
 
 """
     fractionation!(ps, ...)
@@ -1658,26 +1699,9 @@ function fractionation!(ps,
 
     gb_mol = ps.gb_mol_patch
 
-    for p in bounds_patch
-        mask_patch[p] || continue
-        c = col_of_patch[p]
-        g = gridcell_of_patch[p]
-        co2_p = forc_pco2[g]
-
-        for iv in 1:nrad[p]
-            if par_z_in[p, iv] <= 0.0
-                alphapsn[p] = 1.0
-            else
-                ci = co2_p - (an_ref[p, iv] *
-                    forc_pbot[p] *
-                    (1.4 * gs_mol_ref[p, iv] + 1.6 * gb_mol[p]) /
-                    (gb_mol[p] * gs_mol_ref[p, iv]))
-                alphapsn[p] = 1.0 + (((c3psn_pft[ivt[p]] *
-                    (4.4 + (22.6 * (ci / co2_p)))) +
-                    ((1.0 - c3psn_pft[ivt[p]]) * 4.4)) / 1000.0)
-            end
-        end
-    end
+    _launch!(_psn_fractionation_kernel!, alphapsn, mask_patch, nrad, par_z_in,
+        an_ref, gs_mol_ref, gb_mol, forc_pbot, forc_pco2, c3psn_pft, ivt,
+        gridcell_of_patch; ndrange = length(bounds_patch))
 
     return nothing
 end
@@ -1685,6 +1709,30 @@ end
 # =====================================================================
 # TimeStepInit — Initialize at start of time step
 # =====================================================================
+
+# Per-patch zero of photosynthesis fluxes (mask-based standalone form; the
+# canopy_fluxes! call site uses the filterp-gather variant _cf_psn_init_kernel!).
+# use_c13/use_c14 are scalar Bool kernel args so the optional fields are written
+# only when active (byte-identical to the host flag branches).
+@kernel function _psn_timestep_init_kernel!(psnsun, psnsun_wc, psnsun_wj, psnsun_wp,
+        psnsha, psnsha_wc, psnsha_wj, psnsha_wp, fpsn, fpsn_wc, fpsn_wj, fpsn_wp,
+        alphapsnsun, alphapsnsha, c13_psnsun, c13_psnsha, c14_psnsun, c14_psnsha,
+        @Const(mask_nolake), use_c13::Bool, use_c14::Bool)
+    p = @index(Global)
+    @inbounds if mask_nolake[p]
+        z = zero(eltype(psnsun))
+        psnsun[p] = z; psnsun_wc[p] = z; psnsun_wj[p] = z; psnsun_wp[p] = z
+        psnsha[p] = z; psnsha_wc[p] = z; psnsha_wj[p] = z; psnsha_wp[p] = z
+        fpsn[p]   = z; fpsn_wc[p]   = z; fpsn_wj[p]   = z; fpsn_wp[p]   = z
+        if use_c13
+            alphapsnsun[p] = z; alphapsnsha[p] = z
+            c13_psnsun[p]  = z; c13_psnsha[p]  = z
+        end
+        if use_c14
+            c14_psnsun[p] = z; c14_psnsha[p] = z
+        end
+    end
+end
 
 """
     photosynthesis_timestep_init!(ps, mask_nolake, bounds_patch;
@@ -1697,35 +1745,12 @@ function photosynthesis_timestep_init!(ps,
                                        bounds_patch::UnitRange{Int};
                                        use_c13::Bool=false,
                                        use_c14::Bool=false)
-    for p in bounds_patch
-        mask_nolake[p] || continue
-
-        ps.psnsun_patch[p] = 0.0
-        ps.psnsun_wc_patch[p] = 0.0
-        ps.psnsun_wj_patch[p] = 0.0
-        ps.psnsun_wp_patch[p] = 0.0
-
-        ps.psnsha_patch[p] = 0.0
-        ps.psnsha_wc_patch[p] = 0.0
-        ps.psnsha_wj_patch[p] = 0.0
-        ps.psnsha_wp_patch[p] = 0.0
-
-        ps.fpsn_patch[p] = 0.0
-        ps.fpsn_wc_patch[p] = 0.0
-        ps.fpsn_wj_patch[p] = 0.0
-        ps.fpsn_wp_patch[p] = 0.0
-
-        if use_c13
-            ps.alphapsnsun_patch[p] = 0.0
-            ps.alphapsnsha_patch[p] = 0.0
-            ps.c13_psnsun_patch[p] = 0.0
-            ps.c13_psnsha_patch[p] = 0.0
-        end
-        if use_c14
-            ps.c14_psnsun_patch[p] = 0.0
-            ps.c14_psnsha_patch[p] = 0.0
-        end
-    end
+    _launch!(_psn_timestep_init_kernel!, ps.psnsun_patch, ps.psnsun_wc_patch,
+        ps.psnsun_wj_patch, ps.psnsun_wp_patch, ps.psnsha_patch, ps.psnsha_wc_patch,
+        ps.psnsha_wj_patch, ps.psnsha_wp_patch, ps.fpsn_patch, ps.fpsn_wc_patch,
+        ps.fpsn_wj_patch, ps.fpsn_wp_patch, ps.alphapsnsun_patch, ps.alphapsnsha_patch,
+        ps.c13_psnsun_patch, ps.c13_psnsha_patch, ps.c14_psnsun_patch, ps.c14_psnsha_patch,
+        mask_nolake, use_c13, use_c14; ndrange = length(bounds_patch))
 
     return nothing
 end
