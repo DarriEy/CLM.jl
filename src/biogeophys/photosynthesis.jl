@@ -614,6 +614,7 @@ Base.@kwdef struct PsnDV{Vb,V,M,M3,M2,Vp}
     vcmax_z_phs_patch::M3; tpu_z_phs_patch::M3; kp_z_phs_patch::M3
     an_sun_patch::M2; an_sha_patch::M2; gs_mol_sun_ln_patch::M2; gs_mol_sha_ln_patch::M2
     luvcmax25top_patch::Vp; lujmax25top_patch::Vp; lutpu25top_patch::Vp
+    alphapsnsun_patch::Vp; alphapsnsha_patch::Vp
     stomatalcond_mtd::Int
 end
 Adapt.@adapt_structure PsnDV   # so KA adapts MtlArray fields -> MtlDeviceArray (bitstype) at launch
@@ -647,6 +648,7 @@ _psn_dv(ps) = PsnDV(; c3flag_patch = ps.c3flag_patch,
     gs_mol_sha_ln_patch = ps.gs_mol_sha_ln_patch,
     luvcmax25top_patch = ps.luvcmax25top_patch, lujmax25top_patch = ps.lujmax25top_patch,
     lutpu25top_patch = ps.lutpu25top_patch,
+    alphapsnsun_patch = ps.alphapsnsun_patch, alphapsnsha_patch = ps.alphapsnsha_patch,
     stomatalcond_mtd = ps.stomatalcond_mtd)
 
 # Device-view bundle of the PHS vulnerability-curve / kinetics params. params_inst
@@ -2310,6 +2312,238 @@ function getqflx!(p::Int, c::Int, gb_mol::Real,
 end
 
 # =====================================================================
+# GPU-callable POSITIONAL device cores for the PHS Newton chain.
+# Each mirrors a host helper above bit-for-bit on Float64, but:
+#   * NO vectors / StaticArrays — the length-4 vegwp unknown is carried as 4
+#     NAMED SCALARS (xsun=x[SUN], xsha=x[SHA], xxyl=x[XYL], xroot=x[ROOT_SEG]);
+#   * NO params_inst / globals — psi50/ck/kmax/theta come from a threaded
+#     PsnPhsParams bundle; vulnerability curve via _plc/_d1plc;
+#   * NO error(); NO kwargs (positional); every Float64 literal T()-wrapped;
+#   * length-nlevsoi reductions become explicit serial j-loops over the 2D
+#     k_soil_root[p,·]/smp_l[c,·]/z_col[c,·] (passed whole + (p,c) indices, so
+#     no device slices). The host's TWO separate sums in spacF / getvegwp are
+#     kept as TWO separate accumulators (combining them would re-order rounding).
+# These cores are what the per-patch Pass-3 kernel calls in-thread. The original
+# host helpers above are retained for the standalone unit tests.
+# =====================================================================
+
+# _getqflx — pure scalar 4-tuple form of getqflx!. forc_pbot_c/tgcm_p/etc are
+# scalars; T from gb_mol. Byte-identical to getqflx! on Float64.
+@inline function _getqflx(gb_mol::Real,
+                          gs_mol_sun::Real, gs_mol_sha::Real,
+                          qflx_sun::Real, qflx_sha::Real,
+                          qsatl::Real, qaf::Real, havegs::Bool,
+                          laisun_p::Real, laisha_p::Real,
+                          elai_p::Real, esai_p::Real,
+                          fdry_p::Real, forc_rho_c::Real,
+                          forc_pbot_c::Real, tgcm_p::Real, RGAS_::Real)
+    T = typeof(gb_mol)
+    cf = forc_pbot_c / (RGAS_ * tgcm_p) * T(1.0e6)
+    wtl = (elai_p + esai_p) * gb_mol
+    efpot = forc_rho_c * wtl * (qsatl - qaf)
+
+    qsun = qflx_sun
+    qsha = qflx_sha
+    gsun = gs_mol_sun
+    gsha = gs_mol_sha
+    if havegs
+        if efpot > zero(T) && elai_p > zero(T)
+            if gs_mol_sun > zero(T)
+                rppdry_sun = fdry_p / gb_mol * (laisun_p / (one(T) / gb_mol + one(T) / gs_mol_sun)) / elai_p
+                qsun = efpot * rppdry_sun / cf
+            else
+                qsun = zero(T)
+            end
+            if gs_mol_sha > zero(T)
+                rppdry_sha = fdry_p / gb_mol * (laisha_p / (one(T) / gb_mol + one(T) / gs_mol_sha)) / elai_p
+                qsha = efpot * rppdry_sha / cf
+            else
+                qsha = zero(T)
+            end
+        else
+            qsun = zero(T)
+            qsha = zero(T)
+        end
+    else
+        if qflx_sun > zero(T)
+            gsun = gb_mol * qflx_sun * cf * elai_p / (efpot * fdry_p * laisun_p - qflx_sun * cf * elai_p)
+        else
+            gsun = zero(T)
+        end
+        if qflx_sha > zero(T)
+            gsha = gb_mol * qflx_sha * cf * elai_p / (efpot * fdry_p * laisha_p - qflx_sha * cf * elai_p)
+        else
+            gsha = zero(T)
+        end
+    end
+    return (qsun, qsha, gsun, gsha)
+end
+
+# _spacF — scalar-unrolled spacF!. Returns the 4 residual components as 4 scalars
+# (fsun, fsha, fxyl, froot mapping f[SUN],f[SHA],f[XYL],f[ROOT_SEG]). The vegwp
+# unknown is passed as 4 named scalars (xsun..xroot). kmax/psi50/ck via phs_params;
+# the two nlevsoi sums kept as two serial accumulators (host order preserved).
+@inline function _spacF(xsun::Real, xsha::Real, xxyl::Real, xroot::Real,
+                        qflx_sun::Real, qflx_sha::Real,
+                        k_soil_root, smp_l, z_col, p::Int, c::Int,
+                        laisun_p::Real, laisha_p::Real,
+                        htop_p::Real, tsai_p::Real, ivt_p::Int, nlevsoi::Int,
+                        phs_params)
+    T = typeof(xsun)
+    tol_lai = T(0.001)
+
+    psi50 = phs_params.psi50; ck = phs_params.ck; kmax = phs_params.kmax
+    kmax_sun = kmax[ivt_p, SUN]; kmax_sha = kmax[ivt_p, SHA]; kmax_xyl = kmax[ivt_p, XYL]
+
+    grav1 = htop_p * T(1000.0)
+
+    fsto1 = _plc(xsun,  psi50[ivt_p, SUN],      ck[ivt_p, SUN])
+    fsto2 = _plc(xsha,  psi50[ivt_p, SHA],      ck[ivt_p, SHA])
+    fx    = _plc(xxyl,  psi50[ivt_p, XYL],      ck[ivt_p, XYL])
+    fr    = _plc(xroot, psi50[ivt_p, ROOT_SEG], ck[ivt_p, ROOT_SEG])
+
+    fsun = qflx_sun * fsto1 - laisun_p * kmax_sun * fx * (xxyl - xsun)
+    fsha = qflx_sha * fsto2 - laisha_p * kmax_sha * fx * (xxyl - xsha)
+    fxyl = laisun_p * kmax_sun * fx * (xxyl - xsun) +
+           laisha_p * kmax_sha * fx * (xxyl - xsha) -
+           tsai_p * kmax_xyl / htop_p * fr * (xroot - xxyl - grav1)
+    # f[ROOT_SEG] = xyl-root flux + sum(ksr*(xroot+grav2)) - sum(ksr*smp). Keep the
+    # two sums separate (host order); grav2[j] = z_col[c,j]*1000.
+    s1 = zero(T)
+    @inbounds for j in 1:nlevsoi
+        s1 += k_soil_root[p, j] * (xroot + z_col[c, j] * T(1000.0))
+    end
+    s2 = zero(T)
+    @inbounds for j in 1:nlevsoi
+        s2 += k_soil_root[p, j] * smp_l[c, j]
+    end
+    froot = tsai_p * kmax_xyl / htop_p * fr * (xroot - xxyl - grav1) + s1 - s2
+
+    if laisha_p < tol_lai
+        tmp = fsun
+        fsun = fsha
+        fsha = tmp
+    end
+    return (fsun, fsha, fxyl, froot)
+end
+
+# _spacA — scalar-unrolled spacA!. Returns the (up to 16) invA entries as named
+# scalars + a singular flag (the two host early-returns become flag=true with the
+# already-zeroed invA). Unused A/invA entries are exactly zero as in the host
+# (A/invA start zeroed). Closed-form inverse copied verbatim.
+@inline function _spacA(xsun::Real, xsha::Real, xxyl::Real, xroot::Real,
+                        qflx_sun::Real, qflx_sha::Real,
+                        k_soil_root, p::Int,
+                        laisun_p::Real, laisha_p::Real,
+                        htop_p::Real, tsai_p::Real, ivt_p::Int, nlevsoi::Int,
+                        phs_params)
+    T = typeof(xsun)
+    tol_lai = T(0.001)
+    z = zero(T)
+    # invA entries (row-major names iaRC); default zero like the host invA.
+    ia11 = z; ia12 = z; ia13 = z; ia14 = z
+    ia21 = z; ia22 = z; ia23 = z; ia24 = z
+    ia31 = z; ia32 = z; ia33 = z; ia34 = z
+    ia41 = z; ia42 = z; ia43 = z; ia44 = z
+
+    psi50 = phs_params.psi50; ck = phs_params.ck; kmax = phs_params.kmax
+    kmax_sun = kmax[ivt_p, SUN]; kmax_sha = kmax[ivt_p, SHA]; kmax_xyl = kmax[ivt_p, XYL]
+
+    grav1 = htop_p * T(1000.0)
+
+    fsto1 = _plc(xsun,  psi50[ivt_p, SUN],      ck[ivt_p, SUN])
+    fsto2 = _plc(xsha,  psi50[ivt_p, SHA],      ck[ivt_p, SHA])
+    fx    = _plc(xxyl,  psi50[ivt_p, XYL],      ck[ivt_p, XYL])
+    fr    = _plc(xroot, psi50[ivt_p, ROOT_SEG], ck[ivt_p, ROOT_SEG])
+
+    dfsto1 = _d1plc(xsun,  psi50[ivt_p, SUN],      ck[ivt_p, SUN])
+    dfsto2 = _d1plc(xsha,  psi50[ivt_p, SHA],      ck[ivt_p, SHA])
+    dfx    = _d1plc(xxyl,  psi50[ivt_p, XYL],      ck[ivt_p, XYL])
+    dfr    = _d1plc(xroot, psi50[ivt_p, ROOT_SEG], ck[ivt_p, ROOT_SEG])
+
+    # A matrix entries (named aRC); zero where the host leaves them zero.
+    a11 = -laisun_p * kmax_sun * fx - qflx_sun * dfsto1
+    a13 = laisun_p * kmax_sun * dfx * (xxyl - xsun) + laisun_p * kmax_sun * fx
+    a22 = -laisha_p * kmax_sha * fx - qflx_sha * dfsto2
+    a23 = laisha_p * kmax_sha * dfx * (xxyl - xsha) + laisha_p * kmax_sha * fx
+    a31 = laisun_p * kmax_sun * fx
+    a32 = laisha_p * kmax_sha * fx
+    a33 = -laisun_p * kmax_sun * dfx * (xxyl - xsun) -
+           laisun_p * kmax_sun * fx -
+           laisha_p * kmax_sha * dfx * (xxyl - xsha) -
+           laisha_p * kmax_sha * fx -
+           tsai_p * kmax_xyl / htop_p * fr
+    a34 = tsai_p * kmax_xyl / htop_p * dfr * (xroot - xxyl - grav1) +
+          tsai_p * kmax_xyl / htop_p * fr
+    a43 = tsai_p * kmax_xyl / htop_p * fr
+    # sum(k_soil_root) serial accumulator
+    sksr = zero(T)
+    @inbounds for j in 1:nlevsoi
+        sksr += k_soil_root[p, j]
+    end
+    a44 = -tsai_p * kmax_xyl / htop_p * fr -
+           tsai_p * kmax_xyl / htop_p * dfr * (xroot - xxyl - grav1) -
+           sksr
+
+    if laisun_p > tol_lai && laisha_p > tol_lai
+        # General 4x4 case
+        determ = a44*a22*a33*a11 - a44*a22*a31*a13 -
+                 a44*a32*a23*a11 - a43*a11*a22*a34
+        if abs(determ) <= T(1.0e-50)
+            return (ia11, ia12, ia13, ia14, ia21, ia22, ia23, ia24,
+                    ia31, ia32, ia33, ia34, ia41, ia42, ia43, ia44, true)
+        end
+        leading = one(T) / determ
+        ia11 = leading*a44*a22*a33 - leading*a44*a32*a23 - leading*a43*a22*a34
+        ia21 = leading*a23*a44*a31
+        ia31 = -leading*a44*a22*a31
+        ia41 = leading*a43*a22*a31
+        ia12 = leading*a13*a44*a32
+        ia22 = leading*a44*a33*a11 - leading*a44*a31*a13 - leading*a43*a11*a34
+        ia32 = -leading*a11*a44*a32
+        ia42 = leading*a43*a11*a32
+        ia13 = -leading*a13*a22*a44
+        ia23 = -leading*a23*a11*a44
+        ia33 = leading*a22*a11*a44
+        ia43 = -leading*a43*a11*a22
+        ia14 = leading*a13*a34*a22
+        ia24 = leading*a23*a34*a11
+        ia34 = -leading*a34*a11*a22
+        ia44 = leading*a22*a33*a11 - leading*a22*a31*a13 - leading*a32*a23*a11
+    else
+        # 3x3 case when one of laisun/laisha is ~0. The host mutates A entries
+        # when laisha<=tol; mirror with locals so the formulas read identically.
+        a22l = a22; a32l = a32; a23l = a23
+        if laisha_p <= tol_lai
+            a22l = a11
+            a32l = a31
+            a23l = a13
+        end
+        determ = a22l*a33*a44 - a34*a22l*a43 - a23l*a32l*a44
+        if abs(determ) <= T(1.0e-50)
+            return (ia11, ia12, ia13, ia14, ia21, ia22, ia23, ia24,
+                    ia31, ia32, ia33, ia34, ia41, ia42, ia43, ia44, true)
+        end
+        # build then scale by 1/determ (host: invA .= (1/determ).*invA)
+        b22 = a33*a44 - a34*a43
+        b23 = -a23l*a44
+        b24 = a34*a23l
+        b32 = -a32l*a44
+        b33 = a22l*a44
+        b34 = -a34*a22l
+        b42 = a32l*a43
+        b43 = -a22l*a43
+        b44 = a22l*a33 - a23l*a32l
+        invd = one(T) / determ
+        ia22 = invd*b22; ia23 = invd*b23; ia24 = invd*b24
+        ia32 = invd*b32; ia33 = invd*b33; ia34 = invd*b34
+        ia42 = invd*b42; ia43 = invd*b43; ia44 = invd*b44
+    end
+    return (ia11, ia12, ia13, ia14, ia21, ia22, ia23, ia24,
+            ia31, ia32, ia33, ia34, ia41, ia42, ia43, ia44, false)
+end
+
+# =====================================================================
 # spacF! — Flux divergence across vegetation segments
 # =====================================================================
 
@@ -2545,6 +2779,78 @@ function getvegwp!(p::Int, c::Int, gb_mol::Real,
     return (x, soilflux)
 end
 
+# _getvegwp — scalar-unrolled getvegwp!. Returns the 4 vegwp scalars + soilflux:
+# (xsun, xsha, xxyl, xroot, soilflux). Inlines _getqflx + _plc. The host's
+# nlevsoi reductions become serial accumulators in HOST ORDER (sum_ksr, the
+# combined sum(smp.-grav2), the combined sum(ksr.*(smp.-grav2)), and soilflux).
+@inline function _getvegwp(gb_mol::Real, gs_mol_sun::Real, gs_mol_sha::Real,
+                           qsatl::Real, qaf::Real,
+                           k_soil_root, smp_l, z_col, p::Int, c::Int,
+                           laisun_p::Real, laisha_p::Real,
+                           htop_p::Real, tsai_p::Real, ivt_p::Int, nlevsoi::Int,
+                           elai_p::Real, esai_p::Real,
+                           fdry_p::Real, forc_rho_c::Real,
+                           forc_pbot_c::Real, tgcm_p::Real,
+                           phs_params, RGAS_::Real)
+    T = typeof(gb_mol)
+    psi50 = phs_params.psi50; ck = phs_params.ck; kmax = phs_params.kmax
+    grav1 = T(1000.0) * htop_p
+
+    # Compute transpiration demand
+    qflx_sun, qflx_sha, _, _ = _getqflx(gb_mol, gs_mol_sun, gs_mol_sha,
+        zero(T), zero(T), qsatl, qaf, true, laisun_p, laisha_p,
+        elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p, RGAS_)
+
+    # Root water potential. sum_ksr in host order.
+    sum_ksr = zero(T)
+    @inbounds for j in 1:nlevsoi
+        sum_ksr += k_soil_root[p, j]
+    end
+    xroot = zero(T)
+    if abs(sum_ksr) == zero(T)
+        s = zero(T)
+        @inbounds for j in 1:nlevsoi
+            s += smp_l[c, j] - z_col[c, j] * T(1000.0)
+        end
+        xroot = s / nlevsoi
+    else
+        s = zero(T)
+        @inbounds for j in 1:nlevsoi
+            s += k_soil_root[p, j] * (smp_l[c, j] - z_col[c, j] * T(1000.0))
+        end
+        xroot = (s - qflx_sun - qflx_sha) / sum_ksr
+    end
+
+    # Xylem water potential
+    fr = _plc(xroot, psi50[ivt_p, ROOT_SEG], ck[ivt_p, ROOT_SEG])
+    if tsai_p > zero(T) && fr > zero(T)
+        xxyl = xroot - grav1 - (qflx_sun + qflx_sha) / (fr * kmax[ivt_p, ROOT_SEG] / htop_p * tsai_p)
+    else
+        xxyl = xroot - grav1
+    end
+
+    # Sun/sha leaf water potential
+    fx = _plc(xxyl, psi50[ivt_p, XYL], ck[ivt_p, XYL])
+    if laisha_p > zero(T) && fx > zero(T)
+        xsha = xxyl - qflx_sha / (fx * kmax[ivt_p, XYL] * laisha_p)
+    else
+        xsha = xxyl
+    end
+    if laisun_p > zero(T) && fx > zero(T)
+        xsun = xxyl - qflx_sun / (fx * kmax[ivt_p, XYL] * laisun_p)
+    else
+        xsun = xxyl
+    end
+
+    # Soil flux (host order: grav2[j]=z_col[c,j]*1000)
+    soilflux = zero(T)
+    @inbounds for j in 1:nlevsoi
+        soilflux += k_soil_root[p, j] * (smp_l[c, j] - xroot - z_col[c, j] * T(1000.0))
+    end
+
+    return (xsun, xsha, xxyl, xroot, soilflux)
+end
+
 # =====================================================================
 # calcstress! — Compute transpiration stress via plant hydraulics
 # =====================================================================
@@ -2732,6 +3038,194 @@ function calcstress!(p::Int, c::Int, x::AbstractVector{<:Real},
     end
 
     return (x, bsun, bsha)
+end
+
+# _calcstress — scalar-unrolled calcstress! Newton orchestrator. Takes/returns the
+# vegwp unknown as 4 named scalars; returns (xsun, xsha, xxyl, xroot, bsun, bsha).
+# The host `while true` Newton loop becomes a fixed-trip `for iter in 1:(itmax+1)`
+# with a `done::Bool` that, once set, FREEZES the body (every later iteration is a
+# no-op) → uniform trip count, NO divergent break (Metal-safe). `flag` is captured
+# at the moment the loop finishes (it drives the algebraic-fallback branch below).
+# The 4x4 / 3x3 solves are scalar-unrolled in the exact host index order.
+@inline function _calcstress(xsun0::Real, xsha0::Real, xxyl0::Real, xroot0::Real,
+                             gb_mol::Real, gs_mol_sun_in::Real, gs_mol_sha_in::Real,
+                             qsatl::Real, qaf::Real,
+                             k_soil_root, smp_l, z_col, p::Int, c::Int,
+                             laisun_p::Real, laisha_p::Real,
+                             htop_p::Real, tsai_p::Real, ivt_p::Int, nlevsoi::Int,
+                             elai_p::Real, esai_p::Real,
+                             fdry_p::Real, forc_rho_c::Real,
+                             forc_pbot_c::Real, tgcm_p::Real,
+                             phs_params, RGAS_::Real)
+    T = typeof(xsun0)
+    itmax = 50
+    tolf = T(1.0e-6)
+    toldx = T(1.0e-9)
+    tol_lai = T(0.001)
+    psi50 = phs_params.psi50; ck = phs_params.ck
+
+    xsun = xsun0; xsha = xsha0; xxyl = xxyl0; xroot = xroot0
+
+    # Night flag: vegwp(sun) > 0 signals night
+    night = false
+    if xsun > zero(T)
+        night = true
+        xsun = xsha
+    end
+
+    gs0sun = gs_mol_sun_in
+    gs0sha = gs_mol_sha_in
+
+    # Transpiration demand
+    qflx_sun, qflx_sha, _, _ = _getqflx(gb_mol, gs0sun, gs0sha,
+        zero(T), zero(T), qsatl, qaf, true, laisun_p, laisha_p,
+        elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p, RGAS_)
+
+    flag = false
+
+    if (laisun_p > tol_lai || laisha_p > tol_lai) && (qflx_sun > zero(T) || qflx_sha > zero(T))
+        # Newton's method (fixed-trip, frozen-once-done). The host increments iter
+        # at the top then breaks on iter>itmax — so the body runs for iter=1..itmax+1
+        # (the +1 pass only evaluates spacF + its convergence test before breaking).
+        done = false
+        @inbounds for iter in 1:(itmax + 1)
+            if !done
+                fsun, fsha, fxyl, froot = _spacF(xsun, xsha, xxyl, xroot,
+                    qflx_sun, qflx_sha, k_soil_root, smp_l, z_col, p, c,
+                    laisun_p, laisha_p, htop_p, tsai_p, ivt_p, nlevsoi, phs_params)
+
+                normf = sqrt(fsun*fsun + fsha*fsha + fxyl*fxyl + froot*froot)
+                if normf < tolf * (qflx_sun + qflx_sha)
+                    flag = false
+                    done = true
+                elseif iter > itmax
+                    flag = false
+                    done = true
+                else
+                    ia11, ia12, ia13, ia14, ia21, ia22, ia23, ia24,
+                    ia31, ia32, ia33, ia34, ia41, ia42, ia43, ia44, sing =
+                        _spacA(xsun, xsha, xxyl, xroot, qflx_sun, qflx_sha,
+                            k_soil_root, p, laisun_p, laisha_p, htop_p, tsai_p,
+                            ivt_p, nlevsoi, phs_params)
+                    flag = sing
+                    if sing
+                        done = true
+                    else
+                        # dx = invA * f. General 4x4 vs 3x3 (laisun==0 → dx[SUN]=0).
+                        if laisun_p > tol_lai && laisha_p > tol_lai
+                            dxsun  = ia11*fsun + ia12*fsha + ia13*fxyl + ia14*froot
+                            dxsha  = ia21*fsun + ia22*fsha + ia23*fxyl + ia24*froot
+                            dxxyl  = ia31*fsun + ia32*fsha + ia33*fxyl + ia34*froot
+                            dxroot = ia41*fsun + ia42*fsha + ia43*fxyl + ia44*froot
+                        else
+                            dxsun  = zero(T)
+                            dxsha  = ia22*fsha + ia23*fxyl + ia24*froot
+                            dxxyl  = ia32*fsha + ia33*fxyl + ia34*froot
+                            dxroot = ia42*fsha + ia43*fxyl + ia44*froot
+                        end
+
+                        # maximum(abs.(dx)) over all 4 (dx[SUN]=0 in 3x3 case).
+                        mx = abs(dxsun)
+                        adsha = abs(dxsha); if adsha > mx; mx = adsha; end
+                        adxyl = abs(dxxyl); if adxyl > mx; mx = adxyl; end
+                        adroot = abs(dxroot); if adroot > mx; mx = adroot; end
+                        if mx > T(50000.0)
+                            dxsun  = T(50000.0) * dxsun  / mx
+                            dxsha  = T(50000.0) * dxsha  / mx
+                            dxxyl  = T(50000.0) * dxxyl  / mx
+                            dxroot = T(50000.0) * dxroot / mx
+                        end
+
+                        # Update x per lai case
+                        if laisun_p > tol_lai && laisha_p > tol_lai
+                            xsun  += dxsun
+                            xsha  += dxsha
+                            xxyl  += dxxyl
+                            xroot += dxroot
+                        elseif laisha_p > tol_lai
+                            xsun  += dxsun
+                            xsha  += dxsha
+                            xxyl  += dxxyl
+                            xroot += dxroot
+                            xsun = xxyl  # psi_sun = psi_xyl (laisun==0)
+                        else
+                            xxyl  += dxxyl
+                            xroot += dxroot
+                            xsun  += dxsha   # x[SUN] += dx[SHA]
+                            xsha = xxyl      # psi_sha = psi_xyl (laisha==0)
+                        end
+
+                        normdx = sqrt(dxsun*dxsun + dxsha*dxsha + dxxyl*dxxyl + dxroot*dxroot)
+                        if normdx < toldx
+                            done = true
+                        else
+                            # Force SPAC gradient toward atmosphere
+                            if xxyl > xroot
+                                xxyl = xroot
+                            end
+                            if xsun > xxyl
+                                xsun = xxyl
+                            end
+                            if xsha > xxyl
+                                xsha = xxyl
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    else
+        flag = true
+    end
+
+    bsun = zero(T)
+    bsha = zero(T)
+
+    if flag
+        # Solve algebraically
+        xsun, xsha, xxyl, xroot, _ = _getvegwp(gb_mol, gs0sun, gs0sha, qsatl, qaf,
+            k_soil_root, smp_l, z_col, p, c, laisun_p, laisha_p, htop_p, tsai_p,
+            ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p,
+            phs_params, RGAS_)
+        bsun = _plc(xsun, psi50[ivt_p, SUN], ck[ivt_p, SUN])
+        bsha = _plc(xsha, psi50[ivt_p, SHA], ck[ivt_p, SHA])
+    else
+        qsun = qflx_sun * _plc(xsun, psi50[ivt_p, SUN], ck[ivt_p, SUN])
+        qsha = qflx_sha * _plc(xsha, psi50[ivt_p, SHA], ck[ivt_p, SHA])
+
+        _, _, gs0sun_stressed, gs0sha_stressed = _getqflx(gb_mol, gs0sun, gs0sha,
+            qsun, qsha, qsatl, qaf, false, laisun_p, laisha_p,
+            elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p, RGAS_)
+
+        if qflx_sun > zero(T)
+            bsun = gs0sun_stressed / gs_mol_sun_in
+        else
+            bsun = _plc(xsun, psi50[ivt_p, SUN], ck[ivt_p, SUN])
+        end
+        if qflx_sha > zero(T)
+            bsha = gs0sha_stressed / gs_mol_sha_in
+        else
+            bsha = _plc(xsha, psi50[ivt_p, SHA], ck[ivt_p, SHA])
+        end
+    end
+
+    if bsun < T(0.01)
+        bsun = zero(T)
+    end
+    if bsha < T(0.01)
+        bsha = zero(T)
+    end
+
+    if night
+        gs0sun_night = bsun * gs_mol_sun_in
+        gs0sha_night = bsha * gs_mol_sha_in
+        xsun, xsha, xxyl, xroot, _ = _getvegwp(gb_mol, gs0sun_night, gs0sha_night,
+            qsatl, qaf, k_soil_root, smp_l, z_col, p, c, laisun_p, laisha_p,
+            htop_p, tsai_p, ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c,
+            forc_pbot_c, tgcm_p, phs_params, RGAS_)
+    end
+
+    return (xsun, xsha, xxyl, xroot, bsun, bsha)
 end
 
 # =====================================================================
@@ -2953,6 +3447,201 @@ function ci_func_PHS!(x::AbstractVector{<:Real}, cisun::Real, cisha::Real,
     return (fvalsun, fvalsha, gs_mol_sun, gs_mol_sha, bsun, bsha)
 end
 
+# _ci_func_PHS_core! — GPU-callable positional core of ci_func_PHS!. The vegwp
+# unknown `x` is carried as 4 named scalars (xsun..xroot) and returned updated (it
+# is only mutated when bflag routes to _calcstress). theta_cj_p/theta_ip_val/MAX_CS_
+# threaded; ps fields (ac_phs/.../an_sun/an_sha, 3D + 2D) indexed in-place — on the
+# device path `ps` is the PsnDV bundle. Returns
+# (fvalsun, fvalsha, gs_mol_sun, gs_mol_sha, bsun, bsha, xsun, xsha, xxyl, xroot).
+@inline function _ci_func_PHS_core!(xsun_w::Real, xsha_w::Real, xxyl_w::Real, xroot_w::Real,
+        cisun::Real, cisha::Real, p::Int, iv::Int, c::Int,
+        bsun::Real, bsha::Real, bflag::Bool,
+        gb_mol::Real, gs0sun::Real, gs0sha::Real,
+        gs_mol_sun::Real, gs_mol_sha::Real,
+        jesun::Real, jesha::Real, cair::Real, oair::Real,
+        lmr_z_sun::Real, lmr_z_sha::Real,
+        par_z_sun::Real, par_z_sha::Real,
+        rh_can::Real, qsatl::Real, qaf::Real,
+        ps, forc_pbot_c::Real,
+        k_soil_root, smp_l, z_col,
+        laisun_p::Real, laisha_p::Real, htop_p::Real, tsai_p::Real,
+        ivt_p::Int, nlevsoi::Int,
+        elai_p::Real, esai_p::Real, fdry_p::Real, forc_rho_c::Real, tgcm_p::Real,
+        medlynslope_val::Real, medlynintercept_val::Real,
+        theta_cj_p::Real, theta_ip_val::Real, MAX_CS_::Real, RGAS_::Real,
+        stomatalcond_mtd::Int, STOMATALCOND_MTD_BB1987_::Int,
+        STOMATALCOND_MTD_MEDLYN2011_::Int, phs_params)
+    T = typeof(cisun)
+    c3flag = ps.c3flag_patch[p]
+    ac = ps.ac_phs_patch
+    aj = ps.aj_phs_patch
+    ap = ps.ap_phs_patch
+    ag = ps.ag_phs_patch
+    vcmax_z = ps.vcmax_z_phs_patch
+    tpu_z = ps.tpu_z_phs_patch
+    kp_z = ps.kp_z_phs_patch
+    an_sun = ps.an_sun_patch
+    an_sha = ps.an_sha_patch
+    cp_p = ps.cp_patch[p]
+    kc_p = ps.kc_patch[p]
+    ko_p = ps.ko_patch[p]
+    qe_p = ps.qe_patch[p]
+    bbb_p = ps.bbb_patch[p]
+    mbb_p = ps.mbb_patch[p]
+
+    fvalsun = zero(T)
+    fvalsha = zero(T)
+
+    xsun = xsun_w; xsha = xsha_w; xxyl = xxyl_w; xroot = xroot_w
+    if bflag
+        xsun, xsha, xxyl, xroot, bsun, bsha = _calcstress(xsun, xsha, xxyl, xroot,
+            gb_mol, gs0sun, gs0sha, qsatl, qaf,
+            k_soil_root, smp_l, z_col, p, c, laisun_p, laisha_p, htop_p, tsai_p,
+            ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p,
+            phs_params, RGAS_)
+    end
+
+    @inbounds if c3flag
+        ac[p, SUN, iv] = bsun * vcmax_z[p, SUN, iv] * smooth_max(cisun - cp_p, zero(cisun)) / (cisun + kc_p * (one(T) + oair / ko_p))
+        ac[p, SHA, iv] = bsha * vcmax_z[p, SHA, iv] * smooth_max(cisha - cp_p, zero(cisha)) / (cisha + kc_p * (one(T) + oair / ko_p))
+        aj[p, SUN, iv] = jesun * smooth_max(cisun - cp_p, zero(cisun)) / (T(4.0) * cisun + T(8.0) * cp_p)
+        aj[p, SHA, iv] = jesha * smooth_max(cisha - cp_p, zero(cisha)) / (T(4.0) * cisha + T(8.0) * cp_p)
+        ap[p, SUN, iv] = T(3.0) * tpu_z[p, SUN, iv]
+        ap[p, SHA, iv] = T(3.0) * tpu_z[p, SHA, iv]
+    else
+        ac[p, SUN, iv] = bsun * vcmax_z[p, SUN, iv]
+        ac[p, SHA, iv] = bsha * vcmax_z[p, SHA, iv]
+        aj[p, SUN, iv] = qe_p * par_z_sun * T(4.6)
+        aj[p, SHA, iv] = qe_p * par_z_sha * T(4.6)
+        ap[p, SUN, iv] = kp_z[p, SUN, iv] * smooth_max(cisun, zero(cisun)) / forc_pbot_c
+        ap[p, SHA, iv] = kp_z[p, SHA, iv] * smooth_max(cisha, zero(cisha)) / forc_pbot_c
+    end
+
+    @inbounds begin
+        # Gross photosynthesis - Sunlit
+        aquad = theta_cj_p
+        bquad = -(ac[p, SUN, iv] + aj[p, SUN, iv])
+        cquad = ac[p, SUN, iv] * aj[p, SUN, iv]
+        r1, r2 = quadratic_solve(aquad, bquad, cquad)
+        ai = smooth_min(r1, r2)
+
+        aquad = theta_ip_val
+        bquad = -(ai + ap[p, SUN, iv])
+        cquad = ai * ap[p, SUN, iv]
+        r1, r2 = quadratic_solve(aquad, bquad, cquad)
+        ag[p, SUN, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
+
+        # Gross photosynthesis - Shaded
+        aquad = theta_cj_p
+        bquad = -(ac[p, SHA, iv] + aj[p, SHA, iv])
+        cquad = ac[p, SHA, iv] * aj[p, SHA, iv]
+        r1, r2 = quadratic_solve(aquad, bquad, cquad)
+        ai = smooth_min(r1, r2)
+
+        aquad = theta_ip_val
+        bquad = -(ai + ap[p, SHA, iv])
+        cquad = ai * ap[p, SHA, iv]
+        r1, r2 = quadratic_solve(aquad, bquad, cquad)
+        ag[p, SHA, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
+
+        an_sun[p, iv] = ag[p, SUN, iv] - bsun * lmr_z_sun
+        an_sha[p, iv] = ag[p, SHA, iv] - bsha * lmr_z_sha
+
+        if an_sun[p, iv] < zero(T)
+            if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011_
+                gs_mol_sun = medlynintercept_val
+            elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                gs_mol_sun = bbb_p
+            end
+            gs_mol_sun = smooth_max(bsun * gs_mol_sun, one(T))
+            fvalsun = zero(T)
+        end
+        if an_sha[p, iv] < zero(T)
+            if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011_
+                gs_mol_sha = medlynintercept_val
+            elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                gs_mol_sha = bbb_p
+            end
+            gs_mol_sha = smooth_max(bsha * gs_mol_sha, one(T))
+            fvalsha = zero(T)
+        end
+        if an_sun[p, iv] < zero(T) && an_sha[p, iv] < zero(T)
+            return (fvalsun, fvalsha, gs_mol_sun, gs_mol_sha, bsun, bsha, xsun, xsha, xxyl, xroot)
+        end
+
+        # Quadratic gs_mol calculation with an known
+        cs_sun = zero(T)
+        if an_sun[p, iv] >= zero(T)
+            cs_sun = cair - T(1.4) / gb_mol * an_sun[p, iv] * forc_pbot_c
+            cs_sun = smooth_max(cs_sun, MAX_CS_)
+        end
+
+        if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011_
+            if an_sun[p, iv] >= zero(T)
+                term = T(1.6) * an_sun[p, iv] / (cs_sun / forc_pbot_c * T(1.0e06))
+                aquad = one(T)
+                bquad = -(T(2.0) * (medlynintercept_val * T(1.0e-06) + term) +
+                          (medlynslope_val * term)^2 / (gb_mol * T(1.0e-06) * rh_can))
+                cquad = medlynintercept_val^2 * T(1.0e-12) +
+                        (T(2.0) * medlynintercept_val * T(1.0e-06) + term *
+                         (one(T) - medlynslope_val^2 / rh_can)) * term
+                r1, r2 = quadratic_solve(aquad, bquad, cquad)
+                gs_mol_sun = smooth_max(smooth_max(r1, r2) * T(1.0e06), one(T))
+            end
+            if an_sha[p, iv] >= zero(T)
+                cs_sha = cair - T(1.4) / gb_mol * an_sha[p, iv] * forc_pbot_c
+                cs_sha = smooth_max(cs_sha, MAX_CS_)
+                term = T(1.6) * an_sha[p, iv] / (cs_sha / forc_pbot_c * T(1.0e06))
+                aquad = one(T)
+                bquad = -(T(2.0) * (medlynintercept_val * T(1.0e-06) + term) +
+                          (medlynslope_val * term)^2 / (gb_mol * T(1.0e-06) * rh_can))
+                cquad = medlynintercept_val^2 * T(1.0e-12) +
+                        (T(2.0) * medlynintercept_val * T(1.0e-06) + term *
+                         (one(T) - medlynslope_val^2 / rh_can)) * term
+                r1, r2 = quadratic_solve(aquad, bquad, cquad)
+                gs_mol_sha = smooth_max(smooth_max(r1, r2) * T(1.0e06), one(T))
+            end
+        elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+            if an_sun[p, iv] >= zero(T)
+                aquad = cs_sun
+                bsun_bbb = smooth_max(bsun * bbb_p, one(T))
+                bquad = cs_sun * (gb_mol - bsun_bbb) - mbb_p * an_sun[p, iv] * forc_pbot_c
+                cquad = -gb_mol * (cs_sun * bsun_bbb + mbb_p * an_sun[p, iv] * forc_pbot_c * rh_can)
+                r1, r2 = quadratic_solve(aquad, bquad, cquad)
+                gs_mol_sun = smooth_max(smooth_max(r1, r2), bbb_p)
+            end
+            if an_sha[p, iv] >= zero(T)
+                cs_sha = cair - T(1.4) / gb_mol * an_sha[p, iv] * forc_pbot_c
+                cs_sha = smooth_max(cs_sha, MAX_CS_)
+                aquad = cs_sha
+                bsha_bbb = smooth_max(bsha * bbb_p, one(T))
+                bquad = cs_sha * (gb_mol - bsha_bbb) - mbb_p * an_sha[p, iv] * forc_pbot_c
+                cquad = -gb_mol * (cs_sha * bsha_bbb + mbb_p * an_sha[p, iv] * forc_pbot_c * rh_can)
+                r1, r2 = quadratic_solve(aquad, bquad, cquad)
+                gs_mol_sha = smooth_max(smooth_max(r1, r2), bbb_p)
+            end
+        end
+
+        # Derive new estimate for cisun, cisha
+        if an_sun[p, iv] >= zero(T)
+            if gs_mol_sun > zero(T)
+                fvalsun = cisun - cair + an_sun[p, iv] * forc_pbot_c * (T(1.4) * gs_mol_sun + T(1.6) * gb_mol) / (gb_mol * gs_mol_sun)
+            else
+                fvalsun = cisun - cair
+            end
+        end
+        if an_sha[p, iv] >= zero(T)
+            if gs_mol_sha > zero(T)
+                fvalsha = cisha - cair + an_sha[p, iv] * forc_pbot_c * (T(1.4) * gs_mol_sha + T(1.6) * gb_mol) / (gb_mol * gs_mol_sha)
+            else
+                fvalsha = cisha - cair
+            end
+        end
+    end
+
+    return (fvalsun, fvalsha, gs_mol_sun, gs_mol_sha, bsun, bsha, xsun, xsha, xxyl, xroot)
+end
+
 # =====================================================================
 # brent_PHS! — Brent's method for PHS (simultaneous sun/shade)
 # =====================================================================
@@ -3110,6 +3799,172 @@ function brent_PHS!(x1sun::Real, x2sun::Real, f1sun::Real, f2sun::Real,
     end
 
     return (b[SUN], b[SHA], gs_mol_sun, gs_mol_sha, bsun, bsha)
+end
+
+# _brent_PHS_core! — GPU-callable positional core of brent_PHS!. The length-2
+# [sun,sha] vectors are scalarized into _sun/_sha pairs; the `for phase in 1:nphs`
+# loops are unrolled into explicit sun-then-sha blocks (host order). The host
+# `while iter<itmax` with an early `return` becomes a fixed-trip `for iter in
+# 1:itmax` + `done` flag that freezes the body (live b/gs/bsun/bsha are returned).
+# bflag is constant false here → ci_func core never mutates vegwp (x passed through).
+@inline function _brent_PHS_core!(
+        x1sun::Real, x2sun::Real, f1sun::Real, f2sun::Real,
+        x1sha::Real, x2sha::Real, f1sha::Real, f2sha::Real,
+        tol::Real, p::Int, iv::Int, c::Int,
+        gb_mol::Real, jesun::Real, jesha::Real, cair::Real, oair::Real,
+        lmr_z_sun::Real, lmr_z_sha::Real, par_z_sun::Real, par_z_sha::Real,
+        rh_can::Real, gs_mol_sun::Real, gs_mol_sha::Real, bsun::Real, bsha::Real,
+        qsatl::Real, qaf::Real, ps, forc_pbot_c::Real,
+        k_soil_root, smp_l, z_col,
+        laisun_p::Real, laisha_p::Real, htop_p::Real, tsai_p::Real,
+        ivt_p::Int, nlevsoi::Int,
+        elai_p::Real, esai_p::Real, fdry_p::Real, forc_rho_c::Real, tgcm_p::Real,
+        xsun_w::Real, xsha_w::Real, xxyl_w::Real, xroot_w::Real,
+        medlynslope_val::Real, medlynintercept_val::Real,
+        theta_cj_p::Real, theta_ip_val::Real, MAX_CS_::Real, RGAS_::Real,
+        stomatalcond_mtd::Int, STOMATALCOND_MTD_BB1987_::Int,
+        STOMATALCOND_MTD_MEDLYN2011_::Int, phs_params)
+    T = typeof(x1sun)
+    itmax = 20
+    eps_val = T(1.0e-4)
+    bflag_const = false
+
+    a_sun = x1sun; a_sha = x1sha
+    b_sun = x2sun; b_sha = x2sha
+    fa_sun = f1sun; fa_sha = f1sha
+    fb_sun = f2sun; fb_sha = f2sha
+
+    c_sun = b_sun; c_sha = b_sha
+    fc_sun = fb_sun; fc_sha = fb_sha
+    d_sun = b_sun - a_sun; d_sha = b_sha - a_sha
+    e_sun = d_sun; e_sha = d_sha
+
+    done = false
+    @inbounds for iter in 1:itmax
+        if !done
+            # phase = SUN
+            if (fb_sun > zero(T) && fc_sun > zero(T)) || (fb_sun < zero(T) && fc_sun < zero(T))
+                c_sun = a_sun; fc_sun = fa_sun; d_sun = b_sun - a_sun; e_sun = d_sun
+            end
+            if abs(fc_sun) < abs(fb_sun)
+                a_sun = b_sun; b_sun = c_sun; c_sun = a_sun
+                fa_sun = fb_sun; fb_sun = fc_sun; fc_sun = fa_sun
+            end
+            # phase = SHA
+            if (fb_sha > zero(T) && fc_sha > zero(T)) || (fb_sha < zero(T) && fc_sha < zero(T))
+                c_sha = a_sha; fc_sha = fa_sha; d_sha = b_sha - a_sha; e_sha = d_sha
+            end
+            if abs(fc_sha) < abs(fb_sha)
+                a_sha = b_sha; b_sha = c_sha; c_sha = a_sha
+                fa_sha = fb_sha; fb_sha = fc_sha; fc_sha = fa_sha
+            end
+
+            tol1_sun = T(2.0) * eps_val * abs(b_sun) + T(0.5) * tol
+            tol1_sha = T(2.0) * eps_val * abs(b_sha) + T(0.5) * tol
+            xm_sun = T(0.5) * (c_sun - b_sun)
+            xm_sha = T(0.5) * (c_sha - b_sha)
+
+            if (abs(xm_sun) <= tol1_sun || fb_sun == zero(T)) &&
+               (abs(xm_sha) <= tol1_sha || fb_sha == zero(T))
+                done = true
+            else
+                # Brent step — phase SUN
+                if abs(e_sun) >= tol1_sun && abs(fa_sun) > abs(fb_sun)
+                    s_sun = fb_sun / fa_sun
+                    if a_sun == c_sun
+                        p_sun = T(2.0) * xm_sun * s_sun
+                        q_sun = one(T) - s_sun
+                    else
+                        q_sun = fa_sun / fc_sun
+                        r_sun = fb_sun / fc_sun
+                        p_sun = s_sun * (T(2.0) * xm_sun * q_sun * (q_sun - r_sun) -
+                                (b_sun - a_sun) * (r_sun - one(T)))
+                        q_sun = (q_sun - one(T)) * (r_sun - one(T)) * (s_sun - one(T))
+                    end
+                    if p_sun > zero(T)
+                        q_sun = -q_sun
+                    end
+                    p_sun = abs(p_sun)
+                    if T(2.0) * p_sun < min(T(3.0) * xm_sun * q_sun - abs(tol1_sun * q_sun),
+                                            abs(e_sun * q_sun))
+                        e_sun = d_sun
+                        d_sun = p_sun / q_sun
+                    else
+                        d_sun = xm_sun
+                        e_sun = d_sun
+                    end
+                else
+                    d_sun = xm_sun
+                    e_sun = d_sun
+                end
+                a_sun = b_sun
+                fa_sun = fb_sun
+                if abs(d_sun) > tol1_sun
+                    b_sun = b_sun + d_sun
+                else
+                    b_sun = b_sun + copysign(tol1_sun, xm_sun)
+                end
+
+                # Brent step — phase SHA
+                if abs(e_sha) >= tol1_sha && abs(fa_sha) > abs(fb_sha)
+                    s_sha = fb_sha / fa_sha
+                    if a_sha == c_sha
+                        p_sha = T(2.0) * xm_sha * s_sha
+                        q_sha = one(T) - s_sha
+                    else
+                        q_sha = fa_sha / fc_sha
+                        r_sha = fb_sha / fc_sha
+                        p_sha = s_sha * (T(2.0) * xm_sha * q_sha * (q_sha - r_sha) -
+                                (b_sha - a_sha) * (r_sha - one(T)))
+                        q_sha = (q_sha - one(T)) * (r_sha - one(T)) * (s_sha - one(T))
+                    end
+                    if p_sha > zero(T)
+                        q_sha = -q_sha
+                    end
+                    p_sha = abs(p_sha)
+                    if T(2.0) * p_sha < min(T(3.0) * xm_sha * q_sha - abs(tol1_sha * q_sha),
+                                            abs(e_sha * q_sha))
+                        e_sha = d_sha
+                        d_sha = p_sha / q_sha
+                    else
+                        d_sha = xm_sha
+                        e_sha = d_sha
+                    end
+                else
+                    d_sha = xm_sha
+                    e_sha = d_sha
+                end
+                a_sha = b_sha
+                fa_sha = fb_sha
+                if abs(d_sha) > tol1_sha
+                    b_sha = b_sha + d_sha
+                else
+                    b_sha = b_sha + copysign(tol1_sha, xm_sha)
+                end
+
+                fb_sun, fb_sha, gs_mol_sun, gs_mol_sha, bsun, bsha, _, _, _, _ =
+                    _ci_func_PHS_core!(xsun_w, xsha_w, xxyl_w, xroot_w,
+                        b_sun, b_sha, p, iv, c, bsun, bsha, bflag_const,
+                        gb_mol, gs_mol_sun, gs_mol_sha, gs_mol_sun, gs_mol_sha,
+                        jesun, jesha, cair, oair,
+                        lmr_z_sun, lmr_z_sha, par_z_sun, par_z_sha,
+                        rh_can, qsatl, qaf, ps, forc_pbot_c,
+                        k_soil_root, smp_l, z_col,
+                        laisun_p, laisha_p, htop_p, tsai_p, ivt_p, nlevsoi,
+                        elai_p, esai_p, fdry_p, forc_rho_c, tgcm_p,
+                        medlynslope_val, medlynintercept_val,
+                        theta_cj_p, theta_ip_val, MAX_CS_, RGAS_,
+                        stomatalcond_mtd, STOMATALCOND_MTD_BB1987_,
+                        STOMATALCOND_MTD_MEDLYN2011_, phs_params)
+
+                if fb_sun == zero(T) && fb_sha == zero(T)
+                    done = true
+                end
+            end
+        end
+    end
+
+    return (b_sun, b_sha, gs_mol_sun, gs_mol_sha, bsun, bsha)
 end
 
 # =====================================================================
@@ -3347,6 +4202,555 @@ function hybrid_PHS!(x0sun::Real, x0sha::Real,
     return (x0sun, x0sha, gs_mol_sun, gs_mol_sha, bsun, bsha, vegwp_p, soilflux, iter1, iter2)
 end
 
+# _hybrid_PHS_core! — GPU-callable positional core of hybrid_PHS!. The vegwp input
+# (4 named scalars vegwp0_*) is the per-iteration seed `x` (host: x=copy(vegwp_p));
+# its 4 components are reset each outer iteration and threaded through the ci_func
+# core. Both host `while true` loops become fixed-trip `for`s + done/converged flags
+# (uniform trip count, no divergent break). Final vegwp is recomputed via _getvegwp.
+# Returns (x0sun, x0sha, gs_mol_sun, gs_mol_sha, bsun, bsha, vsun, vsha, vxyl, vroot,
+# soilflux). All Float64 literals are T()-wrapped; medlyn/theta/MAX_CS threaded.
+@inline function _hybrid_PHS_core!(
+        x0sun::Real, x0sha::Real, p::Int, iv::Int, c::Int,
+        gb_mol::Real, jesun::Real, jesha::Real, cair::Real, oair::Real,
+        lmr_z_sun::Real, lmr_z_sha::Real, par_z_sun::Real, par_z_sha::Real,
+        rh_can::Real, qsatl::Real, qaf::Real, ps, forc_pbot_c::Real,
+        vegwp0_sun::Real, vegwp0_sha::Real, vegwp0_xyl::Real, vegwp0_root::Real,
+        k_soil_root, smp_l, z_col,
+        laisun_p::Real, laisha_p::Real, htop_p::Real, tsai_p::Real,
+        ivt_p::Int, nlevsoi::Int,
+        elai_p::Real, esai_p::Real, fdry_p::Real, forc_rho_c::Real, tgcm_p::Real,
+        medlynslope_val::Real, medlynintercept_val::Real,
+        theta_cj_p::Real, theta_ip_val::Real, MAX_CS_::Real, RGAS_::Real,
+        stomatalcond_mtd::Int, STOMATALCOND_MTD_BB1987_::Int,
+        STOMATALCOND_MTD_MEDLYN2011_::Int, phs_params)
+    T = typeof(x0sun)
+    toldb = T(1.0e-2)
+    eps_val = T(1.0e-2)
+    eps1 = T(1.0e-4)
+    itmax = 3
+
+    x1sun = x0sun
+    x1sha = x0sha
+    bflag = false
+    b0sun = -one(T)
+    b0sha = -one(T)
+    gs0sun = zero(T)
+    gs0sha = zero(T)
+    bsun = one(T)
+    bsha = one(T)
+    gs_mol_sun = zero(T)
+    gs_mol_sha = zero(T)
+    dbsun = zero(T)
+    dbsha = zero(T)
+
+    outer_done = false
+    @inbounds for io in 1:(itmax + 1)
+        if !outer_done
+            # x = copy(vegwp_p): reset the working vegwp scalars each outer iter
+            xsun_w = vegwp0_sun; xsha_w = vegwp0_sha; xxyl_w = vegwp0_xyl; xroot_w = vegwp0_root
+
+            x0sun = max(T(0.1), x1sun)
+            x1sun = T(0.99) * x1sun
+            x0sha = max(T(0.1), x1sha)
+            x1sha = T(0.99) * x1sha
+            tolsun = abs(x1sun) * eps_val
+            tolsha = abs(x1sha) * eps_val
+
+            # First ci_func_PHS call (updates bsun/bsha except first iter; may mutate x)
+            f0sun, f0sha, gs_mol_sun, gs_mol_sha, bsun, bsha, xsun_w, xsha_w, xxyl_w, xroot_w =
+                _ci_func_PHS_core!(xsun_w, xsha_w, xxyl_w, xroot_w,
+                    x0sun, x0sha, p, iv, c, bsun, bsha, bflag,
+                    gb_mol, gs0sun, gs0sha, gs_mol_sun, gs_mol_sha,
+                    jesun, jesha, cair, oair, lmr_z_sun, lmr_z_sha,
+                    par_z_sun, par_z_sha, rh_can, qsatl, qaf, ps, forc_pbot_c,
+                    k_soil_root, smp_l, z_col, laisun_p, laisha_p, htop_p, tsai_p,
+                    ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, tgcm_p,
+                    medlynslope_val, medlynintercept_val,
+                    theta_cj_p, theta_ip_val, MAX_CS_, RGAS_,
+                    stomatalcond_mtd, STOMATALCOND_MTD_BB1987_,
+                    STOMATALCOND_MTD_MEDLYN2011_, phs_params)
+
+            dbsun = b0sun - bsun
+            dbsha = b0sha - bsha
+            b0sun = bsun
+            b0sha = bsha
+            bflag = false
+
+            # Second ci_func_PHS call (second point)
+            f1sun, f1sha, gs_mol_sun, gs_mol_sha, bsun, bsha, xsun_w, xsha_w, xxyl_w, xroot_w =
+                _ci_func_PHS_core!(xsun_w, xsha_w, xxyl_w, xroot_w,
+                    x1sun, x1sha, p, iv, c, bsun, bsha, bflag,
+                    gb_mol, gs0sun, gs0sha, gs_mol_sun, gs_mol_sha,
+                    jesun, jesha, cair, oair, lmr_z_sun, lmr_z_sha,
+                    par_z_sun, par_z_sha, rh_can, qsatl, qaf, ps, forc_pbot_c,
+                    k_soil_root, smp_l, z_col, laisun_p, laisha_p, htop_p, tsai_p,
+                    ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, tgcm_p,
+                    medlynslope_val, medlynintercept_val,
+                    theta_cj_p, theta_ip_val, MAX_CS_, RGAS_,
+                    stomatalcond_mtd, STOMATALCOND_MTD_BB1987_,
+                    STOMATALCOND_MTD_MEDLYN2011_, phs_params)
+
+            minf = abs(f1sun + f1sha)
+            minxsun = x1sun
+            minxsha = x1sha
+
+            iter2 = 0
+            inner_done = false
+            for ii in 1:(itmax + 2)
+                if !inner_done
+                    if abs(f0sun) < eps1 && abs(f0sha) < eps1
+                        x1sun = x0sun
+                        x1sha = x0sha
+                        inner_done = true
+                    elseif abs(f1sun) < eps1 && abs(f1sha) < eps1
+                        inner_done = true
+                    else
+                        iter2 += 1
+                        if (f1sun - f0sun) == zero(T)
+                            dxsun = T(0.5) * (x1sun + x0sun) - x1sun
+                        else
+                            dxsun = -f1sun * (x1sun - x0sun) / (f1sun - f0sun)
+                        end
+                        if (f1sha - f0sha) == zero(T)
+                            dxsha = T(0.5) * (x1sha + x0sha) - x1sha
+                        else
+                            dxsha = -f1sha * (x1sha - x0sha) / (f1sha - f0sha)
+                        end
+                        x0sun = x1sun
+                        x1sun = x1sun + dxsun
+                        x0sha = x1sha
+                        x1sha = x1sha + dxsha
+
+                        f1sun, f1sha, gs_mol_sun, gs_mol_sha, bsun, bsha, xsun_w, xsha_w, xxyl_w, xroot_w =
+                            _ci_func_PHS_core!(xsun_w, xsha_w, xxyl_w, xroot_w,
+                                x1sun, x1sha, p, iv, c, bsun, bsha, bflag,
+                                gb_mol, gs0sun, gs0sha, gs_mol_sun, gs_mol_sha,
+                                jesun, jesha, cair, oair, lmr_z_sun, lmr_z_sha,
+                                par_z_sun, par_z_sha, rh_can, qsatl, qaf, ps, forc_pbot_c,
+                                k_soil_root, smp_l, z_col, laisun_p, laisha_p, htop_p, tsai_p,
+                                ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, tgcm_p,
+                                medlynslope_val, medlynintercept_val,
+                                theta_cj_p, theta_ip_val, MAX_CS_, RGAS_,
+                                stomatalcond_mtd, STOMATALCOND_MTD_BB1987_,
+                                STOMATALCOND_MTD_MEDLYN2011_, phs_params)
+
+                        if abs(dxsun) < tolsun && abs(dxsha) < tolsha
+                            x0sun = x1sun
+                            x0sha = x1sha
+                            inner_done = true
+                        else
+                            if iter2 == 1
+                                minf = abs(f1sun + f1sha)
+                                minxsun = x1sun
+                                minxsha = x1sha
+                            else
+                                if abs(f1sun + f1sha) < minf
+                                    minf = abs(f1sun + f1sha)
+                                    minxsun = x1sun
+                                    minxsha = x1sha
+                                end
+                            end
+
+                            if abs(f1sun) < eps1 && abs(f1sha) < eps1
+                                inner_done = true
+                            elseif f1sun * f0sun < zero(T) && f1sha * f0sha < zero(T)
+                                xsun, xsha, gs_mol_sun, gs_mol_sha, bsun, bsha = _brent_PHS_core!(
+                                    x0sun, x1sun, f0sun, f1sun, x0sha, x1sha, f0sha, f1sha,
+                                    tolsun, p, iv, c, gb_mol, jesun, jesha, cair, oair,
+                                    lmr_z_sun, lmr_z_sha, par_z_sun, par_z_sha, rh_can,
+                                    gs_mol_sun, gs_mol_sha, bsun, bsha, qsatl, qaf, ps, forc_pbot_c,
+                                    k_soil_root, smp_l, z_col, laisun_p, laisha_p, htop_p, tsai_p,
+                                    ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, tgcm_p,
+                                    xsun_w, xsha_w, xxyl_w, xroot_w,
+                                    medlynslope_val, medlynintercept_val,
+                                    theta_cj_p, theta_ip_val, MAX_CS_, RGAS_,
+                                    stomatalcond_mtd, STOMATALCOND_MTD_BB1987_,
+                                    STOMATALCOND_MTD_MEDLYN2011_, phs_params)
+                                x0sun = xsun
+                                x0sha = xsha
+                                inner_done = true
+                            elseif iter2 > itmax
+                                x1sun = minxsun
+                                x1sha = minxsha
+                                f1sun, f1sha, gs_mol_sun, gs_mol_sha, bsun, bsha, xsun_w, xsha_w, xxyl_w, xroot_w =
+                                    _ci_func_PHS_core!(xsun_w, xsha_w, xxyl_w, xroot_w,
+                                        x1sun, x1sha, p, iv, c, bsun, bsha, bflag,
+                                        gb_mol, gs0sun, gs0sha, gs_mol_sun, gs_mol_sha,
+                                        jesun, jesha, cair, oair, lmr_z_sun, lmr_z_sha,
+                                        par_z_sun, par_z_sha, rh_can, qsatl, qaf, ps, forc_pbot_c,
+                                        k_soil_root, smp_l, z_col, laisun_p, laisha_p, htop_p, tsai_p,
+                                        ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, tgcm_p,
+                                        medlynslope_val, medlynintercept_val,
+                                        theta_cj_p, theta_ip_val, MAX_CS_, RGAS_,
+                                        stomatalcond_mtd, STOMATALCOND_MTD_BB1987_,
+                                        STOMATALCOND_MTD_MEDLYN2011_, phs_params)
+                                inner_done = true
+                            end
+                        end
+                    end
+                end
+            end  # inner loop
+
+            # Update unstressed stomatal conductance
+            if bsun > T(0.01)
+                gs0sun = gs_mol_sun / bsun
+            end
+            if bsha > T(0.01)
+                gs0sha = gs_mol_sha / bsha
+            end
+            bflag = true
+
+            if abs(dbsun) < toldb && abs(dbsha) < toldb
+                outer_done = true
+            elseif io > itmax
+                outer_done = true
+            end
+        end
+    end  # outer loop
+
+    x0sun = x1sun
+    x0sha = x1sha
+
+    # Final vegwp (algebraic), recomputed from the converged gs_mol
+    vsun, vsha, vxyl, vroot, soilflux = _getvegwp(gb_mol, gs_mol_sun, gs_mol_sha,
+        qsatl, qaf, k_soil_root, smp_l, z_col, p, c, laisun_p, laisha_p, htop_p,
+        tsai_p, ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c,
+        tgcm_p, phs_params, RGAS_)
+
+    if soilflux < zero(T)
+        soilflux = zero(T)
+    end
+
+    return (x0sun, x0sha, gs_mol_sun, gs_mol_sha, bsun, bsha,
+            vsun, vsha, vxyl, vroot, soilflux)
+end
+
+# =====================================================================
+# PHS Pass 3 kernel — per-patch leaf photosynthesis + the simultaneous
+# sun/shade plant-hydraulic-stress Newton solve, run ENTIRELY in-thread.
+# ONE THREAD PER PATCH (p = @index(Global) over ndrange = length(bounds_patch));
+# the inner `for iv in 1:nrad[p]` loop runs serially per thread (per-patch
+# outputs vegwp[p,:]/qflx/rh_leaf/gb_mol are written within the iv loop, so
+# flattening to (p,iv) would race — per-patch is race-free, matches serial order).
+# Calls the GPU-callable PHS chain (_hybrid_PHS_core! → _ci_func_PHS_core! →
+# _brent_PHS_core!/_calcstress → _spacF/_spacA/_getvegwp/_getqflx), which read
+# NO globals. The vegwp length-4 unknown is carried as 4 named scalars; the
+# nlevsoi soil stack (k_soil_root[p,·]/smp_l[c,·]/z_col[c,·]) is indexed in-kernel
+# (full 2D arrays + (p,c), no device slices).
+# =====================================================================
+# Scalar bundle (Metal ~31-arg limit). theta_cj[ivt] comes from phs_params.theta_cj.
+struct PsnPhsP3Scalars{S}
+    fnps::S; theta_psii::S; theta_ip::S; medlyn_slope_override::S
+    RGAS_::S; MAX_CS_::S; MEDLYN_RH_CAN_MAX_::S; MEDLYN_RH_CAN_FACT_::S
+    rsmax0::S; SPVAL_::S
+end
+
+@kernel function _psn_phs_pass3_kernel!(ps, phs_params,
+        @Const(mask_patch), @Const(col_of_patch), @Const(ivt), @Const(nrad),
+        @Const(medlynslope_pft), @Const(medlynintercept_pft), @Const(crop_pft),
+        @Const(forc_pbot), @Const(tgcm), @Const(rb), @Const(eair), @Const(esat_tv),
+        @Const(cair), @Const(oair), @Const(qsatl), @Const(qaf),
+        @Const(laisun), @Const(laisha), @Const(htop), @Const(tsai),
+        @Const(elai), @Const(esai), @Const(fdry), @Const(forc_rho),
+        @Const(par_z_sun_in), @Const(par_z_sha_in), @Const(jmax_z_local),
+        @Const(o3coefg_sun), @Const(o3coefg_sha), @Const(o3coefv_sun), @Const(o3coefv_sha),
+        @Const(k_soil_root), @Const(smp_l), @Const(z_col),
+        vegwp, vegwp_ln, qflx_tran_veg, bsun_arr, bsha_arr,
+        rh_leaf_sun, rh_leaf_sha,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        @Const(is_near_local_noon), sc, nlevsoi::Int,
+        modifyphoto_and_lmr_forcrop::Bool, stomatalcond_mtd::Int,
+        STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
+    p = @index(Global)
+    @inbounds if mask_patch[p]
+        T = eltype(forc_pbot)
+        c = col_of_patch[p]
+        ivt_p = ivt[p]
+
+        fnps = sc.fnps; theta_psii = sc.theta_psii; theta_ip_val = sc.theta_ip
+        RGAS_ = sc.RGAS_; MAX_CS_ = sc.MAX_CS_; rsmax0 = sc.rsmax0; SPVAL_ = sc.SPVAL_
+        MEDLYN_RH_CAN_MAX_ = sc.MEDLYN_RH_CAN_MAX_; MEDLYN_RH_CAN_FACT_ = sc.MEDLYN_RH_CAN_FACT_
+
+        theta_cj_p = phs_params.theta_cj[ivt_p]
+        # Medlyn slope: use override if set, else PFT default
+        medlynslope_p = isnan(sc.medlyn_slope_override) ? medlynslope_pft[ivt_p] : sc.medlyn_slope_override
+        medlynintercept_p = medlynintercept_pft[ivt_p]
+
+        ac = ps.ac_phs_patch; aj = ps.aj_phs_patch; ap = ps.ap_phs_patch; ag = ps.ag_phs_patch
+        an_sun = ps.an_sun_patch; an_sha = ps.an_sha_patch
+        gs_mol_sun = ps.gs_mol_sun_patch; gs_mol_sha = ps.gs_mol_sha_patch
+        gs_mol_sun_ln = ps.gs_mol_sun_ln_patch; gs_mol_sha_ln = ps.gs_mol_sha_ln_patch
+        bbb = ps.bbb_patch; vpd_can = ps.vpd_can_patch; c3flag = ps.c3flag_patch
+        gb_mol_arr = ps.gb_mol_patch
+        ci_z_sun = ps.cisun_z_patch; ci_z_sha = ps.cisha_z_patch
+        rs_z_sun = ps.rssun_z_patch; rs_z_sha = ps.rssha_z_patch
+        lmr_z_sun = ps.lmrsun_z_patch; lmr_z_sha = ps.lmrsha_z_patch
+        psn_z_sun = ps.psnsun_z_patch; psn_z_sha = ps.psnsha_z_patch
+
+        is_crop = crop_pft[ivt_p] > T(0.5)  # round(Int,·)==0 ⟺ <0.5 (0/1 valued)
+
+        cf = forc_pbot[p] / (RGAS_ * tgcm[p]) * T(1.0e06)
+        gb = one(T) / rb[p]
+        gb_mol_arr[p] = gb * cf
+
+        for iv in 1:nrad[p]
+            if par_z_sun_in[p, iv] <= zero(T)  # night time
+                vegwp[p, SUN] = one(T)  # signal for night
+
+                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                    gsminsun = bbb[p]
+                    gsminsha = bbb[p]
+                else
+                    gsminsun = medlynintercept_p
+                    gsminsha = medlynintercept_p
+                end
+
+                vsun, vsha, vxyl, vroot, bsun_val, bsha_val = _calcstress(
+                    vegwp[p, SUN], vegwp[p, SHA], vegwp[p, XYL], vegwp[p, ROOT_SEG],
+                    gb_mol_arr[p], gsminsun, gsminsha, qsatl[p], qaf[p],
+                    k_soil_root, smp_l, z_col, p, c,
+                    laisun[p], laisha[p], htop[p], tsai[p], ivt_p, nlevsoi,
+                    elai[p], esai[p], fdry[p], forc_rho[c], forc_pbot[p], tgcm[p],
+                    phs_params, RGAS_)
+                vegwp[p, SUN] = vsun; vegwp[p, SHA] = vsha
+                vegwp[p, XYL] = vxyl; vegwp[p, ROOT_SEG] = vroot
+                bsun_arr[p] = bsun_val
+                bsha_arr[p] = bsha_val
+
+                ac[p, SUN, iv] = zero(T)
+                aj[p, SUN, iv] = zero(T)
+                ap[p, SUN, iv] = zero(T)
+                ag[p, SUN, iv] = zero(T)
+                if !is_crop || !modifyphoto_and_lmr_forcrop
+                    an_sun[p, iv] = ag[p, SUN, iv] - bsun_arr[p] * lmr_z_sun[p, iv]
+                else
+                    an_sun[p, iv] = ag[p, SUN, iv] - lmr_z_sun[p, iv]
+                end
+                psn_z_sun[p, iv] = zero(T)
+                psn_wc_z_sun[p, iv] = zero(T)
+                psn_wj_z_sun[p, iv] = zero(T)
+                psn_wp_z_sun[p, iv] = zero(T)
+                rs_z_sun[p, iv] = smooth_min(rsmax0, one(T) / smooth_max(bsun_arr[p] * gsminsun, one(T)) * cf)
+                ci_z_sun[p, iv] = zero(T)
+                rh_leaf_sun[p] = zero(T)
+
+                ac[p, SHA, iv] = zero(T)
+                aj[p, SHA, iv] = zero(T)
+                ap[p, SHA, iv] = zero(T)
+                ag[p, SHA, iv] = zero(T)
+                if !is_crop || !modifyphoto_and_lmr_forcrop
+                    an_sha[p, iv] = ag[p, SHA, iv] - bsha_arr[p] * lmr_z_sha[p, iv]
+                else
+                    an_sha[p, iv] = ag[p, SHA, iv] - lmr_z_sha[p, iv]
+                end
+                psn_z_sha[p, iv] = zero(T)
+                psn_wc_z_sha[p, iv] = zero(T)
+                psn_wj_z_sha[p, iv] = zero(T)
+                psn_wp_z_sha[p, iv] = zero(T)
+                rs_z_sha[p, iv] = smooth_min(rsmax0, one(T) / smooth_max(bsha_arr[p] * gsminsha, one(T)) * cf)
+                ci_z_sha[p, iv] = zero(T)
+                rh_leaf_sha[p] = zero(T)
+
+            else  # day time
+                ceair = smooth_min(eair[p], esat_tv[p])
+                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
+                    rh_can = ceair / esat_tv[p]
+                else
+                    rh_can = smooth_max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX_) * MEDLYN_RH_CAN_FACT_
+                    vpd_can[p] = rh_can
+                end
+
+                # Electron transport - Sun
+                qabs = T(0.5) * (one(T) - fnps) * par_z_sun_in[p, iv] * T(4.6)
+                aquad = theta_psii
+                bquad = -(qabs + jmax_z_local[p, SUN, iv])
+                cquad = qabs * jmax_z_local[p, SUN, iv]
+                r1, r2 = quadratic_solve(aquad, bquad, cquad)
+                je_sun = smooth_min(r1, r2)
+
+                # Electron transport - Shade
+                qabs = T(0.5) * (one(T) - fnps) * par_z_sha_in[p, iv] * T(4.6)
+                aquad = theta_psii
+                bquad = -(qabs + jmax_z_local[p, SHA, iv])
+                cquad = qabs * jmax_z_local[p, SHA, iv]
+                r1, r2 = quadratic_solve(aquad, bquad, cquad)
+                je_sha = smooth_min(r1, r2)
+
+                # Initial ci guess
+                if c3flag[p]
+                    ci_z_sun[p, iv] = T(0.7) * cair[p]
+                    ci_z_sha[p, iv] = T(0.7) * cair[p]
+                else
+                    ci_z_sun[p, iv] = T(0.4) * cair[p]
+                    ci_z_sha[p, iv] = T(0.4) * cair[p]
+                end
+
+                # Solve for ci and gs via the in-thread hybrid_PHS chain
+                cisun_sol, cisha_sol, gs_mol_sun_val, gs_mol_sha_val,
+                    bsun_val, bsha_val, vsun, vsha, vxyl, vroot, soilflux =
+                    _hybrid_PHS_core!(ci_z_sun[p, iv], ci_z_sha[p, iv], p, iv, c,
+                        gb_mol_arr[p], je_sun, je_sha, cair[p], oair[p],
+                        lmr_z_sun[p, iv], lmr_z_sha[p, iv],
+                        par_z_sun_in[p, iv], par_z_sha_in[p, iv],
+                        rh_can, qsatl[p], qaf[p], ps, forc_pbot[p],
+                        vegwp[p, SUN], vegwp[p, SHA], vegwp[p, XYL], vegwp[p, ROOT_SEG],
+                        k_soil_root, smp_l, z_col,
+                        laisun[p], laisha[p], htop[p], tsai[p], ivt_p, nlevsoi,
+                        elai[p], esai[p], fdry[p], forc_rho[c], tgcm[p],
+                        medlynslope_p, medlynintercept_p,
+                        theta_cj_p, theta_ip_val, MAX_CS_, RGAS_,
+                        stomatalcond_mtd, STOMATALCOND_MTD_BB1987_,
+                        STOMATALCOND_MTD_MEDLYN2011_, phs_params)
+                ci_z_sun[p, iv] = cisun_sol
+                ci_z_sha[p, iv] = cisha_sol
+                vegwp[p, SUN] = vsun; vegwp[p, SHA] = vsha
+                vegwp[p, XYL] = vxyl; vegwp[p, ROOT_SEG] = vroot
+                gs_mol_sun[p, iv] = gs_mol_sun_val
+                gs_mol_sha[p, iv] = gs_mol_sha_val
+                bsun_arr[p] = bsun_val
+                bsha_arr[p] = bsha_val
+                qflx_tran_veg[p] = smooth_max(soilflux, zero(soilflux))
+
+                # gs min for error checking
+                if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011_
+                    gsminsun = medlynintercept_p
+                    gsminsha = medlynintercept_p
+                else
+                    gsminsun = bbb[p]
+                    gsminsha = bbb[p]
+                end
+
+                if an_sun[p, iv] < zero(T)
+                    gs_mol_sun[p, iv] = smooth_max(bsun_arr[p] * gsminsun, one(T))
+                end
+                if an_sha[p, iv] < zero(T)
+                    gs_mol_sha[p, iv] = smooth_max(bsha_arr[p] * gsminsha, one(T))
+                end
+
+                # Local noon gs
+                if is_near_local_noon[p]
+                    gs_mol_sun_ln[p, iv] = gs_mol_sun[p, iv]
+                    gs_mol_sha_ln[p, iv] = gs_mol_sha[p, iv]
+                    vegwp_ln[p, SUN] = vegwp[p, SUN]; vegwp_ln[p, SHA] = vegwp[p, SHA]
+                    vegwp_ln[p, XYL] = vegwp[p, XYL]; vegwp_ln[p, ROOT_SEG] = vegwp[p, ROOT_SEG]
+                else
+                    gs_mol_sun_ln[p, iv] = SPVAL_
+                    gs_mol_sha_ln[p, iv] = SPVAL_
+                    vegwp_ln[p, SUN] = SPVAL_; vegwp_ln[p, SHA] = SPVAL_
+                    vegwp_ln[p, XYL] = SPVAL_; vegwp_ln[p, ROOT_SEG] = SPVAL_
+                end
+
+                # Final cs and ci
+                cs_sun = cair[p] - T(1.4) / gb_mol_arr[p] * an_sun[p, iv] * forc_pbot[p]
+                cs_sun = smooth_max(cs_sun, MAX_CS_)
+                ci_z_sun[p, iv] = cair[p] - an_sun[p, iv] * forc_pbot[p] *
+                    (T(1.4) * gs_mol_sun[p, iv] + T(1.6) * gb_mol_arr[p]) /
+                    (gb_mol_arr[p] * gs_mol_sun[p, iv])
+                ci_z_sun[p, iv] = smooth_max(ci_z_sun[p, iv], T(1.0e-06))
+
+                cs_sha = cair[p] - T(1.4) / gb_mol_arr[p] * an_sha[p, iv] * forc_pbot[p]
+                cs_sha = smooth_max(cs_sha, MAX_CS_)
+                ci_z_sha[p, iv] = cair[p] - an_sha[p, iv] * forc_pbot[p] *
+                    (T(1.4) * gs_mol_sha[p, iv] + T(1.6) * gb_mol_arr[p]) /
+                    (gb_mol_arr[p] * gs_mol_sha[p, iv])
+                ci_z_sha[p, iv] = smooth_max(ci_z_sha[p, iv], T(1.0e-06))
+
+                # Convert to resistance
+                gs = max(gs_mol_sun[p, iv], one(T)) / cf
+                rs_z_sun[p, iv] = smooth_min(one(T) / gs, rsmax0)
+                rs_z_sun[p, iv] = rs_z_sun[p, iv] / o3coefg_sun[p]
+                gs = max(gs_mol_sha[p, iv], one(T)) / cf
+                rs_z_sha[p, iv] = smooth_min(one(T) / gs, rsmax0)
+                rs_z_sha[p, iv] = rs_z_sha[p, iv] / o3coefg_sha[p]
+
+                # Photosynthesis output
+                psn_z_sun[p, iv] = ag[p, SUN, iv] * o3coefv_sun[p]
+                psn_wc_z_sun[p, iv] = zero(T)
+                psn_wj_z_sun[p, iv] = zero(T)
+                psn_wp_z_sun[p, iv] = zero(T)
+                if ac[p, SUN, iv] <= aj[p, SUN, iv] && ac[p, SUN, iv] <= ap[p, SUN, iv]
+                    psn_wc_z_sun[p, iv] = psn_z_sun[p, iv]
+                elseif aj[p, SUN, iv] < ac[p, SUN, iv] && aj[p, SUN, iv] <= ap[p, SUN, iv]
+                    psn_wj_z_sun[p, iv] = psn_z_sun[p, iv]
+                elseif ap[p, SUN, iv] < ac[p, SUN, iv] && ap[p, SUN, iv] < aj[p, SUN, iv]
+                    psn_wp_z_sun[p, iv] = psn_z_sun[p, iv]
+                end
+
+                psn_z_sha[p, iv] = ag[p, SHA, iv] * o3coefv_sha[p]
+                psn_wc_z_sha[p, iv] = zero(T)
+                psn_wj_z_sha[p, iv] = zero(T)
+                psn_wp_z_sha[p, iv] = zero(T)
+                if ac[p, SHA, iv] <= aj[p, SHA, iv] && ac[p, SHA, iv] <= ap[p, SHA, iv]
+                    psn_wc_z_sha[p, iv] = psn_z_sha[p, iv]
+                elseif aj[p, SHA, iv] < ac[p, SHA, iv] && aj[p, SHA, iv] <= ap[p, SHA, iv]
+                    psn_wj_z_sha[p, iv] = psn_z_sha[p, iv]
+                elseif ap[p, SHA, iv] < ac[p, SHA, iv] && ap[p, SHA, iv] < aj[p, SHA, iv]
+                    psn_wp_z_sha[p, iv] = psn_z_sha[p, iv]
+                end
+
+                # Relative humidity at leaf surface
+                hs = (gb_mol_arr[p] * ceair + gs_mol_sun[p, iv] * esat_tv[p]) /
+                     ((gb_mol_arr[p] + gs_mol_sun[p, iv]) * esat_tv[p])
+                rh_leaf_sun[p] = hs
+                hs = (gb_mol_arr[p] * ceair + gs_mol_sha[p, iv] * esat_tv[p]) /
+                     ((gb_mol_arr[p] + gs_mol_sha[p, iv]) * esat_tv[p])
+                rh_leaf_sha[p] = hs
+            end
+        end
+    end
+end
+
+# Host launcher for the PHS Pass-3 kernel. GPU-hostile values (params_inst fields,
+# the Medlyn override, the is_near_local_noon function, module-global constants) are
+# resolved to host scalars / a per-patch Bool vector before the launch.
+function psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
+        medlynslope_pft, medlynintercept_pft, crop_pft,
+        forc_pbot, tgcm, rb, eair, esat_tv, cair, oair, qsatl, qaf,
+        laisun, laisha, htop, tsai, elai, esai, fdry, forc_rho,
+        par_z_sun_in, par_z_sha_in, jmax_z_local,
+        o3coefg_sun, o3coefg_sha, o3coefv_sun, o3coefv_sha,
+        k_soil_root, smp_l, z_col,
+        vegwp, vegwp_ln, qflx_tran_veg, bsun_arr, bsha_arr,
+        rh_leaf_sun, rh_leaf_sha,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        nlevsoi::Int, modifyphoto_and_lmr_forcrop::Bool, stomatalcond_mtd::Int,
+        rsmax0, overrides::CalibrationOverrides, is_near_local_noon_fn::Function,
+        bounds_patch)
+    T = eltype(forc_pbot)
+    sc = PsnPhsP3Scalars{T}(T(params_inst.fnps), T(params_inst.theta_psii),
+        T(params_inst.theta_ip), T(overrides.medlyn_slope),
+        T(RGAS), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT),
+        T(rsmax0), T(SPVAL))
+    # is_near_local_noon resolved to a per-patch Bool vector on the host (the
+    # closure is not GPU-callable). On the device path this is copied onto the
+    # backend so the kernel reads a device Bool array.
+    nln = [is_near_local_noon_fn(p) for p in eachindex(mask_patch)]
+    is_near_local_noon = similar(mask_patch, Bool, length(nln))
+    copyto!(is_near_local_noon, nln)
+    phs_params = _psn_phs_params(forc_pbot)
+    dv = _psn_dv(ps)
+    be = _kernel_backend(forc_pbot)
+    _psn_phs_pass3_kernel!(be)(dv, phs_params,
+        mask_patch, col_of_patch, ivt, nrad,
+        medlynslope_pft, medlynintercept_pft, crop_pft,
+        forc_pbot, tgcm, rb, eair, esat_tv, cair, oair, qsatl, qaf,
+        laisun, laisha, htop, tsai, elai, esai, fdry, forc_rho,
+        par_z_sun_in, par_z_sha_in, jmax_z_local,
+        o3coefg_sun, o3coefg_sha, o3coefv_sun, o3coefv_sha,
+        k_soil_root, smp_l, z_col,
+        vegwp, vegwp_ln, qflx_tran_veg, bsun_arr, bsha_arr,
+        rh_leaf_sun, rh_leaf_sha,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        is_near_local_noon, sc, nlevsoi, modifyphoto_and_lmr_forcrop,
+        stomatalcond_mtd, STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
+        ndrange = length(bounds_patch))
+    KA.synchronize(be)
+    return nothing
+end
+
 # =====================================================================
 # photosynthesis_hydrstress! — Main PHS photosynthesis
 # =====================================================================
@@ -3528,217 +4932,24 @@ function photosynthesis_hydrstress!(ps,
         vcmaxcint_sha, nrad, use_cn, use_c13, leaf_mr_vcm, nlevcan,
         stomatalcond_mtd, light_inhibit, leafresp_method, overrides, bounds_patch)
 
-    # ---- Pass 3: Leaf-level photosynthesis ----
-    for p in bounds_patch
-        mask_patch[p] || continue
-        c = col_of_patch[p]
-        ivt_p = ivt[p]
-
-        # Medlyn slope: use override if set, else PFT default
-        medlynslope_p = isnan(overrides.medlyn_slope) ? medlynslope_pft[ivt_p] : overrides.medlyn_slope
-
-        cf = forc_pbot[p] / (RGAS * tgcm[p]) * 1.0e06
-        gb = 1.0 / rb[p]
-        gb_mol_arr[p] = gb * cf
-
-        for iv in 1:nrad[p]
-            if par_z_sun_in[p, iv] <= 0.0  # night time
-                vegwp[p, SUN] = 1.0  # signal for night
-
-                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                    gsminsun = bbb[p]
-                    gsminsha = bbb[p]
-                elseif stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
-                    gsminsun = medlynintercept_pft[ivt_p]
-                    gsminsha = medlynintercept_pft[ivt_p]
-                end
-
-                vegwp_view = vegwp[p, :]
-                _, bsun_val, bsha_val = calcstress!(p, c, vegwp_view,
-                    gb_mol_arr[p], gsminsun, gsminsha, qsatl[p], qaf[p],
-                    k_soil_root[p, :], smp_l[c, :], z_col[c, :],
-                    laisun[p], laisha[p], htop[p], tsai[p], ivt_p, nlevsoi,
-                    elai[p], esai[p], fdry[p], forc_rho[c], forc_pbot[p], tgcm[p])
-                vegwp[p, :] .= vegwp_view
-                bsun_arr[p] = bsun_val
-                bsha_arr[p] = bsha_val
-
-                ac[p, SUN, iv] = 0.0
-                aj[p, SUN, iv] = 0.0
-                ap[p, SUN, iv] = 0.0
-                ag[p, SUN, iv] = 0.0
-                if round(Int, crop_pft[ivt_p]) == 0 || !modifyphoto_and_lmr_forcrop
-                    an_sun[p, iv] = ag[p, SUN, iv] - bsun_arr[p] * lmr_z_sun[p, iv]
-                else
-                    an_sun[p, iv] = ag[p, SUN, iv] - lmr_z_sun[p, iv]
-                end
-                psn_z_sun[p, iv] = 0.0
-                psn_wc_z_sun[p, iv] = 0.0
-                psn_wj_z_sun[p, iv] = 0.0
-                psn_wp_z_sun[p, iv] = 0.0
-                rs_z_sun[p, iv] = smooth_min(rsmax0, 1.0 / smooth_max(bsun_arr[p] * gsminsun, 1.0) * cf)
-                ci_z_sun[p, iv] = 0.0
-                rh_leaf_sun[p] = 0.0
-
-                ac[p, SHA, iv] = 0.0
-                aj[p, SHA, iv] = 0.0
-                ap[p, SHA, iv] = 0.0
-                ag[p, SHA, iv] = 0.0
-                if round(Int, crop_pft[ivt_p]) == 0 || !modifyphoto_and_lmr_forcrop
-                    an_sha[p, iv] = ag[p, SHA, iv] - bsha_arr[p] * lmr_z_sha[p, iv]
-                else
-                    an_sha[p, iv] = ag[p, SHA, iv] - lmr_z_sha[p, iv]
-                end
-                psn_z_sha[p, iv] = 0.0
-                psn_wc_z_sha[p, iv] = 0.0
-                psn_wj_z_sha[p, iv] = 0.0
-                psn_wp_z_sha[p, iv] = 0.0
-                rs_z_sha[p, iv] = smooth_min(rsmax0, 1.0 / smooth_max(bsha_arr[p] * gsminsha, 1.0) * cf)
-                ci_z_sha[p, iv] = 0.0
-                rh_leaf_sha[p] = 0.0
-
-            else  # day time
-                ceair = smooth_min(eair[p], esat_tv[p])
-                if stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                    rh_can = ceair / esat_tv[p]
-                elseif stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
-                    rh_can = smooth_max((esat_tv[p] - ceair), MEDLYN_RH_CAN_MAX) * MEDLYN_RH_CAN_FACT
-                    vpd_can[p] = rh_can
-                end
-
-                # Electron transport - Sun
-                qabs = 0.5 * (1.0 - params_inst.fnps) * par_z_sun_in[p, iv] * 4.6
-                aquad = params_inst.theta_psii
-                bquad = -(qabs + jmax_z_local[p, SUN, iv])
-                cquad = qabs * jmax_z_local[p, SUN, iv]
-                r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je_sun = smooth_min(r1, r2)
-
-                # Electron transport - Shade
-                qabs = 0.5 * (1.0 - params_inst.fnps) * par_z_sha_in[p, iv] * 4.6
-                aquad = params_inst.theta_psii
-                bquad = -(qabs + jmax_z_local[p, SHA, iv])
-                cquad = qabs * jmax_z_local[p, SHA, iv]
-                r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je_sha = smooth_min(r1, r2)
-
-                # Initial ci guess
-                if c3flag[p]
-                    ci_z_sun[p, iv] = 0.7 * cair[p]
-                    ci_z_sha[p, iv] = 0.7 * cair[p]
-                else
-                    ci_z_sun[p, iv] = 0.4 * cair[p]
-                    ci_z_sha[p, iv] = 0.4 * cair[p]
-                end
-
-                # Solve for ci and gs via hybrid_PHS
-                vegwp_view = vegwp[p, :]
-                ci_z_sun[p, iv], ci_z_sha[p, iv], gs_mol_sun_val, gs_mol_sha_val,
-                    bsun_val, bsha_val, _, soilflux, _, _ = hybrid_PHS!(
-                    ci_z_sun[p, iv], ci_z_sha[p, iv], p, iv, c,
-                    gb_mol_arr[p], je_sun, je_sha, cair[p], oair[p],
-                    lmr_z_sun[p, iv], lmr_z_sha[p, iv],
-                    par_z_sun_in[p, iv], par_z_sha_in[p, iv],
-                    rh_can, qsatl[p], qaf[p],
-                    ps, forc_pbot[p], vegwp_view,
-                    k_soil_root[p, :], smp_l[c, :], z_col[c, :],
-                    laisun[p], laisha[p], htop[p], tsai[p], ivt_p, nlevsoi,
-                    elai[p], esai[p], fdry[p], forc_rho[c], tgcm[p];
-                    medlynslope_val=medlynslope_p,
-                    medlynintercept_val=medlynintercept_pft[ivt_p])
-                vegwp[p, :] .= vegwp_view
-                gs_mol_sun[p, iv] = gs_mol_sun_val
-                gs_mol_sha[p, iv] = gs_mol_sha_val
-                bsun_arr[p] = bsun_val
-                bsha_arr[p] = bsha_val
-                qflx_tran_veg[p] = smooth_max(soilflux, zero(soilflux))
-
-                # Determine gs min/slope for error checking
-                if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011
-                    gsminsun = medlynintercept_pft[ivt_p]
-                    gsminsha = medlynintercept_pft[ivt_p]
-                elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
-                    gsminsun = bbb[p]
-                    gsminsha = bbb[p]
-                end
-
-                # Check an < 0
-                if an_sun[p, iv] < 0.0
-                    gs_mol_sun[p, iv] = smooth_max(bsun_arr[p] * gsminsun, 1.0)
-                end
-                if an_sha[p, iv] < 0.0
-                    gs_mol_sha[p, iv] = smooth_max(bsha_arr[p] * gsminsha, 1.0)
-                end
-
-                # Local noon gs
-                if is_near_local_noon_fn(p)
-                    gs_mol_sun_ln[p, iv] = gs_mol_sun[p, iv]
-                    gs_mol_sha_ln[p, iv] = gs_mol_sha[p, iv]
-                    vegwp_ln[p, :] .= vegwp[p, :]
-                else
-                    gs_mol_sun_ln[p, iv] = SPVAL
-                    gs_mol_sha_ln[p, iv] = SPVAL
-                    vegwp_ln[p, :] .= SPVAL
-                end
-
-                # Final cs and ci
-                cs_sun = cair[p] - 1.4 / gb_mol_arr[p] * an_sun[p, iv] * forc_pbot[p]
-                cs_sun = smooth_max(cs_sun, MAX_CS)
-                ci_z_sun[p, iv] = cair[p] - an_sun[p, iv] * forc_pbot[p] *
-                    (1.4 * gs_mol_sun[p, iv] + 1.6 * gb_mol_arr[p]) /
-                    (gb_mol_arr[p] * gs_mol_sun[p, iv])
-                ci_z_sun[p, iv] = smooth_max(ci_z_sun[p, iv], 1.0e-06)
-
-                cs_sha = cair[p] - 1.4 / gb_mol_arr[p] * an_sha[p, iv] * forc_pbot[p]
-                cs_sha = smooth_max(cs_sha, MAX_CS)
-                ci_z_sha[p, iv] = cair[p] - an_sha[p, iv] * forc_pbot[p] *
-                    (1.4 * gs_mol_sha[p, iv] + 1.6 * gb_mol_arr[p]) /
-                    (gb_mol_arr[p] * gs_mol_sha[p, iv])
-                ci_z_sha[p, iv] = smooth_max(ci_z_sha[p, iv], 1.0e-06)
-
-                # Convert to resistance (gs must be positive)
-                gs = max(gs_mol_sun[p, iv], 1.0) / cf
-                rs_z_sun[p, iv] = smooth_min(1.0 / gs, rsmax0)
-                rs_z_sun[p, iv] = rs_z_sun[p, iv] / o3coefg_sun[p]
-                gs = max(gs_mol_sha[p, iv], 1.0) / cf
-                rs_z_sha[p, iv] = smooth_min(1.0 / gs, rsmax0)
-                rs_z_sha[p, iv] = rs_z_sha[p, iv] / o3coefg_sha[p]
-
-                # Photosynthesis output
-                psn_z_sun[p, iv] = ag[p, SUN, iv] * o3coefv_sun[p]
-                psn_wc_z_sun[p, iv] = 0.0
-                psn_wj_z_sun[p, iv] = 0.0
-                psn_wp_z_sun[p, iv] = 0.0
-                if ac[p, SUN, iv] <= aj[p, SUN, iv] && ac[p, SUN, iv] <= ap[p, SUN, iv]
-                    psn_wc_z_sun[p, iv] = psn_z_sun[p, iv]
-                elseif aj[p, SUN, iv] < ac[p, SUN, iv] && aj[p, SUN, iv] <= ap[p, SUN, iv]
-                    psn_wj_z_sun[p, iv] = psn_z_sun[p, iv]
-                elseif ap[p, SUN, iv] < ac[p, SUN, iv] && ap[p, SUN, iv] < aj[p, SUN, iv]
-                    psn_wp_z_sun[p, iv] = psn_z_sun[p, iv]
-                end
-
-                psn_z_sha[p, iv] = ag[p, SHA, iv] * o3coefv_sha[p]
-                psn_wc_z_sha[p, iv] = 0.0
-                psn_wj_z_sha[p, iv] = 0.0
-                psn_wp_z_sha[p, iv] = 0.0
-                if ac[p, SHA, iv] <= aj[p, SHA, iv] && ac[p, SHA, iv] <= ap[p, SHA, iv]
-                    psn_wc_z_sha[p, iv] = psn_z_sha[p, iv]
-                elseif aj[p, SHA, iv] < ac[p, SHA, iv] && aj[p, SHA, iv] <= ap[p, SHA, iv]
-                    psn_wj_z_sha[p, iv] = psn_z_sha[p, iv]
-                elseif ap[p, SHA, iv] < ac[p, SHA, iv] && ap[p, SHA, iv] < aj[p, SHA, iv]
-                    psn_wp_z_sha[p, iv] = psn_z_sha[p, iv]
-                end
-
-                # Relative humidity at leaf surface
-                hs = (gb_mol_arr[p] * ceair + gs_mol_sun[p, iv] * esat_tv[p]) /
-                     ((gb_mol_arr[p] + gs_mol_sun[p, iv]) * esat_tv[p])
-                rh_leaf_sun[p] = hs
-                hs = (gb_mol_arr[p] * ceair + gs_mol_sha[p, iv] * esat_tv[p]) /
-                     ((gb_mol_arr[p] + gs_mol_sha[p, iv]) * esat_tv[p])
-                rh_leaf_sha[p] = hs
-            end
-        end
-    end
+    # ---- Pass 3: Leaf-level photosynthesis (kernelized) ----
+    # One thread per patch; the entire per-patch PHS Newton solve (hybrid_PHS →
+    # ci_func_PHS → brent_PHS/calcstress → spacF/spacA/getvegwp/getqflx) runs
+    # in-thread via the positional device cores. Reads Pass 1/2 outputs
+    # (k_soil_root, vcmax_z_phs, lmr_z, …) and writes what Pass 4 reads.
+    psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
+        medlynslope_pft, medlynintercept_pft, crop_pft,
+        forc_pbot, tgcm, rb, eair, esat_tv, cair, oair, qsatl, qaf,
+        laisun, laisha, htop, tsai, elai, esai, fdry, forc_rho,
+        par_z_sun_in, par_z_sha_in, jmax_z_local,
+        o3coefg_sun, o3coefg_sha, o3coefv_sun, o3coefv_sha,
+        k_soil_root, smp_l, z_col,
+        vegwp, vegwp_ln, qflx_tran_veg, bsun_arr, bsha_arr,
+        rh_leaf_sun, rh_leaf_sha,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        nlevsoi, modifyphoto_and_lmr_forcrop, stomatalcond_mtd,
+        rsmax0, overrides, is_near_local_noon_fn, bounds_patch)
 
     # ---- Pass 4: Canopy integration (kernelized) ----
     # One thread per patch; internal serial iv loops reduce sun+sha per-canopy
