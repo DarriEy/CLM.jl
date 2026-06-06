@@ -592,28 +592,48 @@ function energyflux_update_acc_vars!(ef::EnergyFluxData,
                                      end_cd::Bool = false,
                                      secs::Int = 0,
                                      dtime::Int = 0)
-    # BTRANAV: track daily min btran
-    for p in bounds_patch
-        bt = ef.btran_patch[p]
-        isfinite(bt) || continue
-
-        # Track instantaneous minimum for the current day
-        if hasfield(typeof(ef), :btran_min_inst_patch) && length(ef.btran_min_inst_patch) >= p
-            if ef.btran_min_inst_patch[p] == SPVAL
-                ef.btran_min_inst_patch[p] = bt
-            else
-                ef.btran_min_inst_patch[p] = min(bt, ef.btran_min_inst_patch[p])
-            end
-
-            # At end of day, copy to daily min and reset
-            if end_cd
-                if hasfield(typeof(ef), :btran_min_patch) && length(ef.btran_min_patch) >= p
-                    ef.btran_min_patch[p] = ef.btran_min_inst_patch[p]
-                end
-                ef.btran_min_inst_patch[p] = SPVAL
-            end
-        end
+    # BTRANAV: track daily min btran.
+    # The hasfield/length guards are constant over patches → resolved on host;
+    # only launch when the accumulator arrays cover the patch range.
+    has_inst = hasfield(typeof(ef), :btran_min_inst_patch)
+    has_min  = hasfield(typeof(ef), :btran_min_patch)
+    if !isempty(bounds_patch) && has_inst &&
+            length(ef.btran_min_inst_patch) >= last(bounds_patch)
+        # When end_cd, also copy to daily min (only if that array covers the range).
+        write_min = end_cd && has_min && length(ef.btran_min_patch) >= last(bounds_patch)
+        _launch!(_ef_btran_kernel!, ef.btran_min_inst_patch, ef.btran_min_patch,
+            ef.btran_patch, end_cd, write_min,
+            first(bounds_patch), last(bounds_patch);
+            ndrange = length(ef.btran_min_inst_patch))
     end
 
     return nothing
+end
+
+# Per-patch daily-min btran tracking. Own-index read-modify-write.
+# T(SPVAL) keeps the missing-value comparison/store in the device eltype.
+# end_cd/write_min are host-resolved flags passed as kernel args.
+@kernel function _ef_btran_kernel!(btran_min_inst_patch, btran_min_patch,
+        @Const(btran_patch), end_cd::Bool, write_min::Bool,
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(btran_min_inst_patch)
+        bt = btran_patch[p]
+        if isfinite(bt)
+            if btran_min_inst_patch[p] == T(SPVAL)
+                btran_min_inst_patch[p] = bt
+            else
+                btran_min_inst_patch[p] = min(bt, btran_min_inst_patch[p])
+            end
+
+            # At end of day, copy to daily min and reset.
+            if end_cd
+                if write_min
+                    btran_min_patch[p] = btran_min_inst_patch[p]
+                end
+                btran_min_inst_patch[p] = T(SPVAL)
+            end
+        end
+    end
 end

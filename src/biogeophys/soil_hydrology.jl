@@ -1854,41 +1854,35 @@ Calculate irrigation withdrawals from groundwater by layer.
 
 Ported from `CalcIrrigWithdrawals` in `SoilHydrologyMod.F90`.
 """
-function calc_irrig_withdrawals!(
-    soilhydrology::SoilHydrologyData,
-    soilstate::SoilStateData,
-    qflx_gw_demand::Vector{<:Real},
-    qflx_gw_uncon_irrig_lyr::Matrix{<:Real},
-    qflx_gw_con_irrig::Vector{<:Real},
-    col_nbedrock::Vector{Int},
-    col_zi::Matrix{<:Real},
-    mask_soil::BitVector,
-    bounds::UnitRange{Int},
-    nlevsoi::Int,
-    dtime::Real
-)
-    params = soilhydrology_params
-    bsw    = soilstate.bsw_col
-    sucsat = soilstate.sucsat_col
-    watsat = soilstate.watsat_col
-    zwt    = soilhydrology.zwt_col
+# ---- calc_irrig_withdrawals! : per-column layered groundwater withdrawal ----
+# Each column is independent: a per-layer init, a jwt search, then a SEQUENTIAL
+# layered withdrawal cascade carrying loop-carried `irrig_demand_remaining`. One
+# thread per column runs the whole subroutine in-thread and writes only its own
+# column (the matrix init folds into the kernel's first sub-loop). Scalar args
+# (dtime, aq_sp_yield_min) carry the working eltype and literals in arithmetic
+# are eltype-converted so no Float64 reaches a Float32-only backend (Metal);
+# byte-identical on a Float64 CPU run.
+@kernel function _soilhyd_irrig_withdrawals_kernel!(qflx_gw_uncon_irrig_lyr,
+        qflx_gw_con_irrig, @Const(mask), @Const(qflx_gw_demand), @Const(col_nbedrock),
+        @Const(col_zi), @Const(zwt), @Const(watsat), @Const(sucsat), @Const(bsw),
+        nlevsoi::Int, dtime, aq_sp_yield_min)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T   = eltype(qflx_gw_uncon_irrig_lyr)
+        zr  = zero(T)
+        on  = one(T)
+        e3  = T(1.0e3)
+        dt  = T(dtime)
+        aqy = T(aq_sp_yield_min)
 
-    # Initialize
-    for j in 1:nlevsoi
-        for c in bounds
-            mask_soil[c] || continue
-            qflx_gw_uncon_irrig_lyr[c, j] = 0.0
+        # Initialize this column's layers
+        for j in 1:nlevsoi
+            qflx_gw_uncon_irrig_lyr[c, j] = zr
         end
-    end
 
-    for c in bounds
-        mask_soil[c] || continue
+        irrig_demand_remaining = qflx_gw_demand[c] * dt
 
-        irrig_demand_remaining = qflx_gw_demand[c] * dtime
-
-        if irrig_demand_remaining < 0.0
-            error("negative groundwater irrigation demand at c=$c!")
-        end
+        # (negative-demand error is a host-only pre-check; no error() in-kernel)
 
         jwt_c = nlevsoi
         for j in 1:nlevsoi
@@ -1900,31 +1894,69 @@ function calc_irrig_withdrawals!(
 
         for j in (jwt_c+1):col_nbedrock[c]
             s_y = watsat[c, j] *
-                (1.0 - (1.0 + 1.0e3 * zwt[c] / sucsat[c, j])^(-1.0 / bsw[c, j]))
-            s_y = smooth_max(s_y, params.aq_sp_yield_min)
+                (on - (on + e3 * zwt[c] / sucsat[c, j])^(-on / bsw[c, j]))
+            s_y = smooth_max(s_y, aqy)
 
             if j == jwt_c + 1
-                available_water_layer = smooth_max(0.0, s_y * (col_zi[c, j] - zwt[c]) * 1.0e3)
+                available_water_layer = smooth_max(zr, s_y * (col_zi[c, j] - zwt[c]) * e3)
             else
-                available_water_layer = smooth_max(0.0, s_y * (col_zi[c, j] - col_zi[c, j-1]) * 1.0e3)
+                available_water_layer = smooth_max(zr, s_y * (col_zi[c, j] - col_zi[c, j-1]) * e3)
             end
 
             irrig_layer = smooth_min(irrig_demand_remaining, available_water_layer)
-            qflx_gw_uncon_irrig_lyr[c, j] = irrig_layer / dtime
+            qflx_gw_uncon_irrig_lyr[c, j] = irrig_layer / dt
 
             irrig_demand_remaining = irrig_demand_remaining - irrig_layer
 
-            if irrig_demand_remaining <= 0.0
+            if irrig_demand_remaining <= zr
                 break
             end
         end
 
-        if irrig_demand_remaining > 0.0
-            qflx_gw_con_irrig[c] = irrig_demand_remaining / dtime
+        if irrig_demand_remaining > zr
+            qflx_gw_con_irrig[c] = irrig_demand_remaining / dt
         else
-            qflx_gw_con_irrig[c] = 0.0
+            qflx_gw_con_irrig[c] = zr
         end
     end
+end
+
+function calc_irrig_withdrawals!(
+    soilhydrology::SoilHydrologyData,
+    soilstate::SoilStateData,
+    qflx_gw_demand::AbstractVector{<:Real},
+    qflx_gw_uncon_irrig_lyr::AbstractMatrix{<:Real},
+    qflx_gw_con_irrig::AbstractVector{<:Real},
+    col_nbedrock::AbstractVector{<:Integer},
+    col_zi::AbstractMatrix{<:Real},
+    mask_soil::AbstractVector{Bool},
+    bounds::UnitRange{Int},
+    nlevsoi::Int,
+    dtime::Real
+)
+    params = soilhydrology_params
+    bsw    = soilstate.bsw_col
+    sucsat = soilstate.sucsat_col
+    watsat = soilstate.watsat_col
+    zwt    = soilhydrology.zwt_col
+
+    # Host-only pre-check for negative demand. The CPU path keeps the original
+    # error() (the loop is over host Arrays); on a device backend this scalar
+    # scan is skipped (valid forcing only), so the kernel stays scalar-index-free.
+    if qflx_gw_demand isa Array
+        for c in bounds
+            mask_soil[c] || continue
+            if qflx_gw_demand[c] * dtime < 0.0
+                error("negative groundwater irrigation demand at c=$c!")
+            end
+        end
+    end
+
+    T = eltype(qflx_gw_uncon_irrig_lyr)
+    _launch!(_soilhyd_irrig_withdrawals_kernel!, qflx_gw_uncon_irrig_lyr,
+             qflx_gw_con_irrig, mask_soil, qflx_gw_demand, col_nbedrock, col_zi,
+             zwt, watsat, sucsat, bsw, nlevsoi, T(dtime), T(params.aq_sp_yield_min);
+             ndrange = length(mask_soil))
 
     return nothing
 end

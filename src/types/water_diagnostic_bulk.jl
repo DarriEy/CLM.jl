@@ -399,6 +399,96 @@ function waterdiagnosticbulk_init_cold!(wd::WaterDiagnosticBulkData,
     return nothing
 end
 
+# ------------------------------------------------------------------
+# waterdiagnosticbulk_summary! kernels
+# Structs are not isbits, so each kernel takes the INDIVIDUAL wd.<field>
+# output arrays + the input arrays (one thread per patch or per column).
+# T(...) keeps literals/consts in the device eltype (Metal: Float32-only);
+# on CPU T==Float64 so all arithmetic is byte-identical to the original loop.
+# Loop-carried sums (`+=` over j) accumulate into thread-locals and write the
+# output element ONCE; per-(c,j) writes (exice_vol_col) are own-index direct.
+# ------------------------------------------------------------------
+
+# Per-patch: qflx_prec_intr = intercepted liq + intercepted snow
+@kernel function _wdb_prec_intr_kernel!(qflx_prec_intr_patch,
+        @Const(mask_soilp), @Const(qflx_intercepted_liq_patch),
+        @Const(qflx_intercepted_snow_patch), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        qflx_prec_intr_patch[p] = qflx_intercepted_liq_patch[p] + qflx_intercepted_snow_patch[p]
+    end
+end
+
+# Per-column (mask_allc): copy h2osno_total and sum qflx_prec_grnd.
+@kernel function _wdb_allc_kernel!(h2osno_total_out, qflx_prec_grnd_out,
+        @Const(mask_allc), @Const(h2osno_total_col),
+        @Const(qflx_liq_grnd_col), @Const(qflx_snow_grnd_col), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_allc[c]
+        h2osno_total_out[c] = h2osno_total_col[c]
+        qflx_prec_grnd_out[c] = qflx_liq_grnd_col[c] + qflx_snow_grnd_col[c]
+    end
+end
+
+# Per-column (mask_nolakec, non-urban): init totals, sum over soil layers
+# (top-10cm + liq/ice totals + excess-ice subsidence), then excess-ice volume.
+@kernel function _wdb_nolakec_kernel!(h2osoi_liqice_10cm_col, h2osoi_liq_tot_col,
+        h2osoi_ice_tot_col, exice_subs_tot_col, exice_vol_tot_col, exice_vol_col,
+        @Const(mask_nolakec), @Const(landunit_col), @Const(urbpoi), @Const(lun_itype),
+        @Const(h2osoi_liq_col), @Const(h2osoi_ice_col), @Const(zi_col), @Const(dz_col),
+        @Const(exice_subs_col), @Const(excess_ice_col),
+        nlevsoi::Int, nlevsno::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_nolakec[c]
+        T = eltype(h2osoi_liq_tot_col)
+        l = landunit_col[c]
+        if !urbpoi[l]
+            # Sum over soil layers (combined snow+soil index jj = j + nlevsno).
+            acc_10cm = zero(T)
+            acc_liq  = zero(T)
+            acc_ice  = zero(T)
+            acc_subs = zero(T)
+            is_soilcrop = (lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP)
+            for j in 1:nlevsoi
+                jj = j + nlevsno
+                if zi_col[c, j] <= T(0.1)
+                    fracl = one(T)
+                    acc_10cm += (h2osoi_liq_col[c, jj] + h2osoi_ice_col[c, jj]) * fracl
+                else
+                    if zi_col[c, j] > T(0.1) && zi_col[c, j-1] < T(0.1)
+                        fracl = (T(0.1) - zi_col[c, j-1]) / dz_col[c, j]
+                        acc_10cm += (h2osoi_liq_col[c, jj] + h2osoi_ice_col[c, jj]) * fracl
+                    end
+                end
+                acc_liq += h2osoi_liq_col[c, jj]
+                acc_ice += h2osoi_ice_col[c, jj]
+                if is_soilcrop
+                    acc_subs += exice_subs_col[c, j]
+                end
+            end
+            h2osoi_liqice_10cm_col[c] = acc_10cm
+            h2osoi_liq_tot_col[c] = acc_liq
+            h2osoi_ice_tot_col[c] = acc_ice
+            exice_subs_tot_col[c] = acc_subs
+
+            # Excess ice volume calculations.
+            if is_soilcrop
+                dz_tot = zero(T)
+                acc_voltot = zero(T)
+                for j in 1:nlevsoi
+                    dz_ext = dz_col[c, j] + excess_ice_col[c, j] / T(DENICE)
+                    exice_vol_col[c, j] = excess_ice_col[c, j] / (T(DENICE) * dz_ext)
+                    dz_tot += dz_ext
+                    acc_voltot += exice_vol_col[c, j] * dz_ext  # (m)
+                end
+                exice_vol_tot_col[c] = acc_voltot / dz_tot  # (m3/m3)
+            else
+                exice_vol_tot_col[c] = zero(T)
+            end
+        end
+    end
+end
+
 """
     waterdiagnosticbulk_summary!(wd, bounds_col;
         mask_soilp, mask_allc, mask_nolakec,
@@ -412,103 +502,51 @@ Ported from `Summary` in `WaterDiagnosticBulkType.F90`.
 function waterdiagnosticbulk_summary!(wd::WaterDiagnosticBulkData,
                                        bounds_col::UnitRange{Int},
                                        bounds_patch::UnitRange{Int};
-                                       mask_soilp::BitVector,
-                                       mask_allc::BitVector,
-                                       mask_nolakec::BitVector,
-                                       h2osoi_ice_col::Matrix{<:Real},
-                                       h2osoi_liq_col::Matrix{<:Real},
-                                       excess_ice_col::Matrix{<:Real},
-                                       qflx_intercepted_liq_patch::Vector{<:Real},
-                                       qflx_intercepted_snow_patch::Vector{<:Real},
-                                       qflx_liq_grnd_col::Vector{<:Real},
-                                       qflx_snow_grnd_col::Vector{<:Real},
-                                       h2osno_total_col::Vector{<:Real},
-                                       dz_col::Matrix{<:Real},
-                                       zi_col::Matrix{<:Real},
-                                       landunit_col::Vector{Int},
-                                       urbpoi::BitVector,
-                                       lun_itype::Vector{Int})
+                                       mask_soilp::AbstractVector{Bool},
+                                       mask_allc::AbstractVector{Bool},
+                                       mask_nolakec::AbstractVector{Bool},
+                                       h2osoi_ice_col::AbstractMatrix{<:Real},
+                                       h2osoi_liq_col::AbstractMatrix{<:Real},
+                                       excess_ice_col::AbstractMatrix{<:Real},
+                                       qflx_intercepted_liq_patch::AbstractVector{<:Real},
+                                       qflx_intercepted_snow_patch::AbstractVector{<:Real},
+                                       qflx_liq_grnd_col::AbstractVector{<:Real},
+                                       qflx_snow_grnd_col::AbstractVector{<:Real},
+                                       h2osno_total_col::AbstractVector{<:Real},
+                                       dz_col::AbstractMatrix{<:Real},
+                                       zi_col::AbstractMatrix{<:Real},
+                                       landunit_col::AbstractVector{<:Integer},
+                                       urbpoi::AbstractVector{Bool},
+                                       lun_itype::AbstractVector{<:Integer})
     nlevsoi = varpar.nlevsoi
     nlevsno = varpar.nlevsno
 
-    # Copy h2osno_total (already computed externally or via CalculateTotalH2osno)
-    for c in bounds_col
-        mask_allc[c] || continue
-        wd.h2osno_total_col[c] = h2osno_total_col[c]
+    # qflx_prec_intr = intercepted liq + intercepted snow (per patch)
+    if !isempty(bounds_patch)
+        _launch!(_wdb_prec_intr_kernel!, wd.qflx_prec_intr_patch,
+            mask_soilp, qflx_intercepted_liq_patch, qflx_intercepted_snow_patch,
+            first(bounds_patch), last(bounds_patch);
+            ndrange = length(wd.qflx_prec_intr_patch))
     end
 
-    # qflx_prec_intr = intercepted liq + intercepted snow
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        wd.qflx_prec_intr_patch[p] = qflx_intercepted_liq_patch[p] + qflx_intercepted_snow_patch[p]
+    # Copy h2osno_total and sum qflx_prec_grnd (per column, mask_allc).
+    if !isempty(bounds_col)
+        _launch!(_wdb_allc_kernel!, wd.h2osno_total_col, wd.qflx_prec_grnd_col,
+            mask_allc, h2osno_total_col, qflx_liq_grnd_col, qflx_snow_grnd_col,
+            first(bounds_col), last(bounds_col);
+            ndrange = length(wd.h2osno_total_col))
     end
 
-    # qflx_prec_grnd = liq_grnd + snow_grnd
-    for c in bounds_col
-        mask_allc[c] || continue
-        wd.qflx_prec_grnd_col[c] = qflx_liq_grnd_col[c] + qflx_snow_grnd_col[c]
-    end
-
-    # Initialize totals for non-lake, non-urban columns
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        l = landunit_col[c]
-        if !urbpoi[l]
-            wd.h2osoi_liqice_10cm_col[c] = 0.0
-            wd.h2osoi_liq_tot_col[c] = 0.0
-            wd.h2osoi_ice_tot_col[c] = 0.0
-            wd.exice_subs_tot_col[c] = 0.0
-        end
-    end
-
-    # Sum over soil layers
+    # Soil-layer sums + excess-ice volume (per column, mask_nolakec, non-urban).
     # Note: h2osoi_liq/ice_col use combined snow+soil indexing;
     # soil layer j maps to column index j + nlevsno in Julia arrays.
-    for j in 1:nlevsoi
-        for c in bounds_col
-            mask_nolakec[c] || continue
-            l = landunit_col[c]
-            if !urbpoi[l]
-                jj = j + nlevsno  # combined snow+soil index
-
-                # top 10cm calculation
-                if zi_col[c, j] <= 0.1
-                    fracl = 1.0
-                    wd.h2osoi_liqice_10cm_col[c] += (h2osoi_liq_col[c, jj] + h2osoi_ice_col[c, jj]) * fracl
-                else
-                    if zi_col[c, j] > 0.1 && zi_col[c, j-1] < 0.1
-                        fracl = (0.1 - zi_col[c, j-1]) / dz_col[c, j]
-                        wd.h2osoi_liqice_10cm_col[c] += (h2osoi_liq_col[c, jj] + h2osoi_ice_col[c, jj]) * fracl
-                    end
-                end
-
-                wd.h2osoi_liq_tot_col[c] += h2osoi_liq_col[c, jj]
-                wd.h2osoi_ice_tot_col[c] += h2osoi_ice_col[c, jj]
-
-                if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-                    wd.exice_subs_tot_col[c] += wd.exice_subs_col[c, j]
-                end
-            end
-        end
-    end
-
-    # Excess ice volume calculations
-    for c in bounds_col
-        mask_nolakec[c] || continue
-        l = landunit_col[c]
-        if !urbpoi[l]
-            if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-                dz_tot = 0.0
-                wd.exice_vol_tot_col[c] = 0.0
-                for j in 1:nlevsoi
-                    dz_ext = dz_col[c, j] + excess_ice_col[c, j] / DENICE
-                    wd.exice_vol_col[c, j] = excess_ice_col[c, j] / (DENICE * dz_ext)
-                    dz_tot += dz_ext
-                    wd.exice_vol_tot_col[c] += wd.exice_vol_col[c, j] * dz_ext  # (m)
-                end
-                wd.exice_vol_tot_col[c] /= dz_tot  # (m3/m3)
-            end
-        end
+    if !isempty(bounds_col)
+        _launch!(_wdb_nolakec_kernel!, wd.h2osoi_liqice_10cm_col, wd.h2osoi_liq_tot_col,
+            wd.h2osoi_ice_tot_col, wd.exice_subs_tot_col, wd.exice_vol_tot_col, wd.exice_vol_col,
+            mask_nolakec, landunit_col, urbpoi, lun_itype,
+            h2osoi_liq_col, h2osoi_ice_col, zi_col, dz_col, wd.exice_subs_col, excess_ice_col,
+            nlevsoi, nlevsno, first(bounds_col), last(bounds_col);
+            ndrange = length(wd.h2osoi_liq_tot_col))
     end
 
     return nothing

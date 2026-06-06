@@ -414,106 +414,171 @@ Set roughness lengths and forcing heights for non-lake points.
 Ported from `frictionvel_type%SetRoughnessLengthsAndForcHeightsNonLake`
 in `FrictionVelocityMod.F90`.
 """
+# --------------------------------------------------------------------------
+# Kernel: ground (column-level) roughness lengths for non-lake columns.
+# Each column writes only z0mg_col[c]/z0hg_col[c]/z0qg_col[c]; independent.
+# `z0method` resolves z0param_method on the host (1=ZengWang2007, 2=Meier2022)
+# and `use_snowmelt` flags use_z0m_snowmelt; zsno/zlnd/zglc and the Meier
+# Float64 globals (B1/B4/RPI/MEIER1/2) arrive eltype-converted so no Float64
+# reaches a Float32-only backend. `lo` = first(bounds_col).
+# --------------------------------------------------------------------------
+@kernel function _set_ground_roughness_kernel!(z0mg_col, z0hg_col, z0qg_col,
+                                               @Const(mask), @Const(col_landunit),
+                                               @Const(frac_sno), @Const(snomelt_accum),
+                                               @Const(lun_itype),
+                                               z0method::Int, use_snowmelt::Bool,
+                                               zsno, zlnd, zglc,
+                                               b1_param, b4_param, rpi,
+                                               meier1, meier2, lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        c = lo + i - 1
+        if mask[c]
+            T = eltype(z0mg_col)
+            if z0method == 1  # ZengWang2007
+                if frac_sno[c] > zero(T)
+                    z0mg_col[c] = zsno
+                else
+                    z0mg_col[c] = zlnd
+                end
+            elseif z0method == 2  # Meier2022
+                l = col_landunit[c]
+                if frac_sno[c] > zero(T)
+                    if use_snowmelt
+                        if snomelt_accum[c] < T(1.0e-5)
+                            z0mg_col[c] = exp(-b1_param * rpi * T(0.5) + b4_param) * T(1.0e-3)
+                        else
+                            z0mg_col[c] = exp(b1_param * (atan((log10(snomelt_accum[c]) + meier1) / meier2)) + b4_param) * T(1.0e-3)
+                        end
+                    else
+                        z0mg_col[c] = zsno
+                    end
+                elseif lun_itype[l] == ISTICE
+                    z0mg_col[c] = zglc
+                else
+                    z0mg_col[c] = zlnd
+                end
+            end
+
+            z0hg_col[c] = z0mg_col[c]  # initial set only
+            z0qg_col[c] = z0mg_col[c]  # initial set only
+        end
+    end
+end
+
+# --------------------------------------------------------------------------
+# Kernel: vegetation roughness lengths + forcing heights for non-lake patches.
+# Each patch writes only its own indices; reads column ground roughness
+# (must be set by _set_ground_roughness_kernel! first). SPVAL stores are bare
+# (constant-folded). `lo` = first(bounds_patch).
+# --------------------------------------------------------------------------
+@kernel function _set_veg_roughness_forcheights_kernel!(
+        z0mv_patch, z0hv_patch, z0qv_patch, z0mg_patch, z0hg_patch, z0qg_patch,
+        kbm1_patch, forc_hgt_u_patch, forc_hgt_t_patch, forc_hgt_q_patch,
+        @Const(mask), @Const(z0m), @Const(displa),
+        @Const(z0mg_col), @Const(z0hg_col), @Const(z0qg_col),
+        @Const(frac_veg_nosno), @Const(forc_hgt_u), @Const(forc_hgt_t), @Const(forc_hgt_q),
+        @Const(patch_gridcell), @Const(patch_landunit), @Const(patch_column),
+        @Const(lun_itype), @Const(lun_urbpoi), @Const(lun_z_0_town), @Const(lun_z_d_town),
+        lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        p = lo + i - 1
+        if mask[p]
+            # Roughness lengths over vegetation
+            z0mv_patch[p] = z0m[p]
+            z0hv_patch[p] = z0mv_patch[p]
+            z0qv_patch[p] = z0mv_patch[p]
+
+            # Set to arbitrary value (will be overwritten by respective modules)
+            z0mg_patch[p] = SPVAL
+            z0hg_patch[p] = SPVAL
+            z0qg_patch[p] = SPVAL
+            kbm1_patch[p] = SPVAL
+
+            # Forcing height = atmospheric forcing height + z0m + displa
+            g = patch_gridcell[p]
+            l = patch_landunit[p]
+            c = patch_column[p]
+
+            if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+                if frac_veg_nosno[p] == 0
+                    forc_hgt_u_patch[p] = forc_hgt_u[g] + z0mg_col[c] + displa[p]
+                    forc_hgt_t_patch[p] = forc_hgt_t[g] + z0hg_col[c] + displa[p]
+                    forc_hgt_q_patch[p] = forc_hgt_q[g] + z0qg_col[c] + displa[p]
+                else
+                    forc_hgt_u_patch[p] = forc_hgt_u[g] + z0mv_patch[p] + displa[p]
+                    forc_hgt_t_patch[p] = forc_hgt_t[g] + z0hv_patch[p] + displa[p]
+                    forc_hgt_q_patch[p] = forc_hgt_q[g] + z0qv_patch[p] + displa[p]
+                end
+            elseif lun_itype[l] == ISTWET || lun_itype[l] == ISTICE
+                forc_hgt_u_patch[p] = forc_hgt_u[g] + z0mg_col[c] + displa[p]
+                forc_hgt_t_patch[p] = forc_hgt_t[g] + z0hg_col[c] + displa[p]
+                forc_hgt_q_patch[p] = forc_hgt_q[g] + z0qg_col[c] + displa[p]
+            elseif lun_urbpoi[l]
+                forc_hgt_u_patch[p] = forc_hgt_u[g] + lun_z_0_town[l] + lun_z_d_town[l]
+                forc_hgt_t_patch[p] = forc_hgt_t[g] + lun_z_0_town[l] + lun_z_d_town[l]
+                forc_hgt_q_patch[p] = forc_hgt_q[g] + lun_z_0_town[l] + lun_z_d_town[l]
+            end
+        end
+    end
+end
+
 function set_roughness_and_forc_heights_nonlake!(
         fv::FrictionVelocityData,
-        mask_nolakec::BitVector,
-        mask_nolakep::BitVector,
+        mask_nolakec::AbstractVector{Bool},
+        mask_nolakep::AbstractVector{Bool},
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
-        frac_sno::Vector{<:Real},
-        snomelt_accum::Vector{<:Real},
-        frac_veg_nosno::Vector{Int},
-        z0m::Vector{<:Real},
-        displa::Vector{<:Real},
-        forc_hgt_u::Vector{<:Real},
-        forc_hgt_t::Vector{<:Real},
-        forc_hgt_q::Vector{<:Real},
-        col_landunit::Vector{Int},
-        patch_gridcell::Vector{Int},
-        patch_landunit::Vector{Int},
-        patch_column::Vector{Int},
-        lun_itype::Vector{Int},
-        lun_urbpoi::Vector{Bool},
-        lun_z_0_town::Vector{<:Real},
-        lun_z_d_town::Vector{<:Real};
+        frac_sno::AbstractVector{<:Real},
+        snomelt_accum::AbstractVector{<:Real},
+        frac_veg_nosno::AbstractVector{<:Integer},
+        z0m::AbstractVector{<:Real},
+        displa::AbstractVector{<:Real},
+        forc_hgt_u::AbstractVector{<:Real},
+        forc_hgt_t::AbstractVector{<:Real},
+        forc_hgt_q::AbstractVector{<:Real},
+        col_landunit::AbstractVector{<:Integer},
+        patch_gridcell::AbstractVector{<:Integer},
+        patch_landunit::AbstractVector{<:Integer},
+        patch_column::AbstractVector{<:Integer},
+        lun_itype::AbstractVector{<:Integer},
+        lun_urbpoi::AbstractVector{Bool},
+        lun_z_0_town::AbstractVector{<:Real},
+        lun_z_d_town::AbstractVector{<:Real};
         z0param_method::String = "",
         use_z0m_snowmelt::Bool = false)
 
-    # Column loop: set ground roughness lengths
-    for c in bounds_col
-        mask_nolakec[c] || continue
+    # Resolve the String config to an Int flag on the host (no String compares
+    # inside the kernel): 1 = ZengWang2007, 2 = Meier2022, 0 = neither.
+    z0method = z0param_method == "ZengWang2007" ? 1 :
+               (z0param_method == "Meier2022" ? 2 : 0)
 
-        if z0param_method == "ZengWang2007"
-            if frac_sno[c] > 0.0
-                fv.z0mg_col[c] = fv.zsno
-            else
-                fv.z0mg_col[c] = fv.zlnd
-            end
-        elseif z0param_method == "Meier2022"
-            l = col_landunit[c]
-            if frac_sno[c] > 0.0
-                if use_z0m_snowmelt
-                    if snomelt_accum[c] < 1.0e-5
-                        fv.z0mg_col[c] = exp(-B1_PARAM * RPI * 0.5 + B4_PARAM) * 1.0e-3
-                    else
-                        fv.z0mg_col[c] = exp(B1_PARAM * (atan((log10(snomelt_accum[c]) + MEIER_PARAM1) / MEIER_PARAM2)) + B4_PARAM) * 1.0e-3
-                    end
-                else
-                    fv.z0mg_col[c] = fv.zsno
-                end
-            elseif lun_itype[l] == ISTICE
-                fv.z0mg_col[c] = fv.zglc
-            else
-                fv.z0mg_col[c] = fv.zlnd
-            end
-        end
+    T = eltype(fv.z0mg_col)
 
-        fv.z0hg_col[c] = fv.z0mg_col[c]  # initial set only
-        fv.z0qg_col[c] = fv.z0mg_col[c]  # initial set only
+    # Column loop → kernel: set ground roughness lengths
+    if !isempty(bounds_col)
+        _launch!(_set_ground_roughness_kernel!, fv.z0mg_col, fv.z0hg_col, fv.z0qg_col,
+                 mask_nolakec, col_landunit, frac_sno, snomelt_accum, lun_itype,
+                 z0method, use_z0m_snowmelt,
+                 T(fv.zsno), T(fv.zlnd), T(fv.zglc),
+                 T(B1_PARAM), T(B4_PARAM), T(RPI), T(MEIER_PARAM1), T(MEIER_PARAM2),
+                 first(bounds_col); ndrange = length(bounds_col))
     end
 
-    # Patch loop: set vegetation roughness and initial ground roughness at patch level
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-
-        # Roughness lengths over vegetation
-        fv.z0mv_patch[p] = z0m[p]
-        fv.z0hv_patch[p] = fv.z0mv_patch[p]
-        fv.z0qv_patch[p] = fv.z0mv_patch[p]
-
-        # Set to arbitrary value (will be overwritten by respective modules)
-        fv.z0mg_patch[p] = SPVAL
-        fv.z0hg_patch[p] = SPVAL
-        fv.z0qg_patch[p] = SPVAL
-        fv.kbm1_patch[p] = SPVAL
-    end
-
-    # Patch loop: forcing height = atmospheric forcing height + z0m + displa
-    for p in bounds_patch
-        mask_nolakep[p] || continue
-        g = patch_gridcell[p]
-        l = patch_landunit[p]
-        c = patch_column[p]
-
-        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-            if frac_veg_nosno[p] == 0
-                fv.forc_hgt_u_patch[p] = forc_hgt_u[g] + fv.z0mg_col[c] + displa[p]
-                fv.forc_hgt_t_patch[p] = forc_hgt_t[g] + fv.z0hg_col[c] + displa[p]
-                fv.forc_hgt_q_patch[p] = forc_hgt_q[g] + fv.z0qg_col[c] + displa[p]
-            else
-                fv.forc_hgt_u_patch[p] = forc_hgt_u[g] + fv.z0mv_patch[p] + displa[p]
-                fv.forc_hgt_t_patch[p] = forc_hgt_t[g] + fv.z0hv_patch[p] + displa[p]
-                fv.forc_hgt_q_patch[p] = forc_hgt_q[g] + fv.z0qv_patch[p] + displa[p]
-            end
-        elseif lun_itype[l] == ISTWET || lun_itype[l] == ISTICE
-            fv.forc_hgt_u_patch[p] = forc_hgt_u[g] + fv.z0mg_col[c] + displa[p]
-            fv.forc_hgt_t_patch[p] = forc_hgt_t[g] + fv.z0hg_col[c] + displa[p]
-            fv.forc_hgt_q_patch[p] = forc_hgt_q[g] + fv.z0qg_col[c] + displa[p]
-        elseif lun_urbpoi[l]
-            fv.forc_hgt_u_patch[p] = forc_hgt_u[g] + lun_z_0_town[l] + lun_z_d_town[l]
-            fv.forc_hgt_t_patch[p] = forc_hgt_t[g] + lun_z_0_town[l] + lun_z_d_town[l]
-            fv.forc_hgt_q_patch[p] = forc_hgt_q[g] + lun_z_0_town[l] + lun_z_d_town[l]
-        end
+    # Patch loop → kernel: vegetation roughness + forcing heights (reads the
+    # ground roughness set above, so it launches after the column kernel).
+    if !isempty(bounds_patch)
+        _launch!(_set_veg_roughness_forcheights_kernel!,
+                 fv.z0mv_patch, fv.z0hv_patch, fv.z0qv_patch,
+                 fv.z0mg_patch, fv.z0hg_patch, fv.z0qg_patch, fv.kbm1_patch,
+                 fv.forc_hgt_u_patch, fv.forc_hgt_t_patch, fv.forc_hgt_q_patch,
+                 mask_nolakep, z0m, displa,
+                 fv.z0mg_col, fv.z0hg_col, fv.z0qg_col,
+                 frac_veg_nosno, forc_hgt_u, forc_hgt_t, forc_hgt_q,
+                 patch_gridcell, patch_landunit, patch_column,
+                 lun_itype, lun_urbpoi, lun_z_0_town, lun_z_d_town,
+                 first(bounds_patch); ndrange = length(bounds_patch))
     end
 
     return nothing

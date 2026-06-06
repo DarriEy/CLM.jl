@@ -41,7 +41,7 @@
 end
 hydrond_snow_persistence!(snow_persistence, mask_snow, mask_nosnow, dtime, bounds) =
     _launch!(_hydrond_snow_persistence_kernel!, snow_persistence, mask_snow, mask_nosnow,
-             dtime, first(bounds); ndrange = length(bounds))
+             eltype(snow_persistence)(dtime), first(bounds); ndrange = length(bounds))
 
 # --- update_snowdp! : per-column, fully independent ---
 @kernel function _hydrond_snowdp_kernel!(snowdp, @Const(snow_depth), @Const(frac_sno_eff),
@@ -75,7 +75,8 @@ end
 hydrond_h2osoi_vol_nonurban!(h2osoi_vol, h2osoi_liq, h2osoi_ice, dz, col_itype,
         mask_nolake, joff, bounds, nlevgrnd) =
     _launch!(_hydrond_h2osoi_vol_nonurban_kernel!, h2osoi_vol, h2osoi_liq, h2osoi_ice,
-             dz, col_itype, mask_nolake, joff, first(bounds), DENH2O, DENICE;
+             dz, col_itype, mask_nolake, joff, first(bounds),
+             eltype(h2osoi_vol)(DENH2O), eltype(h2osoi_vol)(DENICE);
              ndrange = (length(bounds), nlevgrnd))
 
 # Urban (sunwall/shadewall/roof) branch.
@@ -96,7 +97,8 @@ end
 hydrond_h2osoi_vol_urban!(h2osoi_vol, h2osoi_liq, h2osoi_ice, dz, col_itype,
         mask_urban, joff, bounds, nlevurb) =
     _launch!(_hydrond_h2osoi_vol_urban_kernel!, h2osoi_vol, h2osoi_liq, h2osoi_ice,
-             dz, col_itype, mask_urban, joff, first(bounds), DENH2O, DENICE;
+             dz, col_itype, mask_urban, joff, first(bounds),
+             eltype(h2osoi_vol)(DENH2O), eltype(h2osoi_vol)(DENICE);
              ndrange = (length(bounds), nlevurb))
 
 # --- update_soilpsi! : 2D (column, layer), each [c,j] independent ---
@@ -105,13 +107,14 @@ hydrond_h2osoi_vol_urban!(h2osoi_vol, h2osoi_liq, h2osoi_ice, dz, col_itype,
         joff::Int, cmin::Int, denh2o)
     i, j = @index(Global, NTuple)
     @inbounds begin
+        T = eltype(soilpsi)
         c = cmin + i - 1
         if mask_hydrology[c]
-            if h2osoi_liq[c, j + joff] > 0.0
+            if h2osoi_liq[c, j + joff] > zero(T)
                 vwc = h2osoi_liq[c, j + joff] / (dz[c, j + joff] * denh2o)
-                fsattmp = max(vwc / watsat[c, j], 0.001)
-                psi = sucsat[c, j] * (-9.8e-6) * (fsattmp)^(-bsw[c, j])
-                soilpsi[c, j] = min(max(psi, -15.0), 0.0)
+                fsattmp = max(vwc / watsat[c, j], T(0.001))
+                psi = sucsat[c, j] * T(-9.8e-6) * (fsattmp)^(-bsw[c, j])
+                soilpsi[c, j] = min(max(psi, T(-15.0)), zero(T))
             else
                 soilpsi[c, j] = -15.0
             end
@@ -121,7 +124,7 @@ end
 hydrond_soilpsi!(soilpsi, h2osoi_liq, dz, watsat, sucsat, bsw, mask_hydrology,
         joff, bounds, nlevgrnd) =
     _launch!(_hydrond_soilpsi_kernel!, soilpsi, h2osoi_liq, dz, watsat, sucsat, bsw,
-             mask_hydrology, joff, first(bounds), DENH2O;
+             mask_hydrology, joff, first(bounds), eltype(soilpsi)(DENH2O);
              ndrange = (length(bounds), nlevgrnd))
 
 # --- update_smp_l! : 2D (column, layer), each [c,j] independent ---
@@ -129,10 +132,11 @@ hydrond_soilpsi!(soilpsi, h2osoi_liq, dz, watsat, sucsat, bsw, mask_hydrology,
         @Const(sucsat), @Const(bsw), @Const(smpmin), @Const(mask_hydrology), cmin::Int)
     i, j = @index(Global, NTuple)
     @inbounds begin
+        T = eltype(smp_l)
         c = cmin + i - 1
         if mask_hydrology[c]
-            s_node = max(h2osoi_vol[c, j] / watsat[c, j], 0.01)
-            s_node = min(1.0, s_node)
+            s_node = max(h2osoi_vol[c, j] / watsat[c, j], T(0.01))
+            s_node = min(one(T), s_node)
             smp_l[c, j] = -sucsat[c, j] * s_node^(-bsw[c, j])
             smp_l[c, j] = max(smpmin[c], smp_l[c, j])
         end
@@ -157,10 +161,10 @@ For columns without snow, reset counter to zero.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_snow_persistence!(
-    snow_persistence::Vector{<:Real},
+    snow_persistence::AbstractVector{<:Real},
     dtime::Real,
-    mask_snow::BitVector,
-    mask_nosnow::BitVector,
+    mask_snow::AbstractVector{Bool},
+    mask_nosnow::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     hydrond_snow_persistence!(snow_persistence, mask_snow, mask_nosnow, dtime, bounds)
@@ -179,37 +183,41 @@ Vertically sum h2osoi_ice and h2osoi_liq over all snow layers for history output
 
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
+@kernel function _hydrond_accum_snow_iceliq_kernel!(snowice, snowliq,
+        @Const(h2osoi_ice), @Const(h2osoi_liq), @Const(snl),
+        @Const(mask_nolake), @Const(mask_snow), nlevsno::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    T = eltype(snowice)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        si = zero(T); sl = zero(T)
+        if mask_snow[c]
+            for j_fortran in (-nlevsno + 1):0
+                j = j_fortran + nlevsno
+                if j_fortran >= snl[c] + 1
+                    si += h2osoi_ice[c, j]
+                    sl += h2osoi_liq[c, j]
+                end
+            end
+        end
+        snowice[c] = si
+        snowliq[c] = sl
+    end
+end
+
 function accumulate_snow_ice_liq!(
-    snowice::Vector{<:Real},
-    snowliq::Vector{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    snl::Vector{Int},
-    mask_nolake::BitVector,
-    mask_snow::BitVector,
+    snowice::AbstractVector{<:Real},
+    snowliq::AbstractVector{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    snl::AbstractVector{<:Integer},
+    mask_nolake::AbstractVector{Bool},
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    # Zero for all non-lake columns
-    for c in bounds
-        mask_nolake[c] || continue
-        snowice[c] = 0.0
-        snowliq[c] = 0.0
-    end
-
-    # Accumulate over snow layers
-    # Fortran: j from -nlevsno+1 to 0 → Julia offset: j_julia = j_fortran + nlevsno
-    for j_fortran in (-nlevsno + 1):0
-        j = j_fortran + nlevsno  # Julia 1-based index
-        for c in bounds
-            mask_snow[c] || continue
-            if j_fortran >= snl[c] + 1
-                snowice[c] = snowice[c] + h2osoi_ice[c, j]
-                snowliq[c] = snowliq[c] + h2osoi_liq[c, j]
-            end
-        end
-    end
-
+    _launch!(_hydrond_accum_snow_iceliq_kernel!, snowice, snowliq, h2osoi_ice,
+             h2osoi_liq, snl, mask_nolake, mask_snow, nlevsno,
+             first(bounds), last(bounds); ndrange = last(bounds))
     return nothing
 end
 
@@ -225,9 +233,9 @@ Calculate column average snow depth = snow_depth * frac_sno_eff.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_snowdp!(
-    snowdp::Vector{<:Real},
-    snow_depth::Vector{<:Real},
-    frac_sno_eff::Vector{<:Real},
+    snowdp::AbstractVector{<:Real},
+    snow_depth::AbstractVector{<:Real},
+    frac_sno_eff::AbstractVector{<:Real},
     bounds::UnitRange{Int}
 )
     hydrond_snowdp!(snowdp, snow_depth, frac_sno_eff, bounds)
@@ -250,36 +258,45 @@ snowpack, weighted by layer mass. This function computes the numerator:
 
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
+# Per-column kernel with an internal sequential snow-layer accumulation. The non-lake
+# zero-init and the snow-layer sum are fused: non-snow non-lake columns get 0, snow
+# columns get the mass-weighted temperature sum.
+@kernel function _hydrond_snow_internal_temp_kernel!(t_sno_mul_mss,
+        @Const(h2osoi_ice), @Const(h2osoi_liq), @Const(t_soisno), @Const(snl),
+        @Const(mask_nolake), @Const(mask_snow), nlevsno::Int, tfrz, cmin::Int, cmax::Int)
+    c = @index(Global)
+    T = eltype(t_sno_mul_mss)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        v = zero(T)
+        if mask_snow[c]
+            for j_fortran in (-nlevsno + 1):0
+                j = j_fortran + nlevsno
+                if j_fortran >= snl[c] + 1
+                    v += h2osoi_ice[c, j] * t_soisno[c, j]
+                    v += h2osoi_liq[c, j] * tfrz
+                end
+            end
+        end
+        t_sno_mul_mss[c] = v
+    end
+end
+
 function compute_snow_internal_temperature!(
-    t_sno_mul_mss::Vector{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    t_soisno::Matrix{<:Real},
-    snl::Vector{Int},
-    mask_nolake::BitVector,
-    mask_snow::BitVector,
+    t_sno_mul_mss::AbstractVector{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    t_soisno::AbstractMatrix{<:Real},
+    snl::AbstractVector{<:Integer},
+    mask_nolake::AbstractVector{Bool},
+    mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int,
     tfrz::Real
 )
-    # Zero for all non-lake columns
-    for c in bounds
-        mask_nolake[c] || continue
-        t_sno_mul_mss[c] = 0.0
-    end
-
-    # Accumulate over snow layers
-    for j_fortran in (-nlevsno + 1):0
-        j = j_fortran + nlevsno  # Julia 1-based index
-        for c in bounds
-            mask_snow[c] || continue
-            if j_fortran >= snl[c] + 1
-                t_sno_mul_mss[c] = t_sno_mul_mss[c] + h2osoi_ice[c, j] * t_soisno[c, j]
-                t_sno_mul_mss[c] = t_sno_mul_mss[c] + h2osoi_liq[c, j] * tfrz
-            end
-        end
-    end
-
+    _launch!(_hydrond_snow_internal_temp_kernel!, t_sno_mul_mss, h2osoi_ice,
+             h2osoi_liq, t_soisno, snl, mask_nolake, mask_snow, nlevsno,
+             eltype(t_sno_mul_mss)(tfrz), first(bounds), last(bounds);
+             ndrange = last(bounds))
     return nothing
 end
 
@@ -307,24 +324,95 @@ depth-weighted soil temperatures for top 10cm and 17cm.
 
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
+# Per-column kernel fusing the three host loops (init / depth-weighted accumulate /
+# finalize+ground-temp). The 10cm and 17cm sums are accumulated into thread-locals
+# and written once; ground temperature is computed inline. Non-urban columns get the
+# depth-weighted average, urban columns get the top-layer ground temp.
+@kernel function _hydrond_ground_soil_temps_kernel!(t_grnd, t_grnd_u, t_grnd_r, tsl,
+        t_soi_10cm, tsoi17, @Const(t_soisno), @Const(t_h2osfc), @Const(frac_sno_eff),
+        @Const(frac_h2osfc), @Const(snl), @Const(dz), @Const(zi),
+        @Const(col_landunit), @Const(col_itype), @Const(lun_urbpoi), @Const(lun_itype),
+        @Const(mask_nolake), nlevsoi::Int, joff::Int, joff_zi::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    T = eltype(t_grnd)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        l = col_landunit[c]
+        if !lun_urbpoi[l]
+            acc10 = zero(T)
+            acc17 = zero(T)
+            for j in 1:nlevsoi
+                # Near-surface soil layer temperature
+                if j == 1
+                    tsl[c] = t_soisno[c, j + joff]
+                end
+
+                # Soil T at top 17 cm (F. Li and S. Levis)
+                if zi[c, j + joff_zi] <= T(0.17)
+                    fracl = one(T)
+                    acc17 += t_soisno[c, j + joff] * dz[c, j + joff] * fracl
+                else
+                    if zi[c, j + joff_zi] > T(0.17) && zi[c, j + joff] < T(0.17)
+                        fracl = (T(0.17) - zi[c, j + joff]) / dz[c, j + joff]
+                        acc17 += t_soisno[c, j + joff] * dz[c, j + joff] * fracl
+                    end
+                end
+
+                # Soil T at top 10 cm
+                if zi[c, j + joff_zi] <= T(0.1)
+                    fracl = one(T)
+                    acc10 += t_soisno[c, j + joff] * dz[c, j + joff] * fracl
+                else
+                    if zi[c, j + joff_zi] > T(0.1) && zi[c, j + joff] < T(0.1)
+                        fracl = (T(0.1) - zi[c, j + joff]) / dz[c, j + joff]
+                        acc10 += t_soisno[c, j + joff] * dz[c, j + joff] * fracl
+                    end
+                end
+            end
+            t_soi_10cm[c] = acc10
+            tsoi17[c] = acc17
+        end
+
+        # t_grnd is weighted average of exposed soil and snow
+        if snl[c] < 0
+            t_grnd[c] = frac_sno_eff[c] * t_soisno[c, snl[c] + 1 + joff] +
+                         (one(T) - frac_sno_eff[c] - frac_h2osfc[c]) * t_soisno[c, 1 + joff] +
+                         frac_h2osfc[c] * t_h2osfc[c]
+        else
+            t_grnd[c] = (one(T) - frac_h2osfc[c]) * t_soisno[c, 1 + joff] +
+                         frac_h2osfc[c] * t_h2osfc[c]
+        end
+
+        if lun_urbpoi[l]
+            t_grnd_u[c] = t_soisno[c, snl[c] + 1 + joff]
+        else
+            t_soi_10cm[c] = t_soi_10cm[c] / T(0.1)
+            tsoi17[c] = tsoi17[c] / T(0.17)
+        end
+
+        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+            t_grnd_r[c] = t_soisno[c, snl[c] + 1 + joff]
+        end
+    end
+end
+
 function update_ground_and_soil_temperatures!(
-    t_grnd::Vector{<:Real},
-    t_grnd_u::Vector{<:Real},
-    t_grnd_r::Vector{<:Real},
-    tsl::Vector{<:Real},
-    t_soi_10cm::Vector{<:Real},
-    tsoi17::Vector{<:Real},
-    t_soisno::Matrix{<:Real},
-    t_h2osfc::Vector{<:Real},
-    frac_sno_eff::Vector{<:Real},
-    frac_h2osfc::Vector{<:Real},
-    snl::Vector{Int},
-    dz::Matrix{<:Real},
-    zi::Matrix{<:Real},
-    col_landunit::Vector{Int},
-    col_itype::Vector{Int},
+    t_grnd::AbstractVector{<:Real},
+    t_grnd_u::AbstractVector{<:Real},
+    t_grnd_r::AbstractVector{<:Real},
+    tsl::AbstractVector{<:Real},
+    t_soi_10cm::AbstractVector{<:Real},
+    tsoi17::AbstractVector{<:Real},
+    t_soisno::AbstractMatrix{<:Real},
+    t_h2osfc::AbstractVector{<:Real},
+    frac_sno_eff::AbstractVector{<:Real},
+    frac_h2osfc::AbstractVector{<:Real},
+    snl::AbstractVector{<:Integer},
+    dz::AbstractMatrix{<:Real},
+    zi::AbstractMatrix{<:Real},
+    col_landunit::AbstractVector{<:Integer},
+    col_itype::AbstractVector{<:Integer},
     lun_urbpoi::AbstractVector{Bool},
-    lun_itype::Vector{Int},
+    lun_itype::AbstractVector{<:Integer},
     mask_nolake::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
@@ -337,80 +425,11 @@ function update_ground_and_soil_temperatures!(
     # (zi dimensioned -nlevsno:nlevmaxurbgrnd in Fortran, one extra entry)
     joff_zi = nlevsno + 1
 
-    # Initialize 10cm and 17cm accumulators for non-urban
-    for c in bounds
-        mask_nolake[c] || continue
-        l = col_landunit[c]
-        if !lun_urbpoi[l]
-            t_soi_10cm[c] = 0.0
-            tsoi17[c] = 0.0
-        end
-    end
-
-    # Accumulate soil temperature weighted by depth
-    for j in 1:nlevsoi
-        for c in bounds
-            mask_nolake[c] || continue
-            l = col_landunit[c]
-            if !lun_urbpoi[l]
-                # Near-surface soil layer temperature
-                if j == 1
-                    tsl[c] = t_soisno[c, j + joff]
-                end
-
-                # Soil T at top 17 cm (F. Li and S. Levis)
-                # Fortran: zi(c,j) → Julia: zi[c, j + joff_zi]
-                # Fortran: zi(c,j-1) → Julia: zi[c, (j-1) + joff_zi] = zi[c, j + joff]
-                if zi[c, j + joff_zi] <= 0.17
-                    fracl = 1.0
-                    tsoi17[c] = tsoi17[c] + t_soisno[c, j + joff] * dz[c, j + joff] * fracl
-                else
-                    if zi[c, j + joff_zi] > 0.17 && zi[c, j + joff] < 0.17
-                        fracl = (0.17 - zi[c, j + joff]) / dz[c, j + joff]
-                        tsoi17[c] = tsoi17[c] + t_soisno[c, j + joff] * dz[c, j + joff] * fracl
-                    end
-                end
-
-                # Soil T at top 10 cm
-                if zi[c, j + joff_zi] <= 0.1
-                    fracl = 1.0
-                    t_soi_10cm[c] = t_soi_10cm[c] + t_soisno[c, j + joff] * dz[c, j + joff] * fracl
-                else
-                    if zi[c, j + joff_zi] > 0.1 && zi[c, j + joff] < 0.1
-                        fracl = (0.1 - zi[c, j + joff]) / dz[c, j + joff]
-                        t_soi_10cm[c] = t_soi_10cm[c] + t_soisno[c, j + joff] * dz[c, j + joff] * fracl
-                    end
-                end
-            end
-        end
-    end
-
-    # Ground temperature and finalize 10cm/17cm temperatures
-    for c in bounds
-        mask_nolake[c] || continue
-        l = col_landunit[c]
-
-        # t_grnd is weighted average of exposed soil and snow
-        if snl[c] < 0
-            t_grnd[c] = frac_sno_eff[c] * t_soisno[c, snl[c] + 1 + joff] +
-                         (1.0 - frac_sno_eff[c] - frac_h2osfc[c]) * t_soisno[c, 1 + joff] +
-                         frac_h2osfc[c] * t_h2osfc[c]
-        else
-            t_grnd[c] = (1.0 - frac_h2osfc[c]) * t_soisno[c, 1 + joff] +
-                         frac_h2osfc[c] * t_h2osfc[c]
-        end
-
-        if lun_urbpoi[l]
-            t_grnd_u[c] = t_soisno[c, snl[c] + 1 + joff]
-        else
-            t_soi_10cm[c] = t_soi_10cm[c] / 0.1
-            tsoi17[c] = tsoi17[c] / 0.17
-        end
-
-        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-            t_grnd_r[c] = t_soisno[c, snl[c] + 1 + joff]
-        end
-    end
+    _launch!(_hydrond_ground_soil_temps_kernel!, t_grnd, t_grnd_u, t_grnd_r, tsl,
+             t_soi_10cm, tsoi17, t_soisno, t_h2osfc, frac_sno_eff, frac_h2osfc, snl,
+             dz, zi, col_landunit, col_itype, lun_urbpoi, lun_itype, mask_nolake,
+             nlevsoi, joff, joff_zi, first(bounds), last(bounds);
+             ndrange = last(bounds))
 
     return nothing
 end
@@ -432,13 +451,13 @@ For urban wall/roof columns: over nlevurb layers.
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_h2osoi_vol!(
-    h2osoi_vol::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    dz::Matrix{<:Real},
-    col_itype::Vector{Int},
-    mask_nolake::BitVector,
-    mask_urban::BitVector,
+    h2osoi_vol::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    dz::AbstractMatrix{<:Real},
+    col_itype::AbstractVector{<:Integer},
+    mask_nolake::AbstractVector{Bool},
+    mask_urban::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevgrnd::Int,
     nlevurb::Int,
@@ -472,13 +491,13 @@ Update soil water potential (soilpsi) in each soil layer [MPa].
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_soilpsi!(
-    soilpsi::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    dz::Matrix{<:Real},
-    watsat::Matrix{<:Real},
-    sucsat::Matrix{<:Real},
-    bsw::Matrix{<:Real},
-    mask_hydrology::BitVector,
+    soilpsi::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    dz::AbstractMatrix{<:Real},
+    watsat::AbstractMatrix{<:Real},
+    sucsat::AbstractMatrix{<:Real},
+    bsw::AbstractMatrix{<:Real},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevgrnd::Int,
     nlevsno::Int
@@ -506,13 +525,13 @@ Update soil matric potential (smp_l) for history output and ch4Mod [mm].
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
 function update_smp_l!(
-    smp_l::Matrix{<:Real},
-    h2osoi_vol::Matrix{<:Real},
-    watsat::Matrix{<:Real},
-    sucsat::Matrix{<:Real},
-    bsw::Matrix{<:Real},
-    smpmin::Vector{<:Real},
-    mask_hydrology::BitVector,
+    smp_l::AbstractMatrix{<:Real},
+    h2osoi_vol::AbstractMatrix{<:Real},
+    watsat::AbstractMatrix{<:Real},
+    sucsat::AbstractMatrix{<:Real},
+    bsw::AbstractMatrix{<:Real},
+    smpmin::AbstractVector{<:Real},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevgrnd::Int
 )
@@ -541,15 +560,45 @@ Returns wf = available / potentially_available for each column.
 
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
+# Per-column kernel fusing the three host loops; rwat/swat/rz become thread-locals
+# (no scratch allocations). The depth-weighted sums are accumulated then the WHC
+# fraction finalized inline, replicating the rz==0 fallback exactly.
+@kernel function _hydrond_compute_wf_kernel!(wf_out, @Const(h2osoi_vol),
+        @Const(watsat), @Const(sucsat), @Const(bsw), @Const(z), @Const(dz),
+        @Const(mask_hydrology), nlevgrnd::Int, joff::Int, depth_limit, cmin::Int, cmax::Int)
+    c = @index(Global)
+    T = eltype(wf_out)
+    @inbounds if cmin <= c <= cmax && mask_hydrology[c]
+        rwat = zero(T); swat = zero(T); rz = zero(T)
+        for j in 1:nlevgrnd
+            if z[c, j + joff] + T(0.5) * dz[c, j + joff] <= depth_limit
+                watdry = watsat[c, j] * (T(316230.0) / sucsat[c, j])^(T(-1.0) / bsw[c, j])
+                rwat += (h2osoi_vol[c, j] - watdry) * dz[c, j + joff]
+                swat += (watsat[c, j]      - watdry) * dz[c, j + joff]
+                rz   += dz[c, j + joff]
+            end
+        end
+        if rz != zero(T)
+            tsw  = rwat / rz
+            stsw = swat / rz
+        else
+            watdry = watsat[c, 1] * (T(316230.0) / sucsat[c, 1])^(T(-1.0) / bsw[c, 1])
+            tsw  = h2osoi_vol[c, 1] - watdry
+            stsw = watsat[c, 1] - watdry
+        end
+        wf_out[c] = tsw / stsw
+    end
+end
+
 function compute_wf!(
-    wf_out::Vector{<:Real},
-    h2osoi_vol::Matrix{<:Real},
-    watsat::Matrix{<:Real},
-    sucsat::Matrix{<:Real},
-    bsw::Matrix{<:Real},
-    z::Matrix{<:Real},
-    dz::Matrix{<:Real},
-    mask_hydrology::BitVector,
+    wf_out::AbstractVector{<:Real},
+    h2osoi_vol::AbstractMatrix{<:Real},
+    watsat::AbstractMatrix{<:Real},
+    sucsat::AbstractMatrix{<:Real},
+    bsw::AbstractMatrix{<:Real},
+    z::AbstractMatrix{<:Real},
+    dz::AbstractMatrix{<:Real},
+    mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevgrnd::Int,
     nlevsno::Int,
@@ -557,44 +606,9 @@ function compute_wf!(
 )
     joff = nlevsno
 
-    # Temporary accumulators
-    FT = eltype(h2osoi_vol)
-    nc = length(wf_out)
-    rwat = zeros(FT, nc)
-    swat = zeros(FT, nc)
-    rz   = zeros(FT, nc)
-
-    for c in bounds
-        mask_hydrology[c] || continue
-        rwat[c] = 0.0
-        swat[c] = 0.0
-        rz[c]   = 0.0
-    end
-
-    for j in 1:nlevgrnd
-        for c in bounds
-            mask_hydrology[c] || continue
-            if z[c, j + joff] + 0.5 * dz[c, j + joff] <= depth_limit
-                watdry = watsat[c, j] * (316230.0 / sucsat[c, j])^(-1.0 / bsw[c, j])
-                rwat[c] = rwat[c] + (h2osoi_vol[c, j] - watdry) * dz[c, j + joff]
-                swat[c] = swat[c] + (watsat[c, j]      - watdry) * dz[c, j + joff]
-                rz[c]   = rz[c] + dz[c, j + joff]
-            end
-        end
-    end
-
-    for c in bounds
-        mask_hydrology[c] || continue
-        if rz[c] != 0.0
-            tsw  = rwat[c] / rz[c]
-            stsw = swat[c] / rz[c]
-        else
-            watdry = watsat[c, 1] * (316230.0 / sucsat[c, 1])^(-1.0 / bsw[c, 1])
-            tsw  = h2osoi_vol[c, 1] - watdry
-            stsw = watsat[c, 1] - watdry
-        end
-        wf_out[c] = tsw / stsw
-    end
+    _launch!(_hydrond_compute_wf_kernel!, wf_out, h2osoi_vol, watsat, sucsat, bsw,
+             z, dz, mask_hydrology, nlevgrnd, joff, eltype(wf_out)(depth_limit),
+             first(bounds), last(bounds); ndrange = last(bounds))
 
     return nothing
 end
@@ -615,46 +629,51 @@ Update top-layer snow diagnostics:
 
 Ported from inline code in `HydrologyNoDrainage` in `HydrologyNoDrainageMod.F90`.
 """
+# Per-column kernel fusing the snow / nosnow loops. mask_snow and mask_nosnow are
+# disjoint, so each column takes at most one branch. The spval stores are bare
+# assignments (no arithmetic), so spval may flow through as a scalar arg.
+@kernel function _hydrond_snow_top_diag_kernel!(h2osno_top, snw_rds, snot_top,
+        dTdz_top, snw_rds_top, sno_liq_top, @Const(h2osoi_ice), @Const(h2osoi_liq),
+        @Const(snl), @Const(mask_snow), @Const(mask_nosnow), nlevsno::Int, spval,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        if mask_snow[c]
+            j_top = snl[c] + 1 + nlevsno  # Julia index of top snow layer
+            h2osno_top[c] = h2osoi_ice[c, j_top] + h2osoi_liq[c, j_top]
+        elseif mask_nosnow[c]
+            h2osno_top[c] = 0.0
+            for j in 1:nlevsno
+                snw_rds[c, j] = 0.0
+            end
+            snot_top[c]    = spval
+            dTdz_top[c]    = spval
+            snw_rds_top[c] = spval
+            sno_liq_top[c] = spval
+        end
+    end
+end
+
 function update_snow_top_layer_diagnostics!(
-    h2osno_top::Vector{<:Real},
-    snw_rds::Matrix{<:Real},
-    snot_top::Vector{<:Real},
-    dTdz_top::Vector{<:Real},
-    snw_rds_top::Vector{<:Real},
-    sno_liq_top::Vector{<:Real},
-    h2osoi_ice::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    snl::Vector{Int},
-    mask_snow::BitVector,
-    mask_nosnow::BitVector,
+    h2osno_top::AbstractVector{<:Real},
+    snw_rds::AbstractMatrix{<:Real},
+    snot_top::AbstractVector{<:Real},
+    dTdz_top::AbstractVector{<:Real},
+    snw_rds_top::AbstractVector{<:Real},
+    sno_liq_top::AbstractVector{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    snl::AbstractVector{<:Integer},
+    mask_snow::AbstractVector{Bool},
+    mask_nosnow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsno::Int,
     spval::Real
 )
-    # Top-layer diagnostics for columns with snow
-    for c in bounds
-        mask_snow[c] || continue
-        j_top = snl[c] + 1 + nlevsno  # Julia index of top snow layer
-        h2osno_top[c] = h2osoi_ice[c, j_top] + h2osoi_liq[c, j_top]
-    end
-
-    # Zero variables for columns without snow
-    for c in bounds
-        mask_nosnow[c] || continue
-
-        h2osno_top[c] = 0.0
-
-        # Zero all snow grain radii layers
-        for j in 1:nlevsno
-            snw_rds[c, j] = 0.0
-        end
-
-        # Top-layer diagnostics set to spval (not averaged in history fields)
-        snot_top[c]    = spval
-        dTdz_top[c]    = spval
-        snw_rds_top[c] = spval
-        sno_liq_top[c] = spval
-    end
+    _launch!(_hydrond_snow_top_diag_kernel!, h2osno_top, snw_rds, snot_top, dTdz_top,
+             snw_rds_top, sno_liq_top, h2osoi_ice, h2osoi_liq, snl, mask_snow,
+             mask_nosnow, nlevsno, eltype(snot_top)(spval),
+             first(bounds), last(bounds); ndrange = last(bounds))
 
     return nothing
 end
@@ -681,7 +700,7 @@ Ported from `CalcAndWithdrawIrrigationFluxes` in `HydrologyNoDrainageMod.F90`.
 function calc_and_withdraw_irrigation_fluxes!(
     waterflux::WaterFluxData,
     waterstate::WaterStateData,
-    mask_soil::BitVector,
+    mask_soil::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
     dtime::Real;
@@ -775,15 +794,15 @@ function handle_new_snow!(
     waterdiagbulk::WaterDiagnosticBulkData,
     col::ColumnData,
     lun::LandunitData,
-    mask_nolake::BitVector,
+    mask_nolake::AbstractVector{Bool},
     bounds::UnitRange{Int},
     dtime::Real,
     nlevsno::Int;
-    forc_t::Vector{<:Real},
-    forc_wind::Vector{<:Real} = Float64[],
-    qflx_snow_grnd::Vector{<:Real},
-    qflx_snow_drain::Vector{<:Real} = zeros(length(mask_nolake)),
-    int_snow::Vector{<:Real} = zeros(length(mask_nolake)),
+    forc_t::AbstractVector{<:Real},
+    forc_wind::AbstractVector{<:Real} = Float64[],
+    qflx_snow_grnd::AbstractVector{<:Real},
+    qflx_snow_drain::AbstractVector{<:Real} = zeros(length(mask_nolake)),
+    int_snow::AbstractVector{<:Real} = zeros(length(mask_nolake)),
     scf_method::SnowCoverFractionBase = SnowCoverFractionSwensonLawrence2012()
 )
     nc = length(mask_nolake)
@@ -791,7 +810,7 @@ function handle_new_snow!(
 
     # --- 1. Update quantities for new snow ---
     # Step 1a: Compute bulk density of new snow
-    bifall = fill(FT(50.0), nc)
+    bifall = fill!(similar(forc_t, FT, nc), FT(50.0))
     if !isempty(forc_wind)
         new_snow_bulk_density!(bifall, forc_t, forc_wind, col.gridcell,
                                mask_nolake, bounds)
@@ -804,15 +823,15 @@ function handle_new_snow!(
     # Step 1b: Calculate total H2O in snow (h2osno_total) — per-column kernel with
     # an internal sequential snow-layer loop (loop-carried accumulation).
     FT_hs = eltype(forc_t)
-    h2osno_total = zeros(FT_hs, nc)
+    h2osno_total = fill!(similar(forc_t, FT_hs, nc), zero(FT_hs))
     _launch!(_hydrond_h2osno_total_kernel!, h2osno_total, mask_nolake, col.snl,
              waterstatebulk.ws.h2osno_no_layers_col,
              waterstatebulk.ws.h2osoi_ice_col, waterstatebulk.ws.h2osoi_liq_col,
              nlevsno, first(bounds), last(bounds))
 
     # Step 1c: Update snow diagnostics (snow_depth, frac_sno, int_snow, swe_old)
-    lun_itype_col = Vector{Int}(undef, nc)
-    urbpoi_col = Vector{Bool}(undef, nc)
+    lun_itype_col = similar(col.landunit, Int, nc)
+    urbpoi_col = similar(col.landunit, Bool, nc)
     _launch!(_hydrond_gather_lun_kernel!, lun_itype_col, mask_nolake, col.landunit,
              lun.itype, lun.urbpoi, urbpoi_col, first(bounds), last(bounds))
 
@@ -837,7 +856,7 @@ function handle_new_snow!(
     # --- 2. Remove snow from thawed wetlands ---
     # Reuse lun_itype_col from Step 1c (already populated for all active columns)
 
-    mask_thawed_wetland = falses(nc)
+    mask_thawed_wetland = fill!(similar(mask_nolake, Bool, nc), false)
     build_filter_thawed_wetland_thin_snowpack!(
         mask_thawed_wetland,
         temperature.t_grnd_col, lun_itype_col, col.snl,
@@ -852,7 +871,7 @@ function handle_new_snow!(
         mask_thawed_wetland, bounds)
 
     # --- 3. Initialize explicit snow pack ---
-    mask_init_snowpack = falses(nc)
+    mask_init_snowpack = fill!(similar(mask_nolake, Bool, nc), false)
     build_filter_snowpack_initialized!(
         mask_init_snowpack,
         col.snl, lun_itype_col,
@@ -913,11 +932,11 @@ function hydrology_no_drainage!(
     waterdiagbulk::WaterDiagnosticBulkData,
     col::ColumnData,
     lun::LandunitData,
-    mask_nolake::BitVector,
-    mask_hydrology::BitVector,
-    mask_urban::BitVector,
-    mask_snow::BitVector,
-    mask_nosnow::BitVector,
+    mask_nolake::AbstractVector{Bool},
+    mask_hydrology::AbstractVector{Bool},
+    mask_urban::AbstractVector{Bool},
+    mask_snow::AbstractVector{Bool},
+    mask_nosnow::AbstractVector{Bool},
     bounds::UnitRange{Int},
     dtime::Real,
     nlevsno::Int,

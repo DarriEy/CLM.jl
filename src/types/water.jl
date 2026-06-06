@@ -673,15 +673,15 @@ Ported from `Summary` in `WaterType.F90`.
 function water_summary!(water::WaterData,
                          bounds_col::UnitRange{Int},
                          bounds_patch::UnitRange{Int};
-                         mask_soilp::BitVector,
-                         mask_allc::BitVector,
-                         mask_nolakec::BitVector,
-                         h2osno_total_col::Vector{<:Real},
-                         dz_col::Matrix{<:Real},
-                         zi_col::Matrix{<:Real},
-                         landunit_col::Vector{Int},
-                         urbpoi::BitVector,
-                         lun_itype::Vector{Int})
+                         mask_soilp::AbstractVector{Bool},
+                         mask_allc::AbstractVector{Bool},
+                         mask_nolakec::AbstractVector{Bool},
+                         h2osno_total_col::AbstractVector{<:Real},
+                         dz_col::AbstractMatrix{<:Real},
+                         zi_col::AbstractMatrix{<:Real},
+                         landunit_col::AbstractVector{<:Integer},
+                         urbpoi::AbstractVector{Bool},
+                         lun_itype::AbstractVector{<:Integer})
     # Bulk summary: extract waterstate/waterflux fields from bulk instances
     ws = water.waterstatebulk_inst.ws
     wf = water.waterfluxbulk_inst.wf

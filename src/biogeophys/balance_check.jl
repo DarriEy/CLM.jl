@@ -81,7 +81,7 @@ end
     water_gridcell_balance!(water::WaterData,
         lakestate::LakeStateData,
         col_data::ColumnData, lun_data::LandunitData, grc_data::GridcellData,
-        mask_nolake::BitVector, mask_lake::BitVector,
+        mask_nolake::AbstractVector{Bool}, mask_lake::AbstractVector{Bool},
         bounds_c::UnitRange{Int}, bounds_l::UnitRange{Int}, bounds_g::UnitRange{Int},
         flag::String; kwargs...)
 
@@ -100,16 +100,16 @@ function water_gridcell_balance!(
     col_data::ColumnData,
     lun_data::LandunitData,
     grc_data::GridcellData,
-    mask_nolake::BitVector,
-    mask_lake::BitVector,
+    mask_nolake::AbstractVector{Bool},
+    mask_lake::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_l::UnitRange{Int},
     bounds_g::UnitRange{Int},
     flag::String;
     use_aquifer_layer::Bool=false,
     use_hillslope_routing::Bool=false,
-    qflx_liq_dynbal_left_to_dribble::Vector{<:Real}=Float64[],
-    qflx_ice_dynbal_left_to_dribble::Vector{<:Real}=Float64[]
+    qflx_liq_dynbal_left_to_dribble::AbstractVector{<:Real}=Float64[],
+    qflx_ice_dynbal_left_to_dribble::AbstractVector{<:Real}=Float64[]
 )
     for i in water.bulk_and_tracers_beg:water.bulk_and_tracers_end
         bt = water.bulk_and_tracers[i]
@@ -132,6 +132,33 @@ function water_gridcell_balance!(
         )
     end
     return nothing
+end
+
+# Landunit stream water volume → gridcell (m3 → kg/m2). One thread per landunit;
+# many landunits map to one gridcell, so the gridcell add is a scatter.
+@kernel function _wgb_stream_water_kernel!(wb_grc, @Const(lun_gridcell),
+        @Const(stream_water_volume_lun), @Const(grc_area),
+        gmin::Int, gmax::Int, lmin::Int, lmax::Int)
+    l = @index(Global)
+    @inbounds if lmin <= l <= lmax
+        T = eltype(wb_grc)
+        g = lun_gridcell[l]
+        if gmin <= g <= gmax
+            _scatter_add!(wb_grc, g,
+                stream_water_volume_lun[l] * T(1.0e3) / (grc_area[g] * T(1.0e6)))
+        end
+    end
+end
+
+# Subtract dynbal dribbler amounts (liq + ice), one thread per gridcell.
+@kernel function _wgb_dribbler_subtract_kernel!(wb_grc,
+        @Const(qflx_liq_dynbal_left_to_dribble), @Const(qflx_ice_dynbal_left_to_dribble),
+        gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        wb_grc[g] -= qflx_liq_dynbal_left_to_dribble[g] +
+                     qflx_ice_dynbal_left_to_dribble[g]
+    end
 end
 
 # --------------------------------------------------------------------------
@@ -161,17 +188,17 @@ function water_gridcell_balance_single!(
     col_data::ColumnData,
     lun_data::LandunitData,
     grc_data::GridcellData,
-    mask_nolake::BitVector,
-    mask_lake::BitVector,
+    mask_nolake::AbstractVector{Bool},
+    mask_lake::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_l::UnitRange{Int},
     bounds_g::UnitRange{Int},
     flag::String;
     use_aquifer_layer::Bool=false,
     use_hillslope_routing::Bool=false,
-    qflx_liq_dynbal_left_to_dribble::Vector{<:Real}=Float64[],
-    qflx_ice_dynbal_left_to_dribble::Vector{<:Real}=Float64[],
-    wa_reset_nonconservation_gain_col::Vector{<:Real}=Float64[]
+    qflx_liq_dynbal_left_to_dribble::AbstractVector{<:Real}=Float64[],
+    qflx_ice_dynbal_left_to_dribble::AbstractVector{<:Real}=Float64[],
+    wa_reset_nonconservation_gain_col::AbstractVector{<:Real}=Float64[]
 )
     isnothing(waterbalance) && return nothing
     isnothing(waterstate) && return nothing
@@ -183,8 +210,10 @@ function water_gridcell_balance_single!(
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
     ng = length(bounds_g) > 0 ? last(bounds_g) : 0
     FT = eltype(begwb_grc)
-    wb_col = zeros(FT, nc)
-    wb_grc = zeros(FT, ng)
+    # Device-resident scratch (lands on-device when col_data arrays are device
+    # arrays; ordinary host arrays on CPU). col_data.wtgcell is the backend ref.
+    wb_col = fill!(similar(col_data.wtgcell, FT, nc), zero(FT))
+    wb_grc = fill!(similar(col_data.wtgcell, FT, ng), zero(FT))
 
     # Compute water mass for non-lake columns
     ws_raw = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
@@ -196,41 +225,39 @@ function water_gridcell_balance_single!(
     # Column-to-gridcell aggregation
     c2g_unity!(wb_grc, wb_col, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
-    # Add landunit-level state (stream water volume), convert from m3 to kg/m2
+    # Add landunit-level state (stream water volume), convert from m3 to kg/m2.
+    # Landunit→gridcell scatter (atomic-safe via _scatter_add!).
     if use_hillslope_routing
         ws = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
         stream_water_volume_lun = ws.stream_water_volume_lun
-        for l in bounds_l
-            g = lun_data.gridcell[l]
-            if g in bounds_g
-                wb_grc[g] += stream_water_volume_lun[l] * 1.0e3 / (grc_data.area[g] * 1.0e6)
-            end
+        if !isempty(bounds_l)
+            _launch!(_wgb_stream_water_kernel!, wb_grc, lun_data.gridcell,
+                stream_water_volume_lun, grc_data.area, first(bounds_g), last(bounds_g),
+                first(bounds_l), last(bounds_l); ndrange = length(stream_water_volume_lun))
         end
     end
 
-    # Subtract dynbal dribbler amounts
+    # Subtract dynbal dribbler amounts (per-gridcell).
     if !isempty(qflx_liq_dynbal_left_to_dribble)
-        for g in bounds_g
-            wb_grc[g] -= qflx_liq_dynbal_left_to_dribble[g] +
-                          qflx_ice_dynbal_left_to_dribble[g]
+        if !isempty(bounds_g)
+            _launch!(_wgb_dribbler_subtract_kernel!, wb_grc,
+                qflx_liq_dynbal_left_to_dribble, qflx_ice_dynbal_left_to_dribble,
+                first(bounds_g), last(bounds_g); ndrange = length(wb_grc))
         end
     end
 
-    # Map wb_grc to beginning/ending water balance according to flag
+    # Map wb_grc to beginning/ending water balance according to flag.
+    # Broadcast over the bounds range (device-safe; no scalar indexing).
     if flag == "begwb"
-        for g in bounds_g
-            begwb_grc[g] = wb_grc[g]
-        end
+        @view(begwb_grc[bounds_g]) .= @view(wb_grc[bounds_g])
     elseif flag == "endwb"
         # endwb_grc requires wa_reset_nonconservation_gain adjustment
-        wa_reset_grc = zeros(FT, ng)
+        wa_reset_grc = fill!(similar(col_data.wtgcell, FT, ng), zero(FT))
         if use_aquifer_layer && !isempty(wa_reset_nonconservation_gain_col)
             c2g_unity!(wa_reset_grc, wa_reset_nonconservation_gain_col,
                        col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
         end
-        for g in bounds_g
-            endwb_grc[g] = wb_grc[g] - wa_reset_grc[g]
-        end
+        @view(endwb_grc[bounds_g]) .= @view(wb_grc[bounds_g]) .- @view(wa_reset_grc[bounds_g])
     else
         error("Unknown flag '$flag' passed to water_gridcell_balance_single!. " *
               "Expecting either 'begwb' or 'endwb'.")
@@ -253,10 +280,10 @@ Delegates to `compute_water_mass_lake!` in `total_water_heat.jl`.
 Ported from `ComputeWaterMassLake` in `TotalWaterAndHeatMod.F90`.
 """
 function compute_water_mass_lake_bc!(
-    water_mass::Vector{<:Real},
+    water_mass::AbstractVector{<:Real},
     waterstate::Union{WaterStateData, WaterStateBulkData},
     lakestate::LakeStateData,
-    mask_lake::BitVector,
+    mask_lake::AbstractVector{Bool},
     bounds::UnitRange{Int},
     col_data::ColumnData
 )
@@ -279,10 +306,10 @@ Delegates to `compute_water_mass_non_lake!` in `total_water_heat.jl`.
 Ported from `ComputeWaterMassNonLake` in `TotalWaterAndHeatMod.F90`.
 """
 function compute_water_mass_non_lake_bc!(
-    water_mass::Vector{<:Real},
+    water_mass::AbstractVector{<:Real},
     waterstate::Union{WaterStateData, WaterStateBulkData},
     waterdiagnostic::Union{WaterDiagnosticBulkData, Nothing},
-    mask_nolake::BitVector,
+    mask_nolake::AbstractVector{Bool},
     bounds::UnitRange{Int},
     col_data::ColumnData
 )
@@ -291,25 +318,42 @@ function compute_water_mass_non_lake_bc!(
         compute_water_mass_non_lake!(mask_nolake, col_data, ws, waterdiagnostic, false, water_mass)
     else
         # Tracer path: no waterdiagnostic available, compute without plant stored water
-        nc = length(water_mass)
         nlevsno = varpar.nlevsno
-        for c in eachindex(mask_nolake)
-            mask_nolake[c] || continue
-            water_mass[c] = ws.h2osno_no_layers_col[c] + ws.h2osfc_col[c]
-            for j in (col_data.snl[c] + 1):0
-                jj = j + nlevsno
-                water_mass[c] += ws.h2osoi_liq_col[c, jj] + ws.h2osoi_ice_col[c, jj]
-            end
-            if col_data.hydrologically_active[c]
-                water_mass[c] += (ws.wa_col[c] - ws.aquifer_water_baseline)
-            end
-            for j in 1:varpar.nlevgrnd
-                jj = j + nlevsno
-                water_mass[c] += ws.h2osoi_liq_col[c, jj] + ws.h2osoi_ice_col[c, jj]
-            end
-        end
+        nlevgrnd = varpar.nlevgrnd
+        aquifer_baseline = convert(eltype(water_mass), ws.aquifer_water_baseline)
+        _launch!(_bc_tracer_water_mass_kernel!, water_mass, mask_nolake,
+            ws.h2osno_no_layers_col, ws.h2osfc_col, col_data.snl,
+            ws.h2osoi_liq_col, ws.h2osoi_ice_col,
+            col_data.hydrologically_active, ws.wa_col, aquifer_baseline,
+            nlevsno, nlevgrnd; ndrange = length(water_mass))
     end
     return nothing
+end
+
+# Tracer-path total water mass (no canopy / plant stored water). One thread per
+# column; loop-carried sum accumulated into a thread-local, written once.
+@kernel function _bc_tracer_water_mass_kernel!(water_mass, @Const(mask),
+        @Const(h2osno_no_layers_col), @Const(h2osfc_col), @Const(snl),
+        @Const(h2osoi_liq_col), @Const(h2osoi_ice_col),
+        @Const(hydrologically_active), @Const(wa_col), aquifer_baseline,
+        nlevsno::Int, nlevgrnd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(water_mass)
+        wm = h2osno_no_layers_col[c] + h2osfc_col[c]
+        for j in (snl[c] + 1):0
+            jj = j + nlevsno
+            wm += h2osoi_liq_col[c, jj] + h2osoi_ice_col[c, jj]
+        end
+        if hydrologically_active[c]
+            wm += (wa_col[c] - aquifer_baseline)
+        end
+        for j in 1:nlevgrnd
+            jj = j + nlevsno
+            wm += h2osoi_liq_col[c, jj] + h2osoi_ice_col[c, jj]
+        end
+        water_mass[c] = wm
+    end
 end
 
 # --------------------------------------------------------------------------
@@ -321,7 +365,7 @@ end
         soilhydrology::SoilHydrologyData,
         lakestate::LakeStateData,
         col_data::ColumnData, lun_data::LandunitData,
-        mask_nolake::BitVector, mask_lake::BitVector,
+        mask_nolake::AbstractVector{Bool}, mask_lake::AbstractVector{Bool},
         bounds_c::UnitRange{Int};
         use_aquifer_layer::Bool)
 
@@ -336,8 +380,8 @@ function begin_water_column_balance!(
     lakestate::LakeStateData,
     col_data::ColumnData,
     lun_data::LandunitData,
-    mask_nolake::BitVector,
-    mask_lake::BitVector,
+    mask_nolake::AbstractVector{Bool},
+    mask_lake::AbstractVector{Bool},
     bounds_c::UnitRange{Int};
     use_aquifer_layer::Bool=false
 )
@@ -363,6 +407,28 @@ end
 # BeginWaterColumnBalanceSingle
 # --------------------------------------------------------------------------
 
+# Reset aquifer water to baseline for active, hydrologically-active columns whose
+# water table is at/below the soil bottom interface. One thread per column;
+# writes wa and wa_reset_nonconservation_gain. zi_bottom_idx = joff_zi + nlevsoi.
+@kernel function _bwcb_aquifer_reset_kernel!(wa, wa_reset_nonconservation_gain,
+        @Const(mask_nolake), @Const(active), @Const(hydrologically_active),
+        @Const(zwt), @Const(zi), aquifer_baseline, zi_bottom_idx::Int,
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_nolake[c]
+        if active[c]
+            if hydrologically_active[c]
+                if zwt[c] <= zi[c, zi_bottom_idx]
+                    wa_reset_nonconservation_gain[c] = aquifer_baseline - wa[c]
+                    wa[c] = aquifer_baseline
+                else
+                    wa_reset_nonconservation_gain[c] = zero(eltype(wa_reset_nonconservation_gain))
+                end
+            end
+        end
+    end
+end
+
 """
     begin_water_column_balance_single!(waterstate, waterbalance,
         soilhydrology, lakestate, col_data, lun_data,
@@ -382,8 +448,8 @@ function begin_water_column_balance_single!(
     lakestate::LakeStateData,
     col_data::ColumnData,
     lun_data::LandunitData,
-    mask_nolake::BitVector,
-    mask_lake::BitVector,
+    mask_nolake::AbstractVector{Bool},
+    mask_lake::AbstractVector{Bool},
     bounds_c::UnitRange{Int};
     use_aquifer_layer::Bool=false
 )
@@ -403,22 +469,15 @@ function begin_water_column_balance_single!(
     begwb = waterbalance.begwb_col
     h2osno_old = waterbalance.h2osno_old_col
 
-    # Reset aquifer water to baseline under certain conditions
-    if use_aquifer_layer
-        for c in bounds_c
-            mask_nolake[c] || continue
-            if col_data.active[c]
-                if is_hydrologically_active(col_data.itype[c], lun_data.itype[col_data.landunit[c]])
-                    # zi is indexed on combined snow+soil interfaces.
-                    if zwt[c] <= zi[c, joff_zi + nlevsoi_val]
-                        wa_reset_nonconservation_gain[c] = aquifer_water_baseline - wa[c]
-                        wa[c] = aquifer_water_baseline
-                    else
-                        wa_reset_nonconservation_gain[c] = 0.0
-                    end
-                end
-            end
-        end
+    # Reset aquifer water to baseline under certain conditions (per-column kernel).
+    # col_data.hydrologically_active is the precomputed equivalent of
+    # is_hydrologically_active(col_itype, lun_itype).
+    if use_aquifer_layer && !isempty(bounds_c)
+        aquifer_baseline_ft = convert(eltype(wa), aquifer_water_baseline)
+        _launch!(_bwcb_aquifer_reset_kernel!, wa, wa_reset_nonconservation_gain,
+            mask_nolake, col_data.active, col_data.hydrologically_active,
+            zwt, zi, aquifer_baseline_ft, joff_zi + nlevsoi_val,
+            first(bounds_c), last(bounds_c); ndrange = length(wa))
     end
 
     # Compute water mass for non-lake columns → begwb
@@ -443,6 +502,209 @@ end
 const H2O_WARNING_THRESH    = 1.0e-9
 const ENERGY_WARNING_THRESH = 1.0e-7
 const BALANCE_ERROR_THRESH  = 1.0e-5
+
+# ------------------------------------------------------------------
+# balance_check! numeric kernels (one thread per column / gridcell / patch).
+# Each takes the INDIVIDUAL field arrays (structs are not isbits). The
+# warn/error scans stay HOST-ONLY (gated `if <errarr> isa Array`) so the CPU
+# keeps the @warn/@error/error() and the device skips the scalar scan.
+# T(...) keeps consts in the device eltype (Metal: Float32-only); on CPU
+# T==Float64 so every store is byte-identical to the original loop.
+# ------------------------------------------------------------------
+
+# Per-column: incoming column rain/snow (zero on urban wall columns).
+@kernel function _bc_forc_rainsnow_kernel!(forc_rain_c, forc_snow_c,
+        @Const(col_itype), @Const(forc_rain_col), @Const(forc_snow_col),
+        cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        if col_itype[c] == ICOL_SUNWALL || col_itype[c] == ICOL_SHADEWALL
+            forc_rain_c[c] = zero(eltype(forc_rain_c))
+            forc_snow_c[c] = zero(eltype(forc_snow_c))
+        else
+            forc_rain_c[c] = forc_rain_col[c]
+            forc_snow_c[c] = forc_snow_col[c]
+        end
+    end
+end
+
+# Per-column water balance error.
+@kernel function _bc_errh2o_col_kernel!(errh2o_col,
+        @Const(active), @Const(endwb_col), @Const(begwb_col),
+        @Const(forc_rain_c), @Const(forc_snow_c), @Const(qflx_flood_col),
+        @Const(qflx_sfc_irrig_col), @Const(qflx_glcice_dyn_water_flux_col),
+        @Const(qflx_evap_tot_col), @Const(qflx_surf_col), @Const(qflx_qrgwl_col),
+        @Const(qflx_drain_col), @Const(qflx_drain_perched_col), @Const(qflx_ice_runoff_col),
+        @Const(qflx_snwcp_discarded_liq_col), @Const(qflx_snwcp_discarded_ice_col),
+        dtime, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        T = eltype(errh2o_col)
+        if active[c]
+            errh2o_col[c] = endwb_col[c] - begwb_col[c] -
+                (forc_rain_c[c] +
+                 forc_snow_c[c] +
+                 qflx_flood_col[c] +
+                 qflx_sfc_irrig_col[c] +
+                 qflx_glcice_dyn_water_flux_col[c] -
+                 qflx_evap_tot_col[c] -
+                 qflx_surf_col[c] -
+                 qflx_qrgwl_col[c] -
+                 qflx_drain_col[c] -
+                 qflx_drain_perched_col[c] -
+                 qflx_ice_runoff_col[c] -
+                 qflx_snwcp_discarded_liq_col[c] -
+                 qflx_snwcp_discarded_ice_col[c]) * T(dtime)
+        else
+            errh2o_col[c] = zero(T)
+        end
+    end
+end
+
+# Per-gridcell water balance error (with optional streamflow term).
+@kernel function _bc_errh2o_grc_kernel!(errh2o_grc,
+        @Const(endwb_grc), @Const(begwb_grc), @Const(forc_rain_grc), @Const(forc_snow_grc),
+        @Const(forc_flood_grc), @Const(qflx_sfc_irrig_grc), @Const(qflx_glcice_dyn_water_flux_grc),
+        @Const(qflx_evap_tot_grc), @Const(qflx_surf_grc), @Const(qflx_qrgwl_grc),
+        @Const(qflx_drain_grc), @Const(qflx_drain_perched_grc), @Const(qflx_ice_runoff_grc),
+        @Const(qflx_snwcp_discarded_liq_grc), @Const(qflx_snwcp_discarded_ice_grc),
+        @Const(qflx_streamflow_grc), use_hillslope_routing::Bool, dtime, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        T = eltype(errh2o_grc)
+        e = endwb_grc[g] - begwb_grc[g] -
+            (forc_rain_grc[g] +
+             forc_snow_grc[g] +
+             forc_flood_grc[g] +
+             qflx_sfc_irrig_grc[g] +
+             qflx_glcice_dyn_water_flux_grc[g] -
+             qflx_evap_tot_grc[g] -
+             qflx_surf_grc[g] -
+             qflx_qrgwl_grc[g] -
+             qflx_drain_grc[g] -
+             qflx_drain_perched_grc[g] -
+             qflx_ice_runoff_grc[g] -
+             qflx_snwcp_discarded_liq_grc[g] -
+             qflx_snwcp_discarded_ice_grc[g]) * T(dtime)
+        if use_hillslope_routing
+            e += qflx_streamflow_grc[g] * T(dtime)
+        end
+        errh2o_grc[g] = e
+    end
+end
+
+# Per-column snow balance error.
+@kernel function _bc_errh2osno_kernel!(snow_sources, snow_sinks, errh2osno,
+        @Const(active), @Const(landunit), @Const(snl), @Const(col_itype), @Const(lun_itype),
+        @Const(qflx_prec_grnd), @Const(qflx_soliddew_to_top_layer), @Const(qflx_liqdew_to_top_layer),
+        @Const(qflx_solidevap_from_top_layer), @Const(qflx_liqevap_from_top_layer),
+        @Const(qflx_snow_drain), @Const(qflx_snwcp_ice), @Const(qflx_snwcp_liq),
+        @Const(qflx_snwcp_discarded_ice_col), @Const(qflx_snwcp_discarded_liq_col),
+        @Const(qflx_sl_top_soil), @Const(frac_sno_eff), @Const(qflx_snow_grnd_col),
+        @Const(qflx_liq_grnd_col), @Const(qflx_snow_h2osfc), @Const(qflx_h2osfc_to_ice),
+        @Const(h2osno_total), @Const(h2osno_old), dtime, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        T = eltype(errh2osno)
+        if active[c]
+            l = landunit[c]
+            if snl[c] < 0
+                ss_src = qflx_prec_grnd[c] + qflx_soliddew_to_top_layer[c] +
+                    qflx_liqdew_to_top_layer[c]
+                ss_snk = qflx_solidevap_from_top_layer[c] +
+                    qflx_liqevap_from_top_layer[c] +
+                    qflx_snow_drain[c] + qflx_snwcp_ice[c] + qflx_snwcp_liq[c] +
+                    qflx_snwcp_discarded_ice_col[c] + qflx_snwcp_discarded_liq_col[c] +
+                    qflx_sl_top_soil[c]
+
+                if lun_itype[l] == ISTDLAK
+                    ss_src = qflx_snow_grnd_col[c] +
+                        frac_sno_eff[c] * (qflx_liq_grnd_col[c] +
+                        qflx_soliddew_to_top_layer[c] + qflx_liqdew_to_top_layer[c])
+                    ss_snk = frac_sno_eff[c] * (qflx_solidevap_from_top_layer[c] +
+                        qflx_liqevap_from_top_layer[c]) + qflx_snwcp_ice[c] + qflx_snwcp_liq[c] +
+                        qflx_snwcp_discarded_ice_col[c] + qflx_snwcp_discarded_liq_col[c] +
+                        qflx_snow_drain[c] + qflx_sl_top_soil[c]
+                end
+
+                if col_itype[c] == ICOL_ROAD_PERV || lun_itype[l] == ISTSOIL ||
+                   lun_itype[l] == ISTCROP || lun_itype[l] == ISTWET ||
+                   lun_itype[l] == ISTICE
+                    ss_src = (qflx_snow_grnd_col[c] - qflx_snow_h2osfc[c]) +
+                        frac_sno_eff[c] * (qflx_liq_grnd_col[c] +
+                        qflx_soliddew_to_top_layer[c] + qflx_liqdew_to_top_layer[c]) +
+                        qflx_h2osfc_to_ice[c]
+                    ss_snk = frac_sno_eff[c] * (qflx_solidevap_from_top_layer[c] +
+                        qflx_liqevap_from_top_layer[c]) + qflx_snwcp_ice[c] + qflx_snwcp_liq[c] +
+                        qflx_snwcp_discarded_ice_col[c] + qflx_snwcp_discarded_liq_col[c] +
+                        qflx_snow_drain[c] + qflx_sl_top_soil[c]
+                end
+
+                snow_sources[c] = ss_src
+                snow_sinks[c] = ss_snk
+                errh2osno[c] = (h2osno_total[c] - h2osno_old[c]) -
+                    (ss_src - ss_snk) * T(dtime)
+            else
+                snow_sources[c] = zero(T)
+                snow_sinks[c] = zero(T)
+                errh2osno[c] = zero(T)
+            end
+        else
+            errh2osno[c] = zero(T)
+        end
+    end
+end
+
+# Per-patch energy balance errors (solar / longwave / surface) + net radiation.
+@kernel function _bc_energy_kernel!(errsol, errlon, errseb, netrad,
+        @Const(pat_active), @Const(pat_column), @Const(pat_landunit), @Const(pat_gridcell),
+        @Const(urbpoi), @Const(fsa), @Const(fsr), @Const(forc_solad_col), @Const(forc_solai_grc),
+        @Const(eflx_lwrad_out), @Const(eflx_lwrad_net), @Const(forc_lwrad_col),
+        @Const(sabv), @Const(sabg_chk), @Const(eflx_sh_tot), @Const(eflx_lh_tot),
+        @Const(eflx_soil_grnd), @Const(dhsdt_canopy), @Const(sabg),
+        @Const(eflx_wasteheat_p), @Const(eflx_heat_from_ac_p), @Const(eflx_traffic_p),
+        @Const(eflx_ventilation_p), spval, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(errsol)
+        if pat_active[p]
+            c = pat_column[p]
+            l = pat_landunit[p]
+            g = pat_gridcell[p]
+
+            if !urbpoi[l]
+                errsol[p] = fsa[p] + fsr[p] -
+                    (forc_solad_col[c, 1] + forc_solad_col[c, 2] +
+                     forc_solai_grc[g, 1] + forc_solai_grc[g, 2])
+            else
+                errsol[p] = T(spval)
+            end
+
+            if !urbpoi[l]
+                errlon[p] = eflx_lwrad_out[p] - eflx_lwrad_net[p] - forc_lwrad_col[c]
+            else
+                errlon[p] = T(spval)
+            end
+
+            if !urbpoi[l]
+                errseb[p] = sabv[p] + sabg_chk[p] + forc_lwrad_col[c] - eflx_lwrad_out[p] -
+                    eflx_sh_tot[p] - eflx_lh_tot[p] - eflx_soil_grnd[p] - dhsdt_canopy[p]
+            else
+                errseb[p] = sabv[p] + sabg[p] -
+                    eflx_lwrad_net[p] -
+                    eflx_sh_tot[p] - eflx_lh_tot[p] - eflx_soil_grnd[p] +
+                    eflx_wasteheat_p[p] + eflx_heat_from_ac_p[p] + eflx_traffic_p[p] +
+                    eflx_ventilation_p[p]
+            end
+
+            netrad[p] = fsa[p] - eflx_lwrad_net[p]
+        else
+            errsol[p] = zero(T)
+            errlon[p] = zero(T)
+            errseb[p] = zero(T)
+        end
+    end
+end
 
 """
     balance_check!(bc::BalanceCheckData, ...)
@@ -476,7 +738,7 @@ function balance_check!(
     lun_data::LandunitData,
     pat_data::PatchData,
     grc_data::GridcellData,
-    mask_allc::BitVector,
+    mask_allc::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     bounds_g::UnitRange{Int},
@@ -484,24 +746,24 @@ function balance_check!(
     DAnstep::Int,
     dtime::Real;
     # --- Atmospheric forcing (from Atm2Lnd / WaterAtm2Lnd) ---
-    forc_rain_col::Vector{<:Real}=Float64[],
-    forc_snow_col::Vector{<:Real}=Float64[],
-    forc_rain_grc::Vector{<:Real}=Float64[],
-    forc_snow_grc::Vector{<:Real}=Float64[],
-    forc_solad_col::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-    forc_solai_grc::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-    forc_lwrad_col::Vector{<:Real}=Float64[],
-    forc_flood_grc::Vector{<:Real}=Float64[],
+    forc_rain_col::AbstractVector{<:Real}=Float64[],
+    forc_snow_col::AbstractVector{<:Real}=Float64[],
+    forc_rain_grc::AbstractVector{<:Real}=Float64[],
+    forc_snow_grc::AbstractVector{<:Real}=Float64[],
+    forc_solad_col::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+    forc_solai_grc::AbstractMatrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+    forc_lwrad_col::AbstractVector{<:Real}=Float64[],
+    forc_flood_grc::AbstractVector{<:Real}=Float64[],
     # --- Fluxes from WaterLnd2Atm (not yet ported as types) ---
-    qflx_ice_runoff_col::Vector{<:Real}=Float64[],
-    qflx_evap_tot_grc::Vector{<:Real}=Float64[],
-    qflx_surf_grc::Vector{<:Real}=Float64[],
-    qflx_qrgwl_grc::Vector{<:Real}=Float64[],
-    qflx_drain_grc::Vector{<:Real}=Float64[],
-    qflx_drain_perched_grc::Vector{<:Real}=Float64[],
-    qflx_ice_runoff_grc::Vector{<:Real}=Float64[],
-    qflx_sfc_irrig_grc::Vector{<:Real}=Float64[],
-    qflx_streamflow_grc::Vector{<:Real}=Float64[],
+    qflx_ice_runoff_col::AbstractVector{<:Real}=Float64[],
+    qflx_evap_tot_grc::AbstractVector{<:Real}=Float64[],
+    qflx_surf_grc::AbstractVector{<:Real}=Float64[],
+    qflx_qrgwl_grc::AbstractVector{<:Real}=Float64[],
+    qflx_drain_grc::AbstractVector{<:Real}=Float64[],
+    qflx_drain_perched_grc::AbstractVector{<:Real}=Float64[],
+    qflx_ice_runoff_grc::AbstractVector{<:Real}=Float64[],
+    qflx_sfc_irrig_grc::AbstractVector{<:Real}=Float64[],
+    qflx_streamflow_grc::AbstractVector{<:Real}=Float64[],
     # --- Control flags ---
     use_fates_planthydro::Bool=false,
     use_soil_moisture_streams::Bool=false,
@@ -600,56 +862,46 @@ function balance_check!(
 
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
     FT_bc = eltype(errh2o_col)
-    forc_rain_c = zeros(FT_bc, nc)
-    forc_snow_c = zeros(FT_bc, nc)
+    # Device-resident scratch (lands on-device when errh2o_col is a device array).
+    forc_rain_c = fill!(similar(errh2o_col, FT_bc, nc), zero(FT_bc))
+    forc_snow_c = fill!(similar(errh2o_col, FT_bc, nc), zero(FT_bc))
 
-    for c in bounds_c
-        if col_data.itype[c] == ICOL_SUNWALL || col_data.itype[c] == ICOL_SHADEWALL
-            forc_rain_c[c] = 0.0
-            forc_snow_c[c] = 0.0
-        else
-            forc_rain_c[c] = forc_rain_col[c]
-            forc_snow_c[c] = forc_snow_col[c]
-        end
+    if !isempty(bounds_c)
+        _launch!(_bc_forc_rainsnow_kernel!, forc_rain_c, forc_snow_c,
+            col_data.itype, forc_rain_col, forc_snow_col,
+            first(bounds_c), last(bounds_c); ndrange = length(forc_rain_c))
     end
 
     # =====================================================================
     # Water balance check at the column level
     # =====================================================================
 
-    for c in bounds_c
-        if col_data.active[c]
-            errh2o_col[c] = endwb_col[c] - begwb_col[c] -
-                (forc_rain_c[c] +
-                 forc_snow_c[c] +
-                 qflx_flood_col[c] +
-                 qflx_sfc_irrig_col[c] +
-                 qflx_glcice_dyn_water_flux_col[c] -
-                 qflx_evap_tot_col[c] -
-                 qflx_surf_col[c] -
-                 qflx_qrgwl_col[c] -
-                 qflx_drain_col[c] -
-                 qflx_drain_perched_col[c] -
-                 qflx_ice_runoff_col[c] -
-                 qflx_snwcp_discarded_liq_col[c] -
-                 qflx_snwcp_discarded_ice_col[c]) * dtime
-        else
-            errh2o_col[c] = 0.0
-        end
+    if !isempty(bounds_c)
+        _launch!(_bc_errh2o_col_kernel!, errh2o_col,
+            col_data.active, endwb_col, begwb_col, forc_rain_c, forc_snow_c,
+            qflx_flood_col, qflx_sfc_irrig_col, qflx_glcice_dyn_water_flux_col,
+            qflx_evap_tot_col, qflx_surf_col, qflx_qrgwl_col, qflx_drain_col,
+            qflx_drain_perched_col, qflx_ice_runoff_col, qflx_snwcp_discarded_liq_col,
+            qflx_snwcp_discarded_ice_col, FT_bc(dtime), first(bounds_c), last(bounds_c);
+            ndrange = length(errh2o_col))
     end
 
-    errh2o_max_val = maximum(abs.(errh2o_col[bounds_c]))
+    # Host-only warn/error scan (errh2o_col is a plain Array only on the CPU;
+    # on the GPU we skip the String-building / argmax error path entirely).
+    if errh2o_col isa Array
+        errh2o_max_val = maximum(abs.(errh2o_col[bounds_c]))
 
-    if errh2o_max_val > H2O_WARNING_THRESH
-        indexc = bounds_c[argmax(abs.(errh2o_col[bounds_c]))]
-        @warn "column-level water balance error" nstep indexc errh2o=errh2o_col[indexc]
+        if errh2o_max_val > H2O_WARNING_THRESH
+            indexc = bounds_c[argmax(abs.(errh2o_col[bounds_c]))]
+            @warn "column-level water balance error" nstep indexc errh2o=errh2o_col[indexc]
 
-        if errh2o_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps
-            if _is_ad_type(FT_bc)
-                @warn "BalanceCheck: column water balance error exceeded threshold (AD mode, continuing)" maxlog=1
-            else
-                @error "Stopping: errh2o > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2o=errh2o_col[indexc] forc_rain=forc_rain_c[indexc]*dtime forc_snow=forc_snow_c[indexc]*dtime endwb=endwb_col[indexc] begwb=begwb_col[indexc] qflx_evap_tot=qflx_evap_tot_col[indexc]*dtime qflx_surf=qflx_surf_col[indexc]*dtime qflx_drain=qflx_drain_col[indexc]*dtime
-                error("BalanceCheck: column water balance error exceeded threshold at c=$indexc")
+            if errh2o_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps
+                if _is_ad_type(FT_bc)
+                    @warn "BalanceCheck: column water balance error exceeded threshold (AD mode, continuing)" maxlog=1
+                else
+                    @error "Stopping: errh2o > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2o=errh2o_col[indexc] forc_rain=forc_rain_c[indexc]*dtime forc_snow=forc_snow_c[indexc]*dtime endwb=endwb_col[indexc] begwb=begwb_col[indexc] qflx_evap_tot=qflx_evap_tot_col[indexc]*dtime qflx_surf=qflx_surf_col[indexc]*dtime qflx_drain=qflx_drain_col[indexc]*dtime
+                    error("BalanceCheck: column water balance error exceeded threshold at c=$indexc")
+                end
             end
         end
     end
@@ -659,10 +911,12 @@ function balance_check!(
     # =====================================================================
 
     ng = length(bounds_g) > 0 ? last(bounds_g) : 0
-    errh2o_grc = zeros(FT_bc, ng)
-    qflx_glcice_dyn_water_flux_grc_arr = zeros(FT_bc, ng)
-    qflx_snwcp_discarded_liq_grc_arr = zeros(FT_bc, ng)
-    qflx_snwcp_discarded_ice_grc_arr = zeros(FT_bc, ng)
+    # Device-resident grc scratch (fed to c2g_unity! / the grc kernel). col_data.wtgcell ref.
+    _grcz(n) = fill!(similar(col_data.wtgcell, FT_bc, n), zero(FT_bc))
+    errh2o_grc = _grcz(ng)
+    qflx_glcice_dyn_water_flux_grc_arr = _grcz(ng)
+    qflx_snwcp_discarded_liq_grc_arr = _grcz(ng)
+    qflx_snwcp_discarded_ice_grc_arr = _grcz(ng)
 
     c2g_unity!(qflx_glcice_dyn_water_flux_grc_arr, qflx_glcice_dyn_water_flux_col,
                col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
@@ -671,45 +925,37 @@ function balance_check!(
     c2g_unity!(qflx_snwcp_discarded_ice_grc_arr, qflx_snwcp_discarded_ice_col,
                col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
 
-    for g in bounds_g
-        errh2o_grc[g] = endwb_grc[g] - begwb_grc[g] -
-            (forc_rain_grc[g] +
-             forc_snow_grc[g] +
-             forc_flood_grc[g] +
-             qflx_sfc_irrig_grc[g] +
-             qflx_glcice_dyn_water_flux_grc_arr[g] -
-             qflx_evap_tot_grc[g] -
-             qflx_surf_grc[g] -
-             qflx_qrgwl_grc[g] -
-             qflx_drain_grc[g] -
-             qflx_drain_perched_grc[g] -
-             qflx_ice_runoff_grc[g] -
-             qflx_snwcp_discarded_liq_grc_arr[g] -
-             qflx_snwcp_discarded_ice_grc_arr[g]) * dtime
+    if !isempty(bounds_g)
+        # streamflow array may be empty when not using hillslope routing; the
+        # kernel only reads it under use_hillslope_routing, but it still needs a
+        # device-resident array of the right shape to index safely.
+        streamflow_arg = use_hillslope_routing ? qflx_streamflow_grc : errh2o_grc
+        _launch!(_bc_errh2o_grc_kernel!, errh2o_grc,
+            endwb_grc, begwb_grc, forc_rain_grc, forc_snow_grc, forc_flood_grc,
+            qflx_sfc_irrig_grc, qflx_glcice_dyn_water_flux_grc_arr, qflx_evap_tot_grc,
+            qflx_surf_grc, qflx_qrgwl_grc, qflx_drain_grc, qflx_drain_perched_grc,
+            qflx_ice_runoff_grc, qflx_snwcp_discarded_liq_grc_arr, qflx_snwcp_discarded_ice_grc_arr,
+            streamflow_arg, use_hillslope_routing, FT_bc(dtime),
+            first(bounds_g), last(bounds_g); ndrange = length(errh2o_grc))
     end
-
-    # Add landunit level flux (streamflow) for hillslope routing
-    if use_hillslope_routing
-        for g in bounds_g
-            errh2o_grc[g] += qflx_streamflow_grc[g] * dtime
-        end
-    end
-
-    errh2o_grc_max_val = maximum(abs.(errh2o_grc[bounds_g]))
 
     # BUG(rgk, 2021-04-13, ESCOMP/CTSM#1314) Temporarily bypassing gridcell-level check
-    # with use_fates_planthydro
-    if errh2o_grc_max_val > H2O_WARNING_THRESH && !use_fates_planthydro
-        indexg = bounds_g[argmax(abs.(errh2o_grc[bounds_g]))]
-        @warn "grid cell-level water balance error" nstep indexg errh2o_grc=errh2o_grc[indexg]
+    # with use_fates_planthydro. Host-only warn/error scan.
+    if errh2o_grc isa Array
+        errh2o_grc_max_val = maximum(abs.(errh2o_grc[bounds_g]))
 
-        if errh2o_grc_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps &&
-           !use_soil_moisture_streams && !for_testing_zero_dynbal_fluxes
-            if _is_ad_type(FT_bc)
-                @warn "BalanceCheck: gridcell water balance error exceeded threshold (AD mode, continuing)" maxlog=1
-            else
-                @error "Stopping: errh2o_grc > $(BALANCE_ERROR_THRESH) mm" nstep indexg errh2o_grc=errh2o_grc[indexg] forc_rain=forc_rain_grc[indexg]*dtime forc_snow=forc_snow_grc[indexg]*dtime endwb_grc=endwb_grc[indexg] begwb_grc=begwb_grc[indexg]
-                error("BalanceCheck: gridcell water balance error exceeded threshold at g=$indexg")
+        if errh2o_grc_max_val > H2O_WARNING_THRESH && !use_fates_planthydro
+            indexg = bounds_g[argmax(abs.(errh2o_grc[bounds_g]))]
+            @warn "grid cell-level water balance error" nstep indexg errh2o_grc=errh2o_grc[indexg]
+
+            if errh2o_grc_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps &&
+               !use_soil_moisture_streams && !for_testing_zero_dynbal_fluxes
+                if _is_ad_type(FT_bc)
+                    @warn "BalanceCheck: gridcell water balance error exceeded threshold (AD mode, continuing)" maxlog=1
+                else
+                    @error "Stopping: errh2o_grc > $(BALANCE_ERROR_THRESH) mm" nstep indexg errh2o_grc=errh2o_grc[indexg] forc_rain=forc_rain_grc[indexg]*dtime forc_snow=forc_snow_grc[indexg]*dtime endwb_grc=endwb_grc[indexg] begwb_grc=begwb_grc[indexg]
+                    error("BalanceCheck: gridcell water balance error exceeded threshold at g=$indexg")
+                end
             end
         end
     end
@@ -718,70 +964,36 @@ function balance_check!(
     # Snow balance check at the column level
     # =====================================================================
 
-    h2osno_total = zeros(FT_bc, nc)
+    h2osno_total = fill!(similar(errh2o_col, FT_bc, nc), zero(FT_bc))
     waterstate_calculate_total_h2osno!(ws, mask_allc, bounds_c, col_data.snl, h2osno_total)
 
-    for c in bounds_c
-        if col_data.active[c]
-            l = col_data.landunit[c]
-
-            if col_data.snl[c] < 0
-                snow_sources[c] = qflx_prec_grnd[c] + qflx_soliddew_to_top_layer[c] +
-                    qflx_liqdew_to_top_layer[c]
-                snow_sinks[c] = qflx_solidevap_from_top_layer[c] +
-                    qflx_liqevap_from_top_layer[c] +
-                    qflx_snow_drain[c] + qflx_snwcp_ice[c] + qflx_snwcp_liq[c] +
-                    qflx_snwcp_discarded_ice_col[c] + qflx_snwcp_discarded_liq_col[c] +
-                    qflx_sl_top_soil[c]
-
-                if lun_data.itype[l] == ISTDLAK
-                    snow_sources[c] = qflx_snow_grnd_col[c] +
-                        frac_sno_eff[c] * (qflx_liq_grnd_col[c] +
-                        qflx_soliddew_to_top_layer[c] + qflx_liqdew_to_top_layer[c])
-                    snow_sinks[c] = frac_sno_eff[c] * (qflx_solidevap_from_top_layer[c] +
-                        qflx_liqevap_from_top_layer[c]) + qflx_snwcp_ice[c] + qflx_snwcp_liq[c] +
-                        qflx_snwcp_discarded_ice_col[c] + qflx_snwcp_discarded_liq_col[c] +
-                        qflx_snow_drain[c] + qflx_sl_top_soil[c]
-                end
-
-                if col_data.itype[c] == ICOL_ROAD_PERV || lun_data.itype[l] == ISTSOIL ||
-                   lun_data.itype[l] == ISTCROP || lun_data.itype[l] == ISTWET ||
-                   lun_data.itype[l] == ISTICE
-                    snow_sources[c] = (qflx_snow_grnd_col[c] - qflx_snow_h2osfc[c]) +
-                        frac_sno_eff[c] * (qflx_liq_grnd_col[c] +
-                        qflx_soliddew_to_top_layer[c] + qflx_liqdew_to_top_layer[c]) +
-                        qflx_h2osfc_to_ice[c]
-                    snow_sinks[c] = frac_sno_eff[c] * (qflx_solidevap_from_top_layer[c] +
-                        qflx_liqevap_from_top_layer[c]) + qflx_snwcp_ice[c] + qflx_snwcp_liq[c] +
-                        qflx_snwcp_discarded_ice_col[c] + qflx_snwcp_discarded_liq_col[c] +
-                        qflx_snow_drain[c] + qflx_sl_top_soil[c]
-                end
-
-                errh2osno[c] = (h2osno_total[c] - h2osno_old[c]) -
-                    (snow_sources[c] - snow_sinks[c]) * dtime
-            else
-                snow_sources[c] = 0.0
-                snow_sinks[c] = 0.0
-                errh2osno[c] = 0.0
-            end
-        else
-            errh2osno[c] = 0.0
-        end
+    if !isempty(bounds_c)
+        _launch!(_bc_errh2osno_kernel!, snow_sources, snow_sinks, errh2osno,
+            col_data.active, col_data.landunit, col_data.snl, col_data.itype, lun_data.itype,
+            qflx_prec_grnd, qflx_soliddew_to_top_layer, qflx_liqdew_to_top_layer,
+            qflx_solidevap_from_top_layer, qflx_liqevap_from_top_layer, qflx_snow_drain,
+            qflx_snwcp_ice, qflx_snwcp_liq, qflx_snwcp_discarded_ice_col,
+            qflx_snwcp_discarded_liq_col, qflx_sl_top_soil, frac_sno_eff, qflx_snow_grnd_col,
+            qflx_liq_grnd_col, qflx_snow_h2osfc, qflx_h2osfc_to_ice, h2osno_total, h2osno_old,
+            FT_bc(dtime), first(bounds_c), last(bounds_c); ndrange = length(errh2osno))
     end
 
-    errh2osno_max_val = maximum(abs.(errh2osno[bounds_c]))
+    # Host-only warn/error scan.
+    if errh2osno isa Array
+        errh2osno_max_val = maximum(abs.(errh2osno[bounds_c]))
 
-    if errh2osno_max_val > H2O_WARNING_THRESH
-        indexc = bounds_c[argmax(abs.(errh2osno[bounds_c]))]
-        l_idx = col_data.landunit[indexc]
-        @warn "snow balance error" nstep indexc col_itype=col_data.itype[indexc] lun_itype=lun_data.itype[l_idx] errh2osno=errh2osno[indexc]
+        if errh2osno_max_val > H2O_WARNING_THRESH
+            indexc = bounds_c[argmax(abs.(errh2osno[bounds_c]))]
+            l_idx = col_data.landunit[indexc]
+            @warn "snow balance error" nstep indexc col_itype=col_data.itype[indexc] lun_itype=lun_data.itype[l_idx] errh2osno=errh2osno[indexc]
 
-        if errh2osno_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps
-            if _is_ad_type(FT_bc)
-                @warn "BalanceCheck: snow balance error exceeded threshold (AD mode, continuing)" maxlog=1
-            else
-                @error "Stopping: errh2osno > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2osno=errh2osno[indexc] snl=col_data.snl[indexc] snow_depth=snow_depth[indexc] h2osno=h2osno_total[indexc] h2osno_old=h2osno_old[indexc] snow_sources=snow_sources[indexc]*dtime snow_sinks=snow_sinks[indexc]*dtime
-                error("BalanceCheck: snow balance error exceeded threshold at c=$indexc")
+            if errh2osno_max_val > BALANCE_ERROR_THRESH && DAnstep > skip_steps
+                if _is_ad_type(FT_bc)
+                    @warn "BalanceCheck: snow balance error exceeded threshold (AD mode, continuing)" maxlog=1
+                else
+                    @error "Stopping: errh2osno > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2osno=errh2osno[indexc] snl=col_data.snl[indexc] snow_depth=snow_depth[indexc] h2osno=h2osno_total[indexc] h2osno_old=h2osno_old[indexc] snow_sources=snow_sources[indexc]*dtime snow_sinks=snow_sinks[indexc]*dtime
+                    error("BalanceCheck: snow balance error exceeded threshold at c=$indexc")
+                end
             end
         end
     end
@@ -790,116 +1002,91 @@ function balance_check!(
     # Energy balance checks
     # =====================================================================
 
-    for p in bounds_p
-        if pat_data.active[p]
-            c = pat_data.column[p]
-            l = pat_data.landunit[p]
-            g = pat_data.gridcell[p]
-
-            # Solar radiation energy balance
-            if !lun_data.urbpoi[l]
-                errsol[p] = fsa[p] + fsr[p] -
-                    (forc_solad_col[c, 1] + forc_solad_col[c, 2] +
-                     forc_solai_grc[g, 1] + forc_solai_grc[g, 2])
-            else
-                errsol[p] = SPVAL
-            end
-
-            # Longwave radiation energy balance
-            if !lun_data.urbpoi[l]
-                errlon[p] = eflx_lwrad_out[p] - eflx_lwrad_net[p] - forc_lwrad_col[c]
-            else
-                errlon[p] = SPVAL
-            end
-
-            # Surface energy balance
-            if !lun_data.urbpoi[l]
-                errseb[p] = sabv[p] + sabg_chk[p] + forc_lwrad_col[c] - eflx_lwrad_out[p] -
-                    eflx_sh_tot[p] - eflx_lh_tot[p] - eflx_soil_grnd[p] - dhsdt_canopy[p]
-            else
-                errseb[p] = sabv[p] + sabg[p] -
-                    eflx_lwrad_net[p] -
-                    eflx_sh_tot[p] - eflx_lh_tot[p] - eflx_soil_grnd[p] +
-                    eflx_wasteheat_p[p] + eflx_heat_from_ac_p[p] + eflx_traffic_p[p] +
-                    eflx_ventilation_p[p]
-            end
-
-            # Net radiation
-            netrad[p] = fsa[p] - eflx_lwrad_net[p]
-        else
-            errsol[p] = 0.0
-            errlon[p] = 0.0
-            errseb[p] = 0.0
-        end
+    if !isempty(bounds_p)
+        _launch!(_bc_energy_kernel!, errsol, errlon, errseb, netrad,
+            pat_data.active, pat_data.column, pat_data.landunit, pat_data.gridcell,
+            lun_data.urbpoi, fsa, fsr, forc_solad_col, forc_solai_grc,
+            eflx_lwrad_out, eflx_lwrad_net, forc_lwrad_col, sabv, sabg_chk, eflx_sh_tot,
+            eflx_lh_tot, eflx_soil_grnd, dhsdt_canopy, sabg, eflx_wasteheat_p,
+            eflx_heat_from_ac_p, eflx_traffic_p, eflx_ventilation_p,
+            FT_bc(SPVAL), first(bounds_p), last(bounds_p); ndrange = length(errsol))
     end
 
-    # Solar radiation energy balance check
-    errsol_vals = [errsol[p] != SPVAL ? abs(errsol[p]) : 0.0 for p in bounds_p]
-    errsol_max_val = isempty(errsol_vals) ? 0.0 : maximum(errsol_vals)
+    # Solar radiation energy balance check (host-only scan).
+    if errsol isa Array
+        errsol_vals = [errsol[p] != SPVAL ? abs(errsol[p]) : 0.0 for p in bounds_p]
+        errsol_max_val = isempty(errsol_vals) ? 0.0 : maximum(errsol_vals)
 
-    if errsol_max_val > ENERGY_WARNING_THRESH && DAnstep > skip_steps
-        indexp = bounds_p[argmax(errsol_vals)]
-        @warn "solar radiation balance error (W/m2)" nstep errsol=errsol[indexp]
+        if errsol_max_val > ENERGY_WARNING_THRESH && DAnstep > skip_steps
+            indexp = bounds_p[argmax(errsol_vals)]
+            @warn "solar radiation balance error (W/m2)" nstep errsol=errsol[indexp]
 
-        if errsol_max_val > BALANCE_ERROR_THRESH
-            if _is_ad_type(eltype(errsol))
-                @warn "BalanceCheck: solar radiation balance error exceeded threshold (AD mode, continuing)" maxlog=1
-            else
-                @error "Stopping: errsol > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errsol=errsol[indexp] fsa=fsa[indexp] fsr=fsr[indexp]
-                error("BalanceCheck: solar radiation balance error exceeded threshold at p=$indexp")
+            if errsol_max_val > BALANCE_ERROR_THRESH
+                if _is_ad_type(eltype(errsol))
+                    @warn "BalanceCheck: solar radiation balance error exceeded threshold (AD mode, continuing)" maxlog=1
+                else
+                    @error "Stopping: errsol > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errsol=errsol[indexp] fsa=fsa[indexp] fsr=fsr[indexp]
+                    error("BalanceCheck: solar radiation balance error exceeded threshold at p=$indexp")
+                end
             end
         end
     end
 
-    # Longwave radiation energy balance check
-    errlon_vals = [errlon[p] != SPVAL ? abs(errlon[p]) : 0.0 for p in bounds_p]
-    errlon_max_val = isempty(errlon_vals) ? 0.0 : maximum(errlon_vals)
+    # Longwave radiation energy balance check (host-only scan).
+    if errlon isa Array
+        errlon_vals = [errlon[p] != SPVAL ? abs(errlon[p]) : 0.0 for p in bounds_p]
+        errlon_max_val = isempty(errlon_vals) ? 0.0 : maximum(errlon_vals)
 
-    if errlon_max_val > ENERGY_WARNING_THRESH && DAnstep > skip_steps
-        indexp = bounds_p[argmax(errlon_vals)]
-        @warn "longwave energy balance error (W/m2)" nstep indexp errlon=errlon[indexp]
+        if errlon_max_val > ENERGY_WARNING_THRESH && DAnstep > skip_steps
+            indexp = bounds_p[argmax(errlon_vals)]
+            @warn "longwave energy balance error (W/m2)" nstep indexp errlon=errlon[indexp]
 
-        if errlon_max_val > BALANCE_ERROR_THRESH
-            if _is_ad_type(eltype(errlon))
-                @warn "BalanceCheck: longwave energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
-            else
-                @error "Stopping: errlon > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errlon=errlon[indexp]
-                error("BalanceCheck: longwave energy balance error exceeded threshold at p=$indexp")
+            if errlon_max_val > BALANCE_ERROR_THRESH
+                if _is_ad_type(eltype(errlon))
+                    @warn "BalanceCheck: longwave energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
+                else
+                    @error "Stopping: errlon > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errlon=errlon[indexp]
+                    error("BalanceCheck: longwave energy balance error exceeded threshold at p=$indexp")
+                end
             end
         end
     end
 
-    # Surface energy balance check
-    errseb_max_val = isempty(bounds_p) ? 0.0 : maximum(abs.(errseb[bounds_p]))
+    # Surface energy balance check (host-only scan).
+    if errseb isa Array
+        errseb_max_val = isempty(bounds_p) ? 0.0 : maximum(abs.(errseb[bounds_p]))
 
-    if errseb_max_val > ENERGY_WARNING_THRESH && DAnstep > skip_steps
-        indexp = bounds_p[argmax(abs.(errseb[bounds_p]))]
-        @warn "surface flux energy balance error (W/m2)" nstep errseb=errseb[indexp]
+        if errseb_max_val > ENERGY_WARNING_THRESH && DAnstep > skip_steps
+            indexp = bounds_p[argmax(abs.(errseb[bounds_p]))]
+            @warn "surface flux energy balance error (W/m2)" nstep errseb=errseb[indexp]
 
-        if errseb_max_val > BALANCE_ERROR_THRESH
-            if _is_ad_type(eltype(errseb))
-                @warn "BalanceCheck: surface energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
-            else
-                @error "Stopping: errseb > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errseb=errseb[indexp] sabv=sabv[indexp] sabg=sabg[indexp] eflx_lwrad_net=eflx_lwrad_net[indexp] eflx_sh_tot=eflx_sh_tot[indexp] eflx_lh_tot=eflx_lh_tot[indexp] eflx_soil_grnd=eflx_soil_grnd[indexp] dhsdt_canopy=dhsdt_canopy[indexp]
-                error("BalanceCheck: surface energy balance error exceeded threshold at p=$indexp")
+            if errseb_max_val > BALANCE_ERROR_THRESH
+                if _is_ad_type(eltype(errseb))
+                    @warn "BalanceCheck: surface energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
+                else
+                    @error "Stopping: errseb > $(BALANCE_ERROR_THRESH) W/m2" nstep indexp errseb=errseb[indexp] sabv=sabv[indexp] sabg=sabg[indexp] eflx_lwrad_net=eflx_lwrad_net[indexp] eflx_sh_tot=eflx_sh_tot[indexp] eflx_lh_tot=eflx_lh_tot[indexp] eflx_soil_grnd=eflx_soil_grnd[indexp] dhsdt_canopy=dhsdt_canopy[indexp]
+                    error("BalanceCheck: surface energy balance error exceeded threshold at p=$indexp")
+                end
             end
         end
     end
 
-    # Soil energy balance check
-    errsoi_vals = [col_data.active[c] ? abs(errsoi_col[c]) : 0.0 for c in bounds_c]
-    errsoi_col_max_val = isempty(errsoi_vals) ? 0.0 : maximum(errsoi_vals)
+    # Soil energy balance check (host-only scan; errsoi_col computed elsewhere).
+    if errsoi_col isa Array
+        errsoi_vals = [col_data.active[c] ? abs(errsoi_col[c]) : 0.0 for c in bounds_c]
+        errsoi_col_max_val = isempty(errsoi_vals) ? 0.0 : maximum(errsoi_vals)
 
-    if errsoi_col_max_val > 1.0e-5
-        indexc = bounds_c[argmax(errsoi_vals)]
-        @warn "soil balance error (W/m2)" nstep errsoi_col=errsoi_col[indexc]
+        if errsoi_col_max_val > 1.0e-5
+            indexc = bounds_c[argmax(errsoi_vals)]
+            @warn "soil balance error (W/m2)" nstep errsoi_col=errsoi_col[indexc]
 
-        if errsoi_col_max_val > 1.0e-4 && DAnstep > skip_steps
-            if _is_ad_type(eltype(errsoi_col))
-                @warn "BalanceCheck: soil energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
-            else
-                @error "Stopping: errsoi_col > 1.0e-4 W/m2" nstep indexc errsoi_col=errsoi_col[indexc]
-                error("BalanceCheck: soil energy balance error exceeded threshold at c=$indexc")
+            if errsoi_col_max_val > 1.0e-4 && DAnstep > skip_steps
+                if _is_ad_type(eltype(errsoi_col))
+                    @warn "BalanceCheck: soil energy balance error exceeded threshold (AD mode, continuing)" maxlog=1
+                else
+                    @error "Stopping: errsoi_col > 1.0e-4 W/m2" nstep indexc errsoi_col=errsoi_col[indexc]
+                    error("BalanceCheck: soil energy balance error exceeded threshold at c=$indexc")
+                end
             end
         end
     end

@@ -321,6 +321,135 @@ end
 # AerosolMasses
 # --------------------------------------------------------------------------
 
+# Device-view bundles of AerosolData array fields used by the aerosol_masses!
+# kernels. Structs are not isbits kernel args, so the per-column physics receives
+# these small adapt-able bundles instead of the full AerosolData container.
+struct _AerMassMass{M}
+    mss_bcpho::M; mss_bcphi::M; mss_bctot::M
+    mss_ocpho::M; mss_ocphi::M; mss_octot::M
+    mss_dst1::M; mss_dst2::M; mss_dst3::M; mss_dst4::M; mss_dsttot::M
+end
+Adapt.@adapt_structure _AerMassMass
+
+struct _AerMassCnc{M}
+    bcphi::M; bcpho::M; ocphi::M; ocpho::M
+    dst1::M; dst2::M; dst3::M; dst4::M
+end
+Adapt.@adapt_structure _AerMassCnc
+
+struct _AerMassCol{V}
+    bc_col::V; oc_col::V; dst_col::V
+    bc_top::V; oc_top::V; dst_top::V
+end
+Adapt.@adapt_structure _AerMassCol
+
+# Columns WITH snow: integrate masses & concentrations over snow layers.
+@kernel function _aerosol_masses_on_kernel!(
+    h2osno_top_col, snw_rds_col,
+    m::_AerMassMass, cnc::_AerMassCnc, colv::_AerMassCol,
+    @Const(mask_on), @Const(snl),
+    @Const(h2osoi_ice_col), @Const(h2osoi_liq_col), nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask_on[c]
+        bc_sum = zero(eltype(colv.bc_col))
+        oc_sum = zero(eltype(colv.oc_col))
+        dst_sum = zero(eltype(colv.dst_col))
+        for j in 1:nlevsno
+            snowmass = h2osoi_ice_col[c, j] + h2osoi_liq_col[c, j]
+            if j >= snl[c] + nlevsno + 1
+                m.mss_bctot[c, j]  = m.mss_bcpho[c, j] + m.mss_bcphi[c, j]
+                bc_sum += m.mss_bctot[c, j]
+                cnc.bcphi[c, j] = m.mss_bcphi[c, j] / snowmass
+                cnc.bcpho[c, j] = m.mss_bcpho[c, j] / snowmass
+
+                m.mss_octot[c, j]  = m.mss_ocpho[c, j] + m.mss_ocphi[c, j]
+                oc_sum += m.mss_octot[c, j]
+                cnc.ocphi[c, j] = m.mss_ocphi[c, j] / snowmass
+                cnc.ocpho[c, j] = m.mss_ocpho[c, j] / snowmass
+
+                m.mss_dsttot[c, j] = m.mss_dst1[c, j] + m.mss_dst2[c, j] +
+                                     m.mss_dst3[c, j] + m.mss_dst4[c, j]
+                dst_sum += m.mss_dsttot[c, j]
+                cnc.dst1[c, j] = m.mss_dst1[c, j] / snowmass
+                cnc.dst2[c, j] = m.mss_dst2[c, j] / snowmass
+                cnc.dst3[c, j] = m.mss_dst3[c, j] / snowmass
+                cnc.dst4[c, j] = m.mss_dst4[c, j] / snowmass
+            else
+                snw_rds_col[c, j] = 0.0
+
+                m.mss_bcpho[c, j] = 0.0
+                m.mss_bcphi[c, j] = 0.0
+                m.mss_bctot[c, j] = 0.0
+                cnc.bcphi[c, j] = 0.0
+                cnc.bcpho[c, j] = 0.0
+
+                m.mss_ocpho[c, j] = 0.0
+                m.mss_ocphi[c, j] = 0.0
+                m.mss_octot[c, j] = 0.0
+                cnc.ocphi[c, j] = 0.0
+                cnc.ocpho[c, j] = 0.0
+
+                m.mss_dst1[c, j] = 0.0
+                m.mss_dst2[c, j] = 0.0
+                m.mss_dst3[c, j] = 0.0
+                m.mss_dst4[c, j] = 0.0
+                m.mss_dsttot[c, j] = 0.0
+                cnc.dst1[c, j] = 0.0
+                cnc.dst2[c, j] = 0.0
+                cnc.dst3[c, j] = 0.0
+                cnc.dst4[c, j] = 0.0
+            end
+        end
+        colv.bc_col[c]  = bc_sum
+        colv.oc_col[c]  = oc_sum
+        colv.dst_col[c] = dst_sum
+
+        top_j = snl[c] + nlevsno + 1
+        h2osno_top_col[c] = h2osoi_ice_col[c, top_j] + h2osoi_liq_col[c, top_j]
+        colv.bc_top[c]  = m.mss_bctot[c, top_j]
+        colv.oc_top[c]  = m.mss_octot[c, top_j]
+        colv.dst_top[c] = m.mss_dsttot[c, top_j]
+    end
+end
+
+# Columns WITHOUT snow: zero all mass variables.
+@kernel function _aerosol_masses_off_kernel!(
+    mask_off, m::_AerMassMass, cnc::_AerMassCnc, colv::_AerMassCol,
+    nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask_off[c]
+        colv.bc_top[c]  = 0.0
+        colv.bc_col[c]  = 0.0
+        colv.oc_top[c]  = 0.0
+        colv.oc_col[c]  = 0.0
+        colv.dst_top[c] = 0.0
+        colv.dst_col[c] = 0.0
+        for j in 1:nlevsno
+            m.mss_bcpho[c, j] = 0.0
+            m.mss_bcphi[c, j] = 0.0
+            m.mss_bctot[c, j] = 0.0
+            cnc.bcphi[c, j] = 0.0
+            cnc.bcpho[c, j] = 0.0
+
+            m.mss_ocpho[c, j] = 0.0
+            m.mss_ocphi[c, j] = 0.0
+            m.mss_octot[c, j] = 0.0
+            cnc.ocphi[c, j] = 0.0
+            cnc.ocpho[c, j] = 0.0
+
+            m.mss_dst1[c, j] = 0.0
+            m.mss_dst2[c, j] = 0.0
+            m.mss_dst3[c, j] = 0.0
+            m.mss_dst4[c, j] = 0.0
+            m.mss_dsttot[c, j] = 0.0
+            cnc.dst1[c, j] = 0.0
+            cnc.dst2[c, j] = 0.0
+            cnc.dst3[c, j] = 0.0
+            cnc.dst4[c, j] = 0.0
+        end
+    end
+end
+
 """
     aerosol_masses!(aer, mask_on, mask_off, bounds, snl, h2osoi_ice_col,
                     h2osoi_liq_col, h2osno_top_col, snw_rds_col)
@@ -348,125 +477,36 @@ identical to the Fortran convention.
 Ported from `AerosolMasses` in `AerosolMod.F90`.
 """
 function aerosol_masses!(aer::AerosolData,
-                         mask_on::BitVector,
-                         mask_off::BitVector,
+                         mask_on::AbstractVector{Bool},
+                         mask_off::AbstractVector{Bool},
                          bounds::UnitRange{Int},
-                         snl::Vector{Int},
-                         h2osoi_ice_col::Matrix{<:Real},
-                         h2osoi_liq_col::Matrix{<:Real},
-                         h2osno_top_col::Vector{<:Real},
-                         snw_rds_col::Matrix{<:Real})
+                         snl::AbstractVector{<:Integer},
+                         h2osoi_ice_col::AbstractMatrix{<:Real},
+                         h2osoi_liq_col::AbstractMatrix{<:Real},
+                         h2osno_top_col::AbstractVector{<:Real},
+                         snw_rds_col::AbstractMatrix{<:Real})
     nlevsno = varpar.nlevsno
 
+    m = _AerMassMass(aer.mss_bcpho_col, aer.mss_bcphi_col, aer.mss_bctot_col,
+                     aer.mss_ocpho_col, aer.mss_ocphi_col, aer.mss_octot_col,
+                     aer.mss_dst1_col, aer.mss_dst2_col, aer.mss_dst3_col,
+                     aer.mss_dst4_col, aer.mss_dsttot_col)
+    cnc = _AerMassCnc(aer.mss_cnc_bcphi_col, aer.mss_cnc_bcpho_col,
+                      aer.mss_cnc_ocphi_col, aer.mss_cnc_ocpho_col,
+                      aer.mss_cnc_dst1_col, aer.mss_cnc_dst2_col,
+                      aer.mss_cnc_dst3_col, aer.mss_cnc_dst4_col)
+    colv = _AerMassCol(aer.mss_bc_col_col, aer.mss_oc_col_col, aer.mss_dst_col_col,
+                       aer.mss_bc_top_col, aer.mss_oc_top_col, aer.mss_dst_top_col)
+
     # --- Columns with snow ---
-    for c in bounds
-        mask_on[c] || continue
-
-        # Zero column-integrated mass before summation
-        aer.mss_bc_col_col[c]  = 0.0
-        aer.mss_oc_col_col[c]  = 0.0
-        aer.mss_dst_col_col[c] = 0.0
-
-        for j in 1:nlevsno
-            # j_fortran = j - nlevsno (Fortran snow layer index)
-            # Layer mass of snow (h2osoi uses same offset)
-            snowmass = h2osoi_ice_col[c, j] + h2osoi_liq_col[c, j]
-
-            # Active snow layer check: Fortran j >= snl(c)+1
-            # → Julia: j >= snl[c] + nlevsno + 1
-            if j >= snl[c] + nlevsno + 1
-                # BC
-                aer.mss_bctot_col[c, j]     = aer.mss_bcpho_col[c, j] + aer.mss_bcphi_col[c, j]
-                aer.mss_bc_col_col[c]      += aer.mss_bctot_col[c, j]
-                aer.mss_cnc_bcphi_col[c, j] = aer.mss_bcphi_col[c, j] / snowmass
-                aer.mss_cnc_bcpho_col[c, j] = aer.mss_bcpho_col[c, j] / snowmass
-
-                # OC
-                aer.mss_octot_col[c, j]     = aer.mss_ocpho_col[c, j] + aer.mss_ocphi_col[c, j]
-                aer.mss_oc_col_col[c]      += aer.mss_octot_col[c, j]
-                aer.mss_cnc_ocphi_col[c, j] = aer.mss_ocphi_col[c, j] / snowmass
-                aer.mss_cnc_ocpho_col[c, j] = aer.mss_ocpho_col[c, j] / snowmass
-
-                # Dust
-                aer.mss_dsttot_col[c, j]    = aer.mss_dst1_col[c, j] + aer.mss_dst2_col[c, j] +
-                                               aer.mss_dst3_col[c, j] + aer.mss_dst4_col[c, j]
-                aer.mss_dst_col_col[c]     += aer.mss_dsttot_col[c, j]
-                aer.mss_cnc_dst1_col[c, j]  = aer.mss_dst1_col[c, j] / snowmass
-                aer.mss_cnc_dst2_col[c, j]  = aer.mss_dst2_col[c, j] / snowmass
-                aer.mss_cnc_dst3_col[c, j]  = aer.mss_dst3_col[c, j] / snowmass
-                aer.mss_cnc_dst4_col[c, j]  = aer.mss_dst4_col[c, j] / snowmass
-            else
-                # Empty (inactive) snow layer — zero everything
-                snw_rds_col[c, j] = 0.0
-
-                aer.mss_bcpho_col[c, j]     = 0.0
-                aer.mss_bcphi_col[c, j]     = 0.0
-                aer.mss_bctot_col[c, j]     = 0.0
-                aer.mss_cnc_bcphi_col[c, j] = 0.0
-                aer.mss_cnc_bcpho_col[c, j] = 0.0
-
-                aer.mss_ocpho_col[c, j]     = 0.0
-                aer.mss_ocphi_col[c, j]     = 0.0
-                aer.mss_octot_col[c, j]     = 0.0
-                aer.mss_cnc_ocphi_col[c, j] = 0.0
-                aer.mss_cnc_ocpho_col[c, j] = 0.0
-
-                aer.mss_dst1_col[c, j]      = 0.0
-                aer.mss_dst2_col[c, j]      = 0.0
-                aer.mss_dst3_col[c, j]      = 0.0
-                aer.mss_dst4_col[c, j]      = 0.0
-                aer.mss_dsttot_col[c, j]    = 0.0
-                aer.mss_cnc_dst1_col[c, j]  = 0.0
-                aer.mss_cnc_dst2_col[c, j]  = 0.0
-                aer.mss_cnc_dst3_col[c, j]  = 0.0
-                aer.mss_cnc_dst4_col[c, j]  = 0.0
-            end
-        end
-
-        # Top-layer diagnostics
-        # Fortran: snl(c)+1 → Julia: snl[c] + nlevsno + 1
-        top_j = snl[c] + nlevsno + 1
-        h2osno_top_col[c]      = h2osoi_ice_col[c, top_j] + h2osoi_liq_col[c, top_j]
-        aer.mss_bc_top_col[c]  = aer.mss_bctot_col[c, top_j]
-        aer.mss_oc_top_col[c]  = aer.mss_octot_col[c, top_j]
-        aer.mss_dst_top_col[c] = aer.mss_dsttot_col[c, top_j]
-    end
+    _launch!(_aerosol_masses_on_kernel!,
+             h2osno_top_col, snw_rds_col, m, cnc, colv, mask_on, snl,
+             h2osoi_ice_col, h2osoi_liq_col, nlevsno;
+             ndrange = length(mask_on))
 
     # --- Columns without snow: zero all mass variables ---
-    for c in bounds
-        mask_off[c] || continue
-
-        aer.mss_bc_top_col[c]  = 0.0
-        aer.mss_bc_col_col[c]  = 0.0
-        aer.mss_oc_top_col[c]  = 0.0
-        aer.mss_oc_col_col[c]  = 0.0
-        aer.mss_dst_top_col[c] = 0.0
-        aer.mss_dst_col_col[c] = 0.0
-
-        for j in 1:nlevsno
-            aer.mss_bcpho_col[c, j]     = 0.0
-            aer.mss_bcphi_col[c, j]     = 0.0
-            aer.mss_bctot_col[c, j]     = 0.0
-            aer.mss_cnc_bcphi_col[c, j] = 0.0
-            aer.mss_cnc_bcpho_col[c, j] = 0.0
-
-            aer.mss_ocpho_col[c, j]     = 0.0
-            aer.mss_ocphi_col[c, j]     = 0.0
-            aer.mss_octot_col[c, j]     = 0.0
-            aer.mss_cnc_ocphi_col[c, j] = 0.0
-            aer.mss_cnc_ocpho_col[c, j] = 0.0
-
-            aer.mss_dst1_col[c, j]      = 0.0
-            aer.mss_dst2_col[c, j]      = 0.0
-            aer.mss_dst3_col[c, j]      = 0.0
-            aer.mss_dst4_col[c, j]      = 0.0
-            aer.mss_dsttot_col[c, j]    = 0.0
-            aer.mss_cnc_dst1_col[c, j]  = 0.0
-            aer.mss_cnc_dst2_col[c, j]  = 0.0
-            aer.mss_cnc_dst3_col[c, j]  = 0.0
-            aer.mss_cnc_dst4_col[c, j]  = 0.0
-        end
-    end
+    _launch!(_aerosol_masses_off_kernel!, mask_off, m, cnc, colv, nlevsno;
+             ndrange = length(mask_off))
 
     return nothing
 end

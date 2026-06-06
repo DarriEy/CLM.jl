@@ -345,6 +345,14 @@ function update_snow_depth_and_frac!(
         n_melt_dev = scf.n_melt
     end
 
+    # scf is a host-resident config struct; copy its n_melt onto the working
+    # backend so the kernels don't get a host Array among device args. No-op on CPU.
+    if !(frac_sno isa Array) && n_melt_dev isa Array
+        nm = similar(frac_sno, T, length(n_melt_dev))
+        copyto!(nm, T.(n_melt_dev))
+        n_melt_dev = nm
+    end
+
     # ---- Update frac_sno (folds frac_snow_during_melt inline) ----
     _launch!(_sl12_update_fracsno_kernel!, frac_sno, h2osno_total, snowmelt,
              int_snow, newsnow, n_melt_dev, mask,
@@ -489,6 +497,12 @@ function add_newsnow_to_intsnow!(
         resize!(scf.n_melt, ncols)
         fill!(scf.n_melt, 200.0 / 10.0)
         n_melt_dev = scf.n_melt
+    end
+    # scf is host-resident; move n_melt onto the working backend (no-op on CPU).
+    if !(int_snow isa Array) && n_melt_dev isa Array
+        nm = similar(int_snow, T, length(n_melt_dev))
+        copyto!(nm, T.(n_melt_dev))
+        n_melt_dev = nm
     end
 
     _launch!(_sl12_add_intsnow_kernel!, int_snow, newsnow, h2osno_total, frac_sno,

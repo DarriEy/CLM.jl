@@ -106,6 +106,422 @@ function surfalb_rho_tau!(rho, tau, mask, itype_p, wl, ws_arr,
 end
 
 # --------------------------------------------------------------------------
+# Orchestrator (surface_albedo!) per-element kernels.
+# Each replaces an inline host loop with identical semantics. Field-array
+# bundles (immutable, isbits-friendly + @adapt_structure) group the many
+# output arrays a kernel touches so the call stays under the arg limit.
+# --------------------------------------------------------------------------
+
+# ---- Output-initialization (per (ib, col)) ----
+Base.@kwdef struct _SaInitColOut{M}
+    albsod::M; albsoi::M; albgrd::M; albgri::M
+    albgrd_pur::M; albgri_pur::M; albgrd_bc::M; albgri_bc::M
+    albgrd_oc::M; albgri_oc::M; albgrd_dst::M; albgri_dst::M
+    albgrd_hst::M; albgri_hst::M; albgrd_pur_hst::M; albgri_pur_hst::M
+    albgrd_bc_hst::M; albgri_bc_hst::M; albgrd_oc_hst::M; albgri_oc_hst::M
+    albgrd_dst_hst::M; albgri_dst_hst::M; albsnd_hst2::M; albsni_hst2::M
+    flx_absdv::M; flx_absdn::M; flx_absiv::M; flx_absin::M
+end
+Adapt.@adapt_structure _SaInitColOut
+
+@kernel function _sa_init_col_kernel!(o::_SaInitColOut, @Const(mask), nflx::Int)
+    c, ib = @index(Global, NTuple)
+    @inbounds if mask[c]
+        o.albsod[c, ib] = 0.0
+        o.albsoi[c, ib] = 0.0
+        o.albgrd[c, ib] = 0.0
+        o.albgri[c, ib] = 0.0
+        o.albgrd_pur[c, ib] = 0.0
+        o.albgri_pur[c, ib] = 0.0
+        o.albgrd_bc[c, ib] = 0.0
+        o.albgri_bc[c, ib] = 0.0
+        o.albgrd_oc[c, ib] = 0.0
+        o.albgri_oc[c, ib] = 0.0
+        o.albgrd_dst[c, ib] = 0.0
+        o.albgri_dst[c, ib] = 0.0
+        o.albgrd_hst[c, ib] = SPVAL
+        o.albgri_hst[c, ib] = SPVAL
+        o.albgrd_pur_hst[c, ib] = SPVAL
+        o.albgri_pur_hst[c, ib] = SPVAL
+        o.albgrd_bc_hst[c, ib] = SPVAL
+        o.albgri_bc_hst[c, ib] = SPVAL
+        o.albgrd_oc_hst[c, ib] = SPVAL
+        o.albgri_oc_hst[c, ib] = SPVAL
+        o.albgrd_dst_hst[c, ib] = SPVAL
+        o.albgri_dst_hst[c, ib] = SPVAL
+        o.albsnd_hst2[c, ib] = SPVAL
+        o.albsni_hst2[c, ib] = SPVAL
+        # Zero the flux-absorption profiles (nflx layers) once (on ib==1).
+        if ib == 1
+            for j in 1:nflx
+                o.flx_absdv[c, j] = 0.0
+                o.flx_absdn[c, j] = 0.0
+                o.flx_absiv[c, j] = 0.0
+                o.flx_absin[c, j] = 0.0
+            end
+        end
+    end
+end
+
+# ---- Output-initialization (per (ib, patch)) ----
+Base.@kwdef struct _SaInitPatchOut{M}
+    albd::M; albi::M; albd_hst::M; albi_hst::M
+    albdSF::M; albiSF::M
+    fabd::M; fabd_sun::M; fabd_sha::M
+    fabi::M; fabi_sun::M; fabi_sha::M
+    ftdd::M; ftid::M; ftii::M
+end
+Adapt.@adapt_structure _SaInitPatchOut
+
+@kernel function _sa_init_patch_kernel!(o::_SaInitPatchOut, @Const(mask), use_SSRE::Bool)
+    p, ib = @index(Global, NTuple)
+    @inbounds if mask[p]
+        o.albd[p, ib] = 1.0
+        o.albi[p, ib] = 1.0
+        o.albd_hst[p, ib] = SPVAL
+        o.albi_hst[p, ib] = SPVAL
+        if use_SSRE
+            o.albdSF[p, ib] = 1.0
+            o.albiSF[p, ib] = 1.0
+        end
+        o.fabd[p, ib] = 0.0
+        o.fabd_sun[p, ib] = 0.0
+        o.fabd_sha[p, ib] = 0.0
+        o.fabi[p, ib] = 0.0
+        o.fabi_sun[p, ib] = 0.0
+        o.fabi_sha[p, ib] = 0.0
+        o.ftdd[p, ib] = 0.0
+        o.ftid[p, ib] = 0.0
+        o.ftii[p, ib] = 0.0
+    end
+end
+
+# ---- Fallback age-based snow albedo (per col) ----
+@kernel function _sa_snow_fallback_kernel!(albsnd, albsni, @Const(mask),
+        @Const(coszen_col), @Const(frac_sno), @Const(snow_persist), npersist::Int)
+    c = @index(Global)
+    T = eltype(albsnd)
+    @inbounds if mask[c]
+        if coszen_col[c] > 0.0 && frac_sno[c] > 0.0
+            age_days = c <= npersist ? snow_persist[c] / T(86400.0) : zero(T)
+            fage = one(T) - exp(-age_days / T(5.0))
+            albsnd[c, 1] = clamp(T(0.95) * (one(T) - T(0.15) * fage), T(0.1), T(0.99))
+            albsni[c, 1] = clamp(T(0.95) * (one(T) - T(0.15) * fage), T(0.1), T(0.99))
+            albsnd[c, 2] = clamp(T(0.65) * (one(T) - T(0.50) * fage), T(0.1), T(0.99))
+            albsni[c, 2] = clamp(T(0.65) * (one(T) - T(0.50) * fage), T(0.1), T(0.99))
+        end
+    end
+end
+
+# ---- Ground albedos: snow-fraction weighting (per (ib, col)) ----
+Base.@kwdef struct _SaGrndOut{M}
+    albgrd::M; albgri::M
+    albgrd_bc::M; albgri_bc::M; albgrd_dst::M; albgri_dst::M
+    albgrd_pur::M; albgri_pur::M; albgrd_oc::M; albgri_oc::M
+end
+Adapt.@adapt_structure _SaGrndOut
+Base.@kwdef struct _SaGrndIn{M,V}
+    albsod::M; albsoi::M; albsnd::M; albsni::M; frac_sno::V
+end
+Adapt.@adapt_structure _SaGrndIn
+
+@kernel function _sa_grnd_kernel!(o::_SaGrndOut, in::_SaGrndIn, @Const(mask),
+        @Const(coszen_col), use_snicar_frc::Bool, do_sno_oc::Bool)
+    c, ib = @index(Global, NTuple)
+    T = eltype(o.albgrd)
+    @inbounds if mask[c]
+        if coszen_col[c] > 0.0
+            fs = in.frac_sno[c]
+            o.albgrd[c, ib] = in.albsod[c, ib] * (one(T) - fs) + in.albsnd[c, ib] * fs
+            o.albgri[c, ib] = in.albsoi[c, ib] * (one(T) - fs) + in.albsni[c, ib] * fs
+            if use_snicar_frc
+                o.albgrd_bc[c, ib] = in.albsod[c, ib] * (one(T) - fs)
+                o.albgri_bc[c, ib] = in.albsoi[c, ib] * (one(T) - fs)
+                o.albgrd_dst[c, ib] = in.albsod[c, ib] * (one(T) - fs)
+                o.albgri_dst[c, ib] = in.albsoi[c, ib] * (one(T) - fs)
+                o.albgrd_pur[c, ib] = in.albsod[c, ib] * (one(T) - fs)
+                o.albgri_pur[c, ib] = in.albsoi[c, ib] * (one(T) - fs)
+                if do_sno_oc
+                    o.albgrd_oc[c, ib] = in.albsod[c, ib] * (one(T) - fs)
+                    o.albgri_oc[c, ib] = in.albsoi[c, ib] * (one(T) - fs)
+                end
+            end
+        end
+    end
+end
+
+# ---- SNICAR flux-absorption mapping to surfalb fields (per col) ----
+Base.@kwdef struct _SaFluxMap{M3,M,V,VI,VB}
+    flx_absdv::M; flx_absdn::M; flx_absiv::M; flx_absin::M
+    flx_absd_snw::M3; flx_absi_snw::M3
+    albsnd::M; albsni::M; albsod::M; albsoi::M
+    frac_sno::V; landunit::VI; lakpoi::VB
+end
+Adapt.@adapt_structure _SaFluxMap
+
+@kernel function _sa_fluxmap_kernel!(o::_SaFluxMap, @Const(mask), nlev1::Int,
+        use_subgrid_fluxes::Bool, ivis::Int, inir::Int)
+    c = @index(Global)
+    T = eltype(o.flx_absdv)
+    @inbounds if mask[c]
+        l = o.landunit[c]
+        is_lake = o.lakpoi[l]
+        for i in 1:nlev1
+            if use_subgrid_fluxes && !is_lake
+                o.flx_absdv[c, i] = o.flx_absd_snw[c, i, ivis]
+                o.flx_absdn[c, i] = o.flx_absd_snw[c, i, inir]
+                o.flx_absiv[c, i] = o.flx_absi_snw[c, i, ivis]
+                o.flx_absin[c, i] = o.flx_absi_snw[c, i, inir]
+            else
+                fsnow = o.frac_sno[c]
+                # flx_absdv (direct VIS)
+                f_snw = o.flx_absd_snw[c, i, ivis]; a_snw = o.albsnd[c, ivis]; a_soil = o.albsod[c, ivis]
+                if a_snw < 1.0
+                    o.flx_absdv[c, i] = f_snw * fsnow + (one(T) - fsnow) * (one(T) - a_soil) * (f_snw / max(one(T) - a_snw, T(1.0e-6)))
+                else
+                    o.flx_absdv[c, i] = 0.0
+                end
+                # flx_absdn (direct NIR)
+                f_snw = o.flx_absd_snw[c, i, inir]; a_snw = o.albsnd[c, inir]; a_soil = o.albsod[c, inir]
+                if a_snw < 1.0
+                    o.flx_absdn[c, i] = f_snw * fsnow + (one(T) - fsnow) * (one(T) - a_soil) * (f_snw / max(one(T) - a_snw, T(1.0e-6)))
+                else
+                    o.flx_absdn[c, i] = 0.0
+                end
+                # flx_absiv (diffuse VIS)
+                f_snw = o.flx_absi_snw[c, i, ivis]; a_snw = o.albsni[c, ivis]; a_soil = o.albsoi[c, ivis]
+                if a_snw < 1.0
+                    o.flx_absiv[c, i] = f_snw * fsnow + (one(T) - fsnow) * (one(T) - a_soil) * (f_snw / max(one(T) - a_snw, T(1.0e-6)))
+                else
+                    o.flx_absiv[c, i] = 0.0
+                end
+                # flx_absin (diffuse NIR)
+                f_snw = o.flx_absi_snw[c, i, inir]; a_snw = o.albsni[c, inir]; a_soil = o.albsoi[c, inir]
+                if a_snw < 1.0
+                    o.flx_absin[c, i] = f_snw * fsnow + (one(T) - fsnow) * (one(T) - a_soil) * (f_snw / max(one(T) - a_snw, T(1.0e-6)))
+                else
+                    o.flx_absin[c, i] = 0.0
+                end
+            end
+        end
+    end
+end
+
+# ---- Snow albedo history diagnostics (per (ib, col)) ----
+@kernel function _sa_snowhist_kernel!(albsnd_hst, albsni_hst, @Const(mask),
+        @Const(coszen_col), @Const(h2osno_total), @Const(albsnd), @Const(albsni))
+    c, ib = @index(Global, NTuple)
+    @inbounds if mask[c]
+        if coszen_col[c] > 0.0 && h2osno_total[c] > 0.0
+            albsnd_hst[c, ib] = albsnd[c, ib]
+            albsni_hst[c, ib] = albsni[c, ib]
+        else
+            albsnd_hst[c, ib] = 0.0
+            albsni_hst[c, ib] = 0.0
+        end
+    end
+end
+
+# ---- Canopy layering (per patch; internal canopy-layer iv loops) ----
+Base.@kwdef struct _SaCanLayer{VI,V,M}
+    nrad::VI; ncan::VI; tlai_z::M; tsai_z::M
+    elai::V; esai::V; tlai::V; tsai::V
+end
+Adapt.@adapt_structure _SaCanLayer
+
+@kernel function _sa_canlayer_kernel!(o::_SaCanLayer, @Const(mask),
+        nlevcan::Int, dincmax, mpe)
+    p = @index(Global)
+    T = eltype(o.tlai_z)
+    @inbounds if mask[p]
+        dincmax_T = oftype(o.elai[p], dincmax)
+        mpe_T = oftype(o.elai[p], mpe)
+        if nlevcan == 1
+            o.nrad[p] = 1
+            o.ncan[p] = 1
+            o.tlai_z[p, 1] = o.elai[p]
+            o.tsai_z[p, 1] = o.esai[p]
+        elseif nlevcan > 1
+            if o.elai[p] + o.esai[p] == zero(T)
+                o.nrad[p] = 0
+            else
+                dincmax_sum = zero(T)
+                for iv in 1:nlevcan
+                    dincmax_sum += dincmax_T
+                    if ((o.elai[p] + o.esai[p]) - dincmax_sum) > T(1.0e-06)
+                        o.nrad[p] = iv
+                        dinc = dincmax_T
+                        o.tlai_z[p, iv] = dinc * o.elai[p] / smooth_max(o.elai[p] + o.esai[p], mpe_T)
+                        o.tsai_z[p, iv] = dinc * o.esai[p] / smooth_max(o.elai[p] + o.esai[p], mpe_T)
+                    else
+                        o.nrad[p] = iv
+                        dinc = dincmax_T - (dincmax_sum - (o.elai[p] + o.esai[p]))
+                        o.tlai_z[p, iv] = dinc * o.elai[p] / smooth_max(o.elai[p] + o.esai[p], mpe_T)
+                        o.tsai_z[p, iv] = dinc * o.esai[p] / smooth_max(o.elai[p] + o.esai[p], mpe_T)
+                        break
+                    end
+                end
+
+                # Minimum of 4 canopy layers
+                if o.nrad[p] < 4
+                    o.nrad[p] = 4
+                    for iv in 1:o.nrad[p]
+                        o.tlai_z[p, iv] = o.elai[p] / o.nrad[p]
+                        o.tsai_z[p, iv] = o.esai[p] / o.nrad[p]
+                    end
+                end
+            end
+
+            # Repeat for buried canopy layers
+            blai = o.tlai[p] - o.elai[p]
+            bsai = o.tsai[p] - o.esai[p]
+            if blai + bsai == zero(T)
+                o.ncan[p] = o.nrad[p]
+            else
+                dincmax_sum = zero(T)
+                for iv in (o.nrad[p] + 1):nlevcan
+                    dincmax_sum += dincmax_T
+                    if ((blai + bsai) - dincmax_sum) > T(1.0e-06)
+                        o.ncan[p] = iv
+                        dinc = dincmax_T
+                        o.tlai_z[p, iv] = dinc * blai / smooth_max(blai + bsai, mpe_T)
+                        o.tsai_z[p, iv] = dinc * bsai / smooth_max(blai + bsai, mpe_T)
+                    else
+                        o.ncan[p] = iv
+                        dinc = dincmax_T - (dincmax_sum - (blai + bsai))
+                        o.tlai_z[p, iv] = dinc * blai / smooth_max(blai + bsai, mpe_T)
+                        o.tsai_z[p, iv] = dinc * bsai / smooth_max(blai + bsai, mpe_T)
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+# ---- Zero fluxes for active canopy layers (per patch; iv loop) ----
+@kernel function _sa_zerolayer_kernel!(fabd_sun_z, fabd_sha_z, fabi_sun_z, fabi_sha_z,
+        fsun_z, @Const(mask), @Const(nrad))
+    p = @index(Global)
+    @inbounds if mask[p]
+        for iv in 1:nrad[p]
+            fabd_sun_z[p, iv] = 0.0
+            fabd_sha_z[p, iv] = 0.0
+            fabi_sun_z[p, iv] = 0.0
+            fabi_sha_z[p, iv] = 0.0
+            fsun_z[p, iv] = 0.0
+        end
+    end
+end
+
+# ---- Default vcmax scaling (coszen <= 0 case) (per patch) ----
+@kernel function _sa_vcmaxdef_kernel!(vcmaxcintsun, vcmaxcintsha, @Const(mask),
+        @Const(elai), nlevcan::Int, extkn)
+    p = @index(Global)
+    T = eltype(vcmaxcintsun)
+    @inbounds if mask[p]
+        extkn_T = oftype(elai[p], extkn)
+        if nlevcan == 1
+            vcmaxcintsun[p] = 0.0
+            vcmaxcintsha[p] = (one(T) - exp(-extkn_T * elai[p])) / extkn_T
+            if elai[p] > 0.0
+                vcmaxcintsha[p] /= elai[p]
+            else
+                vcmaxcintsha[p] = 0.0
+            end
+        elseif nlevcan > 1
+            vcmaxcintsun[p] = 0.0
+            vcmaxcintsha[p] = 0.0
+        end
+    end
+end
+
+# ---- Non-vegetated patches where coszen > 0 (per (ib, patch)) ----
+Base.@kwdef struct _SaNovegOut{M}
+    fabd::M; fabd_sun::M; fabd_sha::M
+    fabi::M; fabi_sun::M; fabi_sha::M
+    ftdd::M; ftid::M; ftii::M
+    albd::M; albi::M; albdSF::M; albiSF::M
+end
+Adapt.@adapt_structure _SaNovegOut
+
+@kernel function _sa_noveg_kernel!(o::_SaNovegOut, @Const(mask), @Const(column),
+        @Const(albgrd), @Const(albgri), @Const(albsod), @Const(albsoi), use_SSRE::Bool)
+    p, ib = @index(Global, NTuple)
+    @inbounds if mask[p]
+        c = column[p]
+        o.fabd[p, ib] = 0.0
+        o.fabd_sun[p, ib] = 0.0
+        o.fabd_sha[p, ib] = 0.0
+        o.fabi[p, ib] = 0.0
+        o.fabi_sun[p, ib] = 0.0
+        o.fabi_sha[p, ib] = 0.0
+        o.ftdd[p, ib] = 1.0
+        o.ftid[p, ib] = 0.0
+        o.ftii[p, ib] = 1.0
+        o.albd[p, ib] = albgrd[c, ib]
+        o.albi[p, ib] = albgri[c, ib]
+        if use_SSRE
+            o.albdSF[p, ib] = albsod[c, ib]
+            o.albiSF[p, ib] = albsoi[c, ib]
+        end
+    end
+end
+
+# ---- History output: ground albedos (per (ib, col)) ----
+Base.@kwdef struct _SaHistColOut{M}
+    albgrd_hst::M; albgri_hst::M
+    albgrd_pur_hst::M; albgri_pur_hst::M
+    albgrd_bc_hst::M; albgri_bc_hst::M
+    albgrd_oc_hst::M; albgri_oc_hst::M
+    albgrd_dst_hst::M; albgri_dst_hst::M
+    albsnd_hst2::M; albsni_hst2::M
+end
+Adapt.@adapt_structure _SaHistColOut
+Base.@kwdef struct _SaHistColIn{M}
+    albgrd::M; albgri::M
+    albgrd_pur::M; albgri_pur::M; albgrd_bc::M; albgri_bc::M
+    albgrd_oc::M; albgri_oc::M; albgrd_dst::M; albgri_dst::M
+    albsnd_hst::M; albsni_hst::M
+end
+Adapt.@adapt_structure _SaHistColIn
+
+@kernel function _sa_histcol_kernel!(o::_SaHistColOut, in::_SaHistColIn, @Const(mask),
+        @Const(coszen_col), @Const(h2osno_total))
+    c, ib = @index(Global, NTuple)
+    @inbounds if mask[c]
+        if coszen_col[c] > 0.0
+            o.albgrd_hst[c, ib] = in.albgrd[c, ib]
+            o.albgri_hst[c, ib] = in.albgri[c, ib]
+            o.albgrd_pur_hst[c, ib] = in.albgrd_pur[c, ib]
+            o.albgri_pur_hst[c, ib] = in.albgri_pur[c, ib]
+            o.albgrd_bc_hst[c, ib] = in.albgrd_bc[c, ib]
+            o.albgri_bc_hst[c, ib] = in.albgri_bc[c, ib]
+            o.albgrd_oc_hst[c, ib] = in.albgrd_oc[c, ib]
+            o.albgri_oc_hst[c, ib] = in.albgri_oc[c, ib]
+            o.albgrd_dst_hst[c, ib] = in.albgrd_dst[c, ib]
+            o.albgri_dst_hst[c, ib] = in.albgri_dst[c, ib]
+            if h2osno_total[c] > 0.0
+                o.albsnd_hst2[c, ib] = in.albsnd_hst[c, ib]
+                o.albsni_hst2[c, ib] = in.albsni_hst[c, ib]
+            end
+        end
+    end
+end
+
+# ---- History output: patch albedos (per (ib, patch)) ----
+@kernel function _sa_histpatch_kernel!(albd_hst, albi_hst, @Const(mask),
+        @Const(coszen_patch), @Const(albd), @Const(albi))
+    p, ib = @index(Global, NTuple)
+    @inbounds if mask[p]
+        if coszen_patch[p] > 0.0
+            albd_hst[p, ib] = albd[p, ib]
+            albi_hst[p, ib] = albi[p, ib]
+        end
+    end
+end
+
+# --------------------------------------------------------------------------
 # surface_albedo_init_time_const!
 # --------------------------------------------------------------------------
 
@@ -168,6 +584,99 @@ function surface_albedo_init_time_const!(con::SurfaceAlbedoConstants,
 end
 
 # --------------------------------------------------------------------------
+# soil_albedo! — device kernel + bundles
+# --------------------------------------------------------------------------
+
+# Outputs / state inputs (per-column / per-(col,band) arrays).
+Base.@kwdef struct _SaSoilOut{M}
+    albsod::M; albsoi::M
+end
+Adapt.@adapt_structure _SaSoilOut
+
+Base.@kwdef struct _SaSoilIn{V,M,VI}
+    coszen_col::V; landunit::VI; itype::VI; isoicol::VI
+    h2osoi_vol::M; t_grnd::V; snl::VI; lake_icefrac::M
+end
+Adapt.@adapt_structure _SaSoilIn
+
+# Color/band lookup tables copied onto the working backend at working eltype.
+Base.@kwdef struct _SaSoilCon{V,M}
+    albsat::M; albdry::M; alblakwi::V; albice::V; ablak::V
+end
+Adapt.@adapt_structure _SaSoilCon
+
+@kernel function _sa_soil_kernel!(o::_SaSoilOut, in::_SaSoilIn, cn::_SaSoilCon,
+        @Const(mask), nband::Int, lakepuddling::Bool, calb, tfrz)
+    c = @index(Global)
+    T = eltype(o.albsod)
+    @inbounds if mask[c]
+        if in.coszen_col[c] > zero(T)
+            l = in.landunit[c]
+            it = in.itype[l]
+            for ib in 1:nband
+                if it == ISTSOIL || it == ISTCROP
+                    # Soil
+                    inc = smooth_max(T(0.11) - T(0.40) * in.h2osoi_vol[c, 1], zero(T))
+                    soilcol = in.isoicol[c]
+                    o.albsod[c, ib] = min(cn.albsat[soilcol, ib] + inc,
+                                          cn.albdry[soilcol, ib])
+                    o.albsoi[c, ib] = o.albsod[c, ib]
+
+                elseif it == ISTICE
+                    # Land ice
+                    o.albsod[c, ib] = cn.albice[ib]
+                    o.albsoi[c, ib] = o.albsod[c, ib]
+
+                elseif in.t_grnd[c] > tfrz ||
+                       (lakepuddling && it == ISTDLAK &&
+                        in.t_grnd[c] == tfrz &&
+                        in.lake_icefrac[c, 1] < one(T) &&
+                        in.lake_icefrac[c, 2] > zero(T))
+                    # Unfrozen lake/wetland
+                    albsod_unfrozen = T(0.05) / (smooth_max(T(0.001), in.coszen_col[c]) + T(0.15))
+                    if it == ISTDLAK
+                        albsoi_unfrozen = T(0.10)
+                    else
+                        albsoi_unfrozen = albsod_unfrozen
+                    end
+
+                    # Blend with frozen albedo via smooth_heaviside for AD
+                    if it == ISTDLAK && !lakepuddling && in.snl[c] == 0
+                        sicefr = one(T) - exp(-calb * (tfrz - in.t_grnd[c]) / tfrz)
+                        albsod_frozen = sicefr * cn.ablak[ib] +
+                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib],
+                                                  T(0.05) / (smooth_max(T(0.001), in.coszen_col[c]) + T(0.15)))
+                        albsoi_frozen = sicefr * cn.ablak[ib] +
+                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib], T(0.10))
+                    else
+                        albsod_frozen = cn.ablak[ib]
+                        albsoi_frozen = albsod_frozen
+                    end
+
+                    w_unfrozen = smooth_heaviside(in.t_grnd[c] - tfrz)
+                    o.albsod[c, ib] = w_unfrozen * albsod_unfrozen + (one(T) - w_unfrozen) * albsod_frozen
+                    o.albsoi[c, ib] = w_unfrozen * albsoi_unfrozen + (one(T) - w_unfrozen) * albsoi_frozen
+
+                else
+                    # Frozen lake/wetland
+                    if it == ISTDLAK && !lakepuddling && in.snl[c] == 0
+                        sicefr = one(T) - exp(-calb * (tfrz - in.t_grnd[c]) / tfrz)
+                        o.albsod[c, ib] = sicefr * cn.ablak[ib] +
+                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib],
+                                                  T(0.05) / (smooth_max(T(0.001), in.coszen_col[c]) + T(0.15)))
+                        o.albsoi[c, ib] = sicefr * cn.ablak[ib] +
+                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib], T(0.10))
+                    else
+                        o.albsod[c, ib] = cn.ablak[ib]
+                        o.albsoi[c, ib] = o.albsod[c, ib]
+                    end
+                end
+            end
+        end
+    end
+end
+
+# --------------------------------------------------------------------------
 # soil_albedo!
 # --------------------------------------------------------------------------
 
@@ -185,84 +694,438 @@ function soil_albedo!(surfalb::SurfaceAlbedoData,
                       con::SurfaceAlbedoConstants,
                       col::ColumnData,
                       lun::LandunitData,
-                      coszen_col::Vector{<:Real},
+                      coszen_col::AbstractVector{<:Real},
                       temperature::TemperatureData,
                       waterstatebulk::WaterStateBulkData,
                       lakestate::LakeStateData,
-                      mask_nourbanc::BitVector,
+                      mask_nourbanc::AbstractVector{Bool},
                       bounds_col::UnitRange{Int};
                       lakepuddling::Bool = false)
 
     nband = NUMRAD
 
-    for ib in 1:nband
-        for c in bounds_col
-            mask_nourbanc[c] || continue
-            if coszen_col[c] > 0.0
-                l = col.landunit[c]
+    # Copy host color/band lookup tables + module-global albedo vectors onto the
+    # working backend at the working eltype (no-op identity on CPU Arrays).
+    T = eltype(surfalb.albsod_col)
+    _dev(a) = surfalb.albsod_col isa Array ?
+        a : copyto!(similar(surfalb.albsod_col, T, size(a)), T.(a))
+    # Int color index: copy onto the backend keeping Int eltype (model off snl).
+    isoicol_dev = col.snl isa Array ?
+        con.isoicol : copyto!(similar(col.snl, Int, length(con.isoicol)), con.isoicol)
 
-                if lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP
-                    # Soil
-                    inc = smooth_max(0.11 - 0.40 * waterstatebulk.ws.h2osoi_vol_col[c, 1], 0.0)
-                    soilcol = con.isoicol[c]
-                    surfalb.albsod_col[c, ib] = min(con.albsat[soilcol, ib] + inc,
-                                                    con.albdry[soilcol, ib])
-                    surfalb.albsoi_col[c, ib] = surfalb.albsod_col[c, ib]
+    o = _SaSoilOut(; albsod = surfalb.albsod_col, albsoi = surfalb.albsoi_col)
+    in = _SaSoilIn(; coszen_col = coszen_col, landunit = col.landunit,
+                   itype = lun.itype, isoicol = isoicol_dev,
+                   h2osoi_vol = waterstatebulk.ws.h2osoi_vol_col,
+                   t_grnd = temperature.t_grnd_col, snl = col.snl,
+                   lake_icefrac = lakestate.lake_icefrac_col)
+    cn = _SaSoilCon(; albsat = _dev(con.albsat), albdry = _dev(con.albdry),
+                    alblakwi = _dev(con.alblakwi), albice = _dev(ALBICE),
+                    ablak = _dev(ALBLAK))
 
-                elseif lun.itype[l] == ISTICE
-                    # Land ice
-                    surfalb.albsod_col[c, ib] = ALBICE[ib]
-                    surfalb.albsoi_col[c, ib] = surfalb.albsod_col[c, ib]
-
-                elseif temperature.t_grnd_col[c] > TFRZ ||
-                       (lakepuddling && lun.itype[l] == ISTDLAK &&
-                        temperature.t_grnd_col[c] == TFRZ &&
-                        lakestate.lake_icefrac_col[c, 1] < 1.0 &&
-                        lakestate.lake_icefrac_col[c, 2] > 0.0)
-                    # Unfrozen lake/wetland
-                    albsod_unfrozen = 0.05 / (smooth_max(0.001, coszen_col[c]) + 0.15)
-                    if lun.itype[l] == ISTDLAK
-                        albsoi_unfrozen = 0.10
-                    else
-                        albsoi_unfrozen = albsod_unfrozen
-                    end
-
-                    # Blend with frozen albedo via smooth_heaviside for AD
-                    if lun.itype[l] == ISTDLAK && !lakepuddling && col.snl[c] == 0
-                        sicefr = 1.0 - exp(-CALB * (TFRZ - temperature.t_grnd_col[c]) / TFRZ)
-                        albsod_frozen = sicefr * ALBLAK[ib] +
-                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib],
-                                                  0.05 / (smooth_max(0.001, coszen_col[c]) + 0.15))
-                        albsoi_frozen = sicefr * ALBLAK[ib] +
-                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib], 0.10)
-                    else
-                        albsod_frozen = convert(eltype(temperature.t_grnd_col), ALBLAK[ib])
-                        albsoi_frozen = albsod_frozen
-                    end
-
-                    w_unfrozen = smooth_heaviside(temperature.t_grnd_col[c] - TFRZ)
-                    surfalb.albsod_col[c, ib] = w_unfrozen * albsod_unfrozen + (1.0 - w_unfrozen) * albsod_frozen
-                    surfalb.albsoi_col[c, ib] = w_unfrozen * albsoi_unfrozen + (1.0 - w_unfrozen) * albsoi_frozen
-
-                else
-                    # Frozen lake/wetland
-                    if lun.itype[l] == ISTDLAK && !lakepuddling && col.snl[c] == 0
-                        sicefr = 1.0 - exp(-CALB * (TFRZ - temperature.t_grnd_col[c]) / TFRZ)
-                        surfalb.albsod_col[c, ib] = sicefr * ALBLAK[ib] +
-                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib],
-                                                  0.05 / (smooth_max(0.001, coszen_col[c]) + 0.15))
-                        surfalb.albsoi_col[c, ib] = sicefr * ALBLAK[ib] +
-                            (1.0 - sicefr) * smooth_max(con.alblakwi[ib], 0.10)
-                    else
-                        surfalb.albsod_col[c, ib] = ALBLAK[ib]
-                        surfalb.albsoi_col[c, ib] = surfalb.albsod_col[c, ib]
-                    end
-                end
-            end
-        end
+    be = _kernel_backend(surfalb.albsod_col)
+    nc = length(bounds_col)
+    if nc != 0
+        _sa_soil_kernel!(be)(o, in, cn, mask_nourbanc, nband, lakepuddling,
+                             T(CALB), T(TFRZ); ndrange = nc)
+        KA.synchronize(be)
     end
 
     return nothing
+end
+
+# --------------------------------------------------------------------------
+# two_stream! — device kernels + bundles
+#
+# Fully per-patch independent: each patch computes its own two-stream solution
+# from its own inputs and writes its own albedo/flux outputs (no cross-patch
+# coupling). Two kernels, both one-thread-per-patch:
+#   _ts_params_kernel!   — waveband-independent params (writes per-patch scratch)
+#   _ts_waveband_kernel! — internal `for ib in 1:numrad` loop + ib==1 per-layer
+# --------------------------------------------------------------------------
+
+# Per-patch waveband-independent scratch (written by params, read by waveband).
+Base.@kwdef struct _TsScratch{V,M}
+    chil::V; gdir::V; twostext::V; avmu::V; temp0::V; temp2::V; omega::M
+end
+Adapt.@adapt_structure _TsScratch
+
+@kernel function _ts_params_kernel!(s::_TsScratch, @Const(mask),
+        @Const(itype), @Const(coszen_patch), @Const(pftcon_xl))
+    p = @index(Global)
+    T = eltype(s.chil)
+    @inbounds if mask[p]
+        cosz = smooth_max(T(0.001), coszen_patch[p])
+
+        s.chil[p] = smooth_clamp(pftcon_xl[itype[p] + 1], T(-0.4), T(0.6))
+        if abs(s.chil[p]) <= T(0.01)
+            s.chil[p] = T(0.01)
+        end
+        phi1 = T(0.5) - T(0.633) * s.chil[p] - T(0.330) * s.chil[p] * s.chil[p]
+        phi2 = T(0.877) * (T(1.0) - T(2.0) * phi1)
+        s.gdir[p] = phi1 + phi2 * cosz
+        s.twostext[p] = s.gdir[p] / cosz
+        s.avmu[p] = (T(1.0) - phi1 / phi2 * log((phi1 + phi2) / phi1)) / phi2
+        s.temp0[p] = smooth_max(s.gdir[p] + phi2 * cosz, T(1.0e-6))
+        temp1_val = phi1 * cosz
+        s.temp2[p] = (T(1.0) - temp1_val / s.temp0[p] * log((temp1_val + s.temp0[p]) / temp1_val))
+    end
+end
+
+# Outputs (per-patch / per-(patch,band) flux + albedo arrays).
+Base.@kwdef struct _TsOut{V,M}
+    albd::M; ftid::M; ftdd::M; fabd::M; albdSF::M
+    fabd_sun::M; fabd_sha::M
+    albi::M; ftii::M; fabi::M; albiSF::M
+    fabi_sun::M; fabi_sha::M
+    fsun_z::M; fabd_sun_z::M; fabd_sha_z::M; fabi_sun_z::M; fabi_sha_z::M
+    vcmaxcintsun::V; vcmaxcintsha::V
+end
+Adapt.@adapt_structure _TsOut
+
+# State inputs read by the waveband kernel.
+Base.@kwdef struct _TsIn{V,M,VI,Vo}
+    column::VI; nrad::VI
+    rho_in::M; tau_in::M
+    fcansno::V; fwet::V; t_veg::V
+    albgrd::M; albgri::M; albsod::M; albsoi::M
+    elai::V; esai::V; tlai_z::M; tsai_z::M
+    omegas::Vo   # SNICAR snow single-scatter constant — stays Float64 even under AD
+                 # (Dual state fields), so it needs its OWN type param to unify.
+end
+Adapt.@adapt_structure _TsIn
+
+@kernel function _ts_waveband_kernel!(o::_TsOut, in::_TsIn, s::_TsScratch,
+        @Const(mask), @Const(coszen_patch), numrad::Int, nlevcan::Int,
+        lSFonly::Bool, snowveg_affects_radiation::Bool, betads, betais, tfrz)
+    p = @index(Global)
+    T = eltype(o.albd)
+    @inbounds if mask[p]
+        betads_T = oftype(o.albd[p, 1], betads)
+        betais_T = oftype(o.albd[p, 1], betais)
+        tfrz_T = oftype(o.albd[p, 1], tfrz)
+        c = in.column[p]
+        cosz = smooth_max(T(0.001), coszen_patch[p])
+
+        for ib in 1:numrad
+            # Two-stream parameters omega, betad, betai
+            omegal = in.rho_in[p, ib] + in.tau_in[p, ib]
+            asu = T(0.5) * omegal * s.gdir[p] / s.temp0[p] * s.temp2[p]
+            betadl = (T(1.0) + s.avmu[p] * s.twostext[p]) / (omegal * s.avmu[p] * s.twostext[p]) * asu
+            betail = T(0.5) * ((in.rho_in[p, ib] + in.tau_in[p, ib]) + (in.rho_in[p, ib] - in.tau_in[p, ib]) *
+                     ((T(1.0) + s.chil[p]) / T(2.0))^2) / omegal
+
+            # Adjust omega, betad, betai for intercepted snow
+            if lSFonly || (!snowveg_affects_radiation && in.t_veg[p] > tfrz_T)
+                tmp0 = omegal
+                tmp1 = betadl
+                tmp2 = betail
+            else
+                if snowveg_affects_radiation
+                    tmp0 = (T(1.0) - in.fcansno[p]) * omegal + in.fcansno[p] * in.omegas[ib]
+                    tmp1 = ((T(1.0) - in.fcansno[p]) * omegal * betadl + in.fcansno[p] * in.omegas[ib] * betads_T) / tmp0
+                    tmp2 = ((T(1.0) - in.fcansno[p]) * omegal * betail + in.fcansno[p] * in.omegas[ib] * betais_T) / tmp0
+                else
+                    tmp0 = (T(1.0) - in.fwet[p]) * omegal + in.fwet[p] * in.omegas[ib]
+                    tmp1 = ((T(1.0) - in.fwet[p]) * omegal * betadl + in.fwet[p] * in.omegas[ib] * betads_T) / tmp0
+                    tmp2 = ((T(1.0) - in.fwet[p]) * omegal * betail + in.fwet[p] * in.omegas[ib] * betais_T) / tmp0
+                end
+            end
+
+            s.omega[p, ib] = tmp0
+            betad = tmp1
+            betai = tmp2
+
+            # Common terms
+            b = T(1.0) - s.omega[p, ib] + s.omega[p, ib] * betai
+            c1 = s.omega[p, ib] * betai
+            tmp0_val = s.avmu[p] * s.twostext[p]
+            d = tmp0_val * s.omega[p, ib] * betad
+            f = tmp0_val * s.omega[p, ib] * (T(1.0) - betad)
+            tmp1_val = b * b - c1 * c1
+            h = sqrt(tmp1_val) / s.avmu[p]
+            sigma = tmp0_val * tmp0_val - tmp1_val
+
+            p1 = b + s.avmu[p] * h
+            p2 = b - s.avmu[p] * h
+            p3 = b + tmp0_val
+            p4 = b - tmp0_val
+
+            # Absorbed, reflected, transmitted fluxes for full canopy
+            t1 = smooth_min(h * (in.elai[p] + in.esai[p]), T(40.0))
+            s1 = exp(-t1)
+            t1 = smooth_min(s.twostext[p] * (in.elai[p] + in.esai[p]), T(40.0))
+            s2 = exp(-t1)
+
+            # ---- Direct beam ----
+            if !lSFonly
+                u1 = b - c1 / in.albgrd[c, ib]
+                u2 = b - c1 * in.albgrd[c, ib]
+                u3 = f + c1 * in.albgrd[c, ib]
+            else
+                u1 = b - c1 / in.albsod[c, ib]
+                u2 = b - c1 * in.albsod[c, ib]
+                u3 = f + c1 * in.albsod[c, ib]
+            end
+            tmp2_val = u1 - s.avmu[p] * h
+            tmp3 = u1 + s.avmu[p] * h
+            d1 = p1 * tmp2_val / s1 - p2 * tmp3 * s1
+            tmp4 = u2 + s.avmu[p] * h
+            tmp5 = u2 - s.avmu[p] * h
+            d2 = tmp4 / s1 - tmp5 * s1
+            h1 = -d * p4 - c1 * f
+            tmp6 = d - h1 * p3 / sigma
+            tmp7 = (d - c1 - h1 / sigma * (u1 + tmp0_val)) * s2
+            h2 = (tmp6 * tmp2_val / s1 - p2 * tmp7) / d1
+            h3 = -(tmp6 * tmp3 * s1 - p1 * tmp7) / d1
+            h4 = -f * p3 - c1 * d
+            tmp8 = h4 / sigma
+            tmp9 = (u3 - tmp8 * (u2 - tmp0_val)) * s2
+            h5 = -(tmp8 * tmp4 / s1 + tmp9) / d2
+            h6 = (tmp8 * tmp5 * s1 + tmp9) / d2
+
+            if !lSFonly
+                o.albd[p, ib] = h1 / sigma + h2 + h3
+                o.ftid[p, ib] = h4 * s2 / sigma + h5 * s1 + h6 / s1
+                o.ftdd[p, ib] = s2
+                o.fabd[p, ib] = T(1.0) - o.albd[p, ib] -
+                    (T(1.0) - in.albgrd[c, ib]) * o.ftdd[p, ib] -
+                    (T(1.0) - in.albgri[c, ib]) * o.ftid[p, ib]
+            else
+                o.albdSF[p, ib] = h1 / sigma + h2 + h3
+            end
+
+            a1 = h1 / sigma * (T(1.0) - s2 * s2) / (T(2.0) * s.twostext[p]) +
+                 h2 * (T(1.0) - s2 * s1) / (s.twostext[p] + h) +
+                 h3 * (T(1.0) - s2 / s1) / (s.twostext[p] - h)
+
+            a2 = h4 / sigma * (T(1.0) - s2 * s2) / (T(2.0) * s.twostext[p]) +
+                 h5 * (T(1.0) - s2 * s1) / (s.twostext[p] + h) +
+                 h6 * (T(1.0) - s2 / s1) / (s.twostext[p] - h)
+
+            if !lSFonly
+                o.fabd_sun[p, ib] = (T(1.0) - s.omega[p, ib]) *
+                    (T(1.0) - s2 + T(1.0) / s.avmu[p] * (a1 + a2))
+                o.fabd_sha[p, ib] = o.fabd[p, ib] - o.fabd_sun[p, ib]
+            end
+
+            # ---- Diffuse ----
+            if !lSFonly
+                u1 = b - c1 / in.albgri[c, ib]
+                u2 = b - c1 * in.albgri[c, ib]
+            else
+                u1 = b - c1 / in.albsoi[c, ib]
+                u2 = b - c1 * in.albsoi[c, ib]
+            end
+            tmp2_val = u1 - s.avmu[p] * h
+            tmp3 = u1 + s.avmu[p] * h
+            d1 = p1 * tmp2_val / s1 - p2 * tmp3 * s1
+            tmp4 = u2 + s.avmu[p] * h
+            tmp5 = u2 - s.avmu[p] * h
+            d2 = tmp4 / s1 - tmp5 * s1
+            h7 = (c1 * tmp2_val) / (d1 * s1)
+            h8 = (-c1 * tmp3 * s1) / d1
+            h9 = tmp4 / (d2 * s1)
+            h10 = (-tmp5 * s1) / d2
+
+            if lSFonly
+                o.albiSF[p, ib] = h7 + h8
+            else
+                o.albi[p, ib] = h7 + h8
+                o.ftii[p, ib] = h9 * s1 + h10 / s1
+                o.fabi[p, ib] = T(1.0) - o.albi[p, ib] -
+                    (T(1.0) - in.albgri[c, ib]) * o.ftii[p, ib]
+
+                a1 = h7 * (T(1.0) - s2 * s1) / (s.twostext[p] + h) +
+                     h8 * (T(1.0) - s2 / s1) / (s.twostext[p] - h)
+                a2 = h9 * (T(1.0) - s2 * s1) / (s.twostext[p] + h) +
+                     h10 * (T(1.0) - s2 / s1) / (s.twostext[p] - h)
+
+                o.fabi_sun[p, ib] = (T(1.0) - s.omega[p, ib]) / s.avmu[p] * (a1 + a2)
+                o.fabi_sha[p, ib] = o.fabi[p, ib] - o.fabi_sun[p, ib]
+
+                # Per-layer derivatives for PAR (ib == 1)
+                if ib == 1
+                    if nlevcan == 1
+                        # Sun/shade big leaf: single layer
+                        o.fsun_z[p, 1] = (T(1.0) - s2) / t1
+
+                        laisum = in.elai[p] + in.esai[p]
+                        o.fabd_sun_z[p, 1] = o.fabd_sun[p, ib] /
+                            (o.fsun_z[p, 1] * laisum)
+                        o.fabi_sun_z[p, 1] = o.fabi_sun[p, ib] /
+                            (o.fsun_z[p, 1] * laisum)
+                        o.fabd_sha_z[p, 1] = o.fabd_sha[p, ib] /
+                            ((T(1.0) - o.fsun_z[p, 1]) * laisum)
+                        o.fabi_sha_z[p, 1] = o.fabi_sha[p, ib] /
+                            ((T(1.0) - o.fsun_z[p, 1]) * laisum)
+
+                        # Leaf to canopy scaling coefficients
+                        extkn = T(0.30)
+                        extkb = s.twostext[p]
+                        o.vcmaxcintsun[p] = (T(1.0) - exp(-(extkn + extkb) * in.elai[p])) /
+                            (extkn + extkb)
+                        o.vcmaxcintsha[p] = (T(1.0) - exp(-extkn * in.elai[p])) / extkn -
+                            o.vcmaxcintsun[p]
+                        if in.elai[p] > T(0.0)
+                            o.vcmaxcintsun[p] /= (o.fsun_z[p, 1] * in.elai[p])
+                            o.vcmaxcintsha[p] /= ((T(1.0) - o.fsun_z[p, 1]) * in.elai[p])
+                        else
+                            o.vcmaxcintsun[p] = 0.0
+                            o.vcmaxcintsha[p] = 0.0
+                        end
+
+                    elseif nlevcan > 1
+                        # Multi-layer canopy
+                        laisum_l = zero(T)
+                        for iv in 1:in.nrad[p]
+                            # Cumulative lai+sai at center of layer
+                            if iv == 1
+                                laisum_l = T(0.5) * (in.tlai_z[p, iv] + in.tsai_z[p, iv])
+                            else
+                                laisum_l = laisum_l + T(0.5) * ((in.tlai_z[p, iv-1] + in.tsai_z[p, iv-1]) +
+                                    (in.tlai_z[p, iv] + in.tsai_z[p, iv]))
+                            end
+
+                            t1_l = smooth_min(h * laisum_l, T(40.0))
+                            s1_l = exp(-t1_l)
+                            t1_l = smooth_min(s.twostext[p] * laisum_l, T(40.0))
+                            s2_l = exp(-t1_l)
+                            o.fsun_z[p, iv] = s2_l
+
+                            # ---- Direct beam derivatives ----
+                            u1_l = b - c1 / in.albgrd[c, ib]
+                            u2_l = b - c1 * in.albgrd[c, ib]
+                            u3_l = f + c1 * in.albgrd[c, ib]
+
+                            tmp2_l = u1_l - s.avmu[p] * h
+                            tmp3_l = u1_l + s.avmu[p] * h
+                            d1_l = p1 * tmp2_l / s1_l - p2 * tmp3_l * s1_l
+                            tmp4_l = u2_l + s.avmu[p] * h
+                            tmp5_l = u2_l - s.avmu[p] * h
+                            d2_l = tmp4_l / s1_l - tmp5_l * s1_l
+
+                            h1_l = -d * p4 - c1 * f
+                            tmp6_l = d - h1_l * p3 / sigma
+                            tmp7_l = (d - c1 - h1_l / sigma * (u1_l + tmp0_val)) * s2_l
+
+                            h2_l = (tmp6_l * tmp2_l / s1_l - p2 * tmp7_l) / d1_l
+                            h3_l = -(tmp6_l * tmp3_l * s1_l - p1 * tmp7_l) / d1_l
+
+                            h4_l = -f * p3 - c1 * d
+                            tmp8_l = h4_l / sigma
+                            tmp9_l = (u3_l - tmp8_l * (u2_l - tmp0_val)) * s2_l
+                            h5_l = -(tmp8_l * tmp4_l / s1_l + tmp9_l) / d2_l
+                            h6_l = (tmp8_l * tmp5_l * s1_l + tmp9_l) / d2_l
+
+                            # Derivatives
+                            v_val = d1_l
+                            dv = h * p1 * tmp2_l / s1_l + h * p2 * tmp3_l * s1_l
+
+                            u_val = tmp6_l * tmp2_l / s1_l - p2 * tmp7_l
+                            du = h * tmp6_l * tmp2_l / s1_l + s.twostext[p] * p2 * tmp7_l
+                            dh2 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            u_val = -tmp6_l * tmp3_l * s1_l + p1 * tmp7_l
+                            du = h * tmp6_l * tmp3_l * s1_l - s.twostext[p] * p1 * tmp7_l
+                            dh3 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            v_val = d2_l
+                            dv = h * tmp4_l / s1_l + h * tmp5_l * s1_l
+
+                            u_val = -h4_l / sigma * tmp4_l / s1_l - tmp9_l
+                            du = -h * h4_l / sigma * tmp4_l / s1_l + s.twostext[p] * tmp9_l
+                            dh5 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            u_val = h4_l / sigma * tmp5_l * s1_l + tmp9_l
+                            du = -h * h4_l / sigma * tmp5_l * s1_l - s.twostext[p] * tmp9_l
+                            dh6 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            da1 = h1_l / sigma * s2_l * s2_l + h2_l * s2_l * s1_l + h3_l * s2_l / s1_l +
+                                  (T(1.0) - s2_l * s1_l) / (s.twostext[p] + h) * dh2 +
+                                  (T(1.0) - s2_l / s1_l) / (s.twostext[p] - h) * dh3
+                            da2 = h4_l / sigma * s2_l * s2_l + h5_l * s2_l * s1_l + h6_l * s2_l / s1_l +
+                                  (T(1.0) - s2_l * s1_l) / (s.twostext[p] + h) * dh5 +
+                                  (T(1.0) - s2_l / s1_l) / (s.twostext[p] - h) * dh6
+
+                            d_ftid = -s.twostext[p] * h4_l / sigma * s2_l - h * h5_l * s1_l + h * h6_l / s1_l +
+                                     dh5 * s1_l + dh6 / s1_l
+                            d_fabd = -(dh2 + dh3) + (T(1.0) - in.albgrd[c, ib]) * s.twostext[p] * s2_l -
+                                     (T(1.0) - in.albgri[c, ib]) * d_ftid
+                            d_fabd_sun = (T(1.0) - s.omega[p, ib]) *
+                                (s.twostext[p] * s2_l + T(1.0) / s.avmu[p] * (da1 + da2))
+                            d_fabd_sha = d_fabd - d_fabd_sun
+
+                            o.fabd_sun_z[p, iv] = smooth_max(d_fabd_sun, T(0.0)) /
+                                o.fsun_z[p, iv]
+                            o.fabd_sha_z[p, iv] = smooth_max(d_fabd_sha, T(0.0)) /
+                                (T(1.0) - o.fsun_z[p, iv])
+
+                            # ---- Diffuse derivatives ----
+                            u1_l = b - c1 / in.albgri[c, ib]
+                            u2_l = b - c1 * in.albgri[c, ib]
+
+                            tmp2_l = u1_l - s.avmu[p] * h
+                            tmp3_l = u1_l + s.avmu[p] * h
+                            d1_l = p1 * tmp2_l / s1_l - p2 * tmp3_l * s1_l
+                            tmp4_l = u2_l + s.avmu[p] * h
+                            tmp5_l = u2_l - s.avmu[p] * h
+                            d2_l = tmp4_l / s1_l - tmp5_l * s1_l
+
+                            h7_l = (c1 * tmp2_l) / (d1_l * s1_l)
+                            h8_l = (-c1 * tmp3_l * s1_l) / d1_l
+                            h9_l = tmp4_l / (d2_l * s1_l)
+                            h10_l = (-tmp5_l * s1_l) / d2_l
+
+                            a1_l = h7_l * (T(1.0) - s2_l * s1_l) / (s.twostext[p] + h) +
+                                   h8_l * (T(1.0) - s2_l / s1_l) / (s.twostext[p] - h)
+                            a2_l = h9_l * (T(1.0) - s2_l * s1_l) / (s.twostext[p] + h) +
+                                   h10_l * (T(1.0) - s2_l / s1_l) / (s.twostext[p] - h)
+
+                            v_val = d1_l
+                            dv = h * p1 * tmp2_l / s1_l + h * p2 * tmp3_l * s1_l
+
+                            u_val = c1 * tmp2_l / s1_l
+                            du = h * c1 * tmp2_l / s1_l
+                            dh7 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            u_val = -c1 * tmp3_l * s1_l
+                            du = h * c1 * tmp3_l * s1_l
+                            dh8 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            v_val = d2_l
+                            dv = h * tmp4_l / s1_l + h * tmp5_l * s1_l
+
+                            u_val = tmp4_l / s1_l
+                            du = h * tmp4_l / s1_l
+                            dh9 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            u_val = -tmp5_l * s1_l
+                            du = h * tmp5_l * s1_l
+                            dh10 = (v_val * du - u_val * dv) / (v_val * v_val)
+
+                            da1 = h7_l * s2_l * s1_l + h8_l * s2_l / s1_l +
+                                  (T(1.0) - s2_l * s1_l) / (s.twostext[p] + h) * dh7 +
+                                  (T(1.0) - s2_l / s1_l) / (s.twostext[p] - h) * dh8
+                            da2 = h9_l * s2_l * s1_l + h10_l * s2_l / s1_l +
+                                  (T(1.0) - s2_l * s1_l) / (s.twostext[p] + h) * dh9 +
+                                  (T(1.0) - s2_l / s1_l) / (s.twostext[p] - h) * dh10
+
+                            d_ftii = -h * h9_l * s1_l + h * h10_l / s1_l + dh9 * s1_l + dh10 / s1_l
+                            d_fabi = -(dh7 + dh8) - (T(1.0) - in.albgri[c, ib]) * d_ftii
+                            d_fabi_sun = (T(1.0) - s.omega[p, ib]) / s.avmu[p] * (da1 + da2)
+                            d_fabi_sha = d_fabi - d_fabi_sun
+
+                            o.fabi_sun_z[p, iv] = smooth_max(d_fabi_sun, T(0.0)) /
+                                o.fsun_z[p, iv]
+                            o.fabi_sha_z[p, iv] = smooth_max(d_fabi_sha, T(0.0)) /
+                                (T(1.0) - o.fsun_z[p, iv])
+                        end  # iv loop
+                    end  # nlevcan
+                end  # ib == 1
+            end  # !lSFonly
+        end  # ib loop
+    end
 end
 
 # --------------------------------------------------------------------------
@@ -293,11 +1156,11 @@ function two_stream!(surfalb::SurfaceAlbedoData,
                      canopystate::CanopyStateData,
                      temperature::TemperatureData,
                      waterdiagbulk::WaterDiagnosticBulkData,
-                     coszen_patch::Vector{<:Real},
-                     rho_in::Matrix{<:Real},
-                     tau_in::Matrix{<:Real},
-                     pftcon_xl::Vector{<:Real},
-                     mask_vegsol::BitVector,
+                     coszen_patch::AbstractVector{<:Real},
+                     rho_in::AbstractMatrix{<:Real},
+                     tau_in::AbstractMatrix{<:Real},
+                     pftcon_xl::AbstractVector{<:Real},
+                     mask_vegsol::AbstractVector{Bool},
                      bounds_patch::UnitRange{Int};
                      SFonly::Bool = false)
 
@@ -319,365 +1182,59 @@ function two_stream!(surfalb::SurfaceAlbedoData,
     albsod = surfalb.albsod_col
     albsoi = surfalb.albsoi_col
 
-    # Pre-allocate per-patch arrays
     np = length(bounds_patch)
-    FT = eltype(coszen_patch)
-    chil = zeros(FT, np)
-    gdir_arr = zeros(FT, np)
-    twostext = zeros(FT, np)
-    avmu = zeros(FT, np)
-    temp0_arr = zeros(FT, np)
-    temp2_arr = zeros(FT, np)
-    omega = zeros(FT, np, numrad)
+    np == 0 && return nothing
+    T = eltype(coszen_patch)
+
+    # Device-resident per-patch scratch (waveband-independent params + omega),
+    # shared between the two kernels. fill!/similar tracks the working backend.
+    s = _TsScratch(;
+        chil     = fill!(similar(coszen_patch, T, np), zero(T)),
+        gdir     = fill!(similar(coszen_patch, T, np), zero(T)),
+        twostext = fill!(similar(coszen_patch, T, np), zero(T)),
+        avmu     = fill!(similar(coszen_patch, T, np), zero(T)),
+        temp0    = fill!(similar(coszen_patch, T, np), zero(T)),
+        temp2    = fill!(similar(coszen_patch, T, np), zero(T)),
+        omega    = fill!(similar(coszen_patch, T, np, numrad), zero(T)))
+
+    # Module-global single-scattering albedo lookup onto the working backend at
+    # working eltype (no-op identity on CPU Arrays).
+    omegas_dev = coszen_patch isa Array ? OMEGAS :
+        copyto!(similar(coszen_patch, T, length(OMEGAS)), T.(OMEGAS))
+
+    be = _kernel_backend(coszen_patch)
 
     # Calculate two-stream parameters independent of waveband
-    for p in bounds_patch
-        mask_vegsol[p] || continue
+    _ts_params_kernel!(be)(s, mask_vegsol, patchdata.itype, coszen_patch,
+                           pftcon_xl; ndrange = np)
+    KA.synchronize(be)
 
-        cosz = smooth_max(0.001, coszen_patch[p])
+    # Loop over wavebands (internal `for ib` in the per-patch kernel)
+    o = _TsOut(;
+        albd = surfalb.albd_patch, ftid = surfalb.ftid_patch,
+        ftdd = surfalb.ftdd_patch, fabd = surfalb.fabd_patch,
+        albdSF = surfalb.albdSF_patch,
+        fabd_sun = surfalb.fabd_sun_patch, fabd_sha = surfalb.fabd_sha_patch,
+        albi = surfalb.albi_patch, ftii = surfalb.ftii_patch,
+        fabi = surfalb.fabi_patch, albiSF = surfalb.albiSF_patch,
+        fabi_sun = surfalb.fabi_sun_patch, fabi_sha = surfalb.fabi_sha_patch,
+        fsun_z = surfalb.fsun_z_patch,
+        fabd_sun_z = surfalb.fabd_sun_z_patch, fabd_sha_z = surfalb.fabd_sha_z_patch,
+        fabi_sun_z = surfalb.fabi_sun_z_patch, fabi_sha_z = surfalb.fabi_sha_z_patch,
+        vcmaxcintsun = surfalb.vcmaxcintsun_patch,
+        vcmaxcintsha = surfalb.vcmaxcintsha_patch)
+    inb = _TsIn(;
+        column = patchdata.column, nrad = nrad,
+        rho_in = rho_in, tau_in = tau_in,
+        fcansno = fcansno, fwet = fwet, t_veg = t_veg,
+        albgrd = albgrd, albgri = albgri, albsod = albsod, albsoi = albsoi,
+        elai = elai, esai = esai, tlai_z = tlai_z, tsai_z = tsai_z,
+        omegas = omegas_dev)
 
-        chil[p] = smooth_clamp(pftcon_xl[patchdata.itype[p] + 1], -0.4, 0.6)
-        if abs(chil[p]) <= 0.01
-            chil[p] = 0.01
-        end
-        phi1 = 0.5 - 0.633 * chil[p] - 0.330 * chil[p] * chil[p]
-        phi2 = 0.877 * (1.0 - 2.0 * phi1)
-        gdir_arr[p] = phi1 + phi2 * cosz
-        twostext[p] = gdir_arr[p] / cosz
-        avmu[p] = (1.0 - phi1 / phi2 * log((phi1 + phi2) / phi1)) / phi2
-        temp0_arr[p] = smooth_max(gdir_arr[p] + phi2 * cosz, 1.0e-6)
-        temp1_val = phi1 * cosz
-        temp2_arr[p] = (1.0 - temp1_val / temp0_arr[p] * log((temp1_val + temp0_arr[p]) / temp1_val))
-    end
-
-    # Loop over wavebands
-    for ib in 1:numrad
-        for p in bounds_patch
-            mask_vegsol[p] || continue
-            c = patchdata.column[p]
-
-            cosz = smooth_max(0.001, coszen_patch[p])
-
-            # Two-stream parameters omega, betad, betai
-            omegal = rho_in[p, ib] + tau_in[p, ib]
-            asu = 0.5 * omegal * gdir_arr[p] / temp0_arr[p] * temp2_arr[p]
-            betadl = (1.0 + avmu[p] * twostext[p]) / (omegal * avmu[p] * twostext[p]) * asu
-            betail = 0.5 * ((rho_in[p, ib] + tau_in[p, ib]) + (rho_in[p, ib] - tau_in[p, ib]) *
-                     ((1.0 + chil[p]) / 2.0)^2) / omegal
-
-            # Adjust omega, betad, betai for intercepted snow
-            if lSFonly || (!surfalb_con.snowveg_affects_radiation && t_veg[p] > TFRZ)
-                tmp0 = omegal
-                tmp1 = betadl
-                tmp2 = betail
-            else
-                if surfalb_con.snowveg_affects_radiation
-                    tmp0 = (1.0 - fcansno[p]) * omegal + fcansno[p] * OMEGAS[ib]
-                    tmp1 = ((1.0 - fcansno[p]) * omegal * betadl + fcansno[p] * OMEGAS[ib] * BETADS) / tmp0
-                    tmp2 = ((1.0 - fcansno[p]) * omegal * betail + fcansno[p] * OMEGAS[ib] * BETAIS) / tmp0
-                else
-                    tmp0 = (1.0 - fwet[p]) * omegal + fwet[p] * OMEGAS[ib]
-                    tmp1 = ((1.0 - fwet[p]) * omegal * betadl + fwet[p] * OMEGAS[ib] * BETADS) / tmp0
-                    tmp2 = ((1.0 - fwet[p]) * omegal * betail + fwet[p] * OMEGAS[ib] * BETAIS) / tmp0
-                end
-            end
-
-            omega[p, ib] = tmp0
-            betad = tmp1
-            betai = tmp2
-
-            # Common terms
-            b = 1.0 - omega[p, ib] + omega[p, ib] * betai
-            c1 = omega[p, ib] * betai
-            tmp0_val = avmu[p] * twostext[p]
-            d = tmp0_val * omega[p, ib] * betad
-            f = tmp0_val * omega[p, ib] * (1.0 - betad)
-            tmp1_val = b * b - c1 * c1
-            h = sqrt(tmp1_val) / avmu[p]
-            sigma = tmp0_val * tmp0_val - tmp1_val
-
-            p1 = b + avmu[p] * h
-            p2 = b - avmu[p] * h
-            p3 = b + tmp0_val
-            p4 = b - tmp0_val
-
-            # Absorbed, reflected, transmitted fluxes for full canopy
-            t1 = smooth_min(h * (elai[p] + esai[p]), 40.0)
-            s1 = exp(-t1)
-            t1 = smooth_min(twostext[p] * (elai[p] + esai[p]), 40.0)
-            s2 = exp(-t1)
-
-            # ---- Direct beam ----
-            if !lSFonly
-                u1 = b - c1 / albgrd[c, ib]
-                u2 = b - c1 * albgrd[c, ib]
-                u3 = f + c1 * albgrd[c, ib]
-            else
-                u1 = b - c1 / albsod[c, ib]
-                u2 = b - c1 * albsod[c, ib]
-                u3 = f + c1 * albsod[c, ib]
-            end
-            tmp2_val = u1 - avmu[p] * h
-            tmp3 = u1 + avmu[p] * h
-            d1 = p1 * tmp2_val / s1 - p2 * tmp3 * s1
-            tmp4 = u2 + avmu[p] * h
-            tmp5 = u2 - avmu[p] * h
-            d2 = tmp4 / s1 - tmp5 * s1
-            h1 = -d * p4 - c1 * f
-            tmp6 = d - h1 * p3 / sigma
-            tmp7 = (d - c1 - h1 / sigma * (u1 + tmp0_val)) * s2
-            h2 = (tmp6 * tmp2_val / s1 - p2 * tmp7) / d1
-            h3 = -(tmp6 * tmp3 * s1 - p1 * tmp7) / d1
-            h4 = -f * p3 - c1 * d
-            tmp8 = h4 / sigma
-            tmp9 = (u3 - tmp8 * (u2 - tmp0_val)) * s2
-            h5 = -(tmp8 * tmp4 / s1 + tmp9) / d2
-            h6 = (tmp8 * tmp5 * s1 + tmp9) / d2
-
-            if !lSFonly
-                surfalb.albd_patch[p, ib] = h1 / sigma + h2 + h3
-                surfalb.ftid_patch[p, ib] = h4 * s2 / sigma + h5 * s1 + h6 / s1
-                surfalb.ftdd_patch[p, ib] = s2
-                surfalb.fabd_patch[p, ib] = 1.0 - surfalb.albd_patch[p, ib] -
-                    (1.0 - albgrd[c, ib]) * surfalb.ftdd_patch[p, ib] -
-                    (1.0 - albgri[c, ib]) * surfalb.ftid_patch[p, ib]
-            else
-                surfalb.albdSF_patch[p, ib] = h1 / sigma + h2 + h3
-            end
-
-            a1 = h1 / sigma * (1.0 - s2 * s2) / (2.0 * twostext[p]) +
-                 h2 * (1.0 - s2 * s1) / (twostext[p] + h) +
-                 h3 * (1.0 - s2 / s1) / (twostext[p] - h)
-
-            a2 = h4 / sigma * (1.0 - s2 * s2) / (2.0 * twostext[p]) +
-                 h5 * (1.0 - s2 * s1) / (twostext[p] + h) +
-                 h6 * (1.0 - s2 / s1) / (twostext[p] - h)
-
-            if !lSFonly
-                surfalb.fabd_sun_patch[p, ib] = (1.0 - omega[p, ib]) *
-                    (1.0 - s2 + 1.0 / avmu[p] * (a1 + a2))
-                surfalb.fabd_sha_patch[p, ib] = surfalb.fabd_patch[p, ib] -
-                    surfalb.fabd_sun_patch[p, ib]
-            end
-
-            # ---- Diffuse ----
-            if !lSFonly
-                u1 = b - c1 / albgri[c, ib]
-                u2 = b - c1 * albgri[c, ib]
-            else
-                u1 = b - c1 / albsoi[c, ib]
-                u2 = b - c1 * albsoi[c, ib]
-            end
-            tmp2_val = u1 - avmu[p] * h
-            tmp3 = u1 + avmu[p] * h
-            d1 = p1 * tmp2_val / s1 - p2 * tmp3 * s1
-            tmp4 = u2 + avmu[p] * h
-            tmp5 = u2 - avmu[p] * h
-            d2 = tmp4 / s1 - tmp5 * s1
-            h7 = (c1 * tmp2_val) / (d1 * s1)
-            h8 = (-c1 * tmp3 * s1) / d1
-            h9 = tmp4 / (d2 * s1)
-            h10 = (-tmp5 * s1) / d2
-
-            if lSFonly
-                surfalb.albiSF_patch[p, ib] = h7 + h8
-            else
-                surfalb.albi_patch[p, ib] = h7 + h8
-                surfalb.ftii_patch[p, ib] = h9 * s1 + h10 / s1
-                surfalb.fabi_patch[p, ib] = 1.0 - surfalb.albi_patch[p, ib] -
-                    (1.0 - albgri[c, ib]) * surfalb.ftii_patch[p, ib]
-
-                a1 = h7 * (1.0 - s2 * s1) / (twostext[p] + h) +
-                     h8 * (1.0 - s2 / s1) / (twostext[p] - h)
-                a2 = h9 * (1.0 - s2 * s1) / (twostext[p] + h) +
-                     h10 * (1.0 - s2 / s1) / (twostext[p] - h)
-
-                surfalb.fabi_sun_patch[p, ib] = (1.0 - omega[p, ib]) / avmu[p] * (a1 + a2)
-                surfalb.fabi_sha_patch[p, ib] = surfalb.fabi_patch[p, ib] -
-                    surfalb.fabi_sun_patch[p, ib]
-
-                # Per-layer derivatives for PAR (ib == 1)
-                if ib == 1
-                    if nlevcan == 1
-                        # Sun/shade big leaf: single layer
-                        fsun_z = surfalb.fsun_z_patch
-                        fsun_z[p, 1] = (1.0 - s2) / t1
-
-                        laisum = elai[p] + esai[p]
-                        surfalb.fabd_sun_z_patch[p, 1] = surfalb.fabd_sun_patch[p, ib] /
-                            (fsun_z[p, 1] * laisum)
-                        surfalb.fabi_sun_z_patch[p, 1] = surfalb.fabi_sun_patch[p, ib] /
-                            (fsun_z[p, 1] * laisum)
-                        surfalb.fabd_sha_z_patch[p, 1] = surfalb.fabd_sha_patch[p, ib] /
-                            ((1.0 - fsun_z[p, 1]) * laisum)
-                        surfalb.fabi_sha_z_patch[p, 1] = surfalb.fabi_sha_patch[p, ib] /
-                            ((1.0 - fsun_z[p, 1]) * laisum)
-
-                        # Leaf to canopy scaling coefficients
-                        extkn = 0.30
-                        extkb = twostext[p]
-                        surfalb.vcmaxcintsun_patch[p] = (1.0 - exp(-(extkn + extkb) * elai[p])) /
-                            (extkn + extkb)
-                        surfalb.vcmaxcintsha_patch[p] = (1.0 - exp(-extkn * elai[p])) / extkn -
-                            surfalb.vcmaxcintsun_patch[p]
-                        if elai[p] > 0.0
-                            surfalb.vcmaxcintsun_patch[p] /= (fsun_z[p, 1] * elai[p])
-                            surfalb.vcmaxcintsha_patch[p] /= ((1.0 - fsun_z[p, 1]) * elai[p])
-                        else
-                            surfalb.vcmaxcintsun_patch[p] = 0.0
-                            surfalb.vcmaxcintsha_patch[p] = 0.0
-                        end
-
-                    elseif nlevcan > 1
-                        # Multi-layer canopy
-                        for iv in 1:nrad[p]
-                            # Cumulative lai+sai at center of layer
-                            if iv == 1
-                                laisum_l = 0.5 * (tlai_z[p, iv] + tsai_z[p, iv])
-                            else
-                                laisum_l = laisum_l + 0.5 * ((tlai_z[p, iv-1] + tsai_z[p, iv-1]) +
-                                    (tlai_z[p, iv] + tsai_z[p, iv]))
-                            end
-
-                            t1_l = smooth_min(h * laisum_l, 40.0)
-                            s1_l = exp(-t1_l)
-                            t1_l = smooth_min(twostext[p] * laisum_l, 40.0)
-                            s2_l = exp(-t1_l)
-                            surfalb.fsun_z_patch[p, iv] = s2_l
-
-                            # ---- Direct beam derivatives ----
-                            u1_l = b - c1 / albgrd[c, ib]
-                            u2_l = b - c1 * albgrd[c, ib]
-                            u3_l = f + c1 * albgrd[c, ib]
-
-                            tmp2_l = u1_l - avmu[p] * h
-                            tmp3_l = u1_l + avmu[p] * h
-                            d1_l = p1 * tmp2_l / s1_l - p2 * tmp3_l * s1_l
-                            tmp4_l = u2_l + avmu[p] * h
-                            tmp5_l = u2_l - avmu[p] * h
-                            d2_l = tmp4_l / s1_l - tmp5_l * s1_l
-
-                            h1_l = -d * p4 - c1 * f
-                            tmp6_l = d - h1_l * p3 / sigma
-                            tmp7_l = (d - c1 - h1_l / sigma * (u1_l + tmp0_val)) * s2_l
-
-                            h2_l = (tmp6_l * tmp2_l / s1_l - p2 * tmp7_l) / d1_l
-                            h3_l = -(tmp6_l * tmp3_l * s1_l - p1 * tmp7_l) / d1_l
-
-                            h4_l = -f * p3 - c1 * d
-                            tmp8_l = h4_l / sigma
-                            tmp9_l = (u3_l - tmp8_l * (u2_l - tmp0_val)) * s2_l
-                            h5_l = -(tmp8_l * tmp4_l / s1_l + tmp9_l) / d2_l
-                            h6_l = (tmp8_l * tmp5_l * s1_l + tmp9_l) / d2_l
-
-                            # Derivatives
-                            v_val = d1_l
-                            dv = h * p1 * tmp2_l / s1_l + h * p2 * tmp3_l * s1_l
-
-                            u_val = tmp6_l * tmp2_l / s1_l - p2 * tmp7_l
-                            du = h * tmp6_l * tmp2_l / s1_l + twostext[p] * p2 * tmp7_l
-                            dh2 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            u_val = -tmp6_l * tmp3_l * s1_l + p1 * tmp7_l
-                            du = h * tmp6_l * tmp3_l * s1_l - twostext[p] * p1 * tmp7_l
-                            dh3 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            v_val = d2_l
-                            dv = h * tmp4_l / s1_l + h * tmp5_l * s1_l
-
-                            u_val = -h4_l / sigma * tmp4_l / s1_l - tmp9_l
-                            du = -h * h4_l / sigma * tmp4_l / s1_l + twostext[p] * tmp9_l
-                            dh5 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            u_val = h4_l / sigma * tmp5_l * s1_l + tmp9_l
-                            du = -h * h4_l / sigma * tmp5_l * s1_l - twostext[p] * tmp9_l
-                            dh6 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            da1 = h1_l / sigma * s2_l * s2_l + h2_l * s2_l * s1_l + h3_l * s2_l / s1_l +
-                                  (1.0 - s2_l * s1_l) / (twostext[p] + h) * dh2 +
-                                  (1.0 - s2_l / s1_l) / (twostext[p] - h) * dh3
-                            da2 = h4_l / sigma * s2_l * s2_l + h5_l * s2_l * s1_l + h6_l * s2_l / s1_l +
-                                  (1.0 - s2_l * s1_l) / (twostext[p] + h) * dh5 +
-                                  (1.0 - s2_l / s1_l) / (twostext[p] - h) * dh6
-
-                            d_ftid = -twostext[p] * h4_l / sigma * s2_l - h * h5_l * s1_l + h * h6_l / s1_l +
-                                     dh5 * s1_l + dh6 / s1_l
-                            d_fabd = -(dh2 + dh3) + (1.0 - albgrd[c, ib]) * twostext[p] * s2_l -
-                                     (1.0 - albgri[c, ib]) * d_ftid
-                            d_fabd_sun = (1.0 - omega[p, ib]) *
-                                (twostext[p] * s2_l + 1.0 / avmu[p] * (da1 + da2))
-                            d_fabd_sha = d_fabd - d_fabd_sun
-
-                            surfalb.fabd_sun_z_patch[p, iv] = smooth_max(d_fabd_sun, 0.0) /
-                                surfalb.fsun_z_patch[p, iv]
-                            surfalb.fabd_sha_z_patch[p, iv] = smooth_max(d_fabd_sha, 0.0) /
-                                (1.0 - surfalb.fsun_z_patch[p, iv])
-
-                            # ---- Diffuse derivatives ----
-                            u1_l = b - c1 / albgri[c, ib]
-                            u2_l = b - c1 * albgri[c, ib]
-
-                            tmp2_l = u1_l - avmu[p] * h
-                            tmp3_l = u1_l + avmu[p] * h
-                            d1_l = p1 * tmp2_l / s1_l - p2 * tmp3_l * s1_l
-                            tmp4_l = u2_l + avmu[p] * h
-                            tmp5_l = u2_l - avmu[p] * h
-                            d2_l = tmp4_l / s1_l - tmp5_l * s1_l
-
-                            h7_l = (c1 * tmp2_l) / (d1_l * s1_l)
-                            h8_l = (-c1 * tmp3_l * s1_l) / d1_l
-                            h9_l = tmp4_l / (d2_l * s1_l)
-                            h10_l = (-tmp5_l * s1_l) / d2_l
-
-                            a1_l = h7_l * (1.0 - s2_l * s1_l) / (twostext[p] + h) +
-                                   h8_l * (1.0 - s2_l / s1_l) / (twostext[p] - h)
-                            a2_l = h9_l * (1.0 - s2_l * s1_l) / (twostext[p] + h) +
-                                   h10_l * (1.0 - s2_l / s1_l) / (twostext[p] - h)
-
-                            v_val = d1_l
-                            dv = h * p1 * tmp2_l / s1_l + h * p2 * tmp3_l * s1_l
-
-                            u_val = c1 * tmp2_l / s1_l
-                            du = h * c1 * tmp2_l / s1_l
-                            dh7 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            u_val = -c1 * tmp3_l * s1_l
-                            du = h * c1 * tmp3_l * s1_l
-                            dh8 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            v_val = d2_l
-                            dv = h * tmp4_l / s1_l + h * tmp5_l * s1_l
-
-                            u_val = tmp4_l / s1_l
-                            du = h * tmp4_l / s1_l
-                            dh9 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            u_val = -tmp5_l * s1_l
-                            du = h * tmp5_l * s1_l
-                            dh10 = (v_val * du - u_val * dv) / (v_val * v_val)
-
-                            da1 = h7_l * s2_l * s1_l + h8_l * s2_l / s1_l +
-                                  (1.0 - s2_l * s1_l) / (twostext[p] + h) * dh7 +
-                                  (1.0 - s2_l / s1_l) / (twostext[p] - h) * dh8
-                            da2 = h9_l * s2_l * s1_l + h10_l * s2_l / s1_l +
-                                  (1.0 - s2_l * s1_l) / (twostext[p] + h) * dh9 +
-                                  (1.0 - s2_l / s1_l) / (twostext[p] - h) * dh10
-
-                            d_ftii = -h * h9_l * s1_l + h * h10_l / s1_l + dh9 * s1_l + dh10 / s1_l
-                            d_fabi = -(dh7 + dh8) - (1.0 - albgri[c, ib]) * d_ftii
-                            d_fabi_sun = (1.0 - omega[p, ib]) / avmu[p] * (da1 + da2)
-                            d_fabi_sha = d_fabi - d_fabi_sun
-
-                            surfalb.fabi_sun_z_patch[p, iv] = smooth_max(d_fabi_sun, 0.0) /
-                                surfalb.fsun_z_patch[p, iv]
-                            surfalb.fabi_sha_z_patch[p, iv] = smooth_max(d_fabi_sha, 0.0) /
-                                (1.0 - surfalb.fsun_z_patch[p, iv])
-                        end  # iv loop
-                    end  # nlevcan
-                end  # ib == 1
-            end  # !lSFonly
-        end  # patch loop
-    end  # waveband loop
+    _ts_waveband_kernel!(be)(o, inb, s, mask_vegsol, coszen_patch, numrad,
+                             nlevcan, lSFonly, surfalb_con.snowveg_affects_radiation,
+                             T(BETADS), T(BETAIS), T(TFRZ); ndrange = np)
+    KA.synchronize(be)
 
     return nothing
 end
@@ -718,18 +1275,18 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                          waterdiagbulk::WaterDiagnosticBulkData,
                          lakestate::LakeStateData,
                          aerosol::AerosolData,
-                         mask_nourbanc::BitVector,
-                         mask_nourbanp::BitVector,
+                         mask_nourbanc::AbstractVector{Bool},
+                         mask_nourbanp::AbstractVector{Bool},
                          nextsw_cday::Real,
                          declinp1::Real,
                          bounds_grc::UnitRange{Int},
                          bounds_col::UnitRange{Int},
                          bounds_patch::UnitRange{Int},
-                         pftcon_rhol::Matrix{<:Real},
-                         pftcon_rhos::Matrix{<:Real},
-                         pftcon_taul::Matrix{<:Real},
-                         pftcon_taus::Matrix{<:Real},
-                         pftcon_xl::Vector{<:Real},
+                         pftcon_rhol::AbstractMatrix{<:Real},
+                         pftcon_rhos::AbstractMatrix{<:Real},
+                         pftcon_taul::AbstractMatrix{<:Real},
+                         pftcon_taus::AbstractMatrix{<:Real},
+                         pftcon_xl::AbstractVector{<:Real},
                          coszen_func::Function;
                          use_SSRE::Bool = false,
                          use_snicar_frc::Bool = false,
@@ -765,12 +1322,19 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     fsun_z = surfalb.fsun_z_patch
 
     # --- Cosine solar zenith angle ---
-    for g in bounds_grc
-        coszen_grc[g] = coszen_func(nextsw_cday, grc.lat[g], grc.lon[g], declinp1)
+    # coszen_func is a host closure (not GPU-safe). Evaluate it on the HOST over
+    # Array copies of lat/lon (only ng elements), then copy the result into the
+    # (possibly device-resident) coszen_grc. Byte-identical to the scalar loop.
+    let lat_h = Array(grc.lat), lon_h = Array(grc.lon),
+        coszen_grc_h = Array(coszen_grc)
+        for g in bounds_grc
+            coszen_grc_h[g] = coszen_func(nextsw_cday, lat_h[g], lon_h[g], declinp1)
+        end
+        copyto!(coszen_grc, coszen_grc_h)
     end
 
     FT = eltype(coszen_col_arr)
-    coszen_patch_arr = zeros(FT, length(bounds_patch))
+    coszen_patch_arr = fill!(similar(coszen_col_arr, FT, length(bounds_patch)), zero(FT))
 
     # Hillslope downscaling branch is currently a no-op (both branches identical),
     # so coszen_col[c] = coszen_grc[gridcell[c]] unconditionally.
@@ -779,58 +1343,41 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     surfalb_coszen_patch!(coszen_patch_arr, mask_nourbanp, patchdata.column, coszen_col_arr)
 
     # --- Initialize output ---
-    for ib in 1:numrad
-        for c in bounds_col
-            mask_nourbanc[c] || continue
-            albsod[c, ib] = 0.0
-            albsoi[c, ib] = 0.0
-            albgrd[c, ib] = 0.0
-            albgri[c, ib] = 0.0
-            surfalb.albgrd_pur_col[c, ib] = 0.0
-            surfalb.albgri_pur_col[c, ib] = 0.0
-            surfalb.albgrd_bc_col[c, ib] = 0.0
-            surfalb.albgri_bc_col[c, ib] = 0.0
-            surfalb.albgrd_oc_col[c, ib] = 0.0
-            surfalb.albgri_oc_col[c, ib] = 0.0
-            surfalb.albgrd_dst_col[c, ib] = 0.0
-            surfalb.albgri_dst_col[c, ib] = 0.0
-            surfalb.albgrd_hst_col[c, ib] = SPVAL
-            surfalb.albgri_hst_col[c, ib] = SPVAL
-            surfalb.albgrd_pur_hst_col[c, ib] = SPVAL
-            surfalb.albgri_pur_hst_col[c, ib] = SPVAL
-            surfalb.albgrd_bc_hst_col[c, ib] = SPVAL
-            surfalb.albgri_bc_hst_col[c, ib] = SPVAL
-            surfalb.albgrd_oc_hst_col[c, ib] = SPVAL
-            surfalb.albgri_oc_hst_col[c, ib] = SPVAL
-            surfalb.albgrd_dst_hst_col[c, ib] = SPVAL
-            surfalb.albgri_dst_hst_col[c, ib] = SPVAL
-            surfalb.albsnd_hst2_col[c, ib] = SPVAL
-            surfalb.albsni_hst2_col[c, ib] = SPVAL
-            surfalb.flx_absdv_col[c, :] .= 0.0
-            surfalb.flx_absdn_col[c, :] .= 0.0
-            surfalb.flx_absiv_col[c, :] .= 0.0
-            surfalb.flx_absin_col[c, :] .= 0.0
+    let initcol = _SaInitColOut(;
+            albsod = albsod, albsoi = albsoi, albgrd = albgrd, albgri = albgri,
+            albgrd_pur = surfalb.albgrd_pur_col, albgri_pur = surfalb.albgri_pur_col,
+            albgrd_bc = surfalb.albgrd_bc_col, albgri_bc = surfalb.albgri_bc_col,
+            albgrd_oc = surfalb.albgrd_oc_col, albgri_oc = surfalb.albgri_oc_col,
+            albgrd_dst = surfalb.albgrd_dst_col, albgri_dst = surfalb.albgri_dst_col,
+            albgrd_hst = surfalb.albgrd_hst_col, albgri_hst = surfalb.albgri_hst_col,
+            albgrd_pur_hst = surfalb.albgrd_pur_hst_col, albgri_pur_hst = surfalb.albgri_pur_hst_col,
+            albgrd_bc_hst = surfalb.albgrd_bc_hst_col, albgri_bc_hst = surfalb.albgri_bc_hst_col,
+            albgrd_oc_hst = surfalb.albgrd_oc_hst_col, albgri_oc_hst = surfalb.albgri_oc_hst_col,
+            albgrd_dst_hst = surfalb.albgrd_dst_hst_col, albgri_dst_hst = surfalb.albgri_dst_hst_col,
+            albsnd_hst2 = surfalb.albsnd_hst2_col, albsni_hst2 = surfalb.albsni_hst2_col,
+            flx_absdv = surfalb.flx_absdv_col, flx_absdn = surfalb.flx_absdn_col,
+            flx_absiv = surfalb.flx_absiv_col, flx_absin = surfalb.flx_absin_col)
+        be = _kernel_backend(albsod)
+        nflx = size(surfalb.flx_absdv_col, 2)
+        if length(bounds_col) * numrad != 0
+            _sa_init_col_kernel!(be)(initcol, mask_nourbanc, nflx;
+                                     ndrange = (length(bounds_col), numrad))
+            KA.synchronize(be)
         end
+    end
 
-        for p in bounds_patch
-            mask_nourbanp[p] || continue
-            albd[p, ib] = 1.0
-            albi[p, ib] = 1.0
-            surfalb.albd_hst_patch[p, ib] = SPVAL
-            surfalb.albi_hst_patch[p, ib] = SPVAL
-            if use_SSRE
-                surfalb.albdSF_patch[p, ib] = 1.0
-                surfalb.albiSF_patch[p, ib] = 1.0
-            end
-            surfalb.fabd_patch[p, ib] = 0.0
-            surfalb.fabd_sun_patch[p, ib] = 0.0
-            surfalb.fabd_sha_patch[p, ib] = 0.0
-            surfalb.fabi_patch[p, ib] = 0.0
-            surfalb.fabi_sun_patch[p, ib] = 0.0
-            surfalb.fabi_sha_patch[p, ib] = 0.0
-            surfalb.ftdd_patch[p, ib] = 0.0
-            surfalb.ftid_patch[p, ib] = 0.0
-            surfalb.ftii_patch[p, ib] = 0.0
+    let initpch = _SaInitPatchOut(;
+            albd = albd, albi = albi,
+            albd_hst = surfalb.albd_hst_patch, albi_hst = surfalb.albi_hst_patch,
+            albdSF = surfalb.albdSF_patch, albiSF = surfalb.albiSF_patch,
+            fabd = surfalb.fabd_patch, fabd_sun = surfalb.fabd_sun_patch, fabd_sha = surfalb.fabd_sha_patch,
+            fabi = surfalb.fabi_patch, fabi_sun = surfalb.fabi_sun_patch, fabi_sha = surfalb.fabi_sha_patch,
+            ftdd = surfalb.ftdd_patch, ftid = surfalb.ftid_patch, ftii = surfalb.ftii_patch)
+        be = _kernel_backend(albd)
+        if length(bounds_patch) * numrad != 0
+            _sa_init_patch_kernel!(be)(initpch, mask_nourbanp, use_SSRE;
+                                       ndrange = (length(bounds_patch), numrad))
+            KA.synchronize(be)
         end
     end
 
@@ -847,296 +1394,230 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     use_snicar = length(snicar_optics.ext_cff_mss_snw_drc) > 0 &&
                  any(x -> x != 0.0, @view snicar_optics.ext_cff_mss_snw_drc[1:min(10, end), 1:min(1, end)])
 
-    # Prepare SNICAR input arrays
-    h2osno_liq_snw = zeros(FT, nc, nlevsno_val)
-    h2osno_ice_snw = zeros(FT, nc, nlevsno_val)
-    h2osno_total_arr = zeros(FT, nc)
-    snw_rds_int = fill(round(Int, snicar_params.snw_rds_min), nc, nlevsno_val)
-    mss_cnc_aer = zeros(FT, nc, nlevsno_val, SNO_NBR_AER)
-    albsfc_snw = zeros(FT, nc, numrad)
-
-    # Compute total h2osno using the proper method (includes h2osno_no_layers_col)
+    # Total snow water content (kernelized; device-resident so downstream kernels
+    # can read it).
+    h2osno_total_arr = fill!(similar(coszen_col_arr, FT, nc), zero(FT))
     waterstate_calculate_total_h2osno!(waterstatebulk.ws, mask_nourbanc,
                                         bounds_col, col.snl, h2osno_total_arr)
 
-    for c in bounds_col
-        mask_nourbanc[c] || continue
-        # Snow layer water content (first nlevsno slots are snow layers)
-        for j in 1:nlevsno_val
-            h2osno_liq_snw[c, j] = smooth_max(0.0, waterstatebulk.ws.h2osoi_liq_col[c, j])
-            h2osno_ice_snw[c, j] = smooth_max(0.0, waterstatebulk.ws.h2osoi_ice_col[c, j])
-        end
-        # Snow grain radius (Float64 → Int, microns)
-        for j in 1:nlevsno_val
-            rds = waterdiagbulk.snw_rds_col[c, j]
-            if !isnan(rds) && rds > 0.0
-                snw_rds_int[c, j] = round(Int, clamp(rds, SNW_RDS_MIN_TBL, SNW_RDS_MAX_TBL))
-            end
-        end
-        # Aerosol mass concentrations (8 species: bcphi, bcpho, ocphi, ocpho, dst1-4)
-        if size(aerosol.mss_cnc_bcphi_col, 1) >= c
-            for j in 1:nlevsno_val
-                mss_cnc_aer[c, j, 1] = aerosol.mss_cnc_bcphi_col[c, j]
-                mss_cnc_aer[c, j, 2] = aerosol.mss_cnc_bcpho_col[c, j]
-                mss_cnc_aer[c, j, 3] = aerosol.mss_cnc_ocphi_col[c, j]
-                mss_cnc_aer[c, j, 4] = aerosol.mss_cnc_ocpho_col[c, j]
-                mss_cnc_aer[c, j, 5] = aerosol.mss_cnc_dst1_col[c, j]
-                mss_cnc_aer[c, j, 6] = aerosol.mss_cnc_dst2_col[c, j]
-                mss_cnc_aer[c, j, 7] = aerosol.mss_cnc_dst3_col[c, j]
-                mss_cnc_aer[c, j, 8] = aerosol.mss_cnc_dst4_col[c, j]
-            end
-        end
-        # Underlying surface albedo (diffuse soil albedo)
-        for ib in 1:numrad
-            albsfc_snw[c, ib] = albsoi[c, ib]
-        end
-    end
-
-    # Output arrays
-    albsnd = zeros(FT, nc, numrad)
-    albsni = zeros(FT, nc, numrad)
-    flx_absd_snw = zeros(FT, nc, nlevsno_val + 1, numrad)
-    flx_absi_snw = zeros(FT, nc, nlevsno_val + 1, numrad)
+    # Snow albedo / flux-absorption outputs — device-resident (consumed by the
+    # ground-albedo, flux-map and history kernels below).
+    albsnd = fill!(similar(coszen_col_arr, FT, nc, numrad), zero(FT))
+    albsni = fill!(similar(coszen_col_arr, FT, nc, numrad), zero(FT))
+    flx_absd_snw = fill!(similar(coszen_col_arr, FT, nc, nlevsno_val + 1, numrad), zero(FT))
+    flx_absi_snw = fill!(similar(coszen_col_arr, FT, nc, nlevsno_val + 1, numrad), zero(FT))
 
     if use_snicar
+        # snicar_rt! is a HOST-only solver (concrete Vector/Matrix{Int} signature
+        # with internal scalar loops + lookup-table interpolation — not kernelizable
+        # without a large separate effort). Per the host-fallback convention: build
+        # its inputs on the HOST from Array() copies of the device state, run it on
+        # host scratch outputs, then copy the results back into the device-resident
+        # albsnd/albsni/flx_*_snw. Byte-identical on CPU (Array() of a CPU Array is
+        # a no-op / view).
+        h2osno_liq_snw = zeros(FT, nc, nlevsno_val)
+        h2osno_ice_snw = zeros(FT, nc, nlevsno_val)
+        snw_rds_int = fill(round(Int, snicar_params.snw_rds_min), nc, nlevsno_val)
+        mss_cnc_aer = zeros(FT, nc, nlevsno_val, SNO_NBR_AER)
+        albsfc_snw = zeros(FT, nc, numrad)
+
+        mask_h = Array(mask_nourbanc)
+        h2osoi_liq_h = Array(waterstatebulk.ws.h2osoi_liq_col)
+        h2osoi_ice_h = Array(waterstatebulk.ws.h2osoi_ice_col)
+        snw_rds_h = Array(waterdiagbulk.snw_rds_col)
+        albsoi_h = Array(albsoi)
+        aer_avail = size(aerosol.mss_cnc_bcphi_col, 1)
+        bcphi_h = Array(aerosol.mss_cnc_bcphi_col); bcpho_h = Array(aerosol.mss_cnc_bcpho_col)
+        ocphi_h = Array(aerosol.mss_cnc_ocphi_col); ocpho_h = Array(aerosol.mss_cnc_ocpho_col)
+        dst1_h = Array(aerosol.mss_cnc_dst1_col); dst2_h = Array(aerosol.mss_cnc_dst2_col)
+        dst3_h = Array(aerosol.mss_cnc_dst3_col); dst4_h = Array(aerosol.mss_cnc_dst4_col)
+
+        for c in bounds_col
+            mask_h[c] || continue
+            # Snow layer water content (first nlevsno slots are snow layers)
+            for j in 1:nlevsno_val
+                h2osno_liq_snw[c, j] = smooth_max(0.0, h2osoi_liq_h[c, j])
+                h2osno_ice_snw[c, j] = smooth_max(0.0, h2osoi_ice_h[c, j])
+            end
+            # Snow grain radius (Float64 → Int, microns)
+            for j in 1:nlevsno_val
+                rds = snw_rds_h[c, j]
+                if !isnan(rds) && rds > 0.0
+                    snw_rds_int[c, j] = round(Int, clamp(rds, SNW_RDS_MIN_TBL, SNW_RDS_MAX_TBL))
+                end
+            end
+            # Aerosol mass concentrations (8 species: bcphi, bcpho, ocphi, ocpho, dst1-4)
+            if aer_avail >= c
+                for j in 1:nlevsno_val
+                    mss_cnc_aer[c, j, 1] = bcphi_h[c, j]
+                    mss_cnc_aer[c, j, 2] = bcpho_h[c, j]
+                    mss_cnc_aer[c, j, 3] = ocphi_h[c, j]
+                    mss_cnc_aer[c, j, 4] = ocpho_h[c, j]
+                    mss_cnc_aer[c, j, 5] = dst1_h[c, j]
+                    mss_cnc_aer[c, j, 6] = dst2_h[c, j]
+                    mss_cnc_aer[c, j, 7] = dst3_h[c, j]
+                    mss_cnc_aer[c, j, 8] = dst4_h[c, j]
+                end
+            end
+            # Underlying surface albedo (diffuse soil albedo)
+            for ib in 1:numrad
+                albsfc_snw[c, ib] = albsoi_h[c, ib]
+            end
+        end
+
+        coszen_h = Array(coszen_col_arr)
+        h2osno_total_h = Array(h2osno_total_arr)
+        snl_h = Array(col.snl)
+        frac_sno_h = Array(frac_sno)
+        mask_bv = mask_h isa BitVector ? mask_h : BitVector(mask_h)
+
+        albsnd_h = zeros(FT, nc, numrad)
+        albsni_h = zeros(FT, nc, numrad)
+        flx_absd_h = zeros(FT, nc, nlevsno_val + 1, numrad)
+        flx_absi_h = zeros(FT, nc, nlevsno_val + 1, numrad)
+
         # Call SNICAR_RT for direct beam (flg_slr=1)
-        snicar_rt!(coszen_col_arr, 1,
-                   h2osno_liq_snw, h2osno_ice_snw, h2osno_total_arr,
+        snicar_rt!(coszen_h, 1,
+                   h2osno_liq_snw, h2osno_ice_snw, h2osno_total_h,
                    snw_rds_int, mss_cnc_aer, albsfc_snw,
-                   col.snl, frac_sno,
-                   albsnd, flx_absd_snw, nlevsno_val;
-                   mask_nourbanc=mask_nourbanc)
+                   snl_h, frac_sno_h,
+                   albsnd_h, flx_absd_h, nlevsno_val;
+                   mask_nourbanc=mask_bv)
 
         # Call SNICAR_RT for diffuse (flg_slr=2)
-        snicar_rt!(coszen_col_arr, 2,
-                   h2osno_liq_snw, h2osno_ice_snw, h2osno_total_arr,
+        snicar_rt!(coszen_h, 2,
+                   h2osno_liq_snw, h2osno_ice_snw, h2osno_total_h,
                    snw_rds_int, mss_cnc_aer, albsfc_snw,
-                   col.snl, frac_sno,
-                   albsni, flx_absi_snw, nlevsno_val;
-                   mask_nourbanc=mask_nourbanc)
+                   snl_h, frac_sno_h,
+                   albsni_h, flx_absi_h, nlevsno_val;
+                   mask_nourbanc=mask_bv)
+
+        copyto!(albsnd, albsnd_h)
+        copyto!(albsni, albsni_h)
+        copyto!(flx_absd_snw, flx_absd_h)
+        copyto!(flx_absi_snw, flx_absi_h)
     else
         # Fallback: age-based snow albedo (used when SNICAR optics not loaded)
         snow_persist = waterstatebulk.snow_persistence_col
-        for c in bounds_col
-            mask_nourbanc[c] || continue
-            if coszen_col_arr[c] > 0.0 && frac_sno[c] > 0.0
-                age_days = c <= length(snow_persist) ? snow_persist[c] / 86400.0 : 0.0
-                fage = 1.0 - exp(-age_days / 5.0)
-                albsnd[c, 1] = clamp(0.95 * (1.0 - 0.15 * fage), 0.1, 0.99)
-                albsni[c, 1] = clamp(0.95 * (1.0 - 0.15 * fage), 0.1, 0.99)
-                albsnd[c, 2] = clamp(0.65 * (1.0 - 0.50 * fage), 0.1, 0.99)
-                albsni[c, 2] = clamp(0.65 * (1.0 - 0.50 * fage), 0.1, 0.99)
-            end
-        end
+        _launch!(_sa_snow_fallback_kernel!, albsnd, albsni, mask_nourbanc,
+                 coszen_col_arr, frac_sno, snow_persist, length(snow_persist);
+                 ndrange = nc)
     end
 
     # --- Ground albedos (snow-fraction weighting) ---
-    for ib in 1:numrad
-        for c in bounds_col
-            mask_nourbanc[c] || continue
-            if coszen_col_arr[c] > 0.0
-                albgrd[c, ib] = albsod[c, ib] * (1.0 - frac_sno[c]) + albsnd[c, ib] * frac_sno[c]
-                albgri[c, ib] = albsoi[c, ib] * (1.0 - frac_sno[c]) + albsni[c, ib] * frac_sno[c]
-
-                if use_snicar_frc
-                    surfalb.albgrd_bc_col[c, ib] = albsod[c, ib] * (1.0 - frac_sno[c])
-                    surfalb.albgri_bc_col[c, ib] = albsoi[c, ib] * (1.0 - frac_sno[c])
-                    surfalb.albgrd_dst_col[c, ib] = albsod[c, ib] * (1.0 - frac_sno[c])
-                    surfalb.albgri_dst_col[c, ib] = albsoi[c, ib] * (1.0 - frac_sno[c])
-                    surfalb.albgrd_pur_col[c, ib] = albsod[c, ib] * (1.0 - frac_sno[c])
-                    surfalb.albgri_pur_col[c, ib] = albsoi[c, ib] * (1.0 - frac_sno[c])
-                    if do_sno_oc
-                        surfalb.albgrd_oc_col[c, ib] = albsod[c, ib] * (1.0 - frac_sno[c])
-                        surfalb.albgri_oc_col[c, ib] = albsoi[c, ib] * (1.0 - frac_sno[c])
-                    end
-                end
-            end
+    let go = _SaGrndOut(;
+            albgrd = albgrd, albgri = albgri,
+            albgrd_bc = surfalb.albgrd_bc_col, albgri_bc = surfalb.albgri_bc_col,
+            albgrd_dst = surfalb.albgrd_dst_col, albgri_dst = surfalb.albgri_dst_col,
+            albgrd_pur = surfalb.albgrd_pur_col, albgri_pur = surfalb.albgri_pur_col,
+            albgrd_oc = surfalb.albgrd_oc_col, albgri_oc = surfalb.albgri_oc_col),
+        gin = _SaGrndIn(; albsod = albsod, albsoi = albsoi,
+                        albsnd = albsnd, albsni = albsni, frac_sno = frac_sno)
+        be = _kernel_backend(albgrd)
+        if length(bounds_col) * numrad != 0
+            _sa_grnd_kernel!(be)(go, gin, mask_nourbanc, coszen_col_arr,
+                                 use_snicar_frc, do_sno_oc;
+                                 ndrange = (length(bounds_col), numrad))
+            KA.synchronize(be)
         end
     end
 
     # --- Map SNICAR flux absorption to surfalb fields ---
     if use_snicar
-        for c in bounds_col
-            mask_nourbanc[c] || continue
-            l = col.landunit[c]
-            is_lake = lun.lakpoi[l]
-            for i in 1:(nlevsno_val + 1)
-                if use_subgrid_fluxes && !is_lake
-                    # Subgrid fluxes: SNICAR output used directly for snow-covered area
-                    surfalb.flx_absdv_col[c, i] = flx_absd_snw[c, i, IVIS]
-                    surfalb.flx_absdn_col[c, i] = flx_absd_snw[c, i, INIR]
-                    surfalb.flx_absiv_col[c, i] = flx_absi_snw[c, i, IVIS]
-                    surfalb.flx_absin_col[c, i] = flx_absi_snw[c, i, INIR]
-                else
-                    # No subgrid fluxes or lake: weight by snow fraction
-                    fsnow = frac_sno[c]
-                    for (flx_field, flx_snw, alb_s, alb_d, ib) in [
-                        (:flx_absdv_col, flx_absd_snw, albsnd, albsod, IVIS),
-                        (:flx_absdn_col, flx_absd_snw, albsnd, albsod, INIR),
-                        (:flx_absiv_col, flx_absi_snw, albsni, albsoi, IVIS),
-                        (:flx_absin_col, flx_absi_snw, albsni, albsoi, INIR),
-                    ]
-                        f_snw = flx_snw[c, i, ib]
-                        a_snw = alb_s[c, ib]
-                        a_soil = alb_d[c, ib]
-                        flx_out = getfield(surfalb, flx_field)
-                        if a_snw < 1.0
-                            flx_out[c, i] = f_snw * fsnow +
-                                (1.0 - fsnow) * (1.0 - a_soil) * (f_snw / max(1.0 - a_snw, 1.0e-6))
-                        else
-                            flx_out[c, i] = 0.0
-                        end
-                    end
-                end
-            end
+        fm = _SaFluxMap(;
+            flx_absdv = surfalb.flx_absdv_col, flx_absdn = surfalb.flx_absdn_col,
+            flx_absiv = surfalb.flx_absiv_col, flx_absin = surfalb.flx_absin_col,
+            flx_absd_snw = flx_absd_snw, flx_absi_snw = flx_absi_snw,
+            albsnd = albsnd, albsni = albsni, albsod = albsod, albsoi = albsoi,
+            frac_sno = frac_sno, landunit = col.landunit, lakpoi = lun.lakpoi)
+        be = _kernel_backend(surfalb.flx_absdv_col)
+        if nc != 0
+            _sa_fluxmap_kernel!(be)(fm, mask_nourbanc, nlevsno_val + 1,
+                                    use_subgrid_fluxes, IVIS, INIR; ndrange = nc)
+            KA.synchronize(be)
         end
     end
 
     # --- Snow albedo history diagnostics ---
-    for ib in 1:numrad
-        for c in bounds_col
-            mask_nourbanc[c] || continue
-            if coszen_col_arr[c] > 0.0 && h2osno_total_arr[c] > 0.0
-                surfalb.albsnd_hst_col[c, ib] = albsnd[c, ib]
-                surfalb.albsni_hst_col[c, ib] = albsni[c, ib]
-            else
-                surfalb.albsnd_hst_col[c, ib] = 0.0
-                surfalb.albsni_hst_col[c, ib] = 0.0
-            end
-        end
-    end
+    _launch!(_sa_snowhist_kernel!, surfalb.albsnd_hst_col,
+             surfalb.albsni_hst_col, mask_nourbanc, coszen_col_arr,
+             h2osno_total_arr, albsnd, albsni;
+             ndrange = (length(bounds_col), numrad))
 
     # --- Canopy layering ---
     dincmax = 0.25
-    for p in bounds_patch
-        mask_nourbanp[p] || continue
-
-        if nlevcan == 1
-            nrad[p] = 1
-            ncan[p] = 1
-            tlai_z[p, 1] = elai[p]
-            tsai_z[p, 1] = esai[p]
-        elseif nlevcan > 1
-            if elai[p] + esai[p] == 0.0
-                nrad[p] = 0
-            else
-                dincmax_sum = 0.0
-                for iv in 1:nlevcan
-                    dincmax_sum += dincmax
-                    if ((elai[p] + esai[p]) - dincmax_sum) > 1.0e-06
-                        nrad[p] = iv
-                        dinc = dincmax
-                        tlai_z[p, iv] = dinc * elai[p] / smooth_max(elai[p] + esai[p], mpe)
-                        tsai_z[p, iv] = dinc * esai[p] / smooth_max(elai[p] + esai[p], mpe)
-                    else
-                        nrad[p] = iv
-                        dinc = dincmax - (dincmax_sum - (elai[p] + esai[p]))
-                        tlai_z[p, iv] = dinc * elai[p] / smooth_max(elai[p] + esai[p], mpe)
-                        tsai_z[p, iv] = dinc * esai[p] / smooth_max(elai[p] + esai[p], mpe)
-                        break
-                    end
-                end
-
-                # Minimum of 4 canopy layers
-                if nrad[p] < 4
-                    nrad[p] = 4
-                    for iv in 1:nrad[p]
-                        tlai_z[p, iv] = elai[p] / nrad[p]
-                        tsai_z[p, iv] = esai[p] / nrad[p]
-                    end
-                end
-            end
-
-            # Repeat for buried canopy layers
-            blai = tlai[p] - elai[p]
-            bsai = tsai[p] - esai[p]
-            if blai + bsai == 0.0
-                ncan[p] = nrad[p]
-            else
-                dincmax_sum = 0.0
-                for iv in (nrad[p] + 1):nlevcan
-                    dincmax_sum += dincmax
-                    if ((blai + bsai) - dincmax_sum) > 1.0e-06
-                        ncan[p] = iv
-                        dinc = dincmax
-                        tlai_z[p, iv] = dinc * blai / smooth_max(blai + bsai, mpe)
-                        tsai_z[p, iv] = dinc * bsai / smooth_max(blai + bsai, mpe)
-                    else
-                        ncan[p] = iv
-                        dinc = dincmax - (dincmax_sum - (blai + bsai))
-                        tlai_z[p, iv] = dinc * blai / smooth_max(blai + bsai, mpe)
-                        tsai_z[p, iv] = dinc * bsai / smooth_max(blai + bsai, mpe)
-                        break
-                    end
-                end
-            end
+    let cl = _SaCanLayer(; nrad = nrad, ncan = ncan, tlai_z = tlai_z, tsai_z = tsai_z,
+                         elai = elai, esai = esai, tlai = tlai, tsai = tsai)
+        be = _kernel_backend(nrad)
+        if length(bounds_patch) != 0
+            _sa_canlayer_kernel!(be)(cl, mask_nourbanp, nlevcan,
+                                     eltype(tlai_z)(dincmax), eltype(tlai_z)(mpe);
+                                     ndrange = length(bounds_patch))
+            KA.synchronize(be)
         end
     end
 
     # --- Zero fluxes for active canopy layers ---
-    for p in bounds_patch
-        mask_nourbanp[p] || continue
-        for iv in 1:nrad[p]
-            surfalb.fabd_sun_z_patch[p, iv] = 0.0
-            surfalb.fabd_sha_z_patch[p, iv] = 0.0
-            surfalb.fabi_sun_z_patch[p, iv] = 0.0
-            surfalb.fabi_sha_z_patch[p, iv] = 0.0
-            fsun_z[p, iv] = 0.0
-        end
-    end
+    _launch!(_sa_zerolayer_kernel!, surfalb.fabd_sun_z_patch,
+             surfalb.fabd_sha_z_patch, surfalb.fabi_sun_z_patch,
+             surfalb.fabi_sha_z_patch, fsun_z, mask_nourbanp, nrad;
+             ndrange = length(bounds_patch))
 
     # --- Default vcmax scaling (coszen <= 0 case) ---
     extkn = 0.30
-    for p in bounds_patch
-        mask_nourbanp[p] || continue
-        if nlevcan == 1
-            surfalb.vcmaxcintsun_patch[p] = 0.0
-            surfalb.vcmaxcintsha_patch[p] = (1.0 - exp(-extkn * elai[p])) / extkn
-            if elai[p] > 0.0
-                surfalb.vcmaxcintsha_patch[p] /= elai[p]
-            else
-                surfalb.vcmaxcintsha_patch[p] = 0.0
-            end
-        elseif nlevcan > 1
-            surfalb.vcmaxcintsun_patch[p] = 0.0
-            surfalb.vcmaxcintsha_patch[p] = 0.0
-        end
-    end
+    _launch!(_sa_vcmaxdef_kernel!, surfalb.vcmaxcintsun_patch,
+             surfalb.vcmaxcintsha_patch, mask_nourbanp, elai, nlevcan,
+             eltype(surfalb.vcmaxcintsun_patch)(extkn);
+             ndrange = length(bounds_patch))
 
     # --- Create solar-vegetated filter ---
+    # mask_vegsol/mask_novegsol are BitVector scratch consumed by two_stream! and
+    # the non-veg patch kernel. BitVector has no device backend (packed bits), so
+    # this classification stays on the HOST over Array() copies of the device state
+    # it reads. Byte-identical (Array() of a CPU Array is a no-op).
     mask_vegsol = falses(length(bounds_patch))
     mask_novegsol = falses(length(bounds_patch))
 
-    for p in bounds_patch
-        mask_nourbanp[p] || continue
-        if coszen_patch_arr[p] > 0.0
-            l_p = patchdata.landunit[p]
-            if (lun.itype[l_p] == ISTSOIL || lun.itype[l_p] == ISTCROP) &&
-               (elai[p] + esai[p]) > 0.0
-                mask_vegsol[p] = true
-            else
-                mask_novegsol[p] = true
+    let maskp_h = Array(mask_nourbanp), coszp_h = Array(coszen_patch_arr),
+        landunit_h = Array(patchdata.landunit), itype_h = Array(lun.itype),
+        elai_h = Array(elai), esai_h = Array(esai)
+        for p in bounds_patch
+            maskp_h[p] || continue
+            if coszp_h[p] > 0.0
+                l_p = landunit_h[p]
+                if (itype_h[l_p] == ISTSOIL || itype_h[l_p] == ISTCROP) &&
+                   (elai_h[p] + esai_h[p]) > 0.0
+                    mask_vegsol[p] = true
+                else
+                    mask_novegsol[p] = true
+                end
             end
         end
     end
 
     # --- Weight reflectance/transmittance by LAI and SAI ---
     np = length(bounds_patch)
-    wl = zeros(FT, np)
-    ws_arr = zeros(FT, np)
-    rho = zeros(FT, np, numrad)
-    tau = zeros(FT, np, numrad)
+    wl = fill!(similar(coszen_col_arr, FT, np), zero(FT))
+    ws_arr = fill!(similar(coszen_col_arr, FT, np), zero(FT))
+    rho = fill!(similar(coszen_col_arr, FT, np, numrad), zero(FT))
+    tau = fill!(similar(coszen_col_arr, FT, np, numrad), zero(FT))
 
-    surfalb_lai_weight!(wl, ws_arr, mask_vegsol, elai, esai, mpe)
+    mpe_FT = FT(mpe)
+    # Device copy of the (host) vegsol mask for the kernels; the host BitVector is
+    # kept for the two_stream! host solver below.
+    mask_vegsol_dev = coszen_col_arr isa Array ? mask_vegsol :
+                      copyto!(similar(coszen_col_arr, Bool, length(mask_vegsol)),
+                              collect(Bool, mask_vegsol))  # collect: copyto!(device, BitVector) scalar-indexes packed bits
+    surfalb_lai_weight!(wl, ws_arr, mask_vegsol_dev, elai, esai, mpe_FT)
 
-    surfalb_rho_tau!(rho, tau, mask_vegsol, patchdata.itype, wl, ws_arr,
-                     pftcon_rhol, pftcon_rhos, pftcon_taul, pftcon_taus, mpe, numrad)
+    surfalb_rho_tau!(rho, tau, mask_vegsol_dev, patchdata.itype, wl, ws_arr,
+                     pftcon_rhol, pftcon_rhos, pftcon_taul, pftcon_taus, mpe_FT, numrad)
 
     # --- Two-stream calculation ---
     if !use_fates
         two_stream!(surfalb, patchdata, col, canopystate, temperature,
                     waterdiagbulk, coszen_patch_arr, rho, tau,
-                    pftcon_xl, mask_vegsol, bounds_patch)
+                    pftcon_xl, mask_vegsol_dev, bounds_patch)
 
         if use_SSRE
             if nlevcan > 1
@@ -1144,64 +1625,57 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
             end
             two_stream!(surfalb, patchdata, col, canopystate, temperature,
                         waterdiagbulk, coszen_patch_arr, rho, tau,
-                        pftcon_xl, mask_vegsol, bounds_patch; SFonly=true)
+                        pftcon_xl, mask_vegsol_dev, bounds_patch; SFonly=true)
         end
     end
     # (FATES canopy radiation stub — not yet ported)
 
     # --- Non-vegetated patches where coszen > 0 ---
-    for ib in 1:numrad
-        for p in bounds_patch
-            mask_novegsol[p] || continue
-            c = patchdata.column[p]
-            surfalb.fabd_patch[p, ib] = 0.0
-            surfalb.fabd_sun_patch[p, ib] = 0.0
-            surfalb.fabd_sha_patch[p, ib] = 0.0
-            surfalb.fabi_patch[p, ib] = 0.0
-            surfalb.fabi_sun_patch[p, ib] = 0.0
-            surfalb.fabi_sha_patch[p, ib] = 0.0
-            surfalb.ftdd_patch[p, ib] = 1.0
-            surfalb.ftid_patch[p, ib] = 0.0
-            surfalb.ftii_patch[p, ib] = 1.0
-            albd[p, ib] = albgrd[c, ib]
-            albi[p, ib] = albgri[c, ib]
-            if use_SSRE
-                surfalb.albdSF_patch[p, ib] = albsod[c, ib]
-                surfalb.albiSF_patch[p, ib] = albsoi[c, ib]
-            end
+    # mask_novegsol is a BitVector (no device backend); the kernel writes device
+    # output arrays, so copy the mask onto the output backend as a Bool vector
+    # (no-op-equivalent on CPU). Byte-identical.
+    let nv = _SaNovegOut(;
+            fabd = surfalb.fabd_patch, fabd_sun = surfalb.fabd_sun_patch, fabd_sha = surfalb.fabd_sha_patch,
+            fabi = surfalb.fabi_patch, fabi_sun = surfalb.fabi_sun_patch, fabi_sha = surfalb.fabi_sha_patch,
+            ftdd = surfalb.ftdd_patch, ftid = surfalb.ftid_patch, ftii = surfalb.ftii_patch,
+            albd = albd, albi = albi, albdSF = surfalb.albdSF_patch, albiSF = surfalb.albiSF_patch)
+        be = _kernel_backend(surfalb.fabd_patch)
+        if length(bounds_patch) * numrad != 0
+            mask_nv = similar(surfalb.fabd_patch, Bool, length(mask_novegsol))
+            copyto!(mask_nv, collect(mask_novegsol))
+            _sa_noveg_kernel!(be)(nv, mask_nv, patchdata.column,
+                                  albgrd, albgri, albsod, albsoi, use_SSRE;
+                                  ndrange = (length(bounds_patch), numrad))
+            KA.synchronize(be)
         end
     end
 
     # --- History output variables ---
-    for ib in 1:numrad
-        for c in bounds_col
-            mask_nourbanc[c] || continue
-            if coszen_col_arr[c] > 0.0
-                surfalb.albgrd_hst_col[c, ib] = albgrd[c, ib]
-                surfalb.albgri_hst_col[c, ib] = albgri[c, ib]
-                surfalb.albgrd_pur_hst_col[c, ib] = surfalb.albgrd_pur_col[c, ib]
-                surfalb.albgri_pur_hst_col[c, ib] = surfalb.albgri_pur_col[c, ib]
-                surfalb.albgrd_bc_hst_col[c, ib] = surfalb.albgrd_bc_col[c, ib]
-                surfalb.albgri_bc_hst_col[c, ib] = surfalb.albgri_bc_col[c, ib]
-                surfalb.albgrd_oc_hst_col[c, ib] = surfalb.albgrd_oc_col[c, ib]
-                surfalb.albgri_oc_hst_col[c, ib] = surfalb.albgri_oc_col[c, ib]
-                surfalb.albgrd_dst_hst_col[c, ib] = surfalb.albgrd_dst_col[c, ib]
-                surfalb.albgri_dst_hst_col[c, ib] = surfalb.albgri_dst_col[c, ib]
-                if h2osno_total_arr[c] > 0.0
-                    surfalb.albsnd_hst2_col[c, ib] = surfalb.albsnd_hst_col[c, ib]
-                    surfalb.albsni_hst2_col[c, ib] = surfalb.albsni_hst_col[c, ib]
-                end
-            end
-        end
-
-        for p in bounds_patch
-            mask_nourbanp[p] || continue
-            if coszen_patch_arr[p] > 0.0
-                surfalb.albd_hst_patch[p, ib] = albd[p, ib]
-                surfalb.albi_hst_patch[p, ib] = albi[p, ib]
-            end
+    let ho = _SaHistColOut(;
+            albgrd_hst = surfalb.albgrd_hst_col, albgri_hst = surfalb.albgri_hst_col,
+            albgrd_pur_hst = surfalb.albgrd_pur_hst_col, albgri_pur_hst = surfalb.albgri_pur_hst_col,
+            albgrd_bc_hst = surfalb.albgrd_bc_hst_col, albgri_bc_hst = surfalb.albgri_bc_hst_col,
+            albgrd_oc_hst = surfalb.albgrd_oc_hst_col, albgri_oc_hst = surfalb.albgri_oc_hst_col,
+            albgrd_dst_hst = surfalb.albgrd_dst_hst_col, albgri_dst_hst = surfalb.albgri_dst_hst_col,
+            albsnd_hst2 = surfalb.albsnd_hst2_col, albsni_hst2 = surfalb.albsni_hst2_col),
+        hin = _SaHistColIn(;
+            albgrd = albgrd, albgri = albgri,
+            albgrd_pur = surfalb.albgrd_pur_col, albgri_pur = surfalb.albgri_pur_col,
+            albgrd_bc = surfalb.albgrd_bc_col, albgri_bc = surfalb.albgri_bc_col,
+            albgrd_oc = surfalb.albgrd_oc_col, albgri_oc = surfalb.albgri_oc_col,
+            albgrd_dst = surfalb.albgrd_dst_col, albgri_dst = surfalb.albgri_dst_col,
+            albsnd_hst = surfalb.albsnd_hst_col, albsni_hst = surfalb.albsni_hst_col)
+        be = _kernel_backend(albgrd)
+        if length(bounds_col) * numrad != 0
+            _sa_histcol_kernel!(be)(ho, hin, mask_nourbanc, coszen_col_arr, h2osno_total_arr;
+                                    ndrange = (length(bounds_col), numrad))
+            KA.synchronize(be)
         end
     end
+
+    _launch!(_sa_histpatch_kernel!, surfalb.albd_hst_patch, surfalb.albi_hst_patch,
+             mask_nourbanp, coszen_patch_arr, albd, albi;
+             ndrange = (length(bounds_patch), numrad))
 
     return nothing
 end

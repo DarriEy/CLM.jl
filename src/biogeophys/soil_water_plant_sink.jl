@@ -341,7 +341,7 @@ in `SoilWaterPlantSinkMod.F90`.
 function compute_effec_rootfrac_and_vert_tran_sink!(
         bounds_col::UnitRange{Int},
         nlevsoi::Int,
-        mask_hydrology::BitVector,
+        mask_hydrology::AbstractVector{Bool},
         soilstate_inst::SoilStateData,
         canopystate_inst::CanopyStateData,
         waterfluxbulk_inst::WaterFluxBulkData,
@@ -361,13 +361,16 @@ function compute_effec_rootfrac_and_vert_tran_sink!(
     col_itype    = Array(col.itype)
     col_landunit = Array(col.landunit)
     lun_itype    = Array(lun.itype)
+    # Pull the hydrology mask to the host too so the column-group filter loops
+    # below stay scalar-index-free on a device backend (no-op on CPU).
+    mask_host    = Array(mask_hydrology)
 
     # ---------------------------------------------------------------
     # 1) Pervious roads
     # ---------------------------------------------------------------
     filterc_roads = Int[]
     for c in bounds_col
-        mask_hydrology[c] || continue
+        mask_host[c] || continue
         if col_itype[c] == ICOL_ROAD_PERV
             push!(filterc_roads, c)
         end
@@ -391,7 +394,7 @@ function compute_effec_rootfrac_and_vert_tran_sink!(
     # ---------------------------------------------------------------
     filterc_other = Int[]
     for c in bounds_col
-        mask_hydrology[c] || continue
+        mask_host[c] || continue
         l = col_landunit[c]
         if col_itype[c] != ICOL_ROAD_PERV && lun_itype[l] != ISTSOIL
             push!(filterc_other, c)
@@ -416,7 +419,7 @@ function compute_effec_rootfrac_and_vert_tran_sink!(
     # ---------------------------------------------------------------
     filterc_natveg = Int[]
     for c in bounds_col
-        mask_hydrology[c] || continue
+        mask_host[c] || continue
         l = col_landunit[c]
         if lun_itype[l] == ISTSOIL
             push!(filterc_natveg, c)
@@ -437,7 +440,7 @@ function compute_effec_rootfrac_and_vert_tran_sink!(
     end
 
     # Sanity check: all hydrology columns must have been processed
-    num_hydrology = count(mask_hydrology[bounds_col])
+    num_hydrology = count(mask_host[bounds_col])
     if num_hydrology != num_filterc_tot
         error("SoilWaterPlantSink: total columns flagged for root water uptake " *
               "($num_filterc_tot) did not match the total hydrology filter count " *

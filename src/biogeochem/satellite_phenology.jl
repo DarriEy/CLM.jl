@@ -219,8 +219,12 @@ function interp_monthly_veg!(sp::SatellitePhenologyData;
     if months2 > 12
         months2 = 1
     end
-    sp.timwt[1] = (it1 + 0.5) - t
-    sp.timwt[2] = 1.0 - sp.timwt[1]
+    # Bulk-write the two interpolation weights so this works whether sp.timwt is
+    # a host Array or a device array (a scalar `sp.timwt[i] = ` would scalar-index
+    # a GPU array). Byte-identical to the per-element writes on the CPU.
+    Twt = eltype(sp.timwt)
+    wt1 = Twt((it1 + 0.5) - t)
+    copyto!(sp.timwt, Twt[wt1, one(Twt) - wt1])
 
     needs_read = false
     if sp.InterpMonths1 != months1

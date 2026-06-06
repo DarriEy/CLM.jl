@@ -453,20 +453,30 @@ Sums h2osno_no_layers_col plus liquid and ice in snow layers.
 
 Ported from `waterstate_type%CalculateTotalH2osno` in `WaterStateType.F90`.
 """
-function waterstate_calculate_total_h2osno!(ws::WaterStateData,
-                                             mask::BitVector,
-                                             bounds_col::UnitRange{Int},
-                                             snl_col::Vector{Int},
-                                             h2osno_total::Vector{<:Real})
-    nlevsno = varpar.nlevsno
-    for c in bounds_col
-        mask[c] || continue
-        h2osno_total[c] = ws.h2osno_no_layers_col[c]
-        for j in (snl_col[c] + 1):0
-            jj = _snow_idx(j)
-            h2osno_total[c] += ws.h2osoi_ice_col[c, jj] + ws.h2osoi_liq_col[c, jj]
+@kernel function _ws_total_h2osno_kernel!(h2osno_total, @Const(mask), @Const(snl),
+        @Const(h2osno_no_layers), @Const(h2osoi_ice), @Const(h2osoi_liq),
+        cmin::Int, cmax::Int, nlevsno::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        v = h2osno_no_layers[c]
+        for j in (snl[c] + 1):0
+            jj = j + nlevsno
+            v += h2osoi_ice[c, jj] + h2osoi_liq[c, jj]
         end
+        h2osno_total[c] = v
     end
+end
+
+function waterstate_calculate_total_h2osno!(ws::WaterStateData,
+                                             mask::AbstractVector{Bool},
+                                             bounds_col::UnitRange{Int},
+                                             snl_col::AbstractVector{<:Integer},
+                                             h2osno_total::AbstractVector{<:Real})
+    nlevsno = varpar.nlevsno
+    _launch!(_ws_total_h2osno_kernel!, h2osno_total, mask, snl_col,
+             ws.h2osno_no_layers_col, ws.h2osoi_ice_col, ws.h2osoi_liq_col,
+             first(bounds_col), last(bounds_col), nlevsno;
+             ndrange = last(bounds_col))
     return nothing
 end
 

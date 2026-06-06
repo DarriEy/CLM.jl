@@ -25,44 +25,48 @@ BitVectors. Usage:
 
 Ported from `clumpfilter` in `filterMod.F90`.
 """
-Base.@kwdef mutable struct ClumpFilter
+Base.@kwdef mutable struct ClumpFilter{B<:AbstractVector{Bool}}
     # Column-level masks
-    allc::BitVector = BitVector()           # all columns
-    lakec::BitVector = BitVector()          # lake filter (columns)
-    nolakec::BitVector = BitVector()        # non-lake filter (columns)
-    soilc::BitVector = BitVector()          # soil filter (columns)
-    bgc_soilc::BitVector = BitVector()      # soil with biogeochemistry active (columns)
-    snowc::BitVector = BitVector()          # snow filter (columns) — set in SnowHydrology
-    nosnowc::BitVector = BitVector()        # non-snow filter (columns) — set in SnowHydrology
-    lakesnowc::BitVector = BitVector()      # lake snow filter (columns) — set in LakeHydrology
-    lakenosnowc::BitVector = BitVector()    # lake non-snow filter (columns) — set in LakeHydrology
-    hydrologyc::BitVector = BitVector()     # hydrology filter (columns)
-    urbanc::BitVector = BitVector()         # urban filter (columns)
-    nourbanc::BitVector = BitVector()       # non-urban filter (columns)
-    icec::BitVector = BitVector()           # glacier filter (columns)
-    do_smb_c::BitVector = BitVector()       # glacier+bareland SMB filter (columns)
-    actfirec::BitVector = BitVector()       # active fire filter (columns) — set elsewhere
+    allc::B = BitVector()                    # all columns
+    lakec::B = BitVector()          # lake filter (columns)
+    nolakec::B = BitVector()        # non-lake filter (columns)
+    soilc::B = BitVector()          # soil filter (columns)
+    bgc_soilc::B = BitVector()      # soil with biogeochemistry active (columns)
+    snowc::B = BitVector()          # snow filter (columns) — set in SnowHydrology
+    nosnowc::B = BitVector()        # non-snow filter (columns) — set in SnowHydrology
+    lakesnowc::B = BitVector()      # lake snow filter (columns) — set in LakeHydrology
+    lakenosnowc::B = BitVector()    # lake non-snow filter (columns) — set in LakeHydrology
+    hydrologyc::B = BitVector()     # hydrology filter (columns)
+    urbanc::B = BitVector()         # urban filter (columns)
+    nourbanc::B = BitVector()       # non-urban filter (columns)
+    icec::B = BitVector()           # glacier filter (columns)
+    do_smb_c::B = BitVector()       # glacier+bareland SMB filter (columns)
+    actfirec::B = BitVector()       # active fire filter (columns) — set elsewhere
 
     # Patch-level masks
-    natvegp::BitVector = BitVector()        # CNDV nat-vegetated filter (patches) — set by CNDV
-    pcropp::BitVector = BitVector()         # prognostic crop filter (patches)
-    soilnopcropp::BitVector = BitVector()   # soil w/o prog. crops (patches)
-    all_soil_patches::BitVector = BitVector() # all soil or crop patches (for FATES SP)
-    lakep::BitVector = BitVector()          # lake filter (patches)
-    nolakep::BitVector = BitVector()        # non-lake filter (patches)
-    bgc_vegp::BitVector = BitVector()       # vegetation biochemistry active (patches)
-    soilp::BitVector = BitVector()          # soil filter (patches)
-    exposedvegp::BitVector = BitVector()    # exposed vegetation (patches) — set by set_exposedvegp_filter!
-    noexposedvegp::BitVector = BitVector()  # non-exposed vegetation (patches)
-    urbanp::BitVector = BitVector()         # urban filter (patches)
-    nourbanp::BitVector = BitVector()       # non-urban filter (patches)
-    nolakeurbanp::BitVector = BitVector()   # non-lake, non-urban filter (patches)
-    actfirep::BitVector = BitVector()       # active fire filter (patches) — set elsewhere
+    natvegp::B = BitVector()        # CNDV nat-vegetated filter (patches) — set by CNDV
+    pcropp::B = BitVector()         # prognostic crop filter (patches)
+    soilnopcropp::B = BitVector()   # soil w/o prog. crops (patches)
+    all_soil_patches::B = BitVector() # all soil or crop patches (for FATES SP)
+    lakep::B = BitVector()          # lake filter (patches)
+    nolakep::B = BitVector()        # non-lake filter (patches)
+    bgc_vegp::B = BitVector()       # vegetation biochemistry active (patches)
+    soilp::B = BitVector()          # soil filter (patches)
+    exposedvegp::B = BitVector()    # exposed vegetation (patches) — set by set_exposedvegp_filter!
+    noexposedvegp::B = BitVector()  # non-exposed vegetation (patches)
+    urbanp::B = BitVector()         # urban filter (patches)
+    nourbanp::B = BitVector()       # non-urban filter (patches)
+    nolakeurbanp::B = BitVector()   # non-lake, non-urban filter (patches)
+    actfirep::B = BitVector()       # active fire filter (patches) — set elsewhere
 
     # Landunit-level masks
-    urbanl::BitVector = BitVector()         # urban filter (landunits)
-    nourbanl::BitVector = BitVector()       # non-urban filter (landunits)
+    urbanl::B = BitVector()         # urban filter (landunits)
+    nourbanl::B = BitVector()       # non-urban filter (landunits)
 end
+
+# Device-movable: adapt swaps every BitVector mask to the target backend array
+# type (e.g. MtlVector{Bool}) so the whole filter set can ride along to the GPU.
+Adapt.@adapt_structure ClumpFilter
 
 # Global filter instances
 # `clump_filter` is the standard set of filters (active points only).
@@ -412,26 +416,30 @@ Only sets filters in the provided `filt`, NOT in
 
 Ported from `setExposedvegpFilter` in `filterMod.F90`.
 """
+@kernel function _set_exposedvegp_kernel!(exposedvegp, noexposedvegp,
+        @Const(nolakeurbanp), @Const(frac_veg_nosno), pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        exposedvegp[p] = false
+        noexposedvegp[p] = false
+        if nolakeurbanp[p]
+            if frac_veg_nosno[p] > 0
+                exposedvegp[p] = true
+            else
+                noexposedvegp[p] = true
+            end
+        end
+    end
+end
+
 function set_exposedvegp_filter!(filt::ClumpFilter, bounds::BoundsType,
-                                 frac_veg_nosno::Vector{Int})
+                                 frac_veg_nosno::AbstractVector{<:Integer})
     @assert bounds.level == BOUNDS_LEVEL_CLUMP
     @assert length(frac_veg_nosno) >= bounds.endp
 
-    # Clear existing masks in bounds range
-    for p in bounds.begp:bounds.endp
-        filt.exposedvegp[p] = false
-        filt.noexposedvegp[p] = false
-    end
-
-    # Set based on frac_veg_nosno, only for nolakeurban patches
-    for p in bounds.begp:bounds.endp
-        filt.nolakeurbanp[p] || continue
-        if frac_veg_nosno[p] > 0
-            filt.exposedvegp[p] = true
-        else
-            filt.noexposedvegp[p] = true
-        end
-    end
+    _launch!(_set_exposedvegp_kernel!, filt.exposedvegp, filt.noexposedvegp,
+             filt.nolakeurbanp, frac_veg_nosno, bounds.begp, bounds.endp;
+             ndrange = bounds.endp)
 
     return nothing
 end
