@@ -1667,19 +1667,54 @@ function psn_phs_pass1_update!(ps, mask_patch, col_of_patch, ivt, froot_carbon,
     return nothing
 end
 
+# --- PHS Pass-2 device-view arg bundles (Metal 31-arg-buffer reduction) ---
+# Loose @Const input arrays grouped into immutable @adapt_structure'd bundles so the
+# kernel takes a handful of struct args (each = 1 indirect-arg-buffer). Fields are
+# aliased to locals at the kernel top so the physics body is UNCHANGED.
+# Index/Bool arrays (VB=mask Bool, VI=ivt/nrad Int). PFT params are Float64-pinned
+# in the AD path → own struct/param (Vp) so they don't unify with Dual state.
+Base.@kwdef struct _Psn2Idx{VB,VI}
+    mask_patch::VB; ivt::VI; nrad::VI
+end
+Base.@kwdef struct _Psn2Pft{Vp}
+    c3psn_pft::Vp; mbbopt_pft::Vp; slatop_pft::Vp; leafcn_pft::Vp
+    flnr_pft::Vp; fnitr_pft::Vp
+end
+Base.@kwdef struct _Psn2In{V,M}     # read-only forcing vectors (V) + matrices (M)
+    forc_pbot::V; oair::V; dayl_factor::V; t10::V; t_veg::V
+    vcmaxcint_sun::V; vcmaxcint_sha::V
+    tlai_z::M; par_z_sun_in::M; par_z_sha_in::M
+end
+Adapt.@adapt_structure _Psn2Idx
+Adapt.@adapt_structure _Psn2Pft
+Adapt.@adapt_structure _Psn2In
+# Loose scalars bundled into one isbits struct (Float scalars share S; Bools/Ints own
+# fields). Counts as 1 kernel arg instead of 15.
+struct _Psn2Scalars{S}
+    vcmax25_scale::S; jmax25top_sf_val::S; leaf_mr_vcm::S; bbbopt_c3::S; bbbopt_c4::S
+    use_cn::Bool; use_c13::Bool; light_inhibit::Bool
+    leafresp_method::Int; nlevcan::Int; stomatalcond_mtd::Int
+    stomatal_bb::Int; leafresp_ryan::Int; sun::Int; sha::Int
+end
+
 # PHS Pass 2: kinetics + N-profile + vcmax/jmax/tpu/kp/lmr, BOTH phases, writing
 # the 3D ps.*_phs fields ([p,SUN,iv] & [p,SHA,iv]) in one iv pass. params_inst
 # scalars bundled in `prm`; overrides / leaf_mr_vcm resolved on the host.
-@kernel function _psn_phs_pass2_kernel!(ps, kn, jmax_z_local, @Const(mask_patch),
-        @Const(ivt), @Const(c3psn_pft), @Const(mbbopt_pft), @Const(forc_pbot),
-        @Const(oair), @Const(slatop_pft), @Const(leafcn_pft), @Const(flnr_pft),
-        @Const(fnitr_pft), @Const(dayl_factor), @Const(t10), @Const(t_veg),
-        @Const(tlai_z), @Const(par_z_sun_in), @Const(par_z_sha_in),
-        @Const(vcmaxcint_sun), @Const(vcmaxcint_sha), @Const(nrad), prm,
-        vcmax25_scale, jmax25top_sf_val, leaf_mr_vcm, use_cn::Bool, use_c13::Bool,
-        light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
-        stomatalcond_mtd::Int, stomatal_bb::Int, leafresp_ryan::Int,
-        bbbopt_c3, bbbopt_c4, sun::Int, sha::Int)
+@kernel function _psn_phs_pass2_kernel!(ps, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+    # alias grouped fields to locals → physics body below is byte-identical
+    mask_patch = idx.mask_patch; ivt = idx.ivt; nrad = idx.nrad
+    c3psn_pft = pft.c3psn_pft; mbbopt_pft = pft.mbbopt_pft; slatop_pft = pft.slatop_pft
+    leafcn_pft = pft.leafcn_pft; flnr_pft = pft.flnr_pft; fnitr_pft = pft.fnitr_pft
+    forc_pbot = inp.forc_pbot; oair = inp.oair; dayl_factor = inp.dayl_factor
+    t10 = inp.t10; t_veg = inp.t_veg
+    vcmaxcint_sun = inp.vcmaxcint_sun; vcmaxcint_sha = inp.vcmaxcint_sha
+    tlai_z = inp.tlai_z; par_z_sun_in = inp.par_z_sun_in; par_z_sha_in = inp.par_z_sha_in
+    vcmax25_scale = sc2.vcmax25_scale; jmax25top_sf_val = sc2.jmax25top_sf_val
+    leaf_mr_vcm = sc2.leaf_mr_vcm; bbbopt_c3 = sc2.bbbopt_c3; bbbopt_c4 = sc2.bbbopt_c4
+    use_cn = sc2.use_cn; use_c13 = sc2.use_c13; light_inhibit = sc2.light_inhibit
+    leafresp_method = sc2.leafresp_method; nlevcan = sc2.nlevcan
+    stomatalcond_mtd = sc2.stomatalcond_mtd; stomatal_bb = sc2.stomatal_bb
+    leafresp_ryan = sc2.leafresp_ryan; sun = sc2.sun; sha = sc2.sha
     p = @index(Global)
     @inbounds if mask_patch[p]
         T = eltype(t_veg)
@@ -1882,14 +1917,23 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
            tpuha = T(params_inst.tpuha))
     jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
     dv = _psn_dv(ps)
+    # group loose @Const arrays into device-view bundles + scalars into one isbits
+    # struct (Metal 31-arg-buffer reduction); same refs, so behaviour unchanged.
+    idx = _Psn2Idx(; mask_patch = mask_patch, ivt = ivt, nrad = nrad)
+    pft = _Psn2Pft(; c3psn_pft = c3psn_pft, mbbopt_pft = mbbopt_pft,
+        slatop_pft = slatop_pft, leafcn_pft = leafcn_pft, flnr_pft = flnr_pft,
+        fnitr_pft = fnitr_pft)
+    inp = _Psn2In(; forc_pbot = forc_pbot, oair = oair, dayl_factor = dayl_factor,
+        t10 = t10, t_veg = t_veg, vcmaxcint_sun = vcmaxcint_sun,
+        vcmaxcint_sha = vcmaxcint_sha, tlai_z = tlai_z,
+        par_z_sun_in = par_z_sun_in, par_z_sha_in = par_z_sha_in)
+    sc2 = _Psn2Scalars{T}(T(overrides.vcmax25_scale), T(jmax25top_sf_val),
+        T(leaf_mr_vcm), T(BBBOPT_C3), T(BBBOPT_C4),
+        use_cn, use_c13, light_inhibit, leafresp_method, nlevcan,
+        stomatalcond_mtd, STOMATALCOND_MTD_BB1987, LEAFRESP_MTD_RYAN1991, SUN, SHA)
     be = _kernel_backend(t_veg)
-    _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
-        mbbopt_pft, forc_pbot, oair, slatop_pft, leafcn_pft, flnr_pft, fnitr_pft,
-        dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
-        vcmaxcint_sha, nrad, prm, T(overrides.vcmax25_scale), T(jmax25top_sf_val),
-        T(leaf_mr_vcm), use_cn, use_c13, light_inhibit, leafresp_method, nlevcan,
-        stomatalcond_mtd, STOMATALCOND_MTD_BB1987, LEAFRESP_MTD_RYAN1991,
-        T(BBBOPT_C3), T(BBBOPT_C4), SUN, SHA; ndrange = length(bounds_patch))
+    _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, prm, idx, pft, inp, sc2;
+        ndrange = length(bounds_patch))
     KA.synchronize(be)
     return nothing
 end
@@ -4445,23 +4489,62 @@ struct PsnPhsP3Scalars{S}
     rsmax0::S; SPVAL_::S
 end
 
-@kernel function _psn_phs_pass3_kernel!(ps, phs_params,
-        @Const(mask_patch), @Const(col_of_patch), @Const(ivt), @Const(nrad),
-        @Const(medlynslope_pft), @Const(medlynintercept_pft), @Const(crop_pft),
-        @Const(forc_pbot), @Const(tgcm), @Const(rb), @Const(eair), @Const(esat_tv),
-        @Const(cair), @Const(oair), @Const(qsatl), @Const(qaf),
-        @Const(laisun), @Const(laisha), @Const(htop), @Const(tsai),
-        @Const(elai), @Const(esai), @Const(fdry), @Const(forc_rho),
-        @Const(par_z_sun_in), @Const(par_z_sha_in), @Const(jmax_z_local),
-        @Const(o3coefg_sun), @Const(o3coefg_sha), @Const(o3coefv_sun), @Const(o3coefv_sha),
-        @Const(k_soil_root), @Const(smp_l), @Const(z_col),
-        vegwp, vegwp_ln, qflx_tran_veg, bsun_arr, bsha_arr,
-        rh_leaf_sun, rh_leaf_sha,
-        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
-        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
-        @Const(is_near_local_noon), sc, nlevsoi::Int,
-        modifyphoto_and_lmr_forcrop::Bool, stomatalcond_mtd::Int,
+# --- PHS Pass-3 device-view arg bundles (Metal 31-arg-buffer reduction) ---
+# The fused-Newton kernel has ~48 loose arrays; grouped into 4 @adapt_structure'd
+# bundles (each = 1 indirect-arg-buffer, ≤17 array fields each). Fields aliased to
+# locals at the kernel top so the physics body is byte-identical.
+# Index/Bool arrays own params (VI=Int col/ivt/nrad, VB=mask+near-noon Bool); PFT
+# params Float64-pinned in the AD path → own param (Vp).
+Base.@kwdef struct _Psn3Idx{VB,VI,Vp}
+    mask_patch::VB; is_near_local_noon::VB
+    col_of_patch::VI; ivt::VI; nrad::VI
+    medlynslope_pft::Vp; medlynintercept_pft::Vp; crop_pft::Vp
+end
+Base.@kwdef struct _Psn3InA{V}      # read-only per-patch/col forcing vectors (1/1)
+    forc_pbot::V; tgcm::V; rb::V; eair::V; esat_tv::V; cair::V; oair::V; qsatl::V; qaf::V
+    laisun::V; laisha::V; htop::V; tsai::V; elai::V; esai::V; fdry::V; forc_rho::V
+end
+Base.@kwdef struct _Psn3InB{V,M,M3}  # o3 vectors (V) + 2D matrices (M) + 3D jmax (M3)
+    o3coefg_sun::V; o3coefg_sha::V; o3coefv_sun::V; o3coefv_sha::V
+    par_z_sun_in::M; par_z_sha_in::M
+    k_soil_root::M; smp_l::M; z_col::M
+    jmax_z_local::M3
+end
+Base.@kwdef struct _Psn3Out{V,M}    # written outputs: vectors (V) + matrices (M)
+    qflx_tran_veg::V; bsun_arr::V; bsha_arr::V; rh_leaf_sun::V; rh_leaf_sha::V
+    vegwp::M; vegwp_ln::M
+    psn_wc_z_sun::M; psn_wj_z_sun::M; psn_wp_z_sun::M
+    psn_wc_z_sha::M; psn_wj_z_sha::M; psn_wp_z_sha::M
+end
+Adapt.@adapt_structure _Psn3Idx
+Adapt.@adapt_structure _Psn3InA
+Adapt.@adapt_structure _Psn3InB
+Adapt.@adapt_structure _Psn3Out
+
+@kernel function _psn_phs_pass3_kernel!(ps, phs_params, sc, idx, ina, inb, out,
+        nlevsoi::Int, modifyphoto_and_lmr_forcrop::Bool, stomatalcond_mtd::Int,
         STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
+    # alias grouped fields to locals → physics body below is byte-identical
+    mask_patch = idx.mask_patch; is_near_local_noon = idx.is_near_local_noon
+    col_of_patch = idx.col_of_patch; ivt = idx.ivt; nrad = idx.nrad
+    medlynslope_pft = idx.medlynslope_pft; medlynintercept_pft = idx.medlynintercept_pft
+    crop_pft = idx.crop_pft
+    forc_pbot = ina.forc_pbot; tgcm = ina.tgcm; rb = ina.rb; eair = ina.eair
+    esat_tv = ina.esat_tv; cair = ina.cair; oair = ina.oair; qsatl = ina.qsatl
+    qaf = ina.qaf; laisun = ina.laisun; laisha = ina.laisha; htop = ina.htop
+    tsai = ina.tsai; elai = ina.elai; esai = ina.esai; fdry = ina.fdry
+    forc_rho = ina.forc_rho
+    o3coefg_sun = inb.o3coefg_sun; o3coefg_sha = inb.o3coefg_sha
+    o3coefv_sun = inb.o3coefv_sun; o3coefv_sha = inb.o3coefv_sha
+    par_z_sun_in = inb.par_z_sun_in; par_z_sha_in = inb.par_z_sha_in
+    jmax_z_local = inb.jmax_z_local; k_soil_root = inb.k_soil_root
+    smp_l = inb.smp_l; z_col = inb.z_col
+    qflx_tran_veg = out.qflx_tran_veg; bsun_arr = out.bsun_arr; bsha_arr = out.bsha_arr
+    rh_leaf_sun = out.rh_leaf_sun; rh_leaf_sha = out.rh_leaf_sha
+    vegwp = out.vegwp; vegwp_ln = out.vegwp_ln
+    psn_wc_z_sun = out.psn_wc_z_sun; psn_wj_z_sun = out.psn_wj_z_sun
+    psn_wp_z_sun = out.psn_wp_z_sun; psn_wc_z_sha = out.psn_wc_z_sha
+    psn_wj_z_sha = out.psn_wj_z_sha; psn_wp_z_sha = out.psn_wp_z_sha
     p = @index(Global)
     @inbounds if mask_patch[p]
         T = eltype(forc_pbot)
@@ -4731,20 +4814,31 @@ function psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
     copyto!(is_near_local_noon, nln)
     phs_params = _psn_phs_params(forc_pbot)
     dv = _psn_dv(ps)
+    # group loose @Const inputs + mutable outputs into device-view bundles (Metal
+    # 31-arg-buffer reduction); same refs, so writes flow back and behaviour is
+    # unchanged.
+    idx = _Psn3Idx(; mask_patch = mask_patch, is_near_local_noon = is_near_local_noon,
+        col_of_patch = col_of_patch, ivt = ivt, nrad = nrad,
+        medlynslope_pft = medlynslope_pft, medlynintercept_pft = medlynintercept_pft,
+        crop_pft = crop_pft)
+    ina = _Psn3InA(; forc_pbot = forc_pbot, tgcm = tgcm, rb = rb, eair = eair,
+        esat_tv = esat_tv, cair = cair, oair = oair, qsatl = qsatl, qaf = qaf,
+        laisun = laisun, laisha = laisha, htop = htop, tsai = tsai, elai = elai,
+        esai = esai, fdry = fdry, forc_rho = forc_rho)
+    inb = _Psn3InB(; o3coefg_sun = o3coefg_sun, o3coefg_sha = o3coefg_sha,
+        o3coefv_sun = o3coefv_sun, o3coefv_sha = o3coefv_sha,
+        par_z_sun_in = par_z_sun_in, par_z_sha_in = par_z_sha_in,
+        jmax_z_local = jmax_z_local, k_soil_root = k_soil_root, smp_l = smp_l,
+        z_col = z_col)
+    out = _Psn3Out(; qflx_tran_veg = qflx_tran_veg, bsun_arr = bsun_arr,
+        bsha_arr = bsha_arr, rh_leaf_sun = rh_leaf_sun, rh_leaf_sha = rh_leaf_sha,
+        vegwp = vegwp, vegwp_ln = vegwp_ln,
+        psn_wc_z_sun = psn_wc_z_sun, psn_wj_z_sun = psn_wj_z_sun,
+        psn_wp_z_sun = psn_wp_z_sun, psn_wc_z_sha = psn_wc_z_sha,
+        psn_wj_z_sha = psn_wj_z_sha, psn_wp_z_sha = psn_wp_z_sha)
     be = _kernel_backend(forc_pbot)
-    _psn_phs_pass3_kernel!(be)(dv, phs_params,
-        mask_patch, col_of_patch, ivt, nrad,
-        medlynslope_pft, medlynintercept_pft, crop_pft,
-        forc_pbot, tgcm, rb, eair, esat_tv, cair, oair, qsatl, qaf,
-        laisun, laisha, htop, tsai, elai, esai, fdry, forc_rho,
-        par_z_sun_in, par_z_sha_in, jmax_z_local,
-        o3coefg_sun, o3coefg_sha, o3coefv_sun, o3coefv_sha,
-        k_soil_root, smp_l, z_col,
-        vegwp, vegwp_ln, qflx_tran_veg, bsun_arr, bsha_arr,
-        rh_leaf_sun, rh_leaf_sha,
-        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
-        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
-        is_near_local_noon, sc, nlevsoi, modifyphoto_and_lmr_forcrop,
+    _psn_phs_pass3_kernel!(be)(dv, phs_params, sc, idx, ina, inb, out,
+        nlevsoi, modifyphoto_and_lmr_forcrop,
         stomatalcond_mtd, STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
         ndrange = length(bounds_patch))
     KA.synchronize(be)
@@ -4884,8 +4978,8 @@ function photosynthesis_hydrstress!(ps,
     psn_wc_z_sha = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
     psn_wj_z_sha = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
     psn_wp_z_sha = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
-    rh_leaf_sun  = zeros(FT, np)   # written by Pass 3 (host) only
-    rh_leaf_sha  = zeros(FT, np)
+    rh_leaf_sun  = fill!(similar(t_veg, FT, np), zero(FT))   # written by the Pass 3 kernel
+    rh_leaf_sha  = fill!(similar(t_veg, FT, np), zero(FT))
     bsun_arr     = fill!(similar(t_veg, FT, np), one(FT))
     bsha_arr     = fill!(similar(t_veg, FT, np), one(FT))
 
