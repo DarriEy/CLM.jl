@@ -432,57 +432,109 @@ function atm2lnd_update_acc_vars!(a2l::Atm2LndData,
         patch_gridcell::AbstractVector{Int},
         patch_column::AbstractVector{Int})
 
+    isempty(bounds_p) && return nothing
+    pmin = first(bounds_p)
+    pmax = last(bounds_p)
+
     # Accumulate direct beam radiation: FSD24, FSD240
-    for p in bounds_p
-        g = patch_gridcell[p]
-        val = a2l.forc_solad_not_downscaled_grc[g, 1]
-        a2l.fsd24_patch[p] = val
-        a2l.fsd240_patch[p] = val
-    end
+    _launch!(_a2l_solad_kernel!, a2l.fsd24_patch, a2l.fsd240_patch,
+        patch_gridcell, a2l.forc_solad_not_downscaled_grc, pmin, pmax;
+        ndrange = length(a2l.fsd24_patch))
 
     # Accumulate diffuse radiation: FSI24, FSI240
-    for p in bounds_p
-        g = patch_gridcell[p]
-        val = a2l.forc_solai_grc[g, 1]
-        a2l.fsi24_patch[p] = val
-        a2l.fsi240_patch[p] = val
-    end
+    _launch!(_a2l_solai_kernel!, a2l.fsi24_patch, a2l.fsi240_patch,
+        patch_gridcell, a2l.forc_solai_grc, pmin, pmax;
+        ndrange = length(a2l.fsi24_patch))
 
     # CNDV: accumulate temperature (TDA)
     if varctl.use_cndv
-        for p in bounds_p
-            c = patch_column[p]
-            t_val = a2l.forc_t_downscaled_col[c]
-            a2l.t_mo_patch[p] = t_val
-            a2l.t_mo_min_patch[p] = min(a2l.t_mo_min_patch[p], t_val)
-        end
+        _launch!(_a2l_cndv_kernel!, a2l.t_mo_patch, a2l.t_mo_min_patch,
+            patch_column, a2l.forc_t_downscaled_col, pmin, pmax;
+            ndrange = length(a2l.t_mo_patch))
     end
 
     # FATES: accumulate wind
     if varctl.use_fates
-        for p in bounds_p
-            g = patch_gridcell[p]
-            a2l.wind24_patch[p] = a2l.forc_wind_grc[g]
-        end
+        _launch!(_a2l_fates_kernel!, a2l.wind24_patch,
+            patch_gridcell, a2l.forc_wind_grc, pmin, pmax;
+            ndrange = length(a2l.wind24_patch))
     end
 
     # LUNA: accumulate pco2, po2, pbot
     if varctl.use_luna
-        for p in bounds_p
-            g = patch_gridcell[p]
-            a2l.forc_pco2_240_patch[p] = a2l.forc_pco2_grc[g]
-        end
-        for p in bounds_p
-            g = patch_gridcell[p]
-            a2l.forc_po2_240_patch[p] = a2l.forc_po2_grc[g]
-        end
-        for p in bounds_p
-            c = patch_column[p]
-            a2l.forc_pbot240_downscaled_patch[p] = a2l.forc_pbot_downscaled_col[c]
-        end
+        _launch!(_a2l_luna_kernel!, a2l.forc_pco2_240_patch,
+            a2l.forc_po2_240_patch, a2l.forc_pbot240_downscaled_patch,
+            patch_gridcell, patch_column, a2l.forc_pco2_grc, a2l.forc_po2_grc,
+            a2l.forc_pbot_downscaled_col, pmin, pmax;
+            ndrange = length(a2l.forc_pco2_240_patch))
     end
 
     nothing
+end
+
+# Per-patch: gather direct beam radiation into FSD24/FSD240.
+@kernel function _a2l_solad_kernel!(fsd24_patch, fsd240_patch,
+        @Const(patch_gridcell), @Const(forc_solad_not_downscaled_grc),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        g = patch_gridcell[p]
+        val = forc_solad_not_downscaled_grc[g, 1]
+        fsd24_patch[p] = val
+        fsd240_patch[p] = val
+    end
+end
+
+# Per-patch: gather diffuse radiation into FSI24/FSI240.
+@kernel function _a2l_solai_kernel!(fsi24_patch, fsi240_patch,
+        @Const(patch_gridcell), @Const(forc_solai_grc),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        g = patch_gridcell[p]
+        val = forc_solai_grc[g, 1]
+        fsi24_patch[p] = val
+        fsi240_patch[p] = val
+    end
+end
+
+# CNDV: per-patch temperature accumulation (TDA) + running monthly min.
+@kernel function _a2l_cndv_kernel!(t_mo_patch, t_mo_min_patch,
+        @Const(patch_column), @Const(forc_t_downscaled_col),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        c = patch_column[p]
+        t_val = forc_t_downscaled_col[c]
+        t_mo_patch[p] = t_val
+        t_mo_min_patch[p] = min(t_mo_min_patch[p], t_val)
+    end
+end
+
+# FATES: per-patch wind accumulation.
+@kernel function _a2l_fates_kernel!(wind24_patch,
+        @Const(patch_gridcell), @Const(forc_wind_grc),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        g = patch_gridcell[p]
+        wind24_patch[p] = forc_wind_grc[g]
+    end
+end
+
+# LUNA: per-patch pco2/po2/pbot accumulation.
+@kernel function _a2l_luna_kernel!(forc_pco2_240_patch, forc_po2_240_patch,
+        forc_pbot240_downscaled_patch, @Const(patch_gridcell), @Const(patch_column),
+        @Const(forc_pco2_grc), @Const(forc_po2_grc), @Const(forc_pbot_downscaled_col),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        g = patch_gridcell[p]
+        c = patch_column[p]
+        forc_pco2_240_patch[p] = forc_pco2_grc[g]
+        forc_po2_240_patch[p] = forc_po2_grc[g]
+        forc_pbot240_downscaled_patch[p] = forc_pbot_downscaled_col[c]
+    end
 end
 
 # --------------------------------------------------------------------------

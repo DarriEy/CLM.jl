@@ -669,9 +669,9 @@ become active (due to landuse change).
 
 Ported from `UrbanAlbedo` in `UrbanAlbedoMod.F90`.
 """
-function urban_albedo!(mask_urbanl::BitVector,
-                       mask_urbanc::BitVector,
-                       mask_urbanp::BitVector,
+function urban_albedo!(mask_urbanl::AbstractVector{Bool},
+                       mask_urbanc::AbstractVector{Bool},
+                       mask_urbanp::AbstractVector{Bool},
                        lun::LandunitData,
                        col::ColumnData,
                        pch::PatchData,
@@ -680,6 +680,11 @@ function urban_albedo!(mask_urbanl::BitVector,
                        urbanparams::UrbanParamsData,
                        solarabs::SolarAbsorbedData,
                        surfalb::SurfaceAlbedoData)
+
+    # No urban landunits/columns/patches → nothing to do. All work here is
+    # urban-gated; the host loops would otherwise scalar-index a device mask even
+    # with no urban present. Device-safe any() reduction; byte-identical (all-false loops).
+    (any(mask_urbanl) || any(mask_urbanc) || any(mask_urbanp)) || return nothing
 
     nl = length(mask_urbanl)
     numrad = NUMRAD

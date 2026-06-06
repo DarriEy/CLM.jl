@@ -74,13 +74,13 @@ end
 
 smstress_effsoilpor!(eff_por, mask, watsat, h2osoi_ice, col_dz, joff::Int, nlevgrnd::Int, denice) =
     _launch!(_smstress_effsoilpor_kernel!, eff_por, mask, watsat, h2osoi_ice, col_dz,
-             joff, denice; ndrange = (length(mask), nlevgrnd))
+             joff, eltype(eff_por)(denice); ndrange = (length(mask), nlevgrnd))
 
-function calc_effective_soilporosity!(watsat::Matrix{<:Real},
-                                      h2osoi_ice::Matrix{<:Real},
-                                      col_dz::Matrix{<:Real},
-                                      eff_por::Matrix{<:Real},
-                                      mask::BitVector,
+function calc_effective_soilporosity!(watsat::AbstractMatrix{<:Real},
+                                      h2osoi_ice::AbstractMatrix{<:Real},
+                                      col_dz::AbstractMatrix{<:Real},
+                                      eff_por::AbstractMatrix{<:Real},
+                                      mask::AbstractVector{Bool},
                                       bounds_col::UnitRange{Int},
                                       nlevgrnd::Int,
                                       nlevsno::Int)
@@ -118,25 +118,26 @@ Arguments:
                                               joff::Int, denice)
     c, jj = @index(Global, NTuple)
     @inbounds if mask[c]
+        T = eltype(eff_por)
         j = jj - joff  # Fortran snow layer index (negative)
         if j >= jtop[c]
             # compute the volumetric ice content
-            vol_ice = min(1.0, h2osoi_ice[c, jj] / (denice * col_dz[c, jj]))
+            vol_ice = min(one(T), h2osoi_ice[c, jj] / (denice * col_dz[c, jj]))
             # compute the maximum snow void space to fill liquid water and air
-            eff_por[c, jj] = 1.0 - vol_ice
+            eff_por[c, jj] = one(T) - vol_ice
         end
     end
 end
 
 smstress_effsnowpor!(eff_por, mask, jtop, h2osoi_ice, col_dz, joff::Int, nlevsno::Int, denice) =
     _launch!(_smstress_effsnowpor_kernel!, eff_por, mask, jtop, h2osoi_ice, col_dz,
-             joff, denice; ndrange = (length(mask), nlevsno))
+             joff, eltype(eff_por)(denice); ndrange = (length(mask), nlevsno))
 
-function calc_effective_snowporosity!(h2osoi_ice::Matrix{<:Real},
-                                      col_dz::Matrix{<:Real},
-                                      jtop::Vector{Int},
-                                      eff_por::Matrix{<:Real},
-                                      mask::BitVector,
+function calc_effective_snowporosity!(h2osoi_ice::AbstractMatrix{<:Real},
+                                      col_dz::AbstractMatrix{<:Real},
+                                      jtop::AbstractVector{<:Integer},
+                                      eff_por::AbstractMatrix{<:Real},
+                                      mask::AbstractVector{Bool},
                                       bounds_col::UnitRange{Int},
                                       lbj::Int,
                                       nlevsno::Int)
@@ -191,15 +192,15 @@ function smstress_volh2oliq!(vol_liq, mask, jtop, eff_porosity, h2osoi_liq, col_
                              lbj::Int, ubj::Int, joff::Int, denh2o)
     nlay = ubj - lbj + 1
     _launch!(_smstress_volh2oliq_kernel!, vol_liq, mask, jtop, eff_porosity, h2osoi_liq,
-             col_dz, lbj, joff, denh2o; ndrange = (length(mask), nlay))
+             col_dz, lbj, joff, eltype(vol_liq)(denh2o); ndrange = (length(mask), nlay))
 end
 
-function calc_volumetric_h2oliq!(eff_porosity::Matrix{<:Real},
-                                  h2osoi_liq::Matrix{<:Real},
-                                  col_dz::Matrix{<:Real},
-                                  jtop::Vector{Int},
-                                  vol_liq::Matrix{<:Real},
-                                  mask::BitVector,
+function calc_volumetric_h2oliq!(eff_porosity::AbstractMatrix{<:Real},
+                                  h2osoi_liq::AbstractMatrix{<:Real},
+                                  col_dz::AbstractMatrix{<:Real},
+                                  jtop::AbstractVector{<:Integer},
+                                  vol_liq::AbstractMatrix{<:Real},
+                                  mask::AbstractVector{Bool},
                                   bounds_col::UnitRange{Int},
                                   lbj::Int,
                                   ubj::Int,

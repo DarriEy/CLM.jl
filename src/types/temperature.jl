@@ -671,39 +671,53 @@ function temperature_update_acc_vars!(temp::TemperatureData,
     # T_VEG240: 240 timesteps = 5 days
     # T10:      480 timesteps = 10 days
 
-    for p in bounds_patch
-        tv = temp.t_veg_patch[p]
-        isfinite(tv) || continue
-
-        # T_VEG24: 24-timestep running mean of vegetation temperature
-        if isnan(temp.t_veg24_patch[p]) || nstep <= 1
-            temp.t_veg24_patch[p] = tv
-        else
-            n24 = min(nstep, 24)
-            temp.t_veg24_patch[p] += (tv - temp.t_veg24_patch[p]) / n24
-        end
-
-        # T_VEG240: 240-timestep running mean of vegetation temperature
-        if isnan(temp.t_veg240_patch[p]) || nstep <= 1
-            temp.t_veg240_patch[p] = tv
-        else
-            n240 = min(nstep, 240)
-            temp.t_veg240_patch[p] += (tv - temp.t_veg240_patch[p]) / n240
-        end
-
-        # T10: 10-day (480 timestep) running mean of 2m reference temperature
-        t2m = temp.t_ref2m_patch[p]
-        if isfinite(t2m)
-            if isnan(temp.t_a10_patch[p]) || nstep <= 1
-                temp.t_a10_patch[p] = t2m
-            else
-                n480 = min(nstep, 480)
-                temp.t_a10_patch[p] += (t2m - temp.t_a10_patch[p]) / n480
-            end
-        end
+    if !isempty(bounds_patch)
+        _launch!(_temp_acc_kernel!, temp.t_veg24_patch, temp.t_veg240_patch,
+            temp.t_a10_patch, temp.t_veg_patch, temp.t_ref2m_patch,
+            nstep, first(bounds_patch), last(bounds_patch);
+            ndrange = length(temp.t_veg24_patch))
     end
 
     return nothing
+end
+
+# Per-patch running means of veg temperature (24/240 ts) and 2m T (480 ts).
+# Own-index read-modify-write; one thread per patch.
+@kernel function _temp_acc_kernel!(t_veg24_patch, t_veg240_patch, t_a10_patch,
+        @Const(t_veg_patch), @Const(t_ref2m_patch),
+        nstep::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        tv = t_veg_patch[p]
+        if isfinite(tv)
+            # T_VEG24: 24-timestep running mean of vegetation temperature
+            if isnan(t_veg24_patch[p]) || nstep <= 1
+                t_veg24_patch[p] = tv
+            else
+                n24 = min(nstep, 24)
+                t_veg24_patch[p] += (tv - t_veg24_patch[p]) / n24
+            end
+
+            # T_VEG240: 240-timestep running mean of vegetation temperature
+            if isnan(t_veg240_patch[p]) || nstep <= 1
+                t_veg240_patch[p] = tv
+            else
+                n240 = min(nstep, 240)
+                t_veg240_patch[p] += (tv - t_veg240_patch[p]) / n240
+            end
+
+            # T10: 10-day (480 timestep) running mean of 2m reference temperature
+            t2m = t_ref2m_patch[p]
+            if isfinite(t2m)
+                if isnan(t_a10_patch[p]) || nstep <= 1
+                    t_a10_patch[p] = t2m
+                else
+                    n480 = min(nstep, 480)
+                    t_a10_patch[p] += (t2m - t_a10_patch[p]) / n480
+                end
+            end
+        end
+    end
 end
 
 """

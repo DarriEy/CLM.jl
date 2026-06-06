@@ -363,37 +363,53 @@ Core logic is ported; accumulator calls are stubs until accumulMod is ported.
 function canopystate_update_acc_vars!(cs::CanopyStateData,
                                        bounds_patch::UnitRange{Int};
                                        nstep::Int = 0)
-    for p in bounds_patch
+    if !isempty(bounds_patch)
+        _launch!(_canopy_acc_kernel!, cs.fsun24_patch, cs.fsun240_patch,
+            cs.elai240_patch, cs.fsun_patch, cs.elai_patch,
+            nstep, first(bounds_patch), last(bounds_patch);
+            ndrange = length(cs.fsun24_patch))
+    end
+
+    return nothing
+end
+
+# Per-patch running means of sunlit fraction (24/240 ts) and exposed LAI (240 ts).
+# Own-index read-modify-write; one thread per patch. T(SPVAL) keeps the
+# missing-value comparison in the device eltype (Metal: Float32-only).
+@kernel function _canopy_acc_kernel!(fsun24_patch, fsun240_patch, elai240_patch,
+        @Const(fsun_patch), @Const(elai_patch),
+        nstep::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(fsun24_patch)
         # FSUN24: 24-timestep running mean of sunlit fraction
-        fsun = cs.fsun_patch[p]
+        fsun = fsun_patch[p]
         if isfinite(fsun)
-            if isnan(cs.fsun24_patch[p]) || cs.fsun24_patch[p] == SPVAL || nstep <= 1
-                cs.fsun24_patch[p] = fsun
+            if isnan(fsun24_patch[p]) || fsun24_patch[p] == T(SPVAL) || nstep <= 1
+                fsun24_patch[p] = fsun
             else
                 n24 = min(nstep, 24)
-                cs.fsun24_patch[p] += (fsun - cs.fsun24_patch[p]) / n24
+                fsun24_patch[p] += (fsun - fsun24_patch[p]) / n24
             end
 
             # FSUN240: 240-timestep running mean of sunlit fraction
-            if isnan(cs.fsun240_patch[p]) || cs.fsun240_patch[p] == SPVAL || nstep <= 1
-                cs.fsun240_patch[p] = fsun
+            if isnan(fsun240_patch[p]) || fsun240_patch[p] == T(SPVAL) || nstep <= 1
+                fsun240_patch[p] = fsun
             else
                 n240 = min(nstep, 240)
-                cs.fsun240_patch[p] += (fsun - cs.fsun240_patch[p]) / n240
+                fsun240_patch[p] += (fsun - fsun240_patch[p]) / n240
             end
         end
 
         # LAI240: 240-timestep running mean of exposed LAI
-        elai = cs.elai_patch[p]
+        elai = elai_patch[p]
         if isfinite(elai)
-            if isnan(cs.elai240_patch[p]) || cs.elai240_patch[p] == SPVAL || nstep <= 1
-                cs.elai240_patch[p] = elai
+            if isnan(elai240_patch[p]) || elai240_patch[p] == T(SPVAL) || nstep <= 1
+                elai240_patch[p] = elai
             else
                 n240 = min(nstep, 240)
-                cs.elai240_patch[p] += (elai - cs.elai240_patch[p]) / n240
+                elai240_patch[p] += (elai - elai240_patch[p]) / n240
             end
         end
     end
-
-    return nothing
 end

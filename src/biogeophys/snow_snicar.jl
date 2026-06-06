@@ -987,6 +987,159 @@ end
 # snowage_grain!
 # --------------------------------------------------------------------------
 
+# Per-column snow-grain aging (one thread per column; inner snow-layer loop
+# sequential in-thread). All Float64 module constants / params scalars are passed
+# as the working element type so the kernel carries no Float64 on a Float32-only
+# backend (Metal); on Float64 the conversions are byte-identical.
+@kernel function _snowage_grain_kernel!(
+    snw_rds, snw_rds_top, sno_liq_top, snot_top, dTdz_top,
+    @Const(snl), @Const(dz), @Const(frac_sno),
+    @Const(h2osoi_liq), @Const(h2osoi_ice), @Const(t_soisno),
+    @Const(qflx_snow_grnd_col), @Const(qflx_snofrz_lyr), @Const(forc_t),
+    @Const(snowage_tau), @Const(snowage_kappa), @Const(snowage_drdt0),
+    @Const(mask), nlevsno::Int, dtime,
+    snw_rds_min, C2_liq_Brun89, xdrdt, snw_rds_refrz,
+    fresh_snw_rds_max, secsphr, snw_rds_max, tfrz)
+    c = @index(Global)
+    @inbounds if mask[c] && snl[c] < 0
+        T = eltype(snw_rds)
+        joff = nlevsno
+        snl_btm_j = 0 + joff
+        snl_top_j = (snl[c] + 1) + joff
+
+        for i in snl_top_j:snl_btm_j
+            cdz_i = frac_sno[c] * dz[c, i]
+            if !isfinite(cdz_i) || cdz_i <= zero(cdz_i)
+                continue
+            end
+
+            # 1. DRY SNOW AGING
+            h2osno_lyr = h2osoi_liq[c, i] + h2osoi_ice[c, i]
+
+            if i == snl_top_j
+                t_snotop = t_soisno[c, snl_top_j]
+                t_snobtm = (t_soisno[c, i+1] * dz[c, i] +
+                            t_soisno[c, i] * dz[c, i+1]) /
+                           (dz[c, i] + dz[c, i+1])
+            else
+                t_snotop = (t_soisno[c, i-1] * dz[c, i] +
+                            t_soisno[c, i] * dz[c, i-1]) /
+                           (dz[c, i] + dz[c, i-1])
+                t_snobtm = (t_soisno[c, i+1] * dz[c, i] +
+                            t_soisno[c, i] * dz[c, i+1]) /
+                           (dz[c, i] + dz[c, i+1])
+            end
+
+            dTdz_val = smooth_abs((t_snotop - t_snobtm) / cdz_i)
+            if !isfinite(dTdz_val)
+                dTdz_val = zero(dTdz_val)
+            end
+
+            rhos = (h2osoi_liq[c, i] + h2osoi_ice[c, i]) / cdz_i
+            rhos = smooth_max(oftype(rhos, 50.0), rhos)
+            if !isfinite(rhos)
+                rhos = oftype(rhos, 50.0)
+            end
+
+            T_idx = round(Int, (t_soisno[c, i] - 223) / 5) + 1
+            Tgrd_idx = round(Int, dTdz_val / 10) + 1
+            rhos_idx = round(Int, (rhos - 50) / 50) + 1
+
+            T_idx = clamp(T_idx, IDX_T_MIN, IDX_T_MAX)
+            Tgrd_idx = clamp(Tgrd_idx, IDX_TGRD_MIN, IDX_TGRD_MAX)
+            rhos_idx = clamp(rhos_idx, IDX_RHOS_MIN, IDX_RHOS_MAX)
+
+            bst_tau = snowage_tau[rhos_idx, Tgrd_idx, T_idx]
+            bst_kappa = snowage_kappa[rhos_idx, Tgrd_idx, T_idx]
+            bst_drdt0 = snowage_drdt0[rhos_idx, Tgrd_idx, T_idx]
+
+            snw_rds[c, i] = smooth_max(snw_rds[c, i], snw_rds_min)
+
+            dr_fresh = snw_rds[c, i] - snw_rds_min
+            dr = (bst_drdt0 * (bst_tau / (dr_fresh + bst_tau))^(one(T) / bst_kappa)) *
+                 (dtime / secsphr)
+
+            # 2. WET SNOW AGING
+            frc_liq = smooth_min(oftype(snw_rds[c, i], 0.1),
+                                 h2osoi_liq[c, i] / (h2osoi_liq[c, i] + h2osoi_ice[c, i]))
+            dr_wet = oftype(snw_rds[c, i], 1.0e18) *
+                     (dtime * (C2_liq_Brun89 * frc_liq^3) /
+                      (oftype(snw_rds[c, i], 4.0) * T(π) * snw_rds[c, i] * snw_rds[c, i]))
+
+            dr += dr_wet
+
+            # 3. SNOWAGE SCALING
+            dr *= xdrdt
+
+            # 4. INCREMENT EFFECTIVE RADIUS
+            newsnow = smooth_max(zero(T), qflx_snow_grnd_col[c] * dtime)
+            refrzsnow = smooth_max(zero(T), qflx_snofrz_lyr[c, i] * dtime)
+
+            frc_refrz = refrzsnow / h2osno_lyr
+
+            if i == snl_top_j
+                frc_newsnow = newsnow / h2osno_lyr
+            else
+                frc_newsnow = zero(T)
+            end
+
+            if (frc_refrz + frc_newsnow) > one(T)
+                frc_refrz = frc_refrz / (frc_refrz + frc_newsnow)
+                frc_newsnow = one(T) - frc_refrz
+                frc_oldsnow = zero(T)
+            else
+                frc_oldsnow = one(T) - frc_refrz - frc_newsnow
+            end
+
+            # Inlined fresh_snow_radius(forc_t[c]; params)
+            tmin = tfrz - oftype(tfrz, 30.0)
+            tmax = tfrz
+            if fresh_snw_rds_max <= snw_rds_min
+                snw_rds_fresh = snw_rds_min
+            else
+                gs_max = fresh_snw_rds_max
+                gs_min = snw_rds_min
+                ft = forc_t[c]
+                if ft < tmin
+                    snw_rds_fresh = gs_min
+                elseif ft > tmax
+                    snw_rds_fresh = gs_max
+                else
+                    snw_rds_fresh = (tmax - ft) / (tmax - tmin) * gs_min +
+                                    (ft - tmin) / (tmax - tmin) * gs_max
+                end
+            end
+
+            snw_rds[c, i] = (snw_rds[c, i] + dr) * frc_oldsnow +
+                            snw_rds_fresh * frc_newsnow +
+                            snw_rds_refrz * frc_refrz
+
+            # 5. BOUNDARY CHECK
+            snw_rds[c, i] = smooth_max(snw_rds[c, i], snw_rds_min)
+            snw_rds[c, i] = smooth_min(snw_rds[c, i], snw_rds_max)
+
+            if i == snl_top_j
+                snot_top[c] = t_soisno[c, i]
+                dTdz_top[c] = dTdz_val
+                snw_rds_top[c] = snw_rds[c, i]
+                sno_liq_top[c] = h2osoi_liq[c, i] / (h2osoi_liq[c, i] + h2osoi_ice[c, i])
+            end
+        end
+    end
+end
+
+# Columns with no snow layers but some snow mass: set top layer to min radius.
+@kernel function _snowage_grain_nolayers_kernel!(
+    snw_rds, @Const(mask), @Const(snl), @Const(h2osno_no_layers),
+    nlevsno::Int, snw_rds_min)
+    c = @index(Global)
+    @inbounds if mask[c] && snl[c] >= 0
+        if h2osno_no_layers[c] > zero(eltype(h2osno_no_layers))
+            snw_rds[c, nlevsno] = snw_rds_min
+        end
+    end
+end
+
 """
     snowage_grain!(snl, dz, frac_sno, h2osoi_liq, h2osoi_ice,
                    t_soisno, t_grnd, qflx_snow_grnd_col, qflx_snofrz_lyr,
@@ -1025,171 +1178,75 @@ Ported from `SnowAge_grain` in `SnowSnicarMod.F90`.
 - `nlevsno::Int`: maximum number of snow layers
 - `dtime::Float64`: time step [sec]
 """
-function snowage_grain!(snl::Vector{Int},
-                        dz::Matrix{<:Real},
-                        frac_sno::Vector{<:Real},
-                        h2osoi_liq::Matrix{<:Real},
-                        h2osoi_ice::Matrix{<:Real},
-                        t_soisno::Matrix{<:Real},
-                        t_grnd::Vector{<:Real},
-                        qflx_snow_grnd_col::Vector{<:Real},
-                        qflx_snofrz_lyr::Matrix{<:Real},
-                        h2osno_no_layers::Vector{<:Real},
-                        forc_t::Vector{<:Real},
-                        snw_rds::Matrix{<:Real},
-                        snw_rds_top::Vector{<:Real},
-                        sno_liq_top::Vector{<:Real},
-                        snot_top::Vector{<:Real},
-                        dTdz_top::Vector{<:Real},
+function snowage_grain!(snl::AbstractVector{<:Integer},
+                        dz::AbstractMatrix{<:Real},
+                        frac_sno::AbstractVector{<:Real},
+                        h2osoi_liq::AbstractMatrix{<:Real},
+                        h2osoi_ice::AbstractMatrix{<:Real},
+                        t_soisno::AbstractMatrix{<:Real},
+                        t_grnd::AbstractVector{<:Real},
+                        qflx_snow_grnd_col::AbstractVector{<:Real},
+                        qflx_snofrz_lyr::AbstractMatrix{<:Real},
+                        h2osno_no_layers::AbstractVector{<:Real},
+                        forc_t::AbstractVector{<:Real},
+                        snw_rds::AbstractMatrix{<:Real},
+                        snw_rds_top::AbstractVector{<:Real},
+                        sno_liq_top::AbstractVector{<:Real},
+                        snot_top::AbstractVector{<:Real},
+                        dTdz_top::AbstractVector{<:Real},
                         nlevsno::Int,
                         dtime::Real;
-                        mask_snowc::Union{BitVector,Nothing}=nothing,
-                        mask_nosnowc::Union{BitVector,Nothing}=nothing,
+                        mask_snowc::Union{AbstractVector{Bool},Nothing}=nothing,
+                        mask_nosnowc::Union{AbstractVector{Bool},Nothing}=nothing,
                         params::SnicarParams=snicar_params,
                         aging::SnicarAgingData=snicar_aging)
 
-    joff = nlevsno  # offset: Fortran index i maps to Julia index i + joff
     ncols = length(snl)
+    T = eltype(snw_rds)
 
-    # Loop over columns with snow layers
-    for c_idx in 1:ncols
-        if mask_snowc !== nothing && !mask_snowc[c_idx]
-            continue
-        end
-        if snl[c_idx] >= 0
-            continue
-        end
+    # No snow layers anywhere → snowage does nothing (the kernel guards on snl<0).
+    # Skip entirely (device-safe reduction, no scalar index) so the no-snow default
+    # path doesn't compile/launch the kernel. Byte-identical (all-skipped loop).
+    any(snl .< 0) || return nothing
 
-        snl_btm = 0
-        snl_top = snl[c_idx] + 1
+    # Build snow / no-snow masks (default = all columns) on the snw_rds backend so
+    # the kernels stay scalar-index-free on the device.
+    msnow   = mask_snowc   === nothing ? fill!(similar(snw_rds, Bool, ncols), true) : mask_snowc
+    mnosnow = mask_nosnowc === nothing ? fill!(similar(snw_rds, Bool, ncols), true) : mask_nosnowc
 
-        snl_btm_j = snl_btm + joff
-        snl_top_j = snl_top + joff
+    # params scalars at working precision (byte-identical on Float64).
+    snw_rds_min_T    = T(params.snw_rds_min)
+    C2_liq_T         = T(params.C2_liq_Brun89)
+    xdrdt_T          = T(params.xdrdt)
+    snw_rds_refrz_T  = T(params.snw_rds_refrz)
+    fresh_max_T      = T(params.fresh_snw_rds_max)
+    secsphr_T        = T(SECSPHR)
+    snw_rds_max_T    = T(SNW_RDS_MAX)
+    tfrz_T           = T(TFRZ)
+    dtime_T          = T(dtime)
 
-        # Column average layer thickness
-        FT_sg = eltype(dz)
-        cdz = zeros(FT_sg, nlevsno)
-        for i in snl_top_j:snl_btm_j
-            cdz[i] = frac_sno[c_idx] * dz[c_idx, i]
-        end
+    # SNICAR aging lookup tables are host Float64 3D globals; move onto the working
+    # backend so they aren't host Arrays in the device kernel (no-op on CPU).
+    _age(a) = snw_rds isa Array ? a : copyto!(similar(snw_rds, T, size(a)), T.(a))
+    snowage_tau_d   = _age(aging.snowage_tau)
+    snowage_kappa_d = _age(aging.snowage_kappa)
+    snowage_drdt0_d = _age(aging.snowage_drdt0)
 
-        for i in snl_top_j:snl_btm_j
-            if !isfinite(cdz[i]) || cdz[i] <= 0.0
-                continue
-            end
-
-            # 1. DRY SNOW AGING
-            h2osno_lyr = h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]
-
-            # Temperature gradient
-            if i == snl_top_j
-                t_snotop = t_soisno[c_idx, snl_top_j]
-                t_snobtm = (t_soisno[c_idx, i+1] * dz[c_idx, i] +
-                            t_soisno[c_idx, i] * dz[c_idx, i+1]) /
-                           (dz[c_idx, i] + dz[c_idx, i+1])
-            else
-                t_snotop = (t_soisno[c_idx, i-1] * dz[c_idx, i] +
-                            t_soisno[c_idx, i] * dz[c_idx, i-1]) /
-                           (dz[c_idx, i] + dz[c_idx, i-1])
-                t_snobtm = (t_soisno[c_idx, i+1] * dz[c_idx, i] +
-                            t_soisno[c_idx, i] * dz[c_idx, i+1]) /
-                           (dz[c_idx, i] + dz[c_idx, i+1])
-            end
-
-            dTdz_val = smooth_abs((t_snotop - t_snobtm) / cdz[i])
-            if !isfinite(dTdz_val)
-                dTdz_val = 0.0
-            end
-
-            # Snow density
-            rhos = (h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]) / cdz[i]
-            rhos = smooth_max(50.0, rhos)
-            if !isfinite(rhos)
-                rhos = 50.0
-            end
-
-            # Best-fit table indices
-            T_idx = round(Int, (t_soisno[c_idx, i] - 223) / 5) + 1
-            Tgrd_idx = round(Int, dTdz_val / 10) + 1
-            rhos_idx = round(Int, (rhos - 50) / 50) + 1
-
-            T_idx = clamp(T_idx, IDX_T_MIN, IDX_T_MAX)
-            Tgrd_idx = clamp(Tgrd_idx, IDX_TGRD_MIN, IDX_TGRD_MAX)
-            rhos_idx = clamp(rhos_idx, IDX_RHOS_MIN, IDX_RHOS_MAX)
-
-            bst_tau = aging.snowage_tau[rhos_idx, Tgrd_idx, T_idx]
-            bst_kappa = aging.snowage_kappa[rhos_idx, Tgrd_idx, T_idx]
-            bst_drdt0 = aging.snowage_drdt0[rhos_idx, Tgrd_idx, T_idx]
-
-            # Boundary check
-            snw_rds[c_idx, i] = smooth_max(snw_rds[c_idx, i], params.snw_rds_min)
-
-            # Change in effective radius
-            dr_fresh = snw_rds[c_idx, i] - params.snw_rds_min
-            dr = (bst_drdt0 * (bst_tau / (dr_fresh + bst_tau))^(1.0 / bst_kappa)) * (dtime / SECSPHR)
-
-            # 2. WET SNOW AGING
-            frc_liq = smooth_min(0.1, h2osoi_liq[c_idx, i] / (h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i]))
-            dr_wet = 1.0e18 * (dtime * (params.C2_liq_Brun89 * frc_liq^3) /
-                     (4.0 * π * snw_rds[c_idx, i] * snw_rds[c_idx, i]))
-
-            dr += dr_wet
-
-            # 3. SNOWAGE SCALING
-            dr *= params.xdrdt
-
-            # 4. INCREMENT EFFECTIVE RADIUS
-            newsnow = smooth_max(0.0, qflx_snow_grnd_col[c_idx] * dtime)
-            refrzsnow = smooth_max(0.0, qflx_snofrz_lyr[c_idx, i] * dtime)
-
-            frc_refrz = refrzsnow / h2osno_lyr
-
-            if i == snl_top_j
-                frc_newsnow = newsnow / h2osno_lyr
-            else
-                frc_newsnow = 0.0
-            end
-
-            if (frc_refrz + frc_newsnow) > 1.0
-                frc_refrz = frc_refrz / (frc_refrz + frc_newsnow)
-                frc_newsnow = 1.0 - frc_refrz
-                frc_oldsnow = 0.0
-            else
-                frc_oldsnow = 1.0 - frc_refrz - frc_newsnow
-            end
-
-            snw_rds_fresh = fresh_snow_radius(forc_t[c_idx]; params=params)
-
-            snw_rds[c_idx, i] = (snw_rds[c_idx, i] + dr) * frc_oldsnow +
-                                 snw_rds_fresh * frc_newsnow +
-                                 params.snw_rds_refrz * frc_refrz
-
-            # 5. BOUNDARY CHECK
-            snw_rds[c_idx, i] = smooth_max(snw_rds[c_idx, i], params.snw_rds_min)
-            snw_rds[c_idx, i] = smooth_min(snw_rds[c_idx, i], SNW_RDS_MAX)
-
-            # Top layer variables for history
-            if i == snl_top_j
-                snot_top[c_idx] = t_soisno[c_idx, i]
-                dTdz_top[c_idx] = dTdz_val
-                snw_rds_top[c_idx] = snw_rds[c_idx, i]
-                sno_liq_top[c_idx] = h2osoi_liq[c_idx, i] / (h2osoi_liq[c_idx, i] + h2osoi_ice[c_idx, i])
-            end
-        end
-    end
+    # Columns with snow layers
+    _launch!(_snowage_grain_kernel!,
+             snw_rds, snw_rds_top, sno_liq_top, snot_top, dTdz_top,
+             snl, dz, frac_sno, h2osoi_liq, h2osoi_ice, t_soisno,
+             qflx_snow_grnd_col, qflx_snofrz_lyr, forc_t,
+             snowage_tau_d, snowage_kappa_d, snowage_drdt0_d,
+             msnow, nlevsno, dtime_T,
+             snw_rds_min_T, C2_liq_T, xdrdt_T, snw_rds_refrz_T,
+             fresh_max_T, secsphr_T, snw_rds_max_T, tfrz_T;
+             ndrange = ncols)
 
     # Columns with no snow layers but some snow mass
-    for c_idx in 1:ncols
-        if mask_nosnowc !== nothing && !mask_nosnowc[c_idx]
-            continue
-        end
-        if snl[c_idx] < 0
-            continue
-        end
-        if h2osno_no_layers[c_idx] > 0.0
-            snw_rds[c_idx, nlevsno] = params.snw_rds_min
-        end
-    end
+    _launch!(_snowage_grain_nolayers_kernel!,
+             snw_rds, mnosnow, snl, h2osno_no_layers, nlevsno, snw_rds_min_T;
+             ndrange = ncols)
 
     return nothing
 end

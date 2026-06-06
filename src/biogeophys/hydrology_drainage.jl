@@ -39,39 +39,26 @@ Assigns `qflx_ice_runoff_snwcp` for all non-lake columns.
 
 Ported from inline code in `HydrologyDrainage` in `HydrologyDrainageMod.F90`.
 """
-function compute_wetland_ice_hydrology!(
-    qflx_drain::Vector{<:Real},
-    qflx_drain_perched::Vector{<:Real},
-    qflx_surf::Vector{<:Real},
-    qflx_infl::Vector{<:Real},
-    qflx_qrgwl::Vector{<:Real},
-    qflx_latflow_out::Vector{<:Real},
-    qflx_rsub_sat::Vector{<:Real},
-    qflx_evap_tot::Vector{<:Real},
-    qflx_snwcp_ice::Vector{<:Real},
-    qflx_snwcp_discarded_ice::Vector{<:Real},
-    qflx_snwcp_discarded_liq::Vector{<:Real},
-    qflx_ice_runoff_snwcp::Vector{<:Real},
-    forc_rain::Vector{<:Real},
-    forc_snow::Vector{<:Real},
-    qflx_floodg::Vector{<:Real},
-    begwb::Vector{<:Real},
-    endwb::Vector{<:Real},
-    col_landunit::Vector{Int},
-    col_gridcell::Vector{Int},
-    col_itype::Vector{Int},
-    lun_itype::Vector{Int},
-    lun_urbpoi::AbstractVector{Bool},
-    mask_nolake::BitVector,
-    bounds::UnitRange{Int},
-    dtime::Real
-)
-    for c in bounds
-        mask_nolake[c] || continue
+# ---- compute_wetland_ice_hydrology! : per-column wetland/ice + urban fluxes ----
+# Each column is fully independent (no loop-carried deps / cross-column coupling).
+# One thread per column, mask-gated. dtime is passed as a working-eltype scalar
+# and SPVAL is eltype-converted so no Float64 reaches a Float32-only backend
+# (Metal); byte-identical on a Float64 CPU run. Bare 0.0 stores are left as-is.
+@kernel function _hyddr_wetland_ice_kernel!(qflx_drain, qflx_drain_perched, qflx_surf,
+        qflx_infl, qflx_qrgwl, qflx_latflow_out, qflx_rsub_sat,
+        qflx_ice_runoff_snwcp, @Const(mask), @Const(col_landunit), @Const(col_gridcell),
+        @Const(col_itype), @Const(lun_itype), @Const(lun_urbpoi),
+        @Const(qflx_evap_tot), @Const(qflx_snwcp_ice), @Const(qflx_snwcp_discarded_ice),
+        @Const(qflx_snwcp_discarded_liq), @Const(forc_rain), @Const(forc_snow),
+        @Const(qflx_floodg), @Const(begwb), @Const(endwb),
+        istwet::Int, istice::Int, icol_road_perv::Int, spval, dtime)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(qflx_drain)
         l = col_landunit[c]
         g = col_gridcell[c]
 
-        if lun_itype[l] == ISTWET || lun_itype[l] == ISTICE
+        if lun_itype[l] == istwet || lun_itype[l] == istice
             qflx_latflow_out[c]   = 0.0
             qflx_drain[c]         = 0.0
             qflx_drain_perched[c] = 0.0
@@ -80,15 +67,52 @@ function compute_wetland_ice_hydrology!(
             qflx_qrgwl[c] = forc_rain[c] + forc_snow[c] + qflx_floodg[g] -
                              qflx_evap_tot[c] - qflx_snwcp_ice[c] -
                              qflx_snwcp_discarded_ice[c] - qflx_snwcp_discarded_liq[c] -
-                             (endwb[c] - begwb[c]) / dtime
-        elseif lun_urbpoi[l] && col_itype[c] != ICOL_ROAD_PERV
+                             (endwb[c] - begwb[c]) / T(dtime)
+        elseif lun_urbpoi[l] && col_itype[c] != icol_road_perv
             qflx_drain_perched[c] = 0.0
-            qflx_rsub_sat[c]      = SPVAL
+            qflx_rsub_sat[c]      = T(spval)
             qflx_infl[c]          = 0.0
         end
 
         qflx_ice_runoff_snwcp[c] = qflx_snwcp_ice[c]
     end
+end
+
+function compute_wetland_ice_hydrology!(
+    qflx_drain::AbstractVector{<:Real},
+    qflx_drain_perched::AbstractVector{<:Real},
+    qflx_surf::AbstractVector{<:Real},
+    qflx_infl::AbstractVector{<:Real},
+    qflx_qrgwl::AbstractVector{<:Real},
+    qflx_latflow_out::AbstractVector{<:Real},
+    qflx_rsub_sat::AbstractVector{<:Real},
+    qflx_evap_tot::AbstractVector{<:Real},
+    qflx_snwcp_ice::AbstractVector{<:Real},
+    qflx_snwcp_discarded_ice::AbstractVector{<:Real},
+    qflx_snwcp_discarded_liq::AbstractVector{<:Real},
+    qflx_ice_runoff_snwcp::AbstractVector{<:Real},
+    forc_rain::AbstractVector{<:Real},
+    forc_snow::AbstractVector{<:Real},
+    qflx_floodg::AbstractVector{<:Real},
+    begwb::AbstractVector{<:Real},
+    endwb::AbstractVector{<:Real},
+    col_landunit::AbstractVector{<:Integer},
+    col_gridcell::AbstractVector{<:Integer},
+    col_itype::AbstractVector{<:Integer},
+    lun_itype::AbstractVector{<:Integer},
+    lun_urbpoi::AbstractVector{Bool},
+    mask_nolake::AbstractVector{Bool},
+    bounds::UnitRange{Int},
+    dtime::Real
+)
+    T = eltype(qflx_drain)
+    _launch!(_hyddr_wetland_ice_kernel!, qflx_drain, qflx_drain_perched, qflx_surf,
+             qflx_infl, qflx_qrgwl, qflx_latflow_out, qflx_rsub_sat,
+             qflx_ice_runoff_snwcp, mask_nolake, col_landunit, col_gridcell,
+             col_itype, lun_itype, lun_urbpoi, qflx_evap_tot, qflx_snwcp_ice,
+             qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq, forc_rain, forc_snow,
+             qflx_floodg, begwb, endwb, ISTWET, ISTICE, ICOL_ROAD_PERV, T(SPVAL), T(dtime);
+             ndrange = length(mask_nolake))
 
     return nothing
 end
@@ -109,32 +133,44 @@ runoff, and perched drainage. Assigns urban and rural runoff separately.
 
 Ported from inline code in `HydrologyDrainage` in `HydrologyDrainageMod.F90`.
 """
-function compute_total_runoff!(
-    qflx_runoff::Vector{<:Real},
-    qflx_runoff_u::Vector{<:Real},
-    qflx_runoff_r::Vector{<:Real},
-    qflx_drain::Vector{<:Real},
-    qflx_surf::Vector{<:Real},
-    qflx_qrgwl::Vector{<:Real},
-    qflx_drain_perched::Vector{<:Real},
-    col_landunit::Vector{Int},
-    lun_itype::Vector{Int},
-    lun_urbpoi::AbstractVector{Bool},
-    mask_nolake::BitVector,
-    bounds::UnitRange{Int}
-)
-    for c in bounds
-        mask_nolake[c] || continue
+# ---- compute_total_runoff! : per-column total + urban/rural split ----
+# Each column is fully independent. One thread per column, mask-gated. No Float64
+# literals in arithmetic; byte-identical on a Float64 CPU run.
+@kernel function _hyddr_total_runoff_kernel!(qflx_runoff, qflx_runoff_u, qflx_runoff_r,
+        @Const(qflx_drain), @Const(qflx_surf), @Const(qflx_qrgwl),
+        @Const(qflx_drain_perched), @Const(mask), @Const(col_landunit),
+        @Const(lun_itype), @Const(lun_urbpoi), istsoil::Int, istcrop::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
         l = col_landunit[c]
-
         qflx_runoff[c] = qflx_drain[c] + qflx_surf[c] + qflx_qrgwl[c] + qflx_drain_perched[c]
 
         if lun_urbpoi[l]
             qflx_runoff_u[c] = qflx_runoff[c]
-        elseif lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+        elseif lun_itype[l] == istsoil || lun_itype[l] == istcrop
             qflx_runoff_r[c] = qflx_runoff[c]
         end
     end
+end
+
+function compute_total_runoff!(
+    qflx_runoff::AbstractVector{<:Real},
+    qflx_runoff_u::AbstractVector{<:Real},
+    qflx_runoff_r::AbstractVector{<:Real},
+    qflx_drain::AbstractVector{<:Real},
+    qflx_surf::AbstractVector{<:Real},
+    qflx_qrgwl::AbstractVector{<:Real},
+    qflx_drain_perched::AbstractVector{<:Real},
+    col_landunit::AbstractVector{<:Integer},
+    lun_itype::AbstractVector{<:Integer},
+    lun_urbpoi::AbstractVector{Bool},
+    mask_nolake::AbstractVector{Bool},
+    bounds::UnitRange{Int}
+)
+    _launch!(_hyddr_total_runoff_kernel!, qflx_runoff, qflx_runoff_u, qflx_runoff_r,
+             qflx_drain, qflx_surf, qflx_qrgwl, qflx_drain_perched, mask_nolake,
+             col_landunit, lun_itype, lun_urbpoi, ISTSOIL, ISTCROP;
+             ndrange = length(mask_nolake))
 
     return nothing
 end
@@ -154,19 +190,26 @@ Stub: TotalWaterAndHeatMod is not yet ported. When ported, this function
 should compute total water mass (liquid + ice + snow + surface water +
 aquifer) for each non-lake column and store in endwb.
 """
+# ---- compute_water_mass_non_lake! (stub) : zero endwb per non-lake column ----
+# One thread per column, mask-gated. Bare 0.0 store (auto-converts on assignment).
+@kernel function _hyddr_water_mass_stub_kernel!(endwb, @Const(mask))
+    c = @index(Global)
+    @inbounds if mask[c]
+        endwb[c] = 0.0
+    end
+end
+
 function compute_water_mass_non_lake!(
-    endwb::Vector{<:Real},
+    endwb::AbstractVector{<:Real},
     waterstatebulk::WaterStateBulkData,
     waterdiagbulk::WaterDiagnosticBulkData,
-    mask_nolake::BitVector,
+    mask_nolake::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     # Stub: sets endwb to 0.0 for all non-lake columns.
     # When TotalWaterAndHeatMod is ported, replace with actual computation.
-    for c in bounds
-        mask_nolake[c] || continue
-        endwb[c] = 0.0
-    end
+    _launch!(_hyddr_water_mass_stub_kernel!, endwb, mask_nolake;
+             ndrange = length(mask_nolake))
 
     return nothing
 end
@@ -188,10 +231,10 @@ function should adjust qflx_qrgwl and qflx_ice_runoff_snwcp based on
 glacier SMB calculations.
 """
 function adjust_runoff_terms!(
-    qflx_qrgwl::Vector{<:Real},
-    qflx_ice_runoff_snwcp::Vector{<:Real},
+    qflx_qrgwl::AbstractVector{<:Real},
+    qflx_ice_runoff_snwcp::AbstractVector{<:Real},
     waterfluxbulk::WaterFluxBulkData,
-    mask_do_smb::BitVector,
+    mask_do_smb::AbstractVector{Bool},
     bounds::UnitRange{Int}
 )
     # Stub: no-op until GlacierSurfaceMassBalanceMod is ported
@@ -231,13 +274,13 @@ function hydrology_drainage!(
     waterfluxbulk::WaterFluxBulkData,
     col::ColumnData,
     lun::LandunitData,
-    mask_nolake::BitVector,
-    mask_hydrology::BitVector,
-    mask_urban::BitVector,
-    mask_do_smb::BitVector,
-    forc_rain::Vector{<:Real},
-    forc_snow::Vector{<:Real},
-    qflx_floodg::Vector{<:Real},
+    mask_nolake::AbstractVector{Bool},
+    mask_hydrology::AbstractVector{Bool},
+    mask_urban::AbstractVector{Bool},
+    mask_do_smb::AbstractVector{Bool},
+    forc_rain::AbstractVector{<:Real},
+    forc_snow::AbstractVector{<:Real},
+    qflx_floodg::AbstractVector{<:Real},
     bounds::UnitRange{Int},
     dtime::Real,
     nlevsno::Int,
@@ -278,10 +321,14 @@ function hydrology_drainage!(
         # Perched/subsurface lateral flow expects gridcell-indexed vectors.
         # In single-point mode, use safe defaults when no external routing data exist.
         FT = eltype(temperature.t_soisno_col)
-        ng = isempty(bounds) ? 0 : maximum(col.gridcell[bounds])
+        # gridcell ids: pull to host so the maximum() stays scalar-index-free on device.
+        ng = isempty(bounds) ? 0 : maximum(Array(col.gridcell)[bounds])
+        # tdepth/tdepthmax are only read on the (CPU-only) hillslope branch, so plain
+        # host scratch is fine. grc_area is read inside the subsurface_lateral_flow!
+        # device kernel, so it must live on the same backend as the state arrays.
         tdepth_grc = zeros(FT, ng)
         tdepthmax_grc = zeros(FT, ng)
-        grc_area = ones(FT, ng)
+        grc_area = fill!(similar(waterstatebulk.ws.h2osoi_liq_col, FT, ng), one(FT))
 
         perched_lateral_flow!(
             soilhydrology, soilstate,

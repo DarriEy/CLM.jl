@@ -327,8 +327,8 @@ this routine.
 Ported from `clm_drv_patch2col` in `clm_driver.F90`.
 """
 function clm_drv_patch2col!(bounds::BoundsType,
-                             mask_allc::BitVector,
-                             mask_nolakec::BitVector,
+                             mask_allc::AbstractVector{Bool},
+                             mask_nolakec::AbstractVector{Bool},
                              energyflux::EnergyFluxData,
                              waterfluxbulk::WaterFluxBulkData,
                              col_data::ColumnData,
@@ -412,8 +412,11 @@ Convert a BitVector mask to the (count, index-array) form used by some
 ported Fortran routines (e.g. urban_fluxes!) that have not yet been
 converted to the BitVector interface.
 """
-function bitvec_to_filter(mask::BitVector)
-    indices = findall(mask)
+function bitvec_to_filter(mask::AbstractVector{Bool})
+    # findall on the host (Array() a device mask first) — this builds an integer
+    # filter for the host-side urban integer-filter API.
+    m = mask isa Array ? mask : Array(mask)
+    indices = findall(m)
     return (length(indices), indices)
 end
 
@@ -558,9 +561,22 @@ function clm_drv_core!(config::CLMDriverConfig,
     # q = 0.622 * e / (p - 0.378 * e), where e = forc_vp, p = forc_pbot
     nc = length(a2l.forc_pbot_downscaled_col)
     FT = eltype(a2l.forc_pbot_downscaled_col)
+    # Backend-aware scratch/parameter helpers. On CPU `_bref` is a plain Array so
+    # these are ordinary host allocations; on a GPU device run `_bref` is a device
+    # array so `similar` lands the scratch on-device and `_onbk` copies global
+    # (host) parameter arrays — e.g. pftcon.* — onto the working backend at FT.
+    _bref = a2l.forc_pbot_downscaled_col
+    _zlike(dims...)       = fill!(similar(_bref, FT, dims...), zero(FT))
+    _olike(dims...)       = fill!(similar(_bref, FT, dims...), one(FT))
+    _fulllike(v, dims...) = fill!(similar(_bref, FT, dims...), FT(v))
+    _blike(dims...)       = fill!(similar(_bref, Bool, dims...), false)
+    _onbk(arr)            = _bref isa Array ? arr : Adapt.adapt(typeof(_bref).name.wrapper, FT.(arr))
+    # Match the timestep scalar to the working precision (Float64 on CPU, Float32
+    # on device) so it doesn't leak a `double` into the device kernels it's passed to.
+    dtime = FT(dtime)
     # Column specific humidity from vapor pressure — KernelAbstractions kernel
     # (runs on CPU or GPU depending on where the arrays live). See kernels.jl.
-    forc_q_col = zeros(FT, nc)
+    forc_q_col = _zlike(nc)
     compute_forc_q!(forc_q_col, col.gridcell, a2l.forc_vp_grc, a2l.forc_pbot_downscaled_col)
 
     # ========================================================================
@@ -740,9 +756,9 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Rain/snow/flood forcings (from atmosphere, filled by downscale_forcings! or forcing reader)
     np = length(pch.column)
-    forc_rain_col = isdefined(Main, :nothing) ? zeros(FT, nc) : zeros(FT, nc)  # will use a2l fields
-    forc_snow_col = zeros(FT, nc)
-    qflx_floodg = zeros(FT, length(grc.lat))
+    forc_rain_col = isdefined(Main, :nothing) ? _zlike(nc) : _zlike(nc)  # will use a2l fields
+    forc_snow_col = _zlike(nc)
+    qflx_floodg = _zlike(length(grc.lat))
     # Use Atm2LndData rain/snow if available (populated by downscale_forcings!/forcing_reader)
     if length(a2l.forc_rain_downscaled_col) == nc
         forc_rain_col = a2l.forc_rain_downscaled_col
@@ -758,7 +774,7 @@ function clm_drv_core!(config::CLMDriverConfig,
         bc_patch, bc_col, bc_grc,
         forc_rain_col, forc_snow_col, a2l.forc_t_downscaled_col,
         a2l.forc_wind_grc,
-        zeros(FT, np), zeros(FT, np))  # irrigation sprinkler/drip placeholders
+        _zlike(np), _zlike(np))  # irrigation sprinkler/drip placeholders
 
     # HandleNewSnow — WIRED
     handle_new_snow!(temp, wsb, wdb, col, lun,
@@ -817,7 +833,7 @@ function clm_drv_core!(config::CLMDriverConfig,
 
     # CalcOzoneStress — WIRED
     calc_ozone_stress!(oz, filt.exposedvegp, filt.noexposedvegp,
-                       bc_patch, pch, pftcon.woody;
+                       bc_patch, pch, _onbk(pftcon.woody);
                        is_time_to_run_luna=false)
 
     # CalculateSurfaceHumidity — WIRED
@@ -850,9 +866,9 @@ function clm_drv_core!(config::CLMDriverConfig,
     # SoilMoistStress (root moisture stress / BTRAN) — WIRED
     al = inst.active_layer
     calc_root_moist_stress!(ss, ef, temp, wsb, wdb, col, pch,
-                             pftcon.smpso, pftcon.smpsc,
-                             Float64.(al.altmax_lastyear_indx_col),
-                             Float64.(al.altmax_indx_col),
+                             _onbk(pftcon.smpso), _onbk(pftcon.smpsc),
+                             FT.(al.altmax_lastyear_indx_col),
+                             FT.(al.altmax_indx_col),
                              filt.exposedvegp, bc_patch,
                              varpar.nlevgrnd, varpar.nlevsno)
 
@@ -862,8 +878,8 @@ function clm_drv_core!(config::CLMDriverConfig,
         downreg_patch = get_downreg_patch(inst.bgc_vegetation, bc_patch)
         leafn_patch = get_leafn_patch(inst.bgc_vegetation, bc_patch)
     else
-        downreg_patch = zeros(FT, np)
-        leafn_patch = zeros(FT, np)
+        downreg_patch = _zlike(np)
+        leafn_patch = _zlike(np)
     end
     canopy_fluxes!(cs, ef, fv, temp, sa, ss, wfb, wsb, wdb, ps,
                    pch, col, grc,
@@ -887,16 +903,16 @@ function clm_drv_core!(config::CLMDriverConfig,
                    parsha_z_patch=sa.parsha_z_patch,
                    laisun_z_patch=cs.laisun_z_patch,
                    laisha_z_patch=cs.laisha_z_patch,
-                   o3coefv_patch=ones(FT, np),
-                   o3coefg_patch=ones(FT, np),
-                   dleaf_pft=pftcon.dleaf,
-                   slatop_pft=pftcon.slatop,
-                   leafcn_pft=pftcon.leafcn,
-                   flnr_pft=pftcon.flnr,
-                   fnitr_pft=pftcon.fnitr,
-                   mbbopt_pft=pftcon.mbbopt,
-                   c3psn_pft=pftcon.c3psn,
-                   woody_pft=Float64.(pftcon.woody),
+                   o3coefv_patch=_olike(np),
+                   o3coefg_patch=_olike(np),
+                   dleaf_pft=_onbk(pftcon.dleaf),
+                   slatop_pft=_onbk(pftcon.slatop),
+                   leafcn_pft=_onbk(pftcon.leafcn),
+                   flnr_pft=_onbk(pftcon.flnr),
+                   fnitr_pft=_onbk(pftcon.fnitr),
+                   mbbopt_pft=_onbk(pftcon.mbbopt),
+                   c3psn_pft=_onbk(pftcon.c3psn),
+                   woody_pft=_onbk(pftcon.woody),
                    overrides=inst.overrides)
 
 
@@ -951,7 +967,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Placeholder: DustEmission!(bc, ...) [dust emission — deferred: Zender2003 mobilization]
 
     # DustDryDep — WIRED
-    dust_dry_dep!(inst.dust_emis, BitVector(pch.active), pch.column, bc_patch,
+    dust_dry_dep!(inst.dust_emis, pch.active, pch.column, bc_patch,
                   a2l.forc_pbot_downscaled_col, a2l.forc_rho_downscaled_col,
                   a2l.forc_t_downscaled_col,
                   fv.ram1_patch, fv.fv_patch)
@@ -964,7 +980,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
 
     # LakeTemperature — WIRED
-    grnd_ch4_cond = zeros(FT, nc)  # placeholder (CH4 module provides when active)
+    grnd_ch4_cond = _zlike(nc)  # placeholder (CH4 module provides when active)
     lake_temperature!(col, pch, sa, ss, wsb, wdb, wfb, ef, temp, ls,
                       grnd_ch4_cond,
                       filt.lakec, filt.lakep,
@@ -973,7 +989,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # SoilTemperature — WIRED
     # Placeholder for urban building temperature max
     nl = length(lun.itype)
-    urbantv_t_building_max = fill(FT(323.15), nl)  # placeholder ~50°C cap
+    urbantv_t_building_max = _fulllike(323.15, nl)  # placeholder ~50°C cap
     soil_temperature!(col, lun, pch, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
                       urbantv_t_building_max,
                       a2l.forc_lwrad_downscaled_col,
@@ -1066,12 +1082,11 @@ function clm_drv_core!(config::CLMDriverConfig,
     # For snow columns: drainage from bottom + non-snow-covered rain
     # For no-snow columns: rain + snowmelt
     # Extract bottom-layer percolation (layer 0 in Fortran = index nlevsno in Julia)
-    qflx_snow_perc_bottom = zeros(FT, nc)
-    for c in bc_col
-        if filt.snowc[c]
-            qflx_snow_perc_bottom[c] = wfb.wf.qflx_snow_percolation_col[c, nlevsno]
-        end
-    end
+    qflx_snow_perc_bottom = _zlike(nc)
+    # Masked bottom-layer gather as a device-safe broadcast (snowc ? perc : 0; the
+    # array is zero-initialized so `Bool * val` is byte-identical to the masked set).
+    @views qflx_snow_perc_bottom[bc_col] .=
+        filt.snowc[bc_col] .* wfb.wf.qflx_snow_percolation_col[bc_col, nlevsno]
     sum_flux_add_snow_percolation!(
         wfb.wf.qflx_snow_drain_col,
         wfb.wf.qflx_rain_plus_snomelt_col,
@@ -1173,7 +1188,7 @@ function clm_drv_core!(config::CLMDriverConfig,
         bc_col, dtime)
 
     # --- 15. Snow capping excess ---
-    h2osno_total = zeros(FT, nc)
+    h2osno_total = _zlike(nc)
     waterstate_calculate_total_h2osno!(wsb.ws, filt.snowc, bc_col,
                                        col.snl, h2osno_total)
     # Init snow capping fluxes
@@ -1186,9 +1201,9 @@ function clm_drv_core!(config::CLMDriverConfig,
     dz_bottom_vec = col.dz[:, jj_bottom]
     ice_bottom_vec = wsb.ws.h2osoi_ice_col[:, jj_bottom]
     liq_bottom_vec = wsb.ws.h2osoi_liq_col[:, jj_bottom]
-    mask_capping = falses(nc)
-    rho_orig_bottom = zeros(FT, nc)
-    frac_adjust = zeros(FT, nc)
+    mask_capping = _blike(nc)
+    rho_orig_bottom = _zlike(nc)
+    frac_adjust = _zlike(nc)
     # Compute capping fluxes
     bulk_flux_snow_capping_fluxes!(
         mask_capping, rho_orig_bottom, frac_adjust,
@@ -1205,23 +1220,17 @@ function clm_drv_core!(config::CLMDriverConfig,
         wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
         wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
         mask_capping, bc_col)
-    # Write back bottom layer state
-    for c in bc_col
-        if mask_capping[c]
-            wsb.ws.h2osoi_ice_col[c, jj_bottom] = ice_bottom_vec[c]
-            wsb.ws.h2osoi_liq_col[c, jj_bottom] = liq_bottom_vec[c]
-        end
-    end
+    # Write back bottom layer state (device-safe broadcast; non-capping entries are
+    # the unchanged extracted values, so writing all back is byte-identical).
+    @views wsb.ws.h2osoi_ice_col[bc_col, jj_bottom] .= ice_bottom_vec[bc_col]
+    @views wsb.ws.h2osoi_liq_col[bc_col, jj_bottom] .= liq_bottom_vec[bc_col]
     # Update dz and aerosols after capping
     snow_capping_update_dz_and_aerosols!(
         dz_bottom_vec, aer, jj_bottom,
         rho_orig_bottom, ice_bottom_vec, frac_adjust,
         mask_capping, bc_col)
-    for c in bc_col
-        if mask_capping[c]
-            col.dz[c, jj_bottom] = dz_bottom_vec[c]
-        end
-    end
+    # Device-safe broadcast write-back (non-capping entries unchanged).
+    @views col.dz[bc_col, jj_bottom] .= dz_bottom_vec[bc_col]
 
     # --- 16. Snow compaction ---
     snow_compaction!(
@@ -1473,7 +1482,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Water diagnostic summaries
     # ========================================================================
-    h2osno_total_col = zeros(FT, nc)
+    h2osno_total_col = _zlike(nc)
     waterstate_calculate_total_h2osno!(wsb.ws, filt.allc, bc_col, col.snl, h2osno_total_col)
 
     # WaterSummary — WIRED
@@ -1485,7 +1494,7 @@ function clm_drv_core!(config::CLMDriverConfig,
                    dz_col=col.dz,
                    zi_col=col.zi,
                    landunit_col=col.landunit,
-                   urbpoi=BitVector(lun.urbpoi),
+                   urbpoi=lun.urbpoi,
                    lun_itype=lun.itype)
 
     # ========================================================================
@@ -1529,7 +1538,7 @@ function clm_drv_core!(config::CLMDriverConfig,
                         filt_inactive_and_active.nourbanp,
                         nextsw_cday, declinp1,
                         bc_grc, bc_col, bc_patch,
-                        pftcon.rhol, pftcon.rhos, pftcon.taul, pftcon.taus, pftcon.xl,
+                        _onbk(pftcon.rhol), _onbk(pftcon.rhos), _onbk(pftcon.taul), _onbk(pftcon.taus), _onbk(pftcon.xl),
                         coszen_cday)
 
         # UrbanAlbedo — WIRED
@@ -1570,21 +1579,21 @@ function clm_drv_core!(config::CLMDriverConfig,
                    nstep, 0, dtime;
                    forc_rain_col=forc_rain_col,
                    forc_snow_col=forc_snow_col,
-                   forc_rain_grc=length(a2l.forc_rain_not_downscaled_grc) > 0 ? a2l.forc_rain_not_downscaled_grc : zeros(FT, length(grc.lat)),
-                   forc_snow_grc=length(a2l.forc_snow_not_downscaled_grc) > 0 ? a2l.forc_snow_not_downscaled_grc : zeros(FT, length(grc.lat)),
+                   forc_rain_grc=length(a2l.forc_rain_not_downscaled_grc) > 0 ? a2l.forc_rain_not_downscaled_grc : _zlike(length(grc.lat)),
+                   forc_snow_grc=length(a2l.forc_snow_not_downscaled_grc) > 0 ? a2l.forc_snow_not_downscaled_grc : _zlike(length(grc.lat)),
                    forc_solad_col=a2l.forc_solad_downscaled_col,
                    forc_solai_grc=a2l.forc_solai_grc,
                    forc_lwrad_col=a2l.forc_lwrad_downscaled_col,
-                   forc_flood_grc=zeros(FT, length(grc.lat)),
-                   qflx_ice_runoff_col=zeros(FT, nc),
-                   qflx_evap_tot_grc=zeros(FT, length(grc.lat)),
-                   qflx_surf_grc=zeros(FT, length(grc.lat)),
-                   qflx_qrgwl_grc=zeros(FT, length(grc.lat)),
-                   qflx_drain_grc=zeros(FT, length(grc.lat)),
-                   qflx_drain_perched_grc=zeros(FT, length(grc.lat)),
-                   qflx_ice_runoff_grc=zeros(FT, length(grc.lat)),
-                   qflx_sfc_irrig_grc=zeros(FT, length(grc.lat)),
-                   qflx_streamflow_grc=zeros(FT, length(grc.lat)))
+                   forc_flood_grc=_zlike(length(grc.lat)),
+                   qflx_ice_runoff_col=_zlike(nc),
+                   qflx_evap_tot_grc=_zlike(length(grc.lat)),
+                   qflx_surf_grc=_zlike(length(grc.lat)),
+                   qflx_qrgwl_grc=_zlike(length(grc.lat)),
+                   qflx_drain_grc=_zlike(length(grc.lat)),
+                   qflx_drain_perched_grc=_zlike(length(grc.lat)),
+                   qflx_ice_runoff_grc=_zlike(length(grc.lat)),
+                   qflx_sfc_irrig_grc=_zlike(length(grc.lat)),
+                   qflx_streamflow_grc=_zlike(length(grc.lat)))
 
     # ========================================================================
     # Diagnostics

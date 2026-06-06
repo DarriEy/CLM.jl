@@ -598,7 +598,7 @@ function bareground_fluxes!(
         patch_data       ::PatchData,
         col_data         ::ColumnData,
         lun_data         ::LandunitData,
-        mask_noexposedvegp ::BitVector,
+        mask_noexposedvegp ::AbstractVector{Bool},
         bounds_patch     ::UnitRange{Int},
         # Atmospheric forcing (column-level)
         forc_q_col       ::AbstractVector{<:Real},
@@ -642,8 +642,10 @@ function bareground_fluxes!(
     filterp = _sci(np)
     filterp_host = zeros(Int, np)
     fn = 0
+    # Host-scan the mask (Array() it once so a device mask isn't scalar-indexed).
+    mask_nev_host = mask_noexposedvegp isa Array ? mask_noexposedvegp : Array(mask_noexposedvegp)
     for p in bounds_patch
-        if mask_noexposedvegp[p]
+        if mask_nev_host[p]
             fn += 1
             filterp_host[fn] = p
         end
@@ -677,6 +679,11 @@ function bareground_fluxes!(
     # =========================================================================
     # Phase 1: Initialization — simple settings for no-exposed-veg patches
     # =========================================================================
+
+    # No bare-ground (non-exposed-veg) patches → nothing to do. Skip the per-patch
+    # phases; the manual struct-arg kernel launches below would otherwise divide by
+    # the empty workgroup (ndrange = fn = 0) on the GPU backend.
+    fn == 0 && return nothing
 
     bgf_phase1_update!(energyflux, temperature, photosyns, soilstate, patch_data,
         filterp, fn, forc_t_col, forc_pbot_col, nlevgrnd)

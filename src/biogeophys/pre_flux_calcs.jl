@@ -299,6 +299,14 @@ function set_z0m_displa!(canopystate::CanopyStateData,
                           z0mr::AbstractVector{<:Real} = pftcon.z0mr,
                           displar::AbstractVector{<:Real} = pftcon.displar)
 
+    # z0mr/displar default to the host-resident pftcon globals; move them onto the
+    # working backend so the kernel doesn't get host Arrays among device args (no-op on CPU).
+    if !(canopystate.z0m_patch isa Array)
+        T = eltype(canopystate.z0m_patch)
+        z0mr = copyto!(similar(canopystate.z0m_patch, T, length(z0mr)), T.(z0mr))
+        displar = copyto!(similar(canopystate.z0m_patch, T, length(displar)), T.(displar))
+    end
+
     # Both z0param_method branches are identical, so the common expression is used.
     preflux_z0m_displa!(canopystate.z0m_patch, canopystate.displa_patch,
                         mask_nolakep, patch_data.itype, canopystate.htop_patch,

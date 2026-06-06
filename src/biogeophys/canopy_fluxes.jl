@@ -1221,7 +1221,7 @@ function canopy_fluxes!(
         patch_data      ::PatchData,
         col_data        ::ColumnData,
         gridcell_data   ::GridcellData,
-        mask_exposedvegp::BitVector,
+        mask_exposedvegp::AbstractVector{Bool},
         bounds_patch    ::UnitRange{Int},
         bounds_col      ::UnitRange{Int},
         # Atmospheric forcing (column-level)
@@ -1287,14 +1287,14 @@ function canopy_fluxes!(
         # Photosynthesis extras
         forc_pc13o2_grc ::AbstractVector{<:Real} = Float64[],
         t10_patch       ::AbstractVector{<:Real} = Float64[],
-        nrad_patch      ::Vector{Int} = Int[],
-        tlai_z_patch    ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
+        nrad_patch      ::AbstractVector{<:Integer} = Int[],
+        tlai_z_patch    ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
         vcmaxcint_sun_patch ::AbstractVector{<:Real} = Float64[],
         vcmaxcint_sha_patch ::AbstractVector{<:Real} = Float64[],
-        parsun_z_patch  ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
-        parsha_z_patch  ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
-        laisun_z_patch  ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
-        laisha_z_patch  ::Matrix{<:Real} = Matrix{Float64}(undef,0,0),
+        parsun_z_patch  ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
+        parsha_z_patch  ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
+        laisun_z_patch  ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
+        laisha_z_patch  ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
         leaf_mr_vcm     ::Real = 0.015,
         # Calibration overrides (NaN = use defaults)
         overrides       ::CalibrationOverrides = CalibrationOverrides())
@@ -1388,13 +1388,33 @@ function canopy_fluxes!(
     filterp = _sci(np)
     filterp_host = zeros(Int, np)
     fn = 0
+    # Host-scan the mask (Array() it once so a device mask isn't scalar-indexed here
+    # or in the later host-side diagnostic scans).
+    mask_ev_host = mask_exposedvegp isa Array ? mask_exposedvegp : Array(mask_exposedvegp)
     for p in bounds_patch
-        if mask_exposedvegp[p]
+        if mask_ev_host[p]
             fn += 1
             filterp_host[fn] = p
         end
     end
     copyto!(filterp, filterp_host)
+
+    # Move host pft-parameter kwargs + the ch4 placeholder onto the working backend.
+    # The driver passes some pft params via device copies already; the rest default to
+    # host fill() arrays that get bundled into device-view structs / passed to kernels.
+    # No-op on CPU (and skips args already on-device). Length-preserving.
+    if !(canopystate.elai_patch isa Array)
+        _cfref = canopystate.elai_patch
+        Tcf = eltype(_cfref)
+        _pf(a) = a isa Array ? copyto!(similar(_cfref, Tcf, length(a)), Tcf.(a)) : a
+        _pb(a) = a isa Array ? copyto!(similar(_cfref, Bool, length(a)), a) : a
+        grnd_ch4_cond_patch = _pf(grnd_ch4_cond_patch)
+        medlynintercept_pft = _pf(medlynintercept_pft); medlynslope_pft = _pf(medlynslope_pft)
+        crop_pft = _pf(crop_pft); dbh_pft = _pf(dbh_pft); fbw_pft = _pf(fbw_pft)
+        nstem_pft = _pf(nstem_pft); rstem_per_dbh_pft = _pf(rstem_per_dbh_pft)
+        wood_density_pft = _pf(wood_density_pft)
+        is_tree_pft = _pb(is_tree_pft); is_shrub_pft = _pb(is_shrub_pft)
+    end
 
     # Time step initialization of photosynthesis variables (kernelized over the
     # filtered patches; canopy uses the base path — use_c13/use_c14 = false).
@@ -1446,6 +1466,15 @@ function canopy_fluxes!(
     z0_method = z0param_method == "ZengWang2007" ? 1 :
                 z0param_method == "Meier2022" ? 2 :
                 error("canopy_fluxes!: unknown z0param_method: $z0param_method")
+    # z0v_* default to host pftcon-like fill() arrays; move onto the working backend
+    # so the kernel doesn't get host Arrays among device args (no-op on CPU).
+    if !(canopystate.displa_patch isa Array)
+        Tz0 = eltype(canopystate.displa_patch)
+        _z0v_dev(a) = copyto!(similar(canopystate.displa_patch, Tz0, length(a)), Tz0.(a))
+        z0v_LAImax_pft = _z0v_dev(z0v_LAImax_pft); z0v_Cs_pft = _z0v_dev(z0v_Cs_pft)
+        z0v_Cr_pft = _z0v_dev(z0v_Cr_pft); z0v_c_pft = _z0v_dev(z0v_c_pft)
+        z0v_cw_pft = _z0v_dev(z0v_cw_pft)
+    end
     _launch!(_cf_z0_kernel!, canopystate.displa_patch, frictionvel.z0mv_patch,
         frictionvel.z0hv_patch, frictionvel.z0qv_patch, frictionvel.forc_hgt_u_patch,
         frictionvel.forc_hgt_t_patch, frictionvel.forc_hgt_q_patch, filterp,
@@ -1557,12 +1586,17 @@ function canopy_fluxes!(
         if !isempty(nrad_patch) && !isempty(parsun_z_patch)
             # Build patch-indexed forc_pbot from column-level data
             # Use full mask (not reduced filterp) since photosynthesis uses mask_exposedvegp
-            forc_pbot_patch = zeros(FT, endp)
+            # Gather on the host (Array() the device inputs once) then bulk-copy to
+            # a device-resident array — avoids device scalar indexing.
+            fpp_host = zeros(FT, endp)
+            col_host = patch_data.column isa Array ? patch_data.column : Array(patch_data.column)
+            fpc_host = forc_pbot_col isa Array ? forc_pbot_col : Array(forc_pbot_col)
             for p in bounds_patch
-                mask_exposedvegp[p] || continue
-                c = patch_data.column[p]
-                forc_pbot_patch[p] = forc_pbot_col[c]
+                mask_ev_host[p] || continue
+                fpp_host[p] = fpc_host[col_host[p]]
             end
+            forc_pbot_patch = forc_pbot_col isa Array ? fpp_host :
+                              copyto!(similar(forc_pbot_col, FT, endp), fpp_host)
 
             # PFT index vector (+1 for 0-based Fortran → 1-based Julia)
             ivt_vec = patch_data.itype .+ 1
