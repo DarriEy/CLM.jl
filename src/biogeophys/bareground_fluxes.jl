@@ -526,6 +526,14 @@ function bgf_phase4_update!(energyflux, frictionvel, temperature, soilstate,
         forc_q_col, forc_rho_col, forc_u_grc, forc_v_grc, forc_pbot_col,
         grnd_ch4_cond_patch, soilevap_beta::Bool, soil_resis_sl14::Bool,
         use_lch4::Bool, nlevsno::Int)
+    # grnd_ch4_cond_patch defaults to a host Float64[] when use_lch4=false; on a
+    # device backend it must be device-resident or the BgfP4Out kernel arg is
+    # non-isbits (Vector{Float64} field). Rebuild it on the working backend.
+    if !(frictionvel.ram1_patch isa Array) && grnd_ch4_cond_patch isa Array
+        _Tg = eltype(frictionvel.ram1_patch)
+        grnd_ch4_cond_patch = fill!(
+            similar(frictionvel.ram1_patch, _Tg, length(grnd_ch4_cond_patch)), zero(_Tg))
+    end
     o = BgfP4Out(; ram1_patch = frictionvel.ram1_patch, ustar_patch = frictionvel.ustar_patch,
         cgrnds_patch = energyflux.cgrnds_patch, cgrndl_patch = energyflux.cgrndl_patch,
         cgrnd_patch = energyflux.cgrnd_patch, taux_patch = energyflux.taux_patch,

@@ -12,9 +12,14 @@
 # RESULT (2026-06-10, Julia 1.10.11): STILL hits the Enzyme-internal sret_ty bug
 # (propagate_returned!) even STANDALONE — so the bug is intrinsic to
 # differentiating canopy_fluxes_core! under this Enzyme, NOT a dispatch-path
-# artifact. Compositional AD therefore CANNOT get past this phase; it needs an
-# Enzyme fix, a hand-written EnzymeRule, or sub-phase decomposition.
-# (soil_temperature! DOES differentiate cleanly — see enzyme_phase_probe.jl.)
+# artifact. ALSO tested the IN-PLACE form (Const return, seed output shadow=1,
+# read input shadows — the banked Phase-C workaround for scalar-return bugs): it
+# fails with the IDENTICAL sret_ty error too. So the bug is return-form-independent
+# (3 tests: whole-driver dispatch, standalone Active-return, standalone in-place
+# Const-return all fail the same way). Compositional AD therefore CANNOT get past
+# this phase; it needs an Enzyme fix, a hand-written EnzymeRule, or sub-phase
+# decomposition. (soil_temperature! DOES differentiate cleanly — see
+# enzyme_phase_probe.jl — so compositional works for the phases Enzyme can handle.)
 using CLM, Enzyme, Printf
 const FSURDAT = get(ENV, "CLM_FSURDAT",
     "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")

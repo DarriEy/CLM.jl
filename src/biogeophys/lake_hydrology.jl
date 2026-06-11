@@ -287,6 +287,88 @@ and Biogeophysics2.
 
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 274-365).
 """
+# Per-patch kernel (lakes are 1 patch per column, so the per-column writes to
+# h2osno_no_layers/frac_sno/snow_depth are race-free). Float64 module constants
+# (TFRZ/FRAC_SNO_SMALL/SNOW_BD_LAKE) passed in eltype-converted for Metal.
+@kernel function _lake_subl_dew_kernel!(
+        qflx_liqevap_from_top_layer, qflx_solidevap_from_top_layer,
+        qflx_soliddew_to_top_layer, qflx_liqdew_to_top_layer, qflx_ev_snow,
+        h2osno_no_layers, snow_depth, frac_sno,
+        @Const(qflx_evap_soi), @Const(h2osoi_liq), @Const(h2osoi_ice),
+        @Const(t_grnd), @Const(t_soisno), @Const(snl), @Const(patch_column),
+        @Const(mask_lakep), dtime, nlevsno::Int, tfrz, frac_sno_small, snow_bd_lake)
+    p = @index(Global)
+    @inbounds if mask_lakep[p]
+        T = eltype(qflx_ev_snow)
+        c = patch_column[p]
+        jtop = snl[c] + 1
+
+        qflx_liqevap_from_top_layer[p]   = zero(T)
+        qflx_solidevap_from_top_layer[p] = zero(T)
+        qflx_soliddew_to_top_layer[p]    = zero(T)
+        qflx_liqdew_to_top_layer[p]      = zero(T)
+        qflx_ev_snow[p]                  = qflx_evap_soi[p]
+
+        if jtop <= 0  # snow layers present
+            j = jtop + nlevsno
+            if qflx_evap_soi[p] >= zero(T)
+                qflx_evap_soi_lim = min(qflx_evap_soi[p],
+                    (h2osoi_liq[c, j] + h2osoi_ice[c, j]) / dtime)
+                qflx_ev_snow[p] = qflx_evap_soi_lim
+                if (h2osoi_liq[c, j] + h2osoi_ice[c, j]) > zero(T)
+                    qflx_liqevap_from_top_layer[p] = max(
+                        qflx_evap_soi_lim * (h2osoi_liq[c, j] /
+                            (h2osoi_liq[c, j] + h2osoi_ice[c, j])), zero(T))
+                else
+                    qflx_liqevap_from_top_layer[p] = zero(T)
+                end
+                qflx_solidevap_from_top_layer[p] = qflx_evap_soi_lim - qflx_liqevap_from_top_layer[p]
+            else
+                if t_grnd[c] < tfrz && t_soisno[c, j] < tfrz
+                    qflx_soliddew_to_top_layer[p] = abs(qflx_evap_soi[p])
+                elseif jtop < 0 || (t_grnd[c] == tfrz && t_soisno[c, j] == tfrz)
+                    qflx_liqdew_to_top_layer[p] = abs(qflx_evap_soi[p])
+                end
+            end
+        else  # No snow layers
+            if qflx_evap_soi[p] >= zero(T)
+                qflx_solidevap_from_top_layer[p] = min(qflx_evap_soi[p],
+                    h2osno_no_layers[c] / dtime)
+                qflx_liqevap_from_top_layer[p] = qflx_evap_soi[p] -
+                    qflx_solidevap_from_top_layer[p]
+            else
+                if t_grnd[c] < tfrz - T(0.1)
+                    qflx_soliddew_to_top_layer[p] = abs(qflx_evap_soi[p])
+                else
+                    qflx_liqdew_to_top_layer[p] = abs(qflx_evap_soi[p])
+                end
+            end
+
+            h2osno_temp = h2osno_no_layers[c]
+            qflx_dew_minus_sub_snow = -qflx_solidevap_from_top_layer[p] +
+                qflx_soliddew_to_top_layer[p]
+            h2osno_no_layers[c] = h2osno_no_layers[c] + qflx_dew_minus_sub_snow * dtime
+            h2osno_no_layers[c] = max(h2osno_no_layers[c], zero(T))
+
+            if qflx_dew_minus_sub_snow > zero(T)
+                if frac_sno[c] <= zero(T)
+                    frac_sno[c] = frac_sno_small
+                end
+            elseif qflx_dew_minus_sub_snow < zero(T)
+                if h2osno_no_layers[c] == zero(T)
+                    frac_sno[c] = zero(T)
+                end
+            end
+
+            if h2osno_temp > zero(T)
+                snow_depth[c] = snow_depth[c] * h2osno_no_layers[c] / h2osno_temp
+            else
+                snow_depth[c] = h2osno_no_layers[c] / snow_bd_lake
+            end
+        end
+    end
+end
+
 function lake_sublimation_dew!(
     qflx_liqevap_from_top_layer::AbstractVector{<:Real},
     qflx_solidevap_from_top_layer::AbstractVector{<:Real},
@@ -308,86 +390,16 @@ function lake_sublimation_dew!(
     dtime::Real,
     nlevsno::Int
 )
-    for p in bounds_patch
-        mask_lakep[p] || continue
-        c = patch_column[p]
-        jtop = snl[c] + 1
-
-        qflx_liqevap_from_top_layer[p]   = 0.0
-        qflx_solidevap_from_top_layer[p] = 0.0
-        qflx_soliddew_to_top_layer[p]    = 0.0
-        qflx_liqdew_to_top_layer[p]      = 0.0
-        qflx_ev_snow[p]                  = qflx_evap_soi[p]
-
-        if jtop <= 0  # snow layers present
-            j = jtop + nlevsno  # Julia 1-based index
-
-            if qflx_evap_soi[p] >= 0.0
-                # Evaporation: partition between liquid evap and ice sublimation
-                qflx_evap_soi_lim = min(qflx_evap_soi[p],
-                    (h2osoi_liq[c, j] + h2osoi_ice[c, j]) / dtime)
-                qflx_ev_snow[p] = qflx_evap_soi_lim
-                if (h2osoi_liq[c, j] + h2osoi_ice[c, j]) > 0.0
-                    qflx_liqevap_from_top_layer[p] = max(
-                        qflx_evap_soi_lim * (h2osoi_liq[c, j] /
-                            (h2osoi_liq[c, j] + h2osoi_ice[c, j])), 0.0)
-                else
-                    qflx_liqevap_from_top_layer[p] = 0.0
-                end
-                qflx_solidevap_from_top_layer[p] = qflx_evap_soi_lim - qflx_liqevap_from_top_layer[p]
-            else
-                # Dew/frost
-                if t_grnd[c] < TFRZ && t_soisno[c, j] < TFRZ
-                    qflx_soliddew_to_top_layer[p] = abs(qflx_evap_soi[p])
-                elseif jtop < 0 || (t_grnd[c] == TFRZ && t_soisno[c, j] == TFRZ)
-                    qflx_liqdew_to_top_layer[p] = abs(qflx_evap_soi[p])
-                end
-            end
-
-        else  # No snow layers
-            if qflx_evap_soi[p] >= 0.0
-                # Sublimation: do not allow more than there is snow
-                qflx_solidevap_from_top_layer[p] = min(qflx_evap_soi[p],
-                    h2osno_no_layers[c] / dtime)
-                qflx_liqevap_from_top_layer[p] = qflx_evap_soi[p] -
-                    qflx_solidevap_from_top_layer[p]
-            else
-                if t_grnd[c] < TFRZ - 0.1
-                    qflx_soliddew_to_top_layer[p] = abs(qflx_evap_soi[p])
-                else
-                    qflx_liqdew_to_top_layer[p] = abs(qflx_evap_soi[p])
-                end
-            end
-
-            # Update snow pack for dew & sub.
-            h2osno_temp = h2osno_no_layers[c]
-            qflx_dew_minus_sub_snow = -qflx_solidevap_from_top_layer[p] +
-                qflx_soliddew_to_top_layer[p]
-            h2osno_no_layers[c] = h2osno_no_layers[c] + qflx_dew_minus_sub_snow * dtime
-            h2osno_no_layers[c] = max(h2osno_no_layers[c], 0.0)
-
-            if qflx_dew_minus_sub_snow > 0.0
-                # Accumulating snow from dew: ensure at least small non-zero frac_sno
-                if frac_sno[c] <= 0.0
-                    frac_sno[c] = FRAC_SNO_SMALL
-                end
-            elseif qflx_dew_minus_sub_snow < 0.0
-                # Losing snow from sublimation: reset frac_sno if snow gone
-                if h2osno_no_layers[c] == 0.0
-                    frac_sno[c] = 0.0
-                end
-            end
-
-            if h2osno_temp > 0.0
-                # Assume snow bulk density remains the same as before
-                snow_depth[c] = snow_depth[c] * h2osno_no_layers[c] / h2osno_temp
-            else
-                # Assume a constant snow bulk density = 250
-                snow_depth[c] = h2osno_no_layers[c] / SNOW_BD_LAKE
-            end
-        end
-    end
-
+    T = eltype(qflx_ev_snow)
+    # _launch!(kernel, out, args...) maps out,args 1:1 to the kernel params in order;
+    # out (= first param) is also used for backend detection.
+    _launch!(_lake_subl_dew_kernel!,
+        qflx_liqevap_from_top_layer, qflx_solidevap_from_top_layer,
+        qflx_soliddew_to_top_layer, qflx_liqdew_to_top_layer, qflx_ev_snow,
+        h2osno_no_layers, snow_depth, frac_sno,
+        qflx_evap_soi, h2osoi_liq, h2osoi_ice, t_grnd, t_soisno, snl, patch_column,
+        mask_lakep, T(dtime), nlevsno, T(TFRZ), T(FRAC_SNO_SMALL), T(SNOW_BD_LAKE);
+        ndrange = length(bounds_patch))
     return nothing
 end
 
