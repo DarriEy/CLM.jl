@@ -41,7 +41,7 @@ const config = CLM.CLMDriverConfig()
 const filt_ia = CLM.clump_filter_inactive_and_active
 const (declin, eccf) = CLM.compute_orbital(120.0)
 const nextsw_cday = 120.0 + 1800.0/CLM.SECSPDAY
-runstep!(inst, filt, bounds, n; first=false) = CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
+runstep!(inst, filt, fia, bounds, n; first=false) = CLM.clm_drv!(config, inst, filt, fia, bounds,
     true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
     nstep=n, is_first_step=first, is_beg_curr_day=first, dtime=1800.0, mon=1, day=1, photosyns=inst.photosyns)
 
@@ -57,13 +57,13 @@ end
 function main()
     if !Metal.functional(); println("Metal not functional"); return 0; end
     instH, bounds, filtH = build()
-    for n in 1:3; runstep!(instH, filtH, bounds, n; first=(n==1)); end   # CPU warmup
+    for n in 1:3; runstep!(instH, filtH, filt_ia, bounds, n; first=(n==1)); end   # CPU warmup
     instB, boundsB, filtB = build()
-    for n in 1:3; runstep!(instB, filtB, boundsB, n; first=(n==1)); end
-    inst_d = mfm(instB); filt_d = mfm(filtB)
+    for n in 1:3; runstep!(instB, filtB, filt_ia, boundsB, n; first=(n==1)); end
+    inst_d = mfm(instB); filt_d = mfm(filtB); filt_ia_d = mfm(filt_ia)
     println("moved to device: ", inst_d.temperature.t_soisno_col isa Metal.MtlArray)
-    runstep!(instH, filtH, bounds, 4)                 # CPU compared step
-    runstep!(inst_d, filt_d, boundsB, 4)              # device compared step
+    runstep!(instH, filtH, filt_ia, bounds, 4)            # CPU compared step
+    runstep!(inst_d, filt_d, filt_ia_d, boundsB, 4)       # device compared step
     println("both step-4 runs completed")
     checks = [
         ("t_grnd", instH.temperature.t_grnd_col, inst_d.temperature.t_grnd_col),

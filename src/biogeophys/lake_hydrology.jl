@@ -522,6 +522,46 @@ remove the layer entirely.
 
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 495-535).
 """
+# Per-patch kernel (lakes 1-patch-per-column → per-column writes race-free).
+@kernel function _lake_check_single_snow_kernel!(
+        eflx_sh_tot, eflx_sh_grnd, eflx_soil_grnd, eflx_gnet, eflx_grnd_lake,
+        t_soisno, snl, h2osno_no_layers, h2osno_total, snow_depth, qflx_snow_drain,
+        @Const(h2osoi_ice), @Const(h2osoi_liq), @Const(patch_column), @Const(mask_lakep),
+        dtime, j::Int, tfrz, cpliq)
+    p = @index(Global)
+    @inbounds if mask_lakep[p]
+        T = eltype(eflx_gnet)
+        c = patch_column[p]
+        if snl[c] == -1
+            if h2osoi_ice[c, j] > zero(T) && t_soisno[c, j] > tfrz
+                heatrem           = (cpliq * h2osoi_liq[c, j]) * (t_soisno[c, j] - tfrz)
+                t_soisno[c, j]    = tfrz
+                eflx_sh_tot[p]    = eflx_sh_tot[p] + heatrem / dtime
+                eflx_sh_grnd[p]   = eflx_sh_grnd[p] + heatrem / dtime
+                eflx_soil_grnd[p] = eflx_soil_grnd[p] - heatrem / dtime
+                eflx_gnet[p]      = eflx_gnet[p] - heatrem / dtime
+                eflx_grnd_lake[p] = eflx_grnd_lake[p] - heatrem / dtime
+            elseif h2osoi_ice[c, j] == zero(T)
+                heatrem             = cpliq * h2osoi_liq[c, j] * (t_soisno[c, j] - tfrz)
+                eflx_sh_tot[p]      = eflx_sh_tot[p] + heatrem / dtime
+                eflx_sh_grnd[p]     = eflx_sh_grnd[p] + heatrem / dtime
+                eflx_soil_grnd[p]   = eflx_soil_grnd[p] - heatrem / dtime
+                eflx_gnet[p]        = eflx_gnet[p] - heatrem / dtime
+                eflx_grnd_lake[p]   = eflx_grnd_lake[p] - heatrem / dtime
+                qflx_snow_drain[c]  = qflx_snow_drain[c] + h2osno_total[c] / dtime
+                snl[c]              = 0
+                h2osno_no_layers[c] = zero(T)
+                h2osno_total[c]     = zero(T)
+                snow_depth[c]       = zero(T)
+            else
+                eflx_grnd_lake[p] = eflx_gnet[p]
+            end
+        else
+            eflx_grnd_lake[p] = eflx_gnet[p]
+        end
+    end
+end
+
 function lake_check_single_snow_layer!(
     eflx_sh_tot::AbstractVector{<:Real},
     eflx_sh_grnd::AbstractVector{<:Real},
@@ -542,43 +582,13 @@ function lake_check_single_snow_layer!(
     dtime::Real,
     nlevsno::Int
 )
+    T = eltype(eflx_gnet)
     j = 0 + nlevsno  # Julia index for snow layer 0
-
-    for p in bounds_patch
-        mask_lakep[p] || continue
-        c = patch_column[p]
-
-        if snl[c] == -1
-            if h2osoi_ice[c, j] > 0.0 && t_soisno[c, j] > TFRZ
-                # Take extra heat of layer and release to sensible heat
-                heatrem           = (CPLIQ * h2osoi_liq[c, j]) * (t_soisno[c, j] - TFRZ)
-                t_soisno[c, j]    = TFRZ
-                eflx_sh_tot[p]    = eflx_sh_tot[p] + heatrem / dtime
-                eflx_sh_grnd[p]   = eflx_sh_grnd[p] + heatrem / dtime
-                eflx_soil_grnd[p] = eflx_soil_grnd[p] - heatrem / dtime
-                eflx_gnet[p]      = eflx_gnet[p] - heatrem / dtime
-                eflx_grnd_lake[p] = eflx_grnd_lake[p] - heatrem / dtime
-            elseif h2osoi_ice[c, j] == 0.0
-                # Remove layer
-                heatrem             = CPLIQ * h2osoi_liq[c, j] * (t_soisno[c, j] - TFRZ)
-                eflx_sh_tot[p]      = eflx_sh_tot[p] + heatrem / dtime
-                eflx_sh_grnd[p]     = eflx_sh_grnd[p] + heatrem / dtime
-                eflx_soil_grnd[p]   = eflx_soil_grnd[p] - heatrem / dtime
-                eflx_gnet[p]        = eflx_gnet[p] - heatrem / dtime
-                eflx_grnd_lake[p]   = eflx_grnd_lake[p] - heatrem / dtime
-                qflx_snow_drain[c]  = qflx_snow_drain[c] + h2osno_total[c] / dtime
-                snl[c]              = 0
-                h2osno_no_layers[c] = 0.0
-                h2osno_total[c]     = 0.0
-                snow_depth[c]       = 0.0
-            else
-                eflx_grnd_lake[p] = eflx_gnet[p]
-            end
-        else
-            eflx_grnd_lake[p] = eflx_gnet[p]
-        end
-    end
-
+    _launch!(_lake_check_single_snow_kernel!,
+        eflx_sh_tot, eflx_sh_grnd, eflx_soil_grnd, eflx_gnet, eflx_grnd_lake,
+        t_soisno, snl, h2osno_no_layers, h2osno_total, snow_depth, qflx_snow_drain,
+        h2osoi_ice, h2osoi_liq, patch_column, mask_lakep,
+        T(dtime), j, T(TFRZ), T(CPLIQ); ndrange = length(bounds_patch))
     return nothing
 end
 
@@ -601,6 +611,53 @@ remove the layers. Otherwise, let snow persist and melt by diffusion.
 
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 543-605).
 """
+# Per-column kernel: each thread does the unfrozen-check, snow-ice/heat sums
+# (internal ascending-j loop, thread-local scalars replacing the host
+# unfrozen/sumsnowice/heatsum scratch), and the melt update — byte-identical to
+# the original 4 host loops (columns independent; sum order preserved).
+@kernel function _lake_snow_above_unfrozen_kernel!(
+        t_lake, lake_icefrac, snl, h2osno_no_layers, snow_depth,
+        qflx_snomelt, eflx_snomelt, qflx_snomelt_lyr, qflx_snow_drain,
+        @Const(t_soisno), @Const(h2osoi_ice), @Const(h2osoi_liq),
+        @Const(h2osno_total), @Const(dz_lake), @Const(mask_lake),
+        dtime, nlevsno::Int, tfrz, cpice, cpliq, hfus, denh2o)
+    c = @index(Global)
+    @inbounds if mask_lake[c]
+        T = eltype(t_lake)
+        if t_lake[c, 1] > tfrz && lake_icefrac[c, 1] == zero(T) && snl[c] < 0
+            sumsnowice = zero(T); heatsum = zero(T)
+            for j_fortran in (-nlevsno + 1):0
+                j = j_fortran + nlevsno
+                if j_fortran >= snl[c] + 1
+                    sumsnowice += h2osoi_ice[c, j]
+                    heatsum += h2osoi_ice[c, j] * cpice * (tfrz - t_soisno[c, j]) +
+                               h2osoi_liq[c, j] * cpliq * (tfrz - t_soisno[c, j])
+                end
+            end
+            heatsum += sumsnowice * hfus
+            heatrem = (t_lake[c, 1] - tfrz) * cpliq * denh2o * dz_lake[c, 1] - heatsum
+            if heatrem + denh2o * dz_lake[c, 1] * hfus > zero(T)
+                qflx_snomelt[c] = qflx_snomelt[c] + sumsnowice / dtime
+                eflx_snomelt[c] = eflx_snomelt[c] + sumsnowice * hfus / dtime
+                for j_fortran in (snl[c] + 1):0
+                    j = j_fortran + nlevsno
+                    qflx_snomelt_lyr[c, j] = qflx_snomelt_lyr[c, j] + h2osoi_ice[c, j] / dtime
+                end
+                qflx_snow_drain[c] = qflx_snow_drain[c] + h2osno_total[c] / dtime
+                h2osno_no_layers[c] = zero(T)
+                snow_depth[c] = zero(T)
+                snl[c] = 0
+                if heatrem > zero(T)
+                    t_lake[c, 1] = t_lake[c, 1] - heatrem / (cpliq * denh2o * dz_lake[c, 1])
+                else
+                    t_lake[c, 1] = tfrz
+                    lake_icefrac[c, 1] = -heatrem / (denh2o * dz_lake[c, 1] * hfus)
+                end
+            end
+        end
+    end
+end
+
 function lake_snow_above_unfrozen!(
     t_lake::AbstractMatrix{<:Real},
     lake_icefrac::AbstractMatrix{<:Real},
@@ -621,76 +678,13 @@ function lake_snow_above_unfrozen!(
     dtime::Real,
     nlevsno::Int
 )
-    nc = length(mask_lake)
-    FT = eltype(t_lake)
-    unfrozen = falses(nc)
-    sumsnowice = zeros(FT, nc)
-    heatsum = zeros(FT, nc)
-
-    # Determine which columns have unfrozen top lake layer with snow
-    for c in bounds
-        mask_lake[c] || continue
-        if t_lake[c, 1] > TFRZ && lake_icefrac[c, 1] == 0.0 && snl[c] < 0
-            unfrozen[c] = true
-        end
-    end
-
-    # Sum snow ice and heat content
-    for j_fortran in (-nlevsno + 1):0
-        j = j_fortran + nlevsno  # Julia index
-        for c in bounds
-            mask_lake[c] || continue
-            if unfrozen[c]
-                if j_fortran == -nlevsno + 1
-                    sumsnowice[c] = 0.0
-                    heatsum[c] = 0.0
-                end
-                if j_fortran >= snl[c] + 1
-                    sumsnowice[c] = sumsnowice[c] + h2osoi_ice[c, j]
-                    heatsum[c] = heatsum[c] +
-                        h2osoi_ice[c, j] * CPICE * (TFRZ - t_soisno[c, j]) +
-                        h2osoi_liq[c, j] * CPLIQ * (TFRZ - t_soisno[c, j])
-                end
-            end
-        end
-    end
-
-    # Determine if lake can absorb the latent heat
-    for c in bounds
-        mask_lake[c] || continue
-        if unfrozen[c]
-            heatsum[c] = heatsum[c] + sumsnowice[c] * HFUS
-            heatrem = (t_lake[c, 1] - TFRZ) * CPLIQ * DENH2O * dz_lake[c, 1] - heatsum[c]
-
-            if heatrem + DENH2O * dz_lake[c, 1] * HFUS > 0.0
-                # Remove snow and subtract the latent heat from the top layer
-                qflx_snomelt[c] = qflx_snomelt[c] + sumsnowice[c] / dtime
-                eflx_snomelt[c] = eflx_snomelt[c] + sumsnowice[c] * HFUS / dtime
-
-                # Update melt per layer
-                for j_fortran in (snl[c] + 1):0
-                    j = j_fortran + nlevsno
-                    qflx_snomelt_lyr[c, j_fortran + nlevsno] =
-                        qflx_snomelt_lyr[c, j_fortran + nlevsno] + h2osoi_ice[c, j] / dtime
-                end
-
-                # Update incidental drainage from snow pack
-                qflx_snow_drain[c] = qflx_snow_drain[c] + h2osno_total[c] / dtime
-
-                h2osno_no_layers[c] = 0.0
-                snow_depth[c] = 0.0
-                snl[c] = 0
-
-                if heatrem > 0.0
-                    t_lake[c, 1] = t_lake[c, 1] - heatrem / (CPLIQ * DENH2O * dz_lake[c, 1])
-                else
-                    t_lake[c, 1] = TFRZ
-                    lake_icefrac[c, 1] = -heatrem / (DENH2O * dz_lake[c, 1] * HFUS)
-                end
-            end
-        end
-    end
-
+    T = eltype(t_lake)
+    _launch!(_lake_snow_above_unfrozen_kernel!,
+        t_lake, lake_icefrac, snl, h2osno_no_layers, snow_depth,
+        qflx_snomelt, eflx_snomelt, qflx_snomelt_lyr, qflx_snow_drain,
+        t_soisno, h2osoi_ice, h2osoi_liq, h2osno_total, dz_lake, mask_lake,
+        T(dtime), nlevsno, T(TFRZ), T(CPICE), T(CPLIQ), T(HFUS), T(DENH2O);
+        ndrange = length(mask_lake))
     return nothing
 end
 
@@ -710,6 +704,33 @@ over all snow layers for history output.
 
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 619-651).
 """
+# Per-column kernel: init (mask_lake) + snow-layer accumulation (mask_lakesnow,
+# internal ascending-j loop into write-once locals — --check-bounds-safe).
+# mask_lakesnow ⊆ mask_lake, so accumulated columns are always init'd first.
+@kernel function _lake_snow_diag_kernel!(snowice, snowliq, t_sno_mul_mss,
+        @Const(h2osoi_ice), @Const(h2osoi_liq), @Const(t_soisno), @Const(snl),
+        @Const(mask_lake), @Const(mask_lakesnow), nlevsno::Int, tfrz)
+    c = @index(Global)
+    @inbounds begin
+        T = eltype(snowice)
+        if mask_lake[c]
+            snowice[c] = zero(T); snowliq[c] = zero(T); t_sno_mul_mss[c] = zero(T)
+        end
+        if mask_lakesnow[c]
+            si = zero(T); sl = zero(T); tsm = zero(T)
+            for j_fortran in (-nlevsno + 1):0
+                j = j_fortran + nlevsno
+                if j_fortran >= snl[c] + 1
+                    si  += h2osoi_ice[c, j]
+                    sl  += h2osoi_liq[c, j]
+                    tsm += h2osoi_ice[c, j] * t_soisno[c, j] + h2osoi_liq[c, j] * tfrz
+                end
+            end
+            snowice[c] = si; snowliq[c] = sl; t_sno_mul_mss[c] = tsm
+        end
+    end
+end
+
 function lake_snow_diagnostics!(
     snowice::AbstractVector{<:Real},
     snowliq::AbstractVector{<:Real},
@@ -723,28 +744,10 @@ function lake_snow_diagnostics!(
     bounds::UnitRange{Int},
     nlevsno::Int
 )
-    # Initialize
-    for c in bounds
-        mask_lake[c] || continue
-        snowice[c] = 0.0
-        snowliq[c] = 0.0
-        t_sno_mul_mss[c] = 0.0
-    end
-
-    # Accumulate over snow layers
-    for j_fortran in (-nlevsno + 1):0
-        j = j_fortran + nlevsno  # Julia index
-        for c in bounds
-            mask_lakesnow[c] || continue
-            if j_fortran >= snl[c] + 1
-                snowice[c] = snowice[c] + h2osoi_ice[c, j]
-                snowliq[c] = snowliq[c] + h2osoi_liq[c, j]
-                t_sno_mul_mss[c] = t_sno_mul_mss[c] + h2osoi_ice[c, j] * t_soisno[c, j]
-                t_sno_mul_mss[c] = t_sno_mul_mss[c] + h2osoi_liq[c, j] * TFRZ
-            end
-        end
-    end
-
+    T = eltype(snowice)
+    _launch!(_lake_snow_diag_kernel!, snowice, snowliq, t_sno_mul_mss,
+        h2osoi_ice, h2osoi_liq, t_soisno, snl, mask_lake, mask_lakesnow,
+        nlevsno, T(TFRZ); ndrange = length(mask_lake))
     return nothing
 end
 
@@ -863,6 +866,24 @@ Update top-layer snow diagnostics for history output.
 
 Ported from inline code in `LakeHydrology` in `LakeHydrologyMod.F90` (lines 692-709).
 """
+# Per-column kernel for the non-snow lake columns (zero/SPVAL fill; the
+# snw_rds[c,:].=0 row broadcast becomes an internal j-loop over its ncol columns).
+@kernel function _lake_top_nosnow_kernel!(h2osno_top, snw_rds, snot_top, dTdz_top,
+        snw_rds_top, sno_liq_top, @Const(mask_lakenosnow), ncol_snw::Int, spval)
+    c = @index(Global)
+    @inbounds if mask_lakenosnow[c]
+        T = eltype(h2osno_top)
+        h2osno_top[c] = zero(T)
+        for j in 1:ncol_snw
+            snw_rds[c, j] = zero(T)
+        end
+        snot_top[c]    = spval
+        dTdz_top[c]    = spval
+        snw_rds_top[c] = spval
+        sno_liq_top[c] = spval
+    end
+end
+
 function lake_top_layer_diagnostics!(
     h2osno_top::AbstractVector{<:Real},
     snw_rds::AbstractMatrix{<:Real},
@@ -882,16 +903,10 @@ function lake_top_layer_diagnostics!(
     lakehyd_top_layer_snow!(h2osno_top, mask_lakesnow, h2osoi_ice, h2osoi_liq, snl, nlevsno)
 
     # Non-snow columns: zero / spval
-    for c in bounds
-        mask_lakenosnow[c] || continue
-        h2osno_top[c]  = 0.0
-        snw_rds[c, :]  .= 0.0
-        snot_top[c]    = SPVAL
-        dTdz_top[c]    = SPVAL
-        snw_rds_top[c] = SPVAL
-        sno_liq_top[c] = SPVAL
-    end
-
+    T = eltype(h2osno_top)
+    _launch!(_lake_top_nosnow_kernel!, h2osno_top, snw_rds, snot_top, dTdz_top,
+        snw_rds_top, sno_liq_top, mask_lakenosnow, size(snw_rds, 2), T(SPVAL);
+        ndrange = length(mask_lakenosnow))
     return nothing
 end
 
