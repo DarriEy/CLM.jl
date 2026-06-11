@@ -17,6 +17,10 @@ const FSURDAT = get(ENV, "CLM_FSURDAT",
     "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = get(ENV, "CLM_PARAMFILE",
     "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
+const FSNOWOPTICS = get(ENV, "CLM_FSNOWOPTICS",
+    "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc")
+const FSNOWAGING = get(ENV, "CLM_FSNOWAGING",
+    "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc")
 
 function setup_forcing!(a2l, ng)
     T0 = 285.0
@@ -81,7 +85,8 @@ function run_albedo!(inst, filt, bounds)
 end
 
 function build()
-    (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=PARAMFILE)
+    (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=PARAMFILE,
+                                                     fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING)
     setup_forcing!(inst.atm2lnd, bounds.endg)
     CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
     for n in 1:3; runstep!(inst, filt, filt_ia, bounds, n; first=(n==1)); end  # stable summer warmup
@@ -136,7 +141,10 @@ function main()
         @printf("  [%s] %-14s rel=%.3e (%d finite)\n", n==0 ? "skip" : (ok ? "PASS" : "FAIL"), nm, d, n)
         ok || (nfail+=1)
     end
-    @printf("\n  %d fields, %d finite; max rel=%.3e; %s (snicar via host-fallback)\n", ncmp, tot, gmax,
+    use_snicar = length(CLM.snicar_optics.ext_cff_mss_snw_drc) > 0 &&
+                 any(x -> x != 0.0, CLM.snicar_optics.ext_cff_mss_snw_drc)
+    @printf("\n  use_snicar=%s; %d fields, %d finite; max rel=%.3e; %s (snicar_rt_device! on Metal)\n",
+            use_snicar, ncmp, tot, gmax,
             nfail==0 ? "MATCHES CPU on Metal" : "DIVERGENCE ($nfail)")
     return nfail
 end

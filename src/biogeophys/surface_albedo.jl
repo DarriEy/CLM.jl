@@ -1407,14 +1407,12 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
     flx_absd_snw = fill!(similar(coszen_col_arr, FT, nc, nlevsno_val + 1, numrad), zero(FT))
     flx_absi_snw = fill!(similar(coszen_col_arr, FT, nc, nlevsno_val + 1, numrad), zero(FT))
 
-    if use_snicar
-        # snicar_rt! is a HOST-only solver (concrete Vector/Matrix{Int} signature
-        # with internal scalar loops + lookup-table interpolation — not kernelizable
-        # without a large separate effort). Per the host-fallback convention: build
-        # its inputs on the HOST from Array() copies of the device state, run it on
-        # host scratch outputs, then copy the results back into the device-resident
-        # albsnd/albsni/flx_*_snw. Byte-identical on CPU (Array() of a CPU Array is
-        # a no-op / view).
+    if use_snicar && albsnd isa Array
+        # CPU path: snicar_rt! runs in-place on host arrays. (The on-device port
+        # snicar_rt_device! handles the GPU branch below; this host path is kept
+        # byte-identical for CPU runs and AD.) Build its inputs on the HOST from
+        # Array() copies of the (CPU) state, run it on host scratch outputs, then
+        # copy the results back into albsnd/albsni/flx_*_snw.
         h2osno_liq_snw = zeros(FT, nc, nlevsno_val)
         h2osno_ice_snw = zeros(FT, nc, nlevsno_val)
         snw_rds_int = fill(round(Int, snicar_params.snw_rds_min), nc, nlevsno_val)
@@ -1496,6 +1494,33 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
         copyto!(albsni, albsni_h)
         copyto!(flx_absd_snw, flx_absd_h)
         copyto!(flx_absi_snw, flx_absi_h)
+    elseif use_snicar
+        # GPU path: build the SNICAR snow-layer inputs on-device (prep kernel),
+        # then run the on-device Adding-Doubling solver snicar_rt_device! straight
+        # into the device-resident albsnd/albsni/flx_*_snw. No host roundtrip.
+        h2osno_liq_snw = fill!(similar(albsnd, FT, nc, nlevsno_val), zero(FT))
+        h2osno_ice_snw = fill!(similar(albsnd, FT, nc, nlevsno_val), zero(FT))
+        snw_rds_dev    = fill!(similar(col.snl, eltype(col.snl), nc, nlevsno_val), zero(eltype(col.snl)))
+        mss_cnc_dev    = fill!(similar(albsnd, FT, nc, nlevsno_val, SNO_NBR_AER), zero(FT))
+        aer_avail      = size(aerosol.mss_cnc_bcphi_col, 1)
+        rds_min_int    = round(Int, snicar_params.snw_rds_min)
+
+        _launch!(_snicar_prep_kernel!, h2osno_liq_snw, h2osno_ice_snw, snw_rds_dev, mss_cnc_dev,
+                 mask_nourbanc, waterstatebulk.ws.h2osoi_liq_col, waterstatebulk.ws.h2osoi_ice_col,
+                 waterdiagbulk.snw_rds_col,
+                 aerosol.mss_cnc_bcphi_col, aerosol.mss_cnc_bcpho_col,
+                 aerosol.mss_cnc_ocphi_col, aerosol.mss_cnc_ocpho_col,
+                 aerosol.mss_cnc_dst1_col, aerosol.mss_cnc_dst2_col,
+                 aerosol.mss_cnc_dst3_col, aerosol.mss_cnc_dst4_col,
+                 nlevsno_val, aer_avail, rds_min_int; ndrange = nc)
+
+        # Underlying surface albedo for SNICAR is the diffuse soil albedo (albsoi).
+        snicar_rt_device!(coszen_col_arr, 1, h2osno_liq_snw, h2osno_ice_snw, h2osno_total_arr,
+                          snw_rds_dev, mss_cnc_dev, albsoi, col.snl, frac_sno,
+                          albsnd, flx_absd_snw, nlevsno_val; mask = mask_nourbanc)
+        snicar_rt_device!(coszen_col_arr, 2, h2osno_liq_snw, h2osno_ice_snw, h2osno_total_arr,
+                          snw_rds_dev, mss_cnc_dev, albsoi, col.snl, frac_sno,
+                          albsni, flx_absi_snw, nlevsno_val; mask = mask_nourbanc)
     else
         # Fallback: age-based snow albedo (used when SNICAR optics not loaded)
         snow_persist = waterstatebulk.snow_persistence_col
