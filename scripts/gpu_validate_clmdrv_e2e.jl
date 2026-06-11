@@ -66,8 +66,13 @@ end
 # kernels onto the working backend via its internal `_onbk` helper, so no global
 # swap is needed here.
 
-# make_driver_data: cloned from test/test_clm_driver.jl (Float64 build, sets the
-# shared module globals varpar/varcon/pftcon/SNOW_DZ*/urban_ctrl).
+# make_driver_data / make_driver_data_physical: cloned from
+# test/test_clm_driver.jl (Float64 build, sets the shared module globals
+# varpar/varcon/pftcon/SNOW_DZ*/urban_ctrl). make_driver_data_physical adds
+# realistic cold-start initial conditions (forcing, geometry, soil props,
+# temperature, water, canopy) so clm_drv! yields FINITE outputs across the bulk
+# of the state — giving a meaningful CPU-vs-device parity number over many
+# fields instead of only the handful the smoke fixture leaves finite.
 include(joinpath(@__DIR__, "clmdrv_make_data.jl"))
 
 const DRV_ARGS = (true,      # doalb (full driver incl. surface_albedo radiative transfer)
@@ -99,13 +104,13 @@ function main(backend)
     @printf("  Backend: %s   (working precision: %s)\n\n", name, FT)
 
     # ---- CPU reference run (Float64) ----
-    instH, bounds, filtH, filt_iaH, configH, psH = make_driver_data()
+    instH, bounds, filtH, filt_iaH, configH, psH = make_driver_data_physical()
     instH.canopystate.frac_veg_nosno_alb_patch .= 1
     run_drv!(instH, filtH, filt_iaH, bounds, configH, psH)
     println("  CPU clm_drv! completed.")
 
     # ---- Device run (Metal Float32) over a fresh, identical state ----
-    instB, boundsB, filtB, filt_iaB, configB, psB = make_driver_data()
+    instB, boundsB, filtB, filt_iaB, configB, psB = make_driver_data_physical()
     instB.canopystate.frac_veg_nosno_alb_patch .= 1
 
     inst_d = mf(instB)
