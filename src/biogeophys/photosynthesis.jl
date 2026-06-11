@@ -4784,6 +4784,18 @@ Adapt.@adapt_structure _Psn3Out
     end
 end
 
+# Copy every array field of a host bundle back into the matching field of the
+# device bundle (used by the PHS Pass-3 hybrid below). Read-only fields copy back
+# unchanged (harmless); output fields carry the host-computed Pass-3 result onto
+# the device. Bulk copyto! (no scalar indexing) so it is device-safe.
+function _phs_pass3_copyback!(dev, host)
+    for f in fieldnames(typeof(dev))
+        d = getfield(dev, f); h = getfield(host, f)
+        (d isa AbstractArray && h isa AbstractArray) && copyto!(d, h)
+    end
+    return nothing
+end
+
 # Host launcher for the PHS Pass-3 kernel. GPU-hostile values (params_inst fields,
 # the Medlyn override, the is_near_local_noon function, module-global constants) are
 # resolved to host scalars / a per-patch Bool vector before the launch.
@@ -4837,11 +4849,35 @@ function psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
         psn_wp_z_sun = psn_wp_z_sun, psn_wc_z_sha = psn_wc_z_sha,
         psn_wj_z_sha = psn_wj_z_sha, psn_wp_z_sha = psn_wp_z_sha)
     be = _kernel_backend(forc_pbot)
-    _psn_phs_pass3_kernel!(be)(dv, phs_params, sc, idx, ina, inb, out,
-        nlevsoi, modifyphoto_and_lmr_forcrop,
-        stomatalcond_mtd, STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
-        ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if be isa KA.CPU
+        _psn_phs_pass3_kernel!(be)(dv, phs_params, sc, idx, ina, inb, out,
+            nlevsoi, modifyphoto_and_lmr_forcrop,
+            stomatalcond_mtd, STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
+            ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    else
+        # HYBRID FALLBACK: the fused PHS Pass-3 Newton kernel is CPU-bit-identical
+        # but exceeds the Apple Metal shader compiler's capacity (the compiler
+        # daemon crashes, XPC_ERROR_CONNECTION_INTERRUPTED — a compiler limit, not
+        # a code bug; it would likely compile on CUDA). Run the SAME kernel on the
+        # CPU over host copies of the device bundles, then copy the mutated arrays
+        # back to the device. Passes 1/2/4 still run on the GPU; only this one
+        # coupled Newton solve hops to the host. Float32 throughout, so the device
+        # state after copyback matches a would-be on-device F32 result to last bits.
+        dv_h  = Adapt.adapt(Array, dv)
+        pp_h  = Adapt.adapt(Array, phs_params)
+        idx_h = Adapt.adapt(Array, idx)
+        ina_h = Adapt.adapt(Array, ina)
+        inb_h = Adapt.adapt(Array, inb)
+        out_h = Adapt.adapt(Array, out)
+        _psn_phs_pass3_kernel!(KA.CPU())(dv_h, pp_h, sc, idx_h, ina_h, inb_h, out_h,
+            nlevsoi, modifyphoto_and_lmr_forcrop,
+            stomatalcond_mtd, STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
+            ndrange = length(bounds_patch))
+        KA.synchronize(KA.CPU())
+        _phs_pass3_copyback!(dv, dv_h)
+        _phs_pass3_copyback!(out, out_h)
+    end
     return nothing
 end
 

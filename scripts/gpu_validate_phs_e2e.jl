@@ -5,8 +5,11 @@
 # Builds the same small Float32 PHS case as the CPU oracle
 # (gpu_validate_phs_cpu_oracle.jl), runs photosynthesis_hydrstress! on the CPU,
 # adapts ps + every input array to Metal, runs the SAME call on device, and
-# compares the mutated outputs. This is the parity gate for Passes 1-4 together
-# (Pass 3's fused Newton solve runs end-to-end on the GPU here for the first time).
+# compares the mutated outputs. This is the parity gate for Passes 1-4 together.
+# Passes 1/2/4 run on the GPU; Pass 3's fused Newton solve runs via the HYBRID
+# fallback (on the CPU over host copies, results copied back to the device) because
+# that kernel exceeds the Apple Metal shader compiler's capacity. So vegwp/qflx_tran
+# here exercise the hybrid path, while k_soil_root/vcmax_z/cisun_z exercise on-GPU.
 #
 #   julia --project=scripts scripts/gpu_validate_phs_e2e.jl
 # ==========================================================================
