@@ -19,33 +19,10 @@ using Printf
 import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
-# Float32 down-adaptor: arrays -> Float32, AND ::FT scalar fields (e.g.
-# TemperatureData.excess_ice_coldstart_*) -> Float32 so the parametric {FT}
-# constructor accepts them. The handful of structs that pin a CONCRETE ::Float64
-# scalar (which must stay Float64) are special-cased below to preserve it.
-struct _F32 end
-CLM.Adapt.adapt_storage(::_F32, x::AbstractArray{<:AbstractFloat}) = Float32.(x)
-CLM.Adapt.adapt_storage(::_F32, x::AbstractArray{<:Integer}) = x
-# Unpack Bool arrays (BitVector) to Vector{Bool} so the subsequent MtlArray adapt
-# doesn't scalar-index packed bits.
-CLM.Adapt.adapt_storage(::_F32, x::AbstractArray{Bool}) = collect(Bool, x)
-CLM.Adapt.adapt_storage(::_F32, x::Float64) = Float32(x)
-
-# Reconstruct a struct adapting every field EXCEPT the named concrete-Float64
-# scalar field(s), which are preserved as-is (their ctor pins ::Float64).
-function _adapt_keep_f64(a, x, keep::Tuple)
-    T = typeof(x)
-    vals = ntuple(fieldcount(T)) do i
-        n = fieldname(T, i); v = getfield(x, i)
-        n in keep ? v : CLM.Adapt.adapt(a, v)
-    end
-    return T.name.wrapper(vals...)
-end
-CLM.Adapt.adapt_structure(a::_F32, x::CLM.CanopyStateData) = _adapt_keep_f64(a, x, (:leaf_mr_vcm,))
-CLM.Adapt.adapt_structure(a::_F32, x::CLM.SoilBiogeochemCarbonStateData) = _adapt_keep_f64(a, x, (:totvegcthresh,))
-CLM.Adapt.adapt_structure(a::_F32, x::CLM.SoilBiogeochemNitrogenStateData) = _adapt_keep_f64(a, x, (:totvegcthresh,))
-
-mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+# Float32 down-adaptor (arrays + ::FT scalars -> Float32, concrete-Float64 scalars
+# kept) — shared across the gpu_validate_* harnesses; see gpu_adapt.jl.
+include(joinpath(@__DIR__, "gpu_adapt.jl"))
+mf(x) = mf(Metal.MtlArray, x)
 
 # Finite-only relative diff: compares only entries finite on BOTH backends (the
 # minimal smoke-test fixture leaves much of the physics NaN/Inf on both). Returns
