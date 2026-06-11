@@ -65,22 +65,63 @@ function main()
     runstep!(instH, filtH, filt_ia, bounds, 4)            # CPU compared step
     runstep!(inst_d, filt_d, filt_ia_d, boundsB, 4)       # device compared step
     println("both step-4 runs completed")
+    H = instH; D = inst_d
+    wsH = H.water.waterstatebulk_inst.ws;  wsD = D.water.waterstatebulk_inst.ws
+    wdH = H.water.waterdiagnosticbulk_inst; wdD = D.water.waterdiagnosticbulk_inst
+    wfH = H.water.waterfluxbulk_inst;       wfD = D.water.waterfluxbulk_inst
+    # Lazy (name, hostgetter, devgetter) so a missing field can't abort the scan.
     checks = [
-        ("t_grnd", instH.temperature.t_grnd_col, inst_d.temperature.t_grnd_col),
-        ("t_soisno", instH.temperature.t_soisno_col, inst_d.temperature.t_soisno_col),
-        ("t_veg", instH.temperature.t_veg_patch, inst_d.temperature.t_veg_patch),
-        ("eflx_sh_tot", instH.energyflux.eflx_sh_tot_patch, inst_d.energyflux.eflx_sh_tot_patch),
-        ("sabg", instH.solarabs.sabg_patch, inst_d.solarabs.sabg_patch),
-        ("fabd", instH.surfalb.fabd_patch, inst_d.surfalb.fabd_patch),
+        ("temp.t_grnd",      ()->H.temperature.t_grnd_col,      ()->D.temperature.t_grnd_col),
+        ("temp.t_soisno",    ()->H.temperature.t_soisno_col,    ()->D.temperature.t_soisno_col),
+        ("temp.t_veg",       ()->H.temperature.t_veg_patch,     ()->D.temperature.t_veg_patch),
+        ("temp.t_h2osfc",    ()->H.temperature.t_h2osfc_col,    ()->D.temperature.t_h2osfc_col),
+        ("temp.thv",         ()->H.temperature.thv_col,         ()->D.temperature.thv_col),
+        ("temp.emg",         ()->H.temperature.emg_col,         ()->D.temperature.emg_col),
+        ("temp.t_ref2m",     ()->H.temperature.t_ref2m_patch,   ()->D.temperature.t_ref2m_patch),
+        ("temp.t_lake",      ()->H.temperature.t_lake_col,      ()->D.temperature.t_lake_col),
+        ("ws.h2osoi_liq",    ()->wsH.h2osoi_liq_col,            ()->wsD.h2osoi_liq_col),
+        ("ws.h2osoi_ice",    ()->wsH.h2osoi_ice_col,            ()->wsD.h2osoi_ice_col),
+        ("ws.h2osoi_vol",    ()->wsH.h2osoi_vol_col,            ()->wsD.h2osoi_vol_col),
+        ("ws.h2osfc",        ()->wsH.h2osfc_col,                ()->wsD.h2osfc_col),
+        ("ws.h2osno_nolyr",  ()->wsH.h2osno_no_layers_col,      ()->wsD.h2osno_no_layers_col),
+        ("wd.frac_sno",      ()->wdH.frac_sno_col,              ()->wdD.frac_sno_col),
+        ("wd.frac_sno_eff",  ()->wdH.frac_sno_eff_col,          ()->wdD.frac_sno_eff_col),
+        ("wd.frac_h2osfc",   ()->wdH.frac_h2osfc_col,           ()->wdD.frac_h2osfc_col),
+        ("wd.snow_depth",    ()->wdH.snow_depth_col,            ()->wdD.snow_depth_col),
+        ("wd.h2osoi_liqvol", ()->wdH.h2osoi_liqvol_col,         ()->wdD.h2osoi_liqvol_col),
+        ("ef.eflx_sh_tot",   ()->H.energyflux.eflx_sh_tot_patch, ()->D.energyflux.eflx_sh_tot_patch),
+        ("ef.eflx_sh_grnd",  ()->H.energyflux.eflx_sh_grnd_patch,()->D.energyflux.eflx_sh_grnd_patch),
+        ("ef.eflx_lwrad_net",()->H.energyflux.eflx_lwrad_net_patch,()->D.energyflux.eflx_lwrad_net_patch),
+        ("ef.eflx_soil_grnd",()->H.energyflux.eflx_soil_grnd_patch,()->D.energyflux.eflx_soil_grnd_patch),
+        ("ef.htvp",          ()->H.energyflux.htvp_col,         ()->D.energyflux.htvp_col),
+        ("sa.sabg",          ()->H.solarabs.sabg_patch,         ()->D.solarabs.sabg_patch),
+        ("sa.sabv",          ()->H.solarabs.sabv_patch,         ()->D.solarabs.sabv_patch),
+        ("sa.fsa",           ()->H.solarabs.fsa_patch,          ()->D.solarabs.fsa_patch),
+        ("alb.albgrd",       ()->H.surfalb.albgrd_col,          ()->D.surfalb.albgrd_col),
+        ("alb.albgri",       ()->H.surfalb.albgri_col,          ()->D.surfalb.albgri_col),
+        ("alb.albd",         ()->H.surfalb.albd_patch,          ()->D.surfalb.albd_patch),
+        ("alb.fabd",         ()->H.surfalb.fabd_patch,          ()->D.surfalb.fabd_patch),
+        ("alb.fabi",         ()->H.surfalb.fabi_patch,          ()->D.surfalb.fabi_patch),
+        ("alb.ftdd",         ()->H.surfalb.ftdd_patch,          ()->D.surfalb.ftdd_patch),
+        ("cs.elai",          ()->H.canopystate.elai_patch,      ()->D.canopystate.elai_patch),
+        ("fv.z0mg",          ()->H.frictionvel.z0mg_col,        ()->D.frictionvel.z0mg_col),
+        ("fv.ram1",          ()->H.frictionvel.ram1_patch,      ()->D.frictionvel.ram1_patch),
+        ("wf.qflx_ev_snow",  ()->wfH.qflx_ev_snow_patch,        ()->wfD.qflx_ev_snow_patch),
     ]
-    nfail=0; tot=0; gmax=0.0
-    for (nm,a,b) in checks
-        d,n = reldiff(a,b); tot+=n; gmax=max(gmax,d)
+    nfail=0; tot=0; gmax=0.0; ncmp=0
+    for (nm,ga,gb) in checks
+        local d, n
+        try
+            d,n = reldiff(ga(), gb())
+        catch e
+            @printf("  [err ] %-18s %s\n", nm, sprint(showerror,e)[1:min(end,40)]); continue
+        end
+        tot+=n; (n>0) && (gmax=max(gmax,d); ncmp+=1)
         ok = n==0 || d<1f-2
-        @printf("  [%s] %-12s rel=%.3e (%d finite)\n", n==0 ? "skip" : (ok ? "PASS" : "FAIL"), nm, d, n)
+        @printf("  [%s] %-18s rel=%.3e (%d finite)\n", n==0 ? "skip" : (ok ? "PASS" : "FAIL"), nm, d, n)
         ok || (nfail+=1)
     end
-    @printf("\n  %d finite entries; global max rel=%.3e; %s\n", tot, gmax,
+    @printf("\n  %d fields compared, %d finite entries; global max rel=%.3e; %s\n", ncmp, tot, gmax,
             nfail==0 ? "MATCHES CPU on Metal" : "DIVERGENCE ($nfail)")
     return nfail
 end
