@@ -1207,7 +1207,64 @@ using Newton-Raphson to find leaf temperature (t_veg).
 
 Ported from `subroutine CanopyFluxes` in `CanopyFluxesMod.F90`.
 """
+# Thin keyword wrapper preserving the original interface (tests + other callers).
+# Forwards to the all-positional canopy_fluxes_core! so the differentiated driver
+# path (clm_drv_core!) can call it WITHOUT a kwarg NamedTuple — Enzyme reverse-mode
+# cannot compile the Core.kwcall augmented thunk over this signature (see
+# scripts/enzyme_fulldriver_probe.jl). The core lists the driver-supplied kwargs
+# first so the driver call stays compact (trailing default-only args omitted).
 function canopy_fluxes!(
+        canopystate, energyflux, frictionvel, temperature, solarabs, soilstate,
+        waterfluxbulk, waterstatebulk, waterdiagbulk, photosyns,
+        patch_data, col_data, gridcell_data, mask_exposedvegp, bounds_patch, bounds_col,
+        forc_lwrad_col, forc_q_col, forc_pbot_col, forc_th_col, forc_rho_col, forc_t_col,
+        forc_u_grc, forc_v_grc, forc_pco2_grc, forc_po2_grc,
+        forc_hgt_t_grc, forc_hgt_u_grc, forc_hgt_q_grc, dayl_grc, max_dayl_grc,
+        downreg_patch, leafn_patch, dtime;
+        dleaf_pft=fill(0.04, MXPFT+1), dbh_pft=fill(0.1, MXPFT+1),
+        slatop_pft=fill(0.01, MXPFT+1), fbw_pft=fill(0.1, MXPFT+1),
+        nstem_pft=fill(1.0, MXPFT+1), woody_pft=fill(0.0, MXPFT+1),
+        rstem_per_dbh_pft=fill(0.0, MXPFT+1), wood_density_pft=fill(500.0, MXPFT+1),
+        is_tree_pft=fill(false, MXPFT+1), is_shrub_pft=fill(false, MXPFT+1),
+        c3psn_pft=fill(1.0, MXPFT+1), leafcn_pft=fill(25.0, MXPFT+1),
+        flnr_pft=fill(0.08, MXPFT+1), fnitr_pft=fill(0.1, MXPFT+1),
+        mbbopt_pft=fill(0.0, MXPFT+1), medlynintercept_pft=fill(100.0, MXPFT+1),
+        medlynslope_pft=fill(6.0, MXPFT+1), crop_pft=Float64[],
+        z0v_Cr_pft=fill(0.35, MXPFT+1), z0v_Cs_pft=fill(0.003, MXPFT+1),
+        z0v_c_pft=fill(0.25, MXPFT+1), z0v_cw_pft=fill(2.0, MXPFT+1),
+        z0v_LAImax_pft=fill(8.0, MXPFT+1),
+        use_cn=false, use_lch4=false, use_c13=false, use_hydrstress=false,
+        use_fates=false, use_luna=false, z0param_method="ZengWang2007",
+        o3coefv_patch=Float64[], o3coefg_patch=Float64[],
+        grnd_ch4_cond_patch=Float64[], forc_pc13o2_grc=Float64[],
+        t10_patch=Float64[], nrad_patch=Int[],
+        tlai_z_patch=Matrix{Float64}(undef,0,0),
+        vcmaxcint_sun_patch=Float64[], vcmaxcint_sha_patch=Float64[],
+        parsun_z_patch=Matrix{Float64}(undef,0,0), parsha_z_patch=Matrix{Float64}(undef,0,0),
+        laisun_z_patch=Matrix{Float64}(undef,0,0), laisha_z_patch=Matrix{Float64}(undef,0,0),
+        leaf_mr_vcm=0.015, overrides=CalibrationOverrides())
+    return canopy_fluxes_core!(
+        canopystate, energyflux, frictionvel, temperature, solarabs, soilstate,
+        waterfluxbulk, waterstatebulk, waterdiagbulk, photosyns,
+        patch_data, col_data, gridcell_data, mask_exposedvegp, bounds_patch, bounds_col,
+        forc_lwrad_col, forc_q_col, forc_pbot_col, forc_th_col, forc_rho_col, forc_t_col,
+        forc_u_grc, forc_v_grc, forc_pco2_grc, forc_po2_grc,
+        forc_hgt_t_grc, forc_hgt_u_grc, forc_hgt_q_grc, dayl_grc, max_dayl_grc,
+        downreg_patch, leafn_patch, dtime,
+        t10_patch, nrad_patch, tlai_z_patch, vcmaxcint_sun_patch, vcmaxcint_sha_patch,
+        parsun_z_patch, parsha_z_patch, laisun_z_patch, laisha_z_patch,
+        o3coefv_patch, o3coefg_patch, dleaf_pft, slatop_pft, leafcn_pft, flnr_pft,
+        fnitr_pft, mbbopt_pft, c3psn_pft, woody_pft, overrides,
+        dbh_pft, fbw_pft, nstem_pft, rstem_per_dbh_pft, wood_density_pft,
+        is_tree_pft, is_shrub_pft, medlynintercept_pft, medlynslope_pft, crop_pft,
+        z0v_Cr_pft, z0v_Cs_pft, z0v_c_pft, z0v_cw_pft, z0v_LAImax_pft,
+        use_cn, use_lch4, use_c13, use_hydrstress, use_fates, use_luna,
+        z0param_method, grnd_ch4_cond_patch, forc_pc13o2_grc, leaf_mr_vcm)
+end
+
+# All-positional core (body lives here). Param groups: (1) state/forcing, then
+# (2) driver-supplied "kwargs" (front), then (3) default-only params (back).
+function canopy_fluxes_core!(
         canopystate     ::CanopyStateData,
         energyflux      ::EnergyFluxData,
         frictionvel     ::FrictionVelocityData,
@@ -1224,14 +1281,12 @@ function canopy_fluxes!(
         mask_exposedvegp::AbstractVector{Bool},
         bounds_patch    ::UnitRange{Int},
         bounds_col      ::UnitRange{Int},
-        # Atmospheric forcing (column-level)
         forc_lwrad_col  ::AbstractVector{<:Real},
         forc_q_col      ::AbstractVector{<:Real},
         forc_pbot_col   ::AbstractVector{<:Real},
         forc_th_col     ::AbstractVector{<:Real},
         forc_rho_col    ::AbstractVector{<:Real},
         forc_t_col      ::AbstractVector{<:Real},
-        # Atmospheric forcing (gridcell-level)
         forc_u_grc      ::AbstractVector{<:Real},
         forc_v_grc      ::AbstractVector{<:Real},
         forc_pco2_grc   ::AbstractVector{<:Real},
@@ -1239,53 +1294,12 @@ function canopy_fluxes!(
         forc_hgt_t_grc  ::AbstractVector{<:Real},
         forc_hgt_u_grc  ::AbstractVector{<:Real},
         forc_hgt_q_grc  ::AbstractVector{<:Real},
-        # Daylength (gridcell-level)
         dayl_grc        ::AbstractVector{<:Real},
         max_dayl_grc    ::AbstractVector{<:Real},
-        # CN inputs (patch-level)
         downreg_patch   ::AbstractVector{<:Real},
         leafn_patch     ::AbstractVector{<:Real},
-        # Time step
-        dtime           ::Real;
-        # PFT parameters (patch-indexed via ivt)
-        dleaf_pft       ::AbstractVector{<:Real} = fill(0.04, MXPFT+1),
-        dbh_pft         ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
-        slatop_pft      ::AbstractVector{<:Real} = fill(0.01, MXPFT+1),
-        fbw_pft         ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
-        nstem_pft       ::AbstractVector{<:Real} = fill(1.0, MXPFT+1),
-        woody_pft       ::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
-        rstem_per_dbh_pft::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
-        wood_density_pft::AbstractVector{<:Real} = fill(500.0, MXPFT+1),
-        is_tree_pft     ::AbstractVector{Bool} = fill(false, MXPFT+1),
-        is_shrub_pft    ::AbstractVector{Bool} = fill(false, MXPFT+1),
-        c3psn_pft       ::AbstractVector{<:Real} = fill(1.0, MXPFT+1),
-        leafcn_pft      ::AbstractVector{<:Real} = fill(25.0, MXPFT+1),
-        flnr_pft        ::AbstractVector{<:Real} = fill(0.08, MXPFT+1),
-        fnitr_pft       ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
-        mbbopt_pft      ::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
-        medlynintercept_pft::AbstractVector{<:Real} = fill(100.0, MXPFT+1),
-        medlynslope_pft ::AbstractVector{<:Real} = fill(6.0, MXPFT+1),
-        crop_pft        ::AbstractVector{<:Real} = Float64[],
-        z0v_Cr_pft      ::AbstractVector{<:Real} = fill(0.35, MXPFT+1),
-        z0v_Cs_pft      ::AbstractVector{<:Real} = fill(0.003, MXPFT+1),
-        z0v_c_pft       ::AbstractVector{<:Real} = fill(0.25, MXPFT+1),
-        z0v_cw_pft      ::AbstractVector{<:Real} = fill(2.0, MXPFT+1),
-        z0v_LAImax_pft  ::AbstractVector{<:Real} = fill(8.0, MXPFT+1),
-        # Feature flags
-        use_cn          ::Bool = false,
-        use_lch4        ::Bool = false,
-        use_c13         ::Bool = false,
-        use_hydrstress  ::Bool = false,
-        use_fates       ::Bool = false,
-        use_luna        ::Bool = false,
-        z0param_method  ::String = "ZengWang2007",
-        # Ozone stress arrays (optional)
-        o3coefv_patch   ::AbstractVector{<:Real} = Float64[],
-        o3coefg_patch   ::AbstractVector{<:Real} = Float64[],
-        # CH4 conductance output (optional)
-        grnd_ch4_cond_patch::AbstractVector{<:Real} = Float64[],
-        # Photosynthesis extras
-        forc_pc13o2_grc ::AbstractVector{<:Real} = Float64[],
+        dtime           ::Real,
+        # (2) driver-supplied group
         t10_patch       ::AbstractVector{<:Real} = Float64[],
         nrad_patch      ::AbstractVector{<:Integer} = Int[],
         tlai_z_patch    ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
@@ -1295,9 +1309,43 @@ function canopy_fluxes!(
         parsha_z_patch  ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
         laisun_z_patch  ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
         laisha_z_patch  ::AbstractMatrix{<:Real} = Matrix{Float64}(undef,0,0),
-        leaf_mr_vcm     ::Real = 0.015,
-        # Calibration overrides (NaN = use defaults)
-        overrides       ::CalibrationOverrides = CalibrationOverrides())
+        o3coefv_patch   ::AbstractVector{<:Real} = Float64[],
+        o3coefg_patch   ::AbstractVector{<:Real} = Float64[],
+        dleaf_pft       ::AbstractVector{<:Real} = fill(0.04, MXPFT+1),
+        slatop_pft      ::AbstractVector{<:Real} = fill(0.01, MXPFT+1),
+        leafcn_pft      ::AbstractVector{<:Real} = fill(25.0, MXPFT+1),
+        flnr_pft        ::AbstractVector{<:Real} = fill(0.08, MXPFT+1),
+        fnitr_pft       ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
+        mbbopt_pft      ::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
+        c3psn_pft       ::AbstractVector{<:Real} = fill(1.0, MXPFT+1),
+        woody_pft       ::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
+        overrides       ::CalibrationOverrides = CalibrationOverrides(),
+        # (3) default-only group
+        dbh_pft         ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
+        fbw_pft         ::AbstractVector{<:Real} = fill(0.1, MXPFT+1),
+        nstem_pft       ::AbstractVector{<:Real} = fill(1.0, MXPFT+1),
+        rstem_per_dbh_pft::AbstractVector{<:Real} = fill(0.0, MXPFT+1),
+        wood_density_pft::AbstractVector{<:Real} = fill(500.0, MXPFT+1),
+        is_tree_pft     ::AbstractVector{Bool} = fill(false, MXPFT+1),
+        is_shrub_pft    ::AbstractVector{Bool} = fill(false, MXPFT+1),
+        medlynintercept_pft::AbstractVector{<:Real} = fill(100.0, MXPFT+1),
+        medlynslope_pft ::AbstractVector{<:Real} = fill(6.0, MXPFT+1),
+        crop_pft        ::AbstractVector{<:Real} = Float64[],
+        z0v_Cr_pft      ::AbstractVector{<:Real} = fill(0.35, MXPFT+1),
+        z0v_Cs_pft      ::AbstractVector{<:Real} = fill(0.003, MXPFT+1),
+        z0v_c_pft       ::AbstractVector{<:Real} = fill(0.25, MXPFT+1),
+        z0v_cw_pft      ::AbstractVector{<:Real} = fill(2.0, MXPFT+1),
+        z0v_LAImax_pft  ::AbstractVector{<:Real} = fill(8.0, MXPFT+1),
+        use_cn          ::Bool = false,
+        use_lch4        ::Bool = false,
+        use_c13         ::Bool = false,
+        use_hydrstress  ::Bool = false,
+        use_fates       ::Bool = false,
+        use_luna        ::Bool = false,
+        z0param_method  ::String = "ZengWang2007",
+        grnd_ch4_cond_patch::AbstractVector{<:Real} = Float64[],
+        forc_pc13o2_grc ::AbstractVector{<:Real} = Float64[],
+        leaf_mr_vcm     ::Real = 0.015)
 
     np = length(bounds_patch)
     begp = first(bounds_patch)

@@ -881,7 +881,10 @@ function clm_drv_core!(config::CLMDriverConfig,
         downreg_patch = _zlike(np)
         leafn_patch = _zlike(np)
     end
-    canopy_fluxes!(cs, ef, fv, temp, sa, ss, wfb, wsb, wdb, ps,
+    # Positional call into canopy_fluxes_core! (no kwarg NamedTuple) so Enzyme
+    # reverse-mode can compile the differentiated driver. The trailing args after
+    # `overrides` (dbh_pft/.../leaf_mr_vcm) keep their core defaults.
+    canopy_fluxes_core!(cs, ef, fv, temp, sa, ss, wfb, wsb, wdb, ps,
                    pch, col, grc,
                    filt.exposedvegp, bc_patch, bc_col,
                    a2l.forc_lwrad_downscaled_col,
@@ -893,27 +896,16 @@ function clm_drv_core!(config::CLMDriverConfig,
                    a2l.forc_hgt_t_grc, a2l.forc_hgt_u_grc, a2l.forc_hgt_q_grc,
                    grc.dayl, grc.max_dayl,
                    downreg_patch, leafn_patch,
-                   dtime;
-                   t10_patch=temp.t_a10_patch,
-                   nrad_patch=alb.nrad_patch,
-                   tlai_z_patch=alb.tlai_z_patch,
-                   vcmaxcint_sun_patch=alb.vcmaxcintsun_patch,
-                   vcmaxcint_sha_patch=alb.vcmaxcintsha_patch,
-                   parsun_z_patch=sa.parsun_z_patch,
-                   parsha_z_patch=sa.parsha_z_patch,
-                   laisun_z_patch=cs.laisun_z_patch,
-                   laisha_z_patch=cs.laisha_z_patch,
-                   o3coefv_patch=_olike(np),
-                   o3coefg_patch=_olike(np),
-                   dleaf_pft=_onbk(pftcon.dleaf),
-                   slatop_pft=_onbk(pftcon.slatop),
-                   leafcn_pft=_onbk(pftcon.leafcn),
-                   flnr_pft=_onbk(pftcon.flnr),
-                   fnitr_pft=_onbk(pftcon.fnitr),
-                   mbbopt_pft=_onbk(pftcon.mbbopt),
-                   c3psn_pft=_onbk(pftcon.c3psn),
-                   woody_pft=_onbk(pftcon.woody),
-                   overrides=inst.overrides)
+                   dtime,
+                   temp.t_a10_patch, alb.nrad_patch, alb.tlai_z_patch,
+                   alb.vcmaxcintsun_patch, alb.vcmaxcintsha_patch,
+                   sa.parsun_z_patch, sa.parsha_z_patch,
+                   cs.laisun_z_patch, cs.laisha_z_patch,
+                   _olike(np), _olike(np),
+                   _onbk(pftcon.dleaf), _onbk(pftcon.slatop), _onbk(pftcon.leafcn),
+                   _onbk(pftcon.flnr), _onbk(pftcon.fnitr), _onbk(pftcon.mbbopt),
+                   _onbk(pftcon.c3psn), _onbk(pftcon.woody),
+                   inst.overrides)
 
 
     # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)
