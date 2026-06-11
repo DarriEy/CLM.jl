@@ -315,49 +315,6 @@ function make_driver_data_physical(; ng=2, nl=3, nc=4, np=6)
         ss.rootr_patch[p, j]  = j <= nlevsoi ? 1.0 / nlevsoi : 0.0
     end
 
-    # ---- 4. Temperature state ---------------------------------------------
-    temp = inst.temperature
-    for c in 1:nc
-        temp.t_grnd_col[c]   = 283.0
-        temp.t_h2osfc_col[c] = 283.0
-        temp.emg_col[c]      = 0.97
-        temp.thv_col[c]      = 283.0 * (1 + 0.61 * qair)
-        for j in 1:nlevsno
-            temp.t_soisno_col[c, j] = TFRZ          # unused snow layers, keep finite
-        end
-        for j in 1:nlevmax
-            temp.t_soisno_col[c, j + joff] = 283.0
-        end
-    end
-    for p in 1:np
-        temp.t_veg_patch[p] = 283.0
-    end
-
-    # ---- 5. Water state ----------------------------------------------------
-    ws = inst.water.waterstatebulk_inst.ws
-    DENH2O = CLM.DENH2O
-    nlevtot = nlevsno + nlevmax
-    for c in 1:nc
-        ws.h2osfc_col[c]            = 0.0
-        ws.h2osno_no_layers_col[c] = 0.0
-        for j in 1:nlevtot
-            ws.h2osoi_liq_col[c, j] = 0.0
-            ws.h2osoi_ice_col[c, j] = 0.0
-            ws.excess_ice_col[c, j] = 0.0
-        end
-        for j in 1:nlevmax
-            ws.h2osoi_vol_col[c, j] = 0.0
-        end
-        # Soil layers (below joff): unfrozen liquid water at ~50% saturation.
-        for j in 1:nlevgrnd
-            jj  = j + joff
-            vol = 0.20                       # vol. soil moisture (< watsat=0.40)
-            ws.h2osoi_liq_col[c, jj] = vol * inst.column.dz[c, jj] * DENH2O
-            ws.h2osoi_ice_col[c, jj] = 0.0
-            ws.h2osoi_vol_col[c, j]  = vol
-        end
-    end
-
     # ---- 6b. Soil-color albedo constants (isoicol + albsat/albdry lookup) --
     # clm_initialize! normally fills inst.surfalb_con from surfdata.soil_color;
     # the fixture skips initialization, so the daytime soil-albedo kernel
@@ -367,18 +324,86 @@ function make_driver_data_physical(; ng=2, nl=3, nc=4, np=6)
     CLM.surface_albedo_init_time_const!(inst.surfalb_con, 20, soic2d,
                                         inst.column.gridcell[1:nc], 1:nc, 1:ng)
 
-    # ---- 6. Canopy state ---------------------------------------------------
-    cs = inst.canopystate
-    for p in 1:np
-        cs.tlai_patch[p] = 2.0
-        cs.tsai_patch[p] = 0.5
-        cs.elai_patch[p] = 2.0
-        cs.esai_patch[p] = 0.5
-        cs.htop_patch[p] = 1.0
-        cs.hbot_patch[p] = 0.1
-        cs.frac_veg_nosno_patch[p]     = 1
-        cs.frac_veg_nosno_alb_patch[p] = 1
+    # ---- 6c. Satellite-phenology monthly veg -------------------------------
+    # satellite_phenology! (driver ~L1405, runs every step before surface_albedo!)
+    # overwrites elai/tlai/htop from these np×2 monthly arrays (default NaN). Set
+    # them so elai stays finite (=2) — otherwise surface_albedo! gets NaN elai and
+    # fabd/fabi come out NaN, defeating the warmup below.
+    sp = inst.satellite_phenology
+    for p in 1:np, k in 1:2
+        sp.mlai2t[p, k] = 2.0
+        sp.msai2t[p, k] = 0.5
+        sp.mhvt2t[p, k] = 1.0
+        sp.mhvb2t[p, k] = 0.1
     end
+    sp.timwt[1] = 1.0; sp.timwt[2] = 0.0
+
+    # ---- 4/5/6. Dynamic state (temperature, water, canopy) -----------------
+    temp = inst.temperature
+    ws   = inst.water.waterstatebulk_inst.ws
+    cs   = inst.canopystate
+    DENH2O  = CLM.DENH2O
+    nlevtot = nlevsno + nlevmax
+    function set_dynamic_state!()
+        for c in 1:nc                                       # temperature
+            temp.t_grnd_col[c]   = 283.0
+            temp.t_h2osfc_col[c] = 283.0
+            temp.emg_col[c]      = 0.97
+            temp.thv_col[c]      = 283.0 * (1 + 0.61 * qair)
+            for j in 1:nlevsno
+                temp.t_soisno_col[c, j] = TFRZ              # unused snow layers
+            end
+            for j in 1:nlevmax
+                temp.t_soisno_col[c, j + joff] = 283.0
+            end
+        end
+        for p in 1:np
+            temp.t_veg_patch[p] = 283.0
+        end
+        for c in 1:nc                                       # water
+            ws.h2osfc_col[c]            = 0.0
+            ws.h2osno_no_layers_col[c] = 0.0
+            for j in 1:nlevtot
+                ws.h2osoi_liq_col[c, j] = 0.0
+                ws.h2osoi_ice_col[c, j] = 0.0
+                ws.excess_ice_col[c, j] = 0.0
+            end
+            for j in 1:nlevmax
+                ws.h2osoi_vol_col[c, j] = 0.0
+            end
+            for j in 1:nlevgrnd
+                jj  = j + joff
+                vol = 0.20                                  # < watsat=0.40
+                ws.h2osoi_liq_col[c, jj] = vol * inst.column.dz[c, jj] * DENH2O
+                ws.h2osoi_ice_col[c, jj] = 0.0
+                ws.h2osoi_vol_col[c, j]  = vol
+            end
+        end
+        for p in 1:np                                       # canopy
+            cs.tlai_patch[p] = 2.0
+            cs.tsai_patch[p] = 0.5
+            cs.elai_patch[p] = 2.0
+            cs.esai_patch[p] = 0.5
+            cs.htop_patch[p] = 1.0
+            cs.hbot_patch[p] = 0.1
+            cs.frac_veg_nosno_patch[p]     = 1
+            cs.frac_veg_nosno_alb_patch[p] = 1
+        end
+        return nothing
+    end
+    set_dynamic_state!()
+
+    # NOTE on the surface-energy-balance fields (t_grnd/t_veg/eflx, all soil layers
+    # of t_soisno): these stay NaN because surface_radiation! (driver ~L807) reads
+    # the albedo radiation fractions (fabd/fabi/albgrd/...) that surface_albedo!
+    # only computes at the END of a step (~L1536) — and surface_albedo!'s ground
+    # albedo in turn needs a clean post-hydrology h2osoi_vol. On a cold start that
+    # is a circular dependency (albedo <- hydrology <- energy balance <- albedo);
+    # a warmup step doesn't break it (the warmup's NaN radiation corrupts the
+    # hydrology that the warmup's albedo then reads). Lighting these up needs a
+    # real CLM cold start (clm_initialize!/cold_start! computes a consistent
+    # initial albedo + state). Out of scope for this fixture; the 410 finite
+    # entries still give a real CPU-vs-Metal parity signal across the rest.
 
     return inst, bounds, filt, filt_ia, config, photosyns
 end
