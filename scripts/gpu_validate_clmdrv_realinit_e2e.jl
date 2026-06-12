@@ -24,6 +24,7 @@ function setup_forcing!(a2l, T0, ng)
         a2l.forc_rho_not_downscaled_grc[g]=85000.0/(CLM.RAIR*T0)
         a2l.forc_lwrad_not_downscaled_grc[g]=300.0; a2l.forc_vp_grc[g]=800.0
         a2l.forc_hgt_grc[g]=30.0; a2l.forc_topo_grc[g]=0.0; a2l.forc_wind_grc[g]=3.0
+        a2l.forc_hgt_u_grc[g]=30.0; a2l.forc_hgt_t_grc[g]=30.0; a2l.forc_hgt_q_grc[g]=30.0  # component obs heights (forcing_reader derives these; harness bypasses it)
         for b in 1:CLM.NUMRAD; a2l.forc_solad_not_downscaled_grc[g,b]=200.0; a2l.forc_solai_grc[g,b]=80.0; end
         a2l.forc_solar_not_downscaled_grc[g]=560.0
         a2l.forc_rain_not_downscaled_grc[g]=0.0001; a2l.forc_snow_not_downscaled_grc[g]=0.0

@@ -28,6 +28,7 @@ function setup_forcing!(a2l, T, ng)
         a2l.forc_lwrad_not_downscaled_grc[g] = 300.0
         a2l.forc_vp_grc[g] = 800.0
         a2l.forc_hgt_grc[g] = 30.0
+        a2l.forc_hgt_u_grc[g]=30.0; a2l.forc_hgt_t_grc[g]=30.0; a2l.forc_hgt_q_grc[g]=30.0  # component obs heights (forcing_reader derives these; harness bypasses it)
         a2l.forc_topo_grc[g] = 0.0
         a2l.forc_wind_grc[g] = 3.0
         for b in 1:CLM.NUMRAD

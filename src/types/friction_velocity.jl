@@ -706,6 +706,10 @@ function friction_velocity!(
         else
             zldis = fv.forc_hgt_u_patch[n] - displa[n]
         end
+        # Defense-in-depth: keep the wind reference height above the roughness length so
+        # log(zldis/z0m) can't collapse to 0 (→ ustar = VKC·um/0 blow-up). See the
+        # non-landunit branch for the full rationale; valid inputs are unaffected.
+        zldis = max(zldis, z0m[n] + 1.0)
         zeta = zldis / obu[n]
 
         if zeta < -zetam
@@ -969,6 +973,11 @@ end
 
         # ------- Wind profile -------
         zldis = forc_hgt_u_patch[n] - displa[n]
+        # Defense-in-depth: the wind reference height must sit above the roughness
+        # length. A degenerate forc_hgt_u (e.g. an obs height of 0 → zldis collapses to
+        # z0m) makes log(zldis/z0m)→0 and ustar = VKC·um/0 → blows up to ~1e15. Clamp
+        # zldis to ≥ z0m + 1 m; valid inputs (zldis ≫ z0m) are unaffected.
+        zldis = max(zldis, z0m[n] + one(T))
         zeta = zldis / obu[n]
 
         if zeta < -zetam

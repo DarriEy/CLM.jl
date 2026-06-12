@@ -676,7 +676,12 @@ compute_urban_tk!(thk, mask, itype, landunit, tk_wall, tk_roof, tk_improad, nlev
         T = eltype(tk_h2osfc)
         zh2osfc = T(1.0e-3) * (T(0.5) * h2osfc[c])
         z1 = z[c, 1 + joff]; tk1 = thk[c, 1 + joff]
-        tk_h2osfc[c] = T(TKWAT) * tk1 * (z1 + zh2osfc) / (T(TKWAT) * z1 + tk1 * zh2osfc)
+        # Guard the no-surface-water / degenerate-geometry 0/0: with h2osfc≈0 (zh2osfc≈0)
+        # the conductance reduces to tk1; if the denominator collapses (e.g. z1=0 on a
+        # degenerate column) fall back to the soil conductivity tk1 instead of 0/0=NaN
+        # — physically harmless since tk_h2osfc only contributes weighted by frac_h2osfc.
+        denom = T(TKWAT) * z1 + tk1 * zh2osfc
+        tk_h2osfc[c] = denom > zero(T) ? T(TKWAT) * tk1 * (z1 + zh2osfc) / denom : tk1
     end
 end
 compute_tk_h2osfc!(tk_h2osfc, mask, h2osfc, z, thk, joff::Int) =
@@ -946,10 +951,14 @@ Adapt.@adapt_structure GnetOut
             eflx_gnet_h2osfc = out.eflx_gnet[p]
         end
         out.dgnetdT[p] = -pin.cgrnd[p] - cin.dlwrad_emit[c]
-        _scatter_add!(hs,        c, out.eflx_gnet[p] * wt)
-        _scatter_add!(dhsdT,     c, out.dgnetdT[p]   * wt)
-        _scatter_add!(hs_soil,   c, eflx_gnet_soil   * wt)
-        _scatter_add!(hs_h2osfc, c, eflx_gnet_h2osfc * wt)
+        # Zero-weight (inactive) patches may carry uninitialized (NaN) flux state; their
+        # contribution is physically zero, but `0 * NaN = NaN` would poison the column
+        # heat-flux sums (and hence the whole tridiagonal solve). Contribute exactly 0.
+        wnz = wt != zero(T)
+        _scatter_add!(hs,        c, wnz ? out.eflx_gnet[p] * wt : zero(T))
+        _scatter_add!(dhsdT,     c, wnz ? out.dgnetdT[p]   * wt : zero(T))
+        _scatter_add!(hs_soil,   c, wnz ? eflx_gnet_soil   * wt : zero(T))
+        _scatter_add!(hs_h2osfc, c, wnz ? eflx_gnet_h2osfc * wt : zero(T))
     end
 end
 

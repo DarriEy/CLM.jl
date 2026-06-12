@@ -43,12 +43,18 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
     col = inst.column
     ss = inst.soilstate
     nlevsoi = varpar.nlevsoi
+    nlevgrnd = varpar.nlevgrnd
 
     for c in bounds.begc:bounds.endc
         g = col.gridcell[c]
         gi = g - bounds.begg + 1
 
-        for j in 1:nlevsoi
+        # Loop over ALL ground levels (incl. bedrock nlevsoi+1:nlevgrnd), not just the
+        # hydrologically-active soil levels — the thermal solve needs finite tkmg/tkdry/
+        # csol etc. in every layer (csol in a bedrock layer NaN → cv NaN → the whole
+        # column's tridiagonal heat solve goes NaN). Deeper-than-input texture reuses the
+        # last available sand/clay (j_surf clamp below), matching CLM's deep-layer handling.
+        for j in 1:nlevgrnd
             # Surface data may only have 10 levels; use last available for deeper layers
             j_surf = min(j, size(surf.pct_sand, 2))
             sand = surf.pct_sand[gi, j_surf]
@@ -453,6 +459,14 @@ function init_misc_state!(inst::CLMInstances, bounds::BoundsType)
     ef = inst.energyflux
     for p in bounds.begp:bounds.endp
         ef.eflx_sh_grnd_patch[p] = 0.0
+        # Ground-flux PARTITION fields (soil/snow/h2osfc): init to a valid value even
+        # though they're only set for some patches each step — soil_temperature!'s
+        # ground-heat-flux uses eflx_sh_soil etc. for EVERY non-lake patch (weighted by
+        # patch wt), so a patch that doesn't recompute them must not carry a NaN
+        # (0*NaN=NaN would poison the column heat-flux sum → the whole tridiagonal solve).
+        ef.eflx_sh_soil_patch[p] = 0.0
+        ef.eflx_sh_snow_patch[p] = 0.0
+        ef.eflx_sh_h2osfc_patch[p] = 0.0
         ef.eflx_sh_veg_patch[p] = 0.0
         ef.eflx_sh_tot_patch[p] = 0.0
         ef.eflx_lh_tot_patch[p] = 0.0
@@ -495,6 +509,19 @@ function init_misc_state!(inst::CLMInstances, bounds::BoundsType)
         for j in 1:varpar.nlevgrnd
             ef.eflx_fgr_col[c, j] = 0.0
         end
+    end
+
+    # Water flux PARTITION cold-start (same rationale as the energy-flux partition
+    # fields above): soil_temperature!'s ground-heat-flux uses qflx_ev_soil/snow/h2osfc
+    # (and qflx_evap_soi) for every non-lake patch weighted by wt; a patch that doesn't
+    # recompute them must carry 0, not the NaN they're allocated with — else 0*NaN=NaN
+    # poisons the column heat-flux sum and the whole tridiagonal soil-temperature solve.
+    wf = inst.water.waterfluxbulk_inst.wf
+    for p in bounds.begp:bounds.endp
+        wf.qflx_ev_soil_patch[p]   = 0.0
+        wf.qflx_ev_snow_patch[p]   = 0.0
+        wf.qflx_ev_h2osfc_patch[p] = 0.0
+        wf.qflx_evap_soi_patch[p]  = 0.0
     end
 
     # Solar absorbed cold-start defaults
