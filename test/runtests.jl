@@ -66,6 +66,7 @@ using CLM
     include("test_hillslope_hydrology.jl")
     include("test_photosynthesis.jl")
     include("test_canopy_fluxes.jl")
+    include("test_canopy_reverse.jl")
     include("test_canopy_hydrology.jl")
     include("test_bareground_fluxes.jl")
     include("test_soil_fluxes.jl")

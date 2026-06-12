@@ -232,4 +232,8 @@ include("calibration/param_injection.jl")
 # Included last so all referenced types (param/control containers) are defined.
 include("infrastructure/enzyme_rules.jl")
 
+# Compositional reverse-mode AD for canopy_fluxes_core! (per-sub-phase Enzyme calls,
+# checkpointed Newton loop). Needs the canopy/photosynthesis kernels + Enzyme above.
+include("biogeophys/canopy_fluxes_reverse.jl")
+
 end # module CLM
