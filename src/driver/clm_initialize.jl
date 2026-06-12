@@ -145,6 +145,21 @@ function clm_initialize!(;
     # ---- Step 12: Read parameters ----
     readParameters!(paramfile)
 
+    # Wire per-instance friction-velocity roughness params from the param file.
+    # zlnd (soil momentum roughness) defaults to 0.000775 but the param file sets
+    # 0.01 (Fortran reads it too); leaving it at the default makes z0mg/z0hg ~13x
+    # too small, collapsing the bare-ground friction velocity and over-heating
+    # the summer surface. zsno is also read here (was previously only via clm_run!).
+    try
+        ds_fv = NCDataset(paramfile, "r")
+        haskey(ds_fv, "zlnd") && (inst.frictionvel.zlnd = Float64(ds_fv["zlnd"][1]))
+        haskey(ds_fv, "zsno") && (inst.frictionvel.zsno = Float64(ds_fv["zsno"][1]))
+        haskey(ds_fv, "zglc") && (inst.frictionvel.zglc = Float64(ds_fv["zglc"][1]))
+        close(ds_fv)
+    catch e
+        @warn "friction-velocity param wiring failed: $e" maxlog=1
+    end
+
     # ---- Step 13: Initialize vertical structure ----
     initVertical!(bounds, inst.gridcell, inst.landunit, inst.column, surf)
 
