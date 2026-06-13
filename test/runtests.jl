@@ -145,4 +145,5 @@ using CLM
     include("test_enzyme_smoke.jl")
     include("test_multisite_calibration.jl")
     include("test_cn_integration.jl")
+    include("test_fortran_parity.jl")   # gated on external Fortran reference dumps
 end
