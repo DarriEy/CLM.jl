@@ -132,7 +132,11 @@ Base.@kwdef mutable struct VarCtl
     snicar_solarspec::String = "mid_latitude_winter"
     snicar_dust_optics::String = "sahara"
     snicar_use_aerosol::Bool = true
-    snicar_snw_shape::String = "hexagonal_plate"
+    # CTSM namelist_defaults: 'hexagonal_plate' for ctsm5.1+, but 'sphere' for
+    # phys="clm5_0" — which is what this port targets (compset I2000Clm50Sp).
+    # 'hexagonal_plate' raises the snow NIR albedo ~0.06 → less absorbed solar →
+    # spring snowmelt too slow → soil stays wet → summer BTRAN inversion.
+    snicar_snw_shape::String = "sphere"
     snicar_snobc_intmix::Bool = false
     snicar_snodst_intmix::Bool = false
     do_sno_oc::Bool = false
