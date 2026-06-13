@@ -201,3 +201,60 @@ Inject a Fortran dump as the Julia initial condition (reuses
 CLM.read_fortran_restart!).
 """
 inject_dump!(inst, bounds, dumpfile) = _read_fortran_restart!(dumpfile, inst, bounds)
+
+"""
+    run_one_parity_step!(nstep) -> (inst, bounds)
+
+Build a Bow instance, inject the `before_step_n<nstep>` dump as the shared IC,
+read/downscale forcing at the step START, seed daylength, and run clm_drv! for
+exactly one timestep. Mirrors the clm_run.jl loop body (and the single-step
+setup in fortran_parity_validate.jl). Returns the post-step instance for diffing
+against the Fortran per-boundary dumps.
+"""
+function run_one_parity_step!(nstep::Int)
+    step_date = DateTime(2003, 1, 1) + Hour(nstep - 8761)
+    (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date)
+    inject_dump!(inst, bounds, joinpath(DUMPDIR, "pdump_before_step_n$(nstep).nc"))
+
+    config  = CLM.CLMDriverConfig(use_cn=false, use_aquifer_layer=false)
+    filt_ia = CLM.clump_filter_inactive_and_active
+    ng, nc, np = bounds.endg, bounds.endc, bounds.endp
+
+    fr = CLM.ForcingReader()
+    CLM.forcing_reader_init!(fr, FFORCING)
+
+    topo_file = replace(FFORCING, r"clmforc\.[^/]*\.nc$" => "topo_forcing.nc")
+    if isfile(topo_file)
+        ds_topo = NCDataset(topo_file, "r")
+        if haskey(ds_topo, "TOPO")
+            ft = Float64(ds_topo["TOPO"][1])
+            for g in 1:ng; inst.atm2lnd.forc_topo_grc[g] = ft; end
+            for c in 1:nc; inst.topo.topo_col[c] = ft; end
+        end
+        close(ds_topo)
+    end
+
+    step_start  = tm.current_date
+    calday      = CLM.get_curr_calday(tm)
+    (declin, _) = CLM.compute_orbital(calday)
+    obliqr      = CLM.ORB_OBLIQR_DEFAULT
+    nextsw_cday = calday + 3600.0 / CLM.SECSPDAY
+    (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
+    CLM.init_daylength!(inst.gridcell, declin, declinm1, obliqr, 1:bounds.endg)
+
+    CLM.advance_timestep!(tm)
+    CLM.read_forcing_step!(fr, inst.atm2lnd, step_start, ng, nc)
+    CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
+    (yr, mon, d, tod) = CLM.get_curr_date(tm)
+
+    CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
+                 true, nextsw_cday, declin, declin, obliqr,
+                 false, false, "", false;
+                 nstep=tm.nstep, is_first_step=(tm.nstep==1),
+                 is_beg_curr_day=CLM.is_beg_curr_day(tm),
+                 is_end_curr_day=CLM.is_end_curr_day(tm),
+                 is_beg_curr_year=CLM.is_beg_curr_year(tm),
+                 dtime=3600.0, mon=mon, day=d, photosyns=inst.photosyns)
+    CLM.forcing_reader_close!(fr)
+    return inst, bounds
+end

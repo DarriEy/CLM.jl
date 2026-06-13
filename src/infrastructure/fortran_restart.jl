@@ -242,6 +242,9 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     # Vegetation temperature
     set_patch_1d!("T_VEG", inst.temperature.t_veg_patch)
     set_patch_1d!("T_REF2M", inst.temperature.t_ref2m_patch)
+    if hasproperty(inst.temperature, :t_stem_patch)
+        set_patch_1d!("T_STEM", inst.temperature.t_stem_patch)
+    end
     # 10-day mean air temperature (photosynthesis jmax25 input; a restart-persisted
     # accumulator mean in CTSM). Without it t_a10=NaN → vcmax/jmax NaN → t_veg NaN.
     if hasproperty(inst.temperature, :t_a10_patch)
