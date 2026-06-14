@@ -94,6 +94,38 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
         end
     end
 
+    # Helper: inject 2D patch variable. Fortran layout is (sec × patch) where
+    # sec is a radiation band (numrad) or a canopy layer (nlevcan); CLM.jl stores
+    # the transpose [patch, sec]. Reuses the PFT-type patch remap of set_patch_1d!.
+    function set_patch_2d!(name, target_array)
+        haskey(ds, name) || return
+        try
+            raw = ds[name][:, :]                       # (nsec, npatch_f90)
+            f90_pfts = haskey(ds, "pfts1d_itypveg") ? Int.(ds["pfts1d_itypveg"][:]) : Int[]
+            jl_pfts = inst.patch.itype
+            nsec = min(size(raw, 1), size(target_array, 2))
+            for pf in 1:min(np_f90, size(raw, 2))
+                pj_found = 0
+                for pj in 1:np_jl
+                    if !isempty(f90_pfts) && f90_pfts[pf] == jl_pfts[pj]
+                        pj_found = pj; break
+                    elseif pf <= np_jl
+                        pj_found = pf; break
+                    end
+                end
+                pj_found == 0 && continue
+                for s in 1:nsec
+                    v = raw[s, pf]
+                    target_array[pj_found, s] = ismissing(v) ? NaN : Float64(v)
+                end
+            end
+            n_ok += 1
+        catch e
+            n_fail += 1
+            @debug "Skip $name: $e"
+        end
+    end
+
     # =====================================================================
     # COLUMN-LEVEL STATE (most critical for parity)
     # =====================================================================
@@ -210,6 +242,14 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     # Vegetation temperature
     set_patch_1d!("T_VEG", inst.temperature.t_veg_patch)
     set_patch_1d!("T_REF2M", inst.temperature.t_ref2m_patch)
+    if hasproperty(inst.temperature, :t_stem_patch)
+        set_patch_1d!("T_STEM", inst.temperature.t_stem_patch)
+    end
+    # 10-day mean air temperature (photosynthesis jmax25 input; a restart-persisted
+    # accumulator mean in CTSM). Without it t_a10=NaN → vcmax/jmax NaN → t_veg NaN.
+    if hasproperty(inst.temperature, :t_a10_patch)
+        set_patch_1d!("tair10", inst.temperature.t_a10_patch)
+    end
 
     # Canopy state
     set_patch_1d!("elai", inst.canopystate.elai_patch)
@@ -220,6 +260,36 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     set_patch_1d!("hbot", inst.canopystate.hbot_patch)
     set_patch_1d!("fsun", inst.canopystate.fsun_patch)
 
+    # SurfaceAlbedo radiative-transfer outputs from the PREVIOUS step. CLM calls
+    # SurfaceAlbedo at the end of clm_driver and saves these to the restart; the
+    # NEXT step's SurfaceRadiation consumes them to split absorbed solar between
+    # canopy (sabv) and ground (sabg). Without them fabd/fabi=0 → the canopy is
+    # radiatively invisible, all solar hits the ground, and the ground over-heats.
+    sa = inst.surfalb
+    set_patch_2d!("fabd",     sa.fabd_patch)
+    set_patch_2d!("fabi",     sa.fabi_patch)
+    set_patch_2d!("fabd_sun", sa.fabd_sun_patch)
+    set_patch_2d!("fabd_sha", sa.fabd_sha_patch)
+    set_patch_2d!("fabi_sun", sa.fabi_sun_patch)
+    set_patch_2d!("fabi_sha", sa.fabi_sha_patch)
+    set_patch_2d!("ftdd",     sa.ftdd_patch)
+    set_patch_2d!("ftid",     sa.ftid_patch)
+    set_patch_2d!("ftii",     sa.ftii_patch)
+    set_patch_2d!("albd",     sa.albd_patch)
+    set_patch_2d!("albi",     sa.albi_patch)
+    set_patch_2d!("fabd_sun_z", sa.fabd_sun_z_patch)
+    set_patch_2d!("fabd_sha_z", sa.fabd_sha_z_patch)
+    set_patch_2d!("fabi_sun_z", sa.fabi_sun_z_patch)
+    set_patch_2d!("fabi_sha_z", sa.fabi_sha_z_patch)
+    set_patch_2d!("tlai_z",   sa.tlai_z_patch)
+    set_patch_2d!("tsai_z",   sa.tsai_z_patch)
+    set_patch_2d!("fsun_z",   sa.fsun_z_patch)
+    set_patch_1d!("vcmaxcintsun", sa.vcmaxcintsun_patch)
+    set_patch_1d!("vcmaxcintsha", sa.vcmaxcintsha_patch)
+    if haskey(ds, "nrad") && hasproperty(sa, :nrad_patch)
+        set_patch_1d!("nrad", sa.nrad_patch)
+    end
+
     # Canopy water
     set_patch_1d!("LIQCAN", ws.liqcan_patch)
     set_patch_1d!("SNOCAN", ws.snocan_patch)
@@ -229,12 +299,20 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     # Friction velocity
     set_patch_1d!("OBU", inst.frictionvel.obu_patch)
 
-    # Compute H2OSNO from snow layer totals
-    h2osno_total = 0.0
-    for j in 1:nlevsno
-        h2osno_total += ws.h2osoi_liq_col[1, j] + ws.h2osoi_ice_col[1, j]
+    # H2OSNO_NO_LAYERS holds snow water ONLY for columns with no explicit snow
+    # layers (snl == 0). For a layered column (snl < 0) the snow water lives in
+    # the layers, so this must be 0 — otherwise downstream h2osno_total
+    # (= h2osno_no_layers + Σ layers) double-counts the pack and, via the
+    # snow-cover-fraction overwrite, doubles int_snow.
+    if inst.column.snl[1] < 0
+        ws.h2osno_no_layers_col[1] = 0.0
+    else
+        h2osno_total = 0.0
+        for j in 1:nlevsno
+            h2osno_total += ws.h2osoi_liq_col[1, j] + ws.h2osoi_ice_col[1, j]
+        end
+        ws.h2osno_no_layers_col[1] = h2osno_total
     end
-    ws.h2osno_no_layers_col[1] = h2osno_total
 
     close(ds)
 

@@ -45,6 +45,25 @@ function readParameters!(paramfile::String)
         haskey(ds, "snowcan_unload_temp_fact") && (canopy_hydrology_params.snowcan_unload_temp_fact = Float64(ds["snowcan_unload_temp_fact"][1]))
         haskey(ds, "liq_canopy_storage_scalar") && (canopy_hydrology_params.liq_canopy_storage_scalar = Float64(ds["liq_canopy_storage_scalar"][1]))
         haskey(ds, "snow_canopy_storage_scalar") && (canopy_hydrology_params.snow_canopy_storage_scalar = Float64(ds["snow_canopy_storage_scalar"][1]))
+
+        # Bare-ground flux params. Critically, wind_min (default 1.0 m/s) was not
+        # being wired, so it stayed 0 — at low wind the reference wind was not
+        # floored, collapsing the bare-ground friction velocity (and aerodynamic
+        # conductance) and over-heating the summer surface.
+        haskey(ds, "a_coef")   && (bareground_fluxes_params.a_coef   = Float64(ds["a_coef"][1]))
+        haskey(ds, "a_exp")    && (bareground_fluxes_params.a_exp    = Float64(ds["a_exp"][1]))
+        haskey(ds, "wind_min") && (bareground_fluxes_params.wind_min = Float64(ds["wind_min"][1]))
+
+        # Canopy flux params — SEPARATE struct from the bare-ground one and likewise
+        # not wired from file: a_coef/a_exp defaulted to 0.5/1.0 instead of the file's
+        # 0.13/0.45, so the under-canopy soil-drag csoilb used a LINEAR (^1.0) Reynolds
+        # term instead of ^0.45 → rah_below ~13x too high for sparse canopies (grass)
+        # → the warm ground could not heat the canopy air → grass T_VEG too cold at
+        # low sun. (csoilc/cv defaults already match the file but wire them too.)
+        haskey(ds, "a_coef")   && (canopy_fluxes_params.a_coef = Float64(ds["a_coef"][1]))
+        haskey(ds, "a_exp")    && (canopy_fluxes_params.a_exp  = Float64(ds["a_exp"][1]))
+        haskey(ds, "csoilc")   && (canopy_fluxes_params.csoilc = Float64(ds["csoilc"][1]))
+        haskey(ds, "cv")       && (canopy_fluxes_params.cv     = Float64(ds["cv"][1]))
     finally
         close(ds)
     end

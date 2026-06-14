@@ -50,6 +50,7 @@ function clm_run!(;
     fsnowoptics::String = "",
     fsnowaging::String = "",
     frestart::String = "",
+    ffortran_restart::String = "",
     baseflow_scalar::Real = 1.0e-2,
     int_snow_max::Real = 2000.0,
     overrides::Union{CalibrationOverrides, Nothing} = nothing)
@@ -163,11 +164,24 @@ function clm_run!(;
         read_restart!(frestart, inst, bounds)
     end
 
+    # ---- Inject a FORTRAN restart (spun-up IC) if provided ----
+    # Lets the free-run start from the Fortran model's equilibrium prognostic
+    # state (soil water/temps/snow/...), so an annual comparison against a
+    # calibrated spun-up Fortran reference is spun-up-vs-spun-up rather than
+    # cold-start-vs-spun-up (the latter leaves the cold-start soil too wet for
+    # a year with deep drainage off → spurious summer BTRAN inversion).
+    have_ic_restart = (!isempty(frestart) && isfile(frestart)) ||
+                      (!isempty(ffortran_restart) && isfile(ffortran_restart))
+    if !isempty(ffortran_restart) && isfile(ffortran_restart)
+        verbose && println("CLM.jl: Injecting Fortran restart IC from: ", ffortran_restart)
+        read_fortran_restart!(ffortran_restart, inst, bounds)
+    end
+
     # ---- Initialize water table near bedrock for cold-start runs ----
     # Without restart, wa_col defaults to 4000mm which puts zwt ~13m deep
     # (well below bedrock). This disables baseflow for years. Set wa to put
     # zwt at bedrock depth so hydrology params are immediately active.
-    if isempty(frestart) || !isfile(frestart)
+    if !have_ic_restart
         nlevsno_l = varpar.nlevsno
         nlevsoi_l = varpar.nlevsoi
         for c in 1:nc
@@ -230,11 +244,16 @@ function clm_run!(;
     verbose && println("CLM.jl: Starting time loop ($total_steps steps, dtime=$(dtime)s)")
 
     while tm.current_date < end_date
+        # The forcing for a step is the value at the step's START time (verified
+        # against the Fortran datm: step 8761 from 2003-01-01 00:00 uses
+        # PRECTmms[0], not [1]). Capture it before advancing the clock, which
+        # otherwise reads one interval ahead.
+        step_start = tm.current_date
         advance_timestep!(tm)
         step_count += 1
 
-        # --- Read and downscale forcings ---
-        read_forcing_step!(fr, inst.atm2lnd, tm.current_date, ng, nc)
+        # --- Read and downscale forcings (at step-start time) ---
+        read_forcing_step!(fr, inst.atm2lnd, step_start, ng, nc)
         downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
 
         # --- Compute orbital parameters ---

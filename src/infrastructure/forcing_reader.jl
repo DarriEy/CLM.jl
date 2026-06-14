@@ -174,11 +174,15 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
         end
     end
 
-    # Potential temperature
+    # Potential temperature. The Fortran datm for this observed single-point
+    # forcing delivers forc_th = forc_t (Sa_ptem == TBOT; no reference-pressure
+    # adjustment), so thv/thvstar in the surface layer match. Applying the
+    # standard (100000/pbot)^kappa factor here (pbot≈79000 at this altitude)
+    # inflated forc_th/thv by ~7% (307 vs 287 K) and biased the Monin-Obukhov
+    # stability solve.
     for g in 1:ng
-        pbot = a2l.forc_pbot_not_downscaled_grc[g]
         t = a2l.forc_t_not_downscaled_grc[g]
-        a2l.forc_th_not_downscaled_grc[g] = t * (100000.0 / pbot)^(RAIR / CPAIR)
+        a2l.forc_th_not_downscaled_grc[g] = t
     end
 
     # Density from equation of state

@@ -639,7 +639,8 @@ end
 Adapt.@adapt_structure _WTOutDV
 
 @kernel function _water_table_kernel!(zwt_out, odv, @Const(idv), @Const(mask),
-        nlevsoi::Int, joff::Int, joff_zi::Int, dtime, aq_sp_yield_min, tfrz, denh2o, denice)
+        nlevsoi::Int, joff::Int, joff_zi::Int, dtime, aq_sp_yield_min, tfrz, denh2o, denice,
+        recompute_frost_table::Bool)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(zwt_out)
@@ -731,62 +732,72 @@ Adapt.@adapt_structure _WTOutDV
         end
 
         # ============================ BASEFLOW ============================
-        # define frost table as first frozen layer with unfrozen layer above it
-        if idv.t_soisno[c, joff + 1] > TFRZl
-            k_frz = nlevsoi
-        else
-            k_frz = 1
-        end
-        for k in 2:nlevsoi
-            if idv.t_soisno[c, joff + k - 1] > TFRZl && idv.t_soisno[c, joff + k] <= TFRZl
-                k_frz = k
-                break
+        # Frost table + perched water table. In Fortran this lives in WaterTable
+        # (HydrologyNoDrainageMod.F90:357), which is ONLY called when
+        # use_aquifer_layer==true; the non-aquifer path uses ThetaBasedWaterTable,
+        # which leaves frost_table/zwt_perched at their restart values (the perched
+        # drainage is handled later by perched_lateral_flow!). Gate accordingly so we
+        # do not spuriously recompute frost_table = col_z[k_frz] (node) every step.
+        if recompute_frost_table
+            # define frost table as first frozen layer with unfrozen layer above it
+            if idv.t_soisno[c, joff + 1] > TFRZl
+                k_frz = nlevsoi
+            else
+                k_frz = 1
             end
-        end
-
-        odv.frost_table[c] = idv.col_z[c, joff + k_frz]
-        odv.zwt_perched[c] = odv.frost_table[c]
-
-        if odv.zwt[c] < odv.frost_table[c] && idv.t_soisno[c, joff + k_frz] <= TFRZl
-            # do nothing - handled in Drainage
-        else
-            sat_lev = T(0.9)
-
-            k_perch = 1
-            for k in k_frz:-1:1
-                odv.h2osoi_vol[c, k] = idv.h2osoi_liq[c, joff + k] / (idv.col_dz[c, joff + k] * DH2O) +
-                    idv.h2osoi_ice[c, joff + k] / (idv.col_dz[c, joff + k] * DICE)
-                if odv.h2osoi_vol[c, k] / idv.watsat[c, k] <= sat_lev
-                    k_perch = k
+            for k in 2:nlevsoi
+                if idv.t_soisno[c, joff + k - 1] > TFRZl && idv.t_soisno[c, joff + k] <= TFRZl
+                    k_frz = k
                     break
                 end
             end
 
-            if idv.t_soisno[c, joff + k_frz] > TFRZl
-                k_perch = k_frz
-            end
+            odv.frost_table[c] = idv.col_z[c, joff + k_frz]
+            odv.zwt_perched[c] = odv.frost_table[c]
 
-            if k_frz > k_perch
-                s1 = (idv.h2osoi_liq[c, joff + k_perch] / (idv.col_dz[c, joff + k_perch] * DH2O) +
-                    idv.h2osoi_ice[c, joff + k_perch] / (idv.col_dz[c, joff + k_perch] * DICE)) / idv.watsat[c, k_perch]
-                s2 = (idv.h2osoi_liq[c, joff + k_perch + 1] / (idv.col_dz[c, joff + k_perch + 1] * DH2O) +
-                    idv.h2osoi_ice[c, joff + k_perch + 1] / (idv.col_dz[c, joff + k_perch + 1] * DICE)) / idv.watsat[c, k_perch + 1]
+            if odv.zwt[c] < odv.frost_table[c] && idv.t_soisno[c, joff + k_frz] <= TFRZl
+                # do nothing - handled in Drainage
+            else
+                sat_lev = T(0.9)
 
-                m_val = (idv.col_z[c, joff + k_perch + 1] - idv.col_z[c, joff + k_perch]) / (s2 - s1)
-                b_val = idv.col_z[c, joff + k_perch + 1] - m_val * s2
-                odv.zwt_perched[c] = smooth_max(zr, m_val * sat_lev + b_val)
+                k_perch = 1
+                for k in k_frz:-1:1
+                    odv.h2osoi_vol[c, k] = idv.h2osoi_liq[c, joff + k] / (idv.col_dz[c, joff + k] * DH2O) +
+                        idv.h2osoi_ice[c, joff + k] / (idv.col_dz[c, joff + k] * DICE)
+                    if odv.h2osoi_vol[c, k] / idv.watsat[c, k] <= sat_lev
+                        k_perch = k
+                        break
+                    end
+                end
+
+                if idv.t_soisno[c, joff + k_frz] > TFRZl
+                    k_perch = k_frz
+                end
+
+                if k_frz > k_perch
+                    s1 = (idv.h2osoi_liq[c, joff + k_perch] / (idv.col_dz[c, joff + k_perch] * DH2O) +
+                        idv.h2osoi_ice[c, joff + k_perch] / (idv.col_dz[c, joff + k_perch] * DICE)) / idv.watsat[c, k_perch]
+                    s2 = (idv.h2osoi_liq[c, joff + k_perch + 1] / (idv.col_dz[c, joff + k_perch + 1] * DH2O) +
+                        idv.h2osoi_ice[c, joff + k_perch + 1] / (idv.col_dz[c, joff + k_perch + 1] * DICE)) / idv.watsat[c, k_perch + 1]
+
+                    m_val = (idv.col_z[c, joff + k_perch + 1] - idv.col_z[c, joff + k_perch]) / (s2 - s1)
+                    b_val = idv.col_z[c, joff + k_perch + 1] - m_val * s2
+                    odv.zwt_perched[c] = smooth_max(zr, m_val * sat_lev + b_val)
+                end
             end
         end
     end
 end
 
 function soilhyd_water_table!(odv, idv, mask, nlevsoi::Int, joff::Int, joff_zi::Int,
-                              dtime, aq_sp_yield_min, tfrz, denh2o, denice)
+                              dtime, aq_sp_yield_min, tfrz, denh2o, denice;
+                              recompute_frost_table::Bool=true)
     # Convert all scalar reals to the working precision of the device arrays so no
     # Float64 reaches the Float32-only Metal backend (byte-identical on Float64 CPU).
     T = eltype(odv.zwt)
     _launch!(_water_table_kernel!, odv.zwt, odv, idv, mask, nlevsoi, joff, joff_zi,
-             T(dtime), T(aq_sp_yield_min), T(tfrz), T(denh2o), T(denice);
+             T(dtime), T(aq_sp_yield_min), T(tfrz), T(denh2o), T(denice),
+             recompute_frost_table;
              ndrange = length(mask))
 end
 
@@ -811,7 +822,8 @@ function water_table!(
     mask_hydrology::AbstractVector{Bool},
     bounds::UnitRange{Int},
     nlevsoi::Int,
-    dtime::Real
+    dtime::Real;
+    recompute_frost_table::Bool=true
 )
     wf = waterfluxbulk.wf
     params = soilhydrology_params
@@ -847,7 +859,8 @@ function water_table!(
         qflx_drain_perched = wf.qflx_drain_perched_col)
 
     soilhyd_water_table!(odv, idv, mask_hydrology, nlevsoi, joff, joff_zi,
-                         dtime, params.aq_sp_yield_min, TFRZ, DENH2O, DENICE)
+                         dtime, params.aq_sp_yield_min, TFRZ, DENH2O, DENICE;
+                         recompute_frost_table=recompute_frost_table)
 
     return nothing
 end

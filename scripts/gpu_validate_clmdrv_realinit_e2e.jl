@@ -33,6 +33,14 @@ end
 
 function build()
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=PARAMFILE)
+    # Optional WARM START: inject a Fortran spun-up restart so the device-parity
+    # check runs over a realistic spun-up state (snow layers + soil moisture
+    # gradients), exercising the snow/SNICAR + hydrology GPU paths on real values.
+    # Set CLM_WARMSTART_RESTART to a Fortran clm2.r restart path.
+    wr = get(ENV, "CLM_WARMSTART_RESTART", "")
+    if !isempty(wr) && isfile(wr)
+        CLM.read_fortran_restart!(wr, inst, bounds)
+    end
     setup_forcing!(inst.atm2lnd, 285.0, bounds.endg)
     CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
     return inst, bounds, filt

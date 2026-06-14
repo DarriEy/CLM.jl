@@ -54,13 +54,24 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
         # csol etc. in every layer (csol in a bedrock layer NaN → cv NaN → the whole
         # column's tridiagonal heat solve goes NaN). Deeper-than-input texture reuses the
         # last available sand/clay (j_surf clamp below), matching CLM's deep-layer handling.
+        # Carry the deepest VALID texture down: the surfdata texture array is
+        # zero-padded above the model's nlevsoi (the dataset often has only ~10
+        # levels), so a plain j_surf clamp reads sand=clay=0 for deep layers,
+        # giving badly wrong thermal/hydraulic props (e.g. thk ~5x too low,
+        # trapping heat → summer surface over-heats). Fortran carries the
+        # deepest dataset value down (SoilStateInitTimeConstMod.F90:466-494).
+        last_sand = 0.0; last_clay = 0.0; last_om = 0.0
         for j in 1:nlevgrnd
-            # Surface data may only have 10 levels; use last available for deeper layers
             j_surf = min(j, size(surf.pct_sand, 2))
             sand = surf.pct_sand[gi, j_surf]
             clay = surf.pct_clay[gi, j_surf]
             om_frac = j_surf <= size(surf.organic, 2) ?
                 min(surf.organic[gi, j_surf] / 130.0, 1.0) : 0.0
+            if sand + clay > 0.0
+                last_sand = sand; last_clay = clay; last_om = om_frac
+            else
+                sand = last_sand; clay = last_clay; om_frac = last_om
+            end
 
             # Mineral soil properties (Clapp-Hornberger)
             watsat_mineral = 0.489 - 0.00126 * sand
@@ -68,11 +79,22 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             sucsat_mineral = 10.0 * 10.0^(1.88 - 0.0131 * sand)
             xksat_mineral = 0.0070556 * 10.0^(-0.884 + 0.0153 * sand)
 
-            # Organic soil properties
-            watsat_organic = max(0.93 - 0.1 * (0.0 / 0.3), 0.83)
-            bsw_organic = max(12.14 - 7.55 * (0.0 / 0.3), 2.7)
-            sucsat_organic = min(10.3 - 0.098 * (0.0 / 0.3), 10.3)
-            xksat_organic = max(0.28 - 0.2799 * (0.0 / 0.3), 0.0001)
+            # Organic soil properties — depth-dependent, matching Fortran
+            # SoilStateInitTimeConstMod.F90:543-546 (zsapric = 0.5 m). The prior
+            # code hardcoded the depth term to 0 and used wrong bsw/sucsat
+            # coefficients, giving bsw_organic = 12.14 at the surface instead of
+            # 2.7 — which made matric potential (and BTRAN) badly too negative
+            # in organic-rich top layers.
+            zsapric = 0.5
+            # zsoi[] (soil node depths) is populated by the vertical-grid init in
+            # the full clm_initialize! path; guard for minimal unit-test setups
+            # that call init_soil_properties! directly (fall back to surface depth).
+            zsoi_j = length(zsoi[]) >= j ? zsoi[][j] : 0.0
+            depth_ratio = zsoi_j / zsapric
+            watsat_organic = max(0.93 - 0.1 * depth_ratio, 0.83)
+            bsw_organic = min(2.7 + 9.3 * depth_ratio, 12.0)
+            sucsat_organic = min(10.3 - 0.2 * depth_ratio, 10.1)
+            xksat_organic = max(0.28 - 0.2799 * depth_ratio, xksat_mineral)
 
             # Blend mineral + organic
             watsat_val = (1.0 - om_frac) * watsat_mineral + om_frac * watsat_organic
@@ -85,13 +107,30 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             ss.sucsat_col[c, j] = sucsat_val
             ss.hksat_col[c, j] = hksat_val
 
-            # Thermal conductivity and heat capacity of dry soil
-            ss.tkmg_col[c, j] = TKWAT^watsat_val * TKICE^(1.0 - watsat_val)
-            ss.tksatu_col[c, j] = ss.tkmg_col[c, j] * TKICE^(watsat_val - watsat_val)
-            ss.tkdry_col[c, j] = (0.135 * (1.0 - watsat_val) * 2700.0 + 64.7) /
-                                  (2700.0 - 0.947 * (1.0 - watsat_val) * 2700.0)
-            ss.csol_col[c, j] = (1.0 - watsat_val) * (2.0e6 * (1.0 - om_frac) +
-                                 2.5e6 * om_frac)
+            # Soil thermal properties — match Fortran SoilStateInitTimeConstMod.F90
+            # :548-560. The prior code used water/ice conductivities for tkmg
+            # instead of the mineral-solids conductivity tkm (sand/clay weighted),
+            # making soil ~2x too thermally insulating → too little ground heat
+            # flux → the summer surface over-heats. Params: tkd_sand=8.8,
+            # tkd_clay=2.92, tkm_om=0.25, tkd_om=0.05, csol_*, pd=2700.
+            pd = 2700.0
+            bd = (1.0 - watsat_mineral) * pd            # bulk density (mineral watsat)
+            sc = sand + clay
+            tkm = sc > 0.0 ?
+                (1.0 - om_frac) * (8.8 * sand + 2.92 * clay) / sc + 0.25 * om_frac :
+                0.25
+            ss.tkmg_col[c, j] = tkm^(1.0 - watsat_val)
+            ss.tksatu_col[c, j] = ss.tkmg_col[c, j] * TKWAT^watsat_val
+            ss.tkdry_col[c, j] = ((0.135 * bd + 64.7) / (pd - 0.947 * bd)) *
+                                  (1.0 - om_frac) + 0.05 * om_frac
+            # csol is the volumetric heat capacity of soil SOLIDS, WITHOUT the
+            # (1-watsat) solid-fraction factor — the thermal solve applies that
+            # (compute_soil_cv!: cv = csol*(1-watsat)*dz). The prior code baked
+            # (1-watsat) in here too, double-counting it → soil heat capacity ~2x
+            # too low → summer surface over-heats. (csol_sand=2.128e6,
+            # csol_clay=2.385e6, csol_om=2.5e6 J/m3/K.)
+            csol_min = sc > 0.0 ? (2.128e6 * sand + 2.385e6 * clay) / sc : 2.5e6
+            ss.csol_col[c, j] = (1.0 - om_frac) * csol_min + 2.5e6 * om_frac
             # Soil water retention (Clapp-Hornberger watdry, watopt, watfc)
             ss.watdry_col[c, j] = watsat_val * (316230.0 / sucsat_val)^(-1.0 / bsw_val)
             ss.watopt_col[c, j] = watsat_val * (158490.0 / sucsat_val)^(-1.0 / bsw_val)

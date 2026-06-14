@@ -8,6 +8,20 @@ A differentiable Julia port of the [Community Land Model version 5](https://www.
 
 CLM.jl reproduces the full CLM5 biogeophysics in pure Julia, enabling **automatic differentiation** for gradient-based parameter calibration, **GPU-ready architecture** with BitVector masks, and **composability** with the Julia scientific ecosystem (ForwardDiff.jl, Enzyme.jl, Flux.jl, Optim.jl).
 
+> ## ⚠️ Read this first: an agentic-engineering experiment
+>
+> **This codebase was written almost entirely by AI agents running in a continuous "[Ralph](https://ghuntley.com/ralph/)" loop.** No human has hand-written any meaningful amount of the code here, and the author has read only a small fraction of it. What you see is the output of a large amount of *agentic* engineering — autonomous agents reading the original Fortran, porting it, writing tests, validating against reference output, and iterating — supervised at the goal level, not the line level.
+>
+> This project exists to find out **what *can* be done** with agentic engineering on a serious scientific codebase — not to demonstrate what *should* be done. It is a probe into the limits of the approach, and should be read as such.
+>
+> **Implications you must take seriously:**
+> - 🧪 **It is a research artifact, not production software.** Do not use it for science, operations, or decisions you care about without independent verification.
+> - 🔍 **Validation is partial.** The numbers below are real, but they cover a narrow slice (one site, SP mode, selected variables). Whole subsystems are implemented but unvalidated, and "tests pass" means the agents' own tests pass.
+> - 🐛 **Expect latent bugs.** Plausible-looking code that no human has reviewed can be subtly or badly wrong in ways tests don't catch. Treat every result as suspect until you've checked it yourself.
+> - 📝 **Provenance is unusual.** Much of the design rationale lives in agent logs and commit history rather than in a human's head.
+>
+> **Use entirely at your own risk.** No warranty, no guarantees of correctness, fitness, or scientific validity. If you build on this, verify everything.
+
 ## Validation Against Fortran CLM5
 
 CLM.jl has been validated in SP mode against Fortran CLM5 (CTSM release-clm5.0) for a full-year simulation at the Bow at Banff site (51.2°N, 115.6°W, 2003, restart-initialized from a 2002 cold-start spinup). The figure below shows 7-day running averages for 12 key output variables:
@@ -21,6 +35,8 @@ CLM.jl has been validated in SP mode against Fortran CLM5 (CTSM release-clm5.0) 
 | Latent Heat Flux | +3% | 1.8 W/m² | 0.98 |
 | Canopy Transpiration | +12% | 2.4 W/m² | 0.97 |
 | Sensible Heat, Ground Temp, Snow, Runoff | < 5% | — | > 0.98 |
+
+> **Scope of validation:** these results are for a *single site, single year, SP (satellite-phenology) mode*, against one CTSM release. They are genuinely encouraging but they do **not** establish correctness across sites, configurations, or the biogeochemistry subsystems. See [the warning above](#️-read-this-first-an-agentic-engineering-experiment).
 
 ## Features
 
@@ -135,11 +151,33 @@ julia --project=. -e 'using Test; include("test/runtests.jl")'
 - NCDatasets.jl, ForwardDiff.jl, JSON.jl
 - CLM5 surface data and parameter files (NetCDF)
 
+## How This Was Built — The Ralph Loop
+
+CLM.jl is, first and foremost, an experiment in **agentic software engineering**. The porting work was driven by a [Ralph-style loop](https://ghuntley.com/ralph/): an AI coding agent run repeatedly against a standing set of instructions, each iteration picking up the next unit of work, reading the original Fortran, writing the Julia translation, adding tests, validating, and committing — with a human steering goals and priorities rather than authoring code.
+
+The working pattern, roughly:
+
+1. **Read the Fortran completely** for the target module (`/installs/clm/`).
+2. **Translate** to Julia following the conventions in [`CLAUDE.md`](CLAUDE.md) (SoA layout, preserved variable names, BitVector masks).
+3. **Test** — unit tests plus finite-difference derivative checks where applicable.
+4. **Validate** against reference Fortran output where a harness exists.
+5. **Iterate** until parity, then move to the next module. Repeat, autonomously, for a long time.
+
+Some of the larger pushes (GPU kernelization, reverse-mode AD, BGC subsystems) were run as multi-agent workflows — fan-out batches of agents working in parallel, with adversarial verification passes. The accumulated decisions, dead-ends, and lessons live in the commit history, [`PORTING_LOG.md`](PORTING_LOG.md), and the agents' own memory.
+
+**What this means for you:**
+
+- The code is **idiomatic and traceable** because the loop was told to keep it that way — but consistency is not correctness.
+- Coverage is **broad but uneven.** Biogeophysics is the most exercised; biogeochemistry is implemented but largely unvalidated.
+- If you find a bug, you are likely the **first human to look at that code closely.** Issues and fixes are very welcome (see [Contributing](#contributing)).
+
+This is shared in the spirit of finding out what is possible. Calibrate your trust accordingly.
+
 ## Citation
 
-If you use CLM.jl, please cite:
+If you use CLM.jl, please cite the repository:
 
-> Eythorsson, D. (2026). CLM.jl: A differentiable Julia port of the Community Land Model. *Geoscientific Model Development* (in preparation).
+> Eythorsson, D. (2026). *CLM.jl: A differentiable Julia port of the Community Land Model.* https://github.com/DarriEy/CLM.jl
 
 ## Contributing
 
@@ -151,7 +189,7 @@ julia --project=. -e 'using Test; include("test/runtests.jl")'
 
 ## License
 
-[MIT](LICENSE) — free for academic and commercial use.
+[MIT](LICENSE).
 
 ## Acknowledgements
 

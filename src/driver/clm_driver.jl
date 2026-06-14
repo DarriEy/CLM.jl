@@ -1160,11 +1160,20 @@ function clm_drv_core!(config::CLMDriverConfig,
                 dtime)
 
     # --- 13. Water table ---
+    # Fortran HydrologyNoDrainageMod.F90:356 branches on use_aquifer_layer:
+    #   true  → WaterTable (Zeng-Decker aquifer; RECOMPUTES frost_table/zwt_perched)
+    #   false → ThetaBasedWaterTable (zwt from the moisture profile; does NOT touch
+    #           frost_table — that stays at its restart value, and the perched
+    #           drainage is handled by perched_lateral_flow! in HydrologyDrainage).
+    # Calling the aquifer water_table! unconditionally wrongly recomputed
+    # frost_table = col_z[k_frz] (node) every step, where Fortran leaves it at the
+    # restart value; that inflated zwt_perched and qflx_drain_perched.
     water_table!(sh, ss,
                  temp.t_soisno_col, wsb.ws, wfb,
                  col.dz, col.z, col.zi,
                  filt.hydrologyc, bc_col,
-                 nlevsoi, dtime)
+                 nlevsoi, dtime;
+                 recompute_frost_table=config.use_aquifer_layer)
 
     # Bedrock clipping: Fortran ThetaBasedWaterTable clips ZWT at bedrock depth
     # when soil above bedrock is not saturated. Without this, ZWT drops to 80m

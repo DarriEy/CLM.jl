@@ -1041,9 +1041,12 @@ end
                 rhos = oftype(rhos, 50.0)
             end
 
-            T_idx = round(Int, (t_soisno[c, i] - 223) / 5) + 1
-            Tgrd_idx = round(Int, dTdz_val / 10) + 1
-            rhos_idx = round(Int, (rhos - 50) / 50) + 1
+            # round(Int, ::Float32) heap-allocates on Metal (gpu_malloc → invalid
+            # IR); unsafe_trunc(Int, round(x)) is the same round-half-to-even with
+            # no allocation, byte-identical on the Float64 CPU path.
+            T_idx = unsafe_trunc(Int, round((t_soisno[c, i] - 223) / 5)) + 1
+            Tgrd_idx = unsafe_trunc(Int, round(dTdz_val / 10)) + 1
+            rhos_idx = unsafe_trunc(Int, round((rhos - 50) / 50)) + 1
 
             T_idx = clamp(T_idx, IDX_T_MIN, IDX_T_MAX)
             Tgrd_idx = clamp(Tgrd_idx, IDX_TGRD_MIN, IDX_TGRD_MAX)
