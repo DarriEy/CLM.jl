@@ -5,11 +5,18 @@ const run_clm! = getfield(CLM, Symbol("clm_run!"))
 # Configuration: use calibrated params and non-aquifer mode to match Fortran reference
 const USE_AQUIFER_LAYER = false
 const USE_CALIBRATED = !any(==("--default-params"), ARGS)
+# --spinup: initialize from the Fortran spun-up restart (clm2.r.2003-01-01) and
+# run 2003, so the comparison is spun-up-vs-spun-up rather than cold-start-vs-
+# spun-up (the cold-start soil is too wet to equilibrate in one year with deep
+# drainage off → a spurious summer BTRAN inversion). Requires the 2003 forcing,
+# the 2003 Fortran restart, and the 2003 Fortran h0 reference.
+const USE_SPINUP = any(==("--spinup"), ARGS)
+const YEAR = USE_SPINUP ? 2003 : 2002
 
 println("================================================================")
 println("  Julia CLM vs Fortran CLM — Full Year Comparison")
-println("  Site: Bow at Banff | Forcing: clmforc.2002.nc (real obs)")
-println("  Features: seasonal phenology, SNICAR optics, PFT roughness")
+println("  Site: Bow at Banff | Forcing: clmforc.$(YEAR).nc (real obs)")
+println("  Init: ", USE_SPINUP ? "Fortran spun-up restart (spun-up-vs-spun-up)" : "cold start")
 println("  Hydrology mode: ", USE_AQUIFER_LAYER ? "aquifer" : "no-aquifer")
 println("  Parameters: ", USE_CALIBRATED ? "calibrated (DDS)" : "default")
 println("================================================================")
@@ -23,15 +30,19 @@ fsurdat  = USE_CALIBRATED ? joinpath(caldir, "surfdata_clm.nc") :
                             joinpath(basedir, "settings/CLM/parameters/surfdata_clm.nc")
 paramfile = USE_CALIBRATED ? joinpath(caldir, "clm5_params.nc") :
                              joinpath(basedir, "settings/CLM/parameters/clm5_params.nc")
-fforcing = joinpath(basedir, "data/forcing/CLM_input/clmforc.2002.nc")
+fforcing = joinpath(basedir, "data/forcing/CLM_input/clmforc.$(YEAR).nc")
 fhistory = tempname() * "_verify.nc"
+
+# Fortran spun-up restart IC (only in --spinup mode)
+ffortran_restart = USE_SPINUP ?
+    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.r.$(YEAR)-01-01-00000.nc" : ""
 
 # SNICAR data files
 fsnowoptics = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
 fsnowaging  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 
 # Fortran reference
-f_h0 = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/Bow_at_Banff_lumped.clm2.h0.2002-01-01-00000.nc")
+f_h0 = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/Bow_at_Banff_lumped.clm2.h0.$(YEAR)-01-01-00000.nc")
 
 # Calibrated parameters (from user_nl_clm)
 baseflow_scalar = USE_CALIBRATED ? 0.0022119554 : 1.0e-2
@@ -39,22 +50,24 @@ int_snow_max = USE_CALIBRATED ? 3113.2227 : 2000.0
 
 # --- Run full year ---
 ndays = 365
-println("Running Julia CLM for $ndays days (full year 2002)...")
+println("Running Julia CLM for $ndays days (full year $(YEAR))...")
 println("  SNICAR optics: $(isfile(fsnowoptics) ? "YES" : "NO")")
 println("  SNICAR aging:  $(isfile(fsnowaging)  ? "YES" : "NO")")
 println("  baseflow_scalar: $baseflow_scalar")
+USE_SPINUP && println("  spun-up IC: $(isfile(ffortran_restart) ? "YES" : "MISSING — "*ffortran_restart)")
 println()
 
 t0 = time()
 inst = run_clm!(;
     fsurdat=fsurdat, paramfile=paramfile, fforcing=fforcing,
     fhistory=fhistory,
-    start_date=DateTime(2002, 1, 1),
-    end_date=DateTime(2003, 1, 1),
+    start_date=DateTime(YEAR, 1, 1),
+    end_date=DateTime(YEAR + 1, 1, 1),
     dtime=1800, use_cn=false, verbose=true,
     use_aquifer_layer=USE_AQUIFER_LAYER,
     baseflow_scalar=baseflow_scalar,
     int_snow_max=int_snow_max,
+    ffortran_restart=ffortran_restart,
     fsnowoptics=isfile(fsnowoptics) ? fsnowoptics : "",
     fsnowaging=isfile(fsnowaging)   ? fsnowaging  : "")
 elapsed = time() - t0
@@ -119,7 +132,7 @@ month_names  = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 println("================================================================")
-println("  MONTHLY MEAN COMPARISON — Julia vs Fortran (2002)")
+println("  MONTHLY MEAN COMPARISON — Julia vs Fortran ($(YEAR))")
 println("================================================================\n")
 
 for (jname, fname, units, level) in vcat(vars, new_vars)
