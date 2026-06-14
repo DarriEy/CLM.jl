@@ -60,9 +60,14 @@ function soil_temperature!(temp::TemperatureData, mask::BitVector, bounds::UnitR
 6. Ensure ALL existing tests still pass before committing
 
 ## Build & Test
+Local dev uses **Julia 1.12** (the NetCDF / Metal / Enzyme stack resolves under
+1.12). Set a juliaup directory override once so the bare `julia` here is 1.12:
 ```bash
+juliaup override set 1.12   # one-time, repo-scoped; or prefix commands with `julia +1.12`
 julia --project=. -e 'using Test; include("test/runtests.jl")'
 ```
+CI still resolves a fresh per-version Manifest for the 1.10 minimum and latest
+stable (`.github/workflows/test.yml`); `Manifest.toml` stays gitignored.
 
 ## PRD
 See `PRD_CLM_JULIA_PORT.md` for the full porting plan, module dependency graph, and tier ordering.
