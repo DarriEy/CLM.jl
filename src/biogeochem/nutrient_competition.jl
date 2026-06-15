@@ -207,7 +207,7 @@ Base.@kwdef struct _CnAllocIn{V,M,VB}
     arepr::M
     sminn_to_plant_fun::V; plant_ndemand::V; fpg_col::V
     retransn_to_npool::V; c_allometry::V; n_allometry::V
-    availc::V; gpp_before_downreg::V; npool::V
+    availc::V; gpp_before_downreg::V; npool::V; npp_growth::V
 end
 Adapt.@adapt_structure _CnAllocIn
 
@@ -332,7 +332,17 @@ Adapt.@adapt_structure _CnAllocIn
 
         plant_nalloc[p] = sminn_to_npool[p] + retransn_to_npool[p]
 
-        plant_calloc[p] = plant_nalloc[p] * (c_allometry[p] / n_allometry[p])
+        # C available for new growth. With FUN this is npp_growth (the C left for
+        # growth after FUN has paid for N uptake), per Fortran
+        # NutrientCompetitionFlexibleCNMod:454-458. Without FUN it is the N-paired
+        # C (plant_nalloc * C:N of new growth). Using the N-paired form under FUN
+        # left the unallocated excess GPP stranded in cpool (it accumulated over
+        # daytime steps — a multi-step drift only visible free-running).
+        if use_fun
+            plant_calloc[p] = in.npp_growth[p]
+        else
+            plant_calloc[p] = plant_nalloc[p] * (c_allometry[p] / n_allometry[p])
+        end
 
         if !use_fun  # ORIGINAL CLM(CN) downregulation code
             excess_cflux[p] = availc[p] - plant_calloc[p]
@@ -593,7 +603,8 @@ function calc_plant_cn_alloc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRang
         n_allometry        = cnveg_state.n_allometry_patch,
         availc             = cnveg_cf.availc_patch,
         gpp_before_downreg = cnveg_cf.gpp_before_downreg_patch,
-        npool              = _npool)
+        npool              = _npool,
+        npp_growth         = cnveg_cf.npp_growth_patch)
 
     # mask + integer index vectors onto the state backend (BitVector / host
     # non-bitstype on device). Reference array carries the backend + eltype.
