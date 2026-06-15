@@ -125,6 +125,8 @@ function calc_plant_nutrient_competition!(mask_soilp::AbstractVector{Bool}, boun
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_nf::CNVegNitrogenFluxData;
         fpg_col::AbstractVector{<:Real},
+        cnveg_ns::Union{CNVegNitrogenStateData,Nothing}=nothing,
+        dt::Real=1800.0,
         c13_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         c14_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         use_c13::Bool=false,
@@ -136,6 +138,8 @@ function calc_plant_nutrient_competition!(mask_soilp::AbstractVector{Bool}, boun
         pftcon, cn_shared_params, patch, crop,
         cnveg_state, cnveg_cs, cnveg_cf, cnveg_nf;
         fpg_col=fpg_col,
+        cnveg_ns=cnveg_ns,
+        dt=dt,
         c13_cnveg_cf=c13_cnveg_cf,
         c14_cnveg_cf=c14_cnveg_cf,
         use_c13=use_c13,
@@ -203,14 +207,14 @@ Base.@kwdef struct _CnAllocIn{V,M,VB}
     arepr::M
     sminn_to_plant_fun::V; plant_ndemand::V; fpg_col::V
     retransn_to_npool::V; c_allometry::V; n_allometry::V
-    availc::V; gpp_before_downreg::V
+    availc::V; gpp_before_downreg::V; npool::V
 end
 Adapt.@adapt_structure _CnAllocIn
 
 @kernel function _cnalloc_main_kernel!(
         out::_CnAllocOut, in::_CnAllocIn,
         @Const(mask_soilp), @Const(column), @Const(itype),
-        use_fun::Bool, npcropmin::Int, nrepr::Int)
+        use_fun::Bool, npcropmin::Int, nrepr::Int, dt, use_flexiblecn::Bool)
     T = eltype(out.plant_calloc)
     p = @index(Global)
     @inbounds if mask_soilp[p]
@@ -411,6 +415,54 @@ Adapt.@adapt_structure _CnAllocIn
             end
         end
 
+        # FlexibleCN N allocation (Fortran NutrientCompetitionFlexibleCNMod
+        # calc_npool_to_components_flexiblecn). The npool_to_* set above are the
+        # per-tissue N *demands*; with use_flexiblecn the plant instead allocates
+        # a fraction of its EXISTING npool by fractional demand:
+        #   npool_to_X = (demand_X / total_demand) * npool / dt.
+        # This draws npool down (the CLM4.5 default, used otherwise, sets
+        # npool_to_X = demand_X directly, leaving npool ~static).
+        if use_flexiblecn
+            total_ndemand = npool_to_leafn[p] + npool_to_leafn_storage[p] +
+                            npool_to_frootn[p] + npool_to_frootn_storage[p]
+            if woody[ivt] == one(T) || is_crop
+                total_ndemand += npool_to_livestemn[p] + npool_to_livestemn_storage[p] +
+                                 npool_to_deadstemn[p] + npool_to_deadstemn_storage[p] +
+                                 npool_to_livecrootn[p] + npool_to_livecrootn_storage[p] +
+                                 npool_to_deadcrootn[p] + npool_to_deadcrootn_storage[p]
+            end
+            if is_crop
+                for k in 1:nrepr
+                    total_ndemand += npool_to_reproductiven[p, k] +
+                                     npool_to_reproductiven_storage[p, k]
+                end
+            end
+            if total_ndemand > zero(T)
+                scale = (in.npool[p] / dt) / total_ndemand
+                npool_to_leafn[p]          *= scale
+                npool_to_leafn_storage[p]  *= scale
+                npool_to_frootn[p]         *= scale
+                npool_to_frootn_storage[p] *= scale
+                if woody[ivt] == one(T) || is_crop
+                    npool_to_livestemn[p]          *= scale
+                    npool_to_livestemn_storage[p]  *= scale
+                    npool_to_deadstemn[p]          *= scale
+                    npool_to_deadstemn_storage[p]  *= scale
+                    npool_to_livecrootn[p]         *= scale
+                    npool_to_livecrootn_storage[p] *= scale
+                    npool_to_deadcrootn[p]         *= scale
+                    npool_to_deadcrootn_storage[p] *= scale
+                end
+                if is_crop
+                    for k in 1:nrepr
+                        npool_to_reproductiven[p, k]         *= scale
+                        npool_to_reproductiven_storage[p, k] *= scale
+                    end
+                end
+            end
+            # total_ndemand == 0 → all demands already 0 (non-negative), no rescale.
+        end
+
         # Growth respiration storage: carbon that needs to go into growth
         # respiration storage to satisfy all of the storage growth demands
         gresp_storage = cpool_to_leafc_storage[p] + cpool_to_frootc_storage[p]
@@ -460,6 +512,8 @@ function calc_plant_cn_alloc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRang
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_nf::CNVegNitrogenFluxData;
         fpg_col::AbstractVector{<:Real},
+        cnveg_ns::Union{CNVegNitrogenStateData,Nothing}=nothing,
+        dt::Real=1800.0,
         c13_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         c14_cnveg_cf::Union{CNVegCarbonFluxData,Nothing}=nothing,
         use_c13::Bool=false,
@@ -468,6 +522,10 @@ function calc_plant_cn_alloc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRang
         nrepr::Int=NREPR)
 
     use_fun = cn_shared_params.use_fun
+    # FlexibleCN N allocation needs the live npool; only enable it when the npool
+    # state is supplied (else fall back to the C-based CLM4.5 default allocation).
+    use_flexiblecn = cn_shared_params.use_flexiblecn && cnveg_ns !== nothing
+    _npool = cnveg_ns !== nothing ? cnveg_ns.npool_patch : cnveg_nf.plant_ndemand_patch
 
     out = _CnAllocOut(;
         sminn_to_npool                 = cnveg_nf.sminn_to_npool_patch,
@@ -534,7 +592,8 @@ function calc_plant_cn_alloc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRang
         c_allometry        = cnveg_state.c_allometry_patch,
         n_allometry        = cnveg_state.n_allometry_patch,
         availc             = cnveg_cf.availc_patch,
-        gpp_before_downreg = cnveg_cf.gpp_before_downreg_patch)
+        gpp_before_downreg = cnveg_cf.gpp_before_downreg_patch,
+        npool              = _npool)
 
     # mask + integer index vectors onto the state backend (BitVector / host
     # non-bitstype on device). Reference array carries the backend + eltype.
@@ -549,7 +608,7 @@ function calc_plant_cn_alloc!(mask_soilp::AbstractVector{Bool}, bounds::UnitRang
     # no backend, so we take it from a known device array field).
     backend = _kernel_backend(ref)
     _cnalloc_main_kernel!(backend)(out, in, mask_d, column_d, itype_d,
-        use_fun, npcropmin, nrepr; ndrange = nd)
+        use_fun, npcropmin, nrepr, FT(dt), use_flexiblecn; ndrange = nd)
     KA.synchronize(backend)
 
     if use_c13 && c13_cnveg_cf !== nothing

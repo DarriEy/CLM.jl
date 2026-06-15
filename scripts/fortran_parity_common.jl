@@ -91,6 +91,7 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         # the FUN-consistent allometry (g1a=0) + demand feed cnfun!, else FUN draws
         # the wrong amount (over-tapping the deep no3).
         inst.cn_shared_params.use_fun = true
+        inst.cn_shared_params.use_flexiblecn = true   # → FlexibleCN npool-fraction N allocation
     end
 
     # atm2lnd downscaling to match Fortran lnd_in defaults

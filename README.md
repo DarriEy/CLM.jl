@@ -189,7 +189,13 @@ julia --project=. -e 'using Test; include("test/runtests.jl")'
 
 ## License
 
-[MIT](LICENSE).
+The original contributions in this repository (the Julia translation, AD/GPU
+work, test and parity harnesses) are licensed under the [MIT License](LICENSE).
+
+CLM.jl is a port — and therefore a derivative work — of the Fortran CTSM/CLM5
+source, which is distributed by UCAR/NCAR under a BSD 3-Clause license. That
+upstream copyright notice and license are retained in the [NOTICE](NOTICE) file
+and continue to govern the portions of this work derived from CTSM.
 
 ## Acknowledgements
 

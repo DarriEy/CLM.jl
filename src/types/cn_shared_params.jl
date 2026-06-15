@@ -29,6 +29,7 @@ Base.@kwdef mutable struct CNSharedParamsData{FT<:Real}
     # --- Module-level variables ---
     use_matrixcn                     ::Bool    = false   # true => use cn matrix solution
     use_fun                          ::Bool    = false   # Use the FUN2.0 model
+    use_flexiblecn                   ::Bool    = false   # flexible leaf C:N → FlexibleCN N allocation
     nlev_soildecomp_standard         ::Int     = 5       # standard number of soil decomposition levels
     upper_soil_layer                 ::Int     = -1      # upper soil layer for 10-day average in CNPhenology
 end

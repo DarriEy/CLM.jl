@@ -454,6 +454,7 @@ function cn_driver_no_leaching!(
                 _pftnc, cn_shared_params, patch, crop, cnveg_state,
                 cnveg_cs, cnveg_cf, cnveg_nf;
                 fpg_col = soilbgc_state.fpg_col,
+                cnveg_ns = cnveg_ns, dt = dt,
                 use_c13 = config.use_c13, use_c14 = config.use_c14,
                 npcropmin = npcropmin, nrepr = nrepr)
         end
