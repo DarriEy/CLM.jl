@@ -234,8 +234,8 @@ function clm_initialize!(;
             decomp_bgc_read_params!(inst.decomp_bgc_params;
                 tau_l1=1.0/18.5, tau_l2_l3=1.0/4.9, tau_s1=1.0/7.3,
                 tau_s2=1.0/0.2, tau_s3=1.0/0.0045,
-                cn_s1=12.0, cn_s2=12.0, cn_s3=10.0,
-                rf_l1s1=0.39, rf_l2s1=0.55, rf_l3s2=0.29,
+                cn_s1=8.0, cn_s2=11.0, cn_s3=11.0,         # bgc_cn_s1/s2/s3 (clm5_params.nc)
+                rf_l1s1=0.55, rf_l2s1=0.5, rf_l3s2=0.5,    # bgc_rf_* (were MIMICS-method values 0.39/0.55/0.29)
                 rf_s2s1=0.55, rf_s2s3=0.55, rf_s3s1=0.55,
                 rf_cwdl3=0.0, cwd_fcel=0.76,   # = 1 - cwd_flig (0.24)
                 bgc_initial_Cstocks=cstocks,
