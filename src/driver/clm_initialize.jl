@@ -219,13 +219,22 @@ function clm_initialize!(;
             cstocks_depth = haskey(ds, "bgc_initial_Cstocks_depth") ?
                 Float64(ds["bgc_initial_Cstocks_depth"][1]) : 0.3
 
+            # CN shared params (CNSharedParamsMod) — clm5_params.nc values. Without
+            # this the whole CNSharedParamsData was at defaults (0), so tau_cwd=0 →
+            # CWD fragmentation rate k_frag=1/0=Inf (Inf*0=NaN in the cascade) and
+            # the HR temperature/moisture/depth scalars were mis-parameterized.
+            cn_shared_params_read!(inst.cn_shared_params;
+                q10_mr=1.5, minpsi_hr=-2.0, maxpsi_hr=-0.002, rf_cwdl2=0.0,
+                tau_cwd=3.3333333, cwd_flig=0.24, decomp_depth_efolding=10.0,
+                froz_q10=1.5, mino2lim=0.2, organic_max=130.0)
+
             decomp_bgc_read_params!(inst.decomp_bgc_params;
                 tau_l1=1.0/18.5, tau_l2_l3=1.0/4.9, tau_s1=1.0/7.3,
                 tau_s2=1.0/0.2, tau_s3=1.0/0.0045,
                 cn_s1=12.0, cn_s2=12.0, cn_s3=10.0,
                 rf_l1s1=0.39, rf_l2s1=0.55, rf_l3s2=0.29,
                 rf_s2s1=0.55, rf_s2s3=0.55, rf_s3s1=0.55,
-                rf_cwdl3=0.0, cwd_fcel=0.0,
+                rf_cwdl3=0.0, cwd_fcel=0.76,   # = 1 - cwd_flig (0.24)
                 bgc_initial_Cstocks=cstocks,
                 bgc_initial_Cstocks_depth=cstocks_depth)
         end

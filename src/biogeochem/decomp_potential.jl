@@ -51,11 +51,17 @@ decpot_copy2d!(out, mask, src, nc::Int, nlev::Int) =
         @Const(decomp_cpools_vr), @Const(decomp_npools_vr))
     c, j, l = @index(Global, NTuple)
     @inbounds if mask[c]
-        if floating[l]
-            if decomp_npools_vr[c, j, l] > zero(eltype(decomp_npools_vr))
-                cn_decomp_pools[c, j, l] = decomp_cpools_vr[c, j, l] / decomp_npools_vr[c, j, l]
-            end
+        if floating[l] && decomp_npools_vr[c, j, l] > zero(eltype(decomp_npools_vr))
+            cn_decomp_pools[c, j, l] = decomp_cpools_vr[c, j, l] / decomp_npools_vr[c, j, l]
         else
+            # Non-floating pools use the fixed initial C:N. Floating pools with no N
+            # (empty deep layers) get the nominal C:N too, rather than being left at
+            # the 0-init: Fortran leaves them undefined but relies on consistent
+            # C>0 <=> N>0 pools so the downstream cn-ratio divisions never see a 0.
+            # The injected deep pools can have tiny/zero N with tiny+ C, so without
+            # this the cascade flux divides by cn=0 -> NaN. Deep flux is ~0 either
+            # way (donor C ~ 0), so parity impact is negligible; surface (N>0) is
+            # unchanged.
             cn_decomp_pools[c, j, l] = initial_cn_ratio[l]
         end
     end

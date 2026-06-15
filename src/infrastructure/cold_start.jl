@@ -73,6 +73,15 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
                 sand = last_sand; clay = last_clay; om_frac = last_om
             end
 
+            # Sand fraction (%) per layer for the BGC decomposition cascade:
+            # SoilBiogeochemDecompCascadeBGCMod's rf_s1s2/rf_s1s3 = f(cellsand).
+            # cellsand_col was allocated NaN and never filled — leaving the SOM
+            # respiration fractions NaN under vertical soil C (nlevdecomp>1).
+            # Sized nlevsoi; uses the same carried-down texture as the props below.
+            if j <= size(ss.cellsand_col, 2)
+                ss.cellsand_col[c, j] = sand
+            end
+
             # Mineral soil properties (Clapp-Hornberger)
             watsat_mineral = 0.489 - 0.00126 * sand
             bsw_mineral = 2.91 + 0.159 * clay

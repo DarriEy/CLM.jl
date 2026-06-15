@@ -159,8 +159,8 @@ function varpar_init!(vp::VarPar, actual_maxsoil_patches::Int,
     # dedicated debugging effort. Single-step teacher-forced soil-pool parity is
     # dominated by the injected values, and the veg-CN flux chain is independent of
     # nlevdecomp, so nlevdecomp=1 is kept here while the veg-CN wiring is validated.
-    vp.nlevdecomp = 1
-    vp.nlevdecomp_full = vp.nlevsoi
+    vp.nlevdecomp = vp.nlevsoi
+    vp.nlevdecomp_full = vp.nlevgrnd
 
     # PFT/CFT ranges
     vp.natpft_lb = 0
