@@ -372,6 +372,20 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
             end
             hasproperty(cns, :ntrunc_patch) && set_patch_1d!("pft_ntrunc", cns.ntrunc_patch)
         end
+        # CNVeg phenology accumulators (restart-persisted; needed for cn_phenology!
+        # parity). Dump var name == Julia field stem; field = <stem>_patch.
+        if hasproperty(inst.bgc_vegetation, :cnveg_state_inst)
+            cvs = inst.bgc_vegetation.cnveg_state_inst
+            if hasproperty(cvs, :dormant_flag_patch) && length(cvs.dormant_flag_patch) > 0
+                for stem in ("dormant_flag","days_active","onset_flag","onset_counter",
+                             "onset_gddflag","onset_fdd","onset_gdd","onset_swi",
+                             "offset_flag","offset_counter","offset_fdd","offset_swi",
+                             "lgsf","bglfr","bgtr","annavg_t2m","tempavg_t2m")
+                    fld = Symbol(stem * "_patch")
+                    hasproperty(cvs, fld) && set_patch_1d!(stem, getfield(cvs, fld))
+                end
+            end
+        end
     end
 
     # Soil decomposition pools (vertically resolved). Pool index order (CNMode):

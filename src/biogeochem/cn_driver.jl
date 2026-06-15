@@ -173,6 +173,9 @@ function cn_driver_no_leaching!(
         canopystate::Union{CanopyStateData, Nothing} = nothing,
         soilstate::Union{SoilStateData, Nothing} = nothing,
         temperature::Union{TemperatureData, Nothing} = nothing,
+        water_diag::Union{WaterDiagnosticBulkData, Nothing} = nothing,
+        gridcell::Union{GridcellData, Nothing} = nothing,
+        is_first_step::Bool = false,
         # Output: fire masks (populated by fire routines)
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
@@ -412,10 +415,46 @@ function cn_driver_no_leaching!(
     # SoilBiogeochemDecomp — already ported: soil_biogeochem_decomp!(...)
 
     # --------------------------------------------------
-    # Phenology phase 2
+    # Phenology (cn_phenology!) phase 1 then phase 2 — WIRED. For use_fun=false
+    # both phases run here (after decomposition, before growth respiration), per
+    # CNDriverNoLeaching. Phase 1 updates onset/offset/dormancy state; phase 2
+    # emits growth-from-storage, litterfall, live-wood turnover and distributes
+    # patch litter to the column via leaf/froot vertical profiles.
     # --------------------------------------------------
-    if num_bgc_vegp > 0
-        # CNPhenology phase 1 (if !use_fun) and phase 2 — already ported
+    if num_bgc_vegp > 0 && pftcon_main !== nothing && cn_shared_params !== nothing &&
+       patch !== nothing && crop !== nothing && cnveg_state !== nothing &&
+       temperature !== nothing && water_diag !== nothing && canopystate !== nothing &&
+       soilstate !== nothing && gridcell !== nothing
+        _phparams = PhenologyParams()
+        _phstate  = PhenologyState()
+        cn_phenology_init!(_phstate, _phparams, dt)
+        _pftph = PftConPhenology{Float64}(
+            evergreen = Float64.(pftcon_main.evergreen), season_decid = Float64.(pftcon_main.season_decid),
+            season_decid_temperate = Float64.(pftcon_main.season_decid_temperate),
+            stress_decid = Float64.(pftcon_main.stress_decid), woody = Float64.(pftcon_main.woody),
+            leaf_long = Float64.(pftcon_main.leaf_long), leafcn = Float64.(pftcon_main.leafcn),
+            frootcn = Float64.(pftcon_main.frootcn), lflitcn = Float64.(pftcon_main.lflitcn),
+            livewdcn = Float64.(pftcon_main.livewdcn), deadwdcn = Float64.(pftcon_main.deadwdcn),
+            ndays_on = Float64.(pftcon_main.ndays_on), crit_onset_gdd_sf = Float64.(pftcon_main.crit_onset_gdd_sf),
+            lf_f = Float64.(pftcon_main.lf_f), fr_f = Float64.(pftcon_main.fr_f),
+            biofuel_harvfrac = Float64.(pftcon_main.biofuel_harvfrac),
+            repr_structure_harvfrac = Float64.(pftcon_main.repr_structure_harvfrac),
+            minplanttemp = Float64.(pftcon_main.minplanttemp), planttemp = Float64.(pftcon_main.planttemp),
+            gddmin = Float64.(pftcon_main.gddmin), lfemerg = Float64.(pftcon_main.lfemerg),
+            grnfill = Float64.(pftcon_main.grnfill), hybgdd = Float64.(pftcon_main.hybgdd),
+            mxmat = Int.(pftcon_main.mxmat), manunitro = Float64.(pftcon_main.manunitro),
+            is_pft_known_to_model = Bool.(pftcon_main.is_pft_known_to_model))
+        _lprof = soilbgc_state.leaf_prof_patch
+        _fprof = soilbgc_state.froot_prof_patch
+        for _phase in (1, 2)
+            cn_phenology!(_phstate, _phparams, _pftph,
+                mask_bgc_vegp, mask_pcropp, mask_bgc_soilc,
+                temperature, water_diag, canopystate, soilstate,
+                cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
+                crop, patch, gridcell, cn_shared_params,
+                _lprof, _fprof, _phase;
+                varctl = varctl, is_first_step = is_first_step, avg_dayspyr = 365.0)
+        end
     end
 
     # --------------------------------------------------

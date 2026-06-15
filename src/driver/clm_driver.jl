@@ -1405,6 +1405,9 @@ function clm_drv_core!(config::CLMDriverConfig,
             canopystate=inst.canopystate,
             soilstate=ss,
             temperature=temp,
+            water_diag=wdb,
+            gridcell=grc,
+            is_first_step=is_first_step,
             mask_actfirec=filt.actfirec,
             mask_actfirep=filt.actfirep)
     end

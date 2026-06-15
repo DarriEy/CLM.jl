@@ -451,6 +451,9 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         canopystate::Union{CanopyStateData, Nothing} = nothing,
         soilstate::Union{SoilStateData, Nothing} = nothing,
         temperature::Union{TemperatureData, Nothing} = nothing,
+        water_diag::Union{WaterDiagnosticBulkData, Nothing} = nothing,
+        gridcell::Union{GridcellData, Nothing} = nothing,
+        is_first_step::Bool = false,
         mask_actfirec::BitVector = falses(length(bounds_col)),
         mask_actfirep::BitVector = falses(length(bounds_patch)))
 
@@ -516,6 +519,9 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         canopystate=canopystate,
         soilstate=soilstate,
         temperature=temperature,
+        water_diag=water_diag,
+        gridcell=gridcell,
+        is_first_step=is_first_step,
         mask_actfirec=mask_actfirec,
         mask_actfirep=mask_actfirep)
 
