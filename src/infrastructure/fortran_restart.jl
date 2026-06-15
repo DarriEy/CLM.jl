@@ -381,10 +381,19 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
                              "onset_gddflag","onset_fdd","onset_gdd","onset_swi",
                              "offset_flag","offset_counter","offset_fdd","offset_swi",
                              "lgsf","bglfr","bgtr","annavg_t2m","tempavg_t2m",
-                             "leafcn_offset")  # FUN leaf C:N target (prognostic, restart-persisted)
+                             "leafcn_offset",   # FUN leaf C:N target (prognostic, restart-persisted)
+                             # GPP/retrans accumulators (were NaN → drive the seasonal
+                             # allocation + N-demand scaling; restart-persisted)
+                             "tempsum_potential_gpp","annsum_potential_gpp",
+                             "tempmax_retransn","annmax_retransn")
                     fld = Symbol(stem * "_patch")
                     hasproperty(cvs, fld) && set_patch_1d!(stem, getfield(cvs, fld))
                 end
+            end
+            # annsum_npp lives on the carbon-flux struct (24h/annual NPP accumulator)
+            if hasproperty(inst.bgc_vegetation, :cnveg_carbonflux_inst)
+                cvf = inst.bgc_vegetation.cnveg_carbonflux_inst
+                hasproperty(cvf, :annsum_npp_patch) && set_patch_1d!("annsum_npp", cvf.annsum_npp_patch)
             end
         end
     end
