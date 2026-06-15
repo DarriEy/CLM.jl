@@ -858,7 +858,13 @@ function soil_bgc_competition!(
         mimics_decomp::Bool=false,
         i_cop_mic::Int=0,
         i_oli_mic::Int=0,
-        nitrif_n2o_loss_frac::Real=NITRIF_N2O_LOSS_FRAC)
+        nitrif_n2o_loss_frac::Real=NITRIF_N2O_LOSS_FRAC,
+        # FUN hook: when use_fun, this zero-arg closure runs after the per-layer
+        # competition has set the *offered* N (smin_{nh4,no3}_to_plant_vr) and
+        # before the FUN re-sum, to compute the cost-based *actual* uptake
+        # (sminn_to_plant_fun_{nh4,no3}_vr) — i.e. it calls cnfun! + p2c. This
+        # mirrors Fortran calling CNFUN inside SoilBiogeochemCompetition.
+        fun_hook::Union{Function, Nothing}=nothing)
 
     dt   = state.dt
     bdnr = state.bdnr
@@ -1077,7 +1083,11 @@ function soil_bgc_competition!(
                      sminn_to_plant_vr, smin_nh4_to_plant_vr, smin_no3_to_plant_vr,
                      dzsoi_decomp, nlevdecomp)
         else
-            # use_fun: calculate maximum N available to plants + add up FUN fluxes
+            # use_fun: the per-layer loop above set the *offered* N
+            # (smin_{nh4,no3}_to_plant_vr = smin_*_vr/dt - immob - nit/denit).
+            # Run FUN now to turn offered → cost-based actual uptake
+            # (sminn_to_plant_fun_{nh4,no3}_vr), then sum the FUN fluxes.
+            fun_hook !== nothing && fun_hook()
             _launch!(_decompc_nd_fun_resum_kernel!, mask_bgc_soilc, sminn_to_plant,
                      sminn_to_plant_new, sminn_to_plant_vr, smin_nh4_to_plant_vr,
                      smin_no3_to_plant_vr, sminn_to_plant_fun_no3_vr,

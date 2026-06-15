@@ -55,6 +55,55 @@ Base.@kwdef mutable struct PftConFUN
     c3psn           ::Vector{Float64} = Float64[]   # C3 photosynthesis flag
 end
 
+"""
+    pftcon_fun_from(p) -> PftConFUN
+
+Build the FUN per-PFT constant bundle from the main `pftcon` (PftconType). All
+20 FUN parameters are already loaded into the main pftcon by `pftcon_read!`
+(same NetCDF names), so this is a straight field map — no separate param read.
+"""
+function pftcon_fun_from(p)
+    PftConFUN(
+        leafcn = p.leafcn, season_decid = p.season_decid, stress_decid = p.stress_decid,
+        a_fix = p.a_fix, b_fix = p.b_fix, c_fix = p.c_fix, s_fix = p.s_fix,
+        akc_active = p.akc_active, akn_active = p.akn_active,
+        ekc_active = p.ekc_active, ekn_active = p.ekn_active,
+        kc_nonmyc = p.kc_nonmyc, kn_nonmyc = p.kn_nonmyc,
+        perecm = p.perecm, grperc = p.grperc,
+        fun_cn_flex_a = p.fun_cn_flex_a, fun_cn_flex_b = p.fun_cn_flex_b,
+        fun_cn_flex_c = p.fun_cn_flex_c,
+        FUN_fracfixers = p.FUN_fracfixers, c3psn = p.c3psn)
+end
+
+"""
+    _fun_p2c!(col_out, patch_in, patch, mask_c, bounds_c, bounds_p, nlev)
+
+Unity-weighted patch→column average of a per-(patch,level) array, used to push
+FUN's cost-based plant N uptake (`sminn_to_plant_fun_*_vr_patch`) up to the
+column (`*_vr_col`) for the competition re-sum + soil-N state update. Mirrors
+Fortran `p2c(..., 'unity')` after the CNFUN call.
+"""
+function _fun_p2c!(col_out, patch_in, patch, mask_c::AbstractVector{Bool},
+                   bounds_c::UnitRange{Int}, bounds_p::UnitRange{Int}, nlev::Int)
+    @inbounds for c in bounds_c
+        mask_c[c] || continue
+        for j in 1:nlev
+            col_out[c, j] = 0.0
+        end
+    end
+    @inbounds for p in bounds_p
+        c = patch.column[p]
+        (first(bounds_c) <= c <= last(bounds_c)) || continue
+        mask_c[c] || continue
+        w = patch.wtcol[p]
+        isfinite(w) || continue
+        for j in 1:nlev
+            col_out[c, j] += patch_in[p, j] * w
+        end
+    end
+    return nothing
+end
+
 # =============================================================================
 #  Cost functions (pure functions, GPU-friendly)
 # =============================================================================

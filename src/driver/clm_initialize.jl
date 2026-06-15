@@ -120,6 +120,13 @@ function clm_initialize!(;
     # clm5_0 BGC defaults to nitrification/denitrification ON (use_nitrif_denitrif);
     # the Fortran BGC spinup used it, so the mineral N is tracked as NO3/NH4.
     inst.bgc_vegetation.config.use_nitrif_denitrif = use_cn
+    # clm5_0 BGC also defaults to FUN (Fixation & Uptake of Nitrogen) + flexible
+    # leaf C:N ON (the Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true.),
+    # but FUN is left OFF by default here: it is fully wired (see cn_driver.jl) and
+    # validated on the warm-restart parity path (which flips it on), yet defaulting
+    # it on for a COLD start surfaces the separate cold-start canopy-NaN blocker
+    # (FUN reads availc/canopy which are NaN before the canopy spins up). Callers
+    # with a finite (warm) state set inst.bgc_vegetation.config.use_fun = true.
     nlevdecomp_full = varpar.nlevdecomp_full
     ndecomp_cascade_transitions = use_cn ? 10 : 5
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,

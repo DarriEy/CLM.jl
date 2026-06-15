@@ -78,6 +78,16 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
         int_snow_max=INT_SNOW_MAX)
 
+    # The Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true. (CLM5 default).
+    # Enable them here — the parity harness runs from a warm Fortran restart, so the
+    # canopy/availc are finite and FUN's carbon-cost N uptake is well-posed.
+    if use_cn
+        inst.bgc_vegetation.config.use_fun = true
+        inst.bgc_vegetation.config.use_flexiblecn = true
+        inst.bgc_vegetation.driver_config.use_fun = true          # set both: the
+        inst.bgc_vegetation.driver_config.use_flexiblecn = true   # fc→dc sync already ran in init
+    end
+
     # atm2lnd downscaling to match Fortran lnd_in defaults
     CLM.atm2lnd_read_namelist!(inst.atm2lnd;
         repartition_rain_snow=true, lapse_rate=0.006, lapse_rate_longwave=0.032,

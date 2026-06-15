@@ -51,6 +51,7 @@ Base.@kwdef mutable struct CNVegetationConfig
     use_cndv::Bool = false
     use_fates_bgc::Bool = false
     use_fun::Bool = false
+    use_flexiblecn::Bool = false
     use_crop::Bool = false
     use_crop_agsys::Bool = false
     use_nitrif_denitrif::Bool = false
@@ -452,6 +453,7 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         soilstate::Union{SoilStateData, Nothing} = nothing,
         temperature::Union{TemperatureData, Nothing} = nothing,
         water_diag::Union{WaterDiagnosticBulkData, Nothing} = nothing,
+        waterstate::Union{WaterStateData, Nothing} = nothing,
         gridcell::Union{GridcellData, Nothing} = nothing,
         is_first_step::Bool = false,
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
@@ -522,6 +524,7 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         soilstate=soilstate,
         temperature=temperature,
         water_diag=water_diag,
+        waterstate=waterstate,
         gridcell=gridcell,
         is_first_step=is_first_step,
         h2osoi_vol=h2osoi_vol,
@@ -917,6 +920,7 @@ function _sync_driver_config!(veg::CNVegetationData)
     dc.use_c13 = fc.use_c13
     dc.use_c14 = fc.use_c14
     dc.use_fun = fc.use_fun
+    dc.use_flexiblecn = fc.use_flexiblecn
     dc.use_crop = fc.use_crop
     dc.use_crop_agsys = fc.use_crop_agsys
     dc.use_nitrif_denitrif = fc.use_nitrif_denitrif

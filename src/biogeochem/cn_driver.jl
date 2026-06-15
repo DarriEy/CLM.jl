@@ -30,6 +30,7 @@ Base.@kwdef mutable struct CNDriverConfig
     use_c14::Bool = false
     use_cn::Bool = false
     use_fun::Bool = false
+    use_flexiblecn::Bool = false     # flexible leaf C:N (FUN cost adjustment)
     use_crop::Bool = false
     use_crop_agsys::Bool = false
     use_nitrif_denitrif::Bool = false
@@ -174,6 +175,7 @@ function cn_driver_no_leaching!(
         soilstate::Union{SoilStateData, Nothing} = nothing,
         temperature::Union{TemperatureData, Nothing} = nothing,
         water_diag::Union{WaterDiagnosticBulkData, Nothing} = nothing,
+        waterstate::Union{WaterStateData, Nothing} = nothing,   # for FUN (h2osoi_liq_col)
         gridcell::Union{GridcellData, Nothing} = nothing,
         is_first_step::Bool = false,
         # Soil-water state (soil-layer slices) for nitrif/denitrif anoxia.
@@ -376,6 +378,55 @@ function cn_driver_no_leaching!(
                 col_dz=Array(col.dz[:, (varpar.nlevsno+1):end]), use_lch4=false)
         end
 
+        # 2c. FUN (Fixation & Uptake of Nitrogen) hook. When use_fun, the plant's
+        # actual soil-N uptake is a carbon-cost optimization, not availability-
+        # weighted. cnfun! runs INSIDE soil_bgc_competition! (Fortran calls CNFUN
+        # inside SoilBiogeochemCompetition): after the per-layer loop sets the
+        # *offered* N, the hook computes the cost-based actual uptake
+        # (sminn_to_plant_fun_{nh4,no3}_vr_patch) and p2c's it to column.
+        _fun_hook = nothing
+        if config.use_fun && cnveg_state !== nothing && patch !== nothing &&
+           pftcon_main !== nothing && soilstate !== nothing && temperature !== nothing &&
+           canopystate !== nothing && h2osoi_liq !== nothing
+            _pftcon_fun = pftcon_fun_from(pftcon_main)
+            _fun_params = FUNParams()
+            # Cold-start safety: leafcn_offset is a FUN prognostic (leaf C:N target).
+            # When started from a Fortran restart it is injected; on a cold start it
+            # is NaN/SPVAL — seed it with the base leaf C:N (Fortran InitCold default)
+            # so FUN's litterfall-N / retranslocation stay finite.
+            for p in bounds_patch
+                mask_bgc_vegp[p] || continue
+                lo = cnveg_state.leafcn_offset_patch[p]
+                # Seed when unset (cold start → NaN), SPVAL, or non-positive (a
+                # zeroed leaf C:N divides to NaN inside FUN). leaf C:N is always > 0.
+                if !isfinite(lo) || lo <= 0.0 || lo > 1.0e30
+                    _vt = patch.itype[p] + 1   # local PFT index — NOT the ivt kwarg vector
+                    cnveg_state.leafcn_offset_patch[p] = _pftcon_fun.leafcn[_vt]
+                end
+            end
+            # cnfun! reads only waterstate.h2osoi_liq_col, indexed by soil layer
+            # 1:nlevdecomp. The driver's h2osoi_liq is already the soil slice
+            # (snow padding stripped), so wrap it in a minimal WaterStateData.
+            _ws_fun = WaterStateData()
+            _ws_fun.h2osoi_liq_col = h2osoi_liq
+            _fun_hook = function ()
+                cnfun!(mask_bgc_vegp, mask_bgc_soilc, bounds_patch, bounds_col,
+                       _fun_params, _pftcon_fun, patch, _ws_fun, temperature,
+                       soilstate, cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
+                       soilbgc_nf, soilbgc_cf, canopystate, soilbgc_ns;
+                       dt=dt, nlevdecomp=nlevdecomp, dzsoi_decomp_vals=dzsoi_decomp,
+                       use_flexiblecn=config.use_flexiblecn,
+                       use_matrixcn=config.use_matrixcn, npcropmin=npcropmin)
+                # p2c (unity): patch FUN uptake → column, per layer.
+                _fun_p2c!(soilbgc_nf.sminn_to_plant_fun_no3_vr_col,
+                          cnveg_nf.sminn_to_plant_fun_no3_vr_patch,
+                          patch, mask_bgc_soilc, bounds_col, bounds_patch, nlevdecomp)
+                _fun_p2c!(soilbgc_nf.sminn_to_plant_fun_nh4_vr_col,
+                          cnveg_nf.sminn_to_plant_fun_nh4_vr_patch,
+                          patch, mask_bgc_soilc, bounds_col, bounds_patch, nlevdecomp)
+            end
+        end
+
         # 3. Mineral N competition (plant vs decomposers)
         if competition_state !== nothing && competition_params !== nothing
             soil_bgc_competition!(soilbgc_state, soilbgc_nf, soilbgc_cf, soilbgc_ns,
@@ -388,7 +439,9 @@ function cn_driver_no_leaching!(
                 pmnf_decomp_cascade=pmnf_decomp_cascade,
                 p_decomp_cn_gain=p_decomp_cn_gain,
                 cascade_receiver_pool=cascade_receiver_pool,
-                use_nitrif_denitrif=config.use_nitrif_denitrif)
+                use_nitrif_denitrif=config.use_nitrif_denitrif,
+                use_fun=config.use_fun,
+                fun_hook=_fun_hook)
         end
 
         # 3b. Plant C/N allocation (calc_plant_nutrient_competition!) — WIRED.
@@ -566,7 +619,7 @@ function cn_driver_no_leaching!(
     if config.use_nitrif_denitrif && _has_decomp
         soilbiogeochem_n_state_update1!(soilbgc_ns, soilbgc_nf, soilbgc_state;
             mask_bgc_soilc=mask_bgc_soilc, bounds_col=bounds_col,
-            nlevdecomp=nlevdecomp, dt=dt)
+            nlevdecomp=nlevdecomp, dt=dt, use_fun=config.use_fun)
     end
 
     # CNPrecisionControl — WIRED

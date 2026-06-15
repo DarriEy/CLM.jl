@@ -380,7 +380,8 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
                 for stem in ("dormant_flag","days_active","onset_flag","onset_counter",
                              "onset_gddflag","onset_fdd","onset_gdd","onset_swi",
                              "offset_flag","offset_counter","offset_fdd","offset_swi",
-                             "lgsf","bglfr","bgtr","annavg_t2m","tempavg_t2m")
+                             "lgsf","bglfr","bgtr","annavg_t2m","tempavg_t2m",
+                             "leafcn_offset")  # FUN leaf C:N target (prognostic, restart-persisted)
                     fld = Symbol(stem * "_patch")
                     hasproperty(cvs, fld) && set_patch_1d!(stem, getfield(cvs, fld))
                 end

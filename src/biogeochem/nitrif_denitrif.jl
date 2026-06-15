@@ -555,7 +555,8 @@ function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
                                           mask_bgc_soilc::AbstractVector{Bool},
                                           bounds_col::UnitRange{Int},
                                           nlevdecomp::Int,
-                                          dt::Real)
+                                          dt::Real,
+                                          use_fun::Bool=false)
     n2o = NITRIF_N2O_LOSS_FRAC
     @inbounds for c in bounds_col
         mask_bgc_soilc[c] || continue
@@ -568,9 +569,16 @@ function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
             # immobilization ← NH4 / NO3
             ns.smin_nh4_vr_col[c, j] -= nf.actual_immob_nh4_vr_col[c, j] * dt
             ns.smin_no3_vr_col[c, j] -= nf.actual_immob_no3_vr_col[c, j] * dt
-            # plant uptake ← NH4 / NO3
-            ns.smin_nh4_vr_col[c, j] -= nf.smin_nh4_to_plant_vr_col[c, j] * dt
-            ns.smin_no3_vr_col[c, j] -= nf.smin_no3_to_plant_vr_col[c, j] * dt
+            # plant uptake ← NH4 / NO3.  With FUN, the plant takes the cost-based
+            # *actual* uptake (sminn_to_plant_fun_*), not the offered amount
+            # (smin_*_to_plant_vr) — Fortran SoilBiogeochemNStateUpdate1Mod:237-244.
+            if use_fun
+                ns.smin_nh4_vr_col[c, j] -= nf.sminn_to_plant_fun_nh4_vr_col[c, j] * dt
+                ns.smin_no3_vr_col[c, j] -= nf.sminn_to_plant_fun_no3_vr_col[c, j] * dt
+            else
+                ns.smin_nh4_vr_col[c, j] -= nf.smin_nh4_to_plant_vr_col[c, j] * dt
+                ns.smin_no3_vr_col[c, j] -= nf.smin_no3_to_plant_vr_col[c, j] * dt
+            end
             # nitrification: NH4 → NO3 (minus N2O loss)
             ns.smin_nh4_vr_col[c, j] -= nf.f_nit_vr_col[c, j] * dt
             ns.smin_no3_vr_col[c, j] += nf.f_nit_vr_col[c, j] * dt * (1.0 - n2o)
