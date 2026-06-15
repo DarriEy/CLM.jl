@@ -560,23 +560,24 @@
         expected_bglfr = 1.0 / (3.0 * 365.0 * CLM.SECSPDAY)
         @test d.cnveg_state.bglfr_patch[1] ≈ expected_bglfr
 
-        # Storage → transfer fluxes (fstor2tran=0.5, dt=1800)
-        fstor2tran = d.pstate.fstor2tran
+        # Storage → transfer fluxes. The evergreen transfer uses Fortran's fixed
+        # tranr=0.0002 (CNEvergreenPhenology), NOT fstor2tran=0.5 (deciduous onset).
+        tranr = 0.0002
         dt = d.pstate.dt
 
-        @test d.cnveg_cf.leafc_storage_to_xfer_patch[1] ≈ fstor2tran * 10.0 / dt
-        @test d.cnveg_cf.frootc_storage_to_xfer_patch[1] ≈ fstor2tran * 5.0 / dt
+        @test d.cnveg_cf.leafc_storage_to_xfer_patch[1] ≈ tranr * 10.0 / dt
+        @test d.cnveg_cf.frootc_storage_to_xfer_patch[1] ≈ tranr * 5.0 / dt
 
         # Woody: stem and coarse root storage transfers
-        @test d.cnveg_cf.livestemc_storage_to_xfer_patch[1] ≈ fstor2tran * 3.0 / dt
-        @test d.cnveg_cf.deadstemc_storage_to_xfer_patch[1] ≈ fstor2tran * 2.0 / dt
-        @test d.cnveg_cf.livecrootc_storage_to_xfer_patch[1] ≈ fstor2tran * 1.5 / dt
-        @test d.cnveg_cf.deadcrootc_storage_to_xfer_patch[1] ≈ fstor2tran * 1.0 / dt
-        @test d.cnveg_cf.gresp_storage_to_xfer_patch[1] ≈ fstor2tran * 0.5 / dt
+        @test d.cnveg_cf.livestemc_storage_to_xfer_patch[1] ≈ tranr * 3.0 / dt
+        @test d.cnveg_cf.deadstemc_storage_to_xfer_patch[1] ≈ tranr * 2.0 / dt
+        @test d.cnveg_cf.livecrootc_storage_to_xfer_patch[1] ≈ tranr * 1.5 / dt
+        @test d.cnveg_cf.deadcrootc_storage_to_xfer_patch[1] ≈ tranr * 1.0 / dt
+        @test d.cnveg_cf.gresp_storage_to_xfer_patch[1] ≈ tranr * 0.5 / dt
 
         # Nitrogen fluxes
-        @test d.cnveg_nf.leafn_storage_to_xfer_patch[1] ≈ fstor2tran * 0.4 / dt
-        @test d.cnveg_nf.frootn_storage_to_xfer_patch[1] ≈ fstor2tran * 0.12 / dt
+        @test d.cnveg_nf.leafn_storage_to_xfer_patch[1] ≈ tranr * 0.4 / dt
+        @test d.cnveg_nf.frootn_storage_to_xfer_patch[1] ≈ tranr * 0.12 / dt
     end
 
     @testset "cn_evergreen_phenology! non-woody" begin

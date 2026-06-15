@@ -965,7 +965,14 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
                                  patch_data::PatchData,
                                  avg_dayspyr::Real)
     dt         = pstate.dt
-    fstor2tran = pstate.fstor2tran
+    # The evergreen storage→transfer uses Fortran's FIXED tranr = 0.0002
+    # (CNPhenologyMod CNEvergreenPhenology, gated on cn_evergreen_phenology_opt==1,
+    # which the Bow run sets), NOT fstor2tran=0.5 — that 0.5 is the DECIDUOUS onset
+    # fraction. Using fstor2tran here drained evergreen storage 2500x too fast
+    # (halving leafc_storage every step). With opt==0 (CLM default) Fortran skips
+    # the transfer entirely; 0.0002 is small enough that the always-on form here
+    # stays negligible for that case (TODO: thread the opt flag to gate it off).
+    tranr = 0.0002
 
     # Per-patch independent: evergreen background rates + storage→transfer.
     phen_evergreen!(
@@ -985,7 +992,7 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
         cnveg_ns.leafn_storage_patch, cnveg_ns.frootn_storage_patch,
         cnveg_ns.livestemn_storage_patch, cnveg_ns.deadstemn_storage_patch,
         cnveg_ns.livecrootn_storage_patch, cnveg_ns.deadcrootn_storage_patch,
-        dt, fstor2tran, Float64(avg_dayspyr), SECSPDAY)
+        dt, tranr, Float64(avg_dayspyr), SECSPDAY)
 
     return nothing
 end
