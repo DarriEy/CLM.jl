@@ -560,7 +560,31 @@ function cn_driver_no_leaching!(
     # Gap mortality and Update2
     # --------------------------------------------------
     if num_bgc_vegp > 0
-        # CNGapMortality — already ported: cn_gap_mortality!(...), cn_gap_patch_to_column!(...)
+        # CNGapMortality — WIRED. Background gap mortality (r_mort=0.02/yr CLM5
+        # default; DGVS path off so dgvs is unused/zero) → m_*_to_litter patch
+        # fluxes, then gathered patch→column via the vertical profiles. Feeds
+        # c_state_update2!/n_state_update2! below.
+        if pftcon_main !== nothing && patch !== nothing && canopystate !== nothing
+            _np = length(bounds_patch)
+            _gmp = GapMortalityParams{Float64}(k_mort = 0.3,
+                r_mort = fill(0.02, length(pftcon_main.woody)))
+            _pftgm = PftConGapMort{Float64}(
+                woody = Float64.(pftcon_main.woody), leafcn = Float64.(pftcon_main.leafcn),
+                livewdcn = Float64.(pftcon_main.livewdcn),
+                lf_f = Float64.(pftcon_main.lf_f), fr_f = Float64.(pftcon_main.fr_f))
+            _dgvs = DgvsGapMortData{Float64}(greffic_patch = zeros(_np),
+                heatstress_patch = zeros(_np), nind_patch = zeros(_np))
+            cn_gap_mortality!(mask_bgc_vegp, bounds_patch, _gmp, _pftgm, _dgvs, patch,
+                canopystate, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
+                dt = dt, days_per_year = 365.0, use_cndv = false,
+                use_matrixcn = config.use_matrixcn, spinup_state = 0, npcropmin = npcropmin)
+            cn_gap_patch_to_column!(mask_bgc_vegp, bounds_patch, _pftgm, patch,
+                cnveg_cf, cnveg_nf,
+                soilbgc_state.leaf_prof_patch, soilbgc_state.froot_prof_patch,
+                soilbgc_state.croot_prof_patch, soilbgc_state.stem_prof_patch;
+                nlevdecomp = nlevdecomp, i_litr_min = i_litr_min,
+                i_litr_max = i_litr_max, i_met_lit = i_litr_min)
+        end
         # CIsoFlux2 — not yet ported
 
         c_state_update2!(cnveg_cs, cnveg_cf, soilbgc_cs;
@@ -876,10 +900,7 @@ function _zero_soilbgc_cflux!(cf::SoilBiogeochemCarbonFluxData;
                                 mask::AbstractVector{Bool},
                                 bounds::UnitRange{Int})
     isempty(bounds) && return nothing
-    hr = cf.decomp_cascade_hr_vr_col; ct = cf.decomp_cascade_ctransfer_vr_col; phr = cf.phr_vr_col
-    _launch!(_zero_soilbgc_cf_kernel!, hr, ct, phr, mask,
-        size(hr, 2), size(hr, 3), size(ct, 2), size(ct, 3), size(phr, 2),
-        first(bounds), last(bounds); ndrange = length(mask))
+    _zero_cnveg_flux_arrays!(cf)   # full per-step reset (ann* accumulators kept)
     return nothing
 end
 
@@ -966,8 +987,6 @@ function _zero_soilbgc_nflux!(nf::SoilBiogeochemNitrogenFluxData;
                                 mask::AbstractVector{Bool},
                                 bounds::UnitRange{Int})
     isempty(bounds) && return nothing
-    _launch!(_zero_soilbgc_nf_kernel!, nf.ndep_to_sminn_col, nf.nfix_to_sminn_col,
-        nf.fert_to_sminn_col, nf.soyfixn_to_sminn_col, nf.ffix_to_sminn_col, mask,
-        first(bounds), last(bounds); ndrange = length(mask))
+    _zero_cnveg_flux_arrays!(nf)   # full per-step reset incl. leached/runoff (ann* kept)
     return nothing
 end

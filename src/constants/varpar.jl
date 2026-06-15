@@ -149,7 +149,16 @@ function varpar_init!(vp::VarPar, actual_maxsoil_patches::Int,
         vp.nlevsno = 12  # default max snow layers
     end
 
-    # Decomposition levels
+    # Decomposition levels.
+    # NOTE: clm5_0 BGC uses vertically-resolved soil C (use_vertsoilc=.true.):
+    # Fortran (clm_varpar.F90:305-306) sets nlevdecomp = nlevsoi (20),
+    # nlevdecomp_full = nlevgrnd (25). The Fortran spinup restart confirms this
+    # (depth-decreasing _vr pools). TODO for true soil-BGC parity: switch to the
+    # vertical values — but the multi-layer decomposition/litter-transport chain
+    # currently NaNs pools 2-7 at nlevdecomp>1 (only ever exercised at 1), a
+    # dedicated debugging effort. Single-step teacher-forced soil-pool parity is
+    # dominated by the injected values, and the veg-CN flux chain is independent of
+    # nlevdecomp, so nlevdecomp=1 is kept here while the veg-CN wiring is validated.
     vp.nlevdecomp = 1
     vp.nlevdecomp_full = vp.nlevsoi
 
