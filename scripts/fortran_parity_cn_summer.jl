@@ -19,8 +19,12 @@ function main()
     println("Running ONE use_cn=true clm_drv! step from BGC IC (nstep=$NSTEP) ...")
     local inst, bounds
     try
+        # The BGC run cycles datm 2002-2009 (year_align=2002), so model year 2202
+        # maps to forcing year 2002. Use clmforc.2002 + a 2002 step date so the
+        # teacher-forced step sees the SAME atm forcing the Fortran run did.
         inst, bounds = run_one_parity_step!(NSTEP; use_cn=true, dumpdir=BGC_DUMPDIR,
-                                            step_date=DateTime(2003,1,1)+Hour(1757852-1753153))
+                                            step_date=DateTime(2002,1,1)+Hour(1757852-1753153),
+                                            forcing_file=replace(FFORCING, "clmforc.2003.nc"=>"clmforc.2002.nc"))
     catch e
         println("\n!!! use_cn clm_drv! step CRASHED:")
         Base.showerror(stdout, e, catch_backtrace())

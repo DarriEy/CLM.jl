@@ -213,7 +213,8 @@ setup in fortran_parity_validate.jl). Returns the post-step instance for diffing
 against the Fortran per-boundary dumps.
 """
 function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DUMPDIR,
-                              step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761))
+                              step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761),
+                              forcing_file::String=FFORCING)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn)
     inject_dump!(inst, bounds, joinpath(dumpdir, "pdump_before_step_n$(nstep).nc"))
 
@@ -222,9 +223,9 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 
     fr = CLM.ForcingReader()
-    CLM.forcing_reader_init!(fr, FFORCING)
+    CLM.forcing_reader_init!(fr, forcing_file)
 
-    topo_file = replace(FFORCING, r"clmforc\.[^/]*\.nc$" => "topo_forcing.nc")
+    topo_file = replace(forcing_file, r"clmforc\.[^/]*\.nc$" => "topo_forcing.nc")
     if isfile(topo_file)
         ds_topo = NCDataset(topo_file, "r")
         if haskey(ds_topo, "TOPO")
