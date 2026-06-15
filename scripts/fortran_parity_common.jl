@@ -86,6 +86,11 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         inst.bgc_vegetation.config.use_flexiblecn = true
         inst.bgc_vegetation.driver_config.use_fun = true          # set both: the
         inst.bgc_vegetation.driver_config.use_flexiblecn = true   # fc→dc sync already ran in init
+        # The allometry / N-demand / availc routines read cn_shared_params.use_fun
+        # (a SEPARATE flag from the driver config). It must agree with the driver so
+        # the FUN-consistent allometry (g1a=0) + demand feed cnfun!, else FUN draws
+        # the wrong amount (over-tapping the deep no3).
+        inst.cn_shared_params.use_fun = true
     end
 
     # atm2lnd downscaling to match Fortran lnd_in defaults
