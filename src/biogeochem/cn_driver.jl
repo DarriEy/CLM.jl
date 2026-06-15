@@ -176,6 +176,9 @@ function cn_driver_no_leaching!(
         water_diag::Union{WaterDiagnosticBulkData, Nothing} = nothing,
         gridcell::Union{GridcellData, Nothing} = nothing,
         is_first_step::Bool = false,
+        # Soil-water state (soil-layer slices) for nitrif/denitrif anoxia.
+        h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         # Output: fire masks (populated by fire routines)
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
@@ -347,6 +350,31 @@ function cn_driver_no_leaching!(
             p_decomp_cn_gain=p_decomp_cn_gain,
             pmnf_decomp_cascade=pmnf_decomp_cascade,
             p_decomp_npool_to_din=p_decomp_npool_to_din)
+
+        # 2b. Nitrification / denitrification (SoilBiogeochemNitrifDenitrif) — WIRED.
+        # Produces f_nit/f_denit/pot_f_nit (+ NO3/NH4 immob/uptake demand) consumed
+        # by the competition's nitrif split and the smin nh4/no3 state update. Runs
+        # BEFORE competition, per CNDriverNoLeaching (Fortran order, line 375).
+        if config.use_nitrif_denitrif && soilstate !== nothing && cn_shared_params !== nothing &&
+           soilpsi !== nothing && t_soisno !== nothing && h2osoi_vol !== nothing &&
+           h2osoi_liq !== nothing && col !== nothing
+            _ndp = NitrifDenitrifParams()
+            nitrif_denitrif_read_params!(_ndp;
+                k_nitr_max_perday=0.1, surface_tension_water=0.073,
+                rij_kro_a=1.5e-10, rij_kro_alpha=1.26, rij_kro_beta=0.6,
+                rij_kro_gamma=0.6, rij_kro_delta=0.85,
+                denitrif_respiration_coefficient=0.1, denitrif_respiration_exponent=1.3,
+                denitrif_nitrateconc_coefficient=1.15, denitrif_nitrateconc_exponent=0.57,
+                om_frac_sf=1.0)
+            nitrif_denitrif!(soilbgc_nf, soilbgc_ns, soilbgc_cf, _ndp, cn_shared_params;
+                mask_bgc_soilc=mask_bgc_soilc, bounds=bounds_col, nlevdecomp=nlevdecomp,
+                watsat=soilstate.watsat_col, watfc=soilstate.watfc_col,
+                bd=soilstate.bd_col, bsw=soilstate.bsw_col, cellorg=soilstate.cellorg_col,
+                sucsat=soilstate.sucsat_col, soilpsi=Array(soilpsi),
+                h2osoi_vol=Array(h2osoi_vol), h2osoi_liq=Array(h2osoi_liq),
+                t_soisno=Array(t_soisno),   # _NitrifIn groups inputs as Matrix; materialize views
+                col_dz=Array(col.dz[:, (varpar.nlevsno+1):end]), use_lch4=false)
+        end
 
         # 3. Mineral N competition (plant vs decomposers)
         if competition_state !== nothing && competition_params !== nothing
@@ -530,6 +558,16 @@ function cn_driver_no_leaching!(
         use_soil_matrixcn=config.use_soil_matrixcn,
         use_fun=config.use_fun,
         dt=dt)
+
+    # SoilBiogeochemNStateUpdate1 — WIRED. Applies the mineral-N fluxes
+    # (dep/fix, gross mineralization, immobilization, plant uptake, nitrification,
+    # denitrification, supplement) to smin_nh4_vr/smin_no3_vr (the nitrif path).
+    # Fortran CNDriverNoLeaching line 658, after NStateUpdate1.
+    if config.use_nitrif_denitrif && _has_decomp
+        soilbiogeochem_n_state_update1!(soilbgc_ns, soilbgc_nf, soilbgc_state;
+            mask_bgc_soilc=mask_bgc_soilc, bounds_col=bounds_col,
+            nlevdecomp=nlevdecomp, dt=dt)
+    end
 
     # CNPrecisionControl — WIRED
     # Called with integer filter built from mask (cn_precision_control! uses filter array)

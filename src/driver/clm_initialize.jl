@@ -117,6 +117,9 @@ function clm_initialize!(;
     inst.surfdata = surf
     # Propagate CN flag to vegetation facade config before init
     inst.bgc_vegetation.config.use_cn = use_cn
+    # clm5_0 BGC defaults to nitrification/denitrification ON (use_nitrif_denitrif);
+    # the Fortran BGC spinup used it, so the mineral N is tracked as NO3/NH4.
+    inst.bgc_vegetation.config.use_nitrif_denitrif = use_cn
     nlevdecomp_full = varpar.nlevdecomp_full
     ndecomp_cascade_transitions = use_cn ? 10 : 5
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,

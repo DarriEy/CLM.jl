@@ -132,6 +132,14 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             ss.tksatu_col[c, j] = ss.tkmg_col[c, j] * TKWAT^watsat_val
             ss.tkdry_col[c, j] = ((0.135 * bd + 64.7) / (pd - 0.947 * bd)) *
                                   (1.0 - om_frac) + 0.05 * om_frac
+
+            # Bulk density + organic-matter content per layer for the BGC
+            # nitrification/denitrification anoxia calc (SoilBiogeochemNitrifDenitrif).
+            # Both were allocated NaN and never filled (same gap as cellsand) →
+            # nitrif_denitrif! produced NaN. bd already computed above; cellorg
+            # (kg/m3) reconstructed from om_frac (= organic/organic_max, max 130).
+            if j <= size(ss.bd_col, 2);      ss.bd_col[c, j]      = bd;              end
+            if j <= size(ss.cellorg_col, 2); ss.cellorg_col[c, j] = om_frac * 130.0; end
             # csol is the volumetric heat capacity of soil SOLIDS, WITHOUT the
             # (1-watsat) solid-fraction factor — the thermal solve applies that
             # (compute_soil_cv!: cv = csol*(1-watsat)*dz). The prior code baked

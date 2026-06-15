@@ -537,3 +537,50 @@ function nitrif_denitrif!(
 
     return nothing
 end
+
+# ---------------------------------------------------------------------------
+# soilbiogeochem_n_state_update1! — mineral N (NH4/NO3) state update
+# Ported from SoilBiogeochemNStateUpdate1Mod.F90 (the use_nitrif_denitrif=.true.,
+# use_fun=.false. branch). Applies the per-step N fluxes — deposition/fixation,
+# gross mineralization, immobilization, plant uptake, nitrification,
+# denitrification, supplement — to smin_nh4_vr / smin_no3_vr and updates the
+# diagnostic sminn_vr. (The decomp-N-pools sourcesink part of NStateUpdate1 is
+# already handled in n_state_update1!.) Runs after n_state_update1! (Fortran
+# CNDriverNoLeaching order, line 658). CPU loop (single-point harness); kernelize
+# for GPU later.
+# ---------------------------------------------------------------------------
+function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
+                                          nf::SoilBiogeochemNitrogenFluxData,
+                                          st::SoilBiogeochemStateData;
+                                          mask_bgc_soilc::AbstractVector{Bool},
+                                          bounds_col::UnitRange{Int},
+                                          nlevdecomp::Int,
+                                          dt::Real)
+    n2o = NITRIF_N2O_LOSS_FRAC
+    @inbounds for c in bounds_col
+        mask_bgc_soilc[c] || continue
+        for j in 1:nlevdecomp
+            # N deposition + fixation (all into NH4)
+            ns.smin_nh4_vr_col[c, j] += nf.ndep_to_sminn_col[c] * dt * st.ndep_prof_col[c, j]
+            ns.smin_nh4_vr_col[c, j] += nf.nfix_to_sminn_col[c] * dt * st.nfixation_prof_col[c, j]
+            # gross mineralization → NH4
+            ns.smin_nh4_vr_col[c, j] += nf.gross_nmin_vr_col[c, j] * dt
+            # immobilization ← NH4 / NO3
+            ns.smin_nh4_vr_col[c, j] -= nf.actual_immob_nh4_vr_col[c, j] * dt
+            ns.smin_no3_vr_col[c, j] -= nf.actual_immob_no3_vr_col[c, j] * dt
+            # plant uptake ← NH4 / NO3
+            ns.smin_nh4_vr_col[c, j] -= nf.smin_nh4_to_plant_vr_col[c, j] * dt
+            ns.smin_no3_vr_col[c, j] -= nf.smin_no3_to_plant_vr_col[c, j] * dt
+            # nitrification: NH4 → NO3 (minus N2O loss)
+            ns.smin_nh4_vr_col[c, j] -= nf.f_nit_vr_col[c, j] * dt
+            ns.smin_no3_vr_col[c, j] += nf.f_nit_vr_col[c, j] * dt * (1.0 - n2o)
+            # denitrification ← NO3
+            ns.smin_no3_vr_col[c, j] -= nf.f_denit_vr_col[c, j] * dt
+            # supplement (carbon-only N limitation relief) → NH4
+            ns.smin_nh4_vr_col[c, j] += nf.supplement_to_sminn_vr_col[c, j] * dt
+            # diagnostic total
+            ns.sminn_vr_col[c, j] = ns.smin_nh4_vr_col[c, j] + ns.smin_no3_vr_col[c, j]
+        end
+    end
+    return nothing
+end

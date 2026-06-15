@@ -454,6 +454,8 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         water_diag::Union{WaterDiagnosticBulkData, Nothing} = nothing,
         gridcell::Union{GridcellData, Nothing} = nothing,
         is_first_step::Bool = false,
+        h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         mask_actfirec::BitVector = falses(length(bounds_col)),
         mask_actfirep::BitVector = falses(length(bounds_patch)))
 
@@ -522,6 +524,8 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         water_diag=water_diag,
         gridcell=gridcell,
         is_first_step=is_first_step,
+        h2osoi_vol=h2osoi_vol,
+        h2osoi_liq=h2osoi_liq,
         mask_actfirec=mask_actfirec,
         mask_actfirep=mask_actfirep)
 

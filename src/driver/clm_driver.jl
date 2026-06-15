@@ -1408,6 +1408,8 @@ function clm_drv_core!(config::CLMDriverConfig,
             water_diag=wdb,
             gridcell=grc,
             is_first_step=is_first_step,
+            h2osoi_vol=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_vol_col : nothing),
+            h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
             mask_actfirec=filt.actfirec,
             mask_actfirep=filt.actfirep)
     end
