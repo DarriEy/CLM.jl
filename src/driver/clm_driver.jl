@@ -1397,6 +1397,14 @@ function clm_drv_core!(config::CLMDriverConfig,
             dzsoi_decomp=dzsoi_decomp[],
             zsoi_vals=zsoi[],
             zisoi_vals=zisoi[],
+            # Vegetation-flux inputs for the veg-CN flux chain (mresp, gpp/alloc, …)
+            patch=pch,
+            pftcon_main=pftcon,
+            crop=inst.crop,
+            photosyns=inst.photosyns,
+            canopystate=inst.canopystate,
+            soilstate=ss,
+            temperature=temp,
             mask_actfirec=filt.actfirec,
             mask_actfirep=filt.actfirep)
     end

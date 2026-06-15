@@ -69,10 +69,11 @@ instrumented Fortran run's configuration, with the runtime params wired in.
 Returns (inst, bounds, filt, tm).
 """
 function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
-                          start_date::DateTime=DateTime(2003,1,1))
+                          start_date::DateTime=DateTime(2003,1,1),
+                          use_cn::Bool=false)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(;
         fsurdat=FSURDAT, paramfile=FPARAM,
-        start_date=start_date, dtime=dtime, use_cn=false,
+        start_date=start_date, dtime=dtime, use_cn=use_cn,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
         int_snow_max=INT_SNOW_MAX)
@@ -211,12 +212,12 @@ exactly one timestep. Mirrors the clm_run.jl loop body (and the single-step
 setup in fortran_parity_validate.jl). Returns the post-step instance for diffing
 against the Fortran per-boundary dumps.
 """
-function run_one_parity_step!(nstep::Int)
-    step_date = DateTime(2003, 1, 1) + Hour(nstep - 8761)
-    (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date)
-    inject_dump!(inst, bounds, joinpath(DUMPDIR, "pdump_before_step_n$(nstep).nc"))
+function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DUMPDIR,
+                              step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761))
+    (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn)
+    inject_dump!(inst, bounds, joinpath(dumpdir, "pdump_before_step_n$(nstep).nc"))
 
-    config  = CLM.CLMDriverConfig(use_cn=false, use_aquifer_layer=false)
+    config  = CLM.CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=false)
     filt_ia = CLM.clump_filter_inactive_and_active
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 

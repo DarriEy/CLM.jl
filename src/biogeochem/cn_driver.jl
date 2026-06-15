@@ -138,6 +138,7 @@ function cn_driver_no_leaching!(
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_ns::CNVegNitrogenStateData,
         cnveg_nf::CNVegNitrogenFluxData,
+        cnveg_state::Union{CNVegStateData, Nothing} = nothing,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
@@ -162,6 +163,16 @@ function cn_driver_no_leaching!(
         dzsoi_decomp::Union{AbstractVector{<:Real}, Nothing} = nothing,
         zsoi_vals::Union{AbstractVector{<:Real}, Nothing} = nothing,
         zisoi_vals::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        # Vegetation-flux inputs (for the veg-CN flux chain: mresp, gpp/alloc, …).
+        # Optional so SP / decomp-only callers are unaffected; the veg-flux routines
+        # are wired only when these are supplied.
+        patch::Union{PatchData, Nothing} = nothing,
+        pftcon_main::Union{Any, Nothing} = nothing,
+        crop::Union{CropData, Nothing} = nothing,
+        photosyns::Union{PhotosynthesisData, Nothing} = nothing,
+        canopystate::Union{CanopyStateData, Nothing} = nothing,
+        soilstate::Union{SoilStateData, Nothing} = nothing,
+        temperature::Union{TemperatureData, Nothing} = nothing,
         # Output: fire masks (populated by fire routines)
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
@@ -194,8 +205,90 @@ function cn_driver_no_leaching!(
     # N deposition — already ported: n_deposition!(...)
     # N fixation — already ported: n_fixation!(...) or n_free_living_fixation!(...)
     # Crop N fertilization — already ported: n_fert!(...), n_soyfix!(...)
-    # Maintenance respiration — already ported: cn_mresp!(...)
-    # (These are called externally before/after this driver)
+
+    # Maintenance respiration (CNMResp) — WIRED (veg-flux chain). Runs when the
+    # veg-flux inputs (photosyns/canopystate/soilstate/temperature/patch/pftcon)
+    # are supplied; produces cnveg_cf.{leaf,froot,livestem,livecroot,reproductive}_mr.
+    if num_bgc_vegp > 0 && cn_shared_params !== nothing && pftcon_main !== nothing &&
+       patch !== nothing && canopystate !== nothing && soilstate !== nothing &&
+       temperature !== nothing && photosyns !== nothing
+        _mrp = MaintRespParams(); maint_resp_read_params!(_mrp)
+        _pftmr = PftConMaintResp{Float64}(woody = Float64.(pftcon_main.woody))
+        cn_mresp!(mask_bgc_soilc, mask_bgc_vegp, bounds_col, bounds_patch,
+                  _mrp, cn_shared_params, _pftmr,
+                  patch, canopystate, soilstate, temperature, photosyns,
+                  cnveg_cf, cnveg_ns;
+                  npcropmin = npcropmin, nrepr = nrepr)
+    end
+
+    # GPP, maintenance-resp totals, and available C (calc_gpp_mr_availc!) — WIRED.
+    # Produces cnveg_cf.{availc, gpp_before_downreg, psnsun_to_cpool, …} consumed by
+    # plant N demand + allocation. Builds PftConAllocation as a subset of the main
+    # pftcon (all fields present); reused below by calc_allometry!.
+    _pfta = (pftcon_main === nothing) ? nothing : PftConAllocation{Float64}(
+        woody = Float64.(pftcon_main.woody), froot_leaf = Float64.(pftcon_main.froot_leaf),
+        croot_stem = Float64.(pftcon_main.croot_stem), stem_leaf = Float64.(pftcon_main.stem_leaf),
+        flivewd = Float64.(pftcon_main.flivewd), leafcn = Float64.(pftcon_main.leafcn),
+        frootcn = Float64.(pftcon_main.frootcn), livewdcn = Float64.(pftcon_main.livewdcn),
+        deadwdcn = Float64.(pftcon_main.deadwdcn), graincn = Float64.(pftcon_main.graincn),
+        grperc = Float64.(pftcon_main.grperc))
+    if num_bgc_vegp > 0 && cn_shared_params !== nothing && _pfta !== nothing &&
+       patch !== nothing && crop !== nothing && photosyns !== nothing && canopystate !== nothing
+        _ap = AllocationParams()
+        calc_gpp_mr_availc!(mask_bgc_vegp, bounds_patch, _ap, _pfta, cn_shared_params,
+                  patch, crop, photosyns, canopystate, cnveg_cs, cnveg_cf;
+                  use_c13 = config.use_c13, use_c14 = config.use_c14,
+                  npcropmin = npcropmin, nrepr = nrepr)
+    end
+
+    # Crop allocation fractions (calc_crop_allocation_fractions!) — crops only;
+    # Bow has no crop patches (mask_pcropp empty) so this is a no-op here. (Wire
+    # later when crop infra is needed.)
+
+    # C/N allometry (calc_allometry!) — WIRED. Produces cnveg_state.{c_allometry,
+    # n_allometry} used by plant N demand + allocation.
+    if num_bgc_vegp > 0 && cn_shared_params !== nothing && _pfta !== nothing &&
+       patch !== nothing && cnveg_state !== nothing
+        calc_allometry!(mask_bgc_vegp, bounds_patch, _pfta, cn_shared_params,
+                  patch, cnveg_cf, cnveg_state;
+                  npcropmin = npcropmin, nrepr = nrepr)
+    end
+
+    # Plant nitrogen demand (calc_plant_nutrient_demand!) — WIRED. Non-crop call
+    # over the veg-patch filter (Bow has no prognostic crops). Produces
+    # cnveg_nf.plant_ndemand_patch, then aggregated patch→column into
+    # soilbgc_state.plant_ndemand_col so the (already-wired) soil_bgc_competition!
+    # below computes a real fpg_col. PftConNutrientCompetition is a subset of the
+    # main pftcon (all fields present).
+    _pftnc = (pftcon_main === nothing) ? nothing : PftConNutrientCompetition{Float64}(
+        woody = Float64.(pftcon_main.woody), froot_leaf = Float64.(pftcon_main.froot_leaf),
+        croot_stem = Float64.(pftcon_main.croot_stem), stem_leaf = Float64.(pftcon_main.stem_leaf),
+        flivewd = Float64.(pftcon_main.flivewd), leafcn = Float64.(pftcon_main.leafcn),
+        frootcn = Float64.(pftcon_main.frootcn), livewdcn = Float64.(pftcon_main.livewdcn),
+        deadwdcn = Float64.(pftcon_main.deadwdcn), fcur = Float64.(pftcon_main.fcur),
+        graincn = Float64.(pftcon_main.graincn), grperc = Float64.(pftcon_main.grperc),
+        grpnow = Float64.(pftcon_main.grpnow), fleafcn = Float64.(pftcon_main.fleafcn),
+        ffrootcn = Float64.(pftcon_main.ffrootcn), fstemcn = Float64.(pftcon_main.fstemcn),
+        astemf = Float64.(pftcon_main.astemf), season_decid = Float64.(pftcon_main.season_decid),
+        stress_decid = Float64.(pftcon_main.stress_decid))
+    if num_bgc_vegp > 0 && cn_shared_params !== nothing && _pftnc !== nothing &&
+       patch !== nothing && crop !== nothing && cnveg_state !== nothing
+        calc_plant_nutrient_demand!(mask_bgc_vegp, bounds_patch, false,
+            _pftnc, cn_shared_params, patch, crop, cnveg_state,
+            cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
+            dt = dt, npcropmin = npcropmin, nrepr = nrepr)
+        # patch→column "unity" aggregation of plant N demand for competition
+        _Tnd = eltype(soilbgc_state.plant_ndemand_col)
+        for c in bounds_col
+            mask_bgc_soilc[c] && (soilbgc_state.plant_ndemand_col[c] = zero(_Tnd))
+        end
+        for p in bounds_patch
+            mask_bgc_vegp[p] || continue
+            w = patch.wtcol[p]; isfinite(w) || continue
+            cc = patch_column[p]
+            soilbgc_state.plant_ndemand_col[cc] += cnveg_nf.plant_ndemand_patch[p] * w
+        end
+    end
 
     # --------------------------------------------------
     # Soil Biogeochemistry
@@ -267,6 +360,20 @@ function cn_driver_no_leaching!(
                 use_nitrif_denitrif=config.use_nitrif_denitrif)
         end
 
+        # 3b. Plant C/N allocation (calc_plant_nutrient_competition!) — WIRED.
+        # Consumes the fpg_col just produced by soil_bgc_competition! and the
+        # availc/allometry from the veg-flux chain above; produces cnveg_cf.cpool_to_*c
+        # (consumed by c_state_update1! → makes leafc finite) + cnveg_nf alloc fluxes.
+        if num_bgc_vegp > 0 && _pftnc !== nothing && cn_shared_params !== nothing &&
+           patch !== nothing && crop !== nothing && cnveg_state !== nothing
+            calc_plant_nutrient_competition!(mask_bgc_vegp, bounds_patch,
+                _pftnc, cn_shared_params, patch, crop, cnveg_state,
+                cnveg_cs, cnveg_cf, cnveg_nf;
+                fpg_col = soilbgc_state.fpg_col,
+                use_c13 = config.use_c13, use_c14 = config.use_c14,
+                npcropmin = npcropmin, nrepr = nrepr)
+        end
+
         # 4. Actual decomposition
         if decomp_params !== nothing
             soil_biogeochem_decomp!(soilbgc_cf, soilbgc_cs, soilbgc_nf, soilbgc_ns,
@@ -312,8 +419,17 @@ function cn_driver_no_leaching!(
     end
 
     # --------------------------------------------------
-    # Growth respiration — already ported: cn_gresp!(...)
+    # Growth respiration (cn_gresp!) — WIRED. Reads cpool_to_*c (allocation) +
+    # *_xfer_to_*c (phenology); writes the *_gr growth-respiration fluxes consumed
+    # by c_state_update1!. PftConGrowthResp is a subset of the main pftcon.
     # --------------------------------------------------
+    if num_bgc_vegp > 0 && pftcon_main !== nothing && patch !== nothing
+        _pftgr = PftConGrowthResp{Float64}(
+            woody = Float64.(pftcon_main.woody), grperc = Float64.(pftcon_main.grperc),
+            grpnow = Float64.(pftcon_main.grpnow))
+        cn_gresp!(mask_bgc_vegp, bounds_patch, _pftgr, patch, cnveg_cf;
+                  npcropmin = npcropmin, nrepr = nrepr)
+    end
 
     # --------------------------------------------------
     # CStateUpdate0
@@ -742,14 +858,29 @@ Replaces `cnveg_carbonflux_inst%SetValues(...)` in the Fortran.
     end
 end
 
+# Zero every per-step flux array field (matches Fortran CNVegCarbonFluxType%SetValues,
+# which resets all fluxes each step before the producer routines fill them). Annual
+# accumulators (ann*) are preserved. fill! is device-safe; the field iteration is a
+# one-shot reset per step. This replaces the earlier 2-field stub — the full driver
+# needs ALL fluxes consumed by the c_state_update* cascade reset to 0, otherwise the
+# unwired producers leave NaN-init fluxes that poison the state updates.
+function _zero_cnveg_flux_arrays!(cf)
+    for name in fieldnames(typeof(cf))
+        startswith(String(name), "ann") && continue   # keep annual accumulators
+        arr = getfield(cf, name)
+        (arr isa AbstractArray && !isempty(arr) && eltype(arr) <: Real) || continue
+        fill!(arr, zero(eltype(arr)))
+    end
+    return nothing
+end
+
 function _zero_cnveg_cflux!(cf::CNVegCarbonFluxData;
                               mask::AbstractVector{Bool},
                               bounds::UnitRange{Int},
                               mask_col::AbstractVector{Bool},
                               bounds_col::UnitRange{Int})
     isempty(bounds) && return nothing
-    _launch!(_zero_cnveg_cf_kernel!, cf.psnsun_to_cpool_patch, cf.psnshade_to_cpool_patch,
-        mask, first(bounds), last(bounds); ndrange = length(mask))
+    _zero_cnveg_flux_arrays!(cf)
     return nothing
 end
 
@@ -772,8 +903,7 @@ function _zero_cnveg_nflux!(nf::CNVegNitrogenFluxData;
                               mask_col::AbstractVector{Bool},
                               bounds_col::UnitRange{Int})
     isempty(bounds) && return nothing
-    _launch!(_zero_cnveg_nf_kernel!, nf.plant_ndemand_patch, mask,
-        first(bounds), last(bounds); ndrange = length(mask))
+    _zero_cnveg_flux_arrays!(nf)   # full per-step reset (ann* accumulators kept)
     return nothing
 end
 

@@ -112,10 +112,13 @@ end
             br_root_local = br_root_local * acc
         end
 
-        # Leaf maintenance respiration
+        # Leaf maintenance respiration. Guard the sunlit/shaded terms against
+        # NaN*0: at night the sunlit lmr is unset (NaN) while laisun==0, so add a
+        # term only when its leaf area is positive (matches the no-leaf-area = no
+        # respiration limit; avoids NaN poisoning the column allocation).
         if frac_veg_nosno[p] == 1
-            leaf_mr[p] = lmrsun[p] * laisun[p] * T(12.011e-6) +
-                         lmrsha[p] * laisha[p] * T(12.011e-6)
+            leaf_mr[p] = (laisun[p] > zero(T) ? lmrsun[p] * laisun[p] * T(12.011e-6) : zero(T)) +
+                         (laisha[p] > zero(T) ? lmrsha[p] * laisha[p] * T(12.011e-6) : zero(T))
         else
             leaf_mr[p] = zero(T)
         end

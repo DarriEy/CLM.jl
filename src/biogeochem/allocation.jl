@@ -182,17 +182,21 @@ end
         # Convert psn from umol/m2/s -> gC/m2/s
         # The input psn (psnsun and psnsha) are expressed per unit LAI
         # in the sunlit and shaded canopy. Scale by laisun and laisha.
-        psnsun_to_cpool[p]   = psnsun_patch[p] * laisun_patch[p] * T(12.011e-6)
-        psnshade_to_cpool[p] = psnsha_patch[p] * laisha_patch[p] * T(12.011e-6)
+        # Guard zero-leaf-area patches: photosynthesis is computed only on the
+        # exposed-veg filter, so non-exposed patches (e.g. bare ground, ivt=0)
+        # retain a NaN psn here; with laisun/laisha==0 they contribute no GPP, so
+        # force 0 rather than NaN*0 (which would poison the column allocation).
+        psnsun_to_cpool[p]   = laisun_patch[p] > zero(T) ? psnsun_patch[p] * laisun_patch[p] * T(12.011e-6) : zero(T)
+        psnshade_to_cpool[p] = laisha_patch[p] > zero(T) ? psnsha_patch[p] * laisha_patch[p] * T(12.011e-6) : zero(T)
 
         if do_c13
-            c13_psnsun_to_cpool[p]   = c13_psnsun_patch[p] * laisun_patch[p] * T(12.011e-6)
-            c13_psnshade_to_cpool[p] = c13_psnsha_patch[p] * laisha_patch[p] * T(12.011e-6)
+            c13_psnsun_to_cpool[p]   = laisun_patch[p] > zero(T) ? c13_psnsun_patch[p] * laisun_patch[p] * T(12.011e-6) : zero(T)
+            c13_psnshade_to_cpool[p] = laisha_patch[p] > zero(T) ? c13_psnsha_patch[p] * laisha_patch[p] * T(12.011e-6) : zero(T)
         end
 
         if do_c14
-            c14_psnsun_to_cpool[p]   = c14_psnsun_patch[p] * laisun_patch[p] * T(12.011e-6)
-            c14_psnshade_to_cpool[p] = c14_psnsha_patch[p] * laisha_patch[p] * T(12.011e-6)
+            c14_psnsun_to_cpool[p]   = laisun_patch[p] > zero(T) ? c14_psnsun_patch[p] * laisun_patch[p] * T(12.011e-6) : zero(T)
+            c14_psnshade_to_cpool[p] = laisha_patch[p] > zero(T) ? c14_psnsha_patch[p] * laisha_patch[p] * T(12.011e-6) : zero(T)
         end
 
         gpp = psnsun_to_cpool[p] + psnshade_to_cpool[p]

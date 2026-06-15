@@ -442,6 +442,15 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         dzsoi_decomp::Union{Vector{<:Real}, Nothing} = nothing,
         zsoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
         zisoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
+        # Vegetation-flux inputs (threaded to cn_driver_no_leaching! for the veg-CN
+        # flux chain: maintenance respiration, gpp/allocation, …).
+        patch::Union{PatchData, Nothing} = nothing,
+        pftcon_main::Union{Any, Nothing} = nothing,
+        crop::Union{CropData, Nothing} = nothing,
+        photosyns::Union{PhotosynthesisData, Nothing} = nothing,
+        canopystate::Union{CanopyStateData, Nothing} = nothing,
+        soilstate::Union{SoilStateData, Nothing} = nothing,
+        temperature::Union{TemperatureData, Nothing} = nothing,
         mask_actfirec::BitVector = falses(length(bounds_col)),
         mask_actfirep::BitVector = falses(length(bounds_patch)))
 
@@ -478,6 +487,7 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         cnveg_cf=veg.cnveg_carbonflux_inst,
         cnveg_ns=veg.cnveg_nitrogenstate_inst,
         cnveg_nf=veg.cnveg_nitrogenflux_inst,
+        cnveg_state=veg.cnveg_state_inst,
         soilbgc_cs=soilbgc_cs,
         soilbgc_cf=soilbgc_cf,
         soilbgc_ns=soilbgc_ns,
@@ -499,6 +509,13 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         dzsoi_decomp=dzsoi_decomp,
         zsoi_vals=zsoi_vals,
         zisoi_vals=zisoi_vals,
+        patch=patch,
+        pftcon_main=pftcon_main,
+        crop=crop,
+        photosyns=photosyns,
+        canopystate=canopystate,
+        soilstate=soilstate,
+        temperature=temperature,
         mask_actfirec=mask_actfirec,
         mask_actfirep=mask_actfirep)
 

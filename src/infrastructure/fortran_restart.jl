@@ -65,6 +65,28 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
         end
     end
 
+    # Helper: inject a named per-pool vertical var. The Fortran restart writes the
+    # decomposition pools as SEPARATE 2D vars (column, levgrnd) — litr1c_vr,
+    # litr2c_vr, ... cwdc_vr — whereas CLM.jl stores one 3D array
+    # decomp_*pools_vr_col[col, lev, pool]. This routes one named var into pool
+    # slot `pidx`. NCDatasets returns (lev, column), so data[j,1] is level j.
+    function set_col_pool_vr!(name, target3d, pidx)
+        haskey(ds, name) || return
+        (ndims(target3d) == 3 && size(target3d, 1) >= 1 &&
+         size(target3d, 2) >= 1 && size(target3d, 3) >= pidx) || return
+        raw = ds[name][:]; data = [ismissing(v) ? NaN : Float64(v) for v in raw]
+        try
+            nlev = min(size(data, 1), size(target3d, 2))
+            for j in 1:nlev
+                target3d[1, j, pidx] = ndims(data) == 1 ? data[j] : data[j, 1]
+            end
+            n_ok += 1
+        catch e
+            n_fail += 1
+            @debug "Skip $name: $e"
+        end
+    end
+
     # Helper: inject 1D patch variable (handling 3→4 patch mapping)
     function set_patch_1d!(name, target_array)
         haskey(ds, name) || return
@@ -312,6 +334,67 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
             h2osno_total += ws.h2osoi_liq_col[1, j] + ws.h2osoi_ice_col[1, j]
         end
         ws.h2osno_no_layers_col[1] = h2osno_total
+    end
+
+    # =====================================================================
+    # CN / BGC POOLS (use_cn). Only populated when the inst was built with
+    # use_cn=true; on an SP inst the target arrays are empty (size 0) and the
+    # guards below skip the whole block (no spurious n_fail).
+    # =====================================================================
+    if hasproperty(inst, :bgc_vegetation) &&
+       hasproperty(inst.bgc_vegetation, :cnveg_carbonstate_inst)
+        ccs = inst.bgc_vegetation.cnveg_carbonstate_inst
+        cns = inst.bgc_vegetation.cnveg_nitrogenstate_inst
+        if length(getfield(ccs, :leafc_patch)) > 0
+            # --- vegetation carbon pools (gC/m2, per pft). Dump var name == Julia
+            #     field stem; field = <stem>_patch.
+            for stem in ("leafc","leafc_storage","leafc_xfer",
+                         "frootc","frootc_storage","frootc_xfer",
+                         "livestemc","livestemc_storage","livestemc_xfer",
+                         "deadstemc","deadstemc_storage","deadstemc_xfer",
+                         "livecrootc","livecrootc_storage","livecrootc_xfer",
+                         "deadcrootc","deadcrootc_storage","deadcrootc_xfer",
+                         "gresp_storage","gresp_xfer","cpool","xsmrpool")
+                fld = Symbol(stem * "_patch")
+                hasproperty(ccs, fld) && set_patch_1d!(stem, getfield(ccs, fld))
+            end
+            hasproperty(ccs, :ctrunc_patch) && set_patch_1d!("pft_ctrunc", ccs.ctrunc_patch)
+            # --- vegetation nitrogen pools (gN/m2, per pft)
+            for stem in ("leafn","leafn_storage","leafn_xfer",
+                         "frootn","frootn_storage","frootn_xfer",
+                         "livestemn","livestemn_storage","livestemn_xfer",
+                         "deadstemn","deadstemn_storage","deadstemn_xfer",
+                         "livecrootn","livecrootn_storage","livecrootn_xfer",
+                         "deadcrootn","deadcrootn_storage","deadcrootn_xfer",
+                         "retransn","npool")
+                fld = Symbol(stem * "_patch")
+                hasproperty(cns, fld) && set_patch_1d!(stem, getfield(cns, fld))
+            end
+            hasproperty(cns, :ntrunc_patch) && set_patch_1d!("pft_ntrunc", cns.ntrunc_patch)
+        end
+    end
+
+    # Soil decomposition pools (vertically resolved). Pool index order (CNMode):
+    # 1 litr1, 2 litr2, 3 litr3, 4 soil1, 5 soil2, 6 soil3, 7 cwd.
+    if hasproperty(inst, :soilbiogeochem_carbonstate)
+        scs = inst.soilbiogeochem_carbonstate
+        sns = inst.soilbiogeochem_nitrogenstate
+        cpools = ("litr1c_vr"=>1,"litr2c_vr"=>2,"litr3c_vr"=>3,
+                  "soil1c_vr"=>4,"soil2c_vr"=>5,"soil3c_vr"=>6,"cwdc_vr"=>7)
+        for (vn, pidx) in cpools
+            set_col_pool_vr!(vn, scs.decomp_cpools_vr_col, pidx)
+        end
+        npools = ("litr1n_vr"=>1,"litr2n_vr"=>2,"litr3n_vr"=>3,
+                  "soil1n_vr"=>4,"soil2n_vr"=>5,"soil3n_vr"=>6,"cwdn_vr"=>7)
+        for (vn, pidx) in npools
+            set_col_pool_vr!(vn, sns.decomp_npools_vr_col, pidx)
+        end
+        # mineral N + truncation sinks (column, levgrnd) → matrices [nc, nlevdecomp]
+        size(sns.sminn_vr_col, 1) > 0    && set_col_2d!("sminn_vr",    sns.sminn_vr_col)
+        size(sns.smin_no3_vr_col, 1) > 0 && set_col_2d!("smin_no3_vr", sns.smin_no3_vr_col)
+        size(sns.smin_nh4_vr_col, 1) > 0 && set_col_2d!("smin_nh4_vr", sns.smin_nh4_vr_col)
+        size(sns.ntrunc_vr_col, 1) > 0   && set_col_2d!("ntrunc_vr",   sns.ntrunc_vr_col)
+        size(scs.ctrunc_vr_col, 1) > 0   && set_col_2d!("ctrunc_vr",   scs.ctrunc_vr_col)
     end
 
     close(ds)
