@@ -1340,6 +1340,7 @@ function canopy_fluxes_core!(
         use_lch4        ::Bool = false,
         use_c13         ::Bool = false,
         use_hydrstress  ::Bool = false,
+        phs_froot_carbon::AbstractVector{<:Real} = Float64[],  # PHS: CN frootc (gC/m2)
         use_fates       ::Bool = false,
         use_luna        ::Bool = false,
         z0param_method  ::String = "ZengWang2007",
@@ -1508,6 +1509,35 @@ function canopy_fluxes_core!(
     #  The full calc_root_moist_stress call would go here.)
     # In a full implementation, this would call calc_root_moist_stress.
 
+    # --- PHS (use_hydrstress): soil matric potential + soil-to-root conductance ---
+    # Normally smp_l is filled by HydrologyNoDrainage (which runs after canopy_fluxes),
+    # so recompute it here from the injected soil water; then call PHS Pass 1 to fill
+    # k_soil_root, which the PHS photosynthesis (calcstress!/vegwp solve) needs.
+    if use_hydrstress
+        _nlevsoi = varpar.nlevsoi; _nlevsno = varpar.nlevsno
+        _smp_l = soilstate.smp_l_col; _watsat = soilstate.watsat_col
+        _sucsat = soilstate.sucsat_col; _bsw = soilstate.bsw_col
+        _smpmin = soilstate.smpmin_col; _h2osoi_vol = waterstatebulk.ws.h2osoi_vol_col
+        _hksat = soilstate.hksat_col; _hk_l = soilstate.hk_l_col
+        @inbounds for c in bounds_col, j in 1:_nlevsoi
+            s_node = max(min(_h2osoi_vol[c, j] / _watsat[c, j], one(FT)), FT(0.01))
+            _smp_l[c, j] = max(_smpmin[c], -_sucsat[c, j] * s_node^(-_bsw[c, j]))
+            # Clapp-Hornberger unsaturated conductivity (also filled by HydrologyNoDrainage,
+            # which runs after canopy_fluxes, so recompute here for PHS).
+            _hk_l[c, j] = _hksat[c, j] * s_node^(FT(2.0) * _bsw[c, j] + FT(3.0))
+        end
+        _froot_c = isempty(phs_froot_carbon) ? zeros(FT, length(bounds_patch)) : phs_froot_carbon
+        psn_phs_pass1_update!(photosyns, mask_exposedvegp, patch_data.column,
+            patch_data.itype .+ 1, _froot_c, soilstate.rootfr_patch,
+            view(col_data.dz, :, _nlevsno+1:_nlevsno+_nlevsoi),
+            canopystate.tsai_patch, canopystate.tlai_patch,
+            pftcon.froot_leaf, pftcon.root_radius, pftcon.root_density,
+            soilstate.hksat_col, soilstate.hk_l_col, _smp_l,
+            view(col_data.z, :, _nlevsno+1:_nlevsno+_nlevsoi),
+            soilstate.k_soil_root_patch, soilstate.root_conductance_patch,
+            soilstate.soil_conductance_patch, C_TO_B, 0.25, _nlevsoi, bounds_patch)
+    end
+
     # --- Modify aerodynamic parameters for sparse/dense canopy (X. Zeng) ---
     # Resolve the method String to an Int code on the host (so no String compare or
     # error() runs in the kernel); validate here.
@@ -1649,6 +1679,40 @@ function canopy_fluxes_core!(
             # PFT index vector (+1 for 0-based Fortran → 1-based Julia)
             ivt_vec = patch_data.itype .+ 1
 
+          if use_hydrstress
+            # --- PHS photosynthesis (plant hydraulic stress) ---
+            _nsno = varpar.nlevsno; _nsoi = varpar.nlevsoi
+            _frho_host = zeros(FT, endp)
+            for p in bounds_patch
+                mask_ev_host[p] || continue
+                _frho_host[p] = (forc_rho_col isa Array ? forc_rho_col : Array(forc_rho_col))[col_host[p]]
+            end
+            forc_rho_patch = forc_rho_col isa Array ? _frho_host :
+                             copyto!(similar(forc_rho_col, FT, endp), _frho_host)
+            _froot_c2 = isempty(phs_froot_carbon) ? zeros(FT, endp) : phs_froot_carbon
+            photosynthesis_hydrstress!(photosyns,
+                svpts, eah, o2_arr, co2_arr, rb,
+                energyflux.btran_patch, dayl_factor, leafn_patch, qsatl, frictionvel.qaf_patch,
+                forc_pbot_patch, forc_rho_patch, temperature.t_veg_patch, t10_patch, temperature.thm_patch,
+                nrad_patch, tlai_z_patch, canopystate.tlai_patch, canopystate.tsai_patch,
+                parsun_z_patch, parsha_z_patch, laisun_z_patch, laisha_z_patch,
+                vcmaxcint_sun_patch, vcmaxcint_sha_patch,
+                o3coefv_patch, o3coefg_patch, o3coefv_patch, o3coefg_patch,
+                c3psn_pft, leafcn_pft, flnr_pft, fnitr_pft, slatop_pft,
+                mbbopt_pft, medlynintercept_pft, medlynslope_pft,
+                pftcon.froot_leaf, pftcon.root_radius, pftcon.root_density,
+                crop_pft, ivt_vec, patch_data.column, mask_exposedvegp, bounds_patch,
+                _froot_c2, _froot_c2, soilstate.k_soil_root_patch,
+                soilstate.root_conductance_patch, soilstate.soil_conductance_patch,
+                soilstate.rootfr_patch,
+                col_data.dz[:, _nsno+1:_nsno+_nsoi], col_data.z[:, _nsno+1:_nsno+_nsoi],
+                soilstate.hk_l_col, soilstate.hksat_col, soilstate.smp_l_col,
+                canopystate.vegwp_patch, canopystate.vegwp_ln_patch,
+                canopystate.laisun_patch, canopystate.laisha_patch,
+                canopystate.elai_patch, canopystate.esai_patch,
+                canopystate.htop_patch, waterdiagbulk.fdry_patch, waterfluxbulk.wf.qflx_tran_veg_patch;
+                nlevcan=NLEVCAN, nlevsoi=_nsoi, use_cn=use_cn)
+          else
             # Sunlit leaves
             photosynthesis!(photosyns,
                 svpts, eah, o2_arr, co2_arr, rb,
@@ -1684,6 +1748,7 @@ function canopy_fluxes_core!(
                 use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
                 leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft,
                 overrides=overrides)
+          end  # use_hydrstress
 
         end
 
