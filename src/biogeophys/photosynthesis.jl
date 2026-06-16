@@ -1355,7 +1355,7 @@ end
 # scratch matrices; lmr_z is the phase-selected ps field.
 @kernel function _psn_pass2_kernel!(ps, kn, jmax_z_local, @Const(mask_patch),
         @Const(ivt), @Const(slatop_pft), @Const(leafcn_pft), @Const(flnr_pft),
-        @Const(fnitr_pft), @Const(dayl_factor), @Const(t10), @Const(t_veg),
+        @Const(fnitr_pft), @Const(lmr_intercept_atkin), @Const(dayl_factor), @Const(t10), @Const(t_veg),
         @Const(btran), @Const(tlai_z), @Const(par_z_in), @Const(vcmaxcint),
         @Const(nrad), prm, vcmax25_scale, jmax25top_sf_val, leaf_mr_vcm,
         use_cn::Bool, light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
@@ -1393,7 +1393,11 @@ end
                 lmr25top = T(2.525e-6) * (T(1.5)^((T(25.0) - T(20.0)) / T(10.0)))
                 lmr25top = lmr25top * lnc_p / T(12.0e-06)
             else
-                lmr25top = zero(T)
+                # Atkin2015 (leafresp_method=2): PhotosynthesisMod.F90:1678
+                # lmr25top = lmr_intercept_atkin(ivt) + lnc*0.2061 - 0.0402*(t10-tfrz), lnc>0.
+                lmr25top = lnc_p > zero(T) ?
+                    lmr_intercept_atkin[ivt_p] + lnc_p * T(0.2061) - T(0.0402) * (t10[p] - T(TFRZ)) :
+                    zero(T)
             end
         else
             if c3flag_p
@@ -1475,10 +1479,14 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
            vcmaxha = T(params_inst.vcmaxha), jmaxha = T(params_inst.jmaxha),
            tpuha = T(params_inst.tpuha))
     jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
+    # Atkin2015 leaf-resp base rate: per-PFT param, only indexed when
+    # leafresp_method≠Ryan. Match slatop_pft's backend (host on CPU, device on GPU).
+    _lmratk = T.(params_inst.lmr_intercept_atkin)
+    lmr_intercept_atkin = slatop_pft isa Array ? _lmratk : convert(typeof(slatop_pft), _lmratk)
     dv = _psn_dv(ps)
     be = _kernel_backend(t_veg)
     _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-        leafcn_pft, flnr_pft, fnitr_pft, dayl_factor, t10, t_veg, btran, tlai_z,
+        leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
         par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
         T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
         ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991;

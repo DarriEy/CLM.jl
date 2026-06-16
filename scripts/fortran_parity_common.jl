@@ -92,6 +92,13 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         # the wrong amount (over-tapping the deep no3).
         inst.cn_shared_params.use_fun = true
         inst.cn_shared_params.use_flexiblecn = true   # → FlexibleCN npool-fraction N allocation
+        # Bow case calibrates the CNMResp root base rate via &cnmresp_inparm in
+        # lnd_in (br_root=0.83e-6, vs the CLM default br=2.525e-6). Without this the
+        # fine-root + livecroot maintenance respiration is ~3x too big.
+        inst.cn_shared_params.br_root = 0.83e-6
+        # Fortran lnd_in leafresp_method=2 (Atkin2015); the Julia default is Ryan1991,
+        # which gives leaf maintenance respiration (lmr) ~3x too big.
+        inst.photosyns.leafresp_method = CLM.LEAFRESP_MTD_ATKIN2015
     end
 
     # atm2lnd downscaling to match Fortran lnd_in defaults

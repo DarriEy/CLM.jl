@@ -220,7 +220,7 @@ function cn_driver_no_leaching!(
     if num_bgc_vegp > 0 && cn_shared_params !== nothing && pftcon_main !== nothing &&
        patch !== nothing && canopystate !== nothing && soilstate !== nothing &&
        temperature !== nothing && photosyns !== nothing
-        _mrp = MaintRespParams(); maint_resp_read_params!(_mrp)
+        _mrp = MaintRespParams(); maint_resp_read_params!(_mrp; br_root = cn_shared_params.br_root)
         _pftmr = PftConMaintResp{Float64}(woody = Float64.(pftcon_main.woody))
         cn_mresp!(mask_bgc_soilc, mask_bgc_vegp, bounds_col, bounds_patch,
                   _mrp, cn_shared_params, _pftmr,

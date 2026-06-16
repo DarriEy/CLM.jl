@@ -15,6 +15,7 @@ Ported from `CNParamsShareType` and module-level variables in
 Base.@kwdef mutable struct CNSharedParamsData{FT<:Real}
     # --- Parameters from CNParamsShareType ---
     Q10                              ::FT = 1.5     # temperature dependence
+    br_root                          ::FT = SPVAL   # CNMResp root maint-resp base rate (gC/gN/s); namelist cnmresp_inparm br_root, SPVAL→br
     minpsi                           ::FT = -10.0   # minimum soil water potential for heterotrophic resp (MPa)
     maxpsi                           ::FT = -0.1    # maximum soil water potential for heterotrophic resp (MPa)
     rf_cwdl2                         ::FT = 0.0     # respiration fraction in CWD to litter2 transition (frac)
