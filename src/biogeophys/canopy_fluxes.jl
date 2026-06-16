@@ -1242,6 +1242,7 @@ function canopy_fluxes!(
         vcmaxcint_sun_patch=Float64[], vcmaxcint_sha_patch=Float64[],
         parsun_z_patch=Matrix{Float64}(undef,0,0), parsha_z_patch=Matrix{Float64}(undef,0,0),
         laisun_z_patch=Matrix{Float64}(undef,0,0), laisha_z_patch=Matrix{Float64}(undef,0,0),
+        phs_froot_carbon=Float64[],
         leaf_mr_vcm=0.015, overrides=CalibrationOverrides())
     return canopy_fluxes_core!(
         canopystate, energyflux, frictionvel, temperature, solarabs, soilstate,
@@ -1258,7 +1259,7 @@ function canopy_fluxes!(
         dbh_pft, fbw_pft, nstem_pft, rstem_per_dbh_pft, wood_density_pft,
         is_tree_pft, is_shrub_pft, medlynintercept_pft, medlynslope_pft, crop_pft,
         z0v_Cr_pft, z0v_Cs_pft, z0v_c_pft, z0v_cw_pft, z0v_LAImax_pft,
-        use_cn, use_lch4, use_c13, use_hydrstress, use_fates, use_luna,
+        use_cn, use_lch4, use_c13, use_hydrstress, phs_froot_carbon, use_fates, use_luna,
         z0param_method, grnd_ch4_cond_patch, forc_pc13o2_grc, leaf_mr_vcm)
 end
 
@@ -1681,19 +1682,17 @@ function canopy_fluxes_core!(
 
           if use_hydrstress
             # --- PHS photosynthesis (plant hydraulic stress) ---
+            # forc_rho is COLUMN-indexed inside the PHS solver (forc_rho[c]); pass
+            # the column array, NOT a per-patch copy. A patch-indexed array would be
+            # read at the wrong slot (c = column[p]) — for multi-patch columns the
+            # tree/grass patch grabs another patch's slot (zero for bare ground),
+            # zeroing efpot and collapsing the transpiration demand.
             _nsno = varpar.nlevsno; _nsoi = varpar.nlevsoi
-            _frho_host = zeros(FT, endp)
-            for p in bounds_patch
-                mask_ev_host[p] || continue
-                _frho_host[p] = (forc_rho_col isa Array ? forc_rho_col : Array(forc_rho_col))[col_host[p]]
-            end
-            forc_rho_patch = forc_rho_col isa Array ? _frho_host :
-                             copyto!(similar(forc_rho_col, FT, endp), _frho_host)
             _froot_c2 = isempty(phs_froot_carbon) ? zeros(FT, endp) : phs_froot_carbon
             photosynthesis_hydrstress!(photosyns,
                 svpts, eah, o2_arr, co2_arr, rb,
                 energyflux.btran_patch, dayl_factor, leafn_patch, qsatl, frictionvel.qaf_patch,
-                forc_pbot_patch, forc_rho_patch, temperature.t_veg_patch, t10_patch, temperature.thm_patch,
+                forc_pbot_patch, forc_rho_col, temperature.t_veg_patch, t10_patch, temperature.thm_patch,
                 nrad_patch, tlai_z_patch, canopystate.tlai_patch, canopystate.tsai_patch,
                 parsun_z_patch, parsha_z_patch, laisun_z_patch, laisha_z_patch,
                 vcmaxcint_sun_patch, vcmaxcint_sha_patch,

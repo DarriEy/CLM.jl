@@ -237,11 +237,27 @@ against the Fortran per-boundary dumps.
 """
 function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DUMPDIR,
                               step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761),
-                              forcing_file::String=FFORCING)
+                              forcing_file::String=FFORCING, use_hydrstress::Bool=false)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn)
-    inject_dump!(inst, bounds, joinpath(dumpdir, "pdump_before_step_n$(nstep).nc"))
+    dumpfile = joinpath(dumpdir, "pdump_before_step_n$(nstep).nc")
+    inject_dump!(inst, bounds, dumpfile)
 
-    config  = CLM.CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=false)
+    # PHS (plant hydraulic stress): seed vegwp from the Fortran dump so the vegwp
+    # Newton solve starts finite. dump vegwp is (vegwcs=4, pft=3) → Julia [patch,4].
+    if use_hydrstress
+        ds = NCDataset(dumpfile, "r")
+        if haskey(ds, "vegwp")
+            vw = ds["vegwp"][:, :]   # (vegwcs, pft_dump)
+            npd = size(vw, 2)
+            for pd in 1:npd, seg in 1:4
+                inst.canopystate.vegwp_patch[pd, seg] = Float64(vw[seg, pd])
+            end
+        end
+        close(ds)
+    end
+
+    config  = CLM.CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=false,
+                                  use_hydrstress=use_hydrstress)
     filt_ia = CLM.clump_filter_inactive_and_active
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 

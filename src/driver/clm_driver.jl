@@ -94,6 +94,7 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     use_soil_moisture_streams::Bool
     use_lai_streams::Bool
     n_drydep::Int
+    use_hydrstress::Bool   # plant hydraulic stress (PHS) photosynthesis path
 end
 
 # Backward-compatible property accessors so existing code like config.use_cn still works
@@ -158,7 +159,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           irrigate::Bool=false, use_noio::Bool=false,
                           use_aquifer_layer::Bool=true,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
-                          n_drydep::Int=0,
+                          n_drydep::Int=0, use_hydrstress::Bool=false,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
                           ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
                           i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
@@ -176,7 +177,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
         mode = SPMode()
     end
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
-                    use_soil_moisture_streams, use_lai_streams, n_drydep)
+                    use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress)
 end
 
 # ---------------------------------------------------------------------------
@@ -881,9 +882,26 @@ function clm_drv_core!(config::CLMDriverConfig,
         downreg_patch = _zlike(np)
         leafn_patch = _zlike(np)
     end
+    # PHS (plant hydraulic stress) needs fine-root carbon for the soil-to-root
+    # conductance. Empty in the non-PHS path → the canopy core falls back to zeros.
+    phs_froot_c = (config.use_hydrstress && config.use_cn) ?
+        get_froot_carbon_patch(inst.bgc_vegetation, bc_patch) : FT[]
+    # Calibrated stomatal/crop params come from pftcon only in CN mode; the SP/AD
+    # path keeps the canopy-core defaults (medlynslope=6.0) so its validated energy
+    # balance is untouched.
+    _medint_pft = config.use_cn ? _onbk(pftcon.medlynintercept) : fill(100.0, MXPFT + 1)
+    _medslp_pft = config.use_cn ? _onbk(pftcon.medlynslope)     : fill(6.0, MXPFT + 1)
+    _crop_pft   = config.use_cn ? _onbk(pftcon.crop)            : Float64[]
     # Positional call into canopy_fluxes_core! (no kwarg NamedTuple) so Enzyme
     # reverse-mode can compile the differentiated driver. The trailing args after
-    # `overrides` (dbh_pft/.../leaf_mr_vcm) keep their core defaults.
+    # `overrides` are the "default-only back group". We thread the ones that affect
+    # the stomatal/photosynthesis solve — the calibrated Medlyn params, crop flags,
+    # and config.use_cn (which selects the CN leaf-respiration / GPP path). Without
+    # this the canopy ran with medlynslope=6.0 (Bow-calibrated 11.15) and use_cn=false
+    # even in a CN run. Passing them positionally keeps the differentiated path
+    # compilable. The woody-structure (dbh/nstem/is_tree/...) and z0v params keep
+    # their core defaults — they only matter under use_biomass_heat_storage (off) or
+    # the non-default z0param_method.
     canopy_fluxes_core!(cs, ef, fv, temp, sa, ss, wfb, wsb, wdb, ps,
                    pch, col, grc,
                    filt.exposedvegp, bc_patch, bc_col,
@@ -905,7 +923,17 @@ function clm_drv_core!(config::CLMDriverConfig,
                    _onbk(pftcon.dleaf), _onbk(pftcon.slatop), _onbk(pftcon.leafcn),
                    _onbk(pftcon.flnr), _onbk(pftcon.fnitr), _onbk(pftcon.mbbopt),
                    _onbk(pftcon.c3psn), _onbk(pftcon.woody),
-                   inst.overrides)
+                   inst.overrides,
+                   # (3) default-only back group (positional): woody-structure +
+                   # z0v keep core defaults; Medlyn/crop/use_cn are threaded.
+                   fill(0.1, MXPFT + 1), fill(0.1, MXPFT + 1), fill(1.0, MXPFT + 1),
+                   fill(0.0, MXPFT + 1), fill(500.0, MXPFT + 1),
+                   fill(false, MXPFT + 1), fill(false, MXPFT + 1),
+                   _medint_pft, _medslp_pft, _crop_pft,
+                   fill(0.35, MXPFT + 1), fill(0.003, MXPFT + 1), fill(0.25, MXPFT + 1),
+                   fill(2.0, MXPFT + 1), fill(8.0, MXPFT + 1),
+                   config.use_cn,
+                   false, false, config.use_hydrstress, phs_froot_c)
 
 
     # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)
