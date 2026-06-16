@@ -1527,11 +1527,17 @@ function canopy_fluxes_core!(
         _h2osoi_liqvol = waterdiagbulk.h2osoi_liqvol_col
         _hksat = soilstate.hksat_col; _hk_l = soilstate.hk_l_col
         @inbounds for c in bounds_col, j in 1:_nlevsoi
+            # smp_l uses the LAYER liquid s_node (SoilWaterMovementMod.F90:740-746).
             s_node = max(min(_h2osoi_liqvol[c, _nlevsno + j] / _watsat[c, j], one(FT)), FT(0.01))
             _smp_l[c, j] = max(_smpmin[c], -_sucsat[c, j] * s_node^(-_bsw[c, j]))
-            # Clapp-Hornberger unsaturated conductivity (also filled by HydrologyNoDrainage,
-            # which runs after canopy_fluxes, so recompute here for PHS).
-            _hk_l[c, j] = _hksat[c, j] * s_node^(FT(2.0) * _bsw[c, j] + FT(3.0))
+            # hk_l (Clapp-Hornberger) uses the INTERFACE-AVERAGE saturation between
+            # layers j and j+1 (SoilWaterMovementMod.F90:721-728), NOT the layer's own
+            # s_node — for a wetter-with-depth profile this makes hk_l rise with depth.
+            jp1 = min(_nlevsoi, j + 1)
+            s1 = (_h2osoi_liqvol[c, _nlevsno + j] + _h2osoi_liqvol[c, _nlevsno + jp1]) /
+                 (_watsat[c, j] + _watsat[c, jp1])
+            s1 = min(one(FT), s1)
+            _hk_l[c, j] = _hksat[c, j] * s1^(FT(2.0) * _bsw[c, j] + FT(3.0))
         end
         _froot_c = isempty(phs_froot_carbon) ? zeros(FT, length(bounds_patch)) : phs_froot_carbon
         psn_phs_pass1_update!(photosyns, mask_exposedvegp, patch_data.column,

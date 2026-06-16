@@ -109,7 +109,28 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             watsat_val = (1.0 - om_frac) * watsat_mineral + om_frac * watsat_organic
             bsw_val = (1.0 - om_frac) * bsw_mineral + om_frac * bsw_organic
             sucsat_val = (1.0 - om_frac) * sucsat_mineral + om_frac * sucsat_organic
-            hksat_val = (1.0 - om_frac) * xksat_mineral + om_frac * xksat_organic
+            # hksat is NOT a simple linear blend — organic matter only conducts above
+            # a percolation threshold (Lawrence & Slater 2008), so below it the
+            # mineral/organic conductances add in SERIES (much lower hksat than the
+            # parallel/linear blend). Matches SoilStateInitTimeConstMod.F90:546-579.
+            # (A linear blend over-estimated surface hksat ~6x → inflated the PHS
+            # soil-to-root conductance → grass under-stress.)
+            om_hksat = xksat_organic
+            pcalpha = 0.5; pcbeta = 0.139
+            if om_frac > pcalpha
+                perc_norm = (1.0 - pcalpha)^(-pcbeta)
+                perc_frac = perc_norm * (om_frac - pcalpha)^pcbeta
+            else
+                perc_frac = 0.0
+            end
+            uncon_frac = (1.0 - om_frac) + (1.0 - perc_frac) * om_frac
+            if uncon_frac > 0.0
+                uncon_hksat = uncon_frac / ((1.0 - om_frac) / xksat_mineral +
+                              ((1.0 - perc_frac) * om_frac) / om_hksat)
+            else
+                uncon_hksat = 0.0
+            end
+            hksat_val = uncon_frac * uncon_hksat + (perc_frac * om_frac) * om_hksat
 
             ss.watsat_col[c, j] = watsat_val
             ss.bsw_col[c, j] = bsw_val
