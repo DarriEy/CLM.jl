@@ -105,6 +105,9 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         # Fortran lnd_in leafresp_method=2 (Atkin2015); the Julia default is Ryan1991,
         # which gives leaf maintenance respiration (lmr) ~3x too big.
         inst.photosyns.leafresp_method = CLM.LEAFRESP_MTD_ATKIN2015
+        # Bow lnd_in light_inhibit=.true. (Lloyd 2010 / Reich): daytime leaf
+        # respiration ×0.67. Julia defaults false → lmr ~1.5x too high.
+        inst.photosyns.light_inhibit = true
     end
 
     # atm2lnd downscaling to match Fortran lnd_in defaults
