@@ -210,13 +210,17 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
         end
     end
 
-    # CO2 / O2 defaults
+    # CO2 / O2 defaults. CLM forms the partial pressures from the molar fractions
+    # times the ACTUAL surface pressure (forc_pco2 = co2_ppmv*1e-6*pbot,
+    # forc_po2 = 0.209*pbot), so they must scale with pbot — a fixed sea-level value
+    # over-estimates both at high elevation (Bow pbot≈79 kPa → 40 Pa would be 506 ppm,
+    # vs Fortran's 367 ppm = 29 Pa). co2_ppmv = 367 matches the I2000 (year-2000) CO2.
     for g in 1:ng
         if a2l.forc_pco2_grc[g] <= 0.0
-            a2l.forc_pco2_grc[g] = 40.0  # ~400 ppm at sea level
+            a2l.forc_pco2_grc[g] = 367.0e-6 * a2l.forc_pbot_not_downscaled_grc[g]
         end
         if a2l.forc_po2_grc[g] <= 0.0
-            a2l.forc_po2_grc[g] = 20900.0  # ~20.9% of 100 kPa
+            a2l.forc_po2_grc[g] = 0.209 * a2l.forc_pbot_not_downscaled_grc[g]
         end
     end
 
