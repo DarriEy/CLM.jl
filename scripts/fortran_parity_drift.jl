@@ -22,7 +22,7 @@
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const DRIFT_SUM    = joinpath(dirname(DUMPDIR), "bgc_ref_summer")
+const DRIFT_SUM    = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
 const DRIFT_N0     = 1757845          # first step with a dump
 const DRIFT_NSTEPS = 28               # contiguous dumps available
 const DRIFT_BASE   = 1753153          # nstep -> date base (DateTime(2002,1,1)+Hour(n-base))
@@ -43,9 +43,26 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
     start_date = DateTime(2002, 1, 1) + Hour(n0 - DRIFT_BASE)
     ffile = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
     (inst, bounds, filt, tm) = build_bow_inst(; dtime = 3600, start_date = start_date, use_cn = true)
-    inject_dump!(inst, bounds, joinpath(sumdir, "pdump_before_step_n$(n0).nc"))
+    # PHS+LUNA (Bow lnd_in): allocate LUNA vcmax/jmax fields so inject fills them,
+    # then seed vegwp from the IC dump so the first PHS Newton solve starts finite.
+    if isempty(inst.photosyns.vcmx25_z_patch)
+        inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)
+        inst.photosyns.jmx25_z_patch  = fill(60.0, bounds.endp, CLM.NLEVCAN)
+    end
+    icdump = joinpath(sumdir, "pdump_before_step_n$(n0).nc")
+    inject_dump!(inst, bounds, icdump)
+    let ds = NCDataset(icdump, "r")
+        if haskey(ds, "vegwp")
+            vw = ds["vegwp"][:, :]
+            for pd in 1:size(vw, 2), seg in 1:4
+                inst.canopystate.vegwp_patch[pd, seg] = Float64(vw[seg, pd])
+            end
+        end
+        close(ds)
+    end
 
-    config = CLM.CLMDriverConfig(use_cn = true, use_aquifer_layer = false)
+    config = CLM.CLMDriverConfig(use_cn = true, use_aquifer_layer = false,
+                                 use_hydrstress = true, use_luna = true)
     filt_ia = CLM.clump_filter_inactive_and_active
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
     fr = CLM.ForcingReader(); CLM.forcing_reader_init!(fr, ffile)

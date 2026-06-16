@@ -23,6 +23,7 @@ function main()
         # maps to forcing year 2002. Use clmforc.2002 + a 2002 step date so the
         # teacher-forced step sees the SAME atm forcing the Fortran run did.
         inst, bounds = run_one_parity_step!(NSTEP; use_cn=true, dumpdir=BGC_DUMPDIR,
+                                            use_hydrstress=true, use_luna=true,
                                             step_date=DateTime(2002,1,1)+Hour(1757852-1753153),
                                             forcing_file=replace(FFORCING, "clmforc.2003.nc"=>"clmforc.2002.nc"))
     catch e
