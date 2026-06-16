@@ -612,6 +612,7 @@ Base.@kwdef struct PsnDV{Vb,V,M,M3,M2,Vp}
     # --- PHS (plant-hydraulic-stress) fields ---
     ac_phs_patch::M3; aj_phs_patch::M3; ap_phs_patch::M3; ag_phs_patch::M3
     vcmax_z_phs_patch::M3; tpu_z_phs_patch::M3; kp_z_phs_patch::M3
+    vcmx25_z_patch::M; jmx25_z_patch::M   # LUNA-acclimated vcmax25/jmax25 (injected)
     an_sun_patch::M2; an_sha_patch::M2; gs_mol_sun_ln_patch::M2; gs_mol_sha_ln_patch::M2
     luvcmax25top_patch::Vp; lujmax25top_patch::Vp; lutpu25top_patch::Vp
     alphapsnsun_patch::Vp; alphapsnsha_patch::Vp
@@ -643,7 +644,9 @@ _psn_dv(ps) = PsnDV(; c3flag_patch = ps.c3flag_patch,
     ac_phs_patch = ps.ac_phs_patch, aj_phs_patch = ps.aj_phs_patch,
     ap_phs_patch = ps.ap_phs_patch, ag_phs_patch = ps.ag_phs_patch,
     vcmax_z_phs_patch = ps.vcmax_z_phs_patch, tpu_z_phs_patch = ps.tpu_z_phs_patch,
-    kp_z_phs_patch = ps.kp_z_phs_patch, an_sun_patch = ps.an_sun_patch,
+    kp_z_phs_patch = ps.kp_z_phs_patch,
+    vcmx25_z_patch = ps.vcmx25_z_patch, jmx25_z_patch = ps.jmx25_z_patch,
+    an_sun_patch = ps.an_sun_patch,
     an_sha_patch = ps.an_sha_patch, gs_mol_sun_ln_patch = ps.gs_mol_sun_ln_patch,
     gs_mol_sha_ln_patch = ps.gs_mol_sha_ln_patch,
     luvcmax25top_patch = ps.luvcmax25top_patch, lujmax25top_patch = ps.lujmax25top_patch,
@@ -1700,7 +1703,7 @@ Adapt.@adapt_structure _Psn2In
 # fields). Counts as 1 kernel arg instead of 15.
 struct _Psn2Scalars{S}
     vcmax25_scale::S; jmax25top_sf_val::S; leaf_mr_vcm::S; bbbopt_c3::S; bbbopt_c4::S
-    use_cn::Bool; use_c13::Bool; light_inhibit::Bool
+    use_cn::Bool; use_c13::Bool; light_inhibit::Bool; use_luna::Bool
     leafresp_method::Int; nlevcan::Int; stomatalcond_mtd::Int
     stomatal_bb::Int; leafresp_ryan::Int; sun::Int; sha::Int
 end
@@ -1721,9 +1724,11 @@ end
     vcmax25_scale = sc2.vcmax25_scale; jmax25top_sf_val = sc2.jmax25top_sf_val
     leaf_mr_vcm = sc2.leaf_mr_vcm; bbbopt_c3 = sc2.bbbopt_c3; bbbopt_c4 = sc2.bbbopt_c4
     use_cn = sc2.use_cn; use_c13 = sc2.use_c13; light_inhibit = sc2.light_inhibit
+    use_luna = sc2.use_luna
     leafresp_method = sc2.leafresp_method; nlevcan = sc2.nlevcan
     stomatalcond_mtd = sc2.stomatalcond_mtd; stomatal_bb = sc2.stomatal_bb
     leafresp_ryan = sc2.leafresp_ryan; sun = sc2.sun; sha = sc2.sha
+    vcmx25_z = ps.vcmx25_z_patch; jmx25_z = ps.jmx25_z_patch
     p = @index(Global)
     @inbounds if mask_patch[p]
         T = eltype(t_veg)
@@ -1853,12 +1858,31 @@ end
                     ps.alphapsnsha_patch[p] = one(T)
                 end
             else  # day time
-                vcmax25_sun = vcmax25top * nscaler_sun
-                jmax25_sun = jmax25top * nscaler_sun
-                tpu25_sun = tpu25top * nscaler_sun
-                vcmax25_sha = vcmax25top * nscaler_sha
-                jmax25_sha = jmax25top * nscaler_sha
-                tpu25_sha = tpu25top * nscaler_sha
+                if use_luna && c3flag_p
+                    # LUNA-acclimated vcmax25/jmax25 (injected from restart), overriding
+                    # the static lnc-based vcmax25top. Sun uses the layer value directly;
+                    # sha is scaled by the canopy sun/sha integration ratio. Matches
+                    # PhotosynthesisMod.F90:3378 (use_luna .and. c3flag .and. crop==0).
+                    vcmax25_sun = vcmx25_z[p, iv]
+                    jmax25_sun = jmx25_z[p, iv]
+                    tpu25_sun = prm.tpu25ratio * vcmax25_sun
+                    vcmax25_sha = vcmax25_sun
+                    jmax25_sha = jmax25_sun
+                    tpu25_sha = prm.tpu25ratio * vcmax25_sha
+                    if vcmaxcint_sun[p] > zero(T) && nlevcan == 1
+                        _luna_r = vcmaxcint_sha[p] / vcmaxcint_sun[p]
+                        vcmax25_sha = vcmax25_sun * _luna_r
+                        jmax25_sha = jmax25_sun * _luna_r
+                        tpu25_sha = tpu25_sun * _luna_r
+                    end
+                else
+                    vcmax25_sun = vcmax25top * nscaler_sun
+                    jmax25_sun = jmax25top * nscaler_sun
+                    tpu25_sun = tpu25top * nscaler_sun
+                    vcmax25_sha = vcmax25top * nscaler_sha
+                    jmax25_sha = jmax25top * nscaler_sha
+                    tpu25_sha = tpu25top * nscaler_sha
+                end
                 kp25_sun = kp25top * nscaler_sun
                 kp25_sha = kp25top * nscaler_sha
 
@@ -1912,7 +1936,7 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
         dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
         vcmaxcint_sha, nrad, use_cn::Bool, use_c13::Bool, leaf_mr_vcm, nlevcan::Int,
         stomatalcond_mtd::Int, light_inhibit::Bool, leafresp_method::Int,
-        overrides, bounds_patch)
+        overrides, bounds_patch; use_luna::Bool=false)
     T = eltype(t_veg)
     lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
     prm = (kc25_coef = T(params_inst.kc25_coef), ko25_coef = T(params_inst.ko25_coef),
@@ -1943,7 +1967,7 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
         par_z_sun_in = par_z_sun_in, par_z_sha_in = par_z_sha_in)
     sc2 = _Psn2Scalars{T}(T(overrides.vcmax25_scale), T(jmax25top_sf_val),
         T(leaf_mr_vcm), T(BBBOPT_C3), T(BBBOPT_C4),
-        use_cn, use_c13, light_inhibit, leafresp_method, nlevcan,
+        use_cn, use_c13, light_inhibit, use_luna, leafresp_method, nlevcan,
         stomatalcond_mtd, STOMATALCOND_MTD_BB1987, LEAFRESP_MTD_RYAN1991, SUN, SHA)
     be = _kernel_backend(t_veg)
     _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, prm, idx, pft, inp, sc2;
@@ -5074,7 +5098,8 @@ function photosynthesis_hydrstress!(ps,
         mbbopt_pft, forc_pbot, oair, slatop_pft, leafcn_pft, flnr_pft, fnitr_pft,
         dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
         vcmaxcint_sha, nrad, use_cn, use_c13, leaf_mr_vcm, nlevcan,
-        stomatalcond_mtd, light_inhibit, leafresp_method, overrides, bounds_patch)
+        stomatalcond_mtd, light_inhibit, leafresp_method, overrides, bounds_patch;
+        use_luna=use_luna)
 
     # ---- Pass 3: Leaf-level photosynthesis (kernelized) ----
     # One thread per patch; the entire per-patch PHS Newton solve (hybrid_PHS →

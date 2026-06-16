@@ -237,8 +237,15 @@ against the Fortran per-boundary dumps.
 """
 function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DUMPDIR,
                               step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761),
-                              forcing_file::String=FFORCING, use_hydrstress::Bool=false)
+                              forcing_file::String=FFORCING, use_hydrstress::Bool=false,
+                              use_luna::Bool=use_hydrstress)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn)
+    # LUNA (Bow lnd_in use_luna=.true.): allocate the photosyns LUNA vcmax25/jmax25
+    # fields so inject_dump! fills them from the restart's vcmx25_z/jmx25_z.
+    if use_luna && isempty(inst.photosyns.vcmx25_z_patch)
+        inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)
+        inst.photosyns.jmx25_z_patch  = fill(60.0, bounds.endp, CLM.NLEVCAN)
+    end
     dumpfile = joinpath(dumpdir, "pdump_before_step_n$(nstep).nc")
     inject_dump!(inst, bounds, dumpfile)
 
@@ -257,7 +264,7 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     end
 
     config  = CLM.CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=false,
-                                  use_hydrstress=use_hydrstress)
+                                  use_hydrstress=use_hydrstress, use_luna=use_luna)
     filt_ia = CLM.clump_filter_inactive_and_active
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 

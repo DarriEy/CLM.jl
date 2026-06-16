@@ -95,6 +95,7 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     use_lai_streams::Bool
     n_drydep::Int
     use_hydrstress::Bool   # plant hydraulic stress (PHS) photosynthesis path
+    use_luna::Bool         # LUNA photosynthetic-N acclimation (vcmax25 from vcmx25_z)
 end
 
 # Backward-compatible property accessors so existing code like config.use_cn still works
@@ -159,7 +160,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           irrigate::Bool=false, use_noio::Bool=false,
                           use_aquifer_layer::Bool=true,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
-                          n_drydep::Int=0, use_hydrstress::Bool=false,
+                          n_drydep::Int=0, use_hydrstress::Bool=false, use_luna::Bool=false,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
                           ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
                           i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
@@ -177,7 +178,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
         mode = SPMode()
     end
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
-                    use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress)
+                    use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, use_luna)
 end
 
 # ---------------------------------------------------------------------------
@@ -933,7 +934,8 @@ function clm_drv_core!(config::CLMDriverConfig,
                    fill(0.35, MXPFT + 1), fill(0.003, MXPFT + 1), fill(0.25, MXPFT + 1),
                    fill(2.0, MXPFT + 1), fill(8.0, MXPFT + 1),
                    config.use_cn,
-                   false, false, config.use_hydrstress, phs_froot_c)
+                   false, false, config.use_hydrstress, phs_froot_c,
+                   false, config.use_luna)
 
 
     # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)

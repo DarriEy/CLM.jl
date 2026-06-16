@@ -311,6 +311,13 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     if haskey(ds, "nrad") && hasproperty(sa, :nrad_patch)
         set_patch_1d!("nrad", sa.nrad_patch)
     end
+    # LUNA-acclimated vcmax25/jmax25 (dump dims (levcan, pft) → Julia [patch, levcan]).
+    # Only injected when the photosyns LUNA fields are allocated (use_luna harness).
+    if haskey(ds, "vcmx25_z") && hasproperty(inst.photosyns, :vcmx25_z_patch) &&
+       !isempty(inst.photosyns.vcmx25_z_patch)
+        set_patch_2d!("vcmx25_z", inst.photosyns.vcmx25_z_patch)
+        set_patch_2d!("jmx25_z",  inst.photosyns.jmx25_z_patch)
+    end
 
     # Canopy water
     set_patch_1d!("LIQCAN", ws.liqcan_patch)
