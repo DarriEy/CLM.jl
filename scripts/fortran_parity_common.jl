@@ -71,6 +71,12 @@ Returns (inst, bounds, filt, tm).
 function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
                           start_date::DateTime=DateTime(2003,1,1),
                           use_cn::Bool=false)
+    # Bow lnd_in: rooting_profile_method_{water,carbon} = 1 (Jackson 1996 beta
+    # profile via rootprof_beta), not the Julia default Zeng-2001 roota/rootb. This
+    # sets rootfr, which drives the PHS soil-to-root conductance (k_soil_root). Must
+    # be set before clm_initialize! runs cold_start's init_vegrootfr!.
+    CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
+    CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
     (inst, bounds, filt, tm) = CLM.clm_initialize!(;
         fsurdat=FSURDAT, paramfile=FPARAM,
         start_date=start_date, dtime=dtime, use_cn=use_cn,
