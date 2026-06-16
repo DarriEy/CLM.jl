@@ -1518,10 +1518,16 @@ function canopy_fluxes_core!(
         _nlevsoi = varpar.nlevsoi; _nlevsno = varpar.nlevsno
         _smp_l = soilstate.smp_l_col; _watsat = soilstate.watsat_col
         _sucsat = soilstate.sucsat_col; _bsw = soilstate.bsw_col
-        _smpmin = soilstate.smpmin_col; _h2osoi_vol = waterstatebulk.ws.h2osoi_vol_col
+        _smpmin = soilstate.smpmin_col
+        # s_node from the LIQUID volumetric water (driver fills h2osoi_liqvol_col from
+        # the prognostic h2osoi_liq before canopy_fluxes). Do NOT use h2osoi_vol_col:
+        # it is only updated by HydrologyNoDrainage (which runs AFTER canopy_fluxes),
+        # so here it sits at its cold-start default (≈0.75·watsat) → spuriously wet
+        # soil → no plant water stress (grass vegwp stuck ~−9000 mm vs Fortran ~−205000).
+        _h2osoi_liqvol = waterdiagbulk.h2osoi_liqvol_col
         _hksat = soilstate.hksat_col; _hk_l = soilstate.hk_l_col
         @inbounds for c in bounds_col, j in 1:_nlevsoi
-            s_node = max(min(_h2osoi_vol[c, j] / _watsat[c, j], one(FT)), FT(0.01))
+            s_node = max(min(_h2osoi_liqvol[c, _nlevsno + j] / _watsat[c, j], one(FT)), FT(0.01))
             _smp_l[c, j] = max(_smpmin[c], -_sucsat[c, j] * s_node^(-_bsw[c, j]))
             # Clapp-Hornberger unsaturated conductivity (also filled by HydrologyNoDrainage,
             # which runs after canopy_fluxes, so recompute here for PHS).
