@@ -1686,7 +1686,7 @@ Base.@kwdef struct _Psn2Idx{VB,VI}
 end
 Base.@kwdef struct _Psn2Pft{Vp}
     c3psn_pft::Vp; mbbopt_pft::Vp; slatop_pft::Vp; leafcn_pft::Vp
-    flnr_pft::Vp; fnitr_pft::Vp
+    flnr_pft::Vp; fnitr_pft::Vp; lmr_intercept_atkin::Vp
 end
 Base.@kwdef struct _Psn2In{V,M}     # read-only forcing vectors (V) + matrices (M)
     forc_pbot::V; oair::V; dayl_factor::V; t10::V; t_veg::V
@@ -1713,6 +1713,7 @@ end
     mask_patch = idx.mask_patch; ivt = idx.ivt; nrad = idx.nrad
     c3psn_pft = pft.c3psn_pft; mbbopt_pft = pft.mbbopt_pft; slatop_pft = pft.slatop_pft
     leafcn_pft = pft.leafcn_pft; flnr_pft = pft.flnr_pft; fnitr_pft = pft.fnitr_pft
+    lmr_intercept_atkin = pft.lmr_intercept_atkin
     forc_pbot = inp.forc_pbot; oair = inp.oair; dayl_factor = inp.dayl_factor
     t10 = inp.t10; t_veg = inp.t_veg
     vcmaxcint_sun = inp.vcmaxcint_sun; vcmaxcint_sha = inp.vcmaxcint_sha
@@ -1793,7 +1794,10 @@ end
                 lmr25top = T(2.525e-6) * (T(1.5)^((T(25.0) - T(20.0)) / T(10.0)))
                 lmr25top = lmr25top * lnc_p / T(12.0e-06)
             else
-                lmr25top = zero(T)
+                # Atkin2015 (leafresp_method=2): PhotosynthesisMod.F90:3289 (PHS path)
+                lmr25top = lnc_p > zero(T) ?
+                    lmr_intercept_atkin[ivt_p] + lnc_p * T(0.2061) - T(0.0402) * (t10[p] - T(TFRZ)) :
+                    zero(T)
             end
         else
             if c3flag_p
@@ -1928,9 +1932,11 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
     # group loose @Const arrays into device-view bundles + scalars into one isbits
     # struct (Metal 31-arg-buffer reduction); same refs, so behaviour unchanged.
     idx = _Psn2Idx(; mask_patch = mask_patch, ivt = ivt, nrad = nrad)
+    _lmratk = T.(params_inst.lmr_intercept_atkin)
+    lmr_intercept_atkin = slatop_pft isa Array ? _lmratk : convert(typeof(slatop_pft), _lmratk)
     pft = _Psn2Pft(; c3psn_pft = c3psn_pft, mbbopt_pft = mbbopt_pft,
         slatop_pft = slatop_pft, leafcn_pft = leafcn_pft, flnr_pft = flnr_pft,
-        fnitr_pft = fnitr_pft)
+        fnitr_pft = fnitr_pft, lmr_intercept_atkin = lmr_intercept_atkin)
     inp = _Psn2In(; forc_pbot = forc_pbot, oair = oair, dayl_factor = dayl_factor,
         t10 = t10, t_veg = t_veg, vcmaxcint_sun = vcmaxcint_sun,
         vcmaxcint_sha = vcmaxcint_sha, tlai_z = tlai_z,
