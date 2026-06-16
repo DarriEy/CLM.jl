@@ -108,6 +108,12 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         # Bow lnd_in light_inhibit=.true. (Lloyd 2010 / Reich): daytime leaf
         # respiration ×0.67. Julia defaults false → lmr ~1.5x too high.
         inst.photosyns.light_inhibit = true
+        # Bow lnd_in modifyphoto_and_lmr_forcrop=.true.: in the PHS canopy
+        # integration the per-layer lmr is weighted by bsun/bsha (the sunlit/
+        # shaded plant-hydraulic stress factor) — PhotosynthesisMod.F90:3719.
+        # Julia defaults false → the bsun weight is skipped → leaf_mr ~1/bsun
+        # too high (grass bsun≈0.42 → 2.2× high; the grass availc residual).
+        inst.photosyns.modifyphoto_and_lmr_forcrop = true
     end
 
     # atm2lnd downscaling to match Fortran lnd_in defaults
