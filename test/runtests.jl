@@ -167,6 +167,12 @@ using CLM
         for f in isolated_files
             path = joinpath(@__DIR__, f)
             cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e "using Test, CLM; include(raw\"$(path)\")"`
+            # Under `Pkg.test` (CI), the parent sets JULIA_LOAD_PATH to the test
+            # env only — no @stdlib — so a subprocess `using Printf` (stdlib, not a
+            # test dep) fails with "Package Printf not found". Force the default
+            # project+stdlib path so any stdlib `using` in the isolated file
+            # resolves. @ resolves to --project; @stdlib provides Printf/etc.
+            cmd = addenv(cmd, "JULIA_LOAD_PATH" => "@:@stdlib")
             @testset "$f (subprocess)" begin
                 @test success(pipeline(cmd; stdout = stdout, stderr = stderr))
             end
