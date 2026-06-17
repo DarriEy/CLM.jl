@@ -534,14 +534,14 @@ end
 
 # --- cn_offset_litterfall!: display→litter fluxes during offset ----------
 @kernel function _phen_offset_litterfall_kernel!(
-        leafc_to_litter, frootc_to_litter,
+        leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         @Const(mask), @Const(itype),
         @Const(offset_flag), @Const(offset_counter),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
-        dt, CNratio_floating::Bool)
+        dt, CNratio_floating::Bool, use_fun::Bool)
     T = eltype(leafc_to_litter)
     p = @index(Global)
     @inbounds if mask[p]
@@ -579,6 +579,13 @@ end
                 frootn_to_litter[p]  = frootc_to_litter[p] / frootcn[ivt]
             end
 
+            # FUN uses the current step's leaf litterfall for retranslocation
+            # accounting (CNPhenologyMod.F90:3749). Set inside the litterfall
+            # branch so non-litterfall patches keep their prior value.
+            if use_fun
+                leafc_to_litter_fun[p] = leafc_to_litter[p]
+            end
+
             prev_leafc_to_litter[p]  = leafc_to_litter[p]
             prev_frootc_to_litter[p] = frootc_to_litter[p]
         end
@@ -586,29 +593,29 @@ end
 end
 
 function phen_offset_litterfall!(
-        leafc_to_litter, frootc_to_litter,
+        leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
-        dt, CNratio_floating)
+        dt, CNratio_floating, use_fun)
     _launch!(_phen_offset_litterfall_kernel!,
-        leafc_to_litter, frootc_to_litter,
+        leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
-        eltype(leafc_to_litter)(dt), CNratio_floating)
+        eltype(leafc_to_litter)(dt), CNratio_floating, use_fun)
 end
 
 # --- cn_background_litterfall!: background litter fluxes ------------------
 @kernel function _phen_background_litterfall_kernel!(
-        leafc_to_litter, frootc_to_litter,
+        leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         @Const(mask), @Const(itype), @Const(bglfr),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
-        CNratio_floating::Bool)
+        CNratio_floating::Bool, use_fun::Bool)
     T = eltype(leafc_to_litter)
     p = @index(Global)
     @inbounds if mask[p]
@@ -616,6 +623,10 @@ end
             ivt = itype[p] + 1
             leafc_to_litter[p]  = bglfr[p] * leafc[p]
             frootc_to_litter[p] = bglfr[p] * frootc[p]
+            # FUN uses the current step's leaf litterfall (CNPhenologyMod.F90:3983)
+            if use_fun
+                leafc_to_litter_fun[p] = leafc_to_litter[p]
+            end
             if CNratio_floating
                 fr_leafn_to_litter = T(0.5)
                 if leafc[p] == zero(T)
@@ -640,15 +651,15 @@ end
 end
 
 function phen_background_litterfall!(
-        leafc_to_litter, frootc_to_litter,
+        leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, bglfr, leafc, frootc, leafn, frootn,
-        lflitcn, leafcn, frootcn, CNratio_floating)
+        lflitcn, leafcn, frootcn, CNratio_floating, use_fun)
     _launch!(_phen_background_litterfall_kernel!,
-        leafc_to_litter, frootc_to_litter,
+        leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, bglfr, leafc, frootc, leafn, frootn,
-        lflitcn, leafcn, frootcn, CNratio_floating)
+        lflitcn, leafcn, frootcn, CNratio_floating, use_fun)
 end
 
 # --- cn_livewood_turnover!: live wood → dead wood turnover ----------------
@@ -2466,6 +2477,7 @@ function cn_offset_litterfall!(pstate::PhenologyState,
     # Per-patch independent: display→litter fluxes during offset.
     phen_offset_litterfall!(
         cnveg_cf.leafc_to_litter_patch, cnveg_cf.frootc_to_litter_patch,
+        cnveg_cf.leafc_to_litter_fun_patch,
         cnveg_cf.prev_leafc_to_litter_patch, cnveg_cf.prev_frootc_to_litter_patch,
         cnveg_nf.leafn_to_litter_patch, cnveg_nf.leafn_to_retransn_patch,
         cnveg_nf.frootn_to_litter_patch,
@@ -2474,7 +2486,7 @@ function cn_offset_litterfall!(pstate::PhenologyState,
         cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
         pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn,
-        dt, CNratio_floating)
+        dt, CNratio_floating, use_fun)
 
     return nothing
 end
@@ -2496,12 +2508,13 @@ function cn_background_litterfall!(pstate::PhenologyState,
     # Per-patch independent: background litterfall fluxes.
     phen_background_litterfall!(
         cnveg_cf.leafc_to_litter_patch, cnveg_cf.frootc_to_litter_patch,
+        cnveg_cf.leafc_to_litter_fun_patch,
         cnveg_nf.leafn_to_litter_patch, cnveg_nf.leafn_to_retransn_patch,
         cnveg_nf.frootn_to_litter_patch,
         mask_soilp, patch_data.itype, cnveg_state.bglfr_patch,
         cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
-        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn, CNratio_floating)
+        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn, CNratio_floating, use_fun)
 
     return nothing
 end

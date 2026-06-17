@@ -1019,6 +1019,10 @@ end
 function _zero_cnveg_flux_arrays!(cf)
     for name in fieldnames(typeof(cf))
         startswith(String(name), "ann") && continue   # keep annual accumulators
+        # leafc_to_litter_fun persists step-to-step (Fortran SetValues does NOT
+        # zero it): phenology phase-2 sets it, and FUN — which runs BEFORE phase-2
+        # — reads the previous step's value for retranslocation accounting.
+        name === :leafc_to_litter_fun_patch && continue
         arr = getfield(cf, name)
         (arr isa AbstractArray && !isempty(arr) && eltype(arr) <: Real) || continue
         fill!(arr, zero(eltype(arr)))

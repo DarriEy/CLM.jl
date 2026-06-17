@@ -401,6 +401,11 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
             if hasproperty(inst.bgc_vegetation, :cnveg_carbonflux_inst)
                 cvf = inst.bgc_vegetation.cnveg_carbonflux_inst
                 hasproperty(cvf, :annsum_npp_patch) && set_patch_1d!("annsum_npp", cvf.annsum_npp_patch)
+                # leaf litterfall used by FUN for retranslocation accounting. A
+                # restart var: FUN (which runs before phenology phase-2) reads the
+                # PREVIOUS step's value, so it must be injected, not left at 0.
+                hasproperty(cvf, :leafc_to_litter_fun_patch) &&
+                    set_patch_1d!("leafc_to_litter_fun", cvf.leafc_to_litter_fun_patch)
             end
         end
     end
