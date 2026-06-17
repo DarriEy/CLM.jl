@@ -29,6 +29,12 @@ function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
                            bounds.begp:bounds.endp;
                            col_landunit=inst.column.landunit,
                            lun_lakpoi=inst.landunit.lakpoi)
+    # Cold-start the annual-max ALT trackers (needs the subgrid col→landunit map,
+    # set up before cold_start). active_layer_init! only allocated them to SPVAL;
+    # without zeroing, the running-max test `alt > altmax` is always false so
+    # altmax/altmax_indx never track — they feed the decomposition vertical profile.
+    active_layer_init_cold!(inst.active_layer, inst.column, inst.landunit,
+                            bounds.begc:bounds.endc)
     nothing
 end
 
