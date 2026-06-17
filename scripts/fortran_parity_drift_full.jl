@@ -1,0 +1,137 @@
+# =============================================================================
+# Multi-step CN/BGC drift harness (free-running) — FULL contiguous window.
+#
+# Same as fortran_parity_drift.jl but explicitly runs the FULL contiguous dump
+# window [1757845, 1757872] = 28 steps (the longest run with BOTH a
+# before_step and after_hydrologydrainage dump), and additionally tracks the
+# RELATIVE error of the fast-drifting buffer pools cpool + xsmrpool (per-PFT)
+# rather than only printing cpool's raw value.
+#
+# Usage: julia +1.12 --project=. scripts/fortran_parity_drift_full.jl
+# =============================================================================
+include(joinpath(@__DIR__, "fortran_parity_common.jl"))
+
+const DRIFT_SUM    = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const DRIFT_N0     = 1757845          # first step with BOTH before+after dump
+const DRIFT_NSTEPS = 28               # full contiguous window: 1757845..1757872
+const DRIFT_BASE   = 1753153          # nstep -> date base (DateTime(2002,1,1)+Hour(n-base))
+
+_relmax(jl, fa; thr = 1e-9) = begin
+    mx = 0.0
+    @inbounds for k in eachindex(jl)
+        j = jl[k]; f = fa[k]
+        (isfinite(j) && isfinite(f)) || continue
+        d = abs(f) > thr ? abs(j - f) / abs(f) : abs(j - f)
+        mx = max(mx, d)
+    end
+    mx
+end
+
+function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
+                     sumdir::String = DRIFT_SUM)
+    start_date = DateTime(2002, 1, 1) + Hour(n0 - DRIFT_BASE)
+    ffile = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
+    (inst, bounds, filt, tm) = build_bow_inst(; dtime = 3600, start_date = start_date, use_cn = true)
+    if isempty(inst.photosyns.vcmx25_z_patch)
+        inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)
+        inst.photosyns.jmx25_z_patch  = fill(60.0, bounds.endp, CLM.NLEVCAN)
+    end
+    icdump = joinpath(sumdir, "pdump_before_step_n$(n0).nc")
+    inject_dump!(inst, bounds, icdump)
+    let ds = NCDataset(icdump, "r")
+        if haskey(ds, "vegwp")
+            vw = ds["vegwp"][:, :]
+            for pd in 1:size(vw, 2), seg in 1:4
+                inst.canopystate.vegwp_patch[pd, seg] = Float64(vw[seg, pd])
+            end
+        end
+        close(ds)
+    end
+
+    config = CLM.CLMDriverConfig(use_cn = true, use_aquifer_layer = false,
+                                 use_hydrstress = true, use_luna = true)
+    filt_ia = CLM.clump_filter_inactive_and_active
+    ng, nc, np = bounds.endg, bounds.endc, bounds.endp
+    fr = CLM.ForcingReader(); CLM.forcing_reader_init!(fr, ffile)
+    tf = replace(ffile, r"clmforc\.[^/]*\.nc$" => "topo_forcing.nc")
+    if isfile(tf)
+        dt = NCDataset(tf, "r")
+        if haskey(dt, "TOPO")
+            ft = Float64(dt["TOPO"][1])
+            for g in 1:ng; inst.atm2lnd.forc_topo_grc[g] = ft; end
+            for c in 1:nc; inst.topo.topo_col[c] = ft; end
+        end
+        close(dt)
+    end
+
+    sbns = inst.soilbiogeochem_nitrogenstate; sbcs = inst.soilbiogeochem_carbonstate
+    cs = inst.bgc_vegetation.cnveg_carbonstate_inst
+    println("step | sminn_vr | smin_nh4 | leafc    | soil1c   | cpool    | xsmrpool | cpool(tree raw)")
+    nl = CLM.varpar.nlevdecomp
+    # collect per-step rel errors for growth-rate analysis
+    hist = Dict{String,Vector{Float64}}("sminn"=>Float64[], "smin_nh4"=>Float64[],
+        "leafc"=>Float64[], "soil1c"=>Float64[], "cpool"=>Float64[], "xsmrpool"=>Float64[])
+    for i in 0:(nsteps - 1)
+        cur = start_date + Hour(i)
+        calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
+        nextsw = calday + 3600.0 / CLM.SECSPDAY
+        (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
+        CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:bounds.endg)
+        CLM.advance_timestep!(tm)
+        CLM.read_forcing_step!(fr, inst.atm2lnd, cur, ng, nc)
+        CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
+        (yr, mon, d, tod) = CLM.get_curr_date(tm)
+        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
+            CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
+            nstep = tm.nstep, is_first_step = false,
+            is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
+            is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = d,
+            photosyns = inst.photosyns)
+        n = n0 + i
+        da = NCDataset(joinpath(sumdir, "pdump_after_hydrologydrainage_n$(n).nc"), "r")
+        msm = _relmax(sbns.sminn_vr_col[1, 1:nl], Float64.(da["sminn_vr"][1:nl, 1]))
+        mnh = _relmax(sbns.smin_nh4_vr_col[1, 1:nl], Float64.(da["smin_nh4_vr"][1:nl, 1]))
+        mlc = _relmax(cs.leafc_patch[2:3], Float64.(da["leafc"][2:3]))
+        ms1 = _relmax(sbcs.decomp_cpools_vr_col[1, 1:nl, 4], Float64.(da["soil1c_vr"][1:nl, 1]))
+        mcp = _relmax(cs.cpool_patch[2:3], Float64.(da["cpool"][2:3]))
+        mxs = _relmax(cs.xsmrpool_patch[2:3], Float64.(da["xsmrpool"][2:3]))
+        close(da)
+        push!(hist["sminn"], msm); push!(hist["smin_nh4"], mnh); push!(hist["leafc"], mlc)
+        push!(hist["soil1c"], ms1); push!(hist["cpool"], mcp); push!(hist["xsmrpool"], mxs)
+        println("n", lpad(i + 1, 2), " | ", rpad(round(msm, sigdigits = 3), 8), " | ",
+                rpad(round(mnh, sigdigits = 3), 8), " | ", rpad(round(mlc, sigdigits = 3), 8),
+                " | ", rpad(round(ms1, sigdigits = 3), 8), " | ", rpad(round(mcp, sigdigits = 3), 8),
+                " | ", rpad(round(mxs, sigdigits = 3), 8), " | ", round(cs.cpool_patch[2], sigdigits = 4))
+    end
+    CLM.forcing_reader_close!(fr)
+
+    # ---- growth analysis ----
+    println("\n==== drift growth analysis (rel-err vs step) ====")
+    println("quantity | step1     | final     | mean Δ/step (last half) | ratio last/first | verdict")
+    for q in ["sminn", "smin_nh4", "leafc", "soil1c", "cpool", "xsmrpool"]
+        v = hist[q]; nstp = length(v)
+        first = v[1]; final = v[end]
+        # average per-step increment over the second half
+        h0 = max(2, nstp ÷ 2 + 1)
+        incs = [v[k] - v[k-1] for k in h0:nstp]
+        meaninc = isempty(incs) ? 0.0 : sum(incs) / length(incs)
+        # detect verdict: compare increment in 1st half vs 2nd half
+        inc1 = (v[nstp ÷ 2] - v[1]) / max(1, nstp ÷ 2 - 1)
+        inc2 = meaninc
+        ratio = final / max(first, 1e-30)
+        verdict = if inc2 < 0.4 * inc1
+            "PLATEAU"
+        elseif inc2 > 1.6 * inc1
+            "RUNAWAY(super-lin)"
+        else
+            "LINEAR"
+        end
+        println(rpad(q, 9), "| ", rpad(round(first, sigdigits=3), 10), "| ",
+                rpad(round(final, sigdigits=3), 10), "| ",
+                rpad(round(meaninc, sigdigits=3), 24), "| ",
+                rpad(round(ratio, sigdigits=4), 17), "| ", verdict)
+    end
+    return inst, bounds
+end
+
+run_drift()
