@@ -105,9 +105,12 @@ is 0-based PFT so index p stores file row p (the natural-veg/crop CLM convention
 function luna_read_params!(lp::LunaParamsData, ds)
     luna_params_init!(lp, MXPFT)   # allocate the PFT vectors (NaN)
     rs(name, default) = (haskey(ds, name) && !ismissing(ds[name][1])) ? Float64(ds[name][1]) : default
-    lp.cp25_yr2000          = rs("cp25_yr2000", 42.75e-6)
-    lp.kc25_coef            = rs("kc25_coef", 404.9e-6)
-    lp.ko25_coef            = rs("ko25_coef", 278.4e-3)
+    # LunaMod readParams converts these from mol/mol to "Luna units" via ×1e5
+    # (LunaMod.F90: params_inst%{cp25_yr2000,ko25_coef,kc25_coef} *= 1.e5_r8).
+    # Without this, the reference NUE (Kc/Kj at 25°C) is wrong → vcmx25_opt ~0.67×.
+    lp.cp25_yr2000          = rs("cp25_yr2000", 42.75e-6) * 1.0e5
+    lp.kc25_coef            = rs("kc25_coef", 404.9e-6)   * 1.0e5
+    lp.ko25_coef            = rs("ko25_coef", 278.4e-3)   * 1.0e5
     lp.luna_theta_cj        = rs("theta_cj_luna", rs("luna_theta_cj", 0.98))
     lp.enzyme_turnover_daily = rs("enzyme_turnover_daily", 0.0114)
     lp.relhExp              = rs("relhExp", 6.0686)
