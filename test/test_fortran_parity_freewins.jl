@@ -187,27 +187,30 @@ using Dates
 
         # ----------------------------------------------------------------
         # 5. surface fluxes — the model's core per-patch surface predictions,
-        #    diffed at their FINALIZED boundary (timing matters: each flux is
-        #    snapshotted in the dump at a specific phase):
-        #      EFLX_GNET_P / EFLX_SHG_P -> after_soiltemperature (post energy-bal)
-        #      EFLX_LWRAD_OUT / T_REF2M -> after_hydrologydrainage (end of step)
-        #      QFLX_TRAN_VEG_P          -> after_canopyfluxes
-        #    Diffs vegetated patches 2,3. The net ground heat flux (GNET),
-        #    outgoing longwave, 2 m air temp and canopy transpiration all match
-        #    Fortran to <1e-3 (verified ~1e-4..1e-6). NOT asserted: the ground
-        #    sensible/soil heat PARTITION (EFLX_SHG_P/EFLX_SOIG_P) differs ~8-17%
-        #    even though GNET (their net) and T_GRND/T_VEG (main parity test)
-        #    match — a snapshot/definition difference in the SH-vs-conduction
-        #    split, not an energy-balance error; left out, documented here.
+        #    each diffed at the boundary where it is FINALIZED. Timing is the
+        #    whole game: the ground sensible/soil-heat fluxes get a post-soil-
+        #    temperature CORRECTION in SoilFluxes (the new-t_grnd flux update),
+        #    so EFLX_SHG_P jumps 214->259 between after_soiltemperature and
+        #    after_soilfluxes — Julia's end-of-step value matches the LATTER.
+        #      EFLX_SHG_P / EFLX_SOIG_P / EFLX_GNET_P -> after_soilfluxes
+        #      EFLX_LWRAD_OUT / T_REF2M               -> after_hydrologydrainage
+        #      QFLX_TRAN_VEG_P                        -> after_canopyfluxes
+        #    Vegetated patches 2,3; the full ground energy partition (sensible +
+        #    soil + net), outgoing longwave, 2 m air temp and canopy
+        #    transpiration ALL match Fortran to <1e-3 (verified ~1e-4..1e-6).
         # ----------------------------------------------------------------
-        @testset "surface fluxes (GNET/LW/T_REF2M/transp)" begin
+        @testset "surface fluxes (SHG/SOIG/GNET/LW/T_REF2M/transp)" begin
             ef = inst.energyflux; tp = inst.temperature
             wf = inst.water.waterfluxbulk_inst.wf
             relf(a, b) = abs(a - b) / (1.0 + max(abs(a), abs(b)))
-            stdump = joinpath(dumpdir, "pdump_after_soiltemperature_n$(nstep).nc")
+            sfdump = joinpath(dumpdir, "pdump_after_soilfluxes_n$(nstep).nc")
             cfdump = joinpath(dumpdir, "pdump_after_canopyfluxes_n$(nstep).nc")
             specs = []
-            isfile(stdump) && push!(specs, (stdump, "EFLX_GNET_P", ef.eflx_gnet_patch))
+            if isfile(sfdump)
+                push!(specs, (sfdump, "EFLX_SHG_P",  ef.eflx_sh_grnd_patch))
+                push!(specs, (sfdump, "EFLX_SOIG_P", ef.eflx_soil_grnd_patch))
+                push!(specs, (sfdump, "EFLX_GNET_P", ef.eflx_gnet_patch))
+            end
             push!(specs, (edump, "EFLX_LWRAD_OUT", ef.eflx_lwrad_out_patch))
             push!(specs, (edump, "T_REF2M",        tp.t_ref2m_patch))
             isfile(cfdump) && push!(specs, (cfdump, "QFLX_TRAN_VEG_P", wf.qflx_tran_veg_patch))
