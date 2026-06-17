@@ -31,7 +31,7 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
                      sumdir::String = DRIFT_SUM)
     start_date = DateTime(2002, 1, 1) + Hour(n0 - DRIFT_BASE)
     ffile = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
-    (inst, bounds, filt, tm) = build_bow_inst(; dtime = 3600, start_date = start_date, use_cn = true)
+    (inst, bounds, filt, tm) = build_bow_inst(; dtime = 3600, start_date = start_date, use_cn = true, use_luna = true)
     if isempty(inst.photosyns.vcmx25_z_patch)
         inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)
         inst.photosyns.jmx25_z_patch  = fill(60.0, bounds.endp, CLM.NLEVCAN)

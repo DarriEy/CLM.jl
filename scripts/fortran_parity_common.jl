@@ -70,7 +70,7 @@ Returns (inst, bounds, filt, tm).
 """
 function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
                           start_date::DateTime=DateTime(2003,1,1),
-                          use_cn::Bool=false)
+                          use_cn::Bool=false, use_luna::Bool=false)
     # Bow lnd_in: rooting_profile_method_{water,carbon} = 1 (Jackson 1996 beta
     # profile via rootprof_beta), not the Julia default Zeng-2001 roota/rootb. This
     # sets rootfr, which drives the PHS soil-to-root conductance (k_soil_root). Must
@@ -79,7 +79,7 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
     CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
     (inst, bounds, filt, tm) = CLM.clm_initialize!(;
         fsurdat=FSURDAT, paramfile=FPARAM,
-        start_date=start_date, dtime=dtime, use_cn=use_cn,
+        start_date=start_date, dtime=dtime, use_cn=use_cn, use_luna=use_luna,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
         int_snow_max=INT_SNOW_MAX)
@@ -254,7 +254,7 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761),
                               forcing_file::String=FFORCING, use_hydrstress::Bool=false,
                               use_luna::Bool=use_hydrstress)
-    (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn)
+    (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna)
     # LUNA (Bow lnd_in use_luna=.true.): allocate the photosyns LUNA vcmax25/jmax25
     # fields so inject_dump! fills them from the restart's vcmx25_z/jmx25_z.
     if use_luna && isempty(inst.photosyns.vcmx25_z_patch)

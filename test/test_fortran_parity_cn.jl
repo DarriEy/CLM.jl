@@ -154,7 +154,7 @@ using Dates
         @testset "multi-step drift (n$drift_n0 +$(drift_nsteps))" begin
             start_date = DateTime(2002,1,1) + Hour(drift_n0 - date_base)
             (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600,
-                                                       start_date=start_date, use_cn=true)
+                                                       start_date=start_date, use_cn=true, use_luna=true)
             if isempty(inst.photosyns.vcmx25_z_patch)
                 inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)
                 inst.photosyns.jmx25_z_patch  = fill(60.0, bounds.endp, CLM.NLEVCAN)

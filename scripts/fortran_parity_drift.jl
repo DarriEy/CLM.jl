@@ -42,7 +42,7 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
                      sumdir::String = DRIFT_SUM)
     start_date = DateTime(2002, 1, 1) + Hour(n0 - DRIFT_BASE)
     ffile = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
-    (inst, bounds, filt, tm) = build_bow_inst(; dtime = 3600, start_date = start_date, use_cn = true)
+    (inst, bounds, filt, tm) = build_bow_inst(; dtime = 3600, start_date = start_date, use_cn = true, use_luna = true)
     # PHS+LUNA (Bow lnd_in): allocate LUNA vcmax/jmax fields so inject fills them,
     # then seed vegwp from the IC dump so the first PHS Newton solve starts finite.
     if isempty(inst.photosyns.vcmx25_z_patch)
