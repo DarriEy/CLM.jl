@@ -91,6 +91,37 @@ function luna_params_clean!(lp::LunaParamsData)
     return nothing
 end
 
+# Module-level LUNA parameter store (mirrors `const params_inst = PhotoParamsData()`
+# in photosynthesis.jl). Populated from the CLM params NetCDF by luna_read_params!.
+const luna_params_inst = LunaParamsData()
+
+"""
+    luna_read_params!(lp, ds)
+
+Read LUNA parameters (PFT vectors jmaxb0/jmaxb1/wc2wjb0 + scalars) from the open
+CLM params NetCDF `ds` into `lp`. PFT vectors are 1-based length MXPFT+1; the file
+is 0-based PFT so index p stores file row p (the natural-veg/crop CLM convention).
+"""
+function luna_read_params!(lp::LunaParamsData, ds)
+    luna_params_init!(lp, MXPFT)   # allocate the PFT vectors (NaN)
+    rs(name, default) = (haskey(ds, name) && !ismissing(ds[name][1])) ? Float64(ds[name][1]) : default
+    lp.cp25_yr2000          = rs("cp25_yr2000", 42.75e-6)
+    lp.kc25_coef            = rs("kc25_coef", 404.9e-6)
+    lp.ko25_coef            = rs("ko25_coef", 278.4e-3)
+    lp.luna_theta_cj        = rs("theta_cj_luna", rs("luna_theta_cj", 0.98))
+    lp.enzyme_turnover_daily = rs("enzyme_turnover_daily", 0.0114)
+    lp.relhExp              = rs("relhExp", 6.0686)
+    lp.minrelh              = rs("minrelh", 0.65)
+    for (name, dest) in (("jmaxb0", lp.jmaxb0), ("jmaxb1", lp.jmaxb1), ("wc2wjb0", lp.wc2wjb0))
+        haskey(ds, name) || continue
+        v = ds[name][:]
+        @inbounds for p in 1:min(length(dest), length(v))
+            dest[p] = ismissing(v[p]) ? dest[p] : Float64(v[p])
+        end
+    end
+    return nothing
+end
+
 # ==========================================================================
 # Temperature response functions
 # ==========================================================================
@@ -772,7 +803,10 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
     for p in bounds
         mask_patch[p] || continue
 
-        ft = patchdata.itype[p]
+        # 1-based PFT index: CLM.jl pftcon arrays are length MXPFT+1 (row p = PFT
+        # p-1), whereas Fortran LunaMod indexes c3psn(itype) with 0-based pftcon.
+        # ft drives only the pftcon lookups (rhol/taul/slatop/c3psn/leafcn) below.
+        ft = patchdata.itype[p] + 1
         g  = patchdata.gridcell[p]
         c  = patchdata.column[p]
 

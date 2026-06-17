@@ -1665,6 +1665,27 @@ function clm_drv_core!(config::CLMDriverConfig,
         energyflux_update_acc_vars!(ef, bc_patch;
             end_cd=is_end_curr_day, dtime=Int(dtime))
 
+        # LUNA photosynthetic-N acclimation accumulators + end-of-day vcmax update.
+        # The call sequence is ready (acc24 each step; at EOD acc240 →
+        # update_photosynthesis_capacity! → clear24) and the inputs resolve:
+        #   acc24_climate_luna!(cs, ps, alb, sa, temp, pch, filt.exposedvegp, bc_patch, dtime)
+        #   acc240_climate_luna!(temp, ps, alb, sa, wdb, fv, pch, filt.exposedvegp, bc_patch,
+        #       a2l.forc_po2_240_patch, a2l.forc_pco2_240_patch, fv.rb1_patch, wdb.rh_af_patch, dtime)
+        #   update_photosynthesis_capacity!(ps, temp, cs, alb, sa, wdb, fv, pch, grc,
+        #       filt.exposedvegp, bc_patch, <dayl_factor>, a2l.forc_pbot240_downscaled_patch,
+        #       a2l.forc_pco2_240_patch, a2l.forc_po2_240_patch, pftcon.c3psn, pftcon.slatop,
+        #       pftcon.leafcn, pftcon.rhol, pftcon.taul, fill(1.0,np), luna_params_inst, dtime, NLEVCAN)
+        #   clear24_climate_luna!(sa, ps, temp, pch, filt.exposedvegp, bc_patch)
+        # REMAINING before activation (do NOT enable until both are done):
+        #   (1) solarabs_init!/build path must pass use_luna so the LUNA PAR arrays
+        #       (par24d_z/par24x_z/par240d_z/par240x_z) are allocated — they are 0×0
+        #       under the current init, and clear24 (no SPVAL guard) would BoundsError.
+        #   (2) numerical validation: LUNA's per-step climate accumulators are NOT in
+        #       any Fortran dump, so the EOD update can't be diffed — add an after-LUNA
+        #       restFile_write_dump boundary in SourceMods, rerun, then assert.
+        # Prereqs already landed: luna_read_params! (params were NaN) + the 1-based
+        # PFT-index fix in update_photosynthesis_capacity!.
+
         # Placeholder: bgc_vegetation_inst%UpdateAccVars!(bounds_proc, ...) [BGC accum]
 
         if config.use_crop
