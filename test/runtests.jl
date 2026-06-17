@@ -146,4 +146,7 @@ using CLM
     include("test_multisite_calibration.jl")
     include("test_cn_integration.jl")
     include("test_fortran_parity.jl")   # gated on external Fortran reference dumps
+    include("test_fortran_parity_cn.jl") # gated on external Fortran BGC/CN reference dumps
+    include("test_fortran_parity_luna_decomp.jl") # gated: LUNA cadence + decomp N-source deltas
+    include("test_fortran_parity_freewins.jl") # gated: Tier-0 free-win modules (soilresis, aerosol)
 end
