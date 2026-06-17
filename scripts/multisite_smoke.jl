@@ -101,9 +101,23 @@ function main(; nsteps::Int = 6, use_cn::Bool = false)
         isempty(bad) || push!(nan_fields, "step$i:$(bad)")
     end
 
-    println(isempty(nan_fields) ? "\n✅ MULTI-SITE SMOKE PASS: driver ran $nsteps steps at Aripuanã, all finite" :
+    println(isempty(nan_fields) ? "\n✅ MULTI-SITE SMOKE PASS (use_cn=$use_cn): driver ran $nsteps steps at Aripuanã, all finite" :
                                   "\n❌ NaN appeared at: $(nan_fields)")
-    return inst, bounds
+    return (inst=inst, bounds=bounds, nbad=length(nan_fields))
 end
 
-main()
+# Returns true iff the site data is present AND both biogeophys + full-BGC runs
+# stayed finite for `nsteps` steps. Used by the gated regression test.
+function multisite_smoke_ok(; nsteps::Int = 6)
+    isfile(FS) || (@info "multisite smoke: Aripuanã surfdata absent, skipping" FS; return missing)
+    r0 = main(; nsteps=nsteps, use_cn=false)
+    r1 = main(; nsteps=nsteps, use_cn=true)
+    return r0.nbad == 0 && r1.nbad == 0
+end
+
+# Only auto-run when invoked as a script (not when included by the gated test).
+if abspath(PROGRAM_FILE) == @__FILE__
+    main(; use_cn=false)
+    println("\n=== use_cn=true (full BGC) ===")
+    main(; use_cn=true)
+end

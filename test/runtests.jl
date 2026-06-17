@@ -162,6 +162,7 @@ using CLM
             "test_fortran_parity_luna_decomp.jl",# LUNA cadence + decomp N-source (gated)
             "test_fortran_parity_freewins.jl",   # soilresis, aerosol free-wins (gated)
             "test_fortran_parity_luna_update.jl",# LUNA EOD vcmax/jmax update (gated)
+            "test_multisite_robustness.jl",      # off-Bow driver robustness (gated)
             "test_ad_robustness.jl",             # AD near phase-change discontinuities
         ]
         for f in isolated_files
