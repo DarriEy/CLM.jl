@@ -3,7 +3,9 @@
 # byte-faithful to canopy_fluxes_core! on a converged single patch. NO Enzyme here —
 # this is a fast, suite-safe primal-parity guard against the decomposition drifting
 # from the production forward. The reverse-AD gradient itself is validated in
-# scripts/enzyme_canopy_psn.jl (Enzyme; run on Julia 1.10).
+# scripts/enzyme_canopy_psn.jl (Enzyme; run on Julia 1.10), and the full canopy
+# reverse + canopy→soil_temperature two-module reverse CHAIN (both through the one
+# CLM.compositional_reverse! engine) in scripts/enzyme_driver_reverse.jl.
 
 @testset "canopy_fluxes compositional-reverse forward parity" begin
     FT = Float64
