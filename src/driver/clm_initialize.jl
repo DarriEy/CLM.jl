@@ -62,6 +62,7 @@ function clm_initialize!(;
     dtime::Int = 1800,
     use_cn::Bool = false,
     use_crop::Bool = false,
+    use_luna::Bool = false,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
     all_active::Bool = false,
@@ -76,6 +77,7 @@ function clm_initialize!(;
     # ---- Step 1: Set control flags ----
     varctl.use_cn = use_cn
     varctl.use_crop = use_crop
+    varctl.use_luna = use_luna
     varctl.create_crop_landunit = use_crop
     varctl.use_bedrock = use_bedrock
     varctl.all_active = all_active
@@ -131,7 +133,8 @@ function clm_initialize!(;
     ndecomp_cascade_transitions = use_cn ? 10 : 5
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                   nlevdecomp_full=nlevdecomp_full,
-                  ndecomp_cascade_transitions=ndecomp_cascade_transitions)
+                  ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+                  use_luna=use_luna)
 
     # ---- Step 9: Build subgrid hierarchy ----
     # Get lat/lon from surface file if not provided

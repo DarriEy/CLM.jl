@@ -1,30 +1,19 @@
 # =============================================================================
-# Multi-step CN/BGC drift harness (free-running).
+# Multi-step CN/BGC drift harness (free-running) — FULL contiguous window.
 #
-# Single-step parity (fortran_parity_common.jl) re-injects the Fortran state
-# before every step, so it measures per-step *translation* error. This harness
-# instead injects the Fortran restart ONCE and free-runs N steps, advancing
-# forcing + time each step, diffing the Julia trajectory against the Fortran
-# per-step `after_hydrologydrainage` dumps. It shows how/where the single-step
-# residuals COMPOUND (drift) and whether anything runs away.
+# Same as fortran_parity_drift.jl but explicitly runs the FULL contiguous dump
+# window [1757845, 1757872] = 28 steps (the longest run with BOTH a
+# before_step and after_hydrologydrainage dump), and additionally tracks the
+# RELATIVE error of the fast-drifting buffer pools cpool + xsmrpool (per-PFT)
+# rather than only printing cpool's raw value.
 #
-# Reference dumps: a contiguous window of before_step_n<N> + after_hydrology-
-# drainage_n<N> dumps (the summer window n1757845..n1757872, 28 steps).
-#
-# Findings (2026-06): drift is bounded — the temporary C/N buffer pools drift
-# fastest (cpool ~2e-4->2.9e-2, xsmrpool ~8e-4->3.5e-2 over a day), the mineral
-# N compounds to ~1% then plateaus, and the large long-memory pools (leafc,
-# decomp C/N) stay ≤1e-4. The cpool/xsmrpool drift is a coupled feedback that
-# integrates the known single-step residuals (FUN uptake, smin N-balance), not a
-# C leak — the single-step cpool budget conserves C.
-#
-# Usage: julia +1.12 --project=. scripts/fortran_parity_drift.jl
+# Usage: julia +1.12 --project=. scripts/fortran_parity_drift_full.jl
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
 const DRIFT_SUM    = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
-const DRIFT_N0     = 1757845          # first step with a dump
-const DRIFT_NSTEPS = 28               # contiguous dumps available
+const DRIFT_N0     = 1757845          # first step with BOTH before+after dump
+const DRIFT_NSTEPS = 28               # full contiguous window: 1757845..1757872
 const DRIFT_BASE   = 1753153          # nstep -> date base (DateTime(2002,1,1)+Hour(n-base))
 
 _relmax(jl, fa; thr = 1e-9) = begin
@@ -43,8 +32,6 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
     start_date = DateTime(2002, 1, 1) + Hour(n0 - DRIFT_BASE)
     ffile = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
     (inst, bounds, filt, tm) = build_bow_inst(; dtime = 3600, start_date = start_date, use_cn = true, use_luna = true)
-    # PHS+LUNA (Bow lnd_in): allocate LUNA vcmax/jmax fields so inject fills them,
-    # then seed vegwp from the IC dump so the first PHS Newton solve starts finite.
     if isempty(inst.photosyns.vcmx25_z_patch)
         inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)
         inst.photosyns.jmx25_z_patch  = fill(60.0, bounds.endp, CLM.NLEVCAN)
@@ -79,8 +66,11 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
 
     sbns = inst.soilbiogeochem_nitrogenstate; sbcs = inst.soilbiogeochem_carbonstate
     cs = inst.bgc_vegetation.cnveg_carbonstate_inst
-    println("step | sminn_vr | smin_nh4 | leafc | soil1c | cpool(tree)")
+    println("step | sminn_vr | smin_nh4 | leafc    | soil1c   | cpool    | xsmrpool | cpool(tree raw)")
     nl = CLM.varpar.nlevdecomp
+    # collect per-step rel errors for growth-rate analysis
+    hist = Dict{String,Vector{Float64}}("sminn"=>Float64[], "smin_nh4"=>Float64[],
+        "leafc"=>Float64[], "soil1c"=>Float64[], "cpool"=>Float64[], "xsmrpool"=>Float64[])
     for i in 0:(nsteps - 1)
         cur = start_date + Hour(i)
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
@@ -103,12 +93,44 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
         mnh = _relmax(sbns.smin_nh4_vr_col[1, 1:nl], Float64.(da["smin_nh4_vr"][1:nl, 1]))
         mlc = _relmax(cs.leafc_patch[2:3], Float64.(da["leafc"][2:3]))
         ms1 = _relmax(sbcs.decomp_cpools_vr_col[1, 1:nl, 4], Float64.(da["soil1c_vr"][1:nl, 1]))
+        mcp = _relmax(cs.cpool_patch[2:3], Float64.(da["cpool"][2:3]))
+        mxs = _relmax(cs.xsmrpool_patch[2:3], Float64.(da["xsmrpool"][2:3]))
         close(da)
-        println("n", lpad(i + 1, 2), " | ", rpad(round(msm, sigdigits = 3), 9), " | ",
-                rpad(round(mnh, sigdigits = 3), 9), " | ", rpad(round(mlc, sigdigits = 3), 9),
-                " | ", rpad(round(ms1, sigdigits = 3), 9), " | ", round(cs.cpool_patch[2], sigdigits = 4))
+        push!(hist["sminn"], msm); push!(hist["smin_nh4"], mnh); push!(hist["leafc"], mlc)
+        push!(hist["soil1c"], ms1); push!(hist["cpool"], mcp); push!(hist["xsmrpool"], mxs)
+        println("n", lpad(i + 1, 2), " | ", rpad(round(msm, sigdigits = 3), 8), " | ",
+                rpad(round(mnh, sigdigits = 3), 8), " | ", rpad(round(mlc, sigdigits = 3), 8),
+                " | ", rpad(round(ms1, sigdigits = 3), 8), " | ", rpad(round(mcp, sigdigits = 3), 8),
+                " | ", rpad(round(mxs, sigdigits = 3), 8), " | ", round(cs.cpool_patch[2], sigdigits = 4))
     end
     CLM.forcing_reader_close!(fr)
+
+    # ---- growth analysis ----
+    println("\n==== drift growth analysis (rel-err vs step) ====")
+    println("quantity | step1     | final     | mean Δ/step (last half) | ratio last/first | verdict")
+    for q in ["sminn", "smin_nh4", "leafc", "soil1c", "cpool", "xsmrpool"]
+        v = hist[q]; nstp = length(v)
+        first = v[1]; final = v[end]
+        # average per-step increment over the second half
+        h0 = max(2, nstp ÷ 2 + 1)
+        incs = [v[k] - v[k-1] for k in h0:nstp]
+        meaninc = isempty(incs) ? 0.0 : sum(incs) / length(incs)
+        # detect verdict: compare increment in 1st half vs 2nd half
+        inc1 = (v[nstp ÷ 2] - v[1]) / max(1, nstp ÷ 2 - 1)
+        inc2 = meaninc
+        ratio = final / max(first, 1e-30)
+        verdict = if inc2 < 0.4 * inc1
+            "PLATEAU"
+        elseif inc2 > 1.6 * inc1
+            "RUNAWAY(super-lin)"
+        else
+            "LINEAR"
+        end
+        println(rpad(q, 9), "| ", rpad(round(first, sigdigits=3), 10), "| ",
+                rpad(round(final, sigdigits=3), 10), "| ",
+                rpad(round(meaninc, sigdigits=3), 24), "| ",
+                rpad(round(ratio, sigdigits=4), 17), "| ", verdict)
+    end
     return inst, bounds
 end
 

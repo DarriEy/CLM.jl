@@ -138,12 +138,38 @@ using CLM
     include("test_clm_run.jl")
     include("test_ad_smoke.jl")
     include("test_ad_e2e.jl")
-    include("test_ad_robustness.jl")
+    # test_ad_robustness.jl runs below in an isolated subprocess (flakes in-process
+    # near AD phase-change discontinuities; passes standalone).
     include("test_calibration.jl")
     include("test_parameter_recovery.jl")
     include("test_enzyme_feasibility.jl")
     include("test_enzyme_smoke.jl")
     include("test_multisite_calibration.jl")
     include("test_cn_integration.jl")
-    include("test_fortran_parity.jl")   # gated on external Fortran reference dumps
+
+    # These tests each pass STANDALONE but flake when run in-process after the
+    # full suite — a cumulative global-state effect (precompile / method-
+    # invalidation / NCDataset-handle / float-state near AD discontinuities),
+    # not a single resettable global (verified: no subset reproduces it). The
+    # gated Fortran-parity files additionally depend on external dumps (skipped
+    # cleanly when absent). Running each in a FRESH subprocess gives it a clean
+    # global state. CLM precompilation is shared via the depot, so only the
+    # first subprocess pays the precompile cost.
+    @testset "Isolated subprocesses (global-state-sensitive)" begin
+        isolated_files = [
+            "test_fortran_parity.jl",            # per-step Julia↔Fortran (gated)
+            "test_fortran_parity_cn.jl",         # CN/BGC/PHS/LUNA/FUN (gated)
+            "test_fortran_parity_luna_decomp.jl",# LUNA cadence + decomp N-source (gated)
+            "test_fortran_parity_freewins.jl",   # soilresis, aerosol free-wins (gated)
+            "test_fortran_parity_luna_update.jl",# LUNA EOD vcmax/jmax update (gated)
+            "test_ad_robustness.jl",             # AD near phase-change discontinuities
+        ]
+        for f in isolated_files
+            path = joinpath(@__DIR__, f)
+            cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e "using Test, CLM; include(raw\"$(path)\")"`
+            @testset "$f (subprocess)" begin
+                @test success(pipeline(cmd; stdout = stdout, stderr = stderr))
+            end
+        end
+    end
 end

@@ -137,6 +137,25 @@
         @test isfinite(NUEjref)
         @test isfinite(NUEcref)
         @test isfinite(Kj2Kcref)
+        # Fortran ground truth (instrumented LunaMod NINVEST_F2 at nstep 1757880,
+        # reference NUE is config-independent): NUEcref=67.86, NUEjref=200.73.
+        # This locks in the kc25/ko25/cp25 ×1e5 "mol/mol → Luna units" conversion
+        # (LunaMod.F90 readParams) that luna_read_params! must apply; without it
+        # the reference Kc/Kj are wrong → vcmx25_opt ~0.67× Fortran.
+        @test isapprox(NUEcref, 67.86, atol=0.1)
+        @test isapprox(NUEjref, 200.73, atol=0.2)
+    end
+
+    # luna_read_params! must convert kc25/ko25/cp25 from mol/mol to Luna units (×1e5)
+    @testset "luna_read_params! mol/mol→Luna units (×1e5)" begin
+        lp = CLM.LunaParamsData()
+        # minimal NamedTuple-like dataset: only the scalars under test present
+        ds = Dict("cp25_yr2000" => [42.75e-6], "kc25_coef" => [404.9e-6],
+                  "ko25_coef" => [278.4e-3])
+        CLM.luna_read_params!(lp, ds)
+        @test isapprox(lp.cp25_yr2000, 4.275,  rtol=1e-6)   # 42.75e-6 × 1e5
+        @test isapprox(lp.kc25_coef,   40.49,  rtol=1e-6)   # 404.9e-6 × 1e5
+        @test isapprox(lp.ko25_coef,   27840.0, rtol=1e-6)  # 278.4e-3 × 1e5
     end
 
     # =====================================================================

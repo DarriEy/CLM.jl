@@ -64,6 +64,9 @@ function readParameters!(paramfile::String)
         haskey(ds, "a_exp")    && (canopy_fluxes_params.a_exp  = Float64(ds["a_exp"][1]))
         haskey(ds, "csoilc")   && (canopy_fluxes_params.csoilc = Float64(ds["csoilc"][1]))
         haskey(ds, "cv")       && (canopy_fluxes_params.cv     = Float64(ds["cv"][1]))
+
+        # LUNA photosynthetic-N acclimation parameters (jmaxb0/jmaxb1/wc2wjb0 + scalars)
+        luna_read_params!(luna_params_inst, ds)
     finally
         close(ds)
     end

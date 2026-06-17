@@ -1665,6 +1665,35 @@ function clm_drv_core!(config::CLMDriverConfig,
         energyflux_update_acc_vars!(ef, bc_patch;
             end_cd=is_end_curr_day, dtime=Int(dtime))
 
+        # LUNA photosynthetic-N acclimation — WIRED. Accumulate 24h climate each
+        # step; at end-of-day compute the 10-day means, recompute vcmx25_z/jmx25_z,
+        # and clear the 24h buffers. LUNA self-skips while the day accumulators are
+        # SPVAL (Fortran first-day bootstrap), so a restart-injected run where
+        # vcmx25_z is supplied stays unaffected until the accumulators fill. The
+        # forc_pco2/po2_240 + pbot240 10-day means are maintained above by
+        # atm2lnd_update_acc_vars!; the LUNA PAR arrays are allocated when use_luna
+        # (clm_instInit! → solarabs_init!). o3coefjmax=1: ozone–LUNA coupling off.
+        if config.use_luna
+            acc24_climate_luna!(cs, ps, alb, sa, temp, pch, filt.exposedvegp, bc_patch, dtime)
+            if is_end_curr_day
+                _luna_dayl = zeros(np)
+                @inbounds for p in 1:np
+                    g = pch.gridcell[p]
+                    _luna_dayl[p] = smooth_clamp((grc.dayl[g] * grc.dayl[g]) /
+                                                 (grc.max_dayl[g] * grc.max_dayl[g]), 0.01, 1.0)
+                end
+                acc240_climate_luna!(temp, ps, alb, sa, wdb, fv, pch, filt.exposedvegp, bc_patch,
+                    a2l.forc_po2_240_patch, a2l.forc_pco2_240_patch,
+                    fv.rb1_patch, wdb.rh_af_patch, dtime)
+                update_photosynthesis_capacity!(ps, temp, cs, alb, sa, wdb, fv, pch, grc,
+                    filt.exposedvegp, bc_patch, _luna_dayl,
+                    a2l.forc_pbot240_downscaled_patch, a2l.forc_pco2_240_patch, a2l.forc_po2_240_patch,
+                    pftcon.c3psn, pftcon.slatop, pftcon.leafcn, pftcon.rhol, pftcon.taul,
+                    fill(1.0, np), luna_params_inst, dtime, NLEVCAN)
+                clear24_climate_luna!(sa, ps, temp, pch, filt.exposedvegp, bc_patch)
+            end
+        end
+
         # Placeholder: bgc_vegetation_inst%UpdateAccVars!(bounds_proc, ...) [BGC accum]
 
         if config.use_crop

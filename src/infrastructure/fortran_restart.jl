@@ -161,8 +161,31 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     ws = inst.water.waterstatebulk_inst.ws
     set_col_2d!("H2OSOI_LIQ", ws.h2osoi_liq_col)
     set_col_2d!("H2OSOI_ICE", ws.h2osoi_ice_col)
+    # Recompute h2osoi_vol_col from the injected liq/ice. h2osoi_vol is normally a
+    # mid-step diagnostic refreshed AFTER SurfaceAlbedo runs, so on a restart-read
+    # it otherwise keeps the cold-start default (0.75*watsat, wet) — which biases
+    # the soil-albedo moisture blend (inc = 0.11 - 0.40*h2osoi_vol[c,1]) by ~6.5%.
+    # Formula matches lake_hydrology.jl / CLM (jj = j + nlevsno snow padding).
+    if !isempty(ws.h2osoi_vol_col) && !isempty(inst.column.dz)
+        dz = inst.column.dz
+        for c in 1:nc_jl, j in 1:nlevgrnd
+            jj = j + nlevsno
+            (jj <= size(ws.h2osoi_liq_col, 2) && jj <= size(dz, 2)) || continue
+            ws.h2osoi_vol_col[c, j] = ws.h2osoi_liq_col[c, jj] / (dz[c, jj] * DENH2O) +
+                                      ws.h2osoi_ice_col[c, jj] / (dz[c, jj] * DENICE)
+        end
+    end
     set_col_1d!("WA", v -> (ws.wa_col[1] = v))
     set_col_1d!("H2OSFC", v -> (ws.h2osfc_col[1] = v))
+
+    # Active-layer annual-max trackers (carried prognostic state). altmax/altmax_indx
+    # are re-tracked each step by alt_calc!, but altmax_lastyear is only refreshed at
+    # the year boundary, so it must be injected to match the Fortran restart.
+    al = inst.active_layer
+    set_col_1d!("altmax",               v -> (al.altmax_col[1]               = v))
+    set_col_1d!("altmax_lastyear",      v -> (al.altmax_lastyear_col[1]      = v))
+    set_col_1d!("altmax_indx",          v -> (al.altmax_indx_col[1]          = Int(round(v))))
+    set_col_1d!("altmax_lastyear_indx", v -> (al.altmax_lastyear_indx_col[1] = Int(round(v))))
 
     # Snow
     set_col_1d!("SNLSNO", v -> (inst.column.snl[1] = Int(v)))

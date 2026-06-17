@@ -190,7 +190,8 @@ function clm_instInit!(inst::CLMInstances;
                        np::Int,
                        nlevdecomp_full::Int = 10,
                        ndecomp_pools::Int = 7,
-                       ndecomp_cascade_transitions::Int = 5)
+                       ndecomp_cascade_transitions::Int = 5,
+                       use_luna::Bool = false)
 
     # --- Grid hierarchy ---
     gridcell_init!(inst.gridcell, ng)
@@ -215,14 +216,14 @@ function clm_instInit!(inst::CLMInstances;
     frictionvel_read_nml!(inst.frictionvel)
     frictionvel_read_params!(inst.frictionvel)
     lakestate_init!(inst.lakestate, nc, np)
-    solarabs_init!(inst.solarabs, np, nl)
+    solarabs_init!(inst.solarabs, np, nl; use_luna=use_luna)
     surfalb_init!(inst.surfalb, np, nc, ng)
 
     # --- Radiation diagnostics ---
     surfrad_init!(inst.surfrad, np)
 
     # --- Photosynthesis ---
-    photosynthesis_data_init!(inst.photosyns, np)
+    photosynthesis_data_init!(inst.photosyns, np; use_luna=use_luna)
 
     # --- Ozone ---
     ozone_init!(inst.ozone, np)
