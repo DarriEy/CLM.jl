@@ -139,5 +139,50 @@ using Dates
             @info "active_layer altmax parity" max_rel=gmax
             @test gmax < 1e-6
         end
+
+        # ----------------------------------------------------------------
+        # 4. surface_albedo — the radiation bands (albgrd/albgri/albd/albi/
+        #    fabd/fabi) RECOMPUTED by surface_albedo! during the step.
+        #    The main parity harness INJECTS these RT outputs as IC (to dodge
+        #    the cold-start albedo NaN), so it never diffs the module's own
+        #    output — an albedo bug could hide behind the injection (audit B).
+        #    Here we diff the POST-step recompute against the after_hydrology-
+        #    drainage dump: the step overwrites the injected IC, so this is a
+        #    genuine recompute. Agreement is ~1e-4 (albd/albi/albgri) up to
+        #    ~1.5e-3 (fabd) — a real ~0.1% residual (soil-albedo / coszen-timing,
+        #    not chased here), much looser than soilresis's 1e-8 but a true
+        #    Fortran diff that guards against gross albedo regressions.
+        # ----------------------------------------------------------------
+        @testset "surface_albedo (radiation bands)" begin
+            sa = inst.surfalb
+            ds = NCDataset(edump, "r")
+            relf(a, b) = abs(a - b) / (1.0 + max(abs(a), abs(b)))
+            # column-indexed (numrad bands), 1 column
+            col_fields = (("albgrd", sa.albgrd_col), ("albgri", sa.albgri_col))
+            # patch-indexed (numrad bands); diff the two vegetated patches (2,3)
+            pat_fields = (("albd", sa.albd_patch), ("albi", sa.albi_patch),
+                          ("fabd", sa.fabd_patch), ("fabi", sa.fabi_patch))
+            gmax = 0.0; nchecked = 0
+            for (nm, arr) in col_fields
+                haskey(ds, nm) || continue
+                for b in 1:2
+                    f = ismissing(ds[nm][b, 1]) ? NaN : Float64(ds[nm][b, 1])
+                    isnan(f) && continue
+                    gmax = max(gmax, relf(Float64(arr[1, b]), f)); nchecked += 1
+                end
+            end
+            for (nm, arr) in pat_fields
+                haskey(ds, nm) || continue
+                for p in 2:3, b in 1:2
+                    f = ismissing(ds[nm][b, p]) ? NaN : Float64(ds[nm][b, p])
+                    isnan(f) && continue
+                    gmax = max(gmax, relf(Float64(arr[p, b]), f)); nchecked += 1
+                end
+            end
+            close(ds)
+            @info "surface_albedo bands parity (recompute vs Fortran)" max_rel=gmax nchecked
+            @test nchecked > 0           # the bands were actually present + diffed
+            @test gmax < 3e-3            # recompute matches Fortran to ~0.1%
+        end
     end
 end
