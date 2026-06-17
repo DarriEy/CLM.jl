@@ -94,6 +94,11 @@
         cnveg_cf = CLM.CNVegCarbonFluxData()
         cnveg_cf.gpp_before_downreg_patch = [gpp]
         cnveg_cf.availc_patch             = [availc]
+        # npp_growth is read by the use_fun branch of calc_plant_cn_alloc!
+        # (plant_calloc = npp_growth). Real callers size it via nanvec(np); this
+        # builder must too, else the FUN test hits a 0-element BoundsError under
+        # --check-bounds=yes (CI). Seed with availc (C available for new growth).
+        cnveg_cf.npp_growth_patch         = [availc]
         cnveg_cf.excess_cflux_patch       = [0.0]
         cnveg_cf.plant_calloc_patch       = [0.0]
         cnveg_cf.psnsun_to_cpool_patch    = [6.0]
