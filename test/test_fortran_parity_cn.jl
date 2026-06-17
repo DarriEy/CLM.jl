@@ -96,6 +96,7 @@ using Dates
                 forcing_file=forcing2002)
 
             sns = inst.soilbiogeochem_nitrogenstate
+            scs = inst.soilbiogeochem_carbonstate
             cnf = inst.bgc_vegetation.cnveg_nitrogenflux_inst
             cf  = inst.bgc_vegetation.cnveg_carbonflux_inst
 
@@ -104,9 +105,32 @@ using Dates
             # (a) mineral N per-layer rel err < 1e-3 (verified worst 0.024%; 4× headroom)
             sminn_err   = minn_relerr(sns.sminn_vr_col,    ds, "sminn_vr")
             smin_nh4_err = minn_relerr(sns.smin_nh4_vr_col, ds, "smin_nh4_vr")
-            @info "single-step mineral-N max rel err" sminn=sminn_err smin_nh4=smin_nh4_err
+            smin_no3_err = minn_relerr(sns.smin_no3_vr_col, ds, "smin_no3_vr")
+            @info "single-step mineral-N max rel err" sminn=sminn_err smin_nh4=smin_nh4_err smin_no3=smin_no3_err
             @test sminn_err   < 1e-3
             @test smin_nh4_err < 1e-3
+            @test smin_no3_err < 1e-3
+
+            # (a2) FULL decomp-cascade C/N pools per-layer (litr1-3, soil1-3, cwd):
+            #   the SoilBiogeochem decomposition output state in the dump, all
+            #   populated but previously undiffed (only soil1c was checked). The
+            #   *rates* (GROSS_NMIN_VR_P etc.) are zeroed pre-dump and useless, but
+            #   the integrated pool STATE validates the whole cascade. Pool index
+            #   map: 1-3 litr1-3, 4-6 soil1-3, 7 cwd (config i_cwd=7). Verified
+            #   worst ~1.6e-4 (litr1n, the fast metabolic pool); slow pools
+            #   (soil3/cwd) near machine-exact ~1.5e-8. Asserted < 1e-3.
+            decomp_pool_map = (("litr1", 1), ("litr2", 2), ("litr3", 3),
+                               ("soil1", 4), ("soil2", 5), ("soil3", 6), ("cwd", 7))
+            decomp_cmax = 0.0; decomp_nmax = 0.0
+            for (nm, p) in decomp_pool_map
+                cerr = minn_relerr(view(scs.decomp_cpools_vr_col, :, :, p), ds, "$(nm)c_vr")
+                nerr = minn_relerr(view(sns.decomp_npools_vr_col, :, :, p), ds, "$(nm)n_vr")
+                isnan(cerr) || (decomp_cmax = max(decomp_cmax, cerr))
+                isnan(nerr) || (decomp_nmax = max(decomp_nmax, nerr))
+            end
+            @info "single-step decomp-cascade pool max rel err" Cpools=decomp_cmax Npools=decomp_nmax
+            @test decomp_cmax < 1e-3
+            @test decomp_nmax < 1e-3
 
             # patch remap (Fortran np may differ from Julia np; match by PFT itype)
             f_pfts  = Int.(ds["pfts1d_itypveg"][:])
