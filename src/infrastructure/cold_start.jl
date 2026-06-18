@@ -3,6 +3,18 @@
 # Ported from scattered *InitTimeConst subroutines in CLM Fortran
 # ==========================================================================
 
+# When true, the cold-start soil temperature + moisture are initialized to the EXACT
+# CLM5/Fortran values (soil 272 K → frozen, h2osoi_vol = 0.15 for j<=nbedrock) so a
+# TRUE Julia cold start is byte-faithful to Fortran's (validated by
+# scripts/fortran_parity_aripuana_coldstart.jl). DEFAULT false uses the latitude-based
+# mean-annual-temperature estimate + 0.75*watsat moisture (a more physical, non-Fortran
+# cold start). It is GATED rather than default because the injection-based parity
+# harnesses re-use cold_start! for non-injected fields and rely on the latitude default;
+# flipping the default to match Fortran is the goal but needs those harnesses made
+# cold-start-independent first. Toggle with coldstart_match_fortran!(::Bool).
+const COLDSTART_MATCH_FORTRAN = Ref(false)
+coldstart_match_fortran!(b::Bool) = (COLDSTART_MATCH_FORTRAN[] = b; nothing)
+
 """
     cold_start_initialize!(inst, bounds, filt, surf)
 
@@ -192,44 +204,63 @@ Set initial temperature profiles for cold start.
 """
 function init_temperatures!(inst::CLMInstances, bounds::BoundsType)
     temp = inst.temperature
+    col  = inst.column
+    lun  = inst.landunit
     nlevsno = varpar.nlevsno
     nlevmaxurbgrnd = varpar.nlevmaxurbgrnd
     nlevlak = varpar.nlevlak
 
-    # Estimate mean annual temperature from latitude for cold-start init.
-    # At 274 K (previous default), deep soil at high latitudes never freezes,
-    # causing excessive winter drainage. Use latitude-based estimate instead.
+    if COLDSTART_MATCH_FORTRAN[]
+        # Reproduce Fortran TemperatureType::InitCold EXACTLY (the CLM5 cold-start
+        # values, for byte-faithful cold-start parity): standard soil/crop columns are
+        # initialized at 272 K (below freezing → the soil starts frozen), wetland at
+        # 277 K, land-ice at 250 K; surface water at 274 K; vegetation/skin/2 m at 283 K.
+        # (See scripts/fortran_parity_aripuana_coldstart.jl for the proof.)
+        for c in bounds.begc:bounds.endc
+            l = col.landunit[c]
+            lit = lun.itype[l]
+            tsoil = lit == ISTICE ? 250.0 : (lit == ISTWET ? 277.0 : 272.0)
+            temp.t_grnd_col[c] = tsoil
+            for j in 1:(nlevsno + nlevmaxurbgrnd)
+                temp.t_soisno_col[c, j] = tsoil
+            end
+            for j in 1:nlevlak
+                temp.t_lake_col[c, j] = tsoil + 5.0
+            end
+            temp.t_h2osfc_col[c] = 274.0
+            temp.t_h2osfc_bef_col[c] = 274.0
+        end
+        for p in bounds.begp:bounds.endp
+            temp.t_veg_patch[p] = 283.0
+            temp.t_stem_patch[p] = 283.0
+            temp.t_skin_patch[p] = 283.0
+            temp.t_ref2m_patch[p] = 283.0
+        end
+        return nothing
+    end
+
+    # ---- Non-matching (Julia physical default): latitude-based MAT estimate ----
+    # At 274 K, deep soil at high latitudes never freezes → excessive winter drainage.
     lat = length(inst.gridcell.latdeg) > 0 ? inst.gridcell.latdeg[1] : 45.0
     T_INIT = max(250.0, 288.0 - 0.5 * abs(lat))  # rough MAT approximation
 
     for c in bounds.begc:bounds.endc
         temp.t_grnd_col[c] = T_INIT
-
-        # Soil/snow temperature — set with depth-dependent offset
-        # Deep soil converges to mean annual T; surface starts cooler in cold climates
         for j in 1:(nlevsno + nlevmaxurbgrnd)
             temp.t_soisno_col[c, j] = T_INIT
         end
-
-        # Lake temperature
         for j in 1:nlevlak
             temp.t_lake_col[c, j] = T_INIT + 2.0
         end
-
-        # Surface water temperature (must be valid even when frac_h2osfc=0
-        # because 0.0 * NaN = NaN in IEEE 754)
         temp.t_h2osfc_col[c] = T_INIT
         temp.t_h2osfc_bef_col[c] = T_INIT
     end
-
-    # Patch-level temperatures
     for p in bounds.begp:bounds.endp
         temp.t_veg_patch[p] = T_INIT
         temp.t_stem_patch[p] = T_INIT
         temp.t_skin_patch[p] = T_INIT
         temp.t_ref2m_patch[p] = T_INIT
     end
-
     nothing
 end
 
@@ -267,12 +298,30 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
             ws.h2osoi_ice_col[c, jj] = 0.0
         end
 
-        # Set soil layers to initial volumetric water content
+        # Set soil layers to initial volumetric water content.
         for j in 1:nlevsoi
-            vol_liq = 0.75 * ss.watsat_col[c, j]
-            ws.h2osoi_vol_col[c, j] = vol_liq
-            ws.h2osoi_liq_col[c, j + joff] = vol_liq * col.dz[c, j + joff] * DENH2O
-            ws.h2osoi_ice_col[c, j + joff] = 0.0
+            if COLDSTART_MATCH_FORTRAN[]
+                # Fortran WaterStateType::InitCold standard soil: h2osoi_vol = 0.15
+                # for j <= nbedrock, else 0 (bedrock layers stay dry). The 0.75*watsat
+                # branch is for organic/special columns only. The vol is then split by
+                # temperature: a frozen layer (t_soisno <= TFRZ) becomes ALL ICE
+                # (dz*DENICE*vol), a thawed layer all liquid (dz*DENH2O*vol).
+                nbr = min(col.nbedrock[c], nlevsoi)  # nbedrock = nlevsoi when use_bedrock=false
+                vol = j <= nbr ? 0.15 : 0.0
+                ws.h2osoi_vol_col[c, j] = vol
+                if inst.temperature.t_soisno_col[c, j + joff] <= TFRZ
+                    ws.h2osoi_ice_col[c, j + joff] = col.dz[c, j + joff] * DENICE * vol
+                    ws.h2osoi_liq_col[c, j + joff] = 0.0
+                else
+                    ws.h2osoi_ice_col[c, j + joff] = 0.0
+                    ws.h2osoi_liq_col[c, j + joff] = col.dz[c, j + joff] * DENH2O * vol
+                end
+            else
+                vol_liq = 0.75 * ss.watsat_col[c, j]
+                ws.h2osoi_vol_col[c, j] = vol_liq
+                ws.h2osoi_liq_col[c, j + joff] = vol_liq * col.dz[c, j + joff] * DENH2O
+                ws.h2osoi_ice_col[c, j + joff] = 0.0
+            end
         end
 
         # Initialize h2osoi_vol for bedrock layers (nlevsoi+1:nlevgrnd) to zero
