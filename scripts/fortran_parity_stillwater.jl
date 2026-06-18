@@ -15,20 +15,20 @@
 # parity diffs column 1 (natveg) + the natveg patches, exactly like the Bow
 # harness; the phantom lake column/patch is injected as default and ignored.
 #
-# RESULT (nstep 18, this is the FIRST off-Bow Julia↔Fortran parity):
-#   T_GRND 0.0 (exact), ZWT 2.9e-10, H2OSFC 0.0, T_SOISNO 1.4e-3 (0.1%),
-#   T_VEG 8.6e-3 (0.86%), SNOW_DEPTH 1.7e-2 — temperature/energy state matches.
-# KNOWN RESIDUALS (localized; root-cause needs Fortran-instrumented ground truth):
-#   - H2OSOI_LIQ/ICE ~15–23% — localized to PHASE-CHANGE MELT in the top 2 soil
-#     layers only (layers 3+ exact; total water conserved, it's the liq/ice
-#     split). Julia melts ~1.5× too much ice. cv + the surface-corrected `fact`
-#     are VERIFIED correct (cv kernel = 26474 J/m2/K for layer 1). Back-solving
-#     the melt: Julia's TENTATIVE top-layer temperature (after the tridiagonal
-#     solve, before phase change) overshoots freezing by ~7.5 K vs Fortran's
-#     implied ~4.95 K → so the divergence is UPSTREAM in the tridiagonal
-#     soil-temperature solve / thermal conductivity, not the phase change.
-#     Next: instrument Fortran SoilTemperatureMod for the layer-1 tentative t /
-#     tk and compare.
+# RESULT (this is the FIRST off-Bow Julia↔Fortran parity):
+#   nstep 18 (day): global max|rel| 1.77e-2 (SNOW_DEPTH). T_GRND 0.0 (exact),
+#     T_SOISNO 4.3e-8, T_VEG 8.0e-6, H2OSOI_LIQ 7.5e-4, H2OSOI_ICE 1.7e-3, ZWT 2.9e-10.
+#   nstep 1 (night): global max|rel| 4.44e-2 (T_VEG). T_GRND 5.5e-3, all finite.
+# KNOWN RESIDUALS:
+#   - H2OSOI_LIQ/ICE 15–23% (daytime) — RESOLVED 2026-06-18. NOT a phase-change /
+#     SoilTemperature / SurfaceRadiation bug: it was a FORCING-RECORD off-by-one.
+#     Fortran reads the forcing at the START of the step interval (the step that
+#     yields nstep N uses base+(N-1)h); the harness read base+(N)h → a one-hour-late
+#     FSDS (nstep 18: 505.6 vs the correct 412.2 W/m²) → +22.7% incident solar →
+#     SABV *and* SABG uniformly 1.227× high (the two-stream/albedo were exact all
+#     along) → spurious top-layer ice melt. Fixed via force_date=base+Hour(max(N-1,1)).
+#     H2OSOI_LIQ/ICE 23%/15% → 7.5e-4/1.7e-3; T_SOISNO 1.4e-3 → 4.3e-8; T_VEG → 8e-6.
+#   - SNOW_DEPTH ~1.8% (now the top daytime residual) — not yet chased.
 #   - NIGHT step (nstep 1) NaN — RESOLVED 2026-06-18. Root cause: read_fortran_restart!
 #     injected the restart's PRE-SatellitePhenology veg structure (cold-start zeros:
 #     elai=esai=htop=0) over cold_start!'s correct surfdata-derived values (elai=0.5,
@@ -107,7 +107,13 @@ end
 function main(; nstep::Int = 18)
     base = DateTime(2002, 1, 1)             # Fortran nstep-0 date
     step_date = base + Hour(nstep - 1)      # state at start of the step (nstep-1)
-    force_date = base + Hour(nstep)         # forcing record read for this step (file starts 01:00)
+    # Fortran reads the forcing at the START of the step interval: the step that
+    # yields nstep N integrates (N-1)→N and uses the record at base+(N-1)h. The
+    # clmforc file starts 01:00 (rec 1), so nstep 1 (interval 00:00→01:00, start
+    # 00:00) clamps to rec 1. The previous base+Hour(nstep) read the END-of-interval
+    # record → a one-hour-late FSDS (e.g. nstep 18: 505.6 vs the correct 412.2 W/m²)
+    # → +23% absorbed solar → spurious top-layer melt (H2OSOI_LIQ/ICE 15–23%).
+    force_date = base + Hour(max(nstep - 1, 1))
     (inst, bounds, filt, tm) = build_stillwater_inst(; start_date=step_date)
     @printf("Stillwater inst: nc=%d np=%d  PFTs=%s\n", bounds.endc, bounds.endp, string(Int.(inst.patch.itype)))
 
