@@ -19,18 +19,27 @@
 #       cold-starts the soil ice-filled (a generic IC, unphysical for the tropics);
 #       it thaws over the first ~6 steps. Probing n2: Fortran warms the top soil
 #       layer to 274.08 K (all ice melted + heated past freezing) while Julia stays
-#       at 273.15 K still melting — i.e. Fortran DELIVERS more heat to the cold soil
-#       (~330 vs Julia's eflx_soil_grnd 209.7 W/m²); the phase change correctly
-#       follows whatever heat arrives. The deficit is the BAREGROUND surface flux: at
-#       cold start the exposed-veg filter hasn't activated (injected
-#       FRAC_VEG_NOSNO_ALB = 0 for all patches, despite elai=5), so the warm tropical
-#       air (296.8 K) sits over the frozen ground (273.15 K) as a STRONGLY STABLE
-#       layer. Julia's Monin-Obukhov solve over-suppresses turbulence there
-#       (ustar 0.043 m/s, ram1 553 s/m), throttling the downward sensible heat
-#       (−47.6 W/m²) more than Fortran does → slower thaw. (obu goes NaN as a
-#       converged diagnostic but ram1/ustar are finite and drive the flux.) Only the
-#       extreme stable stratification of the unphysical frozen-tropical IC exposes
-#       this; the settled regime (no such gradient) is exact (n7+).
+#       at 273.15 K still melting — i.e. Fortran delivers more heat to the cold soil
+#       (eflx_soil_grnd ~352 W/m² implied vs Julia's 209.7); the phase change follows
+#       whatever heat arrives. At cold start the exposed-veg filter hasn't activated
+#       (injected FRAC_VEG_NOSNO_ALB = 0 for all patches, despite elai=5), so warm
+#       tropical air (296.8 K) sits over the frozen ground (273.15 K) as a STRONGLY
+#       STABLE layer, and the humid air condenses on it (latent eflx_lh_grnd -69.7 +
+#       sensible -47.6 W/m², both INTO the ground).
+#       FULL M-O INVESTIGATION (2026-06-18) — the "Julia over-suppresses the
+#       Monin-Obukhov resistance" hypothesis is DISPROVEN. The friction-velocity / M-O
+#       scheme is BYTE-FAITHFUL to Fortran: the stable stability functions, a_coef/
+#       a_exp (0.13/0.45, verified read), zetamaxstable (0.5), the 3-iteration loop,
+#       zldis (= forc_hgt_u_patch with the stale canopy displa = 53.46, matching
+#       BareGroundFluxesMod:318 exactly), and the convergence (zeta→0.5 capped, clean)
+#       ALL match Fortran. So the residual is NOT the surface turbulence scheme — it is
+#       the COUPLED SOIL-ENERGY solve over the frozen profile: the implicit t_grnd /
+#       phase-change coupling at the melt-out layer (Fortran's surface warms past
+#       freezing as soil1 fully thaws; Julia's stays pinned at 273.15 still melting).
+#       Pinning the exact term (G, dhsdT, thk) needs Fortran-side instrumentation the
+#       clean exe (no dump SourceMods) doesn't provide. Only the unphysical
+#       frozen-tropical IC exposes it; the settled regime is exact (n7+). (obu goes NaN
+#       only as a post-iteration diagnostic; the M-O iteration itself is finite.)
 #     - nstep 14–22 (H2OSOI_LIQ ~5e-4→1e-2): a small daytime soil-water difference
 #       (tropical high-moisture transpiration/evaporation), T_VEG/T_GRND ≤1.5e-3.
 #   So the model is byte-faithful in the settled tropical regime; the >1e-2 points are
