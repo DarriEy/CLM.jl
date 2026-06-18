@@ -12,6 +12,22 @@
 # Forcing is read at the START of each step interval (the step yielding nstep s
 # reads the record at base+(s-1)h, clamped to rec 1; the clmforc file starts 01:00).
 #
+# RESULT (24-step free-run, 2026-06-18): core thermodynamic/hydrologic state tracks
+# Fortran tightly the WHOLE day with NO drift — T_GRND/T_SOISNO/T_VEG/H2OSOI ≤~1.3e-2
+# every step. Two characterized (non-thermodynamic) residuals remain:
+#   - nsteps 1–2 T_VEG (4.4e-2 → 2.7e-2): cold-start canopy-activation transient.
+#     Fortran leaves T_VEG STALE on step 1 and = forc_t on step 2 (its exposed-veg
+#     filter ramps on over ~3 steps); Julia solves the canopy from step 1. The solve
+#     itself is exact at nstep 18 (T_VEG 8e-6). Converges to <1.5e-3 by n3, 5e-4 by n6.
+#   - nsteps 3–17 SNOW_DEPTH (~5%): a trace-FROST diagnostic, not snowfall
+#     (FORC_SNOW_G = 0 every step). The overnight pack is pure frost deposition
+#     (h2osno ~1e-5 mm); Julia's frost ONSETS one step early (n3 vs Fortran's n4,
+#     flux ~9.4e-10 kg/m²/s — a knife's-edge surface-humidity-flux tip), and after
+#     onset the frost amounts track within ~8%. snow_depth = (trace frost)/(tiny
+#     frac_sno_eff·bifall) amplifies it into a physically meaningless "depth"
+#     (density ~0.0002 kg/m³). It fully melts at daytime (n18); thermodynamic state
+#     is unaffected. Not a code bug — left as a documented ill-conditioned diagnostic.
+#
 # Usage: julia +1.12 --project=. scripts/fortran_parity_stillwater_multistep.jl [NSTEPS]
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
