@@ -16,22 +16,29 @@
 # harness; the phantom lake column/patch is injected as default and ignored.
 #
 # RESULT (this is the FIRST off-Bow Julia↔Fortran parity):
-#   nstep 18 (day): global max|rel| 1.68e-5 (near machine precision). T_GRND/
-#     SNOW_DEPTH 0.0 exact, T_SOISNO 1.2e-7, T_VEG 8.0e-6, H2OSOI_LIQ 1.7e-5,
-#     H2OSOI_ICE 1.0e-5, ZWT 2.9e-10.
-#   nstep 1 (night): global max|rel| 4.44e-2 (T_VEG). T_GRND 5.5e-3, all finite.
-# REMAINING (characterized, not a steady-state bug):
-#   - NIGHT nstep-1 T_VEG 4.44e-2 — a COLD-START canopy-ACTIVATION transient, not a
-#     canopy-solve error (the solve is exact at nstep 18: T_VEG 8e-6). Fortran's
-#     exposed-veg filter ramps on over the first ~3 steps: its T_VEG is left STALE at
-#     nstep 1 (= the injected 280.6, canopy not solved), = forc_t at nstep 2
-#     (bareground), and only canopy-solved from nstep 3. Julia (carrying the full
-#     cold_start veg structure it needs to avoid the nstep-1 z0 NaN) solves the
-#     canopy from step 1, so its veg-patch T_VEG cools to ~268 K vs Fortran's stale
-#     280.6. The multi-step free-run confirms it is a 2-step transient: T_VEG rel
-#     4.4e-2 (n1) → 2.7e-2 (n2) → <1.5e-3 (n3) → 5e-4 (n6). Matching Fortran's exact
-#     first-step filter ramp needs its cold-start sequencing (absent from the dumps)
-#     and would risk the validated daytime parity — left as a documented transient.
+#   The single-step parity is now < 1e-2 at EVERY nstep EXCEPT nstep 1 — most steps
+#   are ~1e-7 (machine precision). Representative:
+#     nstep 4/10/17 (snow accum): 5.5e-8 / 4.4e-8 / 4.2e-6
+#     nstep 2 (bareground):       1.3e-5
+#     nstep 18 (day):             1.68e-5  (T_GRND/SNOW_DEPTH exact, T_VEG 8.0e-6)
+#     nstep 1 (night):            2.2e-2   (T_VEG — see below)
+#
+# THE nstep-1 RESIDUAL IS A COLD-START INITIALIZATION ARTIFACT, NOT A MODEL ERROR —
+# and NOT one we should "fix" by matching Fortran. The dumps show Fortran does not
+# update T_VEG on its literal first timestep: before_step_n1 T_VEG = after_n1 T_VEG =
+# 280.6 (the cold-start IC, unchanged — Fortran's exposed/noexposed-veg flux filters
+# are both empty on step 1, so no patch is processed). It then sets T_VEG = forc_t at
+# nstep 2 (bareground) and only solves the canopy energy balance from nstep 3 (266.8).
+# Julia solves the canopy on step 1, so its veg-patch T_VEG = 268 K — the correct
+# nocturnal energy-balance value, within ~1 K of the converged temperature Fortran
+# itself reaches at n3. So Fortran's 280.6 contains NO canopy physics (it's an
+# uninitialized IC); Julia's 268 is physically correct. Making Julia output 280.6
+# would mean reproducing a non-physical initialization artifact — degrading a correct
+# canopy temperature to match an IC for one step — so we DELIBERATELY do not. The
+# canopy solve itself is exact (nstep 18 T_VEG 8e-6) and the difference washes out by
+# nstep 3 (multi-step free-run: T_VEG 2.2e-2 @n1 → 2.8e-2 @n2 → <1.5e-3 @n3 → 5e-4 @n6).
+# Bottom line: n1 is an initialization comparison, not a physics comparison; the 2.2e-2
+# reflects Julia being MORE correct, not less. Left honest and documented.
 # RESOLVED RESIDUALS:
 #   - H2OSOI_LIQ/ICE 15–23% (daytime) — was a FORCING-RECORD off-by-one. Fortran
 #     reads the forcing at the START of the step interval (the step that yields
@@ -58,6 +65,17 @@
 #     canopy_fluxes.jl: re-seed z0mv from the bare-canopy z0 (z0m_patch) each step and
 #     floor it with z0mg in the log-blend. Night nstep 1 now: T_GRND 5.5e-3, T_VEG
 #     4.4e-2, all finite (was NaN).
+#   - SNOW_DEPTH ~5% (overnight accum) — was a MISSING bifall wind term. With h2osno
+#     (snow WATER), frac_sno, frac_sno_eff, forc_t all matching Fortran exactly, only
+#     bifall (new-snow density) differed (106.3 vs 111.8). Fortran's lnd_in sets
+#     wind_dependent_snow_density=.true. (adds 266.861·((1+tanh(wind/fact))/2)^8.8 =
+#     +5.5 at the ~1.5 m/s wind). The global Julia default keeps it FALSE (the ^8.8 is
+#     AD-unfriendly: breaks the 250 K FD-vs-AD check); this harness sets it true via
+#     snow_hydrology_set_control_for_testing! to match the namelist. → n4/n10/n17 5e-2
+#     → ~1e-7.
+#   - nstep-2 T_VEG 2.7e-2 — read_fortran_restart! now injects FRAC_VEG_NOSNO_ALB
+#     (Fortran's prev-step exposed-veg flag, which ramps on over ~3 cold-start steps),
+#     so Julia is bareground when Fortran's filter hasn't activated. → n2 to 1.3e-5.
 #
 # Usage: julia +1.12 --project=. scripts/fortran_parity_stillwater.jl
 # =============================================================================
