@@ -17,7 +17,8 @@ using NCDatasets
 Read a Fortran CLM5 restart file and inject all compatible state variables
 into CLM.jl instances. Handles dimension mismatches gracefully.
 """
-function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType)
+function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType;
+                               inject_veg_struct::Bool = true)
     isfile(filepath) || error("Restart file not found: $filepath")
 
     ds = NCDataset(filepath, "r")
@@ -296,13 +297,23 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
         set_patch_1d!("tair10", inst.temperature.t_a10_patch)
     end
 
-    # Canopy state
-    set_patch_1d!("elai", inst.canopystate.elai_patch)
-    set_patch_1d!("esai", inst.canopystate.esai_patch)
-    set_patch_1d!("tlai", inst.canopystate.tlai_patch)
-    set_patch_1d!("tsai", inst.canopystate.tsai_patch)
-    set_patch_1d!("htop", inst.canopystate.htop_patch)
-    set_patch_1d!("hbot", inst.canopystate.hbot_patch)
+    # Canopy state. The restart stores the PRE-SatellitePhenology veg structure
+    # (the value persisted at the END of the previous step). At a cold-start FIRST
+    # step that is all-zero, whereas the flux calcs need the POST-SP structure that
+    # SatellitePhenology sets in-step from the surfdata monthly LAI/SAI/height —
+    # which cold_start! already computed identically. Injecting the restart zeros
+    # would clobber that into a leafless "canopy" (elai=0 but frac_veg_nosno_alb=1,
+    # htop=0 → log(0) in the z0 blend → t_veg=NaN). `inject_veg_struct=false` keeps
+    # the cold_start surfdata structure so the single-step flux matches Fortran's
+    # post-SP state (needed off-Bow, where dumps carry pre-SP zeros).
+    if inject_veg_struct
+        set_patch_1d!("elai", inst.canopystate.elai_patch)
+        set_patch_1d!("esai", inst.canopystate.esai_patch)
+        set_patch_1d!("tlai", inst.canopystate.tlai_patch)
+        set_patch_1d!("tsai", inst.canopystate.tsai_patch)
+        set_patch_1d!("htop", inst.canopystate.htop_patch)
+        set_patch_1d!("hbot", inst.canopystate.hbot_patch)
+    end
     set_patch_1d!("fsun", inst.canopystate.fsun_patch)
 
     # SurfaceAlbedo radiative-transfer outputs from the PREVIOUS step. CLM calls

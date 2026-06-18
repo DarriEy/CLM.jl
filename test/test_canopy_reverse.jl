@@ -44,6 +44,9 @@
         canopystate.elai_patch[1] = 2.0;  canopystate.esai_patch[1] = 0.5
         canopystate.laisun_patch[1] = 1.2; canopystate.laisha_patch[1] = 0.8
         canopystate.displa_patch[1] = 5.0; canopystate.htop_patch[1] = 10.0
+        # Bare-canopy momentum z0 (z0mr*htop): canopy_fluxes! re-seeds z0mv from this
+        # each step, so set it when bypassing the preflux z0m/displa kernel.
+        canopystate.z0m_patch[1] = 0.5
         canopystate.frac_veg_nosno_patch[1] = 1; canopystate.dleaf_patch[1] = 0.04
         canopystate.stem_biomass_patch[1] = 0.0; canopystate.leaf_biomass_patch[1] = 0.0
         canopystate.tlai_patch[1] = 2.0

@@ -988,7 +988,11 @@ end
             lt = smooth_min(elai[p] + esai[p], T(TLSAI_CRIT))
             egvf = (one(T) - T(ALPHA_AERO) * exp(-lt)) / (one(T) - T(ALPHA_AERO) * exp(-T(TLSAI_CRIT)))
             displa[p] = egvf * displa[p]
-            z0mv[p] = exp(egvf * log(z0mv[p]) + (one(T) - egvf) * log(z0mg[c]))
+            # Floor the bare-canopy z0 with the ground z0 before the log-blend: at
+            # a zero-height canopy (htop=0 → z0mv=0, e.g. the first cold-start step
+            # before veg-structure sets htop) log(0)=-Inf and egvf·log(0) → NaN.
+            # Flooring → z0mv collapses to z0mg (the bare-ground limit), finite.
+            z0mv[p] = exp(egvf * log(smooth_max(z0mv[p], z0mg[c])) + (one(T) - egvf) * log(z0mg[c]))
         else                # Meier2022 (z0_method == 2; host-validated)
             lt = smooth_max(T(1.0e-5), elai[p] + esai[p])
             displa[p] = htop[p] *
@@ -1566,6 +1570,14 @@ function canopy_fluxes_core!(
         z0v_Cr_pft = _z0v_dev(z0v_Cr_pft); z0v_c_pft = _z0v_dev(z0v_c_pft)
         z0v_cw_pft = _z0v_dev(z0v_cw_pft)
     end
+    # The ZengWang2007 (z0_method==1) branch blends z0mv with the ground z0mg via
+    # exp(egvf*log(z0mv[p]) + ...), reading z0mv_patch AS INPUT — it must be the
+    # bare-canopy roughness (z0mr*htop). preflux_z0m_displa! computes that into
+    # canopystate.z0m_patch, but the kernel reads frictionvel.z0mv_patch; seed it
+    # here. Otherwise z0mv_patch is uninitialized (NaN) at the first cold-start
+    # canopy step → log(NaN) → z0mv=NaN → forc_hgt_u=NaN → ustar=NaN → t_veg=NaN.
+    # (Meier2022 overwrites z0mv from htop, so this is a harmless no-op there.)
+    frictionvel.z0mv_patch .= canopystate.z0m_patch
     _launch!(_cf_z0_kernel!, canopystate.displa_patch, frictionvel.z0mv_patch,
         frictionvel.z0hv_patch, frictionvel.z0qv_patch, frictionvel.forc_hgt_u_patch,
         frictionvel.forc_hgt_t_patch, frictionvel.forc_hgt_q_patch, filterp,

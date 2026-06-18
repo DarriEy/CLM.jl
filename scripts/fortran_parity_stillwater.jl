@@ -29,11 +29,16 @@
 #     soil-temperature solve / thermal conductivity, not the phase change.
 #     Next: instrument Fortran SoilTemperatureMod for the layer-1 tentative t /
 #     tk and compare.
-#   - NIGHT steps NaN the ground-temp / canopy solve (t_grnd→NaN at coszen=0,
-#     vegetated patches frac_veg_nosno=1 but winter elai=0). NOT the forc_hgt
-#     bug (setting forc_hgt_u/t/q=30 — done below — does not resolve it). A
-#     stable-nocturnal + zero-LAI canopy/friction edge case. Next: trace the
-#     canopy/bareground flux intermediates at the night step.
+#   - NIGHT step (nstep 1) NaN — RESOLVED 2026-06-18. Root cause: read_fortran_restart!
+#     injected the restart's PRE-SatellitePhenology veg structure (cold-start zeros:
+#     elai=esai=htop=0) over cold_start!'s correct surfdata-derived values (elai=0.5,
+#     htop=18), but left frac_veg_nosno_alb=1 → a leafless exposed-veg "canopy". The
+#     z0 blend then hit log(z0mr*htop=0) → z0mv=NaN → ustar/t_veg/t_grnd=NaN. Fortran's
+#     flux uses the POST-SP structure (= cold_start's values), so the fix is
+#     inject_veg_struct=false (keep cold_start's surfdata veg structure). Hardening in
+#     canopy_fluxes.jl: re-seed z0mv from the bare-canopy z0 (z0m_patch) each step and
+#     floor it with z0mg in the log-blend. Night nstep 1 now: T_GRND 5.5e-3, T_VEG
+#     4.4e-2, all finite (was NaN).
 #
 # Usage: julia +1.12 --project=. scripts/fortran_parity_stillwater.jl
 # =============================================================================
@@ -107,7 +112,11 @@ function main(; nstep::Int = 18)
     @printf("Stillwater inst: nc=%d np=%d  PFTs=%s\n", bounds.endc, bounds.endp, string(Int.(inst.patch.itype)))
 
     bdump = joinpath(DUMPS, "pdump_before_step_n$(nstep).nc")
-    _read_fortran_restart!(bdump, inst, bounds)
+    # The Stillwater restart dumps carry the PRE-SatellitePhenology veg structure
+    # (zeros at a cold-start step); injecting them would clobber cold_start!'s
+    # surfdata-derived elai/esai/htop (which equal Fortran's in-step post-SP values
+    # the flux actually uses) and leave a leafless exposed-veg canopy → t_veg NaN.
+    _read_fortran_restart!(bdump, inst, bounds; inject_veg_struct=false)
 
     config  = CLM.CLMDriverConfig(use_cn=false, use_aquifer_layer=false,
                                   use_hydrstress=false, use_luna=false)

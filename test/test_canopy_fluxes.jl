@@ -96,6 +96,10 @@
         canopystate.laisha_patch[1] = 0.8
         canopystate.displa_patch[1] = 5.0
         canopystate.htop_patch[1] = 10.0
+        # Bare-canopy momentum z0 (z0mr*htop). canopy_fluxes! re-seeds z0mv from
+        # this each step (matching Fortran), so it must be set when bypassing the
+        # preflux z0m/displa kernel that normally fills it.
+        canopystate.z0m_patch[1] = 0.5
         canopystate.frac_veg_nosno_patch[1] = 1
         canopystate.dleaf_patch[1] = 0.04
         canopystate.stem_biomass_patch[1] = 0.0
