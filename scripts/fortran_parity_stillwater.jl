@@ -18,13 +18,22 @@
 # RESULT (nstep 18, this is the FIRST off-Bow Julia↔Fortran parity):
 #   T_GRND 0.0 (exact), ZWT 2.9e-10, H2OSFC 0.0, T_SOISNO 1.4e-3 (0.1%),
 #   T_VEG 8.6e-3 (0.86%), SNOW_DEPTH 1.7e-2 — temperature/energy state matches.
-# KNOWN RESIDUALS (follow-up):
-#   - H2OSOI_LIQ/ICE ~15–23% at this thawing winter-day step — a soil-water
-#     phase-change / infiltration difference (water is exact at frozen night
-#     steps; the residual appears where the top layer thaws). To localize.
-#   - NIGHT steps (nstep 1–4, no solar) NaN the ground-temperature solve
-#     (eflx_gnet→NaN at coszen=0) — a winter-night biogeophysics edge case the
-#     summer multisite smoke never hit. To debug separately.
+# KNOWN RESIDUALS (localized; root-cause needs Fortran-instrumented ground truth):
+#   - H2OSOI_LIQ/ICE ~15–23% — localized to PHASE-CHANGE MELT in the top 2 soil
+#     layers only (layers 3+ exact; total water conserved, it's the liq/ice
+#     split). Julia melts ~1.5× too much ice. cv + the surface-corrected `fact`
+#     are VERIFIED correct (cv kernel = 26474 J/m2/K for layer 1). Back-solving
+#     the melt: Julia's TENTATIVE top-layer temperature (after the tridiagonal
+#     solve, before phase change) overshoots freezing by ~7.5 K vs Fortran's
+#     implied ~4.95 K → so the divergence is UPSTREAM in the tridiagonal
+#     soil-temperature solve / thermal conductivity, not the phase change.
+#     Next: instrument Fortran SoilTemperatureMod for the layer-1 tentative t /
+#     tk and compare.
+#   - NIGHT steps NaN the ground-temp / canopy solve (t_grnd→NaN at coszen=0,
+#     vegetated patches frac_veg_nosno=1 but winter elai=0). NOT the forc_hgt
+#     bug (setting forc_hgt_u/t/q=30 — done below — does not resolve it). A
+#     stable-nocturnal + zero-LAI canopy/friction edge case. Next: trace the
+#     canopy/bareground flux intermediates at the night step.
 #
 # Usage: julia +1.12 --project=. scripts/fortran_parity_stillwater.jl
 # =============================================================================
@@ -121,6 +130,14 @@ function main(; nstep::Int = 18)
     CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
     CLM.advance_timestep!(tm)
     CLM.read_forcing_step!(fr, inst.atm2lnd, force_date, ng, nc)
+    # The clmforc reader doesn't set the atm reference heights; without them
+    # forc_hgt_u/t/q=0 → zldis collapses → the M-O friction-velocity solve blows
+    # up to NaN (the documented cold-start forc_hgt fix). Set them to 30 m.
+    for g in 1:ng
+        inst.atm2lnd.forc_hgt_u_grc[g] = 30.0
+        inst.atm2lnd.forc_hgt_t_grc[g] = 30.0
+        inst.atm2lnd.forc_hgt_q_grc[g] = 30.0
+    end
     CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
     (yr, mon, d, tod) = CLM.get_curr_date(tm)
     CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
