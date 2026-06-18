@@ -14,13 +14,23 @@
 # RESULT (2026-06-18, the THIRD domain, validating the Stillwater fixes generalize):
 #   The settled regime is MACHINE PRECISION — nstep 7–13 global max|rel| ~3e-7
 #   (every field exact). The only residuals are cold-start spin-up + daytime:
-#     - nstep 2 (76%) and n3–6 (~1e-2): COLD-START FROZEN-SOIL THAW. CLM cold-starts
-#       the soil ice-filled (a generic IC, unphysical for the tropics); it thaws over
-#       the first ~6 steps. At the layer that melts OUT (n2: top soil layer, Fortran
-#       ice→0) Julia's phase-change melt is a hair short (retains 0.76 vs 0) — the
-#       same melt-completeness sensitivity seen for trace snow, amplified by the rel
-#       metric at ice≈0. T_GRND/T_SOISNO stay ~1e-7 throughout; it is a spin-up
-#       transient, gone by n7.
+#     - nstep 2 (76%) and n3–6 (~1e-2): COLD-START FROZEN-SOIL THAW — and it is NOT
+#       phase-change melt-completeness (the initial hypothesis was wrong). CLM
+#       cold-starts the soil ice-filled (a generic IC, unphysical for the tropics);
+#       it thaws over the first ~6 steps. Probing n2: Fortran warms the top soil
+#       layer to 274.08 K (all ice melted + heated past freezing) while Julia stays
+#       at 273.15 K still melting — i.e. Fortran DELIVERS more heat to the cold soil
+#       (~330 vs Julia's eflx_soil_grnd 209.7 W/m²); the phase change correctly
+#       follows whatever heat arrives. The deficit is the BAREGROUND surface flux: at
+#       cold start the exposed-veg filter hasn't activated (injected
+#       FRAC_VEG_NOSNO_ALB = 0 for all patches, despite elai=5), so the warm tropical
+#       air (296.8 K) sits over the frozen ground (273.15 K) as a STRONGLY STABLE
+#       layer. Julia's Monin-Obukhov solve over-suppresses turbulence there
+#       (ustar 0.043 m/s, ram1 553 s/m), throttling the downward sensible heat
+#       (−47.6 W/m²) more than Fortran does → slower thaw. (obu goes NaN as a
+#       converged diagnostic but ram1/ustar are finite and drive the flux.) Only the
+#       extreme stable stratification of the unphysical frozen-tropical IC exposes
+#       this; the settled regime (no such gradient) is exact (n7+).
 #     - nstep 14–22 (H2OSOI_LIQ ~5e-4→1e-2): a small daytime soil-water difference
 #       (tropical high-moisture transpiration/evaporation), T_VEG/T_GRND ≤1.5e-3.
 #   So the model is byte-faithful in the settled tropical regime; the >1e-2 points are
