@@ -20,6 +20,18 @@
 #     SNOW_DEPTH 0.0 exact, T_SOISNO 1.2e-7, T_VEG 8.0e-6, H2OSOI_LIQ 1.7e-5,
 #     H2OSOI_ICE 1.0e-5, ZWT 2.9e-10.
 #   nstep 1 (night): global max|rel| 4.44e-2 (T_VEG). T_GRND 5.5e-3, all finite.
+# REMAINING (characterized, not a steady-state bug):
+#   - NIGHT nstep-1 T_VEG 4.44e-2 — a COLD-START canopy-ACTIVATION transient, not a
+#     canopy-solve error (the solve is exact at nstep 18: T_VEG 8e-6). Fortran's
+#     exposed-veg filter ramps on over the first ~3 steps: its T_VEG is left STALE at
+#     nstep 1 (= the injected 280.6, canopy not solved), = forc_t at nstep 2
+#     (bareground), and only canopy-solved from nstep 3. Julia (carrying the full
+#     cold_start veg structure it needs to avoid the nstep-1 z0 NaN) solves the
+#     canopy from step 1, so its veg-patch T_VEG cools to ~268 K vs Fortran's stale
+#     280.6. The multi-step free-run confirms it is a 2-step transient: T_VEG rel
+#     4.4e-2 (n1) → 2.7e-2 (n2) → <1.5e-3 (n3) → 5e-4 (n6). Matching Fortran's exact
+#     first-step filter ramp needs its cold-start sequencing (absent from the dumps)
+#     and would risk the validated daytime parity — left as a documented transient.
 # RESOLVED RESIDUALS:
 #   - H2OSOI_LIQ/ICE 15–23% (daytime) — was a FORCING-RECORD off-by-one. Fortran
 #     reads the forcing at the START of the step interval (the step that yields
