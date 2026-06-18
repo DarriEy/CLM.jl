@@ -79,6 +79,14 @@ const OVERBURDEN_COMPACTION_ANDERSON1976 = 1
 const OVERBURDEN_COMPACTION_VIONNET2012  = 2
 
 # Module-level control variables (Ref for mutability)
+# wind_dependent_snow_density: CLM5's lnd_in sets this .true. (it adds the Slater/
+# van-Kampenhout wind-densification term to new-snow bulk density; without it bifall
+# is ~5% too low at modest winds ~1.5 m/s, inflating snow_depth by ~5% — the snow
+# WATER is unaffected). We DEFAULT it false because the term's (·)^8.8 makes the snow
+# path stiff enough to break the strict FD-vs-AD derivative check at deep-winter
+# (250 K) conditions (test_ad_robustness.jl); the Fortran-parity harnesses turn it on
+# via snow_hydrology_set_control_for_testing!(wind_dep_snow_density=true) to match the
+# namelist, while the differentiable path keeps the smoother default.
 const WIND_DEPENDENT_SNOW_DENSITY = Ref(false)
 const NEW_SNOW_DENSITY = Ref(LO_TMP_DNS_SLATER2017)
 const OVERBURDEN_COMPACTION_METHOD = Ref(OVERBURDEN_COMPACTION_ANDERSON1976)

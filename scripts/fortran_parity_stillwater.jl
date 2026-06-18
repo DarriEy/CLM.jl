@@ -76,6 +76,10 @@ const _read_fortran_restart! = getfield(CLM, Symbol("read_fortran_restart!"))
 function build_stillwater_inst(; start_date::DateTime)
     CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
     CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
+    # Match the Fortran lnd_in (wind_dependent_snow_density = .true.) — adds the
+    # wind-densification term to new-snow bulk density. Without it bifall is ~5% low
+    # at modest winds → snow_depth ~5% high (the snow water is unaffected).
+    CLM.snow_hydrology_set_control_for_testing!(wind_dep_snow_density=true)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=FS, paramfile=FP,
         start_date=start_date, dtime=3600, use_cn=false, use_luna=false,
         use_bedrock=true, use_aquifer_layer=false, h2osfcflag=0,

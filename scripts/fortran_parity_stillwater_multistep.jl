@@ -94,6 +94,8 @@ end
 function main(; nsteps::Int = 24)
     CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
     CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
+    # Match the Fortran lnd_in (wind_dependent_snow_density = .true.).
+    CLM.snow_hydrology_set_control_for_testing!(wind_dep_snow_density=true)
     base = DateTime(2002, 1, 1)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=FS, paramfile=FP,
         start_date=base, dtime=3600, use_cn=false, use_luna=false, use_bedrock=true,
