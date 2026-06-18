@@ -369,10 +369,20 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     # snow-cover-fraction overwrite, doubles int_snow.
     if inst.column.snl[1] < 0
         ws.h2osno_no_layers_col[1] = 0.0
+    elseif haskey(ds, "H2OSNO_NO_LAYERS") && !ismissing(ds["H2OSNO_NO_LAYERS"][1])
+        # No explicit snow layers (snl == 0): the trace snow water IS the dump's
+        # H2OSNO_NO_LAYERS field — use it directly. Do NOT recompute it from the
+        # snow-layer slots h2osoi_{liq,ice}[1, 1:nlevsno]: those slots are not
+        # injected for a no-layer column, so they hold the cold-start NaN, which
+        # would NaN h2osno_total → route the snow-depth kernel into its reset
+        # branch (the pack never accumulates) and NaN int_snow.
+        ws.h2osno_no_layers_col[1] = Float64(ds["H2OSNO_NO_LAYERS"][1])
     else
+        # Dump lacks the field: fall back to the snow-layer sum, guarding NaN slots.
         h2osno_total = 0.0
         for j in 1:nlevsno
-            h2osno_total += ws.h2osoi_liq_col[1, j] + ws.h2osoi_ice_col[1, j]
+            liq = ws.h2osoi_liq_col[1, j]; ice = ws.h2osoi_ice_col[1, j]
+            h2osno_total += (isnan(liq) ? 0.0 : liq) + (isnan(ice) ? 0.0 : ice)
         end
         ws.h2osno_no_layers_col[1] = h2osno_total
     end

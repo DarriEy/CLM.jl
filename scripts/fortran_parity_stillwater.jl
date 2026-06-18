@@ -16,34 +16,26 @@
 # harness; the phantom lake column/patch is injected as default and ignored.
 #
 # RESULT (this is the FIRST off-Bow Julia↔Fortran parity):
-#   nstep 18 (day): global max|rel| 1.77e-2 (SNOW_DEPTH). T_GRND 0.0 (exact),
-#     T_SOISNO 4.3e-8, T_VEG 8.0e-6, H2OSOI_LIQ 7.5e-4, H2OSOI_ICE 1.7e-3, ZWT 2.9e-10.
+#   nstep 18 (day): global max|rel| 1.68e-5 (near machine precision). T_GRND/
+#     SNOW_DEPTH 0.0 exact, T_SOISNO 1.2e-7, T_VEG 8.0e-6, H2OSOI_LIQ 1.7e-5,
+#     H2OSOI_ICE 1.0e-5, ZWT 2.9e-10.
 #   nstep 1 (night): global max|rel| 4.44e-2 (T_VEG). T_GRND 5.5e-3, all finite.
-# KNOWN RESIDUALS:
-#   - H2OSOI_LIQ/ICE 15–23% (daytime) — RESOLVED 2026-06-18. NOT a phase-change /
-#     SoilTemperature / SurfaceRadiation bug: it was a FORCING-RECORD off-by-one.
-#     Fortran reads the forcing at the START of the step interval (the step that
-#     yields nstep N uses base+(N-1)h); the harness read base+(N)h → a one-hour-late
-#     FSDS (nstep 18: 505.6 vs the correct 412.2 W/m²) → +22.7% incident solar →
-#     SABV *and* SABG uniformly 1.227× high (the two-stream/albedo were exact all
-#     along) → spurious top-layer ice melt. Fixed via force_date=base+Hour(max(N-1,1)).
-#     H2OSOI_LIQ/ICE 23%/15% → 7.5e-4/1.7e-3; T_SOISNO 1.4e-3 → 4.3e-8; T_VEG → 8e-6.
-#   - SNOW_DEPTH ~1.8% (the top daytime residual) — CHARACTERIZED 2026-06-18, benign.
-#     The before_step restart injects a PATHOLOGICAL trace-snow state: snow_depth
-#     0.47 m over h2osno_no_layers 0.0035 mm (≈0.007 kg/m³ — physically absurd, a
-#     Fortran restart lag where depth wasn't zeroed when the pack melted). Fortran
-#     fully melts the trace this step (h2osno/snow_depth→0 in SoilTemperature); the
-#     Julia trace-snow phase-change melt block is BYTE-IDENTICAL to Fortran
-#     (SoilTemperatureMod.F90:1391–1416 vs soil_temperature.jl:1908–1924), but its
-#     melt mass xm=hm·dt/hfus falls ~0.012 W/m² short (a hair in the top-layer
-#     TENTATIVE temperature feeding hm — T_SOISNO final still matches 4.3e-8), so
-#     ~3.8% of the trace survives and snow_depth=propor·0.47=0.0177 m amplifies it
-#     ~50×. Independent of the forcing fix (identical before/after). A downstream
-#     NaN in int_snow/h2osno_no_layers for this column is a consequence (Fortran's
-#     exact 0 dodges a division the tiny residual hits) and is invisible to the
-#     parity registry; it does NOT occur in normal cold-start/continuous runs (the
-#     multisite smoke runs Stillwater 6 steps NaN-free) — purely a single-step
-#     injection artifact of the pathological restart. Not a code bug; left as-is.
+# RESOLVED RESIDUALS:
+#   - H2OSOI_LIQ/ICE 15–23% (daytime) — was a FORCING-RECORD off-by-one. Fortran
+#     reads the forcing at the START of the step interval (the step that yields
+#     nstep N uses base+(N-1)h); the harness read base+(N)h → a one-hour-late FSDS
+#     (nstep 18: 505.6 vs the correct 412.2 W/m²) → +22.7% incident solar → SABV
+#     *and* SABG uniformly 1.227× high (the two-stream/albedo were exact all along).
+#     Fixed via force_date=base+Hour(max(N-1,1)).
+#   - SNOW_DEPTH ~1.8% + the residual H2OSOI — was an INJECTION bug in
+#     read_fortran_restart!. For a no-snow-layer column (snl==0) it RECOMPUTED
+#     h2osno_no_layers by summing the snow-layer slots h2osoi_{liq,ice}[1,1:nlevsno],
+#     which are NOT injected for such a column → cold-start NaN → NaN h2osno_total →
+#     the snow-depth kernel took its reset branch (the pack never accumulated /
+#     never fully melted) and int_snow NaN'd. Fixed by injecting the dump's
+#     H2OSNO_NO_LAYERS field directly. Daytime nstep 18 → 1.68e-5; the SNOW_DEPTH
+#     and H2OSOI residuals both collapse. (My earlier "benign float-level artifact"
+#     characterization was WRONG — it was this NaN.)
 #   - NIGHT step (nstep 1) NaN — RESOLVED 2026-06-18. Root cause: read_fortran_restart!
 #     injected the restart's PRE-SatellitePhenology veg structure (cold-start zeros:
 #     elai=esai=htop=0) over cold_start!'s correct surfdata-derived values (elai=0.5,
