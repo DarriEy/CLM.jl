@@ -26,20 +26,27 @@
 #       tropical air (296.8 K) sits over the frozen ground (273.15 K) as a STRONGLY
 #       STABLE layer, and the humid air condenses on it (latent eflx_lh_grnd -69.7 +
 #       sensible -47.6 W/m², both INTO the ground).
-#       FULL M-O INVESTIGATION (2026-06-18) — the "Julia over-suppresses the
-#       Monin-Obukhov resistance" hypothesis is DISPROVEN. The friction-velocity / M-O
-#       scheme is BYTE-FAITHFUL to Fortran: the stable stability functions, a_coef/
-#       a_exp (0.13/0.45, verified read), zetamaxstable (0.5), the 3-iteration loop,
-#       zldis (= forc_hgt_u_patch with the stale canopy displa = 53.46, matching
-#       BareGroundFluxesMod:318 exactly), and the convergence (zeta→0.5 capped, clean)
-#       ALL match Fortran. So the residual is NOT the surface turbulence scheme — it is
-#       the COUPLED SOIL-ENERGY solve over the frozen profile: the implicit t_grnd /
-#       phase-change coupling at the melt-out layer (Fortran's surface warms past
-#       freezing as soil1 fully thaws; Julia's stays pinned at 273.15 still melting).
-#       Pinning the exact term (G, dhsdT, thk) needs Fortran-side instrumentation the
-#       clean exe (no dump SourceMods) doesn't provide. Only the unphysical
-#       frozen-tropical IC exposes it; the settled regime is exact (n7+). (obu goes NaN
-#       only as a post-iteration diagnostic; the M-O iteration itself is finite.)
+#       ROOT CAUSE FOUND via Fortran re-instrumentation (2026-06-18) — and it is NOT a
+#       model bug. Two earlier hypotheses (M-O over-suppression, then a coupled
+#       soil-energy term) were BOTH disproven by a direct gated print of the soil solve
+#       at nstep 2 (PARITYSOIL in SoilTemperatureMod, exe rebuilt via case.build with
+#       LIBRARY_PATH→netcdf 4.10.0). The M-O scheme is byte-faithful, AND every soil
+#       THERMAL PROPERTY and formula matches Fortran exactly: watsat (0.54669), tkmg
+#       (2.15417), tkdry (0.17890), the tk/cv/fact formulas, CAPR (0.34), the layer
+#       geometry (dz/z/zi), the constants (TKICE/TKWAT/DENICE/DENH2O), and the dke
+#       frozen/thawed condition (>= TFRZ). The ONLY thing that differs is the soil
+#       ICE/LIQ STATE fed to the tk computation: Julia (from the injected restart
+#       clm2.r-03600, raw value verified) has ice=1.789/liq=1.044, but Fortran's
+#       CONTINUOUS step-2 consumes ice=0.855/liq=2.060 — ~0.93 kg/m² of ice has already
+#       melted (+a little infiltration, total water 2.833→2.915) between the restart-
+#       write point and Fortran's step-2 SoilTemperature. With MORE ice Julia gets a
+#       higher frozen-soil tk (1.583 vs 1.367) → conducts heat away from soil1 → melts
+#       less (1.026 vs Fortran's full 0.855) → soil1 stays at 273.15 vs Fortran's 274.08.
+#       So this is a RESTART-STATE / step-boundary mismatch in the rapidly-thawing
+#       cold-start regime (the injected restart's ice ≠ the ice the next continuous step
+#       actually uses), a single-step-injection artifact — NOT a soil-physics error. The
+#       settled regime is exact (n7+) precisely because there the ice changes slowly, so
+#       the restart matches the step boundary.
 #     - nstep 14–22 (H2OSOI_LIQ ~5e-4→1e-2): a small daytime soil-water difference
 #       (tropical high-moisture transpiration/evaporation), T_VEG/T_GRND ≤1.5e-3.
 #   So the model is byte-faithful in the settled tropical regime; the >1e-2 points are
