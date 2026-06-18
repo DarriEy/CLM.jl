@@ -316,6 +316,21 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     end
     set_patch_1d!("fsun", inst.canopystate.fsun_patch)
 
+    # Exposed-veg flag from the PREVIOUS step's SurfaceAlbedo (persisted to the
+    # restart). drv_init copies it into frac_veg_nosno → the exposed/noexposed-veg
+    # filters, deciding canopy-solve vs bareground for THIS step. CLM ramps it on
+    # over the first ~2–3 cold-start steps (elai/SAI establishing), so injecting it
+    # makes Julia's canopy/bareground split — and the resulting surface fluxes —
+    # match Fortran step-for-step instead of activating the canopy immediately from
+    # cold_start's elai. Integer field → round (SPVAL/missing → leave cold_start).
+    if haskey(ds, "FRAC_VEG_NOSNO_ALB")
+        fva = ds["FRAC_VEG_NOSNO_ALB"][:]
+        for p in 1:min(np_jl, length(fva))
+            ismissing(fva[p]) && continue
+            inst.canopystate.frac_veg_nosno_alb_patch[p] = Int(round(Float64(fva[p])))
+        end
+    end
+
     # SurfaceAlbedo radiative-transfer outputs from the PREVIOUS step. CLM calls
     # SurfaceAlbedo at the end of clm_driver and saves these to the restart; the
     # NEXT step's SurfaceRadiation consumes them to split absorbed solar between
