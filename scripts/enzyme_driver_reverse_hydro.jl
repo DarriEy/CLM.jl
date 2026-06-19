@@ -1,8 +1,15 @@
 # =============================================================================
-# EXTENSION of scripts/enzyme_driver_reverse_full.jl by ONE more clm_drv! phase:
-# water_table! (the aquifer / ThetaBasedWaterTable phase that runs right after
-# soil_water! in HydrologyNoDrainage). All through the production
-# CLM.compositional_reverse! engine (src/biogeophys/canopy_fluxes_reverse.jl).
+# EXTENSION of scripts/enzyme_driver_reverse_full.jl by more clm_drv! HydrologyNoDrainage
+# phases: water_table! ([G]/[H]) and hydrology_no_drainage! ([I]/[J], the namesake
+# end-of-step diagnostic). All through the production CLM.compositional_reverse! engine
+# (src/biogeophys/canopy_fluxes_reverse.jl); the phase wrappers are productionized in
+# src/driver/driver_reverse.jl.
+#
+#   [I] hydrology_no_drainage! STANDALONE reverse (machine precision 1.1e-11): perturb
+#       h2osoi_liq, L = sum(h2osoi_vol²) (the diagnostic recomputes vol from liq/ice).
+#   [J] canopy+soil_temp+soil_water+water_table+hydrology_no_drainage FIVE-module chain
+#       (4.1e-7, FD-bracketed): perturb t_grnd → gradient flows across five module
+#       boundaries to L = sum(h2osoi_vol²).
 #
 #   [G] water_table! STANDALONE reverse on the real Bow cold-start inst. Perturb
 #       qcharge_col (the live aquifer-recharge INPUT the phase integrates: zwt -=
@@ -117,6 +124,19 @@ end
 chain_soil_phase!(b, saux)  = soil_phase!(b.inst, saux)
 chain_water_phase!(b, waux) = water_phase!(b.inst, waux)
 chain_wt_phase!(b, wtaux)   = wt_phase!(b.inst, wtaux)
+
+# hydrology_no_drainage! phase (end-of-step diagnostics: recompute h2osoi_vol etc.)
+hnd_aux(bounds, filt) = (; nolakec=filt.nolakec, hydrologyc=filt.hydrologyc, urbanc=filt.urbanc,
+    snowc=filt.snowc, nosnowc=filt.nosnowc, bc_col=bounds.begc:bounds.endc, dtime=1800.0,
+    nlevsno=C.varpar.nlevsno, nlevsoi=C.varpar.nlevsoi, nlevgrnd=C.varpar.nlevgrnd, nlevurb=C.varpar.nlevurb)
+function hnd_phase!(b, aux)
+    C.hydrology_no_drainage!(b.temperature, b.soilstate, b.water.waterstatebulk_inst,
+        b.water.waterdiagnosticbulk_inst, b.column, b.landunit,
+        aux.nolakec, aux.hydrologyc, aux.urbanc, aux.snowc, aux.nosnowc,
+        aux.bc_col, aux.dtime, aux.nlevsno, aux.nlevsoi, aux.nlevgrnd, aux.nlevurb)
+    return nothing
+end
+chain_hnd_phase!(b, hndaux) = hnd_phase!(b.inst, hndaux)
 
 function canopy_aux(inst, bounds, filt)
     NP = bounds.endp; ev = filt.exposedvegp
@@ -238,11 +258,76 @@ function section_H(inst, bounds, filt, config)
     return report_chain("H", "canopy→soiltemp→soilwater→watertable", L_pert, g_rev, "t_grnd", c0)
 end
 
+# =============================================================================
+# [I] hydrology_no_drainage! STANDALONE reverse — perturb h2osoi_liq → h2osoi_vol.
+# =============================================================================
+function section_I(inst, bounds, filt, config)
+    println("\n", "#"^70, "\n# [I] hydrology_no_drainage! REVERSE (real cold-start inst) vs FD\n", "#"^70)
+    hndaux = hnd_aux(bounds, filt)
+    hc = filt.hydrologyc; c0 = [c for c in bounds.begc:bounds.endc if hc[c]][1]; j0 = C.varpar.nlevsno + 4
+    vol(s) = s.water.waterstatebulk_inst.ws.h2osoi_vol_col
+    L(s) = sum(abs2, vol(s))
+    let s = deepcopy(inst); hnd_phase!(s, hndaux)
+        @printf("standalone primal: h2osoi_vol[%d,4]=%.6f (finite: %s)\n", c0, vol(s)[c0,4],
+            string(isfinite(vol(s)[c0,4])))
+    end
+    function L_pert(δ)
+        s = deepcopy(inst); s.water.waterstatebulk_inst.ws.h2osoi_liq_col[c0,j0] += δ
+        hnd_phase!(s, hndaux); return L(s)
+    end
+    cfd(h) = (L_pert(h) - L_pert(-h)) / (2h)
+    g_fd = (4*cfd(5e-3) - cfd(1e-2)) / 3
+    seed!(db, b) = (db.water.waterstatebulk_inst.ws.h2osoi_vol_col .=
+                    2 .* b.water.waterstatebulk_inst.ws.h2osoi_vol_col)
+    db = C.compositional_reverse!(Any[(hnd_phase!, (hndaux,))], deepcopy(inst), seed!)
+    g_rev = db.water.waterstatebulk_inst.ws.h2osoi_liq_col[c0,j0]
+    rl = abs(g_rev - g_fd) / max(abs(g_fd), 1e-10)
+    @printf("[I] perturb h2osoi_liq[%d,%d]; L=sum(vol^2); FD = % .8e  rev = % .8e  rel = %.3e  %s\n",
+        c0, j0, g_fd, g_rev, rl, rl < 1e-5 ? "PASS ✓" : "FAIL ✗")
+    return rl
+end
+
+# =============================================================================
+# [J] canopy + soil_temp + soil_water + water_table + hydrology_no_drainage
+#     FIVE-module chain — extends [H] by the namesake diagnostic phase.
+# =============================================================================
+function section_J(inst, bounds, filt, config)
+    println("\n", "#"^70, "\n# [J] FIVE-module CHAIN (+ hydrology_no_drainage!) vs FD\n", "#"^70)
+    aux  = canopy_aux(inst, bounds, filt); saux = soil_aux(bounds, filt)
+    waux = water_aux(filt, config); wtaux = wt_aux(bounds, filt, config); hndaux = hnd_aux(bounds, filt)
+    Ncanopy = parse(Int, get(ENV, "CLM_NCANOPY", "12"))
+    hc = filt.hydrologyc; c0 = [c for c in bounds.begc:bounds.endc if hc[c]][1]
+    chain_phases = Any[(chain_canopy_phase!, (aux, Ncanopy)), (chain_soil_phase!, (saux,)),
+                       (chain_water_phase!, (waux,)), (chain_wt_phase!, (wtaux,)), (chain_hnd_phase!, (hndaux,))]
+    let bs = chain_bundle(deepcopy(inst))
+        for (f, ca) in chain_phases; f(bs, ca...); end
+        @printf("chained primal: t_veg ok=%s  h2osoi_vol[%d,4]=%.6f (finite: %s)\n",
+            string(all(isfinite, bs.inst.temperature.t_veg_patch)), c0,
+            bs.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0,4],
+            string(isfinite(bs.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0,4])))
+    end
+    Lchain(s) = sum(abs2, s.water.waterstatebulk_inst.ws.h2osoi_vol_col)
+    function L_pert(δ)
+        s = deepcopy(inst); s.temperature.t_grnd_col[c0] += δ; bs = chain_bundle(s)
+        for (f, ca) in chain_phases; f(bs, ca...); end
+        return Lchain(bs.inst)
+    end
+    seed_chain!(db, b) = (db.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col .=
+                          2 .* b.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col)
+    db = C.compositional_reverse!(chain_phases, chain_bundle(deepcopy(inst)), seed_chain!)
+    g_rev = db.inst.temperature.t_grnd_col[c0]
+    return report_chain("J", "canopy→…→watertable→hydnodrain", L_pert, g_rev, "t_grnd", c0)
+end
+
 # ---- driver ----
 inst, bounds, filt, config = build_real()
 rG = try section_G(inst, bounds, filt, config) catch e; @printf("\n[G] ERRORED: %s\n", sprint(showerror, e)); NaN end
 rH = try section_H(inst, bounds, filt, config) catch e; @printf("\n[H] ERRORED: %s\n", sprint(showerror, e)); NaN end
+rI = try section_I(inst, bounds, filt, config) catch e; @printf("\n[I] ERRORED: %s\n", sprint(showerror, e)); NaN end
+rJ = try section_J(inst, bounds, filt, config) catch e; @printf("\n[J] ERRORED: %s\n", sprint(showerror, e)); NaN end
 println("\n", "="^70)
-@printf("SUMMARY  [G] water_table standalone rev rel err = %.3e\n", rG)
-@printf("         [H] canopy+soiltemp+soilwater+watertable chain = %.3e\n", rH)
+@printf("SUMMARY  [G] water_table standalone           = %.3e\n", rG)
+@printf("         [H] canopy+soiltemp+soilwater+wt      = %.3e\n", rH)
+@printf("         [I] hydrology_no_drainage standalone  = %.3e\n", rI)
+@printf("         [J] FIVE-module chain (+hydnodrain)   = %.3e\n", rJ)
 println("="^70)

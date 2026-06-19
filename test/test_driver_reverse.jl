@@ -44,10 +44,10 @@
     c0 = first(c for c in bounds.begc:bounds.endc if hc[c])
     j1 = CLM.varpar.nlevsno + 1
 
-    # assembler: 3 hydrology phases (no canopy), 4 with a canopy block.
+    # assembler: 4 hydrology phases (no canopy), 5 with a canopy block.
     ph = CLM.driver_rev_phases(bounds, filt, config)
-    @test length(ph) == 3
-    @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 4
+    @test length(ph) == 4
+    @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 5
 
     # run the production phases forward on the shared-inst bundle.
     b = CLM.driver_rev_bundle(inst)
@@ -58,6 +58,7 @@
     @test isfinite(b.inst.temperature.t_soisno_col[c0, j1])
     @test all(isfinite, b.inst.water.waterstatebulk_inst.ws.h2osoi_liq_col)
     @test isfinite(b.inst.soilhydrology.zwt_col[c0])
+    @test isfinite(b.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
 
     # parity: soiltemp_rev_phase! reproduces a raw soil_temperature! call (i.e. the
     # soiltemp aux builder passes the same args the driver does).

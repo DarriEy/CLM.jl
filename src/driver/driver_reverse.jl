@@ -105,6 +105,27 @@ function watertable_rev_phase!(b, aux)
 end
 
 # --------------------------------------------------------------------------
+# hydrology_no_drainage! — the namesake HydrologyNoDrainage end-of-step
+# diagnostics (recomputes h2osoi_vol, the 10 cm / total water columns, etc. from
+# the updated h2osoi_liq/ice). Runs after water_table! (the intervening snow
+# capping/compaction/layer combine-divide ops are discrete and no-ops at snl=0).
+# --------------------------------------------------------------------------
+hydnodrain_rev_aux(bounds, filt; dtime = 1800.0) = (;
+    nolakec = filt.nolakec, hydrologyc = filt.hydrologyc, urbanc = filt.urbanc,
+    snowc = filt.snowc, nosnowc = filt.nosnowc, bc_col = bounds.begc:bounds.endc,
+    dtime = dtime, nlevsno = varpar.nlevsno, nlevsoi = varpar.nlevsoi,
+    nlevgrnd = varpar.nlevgrnd, nlevurb = varpar.nlevurb)
+
+function hydnodrain_rev_phase!(b, aux)
+    i = b.inst
+    hydrology_no_drainage!(i.temperature, i.soilstate, i.water.waterstatebulk_inst,
+        i.water.waterdiagnosticbulk_inst, i.column, i.landunit,
+        aux.nolakec, aux.hydrologyc, aux.urbanc, aux.snowc, aux.nosnowc,
+        aux.bc_col, aux.dtime, aux.nlevsno, aux.nlevsoi, aux.nlevgrnd, aux.nlevurb)
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse.
 # `canopy_aux === nothing` skips the canopy block (e.g. a hydrology-only reverse).
 # Append further phases (hydrology diagnostics, fluxes, BGC) here as they are
@@ -117,5 +138,6 @@ function driver_rev_phases(bounds, filt, config; canopy_aux = nothing,
     push!(phases, (soiltemp_rev_phase!,   (soiltemp_rev_aux(bounds, filt; dtime),)))
     push!(phases, (soilwater_rev_phase!,  (soilwater_rev_aux(filt, config; dtime),)))
     push!(phases, (watertable_rev_phase!, (watertable_rev_aux(bounds, filt, config; dtime),)))
+    push!(phases, (hydnodrain_rev_phase!, (hydnodrain_rev_aux(bounds, filt; dtime),)))
     return phases
 end
