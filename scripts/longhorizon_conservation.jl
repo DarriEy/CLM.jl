@@ -41,6 +41,14 @@ const DTIME          = 1800
 # --probe YYYY-MM-DD : dump the per-step water budget + every nonzero candidate
 # flux on that day, to localize which term carries the residual.
 const PROBE_DATE     = let v = _argval("--probe", ""); isempty(v) ? nothing : Date(v); end
+# --repeat-year YYYY : drive EVERY model year with the forcing from year YYYY, so
+# the year-over-year report measures pure MODEL drift (no interannual weather).
+const REPEAT_YEAR    = let v = _argval("--repeat-year", ""); isempty(v) ? 0 : parse(Int, v); end
+# Map a model timestamp into the repeat forcing year (clamp leap-day Feb 29).
+_repeat_force_date(d) = REPEAT_YEAR == 0 ? d : begin
+    m = Dates.month(d); dy = Dates.day(d); (m == 2 && dy == 29) && (dy = 28)
+    DateTime(REPEAT_YEAR, m, dy, Dates.hour(d), Dates.minute(d), Dates.second(d))
+end
 
 # ---- Input paths (calibrated config, matches test/verify_vs_fortran.jl) ----
 const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
@@ -67,9 +75,12 @@ const end_date   = NDAYS_OVERRIDE > 0 ? (start_date + Day(NDAYS_OVERRIDE)) :
                                         DateTime(START_YEAR + NYEARS, 1, 1)
 
 println("="^70)
-println("  CLM.jl — MULTI-YEAR STABILITY + CONSERVATION")
-println("  IC: Fortran spun-up restart 2003-01-01 | forcing: clmforc.2002_2004.nc")
+println("  CLM.jl — MULTI-YEAR STABILITY + CONSERVATION",
+        REPEAT_YEAR > 0 ? " (CLEAN-DRIFT: repeat forcing $(REPEAT_YEAR))" : "")
+println("  IC: Fortran spun-up restart 2003-01-01 | forcing: clmforc.2002_2004.nc",
+        REPEAT_YEAR > 0 ? " mapped→$(REPEAT_YEAR)" : "")
 @printf("  Window: %s .. %s  (dtime=%ds)\n", start_date, end_date, DTIME)
+REPEAT_YEAR > 0 && println("  Every model year sees IDENTICAL weather → year-over-year Δ = pure model drift")
 println("="^70)
 
 # ============================================================================
@@ -274,7 +285,7 @@ while tm.current_date < end_date
     CLM.advance_timestep!(tm)
     step_count += 1
 
-    CLM.read_forcing_step!(fr, inst.atm2lnd, step_start, ng, nc)
+    CLM.read_forcing_step!(fr, inst.atm2lnd, _repeat_force_date(step_start), ng, nc)
     CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
 
     calday = CLM.get_curr_calday(tm)
