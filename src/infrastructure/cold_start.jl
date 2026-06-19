@@ -20,11 +20,13 @@
 # The one residual reason a frozen cold start is harder than the warm latitude init: the
 # 272 K soil sits exactly 1 K below freezing, ON the phase-change front, so an FD/AD probe
 # straddles the TFRZ discontinuity (a known Phase-1 non-differentiability; Phase-3 smoothing
-# pending). The AD/FD calibration harnesses (test_ad_robustness, test_parameter_recovery)
-# therefore pin this false with save/restore to get the smooth thawed state they validate
-# differentiability on — independent of the global default. The injection parity harness
-# (build_bow_inst) likewise pins false: it injects only the active subgrid subset, and the
-# matching IC's non-injected slots bleed into the active-patch EFLX_GNET.
+# pending). test_ad_robustness therefore pins this false with save/restore to get the smooth
+# thawed state its finite-difference derivative checks need — independent of the global
+# default. (test_parameter_recovery used to pin too, but its NaN was the LAKE eddy-diffusivity
+# AD bug — ks=6.6·sqrt(|sin lat|)·… with lat stubbed to 0 → sqrt(0) → Inf·0 NaN partial,
+# fixed in lake_fluxes.jl — not the phase change, so it now runs on the matching default.)
+# The injection parity harness (build_bow_inst) also pins false: it injects only the active
+# subgrid subset, and the matching IC's non-injected slots bleed into the active-patch EFLX_GNET.
 #
 # Toggle with coldstart_match_fortran!(::Bool); read with coldstart_match_fortran().
 const COLDSTART_MATCH_FORTRAN = Ref(true)

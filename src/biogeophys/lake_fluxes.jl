@@ -449,8 +449,14 @@ end
         # 2m wind speed for mixing parameters
         u2m = smooth_max(T(0.1), ustar / T(VKC) * log(T(2.0) / z0mg))
         ws_col[c] = T(1.2e-3) * u2m
-        g_idx = c_gridcell[c]
-        ks_col[c] = T(6.6) * sqrt(smooth_abs(sin(zero(T)))) * u2m^T(-1.84)  # lat from gridcell, simplified
+        # Wave-driven eddy-extinction coefficient ks = 6.6·sqrt(|sin(lat)|)·u2m^-1.84.
+        # The gridcell latitude is not yet wired in (simplified to 0), so the sqrt(|sin 0|)
+        # factor — and hence the whole term — is exactly 0. It MUST be written as a literal
+        # zero, not sqrt(smooth_abs(sin(zero(T))))·…: sqrt(0) has an Inf ForwardDiff
+        # derivative, so even with a zero-valued input the AD partial is Inf·0 = NaN, which
+        # poisons ks → the lake eddy diffusivity kme → the entire coupled lake temperature
+        # solve under AD (finite values, NaN gradients). Value is unchanged (ks = 0).
+        ks_col[c] = zero(T)
 
         htvp_col[c] = htvp
     end

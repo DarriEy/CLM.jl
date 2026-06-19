@@ -28,14 +28,12 @@ const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain
         return
     end
 
-    # These AD calibration twin experiments differentiate through a cold-start state.
-    # The gated Fortran-matching cold start freezes Bow soil at 272 K — exactly 1 K below
-    # freezing, i.e. sitting ON the phase-change front — so an FD/AD probe straddles the
-    # TFRZ discontinuity and the gradient goes NaN (a known Phase-1 non-differentiability;
-    # the latitude init's 262 K is safely below the front). Pin the smooth thawed init this
-    # harness was validated against (independent of the global default), then restore.
-    _prev_cs = CLM.coldstart_match_fortran()
-    CLM.coldstart_match_fortran!(false)
+    # These AD calibration twin experiments differentiate through a cold-start state and run
+    # on the global default cold start (Fortran-matching). They previously NaN'd under that
+    # default, but the cause was NOT the soil phase change — it was the lake column's eddy
+    # diffusivity (ks = 6.6·sqrt(|sin lat|)·… with lat stubbed to 0 → sqrt(0) → Inf·0 = NaN
+    # ForwardDiff partial), now fixed in lake_fluxes.jl. csoilc gradient is finite and within
+    # ~10% of FD, so no cold-start pin is needed here.
 
     # =====================================================================
     # Helper: generate synthetic observations from a "true" parameter set
@@ -326,6 +324,4 @@ const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain
         println("  n_eval=3: obj=$(round(obj3, sigdigits=4)), grad=$(round(grad3[1], sigdigits=4))")
         println("  Multi-timestep calibration: PASSED")
     end
-
-    CLM.coldstart_match_fortran!(_prev_cs)
 end  # outer testset
