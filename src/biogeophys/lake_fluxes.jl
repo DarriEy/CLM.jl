@@ -38,8 +38,10 @@ const PRN_AIR = 0.713          # Prandtl number for air
 const SCH_WATER = 0.66         # Schmidt number for water in air
 const KVA0 = 1.51e-5           # kinematic viscosity of air at 20°C [m²/s]
 const CUS = 0.1                # smooth flow regime coefficient
-const CUR0 = 0.01              # base Charnock constant
-const CURM = 0.0                # modified Charnock coefficient
+const CUR0 = 0.01              # min Charnock parameter (LakeCon cur0)
+const CURM = 0.1               # max Charnock parameter (LakeCon curm; was wrongly 0 → no
+                               # fetch-limited enhancement, leaving z0mg far too small)
+const FCRIT = 100.0            # critical dimensionless fetch for the Charnock parameter
 const BETA1 = 1.0              # coefficient of convective velocity
 const ZETAMAX_LAKE = 0.5       # max zeta under stable conditions
 
@@ -146,8 +148,9 @@ end
 
         snl = snl_arr[c]
 
-        # Wind minimum
-        wind_min = T(0.1)
+        # Wind minimum (CLM params_inst%wind_min = 1.0; Fortran LakeFluxes floors ur
+        # at this, not 0.1 — the low-wind ur feeds ustar).
+        wind_min = T(1.0)
 
         # ============================================================
         # Phase 1: Initialization
@@ -251,28 +254,35 @@ end
         dqh = forc_q[c] - qsat_water(tgbef, forc_pbot[c])
         dthv = dth * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * dqh
 
-        # Initial ustar estimate
-        ustar = T(VKC) * ur / log(zldis / z0mg)
-        ustar = smooth_max(ustar, T(0.001))
-
-        # Initial Obukhov length
-        tstar = T(VKC) * dth / log(forc_hgt_t / z0hg)
-        qstar = T(VKC) * dqh / log(forc_hgt_q / z0qg)
-        thvstar = tstar * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * qstar
-
-        if abs(thvstar) > T(1e-10)
-            obu = -ustar^3 * thv / (T(VKC) * T(GRAV) * thvstar)
-            obu = clamp(obu, T(-1e4), T(1e4))
+        # Initial Monin-Obukhov length + wind speed — CLM FrictionVelocityMod
+        # MoninObukIni (bulk-Richardson form). The previous initialization used
+        # obu = -ustar^3*thv/(vkc*grav*thvstar), which gives the WRONG SIGN for
+        # UNSTABLE conditions (it returned positive obu / the stable branch when the
+        # lake surface is warmer than the air, dthv<0). That collapsed ustar to ~0.01
+        # (rah ~ 1e3-1e4), drove the turbulent fluxes to ~0, and let the surface
+        # radiatively over-cool (TG 250 K vs Fortran 271 K). The Richardson form gives
+        # obu<0 + a convective wind speed for unstable, matching Fortran.
+        ustar = smooth_max(T(VKC) * ur / log(zldis / z0mg), T(0.001))  # overwritten in the iteration
+        if dthv >= zero(T)
+            um = smooth_max(ur, T(0.1))
         else
-            obu = T(1e4)
+            um = sqrt(ur^2 + T(0.25))   # convective velocity wc = 0.5 m/s
         end
-
-        um = ur
+        rib = T(GRAV) * zldis * dthv / (thv * um^2)
+        if rib >= zero(T)
+            zeta = rib * log(zldis / z0mg) / (one(T) - T(5.0) * min(rib, T(0.19)))
+            zeta = clamp(zeta, T(0.01), T(ZETAMAX_LAKE))
+        else
+            zeta = rib * log(zldis / z0mg)
+            zeta = clamp(zeta, T(-100.0), T(-0.01))
+        end
+        obu = zldis / zeta
 
         # ============================================================
         # Phase 2: Stability iteration
         # ============================================================
         t_grnd_new = tgbef
+        rah_c = one(T); raw_c = one(T); ram_c = one(T)   # converged resistances (set in loop)
 
         for iter in 1:niters
             # Aerodynamic resistances
@@ -364,11 +374,19 @@ end
             end
             obu = zldis_u / zeta_val
             obu = clamp(obu, T(-1e4), T(1e4))
+            rah_c = rah; raw_c = raw; ram_c = ram   # carry converged (log + stability) resistances
 
             # Update roughness for unfrozen lakes
             if tgbef > T(TFRZ)
-                z0mg = smooth_max(smooth_max(T(MINZ0LAKE), T(CUS) * kva / smooth_max(ustar, T(1e-6))),
-                           T(CUR0) * ustar^2 / T(GRAV))
+                # Fetch/depth-limited Charnock parameter (Vickers & Mahrt 1997 form,
+                # LakeFluxesMod). The previous code used the constant CUR0 (CURM=0),
+                # so cur*ustar^2/g was ~6x too small and z0mg collapsed toward the
+                # smooth-flow floor → rah too high.
+                cur = T(CUR0) + T(CURM) * exp(max(
+                          -(fetch * T(GRAV) / ustar^2)^(one(T)/T(3.0)) / T(FCRIT),
+                          -sqrt(lakedepth_c * T(GRAV) / ur^2)))
+                z0mg = smooth_max(smooth_max(T(MINZ0LAKE), T(CUS) * kva / smooth_max(ustar, T(1e-4))),
+                           cur * ustar^2 / T(GRAV))
                 sqre0 = sqrt(smooth_max(z0mg * ustar / kva, T(0.1)))
                 z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
                 z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
@@ -406,13 +424,11 @@ end
         qsatg_final = qsat_water(t_grnd_new, forc_pbot[c])
         thm_local = forc_t[c] + T(0.0098) * forc_hgt_t_grc[g]
 
-        # Aerodynamic resistances (use final iteration values)
-        zldis_t = smooth_max(forc_hgt_t - displa, z0hg + T(0.01))
-        zldis_q = smooth_max(forc_hgt_q - displa, z0qg + T(0.01))
-        zldis_u = smooth_max(forc_hgt_u - displa, z0mg + T(0.01))
-
-        rah_final = smooth_max(zldis_t / (T(VKC) * ustar), one(T))
-        raw_final = smooth_max(zldis_q / (T(VKC) * ustar), one(T))
+        # Use the converged resistances from the stability iteration (log profile +
+        # stability corrections). The previous rah_final = zldis_t/(vkc*ustar) dropped
+        # the log(z/z0) factor and the stability functions, inflating the resistance.
+        rah_final = rah_c
+        raw_final = raw_c
 
         eflx_sh_grnd_p = forc_rho[c] * T(CPAIR) * (t_grnd_new - thm_local) / rah_final
         qflx_evap_soi_p = forc_rho[c] * (qsatg_final - forc_q[c]) / raw_final
@@ -442,15 +458,21 @@ end
         d.z0qg[p] = z0qg
 
         # Momentum stress
-        ram_final = smooth_max(zldis_u / (T(VKC) * ustar), one(T))
+        ram_final = ram_c
         d.taux[p] = -forc_rho[c] * forc_u[g] / ram_final
         d.tauy[p] = -forc_rho[c] * forc_v[g] / ram_final
 
         # 2m wind speed for mixing parameters
         u2m = smooth_max(T(0.1), ustar / T(VKC) * log(T(2.0) / z0mg))
         ws_col[c] = T(1.2e-3) * u2m
-        g_idx = c_gridcell[c]
-        ks_col[c] = T(6.6) * sqrt(smooth_abs(sin(zero(T)))) * u2m^T(-1.84)  # lat from gridcell, simplified
+        # Wave-driven eddy-extinction coefficient ks = 6.6·sqrt(|sin(lat)|)·u2m^-1.84.
+        # The gridcell latitude is not yet wired in (simplified to 0), so the sqrt(|sin 0|)
+        # factor — and hence the whole term — is exactly 0. It MUST be written as a literal
+        # zero, not sqrt(smooth_abs(sin(zero(T))))·…: sqrt(0) has an Inf ForwardDiff
+        # derivative, so even with a zero-valued input the AD partial is Inf·0 = NaN, which
+        # poisons ks → the lake eddy diffusivity kme → the entire coupled lake temperature
+        # solve under AD (finite values, NaN gradients). Value is unchanged (ks = 0).
+        ks_col[c] = zero(T)
 
         htvp_col[c] = htvp
     end

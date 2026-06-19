@@ -3,17 +3,36 @@
 # Ported from scattered *InitTimeConst subroutines in CLM Fortran
 # ==========================================================================
 
-# When true, the cold-start soil temperature + moisture are initialized to the EXACT
-# CLM5/Fortran values (soil 272 K → frozen, h2osoi_vol = 0.15 for j<=nbedrock) so a
-# TRUE Julia cold start is byte-faithful to Fortran's (validated by
-# scripts/fortran_parity_aripuana_coldstart.jl). DEFAULT false uses the latitude-based
-# mean-annual-temperature estimate + 0.75*watsat moisture (a more physical, non-Fortran
-# cold start). It is GATED rather than default because the injection-based parity
-# harnesses re-use cold_start! for non-injected fields and rely on the latitude default;
-# flipping the default to match Fortran is the goal but needs those harnesses made
-# cold-start-independent first. Toggle with coldstart_match_fortran!(::Bool).
-const COLDSTART_MATCH_FORTRAN = Ref(false)
+# When true (the DEFAULT), the cold-start soil temperature + moisture are initialized to
+# the EXACT CLM5/Fortran values (soil 272 K → frozen, h2osoi_vol = 0.15 for j<=nbedrock;
+# lakes 277 K thawed; land-ice 250 K; wetland 277 K) so a TRUE Julia cold start is
+# byte-faithful to Fortran's — validated by scripts/fortran_parity_aripuana_coldstart.jl
+# (global max|rel| 370 → ~0.2). When false, the old latitude-based mean-annual-temperature
+# estimate + 0.75*watsat moisture is used (more forgiving but non-Fortran).
+#
+# Defaulting to true was gated until 2026-06-19; the blocker was a DRIVER bug, now fixed:
+# init_temperatures! left LAKE columns (lakpoi) at the 272 K soil default instead of the
+# Fortran lake branch's 277 K, so the frozen lake soil/water met a warm forcing and a
+# catastrophic phase-change melt blew t_soisno to NaN at step 1 (caught only by the generic
+# smoke harnesses; the proof diffs column 1 = the veg column, never the lake column 2).
+# With the lake branch fixed, scripts/multisite_smoke*.jl run clean at matching=true.
+#
+# The frozen 272 K cold start is now fully AD-validated on the default: the AD/FD calibration
+# harnesses (test_parameter_recovery, test_ad_robustness) run on it with NO pin. Two AD issues
+# that once forced pins were root-caused and fixed, neither a phase-change discontinuity:
+#   • LAKE eddy-diffusivity NaN — ks=6.6·sqrt(|sin lat|)·… with lat stubbed to 0 → sqrt(0) →
+#     Inf·0 NaN ForwardDiff partial; fixed in lake_fluxes.jl (parameter_recovery).
+#   • smooth-AD vs hard-FD mismatch — the Dual path always evaluates the SMOOTHED phase change
+#     (smooth_max; _use_smooth is type-based so Float64 never smooths), so a Float64 FD diverged
+#     from the smooth-AD near the thaw front. test_ad_robustness now takes its FD on Dual VALUES
+#     (same smoothed physics) → AD and FD agree to truncation error in every scenario.
+# Only the injection parity harness (build_bow_inst) still pins false: it injects only the active
+# subgrid subset, and the matching IC's non-injected slots bleed into the active-patch EFLX_GNET.
+#
+# Toggle with coldstart_match_fortran!(::Bool); read with coldstart_match_fortran().
+const COLDSTART_MATCH_FORTRAN = Ref(true)
 coldstart_match_fortran!(b::Bool) = (COLDSTART_MATCH_FORTRAN[] = b; nothing)
+coldstart_match_fortran() = COLDSTART_MATCH_FORTRAN[]
 
 """
     cold_start_initialize!(inst, bounds, filt, surf)
@@ -215,17 +234,35 @@ function init_temperatures!(inst::CLMInstances, bounds::BoundsType)
         # values, for byte-faithful cold-start parity): standard soil/crop columns are
         # initialized at 272 K (below freezing → the soil starts frozen), wetland at
         # 277 K, land-ice at 250 K; surface water at 274 K; vegetation/skin/2 m at 283 K.
+        # LAKE columns (lakpoi) get t_grnd = t_soisno = t_lake = 277 K (thawed) — the
+        # Fortran lake branch (TemperatureType.F90:824-837) sets them AFTER and OVERRIDES
+        # the soil branch. Critically this keeps the lake column ABOVE freezing: leaving it
+        # at the 272 K soil default (the bug this fixes) froze its soil + lake water, and a
+        # warm forcing then drove a catastrophic phase-change melt → NaN in the lake-column
+        # t_soisno at step 1 (the frozen-IC blowup that gated COLDSTART_MATCH_FORTRAN).
         # (See scripts/fortran_parity_aripuana_coldstart.jl for the proof.)
         for c in bounds.begc:bounds.endc
             l = col.landunit[c]
-            lit = lun.itype[l]
-            tsoil = lit == ISTICE ? 250.0 : (lit == ISTWET ? 277.0 : 272.0)
-            temp.t_grnd_col[c] = tsoil
-            for j in 1:(nlevsno + nlevmaxurbgrnd)
-                temp.t_soisno_col[c, j] = tsoil
-            end
-            for j in 1:nlevlak
-                temp.t_lake_col[c, j] = tsoil + 5.0
+            is_lake = l >= 1 && l <= length(lun.lakpoi) && lun.lakpoi[l]
+            if is_lake
+                tgrnd = 277.0
+                temp.t_grnd_col[c] = tgrnd
+                for j in 1:(nlevsno + nlevmaxurbgrnd)
+                    temp.t_soisno_col[c, j] = tgrnd
+                end
+                for j in 1:nlevlak
+                    temp.t_lake_col[c, j] = tgrnd
+                end
+            else
+                lit = lun.itype[l]
+                tsoil = lit == ISTICE ? 250.0 : (lit == ISTWET ? 277.0 : 272.0)
+                temp.t_grnd_col[c] = tsoil
+                for j in 1:(nlevsno + nlevmaxurbgrnd)
+                    temp.t_soisno_col[c, j] = tsoil
+                end
+                for j in 1:nlevlak
+                    temp.t_lake_col[c, j] = tsoil + 5.0
+                end
             end
             temp.t_h2osfc_col[c] = 274.0
             temp.t_h2osfc_bef_col[c] = 274.0

@@ -77,12 +77,21 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
     # be set before clm_initialize! runs cold_start's init_vegrootfr!.
     CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
     CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
+    # This is an INJECTION harness: a warm Fortran mid-run state is injected after the
+    # cold start, so only the ACTIVE subgrid subset matters. The Fortran-matching cold
+    # start (default) perturbs the non-injected residual fields (inactive units, canopy
+    # accumulators) and bleeds into the active-patch EFLX_GNET. Pin the latitude init
+    # the harness was validated against, then restore the global default for any later
+    # naive/production cold start in the session.
+    _prev_cs = CLM.coldstart_match_fortran()
+    CLM.coldstart_match_fortran!(false)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(;
         fsurdat=FSURDAT, paramfile=FPARAM,
         start_date=start_date, dtime=dtime, use_cn=use_cn, use_luna=use_luna,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
         int_snow_max=INT_SNOW_MAX)
+    CLM.coldstart_match_fortran!(_prev_cs)
 
     # The Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true. (CLM5 default).
     # Enable them here — the parity harness runs from a warm Fortran restart, so the

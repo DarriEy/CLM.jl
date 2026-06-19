@@ -144,6 +144,10 @@ using CLM
     include("test_parameter_recovery.jl")
     include("test_enzyme_feasibility.jl")
     include("test_enzyme_smoke.jl")
+    # Forward-parity guard for the productionized clm_drv! reverse phases
+    # (src/driver/driver_reverse.jl). Builds a real inst → placed with the other
+    # clm_initialize!-using integration tests, not the fresh-global unit block.
+    include("test_driver_reverse.jl")
     include("test_multisite_calibration.jl")
     include("test_cn_integration.jl")
 

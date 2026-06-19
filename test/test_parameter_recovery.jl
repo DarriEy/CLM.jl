@@ -28,6 +28,13 @@ const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain
         return
     end
 
+    # These AD calibration twin experiments differentiate through a cold-start state and run
+    # on the global default cold start (Fortran-matching). They previously NaN'd under that
+    # default, but the cause was NOT the soil phase change — it was the lake column's eddy
+    # diffusivity (ks = 6.6·sqrt(|sin lat|)·… with lat stubbed to 0 → sqrt(0) → Inf·0 = NaN
+    # ForwardDiff partial), now fixed in lake_fluxes.jl. csoilc gradient is finite and within
+    # ~10% of FD, so no cold-start pin is needed here.
+
     # =====================================================================
     # Helper: generate synthetic observations from a "true" parameter set
     # =====================================================================
@@ -317,5 +324,4 @@ const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain
         println("  n_eval=3: obj=$(round(obj3, sigdigits=4)), grad=$(round(grad3[1], sigdigits=4))")
         println("  Multi-timestep calibration: PASSED")
     end
-
 end  # outer testset

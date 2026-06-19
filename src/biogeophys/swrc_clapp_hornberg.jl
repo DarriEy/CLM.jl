@@ -27,17 +27,21 @@ Compute hydraulic conductivity using the Clapp-Hornberg 1978 parameterization.
 # Arguments
 - `c::Int`: column index
 - `j::Int`: level index
-- `s::Float64`: relative saturation, [0, 1]
-- `imped::Float64`: ice impedance
+- `s::Real`: relative saturation, [0, 1]
+- `imped::Real`: ice impedance
 - `soilstate::SoilStateData`: soil state data (uses `hksat_col`, `bsw_col`)
 
 # Returns
 - `(hk, dhkds)`: hydraulic conductivity [mm/s] and its derivative w.r.t. s
 
+`s`/`imped` are `::Real` (not `::Float64`) so a ForwardDiff `Dual` flowing from a
+calibrated parameter (e.g. watsat → s, or e_ice → imped) dispatches HERE rather than
+to the abstract `soil_hk!(::SoilWaterRetentionCurve, …)` fallback, which `error`s.
+
 Ported from `soil_hk` in `SoilWaterRetentionCurveClappHornberg1978Mod.F90`.
 """
 function soil_hk!(swrc::SoilWaterRetentionCurveClappHornberg1978, c::Int, j::Int,
-                  s::Float64, imped::Float64, soilstate::SoilStateData)
+                  s::Real, imped::Real, soilstate::SoilStateData)
     hksat = soilstate.hksat_col[c, j]
     bsw   = soilstate.bsw_col[c, j]
 

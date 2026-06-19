@@ -236,4 +236,8 @@ include("infrastructure/enzyme_rules.jl")
 # checkpointed Newton loop). Needs the canopy/photosynthesis kernels + Enzyme above.
 include("biogeophys/canopy_fluxes_reverse.jl")
 
+# Productionized clm_drv! reverse phases (soil_temperature!/soil_water!/water_table!)
+# for the compositional engine — the building blocks of a whole-timestep reverse.
+include("driver/driver_reverse.jl")
+
 end # module CLM

@@ -115,10 +115,12 @@ end
                            zwt::Vector{<:Real},
                            zwt_perched::Vector{<:Real},
                            wtfact::Vector{<:Real},
-                           fff::Float64,
+                           fff::Real,
                            fsat::Vector{<:Real})
 
-Compute fsat using the TOPModel-based parameterization (CLM default).
+Compute fsat using the TOPModel-based parameterization (CLM default). `fff` (the
+TOPModel decay factor) is `::Real`, so a ForwardDiff `Dual` for it differentiates
+through `fsat = wtfact·exp(-0.5·fff·zwt)` — fsat IS differentiable w.r.t. fff.
 
 If the frost table is between the perched water table and the main water
 table, uses the perched water table depth; otherwise uses the main water
