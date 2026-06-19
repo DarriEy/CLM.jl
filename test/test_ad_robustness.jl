@@ -31,6 +31,15 @@ using CLM
         return
     end
 
+    # These FD-vs-AD derivative checks perturb a cold-start state across temperature.
+    # The gated Fortran-matching cold start freezes the soil (272 K) + dries it (vol 0.15),
+    # so the finite-difference probe straddles the phase-change / dry-beta discontinuities
+    # and the FD reference becomes noisy. This harness wants the smooth thawed latitude init
+    # it was validated against; pin it off (independent of the global default, in case a
+    # prior opt-in left it on) and restore afterward.
+    _prev_cs = CLM.coldstart_match_fortran()
+    CLM.coldstart_match_fortran!(false)
+
     # --- Helper: create a Dual-typed copy of a parameterized struct ---
     function make_dual_copy(src, ::Type{D}) where D
         T = typeof(src)
@@ -353,4 +362,5 @@ using CLM
         end
     end
 
+    CLM.coldstart_match_fortran!(_prev_cs)
 end  # outer testset

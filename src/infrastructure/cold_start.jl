@@ -4,16 +4,33 @@
 # ==========================================================================
 
 # When true, the cold-start soil temperature + moisture are initialized to the EXACT
-# CLM5/Fortran values (soil 272 K → frozen, h2osoi_vol = 0.15 for j<=nbedrock) so a
-# TRUE Julia cold start is byte-faithful to Fortran's (validated by
-# scripts/fortran_parity_aripuana_coldstart.jl). DEFAULT false uses the latitude-based
-# mean-annual-temperature estimate + 0.75*watsat moisture (a more physical, non-Fortran
-# cold start). It is GATED rather than default because the injection-based parity
-# harnesses re-use cold_start! for non-injected fields and rely on the latitude default;
-# flipping the default to match Fortran is the goal but needs those harnesses made
-# cold-start-independent first. Toggle with coldstart_match_fortran!(::Bool).
+# CLM5/Fortran values (soil 272 K → frozen, h2osoi_vol = 0.15 for j<=nbedrock) so a TRUE
+# Julia cold start is byte-faithful to Fortran's — validated by
+# scripts/fortran_parity_aripuana_coldstart.jl (global max|rel| 370 → ~0.2). When false
+# (the DEFAULT), the latitude-based mean-annual-temperature estimate + 0.75*watsat moisture
+# is used (the old, more forgiving, non-Fortran Julia init).
+#
+# It is GATED rather than default — and "should default" remains the goal — because the
+# frozen 272 K / dry IC is NOT robust under arbitrary configs the way the warm latitude
+# init is. Two concrete obstacles measured 2026-06-19 when the default was flipped to true:
+#   1. The generic driver smoke harnesses (scripts/multisite_smoke*.jl, use_cn=false AND
+#      true) go NaN/Inf within ~6 steps at the tropical/semiarid sites from the frozen IC,
+#      where they run clean from the latitude init. The cold-start PROOF avoids this only
+#      because it is a carefully-configured free-run (specific forcing/topo/int_snow_max,
+#      use_cn=false).
+#   2. The Phase-1 phase-change discontinuity at the freezing front makes the AD gradient
+#      through a frozen cold start non-finite (test_parameter_recovery NaN); FD-vs-AD
+#      derivative checks straddle the phase-change / dry-beta kinks (test_ad_robustness).
+# Defaulting needs the driver hardened against the frozen cold start + the Phase-3 smoothing
+# of those discontinuities. Until then this stays opt-in; the cold-start proof opts in.
+#
+# Harnesses that build/inject/perturb a state and want the smooth latitude init pin this
+# false with save/restore (build_bow_inst, test_ad_robustness) so they are independent of
+# the global default. Toggle with coldstart_match_fortran!(::Bool); read with
+# coldstart_match_fortran().
 const COLDSTART_MATCH_FORTRAN = Ref(false)
 coldstart_match_fortran!(b::Bool) = (COLDSTART_MATCH_FORTRAN[] = b; nothing)
+coldstart_match_fortran() = COLDSTART_MATCH_FORTRAN[]
 
 """
     cold_start_initialize!(inst, bounds, filt, surf)
