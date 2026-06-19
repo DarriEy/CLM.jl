@@ -40,7 +40,9 @@ end
 
 inst, bounds, filt, config = build_real()
 Ncanopy = parse(Int, get(ENV, "CLM_NCANOPY", "12"))
-caux = C.canopy_rev_aux(inst, bounds, filt)
+use_psn = get(ENV, "CLM_USE_PSN", "0") == "1"
+caux = C.canopy_rev_aux(inst, bounds, filt; use_psn=use_psn)
+@printf("canopy use_psn=%s\n", string(use_psn))
 phases = C.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=Ncanopy)
 hc = filt.hydrologyc; c0 = [c for c in bounds.begc:bounds.endc if hc[c]][1]
 @printf("assembled %d-phase FULL whole-step chain (canopy + hydrology)\n", length(phases))

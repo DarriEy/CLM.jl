@@ -102,4 +102,13 @@
     end
     @test all(isfinite, bf.inst.temperature.t_veg_patch)
     @test isfinite(bf.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
+
+    # canopy_rev_aux(use_psn=true) sources the real LUNA/albedo arrays + the canopy block
+    # with photosynthesis runs forward finite (stomatal feedback path; reverse validated on
+    # 1.10/Enzyme in scripts/enzyme_driver_reverse_fullstep.jl CLM_USE_PSN=1).
+    fp = first(p for p in bounds.begp:bounds.endp if filt.exposedvegp[p])
+    bp = CLM.driver_rev_bundle(deepcopy(inst))
+    CLM.canopy_rev_block!(bp, CLM.canopy_rev_aux(inst, bounds, filt; use_psn=true), 2)
+    @test isfinite(bp.inst.temperature.t_veg_patch[fp])
+    @test isfinite(bp.inst.photosyns.rssun_patch[fp])
 end

@@ -67,14 +67,34 @@ function canopy_rev_aux(inst, bounds, filt; use_psn::Bool = false, dtime = 1800.
     pft = (; dleaf = fill(FT(0.04), MP), z0v_Cr = fill(FT(0.35), MP), z0v_Cs = fill(FT(0.003), MP),
              z0v_c = fill(FT(0.25), MP), z0v_cw = fill(FT(2.0), MP), z0v_LAImax = fill(FT(8.0), MP),
              grnd_ch4 = fill(FT(0.0), NP))
-    psn = (; c3psn = fill(FT(1.0), MP), leafcn = fill(FT(25.0), MP), flnr = fill(FT(0.1), MP),
-             fnitr = fill(FT(1.0), MP), slatop = fill(FT(0.01), MP), mbbopt = fill(FT(9.0), MP),
-             medlynintercept = fill(FT(100.0), MP), medlynslope = fill(FT(6.0), MP),
-             nrad = fill(1, NP), tlai_z = fill(FT(1.0), NP, NLEVCAN),
-             parsun_z = fill(FT(0.0), NP, NLEVCAN), parsha_z = fill(FT(0.0), NP, NLEVCAN),
-             laisun_z = fill(FT(0.0), NP, NLEVCAN), laisha_z = fill(FT(0.0), NP, NLEVCAN),
-             vcmaxcint_sun = fill(FT(1.0), NP), vcmaxcint_sha = fill(FT(0.6), NP),
-             o3coefv = fill(FT(1.0), NP), o3coefg = fill(FT(1.0), NP), t10 = inst.temperature.t_a10_patch)
+    # Photosynthesis aux. With use_psn=true the psn sub-phases run, so source the REAL
+    # canopy radiation / LUNA arrays from the warmed-up inst (surfalb/solarabs/canopystate/
+    # pftcon) — but as Const COPIES, never bundle references, or Enzyme sees the same array
+    # as both Const (here) and Duplicated (in the differentiated bundle). photosynthesis!'s
+    # scalar params come from the module-global params_inst (set during init/warmup). With
+    # use_psn=false the psn sub-phases are skipped, so cheap synthetic fills suffice.
+    psn = if use_psn
+        sa = inst.surfalb; so = inst.solarabs; cs2 = inst.canopystate
+        (; c3psn = copy(pftcon.c3psn), leafcn = copy(pftcon.leafcn), flnr = copy(pftcon.flnr),
+           fnitr = copy(pftcon.fnitr), slatop = copy(pftcon.slatop), mbbopt = copy(pftcon.mbbopt),
+           medlynintercept = fill(FT(100.0), MP), medlynslope = fill(FT(6.0), MP),
+           nrad = copy(sa.nrad_patch), tlai_z = copy(sa.tlai_z_patch),
+           parsun_z = copy(so.parsun_z_patch), parsha_z = copy(so.parsha_z_patch),
+           laisun_z = copy(cs2.laisun_z_patch), laisha_z = copy(cs2.laisha_z_patch),
+           vcmaxcint_sun = copy(sa.vcmaxcintsun_patch), vcmaxcint_sha = copy(sa.vcmaxcintsha_patch),
+           o3coefv = fill(FT(1.0), NP), o3coefg = fill(FT(1.0), NP),
+           t10 = copy(inst.temperature.t_a10_patch))
+    else
+        (; c3psn = fill(FT(1.0), MP), leafcn = fill(FT(25.0), MP), flnr = fill(FT(0.1), MP),
+           fnitr = fill(FT(1.0), MP), slatop = fill(FT(0.01), MP), mbbopt = fill(FT(9.0), MP),
+           medlynintercept = fill(FT(100.0), MP), medlynslope = fill(FT(6.0), MP),
+           nrad = fill(1, NP), tlai_z = fill(FT(1.0), NP, NLEVCAN),
+           parsun_z = fill(FT(0.0), NP, NLEVCAN), parsha_z = fill(FT(0.0), NP, NLEVCAN),
+           laisun_z = fill(FT(0.0), NP, NLEVCAN), laisha_z = fill(FT(0.0), NP, NLEVCAN),
+           vcmaxcint_sun = fill(FT(1.0), NP), vcmaxcint_sha = fill(FT(0.6), NP),
+           o3coefv = fill(FT(1.0), NP), o3coefg = fill(FT(1.0), NP),
+           t10 = copy(inst.temperature.t_a10_patch))
+    end
     return (; patch = inst.patch, col = inst.column, grid = inst.gridcell, forc = forc, pft = pft,
         psn = psn, filterp = fp, fn = fn, active = Bool[ev[p] for p in 1:NP], mask = ev,
         ivt = inst.patch.itype .+ 1,
