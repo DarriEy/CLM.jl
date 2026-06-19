@@ -126,6 +126,38 @@ function hydnodrain_rev_phase!(b, aux)
 end
 
 # --------------------------------------------------------------------------
+# Pre-soil_water! SURFACE-HYDROLOGY phases (HydrologyNoDrainage). These compute the
+# surface water partitioning that becomes soil_water!'s top boundary; they run AFTER
+# soil_temperature! and BEFORE soil_water! in forward order. Each reverse-differentiates
+# cleanly (validated in scripts/enzyme_driver_reverse_surface.jl). They share one aux
+# (just the hydrology filter + column bounds); the Bool kwargs of saturated_excess_runoff!
+# default inside the wrapper. NOTE: a FULLY-FAITHFUL whole-step reverse also needs the
+# data-threading connectors between them (set_soil_water_fractions!, set_qflx_inputs!,
+# route_infiltration_excess!, update_h2osfc!, …) as their own phases — so these are exposed
+# as building blocks here but not yet auto-inserted into driver_rev_phases.
+surfhydro_rev_aux(bounds, filt) = (; hydrologyc = filt.hydrologyc, bc_col = bounds.begc:bounds.endc)
+
+function satexcess_rev_phase!(b, aux)
+    i = b.inst
+    saturated_excess_runoff!(i.sat_excess_runoff, aux.hydrologyc, aux.bc_col,
+        i.column, i.landunit, i.soilhydrology, i.soilstate, i.water.waterfluxbulk_inst)
+    return nothing
+end
+
+function inflexcess_rev_phase!(b, aux)
+    i = b.inst
+    infiltration_excess_runoff!(i.infilt_excess_runoff, i.soilhydrology, i.soilstate,
+        i.sat_excess_runoff.fsat_col, i.water.waterfluxbulk_inst, i.water.waterdiagnosticbulk_inst,
+        aux.hydrologyc, aux.bc_col)
+    return nothing
+end
+
+function infil_rev_phase!(b, aux)
+    infiltration!(b.inst.water.waterfluxbulk_inst, aux.hydrologyc, aux.bc_col)
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse.
 # `canopy_aux === nothing` skips the canopy block (e.g. a hydrology-only reverse).
 # Append further phases (hydrology diagnostics, fluxes, BGC) here as they are

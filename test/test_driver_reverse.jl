@@ -74,4 +74,14 @@
     b2 = CLM.driver_rev_bundle(deepcopy(inst))
     CLM.soiltemp_rev_phase!(b2, CLM.soiltemp_rev_aux(bounds, filt))
     @test b2.inst.temperature.t_soisno_col[c0, j1] ≈ ref.temperature.t_soisno_col[c0, j1] atol = 1e-12
+
+    # pre-soil_water surface-hydrology phase wrappers run + produce finite outputs.
+    bs = CLM.driver_rev_bundle(deepcopy(inst))
+    sh = CLM.surfhydro_rev_aux(bounds, filt)
+    CLM.satexcess_rev_phase!(bs, sh)      # fsat
+    CLM.inflexcess_rev_phase!(bs, sh)     # qinmax (reads fsat)
+    CLM.infil_rev_phase!(bs, sh)          # qflx_infl
+    @test isfinite(bs.inst.sat_excess_runoff.fsat_col[c0])
+    @test isfinite(bs.inst.infilt_excess_runoff.qinmax_col[c0])
+    @test isfinite(bs.inst.water.waterfluxbulk_inst.wf.qflx_infl_col[c0])
 end
