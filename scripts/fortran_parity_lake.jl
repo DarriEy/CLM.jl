@@ -18,17 +18,21 @@
 # the Julia state at end-of-step — with 1 step/record these coincide for state vars;
 # flux fields (LH/SH/FIRE/FSA) are the step's instantaneous value vs a 1-sample mean.
 #
-# RESULT (48-step cold-start, 2026-06-19): the lake THERMODYNAMICS track Fortran
-# (TLAKE ~1%, H2OSNO tight, FSA==0 at the winter-night start), but the lake SURFACE
-# TURBULENT-FLUX solve is broken: at step 1 Julia FSH=-1.0 / EFLX_LH=-0.14 W/m2 vs
-# Fortran +84.9 / +53.8 (collapse to ~0 — implied aerodynamic resistance rah ~1e4
-# s/m, ~100-1000x too high), so the lake surface radiatively decouples and TG
-# over-cools to 250 K vs Fortran 271 K in ONE step (FIRE = sigma*Tg^4 follows:
-# 220 vs 301). Same CLASS as the documented bare-ground Monin-Obukhov ustar
-# collapse. It compounds: the cold surface over-freezes the lake (LAKEICE rel
-# drifts to ~0.38 by step 48) and skews daytime albedo/FSA (~0.44). NEXT: chase the
-# lake surface MO/aerodynamic-resistance in lake_fluxes! (ustar/rah; cf. ws_col,
-# ks_col, and the stability iteration) — the thermodynamics downstream are fine.
+# RESULT (48-step cold-start): the lake THERMODYNAMICS track Fortran (TLAKE ~1%,
+# H2OSNO tight, FSA==0 at the winter-night start); the residual is the lake SURFACE
+# TURBULENT-FLUX solve (FSH/EFLX_LH still low vs Fortran +85/+54, TG over-cools).
+#
+# FIXED 2026-06-19 (lake_fluxes.jl): (1) the MoninObukIni obu had the WRONG SIGN for
+# unstable conditions (obu = -ustar^3*thv/(vkc*g*thvstar) returned the stable branch
+# when the lake is warmer than the air) -> ustar collapsed; replaced with the CLM
+# bulk-Richardson MoninObukIni (obu<0 + convective um for unstable). (2) wind_min
+# 0.1->1.0 (Fortran param). (3) the final fluxes used rah_final=zldis/(vkc*ustar),
+# dropping the log(z/z0)+stability profile; now use the iteration's converged
+# rah/raw/ram. These make iteration 1 correctly unstable and improve early FSH/LH
+# (rel 0.94->0.83). REMAINING: Julia's lake z0mg (~5.6e-5) is ~20-90x smaller than
+# CLM5 (~1e-3), so rah stays ~2x high and the surface-temp Newton tips back to the
+# stable/over-cooled fixed point. NEXT: the lake roughness z0mg/z0hg + carried
+# ust_lake / z0mg_col state (LakeFluxesMod.F90:330-370, Charnock + a_coef/a_exp).
 #
 # Usage: julia +1.12 --project=. scripts/fortran_parity_lake.jl [NSTEPS] [--all]
 # =============================================================================

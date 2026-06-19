@@ -146,8 +146,9 @@ end
 
         snl = snl_arr[c]
 
-        # Wind minimum
-        wind_min = T(0.1)
+        # Wind minimum (CLM params_inst%wind_min = 1.0; Fortran LakeFluxes floors ur
+        # at this, not 0.1 — the low-wind ur feeds ustar).
+        wind_min = T(1.0)
 
         # ============================================================
         # Phase 1: Initialization
@@ -251,28 +252,35 @@ end
         dqh = forc_q[c] - qsat_water(tgbef, forc_pbot[c])
         dthv = dth * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * dqh
 
-        # Initial ustar estimate
-        ustar = T(VKC) * ur / log(zldis / z0mg)
-        ustar = smooth_max(ustar, T(0.001))
-
-        # Initial Obukhov length
-        tstar = T(VKC) * dth / log(forc_hgt_t / z0hg)
-        qstar = T(VKC) * dqh / log(forc_hgt_q / z0qg)
-        thvstar = tstar * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * qstar
-
-        if abs(thvstar) > T(1e-10)
-            obu = -ustar^3 * thv / (T(VKC) * T(GRAV) * thvstar)
-            obu = clamp(obu, T(-1e4), T(1e4))
+        # Initial Monin-Obukhov length + wind speed — CLM FrictionVelocityMod
+        # MoninObukIni (bulk-Richardson form). The previous initialization used
+        # obu = -ustar^3*thv/(vkc*grav*thvstar), which gives the WRONG SIGN for
+        # UNSTABLE conditions (it returned positive obu / the stable branch when the
+        # lake surface is warmer than the air, dthv<0). That collapsed ustar to ~0.01
+        # (rah ~ 1e3-1e4), drove the turbulent fluxes to ~0, and let the surface
+        # radiatively over-cool (TG 250 K vs Fortran 271 K). The Richardson form gives
+        # obu<0 + a convective wind speed for unstable, matching Fortran.
+        ustar = smooth_max(T(VKC) * ur / log(zldis / z0mg), T(0.001))  # overwritten in the iteration
+        if dthv >= zero(T)
+            um = smooth_max(ur, T(0.1))
         else
-            obu = T(1e4)
+            um = sqrt(ur^2 + T(0.25))   # convective velocity wc = 0.5 m/s
         end
-
-        um = ur
+        rib = T(GRAV) * zldis * dthv / (thv * um^2)
+        if rib >= zero(T)
+            zeta = rib * log(zldis / z0mg) / (one(T) - T(5.0) * min(rib, T(0.19)))
+            zeta = clamp(zeta, T(0.01), T(ZETAMAX_LAKE))
+        else
+            zeta = rib * log(zldis / z0mg)
+            zeta = clamp(zeta, T(-100.0), T(-0.01))
+        end
+        obu = zldis / zeta
 
         # ============================================================
         # Phase 2: Stability iteration
         # ============================================================
         t_grnd_new = tgbef
+        rah_c = one(T); raw_c = one(T); ram_c = one(T)   # converged resistances (set in loop)
 
         for iter in 1:niters
             # Aerodynamic resistances
@@ -364,6 +372,7 @@ end
             end
             obu = zldis_u / zeta_val
             obu = clamp(obu, T(-1e4), T(1e4))
+            rah_c = rah; raw_c = raw; ram_c = ram   # carry converged (log + stability) resistances
 
             # Update roughness for unfrozen lakes
             if tgbef > T(TFRZ)
@@ -406,13 +415,11 @@ end
         qsatg_final = qsat_water(t_grnd_new, forc_pbot[c])
         thm_local = forc_t[c] + T(0.0098) * forc_hgt_t_grc[g]
 
-        # Aerodynamic resistances (use final iteration values)
-        zldis_t = smooth_max(forc_hgt_t - displa, z0hg + T(0.01))
-        zldis_q = smooth_max(forc_hgt_q - displa, z0qg + T(0.01))
-        zldis_u = smooth_max(forc_hgt_u - displa, z0mg + T(0.01))
-
-        rah_final = smooth_max(zldis_t / (T(VKC) * ustar), one(T))
-        raw_final = smooth_max(zldis_q / (T(VKC) * ustar), one(T))
+        # Use the converged resistances from the stability iteration (log profile +
+        # stability corrections). The previous rah_final = zldis_t/(vkc*ustar) dropped
+        # the log(z/z0) factor and the stability functions, inflating the resistance.
+        rah_final = rah_c
+        raw_final = raw_c
 
         eflx_sh_grnd_p = forc_rho[c] * T(CPAIR) * (t_grnd_new - thm_local) / rah_final
         qflx_evap_soi_p = forc_rho[c] * (qsatg_final - forc_q[c]) / raw_final
@@ -442,7 +449,7 @@ end
         d.z0qg[p] = z0qg
 
         # Momentum stress
-        ram_final = smooth_max(zldis_u / (T(VKC) * ustar), one(T))
+        ram_final = ram_c
         d.taux[p] = -forc_rho[c] * forc_u[g] / ram_final
         d.tauy[p] = -forc_rho[c] * forc_v[g] / ram_final
 
