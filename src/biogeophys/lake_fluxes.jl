@@ -38,8 +38,10 @@ const PRN_AIR = 0.713          # Prandtl number for air
 const SCH_WATER = 0.66         # Schmidt number for water in air
 const KVA0 = 1.51e-5           # kinematic viscosity of air at 20°C [m²/s]
 const CUS = 0.1                # smooth flow regime coefficient
-const CUR0 = 0.01              # base Charnock constant
-const CURM = 0.0                # modified Charnock coefficient
+const CUR0 = 0.01              # min Charnock parameter (LakeCon cur0)
+const CURM = 0.1               # max Charnock parameter (LakeCon curm; was wrongly 0 → no
+                               # fetch-limited enhancement, leaving z0mg far too small)
+const FCRIT = 100.0            # critical dimensionless fetch for the Charnock parameter
 const BETA1 = 1.0              # coefficient of convective velocity
 const ZETAMAX_LAKE = 0.5       # max zeta under stable conditions
 
@@ -376,8 +378,15 @@ end
 
             # Update roughness for unfrozen lakes
             if tgbef > T(TFRZ)
-                z0mg = smooth_max(smooth_max(T(MINZ0LAKE), T(CUS) * kva / smooth_max(ustar, T(1e-6))),
-                           T(CUR0) * ustar^2 / T(GRAV))
+                # Fetch/depth-limited Charnock parameter (Vickers & Mahrt 1997 form,
+                # LakeFluxesMod). The previous code used the constant CUR0 (CURM=0),
+                # so cur*ustar^2/g was ~6x too small and z0mg collapsed toward the
+                # smooth-flow floor → rah too high.
+                cur = T(CUR0) + T(CURM) * exp(max(
+                          -(fetch * T(GRAV) / ustar^2)^(one(T)/T(3.0)) / T(FCRIT),
+                          -sqrt(lakedepth_c * T(GRAV) / ur^2)))
+                z0mg = smooth_max(smooth_max(T(MINZ0LAKE), T(CUS) * kva / smooth_max(ustar, T(1e-4))),
+                           cur * ustar^2 / T(GRAV))
                 sqre0 = sqrt(smooth_max(z0mg * ustar / kva, T(0.1)))
                 z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
                 z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))

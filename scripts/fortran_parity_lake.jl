@@ -29,10 +29,20 @@
 # 0.1->1.0 (Fortran param). (3) the final fluxes used rah_final=zldis/(vkc*ustar),
 # dropping the log(z/z0)+stability profile; now use the iteration's converged
 # rah/raw/ram. These make iteration 1 correctly unstable and improve early FSH/LH
-# (rel 0.94->0.83). REMAINING: Julia's lake z0mg (~5.6e-5) is ~20-90x smaller than
-# CLM5 (~1e-3), so rah stays ~2x high and the surface-temp Newton tips back to the
-# stable/over-cooled fixed point. NEXT: the lake roughness z0mg/z0hg + carried
-# ust_lake / z0mg_col state (LakeFluxesMod.F90:330-370, Charnock + a_coef/a_exp).
+# (rel 0.94->0.83). Also added the fetch-limited Charnock cur (CURM 0->0.1 + the
+# fetch/depth exp term; the constant CUR0 left z0mg too small) — correct but inert.
+#
+# REMAINING (and it is NOT the aerodynamic resistance): instrumenting the surface-
+# temp Newton (ax/bx, formula identical to Fortran) shows t_grnd = ax/bx as a
+# function of rah is BOUNDED to ~[248, 261] K — NO rah reaches Fortran's 271 K. The
+# only term that can hold t_grnd near the warm lake is the conduction
+# tksur*tsur/dzsur; reaching 271 needs tksur ~= 15, but tksur = savedtke1 = tkwat =
+# 0.57 (molecular) at cold start (which MATCHES Fortran's cold-start init). So the
+# residual is the lake SURFACE-WATER THERMAL COUPLING — the eddy conductivity /
+# cold-start t_lake profile, or LakeTemperature resetting t_grnd toward the warm
+# column post-flux. NEXT: instrument the Fortran lake_fluxes/lake_temperature
+# (rebuild w/ prints) to compare tksur / savedtke1 / t_lake at step 1 and whether
+# t_grnd is updated after the flux solve.
 #
 # Usage: julia +1.12 --project=. scripts/fortran_parity_lake.jl [NSTEPS] [--all]
 # =============================================================================
