@@ -318,6 +318,42 @@ function cnmresp_rev_phase!(b, aux)
     return nothing
 end
 
+# c_state_update1! — the carbon-cycle pool integration (e.g. leafc += cpool_to_leafc·dt;
+# cpool drained by allocation/MR/growth-resp). Reverse-validated at machine precision
+# (scripts/enzyme_bgc_reverse.jl [P3]). Differentiated state: cnveg_carbonstate_inst (pools,
+# out) ← cnveg_carbonflux_inst (fluxes, in) + soilbiogeochem_carbonflux (litter sink). Every
+# index/cascade arg (patch_column, ivt, woody, cascade_donor/receiver_pool, harvdate,
+# col_is_fates, i_litr_*, …) is a Const, sourced from inst/config exactly as cn_driver does.
+function cstate1_rev_aux(inst, bounds, filt, config)
+    return (; mask_c = filt.bgc_soilc, mask_p = filt.bgc_vegp,
+              bounds_c = bounds.begc:bounds.endc, bounds_p = bounds.begp:bounds.endp,
+              patch_column = inst.patch.column, ivt = inst.patch.itype,
+              woody = Float64.(pftcon.woody),
+              cascade_donor_pool = inst.decomp_cascade.cascade_donor_pool,
+              cascade_receiver_pool = inst.decomp_cascade.cascade_receiver_pool,
+              harvdate = inst.crop.harvdate_patch, col_is_fates = inst.column.is_fates,
+              nlevdecomp = varpar.nlevdecomp,
+              ndecomp_cascade_transitions = config.ndecomp_cascade_transitions,
+              i_litr_min = config.i_litr_min, i_litr_max = config.i_litr_max, i_cwd = config.i_cwd,
+              npcropmin = config.npcropmin, nrepr = config.nrepr, dt = 1800.0)
+end
+function cstate1_rev_phase!(b, aux)
+    i = b.inst
+    c_state_update1!(i.bgc_vegetation.cnveg_carbonstate_inst,
+                     i.bgc_vegetation.cnveg_carbonflux_inst, i.soilbiogeochem_carbonflux;
+                     mask_soilc = aux.mask_c, mask_soilp = aux.mask_p,
+                     bounds_col = aux.bounds_c, bounds_patch = aux.bounds_p,
+                     patch_column = aux.patch_column, ivt = aux.ivt, woody = aux.woody,
+                     cascade_donor_pool = aux.cascade_donor_pool,
+                     cascade_receiver_pool = aux.cascade_receiver_pool,
+                     harvdate = aux.harvdate, col_is_fates = aux.col_is_fates,
+                     nlevdecomp = aux.nlevdecomp,
+                     ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
+                     i_litr_min = aux.i_litr_min, i_litr_max = aux.i_litr_max, i_cwd = aux.i_cwd,
+                     npcropmin = aux.npcropmin, nrepr = aux.nrepr, dt = aux.dt)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →

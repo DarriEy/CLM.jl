@@ -8,6 +8,7 @@
 #
 #   [P1] cn_gresp!  (growth respiration:   cpool_*_gr = grperc·grpnow·allocation)
 #   [P2] cn_mresp!  (maintenance resp:     livestem_mr = livestemn·br·tc(Q10), the `br` param)
+#   [P3] c_state_update1! (C pool integration: leafc += cpool_to_leafc·dt — the C-cycle update)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -93,8 +94,61 @@ function section_mresp()
     return verdict("P2 cn_mresp", g_fd, db.cnveg_ns.livestemn_patch[1])
 end
 
+# =============================================================================
+# [P3] c_state_update1! — carbon pool integration (the C-cycle state update). Bundle =
+#      (cs_veg pools out, cf_veg fluxes in, cf_soil litter sink). All index/cascade args
+#      (patch_column, cascade_donor/receiver_pool, woody, …) are Const aux. Perturb
+#      cpool_to_leafc → leafc_patch (leafc += cpool_to_leafc·dt, c_state_update1.jl:489).
+# =============================================================================
+function section_cstate1()
+    println("\n", "#"^70, "\n# [P3] c_state_update1! (carbon pool integration) REVERSE\n", "#"^70)
+    np=1; nc=1; ng=1; nlevdecomp=1; ndecomp_pools=7; ndecomp_cascade_transitions=5; nrepr=C.NREPR
+    i_litr_min=1; i_litr_max=3; i_cwd=4; dt=1800.0
+    patch_column=[1]; ivt=[1]; woody=zeros(Float64,80); harvdate=fill(999,np); col_is_fates=fill(false,nc)
+    cascade_donor_pool=[1,2,3,1,2]; cascade_receiver_pool=[2,3,0,4,4]
+    function fresh()
+        cs = C.CNVegCarbonStateData(); C.cnveg_carbon_state_init!(cs, np, nc, ng; nrepr=nrepr)
+        cs.cpool_patch .= 100.0; cs.leafc_patch .= 50.0
+        cf = C.CNVegCarbonFluxData()
+        C.cnveg_carbon_flux_init!(cf, np, nc, ng; nrepr=nrepr, nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools)
+        for f in fieldnames(typeof(cf))          # init NaN-fills (surfaces unset fluxes) → zero for a clean probe
+            v = getfield(cf, f); v isa AbstractArray{<:AbstractFloat} && fill!(v, 0.0)
+        end
+        cf.cpool_to_leafc_patch[1]=5.0e-7; cf.cpool_to_leafc_storage_patch[1]=2.0e-7
+        cf.leafc_xfer_to_leafc_patch[1]=2.0e-7
+        cf.psnsun_to_cpool_patch[1]=1.0e-6; cf.psnshade_to_cpool_patch[1]=0.5e-6
+        cfs = C.SoilBiogeochemCarbonFluxData()
+        C.soil_bgc_carbon_flux_init!(cfs, nc, nlevdecomp, ndecomp_pools, ndecomp_cascade_transitions)
+        cfs.decomp_cpools_sourcesink_col .= 0.0
+        return (; cs_veg=cs, cf_veg=cf, cf_soil=cfs)
+    end
+    aux = (; mask_c=BitVector([true]), mask_p=BitVector([true]), bounds_c=1:nc, bounds_p=1:np,
+             patch_column=patch_column, ivt=ivt, woody=woody,
+             cascade_donor_pool=cascade_donor_pool, cascade_receiver_pool=cascade_receiver_pool,
+             harvdate=harvdate, col_is_fates=col_is_fates, nlevdecomp=nlevdecomp,
+             ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+             i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, nrepr=nrepr, dt=dt)
+    phase!(b, a) = (C.c_state_update1!(b.cs_veg, b.cf_veg, b.cf_soil;
+        mask_soilc=a.mask_c, mask_soilp=a.mask_p, bounds_col=a.bounds_c, bounds_patch=a.bounds_p,
+        patch_column=a.patch_column, ivt=a.ivt, woody=a.woody,
+        cascade_donor_pool=a.cascade_donor_pool, cascade_receiver_pool=a.cascade_receiver_pool,
+        harvdate=a.harvdate, col_is_fates=a.col_is_fates, nlevdecomp=a.nlevdecomp,
+        ndecomp_cascade_transitions=a.ndecomp_cascade_transitions,
+        i_litr_min=a.i_litr_min, i_litr_max=a.i_litr_max, i_cwd=a.i_cwd, nrepr=a.nrepr, dt=a.dt); nothing)
+    let b=fresh(); l0=b.cs_veg.leafc_patch[1]; phase!(b,aux)
+        @printf("primal: leafc %.4f→%.8f (Δ=%.4e expect cpool_to_leafc·dt=%.4e)\n",
+            l0, b.cs_veg.leafc_patch[1], b.cs_veg.leafc_patch[1]-l0, 5.0e-7*dt)
+    end
+    L(b) = sum(abs2, b.cs_veg.leafc_patch)
+    g_fd = richardson(δ -> (b=fresh(); b.cf_veg.cpool_to_leafc_patch[1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.cs_veg.leafc_patch .= 2 .* b.cs_veg.leafc_patch))
+    return verdict("P3 c_state_update1", g_fd, db.cf_veg.cpool_to_leafc_patch[1])
+end
+
 rP1 = try section_gresp() catch e; @printf("[P1] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP2 = try section_mresp() catch e; @printf("[P2] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP3 = try section_cstate1() catch e; @printf("[P3] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e\n", rP1, rP2)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e\n", rP1, rP2, rP3)
 println("="^70)
