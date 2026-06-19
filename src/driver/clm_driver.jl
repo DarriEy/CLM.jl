@@ -694,6 +694,12 @@ function clm_drv_core!(config::CLMDriverConfig,
     # BeginWaterColumnBalance — WIRED
     begin_water_column_balance!(inst.water, sh, ls, col, lun,
                                 filt.nolakec, filt.lakec, bc_col)
+    # Include p2c canopy water in begwb (Fortran ComputeWaterMassNonLake p2c's it
+    # in; the Julia storage fn stubs canopy to zero). Required so errh2o_col treats
+    # canopy interception/unloading as internal, not a phantom storage change.
+    add_canopy_water_to_storage!(inst.water.waterbalancebulk_inst.begwb_col,
+                                 wsb.ws.liqcan_patch, wsb.ws.snocan_patch,
+                                 filt.nolakec, col, pch)
 
     if config.use_cn || config.use_fates_bgc
         # InitColumnBalance — WIRED
@@ -1614,6 +1620,32 @@ function clm_drv_core!(config::CLMDriverConfig,
     water_gridcell_balance!(inst.water, ls, col, lun, grc,
                             filt.nolakec, filt.lakec,
                             bc_col, bc_lun, bc_grc, "endwb")
+    # Column-level end water balance: the port never set endwb_col (it stayed NaN,
+    # so the errh2o_col check silently passed on NaN). Mirror begin (non-lake +
+    # lake stores) and add p2c canopy water, consistent with begwb above.
+    end_water_column_balance!(inst.water, ls, col, filt.nolakec, filt.lakec, bc_col)
+    add_canopy_water_to_storage!(inst.water.waterbalancebulk_inst.endwb_col,
+                                 wsb.ws.liqcan_patch, wsb.ws.snocan_patch,
+                                 filt.nolakec, col, pch)
+
+    # Gridcell water balance: mirror the column fix so errh2o_grc is meaningful.
+    # (1) add canopy to begwb_grc/endwb_grc (water_gridcell_balance! computes them
+    # canopy-free); (2) aggregate column output fluxes to gridcell (the call below
+    # previously passed _zlike → errh2o_grc compared ΔS to precip alone). Both are
+    # required: once the column fluxes are de-NaN'd, an unfixed grc check spams.
+    let wbk = inst.water.waterbalancebulk_inst, lc = wsb.ws.liqcan_patch, sc = wsb.ws.snocan_patch
+        add_canopy_water_to_grc_storage!(wbk.begwb_grc, lc, sc, filt.nolakec, col, pch, bc_col, bc_grc)
+        add_canopy_water_to_grc_storage!(wbk.endwb_grc, lc, sc, filt.nolakec, col, pch, bc_col, bc_grc)
+    end
+    _g_evap_tot     = _zlike(length(grc.lat)); _g_surf      = _zlike(length(grc.lat))
+    _g_qrgwl        = _zlike(length(grc.lat)); _g_drain     = _zlike(length(grc.lat))
+    _g_drain_perch  = _zlike(length(grc.lat)); _g_sfc_irrig = _zlike(length(grc.lat))
+    c2g_unity!(_g_evap_tot,    wfb.wf.qflx_evap_tot_col,      col.gridcell, col.wtgcell, bc_col, bc_grc)
+    c2g_unity!(_g_surf,        wfb.wf.qflx_surf_col,          col.gridcell, col.wtgcell, bc_col, bc_grc)
+    c2g_unity!(_g_qrgwl,       wfb.wf.qflx_qrgwl_col,         col.gridcell, col.wtgcell, bc_col, bc_grc)
+    c2g_unity!(_g_drain,       wfb.wf.qflx_drain_col,         col.gridcell, col.wtgcell, bc_col, bc_grc)
+    c2g_unity!(_g_drain_perch, wfb.wf.qflx_drain_perched_col, col.gridcell, col.wtgcell, bc_col, bc_grc)
+    c2g_unity!(_g_sfc_irrig,   wfb.wf.qflx_sfc_irrig_col,     col.gridcell, col.wtgcell, bc_col, bc_grc)
 
     # BalanceCheck — WIRED
     balance_check!(inst.balcheck, wfb, wsb,
@@ -1630,13 +1662,13 @@ function clm_drv_core!(config::CLMDriverConfig,
                    forc_lwrad_col=a2l.forc_lwrad_downscaled_col,
                    forc_flood_grc=_zlike(length(grc.lat)),
                    qflx_ice_runoff_col=_zlike(nc),
-                   qflx_evap_tot_grc=_zlike(length(grc.lat)),
-                   qflx_surf_grc=_zlike(length(grc.lat)),
-                   qflx_qrgwl_grc=_zlike(length(grc.lat)),
-                   qflx_drain_grc=_zlike(length(grc.lat)),
-                   qflx_drain_perched_grc=_zlike(length(grc.lat)),
+                   qflx_evap_tot_grc=_g_evap_tot,
+                   qflx_surf_grc=_g_surf,
+                   qflx_qrgwl_grc=_g_qrgwl,
+                   qflx_drain_grc=_g_drain,
+                   qflx_drain_perched_grc=_g_drain_perch,
                    qflx_ice_runoff_grc=_zlike(length(grc.lat)),
-                   qflx_sfc_irrig_grc=_zlike(length(grc.lat)),
+                   qflx_sfc_irrig_grc=_g_sfc_irrig,
                    qflx_streamflow_grc=_zlike(length(grc.lat)))
 
     # ========================================================================

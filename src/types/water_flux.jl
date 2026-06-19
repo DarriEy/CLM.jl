@@ -155,7 +155,7 @@ function waterflux_init!(wf::WaterFluxData{FT}, nc::Int, np::Int, nl::Int, ng::I
     wf.qflx_glcice_col                     = fill(FT(NaN), nc)
     wf.qflx_glcice_frz_col                 = fill(FT(NaN), nc)
     wf.qflx_glcice_melt_col                = fill(FT(NaN), nc)
-    wf.qflx_glcice_dyn_water_flux_col      = fill(FT(NaN), nc)
+    wf.qflx_glcice_dyn_water_flux_col      = fill(zero(FT), nc)  # 0 unless glc dynamics active (else NaN poisons errh2o_col)
     wf.qflx_tran_veg_col                   = fill(FT(NaN), nc)
     wf.qflx_evap_veg_col                   = fill(FT(NaN), nc)
     wf.qflx_evap_can_col                   = fill(FT(NaN), nc)
@@ -187,7 +187,7 @@ function waterflux_init!(wf::WaterFluxData{FT}, nc::Int, np::Int, nl::Int, ng::I
     wf.qflx_h2osfc_to_ice_col             = fill(FT(NaN), nc)
     wf.qflx_snow_h2osfc_col               = fill(FT(NaN), nc)
     wf.qflx_too_small_h2osfc_to_soil_col  = fill(FT(NaN), nc)
-    wf.qflx_sfc_irrig_col                 = fill(FT(NaN), nc)
+    wf.qflx_sfc_irrig_col                 = fill(zero(FT), nc)  # 0 unless irrigation active (else NaN poisons errh2o_col)
     wf.qflx_gw_uncon_irrig_col            = fill(FT(NaN), nc)
     wf.qflx_gw_con_irrig_col              = fill(FT(NaN), nc)
 

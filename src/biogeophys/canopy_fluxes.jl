@@ -1185,8 +1185,22 @@ Adapt.@adapt_structure CfDiagC
         _frac_liq = smooth_heaviside(tveg - T(TFRZ); k = T(200.0))
         _frac_ice = one(T) - _frac_liq
         _net_evap = (pp.qflx_tran_veg[p] - pp.qflx_evap_veg[p]) * dtime
-        out.liqcan[p] = smooth_max(zero(T), out.liqcan[p] + _frac_liq * _net_evap)
-        out.snocan[p] = smooth_max(zero(T), out.snocan[p] + _frac_ice * _net_evap)
+        # Update canopy water on the TOTAL store, then re-split by phase. The
+        # canopy must shed exactly (qflx_evap_veg - qflx_tran_veg)*dt = -net_evap,
+        # the canopy-surface-evaporation part of qflx_evap_tot; the upstream ecidif
+        # cap guarantees |net_evap| <= h2ocan. The previous code split the removal
+        # by leaf-temperature phase (_frac_liq) and clamped each phase at 0
+        # independently, so in melt season (warm leaf + snow-laden canopy) the
+        # evaporation was drawn from an empty liqcan while snocan was left
+        # undebited -> phantom water (a ~64 mm/yr column water-balance leak).
+        # Removals now draw from existing phase amounts; additions (dew) follow the
+        # leaf-temperature phase. _denom guard keeps it AD-safe at h2ocan -> 0.
+        _h2ocan_new = smooth_max(zero(T), out.liqcan[p] + out.snocan[p] + _net_evap)
+        _w_liq = out.liqcan[p] + _frac_liq * smooth_max(zero(T), _net_evap)
+        _w_sno = out.snocan[p] + _frac_ice * smooth_max(zero(T), _net_evap)
+        _denom = smooth_max(T(1.0e-15), _w_liq + _w_sno)
+        out.liqcan[p] = _h2ocan_new * (_w_liq / _denom)
+        out.snocan[p] = _h2ocan_new - out.liqcan[p]
     end
 end
 

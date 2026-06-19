@@ -495,6 +495,105 @@ function begin_water_column_balance_single!(
 end
 
 # --------------------------------------------------------------------------
+# add_canopy_water_to_storage! / end_water_column_balance!
+# --------------------------------------------------------------------------
+
+"""
+    add_canopy_water_to_storage!(storage_col, liqcan_patch, snocan_patch,
+                                 mask_nolakec, col_data, pch_data)
+
+Add p2c-aggregated canopy water (liqcan + snocan, mm over column ground area)
+to a column water-mass array on non-lake columns.
+
+The Julia port's `compute_liq_ice_mass_non_lake!` stubs canopy water to zero
+(its `liqcan_col`/`snocan_col` are left unset by callers), whereas Fortran's
+`ComputeWaterMassNonLake` p2c's the patch canopy water into the column total.
+Omitting it makes `begwb_col`/`endwb_col` exclude canopy, so canopy
+interception/unloading appears as a phantom storage change in `errh2o_col`.
+`p2c_1d_filter!` is the wtcol-weighted sum (= column total when the column's
+patches partition it, Σwtcol=1), matching Fortran; it writes only masked
+columns, so lake columns keep their zero-initialized scratch.
+"""
+function add_canopy_water_to_storage!(
+    storage_col::AbstractVector{<:Real},
+    liqcan_patch::AbstractVector{<:Real},
+    snocan_patch::AbstractVector{<:Real},
+    mask_nolakec::AbstractVector{Bool},
+    col_data::ColumnData,
+    pch_data::PatchData)
+
+    FT = eltype(storage_col)
+    nc = length(storage_col)
+    liqc = fill!(similar(storage_col, FT, nc), zero(FT))
+    snoc = fill!(similar(storage_col, FT, nc), zero(FT))
+    p2c_1d_filter!(liqc, liqcan_patch, mask_nolakec, col_data, pch_data)
+    p2c_1d_filter!(snoc, snocan_patch, mask_nolakec, col_data, pch_data)
+    storage_col .+= liqc .+ snoc
+    return nothing
+end
+
+"""
+    add_canopy_water_to_grc_storage!(storage_grc, liqcan_patch, snocan_patch,
+                                     mask_nolakec, col_data, pch_data, bounds_c, bounds_g)
+
+Gridcell analogue of `add_canopy_water_to_storage!`: p2c the patch canopy water to
+columns, c2g to gridcells, and add to a gridcell water-mass array. Needed so
+`begwb_grc`/`endwb_grc` are canopy-inclusive (matching the column-level fix), else
+canopy interception/unloading shows up as a phantom gridcell water-balance error.
+"""
+function add_canopy_water_to_grc_storage!(
+    storage_grc::AbstractVector{<:Real},
+    liqcan_patch::AbstractVector{<:Real},
+    snocan_patch::AbstractVector{<:Real},
+    mask_nolakec::AbstractVector{Bool},
+    col_data::ColumnData,
+    pch_data::PatchData,
+    bounds_c::UnitRange{Int},
+    bounds_g::UnitRange{Int})
+
+    FT = eltype(storage_grc)
+    nc = length(mask_nolakec)
+    liqc = fill!(similar(storage_grc, FT, nc), zero(FT))
+    snoc = fill!(similar(storage_grc, FT, nc), zero(FT))
+    p2c_1d_filter!(liqc, liqcan_patch, mask_nolakec, col_data, pch_data)
+    p2c_1d_filter!(snoc, snocan_patch, mask_nolakec, col_data, pch_data)
+    can_grc = fill!(similar(storage_grc, FT, length(storage_grc)), zero(FT))
+    c2g_unity!(can_grc, liqc .+ snoc, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
+    storage_grc .+= can_grc
+    return nothing
+end
+
+"""
+    end_water_column_balance!(water, lakestate, col_data, mask_nolake, mask_lake, bounds_c)
+
+Compute the column water mass at the END of the time step into `endwb_col`,
+mirroring `begin_water_column_balance!` (non-lake + lake stores). The port
+previously never set `endwb_col` (it stayed NaN), so the column-level
+`errh2o_col` water-balance check silently passed on NaN. Canopy water is added
+separately by the driver via `add_canopy_water_to_storage!`, consistent with
+how `begwb_col` is augmented.
+"""
+function end_water_column_balance!(
+    water::WaterData,
+    lakestate::LakeStateData,
+    col_data::ColumnData,
+    mask_nolake::AbstractVector{Bool},
+    mask_lake::AbstractVector{Bool},
+    bounds_c::UnitRange{Int})
+
+    for i in water.bulk_and_tracers_beg:water.bulk_and_tracers_end
+        bt = water.bulk_and_tracers[i]
+        (isnothing(bt.waterbalance) || isnothing(bt.waterstate)) && continue
+        endwb = bt.waterbalance.endwb_col
+        compute_water_mass_non_lake_bc!(endwb, bt.waterstate, bt.waterdiagnostic,
+                                        mask_nolake, bounds_c, col_data)
+        compute_water_mass_lake_bc!(endwb, bt.waterstate, lakestate,
+                                    mask_lake, bounds_c, col_data)
+    end
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # BalanceCheck — main water & energy balance check
 # --------------------------------------------------------------------------
 
