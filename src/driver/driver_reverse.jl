@@ -295,6 +295,29 @@ function cngresp_rev_phase!(b, aux)
     return nothing
 end
 
+# cn_mresp! — maintenance respiration (the `br`/`br_root` calibration params; e.g.
+# livestem_mr = livestemn·br·tc(Q10)). Reverse-validated at machine precision
+# (scripts/enzyme_bgc_reverse.jl [P2]). Differentiated state: cnveg_carbonflux_inst (out)
+# + cnveg_nitrogenstate_inst (N-pool inputs); the params (MaintRespParams from
+# maint_resp_read_params! w/ br_root from cn_shared_params, PftConMaintResp from pftcon) +
+# cn_shared_params are Const aux. canopy/soil/temperature/photosyns flow from the bundle.
+function cnmresp_rev_aux(inst, bounds, filt; npcropmin::Int = NPCROPMIN, nrepr::Int = NREPR)
+    mrp = MaintRespParams(); maint_resp_read_params!(mrp; br_root = inst.cn_shared_params.br_root)
+    pftmr = PftConMaintResp{Float64}(woody = Float64.(pftcon.woody))
+    return (; mask_c = filt.bgc_soilc, mask_p = filt.bgc_vegp,
+              bounds_c = bounds.begc:bounds.endc, bounds_p = bounds.begp:bounds.endp,
+              params = mrp, cn_params = inst.cn_shared_params, pftcon = pftmr,
+              nlevgrnd = varpar.nlevgrnd, nlevsno = varpar.nlevsno, npcropmin = npcropmin, nrepr = nrepr)
+end
+function cnmresp_rev_phase!(b, aux)
+    i = b.inst
+    cn_mresp!(aux.mask_c, aux.mask_p, aux.bounds_c, aux.bounds_p, aux.params, aux.cn_params,
+              aux.pftcon, i.patch, i.canopystate, i.soilstate, i.temperature, i.photosyns,
+              i.bgc_vegetation.cnveg_carbonflux_inst, i.bgc_vegetation.cnveg_nitrogenstate_inst;
+              nlevgrnd = aux.nlevgrnd, nlevsno = aux.nlevsno, npcropmin = aux.npcropmin, nrepr = aux.nrepr)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
