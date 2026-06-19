@@ -172,20 +172,24 @@ end
             dzsur = dz_lake[c, 1] / T(2.0)
         end
 
-        # Thermal conductivity of surface layer
-        tksur = savedtke1[c]
-
-        # Temperature of subsurface layer
-        if snl < 0
-            # Snow present: subsurface is next layer
-            tsur = t_soisno[c, jtop + 1]
+        # Surface-layer thermal conductivity + subsurface temperature, per the
+        # LakeFluxesMod 3-branch logic (the previous code used tksur=savedtke1
+        # unconditionally — so a frozen lake used molecular water tk instead of
+        # tkice — and tsur=t_lake[2]/t_soisno[jtop+1], off by one from the first
+        # sub-surface node):
+        #   unfrozen (Tg>tfrz & t_lake[1]>tfrz & no snow) → eddy conductivity savedtke1
+        #   frozen, no snow                               → ice conductivity tkice
+        #   snow layers present                           → snow-layer tk
+        if t_grnd[c] > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl == 0
+            tksur = savedtke1[c]
+            tsur = t_lake[c, 1]
+        elseif snl == 0
+            tksur = T(TKICE)
+            tsur = t_lake[c, 1]
         else
-            # No snow: second lake layer
-            if size(t_lake, 2) >= 2
-                tsur = t_lake[c, 2]
-            else
-                tsur = t_lake[c, 1]
-            end
+            bw = (h2osoi_ice[c, jtop] + h2osoi_liq[c, jtop]) / dz[c, jtop]
+            tksur = T(TKAIR) + (T(7.75e-5) * bw + T(1.105e-6) * bw^2) * (T(TKICE) - T(TKAIR))
+            tsur = t_soisno[c, jtop]
         end
 
         # Saved ground temperature
@@ -446,7 +450,10 @@ end
         d.eflx_lh_tot[p] = htvp * qflx_evap_soi_p
         d.eflx_lh_grnd[p] = htvp * qflx_evap_soi_p
         d.eflx_lwrad_out[p] = eflx_lwrad_out_p
-        d.eflx_lwrad_net[p] = forc_lwrad[c] - eflx_lwrad_out_p
+        # net longwave is upward-positive [+ = to atm] = out - in (LakeFluxesMod.F90:772,
+        # matching soil_fluxes). The previous forc_lwrad - out had the WRONG SIGN, which
+        # made the errlon balance-check diagnostic = 2*(out - forc) instead of ~0 for lakes.
+        d.eflx_lwrad_net[p] = eflx_lwrad_out_p - forc_lwrad[c]
         d.eflx_soil_grnd[p] = eflx_soil_grnd_p
 
         d.qflx_evap_soi[p] = qflx_evap_soi_p
