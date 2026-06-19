@@ -126,24 +126,45 @@ function hydnodrain_rev_phase!(b, aux)
 end
 
 # --------------------------------------------------------------------------
-# Pre-soil_water! SURFACE-HYDROLOGY phases (HydrologyNoDrainage). These compute the
-# surface water partitioning that becomes soil_water!'s top boundary; they run AFTER
-# soil_temperature! and BEFORE soil_water! in forward order. Each reverse-differentiates
-# cleanly (validated in scripts/enzyme_driver_reverse_surface.jl). They share one aux
-# (just the hydrology filter + column bounds); the Bool kwargs of saturated_excess_runoff!
-# default inside the wrapper. NOTE: a FULLY-FAITHFUL whole-step reverse also needs the
-# data-threading connectors between them (set_soil_water_fractions!, set_qflx_inputs!,
-# route_infiltration_excess!, update_h2osfc!, …) as their own phases — so these are exposed
-# as building blocks here but not yet auto-inserted into driver_rev_phases.
-surfhydro_rev_aux(bounds, filt) = (; hydrologyc = filt.hydrologyc, bc_col = bounds.begc:bounds.endc)
+# Pre-soil_water! SURFACE-HYDROLOGY block (HydrologyNoDrainage). The full ordered
+# sequence that runs AFTER soil_temperature! and BEFORE soil_water!, partitioning the
+# surface water that becomes soil_water!'s top boundary:
+#   set_soil_water_fractions! → set_floodc! → saturated_excess_runoff! → set_qflx_inputs!
+#   → infiltration_excess_runoff! → route_infiltration_excess! → update_h2osfc!
+#   → infiltration! → total_surface_runoff! → compute_effec_rootfrac_and_vert_tran_sink!
+# All share one Const aux. saturated_excess_runoff!'s Bool kwargs + update_h2osfc!'s
+# dtime/h2osfcflag + compute_effec_rootfrac's use_hydrstress default inside the wrappers;
+# qflx_floodg is a zero gridcell vector (no river flood input), captured as Const.
+function surfhydro_rev_aux(bounds, filt; dtime = 1800.0)
+    return (; hydrologyc = filt.hydrologyc, nolakec = filt.nolakec, urbanc = filt.urbanc,
+              bc_col = bounds.begc:bounds.endc, nlevsoi = varpar.nlevsoi, nlevsno = varpar.nlevsno,
+              dtime = dtime, qflx_floodg = zeros(Float64, bounds.endg))
+end
 
+function setsoilfrac_rev_phase!(b, aux)
+    i = b.inst
+    set_soil_water_fractions!(i.soilhydrology, i.soilstate, i.water.waterstatebulk_inst.ws,
+        i.column.dz, aux.hydrologyc, aux.bc_col, aux.nlevsoi, aux.nlevsno)
+    return nothing
+end
+function setfloodc_rev_phase!(b, aux)
+    i = b.inst
+    set_floodc!(i.water.waterfluxbulk_inst.wf.qflx_floodc_col, aux.qflx_floodg,
+        i.column.gridcell, i.column.itype, aux.nolakec, aux.bc_col)
+    return nothing
+end
 function satexcess_rev_phase!(b, aux)
     i = b.inst
     saturated_excess_runoff!(i.sat_excess_runoff, aux.hydrologyc, aux.bc_col,
         i.column, i.landunit, i.soilhydrology, i.soilstate, i.water.waterfluxbulk_inst)
     return nothing
 end
-
+function setqflx_rev_phase!(b, aux)
+    i = b.inst
+    set_qflx_inputs!(i.water.waterfluxbulk_inst, i.water.waterdiagnosticbulk_inst,
+        i.column.snl, aux.hydrologyc, aux.bc_col)
+    return nothing
+end
 function inflexcess_rev_phase!(b, aux)
     i = b.inst
     infiltration_excess_runoff!(i.infilt_excess_runoff, i.soilhydrology, i.soilstate,
@@ -151,23 +172,60 @@ function inflexcess_rev_phase!(b, aux)
         aux.hydrologyc, aux.bc_col)
     return nothing
 end
-
+function routeinfl_rev_phase!(b, aux)
+    i = b.inst
+    route_infiltration_excess!(i.water.waterfluxbulk_inst, i.soilhydrology,
+        i.column.landunit, i.landunit.itype, aux.hydrologyc, aux.bc_col)
+    return nothing
+end
+function updateh2osfc_rev_phase!(b, aux)
+    i = b.inst
+    update_h2osfc!(i.column, i.soilhydrology, i.energyflux, i.water.waterfluxbulk_inst,
+        i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst,
+        aux.hydrologyc, aux.bc_col; dtime = aux.dtime)
+    return nothing
+end
 function infil_rev_phase!(b, aux)
     infiltration!(b.inst.water.waterfluxbulk_inst, aux.hydrologyc, aux.bc_col)
     return nothing
 end
+function totalrunoff_rev_phase!(b, aux)
+    i = b.inst
+    total_surface_runoff!(i.water.waterfluxbulk_inst, i.soilhydrology, i.water.waterstatebulk_inst.ws,
+        i.column.snl, i.column.itype, i.column.landunit, i.landunit.urbpoi,
+        aux.hydrologyc, aux.urbanc, aux.bc_col, aux.dtime)
+    return nothing
+end
+function rootsink_rev_phase!(b, aux)
+    i = b.inst
+    compute_effec_rootfrac_and_vert_tran_sink!(aux.bc_col, aux.nlevsoi, aux.hydrologyc,
+        i.soilstate, i.canopystate, i.water.waterfluxbulk_inst, i.energyflux,
+        i.column, i.landunit, i.patch)
+    return nothing
+end
+
+# Ordered pre-soil_water surface-hydrology phase entries.
+function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0)
+    a = surfhydro_rev_aux(bounds, filt; dtime)
+    return Any[(setsoilfrac_rev_phase!, (a,)), (setfloodc_rev_phase!, (a,)),
+               (satexcess_rev_phase!, (a,)),   (setqflx_rev_phase!, (a,)),
+               (inflexcess_rev_phase!, (a,)),  (routeinfl_rev_phase!, (a,)),
+               (updateh2osfc_rev_phase!, (a,)), (infil_rev_phase!, (a,)),
+               (totalrunoff_rev_phase!, (a,)),  (rootsink_rev_phase!, (a,))]
+end
 
 # --------------------------------------------------------------------------
-# Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse.
-# `canopy_aux === nothing` skips the canopy block (e.g. a hydrology-only reverse).
-# Append further phases (hydrology diagnostics, fluxes, BGC) here as they are
-# validated — each is one more entry, same template.
+# Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
+# forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
+# water_table → hydrology_no_drainage. `canopy_aux === nothing` skips the canopy block.
+# `include_surface=false` reverts to the soil_temp→soil_water direct jump.
 # --------------------------------------------------------------------------
 function driver_rev_phases(bounds, filt, config; canopy_aux = nothing,
-                           n_canopy::Int = 12, dtime = 1800.0)
+                           n_canopy::Int = 12, dtime = 1800.0, include_surface::Bool = true)
     phases = Any[]
     canopy_aux === nothing || push!(phases, (canopy_rev_block!, (canopy_aux, n_canopy)))
-    push!(phases, (soiltemp_rev_phase!,   (soiltemp_rev_aux(bounds, filt; dtime),)))
+    push!(phases, (soiltemp_rev_phase!, (soiltemp_rev_aux(bounds, filt; dtime),)))
+    include_surface && append!(phases, surface_hydrology_rev_phases(bounds, filt; dtime))
     push!(phases, (soilwater_rev_phase!,  (soilwater_rev_aux(filt, config; dtime),)))
     push!(phases, (watertable_rev_phase!, (watertable_rev_aux(bounds, filt, config; dtime),)))
     push!(phases, (hydnodrain_rev_phase!, (hydnodrain_rev_aux(bounds, filt; dtime),)))

@@ -44,12 +44,16 @@
     c0 = first(c for c in bounds.begc:bounds.endc if hc[c])
     j1 = CLM.varpar.nlevsno + 1
 
-    # assembler: 4 hydrology phases (no canopy), 5 with a canopy block.
+    # assembler (forward order): soil_temp + 10-phase surface-hydrology block +
+    # soil_water + water_table + hydrology_no_drainage = 14 (15 with a canopy block);
+    # include_surface=false reverts to the soil_temp→soil_water direct jump (4).
     ph = CLM.driver_rev_phases(bounds, filt, config)
-    @test length(ph) == 4
-    @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 5
+    @test length(ph) == 14
+    @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 15
+    @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 4
+    @test length(CLM.surface_hydrology_rev_phases(bounds, filt)) == 10
 
-    # run the production phases forward on the shared-inst bundle.
+    # run the full assembled chain forward on the shared-inst bundle.
     b = CLM.driver_rev_bundle(inst)
     for (f, cargs) in ph
         f(b, cargs...)
@@ -59,6 +63,7 @@
     @test all(isfinite, b.inst.water.waterstatebulk_inst.ws.h2osoi_liq_col)
     @test isfinite(b.inst.soilhydrology.zwt_col[c0])
     @test isfinite(b.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
+    @test isfinite(b.inst.water.waterfluxbulk_inst.wf.qflx_infl_col[c0])   # surface block ran
 
     # parity: soiltemp_rev_phase! reproduces a raw soil_temperature! call (i.e. the
     # soiltemp aux builder passes the same args the driver does).
