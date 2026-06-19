@@ -89,4 +89,17 @@
     @test isfinite(bs.inst.sat_excess_runoff.fsat_col[c0])
     @test isfinite(bs.inst.infilt_excess_runoff.qinmax_col[c0])
     @test isfinite(bs.inst.water.waterfluxbulk_inst.wf.qflx_infl_col[c0])
+
+    # canopy_rev_aux builds from the real inst + the FULL 15-phase whole-step (canopy +
+    # hydrology) runs forward finite (few Newton iters for speed; the reverse gradient is
+    # validated on Julia 1.10/Enzyme in scripts/enzyme_driver_reverse_fullstep.jl).
+    caux = CLM.canopy_rev_aux(inst, bounds, filt)
+    full = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4)
+    @test length(full) == 15
+    bf = CLM.driver_rev_bundle(deepcopy(inst))
+    for (f, cargs) in full
+        f(bf, cargs...)
+    end
+    @test all(isfinite, bf.inst.temperature.t_veg_patch)
+    @test isfinite(bf.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
 end

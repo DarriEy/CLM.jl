@@ -45,6 +45,44 @@ function canopy_rev_block!(b, aux, n::Int)
     return nothing
 end
 
+# Build the canopy Const aux from a warmed-up inst (downscaled forcing must be set).
+# Energy-balance path (use_psn=false) by default — the canopy water/energy gradient. The
+# z0v roughness fills match clm_drv!'s "z0v keep core defaults" (clm_driver.jl), so this is
+# faithful to the production canopy_fluxes_core! energy balance. Photosynthesis (use_psn=true)
+# needs the real LUNA/alb arrays and is a follow-up.
+function canopy_rev_aux(inst, bounds, filt; use_psn::Bool = false, dtime = 1800.0)
+    FT = Float64; NP = bounds.endp; ev = filt.exposedvegp
+    fp = Int[p for p in bounds.begp:bounds.endp if ev[p]]; fn = length(fp)
+    a2l = inst.atm2lnd
+    forc_q_col = fill!(similar(a2l.forc_pbot_downscaled_col), zero(FT))
+    compute_forc_q!(forc_q_col, inst.column.gridcell, a2l.forc_vp_grc, a2l.forc_pbot_downscaled_col)
+    forc = (; lwrad = a2l.forc_lwrad_downscaled_col, q = forc_q_col,
+              pbot = a2l.forc_pbot_downscaled_col, th = a2l.forc_th_downscaled_col,
+              rho = a2l.forc_rho_downscaled_col, t = a2l.forc_t_downscaled_col,
+              u_grc = a2l.forc_u_grc, v_grc = a2l.forc_v_grc, pco2 = a2l.forc_pco2_grc, po2 = a2l.forc_po2_grc,
+              hgt_t = a2l.forc_hgt_t_grc, hgt_u = a2l.forc_hgt_u_grc, hgt_q = a2l.forc_hgt_q_grc,
+              dayl = inst.gridcell.dayl, max_dayl = inst.gridcell.max_dayl,
+              downreg = fill(FT(1.0), NP), leafn = fill(FT(1.0), NP))
+    MP = MXPFT + 1
+    pft = (; dleaf = fill(FT(0.04), MP), z0v_Cr = fill(FT(0.35), MP), z0v_Cs = fill(FT(0.003), MP),
+             z0v_c = fill(FT(0.25), MP), z0v_cw = fill(FT(2.0), MP), z0v_LAImax = fill(FT(8.0), MP),
+             grnd_ch4 = fill(FT(0.0), NP))
+    psn = (; c3psn = fill(FT(1.0), MP), leafcn = fill(FT(25.0), MP), flnr = fill(FT(0.1), MP),
+             fnitr = fill(FT(1.0), MP), slatop = fill(FT(0.01), MP), mbbopt = fill(FT(9.0), MP),
+             medlynintercept = fill(FT(100.0), MP), medlynslope = fill(FT(6.0), MP),
+             nrad = fill(1, NP), tlai_z = fill(FT(1.0), NP, NLEVCAN),
+             parsun_z = fill(FT(0.0), NP, NLEVCAN), parsha_z = fill(FT(0.0), NP, NLEVCAN),
+             laisun_z = fill(FT(0.0), NP, NLEVCAN), laisha_z = fill(FT(0.0), NP, NLEVCAN),
+             vcmaxcint_sun = fill(FT(1.0), NP), vcmaxcint_sha = fill(FT(0.6), NP),
+             o3coefv = fill(FT(1.0), NP), o3coefg = fill(FT(1.0), NP), t10 = inst.temperature.t_a10_patch)
+    return (; patch = inst.patch, col = inst.column, grid = inst.gridcell, forc = forc, pft = pft,
+        psn = psn, filterp = fp, fn = fn, active = Bool[ev[p] for p in 1:NP], mask = ev,
+        ivt = inst.patch.itype .+ 1,
+        forc_pbot_patch = FT[a2l.forc_pbot_downscaled_col[inst.patch.column[p]] for p in 1:NP],
+        soilevap_beta = do_soilevap_beta(), soil_resis_sl14 = do_soil_resistance_sl14(),
+        nlevsno = varpar.nlevsno, dtime = FT(dtime), use_psn = use_psn)
+end
+
 # --------------------------------------------------------------------------
 # soil_temperature!
 # --------------------------------------------------------------------------
