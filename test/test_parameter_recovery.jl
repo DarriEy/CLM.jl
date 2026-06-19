@@ -28,6 +28,15 @@ const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain
         return
     end
 
+    # These AD calibration twin experiments differentiate through a cold-start state.
+    # The gated Fortran-matching cold start freezes Bow soil at 272 K — exactly 1 K below
+    # freezing, i.e. sitting ON the phase-change front — so an FD/AD probe straddles the
+    # TFRZ discontinuity and the gradient goes NaN (a known Phase-1 non-differentiability;
+    # the latitude init's 262 K is safely below the front). Pin the smooth thawed init this
+    # harness was validated against (independent of the global default), then restore.
+    _prev_cs = CLM.coldstart_match_fortran()
+    CLM.coldstart_match_fortran!(false)
+
     # =====================================================================
     # Helper: generate synthetic observations from a "true" parameter set
     # =====================================================================
@@ -318,4 +327,5 @@ const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain
         println("  Multi-timestep calibration: PASSED")
     end
 
+    CLM.coldstart_match_fortran!(_prev_cs)
 end  # outer testset
