@@ -273,6 +273,29 @@ function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0)
 end
 
 # --------------------------------------------------------------------------
+# BGC (use_cn) carbon/nitrogen phases. FIRST entry into the biogeochemistry domain:
+# cn_gresp! (growth respiration, cpool_*_gr = grperc·grpnow·allocation — smooth/linear)
+# reverse-differentiates at machine precision (scripts/enzyme_bgc_reverse.jl), proving the
+# CN carbon-flux cascade is reverse-able via the same template. Operates on a use_cn inst's
+# bgc_vegetation.cnveg_carbonflux_inst; the PFT growth params come from the global pftcon.
+# The full BGC chain (allocation, decomposition, phenology, mortality, fire, N-cycling) is a
+# large separate domain — several of its sub-phases (phenology onset/offset, fire, gap
+# mortality) are genuinely non-differentiable discrete state machines — so this is exposed as
+# a building block, not auto-inserted into driver_rev_phases.
+function cngresp_rev_aux(inst, bounds, filt; npcropmin::Int = NPCROPMIN, nrepr::Int = NREPR)
+    gr = PftConGrowthResp(woody = Float64.(pftcon.woody),
+                          grperc = Float64.(pftcon.grperc), grpnow = Float64.(pftcon.grpnow))
+    return (; mask = filt.bgc_vegp, bounds = bounds.begp:bounds.endp, pftcon = gr,
+              patch = inst.patch, npcropmin = npcropmin, nrepr = nrepr)
+end
+function cngresp_rev_phase!(b, aux)
+    cn_gresp!(aux.mask, aux.bounds, aux.pftcon, aux.patch,
+              b.inst.bgc_vegetation.cnveg_carbonflux_inst;
+              npcropmin = aux.npcropmin, nrepr = aux.nrepr)
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
 # water_table → hydrology_no_drainage. `canopy_aux === nothing` skips the canopy block.
