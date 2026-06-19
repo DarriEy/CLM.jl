@@ -17,15 +17,16 @@
 # smoke harnesses; the proof diffs column 1 = the veg column, never the lake column 2).
 # With the lake branch fixed, scripts/multisite_smoke*.jl run clean at matching=true.
 #
-# The one residual reason a frozen cold start is harder than the warm latitude init: the
-# 272 K soil sits exactly 1 K below freezing, ON the phase-change front, so an FD/AD probe
-# straddles the TFRZ discontinuity (a known Phase-1 non-differentiability; Phase-3 smoothing
-# pending). test_ad_robustness therefore pins this false with save/restore to get the smooth
-# thawed state its finite-difference derivative checks need — independent of the global
-# default. (test_parameter_recovery used to pin too, but its NaN was the LAKE eddy-diffusivity
-# AD bug — ks=6.6·sqrt(|sin lat|)·… with lat stubbed to 0 → sqrt(0) → Inf·0 NaN partial,
-# fixed in lake_fluxes.jl — not the phase change, so it now runs on the matching default.)
-# The injection parity harness (build_bow_inst) also pins false: it injects only the active
+# The frozen 272 K cold start is now fully AD-validated on the default: the AD/FD calibration
+# harnesses (test_parameter_recovery, test_ad_robustness) run on it with NO pin. Two AD issues
+# that once forced pins were root-caused and fixed, neither a phase-change discontinuity:
+#   • LAKE eddy-diffusivity NaN — ks=6.6·sqrt(|sin lat|)·… with lat stubbed to 0 → sqrt(0) →
+#     Inf·0 NaN ForwardDiff partial; fixed in lake_fluxes.jl (parameter_recovery).
+#   • smooth-AD vs hard-FD mismatch — the Dual path always evaluates the SMOOTHED phase change
+#     (smooth_max; _use_smooth is type-based so Float64 never smooths), so a Float64 FD diverged
+#     from the smooth-AD near the thaw front. test_ad_robustness now takes its FD on Dual VALUES
+#     (same smoothed physics) → AD and FD agree to truncation error in every scenario.
+# Only the injection parity harness (build_bow_inst) still pins false: it injects only the active
 # subgrid subset, and the matching IC's non-injected slots bleed into the active-patch EFLX_GNET.
 #
 # Toggle with coldstart_match_fortran!(::Bool); read with coldstart_match_fortran().

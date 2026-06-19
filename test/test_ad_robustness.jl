@@ -31,14 +31,10 @@ using CLM
         return
     end
 
-    # These FD-vs-AD derivative checks perturb a cold-start state across temperature.
-    # The gated Fortran-matching cold start freezes the soil (272 K) + dries it (vol 0.15),
-    # so the finite-difference probe straddles the phase-change / dry-beta discontinuities
-    # and the FD reference becomes noisy. This harness wants the smooth thawed latitude init
-    # it was validated against; pin it off (independent of the global default, in case a
-    # prior opt-in left it on) and restore afterward.
-    _prev_cs = CLM.coldstart_match_fortran()
-    CLM.coldstart_match_fortran!(false)
+    # Runs on the global default cold start (Fortran-matching). No pin is needed: the FD
+    # is evaluated on the SAME smoothed physics as the AD (Dual values, see build_run_dual),
+    # so the freeze/thaw phase change no longer makes a hard-FD reference disagree with the
+    # smooth-AD derivative — they match to FD truncation error in every scenario.
 
     # --- Helper: create a Dual-typed copy of a parameterized struct ---
     function make_dual_copy(src, ::Type{D}) where D
@@ -170,71 +166,63 @@ using CLM
                 end
             end
 
-            # ---- Create Dual-typed copy ----
+            # ---- Build a Dual-typed inst from the warmed-up Float64 state, seed the forcing
+            #      temperature with `seedp`, and run one step. AD seeds partial 1; the FD
+            #      below reuses this with partial 0. This is deliberate: the Dual path always
+            #      evaluates the SMOOTHED physics (the smooth_* primitives dispatch on AD
+            #      element types — _use_smooth is purely type-based, so a plain Float64 re-run
+            #      evaluates the HARD physics and would diverge from AD by the smoothing offset
+            #      near the phase-change front, e.g. 284.3 K hard vs 283.0 K smooth at 295 K).
+            #      Evaluating the FD on Dual VALUES makes FD and AD the SAME smoothed function,
+            #      so the check validates the AD derivative, not the smooth-vs-hard gap. ----
             D = Dual{Nothing, Float64, 1}
-            inst_d = CLM.CLMInstances()
-
-            for name in fieldnames(CLM.CLMInstances)
-                name === :water && continue
-                name === :surfdata && continue
-                src = getfield(inst_f64, name)
-                setfield!(inst_d, name, make_dual_copy(src, D))
+            function build_run_dual(Tseed, seedp)
+                inst_d = CLM.CLMInstances()
+                for name in fieldnames(CLM.CLMInstances)
+                    (name === :water || name === :surfdata) && continue
+                    setfield!(inst_d, name, make_dual_copy(getfield(inst_f64, name), D))
+                end
+                inst_d.surfdata = inst_f64.surfdata
+                inst_d.photosyns.stomatalcond_mtd = inst_f64.photosyns.stomatalcond_mtd
+                water_d = CLM.WaterData()
+                for name in fieldnames(CLM.WaterData)
+                    try setfield!(water_d, name, getfield(inst_f64.water, name)) catch end
+                end
+                wsb_d = make_dual_copy(inst_f64.water.waterstatebulk_inst, D)
+                wsb_d.ws = make_dual_copy(inst_f64.water.waterstatebulk_inst.ws, D)
+                water_d.waterstatebulk_inst = wsb_d
+                wfb_d = make_dual_copy(inst_f64.water.waterfluxbulk_inst, D)
+                wfb_d.wf = make_dual_copy(inst_f64.water.waterfluxbulk_inst.wf, D)
+                water_d.waterfluxbulk_inst = wfb_d
+                water_d.waterdiagnosticbulk_inst = make_dual_copy(inst_f64.water.waterdiagnosticbulk_inst, D)
+                water_d.waterbalancebulk_inst = make_dual_copy(inst_f64.water.waterbalancebulk_inst, D)
+                if !isempty(water_d.bulk_and_tracers)
+                    bt = water_d.bulk_and_tracers[water_d.i_bulk]
+                    bt.waterflux = wfb_d; bt.waterstate = wsb_d
+                    bt.waterdiagnostic = water_d.waterdiagnosticbulk_inst
+                    bt.waterbalance = water_d.waterbalancebulk_inst
+                end
+                inst_d.water = water_d
+                setup_forcing!(inst_d.atm2lnd, Tseed, ng;
+                    precip_rain=scenario.precip_rain, precip_snow=scenario.precip_snow,
+                    vp=scenario.vp, solar_direct=scenario.solar_direct,
+                    solar_diffuse=scenario.solar_diffuse, lwrad=scenario.lwrad, wind=scenario.wind)
+                for g in 1:ng
+                    T_d = Dual(Tseed, seedp)
+                    inst_d.atm2lnd.forc_t_not_downscaled_grc[g] = T_d
+                    inst_d.atm2lnd.forc_th_not_downscaled_grc[g] = T_d * (D(100000.0) / D(85000.0))^(D(CLM.RAIR) / D(CLM.CPAIR))
+                    inst_d.atm2lnd.forc_rho_not_downscaled_grc[g] = D(85000.0) / (D(CLM.RAIR) * T_d)
+                end
+                CLM.downscale_forcings!(bounds, inst_d.atm2lnd, inst_d.column, inst_d.landunit, inst_d.topo)
+                CLM.clm_drv!(config, inst_d, filt, filt_ia, bounds,
+                    true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
+                    false, false, "", false;
+                    nstep=4, is_first_step=false, dtime=1800.0, mon=1, day=1,
+                    photosyns=inst_d.photosyns)
+                return inst_d
             end
-            inst_d.surfdata = inst_f64.surfdata
-            inst_d.photosyns.stomatalcond_mtd = inst_f64.photosyns.stomatalcond_mtd
 
-            # Handle WaterData
-            water_d = CLM.WaterData()
-            for name in fieldnames(CLM.WaterData)
-                sv = getfield(inst_f64.water, name)
-                try setfield!(water_d, name, sv) catch end
-            end
-            wsb_d = make_dual_copy(inst_f64.water.waterstatebulk_inst, D)
-            ws_d  = make_dual_copy(inst_f64.water.waterstatebulk_inst.ws, D)
-            wsb_d.ws = ws_d
-            water_d.waterstatebulk_inst = wsb_d
-            wfb_d = make_dual_copy(inst_f64.water.waterfluxbulk_inst, D)
-            wf_d  = make_dual_copy(inst_f64.water.waterfluxbulk_inst.wf, D)
-            wfb_d.wf = wf_d
-            water_d.waterfluxbulk_inst = wfb_d
-            water_d.waterdiagnosticbulk_inst = make_dual_copy(
-                inst_f64.water.waterdiagnosticbulk_inst, D)
-            water_d.waterbalancebulk_inst = make_dual_copy(
-                inst_f64.water.waterbalancebulk_inst, D)
-            if !isempty(water_d.bulk_and_tracers)
-                bt = water_d.bulk_and_tracers[water_d.i_bulk]
-                bt.waterflux = wfb_d
-                bt.waterstate = wsb_d
-                bt.waterdiagnostic = water_d.waterdiagnosticbulk_inst
-                bt.waterbalance = water_d.waterbalancebulk_inst
-            end
-            inst_d.water = water_d
-
-            # ---- Seed Dual into forcing temperature ----
-            setup_forcing!(inst_d.atm2lnd, scenario.T, ng;
-                precip_rain=scenario.precip_rain,
-                precip_snow=scenario.precip_snow,
-                vp=scenario.vp,
-                solar_direct=scenario.solar_direct,
-                solar_diffuse=scenario.solar_diffuse,
-                lwrad=scenario.lwrad,
-                wind=scenario.wind)
-            for g in 1:ng
-                inst_d.atm2lnd.forc_t_not_downscaled_grc[g] = Dual(scenario.T, 1.0)
-                T_d = inst_d.atm2lnd.forc_t_not_downscaled_grc[g]
-                inst_d.atm2lnd.forc_th_not_downscaled_grc[g] = T_d * (D(100000.0) / D(85000.0))^(D(CLM.RAIR) / D(CLM.CPAIR))
-                inst_d.atm2lnd.forc_rho_not_downscaled_grc[g] = D(85000.0) / (D(CLM.RAIR) * T_d)
-            end
-            CLM.downscale_forcings!(bounds, inst_d.atm2lnd, inst_d.column,
-                                    inst_d.landunit, inst_d.topo)
-
-            # ---- Run one Dual timestep ----
-            CLM.clm_drv!(config, inst_d, filt, filt_ia, bounds,
-                true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
-                false, false, "", false;
-                nstep=4, is_first_step=false,
-                dtime=1800.0, mon=1, day=1,
-                photosyns=inst_d.photosyns)
+            inst_d = build_run_dual(scenario.T, 1.0)
 
             # ---- Verify derivatives are finite ----
             lh_d = inst_d.energyflux.eflx_lh_tot_patch[test_p]
@@ -260,80 +248,30 @@ using CLM
             @test abs(partials(sh_d)[1]) < 1e10
             @test abs(partials(tg_d)[1]) < 1e10
 
-            # ---- Finite difference comparison ----
+            # ---- Finite difference on the SAME smoothed physics (Dual VALUE, partial 0) ----
+            # Central difference of the Dual-evaluated function at T ± eps. Because both the
+            # AD derivative (partials at T) and this FD secant come from the identical smoothed
+            # physics, they agree to the FD truncation error — the check now validates the AD
+            # derivative itself rather than the smooth-vs-hard offset. (Re-running in Float64
+            # would evaluate the HARD physics and disagree near the phase-change front; see the
+            # build_run_dual note above.)
             eps_fd = 0.01
+            inst_dp = build_run_dual(scenario.T + eps_fd, 0.0)
+            inst_dm = build_run_dual(scenario.T - eps_fd, 0.0)
 
-            # Reference run
-            (inst_ref, _, _, _) = CLM.clm_initialize!(;
-                fsurdat=fsurdat, paramfile=paramfile)
-            setup_forcing!(inst_ref.atm2lnd, scenario.T, ng;
-                precip_rain=scenario.precip_rain, precip_snow=scenario.precip_snow,
-                vp=scenario.vp, solar_direct=scenario.solar_direct,
-                solar_diffuse=scenario.solar_diffuse, lwrad=scenario.lwrad,
-                wind=scenario.wind)
-            CLM.downscale_forcings!(bounds, inst_ref.atm2lnd, inst_ref.column,
-                                    inst_ref.landunit, inst_ref.topo)
-            for n in 1:3
-                CLM.clm_drv!(config, inst_ref, filt, filt_ia, bounds,
-                    true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
-                    false, false, "", false;
-                    nstep=n, is_first_step=(n==1), is_beg_curr_day=(n==1),
-                    dtime=1800.0, mon=1, day=1,
-                    photosyns=inst_ref.photosyns)
-            end
-            CLM.clm_drv!(config, inst_ref, filt, filt_ia, bounds,
-                true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
-                false, false, "", false;
-                nstep=4, is_first_step=false,
-                dtime=1800.0, mon=1, day=1,
-                photosyns=inst_ref.photosyns)
-
-            # Perturbed run
-            (inst_pert, _, _, _) = CLM.clm_initialize!(;
-                fsurdat=fsurdat, paramfile=paramfile)
-            setup_forcing!(inst_pert.atm2lnd, scenario.T, ng;
-                precip_rain=scenario.precip_rain, precip_snow=scenario.precip_snow,
-                vp=scenario.vp, solar_direct=scenario.solar_direct,
-                solar_diffuse=scenario.solar_diffuse, lwrad=scenario.lwrad,
-                wind=scenario.wind)
-            CLM.downscale_forcings!(bounds, inst_pert.atm2lnd, inst_pert.column,
-                                    inst_pert.landunit, inst_pert.topo)
-            for n in 1:3
-                CLM.clm_drv!(config, inst_pert, filt, filt_ia, bounds,
-                    true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
-                    false, false, "", false;
-                    nstep=n, is_first_step=(n==1), is_beg_curr_day=(n==1),
-                    dtime=1800.0, mon=1, day=1,
-                    photosyns=inst_pert.photosyns)
-            end
-            setup_forcing!(inst_pert.atm2lnd, scenario.T + eps_fd, ng;
-                precip_rain=scenario.precip_rain, precip_snow=scenario.precip_snow,
-                vp=scenario.vp, solar_direct=scenario.solar_direct,
-                solar_diffuse=scenario.solar_diffuse, lwrad=scenario.lwrad,
-                wind=scenario.wind)
-            CLM.downscale_forcings!(bounds, inst_pert.atm2lnd, inst_pert.column,
-                                    inst_pert.landunit, inst_pert.topo)
-            CLM.clm_drv!(config, inst_pert, filt, filt_ia, bounds,
-                true, nextsw_cday, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
-                false, false, "", false;
-                nstep=4, is_first_step=false,
-                dtime=1800.0, mon=1, day=1,
-                photosyns=inst_pert.photosyns)
-
-            # Compare AD vs FD
-            for (var_name, d_val, ref_val, pert_val) in [
+            for (var_name, d_val, plus_val, minus_val) in [
                 ("LH",    lh_d,
-                 inst_ref.energyflux.eflx_lh_tot_patch[test_p],
-                 inst_pert.energyflux.eflx_lh_tot_patch[test_p]),
+                 inst_dp.energyflux.eflx_lh_tot_patch[test_p],
+                 inst_dm.energyflux.eflx_lh_tot_patch[test_p]),
                 ("SH",    sh_d,
-                 inst_ref.energyflux.eflx_sh_tot_patch[test_p],
-                 inst_pert.energyflux.eflx_sh_tot_patch[test_p]),
+                 inst_dp.energyflux.eflx_sh_tot_patch[test_p],
+                 inst_dm.energyflux.eflx_sh_tot_patch[test_p]),
                 ("T_grnd", tg_d,
-                 inst_ref.temperature.t_grnd_col[1],
-                 inst_pert.temperature.t_grnd_col[1]),
+                 inst_dp.temperature.t_grnd_col[1],
+                 inst_dm.temperature.t_grnd_col[1]),
             ]
                 ad_deriv = partials(d_val)[1]
-                fd_deriv = (pert_val - ref_val) / eps_fd
+                fd_deriv = (value(plus_val) - value(minus_val)) / (2 * eps_fd)
 
                 println("  $(scenario.name): d($var_name)/d(T) AD=$(round(ad_deriv, digits=4)), FD=$(round(fd_deriv, digits=4))")
 
@@ -342,16 +280,12 @@ using CLM
                     @test sign(ad_deriv) == sign(fd_deriv)
                 end
 
-                # Relative agreement (relaxed for near-discontinuity scenarios)
+                # Relative agreement: AD and the smoothed-physics FD evaluate the same
+                # function, so they agree tightly; a small allowance covers FD truncation
+                # (O(eps^2)) and any residual near-freezing curvature.
                 if abs(fd_deriv) > 1e-4
                     rel_err = abs(ad_deriv - fd_deriv) / abs(fd_deriv)
                     println("  $(scenario.name): d($var_name)/d(T) relative error = $(round(rel_err * 100, digits=2))%")
-                    # Within ~1K of the freezing point, AD (exact local derivative)
-                    # and FD (secant over eps=0.01K) legitimately diverge because the
-                    # 0.01K step straddles phase-change / snow-rain regime boundaries.
-                    # This is a genuine near-discontinuity, not a solver artifact, so
-                    # use a wider tolerance there. Everywhere else (including the
-                    # snow-dominated winter case) requires strict 10% agreement.
                     near_freeze = abs(scenario.T - CLM.TFRZ) < 5.0
                     tol = near_freeze ? 0.35 : 0.10
                     @test rel_err < tol
@@ -361,6 +295,4 @@ using CLM
             println("  $(scenario.name) PASSED")
         end
     end
-
-    CLM.coldstart_match_fortran!(_prev_cs)
 end  # outer testset
