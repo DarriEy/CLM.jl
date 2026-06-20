@@ -31,3 +31,4 @@ LocalPreferences.toml
 
 # GPU validation script env: resolved per-machine (Metal is macOS-only), keep Project.toml
 scripts/Manifest.toml
+streamflow_compare.csv
