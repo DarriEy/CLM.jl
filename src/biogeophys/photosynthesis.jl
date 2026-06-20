@@ -538,6 +538,11 @@ Return value of vulnerability curve at water potential `x`.
 """
 function plc(x::Real, ivt::Int, level::Int, plc_method::Int, params::PhotoParamsData=params_inst)
     if plc_method == VEGETATION_WEIBULL
+        # Water potential is always <= 0 physically; for x >= 0 (fully hydrated, no
+        # cavitation) the curve is 1. Guarding here avoids (x/psi50)<0 raised to the
+        # non-integer ck -> NaN, which only arises in the degenerate all-frozen PHS
+        # solve (vegwp driven >= 0); Fortran never reaches that regime, so parity holds.
+        x >= 0.0 && return 1.0
         val = 2.0^(-(x / params.psi50[ivt, level])^params.ck[ivt, level])
         if val < 0.005
             val = 0.0
@@ -555,6 +560,9 @@ Return 1st derivative of vulnerability curve at water potential `x`.
 """
 function d1plc(x::Real, ivt::Int, level::Int, plc_method::Int, params::PhotoParamsData=params_inst)
     if plc_method == VEGETATION_WEIBULL
+        # plc is constant (1) for x >= 0, so its derivative is 0 there; this also
+        # avoids the /x singularity and (x/psi50)<0 ^ ck NaN (see plc above).
+        x >= 0.0 && return 0.0
         ck_val = params.ck[ivt, level]
         psi50_val = params.psi50[ivt, level]
         val = -ck_val * log(2.0) * (2.0^(-(x / psi50_val)^ck_val)) *
@@ -572,12 +580,14 @@ end
 # on Float64 (T(2.0)===2.0); eltype-generic so Float32/Metal carries no Float64.
 @inline function _plc(x::Real, psi50_v::Real, ck_v::Real)
     T = typeof(x)
+    x >= zero(T) && return one(T)   # no cavitation for x>=0; avoids (neg)^ck NaN (see plc)
     val = T(2.0)^(-(x / psi50_v)^ck_v)
     return val < T(0.005) ? zero(T) : val
 end
 
 @inline function _d1plc(x::Real, psi50_v::Real, ck_v::Real)
     T = typeof(x)
+    x >= zero(T) && return zero(T)  # plc flat for x>=0; avoids /x singularity + NaN
     return -ck_v * log(T(2.0)) * (T(2.0)^(-(x / psi50_v)^ck_v)) *
            ((x / psi50_v)^ck_v) / x
 end

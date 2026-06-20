@@ -46,15 +46,36 @@
 # gives a finite (PHS-off, so not exact-parity on water-stress-sensitive GPP/veg) run
 # for sanity-checking the slowly-varying soil C/N pools.
 #
-# PROGRESS (2026-06-20): the PHS-frozen NaN is a multi-layer cascade; 3 layers fixed:
-#   (1) eff_porosity now initialized from the restart (fortran_restart.jl) — was NaN
-#       at step 1 → poisoned liqvol → smp_l. (2)+(3) the getvegwp!/_getvegwp sum_ksr
-#       guard is now a THRESHOLD (photosynthesis.jl), not ==0 — the pass-1 smooth_max
-#       floor leaves k_soil_root~1e-16 for all-frozen soil, so sum_ksr~1e-17≠0 was
-#       dividing → huge xroot. With these, vegwp is now FINITE (~-4e7 mm, extreme but
-#       not NaN). REMAINING (not yet fixed): t_veg/h2osoi still NaN — further layers in
-#       the bsun/bsha stress→canopy-energy coupling and/or the soil-water update on
-#       fully-frozen, no-root-uptake soil. The next round. CN_NOPHS=1 = working fallback.
+# PROGRESS (2026-06-20): the PHS step-1 NaN is a MULTI-LAYER cascade — 4 layers fixed,
+# still not finite. CORRECTED DIAGNOSIS: it is NOT "frozen" soil — the probe shows
+# liqvol~0.086 (DRY, not frozen) at NIGHT (coszen=0). Dry soil → tiny hk_l (~3e-14) →
+# k_soil_root floored to ~1e-16 → degenerate PHS solve driving vegwp to the extreme
+# (~-4e7 mm). Layers fixed (all general robustness, suite-green):
+#   (1) eff_porosity init from the restart (fortran_restart.jl) — was NaN at step 1.
+#   (2)+(3) getvegwp!/_getvegwp sum_ksr guard ==0 → THRESHOLD <=1e-12 (the smooth_max
+#       floor leaves k_soil_root~1e-16, so sum_ksr~1e-17≠0 divided → huge xroot).
+#   (4) plc/_plc/d1plc/_d1plc now return 1/0 for x>=0 (photosynthesis.jl) — water
+#       potential is always <=0 physically, and (x/psi50)<0 ^ (non-integer ck) = NaN;
+#       the degenerate solve drives vegwp >=0 transiently. (Latent bug; Fortran never
+#       hits x>=0 so parity holds.) vegwp now finite, but bsun/bsha STILL NaN.
+# REMAINING (open frontier): bsun/bsha NaN in the NIGHT branch of calcstress! +
+# smp_l(c,1)=NaN feeding it (a separate seed gap). ROOT ISSUE: the restart seed does
+# not provide ALL the derived hydrology state the PHS-on path reads at step 1 (smp_l,
+# the dry-soil k_soil_root regime), so the night PHS solve goes degenerate. PROPER FIX
+# = either seed ALL PHS-read derived state consistently from the restart, OR add a
+# clean dry/degenerate PHS bypass at the calcstress entry — both deeper than these
+# point patches, and in the reverse-AD mirror's code (coordinate). PAUSED here.
+# CN_NOPHS=1 = working PHS-off fallback (see CN_NOPHS findings below).
+#
+# CN_NOPHS=1 FULL-YEAR (2026-06-20, /tmp/cn_nophs_year.log): runs finite end-to-end,
+# but two gaps surface — (a) the _col C/N diagnostics (TOTSOMC/TOTVEGC/TOTECOSYSC/
+# TOTSOMN) read NaN: they are not refreshed during the run (stale restart-init); the
+# harness should aggregate from the raw vr pools instead. (b) Vegetation dynamics do
+# NOT track Fortran: Julia GPP=0 all year, TLAI flat 0.031, LEAFC flat ~4.2 vs
+# Fortran leaf-out to TLAI 0.111 / LEAFC 16.65 in Jul. Likely a PHENOLOGY-ACCUMULATOR
+# clock mismatch (2202 restart run on the 2003 forcing calendar → GDD/daylength onset
+# never triggers leaf-out) and/or PHS-off suppressing GPP. SMINN does track (drift to
+# ~7% by Oct). This veg-dynamics gap is arguably higher-value than the PHS NaN.
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
@@ -245,8 +266,11 @@ function run_cn_annual(; ndays::Int = 365)
                     string(round.(ws.h2osoi_liq_col[c_soil, (ns2+1):(ns2+4)], digits=2)),
                     string(inst.surfalb.albgrd_col[c_soil, 1]),
                     string(inst.surfalb.coszen_col[c_soil]))
-                @printf("  [post-step1] vegwp(p2,1:4)=%s\n",
-                    string(inst.canopystate.vegwp_patch[2, 1:4]))
+                @printf("  [post-step1] vegwp(p2,1:4)=%s bsun=%s bsha=%s qtran=%s qevap=%s\n",
+                    string(inst.canopystate.vegwp_patch[2, 1:4]),
+                    string(inst.energyflux.bsun_patch[2]), string(inst.energyflux.bsha_patch[2]),
+                    string(inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col[c_soil]),
+                    string(inst.water.waterfluxbulk_inst.wf.qflx_evap_veg_patch[2]))
                 @printf("  [post-step1] liqvol soil[1:3]=%s k_soil_root(p2)[1:3]=%s hk_l(c)[1:3]=%s\n",
                     string(round.(inst.water.waterdiagnosticbulk_inst.h2osoi_liqvol_col[c_soil, (ns2+1):(ns2+3)], digits=3)),
                     string(inst.soilstate.k_soil_root_patch[2, 1:3]),
