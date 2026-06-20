@@ -711,6 +711,13 @@ compute_tk_h2osfc!(tk_h2osfc, mask, h2osfc, z, thk, joff::Int) =
             end
         elseif lit == ISTICE
             cv[c, jj] = h2osoi_ice[c, jj] * T(CPICE) + h2osoi_liq[c, jj] * T(CPLIQ)
+            # Deep bedrock layers below the ice have no ice/liquid, so the formula above
+            # gives cv=0 -> fact=dtime/cv=Inf -> the soil-temp band solve NaNs (the whole
+            # glacier column). Floor with bedrock heat capacity, as the soil and ISTWET
+            # branches already do.
+            if j > nbedrock[c]
+                cv[c, jj] = T(CSOL_BEDROCK) * dz[c, jj]
+            end
         end
     end
 end

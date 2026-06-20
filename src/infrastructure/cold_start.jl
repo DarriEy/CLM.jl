@@ -52,6 +52,7 @@ function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
     init_eff_porosity!(inst, bounds)
     init_satellite_phenology!(inst, bounds, surf)
     init_misc_state!(inst, bounds)
+    init_surface_albedo_cold!(inst, bounds)
     init_soil_hydrology_cold!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
     init_lake_state!(inst, bounds)
     init_root_fractions!(inst, bounds)
@@ -67,6 +68,37 @@ function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
     active_layer_init_cold!(inst.active_layer, inst.column, inst.landunit,
                             bounds.begc:bounds.endc)
     nothing
+end
+
+"""
+    init_surface_albedo_cold!(inst, bounds)
+
+Seed the ground albedo (albgrd/albgri) at a cold start. surface_radiation! runs
+BEFORE surface_albedo! within a step, so on the first step it reads these fields to
+compute absorbed solar (sabg). Without a seed they are garbage/zero, so the first-step
+ground absorption is wrong — harmless on high-heat-capacity soil/lake columns, but on
+the thin, low-heat-capacity glacier (istice) ice top layer the over-absorption drives
+t_grnd -> NaN. Seed per-landunit defaults (glacier = ALBICE 0.80/0.55; other land a
+generic 0.20/0.40); surface_albedo! refines them from the second step. The restart /
+injection path sets these from the dump, so this only affects cold starts.
+"""
+function init_surface_albedo_cold!(inst::CLMInstances, bounds::BoundsType)
+    sa = inst.surfalb
+    (isempty(sa.albgrd_col) || isempty(sa.albgri_col)) && return nothing
+    col = inst.column; lun = inst.landunit
+    nb = size(sa.albgrd_col, 2)
+    for c in bounds.begc:bounds.endc
+        l = col.landunit[c]
+        lit = (l >= 1 && l <= length(lun.itype)) ? lun.itype[l] : ISTSOIL
+        # vis, nir defaults; ALBICE = [0.80, 0.55] (see surface_albedo.jl)
+        avis, anir = lit == ISTICE ? (0.80, 0.55) : (0.20, 0.40)
+        for ib in 1:nb
+            a = ib == 1 ? avis : anir
+            sa.albgrd_col[c, ib] = a
+            sa.albgri_col[c, ib] = a
+        end
+    end
+    return nothing
 end
 
 """
