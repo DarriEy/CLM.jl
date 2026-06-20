@@ -15,6 +15,7 @@
 #   [P7] soilbiogeochem_n_state_update1! (mineral-N update: smin_nh4 += (ndep/fix/nmin−immob−...)·dt)
 #   [P8] calc_plant_cn_alloc! (allocation: sminn_to_npool=plant_ndemand·fpg → plant_calloc/cpool_to_*)
 #   [P9] soil_biogeochem_decomp! (actual decomp: decomp_cascade_hr_vr = rf·p_decomp_cpool_loss)
+#  [P10] soil_bgc_competition! (N-competition split: fpi_vr = available_N / total_immob+plant demand)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -459,7 +460,57 @@ rP5 = try section_decomprate() catch e; @printf("[P5] ERRORED: %s\n", sprint(sho
 rP6 = try section_potential() catch e; @printf("[P6] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP7 = try section_sminn() catch e; @printf("[P7] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP8 = try section_alloc() catch e; @printf("[P8] ERRORED: %s\n", sprint(showerror,e)); NaN end
+# =============================================================================
+# [P10] soil_bgc_competition! — the plant-vs-microbe N COMPETITION split. In the N-LIMITED
+#       regime, fpi_vr = available_N / (potential_immob + plant_ndemand + nitrif/denit demand)
+#       (smooth ratio), capped at 1 when supply≥demand. Bundle = (st out [fpi/fpg], nf out
+#       [actual_immob/sminn_to_plant], cf, ns in [sminn]); state/params/scratch Const aux.
+#       Perturb sminn_vr (available N) → seed fpi_vr; stay N-limited so we're on the ratio side.
+# =============================================================================
+function section_competition()
+    println("\n", "#"^70, "\n# [P10] soil_bgc_competition! (N-competition split) REVERSE\n", "#"^70)
+    nc=1; nlevdecomp=1; ntrans=2
+    state = C.SoilBGCCompetitionState(); params = C.SoilBGCCompetitionParams()
+    dzsoi = fill(1.0, nlevdecomp); pmnf = zeros(nc,nlevdecomp,ntrans); pcng = zeros(nc,nlevdecomp,ntrans)
+    crp = ones(Int, ntrans)
+    function fresh()
+        st = C.SoilBiogeochemStateData()
+        st.fpg_col=zeros(nc); st.fpi_col=zeros(nc); st.fpi_vr_col=zeros(nc,nlevdecomp)
+        st.nfixation_prof_col=fill(0.5,nc,nlevdecomp); st.plant_ndemand_col=fill(2.0,nc)   # N-limited: high demand
+        ns = C.SoilBiogeochemNitrogenStateData()
+        ns.sminn_vr_col=fill(1.0,nc,nlevdecomp); ns.smin_nh4_vr_col=fill(0.5,nc,nlevdecomp); ns.smin_no3_vr_col=fill(0.5,nc,nlevdecomp)
+        nf = C.SoilBiogeochemNitrogenFluxData()
+        for f in (:potential_immob_vr_col,:actual_immob_vr_col,:sminn_to_plant_vr_col,:supplement_to_sminn_vr_col,
+                  :sminn_to_denit_excess_vr_col,:actual_immob_no3_vr_col,:actual_immob_nh4_vr_col,
+                  :smin_no3_to_plant_vr_col,:smin_nh4_to_plant_vr_col,:pot_f_nit_vr_col,:pot_f_denit_vr_col,
+                  :f_nit_vr_col,:f_denit_vr_col,:n2_n2o_ratio_denit_vr_col,:f_n2o_denit_vr_col,:f_n2o_nit_vr_col,
+                  :sminn_to_plant_fun_vr_col,:sminn_to_plant_fun_no3_vr_col,:sminn_to_plant_fun_nh4_vr_col)
+            setfield!(nf, f, zeros(nc,nlevdecomp))
+        end
+        nf.potential_immob_vr_col=fill(2.0,nc,nlevdecomp)   # N-limited: demand(2+2)=4 > supply(1)
+        for f in (:sminn_to_plant_col,:actual_immob_col,:potential_immob_col); setfield!(nf, f, zeros(nc)); end
+        cf = C.SoilBiogeochemCarbonFluxData(); cf.c_overflow_vr=zeros(nc,nlevdecomp,ntrans)
+        return (; st=st, nf=nf, cf=cf, ns=ns)
+    end
+    aux = (; state=state, params=params, mask=BitVector([true]), bounds=1:nc, nlevdecomp=nlevdecomp,
+             ntrans=ntrans, dzsoi=dzsoi, pmnf=pmnf, pcng=pcng, crp=crp)
+    phase!(b, a) = (C.soil_bgc_competition!(b.st, b.nf, b.cf, b.ns, a.state, a.params;
+        mask_bgc_soilc=a.mask, bounds=a.bounds, nlevdecomp=a.nlevdecomp, ndecomp_cascade_transitions=a.ntrans,
+        dzsoi_decomp=a.dzsoi, pmnf_decomp_cascade=a.pmnf, p_decomp_cn_gain=a.pcng,
+        cascade_receiver_pool=a.crp, use_nitrif_denitrif=false); nothing)
+    let b=fresh(); phase!(b,aux)
+        @printf("primal: fpi_vr=%.6f (N-limited, expect <1) actual_immob=%.4f fpg=%.4f finite=%s\n",
+            b.st.fpi_vr_col[1,1], b.nf.actual_immob_vr_col[1,1], b.st.fpg_col[1], string(isfinite(b.st.fpi_vr_col[1,1])))
+    end
+    L(b) = sum(abs2, b.st.fpi_vr_col)
+    g_fd = richardson(δ -> (b=fresh(); b.ns.sminn_vr_col[1,1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.st.fpi_vr_col .= 2 .* b.st.fpi_vr_col))
+    return verdict("P10 soil_bgc_competition", g_fd, db.ns.sminn_vr_col[1,1])
+end
+
 rP9 = try section_decomp() catch e; @printf("[P9] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP10 = try section_competition() catch e; @printf("[P10] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e  [P7] sminn=%.3e  [P8] alloc=%.3e  [P9] decomp=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6, rP7, rP8, rP9)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e  [P7] sminn=%.3e  [P8] alloc=%.3e  [P9] decomp=%.3e  [P10] competition=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6, rP7, rP8, rP9, rP10)
 println("="^70)
