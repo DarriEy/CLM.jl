@@ -5030,7 +5030,9 @@ function photosynthesis_hydrstress!(ps,
                                     use_c13::Bool=false,
                                     leaf_mr_vcm::Real=0.015,
                                     overrides::CalibrationOverrides=CalibrationOverrides(),
-                                    is_near_local_noon_fn::Function=(p) -> false)
+                                    is_near_local_noon_fn::Function=(p) -> false,
+                                    bsun_patch=nothing,
+                                    bsha_patch=nothing)
     stomatalcond_mtd = ps.stomatalcond_mtd
     leafresp_method = ps.leafresp_method
     light_inhibit = ps.light_inhibit
@@ -5080,8 +5082,13 @@ function photosynthesis_hydrstress!(ps,
     psn_wp_z_sha = fill!(similar(t_veg, FT, np, nlevcan), zero(FT))
     rh_leaf_sun  = fill!(similar(t_veg, FT, np), zero(FT))   # written by the Pass 3 kernel
     rh_leaf_sha  = fill!(similar(t_veg, FT, np), zero(FT))
-    bsun_arr     = fill!(similar(t_veg, FT, np), one(FT))
-    bsha_arr     = fill!(similar(t_veg, FT, np), one(FT))
+    # Use the caller's energyflux bsun/bsha_patch as the working array when supplied
+    # (so the BSUN/BSHA history diagnostics get populated — they are NaN-initialized and
+    # otherwise never written); else a local scratch. Init to 1.0 to match the scratch.
+    bsun_arr = (bsun_patch === nothing) ? fill!(similar(t_veg, FT, np), one(FT)) :
+               fill!(bsun_patch, one(eltype(bsun_patch)))
+    bsha_arr = (bsha_patch === nothing) ? fill!(similar(t_veg, FT, np), one(FT)) :
+               fill!(bsha_patch, one(eltype(bsha_patch)))
 
     # Aliases for output
     ci_z_sun = ps.cisun_z_patch
