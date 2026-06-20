@@ -461,6 +461,43 @@ function sminnupdate_rev_phase!(b, aux)
     return nothing
 end
 
+# calc_plant_cn_alloc! — plant C/N ALLOCATION (after nutrient competition): distributes the
+# available C/N to leaf/froot/stem/croot/repr pools via the allometry + downregulation logic
+# (sminn_to_npool = plant_ndemand·fpg → plant_nalloc → plant_calloc → cpool_to_*; psn down-
+# regulated by excess C). The first KA-kernel BGC phase reverse-validated with a MANUAL
+# backend launch + struct-grouped (_CnAllocOut/_CnAllocIn) kernel args — reverses at machine
+# precision (scripts/enzyme_bgc_reverse.jl [P8]). All C/N structs + fpg_col + cn_shared_params/
+# patch/crop flow LIVE from the bundle's inst (the whole inst is Duplicated, so the freshly-
+# built PftConNutrientCompetition is the only Const → no Enzyme aliasing). pftcon assembled
+# from the global pftcon exactly as cn_driver's _pftnc.
+function alloc_rev_aux(inst, bounds, filt, config)
+    pftnc = PftConNutrientCompetition{Float64}(
+        woody = Float64.(pftcon.woody), froot_leaf = Float64.(pftcon.froot_leaf),
+        croot_stem = Float64.(pftcon.croot_stem), stem_leaf = Float64.(pftcon.stem_leaf),
+        flivewd = Float64.(pftcon.flivewd), leafcn = Float64.(pftcon.leafcn),
+        frootcn = Float64.(pftcon.frootcn), livewdcn = Float64.(pftcon.livewdcn),
+        deadwdcn = Float64.(pftcon.deadwdcn), fcur = Float64.(pftcon.fcur),
+        graincn = Float64.(pftcon.graincn), grperc = Float64.(pftcon.grperc),
+        grpnow = Float64.(pftcon.grpnow), fleafcn = Float64.(pftcon.fleafcn),
+        ffrootcn = Float64.(pftcon.ffrootcn), fstemcn = Float64.(pftcon.fstemcn),
+        astemf = Float64.(pftcon.astemf), season_decid = Float64.(pftcon.season_decid),
+        stress_decid = Float64.(pftcon.stress_decid))
+    return (; pftcon = pftnc, mask = filt.bgc_vegp, bounds = bounds.begp:bounds.endp,
+              use_c13 = config.use_c13, use_c14 = config.use_c14,
+              npcropmin = config.npcropmin, nrepr = config.nrepr, dt = 1800.0)
+end
+function alloc_rev_phase!(b, aux)
+    i = b.inst; veg = i.bgc_vegetation
+    calc_plant_cn_alloc!(aux.mask, aux.bounds, aux.pftcon, i.cn_shared_params, i.patch, i.crop,
+                         veg.cnveg_state_inst, veg.cnveg_carbonstate_inst,
+                         veg.cnveg_carbonflux_inst, veg.cnveg_nitrogenflux_inst;
+                         fpg_col = i.soilbiogeochem_state.fpg_col,
+                         cnveg_ns = veg.cnveg_nitrogenstate_inst, dt = aux.dt,
+                         use_c13 = aux.use_c13, use_c14 = aux.use_c14,
+                         npcropmin = aux.npcropmin, nrepr = aux.nrepr)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
