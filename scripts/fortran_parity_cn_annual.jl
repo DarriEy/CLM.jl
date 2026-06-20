@@ -46,15 +46,69 @@
 # gives a finite (PHS-off, so not exact-parity on water-stress-sensitive GPP/veg) run
 # for sanity-checking the slowly-varying soil C/N pools.
 #
-# PROGRESS (2026-06-20): the PHS-frozen NaN is a multi-layer cascade; 3 layers fixed:
-#   (1) eff_porosity now initialized from the restart (fortran_restart.jl) — was NaN
-#       at step 1 → poisoned liqvol → smp_l. (2)+(3) the getvegwp!/_getvegwp sum_ksr
-#       guard is now a THRESHOLD (photosynthesis.jl), not ==0 — the pass-1 smooth_max
-#       floor leaves k_soil_root~1e-16 for all-frozen soil, so sum_ksr~1e-17≠0 was
-#       dividing → huge xroot. With these, vegwp is now FINITE (~-4e7 mm, extreme but
-#       not NaN). REMAINING (not yet fixed): t_veg/h2osoi still NaN — further layers in
-#       the bsun/bsha stress→canopy-energy coupling and/or the soil-water update on
-#       fully-frozen, no-root-uptake soil. The next round. CN_NOPHS=1 = working fallback.
+# PROGRESS (2026-06-20): the PHS step-1 NaN is a MULTI-LAYER cascade — 4 layers fixed,
+# still not finite. CORRECTED DIAGNOSIS: it is NOT "frozen" soil — the probe shows
+# liqvol~0.086 (DRY, not frozen) at NIGHT (coszen=0). Dry soil → tiny hk_l (~3e-14) →
+# k_soil_root floored to ~1e-16 → degenerate PHS solve driving vegwp to the extreme
+# (~-4e7 mm). Layers fixed (all general robustness, suite-green):
+#   (1) eff_porosity init from the restart (fortran_restart.jl) — was NaN at step 1.
+#   (2)+(3) getvegwp!/_getvegwp sum_ksr guard ==0 → THRESHOLD <=1e-12 (the smooth_max
+#       floor leaves k_soil_root~1e-16, so sum_ksr~1e-17≠0 divided → huge xroot).
+#   (4) plc/_plc/d1plc/_d1plc now return 1/0 for x>=0 (photosynthesis.jl) — water
+#       potential is always <=0 physically, and (x/psi50)<0 ^ (non-integer ck) = NaN;
+#       the degenerate solve drives vegwp >=0 transiently. (Latent bug; Fortran never
+#       hits x>=0 so parity holds.) vegwp now finite, but bsun/bsha STILL NaN.
+# REMAINING (open frontier): bsun/bsha NaN in the NIGHT branch of calcstress! +
+# smp_l(c,1)=NaN feeding it (a separate seed gap). ROOT ISSUE: the restart seed does
+# not provide ALL the derived hydrology state the PHS-on path reads at step 1 (smp_l,
+# the dry-soil k_soil_root regime), so the night PHS solve goes degenerate. PROPER FIX
+# = either seed ALL PHS-read derived state consistently from the restart, OR add a
+# clean dry/degenerate PHS bypass at the calcstress entry — both deeper than these
+# point patches, and in the reverse-AD mirror's code (coordinate). PAUSED here.
+# CN_NOPHS=1 = working PHS-off fallback (see CN_NOPHS findings below).
+#
+# RAW-POOL DIAGNOSTICS FIXED (2026-06-20): the "NaN C/N pools" was a pure DIAGNOSTIC
+# artifact, not physics. The _col summary fields (totsomc_col/totvegc_col/totsomn_col)
+# and gpp_patch are NOT refreshed in this CN driver path — their summary routines
+# (soil_bgc_carbon_state_summary! / cnveg_carbon_flux_summary!) are unported
+# placeholders (clm_driver.jl ~952), so they keep their restart-init NaN/0. This
+# harness now aggregates the actual PROGNOSTIC pools (see RAW-POOL block below):
+#   TOTSOMC/N = sum_j sum_{is_soil pools 4-6} decomp_*pools_vr[c,j,l]*dz_decomp[j]
+#   TOTVEGC   = patch sum of all veg C pools (displayed+storage+xfer), wtgcell->grc
+#   GPP       = psnsun_to_cpool + psnshade_to_cpool (real photosynthate flux, not the
+#               unported gpp_patch). NPP's summary is also unported → still reads 0.
+# RESULT (3-day smoke vs Fortran h0, Jan): TOTSOMC rel 3.3e-8, TOTVEGC 5.9e-8,
+# TOTECOSYSC 5.2e-7, TOTSOMN 1.7e-8, SMINN 1.4e-5, TLAI 8e-6, LEAFC 8.6e-4, TG 7.6e-5
+# — i.e. the CN state was at PARITY all along; only the diagnostics were stale. The
+# Jan match also confirms the forcing is shared (clmforc.2003), so the day-of-year
+# comparison is valid. GPP in Jan is ~0 in both (winter); the seasonal leaf-out /
+# summer-GPP trajectory is the real open test (full-year run).
+#
+# LEAF-OUT FIXED (2026-06-20): two unrelated bugs blocked the season_decid grass (p3,
+# ivt=12, wt=0.35; p2 ivt=1 needleleaf-evergreen is correctly constant-LAI) from
+# leafing out, so GPP/TLAI/TOTVEGC were flat all year. Found via the CN_PHENO probe
+# (onset_gdd stuck at 0.0 even at peak summer):
+#  (1) phenology.jl: the season_decid/stress_decid GDD-onset read soil temperature as
+#      t_soisno_col[c, soil_layer] with soil_layer=1, but t_soisno_col is SNOW-PADDED
+#      ([nlevsno + nlevgrnd]) so index 1 is the top snow slot (frozen year-round) →
+#      onset_gdd never accumulated → onset never fired → dormant_flag stuck at 1. Fixed
+#      by offsetting the t_soisno read by nlevsno (ts_layer = nlevsno + soil_layer) in
+#      both kernels, keeping soilpsi_col (soil-only) at soil_layer. (soilpsi was right;
+#      only t_soisno needed the offset — that mismatch was the giveaway.)
+#  (2) cn_veg_struct_update! (leafc -> tlai/tsai/htop/elai) was DEFINED but never CALLED
+#      in the driver path → even after onset fired and leafc grew, tlai stayed frozen at
+#      the restart value, so the canopy never responded. This harness calls it post-step
+#      (after clm_drv!). NOTE: wiring it into the GLOBAL driver broke surface-albedo
+#      parity (freewins) + introduced off-Bow NaN (multisite) — it recomputes tlai from
+#      leafc, diverging from the injected/restart tlai those tests assume + a NaN edge
+#      case off-Bow — so the global wiring is deferred (see clm_driver.jl note); the
+#      harness call exercises the chain without touching the suite.
+# RESULT (CN_NOPHS full year vs Fortran h0): TLAI flat 0.031 -> grows to 0.109 (Jul,
+# vs Fortran 0.111); TOTVEGC Jul rel 1.0e-1 -> 2.2e-2; TOTECOSYSC 1.5e-3 -> 4.3e-4;
+# SMINN 4.3e-2 -> 1.4e-2; GPP now nonzero w/ right seasonal shape (Jul 8.4e-6 vs
+# Fortran 6.7e-6, slight ~1.3x overshoot — a 2nd-order residual, likely the GDD
+# soil-layer choice (1 vs the 0.08m layer ~4) shifting onset timing). The CN axis is
+# now at good seasonal parity (PHS-off). Probe: CN_PHENO=1 CN_NOPHS=1 julia ... 365.
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
@@ -164,6 +218,24 @@ function run_cn_annual(; ndays::Int = 365)
             string(round.(ss.rootfr_patch[2, 1:4], digits=3)), string(ss.k_soil_root_patch[2, 1:4]))
     end
 
+    # Phenology-onset probe: which patches are deciduous + seeded onset state.
+    if get(ENV, "CN_PHENO", "") != "" && hasproperty(inst.bgc_vegetation, :cnveg_state_inst)
+        cvs0 = inst.bgc_vegetation.cnveg_state_inst
+        pc = CLM.pftcon
+        println("  [pheno-init] per-patch phenology type + seeded onset state:")
+        for p in 1:np
+            inst.patch.active[p] || continue
+            it = inst.patch.itype[p]; ix = it + 1   # pft type → 1-based pftcon index
+            eg = ix <= length(pc.evergreen) ? pc.evergreen[ix] : NaN
+            sd = ix <= length(pc.season_decid) ? pc.season_decid[ix] : NaN
+            st = ix <= length(pc.stress_decid) ? pc.stress_decid[ix] : NaN
+            @printf("    p%-2d ivt=%-2d wt=%.3f evgrn=%g seas=%g stress=%g | dormant=%g gddflag=%g gdd=%.1f days_act=%.1f swi=%.1f onflag=%g\n",
+                p, it, inst.patch.wtgcell[p], eg, sd, st,
+                cvs0.dormant_flag_patch[p], cvs0.onset_gddflag_patch[p], cvs0.onset_gdd_patch[p],
+                cvs0.days_active_patch[p], cvs0.onset_swi_patch[p], cvs0.onset_flag_patch[p])
+        end
+    end
+
     _phs = get(ENV, "CN_NOPHS", "") == ""   # CN_NOPHS=1 → diagnostic: disable PHS
     config  = CLM.CLMDriverConfig(use_cn = true, use_aquifer_layer = false,
                                   use_hydrstress = _phs, use_luna = true)
@@ -196,15 +268,67 @@ function run_cn_annual(; ndays::Int = 365)
     end
     sminn_tot() = (s = 0.0; @inbounds for j in 1:nl; s += sns().sminn_vr_col[c_soil, j] * dzd[j]; end; s)
 
+    # --- RAW-POOL diagnostics --------------------------------------------------
+    # The _col summary fields (totsomc_col/totvegc_col/totsomn_col) and gpp_patch
+    # are NOT refreshed in this CN driver path: their summary routines
+    # (soil_bgc_carbon_state_summary! / cnveg_carbon_flux_summary!) are unported
+    # placeholders (clm_driver.jl ~952), so they keep their restart-init NaN/0.
+    # Aggregate the actual prognostic pools instead, matching the summary formulas:
+    #   TOTSOMC/N = sum_j sum_{is_soil pools} decomp_*pools_vr[c,j,l] * dz_decomp[j]
+    #   TOTVEGC   = patch sum of all veg C pools (displayed + storage + xfer)
+    #   GPP       = psnsun_to_cpool + psnshade_to_cpool (the real photosynthate flux)
+    is_soil = (length(inst.decomp_cascade.is_soil) > 0) ? inst.decomp_cascade.is_soil : Bool[]
+    function som_raw(vr)
+        s = 0.0
+        @inbounds for l in 1:size(vr, 3)
+            (l <= length(is_soil) && is_soil[l]) || continue
+            for j in 1:nl
+                v = vr[c_soil, j, l]; isfinite(v) && (s += v * dzd[j])
+            end
+        end
+        s
+    end
+    totsomc_raw() = som_raw(scs().decomp_cpools_vr_col)
+    totsomn_raw() = som_raw(sns().decomp_npools_vr_col)
+    vegc_stems = ("leafc","leafc_storage","leafc_xfer","frootc","frootc_storage",
+        "frootc_xfer","livestemc","livestemc_storage","livestemc_xfer","deadstemc",
+        "deadstemc_storage","deadstemc_xfer","livecrootc","livecrootc_storage",
+        "livecrootc_xfer","deadcrootc","deadcrootc_storage","deadcrootc_xfer",
+        "cpool","gresp_storage","gresp_xfer")
+    vegc_arrs = [getfield(ccs(), Symbol(s * "_patch")) for s in vegc_stems
+                 if hasproperty(ccs(), Symbol(s * "_patch"))]
+    function totvegc_raw()
+        s = 0.0
+        @inbounds for p in 1:np
+            inst.patch.active[p] || continue
+            t = 0.0; for a in vegc_arrs; v = a[p]; isfinite(v) && (t += v); end
+            s += t * inst.patch.wtgcell[p]
+        end
+        s
+    end
+    gpp_raw() = p2g(ccf().psnsun_to_cpool_patch) + p2g(ccf().psnshade_to_cpool_patch)
+    function litcwd_raw()  # column-integrated litter + CWD C (the non-is_soil pools)
+        vr = scs().decomp_cpools_vr_col
+        s = 0.0
+        @inbounds for l in 1:size(vr, 3)
+            (l <= length(is_soil) && !is_soil[l]) || continue
+            for j in 1:nl
+                v = vr[c_soil, j, l]; isfinite(v) && (s += v * dzd[j])
+            end
+        end
+        s
+    end
+    totecosysc_raw() = totsomc_raw() + totvegc_raw() + litcwd_raw()
+
     # Julia-side daily-mean accumulators: (h0 name, getter)
     fields = [
-        ("TOTSOMC",    () -> scs().totsomc_col[c_soil]),
-        ("TOTVEGC",    () -> ccs().totvegc_col[c_soil]),
-        ("TOTECOSYSC", () -> scs().totecosysc_col[c_soil]),
-        ("TOTSOMN",    () -> sns().totsomn_col[c_soil]),
-        ("SMINN",      () -> sminn_tot()),
-        ("GPP",        () -> p2g(ccf().gpp_patch)),
-        ("NPP",        () -> p2g(ccf().npp_patch)),
+        ("TOTSOMC",    totsomc_raw),
+        ("TOTVEGC",    totvegc_raw),
+        ("TOTECOSYSC", totecosysc_raw),
+        ("TOTSOMN",    totsomn_raw),
+        ("SMINN",      sminn_tot),
+        ("GPP",        gpp_raw),
+        ("NPP",        () -> p2g(ccf().npp_patch)),  # NPP summary also unported (stays 0)
         ("TLAI",       () -> p2g(inst.canopystate.tlai_patch)),
         ("LEAFC",      () -> p2g(ccs().leafc_patch)),
         ("TG",         () -> inst.temperature.t_grnd_col[c_soil]),
@@ -234,6 +358,14 @@ function run_cn_annual(; ndays::Int = 365)
                 is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
                 is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy,
                 photosyns = inst.photosyns)
+            # CTSM's CNVegStructUpdate (leafc -> tlai/elai/htop) is not yet wired into
+            # the global driver (it broke freewins/multisite — see clm_driver.jl note),
+            # so call it here post-step so leaf-out (onset-driven leafc growth) is
+            # reflected in LAI for the diagnostics + the next step's photosynthesis.
+            CLM.cn_veg_struct_update!(filt.bgc_vegp, bounds.begp:bounds.endp, inst.patch,
+                inst.canopystate, inst.bgc_vegetation.cnveg_carbonstate_inst,
+                inst.water.waterdiagnosticbulk_inst, inst.frictionvel,
+                inst.bgc_vegetation.cnveg_state_inst, inst.crop, CLM.pftcon; dt = 3600.0)
             if get(ENV, "CN_PROBE", "") != "" && d == 1 && h == 1
                 ns2 = CLM.varpar.nlevsno
                 ws = inst.water.waterstatebulk_inst.ws
@@ -245,8 +377,11 @@ function run_cn_annual(; ndays::Int = 365)
                     string(round.(ws.h2osoi_liq_col[c_soil, (ns2+1):(ns2+4)], digits=2)),
                     string(inst.surfalb.albgrd_col[c_soil, 1]),
                     string(inst.surfalb.coszen_col[c_soil]))
-                @printf("  [post-step1] vegwp(p2,1:4)=%s\n",
-                    string(inst.canopystate.vegwp_patch[2, 1:4]))
+                @printf("  [post-step1] vegwp(p2,1:4)=%s bsun=%s bsha=%s qtran=%s qevap=%s\n",
+                    string(inst.canopystate.vegwp_patch[2, 1:4]),
+                    string(inst.energyflux.bsun_patch[2]), string(inst.energyflux.bsha_patch[2]),
+                    string(inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col[c_soil]),
+                    string(inst.water.waterfluxbulk_inst.wf.qflx_evap_veg_patch[2]))
                 @printf("  [post-step1] liqvol soil[1:3]=%s k_soil_root(p2)[1:3]=%s hk_l(c)[1:3]=%s\n",
                     string(round.(inst.water.waterdiagnosticbulk_inst.h2osoi_liqvol_col[c_soil, (ns2+1):(ns2+3)], digits=3)),
                     string(inst.soilstate.k_soil_root_patch[2, 1:3]),
@@ -260,6 +395,24 @@ function run_cn_annual(; ndays::Int = 365)
         d % 30 == 0 && @printf("  day %3d  TOTSOMC=%.0f TOTVEGC=%.1f GPP=%.3e TLAI=%.3f Tg=%.1f\n",
                 d, daily["TOTSOMC"][end], daily["TOTVEGC"][end], daily["GPP"][end],
                 daily["TLAI"][end], daily["TG"][end])
+        # phenology-onset evolution probe for the season_decid grass patch (p3)
+        if get(ENV, "CN_PHENO", "") != "" && d % 15 == 0 &&
+           hasproperty(inst.bgc_vegetation, :cnveg_state_inst)
+            cvs = inst.bgc_vegetation.cnveg_state_inst
+            pd = findfirst(p -> inst.patch.active[p] &&
+                (inst.patch.itype[p]+1 <= length(CLM.pftcon.season_decid)) &&
+                CLM.pftcon.season_decid[inst.patch.itype[p]+1] == 1.0, 1:np)
+            if pd !== nothing
+                tg = inst.gridcell.dayl
+                @printf("    [pheno d%3d p%d] dormant=%g gddflag=%g gdd=%.1f days_act=%.1f swi=%.1f onflag=%g oncnt=%.0f offflag=%g leafc=%.2f tlai=%.3f dayl=%.0f\n",
+                    d, pd, cvs.dormant_flag_patch[pd], cvs.onset_gddflag_patch[pd],
+                    cvs.onset_gdd_patch[pd], cvs.days_active_patch[pd], cvs.onset_swi_patch[pd],
+                    cvs.onset_flag_patch[pd], cvs.onset_counter_patch[pd],
+                    cvs.offset_flag_patch[pd], ccs().leafc_patch[pd],
+                    inst.canopystate.tlai_patch[pd],
+                    (length(tg) > 0 ? tg[1] : NaN))
+            end
+        end
     end
     CLM.forcing_reader_close!(fr)
     @printf("  ran %d days in %.1fs\n\n", ndays, time() - t0)

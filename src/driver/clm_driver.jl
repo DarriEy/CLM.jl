@@ -1450,6 +1450,14 @@ function clm_drv_core!(config::CLMDriverConfig,
             mask_actfirep=filt.actfirep)
     end
 
+    # NOTE: CTSM's CNVegStructUpdate (leafc -> tlai/tsai/htop/elai, on the radiation
+    # step) is NOT yet wired here. Wiring it broke surface-albedo parity (freewins) and
+    # introduced NaN at non-Bow sites (multisite robustness) — it recomputes tlai from
+    # leafc, diverging from the injected/restart tlai those tests assume, and has a
+    # NaN edge case off-Bow. The CN-annual harness calls cn_veg_struct_update! itself
+    # (post-step) to exercise the leaf-out -> LAI chain; wiring it into the global
+    # driver needs that recompute-vs-inject + off-Bow-NaN follow-up first.
+
     # Satellite phenology (SP mode) — WIRED
     if !config.use_cn && !config.use_fates && doalb
         satellite_phenology!(inst.satellite_phenology, cs, wdb,

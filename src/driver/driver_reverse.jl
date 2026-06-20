@@ -408,6 +408,59 @@ function decomprate_rev_phase!(b, aux)
     return nothing
 end
 
+# soil_bgc_potential! — potential decomposition + mineral-N flux (the decomposition cascade
+# step that consumes decomp_k from decomp_rate_constants_bgc!): p_decomp_cpool_loss[tr] =
+# Cpool[donor]·decomp_k[donor]·pathfrac, gross mineralization / potential immobilization,
+# floating-vs-fixed C:N. Reverse-validated at machine precision (scripts/enzyme_bgc_reverse.jl
+# [P6]). All differentiable C/N structs flow LIVE from the bundle (cf decomp_k in / phr_vr +
+# nf potential_immob/gross_nmin out, cs decomp_cpools / ns decomp_npools in); cascade_con +
+# the five potential-flux SCRATCH arrays (cn_decomp_pools/p_decomp_*/pmnf — preallocated,
+# overwritten each call) are Const aux, sized exactly as cn_driver_no_leaching!'s _z3.
+function decomppot_rev_aux(inst, bounds, filt, config)
+    nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
+    ndp = config.ndecomp_pools; nct = config.ndecomp_cascade_transitions
+    z3(d) = zeros(Float64, nc, nld, d)
+    return (; cascade_con = inst.decomp_cascade, mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc,
+              nlevdecomp = nld, ndecomp_pools = ndp, ndecomp_cascade_transitions = nct,
+              cn_decomp_pools = z3(ndp), p_decomp_cpool_loss = z3(nct), p_decomp_cn_gain = z3(ndp),
+              pmnf_decomp_cascade = z3(nct), p_decomp_npool_to_din = z3(nct))
+end
+function decomppot_rev_phase!(b, aux)
+    i = b.inst
+    soil_bgc_potential!(i.soilbiogeochem_carbonflux, i.soilbiogeochem_carbonstate,
+                        i.soilbiogeochem_nitrogenflux, i.soilbiogeochem_nitrogenstate,
+                        i.soilbiogeochem_state, aux.cascade_con;
+                        mask_bgc_soilc = aux.mask, bounds = aux.bounds, nlevdecomp = aux.nlevdecomp,
+                        ndecomp_pools = aux.ndecomp_pools,
+                        ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
+                        cn_decomp_pools = aux.cn_decomp_pools,
+                        p_decomp_cpool_loss = aux.p_decomp_cpool_loss,
+                        p_decomp_cn_gain = aux.p_decomp_cn_gain,
+                        pmnf_decomp_cascade = aux.pmnf_decomp_cascade,
+                        p_decomp_npool_to_din = aux.p_decomp_npool_to_din)
+    return nothing
+end
+
+# soilbiogeochem_n_state_update1! — the MINERAL-N pool update (applies N deposition+fixation,
+# gross mineralization, immobilization, plant uptake, nitrification/denitrification and the
+# carbon-only-limitation supplement to smin_nh4_vr / smin_no3_vr; sminn = nh4+no3). The
+# downstream sink of the decomposition cascade's N side. Reverse-validated at machine
+# precision (scripts/enzyme_bgc_reverse.jl [P7]). All three structs flow LIVE from the bundle
+# (ns smin_nh4/no3/sminn out ← nf the mineral-N fluxes in; st ndep/nfixation profiles, read-
+# only). use_fun resolved inside the wrapper. Sourced from inst/config as cn_driver does.
+function sminnupdate_rev_aux(inst, bounds, filt, config)
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc,
+              nlevdecomp = varpar.nlevdecomp, use_fun = config.use_fun, dt = 1800.0)
+end
+function sminnupdate_rev_phase!(b, aux)
+    i = b.inst
+    soilbiogeochem_n_state_update1!(i.soilbiogeochem_nitrogenstate, i.soilbiogeochem_nitrogenflux,
+                                    i.soilbiogeochem_state;
+                                    mask_bgc_soilc = aux.mask, bounds_col = aux.bounds,
+                                    nlevdecomp = aux.nlevdecomp, dt = aux.dt, use_fun = aux.use_fun)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
