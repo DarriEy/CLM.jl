@@ -98,6 +98,56 @@ function init_surface_albedo_cold!(inst::CLMInstances, bounds::BoundsType)
             sa.albgri_col[c, ib] = a
         end
     end
+    _init_urban_albedo_cold!(inst, bounds)
+    return nothing
+end
+
+"""
+    _init_urban_albedo_cold!(inst, bounds)
+
+Cold-start the urban shortwave absorbed fractions (`sabs_*_dir/dif_lun`) and
+`coszen_col` for urban columns. The full `urban_albedo!` solve only runs at the
+END of a timestep (for the next step's radiation), so on the first step
+`urban_radiation!` would otherwise apply NaN absorption fractions and produce NaN
+`sabg`. This seeds physically-bounded fractions (1 - surface albedo) — the urban
+analog of the `albgrd/albgri` seed used for non-urban columns above — which the
+real `urban_albedo!` overwrites from step 2 onward. Requires `urbanparams` to be
+populated (done before cold start in clm_initialize!).
+"""
+function _init_urban_albedo_cold!(inst::CLMInstances, bounds::BoundsType)
+    sa  = inst.surfalb
+    sol = inst.solarabs
+    up  = inst.urbanparams
+    col = inst.column
+    lun = inst.landunit
+    isempty(sol.sabs_roof_dir_lun) && return nothing
+    isempty(up.alb_roof_dir) && return nothing
+    nrad = size(sol.sabs_roof_dir_lun, 2)
+    clamp01(x) = isfinite(x) ? clamp(1.0 - x, 0.0, 1.0) : 0.0
+    for l in bounds.begl:bounds.endl
+        (l <= length(lun.urbpoi) && lun.urbpoi[l]) || continue
+        for ib in 1:nrad
+            sol.sabs_roof_dir_lun[l, ib]      = clamp01(up.alb_roof_dir[l, ib])
+            sol.sabs_roof_dif_lun[l, ib]      = clamp01(up.alb_roof_dif[l, ib])
+            sol.sabs_sunwall_dir_lun[l, ib]   = clamp01(up.alb_wall_dir[l, ib])
+            sol.sabs_sunwall_dif_lun[l, ib]   = clamp01(up.alb_wall_dif[l, ib])
+            sol.sabs_shadewall_dir_lun[l, ib] = clamp01(up.alb_wall_dir[l, ib])
+            sol.sabs_shadewall_dif_lun[l, ib] = clamp01(up.alb_wall_dif[l, ib])
+            sol.sabs_improad_dir_lun[l, ib]   = clamp01(up.alb_improad_dir[l, ib])
+            sol.sabs_improad_dif_lun[l, ib]   = clamp01(up.alb_improad_dif[l, ib])
+            sol.sabs_perroad_dir_lun[l, ib]   = clamp01(up.alb_perroad_dir[l, ib])
+            sol.sabs_perroad_dif_lun[l, ib]   = clamp01(up.alb_perroad_dif[l, ib])
+        end
+    end
+    # Seed coszen_col for urban columns (full albedo solve sets it for non-urban /
+    # for the next step); 0 = night-equivalent, finite and safe for step 1.
+    if !isempty(sa.coszen_col)
+        for c in bounds.begc:bounds.endc
+            l = col.landunit[c]
+            (l <= length(lun.urbpoi) && lun.urbpoi[l]) || continue
+            sa.coszen_col[c] = 0.0
+        end
+    end
     return nothing
 end
 
@@ -305,6 +355,7 @@ function init_temperatures!(inst::CLMInstances, bounds::BoundsType)
             temp.t_skin_patch[p] = 283.0
             temp.t_ref2m_patch[p] = 283.0
         end
+        _init_urban_building_temps!(inst, bounds)
         return nothing
     end
 
@@ -330,7 +381,94 @@ function init_temperatures!(inst::CLMInstances, bounds::BoundsType)
         temp.t_skin_patch[p] = T_INIT
         temp.t_ref2m_patch[p] = T_INIT
     end
+    _init_urban_building_temps!(inst, bounds)
     nothing
+end
+
+"""
+    _init_urban_building_temps!(inst, bounds)
+
+Cold-start the prognostic urban building temperatures (internal air, inner
+roof/wall surfaces, floor) from the corresponding urban column's deepest urban
+ground level. Ported from the `is_prog_buildtemp` block of
+`TemperatureType.F90::InitCold` (roof column → t_roof_inner/t_building/t_floor,
+sunwall → t_sunw_inner, shadewall → t_shdw_inner). Without this these landunit
+temperatures stay NaN at cold start and poison `soil_temperature!`'s urban
+wall/roof heat-flux path.
+"""
+function _init_urban_building_temps!(inst::CLMInstances, bounds::BoundsType)
+    temp = inst.temperature
+    col  = inst.column
+    lun  = inst.landunit
+    up   = inst.urbanparams
+    wdb  = inst.water.waterdiagnosticbulk_inst
+    idx  = varpar.nlevsno + varpar.nlevurb   # deepest urban ground layer (snow-padded)
+
+    # Urban canyon air temperature (taf) and specific humidity (qaf): cold-start
+    # constants per Fortran InitCold (TemperatureType / WaterDiagnosticType). taf =
+    # 283 K, qaf = 1e-4 kg/kg (the use_vancouver / use_mexicocity overrides only
+    # affect those two field-study parity runs; the default path is used here).
+    has_qaf = length(wdb.qaf_lun) >= bounds.endl
+    for l in bounds.begl:bounds.endl
+        (l <= length(lun.urbpoi) && lun.urbpoi[l]) || continue
+        temp.taf_lun[l] = 283.0
+        has_qaf && (wdb.qaf_lun[l] = 1.0e-4)
+    end
+
+    # Building inner temperatures from each urban column's deepest urban ground level,
+    # and the per-column ground emissivity emg from the urban surface emissivities.
+    has_emg = length(temp.emg_col) >= bounds.endc
+    for c in bounds.begc:bounds.endc
+        l = col.landunit[c]
+        (l >= 1 && l <= length(lun.urbpoi) && lun.urbpoi[l]) || continue
+        ts = temp.t_soisno_col[c, idx]
+        it = col.itype[c]
+        if it == ICOL_ROOF
+            temp.t_roof_inner_lun[l] = ts
+            temp.t_building_lun[l]   = ts   # arbitrarily set to roof temperature
+            temp.t_floor_lun[l]      = ts   # arbitrarily set to roof temperature
+            has_emg && (temp.emg_col[c] = up.em_roof[l])
+        elseif it == ICOL_SUNWALL
+            temp.t_sunw_inner_lun[l] = ts
+            has_emg && (temp.emg_col[c] = up.em_wall[l])
+        elseif it == ICOL_SHADEWALL
+            temp.t_shdw_inner_lun[l] = ts
+            has_emg && (temp.emg_col[c] = up.em_wall[l])
+        elseif it == ICOL_ROAD_IMPERV
+            has_emg && (temp.emg_col[c] = up.em_improad[l])
+        elseif it == ICOL_ROAD_PERV
+            has_emg && (temp.emg_col[c] = up.em_perroad[l])
+        end
+    end
+
+    # Urban patches are never exposed-vegetation, so canopy_fluxes! never writes
+    # their transpiration; zero it so the urban ground-net-heat-flux term
+    # (eflx_gnet += qflx_tran_veg*hvap, SoilTemperatureMod) is finite instead of NaN.
+    pch = inst.patch
+    wf  = inst.water.waterfluxbulk_inst.wf
+    if length(wf.qflx_tran_veg_patch) >= bounds.endp
+        for p in bounds.begp:bounds.endp
+            l = pch.landunit[p]
+            (l <= length(lun.urbpoi) && lun.urbpoi[l]) || continue
+            wf.qflx_tran_veg_patch[p] = 0.0
+        end
+    end
+
+    # Prognostic-building-temperature landunit energy fluxes (ventilation, building,
+    # AC, heat) cold-start to 0 for urban landunits, per EnergyFluxType::InitCold's
+    # is_prog_buildtemp urban branch. Without this eflx_ventilation_lun stays NaN and
+    # poisons the road-column ground heat flux (eflx_gnet, SoilTemperatureMod).
+    ef = inst.energyflux
+    if length(ef.eflx_ventilation_lun) >= bounds.endl
+        for l in bounds.begl:bounds.endl
+            (l <= length(lun.urbpoi) && lun.urbpoi[l]) || continue
+            ef.eflx_ventilation_lun[l] = 0.0
+            ef.eflx_building_lun[l]    = 0.0
+            ef.eflx_urban_ac_lun[l]    = 0.0
+            ef.eflx_urban_heat_lun[l]  = 0.0
+        end
+    end
+    return nothing
 end
 
 """
@@ -915,6 +1053,35 @@ function init_root_fractions!(inst::CLMInstances, bounds::BoundsType)
     init_vegrootfr!(ss.crootfr_patch, col_zi_soil, col_z_soil, col_dz_soil,
                     col.nbedrock, pch.column, pch.itype, patch_is_fates,
                     pftcon, rooting_profile_config, bp, nlevsoi, nlevgrnd, "carbon")
+
+    # Urban pervious-road root fraction (uniform over soil layers, roots below
+    # bedrock folded back into the bedrock layers). Ported from
+    # SoilStateInitTimeConstMod.F90 (perv road shares soil properties). Without
+    # this rootfr_road_perv_col stays NaN -> NaN qg in calculate_surface_humidity!
+    # for the perv-road column -> the whole urban canyon air solve NaNs.
+    lun = inst.landunit
+    if !isempty(ss.rootfr_road_perv_col)
+        for c in bounds.begc:bounds.endc
+            l = col.landunit[c]
+            (l <= length(lun.urbpoi) && lun.urbpoi[l] && col.itype[c] == ICOL_ROAD_PERV) || continue
+            nb = col.nbedrock[c]
+            for lev in 1:nlevgrnd
+                ss.rootfr_road_perv_col[c, lev] = 0.0
+            end
+            for lev in 1:nlevsoi
+                ss.rootfr_road_perv_col[c, lev] = 1.0 / nlevsoi
+            end
+            if nb >= 1 && nb < nlevsoi
+                below = sum(@view ss.rootfr_road_perv_col[c, (nb + 1):nlevsoi])
+                for lev in 1:nb
+                    ss.rootfr_road_perv_col[c, lev] += below / nb
+                end
+                for lev in (nb + 1):nlevsoi
+                    ss.rootfr_road_perv_col[c, lev] = 0.0
+                end
+            end
+        end
+    end
 
     return nothing
 end

@@ -134,6 +134,7 @@ function clm_initialize!(;
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                   nlevdecomp_full=nlevdecomp_full,
                   ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+                  nlevurb=nlevurb,
                   use_luna=use_luna)
 
     # ---- Step 9: Build subgrid hierarchy ----
@@ -175,6 +176,22 @@ function clm_initialize!(;
 
     # ---- Step 13: Initialize vertical structure ----
     initVertical!(bounds, inst.gridcell, inst.landunit, inst.column, surf)
+
+    # ---- Step 13a: Read urban morphology and populate landunit-level urban params ----
+    # Read the urban morphology / thermal / radiative fields from the surface dataset
+    # into landunit-level urbanparams (canyon_hwr, ht_roof, tk/cv, albedos, emissivities).
+    # Without this the isturb path runs on fill(NaN) morphology -> degenerate. Must run
+    # BEFORE cold_start_initialize! so InitCold can derive urban emg_col and the building
+    # inner temperatures from the populated emissivities (mirrors Fortran: urbanparams%Init
+    # precedes TemperatureType::InitCold). Gated on any urban landunit being present.
+    if isdefined(CLM, :read_urban_input!) &&
+       any(@view inst.landunit.urbpoi[bounds.begl:bounds.endl])
+        urbinp = UrbanInputData{Float64}()
+        urbinp_init!(urbinp, bounds.endg, NUMURBL, NUMRAD, nlevurb)
+        read_urban_input!(urbinp, fsurdat, bounds.endg, NUMURBL, NUMRAD, nlevurb)
+        urbanparams_populate!(inst.urbanparams, inst.landunit, urbinp,
+                              bounds.begl:bounds.endl)
+    end
 
     # ---- Step 14: Cold-start initialization ----
     cold_start_initialize!(inst, bounds, filt, surf; use_aquifer_layer=use_aquifer_layer)
