@@ -118,6 +118,13 @@ function cn_veg_struct_update!(mask_soilp::BitVector,
     for p in bounds
         mask_soilp[p] || continue
 
+        # Skip patches whose live C is non-finite (e.g. CN pools not yet initialized
+        # at a cold start) — there is no sensible structure to diagnose from NaN, and
+        # propagating it would poison tlai/elai -> radiation/photosynthesis. Leaves the
+        # structure fields at their current (cold-init) values, matching the behavior
+        # before this routine was wired into the driver. Restart runs have finite C.
+        isfinite(leafc[p]) || continue
+
         c = col[p]
 
         if ivt[p] != noveg

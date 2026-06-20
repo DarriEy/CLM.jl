@@ -13,6 +13,7 @@
 #   [P5] decomp_rate_constants_bgc! (soil-C turnover: t_scalar=Q10^((Tsoi-Tref)/10) — the `Q10` param)
 #   [P6] soil_bgc_potential! (potential decomp + mineral-N: p_decomp_cpool_loss=Cpool·decomp_k·pathfrac)
 #   [P7] soilbiogeochem_n_state_update1! (mineral-N update: smin_nh4 += (ndep/fix/nmin−immob−...)·dt)
+#   [P8] calc_plant_cn_alloc! (allocation: sminn_to_npool=plant_ndemand·fpg → plant_calloc/cpool_to_*)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -329,6 +330,75 @@ function section_sminn()
     return verdict("P7 sminn_update", g_fd, db.nf.gross_nmin_vr_col[1,1])
 end
 
+# =============================================================================
+# [P8] calc_plant_cn_alloc! — plant C/N allocation (distributes available C/N to the leaf/
+#      froot/stem/root/repr pools via the allometry + downregulation logic). Bundle =
+#      (cnveg_state, cnveg_cs, cnveg_cf, cnveg_nf); pftcon/cn_shared_params/patch/crop +
+#      fpg_col are Const aux. Perturb plant_ndemand → seed sminn_to_npool = plant_ndemand·fpg.
+#      First KA-kernel BGC phase with a MANUAL backend launch + struct-grouped args.
+# =============================================================================
+function section_alloc()
+    println("\n", "#"^70, "\n# [P8] calc_plant_cn_alloc! (plant C/N allocation) REVERSE\n", "#"^70)
+    np=1; nc=1; nrepr=C.NREPR; fpg=0.8
+    pftcon = C.PftConNutrientCompetition(woody=[1.0], froot_leaf=[1.0], croot_stem=[0.3],
+        stem_leaf=[-1.0], flivewd=[0.1], leafcn=[25.0], frootcn=[42.0], livewdcn=[50.0],
+        deadwdcn=[500.0], fcur=[0.5], graincn=[50.0], grperc=[0.3], grpnow=[0.5],
+        fleafcn=[65.0], ffrootcn=[100.0], fstemcn=[130.0], astemf=[0.0],
+        season_decid=[0.0], stress_decid=[0.0])
+    cn_shared_params = C.CNSharedParamsData(use_matrixcn=false, use_fun=false)
+    patch = C.PatchData(); patch.column=[1]; patch.itype=[0]
+    crop = C.CropData(); crop.croplive_patch=[false]
+    function fresh()
+        cst = C.CNVegStateData()
+        cst.c_allometry_patch=[1.5]; cst.n_allometry_patch=[0.06]; cst.downreg_patch=[0.0]
+        cst.aleaf_patch=[NaN]; cst.astem_patch=[NaN]; cst.aroot_patch=[NaN]; cst.arepr_patch=fill(NaN,np,nrepr)
+        cst.peaklai_patch=[0]; cst.tempsum_potential_gpp_patch=[0.0]; cst.annsum_potential_gpp_patch=[5000.0]
+        cst.tempmax_retransn_patch=[0.0]; cst.annmax_retransn_patch=[1.0]; cst.grain_flag_patch=[0.0]
+        cs = C.CNVegCarbonStateData(); cs.leafc_patch=[10.0]; cs.frootc_patch=[5.0]; cs.livestemc_patch=[20.0]
+        cf = C.CNVegCarbonFluxData()
+        cf.gpp_before_downreg_patch=[10.0]; cf.availc_patch=[8.0]; cf.npp_growth_patch=[8.0]
+        cf.excess_cflux_patch=[0.0]; cf.plant_calloc_patch=[0.0]; cf.psnsun_to_cpool_patch=[6.0]
+        cf.psnshade_to_cpool_patch=[4.0]; cf.annsum_npp_patch=[400.0]
+        for f in (:cpool_to_leafc_patch,:cpool_to_leafc_storage_patch,:cpool_to_frootc_patch,
+                  :cpool_to_frootc_storage_patch,:cpool_to_livestemc_patch,:cpool_to_livestemc_storage_patch,
+                  :cpool_to_deadstemc_patch,:cpool_to_deadstemc_storage_patch,:cpool_to_livecrootc_patch,
+                  :cpool_to_livecrootc_storage_patch,:cpool_to_deadcrootc_patch,:cpool_to_deadcrootc_storage_patch,
+                  :cpool_to_gresp_storage_patch)
+            setfield!(cf, f, [0.0])
+        end
+        cf.cpool_to_reproductivec_patch=fill(0.0,np,nrepr); cf.cpool_to_reproductivec_storage_patch=fill(0.0,np,nrepr)
+        nf = C.CNVegNitrogenFluxData()
+        nf.plant_ndemand_patch=[0.2]; nf.avail_retransn_patch=[0.0]; nf.retransn_to_npool_patch=[0.05]
+        nf.sminn_to_npool_patch=[0.0]; nf.plant_nalloc_patch=[0.0]
+        for f in (:npool_to_leafn_patch,:npool_to_leafn_storage_patch,:npool_to_frootn_patch,
+                  :npool_to_frootn_storage_patch,:npool_to_livestemn_patch,:npool_to_livestemn_storage_patch,
+                  :npool_to_deadstemn_patch,:npool_to_deadstemn_storage_patch,:npool_to_livecrootn_patch,
+                  :npool_to_livecrootn_storage_patch,:npool_to_deadcrootn_patch,:npool_to_deadcrootn_storage_patch,
+                  :sminn_to_plant_fun_patch,:leafn_to_retransn_patch,:frootn_to_retransn_patch,
+                  :livestemn_to_retransn_patch,:Npassive_patch,:Nfix_patch,:Nactive_patch,
+                  :Nnonmyc_patch,:Nam_patch,:Necm_patch)
+            setfield!(nf, f, [0.0])
+        end
+        nf.npool_to_reproductiven_patch=fill(0.0,np,nrepr); nf.npool_to_reproductiven_storage_patch=fill(0.0,np,nrepr)
+        return (; cnveg_state=cst, cnveg_cs=cs, cnveg_cf=cf, cnveg_nf=nf)
+    end
+    aux = (; pftcon=pftcon, cn_shared_params=cn_shared_params, patch=patch, crop=crop,
+             mask=BitVector([true]), bounds=1:np, fpg_col=[fpg], npcropmin=C.NPCROPMIN, nrepr=nrepr)
+    phase!(b, a) = (C.calc_plant_cn_alloc!(a.mask, a.bounds, a.pftcon, a.cn_shared_params,
+        a.patch, a.crop, b.cnveg_state, b.cnveg_cs, b.cnveg_cf, b.cnveg_nf;
+        fpg_col=a.fpg_col, npcropmin=a.npcropmin, nrepr=a.nrepr); nothing)
+    let b=fresh(); phase!(b,aux)
+        @printf("primal: sminn_to_npool=%.6f (expect plant_ndemand·fpg=%.6f) plant_calloc=%.4f finite=%s\n",
+            b.cnveg_nf.sminn_to_npool_patch[1], 0.2*fpg, b.cnveg_cf.plant_calloc_patch[1],
+            string(isfinite(b.cnveg_cf.plant_calloc_patch[1])))
+    end
+    L(b) = sum(abs2, b.cnveg_nf.sminn_to_npool_patch)
+    g_fd = richardson(δ -> (b=fresh(); b.cnveg_nf.plant_ndemand_patch[1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.cnveg_nf.sminn_to_npool_patch .= 2 .* b.cnveg_nf.sminn_to_npool_patch))
+    return verdict("P8 calc_plant_cn_alloc", g_fd, db.cnveg_nf.plant_ndemand_patch[1])
+end
+
 rP1 = try section_gresp() catch e; @printf("[P1] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP2 = try section_mresp() catch e; @printf("[P2] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP3 = try section_cstate1() catch e; @printf("[P3] ERRORED: %s\n", sprint(showerror,e)); NaN end
@@ -336,6 +406,7 @@ rP4 = try section_nstate1() catch e; @printf("[P4] ERRORED: %s\n", sprint(shower
 rP5 = try section_decomprate() catch e; @printf("[P5] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP6 = try section_potential() catch e; @printf("[P6] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP7 = try section_sminn() catch e; @printf("[P7] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP8 = try section_alloc() catch e; @printf("[P8] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e  [P7] sminn=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6, rP7)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e  [P7] sminn=%.3e  [P8] alloc=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6, rP7, rP8)
 println("="^70)
