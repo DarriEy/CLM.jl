@@ -10,6 +10,7 @@
 #   [P2] cn_mresp!  (maintenance resp:     livestem_mr = livestemn·br·tc(Q10), the `br` param)
 #   [P3] c_state_update1! (C pool integration: leafc += cpool_to_leafc·dt — the C-cycle update)
 #   [P4] n_state_update1! (N pool integration: leafn += npool_to_leafn·dt — the N-cycle update)
+#   [P5] decomp_rate_constants_bgc! (soil-C turnover: t_scalar=Q10^((Tsoi-Tref)/10) — the `Q10` param)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -192,10 +193,54 @@ function section_nstate1()
     return verdict("P4 n_state_update1", g_fd, db.nf_veg.npool_to_leafn_patch[1])
 end
 
+# =============================================================================
+# [P5] decomp_rate_constants_bgc! — soil-carbon decomposition rate constants (the Q10/tau
+#      turnover calibration). Bundle = (cf out [t_scalar/w_scalar/decomp_k], t_soisno in —
+#      the kwarg temperature array); params/cn_params(Q10)/bgc_state/cascade_con/soilpsi/
+#      zsoi/col_dz are Const aux. Perturb t_soisno, seed t_scalar = Q10^((Tsoi-Tref)/10).
+# =============================================================================
+function section_decomprate()
+    println("\n", "#"^70, "\n# [P5] decomp_rate_constants_bgc! (soil-C turnover rates) REVERSE\n", "#"^70)
+    nc=1; nlevdecomp=1; ndecomp_pools=7; ndecomp_cascade_transitions=10; nlev=max(nlevdecomp,5)
+    params = C.DecompBGCParams(cn_s1_bgc=12.0, cn_s2_bgc=12.0, cn_s3_bgc=10.0,
+        rf_l1s1_bgc=0.39, rf_l2s1_bgc=0.55, rf_l3s2_bgc=0.29, rf_s2s1_bgc=0.55, rf_s2s3_bgc=0.55,
+        rf_s3s1_bgc=0.55, rf_cwdl3_bgc=0.0, tau_l1_bgc=1.0/18.5, tau_l2_l3_bgc=1.0/4.9,
+        tau_s1_bgc=1.0/7.3, tau_s2_bgc=1.0/0.2, tau_s3_bgc=1.0/0.0045, cwd_fcel_bgc=0.45,
+        bgc_initial_Cstocks=fill(200.0,7), bgc_initial_Cstocks_depth=0.3)
+    cn_params = C.CNSharedParamsData(Q10=1.5, minpsi=-10.0, maxpsi=-0.1, rf_cwdl2=0.0, tau_cwd=10.0,
+        cwd_flig=0.24, froz_q10=1.5, decomp_depth_efolding=0.5, mino2lim=0.0)
+    bgc_state = C.DecompBGCState(); cascade_con = C.DecompCascadeConData()
+    soilpsi = fill(-1.0, nc, nlev)
+    zsoi_vals = [0.01,0.04,0.09,0.16,0.26,0.40,0.58,0.80,1.06,1.36]
+    col_dz = fill(0.1, nc, nlev)
+    function fresh()
+        cf = C.SoilBiogeochemCarbonFluxData()
+        C.soil_bgc_carbon_flux_init!(cf, nc, nlev, ndecomp_pools, ndecomp_cascade_transitions)
+        t_soisno = fill(C.TFRZ + 15.0, nc, nlev)
+        return (; cf=cf, t_soisno=t_soisno)
+    end
+    aux = (; bgc_state=bgc_state, params=params, cn_params=cn_params, cascade_con=cascade_con,
+             mask=BitVector([true]), bounds=1:nc, nlevdecomp=nlevdecomp,
+             soilpsi=soilpsi, zsoi_vals=zsoi_vals, col_dz=col_dz)
+    phase!(b, a) = (C.decomp_rate_constants_bgc!(b.cf, a.bgc_state, a.params, a.cn_params, a.cascade_con;
+        mask_bgc_soilc=a.mask, bounds=a.bounds, nlevdecomp=a.nlevdecomp, t_soisno=b.t_soisno,
+        soilpsi=a.soilpsi, days_per_year=365.0, dt=1800.0, zsoi_vals=a.zsoi_vals, col_dz=a.col_dz); nothing)
+    let b=fresh(); phase!(b,aux)
+        @printf("primal: t_scalar=%.6f w_scalar=%.6f finite=%s\n",
+            b.cf.t_scalar_col[1,1], b.cf.w_scalar_col[1,1], string(isfinite(b.cf.t_scalar_col[1,1])))
+    end
+    L(b) = sum(abs2, @view b.cf.t_scalar_col[:, 1])
+    g_fd = richardson(δ -> (b=fresh(); b.t_soisno[1,1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.cf.t_scalar_col[:,1] .= 2 .* @view b.cf.t_scalar_col[:,1]))
+    return verdict("P5 decomp_rate_bgc", g_fd, db.t_soisno[1,1])
+end
+
 rP1 = try section_gresp() catch e; @printf("[P1] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP2 = try section_mresp() catch e; @printf("[P2] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP3 = try section_cstate1() catch e; @printf("[P3] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP4 = try section_nstate1() catch e; @printf("[P4] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP5 = try section_decomprate() catch e; @printf("[P5] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e\n", rP1, rP2, rP3, rP4)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e\n", rP1, rP2, rP3, rP4, rP5)
 println("="^70)

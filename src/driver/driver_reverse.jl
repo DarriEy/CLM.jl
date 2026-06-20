@@ -380,6 +380,34 @@ function nstate1_rev_phase!(b, aux)
     return nothing
 end
 
+# decomp_rate_constants_bgc! — soil-carbon decomposition rate constants (the Q10/tau soil-C
+# turnover calibration: t_scalar = Q10^((Tsoi−Tref)/10), w_scalar(soilpsi), decomp_k). Reverse-
+# validated at machine precision (scripts/enzyme_bgc_reverse.jl [P5]). The DIFFERENTIABLE
+# inputs flow LIVE from the bundle: t_soisno (a materialized soil-layer slice of
+# inst.temperature.t_soisno_col — a getindex copy Enzyme tracks back to the array) and
+# soilpsi (inst.soilstate.soilpsi_col); output is inst.soilbiogeochem_carbonflux (t_scalar/
+# w_scalar/decomp_k). params/state/cascade + geometry (zsoi[], col_dz slice) are Const aux,
+# sourced from inst/globals exactly as cn_driver_no_leaching! does.
+function decomprate_rev_aux(inst, bounds, filt)
+    nsno = varpar.nlevsno
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc,
+              params = inst.decomp_bgc_params, bgc_state = inst.decomp_bgc_state,
+              cn_params = inst.cn_shared_params, cascade_con = inst.decomp_cascade,
+              nlevdecomp = varpar.nlevdecomp, nlevsno = nsno, zsoi_vals = zsoi[],
+              col_dz = inst.column.dz[:, (nsno + 1):end], days_per_year = 365.0, dt = 1800.0)
+end
+function decomprate_rev_phase!(b, aux)
+    i = b.inst
+    t_soisno = i.temperature.t_soisno_col[:, (aux.nlevsno + 1):end]   # differentiable slice copy
+    decomp_rate_constants_bgc!(i.soilbiogeochem_carbonflux, aux.bgc_state, aux.params,
+                               aux.cn_params, aux.cascade_con;
+                               mask_bgc_soilc = aux.mask, bounds = aux.bounds,
+                               nlevdecomp = aux.nlevdecomp, t_soisno = t_soisno,
+                               soilpsi = i.soilstate.soilpsi_col, days_per_year = aux.days_per_year,
+                               dt = aux.dt, zsoi_vals = aux.zsoi_vals, col_dz = aux.col_dz)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
