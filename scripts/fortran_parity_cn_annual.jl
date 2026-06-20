@@ -97,12 +97,13 @@
 #      only t_soisno needed the offset — that mismatch was the giveaway.)
 #  (2) cn_veg_struct_update! (leafc -> tlai/tsai/htop/elai) was DEFINED but never CALLED
 #      in the driver path → even after onset fired and leafc grew, tlai stayed frozen at
-#      the restart value, so the canopy never responded. This harness calls it post-step
-#      (after clm_drv!). NOTE: wiring it into the GLOBAL driver broke surface-albedo
-#      parity (freewins) + introduced off-Bow NaN (multisite) — it recomputes tlai from
-#      leafc, diverging from the injected/restart tlai those tests assume + a NaN edge
-#      case off-Bow — so the global wiring is deferred (see clm_driver.jl note); the
-#      harness call exercises the chain without touching the suite.
+#      the restart value, so the canopy never responded. NOW WIRED into the global driver
+#      (clm_driver.jl, use_cn && doalb). Two fixes were needed to wire it cleanly:
+#      (a) pass npcropmin=config.npcropmin — the CLM.npcropmin default is 0, so the crop
+#          branch (ivt>=npcropmin) caught grasses (ivt=12) and gave tsai=0.2*tlai instead
+#          of the 0.5 floor, breaking freewins surface-albedo parity; (b) skip patches
+#          with non-finite leaf C in cn_veg_struct_update! (cold-start CN pools are NaN
+#          off-Bow → would poison tlai; multisite robustness). No harness call needed now.
 # RESULT (CN_NOPHS full year vs Fortran h0): TLAI flat 0.031 -> grows to 0.109 (Jul,
 # vs Fortran 0.111); TOTVEGC Jul rel 1.0e-1 -> 2.2e-2; TOTECOSYSC 1.5e-3 -> 4.3e-4;
 # SMINN 4.3e-2 -> 1.4e-2; GPP now nonzero w/ right seasonal shape (Jul 8.4e-6 vs
@@ -358,14 +359,8 @@ function run_cn_annual(; ndays::Int = 365)
                 is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
                 is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy,
                 photosyns = inst.photosyns)
-            # CTSM's CNVegStructUpdate (leafc -> tlai/elai/htop) is not yet wired into
-            # the global driver (it broke freewins/multisite — see clm_driver.jl note),
-            # so call it here post-step so leaf-out (onset-driven leafc growth) is
-            # reflected in LAI for the diagnostics + the next step's photosynthesis.
-            CLM.cn_veg_struct_update!(filt.bgc_vegp, bounds.begp:bounds.endp, inst.patch,
-                inst.canopystate, inst.bgc_vegetation.cnveg_carbonstate_inst,
-                inst.water.waterdiagnosticbulk_inst, inst.frictionvel,
-                inst.bgc_vegetation.cnveg_state_inst, inst.crop, CLM.pftcon; dt = 3600.0)
+            # cn_veg_struct_update! (leafc -> tlai/elai/htop) now runs INSIDE clm_drv!
+            # (wired into the global driver), so no harness-side call is needed.
             if get(ENV, "CN_PROBE", "") != "" && d == 1 && h == 1
                 ns2 = CLM.varpar.nlevsno
                 ws = inst.water.waterstatebulk_inst.ws
