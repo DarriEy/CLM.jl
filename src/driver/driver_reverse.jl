@@ -498,6 +498,41 @@ function alloc_rev_phase!(b, aux)
     return nothing
 end
 
+# soil_biogeochem_decomp! — the ACTUAL decomposition flux (the cascade step that consumes the
+# competition-resolved potential losses to move C between decomp pools): decomp_cascade_hr_vr =
+# rf_decomp_cascade·p_decomp_cpool_loss (heterotrophic respiration) + the inter-pool C transfer
+# + N mineralization. Completes the soil-C decomposition cascade ([P5] rate → [P6] potential →
+# [P9] actual). Reverse-validated at machine precision (scripts/enzyme_bgc_reverse.jl [P9]).
+# cf/nf (written) + cs/ns/st/cascade_con/params (read) all flow LIVE from the bundle's inst;
+# the scratch in/out arrays (cn_decomp_pools / p_decomp_cpool_loss / pmnf_decomp_cascade /
+# p_decomp_npool_to_din) + dzsoi_decomp are Const aux, sized/sourced as cn_driver does.
+function soildecomp_rev_aux(inst, bounds, filt, config)
+    nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
+    ndp = config.ndecomp_pools; nct = config.ndecomp_cascade_transitions
+    z3(d) = zeros(Float64, nc, nld, d)
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc, nlevdecomp = nld,
+              ndecomp_pools = ndp, ndecomp_cascade_transitions = nct,
+              cn_decomp_pools = z3(ndp), p_decomp_cpool_loss = z3(nct), pmnf_decomp_cascade = z3(nct),
+              p_decomp_npool_to_din = z3(nct), dzsoi_decomp = dzsoi_decomp[],
+              use_nitrif_denitrif = config.use_nitrif_denitrif)
+end
+function soildecomp_rev_phase!(b, aux)
+    i = b.inst
+    soil_biogeochem_decomp!(i.soilbiogeochem_carbonflux, i.soilbiogeochem_carbonstate,
+                            i.soilbiogeochem_nitrogenflux, i.soilbiogeochem_nitrogenstate,
+                            i.soilbiogeochem_state, i.decomp_cascade, i.decomp_params;
+                            mask_bgc_soilc = aux.mask, bounds = aux.bounds, nlevdecomp = aux.nlevdecomp,
+                            ndecomp_pools = aux.ndecomp_pools,
+                            ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
+                            cn_decomp_pools = aux.cn_decomp_pools,
+                            p_decomp_cpool_loss = aux.p_decomp_cpool_loss,
+                            pmnf_decomp_cascade = aux.pmnf_decomp_cascade,
+                            p_decomp_npool_to_din = aux.p_decomp_npool_to_din,
+                            dzsoi_decomp = aux.dzsoi_decomp,
+                            use_nitrif_denitrif = aux.use_nitrif_denitrif)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
