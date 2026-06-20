@@ -3315,16 +3315,22 @@ end
         bsha = zero(T)
     end
 
+    soilflux = zero(T)
     if night
         gs0sun_night = bsun * gs_mol_sun_in
         gs0sha_night = bsha * gs_mol_sha_in
-        xsun, xsha, xxyl, xroot, _ = _getvegwp(gb_mol, gs0sun_night, gs0sha_night,
+        xsun, xsha, xxyl, xroot, soilflux = _getvegwp(gb_mol, gs0sun_night, gs0sha_night,
             qsatl, qaf, k_soil_root, smp_l, z_col, p, c, laisun_p, laisha_p,
             htop_p, tsai_p, ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c,
             forc_pbot_c, tgcm_p, phs_params, RGAS_)
     end
 
-    return (xsun, xsha, xxyl, xroot, bsun, bsha)
+    # Return the night soil-water flux so the caller can set qflx_tran_veg at night.
+    # Fortran sets qflx_tran_veg(p)=soilflux inside getvegwp (PhotosynthesisMod ~4039),
+    # which the night calcstress->getvegwp path also hits; the Julia _getvegwp returns
+    # soilflux for the caller, and the night psn pass would otherwise leave
+    # qflx_tran_veg at its NaN init (transpiration NaN -> t_veg/t_grnd/h2osoi NaN).
+    return (xsun, xsha, xxyl, xroot, bsun, bsha, soilflux)
 end
 
 # =====================================================================
@@ -3593,7 +3599,7 @@ end
 
     xsun = xsun_w; xsha = xsha_w; xxyl = xxyl_w; xroot = xroot_w
     if bflag
-        xsun, xsha, xxyl, xroot, bsun, bsha = _calcstress(xsun, xsha, xxyl, xroot,
+        xsun, xsha, xxyl, xroot, bsun, bsha, _ = _calcstress(xsun, xsha, xxyl, xroot,
             gb_mol, gs0sun, gs0sha, qsatl, qaf,
             k_soil_root, smp_l, z_col, p, c, laisun_p, laisha_p, htop_p, tsai_p,
             ivt_p, nlevsoi, elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p,
@@ -4644,7 +4650,7 @@ Adapt.@adapt_structure _Psn3Out
                     gsminsha = medlynintercept_p
                 end
 
-                vsun, vsha, vxyl, vroot, bsun_val, bsha_val = _calcstress(
+                vsun, vsha, vxyl, vroot, bsun_val, bsha_val, soilflux_night = _calcstress(
                     vegwp[p, SUN], vegwp[p, SHA], vegwp[p, XYL], vegwp[p, ROOT_SEG],
                     gb_mol_arr[p], gsminsun, gsminsha, qsatl[p], qaf[p],
                     k_soil_root, smp_l, z_col, p, c,
@@ -4655,6 +4661,9 @@ Adapt.@adapt_structure _Psn3Out
                 vegwp[p, XYL] = vxyl; vegwp[p, ROOT_SEG] = vroot
                 bsun_arr[p] = bsun_val
                 bsha_arr[p] = bsha_val
+                # Night transpiration: Fortran sets qflx_tran_veg(p)=soilflux inside the
+                # night calcstress->getvegwp path; without this it stays at its NaN init.
+                qflx_tran_veg[p] = smooth_max(soilflux_night, zero(T))
 
                 ac[p, SUN, iv] = zero(T)
                 aj[p, SUN, iv] = zero(T)

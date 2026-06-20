@@ -533,6 +533,38 @@ function soildecomp_rev_phase!(b, aux)
     return nothing
 end
 
+# soil_bgc_competition! — the plant-vs-microbe mineral-N COMPETITION split: resolves the
+# fraction of immobilization demand met (fpi_vr) and the fraction of plant N demand met
+# (fpg_col, consumed by allocation) from the available mineral N vs the total immobilization
+# + plant + nitrif/denit demand, then sets the actual_immob / smin_*_to_plant offered fluxes.
+# In the N-limited regime fpi = avail_N/total_demand (smooth ratio); reverse-validated at
+# machine precision (scripts/enzyme_bgc_reverse.jl [P10]). st/nf/cf (written) + ns (read) flow
+# LIVE from the bundle's inst; competition_state/params + cascade_receiver_pool read live too;
+# the scratch arrays (pmnf_decomp_cascade / p_decomp_cn_gain) + dzsoi_decomp are Const aux.
+# use_fun=false here → fun_hook=nothing (the FUN cost-based-uptake closure is a separate path).
+function competition_rev_aux(inst, bounds, filt, config)
+    nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
+    nct = config.ndecomp_cascade_transitions
+    z3() = zeros(Float64, nc, nld, nct)
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc, nlevdecomp = nld,
+              ndecomp_cascade_transitions = nct, dzsoi_decomp = dzsoi_decomp[],
+              pmnf_decomp_cascade = z3(), p_decomp_cn_gain = z3(),
+              use_nitrif_denitrif = config.use_nitrif_denitrif)
+end
+function competition_rev_phase!(b, aux)
+    i = b.inst
+    soil_bgc_competition!(i.soilbiogeochem_state, i.soilbiogeochem_nitrogenflux,
+                          i.soilbiogeochem_carbonflux, i.soilbiogeochem_nitrogenstate,
+                          i.competition_state, i.competition_params;
+                          mask_bgc_soilc = aux.mask, bounds = aux.bounds, nlevdecomp = aux.nlevdecomp,
+                          ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
+                          dzsoi_decomp = aux.dzsoi_decomp, pmnf_decomp_cascade = aux.pmnf_decomp_cascade,
+                          p_decomp_cn_gain = aux.p_decomp_cn_gain,
+                          cascade_receiver_pool = i.decomp_cascade.cascade_receiver_pool,
+                          use_nitrif_denitrif = aux.use_nitrif_denitrif, use_fun = false)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
