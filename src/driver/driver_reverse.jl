@@ -29,6 +29,29 @@
 driver_rev_bundle(inst) =
     (; inst, scratch = cf_rev_scratch(Float64, length(inst.patch.column)))
 
+# Robust config-field accessor. CLMDriverConfig forwards most CN settings via a custom
+# getproperty (ndecomp_pools/i_litr_*/npcropmin/nrepr/use_c13/…) but NOT use_fun /
+# use_nitrif_denitrif; CNDriverConfig has those instead. `_cfgget` returns the field if any
+# accessor path exposes it, else the default — so the BGC aux builders work with either config.
+_cfgget(config, f::Symbol, default) = try getproperty(config, f) catch; default end
+
+# BGC bundle: the differentiated inst + the shared decomposition SCRATCH arrays
+# (cn_decomp_pools / p_decomp_cpool_loss / p_decomp_cn_gain / pmnf_decomp_cascade /
+# p_decomp_npool_to_din — the cn_driver `_z3` work arrays). These MUST be part of the
+# Duplicated bundle, NOT Const aux: soil_bgc_potential! computes potential_immob THROUGH them
+# (decomp_k → p_decomp_cpool_loss → pmnf → potential_immob), and a Const scratch array cuts
+# that derivative (Enzyme propagates no gradient through a Const). Sharing them across the
+# decomp phases (potential writes, competition + decomp read) also matches cn_driver, where
+# the same _z3 locals thread the cascade. Sizes from config; mirrors driver_rev_bundle.
+function bgc_rev_bundle(inst, bounds, config)
+    nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
+    ndp = config.ndecomp_pools; nct = config.ndecomp_cascade_transitions
+    z3(d) = zeros(Float64, nc, nld, d)
+    bgc = (; cn_decomp_pools = z3(ndp), p_decomp_cpool_loss = z3(nct), p_decomp_cn_gain = z3(ndp),
+             pmnf_decomp_cascade = z3(nct), p_decomp_npool_to_din = z3(nct))
+    return (; inst, scratch = cf_rev_scratch(Float64, length(inst.patch.column)), bgc)
+end
+
 # --------------------------------------------------------------------------
 # Canopy block — runs the N canopy sub-phases (cf_rev_phases) as ONE chain entry
 # on the bundle's cf view. Reversed coarsely (one Enzyme call over the block) in the
@@ -365,7 +388,7 @@ function nstate1_rev_aux(inst, bounds, filt, config)
               ivt = inst.patch.itype, woody = Float64.(pftcon.woody),
               col_is_fates = inst.column.is_fates, nlevdecomp = varpar.nlevdecomp,
               i_litr_min = config.i_litr_min, i_litr_max = config.i_litr_max, i_cwd = config.i_cwd,
-              npcropmin = config.npcropmin, nrepr = config.nrepr, use_fun = config.use_fun, dt = 1800.0)
+              npcropmin = config.npcropmin, nrepr = config.nrepr, use_fun = _cfgget(config, :use_fun, false), dt = 1800.0)
 end
 function nstate1_rev_phase!(b, aux)
     i = b.inst
@@ -417,27 +440,23 @@ end
 # the five potential-flux SCRATCH arrays (cn_decomp_pools/p_decomp_*/pmnf — preallocated,
 # overwritten each call) are Const aux, sized exactly as cn_driver_no_leaching!'s _z3.
 function decomppot_rev_aux(inst, bounds, filt, config)
-    nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
-    ndp = config.ndecomp_pools; nct = config.ndecomp_cascade_transitions
-    z3(d) = zeros(Float64, nc, nld, d)
     return (; cascade_con = inst.decomp_cascade, mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc,
-              nlevdecomp = nld, ndecomp_pools = ndp, ndecomp_cascade_transitions = nct,
-              cn_decomp_pools = z3(ndp), p_decomp_cpool_loss = z3(nct), p_decomp_cn_gain = z3(ndp),
-              pmnf_decomp_cascade = z3(nct), p_decomp_npool_to_din = z3(nct))
+              nlevdecomp = varpar.nlevdecomp, ndecomp_pools = config.ndecomp_pools,
+              ndecomp_cascade_transitions = config.ndecomp_cascade_transitions)
 end
 function decomppot_rev_phase!(b, aux)
-    i = b.inst
+    i = b.inst; s = b.bgc
     soil_bgc_potential!(i.soilbiogeochem_carbonflux, i.soilbiogeochem_carbonstate,
                         i.soilbiogeochem_nitrogenflux, i.soilbiogeochem_nitrogenstate,
                         i.soilbiogeochem_state, aux.cascade_con;
                         mask_bgc_soilc = aux.mask, bounds = aux.bounds, nlevdecomp = aux.nlevdecomp,
                         ndecomp_pools = aux.ndecomp_pools,
                         ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
-                        cn_decomp_pools = aux.cn_decomp_pools,
-                        p_decomp_cpool_loss = aux.p_decomp_cpool_loss,
-                        p_decomp_cn_gain = aux.p_decomp_cn_gain,
-                        pmnf_decomp_cascade = aux.pmnf_decomp_cascade,
-                        p_decomp_npool_to_din = aux.p_decomp_npool_to_din)
+                        cn_decomp_pools = s.cn_decomp_pools,
+                        p_decomp_cpool_loss = s.p_decomp_cpool_loss,
+                        p_decomp_cn_gain = s.p_decomp_cn_gain,
+                        pmnf_decomp_cascade = s.pmnf_decomp_cascade,
+                        p_decomp_npool_to_din = s.p_decomp_npool_to_din)
     return nothing
 end
 
@@ -450,7 +469,7 @@ end
 # only). use_fun resolved inside the wrapper. Sourced from inst/config as cn_driver does.
 function sminnupdate_rev_aux(inst, bounds, filt, config)
     return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc,
-              nlevdecomp = varpar.nlevdecomp, use_fun = config.use_fun, dt = 1800.0)
+              nlevdecomp = varpar.nlevdecomp, use_fun = _cfgget(config, :use_fun, false), dt = 1800.0)
 end
 function sminnupdate_rev_phase!(b, aux)
     i = b.inst
@@ -507,27 +526,23 @@ end
 # the scratch in/out arrays (cn_decomp_pools / p_decomp_cpool_loss / pmnf_decomp_cascade /
 # p_decomp_npool_to_din) + dzsoi_decomp are Const aux, sized/sourced as cn_driver does.
 function soildecomp_rev_aux(inst, bounds, filt, config)
-    nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
-    ndp = config.ndecomp_pools; nct = config.ndecomp_cascade_transitions
-    z3(d) = zeros(Float64, nc, nld, d)
-    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc, nlevdecomp = nld,
-              ndecomp_pools = ndp, ndecomp_cascade_transitions = nct,
-              cn_decomp_pools = z3(ndp), p_decomp_cpool_loss = z3(nct), pmnf_decomp_cascade = z3(nct),
-              p_decomp_npool_to_din = z3(nct), dzsoi_decomp = dzsoi_decomp[],
-              use_nitrif_denitrif = config.use_nitrif_denitrif)
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc, nlevdecomp = varpar.nlevdecomp,
+              ndecomp_pools = config.ndecomp_pools,
+              ndecomp_cascade_transitions = config.ndecomp_cascade_transitions, dzsoi_decomp = dzsoi_decomp[],
+              use_nitrif_denitrif = _cfgget(config, :use_nitrif_denitrif, false))
 end
 function soildecomp_rev_phase!(b, aux)
-    i = b.inst
+    i = b.inst; s = b.bgc
     soil_biogeochem_decomp!(i.soilbiogeochem_carbonflux, i.soilbiogeochem_carbonstate,
                             i.soilbiogeochem_nitrogenflux, i.soilbiogeochem_nitrogenstate,
                             i.soilbiogeochem_state, i.decomp_cascade, i.decomp_params;
                             mask_bgc_soilc = aux.mask, bounds = aux.bounds, nlevdecomp = aux.nlevdecomp,
                             ndecomp_pools = aux.ndecomp_pools,
                             ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
-                            cn_decomp_pools = aux.cn_decomp_pools,
-                            p_decomp_cpool_loss = aux.p_decomp_cpool_loss,
-                            pmnf_decomp_cascade = aux.pmnf_decomp_cascade,
-                            p_decomp_npool_to_din = aux.p_decomp_npool_to_din,
+                            cn_decomp_pools = s.cn_decomp_pools,
+                            p_decomp_cpool_loss = s.p_decomp_cpool_loss,
+                            pmnf_decomp_cascade = s.pmnf_decomp_cascade,
+                            p_decomp_npool_to_din = s.p_decomp_npool_to_din,
                             dzsoi_decomp = aux.dzsoi_decomp,
                             use_nitrif_denitrif = aux.use_nitrif_denitrif)
     return nothing
@@ -543,23 +558,19 @@ end
 # the scratch arrays (pmnf_decomp_cascade / p_decomp_cn_gain) + dzsoi_decomp are Const aux.
 # use_fun=false here → fun_hook=nothing (the FUN cost-based-uptake closure is a separate path).
 function competition_rev_aux(inst, bounds, filt, config)
-    nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
-    nct = config.ndecomp_cascade_transitions
-    z3() = zeros(Float64, nc, nld, nct)
-    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc, nlevdecomp = nld,
-              ndecomp_cascade_transitions = nct, dzsoi_decomp = dzsoi_decomp[],
-              pmnf_decomp_cascade = z3(), p_decomp_cn_gain = z3(),
-              use_nitrif_denitrif = config.use_nitrif_denitrif)
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc, nlevdecomp = varpar.nlevdecomp,
+              ndecomp_cascade_transitions = config.ndecomp_cascade_transitions, dzsoi_decomp = dzsoi_decomp[],
+              use_nitrif_denitrif = _cfgget(config, :use_nitrif_denitrif, false))
 end
 function competition_rev_phase!(b, aux)
-    i = b.inst
+    i = b.inst; s = b.bgc
     soil_bgc_competition!(i.soilbiogeochem_state, i.soilbiogeochem_nitrogenflux,
                           i.soilbiogeochem_carbonflux, i.soilbiogeochem_nitrogenstate,
                           i.competition_state, i.competition_params;
                           mask_bgc_soilc = aux.mask, bounds = aux.bounds, nlevdecomp = aux.nlevdecomp,
                           ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
-                          dzsoi_decomp = aux.dzsoi_decomp, pmnf_decomp_cascade = aux.pmnf_decomp_cascade,
-                          p_decomp_cn_gain = aux.p_decomp_cn_gain,
+                          dzsoi_decomp = aux.dzsoi_decomp, pmnf_decomp_cascade = s.pmnf_decomp_cascade,
+                          p_decomp_cn_gain = s.p_decomp_cn_gain,
                           cascade_receiver_pool = i.decomp_cascade.cascade_receiver_pool,
                           use_nitrif_denitrif = aux.use_nitrif_denitrif, use_fun = false)
     return nothing
@@ -581,4 +592,37 @@ function driver_rev_phases(bounds, filt, config; canopy_aux = nothing,
     push!(phases, (watertable_rev_phase!, (watertable_rev_aux(bounds, filt, config; dtime),)))
     push!(phases, (hydnodrain_rev_phase!, (hydnodrain_rev_aux(bounds, filt; dtime),)))
     return phases
+end
+
+# --------------------------------------------------------------------------
+# BGC (use_cn) whole-step assembler — the ordered (phase_fn, const_args) list for the
+# REVERSE-READY subset of cn_driver_no_leaching!, in the SAME forward order the production
+# CN driver runs them (cn_driver.jl line numbers in parens):
+#   cn_mresp!(225) → decomp_rate_constants_bgc!(325) → soil_bgc_potential!(343) →
+#   soil_bgc_competition!(432) → calc_plant_cn_alloc!(453) → soil_biogeochem_decomp!(464) →
+#   cn_gresp!(566) → c_state_update1!(585) → n_state_update1!(612) →
+#   soilbiogeochem_n_state_update1!(636)
+# i.e. respiration → the soil-C/N decomposition+competition+allocation cascade → the C/N pool
+# integrations. Mirrors driver_rev_phases (hydrology) but the BGC aux builders source struct
+# fields from `inst`, so this takes inst. The phases couple through inst fields (cf.decomp_k →
+# nf.potential_immob → st.fpg_col → cnveg pools → smin_nh4), so a single compositional_reverse!
+# over this list flows the gradient across the whole BGC step. Each phase is individually
+# FD-validated at machine precision (scripts/enzyme_bgc_reverse.jl [P1..P10]); the coupled
+# chain is validated by scripts/enzyme_bgc_wholestep.jl. NOT included: the genuinely discrete
+# cn_driver calls (cn_phenology! onset/offset FSMs, cn_gap_mortality!, nitrif_denitrif!
+# thresholds) + the demand pre-pass (calc_plant_nutrient_demand!), per the "discontinuities
+# deferred to Phase 3" policy.
+function bgc_rev_phases(inst, bounds, filt, config)
+    return Any[
+        (cnmresp_rev_phase!,     (cnmresp_rev_aux(inst, bounds, filt),)),
+        (decomprate_rev_phase!,  (decomprate_rev_aux(inst, bounds, filt),)),
+        (decomppot_rev_phase!,   (decomppot_rev_aux(inst, bounds, filt, config),)),
+        (competition_rev_phase!, (competition_rev_aux(inst, bounds, filt, config),)),
+        (alloc_rev_phase!,       (alloc_rev_aux(inst, bounds, filt, config),)),
+        (soildecomp_rev_phase!,  (soildecomp_rev_aux(inst, bounds, filt, config),)),
+        (cngresp_rev_phase!,     (cngresp_rev_aux(inst, bounds, filt),)),
+        (cstate1_rev_phase!,     (cstate1_rev_aux(inst, bounds, filt, config),)),
+        (nstate1_rev_phase!,     (nstate1_rev_aux(inst, bounds, filt, config),)),
+        (sminnupdate_rev_phase!, (sminnupdate_rev_aux(inst, bounds, filt, config),)),
+    ]
 end
