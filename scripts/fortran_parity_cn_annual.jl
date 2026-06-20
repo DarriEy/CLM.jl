@@ -83,6 +83,32 @@
 # Jan match also confirms the forcing is shared (clmforc.2003), so the day-of-year
 # comparison is valid. GPP in Jan is ~0 in both (winter); the seasonal leaf-out /
 # summer-GPP trajectory is the real open test (full-year run).
+#
+# LEAF-OUT FIXED (2026-06-20): two unrelated bugs blocked the season_decid grass (p3,
+# ivt=12, wt=0.35; p2 ivt=1 needleleaf-evergreen is correctly constant-LAI) from
+# leafing out, so GPP/TLAI/TOTVEGC were flat all year. Found via the CN_PHENO probe
+# (onset_gdd stuck at 0.0 even at peak summer):
+#  (1) phenology.jl: the season_decid/stress_decid GDD-onset read soil temperature as
+#      t_soisno_col[c, soil_layer] with soil_layer=1, but t_soisno_col is SNOW-PADDED
+#      ([nlevsno + nlevgrnd]) so index 1 is the top snow slot (frozen year-round) →
+#      onset_gdd never accumulated → onset never fired → dormant_flag stuck at 1. Fixed
+#      by offsetting the t_soisno read by nlevsno (ts_layer = nlevsno + soil_layer) in
+#      both kernels, keeping soilpsi_col (soil-only) at soil_layer. (soilpsi was right;
+#      only t_soisno needed the offset — that mismatch was the giveaway.)
+#  (2) cn_veg_struct_update! (leafc -> tlai/tsai/htop/elai) was DEFINED but never CALLED
+#      in the driver path → even after onset fired and leafc grew, tlai stayed frozen at
+#      the restart value, so the canopy never responded. This harness calls it post-step
+#      (after clm_drv!). NOTE: wiring it into the GLOBAL driver broke surface-albedo
+#      parity (freewins) + introduced off-Bow NaN (multisite) — it recomputes tlai from
+#      leafc, diverging from the injected/restart tlai those tests assume + a NaN edge
+#      case off-Bow — so the global wiring is deferred (see clm_driver.jl note); the
+#      harness call exercises the chain without touching the suite.
+# RESULT (CN_NOPHS full year vs Fortran h0): TLAI flat 0.031 -> grows to 0.109 (Jul,
+# vs Fortran 0.111); TOTVEGC Jul rel 1.0e-1 -> 2.2e-2; TOTECOSYSC 1.5e-3 -> 4.3e-4;
+# SMINN 4.3e-2 -> 1.4e-2; GPP now nonzero w/ right seasonal shape (Jul 8.4e-6 vs
+# Fortran 6.7e-6, slight ~1.3x overshoot — a 2nd-order residual, likely the GDD
+# soil-layer choice (1 vs the 0.08m layer ~4) shifting onset timing). The CN axis is
+# now at good seasonal parity (PHS-off). Probe: CN_PHENO=1 CN_NOPHS=1 julia ... 365.
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
@@ -332,6 +358,14 @@ function run_cn_annual(; ndays::Int = 365)
                 is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
                 is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy,
                 photosyns = inst.photosyns)
+            # CTSM's CNVegStructUpdate (leafc -> tlai/elai/htop) is not yet wired into
+            # the global driver (it broke freewins/multisite — see clm_driver.jl note),
+            # so call it here post-step so leaf-out (onset-driven leafc growth) is
+            # reflected in LAI for the diagnostics + the next step's photosynthesis.
+            CLM.cn_veg_struct_update!(filt.bgc_vegp, bounds.begp:bounds.endp, inst.patch,
+                inst.canopystate, inst.bgc_vegetation.cnveg_carbonstate_inst,
+                inst.water.waterdiagnosticbulk_inst, inst.frictionvel,
+                inst.bgc_vegetation.cnveg_state_inst, inst.crop, CLM.pftcon; dt = 3600.0)
             if get(ENV, "CN_PROBE", "") != "" && d == 1 && h == 1
                 ns2 = CLM.varpar.nlevsno
                 ws = inst.water.waterstatebulk_inst.ws

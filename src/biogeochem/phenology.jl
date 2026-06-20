@@ -1070,7 +1070,7 @@ end
         st::_PhenSeasonSDState, inp::_PhenSeasonSDInputs, cg::_PhenSeasonSDColGrc,
         @Const(mask_soilp), @Const(itype), @Const(column), @Const(gridcell_idx),
         ps::_PhenSeasonSDScalars,
-        soil_layer::Int, use_cndv::Bool,
+        soil_layer::Int, ts_layer::Int, use_cndv::Bool,
         crit_dayl_method::Int, onset_thresh_depends_on_veg::Bool)
     p = @index(Global)
     @inbounds if mask_soilp[p]
@@ -1246,7 +1246,11 @@ end
 
             # test dormant → growth
             if dormant_flag_patch[p] == one(T)
-                soilt = t_soisno_col[c, soil_layer]
+                # t_soisno_col is snow-padded (nlevsno + nlevgrnd); soil layer
+                # `soil_layer` lives at `nlevsno + soil_layer` (= ts_layer). Reading at
+                # `soil_layer` directly hit a snow slot (frozen year-round) → onset_gdd
+                # never accumulated → season_decid leaf-out never fired.
+                soilt = t_soisno_col[c, ts_layer]
                 snow_5day = snow_5day_col[c]
                 soila10 = soila10_col[c]
                 t_a5min = t_a5min_patch[p]
@@ -1463,7 +1467,7 @@ function cn_season_decid_phenology!(pstate::PhenologyState,
         st, inp, cg,
         mask_soilp, patch_data.itype, patch_data.column, patch_data.gridcell,
         ps,
-        soil_layer, use_cndv,
+        soil_layer, varpar.nlevsno + soil_layer, use_cndv,
         crit_dayl_method, onset_thresh_depends_on_veg;
         ndrange = length(mask_soilp))
     KA.synchronize(backend)
@@ -1634,7 +1638,7 @@ end
         s1::_PhenStressSD_S1, s2::_PhenStressSD_S2,
         inp::_PhenStressSD_In, col::_PhenStressSD_Col,
         @Const(mask_soilp), @Const(itype), @Const(column), @Const(gridcell_idx),
-        sc::_PhenStressSDScalars, soil_layer::Int)
+        sc::_PhenStressSDScalars, soil_layer::Int, ts_layer::Int)
     p = @index(Global)
     @inbounds if mask_soilp[p]
         # working precision from an output array
@@ -1747,8 +1751,8 @@ end
         g   = gridcell_idx[p]
 
         if stress_decid[ivt] == one(T)
-            soilt = t_soisno_col[c, soil_layer]
-            psi   = soilpsi_col[c, soil_layer]
+            soilt = t_soisno_col[c, ts_layer]    # snow-padded array → nlevsno offset
+            psi   = soilpsi_col[c, soil_layer]   # soil-only array → no offset
 
             crit_onset_gdd = crit_onset_gdd_sf[ivt] *
                 exp(T(4.8) + T(0.13) * (annavg_t2m_patch[p] - TFRZ))
@@ -2088,7 +2092,7 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
     _phen_stress_decid_kernel!(backend)(
         s1, s2, inp, col,
         mask_soilp, patch_data.itype, patch_data.column, patch_data.gridcell,
-        sc, soil_layer; ndrange = length(mask_soilp))
+        sc, soil_layer, varpar.nlevsno + soil_layer; ndrange = length(mask_soilp))
     KA.synchronize(backend)
 
     return nothing
