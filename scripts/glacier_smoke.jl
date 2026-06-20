@@ -14,6 +14,19 @@
 # filters, ice-melt handling, snow-on-ice) that have never been run end-to-end.
 #
 # Usage: julia +1.12 --project=. scripts/glacier_smoke.jl
+#
+# STATUS (2026-06-20): the istice cold-start path is a MULTI-LAYER NaN chase. Fixed so
+# far: (1) cold-start albedo seed (cold_start.jl init_surface_albedo_cold!; was albedo=0
+# -> over-absorption); (2) the harness clock is UTC -> use ~local noon (20:00 UTC at Bow's
+# lon) + set forc_wind_grc (handle_new_snow's new-snow density needs it); (3) cv bedrock
+# floor for ISTICE (soil_temperature.jl: deep bedrock layers had ice=liq=0 -> cv=0 ->
+# fact=dtime/cv=Inf -> the band solve NaNs the whole glacier column). With (3) the glacier
+# t_grnd is FINITE at step 1 (263.8 K). REMAINING (open): h2osno still NaN, traced into
+# handle_new_snow! (snow accumulation) with all finite inputs (h2osno=0/int_snow=0/
+# n_melt=0.4/wind=4/bifall finite) -> the NaN is in the snow accumulation / diagnostics
+# (qflx_snow_grnd or the scf int_snow update) — a further cold-start snow layer. The
+# REAL Iceland domain (Symfluence, building) with realistic forcing+spinup is the truer
+# test of whether these synthetic-cold-start pathologies even manifest.
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
 
@@ -41,6 +54,9 @@ function set_glacier_forcing!(inst, ng, nc)
         a.forc_rain_not_downscaled_grc[g] = 0.0
         a.forc_snow_not_downscaled_grc[g] = 5.0e-5   # light snowfall
         a.forc_u_grc[g] = 4.0; a.forc_v_grc[g] = 0.0
+        # forc_wind_grc must be set (handle_new_snow!'s new-snow density needs it; an
+        # unset NaN wind -> NaN snow density -> NaN h2osno). Real forcing provides it.
+        isempty(a.forc_wind_grc) || (a.forc_wind_grc[g] = sqrt(4.0^2 + 0.0^2))
         a.forc_hgt_grc[g] = 30.0
         a.forc_hgt_u_grc[g] = 30.0; a.forc_hgt_t_grc[g] = 30.0; a.forc_hgt_q_grc[g] = 30.0
         a.forc_vp_grc[g] = vp
@@ -79,6 +95,11 @@ function main(; nsteps::Int = 6)
         @printf("  [glac-init c=%d p=%d] watsat[1:3]=%s sucsat[1:3]=%s bsw[1:3]=%s\n", gc, gp,
             string(round.(ss.watsat_col[gc,1:3],digits=3)), string(round.(ss.sucsat_col[gc,1:3],digits=1)),
             string(round.(ss.bsw_col[gc,1:3],digits=2)))
+        @printf("  [glac-init] h2osno=%s snow_depth=%s snl=%s frac_sno=%s\n",
+            string(ws.h2osno_no_layers_col[gc]),
+            string(inst.water.waterdiagnosticbulk_inst.snow_depth_col[gc]),
+            string(inst.column.snl[gc]),
+            string(inst.water.waterdiagnosticbulk_inst.frac_sno_eff_col[gc]))
         @printf("  [glac-init] h2osoi_vol[1:3]=%s liq[1:3]=%s ice[1:3]=%s dz[1:3]=%s snl=%s\n",
             string(round.(ws.h2osoi_vol_col[gc,1:3],digits=3)),
             string(round.(ws.h2osoi_liq_col[gc,ns+1:ns+3],digits=2)),
