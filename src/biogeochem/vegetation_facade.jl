@@ -614,7 +614,8 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         cnveg_cs=veg.cnveg_carbonstate_inst,
         cnveg_ns=veg.cnveg_nitrogenstate_inst,
         soilbgc_cs=soilbgc_cs,
-        soilbgc_ns=soilbgc_ns)
+        soilbgc_ns=soilbgc_ns,
+        patch_itype=patch_itype)
 
     # CNDriverSummarizeFluxes
     cn_driver_summarize_fluxes!(veg.driver_config;

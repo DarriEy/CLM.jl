@@ -926,14 +926,26 @@ function cn_driver_summarize_states!(
         cnveg_cs::CNVegCarbonStateData,
         cnveg_ns::CNVegNitrogenStateData,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
-        soilbgc_ns::SoilBiogeochemNitrogenStateData)
+        soilbgc_ns::SoilBiogeochemNitrogenStateData,
+        patch_itype::Union{Vector{Int},Nothing}=nothing)
 
-    # cnveg_carbonstate_inst%Summary — not yet ported
-    # c13/c14 variants as well
-    # soilbiogeochem_carbonstate_inst%summary — not yet ported
-    # c13/c14 variants as well
-    # cnveg_nitrogenstate_inst%Summary — not yet ported
-    # soilbiogeochem_nitrogenstate_inst%summary — not yet ported
+    if count(mask_bgc_vegp) > 0
+        # cnveg_carbonstate/nitrogenstate Summary — WIRED. These set the patch-level
+        # veg pool diagnostics: dispvegc/storvegc/totvegc_patch and the N equivalents.
+        # Pure diagnostics (no downstream physics reads them); without this they stay
+        # at restart-init NaN/0 in history output. (npcropmin/nrepr only matter for the
+        # use_crop reproductive pools; CNDriverConfig has no such field -> standard
+        # CLM5 literals, moot when use_crop=false.)
+        cnveg_carbon_state_summary!(cnveg_cs, mask_bgc_vegp, bounds_patch;
+            use_crop=config.use_crop, patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
+        cnveg_nitrogen_state_summary!(cnveg_ns, mask_bgc_vegp, bounds_patch;
+            use_crop=config.use_crop, patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
+    end
+    # soilbiogeochem carbon/nitrogen STATE summaries (totsomc_col/totsomn_col/
+    # totecosysc_col) — still stubs: they need the decomp infrastructure
+    # (nlevdecomp/ndecomp_pools/dzsoi_decomp/is_soil) threaded here, and totecosysc_col
+    # additionally needs totvegc_col (a separate patch->col p2c stub). Follow-up.
+    # c13/c14 isotope variants — config-gated off in the default path (not ported).
 
     return nothing
 end

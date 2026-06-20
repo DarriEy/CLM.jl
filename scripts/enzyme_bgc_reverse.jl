@@ -14,6 +14,7 @@
 #   [P6] soil_bgc_potential! (potential decomp + mineral-N: p_decomp_cpool_loss=Cpool·decomp_k·pathfrac)
 #   [P7] soilbiogeochem_n_state_update1! (mineral-N update: smin_nh4 += (ndep/fix/nmin−immob−...)·dt)
 #   [P8] calc_plant_cn_alloc! (allocation: sminn_to_npool=plant_ndemand·fpg → plant_calloc/cpool_to_*)
+#   [P9] soil_biogeochem_decomp! (actual decomp: decomp_cascade_hr_vr = rf·p_decomp_cpool_loss)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -399,6 +400,57 @@ function section_alloc()
     return verdict("P8 calc_plant_cn_alloc", g_fd, db.cnveg_nf.plant_ndemand_patch[1])
 end
 
+# =============================================================================
+# [P9] soil_biogeochem_decomp! — the ACTUAL decomposition flux (consumes the competition-
+#      resolved potential losses): decomp_cascade_hr_vr = rf_decomp_cascade·p_decomp_cpool_loss
+#      (heterotrophic respiration) + C transfer between pools + mineralization. Chains
+#      downstream of [P6]/competition. Bundle = (cf out [hr_vr/ctransfer], nf out [nmin],
+#      ploss in [p_decomp_cpool_loss]); cs/ns/st/cascade_con/params + the other scratch arrays
+#      are Const aux. Perturb p_decomp_cpool_loss, seed decomp_cascade_hr_vr.
+# =============================================================================
+function section_decomp()
+    println("\n", "#"^70, "\n# [P9] soil_biogeochem_decomp! (actual decomposition flux) REVERSE\n", "#"^70)
+    nc=1; nlevdecomp=1; ndecomp_pools=7; nct=10
+    cs = C.SoilBiogeochemCarbonStateData(); C.soil_bgc_carbon_state_init!(cs, nc, 1, nlevdecomp, ndecomp_pools)
+    ns = C.SoilBiogeochemNitrogenStateData(); C.soil_bgc_nitrogen_state_init!(ns, nc, 1, nlevdecomp, ndecomp_pools)
+    for l in 1:ndecomp_pools; cs.decomp_cpools_vr_col[1,1,l]=100.0+10.0*l; ns.decomp_npools_vr_col[1,1,l]=cs.decomp_cpools_vr_col[1,1,l]/12.0; end
+    st = C.SoilBiogeochemStateData(); C.soil_bgc_state_init!(st, nc, nc, nlevdecomp, nct); st.fpi_vr_col[1,1]=0.5
+    params_bgc = C.DecompBGCParams(bgc_initial_Cstocks=fill(200.0, ndecomp_pools))
+    cn_params = C.CNSharedParamsData(); bgc_state = C.DecompBGCState(); cascade_con = C.DecompCascadeConData()
+    C.init_decomp_cascade_bgc!(bgc_state, cascade_con, params_bgc, cn_params;
+        cellsand=fill(50.0, nc, max(nlevdecomp,5)), bounds=1:nc, nlevdecomp=nlevdecomp,
+        ndecomp_pools_max=ndecomp_pools, ndecomp_cascade_transitions_max=nct, use_fates=false)
+    decomp_params = C.DecompParams(dnp=0.01); dzsoi_decomp = fill(0.1, nlevdecomp)
+    function fresh()
+        cf = C.SoilBiogeochemCarbonFluxData(); C.soil_bgc_carbon_flux_init!(cf, nc, nlevdecomp, ndecomp_pools, nct)
+        for f in fieldnames(typeof(cf)); v=getfield(cf,f); v isa AbstractArray{<:AbstractFloat} && fill!(v,0.0); end
+        for k in 1:nct; cf.rf_decomp_cascade_col[1,1,k]=0.5; cf.c_overflow_vr[1,1,k]=0.0; end
+        cf.w_scalar_col[1,1]=0.8; cf.phr_vr_col[1,1]=1.0e-5
+        nf = C.SoilBiogeochemNitrogenFluxData(); C.soil_bgc_nitrogen_flux_init!(nf, nc, nlevdecomp, ndecomp_pools, nct)
+        for f in fieldnames(typeof(nf)); v=getfield(nf,f); v isa AbstractArray{<:AbstractFloat} && fill!(v,0.0); end
+        ploss = fill(1.0e-6, nc, nlevdecomp, nct)
+        return (; cf=cf, nf=nf, ploss=ploss)
+    end
+    aux = (; cs=cs, ns=ns, st=st, cascade_con=cascade_con, params=decomp_params,
+             mask=BitVector([true]), bounds=1:nc, nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools, nct=nct,
+             cn_decomp_pools=zeros(nc,nlevdecomp,ndecomp_pools), pmnf=fill(-1.0e-7,nc,nlevdecomp,nct),
+             p_npool_to_din=zeros(nc,nlevdecomp,nct), dzsoi=dzsoi_decomp)
+    phase!(b, a) = (C.soil_biogeochem_decomp!(b.cf, a.cs, b.nf, a.ns, a.st, a.cascade_con, a.params;
+        mask_bgc_soilc=a.mask, bounds=a.bounds, nlevdecomp=a.nlevdecomp, ndecomp_pools=a.ndecomp_pools,
+        ndecomp_cascade_transitions=a.nct, cn_decomp_pools=a.cn_decomp_pools,
+        p_decomp_cpool_loss=b.ploss, pmnf_decomp_cascade=a.pmnf,
+        p_decomp_npool_to_din=a.p_npool_to_din, dzsoi_decomp=a.dzsoi); nothing)
+    let b=fresh(); phase!(b,aux)
+        @printf("primal: decomp_cascade_hr_vr[1]=%.6e (expect rf·ploss=%.6e) finite=%s\n",
+            b.cf.decomp_cascade_hr_vr_col[1,1,1], 0.5*1.0e-6, string(isfinite(b.cf.decomp_cascade_hr_vr_col[1,1,1])))
+    end
+    L(b) = sum(abs2, b.cf.decomp_cascade_hr_vr_col)
+    g_fd = richardson(δ -> (b=fresh(); b.ploss[1,1,1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.cf.decomp_cascade_hr_vr_col .= 2 .* b.cf.decomp_cascade_hr_vr_col))
+    return verdict("P9 soil_biogeochem_decomp", g_fd, db.ploss[1,1,1])
+end
+
 rP1 = try section_gresp() catch e; @printf("[P1] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP2 = try section_mresp() catch e; @printf("[P2] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP3 = try section_cstate1() catch e; @printf("[P3] ERRORED: %s\n", sprint(showerror,e)); NaN end
@@ -407,6 +459,7 @@ rP5 = try section_decomprate() catch e; @printf("[P5] ERRORED: %s\n", sprint(sho
 rP6 = try section_potential() catch e; @printf("[P6] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP7 = try section_sminn() catch e; @printf("[P7] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP8 = try section_alloc() catch e; @printf("[P8] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP9 = try section_decomp() catch e; @printf("[P9] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e  [P7] sminn=%.3e  [P8] alloc=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6, rP7, rP8)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e  [P7] sminn=%.3e  [P8] alloc=%.3e  [P9] decomp=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6, rP7, rP8, rP9)
 println("="^70)
