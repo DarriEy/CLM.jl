@@ -2823,9 +2823,13 @@ function getvegwp!(p::Int, c::Int, gb_mol::Real,
         0.0, 0.0, qsatl, qaf, havegs, laisun_p, laisha_p,
         elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p)
 
-    # Calculate root water potential
+    # Calculate root water potential. Threshold (not ==0): when ALL soil layers are
+    # frozen the smooth_max floor in pass-1 leaves k_soil_root ~1e-16 (not exactly 0,
+    # an AD-safety artifact), so sum_ksr ~1e-17 would bypass the no-extraction branch
+    # and the /sum_ksr below would give a huge xroot → the vegwp Newton cascades to
+    # NaN. Below the threshold there is effectively no root water access.
     sum_ksr = sum(k_soil_root_p[1:nlevsoi])
-    if abs(sum_ksr) == 0.0
+    if abs(sum_ksr) <= oftype(sum_ksr, 1.0e-12)
         x[ROOT_SEG] = sum(smp_c[1:nlevsoi] .- grav2) / nlevsoi
     else
         x[ROOT_SEG] = (sum(k_soil_root_p[1:nlevsoi] .* (smp_c[1:nlevsoi] .- grav2)) - qflx_sun - qflx_sha) / sum_ksr
@@ -2889,7 +2893,10 @@ end
         sum_ksr += k_soil_root[p, j]
     end
     xroot = zero(T)
-    if abs(sum_ksr) == zero(T)
+    # Threshold (not ==0): all-frozen soil leaves k_soil_root at the pass-1 smooth_max
+    # floor (~1e-16, an AD artifact) so sum_ksr ~1e-17 ≠ 0 would divide below → huge
+    # xroot → Newton NaN. Below threshold = effectively no root water access.
+    if abs(sum_ksr) <= T(1.0e-12)
         s = zero(T)
         @inbounds for j in 1:nlevsoi
             s += smp_l[c, j] - z_col[c, j] * T(1000.0)

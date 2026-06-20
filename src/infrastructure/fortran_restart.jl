@@ -176,6 +176,27 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
                                       ws.h2osoi_ice_col[c, jj] / (dz[c, jj] * DENICE)
         end
     end
+    # Init eff_porosity from the injected ice. eff_porosity is normally computed mid-
+    # step by HydrologyNoDrainage, but compute_h2osoi_liqvol! AND the use_hydrstress
+    # PHS plant-water solve (canopy_fluxes) READ it at step 1 BEFORE that. On a bare
+    # restart it would otherwise be NaN → liqvol = min(lv, NaN) = NaN → smp_l →
+    # k_soil_root → vegwp Newton all NaN (a use_hydrstress restart starting on frozen
+    # soil blew up here). Formula matches soil_hydrology.jl:104-108.
+    let ss = inst.soilstate
+        if !isempty(ss.eff_porosity_col) && !isempty(ss.watsat_col) && !isempty(inst.column.dz)
+            dz = inst.column.dz
+            has_exice = isdefined(ws, :excess_ice_col) && !isempty(ws.excess_ice_col)
+            for c in 1:nc_jl, j in 1:nlevgrnd
+                jj = j + nlevsno
+                (jj <= size(ws.h2osoi_ice_col, 2) && jj <= size(dz, 2) &&
+                 j <= size(ss.eff_porosity_col, 2) && j <= size(ss.watsat_col, 2)) || continue
+                ei = has_exice ? ws.excess_ice_col[c, j] : 0.0
+                dz_ext = dz[c, jj] + ei / DENICE
+                vol_ice = min(ss.watsat_col[c, j], (ws.h2osoi_ice_col[c, jj] + ei) / (dz_ext * DENICE))
+                ss.eff_porosity_col[c, j] = max(0.01, ss.watsat_col[c, j] - vol_ice)
+            end
+        end
+    end
     set_col_1d!("WA", v -> (ws.wa_col[1] = v))
     set_col_1d!("H2OSFC", v -> (ws.h2osfc_col[1] = v))
 

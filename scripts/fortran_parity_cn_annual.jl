@@ -45,6 +45,16 @@
 # k_soil_root/Newton robust to frozen (near-zero-liquid) layers. MEANWHILE CN_NOPHS=1
 # gives a finite (PHS-off, so not exact-parity on water-stress-sensitive GPP/veg) run
 # for sanity-checking the slowly-varying soil C/N pools.
+#
+# PROGRESS (2026-06-20): the PHS-frozen NaN is a multi-layer cascade; 3 layers fixed:
+#   (1) eff_porosity now initialized from the restart (fortran_restart.jl) — was NaN
+#       at step 1 → poisoned liqvol → smp_l. (2)+(3) the getvegwp!/_getvegwp sum_ksr
+#       guard is now a THRESHOLD (photosynthesis.jl), not ==0 — the pass-1 smooth_max
+#       floor leaves k_soil_root~1e-16 for all-frozen soil, so sum_ksr~1e-17≠0 was
+#       dividing → huge xroot. With these, vegwp is now FINITE (~-4e7 mm, extreme but
+#       not NaN). REMAINING (not yet fixed): t_veg/h2osoi still NaN — further layers in
+#       the bsun/bsha stress→canopy-energy coupling and/or the soil-water update on
+#       fully-frozen, no-root-uptake soil. The next round. CN_NOPHS=1 = working fallback.
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
@@ -149,6 +159,9 @@ function run_cn_annual(; ndays::Int = 365)
         @printf("    bsw[1:4]    %s\n", string(round.(ss.bsw_col[cc, 1:4], digits=3)))
         @printf("    sucsat[1:4] %s\n", string(round.(ss.sucsat_col[cc, 1:4], digits=2)))
         @printf("    watsat[18:21] %s\n", string(round.(ss.watsat_col[cc, 18:21], digits=3)))
+        @printf("    eff_poros[1:4] %s\n", string(round.(ss.eff_porosity_col[cc, 1:4], digits=3)))
+        @printf("    rootfr(p2)[1:4] %s  k_soil_root(p2)[1:4] %s\n",
+            string(round.(ss.rootfr_patch[2, 1:4], digits=3)), string(ss.k_soil_root_patch[2, 1:4]))
     end
 
     _phs = get(ENV, "CN_NOPHS", "") == ""   # CN_NOPHS=1 → diagnostic: disable PHS
@@ -232,6 +245,12 @@ function run_cn_annual(; ndays::Int = 365)
                     string(round.(ws.h2osoi_liq_col[c_soil, (ns2+1):(ns2+4)], digits=2)),
                     string(inst.surfalb.albgrd_col[c_soil, 1]),
                     string(inst.surfalb.coszen_col[c_soil]))
+                @printf("  [post-step1] vegwp(p2,1:4)=%s\n",
+                    string(inst.canopystate.vegwp_patch[2, 1:4]))
+                @printf("  [post-step1] liqvol soil[1:3]=%s k_soil_root(p2)[1:3]=%s hk_l(c)[1:3]=%s\n",
+                    string(round.(inst.water.waterdiagnosticbulk_inst.h2osoi_liqvol_col[c_soil, (ns2+1):(ns2+3)], digits=3)),
+                    string(inst.soilstate.k_soil_root_patch[2, 1:3]),
+                    string(inst.soilstate.hk_l_col[c_soil, 1:3]))
             end
             for (nm, g) in fields; acc[nm] += g(); end
             ns += 1
