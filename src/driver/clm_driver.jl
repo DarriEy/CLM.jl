@@ -1527,6 +1527,33 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
             soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
             patch_itype=pch.itype)
+
+        # Soil-biogeochem C/N STATE summaries (totsomc_col/totsomn_col/totecosysc_col)
+        # — WIRED. cn_driver_summarize_states! only does the veg-state summary; the soil
+        # summaries need the decomp infrastructure, which is in scope here. Pure
+        # diagnostics (no downstream physics reads them), so this is an output-correctness
+        # fix. totvegc_col/totvegn_col (for the ecosystem totals) are aggregated from the
+        # veg patch totals via p2c_1d! (unity scale).
+        if config.use_cn && _decomp_initialized(inst.decomp_cascade)
+            _scs = inst.soilbiogeochem_carbonstate
+            _sns = inst.soilbiogeochem_nitrogenstate
+            _dc  = inst.decomp_cascade
+            _tvc = zeros(bc.endc); _tvn = zeros(bc.endc)
+            p2c_1d!(_tvc, inst.bgc_vegetation.cnveg_carbonstate_inst.totvegc_patch,
+                    bc, "unity", pch)
+            p2c_1d!(_tvn, inst.bgc_vegetation.cnveg_nitrogenstate_inst.totvegn_patch,
+                    bc, "unity", pch)
+            soil_bgc_carbon_state_summary!(_scs, filt.allc, bc_col;
+                nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
+                dzsoi_decomp_vals=dzsoi_decomp[], zisoi_vals=zisoi[],
+                is_litter=_dc.is_litter, is_soil=_dc.is_soil, is_cwd=_dc.is_cwd,
+                totvegc_col=_tvc)
+            soil_bgc_nitrogen_state_summary!(_sns, filt.allc, bc_col;
+                nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
+                dzsoi_decomp_vals=dzsoi_decomp[], zisoi_vals=zisoi[],
+                is_litter=_dc.is_litter, is_soil=_dc.is_soil, is_cwd=_dc.is_cwd,
+                totvegn_col=_tvn)
+        end
     end
 
     # ========================================================================

@@ -81,8 +81,11 @@
 #               fluxes!), so the GPP field reads gpp_patch directly (== the psn streams;
 #               GPP_psn cross-checks) and NPP reads npp_patch (was stale 0 → now a real
 #               seasonal value: -2.7e-7 winter resp. → +6.6e-6 Jun, vs Fortran 9.1e-6).
-#               The soil-C/N _col STATE summaries are still stubs → TOTSOMC/TOTVEGC/
-#               TOTSOMN still use raw-pool aggregation here (follow-up: wire those too).
+#               The soil-C/N _col STATE summaries are now WIRED too (soil_bgc_carbon/
+#               nitrogen_state_summary! called from clm_driver.jl), so TOTSOMC/TOTECOSYSC/
+#               TOTSOMN read the model's _col fields (with *_raw cross-checks) and match
+#               Fortran (Jan rel 3e-8/5e-7/2e-8). totvegc_col/totvegn_col for the
+#               ecosystem totals are aggregated via p2c_1d! from the veg patch totals.
 # RESULT (3-day smoke vs Fortran h0, Jan): TOTSOMC rel 3.3e-8, TOTVEGC 5.9e-8,
 # TOTECOSYSC 5.2e-7, TOTSOMN 1.7e-8, SMINN 1.4e-5, TLAI 8e-6, LEAFC 8.6e-4, TG 7.6e-5
 # — i.e. the CN state was at PARITY all along; only the diagnostics were stale. The
@@ -334,10 +337,13 @@ function run_cn_annual(; ndays::Int = 365)
 
     # Julia-side daily-mean accumulators: (h0 name, getter)
     fields = [
-        ("TOTSOMC",    totsomc_raw),
+        ("TOTSOMC",    () -> scs().totsomc_col[c_soil]),    # model _col (soil-state summary now wired)
+        ("TOTSOMC_raw",totsomc_raw),                        # cross-check: raw vr-pool aggregation
         ("TOTVEGC",    totvegc_raw),
-        ("TOTECOSYSC", totecosysc_raw),
-        ("TOTSOMN",    totsomn_raw),
+        ("TOTECOSYSC", () -> scs().totecosysc_col[c_soil]),
+        ("TOTECOSYSC_raw", totecosysc_raw),
+        ("TOTSOMN",    () -> sns().totsomn_col[c_soil]),
+        ("TOTSOMN_raw",totsomn_raw),
         ("SMINN",      sminn_tot),
         ("GPP",        () -> p2g(ccf().gpp_patch)),  # model's gpp_patch (cnveg flux summary now wired)
         ("GPP_psn",    gpp_raw),                      # cross-check: raw psn->cpool streams
