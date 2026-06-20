@@ -11,6 +11,7 @@
 #   [P3] c_state_update1! (C pool integration: leafc += cpool_to_leafc·dt — the C-cycle update)
 #   [P4] n_state_update1! (N pool integration: leafn += npool_to_leafn·dt — the N-cycle update)
 #   [P5] decomp_rate_constants_bgc! (soil-C turnover: t_scalar=Q10^((Tsoi-Tref)/10) — the `Q10` param)
+#   [P6] soil_bgc_potential! (potential decomp + mineral-N: p_decomp_cpool_loss=Cpool·decomp_k·pathfrac)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -236,11 +237,64 @@ function section_decomprate()
     return verdict("P5 decomp_rate_bgc", g_fd, db.t_soisno[1,1])
 end
 
+# =============================================================================
+# [P6] soil_bgc_potential! — potential decomposition + mineral-N flux (consumes decomp_k
+#      from [P5]): p_decomp_cpool_loss[tr] = Cpool[donor]·decomp_k[donor]·pathfrac. Bundle =
+#      (cf in [decomp_k], ploss out [the p_decomp_cpool_loss scratch]); cs/ns/st/cascade_con
+#      + the other potential-flux scratch arrays are Const aux. Perturb decomp_k, seed ploss.
+# =============================================================================
+function section_potential()
+    println("\n", "#"^70, "\n# [P6] soil_bgc_potential! (potential decomp + mineral-N) REVERSE\n", "#"^70)
+    nc=1; nlevdecomp=1; ndecomp_pools=7; nct=5
+    cascade_con = C.DecompCascadeConData()
+    cascade_con.cascade_donor_pool    = [1, 2, 3, 3, 4]
+    cascade_con.cascade_receiver_pool = [3, 3, 4, C.I_ATM, 3]
+    cascade_con.floating_cn_ratio_decomp_pools = BitVector([true, true, false, false, false, false, false])
+    cascade_con.initial_cn_ratio = [20.0, 25.0, 12.0, 10.0, 10.0, 10.0, 10.0]
+    cs = C.SoilBiogeochemCarbonStateData(); cs.decomp_cpools_vr_col = zeros(nc, nlevdecomp, ndecomp_pools)
+    cs.decomp_cpools_vr_col[1,1,1]=110.0; cs.decomp_cpools_vr_col[1,1,2]=85.0
+    cs.decomp_cpools_vr_col[1,1,3]=53.0; cs.decomp_cpools_vr_col[1,1,4]=32.0
+    ns = C.SoilBiogeochemNitrogenStateData(); ns.decomp_npools_vr_col = zeros(nc, nlevdecomp, ndecomp_pools)
+    ns.decomp_npools_vr_col[1,1,1]=110/20; ns.decomp_npools_vr_col[1,1,2]=85/16
+    ns.decomp_npools_vr_col[1,1,3]=53/12; ns.decomp_npools_vr_col[1,1,4]=32/10
+    st = C.SoilBiogeochemStateData(); st.nue_decomp_cascade_col = ones(nct) .* 0.5
+    nf = C.SoilBiogeochemNitrogenFluxData()
+    nf.potential_immob_vr_col = zeros(nc, nlevdecomp); nf.gross_nmin_vr_col = zeros(nc, nlevdecomp)
+    function fresh()
+        cf = C.SoilBiogeochemCarbonFluxData()
+        cf.rf_decomp_cascade_col = zeros(nc, nlevdecomp, nct); cf.pathfrac_decomp_cascade_col = ones(nc, nlevdecomp, nct)
+        cf.decomp_k_col = zeros(nc, nlevdecomp, ndecomp_pools); cf.cn_col = zeros(nc, ndecomp_pools); cf.phr_vr_col = zeros(nc, nlevdecomp)
+        cf.rf_decomp_cascade_col[1,1,:] .= [0.39,0.55,0.28,0.55,0.55]
+        cf.decomp_k_col[1,1,1]=0.01; cf.decomp_k_col[1,1,2]=0.005; cf.decomp_k_col[1,1,3]=0.002; cf.decomp_k_col[1,1,4]=0.001
+        ploss = zeros(nc, nlevdecomp, nct)
+        return (; cf=cf, ploss=ploss)
+    end
+    aux = (; cs=cs, nf=nf, ns=ns, st=st, cascade_con=cascade_con, mask=BitVector([true]), bounds=1:nc,
+             nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools, nct=nct,
+             cn_decomp_pools=zeros(nc,nlevdecomp,ndecomp_pools), p_decomp_cn_gain=zeros(nc,nlevdecomp,ndecomp_pools),
+             pmnf=zeros(nc,nlevdecomp,nct), p_npool_to_din=zeros(nc,nlevdecomp,nct))
+    phase!(b, a) = (C.soil_bgc_potential!(b.cf, a.cs, a.nf, a.ns, a.st, a.cascade_con;
+        mask_bgc_soilc=a.mask, bounds=a.bounds, nlevdecomp=a.nlevdecomp, ndecomp_pools=a.ndecomp_pools,
+        ndecomp_cascade_transitions=a.nct, cn_decomp_pools=a.cn_decomp_pools,
+        p_decomp_cpool_loss=b.ploss, p_decomp_cn_gain=a.p_decomp_cn_gain,
+        pmnf_decomp_cascade=a.pmnf, p_decomp_npool_to_din=a.p_npool_to_din); nothing)
+    let b=fresh(); phase!(b,aux)
+        @printf("primal: p_decomp_cpool_loss[1]=%.6e (expect Cpool1·k1=%.6e) finite=%s\n",
+            b.ploss[1,1,1], 110.0*0.01, string(isfinite(b.ploss[1,1,1])))
+    end
+    L(b) = sum(abs2, b.ploss)
+    g_fd = richardson(δ -> (b=fresh(); b.cf.decomp_k_col[1,1,1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.ploss .= 2 .* b.ploss))
+    return verdict("P6 soil_bgc_potential", g_fd, db.cf.decomp_k_col[1,1,1])
+end
+
 rP1 = try section_gresp() catch e; @printf("[P1] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP2 = try section_mresp() catch e; @printf("[P2] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP3 = try section_cstate1() catch e; @printf("[P3] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP4 = try section_nstate1() catch e; @printf("[P4] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP5 = try section_decomprate() catch e; @printf("[P5] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP6 = try section_potential() catch e; @printf("[P6] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e\n", rP1, rP2, rP3, rP4, rP5)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6)
 println("="^70)
