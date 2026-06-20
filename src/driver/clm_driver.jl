@@ -1525,7 +1525,8 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_cs=inst.soilbiogeochem_carbonstate,
             soilbgc_cf=inst.soilbiogeochem_carbonflux,
             soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
-            soilbgc_nf=inst.soilbiogeochem_nitrogenflux)
+            soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
+            patch_itype=pch.itype)
     end
 
     # ========================================================================
