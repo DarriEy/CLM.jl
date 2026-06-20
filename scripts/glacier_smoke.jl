@@ -15,18 +15,21 @@
 #
 # Usage: julia +1.12 --project=. scripts/glacier_smoke.jl
 #
-# STATUS (2026-06-20): the istice cold-start path is a MULTI-LAYER NaN chase. Fixed so
-# far: (1) cold-start albedo seed (cold_start.jl init_surface_albedo_cold!; was albedo=0
-# -> over-absorption); (2) the harness clock is UTC -> use ~local noon (20:00 UTC at Bow's
-# lon) + set forc_wind_grc (handle_new_snow's new-snow density needs it); (3) cv bedrock
-# floor for ISTICE (soil_temperature.jl: deep bedrock layers had ice=liq=0 -> cv=0 ->
-# fact=dtime/cv=Inf -> the band solve NaNs the whole glacier column). With (3) the glacier
-# t_grnd is FINITE at step 1 (263.8 K). REMAINING (open): h2osno still NaN, traced into
-# handle_new_snow! (snow accumulation) with all finite inputs (h2osno=0/int_snow=0/
-# n_melt=0.4/wind=4/bifall finite) -> the NaN is in the snow accumulation / diagnostics
-# (qflx_snow_grnd or the scf int_snow update) — a further cold-start snow layer. The
-# REAL Iceland domain (Symfluence, building) with realistic forcing+spinup is the truer
-# test of whether these synthetic-cold-start pathologies even manifest.
+# STATUS (2026-06-20): PASSES — the istice cold-start path now runs finite. It took a
+# 4-layer fix (the soil-only multisite test never exercised istice):
+#  (1) cold-start albedo seed (cold_start.jl init_surface_albedo_cold!; was albedo=0 ->
+#      over-absorption sabg 488);
+#  (2) harness: clock is UTC -> use ~local noon (20:00 UTC at Bow's lon) + set
+#      forc_wind_grc (handle_new_snow's new-snow density needs it);
+#  (3) cv bedrock floor for ISTICE (soil_temperature.jl: deep bedrock layers had
+#      ice=liq=0 -> cv=0 -> fact=Inf -> band solve NaN'd the whole column);
+#  (4) canopy-fall flux mask mismatch (canopy_hydrology.jl): qflx_snocanfall/liqcanfall/
+#      snow_unload were set over mask_soilp but read over mask_nolakep in the fluxes-onto-
+#      ground scatter; the glacier (istice) patch is nolakep-but-not-soilp -> its entries
+#      stayed NaN -> poisoned qflx_snow_grnd -> int_snow/h2osno. Fixed by zeroing those
+#      flux arrays at the start of canopy_interception_and_throughfall!.
+# Result: 6 steps finite, t_grnd[glacier]=263.8K, h2osno accumulates 0->1.06. Wired into
+# the gated suite as test_glacier_robustness.jl.
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
 
@@ -92,6 +95,9 @@ function main(; nsteps::Int = 6)
     gp = gc === nothing ? 0 : findfirst(p -> inst.patch.column[p] == gc, 1:np)
     if gc !== nothing && get(ENV, "GLAC_DEBUG", "") != ""
         ss = inst.soilstate; ws = inst.water.waterstatebulk_inst.ws; ns = CLM.varpar.nlevsno
+        @printf("  [glac-init] wtcol(p%d)=%s wtgcell(p%d)=%s active=%s itype=%s\n", gp,
+            string(inst.patch.wtcol[gp]), gp, string(inst.patch.wtgcell[gp]),
+            string(inst.patch.active[gp]), string(inst.patch.itype[gp]))
         @printf("  [glac-init c=%d p=%d] watsat[1:3]=%s sucsat[1:3]=%s bsw[1:3]=%s\n", gc, gp,
             string(round.(ss.watsat_col[gc,1:3],digits=3)), string(round.(ss.sucsat_col[gc,1:3],digits=1)),
             string(round.(ss.bsw_col[gc,1:3],digits=2)))
