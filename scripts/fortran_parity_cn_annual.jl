@@ -32,8 +32,19 @@
 #     (verify_vs_fortran) -> it is a use_cn-path soil-water NaN.
 # The winter CN pools (SMINN/TLAI/LEAFC) still match Fortran because they are
 # ~static in winter, so that is a weak check; the dynamic/energy parity is blocked.
-# NEXT: chase the use_cn=true step-1 soil-hydrology NaN (likely the CN soil-water
-# plant sink / smp_l coupling) — then this harness gives the first full CN parity.
+# ROOT CAUSE (2026-06-20): the step-1 NaN is the PHS (use_hydrstress=TRUE) path on
+# FROZEN winter soil from a bare .clm2.r restart — NOT use_cn. CONFIRMED: CN_NOPHS=1
+# (use_hydrstress=false) runs FINITE. The .clm2.r restart has no derived hydrology
+# fields, so they start NaN; the PHS plant-water solve in canopy_fluxes (which runs
+# before HydrologyNoDrainage recomputes them) reads them at step 1. Seeding smp_l +
+# vegwp here + the driver's compute_h2osoi_liqvol! are not enough — the residual NaN
+# is inside the PHS solve itself (k_soil_root / vegwp Newton) on near-frozen soil
+# (the 28-step CN drift only ran summer/unfrozen, so it never hit it). FIX (deep,
+# deferred — touches the PHS solve, which the reverse-AD mirror also covers):
+# initialize the PHS-read derived hydrology state from the restart + make the PHS
+# k_soil_root/Newton robust to frozen (near-zero-liquid) layers. MEANWHILE CN_NOPHS=1
+# gives a finite (PHS-off, so not exact-parity on water-stress-sensitive GPP/veg) run
+# for sanity-checking the slowly-varying soil C/N pools.
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
@@ -109,6 +120,14 @@ function run_cn_annual(; ndays::Int = 365)
         end
         close(ds)
     end
+    # Seed soil matric potential from the injected h2osoi_vol. The .clm2.r restart
+    # has no smp_l (it's derived), so it starts NaN; with use_hydrstress the PHS
+    # plant sink (canopy_fluxes) reads smp_l at step 1 BEFORE the hydrology recomputes
+    # it → k_soil_root/qflx_rootsoi NaN → soil water NaN. (The 28-step CN drift
+    # injected a pdump that included smp_l, so it never hit this.)
+    CLM.update_smp_l!(inst.soilstate.smp_l_col, inst.water.waterstatebulk_inst.ws.h2osoi_vol_col,
+        inst.soilstate.watsat_col, inst.soilstate.sucsat_col, inst.soilstate.bsw_col,
+        inst.soilstate.smpmin_col, filt.nolakec, 1:nc, CLM.varpar.nlevgrnd)
     if get(ENV, "CN_PROBE", "") != ""
         cc = findfirst(filt.nolakec)
         _chk(nm, x) = @printf("    %-16s %s\n", nm, isfinite(x) ? @sprintf("%.4g", x) : "NaN")
@@ -132,8 +151,9 @@ function run_cn_annual(; ndays::Int = 365)
         @printf("    watsat[18:21] %s\n", string(round.(ss.watsat_col[cc, 18:21], digits=3)))
     end
 
+    _phs = get(ENV, "CN_NOPHS", "") == ""   # CN_NOPHS=1 → diagnostic: disable PHS
     config  = CLM.CLMDriverConfig(use_cn = true, use_aquifer_layer = false,
-                                  use_hydrstress = true, use_luna = true)
+                                  use_hydrstress = _phs, use_luna = true)
     filt_ia = CLM.clump_filter_inactive_and_active
     fr = CLM.ForcingReader(); CLM.forcing_reader_init!(fr, CN_FFORC)
     tf = replace(CN_FFORC, r"clmforc\.[^/]*\.nc$" => "topo_forcing.nc")
