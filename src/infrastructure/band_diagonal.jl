@@ -108,8 +108,19 @@ end
             for i in 1:n
                 x[c, i] = rvector[c, jt + i - 1]
             end
-
             # Gaussian elimination with partial pivoting (in place).
+            #
+            # NOTE: `akk` is captured as A[c,piv,k] BEFORE the row swap (it equals the
+            # post-swap diagonal A[c,k,k]) and is never re-read afterward. The obvious
+            # form — swap rows, then `akk = A[c,k,k]` — miscompiles under the KA CPU
+            # backend: the optimizer caches the pivot-search read of A[c,k,k] and reuses
+            # it for `akk`, ignoring the intervening swap, so a pivot that actually swaps
+            # rows uses the wrong diagonal and silently returns a wrong solution. (A
+            # side-effecting call between the search and the swap masks it.) Only systems
+            # that genuinely swap rows are affected — every diagonally dominant column
+            # (all soil/snow columns) leaves piv==k, so this was latent until the urban
+            # roof/wall columns, whose per-layer heat capacities span ~3 orders of
+            # magnitude, produced |A[k+1,k]| > |A[k,k]| and triggered a real swap.
             for k in 1:(n - 1)
                 piv = k
                 maxv = abs(A[c, k, k])
@@ -120,13 +131,19 @@ end
                         piv = i
                     end
                 end
+                akk = A[c, piv, k]   # post-swap diagonal, read before the swap
                 if piv != k
                     for j in k:n
-                        t = A[c, k, j]; A[c, k, j] = A[c, piv, j]; A[c, piv, j] = t
+                        akj = A[c, k, j]
+                        apj = A[c, piv, j]
+                        A[c, k, j] = apj
+                        A[c, piv, j] = akj
                     end
-                    tx = x[c, k]; x[c, k] = x[c, piv]; x[c, piv] = tx
+                    xk = x[c, k]
+                    xp = x[c, piv]
+                    x[c, k] = xp
+                    x[c, piv] = xk
                 end
-                akk = A[c, k, k]
                 for i in (k + 1):n
                     f = A[c, i, k] / akk
                     for j in k:n

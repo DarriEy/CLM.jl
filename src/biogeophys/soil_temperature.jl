@@ -1260,19 +1260,31 @@ end
 
 # Standing surface water RHS (one thread per column). Also fills fn_h2osfc[c] for the
 # surface-water correction kernel below. dtime arrives converted to the working type.
-@kernel function _rhs_ssw_kernel!(rvector, @Const(mask), @Const(t_soisno), @Const(t_h2osfc),
-        @Const(z), @Const(tk_h2osfc), @Const(dz_h2osfc), @Const(c_h2osfc),
+@kernel function _rhs_ssw_kernel!(rvector, @Const(mask), @Const(itype), @Const(t_soisno),
+        @Const(t_h2osfc), @Const(z), @Const(tk_h2osfc), @Const(dz_h2osfc), @Const(c_h2osfc),
         @Const(hs_h2osfc), @Const(dhsdT), fn_h2osfc, dtime, nlevsno::Int)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(rvector)
-        cnfac = T(CNFAC)
-        joff = nlevsno
-        dzm = T(0.5) * dz_h2osfc[c] + z[c, 1 + joff]
-        fnh = tk_h2osfc[c] * (t_soisno[c, 1 + joff] - t_h2osfc[c]) / dzm
-        fn_h2osfc[c] = fnh
-        rvector[c, nlevsno + 1] = t_h2osfc[c] + (dtime / c_h2osfc[c]) *
-            (hs_h2osfc[c] - dhsdT[c] * t_h2osfc[c] + cnfac * fnh)
+        it = itype[c]
+        # Urban roof/wall columns have no standing-surface-water "layer 0" (their top
+        # solve layer is the roof/wall surface itself, and roof/wall layer 1 has no
+        # up-coupling to this row). The h2osfc thermal props default to a thin-layer
+        # (c_h2osfc = THIN_SFCLAYER) whose dtime/c_h2osfc blows the RHS up; coupled
+        # into the band solve it drives the roof to nonphysical temperatures. Decouple
+        # it as a benign identity row so the solve runs from the roof/wall surface.
+        if it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF
+            fn_h2osfc[c] = zero(T)
+            rvector[c, nlevsno + 1] = t_h2osfc[c]
+        else
+            cnfac = T(CNFAC)
+            joff = nlevsno
+            dzm = T(0.5) * dz_h2osfc[c] + z[c, 1 + joff]
+            fnh = tk_h2osfc[c] * (t_soisno[c, 1 + joff] - t_h2osfc[c]) / dzm
+            fn_h2osfc[c] = fnh
+            rvector[c, nlevsno + 1] = t_h2osfc[c] + (dtime / c_h2osfc[c]) *
+                (hs_h2osfc[c] - dhsdT[c] * t_h2osfc[c] + cnfac * fnh)
+        end
     end
 end
 
@@ -1385,8 +1397,8 @@ function set_rhs_vec!(col::ColumnData, lun::LandunitData,
     _launch!(_rhs_snow_kernel!, rvector, mask_nolakec, col.itype, col.snl, t_soisno,
         fact, fn, dhsdT, hs_top_snow, hs_top, sabg_lyr_col, nlevsno; ndrange = (nc, nlevsno))
     # Standing surface water RHS (also fills fn_h2osfc for the correction below).
-    _launch!(_rhs_ssw_kernel!, rvector, mask_nolakec, t_soisno, t_h2osfc, col.z, tk_h2osfc,
-        dz_h2osfc, c_h2osfc, hs_h2osfc, dhsdT, fn_h2osfc, dt, nlevsno; ndrange = nc)
+    _launch!(_rhs_ssw_kernel!, rvector, mask_nolakec, col.itype, t_soisno, t_h2osfc, col.z,
+        tk_h2osfc, dz_h2osfc, c_h2osfc, hs_h2osfc, dhsdT, fn_h2osfc, dt, nlevsno; ndrange = nc)
     # Soil RHS — urban non-road (wall/roof).
     _launch!(_rhs_soil_urban_kernel!, rvector, mask_nolakec, col.itype, col.snl, t_soisno,
         fact, fn, dhsdT, hs_top, sabg_lyr_col, nlevsno, nlevurb; ndrange = (nc, nlevurb))
@@ -1437,18 +1449,28 @@ end
 end
 
 # Standing surface water submatrix (one thread per column). dtime arrives converted.
-@kernel function _mat_ssw_kernel!(bmatrix, @Const(mask), @Const(z), @Const(tk_h2osfc),
-        @Const(dz_h2osfc), @Const(c_h2osfc), @Const(dhsdT), dtime, nlevsno::Int)
+@kernel function _mat_ssw_kernel!(bmatrix, @Const(mask), @Const(itype), @Const(z),
+        @Const(tk_h2osfc), @Const(dz_h2osfc), @Const(c_h2osfc), @Const(dhsdT), dtime,
+        nlevsno::Int)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(bmatrix)
-        omc = one(T) - T(CNFAC)
-        joff = nlevsno
         ssw_idx = nlevsno + 1
-        dzm = T(0.5) * dz_h2osfc[c] + z[c, 1 + joff]
-        bmatrix[c, 3, ssw_idx] = one(T) + omc * (dtime / c_h2osfc[c]) *
-            tk_h2osfc[c] / dzm - (dtime / c_h2osfc[c]) * dhsdT[c]
-        bmatrix[c, 2, ssw_idx] = -omc * (dtime / c_h2osfc[c]) * tk_h2osfc[c] / dzm
+        it = itype[c]
+        # Urban roof/wall: decouple the standing-water "layer 0" row (see _rhs_ssw_kernel!).
+        # A pure identity row (diagonal 1, no down-coupling to the roof/wall surface layer)
+        # keeps it out of the roof/wall band solve.
+        if it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF
+            bmatrix[c, 3, ssw_idx] = one(T)
+            bmatrix[c, 2, ssw_idx] = zero(T)
+        else
+            omc = one(T) - T(CNFAC)
+            joff = nlevsno
+            dzm = T(0.5) * dz_h2osfc[c] + z[c, 1 + joff]
+            bmatrix[c, 3, ssw_idx] = one(T) + omc * (dtime / c_h2osfc[c]) *
+                tk_h2osfc[c] / dzm - (dtime / c_h2osfc[c]) * dhsdT[c]
+            bmatrix[c, 2, ssw_idx] = -omc * (dtime / c_h2osfc[c]) * tk_h2osfc[c] / dzm
+        end
     end
 end
 
@@ -1581,7 +1603,7 @@ function set_matrix!(col::ColumnData, lun::LandunitData,
     _launch!(_mat_snow_kernel!, bmatrix, mask_nolakec, col.snl, col.z, tk, fact, dhsdT,
         nlevsno; ndrange = (nc, nlevsno))
     # Standing surface water submatrix.
-    _launch!(_mat_ssw_kernel!, bmatrix, mask_nolakec, col.z, tk_h2osfc, dz_h2osfc,
+    _launch!(_mat_ssw_kernel!, bmatrix, mask_nolakec, col.itype, col.z, tk_h2osfc, dz_h2osfc,
         c_h2osfc, dhsdT, dt, nlevsno; ndrange = nc)
     # Soil submatrix — urban non-road (wall/roof).
     _launch!(_mat_soil_urban_kernel!, bmatrix, mask_nolakec, col.itype, col.snl, col.z,

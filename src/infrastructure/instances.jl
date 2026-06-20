@@ -191,6 +191,7 @@ function clm_instInit!(inst::CLMInstances;
                        nlevdecomp_full::Int = 10,
                        ndecomp_pools::Int = 7,
                        ndecomp_cascade_transitions::Int = 5,
+                       nlevurb::Int = 0,
                        use_luna::Bool = false)
 
     # --- Grid hierarchy ---
@@ -200,7 +201,7 @@ function clm_instInit!(inst::CLMInstances;
     patch_init!(inst.patch, np)
 
     # --- Urban ---
-    urbanparams_init!(inst.urbanparams, nl)
+    urbanparams_init!(inst.urbanparams, nl; nlevurb=nlevurb)
 
     # --- Topography (allocate only; cold-start requires valid col/lun linkage) ---
     topo_init_allocate!(inst.topo, nc)
