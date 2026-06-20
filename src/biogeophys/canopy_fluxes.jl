@@ -1748,7 +1748,8 @@ function canopy_fluxes_core!(
                 canopystate.laisun_patch, canopystate.laisha_patch,
                 canopystate.elai_patch, canopystate.esai_patch,
                 canopystate.htop_patch, waterdiagbulk.fdry_patch, waterfluxbulk.wf.qflx_tran_veg_patch;
-                nlevcan=NLEVCAN, nlevsoi=_nsoi, use_cn=use_cn, use_luna=use_luna)
+                nlevcan=NLEVCAN, nlevsoi=_nsoi, use_cn=use_cn, use_luna=use_luna,
+                bsun_patch=energyflux.bsun_patch, bsha_patch=energyflux.bsha_patch)
           else
             # Sunlit leaves
             photosynthesis!(photosyns,
