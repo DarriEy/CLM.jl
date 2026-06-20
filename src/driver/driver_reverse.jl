@@ -441,6 +441,26 @@ function decomppot_rev_phase!(b, aux)
     return nothing
 end
 
+# soilbiogeochem_n_state_update1! — the MINERAL-N pool update (applies N deposition+fixation,
+# gross mineralization, immobilization, plant uptake, nitrification/denitrification and the
+# carbon-only-limitation supplement to smin_nh4_vr / smin_no3_vr; sminn = nh4+no3). The
+# downstream sink of the decomposition cascade's N side. Reverse-validated at machine
+# precision (scripts/enzyme_bgc_reverse.jl [P7]). All three structs flow LIVE from the bundle
+# (ns smin_nh4/no3/sminn out ← nf the mineral-N fluxes in; st ndep/nfixation profiles, read-
+# only). use_fun resolved inside the wrapper. Sourced from inst/config as cn_driver does.
+function sminnupdate_rev_aux(inst, bounds, filt, config)
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc,
+              nlevdecomp = varpar.nlevdecomp, use_fun = config.use_fun, dt = 1800.0)
+end
+function sminnupdate_rev_phase!(b, aux)
+    i = b.inst
+    soilbiogeochem_n_state_update1!(i.soilbiogeochem_nitrogenstate, i.soilbiogeochem_nitrogenflux,
+                                    i.soilbiogeochem_state;
+                                    mask_bgc_soilc = aux.mask, bounds_col = aux.bounds,
+                                    nlevdecomp = aux.nlevdecomp, dt = aux.dt, use_fun = aux.use_fun)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →

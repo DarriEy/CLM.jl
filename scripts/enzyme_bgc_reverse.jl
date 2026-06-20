@@ -12,6 +12,7 @@
 #   [P4] n_state_update1! (N pool integration: leafn += npool_to_leafn·dt — the N-cycle update)
 #   [P5] decomp_rate_constants_bgc! (soil-C turnover: t_scalar=Q10^((Tsoi-Tref)/10) — the `Q10` param)
 #   [P6] soil_bgc_potential! (potential decomp + mineral-N: p_decomp_cpool_loss=Cpool·decomp_k·pathfrac)
+#   [P7] soilbiogeochem_n_state_update1! (mineral-N update: smin_nh4 += (ndep/fix/nmin−immob−...)·dt)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -289,12 +290,52 @@ function section_potential()
     return verdict("P6 soil_bgc_potential", g_fd, db.cf.decomp_k_col[1,1,1])
 end
 
+# =============================================================================
+# [P7] soilbiogeochem_n_state_update1! — mineral-N pool update (applies dep/fix, gross
+#      mineralization, immobilization, plant uptake, nitrif/denitrif, supplement to
+#      smin_nh4_vr/smin_no3_vr). Bundle = (ns out [smin_nh4/no3], nf in [the mineral-N
+#      fluxes]); st (ndep/nfixation profiles) is Const aux. Perturb gross_nmin → smin_nh4.
+# =============================================================================
+function section_sminn()
+    println("\n", "#"^70, "\n# [P7] soilbiogeochem_n_state_update1! (mineral-N update) REVERSE\n", "#"^70)
+    nc=1; nlevdecomp=1; dt=1800.0
+    st = C.SoilBiogeochemStateData()
+    st.ndep_prof_col = zeros(nc, nlevdecomp); st.nfixation_prof_col = zeros(nc, nlevdecomp)
+    function fresh()
+        ns = C.SoilBiogeochemNitrogenStateData()
+        ns.smin_nh4_vr_col = fill(2.0, nc, nlevdecomp); ns.smin_no3_vr_col = fill(1.0, nc, nlevdecomp)
+        ns.sminn_vr_col = zeros(nc, nlevdecomp)
+        nf = C.SoilBiogeochemNitrogenFluxData()
+        for f in (:gross_nmin_vr_col, :actual_immob_nh4_vr_col, :actual_immob_no3_vr_col,
+                  :smin_nh4_to_plant_vr_col, :smin_no3_to_plant_vr_col, :f_nit_vr_col,
+                  :f_denit_vr_col, :supplement_to_sminn_vr_col)
+            setfield!(nf, f, zeros(nc, nlevdecomp))
+        end
+        nf.ndep_to_sminn_col = zeros(nc); nf.nfix_to_sminn_col = zeros(nc)
+        nf.gross_nmin_vr_col[1,1] = 1.0e-6
+        return (; ns=ns, nf=nf)
+    end
+    aux = (; st=st, mask=BitVector([true]), bounds=1:nc, nlevdecomp=nlevdecomp, dt=dt)
+    phase!(b, a) = (C.soilbiogeochem_n_state_update1!(b.ns, b.nf, a.st;
+        mask_bgc_soilc=a.mask, bounds_col=a.bounds, nlevdecomp=a.nlevdecomp, dt=a.dt, use_fun=false); nothing)
+    let b=fresh(); s0=b.ns.smin_nh4_vr_col[1,1]; phase!(b,aux)
+        @printf("primal: smin_nh4 %.6f→%.8f (Δ=%.4e expect gross_nmin·dt=%.4e)\n",
+            s0, b.ns.smin_nh4_vr_col[1,1], b.ns.smin_nh4_vr_col[1,1]-s0, 1.0e-6*dt)
+    end
+    L(b) = sum(abs2, b.ns.smin_nh4_vr_col)
+    g_fd = richardson(δ -> (b=fresh(); b.nf.gross_nmin_vr_col[1,1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.ns.smin_nh4_vr_col .= 2 .* b.ns.smin_nh4_vr_col))
+    return verdict("P7 sminn_update", g_fd, db.nf.gross_nmin_vr_col[1,1])
+end
+
 rP1 = try section_gresp() catch e; @printf("[P1] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP2 = try section_mresp() catch e; @printf("[P2] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP3 = try section_cstate1() catch e; @printf("[P3] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP4 = try section_nstate1() catch e; @printf("[P4] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP5 = try section_decomprate() catch e; @printf("[P5] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP6 = try section_potential() catch e; @printf("[P6] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP7 = try section_sminn() catch e; @printf("[P7] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e  [P5] decomp_rate=%.3e  [P6] potential=%.3e  [P7] sminn=%.3e\n", rP1, rP2, rP3, rP4, rP5, rP6, rP7)
 println("="^70)
