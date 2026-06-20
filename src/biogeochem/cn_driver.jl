@@ -509,7 +509,22 @@ function cn_driver_no_leaching!(
        soilstate !== nothing && gridcell !== nothing
         _phparams = PhenologyParams()
         _phstate  = PhenologyState()
-        cn_phenology_init!(_phstate, _phparams, dt)
+        # Resolve the phenology-trigger soil layer from phenology_soil_depth (0.08 m),
+        # mirroring Fortran find_soil_layer_containing_depth: the first layer whose
+        # lower interface >= depth (CLM5 layers -> layer 3, node ~0.09 m). The
+        # cn_phenology_init! default stub returns 1; using the real layer matches
+        # Fortran's onset timing (layer 1 is too shallow/responsive -> early onset).
+        # zisoi[] is 1-based with zisoi[1]=0 (top) and zisoi[i+1] = lower interface of
+        # soil layer i; empty before the vertical grid is built -> fall back to 1.
+        _find_phen_layer = function (depth)
+            zi = zisoi[]
+            isempty(zi) && return 1
+            for i in 1:varpar.nlevgrnd
+                (i + 1) <= length(zi) && depth <= zi[i + 1] && return i
+            end
+            return varpar.nlevgrnd
+        end
+        cn_phenology_init!(_phstate, _phparams, dt; find_soil_layer_fn = _find_phen_layer)
         _pftph = PftConPhenology{Float64}(
             evergreen = Float64.(pftcon_main.evergreen), season_decid = Float64.(pftcon_main.season_decid),
             season_decid_temperate = Float64.(pftcon_main.season_decid_temperate),
