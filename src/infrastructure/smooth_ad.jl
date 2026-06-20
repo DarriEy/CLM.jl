@@ -51,6 +51,21 @@ element type rather than toggling a global inside the kernel hot path).
 """
 @inline _use_smooth(::Type{T}) where {T} = _is_ad_type(T)
 
+"""
+    _smooth_f64()
+
+HOST-ONLY runtime override for the Float64-specific smooth primitives: returns true when
+`SMOOTH_MODE[] === :always`, so plain-Float64 callers evaluate the SMOOTH function. This is
+what makes `:always` actually take effect for Float64 — needed by (a) the calibration FD/AD-
+consistency path (Float64 FD must match the Dual AD's smooth function) and (b) Enzyme REVERSE-
+mode AD, which differentiates Float64 primals+shadows (no Dual type to trigger the type-based
+smooth path). GPU-SAFE: only the Float64-specific methods consult this global; device kernels
+are Float32 and dispatch to the generic type-based `_use_smooth` path, which never reads a host
+global. Default `SMOOTH_MODE[] === :auto` → false → Float64 stays exact (suite/forward physics
+unchanged).
+"""
+@inline _smooth_f64() = (SMOOTH_MODE[] === :always)
+
 # --------------------------------------------------------------------------
 # smooth_min — LogSumExp approximation: -(log(exp(-k*a) + exp(-k*b)))/k
 # --------------------------------------------------------------------------
@@ -63,7 +78,7 @@ Smooth approximation to `min(a, b)`.
 - For `ForwardDiff.Dual`: LogSumExp smooth approximation with sharpness `k`.
 """
 function smooth_min(a::Float64, b::Float64; k::Float64=50.0)
-    _use_smooth(Float64) || return min(a, b)
+    (_use_smooth(Float64) || _smooth_f64()) || return min(a, b)
     ak = -k * a; bk = -k * b; m = max(ak, bk)
     return -(m + log(exp(ak - m) + exp(bk - m))) / k
 end
@@ -93,7 +108,7 @@ Smooth approximation to `max(a, b)`.
 - For `ForwardDiff.Dual`: LogSumExp smooth approximation with sharpness `k`.
 """
 function smooth_max(a::Float64, b::Float64; k::Float64=50.0)
-    _use_smooth(Float64) || return max(a, b)
+    (_use_smooth(Float64) || _smooth_f64()) || return max(a, b)
     ak = k * a; bk = k * b; m = max(ak, bk)
     return (m + log(exp(ak - m) + exp(bk - m))) / k
 end
@@ -122,7 +137,7 @@ Smooth approximation to `clamp(x, lo, hi)`.
 - For `ForwardDiff.Dual`: composition of smooth_max and smooth_min.
 """
 function smooth_clamp(x::Float64, lo::Float64, hi::Float64; k::Float64=50.0)
-    _use_smooth(Float64) || return clamp(x, lo, hi)
+    (_use_smooth(Float64) || _smooth_f64()) || return clamp(x, lo, hi)
     return smooth_max(lo, smooth_min(x, hi; k=k); k=k)
 end
 
@@ -161,7 +176,7 @@ Smooth approximation to the Heaviside step function.
 - For `ForwardDiff.Dual`: stable sigmoid `1/(1 + exp(-k*x))`.
 """
 function smooth_heaviside(x::Float64; k::Float64=50.0)
-    _use_smooth(Float64) || return x >= 0.0 ? 1.0 : 0.0
+    (_use_smooth(Float64) || _smooth_f64()) || return x >= 0.0 ? 1.0 : 0.0
     return _stable_sigmoid(x, k)
 end
 
@@ -181,7 +196,7 @@ Smooth approximation to `abs(x)`.
 - For `ForwardDiff.Dual`: `x * tanh(k*x)`.
 """
 function smooth_abs(x::Float64; k::Float64=50.0)
-    _use_smooth(Float64) || return abs(x)
+    (_use_smooth(Float64) || _smooth_f64()) || return abs(x)
     return x * tanh(k * x)
 end
 
@@ -203,7 +218,7 @@ Smooth approximation to `x >= 0 ? a : b`.
 Common usage: `smooth_ifelse(T - TFRZ, unfrozen_val, frozen_val)`.
 """
 function smooth_ifelse(x::Float64, a, b; k::Float64=50.0)
-    _use_smooth(Float64) || return x >= 0.0 ? a : b
+    (_use_smooth(Float64) || _smooth_f64()) || return x >= 0.0 ? a : b
     h = _stable_sigmoid(x, k)
     return a * h + b * (1.0 - h)
 end
