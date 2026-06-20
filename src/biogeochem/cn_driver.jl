@@ -962,7 +962,8 @@ function cn_driver_summarize_fluxes!(
         cnveg_cf::CNVegCarbonFluxData,
         cnveg_nf::CNVegNitrogenFluxData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
-        soilbgc_nf::SoilBiogeochemNitrogenFluxData)
+        soilbgc_nf::SoilBiogeochemNitrogenFluxData,
+        patch_itype::Union{Vector{Int},Nothing}=nothing)
 
     num_bgc_vegp = count(mask_bgc_vegp)
 
@@ -970,8 +971,17 @@ function cn_driver_summarize_fluxes!(
     # c13/c14 variants as well
     # soilbiogeochem_nitrogenflux_inst%Summary — not yet ported
     if num_bgc_vegp > 0
-        # cnveg_carbonflux_inst%Summary — not yet ported
-        # c13/c14 variants as well
+        # cnveg_carbonflux_inst%Summary — WIRED (sets the C-flux diagnostics,
+        # incl. gpp_patch = psnsun_to_cpool + psnshade_to_cpool, npp_patch, mr/gr).
+        # These are diagnostics (no downstream physics reads them); without this they
+        # stay at their restart-init NaN/0 in history output.
+        # npcropmin/nrepr only matter for the use_crop branch (crop reproductive MR);
+        # CNDriverConfig has no such field, so use the standard CLM5 values — harmless
+        # when use_crop=false (the default path), correct for crops (npcropmin=17).
+        cnveg_carbon_flux_summary!(cnveg_cf, mask_bgc_vegp, bounds_patch;
+            use_crop=config.use_crop, use_fun=config.use_fun,
+            patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
+        # c13/c14 variants — config-gated off in the default path (not ported)
         # cnveg_nitrogenflux_inst%Summary — not yet ported
     end
 

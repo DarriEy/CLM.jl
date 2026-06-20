@@ -75,8 +75,14 @@
 # harness now aggregates the actual PROGNOSTIC pools (see RAW-POOL block below):
 #   TOTSOMC/N = sum_j sum_{is_soil pools 4-6} decomp_*pools_vr[c,j,l]*dz_decomp[j]
 #   TOTVEGC   = patch sum of all veg C pools (displayed+storage+xfer), wtgcell->grc
-#   GPP       = psnsun_to_cpool + psnshade_to_cpool (real photosynthate flux, not the
-#               unported gpp_patch). NPP's summary is also unported → still reads 0.
+#   GPP       = psnsun_to_cpool + psnshade_to_cpool (real photosynthate flux). NOTE: as
+#               of the summary-wiring fix, the model's own gpp_patch/npp_patch ARE now
+#               populated (cnveg_carbon_flux_summary! wired into cn_driver_summarize_
+#               fluxes!), so the GPP field reads gpp_patch directly (== the psn streams;
+#               GPP_psn cross-checks) and NPP reads npp_patch (was stale 0 → now a real
+#               seasonal value: -2.7e-7 winter resp. → +6.6e-6 Jun, vs Fortran 9.1e-6).
+#               The soil-C/N _col STATE summaries are still stubs → TOTSOMC/TOTVEGC/
+#               TOTSOMN still use raw-pool aggregation here (follow-up: wire those too).
 # RESULT (3-day smoke vs Fortran h0, Jan): TOTSOMC rel 3.3e-8, TOTVEGC 5.9e-8,
 # TOTECOSYSC 5.2e-7, TOTSOMN 1.7e-8, SMINN 1.4e-5, TLAI 8e-6, LEAFC 8.6e-4, TG 7.6e-5
 # — i.e. the CN state was at PARITY all along; only the diagnostics were stale. The
@@ -333,8 +339,9 @@ function run_cn_annual(; ndays::Int = 365)
         ("TOTECOSYSC", totecosysc_raw),
         ("TOTSOMN",    totsomn_raw),
         ("SMINN",      sminn_tot),
-        ("GPP",        gpp_raw),
-        ("NPP",        () -> p2g(ccf().npp_patch)),  # NPP summary also unported (stays 0)
+        ("GPP",        () -> p2g(ccf().gpp_patch)),  # model's gpp_patch (cnveg flux summary now wired)
+        ("GPP_psn",    gpp_raw),                      # cross-check: raw psn->cpool streams
+        ("NPP",        () -> p2g(ccf().npp_patch)),   # npp_patch (summary now wired)
         ("TLAI",       () -> p2g(inst.canopystate.tlai_patch)),
         ("LEAFC",      () -> p2g(ccs().leafc_patch)),
         ("TG",         () -> inst.temperature.t_grnd_col[c_soil]),

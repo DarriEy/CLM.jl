@@ -578,7 +578,8 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         soilbgc_cs::SoilBiogeochemCarbonStateData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
-        soilbgc_nf::SoilBiogeochemNitrogenFluxData)
+        soilbgc_nf::SoilBiogeochemNitrogenFluxData,
+        patch_itype::Union{Vector{Int},Nothing}=nothing)
 
     # CNDriverLeaching — already ported
     cn_driver_leaching!(veg.driver_config;
@@ -624,7 +625,8 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         cnveg_cf=veg.cnveg_carbonflux_inst,
         cnveg_nf=veg.cnveg_nitrogenflux_inst,
         soilbgc_cf=soilbgc_cf,
-        soilbgc_nf=soilbgc_nf)
+        soilbgc_nf=soilbgc_nf,
+        patch_itype=patch_itype)
 
     # CNVegStructUpdate — not yet ported
     # if num_bgc_vegp > 0 && doalb
