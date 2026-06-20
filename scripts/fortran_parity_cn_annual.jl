@@ -106,10 +106,15 @@
 #          off-Bow → would poison tlai; multisite robustness). No harness call needed now.
 # RESULT (CN_NOPHS full year vs Fortran h0): TLAI flat 0.031 -> grows to 0.109 (Jul,
 # vs Fortran 0.111); TOTVEGC Jul rel 1.0e-1 -> 2.2e-2; TOTECOSYSC 1.5e-3 -> 4.3e-4;
-# SMINN 4.3e-2 -> 1.4e-2; GPP now nonzero w/ right seasonal shape (Jul 8.4e-6 vs
-# Fortran 6.7e-6, slight ~1.3x overshoot — a 2nd-order residual, likely the GDD
-# soil-layer choice (1 vs the 0.08m layer ~4) shifting onset timing). The CN axis is
-# now at good seasonal parity (PHS-off). Probe: CN_PHENO=1 CN_NOPHS=1 julia ... 365.
+# SMINN 4.3e-2 -> 1.4e-2. The CN axis is now at good seasonal parity (PHS-off).
+#  (3) GDD soil layer: phenology_soil_depth=0.08m maps (find_soil_layer_containing_depth)
+#      to soil LAYER 3 (CLM5 interfaces 0.02/0.06/0.12 -> 0.08 falls in layer 3, node
+#      ~0.09m), but cn_phenology_init!'s default stub returned layer 1 (~0.01m, too
+#      shallow/responsive) -> onset too early, TLAI/GPP overshoot. Fixed by passing a
+#      Fortran-matching find_soil_layer_fn from cn_driver.jl. TLAI parity improved ~10x:
+#      Apr/May rel 1.1e-2/1.6e-2 -> 1.6e-3/1.7e-3 (Jun 1.8e-3, matches Fortran 0.111).
+#      GPP overshoot ~1.3x -> ~0.85-0.92x (May 5.1e-6 vs 6.0e-6) — onset now tracks
+#      Fortran's timing. Probe: CN_PHENO=1 CN_NOPHS=1 julia ... 365.
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
