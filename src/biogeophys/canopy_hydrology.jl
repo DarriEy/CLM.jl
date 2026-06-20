@@ -889,6 +889,16 @@ function canopy_interception_and_throughfall!(
     check_point_for_interception_and_excess =
         fill!(similar(proto, Bool, last(bounds_p)), false)
 
+    # The canopy-fall fluxes (snocanfall/liqcanfall/snow_unload) are computed only over
+    # mask_soilp, but the fluxes-onto-ground scatter reads them over mask_nolakep. Special
+    # land units (e.g. glacier/istice) are in nolakep but not soilp, so their entries are
+    # never set -> NaN -> poisons qflx_snow_grnd -> int_snow/h2osno. Zero them here so
+    # non-soil patches contribute 0 canopy fall (they have no canopy); the soilp kernels
+    # overwrite the soil patches.
+    fill!(b_wf.wf.qflx_snocanfall_patch, zero(FT))
+    fill!(b_wf.wf.qflx_liqcanfall_patch, zero(FT))
+    fill!(b_wf.wf.qflx_snow_unload_patch, zero(FT))
+
     # --- Step 1: Top-of-canopy inputs for bulk ---
     sum_flux_top_of_canopy_inputs!(
         patch, mask_nolakep, bounds_p,
