@@ -626,3 +626,23 @@ function bgc_rev_phases(inst, bounds, filt, config)
         (sminnupdate_rev_phase!, (sminnupdate_rev_aux(inst, bounds, filt, config),)),
     ]
 end
+
+# --------------------------------------------------------------------------
+# FULL clm_drv! whole-step assembler — the COMPLETE default timestep as ONE ordered phase
+# list: the canopy+hydrology block (driver_rev_phases) followed by the use_cn BGC block
+# (bgc_rev_phases), in the exact clm_drv! order. The production driver runs cn_driver_no_
+# leaching! (the BGC step) at clm_driver.jl:1402 — right AFTER the HydrologyNoDrainage block
+# (canopy → soil_temp → surface-hydrology → soil_water → water_table → hydrology_no_drainage!)
+# and before drainage — so concatenation is faithful. ALL phases share ONE unified bundle
+# (bgc_rev_bundle: inst + canopy `scratch` + decomp `bgc` scratch); the canopy/hydrology
+# phases ignore b.bgc and the BGC phases ignore b.scratch. A single compositional_reverse!
+# over this list flows the gradient across all three domains: e.g. perturb t_grnd → canopy →
+# soil_temperature (t_soisno) / soil_water (soilpsi) → BGC decomposition → leaf carbon.
+# Validated by scripts/enzyme_fullstep_all.jl (Julia 1.10/Enzyme). Needs a use_cn inst (the
+# BGC aux builders read inst.decomp_cascade / competition / bgc_vegetation).
+function full_rev_phases(inst, bounds, filt, config; canopy_aux = nothing,
+                         n_canopy::Int = 12, dtime = 1800.0)
+    return vcat(driver_rev_phases(bounds, filt, config; canopy_aux = canopy_aux,
+                                  n_canopy = n_canopy, dtime = dtime),
+                bgc_rev_phases(inst, bounds, filt, config))
+end
