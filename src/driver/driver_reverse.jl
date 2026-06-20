@@ -273,6 +273,142 @@ function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0)
 end
 
 # --------------------------------------------------------------------------
+# BGC (use_cn) carbon/nitrogen phases. FIRST entry into the biogeochemistry domain:
+# cn_gresp! (growth respiration, cpool_*_gr = grperc·grpnow·allocation — smooth/linear)
+# reverse-differentiates at machine precision (scripts/enzyme_bgc_reverse.jl), proving the
+# CN carbon-flux cascade is reverse-able via the same template. Operates on a use_cn inst's
+# bgc_vegetation.cnveg_carbonflux_inst; the PFT growth params come from the global pftcon.
+# The full BGC chain (allocation, decomposition, phenology, mortality, fire, N-cycling) is a
+# large separate domain — several of its sub-phases (phenology onset/offset, fire, gap
+# mortality) are genuinely non-differentiable discrete state machines — so this is exposed as
+# a building block, not auto-inserted into driver_rev_phases.
+function cngresp_rev_aux(inst, bounds, filt; npcropmin::Int = NPCROPMIN, nrepr::Int = NREPR)
+    gr = PftConGrowthResp(woody = Float64.(pftcon.woody),
+                          grperc = Float64.(pftcon.grperc), grpnow = Float64.(pftcon.grpnow))
+    return (; mask = filt.bgc_vegp, bounds = bounds.begp:bounds.endp, pftcon = gr,
+              patch = inst.patch, npcropmin = npcropmin, nrepr = nrepr)
+end
+function cngresp_rev_phase!(b, aux)
+    cn_gresp!(aux.mask, aux.bounds, aux.pftcon, aux.patch,
+              b.inst.bgc_vegetation.cnveg_carbonflux_inst;
+              npcropmin = aux.npcropmin, nrepr = aux.nrepr)
+    return nothing
+end
+
+# cn_mresp! — maintenance respiration (the `br`/`br_root` calibration params; e.g.
+# livestem_mr = livestemn·br·tc(Q10)). Reverse-validated at machine precision
+# (scripts/enzyme_bgc_reverse.jl [P2]). Differentiated state: cnveg_carbonflux_inst (out)
+# + cnveg_nitrogenstate_inst (N-pool inputs); the params (MaintRespParams from
+# maint_resp_read_params! w/ br_root from cn_shared_params, PftConMaintResp from pftcon) +
+# cn_shared_params are Const aux. canopy/soil/temperature/photosyns flow from the bundle.
+function cnmresp_rev_aux(inst, bounds, filt; npcropmin::Int = NPCROPMIN, nrepr::Int = NREPR)
+    mrp = MaintRespParams(); maint_resp_read_params!(mrp; br_root = inst.cn_shared_params.br_root)
+    pftmr = PftConMaintResp{Float64}(woody = Float64.(pftcon.woody))
+    return (; mask_c = filt.bgc_soilc, mask_p = filt.bgc_vegp,
+              bounds_c = bounds.begc:bounds.endc, bounds_p = bounds.begp:bounds.endp,
+              params = mrp, cn_params = inst.cn_shared_params, pftcon = pftmr,
+              nlevgrnd = varpar.nlevgrnd, nlevsno = varpar.nlevsno, npcropmin = npcropmin, nrepr = nrepr)
+end
+function cnmresp_rev_phase!(b, aux)
+    i = b.inst
+    cn_mresp!(aux.mask_c, aux.mask_p, aux.bounds_c, aux.bounds_p, aux.params, aux.cn_params,
+              aux.pftcon, i.patch, i.canopystate, i.soilstate, i.temperature, i.photosyns,
+              i.bgc_vegetation.cnveg_carbonflux_inst, i.bgc_vegetation.cnveg_nitrogenstate_inst;
+              nlevgrnd = aux.nlevgrnd, nlevsno = aux.nlevsno, npcropmin = aux.npcropmin, nrepr = aux.nrepr)
+    return nothing
+end
+
+# c_state_update1! — the carbon-cycle pool integration (e.g. leafc += cpool_to_leafc·dt;
+# cpool drained by allocation/MR/growth-resp). Reverse-validated at machine precision
+# (scripts/enzyme_bgc_reverse.jl [P3]). Differentiated state: cnveg_carbonstate_inst (pools,
+# out) ← cnveg_carbonflux_inst (fluxes, in) + soilbiogeochem_carbonflux (litter sink). Every
+# index/cascade arg (patch_column, ivt, woody, cascade_donor/receiver_pool, harvdate,
+# col_is_fates, i_litr_*, …) is a Const, sourced from inst/config exactly as cn_driver does.
+function cstate1_rev_aux(inst, bounds, filt, config)
+    return (; mask_c = filt.bgc_soilc, mask_p = filt.bgc_vegp,
+              bounds_c = bounds.begc:bounds.endc, bounds_p = bounds.begp:bounds.endp,
+              patch_column = inst.patch.column, ivt = inst.patch.itype,
+              woody = Float64.(pftcon.woody),
+              cascade_donor_pool = inst.decomp_cascade.cascade_donor_pool,
+              cascade_receiver_pool = inst.decomp_cascade.cascade_receiver_pool,
+              harvdate = inst.crop.harvdate_patch, col_is_fates = inst.column.is_fates,
+              nlevdecomp = varpar.nlevdecomp,
+              ndecomp_cascade_transitions = config.ndecomp_cascade_transitions,
+              i_litr_min = config.i_litr_min, i_litr_max = config.i_litr_max, i_cwd = config.i_cwd,
+              npcropmin = config.npcropmin, nrepr = config.nrepr, dt = 1800.0)
+end
+function cstate1_rev_phase!(b, aux)
+    i = b.inst
+    c_state_update1!(i.bgc_vegetation.cnveg_carbonstate_inst,
+                     i.bgc_vegetation.cnveg_carbonflux_inst, i.soilbiogeochem_carbonflux;
+                     mask_soilc = aux.mask_c, mask_soilp = aux.mask_p,
+                     bounds_col = aux.bounds_c, bounds_patch = aux.bounds_p,
+                     patch_column = aux.patch_column, ivt = aux.ivt, woody = aux.woody,
+                     cascade_donor_pool = aux.cascade_donor_pool,
+                     cascade_receiver_pool = aux.cascade_receiver_pool,
+                     harvdate = aux.harvdate, col_is_fates = aux.col_is_fates,
+                     nlevdecomp = aux.nlevdecomp,
+                     ndecomp_cascade_transitions = aux.ndecomp_cascade_transitions,
+                     i_litr_min = aux.i_litr_min, i_litr_max = aux.i_litr_max, i_cwd = aux.i_cwd,
+                     npcropmin = aux.npcropmin, nrepr = aux.nrepr, dt = aux.dt)
+    return nothing
+end
+
+# n_state_update1! — the nitrogen-cycle pool integration (leafn += npool_to_leafn·dt; the
+# N counterpart of c_state_update1!, fewer consts — no cascade-pool/harvdate). Reverse-
+# validated at machine precision (scripts/enzyme_bgc_reverse.jl [P4]). Differentiated state:
+# cnveg_nitrogenstate_inst (N pools, out) ← cnveg_nitrogenflux_inst (N fluxes, in) +
+# soilbiogeochem_nitrogenflux (litter-N sink). Consts sourced from inst/config as cn_driver.
+function nstate1_rev_aux(inst, bounds, filt, config)
+    return (; mask_c = filt.bgc_soilc, mask_p = filt.bgc_vegp,
+              bounds_c = bounds.begc:bounds.endc, bounds_p = bounds.begp:bounds.endp,
+              ivt = inst.patch.itype, woody = Float64.(pftcon.woody),
+              col_is_fates = inst.column.is_fates, nlevdecomp = varpar.nlevdecomp,
+              i_litr_min = config.i_litr_min, i_litr_max = config.i_litr_max, i_cwd = config.i_cwd,
+              npcropmin = config.npcropmin, nrepr = config.nrepr, use_fun = config.use_fun, dt = 1800.0)
+end
+function nstate1_rev_phase!(b, aux)
+    i = b.inst
+    n_state_update1!(i.bgc_vegetation.cnveg_nitrogenstate_inst,
+                     i.bgc_vegetation.cnveg_nitrogenflux_inst, i.soilbiogeochem_nitrogenflux;
+                     mask_soilc = aux.mask_c, mask_soilp = aux.mask_p,
+                     bounds_col = aux.bounds_c, bounds_patch = aux.bounds_p,
+                     ivt = aux.ivt, woody = aux.woody, col_is_fates = aux.col_is_fates,
+                     nlevdecomp = aux.nlevdecomp, i_litr_min = aux.i_litr_min,
+                     i_litr_max = aux.i_litr_max, i_cwd = aux.i_cwd,
+                     npcropmin = aux.npcropmin, nrepr = aux.nrepr, use_fun = aux.use_fun, dt = aux.dt)
+    return nothing
+end
+
+# decomp_rate_constants_bgc! — soil-carbon decomposition rate constants (the Q10/tau soil-C
+# turnover calibration: t_scalar = Q10^((Tsoi−Tref)/10), w_scalar(soilpsi), decomp_k). Reverse-
+# validated at machine precision (scripts/enzyme_bgc_reverse.jl [P5]). The DIFFERENTIABLE
+# inputs flow LIVE from the bundle: t_soisno (a materialized soil-layer slice of
+# inst.temperature.t_soisno_col — a getindex copy Enzyme tracks back to the array) and
+# soilpsi (inst.soilstate.soilpsi_col); output is inst.soilbiogeochem_carbonflux (t_scalar/
+# w_scalar/decomp_k). params/state/cascade + geometry (zsoi[], col_dz slice) are Const aux,
+# sourced from inst/globals exactly as cn_driver_no_leaching! does.
+function decomprate_rev_aux(inst, bounds, filt)
+    nsno = varpar.nlevsno
+    return (; mask = filt.bgc_soilc, bounds = bounds.begc:bounds.endc,
+              params = inst.decomp_bgc_params, bgc_state = inst.decomp_bgc_state,
+              cn_params = inst.cn_shared_params, cascade_con = inst.decomp_cascade,
+              nlevdecomp = varpar.nlevdecomp, nlevsno = nsno, zsoi_vals = zsoi[],
+              col_dz = inst.column.dz[:, (nsno + 1):end], days_per_year = 365.0, dt = 1800.0)
+end
+function decomprate_rev_phase!(b, aux)
+    i = b.inst
+    t_soisno = i.temperature.t_soisno_col[:, (aux.nlevsno + 1):end]   # differentiable slice copy
+    decomp_rate_constants_bgc!(i.soilbiogeochem_carbonflux, aux.bgc_state, aux.params,
+                               aux.cn_params, aux.cascade_con;
+                               mask_bgc_soilc = aux.mask, bounds = aux.bounds,
+                               nlevdecomp = aux.nlevdecomp, t_soisno = t_soisno,
+                               soilpsi = i.soilstate.soilpsi_col, days_per_year = aux.days_per_year,
+                               dt = aux.dt, zsoi_vals = aux.zsoi_vals, col_dz = aux.col_dz)
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
 # water_table → hydrology_no_drainage. `canopy_aux === nothing` skips the canopy block.

@@ -257,11 +257,16 @@ function varcon_init!()
     dzsoi[] = dzsoi_val
     zisoi[] = zisoi_val
 
-    # Lake levels
+    # Lake levels — CLM5 reference profile (initVerticalMod.F90:517-547); per-column
+    # scaling by lakedepth/50 happens in init_vertical.jl (top layer fixed at 0.1 m).
+    # The previous default [1,2,...] gave a 1 m top layer (dzsur=0.5) → the lake
+    # surface decoupled from the warm column (conduction ~10x too weak, TG over-cooled).
     if varctl.use_extralakelayers
-        dzlak_val = fill(1.0, nlevlak)  # 25 × 1m layers
+        dzlak_val = [0.1, 0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5,
+                     0.75, 0.75, 0.75, 0.75, 2.0, 2.0, 2.5, 2.5,
+                     3.5, 3.5, 3.5, 3.5, 5.225, 5.225, 5.225, 5.225]
     else
-        dzlak_val = [1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 7.0, 7.0, 7.0, 7.0]
+        dzlak_val = [0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 7.0, 10.45, 10.45]
     end
 
     zlak_val = zeros(nlevlak)
