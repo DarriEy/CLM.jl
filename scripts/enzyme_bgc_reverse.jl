@@ -9,6 +9,7 @@
 #   [P1] cn_gresp!  (growth respiration:   cpool_*_gr = grperc·grpnow·allocation)
 #   [P2] cn_mresp!  (maintenance resp:     livestem_mr = livestemn·br·tc(Q10), the `br` param)
 #   [P3] c_state_update1! (C pool integration: leafc += cpool_to_leafc·dt — the C-cycle update)
+#   [P4] n_state_update1! (N pool integration: leafn += npool_to_leafn·dt — the N-cycle update)
 #
 #   julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_bgc_reverse.jl
 # =============================================================================
@@ -146,9 +147,55 @@ function section_cstate1()
     return verdict("P3 c_state_update1", g_fd, db.cf_veg.cpool_to_leafc_patch[1])
 end
 
+# =============================================================================
+# [P4] n_state_update1! — nitrogen pool integration (the N-cycle state update; mirror of
+#      [P3] with N structs, fewer consts — no cascade pools/harvdate). Bundle = (ns_veg N
+#      pools out, nf_veg N fluxes in, nf_soil litter-N sink). Perturb npool_to_leafn →
+#      leafn_patch (leafn += npool_to_leafn·dt, n_state_update1.jl:362).
+# =============================================================================
+function section_nstate1()
+    println("\n", "#"^70, "\n# [P4] n_state_update1! (nitrogen pool integration) REVERSE\n", "#"^70)
+    np=1; nc=1; ng=1; nlevdecomp=1; ndecomp_pools=7; ndecomp_cascade_transitions=5; nrepr=C.NREPR
+    i_litr_min=1; i_litr_max=3; i_cwd=4; dt=1800.0
+    ivt=[1]; woody=zeros(Float64,80); col_is_fates=fill(false,nc)
+    function fresh()
+        ns = C.CNVegNitrogenStateData(); C.cnveg_nitrogen_state_init!(ns, np, nc, ng; nrepr=nrepr)
+        ns.leafn_patch .= 5.0; ns.leafn_xfer_patch .= 0.5; ns.npool_patch .= 10.0
+        nf = C.CNVegNitrogenFluxData()
+        C.cnveg_nitrogen_flux_init!(nf, np, nc, ng; nrepr=nrepr, nlevdecomp_full=nlevdecomp,
+                                    ndecomp_pools=ndecomp_pools, i_litr_max=i_litr_max)
+        for f in fieldnames(typeof(nf))          # init NaN-fills → zero for a clean probe
+            v = getfield(nf, f); v isa AbstractArray{<:AbstractFloat} && fill!(v, 0.0)
+        end
+        nf.npool_to_leafn_patch[1]=5.0e-7; nf.npool_to_leafn_storage_patch[1]=2.0e-7
+        nf.leafn_xfer_to_leafn_patch[1]=2.0e-7
+        nfs = C.SoilBiogeochemNitrogenFluxData()
+        C.soil_bgc_nitrogen_flux_init!(nfs, nc, nlevdecomp, ndecomp_pools, ndecomp_cascade_transitions)
+        nfs.decomp_npools_sourcesink_col .= 0.0
+        return (; ns_veg=ns, nf_veg=nf, nf_soil=nfs)
+    end
+    aux = (; mask_c=BitVector([true]), mask_p=BitVector([true]), bounds_c=1:nc, bounds_p=1:np,
+             ivt=ivt, woody=woody, col_is_fates=col_is_fates, nlevdecomp=nlevdecomp,
+             i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, nrepr=nrepr, dt=dt)
+    phase!(b, a) = (C.n_state_update1!(b.ns_veg, b.nf_veg, b.nf_soil;
+        mask_soilc=a.mask_c, mask_soilp=a.mask_p, bounds_col=a.bounds_c, bounds_patch=a.bounds_p,
+        ivt=a.ivt, woody=a.woody, col_is_fates=a.col_is_fates, nlevdecomp=a.nlevdecomp,
+        i_litr_min=a.i_litr_min, i_litr_max=a.i_litr_max, i_cwd=a.i_cwd, nrepr=a.nrepr, dt=a.dt); nothing)
+    let b=fresh(); l0=b.ns_veg.leafn_patch[1]; phase!(b,aux)
+        @printf("primal: leafn %.4f→%.8f (Δ=%.4e expect npool_to_leafn·dt=%.4e)\n",
+            l0, b.ns_veg.leafn_patch[1], b.ns_veg.leafn_patch[1]-l0, 5.0e-7*dt)
+    end
+    L(b) = sum(abs2, b.ns_veg.leafn_patch)
+    g_fd = richardson(δ -> (b=fresh(); b.nf_veg.npool_to_leafn_patch[1]+=δ; phase!(b,aux); L(b)))
+    db = C.compositional_reverse!(Any[(phase!,(aux,))], fresh(),
+        (db,b)->(db.ns_veg.leafn_patch .= 2 .* b.ns_veg.leafn_patch))
+    return verdict("P4 n_state_update1", g_fd, db.nf_veg.npool_to_leafn_patch[1])
+end
+
 rP1 = try section_gresp() catch e; @printf("[P1] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP2 = try section_mresp() catch e; @printf("[P2] ERRORED: %s\n", sprint(showerror,e)); NaN end
 rP3 = try section_cstate1() catch e; @printf("[P3] ERRORED: %s\n", sprint(showerror,e)); NaN end
+rP4 = try section_nstate1() catch e; @printf("[P4] ERRORED: %s\n", sprint(showerror,e)); NaN end
 println("\n", "="^70)
-@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e\n", rP1, rP2, rP3)
+@printf("BGC REVERSE SUMMARY  [P1] cn_gresp=%.3e  [P2] cn_mresp=%.3e  [P3] c_state_update1=%.3e  [P4] n_state_update1=%.3e\n", rP1, rP2, rP3, rP4)
 println("="^70)

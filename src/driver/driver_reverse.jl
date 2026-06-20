@@ -354,6 +354,32 @@ function cstate1_rev_phase!(b, aux)
     return nothing
 end
 
+# n_state_update1! — the nitrogen-cycle pool integration (leafn += npool_to_leafn·dt; the
+# N counterpart of c_state_update1!, fewer consts — no cascade-pool/harvdate). Reverse-
+# validated at machine precision (scripts/enzyme_bgc_reverse.jl [P4]). Differentiated state:
+# cnveg_nitrogenstate_inst (N pools, out) ← cnveg_nitrogenflux_inst (N fluxes, in) +
+# soilbiogeochem_nitrogenflux (litter-N sink). Consts sourced from inst/config as cn_driver.
+function nstate1_rev_aux(inst, bounds, filt, config)
+    return (; mask_c = filt.bgc_soilc, mask_p = filt.bgc_vegp,
+              bounds_c = bounds.begc:bounds.endc, bounds_p = bounds.begp:bounds.endp,
+              ivt = inst.patch.itype, woody = Float64.(pftcon.woody),
+              col_is_fates = inst.column.is_fates, nlevdecomp = varpar.nlevdecomp,
+              i_litr_min = config.i_litr_min, i_litr_max = config.i_litr_max, i_cwd = config.i_cwd,
+              npcropmin = config.npcropmin, nrepr = config.nrepr, use_fun = config.use_fun, dt = 1800.0)
+end
+function nstate1_rev_phase!(b, aux)
+    i = b.inst
+    n_state_update1!(i.bgc_vegetation.cnveg_nitrogenstate_inst,
+                     i.bgc_vegetation.cnveg_nitrogenflux_inst, i.soilbiogeochem_nitrogenflux;
+                     mask_soilc = aux.mask_c, mask_soilp = aux.mask_p,
+                     bounds_col = aux.bounds_c, bounds_patch = aux.bounds_p,
+                     ivt = aux.ivt, woody = aux.woody, col_is_fates = aux.col_is_fates,
+                     nlevdecomp = aux.nlevdecomp, i_litr_min = aux.i_litr_min,
+                     i_litr_max = aux.i_litr_max, i_cwd = aux.i_cwd,
+                     npcropmin = aux.npcropmin, nrepr = aux.nrepr, use_fun = aux.use_fun, dt = aux.dt)
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # Assembler: the ordered (phase_fn, const_args) list for a clm_drv! reverse, in
 # forward order: [canopy] → soil_temp → <surface hydrology block> → soil_water →
