@@ -139,4 +139,18 @@
     blast = deepcopy(cps[end]); for (f, cargs) in steps[end]; f(blast, cargs...); end
     @test btl.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
     @test blast.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
+
+    # ---- binomial (recursive-bisection) checkpointing guard (NO Enzyme). The O(log N)-memory
+    # engine CLM.multistep_reverse_binomial! gives a gradient bitwise-identical to multistep_
+    # reverse! (Enzyme-validated 4-way in scripts/enzyme_multistep_reverse.jl). Here we guard
+    # its forward primitive _advance_steps!(steps,b,lo,hi): advancing a COPY through the full
+    # range reproduces the flat loop, and advancing a sub-range then the remainder equals the
+    # whole — the recompute fidelity the bisection relies on.
+    @test isa(CLM.multistep_reverse_binomial!, Function)
+    bfull = CLM._advance_steps!(steps, CLM.driver_rev_bundle(deepcopy(inst)), 0, Nstep)
+    @test bfull.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
+    bseg = CLM.driver_rev_bundle(deepcopy(inst))
+    CLM._advance_steps!(steps, bseg, 0, 1)            # step 0
+    CLM._advance_steps!(steps, bseg, 1, Nstep)        # steps 1..N-1
+    @test bseg.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
 end
