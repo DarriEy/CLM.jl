@@ -96,6 +96,8 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     n_drydep::Int
     use_hydrstress::Bool   # plant hydraulic stress (PHS) photosynthesis path
     use_luna::Bool         # LUNA photosynthetic-N acclimation (vcmax25 from vcmx25_z)
+    use_voc::Bool          # MEGAN VOC emissions (gated, like shr_megan_mechcomps_n>0)
+    megan::MEGANConfig     # MEGAN static descriptors (factors table + compound mappings)
 end
 
 # Backward-compatible property accessors so existing code like config.use_cn still works
@@ -161,6 +163,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           use_aquifer_layer::Bool=true,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
                           n_drydep::Int=0, use_hydrstress::Bool=false, use_luna::Bool=false,
+                          use_voc::Bool=false, megan::Union{MEGANConfig,Nothing}=nothing,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
                           ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
                           i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
@@ -177,8 +180,13 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     else
         mode = SPMode()
     end
+    if megan === nothing
+        megan = MEGANConfig()
+        megan_factors_init!(megan.megan_factors, 20)
+    end
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
-                    use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, use_luna)
+                    use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, use_luna,
+                    use_voc, megan)
 end
 
 # ---------------------------------------------------------------------------
@@ -1000,8 +1008,23 @@ function clm_drv_core!(config::CLMDriverConfig,
                   a2l.forc_t_downscaled_col,
                   fv.ram1_patch, fv.fv_patch)
 
-    # VOCEmission — no-op (MEGAN compounds not initialized; empty compound list)
-    # To enable: initialize MEGANCompound/MEGANMechComp arrays and call voc_emission!()
+    # VOCEmission — MEGAN VOC emissions (gated on use_voc + populated compounds).
+    # Mirrors the Fortran `if (shr_megan_mechcomps_n < 1) return` gate: the call is
+    # a no-op unless MEGAN compound/mechanism descriptors have been supplied on
+    # `config.megan` (e.g. from a namelist read + megan_factors_get lookup).
+    if config.use_voc && !isempty(config.megan.mech_comps) && !isempty(config.megan.meg_compounds)
+        voc_emission!(
+            inst.vocemis, config.megan.meg_compounds, config.megan.mech_comps, config.megan.megan_factors,
+            pch, 1:length(filt.soilp), filt.soilp,
+            a2l.forc_solad_downscaled_col, a2l.forc_solai_grc,
+            a2l.forc_pbot_downscaled_col, a2l.forc_pco2_grc,
+            a2l.fsd24_patch, a2l.fsd240_patch, a2l.fsi24_patch, a2l.fsi240_patch,
+            cs.fsun_patch, cs.fsun24_patch, cs.fsun240_patch,
+            cs.elai_patch, cs.elai240_patch,
+            ps.cisun_z_patch, ps.cisha_z_patch,
+            temp.t_veg_patch, temp.t_veg24_patch, temp.t_veg240_patch,
+            ef.btran_patch)
+    end
 
     # ========================================================================
     # DETERMINE TEMPERATURES

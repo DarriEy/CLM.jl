@@ -79,6 +79,71 @@
     end
 
     # -----------------------------------------------------------------------
+    # MEGAN factors name-based lookup (MEGANFactorsMod: gen_hashkey /
+    # megan_factors_table_init! / megan_factors_get)
+    # -----------------------------------------------------------------------
+    @testset "gen_hashkey matches Fortran" begin
+        # Reference values computed from the verbatim Fortran gen_hashkey
+        # (MEGANFactorsMod.F90); the Julia version returns the Fortran result + 1
+        # for 1-based indexing.  Covers the arbitrary-length and the special
+        # length-19 branch (acetaldehyde_ch3cho).
+        ref = Dict(
+            "isoprene"                => 21218,
+            "myrcene"                 => 23430,
+            "pinene_a"                => 20806,
+            "methylbutenol_232m3b2ol" => 19612,  # len 23 (arbitrary branch)
+            "acetaldehyde_ch3cho"     => 17239,  # len 19 (special branch)
+        )
+        for (nm, h) in ref
+            @test CLM.gen_hashkey(nm) - 1 == h
+        end
+        # all keys land within [1, tbl_hash_sz]
+        for (nm, _) in ref
+            k = CLM.gen_hashkey(nm)
+            @test 1 <= k <= 2^16
+        end
+        # trailing blanks are ignored (len_trim semantics)
+        @test CLM.gen_hashkey("isoprene") == CLM.gen_hashkey("isoprene   ")
+    end
+
+    @testset "megan_factors_table_init! / megan_factors_get" begin
+        # Two compounds, 3 PFTs, 2 classes.  Stored factor = Comp_EF * Class_EF.
+        comp_names = ["isoprene", "myrcene"]
+        npfts = 3
+        comp_EF = [10.0 20.0 30.0;     # isoprene per-PFT comp factors
+                    1.0  2.0  3.0]     # myrcene
+        class_EF = [2.0 2.0 2.0;       # class 1 per-PFT class factors
+                    5.0 5.0 5.0]       # class 2
+        class_nums = [1, 2]
+        comp_mw = [68.12, 136.23]
+
+        tbl = CLM.MEGANFactorsTable()
+        CLM.megan_factors_table_init!(tbl, comp_names, comp_EF, class_EF,
+                                      class_nums, comp_mw)
+
+        @test tbl.npfts == npfts
+
+        # isoprene: class 1 -> factors = comp_EF[1,:] .* class_EF[1,:]
+        (f1, cn1, mw1) = CLM.megan_factors_get(tbl, "isoprene")
+        @test cn1 == 1
+        @test mw1 ≈ 68.12
+        @test f1 ≈ [20.0, 40.0, 60.0]
+
+        # myrcene: class 2 -> factors = comp_EF[2,:] .* class_EF[2,:]
+        (f2, cn2, mw2) = CLM.megan_factors_get(tbl, "myrcene")
+        @test cn2 == 2
+        @test mw2 ≈ 136.23
+        @test f2 ≈ [5.0, 10.0, 15.0]
+
+        # trimmed lookups resolve the same entry
+        (f1b, _, _) = CLM.megan_factors_get(tbl, "isoprene ")
+        @test f1b ≈ f1
+
+        # missing compound -> error (mirrors the Fortran endrun)
+        @test_throws ErrorException CLM.megan_factors_get(tbl, "not_a_compound")
+    end
+
+    # -----------------------------------------------------------------------
     # Test helper functions
     # -----------------------------------------------------------------------
     @testset "get_gamma_L" begin
@@ -443,6 +508,79 @@
             fill(0.8, np)
         )
         @test result === nothing
+    end
+
+    # -----------------------------------------------------------------------
+    # Integration: build MEGANCompound descriptors from the name-based lookup
+    # (the megan_factors_get path the Fortran InitAllocate uses) and run the
+    # emission driver to finite output.
+    # -----------------------------------------------------------------------
+    @testset "voc_emission! fed from megan_factors_get" begin
+        npfts = 20
+        comp_names = ["isoprene", "myrcene"]
+        comp_EF  = vcat(fill(600.0, 1, npfts), fill(100.0, 1, npfts))
+        class_EF = vcat(fill(1.0, 1, npfts), fill(1.0, 1, npfts))
+        class_nums = [1, 2]
+        comp_mw = [68.12, 136.23]
+
+        tbl = CLM.MEGANFactorsTable()
+        CLM.megan_factors_table_init!(tbl, comp_names, comp_EF, class_EF,
+                                      class_nums, comp_mw)
+
+        # Build compound descriptors via the lookup (mirrors InitAllocate's
+        # megan_factors_get loop).
+        meg_compounds = CLM.MEGANCompound{Float64}[]
+        for (i, nm) in enumerate(comp_names)
+            (factors, class_n, mw) = CLM.megan_factors_get(tbl, nm)
+            push!(meg_compounds, CLM.MEGANCompound(
+                name = nm, index = i, class_number = class_n,
+                molec_weight = mw, coeff = 1.0, emis_factors = copy(factors)))
+        end
+        @test meg_compounds[1].emis_factors[1] ≈ 600.0
+        @test meg_compounds[2].class_number == 2
+
+        mech_comps = [
+            CLM.MEGANMechComp(name="ISOP", n_megan_comps=1, megan_indices=[1]),
+            CLM.MEGANMechComp(name="TERP", n_megan_comps=1, megan_indices=[2]),
+        ]
+
+        mf = CLM.MEGANFactors(); CLM.megan_factors_init!(mf, 20)
+
+        np = 3; nc = 2; ng = 1
+        voc = CLM.VOCEmisData(); CLM.vocemis_init!(voc, np, ng, 2, 2)
+        voc.efisop_grc[:, 1] .= 600.0
+
+        patch = CLM.PatchData(); CLM.patch_init!(patch, np)
+        patch.itype .= [0, 1, 6]
+        patch.gridcell .= [1, 1, 1]
+        patch.column .= [1, 1, 2]
+
+        CLM.voc_emission!(
+            voc, meg_compounds, mech_comps, mf,
+            patch, 1:np, trues(np),
+            fill(200.0, nc, 2), fill(100.0, ng, 2),
+            fill(101325.0, nc), fill(40.53, ng),
+            fill(200.0, np), fill(200.0, np), fill(100.0, np), fill(100.0, np),
+            fill(0.5, np), fill(0.5, np), fill(0.5, np), fill(2.0, np), fill(2.0, np),
+            fill(0.7 * 400.0e-6 * 101325.0, np, 1), fill(0.7 * 400.0e-6 * 101325.0, np, 1),
+            fill(300.0, np), fill(300.0, np), fill(297.0, np),
+            fill(0.8, np))
+
+        @test voc.vocflx_tot_patch[1] ≈ 0.0          # bare ground
+        @test isfinite(voc.vocflx_tot_patch[2])
+        @test voc.vocflx_tot_patch[2] > 0.0          # vegetated -> emits
+        @test all(isfinite, voc.vocflx_tot_patch)
+        @test all(isfinite, voc.vocflx_patch)
+    end
+
+    # -----------------------------------------------------------------------
+    # Driver-config gate: the use_voc flag exists and defaults off.
+    # -----------------------------------------------------------------------
+    @testset "use_voc config flag" begin
+        cfg = CLM.CLMDriverConfig()
+        @test cfg.use_voc == false
+        cfg2 = CLM.CLMDriverConfig(use_voc=true)
+        @test cfg2.use_voc == true
     end
 
 end
