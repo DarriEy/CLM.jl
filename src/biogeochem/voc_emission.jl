@@ -90,6 +90,24 @@ Base.@kwdef mutable struct MEGANMechComp
     megan_indices ::Vector{Int}  = Int[] # indices into MEGANCompound array
 end
 
+"""
+    MEGANConfig
+
+Static MEGAN/VOC descriptors (the emission-factor table + the compound and
+mechanism-compound mappings). These are configuration, not differentiated
+state, so they live on `CLMDriverConfig` rather than on `CLMInstances` — the
+ForwardDiff AD path dual-copies `CLMInstances` field-by-field and cannot
+traverse these non-numeric struct vectors.
+
+Empty `meg_compounds`/`mech_comps` means MEGAN is inactive (the `voc_emission!`
+driver call is a no-op, mirroring the Fortran `shr_megan_mechcomps_n < 1` gate).
+"""
+Base.@kwdef mutable struct MEGANConfig
+    megan_factors ::MEGANFactors{Float64, Vector{Float64}} = MEGANFactors{Float64}()
+    meg_compounds ::Vector{MEGANCompound{Float64}}         = MEGANCompound{Float64}[]
+    mech_comps    ::Vector{MEGANMechComp}                  = MEGANMechComp[]
+end
+
 # ---------------------------------------------------------------------------
 # VOCEmisData — VOC emission state/flux data
 # ---------------------------------------------------------------------------
@@ -248,6 +266,163 @@ function megan_factors_init!(mf::MEGANFactors{FT}, n_classes::Int=20) where {FT}
     mf.Ceo   = fill(2.0, n_classes)
     mf.LDF   = fill(0.6, n_classes)
     return nothing
+end
+
+# ---------------------------------------------------------------------------
+# MEGAN compound-name → emission-factor lookup table
+# Ported from MEGANFactorsMod.F90 (gen_hashkey / bld_hash_table_indices /
+# enter_hash_data / megan_factors_get).
+# ---------------------------------------------------------------------------
+
+const _MEGAN_TBL_HASH_SZ  = 2^16              # hash table size (tbl_hash_sz)
+const _MEGAN_TBL_MAX_IDX  = 15                # 2**N - 1
+const _MEGAN_HASH_OFFSET  = Int32(0x000053db) # gen_hash_key_offset
+# tbl_gen_hash_key — fixed prime table (Fortran indexes 0..15)
+const _MEGAN_HASH_KEY = Int32[61,59,53,47,43,41,37,31,29,23,17,13,11,7,3,1]
+
+"""
+    gen_hashkey(string) -> Int
+
+Generate a hash key on `[1 .. tbl_hash_sz]` for a compound name.
+
+Faithful port of `gen_hashkey` from `MEGANFactorsMod.F90` (a variant of perl's
+internal hashing function). The Fortran uses 32-bit integer arithmetic with
+wraparound on `ieor`/multiply, so all arithmetic here is done in `Int32`.
+
+Returns a 1-based index (the Fortran result `iand(hash, tbl_hash_sz-1)` is on
+`[0 .. tbl_hash_sz-1]`; we add 1 for Julia 1-based array indexing).
+"""
+function gen_hashkey(s::AbstractString)
+    str = rstrip(s)               # Fortran uses len_trim (trailing-blank-trimmed)
+    n = ncodeunits(str)           # length in bytes (ichar operates byte-wise)
+    bytes = codeunits(str)
+    hash = _MEGAN_HASH_OFFSET
+
+    if n != 19
+        # Process arbitrary string length.
+        @inbounds for i in 1:n
+            ch = Int32(bytes[i])
+            k  = _MEGAN_HASH_KEY[(i - 1) & _MEGAN_TBL_MAX_IDX + 1]
+            hash = xor(hash, ch * k)
+        end
+    else
+        # Special case string length = 19 (matches the Fortran branch exactly).
+        @inbounds for i in 1:(_MEGAN_TBL_MAX_IDX + 1)
+            ch = Int32(bytes[i])
+            hash = xor(hash, ch * _MEGAN_HASH_KEY[i])
+        end
+        @inbounds for i in (_MEGAN_TBL_MAX_IDX + 2):n
+            ch = Int32(bytes[i])
+            hash = xor(hash, ch * _MEGAN_HASH_KEY[i - _MEGAN_TBL_MAX_IDX - 1])
+        end
+    end
+
+    # iand(hash, tbl_hash_sz-1) on [0 .. tbl_hash_sz-1], then +1 for 1-based.
+    return Int(hash & Int32(_MEGAN_TBL_HASH_SZ - 1)) + 1
+end
+
+"""
+    MEGANFactorsTable
+
+In-memory hash table of MEGAN emission factors, mirroring the
+`comp_factors_table` / `hash_table_indices` data of `MEGANFactorsMod.F90`.
+
+Each entry holds, for one named compound, the per-PFT emission-efficiency
+factors (`eff`, = Comp_EF * Class_EF), the MEGAN class number, and the molecular
+weight. Lookups by name use `gen_hashkey`.
+"""
+mutable struct MEGANFactorsTable{FT<:Real}
+    npfts::Int                              # number of plant function types
+    # hash_table_indices: hashkey -> entry index (0 = empty), 1-based hashkey
+    hash_table_indices::Vector{Int}
+    # comp_factors_table (parallel arrays; entry n is the n-th compound entered)
+    eff       ::Vector{Vector{FT}}          # per-entry per-PFT factors
+    class_num ::Vector{Int}                 # per-entry MEGAN class number
+    wght      ::Vector{FT}                  # per-entry molecular weight
+    names     ::Vector{String}              # per-entry compound name
+end
+
+# Empty-table constructor (Float64 by default).
+MEGANFactorsTable{FT}() where {FT<:Real} =
+    MEGANFactorsTable{FT}(0, zeros(Int, _MEGAN_TBL_HASH_SZ),
+                          Vector{Vector{FT}}(), Int[], FT[], String[])
+MEGANFactorsTable() = MEGANFactorsTable{Float64}()
+
+"""
+    megan_factors_table_init!(tbl, comp_names, comp_EF, class_EF, class_nums, comp_molecwghts)
+
+Build the MEGAN factors hash table from the (already-read) input data.
+
+Faithful port of the table-building portion of `megan_factors_init` in
+`MEGANFactorsMod.F90`: for each compound `i`, the stored per-PFT factor is
+`Comp_EF(i, :) * Class_EF(class_nums(i), :)`, keyed by `gen_hashkey(name)`.
+
+Arguments (mirroring the netCDF variables read by the Fortran):
+  - `comp_names`     : Vector{String}, length n_comps           (Comp_Name)
+  - `comp_EF`        : Matrix (n_comps × npfts)                 (Comp_EF)
+  - `class_EF`       : Matrix (n_classes × npfts)               (Class_EF)
+  - `class_nums`     : Vector{Int}, length n_comps              (Class_Num)
+  - `comp_molecwghts`: Vector, length n_comps                   (Comp_MW)
+
+The netCDF read itself (file I/O) is the responsibility of the caller; this
+mirrors the in-memory hash-table construction only.
+"""
+function megan_factors_table_init!(tbl::MEGANFactorsTable{FT},
+                                   comp_names::AbstractVector{<:AbstractString},
+                                   comp_EF::AbstractMatrix{<:Real},
+                                   class_EF::AbstractMatrix{<:Real},
+                                   class_nums::AbstractVector{<:Integer},
+                                   comp_molecwghts::AbstractVector{<:Real}) where {FT}
+    n_comps = length(comp_names)
+    npfts   = size(comp_EF, 2)
+    @assert size(comp_EF, 1) == n_comps "comp_EF rows must equal n_comps"
+    @assert length(class_nums) == n_comps "class_nums length must equal n_comps"
+    @assert length(comp_molecwghts) == n_comps "comp_molecwghts length must equal n_comps"
+
+    tbl.npfts = npfts
+    fill!(tbl.hash_table_indices, 0)
+    empty!(tbl.eff); empty!(tbl.class_num); empty!(tbl.wght); empty!(tbl.names)
+
+    for i in 1:n_comps
+        cn = Int(class_nums[i])
+        # factors(:) = comp_factors(:) * class_factors(:)   (Fortran l.162)
+        factors = FT[FT(comp_EF[i, k]) * FT(class_EF[cn, k]) for k in 1:npfts]
+        # enter_hash_data
+        name = String(rstrip(comp_names[i]))
+        push!(tbl.eff, factors)
+        push!(tbl.class_num, cn)
+        push!(tbl.wght, FT(comp_molecwghts[i]))
+        push!(tbl.names, name)
+        ndx = length(tbl.eff)
+        tbl.hash_table_indices[gen_hashkey(name)] = ndx
+    end
+
+    return nothing
+end
+
+"""
+    megan_factors_get(tbl, comp_name) -> (factors, class_n, molecwght)
+
+Get MEGAN information for a named compound.
+
+Faithful port of `megan_factors_get` in `MEGANFactorsMod.F90`. Returns the
+per-PFT emission-efficiency factors, the MEGAN class number, and the molecular
+weight. Throws if the compound is not present in the table (mirrors the Fortran
+`endrun`).
+"""
+function megan_factors_get(tbl::MEGANFactorsTable{FT}, comp_name::AbstractString) where {FT}
+    name = String(rstrip(comp_name))
+    hashkey = gen_hashkey(name)
+    ndx = tbl.hash_table_indices[hashkey]
+
+    if ndx < 1
+        error("megan_factors_get: $(name) compound not found in MEGAN table")
+    end
+
+    factors   = tbl.eff[ndx]
+    class_n   = tbl.class_num[ndx]
+    molecwght = tbl.wght[ndx]
+    return (factors, class_n, molecwght)
 end
 
 # ---------------------------------------------------------------------------

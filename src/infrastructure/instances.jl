@@ -76,6 +76,9 @@ Base.@kwdef mutable struct CLMInstances
     # --- Emissions ---
     dust_emis::DustEmisBaseData      = DustEmisBaseData()
     vocemis::VOCEmisData             = VOCEmisData()
+    # MEGAN static descriptors (factors table + compound/mechanism mappings) live
+    # on CLMDriverConfig.megan, NOT here — CLMInstances is dual-copied for AD and
+    # cannot traverse those non-numeric struct vectors.
 
     # --- Dry deposition velocity ---
     drydep::DryDepVelocityData = DryDepVelocityData()
@@ -259,6 +262,7 @@ function clm_instInit!(inst::CLMInstances;
     # --- Emissions ---
     dust_emis_init!(inst.dust_emis, np)
     vocemis_init!(inst.vocemis, np, ng, 20, 20)
+    # MEGAN factors live on CLMDriverConfig.megan and are initialized there.
 
     # --- Dry deposition velocity ---
     drydep_init!(inst.drydep, np, 0)  # n_drydep=0 by default; set >0 to activate
