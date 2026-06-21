@@ -480,6 +480,31 @@ function sminnupdate_rev_phase!(b, aux)
     return nothing
 end
 
+# cn_gap_mortality! — background gap mortality (m_{leaf,froot,stem,…}c_to_litter = pool · r_mort
+# rate). A CONTINUOUS/linear phase: its branches are on the STATIC `woody` PFT flag and `>0`
+# true-zeros, so it reverse-differentiates at machine precision with NO smoothing needed
+# (scripts/enzyme_gapmort.jl). Operates on bgc_vegetation.cnveg_carbon/nitrogen{state,flux}_inst;
+# params/pftcon/dgvs sourced from the global pftcon + zeros exactly as cn_driver (DGVS path off).
+function gapmort_rev_aux(inst, bounds, filt, config)
+    np = length(bounds.begp:bounds.endp)
+    gmp = GapMortalityParams{Float64}(k_mort = 0.3, r_mort = fill(0.02, length(pftcon.woody)))
+    pftgm = PftConGapMort{Float64}(woody = Float64.(pftcon.woody), leafcn = Float64.(pftcon.leafcn),
+        livewdcn = Float64.(pftcon.livewdcn), lf_f = Float64.(pftcon.lf_f), fr_f = Float64.(pftcon.fr_f))
+    dgvs = DgvsGapMortData{Float64}(greffic_patch = zeros(np), heatstress_patch = zeros(np), nind_patch = zeros(np))
+    return (; params = gmp, pftcon = pftgm, dgvs = dgvs, mask = filt.bgc_vegp,
+              bounds = bounds.begp:bounds.endp, use_matrixcn = config.use_matrixcn,
+              npcropmin = config.npcropmin, dt = 1800.0)
+end
+function gapmort_rev_phase!(b, aux)
+    i = b.inst; veg = i.bgc_vegetation
+    cn_gap_mortality!(aux.mask, aux.bounds, aux.params, aux.pftcon, aux.dgvs, i.patch, i.canopystate,
+                      veg.cnveg_carbonstate_inst, veg.cnveg_carbonflux_inst,
+                      veg.cnveg_nitrogenstate_inst, veg.cnveg_nitrogenflux_inst;
+                      dt = aux.dt, days_per_year = 365.0, use_cndv = false,
+                      use_matrixcn = aux.use_matrixcn, spinup_state = 0, npcropmin = aux.npcropmin)
+    return nothing
+end
+
 # calc_plant_cn_alloc! — plant C/N ALLOCATION (after nutrient competition): distributes the
 # available C/N to leaf/froot/stem/croot/repr pools via the allometry + downregulation logic
 # (sminn_to_npool = plant_ndemand·fpg → plant_nalloc → plant_calloc → cpool_to_*; psn down-
