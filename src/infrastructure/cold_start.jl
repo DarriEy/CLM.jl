@@ -293,6 +293,17 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             ss.watopt_col[c, j] = watsat_val * (158490.0 / sucsat_val)^(-1.0 / bsw_val)
             ss.watfc_col[c, j]  = watsat_val * (0.01 / hksat_val)^(1.0 / (2.0 * bsw_val + 3.0))
         end
+
+        # Threshold soil moisture and clay mass fraction for dust emission, set
+        # from the top-layer (layer 1) clay percent. Matches the Fortran
+        # SoilStateInitTimeConstMod.F90:718-731 default (non-Leung) path with
+        # dust_moist_fact = 1.0. clay3d(g,1) here is the surfdata clay percent
+        # for the topmost soil level.
+        clay_top = surf.pct_clay[gi, 1]
+        if clay_top >= 0.0 && clay_top <= 100.0
+            ss.mss_frc_cly_vld_col[c] = mass_frac_clay(clay_top)
+            ss.gwc_thr_col[c] = threshold_soil_moist_zender2003(clay_top)
+        end
     end
 
     nothing
