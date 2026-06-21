@@ -13,11 +13,11 @@
 # =============================================================================
 using CLM, Enzyme, Printf
 const C = CLM
-# SMOOTH=always sets SMOOTH_MODE before any Enzyme compile, so the BGC competition/decomp hard
-# min/max/clamps evaluate as smooth (sigmoid/LogSumExp) — tests whether the cross-domain residual
-# is a hard-branch subgradient (Phase-3 smoothing) vs a true AD error.
-C.SMOOTH_MODE[] = (get(ENV, "SMOOTH", "auto") == "always") ? :always : :auto
-@printf("SMOOTH_MODE = %s\n", C.SMOOTH_MODE[])
+# SMOOTH=always evaluates the differentiated phases' hard min/max/clamps as smooth (LogSumExp/
+# sigmoid) — tests whether the cross-domain residual is a hard-branch subgradient (Phase-3) vs a
+# true AD error. Set AFTER warmup (below): the inst is warmed under :auto (the full clm_drv! has
+# many more smooth calls — fire/phenology/methane — and warming under :always can NaN the state);
+# only the reverse-AD chain (forward checkpointing + reverse) runs under the chosen mode.
 const FSURDAT  = get(ENV, "CLM_FSURDAT",  "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = get(ENV, "CLM_PARAMFILE", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
 
@@ -63,7 +63,9 @@ function build_cn_inst()
     return inst, bounds, filt, config
 end
 
-inst, bounds, filt, config = build_cn_inst()
+inst, bounds, filt, config = build_cn_inst()    # warmed under :auto (default)
+C.SMOOTH_MODE[] = (get(ENV, "SMOOTH", "auto") == "always") ? :always : :auto
+@printf("SMOOTH_MODE = %s (set after :auto warmup)\n", C.SMOOTH_MODE[])
 Ncanopy = parse(Int, get(ENV, "CLM_NCANOPY", "8"))
 # CANOPY=0 → hydrology+BGC unification (perturb t_grnd, read by soil_temperature!); CANOPY=1
 # prepends the canopy energy block too (25 phases). NOTE (residual investigation): the canopy
@@ -73,9 +75,13 @@ Ncanopy = parse(Int, get(ENV, "CLM_NCANOPY", "8"))
 # phase change (soil is ~286 K, imelt=0). The remaining FD-vs-AD gap (~3% no-canopy, ~14% with
 # canopy) is a hard-branch SUBGRADIENT in the physics (BGC competition fpi=min(1,…) / decomp
 # clamps; canopy energy-balance branches) under SMOOTH_MODE=:auto — every t_grnd→t_soisno link is
-# individually FD-clean, so it's non-smoothness (Phase 3), not an AD error. SMOOTH=always is the
-# principled fix but the smooth primitives (LogSumExp k=50) currently overflow→NaN on full-physics
-# ranges — a smooth-primitive-hardening follow-up.
+# individually FD-clean, so it's non-smoothness (Phase 3), not an AD error. SMOOTH=always now runs
+# NaN-FREE under reverse-AD (the smooth primitives got a saturation guard, _SMOOTH_SAT, so
+# smooth_max(0,f(x)) with a singular f' in the saturated tail no longer yields tiny·∞=NaN) — but it
+# does NOT yet close the bracket, because the 3% source (soil_bgc_competition!'s fpi) uses HARD
+# min/max branches, not the smooth_* primitives. Closing it = rewrite competition's fpi/clamps with
+# smooth_min/max (now reverse-AD-safe for it). Mode is set AFTER the :auto warmup (below) so the
+# warmup state stays clean (the full clm_drv! has many more smooth calls that :always-warmup can NaN).
 caux = get(ENV, "CANOPY", "0") == "1" ? C.canopy_rev_aux(inst, bounds, filt; use_psn=false) : nothing
 phases = C.full_rev_phases(inst, bounds, filt, config; canopy_aux=caux, n_canopy=Ncanopy)
 hc = filt.hydrologyc; c0h = [c for c in bounds.begc:bounds.endc if hc[c]][1]

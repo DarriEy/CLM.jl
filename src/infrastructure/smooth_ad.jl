@@ -66,6 +66,17 @@ unchanged).
 """
 @inline _smooth_f64() = (SMOOTH_MODE[] === :always)
 
+# Saturation threshold for the LogSumExp smooth_min/max. When one argument dominates the other
+# by k·|a−b| > _SMOOTH_SAT, the dominated branch's softmax weight is < exp(−36) ≈ 2e-16 (below
+# machine eps), so we return the HARD min/max exactly. This is not just speed: it makes the
+# smooth functions SATURATE like the hard ones in the tails, which is essential for reverse-AD.
+# A non-saturating smooth_max(0, f(x)) keeps a tiny-but-nonzero weight on the f(x) branch, so its
+# reverse multiplies that weight by f'(x); if f has a SINGULAR derivative where it is dominated
+# (e.g. log10(satw)→−∞ with d/dsatw = 1/(satw·ln10) → ∞ as satw→0, soil_temperature.jl:580), the
+# product is (tiny)·∞ = NaN. Saturating to the hard value skips evaluating f' there entirely —
+# the exact behavior of the hard branch. Also makes ±Inf arguments safe (no Inf−Inf in LogSumExp).
+const _SMOOTH_SAT = 36.0
+
 # --------------------------------------------------------------------------
 # smooth_min — LogSumExp approximation: -(log(exp(-k*a) + exp(-k*b)))/k
 # --------------------------------------------------------------------------
@@ -79,6 +90,9 @@ Smooth approximation to `min(a, b)`.
 """
 function smooth_min(a::Float64, b::Float64; k::Float64=50.0)
     (_use_smooth(Float64) || _smooth_f64()) || return min(a, b)
+    d = k * (a - b)
+    d >  _SMOOTH_SAT && return b        # b ≪ a → min is b (skip a's branch derivative)
+    d < -_SMOOTH_SAT && return a        # a ≪ b → min is a
     ak = -k * a; bk = -k * b; m = max(ak, bk)
     return -(m + log(exp(ak - m) + exp(bk - m))) / k
 end
@@ -89,6 +103,9 @@ function smooth_min(a::T, b::S; k::Real=50) where {T<:Real, S<:Real}
     R = promote_type(T, S)
     _use_smooth(R) || return min(a, b)   # exact for non-AD (Float32/Float64); GPU-safe
     kk = R(k)                            # sharpness at working precision (no Float64 pin)
+    d = kk * (a - b)                     # saturation guard (see _SMOOTH_SAT); compares on value
+    d >  R(_SMOOTH_SAT) && return R(b)
+    d < -R(_SMOOTH_SAT) && return R(a)
     ak = -kk * a
     bk = -kk * b
     # Numerically stable: shift by max to avoid overflow
@@ -109,6 +126,9 @@ Smooth approximation to `max(a, b)`.
 """
 function smooth_max(a::Float64, b::Float64; k::Float64=50.0)
     (_use_smooth(Float64) || _smooth_f64()) || return max(a, b)
+    d = k * (a - b)
+    d >  _SMOOTH_SAT && return a        # a ≫ b → max is a (skip b's branch derivative)
+    d < -_SMOOTH_SAT && return b        # a ≪ b → max is b
     ak = k * a; bk = k * b; m = max(ak, bk)
     return (m + log(exp(ak - m) + exp(bk - m))) / k
 end
@@ -119,6 +139,9 @@ function smooth_max(a::T, b::S; k::Real=50) where {T<:Real, S<:Real}
     R = promote_type(T, S)
     _use_smooth(R) || return max(a, b)   # exact for non-AD (Float32/Float64); GPU-safe
     kk = R(k)                            # sharpness at working precision (no Float64 pin)
+    d = kk * (a - b)                     # saturation guard (see _SMOOTH_SAT)
+    d >  R(_SMOOTH_SAT) && return R(a)
+    d < -R(_SMOOTH_SAT) && return R(b)
     ak = kk * a
     bk = kk * b
     m = max(ak, bk)
@@ -156,6 +179,12 @@ end
 # --------------------------------------------------------------------------
 @inline function _stable_sigmoid(x::Real, k::Real)
     kx = k * x
+    # Saturation guard (mirrors smooth_min/max _SMOOTH_SAT): for |kx| beyond the threshold the
+    # sigmoid is 1/0 to machine precision AND its derivative k·σ(1−σ) is < ~1e-15. Returning the
+    # exact 0/1 makes the derivative identically 0, so a downstream smooth_heaviside(f(x)) with a
+    # SINGULAR f' in the saturated tail can't produce (tiny)·∞ = NaN under reverse-AD.
+    kx >  _SMOOTH_SAT && return one(kx)
+    kx < -_SMOOTH_SAT && return zero(kx)
     if kx >= zero(kx)
         return one(kx) / (one(kx) + exp(-kx))
     else
