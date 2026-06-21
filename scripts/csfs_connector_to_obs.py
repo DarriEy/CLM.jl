@@ -23,7 +23,10 @@ async def fetch(provider, station, start, end):
     discover()
     async with get_connector(provider)() as conn:
         sts = await conn.fetch_stations()
-        hits = [s for s in sts if str(station) in str(s.native_id)]
+        # exact native_id match first, then substring (avoids 957 matching 19957 etc.)
+        hits = ([s for s in sts if str(s.native_id) == str(station)]
+                or [s for s in sts if str(s.native_id).split(":")[-1] == str(station)]
+                or [s for s in sts if str(station) in str(s.native_id)])
         nid = hits[0].native_id if hits else f"{provider}:{station}"
         name = hits[0].name if hits else station
         chunk = await conn.fetch_observations(nid, start, end)

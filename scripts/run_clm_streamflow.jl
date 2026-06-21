@@ -35,12 +35,17 @@ const DOMAINS = Dict(
     "Bow_at_Banff_lumped" => (
         run_start=DateTime(2002,1,1), run_end=DateTime(2004,12,31),
         spinup_end=DateTime(2002,12,31), forcing="clmforc.2002_2004.nc",
-        area_km2=2210.0, int_snow_max=3113.2227, baseflow_scalar=0.0022119554),
+        area_km2=nothing, int_snow_max=3113.2227, baseflow_scalar=0.0022119554),
     # Eval domains (Symfluence builds, 2008-2018 ERA5). Inputs auto-detect once built.
+    # area_km2: explicit value OVERRIDES shapefile auto-detect — used where the
+    # DEM delineation doesn't match the gauge's catchment so discharge is compared
+    # at the gauge's true drainage area.
     "Boreal_Krycklan_Sweden" => (
         run_start=DateTime(2008,1,1), run_end=DateTime(2018,12,31),
         spinup_end=DateTime(2009,12,31), forcing=:auto,
-        area_km2=nothing, int_snow_max=2000.0, baseflow_scalar=0.0022119554),
+        # SITES C16 gauge = 67.872 km2; CopDEM90 over-delineates to 90.2 km2 → use
+        # the gauge area so the modelled runoff rate converts to comparable discharge.
+        area_km2=67.872, int_snow_max=2000.0, baseflow_scalar=0.0022119554),
     "Arctic_Abisko_Sweden" => (
         run_start=DateTime(2008,1,1), run_end=DateTime(2018,12,31),
         spinup_end=DateTime(2009,12,31), forcing=:auto,
@@ -171,7 +176,8 @@ function run_domain(name::String)
         @info "[$name] forcing not built yet — skipping"
         return nothing
     end
-    area_km2 = detect_area_km2(name, cfg.area_km2)
+    # explicit registry area_km2 overrides shapefile auto-detect (gauge-area match)
+    area_km2 = cfg.area_km2 !== nothing ? cfg.area_km2 : detect_area_km2(name, nothing)
     area_km2 === nothing && error("[$name] basin area unknown (no shapefile + no registry value)")
     obs_path = detect_obs(name)
 
