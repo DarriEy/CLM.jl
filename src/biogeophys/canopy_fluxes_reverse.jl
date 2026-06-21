@@ -288,3 +288,63 @@ function multistep_reverse!(steps, b, seed_bang!)
     end
     return db
 end
+
+# Advance a bundle forward through steps[lo+1 .. hi] (0-indexed steps lo..hi-1), in place.
+function _advance_steps!(steps, b, lo::Int, hi::Int)
+    for s in (lo + 1):hi, (f, cargs) in steps[s]
+        f(b, cargs...)
+    end
+    return b
+end
+
+"""
+    multistep_reverse_binomial!(steps, b, seed_bang!; peak_checkpoints=nothing) -> db
+
+Same multi-timestep reverse as [`multistep_reverse!`](@ref) — `d(L of final state)/d(initial
+state)` over the trajectory — but with **logarithmic** coarse-checkpoint memory for very long
+horizons. Where `multistep_reverse!` stores all `n_steps` step-boundary snapshots
+simultaneously (O(n_steps) memory), this uses RECURSIVE BISECTION (divide-and-conquer /
+binomial checkpointing): it holds only O(log n_steps) snapshots live at once, at the cost of
+O(n_steps · log n_steps) total step recomputation (vs O(n_steps) for the flat scheme). The
+returned gradient is IDENTICAL — only the checkpoint/recompute schedule differs.
+
+`rev_seg(lo, hi, b_lo)` reverses the half-open step range `[lo, hi)` given the state `b_lo`
+entering step `lo`: a single step is reversed directly (fine within-step recompute); otherwise
+it advances a COPY of `b_lo` to the midpoint, reverses the RIGHT half from there, frees that
+midpoint snapshot, then reverses the LEFT half from the still-held `b_lo`. Right-then-left keeps
+the single-step reverses in strict last→first order, so the shared adjoint `db` threads exactly
+as in the flat engine. At most one snapshot per recursion level is live → O(log n_steps) peak.
+
+`peak_checkpoints::Ref{Int}` (optional) is filled with the measured peak number of
+simultaneously-held coarse snapshots — for the validation scripts to exhibit the memory bound.
+This is the building block for season/year horizons where O(n_steps) snapshots won't fit.
+"""
+function multistep_reverse_binomial!(steps, b, seed_bang!;
+                                     peak_checkpoints::Union{Nothing,Base.RefValue{Int}} = nothing)
+    Enzyme.API.strictAliasing!(false)
+    revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
+    N = length(steps)
+    b0 = deepcopy(b)                       # the only persistent snapshot: the initial state
+    # Forward once (no stored boundaries) to the final state, to seed the adjoint.
+    _advance_steps!(steps, b, 0, N)
+    db = Enzyme.make_zero(b)
+    seed_bang!(db, b)
+    live = 0; peak = 0
+    bump(d) = (live += d; peak = max(peak, live); nothing)
+    function rev_seg(lo::Int, hi::Int, b_lo)
+        if hi - lo == 1
+            _reverse_step_into!(steps[lo + 1], deepcopy(b_lo), db, revmode)
+            return nothing
+        end
+        mid = (lo + hi) ÷ 2
+        b_mid = _advance_steps!(steps, deepcopy(b_lo), lo, mid); bump(1)
+        rev_seg(mid, hi, b_mid)            # later steps first (keeps db order last→first)
+        bump(-1)                           # b_mid no longer needed
+        rev_seg(lo, mid, b_lo)
+        return nothing
+    end
+    bump(1)                                # b0 held for the whole reverse
+    N >= 1 && rev_seg(0, N, b0)
+    peak_checkpoints === nothing || (peak_checkpoints[] = peak)
+    return db
+end

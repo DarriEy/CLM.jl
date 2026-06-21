@@ -8,12 +8,13 @@
 # t_soisno) and the seeded loss (final t_soisno) are the SAME carried state → a genuine
 # multi-step thermal Jacobian-vector product.
 #
-# THREE-WAY cross-check of CLM.multistep_reverse! (two-level checkpointing: coarse at step
-# boundaries, fine recomputed within each step during reverse):
+# FOUR-WAY cross-check of the multi-timestep reverse engines:
 #   (1) FD over the full N-step forward trajectory   (ground truth)
-#   (2) multistep_reverse!  (bounded memory: O(N) coarse + O(phases) fine)
-#   (3) compositional_reverse!(vcat(steps...))        (flat: O(N·phases) checkpoints)
-# (2) must equal (3) to roundoff and both must bracket (1).
+#   (2) multistep_reverse!           (two-level: O(N) coarse + O(phases) fine)
+#   (3) compositional_reverse!(vcat)  (flat: O(N·phases) checkpoints)
+#   (4) multistep_reverse_binomial!  (recursive bisection: O(log N) coarse snapshots)
+# (2)==(3)==(4) to roundoff and all must bracket (1); (4) also reports its measured peak
+# number of simultaneously-held coarse snapshots (the logarithmic-memory bound).
 #   CLM_NSTEPS=3 julia +1.10 --project=/tmp/clm_jl10_<id> scripts/enzyme_multistep_reverse.jl
 # =============================================================================
 using CLM, Enzyme, Printf
@@ -80,6 +81,10 @@ g_ms  = db_ms.inst.temperature.t_soisno_col[c0, JLAY]
 # (3) flat reference: one compositional_reverse! over the concatenated phase list
 db_flat = C.compositional_reverse!(reduce(vcat, steps), C.driver_rev_bundle(deepcopy(inst)), seed!)
 g_flat  = db_flat.inst.temperature.t_soisno_col[c0, JLAY]
+# (4) logarithmic-memory engine: recursive bisection checkpointing
+peak = Ref(0)
+db_bin = C.multistep_reverse_binomial!(steps, C.driver_rev_bundle(deepcopy(inst)), seed!; peak_checkpoints=peak)
+g_bin  = db_bin.inst.temperature.t_soisno_col[c0, JLAY]
 
 # (1) FD ground truth over the full trajectory (Richardson on a 2-step shrink)
 hs = (1e-2, 5e-3, 2.5e-3); cfd(h) = (Lfinal(run_traj(h)) - Lfinal(run_traj(-h))) / (2h)
@@ -87,15 +92,17 @@ fds = [cfd(h) for h in hs]; for (h,f) in zip(hs,fds); @printf("  FD(h=%.2e) = % 
 g_rich = (4*fds[end] - fds[end-1]) / 3; lo, hi = minimum(fds), maximum(fds)
 
 rel_ms_flat = abs(g_ms - g_flat) / max(abs(g_flat), 1e-30)
+rel_ms_bin  = abs(g_ms - g_bin)  / max(abs(g_bin),  1e-30)
 rel_ms_fd   = abs(g_ms - g_rich) / max(abs(g_rich), 1e-12)
 bracketed   = (lo - abs(lo)*1e-9) <= g_ms <= (hi + abs(hi)*1e-9)
 println("\n", "="^74)
 @printf("MULTI-STEP REVERSE  d(final t_soisno)/d(initial t_soisno[%d,%d])  over %d steps\n", c0, JLAY, NSTEPS)
-@printf("  (2) multistep_reverse!          = % .8e\n", g_ms)
-@printf("  (3) compositional_reverse!(vcat)= % .8e   rel(2,3)=%.2e\n", g_flat, rel_ms_flat)
-@printf("  (1) FD Richardson               = % .8e   rel(2,1)=%.2e  bracketed=%s\n", g_rich, rel_ms_fd, string(bracketed))
-@printf("  checkpoint memory: two-level=%d coarse + %d fine   vs flat=%d\n",
-    NSTEPS, length(phases1), length(phases1)*NSTEPS)
-pass = rel_ms_flat < 1e-8 && (rel_ms_fd < 1e-4 || bracketed)
-@printf("%s\n", pass ? "PASS ✓ (engines agree to roundoff; gradient matches FD across the horizon)" : "FAIL ✗")
+@printf("  (2) multistep_reverse!            = % .8e\n", g_ms)
+@printf("  (3) compositional_reverse!(vcat)  = % .8e   rel(2,3)=%.2e\n", g_flat, rel_ms_flat)
+@printf("  (4) multistep_reverse_binomial!   = % .8e   rel(2,4)=%.2e\n", g_bin, rel_ms_bin)
+@printf("  (1) FD Richardson                 = % .8e   rel(2,1)=%.2e  bracketed=%s\n", g_rich, rel_ms_fd, string(bracketed))
+@printf("  coarse-snapshot memory: two-level=%d   flat=%d   binomial(measured peak)=%d  [ceil(log2 N)+1=%d]\n",
+    NSTEPS, length(phases1)*NSTEPS, peak[], ceil(Int, log2(max(NSTEPS,1)))+1)
+pass = rel_ms_flat < 1e-8 && rel_ms_bin < 1e-8 && (rel_ms_fd < 1e-4 || bracketed)
+@printf("%s\n", pass ? "PASS ✓ (all 3 engines agree to roundoff; gradient matches FD; binomial holds O(log N) snapshots)" : "FAIL ✗")
 println("="^74)
