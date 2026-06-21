@@ -178,4 +178,171 @@
         CLM.read_restart!(dst2, file; bounds=bounds, use_cn=false)
         @test all(isnan, dst2.bgc_vegetation.cnveg_carbonstate_inst.leafc_patch)
     end
+
+    # ----------------------------------------------------------------------
+    # CN flux/accumulator + phenology + crop + isotope state round-trips.
+    # These need the CN/crop/isotope arrays actually allocated, so we flip
+    # the facade config flags and re-run cn_vegetation_init! to materialize
+    # the (otherwise length-0) pools before seeding.
+    # ----------------------------------------------------------------------
+    function build_cn_inst(; use_cn=true, use_crop=true, use_c13=false, use_c14=false)
+        inst = build_inst()
+        v = inst.bgc_vegetation
+        v.config.use_cn   = use_cn
+        v.config.use_crop = use_crop
+        v.config.use_c13  = use_c13
+        v.config.use_c14  = use_c14
+        CLM.cn_vegetation_init!(v, np, nc, ng;
+                                 nlevdecomp=10, ndecomp_pools=7,
+                                 ndecomp_cascade_transitions=5)
+        return inst
+    end
+
+    # --- CN flux/accumulator + phenology + crop round-trip ---
+    mktempdir() do dir
+        file = joinpath(dir, "clm_restart_cnflux.nc")
+        src = build_cn_inst()
+
+        vcs = src.bgc_vegetation.cnveg_carbonstate_inst
+        vns = src.bgc_vegetation.cnveg_nitrogenstate_inst
+        vss = src.bgc_vegetation.cnveg_state_inst
+        cr  = src.crop
+
+        # Carbon flux/storage/transfer pools
+        fill_seq!(vcs.leafc_storage_patch, 3.0)
+        fill_seq!(vcs.leafc_xfer_patch, 4.0)
+        fill_seq!(vcs.livecrootc_patch, 6.0)
+        fill_seq!(vcs.gresp_storage_patch, 2.0)
+        fill_seq!(vcs.gresp_xfer_patch, 1.5)
+        fill_seq!(vcs.xsmrpool_patch, 1.0)
+        fill_seq!(vcs.cropseedc_deficit_patch, -0.5)
+        fill_seq!(vcs.reproductivec_patch, 7.0)           # 2-D (patch × nrepr)
+        # Nitrogen flux/storage/transfer pools
+        fill_seq!(vns.leafn_storage_patch, 0.3)
+        fill_seq!(vns.livestemn_patch, 0.6)
+        fill_seq!(vns.livestemn_storage_patch, 0.5)
+        fill_seq!(vns.retransn_patch, 0.4)
+        fill_seq!(vns.reproductiven_patch, 0.7)           # 2-D (patch × nrepr)
+        # Phenology counters
+        fill_seq!(vss.dormant_flag_patch, 0.0)
+        fill_seq!(vss.days_active_patch, 30.0)
+        fill_seq!(vss.onset_counter_patch, 10.0)
+        fill_seq!(vss.offset_flag_patch, 0.0)
+        fill_seq!(vss.tempsum_potential_gpp_patch, 5.0)
+        fill_seq!(vss.annsum_counter_col, 100.0)
+        fill_seq!(vss.annavg_t2m_col, 285.0)
+        # Crop block (CNVegState side)
+        fill_seq!(vss.gddmaturity_patch, 1500.0)
+        fill_seq!(vss.cumvd_patch, 12.0)
+        vss.idop_patch    .= fill(120, np)
+        vss.peaklai_patch .= fill(1, np)
+        fill_seq!(vss.gddmaturity_thisyr, 50.0)           # 2-D (patch × mxharvests)
+        # CropType state
+        cr.croplive_patch .= [isodd(i) for i in 1:np]
+        cr.sown_in_this_window .= [iseven(i) for i in 1:np]
+        cr.harvdate_patch .= fill(200, np)
+        cr.nyrs_crop_active_patch .= collect(1:np)
+        fill_seq!(cr.vf_patch, 0.5)
+        fill_seq!(cr.cphase_patch, 2.0)
+        fill_seq!(cr.gddaccum_thisyr_patch, 9.0)          # 2-D (patch × mxharvests)
+        fill_seq!(cr.hui_thisyr_patch, 8.0)
+
+        CLM.write_restart(src, file; bounds=bounds, use_cn=true, use_crop=true)
+        dst = build_cn_inst()
+        CLM.read_restart!(dst, file; bounds=bounds, use_cn=true, use_crop=true)
+
+        dvcs = dst.bgc_vegetation.cnveg_carbonstate_inst
+        dvns = dst.bgc_vegetation.cnveg_nitrogenstate_inst
+        dvss = dst.bgc_vegetation.cnveg_state_inst
+        dcr  = dst.crop
+
+        # Carbon flux pools
+        @test dvcs.leafc_storage_patch == vcs.leafc_storage_patch
+        @test dvcs.leafc_xfer_patch == vcs.leafc_xfer_patch
+        @test dvcs.livecrootc_patch == vcs.livecrootc_patch
+        @test dvcs.gresp_storage_patch == vcs.gresp_storage_patch
+        @test dvcs.gresp_xfer_patch == vcs.gresp_xfer_patch
+        @test dvcs.xsmrpool_patch == vcs.xsmrpool_patch
+        @test dvcs.cropseedc_deficit_patch == vcs.cropseedc_deficit_patch
+        @test dvcs.reproductivec_patch == vcs.reproductivec_patch
+        # Nitrogen flux pools
+        @test dvns.leafn_storage_patch == vns.leafn_storage_patch
+        @test dvns.livestemn_patch == vns.livestemn_patch
+        @test dvns.livestemn_storage_patch == vns.livestemn_storage_patch
+        @test dvns.retransn_patch == vns.retransn_patch
+        @test dvns.reproductiven_patch == vns.reproductiven_patch
+        # Phenology counters
+        @test dvss.dormant_flag_patch == vss.dormant_flag_patch
+        @test dvss.days_active_patch == vss.days_active_patch
+        @test dvss.onset_counter_patch == vss.onset_counter_patch
+        @test dvss.offset_flag_patch == vss.offset_flag_patch
+        @test dvss.tempsum_potential_gpp_patch == vss.tempsum_potential_gpp_patch
+        @test dvss.annsum_counter_col == vss.annsum_counter_col
+        @test dvss.annavg_t2m_col == vss.annavg_t2m_col
+        # Crop block (CNVegState)
+        @test dvss.gddmaturity_patch == vss.gddmaturity_patch
+        @test dvss.cumvd_patch == vss.cumvd_patch
+        @test dvss.idop_patch == vss.idop_patch
+        @test eltype(dvss.idop_patch) <: Integer
+        @test dvss.peaklai_patch == vss.peaklai_patch
+        @test dvss.gddmaturity_thisyr == vss.gddmaturity_thisyr
+        # CropType — integer + boolean survive the Float64 round-trip exactly
+        @test dcr.croplive_patch == cr.croplive_patch
+        @test eltype(dcr.croplive_patch) <: Bool
+        @test dcr.sown_in_this_window == cr.sown_in_this_window
+        @test dcr.harvdate_patch == cr.harvdate_patch
+        @test eltype(dcr.harvdate_patch) <: Integer
+        @test dcr.nyrs_crop_active_patch == cr.nyrs_crop_active_patch
+        @test dcr.vf_patch == cr.vf_patch
+        @test dcr.cphase_patch == cr.cphase_patch
+        @test dcr.gddaccum_thisyr_patch == cr.gddaccum_thisyr_patch
+        @test dcr.hui_thisyr_patch == cr.hui_thisyr_patch
+
+        # use_crop=false reader must NOT touch crop fields (stay at cold-start).
+        dst3 = build_cn_inst()
+        # Cold-start croplive is all-false; planting date sentinel is typemax(Int).
+        CLM.read_restart!(dst3, file; bounds=bounds, use_cn=true, use_crop=false)
+        @test !any(dst3.crop.croplive_patch)            # untouched (cold default)
+        @test dst3.crop.harvdate_patch != cr.harvdate_patch
+        # ...but the CN flux pools (use_cn block) DID round-trip.
+        @test dst3.bgc_vegetation.cnveg_carbonstate_inst.xsmrpool_patch ==
+              vcs.xsmrpool_patch
+    end
+
+    # --- C13/C14 isotope pools round-trip, gated on use_c13/use_c14 ---
+    mktempdir() do dir
+        file = joinpath(dir, "clm_restart_iso.nc")
+        src = build_cn_inst(use_c13=true, use_c14=true)
+        c13 = src.bgc_vegetation.c13_cnveg_carbonstate_inst
+        c14 = src.bgc_vegetation.c14_cnveg_carbonstate_inst
+        fill_seq!(c13.leafc_patch, 11.0)
+        fill_seq!(c13.leafc_storage_patch, 11.5)
+        fill_seq!(c13.xsmrpool_patch, 12.0)
+        fill_seq!(c13.reproductivec_patch, 1.1)
+        fill_seq!(c14.leafc_patch, 13.0)
+        fill_seq!(c14.xsmrpool_patch, 14.0)
+
+        CLM.write_restart(src, file; bounds=bounds,
+                          use_cn=true, use_crop=true, use_c13=true, use_c14=true)
+        dst = build_cn_inst(use_c13=true, use_c14=true)
+        CLM.read_restart!(dst, file; bounds=bounds,
+                          use_cn=true, use_crop=true, use_c13=true, use_c14=true)
+
+        d13 = dst.bgc_vegetation.c13_cnveg_carbonstate_inst
+        d14 = dst.bgc_vegetation.c14_cnveg_carbonstate_inst
+        @test d13.leafc_patch == c13.leafc_patch
+        @test d13.leafc_storage_patch == c13.leafc_storage_patch
+        @test d13.xsmrpool_patch == c13.xsmrpool_patch
+        @test d13.reproductivec_patch == c13.reproductivec_patch
+        @test d14.leafc_patch == c14.leafc_patch
+        @test d14.xsmrpool_patch == c14.xsmrpool_patch
+
+        # Isotope flags OFF on read must leave the isotope pools untouched
+        # even though the suffixed vars are present in the file.
+        dst4 = build_cn_inst(use_c13=true, use_c14=true)
+        CLM.read_restart!(dst4, file; bounds=bounds,
+                          use_cn=true, use_crop=true, use_c13=false, use_c14=false)
+        @test all(isnan, dst4.bgc_vegetation.c13_cnveg_carbonstate_inst.leafc_patch)
+        @test all(isnan, dst4.bgc_vegetation.c14_cnveg_carbonstate_inst.leafc_patch)
+    end
 end
