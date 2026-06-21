@@ -5,7 +5,7 @@
     #   1. compute_wetland_ice_hydrology!
     #   2. compute_total_runoff!
     #   3. compute_water_mass_non_lake! (stub)
-    #   4. adjust_runoff_terms! (stub)
+    #   4. adjust_runoff_terms! (ported, glacier SMB)
     #   5. hydrology_drainage! (orchestrator smoke test)
     # ------------------------------------------------------------------
 
@@ -171,26 +171,30 @@
     end
 
     # ------------------------------------------------------------------
-    # 4. adjust_runoff_terms! (stub)
+    # 4. adjust_runoff_terms! (now ported in glacier_surface_mass_balance.jl)
     # ------------------------------------------------------------------
-    @testset "adjust_runoff_terms! (stub)" begin
+    @testset "adjust_runoff_terms!" begin
         nc = 2
-        np = 1; nl = 1; ng = 1
-
-        waterfluxbulk = CLM.WaterFluxBulkData()
-        CLM.waterfluxbulk_init!(waterfluxbulk, nc, np, nl, ng)
-
-        qflx_qrgwl = [1.0, 2.0]
-        qflx_ice_runoff_snwcp = [0.5, 0.6]
-        mask_do_smb = BitVector([true, true])
         bounds = 1:nc
 
-        # Should run without error (stub — no-op)
-        CLM.adjust_runoff_terms!(qflx_qrgwl, qflx_ice_runoff_snwcp,
-            waterfluxbulk, mask_do_smb, bounds)
+        # No dynamic ice-sheet coupling (standalone CLM): routing = 0 everywhere.
+        qflx_qrgwl            = [1.0, 2.0]
+        qflx_ice_runoff_snwcp = [0.5, 0.6]
+        qflx_glcice_frz       = [0.3, 0.0]
+        qflx_glcice_melt      = [0.2, 0.0]
+        glc_dyn_routing       = [0.0]   # one gridcell
+        col_gridcell          = [1, 1]
+        mask_do_smb           = BitVector([true, false])
 
-        # Values unchanged (stub is a no-op)
-        @test qflx_qrgwl[1] == 1.0
+        CLM.adjust_runoff_terms!(qflx_qrgwl, qflx_ice_runoff_snwcp,
+            qflx_glcice_frz, qflx_glcice_melt, glc_dyn_routing,
+            col_gridcell, mask_do_smb, bounds)
+
+        # do_smb column (1), routing=0: qrgwl += melt; ice -= melt; frz untouched
+        @test qflx_qrgwl[1] ≈ 1.0 + 0.2
+        @test qflx_ice_runoff_snwcp[1] ≈ 0.5 - 0.2
+        # non-do_smb column (2) untouched
+        @test qflx_qrgwl[2] == 2.0
         @test qflx_ice_runoff_snwcp[2] == 0.6
     end
 

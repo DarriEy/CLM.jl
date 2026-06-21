@@ -299,4 +299,38 @@
         @test dust.vlc_trb_patch[1, 1] != dust.vlc_trb_patch[3, 1]
     end
 
+    # -----------------------------------------------------------------------
+    # Threshold soil moisture / clay mass-fraction functions
+    # (ported from SoilStateInitTimeConstMod.F90)
+    # -----------------------------------------------------------------------
+    @testset "threshold soil moisture (Zender2003 / Kok2014)" begin
+        # Zender2003: 0.17 + 0.14*clay*0.01, clay in percent.
+        @test CLM.threshold_soil_moist_zender2003(0.0)   ≈ 0.17 atol=1e-12
+        @test CLM.threshold_soil_moist_zender2003(100.0) ≈ 0.17 + 0.14 atol=1e-12
+        @test CLM.threshold_soil_moist_zender2003(50.0)  ≈ 0.17 + 0.14 * 0.5 atol=1e-12
+        # Linear in clay.
+        d = CLM.threshold_soil_moist_zender2003(40.0) -
+            CLM.threshold_soil_moist_zender2003(20.0)
+        @test d ≈ 0.14 * 0.20 atol=1e-12
+        # Out-of-bounds clay errors.
+        @test_throws ErrorException CLM.threshold_soil_moist_zender2003(-1.0)
+        @test_throws ErrorException CLM.threshold_soil_moist_zender2003(101.0)
+
+        # Kok2014: 0.01*(0.17*clay + 0.0014*clay^2), clay in percent.
+        @test CLM.threshold_soil_moist_kok2014(0.0) ≈ 0.0 atol=1e-12
+        for clay in (10.0, 25.0, 50.0, 80.0)
+            @test CLM.threshold_soil_moist_kok2014(clay) ≈
+                0.01 * (0.17 * clay + 0.0014 * clay * clay) atol=1e-12
+        end
+        # Kok2014 is parabolic (convex) — second difference positive.
+        f = CLM.threshold_soil_moist_kok2014
+        @test (f(60.0) - 2*f(40.0) + f(20.0)) > 0.0
+
+        # MassFracClay: min(clay*0.01, 0.20).
+        @test CLM.mass_frac_clay(10.0) ≈ 0.10 atol=1e-12
+        @test CLM.mass_frac_clay(20.0) ≈ 0.20 atol=1e-12
+        @test CLM.mass_frac_clay(50.0) ≈ 0.20 atol=1e-12   # clamped
+        @test CLM.mass_frac_clay(0.0)  ≈ 0.0  atol=1e-12
+    end
+
 end

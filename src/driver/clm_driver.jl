@@ -1015,20 +1015,31 @@ function clm_drv_core!(config::CLMDriverConfig,
                       bc_col, bc_patch, dtime)
 
     # SoilTemperature — WIRED
-    # Placeholder for urban building temperature max
+    # Placeholders for urban building-temperature time-varying inputs (urbantv).
     nl = length(lun.itype)
     urbantv_t_building_max = _fulllike(323.15, nl)  # placeholder ~50°C cap
+    # AC adoption rate (0..1). Used only by the prognostic (CLM5) building path
+    # with urban_explicit_ac=true; 1.0 = full adoption (placeholder until urbantv
+    # streams are read).
+    urbantv_p_ac = _fulllike(1.0, nl)
     soil_temperature!(col, lun, pch, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
                       urbantv_t_building_max,
                       a2l.forc_lwrad_downscaled_col,
                       filt.nolakec, filt.nolakep,
                       filt.urbanl, filt.urbanc,
                       bc_col, bc_lun, bc_patch,
-                      dtime)
+                      dtime;
+                      urbantv_p_ac = urbantv_p_ac)
 
 
 
-    # Placeholder: glacier_smb_inst%HandleIceMelt!(bc, ...) [glacier ice melt]
+    # Glacier ice melt: convert layer meltwater back to ice over do_smb istice
+    # columns, accumulating qflx_glcice_melt. (GlacierSurfaceMassBalanceMod:HandleIceMelt)
+    handle_ice_melt!(wsb.ws.h2osoi_liq_col, wsb.ws.h2osoi_ice_col,
+                     wfb.wf.qflx_glcice_melt_col,
+                     col.landunit, lun.itype,
+                     filt.do_smb_c, bc_col, dtime,
+                     varpar.nlevsno, varpar.nlevgrnd)
 
     # ========================================================================
     # SURFACE FLUXES for new ground temperature — WIRED
@@ -1324,7 +1335,23 @@ function clm_drv_core!(config::CLMDriverConfig,
                            nlevsno, nlevsoi,
                            varpar.nlevgrnd, varpar.nlevurb)
 
-    # Placeholder: glacier_smb_inst%ComputeSurfaceMassBalance!(bc, ...) [glacier SMB]
+    # Glacier surface mass balance: ice growth (frz), net glcice, dyn water-flux
+    # balance term. (GlacierSurfaceMassBalanceMod:ComputeSurfaceMassBalance)
+    # glc_dyn_runoff_routing is not yet ported (no glc2lnd) → 0 (standalone CLM).
+    let ng_smb = isempty(bc_col) ? 0 : maximum(Array(col.gridcell)[bc_col])
+        glc_dyn_runoff_routing_grc =
+            fill!(similar(wfb.wf.qflx_glcice_col, FT, ng_smb), zero(FT))
+        compute_surface_mass_balance!(
+            wfb.wf.qflx_glcice_col,
+            wfb.wf.qflx_glcice_frz_col,
+            wfb.wf.qflx_glcice_dyn_water_flux_col,
+            wfb.wf.qflx_snwcp_ice_col,
+            wfb.wf.qflx_glcice_melt_col,
+            wsb.snow_persistence_col,
+            glc_dyn_runoff_routing_grc,
+            col.landunit, col.gridcell, lun.itype,
+            filt.allc, filt.do_smb_c, bc_col)  # default glc_snow_persistence_max_days=7300
+    end
 
     # AerosolMasses (non-lake) — WIRED
     aerosol_masses!(aer,

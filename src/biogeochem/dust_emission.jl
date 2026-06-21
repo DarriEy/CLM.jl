@@ -35,6 +35,56 @@ const BOLTZ = 1.38065e-23       # [J/K/molecule] Boltzmann constant (SHR_CONST_B
 const _dust_erf = erf
 
 # ---------------------------------------------------------------------------
+# Threshold soil moisture / clay mass-fraction functions for dust emission.
+# Ported from SoilStateInitTimeConstMod.F90 (used to set gwc_thr_col and
+# mss_frc_cly_vld_col). The threshold gravimetric water content equations
+# come from Eq. 14 of Fecan et al. (1999;
+# https://doi.org/10.1007/s00585-999-0149-7); 0.17 and 0.14/0.0014 are the
+# fitting coefficients and 0.01 converts clay percentage to fraction.
+# `clay` is the soil clay fraction expressed as a PERCENT (0-100).
+# ---------------------------------------------------------------------------
+
+"""
+    threshold_soil_moist_zender2003(clay)
+
+Threshold gravimetric water content needed for dust emission, based on clay
+content, using the Zender (2003a) tuning (a = 1/%clay), giving a threshold that
+is LINEARLY dependent on clay fraction. `clay` is clay percent (0-100).
+
+Ported from `ThresholdSoilMoistZender2003` in `SoilStateInitTimeConstMod.F90`.
+"""
+function threshold_soil_moist_zender2003(clay::Real)
+    if clay < 0.0 || clay > 100.0
+        error("Clay fraction is out of bounds (0 to 100): clay=$clay")
+    end
+    return 0.17 + 0.14 * clay * 0.01
+end
+
+"""
+    threshold_soil_moist_kok2014(clay)
+
+Threshold gravimetric water content needed for dust emission, based on clay
+content, using the Kok et al. (2014) tuning (a = 1), giving the original Fecan
+et al. (1999) PARABOLIC dependence on clay fraction. `clay` is clay percent
+(0-100).
+
+Ported from `ThresholdSoilMoistKok2014` in `SoilStateInitTimeConstMod.F90`.
+"""
+function threshold_soil_moist_kok2014(clay::Real)
+    return 0.01 * (0.17 * clay + 0.0014 * clay * clay)
+end
+
+"""
+    mass_frac_clay(clay)
+
+Mass fraction of clay (limited to 0.20) used as the scaling coefficient of the
+dust emission flux. `clay` is clay percent (0-100).
+
+Ported from `MassFracClay` in `SoilStateInitTimeConstMod.F90`.
+"""
+mass_frac_clay(clay::Real) = min(clay * 0.01, 0.20)
+
+# ---------------------------------------------------------------------------
 # DustEmisBaseData — Dust emission state and flux data
 # Ported from: dust_emis_base_type in DustEmisBase.F90
 # ---------------------------------------------------------------------------

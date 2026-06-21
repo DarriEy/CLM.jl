@@ -294,7 +294,8 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
                            mask_urbanl::AbstractVector{Bool}, mask_urbanc::AbstractVector{Bool},
                            bounds_col::UnitRange{Int}, bounds_lun::UnitRange{Int},
                            bounds_patch::UnitRange{Int},
-                           dtime::Real)
+                           dtime::Real;
+                           urbantv_p_ac::Union{Nothing,AbstractVector{<:Real}} = nothing)
 
     nlevsno = varpar.nlevsno
     nlevgrnd = varpar.nlevgrnd
@@ -488,6 +489,19 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
         _launch!(_excess_ice_restore_kernel!, col.dz, col.zi, col.z, mask_nolakec,
                  col.landunit, lun.itype, dz_0, zi_0, z_0, nlevsno, nlevmaxurbgrnd;
                  ndrange = size(col.dz, 1))
+    end
+
+    # Prognostic (CLM5.0) building temperature. Updates the roof/wall inner-surface
+    # temperatures, floor, and interior building air via a per-landunit 5x5 energy
+    # balance solve. Matches the Fortran call order: after the soil-temperature solve
+    # (and excess-ice restore), before t_grnd. (Simple/CLM4.5 path runs building_hac!
+    # above instead.) p_ac (AC adoption rate) defaults to 1.0 when not supplied.
+    if is_prog_build_temp()
+        p_ac = urbantv_p_ac === nothing ?
+               fill!(similar(pf, FT, length(bounds_lun)), one(FT)) : urbantv_p_ac
+        building_temperature!(col, lun, temperature, energyflux, urbanparams,
+                              urbantv_t_building_max, p_ac, tk,
+                              mask_urbanl, mask_nolakec, bounds_lun, dtime)
     end
 
     # Ground temperature (kernelized; one thread per column).
