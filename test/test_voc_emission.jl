@@ -583,4 +583,144 @@
         @test cfg2.use_voc == true
     end
 
+    # -----------------------------------------------------------------------
+    # MEGAN namelist parser (shr_exp_parse / shr_megan_init / InitAllocate)
+    # -----------------------------------------------------------------------
+    @testset "megan_exp_parse: simple direct mapping" begin
+        items = CLM.megan_exp_parse("ISOP = isoprene")
+        @test length(items) == 1
+        @test items[1].name == "ISOP"
+        @test items[1].vars == ["isoprene"]
+        @test items[1].coeffs ≈ [1.0]
+    end
+
+    @testset "megan_exp_parse: multi-term + coefficients + group" begin
+        # Mirrors the docstring example: a coeff distributed over a paren group.
+        spec = ["C10H16 = myrcene + sabinene + 0.5*(limonene + carene_3)"]
+        items = CLM.megan_exp_parse(spec)
+        @test length(items) == 1
+        @test items[1].name == "C10H16"
+        @test items[1].vars == ["myrcene", "sabinene", "limonene", "carene_3"]
+        @test items[1].coeffs ≈ [1.0, 1.0, 0.5, 0.5]
+
+        # single-term multiplier without a group
+        it2 = CLM.megan_exp_parse("BIGALK = 2.0*pentane")[1]
+        @test it2.vars == ["pentane"]
+        @test it2.coeffs ≈ [2.0]
+    end
+
+    @testset "megan_exp_parse: multi-line splicing on trailing '+'" begin
+        spec = ["TERP = myrcene + sabinene + ",
+                "limonene + carene_3"]
+        items = CLM.megan_exp_parse(spec)
+        @test length(items) == 1
+        @test items[1].vars == ["myrcene", "sabinene", "limonene", "carene_3"]
+        @test items[1].coeffs ≈ [1.0, 1.0, 1.0, 1.0]
+
+        # multiple separate expressions
+        m = CLM.megan_exp_parse(["ISOP = isoprene", "CH3OH = methanol"])
+        @test length(m) == 2
+        @test m[1].name == "ISOP" && m[2].name == "CH3OH"
+    end
+
+    @testset "megan_config_from_nl: build + activate voc_emission!" begin
+        # Build a small factors table: isoprene (class 1) + myrcene (class 2),
+        # 20 PFTs (so default PFT indices in voc_emission! are valid).
+        npfts = 20
+        comp_names = ["isoprene", "myrcene"]
+        comp_EF  = vcat(fill(600.0, 1, npfts), fill(100.0, 1, npfts))
+        class_EF = vcat(fill(1.0, 1, npfts),   fill(1.0, 1, npfts))
+        class_nums = [1, 2]
+        comp_mw = [68.12, 136.23]
+
+        tbl = CLM.MEGANFactorsTable()
+        CLM.megan_factors_table_init!(tbl, comp_names, comp_EF, class_EF,
+                                      class_nums, comp_mw)
+
+        # Two mechanism compounds: ISOP = isoprene; TERP = 0.5*(myrcene)
+        spec = ["ISOP = isoprene", "TERP = 0.5*(myrcene)"]
+        megcfg = CLM.megan_config_from_nl(spec, tbl)
+
+        # Populated MEGANConfig (the no-op gate is now satisfied)
+        @test length(megcfg.meg_compounds) == 2
+        @test length(megcfg.mech_comps) == 2
+        @test megcfg.meg_compounds[1].name == "isoprene"
+        @test megcfg.meg_compounds[1].class_number == 1
+        @test megcfg.meg_compounds[1].emis_factors[1] ≈ 600.0
+        @test megcfg.meg_compounds[2].name == "myrcene"
+        @test megcfg.meg_compounds[2].class_number == 2
+        @test megcfg.meg_compounds[2].coeff ≈ 0.5           # group coeff captured
+        @test megcfg.mech_comps[1].megan_indices == [1]
+        @test megcfg.mech_comps[2].megan_indices == [2]
+        @test length(megcfg.megan_factors.Agro) == 20       # factors auto-init'd
+
+        # Drive emissions through the config-built descriptors.
+        np = 3; nc = 2; ng = 1
+        voc = CLM.VOCEmisData()
+        CLM.vocemis_init!(voc, np, ng,
+                          length(megcfg.meg_compounds), length(megcfg.mech_comps))
+        voc.efisop_grc[:, 1] .= 600.0
+
+        patch = CLM.PatchData(); CLM.patch_init!(patch, np)
+        patch.itype .= [0, 1, 6]      # noveg, ndllf_evr_tmp_tree, nbrdlf_dcd_trp_tree
+        patch.gridcell .= [1, 1, 1]
+        patch.column .= [1, 1, 2]
+
+        CLM.voc_emission!(
+            voc, megcfg.meg_compounds, megcfg.mech_comps, megcfg.megan_factors,
+            patch, 1:np, trues(np),
+            fill(200.0, nc, 2), fill(100.0, ng, 2),
+            fill(101325.0, nc), fill(40.53, ng),
+            fill(200.0, np), fill(200.0, np), fill(100.0, np), fill(100.0, np),
+            fill(0.5, np), fill(0.5, np), fill(0.5, np), fill(2.0, np), fill(2.0, np),
+            fill(0.7 * 400.0e-6 * 101325.0, np, 1), fill(0.7 * 400.0e-6 * 101325.0, np, 1),
+            fill(300.0, np), fill(300.0, np), fill(297.0, np),
+            fill(0.8, np))
+
+        @test voc.vocflx_tot_patch[1] ≈ 0.0      # bare ground
+        @test voc.vocflx_tot_patch[2] > 0.0      # vegetated emits
+        @test all(isfinite, voc.vocflx_tot_patch)
+        @test all(isfinite, voc.vocflx_patch)
+        @test voc.vocflx_patch[2, 1] > 0.0       # ISOP (isoprene)
+        @test voc.vocflx_patch[2, 2] > 0.0       # TERP (myrcene)
+    end
+
+    @testset "megan_config_from_nl: shared mega-compound de-dup + first-coeff" begin
+        # Two mech compounds referencing the same mega-compound 'isoprene':
+        # add_megan_comp de-dups by name and keeps the FIRST coeff (1.0 here).
+        npfts = 20
+        tbl = CLM.MEGANFactorsTable()
+        CLM.megan_factors_table_init!(tbl, ["isoprene"],
+            fill(600.0, 1, npfts), fill(1.0, 1, npfts), [1], [68.12])
+
+        spec = ["A = isoprene", "B = 2.0*isoprene"]
+        megcfg = CLM.megan_config_from_nl(spec, tbl)
+        @test length(megcfg.meg_compounds) == 1            # de-duplicated
+        @test megcfg.meg_compounds[1].coeff ≈ 1.0          # first appearance wins
+        @test megcfg.mech_comps[1].megan_indices == [1]
+        @test megcfg.mech_comps[2].megan_indices == [1]
+    end
+
+    @testset "megan_config_from_nl: duplicate mech name aborts; missing compound errors" begin
+        tbl = CLM.MEGANFactorsTable()
+        CLM.megan_factors_table_init!(tbl, ["isoprene"],
+            fill(600.0, 1, 20), fill(1.0, 1, 20), [1], [68.12])
+        # duplicate mechanism compound name -> error (shr_megan_init abort)
+        @test_throws ErrorException CLM.megan_config_from_nl(
+            ["ISOP = isoprene", "ISOP = isoprene"], tbl)
+        # unknown mega-compound -> megan_factors_get endrun
+        @test_throws ErrorException CLM.megan_config_from_nl("X = nonexistent", tbl)
+    end
+
+    @testset "megan_config_from_nl: end-to-end via CLMDriverConfig" begin
+        tbl = CLM.MEGANFactorsTable()
+        CLM.megan_factors_table_init!(tbl, ["isoprene"],
+            fill(600.0, 1, 20), fill(1.0, 1, 20), [1], [68.12])
+        megcfg = CLM.megan_config_from_nl("ISOP = isoprene", tbl)
+        cfg = CLM.CLMDriverConfig(use_voc = true, megan = megcfg)
+        @test cfg.use_voc == true
+        @test !isempty(cfg.megan.meg_compounds)
+        @test !isempty(cfg.megan.mech_comps)
+    end
+
 end
