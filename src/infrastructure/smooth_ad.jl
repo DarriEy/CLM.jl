@@ -210,6 +210,10 @@ function smooth_heaviside(x::Float64; k::Float64=50.0)
 end
 
 function smooth_heaviside(x::T; k::Real=50) where {T<:Real}
+    # TYPE-BASED (matches smooth_min/max, GPU-safe): exact step for non-AD reals (Float32 device
+    # kernels → hard, no global read; and identical to the Float64-:auto path), smooth sigmoid for
+    # ForwardDiff.Dual. The Float64 method above adds the host-only SMOOTH_MODE=:always override.
+    _use_smooth(T) || return (x >= zero(T) ? one(T) : zero(T))
     return _stable_sigmoid(x, k)
 end
 

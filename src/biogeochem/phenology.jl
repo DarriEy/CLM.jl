@@ -1304,23 +1304,31 @@ end
                     onset_gdd_patch[p]       = zero(T)
                     onset_counter_patch[p]   = ndays_on[ivt] * secspday
 
-                    # storage → transfer (non-matrix)
-                    leafc_storage_to_xfer_patch[p]  = fstor2tran * leafc_storage_patch[p] / dt
-                    frootc_storage_to_xfer_patch[p] = fstor2tran * frootc_storage_patch[p] / dt
+                    # storage → transfer (non-matrix). ONE-TIME-EVENT SMOOTHING: weight the GDD-
+                    # threshold onset burst by a smooth step of (onset_gdd − crit_onset_gdd). Under
+                    # :auto smooth_heaviside is the EXACT step and do_result ⇒ og>crit ⇒ ow=1, so
+                    # this is BYTE-IDENTICAL; under :always ow RAMPS as og crosses crit, turning the
+                    # delta-function d(leaf-out)/d(crit_onset_gdd) of the instant event into a finite
+                    # gradient (the burst magnitude varies smoothly with how far og is past crit).
+                    # The veg-dependent trigger path (daylength/temperature) keeps the hard event (ow=1).
+                    ow = onset_thresh_depends_on_veg ? one(T) : smooth_heaviside(og - crit_onset_gdd)
+                    fs = ow * fstor2tran
+                    leafc_storage_to_xfer_patch[p]  = fs * leafc_storage_patch[p] / dt
+                    frootc_storage_to_xfer_patch[p] = fs * frootc_storage_patch[p] / dt
                     if woody[ivt] == one(T)
-                        livestemc_storage_to_xfer_patch[p]  = fstor2tran * livestemc_storage_patch[p] / dt
-                        deadstemc_storage_to_xfer_patch[p]  = fstor2tran * deadstemc_storage_patch[p] / dt
-                        livecrootc_storage_to_xfer_patch[p] = fstor2tran * livecrootc_storage_patch[p] / dt
-                        deadcrootc_storage_to_xfer_patch[p] = fstor2tran * deadcrootc_storage_patch[p] / dt
-                        gresp_storage_to_xfer_patch[p]      = fstor2tran * gresp_storage_patch[p] / dt
+                        livestemc_storage_to_xfer_patch[p]  = fs * livestemc_storage_patch[p] / dt
+                        deadstemc_storage_to_xfer_patch[p]  = fs * deadstemc_storage_patch[p] / dt
+                        livecrootc_storage_to_xfer_patch[p] = fs * livecrootc_storage_patch[p] / dt
+                        deadcrootc_storage_to_xfer_patch[p] = fs * deadcrootc_storage_patch[p] / dt
+                        gresp_storage_to_xfer_patch[p]      = fs * gresp_storage_patch[p] / dt
                     end
-                    leafn_storage_to_xfer_patch[p]  = fstor2tran * leafn_storage_patch[p] / dt
-                    frootn_storage_to_xfer_patch[p] = fstor2tran * frootn_storage_patch[p] / dt
+                    leafn_storage_to_xfer_patch[p]  = fs * leafn_storage_patch[p] / dt
+                    frootn_storage_to_xfer_patch[p] = fs * frootn_storage_patch[p] / dt
                     if woody[ivt] == one(T)
-                        livestemn_storage_to_xfer_patch[p]  = fstor2tran * livestemn_storage_patch[p] / dt
-                        deadstemn_storage_to_xfer_patch[p]  = fstor2tran * deadstemn_storage_patch[p] / dt
-                        livecrootn_storage_to_xfer_patch[p] = fstor2tran * livecrootn_storage_patch[p] / dt
-                        deadcrootn_storage_to_xfer_patch[p] = fstor2tran * deadcrootn_storage_patch[p] / dt
+                        livestemn_storage_to_xfer_patch[p]  = fs * livestemn_storage_patch[p] / dt
+                        deadstemn_storage_to_xfer_patch[p]  = fs * deadstemn_storage_patch[p] / dt
+                        livecrootn_storage_to_xfer_patch[p] = fs * livecrootn_storage_patch[p] / dt
+                        deadcrootn_storage_to_xfer_patch[p] = fs * deadcrootn_storage_patch[p] / dt
                     end
                 end
 
