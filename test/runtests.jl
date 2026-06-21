@@ -177,6 +177,7 @@ using CLM
             "test_glacier_robustness.jl",        # glacier istice driver robustness (gated)
             "test_snow_robustness.jl",           # deep-snowpack / cold-soil robustness (gated)
             "test_urban_robustness.jl",          # urban isturb roof/wall/road robustness (gated)
+            "test_run_clm.jl",                   # standalone run harness: run→h0+restart→continue (gated)
             "test_ad_robustness.jl",             # AD near phase-change discontinuities
         ]
         for f in isolated_files
