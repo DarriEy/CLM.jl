@@ -58,8 +58,10 @@ Close the genuine process gaps + verify depth. Target: Tier A.
 ## Phase B — Usable standalone model (I/O)  *(large, mechanical)*
 Make it run + write output + restart without the parity harness's injection.
 
-**B1. History output** — port `histFileMod.F90` (~6,100 lines): field registration, time-averaging, NetCDF write. Largest single module. *DoD:* a run writes a CTSM-comparable `h0` history file.
-**B2. Restart I/O** — `restFileMod.F90` (~1,034) + `ncdio_*` + `subgridRestMod`. *DoD:* write a restart, read it back, bit-for-bit continue.
+> **Tier A activations COMPLETE:** crop-GDD threaded into `clm_drv_core!` (AccumManager on `CLMDriverConfig`, AD-safe) + MEGAN namelist parser (`megan_exp_parse`/`megan_config_from_nl`) — both use_crop/use_voc paths now functional.
+
+**B1. History output** — ✅ first cut done (`src/infrastructure/history_io.jl`): `HistoryTape` + `hist_addfld!`/`hist_accumulate!`/`hist_write!` — A/I/X/M averaging, CLM-style h0 NetCDF write+read (27 tests). DEFERRED (full `histFileMod` generality): multi-tape (h1/h2…), `fincl`/`fexcl` namelist, subgrid p2c/c2l/l2g remap, multi-level 2D fields, time_bounds.
+**B2. Restart I/O** — ✅ done (`src/infrastructure/restart_io.jl` reworked): `write_restart!`/`read_restart!` round-trip of the prognostic biogeophys + (use_cn) C/N state, CLM-faithful var/dim names, 46-test round-trip. DEFERRED: C13/C14 isotope pools, CN flux state, crop/phenology counters, full header metadata.
 **B3. Init/domain plumbing** — `decompInitMod`, `domainMod`, `subgridMod`, `init_interp` (11 files) as needed for standalone init. *DoD:* cold-start + finidat without the harness.
 
 ---

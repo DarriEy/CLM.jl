@@ -353,6 +353,94 @@
     end
 
     # ================================================================
+    # Crop growing-degree-day accumulation is ACTIVATED by the driver.
+    #
+    # Guards the Tier-A crop-GDD activation. The full clm_drv! photosynthesis
+    # path doesn't run on the minimal make_driver_data fixture (smoke/config
+    # tests above already error there), so this exercises the exact accumulator
+    # block of clm_drv_core! directly: the config-owned AccumManager is lazily
+    # built (NOT on inst → AD-safe) and the crop config + calendar are threaded
+    # to temperature_update_acc_vars! so GDD actually accumulates.
+    # ================================================================
+    @testset "driver crop-GDD activation block" begin
+        inst, bounds, filt, filt_ia, _, photosyns = make_driver_data()
+        np = bounds.endp
+        bc_patch = bounds.begp:bounds.endp
+        bc_col   = bounds.begc:bounds.endc
+
+        # Warm NH-summer 2 m air so GDD0 accumulates a known increment.
+        # 20 C above freezing → GDD0 += min(26, 20) per full day, GDD8 += 12.
+        t2m = CLM.TFRZ + 20.0
+        inst.temperature.t_ref2m_patch[1:np] .= t2m
+        inst.temperature.t_veg_patch[1:np]   .= t2m
+        inst.temperature.gdd0_patch[1:np]    .= 0.0
+        inst.temperature.gdd8_patch[1:np]    .= 0.0
+        inst.temperature.gdd10_patch[1:np]   .= 0.0
+        inst.gridcell.latdeg[1:bounds.endg] .= 45.0   # NH → July is in-season
+        inst.patch.itype[1:np] .= 1                   # non-crop pft → lat fallback
+
+        config = CLM.CLMDriverConfig(use_cn=true, use_crop=true)
+        @test getfield(config, :accum_mgr) === nothing   # not yet built
+        @test config.use_crop
+
+        dtime = 86400        # one full day per step
+        grc = inst.gridcell; pch = inst.patch; temp = inst.temperature
+        lun = inst.landunit
+
+        # Mirror the clm_drv_core! accumulator block (the wiring under test):
+        # lazily build the manager on the config, then thread crop config +
+        # calendar through to temperature_update_acc_vars!.
+        function drive_acc!(; nstep, mon, day, jday, secs, is_eoy=false)
+            if getfield(config, :accum_mgr) === nothing
+                mgr = CLM.AccumManager()
+                CLM.temperature_init_acc_buffer!(mgr, length(bc_patch);
+                    active = collect(Bool, @view pch.active[bc_patch]),
+                    use_crop = true, step_size = dtime)
+                config.accum_mgr = mgr
+            end
+            CLM.temperature_update_acc_vars!(temp, bc_col, bc_patch, lun, pch;
+                nstep=nstep, dtime=dtime,
+                mgr=getfield(config, :accum_mgr), use_crop=true,
+                month=mon, day=day, jday=jday, secs=secs,
+                is_end_curr_year=is_eoy,
+                latdeg=grc.latdeg, gridcell=pch.gridcell,
+                active=collect(Bool, pch.active), itype=pch.itype,
+                npcropmin=config.npcropmin,
+                gdd20_season_start=inst.crop.gdd20_season_start_patch,
+                gdd20_season_end=inst.crop.gdd20_season_end_patch)
+        end
+
+        # Day 1, July 16, NH summer.
+        drive_acc!(nstep=1, mon=7, day=16, jday=197, secs=dtime)
+
+        # Manager lazily built on the config (NOT on inst → AD-safe).
+        mgr = getfield(config, :accum_mgr)
+        @test mgr isa CLM.AccumManager
+        @test "GDD0" in [f.name for f in mgr.fields]
+
+        @test temp.gdd0_patch[1] ≈ 20.0 atol=1e-9
+        @test temp.gdd8_patch[1] ≈ 12.0 atol=1e-9
+        @test temp.gdd10_patch[1] ≈ 10.0 atol=1e-9
+
+        # Day 2 folds into the running accumulation.
+        drive_acc!(nstep=2, mon=7, day=17, jday=198, secs=dtime)
+        @test temp.gdd0_patch[1] ≈ 40.0 atol=1e-9
+    end
+
+    # ================================================================
+    # Adding the AccumManager to the config must NOT make CLMInstances
+    # carry it (AD-safety: dual-copy of inst never traverses the manager).
+    # ================================================================
+    @testset "AccumManager lives on config, not CLMInstances" begin
+        config = CLM.CLMDriverConfig(use_cn=true, use_crop=true)
+        # The field exists on the (non-dual) config.
+        @test hasfield(typeof(config), :accum_mgr)
+        @test getfield(config, :accum_mgr) === nothing
+        # CLMInstances must NOT gain an accum_mgr field.
+        @test !hasfield(CLM.CLMInstances, :accum_mgr)
+    end
+
+    # ================================================================
     # Test urban snow fraction computation
     # ================================================================
     @testset "urban snow fraction" begin

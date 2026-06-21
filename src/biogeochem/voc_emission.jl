@@ -426,6 +426,181 @@ function megan_factors_get(tbl::MEGANFactorsTable{FT}, comp_name::AbstractString
 end
 
 # ---------------------------------------------------------------------------
+# MEGAN namelist parser
+# Ported from:
+#   shr_exp_parse        (shr_expr_parser_mod.F90) — parse "X = a*R + b*(S + T)"
+#   shr_megan_init       (shr_megan_mod.F90)       — build mech/megan compounds
+#   add_megan_comp       (shr_megan_mod.F90)       — de-dup mega-compounds by name
+#   InitAllocate         (VOCEmissionMod.F90)      — megan_factors_get → fill EFs
+# ---------------------------------------------------------------------------
+
+"""
+    MEGANExpItem
+
+Parsed MEGAN namelist expression: one mechanism compound `name` and its terms.
+Mirrors `shr_exp_item_t` in `shr_expr_parser_mod.F90`. Each term is a MEGAN
+mega-compound `vars[k]` with multiplier `coeffs[k]`.
+"""
+struct MEGANExpItem
+    name   ::String
+    vars   ::Vector{String}
+    coeffs ::Vector{Float64}
+end
+
+"""
+    megan_exp_parse(exp_array) -> Vector{MEGANExpItem}
+
+Parse an array of MEGAN specifier strings of the form
+
+    "X = a*R + b*S + c*(X + Y + Z) + ..."
+
+Faithful port of `shr_exp_parse` in `shr_expr_parser_mod.F90`:
+  - A specifier whose last non-blank char is `+` is continued by the next
+    array element (line splicing), so a single expression can span entries.
+  - The text left of `=` is the mechanism-compound name.
+  - Terms are separated by `+`; each term is `coeff*var` (coeff defaults 1.0).
+  - `coeff*(var1 + var2 + ...)` distributes `coeff` over every var until the
+    matching `)` (the group multiplier `coeff0` persists across terms like the
+    Fortran does, reset to 1.0 at the close paren).
+
+`exp_array` may be a `Vector{<:AbstractString}` or a single `AbstractString`
+(treated as a one-element array).
+"""
+function megan_exp_parse(exp_array::AbstractVector{<:AbstractString})
+    # --- line splicing: combine entries whose trimmed text ends in '+'.
+    sums_grps = String[]
+    cur = ""
+    for raw in exp_array
+        s = rstrip(raw)
+        isempty(s) && break          # Fortran loop1 stops at first blank entry
+        cur *= strip(s)              # trim(adjustl(...)) then concatenate
+        if endswith(s, '+')          # "more_to_come" → keep accumulating
+            continue
+        else
+            push!(sums_grps, cur)
+            cur = ""
+        end
+    end
+    # a trailing '+' with no following line leaves cur dangling; Fortran would
+    # not emit it as a finished item, so we mirror that (drop it).
+
+    items = MEGANExpItem[]
+    for sum_string in sums_grps
+        eq = findfirst('=', sum_string)
+        eq === nothing && error("megan_exp_parse: no '=' in specifier '$(sum_string)'")
+        name = String(strip(sum_string[firstindex(sum_string):prevind(sum_string, eq)]))
+        rhs  = sum_string[nextind(sum_string, eq):end]
+
+        # split terms on '+'
+        term_strs = split(rhs, '+')
+
+        vars   = String[]
+        coeffs = Float64[]
+        coeff0 = 1.0   # group multiplier, persists across terms until ')'
+        for term in term_strs
+            tmp = strip(term)
+            coeff = coeff0
+            star = findfirst('*', tmp)
+            if star !== nothing
+                xchr = strip(tmp[firstindex(tmp):prevind(tmp, star)])
+                xdbl = parse(Float64, xchr)
+                coeff = xdbl
+                lpar = findfirst('(', tmp)
+                if lpar !== nothing
+                    coeff0 = xdbl   # open a distributed group
+                    tmp = strip(tmp[nextind(tmp, lpar):end])
+                else
+                    coeff0 = 1.0
+                    tmp = strip(tmp[nextind(tmp, star):end])
+                end
+            end
+            rpar = findfirst(')', tmp)
+            if rpar !== nothing
+                coeff0 = 1.0        # close the group
+                tmp = strip(tmp[firstindex(tmp):prevind(tmp, rpar)])
+            end
+            push!(vars, String(strip(tmp)))
+            push!(coeffs, coeff)
+        end
+        push!(items, MEGANExpItem(name, vars, coeffs))
+    end
+    return items
+end
+
+megan_exp_parse(s::AbstractString) = megan_exp_parse([s])
+
+"""
+    megan_config_from_nl(specifier, tbl; mapped_emisfctrs=false, maxveg=…) -> MEGANConfig
+
+Build a populated `MEGANConfig` from a MEGAN `megan_specifier` namelist value
+plus an already-built MEGAN factors table `tbl` (`MEGANFactorsTable`, the
+in-memory image of `megan_factors_file`).
+
+This composes the Fortran activation path end-to-end:
+  1. `shr_exp_parse(specifier)`  → mechanism compounds + their MEGAN terms.
+  2. `shr_megan_init` / `add_megan_comp` → unique mega-compound list, indexed by
+     first appearance (1-based), each carrying its mapping `coeff`.
+  3. `VOCEmissionMod:InitAllocate` → `megan_factors_get(name)` fills each
+     mega-compound's `emis_factors` (per-PFT), `class_number`, `molec_weight`.
+
+`mech_comps[i].megan_indices[j]` are 1-based indices into `meg_compounds`,
+exactly as the Fortran `megan_comps(j)%ptr%index` resolves.
+
+`specifier` may be a `Vector{<:AbstractString}` or a single `AbstractString`.
+`maxveg` is the number of PFTs to copy from the factor table (defaults to the
+table's `npfts`).
+"""
+function megan_config_from_nl(specifier,
+                              tbl::MEGANFactorsTable{FT};
+                              megan_factors::Union{MEGANFactors,Nothing} = nothing,
+                              maxveg::Int = tbl.npfts) where {FT}
+    items = megan_exp_parse(specifier)
+
+    # --- build the unique mega-compound list (add_megan_comp de-dups by name).
+    meg_compounds = MEGANCompound{Float64}[]
+    name_to_index = Dict{String,Int}()
+
+    mech_comps = MEGANMechComp[]
+    for item in items
+        # shr_megan_init aborts on duplicate mechanism-compound names
+        for mc in mech_comps
+            mc.name == item.name &&
+                error("megan_config_from_nl: duplicate mechanism compound name '$(item.name)'")
+        end
+        megan_indices = Int[]
+        for (var, coeff) in zip(item.vars, item.coeffs)
+            if !haskey(name_to_index, var)
+                # InitAllocate: megan_factors_get(name) → EF / class / MW
+                (factors, class_n, molecwght) = megan_factors_get(tbl, var)
+                idx = length(meg_compounds) + 1
+                ef = zeros(Float64, maxveg)
+                @inbounds for k in 1:min(maxveg, length(factors))
+                    ef[k] = Float64(factors[k])
+                end
+                push!(meg_compounds, MEGANCompound(
+                    name = var, index = idx, class_number = Int(class_n),
+                    molec_weight = Float64(molecwght), coeff = Float64(coeff),
+                    emis_factors = ef))
+                name_to_index[var] = idx
+            end
+            push!(megan_indices, name_to_index[var])
+        end
+        push!(mech_comps, MEGANMechComp(name = item.name,
+                                        n_megan_comps = length(megan_indices),
+                                        megan_indices = megan_indices))
+    end
+
+    mf = megan_factors === nothing ? MEGANFactors{Float64}() : megan_factors
+    if isempty(mf.Agro)
+        megan_factors_init!(mf)
+    end
+
+    return MEGANConfig(megan_factors = mf,
+                       meg_compounds = meg_compounds,
+                       mech_comps    = mech_comps)
+end
+
+# ---------------------------------------------------------------------------
 # get_map_EF — Mapped emission factor for isoprene
 # ---------------------------------------------------------------------------
 

@@ -1,270 +1,371 @@
 # ==========================================================================
-# Restart I/O — Save and restore CLM state for spinup
+# Restart I/O — write/read the model's prognostic state to a CLM-style
+# restart NetCDF file and round-trip it back.
+#
+# Ported from: src/main/restFileMod.F90 (file-level driver only).
+#
+# restFileMod's job in Fortran is to open the NetCDF, define the subgrid
+# dimensions (gridcell/landunit/column/pft + the level dims levgrnd/levsno/
+# levtot/levlak/levdcmp), then call each type's `*_Restart` subroutine which
+# in turn issues `restartvar` calls (define on write, read on read). We mirror
+# that structure here: `write_restart` / `read_restart!` are the file-level
+# driver, and a per-variable registry plays the role of the scattered
+# `restartvar` calls — each entry names the CLM variable, its subgrid level and
+# vertical dimension, and a getter/setter onto the live `CLMInstances` tree.
+#
+# Variable names and dimension names follow CLM (T_SOISNO/T_GRND/T_VEG; dims
+# column/pft/levtot/levlak/levgrnd/levdcmp/levsoi) where practical, for
+# traceability back to the Fortran restart files.
+#
+# Scope: the prognostic biogeophysical state (temperature, soil/snow water,
+# snow-layer geometry, canopy water, lake state, canopy state) plus, when CN
+# is active, the soil-BGC and CN-vegetation carbon/nitrogen pools. This is a
+# faithful subset — history/diagnostic-only fields are intentionally omitted.
 #
 # Public functions:
-#   write_restart!  — Write all state arrays to a NetCDF file
-#   read_restart!   — Read state arrays from a restart file
+#   write_restart   — create the NetCDF and write the prognostic state
+#   read_restart!   — read it back into a (fresh) CLMInstances
 # ==========================================================================
+
+const _RESTART_FILL = -9999.0
 
 """
     RestartVarDef
 
-Definition of a single restart variable.
+Definition of a single restart variable. `dims` is the rank of the array
+(1=Vector, 2=Matrix, 3=3-D); `level` is the subgrid dimension the first axis
+lives on ("column" or "patch"); `levdim` is the NetCDF name for the (optional)
+vertical/pool axes — empty for rank-1 variables. `getter`/`setter!` read/write
+the corresponding field on the `CLMInstances` tree.
 """
 struct RestartVarDef
     name::String
-    dims::Int       # 1 = Vector, 2 = Matrix
-    level::String   # "column" or "patch"
-    getter::Function  # (inst) -> AbstractArray
-    setter!::Function # (inst, data) -> nothing
+    dims::Int
+    level::String          # "column" or "patch"
+    levdim::String         # NetCDF level-dim name (or "")
+    leveldim2::String      # second level dim for rank-3 vars (or "")
+    getter::Function       # (inst) -> AbstractArray
+    setter!::Function      # (inst, data) -> nothing
 end
 
-"""
-    _restart_registry() -> Vector{RestartVarDef}
+# convenience constructors -----------------------------------------------------
+_rv1(name, level, get, set) = RestartVarDef(name, 1, level, "", "", get, set)
+_rv2(name, level, levdim, get, set) = RestartVarDef(name, 2, level, levdim, "", get, set)
+_rv3(name, level, levdim, levdim2, get, set) =
+    RestartVarDef(name, 3, level, levdim, levdim2, get, set)
 
-Return the list of state variables saved/restored in restart files.
 """
-function _restart_registry()
+    _restart_registry_biogeophys() -> Vector{RestartVarDef}
+
+Prognostic biogeophysical state: temperature, soil/snow water, snow-layer
+geometry, canopy water, lake and canopy state. Always written.
+"""
+function _restart_registry_biogeophys()
     return RestartVarDef[
         # --- Temperature state ---
-        RestartVarDef("T_SOISNO", 2, "column",
-            inst -> inst.temperature.t_soisno_col,
-            (inst, d) -> inst.temperature.t_soisno_col .= d),
-        RestartVarDef("T_GRND", 1, "column",
-            inst -> inst.temperature.t_grnd_col,
-            (inst, d) -> inst.temperature.t_grnd_col .= d),
-        RestartVarDef("T_LAKE", 2, "column",
-            inst -> inst.temperature.t_lake_col,
-            (inst, d) -> inst.temperature.t_lake_col .= d),
-        RestartVarDef("T_H2OSFC", 1, "column",
-            inst -> inst.temperature.t_h2osfc_col,
-            (inst, d) -> inst.temperature.t_h2osfc_col .= d),
-        RestartVarDef("T_VEG", 1, "patch",
-            inst -> inst.temperature.t_veg_patch,
-            (inst, d) -> inst.temperature.t_veg_patch .= d),
-        RestartVarDef("T_REF2M", 1, "patch",
-            inst -> inst.temperature.t_ref2m_patch,
-            (inst, d) -> inst.temperature.t_ref2m_patch .= d),
-        RestartVarDef("T_VEG24", 1, "patch",
-            inst -> inst.temperature.t_veg24_patch,
-            (inst, d) -> inst.temperature.t_veg24_patch .= d),
-        RestartVarDef("T_VEG240", 1, "patch",
-            inst -> inst.temperature.t_veg240_patch,
-            (inst, d) -> inst.temperature.t_veg240_patch .= d),
-        RestartVarDef("T_A10", 1, "patch",
-            inst -> inst.temperature.t_a10_patch,
-            (inst, d) -> inst.temperature.t_a10_patch .= d),
+        _rv2("T_SOISNO", "column", "levtot",
+            i -> i.temperature.t_soisno_col,
+            (i, d) -> i.temperature.t_soisno_col .= d),
+        _rv1("T_GRND", "column",
+            i -> i.temperature.t_grnd_col,
+            (i, d) -> i.temperature.t_grnd_col .= d),
+        _rv2("T_LAKE", "column", "levlak",
+            i -> i.temperature.t_lake_col,
+            (i, d) -> i.temperature.t_lake_col .= d),
+        _rv1("T_H2OSFC", "column",
+            i -> i.temperature.t_h2osfc_col,
+            (i, d) -> i.temperature.t_h2osfc_col .= d),
+        _rv1("T_VEG", "patch",
+            i -> i.temperature.t_veg_patch,
+            (i, d) -> i.temperature.t_veg_patch .= d),
+        _rv1("T_REF2M", "patch",
+            i -> i.temperature.t_ref2m_patch,
+            (i, d) -> i.temperature.t_ref2m_patch .= d),
 
         # --- Water state ---
-        RestartVarDef("H2OSOI_LIQ", 2, "column",
-            inst -> inst.water.waterstatebulk_inst.ws.h2osoi_liq_col,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.h2osoi_liq_col .= d),
-        RestartVarDef("H2OSOI_ICE", 2, "column",
-            inst -> inst.water.waterstatebulk_inst.ws.h2osoi_ice_col,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.h2osoi_ice_col .= d),
-        RestartVarDef("H2OSOI_VOL", 2, "column",
-            inst -> inst.water.waterstatebulk_inst.ws.h2osoi_vol_col,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.h2osoi_vol_col .= d),
-        RestartVarDef("H2OSNO", 1, "column",
-            inst -> inst.water.waterstatebulk_inst.ws.h2osno_no_layers_col,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.h2osno_no_layers_col .= d),
-        RestartVarDef("H2OSFC", 1, "column",
-            inst -> inst.water.waterstatebulk_inst.ws.h2osfc_col,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.h2osfc_col .= d),
-        RestartVarDef("WA", 1, "column",
-            inst -> inst.water.waterstatebulk_inst.ws.wa_col,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.wa_col .= d),
+        _rv2("H2OSOI_LIQ", "column", "levtot",
+            i -> i.water.waterstatebulk_inst.ws.h2osoi_liq_col,
+            (i, d) -> i.water.waterstatebulk_inst.ws.h2osoi_liq_col .= d),
+        _rv2("H2OSOI_ICE", "column", "levtot",
+            i -> i.water.waterstatebulk_inst.ws.h2osoi_ice_col,
+            (i, d) -> i.water.waterstatebulk_inst.ws.h2osoi_ice_col .= d),
+        _rv1("H2OSNO", "column",
+            i -> i.water.waterstatebulk_inst.ws.h2osno_no_layers_col,
+            (i, d) -> i.water.waterstatebulk_inst.ws.h2osno_no_layers_col .= d),
+        _rv1("H2OSFC", "column",
+            i -> i.water.waterstatebulk_inst.ws.h2osfc_col,
+            (i, d) -> i.water.waterstatebulk_inst.ws.h2osfc_col .= d),
+        _rv1("WA", "column",
+            i -> i.water.waterstatebulk_inst.ws.wa_col,
+            (i, d) -> i.water.waterstatebulk_inst.ws.wa_col .= d),
+        _rv1("INT_SNOW", "column",
+            i -> i.water.waterstatebulk_inst.int_snow_col,
+            (i, d) -> i.water.waterstatebulk_inst.int_snow_col .= d),
 
         # --- Soil hydrology ---
-        RestartVarDef("ZWT", 1, "column",
-            inst -> inst.soilhydrology.zwt_col,
-            (inst, d) -> inst.soilhydrology.zwt_col .= d),
-        RestartVarDef("ZWT_PERCHED", 1, "column",
-            inst -> inst.soilhydrology.zwt_perched_col,
-            (inst, d) -> inst.soilhydrology.zwt_perched_col .= d),
+        _rv1("ZWT", "column",
+            i -> i.soilhydrology.zwt_col,
+            (i, d) -> i.soilhydrology.zwt_col .= d),
+        _rv1("ZWT_PERCH", "column",
+            i -> i.soilhydrology.zwt_perched_col,
+            (i, d) -> i.soilhydrology.zwt_perched_col .= d),
 
-        # --- Snow state ---
-        RestartVarDef("SNL", 1, "column",
-            inst -> Float64.(inst.column.snl),
-            (inst, d) -> inst.column.snl .= Int.(d)),
-        RestartVarDef("SNOW_DEPTH", 1, "column",
-            inst -> inst.water.waterdiagnosticbulk_inst.snow_depth_col,
-            (inst, d) -> inst.water.waterdiagnosticbulk_inst.snow_depth_col .= d),
-        RestartVarDef("FRAC_SNO", 1, "column",
-            inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col,
-            (inst, d) -> inst.water.waterdiagnosticbulk_inst.frac_sno_col .= d),
-        RestartVarDef("FRAC_SNO_EFF", 1, "column",
-            inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_eff_col,
-            (inst, d) -> inst.water.waterdiagnosticbulk_inst.frac_sno_eff_col .= d),
-        RestartVarDef("INT_SNOW", 1, "column",
-            inst -> inst.water.waterstatebulk_inst.int_snow_col,
-            (inst, d) -> inst.water.waterstatebulk_inst.int_snow_col .= d),
-
-        # Snow layer geometry (full snow+soil arrays)
-        RestartVarDef("COL_DZ", 2, "column",
-            inst -> inst.column.dz,
-            (inst, d) -> inst.column.dz .= d),
-        RestartVarDef("COL_Z", 2, "column",
-            inst -> inst.column.z,
-            (inst, d) -> inst.column.z .= d),
-        RestartVarDef("COL_ZI", 2, "column",
-            inst -> inst.column.zi,
-            (inst, d) -> inst.column.zi .= d),
+        # --- Snow state (counts + diagnostics + geometry) ---
+        _rv1("SNLSNO", "column",
+            i -> Float64.(i.column.snl),
+            # snl is an integer count; its natural missing marker is ISPVAL, which
+            # equals the float fill (-9999) and is restored to NaN on read — map
+            # NaN back to ISPVAL rather than letting round(Int, NaN) throw.
+            (i, d) -> i.column.snl .= (x -> isnan(x) ? ISPVAL : round(Int, x)).(d)),
+        _rv1("SNOW_DEPTH", "column",
+            i -> i.water.waterdiagnosticbulk_inst.snow_depth_col,
+            (i, d) -> i.water.waterdiagnosticbulk_inst.snow_depth_col .= d),
+        _rv1("frac_sno", "column",
+            i -> i.water.waterdiagnosticbulk_inst.frac_sno_col,
+            (i, d) -> i.water.waterdiagnosticbulk_inst.frac_sno_col .= d),
+        _rv1("frac_sno_eff", "column",
+            i -> i.water.waterdiagnosticbulk_inst.frac_sno_eff_col,
+            (i, d) -> i.water.waterdiagnosticbulk_inst.frac_sno_eff_col .= d),
+        _rv2("DZSNO", "column", "levtot",
+            i -> i.column.dz,
+            (i, d) -> i.column.dz .= d),
+        _rv2("ZSNO", "column", "levtot",
+            i -> i.column.z,
+            (i, d) -> i.column.z .= d),
+        _rv2("ZISNO", "column", "leviface",
+            i -> i.column.zi,
+            (i, d) -> i.column.zi .= d),
 
         # --- Canopy water ---
-        RestartVarDef("LIQCAN", 1, "patch",
-            inst -> inst.water.waterstatebulk_inst.ws.liqcan_patch,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.liqcan_patch .= d),
-        RestartVarDef("SNOCAN", 1, "patch",
-            inst -> inst.water.waterstatebulk_inst.ws.snocan_patch,
-            (inst, d) -> inst.water.waterstatebulk_inst.ws.snocan_patch .= d),
+        _rv1("LIQCAN", "patch",
+            i -> i.water.waterstatebulk_inst.ws.liqcan_patch,
+            (i, d) -> i.water.waterstatebulk_inst.ws.liqcan_patch .= d),
+        _rv1("SNOCAN", "patch",
+            i -> i.water.waterstatebulk_inst.ws.snocan_patch,
+            (i, d) -> i.water.waterstatebulk_inst.ws.snocan_patch .= d),
 
         # --- Lake state ---
-        RestartVarDef("LAKE_ICEFRAC", 2, "column",
-            inst -> inst.lakestate.lake_icefrac_col,
-            (inst, d) -> inst.lakestate.lake_icefrac_col .= d),
-        RestartVarDef("SAVEDTKE1", 1, "column",
-            inst -> inst.lakestate.savedtke1_col,
-            (inst, d) -> inst.lakestate.savedtke1_col .= d),
+        _rv2("LAKE_ICEFRAC", "column", "levlak",
+            i -> i.lakestate.lake_icefrac_col,
+            (i, d) -> i.lakestate.lake_icefrac_col .= d),
+        _rv1("SAVEDTKE1", "column",
+            i -> i.lakestate.savedtke1_col,
+            (i, d) -> i.lakestate.savedtke1_col .= d),
 
         # --- Canopy state ---
-        RestartVarDef("TLAI", 1, "patch",
-            inst -> inst.canopystate.tlai_patch,
-            (inst, d) -> inst.canopystate.tlai_patch .= d),
-        RestartVarDef("ELAI", 1, "patch",
-            inst -> inst.canopystate.elai_patch,
-            (inst, d) -> inst.canopystate.elai_patch .= d),
-        RestartVarDef("HTOP", 1, "patch",
-            inst -> inst.canopystate.htop_patch,
-            (inst, d) -> inst.canopystate.htop_patch .= d),
-        RestartVarDef("FSUN24", 1, "patch",
-            inst -> inst.canopystate.fsun24_patch,
-            (inst, d) -> inst.canopystate.fsun24_patch .= d),
-        RestartVarDef("FSUN240", 1, "patch",
-            inst -> inst.canopystate.fsun240_patch,
-            (inst, d) -> inst.canopystate.fsun240_patch .= d),
-        RestartVarDef("ELAI240", 1, "patch",
-            inst -> inst.canopystate.elai240_patch,
-            (inst, d) -> inst.canopystate.elai240_patch .= d),
+        _rv1("TLAI", "patch",
+            i -> i.canopystate.tlai_patch,
+            (i, d) -> i.canopystate.tlai_patch .= d),
+        _rv1("ELAI", "patch",
+            i -> i.canopystate.elai_patch,
+            (i, d) -> i.canopystate.elai_patch .= d),
+        _rv1("HTOP", "patch",
+            i -> i.canopystate.htop_patch,
+            (i, d) -> i.canopystate.htop_patch .= d),
     ]
 end
 
 """
-    write_restart!(filepath, inst, bounds; time=nothing)
+    _restart_registry_cn() -> Vector{RestartVarDef}
 
-Write all state variables to a restart NetCDF file.
+CN prognostic state: soil-BGC vertically-resolved carbon/nitrogen pools and
+mineral N, plus CN-vegetation carbon/nitrogen pools. Written only when CN is
+active. Names follow CLM (`decomp_cpools_vr`, `sminn_vr`, `leafc`, …).
 """
-function write_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType;
-                         time::Union{DateTime,Nothing} = nothing)
+function _restart_registry_cn()
+    return RestartVarDef[
+        # --- Soil BGC carbon (vertically + pool resolved) ---
+        _rv3("decomp_cpools_vr", "column", "levdcmp", "ndecomp_pools",
+            i -> i.soilbiogeochem_carbonstate.decomp_cpools_vr_col,
+            (i, d) -> i.soilbiogeochem_carbonstate.decomp_cpools_vr_col .= d),
+        _rv2("ctrunc_vr", "column", "levdcmp",
+            i -> i.soilbiogeochem_carbonstate.ctrunc_vr_col,
+            (i, d) -> i.soilbiogeochem_carbonstate.ctrunc_vr_col .= d),
+
+        # --- Soil BGC nitrogen ---
+        _rv3("decomp_npools_vr", "column", "levdcmp", "ndecomp_pools",
+            i -> i.soilbiogeochem_nitrogenstate.decomp_npools_vr_col,
+            (i, d) -> i.soilbiogeochem_nitrogenstate.decomp_npools_vr_col .= d),
+        _rv2("sminn_vr", "column", "levdcmp",
+            i -> i.soilbiogeochem_nitrogenstate.sminn_vr_col,
+            (i, d) -> i.soilbiogeochem_nitrogenstate.sminn_vr_col .= d),
+        _rv2("smin_no3_vr", "column", "levdcmp",
+            i -> i.soilbiogeochem_nitrogenstate.smin_no3_vr_col,
+            (i, d) -> i.soilbiogeochem_nitrogenstate.smin_no3_vr_col .= d),
+        _rv2("smin_nh4_vr", "column", "levdcmp",
+            i -> i.soilbiogeochem_nitrogenstate.smin_nh4_vr_col,
+            (i, d) -> i.soilbiogeochem_nitrogenstate.smin_nh4_vr_col .= d),
+
+        # --- CN vegetation carbon pools ---
+        _rv1("leafc", "patch",
+            i -> i.bgc_vegetation.cnveg_carbonstate_inst.leafc_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_carbonstate_inst.leafc_patch .= d),
+        _rv1("frootc", "patch",
+            i -> i.bgc_vegetation.cnveg_carbonstate_inst.frootc_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_carbonstate_inst.frootc_patch .= d),
+        _rv1("livestemc", "patch",
+            i -> i.bgc_vegetation.cnveg_carbonstate_inst.livestemc_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_carbonstate_inst.livestemc_patch .= d),
+        _rv1("deadstemc", "patch",
+            i -> i.bgc_vegetation.cnveg_carbonstate_inst.deadstemc_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_carbonstate_inst.deadstemc_patch .= d),
+        _rv1("cpool", "patch",
+            i -> i.bgc_vegetation.cnveg_carbonstate_inst.cpool_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_carbonstate_inst.cpool_patch .= d),
+
+        # --- CN vegetation nitrogen pools ---
+        _rv1("leafn", "patch",
+            i -> i.bgc_vegetation.cnveg_nitrogenstate_inst.leafn_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_nitrogenstate_inst.leafn_patch .= d),
+        _rv1("frootn", "patch",
+            i -> i.bgc_vegetation.cnveg_nitrogenstate_inst.frootn_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_nitrogenstate_inst.frootn_patch .= d),
+        _rv1("npool", "patch",
+            i -> i.bgc_vegetation.cnveg_nitrogenstate_inst.npool_patch,
+            (i, d) -> i.bgc_vegetation.cnveg_nitrogenstate_inst.npool_patch .= d),
+    ]
+end
+
+# Replace non-finite entries with the NetCDF fill value (in place, on a copy).
+function _clean_for_write!(a::AbstractArray)
+    @inbounds for i in eachindex(a)
+        isfinite(a[i]) || (a[i] = _RESTART_FILL)
+    end
+    return a
+end
+
+# Restore fill values back to NaN after read (in place).
+function _restore_after_read!(a::AbstractArray)
+    @inbounds for i in eachindex(a)
+        a[i] == _RESTART_FILL && (a[i] = NaN)
+    end
+    return a
+end
+
+# Ensure a NetCDF dim of name `nm` exists with size `n`; if it exists with a
+# different size, fall back to a unique per-variable name and define that.
+function _ensure_dim!(ds, nm::AbstractString, n::Int, fallback::AbstractString)
+    if haskey(ds.dim, nm)
+        ds.dim[nm] == n && return nm
+        # size clash → use a variable-unique dim name
+        if !haskey(ds.dim, fallback)
+            defDim(ds, fallback, n)
+        end
+        return fallback
+    end
+    defDim(ds, nm, n)
+    return nm
+end
+
+"""
+    write_restart(inst, filename; bounds, use_cn=false, time=nothing)
+
+Create a CLM-style restart NetCDF at `filename` and write the prognostic state
+held in `inst`. Mirrors `restFileMod::restFile_write`: defines the subgrid and
+level dimensions, then writes each registered variable (the role of the
+per-type `restartvar` calls).
+
+- `bounds`  — `BoundsType` giving `endc` (#columns) and `endp` (#patches).
+- `use_cn`  — also write the CN carbon/nitrogen pools.
+- `time`    — optional valid time, stored as a scalar `timemgr_rst_curr_date`.
+"""
+function write_restart(inst::CLMInstances, filename::String;
+                       bounds::BoundsType,
+                       use_cn::Bool = false,
+                       time::Union{DateTime,Nothing} = nothing)
     nc = bounds.endc
     np = bounds.endp
 
-    ds = NCDataset(filepath, "c")
+    registry = _restart_registry_biogeophys()
+    use_cn && append!(registry, _restart_registry_cn())
+
+    ds = NCDataset(filename, "c")
     try
-        # Define dimensions
+        # Subgrid dimensions (restFileMod defines column/pft; we add what we use).
         defDim(ds, "column", nc)
-        defDim(ds, "patch", np)
+        defDim(ds, "pft", np)
 
-        # Add 2D dimensions based on array sizes
-        nlevsno_nlevgrnd = size(inst.temperature.t_soisno_col, 2)
-        nlevlak = size(inst.temperature.t_lake_col, 2)
-        nlev_h2o = size(inst.water.waterstatebulk_inst.ws.h2osoi_liq_col, 2)
-        nlev_vol = size(inst.water.waterstatebulk_inst.ws.h2osoi_vol_col, 2)
-
-        defDim(ds, "levsno_levgrnd", nlevsno_nlevgrnd)
-        defDim(ds, "levlak", nlevlak)
-        defDim(ds, "lev_h2o", nlev_h2o)
-        defDim(ds, "lev_vol", nlev_vol)
-
-        # Write time if provided
         if time !== nothing
-            defDim(ds, "time", 1)
-            tvar = defVar(ds, "time", Float64, ("time",);
-                          attrib = Dict("units" => "days since 2000-01-01"))
-            tvar[1] = Dates.value(time - DateTime(2000, 1, 1)) / (1000 * 86400)
+            tvar = defVar(ds, "timemgr_rst_curr_date", Float64, ())
+            tvar[] = Dates.value(time - DateTime(2000, 1, 1)) / (1000 * 86400)
         end
 
-        # Write each restart variable
-        for rv in _restart_registry()
+        for rv in registry
             data = try
                 rv.getter(inst)
             catch
                 continue
             end
-            data === nothing && continue
-            length(data) == 0 && continue
+            (data === nothing || length(data) == 0) && continue
 
-            dim_name = rv.level == "column" ? "column" : "patch"
+            dim1 = rv.level == "column" ? "column" : "pft"
 
             if rv.dims == 1
-                v = defVar(ds, rv.name, Float64, (dim_name,))
-                clean = collect(Float64, data)
-                for i in eachindex(clean)
-                    isfinite(clean[i]) || (clean[i] = -9999.0)
-                end
+                v = defVar(ds, rv.name, Float64, (dim1,))
+                clean = _clean_for_write!(collect(Float64, data))
                 v[:] = clean
-            else
-                # Determine appropriate level dimension
-                nlev = size(data, 2)
-                lev_dim = if rv.name in ("T_SOISNO",)
-                    "levsno_levgrnd"
-                elseif rv.name in ("T_LAKE", "LAKE_ICEFRAC")
-                    "levlak"
-                elseif rv.name in ("H2OSOI_VOL",)
-                    "lev_vol"
-                else
-                    "lev_h2o"
-                end
-                # Ensure level dim exists with right size
-                if !haskey(ds.dim, lev_dim) || ds.dim[lev_dim] != nlev
-                    lev_dim = "lev_$(rv.name)"
-                    defDim(ds, lev_dim, nlev)
-                end
-                v = defVar(ds, rv.name, Float64, (dim_name, lev_dim))
-                clean = collect(Float64, data)
-                for i in eachindex(clean)
-                    isfinite(clean[i]) || (clean[i] = -9999.0)
-                end
+            elseif rv.dims == 2
+                n2 = size(data, 2)
+                d2 = _ensure_dim!(ds, rv.levdim, n2, "lev_$(rv.name)")
+                v = defVar(ds, rv.name, Float64, (dim1, d2))
+                clean = _clean_for_write!(collect(Float64, data))
                 v[:, :] = clean
+            else # rv.dims == 3
+                n2 = size(data, 2); n3 = size(data, 3)
+                d2 = _ensure_dim!(ds, rv.levdim,  n2, "lev_$(rv.name)")
+                d3 = _ensure_dim!(ds, rv.leveldim2, n3, "pool_$(rv.name)")
+                v = defVar(ds, rv.name, Float64, (dim1, d2, d3))
+                clean = _clean_for_write!(collect(Float64, data))
+                v[:, :, :] = clean
             end
         end
     finally
         close(ds)
     end
-
     return nothing
 end
 
 """
-    read_restart!(filepath, inst, bounds)
+    read_restart!(inst, filename; bounds, use_cn=false)
 
-Read state variables from a restart NetCDF file and overwrite
-the corresponding fields in `inst`.
+Read the prognostic state from a restart NetCDF written by [`write_restart`]
+back into `inst`, overwriting each registered field. Mirrors
+`restFileMod::restFile_read`. Variables absent from the file are left untouched;
+fill values are restored to `NaN`.
 """
-function read_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType)
-    isfile(filepath) || error("Restart file not found: $filepath")
+function read_restart!(inst::CLMInstances, filename::String;
+                       bounds::BoundsType,
+                       use_cn::Bool = false)
+    isfile(filename) || error("Restart file not found: $filename")
 
-    NCDataset(filepath, "r") do ds
-        for rv in _restart_registry()
+    registry = _restart_registry_biogeophys()
+    use_cn && append!(registry, _restart_registry_cn())
+
+    NCDataset(filename, "r") do ds
+        for rv in registry
             haskey(ds, rv.name) || continue
-
-            data = Array(ds[rv.name])
-            data = replace(data, missing => NaN)
-
-            # Replace fill values with NaN
-            for i in eachindex(data)
-                if data[i] == -9999.0
-                    data[i] = NaN
-                end
-            end
-
+            raw = Array(ds[rv.name])
+            data = Float64.(replace(raw, missing => NaN))
+            _restore_after_read!(data)
             try
-                rv.setter!(inst, Float64.(data))
+                rv.setter!(inst, data)
             catch e
-                @warn "Skipping restart variable $(rv.name): $e" maxlog=1
+                @warn "Skipping restart variable $(rv.name): $e" maxlog = 1
             end
         end
     end
-
     return nothing
+end
+
+# --- Backwards-compatible aliases (old arg order: filepath, inst, bounds) -----
+# The earlier API was `write_restart!(filepath, inst, bounds)`. Keep thin
+# shims so existing callers/scripts continue to work.
+function write_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType;
+                        use_cn::Bool = false, time::Union{DateTime,Nothing} = nothing)
+    return write_restart(inst, filepath; bounds = bounds, use_cn = use_cn, time = time)
+end
+
+function read_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType;
+                       use_cn::Bool = false)
+    return read_restart!(inst, filepath; bounds = bounds, use_cn = use_cn)
 end

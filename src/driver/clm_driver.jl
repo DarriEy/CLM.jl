@@ -98,6 +98,12 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     use_luna::Bool         # LUNA photosynthetic-N acclimation (vcmax25 from vcmx25_z)
     use_voc::Bool          # MEGAN VOC emissions (gated, like shr_megan_mechcomps_n>0)
     megan::MEGANConfig     # MEGAN static descriptors (factors table + compound mappings)
+    # Crop growing-degree-day accumulation manager. Like `megan`, this lives on
+    # the (non-dual-copied) config rather than on `CLMInstances` so the
+    # ForwardDiff dual-copy of the instances never traverses its non-numeric
+    # AccumField vectors (String/Matrix{Bool}/Matrix{Int}). `nothing` until a
+    # use_crop run lazily registers the GDD fields on the first accumulator step.
+    accum_mgr::Union{AccumManager, Nothing}
 end
 
 # Backward-compatible property accessors so existing code like config.use_cn still works
@@ -186,7 +192,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     end
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
                     use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, use_luna,
-                    use_voc, megan)
+                    use_voc, megan, nothing)
 end
 
 # ---------------------------------------------------------------------------
@@ -496,14 +502,17 @@ function clm_drv!(config::CLMDriverConfig,
                    is_beg_curr_day::Bool = false,
                    is_end_curr_day::Bool = false,
                    is_beg_curr_year::Bool = false,
+                   is_end_curr_year::Bool = false,
                    dtime::Real = 1800.0,
                    mon::Int = 1,
                    day::Int = 1,
+                   secs::Int = 0,
+                   jday::Int = 1,
                    photosyns::PhotosynthesisData = PhotosynthesisData())
     return clm_drv_core!(config, inst, filt, filt_inactive_and_active, bounds_proc,
         doalb, nextsw_cday, declinp1, declin, obliqr, rstwr, nlend, rdate, rof_prognostic,
         nstep, is_first_step, is_beg_curr_day, is_end_curr_day, is_beg_curr_year,
-        dtime, mon, day, photosyns)
+        dtime, mon, day, photosyns, is_end_curr_year, secs, jday)
 end
 
 # Fully-positional core: the differentiable entry point. Enzyme cannot build the
@@ -531,7 +540,10 @@ function clm_drv_core!(config::CLMDriverConfig,
                    dtime::Real,
                    mon::Int,
                    day::Int,
-                   photosyns::PhotosynthesisData)
+                   photosyns::PhotosynthesisData,
+                   is_end_curr_year::Bool = false,
+                   secs::Int = 0,
+                   jday::Int = 1)
 
     bounds_clump = bounds_proc  # single-clump mode
 
@@ -1772,9 +1784,35 @@ function clm_drv_core!(config::CLMDriverConfig,
         # Atm2Lnd accumulator update — WIRED
         atm2lnd_update_acc_vars!(a2l, bc_patch, pch.gridcell, pch.column)
 
-        # Temperature accumulators — WIRED
-        temperature_update_acc_vars!(temp, bc_col, bc_patch, lun, pch;
-            nstep=nstep, dtime=Int(dtime))
+        # Temperature accumulators — WIRED. The crop growing-degree-day path
+        # (GDD0/8/10 runaccum + GDD020/820/1020 20-yr runmeans) activates only
+        # when use_crop. Its AccumManager lives on the (non-dual) config so the
+        # ForwardDiff dual-copy of `inst` never sees its non-numeric AccumField
+        # vectors; the GDD fields are registered lazily on the first crop step
+        # (Fortran temperature_type%InitAccBuffer, called once at init).
+        if config.use_crop
+            crop = inst.crop
+            if getfield(config, :accum_mgr) === nothing
+                mgr = AccumManager()
+                temperature_init_acc_buffer!(mgr, length(bc_patch);
+                    active = collect(Bool, @view pch.active[bc_patch]),
+                    use_crop = true, step_size = Int(dtime))
+                config.accum_mgr = mgr
+            end
+            temperature_update_acc_vars!(temp, bc_col, bc_patch, lun, pch;
+                nstep=nstep, dtime=Int(dtime),
+                mgr=getfield(config, :accum_mgr), use_crop=true,
+                month=mon, day=day, jday=jday,
+                secs=secs, is_end_curr_year=is_end_curr_year,
+                latdeg=grc.latdeg, gridcell=pch.gridcell,
+                active=collect(Bool, pch.active), itype=pch.itype,
+                npcropmin=config.npcropmin,
+                gdd20_season_start=crop.gdd20_season_start_patch,
+                gdd20_season_end=crop.gdd20_season_end_patch)
+        else
+            temperature_update_acc_vars!(temp, bc_col, bc_patch, lun, pch;
+                nstep=nstep, dtime=Int(dtime))
+        end
 
         # Canopy state accumulators — WIRED
         canopystate_update_acc_vars!(cs, bc_patch; nstep=nstep)
