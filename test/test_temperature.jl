@@ -376,11 +376,9 @@
         # These should run without error (they are stubs)
         @test CLM.temperature_init_history!(temp, 1:3, 1:5, 1:2, 1:1) === nothing
         @test CLM.temperature_restart!(temp, 1:3, 1:5, 1:2) === nothing
-        @test CLM.temperature_init_acc_buffer!(temp, 1:5) === nothing
-        @test CLM.temperature_update_acc_vars!(temp, 1:3, 1:5,
-            CLM.LandunitData(), CLM.PatchData()) === nothing
-        # temperature_update_acc_vars_crop_gdds! is no longer a stub — its real
-        # (AccumManager-based) implementation is covered in test_crop_gdd.jl.
+        # temperature_init_acc_buffer! / temperature_update_acc_vars! /
+        # temperature_update_acc_vars_crop_gdds! are no longer stubs — they now use
+        # the AccumManager-based accumulation path, covered in test_crop_gdd.jl.
     end
 
 end
