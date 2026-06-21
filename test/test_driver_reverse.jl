@@ -153,4 +153,25 @@
     CLM._advance_steps!(steps, bseg, 0, 1)            # step 0
     CLM._advance_steps!(steps, bseg, 1, Nstep)        # steps 1..N-1
     @test bseg.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
+
+    # ---- per-step FORCING-advance guard (NO Enzyme). For multistep over a TIME-VARYING-forcing
+    # trajectory, forcingset_rev_phase! overwrites the live downscaled forcing arrays each step;
+    # the reverse gradient under a diurnal schedule is Enzyme-validated in
+    # scripts/enzyme_multistep_forced.jl. Here: forcingset_rev_phase! sets the live arrays, a
+    # different per-step forcing yields a different trajectory (forcing genuinely drives state),
+    # and forced_driver_steps prepends exactly one forcingset phase per step.
+    base = CLM.forcingset_aux(inst)
+    bset = CLM.driver_rev_bundle(deepcopy(inst))
+    warm = base.lwrad .+ 50.0                          # a perturbed longwave snapshot
+    CLM.forcingset_rev_phase!(bset, (; lwrad=warm, t=base.t, th=base.th, rho=base.rho))
+    @test bset.inst.atm2lnd.forc_lwrad_downscaled_col == warm   # live array overwritten
+    sched = [(; lwrad=base.lwrad .+ 30.0*(k-1), t=base.t, th=base.th, rho=base.rho) for k in 1:Nstep]
+    fsteps = CLM.forced_driver_steps(bounds, filt, config, sched; canopy_aux=nothing)
+    @test length(fsteps) == Nstep
+    @test length(fsteps[1]) == length(ph) + 1          # one forcingset phase prepended
+    @test fsteps[1][1][1] === CLM.forcingset_rev_phase!
+    bA = CLM._advance_steps!(fsteps, CLM.driver_rev_bundle(deepcopy(inst)), 0, Nstep)
+    bB = CLM._advance_steps!(steps,  CLM.driver_rev_bundle(deepcopy(inst)), 0, Nstep)  # fixed forcing
+    @test isfinite(bA.inst.temperature.t_soisno_col[c0, jdiff])
+    @test bA.inst.temperature.t_soisno_col[c0, jdiff] != bB.inst.temperature.t_soisno_col[c0, jdiff]
 end

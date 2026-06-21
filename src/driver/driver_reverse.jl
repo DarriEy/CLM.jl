@@ -620,6 +620,49 @@ function driver_rev_phases(bounds, filt, config; canopy_aux = nothing,
 end
 
 # --------------------------------------------------------------------------
+# PER-STEP FORCING injection — for multistep_reverse! over a TRAJECTORY of timesteps with
+# TIME-VARYING atmospheric forcing (a real diurnal/seasonal cycle, not the fixed-forcing
+# fill(phases,N) demo). `forcingset_rev_phase!` overwrites the live DOWNSCALED forcing arrays
+# in b.inst.atm2lnd with this step's snapshot (Const aux). Because the downstream phases read
+# forcing LIVE — soiltemp_rev_phase! takes i.atm2lnd.forc_lwrad_downscaled_col directly, and
+# canopy_rev_aux's `forc` NamedTuple ALIASES the same a2l arrays by reference (not copies) —
+# mutating them in place advances the forcing seen by the whole step WITHOUT rebuilding any aux.
+# A pure copy reverses trivially: forcing is exogenous, so its adjoint flows to the Const source
+# and is discarded — correctly NOT leaking into the carried state's gradient.
+#
+# Sets the four radiative/thermodynamic drivers that feed soil_temperature! + the canopy energy
+# balance (lwrad, t, th, rho). Keep forc_vp/forc_pbot fixed across the schedule so canopy's
+# derived forc_q snapshot stays valid; vary these four for a forcing-driven trajectory.
+function forcingset_rev_phase!(b, aux)
+    a2l = b.inst.atm2lnd
+    copyto!(a2l.forc_lwrad_downscaled_col, aux.lwrad)
+    copyto!(a2l.forc_t_downscaled_col,     aux.t)
+    copyto!(a2l.forc_th_downscaled_col,    aux.th)
+    copyto!(a2l.forc_rho_downscaled_col,   aux.rho)
+    return nothing
+end
+
+# Snapshot the current downscaled forcing as a forcingset aux (Const copies). Use as the base
+# for a schedule (scale/offset per step). The arrays are the COLUMN-indexed downscaled fields.
+forcingset_aux(inst) = (; lwrad = copy(inst.atm2lnd.forc_lwrad_downscaled_col),
+                          t     = copy(inst.atm2lnd.forc_t_downscaled_col),
+                          th    = copy(inst.atm2lnd.forc_th_downscaled_col),
+                          rho   = copy(inst.atm2lnd.forc_rho_downscaled_col))
+
+# Build the per-timestep `steps` list for multistep_reverse!/multistep_reverse_binomial! from a
+# forcing `schedule` (a Vector of forcingset auxes, one per step). Each step = a forcing-set
+# phase followed by the shared driver phase list (canopy+hydrology). The base phases are built
+# ONCE and reused (their aux don't capture forcing — soiltemp reads it live, canopy_aux aliases
+# the live arrays); only the leading forcingset phase differs per step. With canopy_aux passed,
+# the canopy energy/photosynthesis block sees each step's forcing too (live alias).
+function forced_driver_steps(bounds, filt, config, schedule; canopy_aux = nothing,
+                             n_canopy::Int = 12, dtime = 1800.0)
+    base = driver_rev_phases(bounds, filt, config; canopy_aux = canopy_aux,
+                             n_canopy = n_canopy, dtime = dtime)
+    return Any[vcat(Any[(forcingset_rev_phase!, (fk,))], base) for fk in schedule]
+end
+
+# --------------------------------------------------------------------------
 # BGC (use_cn) whole-step assembler — the ordered (phase_fn, const_args) list for the
 # REVERSE-READY subset of cn_driver_no_leaching!, in the SAME forward order the production
 # CN driver runs them (cn_driver.jl line numbers in parens):
