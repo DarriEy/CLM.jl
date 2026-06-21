@@ -221,3 +221,70 @@ function compositional_reverse!(phases, b, seed_bang!)
     end
     return db
 end
+
+# Reverse ONE timestep's ordered phase list into an EXISTING adjoint `db`, starting from
+# the step-entry state `b_start`. Re-runs the step forward with per-phase (fine) checkpoints,
+# then back-propagates last→first accumulating into `db` — identical inner mechanics to
+# compositional_reverse!, but it neither allocates nor seeds `db` (the caller threads it across
+# steps). `b_start` is left holding the step's final forward state. Returns nothing.
+function _reverse_step_into!(phases, b_start, db, revmode)
+    fine = Any[]
+    for (f, cargs) in phases
+        push!(fine, deepcopy(b_start)); f(b_start, cargs...)
+    end
+    for k in length(phases):-1:1
+        f, cargs = phases[k]
+        bk = deepcopy(fine[k])
+        Enzyme.autodiff(revmode, f, Enzyme.Const, Enzyme.Duplicated(bk, db),
+                        map(Enzyme.Const, cargs)...)
+    end
+    return nothing
+end
+
+"""
+    multistep_reverse!(steps, b, seed_bang!) -> db
+
+Multi-timestep checkpointed reverse pass — propagates the adjoint across a TRAJECTORY of
+timesteps, giving `d(L of the final state)/d(initial state)` (the state-to-state sensitivity
+through the whole horizon, e.g. d(end-of-season soil temperature)/d(its initial profile)).
+
+`steps` is an ordered list of per-timestep phase lists; each entry is exactly what
+`compositional_reverse!` consumes (an ordered list of `(phase_fn, const_args::Tuple)`). The
+phases mutate the shared bundle `b` in place, so step `s+1` continues from the state step `s`
+produced — the multi-step coupling is automatic. With a single fixed-forcing step list this is
+`fill(phases, N)`; with per-step forcing each entry captures that step's Const aux.
+
+TWO-LEVEL CHECKPOINTING bounds memory to O(n_steps) coarse checkpoints + O(phases-per-step)
+fine checkpoints (one step's worth, transient), instead of the O(n_steps · phases) that
+`compositional_reverse!` on the flattened `vcat(steps...)` would hold. The forward sweep
+deepcopy-checkpoints `b` only at each STEP boundary; the reverse sweep restores each
+step-entry checkpoint and RECOMPUTES that step's fine (per-phase) checkpoints on the fly
+before back-propagating through it. The single adjoint `db` is threaded across all steps:
+seeded from the final state, after reversing step `s` it holds `dL/d(state entering step s)`
+= `dL/d(state leaving step s-1)`, so after step 1 it is `dL/d(initial state)`.
+
+Equivalent to (and three-way cross-checked against FD and) `compositional_reverse!(vcat(steps...), …)`,
+but with bounded fine-checkpoint memory. `b` is left holding the final forward state.
+Returns the gradient bundle `db` (same structure as `b`).
+"""
+function multistep_reverse!(steps, b, seed_bang!)
+    Enzyme.API.strictAliasing!(false)
+    revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
+    # Forward sweep: checkpoint ONLY at step boundaries (coarse), run each step's phases.
+    step_checkpoints = Any[]
+    for phases in steps
+        push!(step_checkpoints, deepcopy(b))
+        for (f, cargs) in phases
+            f(b, cargs...)
+        end
+    end
+    # Seed the adjoint from the final forward state.
+    db = Enzyme.make_zero(b)
+    seed_bang!(db, b)
+    # Reverse sweep: step last→first. Restore the step-entry checkpoint, recompute its fine
+    # checkpoints, back-propagate through the step accumulating into the threaded `db`.
+    for s in length(steps):-1:1
+        _reverse_step_into!(steps[s], deepcopy(step_checkpoints[s]), db, revmode)
+    end
+    return db
+end

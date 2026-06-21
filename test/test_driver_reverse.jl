@@ -111,4 +111,32 @@
     CLM.canopy_rev_block!(bp, CLM.canopy_rev_aux(inst, bounds, filt; use_psn=true), 2)
     @test isfinite(bp.inst.temperature.t_veg_patch[fp])
     @test isfinite(bp.inst.photosyns.rssun_patch[fp])
+
+    # ---- multi-step trajectory guard (NO Enzyme). The reverse-AD gradient
+    # d(final state)/d(initial state) over an N-step horizon is validated on 1.10/Enzyme in
+    # scripts/enzyme_multistep_reverse.jl (3-way: CLM.multistep_reverse! == compositional_
+    # reverse!(vcat(steps)) == FD). Here we guard the orchestration WITHOUT Enzyme: the same
+    # per-step phase list `ph` is reusable across timesteps, the carried thermal state advances
+    # step-to-step, and the two-level FORWARD sweep (deepcopy at step boundaries, recompute the
+    # step) reproduces a flat N-step loop bit-for-bit — i.e. the checkpoint scheduling is faithful.
+    @test isa(CLM.multistep_reverse!, Function)
+    jdiff = j1 + 3                                   # an actively-diffusing soil layer
+    Nstep = 3; steps = [ph for _ in 1:Nstep]
+    bflat = CLM.driver_rev_bundle(deepcopy(inst)); after1 = NaN
+    for (s, phs) in enumerate(steps)
+        for (f, cargs) in phs; f(bflat, cargs...); end
+        s == 1 && (after1 = bflat.inst.temperature.t_soisno_col[c0, jdiff])
+    end
+    tfin = bflat.inst.temperature.t_soisno_col[c0, jdiff]
+    @test isfinite(tfin)
+    @test abs(after1 - tfin) > 1e-4                  # state genuinely advances across steps
+    # two-level forward: coarse deepcopy checkpoints at step boundaries (mirrors
+    # multistep_reverse!'s forward sweep), then recompute the last step from its checkpoint.
+    btl = CLM.driver_rev_bundle(deepcopy(inst)); cps = Any[]
+    for phs in steps
+        push!(cps, deepcopy(btl)); for (f, cargs) in phs; f(btl, cargs...); end
+    end
+    blast = deepcopy(cps[end]); for (f, cargs) in steps[end]; f(blast, cargs...); end
+    @test btl.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
+    @test blast.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
 end
