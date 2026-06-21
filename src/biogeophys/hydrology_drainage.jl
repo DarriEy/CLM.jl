@@ -7,8 +7,8 @@
 #   compute_urban_drainage_fluxes!   — Set drainage fluxes for urban non-pervious
 #   compute_total_runoff!            — Compute total runoff
 #   compute_water_mass_non_lake!     — Compute water mass (stub)
-#   adjust_runoff_terms!             — Adjust runoff terms for glacier SMB (stub)
 #   hydrology_drainage!              — Main orchestrator
+# (adjust_runoff_terms! for glacier SMB lives in glacier_surface_mass_balance.jl)
 # ==========================================================================
 
 # =========================================================================
@@ -215,31 +215,10 @@ function compute_water_mass_non_lake!(
 end
 
 # =========================================================================
-# adjust_runoff_terms! (stub)
+# adjust_runoff_terms! for glacier SMB is now ported in
+# biogeophys/glacier_surface_mass_balance.jl (alongside handle_ice_melt! and
+# compute_surface_mass_balance!). The orchestrator below calls it directly.
 # =========================================================================
-
-"""
-    adjust_runoff_terms!(qflx_qrgwl, qflx_ice_runoff_snwcp,
-        waterfluxbulk, mask_do_smb, bounds)
-
-Adjust runoff terms for glacier surface mass balance.
-
-Ported from `glacier_smb_inst%AdjustRunoffTerms` in
-`GlacierSurfaceMassBalanceMod.F90`.
-Stub: GlacierSurfaceMassBalanceMod is not yet ported. When ported, this
-function should adjust qflx_qrgwl and qflx_ice_runoff_snwcp based on
-glacier SMB calculations.
-"""
-function adjust_runoff_terms!(
-    qflx_qrgwl::AbstractVector{<:Real},
-    qflx_ice_runoff_snwcp::AbstractVector{<:Real},
-    waterfluxbulk::WaterFluxBulkData,
-    mask_do_smb::AbstractVector{Bool},
-    bounds::UnitRange{Int}
-)
-    # Stub: no-op until GlacierSurfaceMassBalanceMod is ported
-    return nothing
-end
 
 # =========================================================================
 # hydrology_drainage! — Main orchestrator
@@ -392,10 +371,19 @@ function hydrology_drainage!(
         mask_nolake, bounds, dtime)
 
     # --- Adjust runoff terms for glacier SMB ---
+    # glc_dyn_runoff_routing (dynamic ice-sheet coupling fraction, per gridcell)
+    # is not yet ported (no glc2lnd coupling) → standalone-CLM case = 0 everywhere.
+    FT_g = eltype(wf.qflx_qrgwl_col)
+    ng_g = isempty(bounds) ? 0 : maximum(Array(col.gridcell)[bounds])
+    glc_dyn_runoff_routing_grc =
+        fill!(similar(wf.qflx_qrgwl_col, FT_g, ng_g), zero(FT_g))
     adjust_runoff_terms!(
         wf.qflx_qrgwl_col,
         wf.qflx_ice_runoff_snwcp_col,
-        waterfluxbulk,
+        wf.qflx_glcice_frz_col,
+        wf.qflx_glcice_melt_col,
+        glc_dyn_runoff_routing_grc,
+        col.gridcell,
         mask_do_smb, bounds)
 
     # --- Compute total runoff ---

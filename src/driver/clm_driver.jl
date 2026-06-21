@@ -1033,7 +1033,13 @@ function clm_drv_core!(config::CLMDriverConfig,
 
 
 
-    # Placeholder: glacier_smb_inst%HandleIceMelt!(bc, ...) [glacier ice melt]
+    # Glacier ice melt: convert layer meltwater back to ice over do_smb istice
+    # columns, accumulating qflx_glcice_melt. (GlacierSurfaceMassBalanceMod:HandleIceMelt)
+    handle_ice_melt!(wsb.ws.h2osoi_liq_col, wsb.ws.h2osoi_ice_col,
+                     wfb.wf.qflx_glcice_melt_col,
+                     col.landunit, lun.itype,
+                     filt.do_smb_c, bc_col, dtime,
+                     varpar.nlevsno, varpar.nlevgrnd)
 
     # ========================================================================
     # SURFACE FLUXES for new ground temperature — WIRED
@@ -1329,7 +1335,23 @@ function clm_drv_core!(config::CLMDriverConfig,
                            nlevsno, nlevsoi,
                            varpar.nlevgrnd, varpar.nlevurb)
 
-    # Placeholder: glacier_smb_inst%ComputeSurfaceMassBalance!(bc, ...) [glacier SMB]
+    # Glacier surface mass balance: ice growth (frz), net glcice, dyn water-flux
+    # balance term. (GlacierSurfaceMassBalanceMod:ComputeSurfaceMassBalance)
+    # glc_dyn_runoff_routing is not yet ported (no glc2lnd) → 0 (standalone CLM).
+    let ng_smb = isempty(bc_col) ? 0 : maximum(Array(col.gridcell)[bc_col])
+        glc_dyn_runoff_routing_grc =
+            fill!(similar(wfb.wf.qflx_glcice_col, FT, ng_smb), zero(FT))
+        compute_surface_mass_balance!(
+            wfb.wf.qflx_glcice_col,
+            wfb.wf.qflx_glcice_frz_col,
+            wfb.wf.qflx_glcice_dyn_water_flux_col,
+            wfb.wf.qflx_snwcp_ice_col,
+            wfb.wf.qflx_glcice_melt_col,
+            wsb.snow_persistence_col,
+            glc_dyn_runoff_routing_grc,
+            col.landunit, col.gridcell, lun.itype,
+            filt.allc, filt.do_smb_c, bc_col)  # default glc_snow_persistence_max_days=7300
+    end
 
     # AerosolMasses (non-lake) — WIRED
     aerosol_masses!(aer,

@@ -65,6 +65,7 @@ using CLM
     include("test_snow_cover_fraction.jl")
     include("test_hydrology_no_drainage.jl")
     include("test_hydrology_drainage.jl")
+    include("test_glacier_smb.jl")
     include("test_lake_hydrology.jl")
     include("test_hillslope_hydrology.jl")
     include("test_photosynthesis.jl")
