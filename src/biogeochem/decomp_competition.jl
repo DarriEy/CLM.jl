@@ -168,30 +168,28 @@ decompc_sum_ndemand!(sum_ndemand_vr, mask, plant_ndemand, nuptake_prof, potentia
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
         T = eltype(actual_immob_vr)
-        if sum_ndemand_vr[c, j] * dt < sminn_vr[c, j]
-            nlimit[c, j] = 0
+        sd   = sum_ndemand_vr[c, j]
+        smn  = sminn_vr[c, j]
+        pim  = potential_immob_vr[c, j]
+        pdem = plant_ndemand[c] * nuptake_prof[c, j]
+        nlimit[c, j] = (smn > sd * dt) ? 0 : 1         # diagnostic flag (hard integer)
+        # The supply-vs-N-limited transition (at supply == demand, i.e. frac == 1) carried a
+        # d(fpi)/d(sminn) KINK — the hard-branch SUBGRADIENT behind the reverse-AD cross-domain
+        # residual. Reformulated via smooth_min on the availability ratio. smooth_min is TYPE-BASED
+        # (exact min for Float32/Float64-:auto → GPU-safe + BYTE-IDENTICAL forward; smooth only for
+        # Float64-:always and ForwardDiff.Dual), so this is reverse-AD-smooth without changing the
+        # default/GPU physics. (The lone non-identical case under :auto is fpi at the N-limited +
+        # potential_immob==0 corner, where fpi is a don't-care: actual_immob = fpi·0 = 0 regardless.)
+        if carbon_only
             fpi_vr[c, j] = one(T)
-            actual_immob_vr[c, j] = potential_immob_vr[c, j]
-            sminn_to_plant_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j]
-        elseif carbon_only
-            nlimit[c, j] = 1
-            fpi_vr[c, j] = one(T)
-            actual_immob_vr[c, j] = potential_immob_vr[c, j]
-            sminn_to_plant_vr[c, j] = plant_ndemand[c] * nuptake_prof[c, j]
-            supplement_to_sminn_vr[c, j] = sum_ndemand_vr[c, j] - (sminn_vr[c, j] / dt)
+            actual_immob_vr[c, j] = pim
+            sminn_to_plant_vr[c, j] = pdem
+            supplement_to_sminn_vr[c, j] = smooth_max(zero(T), sd - smn / dt)
         else
-            nlimit[c, j] = 1
-            if sum_ndemand_vr[c, j] > zero(T)
-                actual_immob_vr[c, j] = (sminn_vr[c, j] / dt) * (potential_immob_vr[c, j] / sum_ndemand_vr[c, j])
-            else
-                actual_immob_vr[c, j] = zero(T)
-            end
-            if potential_immob_vr[c, j] > zero(T)
-                fpi_vr[c, j] = actual_immob_vr[c, j] / potential_immob_vr[c, j]
-            else
-                fpi_vr[c, j] = zero(T)
-            end
-            sminn_to_plant_vr[c, j] = (sminn_vr[c, j] / dt) - actual_immob_vr[c, j]
+            frac = sd > zero(T) ? smn / (sd * dt) : T(2)     # availability ratio (≥1 ⇒ unlimited)
+            fpi_vr[c, j] = smooth_min(one(T), frac)
+            actual_immob_vr[c, j] = fpi_vr[c, j] * pim
+            sminn_to_plant_vr[c, j] = smooth_min(pdem, smn / dt - actual_immob_vr[c, j])
         end
     end
 end
