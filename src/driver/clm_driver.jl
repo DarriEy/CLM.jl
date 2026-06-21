@@ -1015,16 +1015,21 @@ function clm_drv_core!(config::CLMDriverConfig,
                       bc_col, bc_patch, dtime)
 
     # SoilTemperature — WIRED
-    # Placeholder for urban building temperature max
+    # Placeholders for urban building-temperature time-varying inputs (urbantv).
     nl = length(lun.itype)
     urbantv_t_building_max = _fulllike(323.15, nl)  # placeholder ~50°C cap
+    # AC adoption rate (0..1). Used only by the prognostic (CLM5) building path
+    # with urban_explicit_ac=true; 1.0 = full adoption (placeholder until urbantv
+    # streams are read).
+    urbantv_p_ac = _fulllike(1.0, nl)
     soil_temperature!(col, lun, pch, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
                       urbantv_t_building_max,
                       a2l.forc_lwrad_downscaled_col,
                       filt.nolakec, filt.nolakep,
                       filt.urbanl, filt.urbanc,
                       bc_col, bc_lun, bc_patch,
-                      dtime)
+                      dtime;
+                      urbantv_p_ac = urbantv_p_ac)
 
 
 

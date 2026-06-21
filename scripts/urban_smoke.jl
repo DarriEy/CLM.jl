@@ -79,12 +79,12 @@ function main(; nsteps::Int = 6)
         start_date=start_date, dtime=3600, use_cn=false, use_luna=false,
         use_bedrock=true, use_aquifer_layer=false, h2osfcflag=0,
         fsnowoptics=SNOWOPT, fsnowaging=SNOWAGE, int_snow_max=2000.0)
-    # Use the SIMPLE (CLM4.5) building-temperature method: the prognostic (CLM5.0)
-    # building energy balance is not yet ported (only building_hac! is wired in
-    # soil_temperature!), so prog mode leaves the roof/wall inner temperatures
-    # un-updated and the urban thermal solve diverges. SIMPLE exercises the ported
-    # urban path end-to-end.
-    CLM.urban_ctrl.building_temp_method = CLM.BUILDING_TEMP_METHOD_SIMPLE
+    # Building-temperature method. Default = SIMPLE (CLM4.5, building_hac!).
+    # The prognostic (CLM5.0 / Oleson 2015) building energy balance is now also
+    # wired (building_temperature! in soil_temperature.jl) — set URB_PROG=1 to
+    # exercise it end-to-end through the driver.
+    CLM.urban_ctrl.building_temp_method = get(ENV, "URB_PROG", "") != "" ?
+        CLM.BUILDING_TEMP_METHOD_PROG : CLM.BUILDING_TEMP_METHOD_SIMPLE
 
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
     @printf("Urban subgrid: ng=%d nc=%d np=%d  landunit_types=%s\n",
