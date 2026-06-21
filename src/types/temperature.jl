@@ -586,24 +586,57 @@ function temperature_restart!(temp::TemperatureData,
 end
 
 """
-    temperature_init_acc_buffer!(temp, bounds_patch)
+    temperature_init_acc_buffer!(mgr, npts; active=fill(true, npts),
+                                 use_crop=false, step_size=1800)
 
-Initialize accumulation buffer for temperature-related accumulated fields.
+Register the crop growing-degree-day accumulation fields on `mgr`
+(`AccumManager`), following `temperature_type%InitAccBuffer`.
+
+Only the crop-GDD fields are registered here, because the other temperature
+accumulators (T_VEG24/T_VEG240/T10/SOIL10/TDM5/…) are ported as direct
+in-array running means in [`temperature_update_acc_vars!`](@ref) (the
+established pattern for the always-on temperature accumulators in this port)
+rather than going through the generic `AccumManager`. The crop GDDs go
+through `AccumManager` because they use the `runaccum` (GDD0/8/10) and 20-year
+`runmean` (GDD020/820/1020) machinery with Jan-1 / end-of-year resets.
+
+When `use_crop` is true this registers (all `subgrid_type="pft"`, `numlev=1`):
+- `GDD0`, `GDD8`, `GDD10` — `runaccum`, `init_value=0`
+- `GDD020`, `GDD820`, `GDD1020` — `runmean`, 20-year window (`accum_period=-20*365`)
+
+`active` is the per-patch active mask, `step_size` the model timestep in
+seconds (used to convert the negative day-based runmean period to timesteps).
 
 Ported from `temperature_type%InitAccBuffer` in `TemperatureType.F90`.
-Requires accumulation infrastructure (accumulMod) — stub until that module is ported.
 """
-function temperature_init_acc_buffer!(temp::TemperatureData,
-                                     bounds_patch::UnitRange{Int})
-    # Stub: accumulation field definitions will be added when accumulMod is ported.
-    # Fields that would be initialized:
-    #   T_VEG24 (runmean, -1 day), T_VEG240 (runmean, -10 days),
-    #   TREFAV (timeavg, 1 hour), TREFAV_U, TREFAV_R,
-    #   T10 (runmean, -10 days), SOIL10 (runmean, -10 days), TDM5 (runmean, -5 days),
-    #   TDM10 (runmean, -10 days, crop only),
-    #   GDD0, GDD8, GDD10 (runaccum, crop only),
-    #   GDD020, GDD820, GDD1020 (runmean, -20*365 days, crop only),
-    #   TDA (timeavg, -30 days, cndv only)
+function temperature_init_acc_buffer!(mgr::AccumManager,
+                                      npts::Int;
+                                      active::Vector{Bool} = fill(true, npts),
+                                      use_crop::Bool = false,
+                                      step_size::Int = 1800)
+    use_crop || return nothing
+
+    # All GDD summations are relative to the planting date (Kucharik & Brye 2003).
+    # runaccum: never auto-reset by period (Fortran accum_period = not_used = huge).
+    for (name, base) in (("GDD0", 0), ("GDD8", 8), ("GDD10", 10))
+        init_accum_field!(mgr;
+            name = name, units = "K",
+            desc = "growing degree-days base $(base)C from planting",
+            accum_type = "runaccum", accum_period = typemax(Int),
+            subgrid_type = "pft", numlev = 1, init_value = 0.0,
+            active = active, npts = npts, step_size = step_size)
+    end
+
+    # 20-year running means (20*365 days).
+    for (name, base) in (("GDD020", 0), ("GDD820", 8), ("GDD1020", 10))
+        init_accum_field!(mgr;
+            name = name, units = "K",
+            desc = "20-year running mean of growing degree days base $(base)C from planting",
+            accum_type = "runmean", accum_period = -20 * 365,
+            subgrid_type = "pft", numlev = 1, init_value = 0.0,
+            active = active, npts = npts, step_size = step_size)
+    end
+
     return nothing
 end
 
@@ -647,15 +680,33 @@ end
 
 """
     temperature_update_acc_vars!(temp, bounds_col, bounds_patch, lun, patch_data;
-                                t_ref2m_patch, t_ref2m_u_patch, t_ref2m_r_patch,
-                                end_cd, secs, dtime)
+                                 end_cd=false, secs=0, dtime=0, nstep=0,
+                                 mgr=nothing, use_crop=false,
+                                 month=1, day=1, jday=1, is_end_curr_year=false,
+                                 latdeg=Float64[], gridcell=Int[], active=Bool[],
+                                 itype=Int[], npcropmin=typemax(Int),
+                                 gdd20_season_start=Float64[],
+                                 gdd20_season_end=Float64[])
 
 Update accumulated temperature variables each timestep.
-Handles hourly averages of 2m temperature, daily min/max tracking,
-10-day running means, and growing degree-day accumulation.
+Handles 24/240-step running means of vegetation temperature, the 10-day
+running mean of 2m temperature, and — when `mgr` (an `AccumManager`) is
+supplied and `use_crop` is true — the crop growing-degree-day accumulation
+(GDD0/GDD8/GDD10) plus the end-of-year 20-year running means
+(GDD020/GDD820/GDD1020).
+
+The always-on running means (T_VEG24/T_VEG240/T10) are done with the in-array
+kernel `_temp_acc_kernel!` (the established temperature-accumulator pattern in
+this port). The crop GDDs are routed through the generic `AccumManager` via
+[`temperature_update_acc_vars_crop_gdds!`](@ref); the GDD fields must already be
+registered with [`temperature_init_acc_buffer!`](@ref).
+
+End-of-year GDD20 runmeans (mirroring Fortran's `is_end_curr_year` block):
+when `is_end_curr_year`, if `varctl.flush_gdd20` is set the GDD020/820/1020
+accumulators are flushed (reset) once, then each year's GDD0/8/10 is folded
+into the 20-year running means.
 
 Ported from `temperature_type%UpdateAccVars` in `TemperatureType.F90`.
-Core logic is ported; accumulator calls are stubs until accumulMod is ported.
 """
 function temperature_update_acc_vars!(temp::TemperatureData,
                                      bounds_col::UnitRange{Int},
@@ -665,7 +716,20 @@ function temperature_update_acc_vars!(temp::TemperatureData,
                                      end_cd::Bool = false,
                                      secs::Int = 0,
                                      dtime::Int = 0,
-                                     nstep::Int = 0)
+                                     nstep::Int = 0,
+                                     mgr::Union{AccumManager, Nothing} = nothing,
+                                     use_crop::Bool = false,
+                                     month::Int = 1,
+                                     day::Int = 1,
+                                     jday::Int = 1,
+                                     is_end_curr_year::Bool = false,
+                                     latdeg::AbstractVector{<:Real} = Float64[],
+                                     gridcell::AbstractVector{Int} = Int[],
+                                     active::AbstractVector{Bool} = Bool[],
+                                     itype::AbstractVector{Int} = Int[],
+                                     npcropmin::Int = typemax(Int),
+                                     gdd20_season_start::AbstractVector{<:Real} = Float64[],
+                                     gdd20_season_end::AbstractVector{<:Real} = Float64[])
     # Running mean periods (in timesteps at dtime=1800s):
     # T_VEG24:  24 timesteps  = 12 hours
     # T_VEG240: 240 timesteps = 5 days
@@ -676,6 +740,44 @@ function temperature_update_acc_vars!(temp::TemperatureData,
             temp.t_a10_patch, temp.t_veg_patch, temp.t_ref2m_patch,
             nstep, first(bounds_patch), last(bounds_patch);
             ndrange = length(temp.t_veg24_patch))
+    end
+
+    # --- Crop growing-degree-day accumulation (use_crop only) ---
+    # Mirrors the `if ( use_crop )then` block of Fortran UpdateAccVars: GDD0,
+    # GDD8, GDD10 each timestep, then the end-of-year 20-year running means.
+    if use_crop && mgr !== nothing && !isempty(bounds_patch)
+        begp = first(bounds_patch)
+        endp = last(bounds_patch)
+
+        # GDD0 / GDD8 / GDD10 (runaccum, reset on Jan 1).
+        for (base, gddx) in ((0,  temp.gdd0_patch),
+                             (8,  temp.gdd8_patch),
+                             (10, temp.gdd10_patch))
+            temperature_update_acc_vars_crop_gdds!(temp, mgr, gddx, base;
+                begp = begp, endp = endp, month = month, day = day,
+                secs = secs, dtime = dtime, nstep = nstep, jday = jday,
+                latdeg = latdeg, gridcell = gridcell, active = active,
+                itype = itype, npcropmin = npcropmin,
+                gdd20_season_start = gdd20_season_start,
+                gdd20_season_end = gdd20_season_end)
+        end
+
+        # 20-year running means, updated once at end of year.
+        if is_end_curr_year
+            if varctl.flush_gdd20
+                @info "Flushing GDD20 variables"
+                markreset_accum_field!(mgr, "GDD020")
+                markreset_accum_field!(mgr, "GDD820")
+                markreset_accum_field!(mgr, "GDD1020")
+                varctl.flush_gdd20 = false
+            end
+            update_accum_field!(mgr, "GDD020", temp.gdd0_patch, nstep)
+            extract_accum_field!(mgr, "GDD020", temp.gdd020_patch, nstep)
+            update_accum_field!(mgr, "GDD820", temp.gdd8_patch, nstep)
+            extract_accum_field!(mgr, "GDD820", temp.gdd820_patch, nstep)
+            update_accum_field!(mgr, "GDD1020", temp.gdd10_patch, nstep)
+            extract_accum_field!(mgr, "GDD1020", temp.gdd1020_patch, nstep)
+        end
     end
 
     return nothing
