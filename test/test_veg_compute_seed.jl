@@ -668,4 +668,12 @@
             @test d.seed_leaf_xfer_patch[1]    ≈ leafc_seed * CLM.C3_R2 * 4.0 / tot_leaf
         end
     end
+
+    @testset "species_from_string" begin
+        @test CLM.species_from_string("c12") == CLM.CN_SPECIES_C12
+        @test CLM.species_from_string("c13") == CLM.CN_SPECIES_C13
+        @test CLM.species_from_string("c14") == CLM.CN_SPECIES_C14
+        @test CLM.species_from_string("n")   == CLM.CN_SPECIES_N
+        @test_throws ErrorException CLM.species_from_string("bogus")
+    end
 end

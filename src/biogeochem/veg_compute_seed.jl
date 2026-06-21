@@ -27,6 +27,40 @@ const CN_SPECIES_C14 = 3
 const CN_SPECIES_N   = 4
 
 # ---------------------------------------------------------------------------
+# species_from_string -- Parse a string representation into a CN species ID
+# ---------------------------------------------------------------------------
+
+"""
+    species_from_string(s::AbstractString)::Int
+
+Convert a string representation of a CN species into one of the
+`CN_SPECIES_*` constants. The input should be lowercase, matching the
+Fortran convention.
+
+- `"c12"` -> `CN_SPECIES_C12`
+- `"c13"` -> `CN_SPECIES_C13`
+- `"c14"` -> `CN_SPECIES_C14`
+- `"n"`   -> `CN_SPECIES_N`
+
+Errors on an unrecognized string.
+
+Ported from `species_from_string` in `CNSpeciesMod.F90`.
+"""
+function species_from_string(s::AbstractString)::Int
+    if s == "c12"
+        return CN_SPECIES_C12
+    elseif s == "c13"
+        return CN_SPECIES_C13
+    elseif s == "c14"
+        return CN_SPECIES_C14
+    elseif s == "n"
+        return CN_SPECIES_N
+    else
+        error("species_from_string: unknown species string: $s")
+    end
+end
+
+# ---------------------------------------------------------------------------
 # species_type_multiplier -- Convert gC seed to appropriate species amount
 # ---------------------------------------------------------------------------
 
