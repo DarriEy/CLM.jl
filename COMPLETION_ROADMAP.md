@@ -25,7 +25,12 @@ Close the genuine process gaps + verify depth. Target: Tier A.
 
 **A1. Prognostic urban building temperature** — ✅ DONE. Ported `UrbBuildTempOleson2015Mod` → `urb_build_temp_oleson2015.jl` (5×5 energy-balance solve), wired into the `soil_temperature!` prog branch. 20 tests (energy-balance closure + ForwardDiff check); urban smoke finite in SIMPLE + PROG.
 
-**A10. Remaining real single-point physics gaps (small):** `megan_factors_get` (MEGAN compound-name lookup; **VOC emission not wired into the driver** — the bigger of the three), `species_from_string` (C12/C13/C14/N parser; numeric IDs are hardcoded), `UpdateAccVars_CropGDDs` (crop growing-degree-day accumulation is a stub — gated on porting `accumulMod`, the accumulation infrastructure). *DoD:* MEGAN/VOC active in the driver; GDD accumulating; string parser present.
+**A10. Remaining small single-point gaps — ✅ ALL DONE.**
+- `species_from_string` ✅ (PR #40) — C12/C13/C14/N parser.
+- `UpdateAccVars_CropGDDs` ✅ (PR #40) — crop-GDD accumulation (accumulMod was already ported); now also **wired into `temperature_update_acc_vars!` + GDD020/820/1020 runmeans** (this round).
+- **MEGAN/VOC** ✅ (this round, AD-safe) — `megan_factors_get`/`gen_hashkey` (byte-exact vs Fortran) + `voc_emission!` wired behind a `use_voc` flag; the MEGAN descriptors live on a `MEGANConfig` side-struct on `CLMDriverConfig` (NOT the dual-copied `CLMInstances` — that placement was the AD regression that deferred it the first time). Still needs a MEGAN namelist parser to activate by default (no-op until then).
+
+**→ With A10 closed, the single-point CLM5 physics port (Tier A) is effectively complete.** Remaining work is the big tiers: B (I/O), C (transient dyn_subgrid), D (reverse-AD finish + CUDA/AMD + AD-smoothing), E (alt-method options), F (FATES).
 
 **A2. Subroutine-level audit** — ✅ DONE (`AUDIT_SUBROUTINE.md`): of 138 ported physics modules, **102 full / 23 partial / 13 stub** (most stubs are pure type-defs). The real partials it surfaced become the tasks below (A6–A9):
 
