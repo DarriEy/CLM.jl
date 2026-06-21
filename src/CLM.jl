@@ -30,6 +30,9 @@ include("types/landunit.jl")
 include("types/column.jl")
 include("types/patch.jl")
 include("types/dgvs.jl")
+# accumul.jl defines AccumManager, needed by temperature.jl's crop-GDD routine
+# type signature, so it must be included before the types that reference it.
+include("infrastructure/accumul.jl")
 include("types/temperature.jl")
 include("types/energy_flux.jl")
 include("types/soil_state.jl")
@@ -80,7 +83,6 @@ include("infrastructure/kernels.jl")  # KernelAbstractions physics kernels (Phas
 include("calibration/overrides.jl")
 include("infrastructure/topo.jl")
 include("infrastructure/subgrid_ave.jl")
-include("infrastructure/accumul.jl")
 include("infrastructure/control.jl")
 
 # ===========================================================================

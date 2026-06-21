@@ -721,28 +721,123 @@ end
 end
 
 """
-    temperature_update_acc_vars_crop_gdds!(temp, bounds_patch, gddx_patch;
-                                           basetemp=0, max_accum=26.0, dtime=0)
+    temperature_update_acc_vars_crop_gdds!(temp, mgr, gddx_patch, basetemp_int;
+        begp, endp, month, day, secs, dtime, nstep, jday,
+        latdeg, gridcell, active, itype, npcropmin=typemax(Int),
+        gdd20_season_start=Float64[], gdd20_season_end=Float64[])
 
-Update accumulated growing degree-day variables for crops.
-Computes daily GDD accumulation relative to a base temperature and updates
-the running accumulation.
+Accumulate and extract one crop growing-degree-day field (e.g. GDD0/GDD8/GDD10).
+
+For each active patch this computes the daily GDD contribution
+
+    max(0, min(max_accum, t_ref2m - (TFRZ + basetemp))) * dtime/SECSPDAY
+
+added into a `runaccum` accumulation field named `"GDD<basetemp>"`, resetting the
+accumulator on Jan 1 (first step of the day) and contributing zero outside the
+GDD20 accumulation season. The accumulated value is then extracted into
+`gddx_patch`. `max_accum` is 26 for `basetemp_int == 0` and 30 otherwise.
+
+The GDD20 accumulation season is, by default, derived from latitude
+(Apr–Sep in the NH, Oct–Mar in the SH). If valid per-patch read-in season
+boundaries are supplied via `gdd20_season_start`/`gdd20_season_end` (values in
+[1, 366]), those override the latitude fallback for crop patches
+(`itype >= npcropmin`).
+
+The accumulation field must already be registered on `mgr` as a `runaccum`
+field (see `init_accum_field!`).
 
 Ported from `temperature_type%UpdateAccVars_CropGDDs` in `TemperatureType.F90`.
-Requires accumulation infrastructure (accumulMod) and crop type — stub until those are ported.
 """
 function temperature_update_acc_vars_crop_gdds!(temp::TemperatureData,
-                                                bounds_patch::UnitRange{Int},
-                                                gddx_patch::Vector{<:Real};
-                                                basetemp::Int = 0,
-                                                max_accum::Real = 26.0,
-                                                dtime::Int = 0)
-    # Stub: When accumulMod and CropType are ported, this will:
-    # 1. Determine if each patch is in its GDD accumulation season
-    #    (based on latitude or read-in season boundaries)
-    # 2. Reset accumulation on Jan 1
-    # 3. Compute daily GDD: max(0, min(max_accum, t_ref2m - (TKFRZ + basetemp))) * dtime/CDAY
-    # 4. Call update_accum_field / extract_accum_field
+                                                mgr::AccumManager,
+                                                gddx_patch::AbstractVector{Float64},
+                                                basetemp_int::Int;
+                                                begp::Int,
+                                                endp::Int,
+                                                month::Int,
+                                                day::Int,
+                                                secs::Int,
+                                                dtime::Int,
+                                                nstep::Int,
+                                                jday::Int,
+                                                latdeg::AbstractVector{<:Real},
+                                                gridcell::AbstractVector{Int},
+                                                active::AbstractVector{Bool},
+                                                itype::AbstractVector{Int},
+                                                npcropmin::Int = typemax(Int),
+                                                gdd20_season_start::AbstractVector{<:Real} = Float64[],
+                                                gdd20_season_end::AbstractVector{<:Real} = Float64[])
+
+    basetemp_r8 = Float64(basetemp_int)
+
+    # Get maximum daily accumulation
+    # (SSR 2024-05-31: unsure why base 0 differs, but preserved as in Fortran)
+    max_accum = basetemp_int == 0 ? 26.0 : 30.0
+
+    # Field name, e.g. "GDD0", "GDD8", "GDD10"
+    field_name = "GDD" * string(basetemp_int)
+
+    # Are valid read-in GDD20 seasons available?
+    # Fortran: any(starts(begp:endp) > 0.5) .and. any(starts(begp:endp) < 366.5)
+    have_seasons = !isempty(gdd20_season_start) && !isempty(gdd20_season_end)
+    stream_gdd20_seasons_tt = false
+    if have_seasons
+        any_gt = false
+        any_lt = false
+        for p in begp:endp
+            s = gdd20_season_start[p]
+            any_gt |= s > 0.5
+            any_lt |= s < 366.5
+        end
+        stream_gdd20_seasons_tt = any_gt && any_lt
+    end
+
+    # Per-patch single-level buffer for the daily increment (Fortran rbufslp).
+    rbufslp = zeros(Float64, endp - begp + 1)
+
+    for p in begp:endp
+        # Avoid unnecessary calculations over inactive points
+        active[p] || continue
+
+        # Is this patch in its gdd20 accumulation season?
+        # First, latitude-based fallback.
+        lat = Float64(latdeg[gridcell[p]])
+        in_accumulation_season =
+            ((month > 3 && month < 10) && lat >= 0.0) ||
+            ((month > 9 || month < 4) && lat < 0.0)
+
+        # Replace with read-in gdd20 accumulation season, if needed and valid.
+        if stream_gdd20_seasons_tt && itype[p] >= npcropmin
+            gdd20_start = Int(gdd20_season_start[p])
+            gdd20_end   = Int(gdd20_season_end[p])
+            if gdd20_start >= 1 && gdd20_end >= 1
+                if gdd20_start > 366 || gdd20_end > 366
+                    error("invalid gdd20 season! start: $gdd20_start  end: $gdd20_end")
+                end
+                in_accumulation_season =
+                    _is_doy_in_interval(gdd20_start, gdd20_end, jday)
+            end
+        end
+
+        kf = p - begp + 1
+        if month == 1 && day == 1 && secs == dtime
+            # Jan 1, first timestep of the day: reset the accumulator.
+            markreset_accum_field!(mgr, field_name; kf = kf)
+            rbufslp[kf] = 0.0
+        elseif in_accumulation_season
+            rbufslp[kf] = max(0.0, min(max_accum,
+                temp.t_ref2m_patch[p] - (TFRZ + basetemp_r8))) * dtime / SECSPDAY
+        else
+            rbufslp[kf] = 0.0      # keeps gdd unchanged outside accumulation season
+        end
+    end
+
+    # Save: accumulate the increment, then extract the running total.
+    # Note: runaccum cannot reset AND accumulate in the same call, so on the
+    # reset step rbufslp is zero and the increment is applied the next step.
+    update_accum_field!(mgr, field_name, rbufslp, nstep)
+    extract_accum_field!(mgr, field_name, gddx_patch, nstep)
+
     return nothing
 end
 
