@@ -60,9 +60,10 @@ Make it run + write output + restart without the parity harness's injection.
 
 > **Tier A activations COMPLETE:** crop-GDD threaded into `clm_drv_core!` (AccumManager on `CLMDriverConfig`, AD-safe) + MEGAN namelist parser (`megan_exp_parse`/`megan_config_from_nl`) — both use_crop/use_voc paths now functional.
 
-**B1. History output** — ✅ first cut done (`src/infrastructure/history_io.jl`): `HistoryTape` + `hist_addfld!`/`hist_accumulate!`/`hist_write!` — A/I/X/M averaging, CLM-style h0 NetCDF write+read (27 tests). DEFERRED (full `histFileMod` generality): multi-tape (h1/h2…), `fincl`/`fexcl` namelist, subgrid p2c/c2l/l2g remap, multi-level 2D fields, time_bounds.
-**B2. Restart I/O** — ✅ done (`src/infrastructure/restart_io.jl` reworked): `write_restart!`/`read_restart!` round-trip of the prognostic biogeophys + (use_cn) C/N state, CLM-faithful var/dim names, 46-test round-trip. DEFERRED: C13/C14 isotope pools, CN flux state, crop/phenology counters, full header metadata.
-**B3. Init/domain plumbing** — `decompInitMod`, `domainMod`, `subgridMod`, `init_interp` (11 files) as needed for standalone init. *DoD:* cold-start + finidat without the harness.
+**B0. Standalone run harness** — ✅ done (`src/driver/run_clm.jl`): `run_clm!(...)` orchestrates init(±`finidat` restart) → driver loop → periodic h0 write → end restart, no parity harness. 15-test gated round-trip (run→write h0+restart→finidat-continue exact). Pure orchestration, AD-safe.
+**B1. History output** — ✅ done (`src/infrastructure/history_io.jl`): `HistoryTape` + add/accumulate/write (A/I/X/M) **+ multi-tape `HistoryTapeSet` (h0/h1/h2, per-tape nhtfrq) + `fincl`/`fexcl` w/ `name:flag` + master field list** (68 tests). DEFERRED: subgrid p2c/c2l/l2g remap + multi-level 2D fields — **`default_history_tape()` mixes patch+column under one `subgrid` dim → DimensionMismatch when np≠nc; use single-level tapes until subgrid handling lands**; also time_bounds, mfilt rollover, ndens.
+**B2. Restart I/O** — ✅ done (`src/infrastructure/restart_io.jl`): `write_restart!`/`read_restart!` round-trip of prognostic biogeophys + (use_cn) C/N pools **+ CN flux/accumulators, crop/phenology counters, C13/C14 isotopes** (flag-gated), CLM-faithful names (93 tests). DEFERRED: full header metadata.
+**B3. Init/domain plumbing** — `init_interp` for cross-grid finidat is the main remaining piece. *(Single-process mask-based init via `clm_initialize!` already works; the Fortran MPI-decomp modules `decompInitMod`/`domainMod`/`subgridMod` are largely N/A for this port.)*
 
 ---
 
