@@ -262,6 +262,13 @@ include("fates/EDParamsMod.jl")
 include("fates/PRTParametersMod.jl")
 include("fates/SFFireWeatherMod.jl")
 
+# Batch 1 (cont.): standalone leaf modules depending only on the foundation.
+# FatesLitterMod (litter_type: CWD + fine-litter pools by element) and
+# FatesRadiationMemMod (solar-band indices/params). Standalone — do NOT add to
+# CLMInstances or any dual-copied struct.
+include("fates/FatesLitterMod.jl")
+include("fates/FatesRadiationMemMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
