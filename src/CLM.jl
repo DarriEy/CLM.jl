@@ -296,6 +296,13 @@ include("fates/FatesHydraulicsMemMod.jl")
 # transfer solver. Self-contained — depends only on the foundation above.
 include("fates/TwoStreamMLPEMod.jl")
 
+# Batch 2 (fire): SPITFIRE fuel-class enumeration (FatesFuelClassesMod, depends
+# on FatesLitterMod) and the Nesterov fire-weather-index concrete subtype
+# (SFNesterovMod, extends SFFireWeatherMod's fire_weather). Standalone — NOT
+# added to CLMInstances or any dual-copied struct.
+include("fates/FatesFuelClassesMod.jl")
+include("fates/SFNesterovMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================

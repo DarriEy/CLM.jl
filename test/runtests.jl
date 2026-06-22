@@ -185,6 +185,8 @@ using CLM
     # FATES (Tier F) — plant-hydraulics memory/state types.
     include("test_fates_hydraulicsmem.jl")
     include("test_fates_twostream.jl")
+    # FATES (Tier F) — fire: fuel-class enumeration + Nesterov fire-weather index.
+    include("test_fates_fuelclasses_nesterov.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
