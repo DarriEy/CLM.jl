@@ -208,6 +208,7 @@ include("biogeochem/cn_products_mod.jl")
 # types above for the harvest C/N flux fields.
 include("biogeochem/dyn_harvest.jl")
 include("biogeochem/cndv.jl")
+include("biogeochem/dyn_gross_unrep.jl")  # gross unrepresented LULCC reader + CN disturbance fluxes (dyn_subgrid)
 include("biogeochem/vegetation_facade.jl")
 
 # ===========================================================================
