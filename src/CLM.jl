@@ -270,6 +270,10 @@ include("fates/FatesLitterMod.jl")
 include("fates/FatesRadiationMemMod.jl")
 include("fates/FatesInterfaceTypesMod.jl")
 
+# Batch 1 (biogeophys): plant-hydraulics water transfer functions (WTFs). Depends
+# only on the foundation (Constants/Globals). Standalone — not in CLMInstances.
+include("fates/FatesHydroWTFMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
