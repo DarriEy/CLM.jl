@@ -366,6 +366,24 @@ include("fates/DamageMainMod.jl")
 # CLMInstances or any dual-copied struct.
 include("fates/FatesAllometryMod.jl")
 
+# Batch 7 — PARTEH carbon-only allometric allocation hypothesis
+# (PRTAllometricCarbonMod). Concrete subtype of AbstractPRTVartypes that
+# implements the deferred DailyPRT!/FastPRT! generics; depends on the allometry
+# engine + integrators above. Standalone — NOT added to CLMInstances.
+include("fates/PRTAllometricCarbonMod.jl")
+# FATES (Tier F) Batch 7 — the Carbon-Nitrogen-Phosphorus (CNP) prioritized
+# allometric allocation hypothesis (PRTAllometricCNPMod). The most complex PARTEH
+# allocation strategy: a concrete `cnp_allom_prt_vartypes <: AbstractPRTVartypes`
+# implementing the deferred generics DailyPRT!/FastPRT!/GetNutrientTarget/
+# GetCoordVal plus the CNP-specific allocation chain (prioritized replacement →
+# stature growth via Euler integration of allometric derivatives → remainder
+# allocation/efflux), the multi-element stoichiometric targets, nutrient-limited
+# downregulation, the PID l2fr controller, and storage overflow/efflux/burn.
+# Depends on the merged PRTGenericMod (abstract type + generics + registration),
+# FatesAllometryMod ((value,deriv) routines), prt_params, ed_params(), and the
+# Euler/RKF45 integrators. Standalone — NOT added to CLMInstances.
+include("fates/PRTAllometricCNPMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
