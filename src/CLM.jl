@@ -331,6 +331,20 @@ include("fates/EDPftvarcon.jl")
 # NOT added to CLMInstances or any dual-copied struct.
 include("fates/SFParamsMod.jl")
 
+# Batch 4: statically-derived FATES parameters + seed dispersal. Both standalone
+# and independent of each other; build on the foundation + Batches 1-3.
+# FatesParameterDerivedMod: parameters DERIVED at init from the raw
+# EDPftvarcon/EDParams/SFParams (per-PFT photosynthesis constants from
+# vcmax25top, branch fraction from CWD fractions, damage-class transition
+# matrices). FatesDispersalMod: seed dispersal across grid cells — neighbor
+# linked-list topology, the dispersal-kernel probability densities
+# (exponential / exppower / logsech), and the calendar-driven IsItDispersalTime.
+# Depend on the merged accessors edpftvarcon_inst()/ed_params()/sf_params() and
+# the FatesInterfaceTypesMod module globals. Standalone — NOT added to
+# CLMInstances or any dual-copied struct.
+include("fates/FatesParameterDerivedMod.jl")
+include("fates/FatesDispersalMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
