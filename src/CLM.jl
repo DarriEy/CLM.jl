@@ -256,6 +256,12 @@ include("fates/FatesParametersInterface.jl")
 include("fates/FatesSynchronizedParamsMod.jl")
 include("fates/EDParamsMod.jl")
 
+# Batch 2 (depends only on the foundation above): PARTEH/allometry parameter
+# storage and the SPITFIRE fire-weather base type. Standalone — NOT added to
+# CLMInstances or any dual-copied struct.
+include("fates/PRTParametersMod.jl")
+include("fates/SFFireWeatherMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
