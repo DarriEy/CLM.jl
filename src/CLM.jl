@@ -366,6 +366,12 @@ include("fates/DamageMainMod.jl")
 # CLMInstances or any dual-copied struct.
 include("fates/FatesAllometryMod.jl")
 
+# Batch 7 — PARTEH carbon-only allometric allocation hypothesis
+# (PRTAllometricCarbonMod). Concrete subtype of AbstractPRTVartypes that
+# implements the deferred DailyPRT!/FastPRT! generics; depends on the allometry
+# engine + integrators above. Standalone — NOT added to CLMInstances.
+include("fates/PRTAllometricCarbonMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
