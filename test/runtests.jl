@@ -125,6 +125,7 @@ using CLM
     include("test_control.jl")
     include("test_instances.jl")
     include("test_restart_io.jl")
+    include("test_init_interp.jl")
     include("test_band_diagonal.jl")
     include("test_clm_driver.jl")
     include("test_root_biophys.jl")
