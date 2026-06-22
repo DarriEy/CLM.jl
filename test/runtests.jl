@@ -193,6 +193,8 @@ using CLM
     include("test_fates_edpftvarcon.jl")
     # FATES (Tier F) — fire: SPITFIRE parameter holder (SFParamsMod).
     include("test_fates_sfparams.jl")
+    # FATES (Tier F) Batch 3 — SPITFIRE fuel state (FatesFuelMod).
+    include("test_fates_fuel.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

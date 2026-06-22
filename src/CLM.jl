@@ -310,6 +310,10 @@ include("fates/TwoStreamMLPEMod.jl")
 # added to CLMInstances or any dual-copied struct.
 include("fates/FatesFuelClassesMod.jl")
 include("fates/SFNesterovMod.jl")
+# Batch 3: SPITFIRE fuel state (FatesFuelMod) — the `fuel_type` holding per-fuel-
+# class loading + derived non-trunk loading/moisture/bulk-density/SAV/MEF.
+# Depends on FatesFuelClassesMod, SFFireWeatherMod, SFNesterovMod, FatesConstantsMod.
+include("fates/FatesFuelMod.jl")
 
 # Batch 3: the FATES PFT-indexed parameter container (EDPftvarcon). The large
 # per-PFT trait/allometry/allocation/mortality/phenology/fire/hydraulics
