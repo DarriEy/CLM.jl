@@ -21,30 +21,8 @@
 # as the dyn-var dim1name metadata (the Julia reader slices by position).
 const grlnd = "lndgrid"
 
-# ======================================================================
-# set_landunit_weight!  (subgridWeightsMod :: set_landunit_weight)
-# ======================================================================
-"""
-    set_landunit_weight!(grc, lun, g, ltype, weight)
-
-Set the subgrid weight of a given landunit type `ltype` on a single grid cell
-`g`. Mirrors Fortran `subgridWeightsMod :: set_landunit_weight`.
-
-If a landunit of type `ltype` exists on gridcell `g`, its `wtgcell` is set to
-`weight`. If no such landunit exists, this is a no-op for `weight == 0`, but an
-attempt to assign a non-zero weight to a non-existent landunit is an error.
-"""
-function set_landunit_weight!(grc::GridcellData, lun::LandunitData,
-                              g::Int, ltype::Int, weight::Real)
-    l = grc.landunit_indices[ltype, g]
-    if l != ISPVAL
-        lun.wtgcell[l] = weight
-    elseif weight > 0.0
-        error("set_landunit_weight! ERROR: Attempt to assign non-zero weight to " *
-              "a non-existent landunit: g, l, ltype, weight = $g, $l, $ltype, $weight")
-    end
-    return nothing
-end
+# set_landunit_weight! (subgridWeightsMod :: set_landunit_weight) is defined
+# canonically in dyn_landunit_area.jl (loaded earlier); reused here.
 
 # ======================================================================
 # dynlakeFileMod

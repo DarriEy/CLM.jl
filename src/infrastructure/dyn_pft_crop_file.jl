@@ -292,25 +292,8 @@ function dyncrop_init(dyncrop_filename::String;
                         wtcft = wtcft, fertcft = fertcft)
 end
 
-"""
-    set_landunit_weight!(grc, lun, g, ltype, weight)
-
-Set the subgrid weight of landunit type `ltype` on grid cell `g` (Fortran
-`subgridWeightsMod :: set_landunit_weight`). Looks up the landunit index via
-`grc.landunit_indices[ltype, g]`; if present, sets `lun.wtgcell[l] = weight`.
-It is an error to assign a non-zero weight to a non-existent landunit.
-"""
-function set_landunit_weight!(grc::GridcellData, lun::LandunitData,
-                              g::Int, ltype::Int, weight::Float64)
-    l = grc.landunit_indices[ltype, g]
-    if l != ISPVAL
-        lun.wtgcell[l] = weight
-    elseif weight > 0.0
-        error("set_landunit_weight! ERROR: Attempt to assign non-zero weight to " *
-              "a non-existent landunit: g=$g, l=$l, ltype=$ltype, weight=$weight")
-    end
-    return nothing
-end
+# set_landunit_weight! is defined canonically in dyn_landunit_area.jl (loaded
+# earlier); the transient readers here reuse that single definition.
 
 """
     dyncrop_interp!(state::DyncropState, bounds, grc, lun, col, pch;

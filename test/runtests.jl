@@ -142,6 +142,7 @@ using CLM
     include("test_dyn_file_io.jl")
     include("test_dyn_pft_crop_file.jl")
     include("test_dyn_lake_urban_file.jl")
+    include("test_dyn_landunit_area.jl")
     include("test_dry_dep_velocity.jl")
     include("test_subgrid_build.jl")
     include("test_dyn_init_columns.jl")

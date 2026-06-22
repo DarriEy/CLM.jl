@@ -25,17 +25,23 @@ const DECREASE_ORDER = (ISTSOIL, ISTCROP, ISTURB_MD, ISTURB_HD, ISTURB_TBD,
 """
     set_landunit_weight!(grc, lun, g, ltype, weight)
 
-Set weight of landunit type `ltype` on gridcell `g`. No-op if that landunit
-type does not exist on the gridcell. Mirror of `subgridWeightsMod`'s
-`set_landunit_weight`, used by `update_landunit_weights!`.
+Set weight of landunit type `ltype` on gridcell `g`. No-op when assigning a
+zero weight to a landunit type that does not exist on the gridcell; errors on
+an attempt to assign a non-zero weight to a non-existent landunit. Mirror of
+`subgridWeightsMod`'s `set_landunit_weight`. Canonical definition shared by
+`update_landunit_weights!` and the transient land-use readers
+(`dyn_pft_crop_file.jl`, `dyn_lake_urban_file.jl`).
 """
 function set_landunit_weight!(grc::GridcellData, lun::LandunitData,
                               g::Int, ltype::Int, weight::Real)
     l = grc.landunit_indices[ltype, g]
     if l != ISPVAL
         lun.wtgcell[l] = weight
+    elseif weight > 0.0
+        error("set_landunit_weight! ERROR: Attempt to assign non-zero weight to " *
+              "a non-existent landunit: g=$g, l=$l, ltype=$ltype, weight=$weight")
     end
-    nothing
+    return nothing
 end
 
 """
