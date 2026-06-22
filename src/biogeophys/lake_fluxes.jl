@@ -75,7 +75,7 @@ Base.@kwdef struct LakeFluxDV{Vi,V,M}
     forc_u::V; forc_v::V; forc_hgt_u::V; forc_hgt_t::V; forc_hgt_q::V
     # outputs (patch)
     eflx_sh_tot::V; eflx_sh_grnd::V; eflx_lh_tot::V; eflx_lh_grnd::V
-    eflx_lwrad_out::V; eflx_lwrad_net::V; eflx_soil_grnd::V; taux::V; tauy::V
+    eflx_lwrad_out::V; eflx_lwrad_net::V; eflx_soil_grnd::V; eflx_gnet::V; taux::V; tauy::V
     qflx_evap_soi::V; qflx_evap_tot::V; ustar::V; z0mg::V; z0hg::V; z0qg::V
 end
 Adapt.@adapt_structure LakeFluxDV
@@ -107,6 +107,7 @@ function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate
         eflx_lwrad_out = energyflux.eflx_lwrad_out_patch,
         eflx_lwrad_net = energyflux.eflx_lwrad_net_patch,
         eflx_soil_grnd = energyflux.eflx_soil_grnd_patch,
+        eflx_gnet = energyflux.eflx_gnet_patch,
         taux = energyflux.taux_patch, tauy = energyflux.tauy_patch,
         qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch,
         qflx_evap_tot = waterfluxbulk.wf.qflx_evap_tot_patch,
@@ -455,6 +456,12 @@ end
         # made the errlon balance-check diagnostic = 2*(out - forc) instead of ~0 for lakes.
         d.eflx_lwrad_net[p] = eflx_lwrad_out_p - forc_lwrad[c]
         d.eflx_soil_grnd[p] = eflx_soil_grnd_p
+        # eflx_gnet = the actual heat flux from the ground interface into the lake (NOT the
+        # penetrating solar) — LakeFluxesMod.F90:743, identical formula to eflx_soil_grnd_p.
+        # lake_temperature reads eflx_gnet as `fin` (its top-layer BC); the port computed this
+        # value but only stored it as eflx_soil_grnd, leaving eflx_gnet=0 → the lake surface
+        # never cooled t_lake[1] (stuck at 277 → never froze → LAKEICE never formed). Wire it.
+        d.eflx_gnet[p] = eflx_soil_grnd_p
 
         d.qflx_evap_soi[p] = qflx_evap_soi_p
         d.qflx_evap_tot[p] = qflx_evap_soi_p
