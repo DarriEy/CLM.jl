@@ -187,6 +187,8 @@ using CLM
     include("test_fates_twostream.jl")
     # FATES (Tier F) — fire: fuel-class enumeration + Nesterov fire-weather index.
     include("test_fates_fuelclasses_nesterov.jl")
+    # FATES (Tier F) — PFT-indexed parameter container (EDPftvarcon, Batch 3).
+    include("test_fates_edpftvarcon.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

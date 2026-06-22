@@ -303,6 +303,15 @@ include("fates/TwoStreamMLPEMod.jl")
 include("fates/FatesFuelClassesMod.jl")
 include("fates/SFNesterovMod.jl")
 
+# Batch 3: the FATES PFT-indexed parameter container (EDPftvarcon). The large
+# per-PFT trait/allometry/allocation/mortality/phenology/fire/hydraulics
+# parameter table + its registration/retrieval with the FATES parameter reader,
+# consistency checks (FatesCheckParams), and litter-decomposability lookup
+# (GetDecompyFrac). FATES's OWN PFT param table (EDPftvarcon_inst) — distinct
+# from the host CLM `pftcon`. Standalone — NOT added to CLMInstances or any
+# dual-copied struct. Depends on the foundation + Batches 1-2 above.
+include("fates/EDPftvarcon.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
