@@ -262,6 +262,12 @@ include("fates/EDParamsMod.jl")
 include("fates/PRTParametersMod.jl")
 include("fates/SFFireWeatherMod.jl")
 
+# Batch 2 (PARTEH generic framework): the abstract prt_vartypes/prt_global_type
+# machinery, organ/element indexing, the generic prt_vartype state container, and
+# the generic getters/setters/initializers. Depends only on the foundation +
+# PRTParametersMod. Standalone — NOT added to CLMInstances or any dual-copied struct.
+include("fates/PRTGenericMod.jl")
+
 # Batch 1 (cont.): standalone leaf modules depending only on the foundation.
 # FatesLitterMod (litter_type: CWD + fine-litter pools by element) and
 # FatesRadiationMemMod (solar-band indices/params). Standalone — do NOT add to
@@ -270,13 +276,32 @@ include("fates/FatesLitterMod.jl")
 include("fates/FatesRadiationMemMod.jl")
 include("fates/FatesInterfaceTypesMod.jl")
 
+# Batch 2: pure index-mapping helpers for the FATES history/diagnostic
+# multiplexed dimensions (size/age/height/coage/fuel/damage class lookups +
+# flat 1-D index combiners). Depends only on the foundation + EDParamsMod
+# (nclmax, bin-edge vectors on ed_params()) + FatesInterfaceTypesMod (nlev*).
+# Standalone — NOT added to CLMInstances or any dual-copied struct.
+include("fates/FatesSizeAgeTypeIndicesMod.jl")
+
 # Batch 1 (biogeophys): plant-hydraulics water transfer functions (WTFs). Depends
 # only on the foundation (Constants/Globals). Standalone — not in CLMInstances.
 include("fates/FatesHydroWTFMod.jl")
 
+# Batch 2 (biogeophys): plant-hydraulics memory/state types (ed_site_hydr_type,
+# ed_cohort_hydr_type) + compartment/shell indexing constants. Depends on the
+# foundation + FatesHydroWTFMod (WRFType/WKFType). Standalone — not in CLMInstances.
+include("fates/FatesHydraulicsMemMod.jl")
+
 # Batch 1 (radiation): the multi-layer, multi-PFT two-stream canopy radiative
 # transfer solver. Self-contained — depends only on the foundation above.
 include("fates/TwoStreamMLPEMod.jl")
+
+# Batch 2 (fire): SPITFIRE fuel-class enumeration (FatesFuelClassesMod, depends
+# on FatesLitterMod) and the Nesterov fire-weather-index concrete subtype
+# (SFNesterovMod, extends SFFireWeatherMod's fire_weather). Standalone — NOT
+# added to CLMInstances or any dual-copied struct.
+include("fates/FatesFuelClassesMod.jl")
+include("fates/SFNesterovMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
