@@ -984,6 +984,21 @@ function init_lake_state!(inst::CLMInstances, bounds::BoundsType)
         ls.lake_raw_col[c]         = 0.0
         ls.ks_col[c]               = 0.0
         ls.ws_col[c]               = 0.0
+
+        # PHYSICAL step-1 top eddy conductivity. lakestate_init_cold! leaves savedtke1 at the
+        # molecular TKWAT (the faithful LakeStateType%InitCold port), but lake_temperature recomputes
+        # it every step as kme[1]·cwat = (km + fangkm)·cwat — where fangkm = 1.039e-8·N2MIN^(-0.43) is
+        # the Fang&Stefan background enhanced diffusivity, NONZERO even at ws=0 (a well-mixed cold-start
+        # has n2→N2MIN). That recompute runs AFTER lake_fluxes, so the FIRST step's surface solve would
+        # use molecular 0.57, under-supply heat from the warm deep lake, and over-cool t_grnd (Julia 265
+        # vs Fortran ~271). Seed the physical value (== the model's own kme[1]·cwat ≈ 3.154 for a shallow
+        # lake, ×MIXFACT for deep) so step-1 lake_fluxes matches Fortran. (fortran_parity_lake: step-1
+        # EFLX_LH/FSH rel 0.72→0.19, t_grnd 271.4 vs Fortran 270.96.)
+        let cwat = CPLIQ * DENH2O
+            kme1 = (TKWAT / cwat) + 1.039e-8 * N2MIN^(-0.43)   # km + fangkm (ws=0, n2=N2MIN)
+            col.lakedepth[c] >= DEPTHCRIT && (kme1 *= MIXFACT)
+            ls.savedtke1_col[c] = kme1 * cwat
+        end
     end
 
     # Initialize patch-level fields for lake patches
