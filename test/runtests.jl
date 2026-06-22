@@ -141,6 +141,7 @@ using CLM
     include("test_history_io.jl")
     include("test_dyn_file_io.jl")
     include("test_dyn_pft_crop_file.jl")
+    include("test_dyn_harvest.jl")
     include("test_dyn_lake_urban_file.jl")
     include("test_dyn_landunit_area.jl")
     include("test_dyn_patch_state_updater.jl")

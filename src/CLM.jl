@@ -203,6 +203,10 @@ include("biogeochem/nutrient_competition.jl")
 include("biogeochem/veg_compute_seed.jl")
 include("biogeochem/cn_annual_update.jl")
 include("biogeochem/cn_products_mod.jl")
+# Transient wood-harvest mortality (dyn_subgrid/dynHarvestMod). Needs dyn_file_io.jl
+# (line 106) for the DynFile/DynVarTimeUninterp readers and the CN veg flux/state
+# types above for the harvest C/N flux fields.
+include("biogeochem/dyn_harvest.jl")
 include("biogeochem/cndv.jl")
 include("biogeochem/vegetation_facade.jl")
 
