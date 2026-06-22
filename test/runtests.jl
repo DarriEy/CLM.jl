@@ -199,6 +199,8 @@ using CLM
     include("test_fates_paramderived_dispersal.jl")
     # FATES (Tier F) Batch 5 — tree-damage module (DamageMainMod).
     include("test_fates_damage.jl")
+    # FATES (Tier F) Batch 6 — allometry engine (FatesAllometryMod).
+    include("test_fates_allometry.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

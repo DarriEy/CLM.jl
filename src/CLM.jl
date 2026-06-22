@@ -354,6 +354,18 @@ include("fates/FatesDispersalMod.jl")
 # or any dual-copied struct.
 include("fates/DamageMainMod.jl")
 
+# FATES (Tier F) Batch 6 — the allometry engine (FatesAllometryMod). The
+# size->structure allometry library: height(dbh), crown area, AGB/BGB/sapwood/
+# leaf/fineroot/storage/structure biomass, and each relationship's analytic
+# derivative w.r.t. dbh. Dispatches among per-PFT allometry-mode selectors (h,
+# bagw, blmax, bsap, bdead, bbgw, bfineroot, carea, store). Includes the
+# diameter<->height inverses, root-profile builders, ForceDBH/size2dbh Newton+
+# Regula-Falsi solvers, VegAreaLayer, and CheckIntegratedAllometries. Depends on
+# the merged accessors prt_params/param_derived()/ed_params(), GetCrownReduction
+# (DamageMainMod), and the EDParamsMod VAI bins. Standalone — NOT added to
+# CLMInstances or any dual-copied struct.
+include("fates/FatesAllometryMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
