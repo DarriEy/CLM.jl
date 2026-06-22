@@ -126,7 +126,15 @@ function lakestate_init_cold!(ls::LakeStateData, bounds_col::UnitRange{Int};
             ls.lake_icefrac_col[c, j] = 0.0
         end
 
-        # Set top eddy conductivity from previous timestep
+        # Set top eddy conductivity from previous timestep. NOTE (2026-06-22, fortran_parity_lake):
+        # the molecular TKWAT (0.57) here is an exact port of LakeStateType%InitCold, but it is the
+        # STEP-1 lake-flux parity lever: lake_temperature recomputes savedtke1 = kme[1]·cwat (the
+        # well-mixed eddy conductivity, ~3.15 for Bow) — but only AFTER lake_fluxes runs, so the
+        # FIRST step's surface solve uses molecular 0.57, under-supplies heat from the warm deep
+        # lake, and over-cools t_grnd (Julia 265→ Fortran ~271). Initializing to the eddy value
+        # (~3.15) cut step-1 EFLX_LH/FSH rel 0.72→0.19 and gave t_grnd 271.4 (vs Fortran 270.96).
+        # Left at TKWAT pending a GENERAL eddy-conductivity-at-init (not a Bow-specific constant);
+        # the dominant residual is the separate LAKEICE-formation drift (lake_temperature phase change).
         ls.savedtke1_col[c] = TKWAT
 
         # Set column friction velocity
