@@ -158,6 +158,9 @@ include("biogeophys/sat_excess_runoff.jl")
 include("biogeophys/infilt_excess_runoff.jl")
 include("biogeophys/total_water_heat.jl")
 include("biogeophys/dry_dep_velocity.jl")
+# dyn_cons_biogeophys must come AFTER dyn_subgrid_control.jl (line 87) and
+# total_water_heat.jl (above), on which it depends.
+include("infrastructure/dyn_cons_biogeophys.jl")
 
 # ===========================================================================
 # Tier 2: Biogeochemistry
