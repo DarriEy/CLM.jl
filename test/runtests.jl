@@ -181,6 +181,8 @@ using CLM
     include("test_fates_interfacetypes.jl")
     # FATES (Tier F) — plant-hydraulics water transfer functions.
     include("test_fates_hydrowtf.jl")
+    # FATES (Tier F) — plant-hydraulics memory/state types.
+    include("test_fates_hydraulicsmem.jl")
     include("test_fates_twostream.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
