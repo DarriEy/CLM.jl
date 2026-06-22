@@ -268,6 +268,7 @@ include("fates/SFFireWeatherMod.jl")
 # CLMInstances or any dual-copied struct.
 include("fates/FatesLitterMod.jl")
 include("fates/FatesRadiationMemMod.jl")
+include("fates/FatesInterfaceTypesMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

@@ -177,6 +177,7 @@ using CLM
     include("test_fates_edparams.jl")
     include("test_fates_prtparams_fireweather.jl")
     include("test_fates_litter_radmem.jl")
+    include("test_fates_interfacetypes.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
