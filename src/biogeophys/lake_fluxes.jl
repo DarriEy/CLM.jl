@@ -60,7 +60,7 @@ Base.@kwdef struct LakeFluxDV{Vi,V,M}
     # column-level columns map (for ks_col latitude — simplified, uses col gridcell)
     c_gridcell::Vi
     # column scalars
-    snl::Vi; lakedepth::V; savedtke1::V; ws_col::V; ks_col::V; htvp_col::V
+    snl::Vi; lakedepth::V; savedtke1::V; ws_col::V; ks_col::V; htvp_col::V; ust_lake::V
     # column matrices
     dz::M; dz_lake::M; t_soisno::M; t_lake::M
     # column vectors
@@ -91,6 +91,7 @@ function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate
         snl = col_data.snl, lakedepth = col_data.lakedepth,
         savedtke1 = lakestate.savedtke1_col, ws_col = lakestate.ws_col,
         ks_col = lakestate.ks_col, htvp_col = energyflux.htvp_col,
+        ust_lake = lakestate.ust_lake_col,
         dz = col_data.dz, dz_lake = col_data.dz_lake,
         t_soisno = temperature.t_soisno_col, t_lake = temperature.t_lake_col,
         t_grnd = temperature.t_grnd_col, sabg = solarabs.sabg_patch,
@@ -124,14 +125,14 @@ end
 # type T so no Float64 reaches a Float32-only backend.
 # --------------------------------------------------------------------------
 @kernel function _lake_fluxes_kernel!(d, @Const(mask_lakep), nlevsno_val::Int,
-                                      niters::Int, dtime)
+                                      niters::Int, dtime, a_coef, a_exp)
     p = @index(Global)
     @inbounds if mask_lakep[p]
         # ----- alias struct fields to locals (body stays verbatim) -----
         p_column = d.p_column; p_gridcell = d.p_gridcell; p_landunit = d.p_landunit
         c_gridcell = d.c_gridcell
         snl_arr = d.snl; lakedepth = d.lakedepth; savedtke1 = d.savedtke1
-        ws_col = d.ws_col; ks_col = d.ks_col; htvp_col = d.htvp_col
+        ws_col = d.ws_col; ks_col = d.ks_col; htvp_col = d.htvp_col; ust_lake = d.ust_lake
         dz = d.dz; dz_lake = d.dz_lake; t_soisno = d.t_soisno; t_lake = d.t_lake
         t_grnd = d.t_grnd; sabg_arr = d.sabg
         h2osoi_liq = d.h2osoi_liq; h2osoi_ice = d.h2osoi_ice
@@ -242,12 +243,25 @@ end
             end
         end
 
-        sqre0 = sqrt(smooth_max(z0mg * ur * T(0.1) / kva, T(0.1)))
-        z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
-        z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
+        # Heat/vapour roughness lengths. LakeFluxesMod uses the carried friction velocity
+        # ust_lake (the previous step's ustar) and BRANCHES on the surface phase:
+        #   unfrozen → the classic smooth/rough z0hg = z0mg·exp(-vkc/prn·(4·sqre0−3.2)) (sqre0
+        #     the roughness-Reynolds root, ust_lake-based — the port used ur·0.1, ~√3 too high);
+        #   frozen (snl==0, ice) → ZengWang2007: z0hg = z0mg/exp(a_coef·(ust_lake·z0mg/ν)^a_exp)
+        #     ("Consistent with BareGroundFluxes"). The port used the classic formula for BOTH,
+        #     giving frozen z0hg ~25× too small (2.9e-5 vs ~7.2e-4) → rah too high → surface
+        #     turbulent fluxes ~18% low → t_grnd too warm → ice formed too slowly.
+        if tgbef > T(TFRZ)
+            sqre0 = sqrt(smooth_max(z0mg * ust_lake[c] / kva, T(0.1)))
+            z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
+            z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
+        else
+            z0hg = z0mg / exp(a_coef * (ust_lake[c] * z0mg / kva)^a_exp)
+            z0qg = z0hg
+        end
         z0mg = smooth_max(z0mg, T(1.0e-10))
-        z0hg = smooth_max(z0hg, T(1.0e-10))
-        z0qg = smooth_max(z0qg, T(1.0e-10))
+        z0hg = smooth_max(smooth_max(z0hg, T(1.0e-10)), T(MINZ0LAKE))
+        z0qg = smooth_max(smooth_max(z0qg, T(1.0e-10)), T(MINZ0LAKE))
 
         # Reference displacement height (zero for lakes)
         displa = zero(T)
@@ -478,6 +492,7 @@ end
 
         # 2m wind speed for mixing parameters
         u2m = smooth_max(T(0.1), ustar / T(VKC) * log(T(2.0) / z0mg))
+        ust_lake[c] = ustar     # carry the friction velocity for next step's z0hg (LakeFluxesMod:761)
         ws_col[c] = T(1.2e-3) * u2m
         # Wave-driven eddy-extinction coefficient ks = 6.6·sqrt(|sin(lat)|)·u2m^-1.84.
         # The gridcell latitude is not yet wired in (simplified to 0), so the sqrt(|sin 0|)
@@ -557,7 +572,10 @@ function lake_fluxes!(temperature::TemperatureData,
     # backend off a real state array, launch directly, then synchronize — matches
     # the photosynthesis/_psn_dv struct-first launch convention.
     be = _kernel_backend(temperature.t_grnd_col)
-    _lake_fluxes_kernel!(be)(dv, mask_lakep, nlevsno_val, niters, FT(dtime);
+    # a_coef/a_exp = the BareGround/ZengWang2007 drag params (clm5_params.nc), shared with the
+    # canopy roughness formula. Used for the FROZEN-lake heat-roughness z0hg (LakeFluxesMod 'ZengWang2007').
+    _lake_fluxes_kernel!(be)(dv, mask_lakep, nlevsno_val, niters, FT(dtime),
+                             FT(canopy_fluxes_params.a_coef), FT(canopy_fluxes_params.a_exp);
                              ndrange = np)
     KA.synchronize(be)
 

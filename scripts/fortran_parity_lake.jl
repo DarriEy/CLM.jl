@@ -149,6 +149,22 @@ function main(; nsteps::Int = 48)
             end
             per[nm] = mx
         end
+        # Diagnostic probes (env-gated). LAKE_ICE_PROBE: Julia-vs-Fortran top/bottom ice fraction
+        # + t_grnd + t_lake[1] (localizes the freeze trajectory). LAKE_AERO_PROBE: ustar/z0mg/z0hg
+        # + FSH/LH (localizes the surface-flux residual = the lake-MO aerodynamic resistance).
+        if get(ENV, "LAKE_ICE_PROBE", "") == "1" && s <= 14
+            @printf("  [ice s=%2d] J_top=%.5f F_top=%.5f | J_tg=%.2f F_tg=%.2f | J_tlk1=%.2f F_tlk1=%.2f\n",
+                s, ls.lake_icefrac_col[c_lake,1], _fv(fds["LAKEICEFRAC"][1,1,s]),
+                temp.t_grnd_col[c_lake], _fv(fds["TG"][1,s]),
+                temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,s]))
+        end
+        if get(ENV, "LAKE_AERO_PROBE", "") == "1" && s <= 3
+            fv = inst.frictionvel
+            @printf("  [aero s=%d] ustar=%.4f z0mg=%.3e z0hg=%.3e | J_FSH=%.2f F_FSH=%.2f J_LH=%.2f F_LH=%.2f\n",
+                s, fv.ustar_patch[p_lake], fv.z0mg_patch[p_lake], fv.z0hg_patch[p_lake],
+                inst.energyflux.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1,s]),
+                inst.energyflux.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1,s]))
+        end
         gmax = maximum(v for v in values(per) if !isnan(v); init=0.0)
         gmax_run = max(gmax_run, gmax)
         if s == 1 && SHOWALL
