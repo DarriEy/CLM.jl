@@ -319,6 +319,13 @@ include("fates/SFNesterovMod.jl")
 # from the host CLM `pftcon`. Standalone — NOT added to CLMInstances or any
 # dual-copied struct. Depends on the foundation + Batches 1-2 above.
 include("fates/EDPftvarcon.jl")
+# Batch 3 (fire): SPITFIRE fire-model parameter holder (SFParamsMod) — fuel
+# energy / mineral fractions / moisture-of-extinction + drying ratios /
+# fire-spread + intensity coefficients by fuel class, with registration /
+# retrieval against the FATES parameter reader. Depends on the foundation +
+# FatesFuelClassesMod (num_fuel_classes) + FatesLitterMod (ncwd). Standalone —
+# NOT added to CLMInstances or any dual-copied struct.
+include("fates/SFParamsMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
