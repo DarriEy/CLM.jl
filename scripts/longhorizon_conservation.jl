@@ -403,9 +403,11 @@ while tm.current_date < end_date
     end
 
     if step_count % (48 * 30) == 0
+        # print THIS step's true storage (s_end), not rec.storage: on a print step that
+        # coincides with a day rollover the rec was just reset to a fresh DayRec (storage=NaN).
         @printf("  step %6d  %s  | maxerrh2o=%.2e errseb=%.2e  storage=%.1fmm  Tg=%.1fK  nf=%d\n",
                 step_count, tm.current_date, rec.errh2o, rec.errseb,
-                rec.storage, inst.temperature.t_grnd_col[1], rec.nonfinite)
+                s_end, inst.temperature.t_grnd_col[1], rec.nonfinite)
     end
 end
 rec.nsamp > 0 && push!(days, rec)
