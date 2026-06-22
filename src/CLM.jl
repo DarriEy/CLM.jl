@@ -201,6 +201,10 @@ include("biogeochem/cn_precision_control.jl")
 include("biogeochem/veg_struct_update.jl")
 include("biogeochem/nutrient_competition.jl")
 include("biogeochem/veg_compute_seed.jl")
+# dyn_cons_biogeochem (C/N conservation across land-cover change) depends on the
+# CN veg/soil C+N state+flux types, the dyn patch/column state updaters
+# (infrastructure, included above), and veg_compute_seed.jl.
+include("biogeochem/dyn_cons_biogeochem.jl")
 include("biogeochem/cn_annual_update.jl")
 include("biogeochem/cn_products_mod.jl")
 # Transient wood-harvest mortality (dyn_subgrid/dynHarvestMod). Needs dyn_file_io.jl

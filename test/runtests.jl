@@ -146,6 +146,7 @@ using CLM
     include("test_dyn_landunit_area.jl")
     include("test_dyn_patch_state_updater.jl")
     include("test_dyn_cons_biogeophys.jl")
+    include("test_dyn_cons_biogeochem.jl")
     include("test_dry_dep_velocity.jl")
     include("test_subgrid_build.jl")
     include("test_dyn_init_columns.jl")
