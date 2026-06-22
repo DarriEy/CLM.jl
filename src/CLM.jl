@@ -254,6 +254,7 @@ include("fates/FatesIODimensionsMod.jl")
 include("fates/FatesIOVariableKindMod.jl")
 include("fates/FatesParametersInterface.jl")
 include("fates/FatesSynchronizedParamsMod.jl")
+include("fates/EDParamsMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
