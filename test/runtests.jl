@@ -204,6 +204,8 @@ using CLM
     # FATES (Tier F) Batch 7 — PARTEH carbon-only allometric allocation
     # hypothesis (PRTAllometricCarbonMod).
     include("test_fates_prtcarbon.jl")
+    # FATES (Tier F) Batch 7 — CNP prioritized allometric allocation hypothesis.
+    include("test_fates_prtcnp.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
