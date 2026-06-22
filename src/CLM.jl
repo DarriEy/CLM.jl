@@ -101,6 +101,7 @@ include("infrastructure/init_vertical.jl")
 include("infrastructure/orbital.jl")
 include("infrastructure/dyn_file_io.jl")  # transient land-use file time-stepping (dyn_subgrid)
 include("infrastructure/dyn_pft_crop_file.jl")  # transient PCT_NAT_PFT / PCT_CROP readers (dyn_subgrid)
+include("infrastructure/dyn_lake_urban_file.jl")  # transient lake & urban land-use readers (dyn_subgrid)
 
 # ===========================================================================
 # Tier 1: Biogeophysics (pure math)
