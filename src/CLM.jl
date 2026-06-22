@@ -84,6 +84,7 @@ include("calibration/overrides.jl")
 include("infrastructure/topo.jl")
 include("infrastructure/subgrid_ave.jl")
 include("infrastructure/control.jl")
+include("infrastructure/dyn_subgrid_control.jl")
 
 # ===========================================================================
 # Initialization pipeline

@@ -123,6 +123,7 @@ using CLM
     include("test_crop_gdd.jl")
     include("test_pftcon.jl")
     include("test_control.jl")
+    include("test_dyn_subgrid_control.jl")
     include("test_instances.jl")
     include("test_restart_io.jl")
     include("test_init_interp.jl")
