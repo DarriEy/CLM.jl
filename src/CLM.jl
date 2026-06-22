@@ -268,6 +268,14 @@ include("fates/SFFireWeatherMod.jl")
 # PRTParametersMod. Standalone — NOT added to CLMInstances or any dual-copied struct.
 include("fates/PRTGenericMod.jl")
 
+# Batch 3 (PARTEH loss fluxes): the loss-flux routines that operate on the
+# generic prt_vartypes state — event turnover (deciduous drop / burn / damage /
+# repro release), maintenance/background turnover with retranslocation to
+# storage, and bud-burst flush from storage. Depends on the foundation +
+# PRTGenericMod + PRTParametersMod. Standalone — NOT added to CLMInstances or
+# any dual-copied struct.
+include("fates/PRTLossFluxesMod.jl")
+
 # Batch 1 (cont.): standalone leaf modules depending only on the foundation.
 # FatesLitterMod (litter_type: CWD + fine-litter pools by element) and
 # FatesRadiationMemMod (solar-band indices/params). Standalone — do NOT add to
@@ -302,6 +310,26 @@ include("fates/TwoStreamMLPEMod.jl")
 # added to CLMInstances or any dual-copied struct.
 include("fates/FatesFuelClassesMod.jl")
 include("fates/SFNesterovMod.jl")
+# Batch 3: SPITFIRE fuel state (FatesFuelMod) — the `fuel_type` holding per-fuel-
+# class loading + derived non-trunk loading/moisture/bulk-density/SAV/MEF.
+# Depends on FatesFuelClassesMod, SFFireWeatherMod, SFNesterovMod, FatesConstantsMod.
+include("fates/FatesFuelMod.jl")
+
+# Batch 3: the FATES PFT-indexed parameter container (EDPftvarcon). The large
+# per-PFT trait/allometry/allocation/mortality/phenology/fire/hydraulics
+# parameter table + its registration/retrieval with the FATES parameter reader,
+# consistency checks (FatesCheckParams), and litter-decomposability lookup
+# (GetDecompyFrac). FATES's OWN PFT param table (EDPftvarcon_inst) — distinct
+# from the host CLM `pftcon`. Standalone — NOT added to CLMInstances or any
+# dual-copied struct. Depends on the foundation + Batches 1-2 above.
+include("fates/EDPftvarcon.jl")
+# Batch 3 (fire): SPITFIRE fire-model parameter holder (SFParamsMod) — fuel
+# energy / mineral fractions / moisture-of-extinction + drying ratios /
+# fire-spread + intensity coefficients by fuel class, with registration /
+# retrieval against the FATES parameter reader. Depends on the foundation +
+# FatesFuelClassesMod (num_fuel_classes) + FatesLitterMod (ncwd). Standalone —
+# NOT added to CLMInstances or any dual-copied struct.
+include("fates/SFParamsMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
