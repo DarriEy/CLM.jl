@@ -345,6 +345,15 @@ include("fates/SFParamsMod.jl")
 include("fates/FatesParameterDerivedMod.jl")
 include("fates/FatesDispersalMod.jl")
 
+# FATES (Tier F) Batch 5 — tree-damage module (DamageMainMod). Calendar-driven
+# damage-event test (IsItDamageTime!), damage-class transition fraction lookup
+# (GetDamageFrac via param_derived), crown-loss fraction (GetCrownReduction), and
+# damage-class (crown-loss) dependent mortality (GetDamageMortality). Depends on
+# the merged accessors ed_params()/edpftvarcon_inst()/param_derived() and the
+# FatesInterfaceTypesMod calendar globals. Standalone — NOT added to CLMInstances
+# or any dual-copied struct.
+include("fates/DamageMainMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================

@@ -197,6 +197,8 @@ using CLM
     include("test_fates_fuel.jl")
     # FATES (Tier F) Batch 4 — statically-derived params + seed dispersal.
     include("test_fates_paramderived_dispersal.jl")
+    # FATES (Tier F) Batch 5 — tree-damage module (DamageMainMod).
+    include("test_fates_damage.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
