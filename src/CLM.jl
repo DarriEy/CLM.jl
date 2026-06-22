@@ -274,6 +274,10 @@ include("fates/FatesInterfaceTypesMod.jl")
 # only on the foundation (Constants/Globals). Standalone — not in CLMInstances.
 include("fates/FatesHydroWTFMod.jl")
 
+# Batch 1 (radiation): the multi-layer, multi-PFT two-stream canopy radiative
+# transfer solver. Self-contained — depends only on the foundation above.
+include("fates/TwoStreamMLPEMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
