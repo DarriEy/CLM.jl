@@ -94,7 +94,7 @@ end
             NCDataset(fn, "r") do ds
                 @test haskey(ds, "FIELD_A")
                 @test haskey(ds, "FIELD_X")
-                @test ds.dim["subgrid"] == 3
+                @test ds.dim["patch"] == 3   # default subgrid level
                 @test ds.dim["time"] == 1
                 # ds["time"].var = raw stored values (skip CF datetime decoding)
                 @test Array(ds["time"].var)[1] ≈ 12.5
@@ -274,6 +274,221 @@ end
         @test "EFLX_LH_TOT" in names
         @test "TG" in names
         @test "H2OSNO" in names
+        @test "TSOI" in names                       # 2d column field
         @test length(tape.fields) == length(CLM.default_master_field_list())
+        # native subgrid levels are tagged correctly
+        bylvl = Dict(f.name => f.level for f in tape.fields)
+        @test bylvl["EFLX_LH_TOT"] == CLM.HIST_PATCH
+        @test bylvl["TG"] == CLM.HIST_COLUMN
+        tsoi = tape.fields[findfirst(f -> f.name == "TSOI", tape.fields)]
+        @test tsoi.level == CLM.HIST_COLUMN
+        @test tsoi.nlev > 1                          # 2d (soil-layer) field
+        @test tsoi.levdim == "levsoi"
+    end
+
+    # ------------------------------------------------------------------
+    # Subgrid levels + 2D fields (Tier B: hist_dov2xy / hist_type1d_pertape
+    # + hist_addfld2d). A richer fake `inst` carries patch / column /
+    # landunit subgrid index+weight maps (for gridcell remap).
+    # ------------------------------------------------------------------
+    Base.@kwdef mutable struct _HistSubInst
+        p_vals::Vector{Float64} = Float64[]   # patch level (np)
+        c_vals::Vector{Float64} = Float64[]   # column level (nc)
+        g_vals::Vector{Float64} = Float64[]   # gridcell level (ng)
+        c2d::Matrix{Float64}    = Matrix{Float64}(undef, 0, 0)  # 2D column field (nc,nlev)
+        patch    = nothing
+        column   = nothing
+        landunit = nothing
+    end
+    Base.@kwdef mutable struct _HistMap
+        gridcell::Vector{Int}     = Int[]
+        wtgcell::Vector{Float64}  = Float64[]
+    end
+
+    @testset "mixed subgrid levels coexist (no DimensionMismatch)" begin
+        # Bow-like: np=4, nc=2, ng=1 — different lengths previously crashed
+        # default_history_tape() with DimensionMismatch.
+        inst = _HistSubInst(
+            p_vals = zeros(4), c_vals = zeros(2), g_vals = zeros(1),
+            patch  = _HistMap(gridcell=[1,1,1,1], wtgcell=fill(0.25, 4)),
+            column = _HistMap(gridcell=[1,1],     wtgcell=[0.6, 0.4]),
+            landunit = _HistMap(gridcell=Int[],   wtgcell=Float64[]),
+        )
+        tape = CLM.HistoryTape()
+        CLM.hist_addfld!(tape, "PFLD", "u", i -> i.p_vals; level="patch")
+        CLM.hist_addfld!(tape, "CFLD", "u", i -> i.c_vals; level="column")
+        CLM.hist_addfld!(tape, "GFLD", "u", i -> i.g_vals; level="gridcell")
+
+        p_steps = [[1.0,2.0,3.0,4.0], [2.0,3.0,4.0,5.0], [3.0,4.0,5.0,6.0]]
+        c_steps = [[10.0,20.0], [20.0,30.0], [30.0,40.0]]
+        g_steps = [[100.0], [200.0], [300.0]]
+        for k in 1:3
+            inst.p_vals .= p_steps[k]; inst.c_vals .= c_steps[k]; inst.g_vals .= g_steps[k]
+            CLM.hist_accumulate!(tape, inst)   # must NOT raise DimensionMismatch
+        end
+        @test tape.nsamples == 3
+        exp_p = sum(p_steps) ./ 3; exp_c = sum(c_steps) ./ 3; exp_g = sum(g_steps) ./ 3
+
+        mktempdir() do dir
+            fn = joinpath(dir, "mixed.nc")
+            CLM.hist_write!(tape, fn; time=1.0)   # native-level write
+            NCDataset(fn, "r") do ds
+                @test ds.dim["patch"]    == 4   # separate dim per level
+                @test ds.dim["column"]   == 2
+                @test ds.dim["gridcell"] == 1
+                @test Array(ds["PFLD"])[:, 1] ≈ exp_p
+                @test Array(ds["CFLD"])[:, 1] ≈ exp_c
+                @test Array(ds["GFLD"])[:, 1] ≈ exp_g
+                @test ds["PFLD"].attrib["subgrid_level"] == "patch"
+                @test ds["CFLD"].attrib["subgrid_level"] == "column"
+            end
+        end
+    end
+
+    @testset "2D column field (TSOI-style) round trip" begin
+        nc, nlev = 2, 3
+        inst = _HistSubInst(c2d = zeros(nc, nlev))
+        tape = CLM.HistoryTape()
+        CLM.hist_addfld!(tape, "TSOI", "K", i -> i.c2d;
+                         level="column", nlev=nlev, levdim="levsoi",
+                         long_name="soil temperature")
+
+        s1 = [280.0 281.0 282.0; 270.0 271.0 272.0]
+        s2 = [282.0 283.0 284.0; 272.0 273.0 274.0]
+        for s in (s1, s2)
+            inst.c2d .= s
+            CLM.hist_accumulate!(tape, inst)
+        end
+        expected = (s1 .+ s2) ./ 2
+
+        fv = CLM.hist_field_value(tape.fields[1])
+        @test size(fv) == (nc, nlev)          # finalize -> (nc, nlev) matrix
+        @test fv ≈ expected
+
+        mktempdir() do dir
+            fn = joinpath(dir, "tsoi.nc")
+            CLM.hist_write!(tape, fn; time=5.0)
+            NCDataset(fn, "r") do ds
+                @test ds.dim["column"] == nc
+                @test ds.dim["levsoi"] == nlev
+                @test ds.dim["time"]   == 1
+                rd = Array(ds["TSOI"])         # (column, levsoi, time)
+                @test size(rd) == (nc, nlev, 1)
+                @test rd[:, :, 1] ≈ expected
+            end
+        end
+    end
+
+    @testset "mixed 1D + 2D fields in one tape" begin
+        nc, nlev = 2, 3
+        inst = _HistSubInst(p_vals = zeros(4), c_vals = zeros(2), c2d = zeros(nc, nlev))
+        tape = CLM.HistoryTape()
+        CLM.hist_addfld!(tape, "PFLD", "u", i -> i.p_vals; level="patch")
+        CLM.hist_addfld!(tape, "CFLD", "u", i -> i.c_vals; level="column")
+        CLM.hist_addfld!(tape, "TSOI", "K", i -> i.c2d;
+                         level="column", nlev=nlev, levdim="levsoi")
+        inst.p_vals .= [1.0,2.0,3.0,4.0]
+        inst.c_vals .= [10.0,20.0]
+        inst.c2d    .= [280.0 281.0 282.0; 270.0 271.0 272.0]
+        CLM.hist_accumulate!(tape, inst)
+        @test tape.nsamples == 1
+        mktempdir() do dir
+            fn = joinpath(dir, "mixed12.nc")
+            CLM.hist_write!(tape, fn; time=0.0)
+            NCDataset(fn, "r") do ds
+                @test ds.dim["patch"]  == 4
+                @test ds.dim["column"] == 2
+                @test ds.dim["levsoi"] == nlev
+                @test Array(ds["PFLD"])[:, 1]   ≈ [1.0,2.0,3.0,4.0]
+                @test Array(ds["CFLD"])[:, 1]   ≈ [10.0,20.0]
+                @test Array(ds["TSOI"])[:, :, 1] ≈ inst.c2d
+            end
+        end
+    end
+
+    @testset "gridcell remap (dov2xy) area-weighted aggregate" begin
+        # ng=2 gridcells. patch->gridcell and column->gridcell weights.
+        inst = _HistSubInst(
+            p_vals = zeros(4), c_vals = zeros(3),
+            patch  = _HistMap(gridcell=[1,1,2,2], wtgcell=[0.3,0.7,0.5,0.5]),
+            column = _HistMap(gridcell=[1,2,2],   wtgcell=[1.0,0.4,0.6]),
+            landunit = _HistMap(gridcell=Int[],   wtgcell=Float64[]),
+        )
+        tape = CLM.HistoryTape(dov2xy=true)
+        CLM.hist_addfld!(tape, "PFLD", "u", i -> i.p_vals; level="patch")
+        CLM.hist_addfld!(tape, "CFLD", "u", i -> i.c_vals; level="column")
+
+        pv = [10.0, 20.0, 30.0, 40.0]
+        cv = [100.0, 200.0, 300.0]
+        inst.p_vals .= pv; inst.c_vals .= cv
+        CLM.hist_accumulate!(tape, inst)
+
+        # patch g1 = (10*.3+20*.7)/(.3+.7)=17 ; g2 = (30*.5+40*.5)/1=35
+        # col   g1 = 100*1/1=100 ; g2 = (200*.4+300*.6)/1=260
+        exp_pg = [17.0, 35.0]
+        exp_cg = [100.0, 260.0]
+
+        ng = CLM._hist_ngridcell(inst)
+        @test ng == 2
+        pf = CLM.hist_field_value(tape.fields[1])
+        cf = CLM.hist_field_value(tape.fields[2])
+        @test CLM.hist_dov2xy(tape.fields[1], pf, ng, inst) ≈ exp_pg
+        @test CLM.hist_dov2xy(tape.fields[2], cf, ng, inst) ≈ exp_cg
+
+        mktempdir() do dir
+            fn = joinpath(dir, "v2xy.nc")
+            CLM.hist_write!(tape, fn; time=1.0, inst=inst)
+            NCDataset(fn, "r") do ds
+                @test ds.dim["gridcell"] == 2         # all fields share one dim
+                @test !haskey(ds.dim, "patch")
+                @test !haskey(ds.dim, "column")
+                @test Array(ds["PFLD"])[:, 1] ≈ exp_pg
+                @test Array(ds["CFLD"])[:, 1] ≈ exp_cg
+                @test ds["PFLD"].attrib["subgrid_level"] == "gridcell"
+            end
+        end
+
+        # dov2xy without inst must error.
+        tape2 = CLM.HistoryTape(dov2xy=true)
+        CLM.hist_addfld!(tape2, "PFLD", "u", i -> i.p_vals; level="patch")
+        inst.p_vals .= pv
+        CLM.hist_accumulate!(tape2, inst)
+        @test_throws ErrorException CLM.hist_write!(tape2, "nope.nc")
+    end
+
+    @testset "2D field gridcell remap (dov2xy) per level" begin
+        # nc=2 columns -> ng=1 gridcell, nlev=2.
+        nlev = 2
+        inst = _HistSubInst(
+            c2d = zeros(2, nlev),
+            column = _HistMap(gridcell=[1,1], wtgcell=[0.25, 0.75]),
+            patch  = _HistMap(gridcell=Int[], wtgcell=Float64[]),
+            landunit = _HistMap(gridcell=Int[], wtgcell=Float64[]),
+        )
+        tape = CLM.HistoryTape(dov2xy=true)
+        CLM.hist_addfld!(tape, "TSOI", "K", i -> i.c2d;
+                         level="column", nlev=nlev, levdim="levsoi")
+        inst.c2d .= [280.0 300.0; 284.0 320.0]   # (col, lev)
+        CLM.hist_accumulate!(tape, inst)
+
+        # g1 lev1 = 280*.25+284*.75 = 283 ; lev2 = 300*.25+320*.75 = 315
+        exp = reshape([283.0, 315.0], 1, 2)
+        ng = CLM._hist_ngridcell(inst)
+        fv = CLM.hist_field_value(tape.fields[1])
+        @test CLM.hist_dov2xy(tape.fields[1], fv, ng, inst) ≈ exp
+        mktempdir() do dir
+            fn = joinpath(dir, "tsoi_v2xy.nc")
+            CLM.hist_write!(tape, fn; time=0.0, inst=inst)
+            NCDataset(fn, "r") do ds
+                @test ds.dim["gridcell"] == 1
+                @test ds.dim["levsoi"]   == nlev
+                @test Array(ds["TSOI"])[:, :, 1] ≈ exp
+            end
+        end
+    end
+
+    @testset "bad subgrid level rejected" begin
+        tape = CLM.HistoryTape()
+        @test_throws ErrorException CLM.hist_addfld!(tape, "Z", "u", i -> i.a; level="bogus")
     end
 end

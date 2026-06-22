@@ -37,19 +37,21 @@ function _bow_setup(start_date)
     return (config, inst, bounds, filt, tm, fr)
 end
 
-# A column-level history tape (uniform spatial length — the single-subgrid-dim
-# HistoryTape requires all fields share a length; default_history_tape mixes
-# patch+column levels, which only round-trips when np==nc).
+# A column-level history tape. Each field is tagged `level="column"` so it
+# writes on the native `column` dim. (HistoryTape now supports per-level dims,
+# so mixed patch+column tapes also round-trip even when np≠nc — see
+# default_history_tape — but this harness keeps a clean single-level tape.)
 function _column_tape()
-    tape = CLM.HistoryTape(dimname="column")
+    tape = CLM.HistoryTape()
     CLM.hist_addfld!(tape, "TG", "K",
-        inst -> inst.temperature.t_grnd_col; long_name="ground temperature")
+        inst -> inst.temperature.t_grnd_col; level="column",
+        long_name="ground temperature")
     CLM.hist_addfld!(tape, "QRUNOFF", "mm/s",
         inst -> inst.water.waterfluxbulk_inst.wf.qflx_runoff_col;
-        long_name="total liquid runoff")
+        level="column", long_name="total liquid runoff")
     CLM.hist_addfld!(tape, "QFLX_EVAP_TOT", "mm/s",
         inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_tot_col;
-        long_name="total evaporation")
+        level="column", long_name="total evaporation")
     return tape
 end
 
