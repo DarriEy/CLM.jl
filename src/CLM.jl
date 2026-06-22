@@ -254,6 +254,29 @@ include("fates/FatesIODimensionsMod.jl")
 include("fates/FatesIOVariableKindMod.jl")
 include("fates/FatesParametersInterface.jl")
 include("fates/FatesSynchronizedParamsMod.jl")
+include("fates/EDParamsMod.jl")
+
+# Batch 2 (depends only on the foundation above): PARTEH/allometry parameter
+# storage and the SPITFIRE fire-weather base type. Standalone — NOT added to
+# CLMInstances or any dual-copied struct.
+include("fates/PRTParametersMod.jl")
+include("fates/SFFireWeatherMod.jl")
+
+# Batch 1 (cont.): standalone leaf modules depending only on the foundation.
+# FatesLitterMod (litter_type: CWD + fine-litter pools by element) and
+# FatesRadiationMemMod (solar-band indices/params). Standalone — do NOT add to
+# CLMInstances or any dual-copied struct.
+include("fates/FatesLitterMod.jl")
+include("fates/FatesRadiationMemMod.jl")
+include("fates/FatesInterfaceTypesMod.jl")
+
+# Batch 1 (biogeophys): plant-hydraulics water transfer functions (WTFs). Depends
+# only on the foundation (Constants/Globals). Standalone — not in CLMInstances.
+include("fates/FatesHydroWTFMod.jl")
+
+# Batch 1 (radiation): the multi-layer, multi-PFT two-stream canopy radiative
+# transfer solver. Self-contained — depends only on the foundation above.
+include("fates/TwoStreamMLPEMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

@@ -174,6 +174,13 @@ using CLM
 
     # FATES (Tier F) — foundation-layer unit tests.
     include("test_fates_foundation.jl")
+    include("test_fates_edparams.jl")
+    include("test_fates_prtparams_fireweather.jl")
+    include("test_fates_litter_radmem.jl")
+    include("test_fates_interfacetypes.jl")
+    # FATES (Tier F) — plant-hydraulics water transfer functions.
+    include("test_fates_hydrowtf.jl")
+    include("test_fates_twostream.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
