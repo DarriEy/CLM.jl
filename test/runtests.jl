@@ -152,6 +152,7 @@ using CLM
     include("test_dyn_init_columns.jl")
     include("test_dyn_column_state_updater.jl")
     include("test_dyn_gross_unrep.jl")
+    include("test_dyn_subgrid_driver.jl")
     include("test_initialization.jl")
     include("test_multicolumn.jl")
     include("test_device_adapt.jl")

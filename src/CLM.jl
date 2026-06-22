@@ -240,6 +240,10 @@ include("infrastructure/cold_start.jl")
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
+# Transient land-use top-level orchestrator (dyn_subgrid/dynSubgridDriverMod).
+# Must come AFTER all dyn_subgrid modules above (control/file_io/pft_crop/lake_urban/
+# landunit_area/state-updaters/init_columns/cons_biogeophys + harvest/gross_unrep).
+include("driver/dyn_subgrid_driver.jl")
 include("driver/clm_driver.jl")
 include("driver/clm_initialize.jl")
 include("driver/clm_run.jl")
