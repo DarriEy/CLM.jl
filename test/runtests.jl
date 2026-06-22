@@ -179,6 +179,7 @@ using CLM
     include("test_fates_prtgeneric.jl")
     include("test_fates_litter_radmem.jl")
     include("test_fates_interfacetypes.jl")
+    include("test_fates_sizeageindices.jl")
     # FATES (Tier F) — plant-hydraulics water transfer functions.
     include("test_fates_hydrowtf.jl")
     # FATES (Tier F) — plant-hydraulics memory/state types.

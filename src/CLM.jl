@@ -276,6 +276,13 @@ include("fates/FatesLitterMod.jl")
 include("fates/FatesRadiationMemMod.jl")
 include("fates/FatesInterfaceTypesMod.jl")
 
+# Batch 2: pure index-mapping helpers for the FATES history/diagnostic
+# multiplexed dimensions (size/age/height/coage/fuel/damage class lookups +
+# flat 1-D index combiners). Depends only on the foundation + EDParamsMod
+# (nclmax, bin-edge vectors on ed_params()) + FatesInterfaceTypesMod (nlev*).
+# Standalone — NOT added to CLMInstances or any dual-copied struct.
+include("fates/FatesSizeAgeTypeIndicesMod.jl")
+
 # Batch 1 (biogeophys): plant-hydraulics water transfer functions (WTFs). Depends
 # only on the foundation (Constants/Globals). Standalone — not in CLMInstances.
 include("fates/FatesHydroWTFMod.jl")
