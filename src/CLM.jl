@@ -99,6 +99,7 @@ include("infrastructure/init_gridcells.jl")
 include("infrastructure/read_params.jl")
 include("infrastructure/init_vertical.jl")
 include("infrastructure/orbital.jl")
+include("infrastructure/dyn_file_io.jl")  # transient land-use file time-stepping (dyn_subgrid)
 
 # ===========================================================================
 # Tier 1: Biogeophysics (pure math)
