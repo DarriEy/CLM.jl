@@ -93,7 +93,9 @@ include("infrastructure/surfrd_utils.jl")
 include("infrastructure/init_subgrid.jl")
 include("infrastructure/subgrid_weights.jl")
 include("infrastructure/dyn_landunit_area.jl")
+include("infrastructure/dyn_patch_state_updater.jl")  # conservative patch-state update on weight change (dyn_subgrid)
 include("infrastructure/dyn_init_columns.jl")
+include("infrastructure/dyn_column_state_updater.jl")  # conservative column-state updates on transient column-area change (dyn_subgrid)
 include("infrastructure/time_manager.jl")
 include("infrastructure/surfdata.jl")
 include("infrastructure/urban_input.jl")
@@ -156,6 +158,9 @@ include("biogeophys/sat_excess_runoff.jl")
 include("biogeophys/infilt_excess_runoff.jl")
 include("biogeophys/total_water_heat.jl")
 include("biogeophys/dry_dep_velocity.jl")
+# dyn_cons_biogeophys must come AFTER dyn_subgrid_control.jl (line 87) and
+# total_water_heat.jl (above), on which it depends.
+include("infrastructure/dyn_cons_biogeophys.jl")
 
 # ===========================================================================
 # Tier 2: Biogeochemistry
