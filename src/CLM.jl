@@ -201,9 +201,18 @@ include("biogeochem/cn_precision_control.jl")
 include("biogeochem/veg_struct_update.jl")
 include("biogeochem/nutrient_competition.jl")
 include("biogeochem/veg_compute_seed.jl")
+# dyn_cons_biogeochem (C/N conservation across land-cover change) depends on the
+# CN veg/soil C+N state+flux types, the dyn patch/column state updaters
+# (infrastructure, included above), and veg_compute_seed.jl.
+include("biogeochem/dyn_cons_biogeochem.jl")
 include("biogeochem/cn_annual_update.jl")
 include("biogeochem/cn_products_mod.jl")
+# Transient wood-harvest mortality (dyn_subgrid/dynHarvestMod). Needs dyn_file_io.jl
+# (line 106) for the DynFile/DynVarTimeUninterp readers and the CN veg flux/state
+# types above for the harvest C/N flux fields.
+include("biogeochem/dyn_harvest.jl")
 include("biogeochem/cndv.jl")
+include("biogeochem/dyn_gross_unrep.jl")  # gross unrepresented LULCC reader + CN disturbance fluxes (dyn_subgrid)
 include("biogeochem/vegetation_facade.jl")
 
 # ===========================================================================
