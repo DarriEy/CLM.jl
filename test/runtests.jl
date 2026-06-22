@@ -176,6 +176,7 @@ using CLM
     include("test_fates_foundation.jl")
     include("test_fates_edparams.jl")
     include("test_fates_prtparams_fireweather.jl")
+    include("test_fates_prtgeneric.jl")
     include("test_fates_litter_radmem.jl")
     include("test_fates_interfacetypes.jl")
     # FATES (Tier F) — plant-hydraulics water transfer functions.

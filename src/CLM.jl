@@ -262,6 +262,12 @@ include("fates/EDParamsMod.jl")
 include("fates/PRTParametersMod.jl")
 include("fates/SFFireWeatherMod.jl")
 
+# Batch 2 (PARTEH generic framework): the abstract prt_vartypes/prt_global_type
+# machinery, organ/element indexing, the generic prt_vartype state container, and
+# the generic getters/setters/initializers. Depends only on the foundation +
+# PRTParametersMod. Standalone — NOT added to CLMInstances or any dual-copied struct.
+include("fates/PRTGenericMod.jl")
+
 # Batch 1 (cont.): standalone leaf modules depending only on the foundation.
 # FatesLitterMod (litter_type: CWD + fine-litter pools by element) and
 # FatesRadiationMemMod (solar-band indices/params). Standalone — do NOT add to
