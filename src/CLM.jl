@@ -238,6 +238,24 @@ include("infrastructure/fortran_restart.jl")
 include("infrastructure/cold_start.jl")
 
 # ===========================================================================
+# FATES (Tier F) — Functionally Assembled Terrestrial Ecosystem Simulator
+# ===========================================================================
+# Batch 1: the foundation layer (bedrock for all other FATES modules). Ported
+# from src/fates/main/. Standalone FATES types — do NOT add any of these to
+# CLMInstances or any ForwardDiff-dual-copied struct. Included in dependency
+# order: Constants -> Globals -> Integrators/Utils -> RunningMean ->
+# IODimensions -> IOVariableKind -> ParametersInterface -> SynchronizedParams.
+include("fates/FatesConstantsMod.jl")
+include("fates/FatesGlobals.jl")
+include("fates/FatesIntegratorsMod.jl")
+include("fates/FatesUtilsMod.jl")
+include("fates/FatesRunningMeanMod.jl")
+include("fates/FatesIODimensionsMod.jl")
+include("fates/FatesIOVariableKindMod.jl")
+include("fates/FatesParametersInterface.jl")
+include("fates/FatesSynchronizedParamsMod.jl")
+
+# ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
 # Transient land-use top-level orchestrator (dyn_subgrid/dynSubgridDriverMod).

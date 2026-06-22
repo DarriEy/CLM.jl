@@ -20,6 +20,14 @@ and Fortran-validated*; this roadmap covers everything between that and "100%".
   - **Deferred (later tiers):** FATES land-use (dynFATESLandUseChange/dynED) + CNDV (dynCNDV) + full MPI broadcast.
 - **Tier D — Project goals met** (reverse-AD complete, multi-GPU, AD-smoothing) — the CLAUDE.md mandate.
 - **Tier E — Full CTSM** (Tier C/D + FATES + alternative method options + MPI). The literal 100%.
+- **Tier F — FATES** (Functionally Assembled Terrestrial Ecosystem Simulator) — ~77k lines of Fortran / 68 files under `installs/clm/src/fates/` (main/biogeochem/biogeophys/parteh/radiation/fire). Greenfield → `src/fates/`. Dependency-ordered wave plan (each wave merges before the next; modules within a wave are mutually independent → parallel agents):
+  - **F-Batch 0 — Foundation ✅ done (PR #62):** `src/fates/` — FatesConstantsMod, FatesGlobals, FatesIntegratorsMod (Euler+RKF45), FatesUtilsMod, FatesRunningMeanMod, FatesIODimensionsMod, FatesIOVariableKindMod, FatesParametersInterface, FatesSynchronizedParamsMod (9-module bedrock closure; `fates_r8`→Float64; logging→@warn/error; I/O stubbed; 98 tests).
+  - **F-Batch 1 — Core leaf modules (8, ~6.5k):** EDParamsMod, FatesHydroWTFMod, FatesInterfaceTypesMod, FatesLitterMod, FatesRadiationMemMod, PRTParametersMod, SFFireWeatherMod, TwoStreamMLPEMod.
+  - **F-Batch 2 (5):** FatesFuelClassesMod, FatesHydraulicsMemMod, FatesSizeAgeTypeIndicesMod, PRTGenericMod, SFNesterovMod. **F-Batch 3 (4):** EDPftvarcon, FatesFuelMod, PRTLossFluxesMod, SFParamsMod. **F-Batch 4 (2):** FatesDispersalMod, FatesParameterDerivedMod. **F-Batch 5 (1):** DamageMainMod.
+  - **F-Batch 6:** FatesAllometryMod (3.5k, allometry engine). **F-Batch 7 (2):** PRTAllometricCNPMod, PRTAllometricCarbonMod. **F-Batch 8:** FatesCohortMod. **F-Batch 9:** FatesPatchMod. **F-Batch 10:** EDTypesMod → **TYPE SYSTEM COMPLETE** checkpoint.
+  - **F-Batch 11 (8, ~11.5k):** ChecksBalances, EDAccumulateFluxes, FatesLandUseChange, FatesPlantHydraulicsMod (6.4k), FatesSoilBGCFlux, FatesTwoStreamUtils, PRTParamsFATES, SFMainMod. **F-Batch 12 (3):** EDBtran, EDCohortDynamics, EDLoggingMortality. **F-Batch 13 (3):** EDMortalityFunctions, EDPhysiologyMod (3.4k), FatesBstress → physiology checkpoint.
+  - **F-Batch 14:** EDPatchDynamicsMod (3.9k). **F-Batch 15:** EDCanopyStructureMod → structure checkpoint. **F-Batch 16 (4):** EDMainMod (driver), FatesInventoryInit, FatesNormanRad, FatesPlantRespPhotosynth. **F-Batch 17 (2):** EDInitMod, FatesRadiationDrive → init checkpoint.
+  - **F-Batch 18 — host coupling/I/O (5, ~16k, PORT LAST/deferrable):** FatesHistoryVariableType, FatesHistoryInterfaceMod (9.3k), FatesRestartVariableType, FatesRestartInterfaceMod, FatesInterfaceMod (the CLM↔FATES coupling point).
 
 Recommended definition of "done" for this project: **Tier A + Tier D** (a complete, differentiable, GPU single-point CLM5). Tiers B/C/E are large and only needed for specific use cases.
 

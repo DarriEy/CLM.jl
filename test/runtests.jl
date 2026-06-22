@@ -172,6 +172,9 @@ using CLM
     include("test_multisite_calibration.jl")
     include("test_cn_integration.jl")
 
+    # FATES (Tier F) — foundation-layer unit tests.
+    include("test_fates_foundation.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),
