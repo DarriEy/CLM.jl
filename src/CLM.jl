@@ -268,6 +268,14 @@ include("fates/SFFireWeatherMod.jl")
 # PRTParametersMod. Standalone — NOT added to CLMInstances or any dual-copied struct.
 include("fates/PRTGenericMod.jl")
 
+# Batch 3 (PARTEH loss fluxes): the loss-flux routines that operate on the
+# generic prt_vartypes state — event turnover (deciduous drop / burn / damage /
+# repro release), maintenance/background turnover with retranslocation to
+# storage, and bud-burst flush from storage. Depends on the foundation +
+# PRTGenericMod + PRTParametersMod. Standalone — NOT added to CLMInstances or
+# any dual-copied struct.
+include("fates/PRTLossFluxesMod.jl")
+
 # Batch 1 (cont.): standalone leaf modules depending only on the foundation.
 # FatesLitterMod (litter_type: CWD + fine-litter pools by element) and
 # FatesRadiationMemMod (solar-band indices/params). Standalone — do NOT add to

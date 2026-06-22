@@ -177,6 +177,8 @@ using CLM
     include("test_fates_edparams.jl")
     include("test_fates_prtparams_fireweather.jl")
     include("test_fates_prtgeneric.jl")
+    # FATES (Tier F) — PARTEH loss fluxes (turnover / drop / burn / damage / flush).
+    include("test_fates_prtlossfluxes.jl")
     include("test_fates_litter_radmem.jl")
     include("test_fates_interfacetypes.jl")
     include("test_fates_sizeageindices.jl")
