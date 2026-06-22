@@ -209,6 +209,7 @@ include("infrastructure/forcing_reader.jl")
 include("infrastructure/history_writer.jl")
 include("infrastructure/history_io.jl")
 include("infrastructure/restart_io.jl")
+include("infrastructure/init_interp.jl")
 include("infrastructure/fortran_restart.jl")
 
 # ===========================================================================
