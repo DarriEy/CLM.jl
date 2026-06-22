@@ -84,6 +84,7 @@ include("calibration/overrides.jl")
 include("infrastructure/topo.jl")
 include("infrastructure/subgrid_ave.jl")
 include("infrastructure/control.jl")
+include("infrastructure/dyn_subgrid_control.jl")
 
 # ===========================================================================
 # Initialization pipeline
@@ -98,6 +99,7 @@ include("infrastructure/init_gridcells.jl")
 include("infrastructure/read_params.jl")
 include("infrastructure/init_vertical.jl")
 include("infrastructure/orbital.jl")
+include("infrastructure/dyn_file_io.jl")  # transient land-use file time-stepping (dyn_subgrid)
 
 # ===========================================================================
 # Tier 1: Biogeophysics (pure math)

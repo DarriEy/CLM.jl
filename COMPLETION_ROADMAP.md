@@ -10,7 +10,12 @@ and Fortran-validated*; this roadmap covers everything between that and "100%".
 ## What "100%" means — pick the target tier
 - **Tier A — Complete single-point CLM5 physics** (process fidelity for one column/gridcell). Closest to "done" for science use.
 - **Tier B — Usable standalone model** (Tier A + NetCDF history output + restart I/O).
-- **Tier C — Transient capability** (Tier B + dynamic/transient land use).
+- **Tier C — Transient capability** (Tier B + dynamic/transient land use). *Dependency-ordered batch plan (whole `dyn_subgrid` tree, ~2,900 Julia lines, was fully unported — only base geometry `init_subgrid`/`subgrid_weights`/`subgrid_ave` existed):*
+  - **C-Batch 1 — Foundation ✅ done (PR #53):** `dyn_subgrid_control.jl` (DynSubgridControl flags + namelist consistency checks, 48 tests) + `dyn_file_io.jl` (DynTimeInfo year↔file-index mapping + DynFile NetCDF wrapper + DynVarTimeUninterp step-wise reader, 68 tests).
+  - **C-Batch 2 — Data readers + weight updates:** dynpft/dyncrop/dynlake/dynurban file readers (parallel) + dynLandunitArea normalization, dynPriorWeights snapshot, dynColumnTemplate, dynInitColumns.
+  - **C-Batch 3 — State conservation:** dynPatchStateUpdater + dynColumnStateUpdater (complexity spike, 5 fill variants) + dynConsBiogeophys (water/energy baselines + dynbal fluxes).
+  - **C-Batch 4 — CN dynamics + orchestration:** dynHarvest + dynGrossUnrep CN kernels, dynConsBiogeochem (C/N budget conservation), then dynSubgridDriver top-level orchestration.
+  - **Deferred (later tiers):** FATES land-use (dynFATESLandUseChange/dynED) + CNDV (dynCNDV) + full MPI broadcast.
 - **Tier D — Project goals met** (reverse-AD complete, multi-GPU, AD-smoothing) — the CLAUDE.md mandate.
 - **Tier E — Full CTSM** (Tier C/D + FATES + alternative method options + MPI). The literal 100%.
 
