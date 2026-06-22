@@ -141,4 +141,139 @@ end
         CLM.hist_addfld!(tape, "FA", "u", i -> i.a)
         @test_throws ErrorException CLM.hist_write!(tape, "nope.nc")  # no samples
     end
+
+    @testset "name:flag parsing (getname/getflag)" begin
+        @test CLM.hist_getname("TG") == "TG"
+        @test CLM.hist_getflag("TG") == ""
+        @test CLM.hist_getname("TG:I") == "TG"
+        @test CLM.hist_getflag("TG:I") == "I"
+        @test CLM.hist_getname(" TG : X ") == "TG"
+        @test CLM.hist_getflag(" TG : X ") == "X"
+    end
+
+    @testset "set_hist_filename (h0/h1…)" begin
+        @test CLM.set_hist_filename("BowCase", 1) == "BowCase.clm2.h0.nc"
+        @test CLM.set_hist_filename("BowCase", 2) == "BowCase.clm2.h1.nc"
+        @test CLM.set_hist_filename("BowCase", 3; ext_date="2000-01") ==
+              "BowCase.clm2.h2.2000-01.nc"
+        @test endswith(CLM.set_hist_filename("c", 4; ext_date="2000-01-01-00000"), ".nc")
+        @test_throws ErrorException CLM.set_hist_filename("c", 0)
+    end
+
+    @testset "multi-tape build: fincl/fexcl + :flag override + nhtfrq" begin
+        # A small master list with one on-by-default field and one off-by-default.
+        master = CLM.HistFieldSpec[
+            CLM.hist_master_field("AA", "u", i -> i.a; avgflag="A"),
+            CLM.hist_master_field("BB", "u", i -> i.b; avgflag="A"),
+            CLM.hist_master_field("CC", "u", i -> i.a; avgflag="A",
+                                  on_by_default=false),
+        ]
+
+        # h0: defaults minus BB (fexcl).  h1: defaults + CC via fincl, with
+        # tape-wide "X" default but AA overridden to "I". fincl is ADDITIVE
+        # in Fortran (it does not replace the on-by-default set unless
+        # hist_empty_htapes is set), so BB still appears on h1.
+        set = CLM.build_history_tapes(;
+            master = master,
+            fincl  = [String[],            ["CC", "AA:I"]],
+            fexcl  = [["BB"],              String[]],
+            nhtfrq = [0,                   -24],
+            avgflag_pertape = ["",         "X"],
+            case   = "MultiCase",
+        )
+
+        @test length(set.tapes) == 2
+        @test set.nhtfrq == [0, -24]
+
+        # h0: AA only — BB excluded via fexcl, CC off-by-default & not in fincl.
+        h0names = [f.name for f in set.tapes[1].fields]
+        @test h0names == ["AA"]
+        @test set.tapes[1].fields[1].avgflag == "A"
+
+        # h1: AA (per-field "I") + BB (on-by-default, tape-wide "X") + CC
+        # (fincl, tape-wide "X").
+        h1 = Dict(f.name => f.avgflag for f in set.tapes[2].fields)
+        @test Set(keys(h1)) == Set(["AA", "BB", "CC"])
+        @test h1["AA"] == "I"                   # per-field override wins
+        @test h1["BB"] == "X"                   # tape-wide pertape flag
+        @test h1["CC"] == "X"                   # tape-wide pertape flag
+
+        # hist_empty_htapes=true → tape contains ONLY fincl fields.
+        set_empty = CLM.build_history_tapes(;
+            master = master,
+            fincl  = [["CC:I", "AA"]],
+            hist_empty_htapes = true,
+        )
+        en = Dict(f.name => f.avgflag for f in set_empty.tapes[1].fields)
+        @test Set(keys(en)) == Set(["AA", "CC"])   # BB NOT included
+        @test en["CC"] == "I"
+        @test en["AA"] == "A"                       # falls back to field default
+
+        # Unknown fincl/fexcl name errors.
+        @test_throws ErrorException CLM.build_history_tapes(;
+            master=master, fincl=[["NOPE"]])
+        @test_throws ErrorException CLM.build_history_tapes(;
+            master=master, fexcl=[["NOPE"]])
+    end
+
+    @testset "multi-tape accumulate + write + re-read h0 & h1" begin
+        master = CLM.HistFieldSpec[
+            CLM.hist_master_field("AA", "W/m^2", i -> i.a; avgflag="A"),
+            CLM.hist_master_field("BB", "K",     i -> i.b; avgflag="A"),
+        ]
+        # h0: both fields, A-average (defaults). h1: only BB — AA fexcl'd, and
+        # BB set instantaneous via the :I fincl override.
+        set = CLM.build_history_tapes(;
+            master = master,
+            fincl  = [String[],   ["BB:I"]],
+            fexcl  = [String[],   ["AA"]],
+            nhtfrq = [0,          -1],
+            case   = "TwoTape",
+        )
+
+        inst = _HistFakeInst(a = zeros(2), b = zeros(2))
+        a_steps = [[2.0, 4.0], [4.0, 8.0]]
+        b_steps = [[1.0, 5.0], [3.0, 9.0]]
+        for k in 1:2
+            inst.a .= a_steps[k]
+            inst.b .= b_steps[k]
+            CLM.hist_accumulate!(set, inst)   # accumulates into BOTH tapes
+        end
+
+        mktempdir() do dir
+            written = CLM.hist_write!(set; dir=dir, time=1.0)
+            @test length(written) == 2
+            fn_h0 = joinpath(dir, "TwoTape.clm2.h0.nc")
+            fn_h1 = joinpath(dir, "TwoTape.clm2.h1.nc")
+            @test isfile(fn_h0)
+            @test isfile(fn_h1)
+
+            NCDataset(fn_h0, "r") do ds
+                @test haskey(ds, "AA")
+                @test haskey(ds, "BB")
+                @test ds["AA"].attrib["cell_methods"] == "time: mean"
+                @test Array(ds["AA"])[:, 1] ≈ [3.0, 6.0]    # avg of a_steps
+                @test Array(ds["BB"])[:, 1] ≈ [2.0, 7.0]    # avg of b_steps
+            end
+
+            NCDataset(fn_h1, "r") do ds
+                @test haskey(ds, "BB")
+                @test !haskey(ds, "AA")                     # only BB on h1
+                @test ds["BB"].attrib["cell_methods"] == "time: point"  # "I"
+                @test Array(ds["BB"])[:, 1] ≈ b_steps[end]  # last sample [3,9]
+            end
+        end
+
+        # After write, both tapes reset.
+        @test all(t -> t.nsamples == 0, set.tapes)
+    end
+
+    @testset "default_history_tape via master list" begin
+        tape = CLM.default_history_tape()
+        names = Set(f.name for f in tape.fields)
+        @test "EFLX_LH_TOT" in names
+        @test "TG" in names
+        @test "H2OSNO" in names
+        @test length(tape.fields) == length(CLM.default_master_field_list())
+    end
 end

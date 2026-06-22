@@ -222,6 +222,7 @@ include("infrastructure/cold_start.jl")
 include("driver/clm_driver.jl")
 include("driver/clm_initialize.jl")
 include("driver/clm_run.jl")
+include("driver/run_clm.jl")
 
 # ===========================================================================
 # Calibration framework (depends on driver + all modules)
