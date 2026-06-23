@@ -11,6 +11,24 @@ the Julia port and the Fortran sources (`installs/clm/src/fates` + `src/utils/cl
 
 ---
 
+## ✅ Progress (updated 2026-06-23) — FATES now RUNS in the live driver
+
+Done since this doc was written (suite 20,642 → 20,772; PRs #81–#84):
+- **W1+W2 (PR #81):** `CLMInstances.fates::Union{AbstractFatesInterface,Nothing}` ownership model (skipped from AD dual-copy + GPU adapt, like `surfdata`); `clm_fates_init!` cold-starts a finite carbon-only single FATES site. Proven by test.
+- **W3+W4 (PR #84):** all four per-timestep hooks wired & gated behind `use_fates` — `FatesSunShadeFracs` (sun/shade), `FatesNormalizedCanopyRadiation` (canopy albedo), `btran_ed!` (water stress), `FatesPlantRespPhotosynthDrive` (photosynthesis); bc_in packed from CLM column state, bc_out unpacked into canopystate/surfalb/photosyns/energyflux. Init wiring (`clm_fates_init!` into `clm_initialize.jl`, gated). **FATES drives radiation/btran/photosynthesis through `clm_driver` for a `use_fates` column; default path byte-identical.**
+- **Restart fills R1–R5 (PR #82):** the full deferred restart pack/unpack — cohort diagnostics/mortality, patch fuel/albedo/litter, site demographic/mortality/damage arrays, `update_3dpatch_radiation!`. Demographic round-trip complete.
+- **Plant-hydraulics Tier A (PR #83):** 13 init/lifecycle routines ported; all `hlm_use_planthydro`-gated stub call-sites closed; the no-op `AccumulateMortalityWaterStorage` shadow removed.
+
+**Remaining tail (the table at the bottom is updated with ✅ markers):**
+1. **W4b full *in-solve* photosynthesis coupling** — currently `FatesPlantRespPhotosynthDrive` is called *adjacent to* `canopy_fluxes_core!` (post-solve `t_veg`), not inside its Enzyme-compilable iterative solve. Future: move inside for two-way leaf-temp↔flux coupling.
+2. **Plant-hydraulics Tier B** — `Hydraulics_BC` transpiration solve (~544 F90 lines) + `hydraulics_drive`/`FillDrainRhizShells`/`RecruitWUptake` + a NEW gated `hydraulics_drive` callsite in the canopy-flux path. This is what fills `ftc_*`/`btran`/`leaf_psi` (consumer branches already ported, reading zeros until then).
+3. **History fills H1–H6** — NOW UNBLOCKED (per-step state is live under `use_fates`): `update_history_dyn1!` finish, `dyn2`, `nutrflux`, `hifrq1/2`, `hydraulics`. Plus the size/age/coage/height class-index helpers shared by `dyn2`/`hifrq2`.
+4. **Restart R6/R7/R8** — disturbance running-means (needs SetRMean/GetRMean restart accessors); cohort PRT pools (needs `InitPRTObject` on restart cohorts); cohort hydraulics (needs `InitHydrCohort`, now ported via Tier A).
+5. **Real FATES param-file reader** — replace the spike's synthetic in-memory param tables (`_fates_spike_setup_pft!`) with a reader of the FATES parameter NetCDF (or injection from CLM's param infrastructure). Required before a *physically meaningful* (vs merely finite) FATES run.
+6. **Multi-veg-patch + multi-site** — current column↔patch map is `p = col.patchi[c]+1` (single veg patch MVP); the full `ifp` walk is needed for real FATES columns. AD/GPU for FATES columns remains explicitly out of scope.
+
+---
+
 ## TL;DR — the dependency ordering that drives sequencing
 
 The three areas are **not independent**; one unblocks the others:
@@ -185,25 +203,25 @@ exist at `FatesRestartInterfaceMod.jl:496,821` (overlaps R8).
 
 ## Consolidated batch table
 
-| # | Batch | Area | Effort | Depends on | Standalone testable? |
+| # | Batch | Area | Effort | Depends on | Status |
 |---|---|---|---|---|---|
-| 1 | W1 CLMInstances + init globals/alloc + col→site map | wiring | M (High risk) | — | spike |
-| 2 | W2 cold-start chain → finite site | wiring | M | W1 | yes |
-| 3 | W3 radiation hooks (sunfrac/albedo) | wiring | M | W2 | yes |
-| 4 | W4 btran + photosynthesis hooks | wiring | M | W2 | yes |
-| 5 | W5 daily dynamics + setFilters + balance check | wiring | L | W2–W4 | yes |
-| 6 | W6 history dyn1 wiring + validation harness | wiring | M | W5 | yes |
-| – | R1 cohort diag+mort restart fills | restart | S | — | **now** |
-| – | R2 patch fuel/rad/site-hydro-scalar restart | restart | S | — | **now** |
-| – | R3 `update_3dpatch_radiation!` | restart | M | R2 | **now** |
-| – | R4 patch litter restart (~456) | restart | L | — | **now** |
-| – | R5 site demog/mort/damage/flux arrays (~11k) | restart | L | — | **now** |
-| – | R6 running-means restart (+accessors) | restart | M | — | **now** |
-| – | R7 cohort PRT restart + InitPRTObject | restart | L | InitPRTObject | after init |
-| – | R8 cohort hydro restart + InitHydrCohort | restart | M | §3 Tier A | after Tier A |
-| – | H1 nutrflux / H2 hifrq1 / H3 hifrq2 / H4 hydraulics / H5 dyn1-finish / H6 dyn2(×5) | history | M–XL | W4/W5 (live state) | after wiring |
-| – | PH-A plant-hydraulics init/lifecycle | hydro | M (×1–1.5) | — | **now** |
-| – | PH-B `Hydraulics_BC` transpiration solve + new driver callsite | hydro | L (×1.5–2) | §1 wiring | after wiring |
+| 1 | W1 CLMInstances + init globals/alloc + col→site map | wiring | M (High risk) | — | ✅ #81 |
+| 2 | W2 cold-start chain → finite site | wiring | M | W1 | ✅ #81 |
+| 3 | W3 radiation hooks (sunfrac/albedo) | wiring | M | W2 | ✅ #84 |
+| 4 | W4 btran + photosynthesis hooks | wiring | M | W2 | ✅ #84 (W4b adjacent, not in-solve) |
+| 5 | W5 daily dynamics + setFilters + balance check | wiring | L | W2–W4 | ⬜ not started |
+| 6 | W6 history dyn1 wiring + validation harness | wiring | M | W5 | ⬜ (init-wiring done #84; dyn1 fills pending) |
+| – | R1 cohort diag+mort restart fills | restart | S | — | ✅ #82 |
+| – | R2 patch fuel/rad/site-hydro-scalar restart | restart | S | — | ✅ #82 |
+| – | R3 `update_3dpatch_radiation!` | restart | M | R2 | ✅ #82 |
+| – | R4 patch litter restart (~456) | restart | L | — | ✅ #82 |
+| – | R5 site demog/mort/damage/flux arrays (~11k) | restart | L | — | ✅ #82 |
+| – | R6 running-means restart (+accessors) | restart | M | — | ⬜ not started |
+| – | R7 cohort PRT restart + InitPRTObject | restart | L | InitPRTObject | ⬜ not started |
+| – | R8 cohort hydro restart + InitHydrCohort | restart | M | §3 Tier A (done) | ⬜ not started |
+| – | H1 nutrflux / H2 hifrq1 / H3 hifrq2 / H4 hydraulics / H5 dyn1-finish / H6 dyn2(×5) | history | M–XL | W4 (done) → live state | ⬜ UNBLOCKED, not started |
+| – | PH-A plant-hydraulics init/lifecycle | hydro | M (×1–1.5) | — | ✅ #83 |
+| – | PH-B `Hydraulics_BC` transpiration solve + new driver callsite | hydro | L (×1.5–2) | §1 wiring (done) | ⬜ not started |
 | – | PH-C `RestartHydrStates` | hydro | M | PH-A | overlaps R8 |
 
 **Note on AD/GPU:** every FATES column is CPU-only / non-differentiable in this plan (the
