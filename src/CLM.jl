@@ -516,6 +516,18 @@ include("fates/EDLoggingMortalityMod.jl")
 include("fates/FatesBstressMod.jl")
 include("fates/EDMortalityFunctionsMod.jl")
 include("fates/EDPhysiologyMod.jl")
+# FATES (Tier F) Batch 14 — the patch disturbance engine (EDPatchDynamicsMod):
+# per-patch disturbance_rates (fire/treefall-mortality/logging/land-use) →
+# spawn_patches/split_patch (move surviving & killed cohorts into new disturbed
+# patches, conserving area + cohort number + mass) → the three *_litter_fluxes
+# routines (fire/mortality/landusechange — killed/disturbed biomass → litter/CWD
+# + burn flux) → fuse_patches/fuse_2_patches (area-weighted profile merge) →
+# terminate_patches → DistributeSeeds + patch census (set_patchno/countPatches/
+# check_patch_area/patch_pft_size_profile/GetPseudoPatchAge). Reuses the Batch
+# 12–13 cohort/mortality/logging/physiology helpers. Plant-hydraulics init paths
+# stubbed behind hlm_use_planthydro (off by default). Standalone — NOT added to
+# CLMInstances.
+include("fates/EDPatchDynamicsMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
