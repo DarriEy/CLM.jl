@@ -569,6 +569,25 @@ include("fates/EDMainMod.jl")
 # CLMInstances.
 include("fates/FatesRadiationDriveMod.jl")
 include("fates/EDInitMod.jl")
+# FATES (Tier F) Batch 18 — host coupling + I/O (the final FATES wave). (1) The
+# HISTORY pair: FatesHistoryVariableType (one output variable: metadata + bound
+# data) + FatesHistoryInterfaceMod (the registry of all 472 FATES history vars +
+# dimension bookkeeping + the update_history_* aggregation of site/patch/cohort
+# state into output buffers; update_history_dyn1! ported, the remaining buffer-
+# fill routines registry-complete but fill-logic deferred to a B18 followup —
+# unexercised until FATES is driver-wired). (2) The RESTART pair:
+# FatesRestartVariableType + FatesRestartInterfaceMod (the registry + the
+# site→patch→cohort ↔ flat-vector serialization; the demographic round-trip is
+# complete + tested, per-cohort diagnostic copies deferred). (3) FatesInterfaceMod:
+# the CLM↔FATES coupling seam (set_fates_ctrlparms, SetFatesGlobalElements,
+# allocate/zero/set bc_in/bc_out/bc_pconst, SetFatesTime, DetermineGridCellNeighbors).
+# Var-types precede their interfaces; FatesInterfaceMod last. Standalone — NOT yet
+# added to CLMInstances (live-driver wiring is the next milestone).
+include("fates/FatesHistoryVariableType.jl")
+include("fates/FatesHistoryInterfaceMod.jl")
+include("fates/FatesRestartVariableType.jl")
+include("fates/FatesRestartInterfaceMod.jl")
+include("fates/FatesInterfaceMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

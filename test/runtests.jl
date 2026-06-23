@@ -266,6 +266,13 @@ using CLM
     # + FATES cold-start state init (EDInitMod) → init checkpoint.
     include("test_fates_radiationdrive.jl")
     include("test_fates_edinit.jl")
+    # FATES (Tier F) Batch 18 — host coupling + I/O: history registry/aggregation
+    # (FatesHistoryInterfaceMod), restart registry + demographic pack/unpack
+    # round-trip (FatesRestartInterfaceMod), and the CLM↔FATES coupling seam
+    # (FatesInterfaceMod).
+    include("test_fates_history.jl")
+    include("test_fates_restart.jl")
+    include("test_fates_interface.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
