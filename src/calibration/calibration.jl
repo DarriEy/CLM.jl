@@ -330,10 +330,12 @@ function _make_dual_instances(inst_f64::CLMInstances, ::Type{D}) where D
     for name in fieldnames(CLMInstances)
         name === :water && continue
         name === :surfdata && continue
+        name === :fates && continue
         src = getfield(inst_f64, name)
         setfield!(inst_d, name, _calib_dual_copy(src, D))
     end
     inst_d.surfdata = inst_f64.surfdata
+    inst_d.fates = inst_f64.fates
 
     # Copy overrides as Dual-typed
     inst_d.overrides = CalibrationOverrides{D}()

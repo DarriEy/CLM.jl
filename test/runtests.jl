@@ -273,6 +273,9 @@ using CLM
     include("test_fates_history.jl")
     include("test_fates_restart.jl")
     include("test_fates_interface.jl")
+    # W1+W2 live-driver wiring spike: cold-start a single FATES site + attach to
+    # CLMInstances + prove the AD-dual-copy / GPU-adapt ownership-model skip.
+    include("test_fates_coldstart_spike.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

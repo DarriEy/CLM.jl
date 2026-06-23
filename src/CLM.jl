@@ -588,6 +588,10 @@ include("fates/FatesHistoryInterfaceMod.jl")
 include("fates/FatesRestartVariableType.jl")
 include("fates/FatesRestartInterfaceMod.jl")
 include("fates/FatesInterfaceMod.jl")
+# W1+W2 live-driver wiring: clm_fates_init! — bootstrap + cold-start a single
+# carbon-only FATES site and attach it to CLMInstances.fates. Depends on
+# CLMInstances (instances.jl) + the whole FATES module stack above.
+include("fates/fates_driver_init.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
