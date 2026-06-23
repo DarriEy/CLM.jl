@@ -463,6 +463,16 @@ include("fates/FatesSoilBGCFluxMod.jl")
 # system + WRF/WKF functions + allometry + PRT + params (all included above).
 # Standalone — NOT added to CLMInstances.
 include("fates/FatesPlantHydraulicsMod.jl")
+# FATES (Tier F) Batch 11 — the SPITFIRE main fire driver (SFMainMod). The daily
+# fire model: per-patch fuel characterization -> fire weather / danger index ->
+# rate of spread (Rothermel 1972 / Thonicke et al. 2010) -> ground fuel
+# consumption -> fire intensity & area burnt -> fire effects (crown scorch /
+# damage, cambial damage / kill, post-fire tree mortality). Operates on the
+# merged ed_site / patch / cohort + fuel_type + fire_weather objects. Standalone
+# — NOT added to CLMInstances or any dual-copied struct. Must come AFTER
+# EDTypesMod (site type) + FatesFuelMod + SFParamsMod + EDPftvarcon + the
+# allometry engine (CrownDepth), all included above.
+include("fates/SFMainMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

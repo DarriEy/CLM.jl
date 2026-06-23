@@ -225,6 +225,8 @@ using CLM
     include("test_fates_soilbgcflux.jl")
     # FATES (Tier F) Batch 11 — plant-hydraulics solver (FatesPlantHydraulicsMod).
     include("test_fates_planthydraulics.jl")
+    # FATES (Tier F) Batch 11 — SPITFIRE main fire driver (SFMainMod).
+    include("test_fates_sfmain.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
