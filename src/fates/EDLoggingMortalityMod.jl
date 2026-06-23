@@ -59,15 +59,9 @@ const harvest_litter_localization = 0.0
 const hlm_harvest_area_fraction = 1  # area-fraction-based harvest [m2/m2]
 const hlm_harvest_carbon        = 2  # carbon/biomass-based harvest
 
-# TODO Batch NN: AccumulateMortalityWaterStorage lives in FatesPlantHydraulicsMod,
-# which is partially ported but does not yet expose this routine. It is only
-# called when hlm_use_planthydro == itrue (off in the default + test path). A
-# minimal no-op stub keeps logging_litter_fluxes self-consistent until the real
-# routine lands.
-function AccumulateMortalityWaterStorage(currentSite, currentCohort, delta_n::Real)
-    # TODO Batch NN: real implementation in FatesPlantHydraulicsMod.
-    return nothing
-end
+# NOTE: AccumulateMortalityWaterStorage is provided by FatesPlantHydraulicsMod
+# (Tier A); the previous no-op shadow stub here has been removed so the real
+# routine is called from logging_litter_fluxes when hlm_use_planthydro == itrue.
 
 # ===========================================================================
 # IsItLoggingTime

@@ -1241,6 +1241,598 @@ function BTranForHLMDiagnosticsFromCohortHydr(sites::AbstractVector, bc_out::Abs
 end
 
 # ===========================================================================
+# Tier A — init / lifecycle routines
+# ===========================================================================
+
+"""
+    InitHydrCohort(currentSite, currentCohort)
+
+Allocate the per-cohort plant-hydraulics object (`co_hydr`) and its per-
+rhizosphere-layer arrays, sized from the site's `nlevrhiz`. Returns immediately
+(no-op) when plant hydraulics is disabled. Mirrors the Fortran `InitHydrCohort`.
+"""
+function InitHydrCohort(currentSite::ed_site_type, currentCohort::fates_cohort_type)
+    hlm_use_planthydro[] == ifalse && return nothing
+    ccohort_hydr = ed_cohort_hydr_type()
+    currentCohort.co_hydr = ccohort_hydr
+    AllocateHydrCohortArrays!(ccohort_hydr, currentSite.si_hydr.nlevrhiz)
+    ccohort_hydr.is_newly_recruited = false
+    return nothing
+end
+
+"""
+    DeallocateHydrCohort(currentCohort)
+
+Release the per-cohort plant-hydraulics object (`co_hydr`) and its per-layer
+arrays. No-op when plant hydraulics is disabled. Mirrors the Fortran
+`DeallocateHydrCohort`.
+"""
+function DeallocateHydrCohort(currentCohort::fates_cohort_type)
+    hlm_use_planthydro[] == ifalse && return nothing
+    ccohort_hydr = currentCohort.co_hydr
+    if ccohort_hydr !== nothing
+        DeallocateHydrCohortArrays!(ccohort_hydr)
+    end
+    currentCohort.co_hydr = nothing
+    return nothing
+end
+
+"""
+    SavePreviousRhizVolumes(currentSite)
+
+Snapshot the current site-level rhizosphere geometry (absorbing-root length,
+nodal shell radius, shell volume) into their `*_init` companions, used to
+compute the effect of size change on plant water states. Mirrors the Fortran
+`SavePreviousRhizVolumes`.
+"""
+function SavePreviousRhizVolumes(currentSite::ed_site_type)
+    csite_hydr = currentSite.si_hydr
+    csite_hydr.l_aroot_layer_init  .= csite_hydr.l_aroot_layer
+    csite_hydr.r_node_shell_init   .= csite_hydr.r_node_shell
+    csite_hydr.v_shell_init        .= csite_hydr.v_shell
+    return nothing
+end
+
+"""
+    constrain_water_contents(th_uncorr, delta, ft, pm_type) -> th_corr
+
+Clamp an uncorrected volumetric water content into the open interval
+`(thr+delta, ths-delta)` defined by the PFT's residual / saturated node water
+contents for the given porous-medium type. Mirrors the Fortran (private)
+`constrain_water_contents`.
+"""
+function constrain_water_contents(th_uncorr::Real, delta::Real, ft::Integer, pm_type::Integer)
+    pcon = EDPftvarcon_inst[]
+    ths = pcon.hydr_thetas_node[ft, pm_type]
+    thr = pcon.hydr_resid_node[ft, pm_type]
+    return max((thr + delta), min((ths - delta), th_uncorr))
+end
+
+"""
+    AccumulateMortalityWaterStorage(csite, ccohort, delta_n)
+
+Accumulate the water bound in plants that have just died (number-density loss
+`delta_n`, per area) into the site-level dead-vegetation water pool, removing it
+from the live stored-vegetation pool. Mirrors the Fortran
+`AccumulateMortalityWaterStorage`.
+"""
+function AccumulateMortalityWaterStorage(csite::ed_site_type, ccohort::fates_cohort_type,
+                                         delta_n::Real)
+    ccohort_hydr = ccohort.co_hydr
+    csite_hydr   = csite.si_hydr
+    delta_w = (sum(ccohort_hydr.th_ag .* ccohort_hydr.v_ag) +
+               ccohort_hydr.th_troot * ccohort_hydr.v_troot +
+               sum(ccohort_hydr.th_aroot .* ccohort_hydr.v_aroot_layer)) *
+              dens_fresh_liquid_water * delta_n * AREA_INV
+
+    csite_hydr.h2oveg_dead += delta_w
+    csite_hydr.h2oveg      -= delta_w
+    return nothing
+end
+
+"""
+    RecruitWaterStorage(nsites, sites, bc_out)
+
+Diagnose the site-level water bound in newly recruited plants (the
+`h2oveg_recruit` pool). No mass is moved here; the actual soil->plant uptake
+happens later in `RecruitWUptake`. No-op when plant hydraulics is disabled.
+Mirrors the Fortran `RecruitWaterStorage`.
+"""
+function RecruitWaterStorage(nsites::Integer, sites::AbstractVector, bc_out::AbstractVector)
+    hlm_use_planthydro[] == ifalse && return nothing
+    for s in 1:nsites
+        csite_hydr = sites[s].si_hydr
+        csite_hydr.h2oveg_recruit = 0.0
+        currentPatch = sites[s].oldest_patch
+        while currentPatch !== nothing
+            currentCohort = currentPatch.tallest
+            while currentCohort !== nothing
+                ccohort_hydr = currentCohort.co_hydr
+                if ccohort_hydr.is_newly_recruited
+                    csite_hydr.h2oveg_recruit += (sum(ccohort_hydr.th_ag .* ccohort_hydr.v_ag) +
+                        ccohort_hydr.th_troot * ccohort_hydr.v_troot +
+                        sum(ccohort_hydr.th_aroot .* ccohort_hydr.v_aroot_layer)) *
+                        dens_fresh_liquid_water * currentCohort.n
+                end
+                currentCohort = currentCohort.shorter
+            end
+            currentPatch = currentPatch.younger
+        end
+        csite_hydr.h2oveg_recruit *= AREA_INV
+    end
+    return nothing
+end
+
+"""
+    UpdateSizeDepRhizVolLenCon(currentSite, bc_in)
+
+Update the site's representative-rhizosphere geometry (outer/nodal shell radii
+and shell volumes via [`shellGeom!`](@ref)) and the max soil->shell hydraulic
+conductances, as the site-aggregated absorbing-root length (summed over all
+cohorts and patches) changes. Mirrors the Fortran `UpdateSizeDepRhizVolLenCon`.
+"""
+function UpdateSizeDepRhizVolLenCon(currentSite::ed_site_type, bc_in)
+    csite_hydr = currentSite.si_hydr
+    nlevrhiz = csite_hydr.nlevrhiz
+
+    large_kmax_bound = 1.0e4
+    k_inner = 1
+
+    # Accumulate cohort-level root length to the site level across patches/cohorts.
+    fill!(csite_hydr.l_aroot_layer, 0.0)
+    cPatch = currentSite.youngest_patch
+    while cPatch !== nothing
+        cCohort = cPatch.tallest
+        while cCohort !== nothing
+            ccohort_hydr = cCohort.co_hydr
+            csite_hydr.l_aroot_layer .+= ccohort_hydr.l_aroot_layer .* cCohort.n
+            cCohort = cCohort.shorter
+        end
+        cPatch = cPatch.older
+    end
+
+    # Update outer/nodal radii and shell volumes (handles no-root layers inside).
+    for j in 1:nlevrhiz
+        shellGeom!(csite_hydr.l_aroot_layer[j], csite_hydr.rs1[j], area, csite_hydr.dz_rhiz[j],
+                   view(csite_hydr.r_out_shell, j, :), view(csite_hydr.r_node_shell, j, :),
+                   view(csite_hydr.v_shell, j, :))
+    end
+
+    for j in 1:nlevrhiz
+        # hksat [mm s-1] -> [kg s-1 m-1 MPa-1]
+        hksat_s = AggBCToRhiz(csite_hydr, bc_in.hksat_sisl, j, bc_in.dz_sisl) *
+                  m_per_mm * (1.0 / grav_earth) * pa_per_mpa
+
+        # Only recompute conductances where absorbing-root length changed.
+        if (csite_hydr.l_aroot_layer[j] != csite_hydr.l_aroot_layer_init[j]) &&
+           (csite_hydr.l_aroot_layer[j] > nearzero)
+
+            if csite_hydr.r_node_shell[j, k_inner] <= csite_hydr.rs1[j]
+                csite_hydr.kmax_upper_shell[j, k_inner] = large_kmax_bound
+            else
+                csite_hydr.kmax_upper_shell[j, k_inner] = 2.0 * pi_const * csite_hydr.l_aroot_layer[j] /
+                    log(csite_hydr.r_node_shell[j, k_inner] / csite_hydr.rs1[j]) * hksat_s
+            end
+
+            csite_hydr.kmax_lower_shell[j, k_inner] = 2.0 * pi_const * csite_hydr.l_aroot_layer[j] /
+                log(csite_hydr.r_out_shell[j, k_inner] / csite_hydr.r_node_shell[j, k_inner]) * hksat_s
+
+            for k in 2:nshell
+                csite_hydr.kmax_upper_shell[j, k] = 2.0 * pi_const * csite_hydr.l_aroot_layer[j] /
+                    log(csite_hydr.r_node_shell[j, k] / csite_hydr.r_out_shell[j, k - 1]) * hksat_s
+                csite_hydr.kmax_lower_shell[j, k] = 2.0 * pi_const * csite_hydr.l_aroot_layer[j] /
+                    log(csite_hydr.r_out_shell[j, k] / csite_hydr.r_node_shell[j, k]) * hksat_s
+            end
+        end
+    end
+    return nothing
+end
+
+"""
+    UpdateSizeDepRhizHydProps(currentSite, bc_in)
+
+Thin wrapper: snapshot the previous rhizosphere volumes
+([`SavePreviousRhizVolumes`](@ref)) then update the size-dependent rhizosphere
+geometry/conductances ([`UpdateSizeDepRhizVolLenCon`](@ref)). Mirrors the
+Fortran `UpdateSizeDepRhizHydProps`.
+"""
+function UpdateSizeDepRhizHydProps(currentSite::ed_site_type, bc_in)
+    SavePreviousRhizVolumes(currentSite)
+    UpdateSizeDepRhizVolLenCon(currentSite, bc_in)
+    return nothing
+end
+
+"""
+    UpdateSizeDepPlantHydStates(currentSite, ccohort)
+
+Apply water mass conservation to a cohort whose compartment volumes have just
+changed (growth/turnover): rescale each compartment's water content by the
+volume ratio, clamp via [`constrain_water_contents`](@ref), and book the
+resulting tissue-volume-change water error into the site's `h2oveg_growturn_err`.
+Mirrors the Fortran `UpdateSizeDepPlantHydStates`.
+"""
+function UpdateSizeDepPlantHydStates(currentSite::ed_site_type, ccohort::fates_cohort_type)
+    ccohort_hydr = ccohort.co_hydr
+    ft = ccohort.pft
+    csite_hydr = currentSite.si_hydr
+    small_theta_num = 1.0e-7
+
+    for k in 1:n_hypool_leaf
+        if ccohort_hydr.v_ag[k] > nearzero
+            th_uncorr = ccohort_hydr.th_ag[k] * ccohort_hydr.v_ag_init[k] / ccohort_hydr.v_ag[k]
+            ccohort_hydr.th_ag[k] = constrain_water_contents(th_uncorr, small_theta_num, ft, leaf_p_media)
+        else
+            th_uncorr = ccohort_hydr.th_ag[k]
+        end
+        csite_hydr.h2oveg_growturn_err += dens_fresh_liquid_water * ccohort.n * AREA_INV *
+            (ccohort_hydr.th_ag[k] - th_uncorr) * ccohort_hydr.v_ag[k]
+    end
+
+    for k in (n_hypool_leaf + 1):n_hypool_ag
+        th_uncorr = ccohort_hydr.th_ag[k] * ccohort_hydr.v_ag_init[k] / ccohort_hydr.v_ag[k]
+        ccohort_hydr.th_ag[k] = constrain_water_contents(th_uncorr, small_theta_num, ft, stem_p_media)
+        csite_hydr.h2oveg_growturn_err += dens_fresh_liquid_water * ccohort.n * AREA_INV *
+            (ccohort_hydr.th_ag[k] - th_uncorr) * ccohort_hydr.v_ag[k]
+    end
+
+    th_uncorr = ccohort_hydr.th_troot * ccohort_hydr.v_troot_init / ccohort_hydr.v_troot
+    ccohort_hydr.th_troot = constrain_water_contents(th_uncorr, small_theta_num, ft, troot_p_media)
+    csite_hydr.h2oveg_growturn_err += dens_fresh_liquid_water * ccohort.n * AREA_INV *
+        (ccohort_hydr.th_troot - th_uncorr) * ccohort_hydr.v_troot
+
+    for j in 1:csite_hydr.nlevrhiz
+        if ccohort_hydr.v_aroot_layer[j] > nearzero
+            th_uncorr = ccohort_hydr.th_aroot[j] *
+                ccohort_hydr.v_aroot_layer_init[j] / ccohort_hydr.v_aroot_layer[j]
+            ccohort_hydr.th_aroot[j] = constrain_water_contents(th_uncorr, small_theta_num, ft, aroot_p_media)
+            csite_hydr.h2oveg_growturn_err += dens_fresh_liquid_water * ccohort.n * AREA_INV *
+                (ccohort_hydr.th_aroot[j] - th_uncorr) * ccohort_hydr.v_aroot_layer[j]
+        end
+    end
+    return nothing
+end
+
+"""
+    FuseCohortHydraulics(currentSite, currentCohort, nextCohort, bc_in, newn)
+
+Fuse the donor cohort `nextCohort`'s hydraulics into `currentCohort` (the
+post-fusion cohort), conserving total water volume per compartment (the fused
+`th` is the number-and-volume-weighted blend), then recompute psi/ftc/btran from
+the blended water contents. `newn` is the fused number density. Mirrors the
+Fortran `FuseCohortHydraulics`. Assumes `currentCohort`'s size/biomass were
+already updated (i.e. called after parteh).
+"""
+function FuseCohortHydraulics(currentSite::ed_site_type, currentCohort::fates_cohort_type,
+                              nextCohort::fates_cohort_type, bc_in, newn::Real)
+    csite_hydr   = currentSite.si_hydr
+    ccohort_hydr = currentCohort.co_hydr
+    ncohort_hydr = nextCohort.co_hydr
+    ft = currentCohort.pft
+
+    # Save old volumes (needed for the pre-fusion water volume of each cohort),
+    # then update node positions, volumes/lengths, and max conductances.
+    SavePreviousCompartmentVolumes!(ccohort_hydr)
+    UpdatePlantHydrNodes!(currentCohort, ft, currentCohort.height, csite_hydr)
+    UpdatePlantHydrLenVol!(currentCohort, csite_hydr)
+
+    # Conserve total water volume.
+    for k in 1:n_hypool_ag
+        vol_c1 = currentCohort.n * ccohort_hydr.th_ag[k] * ccohort_hydr.v_ag_init[k]
+        vol_c2 = nextCohort.n    * ncohort_hydr.th_ag[k] * ncohort_hydr.v_ag[k]
+        ccohort_hydr.th_ag[k] = (vol_c1 + vol_c2) / (ccohort_hydr.v_ag[k] * newn)
+    end
+
+    vol_c1 = currentCohort.n * ccohort_hydr.th_troot * ccohort_hydr.v_troot_init
+    vol_c2 = nextCohort.n    * ncohort_hydr.th_troot * ncohort_hydr.v_troot
+    ccohort_hydr.th_troot = (vol_c1 + vol_c2) / (ccohort_hydr.v_troot * newn)
+
+    for j in 1:csite_hydr.nlevrhiz
+        vol_c1 = currentCohort.n * ccohort_hydr.th_aroot[j] * ccohort_hydr.v_aroot_layer_init[j]
+        vol_c2 = nextCohort.n    * ncohort_hydr.th_aroot[j] * ncohort_hydr.v_aroot_layer[j]
+        ccohort_hydr.th_aroot[j] = (vol_c1 + vol_c2) / (ccohort_hydr.v_aroot_layer[j] * newn)
+    end
+
+    ccohort_hydr.supsub_flag = 0
+
+    # Keep the iteration counters of the worse of the two cohorts.
+    if ncohort_hydr.iterh1 > ccohort_hydr.iterh1
+        ccohort_hydr.iterh1    = ncohort_hydr.iterh1
+        ccohort_hydr.iterh2    = ncohort_hydr.iterh2
+        ccohort_hydr.iterlayer = ncohort_hydr.iterlayer
+    end
+
+    for k in 1:n_hypool_leaf
+        ccohort_hydr.psi_ag[k] = psi_from_th(wrf_plant(leaf_p_media, ft), ccohort_hydr.th_ag[k])
+        ccohort_hydr.ftc_ag[k] = ftc_from_psi(wkf_plant(leaf_p_media, ft), ccohort_hydr.psi_ag[k])
+    end
+    for k in (n_hypool_leaf + 1):n_hypool_ag
+        ccohort_hydr.psi_ag[k] = psi_from_th(wrf_plant(stem_p_media, ft), ccohort_hydr.th_ag[k])
+        ccohort_hydr.ftc_ag[k] = ftc_from_psi(wkf_plant(stem_p_media, ft), ccohort_hydr.psi_ag[k])
+    end
+
+    ccohort_hydr.psi_troot = psi_from_th(wrf_plant(troot_p_media, ft), ccohort_hydr.th_troot)
+    ccohort_hydr.ftc_troot = ftc_from_psi(wkf_plant(troot_p_media, ft), ccohort_hydr.psi_troot)
+
+    for j in 1:csite_hydr.nlevrhiz
+        ccohort_hydr.psi_aroot[j] = psi_from_th(wrf_plant(aroot_p_media, ft), ccohort_hydr.th_aroot[j])
+        ccohort_hydr.ftc_aroot[j] = ftc_from_psi(wkf_plant(aroot_p_media, ft), ccohort_hydr.psi_aroot[j])
+    end
+
+    ccohort_hydr.btran = ftc_from_psi(wkf_plant(stomata_p_media, ft), ccohort_hydr.psi_ag[1])
+
+    ccohort_hydr.qtop = (currentCohort.n * ccohort_hydr.qtop +
+                         nextCohort.n * ncohort_hydr.qtop) / newn
+    ccohort_hydr.errh2o = (currentCohort.n * ccohort_hydr.errh2o +
+                           nextCohort.n * ncohort_hydr.errh2o) / newn
+    return nothing
+end
+
+"""
+    ConstrainRecruitNumber(csite, ccohort, cpatch, bc_in, mean_temp)
+
+Constrain a new recruit cohort's number density so that the rhizosphere can
+supply the water that would be subsumed in the new plant tissues (50% of the
+above-residual water per layer is deemed available). When freezing
+(`mean_temp <= 273.15`) recruitment is fully suppressed. The carbon/nutrient
+mass of any reduced individuals is returned to the patch germination seed pool.
+Mirrors the Fortran `ConstrainRecruitNumber`.
+"""
+function ConstrainRecruitNumber(csite::ed_site_type, ccohort::fates_cohort_type,
+                                cpatch::fates_patch_type, bc_in, mean_temp::Real)
+    csite_hydr   = csite.si_hydr
+    ccohort_hydr = ccohort.co_hydr
+
+    recruitw = (sum(ccohort_hydr.th_ag .* ccohort_hydr.v_ag) +
+                ccohort_hydr.th_troot * ccohort_hydr.v_troot +
+                sum(ccohort_hydr.th_aroot .* ccohort_hydr.v_aroot_layer)) *
+               dens_fresh_liquid_water
+
+    sum_l_aroot = sum(ccohort_hydr.l_aroot_layer)
+    for j in 1:csite_hydr.nlevrhiz
+        csite_hydr.cohort_recruit_water_layer[j] = recruitw * ccohort_hydr.l_aroot_layer[j] / sum_l_aroot
+    end
+
+    for j in 1:csite_hydr.nlevrhiz
+        watres_local = th_from_psi(csite_hydr.wrf_soil[j],
+            bc_in.smpmin_si * dens_fresh_liquid_water * grav_earth * m_per_mm * mpa_per_pa)
+        total_water     = sum(view(csite_hydr.v_shell, j, :) .* view(csite_hydr.h2osoi_liqvol_shell, j, :))
+        total_water_min = sum(view(csite_hydr.v_shell, j, :) .* watres_local)
+        # Only 50% is deemed available for recruit water.
+        csite_hydr.recruit_water_avail_layer[j] = 0.5 * max(0.0, total_water - total_water_min)
+    end
+
+    nmin = 1.0e36
+    for j in 1:csite_hydr.nlevrhiz
+        if csite_hydr.cohort_recruit_water_layer[j] > nearzero
+            n = csite_hydr.recruit_water_avail_layer[j] / csite_hydr.cohort_recruit_water_layer[j]
+            nmin = min(n, nmin)
+        end
+    end
+
+    # Prevent recruitment when temperatures are freezing or below.
+    if mean_temp <= 273.15
+        nmin = 0.0
+    end
+
+    # Reduce number density (and return carbon/nutrient mass to germination pool)
+    # if water-limited recruitment is below the carbon-allowed number density.
+    if nmin < ccohort.n
+        for el in 1:num_elements[]
+            element_id = element_list[el]
+            leaf_m   = GetState(ccohort.prt, leaf_organ, element_id)
+            store_m  = GetState(ccohort.prt, store_organ, element_id)
+            sapw_m   = GetState(ccohort.prt, sapw_organ, element_id)
+            fnrt_m   = GetState(ccohort.prt, fnrt_organ, element_id)
+            struct_m = GetState(ccohort.prt, struct_organ, element_id)
+            repro_m  = GetState(ccohort.prt, repro_organ, element_id)
+
+            cpatch.litter[el].seed_germ[ccohort.pft] += (ccohort.n - nmin) / cpatch.area *
+                (leaf_m + store_m + sapw_m + fnrt_m + struct_m + repro_m)
+        end
+        ccohort.n = nmin
+    end
+    return nothing
+end
+
+"""
+    InitHydrSites(sites, bc_in)
+
+Allocate each site's `si_hydr` object, choose the rhizosphere-layer aggregation
+(the FATES default `combine12`: aggregate the top two soil layers, the rest 1:1),
+and size/initialize the site hydraulics arrays via [`InitHydrSite!`](@ref) with
+the soil->rhizosphere layer map and depths. No-op when plant hydraulics is
+disabled. Mirrors the Fortran `InitHydrSites`.
+"""
+function InitHydrSites(sites::AbstractVector, bc_in::AbstractVector)
+    hlm_use_planthydro[] == ifalse && return nothing
+
+    rhizlayer_aggmeth_none      = 1
+    rhizlayer_aggmeth_combine12 = 2
+    rhizlayer_aggmeth_balN      = 3
+
+    solver = EDParams[].hydr_solver
+
+    nsites = length(sites)
+    for s in 1:nsites
+        csite_hydr = ed_site_hydr_type()
+        sites[s].si_hydr = csite_hydr
+        if bc_in[s].nlevsoil > nlevsoi_hyd_max
+            fates_endrun("FATES-hydro: host soil has $(bc_in[s].nlevsoil) layers, " *
+                         "exceeding nlevsoi_hyd_max = $nlevsoi_hyd_max")
+        end
+
+        aggmeth = rhizlayer_aggmeth_combine12
+        aggN    = 10
+
+        # NOTE: bc_in.zi_sisl carries a zero index for the surface, so Fortran
+        # zi_sisl(j) (bottom of soil layer j) is zi_sisl[j+1] here.
+        if aggmeth == rhizlayer_aggmeth_none
+            csite_hydr.nlevrhiz = bc_in[s].nlevsoil
+            InitHydrSite!(csite_hydr, numpft[], nlevsclass[], solver, bc_in[s].nlevsoil)
+            for j in 1:csite_hydr.nlevrhiz
+                csite_hydr.map_r2s[j, 1] = j
+                csite_hydr.map_r2s[j, 2] = j
+                csite_hydr.zi_rhiz[j]    = bc_in[s].zi_sisl[j + 1]
+                csite_hydr.dz_rhiz[j]    = bc_in[s].dz_sisl[j]
+            end
+
+        elseif aggmeth == rhizlayer_aggmeth_combine12
+            csite_hydr.nlevrhiz = max(1, bc_in[s].nlevsoil - 1)
+            InitHydrSite!(csite_hydr, numpft[], nlevsclass[], solver, bc_in[s].nlevsoil)
+
+            csite_hydr.map_r2s[1, 1] = 1
+            j_bc = min(2, bc_in[s].nlevsoil)   # protects the single-soil-layer case
+            csite_hydr.map_r2s[1, 2] = j_bc
+            csite_hydr.zi_rhiz[1]    = bc_in[s].zi_sisl[j_bc + 1]
+            csite_hydr.dz_rhiz[1]    = sum(@view bc_in[s].dz_sisl[1:j_bc])
+
+            for j in 2:csite_hydr.nlevrhiz
+                csite_hydr.map_r2s[j, 1] = j + 1
+                csite_hydr.map_r2s[j, 2] = j + 1
+                csite_hydr.zi_rhiz[j]    = bc_in[s].zi_sisl[(j + 1) + 1]
+                csite_hydr.dz_rhiz[j]    = bc_in[s].dz_sisl[j + 1]
+            end
+
+        elseif aggmeth == rhizlayer_aggmeth_balN
+            csite_hydr.nlevrhiz = min(aggN, bc_in[s].nlevsoil)
+            InitHydrSite!(csite_hydr, numpft[], nlevsclass[], solver, bc_in[s].nlevsoil)
+
+            ntoagg = Int(ceil(bc_in[s].nlevsoil / csite_hydr.nlevrhiz - nearzero))
+            if ntoagg < 1
+                fates_endrun("rhizlayer_aggmeth_balN: bad soil-layers-per-rhiz estimate $ntoagg")
+            end
+            ns_per_rhiz = fill(ntoagg, csite_hydr.nlevrhiz)
+            while sum(ns_per_rhiz) > bc_in[s].nlevsoil
+                for j in csite_hydr.nlevrhiz:-1:1
+                    ns_per_rhiz[j] -= 1
+                    sum(ns_per_rhiz) <= bc_in[s].nlevsoil && break
+                    if ns_per_rhiz[j] == 0
+                        fates_endrun("rhizlayer_aggmeth_balN produced a 0-soil-layer rhiz layer")
+                    end
+                end
+            end
+
+            csite_hydr.map_r2s[1, 1] = 1
+            for j in 1:(csite_hydr.nlevrhiz - 1)
+                j_t = csite_hydr.map_r2s[j, 1]
+                j_b = j_t + ns_per_rhiz[j] - 1
+                csite_hydr.map_r2s[j, 2]     = j_b
+                csite_hydr.map_r2s[j + 1, 1] = j_b + 1
+                csite_hydr.zi_rhiz[j]        = bc_in[s].zi_sisl[j_b + 1]
+                csite_hydr.dz_rhiz[j]        = sum(@view bc_in[s].dz_sisl[j_t:j_b])
+            end
+            j_t = csite_hydr.map_r2s[csite_hydr.nlevrhiz, 1]
+            j_b = j_t + ns_per_rhiz[csite_hydr.nlevrhiz] - 1
+            csite_hydr.map_r2s[csite_hydr.nlevrhiz, 2] = j_b
+            csite_hydr.zi_rhiz[csite_hydr.nlevrhiz]    = bc_in[s].zi_sisl[j_b + 1]
+            csite_hydr.dz_rhiz[csite_hydr.nlevrhiz]    = sum(@view bc_in[s].dz_sisl[j_t:j_b])
+        else
+            fates_endrun("undefined rhizosphere layer aggregation method: $aggmeth")
+        end
+    end
+    return nothing
+end
+
+"""
+    HydrSiteColdStart(sites, bc_in)
+
+Cold-start each site's hydraulics: set the rhizosphere shell liquid water from
+the soil effective porosity / liquid water, zero the site absorbing-root length,
+and construct the per-soil-layer soil water-retention (WRF) and conductance (WKF)
+functions (Campbell/Clapp-Hornberger by default) with parameters aggregated to
+each rhizosphere layer. Mirrors the Fortran `HydrSiteColdStart`.
+"""
+function HydrSiteColdStart(sites::AbstractVector, bc_in::AbstractVector)
+    nsites = length(sites)
+    for s in 1:nsites
+        csite_hydr = sites[s].si_hydr
+        nlevrhiz = csite_hydr.nlevrhiz
+
+        for j in 1:nlevrhiz
+            j_t = csite_hydr.map_r2s[j, 1]
+            j_b = csite_hydr.map_r2s[j, 2]
+            eff_por = AggBCToRhiz(csite_hydr, bc_in[s].eff_porosity_sl, j, bc_in[s].dz_sisl)
+            # [kg/m2] / ([m] * [kg/m3]) = [m3/m3]
+            h2osoi_liqvol = min(eff_por,
+                sum(@view bc_in[s].h2o_liq_sisl[j_t:j_b]) / (csite_hydr.dz_rhiz[j] * dens_fresh_liquid_water))
+            csite_hydr.h2osoi_liqvol_shell[j, 1:nshell] .= h2osoi_liqvol
+        end
+
+        csite_hydr.l_aroot_layer[1:nlevrhiz] .= 0.0
+
+        # --- Soil Water Retention Functions (WRFs) ---
+        if soil_wrf_type == van_genuchten_type
+            for j in 1:nlevrhiz
+                wrf = wrf_type_vg()
+                set_wrf_param!(wrf, [alpha_vg, psd_vg, m_vg, th_sat_vg, th_res_vg])
+                csite_hydr.wrf_soil[j] = wrf
+            end
+        elseif soil_wrf_type == campbell_type
+            for j in 1:nlevrhiz
+                wrf = wrf_type_cch()
+                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
+                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
+                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
+                set_wrf_param!(wrf, [watsat,
+                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw])
+                csite_hydr.wrf_soil[j] = wrf
+            end
+        elseif soil_wrf_type == smooth1_campbell_type || soil_wrf_type == smooth2_campbell_type
+            smooth_order = soil_wrf_type == smooth1_campbell_type ? 1.0 : 2.0
+            for j in 1:nlevrhiz
+                wrf = wrf_type_smooth_cch()
+                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
+                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
+                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
+                set_wrf_param!(wrf, [watsat,
+                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw, smooth_order])
+                csite_hydr.wrf_soil[j] = wrf
+            end
+        elseif soil_wrf_type == tfs_type
+            fates_endrun("TFS water retention curves not available for soil")
+        end
+
+        # --- Soil Water Conductance (K) Functions (WKFs) ---
+        if soil_wkf_type == van_genuchten_type
+            for j in 1:nlevrhiz
+                wkf = wkf_type_vg()
+                set_wkf_param!(wkf, [alpha_vg, psd_vg, m_vg, th_sat_vg, th_res_vg, soil_tort_vg])
+                csite_hydr.wkf_soil[j] = wkf
+            end
+        elseif soil_wkf_type == campbell_type
+            for j in 1:nlevrhiz
+                wkf = wkf_type_cch()
+                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
+                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
+                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
+                set_wkf_param!(wkf, [watsat,
+                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw])
+                csite_hydr.wkf_soil[j] = wkf
+            end
+        elseif soil_wkf_type == smooth1_campbell_type || soil_wkf_type == smooth2_campbell_type
+            smooth_order = soil_wkf_type == smooth1_campbell_type ? 1.0 : 2.0
+            for j in 1:nlevrhiz
+                wkf = wkf_type_smooth_cch()
+                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
+                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
+                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
+                set_wkf_param!(wkf, [watsat,
+                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw, smooth_order])
+                csite_hydr.wkf_soil[j] = wkf
+            end
+        elseif soil_wkf_type == tfs_type
+            fates_endrun("TFS conductance not used in soil")
+        end
+
+        # The FTC functions need psi_min -> point each WKF at its matching WRF.
+        for j in 1:nlevrhiz
+            csite_hydr.wkf_soil[j].wrf = csite_hydr.wrf_soil[j]
+        end
+    end
+    return nothing
+end
+
+# ===========================================================================
 # Non-default 2D solvers (STUBBED — see module header)
 # ===========================================================================
 
