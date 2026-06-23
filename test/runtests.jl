@@ -277,6 +277,11 @@ using CLM
     # CLMInstances + prove the AD-dual-copy / GPU-adapt ownership-model skip.
     include("test_fates_coldstart_spike.jl")
 
+    # W3+W4 live-driver hooks: bc pack -> FATES driver -> bc unpack round-trip for
+    # radiation (sun/shade + canopy albedo), btran, and photosynthesis, plus the
+    # gated driver-branch column<->site mapping.
+    include("test_fates_driver_hooks.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),

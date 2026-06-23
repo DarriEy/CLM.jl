@@ -94,6 +94,19 @@ function _fates_spike_setup_pft!(npft::Int)
     p.repro_alloc_a      .= 0.0
     p.repro_alloc_b      .= 0.0
 
+    # PRT N stoichiometry (PFT x organ) + the organ->param-column reverse lookup.
+    # Read by the maintenance-respiration path in FatesPlantRespPhotosynthDrive
+    # (live_stem_n/live_croot_n/fnrt_n) and by EDInitMod cold-start mass init.
+    # Identity organ_param_id (organ index == nitr_stoich_p1 column) + nominal
+    # broadleaf N:C fractions per organ (leaf/fnrt/sapw/store/repro/struct).
+    p.organ_param_id .= collect(1:num_organ_types)
+    p.nitr_stoich_p1[:, leaf_organ]   .= 0.040
+    p.nitr_stoich_p1[:, fnrt_organ]   .= 0.030
+    p.nitr_stoich_p1[:, sapw_organ]   .= 0.0047
+    p.nitr_stoich_p1[:, store_organ]  .= 0.040
+    p.nitr_stoich_p1[:, repro_organ]  .= 0.024
+    p.nitr_stoich_p1[:, struct_organ] .= 0.0047
+
     pd = param_derived_type()
     pd.branch_frac = fill(0.25, npft)
     pd.jmax25top = fill(85.0, npft, 1)
@@ -119,10 +132,58 @@ function _fates_spike_setup_pft!(npft::Int)
     ev.initd   = fill(0.2, npft)   # positive => initial recruit density
     ev.hgt_min = fill(1.25, npft)  # sapling height (m)
     ev.hlm_pft_map = [Float64(i == j) for i in 1:npft, j in 1:npft]  # identity HLM->FATES map
+
+    # ---- Radiation optical params (read by PatchNormanRadiation) -------------
+    # Leaf/stem reflectance + transmittance (npft, num_swb), orientation index xl,
+    # and self-occlusion clumping. Representative broadleaf values.
+    ev.rhol = fill(0.10, npft, num_swb)   # leaf reflectance
+    ev.rhos = fill(0.16, npft, num_swb)   # stem reflectance
+    ev.taul = fill(0.05, npft, num_swb)   # leaf transmittance
+    ev.taus = fill(0.001, npft, num_swb)  # stem transmittance
+    ev.xl   = fill(0.01, npft)            # leaf/stem orientation index
+    ev.clumping_index = fill(0.85, npft)  # canopy clumping
+
+    # ---- BTRAN params (read by btran_ed!) ------------------------------------
+    ev.smpso = fill(-66000.0, npft)   # soil potential at full stomatal open  [mm]
+    ev.smpsc = fill(-255000.0, npft)  # soil potential at full stomatal close [mm]
+
+    # ---- Photosynthesis params (read by FatesPlantRespPhotosynthDrive) -------
+    ev.c3psn              = fill(1.0, npft)        # C3 pathway
+    ev.bb_slope           = fill(9.0, npft)        # Ball-Berry slope
+    ev.medlyn_slope       = fill(4.1, npft)        # Medlyn slope
+    ev.stomatal_intercept = fill(10000.0, npft)    # C3 Ball-Berry intercept
+    ev.maintresp_leaf_ryan1991_baserate  = fill(2.525e-6, npft)
+    ev.maintresp_leaf_atkin2017_baserate = fill(1.756, npft)
+    ev.maintresp_leaf_vert_scaler_coeff1 = fill(1.5, npft)
+    ev.maintresp_leaf_vert_scaler_coeff2 = fill(3.0, npft)
+    ev.maintresp_reduction_curvature  = fill(0.01, npft)
+    ev.maintresp_reduction_intercept  = fill(1.0, npft)
+    ev.vcmaxha = fill(65330.0, npft);  ev.jmaxha = fill(43540.0, npft)
+    ev.vcmaxhd = fill(149250.0, npft); ev.jmaxhd = fill(152040.0, npft)
+    ev.vcmaxse = fill(485.0, npft);    ev.jmaxse = fill(495.0, npft)
+    ev.hydr_k_lwp = fill(0.0, npft)    # plant hydraulics off
+
     EDPftvarcon_inst[] = ev
 
     edp = ed_params_type()
     edp.regeneration_model = default_regeneration
+    # Norman (big-leaf) radiation solver — the simplest path that needs no
+    # two-stream `twostr.band` allocation. Required for the W3 radiation driver
+    # hooks (FatesNormalizedCanopyRadiation / FatesSunShadeFracs). Default param
+    # is -9 ("unset"); without this the SunShadeFracs two-stream else-branch is
+    # entered with an empty band vector.
+    edp.radiation_model = norman_solver
+    # Photosynthesis / maintenance-respiration model selectors + scalars read by
+    # FatesPlantRespPhotosynthDrive (Ball-Berry stomata, net-assim, no acclim).
+    edp.stomatal_model        = ballberry_model
+    edp.stomatal_assim_model  = net_assim_model
+    edp.photo_tempsens_model  = photosynth_acclim_model_none
+    edp.dayl_switch           = 0
+    edp.maintresp_leaf_model  = lmrmodel_ryan_1991
+    edp.maintresp_nonleaf_baserate = 2.525e-6
+    edp.q10_mr                = 1.5
+    edp.theta_cj_c3           = 0.999
+    edp.theta_cj_c4           = 0.999
     edp.ED_val_history_damage_bin_edges = [0.0, 20.0, 50.0, 80.0]
     edp.ED_val_history_sizeclass_bin_edges  = [0.0, 5.0, 10.0, 20.0, 50.0]
     edp.ED_val_history_coageclass_bin_edges = [0.0, 3.0, 6.0, 9.0, 12.0]
