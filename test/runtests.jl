@@ -219,6 +219,10 @@ using CLM
     # integrated flux/state balance check) + EDAccumulateFluxesMod
     # (daily per-cohort flux accumulation).
     include("test_fates_checksbalances_accfluxes.jl")
+    # FATES (Tier F) Batch 11 — FATES <-> host soil-BGC flux coupling
+    # (FatesSoilBGCFluxMod): litter/CWD fragmentation -> soil litter pools,
+    # nutrient-acquisition BC pack/unpack, root-exudate efflux.
+    include("test_fates_soilbgcflux.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

@@ -444,6 +444,17 @@ include("fates/PRTParamsFATESMod.jl")
 # added to CLMInstances or any dual-copied struct.
 include("fates/ChecksBalancesMod.jl")
 include("fates/EDAccumulateFluxesMod.jl")
+# FATES (Tier F) Batch 11 — the FATES <-> host soil-biogeochem flux coupling
+# (FatesSoilBGCFluxMod). Prepares the litter/CWD fragmentation + root-exudate
+# fluxes FATES passes to the host soil-BGC (partitioned into cellulose/lignin/
+# labile chemical fractions over decomposition layers), the per-competitor fine-
+# root carbon + decomposer microbial biomass nutrient-acquisition boundary
+# conditions, and the CH4-model boundary conditions; and unpacks the host's
+# returned per-competitor N (NH4/NO3) and P uptake fluxes back to each cohort's
+# daily demand/uptake. Operates on the merged site/patch/cohort types + the
+# per-element litter_type + bc_in_type/bc_out_type. Standalone — NOT added to
+# CLMInstances.
+include("fates/FatesSoilBGCFluxMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
