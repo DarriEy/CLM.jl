@@ -745,9 +745,16 @@ function fire_litter_fluxes(currentSite::ed_site_type, currentPatch::fates_patch
     # Only do this if there was a fire in this actual patch.
     currentPatch.fire == ifalse && return nothing
 
+    # If plant hydraulics are on, account for water leaving the plant-soil mass
+    # balance through the fire-killed trees.
     if hlm_use_planthydro[] == itrue
-        # TODO Batch NN: AccumulateMortalityWaterStorage not yet ported.
-        # (Inert by default; hlm_use_planthydro defaults to ifalse.)
+        currentCohort = currentPatch.shortest
+        while currentCohort !== nothing
+            num_dead_trees = currentCohort.fire_mort * currentCohort.n *
+                patch_site_areadis / currentPatch.area
+            AccumulateMortalityWaterStorage(currentSite, currentCohort, num_dead_trees)
+            currentCohort = currentCohort.taller
+        end
     end
 
     nlevsoil = currentSite.nlevsoil
@@ -938,8 +945,10 @@ function mortality_litter_fluxes(currentSite::ed_site_type, currentPatch::fates_
                 num_dead = 0.0
             end
 
+            # Update water balance by removing dead plant water, but only once
+            # (use the carbon element id).
             if element_id == carbon12_element && hlm_use_planthydro[] == itrue
-                # TODO Batch NN: AccumulateMortalityWaterStorage not yet ported.
+                AccumulateMortalityWaterStorage(currentSite, currentCohort, num_dead)
             end
 
             # Leaves (+ seeds) of dying trees -> leaf litter.
@@ -1021,8 +1030,15 @@ function landusechange_litter_fluxes(currentSite::ed_site_type, currentPatch::fa
     SF_val_CWD_frac = sf_params().SF_val_CWD_frac
     ev = EDPftvarcon_inst[]
 
+    # If plant hydraulics are on, account for water leaving the plant-soil mass
+    # balance through the cleared (dead) trees.
     if hlm_use_planthydro[] == itrue
-        # TODO Batch NN: AccumulateMortalityWaterStorage not yet ported.
+        currentCohort = currentPatch.shortest
+        while currentCohort !== nothing
+            num_dead_trees = currentCohort.n * patch_site_areadis / currentPatch.area
+            AccumulateMortalityWaterStorage(currentSite, currentCohort, num_dead_trees)
+            currentCohort = currentCohort.taller
+        end
     end
 
     remainder_area = currentPatch.area - patch_site_areadis
@@ -1183,7 +1199,7 @@ function split_patch(currentSite::ed_site_type, currentPatch::fates_patch_type,
     while currentCohort !== nothing
         nc = fates_cohort_type()
         if hlm_use_planthydro[] == itrue
-            # TODO Batch NN: InitHydrCohort not yet ported.
+            InitHydrCohort(currentSite, nc)
         end
         nc.prt = InitPRTObject!()
         InitPRTBoundaryConditions(nc)
@@ -1477,7 +1493,7 @@ function _spawn_move_cohorts!(currentSite::ed_site_type, currentPatch::fates_pat
     while currentCohort !== nothing
         nc = fates_cohort_type()
         if hlm_use_planthydro[] == itrue
-            # TODO Batch NN: InitHydrCohort not yet ported.
+            InitHydrCohort(currentSite, nc)
         end
         nc.prt = InitPRTObject!()
         InitPRTBoundaryConditions(nc)

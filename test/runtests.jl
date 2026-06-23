@@ -225,6 +225,8 @@ using CLM
     include("test_fates_soilbgcflux.jl")
     # FATES (Tier F) Batch 11 — plant-hydraulics solver (FatesPlantHydraulicsMod).
     include("test_fates_planthydraulics.jl")
+    # FATES plant-hydraulics Tier A — init/lifecycle routines.
+    include("test_fates_planthydraulics_tierA.jl")
     # FATES (Tier F) Batch 11 — SPITFIRE main fire driver (SFMainMod).
     include("test_fates_sfmain.jl")
     # FATES (Tier F) Batch 11 — two-stream radiation glue (FatesTwoStreamUtilsMod)

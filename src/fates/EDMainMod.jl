@@ -58,11 +58,12 @@
 #     UpdateSizeDepPlantHydProps!.
 #   * AREA/AREA_INV are the lowercase EDTypesMod consts `area` / `area_inv`.
 #
-# STUBS (gated, inert by default — hlm_use_planthydro defaults to ifalse):
-#   * UpdateSizeDepPlantHydStates! / UpdateSizeDepRhizHydProps! /
-#     AccumulateMortalityWaterStorage (hydraulics) are NOT yet ported in
-#     FatesPlantHydraulicsMod (only UpdateSizeDepPlantHydProps! exists). Guarded
-#     behind `hlm_use_planthydro[] == itrue`. See `# TODO Batch NN:` markers.
+# PLANT HYDRAULICS (gated, inert by default — hlm_use_planthydro defaults to ifalse):
+#   * UpdateSizeDepRhizHydProps / UpdateSizeDepPlantHydStates /
+#     AccumulateMortalityWaterStorage (Tier A, FatesPlantHydraulicsMod) are now wired,
+#     guarded behind `hlm_use_planthydro[] == itrue`.
+#
+# STUBS (gated, inert by default):
 #   * `fates_hist%update_history_nutrflux` (FatesHistoryInterfaceMod) is NOT ported;
 #     it only runs under the prt_cnp_flex_allom_hyp (CNP) mode, which is naturally
 #     inert in the default carbon-only path. Guarded + stubbed.
@@ -219,9 +220,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
         # If using FATES hydraulics, update the rhizosphere geometry based on the
         # new cohort-patch structure.
         if (hlm_use_planthydro[] == itrue) && do_growthrecruiteffects
-            # TODO Batch NN: UpdateSizeDepRhizHydProps not yet ported
-            # (FatesPlantHydraulicsMod). Inert by default (hlm_use_planthydro off).
-            # UpdateSizeDepRhizHydProps!(currentSite, bc_in)
+            UpdateSizeDepRhizHydProps(currentSite, bc_in)
             # !! UpdateSizeDepRhizHydStates(currentSite, bc_in) (RGK 12-2021)
         end
 
@@ -448,8 +447,7 @@ function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
             # Update tree hydraulic geometry.
             if (hlm_use_planthydro[] == itrue) && do_growthrecruiteffects
                 UpdateSizeDepPlantHydProps!(currentSite, currentCohort, bc_in)
-                # TODO Batch NN: UpdateSizeDepPlantHydStates not yet ported.
-                # UpdateSizeDepPlantHydStates!(currentSite, currentCohort)
+                UpdateSizeDepPlantHydStates(currentSite, currentCohort)
             end
 
             # Age-dependent mortality mode: update cohort age + age classes.
@@ -485,10 +483,8 @@ function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
         while currentPatch !== nothing
             currentCohort = currentPatch.shortest
             while currentCohort !== nothing
-                # TODO Batch NN: AccumulateMortalityWaterStorage (hydraulics
-                # variant) not yet ported. Inert by default.
-                # AccumulateMortalityWaterStorage(currentSite, currentCohort,
-                #     -1.0 * currentCohort.dndt * hlm_freq_day[])
+                AccumulateMortalityWaterStorage(currentSite, currentCohort,
+                    -1.0 * currentCohort.dndt * hlm_freq_day[])
                 currentCohort = currentCohort.taller
             end
             currentPatch = currentPatch.older

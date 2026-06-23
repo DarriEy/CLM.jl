@@ -140,11 +140,6 @@ function create_cohort(currentSite::ed_site_type, patchptr::fates_patch_type,
 
     # Plant hydraulics initialization for the new cohort.
     if hlm_use_planthydro[] == itrue
-        # TODO Batch NN: the cohort-hydraulics initialization chain
-        # (InitHydrCohort / UpdatePlantHydrLenVol / UpdatePlantKmax /
-        # SavePreviousCompartmentVolumes / ConstrainRecruitNumber) is only
-        # partially ported in FatesPlantHydraulicsMod; the ported pieces are wired
-        # below. Inert by default (hlm_use_planthydro defaults to ifalse).
         _create_cohort_inithydro!(currentSite, patchptr, newCohort, recruitstatus, bc_in)
     end
 
@@ -157,20 +152,31 @@ function create_cohort(currentSite::ed_site_type, patchptr::fates_patch_type,
     return nothing
 end
 
-# Plant-hydraulics new-cohort initialization. Calls the ported helpers where they
-# exist; the remainder are TODOs. Only entered when hlm_use_planthydro==itrue.
+# Plant-hydraulics new-cohort initialization (mirrors the Fortran create_cohort
+# hydro block). Only entered when hlm_use_planthydro==itrue.
 function _create_cohort_inithydro!(currentSite::ed_site_type,
                                    patchptr::fates_patch_type,
                                    newCohort::fates_cohort_type,
                                    recruitstatus::Integer, bc_in)
-    # The following helpers are ported (note the `!` names):
+    # Allocate the cohort hydro object + per-layer arrays.
+    InitHydrCohort(currentSite, newCohort)
+    newCohort.co_hydr.errh2o = 0.0
+
+    # Node heights, then volumes/lengths/kmax (UpdateSizeDepPlantHydProps! bundles
+    # SavePreviousCompartmentVolumes + UpdatePlantHydrNodes + UpdatePlantHydrLenVol
+    # + UpdatePlantKmax). Re-snapshot the just-computed volumes as the "init".
     UpdatePlantHydrNodes!(newCohort, newCohort.pft, newCohort.height, currentSite.si_hydr)
     UpdateSizeDepPlantHydProps!(currentSite, newCohort, bc_in)
+    SavePreviousCompartmentVolumes!(newCohort.co_hydr)
+
+    # Starter suctions/water contents from the soil state.
     InitPlantHydStates!(currentSite, newCohort)
-    # TODO Batch NN: InitHydrCohort / UpdatePlantHydrLenVol / UpdatePlantKmax /
-    # SavePreviousCompartmentVolumes / ConstrainRecruitNumber not yet ported.
-    if newCohort.co_hydr !== nothing && recruitstatus == 1
+
+    if recruitstatus == 1
         newCohort.co_hydr.is_newly_recruited = true
+        # Constrain the recruit number density to the water the rhizosphere can supply.
+        rmean_temp = GetMean(patchptr.tveg24)
+        ConstrainRecruitNumber(currentSite, newCohort, patchptr, bc_in, rmean_temp)
     end
     return nothing
 end
@@ -308,8 +314,7 @@ function terminate_cohort(currentSite::ed_site_type, currentPatch::fates_patch_t
     levcan = currentCohort.canopy_layer
 
     if hlm_use_planthydro[] == itrue
-        # TODO Batch NN: AccumulateMortalityWaterStorage not yet ported.
-        nothing
+        AccumulateMortalityWaterStorage(currentSite, currentCohort, currentCohort.n)
     end
 
     sc   = currentCohort.size_class
@@ -682,6 +687,11 @@ function _fuse_pair!(currentSite::ed_site_type, currentPatch::fates_patch_type,
 
     currentCohort.size_class, currentCohort.size_by_pft_class =
         sizetype_class_index(currentCohort.dbh, currentCohort.pft)
+
+    if hlm_use_planthydro[] == itrue
+        # Conserve the fused cohort's plant water and recompute psi/ftc/btran.
+        FuseCohortHydraulics(currentSite, currentCohort, nextc, bc_in, newn)
+    end
 
     # recent canopy history
     currentCohort.canopy_layer_yesterday =
@@ -1127,8 +1137,7 @@ function DamageRecovery(csite::ed_site_type, cpatch::fates_patch_type,
     # Build the recovered cohort as a copy of the donor.
     rcohort = fates_cohort_type()
     if hlm_use_planthydro[] == itrue
-        # TODO Batch NN: InitHydrCohort on rcohort not yet ported.
-        nothing
+        InitHydrCohort(csite, rcohort)
     end
     rcohort.prt = InitPRTObject!()
     InitPRTBoundaryConditions(rcohort)
