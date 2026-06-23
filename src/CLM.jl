@@ -455,6 +455,14 @@ include("fates/EDAccumulateFluxesMod.jl")
 # per-element litter_type + bc_in_type/bc_out_type. Standalone — NOT added to
 # CLMInstances.
 include("fates/FatesSoilBGCFluxMod.jl")
+# FATES plant-hydraulics solver (FatesPlantHydraulicsMod). Plant water transport
+# (Richards-style implicit 1D Taylor solver), stomatal water-stress (btran), and
+# the soil->root->stem->leaf flow network + rhizosphere shells + water mass
+# balance. Default solver path (hydr_solver_1DTaylor) ported fully; the two
+# non-default 2D solvers (Newton/Picard) are stubbed. Depends on the FATES type
+# system + WRF/WKF functions + allometry + PRT + params (all included above).
+# Standalone — NOT added to CLMInstances.
+include("fates/FatesPlantHydraulicsMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

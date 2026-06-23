@@ -223,6 +223,8 @@ using CLM
     # (FatesSoilBGCFluxMod): litter/CWD fragmentation -> soil litter pools,
     # nutrient-acquisition BC pack/unpack, root-exudate efflux.
     include("test_fates_soilbgcflux.jl")
+    # FATES (Tier F) Batch 11 — plant-hydraulics solver (FatesPlantHydraulicsMod).
+    include("test_fates_planthydraulics.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
