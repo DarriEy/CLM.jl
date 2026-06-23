@@ -262,6 +262,10 @@ using CLM
     include("test_fates_plantrespphotosynth.jl")
     include("test_fates_inventoryinit.jl")
     include("test_fates_edmain.jl")
+    # FATES (Tier F) Batch 17 — canopy radiation driver (FatesRadiationDriveMod)
+    # + FATES cold-start state init (EDInitMod) → init checkpoint.
+    include("test_fates_radiationdrive.jl")
+    include("test_fates_edinit.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

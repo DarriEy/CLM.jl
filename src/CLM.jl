@@ -556,6 +556,19 @@ include("fates/FatesNormanRadMod.jl")
 include("fates/FatesPlantRespPhotosynthMod.jl")
 include("fates/FatesInventoryInitMod.jl")
 include("fates/EDMainMod.jl")
+# FATES (Tier F) Batch 17 — the init checkpoint. (1) FatesRadiationDriveMod: the
+# host-facing canopy radiation driver — FatesNormalizedCanopyRadiation (selects
+# Norman vs two-stream, calls the per-patch solver, packs albd/albi/fabd/fabi/
+# ftdd/ftid/ftii into bc_out) + FatesSunShadeFracs (sunlit/shaded LAI + absorbed
+# PAR for the photosynthesis driver); reuses PatchNormanRadiation + the two-stream
+# solver. (2) EDInitMod: FATES default cold-start state init — init_site_vars!/
+# zero_site!/set_site_properties! + init_patches!/init_cohorts! (near-bareground
+# demographic seeding, the counterpart to FatesInventoryInitMod). Reuse the Batch
+# 12–16 constructors/solvers. Plant-hydraulics + LUH paths stubbed behind
+# hlm_use_planthydro/hlm_use_luh (off by default). Standalone — NOT added to
+# CLMInstances.
+include("fates/FatesRadiationDriveMod.jl")
+include("fates/EDInitMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
