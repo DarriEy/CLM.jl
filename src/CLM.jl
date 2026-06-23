@@ -384,6 +384,15 @@ include("fates/PRTAllometricCarbonMod.jl")
 # Euler/RKF45 integrators. Standalone — NOT added to CLMInstances.
 include("fates/PRTAllometricCNPMod.jl")
 
+# FATES (Tier F) Batch 8 — the COHORT type (FatesCohortMod). The fundamental
+# FATES demographic unit: integrates the PRT allocation state, the per-cohort
+# plant-hydraulics state, and all per-cohort vegetation/flux/mortality/phenology
+# variables, plus the taller/shorter linked-list pointers. Depends on the PRT
+# generic + concrete carbon/CNP hypotheses, hydraulics memory, allometry,
+# size/age indices, the FATES PFT/derived parameter tables, and the interface
+# control flags above. Standalone — NOT added to CLMInstances.
+include("fates/FatesCohortMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
