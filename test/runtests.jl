@@ -212,6 +212,24 @@ using CLM
     include("test_fates_patch.jl")
     # FATES (Tier F) Batch 10 — the SITE type (EDTypesMod, ed_site_type).
     include("test_fates_edtypes.jl")
+    # FATES (Tier F) Batch 11 — PARTEH parameter init/registration (PRTParamsFATESMod).
+    include("test_fates_prtparamsfates.jl")
+
+    # FATES (Tier F) Batch 11 — ChecksBalancesMod (site mass-stock summation +
+    # integrated flux/state balance check) + EDAccumulateFluxesMod
+    # (daily per-cohort flux accumulation).
+    include("test_fates_checksbalances_accfluxes.jl")
+    # FATES (Tier F) Batch 11 — FATES <-> host soil-BGC flux coupling
+    # (FatesSoilBGCFluxMod): litter/CWD fragmentation -> soil litter pools,
+    # nutrient-acquisition BC pack/unpack, root-exudate efflux.
+    include("test_fates_soilbgcflux.jl")
+    # FATES (Tier F) Batch 11 — plant-hydraulics solver (FatesPlantHydraulicsMod).
+    include("test_fates_planthydraulics.jl")
+    # FATES (Tier F) Batch 11 — SPITFIRE main fire driver (SFMainMod).
+    include("test_fates_sfmain.jl")
+    # FATES (Tier F) Batch 11 — two-stream radiation glue (FatesTwoStreamUtilsMod)
+    # + land-use-change transitions (FatesLandUseChangeMod).
+    include("test_fates_twostreamutils_landuse.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

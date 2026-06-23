@@ -418,6 +418,76 @@ include("fates/FatesPatchMod.jl")
 # constants. Standalone — NOT added to CLMInstances.
 include("fates/EDTypesMod.jl")
 
+# FATES (Tier F) Batch 11 — the PARTEH parameter initialization / registration
+# layer (PRTParamsFATESMod, Fortran module PRTInitParamsFatesMod). Registers and
+# receives all the PARTEH / PFT allocation / stoichiometry / turnover parameters
+# into the merged `prt_params` via the FATES parameter reader, plus the PARTEH
+# consistency checks (PRTCheckParams) + derived-parameter setup (PRTDerivedParams)
+# + the new-recruit total stoichiometry helper. Depends on the merged param
+# storage (PRTParametersMod), the parameter-reader API (FatesParametersInterface),
+# the organ/element index consts + hypothesis consts + StorageNutrientTarget
+# (PRTGenericMod), the allometry chain (FatesAllometryMod), EDPftvarcon_inst, and
+# init_recruit_trim (EDTypesMod). Standalone — nothing added to CLMInstances.
+include("fates/PRTParamsFATESMod.jl")
+# FATES (Tier F) Batch 11 — two standalone diagnostic / accumulation modules
+# that build on the complete merged FATES type system above.
+#   * ChecksBalancesMod — site-level carbon/mass-balance checking + diagnostics:
+#     SiteMassStock/PatchMassStock sum the biomass+seed+litter stocks per element,
+#     CheckLitterPools sanity-checks for negative litter, and
+#     CheckIntegratedMassPools accumulates the time-integrated net fluxes in/out
+#     of vegetation + litter and compares against the instantaneous state.
+#   * EDAccumulateFluxesMod — AccumulateFluxes_ED accumulates/averages the
+#     per-cohort photosynthesis/respiration fluxes (npp/gpp/resp/sym_nfix/c13/
+#     year_net_uptake) over the FATES daily timestep.
+# Both depend on ed_site_type/patch/cohort + the EDTypes mass-balance helper
+# types + PRTGenericMod element/organ consts + FatesLitter. Standalone — NOT
+# added to CLMInstances or any dual-copied struct.
+include("fates/ChecksBalancesMod.jl")
+include("fates/EDAccumulateFluxesMod.jl")
+# FATES (Tier F) Batch 11 — the FATES <-> host soil-biogeochem flux coupling
+# (FatesSoilBGCFluxMod). Prepares the litter/CWD fragmentation + root-exudate
+# fluxes FATES passes to the host soil-BGC (partitioned into cellulose/lignin/
+# labile chemical fractions over decomposition layers), the per-competitor fine-
+# root carbon + decomposer microbial biomass nutrient-acquisition boundary
+# conditions, and the CH4-model boundary conditions; and unpacks the host's
+# returned per-competitor N (NH4/NO3) and P uptake fluxes back to each cohort's
+# daily demand/uptake. Operates on the merged site/patch/cohort types + the
+# per-element litter_type + bc_in_type/bc_out_type. Standalone — NOT added to
+# CLMInstances.
+include("fates/FatesSoilBGCFluxMod.jl")
+# FATES plant-hydraulics solver (FatesPlantHydraulicsMod). Plant water transport
+# (Richards-style implicit 1D Taylor solver), stomatal water-stress (btran), and
+# the soil->root->stem->leaf flow network + rhizosphere shells + water mass
+# balance. Default solver path (hydr_solver_1DTaylor) ported fully; the two
+# non-default 2D solvers (Newton/Picard) are stubbed. Depends on the FATES type
+# system + WRF/WKF functions + allometry + PRT + params (all included above).
+# Standalone — NOT added to CLMInstances.
+include("fates/FatesPlantHydraulicsMod.jl")
+# FATES (Tier F) Batch 11 — the SPITFIRE main fire driver (SFMainMod). The daily
+# fire model: per-patch fuel characterization -> fire weather / danger index ->
+# rate of spread (Rothermel 1972 / Thonicke et al. 2010) -> ground fuel
+# consumption -> fire intensity & area burnt -> fire effects (crown scorch /
+# damage, cambial damage / kill, post-fire tree mortality). Operates on the
+# merged ed_site / patch / cohort + fuel_type + fire_weather objects. Standalone
+# — NOT added to CLMInstances or any dual-copied struct. Must come AFTER
+# EDTypesMod (site type) + FatesFuelMod + SFParamsMod + EDPftvarcon + the
+# allometry engine (CrownDepth), all included above.
+include("fates/SFMainMod.jl")
+# FATES (Tier F) Batch 11 — two independent modules built on the complete FATES
+# type system. (1) FatesTwoStreamUtilsMod: the glue between the FATES canopy
+# (patch/cohort canopy-layer x PFT structure) and the merged TwoStreamMLPEMod
+# solver — builds the scattering-element inputs from the patch canopy profiles,
+# calls the solver, and maps absorbed radiation back onto cohorts/leaf-layers
+# (FatesConstructRadElements/FatesGetCohortAbsRad/FatesPatchFSun/
+# CheckPatchRadiationBalance/TransferRadParams). (2) FatesLandUseChangeMod: FATES
+# land-use-change transitions — aggregates the LUH2 transition/state vectors to
+# the 5 FATES land use categories, builds the [m2/m2/day] transition matrix +
+# clearing-rules matrix, and the spin-up→land-use initialization transitions.
+# Both depend on the patch/cohort/site types + two-stream solver / interface
+# constants. Standalone — NOT added to CLMInstances.
+include("fates/FatesTwoStreamUtilsMod.jl")
+include("fates/FatesLandUseChangeMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
