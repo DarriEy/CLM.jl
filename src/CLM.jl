@@ -418,6 +418,18 @@ include("fates/FatesPatchMod.jl")
 # constants. Standalone — NOT added to CLMInstances.
 include("fates/EDTypesMod.jl")
 
+# FATES (Tier F) Batch 11 — the PARTEH parameter initialization / registration
+# layer (PRTParamsFATESMod, Fortran module PRTInitParamsFatesMod). Registers and
+# receives all the PARTEH / PFT allocation / stoichiometry / turnover parameters
+# into the merged `prt_params` via the FATES parameter reader, plus the PARTEH
+# consistency checks (PRTCheckParams) + derived-parameter setup (PRTDerivedParams)
+# + the new-recruit total stoichiometry helper. Depends on the merged param
+# storage (PRTParametersMod), the parameter-reader API (FatesParametersInterface),
+# the organ/element index consts + hypothesis consts + StorageNutrientTarget
+# (PRTGenericMod), the allometry chain (FatesAllometryMod), EDPftvarcon_inst, and
+# init_recruit_trim (EDTypesMod). Standalone — nothing added to CLMInstances.
+include("fates/PRTParamsFATESMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
