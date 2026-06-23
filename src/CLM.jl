@@ -403,6 +403,21 @@ include("fates/FatesCohortMod.jl")
 # constants. Standalone — NOT added to CLMInstances.
 include("fates/FatesPatchMod.jl")
 
+# FATES (Tier F) Batch 10 — the SITE type (EDTypesMod), the TOP of the FATES
+# type system and the "type-system-complete" checkpoint. ed_site_type is the
+# FATES site/column structure that owns the age-ordered patch linked list
+# (oldest_patch/youngest_patch), the site plant-hydraulics object, the
+# fire-weather object, the per-element mass-balance + integrated-flux-balance
+# arrays, the flux diagnostics, the full phenology state, soil layering, and the
+# termination/recruitment/demotion/promotion/disturbance accumulators on
+# size x pft history arrays. Also defines the site-scoped helper types
+# (ed_resources_management_type, elem_diag_type, site_ifluxbal_type,
+# site_fluxdiags_type, site_massbal_type) + the module-level FATES constants.
+# Depends on the patch type (Batch 9) + cohort type + ed_site_hydr_type +
+# fire_weather + litter/running-mean/PRT-generic types + EDParams/Interface
+# constants. Standalone — NOT added to CLMInstances.
+include("fates/EDTypesMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================
