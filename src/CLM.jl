@@ -487,6 +487,20 @@ include("fates/SFMainMod.jl")
 # constants. Standalone — NOT added to CLMInstances.
 include("fates/FatesTwoStreamUtilsMod.jl")
 include("fates/FatesLandUseChangeMod.jl")
+# FATES (Tier F) Batch 12 — three demographic/biogeophys modules on the complete
+# type system. (1) EDBtranMod: the FATES water-stress factor btran + root-soil
+# water uptake distribution (get_active_suction_layers / btran_ed). (2)
+# EDCohortDynamicsMod: the demographic cohort engine — create/insert/sort/count/
+# fuse/terminate of the self-referential cohort linked list, EvaluateAndCorrectDBH
+# + DamageRecovery, routing terminated-cohort biomass to litter. (3)
+# EDLoggingMortalityMod: logging/harvest disturbance mortality — direct/collateral/
+# mechanical mortality fractions per PFT/size/scenario, killed-tree biomass → CWD/
+# litter + exported wood product, harvest-rate/harvest-debt logic. All depend on
+# the cohort/patch/site types, litter pools, allometry, PRT, EDParams/EDPftvarcon,
+# and (logging) FatesLandUseChangeMod above. Standalone — NOT added to CLMInstances.
+include("fates/EDBtranMod.jl")
+include("fates/EDCohortDynamicsMod.jl")
+include("fates/EDLoggingMortalityMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

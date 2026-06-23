@@ -231,6 +231,15 @@ using CLM
     # + land-use-change transitions (FatesLandUseChangeMod).
     include("test_fates_twostreamutils_landuse.jl")
 
+    # FATES (Tier F) Batch 12 — water-stress btran + root uptake (EDBtranMod).
+    include("test_fates_edbtran.jl")
+    # FATES (Tier F) Batch 12 — cohort demographic engine (EDCohortDynamicsMod):
+    # create/insert/sort/count/fuse/terminate of the cohort linked list.
+    include("test_fates_edcohortdynamics.jl")
+    # FATES (Tier F) Batch 12 — logging/harvest disturbance mortality
+    # (EDLoggingMortalityMod): mortality fractions + killed-biomass litter routing.
+    include("test_fates_edloggingmortality.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),
