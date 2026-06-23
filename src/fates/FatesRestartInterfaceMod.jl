@@ -30,11 +30,14 @@
 # unpack routines port the DEMOGRAPHIC SKELETON + load-bearing fields exactly
 # (patch area/age/land-use/nocomp/livegrass + cohort n/dbh/pft/height/coage/
 # canopy_layer/crowndamage/status/trim/l2fr/... + the PatchesPerSite /
-# CohortsPerPatch counts and their consistency checks). The dozens of
-# diagnostic / mortality-flux / PRT / hydraulics field copies that DON'T affect
-# the demographic round-trip are deferred (`# TODO Batch 18-followup:`) — this
-# module is not yet wired into the live driver, so the standalone registry + the
-# pack/unpack demographic round-trip is the bar.
+# CohortsPerPatch counts and their consistency checks). Batch-18-followup R1/R2/R4/R5
+# now also pack/unpack the cohort diagnostic+mortality scalars (R1), patch
+# fuel/scorch + ground-albedo + site hydraulics scalars (R2), the patch litter
+# blocks (R4), and the site demographic/mortality/damage/flux-diagnostic arrays
+# (R5), and update_3dpatch_radiation! re-derives the 3D albedo BC (R3). Still
+# deferred (`# TODO Batch 18-followup`): R6 running means, R7 cohort PRT pools,
+# R8 cohort hydro — those need running-mean accessors / cohort-object init not
+# yet wired standalone.
 #
 # Deps: FatesRestartVariableType.jl (fates_restart_variable_type, Init!/Flush!),
 #       FatesIODimensionsMod (fates_io_dimension_type, fates_bounds_type,
@@ -647,6 +650,504 @@ end
 @inline _getr(this, irname, idx) = this.rvars[this.ir[irname]].r81d[idx]
 @inline _geti(this, irname, idx) = this.rvars[this.ir[irname]].int1d[idx]
 
+# Vector-valued / per-element accessors: address rvar `this.ir[irname] + off`
+# (the RegisterCohortVector / per-element handle base + offset; Fortran `ir_*+el`).
+@inline _setr_off!(this, irname, off, idx, val) =
+    (this.rvars[this.ir[irname] + off].r81d[idx] = Float64(val); nothing)
+@inline _getr_off(this, irname, off, idx) = this.rvars[this.ir[irname] + off].r81d[idx]
+
+# =====================================================================================
+# R5: site demographic / mortality / damage / flux-diag array pack & unpack.
+#
+# All of these site-level arrays are stored in the COHORT-vector address space,
+# starting at the site's first-cohort base address (`io_idx_co_1st_init`, captured
+# BEFORE the per-patch walk advances it), each with its OWN independent cursor.
+# The pure-scalar site fields are stored at `io_idx_si`. Mirrors the Fortran
+# `set_restart_vectors` / `get_restart_vectors` site loop exactly (the running-mean
+# `disturbance_rates` block is a Batch-18-followup-R6 item — left out here).
+# =====================================================================================
+
+"""
+    _pack_site_diagnostics!(this, site, io_idx_si, io_idx_base)
+
+Pack the R5 site-level demographic / mortality / damage / flux-diagnostic arrays
+for one site. `io_idx_base` is the site's first-cohort base address.
+"""
+function _pack_site_diagnostics!(this::fates_restart_interface_type, site,
+                                 io_idx_si::Integer, io_idx_base::Integer)
+    nsc  = nlevsclass[]
+    npft = numpft[]
+
+    # --- recruitment rate / use_this_pft (per pft, at base offset) ---
+    for i_pft in 1:npft
+        _setr!(this, :ir_recrate_sift, io_idx_base + i_pft - 1, site.recruitment_rate[i_pft])
+        _seti!(this, :ir_use_this_pft_sift, io_idx_base + i_pft - 1, site.use_this_pft[i_pft])
+    end
+
+    # --- area_PFT (per pft x land-use, packed pft-major) ---
+    for i_pft in 1:npft
+        for i_landuse in 1:n_landuse_cats
+            i_pflu = i_landuse + (i_pft - 1) * n_landuse_cats
+            _setr!(this, :ir_area_pft_sift, io_idx_base + i_pflu - 1, site.area_PFT[i_pft, i_landuse])
+        end
+    end
+
+    _setr!(this, :ir_min_allowed_landuse_fraction_si, io_idx_si, site.min_allowed_landuse_fraction)
+    io_idx_si_lu = io_idx_base
+    for i_landuse in 1:n_landuse_cats
+        _seti!(this, :ir_landuse_vector_gt_min_si, io_idx_si_lu,
+               site.landuse_vector_gt_min[i_landuse] ? itrue : ifalse)
+        io_idx_si_lu += 1
+    end
+    _setr!(this, :ir_area_bareground_si, io_idx_si, site.area_bareground)
+
+    # --- size-class x pft mortality / flux block ---
+    io_idx_si_scpf = io_idx_base
+    io_idx_si_scpf_term = io_idx_base
+    for i_scls in 1:nsc
+        for i_pft in 1:npft
+            _setr!(this, :ir_fmortrate_cano_siscpf, io_idx_si_scpf, site.fmort_rate_canopy[i_scls, i_pft])
+            _setr!(this, :ir_fmortrate_usto_siscpf, io_idx_si_scpf, site.fmort_rate_ustory[i_scls, i_pft])
+            _setr!(this, :ir_imortrate_siscpf, io_idx_si_scpf, site.imort_rate[i_scls, i_pft])
+            _setr!(this, :ir_fmortrate_crown_siscpf, io_idx_si_scpf, site.fmort_rate_crown[i_scls, i_pft])
+            _setr!(this, :ir_fmortrate_cambi_siscpf, io_idx_si_scpf, site.fmort_rate_cambial[i_scls, i_pft])
+            _setr!(this, :ir_growflx_fusion_siscpf, io_idx_si_scpf, site.growthflux_fusion[i_scls, i_pft])
+            _setr!(this, :ir_abg_term_flux_siscpf, io_idx_si_scpf, site.term_abg_flux[i_scls, i_pft])
+            _setr!(this, :ir_abg_imort_flux_siscpf, io_idx_si_scpf, site.imort_abg_flux[i_scls, i_pft])
+            _setr!(this, :ir_abg_fmort_flux_siscpf, io_idx_si_scpf, site.fmort_abg_flux[i_scls, i_pft])
+            io_idx_si_scpf += 1
+            for i_term in 1:n_term_mort_types
+                _setr!(this, :ir_termnindiv_cano_siscpf, io_idx_si_scpf_term, site.term_nindivs_canopy[i_term, i_scls, i_pft])
+                _setr!(this, :ir_termnindiv_usto_siscpf, io_idx_si_scpf_term, site.term_nindivs_ustory[i_term, i_scls, i_pft])
+                io_idx_si_scpf_term += 1
+            end
+        end
+    end
+
+    # --- per-pft carbon flux + drought phenology block ---
+    io_idx_si_pft = io_idx_base
+    io_idx_si_pft_term = io_idx_base
+    for i_pft in 1:npft
+        for i_term in 1:n_term_mort_types
+            _setr!(this, :ir_termcflux_cano_sipft, io_idx_si_pft_term, site.term_carbonflux_canopy[i_term, i_pft])
+            _setr!(this, :ir_termcflux_usto_sipft, io_idx_si_pft_term, site.term_carbonflux_ustory[i_term, i_pft])
+            io_idx_si_pft_term += 1
+        end
+        _setr!(this, :ir_fmortcflux_cano_sipft, io_idx_si_pft, site.fmort_carbonflux_canopy[i_pft])
+        _setr!(this, :ir_fmortcflux_usto_sipft, io_idx_si_pft, site.fmort_carbonflux_ustory[i_pft])
+        _setr!(this, :ir_imortcflux_sipft, io_idx_si_pft, site.imort_carbonflux[i_pft])
+        _seti!(this, :ir_dd_status_sift, io_idx_si_pft, site.dstatus[i_pft])
+        _seti!(this, :ir_dleafondate_sift, io_idx_si_pft, site.dleafondate[i_pft])
+        _seti!(this, :ir_dleafoffdate_sift, io_idx_si_pft, site.dleafoffdate[i_pft])
+        _seti!(this, :ir_dndaysleafon_sift, io_idx_si_pft, site.dndaysleafon[i_pft])
+        _seti!(this, :ir_dndaysleafoff_sift, io_idx_si_pft, site.dndaysleafoff[i_pft])
+        _setr!(this, :ir_elong_factor_sift, io_idx_si_pft, site.elong_factor[i_pft])
+        _setr!(this, :ir_seed_in_sift, io_idx_si_pft, site.seed_in[i_pft])
+        _setr!(this, :ir_seed_out_sift, io_idx_si_pft, site.seed_out[i_pft])
+        io_idx_si_pft += 1
+    end
+
+    # --- flux diagnostics + mass balance (per element), non-SP ---
+    if hlm_use_sp[] == ifalse
+        for el in 1:num_elements[]
+            io_idx_si_cwd = io_idx_base
+            io_idx_si_pft2 = io_idx_base
+            elem = site.flux_diags.elem[el]
+            mbal = site.mass_balance[el]
+            ifb  = site.iflux_balance[el]
+            for i_cwd in 1:ncwd
+                _setr_off!(this, :ir_cwdagin_flxdg, el - 1, io_idx_si_cwd, elem.cwd_ag_input[i_cwd])
+                _setr_off!(this, :ir_cwdbgin_flxdg, el - 1, io_idx_si_cwd, elem.cwd_bg_input[i_cwd])
+                io_idx_si_cwd += 1
+            end
+            for i_pft in 1:npft
+                _setr_off!(this, :ir_leaflittin_flxdg, el - 1, io_idx_si_pft2, elem.surf_fine_litter_input[i_pft])
+                _setr_off!(this, :ir_rootlittin_flxdg, el - 1, io_idx_si_pft2, elem.root_litter_input[i_pft])
+                _setr_off!(this, :ir_woodprod_harvest_mbal, el - 1, io_idx_si_pft2, mbal.wood_product_harvest[i_pft])
+                _setr_off!(this, :ir_woodprod_landusechange_mbal, el - 1, io_idx_si_pft2, mbal.wood_product_landusechange[i_pft])
+                io_idx_si_pft2 += 1
+            end
+            _setr_off!(this, :ir_oldstock_mbal, el - 1, io_idx_si, mbal.old_stock)
+            _setr_off!(this, :ir_errfates_mbal, el - 1, io_idx_si, mbal.err_fates)
+            _setr_off!(this, :ir_liveveg_intflux_el, el - 1, io_idx_si, ifb.iflux_liveveg)
+            _setr_off!(this, :ir_liveveg_err_el, el - 1, io_idx_si, elem.err_liveveg)
+            _setr_off!(this, :ir_litter_intflux_el, el - 1, io_idx_si, ifb.iflux_litter)
+            _setr_off!(this, :ir_litter_err_el, el - 1, io_idx_si, elem.err_litter)
+        end
+    end
+
+    _setr!(this, :ir_spread_si, io_idx_si, site.spread)
+
+    # --- demotion / promotion rate (per size class) ---
+    io_idx_si_sc = io_idx_base
+    for i_scls in 1:nsc
+        _setr!(this, :ir_demorate_sisc, io_idx_si_sc, site.demotion_rate[i_scls])
+        _setr!(this, :ir_promrate_sisc, io_idx_si_sc, site.promotion_rate[i_scls])
+        io_idx_si_sc += 1
+    end
+
+    _setr!(this, :ir_termcarea_cano_si, io_idx_si, site.term_crownarea_canopy)
+    _setr!(this, :ir_termcarea_usto_si, io_idx_si, site.term_crownarea_ustory)
+    _setr!(this, :ir_emanpp_si, io_idx_si, site.ema_npp)
+
+    # --- damage cross-tab (gated) ---
+    if hlm_use_tree_damage[] == itrue
+        io_idx_si_cdpf = io_idx_base
+        io_idx_si_cdsc = io_idx_base
+        for i_scls in 1:nsc
+            for i_cdam in 1:nlevdamage[]
+                for i_pft in 1:npft
+                    _setr!(this, :ir_imortrate_sicdpf, io_idx_si_cdpf, site.imort_rate_damage[i_cdam, i_scls, i_pft])
+                    _setr!(this, :ir_termnindiv_cano_sicdpf, io_idx_si_cdpf, site.term_nindivs_canopy_damage[i_cdam, i_scls, i_pft])
+                    _setr!(this, :ir_termnindiv_usto_sicdpf, io_idx_si_cdpf, site.term_nindivs_ustory_damage[i_cdam, i_scls, i_pft])
+                    _setr!(this, :ir_imortcflux_sicdsc, io_idx_si_cdsc, site.imort_cflux_damage[i_cdam, i_scls])
+                    _setr!(this, :ir_termcflux_cano_sicdsc, io_idx_si_cdsc, site.term_cflux_canopy_damage[i_cdam, i_scls])
+                    _setr!(this, :ir_termcflux_usto_sicdsc, io_idx_si_cdsc, site.term_cflux_ustory_damage[i_cdam, i_scls])
+                    _setr!(this, :ir_fmortrate_cano_sicdpf, io_idx_si_cdpf, site.fmort_rate_canopy_damage[i_cdam, i_scls, i_pft])
+                    _setr!(this, :ir_fmortrate_usto_sicdpf, io_idx_si_cdpf, site.fmort_rate_ustory_damage[i_cdam, i_scls, i_pft])
+                    _setr!(this, :ir_fmortcflux_cano_sicdsc, io_idx_si_cdsc, site.fmort_cflux_canopy_damage[i_cdam, i_scls])
+                    _setr!(this, :ir_fmortcflux_usto_sicdsc, io_idx_si_cdsc, site.fmort_cflux_ustory_damage[i_cdam, i_scls])
+                    io_idx_si_cdsc += 1
+                    io_idx_si_cdpf += 1
+                end
+            end
+        end
+        _setr!(this, :ir_crownarea_cano_si, io_idx_si, site.crownarea_canopy_damage)
+        _setr!(this, :ir_crownarea_usto_si, io_idx_si, site.crownarea_ustory_damage)
+    end
+
+    _setr!(this, :ir_democflux_si, io_idx_si, site.demotion_carbonflux)
+    _setr!(this, :ir_promcflux_si, io_idx_si, site.promotion_carbonflux)
+    _setr!(this, :ir_imortcarea_si, io_idx_si, site.imort_crownarea)
+    _setr!(this, :ir_fmortcarea_cano_si, io_idx_si, site.fmort_crownarea_canopy)
+    _setr!(this, :ir_fmortcarea_usto_si, io_idx_si, site.fmort_crownarea_ustory)
+
+    # --- recruit l2fr (per pft x canopy layer) + soil-water / veg-temp memory ---
+    io_idx_si_pfcl = io_idx_base
+    for i in 1:nclmax
+        for i_pft in 1:npft
+            _setr!(this, :ir_recl2fr_sipfcl, io_idx_si_pfcl, site.rec_l2fr[i_pft, i])
+            io_idx_si_pfcl += 1
+        end
+    end
+    io_idx_si_wmem = io_idx_base
+    for i in 1:numWaterMem
+        for i_pft in 1:npft
+            _setr!(this, :ir_liqvolmem_siwmft, io_idx_si_wmem, site.liqvol_memory[i, i_pft])
+            _setr!(this, :ir_smpmem_siwmft, io_idx_si_wmem, site.smp_memory[i, i_pft])
+            io_idx_si_wmem += 1
+        end
+    end
+    io_idx_si_vtmem = io_idx_base
+    for i in 1:num_vegtemp_mem
+        _setr!(this, :ir_vegtempmem_sitm, io_idx_si_vtmem, site.vegtemp_memory[i])
+        io_idx_si_vtmem += 1
+    end
+
+    # --- site-level hydraulics scalars (R2d, gated) ---
+    if hlm_use_planthydro[] == itrue && site.si_hydr !== nothing
+        sh = site.si_hydr
+        _setr!(this, :ir_hydro_recruit_si, io_idx_si, sh.h2oveg_recruit)
+        _setr!(this, :ir_hydro_dead_si, io_idx_si, sh.h2oveg_dead)
+        _setr!(this, :ir_hydro_growturn_err_si, io_idx_si, sh.h2oveg_growturn_err)
+        _setr!(this, :ir_hydro_hydro_err_si, io_idx_si, sh.h2oveg_hydro_err)
+        io_idx_si_lyr_shell = io_idx_base
+        for i in 1:sh.nlevrhiz
+            for k in 1:nshell
+                _setr!(this, :ir_hydro_liqvol_shell_si, io_idx_si_lyr_shell, sh.h2osoi_liqvol_shell[i, k])
+                io_idx_si_lyr_shell += 1
+            end
+        end
+    end
+    return nothing
+end
+
+"""
+    _unpack_site_diagnostics!(this, site, io_idx_si, io_idx_base)
+
+Read back the R5 site-level arrays (symmetric to [`_pack_site_diagnostics!`](@ref)).
+"""
+function _unpack_site_diagnostics!(this::fates_restart_interface_type, site,
+                                   io_idx_si::Integer, io_idx_base::Integer)
+    nsc  = nlevsclass[]
+    npft = numpft[]
+
+    for i_pft in 1:npft
+        site.recruitment_rate[i_pft] = _getr(this, :ir_recrate_sift, io_idx_base + i_pft - 1)
+        site.use_this_pft[i_pft] = _geti(this, :ir_use_this_pft_sift, io_idx_base + i_pft - 1)
+    end
+    for i_pft in 1:npft
+        for i_landuse in 1:n_landuse_cats
+            i_pflu = i_landuse + (i_pft - 1) * n_landuse_cats
+            site.area_PFT[i_pft, i_landuse] = _getr(this, :ir_area_pft_sift, io_idx_base + i_pflu - 1)
+        end
+    end
+    site.min_allowed_landuse_fraction = _getr(this, :ir_min_allowed_landuse_fraction_si, io_idx_si)
+    io_idx_si_lu = io_idx_base
+    for i_landuse in 1:n_landuse_cats
+        site.landuse_vector_gt_min[i_landuse] = (_geti(this, :ir_landuse_vector_gt_min_si, io_idx_si_lu) == itrue)
+        io_idx_si_lu += 1
+    end
+    site.area_bareground = _getr(this, :ir_area_bareground_si, io_idx_si)
+
+    io_idx_si_scpf = io_idx_base
+    io_idx_si_scpf_term = io_idx_base
+    for i_scls in 1:nsc
+        for i_pft in 1:npft
+            site.fmort_rate_canopy[i_scls, i_pft] = _getr(this, :ir_fmortrate_cano_siscpf, io_idx_si_scpf)
+            site.fmort_rate_ustory[i_scls, i_pft] = _getr(this, :ir_fmortrate_usto_siscpf, io_idx_si_scpf)
+            site.imort_rate[i_scls, i_pft] = _getr(this, :ir_imortrate_siscpf, io_idx_si_scpf)
+            site.fmort_rate_crown[i_scls, i_pft] = _getr(this, :ir_fmortrate_crown_siscpf, io_idx_si_scpf)
+            site.fmort_rate_cambial[i_scls, i_pft] = _getr(this, :ir_fmortrate_cambi_siscpf, io_idx_si_scpf)
+            site.growthflux_fusion[i_scls, i_pft] = _getr(this, :ir_growflx_fusion_siscpf, io_idx_si_scpf)
+            site.term_abg_flux[i_scls, i_pft] = _getr(this, :ir_abg_term_flux_siscpf, io_idx_si_scpf)
+            site.imort_abg_flux[i_scls, i_pft] = _getr(this, :ir_abg_imort_flux_siscpf, io_idx_si_scpf)
+            site.fmort_abg_flux[i_scls, i_pft] = _getr(this, :ir_abg_fmort_flux_siscpf, io_idx_si_scpf)
+            io_idx_si_scpf += 1
+            for i_term in 1:n_term_mort_types
+                site.term_nindivs_canopy[i_term, i_scls, i_pft] = _getr(this, :ir_termnindiv_cano_siscpf, io_idx_si_scpf_term)
+                site.term_nindivs_ustory[i_term, i_scls, i_pft] = _getr(this, :ir_termnindiv_usto_siscpf, io_idx_si_scpf_term)
+                io_idx_si_scpf_term += 1
+            end
+        end
+    end
+
+    io_idx_si_pft = io_idx_base
+    io_idx_si_pft_term = io_idx_base
+    for i_pft in 1:npft
+        for i_term in 1:n_term_mort_types
+            site.term_carbonflux_canopy[i_term, i_pft] = _getr(this, :ir_termcflux_cano_sipft, io_idx_si_pft_term)
+            site.term_carbonflux_ustory[i_term, i_pft] = _getr(this, :ir_termcflux_usto_sipft, io_idx_si_pft_term)
+            io_idx_si_pft_term += 1
+        end
+        site.fmort_carbonflux_canopy[i_pft] = _getr(this, :ir_fmortcflux_cano_sipft, io_idx_si_pft)
+        site.fmort_carbonflux_ustory[i_pft] = _getr(this, :ir_fmortcflux_usto_sipft, io_idx_si_pft)
+        site.imort_carbonflux[i_pft] = _getr(this, :ir_imortcflux_sipft, io_idx_si_pft)
+        site.dstatus[i_pft] = _geti(this, :ir_dd_status_sift, io_idx_si_pft)
+        site.dleafondate[i_pft] = _geti(this, :ir_dleafondate_sift, io_idx_si_pft)
+        site.dleafoffdate[i_pft] = _geti(this, :ir_dleafoffdate_sift, io_idx_si_pft)
+        site.dndaysleafon[i_pft] = _geti(this, :ir_dndaysleafon_sift, io_idx_si_pft)
+        site.dndaysleafoff[i_pft] = _geti(this, :ir_dndaysleafoff_sift, io_idx_si_pft)
+        site.elong_factor[i_pft] = _getr(this, :ir_elong_factor_sift, io_idx_si_pft)
+        site.seed_in[i_pft] = _getr(this, :ir_seed_in_sift, io_idx_si_pft)
+        site.seed_out[i_pft] = _getr(this, :ir_seed_out_sift, io_idx_si_pft)
+        io_idx_si_pft += 1
+    end
+
+    if hlm_use_sp[] == ifalse
+        for el in 1:num_elements[]
+            io_idx_si_cwd = io_idx_base
+            io_idx_si_pft2 = io_idx_base
+            elem = site.flux_diags.elem[el]
+            mbal = site.mass_balance[el]
+            ifb  = site.iflux_balance[el]
+            for i_cwd in 1:ncwd
+                elem.cwd_ag_input[i_cwd] = _getr_off(this, :ir_cwdagin_flxdg, el - 1, io_idx_si_cwd)
+                elem.cwd_bg_input[i_cwd] = _getr_off(this, :ir_cwdbgin_flxdg, el - 1, io_idx_si_cwd)
+                io_idx_si_cwd += 1
+            end
+            for i_pft in 1:npft
+                elem.surf_fine_litter_input[i_pft] = _getr_off(this, :ir_leaflittin_flxdg, el - 1, io_idx_si_pft2)
+                elem.root_litter_input[i_pft] = _getr_off(this, :ir_rootlittin_flxdg, el - 1, io_idx_si_pft2)
+                mbal.wood_product_harvest[i_pft] = _getr_off(this, :ir_woodprod_harvest_mbal, el - 1, io_idx_si_pft2)
+                mbal.wood_product_landusechange[i_pft] = _getr_off(this, :ir_woodprod_landusechange_mbal, el - 1, io_idx_si_pft2)
+                io_idx_si_pft2 += 1
+            end
+            mbal.old_stock = _getr_off(this, :ir_oldstock_mbal, el - 1, io_idx_si)
+            mbal.err_fates = _getr_off(this, :ir_errfates_mbal, el - 1, io_idx_si)
+            ifb.iflux_liveveg = _getr_off(this, :ir_liveveg_intflux_el, el - 1, io_idx_si)
+            elem.err_liveveg = _getr_off(this, :ir_liveveg_err_el, el - 1, io_idx_si)
+            ifb.iflux_litter = _getr_off(this, :ir_litter_intflux_el, el - 1, io_idx_si)
+            elem.err_litter = _getr_off(this, :ir_litter_err_el, el - 1, io_idx_si)
+        end
+    end
+
+    site.spread = _getr(this, :ir_spread_si, io_idx_si)
+
+    io_idx_si_sc = io_idx_base
+    for i_scls in 1:nsc
+        site.demotion_rate[i_scls] = _getr(this, :ir_demorate_sisc, io_idx_si_sc)
+        site.promotion_rate[i_scls] = _getr(this, :ir_promrate_sisc, io_idx_si_sc)
+        io_idx_si_sc += 1
+    end
+
+    site.term_crownarea_canopy = _getr(this, :ir_termcarea_cano_si, io_idx_si)
+    site.term_crownarea_ustory = _getr(this, :ir_termcarea_usto_si, io_idx_si)
+    site.ema_npp = _getr(this, :ir_emanpp_si, io_idx_si)
+
+    if hlm_use_tree_damage[] == itrue
+        io_idx_si_cdpf = io_idx_base
+        io_idx_si_cdsc = io_idx_base
+        for i_scls in 1:nsc
+            for i_cdam in 1:nlevdamage[]
+                for i_pft in 1:npft
+                    site.imort_rate_damage[i_cdam, i_scls, i_pft] = _getr(this, :ir_imortrate_sicdpf, io_idx_si_cdpf)
+                    site.term_nindivs_canopy_damage[i_cdam, i_scls, i_pft] = _getr(this, :ir_termnindiv_cano_sicdpf, io_idx_si_cdpf)
+                    site.term_nindivs_ustory_damage[i_cdam, i_scls, i_pft] = _getr(this, :ir_termnindiv_usto_sicdpf, io_idx_si_cdpf)
+                    site.imort_cflux_damage[i_cdam, i_scls] = _getr(this, :ir_imortcflux_sicdsc, io_idx_si_cdsc)
+                    site.term_cflux_canopy_damage[i_cdam, i_scls] = _getr(this, :ir_termcflux_cano_sicdsc, io_idx_si_cdsc)
+                    site.term_cflux_ustory_damage[i_cdam, i_scls] = _getr(this, :ir_termcflux_usto_sicdsc, io_idx_si_cdsc)
+                    site.fmort_rate_canopy_damage[i_cdam, i_scls, i_pft] = _getr(this, :ir_fmortrate_cano_sicdpf, io_idx_si_cdpf)
+                    site.fmort_rate_ustory_damage[i_cdam, i_scls, i_pft] = _getr(this, :ir_fmortrate_usto_sicdpf, io_idx_si_cdpf)
+                    site.fmort_cflux_canopy_damage[i_cdam, i_scls] = _getr(this, :ir_fmortcflux_cano_sicdsc, io_idx_si_cdsc)
+                    site.fmort_cflux_ustory_damage[i_cdam, i_scls] = _getr(this, :ir_fmortcflux_usto_sicdsc, io_idx_si_cdsc)
+                    io_idx_si_cdsc += 1
+                    io_idx_si_cdpf += 1
+                end
+            end
+        end
+        site.crownarea_canopy_damage = _getr(this, :ir_crownarea_cano_si, io_idx_si)
+        site.crownarea_ustory_damage = _getr(this, :ir_crownarea_usto_si, io_idx_si)
+    end
+
+    site.demotion_carbonflux = _getr(this, :ir_democflux_si, io_idx_si)
+    site.promotion_carbonflux = _getr(this, :ir_promcflux_si, io_idx_si)
+    site.imort_crownarea = _getr(this, :ir_imortcarea_si, io_idx_si)
+    site.fmort_crownarea_canopy = _getr(this, :ir_fmortcarea_cano_si, io_idx_si)
+    site.fmort_crownarea_ustory = _getr(this, :ir_fmortcarea_usto_si, io_idx_si)
+
+    io_idx_si_pfcl = io_idx_base
+    for i in 1:nclmax
+        for i_pft in 1:npft
+            site.rec_l2fr[i_pft, i] = _getr(this, :ir_recl2fr_sipfcl, io_idx_si_pfcl)
+            io_idx_si_pfcl += 1
+        end
+    end
+    io_idx_si_wmem = io_idx_base
+    for i in 1:numWaterMem
+        for i_pft in 1:npft
+            site.liqvol_memory[i, i_pft] = _getr(this, :ir_liqvolmem_siwmft, io_idx_si_wmem)
+            site.smp_memory[i, i_pft] = _getr(this, :ir_smpmem_siwmft, io_idx_si_wmem)
+            io_idx_si_wmem += 1
+        end
+    end
+    io_idx_si_vtmem = io_idx_base
+    for i in 1:num_vegtemp_mem
+        site.vegtemp_memory[i] = _getr(this, :ir_vegtempmem_sitm, io_idx_si_vtmem)
+        io_idx_si_vtmem += 1
+    end
+
+    if hlm_use_planthydro[] == itrue && site.si_hydr !== nothing
+        sh = site.si_hydr
+        sh.h2oveg_recruit = _getr(this, :ir_hydro_recruit_si, io_idx_si)
+        sh.h2oveg_dead = _getr(this, :ir_hydro_dead_si, io_idx_si)
+        sh.h2oveg_growturn_err = _getr(this, :ir_hydro_growturn_err_si, io_idx_si)
+        sh.h2oveg_hydro_err = _getr(this, :ir_hydro_hydro_err_si, io_idx_si)
+        io_idx_si_lyr_shell = io_idx_base
+        for i in 1:sh.nlevrhiz
+            for k in 1:nshell
+                sh.h2osoi_liqvol_shell[i, k] = _getr(this, :ir_hydro_liqvol_shell_si, io_idx_si_lyr_shell)
+                io_idx_si_lyr_shell += 1
+            end
+        end
+    end
+    return nothing
+end
+
+# =====================================================================================
+# R4: patch litter pack & unpack (per element, multi-dimensional nested loops).
+# =====================================================================================
+
+"""
+    _pack_patch_litter!(this, site, cpatch, io_idx_co_1st)
+
+Pack the patch litter pools (`cpatch.litter[el]`) for all elements, mirroring the
+Fortran `el=0..num_elements-1` block (here `el=1..num_elements`, handle offset
+`el-1`). Each element resets all per-element cursors to the patch base.
+"""
+function _pack_patch_litter!(this::fates_restart_interface_type, site, cpatch,
+                             io_idx_co_1st::Integer)
+    hlm_use_sp[] == ifalse || return nothing
+    npft = numpft[]
+    nlevsoil = site.nlevsoil
+    for el in 1:num_elements[]
+        io_idx_pa_pft  = io_idx_co_1st
+        io_idx_pa_cwd  = io_idx_co_1st
+        io_idx_pa_cwsl = io_idx_co_1st
+        io_idx_pa_dcsl = io_idx_co_1st
+        io_idx_pa_dc   = io_idx_co_1st
+        litt = cpatch.litter[el]
+        off = el - 1
+        for i in 1:npft
+            _setr_off!(this, :ir_seed_litt, off, io_idx_pa_pft, litt.seed[i])
+            _setr_off!(this, :ir_seedgerm_litt, off, io_idx_pa_pft, litt.seed_germ[i])
+            _setr_off!(this, :ir_seed_decay_litt, off, io_idx_pa_pft, litt.seed_decay[i])
+            _setr_off!(this, :ir_seedgerm_decay_litt, off, io_idx_pa_pft, litt.seed_germ_decay[i])
+            io_idx_pa_pft += 1
+        end
+        for i in 1:ndcmpy
+            _setr_off!(this, :ir_leaf_litt, off, io_idx_pa_dc, litt.leaf_fines[i])
+            _setr_off!(this, :ir_lfines_frag_litt, off, io_idx_pa_dc, litt.leaf_fines_frag[i])
+            io_idx_pa_dc += 1
+            for ilyr in 1:nlevsoil
+                _setr_off!(this, :ir_fnrt_litt, off, io_idx_pa_dcsl, litt.root_fines[i, ilyr])
+                _setr_off!(this, :ir_rfines_frag_litt, off, io_idx_pa_dcsl, litt.root_fines_frag[i, ilyr])
+                io_idx_pa_dcsl += 1
+            end
+        end
+        for i in 1:ncwd
+            _setr_off!(this, :ir_agcwd_litt, off, io_idx_pa_cwd, litt.ag_cwd[i])
+            _setr_off!(this, :ir_agcwd_frag_litt, off, io_idx_pa_cwd, litt.ag_cwd_frag[i])
+            io_idx_pa_cwd += 1
+            for ilyr in 1:nlevsoil
+                _setr_off!(this, :ir_bgcwd_litt, off, io_idx_pa_cwsl, litt.bg_cwd[i, ilyr])
+                _setr_off!(this, :ir_bgcwd_frag_litt, off, io_idx_pa_cwsl, litt.bg_cwd_frag[i, ilyr])
+                io_idx_pa_cwsl += 1
+            end
+        end
+    end
+    return nothing
+end
+
+"""
+    _unpack_patch_litter!(this, site, cpatch, io_idx_co_1st)
+
+Read back the patch litter pools (symmetric to [`_pack_patch_litter!`](@ref)).
+"""
+function _unpack_patch_litter!(this::fates_restart_interface_type, site, cpatch,
+                               io_idx_co_1st::Integer)
+    hlm_use_sp[] == ifalse || return nothing
+    npft = numpft[]
+    nlevsoil = site.nlevsoil
+    for el in 1:num_elements[]
+        io_idx_pa_pft  = io_idx_co_1st
+        io_idx_pa_cwd  = io_idx_co_1st
+        io_idx_pa_cwsl = io_idx_co_1st
+        io_idx_pa_dcsl = io_idx_co_1st
+        io_idx_pa_dc   = io_idx_co_1st
+        litt = cpatch.litter[el]
+        off = el - 1
+        for i in 1:npft
+            litt.seed[i] = _getr_off(this, :ir_seed_litt, off, io_idx_pa_pft)
+            litt.seed_germ[i] = _getr_off(this, :ir_seedgerm_litt, off, io_idx_pa_pft)
+            litt.seed_decay[i] = _getr_off(this, :ir_seed_decay_litt, off, io_idx_pa_pft)
+            litt.seed_germ_decay[i] = _getr_off(this, :ir_seedgerm_decay_litt, off, io_idx_pa_pft)
+            io_idx_pa_pft += 1
+        end
+        for i in 1:ndcmpy
+            litt.leaf_fines[i] = _getr_off(this, :ir_leaf_litt, off, io_idx_pa_dc)
+            litt.leaf_fines_frag[i] = _getr_off(this, :ir_lfines_frag_litt, off, io_idx_pa_dc)
+            io_idx_pa_dc += 1
+            for ilyr in 1:nlevsoil
+                litt.root_fines[i, ilyr] = _getr_off(this, :ir_fnrt_litt, off, io_idx_pa_dcsl)
+                litt.root_fines_frag[i, ilyr] = _getr_off(this, :ir_rfines_frag_litt, off, io_idx_pa_dcsl)
+                io_idx_pa_dcsl += 1
+            end
+        end
+        for i in 1:ncwd
+            litt.ag_cwd[i] = _getr_off(this, :ir_agcwd_litt, off, io_idx_pa_cwd)
+            litt.ag_cwd_frag[i] = _getr_off(this, :ir_agcwd_frag_litt, off, io_idx_pa_cwd)
+            io_idx_pa_cwd += 1
+            for ilyr in 1:nlevsoil
+                litt.bg_cwd[i, ilyr] = _getr_off(this, :ir_bgcwd_litt, off, io_idx_pa_cwsl)
+                litt.bg_cwd_frag[i, ilyr] = _getr_off(this, :ir_bgcwd_frag_litt, off, io_idx_pa_cwsl)
+                io_idx_pa_cwsl += 1
+            end
+        end
+    end
+    return nothing
+end
+
 # =====================================================================================
 # set_restart_vectors! — PACK the linked-list demographic state into flat vectors.
 # =====================================================================================
@@ -660,11 +1161,12 @@ fields into the registered restart vectors. Writes the per-site
 `fates_PatchesPerSite` and per-patch `fates_CohortsPerPatch` COUNTS that drive
 the unpack. Mirrors the Fortran `set_restart_vectors`.
 
-# TODO Batch 18-followup: the full Fortran packs ~80 additional per-cohort
-# diagnostic / mortality-flux / PRT / hydraulics scalars and per-patch litter /
-# fuel / albedo / radiation blocks + site-level diagnostic arrays. Those are NOT
-# required for the demographic round-trip and are deferred; the load-bearing
-# demographic + count fields are packed here in full.
+Packs the demographic skeleton + load-bearing fields, plus the B18-followup
+fill-groups: R1 (cohort diagnostic scalars + mortality fluxes), R2 (patch
+fuel/scorch + radiation/albedo + site hydraulics scalars), R4 (patch litter
+blocks), and R5 (site demographic/mortality/damage/flux-diag arrays). Still
+deferred: R6 (running means), R7 (cohort PRT pools), R8 (cohort hydro) — those
+need cohort-object init / running-mean accessors not yet wired standalone.
 """
 function set_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                               nsites::Integer, sites::AbstractVector{<:ed_site_type})
@@ -690,6 +1192,10 @@ function set_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
         _setr!(this, :ir_snow_depth_si, io_idx_si, site.snow_depth)
         _setr!(this, :ir_trunk_product_si, io_idx_si, site.resources_management.trunk_product_site)
         _seti!(this, :ir_landuse_config_si, io_idx_si, hlm_use_potentialveg[])
+
+        # capture the site's cohort base BEFORE the patch loop advances it (the
+        # R5 site-level arrays all index from this initial base).
+        io_idx_base = io_idx_co_1st
 
         # --- patch loop (oldest -> youngest) ---
         patchespersite = 0
@@ -725,8 +1231,29 @@ function set_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                 _setr!(this, :ir_c_area_co, io_idx_co, ccohort.c_area)
                 _setr!(this, :ir_treelai_co, io_idx_co, ccohort.treelai)
                 _setr!(this, :ir_treesai_co, io_idx_co, ccohort.treesai)
-                # TODO Batch 18-followup: gpp/npp/resp_acc(_hold), mort rates, lmort,
-                # ddbhdt, resp_tstep, PRT block, year_net_up vector, hydro block.
+
+                # --- R1: cohort diagnostic scalars + mortality fluxes ---
+                _setr!(this, :ir_gpp_acc_co, io_idx_co, ccohort.gpp_acc)
+                _setr!(this, :ir_npp_acc_co, io_idx_co, ccohort.npp_acc)
+                _setr!(this, :ir_resp_acc_co, io_idx_co, ccohort.resp_acc)
+                _setr!(this, :ir_gpp_acc_hold_co, io_idx_co, ccohort.gpp_acc_hold)
+                _setr!(this, :ir_npp_acc_hold_co, io_idx_co, ccohort.npp_acc_hold)
+                _setr!(this, :ir_resp_acc_hold_co, io_idx_co, ccohort.resp_acc_hold)
+                _setr!(this, :ir_resp_excess_co, io_idx_co, ccohort.resp_excess)
+                _setr!(this, :ir_bmort_co, io_idx_co, ccohort.bmort)
+                _setr!(this, :ir_hmort_co, io_idx_co, ccohort.hmort)
+                _setr!(this, :ir_cmort_co, io_idx_co, ccohort.cmort)
+                _setr!(this, :ir_smort_co, io_idx_co, ccohort.smort)
+                _setr!(this, :ir_asmort_co, io_idx_co, ccohort.asmort)
+                _setr!(this, :ir_dgmort_co, io_idx_co, ccohort.dgmort)
+                _setr!(this, :ir_frmort_co, io_idx_co, ccohort.frmort)
+                _setr!(this, :ir_lmort_direct_co, io_idx_co, ccohort.lmort_direct)
+                _setr!(this, :ir_lmort_collateral_co, io_idx_co, ccohort.lmort_collateral)
+                _setr!(this, :ir_lmort_infra_co, io_idx_co, ccohort.lmort_infra)
+                _setr!(this, :ir_ddbhdt_co, io_idx_co, ccohort.ddbhdt)
+                _setr!(this, :ir_resp_tstep_co, io_idx_co, ccohort.resp_tstep)
+                # TODO Batch 18-followup: PRT pool block (R7), cohort hydro block (R8),
+                # year_net_up vector (needs the EDAccumulateFluxes path live).
 
                 io_idx_co += 1
                 ccohort = ccohort.taller
@@ -745,11 +1272,38 @@ function set_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
             _setr!(this, :ir_solar_zenith_angle_pa, io_idx_co_1st, cpatch.solar_zenith_angle)
             _seti!(this, :ir_nclp_pa, io_idx_co_1st, cpatch.ncl_p)
             _setr!(this, :ir_zstar_pa, io_idx_co_1st, cpatch.zstar)
-            # TODO Batch 18-followup: patch running means, litter/fuel/albedo blocks.
+
+            # --- R2: patch fuel/scorch + radiation/albedo (mixed-dim, at base) ---
+            if hlm_use_sp[] == ifalse
+                io_idx_pa_pft = io_idx_co_1st
+                for i in 1:numpft[]
+                    _setr!(this, :ir_scorch_ht_pa_pft, io_idx_pa_pft, cpatch.scorch_ht[i])
+                    io_idx_pa_pft += 1
+                end
+                io_idx_pa_fc = io_idx_co_1st
+                for i in 1:num_fuel_classes
+                    moist = cpatch.fuel === nothing ? 0.0 : cpatch.fuel.effective_moisture[i]
+                    _setr!(this, :ir_litter_moisture_pa_nfsc, io_idx_pa_fc, moist)
+                    io_idx_pa_fc += 1
+                end
+            end
+            io_idx_pa_ib = io_idx_co_1st
+            for i in 1:num_swb
+                _setr!(this, :ir_gnd_alb_dif_pasb, io_idx_pa_ib, cpatch.gnd_alb_dif[i])
+                _setr!(this, :ir_gnd_alb_dir_pasb, io_idx_pa_ib, cpatch.gnd_alb_dir[i])
+                io_idx_pa_ib += 1
+            end
+
+            # --- R4: patch litter blocks (per element nested loops) ---
+            _pack_patch_litter!(this, site, cpatch, io_idx_co_1st)
+            # TODO Batch 18-followup: patch running means (R6).
 
             io_idx_co_1st += maxperpatch
             cpatch = cpatch.younger
         end
+
+        # --- R5: site-level demographic / mortality / damage / flux arrays ---
+        _pack_site_diagnostics!(this, site, io_idx_si, io_idx_base)
 
         _seti!(this, :ir_npatch_si, io_idx_si, patchespersite)   # KEY COUNT
     end
@@ -854,9 +1408,10 @@ round-trip counts (`cohortsperpatch == fates_CohortsPerPatch` per patch,
 `patchespersite == fates_PatchesPerSite` per site). Mirrors the Fortran
 `get_restart_vectors` for the demographic skeleton + load-bearing fields.
 
-# TODO Batch 18-followup: same deferred diagnostic / PRT / hydraulics field reads
-# as the pack side (plus the Fortran InitPRTBoundaryConditions /
-# UpdateCohortBioPhysRates / UpdatePlantPsiFTCFromTheta finalization calls).
+Reads back the demographic skeleton + the B18-followup R1/R2/R4/R5 fill-groups
+symmetric to the pack side. Still deferred: R6 running means, R7 cohort PRT
+pools, R8 cohort hydro (plus the Fortran InitPRTBoundaryConditions /
+UpdateCohortBioPhysRates / UpdatePlantPsiFTCFromTheta finalizers).
 """
 function get_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                               nsites::Integer, sites::AbstractVector{<:ed_site_type})
@@ -879,6 +1434,9 @@ function get_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
         site.grow_deg_days   = _getr(this, :ir_gdd_si, io_idx_si)
         site.snow_depth      = _getr(this, :ir_snow_depth_si, io_idx_si)
         site.resources_management.trunk_product_site = _getr(this, :ir_trunk_product_si, io_idx_si)
+
+        # capture the site's cohort base BEFORE the patch loop advances it.
+        io_idx_base = io_idx_co_1st
 
         # --- patch loop (oldest -> youngest) ---
         patchespersite = 0
@@ -914,7 +1472,28 @@ function get_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                 ccohort.c_area                 = _getr(this, :ir_c_area_co, io_idx_co)
                 ccohort.treelai                = _getr(this, :ir_treelai_co, io_idx_co)
                 ccohort.treesai                = _getr(this, :ir_treesai_co, io_idx_co)
-                # TODO Batch 18-followup: deferred flux/mort/PRT/hydro reads +
+
+                # --- R1: cohort diagnostic scalars + mortality fluxes ---
+                ccohort.gpp_acc          = _getr(this, :ir_gpp_acc_co, io_idx_co)
+                ccohort.npp_acc          = _getr(this, :ir_npp_acc_co, io_idx_co)
+                ccohort.resp_acc         = _getr(this, :ir_resp_acc_co, io_idx_co)
+                ccohort.gpp_acc_hold     = _getr(this, :ir_gpp_acc_hold_co, io_idx_co)
+                ccohort.npp_acc_hold     = _getr(this, :ir_npp_acc_hold_co, io_idx_co)
+                ccohort.resp_acc_hold    = _getr(this, :ir_resp_acc_hold_co, io_idx_co)
+                ccohort.resp_excess      = _getr(this, :ir_resp_excess_co, io_idx_co)
+                ccohort.bmort            = _getr(this, :ir_bmort_co, io_idx_co)
+                ccohort.hmort            = _getr(this, :ir_hmort_co, io_idx_co)
+                ccohort.cmort            = _getr(this, :ir_cmort_co, io_idx_co)
+                ccohort.smort            = _getr(this, :ir_smort_co, io_idx_co)
+                ccohort.asmort           = _getr(this, :ir_asmort_co, io_idx_co)
+                ccohort.dgmort           = _getr(this, :ir_dgmort_co, io_idx_co)
+                ccohort.frmort           = _getr(this, :ir_frmort_co, io_idx_co)
+                ccohort.lmort_direct     = _getr(this, :ir_lmort_direct_co, io_idx_co)
+                ccohort.lmort_collateral = _getr(this, :ir_lmort_collateral_co, io_idx_co)
+                ccohort.lmort_infra      = _getr(this, :ir_lmort_infra_co, io_idx_co)
+                ccohort.ddbhdt           = _getr(this, :ir_ddbhdt_co, io_idx_co)
+                ccohort.resp_tstep       = _getr(this, :ir_resp_tstep_co, io_idx_co)
+                # TODO Batch 18-followup: PRT pool block (R7), cohort hydro block (R8),
                 # InitPRTBoundaryConditions / UpdateCohortBioPhysRates finalizers.
 
                 io_idx_co += 1
@@ -941,11 +1520,39 @@ function get_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
             cpatch.ncl_p            = _geti(this, :ir_nclp_pa, io_idx_co_1st)
             cpatch.zstar            = _getr(this, :ir_zstar_pa, io_idx_co_1st)
             cpatch.countcohorts     = cohortsperpatch
-            # TODO Batch 18-followup: patch running means, litter/fuel/albedo blocks.
+
+            # --- R2: patch fuel/scorch + radiation/albedo ---
+            if hlm_use_sp[] == ifalse
+                io_idx_pa_pft = io_idx_co_1st
+                for i in 1:numpft[]
+                    cpatch.scorch_ht[i] = _getr(this, :ir_scorch_ht_pa_pft, io_idx_pa_pft)
+                    io_idx_pa_pft += 1
+                end
+                if cpatch.fuel !== nothing
+                    io_idx_pa_fc = io_idx_co_1st
+                    for i in 1:num_fuel_classes
+                        cpatch.fuel.effective_moisture[i] = _getr(this, :ir_litter_moisture_pa_nfsc, io_idx_pa_fc)
+                        io_idx_pa_fc += 1
+                    end
+                end
+            end
+            io_idx_pa_ib = io_idx_co_1st
+            for i in 1:num_swb
+                cpatch.gnd_alb_dif[i] = _getr(this, :ir_gnd_alb_dif_pasb, io_idx_pa_ib)
+                cpatch.gnd_alb_dir[i] = _getr(this, :ir_gnd_alb_dir_pasb, io_idx_pa_ib)
+                io_idx_pa_ib += 1
+            end
+
+            # --- R4: patch litter blocks ---
+            _unpack_patch_litter!(this, site, cpatch, io_idx_co_1st)
+            # TODO Batch 18-followup: patch running means (R6).
 
             io_idx_co_1st += maxperpatch
             cpatch = cpatch.younger
         end
+
+        # --- R5: site-level demographic / mortality / damage / flux arrays ---
+        _unpack_site_diagnostics!(this, site, io_idx_si, io_idx_base)
 
         # --- consistency check (round-trip guarantee) ---
         npatch_stored = _geti(this, :ir_npatch_si, io_idx_si)
@@ -963,12 +1570,105 @@ end
 """
     update_3dpatch_radiation!(this, nsites, sites, bc_out)
 
-# TODO Batch 18-followup: the Fortran routine recomputes the per-patch 3D
-# radiation / albedo boundary outputs from the restart-stored ground albedos.
-# It depends on the FATES radiation BC plumbing not yet wired standalone; stubbed.
+R3: re-derive the per-patch 3D radiation / albedo boundary outputs after a
+restart read, from the restart-stored ground albedos (`gnd_alb_dir/dif`) and
+canopy structure. For each patch (ifp incremented over EVERY patch in the
+oldest->youngest list, including bare-ground — mirroring the Fortran which does
+NOT special-case bare ground for ifp), zero the patch rad-profile fields, and if
+`solar_zenith_flag` is set: bare-ground patches (`maximum(nrad[1,:])==0`) copy
+the ground albedos into `bc_out.albd/albi_parb`; vegetated patches run the
+ported `PatchNormanRadiation` (norman) or `Solve!` (two-stream) solver. Mirrors
+the Fortran `update_3dpatch_radiation`.
 """
 function update_3dpatch_radiation!(this::fates_restart_interface_type, nsites::Integer,
                                    sites::AbstractVector{<:ed_site_type}, bc_out)
-    # TODO: port the radiation re-derivation once the radiation BC path is wired.
+    radiation_model = ed_params().radiation_model
+
+    for s in 1:nsites
+        ifp = 0
+        currentPatch = sites[s].oldest_patch
+        while currentPatch !== nothing
+            ifp += 1
+
+            # --- zero the patch radiation-profile fields ---
+            isempty(currentPatch.f_sun)      || fill!(currentPatch.f_sun, 0.0)
+            isempty(currentPatch.fabd_sun_z) || fill!(currentPatch.fabd_sun_z, 0.0)
+            isempty(currentPatch.fabd_sha_z) || fill!(currentPatch.fabd_sha_z, 0.0)
+            isempty(currentPatch.fabi_sun_z) || fill!(currentPatch.fabi_sun_z, 0.0)
+            isempty(currentPatch.fabi_sha_z) || fill!(currentPatch.fabi_sha_z, 0.0)
+            isempty(currentPatch.fabd)       || fill!(currentPatch.fabd, 0.0)
+            isempty(currentPatch.fabi)       || fill!(currentPatch.fabi, 0.0)
+            isempty(currentPatch.nrmlzd_parprof_pft_dir_z) || fill!(currentPatch.nrmlzd_parprof_pft_dir_z, 0.0)
+            isempty(currentPatch.nrmlzd_parprof_pft_dif_z) || fill!(currentPatch.nrmlzd_parprof_pft_dif_z, 0.0)
+            isempty(currentPatch.rad_error)  || fill!(currentPatch.rad_error, 0.0)
+
+            if currentPatch.solar_zenith_flag
+
+                for ib in 1:num_swb
+                    bc_out[s].albd_parb[ifp, ib] = 0.0
+                    bc_out[s].albi_parb[ifp, ib] = 0.0
+                    bc_out[s].fabi_parb[ifp, ib] = 0.0
+                    bc_out[s].fabd_parb[ifp, ib] = 0.0
+                    bc_out[s].ftdd_parb[ifp, ib] = 1.0
+                    bc_out[s].ftid_parb[ifp, ib] = 1.0
+                    bc_out[s].ftii_parb[ifp, ib] = 1.0
+                end
+
+                if maximum(@view currentPatch.nrad[1, :]) == 0
+                    # No leaf layers — effectively bare ground.
+                    for ib in 1:num_swb
+                        bc_out[s].fabd_parb[ifp, ib] = 0.0
+                        bc_out[s].fabi_parb[ifp, ib] = 0.0
+                        bc_out[s].albd_parb[ifp, ib] = currentPatch.gnd_alb_dir[ib]
+                        bc_out[s].albi_parb[ifp, ib] = currentPatch.gnd_alb_dif[ib]
+                        bc_out[s].ftdd_parb[ifp, ib] = 1.0
+                        bc_out[s].ftid_parb[ifp, ib] = 1.0
+                        bc_out[s].ftii_parb[ifp, ib] = 1.0
+                    end
+                else
+                    if radiation_model == norman_solver
+                        albd = zeros(num_swb); albi = zeros(num_swb)
+                        fabd = zeros(num_swb); fabi = zeros(num_swb)
+                        ftdd = zeros(num_swb); ftid = zeros(num_swb)
+                        ftii = zeros(num_swb)
+                        PatchNormanRadiation(currentPatch, albd, albi, fabd, fabi, ftdd, ftid, ftii)
+                        for ib in 1:num_swb
+                            bc_out[s].albd_parb[ifp, ib] = albd[ib]
+                            bc_out[s].albi_parb[ifp, ib] = albi[ib]
+                            bc_out[s].fabd_parb[ifp, ib] = fabd[ib]
+                            bc_out[s].fabi_parb[ifp, ib] = fabi[ib]
+                            bc_out[s].ftdd_parb[ifp, ib] = ftdd[ib]
+                            bc_out[s].ftid_parb[ifp, ib] = ftid[ib]
+                            bc_out[s].ftii_parb[ifp, ib] = ftii[ib]
+                        end
+                    elseif radiation_model == twostr_solver
+                        twostr = currentPatch.twostr
+                        CanopyPrep!(twostr, currentPatch.fcansno)
+                        ZenithPrep!(twostr, currentPatch.solar_zenith_angle)
+                        for ib in 1:num_swb
+                            twostr.band[ib].albedo_grnd_diff = currentPatch.gnd_alb_dif[ib]
+                            twostr.band[ib].albedo_grnd_beam = currentPatch.gnd_alb_dir[ib]
+                            (albedo_beam, albedo_diff, consv_err,
+                             frac_abs_can_beam, frac_abs_can_diff,
+                             frac_beam_grnd_beam, frac_diff_grnd_beam,
+                             frac_diff_grnd_diff) =
+                                Solve!(twostr, ib, normalized_upper_boundary, 1.0, 1.0,
+                                       sites[s].taulambda_2str, sites[s].omega_2str, sites[s].ipiv_2str)
+                            bc_out[s].albd_parb[ifp, ib] = albedo_beam
+                            bc_out[s].albi_parb[ifp, ib] = albedo_diff
+                            currentPatch.rad_error[ib]   = consv_err
+                            bc_out[s].fabd_parb[ifp, ib] = frac_abs_can_beam
+                            bc_out[s].fabi_parb[ifp, ib] = frac_abs_can_diff
+                            bc_out[s].ftdd_parb[ifp, ib] = frac_beam_grnd_beam
+                            bc_out[s].ftid_parb[ifp, ib] = frac_diff_grnd_beam
+                            bc_out[s].ftii_parb[ifp, ib] = frac_diff_grnd_diff
+                        end
+                    end
+                end
+            end
+
+            currentPatch = currentPatch.younger
+        end
+    end
     return nothing
 end

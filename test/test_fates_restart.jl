@@ -131,6 +131,83 @@ function _seed_prt_r(ipft::Int, dbh0::Float64)
     return prt
 end
 
+# Allocate + deterministically fill the R5 site-level demographic / mortality /
+# flux-diagnostic arrays so the round-trip exercises them. Values are seeded by
+# index so the round-trip can assert exact recovery.
+function _alloc_fill_site_diagnostics!(site, npft::Int)
+    nsc = CLM.nlevsclass[]
+    nmt = CLM.n_term_mort_types
+    nel = CLM.num_elements[]
+    nlu = CLM.n_landuse_cats
+
+    site.term_nindivs_canopy = [Float64(100*t + 10*c + p) for t in 1:nmt, c in 1:nsc, p in 1:npft]
+    site.term_nindivs_ustory = [Float64(200*t + 10*c + p) for t in 1:nmt, c in 1:nsc, p in 1:npft]
+    site.demotion_rate  = [Float64(3*c)    for c in 1:nsc]
+    site.promotion_rate = [Float64(4*c)    for c in 1:nsc]
+    site.imort_rate         = [Float64(5*c + p)  for c in 1:nsc, p in 1:npft]
+    site.fmort_rate_canopy  = [Float64(6*c + p)  for c in 1:nsc, p in 1:npft]
+    site.fmort_rate_ustory  = [Float64(7*c + p)  for c in 1:nsc, p in 1:npft]
+    site.fmort_rate_cambial = [Float64(8*c + p)  for c in 1:nsc, p in 1:npft]
+    site.fmort_rate_crown   = [Float64(9*c + p)  for c in 1:nsc, p in 1:npft]
+    site.growthflux_fusion  = [Float64(11*c + p) for c in 1:nsc, p in 1:npft]
+    site.term_carbonflux_canopy = [Float64(12*t + p) for t in 1:nmt, p in 1:npft]
+    site.term_carbonflux_ustory = [Float64(13*t + p) for t in 1:nmt, p in 1:npft]
+    site.imort_carbonflux        = [Float64(14 + p) for p in 1:npft]
+    site.fmort_carbonflux_canopy = [Float64(15 + p) for p in 1:npft]
+    site.fmort_carbonflux_ustory = [Float64(16 + p) for p in 1:npft]
+    site.term_abg_flux  = [Float64(17*c + p) for c in 1:nsc, p in 1:npft]
+    site.imort_abg_flux = [Float64(18*c + p) for c in 1:nsc, p in 1:npft]
+    site.fmort_abg_flux = [Float64(19*c + p) for c in 1:nsc, p in 1:npft]
+
+    site.rec_l2fr = [Float64(20*p + cl) for p in 1:npft, cl in 1:CLM.nclmax]
+    site.area_PFT = [Float64(p) + 0.1*lu for p in 1:npft, lu in 1:nlu]
+    site.use_this_pft = [p for p in 1:npft]
+    site.recruitment_rate = [Float64(21 + p) for p in 1:npft]
+    site.seed_in  = [Float64(22 + p) for p in 1:npft]
+    site.seed_out = [Float64(23 + p) for p in 1:npft]
+    site.landuse_vector_gt_min = [isodd(lu) for lu in 1:nlu]
+    site.min_allowed_landuse_fraction = 0.001
+    site.area_bareground = 0.05
+
+    site.dstatus       = [10 + p for p in 1:npft]
+    site.dleafondate   = [50 + p for p in 1:npft]
+    site.dleafoffdate  = [60 + p for p in 1:npft]
+    site.dndaysleafon  = [70 + p for p in 1:npft]
+    site.dndaysleafoff = [80 + p for p in 1:npft]
+    site.elong_factor  = [Float64(p) / 10 for p in 1:npft]
+
+    site.liqvol_memory = [Float64(24 + i + p) for i in 1:CLM.numWaterMem, p in 1:npft]
+    site.smp_memory    = [Float64(25 + i + p) for i in 1:CLM.numWaterMem, p in 1:npft]
+    site.vegtemp_memory = [Float64(26 + i) for i in 1:CLM.num_vegtemp_mem]
+
+    site.term_crownarea_canopy = 31.0; site.term_crownarea_ustory = 32.0
+    site.ema_npp = 33.0
+    site.demotion_carbonflux = 34.0; site.promotion_carbonflux = 35.0
+    site.imort_crownarea = 36.0
+    site.fmort_crownarea_canopy = 37.0; site.fmort_crownarea_ustory = 38.0
+
+    # flux diagnostics + mass balance (one per element)
+    site.flux_diags = CLM.site_fluxdiags_type()
+    site.flux_diags.elem = [CLM.elem_diag_type() for _ in 1:nel]
+    site.mass_balance  = [CLM.site_massbal_type()  for _ in 1:nel]
+    site.iflux_balance = [CLM.site_ifluxbal_type() for _ in 1:nel]
+    for el in 1:nel
+        e = site.flux_diags.elem[el]
+        e.cwd_ag_input = [Float64(40 + el + c) for c in 1:CLM.ncwd]
+        e.cwd_bg_input = [Float64(41 + el + c) for c in 1:CLM.ncwd]
+        e.surf_fine_litter_input = [Float64(42 + el + p) for p in 1:npft]
+        e.root_litter_input      = [Float64(43 + el + p) for p in 1:npft]
+        e.err_liveveg = Float64(44 + el); e.err_litter = Float64(45 + el)
+        m = site.mass_balance[el]
+        m.old_stock = Float64(46 + el); m.err_fates = Float64(47 + el)
+        m.wood_product_harvest       = [Float64(48 + el + p) for p in 1:npft]
+        m.wood_product_landusechange = [Float64(49 + el + p) for p in 1:npft]
+        ib = site.iflux_balance[el]
+        ib.iflux_liveveg = Float64(50 + el); ib.iflux_litter = Float64(51 + el)
+    end
+    return nothing
+end
+
 function _build_restart_site(npft::Int, nlevsoil::Int)
     site = CLM.ed_site_type()
     site.nlevsoil     = nlevsoil
@@ -145,6 +222,7 @@ function _build_restart_site(npft::Int, nlevsoil::Int)
     site.phen_model_date = 12345
     site.grow_deg_days = 42.5; site.snow_depth = 0.13
     site.resources_management.trunk_product_site = 0.7
+    _alloc_fill_site_diagnostics!(site, npft)
     return site
 end
 
@@ -357,6 +435,59 @@ end
                 c.size_class_lasttimestep = 2
             end
 
+            # --- R1: cohort diagnostic scalars + mortality fluxes (seed values) -
+            # walk all cohorts (pA shortest->taller, then pB) to seed unique values.
+            all_src_coh = CLM.fates_cohort_type[]
+            let c = pA.shortest
+                while c !== nothing; push!(all_src_coh, c); c = c.taller; end
+            end
+            let c = pB.shortest
+                while c !== nothing; push!(all_src_coh, c); c = c.taller; end
+            end
+            for (i, c) in enumerate(all_src_coh)
+                c.gpp_acc = 1.0 * i; c.npp_acc = 2.0 * i; c.resp_acc = 3.0 * i
+                c.gpp_acc_hold = 4.0 * i; c.npp_acc_hold = 5.0 * i; c.resp_acc_hold = 6.0 * i
+                c.resp_excess = 7.0 * i; c.bmort = 0.1 * i; c.hmort = 0.2 * i
+                c.cmort = 0.3 * i; c.smort = 0.4 * i; c.asmort = 0.5 * i; c.dgmort = 0.6 * i
+                c.frmort = 0.7 * i; c.lmort_direct = 0.8 * i; c.lmort_collateral = 0.9 * i
+                c.lmort_infra = 1.1 * i; c.ddbhdt = 1.2 * i; c.resp_tstep = 1.3 * i
+            end
+
+            # --- R2: patch fuel/scorch + ground albedo (seed values) -----------
+            for (k, p) in enumerate((pA, pB))
+                for i in 1:npft; p.scorch_ht[i] = 2.0 * k + i; end
+                for i in 1:CLM.num_fuel_classes; p.fuel.effective_moisture[i] = 0.01 * (k + i); end
+                for i in 1:CLM.num_swb
+                    p.gnd_alb_dir[i] = 0.10 * k + 0.01 * i
+                    p.gnd_alb_dif[i] = 0.20 * k + 0.01 * i
+                end
+            end
+
+            # --- R4: patch litter pools (seed values) --------------------------
+            for (k, p) in enumerate((pA, pB))
+                for el in 1:CLM.num_elements[]
+                    L = p.litter[el]
+                    for i in 1:npft
+                        L.seed[i] = 10.0 * k + i; L.seed_germ[i] = 20.0 * k + i
+                        L.seed_decay[i] = 0.1 * k + i; L.seed_germ_decay[i] = 0.2 * k + i
+                    end
+                    for i in 1:CLM.ndcmpy
+                        L.leaf_fines[i] = 30.0 * k + i; L.leaf_fines_frag[i] = 0.3 * k + i
+                        for j in 1:nlevsoil
+                            L.root_fines[i, j] = 40.0 * k + i + 0.5 * j
+                            L.root_fines_frag[i, j] = 0.4 * k + i + 0.5 * j
+                        end
+                    end
+                    for i in 1:CLM.ncwd
+                        L.ag_cwd[i] = 50.0 * k + i; L.ag_cwd_frag[i] = 0.5 * k + i
+                        for j in 1:nlevsoil
+                            L.bg_cwd[i, j] = 60.0 * k + i + 0.5 * j
+                            L.bg_cwd_frag[i, j] = 0.6 * k + i + 0.5 * j
+                        end
+                    end
+                end
+            end
+
             # capture source demographic snapshot
             src_patches = _patch_list(site)
             @test length(src_patches) == 2
@@ -427,6 +558,94 @@ end
             @test site2.phen_model_date == site.phen_model_date
             @test site2.grow_deg_days ≈ site.grow_deg_days
             @test site2.snow_depth ≈ site.snow_depth
+
+            # ============================================================
+            # B18-followup R1/R2/R4/R5 round-trip assertions
+            # ============================================================
+            # R1: cohort diagnostic scalars + mortality fluxes.
+            dco = CLM.fates_cohort_type[]
+            c = dst_patches[1].shortest
+            while c !== nothing; push!(dco, c); c = c.taller; end
+            c = dst_patches[2].shortest
+            while c !== nothing; push!(dco, c); c = c.taller; end
+            # the source-order is (cA1, cA2, cB1); each cohort carries a unique
+            # gpp_acc = 1*i. find by gpp_acc identity (robust to list order).
+            gpps = sort([cc.gpp_acc for cc in dco])
+            @test gpps ≈ [1.0, 2.0, 3.0]
+            # for cohort with gpp_acc==2 (i=2 → cA2): hmort should be 0.2*2=0.4
+            c2 = dco[findfirst(cc -> cc.gpp_acc ≈ 2.0, dco)]
+            @test c2.hmort ≈ 0.4
+            @test c2.resp_acc ≈ 6.0
+            @test c2.lmort_direct ≈ 1.6
+            @test c2.ddbhdt ≈ 2.4
+
+            # R2: patch ground albedo + scorch height (pA is k=1, pB is k=2).
+            @test dst_patches[1].gnd_alb_dir[1] ≈ 0.11
+            @test dst_patches[2].gnd_alb_dif[2] ≈ 0.42
+            @test dst_patches[1].scorch_ht[1]   ≈ 3.0   # 2*1 + 1
+            @test dst_patches[1].fuel.effective_moisture[1] ≈ 0.02  # 0.01*(1+1)
+
+            # R4: patch litter pool round-trip (pA, element 1).
+            L1 = dst_patches[1].litter[1]
+            @test L1.seed[1]       ≈ 11.0           # 10*1 + 1
+            @test L1.ag_cwd[1]     ≈ 51.0           # 50*1 + 1
+            @test L1.bg_cwd[1, 1]  ≈ 60.0 + 1 + 0.5 # 60*1 + 1 + 0.5*1
+            @test L1.root_fines[1, nlevsoil] ≈ 40.0 + 1 + 0.5 * nlevsoil
+
+            # R5: site demographic / mortality / flux array round-trip.
+            @test site2.fmort_rate_canopy ≈ site.fmort_rate_canopy
+            @test site2.imort_rate ≈ site.imort_rate
+            @test site2.term_nindivs_canopy ≈ site.term_nindivs_canopy
+            @test site2.demotion_rate ≈ site.demotion_rate
+            @test site2.recruitment_rate ≈ site.recruitment_rate
+            @test site2.dstatus == site.dstatus
+            @test site2.ema_npp ≈ site.ema_npp
+            @test site2.area_PFT ≈ site.area_PFT
+            @test site2.landuse_vector_gt_min == site.landuse_vector_gt_min
+            @test site2.liqvol_memory ≈ site.liqvol_memory
+            @test site2.vegtemp_memory ≈ site.vegtemp_memory
+            @test site2.mass_balance[1].old_stock ≈ site.mass_balance[1].old_stock
+            @test site2.flux_diags.elem[1].cwd_ag_input ≈ site.flux_diags.elem[1].cwd_ag_input
+            @test site2.iflux_balance[1].iflux_liveveg ≈ site.iflux_balance[1].iflux_liveveg
+            @test site2.term_carbonflux_canopy ≈ site.term_carbonflux_canopy
+            @test site2.term_abg_flux ≈ site.term_abg_flux
+        end
+
+        # ==================================================================
+        # 4. R3 — update_3dpatch_radiation! runs + finite albd_parb
+        # ==================================================================
+        @testset "R3 update_3dpatch_radiation!" begin
+            site = _build_restart_site(npft, nlevsoil)
+            # bare-ground patch (no leaf layers): nrad zeroed, daylight on.
+            p = _make_restart_patch(10000.0, 1.0, npft, nlevsoil)
+            fill!(p.nrad, 0)
+            p.solar_zenith_flag = true
+            p.solar_zenith_angle = 0.5
+            for i in 1:CLM.num_swb
+                p.gnd_alb_dir[i] = 0.15 + 0.01 * i
+                p.gnd_alb_dif[i] = 0.25 + 0.01 * i
+            end
+            site.oldest_patch = p; site.youngest_patch = p
+            p.older = nothing; p.younger = nothing
+
+            # minimal bc_out with the 7 radiation arrays sized (npatch x num_swb).
+            bc_out = CLM.bc_out_type()
+            npa = 1
+            bc_out.albd_parb = fill(NaN, npa, CLM.num_swb)
+            bc_out.albi_parb = fill(NaN, npa, CLM.num_swb)
+            bc_out.fabd_parb = fill(NaN, npa, CLM.num_swb)
+            bc_out.fabi_parb = fill(NaN, npa, CLM.num_swb)
+            bc_out.ftdd_parb = fill(NaN, npa, CLM.num_swb)
+            bc_out.ftid_parb = fill(NaN, npa, CLM.num_swb)
+            bc_out.ftii_parb = fill(NaN, npa, CLM.num_swb)
+
+            CLM.update_3dpatch_radiation!(ri, 1, [site], [bc_out])
+
+            @test all(isfinite, bc_out.albd_parb)
+            @test all(isfinite, bc_out.albi_parb)
+            # bare-ground branch copies gnd albedos into albd/albi_parb
+            @test bc_out.albd_parb[1, 1] ≈ p.gnd_alb_dir[1]
+            @test bc_out.albi_parb[1, 2] ≈ p.gnd_alb_dif[2]
         end
 
     finally
