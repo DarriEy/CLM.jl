@@ -393,6 +393,16 @@ include("fates/PRTAllometricCNPMod.jl")
 # control flags above. Standalone — NOT added to CLMInstances.
 include("fates/FatesCohortMod.jl")
 
+# FATES (Tier F) Batch 9 — the PATCH type (FatesPatchMod). A FATES patch is a
+# collection of cohorts sharing a disturbance history/age. It owns the cohort
+# linked list (tallest/shortest), the older/younger patch linked list, the
+# canopy-layer/PFT/leaf-layer leaf-area + radiation profile arrays, the per-element
+# litter pools, the SPITFIRE fuel object, the two-stream radiation object, and the
+# per-patch running means. Depends on the cohort type (Batch 8) + litter/fuel/
+# two-stream/running-mean types + PRT generic + EDParams/Radiation/Interface
+# constants. Standalone — NOT added to CLMInstances.
+include("fates/FatesPatchMod.jl")
+
 # ===========================================================================
 # Driver (depends on all modules above)
 # ===========================================================================

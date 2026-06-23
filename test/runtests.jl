@@ -208,6 +208,8 @@ using CLM
     include("test_fates_prtcnp.jl")
     # FATES (Tier F) Batch 8 — the COHORT type (FatesCohortMod).
     include("test_fates_cohort.jl")
+    # FATES (Tier F) Batch 9 — the PATCH type (FatesPatchMod).
+    include("test_fates_patch.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
