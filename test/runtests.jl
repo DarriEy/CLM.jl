@@ -251,6 +251,9 @@ using CLM
     # FATES (Tier F) Batch 14 — patch disturbance engine (EDPatchDynamicsMod):
     # disturbance_rates/spawn/split/fuse/terminate patches + *_litter_fluxes.
     include("test_fates_edpatchdynamics.jl")
+    # FATES (Tier F) Batch 15 — canopy structure engine (EDCanopyStructureMod):
+    # layer arrangement (demote/promote) + leaf-area profiles + host BC packing.
+    include("test_fates_edcanopystructure.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
