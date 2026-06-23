@@ -1713,9 +1713,21 @@ function clm_drv_core!(config::CLMDriverConfig,
     if config.use_fates
         # Placeholder: clm_fates%WrapUpdateFatesRmean(...) [FATES running mean]
         # Placeholder: clm_fates%wrap_update_hifrq_hist(...) [FATES history]
-        if is_beg_curr_day
-            # Placeholder: clm_fates%dynamics_driv(...) [FATES dynamics]
-            # Placeholder: setFilters!(...) [FATES filter update]
+        if is_beg_curr_day && inst.fates !== nothing
+            # W5 daily demographic step — FATES `dynamics_driv`. Runs once per FATES
+            # site at the day boundary: pack the daily soil/decomp bc_in, advance the
+            # cohort/patch population (ed_ecosystem_dynamics), recompute site
+            # diagnostics + canopy structure (ed_update_site), run the final
+            # TotalBalanceCheck mass-conservation audit, and unpack the new canopy
+            # structure (elai/htop/...) back to canopystate. Fire/hydro/harvest/LUH
+            # are gated off on this carbon-only MVP, so no fire/LUH bc_in is packed.
+            fates_daily_dynamics_step!(inst; nlevsoil=varpar.nlevsoi,
+                                       nlevdecomp=varpar.nlevdecomp,
+                                       use_fates_bgc=config.use_fates_bgc)
+            # Filter rebuild (setFilters!): the single-veg-patch MVP has a static
+            # column<->patch map (p = col.patchi[c]+1), so FATES patch-weight changes
+            # do not add/remove patches and no host filter rebuild is required yet.
+            # A multi-veg-patch FATES column (the full `ifp` walk) would need one here.
         end
     end
 

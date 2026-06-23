@@ -173,6 +173,138 @@ function fates_pack_bcin_photosynthesis!(inst::CLMInstances; s::Int = 1, c::Int 
 end
 
 """
+    fates_pack_bcin_daily!(inst; s=1, c=1, nlevsoil, nlevdecomp, use_fates_bgc=false)
+
+Fill the FATES *daily* demographic `bc_in` soil state for site `s` from CLM column
+`c`, mirroring the carbon-only, no-fire, no-hydro, no-LUH part of the Fortran host
+`dynamics_driv` (clmfates_interfaceMod.F90 Part I):
+
+  * `tempk_sl` / `t_soisno_sl` — soil-layer temperature (K).
+  * `h2o_liqvol_sl` — liquid volume in soil layer (m3/m3).
+  * `watsat_sl` / `eff_porosity_sl` — porosity / effective porosity.
+  * `smp_sl` — soil suction potential (mm) from the Clapp-Hornberger curve.
+  * `w_scalar_sisl` / `t_scalar_sisl` — soil-decomposition moisture/temperature
+    limitation scalars consumed by litter fragmentation (EDPhysiologyMod). Only
+    packed when `use_fates_bgc` (Fortran gates these on the soilbiogeochem carbon
+    flux being live); otherwise zeroed, matching the Fortran else-branch.
+  * `max_rooting_depth_index_col` — left as set by `clm_fates_init!`.
+
+Fire drivers (lightning/pop/RH24/wind24/precip24), SP-LAI streams, harvest/LUH
+arrays are intentionally NOT packed — those configs are off on this MVP path.
+
+This reuses the same soil-state slice as `fates_pack_bcin_btran!`; calling both in
+one step is harmless (idempotent on the soil fields). The decomposition scalars
+are the daily-step-specific additions.
+"""
+function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
+                                nlevsoil::Int, nlevdecomp::Int,
+                                use_fates_bgc::Bool = false)
+    fates = inst.fates
+    fates === nothing && return inst
+    bc = fates.bc_in[s]
+
+    temp = inst.temperature
+    wdb  = inst.water.waterdiagnosticbulk_inst
+    ss   = inst.soilstate
+
+    joff = varpar.nlevsno  # snow layers offset into t_soisno / h2osoi arrays
+
+    for j in 1:nlevsoil
+        tk = temp.t_soisno_col[c, joff + j]
+        bc.tempk_sl[j]        = tk
+        bc.t_soisno_sl[j]     = tk
+        bc.h2o_liqvol_sl[j]   = wdb.h2osoi_liqvol_col[c, j]
+        bc.watsat_sl[j]       = ss.watsat_col[c, j]
+        bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
+
+        wsat = ss.watsat_col[c, j]
+        scl  = wsat > 0.0 ? clamp(wdb.h2osoi_liqvol_col[c, j] / wsat, 0.01, 1.0) : 0.01
+        bc.smp_sl[j] = -ss.sucsat_col[c, j] * scl^(-ss.bsw_col[c, j])
+    end
+
+    # Soil-decomposition limitation scalars: live only under use_fates_bgc, else 0
+    # (matches the Fortran w_scalar/t_scalar gate in dynamics_driv). Clamp the loop
+    # to the FATES bc array length (the cold start sizes these to FATES nlevdecomp,
+    # which may differ from the CLM-side nlevdecomp passed by the driver).
+    ndl = min(nlevdecomp, length(bc.w_scalar_sisl))
+    if use_fates_bgc
+        cf = inst.soilbiogeochem_carbonflux
+        for j in 1:ndl
+            wsv = (!isempty(cf.w_scalar_col) && isfinite(cf.w_scalar_col[c, j])) ?
+                  cf.w_scalar_col[c, j] : 0.0
+            tsv = (!isempty(cf.t_scalar_col) && isfinite(cf.t_scalar_col[c, j])) ?
+                  cf.t_scalar_col[c, j] : 0.0
+            bc.w_scalar_sisl[j] = wsv
+            bc.t_scalar_sisl[j] = tsv
+        end
+    else
+        for j in 1:ndl
+            bc.w_scalar_sisl[j] = 0.0
+            bc.t_scalar_sisl[j] = 0.0
+        end
+    end
+
+    return inst
+end
+
+"""
+    fates_daily_dynamics_step!(inst; nlevsoil, nlevdecomp, use_fates_bgc=false)
+
+Run one FATES *daily demographic step* for every FATES site attached to `inst`,
+mirroring the Fortran host `dynamics_driv`:
+
+  1. pack the daily `bc_in` (`fates_pack_bcin_daily!`) for each site's CLM column,
+  2. `ed_ecosystem_dynamics(site, bc_in, bc_out)` — the demographic advance
+     (phenology -> growth/allocation -> mortality -> recruitment -> cohort/patch
+     dynamics, interleaved with `TotalBalanceCheck` mass-conservation audits),
+  3. `ed_update_site(site, bc_in, bc_out, false)` — recompute site diagnostics +
+     canopy structure (runs `TotalBalanceCheck` itself),
+  4. `TotalBalanceCheck(site, -1)` — final mass-conservation audit (throws on
+     imbalance > 1e-5),
+  5. unpack the canopy structure (`fates_unpack_bcout_canopy_structure!`) back into
+     CLM canopystate (elai/esai/htop/hbot/z0m/displa/dleaf) for each site's veg patch.
+
+The site<->column<->veg-patch map mirrors the W3/W4 hooks: FATES site `s` maps onto
+the `s`-th `col.is_fates` column, vegetated patch = `col.patchi[c] + 1`.
+
+Returns `inst`. Gated by the caller behind `config.use_fates`.
+"""
+function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
+                                    nlevdecomp::Int, use_fates_bgc::Bool = false)
+    fates = inst.fates
+    fates === nothing && return inst
+    col = inst.column
+
+    s = 0
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] || continue
+        s += 1
+        s <= fates.nsites || break
+        p = col.patchi[c] + 1   # vegetated patch (bare-ground at +0)
+
+        # 1. pack the daily soil/decomp bc_in.
+        fates_pack_bcin_daily!(inst; s=s, c=c, nlevsoil=nlevsoil,
+                               nlevdecomp=nlevdecomp, use_fates_bgc=use_fates_bgc)
+
+        site = fates.sites[s]
+        bc_in  = fates.bc_in[s]
+        bc_out = fates.bc_out[s]
+
+        # 2-3. the demographic step + site diagnostics update.
+        ed_ecosystem_dynamics(site, bc_in, bc_out)
+        ed_update_site(site, bc_in, bc_out, false)
+
+        # 4. final mass-conservation audit (throws on imbalance).
+        TotalBalanceCheck(site, -1)
+
+        # 5. unpack canopy structure back into CLM.
+        fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p)
+    end
+
+    return inst
+end
+
+"""
     fates_unpack_bcout_sunfrac!(inst; s=1, c=1, p=1)
 
 Write the FATES sun/shade `bc_out` back to CLM canopystate for column `c` /

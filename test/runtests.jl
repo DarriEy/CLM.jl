@@ -288,6 +288,12 @@ using CLM
     # gated driver-branch column<->site mapping.
     include("test_fates_driver_hooks.jl")
 
+    # FATES live-driver wiring W5 — the daily demographic step. Cold-starts a
+    # carbon-only site, drives ed_ecosystem_dynamics + ed_update_site + the final
+    # TotalBalanceCheck through fates_daily_dynamics_step! (the gated driver hook),
+    # and asserts mass conservation + finite/physical cohort/patch/canopy state.
+    include("test_fates_daily_dynamics.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),

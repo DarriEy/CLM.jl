@@ -168,6 +168,38 @@ function _fates_spike_setup_pft!(npft::Int)
     ev.vcmaxse = fill(485.0, npft);    ev.jmaxse = fill(495.0, npft)
     ev.hydr_k_lwp = fill(0.0, npft)    # plant hydraulics off
 
+    # ---- Mortality params (read by mortality_rates in the daily demographic
+    # step, W5) -------------------------------------------------------------
+    # Senescence OFF: setting mort_ip_*_senescence >= fates_check_param_set drives
+    # the (smort/asmort) senescence branches to 0.  Background / carbon-starvation /
+    # cold-stress / hydraulic-failure scalars set to representative small rates so
+    # the demographic step has finite, physical mortality.
+    ev.bmort                   = fill(0.014, npft)   # background mortality (/yr)
+    ev.mort_ip_size_senescence = fill(fates_check_param_set, npft)  # senescence off
+    ev.mort_r_size_senescence  = fill(0.0, npft)
+    ev.mort_ip_age_senescence  = fill(fates_check_param_set, npft)  # senescence off
+    ev.mort_r_age_senescence   = fill(0.0, npft)
+    ev.hf_sm_threshold         = fill(1.0e-6, npft)  # btran hydraulic-failure thresh
+    ev.hf_flc_threshold        = fill(0.5, npft)
+    ev.mort_scalar_hydrfailure = fill(0.6, npft)
+    ev.mort_scalar_cstarvation = fill(0.6, npft)
+    ev.mort_upthresh_cstarvation = fill(0.1, npft)
+    ev.mort_scalar_coldstress  = fill(3.0, npft)
+    ev.freezetol               = fill(-80.0, npft)   # very cold-tolerant => no frmort
+
+    # ---- Seed / recruitment params (read by SeedUpdate / recruitment in the
+    # daily demographic step, W5) ------------------------------------------
+    ev.seed_suppl              = fill(0.0, npft)   # no external seed supplement
+    ev.seed_decay_rate         = fill(0.51, npft)  # seed pool -> litter decay (/yr)
+    ev.germination_rate        = fill(0.5, npft)   # seed -> seedling germination
+    ev.repro_frac_seed         = fill(0.5, npft)   # TRS only (unused: default regen)
+    ev.seed_dispersal_fraction = fill(0.0, npft)   # seed dispersal off (cadence none)
+    # Phenology / trimming knobs read on the integrate / recruitment path.
+    ev.phenflush_fraction      = fill(0.5, npft)
+    ev.phen_cold_size_threshold = fill(0.0, npft)
+    ev.trim_inc                = fill(0.03, npft)
+    ev.trim_limit              = fill(0.3, npft)
+
     EDPftvarcon_inst[] = ev
 
     edp = ed_params_type()
@@ -200,6 +232,12 @@ function _fates_spike_setup_pft!(npft::Int)
     edp.fates_mortality_disturbance_fraction = 1.0
     edp.ED_val_understorey_death      = 0.55983
     edp.logging_coll_under_frac       = 0.55983
+    # logging_event_code is read (Int(trunc(...))) at the TOP of IsItLoggingTime
+    # — BEFORE the use_logging early-return — so it must be finite even with
+    # logging OFF.  1.0 == "logging off" event code.  The daily demographic step
+    # (W5) reaches IsItLoggingTime, unlike the W3/W4 per-step hooks.
+    edp.logging_event_code            = 1.0
+    edp.mort_cstarvation_model        = cstarvation_model_lin  # linear C-starvation
     edp.maxpatches_by_landuse         = fill(10, n_landuse_cats)
     edp.max_nocomp_pfts_by_landuse    = fill(npft, n_landuse_cats)
     edp.crop_lu_pft_vector            = fill(1, n_landuse_cats)
@@ -329,10 +367,16 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # ---- W1.1: FATES globals + parameters (CLMFatesGlobals1) ----
     FatesInterfaceInit(6, false)
 
-    # Carbon-only element registry.
+    # Carbon-only element registry + the element->position reverse lookup
+    # (element_pos[carbon12_element]) read by the daily demographic step (W5,
+    # ed_integrate_state_variables indexes site.mass_balance by it). Params come
+    # from read_fates_params! below (the real FATES param file), not the synthetic
+    # _fates_spike_setup_pft! (superseded/uncalled).
     num_elements[] = 1
     empty!(element_list)
     push!(element_list, carbon12_element)
+    fill!(element_pos, 0)
+    element_pos[carbon12_element] = 1
 
     # Control parameters (set_fates_ctrlparms tag sequence). MUST precede the param
     # read: it sets hlm_parteh_mode (carbon-only), which read_fates_params! branches
