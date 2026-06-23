@@ -538,6 +538,24 @@ include("fates/EDPatchDynamicsMod.jl")
 # paths stubbed behind hlm_use_planthydro (off by default). Standalone — NOT added
 # to CLMInstances.
 include("fates/EDCanopyStructureMod.jl")
+# FATES (Tier F) Batch 16 — radiation + photosynthesis + inventory-init + the
+# ecosystem-dynamics DRIVER. (1) FatesNormanRadMod: the Norman (1979) multi-layer
+# canopy radiative-transfer solver (PatchNormanRadiation — per canopy-layer × PFT
+# × leaf-layer absorbed/reflected/transmitted direct+diffuse rad, albedo,
+# sunlit/shaded fractions). (2) FatesPlantRespPhotosynthMod: leaf-scale
+# Farquhar/Collatz photosynthesis (C3/C4) + Ball-Berry/Medlyn stomatal
+# conductance + Ryan-1991/Atkin-2017 maintenance respiration + leaf→cohort flux
+# scaling (FatesPlantRespPhotosynthDrive). (3) FatesInventoryInitMod: PSS/CSS
+# inventory-based patch/cohort site initialization (initialize_sites_by_inventory).
+# (4) EDMainMod: the daily FATES driver (ed_ecosystem_dynamics) orchestrating
+# phenology→growth→mortality→disturbance→canopy structure→recruitment, plus
+# ed_update_site/TotalBalanceCheck/bypass_dynamics — included LAST as it reuses
+# all the above. Plant-hydraulics paths stubbed behind hlm_use_planthydro (off by
+# default). Standalone — NOT added to CLMInstances.
+include("fates/FatesNormanRadMod.jl")
+include("fates/FatesPlantRespPhotosynthMod.jl")
+include("fates/FatesInventoryInitMod.jl")
+include("fates/EDMainMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

@@ -254,6 +254,14 @@ using CLM
     # FATES (Tier F) Batch 15 — canopy structure engine (EDCanopyStructureMod):
     # layer arrangement (demote/promote) + leaf-area profiles + host BC packing.
     include("test_fates_edcanopystructure.jl")
+    # FATES (Tier F) Batch 16 — Norman (1979) two-stream canopy radiation
+    # (FatesNormanRadMod), leaf photosynthesis+respiration (FatesPlantRespPhoto
+    # synthMod), PSS/CSS inventory init (FatesInventoryInitMod), and the daily
+    # ecosystem-dynamics driver (EDMainMod).
+    include("test_fates_norman_rad.jl")
+    include("test_fates_plantrespphotosynth.jl")
+    include("test_fates_inventoryinit.jl")
+    include("test_fates_edmain.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
