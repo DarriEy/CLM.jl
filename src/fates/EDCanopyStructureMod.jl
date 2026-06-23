@@ -421,7 +421,7 @@ function DemoteFromLayer!(currentSite::ed_site_type, currentPatch::fates_patch_t
                     copyc.prt = InitPRTObject!()
 
                     if hlm_use_planthydro[] == itrue
-                        # TODO Batch NN: InitHydrCohort not yet ported (FatesPlantHydraulicsMod).
+                        InitHydrCohort(currentSite, copyc)
                     end
 
                     Copy(currentCohort, copyc)
@@ -706,7 +706,7 @@ function PromoteIntoLayer!(currentSite::ed_site_type, currentPatch::fates_patch_
                         copyc.prt = InitPRTObject!()
 
                         if hlm_use_planthydro[] == itrue
-                            # TODO Batch NN: InitHydrCohort not yet ported (FatesPlantHydraulicsMod).
+                            InitHydrCohort(currentSite, copyc)
                         end
 
                         Copy(currentCohort, copyc)
@@ -1282,8 +1282,9 @@ function update_hlm_dynamics!(nsites::Integer, sites::AbstractVector,
         UpdateHarvestC!(sites[s], bc_out[s])
     end
 
+    # Diagnose the site-level recruit water storage pool (no mass moved here).
     if hlm_use_planthydro[] == itrue
-        # TODO Batch NN: RecruitWaterStorage not yet ported (FatesPlantHydraulicsMod).
+        RecruitWaterStorage(nsites, sites, bc_out)
     end
 
     return nothing

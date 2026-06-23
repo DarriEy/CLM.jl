@@ -781,9 +781,6 @@ function init_patches!(nsites::Integer, sites::AbstractVector, bc_in::AbstractVe
     # Set the rhizosphere shells based on the plant initialization.  The hydraulics
     # state was set inside init_cohorts!->create_cohort.
     if hlm_use_planthydro[] == itrue
-        # TODO Batch NN: updateSizeDepRhizHydProps (FatesPlantHydraulicsMod) is only
-        # partially ported; gated off by default (hlm_use_planthydro defaults to
-        # ifalse). When fully ported, call it here per-site.
         for s in 1:nsites
             _init_patches_rhiz_hydro!(sites[s], bc_in[s])
         end
@@ -807,10 +804,8 @@ end
 
 # Plant-hydraulics rhizosphere init (only entered when hlm_use_planthydro==itrue).
 function _init_patches_rhiz_hydro!(site::ed_site_type, bc_in)
-    # TODO Batch NN: updateSizeDepRhizHydProps not yet fully ported.
-    if @isdefined(updateSizeDepRhizHydProps!)
-        updateSizeDepRhizHydProps!(site, bc_in)
-    end
+    # Set the rhizosphere shell geometry/conductances from the plant init state.
+    UpdateSizeDepRhizHydProps(site, bc_in)
     return nothing
 end
 

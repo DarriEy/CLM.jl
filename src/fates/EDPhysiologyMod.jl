@@ -86,13 +86,11 @@ const elongf_min = 0.05              # Minimum elongation factor (full abscissio
 const smp_lwr_bound = -1.0e6         # Imposed SMP lower bound for frozen/dry soil
 
 # ===========================================================================
-# Stub: plant-hydraulics cohort init (gated by hlm_use_planthydro, off default)
+# Plant-hydraulics cohort init on the tree-damage path (gated by
+# hlm_use_planthydro). Allocates the new damaged cohort's hydro object.
 # ===========================================================================
-# TODO Batch NN: InitHydrCohort lives in FatesPlantHydraulicsMod, which is only
-# partially ported. It is called only on the tree-damage path when
-# hlm_use_planthydro == itrue (off in the default + test path). No-op until ported.
 function _ed_phys_init_hydr_cohort!(currentSite, ndcohort)
-    # TODO Batch NN: real implementation in FatesPlantHydraulicsMod.InitHydrCohort
+    InitHydrCohort(currentSite, ndcohort)
     return nothing
 end
 
