@@ -52,6 +52,7 @@ end
     old_nlevca   = CLM.nlevcoage[]
     old_nlevage  = CLM.nlevage[]
     old_nlevdam  = CLM.nlevdamage[]
+    old_nlevhgt  = CLM.nlevheight[]
     old_sfp      = CLM.SFParams[]
     old_restart  = CLM.hlm_is_restart[]
     old_nocomp   = CLM.hlm_use_nocomp[]
@@ -67,20 +68,29 @@ end
     old_vert     = CLM.hlm_use_vertsoilc[]
     old_spit     = CLM.hlm_spitfire_mode[]
     old_paramfp  = CLM.fates_maxPatchesPerSite[]
+    # read_fates_params! overwrites the FATES parameter globals; save/restore them
+    # so the surrounding default suite is unperturbed (a real param table now).
+    old_edparams = CLM.EDParams[]
+    old_edpft    = CLM.EDPftvarcon_inst[]
+    old_paramd   = CLM.ParamDerived[]
 
     try
-        numpft   = 2
         nlevsoil = 3
         nlevdecomp = 1     # non-vertsoilc => one decomp layer
 
         # =================================================================
         # W1 + W2: build + cold-start a single FATES site, attach to inst.
+        # numpft now comes from the REAL FATES param file (read_fates_params!),
+        # not a hand-set count — the carbon-only cold start must be finite on
+        # the real per-PFT trait/allometry table.
         # =================================================================
         inst = CLM.CLMInstances()
         @test inst.fates === nothing   # default OFF — inert
 
-        fates = CLM.clm_fates_init!(inst; nsites = 1, numpft_in = numpft,
+        fates = CLM.clm_fates_init!(inst; nsites = 1,
                                     nlevsoil = nlevsoil, nlevdecomp = nlevdecomp)
+        numpft = CLM.numpft[]          # resolved from the param file (14)
+        @test numpft == 14
 
         # ---- attachment + container shape ----
         @test inst.fates !== nothing
@@ -164,6 +174,7 @@ end
         CLM.nlevcoage[]                   = old_nlevca
         CLM.nlevage[]                     = old_nlevage
         CLM.nlevdamage[]                  = old_nlevdam
+        CLM.nlevheight[]                  = old_nlevhgt
         CLM.SFParams[]                    = old_sfp
         CLM.hlm_is_restart[]              = old_restart
         CLM.hlm_use_nocomp[]              = old_nocomp
@@ -179,5 +190,8 @@ end
         CLM.hlm_use_vertsoilc[]           = old_vert
         CLM.hlm_spitfire_mode[]           = old_spit
         CLM.fates_maxPatchesPerSite[]     = old_paramfp
+        CLM.EDParams[]                    = old_edparams
+        CLM.EDPftvarcon_inst[]            = old_edpft
+        CLM.ParamDerived[]                = old_paramd
     end
 end

@@ -23,18 +23,23 @@
 # single primaryland patch holding the whole site area, init_cohorts! seeds one
 # small cohort per PFT.  It needs none of the SP-LAI / inventory / biogeog inputs.
 #
-# Since there is no FATES NetCDF parameter file wired into this port, the PFT /
-# allometry / ED parameter tables are populated synthetically in-memory (a 2-PFT
-# woody evergreen carbon table — the same table the EDInitMod unit test uses).
+# SUPERSEDED: the PFT / allometry / ED parameter tables are now read from the REAL
+# FATES default parameter file (data/fates/fates_params_default.cdl) via
+# read_fates_params! (fates_params_reader.jl), which clm_fates_init! calls below.
+# The synthetic in-memory table _fates_spike_setup_pft! (a 2-PFT woody-evergreen
+# carbon table, the EDInitMod unit-test table) is kept below for reference but is
+# NO LONGER CALLED by the live cold start.
 
 """
     _fates_spike_setup_pft!(npft) -> npft
 
+SUPERSEDED by [`read_fates_params!`](@ref) (real FATES param-file reader). Kept as
+a reference for the minimal synthetic table only — NOT called by `clm_fates_init!`.
+
 Populate the in-memory FATES parameter tables (prt_params allometry, param_derived,
 EDPftvarcon, ed_params bins/tols, sf_params CWD frac) for a minimal `npft`-PFT
 woody-evergreen carbon-only cold start, and set the size/age/coage/damage level
-counts.  Mirrors the synthetic table the EDInitMod test builds — used in lieu of a
-FATES parameter NetCDF file (not wired into this port).
+counts.  Mirrors the synthetic table the EDInitMod test builds.
 """
 function _fates_spike_setup_pft!(npft::Int)
     p = prt_params
@@ -289,7 +294,8 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int)
 end
 
 """
-    clm_fates_init!(inst::CLMInstances; nsites=1, numpft_in, nlevsoil, nlevdecomp,
+    clm_fates_init!(inst::CLMInstances; nsites=1, numpft_in=nothing, nlevsoil,
+                    nlevdecomp, params_path=FATES_PARAMS_DEFAULT_CDL,
                     current_year=1, current_month=1, current_day=1)
         -> fates_interface_type
 
@@ -301,34 +307,53 @@ Carbon-only minimal config (planthydro / SPITFIRE / inventory all OFF; SP / noco
 fixed-biogeog / LUH all OFF) — the default NBG cold start that needs no external
 SP-LAI / inventory / biogeography data.
 
-This sets the FATES module-global `hlm_*` control Refs and the in-memory parameter
-tables as a side effect (there is no FATES parameter NetCDF wired into this port).
-The default test suite never calls this, so the globals are left in the minimal-
-cold-start state on return; callers that mix FATES with other FATES tests should
-save/restore the globals themselves.
+Parameters are read from the REAL FATES default parameter file
+(`data/fates/fates_params_default.cdl`, via [`read_fates_params!`](@ref)) — this
+is the physically-meaningful replacement for the old synthetic 2-PFT table. The
+PFT count (`numpft[]`) comes from the file (14 for the default file); pass
+`numpft_in` only to override/validate it (a mismatch is an error). `params_path`
+selects an alternative parameter file.
+
+This sets the FATES module-global `hlm_*` control Refs and the parameter globals
+as a side effect. The default test suite never calls this, so the globals are
+left in the minimal-cold-start state on return; callers that mix FATES with other
+FATES tests should save/restore the globals themselves.
 """
-function clm_fates_init!(inst::CLMInstances; nsites::Int = 1, numpft_in::Int,
+function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
+                         numpft_in::Union{Int,Nothing} = nothing,
                          nlevsoil::Int, nlevdecomp::Int,
+                         params_path::AbstractString = FATES_PARAMS_DEFAULT_CDL,
                          current_year::Int = 1, current_month::Int = 1,
                          current_day::Int = 1)
 
     # ---- W1.1: FATES globals + parameters (CLMFatesGlobals1) ----
     FatesInterfaceInit(6, false)
 
-    # Populate the in-memory parameter tables (stand-in for the FATES param file).
-    _fates_spike_setup_pft!(numpft_in)
-
     # Carbon-only element registry.
     num_elements[] = 1
     empty!(element_list)
     push!(element_list, carbon12_element)
 
-    # Control parameters (set_fates_ctrlparms tag sequence).
-    _fates_spike_set_ctrlparms!(; numpft_in = numpft_in, nlevsoil = nlevsoil)
+    # Control parameters (set_fates_ctrlparms tag sequence). MUST precede the param
+    # read: it sets hlm_parteh_mode (carbon-only), which read_fates_params! branches
+    # on (PRTDerivedParams! organ map + the PARTEH/PFT consistency checks). nlevsoil
+    # is the only numeric arg it needs; numpft is resolved from the file below.
+    _fates_spike_set_ctrlparms!(; numpft_in = 0, nlevsoil = nlevsoil)
 
-    # PARTEH carbon hypothesis global state + numpft / nleafage / max-patch dims.
+    # Read the REAL FATES default parameter file (replaces _fates_spike_setup_pft!).
+    # This populates prt_params / EDParams / EDPftvarcon_inst / SFParams /
+    # ParamDerived and the numpft[] / nlev*class[] / nleafage[] dim Refs.
+    read_fates_params!(; path = params_path)
+    numpft_resolved = numpft[]
+    if numpft_in !== nothing && numpft_in != numpft_resolved
+        error("clm_fates_init!: numpft_in=$numpft_in does not match the parameter " *
+              "file's fates_pft dimension ($numpft_resolved). Omit numpft_in to " *
+              "use the file value.")
+    end
+
+    # PARTEH carbon hypothesis global state. numpft / nleafage already set by the
+    # reader; re-affirm nleafage from prt_params for robustness.
     InitPRTGlobalAllometricCarbon!()
-    numpft[]   = numpft_in
     nleafage[] = size(prt_params.leaf_long, 2)
 
     # SetFatesGlobalElements1 sizes maxpatch_total / fates_maxPatchesPerSite from the
@@ -374,7 +399,7 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1, numpft_in::Int,
                       0,   # num_lu_harvest_cats
                       0,   # num_luh2_states
                       0,   # num_luh2_transitions
-                      1, numpft_in)  # surfpft_lb, surfpft_ub
+                      1, numpft_resolved)  # surfpft_lb, surfpft_ub
         allocate_bcout(fates.bc_out[s], nlevsoil, nlevdecomp)
         zero_bcs(fates, s)
         set_bcs(fates.bc_in[s])

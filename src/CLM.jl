@@ -588,6 +588,12 @@ include("fates/FatesHistoryInterfaceMod.jl")
 include("fates/FatesRestartVariableType.jl")
 include("fates/FatesRestartInterfaceMod.jl")
 include("fates/FatesInterfaceMod.jl")
+# Real FATES parameter-file reader: read_fates_params! parses the official FATES
+# default parameter file (data/fates/fates_params_default.cdl) and populates every
+# FATES param global via the existing register/receive infrastructure. Replaces
+# the synthetic _fates_spike_setup_pft! table. Depends on the param modules above
+# (EDParamsMod, PRTParamsFATESMod, EDPftvarcon, SFParamsMod, FatesParameterDerived).
+include("fates/fates_params_reader.jl")
 # W1+W2 live-driver wiring: clm_fates_init! — bootstrap + cold-start a single
 # carbon-only FATES site and attach it to CLMInstances.fates. Depends on
 # CLMInstances (instances.jl) + the whole FATES module stack above.

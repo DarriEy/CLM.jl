@@ -313,19 +313,17 @@ function clm_initialize!(;
     # ---- Step 17: FATES live-driver attach (W1+W2, gated) ----
     # When use_fates, bootstrap + cold-start a carbon-only single FATES site per
     # CLM column and attach it to inst.fates (the W3/W4 driver hooks read it).
-    # No-op when !use_fates so the default path is byte-identical. The synthetic
-    # in-memory FATES parameter tables stand in for a FATES parameter NetCDF
-    # reader, which is a separate later task (see fates_driver_init.jl header).
+    # No-op when !use_fates so the default path is byte-identical. Parameters are
+    # read from the REAL FATES default parameter file (data/fates/
+    # fates_params_default.cdl) inside clm_fates_init! via read_fates_params!.
     if use_fates
         varctl.use_fates = true
         nlevsoil_fates = varpar.nlevsoi
         # Carbon-only / non-vertsoilc cold start => one decomposition layer.
         nlevdecomp_fates = 1
-        # One FATES site per CLM column (single-site MVP: nc is typically 1).
-        # The synthetic carbon-only param table built by clm_fates_init! is a
-        # 2-PFT woody-evergreen stand-in (no FATES parameter NetCDF wired yet).
+        # One FATES site per CLM column (single-site MVP: nc is typically 1). PFT
+        # count comes from the parameter file (numpft_in omitted => use the file).
         clm_fates_init!(inst; nsites = nc,
-                        numpft_in = 2,
                         nlevsoil = nlevsoil_fates,
                         nlevdecomp = nlevdecomp_fates,
                         current_year = year(start_date),

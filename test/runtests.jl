@@ -275,6 +275,10 @@ using CLM
     include("test_fates_history.jl")
     include("test_fates_restart.jl")
     include("test_fates_interface.jl")
+    # Real FATES param-file reader: read_fates_params! parses the official FATES
+    # default parameter file (data/fates/fates_params_default.cdl) and populates
+    # every FATES param global; sample values match the CDL; cold-start finite.
+    include("test_fates_params_reader.jl")
     # W1+W2 live-driver wiring spike: cold-start a single FATES site + attach to
     # CLMInstances + prove the AD-dual-copy / GPU-adapt ownership-model skip.
     include("test_fates_coldstart_spike.jl")
