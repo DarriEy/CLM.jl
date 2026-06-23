@@ -215,6 +215,11 @@ using CLM
     # FATES (Tier F) Batch 11 — PARTEH parameter init/registration (PRTParamsFATESMod).
     include("test_fates_prtparamsfates.jl")
 
+    # FATES (Tier F) Batch 11 — ChecksBalancesMod (site mass-stock summation +
+    # integrated flux/state balance check) + EDAccumulateFluxesMod
+    # (daily per-cohort flux accumulation).
+    include("test_fates_checksbalances_accfluxes.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),

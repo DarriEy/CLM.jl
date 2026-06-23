@@ -429,6 +429,21 @@ include("fates/EDTypesMod.jl")
 # (PRTGenericMod), the allometry chain (FatesAllometryMod), EDPftvarcon_inst, and
 # init_recruit_trim (EDTypesMod). Standalone — nothing added to CLMInstances.
 include("fates/PRTParamsFATESMod.jl")
+# FATES (Tier F) Batch 11 — two standalone diagnostic / accumulation modules
+# that build on the complete merged FATES type system above.
+#   * ChecksBalancesMod — site-level carbon/mass-balance checking + diagnostics:
+#     SiteMassStock/PatchMassStock sum the biomass+seed+litter stocks per element,
+#     CheckLitterPools sanity-checks for negative litter, and
+#     CheckIntegratedMassPools accumulates the time-integrated net fluxes in/out
+#     of vegetation + litter and compares against the instantaneous state.
+#   * EDAccumulateFluxesMod — AccumulateFluxes_ED accumulates/averages the
+#     per-cohort photosynthesis/respiration fluxes (npp/gpp/resp/sym_nfix/c13/
+#     year_net_uptake) over the FATES daily timestep.
+# Both depend on ed_site_type/patch/cohort + the EDTypes mass-balance helper
+# types + PRTGenericMod element/organ consts + FatesLitter. Standalone — NOT
+# added to CLMInstances or any dual-copied struct.
+include("fates/ChecksBalancesMod.jl")
+include("fates/EDAccumulateFluxesMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
