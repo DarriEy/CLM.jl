@@ -80,7 +80,7 @@ Fields match the Fortran type:
 - `bc_out::Vector{bc_out_type}`     — FATES -> host boundaries (per site)
 - `bc_pconst::bc_pconst_type`       — parameter constants (one instance)
 """
-Base.@kwdef mutable struct fates_interface_type
+Base.@kwdef mutable struct fates_interface_type <: AbstractFatesInterface
     nsites::Int = 0
     sites::Vector{ed_site_type}   = ed_site_type[]
     bc_in::Vector{bc_in_type}     = bc_in_type[]

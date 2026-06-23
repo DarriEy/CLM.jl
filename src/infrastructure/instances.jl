@@ -12,6 +12,14 @@
 # excess-ice streams, soil-water-retention-curve factory.
 # ============================================================================
 
+# Forward-declared supertype for the FATES interface container. The concrete
+# `fates_interface_type` (FatesInterfaceMod.jl) is `<: AbstractFatesInterface` and
+# is `include`d AFTER this file, so the CLMInstances `fates` field is annotated on
+# the abstract supertype to satisfy parse-time ordering. The attached value is
+# always a concrete `fates_interface_type`; it is excluded from the AD dual-copy and
+# GPU adapt exactly like `surfdata`.
+abstract type AbstractFatesInterface end
+
 """
     CLMInstances
 
@@ -120,6 +128,11 @@ Base.@kwdef mutable struct CLMInstances
 
     # --- Surface input data (for monthly phenology re-reads) ---
     surfdata::Union{SurfaceInputData, Nothing} = nothing
+
+    # FATES interface state (pointer-linked cohort/patch/site hierarchy) — attached
+    # like surfdata: excluded from the AD dual-copy and GPU adapt. FATES columns are
+    # CPU-only / non-differentiable by design. nothing unless use_fates.
+    fates::Union{AbstractFatesInterface, Nothing} = nothing
 end
 
 # Make the whole instance tree device-movable: adapt(backend, inst) recursively
