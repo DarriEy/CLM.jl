@@ -528,6 +528,16 @@ include("fates/EDPhysiologyMod.jl")
 # stubbed behind hlm_use_planthydro (off by default). Standalone — NOT added to
 # CLMInstances.
 include("fates/EDPatchDynamicsMod.jl")
+# FATES (Tier F) Batch 15 — the canopy STRUCTURE engine (EDCanopyStructureMod):
+# canopy_structure! arranges cohorts into discrete canopy layers (PPA) via
+# DemoteFromLayer!/PromoteIntoLayer! so each layer's crown area fits the patch;
+# canopy_spread! (crown-area scaling); canopy_summarization!/leaf_area_profile!
+# build the per-patch canopy-layer × PFT × leaf-layer LAI/SAI profiles;
+# update_hlm_dynamics! packs canopy state (LAI/SAI, fractions, z0m/displa/dleaf)
+# to the host. Reuses Batch 12–14 cohort/patch/allometry helpers. Plant-hydraulics
+# paths stubbed behind hlm_use_planthydro (off by default). Standalone — NOT added
+# to CLMInstances.
+include("fates/EDCanopyStructureMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
