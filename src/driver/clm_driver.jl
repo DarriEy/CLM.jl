@@ -828,7 +828,30 @@ function clm_drv_core!(config::CLMDriverConfig,
                                 a2l.forc_solad_downscaled_col, a2l.forc_solai_grc,
                                 pch, filt.nourbanp, bc_patch)
     else
-        # Placeholder: clm_fates%wrap_sunfrac(...) [FATES sun/shade]
+        # W3a sun/shade — FATES.  Pack the radiation bc_in for every FATES site,
+        # run FatesSunShadeFracs, and unpack fsun/laisun/laisha back to canopystate.
+        # Maps FATES site s 1:1 onto the s-th FATES column and its first vegetated
+        # patch (col.patchi[c] = the bare-ground patch; the veg patch is +1).
+        if inst.fates !== nothing
+            s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                p = col.patchi[c] + 1   # first vegetated patch (bare-ground at +0)
+                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=sa.coszen_col[c])
+            end
+            FatesSunShadeFracs(inst.fates.nsites, inst.fates.sites,
+                               inst.fates.bc_in, inst.fates.bc_out)
+            s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                p = col.patchi[c] + 1
+                fates_unpack_bcout_sunfrac!(inst; s=s, c=c, p=p)
+            end
+        end
     end
 
     # SurfaceRadiation — WIRED
@@ -900,6 +923,29 @@ function clm_drv_core!(config::CLMDriverConfig,
                              filt.exposedvegp, bc_patch,
                              varpar.nlevgrnd, varpar.nlevsno)
 
+    # W4a btran — FATES.  For FATES columns, pack the soil-hydrology bc_in and run
+    # btran_ed! (the FATES water-stress factor + root-soil resistance), then unpack
+    # btran/rootr back into energyflux/soilstate (overriding the column average).
+    if config.use_fates && inst.fates !== nothing
+        nlevsoil_f = varpar.nlevsoi
+        s = 0
+        for c in 1:length(col.is_fates)
+            col.is_fates[c] || continue
+            s += 1
+            s <= inst.fates.nsites || break
+            fates_pack_bcin_btran!(inst; s=s, c=c, nlevsoil=nlevsoil_f)
+        end
+        btran_ed!(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
+        s = 0
+        for c in 1:length(col.is_fates)
+            col.is_fates[c] || continue
+            s += 1
+            s <= inst.fates.nsites || break
+            p = col.patchi[c] + 1
+            fates_unpack_bcout_btran!(inst; s=s, c=c, p=p, nlevsoil=nlevsoil_f)
+        end
+    end
+
     # CanopyFluxes — WIRED
     # Get downreg/leafn from CN vegetation facade when active, else zeros for SP mode
     if config.use_cn
@@ -962,6 +1008,49 @@ function clm_drv_core!(config::CLMDriverConfig,
                    config.use_cn,
                    false, false, config.use_hydrstress, phs_froot_c,
                    false, config.use_luna)
+
+    # W4b photosynthesis — FATES.
+    # NOTE ON PLACEMENT: in Fortran, FATES photosynthesis is called from *inside*
+    # the CanopyFluxes iterative solve (CanopyFluxesMod:1117). Integrating a call
+    # into the differentiable canopy_fluxes_core! in this single pass is too
+    # invasive (it would perturb the Enzyme-compilable positional signature and the
+    # validated SP/AD energy balance). Per the task's pragmatic guidance, the FATES
+    # photosynthesis driver is instead called in this gated block ADJACENT to (just
+    # after) the canopy solve, reading the post-solve canopy state (t_veg) and the
+    # forcing, and unpacking rssun/rssha into photosyns. This produces finite
+    # FATES stomatal resistances for the column; a future pass can move it inside
+    # the iterative solve for full two-way coupling.
+    if config.use_fates && inst.fates !== nothing
+        s = 0
+        for c in 1:length(col.is_fates)
+            col.is_fates[c] || continue
+            s += 1
+            s <= inst.fates.nsites || break
+            p = col.patchi[c] + 1
+            g = col.gridcell[c]
+            pbot   = a2l.forc_pbot_downscaled_col[c]
+            t_veg  = temp.t_veg_patch[p]
+            tgcm   = a2l.forc_t_downscaled_col[c]
+            _, esat_tv, _, _ = qsat(t_veg, pbot)
+            eair   = a2l.forc_vp_grc[g]
+            rb     = 50.0  # representative leaf boundary-layer resistance (s/m)
+            dl     = clamp((grc.dayl[g]^2) / (grc.max_dayl[g]^2), 0.01, 1.0)
+            fates_pack_bcin_photosynthesis!(inst; s=s, c=c, p=p,
+                forc_pbot=pbot, forc_pco2=a2l.forc_pco2_grc[g],
+                forc_po2=a2l.forc_po2_grc[g], t_veg=t_veg, tgcm=tgcm,
+                esat_tv=esat_tv, eair=eair, rb=rb, dayl_factor=dl)
+        end
+        FatesPlantRespPhotosynthDrive(inst.fates.nsites, inst.fates.sites,
+                                      inst.fates.bc_in, inst.fates.bc_out, dtime)
+        s = 0
+        for c in 1:length(col.is_fates)
+            col.is_fates[c] || continue
+            s += 1
+            s <= inst.fates.nsites || break
+            p = col.patchi[c] + 1
+            fates_unpack_bcout_photosynthesis!(inst; s=s, c=c, p=p)
+        end
+    end
 
 
     # UrbanFluxes — WIRED (uses integer-filter API via bitvec_to_filter)
@@ -1695,6 +1784,32 @@ function clm_drv_core!(config::CLMDriverConfig,
         # UrbanAlbedo — WIRED
         urban_albedo!(filt.urbanl, filt.urbanc, filt.urbanp,
                       lun, col, pch, wsb, wdb, up, sa, alb)
+
+        # W3b canopy radiation — FATES.  After surface_albedo! has computed the
+        # ground albedo (albgrd/albgri) + coszen for each column, pack the FATES
+        # radiation bc_in and run FatesNormalizedCanopyRadiation to fill the
+        # per-patch normalized albedo / absorbed / transmitted fractions, then
+        # unpack albd/albi/fab*/ft* into surfalb for the next radiation step.
+        if config.use_fates && inst.fates !== nothing
+            s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                p = col.patchi[c] + 1
+                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=sa.coszen_col[c])
+            end
+            FatesNormalizedCanopyRadiation(inst.fates.nsites, inst.fates.sites,
+                                           inst.fates.bc_in, inst.fates.bc_out)
+            s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                p = col.patchi[c] + 1
+                fates_unpack_bcout_canopy_radiation!(inst; s=s, c=c, p=p)
+            end
+        end
     end
 
     # ========================================================================

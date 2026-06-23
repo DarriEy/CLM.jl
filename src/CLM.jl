@@ -592,6 +592,10 @@ include("fates/FatesInterfaceMod.jl")
 # carbon-only FATES site and attach it to CLMInstances.fates. Depends on
 # CLMInstances (instances.jl) + the whole FATES module stack above.
 include("fates/fates_driver_init.jl")
+# W3+W4 live-driver wiring: bc_in/bc_out pack/unpack helpers that bridge CLM
+# column/patch state and the FATES site boundary conditions. Depends on
+# CLMInstances + fates_driver_init.jl (the cold-start that builds inst.fates).
+include("fates/fates_driver_bc.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

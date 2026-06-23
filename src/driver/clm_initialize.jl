@@ -63,6 +63,7 @@ function clm_initialize!(;
     use_cn::Bool = false,
     use_crop::Bool = false,
     use_luna::Bool = false,
+    use_fates::Bool = false,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
     all_active::Bool = false,
@@ -308,6 +309,29 @@ function clm_initialize!(;
         nstep = 0,
         calendar = "NO_LEAP"
     )
+
+    # ---- Step 17: FATES live-driver attach (W1+W2, gated) ----
+    # When use_fates, bootstrap + cold-start a carbon-only single FATES site per
+    # CLM column and attach it to inst.fates (the W3/W4 driver hooks read it).
+    # No-op when !use_fates so the default path is byte-identical. The synthetic
+    # in-memory FATES parameter tables stand in for a FATES parameter NetCDF
+    # reader, which is a separate later task (see fates_driver_init.jl header).
+    if use_fates
+        varctl.use_fates = true
+        nlevsoil_fates = varpar.nlevsoi
+        # Carbon-only / non-vertsoilc cold start => one decomposition layer.
+        nlevdecomp_fates = 1
+        # One FATES site per CLM column (single-site MVP: nc is typically 1).
+        # The synthetic carbon-only param table built by clm_fates_init! is a
+        # 2-PFT woody-evergreen stand-in (no FATES parameter NetCDF wired yet).
+        clm_fates_init!(inst; nsites = nc,
+                        numpft_in = 2,
+                        nlevsoil = nlevsoil_fates,
+                        nlevdecomp = nlevdecomp_fates,
+                        current_year = year(start_date),
+                        current_month = month(start_date),
+                        current_day = day(start_date))
+    end
 
     return (inst, bounds, filt, tm)
 end
