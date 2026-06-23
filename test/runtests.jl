@@ -240,6 +240,15 @@ using CLM
     # (EDLoggingMortalityMod): mortality fractions + killed-biomass litter routing.
     include("test_fates_edloggingmortality.jl")
 
+    # FATES (Tier F) Batch 13 — salinity transpiration-stress (FatesBstressMod).
+    include("test_fates_bstress.jl")
+    # FATES (Tier F) Batch 13 — per-cohort mortality rates + Mortality_Derivative
+    # (EDMortalityFunctionsMod): carbon-starvation/hydraulic/cold/background/damage.
+    include("test_fates_edmortality.jl")
+    # FATES (Tier F) Batch 13 — physiology hub (EDPhysiologyMod): phenology leaf
+    # on/off, trim_canopy, recruitment/seed, CWD & litter input/fragmentation.
+    include("test_fates_edphysiology.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),

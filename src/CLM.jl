@@ -501,6 +501,21 @@ include("fates/FatesLandUseChangeMod.jl")
 include("fates/EDBtranMod.jl")
 include("fates/EDCohortDynamicsMod.jl")
 include("fates/EDLoggingMortalityMod.jl")
+# FATES (Tier F) Batch 13 — the physiology checkpoint. (1) FatesBstressMod:
+# salinity transpiration-stress factor (bstress_sal_ft) — sibling of EDBtranMod.
+# (2) EDMortalityFunctionsMod: per-cohort mortality rates (carbon-starvation /
+# hydraulic-failure / background / cold-freezing / size-senescence / damage) +
+# Mortality_Derivative feeding the cohort number-density ODE + logging coupling.
+# (3) EDPhysiologyMod: the physiology hub — cold/drought-deciduous phenology +
+# leaf on/off, trim_canopy (LAI→carbon-balance trimming), recruitment / seed
+# rain / germination / decay, CWD & litter input/fragmentation/output, satellite
+# (SP) phenology, recruit L2FR/stoich. All depend on the cohort/patch/site types,
+# allometry, PRT, litter pools, EDParams/EDPftvarcon above. Plant-hydraulics
+# init paths stubbed behind hlm_use_planthydro (off by default). Standalone —
+# NOT added to CLMInstances.
+include("fates/FatesBstressMod.jl")
+include("fates/EDMortalityFunctionsMod.jl")
+include("fates/EDPhysiologyMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
