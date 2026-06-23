@@ -473,6 +473,20 @@ include("fates/FatesPlantHydraulicsMod.jl")
 # EDTypesMod (site type) + FatesFuelMod + SFParamsMod + EDPftvarcon + the
 # allometry engine (CrownDepth), all included above.
 include("fates/SFMainMod.jl")
+# FATES (Tier F) Batch 11 — two independent modules built on the complete FATES
+# type system. (1) FatesTwoStreamUtilsMod: the glue between the FATES canopy
+# (patch/cohort canopy-layer x PFT structure) and the merged TwoStreamMLPEMod
+# solver — builds the scattering-element inputs from the patch canopy profiles,
+# calls the solver, and maps absorbed radiation back onto cohorts/leaf-layers
+# (FatesConstructRadElements/FatesGetCohortAbsRad/FatesPatchFSun/
+# CheckPatchRadiationBalance/TransferRadParams). (2) FatesLandUseChangeMod: FATES
+# land-use-change transitions — aggregates the LUH2 transition/state vectors to
+# the 5 FATES land use categories, builds the [m2/m2/day] transition matrix +
+# clearing-rules matrix, and the spin-up→land-use initialization transitions.
+# Both depend on the patch/cohort/site types + two-stream solver / interface
+# constants. Standalone — NOT added to CLMInstances.
+include("fates/FatesTwoStreamUtilsMod.jl")
+include("fates/FatesLandUseChangeMod.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

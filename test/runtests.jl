@@ -227,6 +227,9 @@ using CLM
     include("test_fates_planthydraulics.jl")
     # FATES (Tier F) Batch 11 — SPITFIRE main fire driver (SFMainMod).
     include("test_fates_sfmain.jl")
+    # FATES (Tier F) Batch 11 — two-stream radiation glue (FatesTwoStreamUtilsMod)
+    # + land-use-change transitions (FatesLandUseChangeMod).
+    include("test_fates_twostreamutils_landuse.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
