@@ -85,7 +85,8 @@ using CLM
         pveg = col.patchi[cveg] + 1   # vegetated patch = 2
 
         # ---- attach a cold-started carbon-only FATES site ----
-        fates = CLM.clm_fates_init!(inst; nsites = 1, numpft_in = numpft,
+        # numpft_in omitted → clm_fates_init! uses the FATES param file's value (14).
+        fates = CLM.clm_fates_init!(inst; nsites = 1,
                                     nlevsoil = nlevsoil, nlevdecomp = nlevdecomp)
         @test inst.fates !== nothing
         @test inst.fates.nsites == 1
