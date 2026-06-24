@@ -300,6 +300,12 @@ using CLM
     # asserts the dyn1-core + hifrq1 history buffers populate finite, physical values.
     include("test_fates_history_dyn1.jl")
 
+    # FATES history buffer-fills Wave 2: drives the level-2 (dim-level > 1) daily
+    # update_history_dyn2! + per-timestep update_history_hifrq2! and asserts the
+    # size/PFT/age-class DISAGGREGATED handles populate finite/physical values with
+    # the cohort's mass landing in the correct size/pft/age class bin.
+    include("test_fates_history_dyn2.jl")
+
     # FATES first REAL multi-day clm_drv!-integrated run: cold-starts a 14-PFT
     # carbon-only site on a FATES-tagged single column and loops the actual driver
     # for 2 days (96 steps), firing the four per-timestep FATES hooks + the daily

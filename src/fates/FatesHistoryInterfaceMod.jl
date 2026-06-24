@@ -1508,18 +1508,957 @@ end
 """
     update_history_dyn2!(this, nc, nsites, sites, bc_in)
 
-Level-2 (complex-dimension) dynamics update — the per-scpf/scag/cnlf/element
-disaggregated fills.
+Level-2 (complex-dimension) daily dynamics update — the per-class aggregation.
+Faithful port of the Fortran `update_history_dyn2` (F90 3028–4880) covering the
+**carbon-relevant disaggregated groups** that the default carbon-only / no-fire /
+no-CNP / no-damage path populates:
 
-# TODO Batch 18-followup: not yet ported. Requires per-cohort PRT pools and the
-# size/age/element class-index helpers wired against live FATES state. The
-# variable registry for these (site_size_pft_r8, site_scag_r8, site_elem_r8, ...)
-# IS fully registered; only the buffer-fill logic is deferred.
+  * **by-PFT** (`*_si_pft`): biomass / leafbiomass / storebiomass / nindivs (+sec),
+    crownarea / canopycrownarea, GPP / NPP (+sec), recruitment(+cflux),
+    seeds out/in, drought-deciduous status (dstatus/dleafon/dleafoff/elong_factor,
+    mean liquid-vol / matric-potential), and the PFT mortality roll-ups
+    (total / cstarv / hydraulic / fire carbonflux + summed-from-scpf `mortality`)
+  * **by-size×PFT** (`*_si_scpf`): gpp / npp_totl / organ npp (leaf/fnrt/seed/stor/
+    ag+bg sap+dead-wood), ba, agb, nplant, ddbh, growthflux(+fusion), the mortality
+    series m1..m10, crown/cambial fire-mort, abg mort/productivity cflux, c13disc,
+    canopy/understory bstor/bleaf/lai/crownarea/mortality/m3/nplant/ddbh/gpp/ar,
+    storec-fraction (canopy/ustory), and the carbon-pool scpf states
+    (totvegc/leafc/fnrtc/sapwc/storec/reproc)
+  * **by-size class** (`*_si_scls`): ba, agb, biomass, nplant, m1..m10, canopy/
+    understory nplant/lai/sai/trimming/crown-area/mortality/m3/carbon-balance/
+    organ-md/seed-prod/organ-npp/yesterday-canopy-level, demotion/promotion rate
+  * **by-size×age** (`*_si_scag`) + **size×age×pft** (`*_si_scagpft`):
+    nplant(+canopy/ustory), mortality(canopy/ustory), ddbh(canopy/ustory)
+  * **by-age** (`*_si_age`): area, lai, canopy_area, ncl, npatches, zstar, biomass,
+    + age×pft npp/biomass (`*_si_agepft`)
+  * **by-canopy-leaf** (`*_si_cnlf`) + canopy layer (`*_cl`): crownarea
+  * **by-height** (`*_si_height`): canopy/leaf height distribution
+  * **by-CWD-size-class** (`*_si_cwdsc`): ag/bg cwd state + in/out fluxes
+  * **by-element** (`*_elem`, `*_elcwd`): err_fates, burn_flux, litter in/out,
+    seed bank/germ/decay/in-local/in-extern, cwd ag/bg, fines ag/bg, cwd×elem,
+    + the per-element scpf C/N/P pool states
+  * **by-soil-layer** (`*_sl`): fnrtc (root-fraction weighted), fragmentation_scaler
+  * recruit running-mean l2fr (`recl2fr_*_pf`)
+
+# TODO Batch 18-followup-W2b: the **fire-dimensioned** sub-blocks
+# (`hio_fire_intensity_si_age`, `hio_fire_sum_fuel_si_age`, `hio_area_burnt_si_age`,
+# `hio_fuel_amount_*`, `hio_litter_moisture_si_fuel`, `hio_burnt_frac_litter_si_fuel`,
+# `nocomp_pftburnedarea`) read `cpatch.fuel` (== `nothing` in carbon-only) and the
+# unset `cpatch.FI`/`frac_burnt`; the **damage cross-tab** sub-blocks (`*_cdpf`/`*_cdsc`,
+# gated on `hlm_use_tree_damage`); the **landuse** sub-blocks (`*_si_lulu`
+# disturbance/transition matrix, `hio_area_si_landuse`, `agesince_anthrodist`,
+# secondarylands area); and the **N/P element** stores (`store{n,p}*_scpf`,
+# `*_si_pft` meanliqvol/meansmp beyond carbon) are deferred — their source state is
+# unset/NaN or the gating flag is off in the default path, exactly as Wave 1
+# deferred fire/planthydro/damage in dyn1. These stay at their flush value.
 """
 function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                               nsites::Integer, sites::AbstractVector,
                               bc_in::AbstractVector)
-    # TODO Batch 18-followup: port the ~1850-line per-class aggregation.
+    reallytalltrees = 1000.0  # some large number (m)
+
+    cpos = element_pos[carbon12_element]
+    model_day_int = round(Int, hlm_model_day[])
+
+    nsclass  = nlevsclass[]
+    nage     = nlevage[]
+    nheight  = nlevheight[]
+    npft     = numpft[]
+    hbedges  = ed_params().ED_val_history_height_bin_edges
+
+    # convenience handle fetch
+    H(sym) = this.hvars[this.ih[sym]].r82d
+
+    # -- by-pft --
+    h_biomass_pft   = H(:ih_biomass_si_pft)
+    h_biomass_sec_pft = H(:ih_biomass_sec_si_pft)
+    h_leafbio_pft   = H(:ih_leafbiomass_si_pft)
+    h_storebio_pft  = H(:ih_storebiomass_si_pft)
+    h_nindivs_pft   = H(:ih_nindivs_si_pft)
+    h_nindivs_sec_pft = H(:ih_nindivs_sec_si_pft)
+    h_recruit_pft   = H(:ih_recruitment_si_pft)
+    h_recruit_cflux_pft = H(:ih_recruitment_cflux_si_pft)
+    h_seeds_out_pft = H(:ih_seeds_out_gc_si_pft)
+    h_seeds_in_pft  = H(:ih_seeds_in_gc_si_pft)
+    h_mort_pft      = H(:ih_mortality_si_pft)
+    h_mort_cflux_pft = H(:ih_mortality_carbonflux_si_pft)
+    h_cstarv_cflux_pft = H(:ih_cstarvmortality_carbonflux_si_pft)
+    h_cstarv_cont_cflux_pft = H(:ih_cstarvmortality_continuous_carbonflux_si_pft)
+    h_hydro_cflux_pft = H(:ih_hydraulicmortality_carbonflux_si_pft)
+    h_fire_cflux_pft = H(:ih_firemortality_carbonflux_si_pft)
+    h_crownarea_pft = H(:ih_crownarea_si_pft)
+    h_canopycrownarea_pft = H(:ih_canopycrownarea_si_pft)
+    h_gpp_pft       = H(:ih_gpp_si_pft)
+    h_gpp_sec_pft   = H(:ih_gpp_sec_si_pft)
+    h_npp_pft       = H(:ih_npp_si_pft)
+    h_npp_sec_pft   = H(:ih_npp_sec_si_pft)
+    h_dstatus_pft   = H(:ih_site_dstatus_si_pft)
+    h_dleafoff_pft  = H(:ih_dleafoff_si_pft)
+    h_dleafon_pft   = H(:ih_dleafon_si_pft)
+    h_elong_pft     = H(:ih_elong_factor_si_pft)
+    h_recl2fr_can_pf = H(:ih_recl2fr_canopy_pf)
+    h_recl2fr_ust_pf = H(:ih_recl2fr_ustory_pf)
+
+    # -- by-size×pft (scpf) --
+    h_gpp_scpf      = H(:ih_gpp_si_scpf)
+    h_npp_totl_scpf = H(:ih_npp_totl_si_scpf)
+    h_npp_leaf_scpf = H(:ih_npp_leaf_si_scpf)
+    h_npp_fnrt_scpf = H(:ih_npp_fnrt_si_scpf)
+    h_npp_bgsw_scpf = H(:ih_npp_bgsw_si_scpf)
+    h_npp_agsw_scpf = H(:ih_npp_agsw_si_scpf)
+    h_npp_bgdw_scpf = H(:ih_npp_bgdw_si_scpf)
+    h_npp_agdw_scpf = H(:ih_npp_agdw_si_scpf)
+    h_npp_seed_scpf = H(:ih_npp_seed_si_scpf)
+    h_npp_stor_scpf = H(:ih_npp_stor_si_scpf)
+    h_ba_scpf       = H(:ih_ba_si_scpf)
+    h_agb_scpf      = H(:ih_agb_si_scpf)
+    h_nplant_scpf   = H(:ih_nplant_si_scpf)
+    h_ddbh_scpf     = H(:ih_ddbh_si_scpf)
+    h_growthflux_scpf = H(:ih_growthflux_si_scpf)
+    h_growthflux_fus_scpf = H(:ih_growthflux_fusion_si_scpf)
+    h_abg_mort_cflux_scpf = H(:ih_abg_mortality_cflux_si_scpf)
+    h_abg_prod_cflux_scpf = H(:ih_abg_productivity_cflux_si_scpf)
+    h_c13disc_scpf  = H(:ih_c13disc_si_scpf)
+    h_m1_scpf  = H(:ih_m1_si_scpf); h_m2_scpf = H(:ih_m2_si_scpf); h_m3_scpf = H(:ih_m3_si_scpf)
+    h_m4_scpf  = H(:ih_m4_si_scpf); h_m5_scpf = H(:ih_m5_si_scpf); h_m6_scpf = H(:ih_m6_si_scpf)
+    h_m7_scpf  = H(:ih_m7_si_scpf); h_m8_scpf = H(:ih_m8_si_scpf); h_m9_scpf = H(:ih_m9_si_scpf)
+    h_m10_scpf = H(:ih_m10_si_scpf); h_m10_capf = H(:ih_m10_si_capf)
+    h_crownfiremort_scpf = H(:ih_crownfiremort_si_scpf)
+    h_cambialfiremort_scpf = H(:ih_cambialfiremort_si_scpf)
+    h_bstor_can_scpf = H(:ih_bstor_canopy_si_scpf)
+    h_bstor_ust_scpf = H(:ih_bstor_understory_si_scpf)
+    h_bleaf_can_scpf = H(:ih_bleaf_canopy_si_scpf)
+    h_bleaf_ust_scpf = H(:ih_bleaf_understory_si_scpf)
+    h_lai_can_scpf   = H(:ih_lai_canopy_si_scpf)
+    h_lai_ust_scpf   = H(:ih_lai_understory_si_scpf)
+    h_crownarea_can_scpf = H(:ih_crownarea_canopy_si_scpf)
+    h_crownarea_ust_scpf = H(:ih_crownarea_understory_si_scpf)
+    h_mort_can_scpf  = H(:ih_mortality_canopy_si_scpf)
+    h_mort_ust_scpf  = H(:ih_mortality_understory_si_scpf)
+    h_m3_mort_can_scpf = H(:ih_m3_mortality_canopy_si_scpf)
+    h_m3_mort_ust_scpf = H(:ih_m3_mortality_understory_si_scpf)
+    h_nplant_can_scpf = H(:ih_nplant_canopy_si_scpf)
+    h_nplant_ust_scpf = H(:ih_nplant_understory_si_scpf)
+    h_ddbh_can_scpf  = H(:ih_ddbh_canopy_si_scpf)
+    h_ddbh_ust_scpf  = H(:ih_ddbh_understory_si_scpf)
+    h_gpp_can_scpf   = H(:ih_gpp_canopy_si_scpf)
+    h_gpp_ust_scpf   = H(:ih_gpp_understory_si_scpf)
+    h_ar_can_scpf    = H(:ih_ar_canopy_si_scpf)
+    h_ar_ust_scpf    = H(:ih_ar_understory_si_scpf)
+    h_storectfrac_can_scpf = H(:ih_storectfrac_canopy_scpf)
+    h_storectfrac_ust_scpf = H(:ih_storectfrac_ustory_scpf)
+
+    # -- by-size class (scls) --
+    h_ba_scls       = H(:ih_ba_si_scls)
+    h_agb_scls      = H(:ih_agb_si_scls)
+    h_biomass_scls  = H(:ih_biomass_si_scls)
+    h_nplant_scls   = H(:ih_nplant_si_scls)
+    h_m1_scls  = H(:ih_m1_si_scls); h_m2_scls = H(:ih_m2_si_scls); h_m3_scls = H(:ih_m3_si_scls)
+    h_m4_scls  = H(:ih_m4_si_scls); h_m5_scls = H(:ih_m5_si_scls); h_m6_scls = H(:ih_m6_si_scls)
+    h_m7_scls  = H(:ih_m7_si_scls); h_m8_scls = H(:ih_m8_si_scls); h_m9_scls = H(:ih_m9_si_scls)
+    h_m10_scls = H(:ih_m10_si_scls)
+    h_nplant_can_scls = H(:ih_nplant_canopy_si_scls)
+    h_nplant_ust_scls = H(:ih_nplant_understory_si_scls)
+    h_lai_can_scls  = H(:ih_lai_canopy_si_scls)
+    h_lai_ust_scls  = H(:ih_lai_understory_si_scls)
+    h_sai_can_scls  = H(:ih_sai_canopy_si_scls)
+    h_sai_ust_scls  = H(:ih_sai_understory_si_scls)
+    h_mort_can_scls = H(:ih_mortality_canopy_si_scls)
+    h_mort_ust_scls = H(:ih_mortality_understory_si_scls)
+    h_m3_mort_can_scls = H(:ih_m3_mortality_canopy_si_scls)
+    h_m3_mort_ust_scls = H(:ih_m3_mortality_understory_si_scls)
+    h_demotion_scls  = H(:ih_demotion_rate_si_scls)
+    h_promotion_scls = H(:ih_promotion_rate_si_scls)
+    h_trim_can_scls = H(:ih_trimming_canopy_si_scls)
+    h_trim_ust_scls = H(:ih_trimming_understory_si_scls)
+    h_crownarea_can_scls = H(:ih_crown_area_canopy_si_scls)
+    h_crownarea_ust_scls = H(:ih_crown_area_understory_si_scls)
+    h_leaf_md_can_scls  = H(:ih_leaf_md_canopy_si_scls)
+    h_root_md_can_scls  = H(:ih_root_md_canopy_si_scls)
+    h_bsw_md_can_scls   = H(:ih_bsw_md_canopy_si_scls)
+    h_bdead_md_can_scls = H(:ih_bdead_md_canopy_si_scls)
+    h_bstore_md_can_scls = H(:ih_bstore_md_canopy_si_scls)
+    h_cbal_can_scls = H(:ih_carbon_balance_canopy_si_scls)
+    h_seedprod_can_scls = H(:ih_seed_prod_canopy_si_scls)
+    h_npp_leaf_can_scls = H(:ih_npp_leaf_canopy_si_scls)
+    h_npp_fnrt_can_scls = H(:ih_npp_fnrt_canopy_si_scls)
+    h_npp_sapw_can_scls = H(:ih_npp_sapw_canopy_si_scls)
+    h_npp_dead_can_scls = H(:ih_npp_dead_canopy_si_scls)
+    h_npp_seed_can_scls = H(:ih_npp_seed_canopy_si_scls)
+    h_npp_stor_can_scls = H(:ih_npp_stor_canopy_si_scls)
+    h_yestcl_can_scls = H(:ih_yesterdaycanopylevel_canopy_si_scls)
+    h_leaf_md_ust_scls  = H(:ih_leaf_md_understory_si_scls)
+    h_root_md_ust_scls  = H(:ih_root_md_understory_si_scls)
+    h_bsw_md_ust_scls   = H(:ih_bsw_md_understory_si_scls)
+    h_bdead_md_ust_scls = H(:ih_bdead_md_understory_si_scls)
+    h_bstore_md_ust_scls = H(:ih_bstore_md_understory_si_scls)
+    h_cbal_ust_scls = H(:ih_carbon_balance_understory_si_scls)
+    h_seedprod_ust_scls = H(:ih_seed_prod_understory_si_scls)
+    h_npp_leaf_ust_scls = H(:ih_npp_leaf_understory_si_scls)
+    h_npp_fnrt_ust_scls = H(:ih_npp_fnrt_understory_si_scls)
+    h_npp_sapw_ust_scls = H(:ih_npp_sapw_understory_si_scls)
+    h_npp_dead_ust_scls = H(:ih_npp_dead_understory_si_scls)
+    h_npp_seed_ust_scls = H(:ih_npp_seed_understory_si_scls)
+    h_npp_stor_ust_scls = H(:ih_npp_stor_understory_si_scls)
+    h_yestcl_ust_scls = H(:ih_yesterdaycanopylevel_understory_si_scls)
+    h_ddbh_can_scls = H(:ih_ddbh_canopy_si_scls)
+    h_ddbh_ust_scls = H(:ih_ddbh_understory_si_scls)
+    h_m10_cacls     = H(:ih_m10_si_cacls)
+
+    # -- size×age (scag) / size×age×pft (scagpft) --
+    h_nplant_scag   = H(:ih_nplant_si_scag)
+    h_nplant_can_scag = H(:ih_nplant_canopy_si_scag)
+    h_nplant_ust_scag = H(:ih_nplant_understory_si_scag)
+    h_mort_can_scag = H(:ih_mortality_canopy_si_scag)
+    h_mort_ust_scag = H(:ih_mortality_understory_si_scag)
+    h_ddbh_can_scag = H(:ih_ddbh_canopy_si_scag)
+    h_ddbh_ust_scag = H(:ih_ddbh_understory_si_scag)
+    h_nplant_scagpft = H(:ih_nplant_si_scagpft)
+    h_npp_agepft    = H(:ih_npp_si_agepft)
+    h_biomass_agepft = H(:ih_biomass_si_agepft)
+
+    # -- by-age --
+    h_area_age      = H(:ih_area_si_age)
+    h_lai_age       = H(:ih_lai_si_age)
+    h_canopy_area_age = H(:ih_canopy_area_si_age)
+    h_ncl_age       = H(:ih_ncl_si_age)
+    h_npatches_age  = H(:ih_npatches_si_age)
+    h_zstar_age     = H(:ih_zstar_si_age)
+    h_biomass_age   = H(:ih_biomass_si_age)
+
+    # -- canopy-leaf / canopy-layer crownarea --
+    h_crownarea_cnlf = H(:ih_crownarea_si_cnlf)
+    h_crownarea_cl   = H(:ih_crownarea_cl)
+
+    # -- height distribution --
+    h_canopy_hgt_dist = H(:ih_canopy_height_dist_si_height)
+    h_leaf_hgt_dist   = H(:ih_leaf_height_dist_si_height)
+
+    # -- CWD size class --
+    h_cwd_ag_cwdsc  = H(:ih_cwd_ag_si_cwdsc)
+    h_cwd_bg_cwdsc  = H(:ih_cwd_bg_si_cwdsc)
+    h_cwd_ag_out_cwdsc = H(:ih_cwd_ag_out_si_cwdsc)
+    h_cwd_bg_out_cwdsc = H(:ih_cwd_bg_out_si_cwdsc)
+    h_cwd_ag_in_cwdsc  = H(:ih_cwd_ag_in_si_cwdsc)
+    h_cwd_bg_in_cwdsc  = H(:ih_cwd_bg_in_si_cwdsc)
+
+    # -- by-element --
+    h_err_fates_elem = H(:ih_err_fates_elem)
+    h_interr_liveveg_elem = H(:ih_interr_liveveg_elem)
+    h_interr_litter_elem  = H(:ih_interr_litter_elem)
+    h_burn_flux_elem = H(:ih_burn_flux_elem)
+    h_litter_in_elem = H(:ih_litter_in_elem)
+    h_litter_out_elem = H(:ih_litter_out_elem)
+    h_seed_bank_elem = H(:ih_seed_bank_elem)
+    h_seed_germ_elem = H(:ih_seed_germ_elem)
+    h_seed_decay_elem = H(:ih_seed_decay_elem)
+    h_seeds_in_local_elem = H(:ih_seeds_in_local_elem)
+    h_seed_in_extern_elem = H(:ih_seeds_in_extern_elem)
+    h_cwd_ag_elem   = H(:ih_cwd_ag_elem)
+    h_cwd_bg_elem   = H(:ih_cwd_bg_elem)
+    h_fines_ag_elem = H(:ih_fines_ag_elem)
+    h_fines_bg_elem = H(:ih_fines_bg_elem)
+    h_cwd_elcwd     = H(:ih_cwd_elcwd)
+
+    # -- by-soil-layer --
+    h_fnrtc_sl      = H(:ih_fnrtc_sl)
+    h_fragscaler_sl = H(:ih_fragmentation_scaler_sl)
+
+    for s in 1:nsites
+        site = sites[s]
+        io_si = site.h_gid
+
+        # cache previous day's scpf gpp for C13 discrimination
+        gpp_cached_scpf = copy(@view h_gpp_scpf[io_si, :])
+
+        zero_site_hvars!(this, site, group_dyna_complx)
+
+        storec_canopy_scpf = zeros(npft * nsclass)
+        storec_ustory_scpf = zeros(npft * nsclass)
+
+        # ---- element diagnostics ----
+        has_massbal  = cpos >= 1 && length(site.mass_balance) >= cpos
+        has_fluxdiag = cpos >= 1 && length(site.flux_diags.elem) >= cpos
+        for el in 1:num_elements[]
+            if hlm_use_ed_st3[] == ifalse && hlm_use_sp[] == ifalse && has_massbal
+                h_err_fates_elem[io_si, el] = site.mass_balance[el].err_fates / sec_per_day
+                if length(site.flux_diags.elem) >= el
+                    h_interr_liveveg_elem[io_si, el] = site.flux_diags.elem[el].err_liveveg
+                    h_interr_litter_elem[io_si, el]  = site.flux_diags.elem[el].err_litter
+                end
+            end
+            if has_massbal
+                h_burn_flux_elem[io_si, el] = site.mass_balance[el].burn_flux_to_atm *
+                                              ha_per_m2 * days_per_sec
+            end
+        end
+
+        # ---- drought-deciduous (PFT) status ----
+        for ft in 1:npft
+            h_dstatus_pft[io_si, ft] = Float64(site.dstatus[ft])
+            h_dleafoff_pft[io_si, ft] = Float64(site.dndaysleafon[ft])
+            h_dleafon_pft[io_si, ft]  = Float64(site.dndaysleafoff[ft])
+            if isfinite(site.elong_factor[ft])
+                h_elong_pft[io_si, ft] = site.elong_factor[ft]
+            end
+            # TODO Batch 18-followup-W2b: meanliqvol_si_pft / meansmp_si_pft from
+            # liqvol_memory/smp_memory — needs the drought-phenology memory wired.
+        end
+
+        # ============== patch loop ==============
+        cpatch = site.oldest_patch
+        while cpatch !== nothing
+            cpatch.age_class = get_age_class_index(cpatch.age)
+            iage = cpatch.age_class
+
+            h_area_age[io_si, iage] += cpatch.area * AREA_INV
+
+            # patch-age-resolved aggregates
+            tcanp = isfinite(cpatch.total_canopy_area) ? cpatch.total_canopy_area : 0.0
+            if !isempty(cpatch.tlai_profile) && !isempty(cpatch.canopy_area_profile)
+                acc = 0.0
+                @inbounds for k in eachindex(cpatch.tlai_profile)
+                    t = cpatch.tlai_profile[k]; a = cpatch.canopy_area_profile[k]
+                    (isfinite(t) && isfinite(a)) && (acc += t * a)
+                end
+                h_lai_age[io_si, iage] += acc * tcanp
+            end
+            h_ncl_age[io_si, iage]      += cpatch.ncl_p * cpatch.area
+            h_npatches_age[io_si, iage] += 1.0
+            if ed_params().ED_val_comp_excln < 0.0 && isfinite(cpatch.zstar)
+                h_zstar_age[io_si, iage] += cpatch.zstar * cpatch.area * AREA_INV
+            end
+
+            # TODO Batch 18-followup-W2b: landuse area (hio_area_si_landuse),
+            # secondary-forest age-since-anthro / secondarylands area, and the
+            # patch-age fire/fuel diagnostics (scorch_height, area_burnt,
+            # fire_intensity, fire_sum_fuel, nocomp_pftburnedarea) — cpatch.fuel
+            # is nothing and FI/frac_burnt are unset in carbon-only.
+
+            # ---- cohort loop (shortest -> taller) ----
+            ccohort = cpatch.shortest
+            while ccohort !== nothing
+                ft = ccohort.pft
+                ccohort.size_class, ccohort.size_by_pft_class =
+                    sizetype_class_index(ccohort.dbh, ccohort.pft)
+                ccohort.coage_class, ccohort.coage_by_pft_class =
+                    coagetype_class_index(ccohort.coage, ccohort.pft)
+                scpf = ccohort.size_by_pft_class
+                scls = ccohort.size_class
+                n_perm2 = ccohort.n * AREA_INV
+
+                if ccohort.prt === nothing
+                    ccohort = ccohort.taller
+                    continue
+                end
+
+                h_canopy_area_age[io_si, iage] += ccohort.c_area * AREA_INV
+
+                # leaf/canopy height distribution
+                crown_depth = CrownDepth(ccohort.height, ft)
+                hbmax = get_height_index(ccohort.height)
+                hbmin = get_height_index(ccohort.height - crown_depth)
+                if crown_depth > 0.0
+                    for ihb in max(hbmin, 1):min(hbmax, nheight)
+                        binbottom = hbedges[ihb]
+                        bintop = ihb == nheight ? reallytalltrees : hbedges[ihb + 1]
+                        frac = (min(bintop, ccohort.height) -
+                                max(binbottom, ccohort.height - crown_depth)) / crown_depth
+                        tl = isfinite(ccohort.treelai) ? ccohort.treelai : 0.0
+                        h_leaf_hgt_dist[io_si, ihb] += ccohort.c_area * AREA_INV * tl * frac
+                    end
+                end
+                if ccohort.canopy_layer == 1 && hbmax >= 1 && hbmax <= nheight
+                    h_canopy_hgt_dist[io_si, hbmax] += ccohort.c_area * AREA_INV
+                end
+
+                # root-fraction profile (carbon: fnrtc by soil layer)
+                if site.nlevsoil >= 1 && length(site.rootfrac_scr) >= site.nlevsoil
+                    set_root_fraction(site.rootfrac_scr, ccohort.pft, site.zi_soil;
+                                      max_nlevroot=bc_in[s].max_rooting_depth_index_col)
+                end
+
+                # ---- elemental biomass states ----
+                for el in 1:num_elements[]
+                    eid = element_list[el]
+                    sapw_m   = GetState(ccohort.prt, sapw_organ, eid)
+                    struct_m = GetState(ccohort.prt, struct_organ, eid)
+                    leaf_m   = GetState(ccohort.prt, leaf_organ, eid)
+                    fnrt_m   = GetState(ccohort.prt, fnrt_organ, eid)
+                    store_m  = GetState(ccohort.prt, store_organ, eid)
+                    repro_m  = GetState(ccohort.prt, repro_organ, eid)
+                    total_m  = leaf_m + fnrt_m + sapw_m + store_m + struct_m
+
+                    if eid == carbon12_element
+                        store_max, _ = bstore_allom(ccohort.dbh, ccohort.pft,
+                                                    ccohort.crowndamage, ccohort.canopy_trim)
+                        if site.nlevsoil >= 1 && length(site.rootfrac_scr) >= site.nlevsoil
+                            # the FATES history soil dimension (`nlevsoil_hist`) may be
+                            # narrower than the live site's soil column; clamp to the
+                            # registered buffer width so the fill is in-bounds.
+                            nsl_io = min(site.nlevsoil, size(h_fnrtc_sl, 2))
+                            for ilyr in 1:nsl_io
+                                h_fnrtc_sl[io_si, ilyr] += fnrt_m * ccohort.n / area *
+                                    site.rootfrac_scr[ilyr] / site.dz_soil[ilyr]
+                            end
+                        end
+                        h_leafbio_pft[io_si, ft]  += n_perm2 * leaf_m
+                        h_storebio_pft[io_si, ft] += n_perm2 * store_m
+                        h_nindivs_pft[io_si, ft]  += n_perm2
+                        if cpatch.land_use_label == secondaryland
+                            h_nindivs_sec_pft[io_si, ft] += n_perm2
+                            h_biomass_sec_pft[io_si, ft] += n_perm2 * total_m
+                        end
+                        if ccohort.isnew
+                            h_recruit_cflux_pft[io_si, ft] += n_perm2 * total_m * days_per_year
+                        end
+                        h_biomass_pft[io_si, ft]  += n_perm2 * total_m
+                        h_biomass_age[io_si, iage] += total_m * n_perm2
+                        if ccohort.canopy_layer == 1
+                            storec_canopy_scpf[scpf] += ccohort.n * store_m
+                            h_storectfrac_can_scpf[io_si, scpf] += ccohort.n * store_max
+                        else
+                            storec_ustory_scpf[scpf] += ccohort.n * store_m
+                            h_storectfrac_ust_scpf[io_si, scpf] += ccohort.n * store_max
+                        end
+                    end
+                    # TODO Batch 18-followup-W2b: N/P store fraction weights
+                    # (storen/storep canopy/ustory) — unset in carbon-only.
+                end
+
+                h_crownarea_pft[io_si, ft] += ccohort.c_area * AREA_INV
+                if ccohort.canopy_layer == 1
+                    h_canopycrownarea_pft[io_si, ft] += ccohort.c_area * AREA_INV
+                end
+
+                # ---- flux variables (cohort must have lived a day) ----
+                if !ccohort.isnew
+                    gpph = ccohort.gpp_acc_hold
+                    npph = ccohort.npp_acc_hold
+                    resph = ccohort.resp_acc_hold
+
+                    h_gpp_pft[io_si, ft] += gpph * n_perm2 / (days_per_year * sec_per_day)
+                    h_npp_pft[io_si, ft] += npph * n_perm2 / (days_per_year * sec_per_day)
+                    if cpatch.land_use_label == secondaryland
+                        h_gpp_sec_pft[io_si, ft] += gpph * n_perm2 / (days_per_year * sec_per_day)
+                        h_npp_sec_pft[io_si, ft] += npph * n_perm2 / (days_per_year * sec_per_day)
+                    end
+
+                    sapw_to  = GetTurnover(ccohort.prt, sapw_organ, carbon12_element) * days_per_year
+                    store_to = GetTurnover(ccohort.prt, store_organ, carbon12_element) * days_per_year
+                    leaf_to  = GetTurnover(ccohort.prt, leaf_organ, carbon12_element) * days_per_year
+                    fnrt_to  = GetTurnover(ccohort.prt, fnrt_organ, carbon12_element) * days_per_year
+                    struct_to = GetTurnover(ccohort.prt, struct_organ, carbon12_element) * days_per_year
+
+                    sapw_na  = GetNetAlloc(ccohort.prt, sapw_organ, carbon12_element) * days_per_year
+                    store_na = GetNetAlloc(ccohort.prt, store_organ, carbon12_element) * days_per_year
+                    leaf_na  = GetNetAlloc(ccohort.prt, leaf_organ, carbon12_element) * days_per_year
+                    fnrt_na  = GetNetAlloc(ccohort.prt, fnrt_organ, carbon12_element) * days_per_year
+                    struct_na = GetNetAlloc(ccohort.prt, struct_organ, carbon12_element) * days_per_year
+                    repro_na = GetNetAlloc(ccohort.prt, repro_organ, carbon12_element) * days_per_year
+
+                    agbf = prt_params.allom_agb_frac[ft]
+                    dyinv = 1.0 / (days_per_year * sec_per_day)
+
+                    h_gpp_scpf[io_si, scpf]      += n_perm2 * gpph * dyinv
+                    h_npp_totl_scpf[io_si, scpf] += npph * n_perm2 * dyinv
+                    h_npp_leaf_scpf[io_si, scpf] += leaf_na * n_perm2 * dyinv
+                    h_npp_fnrt_scpf[io_si, scpf] += fnrt_na * n_perm2 * dyinv
+                    h_npp_bgsw_scpf[io_si, scpf] += sapw_na * n_perm2 * (1.0 - agbf) * dyinv
+                    h_npp_agsw_scpf[io_si, scpf] += sapw_na * n_perm2 * agbf * dyinv
+                    h_npp_bgdw_scpf[io_si, scpf] += struct_na * n_perm2 * (1.0 - agbf) * dyinv
+                    h_npp_agdw_scpf[io_si, scpf] += struct_na * n_perm2 * agbf * dyinv
+                    h_npp_seed_scpf[io_si, scpf] += repro_na * n_perm2 * dyinv
+                    h_npp_stor_scpf[io_si, scpf] += store_na * n_perm2 * dyinv
+
+                    if prt_params.woody[ft] == itrue
+                        ba_cohort = 0.25 * pi_const * ((ccohort.dbh / 100.0)^2) * ccohort.n / m2_per_ha
+                        h_ba_scpf[io_si, scpf] += ba_cohort
+                        h_ba_scls[io_si, scls] += ba_cohort
+                        h_ddbh_scpf[io_si, scpf] += ccohort.ddbhdt * ccohort.n / m2_per_ha * m_per_cm
+                    end
+
+                    # mortality sums [#/m2]
+                    h_m1_scpf[io_si, scpf] += ccohort.bmort * ccohort.n / m2_per_ha
+                    h_m2_scpf[io_si, scpf] += ccohort.hmort * ccohort.n / m2_per_ha
+                    h_m3_scpf[io_si, scpf] += ccohort.cmort * ccohort.n / m2_per_ha
+                    lmort_sum = ccohort.lmort_direct + ccohort.lmort_collateral + ccohort.lmort_infra
+                    h_m7_scpf[io_si, scpf] += lmort_sum * ccohort.n / m2_per_ha
+                    h_m8_scpf[io_si, scpf] += ccohort.frmort * ccohort.n / m2_per_ha
+                    h_m9_scpf[io_si, scpf] += ccohort.smort * ccohort.n / m2_per_ha
+                    if hlm_use_cohort_age_tracking[] == itrue
+                        capf = ccohort.coage_by_pft_class
+                        cacls = ccohort.coage_class
+                        h_m10_scpf[io_si, scpf]  += ccohort.asmort * ccohort.n / m2_per_ha
+                        h_m10_capf[io_si, capf]  += ccohort.asmort * ccohort.n / m2_per_ha
+                        h_m10_scls[io_si, scls]  += ccohort.asmort * ccohort.n / m2_per_ha
+                        h_m10_cacls[io_si, cacls] += ccohort.asmort * ccohort.n / m2_per_ha
+                    end
+
+                    h_m1_scls[io_si, scls] += ccohort.bmort * ccohort.n / m2_per_ha
+                    h_m2_scls[io_si, scls] += ccohort.hmort * ccohort.n / m2_per_ha
+                    h_m3_scls[io_si, scls] += ccohort.cmort * ccohort.n / m2_per_ha
+                    h_m7_scls[io_si, scls] += lmort_sum * ccohort.n / m2_per_ha
+                    h_m8_scls[io_si, scls] += ccohort.frmort * ccohort.n / m2_per_ha
+                    h_m9_scls[io_si, scls] += ccohort.smort * ccohort.n / m2_per_ha
+
+                    # C13 discrimination
+                    if abs(gpp_cached_scpf[scpf] - hlm_hio_ignore_val[]) > nearzero &&
+                       (gpp_cached_scpf[scpf] + gpph) > 0.0
+                        gppc = gpp_cached_scpf[scpf] * days_per_year * sec_per_day
+                        c13a = isfinite(ccohort.c13disc_acc) ? ccohort.c13disc_acc : 0.0
+                        h_c13disc_scpf[io_si, scpf] =
+                            ((h_c13disc_scpf[io_si, scpf] * gppc) + (c13a * gpph)) / (gppc + gpph)
+                    else
+                        h_c13disc_scpf[io_si, scpf] = 0.0
+                    end
+
+                    h_nplant_scpf[io_si, scpf] += ccohort.n / m2_per_ha
+
+                    # carbon-only states
+                    sapw_m   = GetState(ccohort.prt, sapw_organ, carbon12_element)
+                    struct_m = GetState(ccohort.prt, struct_organ, carbon12_element)
+                    leaf_m   = GetState(ccohort.prt, leaf_organ, carbon12_element)
+                    fnrt_m   = GetState(ccohort.prt, fnrt_organ, carbon12_element)
+                    store_m  = GetState(ccohort.prt, store_organ, carbon12_element)
+                    total_m  = leaf_m + fnrt_m + sapw_m + store_m + struct_m
+                    abg_m    = (sapw_m + struct_m + store_m) * agbf + leaf_m
+
+                    mort_rate_sum = ccohort.bmort + ccohort.hmort + ccohort.cmort +
+                                    ccohort.frmort + ccohort.smort + ccohort.asmort + ccohort.dgmort
+
+                    h_mort_cflux_pft[io_si, ft] +=
+                        mort_rate_sum * total_m * ccohort.n * days_per_sec * years_per_day * ha_per_m2 +
+                        lmort_sum * total_m * ccohort.n * ha_per_m2
+                    h_hydro_cflux_pft[io_si, ft] +=
+                        ccohort.hmort * total_m * ccohort.n * days_per_sec * years_per_day * ha_per_m2
+                    h_cstarv_cflux_pft[io_si, ft] +=
+                        ccohort.cmort * total_m * ccohort.n * days_per_sec * years_per_day * ha_per_m2
+                    h_cstarv_cont_cflux_pft[io_si, ft] +=
+                        ccohort.cmort * total_m * ccohort.n * days_per_sec * years_per_day * ha_per_m2
+
+                    h_abg_mort_cflux_scpf[io_si, scpf] +=
+                        mort_rate_sum * abg_m * ccohort.n * days_per_sec * years_per_day * ha_per_m2 +
+                        lmort_sum * abg_m * ccohort.n * ha_per_m2
+                    abg_na = (sapw_na + struct_na + store_na) * agbf + leaf_na
+                    h_abg_prod_cflux_scpf[io_si, scpf] += abg_na * n_perm2 * dyinv
+
+                    h_agb_scls[io_si, scls] += total_m * ccohort.n * agbf * AREA_INV
+                    h_agb_scpf[io_si, scpf] += total_m * ccohort.n * agbf * AREA_INV
+                    h_biomass_scls[io_si, scls] += total_m * ccohort.n * AREA_INV
+
+                    iscag = get_sizeage_class_index(ccohort.dbh, cpatch.age)
+                    h_nplant_scag[io_si, iscag] += ccohort.n / m2_per_ha
+                    h_nplant_scls[io_si, scls]  += ccohort.n / m2_per_ha
+
+                    iscagpft = get_sizeagepft_class_index(ccohort.dbh, cpatch.age, ccohort.pft)
+                    h_nplant_scagpft[io_si, iscagpft] += ccohort.n / m2_per_ha
+
+                    iagepft = get_agepft_class_index(cpatch.age, ccohort.pft)
+                    h_npp_agepft[io_si, iagepft] += ccohort.n * npph * AREA_INV * dyinv
+                    h_biomass_agepft[io_si, iagepft] += total_m * ccohort.n * AREA_INV
+
+                    tl = isfinite(ccohort.treelai) ? ccohort.treelai : 0.0
+                    ts = isfinite(ccohort.treesai) ? ccohort.treesai : 0.0
+
+                    if ccohort.canopy_layer == 1
+                        h_nplant_can_scag[io_si, iscag] += ccohort.n / m2_per_ha
+                        h_mort_can_scag[io_si, iscag] += mort_rate_sum * ccohort.n / m2_per_ha
+                        h_ddbh_can_scag[io_si, iscag] += ccohort.ddbhdt * ccohort.n * m_per_cm / m2_per_ha
+                        h_bstor_can_scpf[io_si, scpf] += store_m * ccohort.n / m2_per_ha
+                        h_bleaf_can_scpf[io_si, scpf] += leaf_m * ccohort.n / m2_per_ha
+                        h_lai_can_scpf[io_si, scpf]   += tl * ccohort.c_area * AREA_INV
+                        h_crownarea_can_scpf[io_si, scpf] += ccohort.c_area * AREA_INV
+                        h_mort_can_scpf[io_si, scpf] +=
+                            mort_rate_sum * ccohort.n / m2_per_ha +
+                            lmort_sum * ccohort.n * sec_per_day * days_per_year / m2_per_ha
+                        h_m3_mort_can_scpf[io_si, scpf] += ccohort.cmort * ccohort.n / m2_per_ha
+                        h_nplant_can_scpf[io_si, scpf] += ccohort.n / m2_per_ha
+                        h_nplant_can_scls[io_si, scls] += ccohort.n / m2_per_ha
+                        h_lai_can_scls[io_si, scls] += tl * ccohort.c_area * AREA_INV
+                        h_sai_can_scls[io_si, scls] += ts * ccohort.c_area * AREA_INV
+                        h_trim_can_scls[io_si, scls] += ccohort.n * ccohort.canopy_trim / m2_per_ha
+                        h_crownarea_can_scls[io_si, scls] += ccohort.c_area * AREA_INV
+                        h_gpp_can_scpf[io_si, scpf] += n_perm2 * gpph / days_per_year / sec_per_day
+                        h_ar_can_scpf[io_si, scpf]  += n_perm2 * resph / days_per_year / sec_per_day
+                        h_ddbh_can_scpf[io_si, scpf] += ccohort.ddbhdt * ccohort.n * m_per_cm / m2_per_ha
+                        h_ddbh_can_scls[io_si, scls] += ccohort.ddbhdt * ccohort.n * m_per_cm / m2_per_ha
+                        h_mort_can_scls[io_si, scls] +=
+                            mort_rate_sum * ccohort.n / m2_per_ha +
+                            lmort_sum * ccohort.n * sec_per_day * days_per_year / m2_per_ha
+                        h_m3_mort_can_scls[io_si, scls] += ccohort.cmort * ccohort.n / m2_per_ha
+                        h_cbal_can_scls[io_si, scls] += ccohort.n * npph / m2_per_ha * dyinv
+                        h_leaf_md_can_scls[io_si, scls]  += leaf_to * ccohort.n / m2_per_ha * dyinv
+                        h_root_md_can_scls[io_si, scls]  += fnrt_to * ccohort.n / m2_per_ha * dyinv
+                        h_bsw_md_can_scls[io_si, scls]   += sapw_to * ccohort.n / m2_per_ha * dyinv
+                        h_bstore_md_can_scls[io_si, scls] += store_to * ccohort.n / m2_per_ha * dyinv
+                        h_bdead_md_can_scls[io_si, scls] += struct_to * ccohort.n / m2_per_ha * dyinv
+                        sprod = isfinite(ccohort.seed_prod) ? ccohort.seed_prod : 0.0
+                        h_seedprod_can_scls[io_si, scls] += sprod * ccohort.n / m2_per_ha / sec_per_day
+                        h_npp_leaf_can_scls[io_si, scls] += leaf_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_fnrt_can_scls[io_si, scls] += fnrt_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_sapw_can_scls[io_si, scls] += sapw_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_dead_can_scls[io_si, scls] += struct_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_seed_can_scls[io_si, scls] += repro_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_stor_can_scls[io_si, scls] += store_na * ccohort.n / m2_per_ha * dyinv
+                        cly = isfinite(ccohort.canopy_layer_yesterday) ? ccohort.canopy_layer_yesterday : 0.0
+                        h_yestcl_can_scls[io_si, scls] += cly * ccohort.n / m2_per_ha
+                    else
+                        h_nplant_ust_scag[io_si, iscag] += ccohort.n / m2_per_ha
+                        h_mort_ust_scag[io_si, iscag] += mort_rate_sum * ccohort.n / m2_per_ha
+                        h_ddbh_ust_scag[io_si, iscag] += ccohort.ddbhdt * ccohort.n * m_per_cm / m2_per_ha
+                        h_bstor_ust_scpf[io_si, scpf] += store_m * ccohort.n / m2_per_ha
+                        h_bleaf_ust_scpf[io_si, scpf] += leaf_m * ccohort.n / m2_per_ha
+                        h_lai_ust_scpf[io_si, scpf]   += tl * ccohort.c_area * AREA_INV
+                        h_crownarea_ust_scpf[io_si, scpf] += ccohort.c_area * AREA_INV
+                        h_mort_ust_scpf[io_si, scpf] +=
+                            mort_rate_sum * ccohort.n / m2_per_ha +
+                            lmort_sum * ccohort.n * sec_per_day * days_per_year / m2_per_ha
+                        h_m3_mort_ust_scpf[io_si, scpf] += ccohort.cmort * ccohort.n / m2_per_ha
+                        h_nplant_ust_scpf[io_si, scpf] += ccohort.n / m2_per_ha
+                        h_nplant_ust_scls[io_si, scls] += ccohort.n / m2_per_ha
+                        h_lai_ust_scls[io_si, scls] += tl * ccohort.c_area * AREA_INV
+                        h_sai_ust_scls[io_si, scls] += tl * ccohort.c_area * AREA_INV
+                        h_trim_ust_scls[io_si, scls] += ccohort.n * ccohort.canopy_trim / m2_per_ha
+                        h_crownarea_ust_scls[io_si, scls] += ccohort.c_area * AREA_INV
+                        h_gpp_ust_scpf[io_si, scpf] += n_perm2 * gpph / days_per_year / sec_per_day
+                        h_ar_ust_scpf[io_si, scpf]  += n_perm2 * resph / days_per_year / sec_per_day
+                        h_ddbh_ust_scpf[io_si, scpf] += ccohort.ddbhdt * ccohort.n * m_per_cm / m2_per_ha
+                        h_ddbh_ust_scls[io_si, scls] += ccohort.ddbhdt * ccohort.n * m_per_cm / m2_per_ha
+                        h_mort_ust_scls[io_si, scls] +=
+                            mort_rate_sum * ccohort.n / m2_per_ha +
+                            lmort_sum * ccohort.n * sec_per_day * days_per_year / m2_per_ha
+                        h_m3_mort_ust_scls[io_si, scls] += ccohort.cmort * ccohort.n / m2_per_ha
+                        h_cbal_ust_scls[io_si, scls] += npph * ccohort.n / m2_per_ha * dyinv
+                        h_leaf_md_ust_scls[io_si, scls]  += leaf_to * ccohort.n / m2_per_ha * dyinv
+                        h_root_md_ust_scls[io_si, scls]  += fnrt_to * ccohort.n / m2_per_ha * dyinv
+                        h_bsw_md_ust_scls[io_si, scls]   += sapw_to * ccohort.n / m2_per_ha * dyinv
+                        h_bstore_md_ust_scls[io_si, scls] += store_to * ccohort.n / m2_per_ha * dyinv
+                        h_bdead_md_ust_scls[io_si, scls] += struct_to * ccohort.n / m2_per_ha * dyinv
+                        sprod = isfinite(ccohort.seed_prod) ? ccohort.seed_prod : 0.0
+                        h_seedprod_ust_scls[io_si, scls] += sprod * ccohort.n / m2_per_ha / sec_per_day
+                        h_npp_leaf_ust_scls[io_si, scls] += leaf_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_fnrt_ust_scls[io_si, scls] += fnrt_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_sapw_ust_scls[io_si, scls] += sapw_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_dead_ust_scls[io_si, scls] += struct_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_seed_ust_scls[io_si, scls] += repro_na * ccohort.n / m2_per_ha * dyinv
+                        h_npp_stor_ust_scls[io_si, scls] += store_na * ccohort.n / m2_per_ha * dyinv
+                        cly = isfinite(ccohort.canopy_layer_yesterday) ? ccohort.canopy_layer_yesterday : 0.0
+                        h_yestcl_ust_scls[io_si, scls] += cly * ccohort.n / m2_per_ha
+                    end
+
+                    # growth flux of individuals into a given size bin
+                    if (scls - ccohort.size_class_lasttimestep) > 0
+                        for i_scls in (ccohort.size_class_lasttimestep + 1):scls
+                            i_scpf = (ccohort.pft - 1) * nsclass + i_scls
+                            h_growthflux_scpf[io_si, i_scpf] += ccohort.n * days_per_year / m2_per_ha
+                        end
+                    end
+                    ccohort.size_class_lasttimestep = scls
+                else
+                    # new cohort: growth flux into first size bin
+                    i_scpf = (ccohort.pft - 1) * nsclass + 1
+                    h_growthflux_scpf[io_si, i_scpf] += ccohort.n * days_per_year / m2_per_ha
+                    ccohort.size_class_lasttimestep = 1
+                end
+
+                # crown area profiles
+                ican = ccohort.canopy_layer
+                h_crownarea_cl[io_si, ican] += ccohort.c_area / area
+                for ileaf in 1:ccohort.nv
+                    cnlf_indx = ileaf + (ican - 1) * nlevleaf
+                    h_crownarea_cnlf[io_si, cnlf_indx] += ccohort.c_area / area
+                end
+
+                ccohort.canopy_layer_yesterday = Float64(ccohort.canopy_layer)
+                ccohort = ccohort.taller
+            end
+
+            # fragmentation scaler by soil layer
+            if site.nlevsoil >= 1 && length(cpatch.fragmentation_scaler) >= site.nlevsoil
+                nsl_io = min(site.nlevsoil, size(h_fragscaler_sl, 2))
+                for ilyr in 1:nsl_io
+                    fs = cpatch.fragmentation_scaler[ilyr]
+                    isfinite(fs) && (h_fragscaler_sl[io_si, ilyr] += fs * cpatch.area * AREA_INV)
+                end
+            end
+
+            # TODO Batch 18-followup-W2b: fuel_amount/litter_moisture/burnt_frac per
+            # fuel class — cpatch.fuel is nothing in carbon-only.
+
+            # CWD ag/bg state + out flux (carbon litter)
+            if has_fluxdiag && length(cpatch.litter) >= cpos
+                litt_c = cpatch.litter[cpos]
+                for icwd in 1:ncwd
+                    h_cwd_ag_cwdsc[io_si, icwd] += litt_c.ag_cwd[icwd] * cpatch.area * AREA_INV
+                    h_cwd_bg_cwdsc[io_si, icwd] += sum(@view litt_c.bg_cwd[icwd, :]) * cpatch.area * AREA_INV
+                    h_cwd_ag_out_cwdsc[io_si, icwd] +=
+                        litt_c.ag_cwd_frag[icwd] * cpatch.area * AREA_INV / days_per_year / sec_per_day
+                    h_cwd_bg_out_cwdsc[io_si, icwd] +=
+                        sum(@view litt_c.bg_cwd_frag[icwd, :]) * cpatch.area * AREA_INV / days_per_year / sec_per_day
+                end
+            end
+
+            cpatch = cpatch.younger
+        end
+
+        # ---- normalize patch-age-class averages ----
+        for ipa2 in 1:nage
+            if h_area_age[io_si, ipa2] > nearzero
+                h_lai_age[io_si, ipa2] /= (h_area_age[io_si, ipa2] * area)
+                h_ncl_age[io_si, ipa2] /= (h_area_age[io_si, ipa2] * area)
+            else
+                h_lai_age[io_si, ipa2] = 0.0
+                h_ncl_age[io_si, ipa2] = 0.0
+            end
+        end
+
+        # ---- site-level termination / impact / fire mortality (scls x pft) ----
+        has_term = !isempty(site.term_nindivs_canopy)
+        has_imort = !isempty(site.imort_rate)
+        has_fmort = !isempty(site.fmort_rate_canopy)
+        if has_term && !isempty(site.term_carbonflux_ustory)
+            for ft in 1:npft
+                h_cstarv_cflux_pft[io_si, ft] +=
+                    (site.term_carbonflux_ustory[i_term_mort_type_cstarv, ft] +
+                     site.term_carbonflux_canopy[i_term_mort_type_cstarv, ft]) * days_per_sec * ha_per_m2
+            end
+        end
+        for ft in 1:npft
+            for i_scls in 1:nsclass
+                i_scpf = (ft - 1) * nsclass + i_scls
+                if has_term
+                    term_can = sum(@view site.term_nindivs_canopy[i_term_mort_type_canlev:n_term_mort_types, i_scls, ft])
+                    term_ust = sum(@view site.term_nindivs_ustory[i_term_mort_type_canlev:n_term_mort_types, i_scls, ft])
+                    h_m6_scpf[io_si, i_scpf] = (term_can + term_ust) * days_per_year / m2_per_ha
+                    h_m6_scls[io_si, i_scls] += (term_can + term_ust) * days_per_year / m2_per_ha
+
+                    cstarv_can = site.term_nindivs_canopy[i_term_mort_type_cstarv, i_scls, ft]
+                    cstarv_ust = site.term_nindivs_ustory[i_term_mort_type_cstarv, i_scls, ft]
+                    h_m3_scpf[io_si, i_scpf] += (cstarv_can + cstarv_ust) * days_per_year / m2_per_ha
+                    h_m3_scls[io_si, i_scls] += (cstarv_can + cstarv_ust) * days_per_year / m2_per_ha
+                    h_m3_mort_can_scpf[io_si, i_scpf] += cstarv_can * days_per_year / m2_per_ha
+                    h_m3_mort_ust_scpf[io_si, i_scpf] += cstarv_ust * days_per_year / m2_per_ha
+                    h_m3_mort_can_scls[io_si, i_scls] += cstarv_can * days_per_year / m2_per_ha
+                    h_m3_mort_ust_scls[io_si, i_scls] += cstarv_ust * days_per_year / m2_per_ha
+
+                    allterm_can = sum(@view site.term_nindivs_canopy[:, i_scls, ft])
+                    allterm_ust = sum(@view site.term_nindivs_ustory[:, i_scls, ft])
+                    h_mort_can_scls[io_si, i_scls] += allterm_can * days_per_year / m2_per_ha
+                    h_mort_ust_scls[io_si, i_scls] += allterm_ust * days_per_year / m2_per_ha
+                    h_mort_can_scpf[io_si, i_scpf] += allterm_can * days_per_year / m2_per_ha
+                    h_mort_ust_scpf[io_si, i_scpf] += allterm_ust * days_per_year / m2_per_ha
+                end
+
+                if has_imort
+                    imr = site.imort_rate[i_scls, ft] / m2_per_ha
+                    h_m4_scpf[io_si, i_scpf] = imr
+                    h_m4_scls[io_si, i_scls] += imr
+                    h_mort_ust_scpf[io_si, i_scpf] += imr
+                    h_mort_ust_scls[io_si, i_scls] += imr
+                    iscag = i_scls
+                    h_mort_ust_scag[io_si, iscag] += imr
+                end
+
+                if has_fmort
+                    fmr_can = site.fmort_rate_canopy[i_scls, ft] / m2_per_ha
+                    fmr_ust = site.fmort_rate_ustory[i_scls, ft] / m2_per_ha
+                    h_m5_scpf[io_si, i_scpf] = fmr_can + fmr_ust
+                    h_m5_scls[io_si, i_scls] += fmr_can + fmr_ust
+                    h_crownfiremort_scpf[io_si, i_scpf] = site.fmort_rate_crown[i_scls, ft] / m2_per_ha
+                    h_cambialfiremort_scpf[io_si, i_scpf] = site.fmort_rate_cambial[i_scls, ft] / m2_per_ha
+                    h_mort_can_scpf[io_si, i_scpf] += fmr_can
+                    h_mort_can_scls[io_si, i_scls] += fmr_can
+                    h_mort_ust_scpf[io_si, i_scpf] += fmr_ust
+                    h_mort_ust_scls[io_si, i_scls] += fmr_ust
+                    iscag = i_scls
+                    h_mort_can_scag[io_si, iscag] += fmr_can
+                    h_mort_ust_scag[io_si, iscag] += fmr_ust
+                end
+
+                if !isempty(site.growthflux_fusion)
+                    h_growthflux_fus_scpf[io_si, i_scpf] +=
+                        site.growthflux_fusion[i_scls, ft] * days_per_year / m2_per_ha
+                end
+            end
+        end
+
+        # PFT mortality carbon flux (fire + impact + termination)
+        if has_fmort && !isempty(site.fmort_carbonflux_canopy)
+            for ft in 1:npft
+                h_mort_cflux_pft[io_si, ft] +=
+                    (site.fmort_carbonflux_canopy[ft] + site.fmort_carbonflux_ustory[ft]) / g_per_kg +
+                    site.imort_carbonflux[ft] +
+                    sum(@view site.term_carbonflux_ustory[:, ft]) * days_per_sec * ha_per_m2 +
+                    sum(@view site.term_carbonflux_canopy[:, ft]) * days_per_sec * ha_per_m2
+                h_fire_cflux_pft[io_si, ft] = site.fmort_carbonflux_canopy[ft] / g_per_kg
+            end
+        end
+
+        # add imort/fmort/term to aboveground woody mortality
+        if has_fmort && !isempty(site.fmort_abg_flux)
+            for ft in 1:npft
+                for i_scls in 1:nsclass
+                    i_scpf = (ft - 1) * nsclass + i_scls
+                    h_abg_mort_cflux_scpf[io_si, i_scpf] +=
+                        (site.fmort_abg_flux[i_scls, ft] / g_per_kg) +
+                        site.imort_abg_flux[i_scls, ft] +
+                        (site.term_abg_flux[i_scls, ft] * days_per_sec * ha_per_m2)
+                end
+            end
+        end
+
+        # TODO Batch 18-followup-W2b: tree-damage cross-tab (cdpf/cdsc) — gated on
+        # hlm_use_tree_damage (off in carbon-only).
+
+        # reset the consumed site-level mortality accumulators
+        has_term  && (fill!(site.term_nindivs_canopy, 0.0); fill!(site.term_nindivs_ustory, 0.0))
+        !isempty(site.imort_carbonflux) && fill!(site.imort_carbonflux, 0.0)
+        has_imort && fill!(site.imort_rate, 0.0)
+        has_fmort && (fill!(site.fmort_rate_canopy, 0.0); fill!(site.fmort_rate_ustory, 0.0);
+                      fill!(site.fmort_rate_cambial, 0.0); fill!(site.fmort_rate_crown, 0.0))
+        !isempty(site.fmort_carbonflux_canopy) && (fill!(site.fmort_carbonflux_canopy, 0.0);
+                                                   fill!(site.fmort_carbonflux_ustory, 0.0))
+        !isempty(site.growthflux_fusion) && fill!(site.growthflux_fusion, 0.0)
+        !isempty(site.fmort_abg_flux) && (fill!(site.fmort_abg_flux, 0.0);
+                                          fill!(site.imort_abg_flux, 0.0); fill!(site.term_abg_flux, 0.0))
+
+        # recruitment rate + gridcell seed in/out flux
+        if !isempty(site.recruitment_rate)
+            for ft in 1:npft
+                h_recruit_pft[io_si, ft] = site.recruitment_rate[ft] * days_per_year / m2_per_ha
+                if !isempty(site.seed_out) && length(site.seed_out) >= ft
+                    h_seeds_out_pft[io_si, ft] = site.seed_out[ft]
+                    h_seeds_in_pft[io_si, ft]  = site.seed_in[ft]
+                end
+            end
+            fill!(site.recruitment_rate, 0.0)
+        end
+
+        # summarize all mortality fluxes by PFT (from the scpf series)
+        for ft in 1:npft
+            for i_scls in 1:nsclass
+                i_scpf = (ft - 1) * nsclass + i_scls
+                h_mort_pft[io_si, ft] +=
+                    h_m1_scpf[io_si, i_scpf] + h_m2_scpf[io_si, i_scpf] + h_m3_scpf[io_si, i_scpf] +
+                    h_m4_scpf[io_si, i_scpf] + h_m5_scpf[io_si, i_scpf] + h_m6_scpf[io_si, i_scpf] +
+                    h_m7_scpf[io_si, i_scpf] + h_m8_scpf[io_si, i_scpf] + h_m9_scpf[io_si, i_scpf] +
+                    h_m10_scpf[io_si, i_scpf]
+            end
+        end
+
+        # ---- per-element litter diagnostics + scpf carbon pool states ----
+        h_totvegc_scpf = H(:ih_totvegc_scpf); h_leafc_scpf = H(:ih_leafc_scpf)
+        h_fnrtc_scpf = H(:ih_fnrtc_scpf); h_sapwc_scpf = H(:ih_sapwc_scpf)
+        h_storec_scpf = H(:ih_storec_scpf); h_reproc_scpf = H(:ih_reproc_scpf)
+        if has_fluxdiag
+            for el in 1:num_elements[]
+                eid = element_list[el]
+                edg = site.flux_diags.elem[el]
+                h_litter_in_elem[io_si, el] = (sum(edg.cwd_ag_input) + sum(edg.cwd_bg_input) +
+                    sum(edg.surf_fine_litter_input) + sum(edg.root_litter_input)) / m2_per_ha / sec_per_day
+
+                if eid == carbon12_element
+                    @views h_totvegc_scpf[io_si, :] .= 0.0
+                    @views h_leafc_scpf[io_si, :]   .= 0.0
+                    @views h_fnrtc_scpf[io_si, :]   .= 0.0
+                    @views h_sapwc_scpf[io_si, :]   .= 0.0
+                    @views h_storec_scpf[io_si, :]  .= 0.0
+                    @views h_reproc_scpf[io_si, :]  .= 0.0
+                end
+                # TODO Batch 18-followup-W2b: N/P scpf pool zeroing/fill (totvegn/p, ...)
+
+                cpatch = site.oldest_patch
+                while cpatch !== nothing
+                    if length(cpatch.litter) >= el
+                        litt = cpatch.litter[el]
+                        h_litter_out_elem[io_si, el] += (sum(litt.leaf_fines_frag) + sum(litt.root_fines_frag) +
+                            sum(litt.ag_cwd_frag) + sum(litt.bg_cwd_frag) + sum(litt.seed_decay) +
+                            sum(litt.seed_germ_decay)) * cpatch.area / m2_per_ha / sec_per_day
+                        h_seed_bank_elem[io_si, el] += sum(litt.seed) * cpatch.area / m2_per_ha
+                        h_seed_germ_elem[io_si, el] += sum(litt.seed_germ) * cpatch.area / m2_per_ha
+                        h_seed_decay_elem[io_si, el] += sum(litt.seed_decay .+ litt.seed_germ_decay) *
+                            cpatch.area / m2_per_ha / sec_per_day
+                        h_seeds_in_local_elem[io_si, el] += sum(litt.seed_in_local) * cpatch.area / m2_per_ha / sec_per_day
+                        h_seed_in_extern_elem[io_si, el] += sum(litt.seed_in_extern) * cpatch.area / m2_per_ha / sec_per_day
+                        h_cwd_ag_elem[io_si, el] += sum(litt.ag_cwd) * cpatch.area / m2_per_ha
+                        h_cwd_bg_elem[io_si, el] += sum(litt.bg_cwd) * cpatch.area / m2_per_ha
+                        h_fines_ag_elem[io_si, el] += sum(litt.leaf_fines) * cpatch.area / m2_per_ha
+                        h_fines_bg_elem[io_si, el] += sum(litt.root_fines) * cpatch.area / m2_per_ha
+                        for icwd in 1:ncwd
+                            elcwd = (el - 1) * ncwd + icwd
+                            h_cwd_elcwd[io_si, elcwd] += (litt.ag_cwd[icwd] + sum(@view litt.bg_cwd[icwd, :])) *
+                                cpatch.area / m2_per_ha
+                        end
+                    end
+
+                    ccohort = cpatch.tallest
+                    while ccohort !== nothing
+                        if ccohort.prt !== nothing
+                            sapw_m   = GetState(ccohort.prt, sapw_organ, eid)
+                            struct_m = GetState(ccohort.prt, struct_organ, eid)
+                            leaf_m   = GetState(ccohort.prt, leaf_organ, eid)
+                            fnrt_m   = GetState(ccohort.prt, fnrt_organ, eid)
+                            store_m  = GetState(ccohort.prt, store_organ, eid)
+                            repro_m  = GetState(ccohort.prt, repro_organ, eid)
+                            total_m  = sapw_m + struct_m + leaf_m + fnrt_m + store_m + repro_m
+                            i_scpf = ccohort.size_by_pft_class
+                            if eid == carbon12_element
+                                h_totvegc_scpf[io_si, i_scpf] += total_m * ccohort.n / m2_per_ha
+                                h_leafc_scpf[io_si, i_scpf]   += leaf_m * ccohort.n / m2_per_ha
+                                h_fnrtc_scpf[io_si, i_scpf]   += fnrt_m * ccohort.n / m2_per_ha
+                                h_sapwc_scpf[io_si, i_scpf]   += sapw_m * ccohort.n / m2_per_ha
+                                h_storec_scpf[io_si, i_scpf]  += store_m * ccohort.n / m2_per_ha
+                                h_reproc_scpf[io_si, i_scpf]  += repro_m * ccohort.n / m2_per_ha
+                            end
+                        end
+                        ccohort = ccohort.shorter
+                    end
+                    cpatch = cpatch.younger
+                end
+            end
+        end
+
+        # storage-fraction normalization (carbon canopy/ustory)
+        for ft in 1:npft
+            for i_scls in 1:nsclass
+                i_scpf = (ft - 1) * nsclass + i_scls
+                if h_storectfrac_can_scpf[io_si, i_scpf] > nearzero
+                    h_storectfrac_can_scpf[io_si, i_scpf] =
+                        storec_canopy_scpf[i_scpf] / h_storectfrac_can_scpf[io_si, i_scpf]
+                end
+                if h_storectfrac_ust_scpf[io_si, i_scpf] > nearzero
+                    h_storectfrac_ust_scpf[io_si, i_scpf] =
+                        storec_ustory_scpf[i_scpf] / h_storectfrac_ust_scpf[io_si, i_scpf]
+                end
+            end
+        end
+
+        # demotion / promotion rates (scls)
+        if !isempty(site.demotion_rate)
+            for i_scls in 1:nsclass
+                h_demotion_scls[io_si, i_scls]  = site.demotion_rate[i_scls] * days_per_year / m2_per_ha
+                h_promotion_scls[io_si, i_scls] = site.promotion_rate[i_scls] * days_per_year / m2_per_ha
+            end
+        end
+
+        # site-level disturbance-associated CWD input fluxes (carbon)
+        if has_fluxdiag
+            edc = site.flux_diags.elem[cpos]
+            for icwd in 1:ncwd
+                h_cwd_ag_in_cwdsc[io_si, icwd] += edc.cwd_ag_input[icwd] / days_per_year / sec_per_day
+                h_cwd_bg_in_cwdsc[io_si, icwd] += edc.cwd_bg_input[icwd] / days_per_year / sec_per_day
+            end
+        end
+
+        # recruit running-mean l2fr
+        if !isempty(site.rec_l2fr) && size(site.rec_l2fr, 2) >= 2
+            for ft in 1:npft
+                h_recl2fr_can_pf[io_si, ft] = site.rec_l2fr[ft, 1]
+                h_recl2fr_ust_pf[io_si, ft] = site.rec_l2fr[ft, 2]
+            end
+        end
+    end
     return nothing
 end
 
@@ -1737,8 +2676,321 @@ function update_history_hifrq1!(this::fates_history_interface_type, nc, nsites, 
     return nothing
 end
 
+"""
+    update_history_hifrq2!(this, nc, nsites, sites, bc_in, bc_out, dt_tstep)
+
+Level-2 high-frequency (per-timestep, multi-dimension) history update. Faithful
+port of the Fortran `update_history_hifrq2` (F90 5174–5621): the per-canopy-layer
+× PFT × leaf-layer radiation/LAI profiles and the per-size/PFT/age-class
+respiration disaggregation.
+
+Filled:
+  * autotrophic-respiration partition by size×pft (`ih_ar_*_si_scpf`):
+    total/grow/maint/agsapm(livestem)/darkm(rdark)/crootm/frootm
+  * canopy/understory respiration by size class (`ih_{rdark,livestem_mr,
+    livecroot_mr,froot_mr,resp_g,resp_m}_{canopy,understory}_si_scls`)
+  * GPP/NPP by patch age class (`ih_gpp_si_age`, `ih_npp_si_age`),
+    canopy resistances by age (`ih_c_stomata_si_age`, `ih_c_lblayer_si_age`)
+  * per-cohort leaf-layer net uptake (`ih_ts_net_uptake_si_cnlf`)
+  * canopy×leaf(×pft) radiation/LAI profiles: `ih_parsun/parsha_z_si_cnlf(pft)`,
+    `ih_laisun/laisha_z_si_cnlf`, `ih_laisun/laisha_clllpf`, `ih_crownfrac_clllpf`,
+    `ih_parprof_dir/dif_si_cnlf(pft)`, canopy means `ih_parsun/parsha_si_can`,
+    `ih_laisun/laisha_si_can` — with the Fortran's crown/leaf/canopy-area
+    normalization + ignore-value masking of empty bins.
+
+`ar` = `resp_m` + `resp_g` (held in `resp_tstep`). The radiation-profile fields
+(`ed_parsun_z`, `f_sun`, `parprof_pft_*_z`, `canopy_area_profile`,
+`elai_profile`) and the cohort `ts_net_uptake` are NaN/unset until canopy radiation
+has been summarized; the port's "NaN == unset" convention is honored with
+`isfinite` guards so an un-summarized carbon-only cold-start contributes zero to
+each bin rather than poisoning it.
+"""
 function update_history_hifrq2!(this::fates_history_interface_type, nc, nsites, sites, bc_in, bc_out, dt_tstep)
-    # TODO Batch 18-followup
+    h_ar_scpf        = this.hvars[this.ih[:ih_ar_si_scpf]].r82d
+    h_ar_grow_scpf   = this.hvars[this.ih[:ih_ar_grow_si_scpf]].r82d
+    h_ar_maint_scpf  = this.hvars[this.ih[:ih_ar_maint_si_scpf]].r82d
+    h_ar_agsapm_scpf = this.hvars[this.ih[:ih_ar_agsapm_si_scpf]].r82d
+    h_ar_darkm_scpf  = this.hvars[this.ih[:ih_ar_darkm_si_scpf]].r82d
+    h_ar_crootm_scpf = this.hvars[this.ih[:ih_ar_crootm_si_scpf]].r82d
+    h_ar_frootm_scpf = this.hvars[this.ih[:ih_ar_frootm_si_scpf]].r82d
+    h_rdark_can_scls   = this.hvars[this.ih[:ih_rdark_canopy_si_scls]].r82d
+    h_livest_can_scls  = this.hvars[this.ih[:ih_livestem_mr_canopy_si_scls]].r82d
+    h_livecr_can_scls  = this.hvars[this.ih[:ih_livecroot_mr_canopy_si_scls]].r82d
+    h_froot_can_scls   = this.hvars[this.ih[:ih_froot_mr_canopy_si_scls]].r82d
+    h_respg_can_scls   = this.hvars[this.ih[:ih_resp_g_canopy_si_scls]].r82d
+    h_respm_can_scls   = this.hvars[this.ih[:ih_resp_m_canopy_si_scls]].r82d
+    h_rdark_ust_scls   = this.hvars[this.ih[:ih_rdark_understory_si_scls]].r82d
+    h_livest_ust_scls  = this.hvars[this.ih[:ih_livestem_mr_understory_si_scls]].r82d
+    h_livecr_ust_scls  = this.hvars[this.ih[:ih_livecroot_mr_understory_si_scls]].r82d
+    h_froot_ust_scls   = this.hvars[this.ih[:ih_froot_mr_understory_si_scls]].r82d
+    h_respg_ust_scls   = this.hvars[this.ih[:ih_resp_g_understory_si_scls]].r82d
+    h_respm_ust_scls   = this.hvars[this.ih[:ih_resp_m_understory_si_scls]].r82d
+    h_gpp_age        = this.hvars[this.ih[:ih_gpp_si_age]].r82d
+    h_npp_age        = this.hvars[this.ih[:ih_npp_si_age]].r82d
+    h_cstom_age      = this.hvars[this.ih[:ih_c_stomata_si_age]].r82d
+    h_clbl_age       = this.hvars[this.ih[:ih_c_lblayer_si_age]].r82d
+    h_parsun_cnlf    = this.hvars[this.ih[:ih_parsun_z_si_cnlf]].r82d
+    h_parsha_cnlf    = this.hvars[this.ih[:ih_parsha_z_si_cnlf]].r82d
+    h_tsnu_cnlf      = this.hvars[this.ih[:ih_ts_net_uptake_si_cnlf]].r82d
+    h_parsun_cnlfpft = this.hvars[this.ih[:ih_parsun_z_si_cnlfpft]].r82d
+    h_parsha_cnlfpft = this.hvars[this.ih[:ih_parsha_z_si_cnlfpft]].r82d
+    h_laisun_cnlf    = this.hvars[this.ih[:ih_laisun_z_si_cnlf]].r82d
+    h_laisha_cnlf    = this.hvars[this.ih[:ih_laisha_z_si_cnlf]].r82d
+    h_laisun_clllpf  = this.hvars[this.ih[:ih_laisun_clllpf]].r82d
+    h_laisha_clllpf  = this.hvars[this.ih[:ih_laisha_clllpf]].r82d
+    h_crownf_clllpf  = this.hvars[this.ih[:ih_crownfrac_clllpf]].r82d
+    h_parprofdir_cnlf    = this.hvars[this.ih[:ih_parprof_dir_si_cnlf]].r82d
+    h_parprofdif_cnlf    = this.hvars[this.ih[:ih_parprof_dif_si_cnlf]].r82d
+    h_parprofdir_cnlfpft = this.hvars[this.ih[:ih_parprof_dir_si_cnlfpft]].r82d
+    h_parprofdif_cnlfpft = this.hvars[this.ih[:ih_parprof_dif_si_cnlfpft]].r82d
+    h_parsun_can     = this.hvars[this.ih[:ih_parsun_si_can]].r82d
+    h_parsha_can     = this.hvars[this.ih[:ih_parsha_si_can]].r82d
+    h_laisun_can     = this.hvars[this.ih[:ih_laisun_si_can]].r82d
+    h_laisha_can     = this.hvars[this.ih[:ih_laisha_si_can]].r82d
+
+    flush_hvars!(this, nc, group_hifr_complx)
+    dt_tstep_inv = 1.0 / dt_tstep
+
+    nage  = nlevage[]
+    npft  = numpft[]
+
+    for s in 1:nsites
+        site = sites[s]
+        io_si = site.h_gid
+
+        zero_site_hvars!(this, site, group_hifr_complx)
+
+        # site vegetated-area normalizer (sum of patch canopy areas)
+        site_area_veg = 0.0
+        cpatch = site.oldest_patch
+        while cpatch !== nothing
+            if isfinite(cpatch.total_canopy_area)
+                site_area_veg += cpatch.total_canopy_area
+            end
+            cpatch = cpatch.younger
+        end
+        site_area_veg < nearzero && continue
+        site_area_veg_inv = 1.0 / site_area_veg
+
+        patch_area_by_age  = zeros(nage)
+        canopy_area_by_age = zeros(nage)
+
+        cpatch = site.oldest_patch
+        while cpatch !== nothing
+            iage  = cpatch.age_class
+            tcanp = isfinite(cpatch.total_canopy_area) ? cpatch.total_canopy_area : 0.0
+
+            patch_area_by_age[iage]  += cpatch.area
+            canopy_area_by_age[iage] += tcanp
+
+            # canopy resistance terms (age-binned, canopy-area weighted)
+            if isfinite(cpatch.c_stomata)
+                h_cstom_age[io_si, iage] += cpatch.c_stomata * tcanp * mol_per_umol
+            end
+            if isfinite(cpatch.c_lblayer)
+                h_clbl_age[io_si, iage]  += cpatch.c_lblayer * tcanp * mol_per_umol
+            end
+
+            # ---- cohort loop: per-class respiration + age GPP/NPP + leaf net-uptake ----
+            ccohort = cpatch.shortest
+            while ccohort !== nothing
+                n_perm2 = ccohort.n * AREA_INV
+
+                if !ccohort.isnew
+                    resp_g = ccohort.resp_g_tstep
+                    aresp  = ccohort.resp_tstep
+                    npp    = ccohort.npp_tstep
+                    scpf   = ccohort.size_by_pft_class
+                    scls   = ccohort.size_class
+
+                    # total / growth / maint AR by size×pft [kgC/m2/s]
+                    h_ar_scpf[io_si, scpf]       += (aresp * dt_tstep_inv) * n_perm2
+                    h_ar_grow_scpf[io_si, scpf]  += (resp_g * dt_tstep_inv) * n_perm2
+                    h_ar_maint_scpf[io_si, scpf] += (ccohort.resp_m * dt_tstep_inv) * n_perm2
+
+                    # maintenance partition variables are stored as rates [kgC/plant/s]
+                    h_ar_agsapm_scpf[io_si, scpf] += ccohort.livestem_mr  * n_perm2
+                    h_ar_darkm_scpf[io_si, scpf]  += ccohort.rdark        * n_perm2
+                    h_ar_crootm_scpf[io_si, scpf] += ccohort.livecroot_mr * n_perm2
+                    h_ar_frootm_scpf[io_si, scpf] += ccohort.froot_mr     * n_perm2
+
+                    # GPP/NPP per patch-age bin (un-normalized; / patch_area below)
+                    h_gpp_age[io_si, iage] += ccohort.gpp_tstep * ccohort.n * dt_tstep_inv
+                    h_npp_age[io_si, iage] += npp * ccohort.n * dt_tstep_inv
+
+                    # canopy/understory size-resolved respiration [kgC/m2/s]
+                    if ccohort.canopy_layer == 1
+                        h_rdark_can_scls[io_si, scls]  += ccohort.rdark        * ccohort.n * ha_per_m2
+                        h_livest_can_scls[io_si, scls] += ccohort.livestem_mr  * ccohort.n * ha_per_m2
+                        h_livecr_can_scls[io_si, scls] += ccohort.livecroot_mr * ccohort.n * ha_per_m2
+                        h_froot_can_scls[io_si, scls]  += ccohort.froot_mr     * ccohort.n * ha_per_m2
+                        h_respg_can_scls[io_si, scls]  += resp_g          * ccohort.n * dt_tstep_inv * ha_per_m2
+                        h_respm_can_scls[io_si, scls]  += ccohort.resp_m  * ccohort.n * dt_tstep_inv * ha_per_m2
+                    else
+                        h_rdark_ust_scls[io_si, scls]  += ccohort.rdark        * ccohort.n * ha_per_m2
+                        h_livest_ust_scls[io_si, scls] += ccohort.livestem_mr  * ccohort.n * ha_per_m2
+                        h_livecr_ust_scls[io_si, scls] += ccohort.livecroot_mr * ccohort.n * ha_per_m2
+                        h_froot_ust_scls[io_si, scls]  += ccohort.froot_mr     * ccohort.n * ha_per_m2
+                        h_respg_ust_scls[io_si, scls]  += resp_g          * ccohort.n * dt_tstep_inv * ha_per_m2
+                        h_respm_ust_scls[io_si, scls]  += ccohort.resp_m  * ccohort.n * dt_tstep_inv * ha_per_m2
+                    end
+                end
+
+                # canopy leaf carbon balance (per leaf layer of this cohort)
+                ican = ccohort.canopy_layer
+                if isfinite(ccohort.c_area)
+                    for ileaf in 1:ccohort.nv
+                        tsnu = ccohort.ts_net_uptake[ileaf]
+                        isfinite(tsnu) || continue
+                        cnlf_indx = ileaf + (ican - 1) * nlevleaf
+                        h_tsnu_cnlf[io_si, cnlf_indx] += tsnu * dt_tstep_inv * ccohort.c_area * AREA_INV
+                    end
+                end
+
+                ccohort = ccohort.taller
+            end
+
+            # ---- radiation profiles through the canopy (cl × ll × pft) ----
+            if !isempty(cpatch.canopy_area_profile)
+                for ipft in 1:npft
+                    for ican in 1:cpatch.ncl_p
+                        for ileaf in 1:cpatch.nleaf[ican, ipft]
+                            clllpf_indx = ileaf + (ican - 1) * nlevleaf +
+                                          (ipft - 1) * nlevleaf * nclmax
+                            cnlf_indx   = ileaf + (ican - 1) * nlevleaf
+
+                            caprof = cpatch.canopy_area_profile[ican, ipft, ileaf]
+                            isfinite(caprof) || continue
+                            clllpf_area = caprof * tcanp
+
+                            psun = cpatch.ed_parsun_z[ican, ipft, ileaf]
+                            psha = cpatch.ed_parsha_z[ican, ipft, ileaf]
+                            elai = cpatch.elai_profile[ican, ipft, ileaf]
+                            fsun = cpatch.f_sun[ican, ipft, ileaf]
+                            pdir = cpatch.parprof_pft_dir_z[ican, ipft, ileaf]
+                            pdif = cpatch.parprof_pft_dif_z[ican, ipft, ileaf]
+
+                            # canopy × leaf × pft diagnostics
+                            if isfinite(psun)
+                                h_parsun_cnlfpft[io_si, clllpf_indx] += psun * clllpf_area
+                                h_parsun_cnlf[io_si, cnlf_indx]      += psun * clllpf_area
+                                h_parsun_can[io_si, ican]            += psun * clllpf_area
+                            end
+                            if isfinite(psha)
+                                h_parsha_cnlfpft[io_si, clllpf_indx] += psha * clllpf_area
+                                h_parsha_cnlf[io_si, cnlf_indx]      += psha * clllpf_area
+                                h_parsha_can[io_si, ican]            += psha * clllpf_area
+                            end
+                            if isfinite(elai) && isfinite(fsun)
+                                h_laisun_clllpf[io_si, clllpf_indx] += elai * fsun * clllpf_area
+                                h_laisha_clllpf[io_si, clllpf_indx] += elai * (1.0 - fsun) * clllpf_area
+                                h_laisun_can[io_si, ican] += fsun * elai * clllpf_area
+                                h_laisha_can[io_si, ican] += (1.0 - fsun) * elai * clllpf_area
+                            end
+                            if isfinite(fsun)
+                                h_laisun_cnlf[io_si, cnlf_indx] += fsun * clllpf_area
+                                h_laisha_cnlf[io_si, cnlf_indx] += (1.0 - fsun) * clllpf_area
+                            end
+                            if isfinite(pdir)
+                                h_parprofdir_cnlfpft[io_si, clllpf_indx] += pdir * clllpf_area
+                                h_parprofdir_cnlf[io_si, cnlf_indx]      += pdir * clllpf_area
+                            end
+                            if isfinite(pdif)
+                                h_parprofdif_cnlfpft[io_si, clllpf_indx] += pdif * clllpf_area
+                                h_parprofdif_cnlf[io_si, cnlf_indx]      += pdif * clllpf_area
+                            end
+
+                            # area footprint accumulator (used for normalization)
+                            h_crownf_clllpf[io_si, clllpf_indx] += clllpf_area
+                        end
+                    end
+                end
+            end
+
+            cpatch = cpatch.younger
+        end
+
+        # ---- normalize the radiation multiplexed diagnostics ----
+        for ican in 1:nclmax
+            cl_area = 0.0
+            for ileaf in 1:nlevleaf
+                clll_area = 0.0
+                for ipft in 1:npft
+                    clllpf_indx = ileaf + (ican - 1) * nlevleaf +
+                                  (ipft - 1) * nlevleaf * nclmax
+                    cf = h_crownf_clllpf[io_si, clllpf_indx]
+                    if cf < nearzero
+                        h_parsun_cnlfpft[io_si, clllpf_indx]    = hlm_hio_ignore_val[]
+                        h_parsha_cnlfpft[io_si, clllpf_indx]    = hlm_hio_ignore_val[]
+                        h_laisun_clllpf[io_si, clllpf_indx]     = hlm_hio_ignore_val[]
+                        h_laisha_clllpf[io_si, clllpf_indx]     = hlm_hio_ignore_val[]
+                        h_parprofdir_cnlfpft[io_si, clllpf_indx] = hlm_hio_ignore_val[]
+                        h_parprofdif_cnlfpft[io_si, clllpf_indx] = hlm_hio_ignore_val[]
+                    else
+                        h_parsun_cnlfpft[io_si, clllpf_indx]    /= cf
+                        h_parsha_cnlfpft[io_si, clllpf_indx]    /= cf
+                        h_laisun_clllpf[io_si, clllpf_indx]     /= cf
+                        h_laisha_clllpf[io_si, clllpf_indx]     /= cf
+                        h_parprofdir_cnlfpft[io_si, clllpf_indx] /= cf
+                        h_parprofdif_cnlfpft[io_si, clllpf_indx] /= cf
+                        clll_area += cf
+                        cl_area   += cf
+                        # convert footprint m2 -> fraction of site
+                        h_crownf_clllpf[io_si, clllpf_indx] = cf * site_area_veg_inv
+                    end
+                end
+
+                cnlf_indx = ileaf + (ican - 1) * nlevleaf
+                if clll_area < nearzero
+                    h_parprofdir_cnlf[io_si, cnlf_indx] = hlm_hio_ignore_val[]
+                    h_parprofdif_cnlf[io_si, cnlf_indx] = hlm_hio_ignore_val[]
+                    h_parsun_cnlf[io_si, cnlf_indx]     = hlm_hio_ignore_val[]
+                    h_parsha_cnlf[io_si, cnlf_indx]     = hlm_hio_ignore_val[]
+                    h_laisun_cnlf[io_si, cnlf_indx]     = hlm_hio_ignore_val[]
+                    h_laisha_cnlf[io_si, cnlf_indx]     = hlm_hio_ignore_val[]
+                else
+                    h_parprofdir_cnlf[io_si, cnlf_indx] /= clll_area
+                    h_parprofdif_cnlf[io_si, cnlf_indx] /= clll_area
+                    h_parsun_cnlf[io_si, cnlf_indx]     /= clll_area
+                    h_parsha_cnlf[io_si, cnlf_indx]     /= clll_area
+                    h_laisun_cnlf[io_si, cnlf_indx]     /= clll_area
+                    h_laisha_cnlf[io_si, cnlf_indx]     /= clll_area
+                end
+            end
+
+            if cl_area < nearzero
+                h_parsun_can[io_si, ican] = hlm_hio_ignore_val[]
+                h_parsha_can[io_si, ican] = hlm_hio_ignore_val[]
+                h_laisun_can[io_si, ican] = hlm_hio_ignore_val[]
+                h_laisha_can[io_si, ican] = hlm_hio_ignore_val[]
+            else
+                # integrated metrics: normalize by the site footprint area
+                h_parsun_can[io_si, ican] *= site_area_veg_inv
+                h_parsha_can[io_si, ican] *= site_area_veg_inv
+                h_laisun_can[io_si, ican] *= site_area_veg_inv
+                h_laisha_can[io_si, ican] *= site_area_veg_inv
+            end
+        end
+
+        # ---- normalize age-stratified diagnostics ----
+        for ipa2 in 1:nage
+            if patch_area_by_age[ipa2] > nearzero
+                h_gpp_age[io_si, ipa2] /= patch_area_by_age[ipa2]
+                h_npp_age[io_si, ipa2] /= patch_area_by_age[ipa2]
+            else
+                h_gpp_age[io_si, ipa2] = 0.0
+                h_npp_age[io_si, ipa2] = 0.0
+            end
+
+            if canopy_area_by_age[ipa2] > nearzero
+                h_cstom_age[io_si, ipa2] /= canopy_area_by_age[ipa2]
+                h_clbl_age[io_si, ipa2]  /= canopy_area_by_age[ipa2]
+            else
+                h_cstom_age[io_si, ipa2] = 0.0
+                h_clbl_age[io_si, ipa2]  = 0.0
+            end
+        end
+    end
     return nothing
 end
 

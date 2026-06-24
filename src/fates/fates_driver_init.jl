@@ -266,7 +266,7 @@ Set the FATES `hlm_*` control Refs for the minimal carbon-only cold start, mirro
 the `set_fates_ctrlparms` tag sequence in `CLMFatesGlobals1`/`CLMFatesGlobals2`
 (see clmfates_interfaceMod.F90).  Brackets with `flush_to_unset` + `check_allset`.
 """
-function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int)
+function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimlevel::Int = 1)
     set_fates_ctrlparms("flush_to_unset")
 
     # Biogeography / competition modes — all OFF (default NBG cold start).
@@ -287,8 +287,8 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int)
     # PARTEH carbon-only + seed-dispersal cadence + history levels.
     set_fates_ctrlparms("parteh_mode";       ival = prt_carbon_allom_hyp)
     set_fates_ctrlparms("seeddisp_cadence";  ival = 0)
-    set_fates_ctrlparms("hist_hifrq_dimlevel"; ival = 1)
-    set_fates_ctrlparms("hist_dynam_dimlevel"; ival = 1)
+    set_fates_ctrlparms("hist_hifrq_dimlevel"; ival = hist_dimlevel)
+    set_fates_ctrlparms("hist_dynam_dimlevel"; ival = hist_dimlevel)
 
     # Nutrient competition / decomposition.  Carbon-only => N/P spec off, CTC decomp.
     set_fates_ctrlparms("nu_com";        cval = "RD")
@@ -362,7 +362,7 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          nlevsoil::Int, nlevdecomp::Int,
                          params_path::AbstractString = FATES_PARAMS_DEFAULT_CDL,
                          current_year::Int = 1, current_month::Int = 1,
-                         current_day::Int = 1)
+                         current_day::Int = 1, hist_dimlevel::Int = 1)
 
     # ---- W1.1: FATES globals + parameters (CLMFatesGlobals1) ----
     FatesInterfaceInit(6, false)
@@ -382,7 +382,8 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # read: it sets hlm_parteh_mode (carbon-only), which read_fates_params! branches
     # on (PRTDerivedParams! organ map + the PARTEH/PFT consistency checks). nlevsoil
     # is the only numeric arg it needs; numpft is resolved from the file below.
-    _fates_spike_set_ctrlparms!(; numpft_in = 0, nlevsoil = nlevsoil)
+    _fates_spike_set_ctrlparms!(; numpft_in = 0, nlevsoil = nlevsoil,
+                                  hist_dimlevel = hist_dimlevel)
 
     # Read the REAL FATES default parameter file (replaces _fates_spike_setup_pft!).
     # This populates prt_params / EDParams / EDPftvarcon_inst / SFParams /
