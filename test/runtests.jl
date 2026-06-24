@@ -139,6 +139,7 @@ using CLM
     include("test_cndv.jl")
     include("test_total_water_heat.jl")
     include("test_history_io.jl")
+    include("test_io_metadata.jl")
     include("test_dyn_file_io.jl")
     include("test_dyn_pft_crop_file.jl")
     include("test_dyn_harvest.jl")

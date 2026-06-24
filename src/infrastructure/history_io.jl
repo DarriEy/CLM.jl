@@ -99,6 +99,23 @@ Base.@kwdef mutable struct HistoryTape
     fields::Vector{HistField}   = HistField[]
     nsamples::Int               = 0
     dov2xy::Bool                = false   # true => area-weight aggregate all fields to gridcell
+
+    # --- CTSM time-slice / file metadata (histFileMod history_tape) ----------
+    # `mfilt` = max time samples per history file (namelist hist_mfilt); when
+    # `ntimes` reaches `mfilt` the file is "full" → rolls over to a new file.
+    # `ndens` = output precision (namelist hist_ndens): 1 => double, 2 => single.
+    # `ntimes` = time records written into the CURRENT file; `begtime` = start
+    # of the current averaging interval (written as time_bounds(1)).
+    mfilt::Int                  = 1
+    ndens::Int                  = 2       # 2 = single (Float32), 1 = double (Float64)
+    ntimes::Int                 = 0
+    begtime::Float64            = 0.0
+    # Set-level rollover bookkeeping: which output file (0-based) this tape is
+    # currently writing into, and that file's path ("" = not yet opened). When
+    # `ntimes` reaches `mfilt` the file is full and the next write rolls to a
+    # new file (`file_index` + 1, `ntimes` reset to 0).
+    file_index::Int             = 0
+    cur_filename::String        = ""
 end
 
 const _HIST_VALID_AVGFLAGS = ("A", "I", "X", "M")
@@ -294,6 +311,64 @@ function hist_dov2xy(fld::HistField, vals, ng::Int, inst)
     return nlev > 1 ? out : vec(out)
 end
 
+# Output NetCDF element type for a tape's `ndens` (Fortran hist_ndens):
+# ndens==1 => ncd_double (Float64), else (ndens==2) => ncd_float (Float32).
+_hist_ncprec(ndens::Integer) = ndens == 1 ? Float64 : Float32
+
+# Compute the CTSM calendar date metadata (mcdate/mcsec/mdcur/mscur) for a
+# model `time` expressed in the units of `time_units` ("<unit> since <date>").
+# `mcdate` = yr*10000+mon*100+day, `mcsec` = seconds of the current day,
+# `mdcur` = whole days since the base date, `mscur` = seconds within that day.
+# Mirrors histFileMod get_curr_date / get_curr_time. Only the common "days
+# since" / "seconds since" / "hours since" forms are decoded; anything else
+# falls back to (time, 0) days/seconds without a calendar date.
+function _hist_time_metadata(time::Real, time_units::AbstractString)
+    parts = split(time_units)
+    unit  = isempty(parts) ? "days" : lowercase(parts[1])
+    factor = unit == "seconds" ? 1.0 / 86400.0 :
+             unit == "hours"   ? 1.0 / 24.0    :
+             unit == "minutes" ? 1.0 / 1440.0  :
+             1.0   # "days" (default)
+    days_since = Float64(time) * factor
+
+    # Locate the base date string after "since".
+    base = DateTime(2000, 1, 1)
+    si = findfirst(==("since"), lowercase.(parts))
+    if si !== nothing && si < length(parts)
+        datestr = join(parts[(si+1):end], " ")
+        try
+            base = _hist_parse_basedate(datestr)
+        catch
+            base = DateTime(2000, 1, 1)
+        end
+    end
+
+    whole_days  = floor(Int, days_since)
+    frac_sec    = round(Int, (days_since - whole_days) * 86400.0)
+    cur = base + Dates.Day(whole_days) + Dates.Second(frac_sec)
+    yr  = Dates.year(cur)
+    mon = Dates.month(cur)
+    dy  = Dates.day(cur)
+    mcsec  = (Dates.hour(cur) * 3600) + (Dates.minute(cur) * 60) + Dates.second(cur)
+    mcdate = yr * 10000 + mon * 100 + dy
+    mdcur  = whole_days
+    mscur  = frac_sec
+    return (mcdate = mcdate, mcsec = mcsec, mdcur = mdcur, mscur = mscur)
+end
+
+# Parse the "<date>[ <time>]" portion of a CF time-units string into DateTime.
+function _hist_parse_basedate(s::AbstractString)
+    s = strip(s)
+    toks = split(s)
+    d = Date(toks[1], dateformat"y-m-d")
+    if length(toks) >= 2
+        t = Time(toks[2], dateformat"H:M:S")
+        return DateTime(d) + Dates.Hour(Dates.hour(t)) +
+               Dates.Minute(Dates.minute(t)) + Dates.Second(Dates.second(t))
+    end
+    return DateTime(d)
+end
+
 # Number of gridcells inferred from the subgrid index vectors in `inst`.
 function _hist_ngridcell(inst)
     ng = 0
@@ -308,7 +383,8 @@ end
 
 """
     hist_write!(tape, filename; time=0.0, time_units="days since 2000-01-01",
-                calendar="noleap", append=false, reset=true, inst=nothing)
+                calendar="noleap", append=false, reset=true, inst=nothing,
+                begtime=nothing)
 
 Write the time-aggregated tape to a CLM-style h0 NetCDF `filename`. Defines a
 `time` dimension (unlimited) and, for each subgrid level present, a spatial
@@ -316,6 +392,19 @@ dim sized to that level's element count (or, if `tape.dov2xy`, a single shared
 `gridcell` dim). 2d fields additionally define their vertical level dim.
 Appends one time record with each field's finalized value and (by default)
 resets the accumulators for the next interval.
+
+Alongside `time` it writes the CTSM averaging-interval metadata (mirroring
+`histFileMod`): `time_bounds(hist_interval,time)` (interval endpoints, with the
+`time` variable carrying `bounds="time_bounds"`), and the calendar bookkeeping
+`mcdate`/`mcsec`/`mdcur`/`mscur`. The interval start is `begtime` (defaults to
+the tape's stored `tape.begtime`); the end is `time`. After the record the
+tape's `begtime` advances to `time` so the next interval picks up where this
+one ended.
+
+Output precision follows the tape's `ndens` (Fortran hist_ndens): `ndens==1`
+writes Float64, otherwise Float32. The `time`/`time_bounds` axes are always
+Float64 (CTSM writes them at `ncprec`, but full precision avoids date-decode
+loss).
 
 `inst` is required when `tape.dov2xy=true` (supplies the subgrid weights for
 gridcell aggregation). If `append=true` and the file exists, the record is
@@ -327,13 +416,17 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
                      calendar::AbstractString="noleap",
                      append::Bool=false,
                      reset::Bool=true,
-                     inst=nothing)
+                     inst=nothing,
+                     begtime::Union{Real,Nothing}=nothing)
     isempty(tape.fields) && error("hist_write!: no fields registered")
     tape.nsamples == 0 && error("hist_write!: no samples accumulated")
     tape.dov2xy && inst === nothing &&
         error("hist_write!: dov2xy=true requires `inst` for gridcell aggregation")
 
     ng = tape.dov2xy ? _hist_ngridcell(inst) : 0
+    prec = _hist_ncprec(tape.ndens)   # field output precision (Float32/Float64)
+    btime = begtime === nothing ? tape.begtime : Float64(begtime)
+    meta  = _hist_time_metadata(time, time_units)
 
     # Finalize each field's value (and remap to gridcell if dov2xy), and
     # determine the spatial dim name + length it will be written on.
@@ -359,10 +452,26 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
     NCDataset(filename, mode) do ds
         if creating
             defDim(ds, "time", Inf)  # unlimited
+            defDim(ds, "hist_interval", 2)  # CTSM time-bounds endpoint dim
             defVar(ds, "time", Float64, ("time",);
                    attrib = Dict("units" => time_units,
                                  "calendar" => calendar,
-                                 "long_name" => "time"))
+                                 "long_name" => "time",
+                                 "bounds" => "time_bounds"))
+            # Averaging-interval endpoints + calendar bookkeeping (histFileMod).
+            defVar(ds, "time_bounds", Float64, ("hist_interval", "time");
+                   attrib = Dict("long_name" => "history time interval endpoints",
+                                 "units" => time_units,
+                                 "calendar" => calendar))
+            defVar(ds, "mcdate", Int32, ("time",);
+                   attrib = Dict("long_name" => "current date (YYYYMMDD)"))
+            defVar(ds, "mcsec", Int32, ("time",);
+                   attrib = Dict("long_name" => "current seconds of current date",
+                                 "units" => "s"))
+            defVar(ds, "mdcur", Int32, ("time",);
+                   attrib = Dict("long_name" => "current day (from base day)"))
+            defVar(ds, "mscur", Int32, ("time",);
+                   attrib = Dict("long_name" => "current seconds of current day"))
             seen = Set{String}()
             # One spatial dim per distinct level name.
             for i in 1:nf
@@ -382,18 +491,23 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
             for (i, fld) in enumerate(tape.fields)
                 dims = fld.nlev > 1 ? (dimname[i], fld.levdim, "time") :
                                       (dimname[i], "time")
-                defVar(ds, fld.name, Float64, dims;
+                defVar(ds, fld.name, prec, dims;
                        attrib = Dict("long_name" => fld.long_name,
                                      "units" => fld.units,
                                      "cell_methods" => _hist_cell_method(fld.avgflag),
                                      "subgrid_level" =>
                                          tape.dov2xy ? "gridcell" : _hist_subgrid_name(fld.level),
-                                     "_FillValue" => SPVAL))
+                                     "_FillValue" => prec(SPVAL)))
             end
         end
 
         ti = ds.dim["time"] + 1
         ds["time"][ti] = Float64(time)
+        ds["time_bounds"][:, ti] = Float64[btime, Float64(time)]
+        ds["mcdate"][ti] = Int32(meta.mcdate)
+        ds["mcsec"][ti]  = Int32(meta.mcsec)
+        ds["mdcur"][ti]  = Int32(meta.mdcur)
+        ds["mscur"][ti]  = Int32(meta.mscur)
         for (i, fld) in enumerate(tape.fields)
             if fld.nlev > 1
                 ds[fld.name][:, :, ti] = finals[i]
@@ -402,6 +516,10 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
             end
         end
     end
+
+    # Advance the averaging-interval start and bump the in-file record count.
+    tape.begtime = Float64(time)
+    tape.ntimes += 1
 
     if reset
         for fld in tape.fields
@@ -599,18 +717,24 @@ function hist_getflag(entry::AbstractString)
 end
 
 """
-    set_hist_filename(case, tape_index; ext_date="", compname="clm2") -> String
+    set_hist_filename(case, tape_index; ext_date="", compname="clm2",
+                      file_index=0) -> String
 
 Construct a CLM history filename. `tape_index` is 1-based in the code but the
 filename uses `h(tape_index-1)`, so tape 1 → `…clm2.h0…`, tape 2 → `…h1…`.
 Mirrors Fortran `set_hist_filename` (the date string is opaque here; pass it
-via `ext_date`, e.g. `"2000-01"`). Always ends in `.nc`.
+via `ext_date`, e.g. `"2000-01"`). `file_index` (the mfilt rollover counter)
+appends a `-NNNNN` suffix when `ext_date` is empty and `file_index>0`, so
+successive files of one tape get distinct names. Always ends in `.nc`.
 """
 function set_hist_filename(case::AbstractString, tape_index::Integer;
-                           ext_date::AbstractString="", compname::AbstractString="clm2")
+                           ext_date::AbstractString="", compname::AbstractString="clm2",
+                           file_index::Integer=0)
     tape_index >= 1 || error("set_hist_filename: tape_index must be ≥ 1")
     hidx = tape_index - 1
-    suffix = isempty(ext_date) ? "" : "." * ext_date
+    suffix = isempty(ext_date) ?
+        (file_index > 0 ? "-" * lpad(file_index, 5, '0') : "") :
+        "." * ext_date
     return string(case, ".", compname, ".h", hidx, suffix, ".nc")
 end
 
@@ -662,17 +786,24 @@ Construct a `HistoryTapeSet`, mirroring Fortran `htapes_build` /
 `fincl`, `fexcl`, `nhtfrq`, and `avgflag_pertape` are per-tape lists; the
 number of tapes is the longest of these (default 1 tape = h0). Shorter lists
 are padded (empty include/exclude, `nhtfrq=0`, no tape-wide flag).
+
+`hist_mfilt` (per tape) is the max number of time samples per history file
+(Fortran namelist `hist_mfilt`, default 1 for h0). `hist_ndens` (per tape) is
+the output precision (`hist_ndens`, default 2 = single/Float32; 1 = double).
 """
 function build_history_tapes(; master::Vector{HistFieldSpec}=default_master_field_list(),
                                fincl::AbstractVector=Vector{String}[],
                                fexcl::AbstractVector=Vector{String}[],
                                nhtfrq::AbstractVector{<:Integer}=Int[],
                                avgflag_pertape::AbstractVector{<:AbstractString}=String[],
+                               hist_mfilt::AbstractVector{<:Integer}=Int[],
+                               hist_ndens::AbstractVector{<:Integer}=Int[],
                                case::AbstractString="clmrun",
                                compname::AbstractString="clm2",
                                hist_empty_htapes::Bool=false)
     ntapes = max(length(fincl), length(fexcl), length(nhtfrq),
-                 length(avgflag_pertape), 1)
+                 length(avgflag_pertape), length(hist_mfilt),
+                 length(hist_ndens), 1)
 
     _get(v, t, default) = t <= length(v) ? v[t] : default
 
@@ -710,7 +841,9 @@ function build_history_tapes(; master::Vector{HistFieldSpec}=default_master_fiel
         end
         exc_names = Set(hist_getname(e) for e in texc if !isempty(hist_getname(e)))
 
-        tape = HistoryTape()
+        # Default mfilt mirrors Fortran: 1 for the first tape, 30 for the rest.
+        tape = HistoryTape(mfilt = Int(_get(hist_mfilt, t, t == 1 ? 1 : 30)),
+                           ndens = Int(_get(hist_ndens, t, 2)))
         for spec in master
             included = haskey(inc_flag, spec.name)
             if included
@@ -751,21 +884,42 @@ end
 """
     hist_write!(set::HistoryTapeSet; ext_date="", reset=true, kwargs...) -> Vector{String}
 
-Write every tape in the set to its own `set_hist_filename`-named file
-(`<case>.<compname>.h<t-1>[.ext_date].nc`) under the current directory unless
-`dir` is given. Tapes with no accumulated samples are skipped (returns only
-the files actually written). Extra `kwargs` (e.g. `time`, `time_units`,
-`calendar`, `append`) are forwarded to per-tape `hist_write!`.
+Write every tape in the set, honoring each tape's `mfilt` (max time samples per
+file). A tape keeps appending time records to its current file until that file
+holds `mfilt` records; the next write then rolls over to a fresh file
+(`set_hist_filename` with an incremented file index). Files land under the
+current directory unless `dir` is given.
+
+When `ext_date` is given it stamps the filename (`<case>.<compname>.h<t-1>.
+<ext_date>.nc`); otherwise rolled-over files are distinguished by a trailing
+`-NNNNN` file-index suffix (the first file has none). Tapes with no accumulated
+samples are skipped (returns only the files actually written). Extra `kwargs`
+(e.g. `time`, `time_units`, `calendar`) are forwarded to per-tape
+`hist_write!`; `append`/`begtime` are managed here per the rollover state.
 """
 function hist_write!(set::HistoryTapeSet; ext_date::AbstractString="",
                      dir::AbstractString="", reset::Bool=true, kwargs...)
     written = String[]
     for (t, tape) in enumerate(set.tapes)
         (isempty(tape.fields) || tape.nsamples == 0) && continue
-        fn = set_hist_filename(set.case, t; ext_date=ext_date, compname=set.compname)
-        isempty(dir) || (fn = joinpath(dir, fn))
-        hist_write!(tape, fn; reset=reset, kwargs...)
-        push!(written, fn)
+
+        # Roll over to a new file if the current one is full (or none yet open).
+        if isempty(tape.cur_filename) || tape.ntimes >= tape.mfilt
+            if !isempty(tape.cur_filename)
+                tape.file_index += 1   # advance only on an actual rollover
+            end
+            fn = set_hist_filename(set.case, t; ext_date=ext_date,
+                                   compname=set.compname,
+                                   file_index=tape.file_index)
+            isempty(dir) || (fn = joinpath(dir, fn))
+            tape.cur_filename = fn
+            tape.ntimes = 0
+        end
+
+        # Append within the current file (the very first record creates it).
+        appending = isfile(tape.cur_filename) && tape.ntimes > 0
+        hist_write!(tape, tape.cur_filename; reset=reset, append=appending, kwargs...)
+        push!(written, tape.cur_filename)
     end
-    return written
+    return unique(written)
 end

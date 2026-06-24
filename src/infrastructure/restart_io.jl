@@ -588,14 +588,47 @@ function _assemble_registry(; use_cn::Bool, use_crop::Bool,
     return registry
 end
 
+# Standard CLM-style restart global-attribute header, mirroring the
+# `ncd_putatt(ncid, NCD_GLOBAL, …)` block in restFileMod::restFile_dimset. The
+# case identification / provenance attributes are sourced from the `VarCtl`
+# control block; `title`/`source`/`Conventions` follow CTSM's fixed strings.
+# Boolean run-config flags are written as 'true'/'false' string attributes
+# (restFile_add_flag_metadata).
+function _restart_write_header!(ds; ctl::VarCtl = varctl,
+                                create_crop_landunit::Bool = false,
+                                irrigate::Bool = false)
+    src   = isempty(ctl.source)      ? "Community Terrestrial Systems Model" : ctl.source
+    conv  = isempty(ctl.conventions) ? "CF-1.0" : ctl.conventions
+    hoststr = isempty(ctl.hostname) ? (haskey(ENV, "HOST") ? ENV["HOST"] : "") : ctl.hostname
+    userstr = isempty(ctl.username) ? (haskey(ENV, "USER") ? ENV["USER"] : "") : ctl.username
+    created = "created on " * Dates.format(Dates.now(), "yyyymmdd HHMMSS")
+
+    ds.attrib["title"]       = "CLM Restart information"
+    ds.attrib["Conventions"] = conv
+    ds.attrib["history"]     = created
+    ds.attrib["source"]      = src
+    ds.attrib["version"]     = ctl.version
+    ds.attrib["username"]    = userstr
+    ds.attrib["host"]        = hoststr
+    ds.attrib["case_title"]  = ctl.ctitle
+    ds.attrib["case_id"]     = ctl.caseid
+    ds.attrib["surface_dataset"]     = ctl.fsurdat
+    ds.attrib["flanduse_timeseries"] = ctl.flandusepftdat
+    # Boolean run-config flags as 'true'/'false' (restFile_add_flag_metadata).
+    ds.attrib["create_crop_landunit"]          = create_crop_landunit ? "true" : "false"
+    ds.attrib["irrigate"]                       = irrigate ? "true" : "false"
+    ds.attrib["created_glacier_mec_landunits"] = "true"
+    return nothing
+end
+
 """
     write_restart(inst, filename; bounds, use_cn=false, use_crop=false,
-                  use_c13=false, use_c14=false, time=nothing)
+                  use_c13=false, use_c14=false, time=nothing, ctl=varctl)
 
 Create a CLM-style restart NetCDF at `filename` and write the prognostic state
-held in `inst`. Mirrors `restFileMod::restFile_write`: defines the subgrid and
-level dimensions, then writes each registered variable (the role of the
-per-type `restartvar` calls).
+held in `inst`. Mirrors `restFileMod::restFile_write`: writes the global-
+attribute header, defines the subgrid and level dimensions, then writes each
+registered variable (the role of the per-type `restartvar` calls).
 
 - `bounds`   — `BoundsType` giving `endc` (#columns) and `endp` (#patches).
 - `use_cn`   — also write the CN carbon/nitrogen pools (bulk + storage/transfer/
@@ -603,6 +636,8 @@ per-type `restartvar` calls).
 - `use_crop` — also write the crop/phenology prognostic counters.
 - `use_c13`/`use_c14` — also write the carbon-isotope vegetation pools.
 - `time`     — optional valid time, stored as a scalar `timemgr_rst_curr_date`.
+- `ctl`      — control block supplying the header provenance (case id/title,
+  version, source, conventions, username/host); defaults to the global `varctl`.
 """
 function write_restart(inst::CLMInstances, filename::String;
                        bounds::BoundsType,
@@ -610,7 +645,8 @@ function write_restart(inst::CLMInstances, filename::String;
                        use_crop::Bool = false,
                        use_c13::Bool = false,
                        use_c14::Bool = false,
-                       time::Union{DateTime,Nothing} = nothing)
+                       time::Union{DateTime,Nothing} = nothing,
+                       ctl::VarCtl = varctl)
     nc = bounds.endc
     np = bounds.endp
 
@@ -619,6 +655,10 @@ function write_restart(inst::CLMInstances, filename::String;
 
     ds = NCDataset(filename, "c")
     try
+        # Global-attribute header (restFileMod restFile_dimset ncd_putatt block).
+        _restart_write_header!(ds; ctl = ctl,
+                               create_crop_landunit = use_crop, irrigate = false)
+
         # Subgrid dimensions (restFileMod defines column/pft; we add what we use).
         defDim(ds, "column", nc)
         defDim(ds, "pft", np)
