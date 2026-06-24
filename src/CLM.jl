@@ -171,6 +171,7 @@ include("biogeochem/growth_resp.jl")
 include("biogeochem/maint_resp.jl")
 include("biogeochem/fun.jl")
 include("biogeochem/gap_mortality.jl")
+include("biogeochem/sparse_matrix_multiply.jl")  # matrix-CN sparse-matrix foundation
 include("biogeochem/decomp_bgc.jl")
 include("biogeochem/decomp_mimics.jl")
 include("biogeochem/decomp.jl")
