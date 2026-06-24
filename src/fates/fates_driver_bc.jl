@@ -17,6 +17,19 @@
 # finite. All packers/unpackers are gated by the caller behind `config.use_fates`.
 
 """
+    _fates_first_fates_column(col) -> Int
+
+Return the index of the first `col.is_fates` column, or 0 if there is none.
+Convenience for the single-site MVP host glue (driver fire-weather derivation).
+"""
+function _fates_first_fates_column(col)
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] && return c
+    end
+    return 0
+end
+
+"""
     fates_pack_bcin_radiation!(inst; s=1, c=1, p=1, coszen)
 
 Fill the FATES radiation `bc_in` fields for site `s` from CLM column `c` /
@@ -198,7 +211,8 @@ are the daily-step-specific additions.
 """
 function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
                                 nlevsoil::Int, nlevdecomp::Int,
-                                use_fates_bgc::Bool = false)
+                                use_fates_bgc::Bool = false,
+                                fire_weather::Union{NamedTuple,Nothing} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_in[s]
@@ -244,6 +258,25 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         end
     end
 
+    # SPITFIRE fire-weather drivers (per-patch 24-hour running means the fire model
+    # reads in `update_fire_weather!` / `area_burnt_intensity!`). Packed only when
+    # SPITFIRE is on (`fire_weather` supplied); the carbon-only default leaves these
+    # zero (allocate_bcin already zeroed them), matching the no_fire path which never
+    # reads them. The fire model indexes these by patchno (1-based vegetated patch),
+    # so fill the whole allocated span with the representative site values; the
+    # bareground patch (patchno 0) is skipped inside the fire model.
+    if fire_weather !== nothing
+        fw = fire_weather
+        np_fire = length(bc.precip24_pa)
+        @inbounds for ip in 1:np_fire
+            bc.precip24_pa[ip]   = fw.precip24      # [mm/s]
+            bc.relhumid24_pa[ip] = fw.relhumid24    # [%]
+            bc.wind24_pa[ip]     = fw.wind24        # [m/s]
+            bc.lightning24[ip]   = get(fw, :lightning24, 0.0)  # [#/km2/day]
+            bc.pop_density[ip]   = get(fw, :pop_density, 0.0)  # [#/km2]
+        end
+    end
+
     return inst
 end
 
@@ -267,13 +300,27 @@ mirroring the Fortran host `dynamics_driv`:
 The site<->column<->veg-patch map mirrors the W3/W4 hooks: FATES site `s` maps onto
 the `s`-th `col.is_fates` column, vegetated patch = `col.patchi[c] + 1`.
 
+When SPITFIRE is active (`hlm_spitfire_mode > hlm_sf_nofire_def`), pass `fire_weather`
+(a `NamedTuple` with `precip24` [mm/s], `relhumid24` [%], `wind24` [m/s], optionally
+`lightning24`/`pop_density`) — the daily pack fills the per-patch fire-weather bc_in
+the fire model reads. Omit it on the carbon-only / no_fire path (the fields stay zero).
+
 Returns `inst`. Gated by the caller behind `config.use_fates`.
 """
 function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
-                                    nlevdecomp::Int, use_fates_bgc::Bool = false)
+                                    nlevdecomp::Int, use_fates_bgc::Bool = false,
+                                    fire_weather::Union{NamedTuple,Nothing} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     col = inst.column
+
+    # 0. CNP: parse the nutrient-acquisition boundary conditions out to the cohorts
+    #    BEFORE the demographic step (sets cohort daily_n/p_demand + daily_*_uptake
+    #    from the prescribed-uptake params). Mirrors the Fortran host order
+    #    (clmfates_interfaceMod: UnPackNutrientAquisitionBCs precedes the per-site
+    #    ed_ecosystem_dynamics loop). A no-op (zeroes the uptake bc) in carbon-only
+    #    mode, so it is safe to call unconditionally.
+    UnPackNutrientAquisitionBCs(fates.sites, fates.bc_in)
 
     s = 0
     for c in 1:length(col.is_fates)
@@ -282,9 +329,10 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         s <= fates.nsites || break
         p = col.patchi[c] + 1   # vegetated patch (bare-ground at +0)
 
-        # 1. pack the daily soil/decomp bc_in.
+        # 1. pack the daily soil/decomp bc_in (+ SPITFIRE fire-weather when on).
         fates_pack_bcin_daily!(inst; s=s, c=c, nlevsoil=nlevsoil,
-                               nlevdecomp=nlevdecomp, use_fates_bgc=use_fates_bgc)
+                               nlevdecomp=nlevdecomp, use_fates_bgc=use_fates_bgc,
+                               fire_weather=fire_weather)
 
         site = fates.sites[s]
         bc_in  = fates.bc_in[s]

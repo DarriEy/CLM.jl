@@ -260,13 +260,33 @@ function _fates_spike_setup_pft!(npft::Int)
 end
 
 """
-    _fates_spike_set_ctrlparms!(; numpft_in, nlevsoil)
+    _fates_spike_set_ctrlparms!(; numpft_in, nlevsoil, hist_dimlevel=1,
+                                  spitfire_mode=0, parteh_mode=prt_carbon_allom_hyp,
+                                  nitrogen_spec=0, phosphorus_spec=0,
+                                  use_tree_damage=false, use_planthydro=false)
 
-Set the FATES `hlm_*` control Refs for the minimal carbon-only cold start, mirroring
-the `set_fates_ctrlparms` tag sequence in `CLMFatesGlobals1`/`CLMFatesGlobals2`
+Set the FATES `hlm_*` control Refs for the carbon-only cold start (the defaults),
+mirroring the `set_fates_ctrlparms` tag sequence in `CLMFatesGlobals1`/`CLMFatesGlobals2`
 (see clmfates_interfaceMod.F90).  Brackets with `flush_to_unset` + `check_allset`.
+
+Mode kwargs (all gated, defaulting to the carbon-only / off values so existing callers
+are unchanged):
+  * `spitfire_mode` — SPITFIRE fire mode (0 = no_fire; 1 = scalar_lightning;
+    2 = successful_ignitions; 3 = anthro_ignitions). The `sf_*_def` enumeration Refs
+    are set so `spitfire_mode > sf_nofire_def` (=0) enables the fire chain.
+  * `parteh_mode` — PARTEH allocation hypothesis (`prt_carbon_allom_hyp` = carbon-only;
+    `prt_cnp_flex_allom_hyp` = CNP). For CNP, pass `nitrogen_spec`/`phosphorus_spec`
+    (the nutrient-acquisition specs; nonzero for an active N/P cycle).
+  * `use_tree_damage` — enable the tree-damage disturbance class state.
+  * `use_planthydro` — enable plant hydraulics (Tier B BC solve).
 """
-function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimlevel::Int = 1)
+function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimlevel::Int = 1,
+                                       spitfire_mode::Int = 0,
+                                       parteh_mode::Int = prt_carbon_allom_hyp,
+                                       nitrogen_spec::Int = 0, phosphorus_spec::Int = 0,
+                                       use_tree_damage::Bool = false,
+                                       use_planthydro::Bool = false,
+                                       do_check::Bool = true)
     set_fates_ctrlparms("flush_to_unset")
 
     # Biogeography / competition modes — all OFF (default NBG cold start).
@@ -284,22 +304,26 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     set_fates_ctrlparms("hio_ignore_val"; rval = -9.9e30)
     set_fates_ctrlparms("soilwater_ipedof"; ival = 0)
 
-    # PARTEH carbon-only + seed-dispersal cadence + history levels.
-    set_fates_ctrlparms("parteh_mode";       ival = prt_carbon_allom_hyp)
+    # PARTEH mode (carbon-only by default; prt_cnp_flex_allom_hyp for CNP) +
+    # seed-dispersal cadence + history levels.
+    set_fates_ctrlparms("parteh_mode";       ival = parteh_mode)
     set_fates_ctrlparms("seeddisp_cadence";  ival = 0)
     set_fates_ctrlparms("hist_hifrq_dimlevel"; ival = hist_dimlevel)
     set_fates_ctrlparms("hist_dynam_dimlevel"; ival = hist_dimlevel)
 
     # Nutrient competition / decomposition.  Carbon-only => N/P spec off, CTC decomp.
+    # For CNP, nitrogen_spec/phosphorus_spec select the (nonzero) acquisition specs.
     set_fates_ctrlparms("nu_com";        cval = "RD")
     set_fates_ctrlparms("decomp_method"; cval = "CTC")
-    set_fates_ctrlparms("use_tree_damage"; ival = ifalse)
-    set_fates_ctrlparms("nitrogen_spec";   ival = 0)
-    set_fates_ctrlparms("phosphorus_spec"; ival = 0)
+    set_fates_ctrlparms("use_tree_damage"; ival = use_tree_damage ? itrue : ifalse)
+    set_fates_ctrlparms("nitrogen_spec";   ival = nitrogen_spec)
+    set_fates_ctrlparms("phosphorus_spec"; ival = phosphorus_spec)
 
-    # SPITFIRE / fire — OFF (no_fire mode).  These four definition Refs select the
-    # mode enumerations; 0 selects the "off" branch of each.
-    set_fates_ctrlparms("spitfire_mode"; ival = 0)
+    # SPITFIRE / fire.  spitfire_mode selects the mode (0 = no_fire); the four
+    # definition Refs select the mode enumerations (no_fire=0, scalar_lightning=1,
+    # successful_ignitions=2, anthro_ignitions=3). spitfire_mode > sf_nofire_def
+    # enables the fire chain inside fire_model!.
+    set_fates_ctrlparms("spitfire_mode"; ival = spitfire_mode)
     set_fates_ctrlparms("sf_nofire_def"; ival = 0)
     set_fates_ctrlparms("sf_scalar_lightning_def";    ival = 1)
     set_fates_ctrlparms("sf_successful_ignitions_def"; ival = 2)
@@ -310,7 +334,7 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     set_fates_ctrlparms("use_vertsoilc";  ival = ifalse)
     set_fates_ctrlparms("use_ed_st3";     ival = ifalse)
     set_fates_ctrlparms("use_ed_prescribed_phys"; ival = ifalse)
-    set_fates_ctrlparms("use_planthydro"; ival = ifalse)
+    set_fates_ctrlparms("use_planthydro"; ival = use_planthydro ? itrue : ifalse)
     set_fates_ctrlparms("use_cohort_age_tracking"; ival = ifalse)
 
     # Land-use harvest / logging / LUH — OFF.
@@ -327,7 +351,14 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     set_fates_ctrlparms("use_inventory_init"; ival = ifalse)
     set_fates_ctrlparms("inventory_ctrl_file"; cval = "none")
 
-    set_fates_ctrlparms("check_allset")
+    # The `check_allset` validation reads `edpftvarcon_inst().prescribed_*uptake`
+    # for the CNP (parteh mode 2) "forced uptake" gate. Those PFT arrays are only
+    # populated by `read_fates_params!`, which runs AFTER this in `clm_fates_init!`.
+    # For carbon-only the gate is skipped (parteh_mode != 2), so an inline check is
+    # fine; for CNP the caller passes `do_check=false` and runs `check_allset`
+    # itself once params are loaded + prescribed uptake is set (mirroring the Fortran
+    # `CLMFatesGlobals2` ordering, where check happens after the param read).
+    do_check && set_fates_ctrlparms("check_allset")
     return nothing
 end
 
@@ -362,33 +393,62 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          nlevsoil::Int, nlevdecomp::Int,
                          params_path::AbstractString = FATES_PARAMS_DEFAULT_CDL,
                          current_year::Int = 1, current_month::Int = 1,
-                         current_day::Int = 1, hist_dimlevel::Int = 1)
+                         current_day::Int = 1, hist_dimlevel::Int = 1,
+                         spitfire_mode::Int = 0,
+                         parteh_mode::Int = prt_carbon_allom_hyp,
+                         nitrogen_spec::Int = 0, phosphorus_spec::Int = 0,
+                         use_tree_damage::Bool = false,
+                         use_planthydro::Bool = false)
 
     # ---- W1.1: FATES globals + parameters (CLMFatesGlobals1) ----
     FatesInterfaceInit(6, false)
 
-    # Carbon-only element registry + the element->position reverse lookup
-    # (element_pos[carbon12_element]) read by the daily demographic step (W5,
-    # ed_integrate_state_variables indexes site.mass_balance by it). Params come
-    # from read_fates_params! below (the real FATES param file), not the synthetic
-    # _fates_spike_setup_pft! (superseded/uncalled).
-    num_elements[] = 1
-    empty!(element_list)
-    push!(element_list, carbon12_element)
-    fill!(element_pos, 0)
-    element_pos[carbon12_element] = 1
-
     # Control parameters (set_fates_ctrlparms tag sequence). MUST precede the param
-    # read: it sets hlm_parteh_mode (carbon-only), which read_fates_params! branches
-    # on (PRTDerivedParams! organ map + the PARTEH/PFT consistency checks). nlevsoil
-    # is the only numeric arg it needs; numpft is resolved from the file below.
+    # read AND the element registry: it sets hlm_parteh_mode (carbon-only by default,
+    # or CNP), which read_fates_params! branches on (PRTDerivedParams! organ map + the
+    # PARTEH/PFT consistency checks) and which InitPARTEHGlobals dispatches on below.
+    # nlevsoil is the only numeric arg it needs; numpft is resolved from the file.
+    is_cnp = parteh_mode == prt_cnp_flex_allom_hyp
     _fates_spike_set_ctrlparms!(; numpft_in = 0, nlevsoil = nlevsoil,
-                                  hist_dimlevel = hist_dimlevel)
+                                  hist_dimlevel = hist_dimlevel,
+                                  spitfire_mode = spitfire_mode,
+                                  parteh_mode = parteh_mode,
+                                  nitrogen_spec = nitrogen_spec,
+                                  phosphorus_spec = phosphorus_spec,
+                                  use_tree_damage = use_tree_damage,
+                                  use_planthydro = use_planthydro,
+                                  do_check = !is_cnp)   # CNP: check after the param read
 
     # Read the REAL FATES default parameter file (replaces _fates_spike_setup_pft!).
     # This populates prt_params / EDParams / EDPftvarcon_inst / SFParams /
-    # ParamDerived and the numpft[] / nlev*class[] / nleafage[] dim Refs.
+    # ParamDerived and the numpft[] / nlev*class[] / nleafage[] dim Refs. The N/P
+    # stoichiometry (nitr_stoich_p1 / phos_stoich_p1) and the fire / damage params
+    # are all read here regardless of mode (the CDL carries real values for them);
+    # the modes only gate their RUNTIME use.
     read_fates_params!(; path = params_path)
+
+    # ---- CNP "forced uptake" configuration (CLM only supports prescribed uptake) ----
+    # Under CLM, the live ECA/RD nutrient-acquisition path is NOT host-coupled, so
+    # FATES requires the PRESCRIBED-uptake CNP mode (a parameterized fraction of the
+    # plant's N/P demand is satisfied each day). The default param file ships
+    # prescribed_*uptake = 0 (which the _check_allset gate rejects for parteh mode 2),
+    # so set full prescribed uptake (=1.0) + the prescribed uptake mode Refs here,
+    # then run the deferred check. This mirrors the Fortran host config for a CLM-CNP
+    # run (vmax_nh4/no3/p drive the demand; prescribed_nuptake scales the gain).
+    if is_cnp
+        evcon = edpftvarcon_inst()
+        n = numpft[]
+        evcon.prescribed_nuptake = fill(1.0, n)
+        evcon.prescribed_puptake = fill(1.0, n)
+        edp_cnp = ed_params()
+        edp_cnp.n_uptake_mode = prescribed_n_uptake
+        edp_cnp.p_uptake_mode = prescribed_p_uptake
+        # Trivial competitor scaling for prescribed uptake (no live competition).
+        max_comp_per_site[]     = 1
+        fates_np_comp_scaling[] = trivial_np_comp_scaling
+        # Now run the deferred validation (params + prescribed uptake are in place).
+        set_fates_ctrlparms("check_allset")
+    end
     numpft_resolved = numpft[]
     if numpft_in !== nothing && numpft_in != numpft_resolved
         error("clm_fates_init!: numpft_in=$numpft_in does not match the parameter " *
@@ -396,9 +456,12 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
               "use the file value.")
     end
 
-    # PARTEH carbon hypothesis global state. numpft / nleafage already set by the
-    # reader; re-affirm nleafage from prt_params for robustness.
-    InitPRTGlobalAllometricCarbon!()
+    # PARTEH element registry + global hypothesis state. InitPARTEHGlobals dispatches
+    # on hlm_parteh_mode (set above): carbon-only => num_elements=1 / carbon12 only /
+    # InitPRTGlobalAllometricCarbon!; CNP => num_elements=3 / C,N,P / element_pos /
+    # InitPRTGlobalAllometricCNP. The daily demographic step (W5) indexes
+    # site.mass_balance by element_pos, so this MUST run before the cold start.
+    InitPARTEHGlobals()
     nleafage[] = size(prt_params.leaf_long, 2)
 
     # SetFatesGlobalElements1 sizes maxpatch_total / fates_maxPatchesPerSite from the

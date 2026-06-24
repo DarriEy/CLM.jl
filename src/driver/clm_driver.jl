@@ -1713,16 +1713,50 @@ function clm_drv_core!(config::CLMDriverConfig,
         # Placeholder: clm_fates%WrapUpdateFatesRmean(...) [FATES running mean]
         # Placeholder: clm_fates%wrap_update_hifrq_hist(...) [FATES history]
         if is_beg_curr_day && inst.fates !== nothing
+            # SPITFIRE fire-weather (gated): when SPITFIRE is on, derive the per-day
+            # representative precip / relative-humidity / wind from the FATES column's
+            # current downscaled atmospheric forcing and pass them to the daily step
+            # (the bc daily pack fills the per-patch fire-weather bc_in the fire model
+            # reads). A single-step stand-in for the true 24-hour running means (the
+            # bc-pack docstring notes the running-mean nuance); finite + representative.
+            # OFF (no_fire) => fire_weather=nothing and the fields stay zero (the fire
+            # chain never runs), so the default path is byte-identical.
+            fire_weather = nothing
+            if hlm_spitfire_mode[] > hlm_sf_nofire_def[]
+                fc = _fates_first_fates_column(col)
+                if fc != 0
+                    g = col.gridcell[fc]
+                    a2l = inst.atm2lnd
+                    rain = a2l.forc_rain_downscaled_col[fc]
+                    snow = a2l.forc_snow_downscaled_col[fc]
+                    # Relative humidity [%] from specific humidity / saturation at
+                    # forcing temperature & pressure (Tetens; clamped to [1,100]).
+                    qair = a2l.forc_q_downscaled_col[fc]
+                    tair = a2l.forc_t_downscaled_col[fc]
+                    pbot = a2l.forc_pbot_downscaled_col[fc]
+                    esat_fw = 610.78 * exp(17.27 * (tair - 273.15) / (tair - 35.86))  # [Pa]
+                    qsat_fw = 0.622 * esat_fw / max(pbot - 0.378 * esat_fw, 1.0)
+                    rh = clamp(100.0 * qair / max(qsat_fw, 1.0e-9), 1.0, 100.0)
+                    # Wind speed from the east/north components (forc_wind_grc may be
+                    # an unset forcing slot; u/v are always packed by the harness/driver).
+                    wind = sqrt(a2l.forc_u_grc[g]^2 + a2l.forc_v_grc[g]^2)
+                    fire_weather = (precip24 = rain + snow, relhumid24 = rh,
+                                    wind24 = wind)
+                end
+            end
+
             # W5 daily demographic step — FATES `dynamics_driv`. Runs once per FATES
-            # site at the day boundary: pack the daily soil/decomp bc_in, advance the
-            # cohort/patch population (ed_ecosystem_dynamics), recompute site
-            # diagnostics + canopy structure (ed_update_site), run the final
+            # site at the day boundary: pack the daily soil/decomp bc_in (+ fire
+            # weather when SPITFIRE is on), advance the cohort/patch population
+            # (ed_ecosystem_dynamics — includes the fire model, CNP nutrient
+            # acquisition, and tree-damage when those modes are enabled), recompute
+            # site diagnostics + canopy structure (ed_update_site), run the final
             # TotalBalanceCheck mass-conservation audit, and unpack the new canopy
-            # structure (elai/htop/...) back to canopystate. Fire/hydro/harvest/LUH
-            # are gated off on this carbon-only MVP, so no fire/LUH bc_in is packed.
+            # structure (elai/htop/...) back to canopystate.
             fates_daily_dynamics_step!(inst; nlevsoil=varpar.nlevsoi,
                                        nlevdecomp=varpar.nlevdecomp,
-                                       use_fates_bgc=config.use_fates_bgc)
+                                       use_fates_bgc=config.use_fates_bgc,
+                                       fire_weather=fire_weather)
             # Filter rebuild (setFilters!): the single-veg-patch MVP has a static
             # column<->patch map (p = col.patchi[c]+1), so FATES patch-weight changes
             # do not add/remove patches and no host filter rebuild is required yet.
