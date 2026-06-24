@@ -39,9 +39,15 @@
     end
 end
 
-ciso_flux_calc!(ciso_flux, ctot_flux, ciso_state, ctot_state, mask, cmin::Int, cmax::Int, frax) =
+function ciso_flux_calc!(ciso_flux, ctot_flux, ciso_state, ctot_state, mask, cmin::Int, cmax::Int, frax)
+    # Defensive: if any flux/state array for this flux isn't allocated for the
+    # current config (a partially-populated fixture, or an inactive flux), there
+    # is nothing to scale — no-op. Real runs allocate every flux/state array to
+    # the patch/column count, so this never short-circuits a live cascade.
+    (isempty(ciso_flux) || isempty(ctot_flux) || isempty(ciso_state) || isempty(ctot_state)) && return
     _launch!(_ciso_flux_calc_kernel!, ciso_flux, ctot_flux, ciso_state, ctot_state,
              mask, cmin, cmax, frax; ndrange = length(ciso_flux))
+end
 
 # Column-level decomposition isotopic flux over (c, j, l):
 #   out[c,j,l] = tot_flux[c,j,l] * (iso_cpool[c,j,cdp]/tot_cpool[c,j,cdp])
