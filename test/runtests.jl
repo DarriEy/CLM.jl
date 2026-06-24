@@ -322,6 +322,22 @@ using CLM
     # FATES demonstrably drove the column (laisha/rssun populated by the FATES path).
     include("test_fates_driver_run.jl")
 
+    # FATES live MODE exercises through the real clm_drv! loop: the SPITFIRE fire,
+    # CNP nutrient-cycle, and tree-damage modes each cold-started + run >=2 days,
+    # asserting finite + mass-conserving (C, and N/P for CNP) and that the mode
+    # actually did something live (fire-weather/ignitions populated, CNP N/P demand
+    # + 3 elements, damage class state active). Defines the shared
+    # _fates_save_globals!/_fates_restore_globals/_fates_census helpers used by
+    # test_fates_spinup.jl, so it MUST be included before it.
+    include("test_fates_live_modes.jl")
+
+    # FATES carbon-only longer-horizon spin-up / stability: a 15-day clm_drv! loop
+    # asserting no blow-up/NaN, the census stays physical, carbon is conserved EVERY
+    # day, and the demographic state evolves sanely (cohorts persist, patch census
+    # ages/splits, carbon stays in a sane band). Reuses test_fates_live_modes.jl
+    # helpers (included above).
+    include("test_fates_spinup.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),
