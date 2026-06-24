@@ -830,16 +830,19 @@ function clm_drv_core!(config::CLMDriverConfig,
     else
         # W3a sun/shade — FATES.  Pack the radiation bc_in for every FATES site,
         # run FatesSunShadeFracs, and unpack fsun/laisun/laisha back to canopystate.
-        # Maps FATES site s 1:1 onto the s-th FATES column and its first vegetated
-        # patch (col.patchi[c] = the bare-ground patch; the veg patch is +1).
+        # Maps FATES site s 1:1 onto the s-th FATES column; each of the site's
+        # vegetated patches maps to HLM patch p = ifp + col.patchi[c] (bare-ground
+        # at +0). The fates_veg_patches walk yields the (ifp, p) pairs.
         if inst.fates !== nothing
             s = 0
             for c in 1:length(col.is_fates)
                 col.is_fates[c] || continue
                 s += 1
                 s <= inst.fates.nsites || break
-                p = col.patchi[c] + 1   # first vegetated patch (bare-ground at +0)
-                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=alb.coszen_col[c])
+                for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, ifp=ifp,
+                                               coszen=alb.coszen_col[c])
+                end
             end
             FatesSunShadeFracs(inst.fates.nsites, inst.fates.sites,
                                inst.fates.bc_in, inst.fates.bc_out)
@@ -848,8 +851,9 @@ function clm_drv_core!(config::CLMDriverConfig,
                 col.is_fates[c] || continue
                 s += 1
                 s <= inst.fates.nsites || break
-                p = col.patchi[c] + 1
-                fates_unpack_bcout_sunfrac!(inst; s=s, c=c, p=p)
+                for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    fates_unpack_bcout_sunfrac!(inst; s=s, c=c, p=p, ifp=ifp)
+                end
             end
         end
     end
@@ -941,8 +945,10 @@ function clm_drv_core!(config::CLMDriverConfig,
             col.is_fates[c] || continue
             s += 1
             s <= inst.fates.nsites || break
-            p = col.patchi[c] + 1
-            fates_unpack_bcout_btran!(inst; s=s, c=c, p=p, nlevsoil=nlevsoil_f)
+            for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                fates_unpack_bcout_btran!(inst; s=s, c=c, p=p, ifp=ifp,
+                                          nlevsoil=nlevsoil_f)
+            end
         end
     end
 
@@ -1031,6 +1037,10 @@ function clm_drv_core!(config::CLMDriverConfig,
     # canopy_fluxes_core! above (use_fates branch); only the post-solve
     # diagnostics + hydraulics remain here.
     if config.use_fates && inst.fates !== nothing
+        # (W4b: the FATES photosynthesis solve is done IN-LOOP inside
+        # canopy_fluxes_core! above — its use_fates branch runs
+        # FatesPlantRespPhotosynthDrive for each canopy-solve patch, so the
+        # multi-patch ifp-walk is handled there by the per-patch canopy loop.)
         # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
         # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
         # the just-computed cohort per-step fluxes. Write-only; no-op until the
@@ -1752,15 +1762,17 @@ function clm_drv_core!(config::CLMDriverConfig,
             # acquisition, and tree-damage when those modes are enabled), recompute
             # site diagnostics + canopy structure (ed_update_site), run the final
             # TotalBalanceCheck mass-conservation audit, and unpack the new canopy
-            # structure (elai/htop/...) back to canopystate.
+            # structure (elai/htop/...) back to canopystate. The daily step walks
+            # ALL the column's vegetated patches (p = ifp + col.patchi[c]) to unpack
+            # canopy structure, and rebuilds the HLM per-patch weights
+            # (fates_set_filters!, the setFilters-equivalent) from the freshly-advanced
+            # FATES patch areas — so a disturbance that splits/merges patches
+            # propagates into the per-column averaging. Fire weather is packed when
+            # SPITFIRE is on.
             fates_daily_dynamics_step!(inst; nlevsoil=varpar.nlevsoi,
                                        nlevdecomp=varpar.nlevdecomp,
                                        use_fates_bgc=config.use_fates_bgc,
                                        fire_weather=fire_weather)
-            # Filter rebuild (setFilters!): the single-veg-patch MVP has a static
-            # column<->patch map (p = col.patchi[c]+1), so FATES patch-weight changes
-            # do not add/remove patches and no host filter rebuild is required yet.
-            # A multi-veg-patch FATES column (the full `ifp` walk) would need one here.
         end
     end
 
@@ -1841,8 +1853,10 @@ function clm_drv_core!(config::CLMDriverConfig,
                 col.is_fates[c] || continue
                 s += 1
                 s <= inst.fates.nsites || break
-                p = col.patchi[c] + 1
-                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=alb.coszen_col[c])
+                for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, ifp=ifp,
+                                               coszen=alb.coszen_col[c])
+                end
             end
             FatesNormalizedCanopyRadiation(inst.fates.nsites, inst.fates.sites,
                                            inst.fates.bc_in, inst.fates.bc_out)
@@ -1851,8 +1865,9 @@ function clm_drv_core!(config::CLMDriverConfig,
                 col.is_fates[c] || continue
                 s += 1
                 s <= inst.fates.nsites || break
-                p = col.patchi[c] + 1
-                fates_unpack_bcout_canopy_radiation!(inst; s=s, c=c, p=p)
+                for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    fates_unpack_bcout_canopy_radiation!(inst; s=s, c=c, p=p, ifp=ifp)
+                end
             end
         end
     end
