@@ -84,6 +84,7 @@ using CLM
     include("test_maint_resp.jl")
     include("test_fun.jl")
     include("test_gap_mortality.jl")
+    include("test_sparse_matrix_multiply.jl")
     include("test_decomp_bgc.jl")
     include("test_decomp_mimics.jl")
     include("test_soil_biogeochem_decomp.jl")
