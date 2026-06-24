@@ -160,6 +160,7 @@ using CLM
     include("test_dyn_gross_unrep.jl")
     include("test_dyn_subgrid_driver.jl")
     include("test_initialization.jl")
+    include("test_multigridcell_surfdata.jl")
     include("test_multicolumn.jl")
     include("test_device_adapt.jl")
     include("test_clm_run.jl")

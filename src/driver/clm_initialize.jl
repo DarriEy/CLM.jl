@@ -36,6 +36,12 @@ state, and returns all data structures ready for `clm_drv!()`.
 - `paramfile::String` — path to parameter NetCDF file (clm5_params.nc)
 
 # Optional keyword arguments
+- `ncopies::Int`          — replicate the single gridcell into N identical batched
+                            copies (legacy GPU data axis; default 1)
+- `read_full_grid::Bool`  — read the full 2D (lon,lat) grid into ng = nlon*nlat
+                            distinct gridcells, each with its own surfdata slice +
+                            lat/lon + g→(i,j) map (default false; mutually exclusive
+                            with `ncopies`, which is ignored when true)
 - `start_date::DateTime`  — simulation start date (default 2000-01-01)
 - `dtime::Int`            — timestep in seconds (default 1800)
 - `use_cn::Bool`          — use CN biogeochemistry (default false)
@@ -58,6 +64,7 @@ function clm_initialize!(;
     fsurdat::String,
     paramfile::String,
     ncopies::Int = 1,
+    read_full_grid::Bool = false,
     start_date::DateTime = DateTime(2000, 1, 1),
     dtime::Int = 1800,
     use_cn::Bool = false,
@@ -96,12 +103,22 @@ function clm_initialize!(;
     varcon_init!()
 
     # ---- Step 5: Read surface data ----
-    # Read the single gridcell from file, then tile to `ncopies` identical
-    # gridcells (a batched run of independent columns for the GPU data axis).
-    ng = max(1, ncopies)
     surf = SurfaceInputData()
-    surfrd_get_data!(surf, 1, 1, fsurdat)
-    _tile_surface_data!(surf, ng)
+    if read_full_grid
+        # True 2D multi-gridcell read: build ng = nlon*nlat gridcells, each with
+        # its own surfdata slice + lat/lon + g→(i,j) topology map. ncopies is
+        # ignored in this mode (it is the single-gridcell batching axis).
+        (nlon, nlat) = surfrd_get_grid_dims(fsurdat)
+        ng = nlon * nlat
+        surfrd_get_data!(surf, 1, ng, fsurdat; full_grid=true)
+    else
+        # Legacy path: read the single gridcell from file, then tile to `ncopies`
+        # identical gridcells (a batched run of independent columns for the GPU
+        # data axis). Byte-identical with the historical single-cell behaviour.
+        ng = max(1, ncopies)
+        surfrd_get_data!(surf, 1, 1, fsurdat)
+        _tile_surface_data!(surf, ng)
+    end
 
     # ---- Step 6: Count subgrid elements ----
     (nl, nc, np) = count_subgrid_elements(surf, ng)
@@ -141,7 +158,9 @@ function clm_initialize!(;
                   use_lch4=use_lch4)
 
     # ---- Step 9: Build subgrid hierarchy ----
-    # Get lat/lon from surface file if not provided
+    # Get scalar lat/lon fallback from surface file if not provided. In full-grid
+    # mode each gridcell instead takes its own lat/lon from surf.grid_latdeg/londeg
+    # (initGridCells! prefers the per-gridcell vectors over this scalar fallback).
     actual_lat = isnan(lat) ? _read_latlon(fsurdat, "LATIXY", 0.0) : lat
     actual_lon = isnan(lon) ? _read_latlon(fsurdat, "LONGXY", 0.0) : lon
 

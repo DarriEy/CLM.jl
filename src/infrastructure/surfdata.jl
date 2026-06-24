@@ -48,6 +48,19 @@ Base.@kwdef mutable struct SurfaceInputData
 
     # Glacier MEC weights [ng, maxpatch_glc]
     wt_glc_mec::Matrix{Float64}    = Matrix{Float64}(undef, 0, 0)
+
+    # ---- 2D grid topology (multi-gridcell support) ----
+    # Per-gridcell latitude/longitude (degrees), length ng. For a single-gridcell
+    # (or tiled) run these may be left empty and lat/lon supplied externally.
+    grid_latdeg::Vector{Float64}   = Float64[]
+    grid_londeg::Vector{Float64}   = Float64[]
+    # g → (i,j) map into the source 2D (lon,lat) grid. ixy[g] = lon index,
+    # jxy[g] = lat index (both 1-based). Length ng. Empty for the tiled path.
+    ixy::Vector{Int}               = Int[]
+    jxy::Vector{Int}               = Int[]
+    # Source-grid extents (full file dims), so the g→(i,j) map can be inverted.
+    nlon::Int                      = 0
+    nlat::Int                      = 0
 end
 
 # --------------------------------------------------------------------------
@@ -198,15 +211,63 @@ function surfrd_get_nlevurb(fsurdat::String)
 end
 
 """
-    surfrd_get_data!(surf, begg, endg, fsurdat)
+    surfrd_get_grid_dims(fsurdat) -> (nlon, nlat)
+
+Read the source-grid spatial extents (`lsmlon`, `lsmlat`) from the surface file.
+Falls back to 1 for any missing dimension (degenerate single-gridcell file).
+"""
+function surfrd_get_grid_dims(fsurdat::String)
+    ds = NCDataset(fsurdat, "r")
+    try
+        nlon = haskey(ds.dim, "lsmlon") ? ds.dim["lsmlon"] : 1
+        nlat = haskey(ds.dim, "lsmlat") ? ds.dim["lsmlat"] : 1
+        return (Int(nlon), Int(nlat))
+    finally
+        close(ds)
+    end
+end
+
+"""
+    surfrd_get_data!(surf, begg, endg, fsurdat; full_grid=false)
 
 Main reader: populate SurfaceInputData from surface NetCDF file.
+
+The spatial dimensions of the file are `(lsmlon, lsmlat)`; the flattened
+gridcell index runs lon-fastest (column-major), so `g = i + (j-1)*nlon` where
+`i` is the lon index and `j` the lat index (both 1-based).
+
+When `full_grid=true` the full `nlon*nlat` grid is read into `ng = endg-begg+1`
+gridcells and the per-gridcell lat/lon plus the `g → (i,j)` topology map
+(`surf.ixy`, `surf.jxy`, `surf.grid_latdeg`, `surf.grid_londeg`) are populated.
+For the legacy single-gridcell / tiled path (`full_grid=false`) the mapping
+fields are still filled for the gridcells actually read, but lat/lon are left to
+the caller (byte-identical with the historical single-cell behaviour).
 """
-function surfrd_get_data!(surf::SurfaceInputData, begg::Int, endg::Int, fsurdat::String)
+function surfrd_get_data!(surf::SurfaceInputData, begg::Int, endg::Int, fsurdat::String;
+                          full_grid::Bool=false)
     ng = endg - begg + 1
 
     ds = NCDataset(fsurdat, "r")
     try
+        # Source-grid extents + g→(i,j) topology map (lon-fastest flatten).
+        nlon = haskey(ds.dim, "lsmlon") ? Int(ds.dim["lsmlon"]) : 1
+        nlat = haskey(ds.dim, "lsmlat") ? Int(ds.dim["lsmlat"]) : 1
+        surf.nlon = nlon
+        surf.nlat = nlat
+        surf.ixy = Vector{Int}(undef, ng)
+        surf.jxy = Vector{Int}(undef, ng)
+        for g in 1:ng
+            gflat = (begg - 1) + g            # absolute flat index (1-based)
+            surf.ixy[g] = ((gflat - 1) % nlon) + 1
+            surf.jxy[g] = ((gflat - 1) ÷ nlon) + 1
+        end
+
+        # Per-gridcell lat/lon (LATIXY/LONGXY are 2D (lsmlon,lsmlat)).
+        if full_grid
+            surf.grid_latdeg = _read_spatial_scalar(ds, "LATIXY", ng, 0.0)
+            surf.grid_londeg = _read_spatial_scalar(ds, "LONGXY", ng, 0.0)
+        end
+
         # Allocate landunit weights
         surf.wt_lunit = zeros(ng, MAX_LUNIT)
 
