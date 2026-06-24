@@ -100,6 +100,23 @@ Base.@kwdef mutable struct HistoryTape
     nsamples::Int               = 0
     dov2xy::Bool                = false   # true => area-weight aggregate all fields to gridcell
 
+    # --- 2D (lon×lat) gridded output (histFileMod hist_dov2xy true-2D path) --
+    # When `xy2d=true` AND `dov2xy=true` AND a g→(i,j) map is present, each
+    # field's gridcell-aggregated value is written on `(lon, lat[, lev], time)`
+    # dims instead of the flat `gridcell` dim, scattering gridcell `g` into grid
+    # cell `(g2i[g], g2j[g])` and filling unmapped cells with the fill value.
+    # `g2i`/`g2j` are 1-based lon/lat indices per gridcell (length ng); `nlon`/
+    # `nlat` are the grid extents; `lon1d`/`lat1d` (optional) are the coordinate
+    # values written for the lon/lat axes. With an empty map (or `xy2d=false`)
+    # the tape falls back to the flat 1D `gridcell` dim (single-gridcell-safe).
+    xy2d::Bool                  = false
+    g2i::Vector{Int}            = Int[]
+    g2j::Vector{Int}            = Int[]
+    nlon::Int                   = 0
+    nlat::Int                   = 0
+    lon1d::Vector{Float64}      = Float64[]
+    lat1d::Vector{Float64}      = Float64[]
+
     # --- CTSM time-slice / file metadata (histFileMod history_tape) ----------
     # `mfilt` = max time samples per history file (namelist hist_mfilt); when
     # `ntimes` reaches `mfilt` the file is "full" → rolls over to a new file.
@@ -311,6 +328,142 @@ function hist_dov2xy(fld::HistField, vals, ng::Int, inst)
     return nlev > 1 ? out : vec(out)
 end
 
+# ----------------------------------------------------------------------
+# 2D (lon×lat) gridded output (Fortran hist_dov2xy true-2D path).
+# A multi-gridcell run lays its `ng` gridcells onto a regular `(nlon, nlat)`
+# grid via a g→(i,j) map. `hist_grid_map_from_lonlat` derives that map (and the
+# 1D lon/lat axis coordinates) from per-gridcell lon/lat; `hist_set_grid_map!`
+# stamps a tape with an explicit or derived map; `_hist_scatter_2d` scatters a
+# gridcell-aggregated value onto the `(nlon, nlat[, nlev])` grid, filling
+# unmapped cells with SPVAL.
+# ----------------------------------------------------------------------
+
+"""
+    hist_grid_map_from_lonlat(lon, lat; atol=1e-6)
+        -> (g2i, g2j, nlon, nlat, lon1d, lat1d)
+
+Derive a gridcell → `(i, j)` lon/lat-index map from per-gridcell `lon`/`lat`
+coordinate vectors (length `ng`). The unique sorted longitude values define the
+`nlon` lon axis and the unique sorted latitude values the `nlat` lat axis; each
+gridcell `g` maps to `(g2i[g], g2j[g])` = the index of its lon/lat on those
+axes. `lon1d`/`lat1d` are the sorted unique coordinate values (the axis coords).
+
+Values within `atol` of each other are treated as the same axis coordinate, so
+floating point grid coordinates collapse cleanly to integer indices. Use this
+when a multi-gridcell run carries only gridcell lon/lat (no explicit i/j map).
+"""
+function hist_grid_map_from_lonlat(lon::AbstractVector, lat::AbstractVector; atol::Real=1e-6)
+    ng = length(lon)
+    ng == length(lat) ||
+        error("hist_grid_map_from_lonlat: lon/lat length mismatch ($(ng) vs $(length(lat)))")
+    lon1d = _hist_unique_sorted(lon, atol)
+    lat1d = _hist_unique_sorted(lat, atol)
+    g2i = Vector{Int}(undef, ng)
+    g2j = Vector{Int}(undef, ng)
+    @inbounds for g in 1:ng
+        g2i[g] = _hist_axis_index(lon1d, lon[g], atol)
+        g2j[g] = _hist_axis_index(lat1d, lat[g], atol)
+    end
+    return (g2i = g2i, g2j = g2j, nlon = length(lon1d), nlat = length(lat1d),
+            lon1d = lon1d, lat1d = lat1d)
+end
+
+# Sorted unique axis coordinates, collapsing values within `atol`.
+function _hist_unique_sorted(v::AbstractVector, atol::Real)
+    s = sort(Float64.(collect(v)))
+    out = Float64[]
+    for x in s
+        if isempty(out) || abs(x - out[end]) > atol
+            push!(out, x)
+        end
+    end
+    return out
+end
+
+# 1-based index of `x` on a sorted axis `ax` (nearest within `atol`).
+function _hist_axis_index(ax::Vector{Float64}, x::Real, atol::Real)
+    best = 1
+    bestd = Inf
+    @inbounds for i in eachindex(ax)
+        d = abs(ax[i] - Float64(x))
+        if d < bestd
+            bestd = d
+            best = i
+        end
+    end
+    return best
+end
+
+"""
+    hist_set_grid_map!(tape; g2i=nothing, g2j=nothing, nlon=0, nlat=0,
+                       lon=nothing, lat=nothing, lon1d=Float64[], lat1d=Float64[],
+                       atol=1e-6) -> tape
+
+Stamp `tape` with a gridcell → `(i, j)` 2D-output map and enable `xy2d`. Either
+pass an explicit `g2i`/`g2j` (1-based) with `nlon`/`nlat` (and optional axis
+coords `lon1d`/`lat1d`), or pass per-gridcell `lon`/`lat` and the map is derived
+via `hist_grid_map_from_lonlat`. With `dov2xy=true` the tape then writes fields
+on `(lon, lat[, lev], time)` dims.
+"""
+function hist_set_grid_map!(tape::HistoryTape;
+                            g2i::Union{AbstractVector,Nothing}=nothing,
+                            g2j::Union{AbstractVector,Nothing}=nothing,
+                            nlon::Integer=0, nlat::Integer=0,
+                            lon::Union{AbstractVector,Nothing}=nothing,
+                            lat::Union{AbstractVector,Nothing}=nothing,
+                            lon1d::AbstractVector=Float64[],
+                            lat1d::AbstractVector=Float64[],
+                            atol::Real=1e-6)
+    if g2i === nothing || g2j === nothing
+        (lon !== nothing && lat !== nothing) ||
+            error("hist_set_grid_map!: pass explicit g2i/g2j or per-gridcell lon/lat")
+        m = hist_grid_map_from_lonlat(lon, lat; atol=atol)
+        tape.g2i = m.g2i; tape.g2j = m.g2j
+        tape.nlon = m.nlon; tape.nlat = m.nlat
+        tape.lon1d = m.lon1d; tape.lat1d = m.lat1d
+    else
+        length(g2i) == length(g2j) ||
+            error("hist_set_grid_map!: g2i/g2j length mismatch")
+        tape.g2i = Int.(collect(g2i)); tape.g2j = Int.(collect(g2j))
+        tape.nlon = nlon > 0 ? Int(nlon) : (isempty(tape.g2i) ? 0 : maximum(tape.g2i))
+        tape.nlat = nlat > 0 ? Int(nlat) : (isempty(tape.g2j) ? 0 : maximum(tape.g2j))
+        tape.lon1d = Float64.(collect(lon1d))
+        tape.lat1d = Float64.(collect(lat1d))
+    end
+    tape.xy2d = true
+    return tape
+end
+
+# Whether the tape's 2D map is usable (xy2d on + a non-degenerate grid covering
+# all `ng` gridcells). Single-gridcell / no-map tapes fall back to the 1D path.
+function _hist_xy2d_active(tape::HistoryTape, ng::Int)
+    tape.xy2d || return false
+    (tape.nlon >= 1 && tape.nlat >= 1) || return false
+    (length(tape.g2i) >= ng && length(tape.g2j) >= ng) || return false
+    return true
+end
+
+"""
+    _hist_scatter_2d(gvals, tape, ng) -> Array (nlon, nlat[, nlev])
+
+Scatter a gridcell-aggregated value `gvals` (Vector length `ng`, or Matrix
+`(ng, nlev)` from `hist_dov2xy`) onto the tape's `(nlon, nlat[, nlev])` grid via
+`g→(i,j)`. Cells with no gridcell are filled with SPVAL.
+"""
+function _hist_scatter_2d(gvals, tape::HistoryTape, ng::Int)
+    src = gvals isa AbstractMatrix ? gvals : reshape(gvals, :, 1)
+    nlev = size(src, 2)
+    out = fill(SPVAL, tape.nlon, tape.nlat, nlev)
+    @inbounds for g in 1:ng
+        i = tape.g2i[g]; j = tape.g2j[g]
+        (i >= 1 && i <= tape.nlon && j >= 1 && j <= tape.nlat) || continue
+        for ell in 1:nlev
+            out[i, j, ell] = src[g, ell]
+        end
+    end
+    return nlev > 1 ? out : reshape(out, tape.nlon, tape.nlat)
+end
+
 # Output NetCDF element type for a tape's `ndens` (Fortran hist_ndens):
 # ndens==1 => ncd_double (Float64), else (ndens==2) => ncd_float (Float32).
 _hist_ncprec(ndens::Integer) = ndens == 1 ? Float64 : Float32
@@ -393,6 +546,13 @@ dim sized to that level's element count (or, if `tape.dov2xy`, a single shared
 Appends one time record with each field's finalized value and (by default)
 resets the accumulators for the next interval.
 
+When `tape.dov2xy` is on AND the tape carries a 2D grid map (`tape.xy2d` with a
+`g→(i,j)` map covering all gridcells, e.g. via `hist_set_grid_map!`), fields are
+instead written on `(lon, lat[, lev], time)` dims: each gridcell `g`'s value is
+scattered to grid cell `(g2i[g], g2j[g])` and cells with no gridcell are filled
+with the `_FillValue` (SPVAL). With no map (or a single gridcell) it falls back
+to the flat `gridcell` dim, so the single-gridcell path is unchanged.
+
 Alongside `time` it writes the CTSM averaging-interval metadata (mirroring
 `histFileMod`): `time_bounds(hist_interval,time)` (interval endpoints, with the
 `time` variable carrying `bounds="time_bounds"`), and the calendar bookkeeping
@@ -428,8 +588,15 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
     btime = begtime === nothing ? tape.begtime : Float64(begtime)
     meta  = _hist_time_metadata(time, time_units)
 
+    # True-2D gridded output only when dov2xy is on AND a usable (lon×lat) map
+    # covers all ng gridcells; otherwise the 1D gridcell/native path (a single-
+    # gridcell run with xy2d=false stays byte-identical to before).
+    xy2d = tape.dov2xy && _hist_xy2d_active(tape, ng)
+
     # Finalize each field's value (and remap to gridcell if dov2xy), and
-    # determine the spatial dim name + length it will be written on.
+    # determine the spatial dim name + length it will be written on. In 2D
+    # mode the value is scattered to (lon, lat[, lev]) and written on the
+    # (lon, lat) dim pair instead of a single spatial dim.
     nf = length(tape.fields)
     finals  = Vector{Any}(undef, nf)
     dimname = Vector{String}(undef, nf)
@@ -437,9 +604,16 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
     for (i, fld) in enumerate(tape.fields)
         v = hist_field_value(fld)
         if tape.dov2xy
-            finals[i]  = hist_dov2xy(fld, v, ng, inst)
-            dimname[i] = "gridcell"
-            dimlen[i]  = ng
+            gv = hist_dov2xy(fld, v, ng, inst)
+            if xy2d
+                finals[i]  = _hist_scatter_2d(gv, tape, ng)
+                dimname[i] = "lon"   # paired with "lat" in the 2D branch below
+                dimlen[i]  = tape.nlon
+            else
+                finals[i]  = gv
+                dimname[i] = "gridcell"
+                dimlen[i]  = ng
+            end
         else
             finals[i]  = v
             dimname[i] = _hist_subgrid_name(fld.level)
@@ -473,11 +647,30 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
             defVar(ds, "mscur", Int32, ("time",);
                    attrib = Dict("long_name" => "current seconds of current day"))
             seen = Set{String}()
-            # One spatial dim per distinct level name.
-            for i in 1:nf
-                if !(dimname[i] in seen)
-                    defDim(ds, dimname[i], dimlen[i])
-                    push!(seen, dimname[i])
+            if xy2d
+                # 2D grid: a shared (lon, lat) dim pair + optional axis coords.
+                defDim(ds, "lon", tape.nlon)
+                defDim(ds, "lat", tape.nlat)
+                push!(seen, "lon"); push!(seen, "lat")
+                if length(tape.lon1d) == tape.nlon
+                    defVar(ds, "lon", Float64, ("lon",);
+                           attrib = Dict("long_name" => "coordinate longitude",
+                                         "units" => "degrees_east"))
+                    ds["lon"][:] = tape.lon1d
+                end
+                if length(tape.lat1d) == tape.nlat
+                    defVar(ds, "lat", Float64, ("lat",);
+                           attrib = Dict("long_name" => "coordinate latitude",
+                                         "units" => "degrees_north"))
+                    ds["lat"][:] = tape.lat1d
+                end
+            else
+                # One spatial dim per distinct level name.
+                for i in 1:nf
+                    if !(dimname[i] in seen)
+                        defDim(ds, dimname[i], dimlen[i])
+                        push!(seen, dimname[i])
+                    end
                 end
             end
             # Vertical level dims for 2d fields.
@@ -487,10 +680,16 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
                     push!(seen, fld.levdim)
                 end
             end
-            # Field variables: 1d -> (space,time); 2d -> (space,lev,time).
+            # Field variables.  1D mode: (space,time) / (space,lev,time).
+            # 2D mode: (lon,lat,time) / (lon,lat,lev,time).
             for (i, fld) in enumerate(tape.fields)
-                dims = fld.nlev > 1 ? (dimname[i], fld.levdim, "time") :
-                                      (dimname[i], "time")
+                dims = if xy2d
+                    fld.nlev > 1 ? ("lon", "lat", fld.levdim, "time") :
+                                   ("lon", "lat", "time")
+                else
+                    fld.nlev > 1 ? (dimname[i], fld.levdim, "time") :
+                                   (dimname[i], "time")
+                end
                 defVar(ds, fld.name, prec, dims;
                        attrib = Dict("long_name" => fld.long_name,
                                      "units" => fld.units,
@@ -509,7 +708,13 @@ function hist_write!(tape::HistoryTape, filename::AbstractString;
         ds["mdcur"][ti]  = Int32(meta.mdcur)
         ds["mscur"][ti]  = Int32(meta.mscur)
         for (i, fld) in enumerate(tape.fields)
-            if fld.nlev > 1
+            if xy2d
+                if fld.nlev > 1
+                    ds[fld.name][:, :, :, ti] = finals[i]
+                else
+                    ds[fld.name][:, :, ti] = finals[i]
+                end
+            elseif fld.nlev > 1
                 ds[fld.name][:, :, ti] = finals[i]
             else
                 ds[fld.name][:, ti] = finals[i]
