@@ -81,6 +81,11 @@ Base.@kwdef mutable struct CLMInstances
     soilbiogeochem_nitrogenstate::SoilBiogeochemNitrogenStateData = SoilBiogeochemNitrogenStateData()
     soilbiogeochem_nitrogenflux::SoilBiogeochemNitrogenFluxData   = SoilBiogeochemNitrogenFluxData()
 
+    # --- Methane (CH4) — prognostic state + parameters; only used when use_lch4 ---
+    ch4::CH4Data                     = CH4Data{Float64}()
+    ch4_params::CH4Params            = CH4Params()
+    ch4_varcon::CH4VarCon            = CH4VarCon()
+
     # --- Emissions ---
     dust_emis::DustEmisBaseData      = DustEmisBaseData()
     vocemis::VOCEmisData             = VOCEmisData()
@@ -208,7 +213,8 @@ function clm_instInit!(inst::CLMInstances;
                        ndecomp_pools::Int = 7,
                        ndecomp_cascade_transitions::Int = 5,
                        nlevurb::Int = 0,
-                       use_luna::Bool = false)
+                       use_luna::Bool = false,
+                       use_lch4::Bool = false)
 
     # --- Grid hierarchy ---
     gridcell_init!(inst.gridcell, ng)
@@ -271,6 +277,11 @@ function clm_instInit!(inst::CLMInstances;
     soil_bgc_nitrogen_flux_init!(inst.soilbiogeochem_nitrogenflux, nc,
                                  nlevdecomp_full, ndecomp_pools,
                                  ndecomp_cascade_transitions)
+
+    # --- Methane (CH4) — size the prognostic state when active ---
+    if use_lch4
+        ch4_init_allocate!(inst.ch4, nc, np, ng, varpar.nlevsoi)
+    end
 
     # --- Emissions ---
     dust_emis_init!(inst.dust_emis, np; nc=nc)
