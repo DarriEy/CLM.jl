@@ -121,3 +121,11 @@ The demographic vegetation model (`src/fates/`). Explicitly deferred in the PRD 
 4. **Phase C / E / F** on demand, by science need.
 
 **Start now:** A2 (subroutine-level audit) — it converts "~66% by file" into a precise, prioritized task list and may reveal Phase A is smaller (or larger) than it looks.
+
+## Tier E → full CTSM parity (scoped 2026-06-24, user: "true 100%, everything Fortran can do")
+All Tier-E items IN SCOPE incl. MPI/distributed + matrix-CN + multi-gridcell. Wave plan (file-disjoint groups; hot shared files = clm_driver.jl, cn_driver.jl, state-updates, I/O):
+- **Wave 1 (parallel):** driver-wiring wins (methane ch4! + ozone uptake + irrigation demand/withdrawal + Tier-C DynSubgridState + CNDV — all ported, just unwired), lake sub-options, dust Leung2023 (+verify Zender base), history/restart metadata.
+- **Wave 2:** fire-method suite (Li2016/2021/2024/NoFire + factory), FlexibleCN nutrient competition, C-isotope flux cascades (CIsoFlux1/2/3) — sequence the cn_driver-touchers.
+- **Wave 3:** matrix-CN solver (~6.2k lines, CNVegMatrix+CNSoilMatrix+sparse-matmul), multi-gridcell I/O (surfdata-2D + history-2D + forcing spatial interp).
+- **Wave 4:** MPI/distributed (decompInit + spmd shim + distributable SoA state + parallel I/O + MPI test lane) — most invasive, touches all state + I/O; threads-over-clumps as the intra-node parallel layer.
+Out-of-scope (faithful ports of CTSM dead code): soil-water MixedForm/HeadForm, dyn-init landunit transitions, urban traffic. (critical_daylight_method was a false stub flag — fully ported.)
