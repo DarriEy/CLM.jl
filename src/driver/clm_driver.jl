@@ -839,7 +839,7 @@ function clm_drv_core!(config::CLMDriverConfig,
                 s += 1
                 s <= inst.fates.nsites || break
                 p = col.patchi[c] + 1   # first vegetated patch (bare-ground at +0)
-                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=sa.coszen_col[c])
+                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=alb.coszen_col[c])
             end
             FatesSunShadeFracs(inst.fates.nsites, inst.fates.sites,
                                inst.fates.bc_in, inst.fates.bc_out)
@@ -1007,7 +1007,7 @@ function clm_drv_core!(config::CLMDriverConfig,
                    fill(2.0, MXPFT + 1), fill(8.0, MXPFT + 1),
                    config.use_cn,
                    false, false, config.use_hydrstress, phs_froot_c,
-                   false, config.use_luna)
+                   config.use_fates, config.use_luna)
 
     # W4b photosynthesis — FATES.
     # NOTE ON PLACEMENT: in Fortran, FATES photosynthesis is called from *inside*
@@ -1809,7 +1809,7 @@ function clm_drv_core!(config::CLMDriverConfig,
                 s += 1
                 s <= inst.fates.nsites || break
                 p = col.patchi[c] + 1
-                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=sa.coszen_col[c])
+                fates_pack_bcin_radiation!(inst; s=s, c=c, p=p, coszen=alb.coszen_col[c])
             end
             FatesNormalizedCanopyRadiation(inst.fates.nsites, inst.fates.sites,
                                            inst.fates.bc_in, inst.fates.bc_out)

@@ -1699,8 +1699,12 @@ function canopy_fluxes_core!(
             ctrl.use_biomass_heat_storage, use_lch4, params)
 
         # --- Photosynthesis ---
-        # Call photosynthesis for sunlit and shaded leaves to update rssun/rssha
-        if !isempty(nrad_patch) && !isempty(parsun_z_patch)
+        # Call photosynthesis for sunlit and shaded leaves to update rssun/rssha.
+        # FATES drives its own photosynthesis (FatesPlantRespPhotosynthDrive, called
+        # from the driver adjacent to this solve), so the standard CLM photosynthesis
+        # path is skipped under use_fates — mirrors CTSM canopy_fluxes calling
+        # clm_fates%wrap_photosynthesis instead of Photosynthesis for FATES columns.
+        if !use_fates && !isempty(nrad_patch) && !isempty(parsun_z_patch)
             # Build patch-indexed forc_pbot from column-level data
             # Use full mask (not reduced filterp) since photosynthesis uses mask_exposedvegp
             # Gather on the host (Array() the device inputs once) then bulk-copy to
