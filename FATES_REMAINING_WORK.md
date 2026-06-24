@@ -32,10 +32,12 @@ Done since this doc was written (suite 20,642 → 20,772; PRs #81–#84):
 1. ✅ ~~W4b full *in-solve* photosynthesis coupling~~ — DONE. `FatesPlantRespPhotosynthDrive` now runs from INSIDE `canopy_fluxes_core!`'s Newton leaf-temperature iteration (gated on `use_fates` + a non-`nothing` `fates_handle` trailing positional), packing the FATES photosynthesis bc_in from the in-loop canopy locals (t_veg/svpts/eah/rb/dayl_factor) and unpacking rssun/rssha back into `photosyns` so the next iteration's energy balance reads the FATES-driven resistance (two-way coupling, mirroring CTSM CanopyFluxesMod:1117). The default (`!use_fates`) path never touches `fates_handle` → byte-identical + Enzyme-compilable. The former adjacent post-solve call in `clm_drv!` was removed; the per-step hifrq history + plant-hydraulics steps stay. Test: `test_fates_w4b_insolve.jl`.
 2. ✅ ~~Plant-hydraulics Tier B~~ — DONE (#89).
 3. ✅ ~~History fills H1–H6~~ — DONE (#87/#88/#90): every `update_history_*` body filled; class-index helpers were already ported.
-4. **Restart R6/R7/R8** — disturbance running-means (needs SetRMean/GetRMean restart accessors); cohort PRT pools (needs `InitPRTObject` on restart cohorts); cohort hydraulics (needs `InitHydrCohort`, ported via Tier A).
+4. ✅ ~~Restart R6/R7/R8~~ — DONE (#91): running-means (SetRMean/GetRMean accessors), cohort PRT pools (InitPRTObject on unpack), cohort hydraulics (InitHydrCohort). Restart round-trip complete.
 5. ✅ ~~Real FATES param-file reader~~ — DONE (#85).
-6. **Multi-veg-patch + multi-site** — column↔patch map is `p = col.patchi[c]+1` (single veg patch MVP); the full `ifp` walk is needed for real FATES columns. AD/GPU for FATES columns remains explicitly out of scope.
-7. ✅ ~~Multi-day driver-integrated run~~ — DONE (#86, 2 days). Longer spin-up/stability + the FIRE/CNP/DAMAGE *modes* exercised through a full live driver run (vs constructed-state history validation) remain.
+6. ✅ ~~Multi-veg-patch + multi-site~~ — DONE (#94): the full `ifp` patch-walk (`p = ifp + col.patchi[c]`) across all hooks + the daily step, `fates_set_filters!` weight rebuild, nsites>1 (nsites=2 live `clm_drv!` validated). AD/GPU for FATES columns remains explicitly out of scope.
+7. ✅ ~~Multi-day driver-integrated run + live modes~~ — DONE (#86 2-day carbon-only; #93 fire/CNP/tree-damage each run live + mass-conserving through `clm_drv!` + a 15-day carbon-only spin-up/stability run).
+
+**★ ALL scoped FATES remaining-work items (1–7) are now COMPLETE (PRs #81–#94, suite → 22,128).** What's left is *deeper validation / coverage*, not implementation: numeric exercise of the W4b in-solve coupling once a column has a finite canopy `t_veg` (the carbon-only cold-start leaves it NaN), multi-year spin-ups, Fortran bit-parity comparison, and the AD/GPU-for-FATES question (explicitly out of scope by the CPU-only Union-ownership decision).
 
 ---
 
