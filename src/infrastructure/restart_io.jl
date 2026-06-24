@@ -82,6 +82,17 @@ function _restart_registry_biogeophys()
             i -> i.temperature.t_ref2m_patch,
             (i, d) -> i.temperature.t_ref2m_patch .= d),
 
+        # --- Ozone (prognostic uptake dose; accumulates across the run) ---
+        _rv1("O3UPTAKESUN", "patch",
+            i -> i.ozone.o3uptakesun_patch,
+            (i, d) -> i.ozone.o3uptakesun_patch .= d),
+        _rv1("O3UPTAKESHA", "patch",
+            i -> i.ozone.o3uptakesha_patch,
+            (i, d) -> i.ozone.o3uptakesha_patch .= d),
+        _rv1("O3_TLAI_OLD", "patch",
+            i -> i.ozone.tlai_old_patch,
+            (i, d) -> i.ozone.tlai_old_patch .= d),
+
         # --- Water state ---
         _rv2("H2OSOI_LIQ", "column", "levtot",
             i -> i.water.waterstatebulk_inst.ws.h2osoi_liq_col,

@@ -97,6 +97,7 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     use_hydrstress::Bool   # plant hydraulic stress (PHS) photosynthesis path
     use_luna::Bool         # LUNA photosynthetic-N acclimation (vcmax25 from vcmx25_z)
     use_voc::Bool          # MEGAN VOC emissions (gated, like shr_megan_mechcomps_n>0)
+    use_ozone::Bool        # ozone uptake/stress on photosynthesis (CalcOzoneUptake → CalcOzoneStress)
     megan::MEGANConfig     # MEGAN static descriptors (factors table + compound mappings)
     # Crop growing-degree-day accumulation manager. Like `megan`, this lives on
     # the (non-dual-copied) config rather than on `CLMInstances` so the
@@ -108,6 +109,12 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     # inactive so the default driver path runs no dust mobilization (only the
     # historically-wired dry deposition) and is byte-identical.
     dust::DustEmisConfig
+    # Transient land-use (dynamic subgrid) state. Like `megan`/`accum_mgr`, this
+    # non-numeric driver-state object lives on the config (NOT on the dual-copied
+    # CLMInstances). `nothing` unless clm_initialize! built a DynSubgridState for a
+    # transient-landcover run; the driver's per-timestep dynSubgrid hooks no-op when
+    # it is `nothing`, keeping the default (non-transient) path byte-identical.
+    dyn_subgrid::Any
 end
 
 # Backward-compatible property accessors so existing code like config.use_cn still works
@@ -173,8 +180,10 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           use_aquifer_layer::Bool=true,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
                           n_drydep::Int=0, use_hydrstress::Bool=false, use_luna::Bool=false,
-                          use_voc::Bool=false, megan::Union{MEGANConfig,Nothing}=nothing,
+                          use_voc::Bool=false, use_ozone::Bool=false,
+                          megan::Union{MEGANConfig,Nothing}=nothing,
                           dust::Union{DustEmisConfig,Nothing}=nothing,
+                          dyn_subgrid=nothing,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
                           ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
                           i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
@@ -200,7 +209,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     end
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
                     use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, use_luna,
-                    use_voc, megan, nothing, dust)
+                    use_voc, use_ozone, megan, nothing, dust, dyn_subgrid)
 end
 
 # ---------------------------------------------------------------------------
@@ -516,11 +525,12 @@ function clm_drv!(config::CLMDriverConfig,
                    day::Int = 1,
                    secs::Int = 0,
                    jday::Int = 1,
+                   year::Int = 0,
                    photosyns::PhotosynthesisData = PhotosynthesisData())
     return clm_drv_core!(config, inst, filt, filt_inactive_and_active, bounds_proc,
         doalb, nextsw_cday, declinp1, declin, obliqr, rstwr, nlend, rdate, rof_prognostic,
         nstep, is_first_step, is_beg_curr_day, is_end_curr_day, is_beg_curr_year,
-        dtime, mon, day, photosyns, is_end_curr_year, secs, jday)
+        dtime, mon, day, photosyns, is_end_curr_year, secs, jday, year)
 end
 
 # Fully-positional core: the differentiable entry point. Enzyme cannot build the
@@ -551,7 +561,8 @@ function clm_drv_core!(config::CLMDriverConfig,
                    photosyns::PhotosynthesisData,
                    is_end_curr_year::Bool = false,
                    secs::Int = 0,
-                   jday::Int = 1)
+                   jday::Int = 1,
+                   year::Int = 0)
 
     bounds_clump = bounds_proc  # single-clump mode
 
@@ -614,7 +625,30 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     if is_first_step
         # Placeholder: update_glc2lnd_fracs!(bounds_clump) [glacier coupling]
-        # Placeholder: dynSubgrid_wrapup_weight_changes!(bounds_clump) [dynamic subgrid]
+
+        # dynSubgrid_wrapup_weight_changes! — WIRED (gated; no-op unless a transient
+        # run built config.dyn_subgrid in clm_initialize!). Reconciles the cold-start
+        # subgrid weights up the hierarchy before the first physics step.
+        if config.dyn_subgrid !== nothing
+            dynSubgrid_wrapup_weight_changes!(bc, grc, lun, col, pch)
+        end
+
+        # Irrigation cold-start — WIRED (gated on config.irrigate). The relsat
+        # wilting-point/target columns + per-patch surface method + nsteps-per-day are
+        # static, so initialize them once on the first step (rather than threading a
+        # full IrrigationInitCold through clm_initialize!). Uses the default
+        # Clapp-Hornberger SWRC and the PFT irrigated flag; surface method left UNSET
+        # so set_irrig_method! falls back to the default (drip). No-op when irrigate off.
+        if config.irrigate && irr.irrig_nsteps_per_day == 0
+            _irr_swrc = SoilWaterRetentionCurveClappHornberg1978()
+            ng_irr = isempty(bc_grc) ? 0 : length(bc_grc)
+            npft_irr = length(pftcon.irrigated)
+            _irr_method_surf = fill(IRRIG_METHOD_UNSET, max(ng_irr, 1), max(npft_irr, 1))
+            irrigation_init_cold!(irr, ss, _irr_swrc, col,
+                                  pftcon.irrigated, _irr_method_surf,
+                                  pch, grc, bc_col, bc_patch,
+                                  varpar.nlevsoi, round(Int, dtime))
+        end
     end
 
     # ========================================================================
@@ -698,8 +732,16 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_cs=inst.soilbiogeochem_carbonstate,
             soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
     end
-    if config.use_lch4
-        # Placeholder: ch4_init_gridcell_balance_check!(bc, ...) [CH4 gridcell balance]
+    if config.use_lch4 && !isempty(inst.ch4.ch4_surf_flux_tot_col)
+        # ch4_init_gridcell_balance_check! — WIRED. dz is soil-indexed (drop the
+        # nlevsno snow-layer prefix that col.dz/z/zi/t_soisno carry). Seeds
+        # totcolch4_bef_grc for the end-of-step CH4 conservation check.
+        _ch4_nsno = varpar.nlevsno; _ch4_nsoi = varpar.nlevsoi
+        _ch4_dz_soil = Matrix(col.dz[:, (_ch4_nsno + 1):(_ch4_nsno + _ch4_nsoi)])
+        ch4_init_gridcell_balance_check!(inst.ch4, filt.nolakec, filt.lakec,
+                                         Array(col.gridcell), Array(col.wtgcell),
+                                         _ch4_dz_soil, _ch4_nsoi, bc.endg,
+                                         inst.ch4_varcon.allowlakeprod)
     end
 
     # Begin water balance — WIRED
@@ -708,9 +750,29 @@ function clm_drv_core!(config::CLMDriverConfig,
                             bc_col, bc_lun, bc_grc, "begwb")
 
     # ========================================================================
-    # Dynamic subgrid weights
+    # Dynamic subgrid weights — WIRED (gated; no-op unless a transient run built
+    # config.dyn_subgrid). Applies the per-year land-cover change and the
+    # biogeophysics (water + energy) conservation dynbal via the cons_bgp bundle.
+    # Transient datasets advance on year boundaries, so only run at is_beg_curr_year
+    # (matching the Fortran do_transient_*'s annual cadence). The CN-half
+    # (dyn_cnbal_patch!/col!) stays deferred here — it needs the full CN-veg facade
+    # threaded through the conservation updater; the biogeophys half is turnkey.
     # ========================================================================
-    # Placeholder: dynSubgrid_driver!(bounds_proc, ...) [dynamic vegetation area]
+    if config.dyn_subgrid !== nothing && is_beg_curr_year && !is_first_step
+        _cons_bgp = (urbanparams = up, soilstate = ss,
+                     waterstatebulk = wsb, waterdiagnosticbulk = wdb,
+                     temperature = temp, lakestate = ls)
+        # The dyn_subgrid driver asserts PROC-level bounds; in single-clump mode the
+        # clump bounds ARE the proc bounds, so present a PROC-level view of bc.
+        _bc_proc = BoundsType(begg = bc.begg, endg = bc.endg, begl = bc.begl,
+                              endl = bc.endl, begc = bc.begc, endc = bc.endc,
+                              begp = bc.begp, endp = bc.endp,
+                              level = BOUNDS_LEVEL_PROC)
+        dynSubgrid_driver!(config.dyn_subgrid, _bc_proc, grc, lun, col, pch;
+                           year = year,
+                           temp = temp, ws = wsb.ws, cons_bgp = _cons_bgp,
+                           mask_nolakec = filt.nolakec, mask_lakec = filt.lakec)
+    end
 
     # ========================================================================
     # Prescribed soil moisture / column balance init
@@ -740,8 +802,14 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_cs=inst.soilbiogeochem_carbonstate,
             soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
     end
-    if config.use_lch4
-        # Placeholder: ch4_init_column_balance_check!(bc, ...) [CH4 column balance]
+    if config.use_lch4 && !isempty(inst.ch4.ch4_surf_flux_tot_col)
+        # ch4_init_column_balance_check! — WIRED. Seeds totcolch4_bef_col for the
+        # column-level CH4 conservation check (dz soil-indexed as above).
+        _ch4c_nsno = varpar.nlevsno; _ch4c_nsoi = varpar.nlevsoi
+        _ch4_dz_soil_c = Matrix(col.dz[:, (_ch4c_nsno + 1):(_ch4c_nsno + _ch4c_nsoi)])
+        ch4_init_column_balance_check!(inst.ch4, filt.nolakec, filt.lakec,
+                                       _ch4_dz_soil_c, _ch4c_nsoi,
+                                       inst.ch4_varcon.allowlakeprod)
     end
 
     # ========================================================================
@@ -781,10 +849,17 @@ function clm_drv_core!(config::CLMDriverConfig,
                             cs.frac_veg_nosno_patch[bc_patch])
 
     # ========================================================================
-    # Irrigation withdrawal
+    # Irrigation withdrawal — WIRED (gated on config.irrigate)
     # ========================================================================
+    # CalcAndWithdrawIrrigationFluxes: route the demand computed at the END of the
+    # previous step (calc_irrigation_needed!) into surface/groundwater withdrawal +
+    # the per-patch drip/sprinkler application fluxes consumed by canopy interception
+    # downstream. calc_irrigation_fluxes! internally runs the bulk-withdrawal and
+    # application-flux sub-steps. No-op until n_irrig_steps_left_patch is set.
     if config.irrigate
-        # Placeholder: CalcAndWithdrawIrrigationFluxes!(bc, ...) [irrigation]
+        calc_irrigation_fluxes!(irr, sh, ss, wfb, col, pch,
+                                filt.soilc, filt.soilp,
+                                bc_col, bc_patch, varpar.nlevsoi, dtime)
     end
 
     # ========================================================================
@@ -1039,6 +1114,23 @@ function clm_drv_core!(config::CLMDriverConfig,
                    # untouched. This supersedes the former adjacent post-solve call.
                    (config.use_fates ? inst.fates : nothing))
 
+    # CalcOzoneUptake — WIRED (gated on config.use_ozone)
+    # Accumulate ozone dose now that the canopy/photosynthesis solve has filled the
+    # stomatal resistances (ps.rssun/rssha) and the leaf-boundary/aerodynamic
+    # resistances (fv.rb1/ram1). The matching CalcOzoneStress runs at the TOP of the
+    # next timestep's flux block (it intentionally uses the previous step's dose, per
+    # OzoneMod's design). With use_ozone off, o3uptake* stays at its cold-start 0 and
+    # CalcOzoneStress returns coef 1.0 → the default path is byte-identical.
+    if config.use_ozone
+        calc_ozone_uptake!(oz, pch, filt.exposedvegp, bc_patch,
+                           a2l.forc_pbot_downscaled_col, a2l.forc_th_downscaled_col,
+                           ps.rssun_patch, ps.rssha_patch,
+                           fv.rb1_patch, fv.ram1_patch,
+                           cs.tlai_patch, a2l.forc_o3_grc,
+                           _onbk(pftcon.evergreen), _onbk(pftcon.leaf_long),
+                           dtime)
+    end
+
     # W4b photosynthesis — FATES: the per-timestep ("hifrq") history fill +
     # plant-hydraulics step that used to follow the (now-removed) adjacent
     # photosynthesis call. The photosynthesis solve itself is done IN-LOOP inside
@@ -1109,10 +1201,29 @@ function clm_drv_core!(config::CLMDriverConfig,
                                   lun.z_0_town)
 
     # ========================================================================
-    # Irrigation needed
+    # Irrigation needed — WIRED (gated on config.irrigate)
     # ========================================================================
+    # CalcIrrigationNeeded: at the end of the timestep, evaluate the soil-water
+    # deficit on exposed irrigated patches and set the per-patch irrigation rate +
+    # n_irrig_steps_left for the next step's withdrawal. local_time_sec_patch is the
+    # local solar time (seconds since midnight) at each patch's longitude, mirroring
+    # the Fortran get_local_time(londeg, offset=0). volr (river volume) is only used
+    # when limit_irrigation_if_rof_enabled — passed as zeros (ROF limiting off).
     if config.irrigate
-        # Placeholder: irrigation_inst%CalcIrrigationNeeded!(bc, ...) [irrigation needed]
+        local_time_sec_patch = zeros(Int, length(pch.gridcell))
+        for p in bc_patch
+            g = pch.gridcell[p]
+            lon = grc.londeg[g]
+            lon < 0.0 && (lon += 360.0)
+            local_time_sec_patch[p] = mod(secs + round(Int, lon / DEGPSEC), ISECSPDAY)
+        end
+        volr_irr = zeros(eltype(ss.eff_porosity_col), length(grc.londeg))
+        calc_irrigation_needed!(irr, cs.elai_patch, temp.t_soisno_col,
+                                ss.eff_porosity_col, wsb.ws.h2osoi_liq_col,
+                                volr_irr, rof_prognostic,
+                                pftcon.irrigated, local_time_sec_patch,
+                                col, grc, pch, filt.exposedvegp,
+                                bc_col, bc_patch, bc_grc, varpar.nlevsoi)
     end
 
     # ========================================================================
@@ -1823,10 +1934,63 @@ function clm_drv_core!(config::CLMDriverConfig,
     end
 
     # ========================================================================
-    # Methane fluxes
+    # Methane fluxes — WIRED (gated on config.use_lch4)
     # ========================================================================
-    if config.use_lch4
-        # Placeholder: ch4!(bc, ...) [methane fluxes]
+    # ch4! consumes the just-computed BGC respiration (somhr/lithr/hr_vr/o_scalar/
+    # fphr/pot_f_nit_vr) + soil temp/moisture + vegetation roots/NPP and produces the
+    # column CH4 surface flux + concentration profiles. The soil-physics matrices
+    # col.dz/z/zi and temp/water carry an nlevsno snow-layer prefix, so they are
+    # soil-sliced to [c, 1:nlevsoi]; the BGC fluxes are nlevdecomp_full-resolved and
+    # sliced to the top nlevsoi layers. Gridcell forcings (forc_t/pbot/po2/pco2/pch4)
+    # are read by gridcell index inside ch4!.
+    if config.use_lch4 && !isempty(inst.ch4.ch4_surf_flux_tot_col)
+        _sl = (nlevsno + 1):(nlevsno + nlevsoi)         # snow-offset soil slice
+        _dl = 1:nlevsoi                                  # decomp-resolved soil slice
+        cnf_ch4 = inst.soilbiogeochem_carbonflux
+        nnf_ch4 = inst.soilbiogeochem_nitrogenflux
+        cveg_cf = inst.bgc_vegetation.cnveg_carbonflux_inst
+        # lake_icefrac_col is nlevlak-resolved (nlevlak may be < nlevsoi); pad to the
+        # nlevsoi soil grid ch4! expects (lake path only reads lake columns, deeper
+        # layers default frozen-free). Replaces NaN cold-start with 0.
+        _ch4_lakeicefr = zeros(eltype(temp.t_soisno_col), size(ls.lake_icefrac_col, 1), nlevsoi)
+        let _nlk = min(size(ls.lake_icefrac_col, 2), nlevsoi)
+            @views _ch4_lakeicefr[:, 1:_nlk] .= ifelse.(isnan.(ls.lake_icefrac_col[:, 1:_nlk]),
+                                                        zero(eltype(_ch4_lakeicefr)),
+                                                        ls.lake_icefrac_col[:, 1:_nlk])
+        end
+        ch4!(inst.ch4, inst.ch4_params, inst.ch4_varcon,
+             filt.soilc, filt.soilp, filt.lakec, filt.nolakec,
+             Array(col.gridcell), Array(col.wtgcell),
+             Array(pch.column), Array(pch.itype), Array(pch.wtcol),
+             Array(col.is_fates), grc.latdeg,
+             a2l.forc_pbot_not_downscaled_grc, a2l.forc_t_not_downscaled_grc,
+             a2l.forc_po2_grc, a2l.forc_pco2_grc, a2l.forc_pch4_grc,
+             Matrix(ss.watsat_col[:, _dl]),
+             Matrix(wsb.ws.h2osoi_vol_col[:, _dl]),
+             Matrix(wsb.ws.h2osoi_liq_col[:, _sl]),
+             Matrix(wsb.ws.h2osoi_ice_col[:, _sl]),
+             wsb.ws.h2osfc_col,
+             Matrix(ss.bsw_col[:, _dl]),
+             Matrix(ss.cellorg_col[:, _dl]),
+             Matrix(ss.smp_l_col[:, _dl]),
+             Matrix(temp.t_soisno_col[:, _sl]),
+             temp.t_grnd_col, temp.t_h2osfc_col, wdb.frac_h2osfc_col,
+             wdb.snow_depth_col, Array(col.snl), wfb.wf.qflx_surf_col,
+             Matrix(ss.rootfr_patch[:, _dl]), Matrix(ss.rootfr_col[:, _dl]),
+             Matrix(ss.crootfr_patch[:, _dl]), Matrix(ss.rootr_patch[:, _dl]),
+             cs.elai_patch, wfb.wf.qflx_tran_veg_patch,
+             cveg_cf.annsum_npp_patch, cveg_cf.rr_patch,
+             cnf_ch4.somhr_col, cnf_ch4.lithr_col,
+             Matrix(cnf_ch4.hr_vr_col[:, _dl]), Matrix(cnf_ch4.o_scalar_col[:, _dl]),
+             Matrix(cnf_ch4.fphr_col[:, _dl]), Matrix(nnf_ch4.pot_f_nit_vr_col[:, _dl]),
+             _ch4_lakeicefr, col.lakedepth,
+             Matrix(col.z[:, _sl]), Matrix(col.dz[:, _sl]),
+             Matrix(col.zi[:, (nlevsno + 1):(nlevsno + nlevsoi + 1)]),
+             nlevsoi, nlevsno, varpar.nlevdecomp, varpar.nlevdecomp_full,
+             5, 0.01, 130.0,
+             bc.endg, noveg, dtime,
+             config.use_cn, false, false,
+             cveg_cf.agnpp_patch, cveg_cf.bgnpp_patch, 365.0 * SECSPDAY)
     end
 
     # ========================================================================

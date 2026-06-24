@@ -63,6 +63,7 @@ function clm_initialize!(;
     use_cn::Bool = false,
     use_crop::Bool = false,
     use_luna::Bool = false,
+    use_lch4::Bool = false,
     use_fates::Bool = false,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
@@ -136,7 +137,8 @@ function clm_initialize!(;
                   nlevdecomp_full=nlevdecomp_full,
                   ndecomp_cascade_transitions=ndecomp_cascade_transitions,
                   nlevurb=nlevurb,
-                  use_luna=use_luna)
+                  use_luna=use_luna,
+                  use_lch4=use_lch4)
 
     # ---- Step 9: Build subgrid hierarchy ----
     # Get lat/lon from surface file if not provided
@@ -332,6 +334,44 @@ function clm_initialize!(;
     end
 
     return (inst, bounds, filt, tm)
+end
+
+"""
+    setup_dyn_subgrid!(config, ctl, bounds, inst; current_year, kwargs...)
+
+Build the transient land-use (dynamic subgrid) state once and attach it to
+`config.dyn_subgrid`, so the per-timestep `dynSubgrid_driver!` /
+`dynSubgrid_wrapup_weight_changes!` hooks in `clm_drv_core!` become active. This is
+the initialization counterpart to those driver hooks (Fortran `dynSubgrid_init`).
+
+`ctl` is a `DynSubgridControl` (built via `dyn_subgrid_control_init`) selecting which
+transient aspects are on. No-op aspects (all `do_transient_* = false`) still produce a
+valid state whose per-step driver call is a near-identity reweight. Returns the
+constructed `DynSubgridState` (also stored on `config.dyn_subgrid`).
+
+Kept separate from `clm_initialize!` because the transient datasets / control flags
+are supplied by the run setup, not the base namelist; the default (non-transient)
+path leaves `config.dyn_subgrid === nothing` and is byte-identical.
+"""
+function setup_dyn_subgrid!(config::CLMDriverConfig, ctl,
+                            bounds::BoundsType, inst::CLMInstances;
+                            current_year::Int,
+                            natpft_size::Int = 0, cft_size::Int = 0,
+                            wt_nat_patch = nothing,
+                            check_dynpft_consistency::Bool = true,
+                            use_crop::Bool = false, crop_inst = nothing,
+                            collapse_crops::Bool = false, glc_behavior = nothing)
+    state = dynSubgrid_init!(bounds, ctl,
+                             inst.gridcell, inst.landunit, inst.column, inst.patch;
+                             current_year = current_year,
+                             natpft_size = natpft_size, cft_size = cft_size,
+                             wt_nat_patch = wt_nat_patch,
+                             check_dynpft_consistency = check_dynpft_consistency,
+                             use_crop = use_crop, crop_inst = crop_inst,
+                             collapse_crops = collapse_crops,
+                             glc_behavior = glc_behavior)
+    config.dyn_subgrid = state
+    return state
 end
 
 """

@@ -321,6 +321,82 @@ CH4Data{FT}(; kwargs...) where {FT<:Real} =
 Adapt.@adapt_structure CH4Data
 
 # ---------------------------------------------------------------------------
+# ch4_init_allocate! — size every CH4Data array for a cold start
+# ---------------------------------------------------------------------------
+"""
+    ch4_init_allocate!(ch4, nc, np, ng, nlevsoi)
+
+Allocate every `CH4Data` array to its working-precision cold-start size. The
+`@kwdef` defaults are zero-length placeholders (so a default-constructed `CH4Data`
+is empty); call this once during instance init when `use_lch4` is active. Most
+fields cold-start at 0; a few diagnostics start at small non-zero values matching
+the Fortran cold start (annavg_somhr/finrw, sif, finundated, pH, first-time flag).
+`c_atm_grc` is `ng × 3` (CH4 / O2 / CO2 atmospheric concentrations).
+"""
+function ch4_init_allocate!(ch4::CH4Data{FT}, nc::Int, np::Int, ng::Int,
+                            nlevsoi::Int) where {FT}
+    M(v) = fill(FT(v), nc, nlevsoi)
+    Vc(v) = fill(FT(v), nc)
+    Vg(v) = fill(FT(v), ng)
+    Vp(v) = fill(FT(v), np)
+
+    # Per-layer fluxes / concentrations / stress (nc × nlevsoi)
+    ch4.ch4_prod_depth_sat_col   = M(0); ch4.ch4_prod_depth_unsat_col  = M(0)
+    ch4.ch4_prod_depth_lake_col  = M(0)
+    ch4.ch4_oxid_depth_sat_col   = M(0); ch4.ch4_oxid_depth_unsat_col  = M(0)
+    ch4.ch4_oxid_depth_lake_col  = M(0)
+    ch4.ch4_aere_depth_sat_col   = M(0); ch4.ch4_aere_depth_unsat_col  = M(0)
+    ch4.ch4_tran_depth_sat_col   = M(0); ch4.ch4_tran_depth_unsat_col  = M(0)
+    ch4.ch4_ebul_depth_sat_col   = M(0); ch4.ch4_ebul_depth_unsat_col  = M(0)
+    ch4.o2_oxid_depth_sat_col    = M(0); ch4.o2_oxid_depth_unsat_col   = M(0)
+    ch4.o2_aere_depth_sat_col    = M(0); ch4.o2_aere_depth_unsat_col   = M(0)
+    ch4.co2_decomp_depth_sat_col = M(0); ch4.co2_decomp_depth_unsat_col = M(0)
+    ch4.co2_oxid_depth_sat_col   = M(0); ch4.co2_oxid_depth_unsat_col  = M(0)
+    ch4.co2_aere_depth_sat_col   = M(0); ch4.co2_aere_depth_unsat_col  = M(0)
+    ch4.conc_ch4_sat_col   = M(0); ch4.conc_ch4_unsat_col = M(0); ch4.conc_ch4_lake_col = M(0)
+    ch4.conc_o2_sat_col    = M(0); ch4.conc_o2_unsat_col  = M(0); ch4.conc_o2_lake_col  = M(0)
+    ch4.o2_decomp_depth_sat_col = M(0); ch4.o2_decomp_depth_unsat_col = M(0)
+    ch4.o2stress_sat_col   = M(1); ch4.o2stress_unsat_col  = M(1)
+    ch4.ch4stress_sat_col  = M(1); ch4.ch4stress_unsat_col = M(1)
+    ch4.lake_soilc_col     = M(0)
+    ch4.layer_sat_lag_col  = M(0.5)
+
+    # Column-level surface fluxes / state (nc)
+    ch4.ch4_ebul_total_sat_col = Vc(0); ch4.ch4_ebul_total_unsat_col = Vc(0)
+    ch4.ch4_surf_aere_sat_col  = Vc(0); ch4.ch4_surf_aere_unsat_col  = Vc(0)
+    ch4.ch4_surf_ebul_sat_col  = Vc(0); ch4.ch4_surf_ebul_unsat_col  = Vc(0)
+    ch4.ch4_surf_ebul_lake_col = Vc(0)
+    ch4.ch4_surf_diff_sat_col  = Vc(0); ch4.ch4_surf_diff_unsat_col  = Vc(0)
+    ch4.ch4_surf_diff_lake_col = Vc(0)
+    ch4.ch4_dfsat_flux_col     = Vc(0); ch4.ch4_surf_flux_tot_col    = Vc(0)
+    ch4.zwt_ch4_unsat_col   = Vc(0)
+    ch4.totcolch4_col       = Vc(0); ch4.totcolch4_bef_col = Vc(0)
+    ch4.annsum_counter_col  = Vc(0)
+    ch4.tempavg_somhr_col   = Vc(0); ch4.annavg_somhr_col  = Vc(1.0e-6)
+    ch4.tempavg_finrw_col   = Vc(0); ch4.annavg_finrw_col  = Vc(0.1)
+    ch4.sif_col             = Vc(1)
+    ch4.qflx_surf_lag_col   = Vc(0)
+    ch4.finundated_col      = Vc(0.1); ch4.finundated_pre_snow_col = Vc(0.1)
+    ch4.finundated_lag_col  = Vc(0.1)
+    ch4.pH_col              = Vc(6.5)
+    ch4.grnd_ch4_cond_col   = Vc(0.01)
+
+    # Gridcell-level (ng) — c_atm_grc is ng × 3
+    ch4.c_atm_grc          = fill(FT(0), ng, 3)
+    ch4.ch4co2f_grc        = Vg(0); ch4.ch4prodg_grc = Vg(0)
+    ch4.totcolch4_grc      = Vg(0); ch4.totcolch4_bef_grc = Vg(0)
+
+    # Patch-level (np)
+    ch4.annavg_agnpp_patch  = Vp(1.0e-5); ch4.annavg_bgnpp_patch  = Vp(1.0e-5)
+    ch4.tempavg_agnpp_patch = Vp(0);      ch4.tempavg_bgnpp_patch = Vp(0)
+    ch4.grnd_ch4_cond_patch = Vp(0.01)
+
+    # First-time balance flag (ng)
+    ch4.ch4_first_time_grc = fill(true, ng)
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # get_jwt! — Water table layer identification
 # ---------------------------------------------------------------------------
 

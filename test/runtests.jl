@@ -130,6 +130,7 @@ using CLM
     include("test_init_interp.jl")
     include("test_band_diagonal.jl")
     include("test_clm_driver.jl")
+    include("test_clm_wiring.jl")
     include("test_root_biophys.jl")
     include("test_soil_water_plant_sink.jl")
     include("test_sat_excess_runoff.jl")
