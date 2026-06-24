@@ -22,13 +22,18 @@
 #     flush_to_zero and the exact HLM gating (hist-level / planthydro / tree-damage /
 #     nocomp / element presence / not-st3-not-sp) are preserved, in source order.
 #
-# What is ported as a representative update path:
-#   * update_history_dyn! orchestrator + update_history_dyn1! covering the
-#     patch/cohort COUNTING and the simple site-level state copies that map onto
-#     already-ported site/patch/cohort fields. The deep per-cohort PRT / element /
-#     hydraulics fills (which require FATES state not yet wired here) are marked
-#     `# TODO Batch 18-followup:` in update_history_dyn2!/hifrq/hydraulics, which
-#     are present as orchestrator stubs.
+# What is ported (the full H-series buffer fills, Waves 1-3):
+#   * update_history_dyn! / dyn1! / dyn2! — daily site/patch/cohort diagnostics
+#     incl. the size/pft/age-class disaggregation, the SPITFIRE fire-dimensioned
+#     groups, and the tree-damage cross-tab.
+#   * update_history_hifrq! / hifrq1! / hifrq2! — per-timestep carbon-flux +
+#     canopy-layer radiation/respiration disaggregation.
+#   * update_history_nutrflux! — per-cohort CNP flux diagnostics.
+#   * update_history_hydraulics! — plant-hydraulics si_hydr/co_hydr diagnostics.
+#   A handful of CNP-mode / landuse / nocomp SUB-fields remain `# TODO ...-W2b`
+#   (they need state from modes outside the carbon-only path); no fill BODY is a
+#   stub. Fire/damage/hydro fills are gated/guarded so the carbon-only path leaves
+#   them at the flush value while the fill logic is exercised with constructed state.
 #
 # Deps: FatesHistoryVariableType, FatesIODimensionsMod, FatesIOVariableKindMod,
 #       FatesInterfaceTypesMod (hlm_* flags, numpft, ...), EDTypesMod (ed_site_type,
@@ -1091,13 +1096,15 @@ Level-1 (daily) dynamics history update. Faithful port of the Fortran
   * organ-partitioned NPP fluxes (leaf/seed/stem/froot/croot/stor)
   * basal-area / crown-area weighted height
 
-# TODO Batch 18-followup-W1b: the **fire** group (SPITFIRE_ROS, TFC_ROS,
-# FIRE_INTENSITY/_AREA_PRODUCT, FIRE_AREA, FIRE_FUEL_*, SUM_FUEL, NESTEROV,
-# NIGNITIONS, FDI, EFFECT_WSPEED) and the **planthydro** (H2OVEG_*) +
-# **treedamage** (CROWNAREA_*_DAMAGE) groups are deferred: the patch `fuel`
-# object is `nothing` and the fire-state / si_hydr fields are unset (NaN) in the
-# carbon-only cold-start path, and the hydro/damage modules are gated off. These
-# vars stay at their flush value.
+# W3 (Wave 3) adds the **fire** group (SPITFIRE_ROS, TFC_ROS, FIRE_INTENSITY/
+# _AREA_PRODUCT, FIRE_AREA, FIRE_FUEL_*, SUM_FUEL, NESTEROV, NIGNITIONS, FDI,
+# EFFECT_WSPEED) and the **treedamage** CROWNAREA_*_DAMAGE diagnostics, each
+# guarded by the "NaN==unset" convention (site `fireWeather` is `nothing` / patch
+# `fuel` is `nothing` / `ros_front`/`fi`/`frac_burnt` are NaN in the carbon-only
+# cold-start; tree-damage is `hlm_use_tree_damage`-gated) so the carbon-only path
+# leaves them at the flush value but the fill logic is exercised with constructed
+# state. The planthydro site-level H2OVEG_DEAD/RECRUIT/GROWTURN diagnostics live
+# in `update_history_hydraulics!`.
 """
 function update_history_dyn1!(this::fates_history_interface_type, nc::Integer,
                               nsites::Integer, sites::AbstractVector,
@@ -1177,6 +1184,25 @@ function update_history_dyn1!(this::fates_history_interface_type, nc::Integer,
     h_seedling      = this.hvars[this.ih[:ih_seedling_pool_si]].r81d
     h_seeds_in      = this.hvars[this.ih[:ih_seeds_in_si]].r81d
     h_seeds_in_loc  = this.hvars[this.ih[:ih_seeds_in_local_si]].r81d
+    # -- fire (SPITFIRE) site scalars + patch-area-weighted fuel/intensity --
+    h_nesterov      = this.hvars[this.ih[:ih_nesterov_fire_danger_si]].r81d
+    h_effect_wspeed = this.hvars[this.ih[:ih_effect_wspeed_si]].r81d
+    h_nignitions    = this.hvars[this.ih[:ih_fire_nignitions_si]].r81d
+    h_fdi           = this.hvars[this.ih[:ih_fire_fdi_si]].r81d
+    h_spitfire_ros  = this.hvars[this.ih[:ih_spitfire_ros_si]].r81d
+    h_tfc_ros       = this.hvars[this.ih[:ih_tfc_ros_si]].r81d
+    h_fire_intens   = this.hvars[this.ih[:ih_fire_intensity_si]].r81d
+    h_fire_area     = this.hvars[this.ih[:ih_fire_area_si]].r81d
+    h_fuel_bulkd    = this.hvars[this.ih[:ih_fire_fuel_bulkd_si]].r81d
+    h_fuel_effmoist = this.hvars[this.ih[:ih_fire_fuel_eff_moist_si]].r81d
+    h_fuel_sav      = this.hvars[this.ih[:ih_fire_fuel_sav_si]].r81d
+    h_fuel_mef      = this.hvars[this.ih[:ih_fire_fuel_mef_si]].r81d
+    h_sum_fuel      = this.hvars[this.ih[:ih_sum_fuel_si]].r81d
+    h_fire_int_area = this.hvars[this.ih[:ih_fire_intensity_area_product_si]].r81d
+    # -- tree-damage crownarea: only registered when hlm_use_tree_damage is on --
+    dmg_on = hlm_use_tree_damage[] == itrue && haskey(this.ih, :ih_crownarea_canopy_damage_si)
+    h_ca_can_dmg = dmg_on ? this.hvars[this.ih[:ih_crownarea_canopy_damage_si]].r81d : nothing
+    h_ca_ust_dmg = dmg_on ? this.hvars[this.ih[:ih_crownarea_ustory_damage_si]].r81d : nothing
 
     cpos = element_pos[carbon12_element]   # carbon's slot in mass_balance / litter / flux_diags
 
@@ -1217,6 +1243,30 @@ function update_history_dyn1!(this::fates_history_interface_type, nc::Integer,
         h_gdd[io_si]     = site.grow_deg_days
         h_cleafoff[io_si] = Float64(site.phen_model_date - site.cleafoffdate)
         h_cleafon[io_si]  = Float64(site.phen_model_date - site.cleafondate)
+
+        # ---- site-level fire scalars (SPITFIRE) ----
+        # fireWeather is `nothing` in the carbon-only / no-fire path; FDI/NF_successful
+        # are NaN until the fire module runs. Guard per the "NaN==unset" convention so
+        # the carbon-only path leaves these at the flush value rather than poisoning.
+        if site.fireWeather !== nothing
+            fwi = site.fireWeather.fire_weather_index
+            ews = site.fireWeather.effective_windspeed
+            isfinite(fwi) && (h_nesterov[io_si]      = fwi)
+            isfinite(ews) && (h_effect_wspeed[io_si] = ews / sec_per_min)
+        end
+        # number of ignitions [#/km2/day -> #/m2/s]
+        isfinite(site.NF_successful) &&
+            (h_nignitions[io_si] = site.NF_successful / m2_per_km2 / sec_per_day)
+        # fire danger index (0-1)
+        isfinite(site.fdi) && (h_fdi[io_si] = site.fdi)
+
+        # tree-damage crownarea-loss diagnostics [m2/ha/day -> m2/m2/yr]
+        if dmg_on
+            isfinite(site.crownarea_canopy_damage) &&
+                (h_ca_can_dmg[io_si] += site.crownarea_canopy_damage * days_per_year / m2_per_ha)
+            isfinite(site.crownarea_ustory_damage) &&
+                (h_ca_ust_dmg[io_si] += site.crownarea_ustory_damage * days_per_year / m2_per_ha)
+        end
 
         # total wood product accumulation [kgC/site -> kgC/m2]
         h_woodprod[io_si] = site.resources_management.trunk_product_site * AREA_INV
@@ -1310,6 +1360,27 @@ function update_history_dyn1!(this::fates_history_interface_type, nc::Integer,
             # plant / tree area occupied [m2/m2]
             h_area_plant[io_si] += min(tcanp, cpatch.area) * AREA_INV
             h_area_trees[io_si] += min(ttree, cpatch.area) * AREA_INV
+
+            # ---- patch-area-weighted fire diagnostics (SPITFIRE) ----
+            # ros_front / fi / tfc_ros / frac_burnt are NaN, and cpatch.fuel is
+            # `nothing`, until the fire module runs; guard each so the carbon-only
+            # path leaves these at the flush value.
+            paw = cpatch.area * AREA_INV
+            isfinite(cpatch.ros_front)  && (h_spitfire_ros[io_si] += cpatch.ros_front  * paw / sec_per_min)
+            isfinite(cpatch.tfc_ros)    && (h_tfc_ros[io_si]       += cpatch.tfc_ros    * paw)
+            isfinite(cpatch.fi)         && (h_fire_intens[io_si]   += cpatch.fi         * paw * J_per_kJ)
+            isfinite(cpatch.frac_burnt) && (h_fire_area[io_si]     += cpatch.frac_burnt * paw / sec_per_day)
+            if isfinite(cpatch.fi) && isfinite(cpatch.frac_burnt)
+                h_fire_int_area[io_si] += cpatch.fi * cpatch.frac_burnt * paw * J_per_kJ
+            end
+            if cpatch.fuel !== nothing
+                fuel = cpatch.fuel
+                h_fuel_bulkd[io_si]    += fuel.bulk_density_notrunks     * paw
+                h_fuel_effmoist[io_si] += fuel.average_moisture_notrunks * paw
+                h_fuel_sav[io_si]      += fuel.SAV_notrunks              * paw / m_per_cm
+                h_fuel_mef[io_si]      += fuel.MEF_notrunks              * paw
+                h_sum_fuel[io_si]      += fuel.non_trunk_loading         * paw
+            end
 
             # ---- litter / seed pools (carbon) ----
             if has_fluxdiag && length(cpatch.litter) >= cpos
@@ -1540,12 +1611,14 @@ no-CNP / no-damage path populates:
   * **by-soil-layer** (`*_sl`): fnrtc (root-fraction weighted), fragmentation_scaler
   * recruit running-mean l2fr (`recl2fr_*_pf`)
 
-# TODO Batch 18-followup-W2b: the **fire-dimensioned** sub-blocks
-# (`hio_fire_intensity_si_age`, `hio_fire_sum_fuel_si_age`, `hio_area_burnt_si_age`,
-# `hio_fuel_amount_*`, `hio_litter_moisture_si_fuel`, `hio_burnt_frac_litter_si_fuel`,
-# `nocomp_pftburnedarea`) read `cpatch.fuel` (== `nothing` in carbon-only) and the
-# unset `cpatch.FI`/`frac_burnt`; the **damage cross-tab** sub-blocks (`*_cdpf`/`*_cdsc`,
-# gated on `hlm_use_tree_damage`); the **landuse** sub-blocks (`*_si_lulu`
+# W3 (Wave 3) adds the **fire-dimensioned** sub-blocks (`ih_fire_intensity_si_age`,
+# `ih_fire_sum_fuel_si_age`, `ih_area_burnt_si_age`, `ih_fuel_amount_*`,
+# `ih_litter_moisture_si_fuel`, `ih_burnt_frac_litter_si_fuel`) — guarded on
+# `cpatch.fuel !== nothing` + `isfinite(cpatch.fi/frac_burnt)` — and the
+# **tree-damage cross-tab** (`*_si_cdpf`: cohort-level + canopy/understory + the
+# site-level damage-array cross-tab), gated on `hlm_use_tree_damage`. Still
+# deferred: `nocomp_pftburnedarea` (needs the nocomp filter); the **landuse**
+# sub-blocks (`*_si_lulu`
 # disturbance/transition matrix, `hio_area_si_landuse`, `agesince_anthrodist`,
 # secondarylands area); and the **N/P element** stores (`store{n,p}*_scpf`,
 # `*_si_pft` meanliqvol/meansmp beyond carbon) are deferred — their source state is
@@ -1648,6 +1721,29 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
     h_storectfrac_can_scpf = H(:ih_storectfrac_canopy_scpf)
     h_storectfrac_ust_scpf = H(:ih_storectfrac_ustory_scpf)
 
+    # -- tree-damage cross-tab (damage×size×pft = cdpf): only registered when
+    #    hlm_use_tree_damage is on (the :treedamage registry gate). --
+    dmg_on = hlm_use_tree_damage[] == itrue && haskey(this.ih, :ih_mortality_si_cdpf)
+    if dmg_on
+        h_mort_cdpf       = H(:ih_mortality_si_cdpf)
+        h_nplant_cdpf     = H(:ih_nplant_si_cdpf)
+        h_m3_cdpf         = H(:ih_m3_si_cdpf)
+        h_m11_cdpf        = H(:ih_m11_si_cdpf)
+        h_ddbh_cdpf       = H(:ih_ddbh_si_cdpf)
+        h_m3_mort_can_cdpf  = H(:ih_m3_mortality_canopy_si_cdpf)
+        h_m11_mort_can_cdpf = H(:ih_m11_mortality_canopy_si_cdpf)
+        h_mort_can_cdpf     = H(:ih_mortality_canopy_si_cdpf)
+        h_nplant_can_cdpf   = H(:ih_nplant_canopy_si_cdpf)
+        h_ddbh_can_cdpf     = H(:ih_ddbh_canopy_si_cdpf)
+        h_m3_mort_ust_cdpf  = H(:ih_m3_mortality_understory_si_cdpf)
+        h_m11_mort_ust_cdpf = H(:ih_m11_mortality_understory_si_cdpf)
+        h_mort_ust_cdpf     = H(:ih_mortality_understory_si_cdpf)
+        h_nplant_ust_cdpf   = H(:ih_nplant_understory_si_cdpf)
+        h_ddbh_ust_cdpf     = H(:ih_ddbh_understory_si_cdpf)
+        # m11 (damage mortality) by scpf is also :treedamage-gated
+        h_m11_scpf          = H(:ih_m11_si_scpf)
+    end
+
     # -- by-size class (scls) --
     h_ba_scls       = H(:ih_ba_si_scls)
     h_agb_scls      = H(:ih_agb_si_scls)
@@ -1725,6 +1821,15 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
     h_npatches_age  = H(:ih_npatches_si_age)
     h_zstar_age     = H(:ih_zstar_si_age)
     h_biomass_age   = H(:ih_biomass_si_age)
+
+    # -- fire by-age + fuel-class (SPITFIRE) --
+    h_area_burnt_age   = H(:ih_area_burnt_si_age)
+    h_fire_intens_age  = H(:ih_fire_intensity_si_age)
+    h_fire_fuel_age    = H(:ih_fire_sum_fuel_si_age)
+    h_fuel_amount_agefuel = H(:ih_fuel_amount_age_fuel)
+    h_litter_moist_fuel = H(:ih_litter_moisture_si_fuel)
+    h_fuel_amount_fuel  = H(:ih_fuel_amount_si_fuel)
+    h_burnt_frac_fuel   = H(:ih_burnt_frac_litter_si_fuel)
 
     # -- canopy-leaf / canopy-layer crownarea --
     h_crownarea_cnlf = H(:ih_crownarea_si_cnlf)
@@ -1829,11 +1934,22 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                 h_zstar_age[io_si, iage] += cpatch.zstar * cpatch.area * AREA_INV
             end
 
+            # ---- patch-age fire diagnostics (SPITFIRE) ----
+            # frac_burnt / fi are NaN, cpatch.fuel is `nothing`, until the fire module
+            # runs; guard each per the "NaN==unset" convention.
+            isfinite(cpatch.frac_burnt) &&
+                (h_area_burnt_age[io_si, iage] += cpatch.frac_burnt * cpatch.area * AREA_INV / sec_per_day)
+            if isfinite(cpatch.fi) && isfinite(cpatch.frac_burnt)
+                h_fire_intens_age[io_si, iage] += cpatch.fi * cpatch.frac_burnt * cpatch.area * AREA_INV * J_per_kJ
+            end
+            if cpatch.fuel !== nothing
+                h_fire_fuel_age[io_si, iage] += cpatch.fuel.non_trunk_loading * cpatch.area * AREA_INV
+            end
+
             # TODO Batch 18-followup-W2b: landuse area (hio_area_si_landuse),
             # secondary-forest age-since-anthro / secondarylands area, and the
-            # patch-age fire/fuel diagnostics (scorch_height, area_burnt,
-            # fire_intensity, fire_sum_fuel, nocomp_pftburnedarea) — cpatch.fuel
-            # is nothing and FI/frac_burnt are unset in carbon-only.
+            # patch-age scorch_height / nocomp_pftburnedarea diagnostics — these need
+            # the per-PFT scorch_height_si_agepft and nocomp filters not yet ported.
 
             # ---- cohort loop (shortest -> taller) ----
             ccohort = cpatch.shortest
@@ -2015,6 +2131,23 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
 
                     h_nplant_scpf[io_si, scpf] += ccohort.n / m2_per_ha
 
+                    # ---- tree-damage cross-tab (cohort-level cdpf) ----
+                    icdpf = -1
+                    if dmg_on && ccohort.crowndamage != fates_unset_int
+                        icdpf = get_cdamagesizepft_class_index(ccohort.dbh, ccohort.crowndamage, ccohort.pft)
+                        lmort_sum_dpf = ccohort.lmort_direct + ccohort.lmort_collateral + ccohort.lmort_infra
+                        mort_dpf = ccohort.bmort + ccohort.hmort + ccohort.cmort + ccohort.frmort +
+                                   ccohort.smort + ccohort.asmort + ccohort.dgmort
+                        h_mort_cdpf[io_si, icdpf] += mort_dpf * ccohort.n / m2_per_ha +
+                            lmort_sum_dpf * ccohort.n * sec_per_day * days_per_year / m2_per_ha
+                        h_nplant_cdpf[io_si, icdpf] += ccohort.n / m2_per_ha
+                        h_m3_cdpf[io_si, icdpf]     += ccohort.cmort * ccohort.n / m2_per_ha
+                        # damage mortality (dgmort) by size×pft and damage×size×pft
+                        h_m11_scpf[io_si, scpf]  += ccohort.dgmort * ccohort.n / m2_per_ha
+                        h_m11_cdpf[io_si, icdpf] += ccohort.dgmort * ccohort.n / m2_per_ha
+                        h_ddbh_cdpf[io_si, icdpf] += ccohort.ddbhdt * ccohort.n / m2_per_ha * m_per_cm
+                    end
+
                     # carbon-only states
                     sapw_m   = GetState(ccohort.prt, sapw_organ, carbon12_element)
                     struct_m = GetState(ccohort.prt, struct_organ, carbon12_element)
@@ -2103,6 +2236,17 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                         h_npp_stor_can_scls[io_si, scls] += store_na * ccohort.n / m2_per_ha * dyinv
                         cly = isfinite(ccohort.canopy_layer_yesterday) ? ccohort.canopy_layer_yesterday : 0.0
                         h_yestcl_can_scls[io_si, scls] += cly * ccohort.n / m2_per_ha
+
+                        # ---- canopy tree-damage cross-tab (cdpf) ----
+                        if icdpf > 0
+                            h_m3_mort_can_cdpf[io_si, icdpf]  += ccohort.cmort  * ccohort.n / m2_per_ha
+                            h_m11_mort_can_cdpf[io_si, icdpf] += ccohort.dgmort * ccohort.n / m2_per_ha
+                            h_mort_can_cdpf[io_si, icdpf] +=
+                                mort_rate_sum * ccohort.n / m2_per_ha +
+                                lmort_sum * ccohort.n * sec_per_day * days_per_year / m2_per_ha
+                            h_nplant_can_cdpf[io_si, icdpf] += ccohort.n / m2_per_ha
+                            h_ddbh_can_cdpf[io_si, icdpf]   += ccohort.ddbhdt * ccohort.n / m2_per_ha * m_per_cm
+                        end
                     else
                         h_nplant_ust_scag[io_si, iscag] += ccohort.n / m2_per_ha
                         h_mort_ust_scag[io_si, iscag] += mort_rate_sum * ccohort.n / m2_per_ha
@@ -2145,6 +2289,17 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                         h_npp_stor_ust_scls[io_si, scls] += store_na * ccohort.n / m2_per_ha * dyinv
                         cly = isfinite(ccohort.canopy_layer_yesterday) ? ccohort.canopy_layer_yesterday : 0.0
                         h_yestcl_ust_scls[io_si, scls] += cly * ccohort.n / m2_per_ha
+
+                        # ---- understory tree-damage cross-tab (cdpf) ----
+                        if icdpf > 0
+                            h_m3_mort_ust_cdpf[io_si, icdpf]  += ccohort.cmort  * ccohort.n / m2_per_ha
+                            h_m11_mort_ust_cdpf[io_si, icdpf] += ccohort.dgmort * ccohort.n / m2_per_ha
+                            h_mort_ust_cdpf[io_si, icdpf] +=
+                                mort_rate_sum * ccohort.n / m2_per_ha +
+                                lmort_sum * ccohort.n * sec_per_day * days_per_year / m2_per_ha
+                            h_nplant_ust_cdpf[io_si, icdpf] += ccohort.n / m2_per_ha
+                            h_ddbh_ust_cdpf[io_si, icdpf]   += ccohort.ddbhdt * ccohort.n / m2_per_ha * m_per_cm
+                        end
                     end
 
                     # growth flux of individuals into a given size bin
@@ -2183,8 +2338,24 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                 end
             end
 
-            # TODO Batch 18-followup-W2b: fuel_amount/litter_moisture/burnt_frac per
-            # fuel class — cpatch.fuel is nothing in carbon-only.
+            # ---- per-fuel-class diagnostics (SPITFIRE) ----
+            # cpatch.fuel is `nothing` in the carbon-only path; guard the whole block.
+            if cpatch.fuel !== nothing
+                fuel = cpatch.fuel
+                paw = cpatch.area * AREA_INV
+                for i_fuel in 1:num_fuel_classes
+                    i_agefuel = get_agefuel_class_index(cpatch.age, i_fuel)
+                    h_fuel_amount_agefuel[io_si, i_agefuel] +=
+                        fuel.frac_loading[i_fuel] * fuel.non_trunk_loading * paw
+                    h_litter_moist_fuel[io_si, i_fuel] += fuel.effective_moisture[i_fuel] * paw
+                    h_fuel_amount_fuel[io_si, i_fuel]  +=
+                        fuel.frac_loading[i_fuel] * fuel.non_trunk_loading * paw
+                    if isfinite(cpatch.frac_burnt)
+                        h_burnt_frac_fuel[io_si, i_fuel] +=
+                            fuel.frac_burnt[i_fuel] * cpatch.frac_burnt * paw
+                    end
+                end
+            end
 
             # CWD ag/bg state + out flux (carbon litter)
             if has_fluxdiag && length(cpatch.litter) >= cpos
@@ -2308,8 +2479,27 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
             end
         end
 
-        # TODO Batch 18-followup-W2b: tree-damage cross-tab (cdpf/cdsc) — gated on
-        # hlm_use_tree_damage (off in carbon-only).
+        # ---- site-level tree-damage cross-tab (cdpf), from the site damage arrays ----
+        # gated on hlm_use_tree_damage; the *_damage arrays are empty (unallocated) in
+        # the carbon-only path, so guard on allocation as well.
+        if dmg_on && !isempty(site.fmort_rate_canopy_damage)
+            ndam = nlevdamage[]
+            for ft in 1:npft
+                for icdam in 1:ndam
+                    for i_scls in 1:nsclass
+                        icdpf = (icdam - 1) * nsclass + i_scls + (ft - 1) * nsclass * ndam
+                        tc = site.term_nindivs_canopy_damage[icdam, i_scls, ft] * days_per_year
+                        tu = site.term_nindivs_ustory_damage[icdam, i_scls, ft] * days_per_year
+                        im = site.imort_rate_damage[icdam, i_scls, ft]
+                        fc = site.fmort_rate_canopy_damage[icdam, i_scls, ft]
+                        fu = site.fmort_rate_ustory_damage[icdam, i_scls, ft]
+                        h_mort_cdpf[io_si, icdpf]     += (tc + tu + im + fc + fu) / m2_per_ha
+                        h_mort_can_cdpf[io_si, icdpf] += (tc + fc) / m2_per_ha
+                        h_mort_ust_cdpf[io_si, icdpf] += (tu + im + fu) / m2_per_ha
+                    end
+                end
+            end
+        end
 
         # reset the consumed site-level mortality accumulators
         has_term  && (fill!(site.term_nindivs_canopy, 0.0); fill!(site.term_nindivs_ustory, 0.0))
@@ -2344,6 +2534,10 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                     h_m4_scpf[io_si, i_scpf] + h_m5_scpf[io_si, i_scpf] + h_m6_scpf[io_si, i_scpf] +
                     h_m7_scpf[io_si, i_scpf] + h_m8_scpf[io_si, i_scpf] + h_m9_scpf[io_si, i_scpf] +
                     h_m10_scpf[io_si, i_scpf]
+                # damage mortality (m11) is only added to the PFT summary when active
+                if dmg_on
+                    h_mort_pft[io_si, ft] += h_m11_scpf[io_si, i_scpf]
+                end
             end
         end
 
@@ -2465,12 +2659,110 @@ end
 """
     update_history_nutrflux!(this, csite)
 
-Nutrient-flux (N/P uptake, efflux, demand, fixation) dynamics update.
+Nutrient-flux (N/P uptake, efflux, demand, fixation) dynamics update. Faithful
+port of the Fortran `update_history_nutrflux` (F90 2091–2310): the per-cohort
+daily CNP flux diagnostics, accumulated to the site (`*_si`) and, at level-2, the
+size×pft (`*_scpf`) bins.
 
-# TODO Batch 18-followup: not yet ported (requires PRT CNP flux diagnostics).
+Filled (carbon): `ih_excess_resp_si` (from `resp_excess`). Nitrogen: `ih_nh4uptake`,
+`ih_no3uptake` (from `daily_nh4/no3_uptake`), `ih_nfix` (`sym_nfix_daily`),
+`ih_nefflux` (`daily_n_efflux`), `ih_ndemand` (`daily_n_demand`) — each `_si` and
+`_scpf`. Phosphorus: `ih_puptake` (from `daily_p_gain`), `ih_pefflux`
+(`daily_p_efflux`), `ih_pdemand` (`daily_p_demand`) — `_si` and `_scpf`.
+
+All cohort fluxes carry the combined unit conversion `uconv = n * ha_per_m2 *
+days_per_sec` (x/plant/day -> x/m2/s). The N/P element branches only have a source
+when the CNP allocation mode is active; per the "NaN == unset" convention, an
+unset daily-flux field contributes zero (guarded by `isfinite`). New cohorts
+(`isnew`) are skipped, exactly as Fortran. The diagnostic groups are zeroed here
+(`group_nflx_simple`, and `group_nflx_complx` at level-2) before accumulating.
 """
 function update_history_nutrflux!(this::fates_history_interface_type, csite)
-    # TODO Batch 18-followup
+    hlm_hist_level_dynam[] > 0 || return nothing
+
+    io_si = csite.h_gid
+
+    # Handle fetch helpers: the N/P diagnostics are `:has_n`/`:has_p`-gated in the
+    # registry (and the scpf variants are also level-2-gated), so in a carbon-only /
+    # level-1 run they are simply not registered. Fetch-if-present and treat a
+    # missing handle as "do not write" — exactly the Fortran behavior (the var
+    # isn't in the active history list).
+    H1(sym) = haskey(this.ih, sym) && this.ih[sym] > 0 ? this.hvars[this.ih[sym]].r81d : nothing
+    H2(sym) = haskey(this.ih, sym) && this.ih[sym] > 0 ? this.hvars[this.ih[sym]].r82d : nothing
+    has_n = any(==(nitrogen_element), element_list)
+    has_p = any(==(phosphorus_element), element_list)
+
+    # ---- site-level fluxes (group_nflx_simple) ----
+    h_excess_resp = H1(:ih_excess_resp_si)
+    h_nh4_si      = H1(:ih_nh4uptake_si)
+    h_no3_si      = H1(:ih_no3uptake_si)
+    h_nfix_si     = H1(:ih_nfix_si)
+    h_nefflux_si  = H1(:ih_nefflux_si)
+    h_ndemand_si  = H1(:ih_ndemand_si)
+    h_puptake_si  = H1(:ih_puptake_si)
+    h_pefflux_si  = H1(:ih_pefflux_si)
+    h_pdemand_si  = H1(:ih_pdemand_si)
+
+    zero_site_hvars!(this, csite, group_nflx_simple)
+
+    do_scpf = hlm_hist_level_dynam[] > 1
+    if do_scpf
+        h_nh4_scpf     = H2(:ih_nh4uptake_scpf)
+        h_no3_scpf     = H2(:ih_no3uptake_scpf)
+        h_nfix_scpf    = H2(:ih_nfix_scpf)
+        h_nefflux_scpf = H2(:ih_nefflux_scpf)
+        h_ndemand_scpf = H2(:ih_ndemand_scpf)
+        h_puptake_scpf = H2(:ih_puptake_scpf)
+        h_pefflux_scpf = H2(:ih_pefflux_scpf)
+        h_pdemand_scpf = H2(:ih_pdemand_scpf)
+        zero_site_hvars!(this, csite, group_nflx_complx)
+    end
+
+    cpatch = csite.youngest_patch
+    while cpatch !== nothing
+        ccohort = cpatch.shortest
+        while ccohort !== nothing
+            # skip new cohorts (no daily diagnostics yet)
+            if ccohort.isnew || ccohort.prt === nothing
+                ccohort = ccohort.taller
+                continue
+            end
+
+            # x/plant/day -> x/m2/s
+            uconv = ccohort.n * ha_per_m2 * days_per_sec
+            iscpf = ccohort.size_by_pft_class
+
+            # accumulate `val*uconv` into site handle `hs[io_si]` (+ scpf handle
+            # `hc[io_si,iscpf]`) when the handle is registered and the value is set.
+            add_si!(hs, v) = (hs !== nothing && isfinite(v)) && (hs[io_si] += v * uconv)
+            add_scpf!(hc, v) = (do_scpf && hc !== nothing && isfinite(v)) && (hc[io_si, iscpf] += v * uconv)
+
+            for el in 1:num_elements[]
+                eid = element_list[el]
+                if eid == carbon12_element
+                    add_si!(h_excess_resp, ccohort.resp_excess)
+                elseif eid == nitrogen_element && has_n
+                    nh4 = ccohort.daily_nh4_uptake; no3 = ccohort.daily_no3_uptake
+                    nfx = ccohort.sym_nfix_daily;   nef = ccohort.daily_n_efflux
+                    ndm = ccohort.daily_n_demand
+                    add_si!(h_nh4_si, nh4);     add_scpf!(h_nh4_scpf, nh4)
+                    add_si!(h_no3_si, no3);     add_scpf!(h_no3_scpf, no3)
+                    add_si!(h_nfix_si, nfx);    add_scpf!(h_nfix_scpf, nfx)
+                    add_si!(h_nefflux_si, nef); add_scpf!(h_nefflux_scpf, nef)
+                    add_si!(h_ndemand_si, ndm); add_scpf!(h_ndemand_scpf, ndm)
+                elseif eid == phosphorus_element && has_p
+                    pup = ccohort.daily_p_gain; pef = ccohort.daily_p_efflux
+                    pdm = ccohort.daily_p_demand
+                    add_si!(h_puptake_si, pup); add_scpf!(h_puptake_scpf, pup)
+                    add_si!(h_pefflux_si, pef); add_scpf!(h_pefflux_scpf, pef)
+                    add_si!(h_pdemand_si, pdm); add_scpf!(h_pdemand_scpf, pdm)
+                end
+            end
+
+            ccohort = ccohort.taller
+        end
+        cpatch = cpatch.older
+    end
     return nothing
 end
 
@@ -2478,10 +2770,9 @@ end
     update_history_hifrq!(this, nc, nsites, sites, bc_in, bc_out, dt_tstep)
 
 Top-level high-frequency (sub-daily) history update orchestrator. Mirrors
-`update_history_hifrq`.
-
-# TODO Batch 18-followup: hifrq1/hifrq2 buffer fills (GPP/AR/radiation/temperature
-# per cnlf/can/scpf) not yet ported; the variable registry is complete.
+`update_history_hifrq`: calls `update_history_hifrq1!` (level-1) and, when the
+hifrq dim-level is > 1, `update_history_hifrq2!`. (Plant-hydraulics history is a
+separate `update_history_hydraulics!` call, driven from the hifrq driver step.)
 """
 function update_history_hifrq!(this::fates_history_interface_type, nc::Integer,
                                nsites::Integer, sites::AbstractVector,
@@ -2997,12 +3288,212 @@ end
 """
     update_history_hydraulics!(this, nc, nsites, sites, bc_in, dt_tstep)
 
-Plant-hydraulics high-frequency history update.
+Plant-hydraulics high-frequency history update. Faithful port of the Fortran
+`update_history_hydraulics` (F90 5625–5998), gated on `hlm_use_planthydro`.
 
-# TODO Batch 18-followup: not yet ported (requires the hydraulics state si_hydr/
-# co_hydr). The registry's hydro vars (group_hydr_*) are fully registered.
+Level-1 (`group_hydr_simple`): site water storage `ih_h2oveg_si` /
+`ih_h2oveg_hydro_err_si`, total root uptake `ih_rootuptake_si`, and the
+root-area-weighted soil column means `ih_rootwgt_soilvwc/_vwcsat/_matpot_si`
+(weighted by `l_aroot_layer * depth_frac * π * rs1²`; depth-weighted fallback when
+no roots).
+
+Level-2 (`group_hydr_complx`): per-soil-layer `ih_rootuptake_sl`,
+`ih_soilmatpot/_vwc/_vwcsat_sl`; the size×pft sap-flow/uptake fluxes
+`ih_sapflow/_rootuptake0/10/50/100_scpf` (× `ha_per_m2`); and the n-weighted
+size×pft cohort means `ih_errh2o/_tran/_iterh1/_iterh2_scpf` (fluxes × per-dt),
+`ih_ath/tth/sth/lth_scpf` (water content; `ag(1)`=leaf, `ag(2)`=stem, troot,
+v-weighted aroot mean), `ih_awp/twp/swp/lwp_scpf` and `ih_aflc/tflc/sflc/lflc_scpf`
+(potentials ×`pa_per_mpa` / conductivity fractions), `ih_btran_scpf`.
+
+`number_fraction = n / Σn(scpf)`; `iterh1/2` are averaged over the cohort count.
+The `si_hydr`/`co_hydr` objects are `nothing` until the plant-hydraulics Tier-B
+solve runs; the fill body is validated here with constructed state (the consumer
+branches populate live once `hlm_use_planthydro` is on).
 """
 function update_history_hydraulics!(this::fates_history_interface_type, nc, nsites, sites, bc_in, dt_tstep)
-    # TODO Batch 18-followup
+    hlm_use_planthydro[] == itrue || return nothing
+    hlm_hist_level_hifrq[] > 0 || return nothing
+
+    per_dt = 1.0 / dt_tstep
+    npft   = numpft[]
+    nsclass = nlevsclass[]
+
+    # ---- group_hydr_simple (site water + root-weighted soil means) ----
+    h_h2oveg      = this.hvars[this.ih[:ih_h2oveg_si]].r81d
+    h_h2oveg_err  = this.hvars[this.ih[:ih_h2oveg_hydro_err_si]].r81d
+    h_rootuptake  = this.hvars[this.ih[:ih_rootuptake_si]].r81d
+    h_rw_vwc      = this.hvars[this.ih[:ih_rootwgt_soilvwc_si]].r81d
+    h_rw_vwcsat   = this.hvars[this.ih[:ih_rootwgt_soilvwcsat_si]].r81d
+    h_rw_matpot   = this.hvars[this.ih[:ih_rootwgt_soilmatpot_si]].r81d
+
+    flush_hvars!(this, nc, group_hydr_simple)
+
+    do_complx = hlm_hist_level_hifrq[] > 1
+    if do_complx
+        h_rootuptake_sl = this.hvars[this.ih[:ih_rootuptake_sl]].r82d
+        h_soilmatpot_sl = this.hvars[this.ih[:ih_soilmatpot_sl]].r82d
+        h_soilvwc_sl    = this.hvars[this.ih[:ih_soilvwc_sl]].r82d
+        h_soilvwcsat_sl = this.hvars[this.ih[:ih_soilvwcsat_sl]].r82d
+        h_sapflow_scpf  = this.hvars[this.ih[:ih_sapflow_scpf]].r82d
+        h_rup0_scpf     = this.hvars[this.ih[:ih_rootuptake0_scpf]].r82d
+        h_rup10_scpf    = this.hvars[this.ih[:ih_rootuptake10_scpf]].r82d
+        h_rup50_scpf    = this.hvars[this.ih[:ih_rootuptake50_scpf]].r82d
+        h_rup100_scpf   = this.hvars[this.ih[:ih_rootuptake100_scpf]].r82d
+        h_errh2o_scpf   = this.hvars[this.ih[:ih_errh2o_scpf]].r82d
+        h_tran_scpf     = this.hvars[this.ih[:ih_tran_scpf]].r82d
+        h_iterh1_scpf   = this.hvars[this.ih[:ih_iterh1_scpf]].r82d
+        h_iterh2_scpf   = this.hvars[this.ih[:ih_iterh2_scpf]].r82d
+        h_ath_scpf      = this.hvars[this.ih[:ih_ath_scpf]].r82d
+        h_tth_scpf      = this.hvars[this.ih[:ih_tth_scpf]].r82d
+        h_sth_scpf      = this.hvars[this.ih[:ih_sth_scpf]].r82d
+        h_lth_scpf      = this.hvars[this.ih[:ih_lth_scpf]].r82d
+        h_awp_scpf      = this.hvars[this.ih[:ih_awp_scpf]].r82d
+        h_twp_scpf      = this.hvars[this.ih[:ih_twp_scpf]].r82d
+        h_swp_scpf      = this.hvars[this.ih[:ih_swp_scpf]].r82d
+        h_lwp_scpf      = this.hvars[this.ih[:ih_lwp_scpf]].r82d
+        h_aflc_scpf     = this.hvars[this.ih[:ih_aflc_scpf]].r82d
+        h_tflc_scpf     = this.hvars[this.ih[:ih_tflc_scpf]].r82d
+        h_sflc_scpf     = this.hvars[this.ih[:ih_sflc_scpf]].r82d
+        h_lflc_scpf     = this.hvars[this.ih[:ih_lflc_scpf]].r82d
+        h_btran_scpf    = this.hvars[this.ih[:ih_btran_scpf]].r82d
+    end
+
+    # root-area-weighted soil-column mean (shared by both levels).
+    function _soil_means!(site_hydr, bcin, io_si, nlevrhiz; per_layer_sl=false,
+                          h_mat=nothing, h_vwc=nothing, h_vwcsat=nothing)
+        mean_vwc = 0.0; mean_matpot = 0.0; mean_vwcsat = 0.0; areaweight = 0.0
+        use_roots = sum(site_hydr.l_aroot_layer) > nearzero
+        for j in 1:nlevrhiz
+            j_t = site_hydr.map_r2s[j, 1]
+            j_b = site_hydr.map_r2s[j, 2]
+            for j_bc in j_t:j_b
+                vwc     = bcin.h2o_liqvol_sl[j_bc]
+                psi     = psi_from_th(site_hydr.wrf_soil[j], vwc)
+                vwc_sat = bcin.watsat_sl[j_bc]
+                depth_frac = bcin.dz_sisl[j_bc] / site_hydr.dz_rhiz[j]
+                law = use_roots ?
+                    site_hydr.l_aroot_layer[j] * depth_frac * pi_const * site_hydr.rs1[j]^2 :
+                    bcin.dz_sisl[j_bc]
+                areaweight  += law
+                mean_vwc    += vwc * law
+                mean_vwcsat += vwc_sat * law
+                mean_matpot += psi * law
+                # the FATES history soil dimension may be narrower than the live
+                # column; clamp the per-layer write to the registered buffer width.
+                if per_layer_sl && j_bc <= size(h_mat, 2)
+                    h_mat[io_si, j_bc]    = psi * pa_per_mpa
+                    h_vwc[io_si, j_bc]    = vwc
+                    h_vwcsat[io_si, j_bc] = vwc_sat
+                end
+            end
+        end
+        return mean_vwc, mean_vwcsat, mean_matpot, areaweight
+    end
+
+    for s in 1:nsites
+        site = sites[s]
+        site.si_hydr === nothing && continue
+        site_hydr = site.si_hydr
+        bcin      = bc_in[s]
+        io_si     = site.h_gid
+        nlevrhiz  = site_hydr.nlevrhiz
+        nlevsoil  = bcin.nlevsoil
+
+        # ---- level-1 ----
+        zero_site_hvars!(this, site, group_hydr_simple)
+        h_h2oveg[io_si]     = site_hydr.h2oveg
+        h_h2oveg_err[io_si] = site_hydr.h2oveg_hydro_err
+        h_rootuptake[io_si] = sum(site_hydr.rootuptake_sl)
+
+        mv, mvs, mmp, aw = _soil_means!(site_hydr, bcin, io_si, nlevrhiz)
+        if aw > nearzero
+            h_rw_vwc[io_si]    = mv  / aw
+            h_rw_vwcsat[io_si] = mvs / aw
+            h_rw_matpot[io_si] = mmp / aw * pa_per_mpa
+        end
+
+        do_complx || continue
+
+        # ---- level-2 ----
+        zero_site_hvars!(this, site, group_hydr_complx)
+        for j in 1:min(nlevsoil, length(site_hydr.rootuptake_sl), size(h_rootuptake_sl, 2))
+            h_rootuptake_sl[io_si, j] = site_hydr.rootuptake_sl[j]
+        end
+        _soil_means!(site_hydr, bcin, io_si, nlevrhiz; per_layer_sl=true,
+                     h_mat=h_soilmatpot_sl, h_vwc=h_soilvwc_sl, h_vwcsat=h_soilvwcsat_sl)
+
+        # size×pft sap-flow / depth-resolved uptake [kg/ha/.. -> kg/m2/..]
+        for ipft in 1:npft, iscls in 1:nsclass
+            iscpf = (ipft - 1) * nsclass + iscls
+            h_sapflow_scpf[io_si, iscpf] = site_hydr.sapflow_scpf[iscls, ipft] * ha_per_m2
+            h_rup0_scpf[io_si, iscpf]    = site_hydr.rootuptake0_scpf[iscls, ipft] * ha_per_m2
+            h_rup10_scpf[io_si, iscpf]   = site_hydr.rootuptake10_scpf[iscls, ipft] * ha_per_m2
+            h_rup50_scpf[io_si, iscpf]   = site_hydr.rootuptake50_scpf[iscls, ipft] * ha_per_m2
+            h_rup100_scpf[io_si, iscpf]  = site_hydr.rootuptake100_scpf[iscls, ipft] * ha_per_m2
+        end
+
+        # normalization counters (n + cohort-count per scpf bin)
+        nplant_scpf  = zeros(nsclass * npft)
+        ncohort_scpf = zeros(nsclass * npft)
+        cpatch = site.oldest_patch
+        while cpatch !== nothing
+            ccohort = cpatch.shortest
+            while ccohort !== nothing
+                if !ccohort.isnew
+                    iscpf = ccohort.size_by_pft_class
+                    nplant_scpf[iscpf]  += ccohort.n
+                    ncohort_scpf[iscpf] += 1.0
+                end
+                ccohort = ccohort.taller
+            end
+            cpatch = cpatch.younger
+        end
+
+        # n-weighted cohort means / fluxes
+        cpatch = site.oldest_patch
+        while cpatch !== nothing
+            ccohort = cpatch.shortest
+            while ccohort !== nothing
+                ch = ccohort.co_hydr
+                if !ccohort.isnew && ch !== nothing
+                    iscpf = ccohort.size_by_pft_class
+                    nplant_scpf[iscpf] > nearzero || (ccohort = ccohort.taller; continue)
+                    nfrac      = ccohort.n / nplant_scpf[iscpf]
+                    nfrac_rate = nfrac * per_dt
+
+                    h_errh2o_scpf[io_si, iscpf] += ch.errh2o * nfrac_rate
+                    h_tran_scpf[io_si, iscpf]   += ch.qtop   * nfrac_rate
+                    if ncohort_scpf[iscpf] > nearzero
+                        h_iterh1_scpf[io_si, iscpf] += ch.iterh1 / ncohort_scpf[iscpf]
+                        h_iterh2_scpf[io_si, iscpf] += ch.iterh2 / ncohort_scpf[iscpf]
+                    end
+
+                    vsum = sum(ch.v_aroot_layer)
+                    mean_ath = vsum > nearzero ? sum(ch.th_aroot  .* ch.v_aroot_layer) / vsum : 0.0
+                    mean_awp = vsum > nearzero ? sum(ch.psi_aroot .* ch.v_aroot_layer) / vsum : 0.0
+                    mean_afl = vsum > nearzero ? sum(ch.ftc_aroot .* ch.v_aroot_layer) / vsum : 0.0
+
+                    h_ath_scpf[io_si, iscpf] += mean_ath     * nfrac
+                    h_tth_scpf[io_si, iscpf] += ch.th_troot  * nfrac
+                    h_sth_scpf[io_si, iscpf] += ch.th_ag[2]  * nfrac
+                    h_lth_scpf[io_si, iscpf] += ch.th_ag[1]  * nfrac
+
+                    h_awp_scpf[io_si, iscpf] += mean_awp      * nfrac * pa_per_mpa
+                    h_twp_scpf[io_si, iscpf] += ch.psi_troot  * nfrac * pa_per_mpa
+                    h_swp_scpf[io_si, iscpf] += ch.psi_ag[2]  * nfrac * pa_per_mpa
+                    h_lwp_scpf[io_si, iscpf] += ch.psi_ag[1]  * nfrac * pa_per_mpa
+
+                    h_aflc_scpf[io_si, iscpf] += mean_afl     * nfrac
+                    h_tflc_scpf[io_si, iscpf] += ch.ftc_troot * nfrac
+                    h_sflc_scpf[io_si, iscpf] += ch.ftc_ag[2] * nfrac
+                    h_lflc_scpf[io_si, iscpf] += ch.ftc_ag[1] * nfrac
+
+                    h_btran_scpf[io_si, iscpf] += ch.btran    * nfrac
+                end
+                ccohort = ccohort.taller
+            end
+            cpatch = cpatch.younger
+        end
+    end
     return nothing
 end

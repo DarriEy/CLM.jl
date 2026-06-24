@@ -327,6 +327,9 @@ function fates_hifrq_history_step!(inst::CLMInstances; dt_tstep::Real)
     fates.hist === nothing && return inst
     update_history_hifrq!(fates.hist, 1, fates.nsites, fates.sites,
                           fates.bc_in, fates.bc_out, dt_tstep)
+    # plant-hydraulics history (no-op unless hlm_use_planthydro is on + si_hydr built)
+    update_history_hydraulics!(fates.hist, 1, fates.nsites, fates.sites,
+                               fates.bc_in, dt_tstep)
     return inst
 end
 

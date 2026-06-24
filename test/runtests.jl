@@ -306,6 +306,13 @@ using CLM
     # the cohort's mass landing in the correct size/pft/age class bin.
     include("test_fates_history_dyn2.jl")
 
+    # FATES history buffer-fills Wave 3 (FINAL): constructs CNP-flux / fire (fuel +
+    # fire-weather + fire-mort) / tree-damage / plant-hydraulics (si_hydr+co_hydr)
+    # state on the cold-started site and asserts update_history_{nutrflux,dyn1,dyn2,
+    # hydraulics}! fill the remaining nutrflux / fire-dimensioned / damage-cross-tab /
+    # hydraulics handles with finite/physical values + correct size/pft/damage binning.
+    include("test_fates_history_w3.jl")
+
     # FATES first REAL multi-day clm_drv!-integrated run: cold-starts a 14-PFT
     # carbon-only site on a FATES-tagged single column and loops the actual driver
     # for 2 days (96 steps), firing the four per-timestep FATES hooks + the daily
