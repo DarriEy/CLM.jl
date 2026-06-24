@@ -1261,7 +1261,8 @@ function canopy_fluxes!(
         parsun_z_patch=Matrix{Float64}(undef,0,0), parsha_z_patch=Matrix{Float64}(undef,0,0),
         laisun_z_patch=Matrix{Float64}(undef,0,0), laisha_z_patch=Matrix{Float64}(undef,0,0),
         phs_froot_carbon=Float64[],
-        leaf_mr_vcm=0.015, overrides=CalibrationOverrides())
+        leaf_mr_vcm=0.015, overrides=CalibrationOverrides(),
+        fates_handle=nothing)
     return canopy_fluxes_core!(
         canopystate, energyflux, frictionvel, temperature, solarabs, soilstate,
         waterfluxbulk, waterstatebulk, waterdiagbulk, photosyns,
@@ -1278,7 +1279,7 @@ function canopy_fluxes!(
         is_tree_pft, is_shrub_pft, medlynintercept_pft, medlynslope_pft, crop_pft,
         z0v_Cr_pft, z0v_Cs_pft, z0v_c_pft, z0v_cw_pft, z0v_LAImax_pft,
         use_cn, use_lch4, use_c13, use_hydrstress, phs_froot_carbon, use_fates, use_luna,
-        z0param_method, grnd_ch4_cond_patch, forc_pc13o2_grc, leaf_mr_vcm)
+        z0param_method, grnd_ch4_cond_patch, forc_pc13o2_grc, leaf_mr_vcm, fates_handle)
 end
 
 # All-positional core (body lives here). Param groups: (1) state/forcing, then
@@ -1365,7 +1366,16 @@ function canopy_fluxes_core!(
         z0param_method  ::String = "ZengWang2007",
         grnd_ch4_cond_patch::AbstractVector{<:Real} = Float64[],
         forc_pc13o2_grc ::AbstractVector{<:Real} = Float64[],
-        leaf_mr_vcm     ::Real = 0.015)
+        leaf_mr_vcm     ::Real = 0.015,
+        # (4) FATES handle — non-differentiable, CPU-only sentinel.
+        # Threaded as a trailing optional positional defaulting to `nothing` so the
+        # default (!use_fates) path NEVER touches it and the Enzyme-compilable
+        # positional signature is unperturbed (mirrors the existing `nothing`
+        # sentinel pattern). Only the gated `use_fates` photosynthesis branch reads
+        # it. The expected concrete type is `fates_interface_type` (carries
+        # nsites/sites/bc_in/bc_out), but it is left untyped here to keep it out of
+        # the differentiated default path entirely.
+        fates_handle = nothing)
 
     np = length(bounds_patch)
     begp = first(bounds_patch)
@@ -1700,10 +1710,12 @@ function canopy_fluxes_core!(
 
         # --- Photosynthesis ---
         # Call photosynthesis for sunlit and shaded leaves to update rssun/rssha.
-        # FATES drives its own photosynthesis (FatesPlantRespPhotosynthDrive, called
-        # from the driver adjacent to this solve), so the standard CLM photosynthesis
-        # path is skipped under use_fates — mirrors CTSM canopy_fluxes calling
-        # clm_fates%wrap_photosynthesis instead of Photosynthesis for FATES columns.
+        # Under use_fates the standard CLM photosynthesis path is skipped and the
+        # FATES photosynthesis driver is run INSTEAD, IN-LOOP (gated block below) —
+        # mirroring CTSM canopy_fluxes calling clm_fates%wrap_photosynthesis from
+        # inside the leaf-temperature solve. The FATES branch reads `fates_handle`,
+        # which the default (!use_fates) path never touches, so this is byte-identical
+        # and Enzyme-compilable on the default path.
         if !use_fates && !isempty(nrad_patch) && !isempty(parsun_z_patch)
             # Build patch-indexed forc_pbot from column-level data
             # Use full mask (not reduced filterp) since photosynthesis uses mask_exposedvegp
@@ -1792,6 +1804,72 @@ function canopy_fluxes_core!(
                 overrides=overrides)
           end  # use_hydrstress
 
+        end
+
+        # --- FATES photosynthesis (in-loop, two-way coupling) ---
+        # CTSM calls clm_fates%wrap_photosynthesis from INSIDE the CanopyFluxes
+        # iterative solve (CanopyFluxesMod:1117), so the FATES stomatal resistance
+        # responds to the current leaf temperature each Newton iteration and feeds
+        # back into the energy balance below. We mirror that here: pack the FATES
+        # photosynthesis bc_in from the IN-LOOP canopy locals (t_veg, esat_tv=svpts,
+        # eair=eah, rb, dayl_factor), run FatesPlantRespPhotosynthDrive, and unpack
+        # rssun/rssha into `photosyns` so the next iteration's cf_energy_update! reads
+        # the FATES-driven resistances. The whole block is gated on `use_fates` AND a
+        # non-`nothing` `fates_handle`, so the differentiable default path never runs
+        # it (and `fates_handle` stays out of the Enzyme-compiled signature).
+        if use_fates && fates_handle !== nothing
+            fates = fates_handle
+            # FATES is CPU-only; pull the in-loop patch locals to the host once
+            # (bulk copies, no device scalar indexing) so the pack can index by patch.
+            t_veg_host = temperature.t_veg_patch isa Array ?
+                         temperature.t_veg_patch : Array(temperature.t_veg_patch)
+            svpts_host = svpts isa Array ? svpts : Array(svpts)
+            eah_host   = eah   isa Array ? eah   : Array(eah)
+            rb_host    = rb    isa Array ? rb    : Array(rb)
+            dayl_host  = dayl_factor isa Array ? dayl_factor : Array(dayl_factor)
+            fpbot_host = forc_pbot_col isa Array ? forc_pbot_col : Array(forc_pbot_col)
+            ft_host    = forc_t_col isa Array ? forc_t_col : Array(forc_t_col)
+            pco2_host  = forc_pco2_grc isa Array ? forc_pco2_grc : Array(forc_pco2_grc)
+            po2_host   = forc_po2_grc  isa Array ? forc_po2_grc  : Array(forc_po2_grc)
+            colidx_h   = col_data.gridcell isa Array ? col_data.gridcell : Array(col_data.gridcell)
+
+            s = 0
+            for c in 1:length(col_data.is_fates)
+                col_data.is_fates[c] || continue
+                s += 1
+                s <= fates.nsites || break
+                p = col_data.patchi[c] + 1   # vegetated patch (bare-ground at +0)
+                g = colidx_h[c]
+                bc = fates.bc_in[s]
+                # pack photosynthesis bc_in from the current in-loop leaf state.
+                bc.forc_pbot          = fpbot_host[c]
+                bc.cair_pa[1]         = pco2_host[g]
+                bc.oair_pa[1]         = po2_host[g]
+                bc.dayl_factor_pa[1]  = dayl_host[p]
+                bc.esat_tv_pa[1]      = svpts_host[p]   # esat(t_veg) — in-loop value
+                bc.eair_pa[1]         = eah_host[p]     # canopy-air vapor pressure
+                bc.rb_pa[1]           = rb_host[p]
+                bc.t_veg_pa[1]        = t_veg_host[p]   # CURRENT iterate leaf temp
+                bc.tgcm_pa[1]         = ft_host[c]
+                bc.filter_photo_pa[1] = 2               # 2 = "compute" branch
+            end
+
+            # Drive FATES plant-respiration / photosynthesis for all sites.
+            FatesPlantRespPhotosynthDrive(fates.nsites, fates.sites,
+                                          fates.bc_in, fates.bc_out, dtime)
+
+            # Unpack rssun/rssha back into photosyns so the energy balance below uses
+            # the FATES-driven stomatal resistance this iteration.
+            s = 0
+            for c in 1:length(col_data.is_fates)
+                col_data.is_fates[c] || continue
+                s += 1
+                s <= fates.nsites || break
+                p = col_data.patchi[c] + 1
+                bcout = fates.bc_out[s]
+                photosyns.rssun_patch[p] = bcout.rssun_pa[1]
+                photosyns.rssha_patch[p] = bcout.rssha_pa[1]
+            end
         end
 
         # --- Heat transfer conductances + Newton update of leaf temperature ---

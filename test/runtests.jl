@@ -322,6 +322,12 @@ using CLM
     # FATES demonstrably drove the column (laisha/rssun populated by the FATES path).
     include("test_fates_driver_run.jl")
 
+    # W4b in-solve FATES photosynthesis coupling: asserts FatesPlantRespPhotosynthDrive
+    # now runs INSIDE canopy_fluxes_core!'s leaf-temperature Newton iteration (two-way
+    # coupling) — the FATES bc_in t_veg_pa matches the converged in-loop leaf temp, and
+    # rssun/rssha are finite/positive. Default (!use_fates) path stays byte-identical.
+    include("test_fates_w4b_insolve.jl")
+
     # FATES live MODE exercises through the real clm_drv! loop: the SPITFIRE fire,
     # CNP nutrient-cycle, and tree-damage modes each cold-started + run >=2 days,
     # asserting finite + mass-conserving (C, and N/P for CNP) and that the mode

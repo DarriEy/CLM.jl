@@ -1007,49 +1007,30 @@ function clm_drv_core!(config::CLMDriverConfig,
                    fill(2.0, MXPFT + 1), fill(8.0, MXPFT + 1),
                    config.use_cn,
                    false, false, config.use_hydrstress, phs_froot_c,
-                   config.use_fates, config.use_luna)
+                   config.use_fates, config.use_luna,
+                   # Re-state the four default-only positionals between use_luna and
+                   # the FATES handle EXACTLY at their canopy_fluxes_core! defaults
+                   # (z0param_method / grnd_ch4_cond_patch / forc_pc13o2_grc /
+                   # leaf_mr_vcm) so the default path stays byte-identical — they are
+                   # only spelled out here to reach the trailing fates_handle slot.
+                   "ZengWang2007", Float64[], Float64[], 0.015,
+                   # W4b: FATES handle — threaded as the trailing optional positional.
+                   # In Fortran, FATES photosynthesis is called from INSIDE the
+                   # CanopyFluxes iterative solve (CanopyFluxesMod:1117). The gated
+                   # `use_fates` branch in canopy_fluxes_core! now runs
+                   # FatesPlantRespPhotosynthDrive each Newton iteration with the
+                   # current in-loop leaf temperature and unpacks rssun/rssha back
+                   # into photosyns (two-way coupling). The handle is `nothing` on the
+                   # non-FATES path, so the differentiable default signature is
+                   # untouched. This supersedes the former adjacent post-solve call.
+                   (config.use_fates ? inst.fates : nothing))
 
-    # W4b photosynthesis — FATES.
-    # NOTE ON PLACEMENT: in Fortran, FATES photosynthesis is called from *inside*
-    # the CanopyFluxes iterative solve (CanopyFluxesMod:1117). Integrating a call
-    # into the differentiable canopy_fluxes_core! in this single pass is too
-    # invasive (it would perturb the Enzyme-compilable positional signature and the
-    # validated SP/AD energy balance). Per the task's pragmatic guidance, the FATES
-    # photosynthesis driver is instead called in this gated block ADJACENT to (just
-    # after) the canopy solve, reading the post-solve canopy state (t_veg) and the
-    # forcing, and unpacking rssun/rssha into photosyns. This produces finite
-    # FATES stomatal resistances for the column; a future pass can move it inside
-    # the iterative solve for full two-way coupling.
+    # W4b photosynthesis — FATES: the per-timestep ("hifrq") history fill +
+    # plant-hydraulics step that used to follow the (now-removed) adjacent
+    # photosynthesis call. The photosynthesis solve itself is done IN-LOOP inside
+    # canopy_fluxes_core! above (use_fates branch); only the post-solve
+    # diagnostics + hydraulics remain here.
     if config.use_fates && inst.fates !== nothing
-        s = 0
-        for c in 1:length(col.is_fates)
-            col.is_fates[c] || continue
-            s += 1
-            s <= inst.fates.nsites || break
-            p = col.patchi[c] + 1
-            g = col.gridcell[c]
-            pbot   = a2l.forc_pbot_downscaled_col[c]
-            t_veg  = temp.t_veg_patch[p]
-            tgcm   = a2l.forc_t_downscaled_col[c]
-            _, esat_tv, _, _ = qsat(t_veg, pbot)
-            eair   = a2l.forc_vp_grc[g]
-            rb     = 50.0  # representative leaf boundary-layer resistance (s/m)
-            dl     = clamp((grc.dayl[g]^2) / (grc.max_dayl[g]^2), 0.01, 1.0)
-            fates_pack_bcin_photosynthesis!(inst; s=s, c=c, p=p,
-                forc_pbot=pbot, forc_pco2=a2l.forc_pco2_grc[g],
-                forc_po2=a2l.forc_po2_grc[g], t_veg=t_veg, tgcm=tgcm,
-                esat_tv=esat_tv, eair=eair, rb=rb, dayl_factor=dl)
-        end
-        FatesPlantRespPhotosynthDrive(inst.fates.nsites, inst.fates.sites,
-                                      inst.fates.bc_in, inst.fates.bc_out, dtime)
-        s = 0
-        for c in 1:length(col.is_fates)
-            col.is_fates[c] || continue
-            s += 1
-            s <= inst.fates.nsites || break
-            p = col.patchi[c] + 1
-            fates_unpack_bcout_photosynthesis!(inst; s=s, c=c, p=p)
-        end
         # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
         # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
         # the just-computed cohort per-step fluxes. Write-only; no-op until the
