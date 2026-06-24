@@ -152,6 +152,8 @@ Base.@kwdef mutable struct PftConFireBase{FT<:Real,
     fr_f     ::M = Matrix{Float64}(undef, 0, 0)  # fine root litter fractions (pft, litr)
     smpso    ::V = Float64[]  # soil water potential at full stomatal opening (mm)
     smpsc    ::V = Float64[]  # soil water potential at full stomatal closure (mm)
+    rswf_min ::V = Float64[]  # min relative soil water content for fire (Li2021/2024)
+    rswf_max ::V = Float64[]  # max relative soil water content for fire (Li2021/2024)
 end
 PftConFireBase{FT}(; kwargs...) where {FT<:Real} =
     PftConFireBase{FT, Vector{FT}, Matrix{FT}}(; kwargs...)
