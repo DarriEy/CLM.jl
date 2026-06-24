@@ -480,6 +480,92 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         ed_update_site(sites[s], bc_in[s], fates.bc_out[s], false)
     end
 
+    # ---- W6: history-output interface (registry + buffers) ----
+    # Each FATES site `s` writes into history-output slot `h_gid = s` (the Fortran
+    # `f2hmap` site<->io-column map). For our single-clump / nsites layout the io
+    # column space is just 1:nsites, so h_gid = s.
+    for s in 1:nsites
+        sites[s].h_gid = s
+    end
+    fates.hist = _build_fates_history_interface(nsites)
+
     inst.fates = fates
     return fates
 end
+
+"""
+    _build_fates_history_interface(nsites) -> fates_history_interface_type
+
+Instantiate and fully build the FATES history-output interface for `nsites`
+sites: dimension bookkeeping (`Init!`), per-thread bounds, the dim-kind maps
+(`assemble_history_output_types!`), and the two-pass variable registry +
+buffer allocation (`initialize_history_vars!`). Mirrors the Fortran host
+sequence (`fates_hist%Init` -> `SetThreadBoundsEach` -> `assemble_*` ->
+`initialize_history_vars`).
+
+The non-column dimension sizes are taken from the FATES class-count Refs
+(`nlevsclass[]`, `nlevage[]`, ...) populated by the param read / ctrlparms set;
+only the `column` (site) dimension drives the site-scalar buffers that the
+W1 fills (dyn1 core + hifrq1) actually write. The level-2 (scpf/scag/...) dims
+size the not-yet-filled dyn2/hifrq2 buffers.
+"""
+function _build_fates_history_interface(nsites::Integer)
+    # Resolve class-count dims with safe fallbacks (these Refs are set by the
+    # param read; guard against an unset Ref so the registry still allocates).
+    _dim(r::Ref{Int}, fallback::Int) = (r[] > 0 ? r[] : fallback)
+    npft   = _dim(numpft, 1)
+    nscls  = _dim(nlevsclass, 1)
+    nage   = _dim(nlevage, 1)
+    nheight= _dim(nlevheight, 1)
+    ncoage = _dim(nlevcoage, 1)
+    ndamage= _dim(nlevdamage, 1)
+    nelem  = max(num_elements[], 1)
+    ncwd_n = ncwd                  # coarse woody debris size classes (=4)
+    nfuel  = num_fuel_classes      # fuel size classes (=6)
+    ncan   = nclmax                # number of canopy layers
+    nlu    = n_landuse_cats
+
+    fb = fates_bounds_type(
+        column_begin = 1,                     column_end = nsites,
+        soil_begin = 1,                       soil_end = max(nlevsoil_hist(), 1),
+        sizepft_class_begin = 1,              sizepft_class_end = nscls * npft,
+        size_class_begin = 1,                 size_class_end = nscls,
+        coage_class_begin = 1,                coage_class_end = ncoage,
+        coagepf_class_begin = 1,              coagepf_class_end = ncoage * npft,
+        pft_class_begin = 1,                  pft_class_end = npft,
+        age_class_begin = 1,                  age_class_end = nage,
+        fuel_begin = 1,                       fuel_end = nfuel,
+        cwdsc_begin = 1,                      cwdsc_end = ncwd_n,
+        can_begin = 1,                        can_end = ncan,
+        cnlf_begin = 1,                       cnlf_end = ncan * nlevleaf,
+        cnlfpft_begin = 1,                    cnlfpft_end = ncan * nlevleaf * npft,
+        cdpf_begin = 1,                       cdpf_end = ndamage * nscls * npft,
+        cdsc_begin = 1,                       cdsc_end = ndamage * nscls,
+        cdam_begin = 1,                       cdam_end = ndamage,
+        sizeage_class_begin = 1,              sizeage_class_end = nscls * nage,
+        sizeagepft_class_begin = 1,           sizeagepft_class_end = nscls * nage * npft,
+        agepft_class_begin = 1,               agepft_class_end = nage * npft,
+        height_begin = 1,                     height_end = nheight,
+        elem_begin = 1,                       elem_end = nelem,
+        elpft_begin = 1,                      elpft_end = nelem * npft,
+        elcwd_begin = 1,                      elcwd_end = nelem * ncwd_n,
+        elage_begin = 1,                      elage_end = nelem * nage,
+        agefuel_begin = 1,                    agefuel_end = nage * nfuel,
+        clscpf_begin = 1,                     clscpf_end = ncan * nscls * npft,
+        landuse_begin = 1,                    landuse_end = nlu,
+        lulu_begin = 1,                       lulu_end = nlu * nlu,
+        lupft_begin = 1,                      lupft_end = nlu * npft,
+    )
+
+    hist = fates_history_interface_type()
+    Init!(hist, 1, fb)                       # dim bookkeeping (1 thread)
+    SetThreadBoundsEach!(hist, 1, fb)        # per-thread (clump) bounds
+    assemble_history_output_types!(hist)     # dim-kind maps + dim indices
+    initialize_history_vars!(hist)           # count + allocate + Init buffers
+    return hist
+end
+
+# Soil-layer dim for the history buffers. The site-scalar level-1 fills
+# (dyn1 core + hifrq1) don't index soil layers, so a size of 1 is sufficient
+# for them; the soil-dimensioned dyn2 vars are not yet filled.
+nlevsoil_hist() = 1

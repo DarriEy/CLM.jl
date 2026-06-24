@@ -86,6 +86,12 @@ Base.@kwdef mutable struct fates_interface_type <: AbstractFatesInterface
     bc_in::Vector{bc_in_type}     = bc_in_type[]
     bc_out::Vector{bc_out_type}   = bc_out_type[]
     bc_pconst::bc_pconst_type     = bc_pconst_type()
+    # FATES history-output interface (registry + buffers). Mirrors the Fortran
+    # host's `fates_hist` (a `fates_history_interface_type` owned by clm_fates).
+    # Instantiated + Init'd by clm_fates_init! when history is wired; the daily
+    # (update_history_dyn1!) and per-timestep (update_history_hifrq1!) fills write
+    # into its buffers. Write-only diagnostics — never read back into the sim.
+    hist::Union{fates_history_interface_type,Nothing} = nothing
 end
 
 # ===========================================================================

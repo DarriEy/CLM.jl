@@ -213,16 +213,20 @@ using CLM
                 co1 = CLM.fates_cohort_type(n = 1.0, dbh = 10.0)
                 co2 = CLM.fates_cohort_type(n = 2.0, dbh = 20.0)
                 co3 = CLM.fates_cohort_type(n = 3.0, dbh = 5.0)
-                co1.shorter = co2          # primary patch cohort list: co1 -> co2
+                # primary patch cohort list (doubly linked, as the real cold-start
+                # builds): co1 (tallest) <-> co2 (shortest). update_history_dyn1!
+                # walks shortest -> taller, matching Fortran.
+                co1.shorter = co2
+                co2.taller  = co1
 
                 p_primary = CLM.fates_patch_type(
                     land_use_label = 1, area = 6000.0,
                     total_canopy_area = 6000.0, total_tree_area = 4000.0,
-                    tallest = co1)
+                    tallest = co1, shortest = co2)
                 p_secondary = CLM.fates_patch_type(
                     land_use_label = CLM.secondaryland, area = 4000.0,
                     total_canopy_area = 4000.0, total_tree_area = 1000.0,
-                    tallest = co3)
+                    tallest = co3, shortest = co3)
                 # age order: oldest -> younger. Make primary oldest.
                 p_primary.younger = p_secondary
 

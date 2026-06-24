@@ -301,6 +301,32 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p)
     end
 
+    # 6. fill the daily ("dynamics") history buffers from the freshly-advanced
+    #    site/patch/cohort state. Mirrors the Fortran host's `update_history_dyn`
+    #    call after `dynamics_driv`. Write-only diagnostics; gated on the history
+    #    interface having been built (clm_fates_init!) — a no-op otherwise.
+    if fates.hist !== nothing
+        update_history_dyn!(fates.hist, 1, fates.nsites, fates.sites, fates.bc_in)
+    end
+
+    return inst
+end
+
+"""
+    fates_hifrq_history_step!(inst; dt_tstep)
+
+Fill the high-frequency ("hifrq", per-timestep) FATES history buffers from the
+current per-step cohort/patch carbon-flux + radiation state. Mirrors the Fortran
+host's `update_history_hifrq` call in the per-timestep path. Write-only
+diagnostics; a no-op when the history interface has not been built. `dt_tstep`
+is the model timestep length [s]. Gated by the caller behind `config.use_fates`.
+"""
+function fates_hifrq_history_step!(inst::CLMInstances; dt_tstep::Real)
+    fates = inst.fates
+    fates === nothing && return inst
+    fates.hist === nothing && return inst
+    update_history_hifrq!(fates.hist, 1, fates.nsites, fates.sites,
+                          fates.bc_in, fates.bc_out, dt_tstep)
     return inst
 end
 
