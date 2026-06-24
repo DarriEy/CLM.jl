@@ -275,6 +275,10 @@ using CLM
     include("test_fates_history.jl")
     include("test_fates_restart.jl")
     include("test_fates_interface.jl")
+    # Real FATES param-file reader: read_fates_params! parses the official FATES
+    # default parameter file (data/fates/fates_params_default.cdl) and populates
+    # every FATES param global; sample values match the CDL; cold-start finite.
+    include("test_fates_params_reader.jl")
     # W1+W2 live-driver wiring spike: cold-start a single FATES site + attach to
     # CLMInstances + prove the AD-dual-copy / GPU-adapt ownership-model skip.
     include("test_fates_coldstart_spike.jl")
@@ -283,6 +287,12 @@ using CLM
     # radiation (sun/shade + canopy albedo), btran, and photosynthesis, plus the
     # gated driver-branch column<->site mapping.
     include("test_fates_driver_hooks.jl")
+
+    # FATES live-driver wiring W5 — the daily demographic step. Cold-starts a
+    # carbon-only site, drives ed_ecosystem_dynamics + ed_update_site + the final
+    # TotalBalanceCheck through fates_daily_dynamics_step! (the gated driver hook),
+    # and asserts mass conservation + finite/physical cohort/patch/canopy state.
+    include("test_fates_daily_dynamics.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

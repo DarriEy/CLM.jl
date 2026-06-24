@@ -29,7 +29,11 @@ using CLM
     old_nlevca   = CLM.nlevcoage[]
     old_nlevage  = CLM.nlevage[]
     old_nlevdam  = CLM.nlevdamage[]
+    old_nlevhgt  = CLM.nlevheight[]
     old_sfp      = CLM.SFParams[]
+    old_edparams = CLM.EDParams[]
+    old_edpft    = CLM.EDPftvarcon_inst[]
+    old_paramd   = CLM.ParamDerived[]
     old_restart  = CLM.hlm_is_restart[]
     old_nocomp   = CLM.hlm_use_nocomp[]
     old_biogeog  = CLM.hlm_use_fixed_biogeog[]
@@ -50,7 +54,6 @@ using CLM
     old_nlevmaxu = CLM.varpar.nlevmaxurbgrnd
 
     try
-        numpft   = 2
         nlevsoil = 3
         nlevdecomp = 1
 
@@ -81,7 +84,8 @@ using CLM
         pveg = col.patchi[cveg] + 1   # vegetated patch = 2
 
         # ---- attach a cold-started carbon-only FATES site ----
-        fates = CLM.clm_fates_init!(inst; nsites = 1, numpft_in = numpft,
+        # PFT count now comes from the real FATES param file (numpft_in omitted).
+        fates = CLM.clm_fates_init!(inst; nsites = 1,
                                     nlevsoil = nlevsoil, nlevdecomp = nlevdecomp)
         @test inst.fates !== nothing
         @test inst.fates.nsites == 1
@@ -237,7 +241,11 @@ using CLM
         CLM.nlevcoage[]                   = old_nlevca
         CLM.nlevage[]                     = old_nlevage
         CLM.nlevdamage[]                  = old_nlevdam
+        CLM.nlevheight[]                  = old_nlevhgt
         CLM.SFParams[]                    = old_sfp
+        CLM.EDParams[]                    = old_edparams
+        CLM.EDPftvarcon_inst[]            = old_edpft
+        CLM.ParamDerived[]                = old_paramd
         CLM.hlm_is_restart[]              = old_restart
         CLM.hlm_use_nocomp[]              = old_nocomp
         CLM.hlm_use_fixed_biogeog[]       = old_biogeog
