@@ -639,7 +639,7 @@ function clm_drv_core!(config::CLMDriverConfig,
         # full IrrigationInitCold through clm_initialize!). Uses the default
         # Clapp-Hornberger SWRC and the PFT irrigated flag; surface method left UNSET
         # so set_irrig_method! falls back to the default (drip). No-op when irrigate off.
-        if config.irrigate && irr.irrig_nsteps_per_day == 0
+        if config.irrigate && !isempty(irr.irrig_method_patch) && !isempty(pftcon.irrigated) && irr.irrig_nsteps_per_day == 0
             _irr_swrc = SoilWaterRetentionCurveClappHornberg1978()
             ng_irr = isempty(bc_grc) ? 0 : length(bc_grc)
             npft_irr = length(pftcon.irrigated)
@@ -855,8 +855,9 @@ function clm_drv_core!(config::CLMDriverConfig,
     # previous step (calc_irrigation_needed!) into surface/groundwater withdrawal +
     # the per-patch drip/sprinkler application fluxes consumed by canopy interception
     # downstream. calc_irrigation_fluxes! internally runs the bulk-withdrawal and
+    # (guard: !isempty(irrig_method_patch) — no-op on an unsized instance, like ch4)
     # application-flux sub-steps. No-op until n_irrig_steps_left_patch is set.
-    if config.irrigate
+    if config.irrigate && !isempty(irr.irrig_method_patch) && !isempty(pftcon.irrigated)
         calc_irrigation_fluxes!(irr, sh, ss, wfb, col, pch,
                                 filt.soilc, filt.soilp,
                                 bc_col, bc_patch, varpar.nlevsoi, dtime)
@@ -1209,7 +1210,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # local solar time (seconds since midnight) at each patch's longitude, mirroring
     # the Fortran get_local_time(londeg, offset=0). volr (river volume) is only used
     # when limit_irrigation_if_rof_enabled — passed as zeros (ROF limiting off).
-    if config.irrigate
+    if config.irrigate && !isempty(irr.irrig_method_patch) && !isempty(pftcon.irrigated)
         local_time_sec_patch = zeros(Int, length(pch.gridcell))
         for p in bc_patch
             g = pch.gridcell[p]
