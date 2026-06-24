@@ -34,10 +34,17 @@
 # now also pack/unpack the cohort diagnostic+mortality scalars (R1), patch
 # fuel/scorch + ground-albedo + site hydraulics scalars (R2), the patch litter
 # blocks (R4), and the site demographic/mortality/damage/flux-diagnostic arrays
-# (R5), and update_3dpatch_radiation! re-derives the 3D albedo BC (R3). Still
-# deferred (`# TODO Batch 18-followup`): R6 running means, R7 cohort PRT pools,
-# R8 cohort hydro — those need running-mean accessors / cohort-object init not
-# yet wired standalone.
+# (R5), and update_3dpatch_radiation! re-derives the 3D albedo BC (R3).
+# Batch-18-followup R6/R7/R8 complete the round-trip: R6 packs/unpacks the
+# patch running means (tveg24 / tveg_lpa / tveg_longterm via the ported
+# Get/SetRMeanRestartVar accessors) + the site disturbance-rate diagnostic; R7
+# packs/unpacks the per-cohort PRT (PARTEH) pools (val + turnover/net_alloc/
+# burned) — the restart cohort's `prt` is re-created by InitPRTObject! in
+# create_patchcohort_structure!, then InitPRTBoundaryConditions /
+# UpdateCohortBioPhysRates finalize it on unpack; R8 packs/unpacks the cohort
+# hydraulics (th_ag/th_troot/th_aroot/errh2o) gated on hlm_use_planthydro — the
+# restart cohort's `co_hydr` is re-allocated by InitHydrCohort and finalized by
+# UpdatePlantPsiFTCFromTheta!. The full restart fill is now complete.
 #
 # Deps: FatesRestartVariableType.jl (fates_restart_variable_type, Init!/Flush!),
 #       FatesIODimensionsMod (fates_io_dimension_type, fates_bounds_type,
@@ -644,6 +651,26 @@ function SetCohortRealVector(this::fates_restart_interface_type, state_vector::A
     return nothing
 end
 
+# Running-mean restart accessors. A running-mean variable is registered as a
+# TRIPLE (`_cmean`, `_lmean`, `_cindex`) starting at `ir_var_index` (see
+# `DefineRMeanRestartVar!`); these read/write the three payload slots at one
+# position. Mirrors the Fortran `GetRMeanRestartVar` / `SetRMeanRestartVar`.
+function GetRMeanRestartVar(this::fates_restart_interface_type, rmean_var::rmean_type,
+                            ir_var_index::Integer, position_index::Integer)
+    rmean_var.c_mean  = this.rvars[ir_var_index].r81d[position_index]
+    rmean_var.l_mean  = this.rvars[ir_var_index + 1].r81d[position_index]
+    rmean_var.c_index = round(Int, this.rvars[ir_var_index + 2].r81d[position_index])
+    return nothing
+end
+
+function SetRMeanRestartVar(this::fates_restart_interface_type, rmean_var::rmean_type,
+                            ir_var_index::Integer, position_index::Integer)
+    this.rvars[ir_var_index].r81d[position_index]     = rmean_var.c_mean
+    this.rvars[ir_var_index + 1].r81d[position_index] = rmean_var.l_mean
+    this.rvars[ir_var_index + 2].r81d[position_index] = Float64(rmean_var.c_index)
+    return nothing
+end
+
 # Real / int payload accessors (1-based io_idx already)
 @inline _setr!(this, irname, idx, val) = (this.rvars[this.ir[irname]].r81d[idx] = Float64(val); nothing)
 @inline _seti!(this, irname, idx, val) = (this.rvars[this.ir[irname]].int1d[idx] = round(Int, val); nothing)
@@ -657,6 +684,63 @@ end
 @inline _getr_off(this, irname, off, idx) = this.rvars[this.ir[irname] + off].r81d[idx]
 
 # =====================================================================================
+# R7: cohort PRT pool pack & unpack.
+#
+# The PRT (PARTEH) pools are registered (in `DefinePRTRestartVars!`) as a flat run
+# of restart vars STARTING just after `this.ir_prt_base`, in the order
+# (val, turnover, net_alloc, burned) per discrete position, per PRT variable —
+# exactly the Fortran `ir_prt_var = ir_prt_base; do i_var; do i_pos; +1 each`.
+# These helpers walk that same order so pack/unpack address the identical slots.
+# =====================================================================================
+
+"""
+    _pack_cohort_prt!(this, ccohort, io_idx_co)
+
+Pack one cohort's PRT pools (instantaneous `val` + the `turnover`/`net_alloc`/
+`burned` fluxes, per discrete position, per PRT variable) into the flat restart
+vectors at cohort slot `io_idx_co`. Mirrors the Fortran PRT block of
+`set_restart_vectors`.
+"""
+function _pack_cohort_prt!(this::fates_restart_interface_type, ccohort, io_idx_co::Integer)
+    pg = prt_global[]
+    pg === nothing && return nothing
+    ir_prt_var = this.ir_prt_base
+    @inbounds for i_var in 1:pg.num_vars
+        v = ccohort.prt.variables[i_var]
+        for i_pos in 1:pg.state_descriptor[i_var].num_pos
+            ir_prt_var += 1; this.rvars[ir_prt_var].r81d[io_idx_co] = v.val[i_pos]
+            ir_prt_var += 1; this.rvars[ir_prt_var].r81d[io_idx_co] = v.turnover[i_pos]
+            ir_prt_var += 1; this.rvars[ir_prt_var].r81d[io_idx_co] = v.net_alloc[i_pos]
+            ir_prt_var += 1; this.rvars[ir_prt_var].r81d[io_idx_co] = v.burned[i_pos]
+        end
+    end
+    return nothing
+end
+
+"""
+    _unpack_cohort_prt!(this, ccohort, io_idx_co)
+
+Read one cohort's PRT pools back into `ccohort.prt` (symmetric to
+[`_pack_cohort_prt!`](@ref)). The cohort's `prt` object must already be allocated
+(via `InitPRTObject!`) before this is called.
+"""
+function _unpack_cohort_prt!(this::fates_restart_interface_type, ccohort, io_idx_co::Integer)
+    pg = prt_global[]
+    pg === nothing && return nothing
+    ir_prt_var = this.ir_prt_base
+    @inbounds for i_var in 1:pg.num_vars
+        v = ccohort.prt.variables[i_var]
+        for i_pos in 1:pg.state_descriptor[i_var].num_pos
+            ir_prt_var += 1; v.val[i_pos]       = this.rvars[ir_prt_var].r81d[io_idx_co]
+            ir_prt_var += 1; v.turnover[i_pos]  = this.rvars[ir_prt_var].r81d[io_idx_co]
+            ir_prt_var += 1; v.net_alloc[i_pos] = this.rvars[ir_prt_var].r81d[io_idx_co]
+            ir_prt_var += 1; v.burned[i_pos]    = this.rvars[ir_prt_var].r81d[io_idx_co]
+        end
+    end
+    return nothing
+end
+
+# =====================================================================================
 # R5: site demographic / mortality / damage / flux-diag array pack & unpack.
 #
 # All of these site-level arrays are stored in the COHORT-vector address space,
@@ -664,7 +748,7 @@ end
 # BEFORE the per-patch walk advances it), each with its OWN independent cursor.
 # The pure-scalar site fields are stored at `io_idx_si`. Mirrors the Fortran
 # `set_restart_vectors` / `get_restart_vectors` site loop exactly (the running-mean
-# `disturbance_rates` block is a Batch-18-followup-R6 item — left out here).
+# `disturbance_rates` block — R6 — is also packed/unpacked here).
 # =====================================================================================
 
 """
@@ -745,6 +829,20 @@ function _pack_site_diagnostics!(this::fates_restart_interface_type, site,
         _setr!(this, :ir_seed_in_sift, io_idx_si_pft, site.seed_in[i_pft])
         _setr!(this, :ir_seed_out_sift, io_idx_si_pft, site.seed_out[i_pft])
         io_idx_si_pft += 1
+    end
+
+    # --- R6: site-level disturbance-rate diagnostic (lu_donor x lu_receiver x
+    #     dist_type, packed donor-major). Registered as a running-mean triple but
+    #     only the base (`_cmean`) slot carries the value (Fortran rio_ pointer). ---
+    io_idx_si_luludi = io_idx_base
+    for i_lu_donor in 1:n_landuse_cats
+        for i_lu_receiver in 1:n_landuse_cats
+            for i_dist in 1:N_DIST_TYPES
+                _setr!(this, :ir_disturbance_rates_siluludi, io_idx_si_luludi,
+                       site.disturbance_rates[i_dist, i_lu_donor, i_lu_receiver])
+                io_idx_si_luludi += 1
+            end
+        end
     end
 
     # --- flux diagnostics + mass balance (per element), non-SP ---
@@ -932,6 +1030,18 @@ function _unpack_site_diagnostics!(this::fates_restart_interface_type, site,
         site.seed_in[i_pft] = _getr(this, :ir_seed_in_sift, io_idx_si_pft)
         site.seed_out[i_pft] = _getr(this, :ir_seed_out_sift, io_idx_si_pft)
         io_idx_si_pft += 1
+    end
+
+    # --- R6: site-level disturbance-rate diagnostic (symmetric to pack) ---
+    io_idx_si_luludi = io_idx_base
+    for i_lu_donor in 1:n_landuse_cats
+        for i_lu_receiver in 1:n_landuse_cats
+            for i_dist in 1:N_DIST_TYPES
+                site.disturbance_rates[i_dist, i_lu_donor, i_lu_receiver] =
+                    _getr(this, :ir_disturbance_rates_siluludi, io_idx_si_luludi)
+                io_idx_si_luludi += 1
+            end
+        end
     end
 
     if hlm_use_sp[] == ifalse
@@ -1164,9 +1274,9 @@ the unpack. Mirrors the Fortran `set_restart_vectors`.
 Packs the demographic skeleton + load-bearing fields, plus the B18-followup
 fill-groups: R1 (cohort diagnostic scalars + mortality fluxes), R2 (patch
 fuel/scorch + radiation/albedo + site hydraulics scalars), R4 (patch litter
-blocks), and R5 (site demographic/mortality/damage/flux-diag arrays). Still
-deferred: R6 (running means), R7 (cohort PRT pools), R8 (cohort hydro) — those
-need cohort-object init / running-mean accessors not yet wired standalone.
+blocks), R5 (site demographic/mortality/damage/flux-diag arrays), R6 (patch
+running means + site disturbance rates), R7 (cohort PRT pools) and R8 (cohort
+hydraulics, gated on `hlm_use_planthydro`). The restart fill is complete.
 """
 function set_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                               nsites::Integer, sites::AbstractVector{<:ed_site_type})
@@ -1252,8 +1362,20 @@ function set_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                 _setr!(this, :ir_lmort_infra_co, io_idx_co, ccohort.lmort_infra)
                 _setr!(this, :ir_ddbhdt_co, io_idx_co, ccohort.ddbhdt)
                 _setr!(this, :ir_resp_tstep_co, io_idx_co, ccohort.resp_tstep)
-                # TODO Batch 18-followup: PRT pool block (R7), cohort hydro block (R8),
-                # year_net_up vector (needs the EDAccumulateFluxes path live).
+
+                # --- R7: PRT pool block (instantaneous state + 3 fluxes per pos) ---
+                _pack_cohort_prt!(this, ccohort, io_idx_co)
+
+                # --- R8: cohort hydraulics (gated; th_*/errh2o) ---
+                if hlm_use_planthydro[] == itrue && ccohort.co_hydr !== nothing
+                    ch = ccohort.co_hydr
+                    SetCohortRealVector(this, ch.th_ag, n_hypool_ag,
+                                        this.ir[:ir_hydro_th_ag_covec], io_idx_co)
+                    SetCohortRealVector(this, ch.th_aroot, site.si_hydr.nlevrhiz,
+                                        this.ir[:ir_hydro_th_aroot_covec], io_idx_co)
+                    _setr!(this, :ir_hydro_th_troot, io_idx_co, ch.th_troot)
+                    _setr!(this, :ir_hydro_errh2o, io_idx_co, ch.errh2o)
+                end
 
                 io_idx_co += 1
                 ccohort = ccohort.taller
@@ -1296,7 +1418,11 @@ function set_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
 
             # --- R4: patch litter blocks (per element nested loops) ---
             _pack_patch_litter!(this, site, cpatch, io_idx_co_1st)
-            # TODO Batch 18-followup: patch running means (R6).
+
+            # --- R6: patch running means (24-hr veg temp + photo-acclim EMAs) ---
+            cpatch.tveg24        === nothing || SetRMeanRestartVar(this, cpatch.tveg24,        this.ir[:ir_tveg24_pa],        io_idx_co_1st)
+            cpatch.tveg_lpa      === nothing || SetRMeanRestartVar(this, cpatch.tveg_lpa,      this.ir[:ir_tveglpa_pa],       io_idx_co_1st)
+            cpatch.tveg_longterm === nothing || SetRMeanRestartVar(this, cpatch.tveg_longterm, this.ir[:ir_tveglongterm_pa],  io_idx_co_1st)
 
             io_idx_co_1st += maxperpatch
             cpatch = cpatch.younger
@@ -1322,9 +1448,12 @@ Read only the `fates_PatchesPerSite` (ir_npatch_si) and `fates_CohortsPerPatch`
 (ir_ncohort_pa) counts and allocate that many patches per site / cohorts per
 patch, building the age-ordered patch list (oldest = idx 1) and the
 height-ordered cohort list (first created = tallest, last = shortest). Mirrors
-the Fortran `create_patchcohort_structure` skeleton-build (without the HLM
-boundary-condition init_site_vars / InitPRTObject / InitHydrCohort calls, which
-have no standalone equivalent yet — `# TODO:` below).
+the Fortran `create_patchcohort_structure` skeleton-build. Each freshly-created
+cohort gets its PRT (PARTEH) object re-created via `InitPRTObject!`, and — when
+`hlm_use_planthydro` is on — its hydraulics object via `InitHydrCohort`, so the
+R7/R8 pools have somewhere to land on unpack. (The HLM `init_site_vars` /
+`zero_site` boundary-condition setup has no standalone equivalent yet — `# TODO:`
+below.)
 """
 function create_patchcohort_structure!(this::fates_restart_interface_type, nc::Integer,
                                        nsites::Integer, sites::AbstractVector{<:ed_site_type};
@@ -1372,7 +1501,15 @@ function create_patchcohort_structure!(this::fates_restart_interface_type, nc::I
                     prev_cohort.shorter    = new_cohort_node
                 end
                 newp.shortest = new_cohort_node        # every new cohort becomes shortest
-                # TODO: InitPRTObject(new_cohort.prt); if hydro InitHydrCohort(...)
+
+                # Initialize the PARTEH (PRT) object so the unpack can fill its
+                # pools (restart cohorts start with `prt === nothing`). Then, if
+                # plant hydraulics is on, allocate the per-cohort hydro object.
+                new_cohort_node.prt = InitPRTObject!()
+                if hlm_use_planthydro[] == itrue
+                    InitHydrCohort(site, new_cohort_node)
+                end
+
                 prev_cohort = new_cohort_node
             end
 
@@ -1408,10 +1545,10 @@ round-trip counts (`cohortsperpatch == fates_CohortsPerPatch` per patch,
 `patchespersite == fates_PatchesPerSite` per site). Mirrors the Fortran
 `get_restart_vectors` for the demographic skeleton + load-bearing fields.
 
-Reads back the demographic skeleton + the B18-followup R1/R2/R4/R5 fill-groups
-symmetric to the pack side. Still deferred: R6 running means, R7 cohort PRT
-pools, R8 cohort hydro (plus the Fortran InitPRTBoundaryConditions /
-UpdateCohortBioPhysRates / UpdatePlantPsiFTCFromTheta finalizers).
+Reads back the demographic skeleton + the B18-followup R1/R2/R4/R5/R6/R7/R8
+fill-groups symmetric to the pack side, including the PRT (R7) finalizers
+`InitPRTBoundaryConditions` / `UpdateCohortBioPhysRates` and the hydraulics (R8)
+finalizer `UpdatePlantPsiFTCFromTheta!`.
 """
 function get_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                               nsites::Integer, sites::AbstractVector{<:ed_site_type})
@@ -1493,8 +1630,27 @@ function get_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
                 ccohort.lmort_infra      = _getr(this, :ir_lmort_infra_co, io_idx_co)
                 ccohort.ddbhdt           = _getr(this, :ir_ddbhdt_co, io_idx_co)
                 ccohort.resp_tstep       = _getr(this, :ir_resp_tstep_co, io_idx_co)
-                # TODO Batch 18-followup: PRT pool block (R7), cohort hydro block (R8),
-                # InitPRTBoundaryConditions / UpdateCohortBioPhysRates finalizers.
+
+                # --- R7: PRT pool block (the cohort.prt object was re-created by
+                #     create_patchcohort_structure!'s InitPRTObject! call) ---
+                _unpack_cohort_prt!(this, ccohort, io_idx_co)
+
+                # PRT finalizers: re-point boundary conditions and refresh the
+                # cohort biophysical rates now that pft + pools are filled.
+                InitPRTBoundaryConditions(ccohort)
+                UpdateCohortBioPhysRates(ccohort)
+
+                # --- R8: cohort hydraulics (gated; th_*/errh2o + psi/ftc refresh) ---
+                if hlm_use_planthydro[] == itrue && ccohort.co_hydr !== nothing
+                    ch = ccohort.co_hydr
+                    GetCohortRealVector(this, ch.th_ag, n_hypool_ag,
+                                        this.ir[:ir_hydro_th_ag_covec], io_idx_co)
+                    GetCohortRealVector(this, ch.th_aroot, site.si_hydr.nlevrhiz,
+                                        this.ir[:ir_hydro_th_aroot_covec], io_idx_co)
+                    ch.th_troot = _getr(this, :ir_hydro_th_troot, io_idx_co)
+                    ch.errh2o   = _getr(this, :ir_hydro_errh2o, io_idx_co)
+                    UpdatePlantPsiFTCFromTheta!(ccohort, site.si_hydr)
+                end
 
                 io_idx_co += 1
                 ccohort = ccohort.taller
@@ -1545,7 +1701,12 @@ function get_restart_vectors!(this::fates_restart_interface_type, nc::Integer,
 
             # --- R4: patch litter blocks ---
             _unpack_patch_litter!(this, site, cpatch, io_idx_co_1st)
-            # TODO Batch 18-followup: patch running means (R6).
+
+            # --- R6: patch running means (the rmean_type instances were created by
+            #     Create! during create_patchcohort_structure!) ---
+            cpatch.tveg24        === nothing || GetRMeanRestartVar(this, cpatch.tveg24,        this.ir[:ir_tveg24_pa],        io_idx_co_1st)
+            cpatch.tveg_lpa      === nothing || GetRMeanRestartVar(this, cpatch.tveg_lpa,      this.ir[:ir_tveglpa_pa],       io_idx_co_1st)
+            cpatch.tveg_longterm === nothing || GetRMeanRestartVar(this, cpatch.tveg_longterm, this.ir[:ir_tveglongterm_pa],  io_idx_co_1st)
 
             io_idx_co_1st += maxperpatch
             cpatch = cpatch.younger

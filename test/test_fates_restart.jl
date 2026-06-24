@@ -306,6 +306,7 @@ end
     old_maxps    = CLM.fates_maxElementsPerSite[]
     old_nlevsc   = CLM.nlevsclass[]
     old_nlevca   = CLM.nlevcoage[]
+    old_nleafage = CLM.nleafage[]
     old_sfp      = CLM.SFParams[]
     old_edp      = CLM.EDParams[]
     old_pd       = CLM.ParamDerived[]
@@ -314,6 +315,9 @@ end
         npft = _setup_restart_pft!()
         ipft = 1
         CLM.InitPRTGlobalAllometricCarbon!()
+        # single leaf-age class (matches the (npft,1)-sized biophys rate params);
+        # required by UpdateCohortBioPhysRates, run as a PRT restart finalizer.
+        CLM.nleafage[] = 1
 
         CLM.num_elements[] = 1
         empty!(CLM.element_list)
@@ -488,6 +492,43 @@ end
                 end
             end
 
+            # --- R7: PRT pool fluxes (turnover / net_alloc / burned) seed values.
+            #     `_seed_prt_r` already filled the instantaneous `val` pools; here
+            #     we add unique non-zero fluxes so the round-trip exercises them. -
+            pg = CLM.prt_global[]
+            for (i, c) in enumerate(all_src_coh)
+                for i_var in 1:pg.num_vars
+                    v = c.prt.variables[i_var]
+                    for i_pos in 1:pg.state_descriptor[i_var].num_pos
+                        v.turnover[i_pos]  = 0.001 * i * (10 * i_var + i_pos)
+                        v.net_alloc[i_pos] = 0.002 * i * (10 * i_var + i_pos)
+                        v.burned[i_pos]    = 0.003 * i * (10 * i_var + i_pos)
+                    end
+                end
+            end
+            # snapshot the full PRT pool state per cohort (keyed by gpp_acc identity),
+            # flattened to a Float64 vector so `≈` compares element-wise.
+            _prt_snapshot(c) = Float64[x for v in c.prt.variables
+                                         for ip in eachindex(v.val)
+                                         for x in (v.val[ip], v.turnover[ip], v.net_alloc[ip], v.burned[ip])]
+            src_prt = Dict(c.gpp_acc => _prt_snapshot(c) for c in all_src_coh)
+
+            # --- R6: patch running means + site disturbance rates (seed values) -
+            for (k, p) in enumerate((pA, pB))
+                p.tveg24.c_mean = 290.0 + k;  p.tveg24.l_mean = 291.0 + k;  p.tveg24.c_index = 10 + k
+                p.tveg_lpa.c_mean = 280.0 + k; p.tveg_lpa.l_mean = 281.0 + k; p.tveg_lpa.c_index = 20 + k
+                p.tveg_longterm.c_mean = 270.0 + k; p.tveg_longterm.l_mean = 271.0 + k; p.tveg_longterm.c_index = 30 + k
+            end
+            site.disturbance_rates = [Float64(100 * d + 10 * ld + lr)
+                                      for d in 1:CLM.N_DIST_TYPES,
+                                          ld in 1:CLM.n_landuse_cats,
+                                          lr in 1:CLM.n_landuse_cats]
+            src_disturbance = copy(site.disturbance_rates)
+            src_tveg = [(p.tveg24.c_mean, p.tveg24.l_mean, p.tveg24.c_index,
+                         p.tveg_lpa.c_mean, p.tveg_lpa.l_mean, p.tveg_lpa.c_index,
+                         p.tveg_longterm.c_mean, p.tveg_longterm.l_mean, p.tveg_longterm.c_index)
+                        for p in (pA, pB)]
+
             # capture source demographic snapshot
             src_patches = _patch_list(site)
             @test length(src_patches) == 2
@@ -609,6 +650,30 @@ end
             @test site2.iflux_balance[1].iflux_liveveg ≈ site.iflux_balance[1].iflux_liveveg
             @test site2.term_carbonflux_canopy ≈ site.term_carbonflux_canopy
             @test site2.term_abg_flux ≈ site.term_abg_flux
+
+            # ============================================================
+            # R6 + R7 round-trip assertions
+            # ============================================================
+            # R7: cohort PRT pools (val + turnover/net_alloc/burned) — the dst
+            # cohorts had `prt === nothing` and were re-init'd by InitPRTObject!
+            # inside create_patchcohort_structure!, then filled on unpack.
+            for c in dco
+                @test c.prt !== nothing                       # InitPRTObject! ran on unpack
+                @test _prt_snapshot(c) ≈ src_prt[c.gpp_acc]   # all pools round-trip
+            end
+            # spot-check a specific non-zero flux survived (cohort i=2 by gpp_acc).
+            c2p = dco[findfirst(cc -> cc.gpp_acc ≈ 2.0, dco)]
+            @test any(v -> any(x -> x != 0.0, v.turnover), c2p.prt.variables)
+
+            # R6: patch running means round-trip identically.
+            for (p, s) in zip(dst_patches, src_tveg)
+                @test p.tveg24 !== nothing
+                @test (p.tveg24.c_mean, p.tveg24.l_mean, p.tveg24.c_index) == (s[1], s[2], s[3])
+                @test (p.tveg_lpa.c_mean, p.tveg_lpa.l_mean, p.tveg_lpa.c_index) == (s[4], s[5], s[6])
+                @test (p.tveg_longterm.c_mean, p.tveg_longterm.l_mean, p.tveg_longterm.c_index) == (s[7], s[8], s[9])
+            end
+            # R6: site disturbance-rate diagnostic array round-trips.
+            @test site2.disturbance_rates ≈ src_disturbance
         end
 
         # ==================================================================
@@ -648,6 +713,135 @@ end
             @test bc_out.albi_parb[1, 2] ≈ p.gnd_alb_dif[2]
         end
 
+        # ==================================================================
+        # 5. R8 — cohort hydraulics restart (hlm_use_planthydro on).
+        #    th_ag/th_troot/th_aroot + errh2o must round-trip; the dst cohorts
+        #    get co_hydr re-allocated by InitHydrCohort on unpack.
+        # ==================================================================
+        @testset "R8 cohort hydraulics restart" begin
+            saved_wrf = CLM._wrf_plant[]; saved_wkf = CLM._wkf_plant[]
+            saved_pft = CLM.EDPftvarcon_inst[]; saved_edp = CLM.EDParams[]
+            try
+                CLM.hlm_use_planthydro[] = CLM.itrue
+
+                # --- Hydro params: reuse the demographic EDParams (keeps the
+                #     history bin-edges Create!/get_age_class_index need) + add the
+                #     hydraulics solver selection. ---
+                edph = saved_edp
+                edph.hydr_solver = CLM.hydr_solver_1DTaylor
+                CLM.EDParams[] = edph
+                # reuse the demographic EDPftvarcon (keeps vcmax25top etc. that the
+                # PRT finalizer UpdateCohortBioPhysRates reads) + add hydro nodes.
+                pcon = saved_pft
+                pcon.hydr_thetas_node = fill(0.75, npft, CLM.n_plant_media)
+                pcon.hydr_resid_node  = fill(0.15, npft, CLM.n_plant_media)
+                CLM.EDPftvarcon_inst[] = pcon
+
+                wrfp = Matrix{Union{CLM.WRFType,Nothing}}(nothing, CLM.n_plant_media + 1, npft)
+                wkfp = Matrix{Union{CLM.WKFType,Nothing}}(nothing, CLM.n_plant_media + 1, npft)
+                for pm in 1:CLM.n_plant_media
+                    th_sat = 0.75; th_res = 0.15; pinot = -1.5; epsil = 12.0
+                    rwc_ft = (pm == CLM.leaf_p_media) ? 1.0 : 0.958
+                    if pm == CLM.leaf_p_media
+                        cap_slp = 0.0; cap_int = 0.0; cap_corr = 1.0
+                    else
+                        cap_slp = (0.0 - (-0.6)) / (1.0 - 0.947)
+                        cap_int = -cap_slp + 0.0
+                        cap_corr = -cap_int / cap_slp
+                    end
+                    wrf = CLM.wrf_type_tfs()
+                    CLM.set_wrf_param!(wrf, [th_sat, th_res, pinot, epsil, rwc_ft,
+                                            cap_corr, cap_int, cap_slp, Float64(pm)])
+                    wrfp[pm + 1, ipft] = wrf
+                    wkf = CLM.wkf_type_tfs(); CLM.set_wkf_param!(wkf, [-1.5, 2.0]); wkf.wrf = wrf
+                    wkfp[pm + 1, ipft] = wkf
+                end
+                sto = CLM.wkf_type_tfs(); CLM.set_wkf_param!(sto, [-1.5, 2.0])
+                sto.wrf = wrfp[CLM.leaf_p_media + 1, ipft]
+                wkfp[CLM.stomata_p_media + 1, ipft] = sto
+                CLM._wrf_plant[] = wrfp; CLM._wkf_plant[] = wkfp
+
+                build_bc_in() = CLM.bc_in_type(
+                    nlevsoil = nlevsoil,
+                    zi_sisl = [0.0, 0.1, 0.4, 1.0],
+                    dz_sisl = [0.1, 0.3, 0.6],
+                    eff_porosity_sl = fill(0.45, nlevsoil),
+                    watsat_sisl = fill(0.45, nlevsoil),
+                    sucsat_sisl = fill(200.0, nlevsoil),
+                    bsw_sisl = fill(5.0, nlevsoil),
+                    hksat_sisl = fill(0.01, nlevsoil),
+                    h2o_liq_sisl = [0.1 * 0.4 * CLM.dens_fresh_liquid_water,
+                                    0.3 * 0.4 * CLM.dens_fresh_liquid_water,
+                                    0.6 * 0.4 * CLM.dens_fresh_liquid_water],
+                    smpmin_si = -2.0e5,
+                )
+
+                # --- source site with si_hydr + 1 patch + 2 cohorts holding co_hydr.
+                site = _build_restart_site(npft, nlevsoil)
+                CLM.InitHydrSites([site], [build_bc_in()])
+                nlevrhiz = site.si_hydr.nlevrhiz
+                pA = _make_restart_patch(6000.0, 20.0, npft, nlevsoil)
+                pA.patchno = 1
+                site.oldest_patch = pA; site.youngest_patch = pA
+                pA.older = nothing; pA.younger = nothing
+                # build the cohorts with hydro OFF (create_cohort's hydro init path
+                # needs a real bc_in / recruit state); we attach co_hydr explicitly
+                # below via InitHydrCohort once hydro is back on.
+                CLM.hlm_use_planthydro[] = CLM.ifalse
+                cA1 = _add_restart_cohort!(site, pA, ipft, 25.0, 0.20; clayer=1)
+                cA2 = _add_restart_cohort!(site, pA, ipft, 12.0, 0.50; clayer=2)
+                CLM.hlm_use_planthydro[] = CLM.itrue
+
+                # allocate + seed each source cohort's co_hydr water contents.
+                src_coh = CLM.fates_cohort_type[]
+                let c = pA.shortest; while c !== nothing; push!(src_coh, c); c = c.taller; end; end
+                for (i, c) in enumerate(src_coh)
+                    CLM.InitHydrCohort(site, c)
+                    ch = c.co_hydr
+                    for k in 1:CLM.n_hypool_ag; ch.th_ag[k] = 0.60 + 0.01 * (10 * i + k); end
+                    ch.th_troot = 0.55 + 0.01 * i
+                    for j in 1:nlevrhiz; ch.th_aroot[j] = 0.50 + 0.01 * (10 * i + j); end
+                    ch.errh2o = 1.0e-3 * i
+                end
+                src_hydr = Dict(c.dbh => (copy(c.co_hydr.th_ag), c.co_hydr.th_troot,
+                                          copy(c.co_hydr.th_aroot), c.co_hydr.errh2o)
+                                for c in src_coh)
+
+                # --- build a hydro-aware interface (registers the ir_hydro_* vars) ---
+                rih = _build_interface()
+                @test CLM.ir_get(rih, :ir_hydro_th_ag_covec) > 0   # hydro vars registered
+                @test CLM.ir_get(rih, :ir_hydro_errh2o) > 0
+
+                CLM.set_restart_vectors!(rih, 1, 1, [site])
+
+                # fresh skeleton with its own si_hydr (InitHydrCohort needs it on unpack).
+                site2 = _build_restart_site(npft, nlevsoil)
+                CLM.InitHydrSites([site2], [build_bc_in()])
+                CLM.create_patchcohort_structure!(rih, 1, 1, [site2]; current_tod=0)
+                CLM.get_restart_vectors!(rih, 1, 1, [site2])
+
+                dst_coh = CLM.fates_cohort_type[]
+                let c = site2.oldest_patch.shortest
+                    while c !== nothing; push!(dst_coh, c); c = c.taller; end
+                end
+                @test length(dst_coh) == 2
+                for c in dst_coh
+                    @test c.co_hydr !== nothing                 # InitHydrCohort ran on unpack
+                    th_ag, th_troot, th_aroot, errh2o = src_hydr[c.dbh]
+                    @test c.co_hydr.th_ag ≈ th_ag
+                    @test c.co_hydr.th_troot ≈ th_troot
+                    @test c.co_hydr.th_aroot ≈ th_aroot
+                    @test c.co_hydr.errh2o ≈ errh2o
+                    # UpdatePlantPsiFTCFromTheta! ran → derived psi/ftc are finite.
+                    @test all(isfinite, c.co_hydr.ftc_ag)
+                end
+            finally
+                CLM.hlm_use_planthydro[] = CLM.ifalse
+                CLM._wrf_plant[] = saved_wrf; CLM._wkf_plant[] = saved_wkf
+                CLM.EDPftvarcon_inst[] = saved_pft; CLM.EDParams[] = saved_edp
+            end
+        end
+
     finally
         CLM.prt_global[]                 = old_global
         CLM.num_elements[]               = old_numel
@@ -666,6 +860,7 @@ end
         CLM.fates_maxElementsPerSite[]   = old_maxps
         CLM.nlevsclass[]                 = old_nlevsc
         CLM.nlevcoage[]                  = old_nlevca
+        CLM.nleafage[]                   = old_nleafage
         CLM.SFParams[]                   = old_sfp
         CLM.EDParams[]                   = old_edp
         CLM.ParamDerived[]               = old_pd
