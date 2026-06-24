@@ -11,11 +11,21 @@ for each gridcell based on surface data weights.
 
 Landunit creation order: ISTSOIL → ISTCROP → ISTURB_TBD → ISTURB_HD → ISTURB_MD
 → ISTDLAK → ISTWET → ISTICE
+
+# Per-gridcell lat/lon
+For a multi-gridcell run each gridcell carries its own latitude/longitude. These
+are taken (in priority order) from:
+  1. `lats`/`lons` keyword vectors (length ng), if supplied;
+  2. `surf.grid_latdeg`/`surf.grid_londeg` (populated by the 2D surfdata read);
+  3. the scalar `lat`/`lon` fallback (legacy single-gridcell / tiled path),
+applied identically to every gridcell.
 """
 function initGridCells!(bounds::BoundsType, surf::SurfaceInputData,
                          grc::GridcellData, lun::LandunitData,
                          col::ColumnData, pch::PatchData;
-                         lat::Float64=0.0, lon::Float64=0.0, area::Float64=1.0)
+                         lat::Float64=0.0, lon::Float64=0.0, area::Float64=1.0,
+                         lats::Union{Nothing,AbstractVector}=nothing,
+                         lons::Union{Nothing,AbstractVector}=nothing)
     li = Ref(bounds.begl - 1)
     ci = Ref(bounds.begc - 1)
     pi = Ref(bounds.begp - 1)
@@ -57,13 +67,20 @@ function initGridCells!(bounds::BoundsType, surf::SurfaceInputData,
     ci[] == bounds.endc || error("initGridCells!: column count mismatch: $(ci[]) != $(bounds.endc)")
     pi[] == bounds.endp || error("initGridCells!: patch count mismatch: $(pi[]) != $(bounds.endp)")
 
-    # Set gridcell properties
+    # Set gridcell properties. Per-gridcell lat/lon priority:
+    #   lats/lons kwargs > surf.grid_latdeg/londeg > scalar lat/lon fallback.
+    have_surf_ll = length(surf.grid_latdeg) >= bounds.endg &&
+                   length(surf.grid_londeg) >= bounds.endg
     for g in bounds.begg:bounds.endg
+        glat = lats !== nothing ? Float64(lats[g]) :
+               (have_surf_ll ? surf.grid_latdeg[g] : lat)
+        glon = lons !== nothing ? Float64(lons[g]) :
+               (have_surf_ll ? surf.grid_londeg[g] : lon)
         grc.area[g] = area
-        grc.latdeg[g] = lat
-        grc.londeg[g] = lon
-        grc.lat[g] = lat * RPI / 180.0
-        grc.lon[g] = lon * RPI / 180.0
+        grc.latdeg[g] = glat
+        grc.londeg[g] = glon
+        grc.lat[g] = glat * RPI / 180.0
+        grc.lon[g] = glon * RPI / 180.0
     end
 
     # Fill down-pointers
