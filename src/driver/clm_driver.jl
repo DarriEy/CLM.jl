@@ -1056,6 +1056,18 @@ function clm_drv_core!(config::CLMDriverConfig,
         # history interface is built (clm_fates_init!). Mirrors the Fortran host's
         # update_history_hifrq in the timestep path.
         fates_hifrq_history_step!(inst; dt_tstep=dtime)
+
+        # W4c plant-hydraulics — FATES.  When plant hydraulics is enabled
+        # (hlm_use_planthydro==itrue), run hydraulics_drive AFTER the photosynthesis
+        # solve (mirroring the Fortran call from the photosynthesis path): it
+        # reconciles the rhizosphere shells with the host soil column and runs the
+        # transpiration/uptake solve, populating co_hydr.ftc_*/btran/leaf_psi (the
+        # fields the already-ported mortality + photosynthesis branches consume) and
+        # bc_out.qflx_soil2root_sisl / plant_stored_h2o_si. Default path
+        # (planthydro OFF) is byte-identical — the helper returns immediately.
+        if hlm_use_planthydro[] == itrue
+            fates_hydraulics_step!(inst; nlevsoil=varpar.nlevsoi, dtime=dtime)
+        end
     end
 
 
