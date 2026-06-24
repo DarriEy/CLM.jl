@@ -331,6 +331,98 @@ function fates_hifrq_history_step!(inst::CLMInstances; dt_tstep::Real)
 end
 
 """
+    fates_pack_bcin_hydro!(inst; s=1, c=1, p=1, nlevsoil)
+
+Fill the FATES plant-hydraulics `bc_in` soil-rhizosphere fields for site `s` from
+CLM column `c` / vegetated patch `p`, packing exactly the inputs the
+`hydraulics_drive` (FillDrainRhizShells + Hydraulics_BC) solve reads:
+
+  * `watsat_sisl` / `eff_porosity_sl` — saturated / effective porosity.
+  * `sucsat_sisl` — minimum soil suction (mm).
+  * `bsw_sisl` — Clapp-Hornberger "b".
+  * `hksat_sisl` — saturated hydraulic conductivity (mm/s).
+  * `h2o_liq_sisl` — liquid water mass in the soil layer (kg/m2).
+  * `smpmin_si` — host minimum soil matric potential (mm).
+  * `qflx_transp_pa[ifp]` — the HLM canopy-solver transpiration demand for the
+    vegetated patch (mm H2O/s, + into root). ifp = 1 for the single veg patch.
+
+`zi_sisl`/`dz_sisl` are set once at cold-start and are not re-packed here.
+Gated by the caller behind `config.use_fates && hlm_use_planthydro==itrue`.
+"""
+function fates_pack_bcin_hydro!(inst::CLMInstances; s::Int = 1, c::Int = 1,
+                                p::Int = 1, nlevsoil::Int)
+    fates = inst.fates
+    fates === nothing && return inst
+    bc = fates.bc_in[s]
+
+    ss  = inst.soilstate
+    wsb = inst.water.waterstatebulk_inst
+    wfb = inst.water.waterfluxbulk_inst
+
+    joff = varpar.nlevsno  # snow-layer offset into h2osoi_liq_col
+
+    for j in 1:nlevsoil
+        bc.watsat_sisl[j]     = ss.watsat_col[c, j]
+        bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
+        bc.sucsat_sisl[j]     = ss.sucsat_col[c, j]
+        bc.bsw_sisl[j]        = ss.bsw_col[c, j]
+        bc.hksat_sisl[j]      = ss.hksat_col[c, j]
+        bc.h2o_liq_sisl[j]    = wsb.ws.h2osoi_liq_col[c, joff + j]
+    end
+
+    bc.smpmin_si = (!isempty(ss.smpmin_col) && isfinite(ss.smpmin_col[c])) ?
+                   ss.smpmin_col[c] : -1.0e8
+
+    # Patch transpiration demand for the (single) vegetated patch (ifp = 1).
+    bc.qflx_transp_pa[1] = wfb.wf.qflx_tran_veg_patch[p]
+
+    return inst
+end
+
+"""
+    fates_hydraulics_step!(inst; nlevsoil)
+
+Run one FATES plant-hydraulics transpiration/uptake step for every FATES site
+attached to `inst`, mirroring the Fortran host's `hydraulics_drive` call from the
+canopy-flux/photosynthesis path:
+
+  1. pack the soil-rhizosphere + transpiration `bc_in` (`fates_pack_bcin_hydro!`)
+     for each site's CLM column / vegetated patch,
+  2. `hydraulics_drive(nsites, sites, bc_in, bc_out, dtime)` — reconcile the
+     rhizosphere shells with the host soil column then run `Hydraulics_BC`, which
+     populates `co_hydr.ftc_ag/ftc_troot/ftc_aroot`, `co_hydr.btran`, and
+     `psi_ag[1]` (leaf_psi) — the fields the mortality + photosynthesis branches
+     consume — and fills `bc_out.qflx_soil2root_sisl` / `plant_stored_h2o_si`.
+
+The site<->column<->veg-patch map mirrors the W3/W4 hooks. Returns `inst`. Gated
+by the caller behind `config.use_fates && hlm_use_planthydro[]==itrue`; a no-op
+when no site has a built `si_hydr`.
+"""
+function fates_hydraulics_step!(inst::CLMInstances; nlevsoil::Int, dtime::Real)
+    fates = inst.fates
+    fates === nothing && return inst
+    hlm_use_planthydro[] == itrue || return inst
+    col = inst.column
+
+    s = 0
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] || continue
+        s += 1
+        s <= fates.nsites || break
+        # A site without a built hydraulics object (planthydro just toggled, or no
+        # cold-start hydro init) has nothing to solve — skip it.
+        fates.sites[s].si_hydr === nothing && continue
+        p = col.patchi[c] + 1   # vegetated patch (bare-ground at +0)
+        fates_pack_bcin_hydro!(inst; s=s, c=c, p=p, nlevsoil=nlevsoil)
+    end
+
+    # Only drive when at least one site is hydro-enabled.
+    any(site -> site.si_hydr !== nothing, fates.sites) || return inst
+    hydraulics_drive(fates.nsites, fates.sites, fates.bc_in, fates.bc_out, dtime)
+    return inst
+end
+
+"""
     fates_unpack_bcout_sunfrac!(inst; s=1, c=1, p=1)
 
 Write the FATES sun/shade `bc_out` back to CLM canopystate for column `c` /
