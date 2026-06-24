@@ -123,6 +123,17 @@ Base.@kwdef mutable struct DustEmisBaseData{FT<:Real,
     vlc_trb_3_patch::V = Float64[]
     # Turbulent deposition velocity 4 (m/s) [np]
     vlc_trb_4_patch::V = Float64[]
+
+    # --- Scheme-specific time-constant fields (allocated by dust_emis_init!) ---
+    # Zender2003: [dimensionless] basin factor / soil erodibility, time-constant,
+    # per column. Defaults to 1.0 (no soil-erodibility stream read). Ported from
+    # `mbl_bsn_fct_col` in DustEmisZender2003.F90.
+    mbl_bsn_fct_col::V = Float64[]
+    # Leung2023: [fraction] rock drag-partition factor, time-constant, per patch.
+    # Set from the Prigent roughness stream in CTSM; here it is a settable input
+    # (defaults to 1.0, i.e. no rock-roughness drag reduction). Ported from
+    # `dpfct_rock_patch` in DustEmisLeung2023.F90.
+    dpfct_rock_patch::V = Float64[]
 end
 
 DustEmisBaseData{FT}(; kwargs...) where {FT<:Real} =
@@ -144,7 +155,7 @@ Stokes correction via `init_dust_vars!`.
 
 Ported from `InitBase` / `InitAllocateBase` in `DustEmisBase.F90`.
 """
-function dust_emis_init!(dust::DustEmisBaseData{FT}, np::Int) where {FT}
+function dust_emis_init!(dust::DustEmisBaseData{FT}, np::Int; nc::Int = np) where {FT}
     dust.flx_mss_vrt_dst_patch     = fill(FT(NaN), np, NDST)
     dust.flx_mss_vrt_dst_tot_patch = fill(FT(NaN), np)
     dust.vlc_trb_patch             = fill(FT(NaN), np, NDST)
@@ -156,6 +167,13 @@ function dust_emis_init!(dust::DustEmisBaseData{FT}, np::Int) where {FT}
     dust.ovr_src_snk_mss = fill(FT(NaN), DST_SRC_NBR, NDST)
     dust.dmt_vwr         = fill(FT(NaN), NDST)
     dust.stk_crc         = fill(FT(NaN), NDST)
+
+    # Scheme-specific time-constant fields. Cold-start defaults mirror CTSM's
+    # InitCold when no streams file is present: Zender basin factor = 1.0
+    # (DustEmisZender2003.F90 InitCold else-branch); Leung rock drag-partition
+    # factor = 1.0 (no rock-roughness reduction — user may override before run).
+    dust.mbl_bsn_fct_col  = fill(FT(1.0), nc)
+    dust.dpfct_rock_patch = fill(FT(1.0), np)
 
     # Compute size distributions, overlap factors, saltation factor, stk_crc
     init_dust_vars!(dust)
@@ -187,6 +205,9 @@ function dust_emis_clean!(dust::DustEmisBaseData{FT}) where {FT}
     dust.ovr_src_snk_mss = Matrix{FT}(undef, 0, 0)
     dust.dmt_vwr         = FT[]
     dust.stk_crc         = FT[]
+
+    dust.mbl_bsn_fct_col  = FT[]
+    dust.dpfct_rock_patch = FT[]
 
     return nothing
 end
@@ -569,6 +590,220 @@ function dust_dry_dep!(
     _launch!(_dust_pass3_kernel!, dust.vlc_trb_patch, dust.vlc_trb_1_patch,
              dust.vlc_trb_2_patch, dust.vlc_trb_3_patch, dust.vlc_trb_4_patch,
              patch_active, ram1, rss_lmn, vlc_grv, ndst, lo; ndrange = n)
+
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# _dust_landunit_vai — landunit-averaged vegetation area index (LAI+SAI)
+#
+# Shared by the Zender2003 and Leung2023 emission routines. Reproduces the
+# `ttlai`/`tlai_lu`/`sumwt` block at the top of both Fortran DustEmission
+# subroutines: VAI = tlai+tsai is averaged to the landunit level using each
+# patch's weight relative to its landunit. Returns a per-landunit vector
+# (indexed 1:nl) with `SPVAL` where no active weighted patch contributes.
+# ---------------------------------------------------------------------------
+function _dust_landunit_vai(
+    tlai::AbstractVector{<:Real}, tsai::AbstractVector{<:Real},
+    patch_active::AbstractVector{Bool},
+    patch_landunit::AbstractVector{<:Integer},
+    patch_wtlunit::AbstractVector{<:Real},
+    bounds_p::UnitRange{Int}, nl::Int,
+)
+    FT = promote_type(eltype(tlai), eltype(tsai))
+    tlai_lu = fill(FT(SPVAL), nl)
+    sumwt   = zeros(FT, nl)
+    for p in bounds_p
+        ttlai = tlai[p] + tsai[p]
+        if ttlai != SPVAL && patch_active[p] && patch_wtlunit[p] != 0.0
+            l = patch_landunit[p]
+            if sumwt[l] == 0.0
+                tlai_lu[l] = 0.0
+            end
+            tlai_lu[l] += ttlai * patch_wtlunit[p]
+            sumwt[l]   += patch_wtlunit[p]
+        end
+    end
+    for l in 1:nl
+        if sumwt[l] > 1.0 + 1.0e-6
+            error("DustEmission: sumwt is greater than 1.0 at landunit l=$l")
+        elseif sumwt[l] != 0.0
+            tlai_lu[l] /= sumwt[l]
+        end
+    end
+    return tlai_lu
+end
+
+# ---------------------------------------------------------------------------
+# dust_emission_zender2003! — Zender (2003) dust mobilization
+# Ported from: subroutine DustEmission in DustEmisZender2003.F90
+#
+# Simulates dust mobilization due to wind from the surface into the lowest
+# atmospheric layer. Fills flx_mss_vrt_dst_patch (kg/m**2/s, +=to atm), the
+# default CLM5 dust-emission scheme. Chain (all per non-lake patch):
+#   land mobile fraction (VAI + snow gating)
+#   → soil-moisture / roughness threshold friction velocity for saltation
+#   → Owen-effect saltating friction velocity from u10
+#   → White (1979) horizontal saltation mass flux
+#   → MaB95 sandblasting → total vertical dust mass flux
+#   → partitioned into NDST transport bins via ovr_src_snk_mss.
+# ---------------------------------------------------------------------------
+
+"""
+    dust_emission_zender2003!(dust, nolakep_mask, patch_active, patch_column,
+        patch_landunit, patch_wtlunit, lun_itype, bounds_p, nl,
+        forc_rho, gwc_thr, mss_frc_cly_vld, watsat, tlai, tsai,
+        frac_sno, h2osoi_vol, h2osoi_liq, h2osoi_ice, fv, u10)
+
+Compute Zender (2003) dust emission, filling `dust.flx_mss_vrt_dst_patch`
+(kg/m²/s, [+ = to atm]) and `dust.flx_mss_vrt_dst_tot_patch` per patch.
+
+Column-level inputs (`forc_rho`, `gwc_thr`, `mss_frc_cly_vld`, `watsat`,
+`frac_sno`, `h2osoi_*`) are indexed by `patch_column[p]`; `watsat` and
+`h2osoi_*` use the top soil layer (column 1). Patch-level inputs (`tlai`,
+`tsai`, `fv`, `u10`) are indexed by patch. `mbl_bsn_fct_col` (basin factor) is
+read from `dust`.
+
+Ported from `DustEmission` in `DustEmisZender2003.F90`.
+"""
+function dust_emission_zender2003!(
+    dust::DustEmisBaseData,
+    nolakep_mask::AbstractVector{Bool},
+    patch_active::AbstractVector{Bool},
+    patch_column::AbstractVector{<:Integer},
+    patch_landunit::AbstractVector{<:Integer},
+    patch_wtlunit::AbstractVector{<:Real},
+    lun_itype::AbstractVector{<:Integer},
+    bounds_p::UnitRange{Int}, nl::Int,
+    forc_rho::AbstractVector{<:Real},
+    gwc_thr::AbstractVector{<:Real},
+    mss_frc_cly_vld::AbstractVector{<:Real},
+    watsat::AbstractMatrix{<:Real},
+    tlai::AbstractVector{<:Real},
+    tsai::AbstractVector{<:Real},
+    frac_sno::AbstractVector{<:Real},
+    h2osoi_vol::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    h2osoi_ice::AbstractMatrix{<:Real},
+    fv::AbstractVector{<:Real},
+    u10::AbstractVector{<:Real},
+)
+    ndst = NDST
+    dst_src_nbr = DST_SRC_NBR
+
+    # Constants (from DustEmisZender2003.F90)
+    cst_slt = 2.61            # [frc] Saltation constant
+    flx_mss_fdg_fct = 5.0e-4  # [frc] Empirical mass-flux tuning factor
+    vai_mbl_thr = 0.3         # [m2 m-2] VAI threshold quenching dust mobilization
+
+    # Landunit-averaged VAI (LAI+SAI)
+    tlai_lu = _dust_landunit_vai(tlai, tsai, patch_active, patch_landunit,
+                                 patch_wtlunit, bounds_p, nl)
+
+    # Initialize outputs and compute land mobile fraction per patch.
+    lnd_frc_mbl = zeros(Float64, length(patch_active))
+    for p in bounds_p
+        nolakep_mask[p] || continue
+        c = patch_column[p]
+        l = patch_landunit[p]
+        # Reset outputs.
+        for nb in 1:ndst
+            dust.flx_mss_vrt_dst_patch[p, nb] = 0.0
+        end
+        dust.flx_mss_vrt_dst_tot_patch[p] = 0.0
+
+        # "bare ground" fraction decreases linearly from 1 to 0 as VAI rises
+        # from 0 to vai_mbl_thr; no dust over ice/wetland/lake landunits.
+        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
+            if tlai_lu[l] < vai_mbl_thr
+                lnd_frc_mbl[p] = 1.0 - tlai_lu[l] / vai_mbl_thr
+            else
+                lnd_frc_mbl[p] = 0.0
+            end
+            lnd_frc_mbl[p] *= (1.0 - frac_sno[c])
+        else
+            lnd_frc_mbl[p] = 0.0
+        end
+        if lnd_frc_mbl[p] > 1.0 || lnd_frc_mbl[p] < 0.0
+            error("Bad value for dust mobilization fraction at patch $p: $(lnd_frc_mbl[p])")
+        end
+    end
+
+    # Per-patch saltation → horizontal flux → vertical dust flux.
+    flx_mss_vrt_dst_ttl = zeros(Float64, length(patch_active))
+    for p in bounds_p
+        nolakep_mask[p] || continue
+        lnd_frc_mbl[p] > 0.0 || continue
+        c = patch_column[p]
+
+        # Roughness factor on threshold friction velocity (constant in CTSM).
+        frc_thr_rgh_fct = 1.0
+
+        # Soil-moisture factor on threshold friction velocity (Fecan 1999):
+        # gravimetric water content vs. clay-based threshold.
+        bd = (1.0 - watsat[c, 1]) * 2.7e3           # [kg m-3] dry soil bulk density
+        gwc_sfc = h2osoi_vol[c, 1] * DENH2O / bd     # [kg kg-1] gravimetric H2O
+        if gwc_sfc > gwc_thr[c]
+            frc_thr_wet_fct = sqrt(1.0 + 1.21 * (100.0 * (gwc_sfc - gwc_thr[c]))^0.68)
+        else
+            frc_thr_wet_fct = 1.0
+        end
+
+        # Liquid fraction of total surface water (frozen-soil effect).
+        liqfrac = max(0.0, min(1.0,
+            h2osoi_liq[c, 1] / (h2osoi_ice[c, 1] + h2osoi_liq[c, 1] + 1.0e-6)))
+
+        # Dry threshold friction velocity scaled for moisture and roughness.
+        wnd_frc_thr_slt = dust.saltation_factor / sqrt(forc_rho[c]) *
+                          frc_thr_wet_fct * frc_thr_rgh_fct
+
+        wnd_frc_slt = fv[p]
+        flx_mss_hrz_slt_ttl = 0.0
+        flx_mss_vrt_dst_ttl[p] = 0.0
+
+        # Threshold saltation wind speed (reference height).
+        wnd_rfr_thr_slt = u10[p] * wnd_frc_thr_slt / fv[p]
+
+        # Owen-effect saltating friction velocity.
+        if u10[p] >= wnd_rfr_thr_slt
+            wnd_rfr_dlt = u10[p] - wnd_rfr_thr_slt
+            wnd_frc_slt_dlt = 0.003 * wnd_rfr_dlt * wnd_rfr_dlt
+            wnd_frc_slt = fv[p] + wnd_frc_slt_dlt
+        end
+
+        # White (1979) vertically integrated streamwise (horizontal) mass flux.
+        if wnd_frc_slt > wnd_frc_thr_slt
+            wnd_frc_rat = wnd_frc_thr_slt / wnd_frc_slt
+            flx_mss_hrz_slt_ttl = cst_slt * forc_rho[c] * (wnd_frc_slt^3.0) *
+                (1.0 - wnd_frc_rat) * (1.0 + wnd_frc_rat) * (1.0 + wnd_frc_rat) / GRAV
+            # Land-surface/veg limits, basin factor, global tuning, frozen-soil.
+            flx_mss_hrz_slt_ttl *= lnd_frc_mbl[p] * dust.mbl_bsn_fct_col[c] *
+                                   flx_mss_fdg_fct * liqfrac
+        end
+
+        # MaB95 sandblasting: total vertical dust mass flux from horizontal flux.
+        dst_slt_flx_rat_ttl = 100.0 * exp(log(10.0) * (13.4 * mss_frc_cly_vld[c] - 6.0))
+        flx_mss_vrt_dst_ttl[p] = flx_mss_hrz_slt_ttl * dst_slt_flx_rat_ttl
+    end
+
+    # Partition total vertical mass flux into NDST transport bins.
+    for nb in 1:ndst
+        for m in 1:dst_src_nbr
+            for p in bounds_p
+                nolakep_mask[p] || continue
+                lnd_frc_mbl[p] > 0.0 || continue
+                dust.flx_mss_vrt_dst_patch[p, nb] +=
+                    dust.ovr_src_snk_mss[m, nb] * flx_mss_vrt_dst_ttl[p]
+            end
+        end
+    end
+    for nb in 1:ndst
+        for p in bounds_p
+            nolakep_mask[p] || continue
+            lnd_frc_mbl[p] > 0.0 || continue
+            dust.flx_mss_vrt_dst_tot_patch[p] += dust.flx_mss_vrt_dst_patch[p, nb]
+        end
+    end
 
     return nothing
 end

@@ -333,4 +333,175 @@
         @test CLM.mass_frac_clay(0.0)  ≈ 0.0  atol=1e-12
     end
 
+    # -----------------------------------------------------------------------
+    # Wind-driven dust mobilization kernels: Zender2003 (default) + Leung2023.
+    # One soil landunit (itype=ISTSOIL), one column, one patch. We toggle wind,
+    # soil moisture, snow and VAI to exercise the threshold/gating logic.
+    # -----------------------------------------------------------------------
+    @testset "dust mobilization (Zender2003 + Leung2023)" begin
+        ndst = CLM.NDST
+
+        # Build a 1-landunit / 1-column / 1-patch setup with given conditions.
+        # Returns (dust, kwargs...) ready to pass to the emission routines.
+        function make_scene(; tlai=0.0, tsai=0.0, fv=0.6, u10=12.0,
+                            frac_sno=0.0, h2osoi_vol=0.05, watsat=0.45,
+                            gwc_thr=0.17, mss_frc_cly_vld=0.15, forc_rho=1.225,
+                            obu=-50.0, itype=CLM.noveg, lun_itype=CLM.ISTSOIL,
+                            dpfct_rock=1.0)
+            dust = CLM.DustEmisBaseData()
+            CLM.dust_emis_init!(dust, 1; nc=1)
+            dust.dpfct_rock_patch[1] = dpfct_rock
+            # liquid surface water (kg/m2): all liquid when warm.
+            return (dust=dust,
+                nolakep_mask=trues(1), patch_active=trues(1),
+                patch_column=[1], patch_landunit=[1], patch_itype=[itype],
+                patch_wtlunit=[1.0], lun_itype=[lun_itype], bounds_p=1:1, nl=1,
+                forc_rho=[forc_rho], gwc_thr=[gwc_thr],
+                mss_frc_cly_vld=[mss_frc_cly_vld],
+                watsat=reshape([watsat], 1, 1),
+                tlai=[tlai], tsai=[tsai], frac_sno=[frac_sno],
+                h2osoi_vol=reshape([h2osoi_vol], 1, 1),
+                h2osoi_liq=reshape([30.0], 1, 1),
+                h2osoi_ice=reshape([0.0], 1, 1),
+                fv=[fv], u10=[u10], obu=[obu])
+        end
+
+        run_zender(s) = CLM.dust_emission_zender2003!(
+            s.dust, s.nolakep_mask, s.patch_active, s.patch_column,
+            s.patch_landunit, s.patch_wtlunit, s.lun_itype, s.bounds_p, s.nl,
+            s.forc_rho, s.gwc_thr, s.mss_frc_cly_vld, s.watsat, s.tlai, s.tsai,
+            s.frac_sno, s.h2osoi_vol, s.h2osoi_liq, s.h2osoi_ice, s.fv, s.u10)
+
+        run_leung(s) = CLM.dust_emission_leung2023!(
+            s.dust, s.nolakep_mask, s.patch_active, s.patch_column,
+            s.patch_landunit, s.patch_itype, s.patch_wtlunit, s.lun_itype,
+            s.bounds_p, s.nl, s.forc_rho, s.gwc_thr, s.mss_frc_cly_vld, s.watsat,
+            s.tlai, s.tsai, s.frac_sno, s.h2osoi_vol, s.h2osoi_liq, s.h2osoi_ice,
+            s.fv, s.obu)
+
+        @testset "Zender2003: dry erodible high wind → positive, size-distributed" begin
+            s = make_scene(tlai=0.0, tsai=0.0, fv=0.8, u10=15.0,
+                           h2osoi_vol=0.02, frac_sno=0.0)
+            run_zender(s)
+            d = s.dust
+            # finite, non-negative, and total = sum over bins
+            @test all(isfinite, d.flx_mss_vrt_dst_patch[1, :])
+            @test all(>=(0.0), d.flx_mss_vrt_dst_patch[1, :])
+            @test d.flx_mss_vrt_dst_tot_patch[1] > 0.0
+            @test d.flx_mss_vrt_dst_tot_patch[1] ≈
+                  sum(d.flx_mss_vrt_dst_patch[1, :]) atol=0.0
+            # at least two bins receive dust (size-distributed)
+            @test count(>(0.0), d.flx_mss_vrt_dst_patch[1, :]) >= 2
+        end
+
+        @testset "Zender2003: wet soil suppresses emission vs dry" begin
+            # Moisture above threshold raises the saltation threshold friction
+            # velocity, so a wet column emits strictly less than a dry one.
+            s_dry = make_scene(h2osoi_vol=0.02, watsat=0.45, gwc_thr=0.10,
+                               fv=0.8, u10=15.0)
+            s_wet = make_scene(h2osoi_vol=0.40, watsat=0.45, gwc_thr=0.10,
+                               fv=0.8, u10=15.0)
+            run_zender(s_dry); run_zender(s_wet)
+            @test s_dry.dust.flx_mss_vrt_dst_tot_patch[1] > 0.0
+            @test s_wet.dust.flx_mss_vrt_dst_tot_patch[1] <
+                  s_dry.dust.flx_mss_vrt_dst_tot_patch[1]
+            @test s_wet.dust.flx_mss_vrt_dst_tot_patch[1] >= 0.0
+            # Saturated soil (gwc_sfc ≫ threshold, very weak wind) → exactly zero.
+            s_sat = make_scene(h2osoi_vol=0.44, watsat=0.45, gwc_thr=0.10,
+                               fv=0.2, u10=2.0)
+            run_zender(s_sat)
+            @test s_sat.dust.flx_mss_vrt_dst_tot_patch[1] == 0.0
+        end
+
+        @testset "Zender2003: full snow cover → zero emission" begin
+            s = make_scene(frac_sno=1.0, fv=0.8, u10=15.0, h2osoi_vol=0.02)
+            run_zender(s)
+            @test s.dust.flx_mss_vrt_dst_tot_patch[1] == 0.0
+        end
+
+        @testset "Zender2003: below-threshold wind → zero emission" begin
+            s = make_scene(fv=0.05, u10=0.5, h2osoi_vol=0.02)
+            run_zender(s)
+            @test s.dust.flx_mss_vrt_dst_tot_patch[1] == 0.0
+        end
+
+        @testset "Zender2003: VAI above threshold → zero (no bare ground)" begin
+            s = make_scene(tlai=0.5, tsai=0.5, fv=0.8, u10=15.0)  # VAI=1.0 > 0.3
+            run_zender(s)
+            @test s.dust.flx_mss_vrt_dst_tot_patch[1] == 0.0
+        end
+
+        @testset "Zender2003: emission increases with wind" begin
+            s1 = make_scene(fv=0.5, u10=10.0, h2osoi_vol=0.02)
+            s2 = make_scene(fv=0.9, u10=18.0, h2osoi_vol=0.02)
+            run_zender(s1); run_zender(s2)
+            @test s2.dust.flx_mss_vrt_dst_tot_patch[1] >
+                  s1.dust.flx_mss_vrt_dst_tot_patch[1] > 0.0
+        end
+
+        @testset "Leung2023: dry erodible high wind → positive, size-distributed" begin
+            s = make_scene(tlai=0.0, tsai=0.0, fv=0.9, u10=15.0,
+                           h2osoi_vol=0.02, frac_sno=0.0, dpfct_rock=1.0)
+            run_leung(s)
+            d = s.dust
+            @test all(isfinite, d.flx_mss_vrt_dst_patch[1, :])
+            @test all(>=(0.0), d.flx_mss_vrt_dst_patch[1, :])
+            @test d.flx_mss_vrt_dst_tot_patch[1] > 0.0
+            @test d.flx_mss_vrt_dst_tot_patch[1] ≈
+                  sum(d.flx_mss_vrt_dst_patch[1, :]) atol=0.0
+            @test count(>(0.0), d.flx_mss_vrt_dst_patch[1, :]) >= 2
+        end
+
+        @testset "Leung2023: snow / low wind → zero emission" begin
+            for s in (make_scene(frac_sno=1.0, fv=0.9, h2osoi_vol=0.02),
+                      make_scene(fv=0.03, h2osoi_vol=0.02))
+                run_leung(s)
+                @test s.dust.flx_mss_vrt_dst_tot_patch[1] == 0.0
+            end
+        end
+
+        @testset "Leung2023: wet soil suppresses emission vs dry" begin
+            s_dry = make_scene(h2osoi_vol=0.02, watsat=0.45, gwc_thr=0.10,
+                               fv=0.9, u10=15.0)
+            s_wet = make_scene(h2osoi_vol=0.40, watsat=0.45, gwc_thr=0.10,
+                               fv=0.9, u10=15.0)
+            run_leung(s_dry); run_leung(s_wet)
+            @test s_dry.dust.flx_mss_vrt_dst_tot_patch[1] > 0.0
+            @test s_wet.dust.flx_mss_vrt_dst_tot_patch[1] <
+                  s_dry.dust.flx_mss_vrt_dst_tot_patch[1]
+            @test s_wet.dust.flx_mss_vrt_dst_tot_patch[1] >= 0.0
+        end
+
+        @testset "Leung2023 vs Zender2003 differ (different threshold/scheme)" begin
+            # Same dry, high-wind, erodible scene → both emit, but the schemes
+            # use different thresholds + emission equations, so totals differ.
+            sz = make_scene(fv=0.85, u10=15.0, h2osoi_vol=0.02, dpfct_rock=1.0)
+            sl = make_scene(fv=0.85, u10=15.0, h2osoi_vol=0.02, dpfct_rock=1.0)
+            run_zender(sz); run_leung(sl)
+            @test sz.dust.flx_mss_vrt_dst_tot_patch[1] > 0.0
+            @test sl.dust.flx_mss_vrt_dst_tot_patch[1] > 0.0
+            @test sz.dust.flx_mss_vrt_dst_tot_patch[1] !=
+                  sl.dust.flx_mss_vrt_dst_tot_patch[1]
+        end
+
+        @testset "factory dispatch + default-off no-op" begin
+            # Inactive config: no-op, fluxes stay at their NaN-init value.
+            dust = CLM.DustEmisBaseData()
+            CLM.dust_emis_init!(dust, 1; nc=1)
+            pre = copy(dust.flx_mss_vrt_dst_patch)
+            cfg_off = CLM.DustEmisConfig()
+            @test cfg_off.active == false
+            # The factory returns early; nothing should run (no inputs needed).
+            CLM.dust_emission!(cfg_off, dust, trues(1), nothing, nothing, 1:1, 1,
+                               [1.225], nothing, nothing, nothing, nothing, nothing)
+            @test isequal(dust.flx_mss_vrt_dst_patch, pre)  # untouched (NaN==NaN)
+
+            # Unknown method errors.
+            cfg_bad = CLM.DustEmisConfig(active=true, method="nope")
+            @test_throws ErrorException CLM.dust_emission!(
+                cfg_bad, dust, trues(1), nothing, nothing, 1:1, 1, [1.225],
+                nothing, nothing, nothing, nothing, nothing)
+        end
+    end
+
 end
