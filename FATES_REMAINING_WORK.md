@@ -23,14 +23,19 @@ Done since this doc was written (suite 20,642 → 20,772; PRs #81–#84):
 - **Real FATES param-file reader** — `read_fates_params!` (CDL parser → the port's existing register/receive infra; `data/fates/fates_params_default.cdl` in-repo); 297/297 params, **numpft now 14** (real). `clm_fates_init!` uses it; synthetic `_fates_spike_setup_pft!` superseded.
 - **W5 daily-dynamics hook** — `ed_ecosystem_dynamics` + `ed_update_site` + `TotalBalanceCheck` gated into the daily driver branch; **runs mass-conserving (|err|≤1e-5) on the real 14-PFT params.** FATES now advances its cohort/patch population on real parameters. Suite → 20,969.
 
+**Update 3 (PRs #86–#90) — real driver run + history output complete + hydraulics complete:**
+- **Multi-day `clm_drv!` integrated run (#86)** — first REAL driver loop with `use_fates=true` (2 days/96 steps); all four per-timestep hooks + the daily step fire end-to-end; flushed out 3 latent wiring bugs (coszen source, hardcoded `use_fates=false`, ungated standard photosynthesis). FATES is no longer helper-tested — it runs through `clm_drv!`.
+- **History fills H-series COMPLETE (#87 W1, #88 W2, #90 W3)** — the history interface is wired into the run (`inst.fates.hist`, Init'd in `clm_fates_init!`, `update_history_dyn!` after the daily step + `update_history_hifrq!` per-timestep). **Every `update_history_*` body is now filled**: dyn1 (core), hifrq1, dyn2 (per-class disaggregation), hifrq2 (canopy profiles), nutrflux (CNP), fire, tree-damage, hydraulics. Mode-gated groups (CNP/fire/damage/planthydro) validated with constructed state; residual = a few sub-fields needing CNP/landuse/nocomp mode state (NOT bodies). Suite → 21,190.
+- **Plant-hydraulics Tier B COMPLETE (#89)** — `Hydraulics_BC` transpiration solve + `hydraulics_drive`/`FillDrainRhizShells`/`RecruitWUptake`/`SetMaxCondConnections`/`Report1DError` + the NEW gated `hydraulics_drive` callsite. Now `ftc_*`/`btran`/`leaf_psi`/`rootuptake`/`sapflow` populate live under `hlm_use_planthydro`; the ported mortality + photosynthesis consumer branches stop reading zeros. Mass-balance closes ~1e-15.
+
 **Remaining tail (the table at the bottom is updated with ✅ markers):**
-1. **W4b full *in-solve* photosynthesis coupling** — currently `FatesPlantRespPhotosynthDrive` is called *adjacent to* `canopy_fluxes_core!` (post-solve `t_veg`), not inside its Enzyme-compilable iterative solve. Future: move inside for two-way leaf-temp↔flux coupling.
-2. **Plant-hydraulics Tier B** — `Hydraulics_BC` transpiration solve (~544 F90 lines) + `hydraulics_drive`/`FillDrainRhizShells`/`RecruitWUptake` + a NEW gated `hydraulics_drive` callsite in the canopy-flux path. This is what fills `ftc_*`/`btran`/`leaf_psi` (consumer branches already ported, reading zeros until then).
-3. **History fills H1–H6** — NOW UNBLOCKED (per-step state is live under `use_fates`): `update_history_dyn1!` finish, `dyn2`, `nutrflux`, `hifrq1/2`, `hydraulics`. Plus the size/age/coage/height class-index helpers shared by `dyn2`/`hifrq2`.
-4. **Restart R6/R7/R8** — disturbance running-means (needs SetRMean/GetRMean restart accessors); cohort PRT pools (needs `InitPRTObject` on restart cohorts); cohort hydraulics (needs `InitHydrCohort`, now ported via Tier A).
-5. ✅ ~~Real FATES param-file reader~~ — DONE (PR #85): `read_fates_params!` from `data/fates/fates_params_default.cdl`.
-6. **Multi-veg-patch + multi-site** — current column↔patch map is `p = col.patchi[c]+1` (single veg patch MVP); the full `ifp` walk is needed for real FATES columns. AD/GPU for FATES columns remains explicitly out of scope.
-7. **Multi-day driver-integrated run / stability** — W5 is currently *helper-tested* (drives `fates_daily_dynamics_step!` directly); a full multi-day `clm_drv!` run with `use_fates=true` exercising the whole loop (radiation→photosynthesis→daily-dynamics→history) end-to-end, plus a spin-up/stability check, is the natural next validation.
+1. **W4b full *in-solve* photosynthesis coupling** — `FatesPlantRespPhotosynthDrive` is called *adjacent to* `canopy_fluxes_core!` (post-solve `t_veg`), not inside its Enzyme-compilable iterative solve. Future: move inside for two-way leaf-temp↔flux coupling.
+2. ✅ ~~Plant-hydraulics Tier B~~ — DONE (#89).
+3. ✅ ~~History fills H1–H6~~ — DONE (#87/#88/#90): every `update_history_*` body filled; class-index helpers were already ported.
+4. **Restart R6/R7/R8** — disturbance running-means (needs SetRMean/GetRMean restart accessors); cohort PRT pools (needs `InitPRTObject` on restart cohorts); cohort hydraulics (needs `InitHydrCohort`, ported via Tier A).
+5. ✅ ~~Real FATES param-file reader~~ — DONE (#85).
+6. **Multi-veg-patch + multi-site** — column↔patch map is `p = col.patchi[c]+1` (single veg patch MVP); the full `ifp` walk is needed for real FATES columns. AD/GPU for FATES columns remains explicitly out of scope.
+7. ✅ ~~Multi-day driver-integrated run~~ — DONE (#86, 2 days). Longer spin-up/stability + the FIRE/CNP/DAMAGE *modes* exercised through a full live driver run (vs constructed-state history validation) remain.
 
 ---
 
@@ -216,7 +221,11 @@ exist at `FatesRestartInterfaceMod.jl:496,821` (overlaps R8).
 | 4 | W4 btran + photosynthesis hooks | wiring | M | W2 | ✅ #84 (W4b adjacent, not in-solve) |
 | 5 | W5 daily dynamics + balance check (helper-tested) | wiring | L | W2–W4 | ✅ #85 (setFilters/multi-day deferred) |
 | – | Real FATES param-file reader (CDL → register/receive) | params | L | — | ✅ #85 (numpft=14) |
-| 6 | W6 history dyn1 wiring + validation harness | wiring | M | W5 | ⬜ (init-wiring done #84; dyn1 fills pending) |
+| 6 | W6 history interface wiring + dyn1/hifrq1 fills | wiring | M | W5 | ✅ #87 |
+| – | Multi-day clm_drv! integrated run (2 days, all hooks) | wiring | M | W1–W5 | ✅ #86 |
+| – | History dyn2 + hifrq2 (per-class disaggregation) | history | L | #87 | ✅ #88 |
+| – | History nutrflux + fire + damage + hydraulics (final) | history | L | #88 | ✅ #90 |
+| – | Plant-hydraulics Tier B (Hydraulics_BC + callsite) | hydro | L | Tier A | ✅ #89 |
 | – | R1 cohort diag+mort restart fills | restart | S | — | ✅ #82 |
 | – | R2 patch fuel/rad/site-hydro-scalar restart | restart | S | — | ✅ #82 |
 | – | R3 `update_3dpatch_radiation!` | restart | M | R2 | ✅ #82 |
