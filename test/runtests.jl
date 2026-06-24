@@ -117,6 +117,7 @@ using CLM
     include("test_cn_precision_control.jl")
     include("test_veg_struct_update.jl")
     include("test_nutrient_competition.jl")
+    include("test_flexiblecn.jl")
     include("test_vegetation_facade.jl")
     include("test_atm2lnd.jl")
     include("test_lnd2atm.jl")

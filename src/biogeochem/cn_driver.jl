@@ -31,6 +31,7 @@ Base.@kwdef mutable struct CNDriverConfig
     use_cn::Bool = false
     use_fun::Bool = false
     use_flexiblecn::Bool = false     # flexible leaf C:N (FUN cost adjustment)
+    carbon_resp_opt::Int = 0         # 1 => FlexibleCN high-C:N tissue C turnover
     use_crop::Bool = false
     use_crop_agsys::Bool = false
     use_nitrif_denitrif::Bool = false
@@ -315,13 +316,25 @@ function cn_driver_no_leaching!(
         grpnow = Float64.(pftcon_main.grpnow), fleafcn = Float64.(pftcon_main.fleafcn),
         ffrootcn = Float64.(pftcon_main.ffrootcn), fstemcn = Float64.(pftcon_main.fstemcn),
         astemf = Float64.(pftcon_main.astemf), season_decid = Float64.(pftcon_main.season_decid),
-        stress_decid = Float64.(pftcon_main.stress_decid))
+        stress_decid = Float64.(pftcon_main.stress_decid), evergreen = Float64.(pftcon_main.evergreen))
     if num_bgc_vegp > 0 && cn_shared_params !== nothing && _pftnc !== nothing &&
        patch !== nothing && crop !== nothing && cnveg_state !== nothing
-        calc_plant_nutrient_demand!(mask_bgc_vegp, bounds_patch, false,
-            _pftnc, cn_shared_params, patch, crop, cnveg_state,
-            cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
-            dt = dt, npcropmin = npcropmin, nrepr = nrepr)
+        # FlexibleCN dispatches to the parallel N-demand method (Michaelis-Menten
+        # uptake kinetics + flexible leaf C:N) when use_flexiblecn is set AND the
+        # extra soilbgc/canopystate inputs it needs are available; otherwise the
+        # CLM4.5 default method runs (default path is byte-identical).
+        if config.use_flexiblecn && canopystate !== nothing && dzsoi_decomp !== nothing
+            calc_plant_nutrient_demand_flexiblecn!(mask_bgc_vegp, bounds_patch, false,
+                _pftnc, cn_shared_params, patch, crop, canopystate, cnveg_state,
+                cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf, soilbgc_ns, soilbgc_cf;
+                dt = dt, dzsoi_decomp = dzsoi_decomp, nlevdecomp = nlevdecomp,
+                npcropmin = npcropmin, nrepr = nrepr)
+        else
+            calc_plant_nutrient_demand!(mask_bgc_vegp, bounds_patch, false,
+                _pftnc, cn_shared_params, patch, crop, cnveg_state,
+                cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
+                dt = dt, npcropmin = npcropmin, nrepr = nrepr)
+        end
         # patch→column "unity" aggregation of plant N demand for competition
         _Tnd = eltype(soilbgc_state.plant_ndemand_col)
         for c in bounds_col
@@ -487,13 +500,26 @@ function cn_driver_no_leaching!(
         # (consumed by c_state_update1! → makes leafc finite) + cnveg_nf alloc fluxes.
         if num_bgc_vegp > 0 && _pftnc !== nothing && cn_shared_params !== nothing &&
            patch !== nothing && crop !== nothing && cnveg_state !== nothing
-            calc_plant_nutrient_competition!(mask_bgc_vegp, bounds_patch,
-                _pftnc, cn_shared_params, patch, crop, cnveg_state,
-                cnveg_cs, cnveg_cf, cnveg_nf;
-                fpg_col = soilbgc_state.fpg_col,
-                cnveg_ns = cnveg_ns, dt = dt,
-                use_c13 = config.use_c13, use_c14 = config.use_c14,
-                npcropmin = npcropmin, nrepr = nrepr)
+            # FlexibleCN allocation: plant_calloc = availc (no GPP downregulation),
+            # npool_to_* drawn from the existing npool by fractional demand, plus
+            # carbon_resp_opt high-C:N tissue turnover. Default path byte-identical.
+            if config.use_flexiblecn && canopystate !== nothing
+                calc_plant_nutrient_competition_flexiblecn!(mask_bgc_vegp, bounds_patch,
+                    _pftnc, cn_shared_params, patch, crop, canopystate, cnveg_state,
+                    cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
+                    fpg_col = soilbgc_state.fpg_col, dt = dt,
+                    use_c13 = config.use_c13, use_c14 = config.use_c14,
+                    carbon_resp_opt = config.carbon_resp_opt,
+                    npcropmin = npcropmin, nrepr = nrepr)
+            else
+                calc_plant_nutrient_competition!(mask_bgc_vegp, bounds_patch,
+                    _pftnc, cn_shared_params, patch, crop, cnveg_state,
+                    cnveg_cs, cnveg_cf, cnveg_nf;
+                    fpg_col = soilbgc_state.fpg_col,
+                    cnveg_ns = cnveg_ns, dt = dt,
+                    use_c13 = config.use_c13, use_c14 = config.use_c14,
+                    npcropmin = npcropmin, nrepr = nrepr)
+            end
         end
 
         # 4. Actual decomposition
