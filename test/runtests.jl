@@ -344,6 +344,14 @@ using CLM
     # helpers (included above).
     include("test_fates_spinup.jl")
 
+    # FATES multi-veg-patch / multi-site coupling: the generalized ifp patch-walk
+    # (p = ifp + col.patchi[c]) + setFilters-equivalent weight rebuild. PART A
+    # splits a cold-start site into 2 vegetated patches and asserts the walk +
+    # bc pack/unpack + fates_set_filters! cover both patch slots; PART B cold-starts
+    # nsites=2 on two FATES columns and loops clm_drv! >= 1 day, asserting both run
+    # finite + the daily step advances both sites.
+    include("test_fates_multipatch.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),

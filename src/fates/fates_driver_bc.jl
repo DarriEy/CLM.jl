@@ -15,6 +15,159 @@
 #
 # Only the fields needed for the four W3/W4 hooks are touched — kept minimal and
 # finite. All packers/unpackers are gated by the caller behind `config.use_fates`.
+#
+# MULTI-VEG-PATCH / MULTI-SITE GENERALIZATION
+# -------------------------------------------
+# A real FATES column can carry MORE THAN ONE vegetated patch (disturbance splits a
+# patch into a disturbed + an undisturbed remnant), and a run can carry MORE THAN
+# ONE FATES site/column. The Fortran host walks the site's age-ordered patch linked
+# list (`oldest_patch -> younger`), and for each VEGETATED patch (i.e. skipping a
+# `nocomp_bareground` patch, which does not advance the index) maps the FATES patch
+# to its HLM patch index via
+#
+#     p = ifp + col%patchi(c)         (ifp = 1, 2, ..., site%youngest_patch%patchno)
+#
+# so the HLM bare-ground patch sits at `col%patchi(c)+0` and the vegetated patches
+# at `+1, +2, ...`.  The per-patch FATES bc arrays (`*_pa`) are indexed by `ifp`.
+#
+# `fates_veg_patches(site, c, col)` reproduces exactly that walk: it returns the
+# `(ifp, p)` pairs for the site's vegetated patches mapped onto column `c`'s HLM
+# patch slots. The single-veg-patch MVP value `p = col.patchi[c]+1` is just the
+# `ifp == 1` case of this walk; the carbon-only NBG cold start builds exactly one
+# (vegetated, non-bareground) patch, so for that config the walk yields `(1, +1)`
+# and the generalized code is byte-identical to the old fixed indexing.
+
+"""
+    fates_veg_patches(site, c, col) -> Vector{Tuple{Int,Int}}
+
+Walk a FATES site's age-ordered patch linked list (`oldest_patch -> younger`) and
+return the `(ifp, p)` pairs for its VEGETATED patches, where `ifp` is the 1-based
+vegetated-patch index (used to slice the patch-dimensioned `bc_*_pa` arrays) and
+`p = ifp + col.patchi[c]` is the corresponding HLM patch index in column `c`.
+
+Mirrors the Fortran host `ifp` walk (clmfates_interfaceMod.F90): a
+`nocomp_bareground` patch is skipped and does NOT advance `ifp` (so `ifp == 1` is
+always the first vegetated patch). The HLM bare-ground patch lives at
+`col.patchi[c]+0`; vegetated patches at `+1, +2, ...`.
+
+Patches whose HLM index would exceed the column's reserved patch range
+(`col.patchf[c]`) are dropped with a warning — the HLM patch allocation is static,
+so a FATES column must reserve enough patch slots for its maximum patch count.
+"""
+function fates_veg_patches(site, c::Int, col)
+    out = Tuple{Int,Int}[]
+    pi = col.patchi[c]
+    # Reserved HLM patch upper bound. Prefer patchf when it is a valid index
+    # (>= patchi); otherwise fall back to patchi + npatches[c] - 1 (bare-ground at
+    # +0 plus the reserved veg slots). Some helper-driven setups leave patchf unset
+    # (ISPVAL) but do set npatches; this keeps the walk inside the HLM patch
+    # allocation either way (matching the old single-patch p = patchi[c]+1 bound).
+    pf = col.patchf[c]
+    if pf < pi
+        npc = col.npatches[c]
+        pf = npc >= 1 ? pi + npc - 1 : pi   # +0 bare-ground only ⇒ no veg slot
+    end
+    ifp = 0
+    cp = site.oldest_patch
+    while cp !== nothing
+        if cp.nocomp_pft_label != nocomp_bareground
+            ifp += 1
+            p = ifp + pi
+            if p <= pf
+                push!(out, (ifp, p))
+            else
+                @warn "FATES column $c has more vegetated patches than reserved HLM " *
+                      "patch slots (patchi=$pi patchf=$pf); patch ifp=$ifp dropped. " *
+                      "Increase the column's patch allocation."
+            end
+        end
+        cp = cp.younger
+    end
+    return out
+end
+
+"""
+    fates_set_filters!(inst; c, s)
+
+Rebuild the HLM per-patch weights for FATES column `c` from the freshly-advanced
+FATES patch areas, mirroring the Fortran host `wrap_update_hlmfates_dyn` +
+`setFilters` sequence (clm_driver.F90:1151) that runs after `dynamics_driv`.
+
+The downstream per-column averaging (`p2c_1d!`) weights a patch by
+`pch.active[p] && pch.wtcol[p]`, so after a disturbance changes the FATES patch
+population the HLM patch weights must be recomputed or the column aggregates would
+still reflect the pre-disturbance single-patch layout. This sets, for column `c`:
+
+  * the bare-ground HLM patch (`col.patchi[c]+0`): `is_bareground=true`,
+    `wt_ed = max(0, 1 - sum(canopy_fraction_pa))`;
+  * each vegetated HLM patch (`+ifp`): `is_veg=true`,
+    `wt_ed = canopy_fraction_pa[ifp]`, and marks it `active`;
+  * any reserved-but-now-unused veg slot beyond the live patch count: zeroed +
+    `active=false` (a disturbance can MERGE patches → fewer live patches);
+  * `pch.wtcol[p] = wt_ed[p]` for every patch in the column's range (the weight the
+    column averaging reads).
+
+This is the minimal `setFilters!`-equivalent: it propagates FATES patch-weight
+changes into the weights the non-FATES column averaging consumes. A full CLM
+BitVector-filter rebuild (reweight_wrapup) is NOT done — the FATES per-timestep
+hooks index patches directly via `fates_veg_patches`, and `p2c_1d!` reads
+`active`/`wtcol`, so the weights are the load-bearing quantity. Gated by the caller
+behind `config.use_fates`.
+"""
+function fates_set_filters!(inst::CLMInstances; c::Int, s::Int)
+    fates = inst.fates
+    fates === nothing && return inst
+    col = inst.column
+    pch = inst.patch
+    bc_out = fates.bc_out[s]
+    site = fates.sites[s]
+
+    pi = col.patchi[c]
+    pf = col.patchf[c]
+
+    # Number of vegetated patches in the site (youngest patch's patchno = the
+    # total veg-patch count for the age-ordered list).
+    npatch = site.youngest_patch === nothing ? 0 : site.youngest_patch.patchno
+
+    # Reset the column's FATES weight flags over its whole patch range.
+    for p in pi:pf
+        if !isempty(pch.is_veg);        pch.is_veg[p] = false;        end
+        if !isempty(pch.is_bareground); pch.is_bareground[p] = false; end
+        if !isempty(pch.wt_ed);         pch.wt_ed[p] = 0.0;           end
+    end
+
+    # Bare-ground HLM patch (col.patchi[c]+0): weight = 1 - sum of canopy fractions.
+    sum_canopy = 0.0
+    for ifp in 1:npatch
+        ifp <= length(bc_out.canopy_fraction_pa) || break
+        sum_canopy += bc_out.canopy_fraction_pa[ifp]
+    end
+    bg = pi
+    if !isempty(pch.is_bareground); pch.is_bareground[bg] = true; end
+    wt_bg = max(0.0, 1.0 - sum_canopy)
+    if !isempty(pch.wt_ed); pch.wt_ed[bg] = wt_bg; end
+    pch.wtcol[bg] = wt_bg
+
+    # Vegetated HLM patches (+ifp): weight = canopy_fraction_pa[ifp].
+    for (ifp, p) in fates_veg_patches(site, c, col)
+        wt = ifp <= length(bc_out.canopy_fraction_pa) ?
+             bc_out.canopy_fraction_pa[ifp] : 0.0
+        if !isempty(pch.is_veg); pch.is_veg[p] = true; end
+        if !isempty(pch.wt_ed);  pch.wt_ed[p] = wt;    end
+        pch.wtcol[p] = wt
+        pch.active[p] = true
+    end
+
+    # Reserved-but-unused vegetated slots (a fuse/merge can leave fewer live
+    # patches than were reserved): zero them and mark inactive so the column
+    # averaging skips them.
+    for p in (pi + npatch + 1):pf
+        pch.wtcol[p] = 0.0
+        pch.active[p] = false
+    end
+
+    return inst
+end
 
 """
     _fates_first_fates_column(col) -> Int
@@ -46,9 +199,16 @@ vegetated patch `p` state:
 
 The FATES radiation solver uses `num_swb` bands (vis, nir); CLM carries `NUMRAD`
 (also 2) radiation bands in the same vis/nir order, so the band index maps directly.
+
+The `ifp` keyword selects which vegetated-patch slot of the patch-dimensioned
+`bc_in` arrays to fill (1-based, from the [`fates_veg_patches`](@ref) walk). The
+ground albedo is site-broadband so it is (re)written each call. The forcing /
+coszen are site/column-uniform, so each patch slot gets the same column value —
+matching the Fortran host which broadcasts `forc_solad(g,:)` to every
+`solad_parb(ifp,:)`. The driver hook loops `(ifp, p)` over the site's veg patches.
 """
 function fates_pack_bcin_radiation!(inst::CLMInstances; s::Int = 1, c::Int = 1,
-                                    p::Int = 1, coszen::Real)
+                                    p::Int = 1, ifp::Int = 1, coszen::Real)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_in[s]
@@ -58,15 +218,15 @@ function fates_pack_bcin_radiation!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 
     g = inst.column.gridcell[c]
 
-    # Radiation (patch, band). ifp = 1 (single vegetated patch).
+    # Radiation (patch, band) for this vegetated patch (ifp).
     for ib in 1:num_swb
-        bc.solad_parb[1, ib] = a2l.forc_solad_downscaled_col[c, ib]
-        bc.solai_parb[1, ib] = a2l.forc_solai_grc[g, ib]
+        bc.solad_parb[ifp, ib] = a2l.forc_solad_downscaled_col[c, ib]
+        bc.solai_parb[ifp, ib] = a2l.forc_solai_grc[g, ib]
     end
 
-    bc.coszen_pa[1]        = coszen
-    bc.filter_vegzen_pa[1] = coszen > 0.0
-    bc.fcansno_pa[1]       = 0.0  # no snow-on-canopy source on the carbon-only path
+    bc.coszen_pa[ifp]        = coszen
+    bc.filter_vegzen_pa[ifp] = coszen > 0.0
+    bc.fcansno_pa[ifp]       = 0.0  # no snow-on-canopy source on the carbon-only path
 
     # Ground albedo (site broadband). Default to 0 if surfalb not yet computed
     # (the very first timestep before surface_albedo! runs).
@@ -163,7 +323,8 @@ soil-suction `smp_sl` and `coszen` were already packed by the btran/radiation
 helpers; the radiation profiles come from `FatesSunShadeFracs`.
 """
 function fates_pack_bcin_photosynthesis!(inst::CLMInstances; s::Int = 1, c::Int = 1,
-                                         p::Int = 1, forc_pbot::Real, forc_pco2::Real,
+                                         p::Int = 1, ifp::Int = 1,
+                                         forc_pbot::Real, forc_pco2::Real,
                                          forc_po2::Real, t_veg::Real, tgcm::Real,
                                          esat_tv::Real, eair::Real, rb::Real,
                                          dayl_factor::Real)
@@ -171,16 +332,16 @@ function fates_pack_bcin_photosynthesis!(inst::CLMInstances; s::Int = 1, c::Int 
     fates === nothing && return inst
     bc = fates.bc_in[s]
 
-    bc.forc_pbot          = forc_pbot
-    bc.cair_pa[1]         = forc_pco2
-    bc.oair_pa[1]         = forc_po2
-    bc.dayl_factor_pa[1]  = dayl_factor
-    bc.esat_tv_pa[1]      = esat_tv
-    bc.eair_pa[1]         = eair
-    bc.rb_pa[1]           = rb
-    bc.t_veg_pa[1]        = t_veg
-    bc.tgcm_pa[1]         = tgcm
-    bc.filter_photo_pa[1] = 2  # 2 = "compute photosynthesis" branch
+    bc.forc_pbot            = forc_pbot   # site scalar
+    bc.cair_pa[ifp]         = forc_pco2
+    bc.oair_pa[ifp]         = forc_po2
+    bc.dayl_factor_pa[ifp]  = dayl_factor
+    bc.esat_tv_pa[ifp]      = esat_tv
+    bc.eair_pa[ifp]         = eair
+    bc.rb_pa[ifp]           = rb
+    bc.t_veg_pa[ifp]        = t_veg
+    bc.tgcm_pa[ifp]         = tgcm
+    bc.filter_photo_pa[ifp] = 2  # 2 = "compute photosynthesis" branch
 
     return inst
 end
@@ -295,10 +456,16 @@ mirroring the Fortran host `dynamics_driv`:
   4. `TotalBalanceCheck(site, -1)` — final mass-conservation audit (throws on
      imbalance > 1e-5),
   5. unpack the canopy structure (`fates_unpack_bcout_canopy_structure!`) back into
-     CLM canopystate (elai/esai/htop/hbot/z0m/displa/dleaf) for each site's veg patch.
+     CLM canopystate (elai/esai/htop/hbot/z0m/displa/dleaf) for EACH vegetated patch
+     of the site (the `ifp` walk — a disturbance can split a patch into several),
+  6. rebuild the HLM per-patch weights for the column
+     (`fates_set_filters!`, mirroring the Fortran host `setFilters` after
+     `dynamics_driv`) so the post-disturbance patch-weight changes propagate into
+     the per-column averaging.
 
-The site<->column<->veg-patch map mirrors the W3/W4 hooks: FATES site `s` maps onto
-the `s`-th `col.is_fates` column, vegetated patch = `col.patchi[c] + 1`.
+The site<->column map mirrors the W3/W4 hooks: FATES site `s` maps onto the `s`-th
+`col.is_fates` column; each vegetated patch maps to HLM patch
+`p = ifp + col.patchi[c]` (bare-ground at `+0`).
 
 When SPITFIRE is active (`hlm_spitfire_mode > hlm_sf_nofire_def`), pass `fire_weather`
 (a `NamedTuple` with `precip24` [mm/s], `relhumid24` [%], `wind24` [m/s], optionally
@@ -322,12 +489,15 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     #    mode, so it is safe to call unconditionally.
     UnPackNutrientAquisitionBCs(fates.sites, fates.bc_in)
 
+    # Map each FATES site index s -> its CLM column c (the s-th is_fates column).
+    site_col = zeros(Int, fates.nsites)
+
     s = 0
     for c in 1:length(col.is_fates)
         col.is_fates[c] || continue
         s += 1
         s <= fates.nsites || break
-        p = col.patchi[c] + 1   # vegetated patch (bare-ground at +0)
+        site_col[s] = c
 
         # 1. pack the daily soil/decomp bc_in (+ SPITFIRE fire-weather when on).
         fates_pack_bcin_daily!(inst; s=s, c=c, nlevsoil=nlevsoil,
@@ -344,12 +514,36 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
 
         # 4. final mass-conservation audit (throws on imbalance).
         TotalBalanceCheck(site, -1)
-
-        # 5. unpack canopy structure back into CLM.
-        fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p)
     end
 
-    # 6. fill the daily ("dynamics") history buffers from the freshly-advanced
+    # 5. summarize the per-patch canopy totals (recomputes cohort crown areas
+    #    `c_area` + patch `total_canopy_area` from allometry), then pack the FATES
+    #    canopy state into bc_out for ALL sites — fills the per-vegetated-patch *_pa
+    #    arrays (elai/esai/htop/.../canopy_fraction_pa) for every (possibly newly
+    #    split) patch. canopy_summarization! is required before update_hlm_dynamics!:
+    #    the latter derives canopy_fraction_pa/elai_pa from `total_canopy_area`, which
+    #    is otherwise stale/NaN if no radiation pass has run this step (the real
+    #    driver runs radiation first, but a daily step driven in isolation has not).
+    #    Mirrors the Fortran host (canopy summarization precedes update_hlm_dynamics
+    #    in wrap_update_hlmfates_dyn after dynamics). `fcolumn` (site->column map) is
+    #    unused by the body, which indexes only by site.
+    canopy_summarization!(fates.nsites, fates.sites, fates.bc_in)
+    update_hlm_dynamics!(fates.nsites, fates.sites, site_col, fates.bc_out)
+
+    # 6. per FATES column: unpack the canopy structure into CLM for each vegetated
+    #    patch (the ifp walk — a disturbance can split one patch into several), then
+    #    rebuild the HLM per-patch weights (setFilters-equivalent) from the new
+    #    canopy_fraction_pa so the per-column averaging sees the right weights.
+    for s in 1:fates.nsites
+        c = site_col[s]
+        c == 0 && continue
+        for (ifp, p) in fates_veg_patches(fates.sites[s], c, col)
+            fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p, ifp=ifp)
+        end
+        fates_set_filters!(inst; c=c, s=s)
+    end
+
+    # 7. fill the daily ("dynamics") history buffers from the freshly-advanced
     #    site/patch/cohort state. Mirrors the Fortran host's `update_history_dyn`
     #    call after `dynamics_driv`. Write-only diagnostics; gated on the history
     #    interface having been built (clm_fates_init!) — a no-op otherwise.
@@ -409,6 +603,7 @@ function fates_pack_bcin_hydro!(inst::CLMInstances; s::Int = 1, c::Int = 1,
     ss  = inst.soilstate
     wsb = inst.water.waterstatebulk_inst
     wfb = inst.water.waterfluxbulk_inst
+    col = inst.column
 
     joff = varpar.nlevsno  # snow-layer offset into h2osoi_liq_col
 
@@ -424,8 +619,10 @@ function fates_pack_bcin_hydro!(inst::CLMInstances; s::Int = 1, c::Int = 1,
     bc.smpmin_si = (!isempty(ss.smpmin_col) && isfinite(ss.smpmin_col[c])) ?
                    ss.smpmin_col[c] : -1.0e8
 
-    # Patch transpiration demand for the (single) vegetated patch (ifp = 1).
-    bc.qflx_transp_pa[1] = wfb.wf.qflx_tran_veg_patch[p]
+    # Patch transpiration demand per vegetated patch (ifp walk → HLM patch p).
+    for (ifp, pp) in fates_veg_patches(fates.sites[s], c, col)
+        bc.qflx_transp_pa[ifp] = wfb.wf.qflx_tran_veg_patch[pp]
+    end
 
     return inst
 end
@@ -463,8 +660,9 @@ function fates_hydraulics_step!(inst::CLMInstances; nlevsoil::Int, dtime::Real)
         # A site without a built hydraulics object (planthydro just toggled, or no
         # cold-start hydro init) has nothing to solve — skip it.
         fates.sites[s].si_hydr === nothing && continue
-        p = col.patchi[c] + 1   # vegetated patch (bare-ground at +0)
-        fates_pack_bcin_hydro!(inst; s=s, c=c, p=p, nlevsoil=nlevsoil)
+        # fates_pack_bcin_hydro! walks all the site's vegetated patches internally
+        # (ifp → HLM patch p) for the per-patch transpiration demand.
+        fates_pack_bcin_hydro!(inst; s=s, c=c, nlevsoil=nlevsoil)
     end
 
     # Only drive when at least one site is hydro-enabled.
@@ -480,15 +678,16 @@ Write the FATES sun/shade `bc_out` back to CLM canopystate for column `c` /
 patch `p`: `fsun_pa -> fsun_patch`, `laisun_pa -> laisun_patch`,
 `laisha_pa -> laisha_patch`.
 """
-function fates_unpack_bcout_sunfrac!(inst::CLMInstances; s::Int = 1, c::Int = 1, p::Int = 1)
+function fates_unpack_bcout_sunfrac!(inst::CLMInstances; s::Int = 1, c::Int = 1,
+                                     p::Int = 1, ifp::Int = 1)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_out[s]
     cs = inst.canopystate
 
-    cs.fsun_patch[p]   = bc.fsun_pa[1]
-    cs.laisun_patch[p] = bc.laisun_pa[1]
-    cs.laisha_patch[p] = bc.laisha_pa[1]
+    cs.fsun_patch[p]   = bc.fsun_pa[ifp]
+    cs.laisun_patch[p] = bc.laisun_pa[ifp]
+    cs.laisha_patch[p] = bc.laisha_pa[ifp]
 
     return inst
 end
@@ -501,20 +700,20 @@ patch `p`: `albd_parb -> albd_patch`, `albi_parb -> albi_patch`,
 `fabd/fabi_parb -> fabd/fabi_patch`, `ftdd/ftid/ftii_parb -> ftdd/ftid/ftii_patch`.
 """
 function fates_unpack_bcout_canopy_radiation!(inst::CLMInstances; s::Int = 1,
-                                              c::Int = 1, p::Int = 1)
+                                              c::Int = 1, p::Int = 1, ifp::Int = 1)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_out[s]
     sa = inst.surfalb
 
     for ib in 1:num_swb
-        sa.albd_patch[p, ib] = bc.albd_parb[1, ib]
-        sa.albi_patch[p, ib] = bc.albi_parb[1, ib]
-        sa.fabd_patch[p, ib] = bc.fabd_parb[1, ib]
-        sa.fabi_patch[p, ib] = bc.fabi_parb[1, ib]
-        sa.ftdd_patch[p, ib] = bc.ftdd_parb[1, ib]
-        sa.ftid_patch[p, ib] = bc.ftid_parb[1, ib]
-        sa.ftii_patch[p, ib] = bc.ftii_parb[1, ib]
+        sa.albd_patch[p, ib] = bc.albd_parb[ifp, ib]
+        sa.albi_patch[p, ib] = bc.albi_parb[ifp, ib]
+        sa.fabd_patch[p, ib] = bc.fabd_parb[ifp, ib]
+        sa.fabi_patch[p, ib] = bc.fabi_parb[ifp, ib]
+        sa.ftdd_patch[p, ib] = bc.ftdd_parb[ifp, ib]
+        sa.ftid_patch[p, ib] = bc.ftid_parb[ifp, ib]
+        sa.ftii_patch[p, ib] = bc.ftii_parb[ifp, ib]
     end
 
     return inst
@@ -527,16 +726,16 @@ Write the FATES BTRAN `bc_out` back to CLM: `btran_pa -> energyflux.btran_patch`
 `rootr_pasl -> soilstate.rootr_patch` (per soil layer).
 """
 function fates_unpack_bcout_btran!(inst::CLMInstances; s::Int = 1, c::Int = 1,
-                                   p::Int = 1, nlevsoil::Int)
+                                   p::Int = 1, ifp::Int = 1, nlevsoil::Int)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_out[s]
     ef = inst.energyflux
     ss = inst.soilstate
 
-    ef.btran_patch[p] = bc.btran_pa[1]
+    ef.btran_patch[p] = bc.btran_pa[ifp]
     for j in 1:nlevsoil
-        ss.rootr_patch[p, j] = bc.rootr_pasl[1, j]
+        ss.rootr_patch[p, j] = bc.rootr_pasl[ifp, j]
     end
 
     return inst
@@ -549,38 +748,40 @@ Write the FATES photosynthesis `bc_out` resistances back to CLM photosyns for
 patch `p`: `rssun_pa -> rssun_patch`, `rssha_pa -> rssha_patch`.
 """
 function fates_unpack_bcout_photosynthesis!(inst::CLMInstances; s::Int = 1,
-                                            c::Int = 1, p::Int = 1)
+                                            c::Int = 1, p::Int = 1, ifp::Int = 1)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_out[s]
     ps = inst.photosyns
 
-    ps.rssun_patch[p] = bc.rssun_pa[1]
-    ps.rssha_patch[p] = bc.rssha_pa[1]
+    ps.rssun_patch[p] = bc.rssun_pa[ifp]
+    ps.rssha_patch[p] = bc.rssha_pa[ifp]
 
     return inst
 end
 
 """
-    fates_unpack_bcout_canopy_structure!(inst; s=1, c=1, p=1)
+    fates_unpack_bcout_canopy_structure!(inst; s=1, c=1, p=1, ifp=1)
 
-Write the FATES canopy-structure `bc_out` back to CLM canopystate for patch `p`:
-`elai/esai_pa`, `htop/hbot_pa`, `z0m/displa/dleaf_pa`.
+Write the FATES canopy-structure `bc_out` back to CLM canopystate for patch `p`
+(vegetated-patch slot `ifp`): `elai/esai_pa`, `htop/hbot_pa`, `z0m/displa/dleaf_pa`.
+The daily step runs `canopy_summarization!` + `update_hlm_dynamics!` before this, so
+the `bc_out` `*_pa[ifp]` slots are finite.
 """
 function fates_unpack_bcout_canopy_structure!(inst::CLMInstances; s::Int = 1,
-                                              c::Int = 1, p::Int = 1)
+                                              c::Int = 1, p::Int = 1, ifp::Int = 1)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_out[s]
     cs = inst.canopystate
 
-    cs.elai_patch[p]   = bc.elai_pa[1]
-    cs.esai_patch[p]   = bc.esai_pa[1]
-    cs.htop_patch[p]   = bc.htop_pa[1]
-    cs.hbot_patch[p]   = bc.hbot_pa[1]
-    cs.z0m_patch[p]    = bc.z0m_pa[1]
-    cs.displa_patch[p] = bc.displa_pa[1]
-    cs.dleaf_patch[p]  = bc.dleaf_pa[1]
+    cs.elai_patch[p]   = bc.elai_pa[ifp]
+    cs.esai_patch[p]   = bc.esai_pa[ifp]
+    cs.htop_patch[p]   = bc.htop_pa[ifp]
+    cs.hbot_patch[p]   = bc.hbot_pa[ifp]
+    cs.z0m_patch[p]    = bc.z0m_pa[ifp]
+    cs.displa_patch[p] = bc.displa_pa[ifp]
+    cs.dleaf_patch[p]  = bc.dleaf_pa[ifp]
 
     return inst
 end
