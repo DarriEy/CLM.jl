@@ -294,6 +294,13 @@ using CLM
     # and asserts mass conservation + finite/physical cohort/patch/canopy state.
     include("test_fates_daily_dynamics.jl")
 
+    # FATES first REAL multi-day clm_drv!-integrated run: cold-starts a 14-PFT
+    # carbon-only site on a FATES-tagged single column and loops the actual driver
+    # for 2 days (96 steps), firing the four per-timestep FATES hooks + the daily
+    # demographic step end-to-end; asserts finiteness, mass conservation, and that
+    # FATES demonstrably drove the column (laisha/rssun populated by the FATES path).
+    include("test_fates_driver_run.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),
