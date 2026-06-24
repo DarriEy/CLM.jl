@@ -145,6 +145,18 @@ function cn_driver_no_leaching!(
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
         soilbgc_state::SoilBiogeochemStateData,
+        # Carbon-isotope (C13/C14) tracer instances. Optional: only used when the
+        # matching use_c13/use_c14 flag is set AND the instance bundle is supplied;
+        # the CIsoFlux1/2/2h/2g/3 cascades + isotope litter transport are then run.
+        # Default (both nothing) → no isotope work → byte-identical to the bulk path.
+        c13_cnveg_cs::Union{CNVegCarbonStateData, Nothing} = nothing,
+        c13_cnveg_cf::Union{CNVegCarbonFluxData, Nothing} = nothing,
+        c13_soilbgc_cs::Union{SoilBiogeochemCarbonStateData, Nothing} = nothing,
+        c13_soilbgc_cf::Union{SoilBiogeochemCarbonFluxData, Nothing} = nothing,
+        c14_cnveg_cs::Union{CNVegCarbonStateData, Nothing} = nothing,
+        c14_cnveg_cf::Union{CNVegCarbonFluxData, Nothing} = nothing,
+        c14_soilbgc_cs::Union{SoilBiogeochemCarbonStateData, Nothing} = nothing,
+        c14_soilbgc_cf::Union{SoilBiogeochemCarbonFluxData, Nothing} = nothing,
         # Decomposition cascade and params (for rate constants + potential + decomp)
         cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
         decomp_bgc_state::Union{DecompBGCState, Nothing} = nothing,
@@ -186,6 +198,31 @@ function cn_driver_no_leaching!(
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
 
     num_bgc_vegp = count(mask_bgc_vegp)
+
+    # --------------------------------------------------
+    # Carbon-isotope (C13/C14) cascade gating
+    # --------------------------------------------------
+    # The CIsoFlux* cascades scale each bulk C flux into its isotopic counterpart
+    # using the donor-pool ratio (iso_state/tot_state). They run only when the flag
+    # is set AND the full isotope-instance bundle (veg + soil C state/flux) is
+    # supplied. Build a list of (isotope-tag, instances) to drive at each hook.
+    _iso_active = Tuple{String, CNVegCarbonStateData, CNVegCarbonFluxData,
+                        SoilBiogeochemCarbonStateData, SoilBiogeochemCarbonFluxData}[]
+    if config.use_c13 && c13_cnveg_cs !== nothing && c13_cnveg_cf !== nothing &&
+       c13_soilbgc_cs !== nothing && c13_soilbgc_cf !== nothing
+        push!(_iso_active, ("c13", c13_cnveg_cs, c13_cnveg_cf, c13_soilbgc_cs, c13_soilbgc_cf))
+    end
+    if config.use_c14 && c14_cnveg_cs !== nothing && c14_cnveg_cf !== nothing &&
+       c14_soilbgc_cs !== nothing && c14_soilbgc_cf !== nothing
+        push!(_iso_active, ("c14", c14_cnveg_cs, c14_cnveg_cf, c14_soilbgc_cs, c14_soilbgc_cf))
+    end
+    _have_iso = !isempty(_iso_active)
+    # Patch/pft metadata used by the patch→column scatters inside the cascades.
+    _iso_pwtcol = (patch !== nothing) ? patch.wtcol : Float64[]
+    _iso_lf_f   = (pftcon_main !== nothing) ? Float64.(pftcon_main.lf_f) : Matrix{Float64}(undef, 0, 0)
+    _iso_fr_f   = (pftcon_main !== nothing) ? Float64.(pftcon_main.fr_f) : Matrix{Float64}(undef, 0, 0)
+    _iso_pcol   = collect(Int, patch_column)
+    _iso_pivt   = collect(Int, ivt)
 
     # Convert the timestep to the working precision of the state once, so every
     # sub-module kernel receives an FT scalar (Metal rejects Float64 args). On the
@@ -576,8 +613,24 @@ function cn_driver_no_leaching!(
         dt=dt)
 
     # --------------------------------------------------
-    # CIsoFlux1 — not yet ported (carbon isotope flux calculations)
+    # CIsoFlux1 — non-mortality carbon-isotope fluxes (WIRED).
+    # Scales every veg + decomposition C flux into its C13/C14 counterpart by the
+    # donor-pool ratio, then gathers patch-level litterfall to columns.
     # --------------------------------------------------
+    if _have_iso && num_bgc_vegp > 0
+        _lprof = soilbgc_state.leaf_prof_patch
+        _fprof = soilbgc_state.froot_prof_patch
+        for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+            c_iso_flux1!(soilbgc_state, soilbgc_cf, soilbgc_cs, cnveg_cf, cnveg_cs,
+                _iscf, _iscs, _icf, _ics,
+                mask_bgc_soilc, mask_bgc_vegp, bounds_col, bounds_patch,
+                collect(Int, cascade_donor_pool), nlevdecomp,
+                ndecomp_cascade_transitions, _tag;
+                use_crop=config.use_crop, nrepr=nrepr, npcropmin=npcropmin,
+                patch_column=_iso_pcol, patch_itype=_iso_pivt, patch_wtcol=_iso_pwtcol,
+                lf_f=_iso_lf_f, fr_f=_iso_fr_f, leaf_prof=_lprof, froot_prof=_fprof)
+        end
+    end
 
     # --------------------------------------------------
     # CStateUpdate1
@@ -660,7 +713,11 @@ function cn_driver_no_leaching!(
             ndecomp_pools=ndecomp_pools,
             zsoi_vals=zsoi_vals,
             dzsoi_decomp_vals=dzsoi_decomp,
-            zisoi_vals=zisoi_vals)
+            zisoi_vals=zisoi_vals,
+            use_c13=(config.use_c13 && c13_soilbgc_cs !== nothing && c13_soilbgc_cf !== nothing),
+            use_c14=(config.use_c14 && c14_soilbgc_cs !== nothing && c14_soilbgc_cf !== nothing),
+            c13_cs=c13_soilbgc_cs, c13_cf=c13_soilbgc_cf,
+            c14_cs=c14_soilbgc_cs, c14_cf=c14_soilbgc_cf)
     end
 
     # --------------------------------------------------
@@ -692,7 +749,16 @@ function cn_driver_no_leaching!(
                 nlevdecomp = nlevdecomp, i_litr_min = i_litr_min,
                 i_litr_max = i_litr_max, i_met_lit = i_litr_min)
         end
-        # CIsoFlux2 — not yet ported
+        # CIsoFlux2 — gap-mortality carbon-isotope fluxes (WIRED).
+        if _have_iso
+            _mvegp = BitVector(mask_bgc_vegp)
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_iso_flux2!(soilbgc_state, cnveg_cf, cnveg_cs, _icf, _ics,
+                    _mvegp, bounds_patch, nlevdecomp, _tag;
+                    patch_column=_iso_pcol, patch_itype=_iso_pivt,
+                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f)
+            end
+        end
 
         c_state_update2!(cnveg_cs, cnveg_cf, soilbgc_cs;
             mask_soilc=mask_bgc_soilc,
@@ -722,7 +788,16 @@ function cn_driver_no_leaching!(
 
         # Harvest (Update2h)
         # CNHarvest — not yet ported
-        # CIsoFlux2h — not yet ported
+        # CIsoFlux2h — harvest-mortality carbon-isotope fluxes (WIRED).
+        if _have_iso
+            _mvegp = BitVector(mask_bgc_vegp)
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_iso_flux2h!(soilbgc_state, cnveg_cf, cnveg_cs, _icf, _ics,
+                    _mvegp, bounds_patch, nlevdecomp, _tag;
+                    patch_column=_iso_pcol, patch_itype=_iso_pivt,
+                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f)
+            end
+        end
 
         c_state_update2h!(cnveg_cs, cnveg_cf, soilbgc_cs;
             mask_soilc=mask_bgc_soilc,
@@ -752,7 +827,16 @@ function cn_driver_no_leaching!(
 
         # Gross unrepresented landcover change (Update2g)
         # CNGrossUnrep — not yet ported
-        # CIsoFlux2g — not yet ported
+        # CIsoFlux2g — gross-unrepresented-LCC carbon-isotope fluxes (WIRED).
+        if _have_iso
+            _mvegp = BitVector(mask_bgc_vegp)
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_iso_flux2g!(soilbgc_state, cnveg_cf, cnveg_cs, _icf, _ics,
+                    _mvegp, bounds_patch, nlevdecomp, _tag;
+                    patch_column=_iso_pcol, patch_itype=_iso_pivt,
+                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f)
+            end
+        end
 
         c_state_update2g!(cnveg_cs, cnveg_cf, soilbgc_cs;
             mask_soilc=mask_bgc_soilc,
@@ -797,7 +881,25 @@ function cn_driver_no_leaching!(
     if num_bgc_vegp > 0
         # NOTE: Fire area/fluxes (cnfire_area_li2014!, cnfire_fluxes_li2014!) are
         # implemented but not wired here — requires column temperature data in driver args.
-        # C isotope flux phase 3 (CIsoFlux3) not yet ported.
+        # CIsoFlux3 — fire-mortality carbon-isotope fluxes (WIRED). Scales the fire C
+        # fluxes into isotopic counterparts (zero here until fire fluxes are wired,
+        # but the cascade stays complete and mass/ratio-consistent).
+        if _have_iso
+            _lprof = soilbgc_state.leaf_prof_patch
+            _fprof = soilbgc_state.froot_prof_patch
+            _cprof = soilbgc_state.croot_prof_patch
+            _sprof = soilbgc_state.stem_prof_patch
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_iso_flux3!(soilbgc_state, soilbgc_cs, cnveg_cf, cnveg_cs,
+                    _icf, _ics, _iscs,
+                    mask_bgc_vegp, bounds_patch, nlevdecomp, ndecomp_pools,
+                    i_litr_min, i_litr_max, _tag;
+                    patch_column=_iso_pcol, patch_itype=_iso_pivt,
+                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f,
+                    leaf_prof=_lprof, froot_prof=_fprof,
+                    stem_prof=_sprof, croot_prof=_cprof)
+            end
+        end
 
         c_state_update3!(cnveg_cs, cnveg_cf, soilbgc_cs;
             mask_soilc=mask_bgc_soilc,

@@ -374,7 +374,17 @@ function litter_vert_transp!(
         spinup_state::Int = 0,
         use_soil_matrixcn::Bool = false,
         som_adv_flux_val::Real = 0.0,
-        max_depth_cryoturb_val::Real = 3.0)
+        max_depth_cryoturb_val::Real = 3.0,
+        # Carbon-isotope transport (optional). When use_c13/use_c14 is true the
+        # corresponding isotope SoilBiogeochem carbon state/flux instances must be
+        # supplied; their decomp_cpools are then transported alongside C and N
+        # (extra i_type passes, matching the Fortran ntype = 2 + use_c13 + use_c14).
+        use_c13::Bool = false,
+        use_c14::Bool = false,
+        c13_cs::Union{SoilBiogeochemCarbonStateData, Nothing} = nothing,
+        c13_cf::Union{SoilBiogeochemCarbonFluxData, Nothing} = nothing,
+        c14_cs::Union{SoilBiogeochemCarbonStateData, Nothing} = nothing,
+        c14_cf::Union{SoilBiogeochemCarbonFluxData, Nothing} = nothing)
 
     # Unpack cascade configuration. is_cwd (BitVector) + spinup_factor (host vector)
     # are indexed per-pool ON THE HOST and passed as scalars to the column kernel, so
@@ -389,7 +399,33 @@ function litter_vert_transp!(
     som_diffus_coef = st.som_diffus_coef_col
 
     nc = length(bounds)
-    ntype = 2   # always C and N; isotopes not implemented in this port
+    # i_type passes: always C (1) and N (2); + C13 and/or C14 when enabled, matching
+    # Fortran ntype = 2 + use_c13 + use_c14. Build the per-pass (state, sourcesink,
+    # transport_tendency) array triples in Fortran's case order (C13 before C14).
+    if use_c13 && (c13_cs === nothing || c13_cf === nothing)
+        error("litter_vert_transp!: use_c13=true requires c13_cs and c13_cf")
+    end
+    if use_c14 && (c14_cs === nothing || c14_cf === nothing)
+        error("litter_vert_transp!: use_c14=true requires c14_cs and c14_cf")
+    end
+    type_arrays = Vector{NTuple{3, Any}}()
+    push!(type_arrays, (cs.decomp_cpools_vr_col,
+                        cf.decomp_cpools_sourcesink_col,
+                        cf.decomp_cpools_transport_tendency_col))
+    push!(type_arrays, (ns.decomp_npools_vr_col,
+                        nf.decomp_npools_sourcesink_col,
+                        nf.decomp_npools_transport_tendency_col))
+    if use_c13
+        push!(type_arrays, (c13_cs.decomp_cpools_vr_col,
+                            c13_cf.decomp_cpools_sourcesink_col,
+                            c13_cf.decomp_cpools_transport_tendency_col))
+    end
+    if use_c14
+        push!(type_arrays, (c14_cs.decomp_cpools_vr_col,
+                            c14_cf.decomp_cpools_sourcesink_col,
+                            c14_cf.decomp_cpools_transport_tendency_col))
+    end
+    ntype = length(type_arrays)
 
     FT  = eltype(cs.decomp_cpools_vr_col)
     ref = cs.decomp_cpools_vr_col          # backend prototype for device scratch
@@ -446,16 +482,9 @@ function litter_vert_transp!(
     # ------ Loop over tracer types (C, N) ------
     for i_type in 1:ntype
 
-        # Select the appropriate state/flux arrays
-        if i_type == 1  # Carbon
-            conc_ptr          = cs.decomp_cpools_vr_col
-            source            = cf.decomp_cpools_sourcesink_col
-            trcr_tendency_ptr = cf.decomp_cpools_transport_tendency_col
-        else  # i_type == 2, Nitrogen
-            conc_ptr          = ns.decomp_npools_vr_col
-            source            = nf.decomp_npools_sourcesink_col
-            trcr_tendency_ptr = nf.decomp_npools_transport_tendency_col
-        end
+        # Select the appropriate state/flux arrays for this pass
+        # (1=C, 2=N, then C13 and/or C14 when enabled).
+        conc_ptr, source, trcr_tendency_ptr = type_arrays[i_type]
 
         for s in 1:ndecomp_pools
             # is_cwd[s] / spinup_factor[s] are read on the host and passed as scalars.

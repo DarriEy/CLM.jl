@@ -108,6 +108,7 @@ using CLM
     include("test_dust_emission.jl")
     include("test_satellite_phenology.jl")
     include("test_c_iso_flux.jl")
+    include("test_cisoflux.jl")
     include("test_cn_balance_check.jl")
     include("test_balance_check.jl")
     include("test_irrigation.jl")
