@@ -104,6 +104,10 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     # AccumField vectors (String/Matrix{Bool}/Matrix{Int}). `nothing` until a
     # use_crop run lazily registers the GDD fields on the first accumulator step.
     accum_mgr::Union{AccumManager, Nothing}
+    # Dust-emission scheme selector (DustEmisFactory equivalent). Defaults to
+    # inactive so the default driver path runs no dust mobilization (only the
+    # historically-wired dry deposition) and is byte-identical.
+    dust::DustEmisConfig
 end
 
 # Backward-compatible property accessors so existing code like config.use_cn still works
@@ -170,6 +174,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
                           n_drydep::Int=0, use_hydrstress::Bool=false, use_luna::Bool=false,
                           use_voc::Bool=false, megan::Union{MEGANConfig,Nothing}=nothing,
+                          dust::Union{DustEmisConfig,Nothing}=nothing,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
                           ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
                           i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
@@ -190,9 +195,12 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
         megan = MEGANConfig()
         megan_factors_init!(megan.megan_factors, 20)
     end
+    if dust === nothing
+        dust = DustEmisConfig()
+    end
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
                     use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, use_luna,
-                    use_voc, megan, nothing)
+                    use_voc, megan, nothing, dust)
 end
 
 # ---------------------------------------------------------------------------
@@ -1110,7 +1118,12 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # EMISSIONS
     # ========================================================================
-    # Placeholder: DustEmission!(bc, ...) [dust emission — deferred: Zender2003 mobilization]
+    # DustEmission — WIRED via the DustEmisFactory dispatcher (config.dust).
+    # No-op unless config.dust.active (default false → byte-identical default
+    # path). Fills inst.dust_emis.flx_mss_vrt_dst_patch from wind/soil state.
+    dust_emission!(config.dust, inst.dust_emis, filt.nolakep, pch, lun,
+                   bc_patch, bc.endl - bc.begl + 1,
+                   a2l.forc_rho_downscaled_col, ss, cs, wsb.ws, wdb, fv)
 
     # DustDryDep — WIRED
     dust_dry_dep!(inst.dust_emis, pch.active, pch.column, bc_patch,

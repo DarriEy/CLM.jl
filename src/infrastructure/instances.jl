@@ -273,7 +273,7 @@ function clm_instInit!(inst::CLMInstances;
                                  ndecomp_cascade_transitions)
 
     # --- Emissions ---
-    dust_emis_init!(inst.dust_emis, np)
+    dust_emis_init!(inst.dust_emis, np; nc=nc)
     vocemis_init!(inst.vocemis, np, ng, 20, 20)
     # MEGAN factors live on CLMDriverConfig.megan and are initialized there.
 
