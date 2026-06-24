@@ -42,6 +42,7 @@ Base.@kwdef mutable struct PftConNutrientCompetition{FT<:Real, V<:AbstractVector
     # Deciduous flags
     season_decid ::V = Float64[]  # binary flag for seasonal-deciduous (0 or 1)
     stress_decid ::V = Float64[]  # binary flag for stress-deciduous (0 or 1)
+    evergreen    ::V = Float64[]  # binary flag for evergreen leaf habit (0 or 1)
 end
 PftConNutrientCompetition{FT}(; kwargs...) where {FT<:Real} = PftConNutrientCompetition{FT, Vector{FT}}(; kwargs...)
 Adapt.@adapt_structure PftConNutrientCompetition

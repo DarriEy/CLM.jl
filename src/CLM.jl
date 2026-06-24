@@ -207,6 +207,7 @@ include("biogeochem/cn_driver.jl")
 include("biogeochem/cn_precision_control.jl")
 include("biogeochem/veg_struct_update.jl")
 include("biogeochem/nutrient_competition.jl")
+include("biogeochem/nutrient_competition_flexiblecn.jl")
 include("biogeochem/veg_compute_seed.jl")
 # dyn_cons_biogeochem (C/N conservation across land-cover change) depends on the
 # CN veg/soil C+N state+flux types, the dyn patch/column state updaters
