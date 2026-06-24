@@ -29,7 +29,7 @@ Done since this doc was written (suite 20,642 → 20,772; PRs #81–#84):
 - **Plant-hydraulics Tier B COMPLETE (#89)** — `Hydraulics_BC` transpiration solve + `hydraulics_drive`/`FillDrainRhizShells`/`RecruitWUptake`/`SetMaxCondConnections`/`Report1DError` + the NEW gated `hydraulics_drive` callsite. Now `ftc_*`/`btran`/`leaf_psi`/`rootuptake`/`sapflow` populate live under `hlm_use_planthydro`; the ported mortality + photosynthesis consumer branches stop reading zeros. Mass-balance closes ~1e-15.
 
 **Remaining tail (the table at the bottom is updated with ✅ markers):**
-1. **W4b full *in-solve* photosynthesis coupling** — `FatesPlantRespPhotosynthDrive` is called *adjacent to* `canopy_fluxes_core!` (post-solve `t_veg`), not inside its Enzyme-compilable iterative solve. Future: move inside for two-way leaf-temp↔flux coupling.
+1. ✅ ~~W4b full *in-solve* photosynthesis coupling~~ — DONE. `FatesPlantRespPhotosynthDrive` now runs from INSIDE `canopy_fluxes_core!`'s Newton leaf-temperature iteration (gated on `use_fates` + a non-`nothing` `fates_handle` trailing positional), packing the FATES photosynthesis bc_in from the in-loop canopy locals (t_veg/svpts/eah/rb/dayl_factor) and unpacking rssun/rssha back into `photosyns` so the next iteration's energy balance reads the FATES-driven resistance (two-way coupling, mirroring CTSM CanopyFluxesMod:1117). The default (`!use_fates`) path never touches `fates_handle` → byte-identical + Enzyme-compilable. The former adjacent post-solve call in `clm_drv!` was removed; the per-step hifrq history + plant-hydraulics steps stay. Test: `test_fates_w4b_insolve.jl`.
 2. ✅ ~~Plant-hydraulics Tier B~~ — DONE (#89).
 3. ✅ ~~History fills H1–H6~~ — DONE (#87/#88/#90): every `update_history_*` body filled; class-index helpers were already ported.
 4. **Restart R6/R7/R8** — disturbance running-means (needs SetRMean/GetRMean restart accessors); cohort PRT pools (needs `InitPRTObject` on restart cohorts); cohort hydraulics (needs `InitHydrCohort`, ported via Tier A).
@@ -218,7 +218,7 @@ exist at `FatesRestartInterfaceMod.jl:496,821` (overlaps R8).
 | 1 | W1 CLMInstances + init globals/alloc + col→site map | wiring | M (High risk) | — | ✅ #81 |
 | 2 | W2 cold-start chain → finite site | wiring | M | W1 | ✅ #81 |
 | 3 | W3 radiation hooks (sunfrac/albedo) | wiring | M | W2 | ✅ #84 |
-| 4 | W4 btran + photosynthesis hooks | wiring | M | W2 | ✅ #84 (W4b adjacent, not in-solve) |
+| 4 | W4 btran + photosynthesis hooks | wiring | M | W2 | ✅ #84 (W4b now in-solve: FATES photosynthesis runs inside canopy_fluxes_core! Newton loop) |
 | 5 | W5 daily dynamics + balance check (helper-tested) | wiring | L | W2–W4 | ✅ #85 (setFilters/multi-day deferred) |
 | – | Real FATES param-file reader (CDL → register/receive) | params | L | — | ✅ #85 (numpft=14) |
 | 6 | W6 history interface wiring + dyn1/hifrq1 fills | wiring | M | W5 | ✅ #87 |

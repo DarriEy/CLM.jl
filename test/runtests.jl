@@ -322,6 +322,12 @@ using CLM
     # FATES demonstrably drove the column (laisha/rssun populated by the FATES path).
     include("test_fates_driver_run.jl")
 
+    # W4b in-solve FATES photosynthesis coupling: asserts FatesPlantRespPhotosynthDrive
+    # now runs INSIDE canopy_fluxes_core!'s leaf-temperature Newton iteration (two-way
+    # coupling) — the FATES bc_in t_veg_pa matches the converged in-loop leaf temp, and
+    # rssun/rssha are finite/positive. Default (!use_fates) path stays byte-identical.
+    include("test_fates_w4b_insolve.jl")
+
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-
     # invalidation / NCDataset-handle / float-state near AD discontinuities),
