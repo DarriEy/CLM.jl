@@ -1072,25 +1072,37 @@ end
 """
     update_history_dyn1!(this, nc, nsites, sites, bc_in)
 
-Level-1 dynamics update: per-site counting of patches/cohorts and simple
-site-level state copies. This is the representative fully-ported update path.
+Level-1 (daily) dynamics history update. Faithful port of the Fortran
+`update_history_dyn1` (F90 2353–3024) covering the **W1 core**:
 
-Covered (faithful to Fortran, using already-ported fields):
-  * FATES_NPATCHES / _SECONDARY, FATES_NCOHORTS / _SECONDARY (patch+cohort loops)
-  * FATES_TRIMMING, FATES_AREA_PLANTS, FATES_AREA_TREES (patch-area aggregation)
-  * FATES_COLD_STATUS, FATES_GDD, FATES_NCHILLDAYS, FATES_NCOLDDAYS,
-    FATES_DAYSINCE_COLDLEAFOFF / _ON (site-level scalar state copies)
+  * counts: NPATCHES/_SECONDARY, NCOHORTS/_SECONDARY
+  * patch-area aggregates: TRIMMING, AREA_PLANTS, AREA_TREES, LAI, ELAI,
+    secondary-forest fraction/biomass/LAI, the running-mean veg temps
+    (TVEG24/TLONGTERM/TGROWTH)
+  * site scalars: COLD_STATUS, GDD, NCHILLDAYS, NCOLDDAYS, DAYSINCE_COLDLEAFOFF/_ON,
+    CANOPY_SPREAD, FATES_FRACTION, WOODPRODUCT, HARVEST_DEBT/_SEC,
+    PRIMARYLAND_FUSION_ERROR, CBAL_ERR_FATES
+  * disturbance-rate diagnostics (fire/logging/fall) + harvest/luchange wood-product C flux
+  * mortality C-flux + crown-area (canopy/understory), demotion/promotion C flux
+  * litter: LITTER_IN (from flux_diags) / LITTER_OUT (fragmentation),
+    seed bank / ungerminated / seedling pool / seeds_in (+local)
+  * per-cohort PRT biomass pools by element (storec/leafc/fnrtc/reproc/sapwc/totvegc
+    + N/P analogues + storetfrac), AGB, BDEAD, BALIVE, canopy/understory biomass, L2FR
+  * organ-partitioned NPP fluxes (leaf/seed/stem/froot/croot/stor)
+  * basal-area / crown-area weighted height
 
-# TODO Batch 18-followup: the remaining ~60 dyn1 fills (fire, seed/litter pools,
-# per-element mass-balance, hydraulics error terms, per-cohort biomass/turnover/
-# net-alloc by scpf, mortality carbon/crown-area fluxes) require FATES site/cohort
-# state (flux_diags, mass_balance, si_hydr, PRT pools) not yet wired into this
-# standalone port; they are intentionally left unfilled here.
+# TODO Batch 18-followup-W1b: the **fire** group (SPITFIRE_ROS, TFC_ROS,
+# FIRE_INTENSITY/_AREA_PRODUCT, FIRE_AREA, FIRE_FUEL_*, SUM_FUEL, NESTEROV,
+# NIGNITIONS, FDI, EFFECT_WSPEED) and the **planthydro** (H2OVEG_*) +
+# **treedamage** (CROWNAREA_*_DAMAGE) groups are deferred: the patch `fuel`
+# object is `nothing` and the fire-state / si_hydr fields are unset (NaN) in the
+# carbon-only cold-start path, and the hydro/damage modules are gated off. These
+# vars stay at their flush value.
 """
 function update_history_dyn1!(this::fates_history_interface_type, nc::Integer,
                               nsites::Integer, sites::AbstractVector,
                               bc_in::AbstractVector)
-    # Buffer handles
+    # -- counts / patch-area aggregates --
     h_npatches      = this.hvars[this.ih[:ih_npatches_si]].r81d
     h_npatches_sec  = this.hvars[this.ih[:ih_npatches_sec_si]].r81d
     h_ncohorts      = this.hvars[this.ih[:ih_ncohorts_si]].r81d
@@ -1098,18 +1110,107 @@ function update_history_dyn1!(this::fates_history_interface_type, nc::Integer,
     h_trimming      = this.hvars[this.ih[:ih_trimming_si]].r81d
     h_area_plant    = this.hvars[this.ih[:ih_area_plant_si]].r81d
     h_area_trees    = this.hvars[this.ih[:ih_area_trees_si]].r81d
+    h_lai           = this.hvars[this.ih[:ih_lai_si]].r81d
+    h_elai          = this.hvars[this.ih[:ih_elai_si]].r81d
+    h_tveg24        = this.hvars[this.ih[:ih_tveg24_si]].r81d
+    h_tlongterm     = this.hvars[this.ih[:ih_tlongterm_si]].r81d
+    h_tgrowth       = this.hvars[this.ih[:ih_tgrowth_si]].r81d
+    h_frac_sec      = this.hvars[this.ih[:ih_fraction_secondary_forest_si]].r81d
+    h_lai_sec       = this.hvars[this.ih[:ih_lai_secondary_si]].r81d
+    h_bio_sec       = this.hvars[this.ih[:ih_biomass_secondary_forest_si]].r81d
+    # -- site scalars --
     h_cstatus       = this.hvars[this.ih[:ih_site_cstatus_si]].r81d
     h_gdd           = this.hvars[this.ih[:ih_gdd_si]].r81d
     h_nchill        = this.hvars[this.ih[:ih_site_nchilldays_si]].r81d
     h_ncold         = this.hvars[this.ih[:ih_site_ncolddays_si]].r81d
     h_cleafoff      = this.hvars[this.ih[:ih_cleafoff_si]].r81d
     h_cleafon       = this.hvars[this.ih[:ih_cleafon_si]].r81d
+    h_fates_frac    = this.hvars[this.ih[:ih_fates_fraction_si]].r81d
+    h_spread        = this.hvars[this.ih[:ih_canopy_spread_si]].r81d
+    h_woodprod      = this.hvars[this.ih[:ih_woodproduct_si]].r81d
+    h_hdebt         = this.hvars[this.ih[:ih_harvest_debt_si]].r81d
+    h_hdebt_sec     = this.hvars[this.ih[:ih_harvest_debt_sec_si]].r81d
+    h_pl_fus_err    = this.hvars[this.ih[:ih_primaryland_fusion_error_si]].r81d
+    h_cbal_err      = this.hvars[this.ih[:ih_cbal_err_fates_si]].r81d
+    h_fire_dist     = this.hvars[this.ih[:ih_fire_disturbance_rate_si]].r81d
+    h_log_dist      = this.hvars[this.ih[:ih_logging_disturbance_rate_si]].r81d
+    h_fall_dist     = this.hvars[this.ih[:ih_fall_disturbance_rate_si]].r81d
+    h_hv_wp_cflux   = this.hvars[this.ih[:ih_harvest_woodprod_carbonflux_si]].r81d
+    h_lu_wp_cflux   = this.hvars[this.ih[:ih_luchange_woodprod_carbonflux_si]].r81d
+    h_fire_c_to_atm = this.hvars[this.ih[:ih_fire_c_to_atm_si]].r81d
+    # -- mortality / demotion / promotion fluxes --
+    h_can_mort_cflux = this.hvars[this.ih[:ih_canopy_mortality_carbonflux_si]].r81d
+    h_ust_mort_cflux = this.hvars[this.ih[:ih_understory_mortality_carbonflux_si]].r81d
+    h_can_mort_ca    = this.hvars[this.ih[:ih_canopy_mortality_crownarea_si]].r81d
+    h_ust_mort_ca    = this.hvars[this.ih[:ih_understory_mortality_crownarea_si]].r81d
+    h_demote_cflux   = this.hvars[this.ih[:ih_demotion_carbonflux_si]].r81d
+    h_promote_cflux  = this.hvars[this.ih[:ih_promotion_carbonflux_si]].r81d
+    # -- biomass aggregates --
+    h_bdead         = this.hvars[this.ih[:ih_bdead_si]].r81d
+    h_balive        = this.hvars[this.ih[:ih_balive_si]].r81d
+    h_agb           = this.hvars[this.ih[:ih_agb_si]].r81d
+    h_can_bio       = this.hvars[this.ih[:ih_canopy_biomass_si]].r81d
+    h_ust_bio       = this.hvars[this.ih[:ih_understory_biomass_si]].r81d
+    h_baw_height    = this.hvars[this.ih[:ih_ba_weighted_height_si]].r81d
+    h_caw_height    = this.hvars[this.ih[:ih_ca_weighted_height_si]].r81d
+    # -- per-cohort C pools --
+    h_storec        = this.hvars[this.ih[:ih_storec_si]].r81d
+    h_leafc         = this.hvars[this.ih[:ih_leafc_si]].r81d
+    h_fnrtc         = this.hvars[this.ih[:ih_fnrtc_si]].r81d
+    h_reproc        = this.hvars[this.ih[:ih_reproc_si]].r81d
+    h_sapwc         = this.hvars[this.ih[:ih_sapwc_si]].r81d
+    h_totvegc       = this.hvars[this.ih[:ih_totvegc_si]].r81d
+    h_storectfrac   = this.hvars[this.ih[:ih_storectfrac_si]].r81d
+    h_l2fr          = this.hvars[this.ih[:ih_l2fr_si]].r81d
+    # -- organ-partitioned NPP --
+    h_npp_leaf      = this.hvars[this.ih[:ih_npp_leaf_si]].r81d
+    h_npp_seed      = this.hvars[this.ih[:ih_npp_seed_si]].r81d
+    h_npp_stem      = this.hvars[this.ih[:ih_npp_stem_si]].r81d
+    h_npp_froot     = this.hvars[this.ih[:ih_npp_froot_si]].r81d
+    h_npp_croot     = this.hvars[this.ih[:ih_npp_croot_si]].r81d
+    h_npp_stor      = this.hvars[this.ih[:ih_npp_stor_si]].r81d
+    # -- litter / seed pools --
+    h_litter_in     = this.hvars[this.ih[:ih_litter_in_si]].r81d
+    h_litter_out    = this.hvars[this.ih[:ih_litter_out_si]].r81d
+    h_seed_bank     = this.hvars[this.ih[:ih_seed_bank_si]].r81d
+    h_ungerm_seed   = this.hvars[this.ih[:ih_ungerm_seed_bank_si]].r81d
+    h_seedling      = this.hvars[this.ih[:ih_seedling_pool_si]].r81d
+    h_seeds_in      = this.hvars[this.ih[:ih_seeds_in_si]].r81d
+    h_seeds_in_loc  = this.hvars[this.ih[:ih_seeds_in_local_si]].r81d
+
+    cpos = element_pos[carbon12_element]   # carbon's slot in mass_balance / litter / flux_diags
 
     for s in 1:nsites
         site = sites[s]
         io_si = site.h_gid
 
-        # Site-level scalar state (Fortran casts integer counters to real)
+        site_ba = 0.0
+        site_ca = 0.0
+
+        # zero this site's dynamics-group slots before filling
+        zero_site_hvars!(this, site, group_dyna_simple)
+
+        # FATES fraction (1 on fates columns; gridcell-average gives the fraction)
+        h_fates_frac[io_si] = 1.0
+
+        # Site mass-balance / flux-diagnostic arrays are only allocated once the
+        # element registry + cold-start chain has run (the live use_fates path).
+        # The port's empty-array convention marks "unallocated"; guard the deep
+        # reads so the registry/aggregation unit path (synthetic bare site) is
+        # still exercisable. In the live run these are always populated.
+        has_massbal  = cpos >= 1 && length(site.mass_balance) >= cpos
+        has_fluxdiag = cpos >= 1 && length(site.flux_diags.elem) >= cpos
+
+        # carbon-model error [kgC/day -> kgC/s]
+        if has_massbal
+            h_cbal_err[io_si] = site.mass_balance[cpos].err_fates / sec_per_day
+            # carbon lost to atmosphere from burning [kgC/site/day -> kgC/m2/s]
+            h_fire_c_to_atm[io_si] = site.mass_balance[cpos].burn_flux_to_atm *
+                                     ha_per_m2 * days_per_sec
+        end
+
+        # site scalar state (Fortran casts integer counters to real)
+        h_spread[io_si]  = site.spread
         h_cstatus[io_si] = Float64(site.cstatus)
         h_nchill[io_si]  = Float64(site.nchilldays)
         h_ncold[io_si]   = Float64(site.ncolddays)
@@ -1117,39 +1218,289 @@ function update_history_dyn1!(this::fates_history_interface_type, nc::Integer,
         h_cleafoff[io_si] = Float64(site.phen_model_date - site.cleafoffdate)
         h_cleafon[io_si]  = Float64(site.phen_model_date - site.cleafondate)
 
-        # zero the count/area accumulators on this site
-        h_npatches[io_si] = 0.0; h_npatches_sec[io_si] = 0.0
-        h_ncohorts[io_si] = 0.0; h_ncohorts_sec[io_si] = 0.0
-        h_area_plant[io_si] = 0.0; h_area_trees[io_si] = 0.0
+        # total wood product accumulation [kgC/site -> kgC/m2]
+        h_woodprod[io_si] = site.resources_management.trunk_product_site * AREA_INV
 
-        # Patch / cohort loops (oldest_patch -> younger; tallest -> shorter)
+        h_hdebt[io_si]     = site.resources_management.harvest_debt
+        h_hdebt_sec[io_si] = site.resources_management.harvest_debt_sec
+
+        # primary-land patch-fusion error [m2/m2/day -> m2/m2/yr] (finite after zero_site!)
+        if isfinite(site.primary_land_patchfusion_error)
+            h_pl_fus_err[io_si] = site.primary_land_patchfusion_error * days_per_year
+        end
+
+        # site-level disturbance rates [m2/m2/day -> m2/m2/yr] (always allocated)
+        h_fire_dist[io_si] = sum(@view site.disturbance_rates[dtype_ifire, :, :]) * days_per_year
+        h_log_dist[io_si]  = sum(@view site.disturbance_rates[dtype_ilog,  :, :]) * days_per_year
+        h_fall_dist[io_si] = sum(@view site.disturbance_rates[dtype_ifall, :, :]) * days_per_year
+
+        # harvest / land-use-change wood-product C flux [kgC/m2]
+        if has_massbal && length(site.mass_balance[cpos].wood_product_harvest) >= numpft[]
+            h_hv_wp_cflux[io_si] = AREA_INV * sum(@view site.mass_balance[cpos].wood_product_harvest[1:numpft[]])
+            h_lu_wp_cflux[io_si] = AREA_INV * sum(@view site.mass_balance[cpos].wood_product_landusechange[1:numpft[]])
+        end
+
+        # mortality C flux + crown-area (site mort arrays allocated by zero_site!)
+        if !isempty(site.fmort_carbonflux_canopy)
+            # fire (gC->kgC) + impact + termination (kgC/ha/day -> kgC/m2/s)
+            h_can_mort_cflux[io_si] += sum(site.fmort_carbonflux_canopy) / g_per_kg
+            h_ust_mort_cflux[io_si] += sum(site.fmort_carbonflux_ustory) / g_per_kg
+            h_ust_mort_cflux[io_si] += sum(site.imort_carbonflux)
+            h_demote_cflux[io_si]   = site.demotion_carbonflux * ha_per_m2 * days_per_sec
+            h_promote_cflux[io_si]  = site.promotion_carbonflux * ha_per_m2 * days_per_sec
+            h_can_mort_cflux[io_si] += sum(site.term_carbonflux_canopy) * days_per_sec * ha_per_m2
+            h_ust_mort_cflux[io_si] += sum(site.term_carbonflux_ustory) * days_per_sec * ha_per_m2
+
+            h_can_mort_ca[io_si] += site.fmort_crownarea_canopy + site.term_crownarea_canopy * days_per_year
+            h_ust_mort_ca[io_si] += site.fmort_crownarea_ustory + site.term_crownarea_ustory * days_per_year +
+                                    site.imort_crownarea
+        end
+
+        # litter-input flux (from carbon flux diagnostics) [kgC/m2/s]
+        if has_fluxdiag
+            edc = site.flux_diags.elem[cpos]
+            h_litter_in[io_si] = (sum(edc.cwd_ag_input) + sum(edc.cwd_bg_input) +
+                                  sum(edc.surf_fine_litter_input) + sum(edc.root_litter_input)) *
+                                 AREA_INV * days_per_sec
+        end
+
+        # patch / cohort aggregation
         cpatch = site.oldest_patch
         while cpatch !== nothing
             h_npatches[io_si] += 1.0
+            cpatch.land_use_label == secondaryland && (h_npatches_sec[io_si] += 1.0)
+
+            # total_canopy_area is left NaN by the carbon-only cold-start path on
+            # a patch whose canopy structure hasn't been summarized; treat an
+            # unset value as zero canopy (the port's "NaN == unset" convention),
+            # so the area/LAI aggregates stay finite.
+            tcanp = isfinite(cpatch.total_canopy_area) ? cpatch.total_canopy_area : 0.0
+            ttree = isfinite(cpatch.total_tree_area)   ? cpatch.total_tree_area   : 0.0
+            # LAI / ELAI = canopy-area-weighted profile integral [m2/m2]
+            if !isempty(cpatch.canopy_area_profile)
+                h_lai[io_si]  += sum(cpatch.canopy_area_profile .* cpatch.tlai_profile) * tcanp * AREA_INV
+                h_elai[io_si] += sum(cpatch.canopy_area_profile .* cpatch.elai_profile) * tcanp * AREA_INV
+            end
+
+            # running-mean veg temperatures, patch-area weighted [degC]
+            aw = cpatch.area * AREA_INV
+            if cpatch.tveg24 !== nothing
+                h_tveg24[io_si]    += (GetMean(cpatch.tveg24)        - t_water_freeze_k_1atm) * aw
+            end
+            if cpatch.tveg_longterm !== nothing
+                h_tlongterm[io_si] += (GetMean(cpatch.tveg_longterm) - t_water_freeze_k_1atm) * aw
+            end
+            if cpatch.tveg_lpa !== nothing
+                h_tgrowth[io_si]   += (GetMean(cpatch.tveg_lpa)      - t_water_freeze_k_1atm) * aw
+            end
+
+            # secondary-forest diagnostics
             if cpatch.land_use_label == secondaryland
-                h_npatches_sec[io_si] += 1.0
-            end
-            area_frac = cpatch.area * AREA_INV
-            # FATES_TRIMMING is patch-area-weighted (set on the last patch counted
-            # in Fortran is actually a numerator; here we accumulate area-weighted)
-            ccohort = cpatch.tallest
-            while ccohort !== nothing
-                h_ncohorts[io_si] += 1.0
-                if cpatch.land_use_label == secondaryland
-                    h_ncohorts_sec[io_si] += 1.0
+                h_frac_sec[io_si] += cpatch.area * AREA_INV
+                if !isempty(cpatch.tlai_profile)
+                    h_lai_sec[io_si] += sum(cpatch.tlai_profile) * tcanp
                 end
-                # plant area occupied (crown area per land area)
-                ccohort = ccohort.shorter
             end
-            # plant / tree area occupied by the patch's vegetation
-            if isfinite(cpatch.total_canopy_area)
-                h_area_plant[io_si] += cpatch.total_canopy_area * AREA_INV
+
+            # canopy trimming (area-weighted, tallest cohort's trim)
+            if cpatch.tallest !== nothing
+                h_trimming[io_si] += cpatch.tallest.canopy_trim * cpatch.area * AREA_INV
             end
-            if isfinite(cpatch.total_tree_area)
-                h_area_trees[io_si] += cpatch.total_tree_area * AREA_INV
+
+            # plant / tree area occupied [m2/m2]
+            h_area_plant[io_si] += min(tcanp, cpatch.area) * AREA_INV
+            h_area_trees[io_si] += min(ttree, cpatch.area) * AREA_INV
+
+            # ---- litter / seed pools (carbon) ----
+            if has_fluxdiag && length(cpatch.litter) >= cpos
+                litt = cpatch.litter[cpos]
+                area_frac = cpatch.area * AREA_INV
+                h_litter_out[io_si] += (sum(litt.leaf_fines_frag) + sum(litt.root_fines_frag) +
+                                        sum(litt.ag_cwd_frag) + sum(litt.bg_cwd_frag) +
+                                        sum(litt.seed_decay) + sum(litt.seed_germ_decay)) *
+                                       area_frac * days_per_sec
+                h_seed_bank[io_si]   += (sum(litt.seed) + sum(litt.seed_germ)) * area_frac
+                h_ungerm_seed[io_si] += sum(litt.seed) * area_frac
+                h_seedling[io_si]    += sum(litt.seed_germ) * area_frac
+                h_seeds_in[io_si]    += (sum(litt.seed_in_local) + sum(litt.seed_in_extern)) *
+                                        area_frac * days_per_sec
+                h_seeds_in_loc[io_si] += sum(litt.seed_in_local) * area_frac * days_per_sec
             end
+
+            # ---- cohort loop (shortest -> taller, matching Fortran) ----
+            ccohort = cpatch.shortest
+            while ccohort !== nothing
+                ft = ccohort.pft
+                n_perm2 = ccohort.n * AREA_INV
+
+                h_ncohorts[io_si] += 1.0
+                cpatch.land_use_label == secondaryland && (h_ncohorts_sec[io_si] += 1.0)
+
+                # Cohort PRT pools are only allocated on cohorts built by the
+                # cold-start chain (InitPRTObject). Skip the biomass/NPP/mortality
+                # fills for a bare unit-test cohort (prt === nothing); counts above
+                # are still accumulated.
+                if ccohort.prt === nothing
+                    ccohort = ccohort.taller
+                    continue
+                end
+
+                # biomass pools by element
+                local total_m = 0.0
+                local store_m = 0.0
+                for el in 1:num_elements[]
+                    eid    = element_list[el]
+                    sapw_m   = GetState(ccohort.prt, sapw_organ,   eid)
+                    struct_m = GetState(ccohort.prt, struct_organ, eid)
+                    leaf_m   = GetState(ccohort.prt, leaf_organ,   eid)
+                    fnrt_m   = GetState(ccohort.prt, fnrt_organ,   eid)
+                    store_e  = GetState(ccohort.prt, store_organ,  eid)
+                    repro_m  = GetState(ccohort.prt, repro_organ,  eid)
+                    alive_m  = leaf_m + fnrt_m + sapw_m
+                    tot_m    = alive_m + store_e + struct_m
+
+                    if eid == carbon12_element
+                        total_m = tot_m
+                        store_m = store_e
+                        h_storec[io_si]  += ccohort.n * store_e / m2_per_ha
+                        h_leafc[io_si]   += ccohort.n * leaf_m  / m2_per_ha
+                        h_fnrtc[io_si]   += ccohort.n * fnrt_m  / m2_per_ha
+                        h_reproc[io_si]  += ccohort.n * repro_m / m2_per_ha
+                        h_sapwc[io_si]   += ccohort.n * sapw_m  / m2_per_ha
+                        h_totvegc[io_si] += ccohort.n * tot_m   / m2_per_ha
+
+                        store_max, _ = bstore_allom(ccohort.dbh, ccohort.pft,
+                                                    ccohort.crowndamage, ccohort.canopy_trim)
+                        h_storectfrac[io_si] += ccohort.n * store_max / m2_per_ha
+
+                        h_bdead[io_si]  += n_perm2 * struct_m
+                        h_balive[io_si] += n_perm2 * alive_m
+                        h_agb[io_si]    += n_perm2 *
+                            (leaf_m + (sapw_m + struct_m + store_e) * prt_params.allom_agb_frac[ft])
+
+                        if cpatch.land_use_label == secondaryland
+                            h_bio_sec[io_si] += tot_m * ccohort.n * AREA_INV
+                        end
+
+                        if hlm_parteh_mode[] == prt_cnp_flex_allom_hyp
+                            h_l2fr[io_si] += ccohort.l2fr * ccohort.n * fnrt_m / m2_per_ha
+                        else
+                            h_l2fr[io_si] += prt_params.allom_l2fr[ft] * ccohort.n * fnrt_m / m2_per_ha
+                        end
+                    elseif eid == nitrogen_element
+                        store_max = GetNutrientTarget(ccohort.prt, eid, store_organ, stoich_growth_min)
+                        this.hvars[this.ih[:ih_storen_si]].r81d[io_si]      += ccohort.n * store_e / m2_per_ha
+                        this.hvars[this.ih[:ih_storentfrac_si]].r81d[io_si] += ccohort.n * store_max / m2_per_ha
+                        this.hvars[this.ih[:ih_leafn_si]].r81d[io_si]       += ccohort.n * leaf_m / m2_per_ha
+                        this.hvars[this.ih[:ih_fnrtn_si]].r81d[io_si]       += ccohort.n * fnrt_m / m2_per_ha
+                        this.hvars[this.ih[:ih_repron_si]].r81d[io_si]      += ccohort.n * repro_m / m2_per_ha
+                        this.hvars[this.ih[:ih_sapwn_si]].r81d[io_si]       += ccohort.n * sapw_m / m2_per_ha
+                        this.hvars[this.ih[:ih_totvegn_si]].r81d[io_si]     += ccohort.n * tot_m / m2_per_ha
+                    elseif eid == phosphorus_element
+                        store_max = GetNutrientTarget(ccohort.prt, eid, store_organ, stoich_growth_min)
+                        this.hvars[this.ih[:ih_storep_si]].r81d[io_si]      += ccohort.n * store_e / m2_per_ha
+                        this.hvars[this.ih[:ih_storeptfrac_si]].r81d[io_si] += ccohort.n * store_max / m2_per_ha
+                        this.hvars[this.ih[:ih_leafp_si]].r81d[io_si]       += ccohort.n * leaf_m / m2_per_ha
+                        this.hvars[this.ih[:ih_fnrtp_si]].r81d[io_si]       += ccohort.n * fnrt_m / m2_per_ha
+                        this.hvars[this.ih[:ih_reprop_si]].r81d[io_si]      += ccohort.n * repro_m / m2_per_ha
+                        this.hvars[this.ih[:ih_sapwp_si]].r81d[io_si]       += ccohort.n * sapw_m / m2_per_ha
+                        this.hvars[this.ih[:ih_totvegp_si]].r81d[io_si]     += ccohort.n * tot_m / m2_per_ha
+                    end
+                end
+
+                # FLUXES — only meaningful after a cohort has lived a day
+                if !ccohort.isnew
+                    # organ net-alloc [kgC/day] * [day/yr] = [kgC/yr]
+                    sapw_na   = GetNetAlloc(ccohort.prt, sapw_organ,   carbon12_element) * days_per_year
+                    store_na  = GetNetAlloc(ccohort.prt, store_organ,  carbon12_element) * days_per_year
+                    leaf_na   = GetNetAlloc(ccohort.prt, leaf_organ,   carbon12_element) * days_per_year
+                    fnrt_na   = GetNetAlloc(ccohort.prt, fnrt_organ,   carbon12_element) * days_per_year
+                    struct_na = GetNetAlloc(ccohort.prt, struct_organ, carbon12_element) * days_per_year
+                    repro_na  = GetNetAlloc(ccohort.prt, repro_organ,  carbon12_element) * days_per_year
+
+                    agbf = prt_params.allom_agb_frac[ft]
+                    # [kgC/yr] -> [kgC/m2/s]
+                    h_npp_leaf[io_si]  += leaf_na  * n_perm2 / days_per_year / sec_per_day
+                    h_npp_seed[io_si]  += repro_na * n_perm2 / days_per_year / sec_per_day
+                    h_npp_stem[io_si]  += (sapw_na + struct_na) * n_perm2 * agbf / days_per_year / sec_per_day
+                    h_npp_froot[io_si] += fnrt_na  * n_perm2 / days_per_year / sec_per_day
+                    h_npp_croot[io_si] += (sapw_na + struct_na) * n_perm2 * (1.0 - agbf) / days_per_year / sec_per_day
+                    h_npp_stor[io_si]  += store_na * n_perm2 / days_per_year / sec_per_day
+
+                    # basal-area / crown-area weighted height
+                    if prt_params.woody[ft] == itrue
+                        cohort_ba = 0.25 * pi_const * ((ccohort.dbh / 100.0)^2) * ccohort.n
+                        h_baw_height[io_si] += ccohort.height * cohort_ba
+                        site_ba += cohort_ba
+                    end
+                    h_caw_height[io_si] += ccohort.height * ccohort.c_area / m2_per_ha
+                    site_ca += ccohort.c_area / m2_per_ha
+
+                    # canopy- / understory-separated biomass + mortality fluxes
+                    sum_mort = ccohort.bmort + ccohort.hmort + ccohort.cmort +
+                               ccohort.frmort + ccohort.smort + ccohort.asmort + ccohort.dgmort
+                    sum_lmort = ccohort.lmort_direct + ccohort.lmort_collateral + ccohort.lmort_infra
+                    if ccohort.canopy_layer == 1
+                        h_can_bio[io_si] += n_perm2 * total_m
+                        h_can_mort_cflux[io_si] +=
+                            sum_mort * total_m * ccohort.n * days_per_sec * years_per_day * ha_per_m2 +
+                            sum_lmort * total_m * ccohort.n * ha_per_m2
+                        h_can_mort_ca[io_si] +=
+                            sum_mort * ccohort.c_area +
+                            sum_lmort * ccohort.c_area * sec_per_day * days_per_year
+                    else
+                        h_ust_bio[io_si] += n_perm2 * total_m
+                        h_ust_mort_cflux[io_si] +=
+                            sum_mort * total_m * ccohort.n * days_per_sec * years_per_day * ha_per_m2 +
+                            sum_lmort * total_m * ccohort.n * ha_per_m2
+                        h_ust_mort_ca[io_si] +=
+                            sum_mort * ccohort.c_area +
+                            sum_lmort * ccohort.c_area * sec_per_day * days_per_year
+                    end
+                end
+
+                ccohort = ccohort.taller
+            end
+
             cpatch = cpatch.younger
         end
+
+        # ---- normalizations ----
+        if h_frac_sec[io_si] > nearzero
+            h_lai_sec[io_si] /= (h_frac_sec[io_si] * area)
+        end
+        if site_ca > nearzero
+            h_caw_height[io_si] /= site_ca
+        end
+        if site_ba > nearzero
+            h_baw_height[io_si] /= site_ba
+        end
+
+        # storage-fraction = stored / target (per element)
+        for el in 1:num_elements[]
+            eid = element_list[el]
+            if eid == carbon12_element && h_storectfrac[io_si] > nearzero
+                h_storectfrac[io_si] = h_storec[io_si] / h_storectfrac[io_si]
+            elseif eid == nitrogen_element
+                hn = this.hvars[this.ih[:ih_storentfrac_si]].r81d
+                hn[io_si] > nearzero && (hn[io_si] = this.hvars[this.ih[:ih_storen_si]].r81d[io_si] / hn[io_si])
+            elseif eid == phosphorus_element
+                hp = this.hvars[this.ih[:ih_storeptfrac_si]].r81d
+                hp[io_si] > nearzero && (hp[io_si] = this.hvars[this.ih[:ih_storep_si]].r81d[io_si] / hp[io_si])
+            end
+        end
+
+        if h_fnrtc[io_si] > nearzero
+            h_l2fr[io_si] /= h_fnrtc[io_si]
+        else
+            h_l2fr[io_si] = hlm_hio_ignore_val[]
+        end
+
+        # zero the site-level termination/damage accumulators (consumed)
+        fill!(site.term_carbonflux_canopy, 0.0)
+        fill!(site.term_carbonflux_ustory, 0.0)
+        site.crownarea_canopy_damage = 0.0
+        site.crownarea_ustory_damage = 0.0
     end
     return nothing
 end
@@ -1205,8 +1556,184 @@ function update_history_hifrq!(this::fates_history_interface_type, nc::Integer,
     return nothing
 end
 
+"""
+    update_history_hifrq1!(this, nc, nsites, sites, bc_in, bc_out, dt_tstep)
+
+Level-1 high-frequency (per-timestep) history update. Faithful port of the
+Fortran `update_history_hifrq1` (F90 4913–5170): site-level sub-daily carbon
+fluxes from the per-step cohort state.
+
+Filled:
+  * NEP/HR (from `bc_in.tot_het_resp`), GPP/NPP/ARESP (+ _SECONDARY),
+    GROWTH_RESP / MAINT_RESP (+ _SECONDARY) / MAINT_RESP_UNREDUCED
+  * organ MR: LEAF_MR (rdark), FROOT_MR, LIVECROOT_MR, LIVESTEM_MR
+  * canopy/understory GPP & AR
+  * C_STOMATA / C_LBLAYER (patch conductances, canopy-area weighted)
+  * TVEG (instantaneous veg temp from `bc_in.t_veg_pa`)
+  * VIS/NIR radiation conservation error (age-area weighted across patches)
+
+Where a per-step source is unavailable in the carbon-only path it is handled
+exactly as Fortran would with a zero/ignore value: `tot_het_resp` defaults to
+zero (no use_fates_bgc heterotrophic respiration), so NEP == GPP-AR and HR == 0.
+"""
 function update_history_hifrq1!(this::fates_history_interface_type, nc, nsites, sites, bc_in, bc_out, dt_tstep)
-    # TODO Batch 18-followup
+    h_gpp        = this.hvars[this.ih[:ih_gpp_si]].r81d
+    h_gpp_sec    = this.hvars[this.ih[:ih_gpp_secondary_si]].r81d
+    h_npp        = this.hvars[this.ih[:ih_npp_si]].r81d
+    h_npp_sec    = this.hvars[this.ih[:ih_npp_secondary_si]].r81d
+    h_aresp      = this.hvars[this.ih[:ih_aresp_si]].r81d
+    h_aresp_sec  = this.hvars[this.ih[:ih_aresp_secondary_si]].r81d
+    h_maint      = this.hvars[this.ih[:ih_maint_resp_si]].r81d
+    h_maint_sec  = this.hvars[this.ih[:ih_maint_resp_secondary_si]].r81d
+    h_growth     = this.hvars[this.ih[:ih_growth_resp_si]].r81d
+    h_growth_sec = this.hvars[this.ih[:ih_growth_resp_secondary_si]].r81d
+    h_cstom      = this.hvars[this.ih[:ih_c_stomata_si]].r81d
+    h_clbl       = this.hvars[this.ih[:ih_c_lblayer_si]].r81d
+    h_visrad_err = this.hvars[this.ih[:ih_vis_rad_err_si]].r81d
+    h_nirrad_err = this.hvars[this.ih[:ih_nir_rad_err_si]].r81d
+    h_nep        = this.hvars[this.ih[:ih_nep_si]].r81d
+    h_hr         = this.hvars[this.ih[:ih_hr_si]].r81d
+    h_gpp_can    = this.hvars[this.ih[:ih_gpp_canopy_si]].r81d
+    h_ar_can     = this.hvars[this.ih[:ih_ar_canopy_si]].r81d
+    h_gpp_ust    = this.hvars[this.ih[:ih_gpp_understory_si]].r81d
+    h_ar_ust     = this.hvars[this.ih[:ih_ar_understory_si]].r81d
+    h_leaf_mr    = this.hvars[this.ih[:ih_leaf_mr_si]].r81d
+    h_froot_mr   = this.hvars[this.ih[:ih_froot_mr_si]].r81d
+    h_livecr_mr  = this.hvars[this.ih[:ih_livecroot_mr_si]].r81d
+    h_livest_mr  = this.hvars[this.ih[:ih_livestem_mr_si]].r81d
+    h_maint_unr  = this.hvars[this.ih[:ih_maint_resp_unreduced_si]].r81d
+    h_tveg       = this.hvars[this.ih[:ih_tveg_si]].r81d
+
+    flush_hvars!(this, nc, group_hifr_simple)
+    dt_tstep_inv = 1.0 / dt_tstep
+
+    for s in 1:nsites
+        site = sites[s]
+        bcin = bc_in[s]
+        io_si = site.h_gid
+
+        zero_site_hvars!(this, site, group_hifr_simple)
+
+        thr = isfinite(bcin.tot_het_resp) ? bcin.tot_het_resp : 0.0
+        h_nep[io_si] = -thr * kg_per_g
+        h_hr[io_si]  =  thr * kg_per_g
+
+        # ---- radiation-error diagnostics (age-area weighted over solved patches) ----
+        # Only patches whose VIS radiation solver ran carry a finite rad_error.
+        sum_area_rad = 0.0
+        cpatch = site.oldest_patch
+        while cpatch !== nothing
+            rv = cpatch.rad_error[ivis]
+            if isfinite(rv) && abs(rv) > nearzero
+                sum_area_rad += cpatch.total_canopy_area
+            end
+            cpatch = cpatch.younger
+        end
+
+        if sum_area_rad < nearzero
+            h_visrad_err[io_si] = hlm_hio_ignore_val[]
+            h_nirrad_err[io_si] = hlm_hio_ignore_val[]
+        else
+            h_visrad_err[io_si] = 0.0
+            h_nirrad_err[io_si] = 0.0
+            cpatch = site.oldest_patch
+            while cpatch !== nothing
+                rv = cpatch.rad_error[ivis]
+                if isfinite(rv) && abs(rv) > nearzero
+                    w = cpatch.total_canopy_area / sum_area_rad
+                    h_visrad_err[io_si] += cpatch.rad_error[ivis] * w
+                    h_nirrad_err[io_si] += cpatch.rad_error[inir] * w
+                end
+                cpatch = cpatch.younger
+            end
+        end
+
+        # ---- vegetated-area normalizer ----
+        if hlm_use_nocomp[] == itrue && hlm_use_fixed_biogeog[] == itrue
+            site_area_veg = area - site.area_bareground * area
+        else
+            site_area_veg = 0.0
+            cpatch = site.oldest_patch
+            while cpatch !== nothing
+                if isfinite(cpatch.total_canopy_area)
+                    site_area_veg += cpatch.total_canopy_area
+                end
+                cpatch = cpatch.younger
+            end
+        end
+
+        if site_area_veg < nearzero
+            h_cstom[io_si] = hlm_hio_ignore_val[]
+            h_clbl[io_si]  = hlm_hio_ignore_val[]
+            h_tveg[io_si]  = hlm_hio_ignore_val[]
+            continue
+        end
+
+        site_area_veg_inv = 1.0 / site_area_veg
+
+        cpatch = site.oldest_patch
+        while cpatch !== nothing
+            tcanp = isfinite(cpatch.total_canopy_area) ? cpatch.total_canopy_area : 0.0
+            if isfinite(cpatch.c_stomata)
+                h_cstom[io_si] += cpatch.c_stomata * tcanp * mol_per_umol * site_area_veg_inv
+            end
+            if isfinite(cpatch.c_lblayer)
+                h_clbl[io_si]  += cpatch.c_lblayer * tcanp * mol_per_umol * site_area_veg_inv
+            end
+
+            # instantaneous veg temperature for vegetated patches only
+            if cpatch.patchno != 0 && cpatch.patchno >= 1 &&
+               length(bcin.t_veg_pa) >= cpatch.patchno
+                h_tveg[io_si] += (bcin.t_veg_pa[cpatch.patchno] - t_water_freeze_k_1atm) *
+                                 tcanp * site_area_veg_inv
+            end
+
+            is_sec = cpatch.land_use_label == secondaryland
+
+            ccohort = cpatch.shortest
+            while ccohort !== nothing
+                if ccohort.isnew
+                    ccohort = ccohort.taller
+                    continue
+                end
+                n_perm2 = ccohort.n * AREA_INV
+
+                # [kg/plant/timestep] -> [kg/m2/s]
+                h_npp[io_si]   += ccohort.npp_tstep   * n_perm2 * dt_tstep_inv
+                h_nep[io_si]   += ccohort.npp_tstep   * n_perm2 * dt_tstep_inv
+                h_gpp[io_si]   += ccohort.gpp_tstep   * n_perm2 * dt_tstep_inv
+                h_aresp[io_si] += ccohort.resp_tstep  * n_perm2 * dt_tstep_inv
+                h_growth[io_si] += ccohort.resp_g_tstep * n_perm2 * dt_tstep_inv
+                h_maint[io_si] += ccohort.resp_m      * n_perm2 * dt_tstep_inv
+                h_maint_unr[io_si] += ccohort.resp_m_unreduced * n_perm2 * dt_tstep_inv
+
+                if is_sec
+                    h_npp_sec[io_si]   += ccohort.npp_tstep   * n_perm2 * dt_tstep_inv
+                    h_gpp_sec[io_si]   += ccohort.gpp_tstep   * n_perm2 * dt_tstep_inv
+                    h_aresp_sec[io_si] += ccohort.resp_tstep  * n_perm2 * dt_tstep_inv
+                    h_growth_sec[io_si] += ccohort.resp_g_tstep * n_perm2 * dt_tstep_inv
+                    h_maint_sec[io_si] += ccohort.resp_m      * n_perm2 * dt_tstep_inv
+                end
+
+                # organ maintenance respiration [kg/plant/s] -> [kg/m2/s]
+                h_leaf_mr[io_si]   += ccohort.rdark        * n_perm2
+                h_froot_mr[io_si]  += ccohort.froot_mr     * n_perm2
+                h_livecr_mr[io_si] += ccohort.livecroot_mr * n_perm2
+                h_livest_mr[io_si] += ccohort.livestem_mr  * n_perm2
+
+                if ccohort.canopy_layer == 1
+                    h_gpp_can[io_si] += ccohort.gpp_tstep  * n_perm2 * dt_tstep_inv
+                    h_ar_can[io_si]  += ccohort.resp_tstep * n_perm2 * dt_tstep_inv
+                else
+                    h_gpp_ust[io_si] += ccohort.gpp_tstep  * n_perm2 * dt_tstep_inv
+                    h_ar_ust[io_si]  += ccohort.resp_tstep * n_perm2 * dt_tstep_inv
+                end
+
+                ccohort = ccohort.taller
+            end
+            cpatch = cpatch.younger
+        end
+    end
     return nothing
 end
 

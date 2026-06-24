@@ -1050,6 +1050,12 @@ function clm_drv_core!(config::CLMDriverConfig,
             p = col.patchi[c] + 1
             fates_unpack_bcout_photosynthesis!(inst; s=s, c=c, p=p)
         end
+        # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
+        # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
+        # the just-computed cohort per-step fluxes. Write-only; no-op until the
+        # history interface is built (clm_fates_init!). Mirrors the Fortran host's
+        # update_history_hifrq in the timestep path.
+        fates_hifrq_history_step!(inst; dt_tstep=dtime)
     end
 
 

@@ -294,6 +294,12 @@ using CLM
     # and asserts mass conservation + finite/physical cohort/patch/canopy state.
     include("test_fates_daily_dynamics.jl")
 
+    # FATES history buffer-fills Wave 1 (B18-followup): cold-starts a use_fates
+    # site (clm_fates_init! builds + Init's inst.fates.hist), drives update_history_dyn1!
+    # via the daily hook + update_history_hifrq1! via fates_hifrq_history_step!, and
+    # asserts the dyn1-core + hifrq1 history buffers populate finite, physical values.
+    include("test_fates_history_dyn1.jl")
+
     # FATES first REAL multi-day clm_drv!-integrated run: cold-starts a 14-PFT
     # carbon-only site on a FATES-tagged single column and loops the actual driver
     # for 2 days (96 steps), firing the four per-timestep FATES hooks + the daily
