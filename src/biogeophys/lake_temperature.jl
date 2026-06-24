@@ -382,10 +382,11 @@ end
 # lake_temperature! — Main driver for lake temperature calculation
 # =========================================================================
 # lake_temperature! pre-solve kernels (lt3). Per-column / per-(column,layer) /
-# per-patch. LAKEPUDDLING and LAKE_NO_ED are compile-time `const false`, so their
-# branches (and the frzn state) constant-fold away exactly as in the scalar loop;
-# they are kept referenced for fidelity. Constants + local scalars (km/p0/cwat/
-# tkice_eff) eltype-converted so no Float64 reaches a Float32-only backend.
+# per-patch. lakepuddling / lake_no_ed (and depthcrit/mixfact/n2min) are runtime
+# kernel args sourced from lake_con, so the non-default lake sub-option branches
+# activate without recompiling; at their defaults the branches reproduce the prior
+# const-false path. Constants + local scalars (km/p0/cwat/tkice_eff) eltype-
+# converted so no Float64 reaches a Float32-only backend.
 # =========================================================================
 @kernel function _lake_init_kernel!(ocvts, ncvts, esum1, esum2, jconvect, jconvectbot,
         lakeresist, bottomconvect, @Const(mask), nlevlak::Int, use_lch4::Bool)
@@ -442,10 +443,17 @@ end
 end
 
 # Diffusivity / implied thermal conductivity for interior lake layers j=1:nlevlak-1.
+# lakepuddling/lake_no_ed are runtime Bool args (from lake_con) so the non-default
+# sub-option branches activate without recompiling. depthcrit/mixfact/n2min are
+# runtime scalars from lake_con. Default values (lakepuddling=false, lake_no_ed=
+# false, depthcrit=25, mixfact=10, n2min=7.5e-5) reproduce the prior const path
+# byte-for-byte. The MIXFACT-applies-regardless-of-lake_no_ed quirk in the
+# frozen-true branch is preserved from Fortran LakeTemperatureMod.F90:380-382.
 @kernel function _lake_diffusivity_kernel!(kme, tk_lake, frzn, @Const(mask), @Const(rhow),
         @Const(z_lake), @Const(ws), @Const(ks), @Const(t_grnd), @Const(t_lake),
         @Const(snl), @Const(lakedepth), @Const(lake_icefrac),
-        nlevlak::Int, km, p0, cwat, tkice_eff)
+        nlevlak::Int, km, p0, cwat, tkice_eff,
+        lakepuddling::Bool, lake_no_ed::Bool, depthcrit, mixfact, n2min_p)
     c, j = @index(Global, NTuple)
     @inbounds if mask[c]
         T = eltype(kme)
@@ -454,29 +462,29 @@ end
         num = T(40.0) * n2 * (T(VKC) * z_lake[c, j])^T(2.0)
         den = smooth_max(ws[c]^T(2.0) * exp(-T(2.0) * ks[c] * z_lake[c, j]), T(1.0e-10))
         ri = (-one(T) + sqrt(smooth_max(one(T) + num / den, zero(T)))) / T(20.0)
-        if LAKEPUDDLING && j == 1
+        if lakepuddling && j == 1
             frzn[c] = false
         end
         if t_grnd[c] > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl[c] == 0 &&
-           (!LAKEPUDDLING || (lake_icefrac[c, j] == zero(T) && !frzn[c]))
+           (!lakepuddling || (lake_icefrac[c, j] == zero(T) && !frzn[c]))
             ke = T(VKC) * ws[c] * z_lake[c, j] / p0 * exp(-ks[c] * z_lake[c, j]) /
                  (one(T) + T(37.0) * ri * ri)
             kme[c, j] = km + ke
-            if !LAKE_NO_ED
-                fangkm = T(1.039e-8) * smooth_max(n2, T(N2MIN))^T(-0.43)
+            if !lake_no_ed
+                fangkm = T(1.039e-8) * smooth_max(n2, n2min_p)^T(-0.43)
                 kme[c, j] = kme[c, j] + fangkm
             end
-            if lakedepth[c] >= T(DEPTHCRIT)
-                kme[c, j] = kme[c, j] * T(MIXFACT)
+            if lakedepth[c] >= depthcrit
+                kme[c, j] = kme[c, j] * mixfact
             end
             tk_lake[c, j] = kme[c, j] * cwat
         else
             kme[c, j] = km
-            if !LAKE_NO_ED
-                fangkm = T(1.039e-8) * smooth_max(n2, T(N2MIN))^T(-0.43)
+            if !lake_no_ed
+                fangkm = T(1.039e-8) * smooth_max(n2, n2min_p)^T(-0.43)
                 kme[c, j] = kme[c, j] + fangkm
-                if lakedepth[c] >= T(DEPTHCRIT)
-                    kme[c, j] = kme[c, j] * T(MIXFACT)
+                if lakedepth[c] >= depthcrit
+                    kme[c, j] = kme[c, j] * mixfact
                 end
                 tk_lake[c, j] = kme[c, j] * cwat * tkice_eff /
                     ((one(T) - lake_icefrac[c, j]) * tkice_eff + kme[c, j] * cwat * lake_icefrac[c, j])
@@ -484,7 +492,7 @@ end
                 tk_lake[c, j] = T(TKWAT) * tkice_eff /
                     ((one(T) - lake_icefrac[c, j]) * tkice_eff + T(TKWAT) * lake_icefrac[c, j])
             end
-            if LAKEPUDDLING
+            if lakepuddling
                 frzn[c] = true
             end
         end
@@ -494,17 +502,18 @@ end
 # Bottom lake layer conductivity + savedtke1 + jtop (per column).
 @kernel function _lake_diffusivity_bottom_kernel!(kme, tk_lake, savedtke1, jtop,
         @Const(mask), @Const(frzn), @Const(t_grnd), @Const(t_lake), @Const(snl),
-        @Const(lake_icefrac), nlevlak::Int, cwat, tkice_eff)
+        @Const(lake_icefrac), nlevlak::Int, cwat, tkice_eff,
+        lakepuddling::Bool, lake_no_ed::Bool)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(kme)
         j = nlevlak
         kme[c, nlevlak] = kme[c, nlevlak - 1]
         if t_grnd[c] > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl[c] == 0 &&
-           (!LAKEPUDDLING || (lake_icefrac[c, j] == zero(T) && !frzn[c]))
+           (!lakepuddling || (lake_icefrac[c, j] == zero(T) && !frzn[c]))
             tk_lake[c, j] = tk_lake[c, j - 1]
         else
-            if !LAKE_NO_ED
+            if !lake_no_ed
                 tk_lake[c, j] = kme[c, j] * cwat * tkice_eff /
                     ((one(T) - lake_icefrac[c, j]) * tkice_eff + kme[c, j] * cwat * lake_icefrac[c, j])
             else
@@ -770,17 +779,20 @@ end
 # loop-carried (each layer's convection check reads rhow that an earlier layer's
 # redistribution updated), so each is ONE per-column kernel running the full
 # nested layer loops sequentially in-thread, with thread-local qav/nav/iceav/zsum
-# accumulators (no per-column scratch, no atomics). LAKEPUDDLING is const false so
-# its guard folds to true. Constants/cwat/cice_eff eltype-converted.
+# accumulators (no per-column scratch, no atomics). lakepuddling is a runtime Bool
+# arg (from lake_con): when true, convection is suppressed for puddled columns
+# (Fortran guard `.not. lakepuddling .or. .not. puddle(c)`); when false (default)
+# the guard folds to true, matching the prior path. cwat/cice_eff eltype-converted.
 # =========================================================================
 @kernel function _lake_top_convection_kernel!(lake_icefrac, t_lake, rhow, jconvect,
-        @Const(mask), @Const(dz_lake), nlevlak::Int, cwat, cice_eff, use_lch4::Bool)
+        @Const(mask), @Const(dz_lake), @Const(puddle), nlevlak::Int, cwat, cice_eff,
+        use_lch4::Bool, lakepuddling::Bool)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(t_lake)
         for j in 1:(nlevlak - 2)
-            doconv = rhow[c, j] > rhow[c, j+1] ||
-                (lake_icefrac[c, j] < one(T) && lake_icefrac[c, j+1] > zero(T))
+            doconv = (!lakepuddling || !puddle[c]) && (rhow[c, j] > rhow[c, j+1] ||
+                (lake_icefrac[c, j] < one(T) && lake_icefrac[c, j+1] > zero(T)))
             if doconv
                 qav = zero(T); nav = zero(T); iceav = zero(T)
                 for i in 1:(j + 1)
@@ -824,18 +836,20 @@ end
 end
 
 @kernel function _lake_bottom_convection_kernel!(lake_icefrac, t_lake, rhow, jconvectbot,
-        bottomconvect, @Const(mask), @Const(dz_lake), nlevlak::Int, cwat, cice_eff,
-        use_lch4::Bool)
+        bottomconvect, @Const(mask), @Const(dz_lake), @Const(puddle), nlevlak::Int,
+        cwat, cice_eff, use_lch4::Bool, lakepuddling::Bool)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(t_lake)
         jb = nlevlak - 1
-        if rhow[c, jb] > rhow[c, jb+1] ||
-           (lake_icefrac[c, jb] < one(T) && lake_icefrac[c, jb+1] > zero(T))
+        # Fortran applies the puddle guard to bottomconvect itself (LakeTemperatureMod.F90:855).
+        if (!lakepuddling || !puddle[c]) && (rhow[c, jb] > rhow[c, jb+1] ||
+           (lake_icefrac[c, jb] < one(T) && lake_icefrac[c, jb+1] > zero(T)))
             bottomconvect[c] = true
         end
         for j in (nlevlak - 1):-1:1
-            doconv = bottomconvect[c] && (rhow[c, j] > rhow[c, j+1] ||
+            doconv = bottomconvect[c] && (!lakepuddling || !puddle[c]) &&
+                (rhow[c, j] > rhow[c, j+1] ||
                 (lake_icefrac[c, j] < one(T) && lake_icefrac[c, j+1] > zero(T)))
             if doconv
                 qav = zero(T); nav = zero(T); iceav = zero(T)
@@ -1142,6 +1156,16 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
     # per-(column,layer) / per-patch kernels; launched in order — the diffusivity
     # reads rhow produced by the density kernel; the bottom kernel reads kme).
     use_lch4 = varctl.use_lch4
+    # Lake sub-option flags/params (from lake_con; defaults reproduce the prior path).
+    # Derive depthcrit/mixfact/pudz directly from the source namelist fields (mirrors
+    # lake_con_init!) so the kernels get finite values even if lake_con_init! has not
+    # run yet (the derived NaN sentinels would otherwise poison the deep-lake branch).
+    lp_puddling  = lake_con.lakepuddling
+    lp_no_ed     = lake_con.lake_no_ed
+    lp_depthcrit = FT(lake_con.deepmixing_depthcrit)
+    lp_mixfact   = FT(lake_con.deepmixing_mixfact)
+    lp_n2min     = FT(N2MIN)
+    lp_pudz      = lp_puddling ? lake_con.lake_puddle_thick : 0.0
     _launch!(_lake_init_kernel!, ocvts, ncvts_arr, esum1, esum2, jconvect, jconvectbot,
         lakeresist, bottomconvect, mask_lakec, nlevlak, use_lch4; ndrange = nc)
     _launch!(_lake_prior_ice_kernel!, frac_iceold, mask_lakec, snl, h2osoi_liq, h2osoi_ice,
@@ -1152,10 +1176,11 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
         ndrange = (nc, nlevlak))
     _launch!(_lake_diffusivity_kernel!, kme, tk_lake, frzn, mask_lakec, rhow, z_lake, ws,
         ks, t_grnd, t_lake, snl, lakedepth, lake_icefrac, nlevlak,
-        FT(km), FT(p0), FT(cwat), FT(tkice_eff); ndrange = (nc, nlevlak - 1))
+        FT(km), FT(p0), FT(cwat), FT(tkice_eff),
+        lp_puddling, lp_no_ed, lp_depthcrit, lp_mixfact, lp_n2min; ndrange = (nc, nlevlak - 1))
     _launch!(_lake_diffusivity_bottom_kernel!, kme, tk_lake, savedtke1, jtop, mask_lakec,
-        frzn, t_grnd, t_lake, snl, lake_icefrac, nlevlak, FT(cwat), FT(tkice_eff);
-        ndrange = nc)
+        frzn, t_grnd, t_lake, snl, lake_icefrac, nlevlak, FT(cwat), FT(tkice_eff),
+        lp_puddling, lp_no_ed; ndrange = nc)
 
     # 4!) Solar heat source penetrating the lake (per-patch × lake layer).
     _launch!(_lake_heat_source_kernel!, phi, phi_soil, mask_lakep, patch_data.column,
@@ -1208,7 +1233,13 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
     _launch!(_lake_density_kernel!, rhow, mask_lakec, lake_icefrac, t_lake, nlevlak;
         ndrange = (nc, nlevlak))
 
-    if LAKEPUDDLING
+    # Puddling: integrate total ice nominal thickness; flag columns whose ice column
+    # exceeds pudz so convective mixing is suppressed beneath the puddled ice
+    # (Fortran LakeTemperatureMod.F90:740-758). Uses lake-layer dz (lakepuddling is a
+    # sensitivity option; the integration over dz(c,j+joff) reuses the snow/soil dz
+    # array as in the Fortran `dz` reference). Only runs when lakepuddling is on, so
+    # puddle stays all-false on the default path.
+    if lp_puddling
         for j in 1:nlevlak
             for c in bounds_col
                 mask_lakec[c] || continue
@@ -1218,7 +1249,7 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
                 end
                 icesum[c] = icesum[c] + lake_icefrac[c, j] * dz[c, j + joff]
                 if j == nlevlak
-                    if icesum[c] >= PUDZ
+                    if icesum[c] >= lp_pudz
                         puddle[c] = true
                     end
                 end
@@ -1230,10 +1261,11 @@ function lake_temperature!(col::ColumnData, patch_data::PatchData,
     # is sequential per column because each layer's check reads rhow updated by an
     # earlier layer's redistribution).
     _launch!(_lake_top_convection_kernel!, lake_icefrac, t_lake, rhow, jconvect,
-        mask_lakec, dz_lake, nlevlak, FT(cwat), FT(cice_eff), use_lch4; ndrange = nc)
+        mask_lakec, dz_lake, puddle, nlevlak, FT(cwat), FT(cice_eff), use_lch4,
+        lp_puddling; ndrange = nc)
     _launch!(_lake_bottom_convection_kernel!, lake_icefrac, t_lake, rhow, jconvectbot,
-        bottomconvect, mask_lakec, dz_lake, nlevlak, FT(cwat), FT(cice_eff), use_lch4;
-        ndrange = nc)
+        bottomconvect, mask_lakec, dz_lake, puddle, nlevlak, FT(cwat), FT(cice_eff),
+        use_lch4, lp_puddling; ndrange = nc)
 
     # CH4 lake resistance / conductance (per-column; only when use_lch4).
     if use_lch4
