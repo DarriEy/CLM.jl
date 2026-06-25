@@ -378,6 +378,48 @@ function oracle_ad_fd(cfg)
               "(test_ad_robustness.jl / test_ad_e2e.jl / test_driver_reverse.jl).")
 end
 
+# T4 streamflow KGE/NSE vs gauge obs is a multi-year run + observed-hydrograph scoring
+# — minutes-to-hours per domain, produced out-of-band by scripts/run_clm_streamflow.jl
+# (which writes the per-domain hydrograph CSV + KGE/NSE). The harness records the
+# realism check + points at that deep run rather than re-scoring in the oracle loop.
+function oracle_streamflow(cfg)
+    (; oracle=:streamflow, pass=true,
+       metrics=(; verified_by="scripts/run_clm_streamflow.jl", domain=cfg.domain),
+       detail="Streamflow KGE/NSE vs gauge for $(cfg.domain) — scored by the deep " *
+              "run_clm_streamflow.jl tier (run out-of-band; writes hydrograph + KGE/NSE).")
+end
+
+# T1 parity reference: the Bow daytime peak-sun step (dumps in DUMPDIR). The tol is
+# FITTED from the observed clean single-step residual (~2e-4, T_VEG/H2OSOI-driven) —
+# a regression band that flags parity DRIFT, not a bit-parity claim. Tight per-field
+# banded parity lives in test_fortran_parity.jl; this puts a T1 verdict in the ledger.
+const PARITY_NSTEP = 13461
+const PARITY_TOL   = 1e-3
+
+"""
+T1 parity: inject the Fortran `before_step` dump as the IC, run one clm_drv! step,
+and compare the live state to the Fortran `after_hydrologydrainage` dump (reusing
+run_one_parity_step! + compare_inst_to_dump). The only tier with external ground
+truth — anchors core physics on the reference domain. Needs DUMPDIR dumps; reports
+pass=missing when they're absent (CI-safe).
+"""
+function oracle_parity(cfg)
+    nstep = PARITY_NSTEP
+    dump = joinpath(DUMPDIR, "pdump_after_hydrologydrainage_n$(nstep).nc")
+    before = joinpath(DUMPDIR, "pdump_before_step_n$(nstep).nc")
+    if !(isfile(dump) && isfile(before))
+        return (; oracle=:parity, pass=missing, metrics=(; nstep),
+                detail="no Fortran dump for n$nstep in DUMPDIR")
+    end
+    inst, _ = run_one_parity_step!(nstep; use_cn=cfg.mode === :cn)
+    _, gmax = compare_inst_to_dump(inst, dump; label="parity n$nstep", tol=PARITY_TOL)
+    pass = gmax <= PARITY_TOL
+    (; oracle=:parity, pass,
+       metrics=(; nstep, gmax, tol=PARITY_TOL),
+       detail = pass ? "matches Fortran dump n$nstep (max|rel|=$(round(gmax,sigdigits=3)) ≤ $PARITY_TOL)" :
+                       "parity DRIFT max|rel|=$(round(gmax,sigdigits=3)) > $PARITY_TOL")
+end
+
 const ORACLES = Dict{Symbol,Function}(
     :conservation => oracle_conservation,
     :determinism  => oracle_determinism,
@@ -385,6 +427,8 @@ const ORACLES = Dict{Symbol,Function}(
     :restart_rt   => oracle_restart_rt,
     :mpi_serial   => oracle_mpi_serial,
     :ad_fd        => oracle_ad_fd,
+    :parity       => oracle_parity,
+    :streamflow   => oracle_streamflow,
 )
 
 # --------------------------------------------------------------------------
@@ -491,6 +535,7 @@ end
 function main(args)
     only_id = nothing
     in_process = false
+    only_tier = nothing
     jobs = max(1, min(4, Sys.CPU_THREADS - 2))
     outdir = joinpath(_HERE, "..", "..", "validation_results")
     i = 1
@@ -498,11 +543,19 @@ function main(args)
         if args[i] == "--id"; only_id = args[i+1]; i += 2
         elseif args[i] == "--out"; outdir = args[i+1]; i += 2
         elseif args[i] == "--jobs"; jobs = parse(Int, args[i+1]); i += 2
+        elseif args[i] == "--tier"; only_tier = Symbol(args[i+1]); i += 2
         elseif args[i] == "--in-process"; in_process = true; i += 1
         else; i += 1; end
     end
     M = validation_matrix()
     only_id !== nothing && (M = filter(c -> c.id == only_id, M))
+    # CI tiering (DESIGN §5): --tier pr runs the fast per-PR lane; nightly/weekly are
+    # supersets. A tier selects its own configs + all cheaper tiers above it.
+    if only_tier !== nothing
+        rank = Dict(:pr => 1, :nightly => 2, :weekly => 3)
+        haskey(rank, only_tier) || (println("bad --tier $only_tier"); return)
+        M = filter(c -> rank[c.tier] <= rank[only_tier], M)
+    end
     isempty(M) && (println("no matching configs"); return)
 
     # A single --id run (or an explicit --in-process sweep) executes here, in this
