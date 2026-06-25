@@ -978,7 +978,12 @@ function cn_driver_no_leaching!(
             for c in bounds_col
                 mask_bgc_soilc[c] || continue
                 lit = zero(_Tc); som = zero(_Tc)
-                for k in 1:ndecomp_pools, j in 1:nlevdecomp
+                # Clamp to the array's actual pool/level dims (not the passed/
+                # global ndecomp_pools/nlevdecomp) so the fuel sum is robust to a
+                # minimally-sized state under any global-init ordering.
+                _np_fuel = min(ndecomp_pools, size(soilbgc_cs.decomp_cpools_vr_col, 3))
+                _nj_fuel = min(nlevdecomp, size(soilbgc_cs.decomp_cpools_vr_col, 2))
+                for k in 1:_np_fuel, j in 1:_nj_fuel
                     v = soilbgc_cs.decomp_cpools_vr_col[c, j, k] *
                         (dzsoi_decomp === nothing ? one(_Tc) : _Tc(dzsoi_decomp[j]))
                     if k <= length(_is_litr) && _is_litr[k]
