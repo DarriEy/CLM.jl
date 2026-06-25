@@ -48,6 +48,7 @@ Base.@kwdef struct CNMode <: AbstractBGCMode
     use_crop::Bool = false
     use_cropcal_streams::Bool = false
     use_matrixcn::Bool = false
+    use_cndv::Bool = false   # dynamic global vegetation (CNDV / DGVM) coupling
     ndep_from_cpl::Bool = false
     decomp_method::Int = 1
     no_soil_decomp::Int = 0
@@ -149,6 +150,8 @@ function Base.getproperty(c::CLMDriverConfig, s::Symbol)
         return m isa CNMode && m.use_cropcal_streams
     elseif s === :use_matrixcn
         return m isa CNMode && m.use_matrixcn
+    elseif s === :use_cndv
+        return m isa CNMode && m.use_cndv
     elseif s === :ndep_from_cpl
         return m isa CNMode && m.ndep_from_cpl
     elseif s === :fates_spitfire_mode
@@ -183,7 +186,8 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           use_fates_sp::Bool=false, use_fates_bgc::Bool=false,
                           use_lch4::Bool=false, use_c13::Bool=false, use_c14::Bool=false,
                           use_crop::Bool=false, use_cropcal_streams::Bool=false,
-                          use_matrixcn::Bool=false, ndep_from_cpl::Bool=false,
+                          use_matrixcn::Bool=false, use_cndv::Bool=false,
+                          ndep_from_cpl::Bool=false,
                           fates_spitfire_mode::Int=0, fates_seeddisp_cadence::Int=0,
                           irrigate::Bool=false, use_noio::Bool=false,
                           use_aquifer_layer::Bool=true,
@@ -203,7 +207,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           fates_spitfire_mode, fates_seeddisp_cadence)
     elseif use_cn
         mode = CNMode(; use_lch4, use_c13, use_c14, use_crop,
-                       use_cropcal_streams, use_matrixcn, ndep_from_cpl,
+                       use_cropcal_streams, use_matrixcn, use_cndv, ndep_from_cpl,
                        decomp_method, no_soil_decomp,
                        ndecomp_pools, ndecomp_cascade_transitions,
                        i_litr_min, i_litr_max, i_cwd, npcropmin, nrepr)
@@ -869,6 +873,21 @@ function clm_drv_core!(config::CLMDriverConfig,
                            year = year,
                            temp = temp, ws = wsb.ws, cons_bgp = _cons_bgp,
                            mask_nolakec = filt.nolakec, mask_lakec = filt.lakec)
+    end
+
+    # ------------------------------------------------------------------------
+    # CNDV: time-interpolate dynamic-vegetation PFT weights to this time step.
+    # Mirrors CNVegetationFacade::UpdateSubgridWeights → dynCNDV_interp (called
+    # every time step when use_cndv); see dynCNDVMod.F90:dynCNDV_interp. The
+    # interpolation weight is wt1 = 1 - yearfrac(this step); fpcgridold is rolled
+    # forward on the first step of the year (is_beg_curr_year && nstep>0).
+    # Gated off by default → no-op on the empty/unsized dgvs state.
+    # ------------------------------------------------------------------------
+    if config.use_cndv && !isempty(inst.dgvs.fpcgrid_patch)
+        _cndv_yearfrac = (jday - 1 + secs / SECSPDAY) / 365.0
+        dyn_cndv_interp!(inst.dgvs, pch, lun, bc_patch;
+                         wt1 = 1.0 - _cndv_yearfrac,
+                         is_beg_curr_year = is_beg_curr_year && nstep > 0)
     end
 
     # ========================================================================
@@ -2305,6 +2324,16 @@ function clm_drv_core!(config::CLMDriverConfig,
 
         # Placeholder: bgc_vegetation_inst%UpdateAccVars!(bounds_proc, ...) [BGC accum]
 
+        # CNDV: accumulate AGDD / AGDDTW each time step (reset annually on Jan 1).
+        # Mirrors CNVegetationFacade::UpdateAccVars → dgvs_inst%UpdateAccVars; see
+        # CNDVType.F90:UpdateAccVars. Only runs when use_cndv and the dgvs state is
+        # sized → default path untouched.
+        if config.use_cndv && !isempty(inst.dgvs.agdd_patch)
+            cndv_update_acc_vars!(inst.dgvs, inst.dgv_ecophyscon,
+                temp.t_a10_patch, temp.t_ref2m_patch, bc_patch, dtime;
+                month=mon, day=day, secs=secs)
+        end
+
         if config.use_crop
             # Placeholder: crop_inst%CropUpdateAccVars!(bounds_proc, ...) [crop accum]
         end
@@ -2325,8 +2354,34 @@ function clm_drv_core!(config::CLMDriverConfig,
         # EndOfTimeStepVegDynamics — WIRED
         cn_vegetation_end_of_timestep!(inst.bgc_vegetation;
             bounds_patch=bc_patch,
-            is_end_curr_year=false,
+            is_end_curr_year=is_end_curr_year,
             is_first_step=is_first_step)
+
+        # CNDV: run the annual dynamic-vegetation driver at the last time step of
+        # the year. Mirrors CNVegetationFacade::EndOfTimeStepVegDynamics →
+        # CNDVDriver (gated on use_cndv .and. is_end_curr_year .and. .not.
+        # is_first_step); see CNDVDriverMod.F90:CNDVDriver. Climate20 + light
+        # competition + establishment update fpcgrid_patch, which the per-step
+        # dyn_cndv_interp! then maps onto patch.wtcol. Gated off → byte-identical.
+        if config.use_cndv && is_end_curr_year && !is_first_step &&
+           !isempty(inst.dgvs.fpcgrid_patch)
+            _cveg_cf = inst.bgc_vegetation.cnveg_carbonflux_inst
+            _cveg_cs = inst.bgc_vegetation.cnveg_carbonstate_inst
+            # prec365_col (365-day running-mean precip) is not yet a ported field;
+            # pass a zero buffer (suppresses the precip-gated *new* establishment
+            # branch — light competition, sapling/grass growth and mortality still
+            # update the weights). bc_col length = number of columns in this clump.
+            _cndv_prec365 = _zlike(nc)
+            # cndv_driver! rebuilds this natveg patch mask in-place from
+            # present_patch, so any same-length Bool buffer works as scratch.
+            _cndv_natvegp = collect(Bool, filt.natvegp)
+            cndv_driver!(inst.dgvs, inst.dgv_ecophyscon,
+                a2l.t_mo_min_patch, _cndv_prec365,
+                _cveg_cf.annsum_npp_patch, _cveg_cf.annsum_litfall_patch,
+                _cveg_cs.deadstemc_patch, _cveg_cs.leafcmax_patch,
+                pftcon, pch, lun, _cndv_natvegp, bc_patch, year;
+                bounds_gridcell = bc_grc)
+        end
     end
 
     # ========================================================================

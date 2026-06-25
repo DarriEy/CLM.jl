@@ -179,10 +179,15 @@ using CLM
             function build_run_dual(Tseed, seedp)
                 inst_d = CLM.CLMInstances()
                 for name in fieldnames(CLM.CLMInstances)
-                    (name === :water || name === :surfdata) && continue
+                    # dgv_ecophyscon is parametric on its *vector* type (not a Real),
+                    # so make_dual_copy's wrapper{D}() rebuild does not apply — share
+                    # it by reference like surfdata.
+                    (name === :water || name === :surfdata ||
+                     name === :dgv_ecophyscon) && continue
                     setfield!(inst_d, name, make_dual_copy(getfield(inst_f64, name), D))
                 end
                 inst_d.surfdata = inst_f64.surfdata
+                inst_d.dgv_ecophyscon = inst_f64.dgv_ecophyscon
                 inst_d.photosyns.stomatalcond_mtd = inst_f64.photosyns.stomatalcond_mtd
                 water_d = CLM.WaterData()
                 for name in fieldnames(CLM.WaterData)

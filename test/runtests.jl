@@ -152,6 +152,7 @@ using CLM
     include("test_cn_annual_update.jl")
     include("test_cn_products_mod.jl")
     include("test_cndv.jl")
+    include("test_cndv_wiring.jl")
     include("test_total_water_heat.jl")
     include("test_history_io.jl")
     include("test_multigridcell_history.jl")

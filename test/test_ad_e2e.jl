@@ -966,10 +966,12 @@ using CLM
         for name in fieldnames(CLM.CLMInstances)
             name === :water && continue          # handled separately (facade)
             name === :surfdata && continue       # Union{..., Nothing}
+            name === :dgv_ecophyscon && continue # parametric on vector type, not FT
             src = getfield(inst_f64, name)
             setfield!(inst_d, name, make_dual_copy(src, D))
         end
         inst_d.surfdata = inst_f64.surfdata
+        inst_d.dgv_ecophyscon = inst_f64.dgv_ecophyscon
 
         # Copy photosyns int/bool fields
         inst_d.photosyns.stomatalcond_mtd = inst_f64.photosyns.stomatalcond_mtd

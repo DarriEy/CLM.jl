@@ -71,6 +71,7 @@ function clm_initialize!(;
     use_crop::Bool = false,
     use_luna::Bool = false,
     use_lch4::Bool = false,
+    use_cndv::Bool = false,
     use_fates::Bool = false,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
@@ -87,6 +88,7 @@ function clm_initialize!(;
     varctl.use_cn = use_cn
     varctl.use_crop = use_crop
     varctl.use_luna = use_luna
+    varctl.use_cndv = use_cndv
     varctl.create_crop_landunit = use_crop
     varctl.use_bedrock = use_bedrock
     varctl.all_active = all_active
@@ -155,7 +157,8 @@ function clm_initialize!(;
                   ndecomp_cascade_transitions=ndecomp_cascade_transitions,
                   nlevurb=nlevurb,
                   use_luna=use_luna,
-                  use_lch4=use_lch4)
+                  use_lch4=use_lch4,
+                  use_cndv=use_cndv)
 
     # ---- Step 9: Build subgrid hierarchy ----
     # Get scalar lat/lon fallback from surface file if not provided. In full-grid
@@ -167,6 +170,17 @@ function clm_initialize!(;
     initGridCells!(bounds, surf,
                    inst.gridcell, inst.landunit, inst.column, inst.patch;
                    lat=actual_lat, lon=actual_lon)
+
+    # ---- CNDV: initialize fpcgrid from the assigned patch weights ----
+    # Mirrors CNVegetationFacade::Init2 → dynCNDV_init (post-subgrid-weight init);
+    # see dynCNDVMod.F90:dynCNDV_init. Sets fpcgrid = fpcgridold = wtcol so the
+    # per-step dyn_cndv_interp! starts from the prescribed weights. The global
+    # clm_varctl.use_cndv (set above with the other control flags) gates the
+    # atm2lnd temperature accumulator (t_mo_min). No-op for the default
+    # (use_cndv=false) path.
+    if use_cndv
+        dyn_cndv_init!(inst.dgvs, inst.patch, bounds.begp:bounds.endp)
+    end
 
     # ---- Step 10: Set active flags and check weights ----
     set_active!(bounds, inst.landunit, inst.column, inst.patch)
