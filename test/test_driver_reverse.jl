@@ -112,6 +112,46 @@
     @test isfinite(bp.inst.temperature.t_veg_patch[fp])
     @test isfinite(bp.inst.photosyns.rssun_patch[fp])
 
+    # ---- convergence-aware canopy N + top-level clm_drv_reverse! guard (NO Enzyme).
+    # driver_canopy_converged_n auto-detects the canopy Newton count from the decomposed
+    # forward's per-patch convergence (same DTMIN/DLEMIN test the production kernel uses),
+    # so the driver-reverse never hard-codes n_canopy. It must (a) land in [ITMIN+1, itmax],
+    # (b) be deterministic, (c) not mutate the bundle, and (d) the forward orchestration that
+    # clm_drv_reverse! reverses must run finite. The reverse GRADIENT (auto N) is FD-validated
+    # on 1.10/Enzyme in scripts/enzyme_clm_drv_reverse.jl (rel ~2e-7 vs Richardson FD).
+    bconv = CLM.driver_rev_bundle(deepcopy(inst))
+    caux2 = CLM.canopy_rev_aux(bconv.inst, bounds, filt)     # energy-balance canopy
+    tveg_before = copy(bconv.inst.temperature.t_veg_patch)
+    Nauto = CLM.driver_canopy_converged_n(bconv, caux2)
+    @test Nauto isa Int
+    @test CLM.ITMIN_CANOPY < Nauto <= CLM.canopy_fluxes_ctrl.itmax_canopy_fluxes
+    @test bconv.inst.temperature.t_veg_patch == tveg_before  # detection did NOT mutate the bundle
+    # Detection is DETERMINISTIC (re-running it on a fresh bundle gives the same N).
+    # NOTE: Nauto is the convergence count of the ENERGY-BALANCE mirror (use_psn=false here),
+    # a different solve than the warmed inst's num_iter_patch (full canopy_fluxes! with
+    # photosynthesis) — so we don't assert Nauto≈num_iter. It either converges below the
+    # DTMIN/DLEMIN tolerance or saturates at itmax (both are correct: N≥converged-count is
+    # what the differentiate-through-the-converged-iterate scheme needs).
+    @test CLM.driver_canopy_converged_n(CLM.driver_rev_bundle(deepcopy(inst)),
+              CLM.canopy_rev_aux(inst, bounds, filt)) == Nauto      # deterministic
+    # clm_drv_reverse! forward-orchestration parity: the chain it assembles with the auto N
+    # reproduces an explicit driver_rev_phases(...; n_canopy=Nauto) forward sweep.
+    bref_drv = CLM.driver_rev_bundle(deepcopy(inst))
+    phref = CLM.driver_rev_phases(bounds, filt, config;
+                                  canopy_aux=CLM.canopy_rev_aux(bref_drv.inst, bounds, filt),
+                                  n_canopy=Nauto)
+    for (f, cargs) in phref; f(bref_drv, cargs...); end
+    @test all(isfinite, bref_drv.inst.temperature.t_veg_patch)
+    @test isfinite(bref_drv.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
+    @test isa(CLM.clm_drv_reverse!, Function)                # top-level entry exists
+    # the default seed touches the soil thermal profile (active soil layers only).
+    bseed = CLM.driver_rev_bundle(deepcopy(inst))
+    for (f, cargs) in phref; f(bseed, cargs...); end
+    dbz = CLM.Enzyme.make_zero(bseed)
+    CLM._default_drv_seed!(dbz, bseed)
+    @test dbz.inst.temperature.t_soisno_col[c0, j1] ≈ 2*bseed.inst.temperature.t_soisno_col[c0, j1] atol=1e-12
+    @test dbz.inst.temperature.t_soisno_col[c0, 1] == 0.0   # snow layer (j<nlevsno+1) not seeded
+
     # ---- multi-step trajectory guard (NO Enzyme). The reverse-AD gradient
     # d(final state)/d(initial state) over an N-step horizon is validated on 1.10/Enzyme in
     # scripts/enzyme_multistep_reverse.jl (3-way: CLM.multistep_reverse! == compositional_

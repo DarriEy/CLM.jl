@@ -180,3 +180,29 @@ ok = isfinite(maxrel) && maxrel < 1e-4
 println(ok ? "\nMULTI-PATCH WHOLE-CANOPY REVERSE-AD VALIDATED ✓ (2 patches, different convergence)" :
              "\nMISMATCH ✗ — investigate")
 println("="^60)
+
+# ---- CONVERGENCE-AWARE auto-N: canopy_rev_converged_n must pick N ≥ the slowest patch's
+# real Newton count (it covers BOTH patches even though they converge at different counts),
+# and the auto-N reverse must match the manual-N reverse to machine precision. ----
+let B = build(); b = make_b(B)
+    itmax = C.canopy_fluxes_ctrl.itmax_canopy_fluxes
+    Nauto = C.canopy_rev_converged_n(b, make_aux(B))
+    @printf("\nauto-detected N = %d   (real per-patch num_iter = %s, max = %d, itmax = %d)\n",
+            Nauto, string(nit), N, itmax)
+    # Auto-N covers every patch's convergence: either it converged (≥ the slowest patch) or
+    # it saturated at itmax (here both patches need the full solve, so Nauto = itmax = 40 and
+    # the real num_iter = 41 is the post-loop-increment past the same cap). The decisive check
+    # is that the auto-N gradient EQUALS the manual-N gradient to machine precision — i.e. the
+    # extra iteration the manual N=41 ran is a no-op at the converged fixed point.
+    okN = (Nauto >= N) || (Nauto == itmax)
+    let B2 = build(); b2 = make_b(B2)
+        dba = C.canopy_rev_gradient!(b2, make_aux(B2); seed = :t_veg_patch)   # N=nothing → auto
+        ga = copy(dba.temperature.t_grnd_col)
+        dmax = maximum(abs.(ga .- g_comp) ./ max.(abs.(g_comp), 1e-10))
+        @printf("auto-N reverse vs manual-N reverse: max rel = %.2e\n", dmax)
+        okN &= isfinite(dmax) && dmax < 1e-8
+    end
+    println(okN ? "CONVERGENCE-AWARE AUTO-N VALIDATED ✓ (per-patch convergence; gradient matches manual N)" :
+                  "AUTO-N MISMATCH ✗")
+    println("="^60)
+end
