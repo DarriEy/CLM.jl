@@ -43,26 +43,33 @@ const DEPTH_DEFAULT_STEPS = Dict(
     :multiyear => 48 * 365 * 2,
 )
 
+# CI cadence tiers (DESIGN §5): which schedule a config runs on.
+#   :pr      — fast, every PR (baselines, single-axis smokes, determinism, parity-anchor)
+#   :nightly — the full matrix at smoke/day depth (pairwise, bundles, domains)
+#   :weekly  — deep tier (multi-year stability, streamflow KGE) — minutes-to-hours
+const TIERS = (:pr, :nightly, :weekly)
+
 """
     vcfg(id; mode=:sp, flags=(;), domain=:bow, backend=:cpu, init=:cold,
-         depth=:smoke, oracles=[:conservation], data_dep=true, note="")
+         depth=:smoke, oracles=[:conservation], data_dep=true, tier=:nightly, note="")
 
 Construct one validation-matrix entry with defaults. Validates field domains so a
-typo'd oracle/mode/depth fails loudly at matrix-load time, not mid-run.
+typo'd oracle/mode/depth/tier fails loudly at matrix-load time, not mid-run.
 """
 function vcfg(id::AbstractString; mode::Symbol=:sp, flags::NamedTuple=(;),
               domain::Symbol=:bow, backend::Symbol=:cpu, init::Symbol=:cold,
               depth::Symbol=:smoke, oracles::Vector{Symbol}=[:conservation],
-              data_dep::Bool=true, note::AbstractString="")
+              data_dep::Bool=true, tier::Symbol=:nightly, note::AbstractString="")
     mode in (:sp, :cn, :fates_sp, :fates_bgc) || error("bad mode $mode in $id")
     init in (:cold, :warm) || error("bad init $init in $id")
     haskey(DEPTH_DEFAULT_STEPS, depth) || error("bad depth $depth in $id")
     backend in (:cpu, :metal, :cuda, :amdgpu) || error("bad backend $backend in $id")
+    tier in TIERS || error("bad tier $tier in $id")
     for o in oracles
         o in ORACLE_KINDS || error("bad oracle $o in $id")
     end
     (; id=String(id), mode, flags, domain, backend, init, depth,
-       oracles, data_dep, note=String(note))
+       oracles, data_dep, tier, note=String(note))
 end
 
 """
@@ -138,14 +145,14 @@ function validation_matrix()
     M = NamedTuple[]
 
     # --- Step 1: reference-domain baselines (T2 conservation, the universal verdict) ---
-    push!(M, vcfg("sp-bow-baseline"; mode=:sp, domain=:bow, depth=:smoke,
+    push!(M, vcfg("sp-bow-baseline"; mode=:sp, domain=:bow, depth=:smoke, tier=:pr,
                   oracles=[:conservation],
                   note="Satellite-phenology baseline on Bow — no BGC, the reference physics path."))
-    push!(M, vcfg("cn-bow-baseline"; mode=:cn, domain=:bow, depth=:smoke,
+    push!(M, vcfg("cn-bow-baseline"; mode=:cn, domain=:bow, depth=:smoke, tier=:pr,
                   oracles=[:conservation],
                   note="CN/BGC baseline on Bow (use_cn, FUN+FlexibleCN as in the Bow lnd_in)."))
     # A deeper SP stability probe (day-length run) — still cheap, exercises a diurnal cycle.
-    push!(M, vcfg("sp-bow-day"; mode=:sp, domain=:bow, depth=:day,
+    push!(M, vcfg("sp-bow-day"; mode=:sp, domain=:bow, depth=:day, tier=:pr,
                   oracles=[:conservation],
                   note="SP Bow over a full diurnal cycle — finiteness + per-step water closure."))
 
@@ -268,9 +275,34 @@ function validation_matrix()
     # spitfire wiring through build_for is its own effort; FATES is validated by the
     # dedicated FATES suite (Tier F: runs live through clm_drv! on 14-PFT params).
 
-    # NOTE: Steps 6–7 append here (Fortran parity, multi-year + streamflow). Gated-off
-    # byte-identity (T3) is covered by the per-feature suite (the r1==r2 pattern, e.g.
-    # test_btran_smoothing.jl / test_cnfire_wiring.jl / test_distributed_driver.jl)
-    # and run-reproducibility by the :determinism oracle above.
+    # --- Step 6: Fortran T1 parity (the only tier with external ground truth) ---
+    # Inject the Fortran before-step dump, run one clm_drv! step, diff vs the after
+    # dump. The :pr-tier physics anchor. Needs DUMPDIR dumps (reports missing if absent).
+    push!(M, vcfg("sp-bow-parity"; mode=:sp, domain=:bow, depth=:smoke, tier=:pr,
+                  oracles=[:parity],
+                  note="T1: Julia state == Fortran dump at the Bow daytime peak-sun step (n13461)."))
+
+    # --- Step 7: deep tier — multi-year stability (T2) + streamflow realism (T4) ---
+    # Multi-year drift: a long repeat-forcing run must stay finite + balance-clean every
+    # step (the :conservation oracle handles any depth). Weekly tier — season depth is
+    # ~thousands of steps. SP keeps it tractable; the verdict is bounded long-run drift.
+    push!(M, vcfg("sp-bow-multiyear"; mode=:sp, domain=:bow, depth=:season, tier=:weekly,
+                  oracles=[:conservation],
+                  note="T2 deep: SP Bow over a season — long-run finiteness + water closure."))
+    # Streamflow KGE/NSE vs gauge across the wired eval domains (T4 realism). Scored
+    # out-of-band by run_clm_streamflow.jl; the oracle records the check + points there.
+    for (dom, note) in [(:bow,       "Bow at Banff (WSC)"),
+                        (:krycklan,  "Boreal Krycklan (SITES C16)"),
+                        (:abisko,    "Arctic Abisko (SMHI)"),
+                        (:tagus,     "Mediterranean Tagus (CEDEX)")]
+        push!(M, vcfg("streamflow-$(dom)"; mode=:sp, domain=dom, depth=:smoke, tier=:weekly,
+                      oracles=[:streamflow],
+                      note="T4 realism: $note — KGE/NSE vs observed daily hydrograph."))
+    end
+
+    # NOTE (coverage ledger, DESIGN §6): gated-off byte-identity (T3) is covered by the
+    # per-feature suite (the r1==r2 pattern, e.g. test_btran_smoothing.jl /
+    # test_cnfire_wiring.jl / test_distributed_driver.jl); run-reproducibility by the
+    # :determinism oracle. A FATES-bgc+SPITFIRE bundle is deferred to the FATES suite.
     return M
 end
