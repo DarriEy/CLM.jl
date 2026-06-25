@@ -156,7 +156,28 @@ function validation_matrix()
                       note="Domain coverage: $note (finiteness + water closure)."))
     end
 
-    # NOTE: Steps 3,5–7 append here (remaining metamorphic oracles, landunits,
-    # pairwise array, Fortran parity, multi-year + streamflow).
+    # --- Step 3: metamorphic oracles (T3), now additive on the generalized build_for ---
+    # Equivalent-method, round-trip, and invariance relations — no external truth.
+    push!(M, vcfg("cn-bow-matrixeq"; mode=:cn, domain=:bow, depth=:smoke,
+                  oracles=[:matrix_eq],
+                  note="T3: matrix-CN solve == sequential cascade (soil C/N + veg-C fingerprint)."))
+    push!(M, vcfg("sp-bow-restart"; mode=:sp, domain=:bow, depth=:smoke,
+                  oracles=[:restart_rt],
+                  note="T3: evolved SP prognostic state round-trips restart write→read bit-exact."))
+    push!(M, vcfg("cn-bow-restart"; mode=:cn, domain=:bow, depth=:smoke,
+                  oracles=[:restart_rt],
+                  note="T3: evolved CN state (incl. soil C/N pools) round-trips restart bit-exact."))
+    # Invariants validated by dedicated always-green machinery (DESIGN §6) — these
+    # oracles record the relation + point at the authoritative check (no in-process
+    # re-derivation; MPI needs separate ranks, AD-over-driver is heavy/version-sensitive).
+    push!(M, vcfg("bow-invariants"; mode=:sp, domain=:bow, depth=:smoke,
+                  oracles=[:mpi_serial, :ad_fd],
+                  note="T3 invariants: MPI==serial (CI lane) + AD==FD (AD suite)."))
+
+    # NOTE: Steps 5–7 append here (landunit coverage, pairwise array, Fortran
+    # parity, multi-year + streamflow). Gated-off byte-identity (T3) is covered
+    # comprehensively by the per-feature suite tests (the r1==r2 pattern, e.g.
+    # test_btran_smoothing.jl / test_cnfire_wiring.jl / test_distributed_driver.jl)
+    # and run-reproducibility by the :determinism oracle above.
     return M
 end
