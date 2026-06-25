@@ -109,6 +109,15 @@ Base.@kwdef mutable struct CLMInstances
     bgc_vegetation::CNVegetationData = CNVegetationData()
     cn_products::CNProductsData      = CNProductsData()
 
+    # --- Dynamic global vegetation (CNDV / DGVM) — only used when use_cndv ---
+    # dgvs is prognostic patch-level state (parametric {FT}, device-movable): it
+    # rides the normal AD dual-copy. dgv_ecophyscon holds read-only ecophysiological
+    # constants derived from pftcon; it is parametric on the *vector* type (not FT)
+    # so it is left untouched by make_instances and is excluded from the AD dual-copy
+    # (like surfdata/fates) in calibration._make_dual_instances.
+    dgvs::DGVSData                   = DGVSData()
+    dgv_ecophyscon::DGVEcophysCon    = DGVEcophysCon()
+
     # --- Decomposition cascade ---
     decomp_cascade::DecompCascadeConData = DecompCascadeConData()
 
@@ -214,7 +223,8 @@ function clm_instInit!(inst::CLMInstances;
                        ndecomp_cascade_transitions::Int = 5,
                        nlevurb::Int = 0,
                        use_luna::Bool = false,
-                       use_lch4::Bool = false)
+                       use_lch4::Bool = false,
+                       use_cndv::Bool = false)
 
     # --- Grid hierarchy ---
     gridcell_init!(inst.gridcell, ng)
@@ -306,6 +316,18 @@ function clm_instInit!(inst::CLMInstances;
                         ndecomp_pools=ndecomp_pools,
                         ndecomp_cascade_transitions=ndecomp_cascade_transitions)
     cn_products_init!(inst.cn_products, ng)
+
+    # --- Dynamic global vegetation (CNDV) — only sized/initialized when active ---
+    # Cold-start the DGVS patch state and derive the ecophysiological constants from
+    # the global pftcon (must already be allocated). Left at size 0 when use_cndv is
+    # false so the default path is byte-identical (the gated driver calls no-op on
+    # an empty dgvs via their isempty(bounds) guards).
+    if use_cndv
+        dgvs_init_cold!(inst.dgvs, np)
+        if !isempty(pftcon.pftpar20)
+            dgv_ecophyscon_init!(inst.dgv_ecophyscon, pftcon)
+        end
+    end
 
     # --- Saturated / infiltration excess runoff ---
     inst.sat_excess_runoff.fsat_col = fill(0.0, nc)
