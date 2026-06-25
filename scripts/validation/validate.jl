@@ -115,6 +115,10 @@ function _make_config(cfg)
         kw[:use_cn] = true
     elseif cfg.mode === :fates_sp || cfg.mode === :fates_bgc
         kw[:use_fates] = true
+        cfg.mode === :fates_bgc && (kw[:use_fates_bgc] = true)
+        # SPITFIRE fire mode (0=off, 1=scalar_lightning, …) — the driver gate; the
+        # FATES module-global is set at clm_fates_init! time inside clm_initialize!.
+        kw[:fates_spitfire_mode] = get(f, :fates_spitfire_mode, 0)
     end
     for k in (:use_luna, :use_hydrstress, :use_voc, :use_ozone, :irrigate,
               :use_lch4, :use_c13, :use_c14, :use_crop, :use_cndv, :use_matrixcn)
@@ -323,42 +327,96 @@ function oracle_matrix_eq(cfg)
                       "a run failed: $(something(em, es, "early stop"))")
 end
 
+# The running-mean / degree-day accumulators that the restart registry OMITS but that
+# feed forward into future steps. A restart-continue must restore these (+ the time
+# manager) to reproduce an uninterrupted run; the forcing reader self-seeks by date so
+# needs no cursor. (Restoring them in-harness from the live pre-restart instance avoids
+# a core restart-format change; the omission itself is documented here.)
+# Running-mean / degree-day accumulators that the restart registry OMITS, grouped by
+# the sub-instance that holds them. They feed forward (24/240-hr means drive photosynthesis,
+# daily min/max drive the 5/10-day temperature means, GDDs drive phenology), so a
+# restart-continue must restore them to match an uninterrupted run.
+const _ACCUM_BY_INST = (
+    temperature = (:t_a10_patch, :t_a10min_patch, :t_a5min_patch,
+        :t_veg24_patch, :t_veg240_patch, :t_veg_day_patch, :t_veg_night_patch,
+        :t_veg10_day_patch, :t_veg10_night_patch, :soila10_col,
+        :t_ref2m_min_patch, :t_ref2m_max_patch, :t_ref2m_min_inst_patch, :t_ref2m_max_inst_patch,
+        :gdd0_patch, :gdd8_patch, :gdd10_patch, :gdd020_patch, :gdd820_patch, :gdd1020_patch),
+    atm2lnd = (:forc_pco2_240_patch, :forc_po2_240_patch, :forc_pbot240_downscaled_patch,
+        :fsd24_patch, :fsd240_patch, :fsi24_patch, :fsi240_patch, :wind24_patch),
+    canopystate = (:fsun24_patch, :fsun240_patch),
+)
+
+function _restore_continuation_state!(dst_inst, src_inst, dst_tm, src_tm)
+    for (sub, fields) in pairs(_ACCUM_BY_INST)
+        ds = getfield(dst_inst, sub); ss = getfield(src_inst, sub)
+        for f in fields
+            d = getfield(ds, f); s = getfield(ss, f)
+            length(d) == length(s) && copyto!(d, s)
+        end
+    end
+    dst_tm.nstep = src_tm.nstep
+    dst_tm.current_date = src_tm.current_date
+    return nothing
+end
+
+# Continue-equality tolerance. Round-trip is bit-exact, but restart-CONTINUATION carries
+# a small residual (~1e-4 over a few steps) because write_restart omits some forward-
+# feeding state beyond the running-mean accumulators restored above — energyflux history
+# (e.g. btran daily-min) + downscaled-forcing state the full Fortran restart would carry.
+# Closing it to bit-exact is a restart-completeness audit (core IO); until then this band
+# is a REGRESSION guard (continuation must track the uninterrupted run within it).
+const RESTART_CONTINUE_TOL = 1e-3
+
 """
-T3 restart round-trip: a config's evolved prognostic state must survive a restart
-write→read bit-exactly. Runs N steps, snapshots, writes a restart to a scratch file,
-reads it into a fresh cold-built instance, and asserts the re-read fingerprint is
-bit-identical. Catches restart-registry gaps (a field that evolves but isn't
-persisted). (The stronger continue==uninterrupted equality — which additionally
-needs accumulator + forcing-cursor capture — is validated in test_run_clm.jl.)
+T3 restart round-trip + continue-equality. Two assertions:
+  (1) round-trip — a config's evolved prognostic state survives a restart write→read
+      BIT-EXACTLY (catches registry gaps: a field that evolves but isn't persisted).
+  (2) continue ≈ uninterrupted — running N then restarting and continuing M more steps
+      tracks an uninterrupted N+M run within RESTART_CONTINUE_TOL. The restart file carries
+      only the prognostic registry, so the oracle restores the omitted running-mean/GDD
+      accumulators + time manager from the live pre-restart instance (the forcing reader
+      self-seeks by date). The residual = the restart's remaining accumulator/diagnostic
+      incompleteness (documented; not bit-zero yet — see RESTART_CONTINUE_TOL).
 """
 function oracle_restart_rt(cfg)
-    nsteps = max(3, DEPTH_DEFAULT_STEPS[cfg.depth] ÷ 2)
     use_cn = cfg.mode === :cn
-    (d1, nf1, e1, s1) = run_steps!(build_for(cfg), nsteps)
-    ran1 = (e1 === nothing) && d1 == nsteps
+    total = DEPTH_DEFAULT_STEPS[cfg.depth]
+    N = max(2, total ÷ 2); M = max(1, total - N)
     path = joinpath(tempdir(), "clmval_restart_$(cfg.id).nc")
-    identical = false; ok = false; mdiff = NaN
-    if ran1
-        # The evolved instance must be re-built+re-run to snapshot it (run_steps!
-        # closed its reader); instead re-run a fresh copy to N, write from it, re-read.
-        b = build_for(cfg); (d2, _, e2, s2) = run_steps!(b, nsteps)
-        if e2 === nothing && d2 == nsteps
-            CLM.write_restart(b.inst, path; bounds=b.bounds, use_cn=use_cn,
-                              time=b.tm.current_date)
+    # A — uninterrupted reference run of N+M steps.
+    (dA, _, eA, sA) = run_steps!(build_for(cfg), N + M)
+    rt_ok = false; rt_diff = NaN; cont_ok = false; cont_diff = NaN; ran = false
+    if eA === nothing && dA == N + M
+        # B — run to step N; keep the live instance + time manager.
+        b = build_for(cfg); (dB, _, eB, _) = run_steps!(b, N)
+        if eB === nothing && dB == N
+            sB = _snapshot(b.inst)
+            CLM.write_restart(b.inst, path; bounds=b.bounds, use_cn=use_cn, time=b.tm.current_date)
+            # C — fresh instance, restore prognostic state FROM THE RESTART FILE.
             c = build_for(cfg)
             CLM.read_restart!(c.inst, path; bounds=c.bounds, use_cn=use_cn)
-            s3 = _snapshot(c.inst)
-            ok = true
-            mdiff = length(s2) == length(s3) ? maximum(abs.(s2 .- s3); init=0.0) : NaN
-            identical = length(s2) == length(s3) && all(s2 .=== s3)
+            sC0 = _snapshot(c.inst)
+            rt_diff = length(sB) == length(sC0) ? absdiff(sB, sC0) : NaN
+            rt_ok = length(sB) == length(sC0) && all(sB .=== sC0)
+            # restore the omitted continuation state (accumulators + tm) from live B, run M.
+            _restore_continuation_state!(c.inst, b.inst, c.tm, b.tm)
+            (dC, _, eC, sC) = run_steps!(c, M)
+            if eC === nothing && dC == M
+                ran = true
+                cont_diff = length(sA) == length(sC) ? absdiff(sA, sC) : NaN
+                cont_ok = isfinite(cont_diff) && cont_diff <= RESTART_CONTINUE_TOL
+            end
         end
         isfile(path) && rm(path; force=true)
     end
-    (; oracle=:restart_rt, pass=identical,
-       metrics=(; ran=ran1 && ok, maxabsdiff=mdiff, nsteps),
-       detail = (ran1 && ok) ? (identical ? "evolved state round-trips bit-exact after $nsteps steps" :
-                                "restart MISMATCH max|Δ|=$(mdiff)") :
-                               "run/restart-io failed: $(something(e1, "early stop"))")
+    pass = rt_ok && cont_ok
+    (; oracle=:restart_rt, pass,
+       metrics=(; ran, N, M, roundtrip_diff=rt_diff, continue_diff=cont_diff, tol=RESTART_CONTINUE_TOL),
+       detail = ran ? (pass ? "round-trip bit-exact; restart-continue tracks uninterrupted N+M " *
+                              "(|Δ|=$(round(cont_diff,sigdigits=3)) ≤ $RESTART_CONTINUE_TOL, $N+$M steps)" :
+                       "MISMATCH roundtrip|Δ|=$(rt_diff) continue|Δ|=$(cont_diff) (> $RESTART_CONTINUE_TOL)") :
+                      "run/restart-io failed: $(something(eA, "early stop"))")
 end
 
 # mpi_serial and ad_fd are invariants validated by dedicated, always-green machinery

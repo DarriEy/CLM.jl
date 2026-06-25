@@ -215,11 +215,18 @@ function validation_matrix()
     # --- Step 4: domain coverage (T2 finiteness smoke on contrasting climates) ---
     # build_for's domain dispatch reuses the run_clm_streamflow.jl path. data_dep so
     # these auto-skip in CI; locally they run wherever the Symfluence inputs exist.
+    # Domains with machine-local inputs run locally; massa/baltimore/iceland are wired
+    # in DOMAIN_DIRNAME but their Symfluence builds aren't on every box — they carry
+    # data_dep so they auto-skip cleanly until the inputs exist (ledger completeness:
+    # every wired domain has a row, so coverage is honest about what's exercised).
     for (dom, note) in [(:aripuana,   "tropical Amazon — wet/warm, no snow"),
                         (:stillwater, "semi-arid continental — dry/hot"),
                         (:krycklan,   "boreal Sweden — cold/snowy"),
                         (:abisko,     "arctic Sweden — permafrost-adjacent"),
-                        (:tagus,      "Mediterranean Spain — seasonal-dry")]
+                        (:tagus,      "Mediterranean Spain — seasonal-dry"),
+                        (:massa,      "Alpine Switzerland — glaciated headwater"),
+                        (:baltimore,  "urban temperate — Dead Run / Baltimore"),
+                        (:iceland,    "subarctic volcanic — Jökulsá á Fjöllum")]
         push!(M, vcfg("sp-$(dom)-smoke"; mode=:sp, domain=dom, depth=:smoke,
                       oracles=[:conservation],
                       note="Domain coverage: $note (finiteness + water closure)."))
@@ -271,9 +278,15 @@ function validation_matrix()
                   flags=(use_luna=true, use_hydrstress=true, use_voc=true, use_ozone=true),
                   oracles=[:conservation],
                   note="Full biophysics: SP + hydrstress + luna + voc + ozone (warm IC)."))
-    # NOTE: a FATES-bgc + SPITFIRE bundle is deferred — FATES instance bootstrap +
-    # spitfire wiring through build_for is its own effort; FATES is validated by the
-    # dedicated FATES suite (Tier F: runs live through clm_drv! on 14-PFT params).
+    # FATES-bgc + SPITFIRE: the third BGC mode (alongside SP/CN) run end-to-end through
+    # the unified harness. build_for builds it via clm_initialize!(use_fates=true) (FATES
+    # NBG cold-start on the Bow surfdata); _make_config sets use_fates_bgc + spitfire mode.
+    # Day depth so the run crosses a day boundary and exercises the daily FATES demographic
+    # + fire step (fire is computed daily, not in the hourly physics loop).
+    push!(M, vcfg("bundle-fates-bgc-spitfire"; mode=:fates_bgc, domain=:bow, depth=:day,
+                  flags=(fates_spitfire_mode=1,),
+                  oracles=[:conservation],
+                  note="FATES-bgc + SPITFIRE (scalar_lightning) — finite through clm_drv! across a day."))
 
     # --- Step 6: Fortran T1 parity (the only tier with external ground truth) ---
     # Inject the Fortran before-step dump, run one clm_drv! step, diff vs the after
