@@ -29,8 +29,10 @@
 #   :restart_rt    (T3) write→read→continue == uninterrupted
 #   :ad_fd         (T3) AD gradient == finite difference
 #   :mpi_serial    (T3) MPI 2-rank gather == serial
+#   :determinism   (T3) same config run twice == bit-identical fingerprint
 #   :streamflow    (T4) KGE/NSE vs gauge obs
 const ORACLE_KINDS = (:conservation, :parity, :byte_identity, :matrix_eq,
+                      :determinism,
                       :restart_rt, :ad_fd, :mpi_serial, :streamflow)
 
 const DEPTH_DEFAULT_STEPS = Dict(
@@ -85,8 +87,27 @@ function validation_matrix()
                   oracles=[:conservation],
                   note="SP Bow over a full diurnal cycle — finiteness + per-step water closure."))
 
-    # NOTE: Steps 2–7 append here (single-axis sweep, metamorphic, domains/landunits,
-    # pairwise, Fortran parity, multi-year + streamflow). Kept minimal in Step 1 so the
-    # runner architecture lands first.
+    # --- Step 2: metamorphic determinism (T3) + deeper-depth stability (T2) ---
+    # Determinism: a fresh build run twice must be bit-identical — catches
+    # nondeterminism (uninit reads, iteration-order, RNG) that conservation misses.
+    push!(M, vcfg("sp-bow-determinism"; mode=:sp, domain=:bow, depth=:smoke,
+                  oracles=[:conservation, :determinism],
+                  note="SP Bow run twice → bit-identical final-state fingerprint."))
+    push!(M, vcfg("cn-bow-determinism"; mode=:cn, domain=:bow, depth=:smoke,
+                  oracles=[:conservation, :determinism],
+                  note="CN Bow run twice → bit-identical (the CN cascade is deterministic)."))
+    # Deeper stability — a CN diurnal cycle exercises the BGC chain over 48 steps.
+    push!(M, vcfg("cn-bow-day"; mode=:cn, domain=:bow, depth=:day,
+                  oracles=[:conservation],
+                  note="CN Bow over a diurnal cycle — BGC + water/energy/C-N closure."))
+
+    # NOTE: A *full* single-axis flag sweep (use_lch4/use_ozone/use_hydrstress/…)
+    # needs the instance built WITH each flag's state allocated (CH4/ozone/PHS
+    # fields), i.e. the build_for/clm_initialize! generalization done in Step 4
+    # (domain/landunit). It is appended there so each swept flag gets a well-posed
+    # instance rather than a config toggle over un-allocated state.
+
+    # NOTE: Steps 3–7 append here (remaining metamorphic oracles, domains/landunits,
+    # pairwise, Fortran parity, multi-year + streamflow).
     return M
 end
