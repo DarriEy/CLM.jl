@@ -195,6 +195,17 @@ function clm_initialize!(;
     # ---- Step 12: Read parameters ----
     readParameters!(paramfile)
 
+    # CNDV ecophysiological constants (twmax/crownarea_max/…) derive from pftcon's
+    # pftpar20/28/29/30/31, which are populated ONLY by readParameters! above. The
+    # clm_instInit! cndv block runs BEFORE this read, so on the first init in a
+    # process it sees an empty pftcon and skips dgv_ecophyscon_init! — leaving
+    # eco.twmax empty and crashing cndv_update_acc_vars! at step 1. (A second init
+    # in the same process worked only because the global pftcon was already filled.)
+    # Re-derive them here, after the param read, so a single fresh init is correct.
+    if use_cndv && !isempty(pftcon.pftpar20)
+        dgv_ecophyscon_init!(inst.dgv_ecophyscon, pftcon)
+    end
+
     # Wire per-instance friction-velocity roughness params from the param file.
     # zlnd (soil momentum roughness) defaults to 0.000775 but the param file sets
     # 0.01 (Fortran reads it too); leaving it at the default makes z0mg/z0hg ~13x

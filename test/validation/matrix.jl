@@ -66,6 +66,68 @@ function vcfg(id::AbstractString; mode::Symbol=:sp, flags::NamedTuple=(;),
 end
 
 """
+    pairwise_binary(flags::Vector{Symbol}) -> Vector{NamedTuple}
+
+Deterministic greedy (AETG-style) 2-wise covering array over a set of BINARY flags:
+the returned rows guarantee that for every pair of flags, all four value-combinations
+(off/off, off/on, on/off, on/on) co-occur in at least one row. Each row is returned as
+a NamedTuple of only its TRUE flags (the all-off row is the baseline and is dropped),
+so a flag absent from a row means "off". Covers all 2-way flag interactions in O(log)
+rows instead of 2^N. Pure/deterministic so the CI schema test can verify it.
+"""
+function pairwise_binary(flags::Vector{Symbol})
+    n = length(flags)
+    n >= 2 || return NamedTuple[]
+    # the set of pairs still needing coverage: (i, j, vi, vj), i<j, vi/vj ∈ {false,true}
+    UC = Set{Tuple{Int,Int,Bool,Bool}}()
+    for i in 1:n-1, j in i+1:n, vi in (false, true), vj in (false, true)
+        push!(UC, (i, j, vi, vj))
+    end
+    rows = Vector{Bool}[]
+    cap = 4 * binomial(n, 2) + 1          # each row removes ≥1 pair → this many suffices
+    while !isempty(UC)
+        length(rows) < cap || error("pairwise_binary failed to converge (bug) for $flags")
+        # ANCHOR each row to a still-uncovered pair (deterministic scan) so this
+        # iteration is guaranteed to remove it — the loop cannot stall.
+        anchor = nothing
+        for i in 1:n-1, j in i+1:n, vi in (false, true), vj in (false, true)
+            if (i, j, vi, vj) in UC; anchor = (i, j, vi, vj); break; end
+        end
+        (ai, aj, avi, avj) = anchor
+        row = fill(false, n); assigned = fill(false, n)
+        row[ai] = avi; assigned[ai] = true
+        row[aj] = avj; assigned[aj] = true
+        # greedily set the remaining params to cover the most additional pairs
+        for k in 1:n
+            assigned[k] && continue
+            bestv = false; bestg = -1
+            for v in (false, true)
+                g = 0
+                for m in 1:n
+                    (assigned[m] && m != k) || continue
+                    a, b = minmax(k, m); va, vb = k < m ? (v, row[m]) : (row[m], v)
+                    (a, b, va, vb) in UC && (g += 1)
+                end
+                g > bestg && (bestg = g; bestv = v)
+            end
+            row[k] = bestv; assigned[k] = true
+        end
+        for i in 1:n-1, j in i+1:n
+            delete!(UC, (i, j, row[i], row[j]))
+        end
+        push!(rows, copy(row))
+    end
+    # emit each row as a NamedTuple of its TRUE flags; drop the all-off (baseline) row
+    out = NamedTuple[]
+    for row in rows
+        ks = Tuple(flags[k] for k in 1:n if row[k])
+        isempty(ks) && continue
+        push!(out, NamedTuple{ks}(ntuple(_ -> true, length(ks))))
+    end
+    out
+end
+
+"""
     validation_matrix() -> Vector{NamedTuple}
 
 The full config matrix. Step 1 seeds the SP and CN Bow baselines (T2 conservation);
@@ -156,7 +218,59 @@ function validation_matrix()
                       note="Domain coverage: $note (finiteness + water closure)."))
     end
 
-    # NOTE: Steps 3,5–7 append here (remaining metamorphic oracles, landunits,
-    # pairwise array, Fortran parity, multi-year + streamflow).
+    # --- Step 3: metamorphic oracles (T3), now additive on the generalized build_for ---
+    # Equivalent-method, round-trip, and invariance relations — no external truth.
+    push!(M, vcfg("cn-bow-matrixeq"; mode=:cn, domain=:bow, depth=:smoke,
+                  oracles=[:matrix_eq],
+                  note="T3: matrix-CN solve == sequential cascade (soil C/N + veg-C fingerprint)."))
+    push!(M, vcfg("sp-bow-restart"; mode=:sp, domain=:bow, depth=:smoke,
+                  oracles=[:restart_rt],
+                  note="T3: evolved SP prognostic state round-trips restart write→read bit-exact."))
+    push!(M, vcfg("cn-bow-restart"; mode=:cn, domain=:bow, depth=:smoke,
+                  oracles=[:restart_rt],
+                  note="T3: evolved CN state (incl. soil C/N pools) round-trips restart bit-exact."))
+    # Invariants validated by dedicated always-green machinery (DESIGN §6) — these
+    # oracles record the relation + point at the authoritative check (no in-process
+    # re-derivation; MPI needs separate ranks, AD-over-driver is heavy/version-sensitive).
+    push!(M, vcfg("bow-invariants"; mode=:sp, domain=:bow, depth=:smoke,
+                  oracles=[:mpi_serial, :ad_fd],
+                  note="T3 invariants: MPI==serial (CI lane) + AD==FD (AD suite)."))
+
+    # --- Step 5: t-wise (pairwise) covering array + realistic bundles (T2) ---
+    # Pairwise covers every 2-way flag interaction in O(log) rows instead of 2^N.
+    # Generated over the cold-safe independent flags (each proven solo in Step 4);
+    # hydrstress is excluded (needs a warm vegwp seed) and instead appears in the
+    # full-biophysics bundle below. Driver flags sweep SP; CN sub-flags sweep CN.
+    for (i, fl) in enumerate(pairwise_binary([:use_luna, :use_voc, :use_ozone,
+                                              :irrigate, :use_aquifer_layer]))
+        push!(M, vcfg("pair-sp-$(lpad(i,2,'0'))"; mode=:sp, domain=:bow, depth=:smoke,
+                      flags=fl, oracles=[:conservation],
+                      note="Pairwise (SP driver flags): $(keys(fl))."))
+    end
+    for (i, fl) in enumerate(pairwise_binary([:use_lch4, :use_c13, :use_c14,
+                                              :use_crop, :use_cndv, :use_matrixcn]))
+        push!(M, vcfg("pair-cn-$(lpad(i,2,'0'))"; mode=:cn, domain=:bow, depth=:smoke,
+                      flags=fl, oracles=[:conservation],
+                      note="Pairwise (CN sub-flags): $(keys(fl))."))
+    end
+
+    # Realistic stacked profiles the science actually runs (DESIGN §2.3).
+    push!(M, vcfg("bundle-bgc-production"; mode=:cn, domain=:bow, depth=:day,
+                  flags=(use_lch4=true, use_crop=true, use_cndv=true, use_c13=true,
+                         use_matrixcn=true),
+                  oracles=[:conservation],
+                  note="Full BGC production: CN + lch4 + crop + cndv + c13 + matrixcn."))
+    push!(M, vcfg("bundle-full-biophysics"; mode=:sp, domain=:bow, depth=:smoke, init=:warm,
+                  flags=(use_luna=true, use_hydrstress=true, use_voc=true, use_ozone=true),
+                  oracles=[:conservation],
+                  note="Full biophysics: SP + hydrstress + luna + voc + ozone (warm IC)."))
+    # NOTE: a FATES-bgc + SPITFIRE bundle is deferred — FATES instance bootstrap +
+    # spitfire wiring through build_for is its own effort; FATES is validated by the
+    # dedicated FATES suite (Tier F: runs live through clm_drv! on 14-PFT params).
+
+    # NOTE: Steps 6–7 append here (Fortran parity, multi-year + streamflow). Gated-off
+    # byte-identity (T3) is covered by the per-feature suite (the r1==r2 pattern, e.g.
+    # test_btran_smoothing.jl / test_cnfire_wiring.jl / test_distributed_driver.jl)
+    # and run-reproducibility by the :determinism oracle above.
     return M
 end
