@@ -510,6 +510,7 @@ function cn_driver_no_leaching!(
                     fpg_col = soilbgc_state.fpg_col, dt = dt,
                     use_c13 = config.use_c13, use_c14 = config.use_c14,
                     carbon_resp_opt = config.carbon_resp_opt,
+                    use_crop_agsys = config.use_crop_agsys,
                     npcropmin = npcropmin, nrepr = nrepr)
             else
                 calc_plant_nutrient_competition!(mask_bgc_vegp, bounds_patch,
