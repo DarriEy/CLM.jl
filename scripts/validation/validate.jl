@@ -327,61 +327,29 @@ function oracle_matrix_eq(cfg)
                       "a run failed: $(something(em, es, "early stop"))")
 end
 
-# The running-mean / degree-day accumulators that the restart registry OMITS but that
-# feed forward into future steps. A restart-continue must restore these (+ the time
-# manager) to reproduce an uninterrupted run; the forcing reader self-seeks by date so
-# needs no cursor. (Restoring them in-harness from the live pre-restart instance avoids
-# a core restart-format change; the omission itself is documented here.)
-# Recursively copy EVERY numeric array (Float + Int) from src into dst across all
-# sub-instances. The restart file persists only the prognostic registry, but a
-# bit-exact continuation needs the COMPLETE numeric state — running-mean/GDD
-# accumulators, snow grain radius, melt flags (Int), surface diagnostics, … — which is
-# what the full Fortran restart carries. (Diagnosed: file-only continuation diverges
-# ~1e-4 in t_grnd via snow-albedo/accumulator state; restoring the complete numeric
-# state → bit-zero.) Restoring it from the live pre-restart instance proves continuation
-# is exact GIVEN complete state, isolating it from the restart FILE's incompleteness.
-function _copy_numeric_arrays!(dst, src)
-    for f in fieldnames(typeof(src))
-        sv = getfield(src, f); dv = getfield(dst, f)
-        if sv isa AbstractArray{<:Number} && dv isa AbstractArray && length(sv) == length(dv) && !isempty(sv)
-            copyto!(dv, sv)
-        elseif sv !== nothing && !(sv isa AbstractArray) && isstructtype(typeof(sv)) && typeof(sv) == typeof(dv)
-            try; _copy_numeric_arrays!(dv, sv); catch; end   # skip non-copyable (e.g. FATES union)
-        end
-    end
-    return nothing
-end
-
-function _restore_full_state!(dst_inst, src_inst, dst_tm, src_tm)
-    _copy_numeric_arrays!(dst_inst, src_inst)
-    dst_tm.nstep = src_tm.nstep
-    dst_tm.current_date = src_tm.current_date
-    return nothing
-end
-
 """
-T3 restart round-trip + bit-zero continue-equality. Two assertions:
-  (1) round-trip — a config's evolved prognostic state survives a restart write→read
-      BIT-EXACTLY (catches registry gaps: a field that evolves but isn't persisted).
-  (2) continue == uninterrupted — running N then restarting and continuing M more steps
-      reproduces an uninterrupted N+M run BIT-EXACTLY (===, NaN-aware). Continuation is
-      fully determined by the instance's numeric state (proven: a deepcopy-continue is
-      bit-identical, so no global/RNG path), so the oracle restores the COMPLETE numeric
-      state (every Float+Int array — accumulators, snow grain radius, melt flags, …) from
-      the live pre-restart instance + the time manager; the forcing reader self-seeks by
-      date. This proves continuation is exact given complete state.
+T3 restart round-trip + bit-zero continue-equality, exercising BOTH restart artifacts:
+  (1) round-trip — the curated, Fortran-compatible NetCDF restart (write_restart/
+      read_restart!) must round-trip a config's evolved prognostic registry BIT-EXACTLY
+      (catches registry gaps: a field that evolves but isn't persisted).
+  (2) continue == uninterrupted — write a COMPLETE checkpoint (CLM.write_checkpoint),
+      read it back into a fresh instance FROM THE FILE, and continue M more steps:
+      reproduces an uninterrupted N+M run BIT-EXACTLY (===, NaN-aware).
 
-NOTE the restart FILE alone is not yet sufficient for (2): a file-only continuation
-(prognostic registry + accumulators) diverges ~1e-4 in t_grnd because write_restart omits
-forward-feeding state (snow-albedo grain radius, melt flags, surface diagnostics) the full
-Fortran restart carries. Closing the FILE gap is a restart-IO completeness project; the
-omission is exposed here via the complete-vs-registry restore, not papered over.
+The complete checkpoint exists because the curated NetCDF restart is NOT sufficient for
+bit-exact continuation: a restart-file-only continuation diverges ~1e-4 in t_grnd, and the
+omitted forward-feeding state (running-mean accumulators, snow-grain radius, melt flags, …)
+is DISTRIBUTED across nearly every sub-instance — no small curated field set closes it
+(diagnosed via the harness; excluding any single sub from a full restore still leaves 0,
+but restoring only a subset leaves ~1e-4). CLM.write_checkpoint serializes the complete
+numeric state, so resume is bit-exact FROM THE FILE (proven here, cont|Δ|=0).
 """
 function oracle_restart_rt(cfg)
     use_cn = cfg.mode === :cn
     total = DEPTH_DEFAULT_STEPS[cfg.depth]
     N = max(2, total ÷ 2); M = max(1, total - N)
-    path = joinpath(tempdir(), "clmval_restart_$(cfg.id).nc")
+    rstpath = joinpath(tempdir(), "clmval_restart_$(cfg.id).nc")
+    ckptpath = joinpath(tempdir(), "clmval_ckpt_$(cfg.id).jls")
     # A — uninterrupted reference run of N+M steps.
     (dA, _, eA, sA) = run_steps!(build_for(cfg), N + M)
     rt_ok = false; rt_diff = NaN; cont_ok = false; cont_diff = NaN; ran = false
@@ -390,28 +358,33 @@ function oracle_restart_rt(cfg)
         b = build_for(cfg); (dB, _, eB, _) = run_steps!(b, N)
         if eB === nothing && dB == N
             sB = _snapshot(b.inst)
-            CLM.write_restart(b.inst, path; bounds=b.bounds, use_cn=use_cn, time=b.tm.current_date)
-            # C — fresh instance; restore the prognostic state FROM THE RESTART FILE first
-            # (round-trip fidelity check), then the COMPLETE numeric state from live B.
-            c = build_for(cfg)
-            CLM.read_restart!(c.inst, path; bounds=c.bounds, use_cn=use_cn)
-            sC0 = _snapshot(c.inst)
+            # (1) curated NetCDF restart round-trip — registry fidelity.
+            CLM.write_restart(b.inst, rstpath; bounds=b.bounds, use_cn=use_cn, time=b.tm.current_date)
+            c0 = build_for(cfg)
+            CLM.read_restart!(c0.inst, rstpath; bounds=c0.bounds, use_cn=use_cn)
+            sC0 = _snapshot(c0.inst)
             rt_diff = length(sB) == length(sC0) ? absdiff(sB, sC0) : NaN
             rt_ok = length(sB) == length(sC0) && all(sB .=== sC0)
-            _restore_full_state!(c.inst, b.inst, c.tm, b.tm)
-            (dC, _, eC, sC) = run_steps!(c, M)
+            # (2) complete checkpoint → restore FROM THE FILE → continue M → bit-zero.
+            CLM.write_checkpoint(ckptpath, b.inst, b.tm)
+            (cinst, cnstep, cdate) = CLM.read_checkpoint(ckptpath)
+            c = build_for(cfg)                              # fresh bounds/filt/config + reader
+            c.tm.nstep = cnstep; c.tm.current_date = cdate
+            cb = RunBundle(cinst, c.bounds, c.filt, c.tm, c.config, c.fr, c.dtime)
+            (dC, _, eC, sC) = run_steps!(cb, M)
             if eC === nothing && dC == M
                 ran = true
                 cont_diff = length(sA) == length(sC) ? absdiff(sA, sC) : NaN
                 cont_ok = length(sA) == length(sC) && all(sA .=== sC)   # bit-exact
             end
         end
-        isfile(path) && rm(path; force=true)
+        isfile(rstpath) && rm(rstpath; force=true)
+        isfile(ckptpath) && rm(ckptpath; force=true)
     end
     pass = rt_ok && cont_ok
     (; oracle=:restart_rt, pass,
        metrics=(; ran, N, M, roundtrip_diff=rt_diff, continue_diff=cont_diff),
-       detail = ran ? (pass ? "round-trip bit-exact; continue==uninterrupted BIT-EXACT via complete-state restore ($N+$M steps)" :
+       detail = ran ? (pass ? "NetCDF round-trip bit-exact; checkpoint continue==uninterrupted BIT-EXACT from file ($N+$M steps)" :
                        "MISMATCH roundtrip|Δ|=$(rt_diff) continue|Δ|=$(cont_diff)") :
                       "run/restart-io failed: $(something(eA, "early stop"))")
 end
