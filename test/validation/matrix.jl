@@ -101,13 +101,62 @@ function validation_matrix()
                   oracles=[:conservation],
                   note="CN Bow over a diurnal cycle — BGC + water/energy/C-N closure."))
 
-    # NOTE: A *full* single-axis flag sweep (use_lch4/use_ozone/use_hydrstress/…)
-    # needs the instance built WITH each flag's state allocated (CH4/ozone/PHS
-    # fields), i.e. the build_for/clm_initialize! generalization done in Step 4
-    # (domain/landunit). It is appended there so each swept flag gets a well-posed
-    # instance rather than a config toggle over un-allocated state.
+    # --- Step 4: single-axis flag sweep (T2 conservation per flag) ---
+    # The keystone payoff: build_for now allocates each flag's state (via the
+    # init-gated clm_initialize! flags for cn/luna/lch4/cndv/crop/fates, or the
+    # always-allocated config-only flags for hydrstress/voc/ozone/c13/c14/matrixcn/
+    # irrigate). Each row flips EXACTLY ONE flag on from the relevant baseline and
+    # asserts it still runs finite + balance-clean — catches "this flag alone breaks
+    # something." Independent driver flags sweep from the SP baseline; CN sub-flags
+    # (gated on use_cn) sweep from the CN baseline.
+    #   (flag, init, note) — most flags are well-posed cold; PHS (use_hydrstress)
+    #   needs a seeded vegwp (warm restart) or its Newton solve diverges to NaN at
+    #   step 1 (the documented coldstart-canopy-nan gap), so it sweeps from a warm IC.
+    DRIVER_SWEEP = [
+        (:use_luna,          :cold, "LUNA photosynthetic N acclimation (allocates vcmx25_z/jmx25_z)"),
+        (:use_hydrstress,    :warm, "plant hydraulic stress (PHS) canopy solve (vegwp seeded from restart)"),
+        (:use_voc,           :cold, "MEGAN VOC emissions"),
+        (:use_ozone,         :cold, "ozone stress on photosynthesis/conductance"),
+        (:irrigate,          :cold, "irrigation demand/application"),
+        (:use_aquifer_layer, :cold, "explicit aquifer lower boundary (zwt/recharge path)"),
+    ]
+    for (flag, init, note) in DRIVER_SWEEP
+        push!(M, vcfg("sp-bow-$(replace(String(flag), "use_"=>"", "_"=>""))";
+                      mode=:sp, domain=:bow, depth=:smoke, init=init,
+                      flags=NamedTuple{(flag,)}((true,)),
+                      oracles=[:conservation],
+                      note="Single-axis: SP Bow + $note."))
+    end
+    CN_SWEEP = [
+        (:use_lch4,     "methane (CH4) production/oxidation/transport state"),
+        (:use_cndv,     "CNDV dynamic vegetation (allocates DGVS state)"),
+        (:use_c13,      "C13 isotope tracer through the CN cascade"),
+        (:use_c14,      "C14 isotope tracer + radioactive decay"),
+        (:use_crop,     "prognostic crop (GDD/phenology/management)"),
+        (:use_matrixcn, "matrix-CN solve == sequential cascade path"),
+    ]
+    for (flag, note) in CN_SWEEP
+        push!(M, vcfg("cn-bow-$(replace(String(flag), "use_"=>"", "_"=>""))";
+                      mode=:cn, domain=:bow, depth=:smoke,
+                      flags=NamedTuple{(flag,)}((true,)),
+                      oracles=[:conservation],
+                      note="Single-axis: CN Bow + $note."))
+    end
 
-    # NOTE: Steps 3–7 append here (remaining metamorphic oracles, domains/landunits,
-    # pairwise, Fortran parity, multi-year + streamflow).
+    # --- Step 4: domain coverage (T2 finiteness smoke on contrasting climates) ---
+    # build_for's domain dispatch reuses the run_clm_streamflow.jl path. data_dep so
+    # these auto-skip in CI; locally they run wherever the Symfluence inputs exist.
+    for (dom, note) in [(:aripuana,   "tropical Amazon — wet/warm, no snow"),
+                        (:stillwater, "semi-arid continental — dry/hot"),
+                        (:krycklan,   "boreal Sweden — cold/snowy"),
+                        (:abisko,     "arctic Sweden — permafrost-adjacent"),
+                        (:tagus,      "Mediterranean Spain — seasonal-dry")]
+        push!(M, vcfg("sp-$(dom)-smoke"; mode=:sp, domain=dom, depth=:smoke,
+                      oracles=[:conservation],
+                      note="Domain coverage: $note (finiteness + water closure)."))
+    end
+
+    # NOTE: Steps 3,5–7 append here (remaining metamorphic oracles, landunits,
+    # pairwise array, Fortran parity, multi-year + streamflow).
     return M
 end
