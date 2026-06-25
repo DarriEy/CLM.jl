@@ -121,6 +121,7 @@ using CLM
     include("test_flexiblecn.jl")
     include("test_vegetation_facade.jl")
     include("test_atm2lnd.jl")
+    include("test_multigridcell_forcing.jl")
     include("test_lnd2atm.jl")
     include("test_topo.jl")
     include("test_subgrid_ave.jl")
