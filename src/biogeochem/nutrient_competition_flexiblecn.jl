@@ -28,10 +28,82 @@
 #      to cpool_to_*_resp (the flexible-C:N turnover term).
 #
 # The CLM4.5 default reproduces exactly when these branches are not taken.
+#
+# Two further branches, gated OFF by default and byte-identical when off:
+#   * use_matrixcn (cn_shared_params.use_matrixcn): assemble the matrix-CN
+#     allocation inputs — matrix_Cinput / matrix_Ninput (the C/N input rates)
+#     and matrix_alloc / matrix_nalloc (the B-matrix allocation fractions per
+#     veg pool), plus the C13/C14 matrix isotope inputs. The retranslocation-
+#     pool transfer registrations (matrix_update_phn) are deferred pending the
+#     N-matrix solve (see calc_plant_cn_alloc_flexiblecn! and cn_veg_matrix.jl).
+#   * use_crop_agsys: for crop patches, draw the npool_to_* N fluxes from the
+#     AgSys-supplied N allocation coefficients (aleaf_n/astem_n/aroot_n/arepr_n)
+#     instead of the FlexibleCN fractional-demand draw.
 # ==========================================================================
 
 # Minimum N value used when forming a C:N ratio (CNPrecisionControlMod n_min)
 const NUTRIENT_COMP_N_MIN = 1.0e-9
+
+# ---------------------------------------------------------------------------
+# Matrix-CN vegetation pool indices (clm_varpar.F90:89-109). These are the
+# column indices into matrix_alloc_patch / matrix_nalloc_patch (the B-matrix
+# carbon / nitrogen allocation fractions) that the use_matrixcn branch writes.
+# Fortran parameters are 1-based, so they map directly to Julia 1-based.
+# ---------------------------------------------------------------------------
+const FLEXCN_ILEAF        = 1
+const FLEXCN_ILEAF_ST     = 2
+const FLEXCN_IFROOT       = 4
+const FLEXCN_IFROOT_ST    = 5
+const FLEXCN_ILIVESTEM    = 7
+const FLEXCN_ILIVESTEM_ST = 8
+const FLEXCN_IDEADSTEM    = 10
+const FLEXCN_IDEADSTEM_ST = 11
+const FLEXCN_ILIVECROOT   = 13
+const FLEXCN_ILIVECROOT_ST = 14
+const FLEXCN_IDEADCROOT   = 16
+const FLEXCN_IDEADCROOT_ST = 17
+const FLEXCN_IGRAIN       = 19
+const FLEXCN_IGRAIN_ST    = 20
+
+# ---------------------------------------------------------------------------
+# _calc_npool_to_components_agsys! -- per-crop-patch N allocation when running
+# with AgSys (the agricultural-systems managed-crop dispatch). Instead of the
+# FlexibleCN fractional-demand draw, AgSys supplies its own leaf/stem/root/repr
+# N allocation coefficients (aleaf_n, astem_n, aroot_n, arepr_n) and the npool
+# is distributed directly in proportion to those. No allocation to coarse roots.
+# Ported from `calc_npool_to_components_agsys`
+# (NutrientCompetitionFlexibleCNMod.F90:1216-1302).
+# ---------------------------------------------------------------------------
+@inline function _calc_npool_to_components_agsys!(p::Int,
+        npool::Real, fcur::Real, f4::Real,
+        aleaf_n::Real, astem_n::Real, aroot_n::Real, arepr_n,
+        nf::CNVegNitrogenFluxData, dt::Real, nrepr::Int)
+    T = typeof(npool)
+    npool_dt = npool / T(dt)
+
+    nf.npool_to_leafn_patch[p]          = aleaf_n * fcur           * npool_dt
+    nf.npool_to_leafn_storage_patch[p]  = aleaf_n * (one(T) - fcur) * npool_dt
+
+    nf.npool_to_frootn_patch[p]         = aroot_n * fcur           * npool_dt
+    nf.npool_to_frootn_storage_patch[p] = aroot_n * (one(T) - fcur) * npool_dt
+
+    nf.npool_to_livestemn_patch[p]          = astem_n * f4           * fcur           * npool_dt
+    nf.npool_to_livestemn_storage_patch[p]  = astem_n * f4           * (one(T) - fcur) * npool_dt
+    nf.npool_to_deadstemn_patch[p]          = astem_n * (one(T) - f4) * fcur           * npool_dt
+    nf.npool_to_deadstemn_storage_patch[p]  = astem_n * (one(T) - f4) * (one(T) - fcur) * npool_dt
+
+    # Assume no allocation to coarse roots for crops (matches Fortran comment).
+    nf.npool_to_livecrootn_patch[p]         = zero(T)
+    nf.npool_to_livecrootn_storage_patch[p] = zero(T)
+    nf.npool_to_deadcrootn_patch[p]         = zero(T)
+    nf.npool_to_deadcrootn_storage_patch[p] = zero(T)
+
+    for k in 1:nrepr
+        nf.npool_to_reproductiven_patch[p, k]         = arepr_n[p, k] * fcur           * npool_dt
+        nf.npool_to_reproductiven_storage_patch[p, k] = arepr_n[p, k] * (one(T) - fcur) * npool_dt
+    end
+    return nothing
+end
 
 # ---------------------------------------------------------------------------
 # calc_plant_nutrient_competition_flexiblecn! -- public competition entry.
@@ -72,6 +144,7 @@ function calc_plant_nutrient_competition_flexiblecn!(mask_soilp::AbstractVector{
         use_c13::Bool=false,
         use_c14::Bool=false,
         carbon_resp_opt::Int=0,
+        use_crop_agsys::Bool=false,
         npcropmin::Int=NPCROPMIN,
         nrepr::Int=NREPR)
 
@@ -82,6 +155,7 @@ function calc_plant_nutrient_competition_flexiblecn!(mask_soilp::AbstractVector{
         c13_cnveg_cf=c13_cnveg_cf, c14_cnveg_cf=c14_cnveg_cf,
         use_c13=use_c13, use_c14=use_c14,
         carbon_resp_opt=carbon_resp_opt,
+        use_crop_agsys=use_crop_agsys,
         npcropmin=npcropmin, nrepr=nrepr)
 
     return nothing
@@ -135,7 +209,7 @@ end
     cng = is_crop ? graincn[ivt] : one(T)
     if is_crop
         for k in 1:nrepr
-            f5k = crop_alive ? (arepr[p, k] / aleaf_p) : zero(T)
+            f5k = crop_alive ? (arepr[p, k] / aleaf_p[p]) : zero(T)
             total += (nlc * f5k / cng) * fcur + (nlc * f5k / cng) * (one(T) - fcur)
         end
     end
@@ -158,7 +232,7 @@ end
     end
     if is_crop
         for k in 1:nrepr
-            f5k = crop_alive ? (arepr[p, k] / aleaf_p) : zero(T)
+            f5k = crop_alive ? (arepr[p, k] / aleaf_p[p]) : zero(T)
             d_repr         = (nlc * f5k / cng) * fcur
             d_repr_storage = (nlc * f5k / cng) * (one(T) - fcur)
             nf.npool_to_reproductiven_patch[p, k]         = d_repr         * inv
@@ -191,10 +265,12 @@ function calc_plant_cn_alloc_flexiblecn!(mask_soilp::AbstractVector{Bool},
         use_c13::Bool=false,
         use_c14::Bool=false,
         carbon_resp_opt::Int=0,
+        use_crop_agsys::Bool=false,
         npcropmin::Int=NPCROPMIN,
         nrepr::Int=NREPR)
 
     use_fun = cn_shared_params.use_fun
+    use_matrixcn = cn_shared_params.use_matrixcn
     cf = cnveg_cf; nf = cnveg_nf; cs = cnveg_cs; ns = cnveg_ns; vs = cnveg_state
     SPVAL = 1.0e36
 
@@ -245,12 +321,22 @@ function calc_plant_cn_alloc_flexiblecn!(mask_soilp::AbstractVector{Bool},
             nf.sminn_to_npool_patch[p] = nf.plant_ndemand_patch[p] * fpg_col[c]
         end
         nf.plant_nalloc_patch[p] = nf.sminn_to_npool_patch[p] + nf.retransn_to_npool_patch[p]
+        if use_matrixcn
+            # matrix N input (gN/m2/s) = soil mineral N draw (Fortran 446-452)
+            nf.matrix_Ninput_patch[p] = nf.sminn_to_npool_patch[p]
+        end
 
         # C available for new growth: FlexibleCN uses npp_growth (FUN) or availc.
         if use_fun
             cf.plant_calloc_patch[p] = cf.npp_growth_patch[p]
+            if use_matrixcn
+                cf.matrix_Cinput_patch[p] = cf.npp_growth_patch[p]
+            end
         else
             cf.plant_calloc_patch[p] = cf.availc_patch[p]
+            if use_matrixcn
+                cf.matrix_Cinput_patch[p] = cf.availc_patch[p]
+            end
         end
 
         # new leaf C and C fluxes to current growth + storage
@@ -286,6 +372,57 @@ function calc_plant_cn_alloc_flexiblecn!(mask_soilp::AbstractVector{Bool},
             end
         end
 
+        # ---- matrixcn C allocation B-matrix (Fortran 479-570) ----
+        # cpool_to_veg = total C allocated to all veg pools this step. The
+        # matrix_alloc(p, pool) is the fraction of that C input going to each
+        # pool (the B-matrix column of the matrix-CN allocation input).
+        if use_matrixcn
+            cpool_to_veg = cf.cpool_to_leafc_patch[p] + cf.cpool_to_leafc_storage_patch[p] +
+                           cf.cpool_to_frootc_patch[p] + cf.cpool_to_frootc_storage_patch[p]
+            if is_woody || is_crop
+                cpool_to_veg += cf.cpool_to_livestemc_patch[p]  + cf.cpool_to_livestemc_storage_patch[p] +
+                                cf.cpool_to_deadstemc_patch[p]  + cf.cpool_to_deadstemc_storage_patch[p] +
+                                cf.cpool_to_livecrootc_patch[p] + cf.cpool_to_livecrootc_storage_patch[p] +
+                                cf.cpool_to_deadcrootc_patch[p] + cf.cpool_to_deadcrootc_storage_patch[p]
+            end
+            if is_crop
+                for k in 1:nrepr
+                    cpool_to_veg += cf.cpool_to_reproductivec_patch[p, k] +
+                                    cf.cpool_to_reproductivec_storage_patch[p, k]
+                end
+            end
+
+            cf.matrix_Cinput_patch[p] = cpool_to_veg
+            if cpool_to_veg != zero(T)
+                inv = one(T) / cpool_to_veg
+                cf.matrix_alloc_patch[p, FLEXCN_ILEAF]     = cf.cpool_to_leafc_patch[p]          * inv
+                cf.matrix_alloc_patch[p, FLEXCN_ILEAF_ST]  = cf.cpool_to_leafc_storage_patch[p]  * inv
+                cf.matrix_alloc_patch[p, FLEXCN_IFROOT]    = cf.cpool_to_frootc_patch[p]         * inv
+                cf.matrix_alloc_patch[p, FLEXCN_IFROOT_ST] = cf.cpool_to_frootc_storage_patch[p] * inv
+            end
+            if (is_woody || is_crop) && cpool_to_veg != zero(T)
+                inv = one(T) / cpool_to_veg
+                cf.matrix_alloc_patch[p, FLEXCN_ILIVESTEM]     = cf.cpool_to_livestemc_patch[p]          * inv
+                cf.matrix_alloc_patch[p, FLEXCN_ILIVESTEM_ST]  = cf.cpool_to_livestemc_storage_patch[p]  * inv
+                cf.matrix_alloc_patch[p, FLEXCN_IDEADSTEM]     = cf.cpool_to_deadstemc_patch[p]          * inv
+                cf.matrix_alloc_patch[p, FLEXCN_IDEADSTEM_ST]  = cf.cpool_to_deadstemc_storage_patch[p]  * inv
+                cf.matrix_alloc_patch[p, FLEXCN_ILIVECROOT]    = cf.cpool_to_livecrootc_patch[p]         * inv
+                cf.matrix_alloc_patch[p, FLEXCN_ILIVECROOT_ST] = cf.cpool_to_livecrootc_storage_patch[p] * inv
+                cf.matrix_alloc_patch[p, FLEXCN_IDEADCROOT]    = cf.cpool_to_deadcrootc_patch[p]         * inv
+                cf.matrix_alloc_patch[p, FLEXCN_IDEADCROOT_ST] = cf.cpool_to_deadcrootc_storage_patch[p] * inv
+                if is_crop
+                    cf.matrix_alloc_patch[p, FLEXCN_IGRAIN]    = zero(T)
+                    cf.matrix_alloc_patch[p, FLEXCN_IGRAIN_ST] = zero(T)
+                    for k in 1:nrepr
+                        cf.matrix_alloc_patch[p, FLEXCN_IGRAIN] +=
+                            cf.cpool_to_reproductivec_patch[p, k] * inv
+                        cf.matrix_alloc_patch[p, FLEXCN_IGRAIN_ST] +=
+                            cf.cpool_to_reproductivec_storage_patch[p, k] * inv
+                    end
+                end
+            end
+        end
+
         # growth respiration storage
         gresp_storage = cf.cpool_to_leafc_storage_patch[p] + cf.cpool_to_frootc_storage_patch[p]
         if is_woody
@@ -302,12 +439,21 @@ function calc_plant_cn_alloc_flexiblecn!(mask_soilp::AbstractVector{Bool},
         end
         cf.cpool_to_gresp_storage_patch[p] = gresp_storage * g1 * (one(T) - g2)
 
-        # N allocation from the existing npool (FlexibleCN)
-        _calc_npool_to_components_flexiblecn!(p, ivt,
-            ns.npool_patch[p], nlc, fcur, f1, f2, f3, f4,
-            vs.arepr_patch, vs.aleaf_patch, crop_alive, is_crop, is_woody,
-            pftcon.leafcn, pftcon.frootcn, pftcon.livewdcn, pftcon.deadwdcn, pftcon.graincn,
-            nf, dt, nrepr)
+        # N allocation: AgSys (managed-crop) for crops when use_crop_agsys, else
+        # the FlexibleCN fractional-demand draw from the existing npool.
+        if use_crop_agsys && is_crop
+            # AgSys supplies its own N allocation coefficients (Fortran 597-625)
+            _calc_npool_to_components_agsys!(p,
+                ns.npool_patch[p], fcur, f4,
+                vs.aleaf_n_patch[p], vs.astem_n_patch[p], vs.aroot_n_patch[p],
+                vs.arepr_n_patch, nf, dt, nrepr)
+        else
+            _calc_npool_to_components_flexiblecn!(p, ivt,
+                ns.npool_patch[p], nlc, fcur, f1, f2, f3, f4,
+                vs.arepr_patch, vs.aleaf_patch, crop_alive, is_crop, is_woody,
+                pftcon.leafcn, pftcon.frootcn, pftcon.livewdcn, pftcon.deadwdcn, pftcon.graincn,
+                nf, dt, nrepr)
+        end
 
         # ---- carbon_resp_opt: flexible-C:N turnover of high-C:N tissue ----
         cf.cpool_to_resp_patch[p]                  = zero(T)
@@ -394,11 +540,73 @@ function calc_plant_cn_alloc_flexiblecn!(mask_soilp::AbstractVector{Bool},
                 cf.cpool_to_frootc_resp_patch[p] + cf.cpool_to_frootc_storage_resp_patch[p] +
                 cf.cpool_to_livecrootc_resp_patch[p] + cf.cpool_to_livecrootc_storage_resp_patch[p] +
                 cf.cpool_to_livestemc_resp_patch[p] + cf.cpool_to_livestemc_storage_resp_patch[p]
+
+            if use_matrixcn
+                # the C turned over to respiration is removed from the matrix C
+                # input (Fortran 835-837)
+                cf.matrix_Cinput_patch[p] -= cf.cpool_to_resp_patch[p]
+            end
         end
 
-        # isotope downregulation: FlexibleCN has NO downregulation (no-op),
-        # so the c13/c14 psn fluxes are unchanged (matches Fortran, which only
-        # writes matrix_C13/C14input under use_matrixcn — not ported here).
+        # ---- matrixcn N allocation B-matrix + isotope C inputs (Fortran 847-924) ----
+        # FlexibleCN has NO C13/C14 downregulation, so under the sequential path
+        # the isotope psn fluxes are unchanged. Under use_matrixcn the matrix
+        # isotope C inputs and the N allocation B-matrix (matrix_nalloc) are
+        # written here from the npool_to_* fluxes just computed.
+        if use_matrixcn
+            psn = cf.psnsun_to_cpool_patch[p] + cf.psnshade_to_cpool_patch[p]
+            if use_c13 && c13_cnveg_cf !== nothing && psn != zero(T)
+                cf.matrix_C13input_patch[p] = cf.plant_calloc_patch[p] *
+                    ((c13_cnveg_cf.psnsun_to_cpool_patch[p] +
+                      c13_cnveg_cf.psnshade_to_cpool_patch[p]) / psn)
+            end
+            if use_c14 && c14_cnveg_cf !== nothing && psn != zero(T)
+                cf.matrix_C14input_patch[p] = cf.plant_calloc_patch[p] *
+                    ((c14_cnveg_cf.psnsun_to_cpool_patch[p] +
+                      c14_cnveg_cf.psnshade_to_cpool_patch[p]) / psn)
+            end
+
+            npool_to_veg = nf.npool_to_leafn_patch[p]      + nf.npool_to_leafn_storage_patch[p] +
+                           nf.npool_to_frootn_patch[p]     + nf.npool_to_frootn_storage_patch[p] +
+                           nf.npool_to_livestemn_patch[p]  + nf.npool_to_livestemn_storage_patch[p] +
+                           nf.npool_to_deadstemn_patch[p]  + nf.npool_to_deadstemn_storage_patch[p] +
+                           nf.npool_to_livecrootn_patch[p] + nf.npool_to_livecrootn_storage_patch[p] +
+                           nf.npool_to_deadcrootn_patch[p] + nf.npool_to_deadcrootn_storage_patch[p]
+            if is_crop
+                npool_to_veg += nf.npool_to_reproductiven_patch[p, 1] +
+                                nf.npool_to_reproductiven_storage_patch[p, 1]
+            end
+
+            if npool_to_veg != zero(T)
+                invn = one(T) / npool_to_veg
+                nf.matrix_nalloc_patch[p, FLEXCN_ILEAF]        = nf.npool_to_leafn_patch[p]          * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_ILEAF_ST]     = nf.npool_to_leafn_storage_patch[p]  * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_IFROOT]       = nf.npool_to_frootn_patch[p]         * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_IFROOT_ST]    = nf.npool_to_frootn_storage_patch[p] * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_ILIVESTEM]    = nf.npool_to_livestemn_patch[p]          * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_ILIVESTEM_ST] = nf.npool_to_livestemn_storage_patch[p]  * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_IDEADSTEM]    = nf.npool_to_deadstemn_patch[p]          * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_IDEADSTEM_ST] = nf.npool_to_deadstemn_storage_patch[p]  * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_ILIVECROOT]    = nf.npool_to_livecrootn_patch[p]         * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_ILIVECROOT_ST] = nf.npool_to_livecrootn_storage_patch[p] * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_IDEADCROOT]    = nf.npool_to_deadcrootn_patch[p]         * invn
+                nf.matrix_nalloc_patch[p, FLEXCN_IDEADCROOT_ST] = nf.npool_to_deadcrootn_storage_patch[p] * invn
+                if is_crop
+                    nf.matrix_nalloc_patch[p, FLEXCN_IGRAIN]    = nf.npool_to_reproductiven_patch[p, 1]         * invn
+                    nf.matrix_nalloc_patch[p, FLEXCN_IGRAIN_ST] = nf.npool_to_reproductiven_storage_patch[p, 1] * invn
+                end
+                nf.matrix_Ninput_patch[p] = npool_to_veg - nf.retransn_to_npool_patch[p]
+            end
+
+            # DEFERRED: the retranslocation-pool transfer registrations
+            # (Fortran 900-922, matrix_update_phn into iretransn_to_* transfer
+            # indices) require the N-matrix turnover/transfer machinery
+            # (matrix_update_phn! + populated iretransn_to_*_ph indices), which
+            # is NOT yet ported (see cn_veg_matrix.jl: the explicit N-matrix
+            # solve is deferred). The matrix_nalloc / matrix_Ninput B-matrix
+            # writes above ARE ported; the retransn transfer accounting is the
+            # only piece that depends on that missing infrastructure.
+        end
     end
 
     return nothing
