@@ -78,6 +78,7 @@ include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 include("infrastructure/smooth_ad.jl")
 include("infrastructure/kernels.jl")  # KernelAbstractions physics kernels (Phase 4)
+include("infrastructure/backend.jl")  # centralized compute-backend selection (CPU/Metal/CUDA/AMDGPU)
 
 # ===========================================================================
 # Calibration overrides struct (needed by physics modules for override kwargs)
@@ -632,6 +633,13 @@ include("driver/run_clm.jl")
 # master). No-op / transparent passthrough on a single rank. Included after the
 # driver so `clm_run_clump_physics!` is in scope.
 include("infrastructure/distributed_driver.jl")
+
+# Multi-GPU domain split (one GPU per MPI rank): binds each rank to its local GPU
+# and runs its clumps' kernels on that device, gathering to the host master for
+# I/O. Reuses the MPI distributed driver above + the backend layer. No-op /
+# byte-identical on CPU + single rank. Needs distributed_driver.jl (above) and
+# backend.jl (infrastructure, included earlier).
+include("infrastructure/multigpu.jl")
 
 # ===========================================================================
 # Calibration framework (depends on driver + all modules)
