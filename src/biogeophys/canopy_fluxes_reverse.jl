@@ -172,6 +172,52 @@ function canopy_rev_forward!(b, aux, N::Int)
 end
 
 """
+    canopy_rev_converged_n(b, aux; itmax=canopy_fluxes_ctrl.itmax_canopy_fluxes) -> N
+
+CONVERGENCE-AWARE iteration count for the compositional canopy reverse. Runs the
+decomposed forward (init + friction→resist→[psn]→energy) one Newton iteration at a
+time on a throwaway DEEPCOPY of `b`, applying the SAME convergence test
+canopy_fluxes_core! uses — `det = max(del_arr, del2) < DTMIN_CANOPY` and
+`dele = |efe - efeb| < DLEMIN_CANOPY`, only after `itlef > ITMIN_CANOPY` — and
+returns the smallest `N` at which every active (in-filter) patch has converged
+(clamped to `[ITMIN_CANOPY+1, itmax]`). Multi-patch aware: a patch that converges
+early stops contributing to the "all converged" test once its metric drops below
+tolerance, exactly as the production `active[p]=false` mask does, so `N` is the
+MAX over per-patch convergence counts — the right fixed `N` for the differentiate-
+through-the-converged-iterate scheme (the early patch sits at its stable fixed point
+for the remaining iterations, so its primal + gradient are unchanged).
+
+This removes the need for the caller to hard-code `n_canopy`: it adapts to whatever
+the forcing/state make the Newton solve take this step. `b` is NOT mutated.
+"""
+function canopy_rev_converged_n(b, aux;
+                                itmax::Int = canopy_fluxes_ctrl.itmax_canopy_fluxes)
+    probe = deepcopy(b)
+    sc = probe.scratch
+    fp = aux.filterp[1:aux.fn]
+    cf_rev_init!(probe, aux)
+    conv = falses(length(fp))                    # per-(in-filter)-patch converged flag
+    for itlef in 1:itmax
+        cf_rev_friction!(probe, aux, itlef - 1)
+        cf_rev_resist!(probe, aux)
+        if aux.use_psn
+            cf_rev_psn!(probe, aux, "sun"); cf_rev_psn!(probe, aux, "sha")
+        end
+        cf_rev_energy!(probe, aux)
+        if itlef > ITMIN_CANOPY                  # production gates the test the same way
+            for (k, p) in enumerate(fp)
+                conv[k] && continue
+                dele = abs(sc.efe[p] - sc.efeb[p])
+                det  = max(sc.del_arr[p], sc.del2[p])
+                (det < DTMIN_CANOPY && dele < DLEMIN_CANOPY) && (conv[k] = true)
+            end
+            all(conv) && return itlef
+        end
+    end
+    return itmax
+end
+
+"""
     canopy_rev_gradient!(b, aux, N; seed=:t_veg_patch)
 
 Compositional reverse pass: forward-sweep `b` through the phases with a deepcopy
@@ -180,11 +226,16 @@ checkpoint before each, seed the adjoint at the chosen output field
 `Enzyme.autodiff` call per sub-phase. Returns the gradient bundle `db` (same
 structure as `b`); e.g. `db.temperature.t_grnd_col` is dL/d(initial t_grnd).
 
+If `N === nothing` the iteration count is auto-detected with
+[`canopy_rev_converged_n`](@ref) — the convergence-aware path that adapts to the
+Newton solve rather than hard-coding a fixed count.
+
 `b` is left holding the final forward state.
 """
-function canopy_rev_gradient!(b, aux, N::Int; seed::Symbol = :t_veg_patch)
+function canopy_rev_gradient!(b, aux, N::Union{Int,Nothing} = nothing; seed::Symbol = :t_veg_patch)
+    Nuse = N === nothing ? canopy_rev_converged_n(b, aux) : N
     seed_bang!(db, b) = (getfield(db.temperature, seed) .= 2 .* getfield(b.temperature, seed))
-    return compositional_reverse!(cf_rev_phases(aux, N), b, seed_bang!)
+    return compositional_reverse!(cf_rev_phases(aux, Nuse), b, seed_bang!)
 end
 
 """

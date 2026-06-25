@@ -57,16 +57,26 @@ end
 # on the bundle's cf view. Reversed coarsely (one Enzyme call over the block) in the
 # chain; for the tight per-sub-phase canopy gradient use canopy_rev_gradient!.
 # --------------------------------------------------------------------------
+# A canopy `cf_rev_bundle` view onto the driver bundle's inst + shared canopy scratch —
+# the object the canopy sub-phases (cf_rev_*) operate on. Aliases the inst's arrays, so
+# mutating the view mutates the driver bundle in place.
+_canopy_view(b) = cf_rev_bundle(b.inst.canopystate, b.inst.energyflux, b.inst.frictionvel,
+    b.inst.temperature, b.inst.solarabs, b.inst.soilstate, b.inst.water.waterfluxbulk_inst,
+    b.inst.water.waterstatebulk_inst, b.inst.water.waterdiagnosticbulk_inst,
+    b.inst.photosyns, b.scratch)
+
 function canopy_rev_block!(b, aux, n::Int)
-    cv = cf_rev_bundle(b.inst.canopystate, b.inst.energyflux, b.inst.frictionvel,
-        b.inst.temperature, b.inst.solarabs, b.inst.soilstate, b.inst.water.waterfluxbulk_inst,
-        b.inst.water.waterstatebulk_inst, b.inst.water.waterdiagnosticbulk_inst,
-        b.inst.photosyns, b.scratch)
+    cv = _canopy_view(b)
     for (f, cargs) in cf_rev_phases(aux, n)
         f(cv, cargs...)
     end
     return nothing
 end
+
+# Convergence-aware canopy iteration count for a DRIVER bundle: builds the canopy view
+# and defers to canopy_rev_converged_n (the per-patch convergence test). Used by
+# clm_drv_reverse! to auto-size the canopy block instead of hard-coding n_canopy.
+driver_canopy_converged_n(b, canopy_aux) = canopy_rev_converged_n(_canopy_view(b), canopy_aux)
 
 # Build the canopy Const aux from a warmed-up inst (downscaled forcing must be set).
 # Energy-balance path (use_psn=false) by default — the canopy water/energy gradient. The
@@ -617,6 +627,57 @@ function driver_rev_phases(bounds, filt, config; canopy_aux = nothing,
     push!(phases, (watertable_rev_phase!, (watertable_rev_aux(bounds, filt, config; dtime),)))
     push!(phases, (hydnodrain_rev_phase!, (hydnodrain_rev_aux(bounds, filt; dtime),)))
     return phases
+end
+
+# --------------------------------------------------------------------------
+# clm_drv_reverse! — the TOP-LEVEL clm_drv! reverse entry point. Given a warmed-up
+# inst (downscaled forcing set) + a seed, it reverse-differentiates one timestep's
+# compositional chain end-to-end and returns the INPUT-gradient bundle `db`
+# (db.inst.<field> = dL/d(that field at step entry)). MULTI-PATCH and CONVERGENCE-
+# AWARE: the canopy block's Newton iteration count is auto-detected per step from the
+# decomposed forward's per-patch convergence (driver_canopy_converged_n) rather than
+# hard-coded — so it adapts when the solve converges early or late. The canopy block is
+# OPTIONAL (include_canopy): with it the chain is canopy → soil_temp → surface-hydrology
+# → soil_water → water_table → hydrology_no_drainage; without it the hydrology-only chain.
+# Set use_psn to differentiate through photosynthesis (the stomatal feedback).
+#
+#     db = clm_drv_reverse!(inst, bounds, filt, config;
+#           seed_bang! = (db, b) -> (db.inst.temperature.t_veg_patch .= 2 .* b.inst.temperature.t_veg_patch),
+#           include_canopy = true, use_psn = false)
+#     # db.inst.temperature.t_grnd_col[c] == dL/d(t_grnd at step entry), L = sum(abs2, t_veg)
+#
+# `seed_bang!(db, b)` seeds the adjoint from the final forward state (default:
+# L = sum(abs2, t_soisno_col[:, nlevsno+1:end]) — the soil thermal profile). The inst
+# is left holding the step's final forward state. Validated on Julia 1.10 + Enzyme by
+# scripts/enzyme_clm_drv_reverse.jl (FD-checked dL/d(t_grnd) through the whole step,
+# auto-detected N); the forward orchestration is guarded (no Enzyme) in
+# test/test_driver_reverse.jl.
+function clm_drv_reverse!(inst, bounds, filt, config;
+        seed_bang! = _default_drv_seed!, include_canopy::Bool = true, use_psn::Bool = false,
+        n_canopy::Union{Int,Nothing} = nothing, dtime = 1800.0, include_surface::Bool = true)
+    b = driver_rev_bundle(inst)
+    canopy_aux = include_canopy ? canopy_rev_aux(inst, bounds, filt; use_psn, dtime) : nothing
+    # Convergence-aware N: probe the canopy forward on a throwaway view (no inst mutation).
+    Nc = if !include_canopy
+        0
+    elseif n_canopy === nothing
+        driver_canopy_converged_n(b, canopy_aux)
+    else
+        n_canopy
+    end
+    phases = driver_rev_phases(bounds, filt, config; canopy_aux = canopy_aux,
+                               n_canopy = max(Nc, 1), dtime = dtime, include_surface = include_surface)
+    return compositional_reverse!(phases, b, seed_bang!)
+end
+
+# Default driver-reverse seed: L = sum(abs2, soil-layer t_soisno) → dL = 2·t_soisno on
+# the active soil layers (the soil thermal profile, the natural whole-step energy output).
+function _default_drv_seed!(db, b)
+    j0 = varpar.nlevsno + 1
+    ts  = b.inst.temperature.t_soisno_col
+    dts = db.inst.temperature.t_soisno_col
+    @views dts[:, j0:end] .= 2 .* ts[:, j0:end]
+    return nothing
 end
 
 # --------------------------------------------------------------------------
