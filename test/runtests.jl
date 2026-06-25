@@ -110,6 +110,7 @@ using CLM
     include("test_fire_base.jl")
     include("test_fire_li2014.jl")
     include("test_fire_methods.jl")
+    include("test_cnfire_wiring.jl")
     include("test_methane.jl")
     include("test_voc_emission.jl")
     include("test_dust_emission.jl")

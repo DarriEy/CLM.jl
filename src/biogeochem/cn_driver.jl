@@ -44,6 +44,13 @@ Base.@kwdef mutable struct CNDriverConfig
     dribble_crophrv_xsmrpool_2atm::Bool = false
     do_harvest::Bool = false
     do_grossunrep::Bool = false
+    # CN fire method (mirrors the `cnfire_method` namelist string mapped to a
+    # symbol by `cnfire_method_symbol`). Default `:nofire` keeps the CN driver
+    # byte-identical to the historical no-fire path; the live Li-family fire
+    # (cnfire_area! → cnfire_fluxes_dispatch! → fire fluxes feeding the fire
+    # state update) runs only when this is set to :li2014/:li2016/:li2021/:li2024
+    # AND the fire-input bundle is supplied to cn_driver_no_leaching!.
+    cnfire_method::Symbol = :nofire
 end
 
 # Decomposition method constants (from SoilBiogeochemDecompCascadeConType)
@@ -194,6 +201,40 @@ function cn_driver_no_leaching!(
         # Soil-water state (soil-layer slices) for nitrif/denitrif anoxia.
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        # ---- CN fire inputs (Li2014-family) -------------------------------
+        # The live fire path (cnfire_area! burned-area + cnfire_fluxes_dispatch!
+        # C/N fluxes) runs only when config.cnfire_method !== :nofire AND this
+        # full bundle is supplied; otherwise the driver is byte-identical to the
+        # historical no-fire placeholder. All defaulted to `nothing` so SP /
+        # decomp-only / no-fire callers are unaffected.
+        fire_data::Union{CNFireBaseData, Nothing} = nothing,
+        fire_li2014::Union{CNFireLi2014Data, Nothing} = nothing,
+        cnfire_const::Union{CNFireConstData, Nothing} = nothing,
+        cnfire_params::Union{CNFireParams, Nothing} = nothing,
+        pftcon_fire::Union{PftConFireBase, Nothing} = nothing,
+        pftcon_fire_li2014::Union{PftConFireLi2014, Nothing} = nothing,
+        dgvs_fire::Union{DgvsFireData, Nothing} = nothing,
+        # Exposed/non-exposed-veg patch masks for the burned-area calc (default to
+        # the BGC veg mask / its complement when unset).
+        mask_exposedvegp_fire::Union{AbstractVector{Bool}, Nothing} = nothing,
+        mask_noexposedvegp_fire::Union{AbstractVector{Bool}, Nothing} = nothing,
+        # Fire forcing / running-mean / water inputs (gridcell/column/patch).
+        forc_rh_grc::AbstractVector{<:Real} = Float64[],
+        forc_wind_grc::AbstractVector{<:Real} = Float64[],
+        forc_t_fire_col::AbstractVector{<:Real} = Float64[],
+        forc_rain_fire_col::AbstractVector{<:Real} = Float64[],
+        forc_snow_fire_col::AbstractVector{<:Real} = Float64[],
+        prec60_patch::AbstractVector{<:Real} = Float64[],
+        prec10_patch::AbstractVector{<:Real} = Float64[],
+        prec30_patch::AbstractVector{<:Real} = Float64[],
+        rh30_patch::AbstractVector{<:Real} = Float64[],
+        fsat_fire_col::AbstractVector{<:Real} = Float64[],
+        wf_fire_col::AbstractVector{<:Real} = Float64[],
+        wf2_fire_col::AbstractVector{<:Real} = Float64[],
+        # Fire date/step scalars.
+        fire_kmo::Int = 1, fire_kda::Int = 1, fire_mcsec::Int = 0, fire_nstep::Int = 1,
+        nlevgrnd_fire::Int = 10,
+        transient_landcover::Bool = false,
         # Output: fire masks (populated by fire routines)
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
@@ -905,8 +946,92 @@ function cn_driver_no_leaching!(
     # Fire and Update3
     # --------------------------------------------------
     if num_bgc_vegp > 0
-        # NOTE: Fire area/fluxes (cnfire_area_li2014!, cnfire_fluxes_li2014!) are
-        # implemented but not wired here — requires column temperature data in driver args.
+        # --------------------------------------------------
+        # Fire: burned area (cnfire_area!) then C/N fluxes (cnfire_fluxes_dispatch!)
+        # WIRED — runs only when config.cnfire_method !== :nofire AND the full fire
+        # bundle is supplied. The fire fluxes (m_*_to_fire patch fluxes +
+        # m_decomp_*_to_fire_vr / m_c_to_litr_fire / fire_mortality_c_to_cwdc column
+        # fluxes) are then consumed by c_state_update3! below — exactly the Fortran
+        # CNDriverNoLeaching order (CNFireArea → CNFireFluxes → CStateUpdate3).
+        # The column soil temperature the old placeholder said it needed is
+        # temperature.t_soi17cm_col (top-17cm soil T), which the driver already
+        # receives via the `temperature` arg.
+        _fire_active = config.cnfire_method !== :nofire &&
+            fire_li2014 !== nothing && pftcon_fire_li2014 !== nothing &&
+            fire_data !== nothing && cnfire_const !== nothing &&
+            cnfire_params !== nothing && pftcon_fire !== nothing &&
+            patch !== nothing && col !== nothing && grc !== nothing &&
+            soilstate !== nothing && h2osoi_vol !== nothing &&
+            cnveg_state !== nothing && cascade_con !== nothing &&
+            temperature !== nothing && dgvs_fire !== nothing
+        if _fire_active
+            _mexp  = mask_exposedvegp_fire === nothing ? mask_bgc_vegp : mask_exposedvegp_fire
+            _mnoex = mask_noexposedvegp_fire === nothing ?
+                     [mask_bgc_vegp[p] ? false : false for p in eachindex(mask_bgc_vegp)] :
+                     mask_noexposedvegp_fire
+            # totlitc_col / totsomc_col fuel inputs: sum the column litter/SOM pools
+            # over (layer, pool) per the decomp cascade is_litter / !is_litter split.
+            _is_litr = cascade_con.is_litter
+            _Tc = eltype(soilbgc_cs.decomp_cpools_vr_col)
+            _totlitc = fill!(similar(soilbgc_cs.decomp_cpools_vr_col, _Tc, nc), zero(_Tc))
+            _totsomc = fill!(similar(soilbgc_cs.decomp_cpools_vr_col, _Tc, nc), zero(_Tc))
+            for c in bounds_col
+                mask_bgc_soilc[c] || continue
+                lit = zero(_Tc); som = zero(_Tc)
+                for k in 1:ndecomp_pools, j in 1:nlevdecomp
+                    v = soilbgc_cs.decomp_cpools_vr_col[c, j, k] *
+                        (dzsoi_decomp === nothing ? one(_Tc) : _Tc(dzsoi_decomp[j]))
+                    if k <= length(_is_litr) && _is_litr[k]
+                        lit += v
+                    else
+                        som += v
+                    end
+                end
+                _totlitc[c] = lit; _totsomc[c] = som
+            end
+
+            # 1. Burned area — factory dispatch on config.cnfire_method.
+            cnfire_area!(config.cnfire_method,
+                fire_li2014, pftcon_fire_li2014, fire_data, cnfire_const,
+                cnfire_params, pftcon_fire,
+                mask_bgc_soilc, mask_bgc_vegp, _mexp, _mnoex,
+                bounds_col, bounds_patch,
+                patch, col, grc, soilstate, h2osoi_vol,
+                cnveg_state, cnveg_cs, cascade_con,
+                _totlitc, soilbgc_cs.decomp_cpools_vr_col, temperature.t_soi17cm_col;
+                forc_rh_grc = forc_rh_grc, forc_wind_grc = forc_wind_grc,
+                forc_t_col = forc_t_fire_col, forc_rain_col = forc_rain_fire_col,
+                forc_snow_col = forc_snow_fire_col,
+                prec60_patch = prec60_patch, prec10_patch = prec10_patch,
+                prec30_patch = prec30_patch, rh30_patch = rh30_patch,
+                fsat_col = fsat_fire_col, wf_col = wf_fire_col, wf2_col = wf2_fire_col,
+                dt = dt, dayspyr = 365.0,
+                kmo = fire_kmo, kda = fire_kda, mcsec = fire_mcsec, nstep = fire_nstep,
+                nlevgrnd = nlevgrnd_fire, nlevdecomp = nlevdecomp,
+                ndecomp_pools = ndecomp_pools, transient_landcover = transient_landcover)
+
+            # 2. Fire C/N fluxes — factory dispatch; produces the m_*_to_fire patch
+            #    fluxes + column decomp/litter fire fluxes consumed by c_state_update3!.
+            #    Returns the active-fire column/patch masks (threaded to the leaching
+            #    driver's fire N state update via mask_actfirec/mask_actfirep).
+            _maskc, _maskp = cnfire_fluxes_dispatch!(config.cnfire_method,
+                mask_bgc_soilc, mask_bgc_vegp, bounds_col, bounds_patch,
+                cnfire_const, pftcon_fire, patch, col, grc, dgvs_fire,
+                cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
+                soilbgc_cf, cascade_con,
+                soilbgc_state.leaf_prof_patch, soilbgc_state.froot_prof_patch,
+                soilbgc_state.croot_prof_patch, soilbgc_state.stem_prof_patch,
+                _totsomc, soilbgc_cs.decomp_cpools_vr_col,
+                soilbgc_ns.decomp_npools_vr_col, soilbgc_cf.somc_fire_col;
+                dt = dt, dayspyr = 365.0, nlevdecomp = nlevdecomp,
+                ndecomp_pools = ndecomp_pools, i_met_lit = i_litr_min,
+                i_litr_max = i_litr_max, transient_landcover = transient_landcover,
+                use_matrixcn = config.use_matrixcn,
+                kmo = fire_kmo, kda = fire_kda, mcsec = fire_mcsec)
+            # Copy the returned active-fire masks into the caller-provided outputs.
+            for c in eachindex(mask_actfirec); mask_actfirec[c] = _maskc[c]; end
+            for p in eachindex(mask_actfirep); mask_actfirep[p] = _maskp[p]; end
+        end
         # CIsoFlux3 — fire-mortality carbon-isotope fluxes (WIRED). Scales the fire C
         # fluxes into isotopic counterparts (zero here until fire fluxes are wired,
         # but the cascade stays complete and mass/ratio-consistent).
