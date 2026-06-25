@@ -15,6 +15,29 @@ end
 
 const soil_moist_stress_ctrl = SoilMoistStressControl()
 
+# --------------------------------------------------------------------------
+# AD-smoothing of the btran (root soil-moisture stress) discontinuities.
+#
+# The CLM4.5-default btran kernel (`_smstress_rootr_btran_kernel!`) has a HARD
+# per-layer gate that zeroes the layer's root-water contribution the instant the
+# layer's liquid water hits 0 or its temperature drops to tfrz-2 K, plus several
+# hard clamps (s_node floor/ceil, smp_node floor, rresis ceil, rootr floor). As
+# T or soil-water sweep across these thresholds, btran[p] — the factor that
+# multiplies stomatal conductance / photosynthesis — has KINKS, so its forward-AD
+# derivative jumps discontinuously (and reverse-AD can NaN at the gate).
+#
+# The smoothing is gated PURELY by element type via the shared `_use_smooth`
+# (smooth_ad.jl): plain Float64 evaluates the EXACT hard physics (byte-identical
+# default; full forward suite unchanged), ForwardDiff.Dual evaluates the smooth
+# surrogate. `BTRAN_SMOOTH_K` is the logistic/softmax sharpness; the transition
+# width ε ≈ 1/k, and as k → ∞ (ε → 0) the surrogate → the hard physics. Separate
+# widths for the two gate axes because they live in different units (volumetric
+# water O(0.1) vs temperature O(1 K)); both default sharp enough to be physically
+# negligible while keeping a finite, continuous derivative across the threshold.
+const BTRAN_SMOOTH_K        = Ref(50.0)   # clamps (s_node / smp_node / rresis / rootr floor)
+const BTRAN_GATE_K_WATER    = Ref(200.0)  # liquid-water gate: σ(k·h2osoi_liqvol)
+const BTRAN_GATE_K_TEMP     = Ref(5.0)    # temperature gate: σ(k·(t_soisno-(tfrz-2)))
+
 """
     init_root_moist_stress!()
 
@@ -392,7 +415,8 @@ smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd::Int) =
                                                @Const(bsw), @Const(eff_porosity),
                                                @Const(h2osoi_liqvol),
                                                nlevgrnd::Int, joff::Int,
-                                               tfrz, use_unf::Bool)
+                                               tfrz, use_unf::Bool,
+                                               smk, gkw, gkt)
     p = @index(Global)
     @inbounds if mask_patch[p]
         T = eltype(rootr)
@@ -400,26 +424,46 @@ smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd::Int) =
         itype = patch_itype[p] + 1  # 0-based Fortran PFT -> 1-based Julia
         acc = zero(T)
         for j in 1:nlevgrnd
-            if h2osoi_liqvol[c, j + joff] <= zero(T) || t_soisno[c, j + joff] <= tfrz - T(2.0)
-                rootr[p, j] = zero(T)
-            else
-                s_node = max(h2osoi_liqvol[c, j + joff] / eff_porosity[c, j], T(0.01))
-                s_node = min(s_node, one(T))
+            # --- HARD GATE (byte-identical for Float64 via smooth_heaviside) ---
+            # Original: zero the layer if it is dry (h2osoi_liqvol<=0) or near-frozen
+            # (t_soisno<=tfrz-2). w_gate = σ_w · σ_t is the smooth product of the two
+            # one-sided gates; for plain Float64 each σ is an EXACT 0/1 step, so
+            # w_gate ∈ {0,1} and the branch below reduces to the original bit-for-bit.
+            #
+            # The hard condition is STRICT ( >0 / >tfrz-2 ), so the gate must be OFF at
+            # the threshold itself. smooth_heaviside uses the `>=` convention (ON at 0),
+            # so we form the strict ">" gate as 1-σ(-x): at x=0 → 1-σ(0)=1-1=0 (OFF, like
+            # the hard <=0 branch); x>0 → 1-σ(-x)=1 (ON); x<0 → 0 (OFF). Identical 0/1 on
+            # Float64, smooth ramp on Dual.
+            w_water = one(T) - smooth_heaviside(-(h2osoi_liqvol[c, j + joff]); k = gkw)
+            w_temp  = one(T) - smooth_heaviside((tfrz - T(2.0)) - t_soisno[c, j + joff]; k = gkt)
+            w_gate  = w_water * w_temp
 
-                smp_node = soil_suction_clapp_hornberger(sucsat[c, j], s_node, bsw[c, j])
-                smp_node = max(smpsc[itype], smp_node)
+            # Wetness-branch quantities. Computed unconditionally (the gate-off branch
+            # is blended out by w_gate below) — the smooth_max floor on s_node keeps
+            # s_node^(-bsw) finite even where the layer is dry/frozen, so the smooth
+            # path never evaluates a singular power on a zeroed layer.
+            s_node = smooth_max(h2osoi_liqvol[c, j + joff] / eff_porosity[c, j], T(0.01); k = smk)
+            s_node = smooth_min(s_node, one(T); k = smk)
 
-                rresis[p, j] = min((eff_porosity[c, j] / watsat[c, j]) *
-                    (smp_node - smpsc[itype]) / (smpso[itype] - smpsc[itype]), one(T))
+            smp_node = soil_suction_clapp_hornberger(sucsat[c, j], s_node, bsw[c, j])
+            smp_node = smooth_max(smpsc[itype], smp_node; k = smk)
 
-                if use_unf
-                    rootr[p, j] = rootfr_unf[p, j] * rresis[p, j]
-                else
-                    rootr[p, j] = rootfr[p, j] * rresis[p, j]
-                end
+            rresis_j = smooth_min((eff_porosity[c, j] / watsat[c, j]) *
+                (smp_node - smpsc[itype]) / (smpso[itype] - smpsc[itype]), one(T); k = smk)
 
-                acc += max(rootr[p, j], zero(T))
-            end
+            rootfr_j = use_unf ? rootfr_unf[p, j] : rootfr[p, j]
+            rootr_wet = rootfr_j * rresis_j
+
+            # Blend across the gate. For Float64 the gate is {0,1}, so this is
+            # byte-identical to the original branch:
+            #   gate=1 → rresis_j / rootr_wet (the original active-layer writes);
+            #   gate=0 → rresis[p,j] UNCHANGED (original never wrote it) and
+            #            rootr[p,j]=0 (original `rootr[p,j]=zero(T)`).
+            rresis[p, j] = w_gate * rresis_j + (one(T) - w_gate) * rresis[p, j]
+            rootr[p, j]  = w_gate * rootr_wet
+
+            acc += smooth_max(rootr[p, j], zero(T); k = smk)
         end
         btran[p] = btran[p] + acc
     end
@@ -434,7 +478,8 @@ function smstress_rootr_btran!(rootr, rresis, btran, mask_patch, patch_column,
     _launch!(_smstress_rootr_btran_kernel!, rootr, rresis, btran, mask_patch,
              patch_column, patch_itype, rootfr, rootfr_unf, smpso, smpsc, t_soisno,
              watsat, sucsat, bsw, eff_porosity, h2osoi_liqvol, nlevgrnd, joff,
-             T(tfrz), use_unf; ndrange = length(mask_patch))
+             T(tfrz), use_unf, T(BTRAN_SMOOTH_K[]), T(BTRAN_GATE_K_WATER[]),
+             T(BTRAN_GATE_K_TEMP[]); ndrange = length(mask_patch))
 end
 
 # --- Kernel: zero btran for active patches ---
