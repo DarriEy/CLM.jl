@@ -29,9 +29,18 @@ NSTEP_START="${2:?first nstep to dump}"
 NSTEP_COUNT="${3:-1}"
 
 # --- paths (the instrumented Fortran build + the case) ---------------------------
+# Discovered live on the build box (2026-06-25): a complete, BUILT, instrumented case.
+#   exe:        $CASE_DIR/bld/cesm.exe  (arm64, pdump SourceMods baked in)
+#   SourceMods: $CASE_DIR/SourceMods/src.clm/{restFileMod,SoilTemperatureMod,...}.F90
+#   existing SP dumps: $DUMP_OUT/pdump_*_n{11881..11900,13458..13470}.nc
 CLM_ROOT="${CLM_ROOT:-/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm}"
-CASE_DIR="${CASE_DIR:-$CLM_ROOT/cime/scripts/clm_parity_case}"
+CASE_DIR="${CASE_DIR:-$CLM_ROOT/cases/symfluence_build}"
 DUMP_OUT="${DUMP_OUT:-/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run}"
+# ⚠️ SAFETY: the existing validated SP dumps in $DUMP_OUT are the live :parity oracle
+# reference — do NOT let a new run overwrite them. Each config writes its run output to
+# an ISOLATED RUNDIR and collects only into a per-config REF_DIR; the parity oracle is
+# pointed at REF_DIR explicitly, never at a clobbered $DUMP_OUT.
+RUNDIR="${RUNDIR:-$DUMP_OUT/gen_$CONFIG/run}"
 REF_DIR="$DUMP_OUT/refs_$CONFIG"
 
 # --- per-config namelist overrides (user_nl_clm) ---------------------------------
@@ -72,23 +81,27 @@ for kv in "${NL_OVERRIDES[@]:-}"; do
 done
 
 # --- run the short window that brackets the requested dump steps ------------------
-# The SourceMods dump fires on nstep ∈ [NSTEP_START, NSTEP_START+NSTEP_COUNT). We
-# run from the spun-up restart so the bracket lands on the right calendar steps
-# (see the recipe for stop_n/continue-mode caveats).
+# The SourceMods dump fires on nstep ∈ [NSTEP_START, NSTEP_START+NSTEP_COUNT). We run
+# from the spun-up restart so the bracket lands on the right calendar steps (see the
+# recipe for stop_n/continue-mode caveats). RUNDIR is ISOLATED so we never clobber the
+# existing validated SP dumps in $DUMP_OUT.
+mkdir -p "$RUNDIR"
 ( cd "$CASE_DIR"
+  ./xmlchange RUNDIR="$RUNDIR"
   ./xmlchange STOP_OPTION=nsteps,STOP_N=$((NSTEP_COUNT+1))
+  # if a SourceMods .F90 changed, rebuild first: ./case.build
   ./case.submit --no-batch )
 
-# --- collect the dumps into a per-config ref dir ---------------------------------
+# --- collect the dumps into a per-config ref dir (from the isolated RUNDIR) -------
 mkdir -p "$REF_DIR"
 moved=0
 for n in $(seq "$NSTEP_START" $((NSTEP_START+NSTEP_COUNT-1))); do
   for b in before_step after_canopyfluxes after_soiltemperature \
            after_soilfluxes after_hydrologynodrainage after_hydrologydrainage; do
-    f="$DUMP_OUT/pdump_${b}_n${n}.nc"
+    f="$RUNDIR/pdump_${b}_n${n}.nc"
     [ -f "$f" ] && { cp -f "$f" "$REF_DIR/"; moved=$((moved+1)); }
   done
 done
 echo ">> collected $moved dump files into $REF_DIR"
 echo ">> point the harness :parity oracle at these by extending PARITY_NSTEP / a"
-echo "   per-config dump dir in scripts/validation/validate.jl."
+echo "   per-config dump dir in scripts/validation/validate.jl (REF_DIR=$REF_DIR)."
