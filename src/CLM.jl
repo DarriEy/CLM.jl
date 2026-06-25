@@ -628,6 +628,11 @@ include("driver/clm_initialize.jl")
 include("driver/clm_run.jl")
 include("driver/run_clm.jl")
 
+# MPI distributed-execution driver (rank-local clump loop + gather/scatter to
+# master). No-op / transparent passthrough on a single rank. Included after the
+# driver so `clm_run_clump_physics!` is in scope.
+include("infrastructure/distributed_driver.jl")
+
 # ===========================================================================
 # Calibration framework (depends on driver + all modules)
 # ===========================================================================

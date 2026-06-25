@@ -33,3 +33,21 @@ jobs:
       - uses: julia-actions/julia-runtest@v1
         env:
           JULIA_NUM_THREADS: '2'
+
+  mpi-smoke:
+    name: MPI 2-rank smoke (bit-identity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'    # latest stable
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      # MPI.jl bundles MPICH_jll, so mpiexec() works without a system MPI.
+      # Launch the 2-rank distributed-driver smoke and assert the gathered
+      # global result is BIT-IDENTICAL to the serial run (CTSM PE-layout
+      # invariant). The script exits nonzero on any mismatch.
+      - name: Run 2-rank MPI smoke
+        run: |
+          julia --project=. -e 'using MPI; run(`$(mpiexec()) -n 2 $(Base.julia_cmd()) --project=. --check-bounds=yes test/mpi/run_mpi_smoke.jl`)'
