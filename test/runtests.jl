@@ -9,6 +9,7 @@ using CLM
     include("test_decomp_init.jl")
     include("test_threaded_clumps.jl")
     include("test_spmd.jl")
+    include("test_distributed_driver.jl")  # MPI driver single-rank no-op path (2-rank smoke: test/mpi/run_mpi_smoke.jl under mpiexec)
     include("test_gridcell.jl")
     include("test_landunit.jl")
     include("test_column.jl")
