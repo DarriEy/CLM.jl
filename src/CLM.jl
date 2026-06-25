@@ -70,6 +70,7 @@ include("types/lnd2atm.jl")
 # ===========================================================================
 # Tier 1: Infrastructure (solvers, utilities, decomposition)
 # ===========================================================================
+include("infrastructure/spmd.jl")  # SPMD/MPI communication shim (single-rank no-op by default)
 include("infrastructure/decomp.jl")
 include("infrastructure/filters.jl")
 include("infrastructure/tridiagonal.jl")
