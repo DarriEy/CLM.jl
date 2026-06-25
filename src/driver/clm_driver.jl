@@ -856,8 +856,8 @@ function clm_drv_core!(config::CLMDriverConfig,
     # biogeophysics (water + energy) conservation dynbal via the cons_bgp bundle.
     # Transient datasets advance on year boundaries, so only run at is_beg_curr_year
     # (matching the Fortran do_transient_*'s annual cadence). The CN-half
-    # (dyn_cnbal_patch!/col!) stays deferred here — it needs the full CN-veg facade
-    # threaded through the conservation updater; the biogeophys half is turnkey.
+    # (dyn_cnbal_patch!/col!) is WIRED via the cons_bgc bundle when config.use_cn —
+    # mirroring the Fortran `if (use_cn) call DynamicAreaConservation`.
     # ========================================================================
     if config.dyn_subgrid !== nothing && is_beg_curr_year && !is_first_step
         _cons_bgp = (urbanparams = up, soilstate = ss,
@@ -869,9 +869,44 @@ function clm_drv_core!(config::CLMDriverConfig,
                               endl = bc.endl, begc = bc.begc, endc = bc.endc,
                               begp = bc.begp, endp = bc.endp,
                               level = BOUNDS_LEVEL_PROC)
+
+        # CN-balance bundle (use_cn only). Mirrors CNVegetationFacade's
+        # DynamicAreaConservation arg list. The soilp/soilc masks must include
+        # inactive points (Fortran filter_inactive_and_active) so columns that
+        # just shrank to 0 area are still updated.
+        _cons_bgc = nothing
+        if config.use_cn
+            _veg = inst.bgc_vegetation
+            _cons_bgc = (
+                dynbal = DynConsBiogeochemState(),
+                pftcon = pftcon,
+                canopystate = inst.canopystate,
+                cnveg_state = _veg.cnveg_state_inst,
+                cnveg_carbonstate = _veg.cnveg_carbonstate_inst,
+                cnveg_carbonflux = _veg.cnveg_carbonflux_inst,
+                cnveg_nitrogenstate = _veg.cnveg_nitrogenstate_inst,
+                cnveg_nitrogenflux = _veg.cnveg_nitrogenflux_inst,
+                soilbiogeochem_state = inst.soilbiogeochem_state,
+                soilbiogeochem_carbonstate = inst.soilbiogeochem_carbonstate,
+                soilbiogeochem_nitrogenstate = inst.soilbiogeochem_nitrogenstate,
+                mask_soilp_with_inactive = filt_inactive_and_active.soilp,
+                mask_soilc_with_inactive = filt_inactive_and_active.soilc,
+                dt = dtime,
+                nlevdecomp = varpar.nlevdecomp,
+                ndecomp_pools = config.ndecomp_pools,
+                i_litr_min = config.i_litr_min,
+                i_litr_max = config.i_litr_max,
+                i_cwd = config.i_cwd,
+                use_crop = config.use_crop,
+                nrepr = config.nrepr,
+                use_nitrif_denitrif = _veg.config.use_nitrif_denitrif,
+            )
+        end
+
         dynSubgrid_driver!(config.dyn_subgrid, _bc_proc, grc, lun, col, pch;
                            year = year,
                            temp = temp, ws = wsb.ws, cons_bgp = _cons_bgp,
+                           cons_bgc = _cons_bgc,
                            mask_nolakec = filt.nolakec, mask_lakec = filt.lakec)
     end
 

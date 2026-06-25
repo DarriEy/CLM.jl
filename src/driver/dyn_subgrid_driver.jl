@@ -258,6 +258,7 @@ function dynSubgrid_driver!(state::DynSubgridState, bounds_proc::BoundsType,
                             temp::Union{TemperatureData,Nothing} = nothing,
                             ws::Union{WaterStateData,Nothing} = nothing,
                             cons_bgp = nothing,
+                            cons_bgc = nothing,
                             mask_nolakec = nothing,
                             mask_lakec = nothing)
 
@@ -349,10 +350,106 @@ function dynSubgrid_driver!(state::DynSubgridState, bounds_proc::BoundsType,
             cons_bgp.temperature, cons_bgp.lakestate, ctl)
     end
 
-    # use_cn DynamicAreaConservation (biogeochem C/N) — requires the full CN
-    # vegetation facade; not wired into this standalone driver. The pieces
-    # (dyn_cnbal_patch! / dyn_cnbal_col!) exist on the base and can be threaded in
-    # when the CN facade is available.
+    # ======================================================================
+    # use_cn DynamicAreaConservation (biogeochem C/N) — WIRED via the optional
+    # `cons_bgc` bundle (the CN-veg facade state + params). Mirrors
+    # CNVegetationFacade::DynamicAreaConservation (CNVegetationFacade.F90:746-800),
+    # called from dynSubgrid_driver under `if (use_cn)`:
+    #
+    #   1. dyn_cnbal_patch!            (patch-level above-ground C/N redistribution,
+    #                                   produces dwt_* litter/CWD/seed/conv fluxes)
+    #   2. c_state_update_dyn_patch!   (CStateUpdateDynPatch — apply the patch fluxes
+    #      n_state_update_dyn_patch!    NStateUpdateDynPatch — to the column soil pools)
+    #   3. soil_bgc_precision_control! (SoilBiogeochemPrecisionControl — issue #741)
+    #   4. dyn_cnbal_col!              (column-level below-ground C/N redistribution)
+    #
+    # No-op when cons_bgc === nothing (the default standalone path). When supplied
+    # but no weights changed, every step is internally a no-op (zero dwt fluxes),
+    # so it is byte-identical to skipping it.
+    # ======================================================================
+    if cons_bgc !== nothing
+        dynSubgrid_run_cnbal!(state, bounds_proc, lun, col, pch, cons_bgc, clump_index)
+    end
+
+    return nothing
+end
+
+# --------------------------------------------------------------------------
+# dynSubgrid_run_cnbal!
+# --------------------------------------------------------------------------
+"""
+    dynSubgrid_run_cnbal!(state, bounds_proc, lun, col, pch, cons_bgc, clump_index)
+
+Run the `use_cn` biogeochem C/N conservation across a land-cover area change,
+mirroring `CNVegetationFacade::DynamicAreaConservation`
+(`CNVegetationFacade.F90`). Helper invoked from [`dynSubgrid_driver!`] when a
+`cons_bgc` bundle is supplied.
+
+`cons_bgc` is a NamedTuple / struct carrying the CN-veg facade state, the
+soilbiogeochem state, the `dynbal` (`DynConsBiogeochemState`) seed constants,
+the soilp/soilc "inactive+active" masks, and the scalar params:
+
+    (dynbal, pftcon, canopystate, cnveg_state,
+     cnveg_carbonstate, cnveg_carbonflux,
+     cnveg_nitrogenstate, cnveg_nitrogenflux,
+     soilbiogeochem_state, soilbiogeochem_carbonstate, soilbiogeochem_nitrogenstate,
+     mask_soilp_with_inactive, mask_soilc_with_inactive,
+     dt, nlevdecomp, ndecomp_pools, i_litr_min, i_litr_max, i_cwd,
+     use_crop, nrepr, use_nitrif_denitrif)
+"""
+function dynSubgrid_run_cnbal!(state::DynSubgridState, bounds_proc::BoundsType,
+                               lun::LandunitData, col::ColumnData, pch::PatchData,
+                               cons_bgc, clump_index::Int)
+
+    bc = bounds_proc
+
+    # 1. Patch-level C/N redistribution. Uses the prior-weights snapshot taken at
+    #    the top of dynSubgrid_driver! (state.prior_weights.pwtgcell).
+    prior_pwtgcell = state.prior_weights.pwtgcell[bc.begp:bc.endp]
+    dyn_cnbal_patch!(cons_bgc.dynbal, bc,
+        cons_bgc.mask_soilp_with_inactive, prior_pwtgcell,
+        state.patch_state_updater,
+        pch, lun, col, cons_bgc.pftcon,
+        cons_bgc.canopystate, cons_bgc.cnveg_state,
+        cons_bgc.cnveg_carbonstate, cons_bgc.cnveg_carbonflux,
+        cons_bgc.cnveg_nitrogenstate, cons_bgc.cnveg_nitrogenflux,
+        cons_bgc.soilbiogeochem_state;
+        dt = cons_bgc.dt,
+        i_litr_min = cons_bgc.i_litr_min, i_litr_max = cons_bgc.i_litr_max,
+        use_crop = cons_bgc.use_crop, nrepr = cons_bgc.nrepr)
+
+    # 2. Apply the patch-level dwt fluxes to the column soil pools BEFORE the
+    #    column redistribution (Fortran CStateUpdateDynPatch / NStateUpdateDynPatch).
+    #    The masks include inactive points so just-shrunk-to-0 columns are updated.
+    bounds_col = bc.begc:bc.endc
+    bounds_grc = bc.begg:bc.endg
+    c_state_update_dyn_patch!(cons_bgc.cnveg_carbonstate, cons_bgc.cnveg_carbonflux,
+        cons_bgc.soilbiogeochem_carbonstate;
+        mask_soilc_with_inactive = cons_bgc.mask_soilc_with_inactive,
+        bounds_col = bounds_col, bounds_grc = bounds_grc,
+        nlevdecomp = cons_bgc.nlevdecomp,
+        i_litr_min = cons_bgc.i_litr_min, i_litr_max = cons_bgc.i_litr_max,
+        i_cwd = cons_bgc.i_cwd, dt = cons_bgc.dt)
+    n_state_update_dyn_patch!(cons_bgc.cnveg_nitrogenstate, cons_bgc.cnveg_nitrogenflux,
+        cons_bgc.soilbiogeochem_nitrogenstate;
+        mask_soilc_with_inactive = cons_bgc.mask_soilc_with_inactive,
+        bounds_col = bounds_col, bounds_grc = bounds_grc,
+        nlevdecomp = cons_bgc.nlevdecomp,
+        i_litr_min = cons_bgc.i_litr_min, i_litr_max = cons_bgc.i_litr_max,
+        i_cwd = cons_bgc.i_cwd, dt = cons_bgc.dt)
+
+    # 3. Precision control on decomp_cpools_vr_col (Fortran fixes issue #741).
+    soil_bgc_precision_control!(cons_bgc.soilbiogeochem_carbonstate,
+        cons_bgc.soilbiogeochem_nitrogenstate;
+        mask_bgc_soilc = cons_bgc.mask_soilc_with_inactive,
+        nlevdecomp = cons_bgc.nlevdecomp,
+        ndecomp_pools = cons_bgc.ndecomp_pools,
+        use_nitrif_denitrif = cons_bgc.use_nitrif_denitrif)
+
+    # 4. Column-level below-ground C/N redistribution.
+    dyn_cnbal_col!(bc, clump_index, state.column_state_updater, col,
+        cons_bgc.soilbiogeochem_carbonstate, cons_bgc.soilbiogeochem_nitrogenstate;
+        use_nitrif_denitrif = cons_bgc.use_nitrif_denitrif)
 
     return nothing
 end
