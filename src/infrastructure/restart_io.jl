@@ -770,3 +770,145 @@ function read_restart!(filepath::String, inst::CLMInstances, bounds::BoundsType;
     return read_restart!(inst, filepath; bounds = bounds, use_cn = use_cn,
                          use_crop = use_crop, use_c13 = use_c13, use_c14 = use_c14)
 end
+
+# ==========================================================================
+# Matrix-CN restart I/O (use_matrixcn / use_soil_matrixcn)
+#
+# Port of `CNSoilMatrixRest` (CNSoilMatrixMod.F90:912) and the matrix-CN restart
+# state of the CN-veg/soil state types. Fortran restarts:
+#   * the SASU cycle counters `soil_cycle_year` (iyr) / `soil_cycle_loop` (iloop),
+#   * the per-spin-period accumulators that live on the carbon/nitrogen state
+#     structs — the soil `in_acc`/`in_nacc` input accumulators, the accumulated
+#     transfer matrices (`AKXcacc`/`AKXnacc`), and the begin-of-year pool snapshot
+#     (`decomp0_*pools_vr`) — without which an interrupted spinup would lose its
+#     partial SASU average.
+#
+# These do NOT live on the standard `CLMInstances` subgrid tree (they are solver-
+# internal workspaces), so this is a self-contained NetCDF round-trip of the
+# `CNSoilMatrixState` accumulators + the SASU counters, gated entirely behind
+# `use_matrixcn`. When the flag is off this is never called → the default restart
+# path (write_restart/read_restart!) is byte-identical.
+#
+# `iyr`/`iloop` are the SASU cycle counters; `ms` carries `AKXcacc`/`AKXnacc`
+# (the accumulated transfer matrices) and the `in_acc`/`in_nacc`/`decomp0_*` are
+# passed explicitly as the per-column accumulators to persist.
+# ==========================================================================
+
+"""
+    write_matrixcn_restart(filename; ms, in_acc, in_nacc, decomp0_cpools_vr,
+                           decomp0_npools_vr, iyr, iloop, ctl=varctl)
+
+Write the matrix-CN spinup/SASU restart state to a NetCDF. Round-trips the
+accumulated transfer matrices (`ms.AKXcacc`/`ms.AKXnacc`), the input accumulators
+(`in_acc`/`in_nacc`), the begin-of-year pool snapshots (`decomp0_*pools_vr`), and
+the SASU cycle counters (`soil_cycle_year`=`iyr`, `soil_cycle_loop`=`iloop`).
+Only the populated entries (`1:NE` of the accumulator matrices) are written.
+Mirrors `CNSoilMatrixRest(flag='write')` plus the state-type accumulator restart.
+"""
+function write_matrixcn_restart(filename::String;
+        ms::CNSoilMatrixState,
+        in_acc::AbstractMatrix{<:Real}, in_nacc::AbstractMatrix{<:Real},
+        decomp0_cpools_vr::AbstractArray{<:Real,3},
+        decomp0_npools_vr::AbstractArray{<:Real,3},
+        iyr::Int, iloop::Int, ctl::VarCtl = varctl)
+    ds = NCDataset(filename, "c")
+    try
+        ds.attrib["title"] = "CLM Matrix-CN Restart information"
+        # SASU cycle counters (CNSoilMatrixRest restartvar's), as scalars.
+        defVar(ds, "soil_cycle_year", Int, ())[] = iyr
+        defVar(ds, "soil_cycle_loop", Int, ())[] = iloop
+
+        # Input accumulators (column × ndecomp_pools_vr).
+        nu = size(in_acc, 1); npvr = size(in_acc, 2)
+        defDim(ds, "matrix_unit", nu)
+        defDim(ds, "ndecomp_pools_vr", npvr)
+        defVar(ds, "matrix_in_acc",  Float64, ("matrix_unit", "ndecomp_pools_vr"))[:, :]  = collect(Float64, in_acc)
+        defVar(ds, "matrix_in_nacc", Float64, ("matrix_unit", "ndecomp_pools_vr"))[:, :] = collect(Float64, in_nacc)
+
+        # Begin-of-year pool snapshots (col × nlev × npool).
+        ncol = size(decomp0_cpools_vr, 1)
+        nlev = size(decomp0_cpools_vr, 2)
+        npool = size(decomp0_cpools_vr, 3)
+        defDim(ds, "matrix_col", ncol)
+        defDim(ds, "matrix_levdcmp", nlev)
+        defDim(ds, "matrix_npool", npool)
+        defVar(ds, "matrix_decomp0_cpools_vr", Float64, ("matrix_col", "matrix_levdcmp", "matrix_npool"))[:, :, :] = collect(Float64, decomp0_cpools_vr)
+        defVar(ds, "matrix_decomp0_npools_vr", Float64, ("matrix_col", "matrix_levdcmp", "matrix_npool"))[:, :, :] = collect(Float64, decomp0_npools_vr)
+
+        # Accumulated transfer matrices (only if values have been set).
+        if is_values_set_sm(ms.AKXcacc)
+            NE = ms.AKXcacc.NE
+            defDim(ds, "matrix_NE_c", NE)
+            defVar(ds, "matrix_AKXcacc_M",  Float64, ("matrix_unit", "matrix_NE_c"))[:, :] = collect(Float64, ms.AKXcacc.M[:, 1:NE])
+            defVar(ds, "matrix_AKXcacc_RI", Int,     ("matrix_NE_c",))[:] = ms.AKXcacc.RI[1:NE]
+            defVar(ds, "matrix_AKXcacc_CI", Int,     ("matrix_NE_c",))[:] = ms.AKXcacc.CI[1:NE]
+        end
+        if is_values_set_sm(ms.AKXnacc)
+            NEn = ms.AKXnacc.NE
+            defDim(ds, "matrix_NE_n", NEn)
+            defVar(ds, "matrix_AKXnacc_M",  Float64, ("matrix_unit", "matrix_NE_n"))[:, :] = collect(Float64, ms.AKXnacc.M[:, 1:NEn])
+            defVar(ds, "matrix_AKXnacc_RI", Int,     ("matrix_NE_n",))[:] = ms.AKXnacc.RI[1:NEn]
+            defVar(ds, "matrix_AKXnacc_CI", Int,     ("matrix_NE_n",))[:] = ms.AKXnacc.CI[1:NEn]
+        end
+    finally
+        close(ds)
+    end
+    return nothing
+end
+
+"""
+    read_matrixcn_restart!(filename; ms, in_acc, in_nacc, decomp0_cpools_vr,
+                           decomp0_npools_vr) -> (iyr, iloop)
+
+Read the matrix-CN spinup/SASU restart state written by [`write_matrixcn_restart`]
+back into the accumulators (overwriting `in_acc`/`in_nacc`/`decomp0_*` in place and
+restoring `ms.AKXcacc`/`ms.AKXnacc`), and return `(iyr, iloop)`. The accumulator
+sparse matrices are (re)initialized to the saved structure if not already
+allocated. Mirrors `CNSoilMatrixRest(flag='read')` plus the state accumulator read.
+"""
+function read_matrixcn_restart!(filename::String;
+        ms::CNSoilMatrixState,
+        in_acc::AbstractMatrix{<:Real}, in_nacc::AbstractMatrix{<:Real},
+        decomp0_cpools_vr::AbstractArray{<:Real,3},
+        decomp0_npools_vr::AbstractArray{<:Real,3},
+        begc::Int = 1, endc::Int = 0)
+    isfile(filename) || error("Matrix-CN restart file not found: $filename")
+    iyr = 0; iloop = 0
+    NCDataset(filename, "r") do ds
+        haskey(ds, "soil_cycle_year") && (iyr   = Int(ds["soil_cycle_year"][]))
+        haskey(ds, "soil_cycle_loop") && (iloop = Int(ds["soil_cycle_loop"][]))
+        if haskey(ds, "matrix_in_acc")
+            in_acc  .= Float64.(Array(ds["matrix_in_acc"]))
+            in_nacc .= Float64.(Array(ds["matrix_in_nacc"]))
+        end
+        if haskey(ds, "matrix_decomp0_cpools_vr")
+            decomp0_cpools_vr .= Float64.(Array(ds["matrix_decomp0_cpools_vr"]))
+            decomp0_npools_vr .= Float64.(Array(ds["matrix_decomp0_npools_vr"]))
+        end
+        ec = endc == 0 ? begc + size(in_acc, 1) - 1 : endc
+        npvr = size(in_acc, 2)
+        if haskey(ds, "matrix_AKXcacc_M")
+            is_alloc_sm(ms.AKXcacc) || init_sm!(ms.AKXcacc, npvr, begc, ec)
+            M  = Float64.(Array(ds["matrix_AKXcacc_M"]))
+            RI = Int.(Array(ds["matrix_AKXcacc_RI"]))
+            CI = Int.(Array(ds["matrix_AKXcacc_CI"]))
+            NE = length(RI)
+            ms.AKXcacc.M[:, 1:NE] .= M
+            ms.AKXcacc.RI[1:NE] .= RI
+            ms.AKXcacc.CI[1:NE] .= CI
+            ms.AKXcacc.NE = NE
+        end
+        if haskey(ds, "matrix_AKXnacc_M")
+            is_alloc_sm(ms.AKXnacc) || init_sm!(ms.AKXnacc, npvr, begc, ec)
+            M  = Float64.(Array(ds["matrix_AKXnacc_M"]))
+            RI = Int.(Array(ds["matrix_AKXnacc_RI"]))
+            CI = Int.(Array(ds["matrix_AKXnacc_CI"]))
+            NEn = length(RI)
+            ms.AKXnacc.M[:, 1:NEn] .= M
+            ms.AKXnacc.RI[1:NEn] .= RI
+            ms.AKXnacc.CI[1:NEn] .= CI
+            ms.AKXnacc.NE = NEn
+        end
+    end
+    return (iyr, iloop)
+end

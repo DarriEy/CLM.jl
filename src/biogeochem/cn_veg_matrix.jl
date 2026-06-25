@@ -419,3 +419,388 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
     release_v!(Xvegc); release_v!(Binput)
     return nothing
 end
+
+# =============================================================================
+# DEFERRED MATRIX-CN TAILS — N-pool solve, C13/C14 isotope solves, and the
+# veg SASU spinup capacity. These extend the matrix model to the remaining pool
+# species and the spinup accelerator. They are gated behind use_matrixcn (and
+# the corresponding use_c13/use_c14/spinup flags) exactly like the C solve, and
+# share the same `_build_ak_process!` assembly + `spmm_ax!` advance, so each is
+# an EXACT reformulation of the corresponding sequential update for its species.
+# =============================================================================
+
+"""
+    _cn_veg_matrix_advance!(X, B, begp, endp, num_soilp, filter_soilp, nvegpool,
+                            phtransfer, phturnover, ph_doner, ph_receiver, nphtrans, nphouttrans,
+                            gmtransfer, gmturnover, gm_doner, gm_receiver, ngmtrans, ngmouttrans,
+                            fitransfer, fiturnover, fi_doner, fi_receiver, nfitrans, nfiouttrans,
+                            dt, num_actfirep)
+
+Generic batched matrix advance `X ← (I + AKph + AKgm [+ AKfi])·X + B` for the veg
+pool vector `X` (already loaded) and input vector `B` (already = alloc·input·dt).
+This is the species-agnostic core shared by the C, N and isotope solves — it
+assembles each process matrix `AK = A·K` from its `transfer`/`turnover`/`doner`/
+`receiver` arrays via [`_build_ak_process!`] and sums them, then applies the
+in-place `spmm_ax!` advance and adds `B`. The pool LOAD and WRITE-BACK (which
+differ per species) stay in the species-specific wrappers. Port of the matrix
+assemble+solve of `CNVegMatrix` (Fortran 1407–1538), factored so the N and
+isotope variants reuse it verbatim.
+"""
+function _cn_veg_matrix_advance!(X::VectorType, B::VectorType,
+        begp::Int, endp::Int, num_soilp::Int, filter_soilp::AbstractVector{Int}, nvegpool::Int,
+        phtransfer::AbstractMatrix{Float64}, phturnover::AbstractMatrix{Float64},
+        ph_doner::AbstractVector{Int}, ph_receiver::AbstractVector{Int}, nphtrans::Int, nphouttrans::Int,
+        gmtransfer::AbstractMatrix{Float64}, gmturnover::AbstractMatrix{Float64},
+        gm_doner::AbstractVector{Int}, gm_receiver::AbstractVector{Int}, ngmtrans::Int, ngmouttrans::Int,
+        fitransfer::AbstractMatrix{Float64}, fiturnover::AbstractMatrix{Float64},
+        fi_doner::AbstractVector{Int}, fi_receiver::AbstractVector{Int}, nfitrans::Int, nfiouttrans::Int,
+        dt::Float64, num_actfirep::Int)
+
+    AKph = SparseMatrixType(); init_sm!(AKph, nvegpool, begp, endp)
+    AKgm = SparseMatrixType(); init_sm!(AKgm, nvegpool, begp, endp)
+    AKfi = SparseMatrixType(); init_sm!(AKfi, nvegpool, begp, endp)
+
+    Aph = fill(0.0, endp - begp + 1, max(1, nphtrans - nphouttrans))
+    Agm = fill(0.0, endp - begp + 1, max(1, ngmtrans - ngmouttrans))
+    Afi = fill(0.0, endp - begp + 1, max(1, nfitrans - nfiouttrans))
+
+    nn = nvegpool * nvegpool
+    list_ph = fill(0, nn); RI_ph = fill(0, nn); CI_ph = fill(0, nn)
+    list_gm = fill(0, nn); RI_gm = fill(0, nn); CI_gm = fill(0, nn)
+    list_fi = fill(0, nn); RI_fi = fill(0, nn); CI_fi = fill(0, nn)
+
+    _build_ak_process!(AKph, begp, endp, num_soilp, filter_soilp, Aph,
+                       phtransfer, phturnover, ph_doner, ph_receiver,
+                       nphtrans, nphouttrans, nvegpool, dt, false, list_ph, RI_ph, CI_ph)
+    _build_ak_process!(AKgm, begp, endp, num_soilp, filter_soilp, Agm,
+                       gmtransfer, gmturnover, gm_doner, gm_receiver,
+                       ngmtrans, ngmouttrans, nvegpool, dt, false, list_gm, RI_gm, CI_gm)
+    _build_ak_process!(AKfi, begp, endp, num_soilp, filter_soilp, Afi,
+                       fitransfer, fiturnover, fi_doner, fi_receiver,
+                       nfitrans, nfiouttrans, nvegpool, dt, false, list_fi, RI_fi, CI_fi)
+
+    AKall = SparseMatrixType(); init_sm!(AKall, nvegpool, begp, endp)
+    if num_actfirep == 0
+        la = fill(0, nn); lb = fill(0, nn); RIab = fill(0, nn); CIab = fill(0, nn)
+        spmp_ab!(AKall, num_soilp, filter_soilp, AKph, AKgm, false;
+                 list_A=la, list_B=lb, NE_AB=0, RI_AB=RIab, CI_AB=CIab)
+    else
+        la = fill(0, nn); lb = fill(0, nn); lc = fill(0, nn)
+        RIabc = fill(0, nn); CIabc = fill(0, nn)
+        spmp_abc!(AKall, num_soilp, filter_soilp, AKph, AKgm, AKfi, false;
+                  list_A=la, list_B=lb, list_C=lc, NE_ABC=0, RI_ABC=RIabc, CI_ABC=CIabc)
+    end
+
+    spmm_ax!(X, num_soilp, filter_soilp, AKall)
+    for i in 1:nvegpool
+        for fp in 1:num_soilp
+            p = filter_soilp[fp]; pr = u_idx(begp, p)
+            X.V[pr, i] = X.V[pr, i] + B.V[pr, i]
+        end
+    end
+
+    release_sm!(AKph); release_sm!(AKgm); release_sm!(AKfi); release_sm!(AKall)
+    return nothing
+end
+
+"""
+    cn_veg_matrix_solve_n!(ns_veg, nf_veg; mask_soilp, bounds_patch, ivt,
+                           npcropmin, nvegnpool, counts, dt, num_actfirep=0, irepr=1)
+
+Advance the vegetation NITROGEN pools by one step via the matrix solution
+`X(n+1) = (I + AKnph + AKngm + AKnfi)·X(n) + matrix_nalloc·matrix_Ninput·dt`, and
+write the result back to the leaf/froot/livestem/deadstem/livecroot/deadcroot
+{+ st/xf} N pools, the retranslocated-N pool (`iretransn = nvegnpool`, the last
+pool, which has no storage/transfer compartment), and grain N for crops.
+
+Port of the N-pool path of Fortran `CNVegMatrix` (Xvegn load 1221–1240, the
+`n*transfer/n*turnover` assembly, and the Xvegn write-back). This is the EXACT
+reformulation of the sequential `n_state_update*` veg pool writes, which are gated
+off (`!use_matrixcn`) when this runs. `counts` is `veg_matrix_transfer_counts`.
+"""
+function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNitrogenFluxData;
+                                mask_soilp::AbstractVector{Bool},
+                                bounds_patch::UnitRange{Int},
+                                ivt::AbstractVector{<:Integer},
+                                npcropmin::Int, nvegnpool::Int,
+                                counts, dt::Real,
+                                num_actfirep::Int=0, irepr::Int=1)
+    dt = Float64(dt)
+    begp = first(bounds_patch); endp = last(bounds_patch)
+    filter_soilp = Int[p for p in bounds_patch if mask_soilp[p]]
+    num_soilp = length(filter_soilp)
+    num_soilp == 0 && return nothing
+
+    nf = nf_veg; ns = ns_veg
+    iretransn = nvegnpool   # last N pool (Fortran iretransn = nvegnpool)
+
+    Xvegn = VectorType(); init_v!(Xvegn, nvegnpool, begp, endp)
+    Binput = VectorType(); init_v!(Binput, nvegnpool, begp, endp)
+
+    # --- load N pools (Fortran 1221–1247) ---
+    for fp in 1:num_soilp
+        p = filter_soilp[fp]; pr = u_idx(begp, p)
+        Xvegn.V[pr, ILEAF]         = ns.leafn_patch[p]
+        Xvegn.V[pr, ILEAF_ST]      = ns.leafn_storage_patch[p]
+        Xvegn.V[pr, ILEAF_XF]      = ns.leafn_xfer_patch[p]
+        Xvegn.V[pr, IFROOT]        = ns.frootn_patch[p]
+        Xvegn.V[pr, IFROOT_ST]     = ns.frootn_storage_patch[p]
+        Xvegn.V[pr, IFROOT_XF]     = ns.frootn_xfer_patch[p]
+        Xvegn.V[pr, ILIVESTEM]     = ns.livestemn_patch[p]
+        Xvegn.V[pr, ILIVESTEM_ST]  = ns.livestemn_storage_patch[p]
+        Xvegn.V[pr, ILIVESTEM_XF]  = ns.livestemn_xfer_patch[p]
+        Xvegn.V[pr, IDEADSTEM]     = ns.deadstemn_patch[p]
+        Xvegn.V[pr, IDEADSTEM_ST]  = ns.deadstemn_storage_patch[p]
+        Xvegn.V[pr, IDEADSTEM_XF]  = ns.deadstemn_xfer_patch[p]
+        Xvegn.V[pr, ILIVECROOT]    = ns.livecrootn_patch[p]
+        Xvegn.V[pr, ILIVECROOT_ST] = ns.livecrootn_storage_patch[p]
+        Xvegn.V[pr, ILIVECROOT_XF] = ns.livecrootn_xfer_patch[p]
+        Xvegn.V[pr, IDEADCROOT]    = ns.deadcrootn_patch[p]
+        Xvegn.V[pr, IDEADCROOT_ST] = ns.deadcrootn_storage_patch[p]
+        Xvegn.V[pr, IDEADCROOT_XF] = ns.deadcrootn_xfer_patch[p]
+        Xvegn.V[pr, iretransn]     = ns.retransn_patch[p]
+        if ivt[p] >= npcropmin && nvegnpool >= IGRAIN_XF
+            Xvegn.V[pr, IGRAIN]    = ns.reproductiven_patch[p, irepr]
+            Xvegn.V[pr, IGRAIN_ST] = ns.reproductiven_storage_patch[p, irepr]
+            Xvegn.V[pr, IGRAIN_XF] = ns.reproductiven_xfer_patch[p, irepr]
+        end
+    end
+
+    # --- B·I : N allocation input (Fortran matrix_nalloc·matrix_Ninput·dt) ---
+    for i in 1:nvegnpool
+        for fp in 1:num_soilp
+            p = filter_soilp[fp]; pr = u_idx(begp, p)
+            Binput.V[pr, i] = nf.matrix_nalloc_patch[p, i] * nf.matrix_Ninput_patch[p] * dt
+        end
+    end
+
+    _cn_veg_matrix_advance!(Xvegn, Binput, begp, endp, num_soilp, filter_soilp, nvegnpool,
+        nf.matrix_nphtransfer_patch, nf.matrix_nphturnover_patch,
+        nf.matrix_nphtransfer_doner_patch, nf.matrix_nphtransfer_receiver_patch,
+        counts.nnphtrans, counts.nnphouttrans,
+        nf.matrix_ngmtransfer_patch, nf.matrix_ngmturnover_patch,
+        nf.matrix_ngmtransfer_doner_patch, nf.matrix_ngmtransfer_receiver_patch,
+        counts.nngmtrans, counts.nngmouttrans,
+        nf.matrix_nfitransfer_patch, nf.matrix_nfiturnover_patch,
+        nf.matrix_nfitransfer_doner_patch, nf.matrix_nfitransfer_receiver_patch,
+        counts.nnfitrans, counts.nnfiouttrans,
+        dt, num_actfirep)
+
+    # --- write the advanced N pools back ---
+    for fp in 1:num_soilp
+        p = filter_soilp[fp]; pr = u_idx(begp, p)
+        ns.leafn_patch[p]             = Xvegn.V[pr, ILEAF]
+        ns.leafn_storage_patch[p]     = Xvegn.V[pr, ILEAF_ST]
+        ns.leafn_xfer_patch[p]        = Xvegn.V[pr, ILEAF_XF]
+        ns.frootn_patch[p]            = Xvegn.V[pr, IFROOT]
+        ns.frootn_storage_patch[p]    = Xvegn.V[pr, IFROOT_ST]
+        ns.frootn_xfer_patch[p]       = Xvegn.V[pr, IFROOT_XF]
+        ns.livestemn_patch[p]         = Xvegn.V[pr, ILIVESTEM]
+        ns.livestemn_storage_patch[p] = Xvegn.V[pr, ILIVESTEM_ST]
+        ns.livestemn_xfer_patch[p]    = Xvegn.V[pr, ILIVESTEM_XF]
+        ns.deadstemn_patch[p]         = Xvegn.V[pr, IDEADSTEM]
+        ns.deadstemn_storage_patch[p] = Xvegn.V[pr, IDEADSTEM_ST]
+        ns.deadstemn_xfer_patch[p]    = Xvegn.V[pr, IDEADSTEM_XF]
+        ns.livecrootn_patch[p]        = Xvegn.V[pr, ILIVECROOT]
+        ns.livecrootn_storage_patch[p] = Xvegn.V[pr, ILIVECROOT_ST]
+        ns.livecrootn_xfer_patch[p]   = Xvegn.V[pr, ILIVECROOT_XF]
+        ns.deadcrootn_patch[p]        = Xvegn.V[pr, IDEADCROOT]
+        ns.deadcrootn_storage_patch[p] = Xvegn.V[pr, IDEADCROOT_ST]
+        ns.deadcrootn_xfer_patch[p]   = Xvegn.V[pr, IDEADCROOT_XF]
+        ns.retransn_patch[p]          = Xvegn.V[pr, iretransn]
+        if ivt[p] >= npcropmin && nvegnpool >= IGRAIN_XF
+            ns.reproductiven_patch[p, irepr]         = Xvegn.V[pr, IGRAIN]
+            ns.reproductiven_storage_patch[p, irepr] = Xvegn.V[pr, IGRAIN_ST]
+            ns.reproductiven_xfer_patch[p, irepr]    = Xvegn.V[pr, IGRAIN_XF]
+        end
+    end
+
+    release_v!(Xvegn); release_v!(Binput)
+    return nothing
+end
+
+"""
+    cn_veg_matrix_solve_iso!(Xiso, Biso; cf_veg, mask_soilp, bounds_patch,
+                             nvegcpool, counts, dt, num_actfirep=0)
+
+Advance an ISOTOPE (C13 or C14) veg-carbon pool vector by the matrix solution
+`Xiso(n+1) = (I + AKph + AKgm + AKfi)·Xiso(n) + Biso`. The isotope pools ride the
+SAME transfer/turnover operator `A` as the bulk carbon (the cascade topology and
+fractional transfer rates are isotope-independent — Fortran reuses the same
+`matrix_*transfer`/`matrix_*turnover` arrays from `cnveg_carbonflux_inst` for the
+C13/C14 advance, lines 99–137, 2845–2857); only the input vector `Biso`
+(`matrix_*alloc·matrix_Cinput13/14·dt`) carries the isotopic signal.
+
+`Xiso` and `Biso` are pre-loaded `(np × nvegcpool)` matrices over the active
+patches (1-based patch row). Returns the advanced `Xiso` (mutated in place). This
+keeps the isotope pool storage decoupled from the bulk C state structs while
+faithfully reusing the bulk-C `A` operator. Port of the C13/C14 branch of
+`CNVegMatrix`.
+"""
+function cn_veg_matrix_solve_iso!(Xiso::AbstractMatrix{Float64}, Biso::AbstractMatrix{Float64},
+                                  cf_veg::CNVegCarbonFluxData;
+                                  mask_soilp::AbstractVector{Bool},
+                                  bounds_patch::UnitRange{Int},
+                                  nvegcpool::Int, counts, dt::Real,
+                                  num_actfirep::Int=0)
+    dt = Float64(dt)
+    begp = first(bounds_patch); endp = last(bounds_patch)
+    filter_soilp = Int[p for p in bounds_patch if mask_soilp[p]]
+    num_soilp = length(filter_soilp)
+    num_soilp == 0 && return Xiso
+    cf = cf_veg
+
+    X = VectorType(); init_v!(X, nvegcpool, begp, endp)
+    B = VectorType(); init_v!(B, nvegcpool, begp, endp)
+    for fp in 1:num_soilp
+        p = filter_soilp[fp]; pr = u_idx(begp, p)
+        for i in 1:nvegcpool
+            X.V[pr, i] = Xiso[pr, i]
+            B.V[pr, i] = Biso[pr, i]
+        end
+    end
+
+    _cn_veg_matrix_advance!(X, B, begp, endp, num_soilp, filter_soilp, nvegcpool,
+        cf.matrix_phtransfer_patch, cf.matrix_phturnover_patch,
+        cf.matrix_phtransfer_doner_patch, cf.matrix_phtransfer_receiver_patch,
+        counts.ncphtrans, counts.ncphouttrans,
+        cf.matrix_gmtransfer_patch, cf.matrix_gmturnover_patch,
+        cf.matrix_gmtransfer_doner_patch, cf.matrix_gmtransfer_receiver_patch,
+        counts.ncgmtrans, counts.ncgmouttrans,
+        cf.matrix_fitransfer_patch, cf.matrix_fiturnover_patch,
+        cf.matrix_fitransfer_doner_patch, cf.matrix_fitransfer_receiver_patch,
+        counts.ncfitrans, counts.ncfiouttrans,
+        dt, num_actfirep)
+
+    for fp in 1:num_soilp
+        p = filter_soilp[fp]; pr = u_idx(begp, p)
+        for i in 1:nvegcpool
+            Xiso[pr, i] = X.V[pr, i]
+        end
+    end
+    release_v!(X); release_v!(B)
+    return Xiso
+end
+
+# -----------------------------------------------------------------------------
+# Veg SASU spinup-capacity accumulator + steady-state solve
+# -----------------------------------------------------------------------------
+
+"""
+    CNVegMatrixSASU
+
+Per-spin-period SASU accumulators for the vegetation matrix (the Fortran
+`matrix_*alloc_acc` / `matrix_*transfer_acc` annual accumulators on the CN-veg
+carbon/nitrogen state structs, plus the begin-of-year pool snapshot `X0`).
+
+Accumulated over a SASU period (`nyr_SASU` forcing years) by
+[`cn_veg_matrix_sasu_accumulate!`]; the analytic steady-state capacity is computed
+at period end by [`cn_veg_matrix_sasu_capacity!`]. All gated behind
+`spinup_matrixcn`. Stored `(np × nvegpool)` for the input/alloc accumulator,
+`(np × nvegpool × nvegpool)` for the transfer accumulator, `(np × nvegpool)` for
+the begin-of-period pool snapshot.
+"""
+Base.@kwdef mutable struct CNVegMatrixSASU
+    alloc_acc::Matrix{Float64}    = Matrix{Float64}(undef, 0, 0)   # Σ B  (np × nveg)
+    transfer_acc::Array{Float64,3} = Array{Float64,3}(undef, 0, 0, 0)  # Σ AK·X0 (np × nveg × nveg)
+    X0::Matrix{Float64}           = Matrix{Float64}(undef, 0, 0)   # begin-of-period pools (np × nveg)
+    nyears::Int = 0
+    allocated::Bool = false
+end
+
+function cn_veg_matrix_sasu_alloc!(s::CNVegMatrixSASU, np::Int, nveg::Int)
+    s.allocated && return nothing
+    s.alloc_acc    = zeros(Float64, np, nveg)
+    s.transfer_acc = zeros(Float64, np, nveg, nveg)
+    s.X0           = zeros(Float64, np, nveg)
+    s.nyears = 0
+    s.allocated = true
+    return nothing
+end
+
+"""
+    cn_veg_matrix_sasu_save_x0!(s, X0; mask_soilp, bounds_patch, nveg, epsi=1e-30)
+
+Save the begin-of-(SASU)-period pool snapshot `X0[pr, i]` (Fortran `*c0`/`*n0`
+variables, set `max(pool, epsi)` at `is_beg_curr_year` — CNVegMatrixMod.F90:1257).
+Used to normalize the accumulated transfer matrix into a per-X0 rate matrix.
+"""
+function cn_veg_matrix_sasu_save_x0!(s::CNVegMatrixSASU, X0::AbstractMatrix{Float64};
+                                     mask_soilp::AbstractVector{Bool},
+                                     bounds_patch::UnitRange{Int}, nveg::Int, epsi::Float64=1.0e-30)
+    begp = first(bounds_patch)
+    cn_veg_matrix_sasu_alloc!(s, size(s.X0, 1) == 0 ? last(bounds_patch) - begp + 1 : size(s.X0, 1), nveg)
+    for p in bounds_patch
+        mask_soilp[p] || continue
+        pr = u_idx(begp, p)
+        for i in 1:nveg
+            s.X0[pr, i] = max(X0[pr, i], epsi)
+        end
+    end
+    return nothing
+end
+
+"""
+    cn_veg_matrix_sasu_accumulate!(s, A_dense, B; mask_soilp, bounds_patch, nveg)
+
+Accumulate one step (or one year) into the SASU period: `alloc_acc += B`, and
+`transfer_acc += A·diag(X0)` (i.e. the actual transfer FLUX matrix `AK·X`, which
+is what Fortran accumulates as `matrix_*transfer_acc`). `A_dense[pr, :, :]` is the
+per-patch `(I + AKall)` − I operator (the off-diagonal transfers + `-turnover`
+diagonal); `B[pr, :]` is the per-patch input `alloc·input·dt`. Port of the
+`matrix_*transfer_acc`/`matrix_*alloc_acc` accumulation (CNVegMatrixMod.F90 ~1734,
+2056, 2740–2762 where columns are divided by `X0` at period end).
+"""
+function cn_veg_matrix_sasu_accumulate!(s::CNVegMatrixSASU,
+        A_dense::AbstractArray{Float64,3}, B::AbstractMatrix{Float64};
+        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int}, nveg::Int)
+    begp = first(bounds_patch)
+    @assert s.allocated "cn_veg_matrix_sasu_accumulate!: SASU not allocated (call save_x0! first)"
+    for p in bounds_patch
+        mask_soilp[p] || continue
+        pr = u_idx(begp, p)
+        for i in 1:nveg
+            s.alloc_acc[pr, i] += B[pr, i]
+            for j in 1:nveg
+                # Accumulate the actual transfer FLUX A[i,j]·X0[j].
+                s.transfer_acc[pr, i, j] += A_dense[pr, i, j] * s.X0[pr, j]
+            end
+        end
+    end
+    s.nyears += 1
+    return nothing
+end
+
+"""
+    cn_veg_matrix_sasu_capacity!(s; mask_soilp, bounds_patch, nveg, reset=true) -> cap
+
+End-of-SASU-period analytic steady-state capacity. Normalizes the accumulated
+transfer flux matrix back to a per-X0 rate matrix (`transfer_acc[:,:,j] / X0[j]`,
+Fortran 2740–2762), then solves `cap = −A^{-1}·alloc_acc` via [`sasu_steady_state`]
+(Fortran `inverse` + `-matmul`, 2845–2862). Returns `cap` `(np × nveg)`; resets the
+accumulators when `reset=true`. Gated behind `spinup_matrixcn`.
+"""
+function cn_veg_matrix_sasu_capacity!(s::CNVegMatrixSASU;
+        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int}, nveg::Int,
+        reset::Bool=true)
+    begp = first(bounds_patch)
+    @assert s.allocated "cn_veg_matrix_sasu_capacity!: SASU not allocated"
+    np = size(s.alloc_acc, 1)
+    cap = zeros(Float64, np, nveg)
+    for p in bounds_patch
+        mask_soilp[p] || continue
+        pr = u_idx(begp, p)
+        A = zeros(Float64, nveg, nveg)
+        for i in 1:nveg, j in 1:nveg
+            A[i, j] = s.transfer_acc[pr, i, j] / s.X0[pr, j]
+        end
+        Xss = sasu_steady_state(A, s.alloc_acc[pr, 1:nveg])
+        cap[pr, :] .= Xss
+    end
+    if reset
+        fill!(s.alloc_acc, 0.0)
+        fill!(s.transfer_acc, 0.0)
+        s.nyears = 0
+    end
+    return cap
+end

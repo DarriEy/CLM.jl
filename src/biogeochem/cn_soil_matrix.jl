@@ -534,3 +534,47 @@ function cn_soil_matrix_akx_accumulate!(ms::CNSoilMatrixState, cc,
 
     return (soilmatrixc_cap, soilmatrixn_cap)
 end
+
+# --------------------------------------------------------------------------
+# sasu_steady_state — the Semi-Analytic Spin-Up (SASU) steady-state solve.
+#
+# Generic port of the capacity inversion at the heart of the matrix-CN spinup
+# accelerator (CNSoilMatrixMod.F90:738–742, CNVegMatrixMod.F90:2845–2862):
+#
+#     X_ss = −(A)^{-1} · B
+#
+# where `A_acc` is the per-spin-period-accumulated transfer matrix (the matrix
+# operator `A·K + V − Kfire` for soil, or `transfer_acc/X0` for veg) and `B_acc`
+# is the accumulated input vector `Σ I·dt` over the same period. This is the
+# closed-form steady state of `dX/dt = A·X + B = 0`, which the iterated pool
+# advance `X(t+1) = X(t) + A·X(t) + B` converges to as `t → ∞` whenever `A` is
+# stable (eigenvalues with negative real part). The test asserts exactly that
+# (matrix iteration → analytic steady state).
+#
+# `epsi` guards a (near-)zero diagonal: a pool with no turnover would make A
+# singular, so its diagonal is set to a huge value (1e36), driving that pool's
+# capacity to ~0 — matching the Fortran guard. Negative capacities are clamped
+# to 0 (a steady-state pool size can't be negative). `A_acc` is NOT modified.
+#
+# Returns `X_ss` (length n). This is the analytic engine shared by the soil and
+# veg SASU capacity routines; gated entirely behind the spinup path (never on
+# the default no-op).
+# --------------------------------------------------------------------------
+function sasu_steady_state(A_acc::AbstractMatrix{<:Real}, B_acc::AbstractVector{<:Real};
+                           epsi::Float64=1.0e-8, clamp_negative::Bool=true)
+    n = length(B_acc)
+    @assert size(A_acc, 1) == n && size(A_acc, 2) == n "sasu_steady_state: A/B size mismatch"
+    A = Matrix{Float64}(A_acc)        # local copy (Fortran does not mutate the accumulator)
+    @inbounds for i in 1:n
+        if abs(A[i, i]) <= epsi
+            A[i, i] = 1.0e36
+        end
+    end
+    X_ss = -(A \ Vector{Float64}(B_acc))
+    if clamp_negative
+        @inbounds for i in 1:n
+            X_ss[i] < 0.0 && (X_ss[i] = 0.0)
+        end
+    end
+    return X_ss
+end
