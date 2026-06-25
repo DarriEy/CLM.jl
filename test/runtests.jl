@@ -180,6 +180,7 @@ using CLM
     include("test_multicolumn.jl")
     include("test_device_adapt.jl")
     include("test_backend.jl")  # centralized backend-selection API + multi-GPU-over-MPI plumbing (CPU proxy)
+    include("test_validation_harness.jl")  # validation-matrix schema (runner exercised locally vs domain data)
     include("test_clm_run.jl")
     include("test_ad_smoke.jl")
     include("test_ad_e2e.jl")
