@@ -396,7 +396,10 @@ function validate_one(cfg)
         return (; cfg.id, status=:skipped_no_data, oracles=Any[],
                 wall=0.0, note="machine-local data for domain $(cfg.domain) absent")
     end
-    if build_for(cfg) === nothing
+    # Build-free "is this config wired?" gate. (Do NOT build_for here just to test it:
+    # the throwaway build would prime global state — e.g. the pftcon param tables — and
+    # MASK first-init bugs that the oracle's own first build should expose.)
+    if !(cfg.domain === :bow || (haskey(DOMAIN_DIRNAME, cfg.domain) && data_available(cfg)))
         return (; cfg.id, status=:skipped_unwired, oracles=Any[],
                 wall=0.0, note="domain $(cfg.domain) not wired in runner yet")
     end
@@ -451,29 +454,83 @@ end
 # --------------------------------------------------------------------------
 # Main.
 # --------------------------------------------------------------------------
+"""
+Run the whole matrix with each config in its OWN fresh subprocess (this script,
+`--id <id> --in-process`), bounded to `jobs` concurrent workers. Process isolation
+is REQUIRED (DESIGN §5): configs share module-global state (pftcon param tables,
+varctl flags, config singletons), so an in-process sweep lets one config's init
+leak into the next and manufacture false verdicts. Each worker reports its verdict
+on a `VERDICT\\t…` stdout line, which the parent parses + aggregates.
+"""
+function run_isolated(M, outdir, jobs)
+    mkpath(outdir)
+    jl = Base.julia_cmd()
+    proj = abspath(joinpath(_HERE, "..", ".."))
+    results = Vector{Any}(undef, length(M))
+    sem = Base.Semaphore(max(1, jobs))
+    @sync for (k, cfg) in enumerate(M)
+        Base.acquire(sem)
+        @async try
+            wd = joinpath(outdir, cfg.id)
+            cmd = `$jl --project=$proj $(@__FILE__) --id $(cfg.id) --out $wd --in-process`
+            out = try; read(pipeline(cmd; stderr=devnull), String); catch; ""; end
+            m = match(r"VERDICT\t(\S+)\t(\S+)\t(\S+)", out)
+            results[k] = m === nothing ?
+                (; id=cfg.id, status=:error, oracles=Any[], wall=0.0,
+                   note="subprocess produced no verdict (build/run crash in isolation)") :
+                (; id=String(m.captures[1]), status=Symbol(m.captures[2]), oracles=Any[],
+                   wall=parse(Float64, m.captures[3]), note=cfg.note)
+            @printf("  %-22s %-18s %6.1fs\n", results[k].id, results[k].status, results[k].wall)
+        finally
+            Base.release(sem)
+        end
+    end
+    return collect(results)
+end
+
 function main(args)
     only_id = nothing
+    in_process = false
+    jobs = max(1, min(4, Sys.CPU_THREADS - 2))
     outdir = joinpath(_HERE, "..", "..", "validation_results")
     i = 1
     while i <= length(args)
         if args[i] == "--id"; only_id = args[i+1]; i += 2
         elseif args[i] == "--out"; outdir = args[i+1]; i += 2
+        elseif args[i] == "--jobs"; jobs = parse(Int, args[i+1]); i += 2
+        elseif args[i] == "--in-process"; in_process = true; i += 1
         else; i += 1; end
     end
     M = validation_matrix()
     only_id !== nothing && (M = filter(c -> c.id == only_id, M))
     isempty(M) && (println("no matching configs"); return)
-    println("Running $(length(M)) validation config(s)...")
-    verdicts = Any[]
-    for cfg in M
-        v = validate_one(cfg)
-        push!(verdicts, v)
-        @printf("  %-22s %-18s %5.1fs\n", v.id, v.status, v.wall)
+
+    # A single --id run (or an explicit --in-process sweep) executes here, in this
+    # process — this is also the isolated worker the parent spawns per config.
+    if only_id !== nothing || in_process
+        println("Running $(length(M)) validation config(s) in-process...")
+        verdicts = Any[]
+        for cfg in M
+            v = validate_one(cfg)
+            push!(verdicts, v)
+            @printf("  %-22s %-18s %5.1fs\n", v.id, v.status, v.wall)
+            println("VERDICT\t$(v.id)\t$(v.status)\t$(v.wall)")   # machine-parseable for the parent
+        end
+        write_results(verdicts, outdir)
+        np = count(v -> v.status === :pass, verdicts)
+        nf = count(v -> v.status === :fail, verdicts)
+        println("\n$np passed, $nf failed → $(joinpath(outdir, "report.md"))")
+        return nf == 0
     end
+
+    # Default: isolate every config in its own subprocess (correct verdicts).
+    println("Running $(length(M)) validation config(s), isolated, $(jobs)-way...")
+    verdicts = run_isolated(M, outdir, jobs)
     write_results(verdicts, outdir)
     np = count(v -> v.status === :pass, verdicts)
     nf = count(v -> v.status === :fail, verdicts)
-    println("\n$np passed, $nf failed → $(joinpath(outdir, "report.md"))")
+    ns = count(v -> v.status in (:skipped_no_data, :skipped_unwired), verdicts)
+    println("\n$np passed, $nf failed, $ns skipped → $(joinpath(outdir, "report.md"))")
     return nf == 0
 end
 
