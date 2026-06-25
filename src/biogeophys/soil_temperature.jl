@@ -25,6 +25,34 @@
 
 const THIN_SFCLAYER = 1.0e-6  # Threshold for thin surface layer
 
+# --------------------------------------------------------------------------
+# AD-smoothing sharpness for the freeze/thaw (phase-change) discontinuities in
+# `phase_change_beta!` / `phase_change_h2osfc!`.
+#
+# Gated PURELY by element type via `_use_smooth` (smooth_ad.jl): plain Float64
+# evaluates the EXACT hard physics (byte-identical default; full forward suite
+# unchanged), ForwardDiff.Dual evaluates the smooth surrogate. Transition width
+# ε ≈ 1/k, and as k → ∞ (ε → 0) the surrogate → the hard physics.
+#
+# PHASE_CHANGE_MASS_K — sharpness of the latent-heat mass clamps
+#   (smooth_max(0, wice0 - xm), smooth_min(wmass0, …)) that bound the amount of
+#   ice melted / liquid frozen by the available mass. These clamps are the C¹
+#   "ran out of ice/liquid" floors of the freeze/thaw heat release: as the
+#   forcing sweeps a layer's temperature across tfrz, the absorbed/released
+#   latent heat — and hence the resulting t_soisno — kinks where the layer
+#   exhausts its ice or liquid; the smooth floor rounds that kink.
+#
+# WHAT STAYS DISCRETE (cannot be smoothed): the melt/freeze IDENTIFICATION flag
+# `imelt` ∈ {0,1,2} is an integer state classification (no phase change / melt /
+# freeze). Whether a layer is "melting" vs "freezing" is a genuinely discrete
+# label that selects different mass-balance branches and history accumulators;
+# it is set by hard tests on (h2osoi_ice>0 ∧ t>tfrz) etc. and is NOT a
+# differentiable quantity. We smooth the CONTINUOUS heat/mass partition that
+# follows once a (discrete) imelt label is set — the temperature and water
+# fields then vary C¹ within each imelt regime — but we do not pretend the
+# integer regime label itself is smooth.
+const PHASE_CHANGE_MASS_K = Ref(50.0)
+
 # =========================================================================
 # Kernels for the soil_temperature! orchestrator's own per-column/-level loops
 # (so the whole driver runs on a device, not just its sub-functions). Each is the
@@ -1643,12 +1671,13 @@ end
 @kernel function _phase_change_h2osfc_kernel!(t_h2osfc, t_soisno, h2osfc, h2osno_no_layers,
         h2osoi_ice, snow_depth, int_snow, xmf_h2osfc, qflx_h2osfc_to_ice, eflx_h2osfc_to_snow,
         @Const(mask), @Const(snl), @Const(fact), @Const(c_h2osfc), @Const(frac_sno),
-        @Const(frac_h2osfc), @Const(h2osoi_liq), @Const(dhsdT), dtime, nlevsno::Int)
+        @Const(frac_h2osfc), @Const(h2osoi_liq), @Const(dhsdT), dtime, nlevsno::Int, pck)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(t_soisno)
         joff = nlevsno
         tfrz = T(TFRZ); hfus = T(HFUS); cpliq = T(CPLIQ); denice = T(DENICE)
+        mk = T(pck)  # density-clamp sharpness (PHASE_CHANGE_MASS_K)
         xmf_h2osfc[c] = zero(T)
         qflx_h2osfc_to_ice[c] = zero(T)
         eflx_h2osfc_to_snow[c] = zero(T)
@@ -1668,7 +1697,7 @@ end
             end
 
             z_avg = frac_sno[c] * snow_depth[c]
-            rho_avg = z_avg > zero(T) ? smooth_min(T(800.0), h2osno_total / z_avg) : T(200.0)
+            rho_avg = z_avg > zero(T) ? smooth_min(T(800.0), h2osno_total / z_avg; k = mk) : T(200.0)
 
             if temp1 >= zero(T)
                 int_snow[c] -= xm
@@ -1771,7 +1800,7 @@ function phase_change_h2osfc!(col::ColumnData, temperature::TemperatureData,
     _launch!(_phase_change_h2osfc_kernel!, t_h2osfc, t_soisno, h2osfc, h2osno_no_layers,
         h2osoi_ice, snow_depth, int_snow, xmf_h2osfc, qflx_h2osfc_to_ice, eflx_h2osfc_to_snow,
         mask_nolakec, col.snl, fact, c_h2osfc, frac_sno, frac_h2osfc, h2osoi_liq, dhsdT,
-        dt, nlevsno)
+        dt, nlevsno, convert(eltype(t_soisno), PHASE_CHANGE_MASS_K[]))
 
     return nothing
 end
@@ -1814,12 +1843,13 @@ Adapt.@adapt_structure PcbTmp
 @kernel function _phase_change_beta_kernel!(lyr::PcbLyr, colv::PcbCol, pin::PcbIn,
         tmp::PcbTmp, imelt, @Const(mask), @Const(urbpoi), @Const(snl), @Const(landunit),
         @Const(itype), @Const(lun_itype), dtime, nlevsno::Int, nlevgrnd::Int,
-        nlevurb::Int, nlevmaxurbgrnd::Int)
+        nlevurb::Int, nlevmaxurbgrnd::Int, pck)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(lyr.t_soisno)
         joff = nlevsno
         tfrz = T(TFRZ); hfus = T(HFUS); grav = T(GRAV); denice = T(DENICE); thou = T(1000.0)
+        mk = T(pck)  # latent-heat mass-clamp sharpness (PHASE_CHANGE_MASS_K)
         l = landunit[c]
         it = itype[c]
         wallroof = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF)
@@ -1955,7 +1985,7 @@ Adapt.@adapt_structure PcbTmp
                     if j == 1
                         if colv.h2osno_no_layers[c] > zero(T) && tmp.xm[c, jj] > zero(T)
                             temp1 = colv.h2osno_no_layers[c]
-                            colv.h2osno_no_layers[c] = smooth_max(zero(T), temp1 - tmp.xm[c, jj])
+                            colv.h2osno_no_layers[c] = smooth_max(zero(T), temp1 - tmp.xm[c, jj]; k = mk)
                             propor = colv.h2osno_no_layers[c] / temp1
                             colv.snow_depth[c] = propor * colv.snow_depth[c]
                             heatr = tmp.hm[c, jj] - hfus * (temp1 - colv.h2osno_no_layers[c]) / dtime
@@ -1966,7 +1996,7 @@ Adapt.@adapt_structure PcbTmp
                                 tmp.xm[c, jj] = zero(T)
                                 tmp.hm[c, jj] = zero(T)
                             end
-                            colv.qflx_snomelt[c] = smooth_max(zero(T), temp1 - colv.h2osno_no_layers[c]) / dtime
+                            colv.qflx_snomelt[c] = smooth_max(zero(T), temp1 - colv.h2osno_no_layers[c]; k = mk) / dtime
                             colv.xmf[c] = hfus * colv.qflx_snomelt[c]
                             colv.qflx_snow_drain[c] = colv.qflx_snomelt[c]
                         end
@@ -1974,32 +2004,32 @@ Adapt.@adapt_structure PcbTmp
 
                     heatr = zero(T)
                     if tmp.xm[c, jj] > zero(T)
-                        lyr.h2osoi_ice[c, jj] = smooth_max(zero(T), tmp.wice0[c, jj] - tmp.xm[c, jj])
+                        lyr.h2osoi_ice[c, jj] = smooth_max(zero(T), tmp.wice0[c, jj] - tmp.xm[c, jj]; k = mk)
                         heatr = tmp.hm[c, jj] - hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
                         tmp.xm2[c, jj] = tmp.xm[c, jj] - lyr.h2osoi_ice[c, jj]
                         if lyr.h2osoi_ice[c, jj] == zero(T)
                             if tmp.wexice0[c, jj] >= zero(T) && tmp.xm2[c, jj] > zero(T) && j >= 2
-                                lyr.excess_ice[c, j] = smooth_max(zero(T), tmp.wexice0[c, jj] - tmp.xm2[c, jj])
+                                lyr.excess_ice[c, j] = smooth_max(zero(T), tmp.wexice0[c, jj] - tmp.xm2[c, jj]; k = mk)
                                 heatr = tmp.hm[c, jj] - hfus * (tmp.wexice0[c, jj] - lyr.excess_ice[c, j] +
                                         tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
                             end
                         end
                     elseif tmp.xm[c, jj] < zero(T)
                         if j <= 0
-                            lyr.h2osoi_ice[c, jj] = smooth_min(tmp.wmass0[c, jj], tmp.wice0[c, jj] - tmp.xm[c, jj])
+                            lyr.h2osoi_ice[c, jj] = smooth_min(tmp.wmass0[c, jj], tmp.wice0[c, jj] - tmp.xm[c, jj]; k = mk)
                         else
                             if tmp.wmass0[c, jj] - tmp.wexice0[c, jj] < tmp.supercool[c, j]
                                 lyr.h2osoi_ice[c, jj] = zero(T)
                             else
                                 lyr.h2osoi_ice[c, jj] = smooth_min(tmp.wmass0[c, jj] - tmp.wexice0[c, jj] - tmp.supercool[c, j],
-                                    tmp.wice0[c, jj] - tmp.xm[c, jj])
+                                    tmp.wice0[c, jj] - tmp.xm[c, jj]; k = mk)
                             end
                         end
                         heatr = tmp.hm[c, jj] - hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
                     end
 
                     ei_val = j >= 1 ? lyr.excess_ice[c, j] : zero(T)
-                    lyr.h2osoi_liq[c, jj] = smooth_max(zero(T), tmp.wmass0[c, jj] - lyr.h2osoi_ice[c, jj] - ei_val)
+                    lyr.h2osoi_liq[c, jj] = smooth_max(zero(T), tmp.wmass0[c, jj] - lyr.h2osoi_ice[c, jj] - ei_val; k = mk)
 
                     if abs(heatr) > zero(T)
                         if j == snl[c] + 1
@@ -2035,18 +2065,18 @@ Adapt.@adapt_structure PcbTmp
                     if j >= 1
                         colv.xmf[c] += hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime +
                             hfus * (tmp.wexice0[c, jj] - (j >= 1 ? lyr.excess_ice[c, j] : zero(T))) / dtime
-                        lyr.exice_subs[c, j] = smooth_max(zero(T), (tmp.wexice0[c, jj] - lyr.excess_ice[c, j]) / denice)
+                        lyr.exice_subs[c, j] = smooth_max(zero(T), (tmp.wexice0[c, jj] - lyr.excess_ice[c, j]) / denice; k = mk)
                     else
                         colv.xmf[c] += hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
                     end
 
                     if imelt[c, jj] == 1 && j < 1
-                        lyr.qflx_snomelt_lyr[c, jj] = smooth_max(zero(T), tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
+                        lyr.qflx_snomelt_lyr[c, jj] = smooth_max(zero(T), tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]; k = mk) / dtime
                         colv.qflx_snomelt[c] += lyr.qflx_snomelt_lyr[c, jj]
                         colv.snomelt_accum[c] += lyr.qflx_snomelt_lyr[c, jj] * dtime * T(1.0e-3)
                     end
                     if imelt[c, jj] == 2 && j < 1
-                        lyr.qflx_snofrz_lyr[c, jj] = smooth_max(zero(T), lyr.h2osoi_ice[c, jj] - tmp.wice0[c, jj]) / dtime
+                        lyr.qflx_snofrz_lyr[c, jj] = smooth_max(zero(T), lyr.h2osoi_ice[c, jj] - tmp.wice0[c, jj]; k = mk) / dtime
                         colv.qflx_snofrz[c] += lyr.qflx_snofrz_lyr[c, jj]
                     end
                 end
@@ -2115,7 +2145,7 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
     backend = _kernel_backend(t_soisno)
     _phase_change_beta_kernel!(backend)(lyr, colv, pin, tmp, temperature.imelt_col,
         mask_nolakec, lun.urbpoi, col.snl, col.landunit, col.itype, lun.itype,
-        dt, nlevsno, nlevgrnd, nlevurb, nlevmaxurbgrnd; ndrange = nc)
+        dt, nlevsno, nlevgrnd, nlevurb, nlevmaxurbgrnd, FT(PHASE_CHANGE_MASS_K[]); ndrange = nc)
     KernelAbstractions.synchronize(backend)
 
     return nothing

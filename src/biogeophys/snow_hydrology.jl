@@ -115,6 +115,37 @@ const RESET_SNOW_TIMESTEPS_PER_LAYER = 4
 # Lake snow additional thickness (from LakeCon)
 const LSADZ = 0.03  # additional minimum thickness for lake snow layers (m)
 
+# --------------------------------------------------------------------------
+# AD-smoothing sharpness for the snow merge/split + combined-layer-temperature
+# discontinuities (snow_hydrology + the combo_scalar layer-energy combine).
+#
+# Gated PURELY by element type via `_use_smooth` (smooth_ad.jl): plain Float64
+# evaluates the EXACT hard physics (byte-identical default; full forward suite
+# unchanged), ForwardDiff.Dual evaluates the smooth surrogate. The transition
+# width ε ≈ 1/k, and as k → ∞ (ε → 0) the surrogate → the hard physics.
+#
+# Two axes, in their own units:
+#   SNOW_COMBO_TEMP_K — sharpness of the smooth_heaviside guarding the
+#       combined-layer-temperature `denom > 0` branch in `combo_scalar` and the
+#       `T >= tfrz` repartition in the divide kernel (temperature O(1 K) / heat
+#       capacity O(>0)); blends the combined temperature C¹ across the
+#       empty-layer / frozen-layer threshold.
+#   SNOW_THRESH_K — sharpness of the clamps/floors in the combine/divide
+#       repartition weights (mass/thickness O(0.01-1)).
+#
+# IMPORTANT — what stays inherently DISCRETE (cannot be smoothed): the snow
+# LAYER COUNT itself (`snl`, an Int) and the WHICH-NEIGHBOUR merge decision are
+# combinatorial — a layer either exists or it does not, and merging two layers
+# vs three is not a continuous operation. The threshold tests `dz < dzmin`,
+# `dz > dzmax`, `mass/dz < 50` that TRIGGER a merge/split flip the integer layer
+# count, so they remain hard `if`s. We smooth only the CONTINUOUS repartition
+# math that runs once a (discrete) merge/split has been decided: the combined
+# temperature, the split-temperature blend, and the mass/thickness clamps. This
+# keeps the per-layer state fields C¹ in their own neighbourhood without
+# pretending the layer count is differentiable.
+const SNOW_COMBO_TEMP_K = Ref(50.0)
+const SNOW_THRESH_K     = Ref(50.0)
+
 # =========================================================================
 # NewSnowBulkDensity
 # =========================================================================
@@ -1793,8 +1824,23 @@ Scalar version of combo for use in divide_snow_layers.
     h2val = (cpice * wice2 + cpliq * wliq2) * (t2 - tfrz) + hfus * wliq2
     hc = h + h2val
 
+    # Combined-layer temperature. The hard physics branches on the combined heat
+    # capacity denom = cpice*wicec + cpliq*wliqc crossing 0 (an empty/massless
+    # combined layer → tc=tfrz). The branch is a discontinuity in dtc/d(state)
+    # (verified: dtc/dw → ~1e15 as denom → 0). We keep the EXACT hard branch for
+    # non-AD reals (Float64/Float32 → byte-identical default, GPU-safe — no host
+    # global read, no division by a floored denom), and only on a Dual blend the
+    # two branches with a sigmoid of width ε≈1/k (SNOW_COMBO_TEMP_K) so tc is C¹
+    # as mass → 0. The denom is FLOORED to a tiny positive value on the smooth
+    # path so the blended 1/denom stays finite where the hard branch returns tfrz
+    # (mirrors the smooth_max(s_node, 0.01) floor in the btran kernel).
     denom = cpice * wicec + cpliq * wliqc
-    if denom > zero(T)
+    if _use_smooth(T)
+        ck = T(SNOW_COMBO_TEMP_K[])
+        denom_safe = smooth_max(denom, T(1.0e-12); k = ck)
+        tc_formula = tfrz + (hc - hfus * wliqc) / denom_safe
+        tc = smooth_ifelse(denom, tc_formula, tfrz; k = ck)
+    elseif denom > zero(T)
         tc = tfrz + (hc - hfus * wliqc) / denom
     else
         tc = tfrz
@@ -1829,7 +1875,9 @@ end
     total_wt = swtot + zwtot
     result = total_wt > zero(T) ? (rds2 * swtot + rds1 * zwtot) / total_wt :
                                   T(0.5) * (rds1 + rds2)
-    result = smooth_clamp(result, T(snw_rds_min), T(snw_rds_max))
+    # snow-grain-radius clamp: exact clamp for Float64 (byte-identical), smooth
+    # for a Dual (radius-threshold axis).
+    result = smooth_clamp(result, T(snw_rds_min), T(snw_rds_max); k = T(SNOW_THRESH_K[]))
     return result
 end
 
@@ -1920,8 +1968,10 @@ Adapt.@adapt_structure DivideSnowScratch2
                                ((s1.dzsno[c, k-1] + two*s1.dzsno[c, k]) / two)
                         tsno_kp1_candidate = s1.tsno[c, k] - dtdz * s1.dzsno[c, k] / two
                         tsno_k_candidate = s1.tsno[c, k] + dtdz * s1.dzsno[c, k] / two
-                        # Smooth blend: if candidate >= TFRZ, use tsno[k]; else use candidates
-                        w_frozen = smooth_heaviside(tfrz - tsno_kp1_candidate)
+                        # Smooth blend: if candidate >= TFRZ, use tsno[k]; else use candidates.
+                        # Float64 → exact 0/1 step (byte-identical to the original hard `if
+                        # candidate >= TFRZ`); Dual → sigmoid of width ε≈1/k (combo-temp axis).
+                        w_frozen = smooth_heaviside(tfrz - tsno_kp1_candidate; k = T(SNOW_COMBO_TEMP_K[]))
                         s1.tsno[c, k+1] = w_frozen * tsno_kp1_candidate + (one(T) - w_frozen) * s1.tsno[c, k]
                         s1.tsno[c, k] = w_frozen * tsno_k_candidate + (one(T) - w_frozen) * s1.tsno[c, k]
                     end
