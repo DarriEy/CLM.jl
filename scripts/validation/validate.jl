@@ -83,6 +83,15 @@ function _state_nonfinite(inst)
         _nonfinite(ws.h2osoi_liq_col) + _nonfinite(ws.h2osoi_ice_col)
 end
 
+"A flat snapshot of the core prognostic state — the determinism/parity fingerprint."
+function _snapshot(inst)
+    t = inst.temperature
+    ws = inst.water.waterstatebulk_inst.ws
+    vcat(vec(copy(t.t_grnd_col)), vec(copy(t.t_soisno_col)),
+         vec(copy(ws.h2osoi_liq_col)), vec(copy(ws.h2osoi_ice_col)),
+         vec(copy(ws.wa_col)))
+end
+
 """
     run_steps!(b, nsteps) -> (steps_done, nonfinite, err)
 
@@ -130,24 +139,44 @@ function run_steps!(b::RunBundle, nsteps::Int)
     finally
         CLM.forcing_reader_close!(b.fr)
     end
-    return (done, nonfinite, err)
+    return (done, nonfinite, err, _snapshot(b.inst))
 end
 
 # --------------------------------------------------------------------------
-# Oracle dispatch. Step 1 wires :conservation; others return :not_yet_wired so
-# the verdict is honest about coverage (steps 2–7 fill these in).
+# Oracle dispatch. Each oracle takes `cfg` and builds the instance(s) it needs
+# (determinism needs two runs), so they compose without sharing mutated state.
+# Steps 2–7 add oracle functions here; unwired oracles report pass=missing.
 # --------------------------------------------------------------------------
-function oracle_conservation(cfg, b::RunBundle)
+function oracle_conservation(cfg)
     nsteps = DEPTH_DEFAULT_STEPS[cfg.depth]
-    (done, nf, err) = run_steps!(b, nsteps)
+    (done, nf, err, _) = run_steps!(build_for(cfg), nsteps)
     pass = (done == nsteps) && (nf == 0) && (err === nothing)
     (; oracle=:conservation, pass,
        metrics=(; steps_target=nsteps, steps_done=done, nonfinite=nf),
        detail = err === nothing ? "ran $done/$nsteps steps, balance-clean, finite" : err)
 end
 
+"""
+T3 determinism: the same config run twice from a fresh build must produce a
+bit-identical final-state fingerprint. Catches nondeterminism (uninitialized
+reads, hash/iteration-order, RNG leakage) that conservation alone misses.
+"""
+function oracle_determinism(cfg)
+    nsteps = DEPTH_DEFAULT_STEPS[cfg.depth]
+    (d1, _, e1, s1) = run_steps!(build_for(cfg), nsteps)
+    (d2, _, e2, s2) = run_steps!(build_for(cfg), nsteps)
+    ran = (e1 === nothing) && (e2 === nothing) && d1 == nsteps && d2 == nsteps
+    identical = ran && length(s1) == length(s2) && all(s1 .=== s2)   # === so NaN==NaN
+    (; oracle=:determinism, pass=identical,
+       metrics=(; ran_both=ran, maxabsdiff = ran ? maximum(abs.(s1 .- s2); init=0.0) : NaN),
+       detail = ran ? (identical ? "two runs bit-identical" :
+                       "DIVERGED max|Δ|=$(maximum(abs.(s1 .- s2); init=0.0))") :
+                      "a run failed: $(something(e1, e2, "early stop"))")
+end
+
 const ORACLES = Dict{Symbol,Function}(
     :conservation => oracle_conservation,
+    :determinism  => oracle_determinism,
 )
 
 # --------------------------------------------------------------------------
@@ -159,20 +188,18 @@ function validate_one(cfg)
         return (; cfg.id, status=:skipped_no_data, oracles=Any[],
                 wall=0.0, note="machine-local data for domain $(cfg.domain) absent")
     end
-    b = build_for(cfg)
-    if b === nothing
+    if build_for(cfg) === nothing
         return (; cfg.id, status=:skipped_unwired, oracles=Any[],
                 wall=0.0, note="domain $(cfg.domain) not wired in runner yet")
     end
     results = Any[]
     for o in cfg.oracles
         if haskey(ORACLES, o)
-            push!(results, ORACLES[o](cfg, b))
+            push!(results, ORACLES[o](cfg))   # each oracle builds its own instance(s)
         else
             push!(results, (; oracle=o, pass=missing, metrics=(;),
                             detail="oracle :$o not yet wired"))
         end
-        # rebuild between oracles that mutate state (Step 1 has ≤1 mutating oracle)
     end
     allpass = all(r -> r.pass === true, results)
     anyfail = any(r -> r.pass === false, results)
