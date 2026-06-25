@@ -55,6 +55,7 @@ using CLM
     include("test_surface_humidity.jl")
     include("test_surface_resistance.jl")
     include("test_soil_moist_stress.jl")
+    include("test_btran_smoothing.jl")
     include("test_soil_temperature.jl")
     include("test_urban_building_temp.jl")
     include("test_lake_temperature.jl")
