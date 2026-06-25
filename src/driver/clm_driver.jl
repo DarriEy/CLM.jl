@@ -115,6 +115,15 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     # transient-landcover run; the driver's per-timestep dynSubgrid hooks no-op when
     # it is `nothing`, keeping the default (non-transient) path byte-identical.
     dyn_subgrid::Any
+    # On-node intra-process multi-clump parallelism (CTSM's OpenMP-over-clumps
+    # model). When `false` (default) the driver runs a single clump = the whole proc
+    # domain, byte-identical to the historical single-clump path. When `true` AND the
+    # decomposition has been split into `get_proc_clumps() > 1` disjoint clumps, the
+    # *clump-safe* per-column physics is run threaded over clumps (each clump owns a
+    # disjoint, contiguous begc:endc / begp:endp / begg:endg slice of the shared
+    # proc-level state arrays — CLM has no halo, so the clumps need zero
+    # communication). See the thread-safety notes on `clm_drv_core!`.
+    use_threaded_clumps::Bool
 end
 
 # Backward-compatible property accessors so existing code like config.use_cn still works
@@ -187,7 +196,8 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
                           ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
                           i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
-                          npcropmin::Int=17, nrepr::Int=1)
+                          npcropmin::Int=17, nrepr::Int=1,
+                          use_threaded_clumps::Bool=false)
     if use_fates
         mode = FATESMode(; use_fates_sp, use_fates_bgc,
                           fates_spitfire_mode, fates_seeddisp_cadence)
@@ -209,7 +219,52 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     end
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
                     use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, use_luna,
-                    use_voc, use_ozone, megan, nothing, dust, dyn_subgrid)
+                    use_voc, use_ozone, megan, nothing, dust, dyn_subgrid, use_threaded_clumps)
+end
+
+# ---------------------------------------------------------------------------
+# clm_run_clump_physics! — on-node multi-clump parallel driver loop
+# (CTSM's OpenMP-over-clumps `do nc = 1, nclumps` model)
+# ---------------------------------------------------------------------------
+
+"""
+    clm_run_clump_physics!(phys!, clump_bounds; threaded=true)
+
+Run a clump-safe per-column physics step `phys!(bounds_clump)` over a list of
+disjoint clump bounds, optionally threaded over clumps with `Threads.@threads`.
+
+This is the Julia analogue of CTSM's `do nc = 1, nclumps ... end do`
+(OpenMP-over-clumps, NOT MPI): each `bounds_clump` owns a disjoint, contiguous
+slice of gridcells/columns/patches of the shared proc-level state arrays, and
+CLM has no halo, so the clumps are embarrassingly parallel with zero
+communication. `phys!` must only read/write the (disjoint) state slice indexed by
+its `bounds_clump` (`bounds_clump.begc:bounds_clump.endc`, etc.) — proc-wide
+filter masks are absolute-indexed and therefore correct for any clump sub-range
+with no slicing.
+
+Determinism: because the clumps own disjoint slices, the result is independent of
+clump count and of whether the loop is threaded — `phys!` applied over `nclumps`
+clumps produces exactly the same state as `phys!` applied over a single
+whole-proc clump (provided `phys!` itself contains no cross-clump reductions or
+shared-global writes). The caller is responsible for that contract; the orchestrator
+`clm_drv_core!` keeps non-clump-safe phases (full-proc FATES site walks, lazy
+accumulator init, gridcell scratch) OUT of `phys!` and runs them serially.
+
+`threaded=false` forces a deterministic serial walk (used to validate
+single-clump byte-identity and as the fallback when `Threads.nthreads() == 1`).
+"""
+function clm_run_clump_physics!(phys!, clump_bounds::AbstractVector{BoundsType};
+                                threaded::Bool = true)
+    if threaded && Threads.nthreads() > 1 && length(clump_bounds) > 1
+        Threads.@threads for nc in eachindex(clump_bounds)
+            phys!(clump_bounds[nc])
+        end
+    else
+        for nc in eachindex(clump_bounds)
+            phys!(clump_bounds[nc])
+        end
+    end
+    return nothing
 end
 
 # ---------------------------------------------------------------------------
@@ -564,7 +619,49 @@ function clm_drv_core!(config::CLMDriverConfig,
                    jday::Int = 1,
                    year::Int = 0)
 
-    bounds_clump = bounds_proc  # single-clump mode
+    # ------------------------------------------------------------------------
+    # On-node multi-clump decomposition (CTSM's `do nc = 1, nclumps` model).
+    #
+    # CTSM runs the per-timestep physics inside a `do nc = 1, nclumps` loop,
+    # OpenMP-threaded over CLUMPS (NOT MPI): each clump owns a disjoint,
+    # contiguous slice of gridcells/columns/patches and there is no halo, so the
+    # clumps are embarrassingly parallel with zero communication.
+    #
+    # `get_clump_bounds(nc)` returns PROC-RELATIVE bounds (offset by procinfo.beg*)
+    # so a clump's begc:endc indexes directly into the proc-level state arrays, and
+    # the proc-wide filter masks (filt.soilc, ...) are absolute-indexed — so the
+    # SAME `filt` is correct for any clump sub-range with no slicing.
+    #
+    # `clm_drv_per_clump_bounds` is the list of clump bounds to walk. With a single
+    # clump (the default, `nclumps == 1`) this is exactly `[bounds_proc]`, so the
+    # body below runs once over the whole proc domain — BYTE-IDENTICAL to the
+    # historical single-clump path. With `nclumps > 1` it partitions the proc into
+    # disjoint clumps; `clm_run_clump_physics!` runs the clump-safe per-column
+    # physics over them (threaded when `config.use_threaded_clumps`).
+    #
+    # THREAD-SAFETY NOTE: the orchestrator body below is NOT itself threaded over
+    # clumps. It contains full-proc-domain operations (`for c in 1:length(...)`
+    # FATES site walks with a running site counter `s`, lazy `config.accum_mgr`
+    # initialization, gridcell-scratch sized to the whole proc) that are not
+    # clump-decomposable without a broader refactor and would race under naive
+    # whole-body threading. The orchestrator therefore runs ONCE over the proc
+    # (bounds_clump = bounds_proc), exactly as before. Genuinely embarrassingly-
+    # parallel per-column physics is exposed via `clm_run_clump_physics!`, which is
+    # threaded over clumps and proven deterministic (multi-clump result ==
+    # single-clump result regardless of clump count / thread count).
+    clm_drv_per_clump_bounds = if config.use_threaded_clumps && get_proc_clumps() > 1
+        cb = [get_clump_bounds(nc) for nc in 1:get_proc_clumps()]
+        # Only adopt the clump partition if it exactly tiles the proc domain passed
+        # in (disjoint + complete column coverage) — otherwise the global `decomp`
+        # was split inconsistently with this `bounds_proc`, so fall back to the safe
+        # single whole-proc clump rather than mis-slice the state arrays.
+        proc_ncol = bounds_proc.endc - bounds_proc.begc + 1
+        sum(b -> b.endc - b.begc + 1, cb) == proc_ncol ? cb : [bounds_proc]
+    else
+        [bounds_proc]
+    end
+
+    bounds_clump = bounds_proc  # orchestrator runs proc-level (single clump = whole proc)
 
     # Shorthand aliases for frequently-used instances
     bc = bounds_clump

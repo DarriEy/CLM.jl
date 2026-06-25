@@ -7,6 +7,7 @@ using CLM
     include("test_tridiagonal.jl")
     include("test_decomp.jl")
     include("test_decomp_init.jl")
+    include("test_threaded_clumps.jl")
     include("test_spmd.jl")
     include("test_gridcell.jl")
     include("test_landunit.jl")
