@@ -72,6 +72,7 @@ include("types/lnd2atm.jl")
 # ===========================================================================
 include("infrastructure/spmd.jl")  # SPMD/MPI communication shim (single-rank no-op by default)
 include("infrastructure/decomp.jl")
+include("infrastructure/decomp_init.jl")
 include("infrastructure/filters.jl")
 include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
