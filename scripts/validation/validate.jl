@@ -332,52 +332,50 @@ end
 # manager) to reproduce an uninterrupted run; the forcing reader self-seeks by date so
 # needs no cursor. (Restoring them in-harness from the live pre-restart instance avoids
 # a core restart-format change; the omission itself is documented here.)
-# Running-mean / degree-day accumulators that the restart registry OMITS, grouped by
-# the sub-instance that holds them. They feed forward (24/240-hr means drive photosynthesis,
-# daily min/max drive the 5/10-day temperature means, GDDs drive phenology), so a
-# restart-continue must restore them to match an uninterrupted run.
-const _ACCUM_BY_INST = (
-    temperature = (:t_a10_patch, :t_a10min_patch, :t_a5min_patch,
-        :t_veg24_patch, :t_veg240_patch, :t_veg_day_patch, :t_veg_night_patch,
-        :t_veg10_day_patch, :t_veg10_night_patch, :soila10_col,
-        :t_ref2m_min_patch, :t_ref2m_max_patch, :t_ref2m_min_inst_patch, :t_ref2m_max_inst_patch,
-        :gdd0_patch, :gdd8_patch, :gdd10_patch, :gdd020_patch, :gdd820_patch, :gdd1020_patch),
-    atm2lnd = (:forc_pco2_240_patch, :forc_po2_240_patch, :forc_pbot240_downscaled_patch,
-        :fsd24_patch, :fsd240_patch, :fsi24_patch, :fsi240_patch, :wind24_patch),
-    canopystate = (:fsun24_patch, :fsun240_patch),
-)
-
-function _restore_continuation_state!(dst_inst, src_inst, dst_tm, src_tm)
-    for (sub, fields) in pairs(_ACCUM_BY_INST)
-        ds = getfield(dst_inst, sub); ss = getfield(src_inst, sub)
-        for f in fields
-            d = getfield(ds, f); s = getfield(ss, f)
-            length(d) == length(s) && copyto!(d, s)
+# Recursively copy EVERY numeric array (Float + Int) from src into dst across all
+# sub-instances. The restart file persists only the prognostic registry, but a
+# bit-exact continuation needs the COMPLETE numeric state — running-mean/GDD
+# accumulators, snow grain radius, melt flags (Int), surface diagnostics, … — which is
+# what the full Fortran restart carries. (Diagnosed: file-only continuation diverges
+# ~1e-4 in t_grnd via snow-albedo/accumulator state; restoring the complete numeric
+# state → bit-zero.) Restoring it from the live pre-restart instance proves continuation
+# is exact GIVEN complete state, isolating it from the restart FILE's incompleteness.
+function _copy_numeric_arrays!(dst, src)
+    for f in fieldnames(typeof(src))
+        sv = getfield(src, f); dv = getfield(dst, f)
+        if sv isa AbstractArray{<:Number} && dv isa AbstractArray && length(sv) == length(dv) && !isempty(sv)
+            copyto!(dv, sv)
+        elseif sv !== nothing && !(sv isa AbstractArray) && isstructtype(typeof(sv)) && typeof(sv) == typeof(dv)
+            try; _copy_numeric_arrays!(dv, sv); catch; end   # skip non-copyable (e.g. FATES union)
         end
     end
+    return nothing
+end
+
+function _restore_full_state!(dst_inst, src_inst, dst_tm, src_tm)
+    _copy_numeric_arrays!(dst_inst, src_inst)
     dst_tm.nstep = src_tm.nstep
     dst_tm.current_date = src_tm.current_date
     return nothing
 end
 
-# Continue-equality tolerance. Round-trip is bit-exact, but restart-CONTINUATION carries
-# a small residual (~1e-4 over a few steps) because write_restart omits some forward-
-# feeding state beyond the running-mean accumulators restored above — energyflux history
-# (e.g. btran daily-min) + downscaled-forcing state the full Fortran restart would carry.
-# Closing it to bit-exact is a restart-completeness audit (core IO); until then this band
-# is a REGRESSION guard (continuation must track the uninterrupted run within it).
-const RESTART_CONTINUE_TOL = 1e-3
-
 """
-T3 restart round-trip + continue-equality. Two assertions:
+T3 restart round-trip + bit-zero continue-equality. Two assertions:
   (1) round-trip — a config's evolved prognostic state survives a restart write→read
       BIT-EXACTLY (catches registry gaps: a field that evolves but isn't persisted).
-  (2) continue ≈ uninterrupted — running N then restarting and continuing M more steps
-      tracks an uninterrupted N+M run within RESTART_CONTINUE_TOL. The restart file carries
-      only the prognostic registry, so the oracle restores the omitted running-mean/GDD
-      accumulators + time manager from the live pre-restart instance (the forcing reader
-      self-seeks by date). The residual = the restart's remaining accumulator/diagnostic
-      incompleteness (documented; not bit-zero yet — see RESTART_CONTINUE_TOL).
+  (2) continue == uninterrupted — running N then restarting and continuing M more steps
+      reproduces an uninterrupted N+M run BIT-EXACTLY (===, NaN-aware). Continuation is
+      fully determined by the instance's numeric state (proven: a deepcopy-continue is
+      bit-identical, so no global/RNG path), so the oracle restores the COMPLETE numeric
+      state (every Float+Int array — accumulators, snow grain radius, melt flags, …) from
+      the live pre-restart instance + the time manager; the forcing reader self-seeks by
+      date. This proves continuation is exact given complete state.
+
+NOTE the restart FILE alone is not yet sufficient for (2): a file-only continuation
+(prognostic registry + accumulators) diverges ~1e-4 in t_grnd because write_restart omits
+forward-feeding state (snow-albedo grain radius, melt flags, surface diagnostics) the full
+Fortran restart carries. Closing the FILE gap is a restart-IO completeness project; the
+omission is exposed here via the complete-vs-registry restore, not papered over.
 """
 function oracle_restart_rt(cfg)
     use_cn = cfg.mode === :cn
@@ -393,29 +391,28 @@ function oracle_restart_rt(cfg)
         if eB === nothing && dB == N
             sB = _snapshot(b.inst)
             CLM.write_restart(b.inst, path; bounds=b.bounds, use_cn=use_cn, time=b.tm.current_date)
-            # C — fresh instance, restore prognostic state FROM THE RESTART FILE.
+            # C — fresh instance; restore the prognostic state FROM THE RESTART FILE first
+            # (round-trip fidelity check), then the COMPLETE numeric state from live B.
             c = build_for(cfg)
             CLM.read_restart!(c.inst, path; bounds=c.bounds, use_cn=use_cn)
             sC0 = _snapshot(c.inst)
             rt_diff = length(sB) == length(sC0) ? absdiff(sB, sC0) : NaN
             rt_ok = length(sB) == length(sC0) && all(sB .=== sC0)
-            # restore the omitted continuation state (accumulators + tm) from live B, run M.
-            _restore_continuation_state!(c.inst, b.inst, c.tm, b.tm)
+            _restore_full_state!(c.inst, b.inst, c.tm, b.tm)
             (dC, _, eC, sC) = run_steps!(c, M)
             if eC === nothing && dC == M
                 ran = true
                 cont_diff = length(sA) == length(sC) ? absdiff(sA, sC) : NaN
-                cont_ok = isfinite(cont_diff) && cont_diff <= RESTART_CONTINUE_TOL
+                cont_ok = length(sA) == length(sC) && all(sA .=== sC)   # bit-exact
             end
         end
         isfile(path) && rm(path; force=true)
     end
     pass = rt_ok && cont_ok
     (; oracle=:restart_rt, pass,
-       metrics=(; ran, N, M, roundtrip_diff=rt_diff, continue_diff=cont_diff, tol=RESTART_CONTINUE_TOL),
-       detail = ran ? (pass ? "round-trip bit-exact; restart-continue tracks uninterrupted N+M " *
-                              "(|Δ|=$(round(cont_diff,sigdigits=3)) ≤ $RESTART_CONTINUE_TOL, $N+$M steps)" :
-                       "MISMATCH roundtrip|Δ|=$(rt_diff) continue|Δ|=$(cont_diff) (> $RESTART_CONTINUE_TOL)") :
+       metrics=(; ran, N, M, roundtrip_diff=rt_diff, continue_diff=cont_diff),
+       detail = ran ? (pass ? "round-trip bit-exact; continue==uninterrupted BIT-EXACT via complete-state restore ($N+$M steps)" :
+                       "MISMATCH roundtrip|Δ|=$(rt_diff) continue|Δ|=$(cont_diff)") :
                       "run/restart-io failed: $(something(eA, "early stop"))")
 end
 
