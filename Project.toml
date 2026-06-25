@@ -16,9 +16,24 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
 
+# Optional GPU backends — loaded ONLY when the user has CUDA/AMDGPU installed.
+# These are NOT hard dependencies: `using CLM` works with neither present. Each
+# triggers a package extension (see [extensions]) that installs its device
+# adaptor + KernelAbstractions backend into the centralized backend registry
+# (src/infrastructure/backend.jl).
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+
+[extensions]
+CLMCUDAExt = "CUDA"
+CLMAMDGPUExt = "AMDGPU"
+
 [compat]
 Adapt = "4.6.0"
+AMDGPU = "1"
 Atomix = "1"
+CUDA = "5"
 Enzyme = "0.13.152"
 ForwardDiff = "1.3"
 JSON = "1.4"
