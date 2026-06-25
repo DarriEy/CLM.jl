@@ -175,6 +175,7 @@ include("biogeochem/sparse_matrix_multiply.jl")  # matrix-CN sparse-matrix found
 include("biogeochem/decomp_bgc.jl")
 include("biogeochem/decomp_mimics.jl")
 include("biogeochem/decomp.jl")
+include("biogeochem/cn_soil_matrix.jl")          # matrix-CN soil C/N solver (use_soil_matrixcn)
 include("biogeochem/decomp_competition.jl")
 include("biogeochem/decomp_vertical_profile.jl")
 include("biogeochem/decomp_potential.jl")
