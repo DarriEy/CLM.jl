@@ -75,9 +75,10 @@
 
         nf_veg = CLM.CNVegNitrogenFluxData()
         CLM.cnveg_nitrogen_flux_init!(nf_veg, np, nc, ng; nrepr=nrepr,
-            nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools)
+            nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools, i_litr_max=i_litr_max)
         CLM.cnveg_nitrogen_flux_set_values!(nf_veg, mask_soilp, 0.0, mask_soilc, 0.0;
-            nrepr=nrepr, nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools)
+            nrepr=nrepr, nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools,
+            i_litr_max=i_litr_max)
 
         # --- Soil biogeochem carbon/nitrogen state/flux ---
         cs_soil = CLM.SoilBiogeochemCarbonStateData()
