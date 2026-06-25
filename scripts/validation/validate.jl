@@ -25,20 +25,89 @@ include(joinpath(_HERE, "..", "..", "test", "validation", "matrix.jl"))
 const WARM_RESTART = joinpath(DUMPDIR, "Bow_at_Banff_lumped.clm2.r.2003-01-01-00000.nc")
 
 # --------------------------------------------------------------------------
-# Build: config → runnable bundle. Step 1 wires the :bow domain (cold or warm).
-# Other domains return `nothing` → the runner records :skipped_unwired.
+# Build: config → runnable bundle. The Step-4 generalization. Two axes:
+#
+#   1. FLAGS — a config's mode + flags map to (a) INIT-gated flags forwarded to
+#      clm_initialize! (use_cn/luna/lch4/cndv/crop/fates + use_aquifer_layer),
+#      which is where their state ARRAYS are conditionally allocated (CH4 / DGVS /
+#      LUNA vcmax / crop / FATES), and (b) CONFIG-only flags set on CLMDriverConfig
+#      (hydrstress/voc/ozone/c13/c14/matrixcn/irrigate) — those state arrays are
+#      ALWAYS allocated in clm_initialize!, so they only need the driver toggle.
+#      Splitting on this is the keystone: a swept flag now gets a well-posed
+#      instance with its state allocated, not a toggle over un-allocated state.
+#
+#   2. DOMAIN — :bow uses the calibrated Fortran-parity builder (build_bow_inst);
+#      every other domain uses the generic build_domain_inst, mirroring the proven
+#      run_clm_streamflow.jl path (clm_initialize! + Jackson rooting + baseflow)
+#      over the Symfluence domain layout. Domains whose inputs are absent skip.
 # --------------------------------------------------------------------------
 struct RunBundle
     inst; bounds; filt; tm; config; fr; dtime::Float64
 end
 
-"Does this config's machine-local input data exist?"
-function data_available(cfg)
-    cfg.domain === :bow || return false           # only Bow wired in Step 1
-    isfile(FSURDAT) && isfile(FPARAM) && isfile(FFORCING)
+# Symfluence domain layout (shared with scripts/run_clm_streamflow.jl).
+const SYMROOT = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+# Validation-domain symbol → on-disk domain dir name. :bow is special-cased
+# (calibrated parity paths in fortran_parity_common.jl), so it is not listed here.
+const DOMAIN_DIRNAME = Dict(
+    :aripuana   => "Aripuana_Amazon",
+    :stillwater => "Stillwater_Oklahoma",
+    :krycklan   => "Boreal_Krycklan_Sweden",
+    :abisko     => "Arctic_Abisko_Sweden",
+    :tagus      => "Mediterranean_Tagus_Spain",
+    :massa      => "Alps_Massa_Aletsch_CH",
+    :baltimore  => "Urban_DeadRun_Baltimore",
+    :iceland    => "Iceland_Jokulsa_Fjollum",
+)
+_domain_dir(dom)  = joinpath(SYMROOT, "domain_$(DOMAIN_DIRNAME[dom])")
+_domain_surf(dom) = joinpath(_domain_dir(dom), "settings", "CLM", "parameters", "surfdata_clm.nc")
+_domain_parm(dom) = joinpath(_domain_dir(dom), "settings", "CLM", "parameters", "clm5_params.nc")
+
+"First clmforc.*.nc forcing file for a domain (the most-merged if several), or nothing."
+function _domain_forcing(dom)
+    cdir = joinpath(_domain_dir(dom), "data", "forcing", "CLM_input")
+    isdir(cdir) || return nothing
+    files = filter(f -> startswith(f, "clmforc") && endswith(f, ".nc"), readdir(cdir))
+    isempty(files) && return nothing
+    joinpath(cdir, files[argmax(length.(files))])   # prefer the most-merged span
 end
 
-"Construct the CLMDriverConfig for a config's mode + flags."
+"Start the run at the forcing file's first timestamp so read_forcing_step! is in-coverage."
+function _forcing_start(forcing_path)
+    ds = NCDataset(forcing_path, "r")
+    t = nothing
+    for nm in ("time", "DTIME", "datetime")
+        haskey(ds, nm) && (t = ds[nm][1]; break)
+    end
+    close(ds)
+    t isa DateTime ? t : DateTime(2003,1,1)
+end
+
+"Init-gated flags for clm_initialize! — these allocate state arrays when true."
+function _init_flags(cfg)
+    f = cfg.flags
+    (; use_cn   = cfg.mode === :cn,
+       use_fates = cfg.mode in (:fates_sp, :fates_bgc),
+       use_luna = get(f, :use_luna, false),
+       use_lch4 = get(f, :use_lch4, false),
+       use_cndv = get(f, :use_cndv, false),
+       use_crop = get(f, :use_crop, false),
+       use_aquifer_layer = get(f, :use_aquifer_layer, false))
+end
+
+"Does this config's machine-local input data exist?"
+function data_available(cfg)
+    if cfg.domain === :bow
+        return isfile(FSURDAT) && isfile(FPARAM) && isfile(FFORCING)
+    end
+    haskey(DOMAIN_DIRNAME, cfg.domain) || return false
+    isfile(_domain_surf(cfg.domain)) && isfile(_domain_parm(cfg.domain)) &&
+        _domain_forcing(cfg.domain) !== nothing
+end
+
+"""Construct the CLMDriverConfig for a config's mode + flags. Forwards the init-gated
+flags (so the driver dispatch matches the allocated state) AND the config-only flags
+(hydrstress/voc/ozone/c13/c14/matrixcn/irrigate — always-allocated state)."""
 function _make_config(cfg)
     f = cfg.flags
     kw = Dict{Symbol,Any}(:use_aquifer_layer => get(f, :use_aquifer_layer, false))
@@ -47,7 +116,6 @@ function _make_config(cfg)
     elseif cfg.mode === :fates_sp || cfg.mode === :fates_bgc
         kw[:use_fates] = true
     end
-    # thread through any recognised driver-level use_* flags present in cfg.flags
     for k in (:use_luna, :use_hydrstress, :use_voc, :use_ozone, :irrigate,
               :use_lch4, :use_c13, :use_c14, :use_crop, :use_cndv, :use_matrixcn)
         haskey(f, k) && (kw[k] = getproperty(f, k))
@@ -55,20 +123,59 @@ function _make_config(cfg)
     CLM.CLMDriverConfig(; kw...)
 end
 
+"Generic non-Bow domain builder — mirrors run_clm_streamflow.jl's clm_initialize! path."
+function build_domain_inst(cfg, fl)
+    dom = cfg.domain
+    fsurdat = _domain_surf(dom); paramfile = _domain_parm(dom)
+    forcing = _domain_forcing(dom)
+    start_date = _forcing_start(forcing)
+    # Bow lnd_in convention: Jackson-1996 rooting (matches the streamflow runner +
+    # parity harness). Set before clm_initialize!'s cold-start init_vegrootfr!.
+    CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
+    CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
+    (inst, bounds, filt, tm) = CLM.clm_initialize!(;
+        fsurdat=fsurdat, paramfile=paramfile, start_date=start_date, dtime=3600,
+        use_cn=fl.use_cn, use_luna=fl.use_luna, use_lch4=fl.use_lch4,
+        use_cndv=fl.use_cndv, use_crop=fl.use_crop, use_fates=fl.use_fates,
+        use_bedrock=true, use_aquifer_layer=fl.use_aquifer_layer, h2osfcflag=0,
+        fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE, int_snow_max=2000.0)
+    CLM.init_soil_hydrology_config(baseflow_scalar=BASEFLOW_SCALAR)
+    fr = CLM.ForcingReader(); CLM.forcing_reader_init!(fr, forcing)
+    return RunBundle(inst, bounds, filt, tm, _make_config(cfg), fr, 3600.0)
+end
+
 function build_for(cfg)::Union{RunBundle,Nothing}
-    cfg.domain === :bow || return nothing
-    use_cn = cfg.mode === :cn
-    use_luna = get(cfg.flags, :use_luna, false)
-    dtime = 3600.0
-    (inst, bounds, filt, tm) = build_bow_inst(; dtime=Int(dtime),
-                                              start_date=DateTime(2003,1,1),
-                                              use_cn=use_cn, use_luna=use_luna)
-    if cfg.init === :warm && isfile(WARM_RESTART)
-        inject_dump!(inst, bounds, WARM_RESTART)
+    fl = _init_flags(cfg)
+    if cfg.domain === :bow
+        dtime = 3600.0
+        (inst, bounds, filt, tm) = build_bow_inst(; dtime=Int(dtime),
+            start_date=DateTime(2003,1,1),
+            use_cn=fl.use_cn, use_luna=fl.use_luna, use_lch4=fl.use_lch4,
+            use_cndv=fl.use_cndv, use_crop=fl.use_crop, use_fates=fl.use_fates)
+        if cfg.init === :warm && isfile(WARM_RESTART)
+            inject_dump!(inst, bounds, WARM_RESTART)
+            # PHS (use_hydrstress) is only well-posed from a seeded vegwp: cold-start
+            # leaves the Newton solve to diverge to NaN canopy fluxes (the documented
+            # coldstart-canopy-nan gap). Seed vegwp from the restart so the solve
+            # starts in-basin — mirrors the vcmx25 LUNA seeding in run_one_parity_step!.
+            if get(cfg.flags, :use_hydrstress, false)
+                ds = NCDataset(WARM_RESTART, "r")
+                if haskey(ds, "vegwp")
+                    vw = ds["vegwp"][:, :]            # (vegwcs, pft)
+                    for pd in 1:size(vw, 2), seg in 1:min(4, size(vw, 1))
+                        pd <= size(inst.canopystate.vegwp_patch, 1) &&
+                            (inst.canopystate.vegwp_patch[pd, seg] = Float64(vw[seg, pd]))
+                    end
+                end
+                close(ds)
+            end
+        end
+        fr = CLM.ForcingReader(); CLM.forcing_reader_init!(fr, FFORCING)
+        return RunBundle(inst, bounds, filt, tm, _make_config(cfg), fr, dtime)
     end
-    config = _make_config(cfg)
-    fr = CLM.ForcingReader(); CLM.forcing_reader_init!(fr, FFORCING)
-    return RunBundle(inst, bounds, filt, tm, config, fr, dtime)
+    haskey(DOMAIN_DIRNAME, cfg.domain) || return nothing   # unknown domain → unwired
+    data_available(cfg) || return nothing                  # inputs absent → skip
+    return build_domain_inst(cfg, fl)
 end
 
 # --------------------------------------------------------------------------
