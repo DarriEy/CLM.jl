@@ -129,3 +129,9 @@ All Tier-E items IN SCOPE incl. MPI/distributed + matrix-CN + multi-gridcell. Wa
 - **Wave 3:** matrix-CN solver (~6.2k lines, CNVegMatrix+CNSoilMatrix+sparse-matmul), multi-gridcell I/O (surfdata-2D + history-2D + forcing spatial interp).
 - **Wave 4:** MPI/distributed (decompInit + spmd shim + distributable SoA state + parallel I/O + MPI test lane) — most invasive, touches all state + I/O; threads-over-clumps as the intra-node parallel layer.
 Out-of-scope (faithful ports of CTSM dead code): soil-water MixedForm/HeadForm, dyn-init landunit transitions, urban traffic. (critical_daylight_method was a false stub flag — fully ported.)
+
+## Tier E progress (2026-06-25): Waves 1–3 DONE, Wave 4 (MPI) starting
+- **Wave 1 ✅ (PRs #95–98):** dust (Zender2003 — was MISSING — + Leung2023 + factory), lake sub-options, history/restart metadata (time_bounds/mfilt/ndens/header), module wiring (methane ch4!, ozone-uptake [silent-bug fix], irrigation, dyn_subgrid biogeophys). Deferred: dyn_subgrid CN-half, CNDV.
+- **Wave 2 ✅ (PRs #99–101):** C-isotope flux cascades (CIsoFlux1/2/2h/2g/3 wiring), fire-method suite (Li2016/2021/2024/NoFire + factory), FlexibleCN nutrient competition. Deferred: fire driver-wiring (no live cn_driver call yet), FlexibleCN matrixcn/AgSys branches.
+- **Wave 3 ✅ (PRs #102–107):** multi-gridcell I/O COMPLETE (2D surfdata read + history 2D output + forcing spatial-interp), matrix-CN COMPLETE (sparse_matrix_multiply foundation + CNSoilMatrix + CNVegMatrix, all matrix==sequential to ~1e-9). Deferred: matrix-CN SASU spinup-averaging, C13/C14 matrices, N-matrix solve, matrix restart.
+- **Wave 4 (MPI/distributed) — STARTING:** decompInit (round-robin clump→rank + gindex), spmd/MPI gather-scatter shim, threaded-multi-clump on-node parallelism, then the distributable-SoA-state refactor + parallel I/O + MPI CI lane.
