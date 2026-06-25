@@ -138,7 +138,8 @@ end
 @kernel function _decomp_cascade_kernel!(@Const(mask), dv, cdv,
         @Const(cascade_donor_pool), @Const(cascade_receiver_pool),
         ndecomp_cascade_transitions::Int, nlevdecomp::Int, dnp,
-        use_nitrif_denitrif::Bool, use_mimics::Bool)
+        use_nitrif_denitrif::Bool, use_mimics::Bool,
+        Ksoil_DM, use_soil_matrixcn::Bool)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(dv.decomp_cpools_vr)
@@ -150,7 +151,13 @@ end
                     if dv.pmnf_decomp_cascade[c, j, k] > zero(T)
                         dv.p_decomp_cpool_loss[c, j, k] *= cdv.fpi_vr[c, j]
                         dv.pmnf_decomp_cascade[c, j, k] *= cdv.fpi_vr[c, j]
-                        # use_soil_matrixcn Ksoil%DM correction not yet implemented
+                        # use_soil_matrixcn: correct the Ksoil%DM turnover diagonal
+                        # only when one transfer from each litter pool (immobilization
+                        # step). Port of SoilBiogeochemDecompMod.F90:181-182.
+                        if use_soil_matrixcn
+                            ix = j + nlevdecomp * (donor - 1)
+                            Ksoil_DM[c, ix] = Ksoil_DM[c, ix] * cdv.fpi_vr[c, j]
+                        end
                         if !use_nitrif_denitrif
                             dv.sminn_to_denit_decomp_cascade_vr[c, j, k] = zero(T)
                         end
@@ -274,7 +281,8 @@ function soil_biogeochem_decomp!(
         use_nitrif_denitrif::Bool=false,
         use_lch4::Bool=false,
         use_mimics::Bool=false,
-        use_soil_matrixcn::Bool=false)
+        use_soil_matrixcn::Bool=false,
+        Ksoil_DM::Union{AbstractMatrix{<:Real},Nothing}=nothing)
 
     # Cascade configuration lives on the host (the cascade_con struct holds host
     # Int/Bool/String metadata). The per-transition index/flag/cn vectors the
@@ -330,12 +338,18 @@ function soil_biogeochem_decomp!(
     # resolution of plant/heterotroph competition for mineral N.
     # Only the immobilization steps are limited by fpi_vr (pmnf > 0).
     # Also calculate denitrification losses as a simple proportion of
-    # mineralization flux.  (use_soil_matrixcn Ksoil%DM correction TODO)
+    # mineralization flux.  (use_soil_matrixcn: the Ksoil%DM turnover-diagonal
+    # correction is applied inside the cascade kernel when the flag is on.)
     # -------------------------------------------------------------------
+    # Ksoil%DM correction array (matrix-CN). When the flag is off the kernel
+    # never indexes it, so a 1×1 placeholder of the working precision suffices —
+    # the default (use_soil_matrixcn=false) path is byte-identical.
+    Ksoil_DM_arg = (use_soil_matrixcn && Ksoil_DM !== nothing) ? Ksoil_DM :
+                    similar(cf.rf_decomp_cascade_col, 1, 1)
     _launch!(_decomp_cascade_kernel!, mask_bgc_soilc, dv, cdv,
              cascade_donor_pool, cascade_receiver_pool,
              ndecomp_cascade_transitions, nlevdecomp, dnp,
-             use_nitrif_denitrif, use_mimics)
+             use_nitrif_denitrif, use_mimics, Ksoil_DM_arg, use_soil_matrixcn)
 
     # -------------------------------------------------------------------
     # Calculate total fraction of potential HR, for methane code

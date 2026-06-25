@@ -41,6 +41,42 @@ Base.@kwdef mutable struct DecompCascadeConData{FT<:Real}
     decomp_pool_name_long          ::Vector{String}   = String[]
     decomp_pool_name_short         ::Vector{String}   = String[]
     cascade_step_name              ::Vector{String}   = String[]
+
+    # --- Matrix-CN (use_soil_matrixcn) prescribed sparse index structures ---
+    # Populated by `init_soil_transfer!` (port of InitSoilTransfer). All static
+    # (depend only on cascade topology + nlevdecomp). Default-empty so the
+    # sequential path is byte-identical when use_soil_matrixcn=false.
+    Ntrans_setup                   ::Int              = SMM_EMPTY_INT
+    Ntri_setup                     ::Int              = SMM_EMPTY_INT
+    n_all_entries                  ::Int              = SMM_EMPTY_INT
+    spm_tranlist_a                 ::Matrix{Int}      = Matrix{Int}(undef, 0, 0)
+    A_i                            ::Vector{Int}      = Int[]
+    A_j                            ::Vector{Int}      = Int[]
+    tri_i                          ::Vector{Int}      = Int[]
+    tri_j                          ::Vector{Int}      = Int[]
+    all_i                          ::Vector{Int}      = Int[]
+    all_j                          ::Vector{Int}      = Int[]
+    # Memo-index arrays (auto-filled on the first matrix solve / SetValueA / SPMP).
+    RI_a                           ::Vector{Int}      = Int[]
+    CI_a                           ::Vector{Int}      = Int[]
+    RI_na                          ::Vector{Int}      = Int[]
+    CI_na                          ::Vector{Int}      = Int[]
+    list_Asoilc                    ::Vector{Int}      = Int[]
+    list_Asoiln                    ::Vector{Int}      = Int[]
+    list_AK_AKVfire                ::Vector{Int}      = Int[]
+    list_AK_AKV                    ::Vector{Int}      = Int[]
+    list_V_AKVfire                 ::Vector{Int}      = Int[]
+    list_V_AKV                     ::Vector{Int}      = Int[]
+    list_fire_AKVfire              ::Vector{Int}      = Int[]
+    # Persistent merged-structure memo for AKallsoilc / AKallsoiln (filled on
+    # the first SPMP_AB/ABC, reused thereafter). On the flux structs in CTSM;
+    # held here for the self-contained solver.
+    NE_AKallsoilc                  ::Int              = SMM_EMPTY_INT
+    RI_AKallsoilc                  ::Vector{Int}      = Int[]
+    CI_AKallsoilc                  ::Vector{Int}      = Int[]
+    NE_AKallsoiln                  ::Int              = SMM_EMPTY_INT
+    RI_AKallsoiln                  ::Vector{Int}      = Int[]
+    CI_AKallsoiln                  ::Vector{Int}      = Int[]
 end
 
 # ---------------------------------------------------------------------------
