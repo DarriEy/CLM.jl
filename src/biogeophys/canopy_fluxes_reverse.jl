@@ -38,7 +38,16 @@ function cf_rev_scratch(::Type{FT}, np::Int) where {FT}
         obuold=z(np), tlbef=z(np), tl_ini=z(np), ts_ini=z(np), co2_arr=z(np), o2_arr=z(np),
         svpts=z(np), eah=z(np), dt_veg=z(np), fm=z(np), nmozsgn=zeros(Int, np),
         dayl_factor=z(np), cp_leaf=z(np), rstem=z(np), frac_rad_abs_by_stem=z(np),
-        sa_stem=z(np), sa_leaf=z(np), sa_internal=z(np), uuc=z(np), lw_stem=z(np), lw_leaf=z(np))
+        sa_stem=z(np), sa_leaf=z(np), sa_internal=z(np), uuc=z(np), lw_stem=z(np), lw_leaf=z(np),
+        # PHS (use_hydrstress) inter-pass scratch — the arrays photosynthesis_hydrstress!
+        # allocates internally (jmax_z_local/kn/psn_w*_z_*/rh_leaf_*). Held in the bundle
+        # so their adjoints thread across the 4 decomposed PHS pass phases (Pass2 writes
+        # phs_jmax → Pass3 reads it; Pass3 writes phs_w* → Pass4 reads them). bsun/bsha use
+        # energyflux.bsun_patch/bsha_patch. Allocated for all canopy states (small).
+        phs_jmax=z(np, 2, NLEVCAN), phs_kn=z(np),
+        phs_wc_sun=z(np, NLEVCAN), phs_wj_sun=z(np, NLEVCAN), phs_wp_sun=z(np, NLEVCAN),
+        phs_wc_sha=z(np, NLEVCAN), phs_wj_sha=z(np, NLEVCAN), phs_wp_sha=z(np, NLEVCAN),
+        phs_rh_sun=z(np), phs_rh_sha=z(np))
 end
 
 # Bundle = the 10 differentiated canopy state structs + scratch. This is the object
@@ -86,6 +95,9 @@ function cf_rev_init!(b, aux)
         KA.synchronize(be)
     end
     cf_moninobukini_update!(fv, tp, pd, fp, fn, sc.ur, sc.dthv, sc.zldis, sc.tl_ini, sc.ts_ini)
+    # PHS: recompute smp_l/hk_l from injected liquid soil water (production does this
+    # before the PHS solve — HydrologyNoDrainage fills smp_l only AFTER canopy_fluxes).
+    get(aux, :use_hydrstress, false) && cf_rev_phs_smp_l!(b, aux)
     return nothing
 end
 
@@ -121,6 +133,106 @@ function cf_rev_psn!(b, aux, phase::String)
     return nothing
 end
 
+# PHS (use_hydrstress) init helper: recompute smp_l + hk_l from the injected LIQUID
+# soil water before the PHS photosynthesis solve. In production canopy_fluxes!
+# (~1545-1569) this is done because HydrologyNoDrainage — which normally fills smp_l —
+# runs AFTER canopy_fluxes; PHS photosynthesis reads smp_l (it does NOT compute it).
+# Byte-identical to the production loop. Called from cf_rev_init! when use_hydrstress.
+function cf_rev_phs_smp_l!(b, aux)
+    ss = b.soilstate; wd = b.waterdiagbulk; ph = aux.phs
+    FT = eltype(ss.smp_l_col)
+    nlevsoi = ph.nlevsoi; nlevsno = aux.nlevsno
+    smp_l = ss.smp_l_col; watsat = ss.watsat_col; sucsat = ss.sucsat_col
+    bsw = ss.bsw_col; smpmin = ss.smpmin_col
+    h2osoi_liqvol = wd.h2osoi_liqvol_col; hksat = ss.hksat_col; hk_l = ss.hk_l_col
+    @inbounds for c in axes(smp_l, 1), j in 1:nlevsoi
+        s_node = max(min(h2osoi_liqvol[c, nlevsno + j] / watsat[c, j], one(FT)), FT(0.01))
+        smp_l[c, j] = max(smpmin[c], -sucsat[c, j] * s_node^(-bsw[c, j]))
+        jp1 = min(nlevsoi, j + 1)
+        s1 = (h2osoi_liqvol[c, nlevsno + j] + h2osoi_liqvol[c, nlevsno + jp1]) /
+             (watsat[c, j] + watsat[c, jp1])
+        s1 = min(one(FT), s1)
+        hk_l[c, j] = hksat[c, j] * s1^(FT(2.0) * bsw[c, j] + FT(3.0))
+    end
+    return nothing
+end
+
+# PHS photosynthesis sub-phases — the use_hydrstress counterpart of cf_rev_psn!.
+# Unlike the non-PHS path (two photosynthesis! calls), PHS solves sun+sha together via
+# the Kennedy/Gentine fused vegwp Newton solve in photosynthesis_hydrstress!. That whole
+# function is too large to reverse-differentiate as ONE Enzyme thunk on Julia 1.12 (the
+# monolith trips EnzymeNoTypeError inside Pass 2 — the same wall canopy_fluxes_core! hits),
+# but EACH of its four passes differentiates cleanly in isolation. So PHS photosynthesis is
+# DECOMPOSED into four compositional phases (one Enzyme call each), exactly mirroring how
+# the canopy energy balance is decomposed. The inter-pass scratch lives in the bundle
+# (b.scratch.phs_* + energyflux.bsun/bsha) so its adjoint threads across the four phases.
+# Arg mapping follows production photosynthesis_hydrstress! (canopy_fluxes.jl ~1746-1768):
+# forc_rho is COLUMN-indexed (aux.forc.rho); smp_l/k_soil_root/rootfr/hk_l/hksat from
+# soilstate; vegwp/lai/elai/esai/htop from canopystate; PHS root params from aux.phs;
+# esat_tv=svpts, eair=eah, cair=co2_arr, oair=o2_arr, tgcm=thm (the canopy scratch).
+# overrides default (CalibrationOverrides()) + the local-noon predicate are constructed
+# in-phase (matching cf_rev_psn!'s reliance on photosynthesis! defaults); they feed only
+# host-side pre-computation, not the differentiated arrays.
+
+# PHS Pass 1: root-soil conductance k_soil_root (reads smp_l set by cf_rev_phs_smp_l!).
+function cf_rev_psn_phs_pass1!(b, aux)
+    sc = b.scratch; ph = aux.phs; cs = b.canopystate; ss = b.soilstate
+    psn_phs_pass1_update!(b.photosyns, aux.mask, aux.patch.column, aux.ivt,
+        ph.froot_carbon, ss.rootfr_patch, ph.dz, cs.tsai_patch, cs.tlai_patch,
+        ph.froot_leaf, ph.root_radius, ph.root_density, ss.hksat_col, ss.hk_l_col,
+        ss.smp_l_col, ph.z_col, ss.k_soil_root_patch, ss.root_conductance_patch,
+        ss.soil_conductance_patch, 2.0, 0.25, ph.nlevsoi, 1:length(sc.air))
+    return nothing
+end
+
+# PHS Pass 2: kinetics, N-profile, vcmax/jmax/tpu/kp/lmr → phs_jmax + ps.*_phs fields.
+function cf_rev_psn_phs_pass2!(b, aux)
+    sc = b.scratch; ph = aux.phs; pn = aux.psn; tp = b.temperature; ps = b.photosyns
+    psn_phs_pass2_update!(ps, sc.phs_kn, sc.phs_jmax, aux.mask, aux.ivt,
+        pn.c3psn, pn.mbbopt, aux.forc_pbot_patch, sc.o2_arr, pn.slatop, pn.leafcn,
+        pn.flnr, pn.fnitr, sc.dayl_factor, pn.t10, tp.t_veg_patch, pn.tlai_z,
+        pn.parsun_z, pn.parsha_z, pn.vcmaxcint_sun, pn.vcmaxcint_sha, pn.nrad,
+        false, false, 0.015, NLEVCAN, ps.stomatalcond_mtd, ps.light_inhibit,
+        ps.leafresp_method, CalibrationOverrides(), 1:length(sc.air))
+    return nothing
+end
+
+# PHS Pass 3: the fused per-patch vegwp Newton solve (calcstress/spacF/spacA/getvegwp).
+function cf_rev_psn_phs_pass3!(b, aux)
+    sc = b.scratch; ph = aux.phs; pn = aux.psn; tp = b.temperature
+    cs = b.canopystate; ss = b.soilstate; ef = b.energyflux; ps = b.photosyns
+    # Match photosynthesis_hydrstress!'s bsun/bsha init (it fill!s 1.0 every call).
+    fill!(ef.bsun_patch, one(eltype(ef.bsun_patch)))
+    fill!(ef.bsha_patch, one(eltype(ef.bsha_patch)))
+    psn_phs_pass3_update!(ps, aux.mask, aux.patch.column, aux.ivt, pn.nrad,
+        pn.medlynslope, pn.medlynintercept, ph.crop_pft,
+        aux.forc_pbot_patch, tp.thm_patch, sc.rb, sc.eah, sc.svpts, sc.co2_arr, sc.o2_arr,
+        sc.qsatl, b.frictionvel.qaf_patch,
+        cs.laisun_patch, cs.laisha_patch, cs.htop_patch, cs.tsai_patch, cs.elai_patch,
+        cs.esai_patch, b.waterdiagbulk.fdry_patch, aux.forc.rho,
+        pn.parsun_z, pn.parsha_z, sc.phs_jmax,
+        pn.o3coefg, pn.o3coefg, pn.o3coefv, pn.o3coefv,
+        ss.k_soil_root_patch, ss.smp_l_col, ph.z_col,
+        cs.vegwp_patch, cs.vegwp_ln_patch, b.waterfluxbulk.wf.qflx_tran_veg_patch,
+        ef.bsun_patch, ef.bsha_patch, sc.phs_rh_sun, sc.phs_rh_sha,
+        sc.phs_wc_sun, sc.phs_wj_sun, sc.phs_wp_sun,
+        sc.phs_wc_sha, sc.phs_wj_sha, sc.phs_wp_sha,
+        ph.nlevsoi, ps.modifyphoto_and_lmr_forcrop, ps.stomatalcond_mtd,
+        2.0e4, CalibrationOverrides(), (p) -> false, 1:length(sc.air))
+    return nothing
+end
+
+# PHS Pass 4: canopy integration → per-patch psn/rs/lmr + LAI-weighted btran.
+function cf_rev_psn_phs_pass4!(b, aux)
+    sc = b.scratch; ph = aux.phs; pn = aux.psn; ef = b.energyflux; ps = b.photosyns
+    psn_phs_pass4_update!(ps, aux.mask, pn.nrad, aux.ivt, ph.crop_pft,
+        pn.laisun_z, pn.laisha_z, sc.rb, ef.btran_patch,
+        sc.phs_wc_sun, sc.phs_wj_sun, sc.phs_wp_sun,
+        sc.phs_wc_sha, sc.phs_wj_sha, sc.phs_wp_sha,
+        ef.bsun_patch, ef.bsha_patch, ps.modifyphoto_and_lmr_forcrop, 1:length(sc.air))
+    return nothing
+end
+
 function cf_rev_energy!(b, aux)
     sc = b.scratch; fc = aux.forc
     cf_energy_update!(b.canopystate, b.energyflux, b.frictionvel, b.temperature,
@@ -143,11 +255,19 @@ end
 # trips on the captured `aux` NamedTuple's nested structs/BitVectors), whereas an
 # explicit Const arg is cleanly excluded from differentiation.
 function cf_rev_phases(aux, N::Int)
+    use_phs = get(aux, :use_hydrstress, false)
     phases = Any[(cf_rev_init!, (aux,))]
     for it in 0:(N-1)
         push!(phases, (cf_rev_friction!, (aux, it)))
         push!(phases, (cf_rev_resist!, (aux,)))
-        if aux.use_psn
+        if use_phs
+            # PHS photosynthesis decomposed into its 4 passes (one Enzyme call each) —
+            # the monolith photosynthesis_hydrstress! won't reverse as a single thunk.
+            push!(phases, (cf_rev_psn_phs_pass1!, (aux,)))
+            push!(phases, (cf_rev_psn_phs_pass2!, (aux,)))
+            push!(phases, (cf_rev_psn_phs_pass3!, (aux,)))
+            push!(phases, (cf_rev_psn_phs_pass4!, (aux,)))
+        elseif aux.use_psn
             push!(phases, (cf_rev_psn!, (aux, "sun")))
             push!(phases, (cf_rev_psn!, (aux, "sha")))
         end

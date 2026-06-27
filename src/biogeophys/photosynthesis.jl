@@ -1621,6 +1621,18 @@ end
         @Const(psn_wc_z_sha), @Const(psn_wj_z_sha), @Const(psn_wp_z_sha),
         @Const(bsun_arr), @Const(bsha_arr), modifyphoto_and_lmr_forcrop::Bool)
     p = @index(Global)
+    _psn_phs_pass4_body!(p, ps, mask_patch, nrad, ivt, crop_pft, lai_z_sun_in,
+        lai_z_sha_in, rb, btran, psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha, bsun_arr, bsha_arr,
+        modifyphoto_and_lmr_forcrop)
+end
+
+# Shared per-patch body for PHS Pass 4 (KA kernel + AD host loop) — see _photosynth_ci_body!.
+@inline function _psn_phs_pass4_body!(p, ps, mask_patch, nrad, ivt, crop_pft,
+        lai_z_sun_in, lai_z_sha_in, rb, btran,
+        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+        bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop::Bool)
     @inbounds if mask_patch[p]
         T = eltype(rb)
         ivt_p = ivt[p]
@@ -1706,14 +1718,24 @@ function psn_phs_pass4_update!(ps, mask_patch, nrad, ivt, crop_pft,
         psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
         bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop::Bool, bounds_patch)
     dv = _psn_dv(ps)
-    be = _kernel_backend(rb)
-    _psn_phs_pass4_kernel!(be)(dv, mask_patch, nrad, ivt, crop_pft,
-        lai_z_sun_in, lai_z_sha_in, rb, btran,
-        psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
-        psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
-        bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop;
-        ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if _PSN_CI_AD_HOSTLOOP[]
+        @inbounds for p in 1:length(bounds_patch)
+            _psn_phs_pass4_body!(p, dv, mask_patch, nrad, ivt, crop_pft,
+                lai_z_sun_in, lai_z_sha_in, rb, btran,
+                psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+                psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+                bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop)
+        end
+    else
+        be = _kernel_backend(rb)
+        _psn_phs_pass4_kernel!(be)(dv, mask_patch, nrad, ivt, crop_pft,
+            lai_z_sun_in, lai_z_sha_in, rb, btran,
+            psn_wc_z_sun, psn_wj_z_sun, psn_wp_z_sun,
+            psn_wc_z_sha, psn_wj_z_sha, psn_wp_z_sha,
+            bsun_arr, bsha_arr, modifyphoto_and_lmr_forcrop;
+            ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    end
     return nothing
 end
 
@@ -1727,6 +1749,17 @@ end
         @Const(z_col), k_soil_root, root_conductance_out, soil_conductance_out,
         c_to_b, croot_lateral_length, nlevsoi::Int, root_seg::Int)
     p = @index(Global)
+    _psn_phs_pass1_body!(p, mask_patch, col_of_patch, ivt, phs_params, froot_carbon,
+        rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft, root_density_pft,
+        hksat, hk_l, smp_l, z_col, k_soil_root, root_conductance_out,
+        soil_conductance_out, c_to_b, croot_lateral_length, nlevsoi, root_seg)
+end
+
+# Shared per-patch body for PHS Pass 1 (KA kernel + AD host loop) — see _photosynth_ci_body!.
+@inline function _psn_phs_pass1_body!(p, mask_patch, col_of_patch, ivt, phs_params,
+        froot_carbon, rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft,
+        root_density_pft, hksat, hk_l, smp_l, z_col, k_soil_root, root_conductance_out,
+        soil_conductance_out, c_to_b, croot_lateral_length, nlevsoi::Int, root_seg::Int)
     @inbounds if mask_patch[p]
         T = eltype(smp_l)
         c = col_of_patch[p]
@@ -1772,13 +1805,26 @@ function psn_phs_pass1_update!(ps, mask_patch, col_of_patch, ivt, froot_carbon,
         soil_conductance_out, c_to_b, croot_lateral_length, nlevsoi::Int, bounds_patch)
     T = eltype(smp_l)
     phs_params = _psn_phs_params(smp_l)
-    be = _kernel_backend(smp_l)
-    _psn_phs_pass1_kernel!(be)(mask_patch, col_of_patch, ivt, phs_params,
-        froot_carbon, rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft,
-        root_density_pft, hksat, hk_l, smp_l, z_col, k_soil_root,
-        root_conductance_out, soil_conductance_out, T(c_to_b),
-        T(croot_lateral_length), nlevsoi, ROOT_SEG; ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if _PSN_CI_AD_HOSTLOOP[]
+        # AD-mode host loop (see compositional_reverse! / _photosynth_ci_body!):
+        # byte-identical to the KA kernel (shared _psn_phs_pass1_body!), avoids the
+        # KA-launch codegen Enzyme reverse segfaults on under Julia 1.12.
+        @inbounds for p in 1:length(bounds_patch)
+            _psn_phs_pass1_body!(p, mask_patch, col_of_patch, ivt, phs_params,
+                froot_carbon, rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft,
+                root_density_pft, hksat, hk_l, smp_l, z_col, k_soil_root,
+                root_conductance_out, soil_conductance_out, T(c_to_b),
+                T(croot_lateral_length), nlevsoi, ROOT_SEG)
+        end
+    else
+        be = _kernel_backend(smp_l)
+        _psn_phs_pass1_kernel!(be)(mask_patch, col_of_patch, ivt, phs_params,
+            froot_carbon, rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft,
+            root_density_pft, hksat, hk_l, smp_l, z_col, k_soil_root,
+            root_conductance_out, soil_conductance_out, T(c_to_b),
+            T(croot_lateral_length), nlevsoi, ROOT_SEG; ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    end
     return nothing
 end
 
@@ -1816,6 +1862,12 @@ end
 # the 3D ps.*_phs fields ([p,SUN,iv] & [p,SHA,iv]) in one iv pass. params_inst
 # scalars bundled in `prm`; overrides / leaf_mr_vcm resolved on the host.
 @kernel function _psn_phs_pass2_kernel!(ps, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+    p = @index(Global)
+    _psn_phs_pass2_body!(p, ps, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+end
+
+# Shared per-patch body for PHS Pass 2 (KA kernel + AD host loop) — see _photosynth_ci_body!.
+@inline function _psn_phs_pass2_body!(p, ps, kn, jmax_z_local, prm, idx, pft, inp, sc2)
     # alias grouped fields to locals → physics body below is byte-identical
     mask_patch = idx.mask_patch; ivt = idx.ivt; nrad = idx.nrad
     c3psn_pft = pft.c3psn_pft; mbbopt_pft = pft.mbbopt_pft; slatop_pft = pft.slatop_pft
@@ -1833,7 +1885,6 @@ end
     stomatalcond_mtd = sc2.stomatalcond_mtd; stomatal_bb = sc2.stomatal_bb
     leafresp_ryan = sc2.leafresp_ryan; sun = sc2.sun; sha = sc2.sha
     vcmx25_z = ps.vcmx25_z_patch; jmx25_z = ps.jmx25_z_patch
-    p = @index(Global)
     @inbounds if mask_patch[p]
         T = eltype(t_veg)
         ivt_p = ivt[p]
@@ -2073,10 +2124,16 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
         T(leaf_mr_vcm), T(BBBOPT_C3), T(BBBOPT_C4),
         use_cn, use_c13, light_inhibit, use_luna, leafresp_method, nlevcan,
         stomatalcond_mtd, STOMATALCOND_MTD_BB1987, LEAFRESP_MTD_RYAN1991, SUN, SHA)
-    be = _kernel_backend(t_veg)
-    _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, prm, idx, pft, inp, sc2;
-        ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if _PSN_CI_AD_HOSTLOOP[]
+        @inbounds for p in 1:length(bounds_patch)
+            _psn_phs_pass2_body!(p, dv, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+        end
+    else
+        be = _kernel_backend(t_veg)
+        _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, prm, idx, pft, inp, sc2;
+            ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    end
     return nothing
 end
 
@@ -4679,6 +4736,18 @@ Adapt.@adapt_structure _Psn3Out
 @kernel function _psn_phs_pass3_kernel!(ps, phs_params, sc, idx, ina, inb, out,
         nlevsoi::Int, modifyphoto_and_lmr_forcrop::Bool, stomatalcond_mtd::Int,
         STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
+    p = @index(Global)
+    _psn_phs_pass3_body!(p, ps, phs_params, sc, idx, ina, inb, out, nlevsoi,
+        modifyphoto_and_lmr_forcrop, stomatalcond_mtd,
+        STOMATALCOND_MTD_BB1987_, STOMATALCOND_MTD_MEDLYN2011_)
+end
+
+# Shared per-patch body for PHS Pass 3 (KA kernel + AD host loop) — see _photosynth_ci_body!.
+# This is the fused per-patch PHS Newton solve (hybrid_PHS → ci_func_PHS →
+# brent_PHS/calcstress → spacF/spacA/getvegwp/getqflx via fixed-trip device cores).
+@inline function _psn_phs_pass3_body!(p, ps, phs_params, sc, idx, ina, inb, out,
+        nlevsoi::Int, modifyphoto_and_lmr_forcrop::Bool, stomatalcond_mtd::Int,
+        STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
     # alias grouped fields to locals → physics body below is byte-identical
     mask_patch = idx.mask_patch; is_near_local_noon = idx.is_near_local_noon
     col_of_patch = idx.col_of_patch; ivt = idx.ivt; nrad = idx.nrad
@@ -4700,7 +4769,6 @@ Adapt.@adapt_structure _Psn3Out
     psn_wc_z_sun = out.psn_wc_z_sun; psn_wj_z_sun = out.psn_wj_z_sun
     psn_wp_z_sun = out.psn_wp_z_sun; psn_wc_z_sha = out.psn_wc_z_sha
     psn_wj_z_sha = out.psn_wj_z_sha; psn_wp_z_sha = out.psn_wp_z_sha
-    p = @index(Global)
     @inbounds if mask_patch[p]
         T = eltype(forc_pbot)
         c = col_of_patch[p]
@@ -5007,7 +5075,17 @@ function psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
         psn_wp_z_sun = psn_wp_z_sun, psn_wc_z_sha = psn_wc_z_sha,
         psn_wj_z_sha = psn_wj_z_sha, psn_wp_z_sha = psn_wp_z_sha)
     be = _kernel_backend(forc_pbot)
-    if be isa KA.CPU
+    if _PSN_CI_AD_HOSTLOOP[]
+        # AD-mode host loop (see compositional_reverse! / _photosynth_ci_body!): runs the
+        # SAME fused per-patch Newton body the KA kernel runs, but as a plain loop so
+        # Enzyme reverse on Julia 1.12 dodges the KA kernel-launch codegen. Byte-identical
+        # primal (shared _psn_phs_pass3_body!).
+        @inbounds for p in 1:length(bounds_patch)
+            _psn_phs_pass3_body!(p, dv, phs_params, sc, idx, ina, inb, out,
+                nlevsoi, modifyphoto_and_lmr_forcrop, stomatalcond_mtd,
+                STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011)
+        end
+    elseif be isa KA.CPU
         _psn_phs_pass3_kernel!(be)(dv, phs_params, sc, idx, ina, inb, out,
             nlevsoi, modifyphoto_and_lmr_forcrop,
             stomatalcond_mtd, STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
