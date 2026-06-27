@@ -44,7 +44,7 @@ realism. Built in 7 steps (PRs #123–#132), ~54 configs, run **subprocess-isola
 | **T1 parity** | Julia state == Fortran dump (16 fields, fitted band) | ✅ Bow anchor (n13461); new-config refs = instrumentation written + compile-verified (§5) |
 | **T2 conservation** | finiteness + water/energy/C-N closure, smoke→multi-year | ✅ the universal verdict |
 | **T3 metamorphic** | determinism · matrix==sequential · restart **bit-zero** · MPI==serial · AD==FD | ✅ all wired |
-| **T4 streamflow** | in-harness KGE/NSE vs gauge | ✅ real (Bow KGE=−0.282; modest skill = calibration, not wiring) |
+| **T4 streamflow** | in-harness KGE/NSE vs gauge | ✅ real, **multi-year across all 7 gauges** (best Abisko KGE=+0.31; modest skill = calibration, not wiring — §2.5) |
 
 - **8 domains exercised** (not just wired): Bow + Aripuanã, Stillwater, Krycklan, Abisko,
   Tagus, Massa, Iceland, Baltimore — the last three **built from cloud ERA5 via Symfluence**
@@ -54,6 +54,31 @@ realism. Built in 7 steps (PRs #123–#132), ~54 configs, run **subprocess-isola
   forward-feeding state; the checkpoint serializes all of it).
 - Harness building **found and fixed a real CNDV cold-start bug** and a real harness-design
   flaw (in-process global-state leakage → false verdicts) — it earns its keep.
+
+### 2.5 Multi-year T4 streamflow — real uncalibrated baselines
+
+All 7 wired gauges run to completion at their **full multi-year registry windows**
+(multi-year spin-up + multi-year scoring), in ~3 min wall under 7-way parallelism; every
+domain scored ≥1,000 overlapping gauge-days with all simulated runoff finite (nbad=0).
+These are **uncalibrated cold-start** baselines — the honest floor before any calibration.
+
+| Domain (climate) | Scored window | KGE | NSE | r | α | β | Note |
+|---|---|---:|---:|---:|---:|---:|---|
+| Abisko (arctic) | 2010–18 | **+0.31** | −0.65 | 0.48 | 1.41 | 1.20 | best skill; only positive KGE |
+| Baltimore (urban) | 2010–18 | −0.18 | **+0.12** | 0.58 | 0.18 | 0.26 | positive NSE; under-predicts volume 4× |
+| Bow (alpine) | 2003–04 | −0.32 | −3.4 | 0.18 | 2.03 | 0.97 | volume right, snowmelt timing/variance off |
+| Krycklan (boreal) | 2010–18 | −0.59 | −5.0 | 0.05 | 2.27 | 1.09 | same: right mean, 2× too variable |
+| Massa (glaciated) | 2010–18 | −0.64 | −0.5 | 0.02 | 0.09 | 0.06 | glacial melt discharge not represented |
+| Iceland Jökulsá (glacial) | 2016–18 | −0.69 | −3.6 | 0.05 | 0.02 | 0.01 | glacial + gauge-area mismatch |
+| Tagus (Mediterranean) | 2010–18 | −36 | −1417 | 0.08 | 35.3 | 15.8 | basin-area/gauge mismatch (16× volume) — config, not physics |
+
+**Honest read:** volume is often right (β≈1 for Bow/Krycklan/Abisko); timing/variance is the
+uncalibrated error (α≈2 — classic snowmelt mistiming). Tagus/Iceland/Massa are **domain-config
+issues** (auto-delineated gauge-area mismatch; no glacial-melt routing), not physics faults —
+they need explicit per-gauge `area_km2` overrides in the `DOMAINS` registry before their KGE is
+meaningful. Real positive KGE requires a **calibration pass** (DDS over baseflow/snow/soil-
+hydrology params + routing lag + area corrections) — that belongs to the separate Symfluence
+calibration pipeline and was deliberately **not** run; these are the baseline-skill numbers.
 
 ## 3. Differentiability (AD)
 
@@ -112,7 +137,7 @@ Re-run the README recipe once the CTSM case is restored.
 | Goal | State | The asterisk |
 |------|-------|--------------|
 | Process fidelity | ✅ complete | parity anchored on reference configs, invariant-validated elsewhere (by design) |
-| Validation harness | ✅ complete | T4 skill is modest (calibration, not wiring); deep multi-year tier opt-in |
+| Validation harness | ✅ complete | T4 now multi-year across all 7 gauges (§2.5); skill is modest by design (calibration, not wiring) |
 | Forward AD | ✅ validated | — |
 | Reverse AD | ✅ whole-driver incl. **photosynthesis** (`use_psn=1`) on 1.10 **and 1.12** | PHS-coupled (`use_hydrstress`) reverse + whole-*function* canopy still 1.12-blocked (latter avoided by decomposition) |
 | GPU Metal | ✅ validated 0.0 | — |
@@ -126,6 +151,9 @@ Re-run the README recipe once the CTSM case is restored.
 2. **Run `scripts/gpu_validate_cuda.jl` on real NVIDIA hardware** (rented GPU over SSH, or
    Buildkite `juliagpu`) — the one external dependency for "CUDA-validated".
 3. **Restore the CTSM case + run the pdump verify** → broaden T1 parity beyond the Bow anchor.
-4. (optional) Multi-year T4 streamflow at depth + calibration for real KGE skill.
+4. ~~Multi-year T4 streamflow at depth~~ — **done** (§2.5: all 7 gauges, full multi-year
+   windows, real uncalibrated KGE/NSE). Remaining there is *calibration* for real KGE skill
+   (DDS/optimization over hydrology params + per-gauge `area_km2` overrides) — a separate
+   Symfluence-pipeline effort, not a harness gap.
 
 Everything except (2) and (3)'s external dependencies is code that exists and runs today.
