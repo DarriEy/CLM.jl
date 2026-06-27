@@ -644,7 +644,7 @@ function bareground_fluxes!(
     # device-resident on GPU. A bare zeros() would force a host Array and break a
     # whole-function GPU run.
     FT = eltype(forc_t_col)
-    _sc(dims...)  = fill!(similar(temperature.t_veg_patch, FT,  dims...), zero(FT))
+    _sc(dims...)  = fill!(similar(temperature.t_veg_patch,  dims...), zero(eltype(temperature.t_veg_patch)))
     _sci(dims...) = fill!(similar(patch_data.column,       Int, dims...), 0)
 
     filterp = _sci(np)

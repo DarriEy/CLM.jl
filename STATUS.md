@@ -13,11 +13,12 @@ _Last updated: 2026-06-27._
 
 A **functionally complete CLM5 port** with a working **layered-oracle validation harness**,
 **Fortran-parity-anchored** and **invariant-validated across 8 contrasting domains**,
-**forward- and reverse-differentiable** (whole-driver energy-balance reverse now FD-validated
-on **both Julia 1.10 and 1.12**), and **Metal-GPU-validated at 0.0 parity**. The honest
-asterisks: the *photosynthesis-coupled* reverse path is still 1.10-only on 1.12, CUDA/AMD GPU
-is validated by CPU proxy but **not yet run on real silicon**, and Fortran parity is anchored
-on Bow reference configs by design (full-cartesian parity is out of scope).
+**forward- and reverse-differentiable** (whole-driver reverse incl. photosynthesis now
+FD-validated on **both Julia 1.10 and 1.12**), and **Metal-GPU-validated at 0.0 parity**. The
+honest asterisks: CUDA/AMD GPU is validated by CPU proxy but **not yet run on real silicon**;
+the PHS-coupled (`use_hydrstress`) reverse path and whole-*function* canopy autodiff remain
+1.12-blocked (the latter avoided by decomposition); and Fortran parity is anchored on Bow
+reference configs by design (full-cartesian parity is out of scope).
 
 ---
 
@@ -68,12 +69,16 @@ realism. Built in 7 steps (PRs #123–#132), ~54 configs, run **subprocess-isola
   captured `FT` (`similar(arr, …)` + `zero(eltype(arr))`) is byte-identical and GPU-safe
   (`soil_water_movement.jl`, `surface_water.jl`). Decomposed canopy, multistep/checkpointed
   composition, and the hydrology phases all pass on 1.12.
-  - **Remaining 1.12 gaps:** (1) the **photosynthesis-coupled** whole-driver (`use_psn=1`)
-    segfaults in the KA-kernel `photosynth_ci_solve!` under Enzyme reverse on 1.12 (works on
-    1.10) — closeable with an AD-mode host-loop fallback for that one ci-solve; (2) the
-    **whole-function** (non-decomposed) canopy autodiff still hits the historical "sret wall"
-    segfault — already avoided by the decomposed production path. 1.10 retains everything
-    including the photosynthesis-coupled path.
+  - **Photosynthesis-coupled (`use_psn=1`) whole-driver reverse now ALSO validates on 1.12**
+    (rel 4.443e-7 vs FD; 1.10 unchanged). The 4 photosynthesis KA kernels segfaulted under
+    Enzyme reverse on 1.12; fixed with an **AD-mode host-loop fallback** — each kernel body
+    factored into a shared `@inline` function the KA `@kernel` still inlines (GPU path
+    unchanged), with a host `for`-loop branch taken only under AD (a `Ref{Bool}` flipped by
+    the reverse engine in `try/finally`). **Primal is byte-identical** (`max|KA−hostloop| = 0.0`).
+  - **Remaining 1.12 gaps:** (1) **PHS-coupled** photosynthesis (`use_hydrstress=true`, its own
+    `_psn_phs_*` KA kernels) would still segfault under reverse on 1.12 — same fix extends it;
+    (2) the **whole-function** (non-decomposed) canopy autodiff hits the historical "sret wall"
+    segfault — already avoided by the decomposed production path. 1.10 retains everything.
 - **AD-smoothing** of discontinuities (btran, phase-change, snow merge/split) — ✅ done, and
   byte-identical when smoothing is off.
 
@@ -109,15 +114,15 @@ Re-run the README recipe once the CTSM case is restored.
 | Process fidelity | ✅ complete | parity anchored on reference configs, invariant-validated elsewhere (by design) |
 | Validation harness | ✅ complete | T4 skill is modest (calibration, not wiring); deep multi-year tier opt-in |
 | Forward AD | ✅ validated | — |
-| Reverse AD | ✅ whole-driver (energy-balance) on 1.10 **and 1.12** | photosynthesis-coupled (`use_psn=1`) reverse still 1.10-only on 1.12 (KA-kernel ci-solve) |
+| Reverse AD | ✅ whole-driver incl. **photosynthesis** (`use_psn=1`) on 1.10 **and 1.12** | PHS-coupled (`use_hydrstress`) reverse + whole-*function* canopy still 1.12-blocked (latter avoided by decomposition) |
 | GPU Metal | ✅ validated 0.0 | — |
 | GPU CUDA/AMD | ⚠️ proxy only | **unrun on real hardware** — `gpu_validate_cuda.jl` ready for a GPU box |
 
 ## Concrete remaining work to claim "fully validated AD + GPU"
 
-1. **Photosynthesis-coupled reverse-AD on 1.12** — the energy-balance whole-driver reverse is
-   now FD-validated on 1.12 (done); the `use_psn=1` path needs an AD-mode host-loop fallback for
-   the KA-kernel `photosynth_ci_solve!` to clear its Enzyme-on-1.12 segfault.
+1. **Reverse-AD on 1.12** — energy-balance AND photosynthesis-coupled (`use_psn=1`) whole-driver
+   reverse are both FD-validated on 1.12 (done). Only the PHS-coupled path (`use_hydrstress`, its
+   own `_psn_phs_*` KA kernels) remains — the same AD-mode host-loop transform extends to it.
 2. **Run `scripts/gpu_validate_cuda.jl` on real NVIDIA hardware** (rented GPU over SSH, or
    Buildkite `juliagpu`) — the one external dependency for "CUDA-validated".
 3. **Restore the CTSM case + run the pdump verify** → broaden T1 parity beyond the Bow anchor.

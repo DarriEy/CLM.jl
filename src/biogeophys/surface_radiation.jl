@@ -1007,8 +1007,8 @@ function surface_radiation!(surfalb::SurfaceAlbedoData,
 
     # Per-patch scratch carried across passes — device-resident (similar()+fill!,
     # NOT zeros()), so a Float32/Metal state runs the whole function on-device.
-    mkV() = fill!(similar(proto, FT, endp), zero(FT))
-    mkM() = fill!(similar(proto, FT, endp, nband), zero(FT))
+    mkV() = fill!(similar(proto, endp), zero(eltype(proto)))
+    mkM() = fill!(similar(proto, endp, nband), zero(eltype(proto)))
     tmp = _SRTmpDV(; trd = mkM(), tri = mkM(), cad = mkM(), cai = mkM(),
                     parveg = mkV(), sabg_pur = mkV(), sabg_bc = mkV(),
                     sabg_oc = mkV(), sabg_dst = mkV())
