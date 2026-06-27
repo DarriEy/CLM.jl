@@ -1428,7 +1428,9 @@ function soilwater_moisture_form!(col_data::ColumnData,
 
     # Per-column scratch rows (nc × nlevsoi), device-resident via similar()+fill!,
     # grouped so the whole adaptive substep loop runs as one per-column kernel.
-    scrow() = fill!(similar(h2osoi_liq, FT, nc, nlevsoi), zero(FT))
+    # (do NOT capture the Type `FT` in this closure — see note in soilwater_zengdecker2009!;
+    #  similar(arr, dims...) keeps eltype+backend, zero(eltype(arr)) is constant-folded.)
+    scrow() = fill!(similar(h2osoi_liq, nc, nlevsoi), zero(eltype(h2osoi_liq)))
     scr = MfScr(; hk = scrow(), smp = scrow(), dhkdw = scrow(), dsmpdw = scrow(),
         imped = scrow(), s2 = scrow(), vwc_liq = scrow(), dt_dz = scrow(),
         qin = scrow(), qout = scrow(), dqidw0 = scrow(), dqidw1 = scrow(),
@@ -1537,9 +1539,14 @@ function soilwater_zengdecker2009!(col_data::ColumnData,
     # Local scratch — allocated on the backend of the state via similar()+fill!
     # (NOT zeros(), which is always host memory) so the kernels below run
     # device-resident on GPU. zerocol2(m) → nc×m float matrix of zeros.
-    FT = eltype(h2osoi_liq)
-    zerocol2(m::Int) = fill!(similar(h2osoi_liq, FT, nc, m), zero(FT))
-    zerocol1()       = fill!(similar(h2osoi_liq, FT, nc), zero(FT))
+    # NOTE: do NOT bind `FT = eltype(...)` and capture it in the closures below.
+    # On Julia 1.12 capturing a Type-valued variable boxes it and emits a runtime
+    # `_typeof_captured_variable`/`has_free_typevars` check that Enzyme reverse-AD
+    # cannot differentiate (EnzymeNoDerivativeError). `similar(arr, dims...)` keeps
+    # the array's own eltype + backend (GPU-safe, byte-identical), and
+    # `zero(eltype(arr))` is constant-folded inside the closure (no Type capture).
+    zerocol2(m::Int) = fill!(similar(h2osoi_liq, nc, m), zero(eltype(h2osoi_liq)))
+    zerocol1()       = fill!(similar(h2osoi_liq, nc), zero(eltype(h2osoi_liq)))
     hk      = zerocol2(nlevsoi)
     dhkdw   = zerocol2(nlevsoi)
     smp_arr = zerocol2(nlevsoi)

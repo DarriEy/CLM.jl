@@ -406,8 +406,11 @@ function update_h2osfc!(col_data::ColumnData,
                          h2osfcflag::Int = 1)
 
     nc = length(waterstatebulk.ws.h2osfc_col)
-    FT = eltype(waterstatebulk.ws.h2osfc_col)
-    _h2sc(n) = fill!(similar(waterstatebulk.ws.h2osfc_col, FT, n), zero(FT))  # device-resident
+    # Avoid capturing a Type-valued `FT` in the closure: on Julia 1.12 that boxes
+    # FT and emits a runtime `_typeof_captured_variable`/`has_free_typevars` check
+    # that Enzyme reverse-AD cannot differentiate. `similar(arr, n)` keeps eltype +
+    # backend (GPU-safe); `zero(eltype(arr))` is constant-folded (no Type capture).
+    _h2sc(n) = fill!(similar(waterstatebulk.ws.h2osfc_col, n), zero(eltype(waterstatebulk.ws.h2osfc_col)))  # device-resident
     qflx_h2osfc_surf_arr = _h2sc(nc)
     qflx_h2osfc_drain_arr = _h2sc(nc)
     qinmax = _h2sc(nc)
