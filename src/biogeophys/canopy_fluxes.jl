@@ -1392,7 +1392,7 @@ function canopy_fluxes_core!(
     # device-resident on GPU. A bare zeros() forces a host Array and would break
     # a whole-function GPU run. `_sc`/`_sci` are the float/Int scratch factories.
     FT = eltype(forc_t_col)
-    _sc(dims...)  = fill!(similar(temperature.t_veg_patch, FT,  dims...), zero(FT))
+    _sc(dims...)  = fill!(similar(temperature.t_veg_patch,  dims...), zero(eltype(temperature.t_veg_patch)))
     _sci(dims...) = fill!(similar(patch_data.column,       Int, dims...), 0)
     zldis     = _sc(endp)
     dth       = _sc(endp)

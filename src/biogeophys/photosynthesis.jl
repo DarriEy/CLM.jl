@@ -1065,6 +1065,14 @@ struct PsnCiScalars{S}
     RGAS_::S; MAX_CS_::S; MEDLYN_RH_CAN_MAX_::S; MEDLYN_RH_CAN_FACT_::S; rsmax0::S
 end
 
+# AD-mode switch for the Pass-3 ci-solve. When true, `photosynth_ci_solve!` runs a
+# plain host loop (over `_photosynth_ci_body!`) instead of launching the KA kernel —
+# the KA kernel-launch path makes Enzyme reverse segfault on Julia 1.12. The reverse
+# engine (compositional_reverse!) sets this true for the duration of the autodiff and
+# restores it; normal forward/GPU runs leave it false (KA kernel). Byte-identical primal
+# is guaranteed because both paths execute the same `_photosynth_ci_body!`.
+const _PSN_CI_AD_HOSTLOOP = Ref(false)
+
 @kernel function _photosynth_ci_kernel!(ps, psn_wc_z, psn_wj_z, psn_wp_z,
         @Const(mask_patch), @Const(ivt),
         @Const(medlynslope_pft), @Const(medlynintercept_pft), @Const(mbbopt_pft),
@@ -1075,6 +1083,25 @@ end
         STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
 
     p = @index(Global)
+    _photosynth_ci_body!(p, ps, psn_wc_z, psn_wj_z, psn_wp_z,
+        mask_patch, ivt, medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+        forc_pbot, tgcm, rb, par_z_in, jmax_z_local, eair, esat_tv, cair,
+        oair, o3coefg, o3coefv, nrad, sc, is_sun, stomatalcond_mtd,
+        STOMATALCOND_MTD_BB1987_, STOMATALCOND_MTD_MEDLYN2011_)
+end
+
+# Per-patch Pass-3 body, factored out of `_photosynth_ci_kernel!` so the SAME code
+# runs in two ways: (a) the KA kernel above calls it with `p = @index(Global)` (KA
+# inlines it on the GPU device path → the Metal/CUDA kernel is functionally unchanged);
+# (b) the host loop in `photosynth_ci_solve!` (taken only under `_PSN_CI_AD_HOSTLOOP[]`,
+# i.e. Enzyme reverse on Julia 1.12) calls it directly, avoiding the KA-kernel-launch
+# codegen that Enzyme reverse segfaults on under 1.12. Identical body ⇒ byte-identical
+# primal between the two paths.
+@inline function _photosynth_ci_body!(p, ps, psn_wc_z, psn_wj_z, psn_wp_z,
+        mask_patch, ivt, medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+        forc_pbot, tgcm, rb, par_z_in, jmax_z_local, eair, esat_tv, cair,
+        oair, o3coefg, o3coefv, nrad, sc, is_sun::Bool, stomatalcond_mtd::Int,
+        STOMATALCOND_MTD_BB1987_::Int, STOMATALCOND_MTD_MEDLYN2011_::Int)
     @inbounds if mask_patch[p]
         ivt_p = ivt[p]
         T = eltype(forc_pbot)
@@ -1237,14 +1264,29 @@ function photosynth_ci_solve!(ps,
         T(RGAS), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT), T(rsmax0))
     is_sun = (phase == "sun")
     dv = _psn_dv(ps)
-    be = _kernel_backend(forc_pbot)
-    _photosynth_ci_kernel!(be)(dv, psn_wc_z, psn_wj_z, psn_wp_z,
-        mask_patch, ivt, medlynslope_pft, medlynintercept_pft, mbbopt_pft,
-        forc_pbot, tgcm, rb, par_z_in, jmax_z_local, eair, esat_tv, cair, oair,
-        o3coefg, o3coefv, nrad, sc, is_sun, stomatalcond_mtd,
-        STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
-        ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if _PSN_CI_AD_HOSTLOOP[]
+        # AD-mode path (set only by the reverse engine; see compositional_reverse!):
+        # plain host loop over the SAME per-patch body the KA kernel runs. This avoids
+        # the KernelAbstractions kernel-launch codegen that Enzyme reverse segfaults on
+        # under Julia 1.12, while staying byte-identical to the kernel primal (shared
+        # `_photosynth_ci_body!`). Normal/GPU runs never set the flag → KA kernel below.
+        @inbounds for p in 1:length(bounds_patch)
+            _photosynth_ci_body!(p, dv, psn_wc_z, psn_wj_z, psn_wp_z,
+                mask_patch, ivt, medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+                forc_pbot, tgcm, rb, par_z_in, jmax_z_local, eair, esat_tv, cair, oair,
+                o3coefg, o3coefv, nrad, sc, is_sun, stomatalcond_mtd,
+                STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011)
+        end
+    else
+        be = _kernel_backend(forc_pbot)
+        _photosynth_ci_kernel!(be)(dv, psn_wc_z, psn_wj_z, psn_wp_z,
+            mask_patch, ivt, medlynslope_pft, medlynintercept_pft, mbbopt_pft,
+            forc_pbot, tgcm, rb, par_z_in, jmax_z_local, eair, esat_tv, cair, oair,
+            o3coefg, o3coefv, nrad, sc, is_sun, stomatalcond_mtd,
+            STOMATALCOND_MTD_BB1987, STOMATALCOND_MTD_MEDLYN2011;
+            ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    end
     return ps
 end
 
@@ -1263,6 +1305,14 @@ end
         @Const(t_veg), @Const(btran), prm, stomatalcond_mtd::Int,
         bbbopt_c3, bbbopt_c4, stomatal_bb::Int)
     p = @index(Global)
+    _psn_pass1_body!(p, ps, mask_patch, ivt, c3psn_pft, mbbopt_pft, forc_pbot, oair,
+        t_veg, btran, prm, stomatalcond_mtd, bbbopt_c3, bbbopt_c4, stomatal_bb)
+end
+
+# Shared per-patch body for Pass 1 (KA kernel + AD host loop) — see _photosynth_ci_body!.
+@inline function _psn_pass1_body!(p, ps, mask_patch, ivt, c3psn_pft, mbbopt_pft,
+        forc_pbot, oair, t_veg, btran, prm, stomatalcond_mtd::Int,
+        bbbopt_c3, bbbopt_c4, stomatal_bb::Int)
     @inbounds if mask_patch[p]
         T = eltype(forc_pbot)
         ivt_p = ivt[p]
@@ -1298,12 +1348,20 @@ function psn_pass1_update!(ps, mask_patch, ivt, c3psn_pft, mbbopt_pft,
            cp25_yr2000 = T(params_inst.cp25_yr2000), kcha = T(params_inst.kcha),
            koha = T(params_inst.koha), cpha = T(params_inst.cpha))
     dv = _psn_dv(ps)
-    be = _kernel_backend(forc_pbot)
-    _psn_pass1_kernel!(be)(dv, mask_patch, ivt, c3psn_pft, mbbopt_pft,
-        forc_pbot, oair, t_veg, btran, prm, stomatalcond_mtd,
-        T(BBBOPT_C3), T(BBBOPT_C4), STOMATALCOND_MTD_BB1987;
-        ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if _PSN_CI_AD_HOSTLOOP[]
+        @inbounds for p in 1:length(bounds_patch)
+            _psn_pass1_body!(p, dv, mask_patch, ivt, c3psn_pft, mbbopt_pft,
+                forc_pbot, oair, t_veg, btran, prm, stomatalcond_mtd,
+                T(BBBOPT_C3), T(BBBOPT_C4), STOMATALCOND_MTD_BB1987)
+        end
+    else
+        be = _kernel_backend(forc_pbot)
+        _psn_pass1_kernel!(be)(dv, mask_patch, ivt, c3psn_pft, mbbopt_pft,
+            forc_pbot, oair, t_veg, btran, prm, stomatalcond_mtd,
+            T(BBBOPT_C3), T(BBBOPT_C4), STOMATALCOND_MTD_BB1987;
+            ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    end
     return nothing
 end
 
@@ -1315,6 +1373,13 @@ end
         @Const(lai_z_in), @Const(rb), @Const(psn_wc_z), @Const(psn_wj_z),
         @Const(psn_wp_z), is_sun::Bool)
     p = @index(Global)
+    _psn_pass4_body!(p, ps, mask_patch, nrad, lai_z_in, rb,
+        psn_wc_z, psn_wj_z, psn_wp_z, is_sun)
+end
+
+# Shared per-patch body for Pass 4 (KA kernel + AD host loop) — see _photosynth_ci_body!.
+@inline function _psn_pass4_body!(p, ps, mask_patch, nrad, lai_z_in, rb,
+        psn_wc_z, psn_wj_z, psn_wp_z, is_sun::Bool)
     @inbounds if mask_patch[p]
         T = eltype(rb)
         psn_z   = is_sun ? ps.psnsun_z_patch  : ps.psnsha_z_patch
@@ -1355,10 +1420,17 @@ end
 function psn_pass4_update!(ps, mask_patch, nrad, lai_z_in, rb,
         psn_wc_z, psn_wj_z, psn_wp_z, is_sun::Bool, bounds_patch)
     dv = _psn_dv(ps)
-    be = _kernel_backend(rb)
-    _psn_pass4_kernel!(be)(dv, mask_patch, nrad, lai_z_in, rb,
-        psn_wc_z, psn_wj_z, psn_wp_z, is_sun; ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if _PSN_CI_AD_HOSTLOOP[]
+        @inbounds for p in 1:length(bounds_patch)
+            _psn_pass4_body!(p, dv, mask_patch, nrad, lai_z_in, rb,
+                psn_wc_z, psn_wj_z, psn_wp_z, is_sun)
+        end
+    else
+        be = _kernel_backend(rb)
+        _psn_pass4_kernel!(be)(dv, mask_patch, nrad, lai_z_in, rb,
+            psn_wc_z, psn_wj_z, psn_wp_z, is_sun; ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    end
     return nothing
 end
 
@@ -1374,6 +1446,18 @@ end
         use_cn::Bool, light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
         is_sun::Bool, leafresp_ryan::Int)
     p = @index(Global)
+    _psn_pass2_body!(p, ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft, leafcn_pft,
+        flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
+        par_z_in, vcmaxcint, nrad, prm, vcmax25_scale, jmax25top_sf_val, leaf_mr_vcm,
+        use_cn, light_inhibit, leafresp_method, nlevcan, is_sun, leafresp_ryan)
+end
+
+# Shared per-patch body for Pass 2 (KA kernel + AD host loop) — see _photosynth_ci_body!.
+@inline function _psn_pass2_body!(p, ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
+        leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg,
+        btran, tlai_z, par_z_in, vcmaxcint, nrad, prm, vcmax25_scale, jmax25top_sf_val,
+        leaf_mr_vcm, use_cn::Bool, light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
+        is_sun::Bool, leafresp_ryan::Int)
     @inbounds if mask_patch[p]
         T = eltype(t_veg)
         ivt_p = ivt[p]
@@ -1497,14 +1581,24 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
     _lmratk = T.(params_inst.lmr_intercept_atkin)
     lmr_intercept_atkin = slatop_pft isa Array ? _lmratk : convert(typeof(slatop_pft), _lmratk)
     dv = _psn_dv(ps)
-    be = _kernel_backend(t_veg)
-    _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-        leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
-        par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
-        T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
-        ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991;
-        ndrange = length(bounds_patch))
-    KA.synchronize(be)
+    if _PSN_CI_AD_HOSTLOOP[]
+        @inbounds for p in 1:length(bounds_patch)
+            _psn_pass2_body!(p, dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
+                leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
+                par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
+                T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
+                ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991)
+        end
+    else
+        be = _kernel_backend(t_veg)
+        _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
+            leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
+            par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
+            T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
+            ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991;
+            ndrange = length(bounds_patch))
+        KA.synchronize(be)
+    end
     return nothing
 end
 

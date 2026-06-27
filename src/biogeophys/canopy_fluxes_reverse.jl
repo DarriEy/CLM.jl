@@ -258,19 +258,30 @@ Returns the gradient bundle `db`.
 function compositional_reverse!(phases, b, seed_bang!)
     Enzyme.API.strictAliasing!(false)
     revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
-    checkpoints = Any[]
-    for (f, cargs) in phases
-        push!(checkpoints, deepcopy(b)); f(b, cargs...)
+    # Force the photosynthesis Pass-3 ci-solve onto its plain host loop for the whole
+    # reverse pass: the KA kernel-launch path makes Enzyme reverse segfault on Julia
+    # 1.12. The host loop is byte-identical (shared `_photosynth_ci_body!`), so both the
+    # forward checkpoint sweep and the per-phase autodiff stay consistent. Restored in
+    # `finally` so non-AD code keeps the KA kernel.
+    _prev_psnci = _PSN_CI_AD_HOSTLOOP[]
+    _PSN_CI_AD_HOSTLOOP[] = true
+    try
+        checkpoints = Any[]
+        for (f, cargs) in phases
+            push!(checkpoints, deepcopy(b)); f(b, cargs...)
+        end
+        db = Enzyme.make_zero(b)
+        seed_bang!(db, b)
+        for k in length(phases):-1:1
+            f, cargs = phases[k]
+            bk = deepcopy(checkpoints[k])
+            Enzyme.autodiff(revmode, f, Enzyme.Const, Enzyme.Duplicated(bk, db),
+                            map(Enzyme.Const, cargs)...)
+        end
+        return db
+    finally
+        _PSN_CI_AD_HOSTLOOP[] = _prev_psnci
     end
-    db = Enzyme.make_zero(b)
-    seed_bang!(db, b)
-    for k in length(phases):-1:1
-        f, cargs = phases[k]
-        bk = deepcopy(checkpoints[k])
-        Enzyme.autodiff(revmode, f, Enzyme.Const, Enzyme.Duplicated(bk, db),
-                        map(Enzyme.Const, cargs)...)
-    end
-    return db
 end
 
 # Reverse ONE timestep's ordered phase list into an EXISTING adjoint `db`, starting from

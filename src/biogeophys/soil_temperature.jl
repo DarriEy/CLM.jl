@@ -341,8 +341,8 @@ function soil_temperature!(col::ColumnData, lun::LandunitData, patch_data::Patch
     FT = eltype(temperature.t_soisno_col)
     pf = temperature.t_soisno_col          # float prototype (backend + FT)
     pint = col.snl                         # int prototype (backend)
-    _z(d...)  = fill!(similar(pf, FT, d...), zero(FT))    # zero-filled FT array
-    _nan(d...) = fill!(similar(pf, FT, d...), FT(NaN))    # NaN-filled FT array
+    _z(d...)  = fill!(similar(pf, d...), zero(eltype(pf)))    # zero-filled FT array (no captured-Type FT → 1.12 Enzyme-safe)
+    _nan(d...) = fill!(similar(pf, d...), eltype(pf)(NaN))    # NaN-filled FT array (no captured-Type FT → 1.12 Enzyme-safe)
     nlev = nlevsno + nlevmaxurbgrnd
     jtop = fill!(similar(pint, Int, nc), -9999)
     jbot = fill!(similar(pint, Int, nc), 0)
@@ -1139,7 +1139,7 @@ function compute_ground_heat_flux_and_deriv!(
     nc = length(bounds_col)
     FT = eltype(temperature.t_soisno_col)
     # Per-call scratch on the state's backend (device on GPU) — not host zeros().
-    _z(n) = fill!(similar(temperature.t_grnd_col, FT, n), zero(FT))
+    _z(n) = fill!(similar(temperature.t_grnd_col, n), zero(eltype(temperature.t_grnd_col)))
     lwrad_emit = _z(nc)
     dlwrad_emit = _z(nc)
     lwrad_emit_snow = _z(nc)
@@ -2136,7 +2136,7 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
 
     # Per-call scratch on the same backend as the state (was local zeros() in the loop).
     nlev = nlevsno + nlevmaxurbgrnd
-    mk(d2) = fill!(similar(t_soisno, FT, nc, d2), zero(FT))
+    mk(d2) = fill!(similar(t_soisno, nc, d2), zero(eltype(t_soisno)))
     tmp = PcbTmp(; hm = mk(nlev), xm = mk(nlev), xm2 = mk(nlev), wice0 = mk(nlev),
         wliq0 = mk(nlev), wexice0 = mk(nlev), wmass0 = mk(nlev),
         supercool = mk(nlevmaxurbgrnd), tinc = mk(nlev))
