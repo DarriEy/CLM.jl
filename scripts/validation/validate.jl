@@ -21,6 +21,11 @@ using Printf
 const _HERE = @__DIR__
 include(joinpath(_HERE, "..", "fortran_parity_common.jl"))   # build_bow_inst, paths, inject_dump!
 include(joinpath(_HERE, "..", "..", "test", "validation", "matrix.jl"))
+# The REAL streamflow machinery: DOMAINS registry + run_domain (run loop + runoff→
+# discharge aggregation) + detect_obs/read_obs_daily + kge/nse scoring. The T4 oracle
+# reuses these directly (a short eval window) rather than re-deriving them. Its module
+# guard (`PROGRAM_FILE == @__FILE__`) is false on include, so nothing runs at load.
+include(joinpath(_HERE, "..", "run_clm_streamflow.jl"))
 
 const WARM_RESTART = joinpath(DUMPDIR, "Bow_at_Banff_lumped.clm2.r.2003-01-01-00000.nc")
 
@@ -406,15 +411,92 @@ function oracle_ad_fd(cfg)
               "(test_ad_robustness.jl / test_ad_e2e.jl / test_driver_reverse.jl).")
 end
 
-# T4 streamflow KGE/NSE vs gauge obs is a multi-year run + observed-hydrograph scoring
-# — minutes-to-hours per domain, produced out-of-band by scripts/run_clm_streamflow.jl
-# (which writes the per-domain hydrograph CSV + KGE/NSE). The harness records the
-# realism check + points at that deep run rather than re-scoring in the oracle loop.
+# T4 streamflow KGE/NSE vs gauge obs — REAL in-harness scoring. Reuses the
+# run_clm_streamflow.jl machinery (DOMAINS registry, run_domain run loop +
+# runoff→discharge aggregation, detect_obs/read_obs_daily, kge/nse) over a SHORT
+# eval window so the oracle stays tractable (a full 10-yr score is minutes-to-hours;
+# the default 1-spinup-yr + 1-score-yr window is ~17.5k hourly steps, single-domain).
+#
+# Validation-domain symbol → run_clm_streamflow.jl DOMAINS key (:bow is special-cased
+# there; the rest mirror DOMAIN_DIRNAME). Only these have a wired streamflow window.
+const STREAMFLOW_DOMAIN_NAME = Dict(
+    :bow       => "Bow_at_Banff_lumped",
+    :krycklan  => "Boreal_Krycklan_Sweden",
+    :abisko    => "Arctic_Abisko_Sweden",
+    :tagus     => "Mediterranean_Tagus_Spain",
+    :massa     => "Alps_Massa_Aletsch_CH",
+    :baltimore => "Urban_DeadRun_Baltimore",
+    :iceland   => "Iceland_Jokulsa_Fjollum",
+)
+# Eval window (env-overridable for the deep weekly tier). Default: 1 spinup yr + 1
+# scored yr from each domain's registry run_start. A short cold-started spinup is NOT
+# expected to reach production KGE — the oracle's bar is "a REAL finite KGE/NSE was
+# computed AND it clears a soft skill floor", not parity-grade realism.
+const SF_SPINUP_YEARS = parse(Int, get(ENV, "CLMVAL_SF_SPINUP_YEARS", "1"))
+const SF_SCORE_YEARS  = parse(Int, get(ENV, "CLMVAL_SF_SCORE_YEARS", "1"))
+# Soft skill floor: KGE = -0.41 is the mean-flow benchmark line (Knoben et al. 2019)
+# — below it a constant-mean predictor beats the model. A finite KGE above it is the
+# first real bar; tighten via env (or the weekly tier with a longer spinup).
+const SF_KGE_FLOOR = parse(Float64, get(ENV, "CLMVAL_SF_KGE_FLOOR", "-0.41"))
+
 function oracle_streamflow(cfg)
-    (; oracle=:streamflow, pass=true,
-       metrics=(; verified_by="scripts/run_clm_streamflow.jl", domain=cfg.domain),
-       detail="Streamflow KGE/NSE vs gauge for $(cfg.domain) — scored by the deep " *
-              "run_clm_streamflow.jl tier (run out-of-band; writes hydrograph + KGE/NSE).")
+    if !haskey(STREAMFLOW_DOMAIN_NAME, cfg.domain)
+        return (; oracle=:streamflow, pass=missing, metrics=(; domain=cfg.domain),
+                detail="streamflow window not wired for domain $(cfg.domain)")
+    end
+    name = STREAMFLOW_DOMAIN_NAME[cfg.domain]
+    if !(haskey(DOMAINS, name) && isfile(surfdata_path(name)) && isfile(params_path(name)))
+        return (; oracle=:streamflow, pass=missing, metrics=(; domain=cfg.domain),
+                detail="domain inputs for $name absent (data-dependent skip)")
+    end
+    # Truncate the registry window to the short eval window (restored in finally). The
+    # NamedTuple values are immutable, but DOMAINS is a Dict so we swap the entry.
+    orig   = DOMAINS[name]
+    sp_end = orig.run_start + Year(SF_SPINUP_YEARS) - Day(1)
+    r_end  = sp_end + Year(SF_SCORE_YEARS)
+    DOMAINS[name] = merge(orig, (spinup_end=sp_end, run_end=r_end))
+    window = "$(Date(orig.run_start))..$(Date(r_end)) (score after $(Date(sp_end)))"
+    t0 = time(); res = nothing; err = nothing
+    try
+        res = run_domain(name)          # full run loop + runoff→discharge + KGE/NSE
+    catch e
+        err = sprint(showerror, e)
+    finally
+        DOMAINS[name] = orig
+    end
+    wall = round(time() - t0, digits=1)
+    if err !== nothing
+        return (; oracle=:streamflow, pass=false,
+                metrics=(; domain=cfg.domain, window, wall),
+                detail="streamflow run errored after $(wall)s: $err")
+    end
+    if res === nothing
+        return (; oracle=:streamflow, pass=missing,
+                metrics=(; domain=cfg.domain, window, wall),
+                detail="run_domain returned nothing (inputs/forcing not built)")
+    end
+    if get(res, :scored, false)
+        kge = res.kge; nse = res.nse
+        pass = isfinite(kge) && isfinite(nse) && kge > SF_KGE_FLOOR
+        (; oracle=:streamflow, pass,
+           metrics=(; domain=cfg.domain, kge=round(kge, digits=4), nse=round(nse, digits=4),
+                    r=round(res.r, digits=3), alpha=round(res.alpha, digits=3),
+                    beta=round(res.beta, digits=3), sim_mean=round(res.sim_mean, digits=3),
+                    obs_mean=round(res.obs_mean, digits=3), kge_floor=SF_KGE_FLOOR, window, wall),
+           detail="KGE=$(round(kge,digits=3)) NSE=$(round(nse,digits=3)) " *
+                  "(r=$(round(res.r,digits=2)) α=$(round(res.alpha,digits=2)) β=$(round(res.beta,digits=2))) " *
+                  "vs gauge over $window in $(wall)s" *
+                  (pass ? "" : " — KGE ≤ floor $(SF_KGE_FLOOR)"))
+    else
+        # Ran finite but unscored (no gauge / too few overlapping days): fall back to
+        # the finiteness bar — a finite mean simulated discharge IS the realism floor.
+        sm = get(res, :sim_mean, NaN)
+        pass = isfinite(sm)
+        (; oracle=:streamflow, pass,
+           metrics=(; domain=cfg.domain, sim_mean=round(sm, digits=4), scored=false, window, wall),
+           detail="ran finite (sim_mean=$(round(sm,digits=3)) cms) but unscored " *
+                  "(no overlapping gauge days) over $window in $(wall)s")
+    end
 end
 
 # T1 parity reference: the Bow daytime peak-sun step (dumps in DUMPDIR). The tol is
