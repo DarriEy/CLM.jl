@@ -1,0 +1,15 @@
+--- src/main/clm_driver.F90    (stock CTSM)
++++ SourceMods/src.clm/clm_driver.F90
+@@ use-statements (after line 83) @@
+   use clm_instMod            , only : ... (existing)
++  use pdumpMod               , only : pdump_write   ! CLM.jl parity instrumentation
+@@ top of the main clump physics loop, right after get_clump_bounds(nc, bounds_clump),
+@@ before  call t_startf('drvinit')  (≈ line 494) @@
+        call get_clump_bounds(nc, bounds_clump)
++       call pdump_write(bounds_clump, 'before_step')   ! CLM.jl parity
++
+        call t_startf('drvinit')
+@@ immediately after  call t_stopf('hydro2_drainage')  (≈ line 1105) @@
+        call t_stopf('hydro2_drainage')
++       call pdump_write(bounds_clump, 'after_hydrologydrainage')   ! CLM.jl parity
++
