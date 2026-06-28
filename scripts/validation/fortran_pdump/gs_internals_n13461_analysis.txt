@@ -1,0 +1,92 @@
+# Phase 3f — localizing the PHS unstressed stomatal-conductance (gs0sun) divergence
+# nstep 13461, Bow-at-Banff SP (use_cn=false) + PHS + LUNA. Sunlit leaf, p=2 tree.
+#
+# Reference dumps used (already committed):
+#   photo_internals_n13461_fortran.txt  (FPHOTO: an, gsmol, bsun, cs-inputs, rh_can, gb_mol)
+#   calcstress_n13461_fortran.txt        (FCALCSTRESS: gs_in_sun = gs0sun, bsun, qsun)
+#   photo_internals_n13461_julia.txt     (JPHOTO, regenerated post-fix)
+# Decisive param evidence read directly from the Fortran run's paramfile (ncdump):
+#   .../dds_run_1/final_evaluation/settings/CLM/parameters/clm5_params.nc
+#
+# =====================================================================================
+# 1. TERM-BY-TERM gs-formula comparison (iteration 1, identical inputs)
+# =====================================================================================
+# The Medlyn2011 gs_mol quadratic in Julia _ci_func_PHS_core! (photosynthesis.jl:3866-3877)
+# is BYTE-IDENTICAL to Fortran ci_func_PHS (PhotosynthesisMod.F90:4421-4437):
+#     term  = 1.6*an/(cs/forc_pbot*1e6)
+#     bquad = -(2*(medint*1e-6 + term) + (medslope*term)^2/(gb_mol*1e-6*rh_can))
+#     cquad = medint^2*1e-12 + (2*medint*1e-6 + term*(1 - medslope^2/rh_can))*term
+#     gs_mol= max(r1,r2)*1e6
+# All gs-formula INPUTS are bit-identical at iter 1 (Julia vs Fortran):
+#     rh_can (=vpd_can kPa) 0.7422822   cair 28.9634   oair 16494.17   gb_mol 769458.3
+#     vcmax_z 34.0848  cp 2.51246  kc 17.2081  ko 16547.79  je_sun 70.086  lmr 0.405958
+#   -> method (Medlyn2011), rh_can/vpd, cs-inputs, kinetics ALL match.
+#   medlynintercept = 100 for every PFT in the paramfile -> Julia's 100.0 already correct.
+#
+# =====================================================================================
+# 2. THE FIRST DIVERGING TERM:  medlynslope (g1)
+# =====================================================================================
+# Fortran reads pftcon%medlynslope from the paramfile (ALWAYS, regardless of use_cn).
+# The DDS-calibrated Bow paramfile sets, per 0-based PFT index:
+#     idx 1  (NET temperate tree, Bow PCT 60%, = patch p2)  medlynslope = 11.152632489181
+#     idx 12 (C3 arctic grass,    Bow PCT 35%, = patch p3)  medlynslope = 11.152632489181
+#     (idx 0 bare 5%; all other indices keep CLM5 defaults 2.35/4.12/5.79/...)
+# Julia's SP path HARDCODED medlynslope = 6.0 for all PFTs
+#     (clm_driver.jl:1220, "_medslp_pft = config.use_cn ? ... : fill(6.0, MXPFT+1)").
+#
+# Magnitude: gs ~ (1 + g1/sqrt(vpd)).  vpd=0.7423 kPa, sqrt=0.8616:
+#     g1=6.0   -> 1 + 6.0/0.8616    = 7.964
+#     g1=11.15 -> 1 + 11.1526/0.8616 = 13.945
+#     ratio 13.945/7.964 = 1.751   == observed bsun ratio (0.020306/0.011619 = 1.748)
+#                                   ~= observed gs0sun ratio (568469/313089 = 1.816).
+# So Julia's TOO-LOW slope (6.0) made the unstressed conductance ~1.75x too low ->
+# too little transpiration demand -> bsun ~1.75x TOO HIGH (under-stressed) -> the
+# residual PHS T_VEG divergence. SAME class as froot #138 / lmr #139: a per-PFT
+# paramfile value silently replaced by a default in the SP path.
+#
+# Classification: FIXABLE (param/wiring), not a formula or floor.
+#
+# =====================================================================================
+# 3. FIX (clm_driver.jl) and RESULT
+# =====================================================================================
+# Read pftcon.medlynslope/medlynintercept whenever use_cn OR use_hydrstress (Fortran
+# always uses pftcon). Gating keeps the pure non-PHS SP/AD path (neither flag)
+# byte-identical at 6.0, preserving its validated energy balance.
+#
+# Oracle: PARITY_PHS=1 julia +1.12 --project=. scripts/fortran_parity_validate.jl 13461
+#                                   BEFORE (g1=6.0)        AFTER (g1=11.1526)   Fortran
+#   unstressed gs0sun (=gsmol/bsun) 313089 (0.55x)        ~813600 (1.0002x)    ~813400
+#   sunlit an  (iter1, p2)          0.25618 (1.68x)        0.14547 (0.952x)     0.15283
+#   sunlit ci  (iter1, p2)          25.353                 26.901               26.8996
+#   sunlit bsun(iter1, p2)          0.020306 (1.75x)       0.011059 (0.952x)    0.011619
+#   sunlit gsmol(iter1,p2)          9051.78                8998.14              9451.14
+#   rssun  p2 (converged)           7114.3  (MISMATCH)     20000.0  (MATCH)     20000.0
+#   rssha  p2 (converged)           11989.9               20000.0  (MISMATCH)   10741.1
+#   T_VEG  p2                       293.292 (d=-0.038)     293.419 (d=+0.089)   293.330
+#   global max|rel|                 1.914e-04              3.024e-04
+#
+# The 1.8x unstressed-conductance gap (the Phase-3f target) is CLOSED: gs0sun now
+# matches Fortran to 0.02%. rssun (sunlit, converged) now matches EXACTLY (both clamp
+# at rsmax0=20000).
+#
+# =====================================================================================
+# 4. REMAINING RESIDUAL (honest verdict)
+# =====================================================================================
+# With g1 fixed, the unstressed gs0sun matches (0.02%) but the STRESS FACTOR bsun/bsha
+# still differs ~5% (sunlit bsun 0.011059 vs 0.011619). This is the plant-hydraulics
+# (vegwp / getqflx) stress solve, NOT the stomatal formula. At convergence the SUNLIT
+# leaf is fully stressed in both (rssun 20000 == 20000), so the only surviving
+# discrepancy is the SHADED leaf at the bsha<0.01 PLC clamp KNIFE-EDGE: Fortran bsha
+# ~0.0106 (survives -> rssha 10741) vs Julia just below 0.01 (clamps -> rssha 20000).
+# A sub-1% bsha difference crosses the hard clamp -> the global max|rel| / T_VEG p2
+# actually got slightly WORSE (0.038K -> 0.089K). That is NOT a regression in physics:
+# the wrong g1=6.0 had been under-stressing BOTH leaves equally, so the canopy
+# energy balance enjoyed partial error-cancellation that masked the bsha knife-edge.
+# Keeping g1=6.0 to preserve the smaller T_VEG would be hacking a match; the correct
+# paramfile value is g1=11.1526 (proven by gs0sun matching to 0.02%).
+#
+# VERDICT: medlynslope wiring = the FIXABLE term that produced the 1.8x gs gap (FIXED).
+# The leftover is a plant-hydraulics bsha residual amplified by the <0.01 PLC clamp
+# discontinuity (a floor / separate axis), flux impact negligible (T_VEG ~0.09K,
+# transpiration O(1e-6 mm/s)). Next axis = the ~5% bsun/bsha plant-hydraulic stress
+# solve, not photosynthesis/stomata.

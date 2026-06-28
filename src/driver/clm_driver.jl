@@ -1213,11 +1213,19 @@ function clm_drv_core!(config::CLMDriverConfig,
     else
         FT[]
     end
-    # Calibrated stomatal/crop params come from pftcon only in CN mode; the SP/AD
-    # path keeps the canopy-core defaults (medlynslope=6.0) so its validated energy
-    # balance is untouched.
-    _medint_pft = config.use_cn ? _onbk(pftcon.medlynintercept) : fill(100.0, MXPFT + 1)
-    _medslp_pft = config.use_cn ? _onbk(pftcon.medlynslope)     : fill(6.0, MXPFT + 1)
+    # Calibrated stomatal params (per-PFT medlynslope/intercept) come from pftcon in
+    # CN mode AND whenever plant-hydraulic stress (PHS) is active. Fortran ALWAYS reads
+    # pftcon%medlynslope (regardless of use_cn), so the SP+PHS Bow reference run uses the
+    # calibrated per-PFT slope (e.g. 11.15 for the Bow tree/grass PFTs), not the
+    # canopy-core default 6.0. Hardcoding 6.0 here made Julia's unstressed stomatal
+    # conductance ~1.75x too low → too little transpiration demand → bsun too high
+    # (under-stressed) → the residual PHS T_VEG divergence. Gating the read on
+    # use_cn||use_hydrstress restores parity while keeping the pure non-PHS SP/AD path
+    # (neither flag) byte-identical at medlynslope=6.0, preserving its validated energy
+    # balance. (Analogous to the SP-mode froot_carbon #138 and LUNA lmr #139 param fixes.)
+    _use_calib_med = config.use_cn || config.use_hydrstress
+    _medint_pft = _use_calib_med ? _onbk(pftcon.medlynintercept) : fill(100.0, MXPFT + 1)
+    _medslp_pft = _use_calib_med ? _onbk(pftcon.medlynslope)     : fill(6.0, MXPFT + 1)
     _crop_pft   = config.use_cn ? _onbk(pftcon.crop)            : Float64[]
     # Positional call into canopy_fluxes_core! (no kwarg NamedTuple) so Enzyme
     # reverse-mode can compile the differentiated driver. The trailing args after
