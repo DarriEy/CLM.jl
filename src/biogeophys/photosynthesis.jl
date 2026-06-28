@@ -462,6 +462,17 @@ end
 # Helper functions: temperature response, quadratic solver
 # =====================================================================
 
+# Gas constant exactly as used inside CTSM PhotosynthesisMod.F90. Fortran carries
+# `rgas` in J/K/kmole (= SHR_CONST_AVOGAD*SHR_CONST_BOLTZ = 8314.467591) and applies
+# the kmole→mole conversion *1.e-3 AT each use site (ft/fth/fth25 and the cf =
+# pbot/(rgas*1e-3*tgcm) leaf-boundary-conductance factor). The module-global
+# `RGAS = 8.31446` (varcon.jl) is a TRUNCATED decimal — bit-different from
+# (6.02214e26*1.38065e-23)*1e-3 = 8.314467591000001 by ~9.1e-7 relative. That ULP
+# seed enters vcmax_z/jmax_z/tpu_z/lmr_z + cf on EVERY in-loop ci-iterate and
+# amplifies into the leaf-temp Newton trajectory. Replicate Fortran's exact value
+# (and its multiply order) here so the non-PHS photosynthesis path is bit-faithful.
+const RGAS_PSN = (6.02214e26 * 1.38065e-23) * 1.0e-3   # == Fortran rgas*1.e-3_r8
+
 """
     ft_photo(tl, ha)
 
@@ -471,7 +482,7 @@ Photosynthesis temperature response function.
     # eltype-generic (T from tl) so it lowers to valid Metal IR under Float32;
     # byte-identical to the Float64 literals on the CPU path.
     T = typeof(tl)
-    return exp(T(ha) / (T(RGAS) * (T(TFRZ) + T(25.0))) * (one(T) - (T(TFRZ) + T(25.0)) / tl))
+    return exp(T(ha) / (T(RGAS_PSN) * (T(TFRZ) + T(25.0))) * (one(T) - (T(TFRZ) + T(25.0)) / tl))
 end
 
 """
@@ -481,7 +492,7 @@ Photosynthesis temperature inhibition function.
 """
 @inline function fth_photo(tl::Real, hd::Real, se::Real, scaleFactor::Real)
     T = typeof(tl)
-    return T(scaleFactor) / (one(T) + exp((-T(hd) + T(se) * tl) / (T(RGAS) * tl)))
+    return T(scaleFactor) / (one(T) + exp((-T(hd) + T(se) * tl) / (T(RGAS_PSN) * tl)))
 end
 
 """
@@ -491,7 +502,7 @@ Scaling factor for photosynthesis temperature inhibition at 25°C.
 """
 @inline function fth25_photo(hd::Real, se::Real)
     T = typeof(se)
-    return one(T) + exp((-T(hd) + T(se) * (T(TFRZ) + T(25.0))) / (T(RGAS) * (T(TFRZ) + T(25.0))))
+    return one(T) + exp((-T(hd) + T(se) * (T(TFRZ) + T(25.0))) / (T(RGAS_PSN) * (T(TFRZ) + T(25.0))))
 end
 
 """
@@ -1261,7 +1272,7 @@ function photosynth_ci_solve!(ps,
     T = eltype(forc_pbot)
     sc = PsnCiScalars{T}(T(params_inst.fnps), T(params_inst.theta_psii),
         T(params_inst.theta_cj[1]), T(params_inst.theta_ip), T(overrides.medlyn_slope),
-        T(RGAS), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT), T(rsmax0))
+        T(RGAS_PSN), T(MAX_CS), T(MEDLYN_RH_CAN_MAX), T(MEDLYN_RH_CAN_FACT), T(rsmax0))
     is_sun = (phase == "sun")
     dv = _psn_dv(ps)
     if _PSN_CI_AD_HOSTLOOP[]

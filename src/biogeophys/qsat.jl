@@ -77,26 +77,32 @@ function qsat(T::Real, p::Real)
     # eltype-generic (R = working precision) so this lowers to valid Metal IR
     # under Float32; byte-identical to the Float64 literals on the CPU path.
     R = typeof(T)
-    td = T - R(TFRZ)  # temperature in °C
+    # Match Fortran QSat op-order EXACTLY (QSatMod.F90) for bit-for-bit parity:
+    #   td clamped to [-75, 100] °C, Horner polynomials, then the specific-
+    #   humidity grouping below. Reordering vs the "natural" Julia form changes
+    #   the result at the ULP level — which is load-bearing inside the canopy
+    #   leaf-temperature Newton iteration (qsat is re-evaluated every iterate).
+    td = min(R(100.0), max(R(-75.0), T - R(TFRZ)))  # temperature in °C
 
     # Saturation vapor pressure: water polynomials (td >= 0) vs ice (td < 0).
     # smooth_ifelse is exact for Float64 (preserves Fortran parity bit-for-bit
     # in :auto mode) but smoothly blends the kink at the freezing point for
     # ForwardDiff.Dual, so the derivative is continuous across TFRZ for AD.
     es = smooth_ifelse(td,
-        R(100.0) * _poly8(td, QSAT_A),    # over water
-        R(100.0) * _poly8(td, QSAT_C))    # over ice
+        _poly8(td, QSAT_A) * R(100.0),    # over water
+        _poly8(td, QSAT_C) * R(100.0))    # over ice
     desdT = smooth_ifelse(td,
-        R(100.0) * _poly8(td, QSAT_B),    # over water
-        R(100.0) * _poly8(td, QSAT_D))    # over ice
+        _poly8(td, QSAT_B) * R(100.0),    # over water
+        _poly8(td, QSAT_D) * R(100.0))    # over ice
 
-    # Specific humidity from vapor pressure
-    # qs = 0.622 * es / (p - 0.378*es)
-    # dqs/dT = 0.622 * desdT * p / (p - 0.378*es)^2   (quotient rule)
+    # Specific humidity from vapor pressure. Fortran order:
+    #   vp = 1/(p - 0.378*es); vp1 = 0.622*vp; qs = es*vp1
+    #   vp2 = vp1*vp;          qsdT = esdT*vp2*p
     vp = one(R) / (p - R(0.378) * es)
-    vp1 = min(es * vp, one(R))
-    qs = R(0.622) * vp1
-    dqsdT = R(0.622) * p * desdT * vp * vp
+    vp1 = R(0.622) * vp
+    qs = min(es * vp1, R(0.622))   # clamp inactive for physical qs; Fortran = es*vp1
+    vp2 = vp1 * vp
+    dqsdT = desdT * vp2 * p
 
     return (qs, es, dqsdT, desdT)
 end
@@ -109,15 +115,17 @@ Slightly more efficient when derivatives are not needed.
 """
 function qsat_no_derivs(T::Real, p::Real)
     R = typeof(T)
-    td = T - R(TFRZ)
+    td = min(R(100.0), max(R(-75.0), T - R(TFRZ)))
 
     # See qsat() above: exact branch for Float64, smooth blend across TFRZ for Dual.
     es = smooth_ifelse(td,
-        R(100.0) * _poly8(td, QSAT_A),    # over water
-        R(100.0) * _poly8(td, QSAT_C))    # over ice
+        _poly8(td, QSAT_A) * R(100.0),    # over water
+        _poly8(td, QSAT_C) * R(100.0))    # over ice
 
-    vp1 = min(es / (p - R(0.378) * es), one(R))
-    qs = R(0.622) * vp1
+    # Fortran order: vp = 1/(p - 0.378*es); vp1 = 0.622*vp; qs = es*vp1
+    vp = one(R) / (p - R(0.378) * es)
+    vp1 = R(0.622) * vp
+    qs = min(es * vp1, R(0.622))
 
     return (qs, es)
 end
