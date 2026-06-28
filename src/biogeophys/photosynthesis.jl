@@ -1084,6 +1084,15 @@ end
 # is guaranteed because both paths execute the same `_photosynth_ci_body!`.
 const _PSN_CI_AD_HOSTLOOP = Ref(false)
 
+# PARITY localization (Phase 3c): opt-in debug dump of converged PHS sunlit-leaf
+# photosynthesis internals (vcmax_z → an → gs chain) for patches in PHS_PHOTO_DEBUG_PATCHES.
+# Default OFF → forward/GPU/AD runs are byte-identical (the dump is a read-only loop
+# over already-converged state in the host launcher, gated by this flag). Mirrors the
+# Fortran FPHOTO/FVCM25 SourceMods dump in PhotosynthesisMod.F90.
+const PHS_PHOTO_DEBUG          = Ref(false)
+const PHS_PHOTO_DEBUG_PATH     = Ref("photo_internals_julia.txt")
+const PHS_PHOTO_DEBUG_PATCHES  = Ref{Vector{Int}}([2, 3])
+
 @kernel function _photosynth_ci_kernel!(ps, psn_wc_z, psn_wj_z, psn_wp_z,
         @Const(mask_patch), @Const(ivt),
         @Const(medlynslope_pft), @Const(medlynintercept_pft), @Const(mbbopt_pft),
@@ -1996,6 +2005,17 @@ end
 
             lmr25_sun = lmr25top * nscaler_sun
             lmr25_sha = lmr25top * nscaler_sha
+
+            # LUNA leaf-respiration base rate: when LUNA is active without prognostic
+            # CN, leaf maintenance respiration scales with the LUNA-acclimated vcmax25
+            # (vcmx25_z) rather than the static lnc-based vcmax25top*nscaler. Matches
+            # PhotosynthesisMod.F90:3335-3340 (use_luna .and. c3flag .and. crop==0 .and.
+            # .not.use_cn). Mirrors the existing LUNA vcmax25 branch below (crop check
+            # omitted, consistent with that branch).
+            if use_luna && c3flag_p && !use_cn
+                lmr25_sun = T(leaf_mr_vcm) * vcmx25_z[p, iv]
+                lmr25_sha = T(leaf_mr_vcm) * vcmx25_z[p, iv]
+            end
 
             if c3flag_p
                 lmr_z_sun[p, iv] = lmr25_sun * ft_photo(t_veg[p], prm.lmrha) *
@@ -5124,6 +5144,59 @@ function psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
         KA.synchronize(KA.CPU())
         _phs_pass3_copyback!(dv, dv_h)
         _phs_pass3_copyback!(out, out_h)
+    end
+    # PARITY (Phase 3c): opt-in read-only dump of converged sunlit-leaf photosynthesis
+    # internals, mirroring the Fortran FPHOTO/FVCM25 SourceMods lines. Default OFF →
+    # byte-identical. Appends one block per pass-3 call (i.e. per canopy leaf-temp
+    # Newton iteration) so the Julia trajectory lines up with the Fortran trajectory.
+    if PHS_PHOTO_DEBUG[]
+        _phs_photo_debug_dump(ps, bsun_arr, rh_leaf_sun, eair, esat_tv, cair, oair,
+            par_z_sun_in, jmax_z_local, nrad, mask_patch)
+    end
+    return nothing
+end
+
+# Read-only dump helper for the PHS photosynthesis-internals parity localization.
+# Reads only already-converged ps arrays + pass-3 inputs; recomputes je_sun the same
+# way the body does. Writes nothing into model state.
+function _phs_photo_debug_dump(ps, bsun_arr, rh_leaf_sun, eair, esat_tv, cair, oair,
+        par_z_sun_in, jmax_z_local, nrad, mask_patch)
+    fnps = params_inst.fnps; theta_psii = params_inst.theta_psii
+    row(p, iv, key, vals...) = string("JPHOTO p=", p, " iv=", iv, " ", key, "= ",
+                                      join(vals, " "))
+    open(PHS_PHOTO_DEBUG_PATH[], "a") do io
+        for p in PHS_PHOTO_DEBUG_PATCHES[]
+            (1 <= p <= length(mask_patch) && mask_patch[p]) || continue
+            for iv in 1:nrad[p]
+                vc = ps.vcmax_z_phs_patch[p, SUN, iv]
+                jm = jmax_z_local[p, SUN, iv]
+                tp = ps.tpu_z_phs_patch[p, SUN, iv]
+                lmr = ps.lmrsun_z_patch[p, iv]
+                # je_sun (recomputed identically to the body)
+                qabs = 0.5 * (1.0 - fnps) * par_z_sun_in[p, iv] * 4.6
+                r1, r2 = quadratic_solve(theta_psii, -(qabs + jm), qabs * jm)
+                je = min(r1, r2)
+                println(io, row(p, iv, "vcmax_jmax_tpu_lmr_sun", vc, jm, tp, lmr))
+                println(io, row(p, iv, "cp_kc_ko_jesun",
+                               ps.cp_patch[p], ps.kc_patch[p], ps.ko_patch[p], je))
+                println(io, row(p, iv, "ci_ac_aj_ap_ag_sun",
+                               ps.cisun_z_patch[p, iv], ps.ac_phs_patch[p, SUN, iv],
+                               ps.aj_phs_patch[p, SUN, iv], ps.ap_phs_patch[p, SUN, iv],
+                               ps.ag_phs_patch[p, SUN, iv]))
+                println(io, row(p, iv, "an_gsmol_bsun_rs_sun",
+                               ps.an_sun_patch[p, iv], ps.gs_mol_sun_patch[p, iv],
+                               bsun_arr[p], ps.rssun_z_patch[p, iv]))
+                println(io, row(p, iv, "rhcan_rhleaf_cair_oair_esattv_eair",
+                               ps.vpd_can_patch[p], rh_leaf_sun[p], cair[p], oair[p],
+                               esat_tv[p], eair[p]))
+                println(io, row(p, iv, "gbmol_par_z_sun",
+                               ps.gb_mol_patch[p], par_z_sun_in[p, iv]))
+                println(io, string("JVCM25 p=", p, " iv=", iv,
+                               " luna_vcmx25z_jmx25z_vc25top_jm25top= ",
+                               join((ps.vcmx25_z_patch[p, iv], ps.jmx25_z_patch[p, iv],
+                                     ps.luvcmax25top_patch[p], ps.lujmax25top_patch[p]), " ")))
+            end
+        end
     end
     return nothing
 end

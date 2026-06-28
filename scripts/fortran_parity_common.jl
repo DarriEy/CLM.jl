@@ -127,6 +127,15 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         # too high (grass bsun≈0.42 → 2.2× high; the grass availc residual).
         inst.photosyns.modifyphoto_and_lmr_forcrop = true
     end
+    # Bow lnd_in &photosyns_inparm flags apply regardless of CN. The SP+PHS+LUNA parity
+    # path (use_luna, use_cn=false) must still honor them, else daytime leaf respiration
+    # is ~1.5x too high (light_inhibit ×0.67 missing) and the PHS canopy lmr integration
+    # drops the bsun/bsha weight (modifyphoto_and_lmr_forcrop). Scoped to use_luna so the
+    # non-PHS baseline (use_cn=false, use_luna=false) is unchanged.
+    if use_luna && !use_cn
+        inst.photosyns.light_inhibit = true
+        inst.photosyns.modifyphoto_and_lmr_forcrop = true
+    end
 
     # atm2lnd downscaling to match Fortran lnd_in defaults
     CLM.atm2lnd_read_namelist!(inst.atm2lnd;
