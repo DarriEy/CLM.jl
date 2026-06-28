@@ -122,6 +122,16 @@ if get(ENV, "CANOPY_PERITER_DUMP", "") != ""
                                           "periter_n$(NSTEP)_julia.txt")
     println("    per-iteration dump -> ", CLM.CANOPY_PERITER_PATH[])
 end
+# PHS photosynthesis-internals dump (Phase 3c localization). Enable with PHS_PHOTO_DUMP=1.
+# Writes one JPHOTO/JVCM25 block per canopy leaf-temp Newton iteration for the sunlit
+# leaf of patches 2 (tree) and 3 (grass), mirroring the Fortran FPHOTO/FVCM25 lines.
+if get(ENV, "PHS_PHOTO_DUMP", "") != ""
+    CLM.PHS_PHOTO_DEBUG[] = true
+    CLM.PHS_PHOTO_DEBUG_PATH[] = joinpath(@__DIR__, "validation", "fortran_pdump",
+                                          "photo_internals_n$(NSTEP)_julia.txt")
+    isfile(CLM.PHS_PHOTO_DEBUG_PATH[]) && rm(CLM.PHS_PHOTO_DEBUG_PATH[])
+    println("    PHS photo-internals dump -> ", CLM.PHS_PHOTO_DEBUG_PATH[])
+end
 CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
              true, nextsw_cday, declin, declin, obliqr,
              false, false, "", false;
