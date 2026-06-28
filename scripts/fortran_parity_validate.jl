@@ -81,6 +81,16 @@ CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.t
 println("    step_start = ", step_start, "  calday=", round(calday, digits=4))
 
 println("[3] Run clm_drv! one step ...")
+# Per-iteration leaf-temperature Newton dump (parity localization). Enable only
+# when CANOPY_PERITER_DUMP env var is set, so the normal validate path is
+# unchanged. Writes one line per (itlef, p) matching the instrumented Fortran.
+if get(ENV, "CANOPY_PERITER_DUMP", "") != ""
+    CLM.CANOPY_PERITER_DEBUG[] = true
+    CLM.CANOPY_PERITER_NSTEP[] = parse(Int, NSTEP)
+    CLM.CANOPY_PERITER_PATH[]  = joinpath(@__DIR__, "validation", "fortran_pdump",
+                                          "periter_n$(NSTEP)_julia.txt")
+    println("    per-iteration dump -> ", CLM.CANOPY_PERITER_PATH[])
+end
 CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
              true, nextsw_cday, declin, declin, obliqr,
              false, false, "", false;

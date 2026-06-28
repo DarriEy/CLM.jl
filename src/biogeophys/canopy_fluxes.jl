@@ -17,6 +17,15 @@ const RIA_CANOPY         = 0.5     # free parameter for stable formulation
 const ABOVE_CANOPY       = 1       # index for above-canopy resistances
 const BELOW_CANOPY       = 2       # index for below-canopy resistances
 
+# --- Per-iteration leaf-temperature Newton dump (parity diagnostics only) ---
+# When CANOPY_PERITER_DEBUG[] is true, canopy_fluxes_core! writes one text line
+# per (itlef, p) inside the leaf-temperature Newton loop, mirroring the
+# instrumented Fortran CanopyFluxesMod dump used for bit-parity localization.
+# Default OFF → no behavioural / numerical change (suite + AD/GPU byte-identical).
+const CANOPY_PERITER_DEBUG = Ref(false)
+const CANOPY_PERITER_PATH  = Ref("periter_julia.txt")
+const CANOPY_PERITER_NSTEP = Ref(13461)
+
 # Biomass heat storage tuning parameters
 const K_VERT_CANOPY      = 0.1     # vertical distribution of stem
 const K_CYL_VOL_CANOPY   = 1.0     # departure from cylindrical volume
@@ -342,6 +351,7 @@ struct CfEnScalars{S}
 end
 
 @kernel function _cf_energy_kernel!(o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
+        dc2_dbg, efsh_dbg,
         @Const(filterp), @Const(active), @Const(column),
         @Const(snl), @Const(frac_veg_nosno_patch),
         # scalars
@@ -498,6 +508,11 @@ end
 
         efsh = dc1 * (wtga[p] * t_veg_patch[p] - wtg0 * t_grnd_col[c] -
             wta0[p] * thm_patch[p] - wtstem0[p] * t_stem_patch[p])
+        # parity diagnostics: capture the two flux-coefficient scalars that are
+        # otherwise kernel-locals (dc2 needs the in-kernel rpp/wtlq; efsh uses the
+        # pre-update t_veg). Cheap unconditional scratch writes → byte-identical.
+        dc2_dbg[p] = dc2
+        efsh_dbg[p] = efsh
         eflx_sh_stem_patch[p] = forc_rho_col[c] * cpair * wtstem *
             ((wta0[p] + wtg0 + wtl0[p]) * t_stem_patch[p] -
              wtg0 * t_grnd_col[c] - wta0[p] * thm_patch[p] -
@@ -666,7 +681,8 @@ function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
         err_arr, qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
         forc_q_col, forc_th_col, forc_pbot_col, forc_rho_col,
         soilevap_beta::Bool, soil_resis_sl14::Bool, use_lch4::Bool,
-        use_hydrstress::Bool, nlevsno::Int, dtime, params)
+        use_hydrstress::Bool, nlevsno::Int, dtime, params;
+        dc2_dbg=nothing, efsh_dbg=nothing)
     o1 = CfEnOutA(; wtg = wtg, wtl0 = wtl0, wta0 = wta0, wtstem0 = wtstem0, wtga = wtga,
         wtal = wtal, lw_stem = lw_stem, lw_leaf = lw_leaf, wtgq = wtgq, wtlq0 = wtlq0,
         wtaq0 = wtaq0, wtalq = wtalq, efe = efe, dt_veg = dt_veg, del_arr = del_arr,
@@ -706,8 +722,11 @@ function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
     sc = CfEnScalars{T}(T(SB), T(CPAIR), T(HVAP), T(VKC), T(GRAV), T(BTRAN0),
         T(DELMAX_CANOPY), T(ZII_CANOPY), T(BETA_CANOPY), T(dtime), T(params.z_dl),
         T(params.lai_dl), T(frictionvel.zetamaxstable))
+    _dc2_dbg  = dc2_dbg  === nothing ? similar(wtg) : dc2_dbg
+    _efsh_dbg = efsh_dbg === nothing ? similar(wtg) : efsh_dbg
     let be = _kernel_backend(wtg)
         _cf_energy_kernel!(be)(o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
+            _dc2_dbg, _efsh_dbg,
             filterp, active, patch_data.column,
             col_data.snl, canopystate.frac_veg_nosno_patch,
             soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
@@ -1456,6 +1475,8 @@ function canopy_fluxes_core!(
     sa_internal = _sc(endp)
     uuc       = _sc(endp)
     snocan_baseline = _sc(endp)
+    dc2_dbg   = _sc(endp)   # parity diagnostics scratch (kernel-local dc2 capture)
+    efsh_dbg  = _sc(endp)   # parity diagnostics scratch (kernel-local efsh capture)
 
     # Integer filter array (Fortran-style). Stays fixed through the Newton
     # iteration — convergence is tracked by the `active` mask, not by compaction.
@@ -1887,7 +1908,39 @@ function canopy_fluxes_core!(
             err_arr, qsatl, el, qsatldT, dth, dqh, delq, obuold, nmozsgn,
             forc_q_col, forc_th_col, forc_pbot_col, forc_rho_col,
             soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
-            nlevsno, dtime, params)
+            nlevsno, dtime, params; dc2_dbg=dc2_dbg, efsh_dbg=efsh_dbg)
+
+        # --- Per-iteration parity dump (diagnostics only; default OFF) ---
+        # Written AFTER cf_energy_update! so the arrays hold the end-of-iteration
+        # state — exactly the point the instrumented Fortran CanopyFluxesMod dumps
+        # (after the qsatl re-eval + taf/qaf + Monin-Obukhov um/obu update). itlef
+        # is still the pre-increment loop counter here, so itlef+1 is the 1-based
+        # iteration index that matches the Fortran `itlef+1` column.
+        if CANOPY_PERITER_DEBUG[]
+            _Tcp = eltype(wtga)
+            open(CANOPY_PERITER_PATH[], itlef == 0 ? "w" : "a") do io
+                if itlef == 0
+                    println(io, "nstep itlef p t_veg dt_veg del del2 efe efsh ustar um obu wtl0 wtg0 wtga wtgaq qsatl qsatldT dc1 dc2 rssun rssha tlbef sabv air bir cir")
+                end
+                for fi in 1:fn
+                    p = filterp[fi]
+                    active[p] || continue
+                    c = patch_data.column[p]
+                    wtg0  = wtga[p] - wta0[p] - wtstem0[p]
+                    wtgaq = one(_Tcp) - wtlq0[p]
+                    dc1   = forc_rho_col[c] * _Tcp(CPAIR) * sa_leaf[p] / rb[p]
+                    row = (CANOPY_PERITER_NSTEP[], itlef + 1, p,
+                        temperature.t_veg_patch[p], dt_veg[p], del_arr[p], del2[p],
+                        efe[p], efsh_dbg[p], frictionvel.ustar_patch[p],
+                        frictionvel.um_patch[p], frictionvel.obu_patch[p],
+                        wtl0[p], wtg0, wtga[p], wtgaq, qsatl[p], qsatldT[p],
+                        dc1, dc2_dbg[p], photosyns.rssun_patch[p],
+                        photosyns.rssha_patch[p], tlbef[p], solarabs.sabv_patch[p],
+                        air[p], bir[p], cir[p])
+                    println(io, join(row, " "))
+                end
+            end
+        end
 
         # --- Test for convergence ---
         # Kernelized: updates the convergence metrics for still-active patches
