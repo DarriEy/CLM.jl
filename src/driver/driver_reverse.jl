@@ -226,10 +226,11 @@ end
 # All share one Const aux. saturated_excess_runoff!'s Bool kwargs + update_h2osfc!'s
 # dtime/h2osfcflag + compute_effec_rootfrac's use_hydrstress default inside the wrappers;
 # qflx_floodg is a zero gridcell vector (no river flood input), captured as Const.
-function surfhydro_rev_aux(bounds, filt; dtime = 1800.0)
+function surfhydro_rev_aux(bounds, filt; dtime = 1800.0, use_hydrstress = false)
     return (; hydrologyc = filt.hydrologyc, nolakec = filt.nolakec, urbanc = filt.urbanc,
               bc_col = bounds.begc:bounds.endc, nlevsoi = varpar.nlevsoi, nlevsno = varpar.nlevsno,
-              dtime = dtime, qflx_floodg = zeros(Float64, bounds.endg))
+              dtime = dtime, qflx_floodg = zeros(Float64, bounds.endg),
+              use_hydrstress = use_hydrstress)
 end
 
 function setsoilfrac_rev_phase!(b, aux)
@@ -291,13 +292,13 @@ function rootsink_rev_phase!(b, aux)
     i = b.inst
     compute_effec_rootfrac_and_vert_tran_sink!(aux.bc_col, aux.nlevsoi, aux.hydrologyc,
         i.soilstate, i.canopystate, i.water.waterfluxbulk_inst, i.energyflux,
-        i.column, i.landunit, i.patch)
+        i.column, i.landunit, i.patch; use_hydrstress = aux.use_hydrstress)
     return nothing
 end
 
 # Ordered pre-soil_water surface-hydrology phase entries.
-function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0)
-    a = surfhydro_rev_aux(bounds, filt; dtime)
+function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0, use_hydrstress = false)
+    a = surfhydro_rev_aux(bounds, filt; dtime, use_hydrstress)
     return Any[(setsoilfrac_rev_phase!, (a,)), (setfloodc_rev_phase!, (a,)),
                (satexcess_rev_phase!, (a,)),   (setqflx_rev_phase!, (a,)),
                (inflexcess_rev_phase!, (a,)),  (routeinfl_rev_phase!, (a,)),
@@ -622,7 +623,8 @@ function driver_rev_phases(bounds, filt, config; canopy_aux = nothing,
     phases = Any[]
     canopy_aux === nothing || push!(phases, (canopy_rev_block!, (canopy_aux, n_canopy)))
     push!(phases, (soiltemp_rev_phase!, (soiltemp_rev_aux(bounds, filt; dtime),)))
-    include_surface && append!(phases, surface_hydrology_rev_phases(bounds, filt; dtime))
+    include_surface && append!(phases, surface_hydrology_rev_phases(bounds, filt; dtime,
+                                          use_hydrstress = config.use_hydrstress))
     push!(phases, (soilwater_rev_phase!,  (soilwater_rev_aux(filt, config; dtime),)))
     push!(phases, (watertable_rev_phase!, (watertable_rev_aux(bounds, filt, config; dtime),)))
     push!(phases, (hydnodrain_rev_phase!, (hydnodrain_rev_aux(bounds, filt; dtime),)))

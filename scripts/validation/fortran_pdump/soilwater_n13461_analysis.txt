@@ -1,0 +1,130 @@
+================================================================================
+Phase 4 — H2OSOI_LIQ (soil liquid water) parity localization @ n13461 (Bow, PHS)
+================================================================================
+
+GOAL
+  Localize the post-Phase-3g residual global max|rel| = 1.306e-04, which is the
+  H2OSOI_LIQ (soil liquid water) floor in the canopy-isolated config
+  (PARITY_PHS=1 + PHS_INJECT_HK=1 — Fortran hk_l/smp_l injected so the canopy
+  PLC-clamp/hk_l coupling-order floor from Phase 3g cannot contaminate the
+  soil-water axis).
+
+NO FORTRAN REBUILD NEEDED
+  As in Phase 3f/3g, the existing dumps localized this without re-instrumenting
+  CTSM. The oracle's per-layer ΔH2OSOI_LIQ table (IC=before_step dump,
+  dF=after_hydrologydrainage dump) already exposes the per-layer Fortran sink
+  distribution; the Julia per-layer change is read directly from the post-step
+  inst. The injected-hk_l hook removes the canopy contamination so the soil-water
+  axis is seen in isolation.
+
+--------------------------------------------------------------------------------
+STEP 1 — WHICH LAYERS DIVERGE (canopy-isolated: PHS_INJECT_HK=1), BEFORE FIX
+--------------------------------------------------------------------------------
+  Per-layer ΔH2OSOI_LIQ (IC→after); dJ=Julia change, dF=Fortran change.
+
+    lay      IC        dJ         dF        dJ-dF (=J-F)
+    1     2.3799   -0.0164    -0.0166     1.443e-04
+    2     4.7995    0.0000    -0.0007     7.575e-04   <-- Julia: ZERO change
+    3     7.0899    0.0000    -0.0006     5.962e-04   <-- Julia: ZERO change
+    4     9.2853    0.0000    -0.0007     6.657e-04
+    5    14.0225   -0.0000    -0.0009     8.918e-04
+    6    18.8105   -0.0000    -0.0010     9.568e-04
+    7    23.5512   -0.0000    -0.0008     7.639e-04
+    8    28.3068    0.0000    -0.0006     5.918e-04
+    9    33.3956    0.0000    -0.0006     6.164e-04
+    10   39.4919    0.0000    -0.0008     8.183e-04
+    11   46.5754    0.0002    -0.0006     7.808e-04
+    12   59.8306   -0.0082    -0.0008    -7.454e-03   <-- Julia: ALL uptake here
+
+  SIGNAL: total uptake matches (Julia ~0.0246, Fortran ~0.0244 over L1..L12), but
+  the DISTRIBUTION is wrong. Julia puts the entire transpiration root sink into the
+  deepest active soil layer (12), with EXACTLY zero change in layers 2..11; Fortran
+  spreads ~6e-4..1e-3 across every layer 2..12. This is a root-sink (qflx_rootsoi)
+  per-layer DISTRIBUTION error, not a total-mass error.
+
+--------------------------------------------------------------------------------
+STEP 2 — TERM-BY-TERM (root-sink -> infiltration -> Richards -> drainage)
+--------------------------------------------------------------------------------
+  root-sink (qflx_rootsoi_col, per layer): DIVERGES (see above) — FIRST diverging term.
+  infiltration / surface runoff:           matches (layer-1 dJ -0.0164 vs dF -0.0166).
+  Richards tridiagonal (hk_l/smp inputs):  matched (Fortran hk_l/smp INJECTED here).
+  drainage / water table:                  ZWT/ZWT_PERCH/WA/H2OSFC/FROST_TABLE all J-F=0.
+
+  => first diverging term = qflx_rootsoi_col[c,j], the PHS root water sink, all
+     soil layers (collapses to layer 12).
+
+--------------------------------------------------------------------------------
+STEP 3 — ROOT CAUSE (Julia <-> Fortran source) — A WIRING BUG
+--------------------------------------------------------------------------------
+  Fortran (HydrologyNoDrainageMod.F90:339 -> SoilWaterPlantSinkMod.F90:18):
+    Compute_EffecRootFrac_And_VertTranSink reads `use_hydrstress` from clm_varctl
+    (module global). For the natural-veg (istsoil) column it branches:
+      use_hydrstress=.true.  -> Compute_..._HydStress   (lines 124-126)
+        qflx_rootsoi_col(c,j) = sum_p k_soil_root(p,j)*(smp(c,j)-vegwp(p,root)-grav2)*wtcol(p)
+        (water-potential-gradient driven; distributes across all rooted layers)
+      use_hydrstress=.false. -> Compute_..._Default     (line 136)
+        qflx_rootsoi_col(c,j) = rootr_col(c,j) * qflx_tran_veg_col(c)
+        (static transpiration-weighted root profile)
+
+  Julia (src/biogeophys/soil_water_plant_sink.jl): the wrapper
+    compute_effec_rootfrac_and_vert_tran_sink!(...; use_hydrstress=false)
+    has use_hydrstress as a KEYWORD defaulting to false. BUT both driver call
+    sites omitted it:
+      src/driver/clm_driver.jl:1616          (forward driver, HydrologyNoDrainage)
+      src/driver/driver_reverse.jl:292       (reverse driver rootsink phase)
+    => in PHS mode (use_hydrstress=true) Julia still ran the DEFAULT method, so the
+       sink followed the static rootr profile instead of the PHS k_soil_root/vegwp
+       gradient. In this column the default rootr_col collapsed the sink onto the
+       deepest layer (12) — hence dJ=0 in 2..11 and -0.0082 in 12.
+
+  CLASSIFICATION: fixable wiring term (same class as the 4 prior PHS fixes), NOT a
+  coupling-order/snapshot floor.
+
+--------------------------------------------------------------------------------
+STEP 4 — FIX + BEFORE/AFTER
+--------------------------------------------------------------------------------
+  FIX: thread use_hydrstress=config.use_hydrstress into both call sites.
+    - clm_driver.jl:1616  -> add `; use_hydrstress=config.use_hydrstress`
+    - driver_reverse.jl   -> surface_hydrology_rev_phases / surfhydro_rev_aux gain
+      a use_hydrstress kwarg (default false), passed from driver_rev_phases'
+      config.use_hydrstress; rootsink_rev_phase! forwards aux.use_hydrstress.
+  use_hydrstress=false (the SP/non-PHS default) == omitting it => byte-identical
+  on every non-PHS path (SP oracle unchanged at 2.011e-04).
+
+  Canopy-isolated config (PARITY_PHS=1 PHS_INJECT_HK=1):
+    per-layer ΔH2OSOI_LIQ AFTER fix — layers 2..12 now match Fortran:
+      lay  dJ-dF(=J-F)
+      1    1.437e-04   (unchanged: surface soil-evaporation term, see verdict)
+      2   -1.450e-06
+      3   -1.573e-06
+      ...
+      11  -3.871e-07
+      12  -1.697e-07   (was -7.454e-03)
+
+    H2OSOI_LIQ  max|abs|  7.454e-03 -> 1.437e-04   (~52x)
+    H2OSOI_LIQ  max|rel|  1.306e-04 -> 4.272e-05
+    global max|rel|       1.306e-04 -> 9.027e-05   (now T_VEG-limited, not soil-water)
+
+  Honest config (PARITY_PHS=1, no injection):
+    H2OSOI_LIQ  max|rel|  1.863e-04
+    global max|rel|       3.024e-04  (T_VEG — the Phase-3g hk_l/PLC-clamp floor)
+
+--------------------------------------------------------------------------------
+STEP 5 — VERDICT
+--------------------------------------------------------------------------------
+  The dominant H2OSOI_LIQ residual (the layer-12 root-sink collapse, J-F=-7.45e-3)
+  was a FIXABLE WIRING BUG: use_hydrstress was not threaded into the soil-water
+  root-sink call, so PHS mode used the static-rootr Default sink instead of the
+  k_soil_root/vegwp HydStress sink. Fixed; layers 2..12 now bit-faithful (~1e-6).
+
+  The remaining H2OSOI_LIQ residual is LAYER 1 ONLY (J-F = 1.44e-4 injected /
+  surface). It is unchanged by this fix and is downstream of the surface
+  soil-evaporation flux (qflx_ev_soil), which is set by the ground energy balance
+  (T_GRND/T_SOISNO differ 4.4e-3 K). That is the energy-balance/T_VEG coupling-order
+  snapshot floor (the Phase-3g carried hk_l -> bsha<0.01 PLC-clamp -> T_VEG/T_GRND
+  chain), NOT a soil-water-process bug. So the soil-water axis is bit-faithful; the
+  global residual reverts to the previously-classified canopy-time snapshot floor.
+
+Reproduce:
+  PARITY_PHS=1 PHS_INJECT_HK=1 julia +1.12 --project=. scripts/fortran_parity_validate.jl 13461
+  PARITY_PHS=1                 julia +1.12 --project=. scripts/fortran_parity_validate.jl 13461
