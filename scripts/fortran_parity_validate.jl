@@ -29,15 +29,46 @@ println("  nstep=$NSTEP   dtime=3600s   Bow-at-Banff (SP, use_cn=false)")
 println("="^64)
 for f in (DUMP_BEFORE, DUMP_AFTER); isfile(f) || error("dump missing: $f"); end
 
+# PHS (plant hydraulic stress) mode is opt-in via PARITY_PHS=1 so the default
+# non-PHS baseline this script reports stays unchanged. The Fortran Bow reference
+# run is PHS+LUNA, so a faithful one-step comparison requires PHS+LUNA + a seeded
+# PHS initial condition (vegwp from the dump; smp_l/hk_l/k_soil_root are recomputed
+# inside canopy_fluxes! from the injected liquid soil water). run_one_parity_step!
+# in fortran_parity_common.jl does all of this; for a quick check use that path:
+#   PARITY_PHS=1 julia --project=. scripts/fortran_parity_validate.jl 13461
+const USE_PHS = get(ENV, "PARITY_PHS", "") != ""
+
 println("\n[1] Build Bow instance + inject shared IC (before_step) ...")
 # Wall-clock date of this step's START: step 8761 begins 2003-01-01 00:00.
 const STEP_DATE = DateTime(2003,1,1) + Hour(parse(Int, NSTEP) - 8761)
 println("    step start date = ", STEP_DATE)
-(inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=STEP_DATE)
+println("    PHS mode = ", USE_PHS)
+(inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=STEP_DATE, use_luna=USE_PHS)
+if USE_PHS && isempty(inst.photosyns.vcmx25_z_patch)
+    # LUNA vcmax25/jmax25 fields so inject_dump! fills them from the restart.
+    inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)
+    inst.photosyns.jmx25_z_patch  = fill(60.0, bounds.endp, CLM.NLEVCAN)
+end
 inject_dump!(inst, bounds, DUMP_BEFORE)
 
+# PHS IC seeding: vegwp (4-segment veg water potential) is carried as state by
+# Fortran and IS in the dump; read_fortran_restart! does not set it, so seed it
+# here. dump vegwp is (vegwcs=4, pft) → Julia vegwp_patch[patch, seg].
+if USE_PHS
+    let ds = NCDataset(DUMP_BEFORE, "r")
+        if haskey(ds, "vegwp")
+            vw = ds["vegwp"][:, :]
+            for pd in 1:size(vw, 2), seg in 1:4
+                inst.canopystate.vegwp_patch[pd, seg] = Float64(vw[seg, pd])
+            end
+        end
+        close(ds)
+    end
+end
+
 # ---- forcing + driver config (mirrors clm_run.jl loop body) ----
-config   = CLM.CLMDriverConfig(use_cn=false, use_aquifer_layer=false)
+config   = CLM.CLMDriverConfig(use_cn=false, use_aquifer_layer=false,
+                               use_hydrstress=USE_PHS, use_luna=USE_PHS)
 filt_ia  = CLM.clump_filter_inactive_and_active
 ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 
@@ -81,6 +112,16 @@ CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.t
 println("    step_start = ", step_start, "  calday=", round(calday, digits=4))
 
 println("[3] Run clm_drv! one step ...")
+# Per-iteration leaf-temperature Newton dump (parity localization). Enable only
+# when CANOPY_PERITER_DUMP env var is set, so the normal validate path is
+# unchanged. Writes one line per (itlef, p) matching the instrumented Fortran.
+if get(ENV, "CANOPY_PERITER_DUMP", "") != ""
+    CLM.CANOPY_PERITER_DEBUG[] = true
+    CLM.CANOPY_PERITER_NSTEP[] = parse(Int, NSTEP)
+    CLM.CANOPY_PERITER_PATH[]  = joinpath(@__DIR__, "validation", "fortran_pdump",
+                                          "periter_n$(NSTEP)_julia.txt")
+    println("    per-iteration dump -> ", CLM.CANOPY_PERITER_PATH[])
+end
 CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
              true, nextsw_cday, declin, declin, obliqr,
              false, false, "", false;
@@ -128,8 +169,11 @@ println("\n  --- Per-patch canopy energy/aero: Julia vs Fortran (after_canopyflu
 let dsC = NCDataset(DUMP_CANOPY, "r")
     ef = inst.energyflux; fv = inst.frictionvel; te = inst.temperature
     sa = inst.solarabs;   cs = inst.canopystate; wf = inst.water.waterfluxbulk_inst.wf
-    sb = inst.surfalb
+    sb = inst.surfalb;    ps = inst.photosyns
     rows = [
+        ("rssun (leaf rs)", p->ps.rssun_patch[p],           "RSSUN_P"),
+        ("rssha (leaf rs)", p->ps.rssha_patch[p],           "RSSHA_P"),
+        ("btran",           p->ef.btran_patch[p],           nothing),
         ("elai",            p->cs.elai_patch[p],            "elai"),
         ("frac_veg_nosno",  p->Float64(cs.frac_veg_nosno_patch[p]),     nothing),
         ("frac_vegnosno_alb",p->Float64(cs.frac_veg_nosno_alb_patch[p]),"FRAC_VEG_NOSNO_ALB"),

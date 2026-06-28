@@ -1197,9 +1197,22 @@ function clm_drv_core!(config::CLMDriverConfig,
         leafn_patch = _zlike(np)
     end
     # PHS (plant hydraulic stress) needs fine-root carbon for the soil-to-root
-    # conductance. Empty in the non-PHS path → the canopy core falls back to zeros.
-    phs_froot_c = (config.use_hydrstress && config.use_cn) ?
-        get_froot_carbon_patch(inst.bgc_vegetation, bc_patch) : FT[]
+    # conductance (root_biomass_density → root_length_density → r_soil → soil_cond).
+    # Fortran computes it for BOTH bgc modes (CNVegetationFacade::get_froot_carbon_patch):
+    # CN uses frootc_patch; SP derives a diagnostic from prescribed LAI
+    # (froot_c = tlai/slatop * froot_leaf). Gating this on use_cn left SP+PHS with
+    # froot_carbon=0 → root_biomass_density floored to c_to_b → r_soil ~70x too large
+    # → soil-to-root conductance ~48x too small → over-stressed stomata (rss pinned to
+    # rsmax). Compute it whenever PHS is on, matching Fortran for either mode.
+    phs_froot_c = if config.use_hydrstress
+        config.use_cn ?
+            get_froot_carbon_patch(inst.bgc_vegetation, bc_patch) :
+            get_froot_carbon_patch(inst.bgc_vegetation, bc_patch;
+                tlai=cs.tlai_patch, slatop=pftcon.slatop,
+                froot_leaf=pftcon.froot_leaf, ivt=(pch.itype .+ 1))
+    else
+        FT[]
+    end
     # Calibrated stomatal/crop params come from pftcon only in CN mode; the SP/AD
     # path keeps the canopy-core defaults (medlynslope=6.0) so its validated energy
     # balance is untouched.
