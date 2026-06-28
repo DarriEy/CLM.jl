@@ -1613,11 +1613,18 @@ function clm_drv_core!(config::CLMDriverConfig,
         bc_col, dtime)
 
     # --- 11. Root water uptake (transpiration sink) ---
+    # Fortran SoilWaterPlantSinkMod reads use_hydrstress from clm_varctl and, when
+    # true, distributes the per-layer sink from k_soil_root × (smp − vegwp − grav2)
+    # (the HydStress branch) rather than the default rootr×qflx_tran profile. The
+    # flag MUST be threaded through here in PHS mode, else qflx_rootsoi_col collapses
+    # to the static root profile (wrong per-layer H2OSOI_LIQ). use_hydrstress=false
+    # ≡ omitting it, so the non-PHS path stays byte-identical.
     compute_effec_rootfrac_and_vert_tran_sink!(
         bc_col, nlevsoi,
         filt.hydrologyc,
         ss, cs, wfb, ef,
-        col, lun, pch)
+        col, lun, pch;
+        use_hydrstress=config.use_hydrstress)
 
     # --- 12. Soil water movement (Richards equation) ---
     # Configure solver to match Fortran namelist:
