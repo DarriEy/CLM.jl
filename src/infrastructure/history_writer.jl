@@ -111,6 +111,17 @@ function default_hist_fields()
         HistFieldDef("FSR", "reflected solar radiation", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_patch) ? Float64[] :
                     Float64.(inst.solarabs.fsr_patch)),
+        HistFieldDef("FIRA", "net infrared (longwave) radiation", "W/m2", "patch",
+            inst -> isempty(inst.energyflux.eflx_lwrad_net_patch) ? Float64[] :
+                    Float64.(inst.energyflux.eflx_lwrad_net_patch)),
+        HistFieldDef("FGR", "soil heat flux into ground", "W/m2", "patch",
+            inst -> isempty(inst.energyflux.eflx_soil_grnd_patch) ? Float64[] :
+                    Float64.(inst.energyflux.eflx_soil_grnd_patch)),
+        HistFieldDef("TV", "vegetation temperature", "K", "patch",
+            inst -> isempty(inst.temperature.t_veg_patch) ? Float64[] :
+                    Float64.(inst.temperature.t_veg_patch)),
+        HistFieldDef("TSOI_10CM", "soil temperature in top 0.1 m", "K", "column",
+            history_tsoi_10cm_col),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
@@ -130,7 +141,7 @@ function default_hist_fields()
         HistFieldDef("QVEGT", "canopy transpiration", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col),
         HistFieldDef("QVEGE", "canopy evaporation", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_veg_col),
+            history_qvege_col),
         HistFieldDef("QSOIL", "ground evaporation", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_soi_col),
     ]
@@ -250,6 +261,45 @@ function history_soilwater_10cm_col(inst::CLMInstances)
             isfinite(ice) && (s += ice * frac)
         end
         out[c] = s
+    end
+    return out
+end
+
+# Fortran QVEGE = canopy INTERCEPTION evaporation = qflx_evap_veg - qflx_tran_veg
+# (qflx_evap_veg_col is the TOTAL leaf water flux incl. transpiration). Matches the
+# energy form FCEV = hvap*(qflx_evap_veg - qflx_tran_veg).
+function history_qvege_col(inst::CLMInstances)
+    wf = inst.water.waterfluxbulk_inst.wf
+    ev = wf.qflx_evap_veg_col; tr = wf.qflx_tran_veg_col
+    isempty(ev) && return Float64[]
+    n = length(ev)
+    out = zeros(n)
+    @inbounds for c in 1:n
+        e = ev[c]; t = c <= length(tr) ? tr[c] : 0.0
+        out[c] = (isfinite(e) ? e : 0.0) - (isfinite(t) ? t : 0.0)
+    end
+    return out
+end
+
+function history_tsoi_10cm_col(inst::CLMInstances)
+    temp = inst.temperature
+    col = inst.column
+    isempty(temp.t_soisno_col) && return Float64[]
+    nc = size(temp.t_soisno_col, 1)
+    nsno = varpar.nlevsno
+    nsoi = varpar.nlevsoi
+    out = fill(NaN, nc)
+    @inbounds for c in 1:nc
+        s = 0.0; wsum = 0.0
+        for j in 1:nsoi
+            zi_top = col.zi[c, j + nsno]
+            zi_top >= 0.1 && break
+            zi_bot = col.zi[c, j + nsno + 1]
+            dz_in = (zi_bot <= 0.1 ? zi_bot : 0.1) - zi_top
+            t = temp.t_soisno_col[c, j + nsno]
+            isfinite(t) && (s += t * dz_in; wsum += dz_in)
+        end
+        wsum > 0 && (out[c] = s / wsum)
     end
     return out
 end
