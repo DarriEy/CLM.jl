@@ -223,13 +223,20 @@ end
 """
     history_btran_daily_min_patch(inst) -> Vector{Float64}
 
-Return daily minimum BTRAN when available to align with Fortran `BTRANMN`
-diagnostics.
+Return daily minimum BTRAN to align with Fortran `BTRANMN`.
 
 Preference order:
-1. `btran_min_inst_patch` when finite (running minimum for current day)
-2. `btran_min_patch` when finite (completed-day minimum)
+1. `btran_min_patch` when finite (COMPLETED-day minimum — constant over the day)
+2. `btran_min_inst_patch` when finite (running minimum; only the first day, before
+   any completed-day min exists)
 3. fallback to instantaneous `btran_patch`
+
+CRITICAL: must use the COMPLETED daily minimum (`btran_min_patch`), not the running
+one (`btran_min_inst_patch`). The history writer DAILY-AVERAGES this field; the
+completed min is constant over the day so its average equals the daily min (matching
+Fortran's `BTRANMN`, which points at `btran_min_patch` with avgflag='A'). The running
+min varies over the day (high until the midday btran dip, then drops), so averaging it
+overstates the daily min by ~5x (the bug that made annual BTRAN read +150%).
 """
 function history_btran_daily_min_patch(inst::CLMInstances)
     ef = inst.energyflux
@@ -242,12 +249,12 @@ function history_btran_daily_min_patch(inst::CLMInstances)
         # Fortran BTRANMN uses a vegetation mask: exclude bare-ground patches.
         if pch.itype[p] != noveg
             bt = ef.btran_patch[p]
-            if length(ef.btran_min_inst_patch) >= p && isfinite(ef.btran_min_inst_patch[p]) &&
-               ef.btran_min_inst_patch[p] != SPVAL
-                bt = ef.btran_min_inst_patch[p]
-            elseif length(ef.btran_min_patch) >= p && isfinite(ef.btran_min_patch[p]) &&
-                   ef.btran_min_patch[p] != SPVAL
+            if length(ef.btran_min_patch) >= p && isfinite(ef.btran_min_patch[p]) &&
+               ef.btran_min_patch[p] != SPVAL
                 bt = ef.btran_min_patch[p]
+            elseif length(ef.btran_min_inst_patch) >= p && isfinite(ef.btran_min_inst_patch[p]) &&
+                   ef.btran_min_inst_patch[p] != SPVAL
+                bt = ef.btran_min_inst_patch[p]
             end
             out[p] = bt
         end

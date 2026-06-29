@@ -168,12 +168,15 @@ include("generate_forcing.jl")
         inst.patch.itype .= CLM.noveg
         inst.patch.itype[1] = 1
 
-        # Use running daily-min source path for BTRAN (preferred over completed-day min).
+        # BTRAN history must use the COMPLETED daily-min (btran_min_patch), not the
+        # running one (btran_min_inst): the history daily-AVERAGES this field, and only
+        # the completed min is constant over the day so its average equals the daily min
+        # (matching Fortran BTRANMN). See history_btran_daily_min_patch.
         inst.energyflux.btran_min_patch .= 0.77
         inst.energyflux.btran_min_inst_patch .= 0.66
         inst.energyflux.btran_patch .= 0.55
         btran_hist = CLM.history_btran_daily_min_patch(inst)
-        @test btran_hist[1] ≈ 0.66
+        @test btran_hist[1] ≈ 0.77
         for p in 2:np
             @test isnan(btran_hist[p])
         end
