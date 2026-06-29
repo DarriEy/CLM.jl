@@ -164,6 +164,15 @@ function clm_run!(;
             pc_val = Float64(ds_p["pc"][1])
             pc_val > 0 && (for c in 1:nc; inst.soilhydrology.hkdepth_col[c] = 1.0 / pc_val; end)
         end
+        # Canopy interception: CLM5 (clm5_0 physics, matching the Fortran reference
+        # lnd_in use_clm5_fpi=.true.) uses fpiliq = interception_fraction*tanh(elai+esai),
+        # NOT the CLM4 default 0.25*(1-exp(-0.5*lai)). The CLM4 form intercepts ~20% at
+        # lai~3 vs ~64% for CLM5 with the calibrated interception_fraction=0.6455 → Julia
+        # under-evaporated the canopy all summer (FCEV -17%). Enable CLM5 fpi + read the
+        # calibrated interception_fraction.
+        canopy_hydrology_read_nml!(use_clm5_fpi=true)
+        haskey(ds_p, "interception_fraction") &&
+            (canopy_hydrology_params.interception_fraction = Float64(ds_p["interception_fraction"][1]))
         close(ds_p)
     catch e
         @warn "Runtime param wiring failed: $e" maxlog=1
