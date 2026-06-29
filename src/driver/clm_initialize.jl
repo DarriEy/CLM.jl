@@ -70,6 +70,7 @@ function clm_initialize!(;
     use_cn::Bool = false,
     use_crop::Bool = false,
     use_luna::Bool = false,
+    use_hydrstress::Bool = false,
     use_lch4::Bool = false,
     use_cndv::Bool = false,
     use_fates::Bool = false,
@@ -88,6 +89,7 @@ function clm_initialize!(;
     varctl.use_cn = use_cn
     varctl.use_crop = use_crop
     varctl.use_luna = use_luna
+    varctl.use_hydrstress = use_hydrstress
     varctl.use_cndv = use_cndv
     varctl.create_crop_landunit = use_crop
     varctl.use_bedrock = use_bedrock

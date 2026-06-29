@@ -44,6 +44,8 @@ function clm_run!(;
     use_cn::Bool = false,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
+    use_luna::Bool = false,
+    use_hydrstress::Bool = false,
     h2osfcflag::Int = 0,
     hist_fields::Union{Vector{HistFieldDef}, Nothing} = nothing,
     verbose::Bool = true,
@@ -64,6 +66,8 @@ function clm_run!(;
         start_date=start_date, dtime=dtime, use_cn=use_cn,
         use_bedrock=use_bedrock,
         use_aquifer_layer=use_aquifer_layer,
+        use_luna=use_luna,
+        use_hydrstress=use_hydrstress,
         h2osfcflag=h2osfcflag,
         fsnowoptics=fsnowoptics, fsnowaging=fsnowaging,
         int_snow_max=int_snow_max)
@@ -75,7 +79,8 @@ function clm_run!(;
         inst.overrides = overrides
     end
 
-    config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer)
+    config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer,
+                             use_luna=use_luna, use_hydrstress=use_hydrstress)
 
     # Configure atm2lnd downscaling to match Fortran lnd_in defaults
     atm2lnd_read_namelist!(inst.atm2lnd;
@@ -142,7 +147,13 @@ function clm_run!(;
         haskey(ds_p, "accum_factor") && (scf.accum_factor = Float64(ds_p["accum_factor"][1]))
         haskey(ds_p, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds_p["SNOW_DENSITY_MAX"][1]))
         haskey(ds_p, "SNOW_DENSITY_MIN") && (snowhydrology_params.rho_min = Float64(ds_p["SNOW_DENSITY_MIN"][1]))
-        haskey(ds_p, "fresh_snw_rds_max") && (snowhydrology_params.snw_rds_min = Float64(ds_p["fresh_snw_rds_max"][1]))
+        # fresh_snw_rds_max sets the WARM (near-0°C) fresh-snow grain radius used by
+        # SNICAR's FreshSnowRadius (snicar_params.fresh_snw_rds_max), NOT snw_rds_min.
+        # The previous wiring set snowhydrology_params.snw_rds_min instead, so the
+        # calibrated value (e.g. 70 µm) never reached SNICAR — fresh snow stayed at the
+        # 204.5 µm CLM5 default → spring snow albedo too low → snowpack melted ~a month
+        # early (Bow May SWE −41 mm) and dried the summer soil. Wire it to SNICAR.
+        haskey(ds_p, "fresh_snw_rds_max") && (snicar_params.fresh_snw_rds_max = Float64(ds_p["fresh_snw_rds_max"][1]))
         haskey(ds_p, "SNO_Z0MV") && (inst.frictionvel.zsno = Float64(ds_p["SNO_Z0MV"][1]))
         if haskey(ds_p, "snw_aging_bst")
             snicar_params.xdrdt = Float64(ds_p["snw_aging_bst"][1])
@@ -153,6 +164,15 @@ function clm_run!(;
             pc_val = Float64(ds_p["pc"][1])
             pc_val > 0 && (for c in 1:nc; inst.soilhydrology.hkdepth_col[c] = 1.0 / pc_val; end)
         end
+        # Canopy interception: CLM5 (clm5_0 physics, matching the Fortran reference
+        # lnd_in use_clm5_fpi=.true.) uses fpiliq = interception_fraction*tanh(elai+esai),
+        # NOT the CLM4 default 0.25*(1-exp(-0.5*lai)). The CLM4 form intercepts ~20% at
+        # lai~3 vs ~64% for CLM5 with the calibrated interception_fraction=0.6455 → Julia
+        # under-evaporated the canopy all summer (FCEV -17%). Enable CLM5 fpi + read the
+        # calibrated interception_fraction.
+        canopy_hydrology_read_nml!(use_clm5_fpi=true)
+        haskey(ds_p, "interception_fraction") &&
+            (canopy_hydrology_params.interception_fraction = Float64(ds_p["interception_fraction"][1]))
         close(ds_p)
     catch e
         @warn "Runtime param wiring failed: $e" maxlog=1
