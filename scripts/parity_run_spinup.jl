@@ -89,21 +89,18 @@ println()
 CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
 CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
 
-# Snow density/compaction — wind-dependent fresh-snow density ON, to match the
-# Bow lnd_in (wind_dependent_snow_density=.true.) and the sibling parity harnesses.
-# NOTE on overburden method: the Bow lnd_in also sets
-# snow_overburden_compaction_method='Vionnet2012', but enabling it here drives
-# SNOW_DEPTH to +28% (vs +4% with the Anderson1976 default). The Vionnet formula
-# itself is byte-identical to Fortran and ceta is now read from the params file
-# (450, not the struct default 250 — see read_params.jl), so the gap is NOT in the
-# overburden term: it exposes a separate under-compaction in another densification
-# term (destructive metamorphism / wind-drift / fresh density) that the stronger
-# Anderson overburden masks in the default config. Pinning Anderson here keeps the
-# apples-to-apples flux comparison honest (SNOW_DEPTH +4%, within tol) until that
-# residual is run down with per-term Fortran dumps. TODO: switch to Vionnet2012
-# once the densification residual is closed.
+# Snow density/compaction — match the Bow lnd_in exactly:
+# wind_dependent_snow_density=.true. + snow_overburden_compaction_method='Vionnet2012'.
+# This required fixing two params that were stuck at struct defaults instead of being
+# read from the clm5 params file (see read_params.jl): upplim_destruct_metamorph
+# (100→175; the dominant snow bug — the low default throttled destructive
+# metamorphism ~10× for 100–175 kg/m3 accumulation-season snow) and ceta (250→450;
+# Vionnet overburden viscosity). With both corrected, the honest Vionnet config gives
+# SNOW_DEPTH −3.8% (was +28% with the wrong upplim; the old Anderson-default "+4%"
+# was a compensating error — wrong overburden method masking the weak metamorphism).
 CLM.snow_hydrology_set_control_for_testing!(;
-    wind_dep_snow_density = true)
+    wind_dep_snow_density = true,
+    overburden_compaction_method = CLM.OVERBURDEN_COMPACTION_VIONNET2012)
 
 t0 = time()
 inst = run_clm!(;
