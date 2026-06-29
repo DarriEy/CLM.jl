@@ -163,6 +163,23 @@ function default_hist_fields()
             history_psnsuntree),
         HistFieldDef("ANSUNTREE", "tree sunlit net photosynthesis", "umol/m2/s", "patch",
             history_ansuntree),
+        HistFieldDef("KSRTREE", "tree soil-root conductance (sum top 10 layers)", "mm/s", "patch",
+            history_ksrtree),
+        # Grass-only (winter-grass-dormancy chase)
+        HistFieldDef("VCMX25GRASS", "grass canopy-top LUNA vcmax25", "umol/m2/s", "patch",
+            history_vcmx25grass),
+        HistFieldDef("FPSNGRASS", "grass photosynthesis (GPP)", "umol/m2/s", "patch",
+            history_fpsngrass),
+        HistFieldDef("BSUNGRASS", "grass sunlit btran (bsun)", "1", "patch",
+            history_bsungrass),
+        HistFieldDef("BTRANGRASS", "grass instantaneous btran", "1", "patch",
+            history_btrangrass),
+        HistFieldDef("VEGWPSUNGRASS", "grass sunlit leaf water potential", "mm", "patch",
+            history_vegwpsungrass),
+        HistFieldDef("ELAIGRASS", "grass exposed LAI", "m2/m2", "patch",
+            history_elaigrass),
+        HistFieldDef("TLAIGRASS", "grass total LAI", "m2/m2", "patch",
+            history_tlaigrass),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
@@ -380,6 +397,41 @@ history_btrantree(inst)  = _history_tree(inst.energyflux.btran_patch, inst.patch
 # readable from end-of-step history — use the realized rates + PAR/btran inputs.)
 history_psnsuntree(inst) = _history_tree(inst.photosyns.psnsun_patch, inst.patch)
 history_ansuntree(inst)  = _history_tree(inst.photosyns.an_sun_patch, inst.patch)
+# Tree total soil-root conductance (sum over the top 10 soil layers, to match the
+# Fortran FCALCSTRESS dump). In frozen soil this tiny conductance sets the intraday
+# vegwp draw-down depth → the BTRAN daily-min. Fortran tree winter sum ~2.2e-12 mm/s.
+function history_ksrtree(inst)
+    ksr = inst.soilstate.k_soil_root_patch
+    isempty(ksr) && return Float64[]
+    np = size(ksr, 1); nl = min(10, size(ksr, 2))
+    s = [sum(@view ksr[p, 1:nl]) for p in 1:np]
+    return _history_tree(s, inst.patch)
+end
+
+# Grass-only (itype 12:15) canopy value — to chase the winter grass dormancy
+# (Julia's winter grass goes dormant, GPP~0, while Fortran's stays lightly active,
+# an_sun~0.08/bsun~0.10). bsun<0.01 is zeroed in calcstress!, so a slightly more
+# negative grass vegwp tips Julia's grass below the threshold into dormancy.
+function _history_grass(arr, pch)
+    isempty(arr) && return Float64[]
+    np = ndims(arr) == 2 ? size(arr, 1) : length(arr)
+    out = fill(NaN, np)
+    @inbounds for p in 1:np
+        p <= length(pch.itype) || continue
+        it = pch.itype[p]
+        (12 <= it <= 15) || continue
+        v = ndims(arr) == 2 ? arr[p, 1] : arr[p]
+        isfinite(v) && (out[p] = Float64(v))
+    end
+    return out
+end
+history_vcmx25grass(inst)   = _history_grass(inst.photosyns.vcmx25_z_patch, inst.patch)
+history_fpsngrass(inst)     = _history_grass(inst.photosyns.fpsn_patch, inst.patch)
+history_bsungrass(inst)     = _history_grass(inst.energyflux.bsun_patch, inst.patch)
+history_btrangrass(inst)    = _history_grass(inst.energyflux.btran_patch, inst.patch)
+history_vegwpsungrass(inst) = _history_grass(inst.canopystate.vegwp_patch, inst.patch)
+history_elaigrass(inst)     = _history_grass(inst.canopystate.elai_patch, inst.patch)
+history_tlaigrass(inst)     = _history_grass(inst.canopystate.tlai_patch, inst.patch)
 
 function history_fpsn_patch(inst::CLMInstances)
     fp = inst.photosyns.fpsn_patch
