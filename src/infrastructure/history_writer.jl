@@ -106,6 +106,11 @@ function default_hist_fields()
         HistFieldDef("BSUNDIAG", "sunlit PHS water-stress factor", "unitless", "patch",
             inst -> isempty(inst.energyflux.bsun_patch) ? Float64[] :
                     Float64.(inst.energyflux.bsun_patch)),
+        HistFieldDef("SOILWATER_10CM", "soil water+ice in top 0.1 m", "mm", "column",
+            history_soilwater_10cm_col),
+        HistFieldDef("FSR", "reflected solar radiation", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsr_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsr_patch)),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
@@ -222,6 +227,33 @@ function history_smplmean_col(inst::CLMInstances)
     end
     return out
 end
+function history_soilwater_10cm_col(inst::CLMInstances)
+    ws = inst.water.waterstatebulk_inst.ws
+    col = inst.column
+    isempty(ws.h2osoi_liq_col) && return Float64[]
+    nc = size(ws.h2osoi_liq_col, 1)
+    nsno = varpar.nlevsno
+    nsoi = varpar.nlevsoi
+    out = zeros(nc)
+    @inbounds for c in 1:nc
+        s = 0.0
+        for j in 1:nsoi
+            jj = j + nsno
+            zi_top = col.zi[c, j + nsno]      # interface above layer j (m)
+            zi_top >= 0.1 && break
+            # fraction of this layer within top 0.1 m
+            zi_bot = col.zi[c, j + nsno + 1]
+            frac = zi_bot <= 0.1 ? 1.0 : (0.1 - zi_top) / max(1e-9, zi_bot - zi_top)
+            liq = ws.h2osoi_liq_col[c, jj]
+            ice = ws.h2osoi_ice_col[c, jj]
+            isfinite(liq) && (s += liq * frac)
+            isfinite(ice) && (s += ice * frac)
+        end
+        out[c] = s
+    end
+    return out
+end
+
 function history_soilice_col(inst::CLMInstances)
     ws = inst.water.waterstatebulk_inst.ws
     isempty(ws.h2osoi_ice_col) && return Float64[]
