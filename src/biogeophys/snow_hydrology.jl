@@ -2781,12 +2781,16 @@ NOTE: This is just for unit testing.
 function snow_hydrology_set_control_for_testing!(;
     wind_dep_snow_density::Union{Nothing,Bool} = nothing,
     new_snow_density_method::Union{Nothing,Int} = nothing,
+    overburden_compaction_method::Union{Nothing,Int} = nothing,
     reset_snow_flag::Union{Nothing,Bool} = nothing,
     reset_snow_glc_flag::Union{Nothing,Bool} = nothing,
     reset_snow_glc_ela_val::Union{Nothing,Float64} = nothing
 )
     if !isnothing(wind_dep_snow_density)
         WIND_DEPENDENT_SNOW_DENSITY[] = wind_dep_snow_density
+    end
+    if !isnothing(overburden_compaction_method)
+        OVERBURDEN_COMPACTION_METHOD[] = overburden_compaction_method
     end
     if !isnothing(new_snow_density_method)
         NEW_SNOW_DENSITY[] = new_snow_density_method

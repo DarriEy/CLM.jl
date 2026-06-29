@@ -35,6 +35,19 @@ function readParameters!(paramfile::String)
         # Read snow hydrology parameters (SnowHydrologyMod)
         haskey(ds, "wimp") && (snowhydrology_params.wimp = Float64(ds["wimp"][1]))
         haskey(ds, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds["SNOW_DENSITY_MAX"][1]))
+        # Overburden-compaction viscosity params. ceta in particular DEFAULTS to 250
+        # in the struct but the clm5 params file ships 450 — using the default makes
+        # the Vionnet2012 viscosity eta = f1·f2·(bi/ceta)·… ~1.8× too large, i.e. the
+        # snow pack under-compacts and snow_depth runs deep. Read them from the file.
+        # upplim_destruct_metamorph: struct default is 100 but the clm5 file ships 175.
+        # Destructive metamorphism is throttled by exp(-46e-3·(bi-upplim)) once bi>upplim,
+        # so the too-low default cuts ddz1 ~10× for accumulation-season snow in the
+        # 100–175 kg/m3 range → the pack under-densifies and SNOW_DEPTH runs deep.
+        haskey(ds, "upplim_destruct_metamorph") && (snowhydrology_params.upplim_destruct_metamorph = Float64(ds["upplim_destruct_metamorph"][1]))
+        haskey(ds, "ceta") && (snowhydrology_params.ceta = Float64(ds["ceta"][1]))
+        haskey(ds, "eta0_vionnet") && (snowhydrology_params.eta0_vionnet = Float64(ds["eta0_vionnet"][1]))
+        haskey(ds, "eta0_anderson") && (snowhydrology_params.eta0_anderson = Float64(ds["eta0_anderson"][1]))
+        haskey(ds, "wind_snowcompact_fact") && (snowhydrology_params.wind_snowcompact_fact = Float64(ds["wind_snowcompact_fact"][1]))
         haskey(ds, "SNO_Z0MV") && nothing  # read in clm_run! → inst.frictionvel.zsno
         haskey(ds, "snw_aging_bst") && nothing  # TODO: wire to snow aging routine
 

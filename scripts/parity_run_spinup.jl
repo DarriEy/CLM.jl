@@ -76,6 +76,32 @@ end
 isdir(outdir) || mkpath(outdir)
 println()
 
+# Rooting profile — match the Bow lnd_in (rooting_profile_method_{water,carbon} = 1
+# = Jackson1996 beta profile). CLM.jl defaults to Zeng2001 (roota/rootb), which
+# gives the grass a much fatter DEEP root tail (rootfr ~0.022 at the bottom soil
+# layer vs Jackson's ~0). With Zeng, the leafless-grass soil-to-root conductance
+# stays soil-limited at depth, so its equilibrium vegwp is pulled to the warm,
+# least-negative deep smp (~-334k ≈ the grass psi50 -340k) → bsun ~0.53. Jackson
+# zeroes the deep roots → root-limited at depth → vegwp weights the frozen shallow
+# layers → bsun ~0.10, matching Fortran. (Drives BTRANMN to parity; the tree is
+# soil-limited at depth either way so it is unaffected.) Every other Fortran-parity
+# harness sets this — parity_run_spinup.jl was the lone omission.
+CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
+CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
+
+# Snow density/compaction — match the Bow lnd_in exactly:
+# wind_dependent_snow_density=.true. + snow_overburden_compaction_method='Vionnet2012'.
+# This required fixing two params that were stuck at struct defaults instead of being
+# read from the clm5 params file (see read_params.jl): upplim_destruct_metamorph
+# (100→175; the dominant snow bug — the low default throttled destructive
+# metamorphism ~10× for 100–175 kg/m3 accumulation-season snow) and ceta (250→450;
+# Vionnet overburden viscosity). With both corrected, the honest Vionnet config gives
+# SNOW_DEPTH −3.8% (was +28% with the wrong upplim; the old Anderson-default "+4%"
+# was a compensating error — wrong overburden method masking the weak metamorphism).
+CLM.snow_hydrology_set_control_for_testing!(;
+    wind_dep_snow_density = true,
+    overburden_compaction_method = CLM.OVERBURDEN_COMPACTION_VIONNET2012)
+
 t0 = time()
 inst = run_clm!(;
     fsurdat=fsurdat, paramfile=paramfile, fforcing=fforcing,
