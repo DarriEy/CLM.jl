@@ -3015,16 +3015,22 @@ function getvegwp!(p::Int, c::Int, gb_mol::Real,
         0.0, 0.0, qsatl, qaf, havegs, laisun_p, laisha_p,
         elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p)
 
-    # Calculate root water potential. Threshold (not ==0): when ALL soil layers are
+    # Calculate root water potential. Threshold (not ==0): when ALL root layers are
     # frozen the smooth_max floor in pass-1 leaves k_soil_root ~1e-16 (not exactly 0,
-    # an AD-safety artifact), so sum_ksr ~1e-17 would bypass the no-extraction branch
-    # and the /sum_ksr below would give a huge xroot → the vegwp Newton cascades to
-    # NaN. Below the threshold there is effectively no root water access.
+    # an AD-safety artifact), so sum_ksr ~1e-17 would bypass a literal ==0 check and
+    # the -qflx/sum_ksr term below would give a huge xroot → vegwp Newton NaN / bogus
+    # vegwp. Below the threshold = effectively no root water access: use the k-weighted
+    # mean of (smp-grav2) for xroot (the qflx→0 limit), which is bounded AND zero-
+    # weights the bedrock layers (k=0, smp pinned at smpmin=-1e8) — an UNWEIGHTED mean
+    # would be dragged to ~-4e7 by that dry bedrock. soilflux is the mass-balance
+    # demand below (= Fortran else-branch's soilflux=qflx).
     sum_ksr = sum(k_soil_root_p[1:nlevsoi])
-    if abs(sum_ksr) <= oftype(sum_ksr, 1.0e-12)
-        x[ROOT_SEG] = sum(smp_c[1:nlevsoi] .- grav2) / nlevsoi
+    no_root_access = abs(sum_ksr) <= oftype(sum_ksr, 1.0e-12)
+    ksmp = sum(k_soil_root_p[1:nlevsoi] .* (smp_c[1:nlevsoi] .- grav2))
+    if no_root_access
+        x[ROOT_SEG] = abs(sum_ksr) > zero(sum_ksr) ? ksmp / sum_ksr : zero(eltype(x))
     else
-        x[ROOT_SEG] = (sum(k_soil_root_p[1:nlevsoi] .* (smp_c[1:nlevsoi] .- grav2)) - qflx_sun - qflx_sha) / sum_ksr
+        x[ROOT_SEG] = (ksmp - qflx_sun - qflx_sha) / sum_ksr
     end
 
     # Calculate xylem water potential
@@ -3048,10 +3054,18 @@ function getvegwp!(p::Int, c::Int, gb_mol::Real,
         x[SUN] = x[XYL]
     end
 
-    # Calculate soil flux
+    # Calculate soil flux. With no root water access (frozen soil; sum_ksr below
+    # threshold), soilflux = transpiration demand by mass balance (= what the
+    # else-branch loop yields by cancellation). The threshold branch's unweighted-mean
+    # xroot breaks that cancellation, leaving a spurious k·smp residual; use the
+    # demand instead. See _getvegwp for the detailed rationale.
     soilflux = 0.0
-    for j in 1:nlevsoi
-        soilflux += k_soil_root_p[j] * (smp_c[j] - x[ROOT_SEG] - grav2[j])
+    if no_root_access
+        soilflux = qflx_sun + qflx_sha
+    else
+        for j in 1:nlevsoi
+            soilflux += k_soil_root_p[j] * (smp_c[j] - x[ROOT_SEG] - grav2[j])
+        end
     end
 
     return (x, soilflux)
@@ -3086,19 +3100,22 @@ end
     end
     xroot = zero(T)
     # Threshold (not ==0): all-frozen soil leaves k_soil_root at the pass-1 smooth_max
-    # floor (~1e-16, an AD artifact) so sum_ksr ~1e-17 ≠ 0 would divide below → huge
-    # xroot → Newton NaN. Below threshold = effectively no root water access.
-    if abs(sum_ksr) <= T(1.0e-12)
-        s = zero(T)
-        @inbounds for j in 1:nlevsoi
-            s += smp_l[c, j] - z_col[c, j] * T(1000.0)
-        end
-        xroot = s / nlevsoi
+    # floor (~1e-16, an AD artifact) so sum_ksr ~1e-17 ≠ 0; the full else-branch's
+    # -qflx/sum_ksr term would then blow xroot → ±1e11 (Newton NaN / bogus vegwp).
+    # Below threshold = effectively no root water access: use the k-weighted mean of
+    # (smp-grav2) for xroot (the qflx→0 limit of the else-branch). This is bounded
+    # (a weighted average, so within the smp range) AND zero-weights the bedrock
+    # layers (k_soil_root=0 there, smp pinned at smpmin=-1e8); an UNWEIGHTED mean
+    # would be dragged to ~-4e7 by that dry bedrock. soilflux is set to the
+    # mass-balance demand below (= Fortran else-branch's soilflux=qflx).
+    no_root_access = abs(sum_ksr) <= T(1.0e-12)
+    s = zero(T)
+    @inbounds for j in 1:nlevsoi
+        s += k_soil_root[p, j] * (smp_l[c, j] - z_col[c, j] * T(1000.0))
+    end
+    if no_root_access
+        xroot = abs(sum_ksr) > zero(T) ? s / sum_ksr : zero(T)
     else
-        s = zero(T)
-        @inbounds for j in 1:nlevsoi
-            s += k_soil_root[p, j] * (smp_l[c, j] - z_col[c, j] * T(1000.0))
-        end
         xroot = (s - qflx_sun - qflx_sha) / sum_ksr
     end
 
@@ -3123,10 +3140,23 @@ end
         xsun = xxyl
     end
 
-    # Soil flux (host order: grav2[j]=z_col[c,j]*1000)
+    # Soil flux (host order: grav2[j]=z_col[c,j]*1000). When there is effectively no
+    # root water access (sum_ksr below threshold, e.g. frozen soil), the soil-to-root
+    # flux equals the transpiration demand by mass balance — which is exactly what the
+    # else-branch loop yields via cancellation (soilflux = Σk(smp-xroot-grav2) =
+    # qflx_sun+qflx_sha). The threshold branch uses the UNWEIGHTED mean for xroot
+    # (NaN-safety), which breaks that cancellation and would otherwise leave a spurious
+    # residual ∝ k·smp (huge with very-negative frozen smp → bogus late-season
+    # transpiration). Set soilflux to the mass-balance demand instead. Fortran's
+    # getvegwp takes the else-branch (sum(k_soil_root)==0 only when ALL layers are 0),
+    # so its soilflux is always = qflx; this matches that limit.
     soilflux = zero(T)
-    @inbounds for j in 1:nlevsoi
-        soilflux += k_soil_root[p, j] * (smp_l[c, j] - xroot - z_col[c, j] * T(1000.0))
+    if no_root_access
+        soilflux = qflx_sun + qflx_sha
+    else
+        @inbounds for j in 1:nlevsoi
+            soilflux += k_soil_root[p, j] * (smp_l[c, j] - xroot - z_col[c, j] * T(1000.0))
+        end
     end
 
     return (xsun, xsha, xxyl, xroot, soilflux)

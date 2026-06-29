@@ -44,6 +44,8 @@ function clm_run!(;
     use_cn::Bool = false,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
+    use_luna::Bool = false,
+    use_hydrstress::Bool = false,
     h2osfcflag::Int = 0,
     hist_fields::Union{Vector{HistFieldDef}, Nothing} = nothing,
     verbose::Bool = true,
@@ -64,6 +66,8 @@ function clm_run!(;
         start_date=start_date, dtime=dtime, use_cn=use_cn,
         use_bedrock=use_bedrock,
         use_aquifer_layer=use_aquifer_layer,
+        use_luna=use_luna,
+        use_hydrstress=use_hydrstress,
         h2osfcflag=h2osfcflag,
         fsnowoptics=fsnowoptics, fsnowaging=fsnowaging,
         int_snow_max=int_snow_max)
@@ -75,7 +79,8 @@ function clm_run!(;
         inst.overrides = overrides
     end
 
-    config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer)
+    config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer,
+                             use_luna=use_luna, use_hydrstress=use_hydrstress)
 
     # Configure atm2lnd downscaling to match Fortran lnd_in defaults
     atm2lnd_read_namelist!(inst.atm2lnd;

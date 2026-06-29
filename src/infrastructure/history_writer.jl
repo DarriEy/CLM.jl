@@ -92,6 +92,20 @@ function default_hist_fields()
             inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col),
         HistFieldDef("BTRAN", "transpiration beta factor", "unitless", "patch",
             history_btran_daily_min_patch),
+        # PHS diagnostics (late-season over-transpiration investigation)
+        HistFieldDef("VEGWPSUN", "sunlit leaf water potential", "mm", "patch",
+            history_vegwpsun_patch),
+        HistFieldDef("VEGWPROOT", "root water potential", "mm", "patch",
+            history_vegwproot_patch),
+        HistFieldDef("KSOILROOT", "soil-to-root conductance (layer sum)", "mm/s", "patch",
+            history_ksoilroot_patch),
+        HistFieldDef("SMPLMEAN", "soil matric potential (soil-layer mean)", "mm", "column",
+            history_smplmean_col),
+        HistFieldDef("SOILICE", "soil column ice", "mm", "column",
+            history_soilice_col),
+        HistFieldDef("BSUNDIAG", "sunlit PHS water-stress factor", "unitless", "patch",
+            inst -> isempty(inst.energyflux.bsun_patch) ? Float64[] :
+                    Float64.(inst.energyflux.bsun_patch)),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
@@ -163,6 +177,67 @@ function history_btran_daily_min_patch(inst::CLMInstances)
             end
             out[p] = bt
         end
+    end
+    return out
+end
+
+# --- PHS diagnostic accessors (DBG_PHS_FIELDS) -------------------------------
+# Temporary diagnostics for the late-season PHS over-transpiration investigation.
+# Expose the chain smp_l → k_soil_root → vegwp → bsun, plus soil ice, so the
+# Julia annual run can be compared link-by-link to the Fortran h0 VEGWP/BTRANMN.
+_phs_vegwp_seg(inst, seg) = begin
+    cs = inst.canopystate
+    isempty(cs.vegwp_patch) ? Float64[] : Float64.(@view cs.vegwp_patch[:, seg])
+end
+history_vegwpsun_patch(inst) = _phs_vegwp_seg(inst, 1)
+history_vegwproot_patch(inst) = _phs_vegwp_seg(inst, 4)
+function history_ksoilroot_patch(inst::CLMInstances)
+    ss = inst.soilstate
+    isempty(ss.k_soil_root_patch) && return Float64[]
+    np, nl = size(ss.k_soil_root_patch)
+    out = zeros(np)
+    @inbounds for p in 1:np
+        s = 0.0
+        for j in 1:nl
+            v = ss.k_soil_root_patch[p, j]
+            isfinite(v) && (s += v)
+        end
+        out[p] = s
+    end
+    return out
+end
+function history_smplmean_col(inst::CLMInstances)
+    ss = inst.soilstate
+    isempty(ss.smp_l_col) && return Float64[]
+    nc = size(ss.smp_l_col, 1)
+    nsoi = min(varpar.nlevsoi, size(ss.smp_l_col, 2))
+    out = fill(NaN, nc)
+    @inbounds for c in 1:nc
+        s = 0.0; n = 0
+        for j in 1:nsoi
+            v = ss.smp_l_col[c, j]
+            isfinite(v) && (s += v; n += 1)
+        end
+        n > 0 && (out[c] = s / n)
+    end
+    return out
+end
+function history_soilice_col(inst::CLMInstances)
+    ws = inst.water.waterstatebulk_inst.ws
+    isempty(ws.h2osoi_ice_col) && return Float64[]
+    nc = size(ws.h2osoi_ice_col, 1)
+    nsno = varpar.nlevsno
+    nsoi = varpar.nlevsoi
+    out = zeros(nc)
+    @inbounds for c in 1:nc
+        s = 0.0
+        for j in 1:nsoi
+            jj = j + nsno
+            jj <= size(ws.h2osoi_ice_col, 2) || continue
+            v = ws.h2osoi_ice_col[c, jj]
+            isfinite(v) && (s += v)
+        end
+        out[c] = s
     end
     return out
 end
