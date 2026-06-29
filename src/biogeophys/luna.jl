@@ -187,7 +187,10 @@ end
 Temperature response for respiration (Bernacchi PCE 2001).
 """
 function resp_t_bernacchi(tleaf::Real)
-    return exp(18.72 - 46.39 / (RGAS * (tleaf + TFRZ)))
+    # Bernacchi (2001) activation energy 46.39 is in kJ/mol, so RGAS (J/mol/K) must
+    # be in kJ/mol/K here (RGAS*1e-3 == Fortran LunaMod's rgas[J/kmol]*1.e-6). Without
+    # the 1e-3 the response is ~1.3e8 instead of 1.0 at the 25°C reference.
+    return exp(18.72 - 46.39 / (RGAS * 1.0e-3 * (tleaf + TFRZ)))
 end
 
 # ==========================================================================

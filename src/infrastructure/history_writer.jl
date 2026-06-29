@@ -124,6 +124,14 @@ function default_hist_fields()
             history_tsoi_10cm_col),
         HistFieldDef("FPSN", "gross photosynthesis", "umol/m2/s", "patch",
             history_fpsn_patch),
+        HistFieldDef("VCMX25T", "canopy-top LUNA vcmax25", "umol/m2/s", "patch",
+            inst -> isempty(inst.photosyns.vcmx25_z_patch) ? Float64[] :
+                    [(@inbounds v=inst.photosyns.vcmx25_z_patch[p,1]; isfinite(v) ? Float64(v) : 0.0)
+                     for p in 1:size(inst.photosyns.vcmx25_z_patch,1)]),
+        HistFieldDef("JMX25T", "canopy-top LUNA jmax25", "umol/m2/s", "patch",
+            inst -> isempty(inst.photosyns.jmx25_z_patch) ? Float64[] :
+                    [(@inbounds v=inst.photosyns.jmx25_z_patch[p,1]; isfinite(v) ? Float64(v) : 0.0)
+                     for p in 1:size(inst.photosyns.jmx25_z_patch,1)]),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
