@@ -124,6 +124,18 @@ function default_hist_fields()
             history_tsoi_10cm_col),
         HistFieldDef("FPSN", "gross photosynthesis", "umol/m2/s", "patch",
             history_fpsn_patch),
+        HistFieldDef("LAISUN", "sunlit projected LAI", "m2/m2", "patch",
+            inst -> isempty(inst.canopystate.laisun_patch) ? Float64[] :
+                    Float64.(inst.canopystate.laisun_patch)),
+        HistFieldDef("LAISHA", "shaded projected LAI", "m2/m2", "patch",
+            inst -> isempty(inst.canopystate.laisha_patch) ? Float64[] :
+                    Float64.(inst.canopystate.laisha_patch)),
+        HistFieldDef("FSUNDIAG", "sunlit fraction of canopy", "1", "patch",
+            inst -> isempty(inst.canopystate.fsun_patch) ? Float64[] :
+                    [(@inbounds v=inst.canopystate.fsun_patch[p]; isfinite(v) ? Float64(v) : 0.0)
+                     for p in 1:length(inst.canopystate.fsun_patch)]),
+        HistFieldDef("PARVEG", "canopy absorbed PAR (sun+sha)", "W/m2", "patch",
+            history_parveg_patch),
         HistFieldDef("VCMX25T", "canopy-top LUNA vcmax25", "umol/m2/s", "patch",
             inst -> isempty(inst.photosyns.vcmx25_z_patch) ? Float64[] :
                     [(@inbounds v=inst.photosyns.vcmx25_z_patch[p,1]; isfinite(v) ? Float64(v) : 0.0)
@@ -281,6 +293,29 @@ end
 # FPSN = canopy gross photosynthesis (umol CO2 m-2 s-1) = fpsn_patch
 # (= psnsun*laisun + psnsha*laisha). NaN/non-exposed → 0 (no photosynthesis), matching
 # Fortran where psn=0 at night; the daily mean then includes night zeros.
+# Canopy absorbed PAR (W/m2) = sum over radiative layers of parsun_z + parsha_z
+# (= Fortran parveg = solad_vis*fabd_vis + solai_vis*fabi_vis, the VIS band). Daily
+# mean here (Fortran PARVEGLN is local-noon, so expect Julia daily-mean < that).
+function history_parveg_patch(inst::CLMInstances)
+    sa = inst.solarabs
+    isempty(sa.parsun_z_patch) && return Float64[]
+    np = size(sa.parsun_z_patch, 1)
+    nz = size(sa.parsun_z_patch, 2)
+    nrad = inst.surfalb.nrad_patch
+    out = zeros(np)
+    @inbounds for p in 1:np
+        nr = (p <= length(nrad) && nrad[p] >= 1) ? min(nrad[p], nz) : nz
+        s = 0.0
+        for z in 1:nr
+            vsun = sa.parsun_z_patch[p, z]; vsha = sa.parsha_z_patch[p, z]
+            isfinite(vsun) && (s += vsun)
+            isfinite(vsha) && (s += vsha)
+        end
+        out[p] = s
+    end
+    return out
+end
+
 function history_fpsn_patch(inst::CLMInstances)
     fp = inst.photosyns.fpsn_patch
     isempty(fp) && return Float64[]
