@@ -76,6 +76,35 @@ end
 isdir(outdir) || mkpath(outdir)
 println()
 
+# Rooting profile — match the Bow lnd_in (rooting_profile_method_{water,carbon} = 1
+# = Jackson1996 beta profile). CLM.jl defaults to Zeng2001 (roota/rootb), which
+# gives the grass a much fatter DEEP root tail (rootfr ~0.022 at the bottom soil
+# layer vs Jackson's ~0). With Zeng, the leafless-grass soil-to-root conductance
+# stays soil-limited at depth, so its equilibrium vegwp is pulled to the warm,
+# least-negative deep smp (~-334k ≈ the grass psi50 -340k) → bsun ~0.53. Jackson
+# zeroes the deep roots → root-limited at depth → vegwp weights the frozen shallow
+# layers → bsun ~0.10, matching Fortran. (Drives BTRANMN to parity; the tree is
+# soil-limited at depth either way so it is unaffected.) Every other Fortran-parity
+# harness sets this — parity_run_spinup.jl was the lone omission.
+CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
+CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
+
+# Snow density/compaction — wind-dependent fresh-snow density ON, to match the
+# Bow lnd_in (wind_dependent_snow_density=.true.) and the sibling parity harnesses.
+# NOTE on overburden method: the Bow lnd_in also sets
+# snow_overburden_compaction_method='Vionnet2012', but enabling it here drives
+# SNOW_DEPTH to +28% (vs +4% with the Anderson1976 default). The Vionnet formula
+# itself is byte-identical to Fortran and ceta is now read from the params file
+# (450, not the struct default 250 — see read_params.jl), so the gap is NOT in the
+# overburden term: it exposes a separate under-compaction in another densification
+# term (destructive metamorphism / wind-drift / fresh density) that the stronger
+# Anderson overburden masks in the default config. Pinning Anderson here keeps the
+# apples-to-apples flux comparison honest (SNOW_DEPTH +4%, within tol) until that
+# residual is run down with per-term Fortran dumps. TODO: switch to Vionnet2012
+# once the densification residual is closed.
+CLM.snow_hydrology_set_control_for_testing!(;
+    wind_dep_snow_density = true)
+
 t0 = time()
 inst = run_clm!(;
     fsurdat=fsurdat, paramfile=paramfile, fforcing=fforcing,
