@@ -1568,25 +1568,46 @@ function canopy_fluxes_core!(
         _smp_l = soilstate.smp_l_col; _watsat = soilstate.watsat_col
         _sucsat = soilstate.sucsat_col; _bsw = soilstate.bsw_col
         _smpmin = soilstate.smpmin_col
-        # s_node from the LIQUID volumetric water (driver fills h2osoi_liqvol_col from
-        # the prognostic h2osoi_liq before canopy_fluxes). Do NOT use h2osoi_vol_col:
-        # it is only updated by HydrologyNoDrainage (which runs AFTER canopy_fluxes),
-        # so here it sits at its cold-start default (≈0.75·watsat) → spuriously wet
-        # soil → no plant water stress (grass vegwp stuck ~−9000 mm vs Fortran ~−205000).
+        # Recompute smp_l + hk_l here because HydrologyNoDrainage (which fills them)
+        # runs AFTER canopy_fluxes, leaving soilstate%smp_l_col one step stale; PHS
+        # photosynthesis reads it but does not compute it. Reconstruct from the
+        # PROGNOSTIC h2osoi_liq/ice — NOT the stale h2osoi_vol_col, which sits at its
+        # cold-start default (≈0.75·watsat) here → spuriously wet → no plant stress
+        # (an earlier bug that was wrongly "fixed" by switching to liquid-only).
         _h2osoi_liqvol = waterdiagbulk.h2osoi_liqvol_col
+        _h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col
+        _h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col
+        _dz = col_data.dz
         _hksat = soilstate.hksat_col; _hk_l = soilstate.hk_l_col
+        # ice impedance factor e_ice (params-file calibrated; matches the value the
+        # main HydrologyNoDrainage/SoilWaterMovement hk_l uses).
+        _eice = FT(soilhydrology_params.e_ice)
         @inbounds for c in bounds_col, j in 1:_nlevsoi
-            # smp_l uses the LAYER liquid s_node (SoilWaterMovementMod.F90:740-746).
-            s_node = max(min(_h2osoi_liqvol[c, _nlevsno + j] / _watsat[c, j], one(FT)), FT(0.01))
+            dz_cj = _dz[c, _nlevsno + j]
+            # smp_l uses the TOTAL volumetric water (liquid + ice), matching
+            # HydrologyNoDrainageMod.F90:629-632 ("this smp_l uses the entire ice and
+            # water volume"). Liquid-only over-cavitates frozen soil — winter vegwp ~2x
+            # too negative → BTRAN spuriously 0 in the frozen shoulder seasons — because
+            # in frozen soil h2osoi_vol ≫ liquid.
+            vol = _h2osoi_liq[c, _nlevsno + j] / (dz_cj * FT(DENH2O)) +
+                  _h2osoi_ice[c, _nlevsno + j] / (dz_cj * FT(DENICE))
+            s_node = max(min(vol / _watsat[c, j], one(FT)), FT(0.01))
             _smp_l[c, j] = max(_smpmin[c], -_sucsat[c, j] * s_node^(-_bsw[c, j]))
-            # hk_l (Clapp-Hornberger) uses the INTERFACE-AVERAGE saturation between
-            # layers j and j+1 (SoilWaterMovementMod.F90:721-728), NOT the layer's own
-            # s_node — for a wetter-with-depth profile this makes hk_l rise with depth.
+            # hk_l = imped · hksat · s1^(2·bsw+3), with s1 the INTERFACE-AVERAGE LIQUID
+            # saturation and imped = 10^(-e_ice·icefrac_iface) the ICE IMPEDANCE
+            # (SoilWaterMovementMod.F90:721-731). Omitting imped leaves frozen-soil root
+            # conductance too high, so the canopy never draws vegwp down at midday and
+            # BTRAN's daily minimum is spuriously high through the frozen season.
             jp1 = min(_nlevsoi, j + 1)
+            dz_jp1 = _dz[c, _nlevsno + jp1]
             s1 = (_h2osoi_liqvol[c, _nlevsno + j] + _h2osoi_liqvol[c, _nlevsno + jp1]) /
                  (_watsat[c, j] + _watsat[c, jp1])
             s1 = min(one(FT), s1)
-            _hk_l[c, j] = _hksat[c, j] * s1^(FT(2.0) * _bsw[c, j] + FT(3.0))
+            vice_j   = min(_watsat[c, j],   _h2osoi_ice[c, _nlevsno + j]   / (dz_cj  * FT(DENICE)))
+            vice_jp1 = min(_watsat[c, jp1], _h2osoi_ice[c, _nlevsno + jp1] / (dz_jp1 * FT(DENICE)))
+            icefrac_iface = FT(0.5) * (vice_j / _watsat[c, j] + vice_jp1 / _watsat[c, jp1])
+            imped = FT(10.0)^(-_eice * icefrac_iface)
+            _hk_l[c, j] = imped * _hksat[c, j] * s1^(FT(2.0) * _bsw[c, j] + FT(3.0))
         end
         _froot_c = isempty(phs_froot_carbon) ? zeros(FT, length(bounds_patch)) : phs_froot_carbon
         psn_phs_pass1_update!(photosyns, mask_exposedvegp, patch_data.column,
