@@ -165,6 +165,7 @@
         # --- Photosynthesis ---
         photosyns = CLM.PhotosynthesisData()
         CLM.photosynthesis_data_init!(photosyns, np)
+        CLM.set_params_for_testing!(photosyns)
 
         return inst, bounds, filt, filt_ia, config, photosyns
     end

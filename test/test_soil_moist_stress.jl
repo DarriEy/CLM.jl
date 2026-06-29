@@ -78,6 +78,15 @@
         CLM.calc_effective_soilporosity!(watsat, h2osoi_ice, col_dz, eff_por,
                                          mask, bounds, nlevgrnd, nlevsno)
         @test eff_por[3, 1] == eff_por_saved[3, 1]
+
+        # bounds_col must be honored; the driver may pass a clump/proc subrange.
+        eff_por .= -1.0
+        mask .= true
+        CLM.calc_effective_soilporosity!(watsat, h2osoi_ice, col_dz, eff_por,
+                                         mask, 2:2, nlevgrnd, nlevsno)
+        @test eff_por[1, 1] == -1.0
+        @test eff_por[2, 1] ≈ 0.0 atol=1e-10
+        @test eff_por[3, 1] == -1.0
     end
 
     @testset "calc_effective_snowporosity!" begin

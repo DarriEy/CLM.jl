@@ -1155,6 +1155,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Volumetric liquid water content for root moisture stress — 2D kernel
     # over (column, soil layer). See kernels.jl.
     joff = varpar.nlevsno
+    # Refresh effective soil porosity (watsat − vol_ice) from THIS timestep's ice
+    # before it is consumed below. Fortran SoilMoistStressMod calls
+    # calc_effective_soilporosity at the top of the BTRAN routine, so eff_porosity is
+    # always self-consistent with the current ice. The Julia port otherwise only
+    # refreshes eff_porosity_col later in the hydrology block (set_soil_water_fractions!,
+    # after this flux block), leaving a ONE-STEP-STALE value here that biased the
+    # freeze-up/thaw shoulder-season chain liqvol-clamp → smp_l → vegwp → bsun/btran
+    # (and transpiration) high. (calc_effective_soilporosity! was dead code.)
+    calc_effective_soilporosity!(ss.watsat_col, wsb.ws.h2osoi_ice_col, col.dz,
+                                 ss.eff_porosity_col, filt.nolakec, bc_col,
+                                 varpar.nlevgrnd, varpar.nlevsno)
     compute_h2osoi_liqvol!(wdb.h2osoi_liqvol_col, filt.nolakec, col.dz,
                            wsb.ws.h2osoi_liq_col, ss.eff_porosity_col,
                            joff, varpar.nlevgrnd; denh2o=DENH2O)
@@ -2358,9 +2369,10 @@ function clm_drv_core!(config::CLMDriverConfig,
         # Water accumulators — WIRED
         water_update_acc_vars!(inst.water, bc_col)
 
-        # Energy flux accumulators — WIRED
+        # Energy flux accumulators — WIRED. BTRANMN = daily min of the HOURLY-AVERAGED
+        # btran (BTRANAV), so nstep is needed to detect hour boundaries.
         energyflux_update_acc_vars!(ef, bc_patch;
-            end_cd=is_end_curr_day, dtime=Int(dtime))
+            end_cd=is_end_curr_day, nstep=nstep, dtime=Int(dtime))
 
         # LUNA photosynthetic-N acclimation — WIRED. Accumulate 24h climate each
         # step; at end-of-day compute the 10-day means, recompute vcmx25_z/jmx25_z,

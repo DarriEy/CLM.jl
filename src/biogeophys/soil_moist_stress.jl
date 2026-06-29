@@ -85,9 +85,9 @@ Arguments:
 # --- Kernel: effective soil porosity over (column, soil layer) ---
 @kernel function _smstress_effsoilpor_kernel!(eff_por, @Const(mask), @Const(watsat),
                                               @Const(h2osoi_ice), @Const(col_dz),
-                                              joff::Int, denice)
+                                              joff::Int, denice, cmin::Int, cmax::Int)
     c, j = @index(Global, NTuple)
-    @inbounds if mask[c]
+    @inbounds if cmin <= c <= cmax && mask[c]
         # compute the volumetric ice content
         vol_ice = min(watsat[c, j], h2osoi_ice[c, j + joff] / (denice * col_dz[c, j + joff]))
         # compute the maximum soil space to fill liquid water and air
@@ -95,9 +95,11 @@ Arguments:
     end
 end
 
-smstress_effsoilpor!(eff_por, mask, watsat, h2osoi_ice, col_dz, joff::Int, nlevgrnd::Int, denice) =
+smstress_effsoilpor!(eff_por, mask, watsat, h2osoi_ice, col_dz,
+                     bounds_col::UnitRange{Int}, joff::Int, nlevgrnd::Int, denice) =
     _launch!(_smstress_effsoilpor_kernel!, eff_por, mask, watsat, h2osoi_ice, col_dz,
-             joff, eltype(eff_por)(denice); ndrange = (length(mask), nlevgrnd))
+             joff, eltype(eff_por)(denice), first(bounds_col), last(bounds_col);
+             ndrange = (length(mask), nlevgrnd))
 
 function calc_effective_soilporosity!(watsat::AbstractMatrix{<:Real},
                                       h2osoi_ice::AbstractMatrix{<:Real},
@@ -108,7 +110,8 @@ function calc_effective_soilporosity!(watsat::AbstractMatrix{<:Real},
                                       nlevgrnd::Int,
                                       nlevsno::Int)
     joff = nlevsno  # offset for combined snow+soil indexing
-    smstress_effsoilpor!(eff_por, mask, watsat, h2osoi_ice, col_dz, joff, nlevgrnd, DENICE)
+    smstress_effsoilpor!(eff_por, mask, watsat, h2osoi_ice, col_dz,
+                         bounds_col, joff, nlevgrnd, DENICE)
     return nothing
 end
 

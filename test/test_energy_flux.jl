@@ -72,6 +72,8 @@
         @test length(ef.btran_patch) == np
         @test length(ef.btran_min_patch) == np
         @test length(ef.btran_min_inst_patch) == np
+        @test length(ef.btranav_accum_patch) == np
+        @test length(ef.btranav_naccum_patch) == np
         @test length(ef.bsun_patch) == np
         @test length(ef.bsha_patch) == np
         @test length(ef.dhsdt_canopy_patch) == np
@@ -311,6 +313,8 @@
         # After startup init, btran_min should be SPVAL
         @test ef.btran_min_patch[1]      ≈ CLM.SPVAL
         @test ef.btran_min_inst_patch[1] ≈ CLM.SPVAL
+        @test ef.btranav_accum_patch[1]  ≈ 0.0
+        @test ef.btranav_naccum_patch[1] ≈ 0.0
         @test ef.btran_min_patch[np]     ≈ CLM.SPVAL
         @test ef.btran_min_inst_patch[np] ≈ CLM.SPVAL
     end
@@ -342,6 +346,57 @@
         ef.btran_patch[1] = 0.50
         CLM.energyflux_update_acc_vars!(ef, 1:np; end_cd=false)
         @test ef.btran_min_inst_patch[1] ≈ 0.50
+    end
+
+    @testset "energyflux_update_acc_vars! hourly BTRANAV semantics" begin
+        np = 1; nc = 1; nl = 1; ng = 1
+        ef = CLM.EnergyFluxData()
+        CLM.energyflux_init!(ef, np, nc, nl, ng)
+        CLM.energyflux_init_acc_vars!(ef, 1:np; is_startup=true)
+
+        # 30-minute timestep: only every second step publishes an hourly average.
+        ef.btran_patch[1] = 0.80
+        CLM.energyflux_update_acc_vars!(ef, 1:np; nstep=1, dtime=1800)
+        @test ef.btran_min_inst_patch[1] ≈ CLM.SPVAL
+        @test ef.btranav_accum_patch[1] ≈ 0.80
+        @test ef.btranav_naccum_patch[1] ≈ 1.0
+
+        ef.btran_patch[1] = 0.40
+        CLM.energyflux_update_acc_vars!(ef, 1:np; nstep=2, dtime=1800)
+        @test ef.btran_min_inst_patch[1] ≈ 0.60
+        @test ef.btran_min_patch[1] ≈ CLM.SPVAL
+        @test ef.btranav_accum_patch[1] ≈ 0.0
+        @test ef.btranav_naccum_patch[1] ≈ 0.0
+
+        # SPVAL is missing data, not a huge finite btran contribution.
+        ef.btran_patch[1] = CLM.SPVAL
+        CLM.energyflux_update_acc_vars!(ef, 1:np; nstep=3, dtime=1800)
+        @test ef.btranav_accum_patch[1] ≈ 0.0
+        @test ef.btranav_naccum_patch[1] ≈ 0.0
+
+        ef.btran_patch[1] = 0.20
+        CLM.energyflux_update_acc_vars!(ef, 1:np; nstep=4, dtime=1800, end_cd=true)
+        @test ef.btran_min_patch[1] ≈ 0.20
+        @test ef.btran_min_inst_patch[1] ≈ CLM.SPVAL
+    end
+
+    @testset "energyflux_update_acc_vars! Fortran NINT period rounding" begin
+        np = 1; nc = 1; nl = 1; ng = 1
+        ef = CLM.EnergyFluxData()
+        CLM.energyflux_init!(ef, np, nc, nl, ng)
+        CLM.energyflux_init_acc_vars!(ef, 1:np; is_startup=true)
+
+        # 3600 / 1440 == 2.5. Fortran NINT rounds this to 3, not Julia's default
+        # ties-to-even result of 2.
+        ef.btran_patch[1] = 0.0
+        CLM.energyflux_update_acc_vars!(ef, 1:np; nstep=1, dtime=1440)
+        ef.btran_patch[1] = 1.0
+        CLM.energyflux_update_acc_vars!(ef, 1:np; nstep=2, dtime=1440)
+        @test ef.btran_min_inst_patch[1] ≈ CLM.SPVAL
+
+        ef.btran_patch[1] = 1.0
+        CLM.energyflux_update_acc_vars!(ef, 1:np; nstep=3, dtime=1440)
+        @test ef.btran_min_inst_patch[1] ≈ 2 / 3
     end
 
     @testset "field mutability" begin
