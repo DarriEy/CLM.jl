@@ -136,14 +136,17 @@ function default_hist_fields()
                      for p in 1:length(inst.canopystate.fsun_patch)]),
         HistFieldDef("PARVEG", "canopy absorbed PAR (sun+sha)", "W/m2", "patch",
             history_parveg_patch),
-        HistFieldDef("VCMX25T", "canopy-top LUNA vcmax25", "umol/m2/s", "patch",
-            inst -> isempty(inst.photosyns.vcmx25_z_patch) ? Float64[] :
-                    [(@inbounds v=inst.photosyns.vcmx25_z_patch[p,1]; isfinite(v) ? Float64(v) : 0.0)
-                     for p in 1:size(inst.photosyns.vcmx25_z_patch,1)]),
-        HistFieldDef("JMX25T", "canopy-top LUNA jmax25", "umol/m2/s", "patch",
-            inst -> isempty(inst.photosyns.jmx25_z_patch) ? Float64[] :
-                    [(@inbounds v=inst.photosyns.jmx25_z_patch[p,1]; isfinite(v) ? Float64(v) : 0.0)
-                     for p in 1:size(inst.photosyns.jmx25_z_patch,1)]),
+        # NOTE: this is the LUNA-acclimated capacity (vcmx25_z), which drives
+        # photosynthesis. It is NOT comparable to the Fortran h0 'VCMX25T'
+        # (luvcmax25top), which on this run is the vestigial vcmax_opt=3 diagnostic
+        # (i_vcad+s_vcad*lnc)*dayl_factor, not the LUNA value. Named VCMX25LUNA to
+        # avoid the false comparison. Bare patches → NaN so the gridcell aggregate
+        # is veg-area-weighted (per-patch already validated vs Fortran: tree 55 vs
+        # 52, grass 128 vs 124).
+        HistFieldDef("VCMX25LUNA", "canopy-top LUNA vcmax25 (acclimated capacity)", "umol/m2/s", "patch",
+            history_vcmx25luna_patch),
+        HistFieldDef("JMX25LUNA", "canopy-top LUNA jmax25 (acclimated capacity)", "umol/m2/s", "patch",
+            history_jmx25luna_patch),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
@@ -316,12 +319,35 @@ function history_parveg_patch(inst::CLMInstances)
     return out
 end
 
+# LUNA-acclimated capacity per patch, top layer; bare → NaN (excluded by the
+# gridcell aggregator → veg-area-weighted). The h0 VCMX25T is a different quantity
+# (vcmax_opt=3), so compare per-patch, not gridcell-vs-h0.
+function _history_lunacap(arr, pch)
+    isempty(arr) && return Float64[]
+    np = size(arr, 1)
+    out = fill(NaN, np)
+    @inbounds for p in 1:np
+        (p <= length(pch.itype) && pch.itype[p] == noveg) && continue
+        v = arr[p, 1]
+        isfinite(v) && (out[p] = Float64(v))
+    end
+    return out
+end
+history_vcmx25luna_patch(inst) = _history_lunacap(inst.photosyns.vcmx25_z_patch, inst.patch)
+history_jmx25luna_patch(inst) = _history_lunacap(inst.photosyns.jmx25_z_patch, inst.patch)
+
 function history_fpsn_patch(inst::CLMInstances)
     fp = inst.photosyns.fpsn_patch
     isempty(fp) && return Float64[]
+    pch = inst.patch
     n = length(fp)
-    out = zeros(n)
+    out = fill(NaN, n)
     @inbounds for p in 1:n
+        # Bare-ground patches → NaN so the gridcell aggregator EXCLUDES them
+        # (matches Fortran FPSN=SPVAL on bare). Vegetated patches keep their value
+        # (a finite 0 at night, included as a real zero). Returning 0 for bare
+        # diluted the gridcell mean by the bare-area fraction (~-6% on FPSN).
+        (p <= length(pch.itype) && pch.itype[p] == noveg) && continue
         v = fp[p]
         out[p] = isfinite(v) ? Float64(v) : 0.0
     end
