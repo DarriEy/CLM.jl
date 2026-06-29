@@ -47,9 +47,16 @@ fhistory = joinpath(outdir,
 ffortran_restart = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.r.$(YEAR)-01-01-00000.nc"
 f_h0 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.h0.$(YEAR)-01-01-00000.nc"
 
-# SNICAR data files
-fsnowoptics = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-fsnowaging  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+# SNICAR data files. The Fortran lnd_in references /Users/.../projects/cesm-inputdata
+# (not present here); the same files live under SYMFLUENCE_data/installs/cesm-inputdata.
+# Without them Julia silently falls back to the BATS snow albedo while Fortran ran full
+# SNICAR — a scheme mismatch that melted Julia's spring snowpack ~a month early. Prefer
+# the existing copy, fall back to the projects path.
+const _snicar_dir1 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/cesm-inputdata/lnd/clm2/snicardata"
+const _snicar_dir2 = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata"
+_pick(f) = isfile(joinpath(_snicar_dir1, f)) ? joinpath(_snicar_dir1, f) : joinpath(_snicar_dir2, f)
+fsnowoptics = _pick("snicar_optics_5bnd_c013122.nc")
+fsnowaging  = _pick("snicar_drdt_bst_fit_60_c070416.nc")
 
 # DDS-calibrated parameters (from the Bow user_nl_clm).
 baseflow_scalar = 0.0022119554

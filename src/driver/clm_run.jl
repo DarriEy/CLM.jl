@@ -147,7 +147,13 @@ function clm_run!(;
         haskey(ds_p, "accum_factor") && (scf.accum_factor = Float64(ds_p["accum_factor"][1]))
         haskey(ds_p, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds_p["SNOW_DENSITY_MAX"][1]))
         haskey(ds_p, "SNOW_DENSITY_MIN") && (snowhydrology_params.rho_min = Float64(ds_p["SNOW_DENSITY_MIN"][1]))
-        haskey(ds_p, "fresh_snw_rds_max") && (snowhydrology_params.snw_rds_min = Float64(ds_p["fresh_snw_rds_max"][1]))
+        # fresh_snw_rds_max sets the WARM (near-0°C) fresh-snow grain radius used by
+        # SNICAR's FreshSnowRadius (snicar_params.fresh_snw_rds_max), NOT snw_rds_min.
+        # The previous wiring set snowhydrology_params.snw_rds_min instead, so the
+        # calibrated value (e.g. 70 µm) never reached SNICAR — fresh snow stayed at the
+        # 204.5 µm CLM5 default → spring snow albedo too low → snowpack melted ~a month
+        # early (Bow May SWE −41 mm) and dried the summer soil. Wire it to SNICAR.
+        haskey(ds_p, "fresh_snw_rds_max") && (snicar_params.fresh_snw_rds_max = Float64(ds_p["fresh_snw_rds_max"][1]))
         haskey(ds_p, "SNO_Z0MV") && (inst.frictionvel.zsno = Float64(ds_p["SNO_Z0MV"][1]))
         if haskey(ds_p, "snw_aging_bst")
             snicar_params.xdrdt = Float64(ds_p["snw_aging_bst"][1])
