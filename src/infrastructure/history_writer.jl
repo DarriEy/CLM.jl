@@ -122,6 +122,8 @@ function default_hist_fields()
                     Float64.(inst.temperature.t_veg_patch)),
         HistFieldDef("TSOI_10CM", "soil temperature in top 0.1 m", "K", "column",
             history_tsoi_10cm_col),
+        HistFieldDef("FPSN", "gross photosynthesis", "umol/m2/s", "patch",
+            history_fpsn_patch),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
@@ -268,6 +270,21 @@ end
 # Fortran QVEGE = canopy INTERCEPTION evaporation = qflx_evap_veg - qflx_tran_veg
 # (qflx_evap_veg_col is the TOTAL leaf water flux incl. transpiration). Matches the
 # energy form FCEV = hvap*(qflx_evap_veg - qflx_tran_veg).
+# FPSN = canopy gross photosynthesis (umol CO2 m-2 s-1) = fpsn_patch
+# (= psnsun*laisun + psnsha*laisha). NaN/non-exposed → 0 (no photosynthesis), matching
+# Fortran where psn=0 at night; the daily mean then includes night zeros.
+function history_fpsn_patch(inst::CLMInstances)
+    fp = inst.photosyns.fpsn_patch
+    isempty(fp) && return Float64[]
+    n = length(fp)
+    out = zeros(n)
+    @inbounds for p in 1:n
+        v = fp[p]
+        out[p] = isfinite(v) ? Float64(v) : 0.0
+    end
+    return out
+end
+
 function history_qvege_col(inst::CLMInstances)
     wf = inst.water.waterfluxbulk_inst.wf
     ev = wf.qflx_evap_veg_col; tr = wf.qflx_tran_veg_col
