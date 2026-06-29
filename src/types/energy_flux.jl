@@ -110,7 +110,13 @@ Base.@kwdef mutable struct EnergyFluxData{FT<:Real,
     # --- Transpiration (patch-level) ---
     btran_patch                  ::V = Float64[]   # patch transpiration wetness factor (0 to 1)
     btran_min_patch              ::V = Float64[]   # patch daily minimum transpiration wetness factor (0 to 1)
-    btran_min_inst_patch         ::V = Float64[]   # patch instantaneous daily minimum transpiration wetness factor (0 to 1)
+    btran_min_inst_patch         ::V = Float64[]   # patch running daily minimum BTRANMN source (0 to 1)
+    # BTRANAV hourly-average accumulator (Fortran EnergyFluxType `BTRANAV`, accum_type
+    # timeavg over nint(3600/dtime) steps). btran_min_inst tracks the daily minimum of
+    # this HOURLY AVERAGE, not of the instantaneous per-step btran. _accum holds the
+    # running sum within the current hour; _naccum the contributing-step count.
+    btranav_accum_patch          ::V = Float64[]   # running sum of btran over the current hour interval
+    btranav_naccum_patch         ::V = Float64[]   # number of finite contributions in the current interval
     bsun_patch                   ::V = Float64[]   # patch sunlit canopy transpiration wetness factor (0 to 1)
     bsha_patch                   ::V = Float64[]   # patch shaded canopy transpiration wetness factor (0 to 1)
 
@@ -249,6 +255,8 @@ function energyflux_init!(ef::EnergyFluxData{FT}, np::Int, nc::Int, nl::Int, ng:
     ef.btran_patch                   = fill(FT(NaN), np)
     ef.btran_min_patch               = fill(FT(NaN), np)
     ef.btran_min_inst_patch          = fill(FT(NaN), np)
+    ef.btranav_accum_patch           = zeros(FT, np)
+    ef.btranav_naccum_patch          = zeros(FT, np)
     ef.bsun_patch                    = fill(FT(NaN), np)
     ef.bsha_patch                    = fill(FT(NaN), np)
 
@@ -329,6 +337,8 @@ function energyflux_clean!(ef::EnergyFluxData{FT}) where {FT}
     ef.btran_patch                   = FT[]
     ef.btran_min_patch               = FT[]
     ef.btran_min_inst_patch          = FT[]
+    ef.btranav_accum_patch           = FT[]
+    ef.btranav_naccum_patch          = FT[]
     ef.bsun_patch                    = FT[]
     ef.bsha_patch                    = FT[]
     ef.dhsdt_canopy_patch            = FT[]
@@ -571,6 +581,8 @@ function energyflux_init_acc_vars!(ef::EnergyFluxData,
         for p in bounds_patch
             ef.btran_min_patch[p]      = SPVAL
             ef.btran_min_inst_patch[p] = SPVAL
+            ef.btranav_accum_patch[p]  = zero(eltype(ef.btranav_accum_patch))
+            ef.btranav_naccum_patch[p] = zero(eltype(ef.btranav_naccum_patch))
         end
     end
 
@@ -579,30 +591,45 @@ end
 
 """
     energyflux_update_acc_vars!(ef, bounds_patch;
-                                 end_cd=false, secs=0, dtime=0)
+                                 end_cd=false, nstep=0, dtime=0)
 
 Update accumulated energy flux variables each timestep.
-Handles hourly average of btran and daily min tracking.
+
+Reproduces Fortran `energyflux_type%UpdateAccVars` (EnergyFluxType.F90:1027-1047) for
+`BTRANMN`: btran is first averaged over each hour (the `BTRANAV` `timeavg` accumulator,
+`accum_period = nint(3600/dtime)` steps), and `btran_min_inst` tracks the daily MINIMUM
+of those HOURLY AVERAGES — not the minimum of the raw per-step btran. The hourly average
+is only sampled at hour boundaries (`mod(nstep, accum_period) == 0`), exactly mirroring
+`extract_accum_field` returning `spval` off-boundary. Averaging over the hour suppresses
+sub-hourly cavitation transients that an instantaneous per-step minimum would latch onto
+(the previous Julia behaviour, which drove spurious daily minima of 0 in the frozen
+shoulder seasons).
 
 Ported from `energyflux_type%UpdateAccVars` in `EnergyFluxType.F90`.
-Core logic is ported; accumulator calls are stubs until accumulMod is ported.
 """
 function energyflux_update_acc_vars!(ef::EnergyFluxData,
                                      bounds_patch::UnitRange{Int};
                                      end_cd::Bool = false,
-                                     secs::Int = 0,
+                                     nstep::Int = 0,
                                      dtime::Int = 0)
-    # BTRANAV: track daily min btran.
     # The hasfield/length guards are constant over patches → resolved on host;
     # only launch when the accumulator arrays cover the patch range.
-    has_inst = hasfield(typeof(ef), :btran_min_inst_patch)
-    has_min  = hasfield(typeof(ef), :btran_min_patch)
-    if !isempty(bounds_patch) && has_inst &&
-            length(ef.btran_min_inst_patch) >= last(bounds_patch)
+    has_inst   = hasfield(typeof(ef), :btran_min_inst_patch)
+    has_min    = hasfield(typeof(ef), :btran_min_patch)
+    has_accum  = hasfield(typeof(ef), :btranav_accum_patch)
+    has_naccum = hasfield(typeof(ef), :btranav_naccum_patch)
+    if !isempty(bounds_patch) && has_inst && has_accum && has_naccum &&
+            length(ef.btran_min_inst_patch) >= last(bounds_patch) &&
+            length(ef.btranav_accum_patch)  >= last(bounds_patch) &&
+            length(ef.btranav_naccum_patch) >= last(bounds_patch)
+        # accum_period = nint(3600/dtime); hour boundary when mod(nstep, period)==0.
+        period = dtime > 0 ? max(1, round(Int, 3600 / dtime, RoundNearestTiesAway)) : 1
+        hour_end = (nstep % period == 0)
         # When end_cd, also copy to daily min (only if that array covers the range).
         write_min = end_cd && has_min && length(ef.btran_min_patch) >= last(bounds_patch)
         _launch!(_ef_btran_kernel!, ef.btran_min_inst_patch, ef.btran_min_patch,
-            ef.btran_patch, end_cd, write_min,
+            ef.btranav_accum_patch, ef.btranav_naccum_patch,
+            ef.btran_patch, hour_end, end_cd, write_min,
             first(bounds_patch), last(bounds_patch);
             ndrange = length(ef.btran_min_inst_patch))
     end
@@ -610,30 +637,47 @@ function energyflux_update_acc_vars!(ef::EnergyFluxData,
     return nothing
 end
 
-# Per-patch daily-min btran tracking. Own-index read-modify-write.
-# T(SPVAL) keeps the missing-value comparison/store in the device eltype.
-# end_cd/write_min are host-resolved flags passed as kernel args.
+# Per-patch BTRANAV hourly average + daily-min tracking. Own-index read-modify-write.
+# Each step accumulates the finite btran into the running hour sum; at an hour boundary
+# the hourly average is folded into the daily running minimum (btran_min_inst) and the
+# hour sum reset. T(SPVAL) keeps the missing-value comparison/store in the device eltype.
+# hour_end/end_cd/write_min are host-resolved flags passed as kernel args.
 @kernel function _ef_btran_kernel!(btran_min_inst_patch, btran_min_patch,
-        @Const(btran_patch), end_cd::Bool, write_min::Bool,
+        btranav_accum_patch, btranav_naccum_patch,
+        @Const(btran_patch), hour_end::Bool, end_cd::Bool, write_min::Bool,
         pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
         T = eltype(btran_min_inst_patch)
         bt = btran_patch[p]
-        if isfinite(bt)
-            if btran_min_inst_patch[p] == T(SPVAL)
-                btran_min_inst_patch[p] = bt
-            else
-                btran_min_inst_patch[p] = min(bt, btran_min_inst_patch[p])
-            end
+        # Accumulate this step's btran into the current hour (BTRANAV timeavg).
+        if isfinite(bt) && bt != T(SPVAL)
+            btranav_accum_patch[p]  += bt
+            btranav_naccum_patch[p] += one(T)
+        end
 
-            # At end of day, copy to daily min and reset.
-            if end_cd
-                if write_min
-                    btran_min_patch[p] = btran_min_inst_patch[p]
+        # At an hour boundary, extract the hourly average and fold it into the daily
+        # running minimum; then reset the hour accumulator (mirrors extract_accum_field).
+        if hour_end
+            n = btranav_naccum_patch[p]
+            if n > zero(T)
+                avg = btranav_accum_patch[p] / n
+                if btran_min_inst_patch[p] == T(SPVAL)
+                    btran_min_inst_patch[p] = avg
+                else
+                    btran_min_inst_patch[p] = min(avg, btran_min_inst_patch[p])
                 end
-                btran_min_inst_patch[p] = T(SPVAL)
             end
+            btranav_accum_patch[p]  = zero(T)
+            btranav_naccum_patch[p] = zero(T)
+        end
+
+        # At end of day, copy the daily minimum and reset for the next day.
+        if end_cd
+            if write_min
+                btran_min_patch[p] = btran_min_inst_patch[p]
+            end
+            btran_min_inst_patch[p] = T(SPVAL)
         end
     end
 end
