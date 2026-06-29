@@ -452,6 +452,12 @@ function clm_drv_patch2col!(bounds::BoundsType,
                    waterfluxbulk.wf.qflx_tran_veg_patch,
                    mask_nolakec, col_data, pch_data)
 
+    # Canopy evaporation: aggregate patch→column so the QVEGE diagnostic is populated
+    # (the energy form FCEV=eflx_lh_vege was fine, but qflx_evap_veg_col stayed 0).
+    p2c_1d_filter!(waterfluxbulk.wf.qflx_evap_veg_col,
+                   waterfluxbulk.wf.qflx_evap_veg_patch,
+                   mask_nolakec, col_data, pch_data)
+
     p2c_1d_filter!(waterfluxbulk.wf.qflx_liqevap_from_top_layer_col,
                    waterfluxbulk.wf.qflx_liqevap_from_top_layer_patch,
                    mask_nolakec, col_data, pch_data)
