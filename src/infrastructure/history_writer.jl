@@ -147,6 +147,22 @@ function default_hist_fields()
             history_vcmx25luna_patch),
         HistFieldDef("JMX25LUNA", "canopy-top LUNA jmax25 (acclimated capacity)", "umol/m2/s", "patch",
             history_jmx25luna_patch),
+        # Tree-only photosynthesis (isolates the evergreen tree from the grass-dominated
+        # gridcell aggregate; for attributing the winter GPP/transpiration deficit).
+        HistFieldDef("VCMX25TREE", "tree canopy-top LUNA vcmax25", "umol/m2/s", "patch",
+            history_vcmx25tree),
+        HistFieldDef("JMX25TREE", "tree canopy-top LUNA jmax25", "umol/m2/s", "patch",
+            history_jmx25tree),
+        HistFieldDef("FPSNTREE", "tree photosynthesis (GPP)", "umol/m2/s", "patch",
+            history_fpsntree),
+        HistFieldDef("PARVEGTREE", "tree canopy absorbed PAR", "W/m2", "patch",
+            history_parvegtree),
+        HistFieldDef("BTRANTREE", "tree instantaneous btran", "1", "patch",
+            history_btrantree),
+        HistFieldDef("PSNSUNTREE", "tree sunlit photosynthesis", "umol/m2/s", "patch",
+            history_psnsuntree),
+        HistFieldDef("ANSUNTREE", "tree sunlit net photosynthesis", "umol/m2/s", "patch",
+            history_ansuntree),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
@@ -335,6 +351,35 @@ function _history_lunacap(arr, pch)
 end
 history_vcmx25luna_patch(inst) = _history_lunacap(inst.photosyns.vcmx25_z_patch, inst.patch)
 history_jmx25luna_patch(inst) = _history_lunacap(inst.photosyns.jmx25_z_patch, inst.patch)
+
+# Tree-only (trees+shrubs, itype 1:11) canopy-top value — isolates the evergreen
+# tree from the grass-dominated gridcell aggregate. In winter the dormant grass
+# carries a high vcmax25 *capacity* that contaminates the gridcell mean, yet it
+# contributes ~0 to the GPP flux; these fields expose the tree's actual winter
+# photosynthesis so the winter GPP/transpiration deficit can be attributed.
+function _history_tree(arr, pch)
+    isempty(arr) && return Float64[]
+    np = ndims(arr) == 2 ? size(arr, 1) : length(arr)
+    out = fill(NaN, np)
+    @inbounds for p in 1:np
+        p <= length(pch.itype) || continue
+        it = pch.itype[p]
+        (1 <= it <= 11) || continue
+        v = ndims(arr) == 2 ? arr[p, 1] : arr[p]
+        isfinite(v) && (out[p] = Float64(v))
+    end
+    return out
+end
+history_vcmx25tree(inst) = _history_tree(inst.photosyns.vcmx25_z_patch, inst.patch)
+history_jmx25tree(inst)  = _history_tree(inst.photosyns.jmx25_z_patch, inst.patch)
+history_fpsntree(inst)   = _history_tree(inst.photosyns.fpsn_patch, inst.patch)
+history_parvegtree(inst) = _history_tree(history_parveg_patch(inst), inst.patch)
+history_btrantree(inst)  = _history_tree(inst.energyflux.btran_patch, inst.patch)
+# Realized tree sunlit photosynthesis (psnsun) + net (an_sun) for the winter-GPP
+# attribution. (vcmax_z is a scratch array cleared after the solve, so it is not
+# readable from end-of-step history — use the realized rates + PAR/btran inputs.)
+history_psnsuntree(inst) = _history_tree(inst.photosyns.psnsun_patch, inst.patch)
+history_ansuntree(inst)  = _history_tree(inst.photosyns.an_sun_patch, inst.patch)
 
 function history_fpsn_patch(inst::CLMInstances)
     fp = inst.photosyns.fpsn_patch
