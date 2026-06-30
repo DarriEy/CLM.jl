@@ -403,7 +403,8 @@ function update_h2osfc!(col_data::ColumnData,
                          mask_hydrologyc::AbstractVector{Bool},
                          bounds_col::UnitRange{Int};
                          dtime::Real = 1800.0,
-                         h2osfcflag::Int = 1)
+                         h2osfcflag::Int = 1,
+                         qinmax::Union{AbstractVector{<:Real},Nothing} = nothing)
 
     nc = length(waterstatebulk.ws.h2osfc_col)
     # Avoid capturing a Type-valued `FT` in the closure: on Julia 1.12 that boxes
@@ -413,7 +414,14 @@ function update_h2osfc!(col_data::ColumnData,
     _h2sc(n) = fill!(similar(waterstatebulk.ws.h2osfc_col, n), zero(eltype(waterstatebulk.ws.h2osfc_col)))  # device-resident
     qflx_h2osfc_surf_arr = _h2sc(nc)
     qflx_h2osfc_drain_arr = _h2sc(nc)
-    qinmax = _h2sc(nc)
+    # Fortran UpdateH2osfc (SurfaceWaterMod.F90:371) reads the maximum infiltration
+    # rate `qinmax` from infiltration_excess_runoff_inst%qinmax_col (populated by the
+    # InfiltrationExcessRunoff call earlier this step). Passing a zero array here makes
+    # qflx_h2osfc_drain = min(frac_h2osfc*0, …) = 0, so ponded surface water never
+    # infiltrates: infiltration (QINFL) collapses and the water spills to surface
+    # runoff (QOVER) instead — the cold/frozen-soil partition defect. Use the real
+    # qinmax when provided; fall back to zeros only for legacy callers/tests.
+    qinmax = qinmax === nothing ? _h2sc(nc) : qinmax
     # topo_slope / h2osfc_thresh are read only for masked columns inside the kernels,
     # where they equal the column arrays — pass those directly (no host masked-copy).
     topo_slope    = col_data.topo_slope
