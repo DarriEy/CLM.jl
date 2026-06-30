@@ -81,7 +81,7 @@ inst = run_clm!(;
     fhistory = fhistory,
     start_date = DateTime(yr, 1, 1), end_date = DateTime(yr + 1, 1, 1),
     dtime = cfg.dtime, use_cn = false, verbose = true,
-    use_aquifer_layer = false, use_hydrstress = true, use_luna = true,
+    use_aquifer_layer = get(cfg, :aquifer, false), use_hydrstress = true, use_luna = true,
     h2osfcflag = 1,  # CLM5 default (surface water active); matters for wet sites
     baseflow_scalar = cfg.baseflow, int_snow_max = cfg.int_snow,
     ffortran_restart = cfg.restart,

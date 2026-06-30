@@ -1669,12 +1669,28 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Calling the aquifer water_table! unconditionally wrongly recomputed
     # frost_table = col_z[k_frz] (node) every step, where Fortran leaves it at the
     # restart value; that inflated zwt_perched and qflx_drain_perched.
-    water_table!(sh, ss,
-                 temp.t_soisno_col, wsb.ws, wfb,
-                 col.dz, col.z, col.zi,
-                 filt.hydrologyc, bc_col,
-                 nlevsoi, dtime;
-                 recompute_frost_table=config.use_aquifer_layer)
+    if config.use_aquifer_layer
+        water_table!(sh, ss,
+                     temp.t_soisno_col, wsb.ws, wfb,
+                     col.dz, col.z, col.zi,
+                     filt.hydrologyc, bc_col,
+                     nlevsoi, dtime;
+                     recompute_frost_table=true)
+    else
+        # CLM5 default (HydrologyNoDrainageMod.F90:360-368): PerchedWaterTable +
+        # ThetaBasedWaterTable diagnose the (perched) water table from the moisture
+        # profile each step; zwt is NOT advanced by aquifer qcharge. Without this,
+        # zwt stays pinned at its restart value, so the topographic baseflow
+        # (zi_bedrock - zwt)^n_baseflow in subsurface_lateral_flow! → 0 and the soil
+        # never drains — saturating the surface, collapsing the dry-surface layer,
+        # and blowing up ground evaporation (Aripuana FGEV +425%).
+        perched_water_table!(sh, ss, temp.t_soisno_col, wsb.ws,
+                             col.dz, col.z, col.zi,
+                             filt.hydrologyc, bc_col, nlevsoi)
+        theta_based_water_table!(sh, ss, wsb.ws,
+                             col.dz, col.z, col.zi, col.nbedrock,
+                             filt.hydrologyc, bc_col, nlevsoi)
+    end
 
     # Bedrock clipping: Fortran ThetaBasedWaterTable clips ZWT at bedrock depth
     # when soil above bedrock is not saturated. Without this, ZWT drops to 80m

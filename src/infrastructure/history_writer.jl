@@ -119,6 +119,12 @@ function default_hist_fields()
                     Float64.(inst.energyflux.bsun_patch)),
         HistFieldDef("SOILWATER_10CM", "soil water+ice in top 0.1 m", "mm", "column",
             history_soilwater_10cm_col),
+        HistFieldDef("SOILRESIS", "soil evaporative resistance (S&L14)", "s/m", "column",
+            inst -> isempty(inst.soilstate.soilresis_col) ? Float64[] :
+                    Float64.(inst.soilstate.soilresis_col)),
+        HistFieldDef("DSL", "dry surface layer thickness", "mm", "column",
+            inst -> isempty(inst.soilstate.dsl_col) ? Float64[] :
+                    Float64.(inst.soilstate.dsl_col)),
         HistFieldDef("FSR", "reflected solar radiation", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_patch) ? Float64[] :
                     Float64.(inst.solarabs.fsr_patch)),
