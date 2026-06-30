@@ -182,7 +182,7 @@
         ws.h2osoi_ice_col = fill(0.0, nc, nlevsoi)
 
         CLM.theta_based_water_table!(sh, ss, ws, col_dz, col_z, col_zi,
-            col_nbedrock, mask, 1:nc, nlevsoi)
+            col_nbedrock, mask, 1:nc, nlevsoi; joff=0, joff_zi=0)
 
         # When fully saturated, water table should be at top (zi[c,1])
         for c in 1:nc
@@ -194,7 +194,7 @@
         ws.h2osoi_ice_col = fill(0.0, nc, nlevsoi)
 
         CLM.theta_based_water_table!(sh, ss, ws, col_dz, col_z, col_zi,
-            col_nbedrock, mask, 1:nc, nlevsoi)
+            col_nbedrock, mask, 1:nc, nlevsoi; joff=0, joff_zi=0)
 
         # When dry, water table should be at bottom
         for c in 1:nc

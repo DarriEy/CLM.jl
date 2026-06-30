@@ -119,9 +119,52 @@ function default_hist_fields()
                     Float64.(inst.energyflux.bsun_patch)),
         HistFieldDef("SOILWATER_10CM", "soil water+ice in top 0.1 m", "mm", "column",
             history_soilwater_10cm_col),
+        HistFieldDef("SOILRESIS", "soil evaporative resistance (S&L14)", "s/m", "column",
+            inst -> isempty(inst.soilstate.soilresis_col) ? Float64[] :
+                    Float64.(inst.soilstate.soilresis_col)),
+        HistFieldDef("DSL", "dry surface layer thickness", "mm", "column",
+            inst -> isempty(inst.soilstate.dsl_col) ? Float64[] :
+                    Float64.(inst.soilstate.dsl_col)),
         HistFieldDef("FSR", "reflected solar radiation", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_patch) ? Float64[] :
                     Float64.(inst.solarabs.fsr_patch)),
+        HistFieldDef("DHSDTCANOPY", "canopy heat storage rate", "W/m2", "patch",
+            inst -> isempty(inst.energyflux.dhsdt_canopy_patch) ? Float64[] :
+                    Float64.(inst.energyflux.dhsdt_canopy_patch)),
+        HistFieldDef("SABG", "solar absorbed by ground", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_patch) ? Float64[] : Float64.(inst.solarabs.sabg_patch)),
+        HistFieldDef("SABGCHK", "fsno-weighted sabg check", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_chk_patch) ? Float64[] : Float64.(inst.solarabs.sabg_chk_patch)),
+        HistFieldDef("SABGSOIL", "solar absorbed by soil", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_soil_patch) ? Float64[] : Float64.(inst.solarabs.sabg_soil_patch)),
+        HistFieldDef("SABGSNOW", "solar absorbed by snow", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_snow_patch) ? Float64[] : Float64.(inst.solarabs.sabg_snow_patch)),
+        HistFieldDef("SABV", "solar absorbed by vegetation", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabv_patch) ? Float64[] : Float64.(inst.solarabs.sabv_patch)),
+        HistFieldDef("FSRVD", "reflected direct beam vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsr_vis_d_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsr_vis_d_patch)),
+        HistFieldDef("FSRND", "reflected direct beam NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsr_nir_d_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsr_nir_d_patch)),
+        HistFieldDef("FSRVI", "reflected diffuse vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsr_vis_i_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsr_vis_i_patch)),
+        HistFieldDef("FSRNI", "reflected diffuse NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsr_nir_i_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsr_nir_i_patch)),
+        HistFieldDef("FSDSVD", "incident direct beam vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsds_vis_d_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsds_vis_d_patch)),
+        HistFieldDef("FSDSND", "incident direct beam NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsds_nir_d_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsds_nir_d_patch)),
+        HistFieldDef("FSDSVI", "incident diffuse vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsds_vis_i_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsds_vis_i_patch)),
+        HistFieldDef("FSDSNI", "incident diffuse NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsds_nir_i_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsds_nir_i_patch)),
         HistFieldDef("FIRA", "net infrared (longwave) radiation", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_lwrad_net_patch) ? Float64[] :
                     Float64.(inst.energyflux.eflx_lwrad_net_patch)),

@@ -161,10 +161,12 @@ function clm_run!(;
         elseif haskey(ds_p, "xdrdt")
             snicar_params.xdrdt = Float64(ds_p["xdrdt"][1])
         end
-        if haskey(ds_p, "pc")
-            pc_val = Float64(ds_p["pc"][1])
-            pc_val > 0 && (for c in 1:nc; inst.soilhydrology.hkdepth_col[c] = 1.0 / pc_val; end)
-        end
+        # NOTE: `pc` is the surface-water/frost connectivity threshold (Fortran reads it
+        # into params_inst%pc for the frac_h2osfc fd calc + the SurfaceWater infiltration
+        # cluster), NOT the baseflow decay depth. Fortran fixes hkdepth = 1/2.5 (0.4 m);
+        # the old `hkdepth = 1/pc` override gave fff=1/2.5=0.4 instead of 2.5, exploding
+        # the topographic baseflow exp(-fff*zwt) at wet sites (Aripuana drainage 14745
+        # mm/d). Bow/Stillwater hid it (zero drainage). Leave hkdepth at its 1/2.5 default.
         # Canopy interception: CLM5 (clm5_0 physics, matching the Fortran reference
         # lnd_in use_clm5_fpi=.true.) uses fpiliq = interception_fraction*tanh(elai+esai),
         # NOT the CLM4 default 0.25*(1-exp(-0.5*lai)). The CLM4 form intercepts ~20% at
