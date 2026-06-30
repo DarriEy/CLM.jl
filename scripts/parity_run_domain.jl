@@ -45,6 +45,15 @@ const DOMAINS = Dict(
         forcing = "$DATA/domain_Aripuana_Amazon/data/forcing/CLM_input/clmforc.2004.nc",
         restart = "$DATA/domain_Aripuana_Amazon/simulations/clm_validation/CLM/Aripuana_Amazon.clm2.r.2004-01-01-00000.nc",
         h0      = "$DATA/domain_Aripuana_Amazon/simulations/clm_validation/CLM/Aripuana_Amazon.clm2.h0.2004-01-01-00000.nc"),
+    # Boreal forest (Krycklan, Sweden). Fortran reference generated via SYMFLUENCE
+    # run_model (spinup 2008-2012, then sim); parity year 2013 from the 2013-01-01
+    # spun-up restart. The 2013 daily h0 records live in the 2012-12-30 file
+    # (noleap interval-end stamping); the plot aligns by calendar date.
+    "Krycklan" => (year = 2013, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Boreal_Krycklan_Sweden/settings/CLM/parameters",
+        forcing = "$DATA/domain_Boreal_Krycklan_Sweden/data/forcing/CLM_input/clmforc.2013.nc",
+        restart = "$DATA/domain_Boreal_Krycklan_Sweden/simulations/clm_boreal/CLM/Boreal_Krycklan_Sweden.clm2.r.2013-01-01-00000.nc",
+        h0      = "$DATA/domain_Boreal_Krycklan_Sweden/simulations/clm_boreal/CLM/Boreal_Krycklan_Sweden.clm2.h0.2012-12-30-00000.nc"),
 )
 
 const DOM = get(ENV, "DOMAIN", "Bow")
