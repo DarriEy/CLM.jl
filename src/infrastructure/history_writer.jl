@@ -128,6 +128,9 @@ function default_hist_fields()
         HistFieldDef("FSR", "reflected solar radiation", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_patch) ? Float64[] :
                     Float64.(inst.solarabs.fsr_patch)),
+        HistFieldDef("DHSDTCANOPY", "canopy heat storage rate", "W/m2", "patch",
+            inst -> isempty(inst.energyflux.dhsdt_canopy_patch) ? Float64[] :
+                    Float64.(inst.energyflux.dhsdt_canopy_patch)),
         HistFieldDef("FSRVD", "reflected direct beam vis solar", "W/m2", "patch",
             inst -> isempty(inst.surfrad.fsr_vis_d_patch) ? Float64[] :
                     Float64.(inst.surfrad.fsr_vis_d_patch)),
