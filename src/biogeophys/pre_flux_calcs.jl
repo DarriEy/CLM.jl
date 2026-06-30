@@ -63,7 +63,7 @@ preflux_tssbef!(t_ssbef_col, mask, t_soisno_col, nlev::Int) =
 # --------------------------------------------------------------------------
 # Ground temperature: weighted average of snow / soil / surface water.
 # --------------------------------------------------------------------------
-@kernel function _preflux_t_grnd_kernel!(t_grnd_col, @Const(mask), @Const(snl),
+@kernel function _preflux_t_grnd_kernel!(t_grnd_col, t_h2osfc_bef_col, @Const(mask), @Const(snl),
                                          @Const(frac_sno_eff_col), @Const(frac_h2osfc_col),
                                          @Const(t_soisno_col), @Const(t_h2osfc_col),
                                          nlevsno::Int)
@@ -75,6 +75,14 @@ preflux_tssbef!(t_ssbef_col, mask, t_soisno_col, nlev::Int) =
         frac_h2osfc = frac_h2osfc_col[c]
         t_soil_1 = t_soisno_col[c, 1 + nlevsno]
         t_h2osfc = t_h2osfc_col[c]
+        # Record surface-water temperature prior to the soil-temperature update
+        # (Fortran BiogeophysPreFluxCalcsMod.F90:331 `t_h2osfc_bef(c) = t_h2osfc(c)`).
+        # SoilFluxes reads t_h2osfc_bef in lw_grnd / t_grnd0 / the h2osfc heat-storage
+        # term; without this per-step snapshot it stayed pinned at the cold-start value
+        # (274 K), so on ponded forest columns (frac_h2osfc ~ 0.5) the emitted-longwave
+        # assembly used a stale-cold surface-water temperature → a season-long ~35 W/m²
+        # surface-energy-balance leak (FIRA/FSH/FGR inflated) once the canopy leafed out.
+        t_h2osfc_bef_col[c] = t_h2osfc
         if snl_c < 0
             jtop = snl_c + 1 + nlevsno
             t_snow_top = t_soisno_col[c, jtop]
@@ -94,9 +102,9 @@ end
 
 Ground temperature as snow/soil/surface-water weighted average, per column.
 """
-preflux_t_grnd!(t_grnd_col, mask, snl, frac_sno_eff_col, frac_h2osfc_col,
+preflux_t_grnd!(t_grnd_col, t_h2osfc_bef_col, mask, snl, frac_sno_eff_col, frac_h2osfc_col,
                 t_soisno_col, t_h2osfc_col, nlevsno::Int) =
-    _launch!(_preflux_t_grnd_kernel!, t_grnd_col, mask, snl, frac_sno_eff_col,
+    _launch!(_preflux_t_grnd_kernel!, t_grnd_col, t_h2osfc_bef_col, mask, snl, frac_sno_eff_col,
              frac_h2osfc_col, t_soisno_col, t_h2osfc_col, nlevsno)
 
 # --------------------------------------------------------------------------
@@ -367,8 +375,8 @@ function calc_initial_temp_energy!(temperature::TemperatureData,
     # ---------------------------------------------------------------
     # 2. Ground temperature: weighted average of snow, soil, surface water
     # ---------------------------------------------------------------
-    preflux_t_grnd!(temperature.t_grnd_col, mask_nolakec, col_data.snl,
-                    waterdiagbulk.frac_sno_eff_col, waterdiagbulk.frac_h2osfc_col,
+    preflux_t_grnd!(temperature.t_grnd_col, temperature.t_h2osfc_bef_col, mask_nolakec,
+                    col_data.snl, waterdiagbulk.frac_sno_eff_col, waterdiagbulk.frac_h2osfc_col,
                     temperature.t_soisno_col, temperature.t_h2osfc_col, nlevsno_val)
 
     # ---------------------------------------------------------------
