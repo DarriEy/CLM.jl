@@ -337,6 +337,38 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     end
     set_patch_1d!("fsun", inst.canopystate.fsun_patch)
 
+    # PHS plant water potential per veg segment (sun/sha/xyl/root). Restart-persisted
+    # in CTSM; without it the hydraulic-stress solver starts from the cold default
+    # (vegwp≈0 → plc≈1 → unstressed) and BTRANMN spikes on day 1 to ~0.98 vs Fortran's
+    # ~0.13 — a pure IC artifact (day 2 onward already matches once vegwp draws down).
+    # Restart `vegwp` is (pft, vegwcs) in CDL → NCDatasets (seg, pft) = the (nsec,
+    # npatch) layout set_patch_2d! expects. No-op when absent / non-PHS (empty target).
+    if hasproperty(inst.canopystate, :vegwp_patch)
+        set_patch_2d!("vegwp", inst.canopystate.vegwp_patch)
+    end
+
+    # BTRANMN accumulator state (restart-persisted in CTSM). BTRANMN history points at
+    # the COMPLETED daily-min (btran_min); on day 1 there is no completed previous day,
+    # so Fortran reports its restart-persisted BTRAN_MIN (≈0.13 here). Julia left these
+    # at NaN → the history fell back to the instantaneous btran whose day-1 average is
+    # ~0.98 (a pure IC spike; day 2 onward already matches). Inject BTRAN_MIN + the
+    # hourly-average accumulator (BTRANAV_VALUE/NSTEPS). btran_min_inst starts the day
+    # fresh, so seed it to SPVAL (the restart stores NaN = "no running min yet"); a NaN
+    # there would poison the day-1 min(avg, NaN) reduction.
+    ef = inst.energyflux
+    if hasproperty(ef, :btran_min_patch) && !isempty(ef.btran_min_patch)
+        set_patch_1d!("BTRAN_MIN", ef.btran_min_patch)
+        if hasproperty(ef, :btranav_accum_patch) && !isempty(ef.btranav_accum_patch)
+            set_patch_1d!("BTRANAV_VALUE", ef.btranav_accum_patch)
+            set_patch_1d!("BTRANAV_NSTEPS", ef.btranav_naccum_patch)
+        end
+        if hasproperty(ef, :btran_min_inst_patch) && !isempty(ef.btran_min_inst_patch)
+            for p in eachindex(ef.btran_min_inst_patch)
+                ef.btran_min_inst_patch[p] = SPVAL
+            end
+        end
+    end
+
     # Exposed-veg flag from the PREVIOUS step's SurfaceAlbedo (persisted to the
     # restart). drv_init copies it into frac_veg_nosno → the exposed/noexposed-veg
     # filters, deciding canopy-solve vs bareground for THIS step. CLM ramps it on
