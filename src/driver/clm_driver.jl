@@ -1744,7 +1744,8 @@ function clm_drv_core!(config::CLMDriverConfig,
         wdb.swe_old_col, wsb.int_snow_col, wdb.frac_iceold_col,
         a2l.forc_wind_grc, col.gridcell, col.landunit,
         lun.lakpoi, lun.urbpoi,
-        filt.snowc, bc_col, nlevsno)
+        filt.snowc, bc_col, nlevsno;
+        use_subgrid_fluxes = varctl.use_subgrid_fluxes)
 
 
 

@@ -47,6 +47,13 @@ Base.@kwdef mutable struct ForcingReader
     # column-major over (lon,lat)) of its mapped atm cell. Built once, cached.
     map_g2atm::Vector{Int} = Int[]
     map_ng::Int = 0                        # ng the map was built for (rebuild if it changes)
+
+    # Linear time-interpolation of the forcing to the model step (datm `tintalgo=
+    # linear`). When the forcing is coarser than the model step (e.g. hourly forcing
+    # driving a 30-min run), nearest-neighbour selection makes a sub-step temperature
+    # error that can flip the rain/snow partition at a marginal event. Off by default
+    # (nearest-neighbour, byte-identical to the legacy reader); enabled per-run.
+    interp_time::Bool = false
 end
 
 """
@@ -227,8 +234,18 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     ds = fr.ds
     ds === nothing && error("ForcingReader not initialized")
 
-    # Find closest time index
-    ti = _find_closest_time(fr.times, target_time, fr.time_index)
+    # Time selection. Default: nearest-neighbour (ti0==ti1, w=0 → byte-identical to
+    # the legacy reader). With interp_time: linearly interpolate between the two
+    # bracketing forcing times (datm tintalgo='linear'), which matters when the
+    # forcing is coarser than the model step.
+    local ti, ti0, ti1, tw
+    if fr.interp_time
+        (ti0, ti1, tw) = _find_bracket_time(fr.times, target_time)
+        ti = ti0
+    else
+        ti = _find_closest_time(fr.times, target_time, fr.time_index)
+        ti0 = ti; ti1 = ti; tw = 0.0
+    end
     fr.time_index = ti
 
     # Decide whether to spatially map. We map only when the file has a real 2D
@@ -249,41 +266,52 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     #     identical to the historical reader (data[1,ti] / data[1,1,ti]).
     #   - mapped path: each g gets the value at its mapped atm cell.
     # The variable's data array is read from disk exactly once per call.
-    function _read_var(varname::String, default::Float64)
+    function _read_var(varname::String, default::Float64; interp::Bool = true)
+        # Per-field interpolation control: datm linearly interpolates the STATE
+        # fields (T, P, wind, humidity, LW) but holds PRECIP constant over the
+        # source interval and uses coszen for solar — so precip/solar pass interp=
+        # false and keep nearest-neighbour even when interp_time is on. (Smearing
+        # precip linearly destroys the snowfall-event timing → wrecks snow_depth.)
+        w_eff = interp ? tw : 0.0
         out = Vector{Float64}(undef, ng)
         if haskey(ds, varname)
             data = Array(ds[varname])
             nd = ndims(data)
+            # Value at a single time index for the broadcast (no-map) path.
+            scalar_at(tx) = if nd == 1
+                Float64(data[tx])
+            elseif nd == 2
+                sz = size(data)
+                sz[end] >= tx ? Float64(data[1, tx]) : Float64(data[tx, 1])
+            elseif nd == 3
+                Float64(data[1, 1, tx])
+            else
+                default
+            end
+            # Value at a single time index for a mapped atm cell.
+            mapped_at(aidx, tx) = if nd == 1
+                Float64(data[tx])
+            elseif nd == 2
+                Float64(data[aidx, tx])
+            elseif nd == 3
+                ilon = ((aidx - 1) % fr.nlon) + 1
+                jlat = ((aidx - 1) ÷ fr.nlon) + 1
+                Float64(data[ilon, jlat, tx])
+            else
+                default
+            end
             if !do_map
-                # Single broadcast scalar (byte-identical to legacy reader)
-                val = if nd == 1  # (time,) only
-                    Float64(data[ti])
-                elseif nd == 2  # (spatial, time) or (time, spatial)
-                    sz = size(data)
-                    sz[end] >= ti ? Float64(data[1, ti]) : Float64(data[ti, 1])
-                elseif nd == 3  # (lon, lat, time)
-                    Float64(data[1, 1, ti])
-                else
-                    default
-                end
+                # w_eff==0 → byte-identical to the legacy nearest read.
+                val = w_eff == 0.0 ? scalar_at(ti0) :
+                      (1.0 - w_eff) * scalar_at(ti0) + w_eff * scalar_at(ti1)
                 @inbounds for g in 1:ng
                     out[g] = val
                 end
             else
-                # Mapped read: each g from its nearest atm cell
                 @inbounds for g in 1:ng
                     aidx = fr.map_g2atm[g]
-                    out[g] = if nd == 1  # no spatial dim → broadcast
-                        Float64(data[ti])
-                    elseif nd == 2  # (atm, time): atm flattened column-major
-                        Float64(data[aidx, ti])
-                    elseif nd == 3  # (lon, lat, time)
-                        ilon = ((aidx - 1) % fr.nlon) + 1
-                        jlat = ((aidx - 1) ÷ fr.nlon) + 1
-                        Float64(data[ilon, jlat, ti])
-                    else
-                        default
-                    end
+                    out[g] = w_eff == 0.0 ? mapped_at(aidx, ti0) :
+                             (1.0 - w_eff) * mapped_at(aidx, ti0) + w_eff * mapped_at(aidx, ti1)
                 end
             end
         else
@@ -324,7 +352,7 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
 
     # Shortwave radiation [W/m2] — split into VIS/NIR (50/50) then
     # direct/diffuse using CAM-derived polynomial (Fortran DATM CLMNCEP)
-    fsds = _read_var("FSDS", 0.0)
+    fsds = _read_var("FSDS", 0.0)  # interpolate with the states (keeps SW/T in phase)
     for g in 1:ng
         fsds_g = fsds[g]
         swndr = fsds_g * 0.50  # NIR half
@@ -339,7 +367,7 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     end
 
     # Precipitation [mm/s] — total, partition by temperature
-    precip = _read_var("PRECTmms", 0.0)
+    precip = _read_var("PRECTmms", 0.0; interp=false)  # datm holds precip constant over the interval
     # Partition precipitation using a linear ramp matching Fortran DATM
     # (shr_precip_mod.F90): frac_rain = (T - TFRZ) * 0.5, clamped to [0,1]
     # All snow at T <= 0°C, all rain at T >= +2°C
@@ -440,6 +468,32 @@ end
 """
 Find the time index closest to target_time, starting search from hint.
 """
+# Bracket `target` between two forcing times and return (i0, i1, w) such that the
+# linearly-interpolated value is (1-w)*v[i0] + w*v[i1], with w∈[0,1]. Clamps to the
+# endpoints outside the forcing span. Mirrors datm `tintalgo='linear'`.
+function _find_bracket_time(times::Vector{DateTime}, target::DateTime)
+    n = length(times)
+    n == 0 && return (1, 1, 0.0)
+    n == 1 && return (1, 1, 0.0)
+    if target <= times[1]
+        return (1, 1, 0.0)
+    elseif target >= times[n]
+        return (n, n, 0.0)
+    end
+    # times are monotonic increasing → find the first index strictly after target
+    i1 = 1
+    @inbounds for i in 2:n
+        if times[i] >= target
+            i1 = i
+            break
+        end
+    end
+    i0 = i1 - 1
+    span = Dates.value(times[i1] - times[i0])
+    w = span > 0 ? Dates.value(target - times[i0]) / span : 0.0
+    return (i0, i1, clamp(w, 0.0, 1.0))
+end
+
 function _find_closest_time(times::Vector{DateTime}, target::DateTime, hint::Int)
     if isempty(times)
         return 1
