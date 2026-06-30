@@ -1151,7 +1151,7 @@ Adapt.@adapt_structure _SCompDV
 @kernel function _snowhyd_compaction_kernel!(dz, dv, @Const(mask_snow), @Const(snl),
         dtime, nlevsno::Int, c3, c4, c5, upplim_destruct, ob_method::Int,
         ob_tfactor, eta0_anderson, ceta, eta0_vionnet,
-        wind_dep::Bool, drift_gs, rho_min, rho_max, tau_ref,
+        wind_dep::Bool, drift_gs, rho_min, rho_max, tau_ref, use_subgrid::Bool,
         cmin::Int, cmax::Int)
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask_snow[c]
@@ -1200,7 +1200,11 @@ Adapt.@adapt_structure _SCompDV
                     # Melt compaction
                     if dv.imelt[c, jj] == 1
                         l = dv.col_landunit[c]
-                        if !dv.lakpoi[l] && !dv.urbpoi[l]
+                        # Fortran gates the subgrid (fsno_melt) branch on
+                        # use_subgrid_fluxes .and. .not.lake .and. .not.urban
+                        # (SnowHydrologyMod). Without the flag a use_subgrid_fluxes=false
+                        # run would wrongly take the subgrid path. Bow has it true.
+                        if use_subgrid && !dv.lakpoi[l] && !dv.urbpoi[l]
                             ddz3 = smooth_max(zero(T),
                                 smooth_min(one(T), (dv.swe_old[c, jj] - wx) / wx))
                             if (dv.swe_old[c, jj] - wx) > zero(T)
@@ -1277,7 +1281,8 @@ function snow_compaction!(
     urbpoi::AbstractVector{Bool},
     mask_snow,
     bounds::UnitRange{Int},
-    nlevsno::Int
+    nlevsno::Int;
+    use_subgrid_fluxes::Bool = true
 )
     params = snowhydrology_params
     FT = eltype(t_soisno)
@@ -1310,6 +1315,7 @@ function snow_compaction!(
              FT(params.ceta), FT(params.eta0_vionnet),
              WIND_DEPENDENT_SNOW_DENSITY[], FT(params.drift_gs),
              FT(params.rho_min), FT(params.rho_max), FT(params.tau_ref),
+             use_subgrid_fluxes,
              first(bounds), last(bounds);
              ndrange = length(snl))
     return nothing

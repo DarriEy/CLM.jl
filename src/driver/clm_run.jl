@@ -55,6 +55,7 @@ function clm_run!(;
     ffortran_restart::String = "",
     baseflow_scalar::Real = 1.0e-2,
     int_snow_max::Real = 2000.0,
+    interp_forcing::Bool = false,
     overrides::Union{CalibrationOverrides, Nothing} = nothing)
 
     # ========================================================================
@@ -221,6 +222,7 @@ function clm_run!(;
     verbose && println("CLM.jl: Opening forcing file: ", fforcing)
     fr = ForcingReader()
     forcing_reader_init!(fr, fforcing)
+    fr.interp_time = interp_forcing
 
     # Read topo forcing to set atmospheric topography for lapse-rate correction.
     # Without this, forc_topo_grc=0 and downscale_forcings! doesn't correct T.
