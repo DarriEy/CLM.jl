@@ -131,6 +131,16 @@ function default_hist_fields()
         HistFieldDef("DHSDTCANOPY", "canopy heat storage rate", "W/m2", "patch",
             inst -> isempty(inst.energyflux.dhsdt_canopy_patch) ? Float64[] :
                     Float64.(inst.energyflux.dhsdt_canopy_patch)),
+        HistFieldDef("SABG", "solar absorbed by ground", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_patch) ? Float64[] : Float64.(inst.solarabs.sabg_patch)),
+        HistFieldDef("SABGCHK", "fsno-weighted sabg check", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_chk_patch) ? Float64[] : Float64.(inst.solarabs.sabg_chk_patch)),
+        HistFieldDef("SABGSOIL", "solar absorbed by soil", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_soil_patch) ? Float64[] : Float64.(inst.solarabs.sabg_soil_patch)),
+        HistFieldDef("SABGSNOW", "solar absorbed by snow", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_snow_patch) ? Float64[] : Float64.(inst.solarabs.sabg_snow_patch)),
+        HistFieldDef("SABV", "solar absorbed by vegetation", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabv_patch) ? Float64[] : Float64.(inst.solarabs.sabv_patch)),
         HistFieldDef("FSRVD", "reflected direct beam vis solar", "W/m2", "patch",
             inst -> isempty(inst.surfrad.fsr_vis_d_patch) ? Float64[] :
                     Float64.(inst.surfrad.fsr_vis_d_patch)),
