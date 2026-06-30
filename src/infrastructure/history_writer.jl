@@ -657,6 +657,21 @@ Accumulate one timestep of all registered fields. When `is_end_curr_day` is
 true, write the daily average to the output file and reset accumulators.
 Matches Fortran CLM h0 daily-average output convention.
 """
+# Days since 2000-01-01 on the NOLEAP (365-day) calendar — matching the `calendar=
+# "noleap"` attribute on the time variable and CLM's datm convention. The previous
+# code wrote Gregorian DateTime day-counts under a noleap label, so noleap-aware
+# readers (and the CLM h0 reference) mis-decoded the stamps by one day (the 2000 leap
+# day), making an index-by-index comparison off by a day. Drop Feb 29 in leap years.
+function _noleap_days_since_2000(dt::DateTime)
+    y = Dates.year(dt)
+    doy = Dates.dayofyear(dt)
+    if Dates.isleapyear(y) && doy > 59   # day 60 = Feb 29; collapse onto the noleap axis
+        doy -= 1
+    end
+    frac = (Dates.hour(dt) * 3600 + Dates.minute(dt) * 60 + Dates.second(dt)) / 86400.0
+    return (y - 2000) * 365 + (doy - 1) + frac
+end
+
 function history_write_step!(hw::HistoryWriter, inst::CLMInstances,
                              current_time::DateTime;
                              is_end_curr_day::Bool=false)
@@ -687,10 +702,13 @@ function history_write_step!(hw::HistoryWriter, inst::CLMInstances,
         hw.time_index += 1
         ti = hw.time_index
 
-        # Write time (days since 2000-01-01)
-        ref_date = DateTime(2000, 1, 1)
-        days = Dates.value(current_time - ref_date) / (1000 * 86400)  # ms → days
-        ds["time"][ti] = days
+        # Write time = the daily-average interval END (next midnight) on the noleap
+        # calendar — matching CLM, which stamps day D's average at D+1 00:00. (CLM.jl's
+        # is_end_curr_day fires on the day's last sub-step, so current_time is e.g.
+        # 23:30; the interval end is the following midnight.)
+        interval_end = DateTime(Dates.year(current_time), Dates.month(current_time),
+                                Dates.day(current_time)) + Dates.Day(1)
+        ds["time"][ti] = _noleap_days_since_2000(interval_end)
 
         n = hw.accum_count
         for f in hw.fields
