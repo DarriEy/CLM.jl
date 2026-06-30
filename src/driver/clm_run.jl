@@ -291,7 +291,14 @@ function clm_run!(;
 
         # --- Time flags ---
         doalb = true  # compute albedo every step for simplicity
-        nextsw_cday = calday + Float64(dtime) / SECSPDAY
+        # `calday` is already post-advance_timestep! (= step_start + dtime), i.e. the
+        # start of the NEXT radiation step — exactly the forcing time this step's
+        # albedo is paired with in the next surface_radiation!. Adding another dtime
+        # put the albedo coszen one full step ahead of its forcing, so at each
+        # sunset the last sunlit forcing step got the next step's coszen<=0 -> night
+        # albedo=1.0 fallback, spiking daily-mean reflected SW (dense-canopy FSR
+        # +14-20%). Pairing nextsw_cday = calday removes the mismatch.
+        nextsw_cday = calday
 
         (yr, mon, d, tod) = get_curr_date(tm)
         first_step = (tm.nstep == 1)
