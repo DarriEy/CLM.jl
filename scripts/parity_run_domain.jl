@@ -54,6 +54,36 @@ const DOMAINS = Dict(
         forcing = "$DATA/domain_Boreal_Krycklan_Sweden/data/forcing/CLM_input/clmforc.2013.nc",
         restart = "$DATA/domain_Boreal_Krycklan_Sweden/simulations/clm_boreal/CLM/Boreal_Krycklan_Sweden.clm2.r.2013-01-01-00000.nc",
         h0      = "$DATA/domain_Boreal_Krycklan_Sweden/simulations/clm_boreal/CLM/Boreal_Krycklan_Sweden.clm2.h0.2012-12-30-00000.nc"),
+    # ---- Eval-prep biomes: Fortran references generated via SYMFLUENCE run_model
+    # (lumped, spinup 2008-2012 → parity year 2013 in the .h0.2012-12-30 file;
+    # Iceland spins 2015-2016 → year 2017 in .h0.2016-12-31). Same Bow lnd_in
+    # physics (PHS+LUNA, non-aquifer, baseflow 0.001, int_snow 2000). Baltimore is
+    # URBAN and Massa/Iceland are GLACIER — exotic-landunit robustness stress tests.
+    "Tagus" => (year = 2013, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Mediterranean_Tagus_Spain/settings/CLM/parameters",
+        forcing = "$DATA/domain_Mediterranean_Tagus_Spain/data/forcing/CLM_input/clmforc.2013.nc",
+        restart = "$DATA/domain_Mediterranean_Tagus_Spain/simulations/clm_mediterranean/CLM/Mediterranean_Tagus_Spain.clm2.r.2013-01-01-00000.nc",
+        h0      = "$DATA/domain_Mediterranean_Tagus_Spain/simulations/clm_mediterranean/CLM/Mediterranean_Tagus_Spain.clm2.h0.2012-12-30-00000.nc"),
+    "Abisko" => (year = 2013, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Arctic_Abisko_Sweden/settings/CLM/parameters",
+        forcing = "$DATA/domain_Arctic_Abisko_Sweden/data/forcing/CLM_input/clmforc.2013.nc",
+        restart = "$DATA/domain_Arctic_Abisko_Sweden/simulations/clm_arctic/CLM/Arctic_Abisko_Sweden.clm2.r.2013-01-01-00000.nc",
+        h0      = "$DATA/domain_Arctic_Abisko_Sweden/simulations/clm_arctic/CLM/Arctic_Abisko_Sweden.clm2.h0.2012-12-30-00000.nc"),
+    "Massa" => (year = 2013, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Alps_Massa_Aletsch_CH/settings/CLM/parameters",
+        forcing = "$DATA/domain_Alps_Massa_Aletsch_CH/data/forcing/CLM_input/clmforc.2013.nc",
+        restart = "$DATA/domain_Alps_Massa_Aletsch_CH/simulations/clm_alpineglacier/CLM/Alps_Massa_Aletsch_CH.clm2.r.2013-01-01-00000.nc",
+        h0      = "$DATA/domain_Alps_Massa_Aletsch_CH/simulations/clm_alpineglacier/CLM/Alps_Massa_Aletsch_CH.clm2.h0.2012-12-30-00000.nc"),
+    "Baltimore" => (year = 2013, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Urban_DeadRun_Baltimore/settings/CLM/parameters",
+        forcing = "$DATA/domain_Urban_DeadRun_Baltimore/data/forcing/CLM_input/clmforc.2013.nc",
+        restart = "$DATA/domain_Urban_DeadRun_Baltimore/simulations/clm_urban/CLM/Urban_DeadRun_Baltimore.clm2.r.2013-01-01-00000.nc",
+        h0      = "$DATA/domain_Urban_DeadRun_Baltimore/simulations/clm_urban/CLM/Urban_DeadRun_Baltimore.clm2.h0.2012-12-30-00000.nc"),
+    "Iceland" => (year = 2017, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Iceland_Jokulsa_Fjollum/settings/CLM/parameters",
+        forcing = "$DATA/domain_Iceland_Jokulsa_Fjollum/data/forcing/CLM_input/clmforc.2017.nc",
+        restart = "$DATA/domain_Iceland_Jokulsa_Fjollum/simulations/clm_glacier/CLM/Iceland_Jokulsa_Fjollum.clm2.r.2017-01-01-00000.nc",
+        h0      = "$DATA/domain_Iceland_Jokulsa_Fjollum/simulations/clm_glacier/CLM/Iceland_Jokulsa_Fjollum.clm2.h0.2016-12-31-00000.nc"),
 )
 
 const DOM = get(ENV, "DOMAIN", "Bow")
