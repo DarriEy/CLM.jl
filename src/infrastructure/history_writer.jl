@@ -128,6 +128,30 @@ function default_hist_fields()
         HistFieldDef("FSR", "reflected solar radiation", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_patch) ? Float64[] :
                     Float64.(inst.solarabs.fsr_patch)),
+        HistFieldDef("FSRVD", "reflected direct beam vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsr_vis_d_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsr_vis_d_patch)),
+        HistFieldDef("FSRND", "reflected direct beam NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsr_nir_d_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsr_nir_d_patch)),
+        HistFieldDef("FSRVI", "reflected diffuse vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsr_vis_i_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsr_vis_i_patch)),
+        HistFieldDef("FSRNI", "reflected diffuse NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsr_nir_i_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsr_nir_i_patch)),
+        HistFieldDef("FSDSVD", "incident direct beam vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsds_vis_d_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsds_vis_d_patch)),
+        HistFieldDef("FSDSND", "incident direct beam NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsds_nir_d_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsds_nir_d_patch)),
+        HistFieldDef("FSDSVI", "incident diffuse vis solar", "W/m2", "patch",
+            inst -> isempty(inst.surfrad.fsds_vis_i_patch) ? Float64[] :
+                    Float64.(inst.surfrad.fsds_vis_i_patch)),
+        HistFieldDef("FSDSNI", "incident diffuse NIR solar", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.fsds_nir_i_patch) ? Float64[] :
+                    Float64.(inst.solarabs.fsds_nir_i_patch)),
         HistFieldDef("FIRA", "net infrared (longwave) radiation", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_lwrad_net_patch) ? Float64[] :
                     Float64.(inst.energyflux.eflx_lwrad_net_patch)),
