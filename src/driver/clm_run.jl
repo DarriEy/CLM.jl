@@ -277,7 +277,8 @@ function clm_run!(;
         # --- Read and downscale forcings (at step-start time) ---
         read_forcing_step!(fr, inst.atm2lnd, step_start, ng, nc;
                            gridcell_latdeg = inst.gridcell.latdeg,
-                           gridcell_londeg = inst.gridcell.londeg)
+                           gridcell_londeg = inst.gridcell.londeg,
+                           dtime = dtime)
         downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
 
         # --- Compute orbital parameters ---

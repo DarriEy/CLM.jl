@@ -230,7 +230,8 @@ broadcast (atm cell 1) is used.
 function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
                             target_time::DateTime, ng::Int, nc::Int;
                             gridcell_latdeg::Union{AbstractVector, Nothing} = nothing,
-                            gridcell_londeg::Union{AbstractVector, Nothing} = nothing)
+                            gridcell_londeg::Union{AbstractVector, Nothing} = nothing,
+                            dtime::Int = 1800)
     ds = fr.ds
     ds === nothing && error("ForcingReader not initialized")
 
@@ -352,7 +353,23 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
 
     # Shortwave radiation [W/m2] — split into VIS/NIR (50/50) then
     # direct/diffuse using CAM-derived polynomial (Fortran DATM CLMNCEP)
-    fsds = _read_var("FSDS", 0.0)  # interpolate with the states (keeps SW/T in phase)
+    # FSDS uses datm tintalgo='coszen': take the LOWER-bound interval value and
+    # scale by cosz(t)/avg_cosz([LB,UB]). interp=false reads the floor (ti0=LB) value.
+    fsds = _read_var("FSDS", 0.0; interp=false)
+    if fr.interp_time && ti1 > ti0 && gridcell_latdeg !== nothing && gridcell_londeg !== nothing
+        cday = _calday_of(target_time)
+        @inbounds for g in 1:ng
+            latr = Float64(gridcell_latdeg[g]) * _DEG2RAD
+            lonr = Float64(gridcell_londeg[g]) * _DEG2RAD
+            czm = _cosz_at(cday, latr, lonr)
+            if czm > _SOLZENMIN
+                avgcz = _avg_cosz(fr.times[ti0], fr.times[ti1], latr, lonr, dtime)
+                fsds[g] = fsds[g] * czm / avgcz
+            else
+                fsds[g] = 0.0
+            end
+        end
+    end
     for g in 1:ng
         fsds_g = fsds[g]
         swndr = fsds_g * 0.50  # NIR half
@@ -480,10 +497,13 @@ function _find_bracket_time(times::Vector{DateTime}, target::DateTime)
     elseif target >= times[n]
         return (n, n, 0.0)
     end
-    # times are monotonic increasing → find the first index strictly after target
-    i1 = 1
+    # LB = largest forcing time <= target, UB = next. Find the first time STRICTLY
+    # after target (UB); LB is the one before it. The strict `>` is essential: a model
+    # step landing exactly on a forcing time tk must bracket [tk, tk+1] (LB=tk), not
+    # [tk-1, tk] — otherwise the coszen LB-value pick is off by one interval.
+    i1 = n
     @inbounds for i in 2:n
-        if times[i] >= target
+        if times[i] > target
             i1 = i
             break
         end
@@ -492,6 +512,46 @@ function _find_bracket_time(times::Vector{DateTime}, target::DateTime)
     span = Dates.value(times[i1] - times[i0])
     w = span > 0 ? Dates.value(target - times[i0]) / span : 0.0
     return (i0, i1, clamp(w, 0.0, 1.0))
+end
+
+# --- coszen solar time-interpolation (datm tintalgo='coszen') ---
+# Solar is interpolated by the cosine of the solar zenith angle, not linearly:
+#   FSDS(t) = FSDS_LB · cosz(t) / avg_cosz([LB,UB])   (0 when cosz ≤ solZenMin)
+# This shapes the diurnal cycle while conserving the interval-mean flux, matching
+# CDEPS dshr_strdata_mod / dshr_tinterp_mod. Ported faithfully (shr_orb_cosz).
+const _SOLZENMIN = 0.001        # min solar zenith cosine (dshr_tinterp_mod)
+const _DEG2RAD   = π / 180.0
+
+# Calendar day (day-of-year + day fraction), matching get_curr_calday.
+_calday_of(dt::DateTime) =
+    Float64(Dates.dayofyear(dt)) +
+    (Dates.hour(dt) * 3600 + Dates.minute(dt) * 60 + Dates.second(dt)) / SECSPDAY
+
+# Cosine of the solar zenith angle (shr_orb_cosz), lat/lon in radians.
+function _cosz_at(calday::Float64, latr::Float64, lonr::Float64)
+    (declin, _) = compute_orbital(calday)
+    return sin(latr) * sin(declin) -
+           cos(latr) * cos(declin) * cos((calday - floor(calday)) * 2.0 * π + lonr)
+end
+
+# Time-average of max(solZenMin, cosz) over [t0, t1), stepping at the model dt
+# (adjusted so the interval divides evenly). Mirrors shr_tInterp_getAvgCosz.
+function _avg_cosz(t0::DateTime, t1::DateTime, latr::Float64, lonr::Float64, dtime::Int)
+    dtsec = Dates.value(Dates.Second(t1 - t0))
+    dtsec <= 0 && return max(_SOLZENMIN, _cosz_at(_calday_of(t0), latr, lonr))
+    ldt = dtime
+    if dtsec % ldt != 0
+        ldt = dtsec ÷ (dtsec ÷ ldt + 1)
+    end
+    total = 0.0
+    n = 0
+    t = t0
+    @inbounds while t < t1
+        total += max(_SOLZENMIN, _cosz_at(_calday_of(t), latr, lonr)) * ldt
+        n += ldt
+        t += Dates.Second(ldt)
+    end
+    return n > 0 ? total / n : _SOLZENMIN
 end
 
 function _find_closest_time(times::Vector{DateTime}, target::DateTime, hint::Int)

@@ -113,12 +113,10 @@ inst = run_clm!(;
     use_hydrstress=USE_PHS, use_luna=USE_LUNA,
     baseflow_scalar=baseflow_scalar,
     int_snow_max=int_snow_max,
-    # interp_forcing left OFF: linear time-interp of the hourly forcing to the 30-min
-    # step is datm-faithful for the STATE fields, but Julia lacks datm's coszen solar
-    # interpolation — linear solar mistimes snowmelt and drops SNOW_DEPTH r 0.93→0.79.
-    # Net of linear-only interp is a wash vs nearest (helps GPP bias, hurts snow r), so
-    # Bow keeps nearest until coszen solar is added. (The Sep SNOW_DEPTH "event" is the
-    # nearest-vs-interp signature: a sub-2mm SWE partition-timing diff at one event.)
+    # datm-faithful forcing time-interpolation of the hourly forcing to the 30-min step,
+    # matching the Bow datm.streams.xml tintalgo per field: states (T/WIND/QBOT/PSRF/
+    # FLDS) linear, FSDS coszen, PRECTmms nearest.
+    interp_forcing=true,
     ffortran_restart=ffortran_restart,
     fsnowoptics=isfile(fsnowoptics) ? fsnowoptics : "",
     fsnowaging=isfile(fsnowaging)   ? fsnowaging  : "")
