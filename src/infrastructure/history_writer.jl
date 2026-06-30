@@ -23,7 +23,12 @@ struct HistFieldDef
     units::String
     level::String  # "gridcell", "column", or "patch"
     getter::Function  # (inst::CLMInstances) -> AbstractArray
+    reduce::Symbol    # :avg (daily mean, default) or :snapshot (end-of-day value)
 end
+
+# Convenience constructor: fields default to daily-mean reduction.
+HistFieldDef(name, long_name, units, level, getter) =
+    HistFieldDef(name, long_name, units, level, getter, :avg)
 
 """
     HistoryWriter
@@ -90,8 +95,14 @@ function default_hist_fields()
             inst -> inst.water.waterdiagnosticbulk_inst.snowdp_col),
         HistFieldDef("FRAC_SNO", "fraction of ground covered by snow", "unitless", "column",
             inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col),
+        # BTRANMN is a daily-MIN, not a daily-mean: snapshot the completed daily-min
+        # (btran_min_patch) at the end-of-day flush. energyflux_update_acc_vars! runs
+        # before the history flush, so at that moment btran_min_patch holds THIS day's
+        # min — writing it as a snapshot puts today's min in today's record (matching
+        # the averaged fields), instead of the day-average of a field that holds
+        # yesterday's completed min for most of the day (which lagged BTRANMN by 1 day).
         HistFieldDef("BTRAN", "transpiration beta factor", "unitless", "patch",
-            history_btran_daily_min_patch),
+            history_btran_daily_min_patch, :snapshot),
         # PHS diagnostics (late-season over-transpiration investigation)
         HistFieldDef("VEGWPSUN", "sunlit leaf water potential", "mm", "patch",
             history_vegwpsun_patch),
@@ -712,9 +723,16 @@ function history_write_step!(hw::HistoryWriter, inst::CLMInstances,
 
         n = hw.accum_count
         for f in hw.fields
-            haskey(hw.accum, f.name) || continue
-            avg = hw.accum[f.name] ./ n
-            ds[f.name][:, ti] = avg
+            if f.reduce == :snapshot
+                # Daily-min/end-of-day field: write its value AT THE FLUSH (the
+                # completed daily statistic), not the day-average of the accumulator.
+                snap = _aggregate_to_gridcell(f, inst, ng)
+                snap === nothing && continue
+                ds[f.name][:, ti] = snap
+            else
+                haskey(hw.accum, f.name) || continue
+                ds[f.name][:, ti] = hw.accum[f.name] ./ n
+            end
         end
 
         # Reset accumulators
