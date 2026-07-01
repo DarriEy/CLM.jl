@@ -353,7 +353,16 @@ function init_topography!(bounds::BoundsType, col::ColumnData,
     end
 
     # Compute micro_sigma
-    slope0 = slopemax > 0.0 && slopebeta > 0.0 ?
+    # Fortran (initVerticalMod.F90:660): slope0 = slopemax**(1/slopebeta),
+    # computed UNCONDITIONALLY. slopebeta is NEGATIVE in CLM5 (clm5_params
+    # slopebeta=-3.0, slopemax=0.4 → slope0=1.357). The previous `slopebeta > 0`
+    # guard wrongly zeroed slope0 for the real CLM5 params, so
+    # micro_sigma=(topo_slope+slope0)^slopebeta was computed with the wrong slope0
+    # (e.g. Krycklan slope 2.088°: buggy 0.110 vs Fortran 0.024 mm). This shifts
+    # the microtopography submerged-fraction relation and (with the pc/mu +
+    # h2osfc_thresh fixes) corrects the cold-site snowmelt QOVER/QDRAI partition +
+    # timing. Guard only the degenerate slopemax<=0 case (0^negative = Inf).
+    slope0 = (slopemax > 0.0 && slopebeta != 0.0) ?
         slopemax^(1.0 / slopebeta) : 0.0
 
     for c in bounds.begc:bounds.endc

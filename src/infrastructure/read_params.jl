@@ -23,6 +23,12 @@ function readParameters!(paramfile::String)
             sat_excess_runoff_params.fff = ds["fff"][1]
         end
 
+        # Read surface-water connectivity parameters (SurfaceWaterMod readParams).
+        # clm5_params ships pc=0.4, mu=0.13889; the old hardcoded 0.5/1.0 throttled
+        # h2osfc surface runoff on cold sites (melt water over-infiltrated).
+        haskey(ds, "pc") && (SURFACE_WATER_PC[] = Float64(ds["pc"][1]))
+        haskey(ds, "mu") && (SURFACE_WATER_MU[] = Float64(ds["mu"][1]))
+
         # Read photosynthesis parameters (PhotosynthesisMod)
         readParams_photosynthesis!(ds)
 

@@ -248,6 +248,17 @@ function clm_initialize!(;
     # ---- Step 14a: Soil hydrology runtime controls ----
     soilhydrology_read_nl!(inst.soilhydrology; h2osfcflag=h2osfcflag)
 
+    # ---- Step 14b: Surface-water "fill & spill" threshold (time constant) ----
+    # Fortran SoilHydrologyInitTimeConst computes h2osfc_thresh_col from micro_sigma
+    # (populated in Step 13 initVertical) once h2osfcflag is known. Cold-start left
+    # it at 0, so surface-water runoff triggered with no threshold. Recompute here.
+    let bc = bounds.begc:bounds.endc
+        compute_h2osfc_thresh!(inst.soilhydrology.h2osfc_thresh_col,
+                               inst.column.micro_sigma,
+                               trues(bounds.endc), bc;
+                               h2osfcflag=h2osfcflag)
+    end
+
     # ---- Step 15: Initialize snow layer constants ----
     _init_snow_layer_constants!()
 
