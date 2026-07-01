@@ -256,6 +256,57 @@ function default_hist_fields()
             history_qvege_col),
         HistFieldDef("QSOIL", "ground evaporation", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_soi_col),
+        # --- Extended parity set: surface water / perched water table ---
+        HistFieldDef("H2OSFC", "surface water depth", "mm", "column",
+            inst -> isempty(inst.water.waterstatebulk_inst.ws.h2osfc_col) ? Float64[] :
+                    Float64.(inst.water.waterstatebulk_inst.ws.h2osfc_col)),
+        HistFieldDef("FH2OSFC", "fraction of ground covered by surface water", "unitless", "column",
+            inst -> isempty(inst.water.waterdiagnosticbulk_inst.frac_h2osfc_col) ? Float64[] :
+                    Float64.(inst.water.waterdiagnosticbulk_inst.frac_h2osfc_col)),
+        HistFieldDef("QH2OSFC", "surface water runoff", "mm/s", "column",
+            inst -> isempty(inst.water.waterfluxbulk_inst.qflx_h2osfc_surf_col) ? Float64[] :
+                    Float64.(inst.water.waterfluxbulk_inst.qflx_h2osfc_surf_col)),
+        HistFieldDef("ZWT_PERCH", "perched water table depth", "m", "column",
+            inst -> isempty(inst.soilhydrology.zwt_perched_col) ? Float64[] :
+                    Float64.(inst.soilhydrology.zwt_perched_col)),
+        # --- Extended parity set: near-surface turbulence / momentum ---
+        # Fortran history 'U10' maps to u10_clm_patch (the clm_map2gcell 10-m wind);
+        # u10_patch is the dust-model wind, exported as 'U10_DUST' in CTSM.
+        HistFieldDef("U10", "10-m wind speed", "m/s", "patch",
+            inst -> isempty(inst.frictionvel.u10_clm_patch) ? Float64[] :
+                    Float64.(inst.frictionvel.u10_clm_patch)),
+        HistFieldDef("Q2M", "2-m specific humidity", "kg/kg", "patch",
+            inst -> isempty(inst.water.waterdiagnosticbulk_inst.q_ref2m_patch) ? Float64[] :
+                    Float64.(inst.water.waterdiagnosticbulk_inst.q_ref2m_patch)),
+        HistFieldDef("RH2M", "2-m relative humidity", "%", "patch",
+            inst -> isempty(inst.water.waterdiagnosticbulk_inst.rh_ref2m_patch) ? Float64[] :
+                    Float64.(inst.water.waterdiagnosticbulk_inst.rh_ref2m_patch)),
+        HistFieldDef("TAUX", "zonal surface wind stress", "kg/m/s^2", "patch",
+            inst -> isempty(inst.energyflux.taux_patch) ? Float64[] :
+                    Float64.(inst.energyflux.taux_patch)),
+        HistFieldDef("TAUY", "meridional surface wind stress", "kg/m/s^2", "patch",
+            inst -> isempty(inst.energyflux.tauy_patch) ? Float64[] :
+                    Float64.(inst.energyflux.tauy_patch)),
+        # --- Extended parity set: canopy structure + emitted longwave ---
+        HistFieldDef("TSAI", "total projected stem area index", "m2/m2", "patch",
+            inst -> isempty(inst.canopystate.tsai_patch) ? Float64[] :
+                    Float64.(inst.canopystate.tsai_patch)),
+        HistFieldDef("FIRE", "emitted infrared (longwave) radiation", "W/m2", "patch",
+            inst -> isempty(inst.energyflux.eflx_lwrad_out_patch) ? Float64[] :
+                    Float64.(inst.energyflux.eflx_lwrad_out_patch)),
+        # --- Core vars previously only tracked by the plot harness ---
+        HistFieldDef("TSOI", "soil temperature (column mean)", "K", "column",
+            history_tsoi_colmean),
+        HistFieldDef("TOTSOILLIQ", "vertically summed soil liquid water", "kg/m2", "column",
+            history_totsoilliq_col),
+        # Column water mass at end of step. Fortran's history TWS is this
+        # landunit-area-weighted to the gridcell (c2g 'urbanf'/'unity') plus river
+        # storage; that landunit weighting is not reproduced by this lumped
+        # single-column harness, so we export the honest column quantity ENDWB and
+        # leave gridcell TWS to the conservation (T2) harness.
+        HistFieldDef("ENDWB", "column water mass (end of step)", "mm", "column",
+            inst -> isempty(inst.water.waterbalancebulk_inst.endwb_col) ? Float64[] :
+                    Float64.(inst.water.waterbalancebulk_inst.endwb_col)),
     ]
 end
 
@@ -395,6 +446,58 @@ function history_soilwater_10cm_col(inst::CLMInstances)
             isfinite(ice) && (s += ice * frac)
         end
         out[c] = s
+    end
+    return out
+end
+
+"""
+    history_totsoilliq_col(inst) -> Vector{Float64}
+
+Vertically-summed soil liquid water (kg/m2) over the soil column (nlevsoi),
+matching Fortran `TOTSOILLIQ`.
+"""
+function history_totsoilliq_col(inst::CLMInstances)
+    ws = inst.water.waterstatebulk_inst.ws
+    isempty(ws.h2osoi_liq_col) && return Float64[]
+    nc = size(ws.h2osoi_liq_col, 1)
+    nsno = varpar.nlevsno
+    nsoi = varpar.nlevsoi
+    out = zeros(nc)
+    @inbounds for c in 1:nc
+        s = 0.0
+        for j in 1:nsoi
+            liq = ws.h2osoi_liq_col[c, j + nsno]
+            isfinite(liq) && (s += liq)
+        end
+        out[c] = s
+    end
+    return out
+end
+
+"""
+    history_tsoi_colmean(inst) -> Vector{Float64}
+
+Soil-column-mean temperature (K) over the ground layers (nlevgrnd), matching the
+layer-averaged Fortran `TSOI`. Snow layers are offset out via nlevsno.
+(Distinct from `history_io.jl`'s `history_tsoi_col`, which returns the full
+2-D (col, nlevsoi) profile for the CLM-faithful HistoryTape.)
+"""
+function history_tsoi_colmean(inst::CLMInstances)
+    t = inst.temperature.t_soisno_col
+    isempty(t) && return Float64[]
+    nc = size(t, 1)
+    nsno = varpar.nlevsno
+    nlev = min(varpar.nlevgrnd, size(t, 2) - nsno)
+    out = zeros(nc)
+    @inbounds for c in 1:nc
+        s = 0.0; n = 0
+        for j in 1:nlev
+            v = t[c, j + nsno]
+            if isfinite(v) && v > 0.0
+                s += v; n += 1
+            end
+        end
+        out[c] = n > 0 ? s / n : NaN
     end
     return out
 end
