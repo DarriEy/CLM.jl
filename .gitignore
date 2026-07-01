@@ -35,3 +35,6 @@ streamflow_compare.csv
 
 # Validation harness generated output
 validation_results/
+
+# stray domain streamflow-comparison CSVs (analysis outputs, not source)
+streamflow_compare_*.csv
