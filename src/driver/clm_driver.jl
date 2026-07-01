@@ -1564,6 +1564,26 @@ function clm_drv_core!(config::CLMDriverConfig,
 
 
 
+    # 2e'. Update int_snow, and RESET frac_sno / snow_depth / int_snow when no snow
+    # present (Fortran BulkDiag_SnowWaterAccumulatedSnow, called at the end of
+    # SnowWater in SnowHydrologyMod.F90:1135). Without this, a no-layer (trace) snow
+    # event that fully melts leaves frac_sno / snow_depth nonzero forever → residual
+    # snow-cover fraction on zero-snow days (Tagus FSNO annual mean ~5× Fortran; ~50%
+    # of it from these stale-frac_sno days). Uses the same snowc/nosnowc filters.
+    bulkdiag_snow_water_accumulated_snow!(
+        wsb.int_snow_col,
+        wdb.frac_sno_col,
+        wdb.snow_depth_col,
+        dtime,
+        wdb.frac_sno_eff_col,
+        wfb.wf.qflx_soliddew_to_top_layer_col,
+        wfb.wf.qflx_liqdew_to_top_layer_col,
+        wfb.wf.qflx_liq_grnd_col,
+        wsb.ws.h2osno_no_layers_col,
+        filt.snowc, filt.nosnowc, bc_col)
+
+
+
     # 2f. Sum percolation out of bottom snow layer → qflx_rain_plus_snomelt
     # For snow columns: drainage from bottom + non-snow-covered rain
     # For no-snow columns: rain + snowmelt
