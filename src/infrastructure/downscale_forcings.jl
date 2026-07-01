@@ -141,14 +141,15 @@ function partition_precip!(bounds::BoundsType,
             a2l.forc_rain_downscaled_col[c] = total_precip * frac_rain
             a2l.forc_snow_downscaled_col[c] = total_precip * (1.0 - frac_rain)
         else
-            # Simple threshold: if T > TFRZ, it's rain; otherwise snow
-            if t_col > TFRZ
-                a2l.forc_rain_downscaled_col[c] = total_precip
-                a2l.forc_snow_downscaled_col[c] = 0.0
-            else
-                a2l.forc_rain_downscaled_col[c] = 0.0
-                a2l.forc_snow_downscaled_col[c] = total_precip
-            end
+            # repartition_rain_snow disabled: the column keeps the gridcell rain/snow
+            # split unchanged (Fortran atm2lndMod.F90:181-186 initializes
+            # forc_rain_c=forc_rain_g, forc_snow_c=forc_snow_g, and partition_precip
+            # ONLY modifies them when repartition_rain_snow is .true.). Preserve the
+            # gridcell split here rather than imposing a hard TFRZ threshold (which
+            # would discard the DATM linear-ramp phase). NOTE: the parity harness runs
+            # with repartition_rain_snow=true, so this branch is inactive there.
+            a2l.forc_rain_downscaled_col[c] = total_rain
+            a2l.forc_snow_downscaled_col[c] = total_snow
         end
     end
 

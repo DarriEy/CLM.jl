@@ -274,7 +274,8 @@ function updateh2osfc_rev_phase!(b, aux)
     i = b.inst
     update_h2osfc!(i.column, i.soilhydrology, i.energyflux, i.water.waterfluxbulk_inst,
         i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst,
-        aux.hydrologyc, aux.bc_col; dtime = aux.dtime)
+        aux.hydrologyc, aux.bc_col; dtime = aux.dtime,
+        qinmax = i.infilt_excess_runoff.qinmax_col)
     return nothing
 end
 function infil_rev_phase!(b, aux)

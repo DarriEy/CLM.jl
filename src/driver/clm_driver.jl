@@ -1616,8 +1616,12 @@ function clm_drv_core!(config::CLMDriverConfig,
         filt.hydrologyc, bc_col)
 
     # --- 8. Update surface water (h2osfc) ---
+    # Pass the qinmax populated by infiltration_excess_runoff! (step 6) so ponded
+    # surface water can infiltrate, matching Fortran UpdateH2osfc (uses
+    # infiltration_excess_runoff_inst%qinmax_col).
     update_h2osfc!(col, sh, ef, wfb, wsb, wdb,
-                   filt.hydrologyc, bc_col; dtime=dtime)
+                   filt.hydrologyc, bc_col; dtime=dtime,
+                   qinmax=inst.infilt_excess_runoff.qinmax_col)
 
     # --- 9. Infiltration ---
     infiltration!(wfb, filt.hydrologyc, bc_col)
