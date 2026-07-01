@@ -56,7 +56,8 @@ function clm_run!(;
     baseflow_scalar::Real = 1.0e-2,
     int_snow_max::Real = 2000.0,
     interp_forcing::Bool = false,
-    overrides::Union{CalibrationOverrides, Nothing} = nothing)
+    overrides::Union{CalibrationOverrides, Nothing} = nothing,
+    step_probe::Union{Function, Nothing} = nothing)
 
     # ========================================================================
     # Phase 1: Initialize
@@ -325,6 +326,12 @@ function clm_run!(;
 
         # --- Write history output ---
         history_write_step!(hw, inst, tm.current_date; is_end_curr_day=end_day)
+
+        # --- Optional per-step diagnostic probe (sub-daily instrumentation) ---
+        # Called after lnd2atm! with the fully-updated instance and the current
+        # time manager, so a caller can record per-timestep state (e.g. sub-daily
+        # h2osfc / frac_h2osfc / surface-water fluxes) without a daily-average tape.
+        step_probe === nothing || step_probe(inst, tm)
 
         # --- Progress ---
         if verbose && (step_count % 48 == 0 || step_count == total_steps)
