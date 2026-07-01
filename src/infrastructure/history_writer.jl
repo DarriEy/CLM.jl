@@ -300,7 +300,18 @@ function history_btran_daily_min_patch(inst::CLMInstances)
     out = fill(NaN, np)
     for p in 1:np
         p <= length(pch.itype) || continue
-        # Fortran BTRANMN uses a vegetation mask: exclude bare-ground patches.
+        # Fortran BTRANMN is history-averaged with l2g_scale_type='veg', whose p2g
+        # step INCLUDES every active patch of the natural-veg landunit — the bare-
+        # ground patch among them — as long as its value is not spval. The Fortran
+        # bare-ground patch carries btran_min = 0.0 (never transpires; btran stays at
+        # btran0=0.0), so it IS folded into the gridcell average with its full area
+        # weight. Excluding it here (the previous "vegetation mask" assumption) made
+        # Julia's gridcell BTRAN the veg-only mean, which over-reads by 1/(1 - bare
+        # fraction): +43% on the 30%-bare Stillwater gridcell (0.998 vs Fortran 0.697),
+        # +9% on 6.9%-bare Aripuana. Contributing bare as 0.0 reproduces Fortran's
+        # p2g exactly for every biome. (Verified against a live Fortran run: Stillwater
+        # per-patch BTRAN_MIN = [bare 0.0, tree 0.99985, shrub 0.0, grass 1.0], area
+        # weights [0.302, 0.022, 0.0009, 0.676] → veg-scale mean 0.6974 = BTRANMN.)
         if pch.itype[p] != noveg
             bt = ef.btran_patch[p]
             if length(ef.btran_min_patch) >= p && isfinite(ef.btran_min_patch[p]) &&
@@ -311,6 +322,10 @@ function history_btran_daily_min_patch(inst::CLMInstances)
                 bt = ef.btran_min_inst_patch[p]
             end
             out[p] = bt
+        else
+            # Bare-ground patch: contribute btran = 0.0 (matches Fortran's p2g 'veg'
+            # scale, which averages the bare patch's zero btran into the gridcell).
+            out[p] = 0.0
         end
     end
     return out
