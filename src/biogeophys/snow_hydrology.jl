@@ -1124,7 +1124,7 @@ Determine change in snow layer thickness due to compaction and settling.
 # `dz` (the only output) is passed to the kernel directly as the backend-carrier /
 # writable first arg — NOT bundled here — so `_launch!` can take the device backend
 # from it and writes flow straight back into the live array.
-Base.@kwdef struct _SCompDV{M,MI,V,VI,VB}
+Base.@kwdef struct _SCompDV{M,MI,V,VF,VI,VB}
     t_soisno::M
     h2osoi_ice::M
     h2osoi_liq::M
@@ -1134,6 +1134,10 @@ Base.@kwdef struct _SCompDV{M,MI,V,VI,VB}
     frac_sno::V
     frac_h2osfc::V
     int_snow::V
+    # n_melt is a fixed surfdata-derived constant (SwensonLawrence2012 SCA shape),
+    # never a calibration/AD variable — give it its own type param VF so it can stay
+    # Vector{Float64} while the state vectors (V) are Vector{Dual} under AD.
+    n_melt::VF
     forc_wind::V
     col_gridcell::VI
     col_landunit::VI
@@ -1152,6 +1156,7 @@ Adapt.@adapt_structure _SCompDV
         dtime, nlevsno::Int, c3, c4, c5, upplim_destruct, ob_method::Int,
         ob_tfactor, eta0_anderson, ceta, eta0_vionnet,
         wind_dep::Bool, drift_gs, rho_min, rho_max, tau_ref, use_subgrid::Bool,
+        int_snow_max, rpi,
         cmin::Int, cmax::Int)
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask_snow[c]
@@ -1213,8 +1218,19 @@ Adapt.@adapt_structure _SCompDV
                                     jj2_idx = jj2 + nlevsno
                                     wsum += dv.h2osoi_liq[c, jj2_idx] + dv.h2osoi_ice[c, jj2_idx]
                                 end
-                                if dv.int_snow[c] > zero(T)
-                                    fsno_melt = smooth_min(one(T), wsum / dv.int_snow[c])
+                                # fsno_melt = FracSnowDuringMelt (SwensonLawrence2012):
+                                # 1 - (acos(2*smr-1)/π)^n_melt, with smr = min(1, wsum/
+                                # min(int_snow, int_snow_max)). Fortran SnowCompaction calls
+                                # scf_method%FracSnowDuringMelt here (SnowHydrologyMod.F90);
+                                # the previous inline `min(1, wsum/int_snow)` was a different
+                                # (Niu-Yang-like) formula that made melting snow INFLATE
+                                # instead of compact (glacier/high-accum SNOW_DEPTH +300%).
+                                int_snow_lim = smooth_min(dv.int_snow[c], int_snow_max)
+                                if int_snow_lim > zero(T)
+                                    smr = smooth_min(one(T), wsum / int_snow_lim)
+                                    fsno_melt = one(T) -
+                                        (acos(smooth_min(one(T), T(2.0) * smr - one(T))) /
+                                         rpi) ^ dv.n_melt[c]
                                 else
                                     fsno_melt = one(T)
                                 end
@@ -1282,10 +1298,21 @@ function snow_compaction!(
     mask_snow,
     bounds::UnitRange{Int},
     nlevsno::Int;
-    use_subgrid_fluxes::Bool = true
+    use_subgrid_fluxes::Bool = true,
+    n_melt::AbstractVector{<:Real} = fill(eltype(t_soisno)(20.0), length(snl)),
+    int_snow_max::Real = 2000.0
 )
     params = snowhydrology_params
     FT = eltype(t_soisno)
+
+    # n_melt is the SwensonLawrence2012 SCA shape parameter, needed by the melt
+    # compaction term (fsno_melt = FracSnowDuringMelt). Match the working backend so
+    # a host Array doesn't reach a device kernel (byte-identical on CPU / no-op there).
+    n_melt_dev = n_melt
+    if !(dz isa Array) && n_melt isa Array
+        n_melt_dev = similar(dz, FT, length(n_melt))
+        copyto!(n_melt_dev, FT.(n_melt))
+    end
 
     # Compaction constants — at working precision (byte-identical on Float64).
     c3 = FT(2.777e-6)   # [1/s]
@@ -1305,6 +1332,7 @@ function snow_compaction!(
         t_soisno = t_soisno, h2osoi_ice = h2osoi_ice, h2osoi_liq = h2osoi_liq,
         imelt = imelt, swe_old = swe_old, frac_iceold = frac_iceold,
         frac_sno = frac_sno, frac_h2osfc = frac_h2osfc, int_snow = int_snow,
+        n_melt = n_melt_dev,
         forc_wind = forc_wind, col_gridcell = col_gridcell, col_landunit = col_landunit,
         lakpoi = lakpoi, urbpoi = urbpoi)
 
@@ -1315,7 +1343,7 @@ function snow_compaction!(
              FT(params.ceta), FT(params.eta0_vionnet),
              WIND_DEPENDENT_SNOW_DENSITY[], FT(params.drift_gs),
              FT(params.rho_min), FT(params.rho_max), FT(params.tau_ref),
-             use_subgrid_fluxes,
+             use_subgrid_fluxes, FT(int_snow_max), FT(RPI),
              first(bounds), last(bounds);
              ndrange = length(snl))
     return nothing

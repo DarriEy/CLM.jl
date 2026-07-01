@@ -1755,6 +1755,14 @@ function clm_drv_core!(config::CLMDriverConfig,
     @views col.dz[bc_col, jj_bottom] .= dz_bottom_vec[bc_col]
 
     # --- 16. Snow compaction ---
+    # The melt-compaction term needs the SwensonLawrence2012 SCA shape parameter
+    # (n_melt) and int_snow_max to compute fsno_melt = FracSnowDuringMelt. Extract
+    # them from the active SCF parameterization (NiuYang2007 has neither → fall back
+    # to defaults that never take the SwensonLawrence branch materially).
+    _scf = inst.scf_method
+    _n_melt = hasproperty(_scf, :n_melt) && length(_scf.n_melt) == length(col.snl) ?
+        _scf.n_melt : fill(20.0, length(col.snl))
+    _int_snow_max = hasproperty(_scf, :int_snow_max) ? _scf.int_snow_max : 2000.0
     snow_compaction!(
         col.dz, dtime, col.snl,
         temp.t_soisno_col,
@@ -1765,7 +1773,8 @@ function clm_drv_core!(config::CLMDriverConfig,
         a2l.forc_wind_grc, col.gridcell, col.landunit,
         lun.lakpoi, lun.urbpoi,
         filt.snowc, bc_col, nlevsno;
-        use_subgrid_fluxes = varctl.use_subgrid_fluxes)
+        use_subgrid_fluxes = varctl.use_subgrid_fluxes,
+        n_melt = _n_melt, int_snow_max = _int_snow_max)
 
 
 

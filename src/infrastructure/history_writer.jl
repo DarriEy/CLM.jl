@@ -512,15 +512,17 @@ history_tlaigrass(inst)     = _history_grass(inst.canopystate.tlai_patch, inst.p
 function history_fpsn_patch(inst::CLMInstances)
     fp = inst.photosyns.fpsn_patch
     isempty(fp) && return Float64[]
-    pch = inst.patch
     n = length(fp)
     out = fill(NaN, n)
     @inbounds for p in 1:n
-        # Bare-ground patches → NaN so the gridcell aggregator EXCLUDES them
-        # (matches Fortran FPSN=SPVAL on bare). Vegetated patches keep their value
-        # (a finite 0 at night, included as a real zero). Returning 0 for bare
-        # diluted the gridcell mean by the bare-area fraction (~-6% on FPSN).
-        (p <= length(pch.itype) && pch.itype[p] == noveg) && continue
+        # Bare-ground (noveg) patches → 0.0, INCLUDED in the gridcell average with
+        # their full area weight. Fortran (PhotosynthesisMod TimeStepInit) sets
+        # fpsn_patch = 0 for EVERY non-lake patch, bare ground included; only lake
+        # patches keep spval. So the gridcell FPSN is area-weighted over the whole
+        # gridcell (bare fraction dilutes it), NOT renormalized to vegetated area.
+        # Excluding bare here over-weighted the vegetated patches and inflated FPSN
+        # by 1/vegfrac (Stillwater vegfrac≈0.70 → +43% instantaneous, +33% on the
+        # annual mean). Lake/urban are handled 0-valued by their own patch types.
         v = fp[p]
         out[p] = isfinite(v) ? Float64(v) : 0.0
     end
