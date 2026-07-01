@@ -177,8 +177,11 @@ include("generate_forcing.jl")
         inst.energyflux.btran_patch .= 0.55
         btran_hist = CLM.history_btran_daily_min_patch(inst)
         @test btran_hist[1] ≈ 0.77
+        # Bare-ground patches contribute btran = 0.0 to the gridcell average, matching
+        # Fortran BTRANMN's l2g_scale_type='veg' p2g (which folds the bare patch's zero
+        # btran into the veg-area mean; verified against a live Fortran Stillwater run).
         for p in 2:np
-            @test isnan(btran_hist[p])
+            @test btran_hist[p] == 0.0
         end
 
         # ZWT should be retained only for columns that host at least one vegetated patch.
