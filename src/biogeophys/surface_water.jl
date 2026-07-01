@@ -10,10 +10,16 @@
 #   update_h2osfc!       — Calculate fluxes out of h2osfc and update state
 # ==========================================================================
 
-# Module-level parameters (read from params file in Fortran)
-const SURFACE_WATER_PC = 0.5    # threshold probability for surface water connectivity
-const SURFACE_WATER_MU = 1.0    # connectivity exponent
-const MIN_H2OSFC = 1.0e-8       # minimum surface water for numerical stability [mm]
+# Module-level parameters (read from the params file in Fortran — SurfaceWaterMod
+# readParams reads `pc` and `mu`). These were previously hardcoded to 0.5/1.0, but
+# clm5_params.nc ships pc=0.4, mu=0.13889. The wrong values raised the connectivity
+# threshold (frac_h2osfc_nosnow>pc for any outflow) and linearized the connectivity
+# (mu=1 vs the strongly concave 0.139), throttling surface-water runoff. Read them
+# from the params file into Refs (dereferenced on the host and passed to the kernel
+# as scalars so no Ref reaches a GPU kernel).
+const SURFACE_WATER_PC = Ref(0.4)    # threshold probability for surface water connectivity (params `pc`)
+const SURFACE_WATER_MU = Ref(0.13889)# connectivity exponent (params `mu`)
+const MIN_H2OSFC = 1.0e-8            # minimum surface water for numerical stability [mm]
 
 """
     bulkdiag_frac_h2osfc!(mask_soilc, bounds_col, dtime,
@@ -37,6 +43,46 @@ Ported from `BulkDiag_FracH2oSfc` in `SurfaceWaterMod.F90`.
     y = 1f0 - (((((1.061405429f0 * t - 1.453152027f0) * t) + 1.421413741f0) * t -
               0.284496736f0) * t + 0.254829592f0) * t * exp(-a * a)
     return s * y
+end
+
+"""
+    compute_h2osfc_thresh!(h2osfc_thresh, micro_sigma, mask, bounds_col;
+                            h2osfcflag, pc)
+
+Compute the "fill & spill" surface-water threshold h2osfc_thresh_col (mm) from
+microtopography. Ported from `SoilHydrologyInitTimeConst` in
+`SoilHydrologyInitTimeConstMod.F90` (lines 216-236): a 4-iteration Newton solve
+for the depth `d` at which the submerged fraction equals `pc`, then integrating
+the storage at that depth. h2osfc must exceed this threshold before surface-water
+runoff (QflxH2osfcSurf) can occur. Cold-start left it at 0, so runoff triggered
+with no threshold (part of the cold-site QOVER/QDRAI partition error).
+
+This is a one-time time-constant init, so it runs on the host.
+"""
+function compute_h2osfc_thresh!(h2osfc_thresh::AbstractVector{<:Real},
+                                 micro_sigma::AbstractVector{<:Real},
+                                 mask::AbstractVector{Bool},
+                                 bounds_col::UnitRange{Int};
+                                 h2osfcflag::Int = 1,
+                                 pc::Real = SURFACE_WATER_PC[])
+    sqrt2   = sqrt(2.0)
+    sqrt2pi = sqrt(2.0 * π)
+    for c in bounds_col
+        mask[c] || continue
+        h2osfc_thresh[c] = 0.0
+        if micro_sigma[c] > 1.0e-6 && h2osfcflag != 0
+            d = 0.0
+            for _ in 1:4
+                fd   = 0.5 * (1.0 + erf(d / (micro_sigma[c] * sqrt2))) - pc
+                dfdd = exp(-d^2 / (2.0 * micro_sigma[c]^2)) / (micro_sigma[c] * sqrt2pi)
+                d    = d - fd / dfdd
+            end
+            thr = 0.5 * d * (1.0 + erf(d / (micro_sigma[c] * sqrt2))) +
+                  micro_sigma[c] / sqrt2pi * exp(-d^2 / (2.0 * micro_sigma[c]^2))
+            h2osfc_thresh[c] = 1.0e3 * thr   # m -> mm
+        end
+    end
+    return nothing
 end
 
 # Per-column kernel: submerged-fraction Newton (erf/exp) + frac_sno/h2osfc cap.
@@ -223,26 +269,28 @@ Ported from `QflxH2osfcSurf` in `SurfaceWaterMod.F90`.
 @kernel function _surfwat_qflx_surf_kernel!(qflx_h2osfc_surf, @Const(mask_hydrologyc),
                                             @Const(h2osfc), @Const(h2osfc_thresh),
                                             @Const(frac_h2osfc_nosnow), @Const(topo_slope),
-                                            dtime, h2osfcflag::Int)
+                                            dtime, h2osfcflag::Int, pc, mu)
     c = @index(Global)
     T = eltype(qflx_h2osfc_surf)
     @inbounds if mask_hydrologyc[c]
         if h2osfcflag != 1
             qflx_h2osfc_surf[c] = zero(T)
         else
-            # Fractional connectivity (power law)
+            # Fractional connectivity (power law); pc/mu are params `pc`,`mu`.
             frac_nosnow = frac_h2osfc_nosnow[c]
-            if frac_nosnow <= T(SURFACE_WATER_PC)
+            if frac_nosnow <= T(pc)
                 frac_infclust = zero(T)
             else
-                frac_infclust = (frac_nosnow - T(SURFACE_WATER_PC))^T(SURFACE_WATER_MU)
+                frac_infclust = (frac_nosnow - T(pc))^T(mu)
             end
 
-            # Compute runoff if above threshold
+            # Compute runoff if above threshold. Fortran SurfaceWaterMod:486 uses
+            # k_wet = 1e-4*sin(topo_slope) with NO floor for non-hillslope columns
+            # (the min-slope guard is only inside the is_hillslope branch), so no
+            # max(k_wet, 1e-7) here.
             q = zero(T)
             if h2osfc[c] > h2osfc_thresh[c] && h2osfcflag != 0
                 k_wet = T(1.0e-4) * sin(T(π / 180.0) * topo_slope[c])
-                k_wet = max(k_wet, T(1.0e-7))
                 q = k_wet * frac_infclust * (h2osfc[c] - h2osfc_thresh[c])
                 # Limit to available water
                 q = min(q, (h2osfc[c] - h2osfc_thresh[c]) / dtime)
@@ -260,7 +308,8 @@ end
 surfwat_qflx_surf!(qflx_h2osfc_surf, mask_hydrologyc, h2osfc, h2osfc_thresh,
                    frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag::Int) =
     _launch!(_surfwat_qflx_surf_kernel!, qflx_h2osfc_surf, mask_hydrologyc, h2osfc,
-             h2osfc_thresh, frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag)
+             h2osfc_thresh, frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag,
+             SURFACE_WATER_PC[], SURFACE_WATER_MU[])
 
 function qflx_h2osfc_surf!(mask_hydrologyc::AbstractVector{Bool},
                             bounds_col::UnitRange{Int},
