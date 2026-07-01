@@ -730,15 +730,24 @@ function temperature_update_acc_vars!(temp::TemperatureData,
                                      npcropmin::Int = typemax(Int),
                                      gdd20_season_start::AbstractVector{<:Real} = Float64[],
                                      gdd20_season_end::AbstractVector{<:Real} = Float64[])
-    # Running mean periods (in timesteps at dtime=1800s):
-    # T_VEG24:  24 timesteps  = 12 hours
-    # T_VEG240: 240 timesteps = 5 days
-    # T10:      480 timesteps = 10 days
+    # Running-mean window lengths, in TIMESTEPS, derived from the accumulation
+    # PERIOD IN DAYS ÷ dtime — exactly as CTSM accumulMod converts a negative
+    # accum_period (in days) via `-period * SHR_CONST_CDAY / get_step_size()`
+    # (accumulMod.F90:246-247). CTSM periods: T_VEG24 = -1 day, T_VEG240 = -10
+    # days, T10 = -10 days. These MUST scale with dtime — hardcoding them to the
+    # dtime=1800s values (48/480/480) mis-sizes every window at dtime≠1800. A too-
+    # long T10 window (e.g. 480 steps = 20 days at dtime=3600) lags the seasonal
+    # 2-m temperature low, over-cooling the vcmax high-T acclimation term
+    # (vcmaxse = 668.39 - 1.07·t10) → excessive high-T inhibition of vcmax at hot
+    # midday → low assimilation → low gs → low transpiration.
+    _dt = dtime > 0 ? dtime : 1800
+    _win_1day  = max(1, round(Int,  1 * 86400 / _dt))
+    _win_10day = max(1, round(Int, 10 * 86400 / _dt))
 
     if !isempty(bounds_patch)
         _launch!(_temp_acc_kernel!, temp.t_veg24_patch, temp.t_veg240_patch,
             temp.t_a10_patch, temp.t_veg_patch, temp.t_ref2m_patch,
-            nstep, first(bounds_patch), last(bounds_patch);
+            nstep, _win_1day, _win_10day, first(bounds_patch), last(bounds_patch);
             ndrange = length(temp.t_veg24_patch))
     end
 
@@ -787,34 +796,34 @@ end
 # Own-index read-modify-write; one thread per patch.
 @kernel function _temp_acc_kernel!(t_veg24_patch, t_veg240_patch, t_a10_patch,
         @Const(t_veg_patch), @Const(t_ref2m_patch),
-        nstep::Int, pmin::Int, pmax::Int)
+        nstep::Int, win_1day::Int, win_10day::Int, pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
         tv = t_veg_patch[p]
         if isfinite(tv)
-            # T_VEG24: 24-timestep running mean of vegetation temperature
+            # T_VEG24: 1-day (win_1day timesteps) running mean of veg temperature
             if isnan(t_veg24_patch[p]) || nstep <= 1
                 t_veg24_patch[p] = tv
             else
-                n24 = min(nstep, 24)
+                n24 = min(nstep, win_1day)
                 t_veg24_patch[p] += (tv - t_veg24_patch[p]) / n24
             end
 
-            # T_VEG240: 240-timestep running mean of vegetation temperature
+            # T_VEG240: 10-day (win_10day timesteps) running mean of veg temperature
             if isnan(t_veg240_patch[p]) || nstep <= 1
                 t_veg240_patch[p] = tv
             else
-                n240 = min(nstep, 240)
+                n240 = min(nstep, win_10day)
                 t_veg240_patch[p] += (tv - t_veg240_patch[p]) / n240
             end
 
-            # T10: 10-day (480 timestep) running mean of 2m reference temperature
+            # T10: 10-day (win_10day timesteps) running mean of 2m reference temperature
             t2m = t_ref2m_patch[p]
             if isfinite(t2m)
                 if isnan(t_a10_patch[p]) || nstep <= 1
                     t_a10_patch[p] = t2m
                 else
-                    n480 = min(nstep, 480)
+                    n480 = min(nstep, win_10day)
                     t_a10_patch[p] += (t2m - t_a10_patch[p]) / n480
                 end
             end
