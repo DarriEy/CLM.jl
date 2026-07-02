@@ -87,6 +87,27 @@ function downscale_forcings!(bounds::BoundsType,
         end
     end
 
+    # --- Step 2b: CO2/O2 partial pressures → downscaled surface pressure ---
+    # forc_pco2/forc_po2 are molar_fraction * surface_pbot. The forcing reader
+    # seeds them from the NOT-downscaled grc pbot; rescale to the elevation-
+    # corrected column pbot that the photosynthesis solve uses for `cair` and cs
+    # (Fortran builds forc_pco2 from the same surface pbot → cair = 367e-6*pbot).
+    # Recover the molar fraction from the reader's per-step value so this is
+    # non-compounding (the reader reseeds pco2 = 367e-6*pbot_nd each step before
+    # this runs). Leaving cair on the not-downscaled pbot made it ~2.7% low at
+    # elevation-corrected columns → stomata ~3% too open → ~2% excess transp
+    # (Krycklan deep-soil drying → water table too deep → QDRAI -10%). forc_pco2
+    # is a gridcell field; parity domains are single-column so col→grc is 1:1.
+    for c in bc_col
+        g = col.gridcell[c]
+        pbot_nd = a2l.forc_pbot_not_downscaled_grc[g]
+        pbot_ds = a2l.forc_pbot_downscaled_col[c]
+        if pbot_nd > 0.0 && pbot_ds > 0.0
+            a2l.forc_pco2_grc[g] = (a2l.forc_pco2_grc[g] / pbot_nd) * pbot_ds
+            a2l.forc_po2_grc[g]  = (a2l.forc_po2_grc[g]  / pbot_nd) * pbot_ds
+        end
+    end
+
     # --- Step 3: Partition precipitation ---
     partition_precip!(bounds, a2l, col, lun)
 

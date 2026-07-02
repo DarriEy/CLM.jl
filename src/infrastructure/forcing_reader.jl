@@ -455,13 +455,16 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     # forc_po2 = 0.209*pbot), so they must scale with pbot — a fixed sea-level value
     # over-estimates both at high elevation (Bow pbot≈79 kPa → 40 Pa would be 506 ppm,
     # vs Fortran's 367 ppm = 29 Pa). co2_ppmv = 367 matches the I2000 (year-2000) CO2.
+    # Seed here from the NOT-downscaled grc pbot; downscale_forcings! then rescales
+    # these partial pressures to the elevation-corrected (downscaled) column pbot the
+    # photosynthesis solve actually uses for `cair`/cs (matching Fortran, which reads
+    # forc_pco2 built from the same surface pbot). Recompute each step (NOT gated on
+    # <=0) so the value tracks pbot and the downscale rescale stays non-compounding —
+    # the old <=0 freeze pinned forc_pco2 at the not-downscaled step-1 value, leaving
+    # cair ~2.7% low at elevation-corrected columns → stomata too open → +2% transp.
     for g in 1:ng
-        if a2l.forc_pco2_grc[g] <= 0.0
-            a2l.forc_pco2_grc[g] = 367.0e-6 * a2l.forc_pbot_not_downscaled_grc[g]
-        end
-        if a2l.forc_po2_grc[g] <= 0.0
-            a2l.forc_po2_grc[g] = 0.209 * a2l.forc_pbot_not_downscaled_grc[g]
-        end
+        a2l.forc_pco2_grc[g] = 367.0e-6 * a2l.forc_pbot_not_downscaled_grc[g]
+        a2l.forc_po2_grc[g]  = 0.209    * a2l.forc_pbot_not_downscaled_grc[g]
     end
 
     return nothing
