@@ -92,6 +92,9 @@ function probe(inst, tm)
     end
     pv = pveg[]
     fv = inst.frictionvel; ps = inst.photosyns; cs = inst.canopystate; sa = inst.solarabs; alb = inst.surfalb
+    a2l = inst.atm2lnd
+    gcell = pv <= length(inst.patch.gridcell) ? Int(inst.patch.gridcell[pv]) : 0
+    cair_p = (gcell >= 1 && gcell <= length(a2l.forc_pco2_grc)) ? Float64(a2l.forc_pco2_grc[gcell]) : NaN
     getp(a) = (pv <= length(a) ? Float64(a[pv]) : NaN)
     getpz1(a) = (size(a,1) >= pv && size(a,2) >= 1 ? Float64(a[pv,1]) : NaN)  # canopy layer 1
     push!(recs, (
@@ -140,6 +143,11 @@ function probe(inst, tm)
         tlaiz1 = getpz1(alb.tlai_z_patch),    # per-layer-1 tlai increment (feeds lmr reduction!)
         nrad = getp(alb.nrad_patch),          # # radiative canopy layers
         tlaiz = getp(cs.tlai_patch),          # total LAI
+        # --- Medlyn gs-vs-A levers (PARITYGVA) ---
+        gbmol  = getp(ps.gb_mol_patch),       # leaf boundary conductance (umol/m2/s)
+        vpdcan = getp(ps.vpd_can_patch),      # canopy VPD used by Medlyn (kPa)
+        pbot   = getc(a2l.forc_pbot_downscaled_col),  # atm pressure (Pa)
+        cair   = cair_p,                      # CO2 partial pressure (Pa)
     ))
 end
 
@@ -160,14 +168,15 @@ run_clm!(;
 
 csv = joinpath(outdir, "probe_h2osfc_$(lowercase(DOM)).csv")
 open(csv, "w") do io
-    println(io, "date,h2osfc,frac,frac_nosnow,frac_sno,frac_sno_eff,h2osno,snl,snowdp,q_in,q_drain,q_spill,q_melt,q_infl,uaf,qaf,rb,rssun,rssha,fdry,laisun,laisha,elai,esai,qtran,parsun,parsha,psnsun,psnsha,gsmolsun,gsmolsha,vcxcsun,vcxcsha,cisha,ansha,cisun,ansun,lmrsha,lmrsun,vcmx25z,jmx25z,tlaiz1,nrad,tlaiz")
+    println(io, "date,h2osfc,frac,frac_nosnow,frac_sno,frac_sno_eff,h2osno,snl,snowdp,q_in,q_drain,q_spill,q_melt,q_infl,uaf,qaf,rb,rssun,rssha,fdry,laisun,laisha,elai,esai,qtran,parsun,parsha,psnsun,psnsha,gsmolsun,gsmolsha,vcxcsun,vcxcsha,cisha,ansha,cisun,ansun,lmrsha,lmrsun,vcmx25z,jmx25z,tlaiz1,nrad,tlaiz,gbmol,vpdcan,pbot,cair")
     for r in recs
-        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
             r.date, r.h2osfc, r.frac, r.frac_nosnow, r.frac_sno, r.frac_sno_eff, r.h2osno, r.snl, r.snowdp,
             r.q_in, r.q_drain, r.q_spill, r.q_melt, r.q_infl,
             r.uaf, r.qaf, r.rb, r.rssun, r.rssha, r.fdry, r.laisun, r.laisha, r.elai, r.esai, r.qtran,
             r.parsun, r.parsha, r.psnsun, r.psnsha, r.gsmolsun, r.gsmolsha, r.vcxcsun, r.vcxcsha,
-            r.cisha, r.ansha, r.cisun, r.ansun, r.lmrsha, r.lmrsun, r.vcmx25z, r.jmx25z, r.tlaiz1, r.nrad, r.tlaiz)
+            r.cisha, r.ansha, r.cisun, r.ansun, r.lmrsha, r.lmrsun, r.vcmx25z, r.jmx25z, r.tlaiz1, r.nrad, r.tlaiz,
+            r.gbmol, r.vpdcan, r.pbot, r.cair)
     end
 end
 @printf("Done %s in %.1fs -> %s (%d steps)\n", DOM, time() - t0, csv, length(recs))
