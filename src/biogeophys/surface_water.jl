@@ -226,13 +226,22 @@ function update_frac_h2osfc!(water::WaterData,
     nc_size = length(wsb.ws.h2osfc_col)
     FT = eltype(wsb.ws.h2osfc_col)
     qflx_too_small = fill!(similar(wsb.ws.h2osfc_col, FT, nc_size), zero(FT))  # device-resident scratch
-    # h2osno_total is only read (for masked cols) inside bulkdiag_frac_h2osfc!, where
-    # it equals h2osno_no_layers_col — pass that directly (byte-identical, no scratch).
+
+    # Fortran BulkDiag_FracH2oSfc gates its snow-cover clamp on h2osno_total > 0,
+    # where h2osno_total is the TOTAL snow water (CalculateTotalH2osno: unresolved
+    # h2osno_no_layers + all explicit snow-layer ice+liq). Passing only
+    # h2osno_no_layers_col was wrong: once a layered snowpack forms it is ~0, so the
+    # clamp silently skipped the entire melt season and frac_h2osfc stayed at the
+    # unclamped micro_sigma value → cold-site FH2OSFC/QINFL over-prediction
+    # (Krycklan/Abisko/Iceland). Compute the true total to match Fortran.
+    h2osno_total = fill!(similar(wsb.ws.h2osfc_col, FT, nc_size), zero(FT))  # device-resident scratch
+    waterstate_calculate_total_h2osno!(wsb.ws, mask_soilc, bounds_col,
+                                       col_data.snl, h2osno_total)
 
     # Compute submerged fractions
     bulkdiag_frac_h2osfc!(mask_soilc, bounds_col, dtime,
                           col_data.micro_sigma,
-                          wsb.ws.h2osno_no_layers_col,
+                          h2osno_total,
                           wsb.ws.h2osfc_col,
                           wdb.frac_sno_col,
                           wdb.frac_sno_eff_col,

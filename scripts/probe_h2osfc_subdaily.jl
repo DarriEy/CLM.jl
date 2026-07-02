@@ -66,6 +66,9 @@ function probe(inst, tm)
         date   = tm.current_date,
         h2osfc = getc(ws.h2osfc_col),
         frac   = getc(wd.frac_h2osfc_col),
+        frac_nosnow = getc(wd.frac_h2osfc_nosnow_col),   # pre-snow-clamp frac
+        frac_sno = getc(wd.frac_sno_col),                # snow cover fraction
+        snowdp = getc(wd.snow_depth_col),                # snow depth (m; >0 => snow present)
         q_in   = getc(wfb.qflx_top_soil_to_h2osfc_col),  # input to h2osfc (mm/s)
         q_drain= getc(wfb.qflx_h2osfc_drain_col),        # h2osfc -> soil (mm/s)
         q_spill= getc(wfb.qflx_h2osfc_surf_col),         # h2osfc -> runoff (mm/s)
@@ -91,10 +94,11 @@ run_clm!(;
 
 csv = joinpath(outdir, "probe_h2osfc_$(lowercase(DOM)).csv")
 open(csv, "w") do io
-    println(io, "date,h2osfc,frac,q_in,q_drain,q_spill,q_melt,q_infl")
+    println(io, "date,h2osfc,frac,frac_nosnow,frac_sno,snowdp,q_in,q_drain,q_spill,q_melt,q_infl")
     for r in recs
-        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
-            r.date, r.h2osfc, r.frac, r.q_in, r.q_drain, r.q_spill, r.q_melt, r.q_infl)
+        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+            r.date, r.h2osfc, r.frac, r.frac_nosnow, r.frac_sno, r.snowdp,
+            r.q_in, r.q_drain, r.q_spill, r.q_melt, r.q_infl)
     end
 end
 @printf("Done %s in %.1fs -> %s (%d steps)\n", DOM, time() - t0, csv, length(recs))
