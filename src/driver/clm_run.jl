@@ -81,6 +81,11 @@ function clm_run!(;
         inst.overrides = overrides
     end
 
+    # Light inhibition of leaf respiration is on by default in CLM5 (namelist
+    # light_inhibit=.true. for the clm5 physics; the reference lnd_in sets it too).
+    # The Julia PhotosynsData field defaults to false, so enable it here to match.
+    inst.photosyns.light_inhibit = true
+
     config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer,
                              use_luna=use_luna, use_hydrstress=use_hydrstress)
 
