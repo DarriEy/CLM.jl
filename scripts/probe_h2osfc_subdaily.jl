@@ -129,6 +129,17 @@ function probe(inst, tm)
         gsmolsha = getpz1(ps.gs_mol_sha_patch),
         vcxcsun = getp(alb.vcmaxcintsun_patch),
         vcxcsha = getp(alb.vcmaxcintsha_patch),
+        cisha = getpz1(ps.cisha_z_patch),    # shaded intercellular CO2 (Pa)
+        ansha = getpz1(ps.an_sha_patch),     # shaded net assimilation (umol/m2/s)
+        cisun = getpz1(ps.cisun_z_patch),
+        ansun = getpz1(ps.an_sun_patch),
+        lmrsha = getpz1(ps.lmrsha_z_patch),  # shaded leaf dark respiration
+        lmrsun = getpz1(ps.lmrsun_z_patch),
+        vcmx25z = getpz1(ps.vcmx25_z_patch),  # base LUNA vcmax25 (feeds lmr25)
+        jmx25z = getpz1(ps.jmx25_z_patch),
+        tlaiz1 = getpz1(alb.tlai_z_patch),    # per-layer-1 tlai increment (feeds lmr reduction!)
+        nrad = getp(alb.nrad_patch),          # # radiative canopy layers
+        tlaiz = getp(cs.tlai_patch),          # total LAI
     ))
 end
 
@@ -149,13 +160,14 @@ run_clm!(;
 
 csv = joinpath(outdir, "probe_h2osfc_$(lowercase(DOM)).csv")
 open(csv, "w") do io
-    println(io, "date,h2osfc,frac,frac_nosnow,frac_sno,frac_sno_eff,h2osno,snl,snowdp,q_in,q_drain,q_spill,q_melt,q_infl,uaf,qaf,rb,rssun,rssha,fdry,laisun,laisha,elai,esai,qtran,parsun,parsha,psnsun,psnsha,gsmolsun,gsmolsha,vcxcsun,vcxcsha")
+    println(io, "date,h2osfc,frac,frac_nosnow,frac_sno,frac_sno_eff,h2osno,snl,snowdp,q_in,q_drain,q_spill,q_melt,q_infl,uaf,qaf,rb,rssun,rssha,fdry,laisun,laisha,elai,esai,qtran,parsun,parsha,psnsun,psnsha,gsmolsun,gsmolsha,vcxcsun,vcxcsha,cisha,ansha,cisun,ansun,lmrsha,lmrsun,vcmx25z,jmx25z,tlaiz1,nrad,tlaiz")
     for r in recs
-        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
             r.date, r.h2osfc, r.frac, r.frac_nosnow, r.frac_sno, r.frac_sno_eff, r.h2osno, r.snl, r.snowdp,
             r.q_in, r.q_drain, r.q_spill, r.q_melt, r.q_infl,
             r.uaf, r.qaf, r.rb, r.rssun, r.rssha, r.fdry, r.laisun, r.laisha, r.elai, r.esai, r.qtran,
-            r.parsun, r.parsha, r.psnsun, r.psnsha, r.gsmolsun, r.gsmolsha, r.vcxcsun, r.vcxcsha)
+            r.parsun, r.parsha, r.psnsun, r.psnsha, r.gsmolsun, r.gsmolsha, r.vcxcsun, r.vcxcsha,
+            r.cisha, r.ansha, r.cisun, r.ansun, r.lmrsha, r.lmrsun, r.vcmx25z, r.jmx25z, r.tlaiz1, r.nrad, r.tlaiz)
     end
 end
 @printf("Done %s in %.1fs -> %s (%d steps)\n", DOM, time() - t0, csv, length(recs))
