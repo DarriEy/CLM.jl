@@ -46,12 +46,14 @@ EXT_VARS = [
     # surface water / perched water table
     ('H2OSFC', ['H2OSFC'], 2.0), ('FH2OSFC', ['FH2OSFC'], 0.02),
     ('QH2OSFC', ['QH2OSFC'], 2e-6), ('ZWT_PERCH', ['ZWT_PERCH'], 0.2),
-    # near-surface turbulence / momentum. (TAUX/TAUY wind-stress VECTOR components
-    # are omitted: the offline scalar-wind forcing does not uniquely define the u/v
-    # split, so the components are a forcing-convention artifact — Julia loads all
-    # stress on one axis (TAUY==0) while Fortran splits it. Near-surface momentum is
-    # validated via U10, which matches to 0.0%.)
+    # near-surface turbulence / momentum. TAUX/TAUY wind-stress components now match:
+    # the CLMNCEP datm splits the scalar forcing wind equally (Sa_u=Sa_v=wind/sqrt2,
+    # datm_datamode_clmncep_mod.F90:435), and forcing_reader.jl now does the same
+    # (was u=wind,v=0 → all stress on taux ×sqrt2, tauy==0). Wind SPEED is unchanged
+    # so no physics moved; only the diagnostic u/v split. taux/tauy now agree to <1%.
     ('U10', ['U10'], 0.3), ('Q2M', ['Q2M'], 3e-4), ('RH2M', ['RH2M'], 2.0),
+    ('TAUX', ['TAUX'], 0.01), ('TAUY', ['TAUY'], 0.01),
+    ('FSAT', ['FSAT'], 0.02),
     # canopy structure + transpiration/canopy-evap fluxes
     ('TSAI', ['TSAI'], 0.05), ('ELAI', ['ELAI'], 0.1),
     ('LAISUN', ['LAISUN'], 0.1), ('LAISHA', ['LAISHA'], 0.1),

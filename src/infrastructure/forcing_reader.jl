@@ -341,8 +341,14 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     wind = _read_var("WIND", 3.0)
     for g in 1:ng
         a2l.forc_wind_grc[g] = wind[g]
-        a2l.forc_u_grc[g] = wind[g]
-        a2l.forc_v_grc[g] = 0.0
+        # Decompose the scalar forcing wind speed equally into east/north
+        # components, matching the CLMNCEP datm (datm_datamode_clmncep_mod.F90:435
+        # Sa_u = strm_wind/sqrt(2); Sa_v = Sa_u). The wind SPEED sqrt(u²+v²)=wind
+        # is unchanged (so aerodynamics/physics are identical), but the taux/tauy
+        # momentum-flux diagnostics need this split — the old u=wind,v=0 put all
+        # stress in taux (×sqrt(2) too large) and left tauy=0.
+        a2l.forc_u_grc[g] = wind[g] / sqrt(2.0)
+        a2l.forc_v_grc[g] = wind[g] / sqrt(2.0)
     end
 
     # Longwave radiation [W/m2]
