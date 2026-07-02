@@ -54,6 +54,16 @@ function readParameters!(paramfile::String)
         haskey(ds, "eta0_vionnet") && (snowhydrology_params.eta0_vionnet = Float64(ds["eta0_vionnet"][1]))
         haskey(ds, "eta0_anderson") && (snowhydrology_params.eta0_anderson = Float64(ds["eta0_anderson"][1]))
         haskey(ds, "wind_snowcompact_fact") && (snowhydrology_params.wind_snowcompact_fact = Float64(ds["wind_snowcompact_fact"][1]))
+        # van Kampenhout wind-drift compaction params (Fortran reads drift_gs/rho_max/
+        # tau_ref via readNcdioScalar in SnowHydrology_readnl). drift_gs in particular
+        # ships 0.00035 in the clm5 file but the struct default is 0.35 — a 1000× error.
+        # It enters the drift mobility as −0.583·drift_gs, so the too-large default
+        # suppresses wind-drift compaction; windy fresh snow (e.g. Baltimore) then stays
+        # fluffy far too long → the pack sits below the 50 kg/m³ CombineSnowLayers
+        # persistence threshold and snow_depth runs deep.
+        haskey(ds, "drift_gs") && (snowhydrology_params.drift_gs = Float64(ds["drift_gs"][1]))
+        haskey(ds, "rho_max") && (snowhydrology_params.rho_max = Float64(ds["rho_max"][1]))
+        haskey(ds, "tau_ref") && (snowhydrology_params.tau_ref = Float64(ds["tau_ref"][1]))
         haskey(ds, "SNO_Z0MV") && nothing  # read in clm_run! → inst.frictionvel.zsno
         haskey(ds, "snw_aging_bst") && nothing  # TODO: wire to snow aging routine
 
