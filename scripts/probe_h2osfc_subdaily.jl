@@ -29,6 +29,10 @@ const DOMAINS = Dict(
         caldir  = "$DATA/domain_Arctic_Abisko_Sweden/settings/CLM/parameters",
         forcing = "$DATA/domain_Arctic_Abisko_Sweden/data/forcing/CLM_input/clmforc.2013.nc",
         restart = "$DATA/domain_Arctic_Abisko_Sweden/simulations/clm_arctic/CLM/Arctic_Abisko_Sweden.clm2.r.2013-01-01-00000.nc"),
+    "Baltimore" => (year = 2013, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Urban_DeadRun_Baltimore/settings/CLM/parameters",
+        forcing = "$DATA/domain_Urban_DeadRun_Baltimore/data/forcing/CLM_input/clmforc.2013.nc",
+        restart = "$DATA/domain_Urban_DeadRun_Baltimore/simulations/clm_urban/CLM/Urban_DeadRun_Baltimore.clm2.r.2013-01-01-00000.nc"),
 )
 
 const DOM = get(ENV, "DOMAIN", "Krycklan")
@@ -48,6 +52,7 @@ CLM.snow_hydrology_set_control_for_testing!(;
 # Per-timestep records for the (first) soil column.
 recs = NamedTuple[]
 csoil = Ref(0)
+pveg  = Ref(0)   # dominant vegetated patch (max wtgcell, itype != noveg)
 
 function probe(inst, tm)
     # Locate a soil column once (istsoil landunit).
@@ -62,18 +67,68 @@ function probe(inst, tm)
     wfb = inst.water.waterfluxbulk_inst
     wf  = wfb.wf
     getc(a) = (c <= length(a) ? Float64(a[c]) : NaN)
+    # total snow water = unresolved + explicit layer ice+liq
+    nsno = CLM.varpar.nlevsno
+    h2osno_t = getc(ws.h2osno_no_layers_col)
+    if c <= size(ws.h2osoi_ice_col, 1)
+        for j in 1:nsno
+            vi = ws.h2osoi_ice_col[c, j]; vl = ws.h2osoi_liq_col[c, j]
+            isfinite(vi) && (h2osno_t += vi); isfinite(vl) && (h2osno_t += vl)
+        end
+    end
+    snlc = c <= length(inst.column.snl) ? Int(inst.column.snl[c]) : 0
+    # Locate dominant vegetated patch once (max wtgcell among itype != noveg=0).
+    if pveg[] == 0
+        want_it = parse(Int, get(ENV, "PVEG_ITYPE", "0"))  # 0 => max-wtgcell veg patch
+        best = 0.0
+        for pp in eachindex(inst.patch.itype)
+            it = inst.patch.itype[pp]
+            ok = want_it == 0 ? (it != 0) : (it == want_it)
+            if ok && inst.patch.wtgcell[pp] > best
+                best = inst.patch.wtgcell[pp]; pveg[] = pp
+            end
+        end
+        pveg[] == 0 && (pveg[] = 1)
+    end
+    pv = pveg[]
+    fv = inst.frictionvel; ps = inst.photosyns; cs = inst.canopystate; sa = inst.solarabs; alb = inst.surfalb
+    getp(a) = (pv <= length(a) ? Float64(a[pv]) : NaN)
+    getpz1(a) = (size(a,1) >= pv && size(a,2) >= 1 ? Float64(a[pv,1]) : NaN)  # canopy layer 1
     push!(recs, (
         date   = tm.current_date,
         h2osfc = getc(ws.h2osfc_col),
         frac   = getc(wd.frac_h2osfc_col),
         frac_nosnow = getc(wd.frac_h2osfc_nosnow_col),   # pre-snow-clamp frac
         frac_sno = getc(wd.frac_sno_col),                # snow cover fraction
+        frac_sno_eff = getc(wd.frac_sno_eff_col),        # effective snow cover fraction
+        h2osno = h2osno_t,                               # total SWE (mm)
+        snl = Float64(snlc),                             # # snow layers (negative)
         snowdp = getc(wd.snow_depth_col),                # snow depth (m; >0 => snow present)
         q_in   = getc(wfb.qflx_top_soil_to_h2osfc_col),  # input to h2osfc (mm/s)
         q_drain= getc(wfb.qflx_h2osfc_drain_col),        # h2osfc -> soil (mm/s)
         q_spill= getc(wfb.qflx_h2osfc_surf_col),         # h2osfc -> runoff (mm/s)
         q_melt = getc(wf.qflx_snomelt_col),              # snowmelt (mm/s)
         q_infl = getc(wf.qflx_infl_col),                 # total infiltration (mm/s)
+        # --- dominant veg-patch canopy internals (FCTR chase) ---
+        uaf   = getp(fv.uaf_patch),
+        qaf   = getp(fv.qaf_patch),
+        rb    = getp(fv.rb1_patch),
+        rssun = getp(ps.rssun_patch),
+        rssha = getp(ps.rssha_patch),
+        fdry  = getp(wd.fdry_patch),
+        laisun= getp(cs.laisun_patch),
+        laisha= getp(cs.laisha_patch),
+        elai  = getp(cs.elai_patch),
+        esai  = getp(cs.esai_patch),
+        qtran = getp(wf.qflx_tran_veg_patch),
+        parsun = getpz1(sa.parsun_z_patch),   # absorbed PAR per sunlit leaf area (W/m2)
+        parsha = getpz1(sa.parsha_z_patch),   # absorbed PAR per shaded leaf area
+        psnsun = getp(ps.psnsun_patch),
+        psnsha = getp(ps.psnsha_patch),
+        gsmolsun = getpz1(ps.gs_mol_sun_patch),
+        gsmolsha = getpz1(ps.gs_mol_sha_patch),
+        vcxcsun = getp(alb.vcmaxcintsun_patch),
+        vcxcsha = getp(alb.vcmaxcintsha_patch),
     ))
 end
 
@@ -94,11 +149,13 @@ run_clm!(;
 
 csv = joinpath(outdir, "probe_h2osfc_$(lowercase(DOM)).csv")
 open(csv, "w") do io
-    println(io, "date,h2osfc,frac,frac_nosnow,frac_sno,snowdp,q_in,q_drain,q_spill,q_melt,q_infl")
+    println(io, "date,h2osfc,frac,frac_nosnow,frac_sno,frac_sno_eff,h2osno,snl,snowdp,q_in,q_drain,q_spill,q_melt,q_infl,uaf,qaf,rb,rssun,rssha,fdry,laisun,laisha,elai,esai,qtran,parsun,parsha,psnsun,psnsha,gsmolsun,gsmolsha,vcxcsun,vcxcsha")
     for r in recs
-        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
-            r.date, r.h2osfc, r.frac, r.frac_nosnow, r.frac_sno, r.snowdp,
-            r.q_in, r.q_drain, r.q_spill, r.q_melt, r.q_infl)
+        @printf(io, "%s,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n",
+            r.date, r.h2osfc, r.frac, r.frac_nosnow, r.frac_sno, r.frac_sno_eff, r.h2osno, r.snl, r.snowdp,
+            r.q_in, r.q_drain, r.q_spill, r.q_melt, r.q_infl,
+            r.uaf, r.qaf, r.rb, r.rssun, r.rssha, r.fdry, r.laisun, r.laisha, r.elai, r.esai, r.qtran,
+            r.parsun, r.parsha, r.psnsun, r.psnsha, r.gsmolsun, r.gsmolsha, r.vcxcsun, r.vcxcsha)
     end
 end
 @printf("Done %s in %.1fs -> %s (%d steps)\n", DOM, time() - t0, csv, length(recs))
