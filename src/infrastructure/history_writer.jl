@@ -307,6 +307,36 @@ function default_hist_fields()
         HistFieldDef("ENDWB", "column water mass (end of step)", "mm", "column",
             inst -> isempty(inst.water.waterbalancebulk_inst.endwb_col) ? Float64[] :
                     Float64.(inst.water.waterbalancebulk_inst.endwb_col)),
+        # --- Further broadened set (2026-07-03): process-split diagnostics. Levels
+        #     and bare-patch handling chosen to reproduce the Fortran h0 aggregation
+        #     (patch vars renormalize over finite patches → veg-weighted when bare is
+        #     NaN, whole-gridcell when bare is a real 0), verified vs Fortran. ---
+        # Sensible-heat partition: veg vs ground (sum = FSH). Bare patches carry a
+        # real eflx_sh_grnd but no eflx_sh_veg; Fortran FSH_V/FSH_G are 'unity'-scaled
+        # (whole gridcell), so contribute finite values including bare.
+        HistFieldDef("FSH_V", "sensible heat from vegetation", "W/m2", "patch",
+            inst -> isempty(inst.energyflux.eflx_sh_veg_patch) ? Float64[] :
+                    Float64.(inst.energyflux.eflx_sh_veg_patch)),
+        HistFieldDef("FSH_G", "sensible heat from ground", "W/m2", "patch",
+            inst -> isempty(inst.energyflux.eflx_sh_grnd_patch) ? Float64[] :
+                    Float64.(inst.energyflux.eflx_sh_grnd_patch)),
+        # Exposed stem area index (complements ELAI; bare = real 0).
+        HistFieldDef("ESAI", "exposed one-sided stem area index", "m2/m2", "patch",
+            inst -> isempty(inst.canopystate.esai_patch) ? Float64[] :
+                    Float64.(inst.canopystate.esai_patch)),
+        # Canopy interception of precipitation (bare = 0).
+        HistFieldDef("QINTR", "interception", "mm/s", "patch",
+            inst -> isempty(inst.water.waterdiagnosticbulk_inst.qflx_prec_intr_patch) ? Float64[] :
+                    Float64.(inst.water.waterdiagnosticbulk_inst.qflx_prec_intr_patch)),
+        # Shortwave penetrating the top soil/snow layer.
+        HistFieldDef("SABG_PEN", "SW penetrating top soil/snow layer", "W/m2", "patch",
+            inst -> isempty(inst.solarabs.sabg_pen_patch) ? Float64[] :
+                    Float64.(inst.solarabs.sabg_pen_patch)),
+        # Snow-pack liquid and ice content (summed over active snow layers).
+        HistFieldDef("SNOWLIQ", "snow liquid water", "kg/m2", "column",
+            history_snowliq_col),
+        HistFieldDef("SNOWICE", "snow ice content", "kg/m2", "column",
+            history_snowice_col),
     ]
 end
 
@@ -473,6 +503,31 @@ function history_totsoilliq_col(inst::CLMInstances)
     end
     return out
 end
+
+# Snow-pack liquid / ice content (kg/m2), summed over the ACTIVE snow layers only.
+# Snow layers occupy the first nlevsno slots; for column c the active layers are
+# (nlevsno + snl[c] + 1):nlevsno with snl[c] the (negative) snow-layer count. Matches
+# Fortran SNOWLIQ/SNOWICE (sum of h2osoi_liq/ice over snl+1:0).
+function _history_snow_water_col(arr, snl)
+    isempty(arr) && return Float64[]
+    nc = size(arr, 1)
+    nsno = varpar.nlevsno
+    out = zeros(nc)
+    @inbounds for c in 1:nc
+        s = 0.0
+        for j in (nsno + snl[c] + 1):nsno
+            (j >= 1 && j <= nsno) || continue
+            v = arr[c, j]
+            isfinite(v) && (s += v)
+        end
+        out[c] = s
+    end
+    return out
+end
+history_snowliq_col(inst::CLMInstances) =
+    _history_snow_water_col(inst.water.waterstatebulk_inst.ws.h2osoi_liq_col, inst.column.snl)
+history_snowice_col(inst::CLMInstances) =
+    _history_snow_water_col(inst.water.waterstatebulk_inst.ws.h2osoi_ice_col, inst.column.snl)
 
 """
     history_tsoi_colmean(inst) -> Vector{Float64}
