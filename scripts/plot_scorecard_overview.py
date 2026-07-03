@@ -25,6 +25,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "paper", "data")
 DOMAINS = [
     ("Bow",        f"{_D}/clm_parity_run/Bow_at_Banff_lumped.clm2.h0.2003-01-01-00000.nc", "julia_clm_bow_phs_2003.nc", "Bow at Banff", "Alpine (Canada)"),
     ("Stillwater", f"{_D}/domain_Stillwater_Oklahoma/optimization/CLM/dds_clm_dds_calibration/final_evaluation/Stillwater_Oklahoma.clm2.h0.2003-01-01-00000.nc", "julia_clm_stillwater_phs_2003.nc", "Stillwater", "Semi-arid prairie (USA)"),
+    ("Desert",     f"{_D}/domain_Desert_WalnutGulch_USA/simulations/clm_desert/CLM/Desert_WalnutGulch_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_desert_phs_2017.nc", "Walnut Gulch", "Hot desert (USA)"),
     ("Aripuana",   f"{_D}/domain_Aripuana_Amazon/simulations/clm_validation/CLM/Aripuana_Amazon.clm2.h0.2004-01-01-00000.nc", "julia_clm_aripuana_phs_2004.nc", "Aripuanã", "Tropical rainforest (Brazil)"),
     ("HubbardBrook", f"{_D}/domain_Temperate_HubbardBrook_USA/simulations/clm_tempforest/CLM/Temperate_HubbardBrook_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_hubbardbrook_phs_2017.nc", "Hubbard Brook", "Temperate deciduous forest (USA)"),
     ("Maritime",   f"{_D}/domain_Maritime_HJAndrews_USA/simulations/clm_maritime/CLM/Maritime_HJAndrews_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_maritime_phs_2017.nc", "HJ Andrews", "Maritime conifer (USA)"),

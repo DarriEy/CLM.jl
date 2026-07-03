@@ -32,8 +32,8 @@ series are compared variable-by-variable.
 
 ![Multi-biome parity scorecard — CLM.jl vs Fortran CLM5](scripts/parity_scorecard.png)
 
-Current standing: **560 of 561** biome × variable combinations agree within
-**10 % relative** (or **0.5 K** for temperatures), across **11 biomes** and
+Current standing: **611 of 612** biome × variable combinations agree within
+**10 % relative** (or **0.5 K** for temperatures), across **12 biomes** and
 **51 output variables** (energy, water, snow, state, carbon). Most agree to under
 1 %; the residuals that remain are small (e.g. the density of thin, warm,
 transient snow at the urban Baltimore site — the one cell outside tolerance).
@@ -56,10 +56,10 @@ accumulation and melt cycle:
   Whole subsystems (notably biogeochemistry) are not exercised by this suite.
 
 Biomes covered so far: alpine (Bow at Banff), semi-arid prairie (Stillwater),
-tropical rainforest (Aripuanã), temperate deciduous forest (Hubbard Brook),
-Pacific maritime conifer (HJ Andrews), boreal forest (Krycklan), Mediterranean
-(Tagus), arctic tundra (Abisko), alpine glacier (Massa Aletsch), urban
-(Baltimore), and glacier outwash (Iceland) — with more (hot desert, tropical
+hot desert (Walnut Gulch), tropical rainforest (Aripuanã), temperate deciduous
+forest (Hubbard Brook), Pacific maritime conifer (HJ Andrews), boreal forest
+(Krycklan), Mediterranean (Tagus), arctic tundra (Abisko), alpine glacier (Massa
+Aletsch), urban (Baltimore), and glacier outwash (Iceland) — with more (tropical
 savanna) in progress. The
 suite (`scripts/parity_run_domain.jl` + scorecard) is expanded as references are
 generated, so these numbers are a snapshot, not a final result. See also [the
