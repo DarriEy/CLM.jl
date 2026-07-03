@@ -79,6 +79,15 @@ const DOMAINS = Dict(
         forcing = "$DATA/domain_Urban_DeadRun_Baltimore/data/forcing/CLM_input/clmforc.2013.nc",
         restart = "$DATA/domain_Urban_DeadRun_Baltimore/simulations/clm_urban/CLM/Urban_DeadRun_Baltimore.clm2.r.2013-01-01-00000.nc",
         h0      = "$DATA/domain_Urban_DeadRun_Baltimore/simulations/clm_urban/CLM/Urban_DeadRun_Baltimore.clm2.h0.2012-12-30-00000.nc"),
+    # ---- New-biome expansion (2026-07-03): fresh SYMFLUENCE references generated
+    # from scratch (define_domain → ERA5 forcing → surfdata → run_model via lldb
+    # to bypass the ad-hoc-codesign SIGTRAP). Spinup 2014-2016 (HubbardBrook) or
+    # Jul-Dec 2016 (others) → parity year 2017 in the .h0.2016-12-31 file.
+    "HubbardBrook" => (year = 2017, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
+        caldir  = "$DATA/domain_Temperate_HubbardBrook_USA/settings/CLM/parameters",
+        forcing = "$DATA/domain_Temperate_HubbardBrook_USA/data/forcing/CLM_input/clmforc.2017.nc",
+        restart = "$DATA/domain_Temperate_HubbardBrook_USA/simulations/clm_tempforest/CLM/Temperate_HubbardBrook_USA.clm2.r.2017-01-01-00000.nc",
+        h0      = "$DATA/domain_Temperate_HubbardBrook_USA/simulations/clm_tempforest/CLM/Temperate_HubbardBrook_USA.clm2.h0.2016-12-31-00000.nc"),
     "Iceland" => (year = 2017, dtime = 3600, baseflow = 0.001, int_snow = 2000.0,
         caldir  = "$DATA/domain_Iceland_Jokulsa_Fjollum/settings/CLM/parameters",
         forcing = "$DATA/domain_Iceland_Jokulsa_Fjollum/data/forcing/CLM_input/clmforc.2017.nc",
