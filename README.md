@@ -16,27 +16,46 @@ CLM.jl reproduces the full CLM5 biogeophysics in pure Julia, enabling **automati
 >
 > **Implications you must take seriously:**
 > - 🧪 **It is a research artifact, not production software.** Do not use it for science, operations, or decisions you care about without independent verification.
-> - 🔍 **Validation is partial.** The numbers below are real, but they cover a narrow slice (one site, SP mode, selected variables). Whole subsystems are implemented but unvalidated, and "tests pass" means the agents' own tests pass.
+> - 🔍 **Validation is partial.** The numbers below are real, but they cover a limited slice (single-point sites, one year each, selected variables, biogeophysics only). Whole subsystems are implemented but unvalidated, and "tests pass" means the agents' own tests pass.
 > - 🐛 **Expect latent bugs.** Plausible-looking code that no human has reviewed can be subtly or badly wrong in ways tests don't catch. Treat every result as suspect until you've checked it yourself.
 > - 📝 **Provenance is unusual.** Much of the design rationale lives in agent logs and commit history rather than in a human's head.
 >
 > **Use entirely at your own risk.** No warranty, no guarantees of correctness, fitness, or scientific validity. If you build on this, verify everything.
 
-## Validation Against Fortran CLM5
+## Validation Against Fortran CLM5 *(ongoing)*
 
-CLM.jl has been validated in SP mode against Fortran CLM5 (CTSM release-clm5.0) for a full-year simulation at the Bow at Banff site (51.2°N, 115.6°W, 2003, restart-initialized from a 2002 cold-start spinup). The figure below shows 7-day running averages for 12 key output variables:
+CLM.jl is being checked against Fortran CLM5 (CTSM) across a growing suite of
+single-point sites chosen to span distinct biomes. Each site runs a full year in
+**PHS + LUNA** mode (plant hydraulic stress + photosynthetic acclimation),
+initialized from a Fortran-generated spun-up restart, and the two daily history
+series are compared variable-by-variable.
 
-![CLM.jl vs Fortran CLM5 — Bow at Banff 2003 (restart init, 7-day avg)](scripts/comparison.png)
+![Multi-biome parity scorecard — CLM.jl vs Fortran CLM5](scripts/parity_scorecard.png)
 
-| Variable | Mean Bias | RMSE | Correlation |
-|---|---|---|---|
-| 2-m Air Temperature | +0.01 K | 0.15 K | 0.999 |
-| Absorbed Solar Radiation | +0.5% | 1.2 W/m² | 0.999 |
-| Latent Heat Flux | +3% | 1.8 W/m² | 0.98 |
-| Canopy Transpiration | +12% | 2.4 W/m² | 0.97 |
-| Sensible Heat, Ground Temp, Snow, Runoff | < 5% | — | > 0.98 |
+Current standing: **509 of 510** biome × variable combinations agree within
+**10 % relative** (or **0.5 K** for temperatures), across **10 biomes** and
+**51 output variables** (energy, water, snow, state, carbon). Most agree to under
+1 %; the residuals that remain are small (e.g. the density of thin, warm,
+transient snow at the urban Baltimore site — the one cell outside tolerance).
 
-> **Scope of validation:** these results are for a *single site, single year, SP (satellite-phenology) mode*, against one CTSM release. They are genuinely encouraging but they do **not** establish correctness across sites, configurations, or the biogeochemistry subsystems. See [the warning above](#️-read-this-first-an-agentic-engineering-experiment).
+- This is agreement within 10 % (0.5 K for temperatures), **not bit-for-bit or
+  machine-precision parity.** True numerical parity is a separate, harder goal
+  and is not claimed here.
+- These numbers are a **snapshot of ongoing work.** Several recent fixes were
+  found by widening this comparison — a CO₂ partial-pressure bug, a wind-stress
+  decomposition bug, a 1000× snow-compaction parameter — and more bugs likely
+  remain.
+- Each site is **one year, one configuration, a selected set of variables.**
+  Whole subsystems (notably biogeochemistry) are not exercised by this suite.
+
+Biomes covered so far: alpine (Bow at Banff), semi-arid prairie (Stillwater),
+tropical rainforest (Aripuanã), temperate deciduous forest (Hubbard Brook),
+boreal forest (Krycklan), Mediterranean (Tagus), arctic tundra (Abisko), alpine
+glacier (Massa Aletsch), urban (Baltimore), and glacier outwash (Iceland) — with
+more (Pacific maritime conifer, hot desert, tropical savanna) in progress. The
+suite (`scripts/parity_run_domain.jl` + scorecard) is expanded as references are
+generated, so these numbers are a snapshot, not a final result. See also [the
+warning above](#️-read-this-first-an-agentic-engineering-experiment).
 
 ## Features
 
