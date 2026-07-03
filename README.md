@@ -38,6 +38,13 @@ Current standing: **560 of 561** biome × variable combinations agree within
 1 %; the residuals that remain are small (e.g. the density of thin, warm,
 transient snow at the urban Baltimore site — the one cell outside tolerance).
 
+The heatmap collapses each variable to a single annual-mean error. To show what
+the agreement looks like day-by-day, here is one site's full-year daily series —
+Bow at Banff (alpine), with Fortran and CLM.jl overlaid across the snow
+accumulation and melt cycle:
+
+![Daily timeseries, CLM.jl vs Fortran CLM5 — Bow at Banff](scripts/parity_timeseries.png)
+
 - This is agreement within 10 % (0.5 K for temperatures), **not bit-for-bit or
   machine-precision parity.** True numerical parity is a separate, harder goal
   and is not claimed here.
