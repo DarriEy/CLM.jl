@@ -27,6 +27,7 @@ DOMAINS = [
     ("Stillwater", f"{_D}/domain_Stillwater_Oklahoma/optimization/CLM/dds_clm_dds_calibration/final_evaluation/Stillwater_Oklahoma.clm2.h0.2003-01-01-00000.nc", "julia_clm_stillwater_phs_2003.nc", "Stillwater", "Semi-arid prairie (USA)"),
     ("Desert",     f"{_D}/domain_Desert_WalnutGulch_USA/simulations/clm_desert/CLM/Desert_WalnutGulch_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_desert_phs_2017.nc", "Walnut Gulch", "Hot desert (USA)"),
     ("Aripuana",   f"{_D}/domain_Aripuana_Amazon/simulations/clm_validation/CLM/Aripuana_Amazon.clm2.h0.2004-01-01-00000.nc", "julia_clm_aripuana_phs_2004.nc", "Aripuanã", "Tropical rainforest (Brazil)"),
+    ("Savanna",    f"{_D}/domain_Savanna_Donga_Benin/simulations/clm_savanna/CLM/Savanna_Donga_Benin.clm2.h0.2016-12-31-00000.nc", "julia_clm_savanna_phs_2017.nc", "Donga", "Tropical savanna (Benin)"),
     ("HubbardBrook", f"{_D}/domain_Temperate_HubbardBrook_USA/simulations/clm_tempforest/CLM/Temperate_HubbardBrook_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_hubbardbrook_phs_2017.nc", "Hubbard Brook", "Temperate deciduous forest (USA)"),
     ("Maritime",   f"{_D}/domain_Maritime_HJAndrews_USA/simulations/clm_maritime/CLM/Maritime_HJAndrews_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_maritime_phs_2017.nc", "HJ Andrews", "Maritime conifer (USA)"),
     ("Krycklan",   f"{_D}/domain_Boreal_Krycklan_Sweden/simulations/clm_boreal/CLM/Boreal_Krycklan_Sweden.clm2.h0.2012-12-30-00000.nc", "julia_clm_krycklan_phs_2013.nc", "Krycklan", "Boreal forest (Sweden)"),
