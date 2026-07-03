@@ -66,10 +66,16 @@ VARS = [
     ("TSAI","TSAI","Stem area idx","State",0.02),("TLAI","TLAI","Total LAI","State",0.02),
     ("LAISUN","LAISUN","Sunlit LAI","State",0.02),("LAISHA","LAISHA","Shaded LAI","State",0.02),
     ("SOILRESIS","SOILRESIS","Soil resist","State",5.0),
+    ("FSRVI","FSRVI","Refl vis-dif","Energy",0.1),("FSRND","FSRND","Refl nir-dir","Energy",0.1),
+    ("FSDSVD","FSDSVD","Inc vis-dir","Energy",0.1),("FSDSVI","FSDSVI","Inc vis-dif","Energy",0.1),
+    ("FSDSND","FSDSND","Inc nir-dir","Energy",0.1),("FSDSNI","FSDSNI","Inc nir-dif","Energy",0.1),
+    ("QFLX_INFL","QINFL","Infiltration","Water",0.02),("QH2OSFC","QH2OSFC","Sfc water flux","Water",0.02),
+    ("ZWT_PERCH","ZWT_PERCH","Perched WT","State",0.001),("DSL","DSL","Dry surf layer","State",0.05),
     ("FPSN","FPSN","Photosynthesis","Carbon",0.05),
 ]
 SCALE = {"QRUNOFF":86400,"QOVER":86400,"QFLX_DRAIN":86400,"QFLX_EVAP_TOT":86400,"QSOIL":86400,
-         "QVEGT":86400,"QVEGE":86400,"QFLX_SNOMELT":86400,"RAIN":86400,"SNOW":86400}
+         "QVEGT":86400,"QVEGE":86400,"QFLX_SNOMELT":86400,"RAIN":86400,"SNOW":86400,
+         "QFLX_INFL":86400,"QH2OSFC":86400}
 
 def date_ord(ds):
     t = ds["time"]; dts = cftime.num2date(t[:], t.units, getattr(t,"calendar","noleap"))
