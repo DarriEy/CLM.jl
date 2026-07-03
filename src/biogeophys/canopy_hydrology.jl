@@ -840,6 +840,24 @@ canhyd_frac_wet!(fwet, fdry, fcansno, mask_soilp, frac_veg_nosno,
         convert(eltype(fwet), maximum_leaf_wetted_fraction), pstart; ndrange=np)
 
 # -----------------------------------------------------------------------
+# Total canopy water diagnostic: h2ocan = snocan + liqcan (Fortran
+# CanopyHydrologyMod stores h2ocan_patch each step; the Julia port only
+# computed it locally for fwet, leaving the persistent diagnostic at 0).
+# -----------------------------------------------------------------------
+@kernel function _canhyd_h2ocan_kernel!(h2ocan, @Const(snocan), @Const(liqcan),
+        @Const(mask), @Const(pstart))
+    i = @index(Global)
+    @inbounds begin
+        p = pstart + i - 1
+        if mask[p]
+            h2ocan[p] = snocan[p] + liqcan[p]
+        end
+    end
+end
+canhyd_update_h2ocan!(h2ocan, snocan, liqcan, mask, pstart, np) =
+    _launch!(_canhyd_h2ocan_kernel!, h2ocan, snocan, liqcan, mask, pstart; ndrange=np)
+
+# -----------------------------------------------------------------------
 # CanopyInterceptionAndThroughfall (top-level coordinator)
 # Ported from CanopyInterceptionAndThroughfall in CanopyHydrologyMod.F90
 #
@@ -979,6 +997,11 @@ function canopy_interception_and_throughfall!(
         canopystate.elai_patch, canopystate.esai_patch,
         b_ws.ws.snocan_patch, b_ws.ws.liqcan_patch,
         b_wd.fwet_patch, b_wd.fdry_patch, b_wd.fcansno_patch)
+
+    # NOTE: the total canopy water diagnostic h2ocan = snocan + liqcan is synced
+    # AFTER canopy_fluxes! (see canhyd_update_h2ocan! call in clm_driver), because
+    # canopy_fluxes applies the canopy-evaporation decrement to snocan/liqcan; the
+    # end-of-hydrology values here are pre-evaporation and would read ~15% high.
 
     return nothing
 end

@@ -32,9 +32,9 @@ series are compared variable-by-variable.
 
 ![Multi-biome parity scorecard — CLM.jl vs Fortran CLM5](scripts/parity_scorecard.png)
 
-Current standing: **882 of 884** biome × variable combinations agree within
+Current standing: **895 of 897** biome × variable combinations agree within
 **10 % relative** (or **0.5 K** for temperatures), across **13 biomes** and
-**68 output variables** (energy, water, snow, state, carbon). Most agree to under
+**69 output variables** (energy, water, snow, state, carbon). Most agree to under
 1 %; the two cells outside tolerance are both small residuals in small quantities:
 the density of thin, warm, transient snow at urban Baltimore, and the vegetation
 share of sensible heat (a ~3 W m⁻² component) on the sparse Donga savanna canopy —

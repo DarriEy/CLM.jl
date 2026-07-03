@@ -74,7 +74,7 @@ VARS = [
     ("FSH_V","FSH_V","Sens H veg","Energy",0.1),("FSH_G","FSH_G","Sens H grnd","Energy",0.1),
     ("SABG_PEN","SABG_PEN","SW penetr","Energy",0.1),("QINTR","QINTR","Interception","Water",0.02),
     ("SNOWLIQ","SNOWLIQ","Snow liquid","Snow",0.02),("SNOWICE","SNOWICE","Snow ice","Snow",0.02),
-    ("ESAI","ESAI","Exposed SAI","State",0.02),
+    ("ESAI","ESAI","Exposed SAI","State",0.02),("H2OCAN","H2OCAN","Canopy water","State",0.02),
     ("FPSN","FPSN","Photosynthesis","Carbon",0.05),
 ]
 # Keep columns grouped on the heatmap regardless of insertion order: stable-sort
