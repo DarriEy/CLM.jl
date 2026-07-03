@@ -27,6 +27,7 @@ DOMAINS = [
     ("Stillwater", f"{_D}/domain_Stillwater_Oklahoma/optimization/CLM/dds_clm_dds_calibration/final_evaluation/Stillwater_Oklahoma.clm2.h0.2003-01-01-00000.nc", "julia_clm_stillwater_phs_2003.nc", "Stillwater", "Semi-arid prairie (USA)"),
     ("Aripuana",   f"{_D}/domain_Aripuana_Amazon/simulations/clm_validation/CLM/Aripuana_Amazon.clm2.h0.2004-01-01-00000.nc", "julia_clm_aripuana_phs_2004.nc", "Aripuanã", "Tropical rainforest (Brazil)"),
     ("HubbardBrook", f"{_D}/domain_Temperate_HubbardBrook_USA/simulations/clm_tempforest/CLM/Temperate_HubbardBrook_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_hubbardbrook_phs_2017.nc", "Hubbard Brook", "Temperate deciduous forest (USA)"),
+    ("Maritime",   f"{_D}/domain_Maritime_HJAndrews_USA/simulations/clm_maritime/CLM/Maritime_HJAndrews_USA.clm2.h0.2016-12-31-00000.nc", "julia_clm_maritime_phs_2017.nc", "HJ Andrews", "Maritime conifer (USA)"),
     ("Krycklan",   f"{_D}/domain_Boreal_Krycklan_Sweden/simulations/clm_boreal/CLM/Boreal_Krycklan_Sweden.clm2.h0.2012-12-30-00000.nc", "julia_clm_krycklan_phs_2013.nc", "Krycklan", "Boreal forest (Sweden)"),
     ("Tagus",      f"{_D}/domain_Mediterranean_Tagus_Spain/simulations/clm_mediterranean/CLM/Mediterranean_Tagus_Spain.clm2.h0.2012-12-30-00000.nc", "julia_clm_tagus_phs_2013.nc", "Tagus", "Mediterranean (Spain)"),
     ("Abisko",     f"{_D}/domain_Arctic_Abisko_Sweden/simulations/clm_arctic/CLM/Arctic_Abisko_Sweden.clm2.h0.2012-12-30-00000.nc", "julia_clm_abisko_phs_2013.nc", "Abisko", "Arctic tundra (Sweden)"),
