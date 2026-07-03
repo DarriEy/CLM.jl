@@ -71,11 +71,20 @@ VARS = [
     ("FSDSND","FSDSND","Inc nir-dir","Energy",0.1),("FSDSNI","FSDSNI","Inc nir-dif","Energy",0.1),
     ("QFLX_INFL","QINFL","Infiltration","Water",0.02),("QH2OSFC","QH2OSFC","Sfc water flux","Water",0.02),
     ("ZWT_PERCH","ZWT_PERCH","Perched WT","State",0.001),("DSL","DSL","Dry surf layer","State",0.05),
+    ("FSH_V","FSH_V","Sens H veg","Energy",0.1),("FSH_G","FSH_G","Sens H grnd","Energy",0.1),
+    ("SABG_PEN","SABG_PEN","SW penetr","Energy",0.1),("QINTR","QINTR","Interception","Water",0.02),
+    ("SNOWLIQ","SNOWLIQ","Snow liquid","Snow",0.02),("SNOWICE","SNOWICE","Snow ice","Snow",0.02),
+    ("ESAI","ESAI","Exposed SAI","State",0.02),
     ("FPSN","FPSN","Photosynthesis","Carbon",0.05),
 ]
+# Keep columns grouped on the heatmap regardless of insertion order: stable-sort
+# by category so each group's columns are contiguous (group headers + white
+# separators assume contiguity). New vars can be appended anywhere above.
+_GORDER = {"Energy": 0, "Water": 1, "Snow": 2, "State": 3, "Carbon": 4}
+VARS = sorted(VARS, key=lambda v: _GORDER[v[3]])
 SCALE = {"QRUNOFF":86400,"QOVER":86400,"QFLX_DRAIN":86400,"QFLX_EVAP_TOT":86400,"QSOIL":86400,
          "QVEGT":86400,"QVEGE":86400,"QFLX_SNOMELT":86400,"RAIN":86400,"SNOW":86400,
-         "QFLX_INFL":86400,"QH2OSFC":86400}
+         "QFLX_INFL":86400,"QH2OSFC":86400,"QINTR":86400}
 
 def date_ord(ds):
     t = ds["time"]; dts = cftime.num2date(t[:], t.units, getattr(t,"calendar","noleap"))
