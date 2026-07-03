@@ -1304,6 +1304,13 @@ function clm_drv_core!(config::CLMDriverConfig,
                    # untouched. This supersedes the former adjacent post-solve call.
                    (config.use_fates ? inst.fates : nothing))
 
+    # Total canopy water diagnostic h2ocan = snocan + liqcan, synced HERE (after
+    # canopy_fluxes applied the canopy-evaporation decrement to snocan/liqcan) so it
+    # matches Fortran's end-of-step H2OCAN sampling. Syncing it at the end of
+    # canopy_hydrology instead (pre-evaporation) reads the store ~15% high.
+    canhyd_update_h2ocan!(wdb.h2ocan_patch, wsb.ws.snocan_patch, wsb.ws.liqcan_patch,
+                          filt.nolakep, 1, np)
+
     # CalcOzoneUptake — WIRED (gated on config.use_ozone)
     # Accumulate ozone dose now that the canopy/photosynthesis solve has filled the
     # stomatal resistances (ps.rssun/rssha) and the leaf-boundary/aerodynamic

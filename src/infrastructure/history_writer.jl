@@ -324,10 +324,14 @@ function default_hist_fields()
         HistFieldDef("ESAI", "exposed one-sided stem area index", "m2/m2", "patch",
             inst -> isempty(inst.canopystate.esai_patch) ? Float64[] :
                     Float64.(inst.canopystate.esai_patch)),
-        # Canopy interception of precipitation (bare = 0).
+        # Canopy interception of precipitation and total intercepted water
+        # (both bare = 0; H2OCAN synced from snocan+liqcan in canopy hydrology).
         HistFieldDef("QINTR", "interception", "mm/s", "patch",
             inst -> isempty(inst.water.waterdiagnosticbulk_inst.qflx_prec_intr_patch) ? Float64[] :
                     Float64.(inst.water.waterdiagnosticbulk_inst.qflx_prec_intr_patch)),
+        HistFieldDef("H2OCAN", "intercepted water", "mm", "patch",
+            inst -> isempty(inst.water.waterdiagnosticbulk_inst.h2ocan_patch) ? Float64[] :
+                    Float64.(inst.water.waterdiagnosticbulk_inst.h2ocan_patch)),
         # Shortwave penetrating the top soil/snow layer.
         HistFieldDef("SABG_PEN", "SW penetrating top soil/snow layer", "W/m2", "patch",
             inst -> isempty(inst.solarabs.sabg_pen_patch) ? Float64[] :
