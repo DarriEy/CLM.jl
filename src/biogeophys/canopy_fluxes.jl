@@ -1560,54 +1560,64 @@ function canopy_fluxes_core!(
     # In a full implementation, this would call calc_root_moist_stress.
 
     # --- PHS (use_hydrstress): soil matric potential + soil-to-root conductance ---
-    # Normally smp_l is filled by HydrologyNoDrainage (which runs after canopy_fluxes),
-    # so recompute it here from the injected soil water; then call PHS Pass 1 to fill
-    # k_soil_root, which the PHS photosynthesis (calcstress!/vegwp solve) needs.
+    # PHS consumes the carried smp_l/hk_l from the previous hydrology step, then fills
+    # k_soil_root for the photosynthesis calcstress!/vegwp solve.
     if use_hydrstress
         _nlevsoi = varpar.nlevsoi; _nlevsno = varpar.nlevsno
         _smp_l = soilstate.smp_l_col; _watsat = soilstate.watsat_col
         _sucsat = soilstate.sucsat_col; _bsw = soilstate.bsw_col
         _smpmin = soilstate.smpmin_col
-        # Recompute smp_l + hk_l here because HydrologyNoDrainage (which fills them)
-        # runs AFTER canopy_fluxes, leaving soilstate%smp_l_col one step stale; PHS
-        # photosynthesis reads it but does not compute it. Reconstruct from the
-        # PROGNOSTIC h2osoi_liq/ice — NOT the stale h2osoi_vol_col, which sits at its
-        # cold-start default (≈0.75·watsat) here → spuriously wet → no plant stress
-        # (an earlier bug that was wrongly "fixed" by switching to liquid-only).
-        _h2osoi_liqvol = waterdiagbulk.h2osoi_liqvol_col
+        # PHS photosynthesis consumes the carried soil hydraulic state from the
+        # previous hydrology step. Preserve finite persisted/restart values for
+        # Fortran parity; recompute only as a cold-start/fallback path.
         _h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col
         _h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col
         _dz = col_data.dz
         _hksat = soilstate.hksat_col; _hk_l = soilstate.hk_l_col
         # ice impedance factor e_ice (params-file calibrated; matches the value the
-        # main HydrologyNoDrainage/SoilWaterMovement hk_l uses).
+        # main SoilWaterMovement hk_l uses).
         _eice = FT(soilhydrology_params.e_ice)
-        @inbounds for c in bounds_col, j in 1:_nlevsoi
-            dz_cj = _dz[c, _nlevsno + j]
-            # smp_l uses the TOTAL volumetric water (liquid + ice), matching
-            # HydrologyNoDrainageMod.F90:629-632 ("this smp_l uses the entire ice and
-            # water volume"). Liquid-only over-cavitates frozen soil — winter vegwp ~2x
-            # too negative → BTRAN spuriously 0 in the frozen shoulder seasons — because
-            # in frozen soil h2osoi_vol ≫ liquid.
-            vol = _h2osoi_liq[c, _nlevsno + j] / (dz_cj * FT(DENH2O)) +
-                  _h2osoi_ice[c, _nlevsno + j] / (dz_cj * FT(DENICE))
-            s_node = max(min(vol / _watsat[c, j], one(FT)), FT(0.01))
-            _smp_l[c, j] = max(_smpmin[c], -_sucsat[c, j] * s_node^(-_bsw[c, j]))
-            # hk_l = imped · hksat · s1^(2·bsw+3), with s1 the INTERFACE-AVERAGE LIQUID
-            # saturation and imped = 10^(-e_ice·icefrac_iface) the ICE IMPEDANCE
-            # (SoilWaterMovementMod.F90:721-731). Omitting imped leaves frozen-soil root
-            # conductance too high, so the canopy never draws vegwp down at midday and
-            # BTRAN's daily minimum is spuriously high through the frozen season.
-            jp1 = min(_nlevsoi, j + 1)
-            dz_jp1 = _dz[c, _nlevsno + jp1]
-            s1 = (_h2osoi_liqvol[c, _nlevsno + j] + _h2osoi_liqvol[c, _nlevsno + jp1]) /
-                 (_watsat[c, j] + _watsat[c, jp1])
-            s1 = min(one(FT), s1)
-            vice_j   = min(_watsat[c, j],   _h2osoi_ice[c, _nlevsno + j]   / (dz_cj  * FT(DENICE)))
-            vice_jp1 = min(_watsat[c, jp1], _h2osoi_ice[c, _nlevsno + jp1] / (dz_jp1 * FT(DENICE)))
-            icefrac_iface = FT(0.5) * (vice_j / _watsat[c, j] + vice_jp1 / _watsat[c, jp1])
-            imped = FT(10.0)^(-_eice * icefrac_iface)
-            _hk_l[c, j] = imped * _hksat[c, j] * s1^(FT(2.0) * _bsw[c, j] + FT(3.0))
+        @inbounds for c in bounds_col
+            recompute_c = false
+            any_hk_positive = false
+            for j in 1:_nlevsoi
+                hkv = _hk_l[c, j]
+                smpv = _smp_l[c, j]
+                if !(isfinite(hkv) && isfinite(smpv))
+                    recompute_c = true
+                    break
+                end
+                any_hk_positive |= hkv > zero(FT)
+            end
+            recompute_c |= !any_hk_positive
+            recompute_c || continue
+            for j in 1:_nlevsoi
+                dz_cj = _dz[c, _nlevsno + j]
+                # smp_l uses the TOTAL volumetric water (liquid + ice), matching
+                # HydrologyNoDrainageMod.F90:629-632 ("this smp_l uses the entire ice and
+                # water volume").
+                vol = _h2osoi_liq[c, _nlevsno + j] / (dz_cj * FT(DENH2O)) +
+                      _h2osoi_ice[c, _nlevsno + j] / (dz_cj * FT(DENICE))
+                s_node = max(min(vol / _watsat[c, j], one(FT)), FT(0.01))
+                _smp_l[c, j] = max(_smpmin[c], -_sucsat[c, j] * s_node^(-_bsw[c, j]))
+
+                # Fallback hk_l mirrors the non-aquifer SoilWaterMovement form:
+                # s1 is the interface liquid content divided by interface porosity,
+                # and ice impedance is averaged across the same interface.
+                jp1 = min(_nlevsoi, j + 1)
+                dz_jp1 = _dz[c, _nlevsno + jp1]
+                liqvol_j = max(_h2osoi_liq[c, _nlevsno + j], FT(1.0e-6)) /
+                           (dz_cj * FT(DENH2O))
+                liqvol_jp1 = max(_h2osoi_liq[c, _nlevsno + jp1], FT(1.0e-6)) /
+                             (dz_jp1 * FT(DENH2O))
+                s1 = (liqvol_j + liqvol_jp1) / (_watsat[c, j] + _watsat[c, jp1])
+                s1 = min(one(FT), s1)
+                vice_j   = min(_watsat[c, j],   _h2osoi_ice[c, _nlevsno + j]   / (dz_cj  * FT(DENICE)))
+                vice_jp1 = min(_watsat[c, jp1], _h2osoi_ice[c, _nlevsno + jp1] / (dz_jp1 * FT(DENICE)))
+                icefrac_iface = FT(0.5) * (vice_j / _watsat[c, j] + vice_jp1 / _watsat[c, jp1])
+                imped = FT(10.0)^(-_eice * icefrac_iface)
+                _hk_l[c, j] = imped * _hksat[c, j] * s1^(FT(2.0) * _bsw[c, j] + FT(3.0))
+            end
         end
         _froot_c = isempty(phs_froot_carbon) ? zeros(FT, length(bounds_patch)) : phs_froot_carbon
         psn_phs_pass1_update!(photosyns, mask_exposedvegp, patch_data.column,

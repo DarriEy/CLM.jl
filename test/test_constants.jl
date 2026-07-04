@@ -58,6 +58,10 @@
         @test CLM.CPAIR ≈ 1004.64
         @test CLM.HVAP ≈ 2.501e6
         @test CLM.HFUS ≈ 3.337e5
+        @test CLM.RGAS_KMOL == 6.02214e26 * 1.38065e-23
+        @test CLM.RAIR == CLM.RGAS_KMOL / 28.966
+        @test CLM.RWAT == CLM.RGAS_KMOL / 18.016
+        @test CLM.RGAS == CLM.RGAS_KMOL * 1.0e-3
         @test CLM.RPI ≈ π atol=1e-10
         @test CLM.SECSPDAY ≈ 86400.0
         @test CLM.VKC ≈ 0.4

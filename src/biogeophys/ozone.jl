@@ -315,7 +315,7 @@ function calc_ozone_uptake_one_point(;
         dtime::Real)
 
     # convert o3 from mol/mol to nmol m^-3
-    # SHR_CONST_RGAS = 8.31446 (same as RGAS in varcon.jl)
+    # RGAS uses the CESM shared-constants construction from varcon.jl.
     o3concnmolm3 = forc_ozone * 1.0e9 * (forc_pbot / (forc_th * RGAS))
 
     # calculate instantaneous flux

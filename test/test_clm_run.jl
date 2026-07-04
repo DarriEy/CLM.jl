@@ -101,6 +101,14 @@ include("generate_forcing.jl")
 
         ng = bounds.endg; nc = bounds.endc
         a2l = inst.atm2lnd
+        CLM.atm2lnd_params_init!(a2l.params;
+            repartition_rain_snow = true,
+            glcmec_downscale_longwave = false,
+            lapse_rate = 0.006,
+            precip_repartition_glc_all_snow_t = -2.0,
+            precip_repartition_glc_all_rain_t = 0.0,
+            precip_repartition_nonglc_all_snow_t = 0.0,
+            precip_repartition_nonglc_all_rain_t = 2.0)
 
         # Set gridcell forcings
         for g in 1:ng
@@ -131,6 +139,14 @@ include("generate_forcing.jl")
         @test a2l.forc_snow_downscaled_col[1] >= 0.0
         total_precip = a2l.forc_rain_downscaled_col[1] + a2l.forc_snow_downscaled_col[1]
         @test total_precip ≈ 0.001 atol=1e-6
+
+        rain_hist = only(f for f in CLM.default_hist_fields() if f.name == "RAIN")
+        snow_hist = only(f for f in CLM.default_hist_fields() if f.name == "SNOW")
+        @test rain_hist.level == "gridcell"
+        @test snow_hist.level == "gridcell"
+        @test rain_hist.getter(inst)[1] ≈ a2l.forc_rain_not_downscaled_grc[1]
+        @test snow_hist.getter(inst)[1] ≈ a2l.forc_snow_not_downscaled_grc[1]
+        @test rain_hist.getter(inst)[1] != a2l.forc_rain_downscaled_col[1]
     end
 
     # ---- Test 5: History writer ----

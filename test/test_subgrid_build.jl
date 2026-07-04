@@ -204,6 +204,8 @@
         )
         @test CLM.get_nstep(tm) == 0
         @test CLM.get_curr_calday(tm) ≈ 1.0
+        @test CLM.is_beg_curr_day(tm) == true
+        @test CLM.is_end_curr_day(tm) == false
 
         CLM.advance_timestep!(tm)
         @test CLM.get_nstep(tm) == 1
@@ -213,12 +215,14 @@
         @test d == 1
         @test tod == 1800
         @test CLM.is_beg_curr_day(tm) == false
+        @test CLM.is_end_curr_day(tm) == false
 
         # Advance to midnight next day
         for _ in 1:47
             CLM.advance_timestep!(tm)
         end
         @test CLM.is_beg_curr_day(tm) == true
+        @test CLM.is_end_curr_day(tm) == true
         @test CLM.is_beg_curr_year(tm) == false
     end
 

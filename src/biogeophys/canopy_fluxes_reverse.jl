@@ -133,41 +133,54 @@ function cf_rev_psn!(b, aux, phase::String)
     return nothing
 end
 
-# PHS (use_hydrstress) init helper: recompute smp_l (from TOTAL soil water) + hk_l
-# (ice-impeded) before the PHS photosynthesis solve. In production canopy_fluxes!
-# this is done because HydrologyNoDrainage — which normally fills smp_l — runs AFTER
-# canopy_fluxes; PHS photosynthesis reads smp_l (it does NOT compute it). Byte-identical
-# to the production canopy_fluxes_core! loop. Called from cf_rev_init! when use_hydrstress.
+# PHS (use_hydrstress) init helper: preserve carried smp_l/hk_l from the previous
+# hydrology step, recomputing only as a cold-start fallback. Byte-identical to the
+# production canopy_fluxes_core! setup. Called from cf_rev_init! when use_hydrstress.
 function cf_rev_phs_smp_l!(b, aux)
-    ss = b.soilstate; wd = b.waterdiagbulk; ph = aux.phs
+    ss = b.soilstate; ph = aux.phs
     FT = eltype(ss.smp_l_col)
     nlevsoi = ph.nlevsoi; nlevsno = aux.nlevsno
     smp_l = ss.smp_l_col; watsat = ss.watsat_col; sucsat = ss.sucsat_col
     bsw = ss.bsw_col; smpmin = ss.smpmin_col
-    h2osoi_liqvol = wd.h2osoi_liqvol_col; hksat = ss.hksat_col; hk_l = ss.hk_l_col
+    hksat = ss.hksat_col; hk_l = ss.hk_l_col
     h2osoi_liq = b.waterstatebulk.ws.h2osoi_liq_col
     h2osoi_ice = b.waterstatebulk.ws.h2osoi_ice_col
     dz = ph.dz                               # soil-sliced [c, 1:nlevsoi]
     eice = FT(soilhydrology_params.e_ice)
-    @inbounds for c in axes(smp_l, 1), j in 1:nlevsoi
-        dz_cj = dz[c, j]
-        # smp_l from TOTAL volumetric water (liquid + ice); hk_l carries the ice
-        # impedance factor. Mirrors the production canopy_fluxes_core! recompute and
-        # HydrologyNoDrainageMod.F90 / SoilWaterMovementMod.F90 (see there for why).
-        vol = h2osoi_liq[c, nlevsno + j] / (dz_cj * FT(DENH2O)) +
-              h2osoi_ice[c, nlevsno + j] / (dz_cj * FT(DENICE))
-        s_node = max(min(vol / watsat[c, j], one(FT)), FT(0.01))
-        smp_l[c, j] = max(smpmin[c], -sucsat[c, j] * s_node^(-bsw[c, j]))
-        jp1 = min(nlevsoi, j + 1)
-        dz_jp1 = dz[c, jp1]
-        s1 = (h2osoi_liqvol[c, nlevsno + j] + h2osoi_liqvol[c, nlevsno + jp1]) /
-             (watsat[c, j] + watsat[c, jp1])
-        s1 = min(one(FT), s1)
-        vice_j   = min(watsat[c, j],   h2osoi_ice[c, nlevsno + j]   / (dz_cj  * FT(DENICE)))
-        vice_jp1 = min(watsat[c, jp1], h2osoi_ice[c, nlevsno + jp1] / (dz_jp1 * FT(DENICE)))
-        icefrac_iface = FT(0.5) * (vice_j / watsat[c, j] + vice_jp1 / watsat[c, jp1])
-        imped = FT(10.0)^(-eice * icefrac_iface)
-        hk_l[c, j] = imped * hksat[c, j] * s1^(FT(2.0) * bsw[c, j] + FT(3.0))
+    @inbounds for c in axes(smp_l, 1)
+        recompute_c = false
+        any_hk_positive = false
+        for j in 1:nlevsoi
+            hkv = hk_l[c, j]
+            smpv = smp_l[c, j]
+            if !(isfinite(hkv) && isfinite(smpv))
+                recompute_c = true
+                break
+            end
+            any_hk_positive |= hkv > zero(FT)
+        end
+        recompute_c |= !any_hk_positive
+        recompute_c || continue
+        for j in 1:nlevsoi
+            dz_cj = dz[c, j]
+            vol = h2osoi_liq[c, nlevsno + j] / (dz_cj * FT(DENH2O)) +
+                  h2osoi_ice[c, nlevsno + j] / (dz_cj * FT(DENICE))
+            s_node = max(min(vol / watsat[c, j], one(FT)), FT(0.01))
+            smp_l[c, j] = max(smpmin[c], -sucsat[c, j] * s_node^(-bsw[c, j]))
+            jp1 = min(nlevsoi, j + 1)
+            dz_jp1 = dz[c, jp1]
+            liqvol_j = max(h2osoi_liq[c, nlevsno + j], FT(1.0e-6)) /
+                       (dz_cj * FT(DENH2O))
+            liqvol_jp1 = max(h2osoi_liq[c, nlevsno + jp1], FT(1.0e-6)) /
+                         (dz_jp1 * FT(DENH2O))
+            s1 = (liqvol_j + liqvol_jp1) / (watsat[c, j] + watsat[c, jp1])
+            s1 = min(one(FT), s1)
+            vice_j   = min(watsat[c, j],   h2osoi_ice[c, nlevsno + j]   / (dz_cj  * FT(DENICE)))
+            vice_jp1 = min(watsat[c, jp1], h2osoi_ice[c, nlevsno + jp1] / (dz_jp1 * FT(DENICE)))
+            icefrac_iface = FT(0.5) * (vice_j / watsat[c, j] + vice_jp1 / watsat[c, jp1])
+            imped = FT(10.0)^(-eice * icefrac_iface)
+            hk_l[c, j] = imped * hksat[c, j] * s1^(FT(2.0) * bsw[c, j] + FT(3.0))
+        end
     end
     return nothing
 end
