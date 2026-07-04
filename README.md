@@ -32,8 +32,8 @@ series are compared variable-by-variable.
 
 ![Multi-biome parity scorecard — CLM.jl vs Fortran CLM5](scripts/parity_scorecard.png)
 
-Current standing: **895 of 897** biome × variable combinations agree within
-**10 % relative** (or **0.5 K** for temperatures), across **13 biomes** and
+Current standing: **1102 of 1104** biome × variable combinations agree within
+**10 % relative** (or **0.5 K** for temperatures), across **16 biomes** and
 **69 output variables** (energy, water, snow, state, carbon). Most agree to under
 1 %; the two cells outside tolerance are both small residuals in small quantities:
 the density of thin, warm, transient snow at urban Baltimore, and the vegetation
@@ -59,12 +59,13 @@ accumulation and melt cycle:
 
 Biomes covered so far: alpine (Bow at Banff), semi-arid prairie (Stillwater),
 hot desert (Walnut Gulch), tropical rainforest (Aripuanã), tropical savanna
-(Donga), temperate deciduous forest (Hubbard Brook), Pacific maritime conifer
-(HJ Andrews), boreal forest (Krycklan), Mediterranean (Tagus), arctic tundra
-(Abisko), alpine glacier (Massa Aletsch), urban (Baltimore), and glacier outwash
-(Iceland). The suite (`scripts/parity_run_domain.jl` + scorecard) is expanded as
-references are generated, so these numbers are a snapshot, not a final result.
-See also [the warning above](#️-read-this-first-an-agentic-engineering-experiment).
+(Donga), larch permafrost taiga (Yakutia), temperate peat bog (Mer Bleue),
+continental steppe (Kherlen), temperate deciduous forest (Hubbard Brook), Pacific
+maritime conifer (HJ Andrews), boreal forest (Krycklan), Mediterranean (Tagus),
+arctic tundra (Abisko), alpine glacier (Massa Aletsch), urban (Baltimore), and
+glacier outwash (Iceland). The suite (`scripts/parity_run_domain.jl` + scorecard)
+is expanded as references are generated, so these numbers are a snapshot, not a
+final result. See also [the warning above](#️-read-this-first-an-agentic-engineering-experiment).
 
 ## Features
 
