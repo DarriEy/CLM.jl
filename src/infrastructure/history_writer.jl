@@ -67,14 +67,17 @@ function default_hist_fields()
             history_h2osno_total_col),
         HistFieldDef("TSA", "2m air temperature", "K", "patch",
             inst -> inst.temperature.t_ref2m_patch),
-        HistFieldDef("RAIN", "atmospheric rain", "mm/s", "column",
-            inst -> length(inst.atm2lnd.forc_rain_downscaled_col) > 0 ?
-                inst.atm2lnd.forc_rain_downscaled_col :
-                zeros(length(inst.column.gridcell))),
-        HistFieldDef("SNOW", "atmospheric snow", "mm/s", "column",
-            inst -> length(inst.atm2lnd.forc_snow_downscaled_col) > 0 ?
-                inst.atm2lnd.forc_snow_downscaled_col :
-                zeros(length(inst.column.gridcell))),
+        # Fortran h0 RAIN/SNOW are atmospheric gridcell forcing fields, before
+        # column downscaling/repartitioning. The solver still uses the downscaled
+        # column fields; these history diagnostics should not.
+        HistFieldDef("RAIN", "atmospheric rain", "mm/s", "gridcell",
+            inst -> length(inst.atm2lnd.forc_rain_not_downscaled_grc) > 0 ?
+                inst.atm2lnd.forc_rain_not_downscaled_grc :
+                zeros(maximum(inst.column.gridcell))),
+        HistFieldDef("SNOW", "atmospheric snow", "mm/s", "gridcell",
+            inst -> length(inst.atm2lnd.forc_snow_not_downscaled_grc) > 0 ?
+                inst.atm2lnd.forc_snow_not_downscaled_grc :
+                zeros(maximum(inst.column.gridcell))),
         HistFieldDef("QRUNOFF", "total runoff", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_runoff_col),
         HistFieldDef("ZWT", "water table depth", "m", "column",
@@ -935,13 +938,10 @@ function history_write_step!(hw::HistoryWriter, inst::CLMInstances,
         hw.time_index += 1
         ti = hw.time_index
 
-        # Write time = the daily-average interval END (next midnight) on the noleap
-        # calendar — matching CLM, which stamps day D's average at D+1 00:00. (CLM.jl's
-        # is_end_curr_day fires on the day's last sub-step, so current_time is e.g.
-        # 23:30; the interval end is the following midnight.)
-        interval_end = DateTime(Dates.year(current_time), Dates.month(current_time),
-                                Dates.day(current_time)) + Dates.Day(1)
-        ds["time"][ti] = _noleap_days_since_2000(interval_end)
+        # Write time = the daily-average interval END on the noleap calendar.
+        # The driver calls this after advance_timestep!, so end-of-day flushes
+        # arrive with current_time already at the next midnight.
+        ds["time"][ti] = _noleap_days_since_2000(current_time)
 
         n = hw.accum_count
         for f in hw.fields

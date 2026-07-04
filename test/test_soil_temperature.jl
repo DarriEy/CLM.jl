@@ -495,6 +495,42 @@
         @test wfb.wf.qflx_h2osfc_to_ice_col[c] == 0.0
     end
 
+    @testset "phase_change_h2osfc! uses effective snow cover for depth" begin
+        col, lun, patch_data, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
+            mask_nolakec, mask_nolakep, mask_urbanl, mask_urbanc,
+            bounds_col, bounds_lun, bounds_patch = setup_test_data()
+
+        c = 1; p = 1; l = 1
+        setup_soil_column!(col, lun, patch_data, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
+                           mask_nolakec, mask_nolakep, mask_urbanc, c, p, l)
+
+        col.snl[c] = -1
+        wsb.ws.h2osoi_ice_col[c, joff] = 40.0
+        wsb.ws.h2osoi_liq_col[c, joff] = 0.0
+        wdb.snow_depth_col[c] = 0.10
+        wdb.frac_sno_col[c] = 0.25
+        wdb.frac_sno_eff_col[c] = 1.0
+        wdb.frac_h2osfc_col[c] = 0.5
+        wsb.ws.h2osfc_col[c] = 20.0
+        temp.t_h2osfc_col[c] = CLM.TFRZ - 1.0
+        temp.t_soisno_col[c, joff] = CLM.TFRZ
+        temp.fact_col[c, joff] = 1.0
+        temp.c_h2osfc_col[c] = 0.0
+
+        dtime = 1800.0
+        dhsdT = fill(-1000.0, nc)
+        xm = wdb.frac_h2osfc_col[c] * (dhsdT[c] * 1.0 - 1.0 * temp.c_h2osfc_col[c] / dtime) *
+             dtime / CLM.HFUS
+        h2osno_total = wsb.ws.h2osoi_ice_col[c, joff]
+        rho_avg = min(800.0, h2osno_total / (wdb.frac_sno_eff_col[c] * wdb.snow_depth_col[c]))
+        expected_depth = (h2osno_total - xm) / (rho_avg * wdb.frac_sno_eff_col[c])
+
+        CLM.phase_change_h2osfc!(col, temp, ef, wsb, wdb, wfb,
+                                  mask_nolakec, bounds_col, dtime, dhsdT)
+
+        @test wdb.snow_depth_col[c] ≈ expected_depth
+    end
+
     @testset "phase_change_beta! — no phase change above freezing" begin
         col, lun, patch_data, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
             mask_nolakec, mask_nolakep, mask_urbanl, mask_urbanc,

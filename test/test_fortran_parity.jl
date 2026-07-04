@@ -9,6 +9,7 @@
 #   - canopy_fluxes_params a_coef/a_exp wiring (night T_VEG would be ~2 K off)
 #   - frost_table use_aquifer_layer gate (ZWT_PERCH would be ~0.27 m off)
 #   - T_STEM injection (would be ~20 K off)
+#   - Bow daytime coupled canopy leaf temperature (machine-level T_VEG parity)
 #   - the cold-start pedotransfer / forcing / canopy radiation fixes (T_GRND
 #     over-heating, ~16 K).
 #
@@ -40,7 +41,7 @@ using Test
 
         # (dump_name, kind, abs_tol, inst->array)
         rd(v) = ismissing(v) ? NaN : Float64(v)
-        fields(inst) = begin
+        fields(inst, nstep) = begin
             ws = inst.water.waterstatebulk_inst.ws
             wd = inst.water.waterdiagnosticbulk_inst
             te = inst.temperature; sh = inst.soilhydrology; sa = inst.solarabs
@@ -48,7 +49,7 @@ using Test
             [
                 ("T_GRND",     :col1d, 0.20,  te.t_grnd_col),
                 ("T_SOISNO",   :col2d, 0.20,  te.t_soisno_col),
-                ("T_VEG",      :patch, 1.20,  te.t_veg_patch),
+                ("T_VEG",      :patch, nstep == 13461 ? 1e-8 : 1.20, te.t_veg_patch),
                 ("T_STEM",     :patch, 0.50,  te.t_stem_patch),
                 ("SABV_P",     :patch, 5.0,   sa.sabv_patch),
                 ("SABG_P",     :patch, 5.0,   sa.sabg_patch),
@@ -83,9 +84,9 @@ using Test
 
         for n in steps
             @testset "step n$n" begin
-                inst, _ = run_one_parity_step!(n)
+                inst, _ = run_one_parity_step!(n; use_hydrstress=true)
                 ds = NCDataset(joinpath(dumpdir, "pdump_after_hydrologydrainage_n$(n).nc"), "r")
-                for (name, kind, tol, jl) in fields(inst)
+                for (name, kind, tol, jl) in fields(inst, n)
                     m = maxabs(ds, name, kind, jl)
                     isnan(m) && continue   # field absent in this dump
                     @test m <= tol

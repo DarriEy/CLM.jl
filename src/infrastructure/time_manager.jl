@@ -66,11 +66,10 @@ end
 """
     is_end_curr_day(tm::TimeManager) -> Bool
 
-Return true if the next timestep would start a new day.
+Return true if the just-completed timestep ended at a day boundary.
 """
 function is_end_curr_day(tm::TimeManager)
-    next_dt = tm.current_date + Second(tm.dtime)
-    return day(next_dt) != day(tm.current_date) || month(next_dt) != month(tm.current_date)
+    return tm.nstep > 0 && is_beg_curr_day(tm)
 end
 
 """

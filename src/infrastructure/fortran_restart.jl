@@ -299,6 +299,17 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
         end
     end)
 
+    # Soil hydraulic state carried from the previous hydrology step. PHS canopy
+    # photosynthesis consumes these before the current step's hydrology refreshes
+    # them, so restart parity needs the persisted values, not a recompute from
+    # current H2OSOI_LIQ/H2OSOI_ICE.
+    if hasproperty(inst.soilstate, :hk_l_col)
+        set_col_2d!("HK", inst.soilstate.hk_l_col)
+    end
+    if hasproperty(inst.soilstate, :smp_l_col)
+        set_col_2d!("SMP", inst.soilstate.smp_l_col)
+    end
+
     # Ground roughness
     set_col_1d!("Z0MG", v -> (inst.frictionvel.z0mg_col[1] = v))
 
@@ -425,7 +436,10 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
     set_patch_1d!("LIQCAN", ws.liqcan_patch)
     set_patch_1d!("SNOCAN", ws.snocan_patch)
     set_patch_1d!("FWET", wd.fwet_patch)
+    set_patch_1d!("FDRY", wd.fdry_patch)
     set_patch_1d!("FCANSNO", wd.fcansno_patch)
+    set_patch_1d!("QFLX_TRAN_VEG_P", inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_patch)
+    set_patch_1d!("QFLX_EVAP_VEG_P", inst.water.waterfluxbulk_inst.wf.qflx_evap_veg_patch)
 
     # Friction velocity
     set_patch_1d!("OBU", inst.frictionvel.obu_patch)

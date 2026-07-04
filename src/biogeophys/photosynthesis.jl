@@ -462,16 +462,9 @@ end
 # Helper functions: temperature response, quadratic solver
 # =====================================================================
 
-# Gas constant exactly as used inside CTSM PhotosynthesisMod.F90. Fortran carries
-# `rgas` in J/K/kmole (= SHR_CONST_AVOGAD*SHR_CONST_BOLTZ = 8314.467591) and applies
-# the kmole→mole conversion *1.e-3 AT each use site (ft/fth/fth25 and the cf =
-# pbot/(rgas*1e-3*tgcm) leaf-boundary-conductance factor). The module-global
-# `RGAS = 8.31446` (varcon.jl) is a TRUNCATED decimal — bit-different from
-# (6.02214e26*1.38065e-23)*1e-3 = 8.314467591000001 by ~9.1e-7 relative. That ULP
-# seed enters vcmax_z/jmax_z/tpu_z/lmr_z + cf on EVERY in-loop ci-iterate and
-# amplifies into the leaf-temp Newton trajectory. Replicate Fortran's exact value
-# (and its multiply order) here so the non-PHS photosynthesis path is bit-faithful.
-const RGAS_PSN = (6.02214e26 * 1.38065e-23) * 1.0e-3   # == Fortran rgas*1.e-3_r8
+# Explicit molar-units alias for the photosynthesis equations. RGAS is built from
+# the same CESM shared constants and multiply order as CTSM.
+const RGAS_PSN = RGAS
 
 """
     ft_photo(tl, ha)

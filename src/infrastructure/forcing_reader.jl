@@ -389,14 +389,18 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
         a2l.forc_solar_not_downscaled_grc[g] = fsds_g
     end
 
-    # Precipitation [mm/s] — total, partition by temperature
+    # Precipitation [mm/s] — total, partition by temperature. DATM holds
+    # precipitation constant over the source interval, and the corresponding
+    # RAIN/SNOW forcing split uses the lower-bound interval temperature rather
+    # than the linearly interpolated state temperature used for surface physics.
     precip = _read_var("PRECTmms", 0.0; interp=false)  # datm holds precip constant over the interval
+    tbot_precip = _read_var("TBOT", 270.0; interp=false)
     # Partition precipitation using a linear ramp matching Fortran DATM
     # (shr_precip_mod.F90): frac_rain = (T - TFRZ) * 0.5, clamped to [0,1]
     # All snow at T <= 0°C, all rain at T >= +2°C
     for g in 1:ng
         precip_g = precip[g] < 0.0 ? 0.0 : precip[g]
-        frac_rain = clamp((tbot[g] - TFRZ) * 0.5, 0.0, 1.0)
+        frac_rain = clamp((tbot_precip[g] - TFRZ) * 0.5, 0.0, 1.0)
         a2l.forc_rain_not_downscaled_grc[g] = precip_g * frac_rain
         a2l.forc_snow_not_downscaled_grc[g] = precip_g * (1.0 - frac_rain)
     end

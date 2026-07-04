@@ -187,5 +187,28 @@ end
         CLM.forcing_reader_close!(fr)
     end
 
+    @testset "held precipitation uses lower-bound temperature for rain/snow split" begin
+        fpath = _write_point_forcing(joinpath(tmpdir, "point_precip.nc"); times=times)
+        NCDataset(fpath, "a") do ds
+            ds["TBOT"][1] = 273.0
+            ds["TBOT"][2] = 275.0
+            ds["PRECTmms"][:] .= 0.001
+        end
+
+        fr = CLM.ForcingReader()
+        CLM.forcing_reader_init!(fr, fpath)
+        fr.interp_time = true
+
+        a2l = CLM.Atm2LndData()
+        CLM.atm2lnd_init!(a2l, 1, 1, 1)
+        CLM.read_forcing_step!(fr, a2l, DateTime(2000,1,1,0,30), 1, 1)
+
+        @test a2l.forc_t_not_downscaled_grc[1] ≈ 274.0
+        @test a2l.forc_rain_not_downscaled_grc[1] ≈ 0.0
+        @test a2l.forc_snow_not_downscaled_grc[1] ≈ 0.001
+
+        CLM.forcing_reader_close!(fr)
+    end
+
     rm(tmpdir; recursive=true, force=true)
 end

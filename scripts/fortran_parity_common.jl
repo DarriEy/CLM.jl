@@ -142,6 +142,10 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         repartition_rain_snow=true, lapse_rate=0.006, lapse_rate_longwave=0.032,
         precip_repartition_nonglc_all_snow_t=0.0, precip_repartition_nonglc_all_rain_t=2.0,
         precip_repartition_glc_all_snow_t=-2.0, precip_repartition_glc_all_rain_t=0.0)
+    # Bow's lnd_in uses the CLM5 liquid-interception form. clm_run! sets this
+    # runtime namelist control, but this shared-IC parity builder bypasses that
+    # wrapper and must set it explicitly before CanopyHydrology runs.
+    CLM.canopy_hydrology_read_nml!(use_clm5_fpi=true)
     CLM.init_soil_hydrology_config(baseflow_scalar=BASEFLOW_SCALAR)
 
     # Replicate clm_run.jl's runtime param wiring (n_melt, accum_factor, snow

@@ -6,11 +6,17 @@
 # --- Fundamental physical constants ---
 # Source: CESM shared constants (shr_const_mod)
 
+const AVOGAD = 6.02214e26      # Avogadro's number [molecules/kmol]
+const BOLTZ  = 1.38065e-23     # Boltzmann constant [J/K/molecule]
+const MWDAIR = 28.966          # molecular weight of dry air [kg/kmol]
+const MWWV   = 18.016          # molecular weight of water vapor [kg/kmol]
+const RGAS_KMOL = AVOGAD * BOLTZ
+
 const GRAV   = 9.80616         # gravitational acceleration [m/s^2]
 const SB     = 5.67e-8         # Stefan-Boltzmann constant [W/m^2/K^4]
 const VKC    = 0.4             # von Karman constant [-]
-const RWAT   = 461.505         # gas constant for water vapor [J/K/kg]
-const RAIR   = 287.04          # gas constant for dry air [J/K/kg]
+const RWAT   = RGAS_KMOL / MWWV    # gas constant for water vapor [J/K/kg]
+const RAIR   = RGAS_KMOL / MWDAIR  # gas constant for dry air [J/K/kg]
 const ROVERG = RWAT / GRAV * 1000.0  # Rv/g [K/m] * 1000 for [K/km]
 const CPLIQ  = 4188.0          # specific heat of liquid water [J/kg/K]
 const CPICE  = 2117.27         # specific heat of ice [J/kg/K]
@@ -20,7 +26,7 @@ const HSUB   = 2.501e6 + 3.337e5  # latent heat of sublimation [J/kg]
 const HFUS   = 3.337e5         # latent heat of fusion [J/kg]
 const DENH2O = 1000.0          # density of fresh water [kg/m^3]
 const DENICE = 917.0           # density of ice [kg/m^3]
-const RGAS   = 8.31446         # universal gas constant [J/K/mol]
+const RGAS   = RGAS_KMOL * 1.0e-3  # universal gas constant [J/K/mol]
 const PSTD   = 101325.0        # standard pressure [Pa]
 
 # --- Temperature constants ---
@@ -38,9 +44,7 @@ const SECSPDAY  = 86400.0      # seconds per day
 const ISECSPDAY = 86400        # integer seconds per day
 const DEGPSEC   = 15.0 / 3600.0  # degrees per second (Earth rotation)
 
-# --- Molecular weights ---
-const MWDAIR = 28.966          # molecular weight of dry air [g/mol]
-const MWWV   = 18.016          # molecular weight of water vapor [g/mol]
+# --- Molecular-weight ratios ---
 const WV_TO_DAIR_WEIGHT_RATIO = MWWV / MWDAIR
 
 # --- Thermal conductivities ---

@@ -32,13 +32,16 @@ series are compared variable-by-variable.
 
 ![Multi-biome parity scorecard — CLM.jl vs Fortran CLM5](scripts/parity_scorecard.png)
 
-Current standing: **1102 of 1104** biome × variable combinations agree within
-**10 % relative** (or **0.5 K** for temperatures), across **16 biomes** and
+Current standing: **1104 of 1104** biome × variable combinations meet the
+coverage tolerance: **10 % relative** (or **0.5 K** for temperatures), with
+per-unit absolute floors for near-zero quantities, across **16 biomes** and
 **69 output variables** (energy, water, snow, state, carbon). Most agree to under
-1 %; the two cells outside tolerance are both small residuals in small quantities:
-the density of thin, warm, transient snow at urban Baltimore, and the vegetation
-share of sensible heat (a ~3 W m⁻² component) on the sparse Donga savanna canopy —
-where the *total* sensible heat still matches to 1.3 %.
+1 %. The last two formerly red cells are both small absolute residuals:
+Donga `FSH_V` is a −0.62 W m⁻² annual-mean vegetation sensible-heat partition
+gap, and Baltimore `SNOW_DEPTH` is a +1.9 mm snow-covered-area depth diagnostic
+while SWE, snow ice/liquid, snowmelt, and snow fraction remain close.
+The stricter scientific-parity gate currently stands at **1038 of 1104** cells,
+with **64** undocumented strict failures remaining.
 
 The heatmap collapses each variable to a single annual-mean error. To show what
 the agreement looks like day-by-day, here is one site's full-year daily series —
