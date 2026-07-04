@@ -38,3 +38,4 @@ validation_results/
 
 # stray domain streamflow-comparison CSVs (analysis outputs, not source)
 streamflow_compare_*.csv
+__pycache__/
