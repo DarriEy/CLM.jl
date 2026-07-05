@@ -147,6 +147,26 @@
         @test wfb.wf.qflx_infl_col[3] ≈ 0.33
     end
 
+    @testset "surface-water truncation is relative to baseline" begin
+        mask = trues(1)
+
+        # A 5e-11 mm residual must survive when the baseline is 1 mm:
+        # it is below the former fixed 1e-10 cutoff, but far above CTSM's
+        # 1e-13 * |baseline| relative cutoff.
+        h2osfc = [1.0]
+        qin = [0.0]
+        qsurf = [(1.0 - 5.0e-11) / 1800.0]
+        CLM.surfwat_partial_update!(h2osfc, mask, qin, qsurf, 1800.0)
+        @test h2osfc[1] > 0.0
+        @test h2osfc[1] ≈ 5.0e-11 atol=1e-15
+
+        # A residual below the relative cutoff is truncated.
+        h2osfc .= 1.0
+        qsurf .= (1.0 - 5.0e-14) / 1800.0
+        CLM.surfwat_partial_update!(h2osfc, mask, qin, qsurf, 1800.0)
+        @test h2osfc[1] == 0.0
+    end
+
     # ------------------------------------------------------------------
     # 6. theta_based_water_table!
     # ------------------------------------------------------------------

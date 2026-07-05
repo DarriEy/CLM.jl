@@ -8,10 +8,10 @@ module pdumpMod
   ! the CLM.jl :parity oracle (scripts/fortran_parity_common.jl
   ! compare_inst_to_dump / run_one_parity_step!) reads from the parity run dir.
   !
-  ! The oracle only reads the 16 prognostic fields in its _parity_registry:
+  ! The oracle only reads the 17 prognostic fields in its _parity_registry:
   !   T_SOISNO, H2OSOI_LIQ, H2OSOI_ICE  (column, levtot)
   !   T_GRND, WA, H2OSFC, ZWT, ZWT_PERCH, INT_SNOW, SNOW_DEPTH, frac_sno (column)
-  !   T_VEG, elai, tlai, LIQCAN, SNOCAN  (pft)
+  !   T_VEG, elai, esai, tlai, LIQCAN, SNOCAN  (pft)
   ! plus the timemgr nstep/ymd/tod metadata.  This module emits exactly that
   ! oracle-readable subset with the SAME dim names and the SAME levtot layout
   ! as the legacy full-restart pdump files (snow layers -nlevsno+1..0 mapped to
@@ -77,7 +77,7 @@ contains
     integer  :: d_col, d_pft, d_lt
     integer  :: v_tsoi, v_hliq, v_hice
     integer  :: v_tgrnd, v_wa, v_h2osfc, v_zwt, v_zwtp, v_intsnow, v_snowdp, v_fsno
-    integer  :: v_tveg, v_elai, v_tlai, v_liqcan, v_snocan
+    integer  :: v_tveg, v_elai, v_esai, v_tlai, v_liqcan, v_snocan
     integer  :: v_nstep, v_ymd, v_tod
     character(len=256) :: fname
     real(r8), allocatable :: tsoi(:,:), hliq(:,:), hice(:,:)   ! (levtot, col)
@@ -144,6 +144,7 @@ contains
 
     ier = nf90_def_var(ncid, 'T_VEG',      NF90_DOUBLE, (/d_pft/), v_tveg)
     ier = nf90_def_var(ncid, 'elai',       NF90_DOUBLE, (/d_pft/), v_elai)
+    ier = nf90_def_var(ncid, 'esai',       NF90_DOUBLE, (/d_pft/), v_esai)
     ier = nf90_def_var(ncid, 'tlai',       NF90_DOUBLE, (/d_pft/), v_tlai)
     ier = nf90_def_var(ncid, 'LIQCAN',     NF90_DOUBLE, (/d_pft/), v_liqcan)
     ier = nf90_def_var(ncid, 'SNOCAN',     NF90_DOUBLE, (/d_pft/), v_snocan)
@@ -170,6 +171,7 @@ contains
 
     call pft1d(bounds, temperature_inst%t_veg_patch,                p1); ier = nf90_put_var(ncid, v_tveg,   p1)
     call pft1d(bounds, canopystate_inst%elai_patch,                 p1); ier = nf90_put_var(ncid, v_elai,   p1)
+    call pft1d(bounds, canopystate_inst%esai_patch,                 p1); ier = nf90_put_var(ncid, v_esai,   p1)
     call pft1d(bounds, canopystate_inst%tlai_patch,                 p1); ier = nf90_put_var(ncid, v_tlai,   p1)
     call pft1d(bounds, water_inst%waterstatebulk_inst%liqcan_patch, p1); ier = nf90_put_var(ncid, v_liqcan, p1)
     call pft1d(bounds, water_inst%waterstatebulk_inst%snocan_patch, p1); ier = nf90_put_var(ncid, v_snocan, p1)

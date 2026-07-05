@@ -9,20 +9,38 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
 const NSTEP       = length(ARGS) >= 1 ? ARGS[1] : "8761"
-const DUMP_BEFORE = joinpath(DUMPDIR, "pdump_before_step_n$(NSTEP).nc")
-const DUMP_AFTER  = joinpath(DUMPDIR, "pdump_after_hydrologydrainage_n$(NSTEP).nc")
+const SNOW_DUMPDIR = get(ENV, "PARITY_DUMPDIR", DUMPDIR)
+const DUMP_BEFORE = joinpath(SNOW_DUMPDIR, "pdump_before_step_n$(NSTEP).nc")
+const DUMP_AFTER  = joinpath(SNOW_DUMPDIR, "pdump_after_hydrologydrainage_n$(NSTEP).nc")
 
 fval(f, v) = begin
     ds = NCDataset(f, "r"); x = haskey(ds, v) ? Float64(ds[v][:][1]) : NaN; close(ds); x
 end
+farray(f, v) = begin
+    ds = NCDataset(f, "r"); x = haskey(ds, v) ? Float64.(Array(ds[v][:])) : Float64[]; close(ds); x
+end
+
+function dump_datetime(f)
+    ds = NCDataset(f, "r")
+    ymd = Int(ds["timemgr_rst_curr_ymd"][])
+    tod = Int(ds["timemgr_rst_curr_tod"][])
+    close(ds)
+    return DateTime(ymd ÷ 10000, (ymd ÷ 100) % 100, ymd % 100) + Second(tod)
+end
 
 println("="^64); println("  INT_SNOW snow-accumulation divergence  (nstep=$NSTEP)"); println("="^64)
 
-(inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=DateTime(2003,1,1))
+CLM.snow_hydrology_set_control_for_testing!(;
+    wind_dep_snow_density=true,
+    overburden_compaction_method=CLM.OVERBURDEN_COMPACTION_VIONNET2012)
+dump_time = dump_datetime(DUMP_BEFORE)
+(inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=dump_time)
 inject_dump!(inst, bounds, DUMP_BEFORE)
+println("  matched dump time: ", dump_time)
 
 ws = inst.water.waterstatebulk_inst
 wd = inst.water.waterdiagnosticbulk_inst
+snocan_before_j = copy(ws.ws.snocan_patch)
 snowsum() = sum(ws.ws.h2osoi_liq_col[1, j] + ws.ws.h2osoi_ice_col[1, j] for j in 1:CLM.varpar.nlevsno)
 
 @printf("\n  %-22s %14s %14s\n", "quantity", "Julia", "Fortran")
@@ -56,6 +74,7 @@ step_start = tm.current_date
 CLM.advance_timestep!(tm)
 CLM.read_forcing_step!(fr, inst.atm2lnd, step_start, ng, nc)
 CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
+@printf("  %-22s %14.6f %14s\n", "forc_t downscaled (K)", inst.atm2lnd.forc_t_downscaled_col[1], "—")
 calday = CLM.get_curr_calday(tm); (declin, eccf) = CLM.compute_orbital(calday)
 (yr, mon, d, tod) = CLM.get_curr_date(tm)
 
@@ -81,6 +100,22 @@ println("  " * "-"^52)
 @printf("  %-22s %14.4f %14.4f\n", "snow_depth (AFTER)", wd.snow_depth_col[1], fval(DUMP_AFTER, "SNOW_DEPTH"))
 @printf("  %-22s %14.4f %14.4f\n", "frac_sno (AFTER)", wd.frac_sno_col[1], fval(DUMP_AFTER, "frac_sno"))
 @printf("  %-22s %14.6e %14s\n", "qflx_snow_grnd (AFTER)", inst.water.waterfluxbulk_inst.wf.qflx_snow_grnd_col[1], "—")
+for (name, arr) in (
+    ("qflx_soliddew", inst.water.waterfluxbulk_inst.wf.qflx_soliddew_to_top_layer_col),
+    ("qflx_liqdew", inst.water.waterfluxbulk_inst.wf.qflx_liqdew_to_top_layer_col),
+    ("qflx_liq_grnd", inst.water.waterfluxbulk_inst.wf.qflx_liq_grnd_col),
+)
+    @printf("  %-22s %14.6e %14s\n", name, arr[1], "—")
+end
+accum_flux = inst.water.waterfluxbulk_inst.wf.qflx_soliddew_to_top_layer_col[1] +
+             inst.water.waterfluxbulk_inst.wf.qflx_liqdew_to_top_layer_col[1] +
+             inst.water.waterfluxbulk_inst.wf.qflx_liq_grnd_col[1]
+@printf("  %-22s %14.6e %14s\n", "int_snow flux Δ", wd.frac_sno_eff_col[1] * accum_flux * 3600.0, "—")
+println("  snocan before Julia/F: ", snocan_before_j, " / ", farray(DUMP_BEFORE, "SNOCAN"))
+println("  snocan after  Julia/F: ", ws.ws.snocan_patch, " / ", farray(DUMP_AFTER, "SNOCAN"))
+println("  snow unload Julia:     ", inst.water.waterfluxbulk_inst.wf.qflx_snow_unload_patch)
+println("  snow through Julia:    ", inst.water.waterfluxbulk_inst.wf.qflx_through_snow_patch)
+println("  snow canfall Julia:    ", inst.water.waterfluxbulk_inst.wf.qflx_snocanfall_patch)
 println()
 @printf("  Δint_snow: Julia %+.3f  Fortran %+.3f\n",
         ws.int_snow_col[1]-fval(DUMP_BEFORE,"INT_SNOW"), fval(DUMP_AFTER,"INT_SNOW")-fval(DUMP_BEFORE,"INT_SNOW"))

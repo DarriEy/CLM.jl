@@ -30,7 +30,10 @@ end
 
 # ---- Per-domain registry ----
 const DOMAINS = Dict(
-    "Bow" => (year = 2003, dtime = 1800, baseflow = 0.0022119554, int_snow = 3113.2227,
+    # The CTSM reference is hourly: n8761 is 2003-01-01 01:00 immediately
+    # following the prior 8760-step year. Using 1800 s here compares different
+    # numerical protocols and creates artificial snow, canopy, and flux misses.
+    "Bow" => (year = 2003, dtime = 3600, baseflow = 0.0022119554, int_snow = 3113.2227,
         caldir  = "$DATA/domain_Bow_at_Banff_lumped/optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters",
         forcing = "$DATA/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2003.nc",
         restart = "$DATA/clm_parity_run/Bow_at_Banff_lumped.clm2.r.2003-01-01-00000.nc",

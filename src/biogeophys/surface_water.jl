@@ -171,8 +171,9 @@ Ported from `UpdateState_TooSmallH2osfcToSoil` in `SurfaceWaterMod.F90`.
         if flux > zero(T)
             hnew = h2osfc[c] - flux * dtime
             h2osoi_liq[c, 1 + nlevsno] = h2osoi_liq[c, 1 + nlevsno] + flux * dtime
-            # Truncate small values
-            if abs(hnew) < T(1.0e-10)
+            # NumericsMod.truncate_small_values uses the pre-update storage as
+            # the scale: only residuals below 1e-13 * |baseline| are zeroed.
+            if abs(hnew) < T(1.0e-13) * abs(h2osfc[c])
                 hnew = zero(T)
             end
             h2osfc[c] = hnew
@@ -399,8 +400,9 @@ end
     T = eltype(h2osfc)
     @inbounds if mask_hydrologyc[c]
         h = h2osfc[c] + (qflx_in_h2osfc[c] - qflx_h2osfc_surf[c]) * dtime
-        # Truncate small values
-        if abs(h) < T(1.0e-10)
+        # Match NumericsMod.truncate_small_values with the pre-update h2osfc
+        # as data_baseline (SurfaceWaterMod.F90).
+        if abs(h) < T(1.0e-13) * abs(h2osfc[c])
             h = zero(T)
         end
         h2osfc[c] = h
@@ -426,7 +428,8 @@ surfwat_partial_update!(h2osfc, mask_hydrologyc, qflx_in_h2osfc,
     T = eltype(h2osfc)
     @inbounds if mask_hydrologyc[c]
         h = h2osfc[c] - qflx_h2osfc_drain_arr[c] * dtime
-        if abs(h) < T(1.0e-10)
+        # Here the partially updated h2osfc is the Fortran baseline.
+        if abs(h) < T(1.0e-13) * abs(h2osfc[c])
             h = zero(T)
         end
         h2osfc[c] = h
