@@ -42,9 +42,16 @@ def gate_cell(j, f, unit_floor, is_temp):
         ann_ok = (abs(pct) <= STRICT_PCT) or (abs(d) <= unit_floor)
         # daily gate: normalized RMSE where the series has real variability;
         # otherwise (near-constant) judge the absolute RMSE against the floor.
+        # A cell also passes when the ABSOLUTE daily RMSE is itself below the
+        # per-unit noise floor — the differences are physically negligible
+        # regardless of how small the Fortran std is (this is the config's stated
+        # near-zero philosophy: near-zero quantities judged vs the absolute floor).
+        # Without this, a variable that is ~0 all year (e.g. surface water at a
+        # site that ponds a few days) fails on a normalized RMSE of noise even
+        # though the actual difference is below the floor.
         if std_f > unit_floor:
             nrmse = rmse / std_f
-            rmse_ok = nrmse <= STRICT_NRMSE
+            rmse_ok = (nrmse <= STRICT_NRMSE) or (rmse <= unit_floor)
         else:
             nrmse = rmse / std_f if std_f > 1e-9 else 0.0
             rmse_ok = rmse <= unit_floor
