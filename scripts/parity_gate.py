@@ -62,8 +62,13 @@ for key, fh0, jnc, lab, biome in DOMAINS:
     dj, df = Dataset(jpath), Dataset(fh0)
     jo, fo = date_ord(dj), date_ord(df)
     common = np.intersect1d(jo, fo)
-    ji = np.array([np.where(jo == c)[0][0] for c in common])
-    fi = np.array([np.where(fo == c)[0][0] for c in common])
+    if len(common) < 3:
+        # Reference and Julia output do not share enough dates to score
+        # (e.g. a truncated or wrong-year Fortran reference).
+        pending.append((key, f"{lab} (no date overlap: julia {jo[0]}-{jo[-1]} vs fortran {fo[0]}-{fo[-1]})"))
+        continue
+    ji = np.array([np.where(jo == c)[0][0] for c in common], dtype=int)
+    fi = np.array([np.where(fo == c)[0][0] for c in common], dtype=int)
     npass = ntot = 0
     for jn, fn, vl, grp, floor in VARS:
         sc = SCALE.get(jn, 1)
