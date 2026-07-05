@@ -112,16 +112,16 @@ TEMP_VARS = {"TSA", "T_GRND", "TV", "TSOI_10CM"}
 # scientific-parity declaration but ALWAYS listed in the report. Add a cell here
 # only with a written mechanism, never to hide an unexplained miss.
 DOCUMENTED_EXCEPTIONS = {
-    ("Savanna", "FSH_V"): (
-        "Sparse-canopy vegetation sensible-heat partition: annual mean residual is "
-        "~0.62 W/m2 on a ~3.9 W/m2 component, while FSH_G is ~0.01 W/m2 and total "
-        "FSH is ~0.63 W/m2. Formula/history aggregation match Fortran; the "
-        "remaining split is a coupled canopy-air-temperature/ground-state floor."),
+    # NOTE: the former ("Savanna", "FSH_V") exception is RESOLVED — it was not a
+    # coupled-solve floor but a real bug: on snow-free ground a subnormal frac_sno
+    # (~1e-18, exactly 0 in Fortran) tripped the z0mg `frac_sno > 0` snow-roughness
+    # branch, giving z0mg=zsno instead of zlnd and ~halving rah2 at dry/low-LAI
+    # canopies. Fixed in friction_velocity.jl (FRAC_SNO_TRACE_FLOOR); Donga now 69/69.
     ("Baltimore", "SNOW_DEPTH"): (
         "Snow-covered-area depth diagnostic over thin/intermittent urban snow. SWE, "
         "snow ice/liquid, snowmelt, and snow fraction are already close; the annual "
-        "mean depth residual is ~1.9 mm and the area-averaged SNOWDP residual is "
-        "~0.22 mm."),
+        "mean depth residual is now ~4% (was ~12% before the z0mg fix) — the "
+        "remaining gap is the thin-snow / melt-out depth relaxation over trace snow."),
 }
 
 def date_ord(ds):

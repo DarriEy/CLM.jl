@@ -4,6 +4,12 @@
 # initialization, roughness length setting, and friction velocity calculation.
 # ==========================================================================
 
+# Snow-cover fraction below which a column is treated as snow-free when picking
+# the ground momentum roughness (zsno vs zlnd). Fortran's frac_sno is exactly 0
+# when snow is absent; Julia's snow-water bookkeeping can leave a subnormal
+# (~1e-18) that must not read as snow. Far below physical snow-cover onset (~1e-2).
+const FRAC_SNO_TRACE_FLOOR = 1.0e-11
+
 """
     FrictionVelocityData
 
@@ -435,15 +441,24 @@ in `FrictionVelocityMod.F90`.
         c = lo + i - 1
         if mask[c]
             T = eltype(z0mg_col)
+            # Fortran tests frac_sno > 0 on a value that is exactly 0 when snow is
+            # absent. Julia's snow-water bookkeeping can leave a physically-
+            # negligible subnormal frac_sno (~1e-18) that would flip this discrete
+            # branch to the snow roughness (zsno ≈ 0.0024) instead of the soil
+            # roughness (zlnd ≈ 0.01), ~halving the below-canopy resistance rah2 at
+            # low-LAI/dry canopies and warm-biasing the coupled canopy-air solve.
+            # A tiny threshold reproduces Fortran's exact-zero behaviour on every
+            # real case (physical snow cover onset is O(1e-2)).
+            has_snow = frac_sno[c] > T(FRAC_SNO_TRACE_FLOOR)
             if z0method == 1  # ZengWang2007
-                if frac_sno[c] > zero(T)
+                if has_snow
                     z0mg_col[c] = zsno
                 else
                     z0mg_col[c] = zlnd
                 end
             elseif z0method == 2  # Meier2022
                 l = col_landunit[c]
-                if frac_sno[c] > zero(T)
+                if has_snow
                     if use_snowmelt
                         if snomelt_accum[c] < T(1.0e-5)
                             z0mg_col[c] = exp(-b1_param * rpi * T(0.5) + b4_param) * T(1.0e-3)
