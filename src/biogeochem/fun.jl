@@ -449,40 +449,181 @@ end
     end
 end
 
-# Phase-2 substep solver (one thread per patch): the loop-carried ECM/AM ×
-# fixer/non-fixer × soil-level machinery + retranslocation + the flux-conversion
-# tail. Per-patch scratch (accumulators, totals, ecm/am, the always-zero retrans
-# terms) are THREAD-LOCAL SCALARS (~46 arrays eliminated); only the genuinely
-# per-(p,j)-persistent working arrays + inputs + outputs stay in the bundle `B`.
-# This both simplifies the body and cuts the array count toward Metal's ~31-buffer
-# kernel limit (remaining bundle arrays get dense-tensor packed next). Every write
-# is to the thread's own patch → race-free, CPU byte-identical to the host loop.
-@kernel function _fun_p2_kernel!(@Const(mask_soilp), @Const(column), @Const(ivt), B,
+# ---- Dense-tensor layout for the Metal-buffer-fit substep kernel -------------
+# Metal caps compute-kernel args at ~31 buffers; the substep touches ~103 arrays.
+# Pack them into a handful of dense tensors and alias each logical array to a
+# @view slice at the top of the kernel (verified: @view slices work inside a
+# Metal kernel), so the solver body stays byte-identical. Index maps:
+const _fSL = (cost_fix_local=1, cost_active_no3=2, cost_active_nh4=3, cost_nonmyc_no3=4,
+    cost_nonmyc_nh4=5, npp_to_fixation=6, npp_to_active_nh4=7, npp_to_nonmyc_nh4=8,
+    npp_to_active_no3=9, npp_to_nonmyc_no3=10, npp_frac_to_fixation=11,
+    npp_frac_to_active_nh4=12, npp_frac_to_nonmyc_nh4=13, npp_frac_to_active_no3=14,
+    npp_frac_to_nonmyc_no3=15, n_from_fixation=16, n_from_active_nh4=17,
+    n_from_nonmyc_nh4=18, n_from_active_no3=19, n_from_nonmyc_no3=20, n_active_no3_vr=21,
+    n_active_nh4_vr=22, n_nonmyc_no3_vr=23, n_nonmyc_nh4_vr=24)              # [p,j,K]
+const _NFSL = 24
+const _fPFT = (leafcn=1, grperc=2, FUN_fracfixers=3, c3psn=4, a_fix=5, b_fix=6, c_fix=7,
+    s_fix=8, kc_nonmyc=9, kn_nonmyc=10, fun_cn_flex_a=11, fun_cn_flex_b=12,
+    fun_cn_flex_c=13, season_decid=14, stress_decid=15)                     # [vt,K]
+const _NFPFT = 15
+const _fIV = (leafc=1, leafc_storage=2, leafn=3, leafn_storage=4, retransn=5, plantCN=6,
+    availc=7, availc_pool=8, plant_ndemand_pool=9, n_passive_acc=10)        # [p,K]
+const _NFIV = 10
+const _fIJ = (crootfr=1, rootc_dens=2, n_passive_no3_vr=3, n_passive_nh4_vr=4)  # [p,j,K]
+const _NFIJ = 4
+const _fIPI = (permyc=1, kc_active=2, kn_active=3, litterfall_c_step=4,
+    litterfall_n_step=5, n_passive_step=6)                                  # [p,istp,K]
+const _NFIPI = 6
+const _fOV = (Npassive=1, Nfix=2, retransn_to_npool=3, free_retransn_to_npool=4, Nretrans=5,
+    Nactive_no3=6, Nactive_nh4=7, Necm_no3=8, Necm_nh4=9, Necm=10, Nam_no3=11, Nam_nh4=12,
+    Nam=13, Nnonmyc_no3=14, Nnonmyc_nh4=15, Nnonmyc=16, plant_ndemand_retrans=17,
+    Nuptake=18, Nactive=19, sminn_to_plant_fun=20, nuptake_npp_fraction=21, cost_nfix=22,
+    cost_nactive=23, cost_nretrans=24, npp_Nactive_no3=25, npp_Nactive_nh4=26,
+    npp_Nnonmyc_no3=27, npp_Nnonmyc_nh4=28, npp_Nactive=29, npp_Nnonmyc=30, npp_Nfix=31,
+    npp_Nretrans=32, soilc_change=33, npp_burnedoff=34, npp_Nuptake=35, npp_growth=36)  # [p,K]
+const _NFOV = 36  # OVR[p,j,1:2] = sminn_fun_no3_vr, sminn_fun_nh4_vr
+
+# Pack the per-vt pftcon params into PFT[vt,K].
+@kernel function _fun_pack_pft!(PFT, @Const(leafcn), @Const(grperc), @Const(FUN_fracfixers),
+        @Const(c3psn), @Const(a_fix), @Const(b_fix), @Const(c_fix), @Const(s_fix),
+        @Const(kc_nonmyc), @Const(kn_nonmyc), @Const(fun_cn_flex_a), @Const(fun_cn_flex_b),
+        @Const(fun_cn_flex_c), @Const(season_decid), @Const(stress_decid))
+    v = @index(Global)
+    @inbounds begin
+        PFT[v,1]=leafcn[v]; PFT[v,2]=grperc[v]; PFT[v,3]=FUN_fracfixers[v]; PFT[v,4]=c3psn[v]
+        PFT[v,5]=a_fix[v]; PFT[v,6]=b_fix[v]; PFT[v,7]=c_fix[v]; PFT[v,8]=s_fix[v]
+        PFT[v,9]=kc_nonmyc[v]; PFT[v,10]=kn_nonmyc[v]; PFT[v,11]=fun_cn_flex_a[v]
+        PFT[v,12]=fun_cn_flex_b[v]; PFT[v,13]=fun_cn_flex_c[v]; PFT[v,14]=season_decid[v]
+        PFT[v,15]=stress_decid[v]
+    end
+end
+
+# Pack per-patch inputs into IV[p,K] and seed OV plant_ndemand_retrans (col 17).
+@kernel function _fun_pack_iv!(IV, OV, @Const(mask), @Const(leafc), @Const(leafc_storage),
+        @Const(leafn), @Const(leafn_storage), @Const(retransn), @Const(plantCN),
+        @Const(availc), @Const(availc_pool), @Const(plant_ndemand_pool),
+        @Const(n_passive_acc), @Const(plant_ndemand_retrans))
+    p = @index(Global)
+    @inbounds if mask[p]
+        IV[p,1]=leafc[p]; IV[p,2]=leafc_storage[p]; IV[p,3]=leafn[p]; IV[p,4]=leafn_storage[p]
+        IV[p,5]=retransn[p]; IV[p,6]=plantCN[p]; IV[p,7]=availc[p]; IV[p,8]=availc_pool[p]
+        IV[p,9]=plant_ndemand_pool[p]; IV[p,10]=n_passive_acc[p]
+        OV[p,17]=plant_ndemand_retrans[p]   # substep does OV[p,17] /= dt
+    end
+end
+
+# Pack per-(p,j) inputs into IJ[p,j,K].
+@kernel function _fun_pack_ij!(IJ, @Const(mask), @Const(crootfr), @Const(rootc_dens),
+        @Const(n_passive_no3_vr), @Const(n_passive_nh4_vr), nlevdecomp::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        for j in 1:nlevdecomp
+            IJ[p,j,1]=crootfr[p,j]; IJ[p,j,2]=rootc_dens[p,j]
+            IJ[p,j,3]=n_passive_no3_vr[p,j]; IJ[p,j,4]=n_passive_nh4_vr[p,j]
+        end
+    end
+end
+
+# Pack per-(p,istp) inputs into IPI[p,istp,K].
+@kernel function _fun_pack_ipi!(IPI, @Const(mask), @Const(permyc), @Const(kc_active),
+        @Const(kn_active), @Const(litterfall_c_step), @Const(litterfall_n_step),
+        @Const(n_passive_step), nstp::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        for istp in 1:nstp
+            IPI[p,istp,1]=permyc[p,istp]; IPI[p,istp,2]=kc_active[p,istp]
+            IPI[p,istp,3]=kn_active[p,istp]; IPI[p,istp,4]=litterfall_c_step[p,istp]
+            IPI[p,istp,5]=litterfall_n_step[p,istp]; IPI[p,istp,6]=n_passive_step[p,istp]
+        end
+    end
+end
+
+# Unpack OV[p,K] / OVR[p,j,K] back into the cnveg flux fields.
+@kernel function _fun_unpack!(@Const(mask), @Const(OV), @Const(OVR),
+        Npassive, Nfix, retransn_to_npool, free_retransn_to_npool, Nretrans,
+        Nactive_no3, Nactive_nh4, Necm_no3, Necm_nh4, Necm, Nam_no3, Nam_nh4, Nam,
+        Nnonmyc_no3, Nnonmyc_nh4, Nnonmyc, plant_ndemand_retrans, Nuptake, Nactive,
+        sminn_to_plant_fun, nuptake_npp_fraction, cost_nfix, cost_nactive, cost_nretrans,
+        npp_Nactive_no3, npp_Nactive_nh4, npp_Nnonmyc_no3, npp_Nnonmyc_nh4, npp_Nactive,
+        npp_Nnonmyc, npp_Nfix, npp_Nretrans, soilc_change, npp_burnedoff, npp_Nuptake,
+        npp_growth, sminn_fun_no3_vr, sminn_fun_nh4_vr, nlevdecomp::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        Npassive[p]=OV[p,1]; Nfix[p]=OV[p,2]; retransn_to_npool[p]=OV[p,3]
+        free_retransn_to_npool[p]=OV[p,4]; Nretrans[p]=OV[p,5]; Nactive_no3[p]=OV[p,6]
+        Nactive_nh4[p]=OV[p,7]; Necm_no3[p]=OV[p,8]; Necm_nh4[p]=OV[p,9]; Necm[p]=OV[p,10]
+        Nam_no3[p]=OV[p,11]; Nam_nh4[p]=OV[p,12]; Nam[p]=OV[p,13]; Nnonmyc_no3[p]=OV[p,14]
+        Nnonmyc_nh4[p]=OV[p,15]; Nnonmyc[p]=OV[p,16]; plant_ndemand_retrans[p]=OV[p,17]
+        Nuptake[p]=OV[p,18]; Nactive[p]=OV[p,19]; sminn_to_plant_fun[p]=OV[p,20]
+        nuptake_npp_fraction[p]=OV[p,21]; cost_nfix[p]=OV[p,22]; cost_nactive[p]=OV[p,23]
+        cost_nretrans[p]=OV[p,24]; npp_Nactive_no3[p]=OV[p,25]; npp_Nactive_nh4[p]=OV[p,26]
+        npp_Nnonmyc_no3[p]=OV[p,27]; npp_Nnonmyc_nh4[p]=OV[p,28]; npp_Nactive[p]=OV[p,29]
+        npp_Nnonmyc[p]=OV[p,30]; npp_Nfix[p]=OV[p,31]; npp_Nretrans[p]=OV[p,32]
+        soilc_change[p]=OV[p,33]; npp_burnedoff[p]=OV[p,34]; npp_Nuptake[p]=OV[p,35]
+        npp_growth[p]=OV[p,36]
+        for j in 1:nlevdecomp
+            sminn_fun_no3_vr[p,j]=OVR[p,j,1]; sminn_fun_nh4_vr[p,j]=OVR[p,j,2]
+        end
+    end
+end
+
+# Phase-2 substep solver (one thread per patch). Reads packed dense tensors, aliases
+# each logical array to a @view slice (Metal-safe), runs the loop-carried ECM/AM ×
+# fixer × level solver + retrans while-loop + flux tail on the thread's own patch.
+@kernel function _fun_p2_kernel!(@Const(mask_soilp), @Const(column), @Const(ivt),
+        @Const(PFT), @Const(IV), @Const(IJ), @Const(IPI), @Const(sminn_no3_layer_step),
+        @Const(sminn_nh4_layer_step), @Const(t_soisno), @Const(dzsoi), SL, OV, OVR,
         dt, nlevdecomp::Int, smallValue, spval, npcropmin::Int,
         use_flexiblecn::Bool, use_matrixcn::Bool)
     p = @index(Global)
     @inbounds if mask_soilp[p]
-        (; leafcn, grperc_pft, FUN_fracfixers_pft, c3psn_pft, a_fix_pft, b_fix_pft,
-           c_fix_pft, s_fix_pft, kc_nonmyc_pft, kn_nonmyc_pft, fun_cn_flex_a_pft,
-           fun_cn_flex_b_pft, fun_cn_flex_c_pft, season_decid, stress_decid,
-           leafc, leafc_storage, leafn, leafn_storage, retransn, plantCN, crootfr,
-           t_soisno, dzsoi, availc, permyc, kc_active, kn_active, availc_pool,
-           plant_ndemand_pool, litterfall_c_step, litterfall_n_step, rootc_dens,
-           sminn_no3_layer_step, sminn_nh4_layer_step, n_passive_step, n_passive_acc,
-           n_passive_no3_vr, n_passive_nh4_vr, cost_fix_local, cost_active_no3,
-           cost_active_nh4, cost_nonmyc_no3, cost_nonmyc_nh4, npp_to_fixation,
-           npp_to_active_nh4, npp_to_nonmyc_nh4, npp_to_active_no3, npp_to_nonmyc_no3,
-           npp_frac_to_fixation, npp_frac_to_active_nh4, npp_frac_to_nonmyc_nh4,
-           npp_frac_to_active_no3, npp_frac_to_nonmyc_no3, n_from_fixation,
-           n_from_active_nh4, n_from_nonmyc_nh4, n_from_active_no3, n_from_nonmyc_no3,
-           n_active_no3_vr, n_active_nh4_vr, n_nonmyc_no3_vr, n_nonmyc_nh4_vr,
-           Npassive, Nfix, retransn_to_npool, free_retransn_to_npool, Nretrans,
-           sminn_fun_no3_vr, sminn_fun_nh4_vr, Nactive_no3, Nactive_nh4, Necm_no3,
-           Necm_nh4, Necm, Nam_no3, Nam_nh4, Nam, Nnonmyc_no3, Nnonmyc_nh4, Nnonmyc,
-           plant_ndemand_retrans, Nuptake, Nactive, sminn_to_plant_fun, nuptake_npp_fraction,
-           cost_nfix, cost_nactive, cost_nretrans, npp_Nactive_no3, npp_Nactive_nh4,
-           npp_Nnonmyc_no3, npp_Nnonmyc_nh4, npp_Nactive, npp_Nnonmyc, npp_Nfix,
-           npp_Nretrans, soilc_change, npp_burnedoff, npp_Nuptake, npp_growth) = B
+        # pftcon (PFT[vt,K])
+        leafcn=@view PFT[:,1]; grperc_pft=@view PFT[:,2]; FUN_fracfixers_pft=@view PFT[:,3]
+        c3psn_pft=@view PFT[:,4]; a_fix_pft=@view PFT[:,5]; b_fix_pft=@view PFT[:,6]
+        c_fix_pft=@view PFT[:,7]; s_fix_pft=@view PFT[:,8]; kc_nonmyc_pft=@view PFT[:,9]
+        kn_nonmyc_pft=@view PFT[:,10]; fun_cn_flex_a_pft=@view PFT[:,11]
+        fun_cn_flex_b_pft=@view PFT[:,12]; fun_cn_flex_c_pft=@view PFT[:,13]
+        season_decid=@view PFT[:,14]; stress_decid=@view PFT[:,15]
+        # per-patch inputs (IV[p,K])
+        leafc=@view IV[:,1]; leafc_storage=@view IV[:,2]; leafn=@view IV[:,3]
+        leafn_storage=@view IV[:,4]; retransn=@view IV[:,5]; plantCN=@view IV[:,6]
+        availc=@view IV[:,7]; availc_pool=@view IV[:,8]; plant_ndemand_pool=@view IV[:,9]
+        n_passive_acc=@view IV[:,10]
+        # per-(p,j) inputs (IJ[p,j,K])
+        crootfr=@view IJ[:,:,1]; rootc_dens=@view IJ[:,:,2]; n_passive_no3_vr=@view IJ[:,:,3]
+        n_passive_nh4_vr=@view IJ[:,:,4]
+        # per-(p,istp) inputs (IPI[p,istp,K])
+        permyc=@view IPI[:,:,1]; kc_active=@view IPI[:,:,2]; kn_active=@view IPI[:,:,3]
+        litterfall_c_step=@view IPI[:,:,4]; litterfall_n_step=@view IPI[:,:,5]
+        n_passive_step=@view IPI[:,:,6]
+        # per-(p,j) persistent scratch (SL[p,j,K])
+        cost_fix_local=@view SL[:,:,1]; cost_active_no3=@view SL[:,:,2]
+        cost_active_nh4=@view SL[:,:,3]; cost_nonmyc_no3=@view SL[:,:,4]
+        cost_nonmyc_nh4=@view SL[:,:,5]; npp_to_fixation=@view SL[:,:,6]
+        npp_to_active_nh4=@view SL[:,:,7]; npp_to_nonmyc_nh4=@view SL[:,:,8]
+        npp_to_active_no3=@view SL[:,:,9]; npp_to_nonmyc_no3=@view SL[:,:,10]
+        npp_frac_to_fixation=@view SL[:,:,11]; npp_frac_to_active_nh4=@view SL[:,:,12]
+        npp_frac_to_nonmyc_nh4=@view SL[:,:,13]; npp_frac_to_active_no3=@view SL[:,:,14]
+        npp_frac_to_nonmyc_no3=@view SL[:,:,15]; n_from_fixation=@view SL[:,:,16]
+        n_from_active_nh4=@view SL[:,:,17]; n_from_nonmyc_nh4=@view SL[:,:,18]
+        n_from_active_no3=@view SL[:,:,19]; n_from_nonmyc_no3=@view SL[:,:,20]
+        n_active_no3_vr=@view SL[:,:,21]; n_active_nh4_vr=@view SL[:,:,22]
+        n_nonmyc_no3_vr=@view SL[:,:,23]; n_nonmyc_nh4_vr=@view SL[:,:,24]
+        # outputs (OV[p,K], OVR[p,j,K])
+        Npassive=@view OV[:,1]; Nfix=@view OV[:,2]; retransn_to_npool=@view OV[:,3]
+        free_retransn_to_npool=@view OV[:,4]; Nretrans=@view OV[:,5]; Nactive_no3=@view OV[:,6]
+        Nactive_nh4=@view OV[:,7]; Necm_no3=@view OV[:,8]; Necm_nh4=@view OV[:,9]
+        Necm=@view OV[:,10]; Nam_no3=@view OV[:,11]; Nam_nh4=@view OV[:,12]; Nam=@view OV[:,13]
+        Nnonmyc_no3=@view OV[:,14]; Nnonmyc_nh4=@view OV[:,15]; Nnonmyc=@view OV[:,16]
+        plant_ndemand_retrans=@view OV[:,17]; Nuptake=@view OV[:,18]; Nactive=@view OV[:,19]
+        sminn_to_plant_fun=@view OV[:,20]; nuptake_npp_fraction=@view OV[:,21]
+        cost_nfix=@view OV[:,22]; cost_nactive=@view OV[:,23]; cost_nretrans=@view OV[:,24]
+        npp_Nactive_no3=@view OV[:,25]; npp_Nactive_nh4=@view OV[:,26]
+        npp_Nnonmyc_no3=@view OV[:,27]; npp_Nnonmyc_nh4=@view OV[:,28]; npp_Nactive=@view OV[:,29]
+        npp_Nnonmyc=@view OV[:,30]; npp_Nfix=@view OV[:,31]; npp_Nretrans=@view OV[:,32]
+        soilc_change=@view OV[:,33]; npp_burnedoff=@view OV[:,34]; npp_Nuptake=@view OV[:,35]
+        npp_growth=@view OV[:,36]
+        sminn_fun_no3_vr=@view OVR[:,:,1]; sminn_fun_nh4_vr=@view OVR[:,:,2]
 
         c = column[p]
         vt = ivt[p] + 1
@@ -1094,66 +1235,55 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
         cnveg_cs.leafc_storage_patch, cnveg_cf.availc_patch, soilstate.crootfr_patch,
         rootC, cnveg_nf.plant_ndemand_patch, ndays_off, steppday, nlevdecomp, dt)
 
-    B_fun = (; leafcn, grperc_pft, FUN_fracfixers_pft, c3psn_pft, a_fix_pft, b_fix_pft,
-        c_fix_pft, s_fix_pft, kc_nonmyc_pft, kn_nonmyc_pft, fun_cn_flex_a_pft,
-        fun_cn_flex_b_pft, fun_cn_flex_c_pft, season_decid, stress_decid,
-        leafc = cnveg_cs.leafc_patch, leafc_storage = cnveg_cs.leafc_storage_patch,
-        leafn = cnveg_ns.leafn_patch, leafn_storage = cnveg_ns.leafn_storage_patch,
-        retransn = cnveg_ns.retransn_patch, plantCN = cnveg_state.plantCN_patch,
-        crootfr = soilstate.crootfr_patch, t_soisno = temperature.t_soisno_col,
-        dzsoi = dzsoi_decomp_vals, availc = cnveg_cf.availc_patch,
-        permyc, kc_active, kn_active, availc_pool, plant_ndemand_pool, litterfall_c_step,
-        litterfall_n_step, rootc_dens, sminn_no3_layer_step, sminn_nh4_layer_step,
-        n_passive_step, n_passive_acc, n_passive_no3_vr, n_passive_nh4_vr, cost_fix_local,
-        cost_active_no3, cost_active_nh4, cost_nonmyc_no3, cost_nonmyc_nh4, npp_to_fixation,
-        npp_to_active_nh4, npp_to_nonmyc_nh4, npp_to_active_no3, npp_to_nonmyc_no3,
-        npp_frac_to_fixation, npp_frac_to_active_nh4, npp_frac_to_nonmyc_nh4,
-        npp_frac_to_active_no3, npp_frac_to_nonmyc_no3, n_exch_fixation, n_exch_active_nh4,
-        n_exch_nonmyc_nh4, n_exch_active_no3, n_exch_nonmyc_no3, n_from_fixation,
-        n_from_active_nh4, n_from_nonmyc_nh4, n_from_active_no3, n_from_nonmyc_no3,
-        n_active_no3_acc, n_active_nh4_acc, n_nonmyc_no3_acc, n_nonmyc_nh4_acc, n_fix_acc,
-        n_retrans_acc, free_nretrans_acc, npp_active_no3_acc, npp_active_nh4_acc,
-        npp_nonmyc_no3_acc, npp_nonmyc_nh4_acc, npp_fix_acc, npp_retrans_acc, nt_uptake,
-        npp_uptake, plant_ndemand_pool_step, npp_remaining, n_active_no3_acc_total,
-        n_active_nh4_acc_total, n_nonmyc_no3_acc_total, n_nonmyc_nh4_acc_total,
-        n_fix_acc_total, n_retrans_acc_total, free_Nretrans_local, npp_active_no3_acc_total,
-        npp_active_nh4_acc_total, npp_nonmyc_no3_acc_total, npp_nonmyc_nh4_acc_total,
-        npp_fix_acc_total, npp_retrans_acc_total, n_ecm_no3_acc, n_ecm_nh4_acc, n_am_no3_acc,
-        n_am_nh4_acc, n_active_no3_vr, n_active_nh4_vr, n_nonmyc_no3_vr, n_nonmyc_nh4_vr,
-        n_active_no3_retrans_total, n_active_nh4_retrans_total, n_nonmyc_no3_retrans_total,
-        n_nonmyc_nh4_retrans_total, npp_active_no3_retrans_total, npp_active_nh4_retrans_total,
-        npp_nonmyc_no3_retrans_total, npp_nonmyc_nh4_retrans_total, n_am_no3_retrans,
-        n_am_nh4_retrans, n_ecm_no3_retrans, n_ecm_nh4_retrans,
-        Npassive = cnveg_nf.Npassive_patch, Nfix = cnveg_nf.Nfix_patch,
-        retransn_to_npool = cnveg_nf.retransn_to_npool_patch,
-        free_retransn_to_npool = cnveg_nf.free_retransn_to_npool_patch,
-        Nretrans = cnveg_nf.Nretrans_patch,
-        sminn_fun_no3_vr = cnveg_nf.sminn_to_plant_fun_no3_vr_patch,
-        sminn_fun_nh4_vr = cnveg_nf.sminn_to_plant_fun_nh4_vr_patch,
-        Nactive_no3 = cnveg_nf.Nactive_no3_patch, Nactive_nh4 = cnveg_nf.Nactive_nh4_patch,
-        Necm_no3 = cnveg_nf.Necm_no3_patch, Necm_nh4 = cnveg_nf.Necm_nh4_patch,
-        Necm = cnveg_nf.Necm_patch, Nam_no3 = cnveg_nf.Nam_no3_patch,
-        Nam_nh4 = cnveg_nf.Nam_nh4_patch, Nam = cnveg_nf.Nam_patch,
-        Nnonmyc_no3 = cnveg_nf.Nnonmyc_no3_patch, Nnonmyc_nh4 = cnveg_nf.Nnonmyc_nh4_patch,
-        Nnonmyc = cnveg_nf.Nnonmyc_patch,
-        plant_ndemand_retrans = cnveg_nf.plant_ndemand_retrans_patch,
-        Nuptake = cnveg_nf.Nuptake_patch, Nactive = cnveg_nf.Nactive_patch,
-        sminn_to_plant_fun = cnveg_nf.sminn_to_plant_fun_patch,
-        nuptake_npp_fraction = cnveg_nf.nuptake_npp_fraction_patch,
-        cost_nfix = cnveg_nf.cost_nfix_patch, cost_nactive = cnveg_nf.cost_nactive_patch,
-        cost_nretrans = cnveg_nf.cost_nretrans_patch,
-        npp_Nactive_no3 = cnveg_cf.npp_Nactive_no3_patch,
-        npp_Nactive_nh4 = cnveg_cf.npp_Nactive_nh4_patch,
-        npp_Nnonmyc_no3 = cnveg_cf.npp_Nnonmyc_no3_patch,
-        npp_Nnonmyc_nh4 = cnveg_cf.npp_Nnonmyc_nh4_patch,
-        npp_Nactive = cnveg_cf.npp_Nactive_patch, npp_Nnonmyc = cnveg_cf.npp_Nnonmyc_patch,
-        npp_Nfix = cnveg_cf.npp_Nfix_patch, npp_Nretrans = cnveg_cf.npp_Nretrans_patch,
-        soilc_change = cnveg_cf.soilc_change_patch, npp_burnedoff = cnveg_cf.npp_burnedoff_patch,
-        npp_Nuptake = cnveg_cf.npp_Nuptake_patch, npp_growth = cnveg_cf.npp_growth_patch)
+    # ---- Phase-2 substep: pack ~103 arrays into dense tensors (Metal ≤31 buffers),
+    #      run the solver, unpack. @view slices alias each logical array in the kernel
+    #      so the solver body is byte-identical to the host loop. ----
+    npft_ct = length(leafcn)
+    npb = last(bounds_p)
+    PFT_t = similar(availc_pool, FT, npft_ct, _NFPFT)
+    IV_t  = similar(availc_pool, FT, npb, _NFIV);            fill!(IV_t, zero(FT))
+    IJ_t  = similar(availc_pool, FT, npb, nlevdecomp, _NFIJ)
+    IPI_t = similar(availc_pool, FT, npb, NSTP, _NFIPI)
+    SL_t  = similar(availc_pool, FT, npb, nlevdecomp, _NFSL); fill!(SL_t, zero(FT))
+    OV_t  = similar(availc_pool, FT, npb, _NFOV);             fill!(OV_t, zero(FT))
+    OVR_t = similar(availc_pool, FT, npb, nlevdecomp, 2);     fill!(OVR_t, zero(FT))
 
-    _launch!(_fun_p2_kernel!, mask_soilp, patch.column, ivt, B_fun, dt, nlevdecomp,
-        smallValue, spval, npcropmin, use_flexiblecn, use_matrixcn)
+    _launch!(_fun_pack_pft!, PFT_t, leafcn, grperc_pft, FUN_fracfixers_pft, c3psn_pft,
+        a_fix_pft, b_fix_pft, c_fix_pft, s_fix_pft, kc_nonmyc_pft, kn_nonmyc_pft,
+        fun_cn_flex_a_pft, fun_cn_flex_b_pft, fun_cn_flex_c_pft, season_decid, stress_decid;
+        ndrange=npft_ct)
+    _launch!(_fun_pack_iv!, IV_t, OV_t, mask_soilp, cnveg_cs.leafc_patch,
+        cnveg_cs.leafc_storage_patch, cnveg_ns.leafn_patch, cnveg_ns.leafn_storage_patch,
+        cnveg_ns.retransn_patch, cnveg_state.plantCN_patch, cnveg_cf.availc_patch,
+        availc_pool, plant_ndemand_pool, n_passive_acc, cnveg_nf.plant_ndemand_retrans_patch;
+        ndrange=npb)
+    _launch!(_fun_pack_ij!, IJ_t, mask_soilp, soilstate.crootfr_patch, rootc_dens,
+        n_passive_no3_vr, n_passive_nh4_vr, nlevdecomp; ndrange=npb)
+    _launch!(_fun_pack_ipi!, IPI_t, mask_soilp, permyc, kc_active, kn_active,
+        litterfall_c_step, litterfall_n_step, n_passive_step, NSTP; ndrange=npb)
 
+    _launch!(_fun_p2_kernel!, mask_soilp, patch.column, ivt, PFT_t, IV_t, IJ_t, IPI_t,
+        sminn_no3_layer_step, sminn_nh4_layer_step, temperature.t_soisno_col,
+        dzsoi_decomp_vals, SL_t, OV_t, OVR_t, dt, nlevdecomp, smallValue, spval,
+        npcropmin, use_flexiblecn, use_matrixcn)
+
+    _launch!(_fun_unpack!, mask_soilp, OV_t, OVR_t, cnveg_nf.Npassive_patch,
+        cnveg_nf.Nfix_patch, cnveg_nf.retransn_to_npool_patch,
+        cnveg_nf.free_retransn_to_npool_patch, cnveg_nf.Nretrans_patch,
+        cnveg_nf.Nactive_no3_patch, cnveg_nf.Nactive_nh4_patch, cnveg_nf.Necm_no3_patch,
+        cnveg_nf.Necm_nh4_patch, cnveg_nf.Necm_patch, cnveg_nf.Nam_no3_patch,
+        cnveg_nf.Nam_nh4_patch, cnveg_nf.Nam_patch, cnveg_nf.Nnonmyc_no3_patch,
+        cnveg_nf.Nnonmyc_nh4_patch, cnveg_nf.Nnonmyc_patch,
+        cnveg_nf.plant_ndemand_retrans_patch, cnveg_nf.Nuptake_patch, cnveg_nf.Nactive_patch,
+        cnveg_nf.sminn_to_plant_fun_patch, cnveg_nf.nuptake_npp_fraction_patch,
+        cnveg_nf.cost_nfix_patch, cnveg_nf.cost_nactive_patch, cnveg_nf.cost_nretrans_patch,
+        cnveg_cf.npp_Nactive_no3_patch, cnveg_cf.npp_Nactive_nh4_patch,
+        cnveg_cf.npp_Nnonmyc_no3_patch, cnveg_cf.npp_Nnonmyc_nh4_patch,
+        cnveg_cf.npp_Nactive_patch, cnveg_cf.npp_Nnonmyc_patch, cnveg_cf.npp_Nfix_patch,
+        cnveg_cf.npp_Nretrans_patch, cnveg_cf.soilc_change_patch, cnveg_cf.npp_burnedoff_patch,
+        cnveg_cf.npp_Nuptake_patch, cnveg_cf.npp_growth_patch,
+        cnveg_nf.sminn_to_plant_fun_no3_vr_patch, cnveg_nf.sminn_to_plant_fun_nh4_vr_patch,
+        nlevdecomp; ndrange=npb)
 
     # ======================================================================
     # Phase 3: Patch-to-column aggregation (p2c) — reuse the generic zero-init +
