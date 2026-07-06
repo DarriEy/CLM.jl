@@ -1159,21 +1159,19 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
     end # PFT loop
 
     # ======================================================================
-    # Phase 3: Patch-to-column aggregation (simplified p2c)
+    # Phase 3: Patch-to-column aggregation (p2c) — reuse the generic zero-init +
+    # atomic scatter helpers (n_dynamics.jl). Zero the column accumulators, then
+    # each active patch scatters patch*wtcol into its column (atomic on GPU, CPU
+    # ascending-p == the old host += loop).
     # ======================================================================
-    for c in bounds_c
-        mask_soilc[c] || continue
-        soilbgc_cf.soilc_change_col[c] = 0.0
-        soilbgc_nf.nfix_to_sminn_col[c] = 0.0
-    end
-
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        wtcol = patch.wtcol[p]
-        soilbgc_cf.soilc_change_col[c]  += cnveg_cf.soilc_change_patch[p] * wtcol
-        soilbgc_nf.nfix_to_sminn_col[c] += cnveg_nf.Nfix_patch[p] * wtcol
-    end
+    ndyn_col_zero!(soilbgc_cf.soilc_change_col, mask_soilc)
+    ndyn_col_zero!(soilbgc_nf.nfix_to_sminn_col, mask_soilc)
+    ndyn_p2c_scatter!(soilbgc_cf.soilc_change_col, mask_soilp, patch.column,
+                      cnveg_cf.soilc_change_patch, patch.wtcol,
+                      first(bounds_p), last(bounds_p))
+    ndyn_p2c_scatter!(soilbgc_nf.nfix_to_sminn_col, mask_soilp, patch.column,
+                      cnveg_nf.Nfix_patch, patch.wtcol,
+                      first(bounds_p), last(bounds_p))
 
     return nothing
 end
