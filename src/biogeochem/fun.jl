@@ -114,13 +114,12 @@ end
 Cost of fixing N by nodules (gC/gN). Returns `big_cost` for non-fixers or
 layers with negligible root fraction.
 """
-function fun_cost_fix(fixer::Int, a_fix::Real, b_fix::Real,
-                      c_fix::Real, big_cost::Real,
-                      crootfr::Real, s_fix::Real,
-                      tc_soisno::Real)
-    if fixer == 1 && crootfr > 1.0e-6
-        return (-1.0 * s_fix) * 1.0 /
-               (1.25 * exp(a_fix + b_fix * tc_soisno * (1.0 - 0.5 * tc_soisno / c_fix)))
+@inline function fun_cost_fix(fixer::Int, a_fix, b_fix, c_fix, big_cost,
+                              crootfr, s_fix, tc_soisno)
+    T = typeof(tc_soisno)
+    if fixer == 1 && crootfr > T(1.0e-6)
+        return (-s_fix) /
+               (T(1.25) * exp(a_fix + b_fix * tc_soisno * (one(T) - T(0.5) * tc_soisno / c_fix)))
     else
         return big_cost
     end
@@ -131,11 +130,9 @@ end
 
 Cost of mycorrhizal active uptake of N (gC/gN).
 """
-function fun_cost_active(sminn_layer::Real, big_cost::Real,
-                         kc_active::Real, kn_active::Real,
-                         rootc_dens::Real, crootfr::Real,
-                         smallValue::Real)
-    if rootc_dens > 1.0e-6 && sminn_layer > smallValue
+@inline function fun_cost_active(sminn_layer, big_cost, kc_active, kn_active,
+                                 rootc_dens, crootfr, smallValue)
+    if rootc_dens > oftype(rootc_dens, 1.0e-6) && sminn_layer > smallValue
         return kn_active / sminn_layer + kc_active / rootc_dens
     else
         return big_cost
@@ -147,11 +144,9 @@ end
 
 Cost of non-mycorrhizal uptake of N (gC/gN).
 """
-function fun_cost_nonmyc(sminn_layer::Real, big_cost::Real,
-                         kc_nonmyc::Real, kn_nonmyc::Real,
-                         rootc_dens::Real, crootfr::Real,
-                         smallValue::Real)
-    if rootc_dens > 1.0e-6 && sminn_layer > smallValue
+@inline function fun_cost_nonmyc(sminn_layer, big_cost, kc_nonmyc, kn_nonmyc,
+                                 rootc_dens, crootfr, smallValue)
+    if rootc_dens > oftype(rootc_dens, 1.0e-6) && sminn_layer > smallValue
         return kn_nonmyc / sminn_layer + kc_nonmyc / rootc_dens
     else
         return big_cost
@@ -169,18 +164,19 @@ end
 Calculate the amount of N absorbed and C spent during retranslocation.
 Returns (total_c_spent_retrans, total_c_accounted_retrans, free_n_retrans, paid_for_n_retrans).
 """
-function fun_retranslocation(dt::Real, npp_to_spend::Real,
-                             total_falling_leaf_c::Real,
-                             total_falling_leaf_n::Real,
-                             total_n_resistance::Real,
-                             target_leafcn::Real,
-                             grperc::Real,
-                             plantCN::Real)
+@inline function fun_retranslocation(dt, npp_to_spend,
+                             total_falling_leaf_c,
+                             total_falling_leaf_n,
+                             total_n_resistance,
+                             target_leafcn,
+                             grperc,
+                             plantCN)
+    T = typeof(npp_to_spend)
     # Initialize total fluxes
-    total_c_spent_retrans     = 0.0
-    total_c_accounted_retrans = 0.0
-    c_accounted_retrans       = 0.0
-    paid_for_n_retrans        = 0.0
+    total_c_spent_retrans     = zero(T)
+    total_c_accounted_retrans = zero(T)
+    c_accounted_retrans       = zero(T)
+    paid_for_n_retrans        = zero(T)
     npp_to_spend_temp         = npp_to_spend
 
     # Initial C and N pools in falling leaves
@@ -188,28 +184,27 @@ function fun_retranslocation(dt::Real, npp_to_spend::Real,
     falling_leaf_n = total_falling_leaf_n
 
     # Parameters
-    max_falling_leaf_cn = target_leafcn * 3.0
-    min_falling_leaf_cn = target_leafcn * 1.5
-    cost_escalation     = 1.3
+    max_falling_leaf_cn = target_leafcn * T(3.0)
+    min_falling_leaf_cn = target_leafcn * T(1.5)
 
     # Free uptake
-    free_n_retrans = max(falling_leaf_n - (falling_leaf_c / min_falling_leaf_cn), 0.0)
+    free_n_retrans = max(falling_leaf_n - (falling_leaf_c / min_falling_leaf_cn), zero(T))
     falling_leaf_n = falling_leaf_n - free_n_retrans
 
     # Initial CN ratio and costs
     falling_leaf_cn   = falling_leaf_c / falling_leaf_n
-    kresorb           = 1.0 / target_leafcn
-    cost_retrans_temp = kresorb / ((1.0 / falling_leaf_cn)^1.3)
+    kresorb           = one(T) / target_leafcn
+    cost_retrans_temp = kresorb / ((one(T) / falling_leaf_cn)^T(1.3))
 
     # Iteration loop
     iter = 0
     exitloop = false
     while !exitloop && cost_retrans_temp < total_n_resistance &&
-          falling_leaf_n >= 0.0 && npp_to_spend > 0.0
+          falling_leaf_n >= zero(T) && npp_to_spend > zero(T)
 
         # Spend some C on removing N
         c_spent_retrans = cost_retrans_temp * (falling_leaf_n - falling_leaf_c /
-                          (falling_leaf_cn + 1.0))
+                          (falling_leaf_cn + one(T)))
         # don't spend more C than you have
         c_spent_retrans = min(npp_to_spend_temp, c_spent_retrans)
         # N extracted
@@ -217,13 +212,13 @@ function fun_retranslocation(dt::Real, npp_to_spend::Real,
         # Do not empty N pool
         leaf_n_ext = min(falling_leaf_n, leaf_n_ext)
         # C accounted for by N uptake
-        c_accounted_retrans = leaf_n_ext * plantCN * (1.0 + grperc)
+        c_accounted_retrans = leaf_n_ext * plantCN * (one(T) + grperc)
 
         # Update leafCN, recalculate costs
         falling_leaf_n = falling_leaf_n - leaf_n_ext
-        if falling_leaf_n > 0.0
+        if falling_leaf_n > zero(T)
             falling_leaf_cn   = falling_leaf_c / falling_leaf_n
-            cost_retrans_temp = kresorb / ((1.0 / falling_leaf_cn)^1.3)
+            cost_retrans_temp = kresorb / ((one(T) / falling_leaf_cn)^T(1.3))
         else
             exitloop = true
         end
@@ -236,7 +231,7 @@ function fun_retranslocation(dt::Real, npp_to_spend::Real,
         iter += 1
 
         # ran out of C or N
-        if npp_to_spend_temp <= 0.0
+        if npp_to_spend_temp <= zero(T)
             exitloop = true
             total_c_spent_retrans = total_c_spent_retrans + npp_to_spend_temp
         end
@@ -627,76 +622,77 @@ end
 
         c = column[p]
         vt = ivt[p] + 1
+        T = eltype(OV)   # working precision (Float64 CPU / Float32 Metal)
         local_use_flexibleCN = use_flexiblecn
-        excess_carbon_acc = 0.0
-        burned_off_carbon_local = 0.0
+        excess_carbon_acc = zero(T)
+        burned_off_carbon_local = zero(T)
 
         for j in 1:nlevdecomp
-            sminn_fun_nh4_vr[p, j] = 0.0
-            sminn_fun_no3_vr[p, j] = 0.0
+            sminn_fun_nh4_vr[p, j] = zero(T)
+            sminn_fun_no3_vr[p, j] = zero(T)
         end
 
         plantCN_p = plantCN[p]
 
         # per-patch totals (were [p] scratch arrays) — thread-local scalars
-        n_active_no3_acc_total = 0.0; n_active_nh4_acc_total = 0.0
-        n_nonmyc_no3_acc_total = 0.0; n_nonmyc_nh4_acc_total = 0.0
-        n_fix_acc_total = 0.0; n_retrans_acc_total = 0.0; free_Nretrans_local = 0.0
-        npp_active_no3_acc_total = 0.0; npp_active_nh4_acc_total = 0.0
-        npp_nonmyc_no3_acc_total = 0.0; npp_nonmyc_nh4_acc_total = 0.0
-        npp_fix_acc_total = 0.0; npp_retrans_acc_total = 0.0
-        n_ecm_no3_acc = 0.0; n_ecm_nh4_acc = 0.0; n_am_no3_acc = 0.0; n_am_nh4_acc = 0.0
+        n_active_no3_acc_total = zero(T); n_active_nh4_acc_total = zero(T)
+        n_nonmyc_no3_acc_total = zero(T); n_nonmyc_nh4_acc_total = zero(T)
+        n_fix_acc_total = zero(T); n_retrans_acc_total = zero(T); free_Nretrans_local = zero(T)
+        npp_active_no3_acc_total = zero(T); npp_active_nh4_acc_total = zero(T)
+        npp_nonmyc_no3_acc_total = zero(T); npp_nonmyc_nh4_acc_total = zero(T)
+        npp_fix_acc_total = zero(T); npp_retrans_acc_total = zero(T)
+        n_ecm_no3_acc = zero(T); n_ecm_nh4_acc = zero(T); n_am_no3_acc = zero(T); n_am_nh4_acc = zero(T)
 
         for istp in ECM_STEP:AM_STEP
-            sminn_no3_diff = 0.0; sminn_nh4_diff = 0.0
-            active_no3_limit1 = 0.0; active_nh4_limit1 = 0.0
+            sminn_no3_diff = zero(T); sminn_nh4_diff = zero(T)
+            active_no3_limit1 = zero(T); active_nh4_limit1 = zero(T)
 
             for j in 1:nlevdecomp
-                n_from_active_no3[p, j] = 0.0; n_from_active_nh4[p, j] = 0.0
-                n_from_nonmyc_no3[p, j] = 0.0; n_from_nonmyc_nh4[p, j] = 0.0
-                n_from_fixation[p, j] = 0.0
+                n_from_active_no3[p, j] = zero(T); n_from_active_nh4[p, j] = zero(T)
+                n_from_nonmyc_no3[p, j] = zero(T); n_from_nonmyc_nh4[p, j] = zero(T)
+                n_from_fixation[p, j] = zero(T)
             end
 
             # per-(p,istp) accumulators (were [p,istp] scratch) — reset each substep
-            n_active_no3_acc = 0.0; n_active_nh4_acc = 0.0
-            n_nonmyc_no3_acc = 0.0; n_nonmyc_nh4_acc = 0.0
-            n_fix_acc = 0.0; n_retrans_acc = 0.0; free_nretrans_acc = 0.0
-            npp_active_no3_acc = 0.0; npp_active_nh4_acc = 0.0
-            npp_nonmyc_no3_acc = 0.0; npp_nonmyc_nh4_acc = 0.0
-            npp_fix_acc = 0.0; npp_retrans_acc = 0.0
-            nt_uptake = 0.0; npp_uptake = 0.0
+            n_active_no3_acc = zero(T); n_active_nh4_acc = zero(T)
+            n_nonmyc_no3_acc = zero(T); n_nonmyc_nh4_acc = zero(T)
+            n_fix_acc = zero(T); n_retrans_acc = zero(T); free_nretrans_acc = zero(T)
+            npp_active_no3_acc = zero(T); npp_active_nh4_acc = zero(T)
+            npp_nonmyc_no3_acc = zero(T); npp_nonmyc_nh4_acc = zero(T)
+            npp_fix_acc = zero(T); npp_retrans_acc = zero(T)
+            nt_uptake = zero(T); npp_uptake = zero(T)
 
             for j in 1:nlevdecomp
-                npp_to_active_no3[p, j] = 0.0; npp_to_active_nh4[p, j] = 0.0
-                npp_to_nonmyc_no3[p, j] = 0.0; npp_to_nonmyc_nh4[p, j] = 0.0
-                npp_to_fixation[p, j] = 0.0
+                npp_to_active_no3[p, j] = zero(T); npp_to_active_nh4[p, j] = zero(T)
+                npp_to_nonmyc_no3[p, j] = zero(T); npp_to_nonmyc_nh4[p, j] = zero(T)
+                npp_to_fixation[p, j] = zero(T)
             end
 
             plant_ndemand_pool_step = plant_ndemand_pool[p] * permyc[p, istp]
             npp_remaining = availc_pool[p] * permyc[p, istp]
 
             for j in 1:nlevdecomp
-                tc = t_soisno[c, j] - TFRZ
-                fixer = round(Int, c3psn_pft[vt]) == 1 ? 1 : 0
+                tc = t_soisno[c, j] - T(TFRZ)
+                fixer = c3psn_pft[vt] == one(T) ? 1 : 0   # c3psn is a 0/1 flag; avoids GPU-hostile round(Int,·)
                 cost_fix_local[p, j] = fun_cost_fix(fixer, a_fix_pft[vt], b_fix_pft[vt],
-                    c_fix_pft[vt], BIG_COST, crootfr[p, j], s_fix_pft[vt], tc)
+                    c_fix_pft[vt], T(BIG_COST), crootfr[p, j], s_fix_pft[vt], tc)
             end
             for j in 1:nlevdecomp
                 rootc_dens_step = rootc_dens[p, j] * permyc[p, istp]
                 cost_active_no3[p, j] = fun_cost_active(sminn_no3_layer_step[p, j, istp],
-                    BIG_COST, kc_active[p, istp], kn_active[p, istp], rootc_dens_step,
+                    T(BIG_COST), kc_active[p, istp], kn_active[p, istp], rootc_dens_step,
                     crootfr[p, j], smallValue)
                 cost_active_nh4[p, j] = fun_cost_active(sminn_nh4_layer_step[p, j, istp],
-                    BIG_COST, kc_active[p, istp], kn_active[p, istp], rootc_dens_step,
+                    T(BIG_COST), kc_active[p, istp], kn_active[p, istp], rootc_dens_step,
                     crootfr[p, j], smallValue)
             end
             for j in 1:nlevdecomp
                 rootc_dens_step = rootc_dens[p, j] * permyc[p, istp]
                 cost_nonmyc_no3[p, j] = fun_cost_nonmyc(sminn_no3_layer_step[p, j, istp],
-                    BIG_COST, kc_nonmyc_pft[vt], kn_nonmyc_pft[vt], rootc_dens_step,
+                    T(BIG_COST), kc_nonmyc_pft[vt], kn_nonmyc_pft[vt], rootc_dens_step,
                     crootfr[p, j], smallValue)
                 cost_nonmyc_nh4[p, j] = fun_cost_nonmyc(sminn_nh4_layer_step[p, j, istp],
-                    BIG_COST, kc_nonmyc_pft[vt], kn_nonmyc_pft[vt], rootc_dens_step,
+                    T(BIG_COST), kc_nonmyc_pft[vt], kn_nonmyc_pft[vt], rootc_dens_step,
                     crootfr[p, j], smallValue)
             end
 
@@ -706,38 +702,38 @@ end
                 if FIX == PLANTS_ARE_FIXING
                     fixerfrac = FUN_fracfixers_pft[vt]
                 else
-                    fixerfrac = 1.0 - FUN_fracfixers_pft[vt]
+                    fixerfrac = one(T) - FUN_fracfixers_pft[vt]
                 end
                 npp_to_spend = npp_remaining * fixerfrac
 
                 for j in 1:nlevdecomp
-                    n_from_active_no3[p, j] = 0.0; n_from_active_nh4[p, j] = 0.0
-                    n_from_nonmyc_no3[p, j] = 0.0; n_from_nonmyc_nh4[p, j] = 0.0
+                    n_from_active_no3[p, j] = zero(T); n_from_active_nh4[p, j] = zero(T)
+                    n_from_nonmyc_no3[p, j] = zero(T); n_from_nonmyc_nh4[p, j] = zero(T)
                 end
 
-                sum_n_acquired = 0.0
-                total_N_conductance = 0.0
+                sum_n_acquired = zero(T)
+                total_N_conductance = zero(T)
                 for j in 1:nlevdecomp
-                    total_N_conductance += 1.0 / cost_active_no3[p, j] +
-                                           1.0 / cost_active_nh4[p, j] +
-                                           1.0 / cost_nonmyc_no3[p, j] +
-                                           1.0 / cost_nonmyc_nh4[p, j]
+                    total_N_conductance += one(T) / cost_active_no3[p, j] +
+                                           one(T) / cost_active_nh4[p, j] +
+                                           one(T) / cost_nonmyc_no3[p, j] +
+                                           one(T) / cost_nonmyc_nh4[p, j]
                     if FIX == PLANTS_ARE_FIXING
-                        total_N_conductance += 1.0 / cost_fix_local[p, j]
+                        total_N_conductance += one(T) / cost_fix_local[p, j]
                     end
                 end
 
                 for j in 1:nlevdecomp
-                    npp_frac_to_active_nh4[p, j] = (1.0 / cost_active_nh4[p, j]) / total_N_conductance
-                    npp_frac_to_nonmyc_nh4[p, j] = (1.0 / cost_nonmyc_nh4[p, j]) / total_N_conductance
-                    npp_frac_to_active_no3[p, j] = (1.0 / cost_active_no3[p, j]) / total_N_conductance
-                    npp_frac_to_nonmyc_no3[p, j] = (1.0 / cost_nonmyc_no3[p, j]) / total_N_conductance
+                    npp_frac_to_active_nh4[p, j] = (one(T) / cost_active_nh4[p, j]) / total_N_conductance
+                    npp_frac_to_nonmyc_nh4[p, j] = (one(T) / cost_nonmyc_nh4[p, j]) / total_N_conductance
+                    npp_frac_to_active_no3[p, j] = (one(T) / cost_active_no3[p, j]) / total_N_conductance
+                    npp_frac_to_nonmyc_no3[p, j] = (one(T) / cost_nonmyc_no3[p, j]) / total_N_conductance
                     if FIX == PLANTS_ARE_FIXING
-                        npp_frac_to_fixation[p, j] = (1.0 / cost_fix_local[p, j]) / total_N_conductance
+                        npp_frac_to_fixation[p, j] = (one(T) / cost_fix_local[p, j]) / total_N_conductance
                     else
-                        npp_frac_to_fixation[p, j] = 0.0
+                        npp_frac_to_fixation[p, j] = zero(T)
                     end
-                    ne_fix = FIX == PLANTS_ARE_FIXING ? npp_frac_to_fixation[p, j] / cost_fix_local[p, j] : 0.0
+                    ne_fix = FIX == PLANTS_ARE_FIXING ? npp_frac_to_fixation[p, j] / cost_fix_local[p, j] : zero(T)
                     ne_anh4 = npp_frac_to_active_nh4[p, j] / cost_active_nh4[p, j]
                     ne_nnh4 = npp_frac_to_nonmyc_nh4[p, j] / cost_nonmyc_nh4[p, j]
                     ne_ano3 = npp_frac_to_active_no3[p, j] / cost_active_no3[p, j]
@@ -748,9 +744,9 @@ end
                     end
                 end
 
-                total_N_resistance = 1.0 / sum_n_acquired
+                total_N_resistance = one(T) / sum_n_acquired
 
-                if leafc[p] > 0.0 && litterfall_n_step[p, istp] * fixerfrac > 0.0 && vt < npcropmin
+                if leafc[p] > zero(T) && litterfall_n_step[p, istp] * fixerfrac > zero(T) && vt < npcropmin
                     rt_result = fun_retranslocation(dt, npp_to_spend,
                         litterfall_c_step[p, istp] * fixerfrac,
                         litterfall_n_step[p, istp] * fixerfrac, total_N_resistance,
@@ -760,8 +756,8 @@ end
                     free_n_retrans_val        = rt_result.free_n_retrans
                     paid_for_n_retrans        = rt_result.paid_for_n_retrans
                 else
-                    total_c_accounted_retrans = 0.0; total_c_spent_retrans = 0.0
-                    paid_for_n_retrans = 0.0; free_n_retrans_val = 0.0
+                    total_c_accounted_retrans = zero(T); total_c_spent_retrans = zero(T)
+                    paid_for_n_retrans = zero(T); free_n_retrans_val = zero(T)
                 end
 
                 npp_to_spend -= total_c_spent_retrans + total_c_accounted_retrans
@@ -769,36 +765,36 @@ end
                 n_retrans_acc   += paid_for_n_retrans
                 free_nretrans_acc += free_n_retrans_val
 
-                if plant_ndemand_pool_step > 0.0
+                if plant_ndemand_pool_step > zero(T)
                     if local_use_flexibleCN
-                        if leafn[p] == 0.0
+                        if leafn[p] == zero(T)
                             delta_CN = fun_cn_flex_c_pft[vt]
                         else
                             delta_CN = (leafc[p] + leafc_storage[p]) /
                                        (leafn[p] + leafn_storage[p]) - leafcn[vt]
                         end
-                        frac_ideal_C_use = max(0.0, 1.0 - (total_N_resistance - fun_cn_flex_a_pft[vt]) /
+                        frac_ideal_C_use = max(zero(T), one(T) - (total_N_resistance - fun_cn_flex_a_pft[vt]) /
                                            fun_cn_flex_b_pft[vt])
-                        if delta_CN < 0.0
-                            frac_ideal_C_use += (1.0 - frac_ideal_C_use) *
-                                                min(1.0, delta_CN / fun_cn_flex_c_pft[vt])
+                        if delta_CN < zero(T)
+                            frac_ideal_C_use += (one(T) - frac_ideal_C_use) *
+                                                min(one(T), delta_CN / fun_cn_flex_c_pft[vt])
                         end
-                        if delta_CN > 0.0 && frac_ideal_C_use < 1.0
-                            frac_ideal_C_use += 0.5 * (1.0 * delta_CN / fun_cn_flex_c_pft[vt])
+                        if delta_CN > zero(T) && frac_ideal_C_use < one(T)
+                            frac_ideal_C_use += T(0.5) * (one(T) * delta_CN / fun_cn_flex_c_pft[vt])
                         end
-                        frac_ideal_C_use = max(min(1.0, frac_ideal_C_use), 0.5)
+                        frac_ideal_C_use = max(min(one(T), frac_ideal_C_use), T(0.5))
                     else
-                        frac_ideal_C_use = 1.0
+                        frac_ideal_C_use = one(T)
                     end
 
-                    excess_carbon = npp_to_spend * (1.0 - frac_ideal_C_use)
-                    if excess_carbon * (1.0 + grperc_pft[vt]) > npp_to_spend
-                        excess_carbon = npp_to_spend / (1.0 + grperc_pft[vt])
+                    excess_carbon = npp_to_spend * (one(T) - frac_ideal_C_use)
+                    if excess_carbon * (one(T) + grperc_pft[vt]) > npp_to_spend
+                        excess_carbon = npp_to_spend / (one(T) + grperc_pft[vt])
                     end
                     excess_carbon_acc += excess_carbon
-                    npp_to_spend -= excess_carbon * (1.0 + grperc_pft[vt])
+                    npp_to_spend -= excess_carbon * (one(T) + grperc_pft[vt])
 
-                    dnpp = npp_to_spend / ((1.0 + grperc_pft[vt]) * (plantCN_p / total_N_resistance) + 1.0)
+                    dnpp = npp_to_spend / ((one(T) + grperc_pft[vt]) * (plantCN_p / total_N_resistance) + one(T))
                     dnpp *= frac_ideal_C_use
                     dn = dnpp / total_N_resistance
 
@@ -810,7 +806,7 @@ end
                         if FIX == PLANTS_ARE_FIXING
                             npp_to_fixation[p, j] = npp_frac_to_fixation[p, j] * dnpp
                         else
-                            npp_to_fixation[p, j] = 0.0
+                            npp_to_fixation[p, j] = zero(T)
                         end
                         n_from_active_nh4[p, j] = npp_to_active_nh4[p, j] / cost_active_nh4[p, j]
                         n_from_nonmyc_nh4[p, j] = npp_to_nonmyc_nh4[p, j] / cost_nonmyc_nh4[p, j]
@@ -819,7 +815,7 @@ end
                         if FIX == PLANTS_ARE_FIXING
                             n_from_fixation[p, j] = npp_to_fixation[p, j] / cost_fix_local[p, j]
                         else
-                            n_from_fixation[p, j] = 0.0
+                            n_from_fixation[p, j] = zero(T)
                         end
                     end
 
@@ -857,7 +853,7 @@ end
                             C_spent    += npp_to_fixation[p, j]
                         end
 
-                        npp_to_spend -= C_spent + N_acquired * plantCN_p * (1.0 + grperc_pft[vt])
+                        npp_to_spend -= C_spent + N_acquired * plantCN_p * (one(T) + grperc_pft[vt])
                         nt_uptake  += N_acquired
                         npp_uptake += C_spent
 
@@ -875,7 +871,7 @@ end
                         end
                     end
 
-                    if npp_to_spend >= 1.0e-13
+                    if npp_to_spend >= T(1.0e-13)
                         burned_off_carbon_local += npp_to_spend
                     end
 
@@ -918,10 +914,10 @@ end
         if !use_matrixcn
             free_retransn_to_npool[p] = free_Nretrans_local / dt
         else
-            if retransn[p] > 0.0
+            if retransn[p] > zero(T)
                 free_retransn_to_npool[p] = free_Nretrans_local / dt
             else
-                free_retransn_to_npool[p] = 0.0
+                free_retransn_to_npool[p] = zero(T)
             end
         end
         Nretrans[p] = retransn_to_npool[p] + free_retransn_to_npool[p]
@@ -968,22 +964,22 @@ end
         npp_Nuptake[p]   = soilc_change[p]
         npp_growth[p] = (Nuptake[p] - free_retransn_to_npool[p]) * plantCN_p + (excess_carbon_acc / dt)
 
-        if availc[p] > 0.0
+        if availc[p] > zero(T)
             nuptake_npp_fraction[p] = npp_Nuptake[p] / availc[p]
         else
             nuptake_npp_fraction[p] = spval
         end
-        if npp_Nfix[p] > 0.0
+        if npp_Nfix[p] > zero(T)
             cost_nfix[p] = Nfix[p] / npp_Nfix[p]
         else
             cost_nfix[p] = spval
         end
-        if npp_Nactive[p] > 0.0
+        if npp_Nactive[p] > zero(T)
             cost_nactive[p] = Nactive[p] / npp_Nactive[p]
         else
             cost_nactive[p] = spval
         end
-        if npp_Nretrans[p] > 0.0
+        if npp_Nretrans[p] > zero(T)
             cost_nretrans[p] = Nretrans[p] / npp_Nretrans[p]
         else
             cost_nretrans[p] = spval
