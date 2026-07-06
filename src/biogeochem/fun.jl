@@ -296,6 +296,116 @@ function cnfun_init!(mask_soilp::BitVector, bounds::UnitRange{Int},
 end
 
 # =============================================================================
+#  FUN Phase-1 pre-computation kernels (one thread per patch/column; internal
+#  substep/level loops run sequentially in-thread, every write to the thread's
+#  own patch/column index → race-free, CPU byte-identical). Consumed by the
+#  main per-patch cnfun! body.
+# =============================================================================
+
+# Loop A: per-patch litterfall_n / rootC / plantN / plantCN
+@kernel function _fun_p1a_kernel!(@Const(mask_soilp), npp_burnedoff, litterfall_n,
+        rootC, plantN, plantCN, @Const(leafc_to_litter_fun), @Const(leafcn_offset),
+        @Const(frootc), @Const(leafn), @Const(frootn), @Const(livestemn),
+        @Const(livecrootn), @Const(n_allometry), @Const(c_allometry), dt)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        npp_burnedoff[p] = zero(eltype(npp_burnedoff))
+        litterfall_n[p] = (leafc_to_litter_fun[p] / leafcn_offset[p]) * dt
+        rootC[p] = frootc[p]
+        plantN[p] = leafn[p] + frootn[p] + livestemn[p] + livecrootn[p]
+        if n_allometry[p] > zero(eltype(n_allometry))
+            plantCN[p] = c_allometry[p] / n_allometry[p]
+        else
+            plantCN[p] = zero(eltype(plantCN))
+        end
+    end
+end
+
+# Loop B: per-patch, internal substep loop — permyc / kc_active / kn_active /
+# litterfall_{c,n}_step. `ivt` is the 0-based Fortran PFT index (add 1).
+@kernel function _fun_p1b_kernel!(@Const(mask_soilp), permyc, kc_active, kn_active,
+        litterfall_c_step, litterfall_n_step, @Const(ivt), @Const(perecm),
+        @Const(ekc_active), @Const(ekn_active), @Const(akc_active), @Const(akn_active),
+        @Const(season_decid), @Const(stress_decid), @Const(leafc), @Const(leafn),
+        @Const(leafc_to_litter_fun), @Const(offset_flag), nstp::Int, ecm_step::Int, dt)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        T = eltype(permyc)
+        vt = ivt[p] + 1
+        for istp in 1:nstp
+            if istp == ecm_step
+                permyc[p, istp]    = perecm[vt]
+                kc_active[p, istp] = ekc_active[vt]
+                kn_active[p, istp] = ekn_active[vt]
+            else
+                permyc[p, istp]    = one(T) - perecm[vt]
+                kc_active[p, istp] = akc_active[vt]
+                kn_active[p, istp] = akn_active[vt]
+            end
+            if leafc[p] > zero(T)
+                litterfall_c_step[p, istp] = dt * permyc[p, istp] * leafc_to_litter_fun[p]
+                litterfall_n_step[p, istp] = dt * permyc[p, istp] * leafn[p] *
+                                              leafc_to_litter_fun[p] / leafc[p]
+            end
+            if (season_decid[vt] == one(T) || stress_decid[vt] == one(T))
+                if offset_flag[p] != one(T)
+                    litterfall_n_step[p, istp] = zero(T)
+                    litterfall_c_step[p, istp] = zero(T)
+                end
+            end
+        end
+    end
+end
+
+# Loop C: per-soil-column, internal level loop — sminn NO3/NH4 layer & conc.
+@kernel function _fun_p1c_kernel!(@Const(mask_soilc), sminn_no3_layer, sminn_nh4_layer,
+        sminn_no3_conc, sminn_nh4_conc, @Const(smin_no3_to_plant_vr),
+        @Const(smin_nh4_to_plant_vr), @Const(h2osoi_liq), @Const(dzsoi),
+        nlevdecomp::Int, smallValue, dt)
+    c = @index(Global)
+    @inbounds if mask_soilc[c]
+        T = eltype(sminn_no3_layer)
+        sv = T(smallValue)
+        for j in 1:nlevdecomp
+            sminn_no3_layer[c, j] = smin_no3_to_plant_vr[c, j] * dzsoi[j] * dt
+            sminn_nh4_layer[c, j] = smin_nh4_to_plant_vr[c, j] * dzsoi[j] * dt
+            if h2osoi_liq[c, j] < sv
+                sminn_no3_layer[c, j] = zero(T)
+                sminn_nh4_layer[c, j] = zero(T)
+            end
+            sminn_no3_layer[c, j] = max(sminn_no3_layer[c, j], zero(T))
+            sminn_nh4_layer[c, j] = max(sminn_nh4_layer[c, j], zero(T))
+            if h2osoi_liq[c, j] > sv
+                sminn_no3_conc[c, j] = sminn_no3_layer[c, j] / (h2osoi_liq[c, j] * T(1000.0))
+                sminn_nh4_conc[c, j] = sminn_nh4_layer[c, j] / (h2osoi_liq[c, j] * T(1000.0))
+            else
+                sminn_no3_conc[c, j] = zero(T)
+                sminn_nh4_conc[c, j] = zero(T)
+            end
+        end
+    end
+end
+
+# Loop D: per-patch, internal substep+level — split the column sminn by permyc.
+@kernel function _fun_p1d_kernel!(@Const(mask_soilp), sminn_no3_layer_step,
+        sminn_nh4_layer_step, sminn_no3_conc_step, sminn_nh4_conc_step,
+        @Const(sminn_no3_layer), @Const(sminn_nh4_layer), @Const(sminn_no3_conc),
+        @Const(sminn_nh4_conc), @Const(permyc), @Const(column), nlevdecomp::Int, nstp::Int)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        c = column[p]
+        for istp in 1:nstp
+            for j in 1:nlevdecomp
+                sminn_no3_layer_step[p, j, istp] = sminn_no3_layer[c, j] * permyc[p, istp]
+                sminn_nh4_layer_step[p, j, istp] = sminn_nh4_layer[c, j] * permyc[p, istp]
+                sminn_no3_conc_step[p, j, istp]  = sminn_no3_conc[c, j]  * permyc[p, istp]
+                sminn_nh4_conc_step[p, j, istp]  = sminn_nh4_conc[c, j]  * permyc[p, istp]
+            end
+        end
+    end
+end
+
+# =============================================================================
 #  CNFUN — main FUN subroutine
 # =============================================================================
 
@@ -501,106 +611,31 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
     # Phase 1: Pre-computation (across all patches)
     # ======================================================================
 
-    # Compute litterfall_n, rootC, plantN, plantCN
-    for p in bounds_p
-        mask_soilp[p] || continue
+    # Compute litterfall_n, rootC, plantN, plantCN (Loop A → per-patch kernel)
+    _launch!(_fun_p1a_kernel!, mask_soilp, cnveg_cf.npp_burnedoff_patch, litterfall_n,
+        rootC, plantN, cnveg_state.plantCN_patch, cnveg_cf.leafc_to_litter_fun_patch,
+        cnveg_state.leafcn_offset_patch, cnveg_cs.frootc_patch, cnveg_ns.leafn_patch,
+        cnveg_ns.frootn_patch, cnveg_ns.livestemn_patch, cnveg_ns.livecrootn_patch,
+        cnveg_state.n_allometry_patch, cnveg_state.c_allometry_patch, dt)
 
-        cnveg_cf.npp_burnedoff_patch[p] = 0.0
+    # Set up permyc, kc_active, kn_active, litterfall steps (Loop B → per-patch kernel)
+    _launch!(_fun_p1b_kernel!, mask_soilp, permyc, kc_active, kn_active,
+        litterfall_c_step, litterfall_n_step, ivt, perecm, ekc_active_pft, ekn_active_pft,
+        akc_active_pft, akn_active_pft, season_decid, stress_decid, cnveg_cs.leafc_patch,
+        cnveg_ns.leafn_patch, cnveg_cf.leafc_to_litter_fun_patch,
+        cnveg_state.offset_flag_patch, NSTP, ECM_STEP, dt)
 
-        litterfall_n[p] = (cnveg_cf.leafc_to_litter_fun_patch[p] /
-                           cnveg_state.leafcn_offset_patch[p]) * dt
-        rootC[p] = cnveg_cs.frootc_patch[p]
+    # Compute soil N layers (Loop C → per-soil-column kernel; the original wrote
+    # column-indexed quantities redundantly per patch — done once per column here).
+    _launch!(_fun_p1c_kernel!, mask_soilc, sminn_no3_layer, sminn_nh4_layer,
+        sminn_no3_conc, sminn_nh4_conc, soilbgc_nf.smin_no3_to_plant_vr_col,
+        soilbgc_nf.smin_nh4_to_plant_vr_col, waterstate.h2osoi_liq_col,
+        dzsoi_decomp_vals, nlevdecomp, smallValue, dt)
 
-        plantN[p] = cnveg_ns.leafn_patch[p] + cnveg_ns.frootn_patch[p] +
-                    cnveg_ns.livestemn_patch[p] + cnveg_ns.livecrootn_patch[p]
-
-        if cnveg_state.n_allometry_patch[p] > 0.0
-            cnveg_state.plantCN_patch[p] = cnveg_state.c_allometry_patch[p] /
-                                           cnveg_state.n_allometry_patch[p]
-        else
-            cnveg_state.plantCN_patch[p] = 0.0
-        end
-    end
-
-    # Set up permyc, kc_active, kn_active, litterfall steps
-    for istp in 1:NSTP
-        for p in bounds_p
-            mask_soilp[p] || continue
-            vt = ivt[p] + 1  # 0-based Fortran → 1-based Julia
-
-            if istp == ECM_STEP
-                permyc[p, istp]    = perecm[vt]
-                kc_active[p, istp] = ekc_active_pft[vt]
-                kn_active[p, istp] = ekn_active_pft[vt]
-            else
-                permyc[p, istp]    = 1.0 - perecm[vt]
-                kc_active[p, istp] = akc_active_pft[vt]
-                kn_active[p, istp] = akn_active_pft[vt]
-            end
-
-            if cnveg_cs.leafc_patch[p] > 0.0
-                litterfall_c_step[p, istp] = dt * permyc[p, istp] *
-                                              cnveg_cf.leafc_to_litter_fun_patch[p]
-                litterfall_n_step[p, istp] = dt * permyc[p, istp] *
-                                              cnveg_ns.leafn_patch[p] *
-                                              cnveg_cf.leafc_to_litter_fun_patch[p] /
-                                              cnveg_cs.leafc_patch[p]
-            end
-
-            if (season_decid[vt] == 1.0 || stress_decid[vt] == 1.0)
-                if cnveg_state.offset_flag_patch[p] != 1.0
-                    litterfall_n_step[p, istp] = 0.0
-                    litterfall_c_step[p, istp] = 0.0
-                end
-            end
-        end
-    end
-
-    # Compute soil N layers
-    for j in 1:nlevdecomp
-        for p in bounds_p
-            mask_soilp[p] || continue
-            c = patch.column[p]
-
-            sminn_no3_layer[c, j] = soilbgc_nf.smin_no3_to_plant_vr_col[c, j] *
-                                    dzsoi_decomp_vals[j] * dt
-            sminn_nh4_layer[c, j] = soilbgc_nf.smin_nh4_to_plant_vr_col[c, j] *
-                                    dzsoi_decomp_vals[j] * dt
-
-            if waterstate.h2osoi_liq_col[c, j] < smallValue
-                sminn_no3_layer[c, j] = 0.0
-                sminn_nh4_layer[c, j] = 0.0
-            end
-
-            sminn_no3_layer[c, j] = max(sminn_no3_layer[c, j], 0.0)
-            sminn_nh4_layer[c, j] = max(sminn_nh4_layer[c, j], 0.0)
-
-            if waterstate.h2osoi_liq_col[c, j] > smallValue
-                sminn_no3_conc[c, j] = sminn_no3_layer[c, j] /
-                                       (waterstate.h2osoi_liq_col[c, j] * 1000.0)
-                sminn_nh4_conc[c, j] = sminn_nh4_layer[c, j] /
-                                       (waterstate.h2osoi_liq_col[c, j] * 1000.0)
-            else
-                sminn_no3_conc[c, j] = 0.0
-                sminn_nh4_conc[c, j] = 0.0
-            end
-        end
-    end
-
-    # Split by permyc
-    for istp in 1:NSTP
-        for j in 1:nlevdecomp
-            for p in bounds_p
-                mask_soilp[p] || continue
-                c = patch.column[p]
-
-                sminn_no3_layer_step[p, j, istp] = sminn_no3_layer[c, j] * permyc[p, istp]
-                sminn_nh4_layer_step[p, j, istp] = sminn_nh4_layer[c, j] * permyc[p, istp]
-                sminn_no3_conc_step[p, j, istp]  = sminn_no3_conc[c, j]  * permyc[p, istp]
-                sminn_nh4_conc_step[p, j, istp]  = sminn_nh4_conc[c, j]  * permyc[p, istp]
-            end
-        end
-    end
+    # Split by permyc (Loop D → per-patch kernel, internal substep+level)
+    _launch!(_fun_p1d_kernel!, mask_soilp, sminn_no3_layer_step, sminn_nh4_layer_step,
+        sminn_no3_conc_step, sminn_nh4_conc_step, sminn_no3_layer, sminn_nh4_layer,
+        sminn_no3_conc, sminn_nh4_conc, permyc, patch.column, nlevdecomp, NSTP)
 
     # ======================================================================
     # Phase 2: Main PFT loop
