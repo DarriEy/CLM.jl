@@ -405,6 +405,50 @@ end
     end
 end
 
+# Phase-2 setup (per-patch): deciduous storage C/N demand, available-C pool,
+# root-C density, plant N demand. Independent of the substep solver within a
+# patch, so it runs as its own pass (byte-identical to the fused host loop).
+@kernel function _fun_p2setup_kernel!(@Const(mask_soilp), storage_cdemand,
+        leafc_storage_xfer_acc, storage_ndemand, leafn_storage_xfer_acc,
+        availc_pool, rootc_dens, plant_ndemand_pool, plant_ndemand_retrans,
+        @Const(ivt), @Const(season_decid), @Const(stress_decid), @Const(onset_flag),
+        @Const(offset_flag), @Const(leafc_storage_to_xfer), @Const(leafn_storage_to_xfer),
+        @Const(leafc_storage), @Const(availc), @Const(crootfr), @Const(rootC),
+        @Const(plant_ndemand), ndays_off, steppday, nlevdecomp::Int, dt)
+    p = @index(Global)
+    @inbounds if mask_soilp[p]
+        T = eltype(availc_pool)
+        vt = ivt[p] + 1
+        if season_decid[vt] == one(T) || stress_decid[vt] == one(T)
+            if onset_flag[p] == one(T)
+                leafc_storage_xfer_acc[p] += leafc_storage_to_xfer[p] * dt
+                leafn_storage_xfer_acc[p] += leafn_storage_to_xfer[p] * dt
+            end
+            if offset_flag[p] == one(T)
+                storage_cdemand[p] = leafc_storage[p] / (T(ndays_off) * T(steppday))
+                storage_ndemand[p] = leafn_storage_xfer_acc[p] / (T(ndays_off) * T(steppday))
+                storage_ndemand[p] = max(storage_ndemand[p], zero(T))
+            else
+                storage_cdemand[p] = zero(T)
+                storage_ndemand[p] = zero(T)
+            end
+        else
+            storage_cdemand[p] = zero(T)
+            storage_ndemand[p] = zero(T)
+        end
+
+        availc_pool[p] = availc[p] * dt
+        if availc_pool[p] > zero(T)
+            for j in 1:nlevdecomp
+                rootc_dens[p, j] = crootfr[p, j] * rootC[p]
+            end
+        end
+
+        plant_ndemand_pool[p] = max(plant_ndemand[p] * dt, zero(T))
+        plant_ndemand_retrans[p] = storage_ndemand[p]
+    end
+end
+
 # =============================================================================
 #  CNFUN — main FUN subroutine
 # =============================================================================
@@ -638,8 +682,19 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
         sminn_no3_conc, sminn_nh4_conc, permyc, patch.column, nlevdecomp, NSTP)
 
     # ======================================================================
-    # Phase 2: Main PFT loop
+    # Phase 2: Main PFT loop — setup (storage demand / availc_pool / rootc_dens /
+    # plant N demand) is a per-patch kernel; the substep solver below is
+    # loop-carried and stays a per-patch host loop (kernelized in a follow-up).
     # ======================================================================
+    _launch!(_fun_p2setup_kernel!, mask_soilp, cnveg_cs.storage_cdemand_patch,
+        cnveg_cs.leafc_storage_xfer_acc_patch, cnveg_ns.storage_ndemand_patch,
+        cnveg_ns.leafn_storage_xfer_acc_patch, availc_pool, rootc_dens, plant_ndemand_pool,
+        cnveg_nf.plant_ndemand_retrans_patch, ivt, season_decid, stress_decid,
+        cnveg_state.onset_flag_patch, cnveg_state.offset_flag_patch,
+        cnveg_cf.leafc_storage_to_xfer_patch, cnveg_nf.leafn_storage_to_xfer_patch,
+        cnveg_cs.leafc_storage_patch, cnveg_cf.availc_patch, soilstate.crootfr_patch,
+        rootC, cnveg_nf.plant_ndemand_patch, ndays_off, steppday, nlevdecomp, dt)
+
     for p in bounds_p
         mask_soilp[p] || continue
         c = patch.column[p]
@@ -649,40 +704,6 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
 
         cnveg_nf.sminn_to_plant_fun_nh4_vr_patch[p, :] .= 0.0
         cnveg_nf.sminn_to_plant_fun_no3_vr_patch[p, :] .= 0.0
-
-        # Deciduous storage demand
-        if season_decid[vt] == 1.0 || stress_decid[vt] == 1.0
-            if cnveg_state.onset_flag_patch[p] == 1.0
-                cnveg_cs.leafc_storage_xfer_acc_patch[p] += cnveg_cf.leafc_storage_to_xfer_patch[p] * dt
-                cnveg_ns.leafn_storage_xfer_acc_patch[p] += cnveg_nf.leafn_storage_to_xfer_patch[p] * dt
-            end
-            if cnveg_state.offset_flag_patch[p] == 1.0
-                cnveg_cs.storage_cdemand_patch[p] = cnveg_cs.leafc_storage_patch[p] /
-                                                     (ndays_off * steppday)
-                cnveg_ns.storage_ndemand_patch[p] = cnveg_ns.leafn_storage_xfer_acc_patch[p] /
-                                                     (ndays_off * steppday)
-                cnveg_ns.storage_ndemand_patch[p] = max(cnveg_ns.storage_ndemand_patch[p], 0.0)
-            else
-                cnveg_cs.storage_cdemand_patch[p] = 0.0
-                cnveg_ns.storage_ndemand_patch[p] = 0.0
-            end
-        else
-            cnveg_cs.storage_cdemand_patch[p] = 0.0
-            cnveg_ns.storage_ndemand_patch[p] = 0.0
-        end
-
-        # Available carbon pool
-        availc_pool[p] = cnveg_cf.availc_patch[p] * dt
-
-        if availc_pool[p] > 0.0
-            for j in 1:nlevdecomp
-                rootc_dens[p, j] = soilstate.crootfr_patch[p, j] * rootC[p]
-            end
-        end
-
-        plant_ndemand_pool[p] = cnveg_nf.plant_ndemand_patch[p] * dt
-        plant_ndemand_pool[p] = max(plant_ndemand_pool[p], 0.0)
-        cnveg_nf.plant_ndemand_retrans_patch[p] = cnveg_ns.storage_ndemand_patch[p]
 
         plantCN_p = cnveg_state.plantCN_patch[p]
 
