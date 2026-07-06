@@ -451,10 +451,12 @@ end
 
 # Phase-2 substep solver (one thread per patch): the loop-carried ECM/AM ×
 # fixer/non-fixer × soil-level machinery + retranslocation + the flux-conversion
-# tail. All ~140 arrays are passed in one destructured NamedTuple `B` (the CPU
-# _launch! path handles this; a Metal-buffer-fit tensor packing is the follow-up).
-# Per-layer working arrays are per-patch rows [p,j]; every write is to the
-# thread's own patch → race-free, CPU byte-identical to the original host loop.
+# tail. Per-patch scratch (accumulators, totals, ecm/am, the always-zero retrans
+# terms) are THREAD-LOCAL SCALARS (~46 arrays eliminated); only the genuinely
+# per-(p,j)-persistent working arrays + inputs + outputs stay in the bundle `B`.
+# This both simplifies the body and cuts the array count toward Metal's ~31-buffer
+# kernel limit (remaining bundle arrays get dense-tensor packed next). Every write
+# is to the thread's own patch → race-free, CPU byte-identical to the host loop.
 @kernel function _fun_p2_kernel!(@Const(mask_soilp), @Const(column), @Const(ivt), B,
         dt, nlevdecomp::Int, smallValue, spval, npcropmin::Int,
         use_flexiblecn::Bool, use_matrixcn::Bool)
@@ -471,23 +473,9 @@ end
            cost_active_nh4, cost_nonmyc_no3, cost_nonmyc_nh4, npp_to_fixation,
            npp_to_active_nh4, npp_to_nonmyc_nh4, npp_to_active_no3, npp_to_nonmyc_no3,
            npp_frac_to_fixation, npp_frac_to_active_nh4, npp_frac_to_nonmyc_nh4,
-           npp_frac_to_active_no3, npp_frac_to_nonmyc_no3, n_exch_fixation,
-           n_exch_active_nh4, n_exch_nonmyc_nh4, n_exch_active_no3, n_exch_nonmyc_no3,
-           n_from_fixation, n_from_active_nh4, n_from_nonmyc_nh4, n_from_active_no3,
-           n_from_nonmyc_no3, n_active_no3_acc, n_active_nh4_acc, n_nonmyc_no3_acc,
-           n_nonmyc_nh4_acc, n_fix_acc, n_retrans_acc, free_nretrans_acc,
-           npp_active_no3_acc, npp_active_nh4_acc, npp_nonmyc_no3_acc, npp_nonmyc_nh4_acc,
-           npp_fix_acc, npp_retrans_acc, nt_uptake, npp_uptake, plant_ndemand_pool_step,
-           npp_remaining, n_active_no3_acc_total, n_active_nh4_acc_total,
-           n_nonmyc_no3_acc_total, n_nonmyc_nh4_acc_total, n_fix_acc_total,
-           n_retrans_acc_total, free_Nretrans_local, npp_active_no3_acc_total,
-           npp_active_nh4_acc_total, npp_nonmyc_no3_acc_total, npp_nonmyc_nh4_acc_total,
-           npp_fix_acc_total, npp_retrans_acc_total, n_ecm_no3_acc, n_ecm_nh4_acc,
-           n_am_no3_acc, n_am_nh4_acc, n_active_no3_vr, n_active_nh4_vr, n_nonmyc_no3_vr,
-           n_nonmyc_nh4_vr, n_active_no3_retrans_total, n_active_nh4_retrans_total,
-           n_nonmyc_no3_retrans_total, n_nonmyc_nh4_retrans_total, npp_active_no3_retrans_total,
-           npp_active_nh4_retrans_total, npp_nonmyc_no3_retrans_total, npp_nonmyc_nh4_retrans_total,
-           n_am_no3_retrans, n_am_nh4_retrans, n_ecm_no3_retrans, n_ecm_nh4_retrans,
+           npp_frac_to_active_no3, npp_frac_to_nonmyc_no3, n_from_fixation,
+           n_from_active_nh4, n_from_nonmyc_nh4, n_from_active_no3, n_from_nonmyc_no3,
+           n_active_no3_vr, n_active_nh4_vr, n_nonmyc_no3_vr, n_nonmyc_nh4_vr,
            Npassive, Nfix, retransn_to_npool, free_retransn_to_npool, Nretrans,
            sminn_fun_no3_vr, sminn_fun_nh4_vr, Nactive_no3, Nactive_nh4, Necm_no3,
            Necm_nh4, Necm, Nam_no3, Nam_nh4, Nam, Nnonmyc_no3, Nnonmyc_nh4, Nnonmyc,
@@ -509,7 +497,15 @@ end
 
         plantCN_p = plantCN[p]
 
-        # ---- Substep loop (ECM then AM) ----
+        # per-patch totals (were [p] scratch arrays) — thread-local scalars
+        n_active_no3_acc_total = 0.0; n_active_nh4_acc_total = 0.0
+        n_nonmyc_no3_acc_total = 0.0; n_nonmyc_nh4_acc_total = 0.0
+        n_fix_acc_total = 0.0; n_retrans_acc_total = 0.0; free_Nretrans_local = 0.0
+        npp_active_no3_acc_total = 0.0; npp_active_nh4_acc_total = 0.0
+        npp_nonmyc_no3_acc_total = 0.0; npp_nonmyc_nh4_acc_total = 0.0
+        npp_fix_acc_total = 0.0; npp_retrans_acc_total = 0.0
+        n_ecm_no3_acc = 0.0; n_ecm_nh4_acc = 0.0; n_am_no3_acc = 0.0; n_am_nh4_acc = 0.0
+
         for istp in ECM_STEP:AM_STEP
             sminn_no3_diff = 0.0; sminn_nh4_diff = 0.0
             active_no3_limit1 = 0.0; active_nh4_limit1 = 0.0
@@ -520,13 +516,14 @@ end
                 n_from_fixation[p, j] = 0.0
             end
 
-            n_active_no3_acc[p, istp] = 0.0; n_active_nh4_acc[p, istp] = 0.0
-            n_nonmyc_no3_acc[p, istp] = 0.0; n_nonmyc_nh4_acc[p, istp] = 0.0
-            n_fix_acc[p, istp] = 0.0; n_retrans_acc[p, istp] = 0.0
-            free_nretrans_acc[p, istp] = 0.0
-            npp_active_no3_acc[p, istp] = 0.0; npp_active_nh4_acc[p, istp] = 0.0
-            npp_nonmyc_no3_acc[p, istp] = 0.0; npp_nonmyc_nh4_acc[p, istp] = 0.0
-            npp_fix_acc[p, istp] = 0.0; npp_retrans_acc[p, istp] = 0.0
+            # per-(p,istp) accumulators (were [p,istp] scratch) — reset each substep
+            n_active_no3_acc = 0.0; n_active_nh4_acc = 0.0
+            n_nonmyc_no3_acc = 0.0; n_nonmyc_nh4_acc = 0.0
+            n_fix_acc = 0.0; n_retrans_acc = 0.0; free_nretrans_acc = 0.0
+            npp_active_no3_acc = 0.0; npp_active_nh4_acc = 0.0
+            npp_nonmyc_no3_acc = 0.0; npp_nonmyc_nh4_acc = 0.0
+            npp_fix_acc = 0.0; npp_retrans_acc = 0.0
+            nt_uptake = 0.0; npp_uptake = 0.0
 
             for j in 1:nlevdecomp
                 npp_to_active_no3[p, j] = 0.0; npp_to_active_nh4[p, j] = 0.0
@@ -534,18 +531,15 @@ end
                 npp_to_fixation[p, j] = 0.0
             end
 
-            plant_ndemand_pool_step[p, istp] = plant_ndemand_pool[p] * permyc[p, istp]
-            npp_remaining[p, istp]           = availc_pool[p] * permyc[p, istp]
+            plant_ndemand_pool_step = plant_ndemand_pool[p] * permyc[p, istp]
+            npp_remaining = availc_pool[p] * permyc[p, istp]
 
-            # Fixation costs
             for j in 1:nlevdecomp
                 tc = t_soisno[c, j] - TFRZ
                 fixer = round(Int, c3psn_pft[vt]) == 1 ? 1 : 0
                 cost_fix_local[p, j] = fun_cost_fix(fixer, a_fix_pft[vt], b_fix_pft[vt],
                     c_fix_pft[vt], BIG_COST, crootfr[p, j], s_fix_pft[vt], tc)
             end
-
-            # Mycorrhizal uptake costs
             for j in 1:nlevdecomp
                 rootc_dens_step = rootc_dens[p, j] * permyc[p, istp]
                 cost_active_no3[p, j] = fun_cost_active(sminn_no3_layer_step[p, j, istp],
@@ -555,8 +549,6 @@ end
                     BIG_COST, kc_active[p, istp], kn_active[p, istp], rootc_dens_step,
                     crootfr[p, j], smallValue)
             end
-
-            # Non-mycorrhizal uptake costs
             for j in 1:nlevdecomp
                 rootc_dens_step = rootc_dens[p, j] * permyc[p, istp]
                 cost_nonmyc_no3[p, j] = fun_cost_nonmyc(sminn_no3_layer_step[p, j, istp],
@@ -567,16 +559,15 @@ end
                     crootfr[p, j], smallValue)
             end
 
-            npp_remaining[p, istp] -= n_passive_step[p, istp] * plantCN_p
+            npp_remaining -= n_passive_step[p, istp] * plantCN_p
 
-            # Fix loop: fixers then non-fixers
             for FIX in PLANTS_ARE_FIXING:PLANTS_NOT_FIXING
                 if FIX == PLANTS_ARE_FIXING
                     fixerfrac = FUN_fracfixers_pft[vt]
                 else
                     fixerfrac = 1.0 - FUN_fracfixers_pft[vt]
                 end
-                npp_to_spend = npp_remaining[p, istp] * fixerfrac
+                npp_to_spend = npp_remaining * fixerfrac
 
                 for j in 1:nlevdecomp
                     n_from_active_no3[p, j] = 0.0; n_from_active_nh4[p, j] = 0.0
@@ -605,19 +596,14 @@ end
                     else
                         npp_frac_to_fixation[p, j] = 0.0
                     end
+                    ne_fix = FIX == PLANTS_ARE_FIXING ? npp_frac_to_fixation[p, j] / cost_fix_local[p, j] : 0.0
+                    ne_anh4 = npp_frac_to_active_nh4[p, j] / cost_active_nh4[p, j]
+                    ne_nnh4 = npp_frac_to_nonmyc_nh4[p, j] / cost_nonmyc_nh4[p, j]
+                    ne_ano3 = npp_frac_to_active_no3[p, j] / cost_active_no3[p, j]
+                    ne_nno3 = npp_frac_to_nonmyc_no3[p, j] / cost_nonmyc_no3[p, j]
+                    sum_n_acquired += ne_anh4 + ne_nnh4 + ne_ano3 + ne_nno3
                     if FIX == PLANTS_ARE_FIXING
-                        n_exch_fixation[p, j] = npp_frac_to_fixation[p, j] / cost_fix_local[p, j]
-                    else
-                        n_exch_fixation[p, j] = 0.0
-                    end
-                    n_exch_active_nh4[p, j] = npp_frac_to_active_nh4[p, j] / cost_active_nh4[p, j]
-                    n_exch_nonmyc_nh4[p, j] = npp_frac_to_nonmyc_nh4[p, j] / cost_nonmyc_nh4[p, j]
-                    n_exch_active_no3[p, j] = npp_frac_to_active_no3[p, j] / cost_active_no3[p, j]
-                    n_exch_nonmyc_no3[p, j] = npp_frac_to_nonmyc_no3[p, j] / cost_nonmyc_no3[p, j]
-                    sum_n_acquired += n_exch_active_nh4[p, j] + n_exch_nonmyc_nh4[p, j] +
-                                      n_exch_active_no3[p, j] + n_exch_nonmyc_no3[p, j]
-                    if FIX == PLANTS_ARE_FIXING
-                        sum_n_acquired += n_exch_fixation[p, j]
+                        sum_n_acquired += ne_fix
                     end
                 end
 
@@ -638,11 +624,11 @@ end
                 end
 
                 npp_to_spend -= total_c_spent_retrans + total_c_accounted_retrans
-                npp_retrans_acc[p, istp] += total_c_spent_retrans
-                n_retrans_acc[p, istp]   += paid_for_n_retrans
-                free_nretrans_acc[p, istp] += free_n_retrans_val
+                npp_retrans_acc += total_c_spent_retrans
+                n_retrans_acc   += paid_for_n_retrans
+                free_nretrans_acc += free_n_retrans_val
 
-                if plant_ndemand_pool_step[p, istp] > 0.0
+                if plant_ndemand_pool_step > 0.0
                     if local_use_flexibleCN
                         if leafn[p] == 0.0
                             delta_CN = fun_cn_flex_c_pft[vt]
@@ -731,20 +717,20 @@ end
                         end
 
                         npp_to_spend -= C_spent + N_acquired * plantCN_p * (1.0 + grperc_pft[vt])
-                        nt_uptake[p, istp]  += N_acquired
-                        npp_uptake[p, istp] += C_spent
+                        nt_uptake  += N_acquired
+                        npp_uptake += C_spent
 
-                        n_active_no3_acc[p, istp] += n_from_active_no3[p, j]
-                        n_active_nh4_acc[p, istp] += n_from_active_nh4[p, j]
-                        n_nonmyc_no3_acc[p, istp] += n_from_nonmyc_no3[p, j]
-                        n_nonmyc_nh4_acc[p, istp] += n_from_nonmyc_nh4[p, j]
-                        npp_active_no3_acc[p, istp] += npp_to_active_no3[p, j]
-                        npp_active_nh4_acc[p, istp] += npp_to_active_nh4[p, j]
-                        npp_nonmyc_no3_acc[p, istp] += npp_to_nonmyc_no3[p, j]
-                        npp_nonmyc_nh4_acc[p, istp] += npp_to_nonmyc_nh4[p, j]
+                        n_active_no3_acc += n_from_active_no3[p, j]
+                        n_active_nh4_acc += n_from_active_nh4[p, j]
+                        n_nonmyc_no3_acc += n_from_nonmyc_no3[p, j]
+                        n_nonmyc_nh4_acc += n_from_nonmyc_nh4[p, j]
+                        npp_active_no3_acc += npp_to_active_no3[p, j]
+                        npp_active_nh4_acc += npp_to_active_nh4[p, j]
+                        npp_nonmyc_no3_acc += npp_to_nonmyc_no3[p, j]
+                        npp_nonmyc_nh4_acc += npp_to_nonmyc_nh4[p, j]
                         if FIX == PLANTS_ARE_FIXING
-                            n_fix_acc[p, istp]   += n_from_fixation[p, j]
-                            npp_fix_acc[p, istp] += npp_to_fixation[p, j]
+                            n_fix_acc   += n_from_fixation[p, j]
+                            npp_fix_acc += npp_to_fixation[p, j]
                         end
                     end
 
@@ -762,37 +748,37 @@ end
             end # FIX
 
             if istp == ECM_STEP
-                n_ecm_no3_acc[p] = n_active_no3_acc[p, istp]
-                n_ecm_nh4_acc[p] = n_active_nh4_acc[p, istp]
+                n_ecm_no3_acc = n_active_no3_acc
+                n_ecm_nh4_acc = n_active_nh4_acc
             else
-                n_am_no3_acc[p] = n_active_no3_acc[p, istp]
-                n_am_nh4_acc[p] = n_active_nh4_acc[p, istp]
+                n_am_no3_acc = n_active_no3_acc
+                n_am_nh4_acc = n_active_nh4_acc
             end
 
-            n_active_no3_acc_total[p]    += n_active_no3_acc[p, istp]
-            n_active_nh4_acc_total[p]    += n_active_nh4_acc[p, istp]
-            n_nonmyc_no3_acc_total[p]    += n_nonmyc_no3_acc[p, istp]
-            n_nonmyc_nh4_acc_total[p]    += n_nonmyc_nh4_acc[p, istp]
-            n_fix_acc_total[p]           += n_fix_acc[p, istp]
-            n_retrans_acc_total[p]       += n_retrans_acc[p, istp]
-            free_Nretrans_local[p]       += free_nretrans_acc[p, istp]
-            npp_active_no3_acc_total[p]  += npp_active_no3_acc[p, istp]
-            npp_active_nh4_acc_total[p]  += npp_active_nh4_acc[p, istp]
-            npp_nonmyc_no3_acc_total[p]  += npp_nonmyc_no3_acc[p, istp]
-            npp_nonmyc_nh4_acc_total[p]  += npp_nonmyc_nh4_acc[p, istp]
-            npp_fix_acc_total[p]         += npp_fix_acc[p, istp]
-            npp_retrans_acc_total[p]     += npp_retrans_acc[p, istp]
+            n_active_no3_acc_total    += n_active_no3_acc
+            n_active_nh4_acc_total    += n_active_nh4_acc
+            n_nonmyc_no3_acc_total    += n_nonmyc_no3_acc
+            n_nonmyc_nh4_acc_total    += n_nonmyc_nh4_acc
+            n_fix_acc_total           += n_fix_acc
+            n_retrans_acc_total       += n_retrans_acc
+            free_Nretrans_local       += free_nretrans_acc
+            npp_active_no3_acc_total  += npp_active_no3_acc
+            npp_active_nh4_acc_total  += npp_active_nh4_acc
+            npp_nonmyc_no3_acc_total  += npp_nonmyc_no3_acc
+            npp_nonmyc_nh4_acc_total  += npp_nonmyc_nh4_acc
+            npp_fix_acc_total         += npp_fix_acc
+            npp_retrans_acc_total     += npp_retrans_acc
         end # istp
 
-        # ---- Convert to fluxes per second ----
+        # ---- flux conversion (retrans-total terms are always 0 → dropped) ----
         Npassive[p]          = n_passive_acc[p] / dt
-        Nfix[p]              = n_fix_acc_total[p] / dt
-        retransn_to_npool[p] = n_retrans_acc_total[p] / dt
+        Nfix[p]              = n_fix_acc_total / dt
+        retransn_to_npool[p] = n_retrans_acc_total / dt
         if !use_matrixcn
-            free_retransn_to_npool[p] = free_Nretrans_local[p] / dt
+            free_retransn_to_npool[p] = free_Nretrans_local / dt
         else
             if retransn[p] > 0.0
-                free_retransn_to_npool[p] = free_Nretrans_local[p] / dt
+                free_retransn_to_npool[p] = free_Nretrans_local / dt
             else
                 free_retransn_to_npool[p] = 0.0
             end
@@ -806,16 +792,16 @@ end
                  n_nonmyc_nh4_vr[p, j]) / (dzsoi[j] * dt)
         end
 
-        Nactive_no3[p] = n_active_no3_acc_total[p] / dt + n_active_no3_retrans_total[p] / dt
-        Nactive_nh4[p] = n_active_nh4_acc_total[p] / dt + n_active_nh4_retrans_total[p] / dt
-        Necm_no3[p] = n_ecm_no3_acc[p] / dt + n_ecm_no3_retrans[p] / dt
-        Necm_nh4[p] = n_ecm_nh4_acc[p] / dt + n_ecm_nh4_retrans[p] / dt
+        Nactive_no3[p] = n_active_no3_acc_total / dt
+        Nactive_nh4[p] = n_active_nh4_acc_total / dt
+        Necm_no3[p] = n_ecm_no3_acc / dt
+        Necm_nh4[p] = n_ecm_nh4_acc / dt
         Necm[p]     = Necm_no3[p] + Necm_nh4[p]
-        Nam_no3[p] = n_am_no3_acc[p] / dt + n_am_no3_retrans[p] / dt
-        Nam_nh4[p] = n_am_nh4_acc[p] / dt + n_am_nh4_retrans[p] / dt
+        Nam_no3[p] = n_am_no3_acc / dt
+        Nam_nh4[p] = n_am_nh4_acc / dt
         Nam[p]     = Nam_no3[p] + Nam_nh4[p]
-        Nnonmyc_no3[p] = n_nonmyc_no3_acc_total[p] / dt + n_nonmyc_no3_retrans_total[p] / dt
-        Nnonmyc_nh4[p] = n_nonmyc_nh4_acc_total[p] / dt + n_nonmyc_nh4_retrans_total[p] / dt
+        Nnonmyc_no3[p] = n_nonmyc_no3_acc_total / dt
+        Nnonmyc_nh4[p] = n_nonmyc_nh4_acc_total / dt
         Nnonmyc[p] = Nnonmyc_no3[p] + Nnonmyc_nh4[p]
         plant_ndemand_retrans[p] /= dt
         Nuptake[p] = Nactive_no3[p] + Nactive_nh4[p] + Nnonmyc_no3[p] + Nnonmyc_nh4[p] +
@@ -824,17 +810,17 @@ end
         sminn_to_plant_fun[p] = Nactive_no3[p] + Nactive_nh4[p] + Nnonmyc_no3[p] +
             Nnonmyc_nh4[p] + Nfix[p] + Npassive[p]
 
-        npp_Nactive_no3[p] = npp_active_no3_acc_total[p] / dt + npp_active_no3_retrans_total[p] / dt
-        npp_Nactive_nh4[p] = npp_active_nh4_acc_total[p] / dt + npp_active_nh4_retrans_total[p] / dt
-        npp_Nnonmyc_no3[p] = npp_nonmyc_no3_acc_total[p] / dt + npp_nonmyc_no3_retrans_total[p] / dt
-        npp_Nnonmyc_nh4[p] = npp_nonmyc_nh4_acc_total[p] / dt + npp_nonmyc_nh4_retrans_total[p] / dt
+        npp_Nactive_no3[p] = npp_active_no3_acc_total / dt
+        npp_Nactive_nh4[p] = npp_active_nh4_acc_total / dt
+        npp_Nnonmyc_no3[p] = npp_nonmyc_no3_acc_total / dt
+        npp_Nnonmyc_nh4[p] = npp_nonmyc_nh4_acc_total / dt
         npp_Nactive[p] = npp_Nactive_no3[p] + npp_Nactive_nh4[p] + npp_Nnonmyc_no3[p] + npp_Nnonmyc_nh4[p]
         npp_Nnonmyc[p] = npp_Nnonmyc_no3[p] + npp_Nnonmyc_nh4[p]
-        npp_Nfix[p]    = npp_fix_acc_total[p] / dt
-        npp_Nretrans[p] = npp_retrans_acc_total[p] / dt
+        npp_Nfix[p]    = npp_fix_acc_total / dt
+        npp_Nretrans[p] = npp_retrans_acc_total / dt
 
-        soilc_change[p] = (npp_active_no3_acc_total[p] + npp_active_nh4_acc_total[p] +
-            npp_nonmyc_no3_acc_total[p] + npp_nonmyc_nh4_acc_total[p] + npp_fix_acc_total[p]) / dt +
+        soilc_change[p] = (npp_active_no3_acc_total + npp_active_nh4_acc_total +
+            npp_nonmyc_no3_acc_total + npp_nonmyc_nh4_acc_total + npp_fix_acc_total) / dt +
             npp_Nretrans[p]
         soilc_change[p] += burned_off_carbon_local / dt
         npp_burnedoff[p] = burned_off_carbon_local / dt
