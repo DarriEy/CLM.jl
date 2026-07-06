@@ -33,26 +33,26 @@ end
 
 # ---- PFT constants needed by FUN ------------------------------------------
 Base.@kwdef mutable struct PftConFUN
-    leafcn          ::Vector{Float64} = Float64[]   # leaf C:N (gC/gN)
-    season_decid    ::Vector{Float64} = Float64[]   # binary flag seasonal-deciduous
-    stress_decid    ::Vector{Float64} = Float64[]   # binary flag stress-deciduous
-    a_fix           ::Vector{Float64} = Float64[]   # BNF parameter
-    b_fix           ::Vector{Float64} = Float64[]   # BNF parameter
-    c_fix           ::Vector{Float64} = Float64[]   # BNF parameter
-    s_fix           ::Vector{Float64} = Float64[]   # BNF parameter
-    akc_active      ::Vector{Float64} = Float64[]   # AM mycorrhizal uptake kc
-    akn_active      ::Vector{Float64} = Float64[]   # AM mycorrhizal uptake kn
-    ekc_active      ::Vector{Float64} = Float64[]   # ECM mycorrhizal uptake kc
-    ekn_active      ::Vector{Float64} = Float64[]   # ECM mycorrhizal uptake kn
-    kc_nonmyc       ::Vector{Float64} = Float64[]   # non-mycorrhizal uptake kc
-    kn_nonmyc       ::Vector{Float64} = Float64[]   # non-mycorrhizal uptake kn
-    perecm          ::Vector{Float64} = Float64[]   # fraction ECM-associated
-    grperc          ::Vector{Float64} = Float64[]   # growth respiration percentage
-    fun_cn_flex_a   ::Vector{Float64} = Float64[]   # flexCN parameter a
-    fun_cn_flex_b   ::Vector{Float64} = Float64[]   # flexCN parameter b
-    fun_cn_flex_c   ::Vector{Float64} = Float64[]   # flexCN parameter c
-    FUN_fracfixers  ::Vector{Float64} = Float64[]   # fraction of C for fixation
-    c3psn           ::Vector{Float64} = Float64[]   # C3 photosynthesis flag
+    leafcn          ::AbstractVector{<:Real} = Float64[]   # leaf C:N (gC/gN)
+    season_decid    ::AbstractVector{<:Real} = Float64[]   # binary flag seasonal-deciduous
+    stress_decid    ::AbstractVector{<:Real} = Float64[]   # binary flag stress-deciduous
+    a_fix           ::AbstractVector{<:Real} = Float64[]   # BNF parameter
+    b_fix           ::AbstractVector{<:Real} = Float64[]   # BNF parameter
+    c_fix           ::AbstractVector{<:Real} = Float64[]   # BNF parameter
+    s_fix           ::AbstractVector{<:Real} = Float64[]   # BNF parameter
+    akc_active      ::AbstractVector{<:Real} = Float64[]   # AM mycorrhizal uptake kc
+    akn_active      ::AbstractVector{<:Real} = Float64[]   # AM mycorrhizal uptake kn
+    ekc_active      ::AbstractVector{<:Real} = Float64[]   # ECM mycorrhizal uptake kc
+    ekn_active      ::AbstractVector{<:Real} = Float64[]   # ECM mycorrhizal uptake kn
+    kc_nonmyc       ::AbstractVector{<:Real} = Float64[]   # non-mycorrhizal uptake kc
+    kn_nonmyc       ::AbstractVector{<:Real} = Float64[]   # non-mycorrhizal uptake kn
+    perecm          ::AbstractVector{<:Real} = Float64[]   # fraction ECM-associated
+    grperc          ::AbstractVector{<:Real} = Float64[]   # growth respiration percentage
+    fun_cn_flex_a   ::AbstractVector{<:Real} = Float64[]   # flexCN parameter a
+    fun_cn_flex_b   ::AbstractVector{<:Real} = Float64[]   # flexCN parameter b
+    fun_cn_flex_c   ::AbstractVector{<:Real} = Float64[]   # flexCN parameter c
+    FUN_fracfixers  ::AbstractVector{<:Real} = Float64[]   # fraction of C for fixation
+    c3psn           ::AbstractVector{<:Real} = Float64[]   # C3 photosynthesis flag
 end
 
 """
@@ -534,14 +534,13 @@ end
 end
 
 # Unpack OV[p,K] / OVR[p,j,K] back into the cnveg flux fields.
-@kernel function _fun_unpack!(@Const(mask), @Const(OV), @Const(OVR),
+# Unpack OV/OVR back into the cnveg fields — split into two kernels so each stays
+# under Metal's ~31-buffer limit (39 output fields would otherwise overflow).
+@kernel function _fun_unpack1!(@Const(mask), @Const(OV),
         Npassive, Nfix, retransn_to_npool, free_retransn_to_npool, Nretrans,
         Nactive_no3, Nactive_nh4, Necm_no3, Necm_nh4, Necm, Nam_no3, Nam_nh4, Nam,
         Nnonmyc_no3, Nnonmyc_nh4, Nnonmyc, plant_ndemand_retrans, Nuptake, Nactive,
-        sminn_to_plant_fun, nuptake_npp_fraction, cost_nfix, cost_nactive, cost_nretrans,
-        npp_Nactive_no3, npp_Nactive_nh4, npp_Nnonmyc_no3, npp_Nnonmyc_nh4, npp_Nactive,
-        npp_Nnonmyc, npp_Nfix, npp_Nretrans, soilc_change, npp_burnedoff, npp_Nuptake,
-        npp_growth, sminn_fun_no3_vr, sminn_fun_nh4_vr, nlevdecomp::Int)
+        sminn_to_plant_fun)
     p = @index(Global)
     @inbounds if mask[p]
         Npassive[p]=OV[p,1]; Nfix[p]=OV[p,2]; retransn_to_npool[p]=OV[p,3]
@@ -550,6 +549,16 @@ end
         Nam_no3[p]=OV[p,11]; Nam_nh4[p]=OV[p,12]; Nam[p]=OV[p,13]; Nnonmyc_no3[p]=OV[p,14]
         Nnonmyc_nh4[p]=OV[p,15]; Nnonmyc[p]=OV[p,16]; plant_ndemand_retrans[p]=OV[p,17]
         Nuptake[p]=OV[p,18]; Nactive[p]=OV[p,19]; sminn_to_plant_fun[p]=OV[p,20]
+    end
+end
+
+@kernel function _fun_unpack2!(@Const(mask), @Const(OV), @Const(OVR),
+        nuptake_npp_fraction, cost_nfix, cost_nactive, cost_nretrans,
+        npp_Nactive_no3, npp_Nactive_nh4, npp_Nnonmyc_no3, npp_Nnonmyc_nh4, npp_Nactive,
+        npp_Nnonmyc, npp_Nfix, npp_Nretrans, soilc_change, npp_burnedoff, npp_Nuptake,
+        npp_growth, sminn_fun_no3_vr, sminn_fun_nh4_vr, nlevdecomp::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
         nuptake_npp_fraction[p]=OV[p,21]; cost_nfix[p]=OV[p,22]; cost_nactive[p]=OV[p,23]
         cost_nretrans[p]=OV[p,24]; npp_Nactive_no3[p]=OV[p,25]; npp_Nactive_nh4[p]=OV[p,26]
         npp_Nnonmyc_no3[p]=OV[p,27]; npp_Nnonmyc_nh4[p]=OV[p,28]; npp_Nactive[p]=OV[p,29]
@@ -1002,7 +1011,7 @@ end
 Main FUN calculation. Computes N uptake via fixation, retranslocation,
 mycorrhizal and non-mycorrhizal pathways.
 """
-function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
+function cnfun!(mask_soilp::AbstractVector{Bool}, mask_soilc::AbstractVector{Bool},
                 bounds_p::UnitRange{Int}, bounds_c::UnitRange{Int},
                 fun_params::FUNParams,
                 pftcon::PftConFUN,
@@ -1021,7 +1030,7 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
                 soilbgc_ns::SoilBiogeochemNitrogenStateData;
                 dt::Real=1800.0,
                 nlevdecomp::Int=1,
-                dzsoi_decomp_vals::Vector{<:Real}=Float64[],
+                dzsoi_decomp_vals::AbstractVector{<:Real}=Float64[],
                 use_flexiblecn::Bool=false,
                 use_matrixcn::Bool=false,
                 npcropmin::Int=17,
@@ -1060,132 +1069,141 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
 
     # Infer floating-point type for AD compatibility
     FT = eltype(dzsoi_decomp_vals)
+    # Scalar params to the working precision so the kernels stay Float32 on Metal
+    # (Float64 dt/spval/smallValue would poison Float32 arrays). Byte-identical on
+    # the CPU-Float64 path (FT(x)==x).
+    dt = FT(dt); spval = FT(spval); smallValue = FT(smallValue)
+
+    # Device-resident zeroed scratch: allocate on the backend of an input array
+    # (host on CPU, MtlArray on Metal) so the whole cnfun! runs where its inputs
+    # live. Byte-identical to zeros(FT,...) on the CPU path.
+    _dz(dims::Vararg{Int}) = fill!(similar(soilstate.crootfr_patch, FT, dims...), zero(FT))
 
     # ---- Allocate local arrays ----
-    rootc_dens       = zeros(FT, last(bounds_p), nlevdecomp)
-    rootC            = zeros(FT, last(bounds_p))
-    permyc           = zeros(FT, last(bounds_p), NSTP)
-    kc_active        = zeros(FT, last(bounds_p), NSTP)
-    kn_active        = zeros(FT, last(bounds_p), NSTP)
-    availc_pool      = zeros(FT, last(bounds_p))
-    plantN           = zeros(FT, last(bounds_p))
-    plant_ndemand_pool       = zeros(FT, last(bounds_p))
-    plant_ndemand_pool_step  = zeros(FT, last(bounds_p), NSTP)
-    leafn_step               = zeros(FT, last(bounds_p), NSTP)
-    leafn_retrans_step       = zeros(FT, last(bounds_p), NSTP)
-    litterfall_n             = zeros(FT, last(bounds_p))
-    litterfall_n_step        = zeros(FT, last(bounds_p), NSTP)
-    litterfall_c_step        = zeros(FT, last(bounds_p), NSTP)
-    npp_remaining            = zeros(FT, last(bounds_p), NSTP)
-    n_passive_step           = zeros(FT, last(bounds_p), NSTP)
-    n_passive_acc            = zeros(FT, last(bounds_p))
+    rootc_dens       = _dz(last(bounds_p), nlevdecomp)
+    rootC            = _dz(last(bounds_p))
+    permyc           = _dz(last(bounds_p), NSTP)
+    kc_active        = _dz(last(bounds_p), NSTP)
+    kn_active        = _dz(last(bounds_p), NSTP)
+    availc_pool      = _dz(last(bounds_p))
+    plantN           = _dz(last(bounds_p))
+    plant_ndemand_pool       = _dz(last(bounds_p))
+    plant_ndemand_pool_step  = _dz(last(bounds_p), NSTP)
+    leafn_step               = _dz(last(bounds_p), NSTP)
+    leafn_retrans_step       = _dz(last(bounds_p), NSTP)
+    litterfall_n             = _dz(last(bounds_p))
+    litterfall_n_step        = _dz(last(bounds_p), NSTP)
+    litterfall_c_step        = _dz(last(bounds_p), NSTP)
+    npp_remaining            = _dz(last(bounds_p), NSTP)
+    n_passive_step           = _dz(last(bounds_p), NSTP)
+    n_passive_acc            = _dz(last(bounds_p))
 
-    cost_retran_local  = zeros(FT, last(bounds_p), nlevdecomp)
-    cost_fix_local     = zeros(FT, last(bounds_p), nlevdecomp)
-    cost_active_no3    = zeros(FT, last(bounds_p), nlevdecomp)
-    cost_active_nh4    = zeros(FT, last(bounds_p), nlevdecomp)
-    cost_nonmyc_no3    = zeros(FT, last(bounds_p), nlevdecomp)
-    cost_nonmyc_nh4    = zeros(FT, last(bounds_p), nlevdecomp)
+    cost_retran_local  = _dz(last(bounds_p), nlevdecomp)
+    cost_fix_local     = _dz(last(bounds_p), nlevdecomp)
+    cost_active_no3    = _dz(last(bounds_p), nlevdecomp)
+    cost_active_nh4    = _dz(last(bounds_p), nlevdecomp)
+    cost_nonmyc_no3    = _dz(last(bounds_p), nlevdecomp)
+    cost_nonmyc_nh4    = _dz(last(bounds_p), nlevdecomp)
 
-    n_fix_acc              = zeros(FT, last(bounds_p), NSTP)
-    n_fix_acc_total        = zeros(FT, last(bounds_p))
-    npp_fix_acc            = zeros(FT, last(bounds_p), NSTP)
-    npp_fix_acc_total      = zeros(FT, last(bounds_p))
-    n_retrans_acc          = zeros(FT, last(bounds_p), NSTP)
-    n_retrans_acc_total    = zeros(FT, last(bounds_p))
-    free_nretrans_acc      = zeros(FT, last(bounds_p), NSTP)
-    npp_retrans_acc        = zeros(FT, last(bounds_p), NSTP)
-    npp_retrans_acc_total  = zeros(FT, last(bounds_p))
-    nt_uptake              = zeros(FT, last(bounds_p), NSTP)
-    npp_uptake             = zeros(FT, last(bounds_p), NSTP)
+    n_fix_acc              = _dz(last(bounds_p), NSTP)
+    n_fix_acc_total        = _dz(last(bounds_p))
+    npp_fix_acc            = _dz(last(bounds_p), NSTP)
+    npp_fix_acc_total      = _dz(last(bounds_p))
+    n_retrans_acc          = _dz(last(bounds_p), NSTP)
+    n_retrans_acc_total    = _dz(last(bounds_p))
+    free_nretrans_acc      = _dz(last(bounds_p), NSTP)
+    npp_retrans_acc        = _dz(last(bounds_p), NSTP)
+    npp_retrans_acc_total  = _dz(last(bounds_p))
+    nt_uptake              = _dz(last(bounds_p), NSTP)
+    npp_uptake             = _dz(last(bounds_p), NSTP)
 
     # NO3/NH4 arrays
-    sminn_no3_conc       = zeros(FT, last(bounds_c), nlevdecomp)
-    sminn_no3_conc_step  = zeros(FT, last(bounds_p), nlevdecomp, NSTP)
-    sminn_no3_layer      = zeros(FT, last(bounds_c), nlevdecomp)
-    sminn_no3_layer_step = zeros(FT, last(bounds_p), nlevdecomp, NSTP)
-    sminn_no3_uptake     = zeros(FT, last(bounds_p), nlevdecomp, NSTP)
-    sminn_nh4_conc       = zeros(FT, last(bounds_c), nlevdecomp)
-    sminn_nh4_conc_step  = zeros(FT, last(bounds_p), nlevdecomp, NSTP)
-    sminn_nh4_layer      = zeros(FT, last(bounds_c), nlevdecomp)
-    sminn_nh4_layer_step = zeros(FT, last(bounds_p), nlevdecomp, NSTP)
-    sminn_nh4_uptake     = zeros(FT, last(bounds_p), nlevdecomp, NSTP)
+    sminn_no3_conc       = _dz(last(bounds_c), nlevdecomp)
+    sminn_no3_conc_step  = _dz(last(bounds_p), nlevdecomp, NSTP)
+    sminn_no3_layer      = _dz(last(bounds_c), nlevdecomp)
+    sminn_no3_layer_step = _dz(last(bounds_p), nlevdecomp, NSTP)
+    sminn_no3_uptake     = _dz(last(bounds_p), nlevdecomp, NSTP)
+    sminn_nh4_conc       = _dz(last(bounds_c), nlevdecomp)
+    sminn_nh4_conc_step  = _dz(last(bounds_p), nlevdecomp, NSTP)
+    sminn_nh4_layer      = _dz(last(bounds_c), nlevdecomp)
+    sminn_nh4_layer_step = _dz(last(bounds_p), nlevdecomp, NSTP)
+    sminn_nh4_uptake     = _dz(last(bounds_p), nlevdecomp, NSTP)
 
-    n_active_no3_acc       = zeros(FT, last(bounds_p), NSTP)
-    n_active_nh4_acc       = zeros(FT, last(bounds_p), NSTP)
-    n_nonmyc_no3_acc       = zeros(FT, last(bounds_p), NSTP)
-    n_nonmyc_nh4_acc       = zeros(FT, last(bounds_p), NSTP)
-    n_active_no3_acc_total = zeros(FT, last(bounds_p))
-    n_active_nh4_acc_total = zeros(FT, last(bounds_p))
-    n_nonmyc_no3_acc_total = zeros(FT, last(bounds_p))
-    n_nonmyc_nh4_acc_total = zeros(FT, last(bounds_p))
-    npp_active_no3_acc       = zeros(FT, last(bounds_p), NSTP)
-    npp_active_nh4_acc       = zeros(FT, last(bounds_p), NSTP)
-    npp_nonmyc_no3_acc       = zeros(FT, last(bounds_p), NSTP)
-    npp_nonmyc_nh4_acc       = zeros(FT, last(bounds_p), NSTP)
-    npp_active_no3_acc_total = zeros(FT, last(bounds_p))
-    npp_active_nh4_acc_total = zeros(FT, last(bounds_p))
-    npp_nonmyc_no3_acc_total = zeros(FT, last(bounds_p))
-    npp_nonmyc_nh4_acc_total = zeros(FT, last(bounds_p))
+    n_active_no3_acc       = _dz(last(bounds_p), NSTP)
+    n_active_nh4_acc       = _dz(last(bounds_p), NSTP)
+    n_nonmyc_no3_acc       = _dz(last(bounds_p), NSTP)
+    n_nonmyc_nh4_acc       = _dz(last(bounds_p), NSTP)
+    n_active_no3_acc_total = _dz(last(bounds_p))
+    n_active_nh4_acc_total = _dz(last(bounds_p))
+    n_nonmyc_no3_acc_total = _dz(last(bounds_p))
+    n_nonmyc_nh4_acc_total = _dz(last(bounds_p))
+    npp_active_no3_acc       = _dz(last(bounds_p), NSTP)
+    npp_active_nh4_acc       = _dz(last(bounds_p), NSTP)
+    npp_nonmyc_no3_acc       = _dz(last(bounds_p), NSTP)
+    npp_nonmyc_nh4_acc       = _dz(last(bounds_p), NSTP)
+    npp_active_no3_acc_total = _dz(last(bounds_p))
+    npp_active_nh4_acc_total = _dz(last(bounds_p))
+    npp_nonmyc_no3_acc_total = _dz(last(bounds_p))
+    npp_nonmyc_nh4_acc_total = _dz(last(bounds_p))
 
-    n_am_no3_acc  = zeros(FT, last(bounds_p))
-    n_am_nh4_acc  = zeros(FT, last(bounds_p))
-    n_ecm_no3_acc = zeros(FT, last(bounds_p))
-    n_ecm_nh4_acc = zeros(FT, last(bounds_p))
-    n_am_no3_retrans  = zeros(FT, last(bounds_p))
-    n_am_nh4_retrans  = zeros(FT, last(bounds_p))
-    n_ecm_no3_retrans = zeros(FT, last(bounds_p))
-    n_ecm_nh4_retrans = zeros(FT, last(bounds_p))
+    n_am_no3_acc  = _dz(last(bounds_p))
+    n_am_nh4_acc  = _dz(last(bounds_p))
+    n_ecm_no3_acc = _dz(last(bounds_p))
+    n_ecm_nh4_acc = _dz(last(bounds_p))
+    n_am_no3_retrans  = _dz(last(bounds_p))
+    n_am_nh4_retrans  = _dz(last(bounds_p))
+    n_ecm_no3_retrans = _dz(last(bounds_p))
+    n_ecm_nh4_retrans = _dz(last(bounds_p))
 
-    n_active_no3_retrans       = zeros(FT, last(bounds_p), NSTP)
-    n_active_nh4_retrans       = zeros(FT, last(bounds_p), NSTP)
-    n_nonmyc_no3_retrans       = zeros(FT, last(bounds_p), NSTP)
-    n_nonmyc_nh4_retrans       = zeros(FT, last(bounds_p), NSTP)
-    n_active_no3_retrans_total = zeros(FT, last(bounds_p))
-    n_active_nh4_retrans_total = zeros(FT, last(bounds_p))
-    n_nonmyc_no3_retrans_total = zeros(FT, last(bounds_p))
-    n_nonmyc_nh4_retrans_total = zeros(FT, last(bounds_p))
-    npp_active_no3_retrans_total = zeros(FT, last(bounds_p))
-    npp_active_nh4_retrans_total = zeros(FT, last(bounds_p))
-    npp_nonmyc_no3_retrans_total = zeros(FT, last(bounds_p))
-    npp_nonmyc_nh4_retrans_total = zeros(FT, last(bounds_p))
+    n_active_no3_retrans       = _dz(last(bounds_p), NSTP)
+    n_active_nh4_retrans       = _dz(last(bounds_p), NSTP)
+    n_nonmyc_no3_retrans       = _dz(last(bounds_p), NSTP)
+    n_nonmyc_nh4_retrans       = _dz(last(bounds_p), NSTP)
+    n_active_no3_retrans_total = _dz(last(bounds_p))
+    n_active_nh4_retrans_total = _dz(last(bounds_p))
+    n_nonmyc_no3_retrans_total = _dz(last(bounds_p))
+    n_nonmyc_nh4_retrans_total = _dz(last(bounds_p))
+    npp_active_no3_retrans_total = _dz(last(bounds_p))
+    npp_active_nh4_retrans_total = _dz(last(bounds_p))
+    npp_nonmyc_no3_retrans_total = _dz(last(bounds_p))
+    npp_nonmyc_nh4_retrans_total = _dz(last(bounds_p))
 
-    n_passive_no3_vr = zeros(FT, last(bounds_p), nlevdecomp)
-    n_passive_nh4_vr = zeros(FT, last(bounds_p), nlevdecomp)
-    n_active_no3_vr  = zeros(FT, last(bounds_p), nlevdecomp)
-    n_nonmyc_no3_vr  = zeros(FT, last(bounds_p), nlevdecomp)
-    n_active_nh4_vr  = zeros(FT, last(bounds_p), nlevdecomp)
-    n_nonmyc_nh4_vr  = zeros(FT, last(bounds_p), nlevdecomp)
+    n_passive_no3_vr = _dz(last(bounds_p), nlevdecomp)
+    n_passive_nh4_vr = _dz(last(bounds_p), nlevdecomp)
+    n_active_no3_vr  = _dz(last(bounds_p), nlevdecomp)
+    n_nonmyc_no3_vr  = _dz(last(bounds_p), nlevdecomp)
+    n_active_nh4_vr  = _dz(last(bounds_p), nlevdecomp)
+    n_nonmyc_nh4_vr  = _dz(last(bounds_p), nlevdecomp)
 
-    free_Nretrans_local = zeros(FT, last(bounds_p))
+    free_Nretrans_local = _dz(last(bounds_p))
 
 
     # Per-layer working arrays — promoted to per-patch rows [np, nlevdecomp] so
     # each kernel thread owns its own layer scratch (npp_{to,frac}_to_retrans were
     # dead — reset but never read — and are dropped).
-    npp_to_fixation     = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_to_active_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_to_nonmyc_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_to_active_no3   = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_to_nonmyc_no3   = zeros(FT, last(bounds_p), nlevdecomp)
+    npp_to_fixation     = _dz(last(bounds_p), nlevdecomp)
+    npp_to_active_nh4   = _dz(last(bounds_p), nlevdecomp)
+    npp_to_nonmyc_nh4   = _dz(last(bounds_p), nlevdecomp)
+    npp_to_active_no3   = _dz(last(bounds_p), nlevdecomp)
+    npp_to_nonmyc_no3   = _dz(last(bounds_p), nlevdecomp)
 
-    npp_frac_to_fixation     = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_frac_to_active_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_frac_to_nonmyc_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_frac_to_active_no3   = zeros(FT, last(bounds_p), nlevdecomp)
-    npp_frac_to_nonmyc_no3   = zeros(FT, last(bounds_p), nlevdecomp)
+    npp_frac_to_fixation     = _dz(last(bounds_p), nlevdecomp)
+    npp_frac_to_active_nh4   = _dz(last(bounds_p), nlevdecomp)
+    npp_frac_to_nonmyc_nh4   = _dz(last(bounds_p), nlevdecomp)
+    npp_frac_to_active_no3   = _dz(last(bounds_p), nlevdecomp)
+    npp_frac_to_nonmyc_no3   = _dz(last(bounds_p), nlevdecomp)
 
-    n_exch_fixation     = zeros(FT, last(bounds_p), nlevdecomp)
-    n_exch_active_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    n_exch_nonmyc_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    n_exch_active_no3   = zeros(FT, last(bounds_p), nlevdecomp)
-    n_exch_nonmyc_no3   = zeros(FT, last(bounds_p), nlevdecomp)
+    n_exch_fixation     = _dz(last(bounds_p), nlevdecomp)
+    n_exch_active_nh4   = _dz(last(bounds_p), nlevdecomp)
+    n_exch_nonmyc_nh4   = _dz(last(bounds_p), nlevdecomp)
+    n_exch_active_no3   = _dz(last(bounds_p), nlevdecomp)
+    n_exch_nonmyc_no3   = _dz(last(bounds_p), nlevdecomp)
 
-    n_from_fixation     = zeros(FT, last(bounds_p), nlevdecomp)
-    n_from_active_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    n_from_nonmyc_nh4   = zeros(FT, last(bounds_p), nlevdecomp)
-    n_from_active_no3   = zeros(FT, last(bounds_p), nlevdecomp)
-    n_from_nonmyc_no3   = zeros(FT, last(bounds_p), nlevdecomp)
+    n_from_fixation     = _dz(last(bounds_p), nlevdecomp)
+    n_from_active_nh4   = _dz(last(bounds_p), nlevdecomp)
+    n_from_nonmyc_nh4   = _dz(last(bounds_p), nlevdecomp)
+    n_from_active_no3   = _dz(last(bounds_p), nlevdecomp)
+    n_from_nonmyc_no3   = _dz(last(bounds_p), nlevdecomp)
 
     # ======================================================================
     # Phase 1: Pre-computation (across all patches)
@@ -1229,7 +1247,7 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
         cnveg_state.onset_flag_patch, cnveg_state.offset_flag_patch,
         cnveg_cf.leafc_storage_to_xfer_patch, cnveg_nf.leafn_storage_to_xfer_patch,
         cnveg_cs.leafc_storage_patch, cnveg_cf.availc_patch, soilstate.crootfr_patch,
-        rootC, cnveg_nf.plant_ndemand_patch, ndays_off, steppday, nlevdecomp, dt)
+        rootC, cnveg_nf.plant_ndemand_patch, FT(ndays_off), FT(steppday), nlevdecomp, dt)
 
     # ---- Phase-2 substep: pack ~103 arrays into dense tensors (Metal ≤31 buffers),
     #      run the solver, unpack. @view slices alias each logical array in the kernel
@@ -1263,7 +1281,7 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
         dzsoi_decomp_vals, SL_t, OV_t, OVR_t, dt, nlevdecomp, smallValue, spval,
         npcropmin, use_flexiblecn, use_matrixcn)
 
-    _launch!(_fun_unpack!, mask_soilp, OV_t, OVR_t, cnveg_nf.Npassive_patch,
+    _launch!(_fun_unpack1!, mask_soilp, OV_t, cnveg_nf.Npassive_patch,
         cnveg_nf.Nfix_patch, cnveg_nf.retransn_to_npool_patch,
         cnveg_nf.free_retransn_to_npool_patch, cnveg_nf.Nretrans_patch,
         cnveg_nf.Nactive_no3_patch, cnveg_nf.Nactive_nh4_patch, cnveg_nf.Necm_no3_patch,
@@ -1271,7 +1289,8 @@ function cnfun!(mask_soilp::BitVector, mask_soilc::BitVector,
         cnveg_nf.Nam_nh4_patch, cnveg_nf.Nam_patch, cnveg_nf.Nnonmyc_no3_patch,
         cnveg_nf.Nnonmyc_nh4_patch, cnveg_nf.Nnonmyc_patch,
         cnveg_nf.plant_ndemand_retrans_patch, cnveg_nf.Nuptake_patch, cnveg_nf.Nactive_patch,
-        cnveg_nf.sminn_to_plant_fun_patch, cnveg_nf.nuptake_npp_fraction_patch,
+        cnveg_nf.sminn_to_plant_fun_patch; ndrange=npb)
+    _launch!(_fun_unpack2!, mask_soilp, OV_t, OVR_t, cnveg_nf.nuptake_npp_fraction_patch,
         cnveg_nf.cost_nfix_patch, cnveg_nf.cost_nactive_patch, cnveg_nf.cost_nretrans_patch,
         cnveg_cf.npp_Nactive_no3_patch, cnveg_cf.npp_Nactive_nh4_patch,
         cnveg_cf.npp_Nnonmyc_no3_patch, cnveg_cf.npp_Nnonmyc_nh4_patch,
