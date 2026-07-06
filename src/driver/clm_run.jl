@@ -56,6 +56,7 @@ function clm_run!(;
     baseflow_scalar::Real = 1.0e-2,
     int_snow_max::Real = 2000.0,
     interp_forcing::Bool = false,
+    forcing_phase_shift_s::Int = 0,
     overrides::Union{CalibrationOverrides, Nothing} = nothing,
     step_probe::Union{Function, Nothing} = nothing)
 
@@ -283,7 +284,18 @@ function clm_run!(;
         step_count += 1
 
         # --- Read and downscale forcings (at step-start time) ---
-        read_forcing_step!(fr, inst.atm2lnd, step_start, ng, nc;
+        # forcing_phase_shift_s shifts the forcing-evaluation time. The Fortran
+        # datm evaluates the LINEAR-interp state fields (esp. temperature) one
+        # coupling interval behind CLM.jl's step-start read (verified at Kherlen
+        # n9500: model 20:00 uses the 19:00 temperature record) — but its coszen
+        # SOLAR tracks the true astronomical time, which CLM.jl already matches.
+        # A uniform shift=-dtime therefore fixes the temperature phase but breaks
+        # the solar/albedo diurnal alignment, and A/B on Kherlen made it worse
+        # (67/69 -> 42/69: reflected-SW/albedo blow up). So the default is 0
+        # (step-start): faithful for solar/precip, and the residual temperature-
+        # phase offset is a night-time single-step floor that doesn't gate the
+        # annual scorecard. Knob retained for datm-exact single-step oracle work.
+        read_forcing_step!(fr, inst.atm2lnd, step_start + Second(forcing_phase_shift_s), ng, nc;
                            gridcell_latdeg = inst.gridcell.latdeg,
                            gridcell_londeg = inst.gridcell.londeg,
                            dtime = dtime)

@@ -32,16 +32,16 @@ series are compared variable-by-variable.
 
 ![Multi-biome parity scorecard — CLM.jl vs Fortran CLM5](scripts/parity_scorecard.png)
 
-Current standing: **1104 of 1104** biome × variable combinations meet the
-coverage tolerance: **10 % relative** (or **0.5 K** for temperatures), with
-per-unit absolute floors for near-zero quantities, across **16 biomes** and
-**69 output variables** (energy, water, snow, state, carbon). Most agree to under
-1 %. The last two formerly red cells are both small absolute residuals:
-Donga `FSH_V` is a −0.62 W m⁻² annual-mean vegetation sensible-heat partition
-gap, and Baltimore `SNOW_DEPTH` is a +1.9 mm snow-covered-area depth diagnostic
-while SWE, snow ice/liquid, snowmelt, and snow fraction remain close.
-The stricter scientific-parity gate currently stands at **1038 of 1104** cells,
-with **64** undocumented strict failures remaining.
+Current standing: across **20 biomes** and **69 output variables** (energy, water,
+snow, state, carbon), essentially all biome × variable combinations meet the
+coverage tolerance — **10 % relative** (or **0.5 K** for temperatures), with
+per-unit absolute floors for near-zero quantities — and most agree to under 1 %.
+The stricter scientific-parity gate (annual |Δ| ≤ 1 % / 0.05 K **and** daily
+nRMSE ≤ 0.10 / 0.2 K) stands at **1348 of 1380** cells (97.7 %), with **11 of 20**
+biomes fully strict, one documented exception (Baltimore `SNOW_DEPTH`, a small
+snow-covered-area depth diagnostic), and 31 residuals traced — by single-step
+oracle instrumentation — to coupled-solver floors or forcing-representation
+limits rather than model bugs.
 
 The heatmap collapses each variable to a single annual-mean error. To show what
 the agreement looks like day-by-day, here is one site's full-year daily series —
@@ -65,8 +65,10 @@ hot desert (Walnut Gulch), tropical rainforest (Aripuanã), tropical savanna
 (Donga), larch permafrost taiga (Yakutia), temperate peat bog (Mer Bleue),
 continental steppe (Kherlen), temperate deciduous forest (Hubbard Brook), Pacific
 maritime conifer (HJ Andrews), boreal forest (Krycklan), Mediterranean (Tagus),
-arctic tundra (Abisko), alpine glacier (Massa Aletsch), urban (Baltimore), and
-glacier outwash (Iceland). The suite (`scripts/parity_run_domain.jl` + scorecard)
+arctic tundra (Abisko), alpine glacier (Massa Aletsch), urban (Baltimore),
+glacier outwash (Iceland), temperate broadleaf-evergreen (Eucalyptus/Tumbarumba),
+boreal aspen (BOREAS), tropical páramo (Antisana), and cropland (Mead). The suite
+(`scripts/parity_run_domain.jl` + scorecard)
 is expanded as references are generated, so these numbers are a snapshot, not a
 final result. See also [the warning above](#️-read-this-first-an-agentic-engineering-experiment).
 

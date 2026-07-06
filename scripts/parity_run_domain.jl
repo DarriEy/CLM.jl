@@ -195,6 +195,7 @@ inst = run_clm!(;
     baseflow_scalar = cfg.baseflow, int_snow_max = cfg.int_snow,
     ffortran_restart = cfg.restart,
     interp_forcing = true,
+    forcing_phase_shift_s = parse(Int, get(ENV, "FORCING_SHIFT_S", "0")),
     fsnowoptics = isfile(_snicar("snicar_optics_5bnd_c013122.nc")) ? _snicar("snicar_optics_5bnd_c013122.nc") : "",
     fsnowaging  = isfile(_snicar("snicar_drdt_bst_fit_60_c070416.nc")) ? _snicar("snicar_drdt_bst_fit_60_c070416.nc") : "")
 @printf("\n  Done: %s in %.1f s -> %s\n", DOM, time() - t0, fhistory)

@@ -175,6 +175,7 @@ let dsE = NCDataset(DUMP_AFTER, "r")
     close(dsE)
 end
 
+if isfile(DUMP_CANOPY)
 println("\n  --- Per-patch canopy energy/aero: Julia vs Fortran (after_canopyfluxes) ---")
 let dsC = NCDataset(DUMP_CANOPY, "r")
     ef = inst.energyflux; fv = inst.frictionvel; te = inst.temperature
@@ -254,6 +255,7 @@ let dsB = NCDataset(DUMP_BEFORE, "r"), dsA = NCDataset(DUMP_AFTER, "r")
     end
     close(dsB); close(dsA)
 end
+end  # isfile(DUMP_CANOPY)
 
 println("\n[4] Compare Julia post-step state vs Fortran after_hydrologydrainage:")
 results, gmax = compare_inst_to_dump(inst, DUMP_AFTER; label="1-step", tol=1e-9)

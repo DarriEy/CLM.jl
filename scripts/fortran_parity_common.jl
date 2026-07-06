@@ -72,7 +72,9 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
                           start_date::DateTime=DateTime(2003,1,1),
                           use_cn::Bool=false, use_luna::Bool=false,
                           use_lch4::Bool=false, use_cndv::Bool=false,
-                          use_crop::Bool=false, use_fates::Bool=false)
+                          use_crop::Bool=false, use_fates::Bool=false,
+                          fsurdat::String=FSURDAT, paramfile::String=FPARAM,
+                          baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX)
     # Bow lnd_in: rooting_profile_method_{water,carbon} = 1 (Jackson 1996 beta
     # profile via rootprof_beta), not the Julia default Zeng-2001 roota/rootb. This
     # sets rootfr, which drives the PHS soil-to-root conductance (k_soil_root). Must
@@ -88,12 +90,12 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
     _prev_cs = CLM.coldstart_match_fortran()
     CLM.coldstart_match_fortran!(false)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(;
-        fsurdat=FSURDAT, paramfile=FPARAM,
+        fsurdat=fsurdat, paramfile=paramfile,
         start_date=start_date, dtime=dtime, use_cn=use_cn, use_luna=use_luna,
         use_lch4=use_lch4, use_cndv=use_cndv, use_crop=use_crop, use_fates=use_fates,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
-        int_snow_max=INT_SNOW_MAX)
+        int_snow_max=int_snow)
     CLM.coldstart_match_fortran!(_prev_cs)
 
     # The Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true. (CLM5 default).
@@ -146,13 +148,13 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
     # runtime namelist control, but this shared-IC parity builder bypasses that
     # wrapper and must set it explicitly before CanopyHydrology runs.
     CLM.canopy_hydrology_read_nml!(use_clm5_fpi=true)
-    CLM.init_soil_hydrology_config(baseflow_scalar=BASEFLOW_SCALAR)
+    CLM.init_soil_hydrology_config(baseflow_scalar=baseflow)
 
     # Replicate clm_run.jl's runtime param wiring (n_melt, accum_factor, snow
     # density, grain radius, roughness, aging) — without this the snow-cover
     # n_melt is at its init default and int_snow diverges badly.
     nc = bounds.endc
-    ds_p = NCDataset(FPARAM, "r")
+    ds_p = NCDataset(paramfile, "r")
     scf = inst.scf_method
     if haskey(ds_p, "n_melt_coef")
         nmc = Float64(ds_p["n_melt_coef"][1])
@@ -278,8 +280,12 @@ against the Fortran per-boundary dumps.
 function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DUMPDIR,
                               step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761),
                               forcing_file::String=FFORCING, use_hydrstress::Bool=false,
-                              use_luna::Bool=use_hydrstress)
-    (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna)
+                              use_luna::Bool=use_hydrstress,
+                              fsurdat::String=FSURDAT, paramfile::String=FPARAM,
+                              baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
+                              forcing_offset_hours::Int=0)
+    (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
+                              fsurdat=fsurdat, paramfile=paramfile, baseflow=baseflow, int_snow=int_snow)
     # LUNA (Bow lnd_in use_luna=.true.): allocate the photosyns LUNA vcmax25/jmax25
     # fields so inject_dump! fills them from the restart's vcmx25_z/jmx25_z.
     if use_luna && isempty(inst.photosyns.vcmx25_z_patch)
@@ -331,7 +337,9 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     CLM.init_daylength!(inst.gridcell, declin, declinm1, obliqr, 1:bounds.endg)
 
     CLM.advance_timestep!(tm)
-    CLM.read_forcing_step!(fr, inst.atm2lnd, step_start, ng, nc)
+    # forcing_offset_hours lets the harness match Fortran datm's record-alignment
+    # convention (datm applies the record one step behind the CLM.jl step-start read).
+    CLM.read_forcing_step!(fr, inst.atm2lnd, step_start + Hour(forcing_offset_hours), ng, nc)
     CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
     (yr, mon, d, tod) = CLM.get_curr_date(tm)
 
