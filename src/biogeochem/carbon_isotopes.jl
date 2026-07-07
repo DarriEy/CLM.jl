@@ -2,17 +2,12 @@
 # Carbon Isotope Tracer Transport (C13/C14)
 #
 # ┌────────────────────────────────────────────────────────────────────────┐
-# │ STATUS: UNWIRED / OUT-OF-SCOPE (2026-07). This file is NOT include()d in │
-# │ src/CLM.jl, has no callers, and its test (test_carbon_isotopes.jl) is    │
-# │ NOT in runtests.jl — it is ported reference code only. C13/C14 tracers   │
-# │ are off by default (use_c13/use_c14=false) and rarely used.              │
-# │                                                                          │
-# │ TODO (deferred feature-integration, NOT a GPU task): to make the isotope │
-# │ subsystem live, (1) include this file in CLM.jl; (2) stand up parallel   │
-# │ C13/C14 state pools (mirror the carbon structs) + alloc/restart;         │
-# │ (3) thread c13_c14_photosynthesis! + c14_decay! into clm_drv! guarded by │
-# │ use_c13/use_c14 in the correct phase order; (4) wire the test into the   │
-# │ suite. Only then is GPU-kernelization of these routines meaningful.      │
+# │ STATUS: BEING WIRED LIVE (2026-07). Included in src/CLM.jl and tested    │
+# │ (test_carbon_isotopes.jl in runtests.jl). C13/C14 tracers are gated by   │
+# │ use_c13/use_c14 (default false → no default-path impact). The parallel   │
+# │ C13/C14 carbon-state instances live on the CN vegetation facade          │
+# │ (c13_/c14_cnveg_carbonstate_inst); c13_c14_photosynthesis! + c14_decay!  │
+# │ thread into clm_drv! in isotope phase order, and are GPU-kernelized.     │
 # └────────────────────────────────────────────────────────────────────────┘
 #
 # Ported from:
