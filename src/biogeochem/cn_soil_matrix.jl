@@ -212,17 +212,17 @@ end
 
 # Allocate the matrix workspaces (once). begc:endc unit bounds.
 function cn_soil_matrix_alloc!(ms::CNSoilMatrixState; ndecomp_pools_vr::Int,
-                               begc::Int, endc::Int)
+                               begc::Int, endc::Int, ref=nothing, FT::Type=Float64)
     ms.allocated && return nothing
-    init_sm!(ms.AKsoilc,    ndecomp_pools_vr, begc, endc)
-    init_sm!(ms.AKsoiln,    ndecomp_pools_vr, begc, endc)
-    init_sm!(ms.AVsoil,     ndecomp_pools_vr, begc, endc)
-    init_sm!(ms.AKfiresoil, ndecomp_pools_vr, begc, endc)
-    init_sm!(ms.AKallsoilc, ndecomp_pools_vr, begc, endc)
-    init_sm!(ms.AKallsoiln, ndecomp_pools_vr, begc, endc)
-    init_dm!(ms.Xdiagsoil,  ndecomp_pools_vr, begc, endc)
-    init_v!(ms.matrix_Cinter, ndecomp_pools_vr, begc, endc)
-    init_v!(ms.matrix_Ninter, ndecomp_pools_vr, begc, endc)
+    init_sm!(ms.AKsoilc,    ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_sm!(ms.AKsoiln,    ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_sm!(ms.AVsoil,     ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_sm!(ms.AKfiresoil, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_sm!(ms.AKallsoilc, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_sm!(ms.AKallsoiln, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_dm!(ms.Xdiagsoil,  ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_v!(ms.matrix_Cinter, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    init_v!(ms.matrix_Ninter, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
     ms.allocated = true
     return nothing
 end
@@ -349,7 +349,8 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         # isotope veg-carbon flux (litter fields, for the isotope B-input). Advanced with
         # the same operator as C. nothing → isotope not carried.
         c13_soilbgc_cs = nothing, c13_cnveg_cf = nothing,
-        c14_soilbgc_cs = nothing, c14_cnveg_cf = nothing)
+        c14_soilbgc_cs = nothing, c14_cnveg_cf = nothing,
+        ref = nothing, FT::Type = Float64)
 
     begc = first(bounds_col); endc = last(bounds_col); nc = endc - begc + 1
     ndp_vr = ndecomp_pools * nlevdecomp
@@ -439,7 +440,8 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         mask_soilc=mask_soilc, begc=begc, endc=endc,
         nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
         ndecomp_cascade_transitions=ndecomp_cascade_transitions,
-        ndecomp_cascade_outtransitions=nouttrans, num_actfirec=num_actfirec)
+        ndecomp_cascade_outtransitions=nouttrans, num_actfirec=num_actfirec,
+        ref=ref, FT=FT)
 
     # Reset the persistent B-input for the next step (its dwt contribution was consumed).
     size(soilbgc_cf.matrix_Cinput_col, 2) == ndp_vr && fill!(soilbgc_cf.matrix_Cinput_col, 0.0)
@@ -488,7 +490,8 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
         decomp_c13pools_vr::Union{AbstractArray{<:Real,3},Nothing}=nothing,
         matrix_C13input::Union{AbstractMatrix{<:Real},Nothing}=nothing,
         decomp_c14pools_vr::Union{AbstractArray{<:Real,3},Nothing}=nothing,
-        matrix_C14input::Union{AbstractMatrix{<:Real},Nothing}=nothing)
+        matrix_C14input::Union{AbstractMatrix{<:Real},Nothing}=nothing,
+        ref=nothing, FT::Type=Float64)
 
     ndecomp_pools_vr = ndecomp_pools * nlevdecomp
     Ntrans = (ndecomp_cascade_transitions - ndecomp_cascade_outtransitions) * nlevdecomp
@@ -498,7 +501,7 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     filter_soilc = [c for c in begc:endc if mask_soilc[c]]
     num_soilc = length(filter_soilc)
 
-    cn_soil_matrix_alloc!(ms; ndecomp_pools_vr=ndecomp_pools_vr, begc=begc, endc=endc)
+    cn_soil_matrix_alloc!(ms; ndecomp_pools_vr=ndecomp_pools_vr, begc=begc, endc=endc, ref=ref, FT=FT)
 
     cascade_donor_pool    = cc.cascade_donor_pool
     cascade_receiver_pool = cc.cascade_receiver_pool
@@ -508,7 +511,7 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     nunit = endc - begc + 1
 
     # ----- C:N ratios of applicable pools (gC/gN) -----
-    cn_decomp_pools = zeros(Float64, nunit, nlevdecomp, ndecomp_pools)
+    cn_decomp_pools = _smm_alloc(ref, FT, 0.0, nunit, nlevdecomp, ndecomp_pools)
     for l in 1:ndecomp_pools
         if floating[l]
             for j in 1:nlevdecomp, c in filter_soilc
@@ -528,8 +531,8 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     end
 
     # ----- Assemble a_ma_vr / na_ma_vr (off-diagonal transfer coefficients). -----
-    a_ma_vr  = zeros(Float64, nunit, Ntrans)
-    na_ma_vr = zeros(Float64, nunit, Ntrans)
+    a_ma_vr  = _smm_alloc(ref, FT, 0.0, nunit, Ntrans)
+    na_ma_vr = _smm_alloc(ref, FT, 0.0, nunit, Ntrans)
     for k in 1:ndecomp_cascade_transitions
         if cascade_receiver_pool[k] != 0
             for j in 1:nlevdecomp
@@ -588,8 +591,8 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
         list=cc.list_Asoiln, RI_A=cc.RI_na, CI_A=cc.CI_na)
 
     # ----- Ac*K, An*K. -----
-    Kdm  = DiagMatrixType();  init_dm!(Kdm,  ndecomp_pools_vr, begc, endc)
-    Kndm = DiagMatrixType();  init_dm!(Kndm, ndecomp_pools_vr, begc, endc)
+    Kdm  = DiagMatrixType();  init_dm!(Kdm,  ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    Kndm = DiagMatrixType();  init_dm!(Kndm, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
     set_value_dm!(Kdm,  begc, endc, num_soilc, filter_soilc, Ksoil)
     set_value_dm!(Kndm, begc, endc, num_soilc, filter_soilc, Ksoiln)
     spmm_ak!(ms.AKsoilc, num_soilc, filter_soilc, Kdm)

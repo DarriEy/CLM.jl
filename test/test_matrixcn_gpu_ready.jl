@@ -97,3 +97,40 @@ end
     @test p64[1] != 11.0                                  # leafc[1] advanced from its init (10·1+1)
     @test isapprox(p32, p64; rtol = 1e-4)                # Float32 solver == Float64 to round-off
 end
+
+@testset "soil solver runs end-to-end in Float32 (ref-threaded workspaces)" begin
+    # cn_soil_matrix! ref-threading — same as the veg smoke: confirm the Float32 soil
+    # solve path executes and matches Float64 to round-off. 3-pool toy cascade
+    # (1→2, 2→atm, 3→1), tri_ma_vr=0 so the cascade advance is exact.
+    nc = 1; nlevdecomp = 2; ndecomp_pools = 3; ndct = 3; nout = 1
+    ndp_vr = ndecomp_pools * nlevdecomp; cn = [20.0, 15.0, 90.0]
+    cc = CLM.DecompCascadeConData(cascade_donor_pool=[1, 2, 3], cascade_receiver_pool=[2, 0, 1],
+        floating_cn_ratio_decomp_pools=BitVector([false, false, false]),
+        is_cwd=BitVector([false, false, true]), initial_cn_ratio=cn)
+    CLM.init_soil_transfer!(cc; ndecomp_pools=ndecomp_pools, nlevdecomp=nlevdecomp,
+        ndecomp_cascade_transitions=ndct, ndecomp_cascade_outtransitions=nout)
+    rf = zeros(nc, nlevdecomp, ndct); rf[1, :, 1] .= 0.3; rf[1, :, 2] .= 1.0; rf[1, :, 3] .= 0.0
+    pf = ones(nc, nlevdecomp, ndct)
+    Ksoil = zeros(nc, ndp_vr)
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp; Ksoil[1, j + (i - 1) * nlevdecomp] = 0.02 * i; end
+    Cin = zeros(nc, ndp_vr); Nin = zeros(nc, ndp_vr)
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp; Cin[1, j + (i - 1) * nlevdecomp] = 2.0 * i; Nin[1, j + (i - 1) * nlevdecomp] = 2.0 * i / cn[i]; end
+
+    function run_soil(FT, ref)
+        C = zeros(nc, nlevdecomp, ndecomp_pools); N = similar(C)
+        for i in 1:ndecomp_pools, j in 1:nlevdecomp; C[1, j, i] = 100.0 * i + 10.0 * j; N[1, j, i] = C[1, j, i] / cn[i]; end
+        ms = CLM.CNSoilMatrixState()
+        CLM.cn_soil_matrix!(ms, cc; decomp_cpools_vr=C, decomp_npools_vr=N,
+            Ksoil=copy(Ksoil), tri_ma_vr=zeros(nc, cc.Ntri_setup),
+            matrix_Cinput=copy(Cin), matrix_Ninput=copy(Nin),
+            rf_decomp_cascade=rf, pathfrac_decomp_cascade=pf,
+            mask_soilc=[true], begc=1, endc=1, nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+            ndecomp_cascade_transitions=ndct, ndecomp_cascade_outtransitions=nout,
+            ref=ref, FT=FT)
+        return Float64[vec(C); vec(N)]
+    end
+    s64 = run_soil(Float64, nothing)
+    s32 = run_soil(Float32, zeros(Float32, 1, 1))
+    @test all(isfinite, s32)
+    @test isapprox(s32, s64; rtol = 1e-4)
+end
