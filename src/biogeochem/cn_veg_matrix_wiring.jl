@@ -39,6 +39,9 @@
     elseif i == IDEADCROOT     ; return cs.deadcrootc_patch[p]
     elseif i == IDEADCROOT_ST  ; return cs.deadcrootc_storage_patch[p]
     elseif i == IDEADCROOT_XF  ; return cs.deadcrootc_xfer_patch[p]
+    elseif i == IGRAIN         ; return cs.reproductivec_patch[p, 1]         # crop grain (reproductive)
+    elseif i == IGRAIN_ST      ; return cs.reproductivec_storage_patch[p, 1]
+    elseif i == IGRAIN_XF      ; return cs.reproductivec_xfer_patch[p, 1]
     else                       ; return 0.0
     end
 end
@@ -75,8 +78,15 @@ function cn_veg_matrix_c_topology!(cf::CNVegCarbonFluxData; use_crop::Bool = fal
     doner    = copy(_PHC_DONER_NATVEG)
     receiver = copy(_PHC_RECEIVER_NATVEG)
     if use_crop
+        # For crop, "outside veg" is ioutc = nvegcpool+1 (grain occupies 19..21), so
+        # remap the natveg out-receivers (NVEGPOOL_NATVEG+1) to ioutc. The solver never
+        # reads out-transfer receivers, but this keeps the arrays semantically correct.
+        ioutc = nvegcpool + 1
+        for k in eachindex(receiver)
+            receiver[k] == NVEGPOOL_NATVEG + 1 && (receiver[k] = ioutc)
+        end
         # crop adds grain->iout as a 4th out-transfer (index 18).
-        push!(doner, IGRAIN); push!(receiver, NVEGPOOL_NATVEG + 1)
+        push!(doner, IGRAIN); push!(receiver, ioutc)
         cf.igrain_to_iout_ph = length(doner)
     end
     cf.matrix_phtransfer_doner_patch    = doner
@@ -109,7 +119,8 @@ function cn_veg_matrix_c_topology!(cf::CNVegCarbonFluxData; use_crop::Bool = fal
     cf.ilivestem_to_iout_ph         = 17
 
     # --- Gap mortality: 18 pure out-of-veg losses (pool i -> iout), index i.
-    iout = NVEGPOOL_NATVEG + 1
+    # (grain does not gap/burn → gm/fi stay the 18 natveg pools even for crop.)
+    iout = nvegcpool + 1
     cf.matrix_gmtransfer_doner_patch    = collect(1:NVEGPOOL_NATVEG)   # ILEAF..IDEADCROOT_XF
     cf.matrix_gmtransfer_receiver_patch = fill(iout, NVEGPOOL_NATVEG)
     cf.matrix_gmtransfer_patch = zeros(np, NVEGPOOL_NATVEG)
@@ -174,18 +185,32 @@ Assemble the veg-C allocation B-input from the cpool_to_* fluxes: the solve adds
 total allocated C rate and matrix_alloc to the per-pool fraction (the faithful
 fraction form, reusable by the isotope B-input). Zero when nothing is allocated.
 """
+# The 2 crop grain allocation targets (reproductive C; 2D fields indexed [p,1]).
+const _ALLOC_TARGET_CROP = Tuple{Int,Symbol}[
+    (IGRAIN, :cpool_to_reproductivec_patch),
+    (IGRAIN_ST, :cpool_to_reproductivec_storage_patch)]
+
 function cn_veg_matrix_alloc_c!(cf::CNVegCarbonFluxData,
-        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int})
+        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int};
+        use_crop::Bool = false)
     fill!(cf.matrix_alloc_patch, 0.0)
     fill!(cf.matrix_Cinput_patch, 0.0)
     for p in bounds_patch
         mask_soilp[p] || continue
         tot = 0.0
         for (_, fld) in _ALLOC_TARGET; tot += getfield(cf, fld)[p]; end
+        if use_crop
+            for (_, fld) in _ALLOC_TARGET_CROP; tot += getfield(cf, fld)[p, 1]; end
+        end
         cf.matrix_Cinput_patch[p] = tot
         if tot > 0.0
             for (pool, fld) in _ALLOC_TARGET
                 cf.matrix_alloc_patch[p, pool] = getfield(cf, fld)[p] / tot
+            end
+            if use_crop
+                for (pool, fld) in _ALLOC_TARGET_CROP
+                    cf.matrix_alloc_patch[p, pool] = getfield(cf, fld)[p, 1] / tot
+                end
             end
         end
     end
@@ -271,7 +296,8 @@ Requires `cn_veg_matrix_c_topology!(cf)` to have been called (indices set).
 """
 function cn_veg_matrix_accumulate_ph_c!(cf::CNVegCarbonFluxData,
         cs::CNVegCarbonStateData, mask_soilp::AbstractVector{Bool},
-        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
+        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
+        use_crop::Bool = false)
 
     fill!(cf.matrix_phtransfer_patch, 0.0)
     fill!(cf.matrix_phturnover_patch, 0.0)
@@ -301,6 +327,11 @@ function cn_veg_matrix_accumulate_ph_c!(cf::CNVegCarbonFluxData,
         reg(cf.ileaf_to_iout_ph,             cf.leafc_to_litter_patch[p],            ILEAF)
         reg(cf.ifroot_to_iout_ph,            cf.frootc_to_litter_patch[p],           IFROOT)
         reg(cf.ilivestem_to_iout_ph,         cf.livestemc_to_litter_patch[p],        ILIVESTEM)
+        if use_crop
+            # grain harvest (grain -> outside veg): food + seed.
+            reg(cf.igrain_to_iout_ph,
+                cf.repr_grainc_to_food_patch[p, 1] + cf.repr_grainc_to_seed_patch[p, 1], IGRAIN)
+        end
     end
     return nothing
 end
