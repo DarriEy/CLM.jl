@@ -108,6 +108,7 @@ using CLM
     include("test_c_state_update3.jl")
     include("test_cn_veg_matrix.jl")
     include("test_cn_veg_matrix_wiring.jl")
+    include("test_cn_veg_matrix_wiring_n.jl")
     include("test_matrix_cn_tails.jl")
     include("test_n_state_update1.jl")
     include("test_n_state_update2.jl")

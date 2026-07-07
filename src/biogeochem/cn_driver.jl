@@ -1087,6 +1087,24 @@ function cn_driver_no_leaching!(
                 mask_soilp=mask_bgc_vegp, bounds_patch=bounds_patch,
                 ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=NVEGPOOL_NATVEG,
                 counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep))
+
+            # Matrix-CN veg-N solve (phase 2) — same as C, plus the retranslocation
+            # pool (nvegnpool=19 incl. retransn). The N fire fluxes are computed by
+            # the fire block above; n_state_update1/2/3 all skip veg-N pool increments
+            # in matrix mode (leaving pools at start-of-step), so this one solve
+            # subsumes them (== sequential; validated in test_cn_veg_matrix_wiring_n).
+            _nret = IRETRANSN_NATVEG   # 19 (Fortran nvegnpool convention: incl. retransn)
+            if cnveg_nf.ileaf_to_iretransn_ph == 0
+                cn_veg_matrix_n_topology!(cnveg_nf; use_crop=false, nvegnpool=_nret)
+            end
+            cn_veg_matrix_alloc_n!(cnveg_nf, mask_bgc_vegp, bounds_patch)
+            cn_veg_matrix_accumulate_phn!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_accumulate_gmn!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_accumulate_fin!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_solve_n!(cnveg_ns, cnveg_nf;
+                mask_soilp=mask_bgc_vegp, bounds_patch=bounds_patch,
+                ivt=ivt, npcropmin=npcropmin, nvegnpool=_nret,
+                counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep))
         end
 
         # C14Decay — not yet ported

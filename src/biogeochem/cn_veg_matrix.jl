@@ -203,6 +203,105 @@ function matrix_update_fic!(cf, p::Int, itransfer::Int, rate::Float64, dt::Float
 end
 
 # -----------------------------------------------------------------------------
+# Nitrogen accumulators — identical mechanics to the C versions but writing the
+# matrix_nph*/matrix_ngm*/matrix_nfi* arrays. Port of matrix_update_phn/gmn/fin.
+# -----------------------------------------------------------------------------
+
+"""
+    matrix_update_phn!(nf, p, itransfer, rate, dt; matrixcheck=true, acc=true) -> applied_rate
+
+Register a phenology N transfer (doner→receiver, index `itransfer`). N analog of
+[`matrix_update_phc!`]; writes `matrix_nphturnover_patch`/`matrix_nphtransfer_patch`.
+"""
+function matrix_update_phn!(nf, p::Int, itransfer::Int, rate::Float64, dt::Float64;
+                            matrixcheck::Bool=true, acc::Bool=true)
+    phtransfer = nf.matrix_nphtransfer_patch
+    phturnover = nf.matrix_nphturnover_patch
+    doner = nf.matrix_nphtransfer_doner_patch
+    d = doner[itransfer]
+    if matrixcheck
+        if acc && phturnover[p, d] + rate * dt >= 1.0
+            applied = max(0.0, (1.0 - phturnover[p, d]) / dt)
+        else
+            applied = rate
+        end
+    else
+        applied = rate
+    end
+    if acc
+        phturnover[p, d] += applied * dt
+        phtransfer[p, itransfer] += applied
+    else
+        phturnover[p, d] += -phtransfer[p, itransfer] * dt + applied * dt
+        phtransfer[p, itransfer] = applied
+    end
+    return applied
+end
+
+"""
+    matrix_update_gmn!(nf, p, itransfer, rate, dt; matrixcheck=true, acc=true) -> applied_rate
+
+Register a gap-mortality N transfer. N analog of [`matrix_update_gmc!`].
+"""
+function matrix_update_gmn!(nf, p::Int, itransfer::Int, rate::Float64, dt::Float64;
+                            matrixcheck::Bool=true, acc::Bool=true)
+    phturnover = nf.matrix_nphturnover_patch
+    gmtransfer = nf.matrix_ngmtransfer_patch
+    gmturnover = nf.matrix_ngmturnover_patch
+    doner = nf.matrix_ngmtransfer_doner_patch
+    d = doner[itransfer]
+    if matrixcheck
+        if acc && phturnover[p, d] + gmturnover[p, d] + rate * dt >= 1.0
+            applied = max(0.0, (1.0 - phturnover[p, d] - gmturnover[p, d]) / dt)
+        else
+            applied = rate
+        end
+    else
+        applied = rate
+    end
+    if acc
+        gmturnover[p, d] += applied * dt
+        gmtransfer[p, itransfer] += applied
+    else
+        gmturnover[p, d] += -gmtransfer[p, itransfer] * dt + applied * dt
+        gmtransfer[p, itransfer] = applied
+    end
+    return applied
+end
+
+"""
+    matrix_update_fin!(nf, p, itransfer, rate, dt; matrixcheck=true, acc=true) -> applied_rate
+
+Register a fire N transfer. N analog of [`matrix_update_fic!`].
+"""
+function matrix_update_fin!(nf, p::Int, itransfer::Int, rate::Float64, dt::Float64;
+                            matrixcheck::Bool=true, acc::Bool=true)
+    phturnover = nf.matrix_nphturnover_patch
+    gmturnover = nf.matrix_ngmturnover_patch
+    fitransfer = nf.matrix_nfitransfer_patch
+    fiturnover = nf.matrix_nfiturnover_patch
+    doner = nf.matrix_nfitransfer_doner_patch
+    d = doner[itransfer]
+    if matrixcheck
+        if acc && phturnover[p, d] + gmturnover[p, d] + fiturnover[p, d] + rate * dt >= 1.0
+            applied = max(0.0, (1.0 - phturnover[p, d] - gmturnover[p, d] - fiturnover[p, d]) / dt)
+        else
+            applied = rate
+        end
+    else
+        applied = rate
+    end
+    if acc
+        fiturnover[p, d] += applied * dt
+        fitransfer[p, itransfer] += applied
+    else
+        fiturnover[p, d] += -fitransfer[p, itransfer] * dt + applied * dt
+        fitransfer[p, itransfer] = applied
+    end
+    return applied
+end
+
+# -----------------------------------------------------------------------------
 # Matrix assembly + solve (Fortran CNVegMatrix core, lines 1024–1538 + 2309–2336)
 # -----------------------------------------------------------------------------
 

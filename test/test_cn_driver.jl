@@ -534,6 +534,13 @@
         @test all(isfinite, d.cs_veg.deadstemc_patch)
         @test d.cs_veg.leafc_patch ≈ leafc0          # zero fluxes → identity advance
         @test d.cs_veg.deadstemc_patch ≈ deadstemc0
+
+        # veg-N matrix path (phase 2): topology set up + retransn pool advanced.
+        @test d.nf_veg.ileaf_to_iretransn_ph == 1     # N topology (retransn) set up
+        @test d.nf_veg.iretransn_to_iout_ph == 34     # last phenology out-transfer
+        @test d.nf_veg.iretransn_to_iout_fi == 21     # fire retransn out (last index)
+        @test all(isfinite, d.ns_veg.leafn_patch)
+        @test all(isfinite, d.ns_veg.retransn_patch)
     end
 
 end
