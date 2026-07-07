@@ -1,6 +1,22 @@
 # =============================================================================
 # CNVegMatrixMod — matrix solution for the vegetation C (and N) cycle
 #
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ GPU STATUS: OUT-OF-SCOPE for kernelization (2026-07). The matrix-CN      │
+# │ solver (this file + cn_soil_matrix.jl + sparse_matrix_multiply.jl) is    │
+# │ off by default (use_matrixcn/use_soil_matrixcn=false) AND NOT driver-    │
+# │ wired: the CN cycle no-op's the matrix path (see c_state_update1.jl      │
+# │ "matrix_update_phc path omitted / replaced by a no-op") and runs the ODE │
+# │ path. It is unit-tested (test_cn_veg_matrix/soil_matrix/sparse_matrix)   │
+# │ but never executes in a run.                                             │
+# │ It is also a SPARSE-MATRIX solver (irregular sparse indexing/matmul) —   │
+# │ the most GPU-hostile pattern — so kernelizing code that never runs is    │
+# │ maximal effort for zero run-path value.                                  │
+# │ TODO (if matrix-CN is ever driver-wired + made default-relevant): only   │
+# │ then kernelize, and the sparse ops will need a CSR/atomic-scatter design │
+# │ distinct from the elementwise/FUN-style playbook.                        │
+# └────────────────────────────────────────────────────────────────────────┘
+#
 # Julia port of (the core of) CTSM `src/biogeochem/CNVegMatrixMod.F90`
 # (matrix model by Yiqi Luo EcoLab: Drs. Xingjie Lu, Yuanyuan Huang, Zhengguang Du).
 #
