@@ -473,4 +473,53 @@
         @test 0.0 <= inst.water.waterdiagnosticbulk_inst.frac_sno_col[2] <= 1.0
     end
 
+    # ================================================================
+    # C13/C14 isotope tracer wiring — c13_c14_photosynthesis! is threaded into
+    # clm_drv_core! gated on use_c13/use_c14. Validates (a) the driver runs with
+    # the flags on (the gated block executes with correctly-sourced inst args)
+    # and (b) that exact call produces the right C13/C14 psn given a seeded
+    # photosynthesis state + isotope forcing.
+    # ================================================================
+    @testset "clm_drv! C13/C14 isotope wiring" begin
+        inst, bounds, filt, filt_ia, _, photosyns = make_driver_data()
+        inst.canopystate.frac_veg_nosno_alb_patch .= 1
+        np = bounds.endp
+
+        # Isotope atmospheric forcing (per gridcell) + latitude.
+        inst.atm2lnd.forc_pco2_grc   .= 400.0e-6
+        inst.atm2lnd.forc_pc13o2_grc .= 4.4e-6
+        inst.gridcell.latdeg         .= 45.0
+
+        # (a) Integration: the driver runs to completion with use_c13/use_c14 on,
+        # so the wired gated block fires with args sourced from inst (a2l/pch/grc)
+        # and must not error (this is what catches a mis-sourced arg). It only
+        # touches the photosynthesis struct + forcing, independent of the CN cycle.
+        # (The minimal fixture doesn't run the full photosynthesis solve or hold
+        # finite forcing across the step, so numeric checks live in (b) below.)
+        config = CLM.CLMDriverConfig(use_c13=true, use_c14=true)
+        @test nothing === CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
+                                        false, 1.0, 0.0, 0.0, 0.4091,
+                                        false, false, "20260101", false;
+                                        nstep=1, photosyns=photosyns)
+
+        # (b) The exact call clm_drv_core! makes, with a seeded photosynthesis
+        # state (the full solve does not populate psn on this minimal fixture).
+        photosyns.psnsun_patch      .= 5.0
+        photosyns.psnsha_patch      .= 3.0
+        photosyns.psnsun_patch[3]    = 0.0   # a zero-psn patch → zero isotope flux
+        photosyns.alphapsnsun_patch .= 1.02
+        photosyns.alphapsnsha_patch .= 1.01
+        CLM.c13_c14_photosynthesis!(photosyns,
+            inst.atm2lnd.forc_pco2_grc, inst.atm2lnd.forc_pc13o2_grc,
+            inst.patch.gridcell, inst.gridcell.latdeg, trues(np), 1:np;
+            use_c13=true, use_c14=true)
+        expected_rc13 = 4.4e-6 / (400.0e-6 - 4.4e-6)
+        @test photosyns.rc13_canair_patch[1] ≈ expected_rc13 atol=1e-12
+        rc_sun = expected_rc13 / 1.02
+        @test photosyns.c13_psnsun_patch[1] ≈ 5.0 * rc_sun / (1.0 + rc_sun) atol=1e-12
+        @test photosyns.c14_psnsun_patch[1] ≈ 5.0 atol=1e-12   # lat 45 → sector 1, rc14=1
+        @test photosyns.c13_psnsun_patch[3] == 0.0
+        @test photosyns.c14_psnsun_patch[3] == 0.0
+    end
+
 end
