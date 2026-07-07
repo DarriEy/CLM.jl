@@ -316,7 +316,7 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         nlevdecomp::Int, ndecomp_pools::Int, ndecomp_cascade_transitions::Int,
         i_litr_min::Int, i_litr_max::Int, i_cwd::Int, dt::Real,
         num_actfirec::Int = 0, transient_landcover::Bool = false,
-        soilbgc_nf = nothing)
+        soilbgc_nf = nothing, soil_matrix_state = nothing)
 
     begc = first(bounds_col); endc = last(bounds_col); nc = endc - begc + 1
     ndp_vr = ndecomp_pools * nlevdecomp
@@ -369,7 +369,11 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         end
     end
 
-    ms = CNSoilMatrixState()
+    # Reuse a caller-owned CNSoilMatrixState across steps to keep the memoized sparse
+    # index structure (init_ready*/list_ready*); a fresh one per call is correct but
+    # rebuilds the indices every step. Reuse is validated in test_cn_soil_matrix
+    # ("memoized index reuse"). Falls back to a fresh state when none is supplied.
+    ms = soil_matrix_state === nothing ? CNSoilMatrixState() : soil_matrix_state
     cn_soil_matrix!(ms, cascade_con;
         decomp_cpools_vr=soilbgc_cs.decomp_cpools_vr_col,
         decomp_npools_vr=soilbgc_ns.decomp_npools_vr_col,

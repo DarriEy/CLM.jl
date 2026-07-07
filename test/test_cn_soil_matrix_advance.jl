@@ -167,3 +167,61 @@ end
         i_cwd=i_cwd, dt=dt, num_actfirec=0)
     @test cs0.decomp_cpools_vr_col ≈ C0 atol=1e-10   # no fire → pools unchanged
 end
+
+@testset "cn_soil_matrix_advance! reuses a persistent CNSoilMatrixState" begin
+    # Passing a caller-owned soil_matrix_state reuses the memoized sparse index
+    # structure across steps; the result must be identical to a fresh state each call.
+    nc = 1; nlevdecomp = 2; ndecomp_pools = 3; dt = 1800.0
+    i_litr_min = 1; i_litr_max = 2; i_cwd = 3; ndp_vr = ndecomp_pools * nlevdecomp
+    initial_cn = [20.0, 15.0, 90.0]
+
+    function fresh_inputs()
+        C0 = zeros(nc, nlevdecomp, ndecomp_pools); N0 = similar(C0)
+        for i in 1:ndecomp_pools, j in 1:nlevdecomp
+            C0[1, j, i] = 100.0 * i + 10.0 * j; N0[1, j, i] = C0[1, j, i] / initial_cn[i]
+        end
+        cs = CLM.SoilBiogeochemCarbonStateData(); cs.decomp_cpools_vr_col = C0
+        ns = CLM.SoilBiogeochemNitrogenStateData(); ns.decomp_npools_vr_col = N0
+        cf = CLM.SoilBiogeochemCarbonFluxData()
+        cf.rf_decomp_cascade_col = fill(0.2, nc, nlevdecomp, ndecomp_pools)
+        cf.pathfrac_decomp_cascade_col = ones(nc, nlevdecomp, ndecomp_pools)
+        cf.tri_ma_vr = zeros(nc, (nlevdecomp * 3 - 2) * (ndecomp_pools - 1))
+        vcf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(vcf, 1, nc, 1;
+            nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools)
+        vnf = CLM.CNVegNitrogenFluxData(); CLM.cnveg_nitrogen_flux_init!(vnf, 1, nc, 1;
+            nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools, i_litr_max=i_litr_max)
+        for f in (:phenology_c_to_litr_c_col, :gap_mortality_c_to_litr_c_col, :m_c_to_litr_fire_col,
+                  :gap_mortality_c_to_cwdc_col, :fire_mortality_c_to_cwdc_col); fill!(getfield(vcf, f), 0.0); end
+        for f in (:phenology_n_to_litr_n_col, :gap_mortality_n_to_litr_n_col, :m_n_to_litr_fire_col,
+                  :gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_col); fill!(getfield(vnf, f), 0.0); end
+        vcf.phenology_c_to_litr_c_col[1, 1, 1] = 0.5; vnf.phenology_n_to_litr_n_col[1, 1, 1] = 0.04
+        return (cs=cs, ns=ns, cf=cf, vcf=vcf, vnf=vnf)
+    end
+    mkcc() = CLM.DecompCascadeConData(cascade_donor_pool=[1,2,3], cascade_receiver_pool=[2,0,1],
+        floating_cn_ratio_decomp_pools=BitVector([false,false,false]),
+        is_cwd=BitVector([false,false,true]), initial_cn_ratio=initial_cn)
+    Ksoil = zeros(nc, ndp_vr)
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp; Ksoil[1, j + (i - 1) * nlevdecomp] = 0.03 * i; end
+    adv!(cc, d, ms) = CLM.cn_soil_matrix_advance!(cc, d.cs, d.ns, d.cf, d.vcf, d.vnf; Ksoil=Ksoil,
+        mask_soilc=[true], bounds_col=1:nc, nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+        ndecomp_cascade_transitions=3, i_litr_min=i_litr_min, i_litr_max=i_litr_max,
+        i_cwd=i_cwd, dt=dt, soil_matrix_state=ms)
+
+    # fresh state each call (baseline)
+    da = fresh_inputs(); adv!(mkcc(), da, nothing)
+    Cref = copy(da.cs.decomp_cpools_vr_col); Nref = copy(da.ns.decomp_npools_vr_col)
+
+    # persistent state, reused across two calls — must match, and be memoized. The
+    # cascade_con is ALSO persistent (it co-memoizes the sparse indices with ms), exactly
+    # as in the driver where both are passed every step.
+    ccp = mkcc()
+    ms = CLM.CNSoilMatrixState()
+    @test ms.init_readyAsoilc == false
+    db = fresh_inputs(); adv!(ccp, db, ms)
+    @test ms.init_readyAsoilc == true               # memoization now engaged
+    @test db.cs.decomp_cpools_vr_col ≈ Cref atol=1e-11
+    @test db.ns.decomp_npools_vr_col ≈ Nref atol=1e-11
+    dc = fresh_inputs(); adv!(ccp, dc, ms)           # second reuse (same cc + ms)
+    @test dc.cs.decomp_cpools_vr_col ≈ Cref atol=1e-11
+    @test dc.ns.decomp_npools_vr_col ≈ Nref atol=1e-11
+end

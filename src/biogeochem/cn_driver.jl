@@ -196,6 +196,10 @@ function cn_driver_no_leaching!(
         dynharvest_state = nothing,
         dyngrossunrep_state = nothing,
         pftcon_grossunrep = nothing,
+        # Caller-owned persistent soil-matrix workspace (CNSoilMatrixState). When
+        # supplied it is reused across steps so the sparse index memoization survives;
+        # a fresh one is built each step otherwise (correct but slower).
+        soil_matrix_state = nothing,
         crop::Union{CropData, Nothing} = nothing,
         photosyns::Union{PhotosynthesisData, Nothing} = nothing,
         canopystate::Union{CanopyStateData, Nothing} = nothing,
@@ -1176,7 +1180,8 @@ function cn_driver_no_leaching!(
             # landcover is active; their state updates (c/n_state_update2h/2g) skip the
             # direct decomp-pool addition under use_soil_matrixcn. dwt enters via the
             # persistent soilbgc_nf/cf.matrix_Cinput/Ninput_col (accumulated in dyn_subgrid).
-            transient_landcover=transient_landcover, soilbgc_nf=soilbgc_nf)
+            transient_landcover=transient_landcover, soilbgc_nf=soilbgc_nf,
+            soil_matrix_state=soil_matrix_state)
     end
 
     # CNPrecisionControl (post fire) — WIRED
