@@ -1311,6 +1311,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     canhyd_update_h2ocan!(wdb.h2ocan_patch, wsb.ws.snocan_patch, wsb.ws.liqcan_patch,
                           filt.nolakep, 1, np)
 
+    # C13/C14 photosynthesis fractionation — WIRED (gated on config.use_c13/use_c14).
+    # Runs after the photosynthesis solve has filled ps.psnsun/psnsha + the
+    # fractionation factors ps.alphapsnsun/sha, mirroring the Fortran call from
+    # PhotosynthesisTotal. With both flags off (default) the block is skipped, so the
+    # default path is unchanged; non-veg patches (psn=0) contribute zero isotope flux.
+    if config.use_c13 || config.use_c14
+        c13_c14_photosynthesis!(ps, a2l.forc_pco2_grc, a2l.forc_pc13o2_grc,
+            pch.gridcell, grc.latdeg, trues(np), 1:np;
+            use_c13 = config.use_c13, use_c14 = config.use_c14)
+    end
+
     # CalcOzoneUptake — WIRED (gated on config.use_ozone)
     # Accumulate ozone dose now that the canopy/photosynthesis solve has filled the
     # stomatal resistances (ps.rssun/rssha) and the leaf-boundary/aerodynamic
