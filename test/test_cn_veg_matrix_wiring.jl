@@ -80,10 +80,24 @@
         end
     end
 
-    # (a) sequential reference (phenology transfers + gap-mortality + fire)
+    # allocation: cpool -> 12 pools (NPP input B)
+    alloc_flux = Dict(CLM.ILEAF=>3e-5, CLM.ILEAF_ST=>1e-5, CLM.IFROOT=>2.5e-5, CLM.IFROOT_ST=>8e-6,
+        CLM.ILIVESTEM=>2e-5, CLM.ILIVESTEM_ST=>6e-6, CLM.IDEADSTEM=>1e-5, CLM.IDEADSTEM_ST=>4e-6,
+        CLM.ILIVECROOT=>1.5e-5, CLM.ILIVECROOT_ST=>5e-6, CLM.IDEADCROOT=>8e-6, CLM.IDEADCROOT_ST=>3e-6)
+    set_alloc!(cf) = begin
+        for (pool, fld) in CLM._ALLOC_TARGET
+            length(getfield(cf, fld)) == 0 && setfield!(cf, fld, zeros(np))
+            arr = getfield(cf, fld); for p in 1:np; arr[p] = alloc_flux[pool]; end
+        end
+    end
+
+    # (a) sequential reference (allocation + phenology transfers + gap-mortality + fire)
     cs_seq = fresh()
     cf_seq = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf_seq, np, 1, 1; use_matrixcn=true)
-    set_fluxes!(cf_seq, cs_seq); set_gm!(cf_seq, cs_seq); set_fi!(cf_seq, cs_seq)
+    set_fluxes!(cf_seq, cs_seq); set_gm!(cf_seq, cs_seq); set_fi!(cf_seq, cs_seq); set_alloc!(cf_seq)
+    for p in 1:np, (pool, fld) in CLM._ALLOC_TARGET   # allocation additions
+        pooladd!(cs_seq, pool, p, getfield(cf_seq, fld)[p] * dt)
+    end
     for p in 1:np, k in 1:17
         flux = getfield(cf_seq, fldlist[k])[p]
         pooladd!(cs_seq, receiverpool[k], p,  flux*dt)
@@ -104,10 +118,10 @@
     # (b) matrix advance via the wiring under test
     cs_mat = fresh()
     cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, 1, 1; use_matrixcn=true)
-    set_fluxes!(cf, cs_mat); set_gm!(cf, cs_mat); set_fi!(cf, cs_mat)
-    CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)   # ph + gm + fi topology
-    cf.matrix_alloc_patch = zeros(np, nveg); cf.matrix_Cinput_patch = zeros(np)
+    set_fluxes!(cf, cs_mat); set_gm!(cf, cs_mat); set_fi!(cf, cs_mat); set_alloc!(cf)
+    CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)   # ph + gm + fi topology + sizes alloc/Cinput
 
+    CLM.cn_veg_matrix_alloc_c!(cf, trues(np), 1:np)
     CLM.cn_veg_matrix_accumulate_ph_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)
     CLM.cn_veg_matrix_accumulate_gm_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)
     CLM.cn_veg_matrix_accumulate_fi_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)

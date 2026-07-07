@@ -87,6 +87,8 @@ function cn_veg_matrix_c_topology!(cf::CNVegCarbonFluxData; use_crop::Bool = fal
     np = length(cf.leafc_to_litter_patch)
     cf.matrix_phtransfer_patch = zeros(np, length(doner))
     cf.matrix_phturnover_patch = zeros(np, nvegcpool)
+    cf.matrix_alloc_patch  = zeros(np, nvegcpool)
+    cf.matrix_Cinput_patch = zeros(np)
 
     cf.ileafst_to_ileafxf_ph        = 1
     cf.ileafxf_to_ileaf_ph          = 2
@@ -153,6 +155,42 @@ const _FIC_TO_LITTER = Symbol[
     :m_deadstemc_to_litter_fire_patch, :m_deadstemc_storage_to_litter_fire_patch, :m_deadstemc_xfer_to_litter_fire_patch,
     :m_livecrootc_to_litter_fire_patch, :m_livecrootc_storage_to_litter_fire_patch, :m_livecrootc_xfer_to_litter_fire_patch,
     :m_deadcrootc_to_litter_fire_patch, :m_deadcrootc_storage_to_litter_fire_patch, :m_deadcrootc_xfer_to_litter_fire_patch]
+
+# The 12 allocation targets: (veg pool, cpool_to_* flux field). Allocation fills
+# the leaf/froot/live+deadwood pools + their storage (never the xfer pools).
+const _ALLOC_TARGET = Tuple{Int,Symbol}[
+    (ILEAF, :cpool_to_leafc_patch), (ILEAF_ST, :cpool_to_leafc_storage_patch),
+    (IFROOT, :cpool_to_frootc_patch), (IFROOT_ST, :cpool_to_frootc_storage_patch),
+    (ILIVESTEM, :cpool_to_livestemc_patch), (ILIVESTEM_ST, :cpool_to_livestemc_storage_patch),
+    (IDEADSTEM, :cpool_to_deadstemc_patch), (IDEADSTEM_ST, :cpool_to_deadstemc_storage_patch),
+    (ILIVECROOT, :cpool_to_livecrootc_patch), (ILIVECROOT_ST, :cpool_to_livecrootc_storage_patch),
+    (IDEADCROOT, :cpool_to_deadcrootc_patch), (IDEADCROOT_ST, :cpool_to_deadcrootc_storage_patch)]
+
+"""
+    cn_veg_matrix_alloc_c!(cf, mask_soilp, bounds_patch)
+
+Assemble the veg-C allocation B-input from the cpool_to_* fluxes: the solve adds
+`matrix_alloc[p,i] * matrix_Cinput[p] * dt` to pool i, so set matrix_Cinput to the
+total allocated C rate and matrix_alloc to the per-pool fraction (the faithful
+fraction form, reusable by the isotope B-input). Zero when nothing is allocated.
+"""
+function cn_veg_matrix_alloc_c!(cf::CNVegCarbonFluxData,
+        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int})
+    fill!(cf.matrix_alloc_patch, 0.0)
+    fill!(cf.matrix_Cinput_patch, 0.0)
+    for p in bounds_patch
+        mask_soilp[p] || continue
+        tot = 0.0
+        for (_, fld) in _ALLOC_TARGET; tot += getfield(cf, fld)[p]; end
+        cf.matrix_Cinput_patch[p] = tot
+        if tot > 0.0
+            for (pool, fld) in _ALLOC_TARGET
+                cf.matrix_alloc_patch[p, pool] = getfield(cf, fld)[p] / tot
+            end
+        end
+    end
+    return nothing
+end
 
 """
     cn_veg_matrix_accumulate_fi_c!(cf, cs, mask_soilp, bounds_patch; dt, matrixcheck=false)
