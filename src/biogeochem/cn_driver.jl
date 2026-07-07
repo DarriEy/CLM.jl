@@ -189,6 +189,13 @@ function cn_driver_no_leaching!(
         # are wired only when these are supplied.
         patch::Union{PatchData, Nothing} = nothing,
         pftcon_main::Union{Any, Nothing} = nothing,
+        # Transient wood-harvest + gross-unrepresented-landcover mortality (CNHarvest /
+        # CNGrossUnrep). Wired only when the corresponding state (annual rates, read by
+        # the dyn_subgrid driver) + pft params are supplied and config.do_harvest /
+        # do_grossunrep are on.
+        dynharvest_state = nothing,
+        dyngrossunrep_state = nothing,
+        pftcon_grossunrep = nothing,
         crop::Union{CropData, Nothing} = nothing,
         photosyns::Union{PhotosynthesisData, Nothing} = nothing,
         canopystate::Union{CanopyStateData, Nothing} = nothing,
@@ -873,8 +880,19 @@ function cn_driver_no_leaching!(
             use_soil_matrixcn=config.use_soil_matrixcn,
             dt=dt)
 
-        # Harvest (Update2h)
-        # CNHarvest — not yet ported
+        # Harvest (Update2h) — CNHarvest WIRED. Compute the patch-level wood-harvest
+        # mortality fluxes then gather patch→column into harvest_c/n_to_litr/cwd, which
+        # c_state_update2h! (or, in matrix mode, the soil-matrix B-input) consumes.
+        if config.do_harvest && dynharvest_state !== nothing &&
+           patch !== nothing && pftcon_main !== nothing
+            cn_harvest!(dynharvest_state, mask_bgc_vegp, patch, pftcon_main,
+                soilbgc_state, cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf;
+                dt=dt, nlevdecomp=nlevdecomp, i_litr_min=i_litr_min,
+                i_litr_max=i_litr_max, i_met_lit=i_litr_min)
+            cn_harvest_pft_to_column!(mask_bgc_vegp, patch, pftcon_main, soilbgc_state,
+                cnveg_cf, cnveg_nf; nlevdecomp=nlevdecomp, i_litr_min=i_litr_min,
+                i_litr_max=i_litr_max, i_met_lit=i_litr_min)
+        end
         # CIsoFlux2h — harvest-mortality carbon-isotope fluxes (WIRED).
         if _have_iso
             _mvegp = BitVector(mask_bgc_vegp)
@@ -912,8 +930,17 @@ function cn_driver_no_leaching!(
             use_soil_matrixcn=config.use_soil_matrixcn,
             dt=dt)
 
-        # Gross unrepresented landcover change (Update2g)
-        # CNGrossUnrep — not yet ported
+        # Gross unrepresented landcover change (Update2g) — CNGrossUnrep WIRED.
+        if config.do_grossunrep && dyngrossunrep_state !== nothing &&
+           patch !== nothing && pftcon_grossunrep !== nothing
+            cn_gross_unrep!(mask_bgc_vegp, dyngrossunrep_state, pftcon_grossunrep, patch,
+                cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf, soilbgc_state;
+                dt=dt, nlevdecomp=nlevdecomp, i_litr_min=i_litr_min,
+                i_litr_max=i_litr_max, i_met_lit=i_litr_min)
+            cn_gross_unrep_pft_to_column!(mask_bgc_vegp, pftcon_grossunrep, patch,
+                cnveg_cf, cnveg_nf, soilbgc_state; nlevdecomp=nlevdecomp,
+                i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_met_lit=i_litr_min)
+        end
         # CIsoFlux2g — gross-unrepresented-LCC carbon-isotope fluxes (WIRED).
         if _have_iso
             _mvegp = BitVector(mask_bgc_vegp)
