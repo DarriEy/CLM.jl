@@ -99,3 +99,71 @@
         ndecomp_cascade_transitions=3, i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt)
     @test cs2.decomp_cpools_vr_col ≈ seqC atol=1e-10
 end
+
+@testset "cn_soil_matrix_advance! fire-from-decomp (matrix_decomp_fire_k)" begin
+    # Fire loss from the soil decomp pools: the fire module computes
+    # m_decomp_cpools_to_fire_vr (= pool·f·cmb); the advance helper derives the
+    # matrix fire-loss diagonal matrix_decomp_fire_k = −flux/pool·dt and applies it
+    # via cn_soil_matrix!. Isolated here (no cascade / input / transport) so the
+    # matrix fire loss must equal the sequential fire subtraction EXACTLY.
+    nc = 1; nlevdecomp = 2; ndecomp_pools = 3; dt = 1800.0
+    i_litr_min = 1; i_litr_max = 2; i_cwd = 3; ndp_vr = ndecomp_pools * nlevdecomp
+    cascade_donor = [1, 2, 3]; cascade_recv = [2, 0, 1]; initial_cn = [20.0, 15.0, 90.0]
+
+    C0 = zeros(nc, nlevdecomp, ndecomp_pools); N0 = similar(C0)
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp
+        C0[1, j, i] = 100.0 * i + 10.0 * j; N0[1, j, i] = C0[1, j, i] / initial_cn[i]
+    end
+    # fire flux to litter (pools 1,2) + cwd (pool 3); SOM-only pools (none here) burn 0.
+    ffrac = [0.12, 0.08, 0.05]   # per-pool f·cmb (litter, litter/som, cwd)
+    fflux = zeros(nc, nlevdecomp, ndecomp_pools)
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp; fflux[1, j, i] = C0[1, j, i] * ffrac[i]; end
+
+    # sequential: pools lose the fire flux (× dt); N burns at the same fraction.
+    seqC = copy(C0); seqN = copy(N0)
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp
+        seqC[1, j, i] -= fflux[1, j, i] * dt
+        seqN[1, j, i] -= N0[1, j, i] * ffrac[i] * dt
+    end
+
+    cs = CLM.SoilBiogeochemCarbonStateData(); cs.decomp_cpools_vr_col = copy(C0)
+    ns = CLM.SoilBiogeochemNitrogenStateData(); ns.decomp_npools_vr_col = copy(N0)
+    cf = CLM.SoilBiogeochemCarbonFluxData()
+    cf.rf_decomp_cascade_col = zeros(nc, nlevdecomp, ndecomp_pools)
+    cf.pathfrac_decomp_cascade_col = ones(nc, nlevdecomp, ndecomp_pools)
+    cf.tri_ma_vr = zeros(nc, (nlevdecomp * 3 - 2) * (ndecomp_pools - 1))
+    vcf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(vcf, 1, nc, 1;
+        nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools)
+    vnf = CLM.CNVegNitrogenFluxData(); CLM.cnveg_nitrogen_flux_init!(vnf, 1, nc, 1;
+        nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools, i_litr_max=i_litr_max)
+    # zero the litter/CWD B-input fields (no litter inputs in this isolated fire test).
+    for f in (:phenology_c_to_litr_c_col, :dwt_frootc_to_litr_c_col, :gap_mortality_c_to_litr_c_col, :m_c_to_litr_fire_col,
+              :dwt_livecrootc_to_cwdc_col, :dwt_deadcrootc_to_cwdc_col, :gap_mortality_c_to_cwdc_col, :fire_mortality_c_to_cwdc_col)
+        fill!(getfield(vcf, f), 0.0)
+    end
+    for f in (:phenology_n_to_litr_n_col, :dwt_frootn_to_litr_n_col, :gap_mortality_n_to_litr_n_col, :m_n_to_litr_fire_col,
+              :dwt_livecrootn_to_cwdn_col, :dwt_deadcrootn_to_cwdn_col, :gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_col)
+        fill!(getfield(vnf, f), 0.0)
+    end
+    vcf.m_decomp_cpools_to_fire_vr_col = fflux   # the fire module's decomp→fire flux
+
+    cc = CLM.DecompCascadeConData(cascade_donor_pool=cascade_donor, cascade_receiver_pool=cascade_recv,
+        floating_cn_ratio_decomp_pools=BitVector([false, false, false]),
+        is_cwd=BitVector([false, false, true]), initial_cn_ratio=initial_cn)
+
+    CLM.cn_soil_matrix_advance!(cc, cs, ns, cf, vcf, vnf; Ksoil=zeros(nc, ndp_vr),
+        mask_soilc=[true], bounds_col=1:nc, nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+        ndecomp_cascade_transitions=3, i_litr_min=i_litr_min, i_litr_max=i_litr_max,
+        i_cwd=i_cwd, dt=dt, num_actfirec=1)
+
+    @test cs.decomp_cpools_vr_col ≈ seqC atol=1e-10 rtol=1e-12
+    @test ns.decomp_npools_vr_col ≈ seqN atol=1e-10 rtol=1e-12
+    # num_actfirec=0 → no fire loss applied (fire_k not built).
+    cs0 = CLM.SoilBiogeochemCarbonStateData(); cs0.decomp_cpools_vr_col = copy(C0)
+    ns0 = CLM.SoilBiogeochemNitrogenStateData(); ns0.decomp_npools_vr_col = copy(N0)
+    CLM.cn_soil_matrix_advance!(cc, cs0, ns0, cf, vcf, vnf; Ksoil=zeros(nc, ndp_vr),
+        mask_soilc=[true], bounds_col=1:nc, nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+        ndecomp_cascade_transitions=3, i_litr_min=i_litr_min, i_litr_max=i_litr_max,
+        i_cwd=i_cwd, dt=dt, num_actfirec=0)
+    @test cs0.decomp_cpools_vr_col ≈ C0 atol=1e-10   # no fire → pools unchanged
+end

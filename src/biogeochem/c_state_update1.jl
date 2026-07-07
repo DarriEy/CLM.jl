@@ -18,9 +18,13 @@
 @kernel function _csu_dyn_col_kernel!(@Const(mask_soilc_with_inactive),
         decomp_cpools_vr_col, @Const(dwt_frootc_to_litr_c_col),
         @Const(dwt_livecrootc_to_cwdc_col), @Const(dwt_deadcrootc_to_cwdc_col),
-        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int, dt)
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
+        use_soil_matrixcn::Bool, dt)
     c = @index(Global)
-    @inbounds if mask_soilc_with_inactive[c]
+    # In matrix mode these dwt→litter/CWD inputs enter via the soil-matrix B-input
+    # (cn_soil_matrix_input_accumulate! reads the same dwt_* flux fields), so the
+    # direct pool addition must be skipped here to avoid double-counting.
+    @inbounds if mask_soilc_with_inactive[c] && !use_soil_matrixcn
         for j in 1:nlevdecomp
             for i in i_litr_min:i_litr_max
                 decomp_cpools_vr_col[c, j, i] =
@@ -68,13 +72,14 @@ function c_state_update_dyn_patch!(cs_veg::CNVegCarbonStateData,
                                     i_litr_min::Int,
                                     i_litr_max::Int,
                                     i_cwd::Int,
+                                    use_soil_matrixcn::Bool = false,
                                     dt::Real)
 
     # --- Column loop: litter/CWD input fluxes (one thread per column) ---
     _launch!(_csu_dyn_col_kernel!, mask_soilc_with_inactive,
         cs_soil.decomp_cpools_vr_col, cf_veg.dwt_frootc_to_litr_c_col,
         cf_veg.dwt_livecrootc_to_cwdc_col, cf_veg.dwt_deadcrootc_to_cwdc_col,
-        nlevdecomp, i_litr_min, i_litr_max, i_cwd, dt)
+        nlevdecomp, i_litr_min, i_litr_max, i_cwd, use_soil_matrixcn, dt)
 
     # --- Gridcell loop: seed carbon update (one thread per gridcell) ---
     _launch!(_csu_dyn_grc_kernel!, cs_veg.seedc_grc,

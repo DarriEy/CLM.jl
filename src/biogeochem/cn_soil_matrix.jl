@@ -334,6 +334,24 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
         transient_landcover=transient_landcover)
 
+    # Fire-loss diagonal (AKfiresoil). The fire module computed the decomp→fire flux
+    # m_decomp_cpools_to_fire_vr (= pool·f·cmb); the matrix representation is the loss
+    # fraction/step matrix_decomp_fire_k = −flux/pool·dt (port of CNFireBase:1239/1251,
+    # derived here so the fire kernels stay untouched). Only assembled when a column is
+    # actually burning; the pools are still at start-of-step so /pool is the fire base.
+    fire_k = nothing
+    if num_actfirec > 0
+        fire_k = zeros(nc, ndp_vr)
+        fflux = cnveg_cf.m_decomp_cpools_to_fire_vr_col
+        Xc = soilbgc_cs.decomp_cpools_vr_col
+        for l in 1:ndecomp_pools, j in 1:nlevdecomp, c in bounds_col
+            mask_soilc[c] || continue
+            pool = Xc[c, j, l]
+            fire_k[c - begc + 1, j + (l - 1) * nlevdecomp] =
+                pool > 0.0 ? -fflux[c, j, l] / pool * dt : 0.0
+        end
+    end
+
     ms = CNSoilMatrixState()
     cn_soil_matrix!(ms, cascade_con;
         decomp_cpools_vr=soilbgc_cs.decomp_cpools_vr_col,
@@ -342,7 +360,7 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         matrix_Cinput=Cin, matrix_Ninput=Nin,
         rf_decomp_cascade=soilbgc_cf.rf_decomp_cascade_col,
         pathfrac_decomp_cascade=soilbgc_cf.pathfrac_decomp_cascade_col,
-        matrix_decomp_fire_k=nothing,   # fire-from-decomp deferred (default non-fire)
+        matrix_decomp_fire_k=fire_k,
         mask_soilc=mask_soilc, begc=begc, endc=endc,
         nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
         ndecomp_cascade_transitions=ndecomp_cascade_transitions,

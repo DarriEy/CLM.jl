@@ -423,20 +423,24 @@ function dynSubgrid_run_cnbal!(state::DynSubgridState, bounds_proc::BoundsType,
     #    The masks include inactive points so just-shrunk-to-0 columns are updated.
     bounds_col = bc.begc:bc.endc
     bounds_grc = bc.begg:bc.endg
+    # Matrix mode routes the dwt→litter/CWD inputs through the soil-matrix B-input, so
+    # the dyn-patch kernels must skip the direct pool addition. Default false when the
+    # caller's cons_bgc bundle does not carry the flag (non-matrix runs unchanged).
+    _use_soil_matrixcn = hasproperty(cons_bgc, :use_soil_matrixcn) ? cons_bgc.use_soil_matrixcn : false
     c_state_update_dyn_patch!(cons_bgc.cnveg_carbonstate, cons_bgc.cnveg_carbonflux,
         cons_bgc.soilbiogeochem_carbonstate;
         mask_soilc_with_inactive = cons_bgc.mask_soilc_with_inactive,
         bounds_col = bounds_col, bounds_grc = bounds_grc,
         nlevdecomp = cons_bgc.nlevdecomp,
         i_litr_min = cons_bgc.i_litr_min, i_litr_max = cons_bgc.i_litr_max,
-        i_cwd = cons_bgc.i_cwd, dt = cons_bgc.dt)
+        i_cwd = cons_bgc.i_cwd, use_soil_matrixcn = _use_soil_matrixcn, dt = cons_bgc.dt)
     n_state_update_dyn_patch!(cons_bgc.cnveg_nitrogenstate, cons_bgc.cnveg_nitrogenflux,
         cons_bgc.soilbiogeochem_nitrogenstate;
         mask_soilc_with_inactive = cons_bgc.mask_soilc_with_inactive,
         bounds_col = bounds_col, bounds_grc = bounds_grc,
         nlevdecomp = cons_bgc.nlevdecomp,
         i_litr_min = cons_bgc.i_litr_min, i_litr_max = cons_bgc.i_litr_max,
-        i_cwd = cons_bgc.i_cwd, dt = cons_bgc.dt)
+        i_cwd = cons_bgc.i_cwd, use_soil_matrixcn = _use_soil_matrixcn, dt = cons_bgc.dt)
 
     # 3. Precision control on decomp_cpools_vr_col (Fortran fixes issue #741).
     soil_bgc_precision_control!(cons_bgc.soilbiogeochem_carbonstate,

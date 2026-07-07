@@ -34,9 +34,12 @@
 @kernel function _nsudp_col_kernel!(@Const(mask_soilc_with_inactive),
         decomp_npools_vr_col, @Const(dwt_frootn_to_litr_n_col),
         @Const(dwt_livecrootn_to_cwdn_col), @Const(dwt_deadcrootn_to_cwdn_col),
-        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int, dt)
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
+        use_soil_matrixcn::Bool, dt)
     c = @index(Global)
-    @inbounds if mask_soilc_with_inactive[c]
+    # Matrix mode: these dwt→litter/CWD N inputs enter via the soil-matrix B-input
+    # instead (see _csu_dyn_col_kernel!), so skip the direct pool addition here.
+    @inbounds if mask_soilc_with_inactive[c] && !use_soil_matrixcn
         for j in 1:nlevdecomp
             for i in i_litr_min:i_litr_max
                 decomp_npools_vr_col[c, j, i] =
@@ -82,12 +85,13 @@ function n_state_update_dyn_patch!(ns_veg::CNVegNitrogenStateData,
                                     i_litr_min::Int,
                                     i_litr_max::Int,
                                     i_cwd::Int,
+                                    use_soil_matrixcn::Bool = false,
                                     dt::Real)
 
     _launch!(_nsudp_col_kernel!, mask_soilc_with_inactive,
         ns_soil.decomp_npools_vr_col, nf_veg.dwt_frootn_to_litr_n_col,
         nf_veg.dwt_livecrootn_to_cwdn_col, nf_veg.dwt_deadcrootn_to_cwdn_col,
-        nlevdecomp, i_litr_min, i_litr_max, i_cwd, dt)
+        nlevdecomp, i_litr_min, i_litr_max, i_cwd, use_soil_matrixcn, dt)
 
     _launch!(_nsudp_grc_kernel!, ns_veg.seedn_grc,
         nf_veg.dwt_seedn_to_leaf_grc, nf_veg.dwt_seedn_to_deadstem_grc, dt)
