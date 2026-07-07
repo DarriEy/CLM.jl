@@ -439,8 +439,20 @@ end
 
 Set the diagonal entries `DM[u,i] = M[u,i]` for active units. Matches `SetValueDM`.
 """
+# Per-unit copy of a batched source matrix into the diagonal (each cell written once).
+@kernel function _set_value_dm_kernel!(thisDM, @Const(M), @Const(filter_u),
+        SM::Int, this_begu::Int, src_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; us = u - src_begu + 1
+        for i in 1:SM
+            thisDM[ui, i] = M[us, i]
+        end
+    end
+end
+
 function set_value_dm!(this::DiagMatrixType, begu::Int, endu::Int, num_unit::Int,
-                       filter_u::AbstractVector{Int}, M::AbstractMatrix{Float64})
+                       filter_u::AbstractVector{Int}, M::AbstractMatrix{<:Real})
     if !is_alloc_dm(this)
         error("SetValueDM ERROR: Diagonal matrix was NOT already allocated")
     end
@@ -448,12 +460,9 @@ function set_value_dm!(this::DiagMatrixType, begu::Int, endu::Int, num_unit::Int
     @assert begu == this.begu
     @assert endu == this.endu
     @assert size(M, 2) >= this.SM
-    for i in 1:this.SM
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            this.DM[u_idx(this.begu, u), i] = M[u_idx(begu, u), i]
-        end
-    end
+    num_unit == 0 && return nothing
+    _launch!(_set_value_dm_kernel!, this.DM, M, filter_u, this.SM, this.begu, begu;
+             ndrange = num_unit)
     return nothing
 end
 
@@ -522,18 +531,26 @@ is_alloc_v(this::VectorType) = !isempty(this.V)
 
 Set all entries of the vector to the constant `scaler`. Matches `SetValueV_scaler`.
 """
+# Per-unit scalar fill (each cell written once → byte-identical parallelized per unit).
+@kernel function _set_value_v_scaler_kernel!(thisV, @Const(filter_u), SV::Int, this_begu::Int, scaler)
+    fu = @index(Global)
+    @inbounds begin
+        ui = filter_u[fu] - this_begu + 1
+        for i in 1:SV
+            thisV[ui, i] = scaler
+        end
+    end
+end
+
 function set_value_v_scaler!(this::VectorType, num_unit::Int,
                              filter_u::AbstractVector{Int}, scaler::Float64)
     if !is_alloc_v(this)
         error("SetValueV_scaler ERROR: Vector was NOT already allocated")
     end
     @assert length(filter_u) >= num_unit
-    for i in 1:this.SV
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            this.V[u_idx(this.begu, u), i] = scaler
-        end
-    end
+    num_unit == 0 && return nothing
+    _launch!(_set_value_v_scaler_kernel!, this.V, filter_u, this.SV, this.begu,
+             eltype(this.V)(scaler); ndrange = num_unit)
     return nothing
 end
 
@@ -542,8 +559,20 @@ end
 
 Set the vector entries `V[u,i] = M[u,i]` for active units. Matches `SetValueV`.
 """
+# Per-unit copy of a batched source matrix into the vector (each cell written once).
+@kernel function _set_value_v_kernel!(thisV, @Const(M), @Const(filter_u),
+        SV::Int, this_begu::Int, src_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; us = u - src_begu + 1
+        for i in 1:SV
+            thisV[ui, i] = M[us, i]
+        end
+    end
+end
+
 function set_value_v!(this::VectorType, begu::Int, endu::Int, num_unit::Int,
-                      filter_u::AbstractVector{Int}, M::AbstractMatrix{Float64})
+                      filter_u::AbstractVector{Int}, M::AbstractMatrix{<:Real})
     if !is_alloc_v(this)
         error("SetValueV ERROR: Vector was NOT already allocated")
     end
@@ -551,12 +580,9 @@ function set_value_v!(this::VectorType, begu::Int, endu::Int, num_unit::Int,
     @assert begu == this.begu
     @assert endu == this.endu
     @assert size(M, 2) >= this.SV
-    for i in 1:this.SV
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            this.V[u_idx(this.begu, u), i] = M[u_idx(begu, u), i]
-        end
-    end
+    num_unit == 0 && return nothing
+    _launch!(_set_value_v_kernel!, this.V, M, filter_u, this.SV, this.begu, begu;
+             ndrange = num_unit)
     return nothing
 end
 
