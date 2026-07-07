@@ -13,6 +13,16 @@
 # All calls must be made from within a loop over clumps; `any_changes` is indexed
 # by clump for thread-safety (matching the Fortran design).
 #
+# GPU: the per-state-variable UPDATE PATH (the conservative redistribution called
+# once per state variable) runs through KernelAbstractions kernels on the _launch!
+# path. The grid-cell reductions (total mass/area lost, non_conserved_mass) use
+# `_scatter_add!` (atomic on GPU; ascending-index on the KA CPU backend → the
+# per-gridcell sums are byte-identical to the host loops). set_old_weights! /
+# set_new_weights! stay HOST: they are per-step setup, and set_old_weights!'s
+# natveg-template search is a per-gridcell sequential scan (reduction-natured,
+# host-appropriate) and `any_changes` is a per-clump host gate flag. The struct's
+# weight fields are Adapt-movable so the update kernels can run on-device.
+#
 # Five conservation-strategy variants are provided (see module-level docs in the
 # Fortran for the full rationale):
 #   1. update_column_state_no_special_handling!        — base conservative redistribution
@@ -20,8 +30,6 @@
 #   3. update_column_state_fill_using_fixed_values!     — per-landunit fixed seed values
 #   4. update_column_state_fill_special_using_fixed_value! — all special lunits same fixed seed
 #   5. update_column_state_with_optional_fractions!     — intermediate (fractional-area) layer
-#
-# Standalone: no file I/O, not wired into the driver.
 # ==========================================================================
 
 # For update_column_state_fill_using_fixed_values!, any landunit whose
@@ -41,19 +49,29 @@ for each column, and a per-clump `any_changes` flag.
 
 Ported from `column_state_updater_type` in `dynColumnStateUpdaterMod.F90`.
 
-- `cwtgcell_old`        : old column weights on the grid cell
-- `cwtgcell_new`        : new column weights on the grid cell
-- `area_gained_col`     : `cwtgcell_new - cwtgcell_old` from last `set_new_weights!`
-- `natveg_template_col` : for each column, the first active natveg column in its grid cell
-                          (active determined at `set_old_weights!` time → prior-step active)
-- `any_changes`         : per-clump flag, true if any column changed area this step
+The float weight fields (`V`) and the Int `natveg_template_col` (`VI`) are loose
+so the struct can be adapted onto a GPU backend for the update kernels;
+`any_changes` stays a host `Vector{Bool}` (per-clump gate flag, read on the host).
 """
-Base.@kwdef mutable struct ColumnStateUpdater
-    cwtgcell_old        ::Vector{Float64} = Float64[]
-    cwtgcell_new        ::Vector{Float64} = Float64[]
-    area_gained_col     ::Vector{Float64} = Float64[]
-    natveg_template_col ::Vector{Int}     = Int[]
-    any_changes         ::Vector{Bool}    = Bool[]
+Base.@kwdef mutable struct ColumnStateUpdater{V<:AbstractVector{<:Real},
+                                              VI<:AbstractVector{<:Integer}}
+    cwtgcell_old        ::V           = Float64[]
+    cwtgcell_new        ::V           = Float64[]
+    area_gained_col     ::V           = Float64[]
+    natveg_template_col ::VI          = Int[]
+    any_changes         ::Vector{Bool} = Bool[]
+end
+
+# Custom adapt rule: move the weight/template arrays to the device but keep
+# `any_changes` on the host (it is scalar-indexed by clump on the host).
+function Adapt.adapt_structure(to, x::ColumnStateUpdater)
+    return ColumnStateUpdater(
+        cwtgcell_old        = Adapt.adapt(to, x.cwtgcell_old),
+        cwtgcell_new        = Adapt.adapt(to, x.cwtgcell_new),
+        area_gained_col     = Adapt.adapt(to, x.area_gained_col),
+        natveg_template_col = Adapt.adapt(to, x.natveg_template_col),
+        any_changes         = x.any_changes,
+    )
 end
 
 """
@@ -87,7 +105,8 @@ Set subgrid column weights BEFORE the dyn-subgrid weight updates, and recompute
 the natveg template column for each column (using the current — i.e. prior-step
 — `col.active` flags).
 
-Ported from `set_old_weights` in `dynColumnStateUpdaterMod.F90`.
+Host-side per-step setup: the natveg-template search is a per-gridcell sequential
+scan (reduction-natured, host-appropriate). Ported from `set_old_weights`.
 """
 function set_old_weights!(this::ColumnStateUpdater, bounds::BoundsType,
                           grc::GridcellData, lun::LandunitData, col::ColumnData)
@@ -108,7 +127,8 @@ Set subgrid column weights AFTER the dyn-subgrid weight updates, compute
 `area_gained_col`, and record in `any_changes[clump_index]` whether any column
 changed area this step.
 
-Ported from `set_new_weights` in `dynColumnStateUpdaterMod.F90`.
+Host-side per-step setup: `any_changes[clump_index]` is a host gate flag read on
+the host by every update variant. Ported from `set_new_weights`.
 """
 function set_new_weights!(this::ColumnStateUpdater, bounds::BoundsType,
                           clump_index::Int, col::ColumnData)
@@ -125,27 +145,152 @@ function set_new_weights!(this::ColumnStateUpdater, bounds::BoundsType,
 end
 
 # ========================================================================
+# Kernels for the per-state-variable update path
+# ========================================================================
+
+# Zero a per-column output over [begc, endc] (e.g. adjustment, intent(out)).
+@kernel function _csu_zero_col_kernel!(out, begc::Int, endc::Int)
+    c = @index(Global)
+    T = eltype(out)
+    @inbounds if begc <= c <= endc
+        out[c] = zero(T)
+    end
+end
+
+# Variant 1 builder: every column is prognostic and seeds its own value.
+@kernel function _csu_vals_nospecial_kernel!(vals_input, has_prog, @Const(var),
+                                             begc::Int, endc::Int)
+    c = @index(Global)
+    @inbounds if begc <= c <= endc
+        vals_input[c] = var[c]
+        has_prog[c]   = true
+    end
+end
+
+# Variant 2 builder: special landunits are non-prognostic and seed from the
+# gridcell's natveg template column; natveg columns seed their own value.
+@kernel function _csu_vals_natveg_kernel!(vals_input, has_prog,
+        @Const(var), @Const(landunit), @Const(ifspecial), @Const(natveg_template),
+        template_none::Int, spval, begc::Int, endc::Int)
+    c = @index(Global)
+    T = eltype(vals_input)
+    @inbounds if begc <= c <= endc
+        l = landunit[c]
+        if ifspecial[l]
+            has_prog[c] = false
+            tc = natveg_template[c]
+            if tc == template_none
+                vals_input[c] = T(spval)   # invalid; only an error if this col shrinks
+            else
+                vals_input[c] = var[tc]
+            end
+        else
+            has_prog[c]   = true
+            vals_input[c] = var[c]
+        end
+    end
+end
+
+# Variant 3 builder: columns whose landunit fixed value == FILLVAL keep their own
+# (prognostic) value; otherwise they seed the fixed value (non-prognostic).
+@kernel function _csu_vals_fixed_kernel!(vals_input, has_prog,
+        @Const(var), @Const(landunit), @Const(lun_itype), @Const(landunit_values),
+        fillval, begc::Int, endc::Int)
+    c = @index(Global)
+    T = eltype(vals_input)
+    @inbounds if begc <= c <= endc
+        l = landunit[c]
+        ltype = lun_itype[l]
+        my_fillval = landunit_values[ltype]
+        if my_fillval == T(fillval)
+            vals_input[c] = var[c]
+            has_prog[c]   = true
+        else
+            vals_input[c] = my_fillval
+            has_prog[c]   = false
+        end
+    end
+end
+
+# Core K1: per-column reduction of shrinking-column mass/area into the gridcell
+# (atomic scatter). Non-prognostic shrinkers pull virtual mass tracked in
+# non_conserved_mass. The Fortran shrinking-without-valid-input error() is
+# dropped (GPU can't throw); byte-identical on valid input.
+@kernel function _csu_loss_kernel!(total_loss_grc, total_area_lost_grc, non_conserved_mass,
+        @Const(area_gained_col), @Const(vals_input), @Const(frac_old),
+        @Const(has_prog), @Const(gridcell), begc::Int, endc::Int)
+    c = @index(Global)
+    T = eltype(total_loss_grc)
+    @inbounds if begc <= c <= endc
+        if area_gained_col[c] < zero(T)
+            g = gridcell[c]
+            area_lost = -one(T) * area_gained_col[c]
+            _scatter_add!(total_area_lost_grc, g, area_lost)
+            area_weighted_loss = area_lost * vals_input[c] * frac_old[c]
+            _scatter_add!(total_loss_grc, g, area_weighted_loss)
+            if !has_prog[c]
+                _scatter_add!(non_conserved_mass, g, -area_weighted_loss)
+            end
+        end
+    end
+end
+
+# Core K2: per-gridcell mass-loss-per-unit-area (loss pooled over shrinkers).
+@kernel function _csu_finalize_kernel!(gain_per_unit_area_grc, @Const(total_loss_grc),
+        @Const(total_area_lost_grc), begg::Int, endg::Int)
+    g = @index(Global)
+    T = eltype(gain_per_unit_area_grc)
+    @inbounds if begg <= g <= endg
+        if total_area_lost_grc[g] > zero(T)
+            gain_per_unit_area_grc[g] = total_loss_grc[g] / total_area_lost_grc[g]
+        else
+            gain_per_unit_area_grc[g] = zero(T)
+        end
+    end
+end
+
+# Core K3: distribute pooled gain to growing columns. Prognostic columns absorb
+# mass into var[c] (own-index) + record adjustment[c]; non-prognostic growers
+# throw incoming mass into non_conserved_mass (atomic scatter).
+@kernel function _csu_distribute_kernel!(var, adjustment, non_conserved_mass,
+        @Const(area_gained_col), @Const(gain_per_unit_area_grc), @Const(has_prog),
+        @Const(cwt_old), @Const(cwt_new), @Const(frac_old), @Const(frac_new),
+        @Const(gridcell), has_adjustment::Bool, begc::Int, endc::Int)
+    c = @index(Global)
+    T = eltype(var)
+    @inbounds if begc <= c <= endc
+        if area_gained_col[c] > zero(T)
+            g = gridcell[c]
+            mass_gained = area_gained_col[c] * gain_per_unit_area_grc[g]
+            if has_prog[c]
+                val_old = var[c]
+                if frac_new[c] != zero(T)
+                    var[c] = (cwt_old[c] * var[c] * frac_old[c] + mass_gained) /
+                             (cwt_new[c] * frac_new[c])
+                end
+                if has_adjustment
+                    adjustment[c] = var[c] * frac_new[c] - val_old * frac_old[c]
+                end
+            else
+                _scatter_add!(non_conserved_mass, g, mass_gained)
+            end
+        end
+    end
+end
+
+# ========================================================================
 # Public update methods
 # ========================================================================
 
 """
     update_column_state_no_special_handling!(this, bounds, clump_index, col, var;
-                                              fractional_area_old=nothing,
-                                              fractional_area_new=nothing,
-                                              adjustment=nothing)
+        fractional_area_old=nothing, fractional_area_new=nothing, adjustment=nothing)
 
-Adjust the values of the column-level state variable `var` (indexed `begc:endc`,
-updated in-place) due to changes in subgrid weights, with NO special handling of
-any columns. Appropriate for state variables with valid values on all landunits;
-shrinking-column mass is redistributed conservatively to growing columns.
+Adjust `var` (indexed `begc:endc`, in place) due to changing subgrid weights with
+NO special handling; shrinking-column mass is redistributed conservatively to
+growing columns. Asserts mass is conserved to `COLSTATE_CONSERVATION_TOLERANCE`.
 
-Optional `fractional_area_old`/`fractional_area_new` give the fraction of each
-column over which the state variable applies (both or neither). Optional
-`adjustment` (indexed `begc:endc`) receives the apparent per-column state change.
-
-Asserts that mass is conserved to within `COLSTATE_CONSERVATION_TOLERANCE`.
-
-Ported from `update_column_state_no_special_handling` in `dynColumnStateUpdaterMod.F90`.
+Ported from `update_column_state_no_special_handling`.
 """
 function update_column_state_no_special_handling!(this::ColumnStateUpdater,
         bounds::BoundsType, clump_index::Int, col::ColumnData,
@@ -154,39 +299,34 @@ function update_column_state_no_special_handling!(this::ColumnStateUpdater,
         fractional_area_new::Union{Nothing,AbstractVector{<:Real}}=nothing,
         adjustment::Union{Nothing,AbstractVector{<:Real}}=nothing)
 
-    # Even if there's no work to be done, zero out adjustment (intent(out)).
     if adjustment !== nothing
-        for c in bounds.begc:bounds.endc
-            adjustment[c] = 0.0
-        end
+        _launch!(_csu_zero_col_kernel!, adjustment, bounds.begc, bounds.endc;
+                 ndrange = bounds.endc)
     end
 
     if this.any_changes[clump_index]
-        nc = bounds.endc
-        vals_input            = Vector{Float64}(undef, nc)
-        vals_input_valid      = Vector{Bool}(undef, nc)
-        has_prognostic_state  = Vector{Bool}(undef, nc)
-        non_conserved_mass    = zeros(Float64, bounds.endg)
+        FT = eltype(var)
+        vals_input           = similar(var, FT, bounds.endc)
+        has_prognostic_state = similar(var, Bool, bounds.endc)
+        non_conserved_mass   = fill!(similar(var, FT, bounds.endg), zero(FT))
 
-        for c in bounds.begc:bounds.endc
-            vals_input[c]           = var[c]
-            vals_input_valid[c]     = true
-            has_prognostic_state[c] = true
-        end
+        _launch!(_csu_vals_nospecial_kernel!, vals_input, has_prognostic_state, var,
+                 bounds.begc, bounds.endc; ndrange = bounds.endc)
 
         update_column_state_with_optional_fractions!(this, bounds, col,
-            vals_input, vals_input_valid, has_prognostic_state,
+            vals_input, has_prognostic_state,
             var, non_conserved_mass;
             fractional_area_old=fractional_area_old,
             fractional_area_new=fractional_area_new,
             adjustment=adjustment)
 
-        # No special handling here, so non_conserved_mass must be ~0 (allow roundoff).
+        # No special handling here, so non_conserved_mass must be ~0 (host check).
+        ncm = Array(non_conserved_mass)
         for g in bounds.begg:bounds.endg
-            if abs(non_conserved_mass[g]) >= COLSTATE_CONSERVATION_TOLERANCE
+            if abs(ncm[g]) >= COLSTATE_CONSERVATION_TOLERANCE
                 error("update_column_state_no_special_handling!: ERROR: failure to " *
                       "conserve mass when using no special handling; g=$g, " *
-                      "non_conserved_mass=$(non_conserved_mass[g])")
+                      "non_conserved_mass=$(ncm[g])")
             end
         end
     end
@@ -196,20 +336,13 @@ end
 
 """
     update_column_state_fill_special_using_natveg!(this, bounds, clump_index,
-        grc, lun, col, var, non_conserved_mass_grc;
-        fractional_area_old=nothing, fractional_area_new=nothing, adjustment=nothing)
+        grc, lun, col, var, non_conserved_mass_grc; kwargs...)
 
-Adjust `var` due to changing subgrid weights, where any shrinking column on a
-SPECIAL landunit contributes state equal to the first natural-veg column on its
-grid cell (its `natveg_template_col`). Special landunits do not have prognostic
-state for this variable, so growing special columns throw away incoming mass and
-shrinking special columns pull "virtual" mass out of thin air; both are tracked
-in `non_conserved_mass_grc` (indexed `begg:endg`, accumulated into).
+Adjust `var` where any shrinking column on a SPECIAL landunit contributes state
+equal to the first natural-veg column on its grid cell (`natveg_template_col`).
+Special-column virtual mass is tracked in `non_conserved_mass_grc`.
 
-If a special column has no natveg template, its input value is invalid; this is
-only an error if that column is actually shrinking (see `update_column_state!`).
-
-Ported from `update_column_state_fill_special_using_natveg` in `dynColumnStateUpdaterMod.F90`.
+Ported from `update_column_state_fill_special_using_natveg`.
 """
 function update_column_state_fill_special_using_natveg!(this::ColumnStateUpdater,
         bounds::BoundsType, clump_index::Int,
@@ -220,39 +353,22 @@ function update_column_state_fill_special_using_natveg!(this::ColumnStateUpdater
         adjustment::Union{Nothing,AbstractVector{<:Real}}=nothing)
 
     if adjustment !== nothing
-        for c in bounds.begc:bounds.endc
-            adjustment[c] = 0.0
-        end
+        _launch!(_csu_zero_col_kernel!, adjustment, bounds.begc, bounds.endc;
+                 ndrange = bounds.endc)
     end
 
     if this.any_changes[clump_index]
-        nc = bounds.endc
-        vals_input           = Vector{Float64}(undef, nc)
-        vals_input_valid     = Vector{Bool}(undef, nc)
-        has_prognostic_state = Vector{Bool}(undef, nc)
+        FT = eltype(var)
+        vals_input           = similar(var, FT, bounds.endc)
+        has_prognostic_state = similar(var, Bool, bounds.endc)
 
-        for c in bounds.begc:bounds.endc
-            l = col.landunit[c]
-            if lun.ifspecial[l]
-                has_prognostic_state[c] = false
-
-                template_col = this.natveg_template_col[c]
-                if template_col == TEMPLATE_NONE_FOUND
-                    vals_input[c]       = SPVAL
-                    vals_input_valid[c] = false
-                else
-                    vals_input[c]       = var[template_col]
-                    vals_input_valid[c] = true
-                end
-            else
-                has_prognostic_state[c] = true
-                vals_input[c]           = var[c]
-                vals_input_valid[c]     = true
-            end
-        end
+        _launch!(_csu_vals_natveg_kernel!, vals_input, has_prognostic_state,
+                 var, col.landunit, lun.ifspecial, this.natveg_template_col,
+                 TEMPLATE_NONE_FOUND, FT(SPVAL), bounds.begc, bounds.endc;
+                 ndrange = bounds.endc)
 
         update_column_state_with_optional_fractions!(this, bounds, col,
-            vals_input, vals_input_valid, has_prognostic_state,
+            vals_input, has_prognostic_state,
             var, non_conserved_mass_grc;
             fractional_area_old=fractional_area_old,
             fractional_area_new=fractional_area_new,
@@ -264,19 +380,13 @@ end
 
 """
     update_column_state_fill_using_fixed_values!(this, bounds, clump_index,
-        lun, col, var, landunit_values, non_conserved_mass_grc;
-        fractional_area_old=nothing, fractional_area_new=nothing, adjustment=nothing)
+        lun, col, var, landunit_values, non_conserved_mass_grc; kwargs...)
 
-Adjust `var` due to changing subgrid weights, where any column on landunit type
-`i` is assumed to have state equal to `landunit_values[i]` when shrinking. If
-`landunit_values[i] == FILLVAL_USE_EXISTING_VALUE`, columns of that type keep
-their existing value (and are prognostic — they can accept mass); otherwise the
-landunit is specially treated (cannot accept mass; contributes/loses virtual
-mass tracked in `non_conserved_mass_grc`, indexed `begg:endg`).
+Adjust `var` where any column on landunit type `i` has state `landunit_values[i]`
+when shrinking; `landunit_values[i] == FILLVAL_USE_EXISTING_VALUE` keeps the
+existing (prognostic) value. `landunit_values` must have length `MAX_LUNIT`.
 
-`landunit_values` must have length `MAX_LUNIT`.
-
-Ported from `update_column_state_fill_using_fixed_values` in `dynColumnStateUpdaterMod.F90`.
+Ported from `update_column_state_fill_using_fixed_values`.
 """
 function update_column_state_fill_using_fixed_values!(this::ColumnStateUpdater,
         bounds::BoundsType, clump_index::Int,
@@ -290,35 +400,22 @@ function update_column_state_fill_using_fixed_values!(this::ColumnStateUpdater,
     @assert length(landunit_values) == MAX_LUNIT "update_column_state_fill_using_fixed_values!: must provide values for all landunits"
 
     if adjustment !== nothing
-        for c in bounds.begc:bounds.endc
-            adjustment[c] = 0.0
-        end
+        _launch!(_csu_zero_col_kernel!, adjustment, bounds.begc, bounds.endc;
+                 ndrange = bounds.endc)
     end
 
     if this.any_changes[clump_index]
-        nc = bounds.endc
-        vals_input           = Vector{Float64}(undef, nc)
-        vals_input_valid     = Vector{Bool}(undef, nc)
-        has_prognostic_state = Vector{Bool}(undef, nc)
+        FT = eltype(var)
+        vals_input           = similar(var, FT, bounds.endc)
+        has_prognostic_state = similar(var, Bool, bounds.endc)
 
-        for c in bounds.begc:bounds.endc
-            l = col.landunit[c]
-            ltype = lun.itype[l]
-            my_fillval = landunit_values[ltype]
-
-            if my_fillval == FILLVAL_USE_EXISTING_VALUE
-                vals_input[c]           = var[c]
-                vals_input_valid[c]     = true
-                has_prognostic_state[c] = true
-            else
-                vals_input[c]           = my_fillval
-                vals_input_valid[c]     = true
-                has_prognostic_state[c] = false
-            end
-        end
+        _launch!(_csu_vals_fixed_kernel!, vals_input, has_prognostic_state,
+                 var, col.landunit, lun.itype, landunit_values,
+                 FT(FILLVAL_USE_EXISTING_VALUE), bounds.begc, bounds.endc;
+                 ndrange = bounds.endc)
 
         update_column_state_with_optional_fractions!(this, bounds, col,
-            vals_input, vals_input_valid, has_prognostic_state,
+            vals_input, has_prognostic_state,
             var, non_conserved_mass_grc;
             fractional_area_old=fractional_area_old,
             fractional_area_new=fractional_area_new,
@@ -330,14 +427,13 @@ end
 
 """
     update_column_state_fill_special_using_fixed_value!(this, bounds, clump_index,
-        lun, col, var, special_value, non_conserved_mass_grc;
-        fractional_area_old=nothing, fractional_area_new=nothing, adjustment=nothing)
+        lun, col, var, special_value, non_conserved_mass_grc; kwargs...)
 
 Convenience wrapper to `update_column_state_fill_using_fixed_values!`: vegetated
-(non-special) landunits keep their existing value (`FILLVAL_USE_EXISTING_VALUE`),
-and ALL special landunits contribute the same fixed `special_value`.
+(non-special) landunits keep their existing value, and ALL special landunits
+contribute the same fixed `special_value`.
 
-Ported from `update_column_state_fill_special_using_fixed_value` in `dynColumnStateUpdaterMod.F90`.
+Ported from `update_column_state_fill_special_using_fixed_value`.
 """
 function update_column_state_fill_special_using_fixed_value!(this::ColumnStateUpdater,
         bounds::BoundsType, clump_index::Int,
@@ -348,6 +444,7 @@ function update_column_state_fill_special_using_fixed_value!(this::ColumnStateUp
         fractional_area_new::Union{Nothing,AbstractVector{<:Real}}=nothing,
         adjustment::Union{Nothing,AbstractVector{<:Real}}=nothing)
 
+    # Host-built per-landunit seed table (MAX_LUNIT small); then reuse variant 3.
     landunit_values = Vector{Float64}(undef, MAX_LUNIT)
     for ltype in 1:MAX_LUNIT
         if landunit_is_special(ltype)
@@ -356,9 +453,12 @@ function update_column_state_fill_special_using_fixed_value!(this::ColumnStateUp
             landunit_values[ltype] = FILLVAL_USE_EXISTING_VALUE
         end
     end
+    # Move the seed table onto var's backend so the variant-3 kernel can read it.
+    lv = var isa Array ? landunit_values :
+         copyto!(similar(var, eltype(var), MAX_LUNIT), landunit_values)
 
     update_column_state_fill_using_fixed_values!(this, bounds, clump_index,
-        lun, col, var, landunit_values, non_conserved_mass_grc;
+        lun, col, var, lv, non_conserved_mass_grc;
         fractional_area_old=fractional_area_old,
         fractional_area_new=fractional_area_new,
         adjustment=adjustment)
@@ -372,19 +472,17 @@ end
 
 """
     update_column_state_with_optional_fractions!(this, bounds, col,
-        vals_input, vals_input_valid, has_prognostic_state, var, non_conserved_mass;
-        fractional_area_old=nothing, fractional_area_new=nothing, adjustment=nothing)
+        vals_input, has_prognostic_state, var, non_conserved_mass; kwargs...)
 
-Intermediate routine between the public update variants and the core work routine
-`update_column_state!`. Resolves the optional fractional areas (defaulting to 1
-for every column when absent — both must be supplied or neither) then calls the
-core routine.
+Intermediate routine: resolve the optional fractional areas (defaulting to 1 for
+every column when absent — both must be supplied or neither) then call the core
+`update_column_state!`.
 
-Ported from `update_column_state_with_optional_fractions` in `dynColumnStateUpdaterMod.F90`.
+Ported from `update_column_state_with_optional_fractions`.
 """
 function update_column_state_with_optional_fractions!(this::ColumnStateUpdater,
         bounds::BoundsType, col::ColumnData,
-        vals_input::AbstractVector{<:Real}, vals_input_valid::AbstractVector{Bool},
+        vals_input::AbstractVector{<:Real},
         has_prognostic_state::AbstractVector{Bool},
         var::AbstractVector{<:Real}, non_conserved_mass::AbstractVector{<:Real};
         fractional_area_old::Union{Nothing,AbstractVector{<:Real}}=nothing,
@@ -398,141 +496,65 @@ function update_column_state_with_optional_fractions!(this::ColumnStateUpdater,
         error("update_column_state_with_optional_fractions!: ERROR: If fractional_area_new is provided, then fractional_area_old must be provided, too")
     end
 
-    my_fractional_area_old = Vector{Float64}(undef, bounds.endc)
-    my_fractional_area_new = Vector{Float64}(undef, bounds.endc)
-
-    if fractional_area_old !== nothing
-        for c in bounds.begc:bounds.endc
-            my_fractional_area_old[c] = fractional_area_old[c]
-        end
-    else
-        for c in bounds.begc:bounds.endc
-            my_fractional_area_old[c] = 1.0
-        end
-    end
-
-    if fractional_area_new !== nothing
-        for c in bounds.begc:bounds.endc
-            my_fractional_area_new[c] = fractional_area_new[c]
-        end
-    else
-        for c in bounds.begc:bounds.endc
-            my_fractional_area_new[c] = 1.0
-        end
-    end
+    FT = eltype(var)
+    # Default the fractional areas to 1 when absent (both or neither supplied).
+    my_frac_old = fractional_area_old !== nothing ? fractional_area_old :
+                  fill!(similar(var, FT, bounds.endc), one(FT))
+    my_frac_new = fractional_area_new !== nothing ? fractional_area_new :
+                  fill!(similar(var, FT, bounds.endc), one(FT))
 
     update_column_state!(this, bounds, col,
-        vals_input, vals_input_valid, has_prognostic_state,
-        my_fractional_area_old, my_fractional_area_new,
+        vals_input, has_prognostic_state,
+        my_frac_old, my_frac_new,
         var, non_conserved_mass; adjustment=adjustment)
 
     return nothing
 end
 
 """
-    update_column_state!(this, bounds, col,
-        vals_input, vals_input_valid, has_prognostic_state,
+    update_column_state!(this, bounds, col, vals_input, has_prognostic_state,
         fractional_area_old, fractional_area_new, var, non_conserved_mass;
         adjustment=nothing)
 
-Do the work of conservatively redistributing a column-level state variable when
-subgrid column weights change. For each grid cell, the area-weighted mass lost by
-shrinking columns is pooled and redistributed per unit area to the growing
-columns. Columns without prognostic state (special handling) cannot accept mass;
-their contribution/uptake is tracked in `non_conserved_mass` instead.
+Core work: for each grid cell, pool the area-weighted mass lost by shrinking
+columns and redistribute it per unit area to growing columns. Non-prognostic
+(special) columns cannot accept mass; their contribution/uptake is tracked in
+`non_conserved_mass` instead.
 
-`var` is updated in-place; `non_conserved_mass` (indexed `begg:endg`) is
-accumulated into; optional `adjustment` (indexed `begc:endc`) receives the
-apparent per-column state change.
+The Fortran `has_prognostic_state`/`vals_input == var` consistency error() is a
+debug assertion, dropped here (byte-identical on valid input); mass conservation
+for the no-special variant is still checked on the host after the call.
 
-Ported from `update_column_state` in `dynColumnStateUpdaterMod.F90`.
+Ported from `update_column_state`.
 """
 function update_column_state!(this::ColumnStateUpdater,
         bounds::BoundsType, col::ColumnData,
-        vals_input::AbstractVector{<:Real}, vals_input_valid::AbstractVector{Bool},
+        vals_input::AbstractVector{<:Real},
         has_prognostic_state::AbstractVector{Bool},
         fractional_area_old::AbstractVector{<:Real},
         fractional_area_new::AbstractVector{<:Real},
         var::AbstractVector{<:Real}, non_conserved_mass::AbstractVector{<:Real};
         adjustment::Union{Nothing,AbstractVector{<:Real}}=nothing)
 
-    # ------------------------------------------------------------------------
-    # Error-checking on inputs
-    # ------------------------------------------------------------------------
-    # For the sake of conservation, vals_input must equal var wherever
-    # has_prognostic_state is true (and vals_input is valid).
-    for c in bounds.begc:bounds.endc
-        if has_prognostic_state[c] && vals_input_valid[c]
-            if vals_input[c] != var[c]
-                error("update_column_state!: ERROR: where has_prognostic_state is true, " *
-                      "vals_input must equal var; c=$c, vals_input=$(vals_input[c]), var=$(var[c])")
-            end
-        end
-    end
+    FT = eltype(var)
+    total_loss_grc         = fill!(similar(var, FT, bounds.endg), zero(FT))
+    total_area_lost_grc    = fill!(similar(var, FT, bounds.endg), zero(FT))
+    gain_per_unit_area_grc = fill!(similar(var, FT, bounds.endg), zero(FT))
 
-    # ------------------------------------------------------------------------
-    # Begin main work
-    # ------------------------------------------------------------------------
-    # Determine the total mass loss for each grid cell, plus the gross area loss
-    # (which should match the gross area gain).
-    total_loss_grc      = zeros(Float64, bounds.endg)
-    total_area_lost_grc = zeros(Float64, bounds.endg)
+    _launch!(_csu_loss_kernel!, total_loss_grc, total_area_lost_grc, non_conserved_mass,
+             this.area_gained_col, vals_input, fractional_area_old,
+             has_prognostic_state, col.gridcell, bounds.begc, bounds.endc;
+             ndrange = bounds.endc)
 
-    for c in bounds.begc:bounds.endc
-        g = col.gridcell[c]
-        if this.area_gained_col[c] < 0.0
-            if !vals_input_valid[c]
-                error("update_column_state!: ERROR: shrinking column without valid input value; c=$c")
-            end
-            area_lost = -1.0 * this.area_gained_col[c]
-            total_area_lost_grc[g] += area_lost
-            area_weighted_loss = area_lost * vals_input[c] * fractional_area_old[c]
-            total_loss_grc[g] += area_weighted_loss
+    _launch!(_csu_finalize_kernel!, gain_per_unit_area_grc, total_loss_grc,
+             total_area_lost_grc, bounds.begg, bounds.endg; ndrange = bounds.endg)
 
-            if !has_prognostic_state[c]
-                # This column doesn't model the state variable, so its vals_input is
-                # a fictitious quantity. Track how much of it we added to the system.
-                non_conserved_mass[g] -= area_weighted_loss
-            end
-        end
-    end
-
-    # Mass loss per unit area for each grid cell: lump all loss into a "loss" pool
-    # per grid cell, to then distribute amongst growing columns.
-    gain_per_unit_area_grc = zeros(Float64, bounds.endg)
-    for g in bounds.begg:bounds.endg
-        if total_area_lost_grc[g] > 0.0
-            gain_per_unit_area_grc[g] = total_loss_grc[g] / total_area_lost_grc[g]
-        else
-            gain_per_unit_area_grc[g] = 0.0
-        end
-    end
-
-    # Distribute gain to growing columns.
-    for c in bounds.begc:bounds.endc
-        g = col.gridcell[c]
-        if this.area_gained_col[c] > 0.0
-            mass_gained = this.area_gained_col[c] * gain_per_unit_area_grc[g]
-            if has_prognostic_state[c]
-                val_old = var[c]
-
-                # Avoid divide-by-zero. fractional_area_new == 0 can only happen if
-                # fractional_area_old(c) == 0 and the shrinking columns' fractional
-                # areas were all 0 — in which case var is irrelevant for conservation.
-                if fractional_area_new[c] != 0.0
-                    var[c] = (this.cwtgcell_old[c] * var[c] * fractional_area_old[c] + mass_gained) /
-                             (this.cwtgcell_new[c] * fractional_area_new[c])
-                end
-
-                if adjustment !== nothing
-                    adjustment[c] = var[c] * fractional_area_new[c] -
-                                    val_old * fractional_area_old[c]
-                end
-            else
-                non_conserved_mass[g] += mass_gained
-            end
-        end
-    end
+    has_adj = adjustment !== nothing
+    adj = has_adj ? adjustment : var
+    _launch!(_csu_distribute_kernel!, var, adj, non_conserved_mass,
+             this.area_gained_col, gain_per_unit_area_grc, has_prognostic_state,
+             this.cwtgcell_old, this.cwtgcell_new, fractional_area_old, fractional_area_new,
+             col.gridcell, has_adj, bounds.begc, bounds.endc; ndrange = bounds.endc)
 
     return nothing
 end
