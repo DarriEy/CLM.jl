@@ -15,7 +15,11 @@
 #   cnfire_area_li2021!                — Compute column-level burned area
 #   cnfire_fluxes_li2021!              — Fire C/N fluxes (delegates to base)
 #
-# NOTE: Non-default fire method — straightforward mask-based host loops.
+# GPU: cnfire_area_li2021! runs entirely through KernelAbstractions kernels on
+# the _launch! path (byte-identical on CPU, Metal-validated). Reuses the generic
+# Li2014 sections + the Li2016 noncrop/crop-fire kernels (identical formulas),
+# and adds Li2021-specific kernels for the rswf-rescaled btran accumulation and
+# the fire-spread loop. Off-by-default (non-default method).
 # ==========================================================================
 
 """
@@ -24,6 +28,197 @@
 Returns `true`. Ported from `need_lightning_and_popdens` in `CNFireLi2021Mod.F90`.
 """
 need_lightning_and_popdens_li2021() = true
+
+# --- Section: btran_col / wtlf accumulation with per-PFT rswf rescale -------
+# Li2021 rescales btran2 by the per-PFT (rswf_min, rswf_max) window before the
+# area-weighted column sum (Li2016/2014 used the raw btran2).
+@kernel function _firea2021_btran_wtlf_kernel!(btran_col, wtlf, @Const(mask_exposedveg),
+        @Const(column), @Const(itype), @Const(wtcol), @Const(btran2), @Const(cropf_col),
+        @Const(rswf_min), @Const(rswf_max), nc3crop::Int)
+    p = @index(Global)
+    T = eltype(btran_col)
+    @inbounds if mask_exposedveg[p]
+        c = column[p]
+        if itype[p] < nc3crop && cropf_col[c] < one(T)
+            it = itype[p]
+            _scatter_add!(btran_col, c, smooth_max(zero(T), smooth_min(one(T),
+                (btran2[p] - rswf_min[it + 1]) / (rswf_max[it + 1] - rswf_min[it + 1]))) * wtcol[p])
+            _scatter_add!(wtlf, c, wtcol[p])
+        end
+    end
+end
+
+# --- Section: main per-column fire-spread loop (Li2021) --------------------
+# Reuses the Li2016 device-view bundles (_Fire2016SpreadOut/In1/In2/Mat/Scalars);
+# the array set is identical. Differs from Li2016 only in the fire-occurrence
+# btran term (no bt_min/bt_max clamp) and the deforestation climate term `cli`
+# (revised dtrotr formula; farea/fbac1 use fb*cli). bt_min/bt_max are unused.
+@kernel function _firea2021_fire_spread_kernel!(
+        out::_Fire2016SpreadOut, in1::_Fire2016SpreadIn1, in2::_Fire2016SpreadIn2,
+        mat::_Fire2016SpreadMat,
+        @Const(mask_soilc), @Const(gridcell),
+        sc::_Fire2016SpreadScalars,
+        i_cwd::Int, nlevdecomp::Int, spinup_state::Int,
+        date_is_jan1_0::Bool, transient_landcover::Bool)
+    c = @index(Global)
+    @inbounds if mask_soilc[c]
+        T = eltype(out.nfire)
+
+        nfire = out.nfire; farea_burned = out.farea_burned; fuelc = out.fuelc
+        fbac  = out.fbac;  fbac1 = out.fbac1
+
+        forc_hdm   = in1.forc_hdm;   cropf_col  = in1.cropf_col
+        trotr1_col = in1.trotr1_col; trotr2_col = in1.trotr2_col
+        baf_crop   = in1.baf_crop;   baf_peatf  = in1.baf_peatf
+        totlitc    = in1.totlitc;    totvegc    = in1.totvegc
+        rootc_col  = in1.rootc_col;  fuelc_crop = in1.fuelc_crop
+        dzsoi_decomp = in1.dzsoi_decomp; rh30_col = in1.rh30_col
+        forc_rh    = in1.forc_rh;    wtlf = in1.wtlf; forc_lnfm = in1.forc_lnfm
+
+        latdeg    = in2.latdeg;    forc_wind = in2.forc_wind
+        lgdp_col  = in2.lgdp_col;  lgdp1_col = in2.lgdp1_col; lpop_col = in2.lpop_col
+        fsr_col   = in2.fsr_col;   fd_col    = in2.fd_col;    btran_col = in2.btran_col
+        tsoi17    = in2.tsoi17;    dtrotr_col = in2.dtrotr_col
+        prec60_col = in2.prec60_col; prec10_col = in2.prec10_col
+        forc_rain = in2.forc_rain; forc_snow = in2.forc_snow; lfc = in2.lfc
+        deadstemc_col = in2.deadstemc_col; spinup_lat_term = in2.spinup_lat_term
+
+        decomp_cpools_vr = mat.decomp_cpools_vr
+
+        lfuel = sc.lfuel; ufuel = sc.ufuel; rh_low = sc.rh_low; rh_hgh = sc.rh_hgh
+        prh30 = sc.prh30; max_rh30_affecting_fuel = sc.max_rh30_affecting_fuel
+        pot_hmn_ign_counts_alpha = sc.pot_hmn_ign_counts_alpha
+        ignition_efficiency = sc.ignition_efficiency
+        g0 = sc.g0; cli_scale = sc.cli_scale
+        defo_fire_precip_thresh_bet = sc.defo_fire_precip_thresh_bet
+        defo_fire_precip_thresh_bdt = sc.defo_fire_precip_thresh_bdt
+        spinup_factor_deadwood = sc.spinup_factor_deadwood
+        spinup_factor_cwd = sc.spinup_factor_cwd
+        tfrz = sc.tfrz; rpi = sc.rpi; secsphr = sc.secsphr; secspday = sc.secspday
+        dayspyr = sc.dayspyr; dt = sc.dt
+
+        g = gridcell[c]
+        hdmlf = forc_hdm[g]
+        nfire[c] = zero(T)
+        if cropf_col[c] < one(T)
+            fc = totlitc[c] + totvegc[c] - rootc_col[c] - fuelc_crop[c] * cropf_col[c]
+            if spinup_state == 2
+                fc = fc + (spinup_factor_deadwood - one(T)) * deadstemc_col[c]
+                for j in 1:nlevdecomp
+                    fc = fc + decomp_cpools_vr[c, j, i_cwd] * dzsoi_decomp[j] *
+                              spinup_factor_cwd * spinup_lat_term[c]
+                end
+            else
+                for j in 1:nlevdecomp
+                    fc = fc + decomp_cpools_vr[c, j, i_cwd] * dzsoi_decomp[j]
+                end
+            end
+            fc = fc / (one(T) - cropf_col[c])
+            fuelc[c] = fc
+            fb = smooth_max(zero(T), smooth_min(one(T), (fc - lfuel) / (ufuel - lfuel)))
+            if trotr1_col[c] + trotr2_col[c] <= T(0.6)
+                afuel = smooth_min(one(T), smooth_max(zero(T), (fc - T(2500.0)) / (T(5000.0) - T(2500.0))))
+                arh   = one(T) - smooth_max(zero(T), smooth_min(one(T), (forc_rh[g] - rh_low) / (rh_hgh - rh_low)))
+                arh30 = one(T) - smooth_max(prh30, smooth_min(one(T), rh30_col[c] / max_rh30_affecting_fuel))
+                if forc_rh[g] < rh_hgh && wtlf[c] > zero(T) && tsoi17[c] > tfrz
+                    # Li2021: btran term has no bt_min/bt_max clamp.
+                    fire_m = ((afuel * arh30 + (one(T) - afuel) * arh)^T(1.5)) *
+                             ((one(T) - btran_col[c] / wtlf[c])^T(0.5))
+                else
+                    fire_m = zero(T)
+                end
+                lh = pot_hmn_ign_counts_alpha * T(6.8) * hdmlf^T(0.43) / T(30.0) / T(24.0)
+                fs = one(T) - (T(0.01) + T(0.98) * exp(T(-0.025) * hdmlf))
+                ig = (lh + forc_lnfm[g] /
+                     (T(5.16) + T(2.16) * cos(rpi / T(180.0) * T(3) * smooth_min(T(60.0), abs(latdeg[g])))) *
+                     ignition_efficiency) * (one(T) - fs) * (one(T) - cropf_col[c])
+                nfire[c] = ig / secsphr * fb * fire_m * lgdp_col[c]
+                Lb_lf = one(T) + T(10.0) * (one(T) - exp(T(-0.06) * forc_wind[g]))
+                spread_m = fire_m^T(0.5)
+                farea_burned[c] = smooth_min(one(T), (g0 * spread_m * fsr_col[c] *
+                    fd_col[c] / T(1000.0))^2 * lgdp1_col[c] * lpop_col[c] *
+                    nfire[c] * rpi * Lb_lf + baf_crop[c] + baf_peatf[c])
+            else
+                farea_burned[c] = smooth_min(one(T), baf_crop[c] + baf_peatf[c])
+            end
+
+            if transient_landcover
+                if trotr1_col[c] + trotr2_col[c] > T(0.6)
+                    if date_is_jan1_0 || dtrotr_col[c] <= zero(T)
+                        fbac1[c]        = zero(T)
+                        farea_burned[c] = baf_crop[c] + baf_peatf[c]
+                    else
+                        cri = (defo_fire_precip_thresh_bet * trotr1_col[c] +
+                               defo_fire_precip_thresh_bdt * trotr2_col[c]) /
+                              (trotr1_col[c] + trotr2_col[c])
+                        # Li2021: revised deforestation climate term.
+                        cli = (smooth_max(zero(T), smooth_min(one(T), (cri - prec60_col[c] * secspday) / cri))^T(0.5)) *
+                              (smooth_max(zero(T), smooth_min(one(T), (cri - prec10_col[c] * secspday) / cri))^T(0.5)) *
+                              (T(15.0) * smooth_min(T(0.0016), dtrotr_col[c] / dt * dayspyr * secspday) + T(0.009)) *
+                              smooth_max(zero(T), smooth_min(one(T), (T(0.25) - (forc_rain[c] + forc_snow[c]) * secsphr) / T(0.25)))
+                        farea_burned[c] = fb * cli * (cli_scale / secspday) + baf_crop[c] + baf_peatf[c]
+                        fbac1[c] = smooth_max(zero(T), fb * cli * (cli_scale / secspday) - T(2) * lfc[c] / dt)
+                    end
+                    fbac[c] = fbac1[c] + baf_crop[c] + baf_peatf[c]
+                else
+                    fbac[c] = farea_burned[c]
+                end
+            end
+        else
+            farea_burned[c] = smooth_min(one(T), baf_crop[c] + baf_peatf[c])
+        end
+    end
+end
+
+function _firea2021_fire_spread!(
+        nfire, farea_burned, fuelc, fbac, fbac1,
+        forc_hdm, cropf_col, trotr1_col, trotr2_col, baf_crop, baf_peatf,
+        totlitc, totvegc, rootc_col, fuelc_crop, dzsoi_decomp, rh30_col,
+        forc_rh, wtlf, forc_lnfm,
+        latdeg, forc_wind, lgdp_col, lgdp1_col, lpop_col, fsr_col, fd_col,
+        btran_col, tsoi17, dtrotr_col, prec60_col, prec10_col, forc_rain, forc_snow,
+        lfc, deadstemc_col, spinup_lat_term,
+        decomp_cpools_vr, mask_soilc, gridcell,
+        lfuel, ufuel, rh_low, rh_hgh, prh30, max_rh30_affecting_fuel,
+        pot_hmn_ign_counts_alpha, ignition_efficiency, g0, cli_scale,
+        defo_fire_precip_thresh_bet, defo_fire_precip_thresh_bdt,
+        spinup_factor_deadwood, spinup_factor_cwd,
+        tfrz, rpi, secsphr, secspday, dayspyr, dt,
+        i_cwd::Int, nlevdecomp::Int, spinup_state::Int,
+        date_is_jan1_0::Bool, transient_landcover::Bool; ndrange = length(farea_burned))
+
+    (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return nothing
+
+    T = eltype(farea_burned)
+    out = _Fire2016SpreadOut(; nfire, farea_burned, fuelc, fbac, fbac1)
+    in1 = _Fire2016SpreadIn1(; forc_hdm, cropf_col, trotr1_col, trotr2_col, baf_crop,
+        baf_peatf, totlitc, totvegc, rootc_col, fuelc_crop, dzsoi_decomp, rh30_col,
+        forc_rh, wtlf, forc_lnfm)
+    in2 = _Fire2016SpreadIn2(; latdeg, forc_wind, lgdp_col, lgdp1_col, lpop_col,
+        fsr_col, fd_col, btran_col, tsoi17, dtrotr_col, prec60_col, prec10_col,
+        forc_rain, forc_snow, lfc, deadstemc_col, spinup_lat_term)
+    mat = _Fire2016SpreadMat(; decomp_cpools_vr)
+    sc = _Fire2016SpreadScalars(;
+        lfuel=T(lfuel), ufuel=T(ufuel), rh_low=T(rh_low), rh_hgh=T(rh_hgh),
+        bt_min=zero(T), bt_max=zero(T), prh30=T(prh30),
+        max_rh30_affecting_fuel=T(max_rh30_affecting_fuel),
+        pot_hmn_ign_counts_alpha=T(pot_hmn_ign_counts_alpha),
+        ignition_efficiency=T(ignition_efficiency), g0=T(g0), cli_scale=T(cli_scale),
+        defo_fire_precip_thresh_bet=T(defo_fire_precip_thresh_bet),
+        defo_fire_precip_thresh_bdt=T(defo_fire_precip_thresh_bdt),
+        spinup_factor_deadwood=T(spinup_factor_deadwood),
+        spinup_factor_cwd=T(spinup_factor_cwd),
+        tfrz=T(tfrz), rpi=T(rpi), secsphr=T(secsphr), secspday=T(secspday),
+        dayspyr=T(dayspyr), dt=T(dt))
+
+    backend = _kernel_backend(out.nfire)
+    _firea2021_fire_spread_kernel!(backend)(out, in1, in2, mat,
+        mask_soilc, gridcell, sc,
+        i_cwd, nlevdecomp, spinup_state, date_is_jan1_0, transient_landcover;
+        ndrange = ndrange)
+    KA.synchronize(backend)
+    return nothing
+end
 
 """
     cnfire_area_li2021!(...)
@@ -178,10 +373,10 @@ function cnfire_area_li2021!(
 
     nc = last(bounds_c)
     FT = eltype(totvegc)
-    btran_col  = zeros(FT, nc)
-    prec60_col = zeros(FT, nc)
-    prec10_col = zeros(FT, nc)
-    rh30_col   = zeros(FT, nc)
+    btran_col  = fill!(similar(totvegc, FT, nc), zero(FT))
+    prec60_col = fill!(similar(totvegc, FT, nc), zero(FT))
+    prec10_col = fill!(similar(totvegc, FT, nc), zero(FT))
+    rh30_col   = fill!(similar(totvegc, FT, nc), zero(FT))
 
     p2c!(prec10_col, prec10_patch, patch, mask_soilc, bounds_c, bounds_p)
     p2c!(prec60_col, prec60_patch, patch, mask_soilc, bounds_c, bounds_p)
@@ -202,273 +397,112 @@ function cnfire_area_li2021!(
         return nothing
     end
 
-    for c in bounds_c
-        mask_soilc[c] || continue
-        cropf_col[c] = 0.0
-        lfwt[c]      = 0.0
-    end
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        if patch.itype[p] > nc4_grass
-            cropf_col[c] += patch.wtcol[p]
-        end
-        if patch.itype[p] >= ndllf_evr_tmp_tree && patch.itype[p] <= nc4_grass
-            lfwt[c] += patch.wtcol[p]
-        end
-    end
+    date_is_jan1_0  = (kmo == 1 && kda == 1 && mcsec == 0)
+    date_is_jan1_dt = (kmo == 1 && kda == 1 && mcsec == dt)
 
-    for c in bounds_c
-        mask_soilc[c] || continue
-        fuelc_crop[c] = 0.0
-    end
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        if patch.itype[p] > nc4_grass && patch.wtcol[p] > 0.0 && leafc_col[c] > 0.0
-            fuelc_crop[c] += (leafc[p] + leafc_storage[p] + leafc_xfer[p]) *
-                             patch.wtcol[p] / cropf_col[c] +
-                             totlitc[c] * leafc[p] / leafc_col[c] *
-                             patch.wtcol[p] / cropf_col[c]
-        end
-    end
+    # --- cropf_col + lfwt ---
+    _launch!(_firea_zero_cropf_lfwt_kernel!, cropf_col, lfwt, mask_soilc)
+    _launch!(_firea_cropf_lfwt_kernel!, cropf_col, lfwt, mask_soilp,
+             patch.column, patch.itype, patch.wtcol,
+             nc4_grass, ndllf_evr_tmp_tree; ndrange = length(mask_soilp))
 
-    for c in bounds_c
-        mask_soilc[c] || continue
-        fsr_col[c]    = 0.0
-        fd_col[c]     = 0.0
-        rootc_col[c]  = 0.0
-        lgdp_col[c]   = 0.0
-        lgdp1_col[c]  = 0.0
-        lpop_col[c]   = 0.0
-        btran_col[c]  = 0.0
-        wtlf[c]       = 0.0
-        trotr1_col[c] = 0.0
-        trotr2_col[c] = 0.0
-        if transient_landcover
-            dtrotr_col[c] = 0.0
-        end
-    end
+    # --- crop fuel ---
+    _launch!(_firea_zero_fuelc_crop_kernel!, fuelc_crop, mask_soilc)
+    _launch!(_firea_fuelc_crop_kernel!, fuelc_crop, mask_soilp,
+             patch.column, patch.itype, patch.wtcol,
+             leafc, leafc_storage, leafc_xfer, leafc_col, totlitc, cropf_col,
+             nc4_grass; ndrange = length(mask_soilp))
 
-    # NOTE(Li2021): root wetness uses the Li2021 method.
+    # --- init noncrop column variables ---
+    _launch!(_firea_init_noncrop_kernel!, fsr_col, fd_col, rootc_col, lgdp_col,
+             lgdp1_col, lpop_col, btran_col, wtlf, trotr1_col, trotr2_col,
+             dtrotr_col, mask_soilc, transient_landcover)
+
+    # --- root wetness (btran2), Li2021 method ---
     cnfire_calc_fire_root_wetness_li2021!(
         fire_data, mask_exposedveg, mask_noexposedveg, bounds_p,
         patch, soilstate, h2osoi_vol_col, nlevgrnd)
 
-    for p in bounds_p
-        mask_exposedveg[p] || continue
-        c = patch.column[p]
-        if patch.itype[p] < nc3crop && cropf_col[c] < 1.0
-            # NOTE(Li2021): rescale root wetness by per-PFT (rswf_min, rswf_max).
-            it = patch.itype[p]
-            btran_col[c] += max(0.0, min(1.0,
-                (btran2[p] - rswf_min[it + 1]) / (rswf_max[it + 1] - rswf_min[it + 1]))) *
-                patch.wtcol[p]
-            wtlf[c] += patch.wtcol[p]
-        end
-    end
+    # --- accumulate btran_col / wtlf with per-PFT rswf rescale (Li2021) ---
+    _launch!(_firea2021_btran_wtlf_kernel!, btran_col, wtlf, mask_exposedveg,
+             patch.column, patch.itype, patch.wtcol, btran2, cropf_col,
+             rswf_min, rswf_max, nc3crop; ndrange = length(mask_exposedveg))
 
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        g = col.gridcell[c]
-        if patch.itype[p] < nc3crop && cropf_col[c] < 1.0
-            if patch.itype[p] == nbrdlf_evr_trp_tree && patch.wtcol[p] > 0.0
-                trotr1_col[c] += patch.wtcol[p]
-            end
-            if patch.itype[p] == nbrdlf_dcd_trp_tree && patch.wtcol[p] > 0.0
-                trotr2_col[c] += patch.wtcol[p]
-            end
-            if transient_landcover
-                if patch.itype[p] == nbrdlf_evr_trp_tree || patch.itype[p] == nbrdlf_dcd_trp_tree
-                    if dwt_smoothed[p] < 0.0
-                        dtrotr_col[c] += -dwt_smoothed[p]
-                    end
-                end
-            end
-            rootc_col[c] += (frootc[p] + frootc_storage[p] + frootc_xfer[p] +
-                deadcrootc[p] * spinup_factor_deadwood +
-                deadcrootc_storage[p] + deadcrootc_xfer[p] +
-                livecrootc[p] + livecrootc_storage[p] +
-                livecrootc_xfer[p]) * patch.wtcol[p]
+    # --- main noncrop per-patch column-var accumulation (shared Li2016 form) ---
+    _firea2016_noncrop_main!(
+        trotr1_col, trotr2_col, dtrotr_col, rootc_col, fsr_col,
+        lgdp_col, lgdp1_col, lpop_col, fd_col,
+        mask_soilp, patch.column, col.gridcell, patch.itype, patch.wtcol,
+        cropf_col, lfwt, dwt_smoothed,
+        frootc, frootc_storage, frootc_xfer,
+        deadcrootc, deadcrootc_storage, deadcrootc_xfer,
+        livecrootc, livecrootc_storage, livecrootc_xfer,
+        fsr_pft, fd_pft, gdp_lf, forc_hdm,
+        nc3crop, nbrdlf_evr_trp_tree, nbrdlf_dcd_trp_tree, nbrdlf_evr_shrub, noveg,
+        occur_hi_gdp_tree, RPI, secsphr, spinup_factor_deadwood,
+        transient_landcover; ndrange = length(mask_soilp))
 
-            fsr_col[c] += fsr_pft[patch.itype[p] + 1] * patch.wtcol[p] / (1.0 - cropf_col[c])
-
-            hdmlf = forc_hdm[g]
-            if hdmlf > 0.1
-                if patch.itype[p] != noveg
-                    if patch.itype[p] >= nbrdlf_evr_shrub
-                        lgdp_col[c]  += (0.1 + 0.9 * exp(-1.0 * RPI * (gdp_lf[c] / 8.0)^0.5)) *
-                                        patch.wtcol[p] / (1.0 - cropf_col[c])
-                        lgdp1_col[c] += (0.2 + 0.8 * exp(-1.0 * RPI * (gdp_lf[c] / 7.0))) *
-                                        patch.wtcol[p] / (1.0 - cropf_col[c])
-                        lpop_col[c]  += (0.2 + 0.8 * exp(-1.0 * RPI * (hdmlf / 450.0)^0.5)) *
-                                        patch.wtcol[p] / (1.0 - cropf_col[c])
-                    else
-                        if gdp_lf[c] > 20.0
-                            lgdp_col[c]  += occur_hi_gdp_tree * patch.wtcol[p] / (1.0 - cropf_col[c])
-                            lgdp1_col[c] += 0.62 * patch.wtcol[p] / (1.0 - cropf_col[c])
-                        else
-                            if gdp_lf[c] > 8.0
-                                lgdp_col[c]  += 0.79 * patch.wtcol[p] / (1.0 - cropf_col[c])
-                                lgdp1_col[c] += 0.83 * patch.wtcol[p] / (1.0 - cropf_col[c])
-                            else
-                                lgdp_col[c]  += patch.wtcol[p] / (1.0 - cropf_col[c])
-                                lgdp1_col[c] += patch.wtcol[p] / (1.0 - cropf_col[c])
-                            end
-                        end
-                        lpop_col[c] += (0.4 + 0.6 * exp(-1.0 * RPI * (hdmlf / 125.0))) *
-                                       patch.wtcol[p] / (1.0 - cropf_col[c])
-                    end
-                end
-            else
-                lgdp_col[c]  += patch.wtcol[p] / (1.0 - cropf_col[c])
-                lgdp1_col[c] += patch.wtcol[p] / (1.0 - cropf_col[c])
-                lpop_col[c]  += patch.wtcol[p] / (1.0 - cropf_col[c])
-            end
-
-            fd_col[c] += fd_pft[patch.itype[p]] * patch.wtcol[p] * secsphr / (1.0 - cropf_col[c])
-        end
-    end
-
+    # --- annual decreased fractional coverage of BET+BDT ---
     if transient_landcover
-        for c in bounds_c
-            mask_soilc[c] || continue
-            if dtrotr_col[c] > 0.0
-                if kmo == 1 && kda == 1 && mcsec == 0
-                    lfc[c] = 0.0
-                end
-                if kmo == 1 && kda == 1 && mcsec == dt
-                    lfc[c] = dtrotr_col[c] * dayspyr * secspday / dt
-                end
-            else
-                lfc[c] = 0.0
-            end
-        end
+        _launch!(_firea_lfc_kernel!, lfc, mask_soilc, dtrotr_col,
+                 date_is_jan1_0, date_is_jan1_dt,
+                 eltype(lfc)(dayspyr), eltype(lfc)(secspday), eltype(lfc)(dt))
     end
 
-    for c in bounds_c
-        mask_soilc[c] || continue
-        baf_crop[c] = 0.0
-    end
-    for p in bounds_p
-        mask_soilp[p] || continue
-        if kmo == 1 && kda == 1 && mcsec == 0
-            burndate[p] = 10000
-        end
-    end
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        g = col.gridcell[c]
-        if forc_t[c] >= TFRZ && patch.itype[p] > nc4_grass &&
-           kmo == abm_lf[c] && burndate[p] >= 999 && patch.wtcol[p] > 0.0
-            hdmlf = forc_hdm[g]
-            fhd  = 0.04 + 0.96 * exp(-1.0 * RPI * (hdmlf / 350.0)^0.5)
-            fgdp = 0.01 + 0.99 * exp(-1.0 * RPI * (gdp_lf[c] / 10.0))
-            fb   = max(0.0, min(1.0, (fuelc_crop[c] - lfuel) / (ufuel - lfuel)))
-            baf_crop[c] += cropfire_a1 / secsphr * fhd * fgdp * patch.wtcol[p]
-            if fb * fhd * fgdp * patch.wtcol[p] > 0.0
-                burndate[p] = kda
-            end
-        end
+    # --- burned-area fraction in cropland (shared Li2016 form) ---
+    _launch!(_firea_zero_baf_crop_kernel!, baf_crop, mask_soilc)
+    _launch!(_firea_burndate_init_kernel!, burndate, mask_soilp,
+             date_is_jan1_0; ndrange = length(mask_soilp))
+    _launch!(_firea2016_crop_fire_kernel!, baf_crop, burndate, mask_soilp,
+             patch.column, col.gridcell, patch.itype, patch.wtcol,
+             forc_t, abm_lf, fuelc_crop, gdp_lf, forc_hdm,
+             nc4_grass, kmo, kda,
+             eltype(baf_crop)(TFRZ), eltype(baf_crop)(RPI), eltype(baf_crop)(lfuel),
+             eltype(baf_crop)(ufuel), eltype(baf_crop)(cropfire_a1), eltype(baf_crop)(secsphr);
+             ndrange = length(mask_soilp))
+
+    # --- peatland fire (per-column independent; shared Li2014 kernel) ---
+    let TFp = eltype(baf_peatf)
+        fire_peatland!(
+            baf_peatf, mask_soilc, col.gridcell, grc.latdeg, prec60_col,
+            peatf_lf, fsat, wf2, tsoi17,
+            TFp(cnfire_const.borealat), TFp(non_boreal_peatfire_c), TFp(boreal_peatfire_c),
+            TFp(nonborpeat_fire_precip_denom), TFp(borpeat_fire_soilmoist_denom),
+            TFp(secsphr), TFp(secspday), TFp(TFRZ), TFp(RPI))
     end
 
-    for c in bounds_c
-        mask_soilc[c] || continue
-        g = col.gridcell[c]
-        if grc.latdeg[g] < cnfire_const.borealat
-            baf_peatf[c] = non_boreal_peatfire_c / secsphr *
-                max(0.0, min(1.0, (4.0 - prec60_col[c] * secspday / nonborpeat_fire_precip_denom) / 4.0))^2 *
-                peatf_lf[c] * (1.0 - fsat[c])
-        else
-            baf_peatf[c] = boreal_peatfire_c / secsphr *
-                exp(-RPI * (max(wf2[c], 0.0) / borpeat_fire_soilmoist_denom)) *
-                max(0.0, min(1.0, (tsoi17[c] - TFRZ) / 10.0)) * peatf_lf[c] *
-                (1.0 - fsat[c])
-        end
-    end
-
+    # --- find CWD pool (host-resolved) ---
     i_cwd = 0
     for l in 1:ndecomp_pools
         if is_cwd[l]
             i_cwd = l
         end
     end
-    dzsoi = dzsoi_decomp[]
 
-    for c in bounds_c
-        mask_soilc[c] || continue
-        g = col.gridcell[c]
-        hdmlf = forc_hdm[g]
-        nfire[c] = 0.0
-        if cropf_col[c] < 1.0
-            fuelc[c] = totlitc[c] + totvegc[c] - rootc_col[c] - fuelc_crop[c] * cropf_col[c]
-            if spinup_state == 2
-                fuelc[c] += (spinup_factor_deadwood - 1.0) * deadstemc_col[c]
-                for j in 1:nlevdecomp
-                    fuelc[c] += decomp_cpools_vr[c, j, i_cwd] * dzsoi[j] * spinup_factor[i_cwd] *
-                                get_spinup_latitude_term(grc.latdeg[col.gridcell[c]])
-                end
-            else
-                for j in 1:nlevdecomp
-                    fuelc[c] += decomp_cpools_vr[c, j, i_cwd] * dzsoi[j]
-                end
-            end
-            fuelc[c] /= (1.0 - cropf_col[c])
-            fb = max(0.0, min(1.0, (fuelc[c] - lfuel) / (ufuel - lfuel)))
-            if trotr1_col[c] + trotr2_col[c] <= 0.6
-                afuel = min(1.0, max(0.0, (fuelc[c] - 2500.0) / (5000.0 - 2500.0)))
-                arh   = 1.0 - max(0.0, min(1.0, (forc_rh[g] - rh_low) / (rh_hgh - rh_low)))
-                arh30 = 1.0 - max(prh30, min(1.0, rh30_col[c] / max_rh30_affecting_fuel))
-                if forc_rh[g] < rh_hgh && wtlf[c] > 0.0 && tsoi17[c] > TFRZ
-                    # NOTE(Li2021): btran term has no bt_min/bt_max clamp.
-                    fire_m = ((afuel * arh30 + (1.0 - afuel) * arh)^1.5) *
-                             ((1.0 - btran_col[c] / wtlf[c])^0.5)
-                else
-                    fire_m = 0.0
-                end
-                lh = pot_hmn_ign_counts_alpha * 6.8 * hdmlf^0.43 / 30.0 / 24.0
-                fs = 1.0 - (0.01 + 0.98 * exp(-0.025 * hdmlf))
-                ig = (lh + forc_lnfm[g] /
-                      (5.16 + 2.16 * cos(RPI / 180.0 * 3 * min(60.0, abs(grc.latdeg[g])))) *
-                      ignition_efficiency) * (1.0 - fs) * (1.0 - cropf_col[c])
-                nfire[c] = ig / secsphr * fb * fire_m * lgdp_col[c]
-                Lb_lf = 1.0 + 10.0 * (1.0 - exp(-0.06 * forc_wind[g]))
-                spread_m = fire_m^0.5
-                farea_burned[c] = min(1.0, (g0 * spread_m * fsr_col[c] *
-                    fd_col[c] / 1000.0)^2 * lgdp1_col[c] * lpop_col[c] *
-                    nfire[c] * RPI * Lb_lf + baf_crop[c] + baf_peatf[c])
-            else
-                farea_burned[c] = min(1.0, baf_crop[c] + baf_peatf[c])
-            end
+    dzsoi_decomp_arr = copyto!(similar(totvegc, FT, length(dzsoi_decomp[])), dzsoi_decomp[])
 
-            if transient_landcover
-                if trotr1_col[c] + trotr2_col[c] > 0.6
-                    if (kmo == 1 && kda == 1 && mcsec == 0) || dtrotr_col[c] <= 0.0
-                        fbac1[c]        = 0.0
-                        farea_burned[c] = baf_crop[c] + baf_peatf[c]
-                    else
-                        cri = (defo_fire_precip_thresh_bet * trotr1_col[c] +
-                               defo_fire_precip_thresh_bdt * trotr2_col[c]) /
-                              (trotr1_col[c] + trotr2_col[c])
-                        # NOTE(Li2021): revised deforestation climate term.
-                        cli = (max(0.0, min(1.0, (cri - prec60_col[c] * secspday) / cri))^0.5) *
-                              (max(0.0, min(1.0, (cri - prec10_col[c] * secspday) / cri))^0.5) *
-                              (15.0 * min(0.0016, dtrotr_col[c] / dt * dayspyr * secspday) + 0.009) *
-                              max(0.0, min(1.0, (0.25 - (forc_rain[c] + forc_snow[c]) * secsphr) / 0.25))
-                        farea_burned[c] = fb * cli * (cli_scale / secspday) + baf_crop[c] + baf_peatf[c]
-                        fbac1[c] = max(0.0, fb * cli * (cli_scale / secspday) - 2.0 * lfc[c] / dt)
-                    end
-                    fbac[c] = fbac1[c] + baf_crop[c] + baf_peatf[c]
-                else
-                    fbac[c] = farea_burned[c]
-                end
-            end
-        else
-            farea_burned[c] = min(1.0, baf_crop[c] + baf_peatf[c])
-        end
-    end
+    spinup_lat_term_col = fill!(similar(totvegc, FT, nc), zero(FT))
+    fire_spinup_latterm!(spinup_lat_term_col, mask_soilc, col.gridcell, grc.latdeg)
+    spinup_factor_cwd = (i_cwd >= 1 && i_cwd <= length(spinup_factor)) ?
+                        spinup_factor[i_cwd] : one(FT)
+
+    # --- main column loop: fractional area affected by fire (Li2021 form) ---
+    _firea2021_fire_spread!(
+        nfire, farea_burned, fuelc, fbac, fbac1,
+        forc_hdm, cropf_col, trotr1_col, trotr2_col, baf_crop, baf_peatf,
+        totlitc, totvegc, rootc_col, fuelc_crop, dzsoi_decomp_arr, rh30_col,
+        forc_rh, wtlf, forc_lnfm,
+        grc.latdeg, forc_wind, lgdp_col, lgdp1_col, lpop_col, fsr_col, fd_col,
+        btran_col, tsoi17, dtrotr_col, prec60_col, prec10_col, forc_rain, forc_snow,
+        lfc, deadstemc_col, spinup_lat_term_col,
+        decomp_cpools_vr, mask_soilc, col.gridcell,
+        lfuel, ufuel, rh_low, rh_hgh, prh30, max_rh30_affecting_fuel,
+        pot_hmn_ign_counts_alpha, ignition_efficiency, g0, cli_scale,
+        defo_fire_precip_thresh_bet, defo_fire_precip_thresh_bdt,
+        spinup_factor_deadwood, spinup_factor_cwd,
+        TFRZ, RPI, secsphr, secspday, dayspyr, dt,
+        i_cwd, nlevdecomp, spinup_state, date_is_jan1_0, transient_landcover;
+        ndrange = length(farea_burned))
 
     return nothing
 end
