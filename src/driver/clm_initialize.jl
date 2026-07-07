@@ -73,6 +73,7 @@ function clm_initialize!(;
     use_hydrstress::Bool = false,
     use_lch4::Bool = false,
     use_cndv::Bool = false,
+    use_c14::Bool = false,
     use_fates::Bool = false,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
@@ -160,7 +161,8 @@ function clm_initialize!(;
                   nlevurb=nlevurb,
                   use_luna=use_luna,
                   use_lch4=use_lch4,
-                  use_cndv=use_cndv)
+                  use_cndv=use_cndv,
+                  use_c14=use_c14)
 
     # ---- Step 9: Build subgrid hierarchy ----
     # Get scalar lat/lon fallback from surface file if not provided. In full-grid

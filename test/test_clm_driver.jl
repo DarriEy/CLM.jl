@@ -522,4 +522,42 @@
         @test photosyns.c14_psnsun_patch[3] == 0.0
     end
 
+    # ================================================================
+    # c14_decay! wiring — the radioactive-decay call is threaded into
+    # clm_drv_core! after the CN post-drainage phase, gated on use_c14 + the
+    # parallel C14 state being stood up. Allocate that state, seed a pool, run
+    # clm_drv! with use_cn+use_c14, and confirm the wired call decayed it once.
+    # ================================================================
+    @testset "clm_drv! c14_decay! wiring" begin
+        inst, bounds, filt, filt_ia, _, photosyns = make_driver_data()
+        inst.canopystate.frac_veg_nosno_alb_patch .= 1
+        np = bounds.endp; nc = bounds.endc; ng = bounds.endg
+        ndp = 7; nlev = CLM.varpar.nlevdecomp
+
+        # Stand up the parallel C14 state the wiring consumes.
+        c14cs = inst.bgc_vegetation.c14_cnveg_carbonstate_inst
+        CLM.cnveg_carbon_state_init!(c14cs, np, nc, ng)
+        CLM.cnveg_carbon_flux_init!(inst.bgc_vegetation.c14_cnveg_carbonflux_inst, np, nc, ng)
+        CLM.soil_bgc_carbon_state_init!(inst.c14_soilbiogeochem_carbonstate, nc, ng, nlev, ndp)
+        CLM.soil_bgc_carbon_flux_init!(inst.c14_soilbiogeochem_carbonflux, nc, nlev, ndp, 5)
+
+        c14cs.leafc_patch .= 100.0
+        inst.c14_soilbiogeochem_carbonstate.decomp_cpools_vr_col .= 50.0
+
+        dt = 1800.0
+        half_life = CLM.C14_HALF_LIFE_YEARS * CLM.SECSPDAY * 365.0
+        decay_factor = 1.0 - (-log(0.5) / half_life) * dt
+
+        config = CLM.CLMDriverConfig(use_cn=true, use_c14=true)
+        CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
+                     false, 1.0, 0.0, 0.0, 0.4091,
+                     false, false, "20260101", false;
+                     nstep=1, photosyns=photosyns)
+
+        # The wired c14_decay! must have decayed the C14 pools exactly once.
+        @test c14cs.leafc_patch[1] ≈ 100.0 * decay_factor atol=1e-8
+        @test inst.c14_soilbiogeochem_carbonstate.decomp_cpools_vr_col[1, 1, 1] ≈
+              50.0 * decay_factor atol=1e-8
+    end
+
 end

@@ -2077,6 +2077,29 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
             patch_itype=pch.itype)
 
+        # C14 radioactive decay — WIRED (gated on config.use_c14). Mirrors the
+        # Fortran C14Decay call in CNDriver: after the C/N state updates, decay
+        # every C14 pool (gridcell seedc / soil decomp vr / veg patch pools). Runs
+        # only when the parallel C14 state is stood up (the facade C14 veg state +
+        # inst C14 soil state, both sized by use_c14); the isempty guards keep it a
+        # no-op if the flag is set without the state allocated. Default off.
+        let _c14cs  = inst.bgc_vegetation.c14_cnveg_carbonstate_inst,
+            _c14scs = inst.c14_soilbiogeochem_carbonstate
+            if config.use_c14 && !isempty(_c14cs.cpool_patch) &&
+               !isempty(_c14scs.decomp_cpools_vr_col)
+                c14_decay!(_c14cs, inst.bgc_vegetation.c14_cnveg_carbonflux_inst,
+                    _c14scs, inst.c14_soilbiogeochem_carbonflux;
+                    mask_soilc=filt.soilc, mask_soilp=filt.soilp,
+                    bounds_col=bc_col, bounds_patch=bc_patch,
+                    bounds_gridcell=bc.begg:bc.endg,
+                    dt=dtime, nlevdecomp=varpar.nlevdecomp,
+                    ndecomp_pools=config.ndecomp_pools,
+                    col_gridcell=inst.column.gridcell, latdeg_grc=inst.gridcell.latdeg,
+                    ivt=pch.itype, npcropmin=config.npcropmin,
+                    use_matrixcn=config.use_matrixcn)
+            end
+        end
+
         # Soil-biogeochem C/N STATE summaries (totsomc_col/totsomn_col/totecosysc_col)
         # — WIRED. cn_driver_summarize_states! only does the veg-state summary; the soil
         # summaries need the decomp infrastructure, which is in scope here. Pure

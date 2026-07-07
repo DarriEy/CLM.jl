@@ -81,6 +81,12 @@ Base.@kwdef mutable struct CLMInstances
     soilbiogeochem_nitrogenstate::SoilBiogeochemNitrogenStateData = SoilBiogeochemNitrogenStateData()
     soilbiogeochem_nitrogenflux::SoilBiogeochemNitrogenFluxData   = SoilBiogeochemNitrogenFluxData()
 
+    # C14 soil-BGC carbon state/flux — only sized when use_c14 (empty otherwise);
+    # the parallel pools that c14_decay! radioactively decays alongside the C14
+    # vegetation state on the CN vegetation facade.
+    c14_soilbiogeochem_carbonstate::SoilBiogeochemCarbonStateData = SoilBiogeochemCarbonStateData()
+    c14_soilbiogeochem_carbonflux::SoilBiogeochemCarbonFluxData   = SoilBiogeochemCarbonFluxData()
+
     # --- Methane (CH4) — prognostic state + parameters; only used when use_lch4 ---
     ch4::CH4Data                     = CH4Data{Float64}()
     ch4_params::CH4Params            = CH4Params()
@@ -224,7 +230,8 @@ function clm_instInit!(inst::CLMInstances;
                        nlevurb::Int = 0,
                        use_luna::Bool = false,
                        use_lch4::Bool = false,
-                       use_cndv::Bool = false)
+                       use_cndv::Bool = false,
+                       use_c14::Bool = false)
 
     # --- Grid hierarchy ---
     gridcell_init!(inst.gridcell, ng)
@@ -287,6 +294,15 @@ function clm_instInit!(inst::CLMInstances;
     soil_bgc_nitrogen_flux_init!(inst.soilbiogeochem_nitrogenflux, nc,
                                  nlevdecomp_full, ndecomp_pools,
                                  ndecomp_cascade_transitions)
+
+    # C14 soil-BGC carbon state/flux — size only when the C14 tracer is active.
+    if use_c14
+        soil_bgc_carbon_state_init!(inst.c14_soilbiogeochem_carbonstate, nc, ng,
+                                    nlevdecomp_full, ndecomp_pools)
+        soil_bgc_carbon_flux_init!(inst.c14_soilbiogeochem_carbonflux, nc,
+                                   nlevdecomp_full, ndecomp_pools,
+                                   ndecomp_cascade_transitions)
+    end
 
     # --- Methane (CH4) — size the prognostic state when active ---
     if use_lch4
