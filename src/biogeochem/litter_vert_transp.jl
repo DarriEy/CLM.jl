@@ -140,10 +140,11 @@ end
 # are the C- or N- arrays selected on the host; `s` indexes the pool, `is_cwd_s` the
 # per-pool CWD flag, `spinup_factor_s` the per-pool spinup factor.
 @kernel function _lvt_column_kernel!(conc_ptr, source, trcr_tendency,
-        @Const(som_diffus_coef), @Const(som_adv_coef), scr,
+        @Const(som_diffus_coef), @Const(som_adv_coef), scr, tri_ma_vr,
         @Const(zsoi_ext), @Const(dz_node), @Const(zisoi), @Const(dzsoi_decomp),
         @Const(nbedrock), @Const(gridcell), @Const(latdeg), @Const(mask),
         nlevdecomp::Int, s::Int, is_cwd_s::Bool, use_soil_matrixcn::Bool,
+        build_tri_ma::Bool, ndecomp_pools::Int,
         spinup_state::Int, spinup_factor_s, dtime, epsilon)
     c = @index(Global)
     @inbounds if mask[c]
@@ -154,6 +155,109 @@ end
         # only the tendency is zeroed and the state is left untouched (mirrors the host).
         for j in 1:nlevdecomp
             trcr_tendency[c, j, s] = zero(T)
+        end
+        # Build the vertical-transport sparse matrix tri_ma_vr ONCE (first non-CWD pool
+        # of the C pass): it is pool-independent (in the non-spinup live run), so the
+        # column's tridiagonal coefficients are repackaged into every non-CWD pool block.
+        # Port of SoilBiogeochemLittVertTransp:401-429. Only a_tri/b_tri/c_tri are needed
+        # (not conc_trcr / r_tri / the Thomas solve).
+        if build_tri_ma && !is_cwd_s
+            stride = nlevdecomp * 3 - 2
+            for k in 1:(stride * (ndecomp_pools - 1))
+                tri_ma_vr[c, k] = zero(T)
+            end
+            spinup_term = one(T)
+            if spinup_state >= 1
+                spinup_term = spinup_factor_s
+            end
+            if abs(spinup_term - one(T)) > T(1.0e-6)
+                spinup_term = spinup_term * _spinup_lat_term(latdeg[gridcell[c]], T)
+            end
+            for j in 1:(nlevdecomp + 1)
+                scr.adv_flux[c, j] = abs(som_adv_coef[c, j]) * spinup_term < epsilon ?
+                    epsilon : som_adv_coef[c, j] * spinup_term
+                scr.diffus[c, j] = abs(som_diffus_coef[c, j]) * spinup_term < epsilon ?
+                    epsilon : som_diffus_coef[c, j] * spinup_term
+            end
+            # D/F/Pe throughout the column (identical to the sequential branch, minus
+            # the conc_trcr writes which the coefficients do not use).
+            for j in 1:(nlevdecomp + 1)
+                if j == 1
+                    scr.d_m1_zm1[c, j] = zero(T)
+                    w_p1 = (zsoi_ext[j + 1] - zisoi[j + 1]) / dz_node[j + 1]
+                    if scr.diffus[c, j + 1] > zero(T) && scr.diffus[c, j] > zero(T)
+                        d_p1 = one(T) / ((one(T) - w_p1) / scr.diffus[c, j] + w_p1 / scr.diffus[c, j + 1])
+                    else
+                        d_p1 = zero(T)
+                    end
+                    scr.d_p1_zp1[c, j] = d_p1 / dz_node[j + 1]
+                    scr.f_m1[c, j] = scr.adv_flux[c, j]
+                    scr.f_p1[c, j] = scr.adv_flux[c, j + 1]
+                    scr.pe_m1[c, j] = zero(T)
+                    scr.pe_p1[c, j] = scr.f_p1[c, j] / scr.d_p1_zp1[c, j]
+                elseif j >= nbr + 1
+                    w_m1 = (zisoi[j] - zsoi_ext[j - 1]) / dz_node[j]
+                    if scr.diffus[c, j] > zero(T) && scr.diffus[c, j - 1] > zero(T)
+                        d_m1 = one(T) / ((one(T) - w_m1) / scr.diffus[c, j] + w_m1 / scr.diffus[c, j - 1])
+                    else
+                        d_m1 = zero(T)
+                    end
+                    scr.d_m1_zm1[c, j] = d_m1 / dz_node[j]
+                    scr.d_p1_zp1[c, j] = scr.d_m1_zm1[c, j]
+                    scr.f_m1[c, j] = scr.adv_flux[c, j]
+                    scr.f_p1[c, j] = zero(T)
+                    scr.pe_m1[c, j] = scr.f_m1[c, j] / scr.d_m1_zm1[c, j]
+                    scr.pe_p1[c, j] = scr.f_p1[c, j] / scr.d_p1_zp1[c, j]
+                else
+                    w_m1 = (zisoi[j] - zsoi_ext[j - 1]) / dz_node[j]
+                    if scr.diffus[c, j - 1] > zero(T) && scr.diffus[c, j] > zero(T)
+                        d_m1 = one(T) / ((one(T) - w_m1) / scr.diffus[c, j] + w_m1 / scr.diffus[c, j - 1])
+                    else
+                        d_m1 = zero(T)
+                    end
+                    w_p1 = (zsoi_ext[j + 1] - zisoi[j + 1]) / dz_node[j + 1]
+                    if scr.diffus[c, j + 1] > zero(T) && scr.diffus[c, j] > zero(T)
+                        d_p1 = one(T) / ((one(T) - w_p1) / scr.diffus[c, j] + w_p1 / scr.diffus[c, j + 1])
+                    else
+                        d_p1 = (one(T) - w_m1) * scr.diffus[c, j] + w_p1 * scr.diffus[c, j + 1]
+                    end
+                    scr.d_m1_zm1[c, j] = d_m1 / dz_node[j]
+                    scr.d_p1_zp1[c, j] = d_p1 / dz_node[j + 1]
+                    scr.f_m1[c, j] = scr.adv_flux[c, j]
+                    scr.f_p1[c, j] = scr.adv_flux[c, j + 1]
+                    scr.pe_m1[c, j] = scr.f_m1[c, j] / scr.d_m1_zm1[c, j]
+                    scr.pe_p1[c, j] = scr.f_p1[c, j] / scr.d_p1_zp1[c, j]
+                end
+            end
+            # Repackage a_tri/b_tri/c_tri into tri_ma_vr for each non-CWD pool block.
+            for j in 1:nlevdecomp
+                a_p_0 = dzsoi_decomp[j] / dtime
+                at = -(scr.d_m1_zm1[c, j] * patankar_A(scr.pe_m1[c, j]) + max(scr.f_m1[c, j], zero(T)))
+                ct = -(scr.d_p1_zp1[c, j] * patankar_A(scr.pe_p1[c, j]) + max(-scr.f_p1[c, j], zero(T)))
+                bt = -at - ct + a_p_0
+                if j == 1
+                    for i in 1:(ndecomp_pools - 1)
+                        base = (i - 1) * stride
+                        tri_ma_vr[c, base + 1] = (bt - a_p_0) / dzsoi_decomp[j] * (-dtime)
+                        tri_ma_vr[c, base + 3] = ct / dzsoi_decomp[j] * (-dtime)
+                    end
+                elseif j <= nbr
+                    for i in 1:(ndecomp_pools - 1)
+                        base = (i - 1) * stride
+                        tri_ma_vr[c, base + j * 3 - 4] = at / dzsoi_decomp[j] * (-dtime)
+                        if j != nlevdecomp
+                            tri_ma_vr[c, base + j * 3] = ct / dzsoi_decomp[j] * (-dtime)
+                        end
+                        tri_ma_vr[c, base + j * 3 - 2] = (bt - a_p_0) / dzsoi_decomp[j] * (-dtime)
+                    end
+                elseif j == nbr + 1 && j != nlevdecomp && j > 1
+                    for i in 1:(ndecomp_pools - 1)
+                        base = (i - 1) * stride
+                        tri_ma_vr[c, base + (j - 1) * 3 - 2] =
+                            tri_ma_vr[c, base + (j - 1) * 3 - 2] + at / dzsoi_decomp[j - 1] * (-dtime)
+                    end
+                end
+            end
         end
       else
         if is_cwd_s
@@ -489,11 +593,15 @@ function litter_vert_transp!(
         for s in 1:ndecomp_pools
             # is_cwd[s] / spinup_factor[s] are read on the host and passed as scalars.
             spinup_factor_s = FT(spinup_factor[s])
+            # Build the pool-independent vertical-transport matrix tri_ma_vr once, on the
+            # first (C, non-CWD) pool pass (Fortran: s==1 .and. i_type==1).
+            build_tri_ma = use_soil_matrixcn && i_type == 1 && s == 1
             _launch!(_lvt_column_kernel!, conc_ptr, source, trcr_tendency_ptr,
-                     som_diffus_coef, som_adv_coef, scr,
+                     som_diffus_coef, som_adv_coef, scr, cf.tri_ma_vr,
                      zsoi_ext, dz_node, zisoi, dzsoi_decomp,
                      col.nbedrock, col.gridcell, grc.latdeg, mask,
-                     nlevdecomp, s, is_cwd[s], use_soil_matrixcn, spinup_state,
+                     nlevdecomp, s, is_cwd[s], use_soil_matrixcn,
+                     build_tri_ma, ndecomp_pools, spinup_state,
                      spinup_factor_s, dtime_ft, epsilon; ndrange = nc)
         end  # s (pool loop)
     end  # i_type

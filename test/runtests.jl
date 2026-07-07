@@ -101,6 +101,7 @@ using CLM
     include("test_decomp_potential.jl")
     include("test_decomp_precision_control.jl")
     include("test_litter_vert_transp.jl")
+    include("test_lvt_tri_ma_vr.jl")
     include("test_nitrif_denitrif.jl")
     include("test_n_leaching.jl")
     include("test_n_dynamics.jl")
