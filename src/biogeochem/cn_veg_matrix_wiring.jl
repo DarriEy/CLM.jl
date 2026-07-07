@@ -355,9 +355,16 @@ end
 
 const IRETRANSN_NATVEG = NVEGPOOL_NATVEG + 1   # = 19 (Fortran iretransn, natveg)
 
-# Pool index -> CNVegNitrogenState value at patch p (incl. retransn = 19).
-@inline function _vegn_pool_val(ns::CNVegNitrogenStateData, i::Int, p::Int)
-    @inbounds if     i == ILEAF          ; return ns.leafn_patch[p]
+# Pool index -> CNVegNitrogenState value at patch p. `iretransn` is the retransn pool
+# index (19 natveg, 22 crop); grain (19..21) only exists for crop and is checked after
+# retransn so the natveg overlap (iretransn==19==IGRAIN) resolves to retransn.
+@inline function _vegn_pool_val(ns::CNVegNitrogenStateData, i::Int, p::Int,
+                                iretransn::Int = IRETRANSN_NATVEG)
+    @inbounds if i == iretransn          ; return ns.retransn_patch[p]
+    elseif i == IGRAIN         ; return ns.reproductiven_patch[p, 1]
+    elseif i == IGRAIN_ST      ; return ns.reproductiven_storage_patch[p, 1]
+    elseif i == IGRAIN_XF      ; return ns.reproductiven_xfer_patch[p, 1]
+    elseif i == ILEAF          ; return ns.leafn_patch[p]
     elseif i == ILEAF_ST       ; return ns.leafn_storage_patch[p]
     elseif i == ILEAF_XF       ; return ns.leafn_xfer_patch[p]
     elseif i == IFROOT         ; return ns.frootn_patch[p]
@@ -375,7 +382,6 @@ const IRETRANSN_NATVEG = NVEGPOOL_NATVEG + 1   # = 19 (Fortran iretransn, natveg
     elseif i == IDEADCROOT     ; return ns.deadcrootn_patch[p]
     elseif i == IDEADCROOT_ST  ; return ns.deadcrootn_storage_patch[p]
     elseif i == IDEADCROOT_XF  ; return ns.deadcrootn_xfer_patch[p]
-    elseif i == IRETRANSN_NATVEG ; return ns.retransn_patch[p]
     else                       ; return 0.0
     end
 end
@@ -407,11 +413,27 @@ the accumulator matrices. `nvegnpool` INCLUDES retransn (=19 natveg). Idempotent
 """
 function cn_veg_matrix_n_topology!(nf::CNVegNitrogenFluxData; use_crop::Bool = false,
                                    nvegnpool::Int = IRETRANSN_NATVEG)
-    iretransn = nvegnpool
+    iretransn = nvegnpool               # 19 natveg, 22 crop (grain occupies 19..21)
     ioutn = nvegnpool + 1
-    doner    = copy(_PHN_DONER_NATVEG)
-    receiver = copy(_PHN_RECEIVER_NATVEG)
-    receiver[31] = ioutn; receiver[32] = ioutn; receiver[33] = ioutn; receiver[34] = ioutn
+    # in-veg transfers 1..30 (natveg structure); remap the baked-in retransn pool
+    # (IRETRANSN_NATVEG) to the actual iretransn for crop (grain shifts it to 22).
+    doner    = _PHN_DONER_NATVEG[1:30]
+    receiver = _PHN_RECEIVER_NATVEG[1:30]
+    if iretransn != IRETRANSN_NATVEG
+        for k in 1:30
+            doner[k]    == IRETRANSN_NATVEG && (doner[k]    = iretransn)
+            receiver[k] == IRETRANSN_NATVEG && (receiver[k] = iretransn)
+        end
+    end
+    if use_crop
+        # +2 retransn→grain supply (31,32), then 5 out-transfers (33..37).
+        append!(doner,    [iretransn, iretransn, ILEAF, IFROOT, ILIVESTEM, IGRAIN, iretransn])
+        append!(receiver, [IGRAIN, IGRAIN_ST, ioutn, ioutn, ioutn, ioutn, ioutn])
+    else
+        # 4 out-transfers (31..34).
+        append!(doner,    [ILEAF, IFROOT, ILIVESTEM, iretransn])
+        append!(receiver, [ioutn, ioutn, ioutn, ioutn])
+    end
     nf.matrix_nphtransfer_doner_patch    = doner
     nf.matrix_nphtransfer_receiver_patch = receiver
 
@@ -451,15 +473,28 @@ function cn_veg_matrix_n_topology!(nf::CNVegNitrogenFluxData; use_crop::Bool = f
     nf.iretransn_to_ilivecrootst_ph     = 28
     nf.iretransn_to_ideadcroot_ph       = 29
     nf.iretransn_to_ideadcrootst_ph     = 30
-    nf.ileaf_to_iout_ph                 = 31
-    nf.ifroot_to_iout_ph                = 32
-    nf.ilivestem_to_iout_ph             = 33
-    nf.iretransn_to_iout_ph             = 34
+    if use_crop
+        nf.iretransn_to_igrain_ph       = 31
+        nf.iretransn_to_igrainst_ph     = 32
+        nf.ileaf_to_iout_ph             = 33
+        nf.ifroot_to_iout_ph            = 34
+        nf.ilivestem_to_iout_ph         = 35
+        nf.igrain_to_iout_ph            = 36
+        nf.iretransn_to_iout_ph         = 37
+    else
+        nf.ileaf_to_iout_ph             = 31
+        nf.ifroot_to_iout_ph            = 32
+        nf.ilivestem_to_iout_ph         = 33
+        nf.iretransn_to_iout_ph         = 34
+    end
 
-    # --- Gap mortality: 19 pure out-of-veg losses (pools 1..19 -> iout), index i.
-    nf.matrix_ngmtransfer_doner_patch    = collect(1:nvegnpool)
-    nf.matrix_ngmtransfer_receiver_patch = fill(ioutn, nvegnpool)
-    nf.matrix_ngmtransfer_patch = zeros(np, nvegnpool)
+    # --- Gap mortality: 19 pure out-of-veg losses (18 natveg pools + retransn -> iout).
+    # Grain (19..21 for crop) does NOT gap/burn, so the doner set is the 18 natveg pools
+    # plus retransn (=iretransn), never the grain pools even when nvegnpool=22.
+    ngm = NVEGPOOL_NATVEG + 1
+    nf.matrix_ngmtransfer_doner_patch    = vcat(collect(1:NVEGPOOL_NATVEG), iretransn)
+    nf.matrix_ngmtransfer_receiver_patch = fill(ioutn, ngm)
+    nf.matrix_ngmtransfer_patch = zeros(np, ngm)
     nf.matrix_ngmturnover_patch = zeros(np, nvegnpool)
     nf.ileaf_to_iout_gm=1;  nf.ileafst_to_iout_gm=2;  nf.ileafxf_to_iout_gm=3
     nf.ifroot_to_iout_gm=4; nf.ifrootst_to_iout_gm=5; nf.ifrootxf_to_iout_gm=6
@@ -471,8 +506,8 @@ function cn_veg_matrix_n_topology!(nf::CNVegNitrogenFluxData; use_crop::Bool = f
 
     # --- Fire: 2 in-veg live->dead (indices 1,2) + 19 out (pools 1..19 -> iout,
     # indices 3..21). nnfiouttrans=19 trailing → the 2 in-veg transfers are first.
-    fi_doner    = vcat([ILIVESTEM, ILIVECROOT], collect(1:nvegnpool))
-    fi_receiver = vcat([IDEADSTEM, IDEADCROOT], fill(ioutn, nvegnpool))
+    fi_doner    = vcat([ILIVESTEM, ILIVECROOT], collect(1:NVEGPOOL_NATVEG), iretransn)
+    fi_receiver = vcat([IDEADSTEM, IDEADCROOT], fill(ioutn, ngm))
     nf.matrix_nfitransfer_doner_patch    = fi_doner
     nf.matrix_nfitransfer_receiver_patch = fi_receiver
     nf.matrix_nfitransfer_patch = zeros(np, length(fi_doner))
@@ -505,17 +540,31 @@ allocation fraction, shared by the A-matrix retransn→X transfers), and matrix_
 = npool_to_veg − retransn_to_npool (the sminn-sourced portion; the retransn-sourced
 portion enters via the A-matrix). Zero when nothing is allocated.
 """
+# The 2 crop grain N allocation targets (reproductive N; 2D fields indexed [p,1]).
+const _NALLOC_TARGET_CROP = Tuple{Int,Symbol}[
+    (IGRAIN, :npool_to_reproductiven_patch),
+    (IGRAIN_ST, :npool_to_reproductiven_storage_patch)]
+
 function cn_veg_matrix_alloc_n!(nf::CNVegNitrogenFluxData,
-        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int})
+        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int};
+        use_crop::Bool = false)
     fill!(nf.matrix_nalloc_patch, 0.0)
     fill!(nf.matrix_Ninput_patch, 0.0)
     for p in bounds_patch
         mask_soilp[p] || continue
         tot = 0.0
         for (_, fld) in _NALLOC_TARGET; tot += getfield(nf, fld)[p]; end
+        if use_crop
+            for (_, fld) in _NALLOC_TARGET_CROP; tot += getfield(nf, fld)[p, 1]; end
+        end
         if tot > 0.0
             for (pool, fld) in _NALLOC_TARGET
                 nf.matrix_nalloc_patch[p, pool] = getfield(nf, fld)[p] / tot
+            end
+            if use_crop
+                for (pool, fld) in _NALLOC_TARGET_CROP
+                    nf.matrix_nalloc_patch[p, pool] = getfield(nf, fld)[p, 1] / tot
+                end
             end
         end
         nf.matrix_Ninput_patch[p] = tot - nf.retransn_to_npool_patch[p]
@@ -542,13 +591,15 @@ retransn→pool supply transfers valued from the allocation nalloc + retransn_to
 """
 function cn_veg_matrix_accumulate_phn!(nf::CNVegNitrogenFluxData,
         ns::CNVegNitrogenStateData, mask_soilp::AbstractVector{Bool},
-        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
+        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
+        use_crop::Bool = false, nvegnpool::Int = IRETRANSN_NATVEG)
+    iretransn = nvegnpool
     fill!(nf.matrix_nphtransfer_patch, 0.0)
     fill!(nf.matrix_nphturnover_patch, 0.0)
     for p in bounds_patch
         mask_soilp[p] || continue
         reg(idx, flux, d) = begin
-            donor = _vegn_pool_val(ns, d, p)
+            donor = _vegn_pool_val(ns, d, p, iretransn)
             rate = donor > 0.0 ? flux / donor : 0.0
             matrix_update_phn!(nf, p, idx, rate, dt; matrixcheck=matrixcheck, acc=true)
         end
@@ -577,16 +628,28 @@ function cn_veg_matrix_accumulate_phn!(nf::CNVegNitrogenFluxData,
         reg(nf.ileaf_to_iout_ph,             nf.leafn_to_litter_patch[p],            ILEAF)
         reg(nf.ifroot_to_iout_ph,            nf.frootn_to_litter_patch[p],           IFROOT)
         reg(nf.ilivestem_to_iout_ph,         nf.livestemn_to_litter_patch[p],        ILIVESTEM)
-        # retransn->pool supply (12) + iretransn->iout edge (allocation-sourced)
+        if use_crop
+            # grain harvest (grain -> outside veg): food + seed.
+            reg(nf.igrain_to_iout_ph,
+                nf.repr_grainn_to_food_patch[p, 1] + nf.repr_grainn_to_seed_patch[p, 1], IGRAIN)
+        end
+        # retransn->pool supply (12, +2 grain for crop) + iretransn->iout edge (alloc-sourced)
         r2n = nf.retransn_to_npool_patch[p]
         npool_to_veg = 0.0
         for (_, fld) in _NALLOC_TARGET; npool_to_veg += getfield(nf, fld)[p]; end
+        if use_crop
+            for (_, fld) in _NALLOC_TARGET_CROP; npool_to_veg += getfield(nf, fld)[p, 1]; end
+        end
         if npool_to_veg > 0.0
             for (idxfld, pool) in _RETRANSN_SUPPLY
-                reg(getfield(nf, idxfld), nf.matrix_nalloc_patch[p, pool] * r2n, IRETRANSN_NATVEG)
+                reg(getfield(nf, idxfld), nf.matrix_nalloc_patch[p, pool] * r2n, iretransn)
+            end
+            if use_crop
+                reg(nf.iretransn_to_igrain_ph,   nf.matrix_nalloc_patch[p, IGRAIN]    * r2n, iretransn)
+                reg(nf.iretransn_to_igrainst_ph, nf.matrix_nalloc_patch[p, IGRAIN_ST] * r2n, iretransn)
             end
         else
-            reg(nf.iretransn_to_iout_ph, r2n, IRETRANSN_NATVEG)
+            reg(nf.iretransn_to_iout_ph, r2n, iretransn)
         end
     end
     return nothing
@@ -609,15 +672,18 @@ Register the 19 veg-N gap-mortality transfers (pools 1..18 + retransn -> litter)
 """
 function cn_veg_matrix_accumulate_gmn!(nf::CNVegNitrogenFluxData,
         ns::CNVegNitrogenStateData, mask_soilp::AbstractVector{Bool},
-        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
+        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
+        nvegnpool::Int = IRETRANSN_NATVEG)
+    iretransn = nvegnpool
     fill!(nf.matrix_ngmtransfer_patch, 0.0)
     fill!(nf.matrix_ngmturnover_patch, 0.0)
-    n = length(_GMN_FLUX)
+    n = length(_GMN_FLUX)                       # 19 = 18 natveg + retransn
     for p in bounds_patch
         mask_soilp[p] || continue
         for i in 1:n
             flux = getfield(nf, _GMN_FLUX[i])[p]
-            donor = _vegn_pool_val(ns, i, p)
+            d = i <= NVEGPOOL_NATVEG ? i : iretransn   # transfer 19 is the retransn pool
+            donor = _vegn_pool_val(ns, d, p, iretransn)
             rate = donor > 0.0 ? flux / donor : 0.0
             matrix_update_gmn!(nf, p, i, rate, dt; matrixcheck=matrixcheck, acc=true)
         end
@@ -651,14 +717,16 @@ losses (pools 1..18 + retransn, flux = m_*n_to_fire + m_*n_to_litter_fire).
 """
 function cn_veg_matrix_accumulate_fin!(nf::CNVegNitrogenFluxData,
         ns::CNVegNitrogenStateData, mask_soilp::AbstractVector{Bool},
-        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
+        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
+        nvegnpool::Int = IRETRANSN_NATVEG)
+    iretransn = nvegnpool
     fill!(nf.matrix_nfitransfer_patch, 0.0)
     fill!(nf.matrix_nfiturnover_patch, 0.0)
-    n = length(_FIN_TO_FIRE)
+    n = length(_FIN_TO_FIRE)                    # 19 out-losses = 18 natveg + retransn
     for p in bounds_patch
         mask_soilp[p] || continue
         reg(idx, flux, d) = begin
-            donor = _vegn_pool_val(ns, d, p)
+            donor = _vegn_pool_val(ns, d, p, iretransn)
             rate = donor > 0.0 ? flux / donor : 0.0
             matrix_update_fin!(nf, p, idx, rate, dt; matrixcheck=matrixcheck, acc=true)
         end
@@ -666,7 +734,8 @@ function cn_veg_matrix_accumulate_fin!(nf::CNVegNitrogenFluxData,
         reg(nf.ilivecroot_to_ideadcroot_fi, nf.m_livecrootn_to_deadcrootn_fire_patch[p], ILIVECROOT)
         for i in 1:n
             flux = getfield(nf, _FIN_TO_FIRE[i])[p] + getfield(nf, _FIN_TO_LITTER[i])[p]
-            reg(i + 2, flux, i)
+            d = i <= NVEGPOOL_NATVEG ? i : iretransn   # out-loss 19 is the retransn pool
+            reg(i + 2, flux, d)
         end
     end
     return nothing

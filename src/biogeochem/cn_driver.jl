@@ -1124,36 +1124,39 @@ function cn_driver_no_leaching!(
         # transfer has been computed into its flux field. Assemble those into the
         # transfer matrix + B-input and advance all pools in one solve (== the
         # sequential update at matrixcheck=false; validated in test_cn_veg_matrix_wiring).
-        if config.use_matrixcn && !config.use_crop
-            _mcounts = veg_matrix_transfer_counts(false)
+        if config.use_matrixcn
+            # Crop adds the 3 grain pools (nvegcpool 18→21) + shifts retransn to pool 22.
+            _uc = config.use_crop
+            _mcounts = veg_matrix_transfer_counts(_uc)
+            _ncpool = _uc ? NVEGPOOL_NATVEG + NVEGPOOL_CROP : NVEGPOOL_NATVEG   # 21 / 18
+            _nnpool = _ncpool + 1                                              # 22 / 19 (incl. retransn)
             if cnveg_cf.ileafst_to_ileafxf_ph == 0
-                cn_veg_matrix_c_topology!(cnveg_cf; use_crop=false, nvegcpool=NVEGPOOL_NATVEG)
+                cn_veg_matrix_c_topology!(cnveg_cf; use_crop=_uc, nvegcpool=_ncpool)
             end
-            cn_veg_matrix_alloc_c!(cnveg_cf, mask_bgc_vegp, bounds_patch)
-            cn_veg_matrix_accumulate_ph_c!(cnveg_cf, cnveg_cs, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_alloc_c!(cnveg_cf, mask_bgc_vegp, bounds_patch; use_crop=_uc)
+            cn_veg_matrix_accumulate_ph_c!(cnveg_cf, cnveg_cs, mask_bgc_vegp, bounds_patch; dt=dt, use_crop=_uc)
             cn_veg_matrix_accumulate_gm_c!(cnveg_cf, cnveg_cs, mask_bgc_vegp, bounds_patch; dt=dt)
             cn_veg_matrix_accumulate_fi_c!(cnveg_cf, cnveg_cs, mask_bgc_vegp, bounds_patch; dt=dt)
             cn_veg_matrix_solve_c!(cnveg_cs, cnveg_cf;
                 mask_soilp=mask_bgc_vegp, bounds_patch=bounds_patch,
-                ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=NVEGPOOL_NATVEG,
+                ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=_ncpool,
                 counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep))
 
             # Matrix-CN veg-N solve (phase 2) — same as C, plus the retranslocation
-            # pool (nvegnpool=19 incl. retransn). The N fire fluxes are computed by
-            # the fire block above; n_state_update1/2/3 all skip veg-N pool increments
-            # in matrix mode (leaving pools at start-of-step), so this one solve
-            # subsumes them (== sequential; validated in test_cn_veg_matrix_wiring_n).
-            _nret = IRETRANSN_NATVEG   # 19 (Fortran nvegnpool convention: incl. retransn)
+            # pool (nvegnpool = nvegcpool+1 incl. retransn). The N fire fluxes are computed
+            # by the fire block above; n_state_update1/2/3 all skip veg-N pool increments
+            # in matrix mode (leaving pools at start-of-step), so this one solve subsumes
+            # them (== sequential; validated in test_cn_veg_matrix_wiring_n[/_crop_n]).
             if cnveg_nf.ileaf_to_iretransn_ph == 0
-                cn_veg_matrix_n_topology!(cnveg_nf; use_crop=false, nvegnpool=_nret)
+                cn_veg_matrix_n_topology!(cnveg_nf; use_crop=_uc, nvegnpool=_nnpool)
             end
-            cn_veg_matrix_alloc_n!(cnveg_nf, mask_bgc_vegp, bounds_patch)
-            cn_veg_matrix_accumulate_phn!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt)
-            cn_veg_matrix_accumulate_gmn!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt)
-            cn_veg_matrix_accumulate_fin!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_alloc_n!(cnveg_nf, mask_bgc_vegp, bounds_patch; use_crop=_uc)
+            cn_veg_matrix_accumulate_phn!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt, use_crop=_uc, nvegnpool=_nnpool)
+            cn_veg_matrix_accumulate_gmn!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt, nvegnpool=_nnpool)
+            cn_veg_matrix_accumulate_fin!(cnveg_nf, cnveg_ns, mask_bgc_vegp, bounds_patch; dt=dt, nvegnpool=_nnpool)
             cn_veg_matrix_solve_n!(cnveg_ns, cnveg_nf;
                 mask_soilp=mask_bgc_vegp, bounds_patch=bounds_patch,
-                ivt=ivt, npcropmin=npcropmin, nvegnpool=_nret,
+                ivt=ivt, npcropmin=npcropmin, nvegnpool=_nnpool,
                 counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep))
         end
 
