@@ -47,7 +47,7 @@ Ported from the module-level variables in `dynHarvestMod.F90`.
 Base.@kwdef mutable struct DynHarvestState
     dynHarvest_file::Union{DynFile,Nothing} = nothing            # file with harvest data
     harvest_inst::Vector{DynVarTimeUninterp} = DynVarTimeUninterp[]  # 5 per-type readers
-    harvest::Vector{Float64} = Float64[]                         # summed harvest rate (per gridcell)
+    harvest::AbstractVector{<:Real} = Float64[]                  # summed harvest rate (per gridcell; Abstract so a device array can be stored)
     do_harvest::Bool = false                                     # are we in a harvest period?
     harvest_units::String = harvest_string_not_set              # units from the file
 end
@@ -204,6 +204,39 @@ function dynHarvest_interp_resolve_harvesttypes(state::DynHarvestState,
     return harvest_rates, after_start_of_harvest_ts
 end
 
+# --- Harvest kernels (Metal-clean). Every output = input * m[p] over the tree-
+#     harvest mask, so compute m + the mask once then scale each field. ---
+@kernel function _dynh_m_kernel!(hmask, m, @Const(mask), @Const(ivt), @Const(gridcell),
+        @Const(leafc), @Const(frootc), @Const(livestemc), @Const(deadstemc),
+        @Const(livecrootc), @Const(deadcrootc), @Const(xsmrpool), @Const(harvest),
+        is_beg::Bool, do_harvest::Bool, is_mass::Bool, dt, noveg::Int, nbrdlf::Int)
+    p = @index(Global)
+    @inbounds begin
+        T = eltype(m)
+        istree = mask[p] && ivt[p] > noveg && ivt[p] < nbrdlf
+        hmask[p] = istree
+        mp = zero(T)
+        if istree && do_harvest
+            g = gridcell[p]
+            if is_mass
+                thistreec = leafc[p] + frootc[p] + livestemc[p] + deadstemc[p] +
+                            livecrootc[p] + deadcrootc[p] + xsmrpool[p]
+                am = thistreec > zero(T) ? min(T(0.98), harvest[g] / thistreec) : zero(T)
+            else
+                am = harvest[g]
+            end
+            mp = is_beg ? am / dt : zero(T)
+        end
+        m[p] = mp
+    end
+end
+
+# masked scale: out[p] = inp[p] * m[p] for masked p
+@kernel function _dynh_scale_kernel!(out, @Const(hmask), @Const(inp), @Const(m))
+    p = @index(Global)
+    @inbounds if hmask[p]; out[p] = inp[p] * m[p]; end
+end
+
 # ---------------------------------------------------------------------------
 # cn_harvest! (= CNHarvest) — patch-level harvest mortality C & N fluxes.
 # ---------------------------------------------------------------------------
@@ -340,89 +373,48 @@ function cn_harvest!(state::DynHarvestState,
     do_harvest  = state.do_harvest
     is_mass     = (state.harvest_units == harvest_mass_units)
 
-    @inbounds for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-        g = patch.gridcell[p]
-
-        # Only tree PFTs (Fortran: ivt > noveg .and. ivt < nbrdlf_evr_shrub).
-        if ivt[p] > noveg && ivt[p] < nbrdlf_evr_shrub
-
-            if do_harvest
-                if is_mass
-                    thistreec = leafc[p] + frootc[p] + livestemc[p] +
-                                deadstemc[p] + livecrootc[p] + deadcrootc[p] +
-                                xsmrpool[p]
-                    cm = harvest[g]
-                    if thistreec > 0.0
-                        am = min(0.98, cm / thistreec)  # harvest up to 98% so regrowth is possible
-                    else
-                        am = 0.0
-                    end
-                else
-                    am = harvest[g]
-                end
-
-                # Apply all harvest at the start of the year.
-                m = is_beg_curr_year ? am / dt : 0.0
-            else
-                m = 0.0
-            end
-
-            # ---- patch-level harvest carbon fluxes ----
-            # displayed pools
-            hrv_leafc_to_litter[p]              = leafc[p]              * m
-            hrv_frootc_to_litter[p]             = frootc[p]             * m
-            hrv_livestemc_to_litter[p]          = livestemc[p]          * m
-            wood_harvestc[p]                    = deadstemc[p]          * m
-            hrv_livecrootc_to_litter[p]         = livecrootc[p]         * m
-            hrv_deadcrootc_to_litter[p]         = deadcrootc[p]         * m
-            hrv_xsmrpool_to_atm[p]              = xsmrpool[p]           * m
-
-            # storage pools
-            hrv_leafc_storage_to_litter[p]      = leafc_storage[p]      * m
-            hrv_frootc_storage_to_litter[p]     = frootc_storage[p]     * m
-            hrv_livestemc_storage_to_litter[p]  = livestemc_storage[p]  * m
-            hrv_deadstemc_storage_to_litter[p]  = deadstemc_storage[p]  * m
-            hrv_livecrootc_storage_to_litter[p] = livecrootc_storage[p] * m
-            hrv_deadcrootc_storage_to_litter[p] = deadcrootc_storage[p] * m
-            hrv_gresp_storage_to_litter[p]      = gresp_storage[p]      * m
-
-            # transfer pools
-            hrv_leafc_xfer_to_litter[p]         = leafc_xfer[p]         * m
-            hrv_frootc_xfer_to_litter[p]        = frootc_xfer[p]        * m
-            hrv_livestemc_xfer_to_litter[p]     = livestemc_xfer[p]     * m
-            hrv_deadstemc_xfer_to_litter[p]     = deadstemc_xfer[p]     * m
-            hrv_livecrootc_xfer_to_litter[p]    = livecrootc_xfer[p]    * m
-            hrv_deadcrootc_xfer_to_litter[p]    = deadcrootc_xfer[p]    * m
-            hrv_gresp_xfer_to_litter[p]         = gresp_xfer[p]         * m
-
-            # ---- patch-level harvest mortality nitrogen fluxes ----
-            # displayed pools
-            hrv_leafn_to_litter[p]              = leafn[p]              * m
-            hrv_frootn_to_litter[p]             = frootn[p]             * m
-            hrv_livestemn_to_litter[p]          = livestemn[p]          * m
-            wood_harvestn[p]                    = deadstemn[p]          * m
-            hrv_livecrootn_to_litter[p]         = livecrootn[p]         * m
-            hrv_deadcrootn_to_litter[p]         = deadcrootn[p]         * m
-            hrv_retransn_to_litter[p]           = retransn[p]           * m
-
-            # storage pools
-            hrv_leafn_storage_to_litter[p]      = leafn_storage[p]      * m
-            hrv_frootn_storage_to_litter[p]     = frootn_storage[p]     * m
-            hrv_livestemn_storage_to_litter[p]  = livestemn_storage[p]  * m
-            hrv_deadstemn_storage_to_litter[p]  = deadstemn_storage[p]  * m
-            hrv_livecrootn_storage_to_litter[p] = livecrootn_storage[p] * m
-            hrv_deadcrootn_storage_to_litter[p] = deadcrootn_storage[p] * m
-
-            # transfer pools
-            hrv_leafn_xfer_to_litter[p]         = leafn_xfer[p]         * m
-            hrv_frootn_xfer_to_litter[p]        = frootn_xfer[p]        * m
-            hrv_livestemn_xfer_to_litter[p]     = livestemn_xfer[p]     * m
-            hrv_deadstemn_xfer_to_litter[p]     = deadstemn_xfer[p]     * m
-            hrv_livecrootn_xfer_to_litter[p]    = livecrootn_xfer[p]    * m
-            hrv_deadcrootn_xfer_to_litter[p]    = deadcrootn_xfer[p]    * m
-        end  # end tree block
-    end  # end patch loop
+    FT = eltype(leafc)
+    np = length(mask_soilp)
+    m = fill!(similar(leafc, FT, np), zero(FT))
+    hmask = fill!(similar(leafc, Bool, np), false)
+    _launch!(_dynh_m_kernel!, hmask, m, mask_soilp, ivt, patch.gridcell, leafc, frootc,
+        livestemc, deadstemc, livecrootc, deadcrootc, xsmrpool, harvest,
+        is_beg_curr_year, do_harvest, is_mass, FT(dt), noveg, nbrdlf_evr_shrub)
+    # scale each output field by m over the tree-harvest mask (byte-identical: only
+    # tree-masked patches are written, exactly as the host loop did).
+    for (o, inp) in ((hrv_leafc_to_litter, leafc), (hrv_frootc_to_litter, frootc),
+            (hrv_livestemc_to_litter, livestemc), (wood_harvestc, deadstemc),
+            (hrv_livecrootc_to_litter, livecrootc), (hrv_deadcrootc_to_litter, deadcrootc),
+            (hrv_xsmrpool_to_atm, xsmrpool), (hrv_leafc_storage_to_litter, leafc_storage),
+            (hrv_frootc_storage_to_litter, frootc_storage),
+            (hrv_livestemc_storage_to_litter, livestemc_storage),
+            (hrv_deadstemc_storage_to_litter, deadstemc_storage),
+            (hrv_livecrootc_storage_to_litter, livecrootc_storage),
+            (hrv_deadcrootc_storage_to_litter, deadcrootc_storage),
+            (hrv_gresp_storage_to_litter, gresp_storage),
+            (hrv_leafc_xfer_to_litter, leafc_xfer), (hrv_frootc_xfer_to_litter, frootc_xfer),
+            (hrv_livestemc_xfer_to_litter, livestemc_xfer),
+            (hrv_deadstemc_xfer_to_litter, deadstemc_xfer),
+            (hrv_livecrootc_xfer_to_litter, livecrootc_xfer),
+            (hrv_deadcrootc_xfer_to_litter, deadcrootc_xfer),
+            (hrv_gresp_xfer_to_litter, gresp_xfer),
+            (hrv_leafn_to_litter, leafn), (hrv_frootn_to_litter, frootn),
+            (hrv_livestemn_to_litter, livestemn), (wood_harvestn, deadstemn),
+            (hrv_livecrootn_to_litter, livecrootn), (hrv_deadcrootn_to_litter, deadcrootn),
+            (hrv_retransn_to_litter, retransn),
+            (hrv_leafn_storage_to_litter, leafn_storage),
+            (hrv_frootn_storage_to_litter, frootn_storage),
+            (hrv_livestemn_storage_to_litter, livestemn_storage),
+            (hrv_deadstemn_storage_to_litter, deadstemn_storage),
+            (hrv_livecrootn_storage_to_litter, livecrootn_storage),
+            (hrv_deadcrootn_storage_to_litter, deadcrootn_storage),
+            (hrv_leafn_xfer_to_litter, leafn_xfer), (hrv_frootn_xfer_to_litter, frootn_xfer),
+            (hrv_livestemn_xfer_to_litter, livestemn_xfer),
+            (hrv_deadstemn_xfer_to_litter, deadstemn_xfer),
+            (hrv_livecrootn_xfer_to_litter, livecrootn_xfer),
+            (hrv_deadcrootn_xfer_to_litter, deadcrootn_xfer))
+        _launch!(_dynh_scale_kernel!, o, hmask, inp, m)
+    end
 
     # Gather all patch-level harvest litterfall fluxes to the column.
     cn_harvest_pft_to_column!(mask_soilp, patch, pftcon, soilbgc_state,
@@ -432,6 +424,82 @@ function cn_harvest!(state::DynHarvestState,
                               i_met_lit = i_met_lit)
 
     return nothing
+end
+
+# --- harvest p2c scatter: pack the 37 patch hrv_* fluxes into HIN[p,K] (2 pack
+#     kernels stay under Metal's 31-buffer limit), then one per-patch kernel does
+#     the internal level/litter-pool loops + atomic scatter to the column pools.
+#     @view-slice aliases keep the scatter body byte-identical to the host loop.
+const _HIN = (
+    lc=1, fc=2, lsc=3, lcrc=4, dcrc=5, lc_st=6, fc_st=7, lsc_st=8, dsc_st=9, lcrc_st=10,
+    dcrc_st=11, gr_st=12, lc_xf=13, fc_xf=14, lsc_xf=15, dsc_xf=16, lcrc_xf=17, dcrc_xf=18,
+    gr_xf=19, ln=20, fn=21, lsn=22, lcrn=23, dcrn=24, rtn=25, ln_st=26, fn_st=27, lsn_st=28,
+    dsn_st=29, lcrn_st=30, dcrn_st=31, ln_xf=32, fn_xf=33, lsn_xf=34, dsn_xf=35, lcrn_xf=36,
+    dcrn_xf=37)
+const _NHIN = 37
+
+@kernel function _dynh_pack_c!(HIN, @Const(mask), @Const(a1), @Const(a2), @Const(a3),
+        @Const(a4), @Const(a5), @Const(a6), @Const(a7), @Const(a8), @Const(a9), @Const(a10),
+        @Const(a11), @Const(a12), @Const(a13), @Const(a14), @Const(a15), @Const(a16),
+        @Const(a17), @Const(a18), @Const(a19))
+    p = @index(Global)
+    @inbounds if mask[p]
+        HIN[p,1]=a1[p]; HIN[p,2]=a2[p]; HIN[p,3]=a3[p]; HIN[p,4]=a4[p]; HIN[p,5]=a5[p]
+        HIN[p,6]=a6[p]; HIN[p,7]=a7[p]; HIN[p,8]=a8[p]; HIN[p,9]=a9[p]; HIN[p,10]=a10[p]
+        HIN[p,11]=a11[p]; HIN[p,12]=a12[p]; HIN[p,13]=a13[p]; HIN[p,14]=a14[p]; HIN[p,15]=a15[p]
+        HIN[p,16]=a16[p]; HIN[p,17]=a17[p]; HIN[p,18]=a18[p]; HIN[p,19]=a19[p]
+    end
+end
+@kernel function _dynh_pack_n!(HIN, @Const(mask), @Const(a20), @Const(a21), @Const(a22),
+        @Const(a23), @Const(a24), @Const(a25), @Const(a26), @Const(a27), @Const(a28),
+        @Const(a29), @Const(a30), @Const(a31), @Const(a32), @Const(a33), @Const(a34),
+        @Const(a35), @Const(a36), @Const(a37))
+    p = @index(Global)
+    @inbounds if mask[p]
+        HIN[p,20]=a20[p]; HIN[p,21]=a21[p]; HIN[p,22]=a22[p]; HIN[p,23]=a23[p]; HIN[p,24]=a24[p]
+        HIN[p,25]=a25[p]; HIN[p,26]=a26[p]; HIN[p,27]=a27[p]; HIN[p,28]=a28[p]; HIN[p,29]=a29[p]
+        HIN[p,30]=a30[p]; HIN[p,31]=a31[p]; HIN[p,32]=a32[p]; HIN[p,33]=a33[p]; HIN[p,34]=a34[p]
+        HIN[p,35]=a35[p]; HIN[p,36]=a36[p]; HIN[p,37]=a37[p]
+    end
+end
+
+@kernel function _dynh_scatter_kernel!(@Const(mask), @Const(column), @Const(ivt), @Const(HIN),
+        @Const(leaf_prof), @Const(froot_prof), @Const(croot_prof), @Const(stem_prof),
+        @Const(lf_f), @Const(fr_f), @Const(wtcol), litr_c, cwdc, litr_n, cwdn,
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_met_lit::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        c = column[p]; ivtp = ivt[p] + 1; wt = wtcol[p]
+        for j in 1:nlevdecomp
+            lp = leaf_prof[p,j]; fpr = froot_prof[p,j]; cp = croot_prof[p,j]; sp = stem_prof[p,j]
+            for i in i_litr_min:i_litr_max
+                _scatter_add!(litr_c, c, j, i, HIN[p,_HIN.lc] * lf_f[ivtp,i] * wt * lp)
+                _scatter_add!(litr_c, c, j, i, HIN[p,_HIN.fc] * fr_f[ivtp,i] * wt * fpr)
+            end
+            _scatter_add!(cwdc, c, j, HIN[p,_HIN.lsc]  * wt * sp)
+            _scatter_add!(cwdc, c, j, HIN[p,_HIN.lcrc] * wt * cp)
+            _scatter_add!(cwdc, c, j, HIN[p,_HIN.dcrc] * wt * cp)
+            _scatter_add!(litr_c, c, j, i_met_lit,
+                HIN[p,_HIN.lc_st]*wt*lp + HIN[p,_HIN.fc_st]*wt*fpr + HIN[p,_HIN.lsc_st]*wt*sp +
+                HIN[p,_HIN.dsc_st]*wt*sp + HIN[p,_HIN.lcrc_st]*wt*cp + HIN[p,_HIN.dcrc_st]*wt*cp +
+                HIN[p,_HIN.gr_st]*wt*lp + HIN[p,_HIN.lc_xf]*wt*lp + HIN[p,_HIN.fc_xf]*wt*fpr +
+                HIN[p,_HIN.lsc_xf]*wt*sp + HIN[p,_HIN.dsc_xf]*wt*sp + HIN[p,_HIN.lcrc_xf]*wt*cp +
+                HIN[p,_HIN.dcrc_xf]*wt*cp + HIN[p,_HIN.gr_xf]*wt*lp)
+            for i in i_litr_min:i_litr_max
+                _scatter_add!(litr_n, c, j, i,
+                    HIN[p,_HIN.ln]*lf_f[ivtp,i]*wt*lp + HIN[p,_HIN.fn]*fr_f[ivtp,i]*wt*fpr)
+            end
+            _scatter_add!(cwdn, c, j, HIN[p,_HIN.lsn]  * wt * sp)
+            _scatter_add!(cwdn, c, j, HIN[p,_HIN.lcrn] * wt * cp)
+            _scatter_add!(cwdn, c, j, HIN[p,_HIN.dcrn] * wt * cp)
+            _scatter_add!(litr_n, c, j, i_met_lit,
+                HIN[p,_HIN.rtn]*wt*lp + HIN[p,_HIN.ln_st]*wt*lp + HIN[p,_HIN.fn_st]*wt*fpr +
+                HIN[p,_HIN.lsn_st]*wt*sp + HIN[p,_HIN.dsn_st]*wt*sp + HIN[p,_HIN.lcrn_st]*wt*cp +
+                HIN[p,_HIN.dcrn_st]*wt*cp + HIN[p,_HIN.ln_xf]*wt*lp + HIN[p,_HIN.fn_xf]*wt*fpr +
+                HIN[p,_HIN.lsn_xf]*wt*sp + HIN[p,_HIN.dsn_xf]*wt*sp + HIN[p,_HIN.lcrn_xf]*wt*cp +
+                HIN[p,_HIN.dcrn_xf]*wt*cp)
+        end
+    end
 end
 
 # ---------------------------------------------------------------------------
@@ -529,83 +597,32 @@ function cn_harvest_pft_to_column!(mask_soilp::AbstractVector{Bool},
     harvest_n_to_litr_n = cnveg_nf.harvest_n_to_litr_n_col
     harvest_n_to_cwdn   = cnveg_nf.harvest_n_to_cwdn_col
 
-    @inbounds for j in 1:nlevdecomp
-        for p in eachindex(mask_soilp)
-            mask_soilp[p] || continue
-            c    = patch.column[p]
-            ivtp = ivt[p] + 1   # 0-based Fortran -> 1-based Julia
-            wt   = wtcol[p]
-            lp   = leaf_prof[p, j]
-            fpr  = froot_prof[p, j]
-            cp   = croot_prof[p, j]
-            sp   = stem_prof[p, j]
+    FT = eltype(hrv_leafc_to_litter)
+    np = length(mask_soilp)
+    HIN = fill!(similar(hrv_leafc_to_litter, FT, np, _NHIN), zero(FT))
+    _launch!(_dynh_pack_c!, HIN, mask_soilp, hrv_leafc_to_litter, hrv_frootc_to_litter,
+        hrv_livestemc_to_litter, hrv_livecrootc_to_litter, hrv_deadcrootc_to_litter,
+        hrv_leafc_storage_to_litter, hrv_frootc_storage_to_litter, hrv_livestemc_storage_to_litter,
+        hrv_deadstemc_storage_to_litter, hrv_livecrootc_storage_to_litter,
+        hrv_deadcrootc_storage_to_litter, hrv_gresp_storage_to_litter, hrv_leafc_xfer_to_litter,
+        hrv_frootc_xfer_to_litter, hrv_livestemc_xfer_to_litter, hrv_deadstemc_xfer_to_litter,
+        hrv_livecrootc_xfer_to_litter, hrv_deadcrootc_xfer_to_litter, hrv_gresp_xfer_to_litter;
+        ndrange = np)
+    _launch!(_dynh_pack_n!, HIN, mask_soilp, hrv_leafn_to_litter, hrv_frootn_to_litter,
+        hrv_livestemn_to_litter, hrv_livecrootn_to_litter, hrv_deadcrootn_to_litter,
+        hrv_retransn_to_litter, hrv_leafn_storage_to_litter, hrv_frootn_storage_to_litter,
+        hrv_livestemn_storage_to_litter, hrv_deadstemn_storage_to_litter,
+        hrv_livecrootn_storage_to_litter, hrv_deadcrootn_storage_to_litter, hrv_leafn_xfer_to_litter,
+        hrv_frootn_xfer_to_litter, hrv_livestemn_xfer_to_litter, hrv_deadstemn_xfer_to_litter,
+        hrv_livecrootn_xfer_to_litter, hrv_deadcrootn_xfer_to_litter; ndrange = np)
+    _launch!(_dynh_scatter_kernel!, mask_soilp, patch.column, ivt, HIN,
+        leaf_prof, froot_prof, croot_prof, stem_prof, lf_f, fr_f, wtcol,
+        harvest_c_to_litr_c, harvest_c_to_cwdc, harvest_n_to_litr_n, harvest_n_to_cwdn,
+        nlevdecomp, i_litr_min, i_litr_max, i_met_lit)
 
-            for i in i_litr_min:i_litr_max
-                # leaf harvest mortality carbon fluxes
-                harvest_c_to_litr_c[c, j, i] += hrv_leafc_to_litter[p]  * lf_f[ivtp, i] * wt * lp
-                # fine root harvest mortality carbon fluxes
-                harvest_c_to_litr_c[c, j, i] += hrv_frootc_to_litter[p] * fr_f[ivtp, i] * wt * fpr
-            end
-
-            # wood harvest mortality carbon fluxes (to CWD)
-            harvest_c_to_cwdc[c, j] += hrv_livestemc_to_litter[p]  * wt * sp
-            harvest_c_to_cwdc[c, j] += hrv_livecrootc_to_litter[p] * wt * cp
-            harvest_c_to_cwdc[c, j] += hrv_deadcrootc_to_litter[p] * wt * cp
-
-            # storage + transfer harvest mortality carbon fluxes (to metabolic litter)
-            harvest_c_to_litr_c[c, j, i_met_lit] +=
-                hrv_leafc_storage_to_litter[p]      * wt * lp +
-                hrv_frootc_storage_to_litter[p]     * wt * fpr +
-                hrv_livestemc_storage_to_litter[p]  * wt * sp +
-                hrv_deadstemc_storage_to_litter[p]  * wt * sp +
-                hrv_livecrootc_storage_to_litter[p] * wt * cp +
-                hrv_deadcrootc_storage_to_litter[p] * wt * cp +
-                hrv_gresp_storage_to_litter[p]      * wt * lp +
-                hrv_leafc_xfer_to_litter[p]         * wt * lp +
-                hrv_frootc_xfer_to_litter[p]        * wt * fpr +
-                hrv_livestemc_xfer_to_litter[p]     * wt * sp +
-                hrv_deadstemc_xfer_to_litter[p]     * wt * sp +
-                hrv_livecrootc_xfer_to_litter[p]    * wt * cp +
-                hrv_deadcrootc_xfer_to_litter[p]    * wt * cp +
-                hrv_gresp_xfer_to_litter[p]         * wt * lp
-
-            for i in i_litr_min:i_litr_max
-                # leaf + fine root harvest mortality nitrogen fluxes
-                harvest_n_to_litr_n[c, j, i] +=
-                    hrv_leafn_to_litter[p]  * lf_f[ivtp, i] * wt * lp +
-                    hrv_frootn_to_litter[p] * fr_f[ivtp, i] * wt * fpr
-            end
-
-            # wood harvest mortality nitrogen fluxes (to CWD)
-            harvest_n_to_cwdn[c, j] += hrv_livestemn_to_litter[p]  * wt * sp
-            harvest_n_to_cwdn[c, j] += hrv_livecrootn_to_litter[p] * wt * cp
-            harvest_n_to_cwdn[c, j] += hrv_deadcrootn_to_litter[p] * wt * cp
-
-            # retransn + storage + transfer harvest mortality N (to metabolic litter)
-            harvest_n_to_litr_n[c, j, i_met_lit] +=
-                hrv_retransn_to_litter[p]           * wt * lp +
-                hrv_leafn_storage_to_litter[p]      * wt * lp +
-                hrv_frootn_storage_to_litter[p]     * wt * fpr +
-                hrv_livestemn_storage_to_litter[p]  * wt * sp +
-                hrv_deadstemn_storage_to_litter[p]  * wt * sp +
-                hrv_livecrootn_storage_to_litter[p] * wt * cp +
-                hrv_deadcrootn_storage_to_litter[p] * wt * cp +
-                hrv_leafn_xfer_to_litter[p]         * wt * lp +
-                hrv_frootn_xfer_to_litter[p]        * wt * fpr +
-                hrv_livestemn_xfer_to_litter[p]     * wt * sp +
-                hrv_deadstemn_xfer_to_litter[p]     * wt * sp +
-                hrv_livecrootn_xfer_to_litter[p]    * wt * cp +
-                hrv_deadcrootn_xfer_to_litter[p]    * wt * cp
-        end
-    end
-
-    # wood harvest mortality C & N fluxes to the product pools
-    @inbounds for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-        c = patch.column[p]
-        cwood_harvestc[c] += pwood_harvestc[p] * wtcol[p]
-        cwood_harvestn[c] += pwood_harvestn[p] * wtcol[p]
-    end
+    # wood harvest mortality C & N fluxes to the product pools (generic p2c scatter)
+    ndyn_p2c_scatter!(cwood_harvestc, mask_soilp, patch.column, pwood_harvestc, wtcol, 1, np)
+    ndyn_p2c_scatter!(cwood_harvestn, mask_soilp, patch.column, pwood_harvestn, wtcol, 1, np)
 
     return nothing
 end

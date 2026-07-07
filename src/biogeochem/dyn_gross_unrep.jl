@@ -45,7 +45,7 @@ Mirrors the module-private globals at the top of `dynGrossUnrepMod.F90`.
 Base.@kwdef mutable struct DynGrossUnrepState
     dyngrossunrep_file::Union{DynFile, Nothing} = nothing
     gru_inst::Union{DynVarTimeUninterp, Nothing} = nothing
-    grossunrepfrac::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)  # (gridcell, natpft_size)
+    grossunrepfrac::AbstractMatrix{<:Real} = Matrix{Float64}(undef, 0, 0)  # (gridcell, natpft_size; Abstract so a device array can be stored)
     do_grossunrep::Bool = false
 end
 
@@ -166,6 +166,58 @@ function dynGrossUnrep_interp!(state::DynGrossUnrepState, year::Int)
     end
 
     return nothing
+end
+
+# --- Gross-unrep kernels. Like harvest, every output = input * (rate), but the
+#     rate is m for most pools, m*cfrac for deadstem→atm, m*(1-cfrac) for wood
+#     products. Compute the three rate arrays + the natural-pft mask once, then
+#     reuse the generic masked-scale kernel (_dynh_scale_kernel!) per field. ---
+@kernel function _gru_m_kernel!(gmask, m, mc, mpr, @Const(mask), @Const(ivt),
+        @Const(gridcell), @Const(grossunrepfrac), @Const(convfrac),
+        is_beg::Bool, do_gru::Bool, dtime, noveg::Int, nc4::Int)
+    p = @index(Global)
+    @inbounds begin
+        T = eltype(m)
+        isnat = mask[p] && ivt[p] > noveg && ivt[p] <= nc4
+        gmask[p] = isnat
+        mm = zero(T); cf = zero(T)
+        if isnat
+            cf = convfrac[ivt[p] + 1]
+            if do_gru
+                am = grossunrepfrac[gridcell[p], ivt[p] + 1]
+                mm = is_beg ? am / dtime : zero(T)
+            end
+        end
+        m[p] = mm; mc[p] = mm * cf; mpr[p] = mm * (one(T) - cf)
+    end
+end
+
+# gross-unrep p2c scatter: only 9 patch fields feed it (< 31 buffers), so no
+# packing — the per-patch kernel reads them directly and atomic-scatters.
+@kernel function _gru_scatter_kernel!(@Const(mask), @Const(column), @Const(ivt),
+        @Const(leaf_prof), @Const(froot_prof), @Const(croot_prof), @Const(lf_f), @Const(fr_f),
+        @Const(wtcol), @Const(gru_leafc), @Const(gru_frootc), @Const(gru_livecrootc),
+        @Const(gru_deadcrootc), @Const(gru_leafn), @Const(gru_frootn), @Const(gru_livecrootn),
+        @Const(gru_deadcrootn), @Const(gru_retransn), litr_c, cwdc, litr_n, cwdn,
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_met_lit::Int)
+    p = @index(Global)
+    @inbounds if mask[p]
+        c = column[p]; ivtp = ivt[p] + 1; wt = wtcol[p]
+        for j in 1:nlevdecomp
+            lp = leaf_prof[p,j]; fp = froot_prof[p,j]; cp = croot_prof[p,j]
+            for i in i_litr_min:i_litr_max
+                _scatter_add!(litr_c, c, j, i,
+                    gru_leafc[p]*lf_f[ivtp,i]*wt*lp + gru_frootc[p]*fr_f[ivtp,i]*wt*fp)
+                _scatter_add!(litr_n, c, j, i,
+                    gru_leafn[p]*lf_f[ivtp,i]*wt*lp + gru_frootn[p]*fr_f[ivtp,i]*wt*fp)
+            end
+            _scatter_add!(cwdc, c, j, gru_livecrootc[p]*wt*cp)
+            _scatter_add!(cwdc, c, j, gru_deadcrootc[p]*wt*cp)
+            _scatter_add!(cwdn, c, j, gru_livecrootn[p]*wt*cp)
+            _scatter_add!(cwdn, c, j, gru_deadcrootn[p]*wt*cp)
+            _scatter_add!(litr_n, c, j, i_met_lit, gru_retransn[p]*wt*lp)
+        end
+    end
 end
 
 # ---------------------------------------------------------------------------
@@ -312,88 +364,50 @@ function cn_gross_unrep!(mask_soilp::AbstractVector{Bool},
     gru_livecrootn_xfer_to_atm    = cnveg_nf.gru_livecrootn_xfer_to_atm_patch
     gru_deadcrootn_xfer_to_atm    = cnveg_nf.gru_deadcrootn_xfer_to_atm_patch
 
-    # patch loop (Fortran filter loop -> mask-based loop)
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-        g = gridcell[p]
-
-        # If this is a natural pft, get the annual grossunrep "mortality" rate (am)
-        # from the grossunrep array and convert to rate per second.
-        if ivt[p] > noveg && ivt[p] <= nc4_grass
-            if do_grossunrep
-                # grossunrepfrac is stored 1-based in the PFT axis (PFT 0 -> col 1),
-                # so PFT ivt[p] is column ivt[p]+1.
-                am = grossunrepfrac[g, ivt[p] + 1]
-
-                # Apply all grossunrep at the start of the year.
-                if is_beg_curr_year
-                    m = am / dtime
-                else
-                    m = 0.0
-                end
-            else
-                m = 0.0
-            end
-
-            cfrac = convfrac[ivt[p] + 1]   # convfrac(ivt(p)), 0-based -> 1-based
-
-            # -------- patch-level carbon fluxes --------
-            # displayed pools
-            gru_leafc_to_litter[p]      = leafc[p]      * m
-            gru_frootc_to_litter[p]     = frootc[p]     * m
-            gru_livestemc_to_atm[p]     = livestemc[p]  * m
-            gru_deadstemc_to_atm[p]     = deadstemc[p]  * m * cfrac
-            gru_wood_productc_gain[p]   = deadstemc[p]  * m * (1.0 - cfrac)
-            gru_livecrootc_to_litter[p] = livecrootc[p] * m
-            gru_deadcrootc_to_litter[p] = deadcrootc[p] * m
-            gru_xsmrpool_to_atm[p]      = xsmrpool[p]   * m
-
-            # storage pools
-            gru_leafc_storage_to_atm[p]      = leafc_storage[p]      * m
-            gru_frootc_storage_to_atm[p]     = frootc_storage[p]     * m
-            gru_livestemc_storage_to_atm[p]  = livestemc_storage[p]  * m
-            gru_deadstemc_storage_to_atm[p]  = deadstemc_storage[p]  * m
-            gru_livecrootc_storage_to_atm[p] = livecrootc_storage[p] * m
-            gru_deadcrootc_storage_to_atm[p] = deadcrootc_storage[p] * m
-            gru_gresp_storage_to_atm[p]      = gresp_storage[p]      * m
-
-            # transfer pools
-            gru_leafc_xfer_to_atm[p]      = leafc_xfer[p]      * m
-            gru_frootc_xfer_to_atm[p]     = frootc_xfer[p]     * m
-            gru_livestemc_xfer_to_atm[p]  = livestemc_xfer[p]  * m
-            gru_deadstemc_xfer_to_atm[p]  = deadstemc_xfer[p]  * m
-            gru_livecrootc_xfer_to_atm[p] = livecrootc_xfer[p] * m
-            gru_deadcrootc_xfer_to_atm[p] = deadcrootc_xfer[p] * m
-            gru_gresp_xfer_to_atm[p]      = gresp_xfer[p]      * m
-
-            # -------- patch-level nitrogen fluxes --------
-            # displayed pools
-            gru_leafn_to_litter[p]      = leafn[p]      * m
-            gru_frootn_to_litter[p]     = frootn[p]     * m
-            gru_livestemn_to_atm[p]     = livestemn[p]  * m
-            gru_deadstemn_to_atm[p]     = deadstemn[p]  * m * cfrac
-            gru_wood_productn_gain[p]   = deadstemn[p]  * m * (1.0 - cfrac)
-            gru_livecrootn_to_litter[p] = livecrootn[p] * m
-            gru_deadcrootn_to_litter[p] = deadcrootn[p] * m
-            gru_retransn_to_litter[p]   = retransn[p]   * m
-
-            # storage pools
-            gru_leafn_storage_to_atm[p]      = leafn_storage[p]      * m
-            gru_frootn_storage_to_atm[p]     = frootn_storage[p]     * m
-            gru_livestemn_storage_to_atm[p]  = livestemn_storage[p]  * m
-            gru_deadstemn_storage_to_atm[p]  = deadstemn_storage[p]  * m
-            gru_livecrootn_storage_to_atm[p] = livecrootn_storage[p] * m
-            gru_deadcrootn_storage_to_atm[p] = deadcrootn_storage[p] * m
-
-            # transfer pools
-            gru_leafn_xfer_to_atm[p]      = leafn_xfer[p]      * m
-            gru_frootn_xfer_to_atm[p]     = frootn_xfer[p]     * m
-            gru_livestemn_xfer_to_atm[p]  = livestemn_xfer[p]  * m
-            gru_deadstemn_xfer_to_atm[p]  = deadstemn_xfer[p]  * m
-            gru_livecrootn_xfer_to_atm[p] = livecrootn_xfer[p] * m
-            gru_deadcrootn_xfer_to_atm[p] = deadcrootn_xfer[p] * m
-        end  # end tree block
-    end  # end patch loop
+    # compute the per-patch rate arrays (m, m*cfrac, m*(1-cfrac)) + natural-pft mask
+    FT = eltype(leafc)
+    np = length(mask_soilp)
+    m   = fill!(similar(leafc, FT, np), zero(FT))
+    mc  = fill!(similar(leafc, FT, np), zero(FT))
+    mpr = fill!(similar(leafc, FT, np), zero(FT))
+    gmask = fill!(similar(leafc, Bool, np), false)
+    _launch!(_gru_m_kernel!, gmask, m, mc, mpr, mask_soilp, ivt, gridcell, grossunrepfrac,
+        convfrac, is_beg_curr_year, do_grossunrep, FT(dtime), noveg, nc4_grass)
+    # deadstem→atm scales by m*cfrac; wood-product gain by m*(1-cfrac); all else by m.
+    for (o, inp) in ((gru_deadstemc_to_atm, deadstemc), (gru_deadstemn_to_atm, deadstemn))
+        _launch!(_dynh_scale_kernel!, o, gmask, inp, mc)
+    end
+    for (o, inp) in ((gru_wood_productc_gain, deadstemc), (gru_wood_productn_gain, deadstemn))
+        _launch!(_dynh_scale_kernel!, o, gmask, inp, mpr)
+    end
+    for (o, inp) in ((gru_leafc_to_litter, leafc), (gru_frootc_to_litter, frootc),
+            (gru_livestemc_to_atm, livestemc), (gru_livecrootc_to_litter, livecrootc),
+            (gru_deadcrootc_to_litter, deadcrootc), (gru_xsmrpool_to_atm, xsmrpool),
+            (gru_leafc_storage_to_atm, leafc_storage), (gru_frootc_storage_to_atm, frootc_storage),
+            (gru_livestemc_storage_to_atm, livestemc_storage),
+            (gru_deadstemc_storage_to_atm, deadstemc_storage),
+            (gru_livecrootc_storage_to_atm, livecrootc_storage),
+            (gru_deadcrootc_storage_to_atm, deadcrootc_storage),
+            (gru_gresp_storage_to_atm, gresp_storage), (gru_leafc_xfer_to_atm, leafc_xfer),
+            (gru_frootc_xfer_to_atm, frootc_xfer), (gru_livestemc_xfer_to_atm, livestemc_xfer),
+            (gru_deadstemc_xfer_to_atm, deadstemc_xfer),
+            (gru_livecrootc_xfer_to_atm, livecrootc_xfer),
+            (gru_deadcrootc_xfer_to_atm, deadcrootc_xfer), (gru_gresp_xfer_to_atm, gresp_xfer),
+            (gru_leafn_to_litter, leafn), (gru_frootn_to_litter, frootn),
+            (gru_livestemn_to_atm, livestemn), (gru_livecrootn_to_litter, livecrootn),
+            (gru_deadcrootn_to_litter, deadcrootn), (gru_retransn_to_litter, retransn),
+            (gru_leafn_storage_to_atm, leafn_storage), (gru_frootn_storage_to_atm, frootn_storage),
+            (gru_livestemn_storage_to_atm, livestemn_storage),
+            (gru_deadstemn_storage_to_atm, deadstemn_storage),
+            (gru_livecrootn_storage_to_atm, livecrootn_storage),
+            (gru_deadcrootn_storage_to_atm, deadcrootn_storage),
+            (gru_leafn_xfer_to_atm, leafn_xfer), (gru_frootn_xfer_to_atm, frootn_xfer),
+            (gru_livestemn_xfer_to_atm, livestemn_xfer),
+            (gru_deadstemn_xfer_to_atm, deadstemn_xfer),
+            (gru_livecrootn_xfer_to_atm, livecrootn_xfer),
+            (gru_deadcrootn_xfer_to_atm, deadcrootn_xfer))
+        _launch!(_dynh_scale_kernel!, o, gmask, inp, m)
+    end
 
     # Gather all patch-level litterfall fluxes from grossunrep to the column for
     # litter C and N inputs.
@@ -473,58 +487,17 @@ function cn_gross_unrep_pft_to_column!(mask_soilp::AbstractVector{Bool},
     gru_n_to_cwdn            = cnveg_nf.gru_n_to_cwdn_col          # (col, level)
     gru_wood_productn_gain_c = cnveg_nf.gru_wood_productn_gain_col # (col)
 
-    for j in 1:nlevdecomp
-        for p in eachindex(mask_soilp)
-            mask_soilp[p] || continue
-            c = column[p]
-            ivtp = ivt[p] + 1   # 0-based Fortran -> 1-based Julia
-            wt = wtcol[p]
-            lp = leaf_prof[p, j]
-            fp = froot_prof[p, j]
-            cp = croot_prof[p, j]
+    _launch!(_gru_scatter_kernel!, mask_soilp, column, ivt, leaf_prof, froot_prof, croot_prof,
+        lf_f, fr_f, wtcol, gru_leafc_to_litter, gru_frootc_to_litter, gru_livecrootc_to_litter,
+        gru_deadcrootc_to_litter, gru_leafn_to_litter, gru_frootn_to_litter,
+        gru_livecrootn_to_litter, gru_deadcrootn_to_litter, gru_retransn_to_litter,
+        gru_c_to_litr_c, gru_c_to_cwdc, gru_n_to_litr_n, gru_n_to_cwdn,
+        nlevdecomp, i_litr_min, i_litr_max, i_met_lit)
 
-            for i in i_litr_min:i_litr_max
-                # leaf + fine root gross-unrep mortality C fluxes to litter pools
-                gru_c_to_litr_c[c, j, i] = gru_c_to_litr_c[c, j, i] +
-                    gru_leafc_to_litter[p]  * lf_f[ivtp, i] * wt * lp +
-                    gru_frootc_to_litter[p] * fr_f[ivtp, i] * wt * fp
-                # leaf + fine root gross-unrep mortality N fluxes to litter pools
-                gru_n_to_litr_n[c, j, i] = gru_n_to_litr_n[c, j, i] +
-                    gru_leafn_to_litter[p]  * lf_f[ivtp, i] * wt * lp +
-                    gru_frootn_to_litter[p] * fr_f[ivtp, i] * wt * fp
-            end
-
-            # coarse root gross-unrep mortality C fluxes to CWD
-            gru_c_to_cwdc[c, j] = gru_c_to_cwdc[c, j] +
-                gru_livecrootc_to_litter[p] * wt * cp
-            gru_c_to_cwdc[c, j] = gru_c_to_cwdc[c, j] +
-                gru_deadcrootc_to_litter[p] * wt * cp
-
-            # coarse root gross-unrep mortality N fluxes to CWD
-            gru_n_to_cwdn[c, j] = gru_n_to_cwdn[c, j] +
-                gru_livecrootn_to_litter[p] * wt * cp
-            gru_n_to_cwdn[c, j] = gru_n_to_cwdn[c, j] +
-                gru_deadcrootn_to_litter[p] * wt * cp
-
-            # retranslocated N pool gross-unrep mortality fluxes (i_met_lit only)
-            gru_n_to_litr_n[c, j, i_met_lit] = gru_n_to_litr_n[c, j, i_met_lit] +
-                gru_retransn_to_litter[p] * wt * lp
-        end
-    end
-
-    for p in eachindex(mask_soilp)
-        mask_soilp[p] || continue
-        c = column[p]
-        wt = wtcol[p]
-
-        # wood gross-unrep mortality C fluxes to product pools
-        gru_wood_productc_gain_c[c] = gru_wood_productc_gain_c[c] +
-            gru_wood_productc_gain[p] * wt
-
-        # wood gross-unrep mortality N fluxes to product pools
-        gru_wood_productn_gain_c[c] = gru_wood_productn_gain_c[c] +
-            gru_wood_productn_gain[p] * wt
-    end
+    # wood gross-unrep mortality C & N to the product pools (generic p2c scatter)
+    np = length(mask_soilp)
+    ndyn_p2c_scatter!(gru_wood_productc_gain_c, mask_soilp, column, gru_wood_productc_gain, wtcol, 1, np)
+    ndyn_p2c_scatter!(gru_wood_productn_gain_c, mask_soilp, column, gru_wood_productn_gain, wtcol, 1, np)
 
     return nothing
 end
