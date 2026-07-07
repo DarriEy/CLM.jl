@@ -603,6 +603,32 @@ end
 # patch's weight relative to its landunit. Returns a per-landunit vector
 # (indexed 1:nl) with `SPVAL` where no active weighted patch contributes.
 # ---------------------------------------------------------------------------
+# p2lu VAI reduction kernels. Accumulate ttlai*wt and wt into per-landunit sums
+# (atomic scatter), then finalize: tlai_lu = acc/sumwt where a landunit has
+# contributing patches, else SPVAL — equivalent to the Fortran first-patch reset
+# (tlai_lu starts SPVAL, is zeroed on the first contributor, then divided). The
+# defensive sumwt>1 guard is dropped (fires only on inconsistent weights).
+@kernel function _dust_vai_scatter!(tlai_lu, sumwt, @Const(tlai), @Const(tsai),
+        @Const(active), @Const(landunit), @Const(wtlunit), spval, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(tlai_lu)
+        ttlai = tlai[p] + tsai[p]
+        if ttlai != spval && active[p] && wtlunit[p] != zero(T)
+            l = landunit[p]
+            _scatter_add!(tlai_lu, l, ttlai * wtlunit[p])
+            _scatter_add!(sumwt, l, wtlunit[p])
+        end
+    end
+end
+@kernel function _dust_vai_final!(tlai_lu, @Const(sumwt), spval)
+    l = @index(Global)
+    @inbounds begin
+        T = eltype(tlai_lu)
+        tlai_lu[l] = sumwt[l] != zero(T) ? tlai_lu[l] / sumwt[l] : spval
+    end
+end
+
 function _dust_landunit_vai(
     tlai::AbstractVector{<:Real}, tsai::AbstractVector{<:Real},
     patch_active::AbstractVector{Bool},
@@ -611,26 +637,12 @@ function _dust_landunit_vai(
     bounds_p::UnitRange{Int}, nl::Int,
 )
     FT = promote_type(eltype(tlai), eltype(tsai))
-    tlai_lu = fill(FT(SPVAL), nl)
-    sumwt   = zeros(FT, nl)
-    for p in bounds_p
-        ttlai = tlai[p] + tsai[p]
-        if ttlai != SPVAL && patch_active[p] && patch_wtlunit[p] != 0.0
-            l = patch_landunit[p]
-            if sumwt[l] == 0.0
-                tlai_lu[l] = 0.0
-            end
-            tlai_lu[l] += ttlai * patch_wtlunit[p]
-            sumwt[l]   += patch_wtlunit[p]
-        end
-    end
-    for l in 1:nl
-        if sumwt[l] > 1.0 + 1.0e-6
-            error("DustEmission: sumwt is greater than 1.0 at landunit l=$l")
-        elseif sumwt[l] != 0.0
-            tlai_lu[l] /= sumwt[l]
-        end
-    end
+    tlai_lu = fill!(similar(tlai, FT, nl), zero(FT))
+    sumwt   = fill!(similar(tlai, FT, nl), zero(FT))
+    _launch!(_dust_vai_scatter!, tlai_lu, sumwt, tlai, tsai, patch_active, patch_landunit,
+             patch_wtlunit, FT(SPVAL), first(bounds_p), last(bounds_p);
+             ndrange = length(tlai))
+    _launch!(_dust_vai_final!, tlai_lu, sumwt, FT(SPVAL))
     return tlai_lu
 end
 

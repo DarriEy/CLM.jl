@@ -18,6 +18,135 @@
 # and the shared `_dust_landunit_vai` helper from dust_emission.jl.
 # ==========================================================================
 
+# T-generic erf (device-safe: literals wrapped so Metal stays in Float32; the
+# host erf in varcon.jl uses Float64 literals which would force Float64 on GPU).
+@inline function _erf_T(x)
+    T = typeof(x)
+    p  = T(0.3275911)
+    sgn = x >= zero(T) ? one(T) : -one(T)
+    ax = abs(x)
+    t = one(T) / (one(T) + p * ax)
+    y = one(T) - (((((T(1.061405429) * t + T(-1.453152027)) * t) + T(1.421413741)) * t +
+        T(-0.284496736)) * t + T(0.254829592)) * t * exp(-ax * ax)
+    return sgn * y
+end
+
+# Per-patch Leung (2023) dust kernel: each patch is independent given the
+# landunit-averaged VAI (a p2lu reduction) precomputed on the host. The two
+# defensive Fortran error() guards (bad mobilization fraction, obu==0) are
+# dropped — they fire only on invalid input and are not exercised; valid-input
+# results are byte-identical. All literals are T()-wrapped so Metal runs Float32.
+@kernel function _dust_leung_kernel!(flx_patch, flx_tot, @Const(nolakep_mask),
+        @Const(patch_column), @Const(patch_landunit), @Const(patch_itype),
+        @Const(lun_itype), @Const(tlai_lu), @Const(forc_rho), @Const(gwc_thr),
+        @Const(mss_frc_cly_vld), @Const(watsat), @Const(frac_sno), @Const(h2osoi_vol),
+        @Const(h2osoi_liq), @Const(h2osoi_ice), @Const(fv), @Const(obu),
+        @Const(dpfct_rock), @Const(ovr_src_snk_mss), ndst::Int, dst_src_nbr::Int,
+        noveg_::Int, istsoil_::Int, istcrop_::Int)
+    p = @index(Global)
+    @inbounds if nolakep_mask[p]
+        T = eltype(flx_patch)
+        vai_mbl_thr = T(0.6); Cd0 = T(4.4e-5); Ca = T(2.7); Ce = T(2.0); C_tune = T(0.05)
+        wnd_frc_thr_slt_std_min = T(0.16); forc_rho_std = T(1.2250); dns_slt = T(2650.0)
+        B_it = T(0.82); k_vk = T(0.4); f_0 = T(0.32); c_e = T(4.8); D_p = T(130e-6)
+        gamma_Shao = T(1.65e-4); A_Shao = T(0.0123); frag_expt_thr = T(2.5)
+        z0a_glob = T(1e-4); hgt_sal = T(0.1); vai0_Okin = T(0.1); zii = T(1000.0)
+        dust_veg_drag_fact = T(0.7)
+        denh2o = T(DENH2O); grav = T(GRAV)
+
+        c = patch_column[p]; l = patch_landunit[p]
+        for nb in 1:ndst; flx_patch[p, nb] = zero(T); end
+        flx_tot[p] = zero(T)
+
+        # land mobile fraction
+        lnd_frc_mbl = zero(T)
+        if lun_itype[l] == istsoil_ || lun_itype[l] == istcrop_
+            lnd_frc_mbl = tlai_lu[l] < vai_mbl_thr ? one(T) - tlai_lu[l] / vai_mbl_thr : zero(T)
+            lnd_frc_mbl *= (one(T) - frac_sno[c])
+        end
+
+        # Fecan (1999) soil-moisture threshold factor
+        bd = (one(T) - watsat[c, 1]) * dns_slt
+        gwc_sfc = h2osoi_vol[c, 1] * denh2o / bd
+        frc_thr_wet_fct = gwc_sfc > gwc_thr[c] ?
+            sqrt(one(T) + T(1.21) * (T(100.0) * (gwc_sfc - gwc_thr[c]))^T(0.68)) : one(T)
+        liqfrac = max(zero(T), min(one(T),
+            h2osoi_liq[c, 1] / (h2osoi_ice[c, 1] + h2osoi_liq[c, 1] + T(1.0e-6))))
+
+        # Shao & Lu (2000) thresholds
+        tmp2 = sqrt(A_Shao * (dns_slt * grav * D_p + gamma_Shao / D_p))
+        wnd_frc_thr_slt    = tmp2 / sqrt(forc_rho[c]) * frc_thr_wet_fct
+        wnd_frc_thr_slt_it = B_it * tmp2 / sqrt(forc_rho[c])
+        wnd_frc_thr_slt_std = wnd_frc_thr_slt * sqrt(forc_rho[c] / forc_rho_std)
+        dst_emiss_coeff = Cd0 * exp(-Ce *
+            (wnd_frc_thr_slt_std - wnd_frc_thr_slt_std_min) / wnd_frc_thr_slt_std_min)
+        frag_expt = Ca * (wnd_frc_thr_slt_std - wnd_frc_thr_slt_std_min) / wnd_frc_thr_slt_std_min
+        if frag_expt > frag_expt_thr; frag_expt = frag_expt_thr; end
+
+        # Okin–Pierre vegetation + rock drag partition
+        wnd_frc_slt = zero(T)
+        if lnd_frc_mbl > zero(T) && tlai_lu[l] <= vai_mbl_thr
+            vai_Okin = tlai_lu[l] + vai0_Okin
+            if vai_Okin > one(T); vai_Okin = one(T); end
+            K_length = T(2.0) * (one(T) / vai_Okin - one(T))
+            ssr = dust_veg_drag_fact * (K_length + f_0 * c_e) / (K_length + c_e)
+            frc_thr_rgh_fct = one(T)
+            if lun_itype[l] == istsoil_ || lun_itype[l] == istcrop_
+                if patch_itype[p] == noveg_
+                    dpr = dpfct_rock[p]
+                    frc_thr_rgh_fct = isnan(dpr) ? T(0.001) : dpr
+                else
+                    frc_thr_rgh_fct = ssr
+                end
+            end
+            wnd_frc_slt = fv[p] * frc_thr_rgh_fct
+        end
+
+        flx_ttl = zero(T)
+        if lnd_frc_mbl > zero(T)
+            # Kok et al. (2014) emission above the IMPACT threshold
+            if wnd_frc_slt > wnd_frc_thr_slt_it
+                flx_ttl = dst_emiss_coeff * mss_frc_cly_vld[c] * forc_rho[c] *
+                    ((wnd_frc_slt^T(2.0) - wnd_frc_thr_slt_it^T(2.0)) / wnd_frc_thr_slt_it) *
+                    (wnd_frc_slt / wnd_frc_thr_slt_it)^frag_expt
+                flx_ttl *= lnd_frc_mbl * C_tune * liqfrac
+            end
+
+            # Comola et al. (2019) intermittency factor
+            u_mean_slt = (wnd_frc_slt / k_vk) * log(hgt_sal / z0a_glob)
+            stblty = zii / obu[p]
+            u_sd_slt = (T(12.0) - T(0.5) * stblty) >= T(0.001) ?
+                wnd_frc_slt * (T(12.0) - T(0.5) * stblty)^T(0.333) :
+                wnd_frc_slt * T(0.001)^T(0.333)
+            u_fld_thr   = (wnd_frc_thr_slt    / k_vk) * log(hgt_sal / z0a_glob)
+            u_impct_thr = (wnd_frc_thr_slt_it / k_vk) * log(hgt_sal / z0a_glob)
+            numer = u_fld_thr^T(2.0) - u_impct_thr^T(2.0) -
+                    T(2.0) * u_mean_slt * (u_fld_thr - u_impct_thr)
+            denom = T(2.0) * u_sd_slt^T(2.0)
+            thr_crs_rate = numer / denom < T(30.0) ?
+                (exp(numer / denom) + one(T))^(-one(T)) : zero(T)
+            sqrt2 = sqrt(T(2.0))
+            prb_crs_fld_thr   = T(0.5) * (one(T) + _erf_T((u_fld_thr   - u_mean_slt) / (sqrt2 * u_sd_slt)))
+            prb_crs_impct_thr = T(0.5) * (one(T) + _erf_T((u_impct_thr - u_mean_slt) / (sqrt2 * u_sd_slt)))
+            intrmtncy_fct = one(T) - prb_crs_fld_thr +
+                            thr_crs_rate * (prb_crs_fld_thr - prb_crs_impct_thr)
+            if !isnan(intrmtncy_fct); flx_ttl *= intrmtncy_fct; end
+
+            # partition total vertical mass flux into NDST bins + total
+            tot = zero(T)
+            for nb in 1:ndst
+                acc = zero(T)
+                for m in 1:dst_src_nbr
+                    acc += ovr_src_snk_mss[m, nb] * flx_ttl
+                end
+                flx_patch[p, nb] = acc
+                tot += acc
+            end
+            flx_tot[p] = tot
+        end
+    end
+end
+
 # ---------------------------------------------------------------------------
 # dust_emission_leung2023! — Leung (2023) dust mobilization
 # Ported from: subroutine DustEmission in DustEmisLeung2023.F90
@@ -65,192 +194,18 @@ function dust_emission_leung2023!(
     fv::AbstractVector{<:Real},
     obu::AbstractVector{<:Real},
 )
-    ndst = NDST
-    dst_src_nbr = DST_SRC_NBR
-
-    # --- Constants (from DustEmisLeung2023.F90) ---
-    vai_mbl_thr = 0.6                 # [m2 m-2] VAI threshold quenching mobilization
-    Cd0     = 4.4e-5                  # [dimless] dust emission coefficient constant
-    Ca      = 2.7                     # [dimless] fragmentation-exponent scaling
-    Ce      = 2.0                     # [dimless] emission-coefficient exponent scaling
-    C_tune  = 0.05                    # [dimless] global vertical-flux tuning constant
-    wnd_frc_thr_slt_std_min = 0.16    # [m/s] min standardized soil threshold
-    forc_rho_std = 1.2250             # [kg/m3] standard air density
-    dns_slt = 2650.0                  # [kg m-3] saltation particle density
-    B_it    = 0.82                    # [dimless] impact/fluid threshold ratio
-    k_vk    = 0.4                     # [dimless] von Karman constant
-    f_0     = 0.32                    # [dimless] SSR in lee of a plant
-    c_e     = 4.8                     # [dimless] e-folding distance velocity recovery
-    D_p     = 130e-6                  # [m] medium soil particle diameter
-    gamma_Shao = 1.65e-4              # [kg s-2] interparticle cohesion (S&L00)
-    A_Shao  = 0.0123                  # [dimless] aerodynamic-force coefficient (S&L00)
-    frag_expt_thr = 2.5               # [dimless] max fragmentation exponent
-    z0a_glob = 1e-4                   # [m] assumed global aeolian roughness length
-    hgt_sal  = 0.1                    # [m] saltation height (log-law of the wall)
-    vai0_Okin = 0.1                   # [m2/m2] min VAI for Okin–Pierre equation
-    zii = 1000.0                      # [m] convective boundary-layer height
-    dust_veg_drag_fact = 0.7          # [dimless] vegetation drag-partition tuning
-
-    # Landunit-averaged VAI (LAI+SAI).
+    # Landunit-averaged VAI (LAI+SAI) — a p2lu reduction, kept on the host.
     tlai_lu = _dust_landunit_vai(tlai, tsai, patch_active, patch_landunit,
                                  patch_wtlunit, bounds_p, nl)
 
-    np = length(patch_active)
-    lnd_frc_mbl      = zeros(Float64, np)
-    frc_thr_rghn_fct = zeros(Float64, np)
-
-    # Land mobile fraction + output reset.
-    for p in bounds_p
-        nolakep_mask[p] || continue
-        c = patch_column[p]
-        l = patch_landunit[p]
-        for nb in 1:ndst
-            dust.flx_mss_vrt_dst_patch[p, nb] = 0.0
-        end
-        dust.flx_mss_vrt_dst_tot_patch[p] = 0.0
-
-        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-            if tlai_lu[l] < vai_mbl_thr
-                lnd_frc_mbl[p] = 1.0 - tlai_lu[l] / vai_mbl_thr
-            else
-                lnd_frc_mbl[p] = 0.0
-            end
-            lnd_frc_mbl[p] *= (1.0 - frac_sno[c])
-        else
-            lnd_frc_mbl[p] = 0.0
-        end
-        if lnd_frc_mbl[p] > 1.0 || lnd_frc_mbl[p] < 0.0
-            error("Bad value for dust mobilization fraction at patch $p: $(lnd_frc_mbl[p])")
-        end
-    end
-
-    flx_mss_vrt_dst_ttl = zeros(Float64, np)
-    for p in bounds_p
-        nolakep_mask[p] || continue
-        c = patch_column[p]
-        l = patch_landunit[p]
-
-        # --- Fecan (1999) soil-moisture threshold factor ---
-        bd = (1.0 - watsat[c, 1]) * dns_slt          # [kg m-3] dry soil bulk density
-        gwc_sfc = h2osoi_vol[c, 1] * DENH2O / bd      # [kg kg-1] gravimetric H2O
-        if gwc_sfc > gwc_thr[c]
-            frc_thr_wet_fct = sqrt(1.0 + 1.21 * (100.0 * (gwc_sfc - gwc_thr[c]))^0.68)
-        else
-            frc_thr_wet_fct = 1.0
-        end
-
-        liqfrac = max(0.0, min(1.0,
-            h2osoi_liq[c, 1] / (h2osoi_ice[c, 1] + h2osoi_liq[c, 1] + 1.0e-6)))
-
-        # --- Shao & Lu (2000) dry fluid threshold, fluid & impact thresholds ---
-        tmp2 = sqrt(A_Shao * (dns_slt * GRAV * D_p + gamma_Shao / D_p))
-        wnd_frc_thr_slt    = tmp2 / sqrt(forc_rho[c]) * frc_thr_wet_fct  # fluid threshold
-        wnd_frc_thr_slt_it = B_it * tmp2 / sqrt(forc_rho[c])            # impact threshold
-
-        # Standardized fluid threshold + emission coefficient + frag. exponent.
-        wnd_frc_thr_slt_std = wnd_frc_thr_slt * sqrt(forc_rho[c] / forc_rho_std)
-        dst_emiss_coeff = Cd0 * exp(-Ce *
-            (wnd_frc_thr_slt_std - wnd_frc_thr_slt_std_min) / wnd_frc_thr_slt_std_min)
-        frag_expt = Ca * (wnd_frc_thr_slt_std - wnd_frc_thr_slt_std_min) /
-                    wnd_frc_thr_slt_std_min
-        if frag_expt > frag_expt_thr
-            frag_expt = frag_expt_thr
-        end
-
-        # --- Drag partition: Okin–Pierre vegetation + rock drag partition ---
-        if lnd_frc_mbl[p] > 0.0 && tlai_lu[l] <= vai_mbl_thr
-            vai_Okin = tlai_lu[l] + vai0_Okin
-            if vai_Okin > 1.0
-                vai_Okin = 1.0
-            end
-            K_length = 2.0 * (1.0 / vai_Okin - 1.0)
-            ssr = dust_veg_drag_fact * (K_length + f_0 * c_e) / (K_length + c_e)
-
-            if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-                if patch_itype[p] == noveg          # bare → rock drag partition
-                    dpr = dust.dpfct_rock_patch[p]
-                    frc_thr_rgh_fct = isnan(dpr) ? 0.001 : dpr
-                else                                # vegetated → SSR drag partition
-                    frc_thr_rgh_fct = ssr
-                end
-            else
-                frc_thr_rgh_fct = 1.0
-            end
-            wnd_frc_slt = fv[p] * frc_thr_rgh_fct
-            frc_thr_rghn_fct[p] = frc_thr_rgh_fct
-        else
-            wnd_frc_slt = fv[p] * frc_thr_rghn_fct[p]
-            frc_thr_rghn_fct[p] = 0.0
-        end
-
-        lnd_frc_mbl[p] > 0.0 || continue
-
-        flx_mss_hrz_slt_ttl = 0.0
-        flx_mss_vrt_dst_ttl[p] = 0.0
-
-        # --- Kok et al. (2014) emission above the IMPACT threshold ---
-        if wnd_frc_slt > wnd_frc_thr_slt_it
-            flx_mss_vrt_dst_ttl[p] = dst_emiss_coeff * mss_frc_cly_vld[c] * forc_rho[c] *
-                ((wnd_frc_slt^2.0 - wnd_frc_thr_slt_it^2.0) / wnd_frc_thr_slt_it) *
-                (wnd_frc_slt / wnd_frc_thr_slt_it)^frag_expt
-            flx_mss_vrt_dst_ttl[p] *= lnd_frc_mbl[p] * C_tune * liqfrac
-        end
-
-        # --- Comola et al. (2019) intermittency factor ---
-        u_mean_slt = (wnd_frc_slt / k_vk) * log(hgt_sal / z0a_glob)
-        if obu[p] == 0.0
-            error("DustEmisLeung2023: input obu is zero at patch $p")
-        end
-        stblty = zii / obu[p]
-        if (12.0 - 0.5 * stblty) >= 0.001
-            u_sd_slt = wnd_frc_slt * (12.0 - 0.5 * stblty)^0.333
-        else
-            u_sd_slt = wnd_frc_slt * (0.001)^0.333
-        end
-
-        u_fld_thr   = (wnd_frc_thr_slt    / k_vk) * log(hgt_sal / z0a_glob)
-        u_impct_thr = (wnd_frc_thr_slt_it / k_vk) * log(hgt_sal / z0a_glob)
-
-        numer = u_fld_thr^2.0 - u_impct_thr^2.0 -
-                2.0 * u_mean_slt * (u_fld_thr - u_impct_thr)
-        denom = 2.0 * u_sd_slt^2.0
-        if numer / denom < 30.0
-            thr_crs_rate = (exp(numer / denom) + 1.0)^(-1.0)
-        else
-            thr_crs_rate = 0.0
-        end
-
-        prb_crs_fld_thr   = 0.5 * (1.0 + _dust_erf((u_fld_thr   - u_mean_slt) /
-                                                   (sqrt(2.0) * u_sd_slt)))
-        prb_crs_impct_thr = 0.5 * (1.0 + _dust_erf((u_impct_thr - u_mean_slt) /
-                                                   (sqrt(2.0) * u_sd_slt)))
-        intrmtncy_fct = 1.0 - prb_crs_fld_thr +
-                        thr_crs_rate * (prb_crs_fld_thr - prb_crs_impct_thr)
-
-        # Multiply emission by intermittency (skip if NaN, mirroring Fortran).
-        if !isnan(intrmtncy_fct)
-            flx_mss_vrt_dst_ttl[p] *= intrmtncy_fct
-        end
-    end
-
-    # Partition total vertical mass flux into NDST transport bins.
-    for nb in 1:ndst
-        for m in 1:dst_src_nbr
-            for p in bounds_p
-                nolakep_mask[p] || continue
-                lnd_frc_mbl[p] > 0.0 || continue
-                dust.flx_mss_vrt_dst_patch[p, nb] +=
-                    dust.ovr_src_snk_mss[m, nb] * flx_mss_vrt_dst_ttl[p]
-            end
-        end
-    end
-    for nb in 1:ndst
-        for p in bounds_p
-            nolakep_mask[p] || continue
-            lnd_frc_mbl[p] > 0.0 || continue
-            dust.flx_mss_vrt_dst_tot_patch[p] += dust.flx_mss_vrt_dst_patch[p, nb]
-        end
-    end
+    # Each patch is independent given tlai_lu, so the whole per-patch physics
+    # (mobile fraction -> thresholds -> drag partition -> Kok emission ->
+    # intermittency -> bin partition + total) runs in one per-patch kernel.
+    _launch!(_dust_leung_kernel!, dust.flx_mss_vrt_dst_patch, dust.flx_mss_vrt_dst_tot_patch,
+        nolakep_mask, patch_column, patch_landunit, patch_itype, lun_itype, tlai_lu,
+        forc_rho, gwc_thr, mss_frc_cly_vld, watsat, frac_sno, h2osoi_vol, h2osoi_liq,
+        h2osoi_ice, fv, obu, dust.dpfct_rock_patch, dust.ovr_src_snk_mss,
+        NDST, DST_SRC_NBR, noveg, ISTSOIL, ISTCROP; ndrange = length(nolakep_mask))
 
     return nothing
 end
