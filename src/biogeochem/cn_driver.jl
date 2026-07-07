@@ -1067,6 +1067,28 @@ function cn_driver_no_leaching!(
             use_soil_matrixcn=config.use_soil_matrixcn,
             dt=dt)
 
+        # Matrix-CN veg-C solve — WIRED (gated on use_matrixcn, phase 1: natveg).
+        # In matrix mode the c_state_update1/2/3 blocks above skipped every veg-pool
+        # increment (only cpool, the input source, decremented), so the 18 veg C
+        # pools are still at start-of-step and every allocation/phenology/gap/fire
+        # transfer has been computed into its flux field. Assemble those into the
+        # transfer matrix + B-input and advance all pools in one solve (== the
+        # sequential update at matrixcheck=false; validated in test_cn_veg_matrix_wiring).
+        if config.use_matrixcn && !config.use_crop
+            _mcounts = veg_matrix_transfer_counts(false)
+            if cnveg_cf.ileafst_to_ileafxf_ph == 0
+                cn_veg_matrix_c_topology!(cnveg_cf; use_crop=false, nvegcpool=NVEGPOOL_NATVEG)
+            end
+            cn_veg_matrix_alloc_c!(cnveg_cf, mask_bgc_vegp, bounds_patch)
+            cn_veg_matrix_accumulate_ph_c!(cnveg_cf, cnveg_cs, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_accumulate_gm_c!(cnveg_cf, cnveg_cs, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_accumulate_fi_c!(cnveg_cf, cnveg_cs, mask_bgc_vegp, bounds_patch; dt=dt)
+            cn_veg_matrix_solve_c!(cnveg_cs, cnveg_cf;
+                mask_soilp=mask_bgc_vegp, bounds_patch=bounds_patch,
+                ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=NVEGPOOL_NATVEG,
+                counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep))
+        end
+
         # C14Decay — not yet ported
     end  # num_bgc_vegp > 0
 

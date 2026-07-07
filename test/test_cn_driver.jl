@@ -502,4 +502,38 @@
         @test CLM.MIMICS_DECOMP == 2
     end
 
+    # ================================================================
+    # Matrix-CN veg-C solve wired into cn_driver_no_leaching! (use_matrixcn).
+    # The building-block test (test_cn_veg_matrix_wiring) proves the matrix
+    # advance == sequential on live fluxes; here we confirm the DRIVER reaches
+    # the matrix path (sets up the topology), runs it without error, and leaves
+    # the veg pools finite — with this fixture's zero transfer fluxes the matrix
+    # advance is the identity, so the pools are unchanged.
+    # ================================================================
+    @testset "cn_driver_no_leaching! use_matrixcn veg-C path" begin
+        d = make_cn_driver_data()
+        d.config.use_matrixcn = true
+        leafc0 = copy(d.cs_veg.leafc_patch); deadstemc0 = copy(d.cs_veg.deadstemc_patch)
+
+        CLM.cn_driver_no_leaching!(d.config;
+            mask_bgc_soilc=d.mask_soilc, mask_bgc_vegp=d.mask_soilp,
+            bounds_col=1:d.nc, bounds_patch=1:d.np,
+            nlevdecomp=d.nlevdecomp, ndecomp_pools=d.ndecomp_pools,
+            ndecomp_cascade_transitions=d.ndecomp_cascade_transitions,
+            i_litr_min=d.i_litr_min, i_litr_max=d.i_litr_max, i_cwd=d.i_cwd,
+            patch_column=d.patch_column, ivt=d.ivt, woody=d.woody, harvdate=d.harvdate,
+            col_is_fates=d.col_is_fates, cascade_donor_pool=d.cascade_donor_pool,
+            cascade_receiver_pool=d.cascade_receiver_pool, dt=d.dt,
+            cnveg_cs=d.cs_veg, cnveg_cf=d.cf_veg, cnveg_ns=d.ns_veg, cnveg_nf=d.nf_veg,
+            soilbgc_cs=d.cs_soil, soilbgc_cf=d.cf_soil, soilbgc_ns=d.ns_soil,
+            soilbgc_nf=d.nf_soil, soilbgc_state=d.soilbgc_st)
+
+        @test d.cf_veg.ileafst_to_ileafxf_ph == 1     # topology was set up in-driver
+        @test d.cf_veg.ideadcrootxf_to_iout_fi == 20  # fire topology too (last index)
+        @test all(isfinite, d.cs_veg.leafc_patch)
+        @test all(isfinite, d.cs_veg.deadstemc_patch)
+        @test d.cs_veg.leafc_patch ≈ leafc0          # zero fluxes → identity advance
+        @test d.cs_veg.deadstemc_patch ≈ deadstemc0
+    end
+
 end
