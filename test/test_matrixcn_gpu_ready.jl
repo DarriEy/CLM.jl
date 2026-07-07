@@ -55,3 +55,45 @@
         @test eltype(V.V) == Float64 && V.V isa Matrix
     end
 end
+
+@testset "veg-C solver runs end-to-end in Float32 (ref-threaded workspaces)" begin
+    # The solver ref-threading makes cn_veg_matrix_solve_c! allocate its workspaces via
+    # ref/FT. Byte-identity tests only exercise the Float64 default; here we confirm the
+    # Float32 solver PATH actually executes (a stray Float64 literal / scalar-arg in the
+    # solver would fail) and gives the same pools as Float64 to Float32 round-off. Uses a
+    # topology-only setup (small transfer/turnover), so the advance genuinely moves pools.
+    np = 3; nveg = CLM.NVEGPOOL_NATVEG; counts = CLM.veg_matrix_transfer_counts(false)
+    ivt = [1, 2, 3]; woody = ones(Float64, 5); npcropmin = 15; dt = 1800.0
+
+    function run_solve(FT, ref)
+        cs = CLM.CNVegCarbonStateData(); CLM.cnveg_carbon_state_init!(cs, np, 1, 1; use_matrixcn=false, nrepr=1)
+        # every veg-C pool (main + storage + xfer) must be finite — the solve loads all.
+        for (k, f) in enumerate((:leafc_patch, :leafc_storage_patch, :leafc_xfer_patch,
+                :frootc_patch, :frootc_storage_patch, :frootc_xfer_patch,
+                :livestemc_patch, :livestemc_storage_patch, :livestemc_xfer_patch,
+                :deadstemc_patch, :deadstemc_storage_patch, :deadstemc_xfer_patch,
+                :livecrootc_patch, :livecrootc_storage_patch, :livecrootc_xfer_patch,
+                :deadcrootc_patch, :deadcrootc_storage_patch, :deadcrootc_xfer_patch))
+            getfield(cs, f) .= Float64[10.0 * k + p for p in 1:np]
+        end
+        cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, 1, 1; use_matrixcn=true)
+        CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)
+        # small transfers (rate) + a turnover on each pool so Aoned = transfer·dt/turnover.
+        fill!(cf.matrix_phtransfer_patch, 1.0e-6); fill!(cf.matrix_phturnover_patch, 0.05)
+        fill!(cf.matrix_gmtransfer_patch, 5.0e-7); fill!(cf.matrix_gmturnover_patch, 0.02)
+        fill!(cf.matrix_fitransfer_patch, 0.0);    fill!(cf.matrix_fiturnover_patch, 0.0)
+        fill!(cf.matrix_alloc_patch, 0.0);         fill!(cf.matrix_Cinput_patch, 0.0)
+        CLM.cn_veg_matrix_solve_c!(cs, cf; mask_soilp=trues(np), bounds_patch=1:np,
+            ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=nveg, counts=counts,
+            dt=dt, num_actfirep=0, ref=ref, FT=FT)
+        return Float64[cs.leafc_patch; cs.frootc_patch; cs.livestemc_patch;
+                       cs.deadstemc_patch; cs.livecrootc_patch; cs.deadcrootc_patch]
+    end
+
+    p64 = run_solve(Float64, nothing)                    # default host Float64
+    p32 = run_solve(Float32, zeros(Float32, 1, 1))       # Float32 workspaces via ref
+    @test all(isfinite, p32)
+    @test all(isfinite, p64)
+    @test p64[1] != 11.0                                  # leafc[1] advanced from its init (10·1+1)
+    @test isapprox(p32, p64; rtol = 1e-4)                # Float32 solver == Float64 to round-off
+end

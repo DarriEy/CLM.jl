@@ -330,15 +330,16 @@ and are NOT placed in the matrix (their effect enters via the diagonal turnover)
 """
 function _build_ak_process!(AK::SparseMatrixType, begp::Int, endp::Int, num_soilp::Int,
                             filter_soilp::AbstractVector{Int},
-                            Aoned::AbstractMatrix{Float64},
-                            transfer::AbstractMatrix{Float64}, turnover::AbstractMatrix{Float64},
+                            Aoned::AbstractMatrix{<:Real},
+                            transfer::AbstractMatrix{<:Real}, turnover::AbstractMatrix{<:Real},
                             doner::AbstractVector{Int}, receiver::AbstractVector{Int},
                             ntrans::Int, nouttrans::Int, nvegpool::Int,
                             dt::Float64, init_ready::Bool,
-                            list::AbstractVector{Int}, RI::AbstractVector{Int}, CI::AbstractVector{Int})
+                            list::AbstractVector{Int}, RI::AbstractVector{Int}, CI::AbstractVector{Int};
+                            ref=nothing, FT::Type=Float64)
     nnon = ntrans - nouttrans
     Kveg = DiagMatrixType()
-    init_dm!(Kveg, nvegpool, begp, endp)
+    init_dm!(Kveg, nvegpool, begp, endp; ref=ref, FT=FT)
 
     if nnon > 0
         # Aoned[p,k] = transfer[p,k]*dt / turnover[p, doner[k]]   (Fortran 1028–1032)
@@ -395,7 +396,8 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
                                 woody::AbstractVector,
                                 npcropmin::Int, nvegcpool::Int,
                                 counts, dt::Real,
-                                num_actfirep::Int=0, irepr::Int=1)
+                                num_actfirep::Int=0, irepr::Int=1,
+                                ref=nothing, FT::Type=Float64)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
 
@@ -410,9 +412,9 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
 
     # --- Xvegc input vector and old-state load (Fortran 992, 1119–1149) ---
     Xvegc = VectorType()
-    init_v!(Xvegc, nvegcpool, begp, endp)
+    init_v!(Xvegc, nvegcpool, begp, endp; ref=ref, FT=FT)
     Binput = VectorType()
-    init_v!(Binput, nvegcpool, begp, endp)
+    init_v!(Binput, nvegcpool, begp, endp; ref=ref, FT=FT)
 
     for fp in 1:num_soilp
         p = filter_soilp[fp]; pr = u_idx(begp, p)
@@ -450,13 +452,13 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
     end
 
     # --- Assemble AKph, AKgm, AKfi (Fortran 1407–1497) ---
-    AKph = SparseMatrixType(); init_sm!(AKph, nvegcpool, begp, endp)
-    AKgm = SparseMatrixType(); init_sm!(AKgm, nvegcpool, begp, endp)
-    AKfi = SparseMatrixType(); init_sm!(AKfi, nvegcpool, begp, endp)
+    AKph = SparseMatrixType(); init_sm!(AKph, nvegcpool, begp, endp; ref=ref, FT=FT)
+    AKgm = SparseMatrixType(); init_sm!(AKgm, nvegcpool, begp, endp; ref=ref, FT=FT)
+    AKfi = SparseMatrixType(); init_sm!(AKfi, nvegcpool, begp, endp; ref=ref, FT=FT)
 
-    Aph = fill(0.0, endp - begp + 1, max(1, counts.ncphtrans - counts.ncphouttrans))
-    Agm = fill(0.0, endp - begp + 1, max(1, counts.ncgmtrans - counts.ncgmouttrans))
-    Afi = fill(0.0, endp - begp + 1, max(1, counts.ncfitrans - counts.ncfiouttrans))
+    Aph = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, counts.ncphtrans - counts.ncphouttrans))
+    Agm = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, counts.ncgmtrans - counts.ncgmouttrans))
+    Afi = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, counts.ncfitrans - counts.ncfiouttrans))
 
     nn = nvegcpool * nvegcpool
     list_ph = fill(0, nn); RI_ph = fill(0, nn); CI_ph = fill(0, nn)
@@ -467,20 +469,20 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
                        cf.matrix_phtransfer_patch, cf.matrix_phturnover_patch,
                        cf.matrix_phtransfer_doner_patch, cf.matrix_phtransfer_receiver_patch,
                        counts.ncphtrans, counts.ncphouttrans, nvegcpool, dt, false,
-                       list_ph, RI_ph, CI_ph)
+                       list_ph, RI_ph, CI_ph; ref=ref, FT=FT)
     _build_ak_process!(AKgm, begp, endp, num_soilp, filter_soilp, Agm,
                        cf.matrix_gmtransfer_patch, cf.matrix_gmturnover_patch,
                        cf.matrix_gmtransfer_doner_patch, cf.matrix_gmtransfer_receiver_patch,
                        counts.ncgmtrans, counts.ncgmouttrans, nvegcpool, dt, false,
-                       list_gm, RI_gm, CI_gm)
+                       list_gm, RI_gm, CI_gm; ref=ref, FT=FT)
     _build_ak_process!(AKfi, begp, endp, num_soilp, filter_soilp, Afi,
                        cf.matrix_fitransfer_patch, cf.matrix_fiturnover_patch,
                        cf.matrix_fitransfer_doner_patch, cf.matrix_fitransfer_receiver_patch,
                        counts.ncfitrans, counts.ncfiouttrans, nvegcpool, dt, false,
-                       list_fi, RI_fi, CI_fi)
+                       list_fi, RI_fi, CI_fi; ref=ref, FT=FT)
 
     # --- AKall = AKph + AKgm (+ AKfi if fire active) (Fortran 1503–1510) ---
-    AKall = SparseMatrixType(); init_sm!(AKall, nvegcpool, begp, endp)
+    AKall = SparseMatrixType(); init_sm!(AKall, nvegcpool, begp, endp; ref=ref, FT=FT)
     if num_actfirep == 0
         la = fill(0, nn); lb = fill(0, nn); RIab = fill(0, nn); CIab = fill(0, nn)
         spmp_ab!(AKall, num_soilp, filter_soilp, AKph, AKgm, false;
@@ -569,15 +571,15 @@ function _cn_veg_matrix_advance!(X::VectorType, B::VectorType,
         gm_doner::AbstractVector{Int}, gm_receiver::AbstractVector{Int}, ngmtrans::Int, ngmouttrans::Int,
         fitransfer::AbstractMatrix{Float64}, fiturnover::AbstractMatrix{Float64},
         fi_doner::AbstractVector{Int}, fi_receiver::AbstractVector{Int}, nfitrans::Int, nfiouttrans::Int,
-        dt::Float64, num_actfirep::Int)
+        dt::Float64, num_actfirep::Int; ref=nothing, FT::Type=Float64)
 
-    AKph = SparseMatrixType(); init_sm!(AKph, nvegpool, begp, endp)
-    AKgm = SparseMatrixType(); init_sm!(AKgm, nvegpool, begp, endp)
-    AKfi = SparseMatrixType(); init_sm!(AKfi, nvegpool, begp, endp)
+    AKph = SparseMatrixType(); init_sm!(AKph, nvegpool, begp, endp; ref=ref, FT=FT)
+    AKgm = SparseMatrixType(); init_sm!(AKgm, nvegpool, begp, endp; ref=ref, FT=FT)
+    AKfi = SparseMatrixType(); init_sm!(AKfi, nvegpool, begp, endp; ref=ref, FT=FT)
 
-    Aph = fill(0.0, endp - begp + 1, max(1, nphtrans - nphouttrans))
-    Agm = fill(0.0, endp - begp + 1, max(1, ngmtrans - ngmouttrans))
-    Afi = fill(0.0, endp - begp + 1, max(1, nfitrans - nfiouttrans))
+    Aph = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, nphtrans - nphouttrans))
+    Agm = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, ngmtrans - ngmouttrans))
+    Afi = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, nfitrans - nfiouttrans))
 
     nn = nvegpool * nvegpool
     list_ph = fill(0, nn); RI_ph = fill(0, nn); CI_ph = fill(0, nn)
@@ -586,15 +588,15 @@ function _cn_veg_matrix_advance!(X::VectorType, B::VectorType,
 
     _build_ak_process!(AKph, begp, endp, num_soilp, filter_soilp, Aph,
                        phtransfer, phturnover, ph_doner, ph_receiver,
-                       nphtrans, nphouttrans, nvegpool, dt, false, list_ph, RI_ph, CI_ph)
+                       nphtrans, nphouttrans, nvegpool, dt, false, list_ph, RI_ph, CI_ph; ref=ref, FT=FT)
     _build_ak_process!(AKgm, begp, endp, num_soilp, filter_soilp, Agm,
                        gmtransfer, gmturnover, gm_doner, gm_receiver,
-                       ngmtrans, ngmouttrans, nvegpool, dt, false, list_gm, RI_gm, CI_gm)
+                       ngmtrans, ngmouttrans, nvegpool, dt, false, list_gm, RI_gm, CI_gm; ref=ref, FT=FT)
     _build_ak_process!(AKfi, begp, endp, num_soilp, filter_soilp, Afi,
                        fitransfer, fiturnover, fi_doner, fi_receiver,
-                       nfitrans, nfiouttrans, nvegpool, dt, false, list_fi, RI_fi, CI_fi)
+                       nfitrans, nfiouttrans, nvegpool, dt, false, list_fi, RI_fi, CI_fi; ref=ref, FT=FT)
 
-    AKall = SparseMatrixType(); init_sm!(AKall, nvegpool, begp, endp)
+    AKall = SparseMatrixType(); init_sm!(AKall, nvegpool, begp, endp; ref=ref, FT=FT)
     if num_actfirep == 0
         la = fill(0, nn); lb = fill(0, nn); RIab = fill(0, nn); CIab = fill(0, nn)
         spmp_ab!(AKall, num_soilp, filter_soilp, AKph, AKgm, false;
@@ -639,7 +641,8 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
                                 ivt::AbstractVector{<:Integer},
                                 npcropmin::Int, nvegnpool::Int,
                                 counts, dt::Real,
-                                num_actfirep::Int=0, irepr::Int=1)
+                                num_actfirep::Int=0, irepr::Int=1,
+                                ref=nothing, FT::Type=Float64)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
     filter_soilp = Int[p for p in bounds_patch if mask_soilp[p]]
@@ -649,8 +652,8 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
     nf = nf_veg; ns = ns_veg
     iretransn = nvegnpool   # last N pool (Fortran iretransn = nvegnpool)
 
-    Xvegn = VectorType(); init_v!(Xvegn, nvegnpool, begp, endp)
-    Binput = VectorType(); init_v!(Binput, nvegnpool, begp, endp)
+    Xvegn = VectorType(); init_v!(Xvegn, nvegnpool, begp, endp; ref=ref, FT=FT)
+    Binput = VectorType(); init_v!(Binput, nvegnpool, begp, endp; ref=ref, FT=FT)
 
     # --- load N pools (Fortran 1221–1247) ---
     for fp in 1:num_soilp
@@ -699,7 +702,7 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
         nf.matrix_nfitransfer_patch, nf.matrix_nfiturnover_patch,
         nf.matrix_nfitransfer_doner_patch, nf.matrix_nfitransfer_receiver_patch,
         counts.nnfitrans, counts.nnfiouttrans,
-        dt, num_actfirep)
+        dt, num_actfirep; ref=ref, FT=FT)
 
     # --- write the advanced N pools back ---
     for fp in 1:num_soilp

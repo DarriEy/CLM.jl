@@ -220,7 +220,7 @@ indices `I[k]`, `J[k]` (`k = 1:NE_in`). `filter_u[1:num_unit]` lists the active
 unit indices. Matches Fortran `SetValueSM`.
 """
 function set_value_sm!(this::SparseMatrixType, begu::Int, endu::Int, num_unit::Int,
-                       filter_u::AbstractVector{Int}, M::AbstractMatrix{Float64},
+                       filter_u::AbstractVector{Int}, M::AbstractMatrix{<:Real},
                        I::AbstractVector{Int}, J::AbstractVector{Int}, NE_in::Int)
     if !is_alloc_sm(this)
         error("SetValueSM ERROR: Sparse Matrix was NOT already allocated")
@@ -286,7 +286,7 @@ are supplied) memorizes the entry map / index structure, returning
 Returns the (possibly updated) `init_ready` flag.
 """
 function set_value_a!(this::SparseMatrixType, begu::Int, endu::Int, num_unit::Int,
-                      filter_u::AbstractVector{Int}, M::AbstractMatrix{Float64},
+                      filter_u::AbstractVector{Int}, M::AbstractMatrix{<:Real},
                       AI::AbstractVector{Int}, AJ::AbstractVector{Int}, NE_NON::Int,
                       init_ready::Bool; list::Union{AbstractVector{Int},Nothing}=nothing,
                       RI_A::Union{AbstractVector{Int},Nothing}=nothing,
