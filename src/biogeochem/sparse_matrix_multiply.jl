@@ -55,16 +55,22 @@ Units are indexed `begu:endu`; `M` is allocated `(endu-begu+1) × maxsm` and
 addressed through the helper `u_idx` so the Fortran `M(u,k)` with `u ∈ begu:endu`
 maps to a 1-based row.
 """
+# Array fields are ABSTRACT so the struct can hold either a host Matrix{Float64} (the
+# byte-identical CPU default) or a device array (e.g. MtlArray{Float32}) — the
+# per-unit compute now lives in KA kernels that receive the concrete arrays as args, so
+# the field-access type-instability is only a handful of host dispatches per solve.
+# Adapt.@adapt_structure moves the arrays when the struct itself is passed to a kernel.
 Base.@kwdef mutable struct SparseMatrixType
-    M::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
-    RI::Vector{Int}    = Int[]
-    CI::Vector{Int}    = Int[]
+    M::AbstractMatrix{<:Real}     = Matrix{Float64}(undef, 0, 0)
+    RI::AbstractVector{<:Integer} = Int[]
+    CI::AbstractVector{<:Integer} = Int[]
     NE::Int            = SMM_EMPTY_INT
     SM::Int            = SMM_EMPTY_INT
     num_unit::Int      = 0
     begu::Int          = SMM_EMPTY_INT
     endu::Int          = SMM_EMPTY_INT
 end
+Adapt.@adapt_structure SparseMatrixType
 
 """
     DiagMatrixType
@@ -73,12 +79,13 @@ Diagonal matrix, storing only the diagonal entries `DM[u, i]`, batched over unit
 Mirrors the Fortran `diag_matrix_type`.
 """
 Base.@kwdef mutable struct DiagMatrixType
-    DM::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    DM::AbstractMatrix{<:Real} = Matrix{Float64}(undef, 0, 0)
     SM::Int             = SMM_EMPTY_INT
     num_unit::Int       = 0
     begu::Int           = SMM_EMPTY_INT
     endu::Int           = SMM_EMPTY_INT
 end
+Adapt.@adapt_structure DiagMatrixType
 
 """
     VectorType
@@ -86,12 +93,13 @@ end
 Dense vector `V[u, i]`, batched over units. Mirrors the Fortran `vector_type`.
 """
 Base.@kwdef mutable struct VectorType
-    V::Matrix{Float64} = Matrix{Float64}(undef, 0, 0)
+    V::AbstractMatrix{<:Real} = Matrix{Float64}(undef, 0, 0)
     SV::Int            = SMM_EMPTY_INT
     num_unit::Int      = 0
     begu::Int          = SMM_EMPTY_INT
     endu::Int          = SMM_EMPTY_INT
 end
+Adapt.@adapt_structure VectorType
 
 # Map a Fortran unit index `u ∈ begu:endu` to the 1-based row of the storage matrix.
 @inline u_idx(begu::Int, u::Int) = u - begu + 1
