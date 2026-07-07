@@ -11,7 +11,15 @@
 # Then each state variable can be updated with:
 #   - update_patch_state!
 #
-# Standalone: no file I/O, not wired into the driver.
+# GPU: the shared conservative updaters (set_old/new_weights!, update_patch_state!,
+# update_patch_state_partition_flux_by_type!) run through KernelAbstractions
+# kernels on the _launch! path. Every write is own-index per-patch (no scatter /
+# reduction), so the KA CPU backend is byte-identical to the original host loops
+# and the device backend matches at working precision. The struct is
+# Adapt-registered so it can move to the device with the CN state it updates.
+# The three BitVector query helpers (old_weight_was_zero / patch_grew /
+# patch_initiating) stay host — they feed the (host) dyn_cnbal orchestrator and
+# BitVectors are CPU-pinned by convention.
 # ==========================================================================
 
 """
@@ -27,15 +35,19 @@ change. Ported from `patch_state_updater_type` in dynPatchStateUpdaterMod.F90.
 - `dwt`                  : `pwtgcell_new - pwtgcell_old`
 - `growing_old_fraction` : `pwtgcell_old / pwtgcell_new`; only valid for growing patches
 - `growing_new_fraction` : `dwt / pwtgcell_new`; only valid for growing patches
+
+The array field type `V` is loose (any `AbstractVector{<:Real}`) so the struct
+can be adapted onto a GPU backend / working precision alongside the CN state.
 """
-Base.@kwdef mutable struct PatchStateUpdater
-    pwtgcell_old         ::Vector{Float64} = Float64[]  # old patch weights on the gridcell
-    pwtgcell_new         ::Vector{Float64} = Float64[]  # new patch weights on the gridcell
-    cwtgcell_old         ::Vector{Float64} = Float64[]  # old column weights on the gridcell
-    dwt                  ::Vector{Float64} = Float64[]  # (pwtgcell_new - pwtgcell_old)
-    growing_old_fraction ::Vector{Float64} = Float64[]  # (pwtgcell_old / pwtgcell_new); growing only
-    growing_new_fraction ::Vector{Float64} = Float64[]  # (dwt / pwtgcell_new); growing only
+Base.@kwdef mutable struct PatchStateUpdater{V<:AbstractVector{<:Real}}
+    pwtgcell_old         ::V = Float64[]  # old patch weights on the gridcell
+    pwtgcell_new         ::V = Float64[]  # new patch weights on the gridcell
+    cwtgcell_old         ::V = Float64[]  # old column weights on the gridcell
+    dwt                  ::V = Float64[]  # (pwtgcell_new - pwtgcell_old)
+    growing_old_fraction ::V = Float64[]  # (pwtgcell_old / pwtgcell_new); growing only
+    growing_new_fraction ::V = Float64[]  # (dwt / pwtgcell_new); growing only
 end
+Adapt.@adapt_structure PatchStateUpdater
 
 """
     PatchStateUpdater(bounds)
@@ -58,6 +70,19 @@ function PatchStateUpdater(bounds::BoundsType)
     )
 end
 
+# --- set_old_weights! ------------------------------------------------------
+@kernel function _psu_set_old_kernel!(pwt_old, cwt_old, @Const(p_wtgcell),
+                                      @Const(c_wtgcell), @Const(column),
+                                      begp::Int, endp::Int)
+    p = @index(Global)
+    @inbounds if begp <= p <= endp
+        pwt_old[p] = p_wtgcell[p]
+        c = column[p]
+        # Multiple patches on the same column write the same value (idempotent).
+        cwt_old[c] = c_wtgcell[c]
+    end
+end
+
 """
     set_old_weights!(updater, bounds, pch, col)
 
@@ -68,12 +93,31 @@ Ported from `set_old_weights` in dynPatchStateUpdaterMod.F90.
 """
 function set_old_weights!(updater::PatchStateUpdater, bounds::BoundsType,
                           pch::PatchData, col::ColumnData)
-    for p in bounds.begp:bounds.endp
-        c = pch.column[p]
-        updater.pwtgcell_old[p] = pch.wtgcell[p]
-        updater.cwtgcell_old[c] = col.wtgcell[c]
-    end
+    _launch!(_psu_set_old_kernel!, updater.pwtgcell_old, updater.cwtgcell_old,
+             pch.wtgcell, col.wtgcell, pch.column, bounds.begp, bounds.endp;
+             ndrange = bounds.endp)
     return nothing
+end
+
+# --- set_new_weights! ------------------------------------------------------
+@kernel function _psu_set_new_kernel!(pwt_new, dwt, gof, gnf,
+                                      @Const(p_wtgcell), @Const(pwt_old),
+                                      begp::Int, endp::Int)
+    p = @index(Global)
+    T = eltype(pwt_new)
+    @inbounds if begp <= p <= endp
+        pwt_new[p] = p_wtgcell[p]
+        d = pwt_new[p] - pwt_old[p]
+        dwt[p] = d
+        if d > zero(T)
+            gof[p] = pwt_old[p] / pwt_new[p]
+            gnf[p] = d / pwt_new[p]
+        else
+            # Unused for non-growing patches; set to safe values (1, 0).
+            gof[p] = one(T)
+            gnf[p] = zero(T)
+        end
+    end
 end
 
 """
@@ -88,20 +132,46 @@ Ported from `set_new_weights` in dynPatchStateUpdaterMod.F90.
 """
 function set_new_weights!(updater::PatchStateUpdater, bounds::BoundsType,
                           pch::PatchData)
-    for p in bounds.begp:bounds.endp
-        updater.pwtgcell_new[p] = pch.wtgcell[p]
-        updater.dwt[p] = updater.pwtgcell_new[p] - updater.pwtgcell_old[p]
-        if updater.dwt[p] > 0.0
-            updater.growing_old_fraction[p] = updater.pwtgcell_old[p] / updater.pwtgcell_new[p]
-            updater.growing_new_fraction[p] = updater.dwt[p] / updater.pwtgcell_new[p]
-        else
-            # These values are unused in this case, but set them to something
-            # reasonable for safety.
-            updater.growing_old_fraction[p] = 1.0
-            updater.growing_new_fraction[p] = 0.0
+    _launch!(_psu_set_new_kernel!, updater.pwtgcell_new, updater.dwt,
+             updater.growing_old_fraction, updater.growing_new_fraction,
+             pch.wtgcell, updater.pwtgcell_old, bounds.begp, bounds.endp;
+             ndrange = bounds.endp)
+    return nothing
+end
+
+# --- update_patch_state! ---------------------------------------------------
+# Per-filter-patch kernel: every write is own-index (var[p], flux_*[p],
+# seed_addition[p]) so no atomics/reductions are needed. Optional flux/seed
+# outputs are resolved to Bool presence flags on the host; when an optional is
+# absent, `var` is passed as a harmless placeholder that the false-guarded
+# branch never touches.
+@kernel function _update_patch_state_kernel!(var, flux_col, flux_grc, seed, seed_add,
+        @Const(filter), @Const(column), @Const(dwt), @Const(gof), @Const(gnf),
+        @Const(cwt_old),
+        has_flux_col::Bool, has_flux_grc::Bool, has_seed::Bool, has_seed_add::Bool)
+    i = @index(Global)
+    T = eltype(var)
+    @inbounds begin
+        p = filter[i]
+        c = column[p]
+        if dwt[p] > zero(T)
+            var[p] = var[p] * gof[p]
+            if has_seed
+                var[p] = var[p] + seed[p] * gnf[p]
+                if has_seed_add
+                    seed_add[p] = seed_add[p] + seed[p] * dwt[p]
+                end
+            end
+        elseif dwt[p] < zero(T)
+            if has_flux_grc
+                flux_grc[p] = flux_grc[p] + var[p] * dwt[p]
+            end
+            if has_flux_col
+                # No divide-by-0 risk: dwt < 0 implies cwtgcell_old > 0.
+                flux_col[p] = flux_col[p] + var[p] * (dwt[p] / cwt_old[c])
+            end
         end
     end
-    return nothing
 end
 
 """
@@ -146,32 +216,40 @@ function update_patch_state!(updater::PatchStateUpdater, bounds::BoundsType,
         error("update_patch_state! ERROR: seed_addition can only be provided if seed is provided")
     end
 
-    for p in filterp_with_inactive
-        c = pch.column[p]
+    isempty(filterp_with_inactive) && return nothing
 
-        if updater.dwt[p] > 0.0
-            var[p] = var[p] * updater.growing_old_fraction[p]
-            if seed !== nothing
-                var[p] = var[p] + seed[p] * updater.growing_new_fraction[p]
-                if seed_addition !== nothing
-                    seed_addition[p] = seed_addition[p] + seed[p] * updater.dwt[p]
-                end
-            end
+    has_flux_col = flux_out_col_area !== nothing
+    has_flux_grc = flux_out_grc_area !== nothing
+    has_seed     = seed !== nothing
+    has_seed_add = seed_addition !== nothing
 
-        elseif updater.dwt[p] < 0.0
-            if flux_out_grc_area !== nothing
-                flux_out_grc_area[p] = flux_out_grc_area[p] + var[p] * updater.dwt[p]
-            end
-            if flux_out_col_area !== nothing
-                # No need to check for divide by 0 here: if dwt < 0 then we must
-                # have had cwtgcell_old > 0.
-                flux_out_col_area[p] = flux_out_col_area[p] +
-                    var[p] * (updater.dwt[p] / updater.cwtgcell_old[c])
-            end
-        end
-    end
+    # Placeholders for absent optionals (never indexed under a false flag).
+    fcol = has_flux_col ? flux_out_col_area : var
+    fgrc = has_flux_grc ? flux_out_grc_area : var
+    sd   = has_seed     ? seed              : var
+    sadd = has_seed_add ? seed_addition     : var
 
+    _launch!(_update_patch_state_kernel!, var, fcol, fgrc, sd, sadd,
+             filterp_with_inactive, pch.column, updater.dwt,
+             updater.growing_old_fraction, updater.growing_new_fraction,
+             updater.cwtgcell_old,
+             has_flux_col, has_flux_grc, has_seed, has_seed_add;
+             ndrange = length(filterp_with_inactive))
     return nothing
+end
+
+# --- update_patch_state_partition_flux_by_type! ----------------------------
+@kernel function _psu_partition_kernel!(flux1_out, flux2_out, @Const(total_flux_out),
+        @Const(filter), @Const(itype), @Const(frac_by_type))
+    i = @index(Global)
+    T = eltype(flux1_out)
+    @inbounds begin
+        p = filter[i]
+        # Fortran itype is 0-based (0 = bare ground); shift +1 for 1-based Julia.
+        f1 = frac_by_type[itype[p] + 1]
+        flux1_out[p] = flux1_out[p] + total_flux_out[p] * f1
+        flux2_out[p] = flux2_out[p] + total_flux_out[p] * (one(T) - f1)
+    end
 end
 
 """
@@ -204,19 +282,16 @@ function update_patch_state_partition_flux_by_type!(updater::PatchStateUpdater,
 
     @assert length(flux1_fraction_by_pft_type) == MXPFT + 1 "update_patch_state_partition_flux_by_type!: flux1_fraction_by_pft_type must have length MXPFT+1 (Fortran 0:mxpft)"
 
-    total_flux_out = zeros(Float64, bounds.endp)
+    # Device-resident scratch (lands on var's backend; zeroed like the original).
+    total_flux_out = fill!(similar(var, eltype(var), bounds.endp), zero(eltype(var)))
     update_patch_state!(updater, bounds, pch, filterp_with_inactive, var;
                         flux_out_grc_area = total_flux_out,
                         seed = seed, seed_addition = seed_addition)
 
-    for p in filterp_with_inactive
-        # Fortran patch%itype is 0-based (0 = bare ground); shift by +1 for the
-        # 1-based Julia array.
-        my_flux1_fraction = flux1_fraction_by_pft_type[pch.itype[p] + 1]
-        flux1_out[p] = flux1_out[p] + total_flux_out[p] * my_flux1_fraction
-        flux2_out[p] = flux2_out[p] + total_flux_out[p] * (1.0 - my_flux1_fraction)
-    end
-
+    isempty(filterp_with_inactive) && return nothing
+    _launch!(_psu_partition_kernel!, flux1_out, flux2_out, total_flux_out,
+             filterp_with_inactive, pch.itype, flux1_fraction_by_pft_type;
+             ndrange = length(filterp_with_inactive))
     return nothing
 end
 
@@ -226,12 +301,14 @@ end
 Returns a patch-level `BitVector` (indexed `1:endp`) that is true wherever the
 patch weight was zero prior to the weight updates.
 
+Host-side (BitVector is CPU-pinned); consumed by the dyn_cnbal orchestrator.
 Ported from `old_weight_was_zero` in dynPatchStateUpdaterMod.F90.
 """
 function old_weight_was_zero(updater::PatchStateUpdater, bounds::BoundsType)
     result = falses(bounds.endp)
+    pwtgcell_old = Array(updater.pwtgcell_old)
     for p in bounds.begp:bounds.endp
-        result[p] = (updater.pwtgcell_old[p] == 0.0)
+        result[p] = (pwtgcell_old[p] == 0.0)
     end
     return result
 end
@@ -246,8 +323,9 @@ Ported from `patch_grew` in dynPatchStateUpdaterMod.F90.
 """
 function patch_grew(updater::PatchStateUpdater, bounds::BoundsType)
     result = falses(bounds.endp)
+    dwt = Array(updater.dwt)
     for p in bounds.begp:bounds.endp
-        result[p] = (updater.dwt[p] > 0.0)
+        result[p] = (dwt[p] > 0.0)
     end
     return result
 end
@@ -263,8 +341,10 @@ Ported from `patch_initiating` in dynPatchStateUpdaterMod.F90.
 """
 function patch_initiating(updater::PatchStateUpdater, bounds::BoundsType)
     result = falses(bounds.endp)
+    pwtgcell_old = Array(updater.pwtgcell_old)
+    pwtgcell_new = Array(updater.pwtgcell_new)
     for p in bounds.begp:bounds.endp
-        result[p] = (updater.pwtgcell_old[p] == 0.0 && updater.pwtgcell_new[p] > 0.0)
+        result[p] = (pwtgcell_old[p] == 0.0 && pwtgcell_new[p] > 0.0)
     end
     return result
 end
