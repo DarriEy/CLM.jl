@@ -104,6 +104,16 @@ Adapt.@adapt_structure VectorType
 # Map a Fortran unit index `u ∈ begu:endu` to the 1-based row of the storage matrix.
 @inline u_idx(begu::Int, u::Int) = u - begu + 1
 
+# Allocate a batched value array for the sparse types. Default (ref=nothing, FT=Float64)
+# returns a host Matrix{Float64} — the byte-identical CPU path. When a device prototype
+# `ref` + working precision `FT` are given it allocates `similar(ref, FT, …)` (e.g. an
+# MtlArray{Float32}) so the whole matrix path can run on the GPU backend. `fillval` is
+# converted to FT.
+@inline _smm_alloc(::Nothing, ::Type{FT}, fillval, dims::Vararg{Int}) where {FT} =
+    fill(convert(FT, fillval), dims...)
+@inline _smm_alloc(ref, ::Type{FT}, fillval, dims::Vararg{Int}) where {FT} =
+    fill!(similar(ref, FT, dims...), convert(FT, fillval))
+
 # -----------------------------------------------------------------------------
 # SparseMatrixType — allocation / status
 # -----------------------------------------------------------------------------
@@ -115,7 +125,8 @@ Initialize the sparse matrix: set size `SM_in`, unit bounds `begu:endu`, and
 allocate the value/index storage. `maxsm` (optional) caps the number of stored
 entries (default `SM_in*SM_in`). Matches Fortran `InitSM`.
 """
-function init_sm!(this::SparseMatrixType, SM_in::Int, begu::Int, endu::Int; maxsm::Union{Int,Nothing}=nothing)
+function init_sm!(this::SparseMatrixType, SM_in::Int, begu::Int, endu::Int;
+                  maxsm::Union{Int,Nothing}=nothing, ref=nothing, FT::Type=Float64)
     if is_alloc_sm(this)
         error("InitSM ERROR: Sparse Matrix was already allocated")
     end
@@ -123,13 +134,14 @@ function init_sm!(this::SparseMatrixType, SM_in::Int, begu::Int, endu::Int; maxs
     this.begu = begu
     this.endu = endu
     nunit = endu - begu + 1
+    ne = maxsm === nothing ? SM_in * SM_in : maxsm
     if maxsm !== nothing
         @assert maxsm >= 1
         @assert maxsm <= SM_in * SM_in
-        this.M = fill(SMM_EMPTY_REAL, nunit, maxsm)
-    else
-        this.M = fill(SMM_EMPTY_REAL, nunit, SM_in * SM_in)
     end
+    this.M = _smm_alloc(ref, FT, SMM_EMPTY_REAL, nunit, ne)
+    # RI/CI are built HOST-side by the sequential index ops (set_value_a!/spmp_ab!); for a
+    # GPU solve the solver syncs them to the device once the structure is known.
     this.RI = fill(SMM_EMPTY_INT, SM_in * SM_in)
     this.CI = fill(SMM_EMPTY_INT, SM_in * SM_in)
     this.NE = SMM_EMPTY_INT
@@ -396,12 +408,13 @@ end
 
 Allocate a diagonal matrix of size `SM_in` over units `begu:endu`. Matches `InitDM`.
 """
-function init_dm!(this::DiagMatrixType, SM_in::Int, begu::Int, endu::Int)
+function init_dm!(this::DiagMatrixType, SM_in::Int, begu::Int, endu::Int;
+                  ref=nothing, FT::Type=Float64)
     if is_alloc_dm(this)
         error("InitDM ERROR: Diagonal Matrix was already allocated")
     end
     this.SM = SM_in
-    this.DM = fill(SMM_EMPTY_REAL, endu - begu + 1, SM_in)
+    this.DM = _smm_alloc(ref, FT, SMM_EMPTY_REAL, endu - begu + 1, SM_in)
     this.begu = begu
     this.endu = endu
     return nothing
@@ -503,12 +516,13 @@ end
 
 Allocate a vector of size `SV_in` over units `begu:endu`. Matches `InitV`.
 """
-function init_v!(this::VectorType, SV_in::Int, begu::Int, endu::Int)
+function init_v!(this::VectorType, SV_in::Int, begu::Int, endu::Int;
+                 ref=nothing, FT::Type=Float64)
     if is_alloc_v(this)
         error("InitV ERROR: Vector was already allocated")
     end
     this.SV = SV_in
-    this.V = fill(SMM_EMPTY_REAL, endu - begu + 1, SV_in)
+    this.V = _smm_alloc(ref, FT, SMM_EMPTY_REAL, endu - begu + 1, SV_in)
     this.begu = begu
     this.endu = endu
     return nothing

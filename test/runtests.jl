@@ -91,6 +91,7 @@ using CLM
     include("test_fun.jl")
     include("test_gap_mortality.jl")
     include("test_sparse_matrix_multiply.jl")
+    include("test_matrixcn_gpu_ready.jl")
     include("test_cn_soil_matrix.jl")
     include("test_cn_soil_matrix_input.jl")
     include("test_cn_soil_matrix_advance.jl")
