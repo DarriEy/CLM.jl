@@ -118,6 +118,71 @@ function cn_veg_matrix_c_topology!(cf::CNVegCarbonFluxData; use_crop::Bool = fal
     cf.ideadstem_to_iout_gm=10; cf.ideadstemst_to_iout_gm=11; cf.ideadstemxf_to_iout_gm=12
     cf.ilivecroot_to_iout_gm=13; cf.ilivecrootst_to_iout_gm=14; cf.ilivecrootxf_to_iout_gm=15
     cf.ideadcroot_to_iout_gm=16; cf.ideadcrootst_to_iout_gm=17; cf.ideadcrootxf_to_iout_gm=18
+
+    # --- Fire: 2 in-veg live->dead conversions (indices 1,2) + 18 pure out-of-veg
+    # losses (indices 3..20, pool i -> iout). ncfiouttrans=18 trailing → the 2
+    # in-veg transfers MUST be first.
+    fi_doner    = vcat([ILIVESTEM, ILIVECROOT], collect(1:NVEGPOOL_NATVEG))
+    fi_receiver = vcat([IDEADSTEM, IDEADCROOT], fill(iout, NVEGPOOL_NATVEG))
+    cf.matrix_fitransfer_doner_patch    = fi_doner
+    cf.matrix_fitransfer_receiver_patch = fi_receiver
+    cf.matrix_fitransfer_patch = zeros(np, length(fi_doner))
+    cf.matrix_fiturnover_patch = zeros(np, nvegcpool)
+    cf.ilivestem_to_ideadstem_fi=1; cf.ilivecroot_to_ideadcroot_fi=2
+    cf.ileaf_to_iout_fi=3;  cf.ileafst_to_iout_fi=4;  cf.ileafxf_to_iout_fi=5
+    cf.ifroot_to_iout_fi=6; cf.ifrootst_to_iout_fi=7; cf.ifrootxf_to_iout_fi=8
+    cf.ilivestem_to_iout_fi=9;  cf.ilivestemst_to_iout_fi=10; cf.ilivestemxf_to_iout_fi=11
+    cf.ideadstem_to_iout_fi=12; cf.ideadstemst_to_iout_fi=13; cf.ideadstemxf_to_iout_fi=14
+    cf.ilivecroot_to_iout_fi=15; cf.ilivecrootst_to_iout_fi=16; cf.ilivecrootxf_to_iout_fi=17
+    cf.ideadcroot_to_iout_fi=18; cf.ideadcrootst_to_iout_fi=19; cf.ideadcrootxf_to_iout_fi=20
+    return nothing
+end
+
+# The 18 fire out-loss flux fields per pool: (to_fire, to_litter_fire) summed.
+const _FIC_TO_FIRE = Symbol[
+    :m_leafc_to_fire_patch, :m_leafc_storage_to_fire_patch, :m_leafc_xfer_to_fire_patch,
+    :m_frootc_to_fire_patch, :m_frootc_storage_to_fire_patch, :m_frootc_xfer_to_fire_patch,
+    :m_livestemc_to_fire_patch, :m_livestemc_storage_to_fire_patch, :m_livestemc_xfer_to_fire_patch,
+    :m_deadstemc_to_fire_patch, :m_deadstemc_storage_to_fire_patch, :m_deadstemc_xfer_to_fire_patch,
+    :m_livecrootc_to_fire_patch, :m_livecrootc_storage_to_fire_patch, :m_livecrootc_xfer_to_fire_patch,
+    :m_deadcrootc_to_fire_patch, :m_deadcrootc_storage_to_fire_patch, :m_deadcrootc_xfer_to_fire_patch]
+const _FIC_TO_LITTER = Symbol[
+    :m_leafc_to_litter_fire_patch, :m_leafc_storage_to_litter_fire_patch, :m_leafc_xfer_to_litter_fire_patch,
+    :m_frootc_to_litter_fire_patch, :m_frootc_storage_to_litter_fire_patch, :m_frootc_xfer_to_litter_fire_patch,
+    :m_livestemc_to_litter_fire_patch, :m_livestemc_storage_to_litter_fire_patch, :m_livestemc_xfer_to_litter_fire_patch,
+    :m_deadstemc_to_litter_fire_patch, :m_deadstemc_storage_to_litter_fire_patch, :m_deadstemc_xfer_to_litter_fire_patch,
+    :m_livecrootc_to_litter_fire_patch, :m_livecrootc_storage_to_litter_fire_patch, :m_livecrootc_xfer_to_litter_fire_patch,
+    :m_deadcrootc_to_litter_fire_patch, :m_deadcrootc_storage_to_litter_fire_patch, :m_deadcrootc_xfer_to_litter_fire_patch]
+
+"""
+    cn_veg_matrix_accumulate_fi_c!(cf, cs, mask_soilp, bounds_patch; dt, matrixcheck=false)
+
+Register the veg-C fire transfers: 2 in-veg live->dead conversions
+(m_livestemc_to_deadstemc_fire / m_livecrootc_to_deadcrootc_fire) + 18 out-of-veg
+losses (each pool -> iout, flux = m_*_to_fire + m_*_to_litter_fire), via
+matrix_update_fic!.
+"""
+function cn_veg_matrix_accumulate_fi_c!(cf::CNVegCarbonFluxData,
+        cs::CNVegCarbonStateData, mask_soilp::AbstractVector{Bool},
+        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
+    fill!(cf.matrix_fitransfer_patch, 0.0)
+    fill!(cf.matrix_fiturnover_patch, 0.0)
+    for p in bounds_patch
+        mask_soilp[p] || continue
+        reg(idx, flux, d) = begin
+            donor = _vegc_pool_val(cs, d, p)
+            rate = donor > 0.0 ? flux / donor : 0.0
+            matrix_update_fic!(cf, p, idx, rate, dt; matrixcheck=matrixcheck, acc=true)
+        end
+        # in-veg live->dead conversions
+        reg(cf.ilivestem_to_ideadstem_fi,   cf.m_livestemc_to_deadstemc_fire_patch[p],   ILIVESTEM)
+        reg(cf.ilivecroot_to_ideadcroot_fi, cf.m_livecrootc_to_deadcrootc_fire_patch[p], ILIVECROOT)
+        # out-of-veg losses (to_fire + to_litter_fire), donor = pool i, index = i+2
+        for i in 1:NVEGPOOL_NATVEG
+            flux = getfield(cf, _FIC_TO_FIRE[i])[p] + getfield(cf, _FIC_TO_LITTER[i])[p]
+            reg(i + 2, flux, i)
+        end
+    end
     return nothing
 end
 

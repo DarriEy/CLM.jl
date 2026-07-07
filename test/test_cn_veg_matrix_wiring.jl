@@ -61,10 +61,29 @@
         end
     end
 
-    # (a) sequential reference (phenology transfers + gap-mortality losses)
+    # fire: 18 out-losses (pool->iout via to_fire) + 2 in-veg live->dead conversions.
+    fi_out_rate = [1e-6,1.5e-6,2e-6,8e-7,1e-6,1.2e-6,7e-7,5e-7,3e-7,2e-7,1e-7,9e-8,
+                   6e-7,4e-7,2e-7,1e-7,8e-8,6e-8]
+    fi_ls_rate = 3e-7; fi_lc_rate = 2e-7
+    set_fi!(cf, cs) = begin
+        for i in 1:nveg
+            f = CLM._FIC_TO_FIRE[i]; length(getfield(cf, f)) == 0 && setfield!(cf, f, zeros(np))
+            fl = CLM._FIC_TO_LITTER[i]; length(getfield(cf, fl)) == 0 && setfield!(cf, fl, zeros(np))
+            fill!(getfield(cf, fl), 0.0)   # flux init NaN-fills these; keep to_litter zero
+            arr = getfield(cf, f); for p in 1:np; arr[p] = poolget(cs, i, p)*fi_out_rate[i]; end
+        end
+        length(cf.m_livestemc_to_deadstemc_fire_patch)==0 && (cf.m_livestemc_to_deadstemc_fire_patch=zeros(np))
+        length(cf.m_livecrootc_to_deadcrootc_fire_patch)==0 && (cf.m_livecrootc_to_deadcrootc_fire_patch=zeros(np))
+        for p in 1:np
+            cf.m_livestemc_to_deadstemc_fire_patch[p]  = poolget(cs, CLM.ILIVESTEM, p)*fi_ls_rate
+            cf.m_livecrootc_to_deadcrootc_fire_patch[p] = poolget(cs, CLM.ILIVECROOT, p)*fi_lc_rate
+        end
+    end
+
+    # (a) sequential reference (phenology transfers + gap-mortality + fire)
     cs_seq = fresh()
     cf_seq = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf_seq, np, 1, 1; use_matrixcn=true)
-    set_fluxes!(cf_seq, cs_seq); set_gm!(cf_seq, cs_seq)
+    set_fluxes!(cf_seq, cs_seq); set_gm!(cf_seq, cs_seq); set_fi!(cf_seq, cs_seq)
     for p in 1:np, k in 1:17
         flux = getfield(cf_seq, fldlist[k])[p]
         pooladd!(cs_seq, receiverpool[k], p,  flux*dt)
@@ -73,21 +92,27 @@
     for p in 1:np, i in 1:nveg   # gap-mortality losses
         pooladd!(cs_seq, i, p, -getfield(cf_seq, CLM._GMC_FLUX[i])[p] * dt)
     end
+    for p in 1:np   # fire: live->dead conversions + out losses
+        fls = cf_seq.m_livestemc_to_deadstemc_fire_patch[p]; flc = cf_seq.m_livecrootc_to_deadcrootc_fire_patch[p]
+        pooladd!(cs_seq, CLM.ILIVESTEM, p, -fls*dt);  pooladd!(cs_seq, CLM.IDEADSTEM, p, fls*dt)
+        pooladd!(cs_seq, CLM.ILIVECROOT, p, -flc*dt); pooladd!(cs_seq, CLM.IDEADCROOT, p, flc*dt)
+        for i in 1:nveg
+            pooladd!(cs_seq, i, p, -(getfield(cf_seq, CLM._FIC_TO_FIRE[i])[p]+getfield(cf_seq, CLM._FIC_TO_LITTER[i])[p])*dt)
+        end
+    end
 
     # (b) matrix advance via the wiring under test
     cs_mat = fresh()
     cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, 1, 1; use_matrixcn=true)
-    set_fluxes!(cf, cs_mat); set_gm!(cf, cs_mat)
-    CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)   # sets ph + gm topology
+    set_fluxes!(cf, cs_mat); set_gm!(cf, cs_mat); set_fi!(cf, cs_mat)
+    CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)   # ph + gm + fi topology
     cf.matrix_alloc_patch = zeros(np, nveg); cf.matrix_Cinput_patch = zeros(np)
-    cf.matrix_fitransfer_doner_patch = fill(CLM.ILEAF, counts.ncfitrans)
-    cf.matrix_fitransfer_receiver_patch = fill(CLM.ILEAF, counts.ncfitrans)
-    cf.matrix_fitransfer_patch = zeros(np, counts.ncfitrans); cf.matrix_fiturnover_patch = zeros(np, nveg)
 
     CLM.cn_veg_matrix_accumulate_ph_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)
     CLM.cn_veg_matrix_accumulate_gm_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)
+    CLM.cn_veg_matrix_accumulate_fi_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)
     CLM.cn_veg_matrix_solve_c!(cs_mat, cf; mask_soilp=trues(np), bounds_patch=1:np,
-        ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=nveg, counts=counts, dt=dt, num_actfirep=0)
+        ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=nveg, counts=counts, dt=dt, num_actfirep=np)
 
     # matrix advance must reproduce the sequential update exactly
     for p in 1:np, i in 1:nveg
