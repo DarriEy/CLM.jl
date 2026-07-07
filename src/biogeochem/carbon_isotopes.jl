@@ -122,69 +122,68 @@ For C14:
 
 Ported from lines 2088-2134 of `PhotosynthesisTotal` in `PhotosynthesisMod.F90`.
 """
+# Per-patch kernel: every write is own-index (ps.*_patch[p]). c14_bomb_factor is
+# inlined (latitude→sector), rc14_atm passed as 3 scalars. Byte-identical on the
+# KA CPU backend; device backend matches at working precision.
+@kernel function _c13c14_photosynthesis_kernel!(
+        rc13_canair, rc13_psnsun, rc13_psnsha, c13_psnsun, c13_psnsha,
+        c14_psnsun, c14_psnsha,
+        @Const(alphapsnsun), @Const(alphapsnsha), @Const(psnsun), @Const(psnsha),
+        @Const(mask_patch), @Const(gridcell_of_patch),
+        @Const(forc_pco2_grc), @Const(forc_pc13o2_grc), @Const(latdeg_grc),
+        use_c13::Bool, use_c14::Bool, use_c13_timeseries::Bool,
+        rc13_atm, rc14_1, rc14_2, rc14_3, begp::Int, endp::Int)
+    p = @index(Global)
+    T = eltype(rc13_canair)
+    @inbounds if begp <= p <= endp && mask_patch[p]
+        g = gridcell_of_patch[p]
+        if use_c13
+            if use_c13_timeseries
+                rc13_canair[p] = rc13_atm
+            else
+                pco2 = forc_pco2_grc[g]; pc13o2 = forc_pc13o2_grc[g]
+                rc13_canair[p] = (pco2 > pc13o2 && pc13o2 > zero(T)) ?
+                                 pc13o2 / (pco2 - pc13o2) : zero(T)
+            end
+            alpha_sun = alphapsnsun[p]; alpha_sha = alphapsnsha[p]
+            rc13_psnsun[p] = alpha_sun != zero(T) ? rc13_canair[p] / alpha_sun : zero(T)
+            rc13_psnsha[p] = alpha_sha != zero(T) ? rc13_canair[p] / alpha_sha : zero(T)
+            rc_sun = rc13_psnsun[p]; rc_sha = rc13_psnsha[p]
+            c13_psnsun[p] = psnsun[p] * (rc_sun / (one(T) + rc_sun))
+            c13_psnsha[p] = psnsha[p] * (rc_sha / (one(T) + rc_sha))
+        end
+        if use_c14
+            lat = latdeg_grc[g]
+            rc14 = lat >= T(30.0) ? rc14_1 : (lat >= T(-30.0) ? rc14_2 : rc14_3)
+            c14_psnsun[p] = rc14 * psnsun[p]
+            c14_psnsha[p] = rc14 * psnsha[p]
+        end
+    end
+end
+
 function c13_c14_photosynthesis!(ps::PhotosynthesisData,
-                                 forc_pco2_grc::Vector{<:Real},
-                                 forc_pc13o2_grc::Vector{<:Real},
-                                 gridcell_of_patch::Vector{Int},
-                                 latdeg_grc::Vector{<:Real},
-                                 mask_patch::BitVector,
+                                 forc_pco2_grc::AbstractVector{<:Real},
+                                 forc_pc13o2_grc::AbstractVector{<:Real},
+                                 gridcell_of_patch::AbstractVector{<:Integer},
+                                 latdeg_grc::AbstractVector{<:Real},
+                                 mask_patch::AbstractVector{Bool},
                                  bounds_patch::UnitRange{Int};
                                  use_c13::Bool = false,
                                  use_c14::Bool = false,
                                  use_c13_timeseries::Bool = false,
                                  rc13_atm::Real = NaN,
-                                 rc14_atm::Vector{<:Real} = [1.0, 1.0, 1.0])
+                                 rc14_atm::AbstractVector{<:Real} = [1.0, 1.0, 1.0])
 
-    for p in bounds_patch
-        mask_patch[p] || continue
-        g = gridcell_of_patch[p]
-
-        # --- C13 fractionation ---
-        if use_c13
-            if use_c13_timeseries
-                ps.rc13_canair_patch[p] = rc13_atm
-            else
-                pco2 = forc_pco2_grc[g]
-                pc13o2 = forc_pc13o2_grc[g]
-                if pco2 > pc13o2 && pc13o2 > 0.0
-                    ps.rc13_canair_patch[p] = pc13o2 / (pco2 - pc13o2)
-                else
-                    ps.rc13_canair_patch[p] = 0.0
-                end
-            end
-
-            # Apply fractionation from Fractionation() subroutine
-            alpha_sun = ps.alphapsnsun_patch[p]
-            alpha_sha = ps.alphapsnsha_patch[p]
-
-            if alpha_sun != 0.0
-                ps.rc13_psnsun_patch[p] = ps.rc13_canair_patch[p] / alpha_sun
-            else
-                ps.rc13_psnsun_patch[p] = 0.0
-            end
-
-            if alpha_sha != 0.0
-                ps.rc13_psnsha_patch[p] = ps.rc13_canair_patch[p] / alpha_sha
-            else
-                ps.rc13_psnsha_patch[p] = 0.0
-            end
-
-            # C13 photosynthesis = total_psn * rc13 / (1 + rc13)
-            rc_sun = ps.rc13_psnsun_patch[p]
-            rc_sha = ps.rc13_psnsha_patch[p]
-            ps.c13_psnsun_patch[p] = ps.psnsun_patch[p] * (rc_sun / (1.0 + rc_sun))
-            ps.c13_psnsha_patch[p] = ps.psnsha_patch[p] * (rc_sha / (1.0 + rc_sha))
-        end
-
-        # --- C14 photosynthesis ---
-        if use_c14
-            lat = latdeg_grc[g]
-            rc14 = c14_bomb_factor(lat; rc14_atm=rc14_atm)
-            ps.c14_psnsun_patch[p] = rc14 * ps.psnsun_patch[p]
-            ps.c14_psnsha_patch[p] = rc14 * ps.psnsha_patch[p]
-        end
-    end
-
+    isempty(bounds_patch) && return nothing
+    T = eltype(ps.psnsun_patch)
+    _launch!(_c13c14_photosynthesis_kernel!,
+        ps.rc13_canair_patch, ps.rc13_psnsun_patch, ps.rc13_psnsha_patch,
+        ps.c13_psnsun_patch, ps.c13_psnsha_patch, ps.c14_psnsun_patch, ps.c14_psnsha_patch,
+        ps.alphapsnsun_patch, ps.alphapsnsha_patch, ps.psnsun_patch, ps.psnsha_patch,
+        mask_patch, gridcell_of_patch, forc_pco2_grc, forc_pc13o2_grc, latdeg_grc,
+        use_c13, use_c14, use_c13_timeseries,
+        T(rc13_atm), T(rc14_atm[1]), T(rc14_atm[2]), T(rc14_atm[3]),
+        first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
     return nothing
 end
 
@@ -212,12 +211,97 @@ spinup by the same factor used for decomposition (spinup_factor).
 
 Ported from `C14Decay` in `CNC14DecayMod.F90`.
 """
+# --- Kernels for the (default, non-matrix) C14 decay path ------------------
+# All writes are own-index; the soil kernel runs per-column with internal l/j
+# loops (fac computed once per (c,l), applied over all j — byte-identical).
+@kernel function _c14decay_seedc_kernel!(seedc_grc, decay_factor, begg::Int, endg::Int)
+    g = @index(Global)
+    @inbounds if begg <= g <= endg
+        seedc_grc[g] = seedc_grc[g] * decay_factor
+    end
+end
+
+@kernel function _c14decay_soil_kernel!(decomp_cpools_vr, @Const(mask_soilc),
+        @Const(spinup_factor), @Const(spinup_lat_term),
+        decay_const, dt, spinup_state::Int, nlevdecomp::Int, ndecomp_pools::Int,
+        begc::Int, endc::Int)
+    c = @index(Global)
+    T = eltype(decomp_cpools_vr)
+    @inbounds if begc <= c <= endc && mask_soilc[c]
+        for l in 1:ndecomp_pools
+            sp_term = one(T)
+            if spinup_state >= 1
+                sp_term = spinup_factor[l]
+                if abs(spinup_factor[l] - one(T)) > T(1.0e-6)
+                    sp_term = sp_term * spinup_lat_term[c]
+                end
+            end
+            fac = one(T) - decay_const * sp_term * dt
+            for j in 1:nlevdecomp
+                decomp_cpools_vr[c, j, l] = decomp_cpools_vr[c, j, l] * fac
+            end
+        end
+    end
+end
+
+# Split into two kernels over the same patches to stay under Metal's ~31
+# top-level buffer limit (24 pool arrays + mask + ivt exceeds it as one kernel).
+# All writes are own-index and independent, so two launches are equivalent.
+@kernel function _c14decay_patch1_kernel!(
+        cpool, xsmrpool,
+        deadcrootc, deadcrootc_storage, deadcrootc_xfer,
+        deadstemc, deadstemc_storage, deadstemc_xfer,
+        frootc, frootc_storage, frootc_xfer, leafc,
+        @Const(mask_soilp), decay_factor, begp::Int, endp::Int)
+    p = @index(Global)
+    @inbounds if begp <= p <= endp && mask_soilp[p]
+        cpool[p]    = cpool[p]    * decay_factor
+        xsmrpool[p] = xsmrpool[p] * decay_factor
+        deadcrootc[p]         = deadcrootc[p]         * decay_factor
+        deadcrootc_storage[p] = deadcrootc_storage[p] * decay_factor
+        deadcrootc_xfer[p]    = deadcrootc_xfer[p]    * decay_factor
+        deadstemc[p]          = deadstemc[p]          * decay_factor
+        deadstemc_storage[p]  = deadstemc_storage[p]  * decay_factor
+        deadstemc_xfer[p]     = deadstemc_xfer[p]     * decay_factor
+        frootc[p]             = frootc[p]             * decay_factor
+        frootc_storage[p]     = frootc_storage[p]     * decay_factor
+        frootc_xfer[p]        = frootc_xfer[p]        * decay_factor
+        leafc[p]              = leafc[p]              * decay_factor
+    end
+end
+
+@kernel function _c14decay_patch2_kernel!(
+        leafc_storage, leafc_xfer,
+        livecrootc, livecrootc_storage, livecrootc_xfer,
+        livestemc, livestemc_storage, livestemc_xfer,
+        gresp_storage, gresp_xfer, ctrunc, cropseedc_deficit,
+        @Const(mask_soilp), @Const(ivt),
+        decay_factor, npcropmin::Int, ivt_len::Int, begp::Int, endp::Int)
+    p = @index(Global)
+    @inbounds if begp <= p <= endp && mask_soilp[p]
+        leafc_storage[p]      = leafc_storage[p]      * decay_factor
+        leafc_xfer[p]         = leafc_xfer[p]         * decay_factor
+        livecrootc[p]         = livecrootc[p]         * decay_factor
+        livecrootc_storage[p] = livecrootc_storage[p] * decay_factor
+        livecrootc_xfer[p]    = livecrootc_xfer[p]    * decay_factor
+        livestemc[p]          = livestemc[p]          * decay_factor
+        livestemc_storage[p]  = livestemc_storage[p]  * decay_factor
+        livestemc_xfer[p]     = livestemc_xfer[p]     * decay_factor
+        gresp_storage[p]      = gresp_storage[p]      * decay_factor
+        gresp_xfer[p]         = gresp_xfer[p]         * decay_factor
+        ctrunc[p]             = ctrunc[p]             * decay_factor
+        if p <= ivt_len && ivt[p] >= npcropmin
+            cropseedc_deficit[p] = cropseedc_deficit[p] * decay_factor
+        end
+    end
+end
+
 function c14_decay!(c14_cnveg_cs::CNVegCarbonStateData,
                     c14_cnveg_cf::CNVegCarbonFluxData,
                     c14_soilbgc_cs::SoilBiogeochemCarbonStateData,
                     c14_soilbgc_cf::SoilBiogeochemCarbonFluxData;
-                    mask_soilc::BitVector,
-                    mask_soilp::BitVector,
+                    mask_soilc::AbstractVector{Bool},
+                    mask_soilp::AbstractVector{Bool},
                     bounds_col::UnitRange{Int},
                     bounds_patch::UnitRange{Int},
                     bounds_gridcell::UnitRange{Int},
@@ -226,10 +310,10 @@ function c14_decay!(c14_cnveg_cs::CNVegCarbonStateData,
                     nlevdecomp::Int,
                     ndecomp_pools::Int,
                     spinup_state::Int = 0,
-                    spinup_factor::Vector{<:Real} = ones(ndecomp_pools),
-                    col_gridcell::Vector{Int} = Int[],
-                    latdeg_grc::Vector{<:Real} = Float64[],
-                    ivt::Vector{Int} = Int[],
+                    spinup_factor::AbstractVector{<:Real} = ones(ndecomp_pools),
+                    col_gridcell::AbstractVector{<:Integer} = Int[],
+                    latdeg_grc::AbstractVector{<:Real} = Float64[],
+                    ivt::AbstractVector{<:Integer} = Int[],
                     npcropmin::Int = 17,
                     use_matrixcn::Bool = false,
                     use_soil_matrixcn::Bool = false)
@@ -239,93 +323,98 @@ function c14_decay!(c14_cnveg_cs::CNVegCarbonStateData,
     decay_const = -log(0.5) / half_life
     decay_factor = 1.0 - decay_const * dt
 
+    cs  = c14_cnveg_cs
+    scs = c14_soilbgc_cs
+    FT  = eltype(cs.cpool_patch)
+    # backend-resident copies of host param arrays (identity on CPU)
+    _onbk(ref, a, ET) = ref isa Array ? a : copyto!(similar(ref, ET, length(a)), a)
+
     # --- Gridcell-level: seedc ---
-    for g in bounds_gridcell
-        c14_cnveg_cs.seedc_grc[g] *= decay_factor
+    if !isempty(bounds_gridcell)
+        _launch!(_c14decay_seedc_kernel!, cs.seedc_grc, FT(decay_factor),
+                 first(bounds_gridcell), last(bounds_gridcell);
+                 ndrange = last(bounds_gridcell))
     end
 
     # --- Column-level: soil decomposition pools ---
-    for l in 1:ndecomp_pools
-        for j in 1:nlevdecomp
-            for c in bounds_col
-                mask_soilc[c] || continue
-
-                if spinup_state >= 1
-                    # Accelerate radioactive decay during spinup
-                    sp_term = spinup_factor[l]
-                    if abs(spinup_factor[l] - 1.0) > 1.0e-6
-                        sp_term *= get_spinup_latitude_term(latdeg_grc[col_gridcell[c]])
-                    end
-                else
-                    sp_term = 1.0
+    if use_soil_matrixcn
+        # matrix path (host; exercised when matrix-CN is wired)
+        for l in 1:ndecomp_pools, j in 1:nlevdecomp, c in bounds_col
+            mask_soilc[c] || continue
+            if spinup_state >= 1
+                sp_term = spinup_factor[l]
+                if abs(spinup_factor[l] - 1.0) > 1.0e-6
+                    sp_term *= get_spinup_latitude_term(latdeg_grc[col_gridcell[c]])
                 end
-
-                if !use_soil_matrixcn
-                    c14_soilbgc_cs.decomp_cpools_vr_col[c, j, l] *= (1.0 - decay_const * sp_term * dt)
-                else
-                    idx = j + nlevdecomp * (l - 1)
-                    c14_soilbgc_cf.matrix_decomp_fire_k_col[c, idx] -= sp_term * decay_const * dt
-                end
+            else
+                sp_term = 1.0
             end
+            idx = j + nlevdecomp * (l - 1)
+            c14_soilbgc_cf.matrix_decomp_fire_k_col[c, idx] -= sp_term * decay_const * dt
         end
+    elseif !isempty(bounds_col)
+        # spinup latitude term per column (device-safe; only read when spinup_state>=1)
+        spinup_lat = fill!(similar(scs.decomp_cpools_vr_col, FT, last(bounds_col)), zero(FT))
+        if spinup_state >= 1 && !isempty(col_gridcell) && !isempty(latdeg_grc)
+            fire_spinup_latterm!(spinup_lat, mask_soilc,
+                _onbk(scs.decomp_cpools_vr_col, col_gridcell, Int), latdeg_grc)
+        end
+        _launch!(_c14decay_soil_kernel!, scs.decomp_cpools_vr_col, mask_soilc,
+                 _onbk(scs.decomp_cpools_vr_col, spinup_factor, FT), spinup_lat,
+                 FT(decay_const), FT(dt), spinup_state, nlevdecomp, ndecomp_pools,
+                 first(bounds_col), last(bounds_col); ndrange = last(bounds_col))
     end
 
     # --- Patch-level: vegetation C pools ---
-    for p in bounds_patch
-        mask_soilp[p] || continue
-
-        c14_cnveg_cs.cpool_patch[p]    *= decay_factor
-        c14_cnveg_cs.xsmrpool_patch[p] *= decay_factor
-
-        if !use_matrixcn
-            c14_cnveg_cs.deadcrootc_patch[p]         *= decay_factor
-            c14_cnveg_cs.deadcrootc_storage_patch[p]  *= decay_factor
-            c14_cnveg_cs.deadcrootc_xfer_patch[p]     *= decay_factor
-            c14_cnveg_cs.deadstemc_patch[p]           *= decay_factor
-            c14_cnveg_cs.deadstemc_storage_patch[p]   *= decay_factor
-            c14_cnveg_cs.deadstemc_xfer_patch[p]      *= decay_factor
-            c14_cnveg_cs.frootc_patch[p]              *= decay_factor
-            c14_cnveg_cs.frootc_storage_patch[p]      *= decay_factor
-            c14_cnveg_cs.frootc_xfer_patch[p]         *= decay_factor
-            c14_cnveg_cs.leafc_patch[p]               *= decay_factor
-            c14_cnveg_cs.leafc_storage_patch[p]       *= decay_factor
-            c14_cnveg_cs.leafc_xfer_patch[p]          *= decay_factor
-            c14_cnveg_cs.livecrootc_patch[p]          *= decay_factor
-            c14_cnveg_cs.livecrootc_storage_patch[p]  *= decay_factor
-            c14_cnveg_cs.livecrootc_xfer_patch[p]     *= decay_factor
-            c14_cnveg_cs.livestemc_patch[p]           *= decay_factor
-            c14_cnveg_cs.livestemc_storage_patch[p]   *= decay_factor
-            c14_cnveg_cs.livestemc_xfer_patch[p]      *= decay_factor
-        else
-            # Matrix mode: encode decay as additional fire transfer rate
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ideadcroot_to_iout_fi[1]]   = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ideadcrootst_to_iout_fi[1]]  = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ideadcrootxf_to_iout_fi[1]]  = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ideadstem_to_iout_fi[1]]     = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ideadstemst_to_iout_fi[1]]   = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ideadstemxf_to_iout_fi[1]]   = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ifroot_to_iout_fi[1]]        = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ifrootst_to_iout_fi[1]]      = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ifrootxf_to_iout_fi[1]]      = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ileaf_to_iout_fi[1]]         = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ileafst_to_iout_fi[1]]       = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ileafxf_to_iout_fi[1]]       = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ilivecroot_to_iout_fi[1]]    = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ilivecrootst_to_iout_fi[1]]  = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ilivecrootxf_to_iout_fi[1]]  = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ilivestem_to_iout_fi[1]]     = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ilivestemst_to_iout_fi[1]]   = decay_const
-            c14_cnveg_cf.matrix_fitransfer_patch[p, c14_cnveg_cf.ilivestemxf_to_iout_fi[1]]   = decay_const
+    if use_matrixcn
+        # matrix path (host; encode decay as a fire transfer rate)
+        cf = c14_cnveg_cf
+        for p in bounds_patch
+            mask_soilp[p] || continue
+            cs.cpool_patch[p]    *= decay_factor
+            cs.xsmrpool_patch[p] *= decay_factor
+            cf.matrix_fitransfer_patch[p, cf.ideadcroot_to_iout_fi[1]]   = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ideadcrootst_to_iout_fi[1]]  = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ideadcrootxf_to_iout_fi[1]]  = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ideadstem_to_iout_fi[1]]     = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ideadstemst_to_iout_fi[1]]   = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ideadstemxf_to_iout_fi[1]]   = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ifroot_to_iout_fi[1]]        = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ifrootst_to_iout_fi[1]]      = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ifrootxf_to_iout_fi[1]]      = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ileaf_to_iout_fi[1]]         = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ileafst_to_iout_fi[1]]       = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ileafxf_to_iout_fi[1]]       = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ilivecroot_to_iout_fi[1]]    = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ilivecrootst_to_iout_fi[1]]  = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ilivecrootxf_to_iout_fi[1]]  = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ilivestem_to_iout_fi[1]]     = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ilivestemst_to_iout_fi[1]]   = decay_const
+            cf.matrix_fitransfer_patch[p, cf.ilivestemxf_to_iout_fi[1]]   = decay_const
+            cs.gresp_storage_patch[p] *= decay_factor
+            cs.gresp_xfer_patch[p]    *= decay_factor
+            cs.ctrunc_patch[p]        *= decay_factor
+            if length(ivt) >= p && ivt[p] >= npcropmin
+                cs.cropseedc_deficit_patch[p] *= decay_factor
+            end
         end
-
-        c14_cnveg_cs.gresp_storage_patch[p] *= decay_factor
-        c14_cnveg_cs.gresp_xfer_patch[p]    *= decay_factor
-        c14_cnveg_cs.ctrunc_patch[p]        *= decay_factor
-
-        # Crop seed deficit decay
-        if length(ivt) >= p && ivt[p] >= npcropmin
-            c14_cnveg_cs.cropseedc_deficit_patch[p] *= decay_factor
-        end
+    elseif !isempty(bounds_patch)
+        _launch!(_c14decay_patch1_kernel!,
+            cs.cpool_patch, cs.xsmrpool_patch,
+            cs.deadcrootc_patch, cs.deadcrootc_storage_patch, cs.deadcrootc_xfer_patch,
+            cs.deadstemc_patch, cs.deadstemc_storage_patch, cs.deadstemc_xfer_patch,
+            cs.frootc_patch, cs.frootc_storage_patch, cs.frootc_xfer_patch, cs.leafc_patch,
+            mask_soilp, FT(decay_factor),
+            first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+        _launch!(_c14decay_patch2_kernel!,
+            cs.leafc_storage_patch, cs.leafc_xfer_patch,
+            cs.livecrootc_patch, cs.livecrootc_storage_patch, cs.livecrootc_xfer_patch,
+            cs.livestemc_patch, cs.livestemc_storage_patch, cs.livestemc_xfer_patch,
+            cs.gresp_storage_patch, cs.gresp_xfer_patch, cs.ctrunc_patch,
+            cs.cropseedc_deficit_patch,
+            mask_soilp, _onbk(cs.cpool_patch, ivt, Int),
+            FT(decay_factor), npcropmin, length(ivt),
+            first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
     end
 
     return nothing
