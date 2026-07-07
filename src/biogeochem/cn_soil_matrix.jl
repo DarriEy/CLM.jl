@@ -228,6 +228,74 @@ function cn_soil_matrix_alloc!(ms::CNSoilMatrixState; ndecomp_pools_vr::Int,
 end
 
 # --------------------------------------------------------------------------
+# cn_soil_matrix_input_accumulate! — assemble the B-input (matrix_Cinput/Ninput).
+#
+# In the sequential path each veg→soil litterfall/CWD flux is added directly into
+# decomp_cpools_vr (via decomp_cpools_sourcesink) by the C/N state updates. In the
+# matrix path those same EXTERNAL inputs become the B term, and the internal
+# decomposition cascade is the A-matrix (Ksoil·rf·pathfrac, handled by
+# cn_soil_matrix!). This fills matrix_Cinput/Ninput[c, j+(i-1)*nlevdecomp] = Σ
+# (litter/CWD input fluxes to pool i, level j) · dt — the port of the
+# `matrix_Cinput%V += *_to_litr/cwd * dt` accumulations scattered across
+# CNC/NStateUpdate1/2/3. Litter pools (i_litr_min..i_litr_max) get the *_to_litr_*
+# fluxes (indexed by pool); the CWD pool (i_cwd) gets the *_to_cwd* fluxes.
+# `transient_landcover` adds the harvest + gross-unrepresented-landcover inputs
+# (zero otherwise, matching the default non-transient run).
+# --------------------------------------------------------------------------
+
+# (litr-pool flux fields (c,j,i), cwd flux fields (c,j)) for C and N.
+const _SOILC_LITR_IN = (:phenology_c_to_litr_c_col, :dwt_frootc_to_litr_c_col,
+                        :gap_mortality_c_to_litr_c_col, :m_c_to_litr_fire_col)
+const _SOILC_CWD_IN  = (:dwt_livecrootc_to_cwdc_col, :dwt_deadcrootc_to_cwdc_col,
+                        :gap_mortality_c_to_cwdc_col, :fire_mortality_c_to_cwdc_col)
+const _SOILC_LITR_IN_TR = (:harvest_c_to_litr_c_col, :gru_c_to_litr_c_col)
+const _SOILC_CWD_IN_TR  = (:harvest_c_to_cwdc_col, :gru_c_to_cwdc_col)
+const _SOILN_LITR_IN = (:phenology_n_to_litr_n_col, :dwt_frootn_to_litr_n_col,
+                        :gap_mortality_n_to_litr_n_col, :m_n_to_litr_fire_col)
+const _SOILN_CWD_IN  = (:dwt_livecrootn_to_cwdn_col, :dwt_deadcrootn_to_cwdn_col,
+                        :gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_col)
+const _SOILN_LITR_IN_TR = (:harvest_n_to_litr_n_col, :gru_n_to_litr_n_col)
+const _SOILN_CWD_IN_TR  = (:harvest_n_to_cwdn_col, :gru_n_to_cwdn_col)
+
+function cn_soil_matrix_input_accumulate!(
+        matrix_Cinput::AbstractMatrix{<:Real}, matrix_Ninput::AbstractMatrix{<:Real},
+        cf_veg, nf_veg;
+        mask_soilc::AbstractVector{Bool}, bounds_col::UnitRange{Int},
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
+        dt::Real, transient_landcover::Bool = false)
+    fill!(matrix_Cinput, 0.0)
+    fill!(matrix_Ninput, 0.0)
+    dt = Float64(dt)
+    litr_c = transient_landcover ? (_SOILC_LITR_IN..., _SOILC_LITR_IN_TR...) : _SOILC_LITR_IN
+    cwd_c  = transient_landcover ? (_SOILC_CWD_IN...,  _SOILC_CWD_IN_TR...)  : _SOILC_CWD_IN
+    litr_n = transient_landcover ? (_SOILN_LITR_IN..., _SOILN_LITR_IN_TR...) : _SOILN_LITR_IN
+    cwd_n  = transient_landcover ? (_SOILN_CWD_IN...,  _SOILN_CWD_IN_TR...)  : _SOILN_CWD_IN
+    icwd = i_cwd
+    for c in bounds_col
+        mask_soilc[c] || continue
+        for j in 1:nlevdecomp
+            # litter pools (indexed by pool i)
+            for i in i_litr_min:i_litr_max
+                vr = j + (i - 1) * nlevdecomp
+                cin = 0.0; nin = 0.0
+                for f in litr_c; cin += getfield(cf_veg, f)[c, j, i]; end
+                for f in litr_n; nin += getfield(nf_veg, f)[c, j, i]; end
+                matrix_Cinput[c, vr] += cin * dt
+                matrix_Ninput[c, vr] += nin * dt
+            end
+            # CWD pool (level-only fluxes)
+            vrc = j + (icwd - 1) * nlevdecomp
+            cin = 0.0; nin = 0.0
+            for f in cwd_c; cin += getfield(cf_veg, f)[c, j]; end
+            for f in cwd_n; nin += getfield(nf_veg, f)[c, j]; end
+            matrix_Cinput[c, vrc] += cin * dt
+            matrix_Ninput[c, vrc] += nin * dt
+        end
+    end
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # cn_soil_matrix! — advance the soil C/N pools by the matrix solve for one step.
 #
 # Port of `CNSoilMatrix` (the non-isotope, non-spinup core path). Inputs:
