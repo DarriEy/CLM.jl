@@ -121,6 +121,7 @@ Base.@kwdef mutable struct SoilBiogeochemNitrogenFluxData{FT<:Real,
     fates_litter_flux                        ::V = Float64[]  # (gN/m2/s) total litter flux from FATES
 
     # --- Matrix-CN fields ---
+    matrix_Ninput_col                        ::M = Matrix{Float64}(undef, 0, 0)  # (gN/m3/step) persistent soil-matrix B-input, accumulated across drivers (incl. dwt)
     NE_AKallsoiln                            ::Int = 0
     RI_AKallsoiln                            ::VI = Int[]
     CI_AKallsoiln                            ::VI = Int[]
@@ -280,6 +281,8 @@ function soil_bgc_nitrogen_flux_init!(nf::SoilBiogeochemNitrogenFluxData,
 
     # --- Matrix-CN fields ---
     if use_soil_matrixcn
+        # Persistent B-input: zero (accumulated across drivers, zeroed after each solve).
+        nf.matrix_Ninput_col = zeros(nc, nlevdecomp * ndecomp_pools)
         Ntrans = (ndecomp_cascade_transitions - ndecomp_cascade_outtransitions) * nlevdecomp
         nf.NE_AKallsoiln = (Ntrans + nlevdecomp * ndecomp_pools) +
                            (Ntrans + Ntri_setup + nlevdecomp) +

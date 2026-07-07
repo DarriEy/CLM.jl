@@ -12,14 +12,14 @@
         nlevdecomp_full=nlevdecomp, ndecomp_pools=ndecomp_pools, i_litr_max=i_litr_max)
 
     # zero every col field the accumulator reads, then set distinct known values.
-    litr_c = (:phenology_c_to_litr_c_col, :dwt_frootc_to_litr_c_col,
+    # cn_driver-local inputs (dwt is NOT here — it enters via the persistent
+    # matrix_Cinput_col field accumulated in the dyn_subgrid driver).
+    litr_c = (:phenology_c_to_litr_c_col,
               :gap_mortality_c_to_litr_c_col, :m_c_to_litr_fire_col)
-    cwd_c  = (:dwt_livecrootc_to_cwdc_col, :dwt_deadcrootc_to_cwdc_col,
-              :gap_mortality_c_to_cwdc_col, :fire_mortality_c_to_cwdc_col)
-    litr_n = (:phenology_n_to_litr_n_col, :dwt_frootn_to_litr_n_col,
+    cwd_c  = (:gap_mortality_c_to_cwdc_col, :fire_mortality_c_to_cwdc_col)
+    litr_n = (:phenology_n_to_litr_n_col,
               :gap_mortality_n_to_litr_n_col, :m_n_to_litr_fire_col)
-    cwd_n  = (:dwt_livecrootn_to_cwdn_col, :dwt_deadcrootn_to_cwdn_col,
-              :gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_col)
+    cwd_n  = (:gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_col)
     for f in litr_c; fill!(getfield(cf, f), 0.0); end
     for f in cwd_c;  fill!(getfield(cf, f), 0.0); end
     for f in litr_n; fill!(getfield(nf, f), 0.0); end

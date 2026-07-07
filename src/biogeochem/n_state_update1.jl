@@ -32,24 +32,37 @@
 
 # --- Kernel: column-level dyn-patch decomposition input (one thread per column) ---
 @kernel function _nsudp_col_kernel!(@Const(mask_soilc_with_inactive),
-        decomp_npools_vr_col, @Const(dwt_frootn_to_litr_n_col),
+        decomp_npools_vr_col, matrix_Ninput_col, @Const(dwt_frootn_to_litr_n_col),
         @Const(dwt_livecrootn_to_cwdn_col), @Const(dwt_deadcrootn_to_cwdn_col),
         nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
         use_soil_matrixcn::Bool, dt)
     c = @index(Global)
-    # Matrix mode: these dwt→litter/CWD N inputs enter via the soil-matrix B-input
-    # instead (see _csu_dyn_col_kernel!), so skip the direct pool addition here.
-    @inbounds if mask_soilc_with_inactive[c] && !use_soil_matrixcn
-        for j in 1:nlevdecomp
-            for i in i_litr_min:i_litr_max
-                decomp_npools_vr_col[c, j, i] =
-                    decomp_npools_vr_col[c, j, i] +
-                    dwt_frootn_to_litr_n_col[c, j, i] * dt
+    @inbounds if mask_soilc_with_inactive[c]
+        if use_soil_matrixcn
+            # Matrix mode: accumulate dwt→litter/CWD N into the persistent B-input.
+            for j in 1:nlevdecomp
+                for i in i_litr_min:i_litr_max
+                    matrix_Ninput_col[c, j + (i - 1) * nlevdecomp] =
+                        matrix_Ninput_col[c, j + (i - 1) * nlevdecomp] +
+                        dwt_frootn_to_litr_n_col[c, j, i] * dt
+                end
+                matrix_Ninput_col[c, j + (i_cwd - 1) * nlevdecomp] =
+                    matrix_Ninput_col[c, j + (i_cwd - 1) * nlevdecomp] +
+                    (dwt_livecrootn_to_cwdn_col[c, j] +
+                     dwt_deadcrootn_to_cwdn_col[c, j]) * dt
             end
-            decomp_npools_vr_col[c, j, i_cwd] =
-                decomp_npools_vr_col[c, j, i_cwd] +
-                (dwt_livecrootn_to_cwdn_col[c, j] +
-                 dwt_deadcrootn_to_cwdn_col[c, j]) * dt
+        else
+            for j in 1:nlevdecomp
+                for i in i_litr_min:i_litr_max
+                    decomp_npools_vr_col[c, j, i] =
+                        decomp_npools_vr_col[c, j, i] +
+                        dwt_frootn_to_litr_n_col[c, j, i] * dt
+                end
+                decomp_npools_vr_col[c, j, i_cwd] =
+                    decomp_npools_vr_col[c, j, i_cwd] +
+                    (dwt_livecrootn_to_cwdn_col[c, j] +
+                     dwt_deadcrootn_to_cwdn_col[c, j]) * dt
+            end
         end
     end
 end
@@ -86,12 +99,17 @@ function n_state_update_dyn_patch!(ns_veg::CNVegNitrogenStateData,
                                     i_litr_max::Int,
                                     i_cwd::Int,
                                     use_soil_matrixcn::Bool = false,
+                                    nf_soil::Union{SoilBiogeochemNitrogenFluxData, Nothing} = nothing,
                                     dt::Real)
 
+    do_matrix = use_soil_matrixcn && nf_soil !== nothing &&
+                size(nf_soil.matrix_Ninput_col, 2) > 0
+    mNin = do_matrix ? nf_soil.matrix_Ninput_col :
+           similar(ns_soil.decomp_npools_vr_col, size(ns_soil.decomp_npools_vr_col, 1), 1)
     _launch!(_nsudp_col_kernel!, mask_soilc_with_inactive,
-        ns_soil.decomp_npools_vr_col, nf_veg.dwt_frootn_to_litr_n_col,
+        ns_soil.decomp_npools_vr_col, mNin, nf_veg.dwt_frootn_to_litr_n_col,
         nf_veg.dwt_livecrootn_to_cwdn_col, nf_veg.dwt_deadcrootn_to_cwdn_col,
-        nlevdecomp, i_litr_min, i_litr_max, i_cwd, use_soil_matrixcn, dt)
+        nlevdecomp, i_litr_min, i_litr_max, i_cwd, do_matrix, dt)
 
     _launch!(_nsudp_grc_kernel!, ns_veg.seedn_grc,
         nf_veg.dwt_seedn_to_leaf_grc, nf_veg.dwt_seedn_to_deadstem_grc, dt)

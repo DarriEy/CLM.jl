@@ -58,6 +58,7 @@ Base.@kwdef mutable struct SoilBiogeochemCarbonFluxData{FT<:Real,
     # --- Matrix-CN fields ---
     matrix_decomp_fire_k_col            ::M = Matrix{Float64}(undef, 0, 0)    # decomp rate due to fire
     tri_ma_vr                            ::M = Matrix{Float64}(undef, 0, 0)    # vertical C transfer rate in sparse matrix format
+    matrix_Cinput_col                    ::M = Matrix{Float64}(undef, 0, 0)    # (gC/m3/step) persistent soil-matrix B-input, accumulated across drivers (incl. dwt)
     NE_AKallsoilc                        ::Int = 0
     RI_AKallsoilc                        ::VI = Int[]
     CI_AKallsoilc                        ::VI = Int[]
@@ -165,6 +166,9 @@ function soil_bgc_carbon_flux_init!(cf::SoilBiogeochemCarbonFluxData,
     if use_soil_matrixcn
         cf.matrix_decomp_fire_k_col = nanmat(nc, nlevdecomp * ndecomp_pools)
         cf.tri_ma_vr = fill(NaN, nc, Ntri_setup)
+        # Persistent B-input: zero (not NaN) — accumulated across drivers, zeroed after
+        # each soil-matrix solve.
+        cf.matrix_Cinput_col = zeros(nc, nlevdecomp * ndecomp_pools)
 
         Ntrans = (ndecomp_cascade_transitions - ndecomp_cascade_outtransitions) * nlevdecomp
         cf.NE_AKallsoilc = Ntrans + ndecomp_pools * nlevdecomp +

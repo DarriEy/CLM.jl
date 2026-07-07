@@ -1174,9 +1174,9 @@ function cn_driver_no_leaching!(
             num_actfirec=count(mask_actfirec),
             # Harvest + gross-unrep litter/CWD inputs enter the B-input when transient
             # landcover is active; their state updates (c/n_state_update2h/2g) skip the
-            # direct decomp-pool addition under use_soil_matrixcn. (dwt is handled in the
-            # dyn_subgrid driver, not here.)
-            transient_landcover=transient_landcover)
+            # direct decomp-pool addition under use_soil_matrixcn. dwt enters via the
+            # persistent soilbgc_nf/cf.matrix_Cinput/Ninput_col (accumulated in dyn_subgrid).
+            transient_landcover=transient_landcover, soilbgc_nf=soilbgc_nf)
     end
 
     # CNPrecisionControl (post fire) — WIRED
@@ -1423,6 +1423,10 @@ function _zero_cnveg_flux_arrays!(cf)
         # zero it): phenology phase-2 sets it, and FUN — which runs BEFORE phase-2
         # — reads the previous step's value for retranslocation accounting.
         name === :leafc_to_litter_fun_patch && continue
+        # Persistent soil-matrix B-input: accumulated across drivers (the dyn_subgrid
+        # dwt inputs are added BEFORE this per-step reset) and zeroed only after the
+        # soil-matrix solve — so it must survive the step-start reset.
+        (name === :matrix_Cinput_col || name === :matrix_Ninput_col) && continue
         arr = getfield(cf, name)
         (arr isa AbstractArray && !isempty(arr) && eltype(arr) <: Real) || continue
         fill!(arr, zero(eltype(arr)))

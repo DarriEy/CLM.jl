@@ -244,16 +244,17 @@ end
 # --------------------------------------------------------------------------
 
 # (litr-pool flux fields (c,j,i), cwd flux fields (c,j)) for C and N.
-const _SOILC_LITR_IN = (:phenology_c_to_litr_c_col, :dwt_frootc_to_litr_c_col,
+# cn_driver-LOCAL litter/CWD inputs (phenology/gap/fire, computed within cn_driver).
+# The dwt inputs are NOT here — they are dyn_subgrid-local and enter via the persistent
+# matrix_Cinput_col field (see _csu_dyn_col_kernel!), added in cn_soil_matrix_advance!.
+const _SOILC_LITR_IN = (:phenology_c_to_litr_c_col,
                         :gap_mortality_c_to_litr_c_col, :m_c_to_litr_fire_col)
-const _SOILC_CWD_IN  = (:dwt_livecrootc_to_cwdc_col, :dwt_deadcrootc_to_cwdc_col,
-                        :gap_mortality_c_to_cwdc_col, :fire_mortality_c_to_cwdc_col)
+const _SOILC_CWD_IN  = (:gap_mortality_c_to_cwdc_col, :fire_mortality_c_to_cwdc_col)
 const _SOILC_LITR_IN_TR = (:harvest_c_to_litr_c_col, :gru_c_to_litr_c_col)
 const _SOILC_CWD_IN_TR  = (:harvest_c_to_cwdc_col, :gru_c_to_cwdc_col)
-const _SOILN_LITR_IN = (:phenology_n_to_litr_n_col, :dwt_frootn_to_litr_n_col,
+const _SOILN_LITR_IN = (:phenology_n_to_litr_n_col,
                         :gap_mortality_n_to_litr_n_col, :m_n_to_litr_fire_col)
-const _SOILN_CWD_IN  = (:dwt_livecrootn_to_cwdn_col, :dwt_deadcrootn_to_cwdn_col,
-                        :gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_col)
+const _SOILN_CWD_IN  = (:gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_col)
 const _SOILN_LITR_IN_TR = (:harvest_n_to_litr_n_col, :gru_n_to_litr_n_col)
 const _SOILN_CWD_IN_TR  = (:harvest_n_to_cwdn_col, :gru_n_to_cwdn_col)
 
@@ -314,7 +315,8 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         mask_soilc::AbstractVector{Bool}, bounds_col::UnitRange{Int},
         nlevdecomp::Int, ndecomp_pools::Int, ndecomp_cascade_transitions::Int,
         i_litr_min::Int, i_litr_max::Int, i_cwd::Int, dt::Real,
-        num_actfirec::Int = 0, transient_landcover::Bool = false)
+        num_actfirec::Int = 0, transient_landcover::Bool = false,
+        soilbgc_nf = nothing)
 
     begc = first(bounds_col); endc = last(bounds_col); nc = endc - begc + 1
     ndp_vr = ndecomp_pools * nlevdecomp
@@ -327,12 +329,27 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
             ndecomp_cascade_outtransitions=nouttrans)
     end
 
-    # B-input from the veg→soil litter/CWD fluxes.
+    # B-input: the cn_driver-local litter/CWD fluxes (phenology/gap/fire, +harvest/gru
+    # when transient) PLUS the persistent matrix_Cinput_col accumulated by the
+    # dyn_subgrid driver (the dwt landcover-change inputs). The persistent field is
+    # zeroed after the solve so it starts fresh next step.
     Cin = zeros(nc, ndp_vr); Nin = zeros(nc, ndp_vr)
     cn_soil_matrix_input_accumulate!(Cin, Nin, cnveg_cf, cnveg_nf;
         mask_soilc=mask_soilc, bounds_col=bounds_col, nlevdecomp=nlevdecomp,
         i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
         transient_landcover=transient_landcover)
+    if size(soilbgc_cf.matrix_Cinput_col, 2) == ndp_vr
+        for k in 1:ndp_vr, c in bounds_col
+            mask_soilc[c] || continue
+            Cin[c - begc + 1, k] += soilbgc_cf.matrix_Cinput_col[c, k]
+        end
+    end
+    if soilbgc_nf !== nothing && size(soilbgc_nf.matrix_Ninput_col, 2) == ndp_vr
+        for k in 1:ndp_vr, c in bounds_col
+            mask_soilc[c] || continue
+            Nin[c - begc + 1, k] += soilbgc_nf.matrix_Ninput_col[c, k]
+        end
+    end
 
     # Fire-loss diagonal (AKfiresoil). The fire module computed the decomp→fire flux
     # m_decomp_cpools_to_fire_vr (= pool·f·cmb); the matrix representation is the loss
@@ -365,6 +382,11 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
         ndecomp_cascade_transitions=ndecomp_cascade_transitions,
         ndecomp_cascade_outtransitions=nouttrans, num_actfirec=num_actfirec)
+
+    # Reset the persistent B-input for the next step (its dwt contribution was consumed).
+    size(soilbgc_cf.matrix_Cinput_col, 2) == ndp_vr && fill!(soilbgc_cf.matrix_Cinput_col, 0.0)
+    soilbgc_nf !== nothing && size(soilbgc_nf.matrix_Ninput_col, 2) == ndp_vr &&
+        fill!(soilbgc_nf.matrix_Ninput_col, 0.0)
     return nothing
 end
 
