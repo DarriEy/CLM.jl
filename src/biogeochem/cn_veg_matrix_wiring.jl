@@ -105,6 +105,52 @@ function cn_veg_matrix_c_topology!(cf::CNVegCarbonFluxData; use_crop::Bool = fal
     cf.ileaf_to_iout_ph             = 15
     cf.ifroot_to_iout_ph            = 16
     cf.ilivestem_to_iout_ph         = 17
+
+    # --- Gap mortality: 18 pure out-of-veg losses (pool i -> iout), index i.
+    iout = NVEGPOOL_NATVEG + 1
+    cf.matrix_gmtransfer_doner_patch    = collect(1:NVEGPOOL_NATVEG)   # ILEAF..IDEADCROOT_XF
+    cf.matrix_gmtransfer_receiver_patch = fill(iout, NVEGPOOL_NATVEG)
+    cf.matrix_gmtransfer_patch = zeros(np, NVEGPOOL_NATVEG)
+    cf.matrix_gmturnover_patch = zeros(np, nvegcpool)
+    cf.ileaf_to_iout_gm=1;  cf.ileafst_to_iout_gm=2;  cf.ileafxf_to_iout_gm=3
+    cf.ifroot_to_iout_gm=4; cf.ifrootst_to_iout_gm=5; cf.ifrootxf_to_iout_gm=6
+    cf.ilivestem_to_iout_gm=7;  cf.ilivestemst_to_iout_gm=8;  cf.ilivestemxf_to_iout_gm=9
+    cf.ideadstem_to_iout_gm=10; cf.ideadstemst_to_iout_gm=11; cf.ideadstemxf_to_iout_gm=12
+    cf.ilivecroot_to_iout_gm=13; cf.ilivecrootst_to_iout_gm=14; cf.ilivecrootxf_to_iout_gm=15
+    cf.ideadcroot_to_iout_gm=16; cf.ideadcrootst_to_iout_gm=17; cf.ideadcrootxf_to_iout_gm=18
+    return nothing
+end
+
+# The 18 gap-mortality m_*_to_litter flux fields, in pool-index order (donor = i).
+const _GMC_FLUX = Symbol[
+    :m_leafc_to_litter_patch, :m_leafc_storage_to_litter_patch, :m_leafc_xfer_to_litter_patch,
+    :m_frootc_to_litter_patch, :m_frootc_storage_to_litter_patch, :m_frootc_xfer_to_litter_patch,
+    :m_livestemc_to_litter_patch, :m_livestemc_storage_to_litter_patch, :m_livestemc_xfer_to_litter_patch,
+    :m_deadstemc_to_litter_patch, :m_deadstemc_storage_to_litter_patch, :m_deadstemc_xfer_to_litter_patch,
+    :m_livecrootc_to_litter_patch, :m_livecrootc_storage_to_litter_patch, :m_livecrootc_xfer_to_litter_patch,
+    :m_deadcrootc_to_litter_patch, :m_deadcrootc_storage_to_litter_patch, :m_deadcrootc_xfer_to_litter_patch]
+
+"""
+    cn_veg_matrix_accumulate_gm_c!(cf, cs, mask_soilp, bounds_patch; dt, matrixcheck=false)
+
+Register the 18 veg-C gap-mortality transfers (each veg pool -> litter, a pure
+out-of-veg loss) into the matrix from the m_*_to_litter flux fields gap_mortality
+already computed. rate = flux/pool; recorded via matrix_update_gmc!.
+"""
+function cn_veg_matrix_accumulate_gm_c!(cf::CNVegCarbonFluxData,
+        cs::CNVegCarbonStateData, mask_soilp::AbstractVector{Bool},
+        bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
+    fill!(cf.matrix_gmtransfer_patch, 0.0)
+    fill!(cf.matrix_gmturnover_patch, 0.0)
+    for p in bounds_patch
+        mask_soilp[p] || continue
+        for i in 1:NVEGPOOL_NATVEG
+            flux = getfield(cf, _GMC_FLUX[i])[p]
+            donor = _vegc_pool_val(cs, i, p)
+            rate = donor > 0.0 ? flux / donor : 0.0
+            matrix_update_gmc!(cf, p, i, rate, dt; matrixcheck=matrixcheck, acc=true)
+        end
+    end
     return nothing
 end
 

@@ -51,30 +51,41 @@
         end
     end
 
-    # (a) sequential reference
+    # gap-mortality: each veg pool i -> litter (pure out-of-veg loss).
+    gm_rate = [1e-6,2e-6,3e-6,1.5e-6,2.5e-6,1e-6,8e-7,6e-7,4e-7,3e-7,2e-7,1e-7,
+               7e-7,5e-7,3e-7,2e-7,1e-7,9e-8]
+    set_gm!(cf, cs) = begin
+        for i in 1:nveg
+            f = CLM._GMC_FLUX[i]; length(getfield(cf, f)) == 0 && setfield!(cf, f, zeros(np))
+            arr = getfield(cf, f); for p in 1:np; arr[p] = poolget(cs, i, p) * gm_rate[i]; end
+        end
+    end
+
+    # (a) sequential reference (phenology transfers + gap-mortality losses)
     cs_seq = fresh()
     cf_seq = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf_seq, np, 1, 1; use_matrixcn=true)
-    set_fluxes!(cf_seq, cs_seq)
+    set_fluxes!(cf_seq, cs_seq); set_gm!(cf_seq, cs_seq)
     for p in 1:np, k in 1:17
         flux = getfield(cf_seq, fldlist[k])[p]
         pooladd!(cs_seq, receiverpool[k], p,  flux*dt)
         pooladd!(cs_seq, donerpool[k],    p, -flux*dt)
     end
+    for p in 1:np, i in 1:nveg   # gap-mortality losses
+        pooladd!(cs_seq, i, p, -getfield(cf_seq, CLM._GMC_FLUX[i])[p] * dt)
+    end
 
     # (b) matrix advance via the wiring under test
     cs_mat = fresh()
     cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, 1, 1; use_matrixcn=true)
-    set_fluxes!(cf, cs_mat)
-    CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)
+    set_fluxes!(cf, cs_mat); set_gm!(cf, cs_mat)
+    CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)   # sets ph + gm topology
     cf.matrix_alloc_patch = zeros(np, nveg); cf.matrix_Cinput_patch = zeros(np)
-    cf.matrix_gmtransfer_doner_patch = fill(CLM.ILEAF, counts.ncgmtrans)
-    cf.matrix_gmtransfer_receiver_patch = fill(CLM.ILEAF, counts.ncgmtrans)
-    cf.matrix_gmtransfer_patch = zeros(np, counts.ncgmtrans); cf.matrix_gmturnover_patch = zeros(np, nveg)
     cf.matrix_fitransfer_doner_patch = fill(CLM.ILEAF, counts.ncfitrans)
     cf.matrix_fitransfer_receiver_patch = fill(CLM.ILEAF, counts.ncfitrans)
     cf.matrix_fitransfer_patch = zeros(np, counts.ncfitrans); cf.matrix_fiturnover_patch = zeros(np, nveg)
 
     CLM.cn_veg_matrix_accumulate_ph_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)
+    CLM.cn_veg_matrix_accumulate_gm_c!(cf, cs_mat, trues(np), 1:np; dt=dt, matrixcheck=false)
     CLM.cn_veg_matrix_solve_c!(cs_mat, cf; mask_soilp=trues(np), bounds_patch=1:np,
         ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=nveg, counts=counts, dt=dt, num_actfirep=0)
 
