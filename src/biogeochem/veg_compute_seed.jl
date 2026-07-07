@@ -206,56 +206,95 @@ amount internally.
 
 Ported from `ComputeSeedAmounts` in `CNVegComputeSeedMod.F90`.
 """
-function compute_seed_amounts!(mask_soilp::BitVector,
+# Per-patch seed kernel. Own-index writes (seed_*[p]); leaf_proportions and
+# species_type_multiplier are inlined T-generically (their error() branches are
+# unreachable for the valid species (1-4) / component the caller passes, so they
+# are dropped — byte-identical on valid input). Only species N (==4) distinguishes
+# leaf vs deadwood via leafcn/deadwdcn; C12/C13/C14 multipliers are component-free.
+@kernel function _seed_amounts_kernel!(seed_leaf, seed_leaf_storage, seed_leaf_xfer,
+        seed_deadstem, @Const(mask_soilp), @Const(compute_here), @Const(ignore_state),
+        @Const(itype), @Const(leaf), @Const(leaf_storage), @Const(leaf_xfer),
+        @Const(c3psn), @Const(leafcn), @Const(deadwdcn), @Const(evergreen), @Const(woody),
+        species::Int, leafc_seed, deadstemc_seed, noveg_val::Int,
+        c3_r2, c4_r2, c14ratio, begp::Int, endp::Int)
+    p = @index(Global)
+    T = eltype(seed_leaf)
+    @inbounds if begp <= p <= endp && mask_soilp[p] && compute_here[p]
+        pft_type = itype[p]
+        ji = pft_type + 1
+
+        # --- leaf_proportions (inlined) ---
+        tot_leaf = leaf[p] + leaf_storage[p] + leaf_xfer[p]
+        pleaf = zero(T); pstor = zero(T); pxfer = zero(T)
+        if tot_leaf == zero(T) || ignore_state[p]
+            if evergreen[ji] == one(T)
+                pleaf = one(T)
+            else
+                pstor = one(T)
+            end
+        else
+            pleaf = leaf[p] / tot_leaf
+            pstor = leaf_storage[p] / tot_leaf
+            pxfer = leaf_xfer[p] / tot_leaf
+        end
+
+        my_leaf_seed = zero(T)
+        my_deadstem_seed = zero(T)
+        if pft_type != noveg_val
+            # species_type_multiplier(·, LEAF): C12=1, C13=C3/C4_R2, C14=ratio, N=1/leafcn
+            mult_leaf = species == CN_SPECIES_C12 ? one(T) :
+                        species == CN_SPECIES_C13 ? (c3psn[ji] == one(T) ? c3_r2 : c4_r2) :
+                        species == CN_SPECIES_C14 ? c14ratio :
+                                                    one(T) / leafcn[ji]
+            my_leaf_seed = leafc_seed * mult_leaf
+            if woody[ji] == one(T)
+                mult_dead = species == CN_SPECIES_C12 ? one(T) :
+                            species == CN_SPECIES_C13 ? (c3psn[ji] == one(T) ? c3_r2 : c4_r2) :
+                            species == CN_SPECIES_C14 ? c14ratio :
+                                                        one(T) / deadwdcn[ji]
+                my_deadstem_seed = deadstemc_seed * mult_dead
+            end
+        end
+
+        seed_leaf[p]         = my_leaf_seed * pleaf
+        seed_leaf_storage[p] = my_leaf_seed * pstor
+        seed_leaf_xfer[p]    = my_leaf_seed * pxfer
+        seed_deadstem[p]     = my_deadstem_seed
+    end
+end
+
+function compute_seed_amounts!(mask_soilp::AbstractVector{Bool},
                                 bounds::UnitRange{Int},
                                 patch::PatchData,
                                 pftcon_data::PftconType;
                                 species::Int,
                                 leafc_seed::Real,
                                 deadstemc_seed::Real,
-                                leaf_patch::Vector{<:Real},
-                                leaf_storage_patch::Vector{<:Real},
-                                leaf_xfer_patch::Vector{<:Real},
-                                compute_here_patch::Vector{Bool},
-                                ignore_current_state_patch::Vector{Bool},
-                                seed_leaf_patch::Vector{<:Real},
-                                seed_leaf_storage_patch::Vector{<:Real},
-                                seed_leaf_xfer_patch::Vector{<:Real},
-                                seed_deadstem_patch::Vector{<:Real},
+                                leaf_patch::AbstractVector{<:Real},
+                                leaf_storage_patch::AbstractVector{<:Real},
+                                leaf_xfer_patch::AbstractVector{<:Real},
+                                compute_here_patch::AbstractVector{Bool},
+                                ignore_current_state_patch::AbstractVector{Bool},
+                                seed_leaf_patch::AbstractVector{<:Real},
+                                seed_leaf_storage_patch::AbstractVector{<:Real},
+                                seed_leaf_xfer_patch::AbstractVector{<:Real},
+                                seed_deadstem_patch::AbstractVector{<:Real},
                                 noveg_val::Int = noveg)
-    for p in bounds
-        mask_soilp[p] || continue
-        compute_here_patch[p] || continue
+    isempty(bounds) && return nothing
+    T = eltype(seed_leaf_patch)
+    # Copy the needed pftcon arrays onto the output's backend/precision (the const
+    # global pftcon holds concrete host Vectors). On CPU this is a plain copy.
+    onb(a) = seed_leaf_patch isa Array ? a :
+             copyto!(similar(seed_leaf_patch, T, length(a)), a)
 
-        my_leaf_seed    = 0.0
-        my_deadstem_seed = 0.0
-
-        pft_type = patch.itype[p]
-
-        pleaf, pstor, pxfer = leaf_proportions(
-            ignore_current_state_patch[p],
-            pft_type,
-            leaf_patch[p],
-            leaf_storage_patch[p],
-            leaf_xfer_patch[p],
-            pftcon_data)
-
-        if pft_type != noveg_val
-            my_leaf_seed = leafc_seed *
-                species_type_multiplier(species, pft_type, COMPONENT_LEAF, pftcon_data)
-
-            ji = pft_type + 1  # Julia 1-based index
-            if pftcon_data.woody[ji] == 1.0
-                my_deadstem_seed = deadstemc_seed *
-                    species_type_multiplier(species, pft_type, COMPONENT_DEADWOOD, pftcon_data)
-            end
-        end
-
-        seed_leaf_patch[p]         = my_leaf_seed * pleaf
-        seed_leaf_storage_patch[p] = my_leaf_seed * pstor
-        seed_leaf_xfer_patch[p]    = my_leaf_seed * pxfer
-        seed_deadstem_patch[p]     = my_deadstem_seed
-    end
-
+    _launch!(_seed_amounts_kernel!, seed_leaf_patch, seed_leaf_storage_patch,
+             seed_leaf_xfer_patch, seed_deadstem_patch,
+             mask_soilp, compute_here_patch, ignore_current_state_patch,
+             patch.itype, leaf_patch, leaf_storage_patch, leaf_xfer_patch,
+             onb(pftcon_data.c3psn), onb(pftcon_data.leafcn), onb(pftcon_data.deadwdcn),
+             onb(pftcon_data.evergreen), onb(pftcon_data.woody),
+             species, T(leafc_seed), T(deadstemc_seed), noveg_val,
+             T(C3_R2), T(C4_R2), T(C14RATIO), first(bounds), last(bounds);
+             ndrange = last(bounds))
     return nothing
 end
