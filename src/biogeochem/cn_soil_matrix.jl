@@ -296,6 +296,34 @@ function cn_soil_matrix_input_accumulate!(
     return nothing
 end
 
+# Carbon-only isotope B-input: same litter/CWD structure as the C accumulator, reading
+# the isotope veg carbon flux (phenology/gap/fire → litr/cwd). Fills matrix_Ciso_input
+# (nc, ndecomp_pools_vr). Used for the C13/C14 soil-matrix advance.
+function cn_soil_matrix_iso_input!(matrix_Ciso_input::AbstractMatrix{<:Real}, cf_iso;
+        mask_soilc::AbstractVector{Bool}, bounds_col::UnitRange{Int},
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
+        dt::Real, transient_landcover::Bool = false, begc::Int = first(bounds_col))
+    fill!(matrix_Ciso_input, 0.0)
+    dt = Float64(dt)
+    litr_c = transient_landcover ? (_SOILC_LITR_IN..., _SOILC_LITR_IN_TR...) : _SOILC_LITR_IN
+    cwd_c  = transient_landcover ? (_SOILC_CWD_IN...,  _SOILC_CWD_IN_TR...)  : _SOILC_CWD_IN
+    for c in bounds_col
+        mask_soilc[c] || continue
+        ui = c - begc + 1
+        for j in 1:nlevdecomp
+            for i in i_litr_min:i_litr_max
+                cin = 0.0
+                for f in litr_c; cin += getfield(cf_iso, f)[c, j, i]; end
+                matrix_Ciso_input[ui, j + (i - 1) * nlevdecomp] += cin * dt
+            end
+            cin = 0.0
+            for f in cwd_c; cin += getfield(cf_iso, f)[c, j]; end
+            matrix_Ciso_input[ui, j + (i_cwd - 1) * nlevdecomp] += cin * dt
+        end
+    end
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # cn_soil_matrix_advance! — driver entry point. Assembles the soil-matrix step from
 # the live soil/veg fluxes and advances the decomp C/N pools by one cn_soil_matrix!
@@ -316,7 +344,12 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         nlevdecomp::Int, ndecomp_pools::Int, ndecomp_cascade_transitions::Int,
         i_litr_min::Int, i_litr_max::Int, i_cwd::Int, dt::Real,
         num_actfirec::Int = 0, transient_landcover::Bool = false,
-        soilbgc_nf = nothing, soil_matrix_state = nothing)
+        soilbgc_nf = nothing, soil_matrix_state = nothing,
+        # Optional carbon isotopes: isotope soil-carbon state (decomp_cpools_vr_col) +
+        # isotope veg-carbon flux (litter fields, for the isotope B-input). Advanced with
+        # the same operator as C. nothing → isotope not carried.
+        c13_soilbgc_cs = nothing, c13_cnveg_cf = nothing,
+        c14_soilbgc_cs = nothing, c14_cnveg_cf = nothing)
 
     begc = first(bounds_col); endc = last(bounds_col); nc = endc - begc + 1
     ndp_vr = ndecomp_pools * nlevdecomp
@@ -373,6 +406,25 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
     # index structure (init_ready*/list_ready*); a fresh one per call is correct but
     # rebuilds the indices every step. Reuse is validated in test_cn_soil_matrix
     # ("memoized index reuse"). Falls back to a fresh state when none is supplied.
+    # Isotope pools + B-inputs (carbon only). Built from the isotope veg-carbon flux.
+    c13pools = c13_soilbgc_cs === nothing ? nothing : c13_soilbgc_cs.decomp_cpools_vr_col
+    c14pools = c14_soilbgc_cs === nothing ? nothing : c14_soilbgc_cs.decomp_cpools_vr_col
+    C13in = nothing; C14in = nothing
+    if c13pools !== nothing && c13_cnveg_cf !== nothing
+        C13in = zeros(nc, ndp_vr)
+        cn_soil_matrix_iso_input!(C13in, c13_cnveg_cf; mask_soilc=mask_soilc,
+            bounds_col=bounds_col, nlevdecomp=nlevdecomp, i_litr_min=i_litr_min,
+            i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
+            transient_landcover=transient_landcover, begc=begc)
+    end
+    if c14pools !== nothing && c14_cnveg_cf !== nothing
+        C14in = zeros(nc, ndp_vr)
+        cn_soil_matrix_iso_input!(C14in, c14_cnveg_cf; mask_soilc=mask_soilc,
+            bounds_col=bounds_col, nlevdecomp=nlevdecomp, i_litr_min=i_litr_min,
+            i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
+            transient_landcover=transient_landcover, begc=begc)
+    end
+
     ms = soil_matrix_state === nothing ? CNSoilMatrixState() : soil_matrix_state
     cn_soil_matrix!(ms, cascade_con;
         decomp_cpools_vr=soilbgc_cs.decomp_cpools_vr_col,
@@ -382,6 +434,8 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
         rf_decomp_cascade=soilbgc_cf.rf_decomp_cascade_col,
         pathfrac_decomp_cascade=soilbgc_cf.pathfrac_decomp_cascade_col,
         matrix_decomp_fire_k=fire_k,
+        decomp_c13pools_vr=c13pools, matrix_C13input=C13in,
+        decomp_c14pools_vr=c14pools, matrix_C14input=C14in,
         mask_soilc=mask_soilc, begc=begc, endc=endc,
         nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
         ndecomp_cascade_transitions=ndecomp_cascade_transitions,
@@ -425,7 +479,16 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
         nlevdecomp::Int, ndecomp_pools::Int,
         ndecomp_cascade_transitions::Int,
         ndecomp_cascade_outtransitions::Int=0,
-        num_actfirec::Int=0)
+        num_actfirec::Int=0,
+        # Optional carbon-isotope decomp pools (C13/C14). When supplied they are advanced
+        # with the SAME transfer operator AKallsoilc as C (transfer/vertical/fire fractions
+        # are isotope-independent; C14 radioactive decay is applied separately by
+        # c14_decay!), each with its own per-step B-input. Port of the matrix_Cinter13/14
+        # SPMM_AX(AKallsoilc) path in CNSoilMatrixMod. Gated: nothing → no-op.
+        decomp_c13pools_vr::Union{AbstractArray{<:Real,3},Nothing}=nothing,
+        matrix_C13input::Union{AbstractMatrix{<:Real},Nothing}=nothing,
+        decomp_c14pools_vr::Union{AbstractArray{<:Real,3},Nothing}=nothing,
+        matrix_C14input::Union{AbstractMatrix{<:Real},Nothing}=nothing)
 
     ndecomp_pools_vr = ndecomp_pools * nlevdecomp
     Ntrans = (ndecomp_cascade_transitions - ndecomp_cascade_outtransitions) * nlevdecomp
@@ -589,8 +652,38 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
         decomp_npools_vr[c, j, i] = ms.matrix_Ninter.V[ui, idx]
     end
 
+    # ----- Carbon isotopes: advance with the SAME AKallsoilc as C, own B-input. -----
+    _advance_iso_soil!(decomp_c13pools_vr, matrix_C13input, ms.AKallsoilc,
+        ndecomp_pools_vr, ndecomp_pools, nlevdecomp, begc, endc, filter_soilc, num_soilc)
+    _advance_iso_soil!(decomp_c14pools_vr, matrix_C14input, ms.AKallsoilc,
+        ndecomp_pools_vr, ndecomp_pools, nlevdecomp, begc, endc, filter_soilc, num_soilc)
+
     release_dm!(Kdm); release_dm!(Kndm)
     return (Cinter_old, Ninter_old)
+end
+
+# Advance one carbon-isotope decomp-pool array with the (already-built) C transfer
+# operator AKallsoilc: X_iso = X_iso + AKallsoilc·X_iso + I_iso·dt. No-op when the pool
+# array is nothing (isotope disabled). A missing B-input is treated as zero.
+function _advance_iso_soil!(decomp_iso_vr, matrix_Ciso_input, AKallsoilc,
+        ndecomp_pools_vr::Int, ndecomp_pools::Int, nlevdecomp::Int,
+        begc::Int, endc::Int, filter_soilc::AbstractVector{<:Integer}, num_soilc::Int)
+    decomp_iso_vr === nothing && return nothing
+    Xiso = VectorType(); init_v!(Xiso, ndecomp_pools_vr, begc, endc)
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp, c in filter_soilc
+        Xiso.V[c - begc + 1, j + (i - 1) * nlevdecomp] = decomp_iso_vr[c, j, i]
+    end
+    spmm_ax!(Xiso, num_soilc, filter_soilc, AKallsoilc)
+    if matrix_Ciso_input !== nothing
+        for jj in 1:ndecomp_pools_vr, c in filter_soilc
+            ui = c - begc + 1
+            Xiso.V[ui, jj] = matrix_Ciso_input[ui, jj] + Xiso.V[ui, jj]
+        end
+    end
+    for i in 1:ndecomp_pools, j in 1:nlevdecomp, c in filter_soilc
+        decomp_iso_vr[c, j, i] = Xiso.V[c - begc + 1, j + (i - 1) * nlevdecomp]
+    end
+    return nothing
 end
 
 # --------------------------------------------------------------------------
