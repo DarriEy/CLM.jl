@@ -94,6 +94,7 @@ using CLM
     include("test_cn_soil_matrix.jl")
     include("test_cn_soil_matrix_input.jl")
     include("test_cn_soil_matrix_advance.jl")
+    include("test_cn_soil_matrix_bgc_topology.jl")
     include("test_dwt_matrix_input.jl")
     include("test_decomp_bgc.jl")
     include("test_decomp_mimics.jl")
