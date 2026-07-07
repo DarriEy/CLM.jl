@@ -571,17 +571,26 @@ Sparse matrix × diagonal matrix, in place: `A(this) = A(this) · K`. Scales eac
 non-zero entry by the diagonal element of its column: `M[u,i] *= K.DM[u, CI[i]]`.
 This is the AKX operator used to apply turnover/transfer rates. Matches `SPMM_AK`.
 """
+# Per-unit element-wise scale of the sparse entries by the diagonal K (no accumulation
+# across entries → order-independent, byte-identical parallelized one thread per unit).
+@kernel function _spmm_ak_kernel!(thisM, @Const(KDM), @Const(CI), @Const(filter_u),
+        NE::Int, this_begu::Int, K_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; uK = u - K_begu + 1
+        for i in 1:NE
+            thisM[ui, i] = thisM[ui, i] * KDM[uK, CI[i]]
+        end
+    end
+end
+
 function spmm_ak!(this::SparseMatrixType, num_unit::Int,
                   filter_u::AbstractVector{Int}, K::DiagMatrixType)
     @assert length(filter_u) >= num_unit
     @assert this.SM == K.SM
-    for i in 1:this.NE
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            ui = u_idx(this.begu, u)
-            this.M[ui, i] = this.M[ui, i] * K.DM[u_idx(K.begu, u), this.CI[i]]
-        end
-    end
+    num_unit == 0 && return nothing
+    _launch!(_spmm_ak_kernel!, this.M, K.DM, this.CI, filter_u,
+             this.NE, this.begu, K.begu; ndrange = num_unit)
     return nothing
 end
 
@@ -592,20 +601,33 @@ Sparse matrix × vector, accumulating in place: `X(this) = X(this) + A · X(this
 using the ORIGINAL `X` on the right (a temporary snapshot is taken first). This is
 the pool-advance operator `X(t+1) = (I + A)·X(t)`. Matches `SPMM_AX`.
 """
+# One KA thread per unit; the per-entry loop stays sequential in-thread so the in-place
+# accumulation order (and thus the result) is byte-identical to the host loop — each
+# thread owns its own unit row, so there is no cross-thread write. RI/CI are the shared
+# (read-only) static index arrays. Vsnap is the pre-copied right-hand operand.
+@kernel function _spmm_ax_kernel!(thisV, @Const(Vsnap), @Const(AM), @Const(RI), @Const(CI),
+        @Const(filter_u), NE::Int, this_begu::Int, A_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]
+        ui = u - this_begu + 1
+        uA = u - A_begu + 1
+        for i in 1:NE
+            thisV[ui, RI[i]] = thisV[ui, RI[i]] + AM[uA, i] * Vsnap[ui, CI[i]]
+        end
+    end
+end
+
 function spmm_ax!(this::VectorType, num_unit::Int,
                   filter_u::AbstractVector{Int}, A::SparseMatrixType)
     @assert length(filter_u) >= num_unit
     @assert this.SV <= A.SM
     @assert size(A.M, 2) >= A.NE
+    num_unit == 0 && return nothing
     # Snapshot of the input vector (right-hand operand).
     V = copy(this.V)
-    for i in 1:A.NE
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            ui = u_idx(this.begu, u)
-            this.V[ui, A.RI[i]] = this.V[ui, A.RI[i]] + A.M[u_idx(A.begu, u), i] * V[ui, A.CI[i]]
-        end
-    end
+    _launch!(_spmm_ax_kernel!, this.V, V, A.M, A.RI, A.CI, filter_u,
+             A.NE, this.begu, A.begu; ndrange = num_unit)
     return nothing
 end
 
@@ -615,6 +637,19 @@ end
 Sparse matrix accumulation in place: `B(this) = B(this) + A`. Requires A and B to
 share the exact same entry locations (same RI/CI). Matches `SPMP_B_ACC`.
 """
+# Per-unit element-wise add of two same-structure sparse matrices (A + B). Each cell
+# [ui,i] written once → order-independent, byte-identical parallelized per unit.
+@kernel function _spmp_b_acc_kernel!(thisM, @Const(AM), @Const(filter_u),
+        NE::Int, this_begu::Int, A_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; uA = u - A_begu + 1
+        for i in 1:NE
+            thisM[ui, i] = thisM[ui, i] + AM[uA, i]
+        end
+    end
+end
+
 function spmp_b_acc!(this::SparseMatrixType, num_unit::Int,
                      filter_u::AbstractVector{Int}, A::SparseMatrixType)
     @assert length(filter_u) >= num_unit
@@ -622,13 +657,9 @@ function spmp_b_acc!(this::SparseMatrixType, num_unit::Int,
     @assert this.NE == A.NE
     @assert all(this.RI[1:this.NE] .== A.RI[1:A.NE])
     @assert all(this.CI[1:this.NE] .== A.CI[1:A.NE])
-    for i in 1:A.NE
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            ui = u_idx(this.begu, u)
-            this.M[ui, i] = this.M[ui, i] + A.M[u_idx(A.begu, u), i]
-        end
-    end
+    num_unit == 0 && return nothing
+    _launch!(_spmp_b_acc_kernel!, this.M, A.M, filter_u,
+             A.NE, this.begu, A.begu; ndrange = num_unit)
     return nothing
 end
 
