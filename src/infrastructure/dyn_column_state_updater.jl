@@ -157,6 +157,26 @@ end
     end
 end
 
+# Accumulate acc[c] += src[c] * scale over [begc, endc] (used by dyn_cnbal_col!
+# to depth-integrate the per-level apparent state change into the column total).
+@kernel function _csu_accum_scaled_kernel!(acc, @Const(src), scale, begc::Int, endc::Int)
+    c = @index(Global)
+    @inbounds if begc <= c <= endc
+        acc[c] = acc[c] + src[c] * scale
+    end
+end
+
+# Device-capable helpers wrapping the two column bookkeeping kernels.
+function zero_col!(out, begc::Int, endc::Int)
+    _launch!(_csu_zero_col_kernel!, out, begc, endc; ndrange = endc)
+    return nothing
+end
+function accumulate_scaled_col!(acc, src, scale::Real, begc::Int, endc::Int)
+    _launch!(_csu_accum_scaled_kernel!, acc, src, eltype(acc)(scale), begc, endc;
+             ndrange = endc)
+    return nothing
+end
+
 # Variant 1 builder: every column is prognostic and seeds its own value.
 @kernel function _csu_vals_nospecial_kernel!(vals_input, has_prog, @Const(var),
                                              begc::Int, endc::Int)

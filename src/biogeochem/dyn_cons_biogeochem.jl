@@ -95,19 +95,30 @@ function dynamic_patch_adjustments_carbon!(cs::CNVegCarbonStateData,
     bp = bounds.begp:bounds.endp
     np = bounds.endp
 
+    # Backend-aware scratch: allocate on cs.leafc_patch's backend so the whole
+    # adjustment runs on-device when the CN state is device-resident (identity on
+    # CPU → byte-identical). owz/pgrew return host BitVectors (the updater helpers
+    # Array()-copy); collect + copy them to the working backend.
+    _ref = cs.leafc_patch
+    FT = eltype(_ref)
+    _zeros(n) = fill!(similar(_ref, FT, n), zero(FT))
+    _onbk_bool(a) = _ref isa Array ? a : copyto!(similar(_ref, Bool, length(a)), a)
+    _onbk_f(a)    = _ref isa Array ? a : copyto!(similar(_ref, FT, length(a)), a)
+
     owz = old_weight_was_zero(updater, bounds)
     pgrew = patch_grew(updater, bounds)
 
-    # ComputeSeedAmounts uses Vector{Bool} compute/ignore flags
-    compute_here = collect(Bool, pgrew)
-    ignore_state = collect(Bool, owz)
+    # ComputeSeedAmounts uses Bool compute/ignore flags (device-resident on GPU)
+    compute_here = _onbk_bool(collect(Bool, pgrew))
+    ignore_state = _onbk_bool(collect(Bool, owz))
+    mask = _onbk_bool(collect(Bool, mask_soilp))
 
-    seed_leafc          = zeros(Float64, np)
-    seed_leafc_storage  = zeros(Float64, np)
-    seed_leafc_xfer     = zeros(Float64, np)
-    seed_deadstemc      = zeros(Float64, np)
+    seed_leafc          = _zeros(np)
+    seed_leafc_storage  = _zeros(np)
+    seed_leafc_xfer     = _zeros(np)
+    seed_deadstemc      = _zeros(np)
 
-    compute_seed_amounts!(mask_soilp, bp, patch, pftcon_data;
+    compute_seed_amounts!(mask, bp, patch, pftcon_data;
         species = CN_SPECIES_C12,
         leafc_seed = leafc_seed, deadstemc_seed = deadstemc_seed,
         leaf_patch = cs.leafc_patch,
@@ -148,7 +159,7 @@ function dynamic_patch_adjustments_carbon!(cs::CNVegCarbonStateData,
         flux_out_grc_area = conv_cflux)
 
     # --- Dead stem: split by PFT type into conv (pconv) + wood product ---
-    pconv = build_flux_fraction_by_type(pftcon_data.pconv)
+    pconv = _onbk_f(build_flux_fraction_by_type(pftcon_data.pconv))
     update_patch_state_partition_flux_by_type!(updater, bounds, patch, filterp,
         pconv, cs.deadstemc_patch, conv_cflux, wood_product_cflux;
         seed = seed_deadstemc, seed_addition = dwt_deadstemc_seed)
@@ -246,17 +257,25 @@ function dynamic_patch_adjustments_nitrogen!(ns::CNVegNitrogenStateData,
     bp = bounds.begp:bounds.endp
     np = bounds.endp
 
+    # Backend-aware scratch (identity on CPU; device-resident when ns is on GPU).
+    _ref = ns.leafn_patch
+    FT = eltype(_ref)
+    _zeros(n) = fill!(similar(_ref, FT, n), zero(FT))
+    _onbk_bool(a) = _ref isa Array ? a : copyto!(similar(_ref, Bool, length(a)), a)
+    _onbk_f(a)    = _ref isa Array ? a : copyto!(similar(_ref, FT, length(a)), a)
+
     owz = old_weight_was_zero(updater, bounds)
     pgrew = patch_grew(updater, bounds)
-    compute_here = collect(Bool, pgrew)
-    ignore_state = collect(Bool, owz)
+    compute_here = _onbk_bool(collect(Bool, pgrew))
+    ignore_state = _onbk_bool(collect(Bool, owz))
+    mask = _onbk_bool(collect(Bool, mask_soilp))
 
-    seed_leafn          = zeros(Float64, np)
-    seed_leafn_storage  = zeros(Float64, np)
-    seed_leafn_xfer     = zeros(Float64, np)
-    seed_deadstemn      = zeros(Float64, np)
+    seed_leafn          = _zeros(np)
+    seed_leafn_storage  = _zeros(np)
+    seed_leafn_xfer     = _zeros(np)
+    seed_deadstemn      = _zeros(np)
 
-    compute_seed_amounts!(mask_soilp, bp, patch, pftcon_data;
+    compute_seed_amounts!(mask, bp, patch, pftcon_data;
         species = CN_SPECIES_N,
         leafc_seed = leafc_seed, deadstemc_seed = deadstemc_seed,
         leaf_patch = ns.leafn_patch,
@@ -297,7 +316,7 @@ function dynamic_patch_adjustments_nitrogen!(ns::CNVegNitrogenStateData,
         flux_out_grc_area = conv_nflux)
 
     # --- Dead stem: split by PFT type into conv (pconv) + wood product ---
-    pconv = build_flux_fraction_by_type(pftcon_data.pconv)
+    pconv = _onbk_f(build_flux_fraction_by_type(pftcon_data.pconv))
     update_patch_state_partition_flux_by_type!(updater, bounds, patch, filterp,
         pconv, ns.deadstemn_patch, conv_nflux, wood_product_nflux;
         seed = seed_deadstemn, seed_addition = dwt_deadstemn_seed)
@@ -710,12 +729,14 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
 
     dzs = dzsoi_decomp[]
 
-    adjustment = zeros(Float64, nc)
+    # Backend-aware adjustment scratch (device-resident when the soil BGC state
+    # is on-device; the per-level depth-integration uses zero_col!/accumulate_
+    # scaled_col! so no device array is scalar-indexed on the host).
+    FT = eltype(cs.decomp_cpools_vr_col)
+    adjustment = fill!(similar(cs.decomp_cpools_vr_col, FT, nc), zero(FT))
 
     # ----- Carbon -----
-    for c in begc:endc
-        cs.dyn_cbal_adjustments_col[c] = 0.0
-    end
+    zero_col!(cs.dyn_cbal_adjustments_col, begc, endc)
 
     ndecomp_pools_c = size(cs.decomp_cpools_vr_col, 3)
     nlevdecomp_c    = size(cs.decomp_cpools_vr_col, 2)
@@ -723,9 +744,7 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
         for j in 1:nlevdecomp_c
             update_column_state_no_special_handling!(updater, bounds, clump_index,
                 col, @view(cs.decomp_cpools_vr_col[:, j, l]); adjustment = adjustment)
-            for c in begc:endc
-                cs.dyn_cbal_adjustments_col[c] += adjustment[c] * dzs[j]
-            end
+            accumulate_scaled_col!(cs.dyn_cbal_adjustments_col, adjustment, dzs[j], begc, endc)
         end
     end
 
@@ -733,15 +752,11 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
     for j in 1:nlevc_trunc
         update_column_state_no_special_handling!(updater, bounds, clump_index,
             col, @view(cs.ctrunc_vr_col[:, j]); adjustment = adjustment)
-        for c in begc:endc
-            cs.dyn_cbal_adjustments_col[c] += adjustment[c] * dzs[j]
-        end
+        accumulate_scaled_col!(cs.dyn_cbal_adjustments_col, adjustment, dzs[j], begc, endc)
     end
 
     # ----- Nitrogen -----
-    for c in begc:endc
-        ns.dyn_nbal_adjustments_col[c] = 0.0
-    end
+    zero_col!(ns.dyn_nbal_adjustments_col, begc, endc)
 
     ndecomp_pools_n = size(ns.decomp_npools_vr_col, 3)
     nlevdecomp_n    = size(ns.decomp_npools_vr_col, 2)
@@ -749,9 +764,7 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
         for j in 1:nlevdecomp_n
             update_column_state_no_special_handling!(updater, bounds, clump_index,
                 col, @view(ns.decomp_npools_vr_col[:, j, l]); adjustment = adjustment)
-            for c in begc:endc
-                ns.dyn_nbal_adjustments_col[c] += adjustment[c] * dzs[j]
-            end
+            accumulate_scaled_col!(ns.dyn_nbal_adjustments_col, adjustment, dzs[j], begc, endc)
         end
     end
 
@@ -759,15 +772,11 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
     for j in 1:nlevn_trunc
         update_column_state_no_special_handling!(updater, bounds, clump_index,
             col, @view(ns.ntrunc_vr_col[:, j]); adjustment = adjustment)
-        for c in begc:endc
-            ns.dyn_nbal_adjustments_col[c] += adjustment[c] * dzs[j]
-        end
+        accumulate_scaled_col!(ns.dyn_nbal_adjustments_col, adjustment, dzs[j], begc, endc)
 
         update_column_state_no_special_handling!(updater, bounds, clump_index,
             col, @view(ns.sminn_vr_col[:, j]); adjustment = adjustment)
-        for c in begc:endc
-            ns.dyn_nbal_adjustments_col[c] += adjustment[c] * dzs[j]
-        end
+        accumulate_scaled_col!(ns.dyn_nbal_adjustments_col, adjustment, dzs[j], begc, endc)
     end
 
     if use_nitrif_denitrif
@@ -775,22 +784,16 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
         for j in 1:nlevsmin
             # These pools aren't included in the overall N balance (totn), so
             # track them separately (reset each level, matching Fortran).
-            for c in begc:endc
-                ns.dyn_no3bal_adjustments_col[c] = 0.0
-                ns.dyn_nh4bal_adjustments_col[c] = 0.0
-            end
+            zero_col!(ns.dyn_no3bal_adjustments_col, begc, endc)
+            zero_col!(ns.dyn_nh4bal_adjustments_col, begc, endc)
 
             update_column_state_no_special_handling!(updater, bounds, clump_index,
                 col, @view(ns.smin_no3_vr_col[:, j]); adjustment = adjustment)
-            for c in begc:endc
-                ns.dyn_no3bal_adjustments_col[c] += adjustment[c] * dzs[j]
-            end
+            accumulate_scaled_col!(ns.dyn_no3bal_adjustments_col, adjustment, dzs[j], begc, endc)
 
             update_column_state_no_special_handling!(updater, bounds, clump_index,
                 col, @view(ns.smin_nh4_vr_col[:, j]); adjustment = adjustment)
-            for c in begc:endc
-                ns.dyn_nh4bal_adjustments_col[c] += adjustment[c] * dzs[j]
-            end
+            accumulate_scaled_col!(ns.dyn_nh4bal_adjustments_col, adjustment, dzs[j], begc, endc)
         end
     end
 
