@@ -296,6 +296,61 @@ function cn_soil_matrix_input_accumulate!(
 end
 
 # --------------------------------------------------------------------------
+# cn_soil_matrix_advance! — driver entry point. Assembles the soil-matrix step from
+# the live soil/veg fluxes and advances the decomp C/N pools by one cn_soil_matrix!
+# solve. Gated by the driver on use_soil_matrixcn (in matrix mode the sequential
+# decomp cascade, vertical transport, and litter-input state updates are all skipped,
+# leaving decomp_cpools_vr at start-of-step; this one solve subsumes them).
+#
+#   Ksoil     — the turnover diagonal decomp_k_col·dt (fpi-corrected in decomp!).
+#   tri_ma_vr — the vertical-transport matrix (built by litter_vert_transp! in
+#               use_soil_matrixcn mode).
+#   B-input   — accumulated here from the veg→soil litter/CWD fluxes.
+# `ms` is created fresh per call (the index memoization is a within-step optimization).
+# init_soil_transfer! sets the (static) sparse index structure on cascade_con once.
+# --------------------------------------------------------------------------
+function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf,
+        cnveg_cf, cnveg_nf; Ksoil::AbstractMatrix{<:Real},
+        mask_soilc::AbstractVector{Bool}, bounds_col::UnitRange{Int},
+        nlevdecomp::Int, ndecomp_pools::Int, ndecomp_cascade_transitions::Int,
+        i_litr_min::Int, i_litr_max::Int, i_cwd::Int, dt::Real,
+        num_actfirec::Int = 0, transient_landcover::Bool = false)
+
+    begc = first(bounds_col); endc = last(bounds_col); nc = endc - begc + 1
+    ndp_vr = ndecomp_pools * nlevdecomp
+    nouttrans = count(==(0), cascade_con.cascade_receiver_pool)   # terminal (→atm) transitions
+
+    # Static sparse index structure — build once (guard on the sentinel).
+    if cascade_con.n_all_entries == SMM_EMPTY_INT
+        init_soil_transfer!(cascade_con; ndecomp_pools=ndecomp_pools, nlevdecomp=nlevdecomp,
+            ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+            ndecomp_cascade_outtransitions=nouttrans)
+    end
+
+    # B-input from the veg→soil litter/CWD fluxes.
+    Cin = zeros(nc, ndp_vr); Nin = zeros(nc, ndp_vr)
+    cn_soil_matrix_input_accumulate!(Cin, Nin, cnveg_cf, cnveg_nf;
+        mask_soilc=mask_soilc, bounds_col=bounds_col, nlevdecomp=nlevdecomp,
+        i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
+        transient_landcover=transient_landcover)
+
+    ms = CNSoilMatrixState()
+    cn_soil_matrix!(ms, cascade_con;
+        decomp_cpools_vr=soilbgc_cs.decomp_cpools_vr_col,
+        decomp_npools_vr=soilbgc_ns.decomp_npools_vr_col,
+        Ksoil=Ksoil, tri_ma_vr=soilbgc_cf.tri_ma_vr,
+        matrix_Cinput=Cin, matrix_Ninput=Nin,
+        rf_decomp_cascade=soilbgc_cf.rf_decomp_cascade_col,
+        pathfrac_decomp_cascade=soilbgc_cf.pathfrac_decomp_cascade_col,
+        matrix_decomp_fire_k=nothing,   # fire-from-decomp deferred (default non-fire)
+        mask_soilc=mask_soilc, begc=begc, endc=endc,
+        nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+        ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+        ndecomp_cascade_outtransitions=nouttrans, num_actfirec=num_actfirec)
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # cn_soil_matrix! — advance the soil C/N pools by the matrix solve for one step.
 #
 # Port of `CNSoilMatrix` (the non-isotope, non-spinup core path). Inputs:

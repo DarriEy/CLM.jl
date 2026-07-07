@@ -411,6 +411,12 @@ function cn_driver_no_leaching!(
     pmnf_decomp_cascade   = _z3(ndecomp_cascade_transitions)
     p_decomp_npool_to_din = _z3(ndecomp_cascade_transitions)
 
+    # Soil matrix-CN turnover diagonal Ksoil (= decomp_k_col·dt, fpi-corrected inside
+    # soil_biogeochem_decomp!). Allocated only in matrix mode; handed to cn_soil_matrix!.
+    Ksoil_mat = config.use_soil_matrixcn ?
+        fill!(similar(soilbgc_cs.decomp_cpools_vr_col, _FT, nc, ndecomp_pools * nlevdecomp), zero(_FT)) :
+        nothing
+
     if _has_decomp
         # 1. Decomposition rate constants (T/moisture-dependent)
         decomp_rate_constants_bgc!(soilbgc_cf,
@@ -564,6 +570,17 @@ function cn_driver_no_leaching!(
             end
         end
 
+        # Soil matrix-CN: seed the turnover diagonal Ksoil = decomp_k_col·dt (before
+        # decomp!, which then applies the fpi_vr immobilization correction in place).
+        if config.use_soil_matrixcn
+            _dk = soilbgc_cf.decomp_k_col
+            for i in 1:ndecomp_pools, j in 1:nlevdecomp, c in bounds_col
+                if mask_bgc_soilc[c]
+                    Ksoil_mat[c, j + (i - 1) * nlevdecomp] = _dk[c, j, i] * dt
+                end
+            end
+        end
+
         # 4. Actual decomposition
         if decomp_params !== nothing
             soil_biogeochem_decomp!(soilbgc_cf, soilbgc_cs, soilbgc_nf, soilbgc_ns,
@@ -578,7 +595,8 @@ function cn_driver_no_leaching!(
                 pmnf_decomp_cascade=pmnf_decomp_cascade,
                 p_decomp_npool_to_din=p_decomp_npool_to_din,
                 dzsoi_decomp=dzsoi_decomp,
-                use_nitrif_denitrif=config.use_nitrif_denitrif)
+                use_nitrif_denitrif=config.use_nitrif_denitrif,
+                use_soil_matrixcn=config.use_soil_matrixcn, Ksoil_DM=Ksoil_mat)
         end
     end
 
@@ -782,6 +800,7 @@ function cn_driver_no_leaching!(
             zsoi_vals=zsoi_vals,
             dzsoi_decomp_vals=dzsoi_decomp,
             zisoi_vals=zisoi_vals,
+            use_soil_matrixcn=config.use_soil_matrixcn,
             use_c13=(config.use_c13 && c13_soilbgc_cs !== nothing && c13_soilbgc_cf !== nothing),
             use_c14=(config.use_c14 && c14_soilbgc_cs !== nothing && c14_soilbgc_cf !== nothing),
             c13_cs=c13_soilbgc_cs, c13_cf=c13_soilbgc_cf,
@@ -1109,6 +1128,25 @@ function cn_driver_no_leaching!(
 
         # C14Decay — not yet ported
     end  # num_bgc_vegp > 0
+
+    # Soil matrix-CN solve (phase 3) — WIRED (gated on use_soil_matrixcn). Runs after
+    # all veg→soil litter fluxes are computed (phenology/gap/fire → litr/cwd). In
+    # matrix mode the sequential decomp cascade + vertical transport + litter-input
+    # state updates all skipped (leaving decomp_cpools_vr at start-of-step); this one
+    # solve advances the pools by (A·K + V)·X + B, with K=Ksoil (decomp_k·dt, fpi-
+    # corrected in decomp!), V=tri_ma_vr (built by litter_vert_transp!), B=the litter
+    # inputs. Validated: cn_soil_matrix == sequential cascade (test_cn_soil_matrix) +
+    # tri_ma_vr tracks sequential transport (test_lvt_tri_ma_vr).
+    if _has_decomp && config.use_soil_matrixcn && decomp_params !== nothing
+        cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf,
+            cnveg_cf, cnveg_nf; Ksoil=Ksoil_mat,
+            mask_soilc=mask_bgc_soilc, bounds_col=bounds_col,
+            nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+            ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+            i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
+            num_actfirec=count(mask_actfirec),
+            transient_landcover=false)   # dwt kernel ungated → transient deferred
+    end
 
     # CNPrecisionControl (post fire) — WIRED
     if num_bgc_vegp > 0

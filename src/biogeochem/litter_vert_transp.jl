@@ -583,6 +583,15 @@ function litter_vert_transp!(
                     a_tri = _m(nj), b_tri = _m(nj), c_tri = _m(nj), r_tri = _m(nj),
                     cp = _m(nj), dp = _m(nj))
 
+    # tri_ma_vr must be sized (ncols, Ntri_setup) for the matrix build to write it;
+    # size it here if the flux instance was not initialised with use_soil_matrixcn.
+    if use_soil_matrixcn
+        Ntri = (nlevdecomp * 3 - 2) * (ndecomp_pools - 1)
+        if size(cf.tri_ma_vr, 1) != ncols || size(cf.tri_ma_vr, 2) != Ntri
+            cf.tri_ma_vr = fill!(similar(ref, FT, ncols, Ntri), zero(FT))
+        end
+    end
+
     # ------ Loop over tracer types (C, N) ------
     for i_type in 1:ntype
 
