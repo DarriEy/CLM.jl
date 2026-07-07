@@ -81,9 +81,12 @@ Base.@kwdef mutable struct CLMInstances
     soilbiogeochem_nitrogenstate::SoilBiogeochemNitrogenStateData = SoilBiogeochemNitrogenStateData()
     soilbiogeochem_nitrogenflux::SoilBiogeochemNitrogenFluxData   = SoilBiogeochemNitrogenFluxData()
 
-    # C14 soil-BGC carbon state/flux — only sized when use_c14 (empty otherwise);
-    # the parallel pools that c14_decay! radioactively decays alongside the C14
+    # C13/C14 soil-BGC carbon state/flux — only sized when use_c13/use_c14 (empty
+    # otherwise); the parallel soil pools the CIsoFlux* cascade routes isotope C
+    # into (and that c14_decay! radioactively decays), alongside the C13/C14
     # vegetation state on the CN vegetation facade.
+    c13_soilbiogeochem_carbonstate::SoilBiogeochemCarbonStateData = SoilBiogeochemCarbonStateData()
+    c13_soilbiogeochem_carbonflux::SoilBiogeochemCarbonFluxData   = SoilBiogeochemCarbonFluxData()
     c14_soilbiogeochem_carbonstate::SoilBiogeochemCarbonStateData = SoilBiogeochemCarbonStateData()
     c14_soilbiogeochem_carbonflux::SoilBiogeochemCarbonFluxData   = SoilBiogeochemCarbonFluxData()
 
@@ -231,6 +234,7 @@ function clm_instInit!(inst::CLMInstances;
                        use_luna::Bool = false,
                        use_lch4::Bool = false,
                        use_cndv::Bool = false,
+                       use_c13::Bool = false,
                        use_c14::Bool = false)
 
     # --- Grid hierarchy ---
@@ -295,7 +299,14 @@ function clm_instInit!(inst::CLMInstances;
                                  nlevdecomp_full, ndecomp_pools,
                                  ndecomp_cascade_transitions)
 
-    # C14 soil-BGC carbon state/flux — size only when the C14 tracer is active.
+    # C13/C14 soil-BGC carbon state/flux — size only when the tracer is active.
+    if use_c13
+        soil_bgc_carbon_state_init!(inst.c13_soilbiogeochem_carbonstate, nc, ng,
+                                    nlevdecomp_full, ndecomp_pools)
+        soil_bgc_carbon_flux_init!(inst.c13_soilbiogeochem_carbonflux, nc,
+                                   nlevdecomp_full, ndecomp_pools,
+                                   ndecomp_cascade_transitions)
+    end
     if use_c14
         soil_bgc_carbon_state_init!(inst.c14_soilbiogeochem_carbonstate, nc, ng,
                                     nlevdecomp_full, ndecomp_pools)

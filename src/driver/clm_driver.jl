@@ -1965,6 +1965,13 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
             soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
             soilbgc_state=inst.soilbiogeochem_state,
+            # C13/C14 soil-BGC state/flux for the CIsoFlux* cascade — passed only
+            # when the tracer is on (else nothing → cascade skipped). The facade
+            # additionally guards on the parallel veg + soil state being allocated.
+            c13_soilbgc_cs = config.use_c13 ? inst.c13_soilbiogeochem_carbonstate : nothing,
+            c13_soilbgc_cf = config.use_c13 ? inst.c13_soilbiogeochem_carbonflux : nothing,
+            c14_soilbgc_cs = config.use_c14 ? inst.c14_soilbiogeochem_carbonstate : nothing,
+            c14_soilbgc_cf = config.use_c14 ? inst.c14_soilbiogeochem_carbonflux : nothing,
             # Decomposition infrastructure (only pass if cascade is initialized)
             cascade_con=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_cascade : nothing),
             decomp_bgc_state=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_bgc_state : nothing),

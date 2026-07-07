@@ -426,6 +426,12 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
         soilbgc_state::SoilBiogeochemStateData,
+        # C13/C14 soil-BGC state/flux (the CIsoFlux* cascade sinks; supplied by the
+        # driver only when use_c13/use_c14 + the state is allocated — else nothing).
+        c13_soilbgc_cs::Union{SoilBiogeochemCarbonStateData, Nothing} = nothing,
+        c13_soilbgc_cf::Union{SoilBiogeochemCarbonFluxData, Nothing} = nothing,
+        c14_soilbgc_cs::Union{SoilBiogeochemCarbonStateData, Nothing} = nothing,
+        c14_soilbgc_cf::Union{SoilBiogeochemCarbonFluxData, Nothing} = nothing,
         # Decomposition infrastructure (optional, for full BGC)
         cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
         decomp_bgc_state::Union{DecompBGCState, Nothing} = nothing,
@@ -463,8 +469,24 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
 
     # crop_inst%CropIncrementYear — not yet ported
 
+    # C13/C14 cascade activation: run the CIsoFlux* cascade only when the parallel
+    # veg state (facade) AND soil state (driver-supplied) are both stood up.
+    # cn_driver_no_leaching! additionally gates on driver_config.use_c13/use_c14, so
+    # passing the bundles is a no-op unless the tracer is on. Pass nothing otherwise
+    # so an unallocated instance is never indexed.
+    _c13_on = !isempty(veg.c13_cnveg_carbonstate_inst.cpool_patch) && c13_soilbgc_cs !== nothing
+    _c14_on = !isempty(veg.c14_cnveg_carbonstate_inst.cpool_patch) && c14_soilbgc_cs !== nothing
+
     # CNDriverNoLeaching — already ported
     cn_driver_no_leaching!(veg.driver_config;
+        c13_cnveg_cs = _c13_on ? veg.c13_cnveg_carbonstate_inst : nothing,
+        c13_cnveg_cf = _c13_on ? veg.c13_cnveg_carbonflux_inst : nothing,
+        c13_soilbgc_cs = _c13_on ? c13_soilbgc_cs : nothing,
+        c13_soilbgc_cf = _c13_on ? c13_soilbgc_cf : nothing,
+        c14_cnveg_cs = _c14_on ? veg.c14_cnveg_carbonstate_inst : nothing,
+        c14_cnveg_cf = _c14_on ? veg.c14_cnveg_carbonflux_inst : nothing,
+        c14_soilbgc_cs = _c14_on ? c14_soilbgc_cs : nothing,
+        c14_soilbgc_cf = _c14_on ? c14_soilbgc_cf : nothing,
         mask_bgc_soilc=mask_bgc_soilc,
         mask_bgc_vegp=mask_bgc_vegp,
         mask_pcropp=mask_pcropp,
