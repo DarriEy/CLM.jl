@@ -1,6 +1,20 @@
 # ==========================================================================
 # Carbon Isotope Tracer Transport (C13/C14)
 #
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ STATUS: UNWIRED / OUT-OF-SCOPE (2026-07). This file is NOT include()d in │
+# │ src/CLM.jl, has no callers, and its test (test_carbon_isotopes.jl) is    │
+# │ NOT in runtests.jl — it is ported reference code only. C13/C14 tracers   │
+# │ are off by default (use_c13/use_c14=false) and rarely used.              │
+# │                                                                          │
+# │ TODO (deferred feature-integration, NOT a GPU task): to make the isotope │
+# │ subsystem live, (1) include this file in CLM.jl; (2) stand up parallel   │
+# │ C13/C14 state pools (mirror the carbon structs) + alloc/restart;         │
+# │ (3) thread c13_c14_photosynthesis! + c14_decay! into clm_drv! guarded by │
+# │ use_c13/use_c14 in the correct phase order; (4) wire the test into the   │
+# │ suite. Only then is GPU-kernelization of these routines meaningful.      │
+# └────────────────────────────────────────────────────────────────────────┘
+#
 # Ported from:
 #   - src/biogeochem/CNC14DecayMod.F90        — C14 radioactive decay
 #   - src/biogeophys/PhotosynthesisMod.F90     — C13/C14 fractionation during photosynthesis
