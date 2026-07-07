@@ -63,18 +63,49 @@
     @test Cin[1, 1 + (i_cwd-1)*nlevdecomp] > 0
     @test all(Cin[1, j + (i_cwd-1)*nlevdecomp] == sum(getfield(cf,f)[1,j] for f in cwd_c)*dt for j in 1:nlevdecomp)
 
-    # transient adds harvest + gru; with those fields zero it's identical.
-    for f in (:harvest_c_to_litr_c_col, :gru_c_to_litr_c_col, :harvest_c_to_cwdc_col, :gru_c_to_cwdc_col)
-        fill!(getfield(cf, f), 0.0)
+    # transient_landcover=true additionally routes harvest + gross-unrep litter/CWD
+    # inputs into the B-input. Set them nonzero and verify they are added on top of the
+    # non-transient inputs (and are EXCLUDED when transient_landcover=false).
+    hgru_litr = (:harvest_c_to_litr_c_col, :gru_c_to_litr_c_col)
+    hgru_cwd  = (:harvest_c_to_cwdc_col, :gru_c_to_cwdc_col)
+    hgru_litr_n = (:harvest_n_to_litr_n_col, :gru_n_to_litr_n_col)
+    hgru_cwd_n  = (:harvest_n_to_cwdn_col, :gru_n_to_cwdn_col)
+    for (ki, f) in enumerate(hgru_litr), j in 1:nlevdecomp, i in i_litr_min:i_litr_max
+        getfield(cf, f)[1, j, i] = 5.0 * ki + 0.2 * j + 0.03 * i
     end
-    for f in (:harvest_n_to_litr_n_col, :gru_n_to_litr_n_col, :harvest_n_to_cwdn_col, :gru_n_to_cwdn_col)
-        fill!(getfield(nf, f), 0.0)
+    for (ki, f) in enumerate(hgru_cwd), j in 1:nlevdecomp; getfield(cf, f)[1, j] = 20.0 * ki + 2 * j; end
+    for (ki, f) in enumerate(hgru_litr_n), j in 1:nlevdecomp, i in i_litr_min:i_litr_max
+        getfield(nf, f)[1, j, i] = 0.4 * ki + 0.05 * j + 0.006 * i
     end
-    Cin2 = zeros(nc, ndecomp_pools_vr); Nin2 = zeros(nc, ndecomp_pools_vr)
-    CLM.cn_soil_matrix_input_accumulate!(Cin2, Nin2, cf, nf;
+    for (ki, f) in enumerate(hgru_cwd_n), j in 1:nlevdecomp; getfield(nf, f)[1, j] = 2.0 * ki + j; end
+
+    # transient=false → unchanged (harvest/gru excluded).
+    CinF = zeros(nc, ndecomp_pools_vr); NinF = zeros(nc, ndecomp_pools_vr)
+    CLM.cn_soil_matrix_input_accumulate!(CinF, NinF, cf, nf;
+        mask_soilc=[true], bounds_col=1:nc, nlevdecomp=nlevdecomp,
+        i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
+        transient_landcover=false)
+    @test CinF ≈ Cref rtol=1e-10
+    @test NinF ≈ Nref rtol=1e-10
+
+    # transient=true → non-transient + harvest + gru.
+    CinT = zeros(nc, ndecomp_pools_vr); NinT = zeros(nc, ndecomp_pools_vr)
+    CLM.cn_soil_matrix_input_accumulate!(CinT, NinT, cf, nf;
         mask_soilc=[true], bounds_col=1:nc, nlevdecomp=nlevdecomp,
         i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
         transient_landcover=true)
-    @test Cin2 ≈ Cin atol=1e-12
-    @test Nin2 ≈ Nin atol=1e-12
+    CrefT = copy(Cref); NrefT = copy(Nref)
+    for j in 1:nlevdecomp
+        for i in i_litr_min:i_litr_max
+            vr = j + (i - 1) * nlevdecomp
+            CrefT[1, vr] += sum(getfield(cf, f)[1, j, i] for f in hgru_litr) * dt
+            NrefT[1, vr] += sum(getfield(nf, f)[1, j, i] for f in hgru_litr_n) * dt
+        end
+        vrc = j + (i_cwd - 1) * nlevdecomp
+        CrefT[1, vrc] += sum(getfield(cf, f)[1, j] for f in hgru_cwd) * dt
+        NrefT[1, vrc] += sum(getfield(nf, f)[1, j] for f in hgru_cwd_n) * dt
+    end
+    @test CinT ≈ CrefT rtol=1e-10
+    @test NinT ≈ NrefT rtol=1e-10
+    @test !(CinT ≈ Cref)   # harvest/gru genuinely changed the result
 end

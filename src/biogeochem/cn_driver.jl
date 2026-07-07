@@ -1145,7 +1145,11 @@ function cn_driver_no_leaching!(
             ndecomp_cascade_transitions=ndecomp_cascade_transitions,
             i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
             num_actfirec=count(mask_actfirec),
-            transient_landcover=false)   # dwt kernel ungated → transient deferred
+            # Harvest + gross-unrep litter/CWD inputs enter the B-input when transient
+            # landcover is active; their state updates (c/n_state_update2h/2g) skip the
+            # direct decomp-pool addition under use_soil_matrixcn. (dwt is handled in the
+            # dyn_subgrid driver, not here.)
+            transient_landcover=transient_landcover)
     end
 
     # CNPrecisionControl (post fire) — WIRED
