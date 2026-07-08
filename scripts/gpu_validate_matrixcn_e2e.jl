@@ -120,6 +120,16 @@ function main(backend)
                      list = dev(list), RI_A = dev(RIa), CI_A = dev(CIa))
     push!(checks, ("set_value_a! (memoized fill)", Aa.M[:, 1:Aa.NE], Adm.M[:, 1:Aa.NE]))
 
+    # (5b) set_value_sm! : copy NE off-diagonal values (M at rows I, cols J) into a sparse
+    #      matrix. The vertical-transport (AVsoil) + fire (AKfiresoil) soil matrices use it.
+    Ii = [2, 3, 4]; Jj = [1, 2, 3]; NEsm = 3
+    Vsm(T) = T[0.2k + 0.1u for u in 1:NUNIT, k in 1:NEsm]
+    Sc = CLM.SparseMatrixType(); CLM.init_sm!(Sc, SM, BEGU, ENDU)
+    CLM.set_value_sm!(Sc, BEGU, ENDU, NUM, FILT, Vsm(Float64), Ii, Jj, NEsm)
+    Sd = CLM.SparseMatrixType(); CLM.init_sm!(Sd, SM, BEGU, ENDU; ref = nothing, FT = FT); Sdm = a(Sd)
+    CLM.set_value_sm!(Sdm, BEGU, ENDU, NUM, dev(FILT), dev(Vsm(FT)), dev(Ii), dev(Jj), NEsm)
+    push!(checks, ("set_value_sm!", Sc.M[:, 1:NEsm], Sdm.M[:, 1:NEsm]))
+
     # (6) veg-solver GLUE kernels — the per-patch load / B-input / Aoned / add /
     #     write-back loops that replaced the host scalar-index loops in the solve
     #     body. Each runs on CPU (golden) and device over the same operands.

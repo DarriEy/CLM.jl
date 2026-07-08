@@ -230,6 +230,19 @@ Set sparse-matrix values from non-zero values `M[u,k]` and their row/column
 indices `I[k]`, `J[k]` (`k = 1:NE_in`). `filter_u[1:num_unit]` lists the active
 unit indices. Matches Fortran `SetValueSM`.
 """
+# Per-unit copy of the first NE columns of the input value matrix into this.M — one
+# thread per unit, sequential per-entry (byte-identical to the host loop; device M).
+@kernel function _set_value_sm_fill_kernel!(thisM, @Const(M), @Const(filter_u),
+        NE::Int, this_begu::Int, src_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; us = u - src_begu + 1
+        for k in 1:NE
+            thisM[ui, k] = M[us, k]
+        end
+    end
+end
+
 function set_value_sm!(this::SparseMatrixType, begu::Int, endu::Int, num_unit::Int,
                        filter_u::AbstractVector{Int}, M::AbstractMatrix{<:Real},
                        I::AbstractVector{Int}, J::AbstractVector{Int}, NE_in::Int)
@@ -242,17 +255,11 @@ function set_value_sm!(this::SparseMatrixType, begu::Int, endu::Int, num_unit::I
     @assert length(J) >= NE_in
     @assert begu == this.begu
     @assert endu == this.endu
-    for k in 1:NE_in
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            this.M[u_idx(this.begu, u), k] = M[u_idx(begu, u), k]
-        end
-    end
+    num_unit == 0 && return nothing
+    _launch!(_set_value_sm_fill_kernel!, this.M, M, filter_u, NE_in, this.begu, begu; ndrange = num_unit)
     this.NE = NE_in
-    for k in 1:NE_in
-        this.RI[k] = I[k]
-        this.CI[k] = J[k]
-    end
+    this.RI[1:NE_in] .= view(I, 1:NE_in)   # row/col indices (device-friendly broadcast copy)
+    this.CI[1:NE_in] .= view(J, 1:NE_in)
     return nothing
 end
 
