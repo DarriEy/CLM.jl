@@ -242,13 +242,53 @@ function main(backend)
         push!(checks, ("WHOLE veg-iso solve e2e", vec(Xg), vec(Array(Xd))))
     end
 
+    # (7d) WHOLE soil-C/N SOLVE end-to-end. cn_soil_matrix! already memoizes its structure
+    #      on the CNSoilMatrixState flags; the cc index arrays are copied onto the device
+    #      inside the solve (ref given). Host warm-up fills cc structure; device solve (fresh
+    #      ms with device workspaces + flags set true) reuses it via the kernelized fills.
+    let nc = 1, nlev = 2, npool = 3, ndct = 3, nout = 1, ndpvr = 6, cn = [20.0, 15.0, 90.0]
+        mvf(x) = dev(FT.(x))          # plain float array → device FT
+        mkcc() = begin
+            cc = CLM.DecompCascadeConData(cascade_donor_pool=[1, 2, 3], cascade_receiver_pool=[2, 0, 1],
+                floating_cn_ratio_decomp_pools=BitVector([false, false, false]),
+                is_cwd=BitVector([false, false, true]), initial_cn_ratio=cn)
+            CLM.init_soil_transfer!(cc; ndecomp_pools=npool, nlevdecomp=nlev,
+                ndecomp_cascade_transitions=ndct, ndecomp_cascade_outtransitions=nout); cc
+        end
+        rf = zeros(nc, nlev, ndct); rf[1, :, 1] .= 0.3; rf[1, :, 2] .= 1.0
+        pf = ones(nc, nlev, ndct)
+        Ksoil = zeros(nc, ndpvr); for i in 1:npool, j in 1:nlev; Ksoil[1, j + (i - 1) * nlev] = 0.02i; end
+        Cin = zeros(nc, ndpvr); Nin = zeros(nc, ndpvr)
+        for i in 1:npool, j in 1:nlev; Cin[1, j + (i - 1) * nlev] = 2.0i; Nin[1, j + (i - 1) * nlev] = 2.0i / cn[i]; end
+        mkC() = (C = zeros(nc, nlev, npool); for i in 1:npool, j in 1:nlev; C[1, j, i] = 100.0i + 10.0j; end; C)
+        mkN() = (N = zeros(nc, nlev, npool); for i in 1:npool, j in 1:nlev; N[1, j, i] = (100.0i + 10.0j) / cn[i]; end; N)
+        hargs(cc) = (; Ksoil=copy(Ksoil), tri_ma_vr=zeros(nc, cc.Ntri_setup), matrix_Cinput=copy(Cin),
+            matrix_Ninput=copy(Nin), rf_decomp_cascade=rf, pathfrac_decomp_cascade=pf, mask_soilc=[true],
+            begc=1, endc=1, nlevdecomp=nlev, ndecomp_pools=npool, ndecomp_cascade_transitions=ndct,
+            ndecomp_cascade_outtransitions=nout)
+        cc = mkcc()
+        CLM.cn_soil_matrix!(CLM.CNSoilMatrixState(), cc; decomp_cpools_vr=mkC(), decomp_npools_vr=mkN(), hargs(cc)...)  # warm-up
+        msg = CLM.CNSoilMatrixState(); Cg = mkC(); Ng = mkN()
+        CLM.cn_soil_matrix!(msg, cc; decomp_cpools_vr=Cg, decomp_npools_vr=Ng, hargs(cc)...)     # golden
+        msd = CLM.CNSoilMatrixState()
+        msd.init_readyAsoilc = true; msd.init_readyAsoiln = true
+        msd.list_ready1_nofire = true; msd.list_ready2_nofire = true
+        Cd = mvf(mkC()); Nd = mvf(mkN())
+        CLM.cn_soil_matrix!(msd, cc; decomp_cpools_vr=Cd, decomp_npools_vr=Nd,
+            Ksoil=mvf(Ksoil), tri_ma_vr=dev(zeros(FT, nc, cc.Ntri_setup)), matrix_Cinput=mvf(Cin),
+            matrix_Ninput=mvf(Nin), rf_decomp_cascade=mvf(rf), pathfrac_decomp_cascade=mvf(pf),
+            mask_soilc=[true], begc=1, endc=1, nlevdecomp=nlev, ndecomp_pools=npool,
+            ndecomp_cascade_transitions=ndct, ndecomp_cascade_outtransitions=nout, ref=dev(zeros(FT, 1, 1)), FT=FT)
+        push!(checks, ("WHOLE soil-C/N solve e2e", Float64[vec(Cg); vec(Ng)], Float64[vec(Array(Cd)); vec(Array(Nd))]))
+    end
+
     nfail = 0
     for (nm, cpu, gpu) in checks
         dd = reldiff(cpu, gpu); ok = dd < 1f-3
         @printf("  [%s] %-30s rel = %.3e\n", ok ? "PASS" : "FAIL", nm, dd); ok || (nfail += 1)
     end
     println()
-    println(nfail == 0 ? "  matrix-CN MATCHES CPU ON $name ($FT) — incl. WHOLE veg-C/N/iso solves e2e" : "  DIVERGENCE ($nfail op(s)).")
+    println(nfail == 0 ? "  matrix-CN MATCHES CPU ON $name ($FT) — incl. WHOLE veg-C/N/iso + soil-C/N solves e2e" : "  DIVERGENCE ($nfail op(s)).")
     return nfail == 0 ? 0 : 1
 end
 

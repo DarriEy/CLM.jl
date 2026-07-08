@@ -451,6 +451,151 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
 end
 
 # --------------------------------------------------------------------------
+# GPU glue-loop kernels for cn_soil_matrix! — one thread per active soil column
+# (fu → c = filter_c[fu], local row ui = c - begc + 1). Source pool arrays are
+# indexed by the GLOBAL column c; per-unit workspaces by ui. Byte-identical to the
+# host `for c in filter_soilc` loops on the CPU backend; device-capable when the
+# decomp arrays + cc index bundle + workspaces are on the GPU.
+# --------------------------------------------------------------------------
+
+# C:N ratio of each pool: floating → C/N (or initial_cn if N==0); fixed → initial_cn.
+@kernel function _soil_cndecomp_kernel!(cnd, @Const(dc), @Const(dn), @Const(floating),
+        @Const(icn), @Const(filter_c), nlev::Int, npool::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for l in 1:npool
+            if floating[l]
+                for j in 1:nlev
+                    cnd[ui, j, l] = dn[c, j, l] > 0 ? dc[c, j, l] / dn[c, j, l] : icn[l]
+                end
+            else
+                for j in 1:nlev
+                    cnd[ui, j, l] = icn[l]
+                end
+            end
+        end
+    end
+end
+
+# Off-diagonal transfer coefficients a_ma_vr (C) + na_ma_vr (N, scaled by C:N ratio).
+@kernel function _soil_ama_kernel!(a_ma, na_ma, @Const(cnd), @Const(rf), @Const(pathfrac),
+        @Const(tranlist), @Const(donor), @Const(receiver), @Const(floating), @Const(filter_c),
+        ndct::Int, nlev::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for k in 1:ndct
+            rp = receiver[k]
+            if rp != 0
+                dp = donor[k]
+                for j in 1:nlev
+                    ta = tranlist[j, k]
+                    onem = one(eltype(a_ma)) - rf[c, j, k]
+                    pf = pathfrac[c, j, k]
+                    a_ma[ui, ta] = onem * pf
+                    if !floating[rp]
+                        na_ma[ui, ta] = onem * (cnd[ui, j, dp] / cnd[ui, j, rp]) * pf
+                    else
+                        na_ma[ui, ta] = pf
+                    end
+                end
+            end
+        end
+    end
+end
+
+# Load C/N pools into the interim vectors + save the old-state snapshots.
+@kernel function _soil_load_kernel!(Cint, Nint, Cold, Nold, @Const(dc), @Const(dn),
+        @Const(filter_c), npool::Int, nlev::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for i in 1:npool, j in 1:nlev
+            idx = j + (i - 1) * nlev
+            Cint[ui, idx] = dc[c, j, i]; Cold[ui, idx] = dc[c, j, i]
+            Nint[ui, idx] = dn[c, j, i]; Nold[ui, idx] = dn[c, j, i]
+        end
+    end
+end
+
+# Ksoiln = Ksoil scaled by the fixed-C:N correction (only for non-floating pools, N>0).
+# Ksoiln must be pre-initialized as a copy of Ksoil (the kernel only overwrites those).
+@kernel function _soil_ksoiln_kernel!(Ksoiln, @Const(Ksoil), @Const(dc), @Const(dn),
+        @Const(floating), @Const(icn), @Const(filter_c), npool::Int, nlev::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for i in 1:npool
+            if !floating[i]
+                for j in 1:nlev
+                    idx = j + (i - 1) * nlev
+                    if dn[c, j, i] > 0
+                        Ksoiln[ui, idx] = Ksoil[ui, idx] * dc[c, j, i] / dn[c, j, i] / icn[i]
+                    end
+                end
+            end
+        end
+    end
+end
+
+# X = X + I·dt  (add the per-step C/N input vectors).
+@kernel function _soil_binput_kernel!(Cint, Nint, @Const(Cin), @Const(Nin), @Const(filter_c),
+        ndpvr::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for j in 1:ndpvr
+            Cint[ui, j] = Cin[ui, j] + Cint[ui, j]
+            Nint[ui, j] = Nin[ui, j] + Nint[ui, j]
+        end
+    end
+end
+
+# Send advanced pools back to decomp_cpools_vr / decomp_npools_vr.
+@kernel function _soil_writeback_kernel!(dc, dn, @Const(Cint), @Const(Nint), @Const(filter_c),
+        npool::Int, nlev::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for i in 1:npool, j in 1:nlev
+            idx = j + (i - 1) * nlev
+            dc[c, j, i] = Cint[ui, idx]; dn[c, j, i] = Nint[ui, idx]
+        end
+    end
+end
+
+# Isotope soil advance: load one decomp-pool array → vector, then (after the caller's
+# spmm_ax! + B-input) write it back. Two small kernels reused for C13/C14.
+@kernel function _soil_iso_load_kernel!(Xv, @Const(diso), @Const(filter_c), npool::Int, nlev::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for i in 1:npool, j in 1:nlev
+            Xv[ui, j + (i - 1) * nlev] = diso[c, j, i]
+        end
+    end
+end
+@kernel function _soil_iso_binput_kernel!(Xv, @Const(Iin), @Const(filter_c), ndpvr::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for jj in 1:ndpvr
+            Xv[ui, jj] = Iin[ui, jj] + Xv[ui, jj]
+        end
+    end
+end
+@kernel function _soil_iso_writeback_kernel!(diso, @Const(Xv), @Const(filter_c), npool::Int, nlev::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for i in 1:npool, j in 1:nlev
+            diso[c, j, i] = Xv[ui, j + (i - 1) * nlev]
+        end
+    end
+end
+
+# --------------------------------------------------------------------------
 # cn_soil_matrix! — advance the soil C/N pools by the matrix solve for one step.
 #
 # Port of `CNSoilMatrix` (the non-isotope, non-spinup core path). Inputs:
@@ -497,98 +642,64 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     Ntrans = (ndecomp_cascade_transitions - ndecomp_cascade_outtransitions) * nlevdecomp
     Ntri_setup = cc.Ntri_setup
 
-    # Active-unit filter (1-based column indices that are active soil columns).
-    filter_soilc = [c for c in begc:endc if mask_soilc[c]]
-    num_soilc = length(filter_soilc)
+    # Active-unit filter; moved onto the device backend for the kernels (host otherwise).
+    filter_host = [c for c in begc:endc if mask_soilc[c]]
+    num_soilc = length(filter_host)
+    filter_soilc = _backend_vec(ref, filter_host)
 
     cn_soil_matrix_alloc!(ms; ndecomp_pools_vr=ndecomp_pools_vr, begc=begc, endc=endc, ref=ref, FT=FT)
 
-    cascade_donor_pool    = cc.cascade_donor_pool
-    cascade_receiver_pool = cc.cascade_receiver_pool
-    floating              = cc.floating_cn_ratio_decomp_pools
-    initial_cn_ratio      = cc.initial_cn_ratio
+    # cc index + memoized-structure arrays used by the glue kernels + the memoized sparse
+    # fills. On a device solve (ref given) they must be on the device — static after the
+    # host warm-up, so device copies are correct. On the host path `_iv`/`_imat`/`_fvv` alias
+    # cc directly (ref===nothing), so the first-call SetValueA/SPMP writes land on cc.
+    _iv(v)   = _backend_vec(ref, v)                                   # Int/Bool vector → device
+    _imat(m) = ref === nothing ? m : typeof(ref).name.wrapper(m)      # Int matrix → device
+    _fvv(v)  = ref === nothing ? v : typeof(ref).name.wrapper(FT.(v)) # Float vector → device FT
+    cascade_donor_pool    = _iv(cc.cascade_donor_pool)
+    cascade_receiver_pool = _iv(cc.cascade_receiver_pool)
+    floating              = _iv(collect(cc.floating_cn_ratio_decomp_pools))
+    initial_cn_ratio      = _fvv(cc.initial_cn_ratio)
+    spm_tranlist_a = _imat(cc.spm_tranlist_a)
+    A_i = _iv(cc.A_i); A_j = _iv(cc.A_j); tri_i = _iv(cc.tri_i); tri_j = _iv(cc.tri_j)
+    list_Asoilc = _iv(cc.list_Asoilc); RI_a = _iv(cc.RI_a); CI_a = _iv(cc.CI_a)
+    list_Asoiln = _iv(cc.list_Asoiln); RI_na = _iv(cc.RI_na); CI_na = _iv(cc.CI_na)
+    list_AK_AKV = _iv(cc.list_AK_AKV); list_V_AKV = _iv(cc.list_V_AKV)
+    RI_AKallc = _iv(cc.RI_AKallsoilc); CI_AKallc = _iv(cc.CI_AKallsoilc)
+    RI_AKalln = _iv(cc.RI_AKallsoiln); CI_AKalln = _iv(cc.CI_AKallsoiln)
 
     nunit = endc - begc + 1
 
     # ----- C:N ratios of applicable pools (gC/gN) -----
     cn_decomp_pools = _smm_alloc(ref, FT, 0.0, nunit, nlevdecomp, ndecomp_pools)
-    for l in 1:ndecomp_pools
-        if floating[l]
-            for j in 1:nlevdecomp, c in filter_soilc
-                ui = c - begc + 1
-                if decomp_npools_vr[c, j, l] > 0.0
-                    cn_decomp_pools[ui, j, l] = decomp_cpools_vr[c, j, l] / decomp_npools_vr[c, j, l]
-                else
-                    cn_decomp_pools[ui, j, l] = initial_cn_ratio[l]
-                end
-            end
-        else
-            for j in 1:nlevdecomp, c in filter_soilc
-                ui = c - begc + 1
-                cn_decomp_pools[ui, j, l] = initial_cn_ratio[l]
-            end
-        end
-    end
+    _launch!(_soil_cndecomp_kernel!, cn_decomp_pools, decomp_cpools_vr, decomp_npools_vr,
+             floating, initial_cn_ratio, filter_soilc, nlevdecomp, ndecomp_pools, begc; ndrange = num_soilc)
 
     # ----- Assemble a_ma_vr / na_ma_vr (off-diagonal transfer coefficients). -----
     a_ma_vr  = _smm_alloc(ref, FT, 0.0, nunit, Ntrans)
     na_ma_vr = _smm_alloc(ref, FT, 0.0, nunit, Ntrans)
-    for k in 1:ndecomp_cascade_transitions
-        if cascade_receiver_pool[k] != 0
-            for j in 1:nlevdecomp
-                tranlist_a = cc.spm_tranlist_a[j, k]
-                for c in filter_soilc
-                    ui = c - begc + 1
-                    a_ma_vr[ui, tranlist_a] =
-                        (1.0 - rf_decomp_cascade[c, j, k]) * pathfrac_decomp_cascade[c, j, k]
-                    if !floating[cascade_receiver_pool[k]]
-                        na_ma_vr[ui, tranlist_a] =
-                            (1.0 - rf_decomp_cascade[c, j, k]) *
-                            (cn_decomp_pools[ui, j, cascade_donor_pool[k]] /
-                             cn_decomp_pools[ui, j, cascade_receiver_pool[k]]) *
-                            pathfrac_decomp_cascade[c, j, k]
-                    else
-                        na_ma_vr[ui, tranlist_a] = pathfrac_decomp_cascade[c, j, k]
-                    end
-                end
-            end
-        end
-    end
+    _launch!(_soil_ama_kernel!, a_ma_vr, na_ma_vr, cn_decomp_pools, rf_decomp_cascade,
+             pathfrac_decomp_cascade, spm_tranlist_a, cascade_donor_pool, cascade_receiver_pool,
+             floating, filter_soilc, ndecomp_cascade_transitions, nlevdecomp, begc; ndrange = num_soilc)
 
-    # ----- Set old vector value (X(t)). -----
-    Cinter_old = zeros(Float64, nunit, ndecomp_pools_vr)
-    Ninter_old = zeros(Float64, nunit, ndecomp_pools_vr)
-    for i in 1:ndecomp_pools, j in 1:nlevdecomp, c in filter_soilc
-        ui = c - begc + 1
-        idx = j + (i - 1) * nlevdecomp
-        ms.matrix_Cinter.V[ui, idx] = decomp_cpools_vr[c, j, i]
-        Cinter_old[ui, idx]         = decomp_cpools_vr[c, j, i]
-        ms.matrix_Ninter.V[ui, idx] = decomp_npools_vr[c, j, i]
-        Ninter_old[ui, idx]         = decomp_npools_vr[c, j, i]
-    end
+    # ----- Set old vector value (X(t)) + save old-state snapshots. -----
+    Cinter_old = _smm_alloc(ref, FT, 0.0, nunit, ndecomp_pools_vr)
+    Ninter_old = _smm_alloc(ref, FT, 0.0, nunit, ndecomp_pools_vr)
+    _launch!(_soil_load_kernel!, ms.matrix_Cinter.V, ms.matrix_Ninter.V, Cinter_old, Ninter_old,
+             decomp_cpools_vr, decomp_npools_vr, filter_soilc, ndecomp_pools, nlevdecomp, begc; ndrange = num_soilc)
 
     # ----- Build Ksoiln (= Ksoil scaled by the fixed-C:N correction). -----
     Ksoiln = copy(Ksoil)
-    for i in 1:ndecomp_pools
-        if !floating[i]
-            for j in 1:nlevdecomp, c in filter_soilc
-                ui = c - begc + 1
-                idx = j + (i - 1) * nlevdecomp
-                if decomp_npools_vr[c, j, i] > 0
-                    Ksoiln[ui, idx] = Ksoil[ui, idx] *
-                        decomp_cpools_vr[c, j, i] / decomp_npools_vr[c, j, i] / initial_cn_ratio[i]
-                end
-            end
-        end
-    end
+    _launch!(_soil_ksoiln_kernel!, Ksoiln, Ksoil, decomp_cpools_vr, decomp_npools_vr,
+             floating, initial_cn_ratio, filter_soilc, ndecomp_pools, nlevdecomp, begc; ndrange = num_soilc)
 
     # ----- Set C transfer matrix Ac from a_ma_vr (adds the -1 diagonal). -----
     ms.init_readyAsoilc = set_value_a!(ms.AKsoilc, begc, endc, num_soilc, filter_soilc,
-        a_ma_vr, cc.A_i, cc.A_j, Ntrans, ms.init_readyAsoilc;
-        list=cc.list_Asoilc, RI_A=cc.RI_a, CI_A=cc.CI_a)
+        a_ma_vr, A_i, A_j, Ntrans, ms.init_readyAsoilc;
+        list=list_Asoilc, RI_A=RI_a, CI_A=CI_a)
     ms.init_readyAsoiln = set_value_a!(ms.AKsoiln, begc, endc, num_soilc, filter_soilc,
-        na_ma_vr, cc.A_i, cc.A_j, Ntrans, ms.init_readyAsoiln;
-        list=cc.list_Asoiln, RI_A=cc.RI_na, CI_A=cc.CI_na)
+        na_ma_vr, A_i, A_j, Ntrans, ms.init_readyAsoiln;
+        list=list_Asoiln, RI_A=RI_na, CI_A=CI_na)
 
     # ----- Ac*K, An*K. -----
     Kdm  = DiagMatrixType();  init_dm!(Kdm,  ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
@@ -600,13 +711,13 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
 
     # ----- Set vertical-transport matrix V from tri_ma_vr. -----
     set_value_sm!(ms.AVsoil, begc, endc, num_soilc, filter_soilc,
-        tri_ma_vr, cc.tri_i, cc.tri_j, Ntri_setup)
+        tri_ma_vr, tri_i, tri_j, Ntri_setup)
 
     # ----- Set fire matrix Kfire from matrix_decomp_fire_k. -----
     if num_actfirec != 0
         @assert matrix_decomp_fire_k !== nothing "cn_soil_matrix!: fire active but matrix_decomp_fire_k not supplied"
-        kfire_i = collect(1:ndecomp_pools_vr)
-        kfire_j = collect(1:ndecomp_pools_vr)
+        kfire_i = _iv(collect(1:ndecomp_pools_vr))
+        kfire_j = _iv(collect(1:ndecomp_pools_vr))
         set_value_sm!(ms.AKfiresoil, begc, endc, num_soilc, filter_soilc,
             matrix_decomp_fire_k, kfire_i, kfire_j, ndecomp_pools_vr)
     end
@@ -616,12 +727,12 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     if num_actfirec == 0
         (ms.list_ready1_nofire, cc.NE_AKallsoilc) = spmp_ab!(ms.AKallsoilc, num_soilc, filter_soilc,
             ms.AKsoilc, ms.AVsoil, ms.list_ready1_nofire;
-            list_A=cc.list_AK_AKV, list_B=cc.list_V_AKV,
-            NE_AB=cc.NE_AKallsoilc, RI_AB=cc.RI_AKallsoilc, CI_AB=cc.CI_AKallsoilc)
+            list_A=list_AK_AKV, list_B=list_V_AKV,
+            NE_AB=cc.NE_AKallsoilc, RI_AB=RI_AKallc, CI_AB=CI_AKallc)
         (ms.list_ready2_nofire, cc.NE_AKallsoiln) = spmp_ab!(ms.AKallsoiln, num_soilc, filter_soilc,
             ms.AKsoiln, ms.AVsoil, ms.list_ready2_nofire;
-            list_A=cc.list_AK_AKV, list_B=cc.list_V_AKV,
-            NE_AB=cc.NE_AKallsoiln, RI_AB=cc.RI_AKallsoiln, CI_AB=cc.CI_AKallsoiln)
+            list_A=list_AK_AKV, list_B=list_V_AKV,
+            NE_AB=cc.NE_AKallsoiln, RI_AB=RI_AKalln, CI_AB=CI_AKalln)
     else
         filter_actfirec = filter_soilc  # caller scopes fire via matrix_decomp_fire_k zeros
         (ms.list_ready1_fire, cc.NE_AKallsoilc) = spmp_abc!(ms.AKallsoilc, num_soilc, filter_soilc,
@@ -641,25 +752,18 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     spmm_ax!(ms.matrix_Ninter, num_soilc, filter_soilc, ms.AKallsoiln)
 
     # ----- Add input: X = X + I·dt. -----
-    for j in 1:ndecomp_pools_vr, c in filter_soilc
-        ui = c - begc + 1
-        ms.matrix_Cinter.V[ui, j] = matrix_Cinput[ui, j] + ms.matrix_Cinter.V[ui, j]
-        ms.matrix_Ninter.V[ui, j] = matrix_Ninput[ui, j] + ms.matrix_Ninter.V[ui, j]
-    end
+    _launch!(_soil_binput_kernel!, ms.matrix_Cinter.V, ms.matrix_Ninter.V, matrix_Cinput,
+             matrix_Ninput, filter_soilc, ndecomp_pools_vr, begc; ndrange = num_soilc)
 
     # ----- Send back to decomp_cpools_vr / decomp_npools_vr. -----
-    for i in 1:ndecomp_pools, j in 1:nlevdecomp, c in filter_soilc
-        ui = c - begc + 1
-        idx = j + (i - 1) * nlevdecomp
-        decomp_cpools_vr[c, j, i] = ms.matrix_Cinter.V[ui, idx]
-        decomp_npools_vr[c, j, i] = ms.matrix_Ninter.V[ui, idx]
-    end
+    _launch!(_soil_writeback_kernel!, decomp_cpools_vr, decomp_npools_vr, ms.matrix_Cinter.V,
+             ms.matrix_Ninter.V, filter_soilc, ndecomp_pools, nlevdecomp, begc; ndrange = num_soilc)
 
     # ----- Carbon isotopes: advance with the SAME AKallsoilc as C, own B-input. -----
     _advance_iso_soil!(decomp_c13pools_vr, matrix_C13input, ms.AKallsoilc,
-        ndecomp_pools_vr, ndecomp_pools, nlevdecomp, begc, endc, filter_soilc, num_soilc)
+        ndecomp_pools_vr, ndecomp_pools, nlevdecomp, begc, endc, filter_soilc, num_soilc; ref=ref, FT=FT)
     _advance_iso_soil!(decomp_c14pools_vr, matrix_C14input, ms.AKallsoilc,
-        ndecomp_pools_vr, ndecomp_pools, nlevdecomp, begc, endc, filter_soilc, num_soilc)
+        ndecomp_pools_vr, ndecomp_pools, nlevdecomp, begc, endc, filter_soilc, num_soilc; ref=ref, FT=FT)
 
     release_dm!(Kdm); release_dm!(Kndm)
     return (Cinter_old, Ninter_old)
@@ -670,22 +774,16 @@ end
 # array is nothing (isotope disabled). A missing B-input is treated as zero.
 function _advance_iso_soil!(decomp_iso_vr, matrix_Ciso_input, AKallsoilc,
         ndecomp_pools_vr::Int, ndecomp_pools::Int, nlevdecomp::Int,
-        begc::Int, endc::Int, filter_soilc::AbstractVector{<:Integer}, num_soilc::Int)
+        begc::Int, endc::Int, filter_soilc::AbstractVector{<:Integer}, num_soilc::Int;
+        ref=nothing, FT::Type=Float64)
     decomp_iso_vr === nothing && return nothing
-    Xiso = VectorType(); init_v!(Xiso, ndecomp_pools_vr, begc, endc)
-    for i in 1:ndecomp_pools, j in 1:nlevdecomp, c in filter_soilc
-        Xiso.V[c - begc + 1, j + (i - 1) * nlevdecomp] = decomp_iso_vr[c, j, i]
-    end
+    Xiso = VectorType(); init_v!(Xiso, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+    _launch!(_soil_iso_load_kernel!, Xiso.V, decomp_iso_vr, filter_soilc, ndecomp_pools, nlevdecomp, begc; ndrange = num_soilc)
     spmm_ax!(Xiso, num_soilc, filter_soilc, AKallsoilc)
     if matrix_Ciso_input !== nothing
-        for jj in 1:ndecomp_pools_vr, c in filter_soilc
-            ui = c - begc + 1
-            Xiso.V[ui, jj] = matrix_Ciso_input[ui, jj] + Xiso.V[ui, jj]
-        end
+        _launch!(_soil_iso_binput_kernel!, Xiso.V, matrix_Ciso_input, filter_soilc, ndecomp_pools_vr, begc; ndrange = num_soilc)
     end
-    for i in 1:ndecomp_pools, j in 1:nlevdecomp, c in filter_soilc
-        decomp_iso_vr[c, j, i] = Xiso.V[c - begc + 1, j + (i - 1) * nlevdecomp]
-    end
+    _launch!(_soil_iso_writeback_kernel!, decomp_iso_vr, Xiso.V, filter_soilc, ndecomp_pools, nlevdecomp, begc; ndrange = num_soilc)
     return nothing
 end
 
