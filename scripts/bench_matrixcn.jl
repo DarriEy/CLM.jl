@@ -118,8 +118,10 @@ function main()
         @printf("  %-10d %12.3f %12.3f %8.2fx %14.1f\n", nc, th * 1e3, td * 1e3, th / td, nc / td / 1e6)
     end
     println("\n  host = KernelAbstractions CPU backend, JULIA_NUM_THREADS=$(Threads.nthreads()).")
-    println("  Note: the GPU solve has a fixed per-call overhead (~20 kernel launches ×")
-    println("  KA.synchronize); the payoff grows with the unit count (real global runs =")
-    println("  10^5–10^6 patches/columns). Fusing the per-op syncs would lower the crossover.")
+    println("  Payoff grows with the unit count (real global runs = 10^5–10^6 patches/cols).")
+    println("  Optimizations applied: sync-fusion (1 GPU sync/solve, not ~20) + a cached")
+    println("  device filter on the solve state. Residual small-size overhead is now the")
+    println("  per-op kernel enqueue/command-buffer latency (~20 launches) — would need")
+    println("  kernel FUSION (merging the glue kernels) to cut further.")
 end
 main()

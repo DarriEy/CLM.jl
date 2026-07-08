@@ -478,6 +478,9 @@ Base.@kwdef mutable struct CNVegMatrixSolveState
     init_ph::Bool = false; init_gm::Bool = false; init_fi::Bool = false
     ab_ready::Bool = false; abc_ready::Bool = false
     allocated::Bool = false
+    # Cached active-patch filter (topology-static like the structure). Built + stored on the
+    # first call; later calls reuse it, avoiding the per-solve mask gather + host→device move.
+    filter::AbstractVector{Int} = Int[]; nfilt::Int = -1
 end
 Adapt.@adapt_structure CNVegMatrixSolveState
 
@@ -590,14 +593,17 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
 
-    # Build the active-patch filter from the mask (Fortran filter_soilp); move it onto the
-    # device backend when running on the GPU so the kernels get a matching-backend filter.
-    mh = _mask_to_host(mask_soilp); filter_host = Int[p for p in bounds_patch if mh[p]]
-    num_soilp = length(filter_host)
-    if num_soilp == 0
-        return nothing
+    # Active-patch filter (moved to the device backend for the kernels). Reused from `state`
+    # when cached (topology-static), else built from the mask + cached.
+    if state !== nothing && state.nfilt >= 0
+        filter_soilp = state.filter; num_soilp = state.nfilt
+    else
+        mh = _mask_to_host(mask_soilp); filter_host = Int[p for p in bounds_patch if mh[p]]
+        num_soilp = length(filter_host)
+        num_soilp == 0 && return nothing
+        filter_soilp = _backend_vec(ref, filter_host)
+        if state !== nothing; state.filter = filter_soilp; state.nfilt = num_soilp; end
     end
-    filter_soilp = _backend_vec(ref, filter_host)
 
     # Sync-fusion: defer the per-op GPU sync across the whole solve (all kernels enqueue in
     # order on one queue); one sync at the end (below) before the host reads the pools. Host
@@ -847,10 +853,15 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
                                 state::Union{CNVegMatrixSolveState,Nothing}=nothing)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
-    mh = _mask_to_host(mask_soilp); filter_host = Int[p for p in bounds_patch if mh[p]]
-    num_soilp = length(filter_host)
-    num_soilp == 0 && return nothing
-    filter_soilp = _backend_vec(ref, filter_host)
+    if state !== nothing && state.nfilt >= 0
+        filter_soilp = state.filter; num_soilp = state.nfilt
+    else
+        mh = _mask_to_host(mask_soilp); filter_host = Int[p for p in bounds_patch if mh[p]]
+        num_soilp = length(filter_host)
+        num_soilp == 0 && return nothing
+        filter_soilp = _backend_vec(ref, filter_host)
+        if state !== nothing; state.filter = filter_soilp; state.nfilt = num_soilp; end
+    end
 
     # Sync-fusion: defer per-op GPU syncs across the solve; one sync before the write-back
     # is read on the host (below). Host (CPU) unchanged. See _DEFER_GPU_SYNC.

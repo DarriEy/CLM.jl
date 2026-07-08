@@ -208,6 +208,8 @@ Base.@kwdef mutable struct CNSoilMatrixState
     init_readyAsoiln::Bool   = false
 
     allocated::Bool = false
+    # Cached active-column filter (static per ms lifecycle, like the memoized structure).
+    filter::AbstractVector{Int} = Int[]; nfilt::Int = -1
 end
 
 # Allocate the matrix workspaces (once). begc:endc unit bounds.
@@ -726,10 +728,17 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     Ntrans = (ndecomp_cascade_transitions - ndecomp_cascade_outtransitions) * nlevdecomp
     Ntri_setup = cc.Ntri_setup
 
-    # Active-unit filter; moved onto the device backend for the kernels (host otherwise).
-    mh = _mask_to_host(mask_soilc); filter_host = [c for c in begc:endc if mh[c]]
-    num_soilc = length(filter_host)
-    filter_soilc = _backend_vec(ref, filter_host)
+    # Active-unit filter (device backend for the kernels). Reused from ms when cached
+    # (static per ms lifecycle), else built from the mask + cached — avoids the per-solve
+    # mask gather + host→device move.
+    if ms.nfilt >= 0
+        filter_soilc = ms.filter; num_soilc = ms.nfilt
+    else
+        mh = _mask_to_host(mask_soilc); filter_host = [c for c in begc:endc if mh[c]]
+        num_soilc = length(filter_host)
+        filter_soilc = _backend_vec(ref, filter_host)
+        ms.filter = filter_soilc; ms.nfilt = num_soilc
+    end
 
     # Sync-fusion: defer per-op GPU syncs across the solve; one sync before the return
     # (host reads decomp_cpools_vr). Host (CPU) backend unchanged. See _DEFER_GPU_SYNC.
