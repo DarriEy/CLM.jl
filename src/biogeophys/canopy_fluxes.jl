@@ -1786,6 +1786,16 @@ function canopy_fluxes_core!(
             # PFT index vector (+1 for 0-based Fortran → 1-based Julia)
             ivt_vec = patch_data.itype .+ 1
 
+            # crop_pft is a PFT-parameter vector read as crop_pft[ivt_p] inside the
+            # photosynthesis solvers; some fixtures leave it empty (no prognostic
+            # crops). Substitute a zero vector sized to the PFT axis (like a known-
+            # populated sibling) so the indexed read is in-bounds — is_crop=false
+            # everywhere, the correct no-crop result. Mirrors the _froot_c2 empty-
+            # input guard below; no-op when crop_pft is populated (default path
+            # byte-identical). Without this an empty crop_pft is an @inbounds OOB
+            # read that throws under --check-bounds=yes.
+            crop_pft_s = isempty(crop_pft) ? zeros(FT, length(medlynslope_pft)) : crop_pft
+
           if use_hydrstress
             # --- PHS photosynthesis (plant hydraulic stress) ---
             # forc_rho is COLUMN-indexed inside the PHS solver (forc_rho[c]); pass
@@ -1806,7 +1816,7 @@ function canopy_fluxes_core!(
                 c3psn_pft, leafcn_pft, flnr_pft, fnitr_pft, slatop_pft,
                 mbbopt_pft, medlynintercept_pft, medlynslope_pft,
                 pftcon.froot_leaf, pftcon.root_radius, pftcon.root_density,
-                crop_pft, ivt_vec, patch_data.column, mask_exposedvegp, bounds_patch,
+                crop_pft_s, ivt_vec, patch_data.column, mask_exposedvegp, bounds_patch,
                 _froot_c2, _froot_c2, soilstate.k_soil_root_patch,
                 soilstate.root_conductance_patch, soilstate.soil_conductance_patch,
                 soilstate.rootfr_patch,
@@ -1834,7 +1844,7 @@ function canopy_fluxes_core!(
                 ivt_vec, patch_data.column,
                 mask_exposedvegp, bounds_patch, "sun";
                 use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
-                leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft,
+                leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft_s,
                 overrides=overrides)
 
             # Shaded leaves
@@ -1852,7 +1862,7 @@ function canopy_fluxes_core!(
                 ivt_vec, patch_data.column,
                 mask_exposedvegp, bounds_patch, "sha";
                 use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
-                leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft,
+                leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft_s,
                 overrides=overrides)
           end  # use_hydrstress
 
