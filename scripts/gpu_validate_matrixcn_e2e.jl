@@ -347,15 +347,25 @@ function main(backend)
                       :livestemc_to_deadstemc_patch, :livecrootc_to_deadcrootc_patch, :leafc_to_litter_patch,
                       :frootc_to_litter_patch, :livestemc_to_litter_patch)
                 getfield(cf, f) .= 0.001
-            end; cf
+            end
+            for s in CLM._GMC_FLUX; getfield(cf, s) .= 0.002; end
+            for s in CLM._FIC_TO_FIRE; getfield(cf, s) .= 0.001; end
+            for s in unique(CLM._FIC_TO_LITTER); getfield(cf, s) .= 5e-4; end
+            cf.m_livestemc_to_deadstemc_fire_patch .= 3e-4; cf.m_livecrootc_to_deadcrootc_fire_patch .= 2e-4
+            cf
         end
         mvf(x) = CLM.Adapt.adapt(DevF32(dev), x)
-        csh = mkcsp(); cfh = mkcfp()
-        CLM.cn_veg_matrix_accumulate_ph_c!(cfh, csh, trues(np), 1:np; dt=1800.0, use_crop=false)
-        csd = mvf(mkcsp()); cfd = mvf(mkcfp())
-        CLM.cn_veg_matrix_accumulate_ph_c!(cfd, csd, dev(trues(np)), 1:np; dt=1800.0, use_crop=false)
-        push!(checks, ("wiring ph_c accumulate", vec(cfh.matrix_phtransfer_patch), vec(Array(cfd.matrix_phtransfer_patch))))
-        push!(checks, ("wiring ph_c turnover", vec(cfh.matrix_phturnover_patch), vec(Array(cfd.matrix_phturnover_patch))))
+        wiring_check!(nm, fn, tsym, nsym) = begin
+            csh = mkcsp(); cfh = mkcfp(); fn(cfh, csh, trues(np), 1:np; dt=1800.0)
+            csd = mvf(mkcsp()); cfd = mvf(mkcfp()); fn(cfd, csd, dev(trues(np)), 1:np; dt=1800.0)
+            push!(checks, ("wiring $nm transfer", vec(getfield(cfh, tsym)), vec(Array(getfield(cfd, tsym)))))
+            push!(checks, ("wiring $nm turnover", vec(getfield(cfh, nsym)), vec(Array(getfield(cfd, nsym)))))
+        end
+        # ph_c takes use_crop; wrap so the shared signature matches.
+        wiring_check!("ph_c", (cf, cs, m, b; dt) -> CLM.cn_veg_matrix_accumulate_ph_c!(cf, cs, m, b; dt=dt, use_crop=false),
+                      :matrix_phtransfer_patch, :matrix_phturnover_patch)
+        wiring_check!("gm_c", CLM.cn_veg_matrix_accumulate_gm_c!, :matrix_gmtransfer_patch, :matrix_gmturnover_patch)
+        wiring_check!("fi_c", CLM.cn_veg_matrix_accumulate_fi_c!, :matrix_fitransfer_patch, :matrix_fiturnover_patch)
     end
 
     nfail = 0

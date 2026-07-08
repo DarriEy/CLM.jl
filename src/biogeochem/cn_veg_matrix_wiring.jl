@@ -225,27 +225,97 @@ Register the veg-C fire transfers: 2 in-veg live->dead conversions
 losses (each pool -> iout, flux = m_*_to_fire + m_*_to_litter_fire), via
 matrix_update_fic!.
 """
+# One fire register: transfer idx, donor column d. Cap = ph + gm + fi turnover for pool d.
+@inline function _mat_fi_reg!(fit, fitn, phtn, gmtn, p::Int, idx::Int, d::Int, flux, donorval, dt, mc::Bool)
+    rate = donorval > 0 ? flux / donorval : zero(flux)
+    tot = phtn[p, d] + gmtn[p, d] + fitn[p, d]
+    if mc && (tot + rate * dt >= one(rate))
+        applied = max(zero(rate), (one(rate) - tot) / dt)
+    else
+        applied = rate
+    end
+    @inbounds fitn[p, d]   = fitn[p, d]   + applied * dt
+    @inbounds fit[p, idx]  = fit[p, idx]  + applied
+    return nothing
+end
+
+Base.@kwdef struct _MatFiOut{M}
+    fit::M; fitn::M; phtn::M; gmtn::M   # phtn/gmtn read-only (for the cap)
+end
+Adapt.@adapt_structure _MatFiOut
+Base.@kwdef struct _MatFiIn{V}
+    ff1::V; ff2::V; ff3::V; ff4::V; ff5::V; ff6::V; ff7::V; ff8::V; ff9::V
+    ff10::V; ff11::V; ff12::V; ff13::V; ff14::V; ff15::V; ff16::V; ff17::V; ff18::V
+    fl1::V; fl2::V; fl3::V; fl4::V; fl5::V; fl6::V; fl7::V; fl8::V; fl9::V
+    fl10::V; fl11::V; fl12::V; fl13::V; fl14::V; fl15::V; fl16::V; fl17::V; fl18::V
+    po1::V; po2::V; po3::V; po4::V; po5::V; po6::V; po7::V; po8::V; po9::V
+    po10::V; po11::V; po12::V; po13::V; po14::V; po15::V; po16::V; po17::V; po18::V
+    f_ls_dead::V; f_lc_dead::V
+end
+Adapt.@adapt_structure _MatFiIn
+Base.@kwdef struct _MatFiIdx
+    i_ls::Int; i_lc::Int; matrixcheck::Bool
+end
+
+@kernel function _mat_fi_c_kernel!(out::_MatFiOut, in::_MatFiIn, @Const(mask), ix::_MatFiIdx, dt, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        fit = out.fit; fitn = out.fitn; phtn = out.phtn; gmtn = out.gmtn; mc = ix.matrixcheck
+        # live->dead conversions FIRST (their turnover contributes to the pool-7/13 cap below)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, ix.i_ls, ILIVESTEM,  in.f_ls_dead[p], in.po7[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, ix.i_lc, ILIVECROOT, in.f_lc_dead[p], in.po13[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 3,  1,  in.ff1[p]  + in.fl1[p],  in.po1[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 4,  2,  in.ff2[p]  + in.fl2[p],  in.po2[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 5,  3,  in.ff3[p]  + in.fl3[p],  in.po3[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 6,  4,  in.ff4[p]  + in.fl4[p],  in.po4[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 7,  5,  in.ff5[p]  + in.fl5[p],  in.po5[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 8,  6,  in.ff6[p]  + in.fl6[p],  in.po6[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 9,  7,  in.ff7[p]  + in.fl7[p],  in.po7[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 10, 8,  in.ff8[p]  + in.fl8[p],  in.po8[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 11, 9,  in.ff9[p]  + in.fl9[p],  in.po9[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 12, 10, in.ff10[p] + in.fl10[p], in.po10[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 13, 11, in.ff11[p] + in.fl11[p], in.po11[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 14, 12, in.ff12[p] + in.fl12[p], in.po12[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 15, 13, in.ff13[p] + in.fl13[p], in.po13[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 16, 14, in.ff14[p] + in.fl14[p], in.po14[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 17, 15, in.ff15[p] + in.fl15[p], in.po15[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 18, 16, in.ff16[p] + in.fl16[p], in.po16[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 19, 17, in.ff17[p] + in.fl17[p], in.po17[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 20, 18, in.ff18[p] + in.fl18[p], in.po18[p], dt, mc)
+    end
+end
+
 function cn_veg_matrix_accumulate_fi_c!(cf::CNVegCarbonFluxData,
         cs::CNVegCarbonStateData, mask_soilp::AbstractVector{Bool},
         bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
-    fill!(cf.matrix_fitransfer_patch, 0.0)
-    fill!(cf.matrix_fiturnover_patch, 0.0)
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        reg(idx, flux, d) = begin
-            donor = _vegc_pool_val(cs, d, p)
-            rate = donor > 0.0 ? flux / donor : 0.0
-            matrix_update_fic!(cf, p, idx, rate, dt; matrixcheck=matrixcheck, acc=true)
-        end
-        # in-veg live->dead conversions
-        reg(cf.ilivestem_to_ideadstem_fi,   cf.m_livestemc_to_deadstemc_fire_patch[p],   ILIVESTEM)
-        reg(cf.ilivecroot_to_ideadcroot_fi, cf.m_livecrootc_to_deadcrootc_fire_patch[p], ILIVECROOT)
-        # out-of-veg losses (to_fire + to_litter_fire), donor = pool i, index = i+2
-        for i in 1:NVEGPOOL_NATVEG
-            flux = getfield(cf, _FIC_TO_FIRE[i])[p] + getfield(cf, _FIC_TO_LITTER[i])[p]
-            reg(i + 2, flux, i)
-        end
-    end
+    fill!(cf.matrix_fitransfer_patch, zero(eltype(cf.matrix_fitransfer_patch)))
+    fill!(cf.matrix_fiturnover_patch, zero(eltype(cf.matrix_fiturnover_patch)))
+    gf(sym) = getfield(cf, sym)
+    out = _MatFiOut(; fit=cf.matrix_fitransfer_patch, fitn=cf.matrix_fiturnover_patch,
+        phtn=cf.matrix_phturnover_patch, gmtn=cf.matrix_gmturnover_patch)
+    in_ = _MatFiIn(;
+        ff1=gf(_FIC_TO_FIRE[1]), ff2=gf(_FIC_TO_FIRE[2]), ff3=gf(_FIC_TO_FIRE[3]), ff4=gf(_FIC_TO_FIRE[4]),
+        ff5=gf(_FIC_TO_FIRE[5]), ff6=gf(_FIC_TO_FIRE[6]), ff7=gf(_FIC_TO_FIRE[7]), ff8=gf(_FIC_TO_FIRE[8]),
+        ff9=gf(_FIC_TO_FIRE[9]), ff10=gf(_FIC_TO_FIRE[10]), ff11=gf(_FIC_TO_FIRE[11]), ff12=gf(_FIC_TO_FIRE[12]),
+        ff13=gf(_FIC_TO_FIRE[13]), ff14=gf(_FIC_TO_FIRE[14]), ff15=gf(_FIC_TO_FIRE[15]), ff16=gf(_FIC_TO_FIRE[16]),
+        ff17=gf(_FIC_TO_FIRE[17]), ff18=gf(_FIC_TO_FIRE[18]),
+        fl1=gf(_FIC_TO_LITTER[1]), fl2=gf(_FIC_TO_LITTER[2]), fl3=gf(_FIC_TO_LITTER[3]), fl4=gf(_FIC_TO_LITTER[4]),
+        fl5=gf(_FIC_TO_LITTER[5]), fl6=gf(_FIC_TO_LITTER[6]), fl7=gf(_FIC_TO_LITTER[7]), fl8=gf(_FIC_TO_LITTER[8]),
+        fl9=gf(_FIC_TO_LITTER[9]), fl10=gf(_FIC_TO_LITTER[10]), fl11=gf(_FIC_TO_LITTER[11]), fl12=gf(_FIC_TO_LITTER[12]),
+        fl13=gf(_FIC_TO_LITTER[13]), fl14=gf(_FIC_TO_LITTER[14]), fl15=gf(_FIC_TO_LITTER[15]), fl16=gf(_FIC_TO_LITTER[16]),
+        fl17=gf(_FIC_TO_LITTER[17]), fl18=gf(_FIC_TO_LITTER[18]),
+        po1=cs.leafc_patch, po2=cs.leafc_storage_patch, po3=cs.leafc_xfer_patch,
+        po4=cs.frootc_patch, po5=cs.frootc_storage_patch, po6=cs.frootc_xfer_patch,
+        po7=cs.livestemc_patch, po8=cs.livestemc_storage_patch, po9=cs.livestemc_xfer_patch,
+        po10=cs.deadstemc_patch, po11=cs.deadstemc_storage_patch, po12=cs.deadstemc_xfer_patch,
+        po13=cs.livecrootc_patch, po14=cs.livecrootc_storage_patch, po15=cs.livecrootc_xfer_patch,
+        po16=cs.deadcrootc_patch, po17=cs.deadcrootc_storage_patch, po18=cs.deadcrootc_xfer_patch,
+        f_ls_dead=cf.m_livestemc_to_deadstemc_fire_patch, f_lc_dead=cf.m_livecrootc_to_deadcrootc_fire_patch)
+    ix = _MatFiIdx(; i_ls=cf.ilivestem_to_ideadstem_fi, i_lc=cf.ilivecroot_to_ideadcroot_fi, matrixcheck=matrixcheck)
+    backend = _kernel_backend(cf.matrix_fitransfer_patch)
+    _mat_fi_c_kernel!(backend)(out, in_, mask_soilp, ix,
+        eltype(cf.matrix_fitransfer_patch)(dt), first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
 
@@ -258,6 +328,58 @@ const _GMC_FLUX = Symbol[
     :m_livecrootc_to_litter_patch, :m_livecrootc_storage_to_litter_patch, :m_livecrootc_xfer_to_litter_patch,
     :m_deadcrootc_to_litter_patch, :m_deadcrootc_storage_to_litter_patch, :m_deadcrootc_xfer_to_litter_patch]
 
+# One gap-mortality register (transfer i = pool i → litter; doner[i]=i). Cap accounts for
+# the already-accumulated phenology + gap turnover for the same pool.
+@inline function _mat_gm_reg!(gmt, gmtn, phtn, p::Int, i::Int, flux, donorval, dt, mc::Bool)
+    rate = donorval > 0 ? flux / donorval : zero(flux)
+    if mc && (phtn[p, i] + gmtn[p, i] + rate * dt >= one(rate))
+        applied = max(zero(rate), (one(rate) - phtn[p, i] - gmtn[p, i]) / dt)
+    else
+        applied = rate
+    end
+    @inbounds gmtn[p, i] = gmtn[p, i] + applied * dt
+    @inbounds gmt[p, i]  = gmt[p, i]  + applied
+    return nothing
+end
+
+Base.@kwdef struct _MatGmOut{M}
+    gmt::M; gmtn::M; phtn::M   # phtn read-only (prior phenology turnover, for the cap)
+end
+Adapt.@adapt_structure _MatGmOut
+# 18 gap-mortality litter fluxes (pool order) + 18 donor-pool values.
+Base.@kwdef struct _MatGmIn{V}
+    fl1::V; fl2::V; fl3::V; fl4::V; fl5::V; fl6::V; fl7::V; fl8::V; fl9::V
+    fl10::V; fl11::V; fl12::V; fl13::V; fl14::V; fl15::V; fl16::V; fl17::V; fl18::V
+    po1::V; po2::V; po3::V; po4::V; po5::V; po6::V; po7::V; po8::V; po9::V
+    po10::V; po11::V; po12::V; po13::V; po14::V; po15::V; po16::V; po17::V; po18::V
+end
+Adapt.@adapt_structure _MatGmIn
+
+@kernel function _mat_gm_c_kernel!(out::_MatGmOut, in::_MatGmIn, @Const(mask), mc::Bool, dt, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        gmt = out.gmt; gmtn = out.gmtn; phtn = out.phtn
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 1,  in.fl1[p],  in.po1[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 2,  in.fl2[p],  in.po2[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 3,  in.fl3[p],  in.po3[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 4,  in.fl4[p],  in.po4[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 5,  in.fl5[p],  in.po5[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 6,  in.fl6[p],  in.po6[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 7,  in.fl7[p],  in.po7[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 8,  in.fl8[p],  in.po8[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 9,  in.fl9[p],  in.po9[p],  dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 10, in.fl10[p], in.po10[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 11, in.fl11[p], in.po11[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 12, in.fl12[p], in.po12[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 13, in.fl13[p], in.po13[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 14, in.fl14[p], in.po14[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 15, in.fl15[p], in.po15[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 16, in.fl16[p], in.po16[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 17, in.fl17[p], in.po17[p], dt, mc)
+        _mat_gm_reg!(gmt, gmtn, phtn, p, 18, in.fl18[p], in.po18[p], dt, mc)
+    end
+end
+
 """
     cn_veg_matrix_accumulate_gm_c!(cf, cs, mask_soilp, bounds_patch; dt, matrixcheck=false)
 
@@ -268,17 +390,26 @@ already computed. rate = flux/pool; recorded via matrix_update_gmc!.
 function cn_veg_matrix_accumulate_gm_c!(cf::CNVegCarbonFluxData,
         cs::CNVegCarbonStateData, mask_soilp::AbstractVector{Bool},
         bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false)
-    fill!(cf.matrix_gmtransfer_patch, 0.0)
-    fill!(cf.matrix_gmturnover_patch, 0.0)
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        for i in 1:NVEGPOOL_NATVEG
-            flux = getfield(cf, _GMC_FLUX[i])[p]
-            donor = _vegc_pool_val(cs, i, p)
-            rate = donor > 0.0 ? flux / donor : 0.0
-            matrix_update_gmc!(cf, p, i, rate, dt; matrixcheck=matrixcheck, acc=true)
-        end
-    end
+    fill!(cf.matrix_gmtransfer_patch, zero(eltype(cf.matrix_gmtransfer_patch)))
+    fill!(cf.matrix_gmturnover_patch, zero(eltype(cf.matrix_gmturnover_patch)))
+    out = _MatGmOut(; gmt=cf.matrix_gmtransfer_patch, gmtn=cf.matrix_gmturnover_patch, phtn=cf.matrix_phturnover_patch)
+    in_ = _MatGmIn(;
+        fl1=getfield(cf, _GMC_FLUX[1]), fl2=getfield(cf, _GMC_FLUX[2]), fl3=getfield(cf, _GMC_FLUX[3]),
+        fl4=getfield(cf, _GMC_FLUX[4]), fl5=getfield(cf, _GMC_FLUX[5]), fl6=getfield(cf, _GMC_FLUX[6]),
+        fl7=getfield(cf, _GMC_FLUX[7]), fl8=getfield(cf, _GMC_FLUX[8]), fl9=getfield(cf, _GMC_FLUX[9]),
+        fl10=getfield(cf, _GMC_FLUX[10]), fl11=getfield(cf, _GMC_FLUX[11]), fl12=getfield(cf, _GMC_FLUX[12]),
+        fl13=getfield(cf, _GMC_FLUX[13]), fl14=getfield(cf, _GMC_FLUX[14]), fl15=getfield(cf, _GMC_FLUX[15]),
+        fl16=getfield(cf, _GMC_FLUX[16]), fl17=getfield(cf, _GMC_FLUX[17]), fl18=getfield(cf, _GMC_FLUX[18]),
+        po1=cs.leafc_patch, po2=cs.leafc_storage_patch, po3=cs.leafc_xfer_patch,
+        po4=cs.frootc_patch, po5=cs.frootc_storage_patch, po6=cs.frootc_xfer_patch,
+        po7=cs.livestemc_patch, po8=cs.livestemc_storage_patch, po9=cs.livestemc_xfer_patch,
+        po10=cs.deadstemc_patch, po11=cs.deadstemc_storage_patch, po12=cs.deadstemc_xfer_patch,
+        po13=cs.livecrootc_patch, po14=cs.livecrootc_storage_patch, po15=cs.livecrootc_xfer_patch,
+        po16=cs.deadcrootc_patch, po17=cs.deadcrootc_storage_patch, po18=cs.deadcrootc_xfer_patch)
+    backend = _kernel_backend(cf.matrix_gmtransfer_patch)
+    _mat_gm_c_kernel!(backend)(out, in_, mask_soilp, matrixcheck,
+        eltype(cf.matrix_gmtransfer_patch)(dt), first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
 
