@@ -599,6 +599,14 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
     end
     filter_soilp = _backend_vec(ref, filter_host)
 
+    # Sync-fusion: defer the per-op GPU sync across the whole solve (all kernels enqueue in
+    # order on one queue); one sync at the end (below) before the host reads the pools. Host
+    # (CPU) backend is never deferred → unchanged. Self-healing if it ever leaks (host always
+    # syncs; the next GPU solve resets it).
+    _sfbk = ref === nothing ? nothing : _kernel_backend(ref)
+    _sfd = _sfbk !== nothing && !(_sfbk isa KA.CPU)
+    _sfd && (_DEFER_GPU_SYNC[] = true)
+
     cf = cf_veg; cs = cs_veg
 
     # --- Xvegc input vector and old-state load (Fortran 992, 1119–1149) ---
@@ -703,6 +711,9 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
         cs.deadcrootc_patch, cs.deadcrootc_storage_patch, cs.deadcrootc_xfer_patch,
         cs.reproductivec_patch, cs.reproductivec_storage_patch, cs.reproductivec_xfer_patch,
         Xvegc.V, ivt, filter_soilp, begp, npcropmin, crop_active, irepr; ndrange = num_soilp)
+
+    # One sync for the whole solve (before the host reads the written-back pools).
+    if _sfd; _DEFER_GPU_SYNC[] = false; KA.synchronize(_sfbk); end
 
     release_sm!(AKph); release_sm!(AKgm); release_sm!(AKfi); release_sm!(AKall)
     release_v!(Xvegc); release_v!(Binput)
@@ -841,6 +852,12 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
     num_soilp == 0 && return nothing
     filter_soilp = _backend_vec(ref, filter_host)
 
+    # Sync-fusion: defer per-op GPU syncs across the solve; one sync before the write-back
+    # is read on the host (below). Host (CPU) unchanged. See _DEFER_GPU_SYNC.
+    _sfbk = ref === nothing ? nothing : _kernel_backend(ref)
+    _sfd = _sfbk !== nothing && !(_sfbk isa KA.CPU)
+    _sfd && (_DEFER_GPU_SYNC[] = true)
+
     nf = nf_veg; ns = ns_veg
     iretransn = nvegnpool   # last N pool (Fortran iretransn = nvegnpool)
 
@@ -888,6 +905,7 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
         ns.reproductiven_xfer_patch, Xvegn.V, ivt, filter_soilp, begp, npcropmin,
         crop_active, iretransn, irepr; ndrange = num_soilp)
 
+    if _sfd; _DEFER_GPU_SYNC[] = false; KA.synchronize(_sfbk); end
     release_v!(Xvegn); release_v!(Binput)
     return nothing
 end

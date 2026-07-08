@@ -731,6 +731,12 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     num_soilc = length(filter_host)
     filter_soilc = _backend_vec(ref, filter_host)
 
+    # Sync-fusion: defer per-op GPU syncs across the solve; one sync before the return
+    # (host reads decomp_cpools_vr). Host (CPU) backend unchanged. See _DEFER_GPU_SYNC.
+    _sfbk = ref === nothing ? nothing : _kernel_backend(ref)
+    _sfd = _sfbk !== nothing && !(_sfbk isa KA.CPU)
+    _sfd && (_DEFER_GPU_SYNC[] = true)
+
     cn_soil_matrix_alloc!(ms; ndecomp_pools_vr=ndecomp_pools_vr, begc=begc, endc=endc, ref=ref, FT=FT)
 
     # cc index + memoized-structure arrays used by the glue kernels + the memoized sparse
@@ -851,6 +857,7 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     _advance_iso_soil!(decomp_c14pools_vr, matrix_C14input, ms.AKallsoilc,
         ndecomp_pools_vr, ndecomp_pools, nlevdecomp, begc, endc, filter_soilc, num_soilc; ref=ref, FT=FT)
 
+    if _sfd; _DEFER_GPU_SYNC[] = false; KA.synchronize(_sfbk); end
     release_dm!(Kdm); release_dm!(Kndm)
     return (Cinter_old, Ninter_old)
 end

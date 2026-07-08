@@ -61,12 +61,33 @@ function atomic_int_type(backend::KA.Backend)
     return _backend_has_64bit_atomics(backend) ? Int : Int32
 end
 
+# Sync-fusion: inside a `with_deferred_gpu_sync` region the per-op GPU synchronize is
+# skipped — kernels enqueued on the same GPU queue execute in order, so intermediate host
+# syncs are unnecessary; one sync at region end (before the host reads results) suffices.
+# The CPU (KA) backend is NEVER deferred (its kernels may run async on threads, so the next
+# op could race a not-yet-finished one) — so the host path keeps its per-op sync unchanged.
+const _DEFER_GPU_SYNC = Ref(false)
+
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
     backend = _kernel_backend(out)
     kernel(backend)(out, args...; ndrange = ndrange)
-    KA.synchronize(backend)
+    (_DEFER_GPU_SYNC[] && !(backend isa KA.CPU)) || KA.synchronize(backend)
     return out
+end
+
+# Defer per-op GPU syncs across `f` (one sync at the end). No-op deferral for the CPU
+# backend / a nothing backend, so the host path is unchanged. `backend` is the region's
+# device (derived from a workspace prototype); the final sync targets it.
+@inline function with_deferred_gpu_sync(f, backend)
+    (backend === nothing || backend isa KA.CPU) && return f()
+    prev = _DEFER_GPU_SYNC[]; _DEFER_GPU_SYNC[] = true
+    try
+        return f()
+    finally
+        _DEFER_GPU_SYNC[] = prev
+        KA.synchronize(backend)
+    end
 end
 
 # Scatter-add `arr[i] += x` for kernels with a many-to-one (e.g. patch→column) write.
