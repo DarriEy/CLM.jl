@@ -439,6 +439,19 @@ function main(backend)
         fkd = dev(zeros(FT, nc, ndpvr))
         CLM._launch!(CLM._soil_firek_kernel!, fkd, mvf(fflux), mvf(Xc), dev(trues(nc)), nlev, npool, 1, FT(1800.0), 1, nc; ndrange=nc)
         push!(checks, ("wiring soil-fire-k", vec(fkh), vec(Array(fkd))))
+        # isotope B-input (C13/C14 soil advance)
+        mkcfi() = begin
+            cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, nc, ng; nrepr=1, nlevdecomp_full=nlev, ndecomp_pools=npool)
+            for s in CLM._SOILC_LITR_IN; getfield(cf, s)[:, :, 1:ilmax] .= 1.3e-3; end
+            for s in CLM._SOILC_CWD_IN; getfield(cf, s) .= 7e-4; end; cf
+        end
+        Cih = zeros(nc, ndpvr)
+        CLM.cn_soil_matrix_iso_input!(Cih, mkcfi(); mask_soilc=trues(nc), bounds_col=1:nc,
+            nlevdecomp=nlev, i_litr_min=ilmin, i_litr_max=ilmax, i_cwd=icwd, dt=1800.0, begc=1)
+        Cid = dev(zeros(FT, nc, ndpvr))
+        CLM.cn_soil_matrix_iso_input!(Cid, mvf(mkcfi()); mask_soilc=dev(trues(nc)), bounds_col=1:nc,
+            nlevdecomp=nlev, i_litr_min=ilmin, i_litr_max=ilmax, i_cwd=icwd, dt=1800.0, begc=1)
+        push!(checks, ("wiring soil-iso-input", vec(Cih), vec(Array(Cid))))
     end
 
     nfail = 0

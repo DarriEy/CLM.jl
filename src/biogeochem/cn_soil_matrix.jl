@@ -328,29 +328,48 @@ end
 
 # Carbon-only isotope B-input: same litter/CWD structure as the C accumulator, reading
 # the isotope veg carbon flux (phenology/gap/fire → litr/cwd). Fills matrix_Ciso_input
-# (nc, ndecomp_pools_vr). Used for the C13/C14 soil-matrix advance.
+# (nc, ndecomp_pools_vr, local row ui). Used for the C13/C14 soil-matrix advance.
+Base.@kwdef struct _SoilIsoIn{M3,M2}
+    lc1::M3; lc2::M3; lc3::M3; lc4::M3; lc5::M3
+    wc1::M2; wc2::M2; wc3::M2; wc4::M2
+end
+Adapt.@adapt_structure _SoilIsoIn
+
+@kernel function _soil_iso_input_kernel!(ciso, in::_SoilIsoIn, @Const(mask), nlev::Int,
+        ilmin::Int, ilmax::Int, icwd::Int, transient::Bool, this_begc::Int, dt, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        ui = c - this_begc + 1
+        for j in 1:nlev
+            for i in ilmin:ilmax
+                vr = j + (i - 1) * nlev
+                cc = in.lc1[c, j, i] + in.lc2[c, j, i] + in.lc3[c, j, i]
+                if transient; cc += in.lc4[c, j, i] + in.lc5[c, j, i]; end
+                ciso[ui, vr] = ciso[ui, vr] + cc * dt
+            end
+            vrc = j + (icwd - 1) * nlev
+            cc = in.wc1[c, j] + in.wc2[c, j]
+            if transient; cc += in.wc3[c, j] + in.wc4[c, j]; end
+            ciso[ui, vrc] = ciso[ui, vrc] + cc * dt
+        end
+    end
+end
+
 function cn_soil_matrix_iso_input!(matrix_Ciso_input::AbstractMatrix{<:Real}, cf_iso;
         mask_soilc::AbstractVector{Bool}, bounds_col::UnitRange{Int},
         nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
         dt::Real, transient_landcover::Bool = false, begc::Int = first(bounds_col))
-    fill!(matrix_Ciso_input, 0.0)
-    dt = Float64(dt)
-    litr_c = transient_landcover ? (_SOILC_LITR_IN..., _SOILC_LITR_IN_TR...) : _SOILC_LITR_IN
-    cwd_c  = transient_landcover ? (_SOILC_CWD_IN...,  _SOILC_CWD_IN_TR...)  : _SOILC_CWD_IN
-    for c in bounds_col
-        mask_soilc[c] || continue
-        ui = c - begc + 1
-        for j in 1:nlevdecomp
-            for i in i_litr_min:i_litr_max
-                cin = 0.0
-                for f in litr_c; cin += getfield(cf_iso, f)[c, j, i]; end
-                matrix_Ciso_input[ui, j + (i - 1) * nlevdecomp] += cin * dt
-            end
-            cin = 0.0
-            for f in cwd_c; cin += getfield(cf_iso, f)[c, j]; end
-            matrix_Ciso_input[ui, j + (i_cwd - 1) * nlevdecomp] += cin * dt
-        end
-    end
+    fill!(matrix_Ciso_input, zero(eltype(matrix_Ciso_input)))
+    cf(s) = getfield(cf_iso, s)
+    in_ = _SoilIsoIn(;
+        lc1=cf(_SOILC_LITR_IN[1]), lc2=cf(_SOILC_LITR_IN[2]), lc3=cf(_SOILC_LITR_IN[3]),
+        lc4=cf(_SOILC_LITR_IN_TR[1]), lc5=cf(_SOILC_LITR_IN_TR[2]),
+        wc1=cf(_SOILC_CWD_IN[1]), wc2=cf(_SOILC_CWD_IN[2]), wc3=cf(_SOILC_CWD_IN_TR[1]), wc4=cf(_SOILC_CWD_IN_TR[2]))
+    backend = _kernel_backend(matrix_Ciso_input)
+    _soil_iso_input_kernel!(backend)(matrix_Ciso_input, in_, mask_soilc, nlevdecomp, i_litr_min,
+        i_litr_max, i_cwd, transient_landcover, begc, eltype(matrix_Ciso_input)(Float64(dt)),
+        first(bounds_col), last(bounds_col); ndrange = last(bounds_col))
+    KA.synchronize(backend)
     return nothing
 end
 
