@@ -302,6 +302,145 @@ function matrix_update_fin!(nf, p::Int, itransfer::Int, rate::Float64, dt::Float
 end
 
 # -----------------------------------------------------------------------------
+# GPU glue-loop kernels (per-patch load / B-input / Aoned fill / add / write-back)
+#
+# These replace the host scalar-index loops in the solve body so the whole solve
+# body runs through KA `_launch!` — byte-identical on the CPU backend (one thread
+# per active patch, sequential per-pool inner loop) and device-capable when the
+# state field arrays + workspaces are on the GPU. Source field arrays are indexed
+# by the GLOBAL patch `p`; the workspace vector/matrix by the local row `pr =
+# p - begp + 1` (exactly the host loops). dt is converted to the workspace eltype
+# so no Float64 scalar reaches a Metal kernel.
+# -----------------------------------------------------------------------------
+
+# Aoned[pr,k] = transfer[pr,k]·dt / turnover[pr,doner[k]]  (0 if turnover==0).
+@kernel function _veg_aoned_kernel!(Aoned, @Const(transfer), @Const(turnover), @Const(doner),
+        @Const(filter_u), nnon::Int, this_begp::Int, dt)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1
+        for k in 1:nnon
+            d = doner[k]; t = turnover[pr, d]
+            Aoned[pr, k] = t != 0 ? transfer[pr, k] * dt / t : zero(eltype(Aoned))
+        end
+    end
+end
+
+# Binput[pr,i] = alloc[p,i]·input[p]·dt   (NPP allocation input vector).
+@kernel function _veg_binput_kernel!(Bv, @Const(alloc), @Const(input), @Const(filter_u),
+        nveg::Int, this_begp::Int, dt)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1; c = input[p]
+        for i in 1:nveg
+            Bv[pr, i] = alloc[p, i] * c * dt
+        end
+    end
+end
+
+# X[pr,i] += B[pr,i]   (add the input vector after the matrix advance).
+@kernel function _veg_add_vec_kernel!(Xv, @Const(Bv), @Const(filter_u), nveg::Int, this_begp::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1
+        for i in 1:nveg
+            Xv[pr, i] = Xv[pr, i] + Bv[pr, i]
+        end
+    end
+end
+
+# Gather the 18 native (+3 grain) veg-C pools from the state fields into Xvegc.V.
+@kernel function _veg_load_c_kernel!(Xv,
+        @Const(leafc), @Const(leafc_st), @Const(leafc_xf), @Const(frootc), @Const(frootc_st),
+        @Const(frootc_xf), @Const(livestemc), @Const(livestemc_st), @Const(livestemc_xf),
+        @Const(deadstemc), @Const(deadstemc_st), @Const(deadstemc_xf), @Const(livecrootc),
+        @Const(livecrootc_st), @Const(livecrootc_xf), @Const(deadcrootc), @Const(deadcrootc_st),
+        @Const(deadcrootc_xf), @Const(reproc), @Const(reproc_st), @Const(reproc_xf),
+        @Const(ivt), @Const(filter_u), this_begp::Int, npcropmin::Int, crop_active::Bool, irepr::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1
+        Xv[pr, ILEAF] = leafc[p];               Xv[pr, ILEAF_ST] = leafc_st[p];       Xv[pr, ILEAF_XF] = leafc_xf[p]
+        Xv[pr, IFROOT] = frootc[p];             Xv[pr, IFROOT_ST] = frootc_st[p];     Xv[pr, IFROOT_XF] = frootc_xf[p]
+        Xv[pr, ILIVESTEM] = livestemc[p];       Xv[pr, ILIVESTEM_ST] = livestemc_st[p]; Xv[pr, ILIVESTEM_XF] = livestemc_xf[p]
+        Xv[pr, IDEADSTEM] = deadstemc[p];       Xv[pr, IDEADSTEM_ST] = deadstemc_st[p]; Xv[pr, IDEADSTEM_XF] = deadstemc_xf[p]
+        Xv[pr, ILIVECROOT] = livecrootc[p];     Xv[pr, ILIVECROOT_ST] = livecrootc_st[p]; Xv[pr, ILIVECROOT_XF] = livecrootc_xf[p]
+        Xv[pr, IDEADCROOT] = deadcrootc[p];     Xv[pr, IDEADCROOT_ST] = deadcrootc_st[p]; Xv[pr, IDEADCROOT_XF] = deadcrootc_xf[p]
+        if crop_active && ivt[p] >= npcropmin
+            Xv[pr, IGRAIN] = reproc[p, irepr]; Xv[pr, IGRAIN_ST] = reproc_st[p, irepr]; Xv[pr, IGRAIN_XF] = reproc_xf[p, irepr]
+        end
+    end
+end
+
+# Scatter the advanced veg-C pools from Xvegc.V back into the state fields.
+@kernel function _veg_writeback_c_kernel!(leafc, leafc_st, leafc_xf, frootc, frootc_st, frootc_xf,
+        livestemc, livestemc_st, livestemc_xf, deadstemc, deadstemc_st, deadstemc_xf,
+        livecrootc, livecrootc_st, livecrootc_xf, deadcrootc, deadcrootc_st, deadcrootc_xf,
+        reproc, reproc_st, reproc_xf, @Const(Xv), @Const(ivt), @Const(filter_u),
+        this_begp::Int, npcropmin::Int, crop_active::Bool, irepr::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1
+        leafc[p] = Xv[pr, ILEAF];             leafc_st[p] = Xv[pr, ILEAF_ST];       leafc_xf[p] = Xv[pr, ILEAF_XF]
+        frootc[p] = Xv[pr, IFROOT];           frootc_st[p] = Xv[pr, IFROOT_ST];     frootc_xf[p] = Xv[pr, IFROOT_XF]
+        livestemc[p] = Xv[pr, ILIVESTEM];     livestemc_st[p] = Xv[pr, ILIVESTEM_ST]; livestemc_xf[p] = Xv[pr, ILIVESTEM_XF]
+        deadstemc[p] = Xv[pr, IDEADSTEM];     deadstemc_st[p] = Xv[pr, IDEADSTEM_ST]; deadstemc_xf[p] = Xv[pr, IDEADSTEM_XF]
+        livecrootc[p] = Xv[pr, ILIVECROOT];   livecrootc_st[p] = Xv[pr, ILIVECROOT_ST]; livecrootc_xf[p] = Xv[pr, ILIVECROOT_XF]
+        deadcrootc[p] = Xv[pr, IDEADCROOT];   deadcrootc_st[p] = Xv[pr, IDEADCROOT_ST]; deadcrootc_xf[p] = Xv[pr, IDEADCROOT_XF]
+        if crop_active && ivt[p] >= npcropmin
+            reproc[p, irepr] = Xv[pr, IGRAIN]; reproc_st[p, irepr] = Xv[pr, IGRAIN_ST]; reproc_xf[p, irepr] = Xv[pr, IGRAIN_XF]
+        end
+    end
+end
+
+# Gather the 18 native (+ retransn + 3 grain) veg-N pools from the state fields.
+@kernel function _veg_load_n_kernel!(Xv,
+        @Const(leafn), @Const(leafn_st), @Const(leafn_xf), @Const(frootn), @Const(frootn_st),
+        @Const(frootn_xf), @Const(livestemn), @Const(livestemn_st), @Const(livestemn_xf),
+        @Const(deadstemn), @Const(deadstemn_st), @Const(deadstemn_xf), @Const(livecrootn),
+        @Const(livecrootn_st), @Const(livecrootn_xf), @Const(deadcrootn), @Const(deadcrootn_st),
+        @Const(deadcrootn_xf), @Const(retransn), @Const(repron), @Const(repron_st), @Const(repron_xf),
+        @Const(ivt), @Const(filter_u), this_begp::Int, npcropmin::Int, crop_active::Bool,
+        iretransn::Int, irepr::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1
+        Xv[pr, ILEAF] = leafn[p];             Xv[pr, ILEAF_ST] = leafn_st[p];       Xv[pr, ILEAF_XF] = leafn_xf[p]
+        Xv[pr, IFROOT] = frootn[p];           Xv[pr, IFROOT_ST] = frootn_st[p];     Xv[pr, IFROOT_XF] = frootn_xf[p]
+        Xv[pr, ILIVESTEM] = livestemn[p];     Xv[pr, ILIVESTEM_ST] = livestemn_st[p]; Xv[pr, ILIVESTEM_XF] = livestemn_xf[p]
+        Xv[pr, IDEADSTEM] = deadstemn[p];     Xv[pr, IDEADSTEM_ST] = deadstemn_st[p]; Xv[pr, IDEADSTEM_XF] = deadstemn_xf[p]
+        Xv[pr, ILIVECROOT] = livecrootn[p];   Xv[pr, ILIVECROOT_ST] = livecrootn_st[p]; Xv[pr, ILIVECROOT_XF] = livecrootn_xf[p]
+        Xv[pr, IDEADCROOT] = deadcrootn[p];   Xv[pr, IDEADCROOT_ST] = deadcrootn_st[p]; Xv[pr, IDEADCROOT_XF] = deadcrootn_xf[p]
+        Xv[pr, iretransn] = retransn[p]
+        if crop_active && ivt[p] >= npcropmin
+            Xv[pr, IGRAIN] = repron[p, irepr]; Xv[pr, IGRAIN_ST] = repron_st[p, irepr]; Xv[pr, IGRAIN_XF] = repron_xf[p, irepr]
+        end
+    end
+end
+
+# Scatter the advanced veg-N pools from Xvegn.V back into the state fields.
+@kernel function _veg_writeback_n_kernel!(leafn, leafn_st, leafn_xf, frootn, frootn_st, frootn_xf,
+        livestemn, livestemn_st, livestemn_xf, deadstemn, deadstemn_st, deadstemn_xf,
+        livecrootn, livecrootn_st, livecrootn_xf, deadcrootn, deadcrootn_st, deadcrootn_xf,
+        retransn, repron, repron_st, repron_xf, @Const(Xv), @Const(ivt), @Const(filter_u),
+        this_begp::Int, npcropmin::Int, crop_active::Bool, iretransn::Int, irepr::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1
+        leafn[p] = Xv[pr, ILEAF];             leafn_st[p] = Xv[pr, ILEAF_ST];       leafn_xf[p] = Xv[pr, ILEAF_XF]
+        frootn[p] = Xv[pr, IFROOT];           frootn_st[p] = Xv[pr, IFROOT_ST];     frootn_xf[p] = Xv[pr, IFROOT_XF]
+        livestemn[p] = Xv[pr, ILIVESTEM];     livestemn_st[p] = Xv[pr, ILIVESTEM_ST]; livestemn_xf[p] = Xv[pr, ILIVESTEM_XF]
+        deadstemn[p] = Xv[pr, IDEADSTEM];     deadstemn_st[p] = Xv[pr, IDEADSTEM_ST]; deadstemn_xf[p] = Xv[pr, IDEADSTEM_XF]
+        livecrootn[p] = Xv[pr, ILIVECROOT];   livecrootn_st[p] = Xv[pr, ILIVECROOT_ST]; livecrootn_xf[p] = Xv[pr, ILIVECROOT_XF]
+        deadcrootn[p] = Xv[pr, IDEADCROOT];   deadcrootn_st[p] = Xv[pr, IDEADCROOT_ST]; deadcrootn_xf[p] = Xv[pr, IDEADCROOT_XF]
+        retransn[p] = Xv[pr, iretransn]
+        if crop_active && ivt[p] >= npcropmin
+            repron[p, irepr] = Xv[pr, IGRAIN]; repron_st[p, irepr] = Xv[pr, IGRAIN_ST]; repron_xf[p, irepr] = Xv[pr, IGRAIN_XF]
+        end
+    end
+end
+
+# -----------------------------------------------------------------------------
 # Matrix assembly + solve (Fortran CNVegMatrix core, lines 1024–1538 + 2309–2336)
 # -----------------------------------------------------------------------------
 
@@ -343,18 +482,8 @@ function _build_ak_process!(AK::SparseMatrixType, begp::Int, endp::Int, num_soil
 
     if nnon > 0
         # Aoned[p,k] = transfer[p,k]*dt / turnover[p, doner[k]]   (Fortran 1028–1032)
-        for k in 1:nnon
-            d = doner[k]
-            for fp in 1:num_soilp
-                p = filter_soilp[fp]
-                pr = u_idx(begp, p)
-                if turnover[pr, d] != 0.0
-                    Aoned[pr, k] = transfer[pr, k] * dt / turnover[pr, d]
-                else
-                    Aoned[pr, k] = 0.0
-                end
-            end
-        end
+        _launch!(_veg_aoned_kernel!, Aoned, transfer, turnover, doner, filter_soilp,
+                 nnon, begp, eltype(Aoned)(dt); ndrange = num_soilp)
         AI = receiver[1:nnon]              # row indices  (receivers)
         AJ = doner[1:nnon]                 # column indices (doners)
         init_ready = set_value_a!(AK, begp, endp, num_soilp, filter_soilp, Aoned,
@@ -416,40 +545,20 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
     Binput = VectorType()
     init_v!(Binput, nvegcpool, begp, endp; ref=ref, FT=FT)
 
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]; pr = u_idx(begp, p)
-        Xvegc.V[pr, ILEAF]         = cs.leafc_patch[p]
-        Xvegc.V[pr, ILEAF_ST]      = cs.leafc_storage_patch[p]
-        Xvegc.V[pr, ILEAF_XF]      = cs.leafc_xfer_patch[p]
-        Xvegc.V[pr, IFROOT]        = cs.frootc_patch[p]
-        Xvegc.V[pr, IFROOT_ST]     = cs.frootc_storage_patch[p]
-        Xvegc.V[pr, IFROOT_XF]     = cs.frootc_xfer_patch[p]
-        Xvegc.V[pr, ILIVESTEM]     = cs.livestemc_patch[p]
-        Xvegc.V[pr, ILIVESTEM_ST]  = cs.livestemc_storage_patch[p]
-        Xvegc.V[pr, ILIVESTEM_XF]  = cs.livestemc_xfer_patch[p]
-        Xvegc.V[pr, IDEADSTEM]     = cs.deadstemc_patch[p]
-        Xvegc.V[pr, IDEADSTEM_ST]  = cs.deadstemc_storage_patch[p]
-        Xvegc.V[pr, IDEADSTEM_XF]  = cs.deadstemc_xfer_patch[p]
-        Xvegc.V[pr, ILIVECROOT]    = cs.livecrootc_patch[p]
-        Xvegc.V[pr, ILIVECROOT_ST] = cs.livecrootc_storage_patch[p]
-        Xvegc.V[pr, ILIVECROOT_XF] = cs.livecrootc_xfer_patch[p]
-        Xvegc.V[pr, IDEADCROOT]    = cs.deadcrootc_patch[p]
-        Xvegc.V[pr, IDEADCROOT_ST] = cs.deadcrootc_storage_patch[p]
-        Xvegc.V[pr, IDEADCROOT_XF] = cs.deadcrootc_xfer_patch[p]
-        if ivt[p] >= npcropmin && nvegcpool >= IGRAIN_XF
-            Xvegc.V[pr, IGRAIN]    = cs.reproductivec_patch[p, irepr]
-            Xvegc.V[pr, IGRAIN_ST] = cs.reproductivec_storage_patch[p, irepr]
-            Xvegc.V[pr, IGRAIN_XF] = cs.reproductivec_xfer_patch[p, irepr]
-        end
-    end
+    crop_active = nvegcpool >= IGRAIN_XF
+    _launch!(_veg_load_c_kernel!, Xvegc.V,
+        cs.leafc_patch, cs.leafc_storage_patch, cs.leafc_xfer_patch,
+        cs.frootc_patch, cs.frootc_storage_patch, cs.frootc_xfer_patch,
+        cs.livestemc_patch, cs.livestemc_storage_patch, cs.livestemc_xfer_patch,
+        cs.deadstemc_patch, cs.deadstemc_storage_patch, cs.deadstemc_xfer_patch,
+        cs.livecrootc_patch, cs.livecrootc_storage_patch, cs.livecrootc_xfer_patch,
+        cs.deadcrootc_patch, cs.deadcrootc_storage_patch, cs.deadcrootc_xfer_patch,
+        cs.reproductivec_patch, cs.reproductivec_storage_patch, cs.reproductivec_xfer_patch,
+        ivt, filter_soilp, begp, npcropmin, crop_active, irepr; ndrange = num_soilp)
 
     # --- B·I : allocation input (Fortran 1400–1405) ---
-    for i in 1:nvegcpool
-        for fp in 1:num_soilp
-            p = filter_soilp[fp]; pr = u_idx(begp, p)
-            Binput.V[pr, i] = cf.matrix_alloc_patch[p, i] * cf.matrix_Cinput_patch[p] * dt
-        end
-    end
+    _launch!(_veg_binput_kernel!, Binput.V, cf.matrix_alloc_patch, cf.matrix_Cinput_patch,
+             filter_soilp, nvegcpool, begp, eltype(Binput.V)(dt); ndrange = num_soilp)
 
     # --- Assemble AKph, AKgm, AKfi (Fortran 1407–1497) ---
     AKph = SparseMatrixType(); init_sm!(AKph, nvegcpool, begp, endp; ref=ref, FT=FT)
@@ -497,40 +606,18 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
     # --- Xvegc = (I + AKall)·Xvegc  (Fortran SPMM_AX, 1530) ---
     spmm_ax!(Xvegc, num_soilp, filter_soilp, AKall)
     # --- Xvegc += B·I  (Fortran 1533–1538) ---
-    for i in 1:nvegcpool
-        for fp in 1:num_soilp
-            p = filter_soilp[fp]; pr = u_idx(begp, p)
-            Xvegc.V[pr, i] = Xvegc.V[pr, i] + Binput.V[pr, i]
-        end
-    end
+    _launch!(_veg_add_vec_kernel!, Xvegc.V, Binput.V, filter_soilp, nvegcpool, begp; ndrange = num_soilp)
 
     # --- Write the advanced pools back (Fortran 2309–2336) ---
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]; pr = u_idx(begp, p)
-        cs.leafc_patch[p]            = Xvegc.V[pr, ILEAF]
-        cs.leafc_storage_patch[p]    = Xvegc.V[pr, ILEAF_ST]
-        cs.leafc_xfer_patch[p]       = Xvegc.V[pr, ILEAF_XF]
-        cs.frootc_patch[p]           = Xvegc.V[pr, IFROOT]
-        cs.frootc_storage_patch[p]   = Xvegc.V[pr, IFROOT_ST]
-        cs.frootc_xfer_patch[p]      = Xvegc.V[pr, IFROOT_XF]
-        cs.livestemc_patch[p]        = Xvegc.V[pr, ILIVESTEM]
-        cs.livestemc_storage_patch[p] = Xvegc.V[pr, ILIVESTEM_ST]
-        cs.livestemc_xfer_patch[p]   = Xvegc.V[pr, ILIVESTEM_XF]
-        cs.deadstemc_patch[p]        = Xvegc.V[pr, IDEADSTEM]
-        cs.deadstemc_storage_patch[p] = Xvegc.V[pr, IDEADSTEM_ST]
-        cs.deadstemc_xfer_patch[p]   = Xvegc.V[pr, IDEADSTEM_XF]
-        cs.livecrootc_patch[p]       = Xvegc.V[pr, ILIVECROOT]
-        cs.livecrootc_storage_patch[p] = Xvegc.V[pr, ILIVECROOT_ST]
-        cs.livecrootc_xfer_patch[p]  = Xvegc.V[pr, ILIVECROOT_XF]
-        cs.deadcrootc_patch[p]       = Xvegc.V[pr, IDEADCROOT]
-        cs.deadcrootc_storage_patch[p] = Xvegc.V[pr, IDEADCROOT_ST]
-        cs.deadcrootc_xfer_patch[p]  = Xvegc.V[pr, IDEADCROOT_XF]
-        if ivt[p] >= npcropmin && nvegcpool >= IGRAIN_XF
-            cs.reproductivec_patch[p, irepr]         = Xvegc.V[pr, IGRAIN]
-            cs.reproductivec_storage_patch[p, irepr] = Xvegc.V[pr, IGRAIN_ST]
-            cs.reproductivec_xfer_patch[p, irepr]    = Xvegc.V[pr, IGRAIN_XF]
-        end
-    end
+    _launch!(_veg_writeback_c_kernel!,
+        cs.leafc_patch, cs.leafc_storage_patch, cs.leafc_xfer_patch,
+        cs.frootc_patch, cs.frootc_storage_patch, cs.frootc_xfer_patch,
+        cs.livestemc_patch, cs.livestemc_storage_patch, cs.livestemc_xfer_patch,
+        cs.deadstemc_patch, cs.deadstemc_storage_patch, cs.deadstemc_xfer_patch,
+        cs.livecrootc_patch, cs.livecrootc_storage_patch, cs.livecrootc_xfer_patch,
+        cs.deadcrootc_patch, cs.deadcrootc_storage_patch, cs.deadcrootc_xfer_patch,
+        cs.reproductivec_patch, cs.reproductivec_storage_patch, cs.reproductivec_xfer_patch,
+        Xvegc.V, ivt, filter_soilp, begp, npcropmin, crop_active, irepr; ndrange = num_soilp)
 
     release_sm!(AKph); release_sm!(AKgm); release_sm!(AKfi); release_sm!(AKall)
     release_v!(Xvegc); release_v!(Binput)
@@ -609,12 +696,7 @@ function _cn_veg_matrix_advance!(X::VectorType, B::VectorType,
     end
 
     spmm_ax!(X, num_soilp, filter_soilp, AKall)
-    for i in 1:nvegpool
-        for fp in 1:num_soilp
-            p = filter_soilp[fp]; pr = u_idx(begp, p)
-            X.V[pr, i] = X.V[pr, i] + B.V[pr, i]
-        end
-    end
+    _launch!(_veg_add_vec_kernel!, X.V, B.V, filter_soilp, nvegpool, begp; ndrange = num_soilp)
 
     release_sm!(AKph); release_sm!(AKgm); release_sm!(AKfi); release_sm!(AKall)
     return nothing
@@ -656,41 +738,21 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
     Binput = VectorType(); init_v!(Binput, nvegnpool, begp, endp; ref=ref, FT=FT)
 
     # --- load N pools (Fortran 1221–1247) ---
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]; pr = u_idx(begp, p)
-        Xvegn.V[pr, ILEAF]         = ns.leafn_patch[p]
-        Xvegn.V[pr, ILEAF_ST]      = ns.leafn_storage_patch[p]
-        Xvegn.V[pr, ILEAF_XF]      = ns.leafn_xfer_patch[p]
-        Xvegn.V[pr, IFROOT]        = ns.frootn_patch[p]
-        Xvegn.V[pr, IFROOT_ST]     = ns.frootn_storage_patch[p]
-        Xvegn.V[pr, IFROOT_XF]     = ns.frootn_xfer_patch[p]
-        Xvegn.V[pr, ILIVESTEM]     = ns.livestemn_patch[p]
-        Xvegn.V[pr, ILIVESTEM_ST]  = ns.livestemn_storage_patch[p]
-        Xvegn.V[pr, ILIVESTEM_XF]  = ns.livestemn_xfer_patch[p]
-        Xvegn.V[pr, IDEADSTEM]     = ns.deadstemn_patch[p]
-        Xvegn.V[pr, IDEADSTEM_ST]  = ns.deadstemn_storage_patch[p]
-        Xvegn.V[pr, IDEADSTEM_XF]  = ns.deadstemn_xfer_patch[p]
-        Xvegn.V[pr, ILIVECROOT]    = ns.livecrootn_patch[p]
-        Xvegn.V[pr, ILIVECROOT_ST] = ns.livecrootn_storage_patch[p]
-        Xvegn.V[pr, ILIVECROOT_XF] = ns.livecrootn_xfer_patch[p]
-        Xvegn.V[pr, IDEADCROOT]    = ns.deadcrootn_patch[p]
-        Xvegn.V[pr, IDEADCROOT_ST] = ns.deadcrootn_storage_patch[p]
-        Xvegn.V[pr, IDEADCROOT_XF] = ns.deadcrootn_xfer_patch[p]
-        Xvegn.V[pr, iretransn]     = ns.retransn_patch[p]
-        if ivt[p] >= npcropmin && nvegnpool >= IGRAIN_XF
-            Xvegn.V[pr, IGRAIN]    = ns.reproductiven_patch[p, irepr]
-            Xvegn.V[pr, IGRAIN_ST] = ns.reproductiven_storage_patch[p, irepr]
-            Xvegn.V[pr, IGRAIN_XF] = ns.reproductiven_xfer_patch[p, irepr]
-        end
-    end
+    crop_active = nvegnpool >= IGRAIN_XF
+    _launch!(_veg_load_n_kernel!, Xvegn.V,
+        ns.leafn_patch, ns.leafn_storage_patch, ns.leafn_xfer_patch,
+        ns.frootn_patch, ns.frootn_storage_patch, ns.frootn_xfer_patch,
+        ns.livestemn_patch, ns.livestemn_storage_patch, ns.livestemn_xfer_patch,
+        ns.deadstemn_patch, ns.deadstemn_storage_patch, ns.deadstemn_xfer_patch,
+        ns.livecrootn_patch, ns.livecrootn_storage_patch, ns.livecrootn_xfer_patch,
+        ns.deadcrootn_patch, ns.deadcrootn_storage_patch, ns.deadcrootn_xfer_patch,
+        ns.retransn_patch, ns.reproductiven_patch, ns.reproductiven_storage_patch,
+        ns.reproductiven_xfer_patch, ivt, filter_soilp, begp, npcropmin, crop_active,
+        iretransn, irepr; ndrange = num_soilp)
 
     # --- B·I : N allocation input (Fortran matrix_nalloc·matrix_Ninput·dt) ---
-    for i in 1:nvegnpool
-        for fp in 1:num_soilp
-            p = filter_soilp[fp]; pr = u_idx(begp, p)
-            Binput.V[pr, i] = nf.matrix_nalloc_patch[p, i] * nf.matrix_Ninput_patch[p] * dt
-        end
-    end
+    _launch!(_veg_binput_kernel!, Binput.V, nf.matrix_nalloc_patch, nf.matrix_Ninput_patch,
+             filter_soilp, nvegnpool, begp, eltype(Binput.V)(dt); ndrange = num_soilp)
 
     _cn_veg_matrix_advance!(Xvegn, Binput, begp, endp, num_soilp, filter_soilp, nvegnpool,
         nf.matrix_nphtransfer_patch, nf.matrix_nphturnover_patch,
@@ -705,33 +767,16 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
         dt, num_actfirep; ref=ref, FT=FT)
 
     # --- write the advanced N pools back ---
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]; pr = u_idx(begp, p)
-        ns.leafn_patch[p]             = Xvegn.V[pr, ILEAF]
-        ns.leafn_storage_patch[p]     = Xvegn.V[pr, ILEAF_ST]
-        ns.leafn_xfer_patch[p]        = Xvegn.V[pr, ILEAF_XF]
-        ns.frootn_patch[p]            = Xvegn.V[pr, IFROOT]
-        ns.frootn_storage_patch[p]    = Xvegn.V[pr, IFROOT_ST]
-        ns.frootn_xfer_patch[p]       = Xvegn.V[pr, IFROOT_XF]
-        ns.livestemn_patch[p]         = Xvegn.V[pr, ILIVESTEM]
-        ns.livestemn_storage_patch[p] = Xvegn.V[pr, ILIVESTEM_ST]
-        ns.livestemn_xfer_patch[p]    = Xvegn.V[pr, ILIVESTEM_XF]
-        ns.deadstemn_patch[p]         = Xvegn.V[pr, IDEADSTEM]
-        ns.deadstemn_storage_patch[p] = Xvegn.V[pr, IDEADSTEM_ST]
-        ns.deadstemn_xfer_patch[p]    = Xvegn.V[pr, IDEADSTEM_XF]
-        ns.livecrootn_patch[p]        = Xvegn.V[pr, ILIVECROOT]
-        ns.livecrootn_storage_patch[p] = Xvegn.V[pr, ILIVECROOT_ST]
-        ns.livecrootn_xfer_patch[p]   = Xvegn.V[pr, ILIVECROOT_XF]
-        ns.deadcrootn_patch[p]        = Xvegn.V[pr, IDEADCROOT]
-        ns.deadcrootn_storage_patch[p] = Xvegn.V[pr, IDEADCROOT_ST]
-        ns.deadcrootn_xfer_patch[p]   = Xvegn.V[pr, IDEADCROOT_XF]
-        ns.retransn_patch[p]          = Xvegn.V[pr, iretransn]
-        if ivt[p] >= npcropmin && nvegnpool >= IGRAIN_XF
-            ns.reproductiven_patch[p, irepr]         = Xvegn.V[pr, IGRAIN]
-            ns.reproductiven_storage_patch[p, irepr] = Xvegn.V[pr, IGRAIN_ST]
-            ns.reproductiven_xfer_patch[p, irepr]    = Xvegn.V[pr, IGRAIN_XF]
-        end
-    end
+    _launch!(_veg_writeback_n_kernel!,
+        ns.leafn_patch, ns.leafn_storage_patch, ns.leafn_xfer_patch,
+        ns.frootn_patch, ns.frootn_storage_patch, ns.frootn_xfer_patch,
+        ns.livestemn_patch, ns.livestemn_storage_patch, ns.livestemn_xfer_patch,
+        ns.deadstemn_patch, ns.deadstemn_storage_patch, ns.deadstemn_xfer_patch,
+        ns.livecrootn_patch, ns.livecrootn_storage_patch, ns.livecrootn_xfer_patch,
+        ns.deadcrootn_patch, ns.deadcrootn_storage_patch, ns.deadcrootn_xfer_patch,
+        ns.retransn_patch, ns.reproductiven_patch, ns.reproductiven_storage_patch,
+        ns.reproductiven_xfer_patch, Xvegn.V, ivt, filter_soilp, begp, npcropmin,
+        crop_active, iretransn, irepr; ndrange = num_soilp)
 
     release_v!(Xvegn); release_v!(Binput)
     return nothing

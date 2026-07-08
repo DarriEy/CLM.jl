@@ -10,6 +10,9 @@
 #   set_value_dm! / set_value_v! / set_value_v_scaler!   (scalar->eltype fills)
 #   spmm_ak!  (A <- A*K)      spmm_ax!  (X <- X + A*X, the pool advance)
 #   spmp_b_acc! (B <- B + A)  set_value_a! memoized value-fill (device M/RI/CI)
+# plus the veg-solver GLUE kernels that replaced the host scalar-index loops in
+# the solve body: _veg_aoned_kernel! / _veg_binput_kernel! / _veg_add_vec_kernel! /
+# _veg_load_c_kernel! / _veg_writeback_c_kernel!.
 # RI/CI/filter are carried to the device via Adapt (item: index arrays on device).
 #
 #   julia --project=scripts scripts/gpu_validate_matrixcn_e2e.jl
@@ -104,6 +107,43 @@ function main(backend)
     CLM.set_value_a!(Adm, BEGU, ENDU, NUM, dev(FILT), dev(Asrc(FT)), AI, AJ, NENON, true;
                      list = dev(list), RI_A = dev(RIa), CI_A = dev(CIa))
     push!(checks, ("set_value_a! (memoized fill)", Aa.M[:, 1:Aa.NE], Adm.M[:, 1:Aa.NE]))
+
+    # (6) veg-solver GLUE kernels — the per-patch load / B-input / Aoned / add /
+    #     write-back loops that replaced the host scalar-index loops in the solve
+    #     body. Each runs on CPU (golden) and device over the same operands.
+    np = 3; nveg = 18; nnon = 5; filt = [1, 2, 3]; nump = 3; dt = 1800.0; doner = [1, 4, 7, 10, 13]
+    # aoned: Aoned[p,k] = transfer·dt / turnover[doner[k]]
+    let tr = FT[0.001(k + p) for p in 1:np, k in 1:nnon], tu = FT[0.05(d + p) for p in 1:np, d in 1:nveg]
+        Ah = zeros(np, nnon); CLM._launch!(CLM._veg_aoned_kernel!, Ah, Float64.(tr), Float64.(tu), doner, filt, nnon, 1, dt; ndrange = nump)
+        Ag = dev(zeros(FT, np, nnon)); CLM._launch!(CLM._veg_aoned_kernel!, Ag, dev(tr), dev(tu), dev(doner), dev(filt), nnon, 1, FT(dt); ndrange = nump)
+        push!(checks, ("glue _veg_aoned_kernel!", Ah, Ag))
+    end
+    # binput: B[p,i] = alloc·input·dt
+    let al = FT[0.1(i + p) for p in 1:np, i in 1:nveg], inp = FT[2.0 + p for p in 1:np]
+        Bh = zeros(np, nveg); CLM._launch!(CLM._veg_binput_kernel!, Bh, Float64.(al), Float64.(inp), filt, nveg, 1, dt; ndrange = nump)
+        Bg = dev(zeros(FT, np, nveg)); CLM._launch!(CLM._veg_binput_kernel!, Bg, dev(al), dev(inp), dev(filt), nveg, 1, FT(dt); ndrange = nump)
+        push!(checks, ("glue _veg_binput_kernel!", Bh, Bg))
+    end
+    # add: X += B
+    let X0 = FT[100.0 + i + p for p in 1:np, i in 1:nveg], Bv = FT[i + 0.5p for p in 1:np, i in 1:nveg]
+        Xh = Float64.(X0); CLM._launch!(CLM._veg_add_vec_kernel!, Xh, Float64.(Bv), filt, nveg, 1; ndrange = nump)
+        Xg = dev(copy(X0)); CLM._launch!(CLM._veg_add_vec_kernel!, Xg, dev(Bv), dev(filt), nveg, 1; ndrange = nump)
+        push!(checks, ("glue _veg_add_vec_kernel!", Xh, Xg))
+    end
+    # load_c / write-back_c round-trip (crop inactive): fields -> Xvegc.V -> fields
+    let fields = [FT[10.0k + p for p in 1:np] for k in 1:18], repro = [FT[0.0 for p in 1:np, r in 1:1] for _ in 1:3], ivt = [1, 2, 3]
+        Xh = fill(-9999.0, np, nveg)
+        CLM._launch!(CLM._veg_load_c_kernel!, Xh, (Float64.(f) for f in fields)..., (Float64.(r) for r in repro)..., ivt, filt, 1, 15, false, 1; ndrange = nump)
+        Xg = dev(fill(FT(-9999), np, nveg))
+        CLM._launch!(CLM._veg_load_c_kernel!, Xg, (dev(f) for f in fields)..., (dev(r) for r in repro)..., dev(ivt), dev(filt), 1, 15, false, 1; ndrange = nump)
+        push!(checks, ("glue _veg_load_c_kernel!", Xh, Xg))
+        # write-back into fresh field arrays and compare the 18 native pools
+        oh = [zeros(np) for _ in 1:18]; ohr = [zeros(np, 1) for _ in 1:3]
+        CLM._launch!(CLM._veg_writeback_c_kernel!, oh..., ohr..., Xh, ivt, filt, 1, 15, false, 1; ndrange = nump)
+        og = [dev(zeros(FT, np)) for _ in 1:18]; ogr = [dev(zeros(FT, np, 1)) for _ in 1:3]
+        CLM._launch!(CLM._veg_writeback_c_kernel!, og..., ogr..., Xg, dev(ivt), dev(filt), 1, 15, false, 1; ndrange = nump)
+        push!(checks, ("glue _veg_writeback_c_kernel!", reduce(hcat, oh), reduce(hcat, [Array(x) for x in og])))
+    end
 
     nfail = 0
     for (nm, cpu, gpu) in checks
