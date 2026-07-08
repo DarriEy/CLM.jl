@@ -326,10 +326,10 @@ end
 """
     cnveg_state_init_cold!(vs::CNVegStateData, bounds_col::UnitRange{Int},
                            bounds_patch::UnitRange{Int};
-                           col_landunit::Union{Vector{Int},Nothing}=nothing,
-                           patch_landunit::Union{Vector{Int},Nothing}=nothing,
+                           col_landunit::Union{AbstractVector{<:Integer},Nothing}=nothing,
+                           patch_landunit::Union{AbstractVector{<:Integer},Nothing}=nothing,
                            lun_ifspecial::Union{Vector{Bool},Nothing}=nothing,
-                           lun_itype::Union{Vector{Int},Nothing}=nothing)
+                           lun_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
 
 Initialize cold-start conditions for CN vegetation state variables.
 Sets fire, phenology, and accumulator variables to their cold-start values.
@@ -339,10 +339,10 @@ Ported from `cnveg_state_type%InitCold` in `CNVegStateType.F90`.
 function cnveg_state_init_cold!(vs::CNVegStateData,
                                 bounds_col::UnitRange{Int},
                                 bounds_patch::UnitRange{Int};
-                                col_landunit::Union{Vector{Int},Nothing}=nothing,
-                                patch_landunit::Union{Vector{Int},Nothing}=nothing,
+                                col_landunit::Union{AbstractVector{<:Integer},Nothing}=nothing,
+                                patch_landunit::Union{AbstractVector{<:Integer},Nothing}=nothing,
                                 lun_ifspecial::Union{Vector{Bool},Nothing}=nothing,
-                                lun_itype::Union{Vector{Int},Nothing}=nothing)
+                                lun_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
 
     have_landunit_info = (col_landunit !== nothing && patch_landunit !== nothing &&
                           lun_ifspecial !== nothing && lun_itype !== nothing)

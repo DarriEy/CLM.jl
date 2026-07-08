@@ -766,20 +766,26 @@ function c_state_update1!(cs_veg::CNVegCarbonStateData,
                            dt::Real)
 
     # --- Column loop: soil decomposition input fluxes (one thread per column) ---
+    _FT = eltype(cf_soil.decomp_cpools_sourcesink_col)
+    _donor    = _to_backend_like(cf_soil.decomp_cpools_sourcesink_col, _FT, cascade_donor_pool)
+    _receiver = _to_backend_like(cf_soil.decomp_cpools_sourcesink_col, _FT, cascade_receiver_pool)
     _launch!(_csu1_col_kernel!, mask_soilc, col_is_fates,
         cf_veg.phenology_c_to_litr_c_col, cf_soil.decomp_cpools_sourcesink_col,
         cf_soil.decomp_cascade_hr_vr_col, cf_soil.decomp_cascade_ctransfer_vr_col,
-        cascade_donor_pool, cascade_receiver_pool,
+        _donor, _receiver,
         nlevdecomp, ndecomp_cascade_transitions, i_litr_min, i_litr_max, i_cwd,
-        use_soil_matrixcn, dt)
+        use_soil_matrixcn, _FT(dt))
 
     # --- Patch loop: vegetation C state updates (one thread per patch) ---
     cs = _csu1_cs(cs_veg)
     cf = _csu1_cf(cf_veg)
-    _launch!(_csu1_patch_kernel!, mask_soilp, ivt, woody, harvdate, cs, cf,
+    _ivtp  = _to_backend_like(cs_veg.leafc_patch, _FT, ivt)
+    _woodp = _to_backend_like(cs_veg.leafc_patch, _FT, woody)
+    _hrvp  = _to_backend_like(cs_veg.leafc_patch, _FT, harvdate)
+    _launch!(_csu1_patch_kernel!, mask_soilp, _ivtp, _woodp, _hrvp, cs, cf,
         npcropmin, nrepr, repr_grain_min, repr_grain_max,
         repr_structure_min, repr_structure_max,
-        use_matrixcn, carbon_resp_opt, dribble_crophrv_xsmrpool_2atm, dt)
+        use_matrixcn, carbon_resp_opt, dribble_crophrv_xsmrpool_2atm, _FT(dt))
 
     return nothing
 end

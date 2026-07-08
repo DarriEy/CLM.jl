@@ -79,7 +79,7 @@ function main(backend)
 
     checks = [("t_soisno", instH.temperature.t_soisno_col, inst_d.temperature.t_soisno_col),
               ("decomp_cpools_vr", instH.soilbiogeochem_carbonstate.decomp_cpools_vr_col, inst_d.soilbiogeochem_carbonstate.decomp_cpools_vr_col),
-              ("leafc", instH.bgc_vegetation.cnveg_carbon_state.leafc_patch, inst_d.bgc_vegetation.cnveg_carbon_state.leafc_patch)]
+              ("leafc", instH.bgc_vegetation.cnveg_carbonstate_inst.leafc_patch, inst_d.bgc_vegetation.cnveg_carbonstate_inst.leafc_patch)]
     nfail = 0; ncmp = 0
     for (nm, h, d) in checks
         r, n = reldiff_finite(h, d); ncmp += n

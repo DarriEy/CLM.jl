@@ -194,7 +194,7 @@ end
 """
     frictionvel_init_cold!(fv::FrictionVelocityData, bounds_col::UnitRange{Int},
                            bounds_patch::UnitRange{Int};
-                           col_landunit::Union{Vector{Int},Nothing}=nothing,
+                           col_landunit::Union{AbstractVector{<:Integer},Nothing}=nothing,
                            lun_lakpoi::Union{Vector{Bool},Nothing}=nothing)
 
 Cold-start initialization. Sets forc_hgt_u_patch to 30m for CN mode,
@@ -205,7 +205,7 @@ Ported from `frictionvel_type%InitCold` in `FrictionVelocityMod.F90`.
 function frictionvel_init_cold!(fv::FrictionVelocityData,
                                  bounds_col::UnitRange{Int},
                                  bounds_patch::UnitRange{Int};
-                                 col_landunit::Union{Vector{Int},Nothing} = nothing,
+                                 col_landunit::Union{AbstractVector{<:Integer},Nothing} = nothing,
                                  lun_lakpoi::Union{Vector{Bool},Nothing} = nothing,
                                  use_cn::Bool = false)
     for p in bounds_patch
@@ -703,10 +703,10 @@ function friction_velocity!(
         fm::AbstractVector{<:Real};
         landunit_index::Bool = false,
         active = nothing,
-        lun_gridcell::Union{Vector{Int},Nothing} = nothing,
-        lun_patchi::Union{Vector{Int},Nothing} = nothing,
-        lun_patchf::Union{Vector{Int},Nothing} = nothing,
-        patch_gridcell::Union{Vector{Int},Nothing} = nothing)
+        lun_gridcell::Union{AbstractVector{<:Integer},Nothing} = nothing,
+        lun_patchi::Union{AbstractVector{<:Integer},Nothing} = nothing,
+        lun_patchf::Union{AbstractVector{<:Integer},Nothing} = nothing,
+        patch_gridcell::Union{AbstractVector{<:Integer},Nothing} = nothing)
 
     zetam = 1.574  # transition point of flux-gradient relation (wind profile)
     zetat = 0.465  # transition point of flux-gradient relation (temp. profile)

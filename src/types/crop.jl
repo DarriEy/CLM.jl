@@ -193,11 +193,11 @@ For each crop patch (where `lun_itype[patch_landunit[p]] == istcrop`),
 sets fertilizer nitrogen and optionally latitude-varying base temperature.
 """
 function crop_init_cold!(cr::CropData, bounds_patch::UnitRange{Int};
-                         patch_landunit::Union{Vector{Int},Nothing}=nothing,
-                         lun_itype::Union{Vector{Int},Nothing}=nothing,
+                         patch_landunit::Union{AbstractVector{<:Integer},Nothing}=nothing,
+                         lun_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                          istcrop::Union{Int,Nothing}=nothing,
-                         patch_gridcell::Union{Vector{Int},Nothing}=nothing,
-                         patch_itype::Union{Vector{Int},Nothing}=nothing,
+                         patch_gridcell::Union{AbstractVector{<:Integer},Nothing}=nothing,
+                         patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                          fert_cft::Union{Matrix{Float64},Nothing}=nothing,
                          pftcon_baset::Union{Vector{Float64},Nothing}=nothing,
                          grc_latdeg::Union{Vector{Float64},Nothing}=nothing)

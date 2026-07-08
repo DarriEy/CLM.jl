@@ -315,11 +315,15 @@ Ported from `QflxH2osfcSurf` in `SurfaceWaterMod.F90`.
     end
 end
 
-surfwat_qflx_surf!(qflx_h2osfc_surf, mask_hydrologyc, h2osfc, h2osfc_thresh,
-                   frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag::Int) =
+function surfwat_qflx_surf!(qflx_h2osfc_surf, mask_hydrologyc, h2osfc, h2osfc_thresh,
+                   frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag::Int)
+    # Scalar params/dtime move to the array precision so the kernel carries no
+    # Float64 arg (Metal rejects Float64). No-op on the Float64 host path.
+    FT = eltype(qflx_h2osfc_surf)
     _launch!(_surfwat_qflx_surf_kernel!, qflx_h2osfc_surf, mask_hydrologyc, h2osfc,
-             h2osfc_thresh, frac_h2osfc_nosnow, topo_slope, dtime, h2osfcflag,
-             SURFACE_WATER_PC[], SURFACE_WATER_MU[])
+             h2osfc_thresh, frac_h2osfc_nosnow, topo_slope, FT(dtime), h2osfcflag,
+             FT(SURFACE_WATER_PC[]), FT(SURFACE_WATER_MU[]))
+end
 
 function qflx_h2osfc_surf!(mask_hydrologyc::AbstractVector{Bool},
                             bounds_col::UnitRange{Int},

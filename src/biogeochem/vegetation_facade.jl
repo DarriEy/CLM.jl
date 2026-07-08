@@ -129,6 +129,28 @@ end
 # Default precision is Float64; legacy callers that don't specify FT get a Float64 tree.
 CNVegetationData(; kwargs...) = CNVegetationData{Float64}(; kwargs...)
 
+# Device-movable: adapt each child (all CNVeg* state/flux sub-structs already carry
+# Adapt.@adapt_structure; the config/driver_config structs hold no arrays and pass
+# through as identity). Without this the CN-veg state tree stays on the host when the
+# enclosing CLMInstances is moved to a GPU, and the CN kernels receive host arrays.
+# Written by hand rather than via @adapt_structure because the facade's FT type
+# parameter isn't the type of any field, so the macro's UnionAll positional
+# reconstruction can't infer it; we recover FT from an adapted child instead.
+function Adapt.adapt_structure(to, x::CNVegetationData)
+    cs    = Adapt.adapt(to, x.cnveg_carbonstate_inst)
+    c13cs = Adapt.adapt(to, x.c13_cnveg_carbonstate_inst)
+    c14cs = Adapt.adapt(to, x.c14_cnveg_carbonstate_inst)
+    cf    = Adapt.adapt(to, x.cnveg_carbonflux_inst)
+    c13cf = Adapt.adapt(to, x.c13_cnveg_carbonflux_inst)
+    c14cf = Adapt.adapt(to, x.c14_cnveg_carbonflux_inst)
+    st    = Adapt.adapt(to, x.cnveg_state_inst)
+    ns    = Adapt.adapt(to, x.cnveg_nitrogenstate_inst)
+    nf    = Adapt.adapt(to, x.cnveg_nitrogenflux_inst)
+    FT    = typeof(cs).parameters[1]
+    return CNVegetationData{FT}(x.config, x.driver_config, st,
+        cs, c13cs, c14cs, cf, c13cf, c14cf, ns, nf)
+end
+
 # ---------------------------------------------------------------------------
 # cn_vegetation_init! — Initialize the vegetation facade
 # Ported from cn_vegetation_type%Init in CNVegetationFacade.F90
@@ -413,13 +435,13 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         i_cwd::Int,
         npcropmin::Int = 17,
         nrepr::Int = 1,
-        patch_column::Vector{Int},
-        ivt::Vector{Int},
-        woody::Vector{<:Real},
-        harvdate::Vector{Int},
-        col_is_fates::Vector{Bool},
-        cascade_donor_pool::Vector{Int},
-        cascade_receiver_pool::Vector{Int},
+        patch_column::AbstractVector{<:Integer},
+        ivt::AbstractVector{<:Integer},
+        woody::AbstractVector{<:Real},
+        harvdate::AbstractVector{<:Integer},
+        col_is_fates::AbstractVector{Bool},
+        cascade_donor_pool::AbstractVector{<:Integer},
+        cascade_receiver_pool::AbstractVector{<:Integer},
         dt::Real,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
@@ -601,7 +623,7 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
-        patch_itype::Union{Vector{Int},Nothing}=nothing)
+        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
 
     # CNDriverLeaching — already ported
     cn_driver_leaching!(veg.driver_config;
@@ -861,10 +883,10 @@ Ported from `get_froot_carbon_patch` in `CNVegetationFacade.F90`.
 """
 function get_froot_carbon_patch(veg::CNVegetationData,
                                   bounds_patch::UnitRange{Int};
-                                  tlai::Vector{<:Real} = Float64[],
-                                  slatop::Vector{<:Real} = Float64[],
-                                  froot_leaf::Vector{<:Real} = Float64[],
-                                  ivt::Vector{Int} = Int[])
+                                  tlai::AbstractVector{<:Real} = Float64[],
+                                  slatop::AbstractVector{<:Real} = Float64[],
+                                  froot_leaf::AbstractVector{<:Real} = Float64[],
+                                  ivt::AbstractVector{<:Integer} = Int[])
     if veg.config.use_cn
         return veg.cnveg_carbonstate_inst.frootc_patch[bounds_patch]
     else
@@ -891,11 +913,11 @@ Ported from `get_croot_carbon_patch` in `CNVegetationFacade.F90`.
 """
 function get_croot_carbon_patch(veg::CNVegetationData,
                                   bounds_patch::UnitRange{Int};
-                                  tlai::Vector{<:Real} = Float64[],
-                                  slatop::Vector{<:Real} = Float64[],
-                                  stem_leaf::Vector{<:Real} = Float64[],
-                                  croot_stem::Vector{<:Real} = Float64[],
-                                  ivt::Vector{Int} = Int[])
+                                  tlai::AbstractVector{<:Real} = Float64[],
+                                  slatop::AbstractVector{<:Real} = Float64[],
+                                  stem_leaf::AbstractVector{<:Real} = Float64[],
+                                  croot_stem::AbstractVector{<:Real} = Float64[],
+                                  ivt::AbstractVector{<:Integer} = Int[])
     if veg.config.use_cn
         return veg.cnveg_carbonstate_inst.livecrootc_patch[bounds_patch]
     else

@@ -188,8 +188,8 @@ end
 
 """
     canopystate_init_cold!(cs::CanopyStateData, bounds_patch::UnitRange{Int};
-                            landunit_patch::Union{Vector{Int},Nothing}=nothing,
-                            lun_itype::Union{Vector{Int},Nothing}=nothing)
+                            landunit_patch::Union{AbstractVector{<:Integer},Nothing}=nothing,
+                            lun_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
 
 Initialize cold-start conditions for canopy state variables.
 Sets LAI, SAI, canopy heights, biomass, vegetation water potential,
@@ -204,8 +204,8 @@ Arguments:
 Ported from `canopystate_type%InitCold` in `CanopyStateType.F90`.
 """
 function canopystate_init_cold!(cs::CanopyStateData, bounds_patch::UnitRange{Int};
-                                 landunit_patch::Union{Vector{Int},Nothing} = nothing,
-                                 lun_itype::Union{Vector{Int},Nothing} = nothing)
+                                 landunit_patch::Union{AbstractVector{<:Integer},Nothing} = nothing,
+                                 lun_itype::Union{AbstractVector{<:Integer},Nothing} = nothing)
     for p in bounds_patch
         cs.tlai_patch[p]         = 0.0
         cs.tsai_patch[p]         = 0.0

@@ -73,6 +73,45 @@ function cn_veg_struct_update!(mask_soilp::AbstractVector{Bool},
                                 nirrig_switchgrass::Int = CLM.nirrig_switchgrass,
                                 c_to_b::Real = C_TO_B)
 
+    # ----------------------------------------------------------------------
+    # Host-fallback bridge (Phase 3 will kernelize this module). This per-patch
+    # structure diagnosis is a zero-kernel host loop that scalar-indexes many
+    # column/patch arrays — disallowed on a GPU. When clm_drv! runs on a device,
+    # gather the touched inst state to the host (structs carry @adapt_structure;
+    # `pftcon_data` is a host-global params struct and passes straight through),
+    # run the loop, and scatter the mutated canopy/cnveg fields back.
+    # ----------------------------------------------------------------------
+    if !(canopystate.tlai_patch isa Array)
+        patchH = Adapt.adapt(Array, patch);       canH = Adapt.adapt(Array, canopystate)
+        ccsH   = Adapt.adapt(Array, cnveg_carbonstate)
+        wdbH   = Adapt.adapt(Array, waterdiagnosticbulk)
+        fvH    = Adapt.adapt(Array, frictionvel); cvsH = Adapt.adapt(Array, cnveg_state)
+        cropH  = Adapt.adapt(Array, crop)
+        cn_veg_struct_update!(Array(mask_soilp), bounds, patchH, canH, ccsH, wdbH,
+            fvH, cvsH, cropH, pftcon_data;
+            dt=dt, use_cndv=use_cndv, use_biomass_heat_storage=use_biomass_heat_storage,
+            spinup_factor_deadwood=spinup_factor_deadwood, noveg=noveg, nc3crop=nc3crop,
+            nc3irrig=nc3irrig, nbrdlf_evr_shrub=nbrdlf_evr_shrub,
+            nbrdlf_dcd_brl_shrub=nbrdlf_dcd_brl_shrub, npcropmin=npcropmin,
+            ntmp_corn=ntmp_corn, nirrig_tmp_corn=nirrig_tmp_corn, ntrp_corn=ntrp_corn,
+            nirrig_trp_corn=nirrig_trp_corn, nsugarcane=nsugarcane,
+            nirrig_sugarcane=nirrig_sugarcane, nmiscanthus=nmiscanthus,
+            nirrig_miscanthus=nirrig_miscanthus, nswitchgrass=nswitchgrass,
+            nirrig_switchgrass=nirrig_switchgrass, c_to_b=c_to_b)
+        copyto!(canopystate.tlai_patch, canH.tlai_patch)
+        copyto!(canopystate.tsai_patch, canH.tsai_patch)
+        copyto!(canopystate.htop_patch, canH.htop_patch)
+        copyto!(canopystate.hbot_patch, canH.hbot_patch)
+        copyto!(canopystate.elai_patch, canH.elai_patch)
+        copyto!(canopystate.esai_patch, canH.esai_patch)
+        copyto!(canopystate.frac_veg_nosno_alb_patch, canH.frac_veg_nosno_alb_patch)
+        copyto!(canopystate.stem_biomass_patch, canH.stem_biomass_patch)
+        copyto!(canopystate.leaf_biomass_patch, canH.leaf_biomass_patch)
+        copyto!(cnveg_state.htmx_patch, cvsH.htmx_patch)
+        copyto!(cnveg_state.peaklai_patch, cvsH.peaklai_patch)
+        return nothing
+    end
+
     # --- Aliases (matching Fortran associate block) ---
     ivt            = patch.itype
     col            = patch.column

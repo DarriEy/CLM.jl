@@ -513,17 +513,20 @@ function n_state_update1!(ns_veg::CNVegNitrogenStateData,
                            dt::Real)
 
     # --- Column loop: soil decomposition input fluxes (one thread per column) ---
+    _FT = eltype(nf_soil.decomp_npools_sourcesink_col)
     _launch!(_nsu1_col_kernel!, mask_soilc, col_is_fates,
         nf_veg.phenology_n_to_litr_n_col, nf_soil.decomp_npools_sourcesink_col,
-        nlevdecomp, i_litr_min, i_litr_max, i_cwd, use_soil_matrixcn, dt)
+        nlevdecomp, i_litr_min, i_litr_max, i_cwd, use_soil_matrixcn, _FT(dt))
 
     # --- Patch loop: vegetation N state updates (one thread per patch) ---
     ns = _nsu1_ns(ns_veg)
     nf = _nsu1_nf(nf_veg)
-    _launch!(_nsu1_patch_kernel!, mask_soilp, ivt, woody, ns, nf,
+    _ivtp  = _to_backend_like(nf_soil.decomp_npools_sourcesink_col, _FT, ivt)
+    _woodp = _to_backend_like(nf_soil.decomp_npools_sourcesink_col, _FT, woody)
+    _launch!(_nsu1_patch_kernel!, mask_soilp, _ivtp, _woodp, ns, nf,
         npcropmin, nrepr, repr_grain_min, repr_grain_max,
         repr_structure_min, repr_structure_max,
-        use_matrixcn, use_fun, dt)
+        use_matrixcn, use_fun, _FT(dt))
 
     return nothing
 end

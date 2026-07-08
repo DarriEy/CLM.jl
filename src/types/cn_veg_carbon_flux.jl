@@ -1319,7 +1319,7 @@ function cnveg_carbon_flux_summary!(cf::CNVegCarbonFluxData,
                                      use_crop::Bool=false,
                                      use_fun::Bool=false,
                                      carbon_resp_opt::Int=0,
-                                     patch_itype::Union{Vector{Int},Nothing}=nothing,
+                                     patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                                      npcropmin::Int=0,
                                      nrepr::Int=NREPR)
     for p in bounds_patch

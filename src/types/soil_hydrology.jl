@@ -165,11 +165,11 @@ end
                              zi_col::Union{Matrix{Float64},Nothing}=nothing,
                              wa_col::Union{Vector{Float64},Nothing}=nothing,
                              nlevsoi::Int=0,
-                             landunit_col::Union{Vector{Int},Nothing}=nothing,
+                             landunit_col::Union{AbstractVector{<:Integer},Nothing}=nothing,
                              lakpoi::Union{BitVector,Nothing}=nothing,
                              urbpoi::Union{BitVector,Nothing}=nothing,
-                             itype_col::Union{Vector{Int},Nothing}=nothing,
-                             nbedrock_col::Union{Vector{Int},Nothing}=nothing)
+                             itype_col::Union{AbstractVector{<:Integer},Nothing}=nothing,
+                             nbedrock_col::Union{AbstractVector{<:Integer},Nothing}=nothing)
 
 Initialize cold-start conditions for soil hydrology variables.
 Sets zwt, frost_table, and zwt_perched based on column types.
@@ -181,11 +181,11 @@ function soilhydrology_init_cold!(sh::SoilHydrologyData, bounds_col::UnitRange{I
                                    zi_col::Union{Matrix{Float64},Nothing} = nothing,
                                    wa_col::Union{Vector{Float64},Nothing} = nothing,
                                    nlevsoi::Int = varpar.nlevsoi,
-                                   landunit_col::Union{Vector{Int},Nothing} = nothing,
+                                   landunit_col::Union{AbstractVector{<:Integer},Nothing} = nothing,
                                    lakpoi::Union{BitVector,Nothing} = nothing,
                                    urbpoi::Union{BitVector,Nothing} = nothing,
-                                   itype_col::Union{Vector{Int},Nothing} = nothing,
-                                   nbedrock_col::Union{Vector{Int},Nothing} = nothing)
+                                   itype_col::Union{AbstractVector{<:Integer},Nothing} = nothing,
+                                   nbedrock_col::Union{AbstractVector{<:Integer},Nothing} = nothing)
     # Initialize num_substeps_col to SPVAL (needed for accum field averaging)
     for c in bounds_col
         sh.num_substeps_col[c] = SPVAL

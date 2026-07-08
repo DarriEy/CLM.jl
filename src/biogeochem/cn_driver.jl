@@ -1311,7 +1311,7 @@ function cn_driver_summarize_states!(
         cnveg_ns::CNVegNitrogenStateData,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
-        patch_itype::Union{Vector{Int},Nothing}=nothing)
+        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
 
     if count(mask_bgc_vegp) > 0
         # cnveg_carbonstate/nitrogenstate Summary — WIRED. These set the patch-level
@@ -1359,7 +1359,7 @@ function cn_driver_summarize_fluxes!(
         cnveg_nf::CNVegNitrogenFluxData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
-        patch_itype::Union{Vector{Int},Nothing}=nothing)
+        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
 
     num_bgc_vegp = count(mask_bgc_vegp)
 

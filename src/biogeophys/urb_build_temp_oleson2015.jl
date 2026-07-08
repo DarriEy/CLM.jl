@@ -115,6 +115,35 @@ function building_temperature!(col::ColumnData, lun::LandunitData,
                                bounds_lun::UnitRange{Int},
                                dtime::Real)
 
+    # ----------------------------------------------------------------------
+    # Host-fallback bridge (Phase 3 will kernelize this module).
+    # This per-landunit 5x5 solve is not yet a device kernel — its gather loop
+    # scalar-indexes col/temperature arrays, which is disallowed on a GPU. When
+    # clm_drv! runs on a device, gather the touched state to the host (the structs
+    # already carry Adapt.@adapt_structure), run the solve there, and scatter the
+    # mutated building temps / fluxes back to the device. The host (Array) path
+    # falls straight through with zero overhead.
+    # ----------------------------------------------------------------------
+    if !(temperature.t_soisno_col isa Array)
+        colH  = Adapt.adapt(Array, col);        lunH = Adapt.adapt(Array, lun)
+        tempH = Adapt.adapt(Array, temperature); efH  = Adapt.adapt(Array, energyflux)
+        upH   = Adapt.adapt(Array, urbanparams)
+        building_temperature!(colH, lunH, tempH, efH, upH,
+                              Array(urbantv_t_building_max), Array(urbantv_p_ac),
+                              Array(tk), Array(mask_urbanl), Array(mask_nolakec),
+                              bounds_lun, dtime)
+        copyto!(temperature.t_roof_inner_lun, tempH.t_roof_inner_lun)
+        copyto!(temperature.t_sunw_inner_lun, tempH.t_sunw_inner_lun)
+        copyto!(temperature.t_shdw_inner_lun, tempH.t_shdw_inner_lun)
+        copyto!(temperature.t_floor_lun,      tempH.t_floor_lun)
+        copyto!(temperature.t_building_lun,   tempH.t_building_lun)
+        copyto!(energyflux.eflx_building_lun,    efH.eflx_building_lun)
+        copyto!(energyflux.eflx_urban_ac_lun,    efH.eflx_urban_ac_lun)
+        copyto!(energyflux.eflx_urban_heat_lun,  efH.eflx_urban_heat_lun)
+        copyto!(energyflux.eflx_ventilation_lun, efH.eflx_ventilation_lun)
+        return nothing
+    end
+
     nlevsno = varpar.nlevsno
     nlevurb = varpar.nlevurb
     joff = nlevsno

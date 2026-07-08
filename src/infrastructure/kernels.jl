@@ -76,6 +76,11 @@ const _DEFER_GPU_SYNC = Ref(false)
 @inline _to_backend_like(::Array, ::Type, v::AbstractArray) = v
 @inline _to_backend_like(proto, ::Type{FT}, v::AbstractArray) where {FT} =
     typeof(proto).name.wrapper(FT.(v))
+# Integer topology/index arrays (cascade pools, patch->column maps, …): move to the
+# backend but PRESERVE the element type — casting indices to FT would corrupt them.
+@inline _to_backend_like(::Array, ::Type, v::AbstractArray{<:Integer}) = v
+@inline _to_backend_like(proto, ::Type{FT}, v::AbstractArray{<:Integer}) where {FT} =
+    typeof(proto).name.wrapper(v)
 
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out

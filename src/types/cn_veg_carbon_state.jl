@@ -619,7 +619,7 @@ function cnveg_carbon_state_summary!(cs::CNVegCarbonStateData,
                                      mask_patch::BitVector,
                                      bounds_patch::UnitRange{Int};
                                      use_crop::Bool=false,
-                                     patch_itype::Union{Vector{Int},Nothing}=nothing,
+                                     patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                                      npcropmin::Int=0,
                                      nrepr::Int=NREPR)
     for p in bounds_patch

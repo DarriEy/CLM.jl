@@ -59,6 +59,19 @@ function handle_ice_melt!(
     nlevsno::Int,
     nlevgrnd::Int,
 )
+    # Host-fallback bridge (Phase 3 will kernelize this module): the do_smb/istice
+    # scalar loops below are not yet a device kernel. On a device, gather to host,
+    # run, and scatter the mutated melt-flux / ice / liq arrays back.
+    if !(h2osoi_liq_col isa Array)
+        liqH = Array(h2osoi_liq_col); iceH = Array(h2osoi_ice_col)
+        meltH = Array(qflx_glcice_melt_col)
+        handle_ice_melt!(liqH, iceH, meltH, Array(col_landunit), Array(lun_itype),
+                         Array(mask_do_smb), bounds, dtime, nlevsno, nlevgrnd)
+        copyto!(h2osoi_liq_col, liqH); copyto!(h2osoi_ice_col, iceH)
+        copyto!(qflx_glcice_melt_col, meltH)
+        return nothing
+    end
+
     T = eltype(h2osoi_liq_col)
     dt = T(dtime)
 
@@ -133,6 +146,21 @@ function compute_surface_mass_balance!(
     bounds::UnitRange{Int};
     glc_snow_persistence_max_days::Integer = 7300,
 )
+    # Host-fallback bridge (see handle_ice_melt!): gather to host on a device.
+    if !(qflx_glcice_col isa Array)
+        glcH = Array(qflx_glcice_col); frzH = Array(qflx_glcice_frz_col)
+        dynH = Array(qflx_glcice_dyn_water_flux_col)
+        compute_surface_mass_balance!(glcH, frzH, dynH,
+            Array(qflx_snwcp_ice_col), Array(qflx_glcice_melt_col),
+            Array(snow_persistence_col), Array(glc_dyn_runoff_routing_grc),
+            Array(col_landunit), Array(col_gridcell), Array(lun_itype),
+            Array(mask_allc), Array(mask_do_smb), bounds;
+            glc_snow_persistence_max_days=glc_snow_persistence_max_days)
+        copyto!(qflx_glcice_col, glcH); copyto!(qflx_glcice_frz_col, frzH)
+        copyto!(qflx_glcice_dyn_water_flux_col, dynH)
+        return nothing
+    end
+
     T = eltype(qflx_glcice_col)
     # Convert max-days to working precision to avoid integer overflow (matches the
     # Fortran `real(glc_snow_persistence_max_days, r8)` cast before multiplying).
@@ -202,6 +230,16 @@ function adjust_runoff_terms!(
     mask_do_smb::AbstractVector{Bool},
     bounds::UnitRange{Int},
 )
+    # Host-fallback bridge (see handle_ice_melt!): gather to host on a device.
+    if !(qflx_qrgwl isa Array)
+        qrgH = Array(qflx_qrgwl); iceRH = Array(qflx_ice_runoff_snwcp)
+        adjust_runoff_terms!(qrgH, iceRH, Array(qflx_glcice_frz_col),
+            Array(qflx_glcice_melt_col), Array(glc_dyn_runoff_routing_grc),
+            Array(col_gridcell), Array(mask_do_smb), bounds)
+        copyto!(qflx_qrgwl, qrgH); copyto!(qflx_ice_runoff_snwcp, iceRH)
+        return nothing
+    end
+
     T = eltype(qflx_qrgwl)
 
     for c in bounds
