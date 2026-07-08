@@ -26,6 +26,31 @@
 # handle_ice_melt!
 # =========================================================================
 
+# One thread per column. Each thread owns column c: it zeros the melt flux and,
+# for istice columns, accumulates meltwater into it over the ground layers (a
+# per-column RMW done sequentially in-thread → race-free). Byte-identical to the
+# original zero-loop + j-outer/c-inner loop: same adds in the same per-column order.
+@kernel function _handle_ice_melt_kernel!(qflx_glcice_melt_col, h2osoi_ice_col,
+        h2osoi_liq_col, @Const(mask_do_smb), @Const(col_landunit), @Const(lun_itype),
+        lo::Int, hi::Int, dt, nlevsno::Int, nlevgrnd::Int, ISTICE_::Int)
+    c = @index(Global)
+    @inbounds if lo <= c <= hi && mask_do_smb[c]
+        z = zero(eltype(qflx_glcice_melt_col))
+        qflx_glcice_melt_col[c] = z
+        if lun_itype[col_landunit[c]] == ISTICE_
+            for j in 1:nlevgrnd
+                jj = j + nlevsno
+                liq = h2osoi_liq_col[c, jj]
+                if liq > z   # ice layer with meltwater
+                    qflx_glcice_melt_col[c] += liq / dt
+                    h2osoi_ice_col[c, jj] += liq
+                    h2osoi_liq_col[c, jj] = z
+                end
+            end
+        end
+    end
+end
+
 """
     handle_ice_melt!(h2osoi_liq_col, h2osoi_ice_col, qflx_glcice_melt_col,
         col_landunit, lun_itype, mask_do_smb, bounds, dtime, nlevsno, nlevgrnd)
@@ -59,52 +84,52 @@ function handle_ice_melt!(
     nlevsno::Int,
     nlevgrnd::Int,
 )
-    # Host-fallback bridge (Phase 3 will kernelize this module): the do_smb/istice
-    # scalar loops below are not yet a device kernel. On a device, gather to host,
-    # run, and scatter the mutated melt-flux / ice / liq arrays back.
-    if !(h2osoi_liq_col isa Array)
-        liqH = Array(h2osoi_liq_col); iceH = Array(h2osoi_ice_col)
-        meltH = Array(qflx_glcice_melt_col)
-        handle_ice_melt!(liqH, iceH, meltH, Array(col_landunit), Array(lun_itype),
-                         Array(mask_do_smb), bounds, dtime, nlevsno, nlevgrnd)
-        copyto!(h2osoi_liq_col, liqH); copyto!(h2osoi_ice_col, iceH)
-        copyto!(qflx_glcice_melt_col, meltH)
-        return nothing
-    end
-
-    T = eltype(h2osoi_liq_col)
-    dt = T(dtime)
-
-    # Zero the melt flux over the whole do_smb filter first.
-    for c in bounds
-        mask_do_smb[c] || continue
-        qflx_glcice_melt_col[c] = zero(T)
-    end
-
-    # Convert meltwater back to ice only for istice columns inside the do_smb filter.
-    for j in 1:nlevgrnd
-        jj = j + nlevsno
-        for c in bounds
-            mask_do_smb[c] || continue
-            l = col_landunit[c]
-            if lun_itype[l] == ISTICE
-                liq = h2osoi_liq_col[c, jj]
-                if liq > zero(T)   # ice layer with meltwater
-                    qflx_glcice_melt_col[c] += liq / dt
-                    # convert layer back to pure ice by borrowing ice from below
-                    h2osoi_ice_col[c, jj] += liq
-                    h2osoi_liq_col[c, jj] = zero(T)
-                end
-            end
-        end
-    end
-
+    isempty(bounds) && return nothing
+    FT = eltype(h2osoi_liq_col)
+    # Index arrays move to the state backend preserving Int; dtime → array precision
+    # so no Float64 scalar reaches a Metal kernel. No-ops on the host path.
+    cl = _to_backend_like(qflx_glcice_melt_col, FT, col_landunit)
+    li = _to_backend_like(qflx_glcice_melt_col, FT, lun_itype)
+    _launch!(_handle_ice_melt_kernel!, qflx_glcice_melt_col, h2osoi_ice_col,
+        h2osoi_liq_col, mask_do_smb, cl, li,
+        first(bounds), last(bounds), FT(dtime), nlevsno, nlevgrnd, Int(ISTICE))
     return nothing
 end
 
 # =========================================================================
 # compute_surface_mass_balance!
 # =========================================================================
+
+# One thread per column, two independent per-column guarded blocks: (a) zero the
+# dyn-water-flux over mask_allc, then (b) the do_smb frz / net-glcice / dyn compute.
+# The blocks are independent across columns, so per-column "zero then set" reproduces
+# the original "zero-all-columns loop, then compute-all-columns loop" exactly.
+@kernel function _smb_compute_kernel!(qflx_glcice_dyn_water_flux_col,
+        qflx_glcice_col, qflx_glcice_frz_col, @Const(mask_allc), @Const(mask_do_smb),
+        @Const(qflx_snwcp_ice_col), @Const(qflx_glcice_melt_col),
+        @Const(snow_persistence_col), @Const(glc_dyn_runoff_routing_grc),
+        @Const(col_landunit), @Const(col_gridcell), @Const(lun_itype),
+        lo::Int, hi::Int, persistence_threshold, ISTICE_::Int)
+    c = @index(Global)
+    @inbounds if lo <= c <= hi
+        z = zero(eltype(qflx_glcice_col))
+        if mask_allc[c]
+            qflx_glcice_dyn_water_flux_col[c] = z
+        end
+        if mask_do_smb[c]
+            l = col_landunit[c]
+            g = col_gridcell[c]
+            if (snow_persistence_col[c] >= persistence_threshold) || (lun_itype[l] == ISTICE_)
+                qflx_glcice_frz_col[c] = qflx_snwcp_ice_col[c]
+            else
+                qflx_glcice_frz_col[c] = z
+            end
+            qflx_glcice_col[c] = qflx_glcice_frz_col[c] - qflx_glcice_melt_col[c]
+            qflx_glcice_dyn_water_flux_col[c] =
+                glc_dyn_runoff_routing_grc[g] * (qflx_glcice_melt_col[c] - qflx_glcice_frz_col[c])
+        end
+    end
+end
 
 """
     compute_surface_mass_balance!(qflx_glcice_col, qflx_glcice_frz_col,
@@ -146,56 +171,45 @@ function compute_surface_mass_balance!(
     bounds::UnitRange{Int};
     glc_snow_persistence_max_days::Integer = 7300,
 )
-    # Host-fallback bridge (see handle_ice_melt!): gather to host on a device.
-    if !(qflx_glcice_col isa Array)
-        glcH = Array(qflx_glcice_col); frzH = Array(qflx_glcice_frz_col)
-        dynH = Array(qflx_glcice_dyn_water_flux_col)
-        compute_surface_mass_balance!(glcH, frzH, dynH,
-            Array(qflx_snwcp_ice_col), Array(qflx_glcice_melt_col),
-            Array(snow_persistence_col), Array(glc_dyn_runoff_routing_grc),
-            Array(col_landunit), Array(col_gridcell), Array(lun_itype),
-            Array(mask_allc), Array(mask_do_smb), bounds;
-            glc_snow_persistence_max_days=glc_snow_persistence_max_days)
-        copyto!(qflx_glcice_col, glcH); copyto!(qflx_glcice_frz_col, frzH)
-        copyto!(qflx_glcice_dyn_water_flux_col, dynH)
-        return nothing
-    end
-
-    T = eltype(qflx_glcice_col)
+    isempty(bounds) && return nothing
+    FT = eltype(qflx_glcice_col)
     # Convert max-days to working precision to avoid integer overflow (matches the
     # Fortran `real(glc_snow_persistence_max_days, r8)` cast before multiplying).
-    persistence_threshold = T(glc_snow_persistence_max_days) * T(SECSPDAY)
-
-    # Zero the dynamic water-flux balance term over all columns (handles columns
-    # leaving the do_smb / glc_dyn_runoff_routing masks mid-run).
-    for c in bounds
-        mask_allc[c] || continue
-        qflx_glcice_dyn_water_flux_col[c] = zero(T)
-    end
-
-    for c in bounds
-        mask_do_smb[c] || continue
-        l = col_landunit[c]
-        g = col_gridcell[c]
-
-        if (snow_persistence_col[c] >= persistence_threshold) || (lun_itype[l] == ISTICE)
-            qflx_glcice_frz_col[c] = qflx_snwcp_ice_col[c]
-        else
-            qflx_glcice_frz_col[c] = zero(T)
-        end
-
-        qflx_glcice_col[c] = qflx_glcice_frz_col[c] - qflx_glcice_melt_col[c]
-
-        qflx_glcice_dyn_water_flux_col[c] =
-            glc_dyn_runoff_routing_grc[g] * (qflx_glcice_melt_col[c] - qflx_glcice_frz_col[c])
-    end
-
+    persistence_threshold = FT(glc_snow_persistence_max_days) * FT(SECSPDAY)
+    cl = _to_backend_like(qflx_glcice_col, FT, col_landunit)
+    cg = _to_backend_like(qflx_glcice_col, FT, col_gridcell)
+    li = _to_backend_like(qflx_glcice_col, FT, lun_itype)
+    gd = _to_backend_like(qflx_glcice_col, FT, glc_dyn_runoff_routing_grc)
+    _launch!(_smb_compute_kernel!, qflx_glcice_dyn_water_flux_col,
+        qflx_glcice_col, qflx_glcice_frz_col, mask_allc, mask_do_smb,
+        qflx_snwcp_ice_col, qflx_glcice_melt_col, snow_persistence_col, gd,
+        cl, cg, li, first(bounds), last(bounds), persistence_threshold, Int(ISTICE))
     return nothing
 end
 
 # =========================================================================
 # adjust_runoff_terms!
 # =========================================================================
+
+# One thread per do_smb column; every write is to the column's own index (no
+# cross-column dependency), so the per-column RMWs are race-free.
+@kernel function _adjust_runoff_kernel!(qflx_qrgwl, qflx_ice_runoff_snwcp,
+        @Const(qflx_glcice_frz_col), @Const(qflx_glcice_melt_col),
+        @Const(glc_dyn_runoff_routing_grc), @Const(col_gridcell),
+        @Const(mask_do_smb), lo::Int, hi::Int)
+    c = @index(Global)
+    @inbounds if lo <= c <= hi && mask_do_smb[c]
+        one_ = one(eltype(qflx_qrgwl))
+        g = col_gridcell[c]
+        # Ice melt is added to liquid runoff regardless of dynamic coupling.
+        qflx_qrgwl[c] += qflx_glcice_melt_col[c]
+        # Capped snow on the dynamically-coupled fraction is owned by the ice sheet.
+        qflx_ice_runoff_snwcp[c] -= glc_dyn_runoff_routing_grc[g] * qflx_glcice_frz_col[c]
+        # On the uncoupled fraction, remove one unit of ice runoff per unit of melt.
+        qflx_ice_runoff_snwcp[c] -=
+            (one_ - glc_dyn_runoff_routing_grc[g]) * qflx_glcice_melt_col[c]
+    end
+end
 
 """
     adjust_runoff_terms!(qflx_qrgwl, qflx_ice_runoff_snwcp,
@@ -230,32 +244,12 @@ function adjust_runoff_terms!(
     mask_do_smb::AbstractVector{Bool},
     bounds::UnitRange{Int},
 )
-    # Host-fallback bridge (see handle_ice_melt!): gather to host on a device.
-    if !(qflx_qrgwl isa Array)
-        qrgH = Array(qflx_qrgwl); iceRH = Array(qflx_ice_runoff_snwcp)
-        adjust_runoff_terms!(qrgH, iceRH, Array(qflx_glcice_frz_col),
-            Array(qflx_glcice_melt_col), Array(glc_dyn_runoff_routing_grc),
-            Array(col_gridcell), Array(mask_do_smb), bounds)
-        copyto!(qflx_qrgwl, qrgH); copyto!(qflx_ice_runoff_snwcp, iceRH)
-        return nothing
-    end
-
-    T = eltype(qflx_qrgwl)
-
-    for c in bounds
-        mask_do_smb[c] || continue
-        g = col_gridcell[c]
-
-        # Ice melt is added to liquid runoff regardless of dynamic coupling.
-        qflx_qrgwl[c] += qflx_glcice_melt_col[c]
-
-        # Capped snow on the dynamically-coupled fraction is owned by the ice sheet.
-        qflx_ice_runoff_snwcp[c] -= glc_dyn_runoff_routing_grc[g] * qflx_glcice_frz_col[c]
-
-        # On the uncoupled fraction, remove one unit of ice runoff per unit of melt.
-        qflx_ice_runoff_snwcp[c] -=
-            (one(T) - glc_dyn_runoff_routing_grc[g]) * qflx_glcice_melt_col[c]
-    end
-
+    isempty(bounds) && return nothing
+    FT = eltype(qflx_qrgwl)
+    cg = _to_backend_like(qflx_qrgwl, FT, col_gridcell)
+    gd = _to_backend_like(qflx_qrgwl, FT, glc_dyn_runoff_routing_grc)
+    _launch!(_adjust_runoff_kernel!, qflx_qrgwl, qflx_ice_runoff_snwcp,
+        qflx_glcice_frz_col, qflx_glcice_melt_col, gd, cg, mask_do_smb,
+        first(bounds), last(bounds))
     return nothing
 end

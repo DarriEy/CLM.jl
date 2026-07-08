@@ -7,6 +7,17 @@
 #
 # Public functions:
 #   cn_veg_struct_update! -- Update vegetation structure from live C pools
+#
+# GPU kernelization: the per-patch diagnosis is one KernelAbstractions kernel
+# (one thread per patch). Every write is to the patch's own index (no patch->
+# column scatter), so it is race-free and byte-identical to the sequential host
+# loop on the KA CPU backend. The ~30 patch/column arrays + 11 PFT-parameter
+# vectors the body touches are grouped into `Adapt.@adapt_structure` device-view
+# bundles (mirroring the original variable names) to stay under Metal's ~31-arg
+# launch limit; the PFT params (a host-global pftcon) are moved onto the state
+# backend at launch via `_to_backend_like`. All literals are carried at the
+# working element type `T` so the kernel compiles on Metal (no Float64) while
+# the Float64 host path is unchanged.
 # ==========================================================================
 
 # ---------------------------------------------------------------------------
@@ -15,6 +26,221 @@
 
 const DTSMONTH = 2592000.0            # seconds in a 30-day month (60*60*24*30)
 const FRAC_SNO_THRESHOLD = 0.999      # frac_sno values > this treated as 1
+
+# ---------------------------------------------------------------------------
+# Device-view bundles (group the many patch/column arrays into few kernel args)
+# ---------------------------------------------------------------------------
+
+# Written outputs: canopy structure (V=float patch vec) + the two Int flags (VI).
+Base.@kwdef struct _VSUOut{V,VI}
+    tlai::V; tsai::V; htop::V; hbot::V; elai::V; esai::V
+    stem_biomass::V; leaf_biomass::V; htmx::V
+    frac_veg_nosno_alb::VI; peaklai::VI
+end
+Adapt.@adapt_structure _VSUOut
+
+# Read-only inputs (patch + column vectors).
+Base.@kwdef struct _VSUIn{V}
+    leafc::V; deadstemc::V; livestemc::V
+    forc_hgt_u::V; frac_sno::V; snow_depth::V; farea_burned::V
+end
+Adapt.@adapt_structure _VSUIn
+
+# PFT-parameter vectors (indexed by ivt+1); all Float in pftcon.
+Base.@kwdef struct _VSUPar{V}
+    woody::V; slatop::V; dsladlai::V; z0mr::V; displar::V; dwood::V
+    ztopmx::V; laimx::V; nstem::V; taper::V; fbw::V
+end
+Adapt.@adapt_structure _VSUPar
+
+# Integer index vectors.
+Base.@kwdef struct _VSUIdx{VI}
+    ivt::VI; col::VI; harvdate::VI
+end
+Adapt.@adapt_structure _VSUIdx
+
+# Scalars (isbits — passes to the kernel directly, no adapt). Floats carried at
+# the working precision T; PFT-type indices and mode flags as Int/Bool.
+struct _VSUScalars{T}
+    dt::T; spinup_factor_deadwood::T; c_to_b::T
+    use_cndv::Bool; use_biomass_heat_storage::Bool
+    noveg::Int; nc3crop::Int; nc3irrig::Int; nbrdlf_dcd_brl_shrub::Int; npcropmin::Int
+    ntmp_corn::Int; nirrig_tmp_corn::Int; ntrp_corn::Int; nirrig_trp_corn::Int
+    nsugarcane::Int; nirrig_sugarcane::Int; nmiscanthus::Int; nirrig_miscanthus::Int
+    nswitchgrass::Int; nirrig_switchgrass::Int
+end
+
+# ---------------------------------------------------------------------------
+# Per-patch kernel — one thread per patch (byte-identical to the host loop on
+# the KA CPU backend; every write is to the thread's own patch index).
+# ---------------------------------------------------------------------------
+@kernel function _vsu_kernel!(@Const(mask), idx, inb, out, par, sc)
+    p = @index(Global)
+    @inbounds if mask[p] && isfinite(inb.leafc[p])
+        T = eltype(out.tlai)
+
+        # aliases (match the Fortran/associate names) — compile-time, zero cost
+        ivt = idx.ivt; col = idx.col; harvdate = idx.harvdate
+        woody = par.woody; slatop = par.slatop; dsladlai = par.dsladlai
+        z0mr = par.z0mr; displar = par.displar; dwood = par.dwood
+        ztopmx = par.ztopmx; laimx = par.laimx; nstem = par.nstem
+        taper = par.taper; fbw = par.fbw
+        leafc = inb.leafc; deadstemc = inb.deadstemc; livestemc = inb.livestemc
+        forc_hgt_u_patch = inb.forc_hgt_u; frac_sno = inb.frac_sno
+        snow_depth = inb.snow_depth; farea_burned = inb.farea_burned
+        tlai = out.tlai; tsai = out.tsai; htop = out.htop; hbot = out.hbot
+        elai = out.elai; esai = out.esai; stem_biomass = out.stem_biomass
+        leaf_biomass = out.leaf_biomass; htmx = out.htmx
+        frac_veg_nosno_alb = out.frac_veg_nosno_alb; peaklai = out.peaklai
+        dt = sc.dt; spinup_factor_deadwood = sc.spinup_factor_deadwood; c_to_b = sc.c_to_b
+        use_cndv = sc.use_cndv; use_biomass_heat_storage = sc.use_biomass_heat_storage
+        noveg = sc.noveg; nc3crop = sc.nc3crop; nc3irrig = sc.nc3irrig
+        nbrdlf_dcd_brl_shrub = sc.nbrdlf_dcd_brl_shrub; npcropmin = sc.npcropmin
+        ntmp_corn = sc.ntmp_corn; nirrig_tmp_corn = sc.nirrig_tmp_corn
+        ntrp_corn = sc.ntrp_corn; nirrig_trp_corn = sc.nirrig_trp_corn
+        nsugarcane = sc.nsugarcane; nirrig_sugarcane = sc.nirrig_sugarcane
+        nmiscanthus = sc.nmiscanthus; nirrig_miscanthus = sc.nirrig_miscanthus
+        nswitchgrass = sc.nswitchgrass; nirrig_switchgrass = sc.nirrig_switchgrass
+
+        c = col[p]
+
+        if ivt[p] != noveg
+
+            tlai_old = tlai[p]  # n-1 value
+            tsai_old = tsai[p]  # n-1 value
+
+            # Update the leaf area index based on leafC and SLA
+            # Eq 3 from Thornton and Zimmerman, 2007, J Clim, 20, 3902-3923.
+            if dsladlai[ivt[p] + 1] > zero(T)
+                tlai[p] = (slatop[ivt[p] + 1] * (exp(leafc[p] * dsladlai[ivt[p] + 1]) - one(T))) / dsladlai[ivt[p] + 1]
+            else
+                tlai[p] = slatop[ivt[p] + 1] * leafc[p]
+            end
+            tlai[p] = smooth_max(zero(T), tlai[p])
+
+            # Update the stem area index and height based on LAI, stem mass, and veg type.
+            # tsai formula from Zeng et al. 2002, Journal of Climate, p1835
+            if ivt[p] == nc3crop || ivt[p] == nc3irrig  # generic crops
+                tsai_alpha = one(T) - one(T) * dt / T(DTSMONTH)
+                tsai_min = T(0.1)
+            else
+                tsai_alpha = one(T) - T(0.5) * dt / T(DTSMONTH)
+                tsai_min = one(T)
+            end
+            tsai_min = tsai_min * T(0.5)
+            tsai[p] = smooth_max(tsai_alpha * tsai_old + smooth_max(tlai_old - tlai[p], zero(T)), tsai_min)
+
+            # Vegetation physiological parameters used in biomass heat storage
+            if use_biomass_heat_storage
+                leaf_biomass[p] = smooth_max(T(0.0025), leafc[p]) *
+                    c_to_b * T(1.0e-3) / (one(T) - fbw[ivt[p] + 1])
+            end
+
+            if woody[ivt[p] + 1] == one(T)
+
+                # Trees and shrubs: simple allometry with hard-wired stem taper
+                # and nstem from PFT parameter file. (CNDV and non-CNDV use the
+                # same standard allometry here.)
+                if use_cndv
+                    htop[p] = ((T(3.0) * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p] + 1] * taper[ivt[p] + 1]) /
+                        (T(pi) * nstem[ivt[p] + 1] * dwood[ivt[p] + 1]))^(T(1) / T(3))
+                else
+                    htop[p] = ((T(3.0) * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p] + 1] * taper[ivt[p] + 1]) /
+                        (T(pi) * nstem[ivt[p] + 1] * dwood[ivt[p] + 1]))^(T(1) / T(3))
+                end
+
+                if use_biomass_heat_storage
+                    stem_biomass[p] = (spinup_factor_deadwood * deadstemc[p] + livestemc[p]) *
+                        c_to_b * T(1.0e-3) / (one(T) - fbw[ivt[p] + 1])
+                end
+
+                # Keep htop from getting too close to forcing height for windspeed
+                htop[p] = smooth_min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - T(3.0))
+
+                # Constraint to keep htop from going to 0.0
+                htop[p] = smooth_max(htop[p], T(0.01))
+
+                hbot[p] = smooth_max(zero(T), smooth_min(T(3.0), htop[p] - one(T)))
+
+            elseif ivt[p] >= npcropmin  # prognostic crops
+
+                if tlai[p] >= laimx[ivt[p] + 1]
+                    peaklai[p] = 1  # used in CNAllocation
+                end
+
+                if ivt[p] == ntmp_corn || ivt[p] == nirrig_tmp_corn ||
+                   ivt[p] == ntrp_corn || ivt[p] == nirrig_trp_corn ||
+                   ivt[p] == nsugarcane || ivt[p] == nirrig_sugarcane ||
+                   ivt[p] == nmiscanthus || ivt[p] == nirrig_miscanthus ||
+                   ivt[p] == nswitchgrass || ivt[p] == nirrig_switchgrass
+                    tsai[p] = T(0.1) * tlai[p]
+                else
+                    tsai[p] = T(0.2) * tlai[p]
+                end
+
+                # "stubble" after harvest
+                if harvdate[p] < 999 && tlai[p] == zero(T)
+                    tsai[p] = T(0.25) * (one(T) - farea_burned[c] * T(0.90))
+                    htmx[p] = zero(T)
+                    peaklai[p] = 0
+                end
+
+                # canopy top and bottom heights
+                htop[p] = ztopmx[ivt[p] + 1] * (smooth_min(tlai[p] / (laimx[ivt[p] + 1] - one(T)), one(T)))^2
+                htmx[p] = smooth_max(htmx[p], htop[p])
+                htop[p] = smooth_max(T(0.05), smooth_max(htmx[p], htop[p]))
+                hbot[p] = T(0.02)
+
+            else  # generic crops and grasses
+
+                # height for grasses depends only on LAI
+                htop[p] = smooth_max(T(0.25), tlai[p] * T(0.25))
+
+                htop[p] = smooth_min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - T(3.0))
+
+                # Constraint to keep htop from going to 0.0
+                htop[p] = smooth_max(htop[p], T(0.01))
+
+                hbot[p] = smooth_max(zero(T), smooth_min(T(0.05), htop[p] - T(0.20)))
+            end
+
+        else
+            # noveg
+            tlai[p] = zero(T)
+            tsai[p] = zero(T)
+            htop[p] = zero(T)
+            hbot[p] = zero(T)
+        end
+
+        # Adjust lai and sai for burying by snow (Lombardozzi et al. 2018,
+        # GRL 45(18), 9889-9897). NOTE: duplicated in SatellitePhenologyMod.
+        if ivt[p] > noveg && ivt[p] <= nbrdlf_dcd_brl_shrub
+            ol = smooth_min(smooth_max(snow_depth[c] - hbot[p], zero(T)), htop[p] - hbot[p])
+            fb = one(T) - ol / smooth_max(T(1.0e-06), htop[p] - hbot[p])
+        else
+            fb = one(T) - (smooth_max(smooth_min(snow_depth[c], smooth_max(T(0.05), htop[p] * T(0.8))), zero(T)) /
+                        (smooth_max(T(0.05), htop[p] * T(0.8))))
+            # depth of snow required for complete burial of grasses
+        end
+
+        if frac_sno[c] <= T(FRAC_SNO_THRESHOLD)
+            frac_sno_adjusted = frac_sno[c]
+        else
+            # avoid tiny but non-zero elai and esai that can blow up radiation/photosynthesis
+            frac_sno_adjusted = one(T)
+        end
+
+        elai[p] = smooth_max(tlai[p] * (one(T) - frac_sno_adjusted) + tlai[p] * fb * frac_sno_adjusted, zero(T))
+        esai[p] = smooth_max(tsai[p] * (one(T) - frac_sno_adjusted) + tsai[p] * fb * frac_sno_adjusted, zero(T))
+
+        # Fraction of vegetation free of snow
+        if (elai[p] + esai[p]) > zero(T)
+            frac_veg_nosno_alb[p] = 1
+        else
+            frac_veg_nosno_alb[p] = 0
+        end
+    end
+end
 
 # ---------------------------------------------------------------------------
 # cn_veg_struct_update! -- Main vegetation structure update
@@ -39,7 +265,8 @@ Updates `canopystate` fields: `tlai_patch`, `tsai_patch`, `htop_patch`,
 
 Updates `cnveg_state` fields: `htmx_patch`, `peaklai_patch`.
 
-Ported from `CNVegStructUpdate` in `CNVegStructUpdateMod.F90`.
+Ported from `CNVegStructUpdate` in `CNVegStructUpdateMod.F90`. Runs as one
+KernelAbstractions kernel (one thread per patch); the CPU path is byte-identical.
 """
 function cn_veg_struct_update!(mask_soilp::AbstractVector{Bool},
                                 bounds::UnitRange{Int},
@@ -73,253 +300,46 @@ function cn_veg_struct_update!(mask_soilp::AbstractVector{Bool},
                                 nirrig_switchgrass::Int = CLM.nirrig_switchgrass,
                                 c_to_b::Real = C_TO_B)
 
-    # ----------------------------------------------------------------------
-    # Host-fallback bridge (Phase 3 will kernelize this module). This per-patch
-    # structure diagnosis is a zero-kernel host loop that scalar-indexes many
-    # column/patch arrays — disallowed on a GPU. When clm_drv! runs on a device,
-    # gather the touched inst state to the host (structs carry @adapt_structure;
-    # `pftcon_data` is a host-global params struct and passes straight through),
-    # run the loop, and scatter the mutated canopy/cnveg fields back.
-    # ----------------------------------------------------------------------
-    if !(canopystate.tlai_patch isa Array)
-        patchH = Adapt.adapt(Array, patch);       canH = Adapt.adapt(Array, canopystate)
-        ccsH   = Adapt.adapt(Array, cnveg_carbonstate)
-        wdbH   = Adapt.adapt(Array, waterdiagnosticbulk)
-        fvH    = Adapt.adapt(Array, frictionvel); cvsH = Adapt.adapt(Array, cnveg_state)
-        cropH  = Adapt.adapt(Array, crop)
-        cn_veg_struct_update!(Array(mask_soilp), bounds, patchH, canH, ccsH, wdbH,
-            fvH, cvsH, cropH, pftcon_data;
-            dt=dt, use_cndv=use_cndv, use_biomass_heat_storage=use_biomass_heat_storage,
-            spinup_factor_deadwood=spinup_factor_deadwood, noveg=noveg, nc3crop=nc3crop,
-            nc3irrig=nc3irrig, nbrdlf_evr_shrub=nbrdlf_evr_shrub,
-            nbrdlf_dcd_brl_shrub=nbrdlf_dcd_brl_shrub, npcropmin=npcropmin,
-            ntmp_corn=ntmp_corn, nirrig_tmp_corn=nirrig_tmp_corn, ntrp_corn=ntrp_corn,
-            nirrig_trp_corn=nirrig_trp_corn, nsugarcane=nsugarcane,
-            nirrig_sugarcane=nirrig_sugarcane, nmiscanthus=nmiscanthus,
-            nirrig_miscanthus=nirrig_miscanthus, nswitchgrass=nswitchgrass,
-            nirrig_switchgrass=nirrig_switchgrass, c_to_b=c_to_b)
-        copyto!(canopystate.tlai_patch, canH.tlai_patch)
-        copyto!(canopystate.tsai_patch, canH.tsai_patch)
-        copyto!(canopystate.htop_patch, canH.htop_patch)
-        copyto!(canopystate.hbot_patch, canH.hbot_patch)
-        copyto!(canopystate.elai_patch, canH.elai_patch)
-        copyto!(canopystate.esai_patch, canH.esai_patch)
-        copyto!(canopystate.frac_veg_nosno_alb_patch, canH.frac_veg_nosno_alb_patch)
-        copyto!(canopystate.stem_biomass_patch, canH.stem_biomass_patch)
-        copyto!(canopystate.leaf_biomass_patch, canH.leaf_biomass_patch)
-        copyto!(cnveg_state.htmx_patch, cvsH.htmx_patch)
-        copyto!(cnveg_state.peaklai_patch, cvsH.peaklai_patch)
-        return nothing
-    end
+    FT = eltype(canopystate.tlai_patch)
 
-    # --- Aliases (matching Fortran associate block) ---
-    ivt            = patch.itype
-    col            = patch.column
+    idx = _VSUIdx(; ivt = patch.itype, col = patch.column, harvdate = crop.harvdate_patch)
+    inb = _VSUIn(; leafc = cnveg_carbonstate.leafc_patch,
+                   deadstemc = cnveg_carbonstate.deadstemc_patch,
+                   livestemc = cnveg_carbonstate.livestemc_patch,
+                   forc_hgt_u = frictionvel.forc_hgt_u_patch,
+                   frac_sno = waterdiagnosticbulk.frac_sno_col,
+                   snow_depth = waterdiagnosticbulk.snow_depth_col,
+                   farea_burned = cnveg_state.farea_burned_col)
+    out = _VSUOut(; tlai = canopystate.tlai_patch, tsai = canopystate.tsai_patch,
+                    htop = canopystate.htop_patch, hbot = canopystate.hbot_patch,
+                    elai = canopystate.elai_patch, esai = canopystate.esai_patch,
+                    stem_biomass = canopystate.stem_biomass_patch,
+                    leaf_biomass = canopystate.leaf_biomass_patch,
+                    htmx = cnveg_state.htmx_patch,
+                    frac_veg_nosno_alb = canopystate.frac_veg_nosno_alb_patch,
+                    peaklai = cnveg_state.peaklai_patch)
+    # PFT-parameter vectors: host-global pftcon → move onto the state backend +
+    # precision (no-op on the host path).
+    tl = canopystate.tlai_patch
+    par = _VSUPar(; woody = _to_backend_like(tl, FT, pftcon_data.woody),
+                    slatop = _to_backend_like(tl, FT, pftcon_data.slatop),
+                    dsladlai = _to_backend_like(tl, FT, pftcon_data.dsladlai),
+                    z0mr = _to_backend_like(tl, FT, pftcon_data.z0mr),
+                    displar = _to_backend_like(tl, FT, pftcon_data.displar),
+                    dwood = _to_backend_like(tl, FT, pftcon_data.dwood),
+                    ztopmx = _to_backend_like(tl, FT, pftcon_data.ztopmx),
+                    laimx = _to_backend_like(tl, FT, pftcon_data.laimx),
+                    nstem = _to_backend_like(tl, FT, pftcon_data.nstem),
+                    taper = _to_backend_like(tl, FT, pftcon_data.taper),
+                    fbw = _to_backend_like(tl, FT, pftcon_data.fbw))
+    sc = _VSUScalars{FT}(FT(dt), FT(spinup_factor_deadwood), FT(c_to_b),
+                         use_cndv, use_biomass_heat_storage,
+                         noveg, nc3crop, nc3irrig, nbrdlf_dcd_brl_shrub, npcropmin,
+                         ntmp_corn, nirrig_tmp_corn, ntrp_corn, nirrig_trp_corn,
+                         nsugarcane, nirrig_sugarcane, nmiscanthus, nirrig_miscanthus,
+                         nswitchgrass, nirrig_switchgrass)
 
-    woody          = pftcon_data.woody
-    slatop         = pftcon_data.slatop
-    dsladlai       = pftcon_data.dsladlai
-    z0mr           = pftcon_data.z0mr
-    displar        = pftcon_data.displar
-    dwood          = pftcon_data.dwood
-    ztopmx         = pftcon_data.ztopmx
-    laimx          = pftcon_data.laimx
-    nstem          = pftcon_data.nstem
-    taper          = pftcon_data.taper
-    fbw            = pftcon_data.fbw
-
-    frac_sno       = waterdiagnosticbulk.frac_sno_col
-    snow_depth     = waterdiagnosticbulk.snow_depth_col
-
-    forc_hgt_u_patch = frictionvel.forc_hgt_u_patch
-
-    leafc          = cnveg_carbonstate.leafc_patch
-    deadstemc      = cnveg_carbonstate.deadstemc_patch
-    livestemc      = cnveg_carbonstate.livestemc_patch
-
-    farea_burned   = cnveg_state.farea_burned_col
-    htmx           = cnveg_state.htmx_patch
-    peaklai        = cnveg_state.peaklai_patch
-
-    harvdate       = crop.harvdate_patch
-
-    tlai           = canopystate.tlai_patch
-    tsai           = canopystate.tsai_patch
-    stem_biomass   = canopystate.stem_biomass_patch
-    leaf_biomass   = canopystate.leaf_biomass_patch
-    htop           = canopystate.htop_patch
-    hbot           = canopystate.hbot_patch
-    elai           = canopystate.elai_patch
-    esai           = canopystate.esai_patch
-    frac_veg_nosno_alb = canopystate.frac_veg_nosno_alb_patch
-
-    # --- Patch loop ---
-    for p in bounds
-        mask_soilp[p] || continue
-
-        # Skip patches whose live C is non-finite (e.g. CN pools not yet initialized
-        # at a cold start) — there is no sensible structure to diagnose from NaN, and
-        # propagating it would poison tlai/elai -> radiation/photosynthesis. Leaves the
-        # structure fields at their current (cold-init) values, matching the behavior
-        # before this routine was wired into the driver. Restart runs have finite C.
-        isfinite(leafc[p]) || continue
-
-        c = col[p]
-
-        if ivt[p] != noveg
-
-            tlai_old = tlai[p]  # n-1 value
-            tsai_old = tsai[p]  # n-1 value
-
-            # Update the leaf area index based on leafC and SLA
-            # Eq 3 from Thornton and Zimmerman, 2007, J Clim, 20, 3902-3923.
-            if dsladlai[ivt[p] + 1] > 0.0
-                tlai[p] = (slatop[ivt[p] + 1] * (exp(leafc[p] * dsladlai[ivt[p] + 1]) - 1.0)) / dsladlai[ivt[p] + 1]
-            else
-                tlai[p] = slatop[ivt[p] + 1] * leafc[p]
-            end
-            tlai[p] = smooth_max(0.0, tlai[p])
-
-            # Update the stem area index and height based on LAI, stem mass, and veg type.
-            # tsai formula from Zeng et al. 2002, Journal of Climate, p1835
-            # Assumes doalb time step .eq. CLM time step, SAI min and monthly decay factor
-            # alpha are set by PFT, and alpha is scaled to CLM time step
-            # tsai_min scaled by 0.5 to match MODIS satellite derived values
-            if ivt[p] == nc3crop || ivt[p] == nc3irrig  # generic crops
-                tsai_alpha = 1.0 - 1.0 * dt / DTSMONTH
-                tsai_min = 0.1
-            else
-                tsai_alpha = 1.0 - 0.5 * dt / DTSMONTH
-                tsai_min = 1.0
-            end
-            tsai_min = tsai_min * 0.5
-            tsai[p] = smooth_max(tsai_alpha * tsai_old + smooth_max(tlai_old - tlai[p], 0.0), tsai_min)
-
-            # Calculate vegetation physiological parameters used in biomass heat storage
-            if use_biomass_heat_storage
-                # Assumes fbw (fraction of biomass that is water) is the same for leaves and stems
-                leaf_biomass[p] = smooth_max(0.0025, leafc[p]) *
-                    c_to_b * 1.0e-3 / (1.0 - fbw[ivt[p] + 1])
-            end
-
-            if woody[ivt[p] + 1] == 1.0
-
-                # Trees and shrubs: simple allometry with hard-wired stem taper
-                # and nstem from PFT parameter file
-                if use_cndv
-                    # CNDV pathway (not commonly used)
-                    # Placeholder: would use dgv_ecophyscon allom2/allom3 and nind/fpcgrid
-                    # For now, use standard non-CNDV allometry
-                    htop[p] = ((3.0 * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p] + 1] * taper[ivt[p] + 1]) /
-                        (pi * nstem[ivt[p] + 1] * dwood[ivt[p] + 1]))^(1.0 / 3.0)
-                else
-                    # correct height calculation if doing accelerated spinup
-                    htop[p] = ((3.0 * deadstemc[p] * spinup_factor_deadwood * taper[ivt[p] + 1] * taper[ivt[p] + 1]) /
-                        (pi * nstem[ivt[p] + 1] * dwood[ivt[p] + 1]))^(1.0 / 3.0)
-                end
-
-                if use_biomass_heat_storage
-                    # Assumes fbw (fraction of biomass that is water) is the same for leaves and stems
-                    stem_biomass[p] = (spinup_factor_deadwood * deadstemc[p] + livestemc[p]) *
-                        c_to_b * 1.0e-3 / (1.0 - fbw[ivt[p] + 1])
-                end
-
-                # Keep htop from getting too close to forcing height for windspeed
-                # (Peter Thornton, 5/3/2004)
-                htop[p] = smooth_min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
-
-                # Constraint to keep htop from going to 0.0
-                # (Peter Thornton, 8/11/2004)
-                htop[p] = smooth_max(htop[p], 0.01)
-
-                hbot[p] = smooth_max(0.0, smooth_min(3.0, htop[p] - 1.0))
-
-            elseif ivt[p] >= npcropmin  # prognostic crops
-
-                if tlai[p] >= laimx[ivt[p] + 1]
-                    peaklai[p] = 1  # used in CNAllocation
-                end
-
-                if ivt[p] == ntmp_corn || ivt[p] == nirrig_tmp_corn ||
-                   ivt[p] == ntrp_corn || ivt[p] == nirrig_trp_corn ||
-                   ivt[p] == nsugarcane || ivt[p] == nirrig_sugarcane ||
-                   ivt[p] == nmiscanthus || ivt[p] == nirrig_miscanthus ||
-                   ivt[p] == nswitchgrass || ivt[p] == nirrig_switchgrass
-                    tsai[p] = 0.1 * tlai[p]
-                else
-                    tsai[p] = 0.2 * tlai[p]
-                end
-
-                # "stubble" after harvest
-                if harvdate[p] < 999 && tlai[p] == 0.0
-                    tsai[p] = 0.25 * (1.0 - farea_burned[c] * 0.90)
-                    htmx[p] = 0.0
-                    peaklai[p] = 0
-                end
-
-                # canopy top and bottom heights
-                htop[p] = ztopmx[ivt[p] + 1] * (smooth_min(tlai[p] / (laimx[ivt[p] + 1] - 1.0), 1.0))^2
-                htmx[p] = smooth_max(htmx[p], htop[p])
-                htop[p] = smooth_max(0.05, smooth_max(htmx[p], htop[p]))
-                hbot[p] = 0.02
-
-            else  # generic crops and grasses
-
-                # height for grasses depends only on LAI
-                htop[p] = smooth_max(0.25, tlai[p] * 0.25)
-
-                htop[p] = smooth_min(htop[p], (forc_hgt_u_patch[p] / (displar[ivt[p] + 1] + z0mr[ivt[p] + 1])) - 3.0)
-
-                # Constraint to keep htop from going to 0.0
-                htop[p] = smooth_max(htop[p], 0.01)
-
-                hbot[p] = smooth_max(0.0, smooth_min(0.05, htop[p] - 0.20))
-            end
-
-        else
-            # noveg
-            tlai[p] = 0.0
-            tsai[p] = 0.0
-            htop[p] = 0.0
-            hbot[p] = 0.0
-        end
-
-        # Adjust lai and sai for burying by snow.
-        # Snow burial fraction for short vegetation (e.g. grasses, crops) changes
-        # with vegetation height. Accounts for a 20% bending factor, as used in
-        # Lombardozzi et al. (2018) GRL 45(18), 9889-9897.
-        #
-        # NOTE: The following snow burial code is duplicated in SatellitePhenologyMod.
-        # Changes in one place should be accompanied by similar changes in the other.
-
-        if ivt[p] > noveg && ivt[p] <= nbrdlf_dcd_brl_shrub
-            ol = smooth_min(smooth_max(snow_depth[c] - hbot[p], 0.0), htop[p] - hbot[p])
-            fb = 1.0 - ol / smooth_max(1.0e-06, htop[p] - hbot[p])
-        else
-            fb = 1.0 - (smooth_max(smooth_min(snow_depth[c], smooth_max(0.05, htop[p] * 0.8)), 0.0) /
-                        (smooth_max(0.05, htop[p] * 0.8)))
-            # depth of snow required for complete burial of grasses
-        end
-
-        if frac_sno[c] <= FRAC_SNO_THRESHOLD
-            frac_sno_adjusted = frac_sno[c]
-        else
-            # avoid tiny but non-zero elai and esai that can cause radiation
-            # and/or photosynthesis code to blow up
-            frac_sno_adjusted = 1.0
-        end
-
-        elai[p] = smooth_max(tlai[p] * (1.0 - frac_sno_adjusted) + tlai[p] * fb * frac_sno_adjusted, 0.0)
-        esai[p] = smooth_max(tsai[p] * (1.0 - frac_sno_adjusted) + tsai[p] * fb * frac_sno_adjusted, 0.0)
-
-        # Fraction of vegetation free of snow
-        if (elai[p] + esai[p]) > 0.0
-            frac_veg_nosno_alb[p] = 1
-        else
-            frac_veg_nosno_alb[p] = 0
-        end
-
-    end  # patch loop
+    _launch!(_vsu_kernel!, mask_soilp, idx, inb, out, par, sc)
 
     return nothing
 end
