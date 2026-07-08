@@ -316,8 +316,13 @@ function soil_bgc_vertical_profile!(
 
     # ------------------------------------------------------------------
     # 1. Surface profile (one thread per decomposition level).
+    # The depth constants (zsoi/dzsoi_decomp) arrive as HOST vectors from the driver
+    # (varcon), but the output is on the state's backend — move them onto it + FT so
+    # the kernel isn't handed mixed host/device args (no-op on the host path).
     # ------------------------------------------------------------------
-    _launch!(_dvp_surface_prof_kernel!, surface_prof, zsoi, dzsoi_decomp,
+    zsoi_k = _to_backend_like(crootfr, FT, zsoi)
+    dzsoi_k = _to_backend_like(crootfr, FT, dzsoi_decomp)
+    _launch!(_dvp_surface_prof_kernel!, surface_prof, zsoi_k, dzsoi_k,
              surfprof_exp_T, use_bedrock, zmin_bedrock_T)
 
     # ------------------------------------------------------------------
@@ -332,7 +337,7 @@ function soil_bgc_vertical_profile!(
     # 3+4. Per-patch cinput_rootfr and normalised patch profiles.
     # ------------------------------------------------------------------
     _launch!(_dvp_patch_prof_kernel!, froot_prof, croot_prof, leaf_prof, stem_prof,
-             cinput_rootfr, crootfr, surface_prof, dzsoi_decomp,
+             cinput_rootfr, crootfr, surface_prof, dzsoi_k,
              mask_bgc_vegp, patch.itype, patch.column,
              altmax_lastyear_indx, noveg, nlevdecomp; ndrange = np)
 
@@ -346,7 +351,7 @@ function soil_bgc_vertical_profile!(
     # 6. Column-native Ndep / Nfix profiles (FATES vs non-FATES).
     # ------------------------------------------------------------------
     _launch!(_dvp_col_prof_kernel!, nfixation_prof, ndep_prof, col_cinput_rootfr,
-             surface_prof, dzsoi_decomp, mask_bgc_soilc,
+             surface_prof, dzsoi_k, mask_bgc_soilc,
              col.is_fates, altmax_lastyear_indx, nlevdecomp; ndrange = nc)
 
     # ------------------------------------------------------------------
@@ -358,7 +363,7 @@ function soil_bgc_vertical_profile!(
     fill!(ndep_prof_sum_col, one(FT))
     fill!(nfix_prof_sum_col, one(FT))
     _launch!(_dvp_col_sums_kernel!, ndep_prof_sum_col, nfix_prof_sum_col, ndep_prof,
-             nfixation_prof, dzsoi_decomp, mask_bgc_soilc, nlevdecomp; ndrange = nc)
+             nfixation_prof, dzsoi_k, mask_bgc_soilc, nlevdecomp; ndrange = nc)
     let ndsum = Array(ndep_prof_sum_col), nfsum = Array(nfix_prof_sum_col),
         amask = Array(mask_bgc_soilc), aalt = Array(altmax_lastyear_indx)
         for c in 1:nc
@@ -384,7 +389,7 @@ function soil_bgc_vertical_profile!(
     fill!(stem_prof_sum_p,  one(FT))
     _launch!(_dvp_patch_sums_kernel!, froot_prof_sum_p, croot_prof_sum_p, leaf_prof_sum_p,
              stem_prof_sum_p, froot_prof, croot_prof, leaf_prof, stem_prof,
-             dzsoi_decomp, mask_bgc_vegp, nlevdecomp; ndrange = np)
+             dzsoi_k, mask_bgc_vegp, nlevdecomp; ndrange = np)
     let fsum = Array(froot_prof_sum_p), csum = Array(croot_prof_sum_p),
         lsum = Array(leaf_prof_sum_p), ssum = Array(stem_prof_sum_p),
         pmask = Array(mask_bgc_vegp)

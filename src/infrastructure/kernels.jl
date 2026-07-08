@@ -68,6 +68,15 @@ end
 # op could race a not-yet-finished one) — so the host path keeps its per-op sync unchanged.
 const _DEFER_GPU_SYNC = Ref(false)
 
+# Move a host constant array `v` onto the same backend + precision as the state prototype
+# `proto`, so a kernel launched on the state's backend isn't handed mixed host/device args.
+# No-op (returns `v` unchanged) when the state is on the host — the host path stays
+# byte-identical. Used where the driver supplies physical constants (zsoi/dz/…) as host
+# vectors but the kernel's other operands live on the device.
+@inline _to_backend_like(::Array, ::Type, v::AbstractArray) = v
+@inline _to_backend_like(proto, ::Type{FT}, v::AbstractArray) where {FT} =
+    typeof(proto).name.wrapper(FT.(v))
+
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
     backend = _kernel_backend(out)
