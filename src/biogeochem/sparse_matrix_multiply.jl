@@ -285,6 +285,24 @@ are supplied) memorizes the entry map / index structure, returning
 
 Returns the (possibly updated) `init_ready` flag.
 """
+# Per-unit value-fill for the memoized (init_ready) path: one thread per unit sets the
+# whole row to -1 then overwrites the NE_NON off-diagonal columns (list) with the input
+# values. Each [ui,i] is written once (the two loops touch disjoint-then-overwrite cols in
+# a fixed per-thread order) → byte-identical to the host nested loop; enables device M.
+@kernel function _set_value_a_fill_kernel!(thisM, @Const(Min), @Const(list), @Const(filter_u),
+        SM::Int, NE_NON::Int, this_begu::Int, M_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; um = u - M_begu + 1
+        negone = -one(eltype(thisM))
+        for i in 1:(SM + NE_NON)
+            thisM[ui, i] = negone
+        end
+        for i in 1:NE_NON
+            thisM[ui, list[i]] = Min[um, i]
+        end
+    end
+end
 function set_value_a!(this::SparseMatrixType, begu::Int, endu::Int, num_unit::Int,
                       filter_u::AbstractVector{Int}, M::AbstractMatrix{<:Real},
                       AI::AbstractVector{Int}, AJ::AbstractVector{Int}, NE_NON::Int,
@@ -303,18 +321,8 @@ function set_value_a!(this::SparseMatrixType, begu::Int, endu::Int, num_unit::In
     @assert size(M, 2) >= NE_NON
 
     if init_ready
-        for i in 1:(this.SM + NE_NON)
-            for fu in 1:num_unit
-                u = filter_u[fu]
-                this.M[u_idx(this.begu, u), i] = -1.0
-            end
-        end
-        for i in 1:NE_NON
-            for fu in 1:num_unit
-                u = filter_u[fu]
-                this.M[u_idx(this.begu, u), list[i]] = M[u_idx(begu, u), i]
-            end
-        end
+        _launch!(_set_value_a_fill_kernel!, this.M, M, list, filter_u,
+                 this.SM, NE_NON, this.begu, begu; ndrange = num_unit)
         this.NE = this.SM + NE_NON
         this.RI[1:this.NE] .= RI_A[1:this.NE]
         this.CI[1:this.NE] .= CI_A[1:this.NE]
