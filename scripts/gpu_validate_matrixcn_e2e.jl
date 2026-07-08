@@ -192,6 +192,44 @@ function main(backend)
         cs_d = mvf(mkcs()); cf_d = mvf(cf); st_d = mvf(st); ivt_d = dev(ivt); ref = dev(zeros(FT, 1, 1))
         CLM.cn_veg_matrix_solve_c!(cs_d, cf_d; A(ivt_d)..., ref=ref, FT=FT, state=st_d)
         push!(checks, ("WHOLE veg-C solve e2e", pools(csg), pools(cs_d)))
+
+        # (7b) WHOLE veg-N solve end-to-end (same recipe; 19 pools incl. retransn).
+        nvn = CLM.IRETRANSN_NATVEG
+        nflds = (:leafn_patch, :leafn_storage_patch, :leafn_xfer_patch, :frootn_patch, :frootn_storage_patch,
+            :frootn_xfer_patch, :livestemn_patch, :livestemn_storage_patch, :livestemn_xfer_patch,
+            :deadstemn_patch, :deadstemn_storage_patch, :deadstemn_xfer_patch, :livecrootn_patch,
+            :livecrootn_storage_patch, :livecrootn_xfer_patch, :deadcrootn_patch, :deadcrootn_storage_patch,
+            :deadcrootn_xfer_patch, :retransn_patch)
+        mkns() = begin
+            ns = CLM.CNVegNitrogenStateData(); CLM.cnveg_nitrogen_state_init!(ns, 3, 1, 1; nrepr=1)
+            for (k, f) in enumerate(nflds); getfield(ns, f) .= Float64[5.0k + p for p in 1:3]; end
+            ns
+        end
+        nf = CLM.CNVegNitrogenFluxData(); CLM.cnveg_nitrogen_flux_init!(nf, 3, 1, 1)
+        CLM.cn_veg_matrix_n_topology!(nf; use_crop=false, nvegnpool=nvn)
+        fill!(nf.matrix_nphtransfer_patch, 1.0e-6); fill!(nf.matrix_nphturnover_patch, 0.05)
+        fill!(nf.matrix_ngmtransfer_patch, 5.0e-7); fill!(nf.matrix_ngmturnover_patch, 0.02)
+        fill!(nf.matrix_nfitransfer_patch, 0.0);    fill!(nf.matrix_nfiturnover_patch, 0.0)
+        fill!(nf.matrix_nalloc_patch, 0.0);         fill!(nf.matrix_Ninput_patch, 0.0)
+        An(ivt_) = (; mask_soilp=trues(3), bounds_patch=1:3, ivt=ivt_, npcropmin=15,
+                    nvegnpool=nvn, counts=cnt, dt=1800.0, num_actfirep=0)
+        npools(ns) = Float64[Array(ns.leafn_patch); Array(ns.frootn_patch); Array(ns.retransn_patch)]
+        stn = CLM.CNVegMatrixSolveState()
+        CLM.cn_veg_matrix_solve_n!(mkns(), nf; An(ivt)..., state=stn)
+        nsg = mkns(); CLM.cn_veg_matrix_solve_n!(nsg, nf; An(ivt)...)
+        ns_d = mvf(mkns()); nf_d = mvf(nf); stn_d = mvf(stn)
+        CLM.cn_veg_matrix_solve_n!(ns_d, nf_d; An(dev(ivt))..., ref=dev(zeros(FT, 1, 1)), FT=FT, state=stn_d)
+        push!(checks, ("WHOLE veg-N solve e2e", npools(nsg), npools(ns_d)))
+
+        # (7c) WHOLE veg-C isotope solve end-to-end (Xiso/Biso matrices ride the bulk-C A op).
+        mkX() = Float64[3.0i + p for p in 1:3, i in 1:nvp]
+        Ai() = (; mask_soilp=trues(3), bounds_patch=1:3, nvegcpool=nvp, counts=cnt, dt=1800.0, num_actfirep=0)
+        sti = CLM.CNVegMatrixSolveState()
+        CLM.cn_veg_matrix_solve_iso!(mkX(), zeros(3, nvp), cf; Ai()..., state=sti)
+        Xg = mkX(); CLM.cn_veg_matrix_solve_iso!(Xg, zeros(3, nvp), cf; Ai()...)
+        Xd = mvf(mkX()); sti_d = mvf(sti)
+        CLM.cn_veg_matrix_solve_iso!(Xd, mvf(zeros(3, nvp)), cf_d; Ai()..., ref=dev(zeros(FT, 1, 1)), FT=FT, state=sti_d)
+        push!(checks, ("WHOLE veg-iso solve e2e", vec(Xg), vec(Array(Xd))))
     end
 
     nfail = 0
@@ -200,7 +238,7 @@ function main(backend)
         @printf("  [%s] %-30s rel = %.3e\n", ok ? "PASS" : "FAIL", nm, dd); ok || (nfail += 1)
     end
     println()
-    println(nfail == 0 ? "  matrix-CN MATCHES CPU ON $name ($FT) — incl. WHOLE veg-C solve e2e" : "  DIVERGENCE ($nfail op(s)).")
+    println(nfail == 0 ? "  matrix-CN MATCHES CPU ON $name ($FT) — incl. WHOLE veg-C/N/iso solves e2e" : "  DIVERGENCE ($nfail op(s)).")
     return nfail == 0 ? 0 : 1
 end
 

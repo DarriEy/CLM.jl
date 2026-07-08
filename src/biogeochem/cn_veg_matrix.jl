@@ -338,6 +338,17 @@ end
     end
 end
 
+# dst[pr,i] = src[pr,i]   (per-patch vector copy; both operands local-row indexed).
+@kernel function _veg_copy_vec_kernel!(dst, @Const(src), @Const(filter_u), nveg::Int, this_begp::Int)
+    fp = @index(Global)
+    @inbounds begin
+        p = filter_u[fp]; pr = p - this_begp + 1
+        for i in 1:nveg
+            dst[pr, i] = src[pr, i]
+        end
+    end
+end
+
 # X[pr,i] += B[pr,i]   (add the input vector after the matrix advance).
 @kernel function _veg_add_vec_kernel!(Xv, @Const(Bv), @Const(filter_u), nveg::Int, this_begp::Int)
     fp = @index(Global)
@@ -726,13 +737,14 @@ isotope variants reuse it verbatim.
 """
 function _cn_veg_matrix_advance!(X::VectorType, B::VectorType,
         begp::Int, endp::Int, num_soilp::Int, filter_soilp::AbstractVector{Int}, nvegpool::Int,
-        phtransfer::AbstractMatrix{Float64}, phturnover::AbstractMatrix{Float64},
+        phtransfer::AbstractMatrix{<:Real}, phturnover::AbstractMatrix{<:Real},
         ph_doner::AbstractVector{Int}, ph_receiver::AbstractVector{Int}, nphtrans::Int, nphouttrans::Int,
-        gmtransfer::AbstractMatrix{Float64}, gmturnover::AbstractMatrix{Float64},
+        gmtransfer::AbstractMatrix{<:Real}, gmturnover::AbstractMatrix{<:Real},
         gm_doner::AbstractVector{Int}, gm_receiver::AbstractVector{Int}, ngmtrans::Int, ngmouttrans::Int,
-        fitransfer::AbstractMatrix{Float64}, fiturnover::AbstractMatrix{Float64},
+        fitransfer::AbstractMatrix{<:Real}, fiturnover::AbstractMatrix{<:Real},
         fi_doner::AbstractVector{Int}, fi_receiver::AbstractVector{Int}, nfitrans::Int, nfiouttrans::Int,
-        dt::Float64, num_actfirep::Int; ref=nothing, FT::Type=Float64)
+        dt::Float64, num_actfirep::Int; ref=nothing, FT::Type=Float64,
+        state::Union{CNVegMatrixSolveState,Nothing}=nothing)
 
     AKph = SparseMatrixType(); init_sm!(AKph, nvegpool, begp, endp; ref=ref, FT=FT)
     AKgm = SparseMatrixType(); init_sm!(AKgm, nvegpool, begp, endp; ref=ref, FT=FT)
@@ -742,31 +754,53 @@ function _cn_veg_matrix_advance!(X::VectorType, B::VectorType,
     Agm = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, ngmtrans - ngmouttrans))
     Afi = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, nfitrans - nfiouttrans))
 
+    # Memoized structure via `state` (device path) or fresh each call (byte-identical default).
     nn = nvegpool * nvegpool
-    list_ph = fill(0, nn); RI_ph = fill(0, nn); CI_ph = fill(0, nn)
-    list_gm = fill(0, nn); RI_gm = fill(0, nn); CI_gm = fill(0, nn)
-    list_fi = fill(0, nn); RI_fi = fill(0, nn); CI_fi = fill(0, nn)
+    state !== nothing && !state.allocated && cn_veg_matrix_solve_state_alloc!(state, nvegpool)
+    if state === nothing
+        list_ph = fill(0, nn); RI_ph = fill(0, nn); CI_ph = fill(0, nn)
+        list_gm = fill(0, nn); RI_gm = fill(0, nn); CI_gm = fill(0, nn)
+        list_fi = fill(0, nn); RI_fi = fill(0, nn); CI_fi = fill(0, nn)
+        iph = false; igm = false; ifi = false
+    else
+        list_ph = state.list_ph; RI_ph = state.RI_ph; CI_ph = state.CI_ph
+        list_gm = state.list_gm; RI_gm = state.RI_gm; CI_gm = state.CI_gm
+        list_fi = state.list_fi; RI_fi = state.RI_fi; CI_fi = state.CI_fi
+        iph = state.init_ph; igm = state.init_gm; ifi = state.init_fi
+    end
 
-    _build_ak_process!(AKph, begp, endp, num_soilp, filter_soilp, Aph,
+    iph = _build_ak_process!(AKph, begp, endp, num_soilp, filter_soilp, Aph,
                        phtransfer, phturnover, ph_doner, ph_receiver,
-                       nphtrans, nphouttrans, nvegpool, dt, false, list_ph, RI_ph, CI_ph; ref=ref, FT=FT)
-    _build_ak_process!(AKgm, begp, endp, num_soilp, filter_soilp, Agm,
+                       nphtrans, nphouttrans, nvegpool, dt, iph, list_ph, RI_ph, CI_ph; ref=ref, FT=FT)
+    igm = _build_ak_process!(AKgm, begp, endp, num_soilp, filter_soilp, Agm,
                        gmtransfer, gmturnover, gm_doner, gm_receiver,
-                       ngmtrans, ngmouttrans, nvegpool, dt, false, list_gm, RI_gm, CI_gm; ref=ref, FT=FT)
-    _build_ak_process!(AKfi, begp, endp, num_soilp, filter_soilp, Afi,
+                       ngmtrans, ngmouttrans, nvegpool, dt, igm, list_gm, RI_gm, CI_gm; ref=ref, FT=FT)
+    ifi = _build_ak_process!(AKfi, begp, endp, num_soilp, filter_soilp, Afi,
                        fitransfer, fiturnover, fi_doner, fi_receiver,
-                       nfitrans, nfiouttrans, nvegpool, dt, false, list_fi, RI_fi, CI_fi; ref=ref, FT=FT)
+                       nfitrans, nfiouttrans, nvegpool, dt, ifi, list_fi, RI_fi, CI_fi; ref=ref, FT=FT)
+    if state !== nothing
+        state.init_ph = iph; state.init_gm = igm; state.init_fi = ifi
+    end
 
     AKall = SparseMatrixType(); init_sm!(AKall, nvegpool, begp, endp; ref=ref, FT=FT)
     if num_actfirep == 0
-        la = fill(0, nn); lb = fill(0, nn); RIab = fill(0, nn); CIab = fill(0, nn)
-        spmp_ab!(AKall, num_soilp, filter_soilp, AKph, AKgm, false;
-                 list_A=la, list_B=lb, NE_AB=0, RI_AB=RIab, CI_AB=CIab)
+        if state === nothing
+            la = fill(0, nn); lb = fill(0, nn); RIab = fill(0, nn); CIab = fill(0, nn); abr = false; neab = 0
+        else
+            la = state.la; lb = state.lb; RIab = state.RIab; CIab = state.CIab; abr = state.ab_ready; neab = state.NE_ab
+        end
+        (abr, neab) = spmp_ab!(AKall, num_soilp, filter_soilp, AKph, AKgm, abr;
+                               list_A=la, list_B=lb, NE_AB=neab, RI_AB=RIab, CI_AB=CIab)
+        if state !== nothing; state.ab_ready = abr; state.NE_ab = neab; end
     else
-        la = fill(0, nn); lb = fill(0, nn); lc = fill(0, nn)
-        RIabc = fill(0, nn); CIabc = fill(0, nn)
-        spmp_abc!(AKall, num_soilp, filter_soilp, AKph, AKgm, AKfi, false;
-                  list_A=la, list_B=lb, list_C=lc, NE_ABC=0, RI_ABC=RIabc, CI_ABC=CIabc)
+        if state === nothing
+            la = fill(0, nn); lb = fill(0, nn); lc = fill(0, nn); RIabc = fill(0, nn); CIabc = fill(0, nn); abcr = false; neabc = 0
+        else
+            la = state.la; lb = state.lb; lc = state.lc; RIabc = state.RIabc; CIabc = state.CIabc; abcr = state.abc_ready; neabc = state.NE_abc
+        end
+        (abcr, neabc) = spmp_abc!(AKall, num_soilp, filter_soilp, AKph, AKgm, AKfi, abcr;
+                  list_A=la, list_B=lb, list_C=lc, NE_ABC=neabc, RI_ABC=RIabc, CI_ABC=CIabc)
+        if state !== nothing; state.abc_ready = abcr; state.NE_abc = neabc; end
     end
 
     spmm_ax!(X, num_soilp, filter_soilp, AKall)
@@ -798,12 +832,14 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
                                 npcropmin::Int, nvegnpool::Int,
                                 counts, dt::Real,
                                 num_actfirep::Int=0, irepr::Int=1,
-                                ref=nothing, FT::Type=Float64)
+                                ref=nothing, FT::Type=Float64,
+                                state::Union{CNVegMatrixSolveState,Nothing}=nothing)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
-    filter_soilp = Int[p for p in bounds_patch if mask_soilp[p]]
-    num_soilp = length(filter_soilp)
+    filter_host = Int[p for p in bounds_patch if mask_soilp[p]]
+    num_soilp = length(filter_host)
     num_soilp == 0 && return nothing
+    filter_soilp = _backend_vec(ref, filter_host)
 
     nf = nf_veg; ns = ns_veg
     iretransn = nvegnpool   # last N pool (Fortran iretransn = nvegnpool)
@@ -838,7 +874,7 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
         nf.matrix_nfitransfer_patch, nf.matrix_nfiturnover_patch,
         nf.matrix_nfitransfer_doner_patch, nf.matrix_nfitransfer_receiver_patch,
         counts.nnfitrans, counts.nnfiouttrans,
-        dt, num_actfirep; ref=ref, FT=FT)
+        dt, num_actfirep; ref=ref, FT=FT, state=state)
 
     # --- write the advanced N pools back ---
     _launch!(_veg_writeback_n_kernel!,
@@ -874,28 +910,26 @@ keeps the isotope pool storage decoupled from the bulk C state structs while
 faithfully reusing the bulk-C `A` operator. Port of the C13/C14 branch of
 `CNVegMatrix`.
 """
-function cn_veg_matrix_solve_iso!(Xiso::AbstractMatrix{Float64}, Biso::AbstractMatrix{Float64},
+function cn_veg_matrix_solve_iso!(Xiso::AbstractMatrix{<:Real}, Biso::AbstractMatrix{<:Real},
                                   cf_veg::CNVegCarbonFluxData;
                                   mask_soilp::AbstractVector{Bool},
                                   bounds_patch::UnitRange{Int},
                                   nvegcpool::Int, counts, dt::Real,
-                                  num_actfirep::Int=0)
+                                  num_actfirep::Int=0,
+                                  ref=nothing, FT::Type=Float64,
+                                  state::Union{CNVegMatrixSolveState,Nothing}=nothing)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
-    filter_soilp = Int[p for p in bounds_patch if mask_soilp[p]]
-    num_soilp = length(filter_soilp)
+    filter_host = Int[p for p in bounds_patch if mask_soilp[p]]
+    num_soilp = length(filter_host)
     num_soilp == 0 && return Xiso
+    filter_soilp = _backend_vec(ref, filter_host)
     cf = cf_veg
 
-    X = VectorType(); init_v!(X, nvegcpool, begp, endp)
-    B = VectorType(); init_v!(B, nvegcpool, begp, endp)
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]; pr = u_idx(begp, p)
-        for i in 1:nvegcpool
-            X.V[pr, i] = Xiso[pr, i]
-            B.V[pr, i] = Biso[pr, i]
-        end
-    end
+    X = VectorType(); init_v!(X, nvegcpool, begp, endp; ref=ref, FT=FT)
+    B = VectorType(); init_v!(B, nvegcpool, begp, endp; ref=ref, FT=FT)
+    _launch!(_veg_copy_vec_kernel!, X.V, Xiso, filter_soilp, nvegcpool, begp; ndrange = num_soilp)
+    _launch!(_veg_copy_vec_kernel!, B.V, Biso, filter_soilp, nvegcpool, begp; ndrange = num_soilp)
 
     _cn_veg_matrix_advance!(X, B, begp, endp, num_soilp, filter_soilp, nvegcpool,
         cf.matrix_phtransfer_patch, cf.matrix_phturnover_patch,
@@ -907,14 +941,9 @@ function cn_veg_matrix_solve_iso!(Xiso::AbstractMatrix{Float64}, Biso::AbstractM
         cf.matrix_fitransfer_patch, cf.matrix_fiturnover_patch,
         cf.matrix_fitransfer_doner_patch, cf.matrix_fitransfer_receiver_patch,
         counts.ncfitrans, counts.ncfiouttrans,
-        dt, num_actfirep)
+        dt, num_actfirep; ref=ref, FT=FT, state=state)
 
-    for fp in 1:num_soilp
-        p = filter_soilp[fp]; pr = u_idx(begp, p)
-        for i in 1:nvegcpool
-            Xiso[pr, i] = X.V[pr, i]
-        end
-    end
+    _launch!(_veg_copy_vec_kernel!, Xiso, X.V, filter_soilp, nvegcpool, begp; ndrange = num_soilp)
     release_v!(X); release_v!(B)
     return Xiso
 end
