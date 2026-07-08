@@ -15,6 +15,11 @@
 # _veg_load_c_kernel! / _veg_writeback_c_kernel!.
 # RI/CI/filter are carried to the device via Adapt (item: index arrays on device).
 #
+# The finale (check 7) is the WHOLE cn_veg_matrix_solve_c! running end-to-end on the
+# device: the topology-static sparse structure is built once on the host (a warm-up
+# call fills a CNVegMatrixSolveState), then the device solve reuses it via the
+# kernelized memoized fills — no host scalar loop remains on the per-step path.
+#
 #   julia --project=scripts scripts/gpu_validate_matrixcn_e2e.jl
 # ==========================================================================
 using CLM
@@ -27,6 +32,13 @@ include(joinpath(@__DIR__, "gpu_backends.jl"))
 # device precision (FT), so this is a pure host->device move (RI/CI Int arrays too).
 struct DevAdaptor{F}; f::F; end
 CLM.Adapt.adapt_storage(d::DevAdaptor, x::AbstractArray) = d.f(x)
+
+# Float32-converting device adaptor for whole state structs (cs/cf/solve-state): floats
+# -> Float32 on device, ints/bools -> device (type preserved). Metal has no Float64.
+struct DevF32{F}; f::F; end
+CLM.Adapt.adapt_storage(d::DevF32, x::AbstractArray{<:AbstractFloat}) = d.f(Float32.(x))
+CLM.Adapt.adapt_storage(d::DevF32, x::AbstractArray{<:Integer}) = d.f(collect(x))
+CLM.Adapt.adapt_storage(d::DevF32, x::AbstractArray{Bool}) = d.f(collect(x))
 
 function reldiff(a, b)
     A = Array(a); B = Array(b); m = 0.0
@@ -145,13 +157,50 @@ function main(backend)
         push!(checks, ("glue _veg_writeback_c_kernel!", reduce(hcat, oh), reduce(hcat, [Array(x) for x in og])))
     end
 
+    # (7) WHOLE veg-C SOLVE end-to-end on the device. Structure is topology-static, so it
+    #     is built ONCE on the host (a warm-up call fills a CNVegMatrixSolveState); the
+    #     device solve reuses it via the kernelized memoized fills. Golden = a stateless
+    #     host solve on the same input; device = the memoized Float32 solve on the GPU.
+    let nvp = CLM.NVEGPOOL_NATVEG, cnt = CLM.veg_matrix_transfer_counts(false),
+        ivt = [1, 2, 3], woody = ones(Float64, 5)
+        mkcs() = begin
+            cs = CLM.CNVegCarbonStateData(); CLM.cnveg_carbon_state_init!(cs, 3, 1, 1; use_matrixcn=false, nrepr=1)
+            for (k, f) in enumerate((:leafc_patch, :leafc_storage_patch, :leafc_xfer_patch,
+                    :frootc_patch, :frootc_storage_patch, :frootc_xfer_patch,
+                    :livestemc_patch, :livestemc_storage_patch, :livestemc_xfer_patch,
+                    :deadstemc_patch, :deadstemc_storage_patch, :deadstemc_xfer_patch,
+                    :livecrootc_patch, :livecrootc_storage_patch, :livecrootc_xfer_patch,
+                    :deadcrootc_patch, :deadcrootc_storage_patch, :deadcrootc_xfer_patch))
+                getfield(cs, f) .= Float64[10.0k + p for p in 1:3]
+            end
+            cs
+        end
+        cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, 3, 1, 1; use_matrixcn=true)
+        CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nvp)
+        fill!(cf.matrix_phtransfer_patch, 1.0e-6); fill!(cf.matrix_phturnover_patch, 0.05)
+        fill!(cf.matrix_gmtransfer_patch, 5.0e-7); fill!(cf.matrix_gmturnover_patch, 0.02)
+        fill!(cf.matrix_fitransfer_patch, 0.0);    fill!(cf.matrix_fiturnover_patch, 0.0)
+        fill!(cf.matrix_alloc_patch, 0.0);         fill!(cf.matrix_Cinput_patch, 0.0)
+        A(ivt_) = (; mask_soilp=trues(3), bounds_patch=1:3, ivt=ivt_, woody=woody,
+                   npcropmin=15, nvegcpool=nvp, counts=cnt, dt=1800.0, num_actfirep=0)
+        pools(cs) = Float64[Array(cs.leafc_patch); Array(cs.frootc_patch); Array(cs.livestemc_patch);
+                            Array(cs.deadstemc_patch); Array(cs.livecrootc_patch); Array(cs.deadcrootc_patch)]
+        st = CLM.CNVegMatrixSolveState()
+        CLM.cn_veg_matrix_solve_c!(mkcs(), cf; A(ivt)..., state=st)      # host warm-up: build structure
+        csg = mkcs(); CLM.cn_veg_matrix_solve_c!(csg, cf; A(ivt)...)     # golden stateless host solve
+        mvf(x) = CLM.Adapt.adapt(DevF32(dev), x)
+        cs_d = mvf(mkcs()); cf_d = mvf(cf); st_d = mvf(st); ivt_d = dev(ivt); ref = dev(zeros(FT, 1, 1))
+        CLM.cn_veg_matrix_solve_c!(cs_d, cf_d; A(ivt_d)..., ref=ref, FT=FT, state=st_d)
+        push!(checks, ("WHOLE veg-C solve e2e", pools(csg), pools(cs_d)))
+    end
+
     nfail = 0
     for (nm, cpu, gpu) in checks
         dd = reldiff(cpu, gpu); ok = dd < 1f-3
         @printf("  [%s] %-30s rel = %.3e\n", ok ? "PASS" : "FAIL", nm, dd); ok || (nfail += 1)
     end
     println()
-    println(nfail == 0 ? "  matrix-CN sparse ops MATCH CPU ON $name ($FT)" : "  DIVERGENCE ($nfail op(s)).")
+    println(nfail == 0 ? "  matrix-CN MATCHES CPU ON $name ($FT) — incl. WHOLE veg-C solve e2e" : "  DIVERGENCE ($nfail op(s)).")
     return nfail == 0 ? 0 : 1
 end
 

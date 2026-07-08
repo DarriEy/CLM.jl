@@ -441,6 +441,54 @@ end
 end
 
 # -----------------------------------------------------------------------------
+# Persistent structure-memo state for an end-to-end DEVICE solve
+#
+# The sparse structure (entry-map `list`, result indices `RI`/`CI`, entry counts)
+# is topology-static — it depends only on the doner/receiver arrays, not the pool
+# values. `cn_veg_matrix_solve_c!` normally rebuilds it every call (init_ready=
+# false → the host merge in `set_value_a!`/`spmp_ab!`). Passing a
+# `CNVegMatrixSolveState` memoizes it: the FIRST call builds the structure (host)
+# and records it here; later calls reuse it via the KERNELIZED memoized fills
+# (`set_value_a!`/`spmp_ab!`/`spmp_abc!` init_ready=true) — which run on the device.
+# So a device solve = one host warm-up call to fill this state, then `Adapt.adapt`
+# the state (and the cs/cf field arrays + workspaces) to the GPU and solve there.
+# All arrays are abstract-typed so the state can hold host `Vector{Int}` or a
+# device `MtlVector{Int}`.
+# -----------------------------------------------------------------------------
+
+Base.@kwdef mutable struct CNVegMatrixSolveState
+    list_ph::AbstractVector{Int} = Int[]; RI_ph::AbstractVector{Int} = Int[]; CI_ph::AbstractVector{Int} = Int[]
+    list_gm::AbstractVector{Int} = Int[]; RI_gm::AbstractVector{Int} = Int[]; CI_gm::AbstractVector{Int} = Int[]
+    list_fi::AbstractVector{Int} = Int[]; RI_fi::AbstractVector{Int} = Int[]; CI_fi::AbstractVector{Int} = Int[]
+    la::AbstractVector{Int} = Int[]; lb::AbstractVector{Int} = Int[]; lc::AbstractVector{Int} = Int[]
+    RIab::AbstractVector{Int} = Int[]; CIab::AbstractVector{Int} = Int[]
+    RIabc::AbstractVector{Int} = Int[]; CIabc::AbstractVector{Int} = Int[]
+    NE_ab::Int = 0; NE_abc::Int = 0
+    init_ph::Bool = false; init_gm::Bool = false; init_fi::Bool = false
+    ab_ready::Bool = false; abc_ready::Bool = false
+    allocated::Bool = false
+end
+Adapt.@adapt_structure CNVegMatrixSolveState
+
+"""
+    cn_veg_matrix_solve_state_alloc!(s, nvegpool) -> s
+
+Allocate the (host) memo arrays for [`CNVegMatrixSolveState`], sized `nvegpool^2`
+(the max possible merged entry count). Idempotent. Structure/flags are filled by
+the first `cn_veg_matrix_solve_c!` call that receives `s`.
+"""
+function cn_veg_matrix_solve_state_alloc!(s::CNVegMatrixSolveState, nvegpool::Int)
+    s.allocated && return s
+    nn = nvegpool * nvegpool
+    for f in (:list_ph, :RI_ph, :CI_ph, :list_gm, :RI_gm, :CI_gm, :list_fi, :RI_fi, :CI_fi,
+              :la, :lb, :lc, :RIab, :CIab, :RIabc, :CIabc)
+        setfield!(s, f, fill(0, nn))
+    end
+    s.allocated = true
+    return s
+end
+
+# -----------------------------------------------------------------------------
 # Matrix assembly + solve (Fortran CNVegMatrix core, lines 1024–1538 + 2309–2336)
 # -----------------------------------------------------------------------------
 
@@ -526,16 +574,19 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
                                 npcropmin::Int, nvegcpool::Int,
                                 counts, dt::Real,
                                 num_actfirep::Int=0, irepr::Int=1,
-                                ref=nothing, FT::Type=Float64)
+                                ref=nothing, FT::Type=Float64,
+                                state::Union{CNVegMatrixSolveState,Nothing}=nothing)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
 
-    # Build the active-patch filter from the mask (Fortran filter_soilp).
-    filter_soilp = Int[p for p in bounds_patch if mask_soilp[p]]
-    num_soilp = length(filter_soilp)
+    # Build the active-patch filter from the mask (Fortran filter_soilp); move it onto the
+    # device backend when running on the GPU so the kernels get a matching-backend filter.
+    filter_host = Int[p for p in bounds_patch if mask_soilp[p]]
+    num_soilp = length(filter_host)
     if num_soilp == 0
         return nothing
     end
+    filter_soilp = _backend_vec(ref, filter_host)
 
     cf = cf_veg; cs = cs_veg
 
@@ -569,38 +620,61 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
     Agm = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, counts.ncgmtrans - counts.ncgmouttrans))
     Afi = _smm_alloc(ref, FT, 0.0, endp - begp + 1, max(1, counts.ncfitrans - counts.ncfiouttrans))
 
+    # Memoized-structure arrays + init flags: fresh (rebuild every call) when no `state`
+    # is given (byte-identical default); reused from `state` when one is (device path).
     nn = nvegcpool * nvegcpool
-    list_ph = fill(0, nn); RI_ph = fill(0, nn); CI_ph = fill(0, nn)
-    list_gm = fill(0, nn); RI_gm = fill(0, nn); CI_gm = fill(0, nn)
-    list_fi = fill(0, nn); RI_fi = fill(0, nn); CI_fi = fill(0, nn)
+    state !== nothing && !state.allocated && cn_veg_matrix_solve_state_alloc!(state, nvegcpool)
+    if state === nothing
+        list_ph = fill(0, nn); RI_ph = fill(0, nn); CI_ph = fill(0, nn)
+        list_gm = fill(0, nn); RI_gm = fill(0, nn); CI_gm = fill(0, nn)
+        list_fi = fill(0, nn); RI_fi = fill(0, nn); CI_fi = fill(0, nn)
+        iph = false; igm = false; ifi = false
+    else
+        list_ph = state.list_ph; RI_ph = state.RI_ph; CI_ph = state.CI_ph
+        list_gm = state.list_gm; RI_gm = state.RI_gm; CI_gm = state.CI_gm
+        list_fi = state.list_fi; RI_fi = state.RI_fi; CI_fi = state.CI_fi
+        iph = state.init_ph; igm = state.init_gm; ifi = state.init_fi
+    end
 
-    _build_ak_process!(AKph, begp, endp, num_soilp, filter_soilp, Aph,
+    iph = _build_ak_process!(AKph, begp, endp, num_soilp, filter_soilp, Aph,
                        cf.matrix_phtransfer_patch, cf.matrix_phturnover_patch,
                        cf.matrix_phtransfer_doner_patch, cf.matrix_phtransfer_receiver_patch,
-                       counts.ncphtrans, counts.ncphouttrans, nvegcpool, dt, false,
+                       counts.ncphtrans, counts.ncphouttrans, nvegcpool, dt, iph,
                        list_ph, RI_ph, CI_ph; ref=ref, FT=FT)
-    _build_ak_process!(AKgm, begp, endp, num_soilp, filter_soilp, Agm,
+    igm = _build_ak_process!(AKgm, begp, endp, num_soilp, filter_soilp, Agm,
                        cf.matrix_gmtransfer_patch, cf.matrix_gmturnover_patch,
                        cf.matrix_gmtransfer_doner_patch, cf.matrix_gmtransfer_receiver_patch,
-                       counts.ncgmtrans, counts.ncgmouttrans, nvegcpool, dt, false,
+                       counts.ncgmtrans, counts.ncgmouttrans, nvegcpool, dt, igm,
                        list_gm, RI_gm, CI_gm; ref=ref, FT=FT)
-    _build_ak_process!(AKfi, begp, endp, num_soilp, filter_soilp, Afi,
+    ifi = _build_ak_process!(AKfi, begp, endp, num_soilp, filter_soilp, Afi,
                        cf.matrix_fitransfer_patch, cf.matrix_fiturnover_patch,
                        cf.matrix_fitransfer_doner_patch, cf.matrix_fitransfer_receiver_patch,
-                       counts.ncfitrans, counts.ncfiouttrans, nvegcpool, dt, false,
+                       counts.ncfitrans, counts.ncfiouttrans, nvegcpool, dt, ifi,
                        list_fi, RI_fi, CI_fi; ref=ref, FT=FT)
+    if state !== nothing
+        state.init_ph = iph; state.init_gm = igm; state.init_fi = ifi
+    end
 
     # --- AKall = AKph + AKgm (+ AKfi if fire active) (Fortran 1503–1510) ---
     AKall = SparseMatrixType(); init_sm!(AKall, nvegcpool, begp, endp; ref=ref, FT=FT)
     if num_actfirep == 0
-        la = fill(0, nn); lb = fill(0, nn); RIab = fill(0, nn); CIab = fill(0, nn)
-        spmp_ab!(AKall, num_soilp, filter_soilp, AKph, AKgm, false;
-                 list_A=la, list_B=lb, NE_AB=0, RI_AB=RIab, CI_AB=CIab)
+        if state === nothing
+            la = fill(0, nn); lb = fill(0, nn); RIab = fill(0, nn); CIab = fill(0, nn); abr = false; neab = 0
+        else
+            la = state.la; lb = state.lb; RIab = state.RIab; CIab = state.CIab; abr = state.ab_ready; neab = state.NE_ab
+        end
+        (abr, neab) = spmp_ab!(AKall, num_soilp, filter_soilp, AKph, AKgm, abr;
+                               list_A=la, list_B=lb, NE_AB=neab, RI_AB=RIab, CI_AB=CIab)
+        if state !== nothing; state.ab_ready = abr; state.NE_ab = neab; end
     else
-        la = fill(0, nn); lb = fill(0, nn); lc = fill(0, nn)
-        RIabc = fill(0, nn); CIabc = fill(0, nn)
-        spmp_abc!(AKall, num_soilp, filter_soilp, AKph, AKgm, AKfi, false;
-                  list_A=la, list_B=lb, list_C=lc, NE_ABC=0, RI_ABC=RIabc, CI_ABC=CIabc)
+        if state === nothing
+            la = fill(0, nn); lb = fill(0, nn); lc = fill(0, nn); RIabc = fill(0, nn); CIabc = fill(0, nn); abcr = false; neabc = 0
+        else
+            la = state.la; lb = state.lb; lc = state.lc; RIabc = state.RIabc; CIabc = state.CIabc; abcr = state.abc_ready; neabc = state.NE_abc
+        end
+        (abcr, neabc) = spmp_abc!(AKall, num_soilp, filter_soilp, AKph, AKgm, AKfi, abcr;
+                  list_A=la, list_B=lb, list_C=lc, NE_ABC=neabc, RI_ABC=RIabc, CI_ABC=CIabc)
+        if state !== nothing; state.abc_ready = abcr; state.NE_abc = neabc; end
     end
 
     # --- Xvegc = (I + AKall)·Xvegc  (Fortran SPMM_AX, 1530) ---

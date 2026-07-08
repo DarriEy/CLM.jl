@@ -114,6 +114,16 @@ Adapt.@adapt_structure VectorType
 @inline _smm_alloc(ref, ::Type{FT}, fillval, dims::Vararg{Int}) where {FT} =
     fill!(similar(ref, FT, dims...), convert(FT, fillval))
 
+# Move a host-built index vector (e.g. a patch/column filter) onto the same backend as
+# the device prototype `ref`, so kernels that also consume device workspaces get a
+# matching-backend filter. `ref === nothing` keeps it on the host (byte-identical path).
+@inline _backend_vec(::Nothing, v::AbstractVector{<:Integer}) = v
+@inline _backend_vec(ref, v::AbstractVector{<:Integer}) = typeof(ref).name.wrapper(v)
+
+# Integer workspace allocation (RI/CI index arrays) matching `_smm_alloc`'s backend rule.
+@inline _smm_alloc_int(::Nothing, fillval::Int, n::Int) = fill(fillval, n)
+@inline _smm_alloc_int(ref, fillval::Int, n::Int) = fill!(similar(ref, Int, n), fillval)
+
 # -----------------------------------------------------------------------------
 # SparseMatrixType — allocation / status
 # -----------------------------------------------------------------------------
@@ -140,10 +150,11 @@ function init_sm!(this::SparseMatrixType, SM_in::Int, begu::Int, endu::Int;
         @assert maxsm <= SM_in * SM_in
     end
     this.M = _smm_alloc(ref, FT, SMM_EMPTY_REAL, nunit, ne)
-    # RI/CI are built HOST-side by the sequential index ops (set_value_a!/spmp_ab!); for a
-    # GPU solve the solver syncs them to the device once the structure is known.
-    this.RI = fill(SMM_EMPTY_INT, SM_in * SM_in)
-    this.CI = fill(SMM_EMPTY_INT, SM_in * SM_in)
+    # RI/CI structure is built HOST-side by the sequential index ops (set_value_a!/spmp_ab!)
+    # on the first call; on a device solve they live on the device (ref given) so the
+    # memoized kernels + the RI/CI copy operate on one backend.
+    this.RI = _smm_alloc_int(ref, SMM_EMPTY_INT, SM_in * SM_in)
+    this.CI = _smm_alloc_int(ref, SMM_EMPTY_INT, SM_in * SM_in)
     this.NE = SMM_EMPTY_INT
     return nothing
 end
@@ -251,22 +262,27 @@ end
 Set `this` to a diagonal sparse matrix with constant value `scaler` on the
 diagonal (RI[i]=CI[i]=i). Matches Fortran `SetValueA_diag`.
 """
+# Per-unit diagonal fill: one thread per unit writes `scaler` to all SM columns of its row.
+@kernel function _set_value_a_diag_kernel!(thisM, @Const(filter_u), SM::Int, this_begu::Int, scaler)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1
+        for i in 1:SM; thisM[ui, i] = scaler; end
+    end
+end
+
 function set_value_a_diag!(this::SparseMatrixType, num_unit::Int,
                            filter_u::AbstractVector{Int}, scaler::Float64)
     if !is_alloc_sm(this)
         error("SetValueA_diag ERROR: Sparse Matrix was NOT already allocated")
     end
     @assert length(filter_u) >= num_unit
-    for i in 1:this.SM
-        for fu in 1:num_unit
-            u = filter_u[fu]
-            this.M[u_idx(this.begu, u), i] = scaler
-        end
-    end
-    for i in 1:this.SM
-        this.RI[i] = i
-        this.CI[i] = i
-    end
+    num_unit == 0 && return nothing
+    _launch!(_set_value_a_diag_kernel!, this.M, filter_u, this.SM, this.begu,
+             eltype(this.M)(scaler); ndrange = num_unit)
+    # RI[i] = CI[i] = i (device-friendly range broadcast; no scalar indexing).
+    this.RI[1:this.SM] .= 1:this.SM
+    this.CI[1:this.SM] .= 1:this.SM
     this.NE = this.SM
     return nothing
 end
@@ -734,6 +750,21 @@ later calls (`list_ready=true`) it reuses the memorized structure. Matches `SPMP
 Returns `(list_ready, NE_AB)`. `NE_AB` is `this.NE` after the operation (or the
 passed-in value on the memorized path).
 """
+# Per-unit memoized fill for A+B: one thread per unit zeros the NE_AB result columns,
+# scatters A's entries to their merged column (list_A), then accumulates B's entries
+# (list_B). Sequential per-thread (zero → A → +B) matches the host loop order exactly
+# (list_A/list_B are injective; a shared column gets A then +B) → byte-identical; device M.
+@kernel function _spmp_ab_fill_kernel!(thisM, @Const(AM), @Const(BM), @Const(list_A), @Const(list_B),
+        @Const(filter_u), A_NE::Int, B_NE::Int, NE_AB::Int, this_begu::Int, A_begu::Int, B_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; ua = u - A_begu + 1; ub = u - B_begu + 1
+        for i in 1:NE_AB; thisM[ui, i] = zero(eltype(thisM)); end
+        for ia in 1:A_NE; thisM[ui, list_A[ia]] = AM[ua, ia]; end
+        for ib in 1:B_NE; c = list_B[ib]; thisM[ui, c] = thisM[ui, c] + BM[ub, ib]; end
+    end
+end
+
 function spmp_ab!(this::SparseMatrixType, num_unit::Int, filter_u::AbstractVector{Int},
                   A::SparseMatrixType, B::SparseMatrixType, list_ready::Bool;
                   list_A::Union{AbstractVector{Int},Nothing}=nothing,
@@ -812,25 +843,8 @@ function spmp_ab!(this::SparseMatrixType, num_unit::Int, filter_u::AbstractVecto
         end
         return (list_ready, out_NE)
     else
-        for i in 1:NE_AB
-            for fu in 1:num_unit
-                u = filter_u[fu]
-                this.M[u_idx(this.begu, u), i] = 0.0
-            end
-        end
-        for i_a in 1:A.NE
-            for fu in 1:num_unit
-                u = filter_u[fu]
-                this.M[u_idx(this.begu, u), list_A[i_a]] = A.M[u_idx(A.begu, u), i_a]
-            end
-        end
-        for i_b in 1:B.NE
-            for fu in 1:num_unit
-                u = filter_u[fu]
-                ui = u_idx(this.begu, u)
-                this.M[ui, list_B[i_b]] = this.M[ui, list_B[i_b]] + B.M[u_idx(B.begu, u), i_b]
-            end
-        end
+        _launch!(_spmp_ab_fill_kernel!, this.M, A.M, B.M, list_A, list_B, filter_u,
+                 A.NE, B.NE, NE_AB, this.begu, A.begu, B.begu; ndrange = num_unit)
         this.NE = NE_AB
         this.CI[1:this.NE] .= CI_AB[1:NE_AB]
         this.RI[1:this.NE] .= RI_AB[1:NE_AB]
@@ -852,6 +866,24 @@ entry map / structure; later calls reuse it. On the memorized path each summand
 may use its own active-unit filter (`num_actunit_*`/`filter_actunit_*`). Matches
 `SPMP_ABC`. Returns `(list_ready, NE_ABC)`.
 """
+# Per-unit memoized fill for A+B+C (no per-summand active-unit filter): zero, scatter A,
+# then accumulate B and C at their merged columns. Byte-identical to the host loops for the
+# common (num_actunit_*==nothing) path used by the veg solve; device M.
+@kernel function _spmp_abc_fill_kernel!(thisM, @Const(AM), @Const(BM), @Const(CM),
+        @Const(list_A), @Const(list_B), @Const(list_C), @Const(filter_u),
+        A_NE::Int, B_NE::Int, C_NE::Int, NE_ABC::Int,
+        this_begu::Int, A_begu::Int, B_begu::Int, C_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1
+        ua = u - A_begu + 1; ub = u - B_begu + 1; uc = u - C_begu + 1
+        for i in 1:NE_ABC; thisM[ui, i] = zero(eltype(thisM)); end
+        for ia in 1:A_NE; thisM[ui, list_A[ia]] = AM[ua, ia]; end
+        for ib in 1:B_NE; c = list_B[ib]; thisM[ui, c] = thisM[ui, c] + BM[ub, ib]; end
+        for ic in 1:C_NE; c = list_C[ic]; thisM[ui, c] = thisM[ui, c] + CM[uc, ic]; end
+    end
+end
+
 function spmp_abc!(this::SparseMatrixType, num_unit::Int, filter_u::AbstractVector{Int},
                    A::SparseMatrixType, B::SparseMatrixType, C::SparseMatrixType,
                    list_ready::Bool;
@@ -994,7 +1026,16 @@ function spmp_abc!(this::SparseMatrixType, num_unit::Int, filter_u::AbstractVect
             list_ready = true
         end
         return (list_ready, out_NE)
+    elseif num_actunit_A === nothing && num_actunit_B === nothing && num_actunit_C === nothing
+        # Common path (all summands share filter_u): single per-unit kernel, device-capable.
+        _launch!(_spmp_abc_fill_kernel!, this.M, A.M, B.M, C.M, list_A, list_B, list_C, filter_u,
+                 A.NE, B.NE, C.NE, NE_ABC, this.begu, A.begu, B.begu, C.begu; ndrange = num_unit)
+        this.NE = NE_ABC
+        this.CI[1:this.NE] .= CI_ABC[1:NE_ABC]
+        this.RI[1:this.NE] .= RI_ABC[1:NE_ABC]
+        return (list_ready, NE_ABC)
     else
+        # Per-summand active-unit filters (host-only path; not used by the veg matrix solve).
         for i in 1:NE_ABC
             for fu in 1:num_unit
                 u = filter_u[fu]

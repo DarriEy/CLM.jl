@@ -98,6 +98,42 @@ end
     @test isapprox(p32, p64; rtol = 1e-4)                # Float32 solver == Float64 to round-off
 end
 
+@testset "veg-C solve memoized-structure state == stateless solve" begin
+    # A CNVegMatrixSolveState memoizes the sparse structure so calls after the first reuse
+    # it via the kernelized memoized fills (the device solve path). On the CPU backend the
+    # BUILD call (call 1) and the MEMOIZED call (call 2) must both be bit-identical to a
+    # stateless solve on the same input.
+    np = 3; nveg = CLM.NVEGPOOL_NATVEG; counts = CLM.veg_matrix_transfer_counts(false)
+    ivt = [1, 2, 3]; woody = ones(Float64, 5); npcropmin = 15; dt = 1800.0
+    mkcs() = (cs = CLM.CNVegCarbonStateData(); CLM.cnveg_carbon_state_init!(cs, np, 1, 1; use_matrixcn=false, nrepr=1);
+        for (k, f) in enumerate((:leafc_patch, :leafc_storage_patch, :leafc_xfer_patch,
+                :frootc_patch, :frootc_storage_patch, :frootc_xfer_patch,
+                :livestemc_patch, :livestemc_storage_patch, :livestemc_xfer_patch,
+                :deadstemc_patch, :deadstemc_storage_patch, :deadstemc_xfer_patch,
+                :livecrootc_patch, :livecrootc_storage_patch, :livecrootc_xfer_patch,
+                :deadcrootc_patch, :deadcrootc_storage_patch, :deadcrootc_xfer_patch))
+            getfield(cs, f) .= Float64[10.0 * k + p for p in 1:np]; end; cs)
+    cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, 1, 1; use_matrixcn=true)
+    CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nveg)
+    fill!(cf.matrix_phtransfer_patch, 1.0e-6); fill!(cf.matrix_phturnover_patch, 0.05)
+    fill!(cf.matrix_gmtransfer_patch, 5.0e-7); fill!(cf.matrix_gmturnover_patch, 0.02)
+    fill!(cf.matrix_fitransfer_patch, 0.0);    fill!(cf.matrix_fiturnover_patch, 0.0)
+    fill!(cf.matrix_alloc_patch, 0.0);         fill!(cf.matrix_Cinput_patch, 0.0)
+    args = (; mask_soilp=trues(np), bounds_patch=1:np, ivt=ivt, woody=woody,
+            npcropmin=npcropmin, nvegcpool=nveg, counts=counts, dt=dt, num_actfirep=0)
+    pools(cs) = Float64[cs.leafc_patch; cs.frootc_patch; cs.livestemc_patch;
+                        cs.deadstemc_patch; cs.livecrootc_patch; cs.deadcrootc_patch]
+    st = CLM.CNVegMatrixSolveState()
+    csref = mkcs(); CLM.cn_veg_matrix_solve_c!(csref, cf; args...);              gold = pools(csref)
+    csb = mkcs();   CLM.cn_veg_matrix_solve_c!(csb, cf; args..., state=st)       # call 1: build
+    @test pools(csb) == gold
+    # ph + fi have in-veg transfers (nnon>0) so they memoize set_value_a!; gm is a pure
+    # diagonal (nnon=0 → the kernelized set_value_a_diag!, rebuilt each call, no memo flag).
+    @test st.init_ph && st.init_fi && st.ab_ready && st.NE_ab > 0
+    csm = mkcs();   CLM.cn_veg_matrix_solve_c!(csm, cf; args..., state=st)       # call 2: memoized
+    @test pools(csm) == gold
+end
+
 @testset "soil solver runs end-to-end in Float32 (ref-threaded workspaces)" begin
     # cn_soil_matrix! ref-threading — same as the veg smoke: confirm the Float32 soil
     # solve path executes and matches Float64 to round-off. 3-pool toy cascade
