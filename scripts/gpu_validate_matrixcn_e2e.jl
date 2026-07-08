@@ -280,6 +280,48 @@ function main(backend)
             mask_soilc=[true], begc=1, endc=1, nlevdecomp=nlev, ndecomp_pools=npool,
             ndecomp_cascade_transitions=ndct, ndecomp_cascade_outtransitions=nout, ref=dev(zeros(FT, 1, 1)), FT=FT)
         push!(checks, ("WHOLE soil-C/N solve e2e", Float64[vec(Cg); vec(Ng)], Float64[vec(Array(Cd)); vec(Array(Nd))]))
+
+        # (7e) soil FIRE path (num_actfirec=1 → the spmp_abc active-unit-filter fill).
+        firek = zeros(nc, ndpvr); for j in 1:ndpvr; firek[1, j] = 0.001j; end
+        fargs(cc) = (; hargs(cc)..., num_actfirec=1)
+        CLM.cn_soil_matrix!(CLM.CNSoilMatrixState(), cc; decomp_cpools_vr=mkC(), decomp_npools_vr=mkN(),
+            matrix_decomp_fire_k=copy(firek), fargs(cc)...)   # fire warm-up
+        msgf = CLM.CNSoilMatrixState(); Cgf = mkC(); Ngf = mkN()
+        CLM.cn_soil_matrix!(msgf, cc; decomp_cpools_vr=Cgf, decomp_npools_vr=Ngf, matrix_decomp_fire_k=copy(firek), fargs(cc)...)
+        msdf = CLM.CNSoilMatrixState()
+        msdf.init_readyAsoilc = true; msdf.init_readyAsoiln = true
+        msdf.list_ready1_fire = true; msdf.list_ready2_fire = true
+        Cdf = mvf(mkC()); Ndf = mvf(mkN())
+        CLM.cn_soil_matrix!(msdf, cc; decomp_cpools_vr=Cdf, decomp_npools_vr=Ndf, matrix_decomp_fire_k=mvf(firek),
+            Ksoil=mvf(Ksoil), tri_ma_vr=dev(zeros(FT, nc, cc.Ntri_setup)), matrix_Cinput=mvf(Cin),
+            matrix_Ninput=mvf(Nin), rf_decomp_cascade=mvf(rf), pathfrac_decomp_cascade=mvf(pf),
+            mask_soilc=[true], begc=1, endc=1, nlevdecomp=nlev, ndecomp_pools=npool,
+            ndecomp_cascade_transitions=ndct, ndecomp_cascade_outtransitions=nout, num_actfirec=1,
+            ref=dev(zeros(FT, 1, 1)), FT=FT)
+        push!(checks, ("soil-C/N FIRE solve e2e", Float64[vec(Cgf); vec(Ngf)], Float64[vec(Array(Cdf)); vec(Array(Ndf))]))
+
+        # (7f) SASU/AKX spinup: accumulate transfers + end-of-year analytic capacity (the
+        #      per-step accumulate runs on device; the dense per-column inverse gathers to host).
+        msga = CLM.CNSoilMatrixState()
+        (Colda, Nolda) = CLM.cn_soil_matrix!(msga, cc; decomp_cpools_vr=mkC(), decomp_npools_vr=mkN(), hargs(cc)...)
+        (capCg, capNg) = CLM.cn_soil_matrix_akx_accumulate!(msga, cc, Colda, Nolda;
+            in_acc=zeros(nc, ndpvr), in_nacc=zeros(nc, ndpvr), matrix_Cinput=copy(Cin), matrix_Ninput=copy(Nin),
+            decomp0_cpools_vr=mkC(), decomp0_npools_vr=mkN(), mask_soilc=[true], begc=1, endc=1,
+            nlevdecomp=nlev, ndecomp_pools=npool, first_step=true, compute_capacity=true)
+        msda = CLM.CNSoilMatrixState()
+        msda.init_readyAsoilc = true; msda.init_readyAsoiln = true
+        msda.list_ready1_nofire = true; msda.list_ready2_nofire = true
+        refa = dev(zeros(FT, 1, 1))
+        (Coldd, Noldd) = CLM.cn_soil_matrix!(msda, cc; decomp_cpools_vr=mvf(mkC()), decomp_npools_vr=mvf(mkN()),
+            Ksoil=mvf(Ksoil), tri_ma_vr=dev(zeros(FT, nc, cc.Ntri_setup)), matrix_Cinput=mvf(Cin),
+            matrix_Ninput=mvf(Nin), rf_decomp_cascade=mvf(rf), pathfrac_decomp_cascade=mvf(pf),
+            mask_soilc=[true], begc=1, endc=1, nlevdecomp=nlev, ndecomp_pools=npool,
+            ndecomp_cascade_transitions=ndct, ndecomp_cascade_outtransitions=nout, num_actfirec=0, ref=refa, FT=FT)
+        (capCd, capNd) = CLM.cn_soil_matrix_akx_accumulate!(msda, cc, Coldd, Noldd;
+            in_acc=dev(zeros(FT, nc, ndpvr)), in_nacc=dev(zeros(FT, nc, ndpvr)), matrix_Cinput=mvf(Cin), matrix_Ninput=mvf(Nin),
+            decomp0_cpools_vr=mvf(mkC()), decomp0_npools_vr=mvf(mkN()), mask_soilc=[true], begc=1, endc=1,
+            nlevdecomp=nlev, ndecomp_pools=npool, first_step=true, compute_capacity=true, ref=refa, FT=FT)
+        push!(checks, ("SASU/AKX capacity e2e", Float64[vec(capCg); vec(capNg)], Float64[vec(capCd); vec(capNd)]))
     end
 
     nfail = 0
@@ -288,7 +330,7 @@ function main(backend)
         @printf("  [%s] %-30s rel = %.3e\n", ok ? "PASS" : "FAIL", nm, dd); ok || (nfail += 1)
     end
     println()
-    println(nfail == 0 ? "  matrix-CN MATCHES CPU ON $name ($FT) — incl. WHOLE veg-C/N/iso + soil-C/N solves e2e" : "  DIVERGENCE ($nfail op(s)).")
+    println(nfail == 0 ? "  matrix-CN MATCHES CPU ON $name ($FT) — veg-C/N/iso + soil-C/N (+fire +SASU) all e2e" : "  DIVERGENCE ($nfail op(s)).")
     return nfail == 0 ? 0 : 1
 end
 

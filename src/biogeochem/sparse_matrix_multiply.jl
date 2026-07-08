@@ -873,6 +873,32 @@ entry map / structure; later calls reuse it. On the memorized path each summand
 may use its own active-unit filter (`num_actunit_*`/`filter_actunit_*`). Matches
 `SPMP_ABC`. Returns `(list_ready, NE_ABC)`.
 """
+# Sub-kernels for the per-summand active-unit-filter A+B+C fill (each summand may use its
+# own filter, so the phases run as separate launches: zero → scatter A → accumulate B → C).
+@kernel function _spmp_zero_row_kernel!(thisM, @Const(filter_u), NE::Int, this_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1
+        for i in 1:NE; thisM[ui, i] = zero(eltype(thisM)); end
+    end
+end
+@kernel function _spmp_scatter_kernel!(thisM, @Const(SM_), @Const(list), @Const(filter_u),
+        SNE::Int, this_begu::Int, S_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; us = u - S_begu + 1
+        for k in 1:SNE; thisM[ui, list[k]] = SM_[us, k]; end
+    end
+end
+@kernel function _spmp_accum_kernel!(thisM, @Const(SM_), @Const(list), @Const(filter_u),
+        SNE::Int, this_begu::Int, S_begu::Int)
+    fu = @index(Global)
+    @inbounds begin
+        u = filter_u[fu]; ui = u - this_begu + 1; us = u - S_begu + 1
+        for k in 1:SNE; c = list[k]; thisM[ui, c] = thisM[ui, c] + SM_[us, k]; end
+    end
+end
+
 # Per-unit memoized fill for A+B+C (no per-summand active-unit filter): zero, scatter A,
 # then accumulate B and C at their merged columns. Byte-identical to the host loops for the
 # common (num_actunit_*==nothing) path used by the veg solve; device M.
@@ -1042,62 +1068,19 @@ function spmp_abc!(this::SparseMatrixType, num_unit::Int, filter_u::AbstractVect
         this.RI[1:this.NE] .= RI_ABC[1:NE_ABC]
         return (list_ready, NE_ABC)
     else
-        # Per-summand active-unit filters (host-only path; not used by the veg matrix solve).
-        for i in 1:NE_ABC
-            for fu in 1:num_unit
-                u = filter_u[fu]
-                this.M[u_idx(this.begu, u), i] = 0.0
-            end
-        end
-        if num_actunit_A !== nothing
-            for i_a in 1:A.NE
-                for fu in 1:num_actunit_A
-                    u = filter_actunit_A[fu]
-                    this.M[u_idx(this.begu, u), list_A[i_a]] = A.M[u_idx(A.begu, u), i_a]
-                end
-            end
-        else
-            for i_a in 1:A.NE
-                for fu in 1:num_unit
-                    u = filter_u[fu]
-                    this.M[u_idx(this.begu, u), list_A[i_a]] = A.M[u_idx(A.begu, u), i_a]
-                end
-            end
-        end
-        if num_actunit_B !== nothing
-            for i_b in 1:B.NE
-                for fu in 1:num_actunit_B
-                    u = filter_actunit_B[fu]
-                    ui = u_idx(this.begu, u)
-                    this.M[ui, list_B[i_b]] = this.M[ui, list_B[i_b]] + B.M[u_idx(B.begu, u), i_b]
-                end
-            end
-        else
-            for i_b in 1:B.NE
-                for fu in 1:num_unit
-                    u = filter_u[fu]
-                    ui = u_idx(this.begu, u)
-                    this.M[ui, list_B[i_b]] = this.M[ui, list_B[i_b]] + B.M[u_idx(B.begu, u), i_b]
-                end
-            end
-        end
-        if num_actunit_C !== nothing
-            for i_c in 1:C.NE
-                for fu in 1:num_actunit_C
-                    u = filter_actunit_C[fu]
-                    ui = u_idx(this.begu, u)
-                    this.M[ui, list_C[i_c]] = this.M[ui, list_C[i_c]] + C.M[u_idx(C.begu, u), i_c]
-                end
-            end
-        else
-            for i_c in 1:C.NE
-                for fu in 1:num_unit
-                    u = filter_u[fu]
-                    ui = u_idx(this.begu, u)
-                    this.M[ui, list_C[i_c]] = this.M[ui, list_C[i_c]] + C.M[u_idx(C.begu, u), i_c]
-                end
-            end
-        end
+        # Per-summand active-unit filters (the soil fire path). Each phase runs on its own
+        # filter as a separate launch: zero (full) → scatter A → accumulate B → accumulate C.
+        # Byte-identical to the host loops on the CPU backend; device-capable.
+        fA = num_actunit_A === nothing ? filter_u : filter_actunit_A
+        nA = num_actunit_A === nothing ? num_unit : num_actunit_A
+        fB = num_actunit_B === nothing ? filter_u : filter_actunit_B
+        nB = num_actunit_B === nothing ? num_unit : num_actunit_B
+        fC = num_actunit_C === nothing ? filter_u : filter_actunit_C
+        nC = num_actunit_C === nothing ? num_unit : num_actunit_C
+        _launch!(_spmp_zero_row_kernel!, this.M, filter_u, NE_ABC, this.begu; ndrange = num_unit)
+        _launch!(_spmp_scatter_kernel!, this.M, A.M, list_A, fA, A.NE, this.begu, A.begu; ndrange = nA)
+        _launch!(_spmp_accum_kernel!, this.M, B.M, list_B, fB, B.NE, this.begu, B.begu; ndrange = nB)
+        _launch!(_spmp_accum_kernel!, this.M, C.M, list_C, fC, C.NE, this.begu, C.begu; ndrange = nC)
         this.NE = NE_ABC
         this.CI[1:this.NE] .= CI_ABC[1:NE_ABC]
         this.RI[1:this.NE] .= RI_ABC[1:NE_ABC]

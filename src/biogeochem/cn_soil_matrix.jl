@@ -595,6 +595,28 @@ end
     end
 end
 
+# SASU/AKX spinup: accumulate the per-step input + reset the transfer accumulators.
+@kernel function _soil_akx_inacc_kernel!(in_acc, in_nacc, @Const(Cin), @Const(Nin),
+        @Const(filter_c), ndpvr::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for j in 1:ndpvr
+            in_acc[ui, j]  = in_acc[ui, j]  + Cin[ui, j]
+            in_nacc[ui, j] = in_nacc[ui, j] + Nin[ui, j]
+        end
+    end
+end
+@kernel function _soil_akx_reset_kernel!(Mc, Mn, @Const(filter_c), NE::Int, this_begc::Int)
+    fu = @index(Global)
+    @inbounds begin
+        c = filter_c[fu]; ui = c - this_begc + 1
+        for jj in 1:NE
+            Mc[ui, jj] = zero(eltype(Mc)); Mn[ui, jj] = zero(eltype(Mn))
+        end
+    end
+end
+
 # --------------------------------------------------------------------------
 # cn_soil_matrix! — advance the soil C/N pools by the matrix solve for one step.
 #
@@ -665,6 +687,8 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     list_Asoilc = _iv(cc.list_Asoilc); RI_a = _iv(cc.RI_a); CI_a = _iv(cc.CI_a)
     list_Asoiln = _iv(cc.list_Asoiln); RI_na = _iv(cc.RI_na); CI_na = _iv(cc.CI_na)
     list_AK_AKV = _iv(cc.list_AK_AKV); list_V_AKV = _iv(cc.list_V_AKV)
+    list_AK_AKVfire = _iv(cc.list_AK_AKVfire); list_V_AKVfire = _iv(cc.list_V_AKVfire)
+    list_fire_AKVfire = _iv(cc.list_fire_AKVfire)
     RI_AKallc = _iv(cc.RI_AKallsoilc); CI_AKallc = _iv(cc.CI_AKallsoilc)
     RI_AKalln = _iv(cc.RI_AKallsoiln); CI_AKalln = _iv(cc.CI_AKallsoiln)
 
@@ -737,13 +761,13 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
         filter_actfirec = filter_soilc  # caller scopes fire via matrix_decomp_fire_k zeros
         (ms.list_ready1_fire, cc.NE_AKallsoilc) = spmp_abc!(ms.AKallsoilc, num_soilc, filter_soilc,
             ms.AKsoilc, ms.AVsoil, ms.AKfiresoil, ms.list_ready1_fire;
-            list_A=cc.list_AK_AKVfire, list_B=cc.list_V_AKVfire, list_C=cc.list_fire_AKVfire,
-            NE_ABC=cc.NE_AKallsoilc, RI_ABC=cc.RI_AKallsoilc, CI_ABC=cc.CI_AKallsoilc,
+            list_A=list_AK_AKVfire, list_B=list_V_AKVfire, list_C=list_fire_AKVfire,
+            NE_ABC=cc.NE_AKallsoilc, RI_ABC=RI_AKallc, CI_ABC=CI_AKallc,
             num_actunit_C=num_actfirec, filter_actunit_C=filter_actfirec)
         (ms.list_ready2_fire, cc.NE_AKallsoiln) = spmp_abc!(ms.AKallsoiln, num_soilc, filter_soilc,
             ms.AKsoiln, ms.AVsoil, ms.AKfiresoil, ms.list_ready2_fire;
-            list_A=cc.list_AK_AKVfire, list_B=cc.list_V_AKVfire, list_C=cc.list_fire_AKVfire,
-            NE_ABC=cc.NE_AKallsoiln, RI_ABC=cc.RI_AKallsoiln, CI_ABC=cc.CI_AKallsoiln,
+            list_A=list_AK_AKVfire, list_B=list_V_AKVfire, list_C=list_fire_AKVfire,
+            NE_ABC=cc.NE_AKallsoiln, RI_ABC=RI_AKalln, CI_ABC=CI_AKalln,
             num_actunit_C=num_actfirec, filter_actunit_C=filter_actfirec)
     end
 
@@ -809,19 +833,18 @@ function cn_soil_matrix_akx_accumulate!(ms::CNSoilMatrixState, cc,
         decomp0_npools_vr::AbstractArray{<:Real,3},
         mask_soilc::AbstractVector{Bool}, begc::Int, endc::Int,
         nlevdecomp::Int, ndecomp_pools::Int,
-        first_step::Bool=false, compute_capacity::Bool=false)
+        first_step::Bool=false, compute_capacity::Bool=false,
+        ref=nothing, FT::Type=Float64)
 
     ndecomp_pools_vr = ndecomp_pools * nlevdecomp
-    filter_soilc = [c for c in begc:endc if mask_soilc[c]]
-    num_soilc = length(filter_soilc)
+    filter_host = [c for c in begc:endc if mask_soilc[c]]
+    num_soilc = length(filter_host)
+    filter_soilc = _backend_vec(ref, filter_host)
     epsi = 1.0e-8
 
     # Accumulate input.
-    for j in 1:(ndecomp_pools * nlevdecomp), c in filter_soilc
-        ui = c - begc + 1
-        in_acc[ui, j]  += matrix_Cinput[ui, j]
-        in_nacc[ui, j] += matrix_Ninput[ui, j]
-    end
+    _launch!(_soil_akx_inacc_kernel!, in_acc, in_nacc, matrix_Cinput, matrix_Ninput,
+             filter_soilc, ndecomp_pools_vr, begc; ndrange = num_soilc)
 
     # AKallsoilc/n → actual transfers (× X_old).
     set_value_dm!(ms.Xdiagsoil, begc, endc, num_soilc, filter_soilc, Cinter_old)
@@ -831,8 +854,8 @@ function cn_soil_matrix_akx_accumulate!(ms::CNSoilMatrixState, cc,
 
     # Accumulate transfers AKXcacc += AKallsoilc ; AKXnacc += AKallsoiln.
     if first_step || !is_alloc_sm(ms.AKXcacc)
-        is_alloc_sm(ms.AKXcacc) || init_sm!(ms.AKXcacc, ndecomp_pools_vr, begc, endc)
-        is_alloc_sm(ms.AKXnacc) || init_sm!(ms.AKXnacc, ndecomp_pools_vr, begc, endc)
+        is_alloc_sm(ms.AKXcacc) || init_sm!(ms.AKXcacc, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
+        is_alloc_sm(ms.AKXnacc) || init_sm!(ms.AKXnacc, ndecomp_pools_vr, begc, endc; ref=ref, FT=FT)
     end
     if is_values_set_sm(ms.AKXcacc)
         spmp_b_acc!(ms.AKXcacc, num_soilc, filter_soilc, ms.AKallsoilc)
@@ -849,22 +872,28 @@ function cn_soil_matrix_akx_accumulate!(ms::CNSoilMatrixState, cc,
         return nothing
     end
 
-    # ----- End-of-SASU-year: compute capacity X* = −A^{-1} I. -----
+    # ----- End-of-SASU-year: compute capacity X* = −A^{-1} I. This is a per-column DENSE
+    # matrix inverse — GPU-hostile and run once per SASU year — so it is done on the host:
+    # the (device or host) accumulators are gathered with `Array` first (a no-op copy on the
+    # host path, so byte-identical). -----
     n_all_entries = cc.n_all_entries
     all_i = cc.all_i
     all_j = cc.all_j
-    soilmatrixc_cap = zeros(Float64, length(filter_soilc), ndecomp_pools_vr)
-    soilmatrixn_cap = zeros(Float64, length(filter_soilc), ndecomp_pools_vr)
+    Mc = Array(ms.AKXcacc.M); Mn = Array(ms.AKXnacc.M)
+    iac = Array(in_acc); ina = Array(in_nacc)
+    d0c = Array(decomp0_cpools_vr); d0n = Array(decomp0_npools_vr)
+    soilmatrixc_cap = zeros(Float64, num_soilc, ndecomp_pools_vr)
+    soilmatrixn_cap = zeros(Float64, num_soilc, ndecomp_pools_vr)
 
-    for (uf, c) in enumerate(filter_soilc)
+    for (uf, c) in enumerate(filter_host)
         ui = c - begc + 1
         tran_acc  = zeros(Float64, ndecomp_pools_vr, ndecomp_pools_vr)
         tran_nacc = zeros(Float64, ndecomp_pools_vr, ndecomp_pools_vr)
         for jj in 1:n_all_entries
             j_lev    = mod(all_j[jj] - 1, nlevdecomp) + 1
             j_decomp = div(all_j[jj] - j_lev, nlevdecomp) + 1
-            tran_acc[all_i[jj], all_j[jj]]  = ms.AKXcacc.M[ui, jj] / decomp0_cpools_vr[c, j_lev, j_decomp]
-            tran_nacc[all_i[jj], all_j[jj]] = ms.AKXnacc.M[ui, jj] / decomp0_npools_vr[c, j_lev, j_decomp]
+            tran_acc[all_i[jj], all_j[jj]]  = Float64(Mc[ui, jj]) / d0c[c, j_lev, j_decomp]
+            tran_nacc[all_i[jj], all_j[jj]] = Float64(Mn[ui, jj]) / d0n[c, j_lev, j_decomp]
         end
         for i in 1:ndecomp_pools_vr
             if abs(tran_acc[i, i]) <= epsi
@@ -876,8 +905,8 @@ function cn_soil_matrix_akx_accumulate!(ms::CNSoilMatrixState, cc,
         end
         AKinv  = inv(tran_acc)
         AKinvn = inv(tran_nacc)
-        soilmatrixc_cap[uf, :] = -(AKinv  * in_acc[ui, 1:ndecomp_pools_vr])
-        soilmatrixn_cap[uf, :] = -(AKinvn * in_nacc[ui, 1:ndecomp_pools_vr])
+        soilmatrixc_cap[uf, :] = -(AKinv  * Float64.(iac[ui, 1:ndecomp_pools_vr]))
+        soilmatrixn_cap[uf, :] = -(AKinvn * Float64.(ina[ui, 1:ndecomp_pools_vr]))
         for k in 1:ndecomp_pools_vr
             soilmatrixc_cap[uf, k] < 0 && (soilmatrixc_cap[uf, k] = 0.0)
             soilmatrixn_cap[uf, k] < 0 && (soilmatrixn_cap[uf, k] = 0.0)
@@ -885,13 +914,9 @@ function cn_soil_matrix_akx_accumulate!(ms::CNSoilMatrixState, cc,
     end
 
     # Reset accumulators.
-    for jj in 1:n_all_entries, c in filter_soilc
-        ui = c - begc + 1
-        ms.AKXcacc.M[ui, jj] = 0.0
-        ms.AKXnacc.M[ui, jj] = 0.0
-    end
-    fill!(in_acc, 0.0)
-    fill!(in_nacc, 0.0)
+    _launch!(_soil_akx_reset_kernel!, ms.AKXcacc.M, ms.AKXnacc.M, filter_soilc, n_all_entries, begc; ndrange = num_soilc)
+    fill!(in_acc, zero(eltype(in_acc)))
+    fill!(in_nacc, zero(eltype(in_nacc)))
 
     return (soilmatrixc_cap, soilmatrixn_cap)
 end
