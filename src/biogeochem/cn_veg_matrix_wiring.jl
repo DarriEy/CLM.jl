@@ -282,6 +282,85 @@ function cn_veg_matrix_accumulate_gm_c!(cf::CNVegCarbonFluxData,
     return nothing
 end
 
+# ==========================================================================
+# GPU: per-patch kernelization of the veg-C phenology accumulate. The reg() calls
+# are a per-patch sequential accumulation into matrix_phtransfer/phturnover — one
+# KA thread per patch (the register order is preserved in-thread, so the shared
+# donor turnover accumulation + the matrixcheck cap stay byte-identical). The ~17
+# flux inputs + ~16 donor-pool inputs are bundled into ONE device-view struct arg
+# (collapses to a single Metal buffer), mirroring the BGC-module kernelization.
+# ==========================================================================
+
+# One transfer register: rate = flux/donor (0 if donor<=0), then (matrixcheck cap)
+# turnover[p,d] += applied·dt ; transfer[p,idx] += applied. `d` is the donor pool
+# column (== matrix_phtransfer_doner_patch[idx] by topology construction).
+@inline function _mat_ph_reg!(pht, phtn, p::Int, idx::Int, flux, d::Int, donorval, dt, matrixcheck::Bool)
+    idx == 0 && return nothing
+    rate = donorval > 0 ? flux / donorval : zero(flux)
+    if matrixcheck && (phtn[p, d] + rate * dt >= one(rate))
+        applied = max(zero(rate), (one(rate) - phtn[p, d]) / dt)
+    else
+        applied = rate
+    end
+    @inbounds phtn[p, d]   = phtn[p, d]   + applied * dt
+    @inbounds pht[p, idx]  = pht[p, idx]  + applied
+    return nothing
+end
+
+# Output bundle (2D accumulators) + input bundle (1D flux + donor-pool fields;
+# crop grain fields are 2D → separate param). One kernel arg each.
+Base.@kwdef struct _MatPhCOut{M}
+    pht::M; phtn::M
+end
+Adapt.@adapt_structure _MatPhCOut
+Base.@kwdef struct _MatPhCIn{V,M}
+    f_leafc_st::V; f_leafc_xf::V; f_frootc_st::V; f_frootc_xf::V
+    f_livestemc_st::V; f_livestemc_xf::V; f_deadstemc_st::V; f_deadstemc_xf::V
+    f_livecrootc_st::V; f_livecrootc_xf::V; f_deadcrootc_st::V; f_deadcrootc_xf::V
+    f_livestem_dead::V; f_livecroot_dead::V
+    f_leaf_lit::V; f_froot_lit::V; f_livestem_lit::V
+    p_leafc_st::V; p_leafc_xf::V; p_frootc_st::V; p_frootc_xf::V
+    p_livestemc_st::V; p_livestemc_xf::V; p_deadstemc_st::V; p_deadstemc_xf::V
+    p_livecrootc_st::V; p_livecrootc_xf::V; p_deadcrootc_st::V; p_deadcrootc_xf::V
+    p_livestemc::V; p_livecrootc::V; p_leafc::V; p_frootc::V
+    grain_food::M; grain_seed::M; p_repro::M
+end
+Adapt.@adapt_structure _MatPhCIn
+
+# Scalar bundle: the 18 topology entry indices + flags. isbits → materializes on Metal.
+Base.@kwdef struct _MatPhCIdx
+    i1::Int; i2::Int; i3::Int; i4::Int; i5::Int; i6::Int; i7::Int; i8::Int; i9::Int
+    i10::Int; i11::Int; i12::Int; i13::Int; i14::Int; i15::Int; i16::Int; i17::Int; i18::Int
+    use_crop::Bool; matrixcheck::Bool
+end
+
+@kernel function _mat_ph_c_kernel!(out::_MatPhCOut, in::_MatPhCIn, @Const(mask), ix::_MatPhCIdx, dt, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        pht = out.pht; phtn = out.phtn; mc = ix.matrixcheck
+        _mat_ph_reg!(pht, phtn, p, ix.i1,  in.f_leafc_st[p],      ILEAF_ST,      in.p_leafc_st[p],      dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i2,  in.f_leafc_xf[p],      ILEAF_XF,      in.p_leafc_xf[p],      dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i3,  in.f_frootc_st[p],     IFROOT_ST,     in.p_frootc_st[p],     dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i4,  in.f_frootc_xf[p],     IFROOT_XF,     in.p_frootc_xf[p],     dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i5,  in.f_livestemc_st[p],  ILIVESTEM_ST,  in.p_livestemc_st[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i6,  in.f_livestemc_xf[p],  ILIVESTEM_XF,  in.p_livestemc_xf[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i7,  in.f_deadstemc_st[p],  IDEADSTEM_ST,  in.p_deadstemc_st[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i8,  in.f_deadstemc_xf[p],  IDEADSTEM_XF,  in.p_deadstemc_xf[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i9,  in.f_livecrootc_st[p], ILIVECROOT_ST, in.p_livecrootc_st[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i10, in.f_livecrootc_xf[p], ILIVECROOT_XF, in.p_livecrootc_xf[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i11, in.f_deadcrootc_st[p], IDEADCROOT_ST, in.p_deadcrootc_st[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i12, in.f_deadcrootc_xf[p], IDEADCROOT_XF, in.p_deadcrootc_xf[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i13, in.f_livestem_dead[p], ILIVESTEM,     in.p_livestemc[p],     dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i14, in.f_livecroot_dead[p], ILIVECROOT,   in.p_livecrootc[p],    dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i15, in.f_leaf_lit[p],      ILEAF,         in.p_leafc[p],         dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i16, in.f_froot_lit[p],     IFROOT,        in.p_frootc[p],        dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.i17, in.f_livestem_lit[p],  ILIVESTEM,     in.p_livestemc[p],     dt, mc)
+        if ix.use_crop
+            _mat_ph_reg!(pht, phtn, p, ix.i18, in.grain_food[p, 1] + in.grain_seed[p, 1], IGRAIN, in.p_repro[p, 1], dt, mc)
+        end
+    end
+end
+
 """
     cn_veg_matrix_accumulate_ph_c!(cf, cs, mask_soilp, bounds_patch;
                                     dt, matrixcheck=false)
@@ -299,40 +378,41 @@ function cn_veg_matrix_accumulate_ph_c!(cf::CNVegCarbonFluxData,
         bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
         use_crop::Bool = false)
 
-    fill!(cf.matrix_phtransfer_patch, 0.0)
-    fill!(cf.matrix_phturnover_patch, 0.0)
+    fill!(cf.matrix_phtransfer_patch, zero(eltype(cf.matrix_phtransfer_patch)))
+    fill!(cf.matrix_phturnover_patch, zero(eltype(cf.matrix_phturnover_patch)))
 
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        # register(index, flux, donor_pool_index)
-        reg(idx, flux, d) = begin
-            donor = _vegc_pool_val(cs, d, p)
-            rate = donor > 0.0 ? flux / donor : 0.0
-            matrix_update_phc!(cf, p, idx, rate, dt; matrixcheck=matrixcheck, acc=true)
-        end
-        reg(cf.ileafst_to_ileafxf_ph,        cf.leafc_storage_to_xfer_patch[p],      ILEAF_ST)
-        reg(cf.ileafxf_to_ileaf_ph,          cf.leafc_xfer_to_leafc_patch[p],        ILEAF_XF)
-        reg(cf.ifrootst_to_ifrootxf_ph,      cf.frootc_storage_to_xfer_patch[p],     IFROOT_ST)
-        reg(cf.ifrootxf_to_ifroot_ph,        cf.frootc_xfer_to_frootc_patch[p],      IFROOT_XF)
-        reg(cf.ilivestemst_to_ilivestemxf_ph, cf.livestemc_storage_to_xfer_patch[p], ILIVESTEM_ST)
-        reg(cf.ilivestemxf_to_ilivestem_ph,  cf.livestemc_xfer_to_livestemc_patch[p], ILIVESTEM_XF)
-        reg(cf.ideadstemst_to_ideadstemxf_ph, cf.deadstemc_storage_to_xfer_patch[p], IDEADSTEM_ST)
-        reg(cf.ideadstemxf_to_ideadstem_ph,  cf.deadstemc_xfer_to_deadstemc_patch[p], IDEADSTEM_XF)
-        reg(cf.ilivecrootst_to_ilivecrootxf_ph, cf.livecrootc_storage_to_xfer_patch[p], ILIVECROOT_ST)
-        reg(cf.ilivecrootxf_to_ilivecroot_ph, cf.livecrootc_xfer_to_livecrootc_patch[p], ILIVECROOT_XF)
-        reg(cf.ideadcrootst_to_ideadcrootxf_ph, cf.deadcrootc_storage_to_xfer_patch[p], IDEADCROOT_ST)
-        reg(cf.ideadcrootxf_to_ideadcroot_ph, cf.deadcrootc_xfer_to_deadcrootc_patch[p], IDEADCROOT_XF)
-        reg(cf.ilivestem_to_ideadstem_ph,    cf.livestemc_to_deadstemc_patch[p],     ILIVESTEM)
-        reg(cf.ilivecroot_to_ideadcroot_ph,  cf.livecrootc_to_deadcrootc_patch[p],   ILIVECROOT)
-        reg(cf.ileaf_to_iout_ph,             cf.leafc_to_litter_patch[p],            ILEAF)
-        reg(cf.ifroot_to_iout_ph,            cf.frootc_to_litter_patch[p],           IFROOT)
-        reg(cf.ilivestem_to_iout_ph,         cf.livestemc_to_litter_patch[p],        ILIVESTEM)
-        if use_crop
-            # grain harvest (grain -> outside veg): food + seed.
-            reg(cf.igrain_to_iout_ph,
-                cf.repr_grainc_to_food_patch[p, 1] + cf.repr_grainc_to_seed_patch[p, 1], IGRAIN)
-        end
-    end
+    out = _MatPhCOut(; pht=cf.matrix_phtransfer_patch, phtn=cf.matrix_phturnover_patch)
+    in_ = _MatPhCIn(;
+        f_leafc_st=cf.leafc_storage_to_xfer_patch, f_leafc_xf=cf.leafc_xfer_to_leafc_patch,
+        f_frootc_st=cf.frootc_storage_to_xfer_patch, f_frootc_xf=cf.frootc_xfer_to_frootc_patch,
+        f_livestemc_st=cf.livestemc_storage_to_xfer_patch, f_livestemc_xf=cf.livestemc_xfer_to_livestemc_patch,
+        f_deadstemc_st=cf.deadstemc_storage_to_xfer_patch, f_deadstemc_xf=cf.deadstemc_xfer_to_deadstemc_patch,
+        f_livecrootc_st=cf.livecrootc_storage_to_xfer_patch, f_livecrootc_xf=cf.livecrootc_xfer_to_livecrootc_patch,
+        f_deadcrootc_st=cf.deadcrootc_storage_to_xfer_patch, f_deadcrootc_xf=cf.deadcrootc_xfer_to_deadcrootc_patch,
+        f_livestem_dead=cf.livestemc_to_deadstemc_patch, f_livecroot_dead=cf.livecrootc_to_deadcrootc_patch,
+        f_leaf_lit=cf.leafc_to_litter_patch, f_froot_lit=cf.frootc_to_litter_patch, f_livestem_lit=cf.livestemc_to_litter_patch,
+        p_leafc_st=cs.leafc_storage_patch, p_leafc_xf=cs.leafc_xfer_patch,
+        p_frootc_st=cs.frootc_storage_patch, p_frootc_xf=cs.frootc_xfer_patch,
+        p_livestemc_st=cs.livestemc_storage_patch, p_livestemc_xf=cs.livestemc_xfer_patch,
+        p_deadstemc_st=cs.deadstemc_storage_patch, p_deadstemc_xf=cs.deadstemc_xfer_patch,
+        p_livecrootc_st=cs.livecrootc_storage_patch, p_livecrootc_xf=cs.livecrootc_xfer_patch,
+        p_deadcrootc_st=cs.deadcrootc_storage_patch, p_deadcrootc_xf=cs.deadcrootc_xfer_patch,
+        p_livestemc=cs.livestemc_patch, p_livecrootc=cs.livecrootc_patch,
+        p_leafc=cs.leafc_patch, p_frootc=cs.frootc_patch,
+        grain_food=cf.repr_grainc_to_food_patch, grain_seed=cf.repr_grainc_to_seed_patch, p_repro=cs.reproductivec_patch)
+    ix = _MatPhCIdx(;
+        i1=cf.ileafst_to_ileafxf_ph, i2=cf.ileafxf_to_ileaf_ph, i3=cf.ifrootst_to_ifrootxf_ph,
+        i4=cf.ifrootxf_to_ifroot_ph, i5=cf.ilivestemst_to_ilivestemxf_ph, i6=cf.ilivestemxf_to_ilivestem_ph,
+        i7=cf.ideadstemst_to_ideadstemxf_ph, i8=cf.ideadstemxf_to_ideadstem_ph,
+        i9=cf.ilivecrootst_to_ilivecrootxf_ph, i10=cf.ilivecrootxf_to_ilivecroot_ph,
+        i11=cf.ideadcrootst_to_ideadcrootxf_ph, i12=cf.ideadcrootxf_to_ideadcroot_ph,
+        i13=cf.ilivestem_to_ideadstem_ph, i14=cf.ilivecroot_to_ideadcroot_ph,
+        i15=cf.ileaf_to_iout_ph, i16=cf.ifroot_to_iout_ph, i17=cf.ilivestem_to_iout_ph,
+        i18=cf.igrain_to_iout_ph, use_crop=use_crop, matrixcheck=matrixcheck)
+    backend = _kernel_backend(cf.matrix_phtransfer_patch)
+    _mat_ph_c_kernel!(backend)(out, in_, mask_soilp, ix, eltype(cf.matrix_phtransfer_patch)(dt),
+        first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
 

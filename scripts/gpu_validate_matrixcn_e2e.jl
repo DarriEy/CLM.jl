@@ -324,6 +324,40 @@ function main(backend)
         push!(checks, ("SASU/AKX capacity e2e", Float64[vec(capCg); vec(capNg)], Float64[vec(capCd); vec(capNd)]))
     end
 
+    # (8) WIRING: veg-C phenology accumulate (cn_veg_matrix_accumulate_ph_c!) — the device-
+    #     view-bundle per-patch kernel that feeds the solve. First of the matrix-wiring layer.
+    let np = 4, nvp = CLM.NVEGPOOL_NATVEG
+        mkcsp() = begin
+            cs = CLM.CNVegCarbonStateData(); CLM.cnveg_carbon_state_init!(cs, np, 1, 1; use_matrixcn=false, nrepr=1)
+            for (k, f) in enumerate((:leafc_patch, :leafc_storage_patch, :leafc_xfer_patch, :frootc_patch,
+                    :frootc_storage_patch, :frootc_xfer_patch, :livestemc_patch, :livestemc_storage_patch,
+                    :livestemc_xfer_patch, :deadstemc_patch, :deadstemc_storage_patch, :deadstemc_xfer_patch,
+                    :livecrootc_patch, :livecrootc_storage_patch, :livecrootc_xfer_patch, :deadcrootc_patch,
+                    :deadcrootc_storage_patch, :deadcrootc_xfer_patch))
+                getfield(cs, f) .= Float64[10.0k + p for p in 1:np]
+            end; cs
+        end
+        mkcfp() = begin
+            cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, 1, 1; use_matrixcn=true)
+            CLM.cn_veg_matrix_c_topology!(cf; use_crop=false, nvegcpool=nvp)
+            for f in (:leafc_storage_to_xfer_patch, :leafc_xfer_to_leafc_patch, :frootc_storage_to_xfer_patch,
+                      :frootc_xfer_to_frootc_patch, :livestemc_storage_to_xfer_patch, :livestemc_xfer_to_livestemc_patch,
+                      :deadstemc_storage_to_xfer_patch, :deadstemc_xfer_to_deadstemc_patch, :livecrootc_storage_to_xfer_patch,
+                      :livecrootc_xfer_to_livecrootc_patch, :deadcrootc_storage_to_xfer_patch, :deadcrootc_xfer_to_deadcrootc_patch,
+                      :livestemc_to_deadstemc_patch, :livecrootc_to_deadcrootc_patch, :leafc_to_litter_patch,
+                      :frootc_to_litter_patch, :livestemc_to_litter_patch)
+                getfield(cf, f) .= 0.001
+            end; cf
+        end
+        mvf(x) = CLM.Adapt.adapt(DevF32(dev), x)
+        csh = mkcsp(); cfh = mkcfp()
+        CLM.cn_veg_matrix_accumulate_ph_c!(cfh, csh, trues(np), 1:np; dt=1800.0, use_crop=false)
+        csd = mvf(mkcsp()); cfd = mvf(mkcfp())
+        CLM.cn_veg_matrix_accumulate_ph_c!(cfd, csd, dev(trues(np)), 1:np; dt=1800.0, use_crop=false)
+        push!(checks, ("wiring ph_c accumulate", vec(cfh.matrix_phtransfer_patch), vec(Array(cfd.matrix_phtransfer_patch))))
+        push!(checks, ("wiring ph_c turnover", vec(cfh.matrix_phturnover_patch), vec(Array(cfd.matrix_phturnover_patch))))
+    end
+
     nfail = 0
     for (nm, cpu, gpu) in checks
         dd = reldiff(cpu, gpu); ok = dd < 1f-3
