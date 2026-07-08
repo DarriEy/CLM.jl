@@ -411,6 +411,36 @@ function main(backend)
         nwire!("fin", CLM.cn_veg_matrix_accumulate_fin!, :matrix_nfitransfer_patch, :matrix_nfiturnover_patch)
     end
 
+    # (10) WIRING: soil B-input accumulate (cn_soil_matrix_input_accumulate!) + fire-k derivation.
+    let nc = 2, np = 2, ng = 1, nlev = 2, npool = 4, ilmin = 1, ilmax = 3, icwd = 4, ndpvr = 8
+        mvf(x) = CLM.Adapt.adapt(DevF32(dev), x)
+        mkcf() = begin
+            cf = CLM.CNVegCarbonFluxData(); CLM.cnveg_carbon_flux_init!(cf, np, nc, ng; nrepr=1, nlevdecomp_full=nlev, ndecomp_pools=npool)
+            for s in CLM._SOILC_LITR_IN; getfield(cf, s)[:, :, 1:ilmax] .= 1e-3; end
+            for s in CLM._SOILC_CWD_IN; getfield(cf, s) .= 5e-4; end; cf
+        end
+        mknf() = begin
+            nf = CLM.CNVegNitrogenFluxData(); CLM.cnveg_nitrogen_flux_init!(nf, np, nc, ng; nrepr=1, nlevdecomp_full=nlev, ndecomp_pools=npool, i_litr_max=ilmax)
+            for s in CLM._SOILN_LITR_IN; getfield(nf, s)[:, :, 1:ilmax] .= 4e-4; end
+            for s in CLM._SOILN_CWD_IN; getfield(nf, s) .= 2e-4; end; nf
+        end
+        Ch = zeros(nc, ndpvr); Nh = zeros(nc, ndpvr)
+        CLM.cn_soil_matrix_input_accumulate!(Ch, Nh, mkcf(), mknf(); mask_soilc=trues(nc), bounds_col=1:nc,
+            nlevdecomp=nlev, i_litr_min=ilmin, i_litr_max=ilmax, i_cwd=icwd, dt=1800.0)
+        Cd = dev(zeros(FT, nc, ndpvr)); Nd = dev(zeros(FT, nc, ndpvr))
+        CLM.cn_soil_matrix_input_accumulate!(Cd, Nd, mvf(mkcf()), mvf(mknf()); mask_soilc=dev(trues(nc)), bounds_col=1:nc,
+            nlevdecomp=nlev, i_litr_min=ilmin, i_litr_max=ilmax, i_cwd=icwd, dt=1800.0)
+        push!(checks, ("wiring soil-input C", vec(Ch), vec(Array(Cd))))
+        push!(checks, ("wiring soil-input N", vec(Nh), vec(Array(Nd))))
+        # fire-k
+        fflux = rand(nc, nlev, npool) .* 1e-4; Xc = rand(nc, nlev, npool) .+ 1.0
+        fkh = zeros(nc, ndpvr)
+        CLM._launch!(CLM._soil_firek_kernel!, fkh, fflux, Xc, trues(nc), nlev, npool, 1, 1800.0, 1, nc; ndrange=nc)
+        fkd = dev(zeros(FT, nc, ndpvr))
+        CLM._launch!(CLM._soil_firek_kernel!, fkd, mvf(fflux), mvf(Xc), dev(trues(nc)), nlev, npool, 1, FT(1800.0), 1, nc; ndrange=nc)
+        push!(checks, ("wiring soil-fire-k", vec(fkh), vec(Array(fkd))))
+    end
+
     nfail = 0
     for (nm, cpu, gpu) in checks
         dd = reldiff(cpu, gpu); ok = dd < 1f-3

@@ -258,41 +258,71 @@ const _SOILN_CWD_IN  = (:gap_mortality_n_to_cwdn_col, :fire_mortality_n_to_cwdn_
 const _SOILN_LITR_IN_TR = (:harvest_n_to_litr_n_col, :gru_n_to_litr_n_col)
 const _SOILN_CWD_IN_TR  = (:harvest_n_to_cwdn_col, :gru_n_to_cwdn_col)
 
+# Device-view bundles for the soil B-input accumulate (litter 3D + CWD 2D veg-flux fields).
+Base.@kwdef struct _SoilInOut{M}
+    cin::M; nin::M
+end
+Adapt.@adapt_structure _SoilInOut
+Base.@kwdef struct _SoilInIn{M3,M2}
+    lc1::M3; lc2::M3; lc3::M3; lc4::M3; lc5::M3     # litter C (phenology/gap/fire + harvest/gru)
+    ln1::M3; ln2::M3; ln3::M3; ln4::M3; ln5::M3     # litter N
+    wc1::M2; wc2::M2; wc3::M2; wc4::M2              # cwd C (gap/fire + harvest/gru)
+    wn1::M2; wn2::M2; wn3::M2; wn4::M2              # cwd N
+end
+Adapt.@adapt_structure _SoilInIn
+
+# One thread per column; sums the litter + CWD contributions into cin/nin (pre-zeroed).
+# Byte-identical to the host loops (each [c,vr] written once). transient adds harvest/gru.
+@kernel function _soil_input_kernel!(out::_SoilInOut, in::_SoilInIn, @Const(mask),
+        nlev::Int, ilmin::Int, ilmax::Int, icwd::Int, transient::Bool, dt, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        cin = out.cin; nin = out.nin
+        for j in 1:nlev
+            for i in ilmin:ilmax
+                vr = j + (i - 1) * nlev
+                cc = in.lc1[c, j, i] + in.lc2[c, j, i] + in.lc3[c, j, i]
+                nn = in.ln1[c, j, i] + in.ln2[c, j, i] + in.ln3[c, j, i]
+                if transient
+                    cc += in.lc4[c, j, i] + in.lc5[c, j, i]
+                    nn += in.ln4[c, j, i] + in.ln5[c, j, i]
+                end
+                cin[c, vr] = cin[c, vr] + cc * dt
+                nin[c, vr] = nin[c, vr] + nn * dt
+            end
+            vrc = j + (icwd - 1) * nlev
+            cc = in.wc1[c, j] + in.wc2[c, j]; nn = in.wn1[c, j] + in.wn2[c, j]
+            if transient
+                cc += in.wc3[c, j] + in.wc4[c, j]; nn += in.wn3[c, j] + in.wn4[c, j]
+            end
+            cin[c, vrc] = cin[c, vrc] + cc * dt
+            nin[c, vrc] = nin[c, vrc] + nn * dt
+        end
+    end
+end
+
 function cn_soil_matrix_input_accumulate!(
         matrix_Cinput::AbstractMatrix{<:Real}, matrix_Ninput::AbstractMatrix{<:Real},
         cf_veg, nf_veg;
         mask_soilc::AbstractVector{Bool}, bounds_col::UnitRange{Int},
         nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
         dt::Real, transient_landcover::Bool = false)
-    fill!(matrix_Cinput, 0.0)
-    fill!(matrix_Ninput, 0.0)
-    dt = Float64(dt)
-    litr_c = transient_landcover ? (_SOILC_LITR_IN..., _SOILC_LITR_IN_TR...) : _SOILC_LITR_IN
-    cwd_c  = transient_landcover ? (_SOILC_CWD_IN...,  _SOILC_CWD_IN_TR...)  : _SOILC_CWD_IN
-    litr_n = transient_landcover ? (_SOILN_LITR_IN..., _SOILN_LITR_IN_TR...) : _SOILN_LITR_IN
-    cwd_n  = transient_landcover ? (_SOILN_CWD_IN...,  _SOILN_CWD_IN_TR...)  : _SOILN_CWD_IN
-    icwd = i_cwd
-    for c in bounds_col
-        mask_soilc[c] || continue
-        for j in 1:nlevdecomp
-            # litter pools (indexed by pool i)
-            for i in i_litr_min:i_litr_max
-                vr = j + (i - 1) * nlevdecomp
-                cin = 0.0; nin = 0.0
-                for f in litr_c; cin += getfield(cf_veg, f)[c, j, i]; end
-                for f in litr_n; nin += getfield(nf_veg, f)[c, j, i]; end
-                matrix_Cinput[c, vr] += cin * dt
-                matrix_Ninput[c, vr] += nin * dt
-            end
-            # CWD pool (level-only fluxes)
-            vrc = j + (icwd - 1) * nlevdecomp
-            cin = 0.0; nin = 0.0
-            for f in cwd_c; cin += getfield(cf_veg, f)[c, j]; end
-            for f in cwd_n; nin += getfield(nf_veg, f)[c, j]; end
-            matrix_Cinput[c, vrc] += cin * dt
-            matrix_Ninput[c, vrc] += nin * dt
-        end
-    end
+    fill!(matrix_Cinput, zero(eltype(matrix_Cinput)))
+    fill!(matrix_Ninput, zero(eltype(matrix_Ninput)))
+    cf(s) = getfield(cf_veg, s); nf(s) = getfield(nf_veg, s)
+    out = _SoilInOut(; cin=matrix_Cinput, nin=matrix_Ninput)
+    in_ = _SoilInIn(;
+        lc1=cf(_SOILC_LITR_IN[1]), lc2=cf(_SOILC_LITR_IN[2]), lc3=cf(_SOILC_LITR_IN[3]),
+        lc4=cf(_SOILC_LITR_IN_TR[1]), lc5=cf(_SOILC_LITR_IN_TR[2]),
+        ln1=nf(_SOILN_LITR_IN[1]), ln2=nf(_SOILN_LITR_IN[2]), ln3=nf(_SOILN_LITR_IN[3]),
+        ln4=nf(_SOILN_LITR_IN_TR[1]), ln5=nf(_SOILN_LITR_IN_TR[2]),
+        wc1=cf(_SOILC_CWD_IN[1]), wc2=cf(_SOILC_CWD_IN[2]), wc3=cf(_SOILC_CWD_IN_TR[1]), wc4=cf(_SOILC_CWD_IN_TR[2]),
+        wn1=nf(_SOILN_CWD_IN[1]), wn2=nf(_SOILN_CWD_IN[2]), wn3=nf(_SOILN_CWD_IN_TR[1]), wn4=nf(_SOILN_CWD_IN_TR[2]))
+    backend = _kernel_backend(matrix_Cinput)
+    _soil_input_kernel!(backend)(out, in_, mask_soilc, nlevdecomp, i_litr_min, i_litr_max, i_cwd,
+        transient_landcover, eltype(matrix_Cinput)(Float64(dt)), first(bounds_col), last(bounds_col);
+        ndrange = last(bounds_col))
+    KA.synchronize(backend)
     return nothing
 end
 
@@ -322,6 +352,30 @@ function cn_soil_matrix_iso_input!(matrix_Ciso_input::AbstractMatrix{<:Real}, cf
         end
     end
     return nothing
+end
+
+# Fire-loss diagonal: matrix_decomp_fire_k = −m_decomp_cpools_to_fire / pool · dt (per column).
+@kernel function _soil_firek_kernel!(fire_k, @Const(fflux), @Const(Xc), @Const(mask),
+        nlev::Int, npool::Int, this_begc::Int, dt, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        ui = c - this_begc + 1
+        for l in 1:npool, j in 1:nlev
+            pool = Xc[c, j, l]
+            fire_k[ui, j + (l - 1) * nlev] = pool > 0 ? -fflux[c, j, l] / pool * dt : zero(eltype(fire_k))
+        end
+    end
+end
+
+# Add a per-column persistent B-input field (indexed by global c) into the local Cin/Nin.
+@kernel function _soil_col_add_kernel!(dst, @Const(src), @Const(mask), ndpvr::Int, this_begc::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask[c]
+        ui = c - this_begc + 1
+        for k in 1:ndpvr
+            dst[ui, k] = dst[ui, k] + src[c, k]
+        end
+    end
 end
 
 # --------------------------------------------------------------------------
@@ -367,22 +421,16 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
     # when transient) PLUS the persistent matrix_Cinput_col accumulated by the
     # dyn_subgrid driver (the dwt landcover-change inputs). The persistent field is
     # zeroed after the solve so it starts fresh next step.
-    Cin = zeros(nc, ndp_vr); Nin = zeros(nc, ndp_vr)
+    Cin = _smm_alloc(ref, FT, 0.0, nc, ndp_vr); Nin = _smm_alloc(ref, FT, 0.0, nc, ndp_vr)
     cn_soil_matrix_input_accumulate!(Cin, Nin, cnveg_cf, cnveg_nf;
         mask_soilc=mask_soilc, bounds_col=bounds_col, nlevdecomp=nlevdecomp,
         i_litr_min=i_litr_min, i_litr_max=i_litr_max, i_cwd=i_cwd, dt=dt,
         transient_landcover=transient_landcover)
     if size(soilbgc_cf.matrix_Cinput_col, 2) == ndp_vr
-        for k in 1:ndp_vr, c in bounds_col
-            mask_soilc[c] || continue
-            Cin[c - begc + 1, k] += soilbgc_cf.matrix_Cinput_col[c, k]
-        end
+        _launch!(_soil_col_add_kernel!, Cin, soilbgc_cf.matrix_Cinput_col, mask_soilc, ndp_vr, begc, begc, endc; ndrange = endc)
     end
     if soilbgc_nf !== nothing && size(soilbgc_nf.matrix_Ninput_col, 2) == ndp_vr
-        for k in 1:ndp_vr, c in bounds_col
-            mask_soilc[c] || continue
-            Nin[c - begc + 1, k] += soilbgc_nf.matrix_Ninput_col[c, k]
-        end
+        _launch!(_soil_col_add_kernel!, Nin, soilbgc_nf.matrix_Ninput_col, mask_soilc, ndp_vr, begc, begc, endc; ndrange = endc)
     end
 
     # Fire-loss diagonal (AKfiresoil). The fire module computed the decomp→fire flux
@@ -392,15 +440,10 @@ function cn_soil_matrix_advance!(cascade_con, soilbgc_cs, soilbgc_ns, soilbgc_cf
     # actually burning; the pools are still at start-of-step so /pool is the fire base.
     fire_k = nothing
     if num_actfirec > 0
-        fire_k = zeros(nc, ndp_vr)
-        fflux = cnveg_cf.m_decomp_cpools_to_fire_vr_col
-        Xc = soilbgc_cs.decomp_cpools_vr_col
-        for l in 1:ndecomp_pools, j in 1:nlevdecomp, c in bounds_col
-            mask_soilc[c] || continue
-            pool = Xc[c, j, l]
-            fire_k[c - begc + 1, j + (l - 1) * nlevdecomp] =
-                pool > 0.0 ? -fflux[c, j, l] / pool * dt : 0.0
-        end
+        fire_k = _smm_alloc(ref, FT, 0.0, nc, ndp_vr)
+        _launch!(_soil_firek_kernel!, fire_k, cnveg_cf.m_decomp_cpools_to_fire_vr_col,
+            soilbgc_cs.decomp_cpools_vr_col, mask_soilc, nlevdecomp, ndecomp_pools, begc,
+            eltype(fire_k)(Float64(dt)), begc, endc; ndrange = endc)
     end
 
     # Reuse a caller-owned CNSoilMatrixState across steps to keep the memoized sparse
