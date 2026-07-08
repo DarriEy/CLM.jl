@@ -368,6 +368,49 @@ function main(backend)
         wiring_check!("fi_c", CLM.cn_veg_matrix_accumulate_fi_c!, :matrix_fitransfer_patch, :matrix_fiturnover_patch)
     end
 
+    # (9) WIRING: veg-N accumulate (phn/gmn/fin) — the retransn pool + the retransn->pool
+    #     supply block (phn). Same device-view-bundle pattern.
+    let np = 4, nvn = CLM.IRETRANSN_NATVEG
+        nflds = (:leafn_patch, :leafn_storage_patch, :leafn_xfer_patch, :frootn_patch, :frootn_storage_patch,
+            :frootn_xfer_patch, :livestemn_patch, :livestemn_storage_patch, :livestemn_xfer_patch,
+            :deadstemn_patch, :deadstemn_storage_patch, :deadstemn_xfer_patch, :livecrootn_patch,
+            :livecrootn_storage_patch, :livecrootn_xfer_patch, :deadcrootn_patch, :deadcrootn_storage_patch,
+            :deadcrootn_xfer_patch, :retransn_patch)
+        phflux = (:leafn_storage_to_xfer_patch, :leafn_xfer_to_leafn_patch, :frootn_storage_to_xfer_patch,
+            :frootn_xfer_to_frootn_patch, :livestemn_storage_to_xfer_patch, :livestemn_xfer_to_livestemn_patch,
+            :deadstemn_storage_to_xfer_patch, :deadstemn_xfer_to_deadstemn_patch, :livecrootn_storage_to_xfer_patch,
+            :livecrootn_xfer_to_livecrootn_patch, :deadcrootn_storage_to_xfer_patch, :deadcrootn_xfer_to_deadcrootn_patch,
+            :livestemn_to_deadstemn_patch, :livecrootn_to_deadcrootn_patch, :leafn_to_retransn_patch,
+            :frootn_to_retransn_patch, :livestemn_to_retransn_patch, :livecrootn_to_retransn_patch,
+            :leafn_to_litter_patch, :frootn_to_litter_patch, :livestemn_to_litter_patch)
+        mkns() = begin
+            ns = CLM.CNVegNitrogenStateData(); CLM.cnveg_nitrogen_state_init!(ns, np, 1, 1; nrepr=1)
+            for (k, f) in enumerate(nflds); getfield(ns, f) .= Float64[5.0k + p for p in 1:np]; end; ns
+        end
+        mknf() = begin
+            nf = CLM.CNVegNitrogenFluxData(); CLM.cnveg_nitrogen_flux_init!(nf, np, 1, 1)
+            CLM.cn_veg_matrix_n_topology!(nf; use_crop=false, nvegnpool=nvn)
+            for s in phflux; getfield(nf, s) .= 1e-4; end
+            for (_, s) in CLM._NALLOC_TARGET; getfield(nf, s) .= 2e-4; end
+            nf.retransn_to_npool_patch .= 1e-3
+            for s in CLM._GMN_FLUX; getfield(nf, s) .= 2e-4; end
+            for s in CLM._FIN_TO_FIRE; getfield(nf, s) .= 1e-4; end
+            for s in unique(CLM._FIN_TO_LITTER); getfield(nf, s) .= 5e-5; end
+            nf.m_livestemn_to_deadstemn_fire_patch .= 3e-5; nf.m_livecrootn_to_deadcrootn_fire_patch .= 2e-5
+            CLM.cn_veg_matrix_alloc_n!(nf, trues(np), 1:np; use_crop=false); nf
+        end
+        mvf(x) = CLM.Adapt.adapt(DevF32(dev), x)
+        nwire!(nm, fn, tsym, nsym) = begin
+            nfh = mknf(); fn(nfh, mkns(), trues(np), 1:np; dt=1800.0, nvegnpool=nvn)
+            nfd = mvf(mknf()); fn(nfd, mvf(mkns()), dev(trues(np)), 1:np; dt=1800.0, nvegnpool=nvn)
+            push!(checks, ("wiring $nm transfer", vec(getfield(nfh, tsym)), vec(Array(getfield(nfd, tsym)))))
+            push!(checks, ("wiring $nm turnover", vec(getfield(nfh, nsym)), vec(Array(getfield(nfd, nsym)))))
+        end
+        nwire!("phn", CLM.cn_veg_matrix_accumulate_phn!, :matrix_nphtransfer_patch, :matrix_nphturnover_patch)
+        nwire!("gmn", CLM.cn_veg_matrix_accumulate_gmn!, :matrix_ngmtransfer_patch, :matrix_ngmturnover_patch)
+        nwire!("fin", CLM.cn_veg_matrix_accumulate_fin!, :matrix_nfitransfer_patch, :matrix_nfiturnover_patch)
+    end
+
     nfail = 0
     for (nm, cpu, gpu) in checks
         dd = reldiff(cpu, gpu); ok = dd < 1f-3

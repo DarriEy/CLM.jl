@@ -800,69 +800,140 @@ pool→retransn resorption, litterfall) from the phenology N flux fields, PLUS t
 retransn→pool supply transfers valued from the allocation nalloc + retransn_to_npool
 (requires `cn_veg_matrix_alloc_n!` called first). Requires `cn_veg_matrix_n_topology!`.
 """
+Base.@kwdef struct _MatPhNOut{M}
+    pht::M; phtn::M
+end
+Adapt.@adapt_structure _MatPhNOut
+Base.@kwdef struct _MatPhNIn{V,M}
+    # storage/xfer (12), livewood (2), resorption (4), litterfall (3) N transfer fluxes
+    fx1::V; fx2::V; fx3::V; fx4::V; fx5::V; fx6::V; fx7::V; fx8::V; fx9::V; fx10::V; fx11::V; fx12::V
+    fw1::V; fw2::V; fr1::V; fr2::V; fr3::V; fr4::V; fll1::V; fll2::V; fll3::V
+    na1::V; na2::V; na3::V; na4::V; na5::V; na6::V; na7::V; na8::V; na9::V; na10::V; na11::V; na12::V  # npool_to_* (for npool_to_veg)
+    r2n::V                                                                                          # retransn_to_npool
+    po1::V; po2::V; po3::V; po4::V; po5::V; po6::V; po7::V; po8::V; po9::V; po10::V
+    po11::V; po12::V; po13::V; po14::V; po15::V; po16::V; po17::V; po18::V; po19::V
+    nalloc::M; grain_food::M; grain_seed::M; p_repro::M; na_gr1::M; na_gr2::M                        # 2D (crop)
+end
+Adapt.@adapt_structure _MatPhNIn
+Base.@kwdef struct _MatPhNIdx
+    x1::Int; x2::Int; x3::Int; x4::Int; x5::Int; x6::Int; x7::Int; x8::Int; x9::Int; x10::Int; x11::Int; x12::Int
+    w1::Int; w2::Int; r1::Int; r2::Int; r3::Int; r4::Int; l1::Int; l2::Int; l3::Int; g::Int
+    s1::Int; s2::Int; s3::Int; s4::Int; s5::Int; s6::Int; s7::Int; s8::Int; s9::Int; s10::Int; s11::Int; s12::Int
+    e::Int; cg1::Int; cg2::Int; iretr::Int; use_crop::Bool; matrixcheck::Bool
+end
+
+@kernel function _mat_phn_kernel!(out::_MatPhNOut, in::_MatPhNIn, @Const(mask), ix::_MatPhNIdx, dt, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        pht = out.pht; phtn = out.phtn; mc = ix.matrixcheck; iretr = ix.iretr
+        # storage/xfer (12)
+        _mat_ph_reg!(pht, phtn, p, ix.x1,  in.fx1[p],  ILEAF_ST,      in.po2[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x2,  in.fx2[p],  ILEAF_XF,      in.po3[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x3,  in.fx3[p],  IFROOT_ST,     in.po5[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x4,  in.fx4[p],  IFROOT_XF,     in.po6[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x5,  in.fx5[p],  ILIVESTEM_ST,  in.po8[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x6,  in.fx6[p],  ILIVESTEM_XF,  in.po9[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x7,  in.fx7[p],  IDEADSTEM_ST,  in.po11[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x8,  in.fx8[p],  IDEADSTEM_XF,  in.po12[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x9,  in.fx9[p],  ILIVECROOT_ST, in.po14[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x10, in.fx10[p], ILIVECROOT_XF, in.po15[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x11, in.fx11[p], IDEADCROOT_ST, in.po17[p], dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.x12, in.fx12[p], IDEADCROOT_XF, in.po18[p], dt, mc)
+        # livewood turnover (2)
+        _mat_ph_reg!(pht, phtn, p, ix.w1, in.fw1[p], ILIVESTEM,  in.po7[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.w2, in.fw2[p], ILIVECROOT, in.po13[p], dt, mc)
+        # pool->retransn resorption (4)
+        _mat_ph_reg!(pht, phtn, p, ix.r1, in.fr1[p], ILEAF,      in.po1[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.r2, in.fr2[p], IFROOT,     in.po4[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.r3, in.fr3[p], ILIVESTEM,  in.po7[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.r4, in.fr4[p], ILIVECROOT, in.po13[p], dt, mc)
+        # litterfall out (3)
+        _mat_ph_reg!(pht, phtn, p, ix.l1, in.fll1[p], ILEAF,     in.po1[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.l2, in.fll2[p], IFROOT,    in.po4[p],  dt, mc)
+        _mat_ph_reg!(pht, phtn, p, ix.l3, in.fll3[p], ILIVESTEM, in.po7[p],  dt, mc)
+        if ix.use_crop
+            _mat_ph_reg!(pht, phtn, p, ix.g, in.grain_food[p, 1] + in.grain_seed[p, 1], IGRAIN, in.p_repro[p, 1], dt, mc)
+        end
+        # retransn->pool supply, valued from nalloc·r2n (or the iout edge when nothing allocated)
+        r2n = in.r2n[p]; retr = in.po19[p]
+        n2v = in.na1[p] + in.na2[p] + in.na3[p] + in.na4[p] + in.na5[p] + in.na6[p] +
+              in.na7[p] + in.na8[p] + in.na9[p] + in.na10[p] + in.na11[p] + in.na12[p]
+        if ix.use_crop
+            n2v += in.na_gr1[p, 1] + in.na_gr2[p, 1]
+        end
+        if n2v > 0
+            _mat_ph_reg!(pht, phtn, p, ix.s1,  in.nalloc[p, ILEAF]         * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s2,  in.nalloc[p, ILEAF_ST]      * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s3,  in.nalloc[p, IFROOT]        * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s4,  in.nalloc[p, IFROOT_ST]     * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s5,  in.nalloc[p, ILIVESTEM]     * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s6,  in.nalloc[p, ILIVESTEM_ST]  * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s7,  in.nalloc[p, IDEADSTEM]     * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s8,  in.nalloc[p, IDEADSTEM_ST]  * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s9,  in.nalloc[p, ILIVECROOT]    * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s10, in.nalloc[p, ILIVECROOT_ST] * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s11, in.nalloc[p, IDEADCROOT]    * r2n, iretr, retr, dt, mc)
+            _mat_ph_reg!(pht, phtn, p, ix.s12, in.nalloc[p, IDEADCROOT_ST] * r2n, iretr, retr, dt, mc)
+            if ix.use_crop
+                _mat_ph_reg!(pht, phtn, p, ix.cg1, in.nalloc[p, IGRAIN]    * r2n, iretr, retr, dt, mc)
+                _mat_ph_reg!(pht, phtn, p, ix.cg2, in.nalloc[p, IGRAIN_ST] * r2n, iretr, retr, dt, mc)
+            end
+        else
+            _mat_ph_reg!(pht, phtn, p, ix.e, r2n, iretr, retr, dt, mc)
+        end
+    end
+end
+
 function cn_veg_matrix_accumulate_phn!(nf::CNVegNitrogenFluxData,
         ns::CNVegNitrogenStateData, mask_soilp::AbstractVector{Bool},
         bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
         use_crop::Bool = false, nvegnpool::Int = IRETRANSN_NATVEG)
     iretransn = nvegnpool
-    fill!(nf.matrix_nphtransfer_patch, 0.0)
-    fill!(nf.matrix_nphturnover_patch, 0.0)
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        reg(idx, flux, d) = begin
-            donor = _vegn_pool_val(ns, d, p, iretransn)
-            rate = donor > 0.0 ? flux / donor : 0.0
-            matrix_update_phn!(nf, p, idx, rate, dt; matrixcheck=matrixcheck, acc=true)
-        end
-        # storage->xfer, xfer->pool (12)
-        reg(nf.ileafst_to_ileafxf_ph,        nf.leafn_storage_to_xfer_patch[p],      ILEAF_ST)
-        reg(nf.ileafxf_to_ileaf_ph,          nf.leafn_xfer_to_leafn_patch[p],        ILEAF_XF)
-        reg(nf.ifrootst_to_ifrootxf_ph,      nf.frootn_storage_to_xfer_patch[p],     IFROOT_ST)
-        reg(nf.ifrootxf_to_ifroot_ph,        nf.frootn_xfer_to_frootn_patch[p],      IFROOT_XF)
-        reg(nf.ilivestemst_to_ilivestemxf_ph, nf.livestemn_storage_to_xfer_patch[p], ILIVESTEM_ST)
-        reg(nf.ilivestemxf_to_ilivestem_ph,  nf.livestemn_xfer_to_livestemn_patch[p], ILIVESTEM_XF)
-        reg(nf.ideadstemst_to_ideadstemxf_ph, nf.deadstemn_storage_to_xfer_patch[p], IDEADSTEM_ST)
-        reg(nf.ideadstemxf_to_ideadstem_ph,  nf.deadstemn_xfer_to_deadstemn_patch[p], IDEADSTEM_XF)
-        reg(nf.ilivecrootst_to_ilivecrootxf_ph, nf.livecrootn_storage_to_xfer_patch[p], ILIVECROOT_ST)
-        reg(nf.ilivecrootxf_to_ilivecroot_ph, nf.livecrootn_xfer_to_livecrootn_patch[p], ILIVECROOT_XF)
-        reg(nf.ideadcrootst_to_ideadcrootxf_ph, nf.deadcrootn_storage_to_xfer_patch[p], IDEADCROOT_ST)
-        reg(nf.ideadcrootxf_to_ideadcroot_ph, nf.deadcrootn_xfer_to_deadcrootn_patch[p], IDEADCROOT_XF)
-        # livewood turnover (2)
-        reg(nf.ilivestem_to_ideadstem_ph,    nf.livestemn_to_deadstemn_patch[p],     ILIVESTEM)
-        reg(nf.ilivecroot_to_ideadcroot_ph,  nf.livecrootn_to_deadcrootn_patch[p],   ILIVECROOT)
-        # pool->retransn resorption (4)
-        reg(nf.ileaf_to_iretransn_ph,        nf.leafn_to_retransn_patch[p],          ILEAF)
-        reg(nf.ifroot_to_iretransn_ph,       nf.frootn_to_retransn_patch[p],         IFROOT)
-        reg(nf.ilivestem_to_iretransn_ph,    nf.livestemn_to_retransn_patch[p],      ILIVESTEM)
-        reg(nf.ilivecroot_to_iretransn_ph,   nf.livecrootn_to_retransn_patch[p],     ILIVECROOT)
-        # litterfall out (3)
-        reg(nf.ileaf_to_iout_ph,             nf.leafn_to_litter_patch[p],            ILEAF)
-        reg(nf.ifroot_to_iout_ph,            nf.frootn_to_litter_patch[p],           IFROOT)
-        reg(nf.ilivestem_to_iout_ph,         nf.livestemn_to_litter_patch[p],        ILIVESTEM)
-        if use_crop
-            # grain harvest (grain -> outside veg): food + seed.
-            reg(nf.igrain_to_iout_ph,
-                nf.repr_grainn_to_food_patch[p, 1] + nf.repr_grainn_to_seed_patch[p, 1], IGRAIN)
-        end
-        # retransn->pool supply (12, +2 grain for crop) + iretransn->iout edge (alloc-sourced)
-        r2n = nf.retransn_to_npool_patch[p]
-        npool_to_veg = 0.0
-        for (_, fld) in _NALLOC_TARGET; npool_to_veg += getfield(nf, fld)[p]; end
-        if use_crop
-            for (_, fld) in _NALLOC_TARGET_CROP; npool_to_veg += getfield(nf, fld)[p, 1]; end
-        end
-        if npool_to_veg > 0.0
-            for (idxfld, pool) in _RETRANSN_SUPPLY
-                reg(getfield(nf, idxfld), nf.matrix_nalloc_patch[p, pool] * r2n, iretransn)
-            end
-            if use_crop
-                reg(nf.iretransn_to_igrain_ph,   nf.matrix_nalloc_patch[p, IGRAIN]    * r2n, iretransn)
-                reg(nf.iretransn_to_igrainst_ph, nf.matrix_nalloc_patch[p, IGRAIN_ST] * r2n, iretransn)
-            end
-        else
-            reg(nf.iretransn_to_iout_ph, r2n, iretransn)
-        end
-    end
+    fill!(nf.matrix_nphtransfer_patch, zero(eltype(nf.matrix_nphtransfer_patch)))
+    fill!(nf.matrix_nphturnover_patch, zero(eltype(nf.matrix_nphturnover_patch)))
+    gf(s) = getfield(nf, s)
+    out = _MatPhNOut(; pht=nf.matrix_nphtransfer_patch, phtn=nf.matrix_nphturnover_patch)
+    in_ = _MatPhNIn(;
+        fx1=nf.leafn_storage_to_xfer_patch, fx2=nf.leafn_xfer_to_leafn_patch,
+        fx3=nf.frootn_storage_to_xfer_patch, fx4=nf.frootn_xfer_to_frootn_patch,
+        fx5=nf.livestemn_storage_to_xfer_patch, fx6=nf.livestemn_xfer_to_livestemn_patch,
+        fx7=nf.deadstemn_storage_to_xfer_patch, fx8=nf.deadstemn_xfer_to_deadstemn_patch,
+        fx9=nf.livecrootn_storage_to_xfer_patch, fx10=nf.livecrootn_xfer_to_livecrootn_patch,
+        fx11=nf.deadcrootn_storage_to_xfer_patch, fx12=nf.deadcrootn_xfer_to_deadcrootn_patch,
+        fw1=nf.livestemn_to_deadstemn_patch, fw2=nf.livecrootn_to_deadcrootn_patch,
+        fr1=nf.leafn_to_retransn_patch, fr2=nf.frootn_to_retransn_patch,
+        fr3=nf.livestemn_to_retransn_patch, fr4=nf.livecrootn_to_retransn_patch,
+        fll1=nf.leafn_to_litter_patch, fll2=nf.frootn_to_litter_patch, fll3=nf.livestemn_to_litter_patch,
+        na1=gf(_NALLOC_TARGET[1][2]), na2=gf(_NALLOC_TARGET[2][2]), na3=gf(_NALLOC_TARGET[3][2]),
+        na4=gf(_NALLOC_TARGET[4][2]), na5=gf(_NALLOC_TARGET[5][2]), na6=gf(_NALLOC_TARGET[6][2]),
+        na7=gf(_NALLOC_TARGET[7][2]), na8=gf(_NALLOC_TARGET[8][2]), na9=gf(_NALLOC_TARGET[9][2]),
+        na10=gf(_NALLOC_TARGET[10][2]), na11=gf(_NALLOC_TARGET[11][2]), na12=gf(_NALLOC_TARGET[12][2]),
+        r2n=nf.retransn_to_npool_patch,
+        po1=ns.leafn_patch, po2=ns.leafn_storage_patch, po3=ns.leafn_xfer_patch,
+        po4=ns.frootn_patch, po5=ns.frootn_storage_patch, po6=ns.frootn_xfer_patch,
+        po7=ns.livestemn_patch, po8=ns.livestemn_storage_patch, po9=ns.livestemn_xfer_patch,
+        po10=ns.deadstemn_patch, po11=ns.deadstemn_storage_patch, po12=ns.deadstemn_xfer_patch,
+        po13=ns.livecrootn_patch, po14=ns.livecrootn_storage_patch, po15=ns.livecrootn_xfer_patch,
+        po16=ns.deadcrootn_patch, po17=ns.deadcrootn_storage_patch, po18=ns.deadcrootn_xfer_patch, po19=ns.retransn_patch,
+        nalloc=nf.matrix_nalloc_patch, grain_food=nf.repr_grainn_to_food_patch, grain_seed=nf.repr_grainn_to_seed_patch,
+        p_repro=ns.reproductiven_patch, na_gr1=gf(_NALLOC_TARGET_CROP[1][2]), na_gr2=gf(_NALLOC_TARGET_CROP[2][2]))
+    ix = _MatPhNIdx(;
+        x1=nf.ileafst_to_ileafxf_ph, x2=nf.ileafxf_to_ileaf_ph, x3=nf.ifrootst_to_ifrootxf_ph, x4=nf.ifrootxf_to_ifroot_ph,
+        x5=nf.ilivestemst_to_ilivestemxf_ph, x6=nf.ilivestemxf_to_ilivestem_ph, x7=nf.ideadstemst_to_ideadstemxf_ph,
+        x8=nf.ideadstemxf_to_ideadstem_ph, x9=nf.ilivecrootst_to_ilivecrootxf_ph, x10=nf.ilivecrootxf_to_ilivecroot_ph,
+        x11=nf.ideadcrootst_to_ideadcrootxf_ph, x12=nf.ideadcrootxf_to_ideadcroot_ph,
+        w1=nf.ilivestem_to_ideadstem_ph, w2=nf.ilivecroot_to_ideadcroot_ph,
+        r1=nf.ileaf_to_iretransn_ph, r2=nf.ifroot_to_iretransn_ph, r3=nf.ilivestem_to_iretransn_ph, r4=nf.ilivecroot_to_iretransn_ph,
+        l1=nf.ileaf_to_iout_ph, l2=nf.ifroot_to_iout_ph, l3=nf.ilivestem_to_iout_ph, g=nf.igrain_to_iout_ph,
+        s1=nf.iretransn_to_ileaf_ph, s2=nf.iretransn_to_ileafst_ph, s3=nf.iretransn_to_ifroot_ph, s4=nf.iretransn_to_ifrootst_ph,
+        s5=nf.iretransn_to_ilivestem_ph, s6=nf.iretransn_to_ilivestemst_ph, s7=nf.iretransn_to_ideadstem_ph, s8=nf.iretransn_to_ideadstemst_ph,
+        s9=nf.iretransn_to_ilivecroot_ph, s10=nf.iretransn_to_ilivecrootst_ph, s11=nf.iretransn_to_ideadcroot_ph, s12=nf.iretransn_to_ideadcrootst_ph,
+        e=nf.iretransn_to_iout_ph, cg1=nf.iretransn_to_igrain_ph, cg2=nf.iretransn_to_igrainst_ph,
+        iretr=iretransn, use_crop=use_crop, matrixcheck=matrixcheck)
+    backend = _kernel_backend(nf.matrix_nphtransfer_patch)
+    _mat_phn_kernel!(backend)(out, in_, mask_soilp, ix,
+        eltype(nf.matrix_nphtransfer_patch)(dt), first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
 
@@ -881,24 +952,81 @@ const _GMN_FLUX = Symbol[
 
 Register the 19 veg-N gap-mortality transfers (pools 1..18 + retransn -> litter).
 """
+# N gap-mortality/fire register with separate transfer index idx + turnover column d.
+@inline function _mat_gmn_reg!(gmt, gmtn, phtn, p::Int, idx::Int, d::Int, flux, donorval, dt, mc::Bool)
+    rate = donorval > 0 ? flux / donorval : zero(flux)
+    if mc && (phtn[p, d] + gmtn[p, d] + rate * dt >= one(rate))
+        applied = max(zero(rate), (one(rate) - phtn[p, d] - gmtn[p, d]) / dt)
+    else
+        applied = rate
+    end
+    @inbounds gmtn[p, d]  = gmtn[p, d]  + applied * dt
+    @inbounds gmt[p, idx] = gmt[p, idx] + applied
+    return nothing
+end
+
+Base.@kwdef struct _MatGmNOut{M}
+    gmt::M; gmtn::M; phtn::M
+end
+Adapt.@adapt_structure _MatGmNOut
+Base.@kwdef struct _MatGmNIn{V}
+    fl1::V; fl2::V; fl3::V; fl4::V; fl5::V; fl6::V; fl7::V; fl8::V; fl9::V; fl10::V
+    fl11::V; fl12::V; fl13::V; fl14::V; fl15::V; fl16::V; fl17::V; fl18::V; fl19::V
+    po1::V; po2::V; po3::V; po4::V; po5::V; po6::V; po7::V; po8::V; po9::V; po10::V
+    po11::V; po12::V; po13::V; po14::V; po15::V; po16::V; po17::V; po18::V; po19::V
+end
+Adapt.@adapt_structure _MatGmNIn
+
+@kernel function _mat_gmn_kernel!(out::_MatGmNOut, in::_MatGmNIn, @Const(mask), iretr::Int, mc::Bool, dt, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        gmt = out.gmt; gmtn = out.gmtn; phtn = out.phtn
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 1,  1,  in.fl1[p],  in.po1[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 2,  2,  in.fl2[p],  in.po2[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 3,  3,  in.fl3[p],  in.po3[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 4,  4,  in.fl4[p],  in.po4[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 5,  5,  in.fl5[p],  in.po5[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 6,  6,  in.fl6[p],  in.po6[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 7,  7,  in.fl7[p],  in.po7[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 8,  8,  in.fl8[p],  in.po8[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 9,  9,  in.fl9[p],  in.po9[p],  dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 10, 10, in.fl10[p], in.po10[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 11, 11, in.fl11[p], in.po11[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 12, 12, in.fl12[p], in.po12[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 13, 13, in.fl13[p], in.po13[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 14, 14, in.fl14[p], in.po14[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 15, 15, in.fl15[p], in.po15[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 16, 16, in.fl16[p], in.po16[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 17, 17, in.fl17[p], in.po17[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 18, 18, in.fl18[p], in.po18[p], dt, mc)
+        _mat_gmn_reg!(gmt, gmtn, phtn, p, 19, iretr, in.fl19[p], in.po19[p], dt, mc)   # retransn
+    end
+end
+
 function cn_veg_matrix_accumulate_gmn!(nf::CNVegNitrogenFluxData,
         ns::CNVegNitrogenStateData, mask_soilp::AbstractVector{Bool},
         bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
         nvegnpool::Int = IRETRANSN_NATVEG)
     iretransn = nvegnpool
-    fill!(nf.matrix_ngmtransfer_patch, 0.0)
-    fill!(nf.matrix_ngmturnover_patch, 0.0)
-    n = length(_GMN_FLUX)                       # 19 = 18 natveg + retransn
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        for i in 1:n
-            flux = getfield(nf, _GMN_FLUX[i])[p]
-            d = i <= NVEGPOOL_NATVEG ? i : iretransn   # transfer 19 is the retransn pool
-            donor = _vegn_pool_val(ns, d, p, iretransn)
-            rate = donor > 0.0 ? flux / donor : 0.0
-            matrix_update_gmn!(nf, p, i, rate, dt; matrixcheck=matrixcheck, acc=true)
-        end
-    end
+    fill!(nf.matrix_ngmtransfer_patch, zero(eltype(nf.matrix_ngmtransfer_patch)))
+    fill!(nf.matrix_ngmturnover_patch, zero(eltype(nf.matrix_ngmturnover_patch)))
+    gf(s) = getfield(nf, s)
+    out = _MatGmNOut(; gmt=nf.matrix_ngmtransfer_patch, gmtn=nf.matrix_ngmturnover_patch, phtn=nf.matrix_nphturnover_patch)
+    in_ = _MatGmNIn(;
+        fl1=gf(_GMN_FLUX[1]), fl2=gf(_GMN_FLUX[2]), fl3=gf(_GMN_FLUX[3]), fl4=gf(_GMN_FLUX[4]), fl5=gf(_GMN_FLUX[5]),
+        fl6=gf(_GMN_FLUX[6]), fl7=gf(_GMN_FLUX[7]), fl8=gf(_GMN_FLUX[8]), fl9=gf(_GMN_FLUX[9]), fl10=gf(_GMN_FLUX[10]),
+        fl11=gf(_GMN_FLUX[11]), fl12=gf(_GMN_FLUX[12]), fl13=gf(_GMN_FLUX[13]), fl14=gf(_GMN_FLUX[14]), fl15=gf(_GMN_FLUX[15]),
+        fl16=gf(_GMN_FLUX[16]), fl17=gf(_GMN_FLUX[17]), fl18=gf(_GMN_FLUX[18]), fl19=gf(_GMN_FLUX[19]),
+        po1=ns.leafn_patch, po2=ns.leafn_storage_patch, po3=ns.leafn_xfer_patch,
+        po4=ns.frootn_patch, po5=ns.frootn_storage_patch, po6=ns.frootn_xfer_patch,
+        po7=ns.livestemn_patch, po8=ns.livestemn_storage_patch, po9=ns.livestemn_xfer_patch,
+        po10=ns.deadstemn_patch, po11=ns.deadstemn_storage_patch, po12=ns.deadstemn_xfer_patch,
+        po13=ns.livecrootn_patch, po14=ns.livecrootn_storage_patch, po15=ns.livecrootn_xfer_patch,
+        po16=ns.deadcrootn_patch, po17=ns.deadcrootn_storage_patch, po18=ns.deadcrootn_xfer_patch, po19=ns.retransn_patch)
+    backend = _kernel_backend(nf.matrix_ngmtransfer_patch)
+    _mat_gmn_kernel!(backend)(out, in_, mask_soilp, iretransn, matrixcheck,
+        eltype(nf.matrix_ngmtransfer_patch)(dt), first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
 
@@ -926,28 +1054,83 @@ const _FIN_TO_LITTER = Symbol[
 Register the veg-N fire transfers: 2 in-veg live->dead conversions + 19 out-of-veg
 losses (pools 1..18 + retransn, flux = m_*n_to_fire + m_*n_to_litter_fire).
 """
+Base.@kwdef struct _MatFiNOut{M}
+    fit::M; fitn::M; phtn::M; gmtn::M
+end
+Adapt.@adapt_structure _MatFiNOut
+Base.@kwdef struct _MatFiNIn{V}
+    ff1::V; ff2::V; ff3::V; ff4::V; ff5::V; ff6::V; ff7::V; ff8::V; ff9::V; ff10::V
+    ff11::V; ff12::V; ff13::V; ff14::V; ff15::V; ff16::V; ff17::V; ff18::V; ff19::V
+    fl1::V; fl2::V; fl3::V; fl4::V; fl5::V; fl6::V; fl7::V; fl8::V; fl9::V; fl10::V
+    fl11::V; fl12::V; fl13::V; fl14::V; fl15::V; fl16::V; fl17::V; fl18::V; fl19::V
+    po1::V; po2::V; po3::V; po4::V; po5::V; po6::V; po7::V; po8::V; po9::V; po10::V
+    po11::V; po12::V; po13::V; po14::V; po15::V; po16::V; po17::V; po18::V; po19::V
+    f_ls_dead::V; f_lc_dead::V
+end
+Adapt.@adapt_structure _MatFiNIn
+Base.@kwdef struct _MatFiNIdx
+    i_ls::Int; i_lc::Int; iretr::Int; matrixcheck::Bool
+end
+
+@kernel function _mat_fin_kernel!(out::_MatFiNOut, in::_MatFiNIn, @Const(mask), ix::_MatFiNIdx, dt, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        fit = out.fit; fitn = out.fitn; phtn = out.phtn; gmtn = out.gmtn; mc = ix.matrixcheck
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, ix.i_ls, ILIVESTEM,  in.f_ls_dead[p], in.po7[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, ix.i_lc, ILIVECROOT, in.f_lc_dead[p], in.po13[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 3,  1,  in.ff1[p]  + in.fl1[p],  in.po1[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 4,  2,  in.ff2[p]  + in.fl2[p],  in.po2[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 5,  3,  in.ff3[p]  + in.fl3[p],  in.po3[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 6,  4,  in.ff4[p]  + in.fl4[p],  in.po4[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 7,  5,  in.ff5[p]  + in.fl5[p],  in.po5[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 8,  6,  in.ff6[p]  + in.fl6[p],  in.po6[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 9,  7,  in.ff7[p]  + in.fl7[p],  in.po7[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 10, 8,  in.ff8[p]  + in.fl8[p],  in.po8[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 11, 9,  in.ff9[p]  + in.fl9[p],  in.po9[p],  dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 12, 10, in.ff10[p] + in.fl10[p], in.po10[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 13, 11, in.ff11[p] + in.fl11[p], in.po11[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 14, 12, in.ff12[p] + in.fl12[p], in.po12[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 15, 13, in.ff13[p] + in.fl13[p], in.po13[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 16, 14, in.ff14[p] + in.fl14[p], in.po14[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 17, 15, in.ff15[p] + in.fl15[p], in.po15[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 18, 16, in.ff16[p] + in.fl16[p], in.po16[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 19, 17, in.ff17[p] + in.fl17[p], in.po17[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 20, 18, in.ff18[p] + in.fl18[p], in.po18[p], dt, mc)
+        _mat_fi_reg!(fit, fitn, phtn, gmtn, p, 21, ix.iretr, in.ff19[p] + in.fl19[p], in.po19[p], dt, mc)  # retransn
+    end
+end
+
 function cn_veg_matrix_accumulate_fin!(nf::CNVegNitrogenFluxData,
         ns::CNVegNitrogenStateData, mask_soilp::AbstractVector{Bool},
         bounds_patch::UnitRange{Int}; dt::Real, matrixcheck::Bool = false,
         nvegnpool::Int = IRETRANSN_NATVEG)
     iretransn = nvegnpool
-    fill!(nf.matrix_nfitransfer_patch, 0.0)
-    fill!(nf.matrix_nfiturnover_patch, 0.0)
-    n = length(_FIN_TO_FIRE)                    # 19 out-losses = 18 natveg + retransn
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        reg(idx, flux, d) = begin
-            donor = _vegn_pool_val(ns, d, p, iretransn)
-            rate = donor > 0.0 ? flux / donor : 0.0
-            matrix_update_fin!(nf, p, idx, rate, dt; matrixcheck=matrixcheck, acc=true)
-        end
-        reg(nf.ilivestem_to_ideadstem_fi,   nf.m_livestemn_to_deadstemn_fire_patch[p],   ILIVESTEM)
-        reg(nf.ilivecroot_to_ideadcroot_fi, nf.m_livecrootn_to_deadcrootn_fire_patch[p], ILIVECROOT)
-        for i in 1:n
-            flux = getfield(nf, _FIN_TO_FIRE[i])[p] + getfield(nf, _FIN_TO_LITTER[i])[p]
-            d = i <= NVEGPOOL_NATVEG ? i : iretransn   # out-loss 19 is the retransn pool
-            reg(i + 2, flux, d)
-        end
-    end
+    fill!(nf.matrix_nfitransfer_patch, zero(eltype(nf.matrix_nfitransfer_patch)))
+    fill!(nf.matrix_nfiturnover_patch, zero(eltype(nf.matrix_nfiturnover_patch)))
+    gf(s) = getfield(nf, s)
+    out = _MatFiNOut(; fit=nf.matrix_nfitransfer_patch, fitn=nf.matrix_nfiturnover_patch,
+        phtn=nf.matrix_nphturnover_patch, gmtn=nf.matrix_ngmturnover_patch)
+    in_ = _MatFiNIn(;
+        ff1=gf(_FIN_TO_FIRE[1]), ff2=gf(_FIN_TO_FIRE[2]), ff3=gf(_FIN_TO_FIRE[3]), ff4=gf(_FIN_TO_FIRE[4]), ff5=gf(_FIN_TO_FIRE[5]),
+        ff6=gf(_FIN_TO_FIRE[6]), ff7=gf(_FIN_TO_FIRE[7]), ff8=gf(_FIN_TO_FIRE[8]), ff9=gf(_FIN_TO_FIRE[9]), ff10=gf(_FIN_TO_FIRE[10]),
+        ff11=gf(_FIN_TO_FIRE[11]), ff12=gf(_FIN_TO_FIRE[12]), ff13=gf(_FIN_TO_FIRE[13]), ff14=gf(_FIN_TO_FIRE[14]), ff15=gf(_FIN_TO_FIRE[15]),
+        ff16=gf(_FIN_TO_FIRE[16]), ff17=gf(_FIN_TO_FIRE[17]), ff18=gf(_FIN_TO_FIRE[18]), ff19=gf(_FIN_TO_FIRE[19]),
+        fl1=gf(_FIN_TO_LITTER[1]), fl2=gf(_FIN_TO_LITTER[2]), fl3=gf(_FIN_TO_LITTER[3]), fl4=gf(_FIN_TO_LITTER[4]), fl5=gf(_FIN_TO_LITTER[5]),
+        fl6=gf(_FIN_TO_LITTER[6]), fl7=gf(_FIN_TO_LITTER[7]), fl8=gf(_FIN_TO_LITTER[8]), fl9=gf(_FIN_TO_LITTER[9]), fl10=gf(_FIN_TO_LITTER[10]),
+        fl11=gf(_FIN_TO_LITTER[11]), fl12=gf(_FIN_TO_LITTER[12]), fl13=gf(_FIN_TO_LITTER[13]), fl14=gf(_FIN_TO_LITTER[14]), fl15=gf(_FIN_TO_LITTER[15]),
+        fl16=gf(_FIN_TO_LITTER[16]), fl17=gf(_FIN_TO_LITTER[17]), fl18=gf(_FIN_TO_LITTER[18]), fl19=gf(_FIN_TO_LITTER[19]),
+        po1=ns.leafn_patch, po2=ns.leafn_storage_patch, po3=ns.leafn_xfer_patch,
+        po4=ns.frootn_patch, po5=ns.frootn_storage_patch, po6=ns.frootn_xfer_patch,
+        po7=ns.livestemn_patch, po8=ns.livestemn_storage_patch, po9=ns.livestemn_xfer_patch,
+        po10=ns.deadstemn_patch, po11=ns.deadstemn_storage_patch, po12=ns.deadstemn_xfer_patch,
+        po13=ns.livecrootn_patch, po14=ns.livecrootn_storage_patch, po15=ns.livecrootn_xfer_patch,
+        po16=ns.deadcrootn_patch, po17=ns.deadcrootn_storage_patch, po18=ns.deadcrootn_xfer_patch, po19=ns.retransn_patch,
+        f_ls_dead=nf.m_livestemn_to_deadstemn_fire_patch, f_lc_dead=nf.m_livecrootn_to_deadcrootn_fire_patch)
+    ix = _MatFiNIdx(; i_ls=nf.ilivestem_to_ideadstem_fi, i_lc=nf.ilivecroot_to_ideadcroot_fi,
+        iretr=iretransn, matrixcheck=matrixcheck)
+    backend = _kernel_backend(nf.matrix_nfitransfer_patch)
+    _mat_fin_kernel!(backend)(out, in_, mask_soilp, ix,
+        eltype(nf.matrix_nfitransfer_patch)(dt), first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
