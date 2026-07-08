@@ -366,7 +366,7 @@ end
                             forc_solad_col::Matrix{<:Real},
                             forc_solai::Matrix{<:Real},
                             pch::PatchData,
-                            mask_nourbanp::BitVector,
+                            mask_nourbanp::AbstractVector{Bool},
                             bounds::UnitRange{Int})
 
 Calculate sun/shade fractions and absorbed PAR for each canopy layer.
@@ -940,8 +940,8 @@ end
                        pch::PatchData,
                        forc_solad_col::Matrix{<:Real},
                        forc_solai::Matrix{<:Real},
-                       mask_nourbanp::BitVector,
-                       mask_urbanp::BitVector,
+                       mask_nourbanp::AbstractVector{Bool},
+                       mask_urbanp::AbstractVector{Bool},
                        bounds::UnitRange{Int};
                        dtime::Float64 = 3600.0,
                        current_tod::Float64 = 43200.0,

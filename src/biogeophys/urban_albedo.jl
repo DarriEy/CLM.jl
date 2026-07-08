@@ -119,7 +119,7 @@ Determine urban snow albedos.
 
 Ported from `SnowAlbedo` in `UrbanAlbedoMod.F90`.
 """
-function snow_albedo!(mask_urbanc::BitVector, col::ColumnData,
+function snow_albedo!(mask_urbanc::AbstractVector{Bool}, col::ColumnData,
                       coszen::Vector{<:Real}, ind::Int,
                       albsn_roof::Matrix{<:Real},
                       albsn_improad::Matrix{<:Real},
@@ -151,7 +151,7 @@ budget in atmospheric models. Boundary-Layer Meteorology 94:357-397.
 
 Ported from `incident_direct` in `UrbanAlbedoMod.F90`.
 """
-function incident_direct!(mask_urbanl::BitVector,
+function incident_direct!(mask_urbanl::AbstractVector{Bool},
                            canyon_hwr::Vector{<:Real},
                            coszen::Vector{<:Real},
                            zen::Vector{<:Real},
@@ -218,7 +218,7 @@ Conservation check: Total incoming diffuse (sdif) =
 
 Ported from `incident_diffuse` in `UrbanAlbedoMod.F90`.
 """
-function incident_diffuse!(mask_urbanl::BitVector,
+function incident_diffuse!(mask_urbanl::AbstractVector{Bool},
                             canyon_hwr::Vector{<:Real},
                             sdif::Matrix{<:Real},
                             sdif_road::Matrix{<:Real},
@@ -269,7 +269,7 @@ for multiple reflection.
 
 Ported from `net_solar` in `UrbanAlbedoMod.F90`.
 """
-function net_solar!(mask_urbanl::BitVector,
+function net_solar!(mask_urbanl::AbstractVector{Bool},
                     coszen::Vector{<:Real},
                     canyon_hwr::Vector{<:Real},
                     wtroad_perv::Vector{<:Real},

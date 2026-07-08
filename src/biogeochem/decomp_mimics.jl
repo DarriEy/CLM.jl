@@ -1156,7 +1156,7 @@ Ported from `decomp_rates_mimics` in
 - `cascade_con::DecompCascadeConData`: cascade configuration
 
 # Keyword Arguments
-- `mask_bgc_soilc::BitVector`: mask for BGC soil columns
+- `mask_bgc_soilc::AbstractVector{Bool}`: mask for BGC soil columns
 - `bounds::UnitRange{Int}`: column bounds
 - `nlevdecomp::Int`: number of decomposition levels
 - `t_soisno::Matrix{<:Real}`: soil temperature (K), (col × nlev)

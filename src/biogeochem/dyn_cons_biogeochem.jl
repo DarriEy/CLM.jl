@@ -80,7 +80,7 @@ Inlined from `DynamicPatchAdjustments` in `CNVegCarbonStateType.F90`.
 function dynamic_patch_adjustments_carbon!(cs::CNVegCarbonStateData,
         updater::PatchStateUpdater, bounds::BoundsType,
         patch::PatchData, pftcon_data::PftconType,
-        mask_soilp::BitVector, filterp::AbstractVector{<:Integer};
+        mask_soilp::AbstractVector{Bool}, filterp::AbstractVector{<:Integer};
         leafc_seed::Real, deadstemc_seed::Real,
         conv_cflux::AbstractVector{<:Real},
         wood_product_cflux::AbstractVector{<:Real},
@@ -242,7 +242,7 @@ Inlined from `DynamicPatchAdjustments` in `CNVegNitrogenStateType.F90`.
 function dynamic_patch_adjustments_nitrogen!(ns::CNVegNitrogenStateData,
         updater::PatchStateUpdater, bounds::BoundsType,
         patch::PatchData, pftcon_data::PftconType,
-        mask_soilp::BitVector, filterp::AbstractVector{<:Integer};
+        mask_soilp::AbstractVector{Bool}, filterp::AbstractVector{<:Integer};
         leafc_seed::Real, deadstemc_seed::Real,
         conv_nflux::AbstractVector{<:Real},
         wood_product_nflux::AbstractVector{<:Real},
@@ -424,7 +424,7 @@ Ported from `dyn_cnbal_patch` in `dynConsBiogeochemMod.F90`. Handles bulk C12
 """
 function dyn_cnbal_patch!(dynbal::DynConsBiogeochemState,
         bounds::BoundsType,
-        mask_soilp_with_inactive::BitVector,
+        mask_soilp_with_inactive::AbstractVector{Bool},
         prior_pwtgcell::AbstractVector{<:Real},
         updater::PatchStateUpdater,
         patch::PatchData, lun::LandunitData, col::ColumnData,

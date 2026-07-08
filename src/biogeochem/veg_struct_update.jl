@@ -41,7 +41,7 @@ Updates `cnveg_state` fields: `htmx_patch`, `peaklai_patch`.
 
 Ported from `CNVegStructUpdate` in `CNVegStructUpdateMod.F90`.
 """
-function cn_veg_struct_update!(mask_soilp::BitVector,
+function cn_veg_struct_update!(mask_soilp::AbstractVector{Bool},
                                 bounds::UnitRange{Int},
                                 patch::PatchData,
                                 canopystate::CanopyStateData,

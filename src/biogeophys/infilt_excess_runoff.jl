@@ -130,7 +130,7 @@ frac_h2osfc.
 - `fsat_col::Vector{<:Real}`         : fractional area with water table at surface (from SaturatedExcessRunoff)
 - `waterfluxbulk::WaterFluxBulkData`  : water fluxes (input: qflx_in_soil_col; output: qflx_infl_excess_col)
 - `waterdiagnosticbulk::WaterDiagnosticBulkData` : water diagnostics (input: frac_h2osfc_col)
-- `mask_hydrology::BitVector`          : column-level hydrology mask
+- `mask_hydrology::AbstractVector{Bool}`          : column-level hydrology mask
 - `bounds::UnitRange{Int}`             : column bounds
 - `params::InfiltrationExcessRunoffParams` : module parameters (keyword, default = infilt_excess_params)
 
@@ -226,7 +226,7 @@ For each column, computes:
 - `soilhydrology::SoilHydrologyData`    : input icefrac_col (ncols, nlevgrnd)
 - `soilstate::SoilStateData`            : input hksat_col (ncols, nlevgrnd)
 - `qinmax_on_unsaturated_area::Vector{<:Real}` : output
-- `mask_hydrology::BitVector`            : column-level hydrology mask
+- `mask_hydrology::AbstractVector{Bool}`            : column-level hydrology mask
 - `bounds::UnitRange{Int}`               : column bounds
 - `params::InfiltrationExcessRunoffParams` : module parameters (keyword)
 

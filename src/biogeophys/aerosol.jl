@@ -309,7 +309,7 @@ Reset aerosol masses for all columns where `mask[c]` is true.
 
 Ported from `ResetFilter` in `AerosolMod.F90`.
 """
-function aerosol_reset_filter!(aer::AerosolData{FT}, mask::BitVector, bounds::UnitRange{Int}) where {FT}
+function aerosol_reset_filter!(aer::AerosolData{FT}, mask::AbstractVector{Bool}, bounds::UnitRange{Int}) where {FT}
     for c in bounds
         mask[c] || continue
         aerosol_reset!(aer, c)
@@ -535,7 +535,7 @@ aerosol mass to the top snow layer.
 Ported from `AerosolFluxes` in `AerosolMod.F90`.
 """
 function aerosol_fluxes!(aer::AerosolData,
-                         mask_snow::BitVector,
+                         mask_snow::AbstractVector{Bool},
                          bounds::UnitRange{Int},
                          snl::Vector{Int},
                          col_gridcell::Vector{Int},

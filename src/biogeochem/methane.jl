@@ -650,8 +650,8 @@ Calculate beginning column-level CH4 balance.
 Ported from `ch4_init_column_balance_check` in `ch4Mod.F90`.
 """
 function ch4_init_column_balance_check!(ch4::CH4Data,
-                                        mask_nolake::BitVector,
-                                        mask_lake::BitVector,
+                                        mask_nolake::AbstractVector{Bool},
+                                        mask_lake::AbstractVector{Bool},
                                         dz::Matrix{<:Real},
                                         nlevsoi::Int,
                                         allowlakeprod::Bool)
@@ -2020,8 +2020,8 @@ Computes total column CH4, then aggregates to gridcell level (c2g).
 Ported from `ch4_init_gridcell_balance_check` in `ch4Mod.F90`.
 """
 function ch4_init_gridcell_balance_check!(ch4::CH4Data,
-                                           mask_nolake::BitVector,
-                                           mask_lake::BitVector,
+                                           mask_nolake::AbstractVector{Bool},
+                                           mask_lake::AbstractVector{Bool},
                                            col_gridcell::Vector{Int},
                                            col_wtgcell::Vector{<:Real},
                                            dz::Matrix{<:Real},

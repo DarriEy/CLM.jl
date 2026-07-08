@@ -97,7 +97,7 @@ function active_layer_clean!(al::ActiveLayerData{FT}) where {FT}
 end
 
 """
-    alt_calc!(al::ActiveLayerData, mask_soil::BitVector,
+    alt_calc!(al::ActiveLayerData, mask_soil::AbstractVector{Bool},
               temperature::TemperatureData, col_data::ColumnData,
               grc::GridcellData;
               mon::Int, day::Int, sec::Int, dtime::Int)

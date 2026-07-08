@@ -1147,7 +1147,7 @@ Calculates sunlit and shaded fluxes as described by Bonan et al (2011).
 Ported from subroutine `TwoStream` in `SurfaceAlbedoMod.F90`.
 
 # Arguments
-- `mask_vegsol::BitVector` : mask for vegetated patches with coszen > 0
+- `mask_vegsol::AbstractVector{Bool}` : mask for vegetated patches with coszen > 0
 - `SFonly::Bool`           : if true, only calculate snow-free albedos
 """
 function two_stream!(surfalb::SurfaceAlbedoData,

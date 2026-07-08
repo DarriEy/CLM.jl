@@ -262,7 +262,7 @@ end
 
 Initialize FUN variables at the start of a new FUN period.
 """
-function cnfun_init!(mask_soilp::BitVector, bounds::UnitRange{Int},
+function cnfun_init!(mask_soilp::AbstractVector{Bool}, bounds::UnitRange{Int},
                      fun_params::FUNParams,
                      pftcon::PftConFUN,
                      patch::PatchData,

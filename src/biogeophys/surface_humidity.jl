@@ -177,7 +177,7 @@ needed in the humidity calculations.
 - `waterdiagbulk::WaterDiagnosticBulkData`: water diagnostics (input: frac_h2osfc_col, frac_sno_eff_col; output: qg_snow_col, qg_soil_col, qg_col, qg_h2osfc_col, dqgdT_col)
 - `forc_pbot::Vector{<:Real}`: atmospheric pressure, downscaled to column (Pa)
 - `forc_q::Vector{<:Real}`: atmospheric specific humidity, downscaled to column (kg/kg)
-- `mask_nolakec::BitVector`: non-lake column mask
+- `mask_nolakec::AbstractVector{Bool}`: non-lake column mask
 - `bounds::UnitRange{Int}`: column bounds
 
 Ported from `CalculateSurfaceHumidity` in `SurfaceHumidityMod.F90`.

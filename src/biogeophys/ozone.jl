@@ -183,7 +183,7 @@ Ported from `CalcOzoneUptake` in OzoneMod.F90.
 # Arguments
 - `oz::OzoneData`: ozone state (modified in place)
 - `patchdata::PatchData`: patch hierarchy data
-- `mask_exposedvegp::BitVector`: mask for non-snow-covered vegetation patches
+- `mask_exposedvegp::AbstractVector{Bool}`: mask for non-snow-covered vegetation patches
 - `bounds::UnitRange{Int}`: patch index range
 - `forc_pbot::Vector{<:Real}`: atmospheric pressure (Pa), column-indexed
 - `forc_th::Vector{<:Real}`: atmospheric potential temperature (K), column-indexed

@@ -110,7 +110,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    compute_fsat_topmodel!(mask_hydrology::BitVector, bounds_col::UnitRange{Int},
+    compute_fsat_topmodel!(mask_hydrology::AbstractVector{Bool}, bounds_col::UnitRange{Int},
                            frost_table::Vector{<:Real},
                            zwt::Vector{<:Real},
                            zwt_perched::Vector{<:Real},
@@ -128,7 +128,7 @@ table depth.
 
 Ported from `ComputeFsatTopmodel` in `SaturatedExcessRunoffMod.F90`.
 """
-function compute_fsat_topmodel!(mask_hydrology::BitVector,
+function compute_fsat_topmodel!(mask_hydrology::AbstractVector{Bool},
                                  bounds_col::UnitRange{Int},
                                  frost_table::Vector{<:Real},
                                  zwt::Vector{<:Real},
@@ -151,7 +151,7 @@ function compute_fsat_topmodel!(mask_hydrology::BitVector,
 end
 
 """
-    compute_fsat_vic!(mask_hydrology::BitVector, bounds_col::UnitRange{Int},
+    compute_fsat_vic!(mask_hydrology::AbstractVector{Bool}, bounds_col::UnitRange{Int},
                       b_infil::Vector{<:Real},
                       top_max_moist::Vector{<:Real},
                       top_moist_limited::Vector{<:Real},
@@ -166,7 +166,7 @@ fsat is equivalent to A in VIC papers.
 
 Ported from `ComputeFsatVic` in `SaturatedExcessRunoffMod.F90`.
 """
-function compute_fsat_vic!(mask_hydrology::BitVector,
+function compute_fsat_vic!(mask_hydrology::AbstractVector{Bool},
                             bounds_col::UnitRange{Int},
                             b_infil::Vector{<:Real},
                             top_max_moist::Vector{<:Real},

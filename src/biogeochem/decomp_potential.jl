@@ -350,7 +350,7 @@ Corresponds to `SoilBiogeochemPotential` in `SoilBiogeochemPotentialMod.F90`.
 - `ns::SoilBiogeochemNitrogenStateData`: nitrogen state data (in)
 - `st::SoilBiogeochemStateData`: biogeochem state data (in: nue_decomp_cascade_col)
 - `cascade_con::DecompCascadeConData`: cascade configuration
-- `mask_bgc_soilc::BitVector`: mask for BGC soil columns
+- `mask_bgc_soilc::AbstractVector{Bool}`: mask for BGC soil columns
 - `bounds::UnitRange{Int}`: column bounds
 - `nlevdecomp::Int`: number of decomposition levels
 - `ndecomp_pools::Int`: number of decomposition pools

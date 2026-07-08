@@ -95,7 +95,7 @@ resistance depending on `surface_resistance_ctrl.soil_resis_method`.
 - `waterstatebulk::WaterStateBulkData`: water state (h2osoi_ice_col, h2osoi_liq_col via ws)
 - `waterdiagbulk::WaterDiagnosticBulkData`: water diagnostics (frac_sno_col, frac_h2osfc_col)
 - `temperature::TemperatureData`: temperature state (t_soisno_col)
-- `mask_nolakec::BitVector`: non-lake column mask
+- `mask_nolakec::AbstractVector{Bool}`: non-lake column mask
 - `bounds::UnitRange{Int}`: column bounds
 
 Ported from `calc_soilevap_resis` in `SurfaceResistanceMod.F90`.

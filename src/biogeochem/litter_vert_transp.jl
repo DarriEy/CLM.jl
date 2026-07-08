@@ -443,7 +443,7 @@ Ported from `SoilBiogeochemLittVertTransp` in `SoilBiogeochemLittVertTranspMod.F
 - `cascade_con::DecompCascadeConData`    : decomposition cascade configuration (in)
 - `active_layer::ActiveLayerData`        : active layer data (in)
 - `params::LitterVertTranspParams`       : parameters (in)
-- `mask_bgc_soilc::BitVector`            : soil column mask (in)
+- `mask_bgc_soilc::AbstractVector{Bool}`            : soil column mask (in)
 - `bounds::UnitRange{Int}`               : column index range (in)
 - `dtime::Float64`                       : timestep size (s) (in)
 - `nlevdecomp::Int`                      : number of decomposition levels (in)
@@ -467,7 +467,7 @@ function litter_vert_transp!(
         cascade_con::DecompCascadeConData,
         active_layer::ActiveLayerData,
         params::LitterVertTranspParams;
-        mask_bgc_soilc::BitVector,
+        mask_bgc_soilc::AbstractVector{Bool},
         bounds::UnitRange{Int},
         dtime::Real,
         nlevdecomp::Int,

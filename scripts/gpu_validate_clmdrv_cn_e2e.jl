@@ -56,13 +56,23 @@ function main(backend)
         drv!(cfg, inst_d, filt_d, filt_ia_d, boundsB, ps_d); Metal.synchronize()
     catch e
         msg = sprint(showerror, e)
+        bt = stacktrace(catch_backtrace())
         kern = match(r"gpu_(_?\w+kernel!?)", msg)
         arg = match(r"Argument (\d+) to your kernel function is of type (\w+\{Float64\})", msg)
         println("\n  ✗ COMPOSITION LEAK on device:")
-        kern !== nothing && println("      leaking kernel: ", kern.captures[1])
-        arg !== nothing && @printf("      arg %s is host %s (needs _to_backend_like)\n", arg.captures[1], arg.captures[2])
-        kern === nothing && arg === nothing && println("      ", first(split(msg, "\n")))
-        println("\n  → fix that kernel's launch (move the host constant to the state backend), then re-run.")
+        println("      ", first(split(msg, "\n")))
+        kern !== nothing && println("      leaking kernel: ", kern.captures[1], " (host-constant arg → _to_backend_like)")
+        arg !== nothing && @printf("      arg %s is host %s\n", arg.captures[1], arg.captures[2])
+        # first few CLM src frames — where the leak actually is (esp. for scalar-indexing)
+        shown = 0
+        for fr in bt
+            s = string(fr.file)
+            if occursin("/src/", s) && occursin("CLM", s) && !occursin("kernels.jl", s)
+                println("      at ", basename(s), ":", fr.line, "  ", fr.func); shown += 1
+                shown >= 5 && break
+            end
+        end
+        println("\n  → fix that site (move host constant / loosen mask type / kernelize the host loop), then re-run.")
         return 1
     end
     println("  DEVICE clm_drv! (use_cn=true) COMPLETED — composite runs on $name.\n")

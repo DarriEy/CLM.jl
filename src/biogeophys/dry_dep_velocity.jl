@@ -504,7 +504,7 @@ end
 
 """
     depvel_compute!(dd::DryDepVelocityData,
-                    mask_patch::BitVector,
+                    mask_patch::AbstractVector{Bool},
                     bounds_patch::UnitRange{Int},
                     patch_gridcell::Vector{Int},
                     patch_column::Vector{Int},
@@ -554,7 +554,7 @@ Arguments:
 Ported from `DryDepVelocity` subroutine in `DryDepVelocity.F90`.
 """
 function depvel_compute!(dd::DryDepVelocityData,
-                         mask_patch::BitVector,
+                         mask_patch::AbstractVector{Bool},
                          bounds_patch::UnitRange{Int},
                          patch_gridcell::Vector{Int},
                          patch_column::Vector{Int},
@@ -636,7 +636,7 @@ end
     drydep_p2g!(dd::DryDepVelocityData,
                 ddvel_grc::Matrix{<:Real},
                 bounds_patch::UnitRange{Int},
-                mask_patch::BitVector,
+                mask_patch::AbstractVector{Bool},
                 patch_gridcell::Vector{Int},
                 wtgcell::Vector{<:Real},
                 ng::Int)
@@ -649,7 +649,7 @@ Ported from `DryDepVelocity%p2g` in `DryDepVelocity.F90`.
 function drydep_p2g!(dd::DryDepVelocityData,
                      ddvel_grc::Matrix{<:Real},
                      bounds_patch::UnitRange{Int},
-                     mask_patch::BitVector,
+                     mask_patch::AbstractVector{Bool},
                      patch_gridcell::Vector{Int},
                      wtgcell::Vector{<:Real},
                      ng::Int)

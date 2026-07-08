@@ -270,8 +270,8 @@ nitrogen flux, carbon state, and nitrogen state types. Those methods are
 not yet ported; this function documents the call sequence as a placeholder.
 """
 function cn_vegetation_init_each_timestep!(veg::CNVegetationData;
-                                            mask_soilc::BitVector,
-                                            mask_soilp::BitVector,
+                                            mask_soilc::AbstractVector{Bool},
+                                            mask_soilp::AbstractVector{Bool},
                                             bounds_col::UnitRange{Int},
                                             bounds_patch::UnitRange{Int})
     cfg = veg.config
@@ -309,9 +309,9 @@ Should be called after DynamicAreaConservation.
 Ported from `InitColumnBalance` in `CNVegetationFacade.F90`.
 """
 function cn_vegetation_init_column_balance!(veg::CNVegetationData;
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
-        mask_allc::BitVector = mask_bgc_soilc,
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
+        mask_allc::AbstractVector{Bool} = mask_bgc_soilc,
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         soilbgc_cs::SoilBiogeochemCarbonStateData,
@@ -351,9 +351,9 @@ Should be called before DynamicAreaConservation.
 Ported from `InitGridcellBalance` in `CNVegetationFacade.F90`.
 """
 function cn_vegetation_init_gridcell_balance!(veg::CNVegetationData;
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
-        mask_allc::BitVector = mask_bgc_soilc,
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
+        mask_allc::AbstractVector{Bool} = mask_bgc_soilc,
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         soilbgc_cs::SoilBiogeochemCarbonStateData,
@@ -396,12 +396,12 @@ Can be called for either `use_cn` or `use_fates_bgc`.
 Ported from `EcosystemDynamicsPreDrainage` in `CNVegetationFacade.F90`.
 """
 function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
-        mask_pcropp::BitVector = falses(0),
-        mask_soilnopcropp::BitVector = falses(0),
-        mask_exposedvegp::BitVector = falses(0),
-        mask_noexposedvegp::BitVector = falses(0),
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
+        mask_pcropp::AbstractVector{Bool} = falses(0),
+        mask_soilnopcropp::AbstractVector{Bool} = falses(0),
+        mask_exposedvegp::AbstractVector{Bool} = falses(0),
+        mask_noexposedvegp::AbstractVector{Bool} = falses(0),
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         nlevdecomp::Int,
@@ -464,8 +464,8 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         is_first_step::Bool = false,
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
-        mask_actfirec::BitVector = falses(length(bounds_col)),
-        mask_actfirep::BitVector = falses(length(bounds_patch)))
+        mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
+        mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
 
     # crop_inst%CropIncrementYear — not yet ported
 
@@ -582,11 +582,11 @@ Should only be called if `use_cn` or `use_fates_bgc` is true.
 Ported from `EcosystemDynamicsPostDrainage` in `CNVegetationFacade.F90`.
 """
 function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
-        mask_allc::BitVector = mask_bgc_soilc,
-        mask_actfirec::BitVector = falses(0),
-        mask_actfirep::BitVector = falses(0),
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
+        mask_allc::AbstractVector{Bool} = mask_bgc_soilc,
+        mask_actfirec::AbstractVector{Bool} = falses(0),
+        mask_actfirep::AbstractVector{Bool} = falses(0),
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         nlevdecomp::Int,
@@ -675,7 +675,7 @@ Should only be called if `use_cn` or `use_fates_bgc` is true.
 Ported from `BalanceCheck` in `CNVegetationFacade.F90`.
 """
 function cn_vegetation_balance_check!(veg::CNVegetationData;
-        mask_bgc_soilc::BitVector,
+        mask_bgc_soilc::AbstractVector{Bool},
         bounds_col::UnitRange{Int},
         nstep_since_startup::Int = 1,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,

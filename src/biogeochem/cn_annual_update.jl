@@ -23,8 +23,8 @@ and annual average 2-m air temperature for the end-of-year columns.
 Ported from `CNAnnualUpdate` in `CNAnnualUpdateMod.F90`.
 
 # Arguments
-- `mask_bgc_soilc::BitVector` : column mask for BGC soil columns
-- `mask_bgc_vegp::BitVector`  : patch mask for BGC vegetation patches
+- `mask_bgc_soilc::AbstractVector{Bool}` : column mask for BGC soil columns
+- `mask_bgc_vegp::AbstractVector{Bool}`  : patch mask for BGC vegetation patches
 - `bounds_c::UnitRange{Int}`  : column index range
 - `bounds_p::UnitRange{Int}`  : patch index range
 - `col::ColumnData`           : column-level data (is_fates, patchi, patchf)

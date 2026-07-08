@@ -470,7 +470,7 @@ function p2c_irrig!(
     col_out::Vector{<:Real},
     patch_in::Vector{<:Real},
     patch_data::PatchData,
-    mask_soilc::BitVector,
+    mask_soilc::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int}
 )
@@ -636,7 +636,7 @@ function calc_irrigation_needed!(
     col_data::ColumnData,
     grc::GridcellData,
     patch_data::PatchData,
-    mask_exposedveg::BitVector,
+    mask_exposedveg::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     bounds_g::UnitRange{Int},
@@ -780,8 +780,8 @@ function calc_bulk_withdrawals!(
     soilstate::SoilStateData,
     col_data::ColumnData,
     patch_data::PatchData,
-    mask_soilc::BitVector,
-    mask_soilp::BitVector,
+    mask_soilc::AbstractVector{Bool},
+    mask_soilp::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     nlevsoi::Int,
@@ -843,7 +843,7 @@ Ported from `CalcTotalGWUnconIrrig` in `IrrigationMod.F90`.
 """
 function calc_total_gw_uncon_irrig!(
     waterflux::WaterFluxData,
-    mask_soilc::BitVector,
+    mask_soilc::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     nlevsoi::Int
 )
@@ -886,8 +886,8 @@ function calc_application_fluxes!(
     qflx_gw_demand_bulk_patch::Vector{<:Real},
     qflx_gw_demand_bulk_col::Vector{<:Real},
     patch_data::PatchData,
-    mask_soilc::BitVector,
-    mask_soilp::BitVector,
+    mask_soilc::AbstractVector{Bool},
+    mask_soilp::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int}
 )
@@ -971,8 +971,8 @@ function calc_irrigation_fluxes!(
     waterfluxbulk::WaterFluxBulkData,
     col_data::ColumnData,
     patch_data::PatchData,
-    mask_soilc::BitVector,
-    mask_soilp::BitVector,
+    mask_soilc::AbstractVector{Bool},
+    mask_soilp::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int},
     nlevsoi::Int,

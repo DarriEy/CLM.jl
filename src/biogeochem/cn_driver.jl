@@ -1228,10 +1228,10 @@ Ported from `CNDriverLeaching` in `CNDriverMod.F90`.
 function cn_driver_leaching!(
         config::CNDriverConfig;
         # Masks
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
-        mask_actfirec::BitVector = falses(0),
-        mask_actfirep::BitVector = falses(0),
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
+        mask_actfirec::AbstractVector{Bool} = falses(0),
+        mask_actfirep::AbstractVector{Bool} = falses(0),
         # Bounds
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
@@ -1302,9 +1302,9 @@ This function documents the call sequence.
 """
 function cn_driver_summarize_states!(
         config::CNDriverConfig;
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
-        mask_allc::BitVector = mask_bgc_soilc,
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
+        mask_allc::AbstractVector{Bool} = mask_bgc_soilc,
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         cnveg_cs::CNVegCarbonStateData,
@@ -1351,8 +1351,8 @@ This function documents the call sequence.
 """
 function cn_driver_summarize_fluxes!(
         config::CNDriverConfig;
-        mask_bgc_soilc::BitVector,
-        mask_bgc_vegp::BitVector,
+        mask_bgc_soilc::AbstractVector{Bool},
+        mask_bgc_vegp::AbstractVector{Bool},
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         cnveg_cf::CNVegCarbonFluxData,

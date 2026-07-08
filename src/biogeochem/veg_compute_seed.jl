@@ -184,7 +184,7 @@ in terms of gC/m2; these amounts are converted to the appropriate species
 amount internally.
 
 # Arguments
-- `mask_soilp::BitVector`: mask over soil patches (including inactive)
+- `mask_soilp::AbstractVector{Bool}`: mask over soil patches (including inactive)
 - `bounds::UnitRange{Int}`: patch index range
 - `patch::PatchData`: patch data (for itype)
 - `pftcon_data::PftconType`: PFT constants
