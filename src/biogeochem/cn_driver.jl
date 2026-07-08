@@ -200,6 +200,11 @@ function cn_driver_no_leaching!(
         # supplied it is reused across steps so the sparse index memoization survives;
         # a fresh one is built each step otherwise (correct but slower).
         soil_matrix_state = nothing,
+        # Caller-owned persistent veg-matrix structure workspaces (CNVegMatrixSolveState).
+        # Supplied for a GPU matrix solve (built once on the host, reused device-side); a
+        # fresh rebuild each step otherwise. See cn_veg_matrix_solve_c!/_n!'s `state`.
+        veg_c_solve_state = nothing,
+        veg_n_solve_state = nothing,
         crop::Union{CropData, Nothing} = nothing,
         photosyns::Union{PhotosynthesisData, Nothing} = nothing,
         canopystate::Union{CanopyStateData, Nothing} = nothing,
@@ -1130,6 +1135,10 @@ function cn_driver_no_leaching!(
             _mcounts = veg_matrix_transfer_counts(_uc)
             _ncpool = _uc ? NVEGPOOL_NATVEG + NVEGPOOL_CROP : NVEGPOOL_NATVEG   # 21 / 18
             _nnpool = _ncpool + 1                                              # 22 / 19 (incl. retransn)
+            # Device backend: when the state arrays live on a GPU, derive the ref prototype
+            # + working precision for the matrix solve (nothing/Float64 keeps the host path).
+            _mref = cnveg_cs.leafc_patch isa Array ? nothing : cnveg_cs.leafc_patch
+            _mFT = eltype(cnveg_cs.leafc_patch)
             if cnveg_cf.ileafst_to_ileafxf_ph == 0
                 cn_veg_matrix_c_topology!(cnveg_cf; use_crop=_uc, nvegcpool=_ncpool)
             end
@@ -1140,7 +1149,8 @@ function cn_driver_no_leaching!(
             cn_veg_matrix_solve_c!(cnveg_cs, cnveg_cf;
                 mask_soilp=mask_bgc_vegp, bounds_patch=bounds_patch,
                 ivt=ivt, woody=woody, npcropmin=npcropmin, nvegcpool=_ncpool,
-                counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep))
+                counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep),
+                ref=_mref, FT=_mFT, state=veg_c_solve_state)
 
             # Matrix-CN veg-N solve (phase 2) — same as C, plus the retranslocation
             # pool (nvegnpool = nvegcpool+1 incl. retransn). The N fire fluxes are computed
@@ -1157,7 +1167,8 @@ function cn_driver_no_leaching!(
             cn_veg_matrix_solve_n!(cnveg_ns, cnveg_nf;
                 mask_soilp=mask_bgc_vegp, bounds_patch=bounds_patch,
                 ivt=ivt, npcropmin=npcropmin, nvegnpool=_nnpool,
-                counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep))
+                counts=_mcounts, dt=dt, num_actfirep=count(mask_actfirep),
+                ref=_mref, FT=_mFT, state=veg_n_solve_state)
         end
 
         # C14Decay — not yet ported
@@ -1184,7 +1195,9 @@ function cn_driver_no_leaching!(
             # direct decomp-pool addition under use_soil_matrixcn. dwt enters via the
             # persistent soilbgc_nf/cf.matrix_Cinput/Ninput_col (accumulated in dyn_subgrid).
             transient_landcover=transient_landcover, soilbgc_nf=soilbgc_nf,
-            soil_matrix_state=soil_matrix_state)
+            soil_matrix_state=soil_matrix_state,
+            ref=(soilbgc_cs.decomp_cpools_vr_col isa Array ? nothing : soilbgc_cs.decomp_cpools_vr_col),
+            FT=eltype(soilbgc_cs.decomp_cpools_vr_col))
     end
 
     # CNPrecisionControl (post fire) — WIRED
