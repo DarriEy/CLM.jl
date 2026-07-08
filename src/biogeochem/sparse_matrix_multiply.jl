@@ -120,6 +120,11 @@ Adapt.@adapt_structure VectorType
 @inline _backend_vec(::Nothing, v::AbstractVector{<:Integer}) = v
 @inline _backend_vec(ref, v::AbstractVector{<:Integer}) = typeof(ref).name.wrapper(v)
 
+# Host copy of a mask for building the active-unit filter (the comprehension scalar-
+# indexes it — disallowed on a GPU array, so gather a device mask to the host first).
+@inline _mask_to_host(m::Union{Array,BitVector}) = m
+@inline _mask_to_host(m) = Array(m)
+
 # Integer workspace allocation (RI/CI index arrays) matching `_smm_alloc`'s backend rule.
 @inline _smm_alloc_int(::Nothing, fillval::Int, n::Int) = fill(fillval, n)
 @inline _smm_alloc_int(ref, fillval::Int, n::Int) = fill!(similar(ref, Int, n), fillval)

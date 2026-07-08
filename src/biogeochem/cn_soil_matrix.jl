@@ -708,7 +708,7 @@ function cn_soil_matrix!(ms::CNSoilMatrixState, cc;
     Ntri_setup = cc.Ntri_setup
 
     # Active-unit filter; moved onto the device backend for the kernels (host otherwise).
-    filter_host = [c for c in begc:endc if mask_soilc[c]]
+    mh = _mask_to_host(mask_soilc); filter_host = [c for c in begc:endc if mh[c]]
     num_soilc = length(filter_host)
     filter_soilc = _backend_vec(ref, filter_host)
 
@@ -880,7 +880,7 @@ function cn_soil_matrix_akx_accumulate!(ms::CNSoilMatrixState, cc,
         ref=nothing, FT::Type=Float64)
 
     ndecomp_pools_vr = ndecomp_pools * nlevdecomp
-    filter_host = [c for c in begc:endc if mask_soilc[c]]
+    mh = _mask_to_host(mask_soilc); filter_host = [c for c in begc:endc if mh[c]]
     num_soilc = length(filter_host)
     filter_soilc = _backend_vec(ref, filter_host)
     epsi = 1.0e-8

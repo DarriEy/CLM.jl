@@ -592,7 +592,7 @@ function cn_veg_matrix_solve_c!(cs_veg::CNVegCarbonStateData, cf_veg::CNVegCarbo
 
     # Build the active-patch filter from the mask (Fortran filter_soilp); move it onto the
     # device backend when running on the GPU so the kernels get a matching-backend filter.
-    filter_host = Int[p for p in bounds_patch if mask_soilp[p]]
+    mh = _mask_to_host(mask_soilp); filter_host = Int[p for p in bounds_patch if mh[p]]
     num_soilp = length(filter_host)
     if num_soilp == 0
         return nothing
@@ -836,7 +836,7 @@ function cn_veg_matrix_solve_n!(ns_veg::CNVegNitrogenStateData, nf_veg::CNVegNit
                                 state::Union{CNVegMatrixSolveState,Nothing}=nothing)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
-    filter_host = Int[p for p in bounds_patch if mask_soilp[p]]
+    mh = _mask_to_host(mask_soilp); filter_host = Int[p for p in bounds_patch if mh[p]]
     num_soilp = length(filter_host)
     num_soilp == 0 && return nothing
     filter_soilp = _backend_vec(ref, filter_host)
@@ -920,7 +920,7 @@ function cn_veg_matrix_solve_iso!(Xiso::AbstractMatrix{<:Real}, Biso::AbstractMa
                                   state::Union{CNVegMatrixSolveState,Nothing}=nothing)
     dt = Float64(dt)
     begp = first(bounds_patch); endp = last(bounds_patch)
-    filter_host = Int[p for p in bounds_patch if mask_soilp[p]]
+    mh = _mask_to_host(mask_soilp); filter_host = Int[p for p in bounds_patch if mh[p]]
     num_soilp = length(filter_host)
     num_soilp == 0 && return Xiso
     filter_soilp = _backend_vec(ref, filter_host)

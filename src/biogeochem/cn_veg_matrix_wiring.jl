@@ -190,30 +190,55 @@ const _ALLOC_TARGET_CROP = Tuple{Int,Symbol}[
     (IGRAIN, :cpool_to_reproductivec_patch),
     (IGRAIN_ST, :cpool_to_reproductivec_storage_patch)]
 
-function cn_veg_matrix_alloc_c!(cf::CNVegCarbonFluxData,
-        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int};
-        use_crop::Bool = false)
-    fill!(cf.matrix_alloc_patch, 0.0)
-    fill!(cf.matrix_Cinput_patch, 0.0)
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        tot = 0.0
-        for (_, fld) in _ALLOC_TARGET; tot += getfield(cf, fld)[p]; end
-        if use_crop
-            for (_, fld) in _ALLOC_TARGET_CROP; tot += getfield(cf, fld)[p, 1]; end
-        end
-        cf.matrix_Cinput_patch[p] = tot
-        if tot > 0.0
-            for (pool, fld) in _ALLOC_TARGET
-                cf.matrix_alloc_patch[p, pool] = getfield(cf, fld)[p] / tot
-            end
+# Allocation B-input (12 cpool_to_* targets [+2 crop grain]): matrix_Cinput = total
+# allocated rate; matrix_alloc = per-pool fraction. One thread per patch.
+Base.@kwdef struct _MatAllocOut{V,M}
+    alloc::M; cinput::V
+end
+Adapt.@adapt_structure _MatAllocOut
+Base.@kwdef struct _MatAllocIn{V,M}
+    a1::V; a2::V; a3::V; a4::V; a5::V; a6::V; a7::V; a8::V; a9::V; a10::V; a11::V; a12::V
+    g1::M; g2::M
+end
+Adapt.@adapt_structure _MatAllocIn
+
+@kernel function _mat_alloc_c_kernel!(out::_MatAllocOut, in::_MatAllocIn, @Const(mask), use_crop::Bool, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        alloc = out.alloc; cin = out.cinput
+        tot = in.a1[p] + in.a2[p] + in.a3[p] + in.a4[p] + in.a5[p] + in.a6[p] +
+              in.a7[p] + in.a8[p] + in.a9[p] + in.a10[p] + in.a11[p] + in.a12[p]
+        if use_crop; tot += in.g1[p, 1] + in.g2[p, 1]; end
+        cin[p] = tot
+        if tot > 0
+            alloc[p, ILEAF] = in.a1[p] / tot;          alloc[p, ILEAF_ST] = in.a2[p] / tot
+            alloc[p, IFROOT] = in.a3[p] / tot;         alloc[p, IFROOT_ST] = in.a4[p] / tot
+            alloc[p, ILIVESTEM] = in.a5[p] / tot;      alloc[p, ILIVESTEM_ST] = in.a6[p] / tot
+            alloc[p, IDEADSTEM] = in.a7[p] / tot;      alloc[p, IDEADSTEM_ST] = in.a8[p] / tot
+            alloc[p, ILIVECROOT] = in.a9[p] / tot;     alloc[p, ILIVECROOT_ST] = in.a10[p] / tot
+            alloc[p, IDEADCROOT] = in.a11[p] / tot;    alloc[p, IDEADCROOT_ST] = in.a12[p] / tot
             if use_crop
-                for (pool, fld) in _ALLOC_TARGET_CROP
-                    cf.matrix_alloc_patch[p, pool] = getfield(cf, fld)[p, 1] / tot
-                end
+                alloc[p, IGRAIN] = in.g1[p, 1] / tot;  alloc[p, IGRAIN_ST] = in.g2[p, 1] / tot
             end
         end
     end
+end
+
+function cn_veg_matrix_alloc_c!(cf::CNVegCarbonFluxData,
+        mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int};
+        use_crop::Bool = false)
+    fill!(cf.matrix_alloc_patch, zero(eltype(cf.matrix_alloc_patch)))
+    fill!(cf.matrix_Cinput_patch, zero(eltype(cf.matrix_Cinput_patch)))
+    gf(s) = getfield(cf, s)
+    out = _MatAllocOut(; alloc=cf.matrix_alloc_patch, cinput=cf.matrix_Cinput_patch)
+    in_ = _MatAllocIn(;
+        a1=gf(_ALLOC_TARGET[1][2]), a2=gf(_ALLOC_TARGET[2][2]), a3=gf(_ALLOC_TARGET[3][2]), a4=gf(_ALLOC_TARGET[4][2]),
+        a5=gf(_ALLOC_TARGET[5][2]), a6=gf(_ALLOC_TARGET[6][2]), a7=gf(_ALLOC_TARGET[7][2]), a8=gf(_ALLOC_TARGET[8][2]),
+        a9=gf(_ALLOC_TARGET[9][2]), a10=gf(_ALLOC_TARGET[10][2]), a11=gf(_ALLOC_TARGET[11][2]), a12=gf(_ALLOC_TARGET[12][2]),
+        g1=gf(_ALLOC_TARGET_CROP[1][2]), g2=gf(_ALLOC_TARGET_CROP[2][2]))
+    backend = _kernel_backend(cf.matrix_alloc_patch)
+    _mat_alloc_c_kernel!(backend)(out, in_, mask_soilp, use_crop, first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
 
@@ -756,30 +781,50 @@ const _NALLOC_TARGET_CROP = Tuple{Int,Symbol}[
     (IGRAIN, :npool_to_reproductiven_patch),
     (IGRAIN_ST, :npool_to_reproductiven_storage_patch)]
 
+# N allocation B-input: nalloc = per-pool fraction; Ninput = total − retransn_to_npool.
+Base.@kwdef struct _MatNAllocIn{V,M}
+    a1::V; a2::V; a3::V; a4::V; a5::V; a6::V; a7::V; a8::V; a9::V; a10::V; a11::V; a12::V
+    g1::M; g2::M; r2n::V
+end
+Adapt.@adapt_structure _MatNAllocIn
+
+@kernel function _mat_alloc_n_kernel!(out::_MatAllocOut, in::_MatNAllocIn, @Const(mask), use_crop::Bool, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask[p]
+        alloc = out.alloc; nin = out.cinput
+        tot = in.a1[p] + in.a2[p] + in.a3[p] + in.a4[p] + in.a5[p] + in.a6[p] +
+              in.a7[p] + in.a8[p] + in.a9[p] + in.a10[p] + in.a11[p] + in.a12[p]
+        if use_crop; tot += in.g1[p, 1] + in.g2[p, 1]; end
+        if tot > 0
+            alloc[p, ILEAF] = in.a1[p] / tot;          alloc[p, ILEAF_ST] = in.a2[p] / tot
+            alloc[p, IFROOT] = in.a3[p] / tot;         alloc[p, IFROOT_ST] = in.a4[p] / tot
+            alloc[p, ILIVESTEM] = in.a5[p] / tot;      alloc[p, ILIVESTEM_ST] = in.a6[p] / tot
+            alloc[p, IDEADSTEM] = in.a7[p] / tot;      alloc[p, IDEADSTEM_ST] = in.a8[p] / tot
+            alloc[p, ILIVECROOT] = in.a9[p] / tot;     alloc[p, ILIVECROOT_ST] = in.a10[p] / tot
+            alloc[p, IDEADCROOT] = in.a11[p] / tot;    alloc[p, IDEADCROOT_ST] = in.a12[p] / tot
+            if use_crop
+                alloc[p, IGRAIN] = in.g1[p, 1] / tot;  alloc[p, IGRAIN_ST] = in.g2[p, 1] / tot
+            end
+        end
+        nin[p] = tot - in.r2n[p]
+    end
+end
+
 function cn_veg_matrix_alloc_n!(nf::CNVegNitrogenFluxData,
         mask_soilp::AbstractVector{Bool}, bounds_patch::UnitRange{Int};
         use_crop::Bool = false)
-    fill!(nf.matrix_nalloc_patch, 0.0)
-    fill!(nf.matrix_Ninput_patch, 0.0)
-    for p in bounds_patch
-        mask_soilp[p] || continue
-        tot = 0.0
-        for (_, fld) in _NALLOC_TARGET; tot += getfield(nf, fld)[p]; end
-        if use_crop
-            for (_, fld) in _NALLOC_TARGET_CROP; tot += getfield(nf, fld)[p, 1]; end
-        end
-        if tot > 0.0
-            for (pool, fld) in _NALLOC_TARGET
-                nf.matrix_nalloc_patch[p, pool] = getfield(nf, fld)[p] / tot
-            end
-            if use_crop
-                for (pool, fld) in _NALLOC_TARGET_CROP
-                    nf.matrix_nalloc_patch[p, pool] = getfield(nf, fld)[p, 1] / tot
-                end
-            end
-        end
-        nf.matrix_Ninput_patch[p] = tot - nf.retransn_to_npool_patch[p]
-    end
+    fill!(nf.matrix_nalloc_patch, zero(eltype(nf.matrix_nalloc_patch)))
+    fill!(nf.matrix_Ninput_patch, zero(eltype(nf.matrix_Ninput_patch)))
+    gf(s) = getfield(nf, s)
+    out = _MatAllocOut(; alloc=nf.matrix_nalloc_patch, cinput=nf.matrix_Ninput_patch)
+    in_ = _MatNAllocIn(;
+        a1=gf(_NALLOC_TARGET[1][2]), a2=gf(_NALLOC_TARGET[2][2]), a3=gf(_NALLOC_TARGET[3][2]), a4=gf(_NALLOC_TARGET[4][2]),
+        a5=gf(_NALLOC_TARGET[5][2]), a6=gf(_NALLOC_TARGET[6][2]), a7=gf(_NALLOC_TARGET[7][2]), a8=gf(_NALLOC_TARGET[8][2]),
+        a9=gf(_NALLOC_TARGET[9][2]), a10=gf(_NALLOC_TARGET[10][2]), a11=gf(_NALLOC_TARGET[11][2]), a12=gf(_NALLOC_TARGET[12][2]),
+        g1=gf(_NALLOC_TARGET_CROP[1][2]), g2=gf(_NALLOC_TARGET_CROP[2][2]), r2n=nf.retransn_to_npool_patch)
+    backend = _kernel_backend(nf.matrix_nalloc_patch)
+    _mat_alloc_n_kernel!(backend)(out, in_, mask_soilp, use_crop, first(bounds_patch), last(bounds_patch); ndrange = last(bounds_patch))
+    KA.synchronize(backend)
     return nothing
 end
 
