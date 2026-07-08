@@ -19,6 +19,7 @@ import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
 include(joinpath(@__DIR__, "clmdrv_make_data.jl"))
+include(joinpath(@__DIR__, "clmdrv_cn_fixture.jl"))
 mf(x) = mf(Metal.MtlArray, x)
 
 const DRV_ARGS = (true, 1.0, 0.0, 0.0, 0.4091, false, false, "20260101", false)
@@ -44,12 +45,14 @@ function main(backend)
     # ---- host reference ----
     instH, bounds, filtH, filt_iaH, _c, psH = make_driver_data_physical()
     instH.canopystate.frac_veg_nosno_alb_patch .= 1
+    populate_cn_cold!(instH; nc=4, np=6, ng=2)  # finite CN cold state → finite BGC outputs
     drv!(cfg, instH, filtH, filt_iaH, bounds, psH)
     println("  HOST clm_drv! (use_cn=true) completed — the composite runs.")
 
     # ---- device ----
     instB, boundsB, filtB, filt_iaB, _c2, psB = make_driver_data_physical()
     instB.canopystate.frac_veg_nosno_alb_patch .= 1
+    populate_cn_cold!(instB; nc=4, np=6, ng=2)
     inst_d = mf(instB); ps_d = mf(psB); filt_d = mf(filtB); filt_ia_d = mf(filt_iaB)
     inst_d.temperature.t_soisno_col isa Metal.MtlArray || (println("  BLOCKED: adapt."); return 2)
     try
