@@ -33,6 +33,21 @@ to output. This is the top-level entry point for offline CLM simulations.
 # Returns
 - `inst::CLMInstances` — Final state of all CLM data instances
 """
+# Push every (host) array field of `src` into the matching (device) field of `dst`,
+# converting to the destination element type (Float64 host forcing -> Float32 device).
+# Used by the optional GPU path of clm_run! to hand the freshly-downscaled forcing to
+# the device mirror each step.
+function _sync_arrays_convert!(dst, src)
+    T = typeof(src)
+    @inbounds for i in 1:fieldcount(T)
+        s = getfield(src, i); d = getfield(dst, i)
+        if s isa AbstractArray && d isa AbstractArray && !isempty(s) && length(s) == length(d)
+            copyto!(d, eltype(d).(s))
+        end
+    end
+    return nothing
+end
+
 function clm_run!(;
     fsurdat::String,
     paramfile::String,
@@ -58,7 +73,8 @@ function clm_run!(;
     interp_forcing::Bool = false,
     forcing_phase_shift_s::Int = 0,
     overrides::Union{CalibrationOverrides, Nothing} = nothing,
-    step_probe::Union{Function, Nothing} = nothing)
+    step_probe::Union{Function, Nothing} = nothing,
+    device_adapt::Union{Function, Nothing} = nothing)
 
     # ========================================================================
     # Phase 1: Initialize
@@ -266,6 +282,21 @@ function clm_run!(;
     history_writer_init!(hw, fhistory, fields, ng, nc, np)
     verbose && println("CLM.jl: Writing output to: ", fhistory)
 
+    # ---- Optional device (GPU) mirror ----
+    # When `device_adapt` is supplied (e.g. moves the tree to a Metal MtlArray/Float32
+    # backend), keep `inst` as the host forcing-in / history-out shuttle and run clm_drv!
+    # on a device mirror. downscale_forcings! + history_write_step! are host-only, so per
+    # step: read+downscale forcing on host -> push atm2lnd to device -> clm_drv! on device
+    # -> device state -> host view -> lnd2atm! + history on the host view.
+    _use_dev = device_adapt !== nothing
+    inst_d = inst; filt_d = filt; filt_ia_d = filt_ia
+    if _use_dev
+        verbose && println("CLM.jl: building device mirror (device_adapt) …")
+        inst_d = device_adapt(inst)
+        filt_d = device_adapt(filt)
+        filt_ia_d = device_adapt(filt_ia)
+    end
+
     # ========================================================================
     # Phase 4: Time integration loop
     # ========================================================================
@@ -324,31 +355,34 @@ function clm_run!(;
         end_day = is_end_curr_day(tm)
         beg_year = is_beg_curr_year(tm)
 
-        # --- Run driver ---
-        clm_drv!(config, inst, filt, filt_ia, bounds,
-                 doalb, nextsw_cday, declinp1, declin, obliqr,
-                 false, false, "", false;
-                 nstep=tm.nstep,
-                 is_first_step=first_step,
-                 is_beg_curr_day=beg_day,
-                 is_end_curr_day=end_day,
-                 is_beg_curr_year=beg_year,
-                 dtime=Float64(dtime),
-                 mon=mon,
-                 day=d,
-                 photosyns=inst.photosyns)
-
-        # --- Land to atmosphere aggregation ---
-        lnd2atm!(bounds, inst)
-
-        # --- Write history output ---
-        history_write_step!(hw, inst, tm.current_date; is_end_curr_day=end_day)
-
-        # --- Optional per-step diagnostic probe (sub-daily instrumentation) ---
-        # Called after lnd2atm! with the fully-updated instance and the current
-        # time manager, so a caller can record per-timestep state (e.g. sub-daily
-        # h2osfc / frac_h2osfc / surface-water fluxes) without a daily-average tape.
-        step_probe === nothing || step_probe(inst, tm)
+        # --- Run driver (host, or on the device mirror) ---
+        if _use_dev
+            # Hand the freshly-downscaled forcing to the device, run physics on-device,
+            # then pull a host view for the host-only lnd2atm! + history_write_step!.
+            _sync_arrays_convert!(inst_d.atm2lnd, inst.atm2lnd)
+            clm_drv!(config, inst_d, filt_d, filt_ia_d, bounds,
+                     doalb, nextsw_cday, declinp1, declin, obliqr,
+                     false, false, "", false;
+                     nstep=tm.nstep, is_first_step=first_step,
+                     is_beg_curr_day=beg_day, is_end_curr_day=end_day,
+                     is_beg_curr_year=beg_year, dtime=Float64(dtime),
+                     mon=mon, day=d, photosyns=inst_d.photosyns)
+            hview = Adapt.adapt(Array, inst_d)   # device -> host snapshot (perf TODO: field-level sync)
+            lnd2atm!(bounds, hview)
+            history_write_step!(hw, hview, tm.current_date; is_end_curr_day=end_day)
+            step_probe === nothing || step_probe(hview, tm)
+        else
+            clm_drv!(config, inst, filt, filt_ia, bounds,
+                     doalb, nextsw_cday, declinp1, declin, obliqr,
+                     false, false, "", false;
+                     nstep=tm.nstep, is_first_step=first_step,
+                     is_beg_curr_day=beg_day, is_end_curr_day=end_day,
+                     is_beg_curr_year=beg_year, dtime=Float64(dtime),
+                     mon=mon, day=d, photosyns=inst.photosyns)
+            lnd2atm!(bounds, inst)
+            history_write_step!(hw, inst, tm.current_date; is_end_curr_day=end_day)
+            step_probe === nothing || step_probe(inst, tm)
+        end
 
         # --- Progress ---
         if verbose && (step_count % 48 == 0 || step_count == total_steps)

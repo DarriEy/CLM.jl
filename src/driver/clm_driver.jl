@@ -2483,11 +2483,16 @@ function clm_drv_core!(config::CLMDriverConfig,
         if config.use_luna
             acc24_climate_luna!(cs, ps, alb, sa, temp, pch, filt.exposedvegp, bc_patch, dtime)
             if is_end_curr_day
+                # Gather the (few) inputs to host so this control-flow scalar loop is
+                # device-safe; no-op on the host path (Array-of-Array is identity).
+                _lpg  = pch.gridcell isa Array ? pch.gridcell : Array(pch.gridcell)
+                _ldl  = grc.dayl isa Array ? grc.dayl : Array{Float64}(grc.dayl)
+                _lmdl = grc.max_dayl isa Array ? grc.max_dayl : Array{Float64}(grc.max_dayl)
                 _luna_dayl = zeros(np)
                 @inbounds for p in 1:np
-                    g = pch.gridcell[p]
-                    _luna_dayl[p] = smooth_clamp((grc.dayl[g] * grc.dayl[g]) /
-                                                 (grc.max_dayl[g] * grc.max_dayl[g]), 0.01, 1.0)
+                    g = _lpg[p]
+                    _luna_dayl[p] = smooth_clamp((_ldl[g] * _ldl[g]) /
+                                                 (_lmdl[g] * _lmdl[g]), 0.01, 1.0)
                 end
                 acc240_climate_luna!(temp, ps, alb, sa, wdb, fv, pch, filt.exposedvegp, bc_patch,
                     a2l.forc_po2_240_patch, a2l.forc_pco2_240_patch,

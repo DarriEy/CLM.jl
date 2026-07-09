@@ -1831,9 +1831,14 @@ function psn_phs_pass1_update!(ps, mask_patch, col_of_patch, ivt, froot_carbon,
         end
     else
         be = _kernel_backend(smp_l)
+        # host-global pftcon params -> device backend/precision (no-op on host)
+        _FTp = eltype(smp_l)
+        _frl = _to_backend_like(smp_l, _FTp, froot_leaf_pft)
+        _rr  = _to_backend_like(smp_l, _FTp, root_radius_pft)
+        _rd  = _to_backend_like(smp_l, _FTp, root_density_pft)
         _psn_phs_pass1_kernel!(be)(mask_patch, col_of_patch, ivt, phs_params,
-            froot_carbon, rootfr, dz, tsai, tlai, froot_leaf_pft, root_radius_pft,
-            root_density_pft, hksat, hk_l, smp_l, z_col, k_soil_root,
+            froot_carbon, rootfr, dz, tsai, tlai, _frl, _rr,
+            _rd, hksat, hk_l, smp_l, z_col, k_soil_root,
             root_conductance_out, soil_conductance_out, T(c_to_b),
             T(croot_lateral_length), nlevsoi, ROOT_SEG; ndrange = length(bounds_patch))
         KA.synchronize(be)

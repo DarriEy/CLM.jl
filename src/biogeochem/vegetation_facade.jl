@@ -891,14 +891,21 @@ function get_froot_carbon_patch(veg::CNVegetationData,
         return veg.cnveg_carbonstate_inst.frootc_patch[bounds_patch]
     else
         FT = eltype(tlai)
+        # Small SP-mode estimate: compute on host (inputs gathered if on device), then
+        # place the result on the inputs' backend so it composes with device downstream.
+        # No-op on the host path (Array-of-Array is identity) → byte-identical.
+        tlaiH = tlai isa Array ? tlai : Array(tlai)
+        slatopH = slatop isa Array ? slatop : Array(slatop)
+        frootH = froot_leaf isa Array ? froot_leaf : Array(froot_leaf)
+        ivtH = ivt isa Array ? ivt : Array(ivt)
         result = zeros(FT, length(bounds_patch))
         for (i, p) in enumerate(bounds_patch)
-            pft = ivt[p]
-            if slatop[pft] > 0.0
-                result[i] = tlai[p] / slatop[pft] * froot_leaf[pft]
+            pft = ivtH[p]
+            if slatopH[pft] > 0.0
+                result[i] = tlaiH[p] / slatopH[pft] * frootH[pft]
             end
         end
-        return result
+        return _to_backend_like(tlai, FT, result)
     end
 end
 
@@ -922,14 +929,19 @@ function get_croot_carbon_patch(veg::CNVegetationData,
         return veg.cnveg_carbonstate_inst.livecrootc_patch[bounds_patch]
     else
         FT = eltype(tlai)
+        tlaiH = tlai isa Array ? tlai : Array(tlai)
+        slatopH = slatop isa Array ? slatop : Array(slatop)
+        stemH = stem_leaf isa Array ? stem_leaf : Array(stem_leaf)
+        crootH = croot_stem isa Array ? croot_stem : Array(croot_stem)
+        ivtH = ivt isa Array ? ivt : Array(ivt)
         result = zeros(FT, length(bounds_patch))
         for (i, p) in enumerate(bounds_patch)
-            pft = ivt[p]
-            if slatop[pft] > 0.0
-                result[i] = tlai[p] / slatop[pft] * stem_leaf[pft] * croot_stem[pft]
+            pft = ivtH[p]
+            if slatopH[pft] > 0.0
+                result[i] = tlaiH[p] / slatopH[pft] * stemH[pft] * crootH[pft]
             end
         end
-        return result
+        return _to_backend_like(tlai, FT, result)
     end
 end
 

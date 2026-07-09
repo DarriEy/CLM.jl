@@ -349,9 +349,17 @@ function read_monthly_vegetation!(sp::SatellitePhenologyData,
                                    months::Tuple{Int,Int},
                                    noveg::Int = 0,
                                    maxveg::Int = 78)
+    # The monthly veg arrays are read host-side from surfdata each month; move them
+    # onto the output arrays' backend+precision so a device launch isn't handed host
+    # Float64 constants (no-op on the host path → byte-identical).
+    _FT = eltype(sp.mlai2t)
+    _ml = _to_backend_like(sp.mlai2t, _FT, monthly_lai)
+    _ms = _to_backend_like(sp.mlai2t, _FT, monthly_sai)
+    _mt = _to_backend_like(sp.mlai2t, _FT, monthly_height_top)
+    _mb = _to_backend_like(sp.mlai2t, _FT, monthly_height_bot)
     _launch!(_satphen_monthly_kernel!, sp.mlai2t, sp.msai2t, sp.mhvt2t, sp.mhvb2t,
         canopystate.mlaidiff_patch, patch.gridcell, patch.itype,
-        monthly_lai, monthly_sai, monthly_height_top, monthly_height_bot,
+        _ml, _ms, _mt, _mb,
         months[1], months[2], noveg, first(bounds_patch), last(bounds_patch);
         ndrange = length(patch.itype))
     return nothing

@@ -726,10 +726,10 @@ function acc240_climate_luna!(temperature::TemperatureData,
                               patchdata::PatchData,
                               mask_patch::AbstractVector{Bool},
                               bounds::UnitRange{Int},
-                              oair::Vector{<:Real},
-                              cair::Vector{<:Real},
-                              rb::Vector{<:Real},
-                              rh::Vector{<:Real},
+                              oair::AbstractVector{<:Real},
+                              cair::AbstractVector{<:Real},
+                              rb::AbstractVector{<:Real},
+                              rh::AbstractVector{<:Real},
                               dtime::Real)
     isempty(bounds) && return nothing
     FT = eltype(temperature.t_veg_day_patch)
@@ -821,6 +821,19 @@ end
 
 Update Vcmax25 and Jmax25 profiles using the LUNA nitrogen allocation model.
 """
+# copyto! every same-length array field of a device struct `dev` from its host
+# copy `hst` (used by the LUNA host-fallback to scatter results back to the device).
+@inline function _luna_scatter_back!(dev, hst)
+    T = typeof(dev)
+    for i in 1:fieldcount(T)
+        d = getfield(dev, i); h = getfield(hst, i)
+        if d isa AbstractArray && h isa AbstractArray && !isempty(d) && length(d) == length(h)
+            copyto!(d, h)
+        end
+    end
+    return nothing
+end
+
 function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
                                          temperature::TemperatureData,
                                          canopystate::CanopyStateData,
@@ -832,19 +845,46 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
                                          gridcell::GridcellData,
                                          mask_patch::AbstractVector{Bool},
                                          bounds::UnitRange{Int},
-                                         dayl_factor::Vector{<:Real},
-                                         forc_pbot10::Vector{<:Real},
-                                         CO2_p240::Vector{<:Real},
-                                         O2_p240::Vector{<:Real},
-                                         c3psn_pft::Vector{<:Real},
-                                         slatop_pft::Vector{<:Real},
-                                         leafcn_pft::Vector{<:Real},
-                                         rhol_pft::Matrix{<:Real},
-                                         taul_pft::Matrix{<:Real},
-                                         o3coefjmax::Vector{<:Real},
+                                         dayl_factor::AbstractVector{<:Real},
+                                         forc_pbot10::AbstractVector{<:Real},
+                                         CO2_p240::AbstractVector{<:Real},
+                                         O2_p240::AbstractVector{<:Real},
+                                         c3psn_pft::AbstractVector{<:Real},
+                                         slatop_pft::AbstractVector{<:Real},
+                                         leafcn_pft::AbstractVector{<:Real},
+                                         rhol_pft::AbstractMatrix{<:Real},
+                                         taul_pft::AbstractMatrix{<:Real},
+                                         o3coefjmax::AbstractVector{<:Real},
                                          luna_params::LunaParamsData,
                                          dtime::Real,
                                          nlevcan_val::Int)
+    # ----------------------------------------------------------------------
+    # Host-fallback bridge — the LUNA optimization core (nitrogen_allocation!/
+    # investments!/photosynthesis_luna!/nue_* chain, ~250 bare Float64 constants)
+    # is not device-kernelized. When clm_drv! runs on a GPU, gather the touched
+    # inst sub-state to the host, run the host solve (end-of-day cadence → ~365x/yr,
+    # negligible), and scatter every touched struct back. No-op zero-overhead
+    # passthrough on the host path (byte-identical).
+    # ----------------------------------------------------------------------
+    if !(photosyns.vcmx25_z_patch isa Array)
+        psH = Adapt.adapt(Array, photosyns); tpH = Adapt.adapt(Array, temperature)
+        caH = Adapt.adapt(Array, canopystate); saH = Adapt.adapt(Array, surfalb)
+        soH = Adapt.adapt(Array, solarabs); wdH = Adapt.adapt(Array, waterdiag)
+        fvH = Adapt.adapt(Array, frictionvel); pdH = Adapt.adapt(Array, patchdata)
+        gcH = Adapt.adapt(Array, gridcell)
+        update_photosynthesis_capacity!(psH, tpH, caH, saH, soH, wdH, fvH, pdH, gcH,
+            Array(mask_patch), bounds, Array(dayl_factor), Array(forc_pbot10),
+            Array(CO2_p240), Array(O2_p240), Array(c3psn_pft), Array(slatop_pft),
+            Array(leafcn_pft), Array(rhol_pft), Array(taul_pft), Array(o3coefjmax),
+            luna_params, dtime, nlevcan_val)
+        for (dev, hst) in ((photosyns, psH), (temperature, tpH), (canopystate, caH),
+                           (surfalb, saH), (solarabs, soH), (waterdiag, wdH),
+                           (frictionvel, fvH), (patchdata, pdH), (gridcell, gcH))
+            _luna_scatter_back!(dev, hst)
+        end
+        return nothing
+    end
+
     fnps = 0.15
     FT = eltype(dayl_factor)
     FNCa_z = zeros(FT, nlevcan_val)
