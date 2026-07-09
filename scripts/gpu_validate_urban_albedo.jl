@@ -137,8 +137,67 @@ function main(backend)
         @printf("  [%s] %-20s rel=%.2e over %d\n", ok ? "PASS" : "FAIL", nm, r, n)
     end
 
+    # ---- WHOLE urban_albedo! orchestrator (host vs Metal) ----
+    # Full urban fixture: 1 landunit, 5 columns (roof/sunwall/shadewall/imperv/perv),
+    # 5 patches, sun up + snow (exercises init + snow-combine + net-solar + mapping).
+    function mk_urban()
+        ncu = 5; npu = 5; ngu = 1; hwr = 1.0
+        lun = CLM.LandunitData(); CLM.landunit_init!(lun, 1)
+        lun.gridcell[1] = 1; lun.coli[1] = 1; lun.colf[1] = ncu
+        lun.canyon_hwr[1] = hwr; lun.wtroad_perv[1] = 0.4
+        lun.urbpoi[1] = true; lun.itype[1] = CLM.ISTURB_MIN
+        col = CLM.ColumnData(); CLM.column_init!(col, ncu)
+        ctypes = [CLM.ICOL_ROOF, CLM.ICOL_SUNWALL, CLM.ICOL_SHADEWALL, CLM.ICOL_ROAD_IMPERV, CLM.ICOL_ROAD_PERV]
+        for c in 1:ncu; col.landunit[c] = 1; col.itype[c] = ctypes[c]; col.snl[c] = -1; end
+        pch = CLM.PatchData(); CLM.patch_init!(pch, npu)
+        for p in 1:npu; pch.column[p] = p; pch.landunit[p] = 1; end
+        up = CLM.UrbanParamsData(); CLM.urbanparams_init!(up, 1; numrad=numrad)
+        for ib in 1:numrad
+            up.alb_roof_dir[1,ib]=0.20; up.alb_roof_dif[1,ib]=0.20
+            up.alb_improad_dir[1,ib]=0.10; up.alb_improad_dif[1,ib]=0.10
+            up.alb_perroad_dir[1,ib]=0.15; up.alb_perroad_dif[1,ib]=0.15
+            up.alb_wall_dir[1,ib]=0.25; up.alb_wall_dif[1,ib]=0.25
+        end
+        up.vf_sr[1] = sqrt(hwr^2+1.0)-hwr; up.vf_wr[1] = 0.5*(1.0-up.vf_sr[1])
+        up.vf_sw[1] = 0.5*(hwr+1.0-sqrt(hwr^2+1.0))/hwr; up.vf_rw[1] = up.vf_sw[1]
+        up.vf_ww[1] = 1.0 - up.vf_sw[1] - up.vf_rw[1]
+        sa = CLM.SolarAbsorbedData(); CLM.solarabs_init!(sa, npu, 1); CLM.solarabs_init_cold!(sa, 1:1)
+        sb = CLM.SurfaceAlbedoData(); CLM.surfalb_init!(sb, npu, ncu, ngu); CLM.surfalb_init_cold!(sb, 1:ncu, 1:npu)
+        sb.coszen_col[1:ncu] .= 0.5
+        wsb = CLM.WaterStateBulkData(); CLM.waterstatebulk_init!(wsb, ncu, npu, 1, ngu)
+        wsb.ws.h2osno_no_layers_col[1:ncu] .= 10.0
+        nlevtot = size(wsb.ws.h2osoi_ice_col, 2); nlsno = CLM.varpar.nlevsno
+        for c in 1:ncu, j in 1:nlevtot
+            wsb.ws.h2osoi_ice_col[c,j] = j <= nlsno ? 3.0 : 0.0
+            wsb.ws.h2osoi_liq_col[c,j] = j <= nlsno ? 1.0 : 0.0
+        end
+        wdb = CLM.WaterDiagnosticBulkData(); CLM.waterdiagnosticbulk_init!(wdb, ncu, npu, 1, ngu)
+        wdb.frac_sno_col[1:ncu] .= 0.3
+        ml = trues(1); mc = trues(ncu); mp = trues(npu)
+        return (lun, col, pch, wsb, wdb, up, sa, sb, ml, mc, mp)
+    end
+    (lunH, colH, pchH, wsbH, wdbH, upH, saH2, sbH, mlH, mcH, mpH) = mk_urban()
+    CLM.urban_albedo!(mlH, mcH, mpH, lunH, colH, pchH, wsbH, wdbH, upH, saH2, sbH)
+    (lunB, colB, pchB, wsbB, wdbB, upB, saB2, sbB, mlB, mcB, mpB) = mk_urban()
+    saB2d = mf(saB2); sbB2d = mf(sbB)
+    CLM.urban_albedo!(mf(mlB), mf(mcB), mf(mpB), mf(lunB), mf(colB), mf(pchB), mf(wsbB),
+                      mf(wdbB), mf(upB), saB2d, sbB2d)
+    Metal.synchronize()
+    orch = [("albd", sbH.albd_patch, sbB2d.albd_patch), ("albi", sbH.albi_patch, sbB2d.albi_patch),
+            ("albgrd", sbH.albgrd_col, sbB2d.albgrd_col), ("albgri", sbH.albgri_col, sbB2d.albgri_col),
+            ("fabd", sbH.fabd_patch, sbB2d.fabd_patch), ("ftdd", sbH.ftdd_patch, sbB2d.ftdd_patch),
+            ("ftii", sbH.ftii_patch, sbB2d.ftii_patch), ("albd_hst", sbH.albd_hst_patch, sbB2d.albd_hst_patch),
+            ("albgrd_hst", sbH.albgrd_hst_col, sbB2d.albgrd_hst_col),
+            ("sabs_roof_dir", saH2.sabs_roof_dir_lun, saB2d.sabs_roof_dir_lun),
+            ("sabs_improad_dif", saH2.sabs_improad_dif_lun, saB2d.sabs_improad_dif_lun)]
+    println("\n  --- WHOLE urban_albedo! orchestrator ---")
+    for (nm, H, D) in orch
+        r, n = reldiff(H, D); ncmp += n; ok = r < 1f-3; ok || (nfail += 1)
+        @printf("  [%s] %-18s rel=%.2e over %d\n", ok ? "PASS" : "FAIL", nm, r, n)
+    end
+
     println()
-    println(nfail == 0 ? "  URBAN CANYON-RT + wasteheat kernels MATCH host on $name over $ncmp finite outputs" :
+    println(nfail == 0 ? "  URBAN CANYON-RT + wasteheat + FULL orchestrator MATCH host on $name over $ncmp finite outputs" :
                           "  DIVERGENCE ($nfail).")
     return nfail == 0 ? 0 : 1
 end

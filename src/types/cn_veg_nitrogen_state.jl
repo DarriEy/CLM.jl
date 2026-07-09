@@ -650,66 +650,76 @@ Ported from `cnveg_nitrogenstate_type%Summary_nitrogenstate`.
 
 Note: column-level p2c averaging is stubbed out pending subgridAveMod port.
 """
+# --- GPU kernelization (one thread per patch; reductions into LOCAL scalars, each
+#     output written ONCE; crop reproductive accumulation into the storvegn/dispvegn
+#     LOCALS preserves the exact per-k term order → byte-identical). Touched fields
+#     grouped into one @adapt_structure bundle (one Metal buffer arg).
+struct _CVNSumView{V,M}
+    leafn::V; frootn::V; livestemn::V; deadstemn::V; livecrootn::V; deadcrootn::V
+    leafn_storage::V; frootn_storage::V; livestemn_storage::V; deadstemn_storage::V
+    livecrootn_storage::V; deadcrootn_storage::V; leafn_xfer::V; frootn_xfer::V
+    livestemn_xfer::V; deadstemn_xfer::V; livecrootn_xfer::V; deadcrootn_xfer::V
+    npool::V; retransn::V; cropseedn_deficit::V; ntrunc::V
+    reproductiven::M; reproductiven_storage::M; reproductiven_xfer::M
+    dispvegn::V; storvegn::V; totvegn::V; totn::V
+end
+Adapt.@adapt_structure _CVNSumView
+
+@kernel function _cvn_summary_kernel!(@Const(mask), b, @Const(patch_itype),
+        lo::Int, hi::Int, do_crop::Bool, npcropmin::Int, nrepr::Int)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask[p]
+        # displayed vegetation nitrogen, excluding storage (DISPVEGN)
+        dispvegn = b.leafn[p] + b.frootn[p] + b.livestemn[p] +
+                   b.deadstemn[p] + b.livecrootn[p] + b.deadcrootn[p]
+
+        # stored vegetation nitrogen, including retranslocated N pool (STORVEGN)
+        storvegn = b.leafn_storage[p] + b.frootn_storage[p] + b.livestemn_storage[p] +
+                   b.deadstemn_storage[p] + b.livecrootn_storage[p] + b.deadcrootn_storage[p] +
+                   b.leafn_xfer[p] + b.frootn_xfer[p] + b.livestemn_xfer[p] +
+                   b.deadstemn_xfer[p] + b.livecrootn_xfer[p] + b.deadcrootn_xfer[p] +
+                   b.npool[p] + b.retransn[p]
+
+        if do_crop && patch_itype[p] >= npcropmin
+            for k in 1:nrepr
+                dispvegn += b.reproductiven[p, k]
+                storvegn += b.reproductiven_storage[p, k] + b.reproductiven_xfer[p, k]
+            end
+            storvegn += b.cropseedn_deficit[p]
+        end
+
+        b.dispvegn[p] = dispvegn
+        b.storvegn[p] = storvegn
+
+        totvegn = dispvegn + storvegn              # TOTVEGN
+        b.totvegn[p] = totvegn
+        b.totn[p] = totvegn + b.ntrunc[p]          # add ntrunc
+    end
+end
+
 function cnveg_nitrogen_state_summary!(ns::CNVegNitrogenStateData,
-                                        mask_patch::BitVector,
+                                        mask_patch::AbstractVector{Bool},
                                         bounds_patch::UnitRange{Int};
                                         use_crop::Bool=false,
                                         patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                                         npcropmin::Int=0,
                                         nrepr::Int=NREPR)
-    for p in bounds_patch
-        mask_patch[p] || continue
-
-        # displayed vegetation nitrogen, excluding storage (DISPVEGN)
-        ns.dispvegn_patch[p] =
-            ns.leafn_patch[p]      +
-            ns.frootn_patch[p]     +
-            ns.livestemn_patch[p]  +
-            ns.deadstemn_patch[p]  +
-            ns.livecrootn_patch[p] +
-            ns.deadcrootn_patch[p]
-
-        # stored vegetation nitrogen, including retranslocated N pool (STORVEGN)
-        ns.storvegn_patch[p] =
-            ns.leafn_storage_patch[p]      +
-            ns.frootn_storage_patch[p]     +
-            ns.livestemn_storage_patch[p]  +
-            ns.deadstemn_storage_patch[p]  +
-            ns.livecrootn_storage_patch[p] +
-            ns.deadcrootn_storage_patch[p] +
-            ns.leafn_xfer_patch[p]         +
-            ns.frootn_xfer_patch[p]        +
-            ns.livestemn_xfer_patch[p]     +
-            ns.deadstemn_xfer_patch[p]     +
-            ns.livecrootn_xfer_patch[p]    +
-            ns.deadcrootn_xfer_patch[p]    +
-            ns.npool_patch[p]              +
-            ns.retransn_patch[p]
-
-        if use_crop && patch_itype !== nothing && patch_itype[p] >= npcropmin
-            for k in 1:nrepr
-                ns.dispvegn_patch[p] +=
-                    ns.reproductiven_patch[p, k]
-
-                ns.storvegn_patch[p] +=
-                    ns.reproductiven_storage_patch[p, k] +
-                    ns.reproductiven_xfer_patch[p, k]
-            end
-
-            ns.storvegn_patch[p] +=
-                ns.cropseedn_deficit_patch[p]
-        end
-
-        # total vegetation nitrogen (TOTVEGN)
-        ns.totvegn_patch[p] =
-            ns.dispvegn_patch[p] +
-            ns.storvegn_patch[p]
-
-        # total patch-level nitrogen (add ntrunc)
-        ns.totn_patch[p] =
-            ns.totvegn_patch[p] +
-            ns.ntrunc_patch[p]
-    end
+    isempty(bounds_patch) && return nothing
+    b = _CVNSumView(ns.leafn_patch, ns.frootn_patch, ns.livestemn_patch,
+        ns.deadstemn_patch, ns.livecrootn_patch, ns.deadcrootn_patch,
+        ns.leafn_storage_patch, ns.frootn_storage_patch, ns.livestemn_storage_patch,
+        ns.deadstemn_storage_patch, ns.livecrootn_storage_patch, ns.deadcrootn_storage_patch,
+        ns.leafn_xfer_patch, ns.frootn_xfer_patch, ns.livestemn_xfer_patch,
+        ns.deadstemn_xfer_patch, ns.livecrootn_xfer_patch, ns.deadcrootn_xfer_patch,
+        ns.npool_patch, ns.retransn_patch, ns.cropseedn_deficit_patch, ns.ntrunc_patch,
+        ns.reproductiven_patch, ns.reproductiven_storage_patch, ns.reproductiven_xfer_patch,
+        ns.dispvegn_patch, ns.storvegn_patch, ns.totvegn_patch, ns.totn_patch)
+    T = eltype(ns.dispvegn_patch)
+    do_crop = use_crop && patch_itype !== nothing
+    pit = do_crop ? _to_backend_like(ns.dispvegn_patch, T, patch_itype) :
+                    _to_backend_like(ns.dispvegn_patch, T, Int[])
+    _launch!(_cvn_summary_kernel!, mask_patch, b, pit,
+        first(bounds_patch), last(bounds_patch), do_crop, npcropmin, nrepr)
 
     # Column-level p2c averaging is stubbed pending subgridAveMod port
     return nothing

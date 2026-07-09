@@ -1313,8 +1313,151 @@ Column-level p2c aggregation is stubbed pending subgridAveMod port.
 
 Ported from `cnveg_carbonflux_type%Summary_carbonflux`.
 """
+# --- GPU kernelization (one thread per patch). Every total is a LOCAL scalar written
+#     ONCE; the crop reproductive `for k` loops accumulate into the mr/current_gr/
+#     transfer_gr/storage_gr LOCALS (safe — the KA trap is only array-element `+=` in a
+#     loop — and byte-identical, exact per-k order preserved). All touched flux fields
+#     grouped into one @adapt_structure {V,M} bundle (one Metal buffer arg).
+struct _CVCFSumView{V,M}
+    # maintenance / growth respiration inputs
+    leaf_mr::V; froot_mr::V; livestem_mr::V; livecroot_mr::V; cpool_to_resp::V
+    cpool_leaf_gr::V; cpool_froot_gr::V; cpool_livestem_gr::V; cpool_deadstem_gr::V
+    cpool_livecroot_gr::V; cpool_deadcroot_gr::V
+    transfer_leaf_gr::V; transfer_froot_gr::V; transfer_livestem_gr::V
+    transfer_deadstem_gr::V; transfer_livecroot_gr::V; transfer_deadcroot_gr::V
+    cpool_leaf_storage_gr::V; cpool_froot_storage_gr::V; cpool_livestem_storage_gr::V
+    cpool_deadstem_storage_gr::V; cpool_livecroot_storage_gr::V; cpool_deadcroot_storage_gr::V
+    soilc_change::V; xsmrpool_to_atm::V; psnsun_to_cpool::V; psnshade_to_cpool::V
+    # allocation inputs
+    cpool_to_leafc::V; cpool_to_leafc_storage::V; leafc_xfer_to_leafc::V
+    cpool_to_livestemc::V; cpool_to_livestemc_storage::V; livestemc_xfer_to_livestemc::V
+    cpool_to_deadstemc::V; cpool_to_deadstemc_storage::V; deadstemc_xfer_to_deadstemc::V
+    cpool_to_frootc::V; cpool_to_frootc_storage::V; frootc_xfer_to_frootc::V
+    cpool_to_livecrootc::V; cpool_to_livecrootc_storage::V; livecrootc_xfer_to_livecrootc::V
+    cpool_to_deadcrootc::V; cpool_to_deadcrootc_storage::V; deadcrootc_xfer_to_deadcrootc::V
+    # litterfall inputs
+    leafc_to_litter::V; frootc_to_litter::V
+    m_leafc_to_litter::V; m_frootc_to_litter::V; m_leafc_storage_to_litter::V
+    m_frootc_storage_to_litter::V; m_leafc_xfer_to_litter::V; m_frootc_xfer_to_litter::V
+    m_livestemc_to_litter::V; m_livestemc_storage_to_litter::V; m_livestemc_xfer_to_litter::V
+    m_deadstemc_to_litter::V; m_deadstemc_storage_to_litter::V; m_deadstemc_xfer_to_litter::V
+    m_livecrootc_to_litter::V; m_livecrootc_storage_to_litter::V; m_livecrootc_xfer_to_litter::V
+    m_deadcrootc_to_litter::V; m_deadcrootc_storage_to_litter::V; m_deadcrootc_xfer_to_litter::V
+    m_gresp_storage_to_litter::V; m_gresp_xfer_to_litter::V
+    # fire inputs
+    m_leafc_to_fire::V; m_frootc_to_fire::V; m_leafc_storage_to_fire::V
+    m_frootc_storage_to_fire::V; m_leafc_xfer_to_fire::V; m_frootc_xfer_to_fire::V
+    m_livestemc_to_fire::V; m_livestemc_storage_to_fire::V; m_livestemc_xfer_to_fire::V
+    m_deadstemc_to_fire::V; m_deadstemc_storage_to_fire::V; m_deadstemc_xfer_to_fire::V
+    m_livecrootc_to_fire::V; m_livecrootc_storage_to_fire::V; m_livecrootc_xfer_to_fire::V
+    m_deadcrootc_to_fire::V; m_deadcrootc_storage_to_fire::V; m_deadcrootc_xfer_to_fire::V
+    m_gresp_storage_to_fire::V; m_gresp_xfer_to_fire::V
+    # reproductive (crop) matrices
+    reproductive_mr::M; cpool_reproductive_gr::M; transfer_reproductive_gr::M
+    cpool_reproductive_storage_gr::M
+    # outputs
+    mr::V; current_gr::V; transfer_gr::V; storage_gr::V; gr::V; ar::V; gpp::V; npp::V
+    rr::V; agnpp::V; bgnpp::V; litfall::V; fire_closs::V
+    frootc_alloc::V; frootc_loss::V; leafc_alloc::V; leafc_loss::V; woodc_alloc::V; woodc_loss::V
+end
+Adapt.@adapt_structure _CVCFSumView
+
+@kernel function _cvcf_summary_kernel!(@Const(mask), b, @Const(patch_itype),
+        lo::Int, hi::Int, do_crop::Bool, use_fun::Bool, carbon_resp_opt::Int,
+        npcropmin::Int, nrepr::Int)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask[p]
+        crop_p = do_crop && patch_itype[p] >= npcropmin
+
+        # --- Maintenance respiration (MR) ---
+        mr = b.leaf_mr[p] + b.froot_mr[p] + b.livestem_mr[p] + b.livecroot_mr[p]
+        if carbon_resp_opt == 1
+            mr += b.cpool_to_resp[p]
+        end
+        if crop_p
+            for k in 1:nrepr
+                mr += b.reproductive_mr[p, k]
+            end
+        end
+
+        # --- Current / transfer / storage growth respiration ---
+        current_gr = b.cpool_leaf_gr[p] + b.cpool_froot_gr[p] + b.cpool_livestem_gr[p] +
+                     b.cpool_deadstem_gr[p] + b.cpool_livecroot_gr[p] + b.cpool_deadcroot_gr[p]
+        transfer_gr = b.transfer_leaf_gr[p] + b.transfer_froot_gr[p] + b.transfer_livestem_gr[p] +
+                      b.transfer_deadstem_gr[p] + b.transfer_livecroot_gr[p] + b.transfer_deadcroot_gr[p]
+        storage_gr = b.cpool_leaf_storage_gr[p] + b.cpool_froot_storage_gr[p] +
+                     b.cpool_livestem_storage_gr[p] + b.cpool_deadstem_storage_gr[p] +
+                     b.cpool_livecroot_storage_gr[p] + b.cpool_deadcroot_storage_gr[p]
+        if crop_p
+            for k in 1:nrepr
+                current_gr  += b.cpool_reproductive_gr[p, k]
+                transfer_gr += b.transfer_reproductive_gr[p, k]
+                storage_gr  += b.cpool_reproductive_storage_gr[p, k]
+            end
+        end
+
+        gr = current_gr + transfer_gr + storage_gr        # total growth respiration
+        ar = mr + gr                                        # autotrophic respiration
+        if use_fun
+            ar += b.soilc_change[p]
+        end
+        if crop_p
+            ar += b.xsmrpool_to_atm[p]
+        end
+
+        gpp = b.psnsun_to_cpool[p] + b.psnshade_to_cpool[p]
+        npp = gpp - ar
+
+        rr = b.froot_mr[p] + b.cpool_froot_gr[p] + b.cpool_livecroot_gr[p] +
+             b.cpool_deadcroot_gr[p] + b.transfer_froot_gr[p] + b.transfer_livecroot_gr[p] +
+             b.transfer_deadcroot_gr[p] + b.cpool_froot_storage_gr[p] +
+             b.cpool_livecroot_storage_gr[p] + b.cpool_deadcroot_storage_gr[p]
+
+        agnpp = b.cpool_to_leafc[p] + b.cpool_to_leafc_storage[p] + b.leafc_xfer_to_leafc[p] +
+                b.cpool_to_livestemc[p] + b.cpool_to_livestemc_storage[p] + b.livestemc_xfer_to_livestemc[p] +
+                b.cpool_to_deadstemc[p] + b.cpool_to_deadstemc_storage[p] + b.deadstemc_xfer_to_deadstemc[p]
+
+        bgnpp = b.cpool_to_frootc[p] + b.cpool_to_frootc_storage[p] + b.frootc_xfer_to_frootc[p] +
+                b.cpool_to_livecrootc[p] + b.cpool_to_livecrootc_storage[p] + b.livecrootc_xfer_to_livecrootc[p] +
+                b.cpool_to_deadcrootc[p] + b.cpool_to_deadcrootc_storage[p] + b.deadcrootc_xfer_to_deadcrootc[p]
+
+        litfall = b.leafc_to_litter[p] + b.frootc_to_litter[p] +
+                  b.m_leafc_to_litter[p] + b.m_frootc_to_litter[p] + b.m_leafc_storage_to_litter[p] +
+                  b.m_frootc_storage_to_litter[p] + b.m_leafc_xfer_to_litter[p] + b.m_frootc_xfer_to_litter[p] +
+                  b.m_livestemc_to_litter[p] + b.m_livestemc_storage_to_litter[p] + b.m_livestemc_xfer_to_litter[p] +
+                  b.m_deadstemc_to_litter[p] + b.m_deadstemc_storage_to_litter[p] + b.m_deadstemc_xfer_to_litter[p] +
+                  b.m_livecrootc_to_litter[p] + b.m_livecrootc_storage_to_litter[p] + b.m_livecrootc_xfer_to_litter[p] +
+                  b.m_deadcrootc_to_litter[p] + b.m_deadcrootc_storage_to_litter[p] + b.m_deadcrootc_xfer_to_litter[p] +
+                  b.m_gresp_storage_to_litter[p] + b.m_gresp_xfer_to_litter[p]
+
+        fire_closs = b.m_leafc_to_fire[p] + b.m_frootc_to_fire[p] + b.m_leafc_storage_to_fire[p] +
+                     b.m_frootc_storage_to_fire[p] + b.m_leafc_xfer_to_fire[p] + b.m_frootc_xfer_to_fire[p] +
+                     b.m_livestemc_to_fire[p] + b.m_livestemc_storage_to_fire[p] + b.m_livestemc_xfer_to_fire[p] +
+                     b.m_deadstemc_to_fire[p] + b.m_deadstemc_storage_to_fire[p] + b.m_deadstemc_xfer_to_fire[p] +
+                     b.m_livecrootc_to_fire[p] + b.m_livecrootc_storage_to_fire[p] + b.m_livecrootc_xfer_to_fire[p] +
+                     b.m_deadcrootc_to_fire[p] + b.m_deadcrootc_storage_to_fire[p] + b.m_deadcrootc_xfer_to_fire[p] +
+                     b.m_gresp_storage_to_fire[p] + b.m_gresp_xfer_to_fire[p]
+
+        b.mr[p] = mr; b.current_gr[p] = current_gr; b.transfer_gr[p] = transfer_gr
+        b.storage_gr[p] = storage_gr; b.gr[p] = gr; b.ar[p] = ar; b.gpp[p] = gpp
+        b.npp[p] = npp; b.rr[p] = rr; b.agnpp[p] = agnpp; b.bgnpp[p] = bgnpp
+        b.litfall[p] = litfall; b.fire_closs[p] = fire_closs
+
+        b.frootc_alloc[p] = b.cpool_to_frootc[p] + b.cpool_to_frootc_storage[p]
+        b.frootc_loss[p]  = b.leafc_to_litter[p] + b.frootc_to_litter[p]
+        b.leafc_alloc[p]  = b.cpool_to_leafc[p] + b.cpool_to_leafc_storage[p]
+        b.leafc_loss[p]   = b.leafc_to_litter[p]
+        b.woodc_alloc[p]  = b.cpool_to_livestemc[p] + b.cpool_to_deadstemc[p] +
+                            b.cpool_to_livecrootc[p] + b.cpool_to_deadcrootc[p] +
+                            b.cpool_to_livestemc_storage[p] + b.cpool_to_deadstemc_storage[p] +
+                            b.cpool_to_livecrootc_storage[p] + b.cpool_to_deadcrootc_storage[p]
+        b.woodc_loss[p]   = b.m_livestemc_to_litter[p] + b.m_deadstemc_to_litter[p] +
+                            b.m_livecrootc_to_litter[p] + b.m_deadcrootc_to_litter[p]
+    end
+end
+
 function cnveg_carbon_flux_summary!(cf::CNVegCarbonFluxData,
-                                     mask_patch::BitVector,
+                                     mask_patch::AbstractVector{Bool},
                                      bounds_patch::UnitRange{Int};
                                      use_crop::Bool=false,
                                      use_fun::Bool=false,
@@ -1322,186 +1465,50 @@ function cnveg_carbon_flux_summary!(cf::CNVegCarbonFluxData,
                                      patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                                      npcropmin::Int=0,
                                      nrepr::Int=NREPR)
-    for p in bounds_patch
-        mask_patch[p] || continue
-
-        # --- Maintenance respiration (MR) ---
-        cf.mr_patch[p] = cf.leaf_mr_patch[p] +
-                         cf.froot_mr_patch[p] +
-                         cf.livestem_mr_patch[p] +
-                         cf.livecroot_mr_patch[p]
-
-        if carbon_resp_opt == 1
-            cf.mr_patch[p] += cf.cpool_to_resp_patch[p]
-        end
-
-        if use_crop && patch_itype !== nothing && patch_itype[p] >= npcropmin
-            for k in 1:nrepr
-                cf.mr_patch[p] += cf.reproductive_mr_patch[p, k]
-            end
-        end
-
-        # --- Current growth respiration ---
-        cf.current_gr_patch[p] = cf.cpool_leaf_gr_patch[p] +
-                                  cf.cpool_froot_gr_patch[p] +
-                                  cf.cpool_livestem_gr_patch[p] +
-                                  cf.cpool_deadstem_gr_patch[p] +
-                                  cf.cpool_livecroot_gr_patch[p] +
-                                  cf.cpool_deadcroot_gr_patch[p]
-
-        # --- Transfer growth respiration ---
-        cf.transfer_gr_patch[p] = cf.transfer_leaf_gr_patch[p] +
-                                   cf.transfer_froot_gr_patch[p] +
-                                   cf.transfer_livestem_gr_patch[p] +
-                                   cf.transfer_deadstem_gr_patch[p] +
-                                   cf.transfer_livecroot_gr_patch[p] +
-                                   cf.transfer_deadcroot_gr_patch[p]
-
-        # --- Storage growth respiration ---
-        cf.storage_gr_patch[p] = cf.cpool_leaf_storage_gr_patch[p] +
-                                  cf.cpool_froot_storage_gr_patch[p] +
-                                  cf.cpool_livestem_storage_gr_patch[p] +
-                                  cf.cpool_deadstem_storage_gr_patch[p] +
-                                  cf.cpool_livecroot_storage_gr_patch[p] +
-                                  cf.cpool_deadcroot_storage_gr_patch[p]
-
-        if use_crop && patch_itype !== nothing && patch_itype[p] >= npcropmin
-            for k in 1:nrepr
-                cf.current_gr_patch[p]  += cf.cpool_reproductive_gr_patch[p, k]
-                cf.transfer_gr_patch[p] += cf.transfer_reproductive_gr_patch[p, k]
-                cf.storage_gr_patch[p]  += cf.cpool_reproductive_storage_gr_patch[p, k]
-            end
-        end
-
-        # --- Total growth respiration (GR) ---
-        cf.gr_patch[p] = cf.current_gr_patch[p] +
-                          cf.transfer_gr_patch[p] +
-                          cf.storage_gr_patch[p]
-
-        # --- Autotrophic respiration (AR) ---
-        cf.ar_patch[p] = cf.mr_patch[p] + cf.gr_patch[p]
-
-        if use_fun
-            cf.ar_patch[p] += cf.soilc_change_patch[p]
-        end
-
-        if use_crop && patch_itype !== nothing && patch_itype[p] >= npcropmin
-            cf.ar_patch[p] += cf.xsmrpool_to_atm_patch[p]
-        end
-
-        # --- Gross primary production (GPP) ---
-        cf.gpp_patch[p] = cf.psnsun_to_cpool_patch[p] +
-                           cf.psnshade_to_cpool_patch[p]
-
-        # --- Net primary production (NPP) ---
-        cf.npp_patch[p] = cf.gpp_patch[p] - cf.ar_patch[p]
-
-        # --- Root respiration (RR) ---
-        cf.rr_patch[p] = cf.froot_mr_patch[p] +
-                          cf.cpool_froot_gr_patch[p] +
-                          cf.cpool_livecroot_gr_patch[p] +
-                          cf.cpool_deadcroot_gr_patch[p] +
-                          cf.transfer_froot_gr_patch[p] +
-                          cf.transfer_livecroot_gr_patch[p] +
-                          cf.transfer_deadcroot_gr_patch[p] +
-                          cf.cpool_froot_storage_gr_patch[p] +
-                          cf.cpool_livecroot_storage_gr_patch[p] +
-                          cf.cpool_deadcroot_storage_gr_patch[p]
-
-        # --- Aboveground NPP (AGNPP) ---
-        cf.agnpp_patch[p] = cf.cpool_to_leafc_patch[p] +
-                             cf.cpool_to_leafc_storage_patch[p] +
-                             cf.leafc_xfer_to_leafc_patch[p] +
-                             cf.cpool_to_livestemc_patch[p] +
-                             cf.cpool_to_livestemc_storage_patch[p] +
-                             cf.livestemc_xfer_to_livestemc_patch[p] +
-                             cf.cpool_to_deadstemc_patch[p] +
-                             cf.cpool_to_deadstemc_storage_patch[p] +
-                             cf.deadstemc_xfer_to_deadstemc_patch[p]
-
-        # --- Belowground NPP (BGNPP) ---
-        cf.bgnpp_patch[p] = cf.cpool_to_frootc_patch[p] +
-                              cf.cpool_to_frootc_storage_patch[p] +
-                              cf.frootc_xfer_to_frootc_patch[p] +
-                              cf.cpool_to_livecrootc_patch[p] +
-                              cf.cpool_to_livecrootc_storage_patch[p] +
-                              cf.livecrootc_xfer_to_livecrootc_patch[p] +
-                              cf.cpool_to_deadcrootc_patch[p] +
-                              cf.cpool_to_deadcrootc_storage_patch[p] +
-                              cf.deadcrootc_xfer_to_deadcrootc_patch[p]
-
-        # --- Litterfall (LITFALL) ---
-        cf.litfall_patch[p] = cf.leafc_to_litter_patch[p] +
-                               cf.frootc_to_litter_patch[p] +
-                               cf.m_leafc_to_litter_patch[p] +
-                               cf.m_frootc_to_litter_patch[p] +
-                               cf.m_leafc_storage_to_litter_patch[p] +
-                               cf.m_frootc_storage_to_litter_patch[p] +
-                               cf.m_leafc_xfer_to_litter_patch[p] +
-                               cf.m_frootc_xfer_to_litter_patch[p] +
-                               cf.m_livestemc_to_litter_patch[p] +
-                               cf.m_livestemc_storage_to_litter_patch[p] +
-                               cf.m_livestemc_xfer_to_litter_patch[p] +
-                               cf.m_deadstemc_to_litter_patch[p] +
-                               cf.m_deadstemc_storage_to_litter_patch[p] +
-                               cf.m_deadstemc_xfer_to_litter_patch[p] +
-                               cf.m_livecrootc_to_litter_patch[p] +
-                               cf.m_livecrootc_storage_to_litter_patch[p] +
-                               cf.m_livecrootc_xfer_to_litter_patch[p] +
-                               cf.m_deadcrootc_to_litter_patch[p] +
-                               cf.m_deadcrootc_storage_to_litter_patch[p] +
-                               cf.m_deadcrootc_xfer_to_litter_patch[p] +
-                               cf.m_gresp_storage_to_litter_patch[p] +
-                               cf.m_gresp_xfer_to_litter_patch[p]
-
-        # --- Fire carbon loss ---
-        cf.fire_closs_patch[p] = cf.m_leafc_to_fire_patch[p] +
-                                  cf.m_frootc_to_fire_patch[p] +
-                                  cf.m_leafc_storage_to_fire_patch[p] +
-                                  cf.m_frootc_storage_to_fire_patch[p] +
-                                  cf.m_leafc_xfer_to_fire_patch[p] +
-                                  cf.m_frootc_xfer_to_fire_patch[p] +
-                                  cf.m_livestemc_to_fire_patch[p] +
-                                  cf.m_livestemc_storage_to_fire_patch[p] +
-                                  cf.m_livestemc_xfer_to_fire_patch[p] +
-                                  cf.m_deadstemc_to_fire_patch[p] +
-                                  cf.m_deadstemc_storage_to_fire_patch[p] +
-                                  cf.m_deadstemc_xfer_to_fire_patch[p] +
-                                  cf.m_livecrootc_to_fire_patch[p] +
-                                  cf.m_livecrootc_storage_to_fire_patch[p] +
-                                  cf.m_livecrootc_xfer_to_fire_patch[p] +
-                                  cf.m_deadcrootc_to_fire_patch[p] +
-                                  cf.m_deadcrootc_storage_to_fire_patch[p] +
-                                  cf.m_deadcrootc_xfer_to_fire_patch[p] +
-                                  cf.m_gresp_storage_to_fire_patch[p] +
-                                  cf.m_gresp_xfer_to_fire_patch[p]
-
-        # --- Allocation/loss summaries ---
-        cf.frootc_alloc_patch[p] = cf.cpool_to_frootc_patch[p] +
-                                    cf.cpool_to_frootc_storage_patch[p]
-
-        cf.frootc_loss_patch[p] = cf.leafc_to_litter_patch[p] +
-                                   cf.frootc_to_litter_patch[p]
-
-        cf.leafc_alloc_patch[p] = cf.cpool_to_leafc_patch[p] +
-                                   cf.cpool_to_leafc_storage_patch[p]
-
-        cf.leafc_loss_patch[p] = cf.leafc_to_litter_patch[p]
-
-        cf.woodc_alloc_patch[p] = cf.cpool_to_livestemc_patch[p] +
-                                   cf.cpool_to_deadstemc_patch[p] +
-                                   cf.cpool_to_livecrootc_patch[p] +
-                                   cf.cpool_to_deadcrootc_patch[p] +
-                                   cf.cpool_to_livestemc_storage_patch[p] +
-                                   cf.cpool_to_deadstemc_storage_patch[p] +
-                                   cf.cpool_to_livecrootc_storage_patch[p] +
-                                   cf.cpool_to_deadcrootc_storage_patch[p]
-
-        cf.woodc_loss_patch[p] = cf.m_livestemc_to_litter_patch[p] +
-                                  cf.m_deadstemc_to_litter_patch[p] +
-                                  cf.m_livecrootc_to_litter_patch[p] +
-                                  cf.m_deadcrootc_to_litter_patch[p]
-    end
+    isempty(bounds_patch) && return nothing
+    b = _CVCFSumView(
+        cf.leaf_mr_patch, cf.froot_mr_patch, cf.livestem_mr_patch, cf.livecroot_mr_patch,
+        cf.cpool_to_resp_patch, cf.cpool_leaf_gr_patch, cf.cpool_froot_gr_patch,
+        cf.cpool_livestem_gr_patch, cf.cpool_deadstem_gr_patch, cf.cpool_livecroot_gr_patch,
+        cf.cpool_deadcroot_gr_patch, cf.transfer_leaf_gr_patch, cf.transfer_froot_gr_patch,
+        cf.transfer_livestem_gr_patch, cf.transfer_deadstem_gr_patch, cf.transfer_livecroot_gr_patch,
+        cf.transfer_deadcroot_gr_patch, cf.cpool_leaf_storage_gr_patch, cf.cpool_froot_storage_gr_patch,
+        cf.cpool_livestem_storage_gr_patch, cf.cpool_deadstem_storage_gr_patch,
+        cf.cpool_livecroot_storage_gr_patch, cf.cpool_deadcroot_storage_gr_patch,
+        cf.soilc_change_patch, cf.xsmrpool_to_atm_patch, cf.psnsun_to_cpool_patch, cf.psnshade_to_cpool_patch,
+        cf.cpool_to_leafc_patch, cf.cpool_to_leafc_storage_patch, cf.leafc_xfer_to_leafc_patch,
+        cf.cpool_to_livestemc_patch, cf.cpool_to_livestemc_storage_patch, cf.livestemc_xfer_to_livestemc_patch,
+        cf.cpool_to_deadstemc_patch, cf.cpool_to_deadstemc_storage_patch, cf.deadstemc_xfer_to_deadstemc_patch,
+        cf.cpool_to_frootc_patch, cf.cpool_to_frootc_storage_patch, cf.frootc_xfer_to_frootc_patch,
+        cf.cpool_to_livecrootc_patch, cf.cpool_to_livecrootc_storage_patch, cf.livecrootc_xfer_to_livecrootc_patch,
+        cf.cpool_to_deadcrootc_patch, cf.cpool_to_deadcrootc_storage_patch, cf.deadcrootc_xfer_to_deadcrootc_patch,
+        cf.leafc_to_litter_patch, cf.frootc_to_litter_patch,
+        cf.m_leafc_to_litter_patch, cf.m_frootc_to_litter_patch, cf.m_leafc_storage_to_litter_patch,
+        cf.m_frootc_storage_to_litter_patch, cf.m_leafc_xfer_to_litter_patch, cf.m_frootc_xfer_to_litter_patch,
+        cf.m_livestemc_to_litter_patch, cf.m_livestemc_storage_to_litter_patch, cf.m_livestemc_xfer_to_litter_patch,
+        cf.m_deadstemc_to_litter_patch, cf.m_deadstemc_storage_to_litter_patch, cf.m_deadstemc_xfer_to_litter_patch,
+        cf.m_livecrootc_to_litter_patch, cf.m_livecrootc_storage_to_litter_patch, cf.m_livecrootc_xfer_to_litter_patch,
+        cf.m_deadcrootc_to_litter_patch, cf.m_deadcrootc_storage_to_litter_patch, cf.m_deadcrootc_xfer_to_litter_patch,
+        cf.m_gresp_storage_to_litter_patch, cf.m_gresp_xfer_to_litter_patch,
+        cf.m_leafc_to_fire_patch, cf.m_frootc_to_fire_patch, cf.m_leafc_storage_to_fire_patch,
+        cf.m_frootc_storage_to_fire_patch, cf.m_leafc_xfer_to_fire_patch, cf.m_frootc_xfer_to_fire_patch,
+        cf.m_livestemc_to_fire_patch, cf.m_livestemc_storage_to_fire_patch, cf.m_livestemc_xfer_to_fire_patch,
+        cf.m_deadstemc_to_fire_patch, cf.m_deadstemc_storage_to_fire_patch, cf.m_deadstemc_xfer_to_fire_patch,
+        cf.m_livecrootc_to_fire_patch, cf.m_livecrootc_storage_to_fire_patch, cf.m_livecrootc_xfer_to_fire_patch,
+        cf.m_deadcrootc_to_fire_patch, cf.m_deadcrootc_storage_to_fire_patch, cf.m_deadcrootc_xfer_to_fire_patch,
+        cf.m_gresp_storage_to_fire_patch, cf.m_gresp_xfer_to_fire_patch,
+        cf.reproductive_mr_patch, cf.cpool_reproductive_gr_patch, cf.transfer_reproductive_gr_patch,
+        cf.cpool_reproductive_storage_gr_patch,
+        cf.mr_patch, cf.current_gr_patch, cf.transfer_gr_patch, cf.storage_gr_patch, cf.gr_patch,
+        cf.ar_patch, cf.gpp_patch, cf.npp_patch, cf.rr_patch, cf.agnpp_patch, cf.bgnpp_patch,
+        cf.litfall_patch, cf.fire_closs_patch, cf.frootc_alloc_patch, cf.frootc_loss_patch,
+        cf.leafc_alloc_patch, cf.leafc_loss_patch, cf.woodc_alloc_patch, cf.woodc_loss_patch)
+    T = eltype(cf.mr_patch)
+    do_crop = use_crop && patch_itype !== nothing
+    pit = do_crop ? _to_backend_like(cf.mr_patch, T, patch_itype) :
+                    _to_backend_like(cf.mr_patch, T, Int[])
+    _launch!(_cvcf_summary_kernel!, mask_patch, b, pit,
+        first(bounds_patch), last(bounds_patch), do_crop, use_fun, carbon_resp_opt, npcropmin, nrepr)
 
     # Column-level p2c aggregation is stubbed pending subgridAveMod port
     return nothing

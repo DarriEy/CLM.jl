@@ -605,6 +605,64 @@ function cnveg_carbon_state_zero_dwt!(cs::CNVegCarbonStateData,
     return nothing
 end
 
+# --- GPU kernelization (one thread per patch; every reduction into a LOCAL scalar,
+#     each output written ONCE — the KA-CPU-under-check-bounds `arr[p] += …`-in-loop
+#     miscompile is avoided). Touched fields grouped into one @adapt_structure bundle
+#     (one Metal buffer arg); the KA CPU backend runs it byte-identical on Arrays.
+struct _CVCSumView{V,M}
+    leafc::V; frootc::V; livestemc::V; deadstemc::V; livecrootc::V; deadcrootc::V
+    cpool::V; leafc_storage::V; frootc_storage::V; livestemc_storage::V
+    deadstemc_storage::V; livecrootc_storage::V; deadcrootc_storage::V
+    leafc_xfer::V; frootc_xfer::V; livestemc_xfer::V; deadstemc_xfer::V
+    livecrootc_xfer::V; deadcrootc_xfer::V; gresp_storage::V; gresp_xfer::V
+    xsmrpool::V; ctrunc::V; cropseedc_deficit::V; xsmrpool_loss::V
+    reproductivec_storage::M; reproductivec_xfer::M; reproductivec::M
+    dispvegc::V; storvegc::V; totvegc::V; totc::V; woodc::V
+end
+Adapt.@adapt_structure _CVCSumView
+
+@kernel function _cvc_summary_kernel!(@Const(mask), b, @Const(patch_itype),
+        lo::Int, hi::Int, do_crop::Bool, use_crop::Bool, npcropmin::Int, nrepr::Int)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask[p]
+        # displayed vegetation carbon, excluding storage and cpool (DISPVEGC)
+        dispvegc = b.leafc[p] + b.frootc[p] + b.livestemc[p] +
+                   b.deadstemc[p] + b.livecrootc[p] + b.deadcrootc[p]
+
+        # stored vegetation carbon, excluding cpool (STORVEGC)
+        storvegc = b.cpool[p] + b.leafc_storage[p] + b.frootc_storage[p] +
+                   b.livestemc_storage[p] + b.deadstemc_storage[p] +
+                   b.livecrootc_storage[p] + b.deadcrootc_storage[p] +
+                   b.leafc_xfer[p] + b.frootc_xfer[p] + b.livestemc_xfer[p] +
+                   b.deadstemc_xfer[p] + b.livecrootc_xfer[p] + b.deadcrootc_xfer[p] +
+                   b.gresp_storage[p] + b.gresp_xfer[p]
+
+        # Accumulate directly into the storvegc/dispvegc LOCAL scalars (safe — the KA
+        # trap is only for array-element `+=` in a loop) so the term order is exactly
+        # the original per-k sequence → byte-identical.
+        if do_crop && patch_itype[p] >= npcropmin
+            for k in 1:nrepr
+                storvegc += b.reproductivec_storage[p, k] + b.reproductivec_xfer[p, k]
+                dispvegc += b.reproductivec[p, k]
+            end
+        end
+
+        b.dispvegc[p] = dispvegc
+        b.storvegc[p] = storvegc
+
+        totvegc = dispvegc + storvegc              # TOTVEGC (excludes cpool)
+        b.totvegc[p] = totvegc
+
+        totc = totvegc + b.xsmrpool[p] + b.ctrunc[p]
+        if use_crop
+            totc += b.cropseedc_deficit[p] + b.xsmrpool_loss[p]
+        end
+        b.totc[p] = totc
+
+        b.woodc[p] = b.deadstemc[p] + b.livestemc[p] + b.deadcrootc[p] + b.livecrootc[p]
+    end
+end
+
 """
     cnveg_carbon_state_summary!(cs, mask_patch, bounds_patch;
                                  use_crop=false, patch_itype=nothing,
@@ -616,74 +674,31 @@ Ported from `cnveg_carbonstate_type%Summary_carbonstate`.
 Note: column-level p2c averaging is stubbed out pending subgridAveMod port.
 """
 function cnveg_carbon_state_summary!(cs::CNVegCarbonStateData,
-                                     mask_patch::BitVector,
+                                     mask_patch::AbstractVector{Bool},
                                      bounds_patch::UnitRange{Int};
                                      use_crop::Bool=false,
                                      patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                                      npcropmin::Int=0,
                                      nrepr::Int=NREPR)
-    for p in bounds_patch
-        mask_patch[p] || continue
-
-        # displayed vegetation carbon, excluding storage and cpool (DISPVEGC)
-        cs.dispvegc_patch[p] =
-            cs.leafc_patch[p]      +
-            cs.frootc_patch[p]     +
-            cs.livestemc_patch[p]  +
-            cs.deadstemc_patch[p]  +
-            cs.livecrootc_patch[p] +
-            cs.deadcrootc_patch[p]
-
-        # stored vegetation carbon, excluding cpool (STORVEGC)
-        cs.storvegc_patch[p] =
-            cs.cpool_patch[p]              +
-            cs.leafc_storage_patch[p]      +
-            cs.frootc_storage_patch[p]     +
-            cs.livestemc_storage_patch[p]  +
-            cs.deadstemc_storage_patch[p]  +
-            cs.livecrootc_storage_patch[p] +
-            cs.deadcrootc_storage_patch[p] +
-            cs.leafc_xfer_patch[p]         +
-            cs.frootc_xfer_patch[p]        +
-            cs.livestemc_xfer_patch[p]     +
-            cs.deadstemc_xfer_patch[p]     +
-            cs.livecrootc_xfer_patch[p]    +
-            cs.deadcrootc_xfer_patch[p]    +
-            cs.gresp_storage_patch[p]      +
-            cs.gresp_xfer_patch[p]
-
-        if use_crop && patch_itype !== nothing && patch_itype[p] >= npcropmin
-            for k in 1:nrepr
-                cs.storvegc_patch[p] +=
-                    cs.reproductivec_storage_patch[p, k] +
-                    cs.reproductivec_xfer_patch[p, k]
-                cs.dispvegc_patch[p] +=
-                    cs.reproductivec_patch[p, k]
-            end
-        end
-
-        # total vegetation carbon, excluding cpool (TOTVEGC)
-        cs.totvegc_patch[p] =
-            cs.dispvegc_patch[p] +
-            cs.storvegc_patch[p]
-
-        # total patch-level carbon, including xsmrpool, ctrunc
-        cs.totc_patch[p] =
-            cs.totvegc_patch[p] +
-            cs.xsmrpool_patch[p] +
-            cs.ctrunc_patch[p]
-
-        if use_crop
-            cs.totc_patch[p] += cs.cropseedc_deficit_patch[p] + cs.xsmrpool_loss_patch[p]
-        end
-
-        # wood C
-        cs.woodc_patch[p] =
-            cs.deadstemc_patch[p]  +
-            cs.livestemc_patch[p]  +
-            cs.deadcrootc_patch[p] +
-            cs.livecrootc_patch[p]
-    end
+    isempty(bounds_patch) && return nothing
+    b = _CVCSumView(cs.leafc_patch, cs.frootc_patch, cs.livestemc_patch,
+        cs.deadstemc_patch, cs.livecrootc_patch, cs.deadcrootc_patch, cs.cpool_patch,
+        cs.leafc_storage_patch, cs.frootc_storage_patch, cs.livestemc_storage_patch,
+        cs.deadstemc_storage_patch, cs.livecrootc_storage_patch, cs.deadcrootc_storage_patch,
+        cs.leafc_xfer_patch, cs.frootc_xfer_patch, cs.livestemc_xfer_patch,
+        cs.deadstemc_xfer_patch, cs.livecrootc_xfer_patch, cs.deadcrootc_xfer_patch,
+        cs.gresp_storage_patch, cs.gresp_xfer_patch, cs.xsmrpool_patch, cs.ctrunc_patch,
+        cs.cropseedc_deficit_patch, cs.xsmrpool_loss_patch,
+        cs.reproductivec_storage_patch, cs.reproductivec_xfer_patch, cs.reproductivec_patch,
+        cs.dispvegc_patch, cs.storvegc_patch, cs.totvegc_patch, cs.totc_patch, cs.woodc_patch)
+    # Crop-reproductive branch only active with a patch_itype; move it to the state
+    # backend (preserving Int) when active, else pass an empty device Int vector.
+    T = eltype(cs.dispvegc_patch)
+    do_crop = use_crop && patch_itype !== nothing
+    pit = do_crop ? _to_backend_like(cs.dispvegc_patch, T, patch_itype) :
+                    _to_backend_like(cs.dispvegc_patch, T, Int[])
+    _launch!(_cvc_summary_kernel!, mask_patch, b, pit,
+        first(bounds_patch), last(bounds_patch), do_crop, use_crop, npcropmin, nrepr)
 
     # Column-level p2c averaging is stubbed pending subgridAveMod port
     return nothing

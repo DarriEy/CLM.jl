@@ -34,8 +34,9 @@ const SNAL1 = 0.56  # nir albedo of urban snow
                                            icol_per::Int, snal0, snal1)
     c = @index(Global)
     @inbounds if mask_urbanc[c]
+        T = eltype(albsn_roof); z = zero(T)
         l = landunit[c]
-        if coszen[l] > 0.0 && h2osno_total[c] > 0.0
+        if coszen[l] > z && h2osno_total[c] > z
             if itype[c] == icol_roof
                 albsn_roof[l, 1] = snal0
                 albsn_roof[l, 2] = snal1
@@ -48,14 +49,14 @@ const SNAL1 = 0.56  # nir albedo of urban snow
             end
         else
             if itype[c] == icol_roof
-                albsn_roof[l, 1] = 0.0
-                albsn_roof[l, 2] = 0.0
+                albsn_roof[l, 1] = z
+                albsn_roof[l, 2] = z
             elseif itype[c] == icol_imp
-                albsn_improad[l, 1] = 0.0
-                albsn_improad[l, 2] = 0.0
+                albsn_improad[l, 1] = z
+                albsn_improad[l, 2] = z
             elseif itype[c] == icol_per
-                albsn_perroad[l, 1] = 0.0
-                albsn_perroad[l, 2] = 0.0
+                albsn_perroad[l, 1] = z
+                albsn_perroad[l, 2] = z
             end
         end
     end
@@ -98,6 +99,187 @@ ualb_init_albgr!(albgrd, mask_urbanc, albgri, numrad::Int) =
              ndrange = (length(mask_urbanc), numrad))
 
 # --------------------------------------------------------------------------
+# Device-view bundles + kernels for the urban_albedo! ORCHESTRATOR's own
+# per-element loops (init / snow-combine / net-solar output mapping). Each
+# @adapt_structure struct-of-arrays passes to a Metal kernel as ONE buffer, so
+# the launches stay well under the ~31-buffer limit. All run on the KA CPU
+# backend byte-identically (every write is to the thread's own patch/column/
+# landunit index; the h2osno accumulation uses a local scalar — see below).
+# --------------------------------------------------------------------------
+
+# surfalb outputs (patch matrices albd..ftii + col matrices albgr*).
+struct _UAlbSurf{M}
+    albd::M; albi::M; fabd::M; fabd_sun::M; fabd_sha::M
+    fabi::M; fabi_sun::M; fabi_sha::M; ftdd::M; ftid::M; ftii::M
+    albd_hst::M; albi_hst::M; albgrd::M; albgri::M; albgrd_hst::M; albgri_hst::M
+end
+Adapt.@adapt_structure _UAlbSurf
+
+# sref working reflectances (landunit × numrad).
+struct _UAlbSref{M}
+    roof_dir::M; roof_dif::M; sunwall_dir::M; sunwall_dif::M
+    shadewall_dir::M; shadewall_dif::M; improad_dir::M; improad_dif::M
+    perroad_dir::M; perroad_dif::M
+end
+Adapt.@adapt_structure _UAlbSref
+
+# sabs absorbed-solar outputs (solarabs landunit × numrad).
+struct _UAlbSabs{M}
+    roof_dir::M; roof_dif::M; sunwall_dir::M; sunwall_dif::M
+    shadewall_dir::M; shadewall_dif::M; improad_dir::M; improad_dif::M
+    perroad_dir::M; perroad_dif::M
+end
+Adapt.@adapt_structure _UAlbSabs
+
+# snow albedos (albsn*) + snow-combined surface albedos (alb_*_s), ld × numrad.
+struct _UAlbSnow{M}
+    albsnd_roof::M; albsni_roof::M; albsnd_improad::M; albsni_improad::M
+    albsnd_perroad::M; albsni_perroad::M
+    roof_dir_s::M; roof_dif_s::M; improad_dir_s::M; perroad_dir_s::M
+    improad_dif_s::M; perroad_dif_s::M
+end
+Adapt.@adapt_structure _UAlbSnow
+
+# urbanparams base albedos (landunit × numrad).
+struct _UAlbParam{M}
+    roof_dir::M; roof_dif::M; improad_dir::M; improad_dif::M
+    perroad_dir::M; perroad_dif::M
+end
+Adapt.@adapt_structure _UAlbParam
+
+# Init patch albedo/absorption/transmission outputs (one thread per patch).
+@kernel function _ualb_initout_kernel!(o, @Const(mask_urbanp), @Const(pch_landunit),
+        @Const(pch_column), @Const(col_itype), @Const(coszen), @Const(vf_sw),
+        @Const(vf_sr), numrad::Int, icol_sunw::Int, icol_shdw::Int,
+        icol_per::Int, icol_imp::Int, icol_roof::Int)
+    p = @index(Global)
+    @inbounds if mask_urbanp[p]
+        l = pch_landunit[p]; c = pch_column[p]; it = col_itype[c]
+        T = eltype(o.albd); sunny = coszen[l] > zero(T)
+        for ib in 1:numrad
+            if it == icol_sunw || it == icol_shdw
+                o.albd[p, ib] = vf_sw[l]; o.albi[p, ib] = vf_sw[l]
+            elseif it == icol_per || it == icol_imp
+                o.albd[p, ib] = vf_sr[l]; o.albi[p, ib] = vf_sr[l]
+            elseif it == icol_roof
+                o.albd[p, ib] = one(T); o.albi[p, ib] = one(T)
+            end
+            o.fabd[p, ib] = zero(T); o.fabd_sun[p, ib] = zero(T); o.fabd_sha[p, ib] = zero(T)
+            o.fabi[p, ib] = zero(T); o.fabi_sun[p, ib] = zero(T); o.fabi_sha[p, ib] = zero(T)
+            o.ftdd[p, ib] = sunny ? one(T) : zero(T)
+            o.ftid[p, ib] = zero(T)
+            o.ftii[p, ib] = sunny ? one(T) : zero(T)
+        end
+    end
+end
+
+# Init sabs (absorbed→0) and sref (roof→1, walls→vf_sw, roads→vf_sr) per landunit.
+@kernel function _ualb_sabsref_init_kernel!(sa, sr, @Const(mask_urbanl),
+        @Const(vf_sw), @Const(vf_sr), numrad::Int)
+    l = @index(Global)
+    @inbounds if mask_urbanl[l]
+        T = eltype(sr.roof_dir); sw = vf_sw[l]; sd = vf_sr[l]
+        for ib in 1:numrad
+            sa.roof_dir[l, ib] = zero(T); sa.roof_dif[l, ib] = zero(T)
+            sa.sunwall_dir[l, ib] = zero(T); sa.sunwall_dif[l, ib] = zero(T)
+            sa.shadewall_dir[l, ib] = zero(T); sa.shadewall_dif[l, ib] = zero(T)
+            sa.improad_dir[l, ib] = zero(T); sa.improad_dif[l, ib] = zero(T)
+            sa.perroad_dir[l, ib] = zero(T); sa.perroad_dif[l, ib] = zero(T)
+            sr.roof_dir[l, ib] = one(T); sr.roof_dif[l, ib] = one(T)
+            sr.sunwall_dir[l, ib] = sw; sr.sunwall_dif[l, ib] = sw
+            sr.shadewall_dir[l, ib] = sw; sr.shadewall_dif[l, ib] = sw
+            sr.improad_dir[l, ib] = sd; sr.improad_dif[l, ib] = sd
+            sr.perroad_dir[l, ib] = sd; sr.perroad_dif[l, ib] = sd
+        end
+    end
+end
+
+# Total column snow water (one thread per column). Accumulate the layer sum into
+# a LOCAL scalar and store once — a repeated `h2osno_total[c] += …` inside the
+# j-loop miscompiles on the KA CPU backend under --check-bounds=yes (inner loop
+# silently runs a single iteration). Byte-identical to the base + loop-add form.
+@kernel function _ualb_h2osno_kernel!(h2osno_total, @Const(mask_urbanc),
+        @Const(h2osno_no_layers), @Const(h2osoi_ice), @Const(h2osoi_liq),
+        @Const(snl), nlevsno::Int)
+    c = @index(Global)
+    @inbounds if mask_urbanc[c]
+        acc = h2osno_no_layers[c]
+        if snl[c] < 0
+            for j in (snl[c] + nlevsno):nlevsno
+                acc += h2osoi_ice[c, j] + h2osoi_liq[c, j]
+            end
+        end
+        h2osno_total[c] = acc
+    end
+end
+
+# Combine snow-free + snow albedos per column (roof/improad/perroad by itype).
+@kernel function _ualb_combine_kernel!(sn, ap, @Const(mask_urbanc),
+        @Const(col_landunit), @Const(col_itype), @Const(frac_sno), numrad::Int,
+        icol_roof::Int, icol_imp::Int, icol_per::Int)
+    c = @index(Global)
+    @inbounds if mask_urbanc[c]
+        l = col_landunit[c]; it = col_itype[c]
+        T = eltype(frac_sno); fs = frac_sno[c]; omfs = one(T) - fs
+        for ib in 1:numrad
+            if it == icol_roof
+                sn.roof_dir_s[l, ib] = ap.roof_dir[l, ib] * omfs + sn.albsnd_roof[l, ib] * fs
+                sn.roof_dif_s[l, ib] = ap.roof_dif[l, ib] * omfs + sn.albsni_roof[l, ib] * fs
+            elseif it == icol_imp
+                sn.improad_dir_s[l, ib] = ap.improad_dir[l, ib] * omfs + sn.albsnd_improad[l, ib] * fs
+                sn.improad_dif_s[l, ib] = ap.improad_dif[l, ib] * omfs + sn.albsni_improad[l, ib] * fs
+            elseif it == icol_per
+                sn.perroad_dir_s[l, ib] = ap.perroad_dir[l, ib] * omfs + sn.albsnd_perroad[l, ib] * fs
+                sn.perroad_dif_s[l, ib] = ap.perroad_dif[l, ib] * omfs + sn.albsni_perroad[l, ib] * fs
+            end
+        end
+    end
+end
+
+# Map net-solar sref → per-column ground albedo (albgrd/albgri + _hst) by itype.
+@kernel function _ualb_map_col_kernel!(o, sr, @Const(mask_urbanc),
+        @Const(col_landunit), @Const(col_itype), @Const(coszen), numrad::Int,
+        icol_roof::Int, icol_sunw::Int, icol_shdw::Int, icol_per::Int, icol_imp::Int)
+    c = @index(Global)
+    @inbounds if mask_urbanc[c]
+        l = col_landunit[c]; it = col_itype[c]
+        T = eltype(coszen); sunny = coszen[l] > zero(T)
+        for ib in 1:numrad
+            if it == icol_roof
+                o.albgrd[c, ib] = sr.roof_dir[l, ib]; o.albgri[c, ib] = sr.roof_dif[l, ib]
+            elseif it == icol_sunw
+                o.albgrd[c, ib] = sr.sunwall_dir[l, ib]; o.albgri[c, ib] = sr.sunwall_dif[l, ib]
+            elseif it == icol_shdw
+                o.albgrd[c, ib] = sr.shadewall_dir[l, ib]; o.albgri[c, ib] = sr.shadewall_dif[l, ib]
+            elseif it == icol_per
+                o.albgrd[c, ib] = sr.perroad_dir[l, ib]; o.albgri[c, ib] = sr.perroad_dif[l, ib]
+            elseif it == icol_imp
+                o.albgrd[c, ib] = sr.improad_dir[l, ib]; o.albgri[c, ib] = sr.improad_dif[l, ib]
+            end
+            if sunny
+                o.albgrd_hst[c, ib] = o.albgrd[c, ib]; o.albgri_hst[c, ib] = o.albgri[c, ib]
+            end
+        end
+    end
+end
+
+# Map per-column ground albedo → per-patch albd/albi (+ _hst) (one thread/patch).
+@kernel function _ualb_map_patch_kernel!(o, @Const(mask_urbanp), @Const(pch_column),
+        @Const(pch_landunit), @Const(coszen), numrad::Int)
+    p = @index(Global)
+    @inbounds if mask_urbanp[p]
+        c = pch_column[p]; l = pch_landunit[p]
+        T = eltype(coszen); sunny = coszen[l] > zero(T)
+        for ib in 1:numrad
+            o.albd[p, ib] = o.albgrd[c, ib]; o.albi[p, ib] = o.albgri[c, ib]
+            if sunny
+                o.albd_hst[p, ib] = o.albd[p, ib]; o.albi_hst[p, ib] = o.albi[p, ib]
+            end
+        end
+    end
+end
+
+# --------------------------------------------------------------------------
 # snow_albedo!
 # --------------------------------------------------------------------------
 
@@ -120,15 +302,18 @@ Determine urban snow albedos.
 Ported from `SnowAlbedo` in `UrbanAlbedoMod.F90`.
 """
 function snow_albedo!(mask_urbanc::AbstractVector{Bool}, col::ColumnData,
-                      coszen::Vector{<:Real}, ind::Int,
-                      albsn_roof::Matrix{<:Real},
-                      albsn_improad::Matrix{<:Real},
-                      albsn_perroad::Matrix{<:Real},
-                      h2osno_total::Vector{<:Real})
+                      coszen::AbstractVector{<:Real}, ind::Int,
+                      albsn_roof::AbstractMatrix{<:Real},
+                      albsn_improad::AbstractMatrix{<:Real},
+                      albsn_perroad::AbstractMatrix{<:Real},
+                      h2osno_total::AbstractVector{<:Real})
 
+    # SNAL0/SNAL1 at the array element type so no Float64 scalar reaches a Metal
+    # kernel (no-op on the Float64 host path).
+    FT = eltype(albsn_roof)
     ualb_snow_albedo!(albsn_roof, mask_urbanc, col.landunit, col.itype,
                       coszen, ind, albsn_improad, albsn_perroad, h2osno_total,
-                      ICOL_ROOF, ICOL_ROAD_IMPERV, ICOL_ROAD_PERV, SNAL0, SNAL1)
+                      ICOL_ROOF, ICOL_ROAD_IMPERV, ICOL_ROAD_PERV, FT(SNAL0), FT(SNAL1))
 
     return nothing
 end
@@ -625,239 +810,110 @@ function urban_albedo!(mask_urbanl::AbstractVector{Bool},
     (any(mask_urbanl) || any(mask_urbanc) || any(mask_urbanp)) || return nothing
 
     nl = length(mask_urbanl)
+    nc = length(mask_urbanc)
     numrad = NUMRAD
+    FT = eltype(surfalb.coszen_col)
 
-    # Aliases for output arrays
-    albgrd     = surfalb.albgrd_col
-    albgri     = surfalb.albgri_col
-    albd       = surfalb.albd_patch
-    albi       = surfalb.albi_patch
-    fabd       = surfalb.fabd_patch
-    fabd_sun   = surfalb.fabd_sun_patch
-    fabd_sha   = surfalb.fabd_sha_patch
-    fabi       = surfalb.fabi_patch
-    fabi_sun   = surfalb.fabi_sun_patch
-    fabi_sha   = surfalb.fabi_sha_patch
-    ftdd       = surfalb.ftdd_patch
-    ftid       = surfalb.ftid_patch
-    ftii       = surfalb.ftii_patch
-    albd_hst   = surfalb.albd_hst_patch
-    albi_hst   = surfalb.albi_hst_patch
-    albgrd_hst = surfalb.albgrd_hst_col
-    albgri_hst = surfalb.albgri_hst_col
+    vf_sr    = urbanparams.vf_sr
+    vf_sw    = urbanparams.vf_sw
+    frac_sno = waterdiagnosticbulk.frac_sno_col
 
-    frac_sno   = waterdiagnosticbulk.frac_sno_col
+    # Backend + backend-aware local allocation (device arrays when the state is on
+    # a GPU, host Arrays otherwise). `_run!` launches a bundle-first kernel on the
+    # state's backend and syncs (the KA CPU path is byte-identical to the old loop).
+    be = _kernel_backend(surfalb.coszen_col)
+    _z(dims...) = fill!(similar(surfalb.coszen_col, FT, dims...), zero(FT))
+    _o(dims...) = fill!(similar(surfalb.coszen_col, FT, dims...), one(FT))
+    _run!(k, nd, args...) = (k(be)(args...; ndrange = nd); KA.synchronize(be))
 
-    vf_sr      = urbanparams.vf_sr
-    vf_sw      = urbanparams.vf_sw
+    # surfalb output bundle (patch matrices albd..ftii + column matrices albgr*).
+    surf = _UAlbSurf(surfalb.albd_patch, surfalb.albi_patch, surfalb.fabd_patch,
+        surfalb.fabd_sun_patch, surfalb.fabd_sha_patch, surfalb.fabi_patch,
+        surfalb.fabi_sun_patch, surfalb.fabi_sha_patch, surfalb.ftdd_patch,
+        surfalb.ftid_patch, surfalb.ftii_patch, surfalb.albd_hst_patch,
+        surfalb.albi_hst_patch, surfalb.albgrd_col, surfalb.albgri_col,
+        surfalb.albgrd_hst_col, surfalb.albgri_hst_col)
 
     # ---- Cosine solar zenith angle ----
-    FT = eltype(surfalb.coszen_col)
-    coszen = zeros(FT, nl)
-    zen    = zeros(FT, nl)
+    coszen = _z(nl)
+    zen    = _z(nl)
     ualb_coszen!(coszen, mask_urbanl, surfalb.coszen_col, lun.coli, zen)
 
-    # ---- Initialize output ----
-    ualb_init_albgr!(albgrd, mask_urbanc, albgri, numrad)
-    for ib in 1:numrad
-        for p in eachindex(mask_urbanp)
-            mask_urbanp[p] || continue
-            l = pch.landunit[p]
-            c = pch.column[p]
-            if col.itype[c] == ICOL_SUNWALL
-                albd[p, ib] = vf_sw[l]
-                albi[p, ib] = vf_sw[l]
-            elseif col.itype[c] == ICOL_SHADEWALL
-                albd[p, ib] = vf_sw[l]
-                albi[p, ib] = vf_sw[l]
-            elseif col.itype[c] == ICOL_ROAD_PERV || col.itype[c] == ICOL_ROAD_IMPERV
-                albd[p, ib] = vf_sr[l]
-                albi[p, ib] = vf_sr[l]
-            elseif col.itype[c] == ICOL_ROOF
-                albd[p, ib] = 1.0
-                albi[p, ib] = 1.0
-            end
-            fabd[p, ib]     = 0.0
-            fabd_sun[p, ib] = 0.0
-            fabd_sha[p, ib] = 0.0
-            fabi[p, ib]     = 0.0
-            fabi_sun[p, ib] = 0.0
-            fabi_sha[p, ib] = 0.0
-            if coszen[l] > 0.0
-                ftdd[p, ib] = 1.0
-            else
-                ftdd[p, ib] = 0.0
-            end
-            ftid[p, ib] = 0.0
-            if coszen[l] > 0.0
-                ftii[p, ib] = 1.0
-            else
-                ftii[p, ib] = 0.0
-            end
-        end
-    end
+    # ---- Initialize outputs: ground albedo + patch albedo/absorption/transmission ----
+    ualb_init_albgr!(surfalb.albgrd_col, mask_urbanc, surfalb.albgri_col, numrad)
+    _run!(_ualb_initout_kernel!, length(mask_urbanp), surf, mask_urbanp, pch.landunit,
+        pch.column, col.itype, coszen, vf_sw, vf_sr, numrad,
+        ICOL_SUNWALL, ICOL_SHADEWALL, ICOL_ROAD_PERV, ICOL_ROAD_IMPERV, ICOL_ROOF)
 
-    # ---- Initialize solarabs and sref defaults ----
-    sabs_roof_dir      = solarabs.sabs_roof_dir_lun
-    sabs_roof_dif      = solarabs.sabs_roof_dif_lun
-    sabs_sunwall_dir   = solarabs.sabs_sunwall_dir_lun
-    sabs_sunwall_dif   = solarabs.sabs_sunwall_dif_lun
-    sabs_shadewall_dir = solarabs.sabs_shadewall_dir_lun
-    sabs_shadewall_dif = solarabs.sabs_shadewall_dif_lun
-    sabs_improad_dir   = solarabs.sabs_improad_dir_lun
-    sabs_improad_dif   = solarabs.sabs_improad_dif_lun
-    sabs_perroad_dir   = solarabs.sabs_perroad_dir_lun
-    sabs_perroad_dif   = solarabs.sabs_perroad_dif_lun
+    # ---- sref working reflectances (local) + sabs (solarabs state) init ----
+    sref_roof_dir = _o(nl, numrad); sref_roof_dif = _o(nl, numrad)
+    sref_sunwall_dir = _z(nl, numrad); sref_sunwall_dif = _z(nl, numrad)
+    sref_shadewall_dir = _z(nl, numrad); sref_shadewall_dif = _z(nl, numrad)
+    sref_improad_dir = _z(nl, numrad); sref_improad_dif = _z(nl, numrad)
+    sref_perroad_dir = _z(nl, numrad); sref_perroad_dif = _z(nl, numrad)
+    sref = _UAlbSref(sref_roof_dir, sref_roof_dif, sref_sunwall_dir, sref_sunwall_dif,
+        sref_shadewall_dir, sref_shadewall_dif, sref_improad_dir, sref_improad_dif,
+        sref_perroad_dir, sref_perroad_dif)
+    sabs = _UAlbSabs(solarabs.sabs_roof_dir_lun, solarabs.sabs_roof_dif_lun,
+        solarabs.sabs_sunwall_dir_lun, solarabs.sabs_sunwall_dif_lun,
+        solarabs.sabs_shadewall_dir_lun, solarabs.sabs_shadewall_dif_lun,
+        solarabs.sabs_improad_dir_lun, solarabs.sabs_improad_dif_lun,
+        solarabs.sabs_perroad_dir_lun, solarabs.sabs_perroad_dif_lun)
+    _run!(_ualb_sabsref_init_kernel!, nl, sabs, sref, mask_urbanl, vf_sw, vf_sr, numrad)
 
-    # Local arrays for sref (landunit × numrad)
-    sref_roof_dir      = ones(FT, nl, numrad)
-    sref_roof_dif      = ones(FT, nl, numrad)
-    sref_sunwall_dir   = zeros(FT, nl, numrad)
-    sref_sunwall_dif   = zeros(FT, nl, numrad)
-    sref_shadewall_dir = zeros(FT, nl, numrad)
-    sref_shadewall_dif = zeros(FT, nl, numrad)
-    sref_improad_dir   = zeros(FT, nl, numrad)
-    sref_improad_dif   = zeros(FT, nl, numrad)
-    sref_perroad_dir   = zeros(FT, nl, numrad)
-    sref_perroad_dif   = zeros(FT, nl, numrad)
-
-    for ib in 1:numrad
-        for l in eachindex(mask_urbanl)
-            mask_urbanl[l] || continue
-            sabs_roof_dir[l, ib]      = 0.0
-            sabs_roof_dif[l, ib]      = 0.0
-            sabs_sunwall_dir[l, ib]   = 0.0
-            sabs_sunwall_dif[l, ib]   = 0.0
-            sabs_shadewall_dir[l, ib] = 0.0
-            sabs_shadewall_dif[l, ib] = 0.0
-            sabs_improad_dir[l, ib]   = 0.0
-            sabs_improad_dif[l, ib]   = 0.0
-            sabs_perroad_dir[l, ib]   = 0.0
-            sabs_perroad_dif[l, ib]   = 0.0
-            sref_roof_dir[l, ib]      = 1.0
-            sref_roof_dif[l, ib]      = 1.0
-            sref_sunwall_dir[l, ib]   = vf_sw[l]
-            sref_sunwall_dif[l, ib]   = vf_sw[l]
-            sref_shadewall_dir[l, ib] = vf_sw[l]
-            sref_shadewall_dif[l, ib] = vf_sw[l]
-            sref_improad_dir[l, ib]   = vf_sr[l]
-            sref_improad_dif[l, ib]   = vf_sr[l]
-            sref_perroad_dir[l, ib]   = vf_sr[l]
-            sref_perroad_dif[l, ib]   = vf_sr[l]
-        end
-    end
-
-    # ---- Check if any landunits have sun above horizon ----
-    num_solar = 0
-    for l in eachindex(mask_urbanl)
-        mask_urbanl[l] || continue
-        if coszen[l] > 0.0
-            num_solar += 1
-        end
-    end
+    # ---- num_solar gate: any urban landunit with sun above horizon? ----
+    # coszen is a small (nl) landunit array; copy to host for this control-flow
+    # scalar (non-urban entries are 0, so they never count). Cheap; once per step.
+    cz_host = coszen isa Array ? coszen : Array(coszen)
+    num_solar = count(>(zero(FT)), cz_host)
 
     if num_solar > 0
-        # Set constants - solar fluxes are per unit incoming flux
-        sdir = ones(FT, nl, numrad)
-        sdif = ones(FT, nl, numrad)
+        # Solar fluxes are per unit incoming flux (device-resident working arrays).
+        sdir = _o(nl, numrad); sdif = _o(nl, numrad)
+        sdir_road = _z(nl, numrad); sdif_road = _z(nl, numrad)
+        sdir_sunwall = _z(nl, numrad); sdif_sunwall = _z(nl, numrad)
+        sdir_shadewall = _z(nl, numrad); sdif_shadewall = _z(nl, numrad)
+        albsnd_roof = _z(nl, numrad); albsni_roof = _z(nl, numrad)
+        albsnd_improad = _z(nl, numrad); albsni_improad = _z(nl, numrad)
+        albsnd_perroad = _z(nl, numrad); albsni_perroad = _z(nl, numrad)
+        alb_roof_dir_s = _z(nl, numrad); alb_roof_dif_s = _z(nl, numrad)
+        alb_improad_dir_s = _z(nl, numrad); alb_perroad_dir_s = _z(nl, numrad)
+        alb_improad_dif_s = _z(nl, numrad); alb_perroad_dif_s = _z(nl, numrad)
 
-        # Local arrays for incident radiation
-        sdir_road      = zeros(FT, nl, numrad)
-        sdif_road      = zeros(FT, nl, numrad)
-        sdir_sunwall   = zeros(FT, nl, numrad)
-        sdif_sunwall   = zeros(FT, nl, numrad)
-        sdir_shadewall = zeros(FT, nl, numrad)
-        sdif_shadewall = zeros(FT, nl, numrad)
-
-        # Snow albedos
-        albsnd_roof    = zeros(FT, nl, numrad)
-        albsni_roof    = zeros(FT, nl, numrad)
-        albsnd_improad = zeros(FT, nl, numrad)
-        albsni_improad = zeros(FT, nl, numrad)
-        albsnd_perroad = zeros(FT, nl, numrad)
-        albsni_perroad = zeros(FT, nl, numrad)
-
-        # Combined albedos with snow
-        alb_roof_dir_s    = zeros(FT, nl, numrad)
-        alb_roof_dif_s    = zeros(FT, nl, numrad)
-        alb_improad_dir_s = zeros(FT, nl, numrad)
-        alb_perroad_dir_s = zeros(FT, nl, numrad)
-        alb_improad_dif_s = zeros(FT, nl, numrad)
-        alb_perroad_dif_s = zeros(FT, nl, numrad)
-
-        # Compute total h2osno for urban columns
-        # (inline version of CalculateTotalH2osno)
+        # Total column snow water (one thread per column; local-scalar layer sum).
         nlevsno = varpar.nlevsno
-        nc = length(mask_urbanc)
-        h2osno_total = zeros(FT, nc)
-        for c in eachindex(mask_urbanc)
-            mask_urbanc[c] || continue
-            h2osno_total[c] = waterstatebulk.ws.h2osno_no_layers_col[c]
-            if col.snl[c] < 0
-                for j in (col.snl[c] + nlevsno):(nlevsno)
-                    h2osno_total[c] += waterstatebulk.ws.h2osoi_ice_col[c, j] +
-                                       waterstatebulk.ws.h2osoi_liq_col[c, j]
-                end
-            end
-        end
+        h2osno_total = _z(nc)
+        _run!(_ualb_h2osno_kernel!, nc, h2osno_total, mask_urbanc,
+            waterstatebulk.ws.h2osno_no_layers_col, waterstatebulk.ws.h2osoi_ice_col,
+            waterstatebulk.ws.h2osoi_liq_col, col.snl, nlevsno)
 
-        # Incident direct beam radiation
+        # Incident direct + diffuse radiation on the canyon facets.
         incident_direct!(mask_urbanl, lun.canyon_hwr, coszen, zen,
                          sdir, sdir_road, sdir_sunwall, sdir_shadewall)
-
-        # Incident diffuse radiation
         incident_diffuse!(mask_urbanl, lun.canyon_hwr, sdif,
-                          sdif_road, sdif_sunwall, sdif_shadewall,
-                          urbanparams)
+                          sdif_road, sdif_sunwall, sdif_shadewall, urbanparams)
 
-        # Snow albedos - direct beam (ind=0)
+        # Snow albedos (direct beam ind=0, diffuse ind=1).
         snow_albedo!(mask_urbanc, col, coszen, 0,
-                     albsnd_roof, albsnd_improad, albsnd_perroad,
-                     h2osno_total)
-
-        # Snow albedos - diffuse (ind=1)
+                     albsnd_roof, albsnd_improad, albsnd_perroad, h2osno_total)
         snow_albedo!(mask_urbanc, col, coszen, 1,
-                     albsni_roof, albsni_improad, albsni_perroad,
-                     h2osno_total)
+                     albsni_roof, albsni_improad, albsni_perroad, h2osno_total)
 
-        # Combine snow-free and snow albedos
-        alb_roof_dir    = urbanparams.alb_roof_dir
-        alb_roof_dif    = urbanparams.alb_roof_dif
-        alb_improad_dir = urbanparams.alb_improad_dir
-        alb_improad_dif = urbanparams.alb_improad_dif
-        alb_perroad_dir = urbanparams.alb_perroad_dir
-        alb_perroad_dif = urbanparams.alb_perroad_dif
-        alb_wall_dir    = urbanparams.alb_wall_dir
-        alb_wall_dif    = urbanparams.alb_wall_dif
+        # Combine snow-free + snow albedos per column.
+        snow = _UAlbSnow(albsnd_roof, albsni_roof, albsnd_improad, albsni_improad,
+            albsnd_perroad, albsni_perroad, alb_roof_dir_s, alb_roof_dif_s,
+            alb_improad_dir_s, alb_perroad_dir_s, alb_improad_dif_s, alb_perroad_dif_s)
+        aparam = _UAlbParam(urbanparams.alb_roof_dir, urbanparams.alb_roof_dif,
+            urbanparams.alb_improad_dir, urbanparams.alb_improad_dif,
+            urbanparams.alb_perroad_dir, urbanparams.alb_perroad_dif)
+        _run!(_ualb_combine_kernel!, nc, snow, aparam, mask_urbanc, col.landunit,
+            col.itype, frac_sno, numrad, ICOL_ROOF, ICOL_ROAD_IMPERV, ICOL_ROAD_PERV)
 
-        for ib in 1:numrad
-            for c in eachindex(mask_urbanc)
-                mask_urbanc[c] || continue
-                l = col.landunit[c]
-                if col.itype[c] == ICOL_ROOF
-                    alb_roof_dir_s[l, ib] = alb_roof_dir[l, ib] * (1.0 - frac_sno[c]) +
-                        albsnd_roof[l, ib] * frac_sno[c]
-                    alb_roof_dif_s[l, ib] = alb_roof_dif[l, ib] * (1.0 - frac_sno[c]) +
-                        albsni_roof[l, ib] * frac_sno[c]
-                elseif col.itype[c] == ICOL_ROAD_IMPERV
-                    alb_improad_dir_s[l, ib] = alb_improad_dir[l, ib] * (1.0 - frac_sno[c]) +
-                        albsnd_improad[l, ib] * frac_sno[c]
-                    alb_improad_dif_s[l, ib] = alb_improad_dif[l, ib] * (1.0 - frac_sno[c]) +
-                        albsni_improad[l, ib] * frac_sno[c]
-                elseif col.itype[c] == ICOL_ROAD_PERV
-                    alb_perroad_dir_s[l, ib] = alb_perroad_dir[l, ib] * (1.0 - frac_sno[c]) +
-                        albsnd_perroad[l, ib] * frac_sno[c]
-                    alb_perroad_dif_s[l, ib] = alb_perroad_dif[l, ib] * (1.0 - frac_sno[c]) +
-                        albsni_perroad[l, ib] * frac_sno[c]
-                end
-            end
-        end
-
-        # Net solar radiation with multiple reflections
+        # Net solar radiation with multiple reflections.
         net_solar!(mask_urbanl, coszen, lun.canyon_hwr, lun.wtroad_perv,
                    sdir, sdif,
-                   alb_improad_dir_s, alb_perroad_dir_s, alb_wall_dir, alb_roof_dir_s,
-                   alb_improad_dif_s, alb_perroad_dif_s, alb_wall_dif, alb_roof_dif_s,
+                   alb_improad_dir_s, alb_perroad_dir_s, urbanparams.alb_wall_dir, alb_roof_dir_s,
+                   alb_improad_dif_s, alb_perroad_dif_s, urbanparams.alb_wall_dif, alb_roof_dif_s,
                    sdir_road, sdir_sunwall, sdir_shadewall,
                    sdif_road, sdif_sunwall, sdif_shadewall,
                    sref_improad_dir, sref_perroad_dir, sref_sunwall_dir,
@@ -866,44 +922,12 @@ function urban_albedo!(mask_urbanl::AbstractVector{Bool},
                    sref_shadewall_dif, sref_roof_dif,
                    urbanparams, solarabs)
 
-        # ---- Map urban output to surfalb_inst components ----
-        for ib in 1:numrad
-            for c in eachindex(mask_urbanc)
-                mask_urbanc[c] || continue
-                l = col.landunit[c]
-                if col.itype[c] == ICOL_ROOF
-                    albgrd[c, ib] = sref_roof_dir[l, ib]
-                    albgri[c, ib] = sref_roof_dif[l, ib]
-                elseif col.itype[c] == ICOL_SUNWALL
-                    albgrd[c, ib] = sref_sunwall_dir[l, ib]
-                    albgri[c, ib] = sref_sunwall_dif[l, ib]
-                elseif col.itype[c] == ICOL_SHADEWALL
-                    albgrd[c, ib] = sref_shadewall_dir[l, ib]
-                    albgri[c, ib] = sref_shadewall_dif[l, ib]
-                elseif col.itype[c] == ICOL_ROAD_PERV
-                    albgrd[c, ib] = sref_perroad_dir[l, ib]
-                    albgri[c, ib] = sref_perroad_dif[l, ib]
-                elseif col.itype[c] == ICOL_ROAD_IMPERV
-                    albgrd[c, ib] = sref_improad_dir[l, ib]
-                    albgri[c, ib] = sref_improad_dif[l, ib]
-                end
-                if coszen[l] > 0.0
-                    albgrd_hst[c, ib] = albgrd[c, ib]
-                    albgri_hst[c, ib] = albgri[c, ib]
-                end
-            end
-            for p in eachindex(mask_urbanp)
-                mask_urbanp[p] || continue
-                c = pch.column[p]
-                l = pch.landunit[p]
-                albd[p, ib] = albgrd[c, ib]
-                albi[p, ib] = albgri[c, ib]
-                if coszen[l] > 0.0
-                    albd_hst[p, ib] = albd[p, ib]
-                    albi_hst[p, ib] = albi[p, ib]
-                end
-            end
-        end
+        # ---- Map net-solar reflectances → per-column then per-patch albedo ----
+        _run!(_ualb_map_col_kernel!, nc, surf, sref, mask_urbanc, col.landunit,
+            col.itype, coszen, numrad, ICOL_ROOF, ICOL_SUNWALL, ICOL_SHADEWALL,
+            ICOL_ROAD_PERV, ICOL_ROAD_IMPERV)
+        _run!(_ualb_map_patch_kernel!, length(mask_urbanp), surf, mask_urbanp,
+            pch.column, pch.landunit, coszen, numrad)
     end
 
     return nothing
