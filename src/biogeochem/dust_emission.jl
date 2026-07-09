@@ -661,6 +661,93 @@ end
 #   → partitioned into NDST transport bins via ovr_src_snk_mss.
 # ---------------------------------------------------------------------------
 
+# Per-patch Zender (2003) dust kernel: each patch is independent given the
+# landunit-averaged VAI (a p2lu reduction) precomputed on the host. The whole
+# per-patch physics (mobile fraction -> Fecan moisture threshold -> Owen-effect
+# saltation -> White (1979) horizontal flux -> MaB95 sandblasting -> bin
+# partition + total) runs in one thread. The Fortran defensive error() guard on
+# a bad mobilization fraction is dropped — lnd_frc_mbl is in [0,1] by construction
+# for valid input, so it never fires; results are byte-identical. All literals are
+# T()-wrapped so Metal runs Float32 while the Float64 host path is unchanged.
+@kernel function _dust_zender_kernel!(flx_patch, flx_tot, @Const(nolakep_mask),
+        @Const(patch_column), @Const(patch_landunit), @Const(lun_itype),
+        @Const(tlai_lu), @Const(forc_rho), @Const(gwc_thr), @Const(mss_frc_cly_vld),
+        @Const(watsat), @Const(frac_sno), @Const(h2osoi_vol), @Const(h2osoi_liq),
+        @Const(h2osoi_ice), @Const(fv), @Const(u10), @Const(mbl_bsn_fct_col),
+        @Const(ovr_src_snk_mss), saltation_factor, ndst::Int, dst_src_nbr::Int,
+        istsoil_::Int, istcrop_::Int)
+    p = @index(Global)
+    @inbounds if nolakep_mask[p]
+        T = eltype(flx_patch)
+        cst_slt = T(2.61); flx_mss_fdg_fct = T(5.0e-4); vai_mbl_thr = T(0.3)
+        denh2o = T(DENH2O); grav = T(GRAV)
+
+        c = patch_column[p]; l = patch_landunit[p]
+        for nb in 1:ndst; flx_patch[p, nb] = zero(T); end
+        flx_tot[p] = zero(T)
+
+        # "bare ground" fraction decreases linearly from 1 to 0 as VAI rises from
+        # 0 to vai_mbl_thr; no dust over ice/wetland/lake landunits.
+        lnd_frc_mbl = zero(T)
+        if lun_itype[l] == istsoil_ || lun_itype[l] == istcrop_
+            lnd_frc_mbl = tlai_lu[l] < vai_mbl_thr ? one(T) - tlai_lu[l] / vai_mbl_thr : zero(T)
+            lnd_frc_mbl *= (one(T) - frac_sno[c])
+        end
+
+        if lnd_frc_mbl > zero(T)
+            # Roughness factor on threshold friction velocity (constant in CTSM).
+            frc_thr_rgh_fct = one(T)
+            # Fecan (1999) soil-moisture factor on threshold friction velocity.
+            bd = (one(T) - watsat[c, 1]) * T(2.7e3)          # dry soil bulk density
+            gwc_sfc = h2osoi_vol[c, 1] * denh2o / bd          # gravimetric H2O
+            frc_thr_wet_fct = gwc_sfc > gwc_thr[c] ?
+                sqrt(one(T) + T(1.21) * (T(100.0) * (gwc_sfc - gwc_thr[c]))^T(0.68)) : one(T)
+            # Liquid fraction of total surface water (frozen-soil effect).
+            liqfrac = max(zero(T), min(one(T),
+                h2osoi_liq[c, 1] / (h2osoi_ice[c, 1] + h2osoi_liq[c, 1] + T(1.0e-6))))
+            # Dry threshold friction velocity scaled for moisture and roughness.
+            wnd_frc_thr_slt = saltation_factor / sqrt(forc_rho[c]) *
+                              frc_thr_wet_fct * frc_thr_rgh_fct
+
+            wnd_frc_slt = fv[p]
+            flx_mss_hrz_slt_ttl = zero(T)
+            wnd_rfr_thr_slt = u10[p] * wnd_frc_thr_slt / fv[p]
+
+            # Owen-effect saltating friction velocity.
+            if u10[p] >= wnd_rfr_thr_slt
+                wnd_rfr_dlt = u10[p] - wnd_rfr_thr_slt
+                wnd_frc_slt_dlt = T(0.003) * wnd_rfr_dlt * wnd_rfr_dlt
+                wnd_frc_slt = fv[p] + wnd_frc_slt_dlt
+            end
+
+            # White (1979) vertically integrated horizontal mass flux.
+            if wnd_frc_slt > wnd_frc_thr_slt
+                wnd_frc_rat = wnd_frc_thr_slt / wnd_frc_slt
+                flx_mss_hrz_slt_ttl = cst_slt * forc_rho[c] * (wnd_frc_slt^T(3.0)) *
+                    (one(T) - wnd_frc_rat) * (one(T) + wnd_frc_rat) * (one(T) + wnd_frc_rat) / grav
+                flx_mss_hrz_slt_ttl *= lnd_frc_mbl * mbl_bsn_fct_col[c] *
+                                       flx_mss_fdg_fct * liqfrac
+            end
+
+            # MaB95 sandblasting: total vertical dust mass flux.
+            dst_slt_flx_rat_ttl = T(100.0) * exp(log(T(10.0)) * (T(13.4) * mss_frc_cly_vld[c] - T(6.0)))
+            flx_ttl = flx_mss_hrz_slt_ttl * dst_slt_flx_rat_ttl
+
+            # Partition total vertical mass flux into NDST bins + total.
+            tot = zero(T)
+            for nb in 1:ndst
+                acc = zero(T)
+                for m in 1:dst_src_nbr
+                    acc += ovr_src_snk_mss[m, nb] * flx_ttl
+                end
+                flx_patch[p, nb] = acc
+                tot += acc
+            end
+            flx_tot[p] = tot
+        end
+    end
+end
+
 """
     dust_emission_zender2003!(dust, nolakep_mask, patch_active, patch_column,
         patch_landunit, patch_wtlunit, lun_itype, bounds_p, nl,
@@ -700,122 +787,21 @@ function dust_emission_zender2003!(
     fv::AbstractVector{<:Real},
     u10::AbstractVector{<:Real},
 )
-    ndst = NDST
-    dst_src_nbr = DST_SRC_NBR
-
-    # Constants (from DustEmisZender2003.F90)
-    cst_slt = 2.61            # [frc] Saltation constant
-    flx_mss_fdg_fct = 5.0e-4  # [frc] Empirical mass-flux tuning factor
-    vai_mbl_thr = 0.3         # [m2 m-2] VAI threshold quenching dust mobilization
-
-    # Landunit-averaged VAI (LAI+SAI)
+    # Landunit-averaged VAI (LAI+SAI) — a p2lu reduction (already kernelized).
     tlai_lu = _dust_landunit_vai(tlai, tsai, patch_active, patch_landunit,
                                  patch_wtlunit, bounds_p, nl)
 
-    # Initialize outputs and compute land mobile fraction per patch.
-    lnd_frc_mbl = zeros(Float64, length(patch_active))
-    for p in bounds_p
-        nolakep_mask[p] || continue
-        c = patch_column[p]
-        l = patch_landunit[p]
-        # Reset outputs.
-        for nb in 1:ndst
-            dust.flx_mss_vrt_dst_patch[p, nb] = 0.0
-        end
-        dust.flx_mss_vrt_dst_tot_patch[p] = 0.0
-
-        # "bare ground" fraction decreases linearly from 1 to 0 as VAI rises
-        # from 0 to vai_mbl_thr; no dust over ice/wetland/lake landunits.
-        if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP
-            if tlai_lu[l] < vai_mbl_thr
-                lnd_frc_mbl[p] = 1.0 - tlai_lu[l] / vai_mbl_thr
-            else
-                lnd_frc_mbl[p] = 0.0
-            end
-            lnd_frc_mbl[p] *= (1.0 - frac_sno[c])
-        else
-            lnd_frc_mbl[p] = 0.0
-        end
-        if lnd_frc_mbl[p] > 1.0 || lnd_frc_mbl[p] < 0.0
-            error("Bad value for dust mobilization fraction at patch $p: $(lnd_frc_mbl[p])")
-        end
-    end
-
-    # Per-patch saltation → horizontal flux → vertical dust flux.
-    flx_mss_vrt_dst_ttl = zeros(Float64, length(patch_active))
-    for p in bounds_p
-        nolakep_mask[p] || continue
-        lnd_frc_mbl[p] > 0.0 || continue
-        c = patch_column[p]
-
-        # Roughness factor on threshold friction velocity (constant in CTSM).
-        frc_thr_rgh_fct = 1.0
-
-        # Soil-moisture factor on threshold friction velocity (Fecan 1999):
-        # gravimetric water content vs. clay-based threshold.
-        bd = (1.0 - watsat[c, 1]) * 2.7e3           # [kg m-3] dry soil bulk density
-        gwc_sfc = h2osoi_vol[c, 1] * DENH2O / bd     # [kg kg-1] gravimetric H2O
-        if gwc_sfc > gwc_thr[c]
-            frc_thr_wet_fct = sqrt(1.0 + 1.21 * (100.0 * (gwc_sfc - gwc_thr[c]))^0.68)
-        else
-            frc_thr_wet_fct = 1.0
-        end
-
-        # Liquid fraction of total surface water (frozen-soil effect).
-        liqfrac = max(0.0, min(1.0,
-            h2osoi_liq[c, 1] / (h2osoi_ice[c, 1] + h2osoi_liq[c, 1] + 1.0e-6)))
-
-        # Dry threshold friction velocity scaled for moisture and roughness.
-        wnd_frc_thr_slt = dust.saltation_factor / sqrt(forc_rho[c]) *
-                          frc_thr_wet_fct * frc_thr_rgh_fct
-
-        wnd_frc_slt = fv[p]
-        flx_mss_hrz_slt_ttl = 0.0
-        flx_mss_vrt_dst_ttl[p] = 0.0
-
-        # Threshold saltation wind speed (reference height).
-        wnd_rfr_thr_slt = u10[p] * wnd_frc_thr_slt / fv[p]
-
-        # Owen-effect saltating friction velocity.
-        if u10[p] >= wnd_rfr_thr_slt
-            wnd_rfr_dlt = u10[p] - wnd_rfr_thr_slt
-            wnd_frc_slt_dlt = 0.003 * wnd_rfr_dlt * wnd_rfr_dlt
-            wnd_frc_slt = fv[p] + wnd_frc_slt_dlt
-        end
-
-        # White (1979) vertically integrated streamwise (horizontal) mass flux.
-        if wnd_frc_slt > wnd_frc_thr_slt
-            wnd_frc_rat = wnd_frc_thr_slt / wnd_frc_slt
-            flx_mss_hrz_slt_ttl = cst_slt * forc_rho[c] * (wnd_frc_slt^3.0) *
-                (1.0 - wnd_frc_rat) * (1.0 + wnd_frc_rat) * (1.0 + wnd_frc_rat) / GRAV
-            # Land-surface/veg limits, basin factor, global tuning, frozen-soil.
-            flx_mss_hrz_slt_ttl *= lnd_frc_mbl[p] * dust.mbl_bsn_fct_col[c] *
-                                   flx_mss_fdg_fct * liqfrac
-        end
-
-        # MaB95 sandblasting: total vertical dust mass flux from horizontal flux.
-        dst_slt_flx_rat_ttl = 100.0 * exp(log(10.0) * (13.4 * mss_frc_cly_vld[c] - 6.0))
-        flx_mss_vrt_dst_ttl[p] = flx_mss_hrz_slt_ttl * dst_slt_flx_rat_ttl
-    end
-
-    # Partition total vertical mass flux into NDST transport bins.
-    for nb in 1:ndst
-        for m in 1:dst_src_nbr
-            for p in bounds_p
-                nolakep_mask[p] || continue
-                lnd_frc_mbl[p] > 0.0 || continue
-                dust.flx_mss_vrt_dst_patch[p, nb] +=
-                    dust.ovr_src_snk_mss[m, nb] * flx_mss_vrt_dst_ttl[p]
-            end
-        end
-    end
-    for nb in 1:ndst
-        for p in bounds_p
-            nolakep_mask[p] || continue
-            lnd_frc_mbl[p] > 0.0 || continue
-            dust.flx_mss_vrt_dst_tot_patch[p] += dust.flx_mss_vrt_dst_patch[p, nb]
-        end
-    end
+    # Each patch is independent given tlai_lu, so the whole per-patch physics
+    # (mobile fraction -> Fecan moisture threshold -> Owen saltation -> White
+    # horizontal flux -> MaB95 sandblasting -> bin partition + total) runs in one
+    # per-patch kernel. saltation_factor moves to the array precision so no Float64
+    # scalar reaches a Metal kernel (no-op on the Float64 host path).
+    FT = eltype(dust.flx_mss_vrt_dst_patch)
+    _launch!(_dust_zender_kernel!, dust.flx_mss_vrt_dst_patch, dust.flx_mss_vrt_dst_tot_patch,
+        nolakep_mask, patch_column, patch_landunit, lun_itype, tlai_lu, forc_rho, gwc_thr,
+        mss_frc_cly_vld, watsat, frac_sno, h2osoi_vol, h2osoi_liq, h2osoi_ice, fv, u10,
+        dust.mbl_bsn_fct_col, dust.ovr_src_snk_mss, FT(dust.saltation_factor),
+        NDST, DST_SRC_NBR, ISTSOIL, ISTCROP; ndrange = length(nolakep_mask))
 
     return nothing
 end

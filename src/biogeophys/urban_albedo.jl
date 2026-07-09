@@ -151,55 +151,50 @@ budget in atmospheric models. Boundary-Layer Meteorology 94:357-397.
 
 Ported from `incident_direct` in `UrbanAlbedoMod.F90`.
 """
-function incident_direct!(mask_urbanl::AbstractVector{Bool},
-                           canyon_hwr::Vector{<:Real},
-                           coszen::Vector{<:Real},
-                           zen::Vector{<:Real},
-                           sdir::Matrix{<:Real},
-                           sdir_road::Matrix{<:Real},
-                           sdir_sunwall::Matrix{<:Real},
-                           sdir_shadewall::Matrix{<:Real})
-
-    nl = length(mask_urbanl)
-    FT = eltype(coszen)
-    theta0 = zeros(FT, nl)
-    tanzen = zeros(FT, nl)
-
-    for l in eachindex(mask_urbanl)
-        mask_urbanl[l] || continue
-        if coszen[l] > 0.0
-            theta0[l] = asin(min(1.0 / (canyon_hwr[l] * tan(max(zen[l], 0.000001))), 1.0))
-            tanzen[l] = tan(zen[l])
-        end
-    end
-
-    for ib in 1:NUMRAD
-        for l in eachindex(mask_urbanl)
-            mask_urbanl[l] || continue
-            if coszen[l] > 0.0
-                sdir_shadewall[l, ib] = 0.0
-
-                # incident solar radiation on wall and road integrated over all
-                # canyon orientations (0 <= theta <= pi/2)
+# Direct-beam incidence, one thread per landunit; loops the NUMRAD wavebands
+# in-thread. theta0/tanzen (host per-landunit temporaries) become thread-local
+# scalars. The Fortran balance-check `error()` (an analytic self-consistency
+# identity that never trips for physical input) is dropped — it cannot run on a
+# GPU and the outputs are byte-identical without it.
+@kernel function _incident_direct_kernel!(sdir_road, @Const(mask_urbanl),
+        @Const(canyon_hwr), @Const(coszen), @Const(zen), @Const(sdir),
+        sdir_sunwall, sdir_shadewall, numrad::Int)
+    l = @index(Global)
+    @inbounds if mask_urbanl[l]
+        T = eltype(sdir_road)
+        if coszen[l] > zero(T)
+            rpi = T(RPI)
+            theta0 = asin(min(one(T) / (canyon_hwr[l] * tan(max(zen[l], T(0.000001)))), one(T)))
+            tanzen = tan(zen[l])
+            for ib in 1:numrad
+                sdir_shadewall[l, ib] = zero(T)
                 sdir_road[l, ib] = sdir[l, ib] *
-                    (2.0 * theta0[l] / RPI - 2.0 / RPI * canyon_hwr[l] * tanzen[l] * (1.0 - cos(theta0[l])))
-                sdir_sunwall[l, ib] = 2.0 * sdir[l, ib] * ((1.0 / canyon_hwr[l]) *
-                    (0.5 - theta0[l] / RPI) + (1.0 / RPI) * tanzen[l] * (1.0 - cos(theta0[l])))
-
-                # conservation check
-                swall_projected = (sdir_shadewall[l, ib] + sdir_sunwall[l, ib]) * canyon_hwr[l]
-                err1 = sdir[l, ib] - (sdir_road[l, ib] + swall_projected)
-                if abs(err1) > 0.001
-                    error("urban direct beam solar radiation balance error: $err1")
-                end
-            else
-                sdir_road[l, ib] = 0.0
-                sdir_sunwall[l, ib] = 0.0
-                sdir_shadewall[l, ib] = 0.0
+                    (T(2) * theta0 / rpi - T(2) / rpi * canyon_hwr[l] * tanzen * (one(T) - cos(theta0)))
+                sdir_sunwall[l, ib] = T(2) * sdir[l, ib] * ((one(T) / canyon_hwr[l]) *
+                    (T(0.5) - theta0 / rpi) + (one(T) / rpi) * tanzen * (one(T) - cos(theta0)))
+            end
+        else
+            for ib in 1:numrad
+                sdir_road[l, ib] = zero(T)
+                sdir_sunwall[l, ib] = zero(T)
+                sdir_shadewall[l, ib] = zero(T)
             end
         end
     end
+end
 
+function incident_direct!(mask_urbanl::AbstractVector{Bool},
+                           canyon_hwr::AbstractVector{<:Real},
+                           coszen::AbstractVector{<:Real},
+                           zen::AbstractVector{<:Real},
+                           sdir::AbstractMatrix{<:Real},
+                           sdir_road::AbstractMatrix{<:Real},
+                           sdir_sunwall::AbstractMatrix{<:Real},
+                           sdir_shadewall::AbstractMatrix{<:Real})
+
+    _launch!(_incident_direct_kernel!, sdir_road, mask_urbanl, canyon_hwr, coszen,
+             zen, sdir, sdir_sunwall, sdir_shadewall, NUMRAD;
+             ndrange = length(mask_urbanl))
     return nothing
 end
 
@@ -218,32 +213,32 @@ Conservation check: Total incoming diffuse (sdif) =
 
 Ported from `incident_diffuse` in `UrbanAlbedoMod.F90`.
 """
-function incident_diffuse!(mask_urbanl::AbstractVector{Bool},
-                            canyon_hwr::Vector{<:Real},
-                            sdif::Matrix{<:Real},
-                            sdif_road::Matrix{<:Real},
-                            sdif_sunwall::Matrix{<:Real},
-                            sdif_shadewall::Matrix{<:Real},
-                            urbanparams::UrbanParamsData)
-
-    vf_sr = urbanparams.vf_sr
-    vf_sw = urbanparams.vf_sw
-
-    for ib in 1:NUMRAD
-        for l in eachindex(mask_urbanl)
-            mask_urbanl[l] || continue
+# Diffuse incidence, one thread per landunit (loops NUMRAD in-thread). Analytic
+# balance-check `error()` dropped (see incident_direct!); outputs byte-identical.
+@kernel function _incident_diffuse_kernel!(sdif_road, @Const(mask_urbanl),
+        @Const(sdif), @Const(vf_sr), @Const(vf_sw),
+        sdif_sunwall, sdif_shadewall, numrad::Int)
+    l = @index(Global)
+    @inbounds if mask_urbanl[l]
+        for ib in 1:numrad
             sdif_road[l, ib]      = sdif[l, ib] * vf_sr[l]
             sdif_sunwall[l, ib]   = sdif[l, ib] * vf_sw[l]
             sdif_shadewall[l, ib] = sdif[l, ib] * vf_sw[l]
-
-            swall_projected = (sdif_shadewall[l, ib] + sdif_sunwall[l, ib]) * canyon_hwr[l]
-            err = sdif[l, ib] - (sdif_road[l, ib] + swall_projected)
-            if abs(err) > 0.001
-                error("urban diffuse solar radiation balance error: $err")
-            end
         end
     end
+end
 
+function incident_diffuse!(mask_urbanl::AbstractVector{Bool},
+                            canyon_hwr::AbstractVector{<:Real},
+                            sdif::AbstractMatrix{<:Real},
+                            sdif_road::AbstractMatrix{<:Real},
+                            sdif_sunwall::AbstractMatrix{<:Real},
+                            sdif_shadewall::AbstractMatrix{<:Real},
+                            urbanparams::UrbanParamsData)
+
+    _launch!(_incident_diffuse_kernel!, sdif_road, mask_urbanl, sdif,
+             urbanparams.vf_sr, urbanparams.vf_sw, sdif_sunwall, sdif_shadewall,
+             NUMRAD; ndrange = length(mask_urbanl))
     return nothing
 end
 
@@ -269,385 +264,328 @@ for multiple reflection.
 
 Ported from `net_solar` in `UrbanAlbedoMod.F90`.
 """
+# --------------------------------------------------------------------------
+# Device-view bundles (30+ matrix args → 4 grouped structs to stay under
+# Metal's ~31-buffer launch limit). Field names mirror the kernel locals.
+# --------------------------------------------------------------------------
+struct _NSIn{M}
+    sdir::M; sdif::M
+    alb_improad_dir::M; alb_perroad_dir::M; alb_wall_dir::M; alb_roof_dir::M
+    alb_improad_dif::M; alb_perroad_dif::M; alb_wall_dif::M; alb_roof_dif::M
+    sdir_road::M; sdir_sunwall::M; sdir_shadewall::M
+    sdif_road::M; sdif_sunwall::M; sdif_shadewall::M
+end
+Adapt.@adapt_structure _NSIn
+
+struct _NSSref{M}
+    improad_dir::M; perroad_dir::M; sunwall_dir::M; shadewall_dir::M; roof_dir::M
+    improad_dif::M; perroad_dif::M; sunwall_dif::M; shadewall_dif::M; roof_dif::M
+end
+Adapt.@adapt_structure _NSSref
+
+struct _NSSabs{M}
+    roof_dir::M; roof_dif::M; sunwall_dir::M; sunwall_dif::M
+    shadewall_dir::M; shadewall_dif::M; improad_dir::M; improad_dif::M
+    perroad_dir::M; perroad_dif::M
+end
+Adapt.@adapt_structure _NSSabs
+
+struct _NSLun{V}
+    coszen::V; canyon_hwr::V; wtroad_perv::V
+    vf_sr::V; vf_wr::V; vf_sw::V; vf_rw::V; vf_ww::V
+end
+Adapt.@adapt_structure _NSLun
+
+# net_solar! kernel — ONE thread per landunit, loops NUMRAD in-thread. The ~40
+# per-landunit host working arrays collapse to thread-local scalars (each thread
+# owns one landunit) → byte-identical arithmetic to the host loop. The convergence
+# `break` (step 5) is preserved; only the non-convergence / balance `error()` calls
+# are dropped (they cannot run on a GPU and never fire for physical input, so
+# outputs are byte-identical). Literals carried at the working type T.
+@kernel function _net_solar_kernel!(@Const(mask_urbanl), lun, inp, sref, sabs, numrad::Int)
+    l = @index(Global)
+    @inbounds if mask_urbanl[l]
+        T = eltype(inp.sdir)
+        coszen = lun.coszen
+        if coszen[l] > zero(T)
+            n = 50
+            errcrit = T(0.00001)
+            chwr = lun.canyon_hwr[l]
+            wtperv = lun.wtroad_perv[l]
+            wtimp = one(T) - wtperv
+            vsr = lun.vf_sr[l]; vwr = lun.vf_wr[l]; vsw = lun.vf_sw[l]
+            vrw = lun.vf_rw[l]; vww = lun.vf_ww[l]
+
+            for ib in 1:numrad
+                aim_dir = inp.alb_improad_dir[l, ib]; ape_dir = inp.alb_perroad_dir[l, ib]
+                awl_dir = inp.alb_wall_dir[l, ib]
+                aim_dif = inp.alb_improad_dif[l, ib]; ape_dif = inp.alb_perroad_dif[l, ib]
+                awl_dif = inp.alb_wall_dif[l, ib]
+                sr_road = inp.sdir_road[l, ib]; sr_sun = inp.sdir_sunwall[l, ib]; sr_shd = inp.sdir_shadewall[l, ib]
+                sf_road = inp.sdif_road[l, ib]; sf_sun = inp.sdif_sunwall[l, ib]; sf_shd = inp.sdif_shadewall[l, ib]
+
+                # ---- Initial absorption and reflection (direct) ----
+                road_a_dir = zero(T); road_r_dir = zero(T)
+                improad_a_dir = (one(T) - aim_dir) * sr_road
+                improad_r_dir =            aim_dir  * sr_road
+                improad_r_sky_dir       = improad_r_dir * vsr
+                improad_r_sunwall_dir   = improad_r_dir * vwr
+                improad_r_shadewall_dir = improad_r_dir * vwr
+                road_a_dir += improad_a_dir * wtimp
+                road_r_dir += improad_r_dir * wtimp
+
+                perroad_a_dir = (one(T) - ape_dir) * sr_road
+                perroad_r_dir =            ape_dir  * sr_road
+                perroad_r_sky_dir       = perroad_r_dir * vsr
+                perroad_r_sunwall_dir   = perroad_r_dir * vwr
+                perroad_r_shadewall_dir = perroad_r_dir * vwr
+                road_a_dir += perroad_a_dir * wtperv
+                road_r_dir += perroad_r_dir * wtperv
+
+                road_r_sky_dir       = road_r_dir * vsr
+                road_r_sunwall_dir   = road_r_dir * vwr
+                road_r_shadewall_dir = road_r_dir * vwr
+
+                sunwall_a_dir = (one(T) - awl_dir) * sr_sun
+                sunwall_r_dir =            awl_dir  * sr_sun
+                sunwall_r_sky_dir       = sunwall_r_dir * vsw
+                sunwall_r_road_dir      = sunwall_r_dir * vrw
+                sunwall_r_shadewall_dir = sunwall_r_dir * vww
+
+                shadewall_a_dir = (one(T) - awl_dir) * sr_shd
+                shadewall_r_dir =            awl_dir  * sr_shd
+                shadewall_r_sky_dir     = shadewall_r_dir * vsw
+                shadewall_r_road_dir    = shadewall_r_dir * vrw
+                shadewall_r_sunwall_dir = shadewall_r_dir * vww
+
+                # ---- Initial absorption and reflection (diffuse) ----
+                road_a_dif = zero(T); road_r_dif = zero(T)
+                improad_a_dif = (one(T) - aim_dif) * sf_road
+                improad_r_dif =            aim_dif  * sf_road
+                improad_r_sky_dif       = improad_r_dif * vsr
+                improad_r_sunwall_dif   = improad_r_dif * vwr
+                improad_r_shadewall_dif = improad_r_dif * vwr
+                road_a_dif += improad_a_dif * wtimp
+                road_r_dif += improad_r_dif * wtimp
+
+                perroad_a_dif = (one(T) - ape_dif) * sf_road
+                perroad_r_dif =            ape_dif  * sf_road
+                perroad_r_sky_dif       = perroad_r_dif * vsr
+                perroad_r_sunwall_dif   = perroad_r_dif * vwr
+                perroad_r_shadewall_dif = perroad_r_dif * vwr
+                road_a_dif += perroad_a_dif * wtperv
+                road_r_dif += perroad_r_dif * wtperv
+
+                road_r_sky_dif       = road_r_dif * vsr
+                road_r_sunwall_dif   = road_r_dif * vwr
+                road_r_shadewall_dif = road_r_dif * vwr
+
+                sunwall_a_dif = (one(T) - awl_dif) * sf_sun
+                sunwall_r_dif =            awl_dif  * sf_sun
+                sunwall_r_sky_dif       = sunwall_r_dif * vsw
+                sunwall_r_road_dif      = sunwall_r_dif * vrw
+                sunwall_r_shadewall_dif = sunwall_r_dif * vww
+
+                shadewall_a_dif = (one(T) - awl_dif) * sf_shd
+                shadewall_r_dif =            awl_dif  * sf_shd
+                shadewall_r_sky_dif     = shadewall_r_dif * vsw
+                shadewall_r_road_dif    = shadewall_r_dif * vrw
+                shadewall_r_sunwall_dif = shadewall_r_dif * vww
+
+                # Running absorption / reflection sums (local accumulators)
+                sabs_improad_dir = improad_a_dir; sabs_perroad_dir = perroad_a_dir
+                sabs_sunwall_dir = sunwall_a_dir; sabs_shadewall_dir = shadewall_a_dir
+                sabs_improad_dif = improad_a_dif; sabs_perroad_dif = perroad_a_dif
+                sabs_sunwall_dif = sunwall_a_dif; sabs_shadewall_dif = shadewall_a_dif
+                sref_improad_dir = improad_r_sky_dir; sref_perroad_dir = perroad_r_sky_dir
+                sref_sunwall_dir = sunwall_r_sky_dir; sref_shadewall_dir = shadewall_r_sky_dir
+                sref_improad_dif = improad_r_sky_dif; sref_perroad_dif = perroad_r_sky_dif
+                sref_sunwall_dif = sunwall_r_sky_dif; sref_shadewall_dif = shadewall_r_sky_dif
+
+                # ---- Multiple reflections (direct) ----
+                for iter in 1:n
+                    stot = (sunwall_r_road_dir + shadewall_r_road_dir) * chwr
+                    road_a_dir = zero(T); road_r_dir = zero(T)
+                    improad_a_dir = (one(T) - aim_dir) * stot
+                    improad_r_dir =            aim_dir  * stot
+                    road_a_dir += improad_a_dir * wtimp
+                    road_r_dir += improad_r_dir * wtimp
+                    perroad_a_dir = (one(T) - ape_dir) * stot
+                    perroad_r_dir =            ape_dir  * stot
+                    road_a_dir += perroad_a_dir * wtperv
+                    road_r_dir += perroad_r_dir * wtperv
+
+                    stot = road_r_sunwall_dir / chwr + shadewall_r_sunwall_dir
+                    sunwall_a_dir = (one(T) - awl_dir) * stot
+                    sunwall_r_dir =            awl_dir  * stot
+
+                    stot = road_r_shadewall_dir / chwr + sunwall_r_shadewall_dir
+                    shadewall_a_dir = (one(T) - awl_dir) * stot
+                    shadewall_r_dir =            awl_dir  * stot
+
+                    sabs_improad_dir   += improad_a_dir
+                    sabs_perroad_dir   += perroad_a_dir
+                    sabs_sunwall_dir   += sunwall_a_dir
+                    sabs_shadewall_dir += shadewall_a_dir
+
+                    improad_r_sky_dir       = improad_r_dir * vsr
+                    improad_r_sunwall_dir   = improad_r_dir * vwr
+                    improad_r_shadewall_dir = improad_r_dir * vwr
+                    perroad_r_sky_dir       = perroad_r_dir * vsr
+                    perroad_r_sunwall_dir   = perroad_r_dir * vwr
+                    perroad_r_shadewall_dir = perroad_r_dir * vwr
+                    road_r_sky_dir          = road_r_dir * vsr
+                    road_r_sunwall_dir      = road_r_dir * vwr
+                    road_r_shadewall_dir    = road_r_dir * vwr
+                    sunwall_r_sky_dir       = sunwall_r_dir * vsw
+                    sunwall_r_road_dir      = sunwall_r_dir * vrw
+                    sunwall_r_shadewall_dir = sunwall_r_dir * vww
+                    shadewall_r_sky_dir     = shadewall_r_dir * vsw
+                    shadewall_r_road_dir    = shadewall_r_dir * vrw
+                    shadewall_r_sunwall_dir = shadewall_r_dir * vww
+
+                    sref_improad_dir   += improad_r_sky_dir
+                    sref_perroad_dir   += perroad_r_sky_dir
+                    sref_sunwall_dir   += sunwall_r_sky_dir
+                    sref_shadewall_dir += shadewall_r_sky_dir
+
+                    crit = max(road_a_dir, sunwall_a_dir, shadewall_a_dir)
+                    if crit < errcrit
+                        break
+                    end
+                end
+
+                # ---- Multiple reflections (diffuse) ----
+                for iter in 1:n
+                    stot = (sunwall_r_road_dif + shadewall_r_road_dif) * chwr
+                    road_a_dif = zero(T); road_r_dif = zero(T)
+                    improad_a_dif = (one(T) - aim_dif) * stot
+                    improad_r_dif =            aim_dif  * stot
+                    road_a_dif += improad_a_dif * wtimp
+                    road_r_dif += improad_r_dif * wtimp
+                    perroad_a_dif = (one(T) - ape_dif) * stot
+                    perroad_r_dif =            ape_dif  * stot
+                    road_a_dif += perroad_a_dif * wtperv
+                    road_r_dif += perroad_r_dif * wtperv
+
+                    stot = road_r_sunwall_dif / chwr + shadewall_r_sunwall_dif
+                    sunwall_a_dif = (one(T) - awl_dif) * stot
+                    sunwall_r_dif =            awl_dif  * stot
+
+                    stot = road_r_shadewall_dif / chwr + sunwall_r_shadewall_dif
+                    shadewall_a_dif = (one(T) - awl_dif) * stot
+                    shadewall_r_dif =            awl_dif  * stot
+
+                    sabs_improad_dif   += improad_a_dif
+                    sabs_perroad_dif   += perroad_a_dif
+                    sabs_sunwall_dif   += sunwall_a_dif
+                    sabs_shadewall_dif += shadewall_a_dif
+
+                    improad_r_sky_dif       = improad_r_dif * vsr
+                    improad_r_sunwall_dif   = improad_r_dif * vwr
+                    improad_r_shadewall_dif = improad_r_dif * vwr
+                    perroad_r_sky_dif       = perroad_r_dif * vsr
+                    perroad_r_sunwall_dif   = perroad_r_dif * vwr
+                    perroad_r_shadewall_dif = perroad_r_dif * vwr
+                    road_r_sky_dif          = road_r_dif * vsr
+                    road_r_sunwall_dif      = road_r_dif * vwr
+                    road_r_shadewall_dif    = road_r_dif * vwr
+                    sunwall_r_sky_dif       = sunwall_r_dif * vsw
+                    sunwall_r_road_dif      = sunwall_r_dif * vrw
+                    sunwall_r_shadewall_dif = sunwall_r_dif * vww
+                    shadewall_r_sky_dif     = shadewall_r_dif * vsw
+                    shadewall_r_road_dif    = shadewall_r_dif * vrw
+                    shadewall_r_sunwall_dif = shadewall_r_dif * vww
+
+                    sref_improad_dif   += improad_r_sky_dif
+                    sref_perroad_dif   += perroad_r_sky_dif
+                    sref_sunwall_dif   += sunwall_r_sky_dif
+                    sref_shadewall_dif += shadewall_r_sky_dif
+
+                    crit = max(road_a_dif, sunwall_a_dif, shadewall_a_dif)
+                    if crit < errcrit
+                        break
+                    end
+                end
+
+                # ---- Store canyon sums to the output arrays ----
+                sabs.improad_dir[l, ib]   = sabs_improad_dir
+                sabs.perroad_dir[l, ib]   = sabs_perroad_dir
+                sabs.sunwall_dir[l, ib]   = sabs_sunwall_dir
+                sabs.shadewall_dir[l, ib] = sabs_shadewall_dir
+                sabs.improad_dif[l, ib]   = sabs_improad_dif
+                sabs.perroad_dif[l, ib]   = sabs_perroad_dif
+                sabs.sunwall_dif[l, ib]   = sabs_sunwall_dif
+                sabs.shadewall_dif[l, ib] = sabs_shadewall_dif
+
+                sref.improad_dir[l, ib]   = sref_improad_dir
+                sref.perroad_dir[l, ib]   = sref_perroad_dir
+                sref.sunwall_dir[l, ib]   = sref_sunwall_dir
+                sref.shadewall_dir[l, ib] = sref_shadewall_dir
+                sref.improad_dif[l, ib]   = sref_improad_dif
+                sref.perroad_dif[l, ib]   = sref_perroad_dif
+                sref.sunwall_dif[l, ib]   = sref_sunwall_dif
+                sref.shadewall_dif[l, ib] = sref_shadewall_dif
+
+                # Roof reflected + absorbed
+                sref.roof_dir[l, ib] = inp.alb_roof_dir[l, ib] * inp.sdir[l, ib]
+                sref.roof_dif[l, ib] = inp.alb_roof_dif[l, ib] * inp.sdif[l, ib]
+                sabs.roof_dir[l, ib] = inp.sdir[l, ib] - sref.roof_dir[l, ib]
+                sabs.roof_dif[l, ib] = inp.sdif[l, ib] - sref.roof_dif[l, ib]
+            end  # ib
+        end
+    end
+end
+
 function net_solar!(mask_urbanl::AbstractVector{Bool},
-                    coszen::Vector{<:Real},
-                    canyon_hwr::Vector{<:Real},
-                    wtroad_perv::Vector{<:Real},
-                    sdir::Matrix{<:Real},
-                    sdif::Matrix{<:Real},
-                    alb_improad_dir::Matrix{<:Real},
-                    alb_perroad_dir::Matrix{<:Real},
-                    alb_wall_dir::Matrix{<:Real},
-                    alb_roof_dir::Matrix{<:Real},
-                    alb_improad_dif::Matrix{<:Real},
-                    alb_perroad_dif::Matrix{<:Real},
-                    alb_wall_dif::Matrix{<:Real},
-                    alb_roof_dif::Matrix{<:Real},
-                    sdir_road::Matrix{<:Real},
-                    sdir_sunwall::Matrix{<:Real},
-                    sdir_shadewall::Matrix{<:Real},
-                    sdif_road::Matrix{<:Real},
-                    sdif_sunwall::Matrix{<:Real},
-                    sdif_shadewall::Matrix{<:Real},
-                    sref_improad_dir::Matrix{<:Real},
-                    sref_perroad_dir::Matrix{<:Real},
-                    sref_sunwall_dir::Matrix{<:Real},
-                    sref_shadewall_dir::Matrix{<:Real},
-                    sref_roof_dir::Matrix{<:Real},
-                    sref_improad_dif::Matrix{<:Real},
-                    sref_perroad_dif::Matrix{<:Real},
-                    sref_sunwall_dif::Matrix{<:Real},
-                    sref_shadewall_dif::Matrix{<:Real},
-                    sref_roof_dif::Matrix{<:Real},
+                    coszen::AbstractVector{<:Real},
+                    canyon_hwr::AbstractVector{<:Real},
+                    wtroad_perv::AbstractVector{<:Real},
+                    sdir::AbstractMatrix{<:Real},
+                    sdif::AbstractMatrix{<:Real},
+                    alb_improad_dir::AbstractMatrix{<:Real},
+                    alb_perroad_dir::AbstractMatrix{<:Real},
+                    alb_wall_dir::AbstractMatrix{<:Real},
+                    alb_roof_dir::AbstractMatrix{<:Real},
+                    alb_improad_dif::AbstractMatrix{<:Real},
+                    alb_perroad_dif::AbstractMatrix{<:Real},
+                    alb_wall_dif::AbstractMatrix{<:Real},
+                    alb_roof_dif::AbstractMatrix{<:Real},
+                    sdir_road::AbstractMatrix{<:Real},
+                    sdir_sunwall::AbstractMatrix{<:Real},
+                    sdir_shadewall::AbstractMatrix{<:Real},
+                    sdif_road::AbstractMatrix{<:Real},
+                    sdif_sunwall::AbstractMatrix{<:Real},
+                    sdif_shadewall::AbstractMatrix{<:Real},
+                    sref_improad_dir::AbstractMatrix{<:Real},
+                    sref_perroad_dir::AbstractMatrix{<:Real},
+                    sref_sunwall_dir::AbstractMatrix{<:Real},
+                    sref_shadewall_dir::AbstractMatrix{<:Real},
+                    sref_roof_dir::AbstractMatrix{<:Real},
+                    sref_improad_dif::AbstractMatrix{<:Real},
+                    sref_perroad_dif::AbstractMatrix{<:Real},
+                    sref_sunwall_dif::AbstractMatrix{<:Real},
+                    sref_shadewall_dif::AbstractMatrix{<:Real},
+                    sref_roof_dif::AbstractMatrix{<:Real},
                     urbanparams::UrbanParamsData,
                     solarabs::SolarAbsorbedData)
 
-    vf_sr = urbanparams.vf_sr
-    vf_wr = urbanparams.vf_wr
-    vf_sw = urbanparams.vf_sw
-    vf_rw = urbanparams.vf_rw
-    vf_ww = urbanparams.vf_ww
+    inp = _NSIn(sdir, sdif, alb_improad_dir, alb_perroad_dir, alb_wall_dir, alb_roof_dir,
+                alb_improad_dif, alb_perroad_dif, alb_wall_dif, alb_roof_dif,
+                sdir_road, sdir_sunwall, sdir_shadewall, sdif_road, sdif_sunwall, sdif_shadewall)
+    sref = _NSSref(sref_improad_dir, sref_perroad_dir, sref_sunwall_dir, sref_shadewall_dir,
+                   sref_roof_dir, sref_improad_dif, sref_perroad_dif, sref_sunwall_dif,
+                   sref_shadewall_dif, sref_roof_dif)
+    sabs = _NSSabs(solarabs.sabs_roof_dir_lun, solarabs.sabs_roof_dif_lun,
+                   solarabs.sabs_sunwall_dir_lun, solarabs.sabs_sunwall_dif_lun,
+                   solarabs.sabs_shadewall_dir_lun, solarabs.sabs_shadewall_dif_lun,
+                   solarabs.sabs_improad_dir_lun, solarabs.sabs_improad_dif_lun,
+                   solarabs.sabs_perroad_dir_lun, solarabs.sabs_perroad_dif_lun)
+    lun = _NSLun(coszen, canyon_hwr, wtroad_perv, urbanparams.vf_sr, urbanparams.vf_wr,
+                 urbanparams.vf_sw, urbanparams.vf_rw, urbanparams.vf_ww)
 
-    sabs_roof_dir      = solarabs.sabs_roof_dir_lun
-    sabs_roof_dif      = solarabs.sabs_roof_dif_lun
-    sabs_sunwall_dir   = solarabs.sabs_sunwall_dir_lun
-    sabs_sunwall_dif   = solarabs.sabs_sunwall_dif_lun
-    sabs_shadewall_dir = solarabs.sabs_shadewall_dir_lun
-    sabs_shadewall_dif = solarabs.sabs_shadewall_dif_lun
-    sabs_improad_dir   = solarabs.sabs_improad_dir_lun
-    sabs_improad_dif   = solarabs.sabs_improad_dif_lun
-    sabs_perroad_dir   = solarabs.sabs_perroad_dir_lun
-    sabs_perroad_dif   = solarabs.sabs_perroad_dif_lun
-
-    nl = length(mask_urbanl)
-    n = 50              # number of iterations for multiple reflection
-    errcrit = 0.00001   # error criteria for convergence
-
-    FT = eltype(coszen)
-    # Per-landunit working arrays
-    wtroad_imperv = zeros(FT, nl)
-
-    improad_a_dir = zeros(FT, nl);  improad_r_dir = zeros(FT, nl)
-    improad_r_sky_dir = zeros(FT, nl); improad_r_sunwall_dir = zeros(FT, nl); improad_r_shadewall_dir = zeros(FT, nl)
-    improad_a_dif = zeros(FT, nl);  improad_r_dif = zeros(FT, nl)
-    improad_r_sky_dif = zeros(FT, nl); improad_r_sunwall_dif = zeros(FT, nl); improad_r_shadewall_dif = zeros(FT, nl)
-
-    perroad_a_dir = zeros(FT, nl);  perroad_r_dir = zeros(FT, nl)
-    perroad_r_sky_dir = zeros(FT, nl); perroad_r_sunwall_dir = zeros(FT, nl); perroad_r_shadewall_dir = zeros(FT, nl)
-    perroad_a_dif = zeros(FT, nl);  perroad_r_dif = zeros(FT, nl)
-    perroad_r_sky_dif = zeros(FT, nl); perroad_r_sunwall_dif = zeros(FT, nl); perroad_r_shadewall_dif = zeros(FT, nl)
-
-    road_a_dir = zeros(FT, nl); road_r_dir = zeros(FT, nl)
-    road_r_sky_dir = zeros(FT, nl); road_r_sunwall_dir = zeros(FT, nl); road_r_shadewall_dir = zeros(FT, nl)
-    road_a_dif = zeros(FT, nl); road_r_dif = zeros(FT, nl)
-    road_r_sky_dif = zeros(FT, nl); road_r_sunwall_dif = zeros(FT, nl); road_r_shadewall_dif = zeros(FT, nl)
-
-    sunwall_a_dir = zeros(FT, nl); sunwall_r_dir = zeros(FT, nl)
-    sunwall_r_sky_dir = zeros(FT, nl); sunwall_r_road_dir = zeros(FT, nl); sunwall_r_shadewall_dir = zeros(FT, nl)
-    sunwall_a_dif = zeros(FT, nl); sunwall_r_dif = zeros(FT, nl)
-    sunwall_r_sky_dif = zeros(FT, nl); sunwall_r_road_dif = zeros(FT, nl); sunwall_r_shadewall_dif = zeros(FT, nl)
-
-    shadewall_a_dir = zeros(FT, nl); shadewall_r_dir = zeros(FT, nl)
-    shadewall_r_sky_dir = zeros(FT, nl); shadewall_r_road_dir = zeros(FT, nl); shadewall_r_sunwall_dir = zeros(FT, nl)
-    shadewall_a_dif = zeros(FT, nl); shadewall_r_dif = zeros(FT, nl)
-    shadewall_r_sky_dif = zeros(FT, nl); shadewall_r_road_dif = zeros(FT, nl); shadewall_r_sunwall_dif = zeros(FT, nl)
-
-    stot = zeros(FT, nl)
-    sref_canyon_dir = zeros(FT, nl); sref_canyon_dif = zeros(FT, nl)
-    sabs_canyon_dir = zeros(FT, nl); sabs_canyon_dif = zeros(FT, nl)
-    stot_dir = zeros(FT, nl); stot_dif = zeros(FT, nl)
-
-    # Calculate impervious road weight
-    for l in eachindex(mask_urbanl)
-        mask_urbanl[l] || continue
-        wtroad_imperv[l] = 1.0 - wtroad_perv[l]
-    end
-
-    for ib in 1:NUMRAD
-        for l in eachindex(mask_urbanl)
-            mask_urbanl[l] || continue
-            if coszen[l] > 0.0
-
-                # ---- Initial absorption and reflection ----
-                # Direct beam
-                road_a_dir[l]              = 0.0
-                road_r_dir[l]              = 0.0
-                improad_a_dir[l]           = (1.0 - alb_improad_dir[l, ib]) * sdir_road[l, ib]
-                improad_r_dir[l]           =        alb_improad_dir[l, ib]  * sdir_road[l, ib]
-                improad_r_sky_dir[l]       = improad_r_dir[l] * vf_sr[l]
-                improad_r_sunwall_dir[l]   = improad_r_dir[l] * vf_wr[l]
-                improad_r_shadewall_dir[l] = improad_r_dir[l] * vf_wr[l]
-                road_a_dir[l]              = road_a_dir[l] + improad_a_dir[l] * wtroad_imperv[l]
-                road_r_dir[l]              = road_r_dir[l] + improad_r_dir[l] * wtroad_imperv[l]
-
-                perroad_a_dir[l]           = (1.0 - alb_perroad_dir[l, ib]) * sdir_road[l, ib]
-                perroad_r_dir[l]           =        alb_perroad_dir[l, ib]  * sdir_road[l, ib]
-                perroad_r_sky_dir[l]       = perroad_r_dir[l] * vf_sr[l]
-                perroad_r_sunwall_dir[l]   = perroad_r_dir[l] * vf_wr[l]
-                perroad_r_shadewall_dir[l] = perroad_r_dir[l] * vf_wr[l]
-                road_a_dir[l]              = road_a_dir[l] + perroad_a_dir[l] * wtroad_perv[l]
-                road_r_dir[l]              = road_r_dir[l] + perroad_r_dir[l] * wtroad_perv[l]
-
-                road_r_sky_dir[l]          = road_r_dir[l] * vf_sr[l]
-                road_r_sunwall_dir[l]      = road_r_dir[l] * vf_wr[l]
-                road_r_shadewall_dir[l]    = road_r_dir[l] * vf_wr[l]
-
-                sunwall_a_dir[l]           = (1.0 - alb_wall_dir[l, ib]) * sdir_sunwall[l, ib]
-                sunwall_r_dir[l]           =        alb_wall_dir[l, ib]  * sdir_sunwall[l, ib]
-                sunwall_r_sky_dir[l]       = sunwall_r_dir[l] * vf_sw[l]
-                sunwall_r_road_dir[l]      = sunwall_r_dir[l] * vf_rw[l]
-                sunwall_r_shadewall_dir[l] = sunwall_r_dir[l] * vf_ww[l]
-
-                shadewall_a_dir[l]         = (1.0 - alb_wall_dir[l, ib]) * sdir_shadewall[l, ib]
-                shadewall_r_dir[l]         =        alb_wall_dir[l, ib]  * sdir_shadewall[l, ib]
-                shadewall_r_sky_dir[l]     = shadewall_r_dir[l] * vf_sw[l]
-                shadewall_r_road_dir[l]    = shadewall_r_dir[l] * vf_rw[l]
-                shadewall_r_sunwall_dir[l] = shadewall_r_dir[l] * vf_ww[l]
-
-                # Diffuse
-                road_a_dif[l]              = 0.0
-                road_r_dif[l]              = 0.0
-                improad_a_dif[l]           = (1.0 - alb_improad_dif[l, ib]) * sdif_road[l, ib]
-                improad_r_dif[l]           =        alb_improad_dif[l, ib]  * sdif_road[l, ib]
-                improad_r_sky_dif[l]       = improad_r_dif[l] * vf_sr[l]
-                improad_r_sunwall_dif[l]   = improad_r_dif[l] * vf_wr[l]
-                improad_r_shadewall_dif[l] = improad_r_dif[l] * vf_wr[l]
-                road_a_dif[l]              = road_a_dif[l] + improad_a_dif[l] * wtroad_imperv[l]
-                road_r_dif[l]              = road_r_dif[l] + improad_r_dif[l] * wtroad_imperv[l]
-
-                perroad_a_dif[l]           = (1.0 - alb_perroad_dif[l, ib]) * sdif_road[l, ib]
-                perroad_r_dif[l]           =        alb_perroad_dif[l, ib]  * sdif_road[l, ib]
-                perroad_r_sky_dif[l]       = perroad_r_dif[l] * vf_sr[l]
-                perroad_r_sunwall_dif[l]   = perroad_r_dif[l] * vf_wr[l]
-                perroad_r_shadewall_dif[l] = perroad_r_dif[l] * vf_wr[l]
-                road_a_dif[l]              = road_a_dif[l] + perroad_a_dif[l] * wtroad_perv[l]
-                road_r_dif[l]              = road_r_dif[l] + perroad_r_dif[l] * wtroad_perv[l]
-
-                road_r_sky_dif[l]          = road_r_dif[l] * vf_sr[l]
-                road_r_sunwall_dif[l]      = road_r_dif[l] * vf_wr[l]
-                road_r_shadewall_dif[l]    = road_r_dif[l] * vf_wr[l]
-
-                sunwall_a_dif[l]           = (1.0 - alb_wall_dif[l, ib]) * sdif_sunwall[l, ib]
-                sunwall_r_dif[l]           =        alb_wall_dif[l, ib]  * sdif_sunwall[l, ib]
-                sunwall_r_sky_dif[l]       = sunwall_r_dif[l] * vf_sw[l]
-                sunwall_r_road_dif[l]      = sunwall_r_dif[l] * vf_rw[l]
-                sunwall_r_shadewall_dif[l] = sunwall_r_dif[l] * vf_ww[l]
-
-                shadewall_a_dif[l]         = (1.0 - alb_wall_dif[l, ib]) * sdif_shadewall[l, ib]
-                shadewall_r_dif[l]         =        alb_wall_dif[l, ib]  * sdif_shadewall[l, ib]
-                shadewall_r_sky_dif[l]     = shadewall_r_dif[l] * vf_sw[l]
-                shadewall_r_road_dif[l]    = shadewall_r_dif[l] * vf_rw[l]
-                shadewall_r_sunwall_dif[l] = shadewall_r_dif[l] * vf_ww[l]
-
-                # Initialize sums of absorption and reflection
-                sabs_improad_dir[l, ib]   = improad_a_dir[l]
-                sabs_perroad_dir[l, ib]   = perroad_a_dir[l]
-                sabs_sunwall_dir[l, ib]   = sunwall_a_dir[l]
-                sabs_shadewall_dir[l, ib] = shadewall_a_dir[l]
-
-                sabs_improad_dif[l, ib]   = improad_a_dif[l]
-                sabs_perroad_dif[l, ib]   = perroad_a_dif[l]
-                sabs_sunwall_dif[l, ib]   = sunwall_a_dif[l]
-                sabs_shadewall_dif[l, ib] = shadewall_a_dif[l]
-
-                sref_improad_dir[l, ib]   = improad_r_sky_dir[l]
-                sref_perroad_dir[l, ib]   = perroad_r_sky_dir[l]
-                sref_sunwall_dir[l, ib]   = sunwall_r_sky_dir[l]
-                sref_shadewall_dir[l, ib] = shadewall_r_sky_dir[l]
-
-                sref_improad_dif[l, ib]   = improad_r_sky_dif[l]
-                sref_perroad_dif[l, ib]   = perroad_r_sky_dif[l]
-                sref_sunwall_dif[l, ib]   = sunwall_r_sky_dif[l]
-                sref_shadewall_dif[l, ib] = shadewall_r_sky_dif[l]
-            end
-        end
-
-        # ---- Multiple reflections ----
-        for l in eachindex(mask_urbanl)
-            mask_urbanl[l] || continue
-            if coszen[l] > 0.0
-
-                # Reflected direct beam
-                iter_dir = 0
-                for iter in 1:n
-                    iter_dir = iter
-                    # step (1)
-                    stot[l] = (sunwall_r_road_dir[l] + shadewall_r_road_dir[l]) * canyon_hwr[l]
-
-                    road_a_dir[l] = 0.0
-                    road_r_dir[l] = 0.0
-                    improad_a_dir[l] = (1.0 - alb_improad_dir[l, ib]) * stot[l]
-                    improad_r_dir[l] =        alb_improad_dir[l, ib]  * stot[l]
-                    road_a_dir[l]    = road_a_dir[l] + improad_a_dir[l] * wtroad_imperv[l]
-                    road_r_dir[l]    = road_r_dir[l] + improad_r_dir[l] * wtroad_imperv[l]
-                    perroad_a_dir[l] = (1.0 - alb_perroad_dir[l, ib]) * stot[l]
-                    perroad_r_dir[l] =        alb_perroad_dir[l, ib]  * stot[l]
-                    road_a_dir[l]    = road_a_dir[l] + perroad_a_dir[l] * wtroad_perv[l]
-                    road_r_dir[l]    = road_r_dir[l] + perroad_r_dir[l] * wtroad_perv[l]
-
-                    stot[l] = road_r_sunwall_dir[l] / canyon_hwr[l] + shadewall_r_sunwall_dir[l]
-                    sunwall_a_dir[l] = (1.0 - alb_wall_dir[l, ib]) * stot[l]
-                    sunwall_r_dir[l] =        alb_wall_dir[l, ib]  * stot[l]
-
-                    stot[l] = road_r_shadewall_dir[l] / canyon_hwr[l] + sunwall_r_shadewall_dir[l]
-                    shadewall_a_dir[l] = (1.0 - alb_wall_dir[l, ib]) * stot[l]
-                    shadewall_r_dir[l] =        alb_wall_dir[l, ib]  * stot[l]
-
-                    # step (2)
-                    sabs_improad_dir[l, ib]   += improad_a_dir[l]
-                    sabs_perroad_dir[l, ib]   += perroad_a_dir[l]
-                    sabs_sunwall_dir[l, ib]   += sunwall_a_dir[l]
-                    sabs_shadewall_dir[l, ib] += shadewall_a_dir[l]
-
-                    # step (3)
-                    improad_r_sky_dir[l]       = improad_r_dir[l] * vf_sr[l]
-                    improad_r_sunwall_dir[l]   = improad_r_dir[l] * vf_wr[l]
-                    improad_r_shadewall_dir[l] = improad_r_dir[l] * vf_wr[l]
-
-                    perroad_r_sky_dir[l]       = perroad_r_dir[l] * vf_sr[l]
-                    perroad_r_sunwall_dir[l]   = perroad_r_dir[l] * vf_wr[l]
-                    perroad_r_shadewall_dir[l] = perroad_r_dir[l] * vf_wr[l]
-
-                    road_r_sky_dir[l]          = road_r_dir[l] * vf_sr[l]
-                    road_r_sunwall_dir[l]      = road_r_dir[l] * vf_wr[l]
-                    road_r_shadewall_dir[l]    = road_r_dir[l] * vf_wr[l]
-
-                    sunwall_r_sky_dir[l]       = sunwall_r_dir[l] * vf_sw[l]
-                    sunwall_r_road_dir[l]      = sunwall_r_dir[l] * vf_rw[l]
-                    sunwall_r_shadewall_dir[l] = sunwall_r_dir[l] * vf_ww[l]
-
-                    shadewall_r_sky_dir[l]     = shadewall_r_dir[l] * vf_sw[l]
-                    shadewall_r_road_dir[l]    = shadewall_r_dir[l] * vf_rw[l]
-                    shadewall_r_sunwall_dir[l] = shadewall_r_dir[l] * vf_ww[l]
-
-                    # step (4)
-                    sref_improad_dir[l, ib]   += improad_r_sky_dir[l]
-                    sref_perroad_dir[l, ib]   += perroad_r_sky_dir[l]
-                    sref_sunwall_dir[l, ib]   += sunwall_r_sky_dir[l]
-                    sref_shadewall_dir[l, ib] += shadewall_r_sky_dir[l]
-
-                    # step (5)
-                    crit = max(road_a_dir[l], sunwall_a_dir[l], shadewall_a_dir[l])
-                    if crit < errcrit
-                        break
-                    end
-                end
-                if iter_dir >= n
-                    error("urban net solar radiation error: no convergence, direct beam")
-                end
-
-                # Reflected diffuse
-                iter_dif = 0
-                for iter in 1:n
-                    iter_dif = iter
-                    # step (1)
-                    stot[l] = (sunwall_r_road_dif[l] + shadewall_r_road_dif[l]) * canyon_hwr[l]
-                    road_a_dif[l]    = 0.0
-                    road_r_dif[l]    = 0.0
-                    improad_a_dif[l] = (1.0 - alb_improad_dif[l, ib]) * stot[l]
-                    improad_r_dif[l] =        alb_improad_dif[l, ib]  * stot[l]
-                    road_a_dif[l]    = road_a_dif[l] + improad_a_dif[l] * wtroad_imperv[l]
-                    road_r_dif[l]    = road_r_dif[l] + improad_r_dif[l] * wtroad_imperv[l]
-                    perroad_a_dif[l] = (1.0 - alb_perroad_dif[l, ib]) * stot[l]
-                    perroad_r_dif[l] =        alb_perroad_dif[l, ib]  * stot[l]
-                    road_a_dif[l]    = road_a_dif[l] + perroad_a_dif[l] * wtroad_perv[l]
-                    road_r_dif[l]    = road_r_dif[l] + perroad_r_dif[l] * wtroad_perv[l]
-
-                    stot[l] = road_r_sunwall_dif[l] / canyon_hwr[l] + shadewall_r_sunwall_dif[l]
-                    sunwall_a_dif[l] = (1.0 - alb_wall_dif[l, ib]) * stot[l]
-                    sunwall_r_dif[l] =        alb_wall_dif[l, ib]  * stot[l]
-
-                    stot[l] = road_r_shadewall_dif[l] / canyon_hwr[l] + sunwall_r_shadewall_dif[l]
-                    shadewall_a_dif[l] = (1.0 - alb_wall_dif[l, ib]) * stot[l]
-                    shadewall_r_dif[l] =        alb_wall_dif[l, ib]  * stot[l]
-
-                    # step (2)
-                    sabs_improad_dif[l, ib]   += improad_a_dif[l]
-                    sabs_perroad_dif[l, ib]   += perroad_a_dif[l]
-                    sabs_sunwall_dif[l, ib]   += sunwall_a_dif[l]
-                    sabs_shadewall_dif[l, ib] += shadewall_a_dif[l]
-
-                    # step (3)
-                    improad_r_sky_dif[l]       = improad_r_dif[l] * vf_sr[l]
-                    improad_r_sunwall_dif[l]   = improad_r_dif[l] * vf_wr[l]
-                    improad_r_shadewall_dif[l] = improad_r_dif[l] * vf_wr[l]
-
-                    perroad_r_sky_dif[l]       = perroad_r_dif[l] * vf_sr[l]
-                    perroad_r_sunwall_dif[l]   = perroad_r_dif[l] * vf_wr[l]
-                    perroad_r_shadewall_dif[l] = perroad_r_dif[l] * vf_wr[l]
-
-                    road_r_sky_dif[l]          = road_r_dif[l] * vf_sr[l]
-                    road_r_sunwall_dif[l]      = road_r_dif[l] * vf_wr[l]
-                    road_r_shadewall_dif[l]    = road_r_dif[l] * vf_wr[l]
-
-                    sunwall_r_sky_dif[l]       = sunwall_r_dif[l] * vf_sw[l]
-                    sunwall_r_road_dif[l]      = sunwall_r_dif[l] * vf_rw[l]
-                    sunwall_r_shadewall_dif[l] = sunwall_r_dif[l] * vf_ww[l]
-
-                    shadewall_r_sky_dif[l]     = shadewall_r_dif[l] * vf_sw[l]
-                    shadewall_r_road_dif[l]    = shadewall_r_dif[l] * vf_rw[l]
-                    shadewall_r_sunwall_dif[l] = shadewall_r_dif[l] * vf_ww[l]
-
-                    # step (4)
-                    sref_improad_dif[l, ib]   += improad_r_sky_dif[l]
-                    sref_perroad_dif[l, ib]   += perroad_r_sky_dif[l]
-                    sref_sunwall_dif[l, ib]   += sunwall_r_sky_dif[l]
-                    sref_shadewall_dif[l, ib] += shadewall_r_sky_dif[l]
-
-                    # step (5)
-                    crit = max(road_a_dif[l], sunwall_a_dif[l], shadewall_a_dif[l])
-                    if crit < errcrit
-                        break
-                    end
-                end
-                if iter_dif >= n
-                    error("urban net solar radiation error: no convergence, diffuse")
-                end
-
-                # ---- Total reflected and absorbed by canyon ----
-                sref_canyon_dir[l] = 0.0
-                sref_canyon_dif[l] = 0.0
-                sref_canyon_dir[l] += sref_improad_dir[l, ib] * wtroad_imperv[l]
-                sref_canyon_dif[l] += sref_improad_dif[l, ib] * wtroad_imperv[l]
-                sref_canyon_dir[l] += sref_perroad_dir[l, ib] * wtroad_perv[l]
-                sref_canyon_dif[l] += sref_perroad_dif[l, ib] * wtroad_perv[l]
-                sref_canyon_dir[l] += (sref_sunwall_dir[l, ib] + sref_shadewall_dir[l, ib]) * canyon_hwr[l]
-                sref_canyon_dif[l] += (sref_sunwall_dif[l, ib] + sref_shadewall_dif[l, ib]) * canyon_hwr[l]
-
-                sabs_canyon_dir[l] = 0.0
-                sabs_canyon_dif[l] = 0.0
-                sabs_canyon_dir[l] += sabs_improad_dir[l, ib] * wtroad_imperv[l]
-                sabs_canyon_dif[l] += sabs_improad_dif[l, ib] * wtroad_imperv[l]
-                sabs_canyon_dir[l] += sabs_perroad_dir[l, ib] * wtroad_perv[l]
-                sabs_canyon_dif[l] += sabs_perroad_dif[l, ib] * wtroad_perv[l]
-                sabs_canyon_dir[l] += (sabs_sunwall_dir[l, ib] + sabs_shadewall_dir[l, ib]) * canyon_hwr[l]
-                sabs_canyon_dif[l] += (sabs_sunwall_dif[l, ib] + sabs_shadewall_dif[l, ib]) * canyon_hwr[l]
-
-                # Conservation check
-                stot_dir[l] = sdir_road[l, ib] + (sdir_sunwall[l, ib] + sdir_shadewall[l, ib]) * canyon_hwr[l]
-                stot_dif[l] = sdif_road[l, ib] + (sdif_sunwall[l, ib] + sdif_shadewall[l, ib]) * canyon_hwr[l]
-
-                err = stot_dir[l] + stot_dif[l] -
-                    (sabs_canyon_dir[l] + sabs_canyon_dif[l] + sref_canyon_dir[l] + sref_canyon_dif[l])
-                if abs(err) > 0.001
-                    error("urban net solar radiation balance error for ib=$ib err=$err")
-                end
-            end
-        end
-
-        # Reflected and absorbed solar radiation for roof
-        for l in eachindex(mask_urbanl)
-            mask_urbanl[l] || continue
-            if coszen[l] > 0.0
-                sref_roof_dir[l, ib] = alb_roof_dir[l, ib] * sdir[l, ib]
-                sref_roof_dif[l, ib] = alb_roof_dif[l, ib] * sdif[l, ib]
-                sabs_roof_dir[l, ib] = sdir[l, ib] - sref_roof_dir[l, ib]
-                sabs_roof_dif[l, ib] = sdif[l, ib] - sref_roof_dif[l, ib]
-            end
-        end
-
-    end  # ib loop
-
+    _launch!(_net_solar_kernel!, mask_urbanl, lun, inp, sref, sabs, NUMRAD;
+             ndrange = length(mask_urbanl))
     return nothing
 end
 

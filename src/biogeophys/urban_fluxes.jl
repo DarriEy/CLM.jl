@@ -70,57 +70,76 @@ Calculate the wasteheat flux from urban heating or air-conditioning.
 
 Ported from: UrbanFluxesMod.F90 :: wasteheat
 """
+# wasteheat! kernel — one thread per urban-filter entry (fl → landunit l). The
+# build-temp-mode flags (is_simple/prog) + HAC mode are host-resolved and passed
+# as isbits scalars so no global lookup happens on-device. Literals at working
+# type T; smooth_min/smooth_abs are device-callable.
+@kernel function _wasteheat_kernel!(eflx_wasteheat_lun, @Const(filter_urbanl),
+        @Const(gridcell), @Const(wtlunit_roof), @Const(canyon_hwr),
+        @Const(eflx_wasteheat_roof), @Const(eflx_wasteheat_sunwall),
+        @Const(eflx_wasteheat_shadewall), @Const(eflx_urban_ac_lun),
+        @Const(eflx_urban_heat_lun), eflx_heat_from_ac_lun,
+        @Const(eflx_heat_from_ac_roof), @Const(eflx_heat_from_ac_sunwall),
+        @Const(eflx_heat_from_ac_shadewall),
+        simple::Bool, prog::Bool, hac_is_wh::Bool, hac_is_on_or_wh::Bool)
+    fl = @index(Global)
+    @inbounds begin
+        l = filter_urbanl[fl]
+        T = eltype(eflx_wasteheat_lun)
+        if simple
+            eflx_wasteheat_lun[l] = wtlunit_roof[l] * eflx_wasteheat_roof[l] +
+                (one(T) - wtlunit_roof[l]) * (canyon_hwr[l] * (eflx_wasteheat_sunwall[l] +
+                eflx_wasteheat_shadewall[l]))
+        elseif prog
+            if hac_is_wh
+                eflx_wasteheat_lun[l] = T(AC_WASTEHEAT_FACTOR) * eflx_urban_ac_lun[l] +
+                    T(HT_WASTEHEAT_FACTOR) * eflx_urban_heat_lun[l]
+            else
+                eflx_wasteheat_lun[l] = zero(T)
+            end
+        end
+
+        eflx_wasteheat_lun[l] = smooth_min(eflx_wasteheat_lun[l], T(WASTEHEAT_LIMIT))
+
+        if simple
+            eflx_heat_from_ac_lun[l] = wtlunit_roof[l] * eflx_heat_from_ac_roof[l] +
+                (one(T) - wtlunit_roof[l]) * (canyon_hwr[l] * (eflx_heat_from_ac_sunwall[l] +
+                eflx_heat_from_ac_shadewall[l]))
+        elseif prog
+            if hac_is_on_or_wh
+                eflx_heat_from_ac_lun[l] = smooth_abs(eflx_urban_ac_lun[l])
+            else
+                eflx_heat_from_ac_lun[l] = zero(T)
+            end
+        end
+    end
+end
+
 function wasteheat!(
         energyflux       ::EnergyFluxData,
         lun_data         ::LandunitData,
         num_urbanl       ::Int,
-        filter_urbanl    ::Vector{Int},
-        eflx_wasteheat_roof      ::Vector{<:Real},
-        eflx_wasteheat_sunwall   ::Vector{<:Real},
-        eflx_wasteheat_shadewall ::Vector{<:Real},
-        eflx_heat_from_ac_roof      ::Vector{<:Real},
-        eflx_heat_from_ac_sunwall   ::Vector{<:Real},
-        eflx_heat_from_ac_shadewall ::Vector{<:Real})
+        filter_urbanl    ::AbstractVector{<:Integer},
+        eflx_wasteheat_roof      ::AbstractVector{<:Real},
+        eflx_wasteheat_sunwall   ::AbstractVector{<:Real},
+        eflx_wasteheat_shadewall ::AbstractVector{<:Real},
+        eflx_heat_from_ac_roof      ::AbstractVector{<:Real},
+        eflx_heat_from_ac_sunwall   ::AbstractVector{<:Real},
+        eflx_heat_from_ac_shadewall ::AbstractVector{<:Real})
 
-    for fl in 1:num_urbanl
-        l = filter_urbanl[fl]
-        g = lun_data.gridcell[l]
-
-        if is_simple_build_temp()
-            # Total waste heat and heat from AC is sum of heat for walls and roofs
-            # accounting for different surface areas
-            energyflux.eflx_wasteheat_lun[l] = lun_data.wtlunit_roof[l] * eflx_wasteheat_roof[l] +
-                (1.0 - lun_data.wtlunit_roof[l]) * (lun_data.canyon_hwr[l] * (eflx_wasteheat_sunwall[l] +
-                eflx_wasteheat_shadewall[l]))
-
-        elseif is_prog_build_temp()
-            # wasteheat from heating/cooling
-            if urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON
-                energyflux.eflx_wasteheat_lun[l] = AC_WASTEHEAT_FACTOR * energyflux.eflx_urban_ac_lun[l] +
-                    HT_WASTEHEAT_FACTOR * energyflux.eflx_urban_heat_lun[l]
-            else
-                energyflux.eflx_wasteheat_lun[l] = 0.0
-            end
-        end
-
-        # Limit wasteheat to ensure no unrealistically strong positive feedbacks
-        energyflux.eflx_wasteheat_lun[l] = smooth_min(energyflux.eflx_wasteheat_lun[l], WASTEHEAT_LIMIT)
-
-        if is_simple_build_temp()
-            energyflux.eflx_heat_from_ac_lun[l] = lun_data.wtlunit_roof[l] * eflx_heat_from_ac_roof[l] +
-                (1.0 - lun_data.wtlunit_roof[l]) * (lun_data.canyon_hwr[l] * (eflx_heat_from_ac_sunwall[l] +
-                eflx_heat_from_ac_shadewall[l]))
-
-        elseif is_prog_build_temp()
-            # If air conditioning on, always replace heat removed with heat into canyon
-            if urban_ctrl.urban_hac == URBAN_HAC_ON || urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON
-                energyflux.eflx_heat_from_ac_lun[l] = smooth_abs(energyflux.eflx_urban_ac_lun[l])
-            else
-                energyflux.eflx_heat_from_ac_lun[l] = 0.0
-            end
-        end
-    end
-
+    num_urbanl == 0 && return nothing
+    FT = eltype(energyflux.eflx_wasteheat_lun)
+    filt = _to_backend_like(energyflux.eflx_wasteheat_lun, FT, filter_urbanl)
+    _launch!(_wasteheat_kernel!, energyflux.eflx_wasteheat_lun, filt,
+             lun_data.gridcell, lun_data.wtlunit_roof, lun_data.canyon_hwr,
+             eflx_wasteheat_roof, eflx_wasteheat_sunwall, eflx_wasteheat_shadewall,
+             energyflux.eflx_urban_ac_lun, energyflux.eflx_urban_heat_lun,
+             energyflux.eflx_heat_from_ac_lun, eflx_heat_from_ac_roof,
+             eflx_heat_from_ac_sunwall, eflx_heat_from_ac_shadewall,
+             is_simple_build_temp(), is_prog_build_temp(),
+             urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON,
+             (urban_ctrl.urban_hac == URBAN_HAC_ON || urban_ctrl.urban_hac == URBAN_WASTEHEAT_ON);
+             ndrange = num_urbanl)
     return nothing
 end
 

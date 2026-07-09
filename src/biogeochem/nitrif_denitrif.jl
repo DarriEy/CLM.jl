@@ -546,9 +546,81 @@ end
 # denitrification, supplement — to smin_nh4_vr / smin_no3_vr and updates the
 # diagnostic sminn_vr. (The decomp-N-pools sourcesink part of NStateUpdate1 is
 # already handled in n_state_update1!.) Runs after n_state_update1! (Fortran
-# CNDriverNoLeaching order, line 658). CPU loop (single-point harness); kernelize
-# for GPU later.
+# CNDriverNoLeaching order, line 658).
+#
+# GPU: one KA kernel, one thread per column (the nlevdecomp loop runs in-thread,
+# byte-identical to the host loop and race-free — each thread owns its column).
+# The N-state outputs / flux inputs / N-profile inputs are grouped into three
+# @adapt_structure device-view bundles to stay well under Metal's ~31-arg limit.
 # ---------------------------------------------------------------------------
+
+# Mutated NH4/NO3/total mineral-N state (per (col,level)).
+Base.@kwdef struct _NSU1Out{M}
+    smin_nh4_vr_col::M
+    smin_no3_vr_col::M
+    sminn_vr_col::M
+end
+Adapt.@adapt_structure _NSU1Out
+
+# Per-step N fluxes: two per-column vectors (V) + ten per-(col,level) matrices (M).
+Base.@kwdef struct _NSU1Flux{V,M}
+    ndep_to_sminn_col::V
+    nfix_to_sminn_col::V
+    gross_nmin_vr_col::M
+    actual_immob_nh4_vr_col::M
+    actual_immob_no3_vr_col::M
+    sminn_to_plant_fun_nh4_vr_col::M
+    sminn_to_plant_fun_no3_vr_col::M
+    smin_nh4_to_plant_vr_col::M
+    smin_no3_to_plant_vr_col::M
+    f_nit_vr_col::M
+    f_denit_vr_col::M
+    supplement_to_sminn_vr_col::M
+end
+Adapt.@adapt_structure _NSU1Flux
+
+# Deposition / fixation vertical profiles (per (col,level)).
+Base.@kwdef struct _NSU1Prof{M}
+    ndep_prof_col::M
+    nfixation_prof_col::M
+end
+Adapt.@adapt_structure _NSU1Prof
+
+@kernel function _nsu1_kernel!(out, flux, prof, @Const(mask_bgc_soilc),
+        lo::Int, hi::Int, nlevdecomp::Int, dt, n2o, use_fun::Bool)
+    c = @index(Global)
+    @inbounds if lo <= c <= hi && mask_bgc_soilc[c]
+        T = eltype(out.smin_nh4_vr_col)
+        for j in 1:nlevdecomp
+            # N deposition + fixation (all into NH4)
+            out.smin_nh4_vr_col[c, j] += flux.ndep_to_sminn_col[c] * dt * prof.ndep_prof_col[c, j]
+            out.smin_nh4_vr_col[c, j] += flux.nfix_to_sminn_col[c] * dt * prof.nfixation_prof_col[c, j]
+            # gross mineralization → NH4
+            out.smin_nh4_vr_col[c, j] += flux.gross_nmin_vr_col[c, j] * dt
+            # immobilization ← NH4 / NO3
+            out.smin_nh4_vr_col[c, j] -= flux.actual_immob_nh4_vr_col[c, j] * dt
+            out.smin_no3_vr_col[c, j] -= flux.actual_immob_no3_vr_col[c, j] * dt
+            # plant uptake ← NH4 / NO3 (FUN: cost-based *actual* uptake)
+            if use_fun
+                out.smin_nh4_vr_col[c, j] -= flux.sminn_to_plant_fun_nh4_vr_col[c, j] * dt
+                out.smin_no3_vr_col[c, j] -= flux.sminn_to_plant_fun_no3_vr_col[c, j] * dt
+            else
+                out.smin_nh4_vr_col[c, j] -= flux.smin_nh4_to_plant_vr_col[c, j] * dt
+                out.smin_no3_vr_col[c, j] -= flux.smin_no3_to_plant_vr_col[c, j] * dt
+            end
+            # nitrification: NH4 → NO3 (minus N2O loss)
+            out.smin_nh4_vr_col[c, j] -= flux.f_nit_vr_col[c, j] * dt
+            out.smin_no3_vr_col[c, j] += flux.f_nit_vr_col[c, j] * dt * (one(T) - n2o)
+            # denitrification ← NO3
+            out.smin_no3_vr_col[c, j] -= flux.f_denit_vr_col[c, j] * dt
+            # supplement (carbon-only N limitation relief) → NH4
+            out.smin_nh4_vr_col[c, j] += flux.supplement_to_sminn_vr_col[c, j] * dt
+            # diagnostic total
+            out.sminn_vr_col[c, j] = out.smin_nh4_vr_col[c, j] + out.smin_no3_vr_col[c, j]
+        end
+    end
+end
+
 function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
                                           nf::SoilBiogeochemNitrogenFluxData,
                                           st::SoilBiogeochemStateData;
@@ -557,38 +629,29 @@ function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
                                           nlevdecomp::Int,
                                           dt::Real,
                                           use_fun::Bool=false)
-    n2o = NITRIF_N2O_LOSS_FRAC
-    @inbounds for c in bounds_col
-        mask_bgc_soilc[c] || continue
-        for j in 1:nlevdecomp
-            # N deposition + fixation (all into NH4)
-            ns.smin_nh4_vr_col[c, j] += nf.ndep_to_sminn_col[c] * dt * st.ndep_prof_col[c, j]
-            ns.smin_nh4_vr_col[c, j] += nf.nfix_to_sminn_col[c] * dt * st.nfixation_prof_col[c, j]
-            # gross mineralization → NH4
-            ns.smin_nh4_vr_col[c, j] += nf.gross_nmin_vr_col[c, j] * dt
-            # immobilization ← NH4 / NO3
-            ns.smin_nh4_vr_col[c, j] -= nf.actual_immob_nh4_vr_col[c, j] * dt
-            ns.smin_no3_vr_col[c, j] -= nf.actual_immob_no3_vr_col[c, j] * dt
-            # plant uptake ← NH4 / NO3.  With FUN, the plant takes the cost-based
-            # *actual* uptake (sminn_to_plant_fun_*), not the offered amount
-            # (smin_*_to_plant_vr) — Fortran SoilBiogeochemNStateUpdate1Mod:237-244.
-            if use_fun
-                ns.smin_nh4_vr_col[c, j] -= nf.sminn_to_plant_fun_nh4_vr_col[c, j] * dt
-                ns.smin_no3_vr_col[c, j] -= nf.sminn_to_plant_fun_no3_vr_col[c, j] * dt
-            else
-                ns.smin_nh4_vr_col[c, j] -= nf.smin_nh4_to_plant_vr_col[c, j] * dt
-                ns.smin_no3_vr_col[c, j] -= nf.smin_no3_to_plant_vr_col[c, j] * dt
-            end
-            # nitrification: NH4 → NO3 (minus N2O loss)
-            ns.smin_nh4_vr_col[c, j] -= nf.f_nit_vr_col[c, j] * dt
-            ns.smin_no3_vr_col[c, j] += nf.f_nit_vr_col[c, j] * dt * (1.0 - n2o)
-            # denitrification ← NO3
-            ns.smin_no3_vr_col[c, j] -= nf.f_denit_vr_col[c, j] * dt
-            # supplement (carbon-only N limitation relief) → NH4
-            ns.smin_nh4_vr_col[c, j] += nf.supplement_to_sminn_vr_col[c, j] * dt
-            # diagnostic total
-            ns.sminn_vr_col[c, j] = ns.smin_nh4_vr_col[c, j] + ns.smin_no3_vr_col[c, j]
-        end
-    end
+    isempty(bounds_col) && return nothing
+    FT = eltype(ns.smin_nh4_vr_col)
+    out = _NSU1Out(; smin_nh4_vr_col=ns.smin_nh4_vr_col,
+                     smin_no3_vr_col=ns.smin_no3_vr_col,
+                     sminn_vr_col=ns.sminn_vr_col)
+    flux = _NSU1Flux(; ndep_to_sminn_col=nf.ndep_to_sminn_col,
+                       nfix_to_sminn_col=nf.nfix_to_sminn_col,
+                       gross_nmin_vr_col=nf.gross_nmin_vr_col,
+                       actual_immob_nh4_vr_col=nf.actual_immob_nh4_vr_col,
+                       actual_immob_no3_vr_col=nf.actual_immob_no3_vr_col,
+                       sminn_to_plant_fun_nh4_vr_col=nf.sminn_to_plant_fun_nh4_vr_col,
+                       sminn_to_plant_fun_no3_vr_col=nf.sminn_to_plant_fun_no3_vr_col,
+                       smin_nh4_to_plant_vr_col=nf.smin_nh4_to_plant_vr_col,
+                       smin_no3_to_plant_vr_col=nf.smin_no3_to_plant_vr_col,
+                       f_nit_vr_col=nf.f_nit_vr_col,
+                       f_denit_vr_col=nf.f_denit_vr_col,
+                       supplement_to_sminn_vr_col=nf.supplement_to_sminn_vr_col)
+    prof = _NSU1Prof(; ndep_prof_col=st.ndep_prof_col,
+                       nfixation_prof_col=st.nfixation_prof_col)
+    backend = _kernel_backend(out.smin_nh4_vr_col)
+    _nsu1_kernel!(backend)(out, flux, prof, mask_bgc_soilc,
+        first(bounds_col), last(bounds_col), nlevdecomp,
+        FT(dt), FT(NITRIF_N2O_LOSS_FRAC), use_fun; ndrange = last(bounds_col))
+    KA.synchronize(backend)
     return nothing
 end

@@ -378,6 +378,189 @@ function soil_bgc_nitrogen_state_init_cold!(ns::SoilBiogeochemNitrogenStateData,
     return nothing
 end
 
+# ==========================================================================
+# GPU kernelization of the nitrogen summary reduction — see the carbon summary
+# for the design. One thread per column, all vertical/pool integrals via LOCAL
+# scalar accumulators (an in-place `arr[c,l] += …` in a nested loop miscompiles on
+# the KA CPU backend under --check-bounds=yes). Byte-identical per-column sequence.
+# ==========================================================================
+struct _SBNSumView{V,M,A3}
+    decomp_npools_vr::A3
+    matrix_cap_decomp_npools_vr::A3
+    sminn_vr::M
+    ntrunc_vr::M
+    smin_no3_vr::M
+    smin_nh4_vr::M
+    decomp_soiln_vr::M
+    decomp_npools::M
+    decomp_npools_1m::M
+    matrix_cap_decomp_npools::M
+    smin_no3::V
+    smin_nh4::V
+    sminn::V
+    ntrunc::V
+    cwdn::V
+    totlitn::V
+    totmicn::V
+    totsomn::V
+    totlitn_1m::V
+    totsomn_1m::V
+    totn::V
+    totecosysn::V
+end
+Adapt.@adapt_structure _SBNSumView
+
+@kernel function _sbn_summary_kernel!(@Const(mask), b,
+        @Const(dzsoi), @Const(zisoi),
+        @Const(is_litter), @Const(is_soil), @Const(is_microbe), @Const(is_cwd),
+        @Const(totn_p2c), @Const(totvegn), @Const(is_fates),
+        lo::Int, hi::Int, nlevdecomp::Int, nlevdecomp_full::Int, ndecomp_pools::Int,
+        use_soil_matrixcn::Bool, use_nitrif_denitrif::Bool)
+    c = @index(Global)
+    @inbounds if lo <= c <= hi && mask[c]
+        T = eltype(b.decomp_npools)
+
+        # Vertically integrate NO3/NH4 pools
+        if use_nitrif_denitrif
+            s3 = zero(T); s4 = zero(T)
+            for j in 1:nlevdecomp
+                s3 += b.smin_no3_vr[c, j] * dzsoi[j]
+                s4 += b.smin_nh4_vr[c, j] * dzsoi[j]
+            end
+            b.smin_no3[c] = s3
+            b.smin_nh4[c] = s4
+        end
+
+        # Vertically integrate each decomposing N pool
+        for l in 1:ndecomp_pools
+            s = zero(T); sm = zero(T)
+            for j in 1:nlevdecomp
+                s += b.decomp_npools_vr[c, j, l] * dzsoi[j]
+                if use_soil_matrixcn
+                    sm += b.matrix_cap_decomp_npools_vr[c, j, l] * dzsoi[j]
+                end
+            end
+            b.decomp_npools[c, l] = s
+            if use_soil_matrixcn
+                b.matrix_cap_decomp_npools[c, l] = sm
+            end
+        end
+
+        # Vertically integrate to 1 meter (+ soil-N vr + 1m litter/SOM totals)
+        if nlevdecomp > 1
+            maxdepth = one(T)
+            for l in 1:ndecomp_pools
+                s = zero(T)
+                for j in 1:nlevdecomp
+                    if zisoi[j+1] <= maxdepth
+                        s += b.decomp_npools_vr[c, j, l] * dzsoi[j]
+                    elseif zisoi[j] < maxdepth
+                        s += b.decomp_npools_vr[c, j, l] * (maxdepth - zisoi[j])
+                    end
+                end
+                b.decomp_npools_1m[c, l] = s
+            end
+
+            if nlevdecomp_full > 1
+                for j in 1:nlevdecomp
+                    s = zero(T)
+                    for l in 1:ndecomp_pools
+                        if is_soil[l]
+                            s += b.decomp_npools_vr[c, j, l]
+                        end
+                    end
+                    b.decomp_soiln_vr[c, j] = s
+                end
+            end
+
+            let s = zero(T)
+                for l in 1:ndecomp_pools
+                    if is_litter[l]
+                        s += b.decomp_npools_1m[c, l]
+                    end
+                end
+                b.totlitn_1m[c] = s
+            end
+            let s = zero(T)
+                for l in 1:ndecomp_pools
+                    if is_soil[l]
+                        s += b.decomp_npools_1m[c, l]
+                    end
+                end
+                b.totsomn_1m[c] = s
+            end
+        end
+
+        # Total litter nitrogen
+        let s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_litter[l]
+                    s += b.decomp_npools[c, l]
+                end
+            end
+            b.totlitn[c] = s
+        end
+
+        # Total microbial nitrogen
+        let s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_microbe[l]
+                    s += b.decomp_npools[c, l]
+                end
+            end
+            b.totmicn[c] = s
+        end
+
+        # Total SOM nitrogen
+        let s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_soil[l]
+                    s += b.decomp_npools[c, l]
+                end
+            end
+            b.totsomn[c] = s
+        end
+
+        # Total sminn
+        let s = zero(T)
+            for j in 1:nlevdecomp
+                s += b.sminn_vr[c, j] * dzsoi[j]
+            end
+            b.sminn[c] = s
+        end
+
+        # Total ntrunc
+        let s = zero(T)
+            for j in 1:nlevdecomp
+                s += b.ntrunc_vr[c, j] * dzsoi[j]
+            end
+            b.ntrunc[c] = s
+        end
+
+        # CWD nitrogen, ecosystem N, total column N
+        if is_fates[c]
+            b.cwdn[c] = zero(T)
+            tvegn   = zero(T)
+            ecovegn = zero(T)
+        else
+            s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_cwd[l]
+                    s += b.decomp_npools[c, l]
+                end
+            end
+            b.cwdn[c] = s
+            tvegn   = totn_p2c[c]
+            ecovegn = totvegn[c]
+        end
+
+        b.totecosysn[c] = b.cwdn[c] + b.totlitn[c] + b.totmicn[c] + b.totsomn[c] +
+                          b.sminn[c] + ecovegn
+        b.totn[c] = b.cwdn[c] + b.totlitn[c] + b.totmicn[c] + b.totsomn[c] +
+                    b.sminn[c] + b.ntrunc[c] + tvegn
+    end
+end
+
 """
     soil_bgc_nitrogen_state_summary!(ns, mask_allc, bounds_col;
                                       nlevdecomp, nlevdecomp_full, ndecomp_pools,
@@ -391,239 +574,54 @@ Perform column-level nitrogen summary calculations.
 Corresponds to `Summary` in the Fortran source.
 """
 function soil_bgc_nitrogen_state_summary!(ns::SoilBiogeochemNitrogenStateData,
-                                           mask_allc::BitVector,
+                                           mask_allc::AbstractVector{Bool},
                                            bounds_col::UnitRange{Int};
                                            nlevdecomp::Int,
                                            nlevdecomp_full::Int=nlevdecomp,
                                            ndecomp_pools::Int,
-                                           dzsoi_decomp_vals::Vector{<:Real},
-                                           zisoi_vals::Vector{<:Real}=Float64[],
-                                           is_litter::BitVector=falses(ndecomp_pools),
-                                           is_soil::BitVector=falses(ndecomp_pools),
-                                           is_microbe::BitVector=falses(ndecomp_pools),
-                                           is_cwd::BitVector=falses(ndecomp_pools),
-                                           totn_p2c_col::Vector{<:Real}=zeros(length(mask_allc)),
-                                           totvegn_col::Vector{<:Real}=zeros(length(mask_allc)),
-                                           is_fates_col::Union{BitVector,Nothing}=nothing,
+                                           dzsoi_decomp_vals::AbstractVector{<:Real},
+                                           zisoi_vals::AbstractVector{<:Real}=Float64[],
+                                           is_litter::AbstractVector{Bool}=falses(ndecomp_pools),
+                                           is_soil::AbstractVector{Bool}=falses(ndecomp_pools),
+                                           is_microbe::AbstractVector{Bool}=falses(ndecomp_pools),
+                                           is_cwd::AbstractVector{Bool}=falses(ndecomp_pools),
+                                           totn_p2c_col::AbstractVector{<:Real}=zeros(length(mask_allc)),
+                                           totvegn_col::AbstractVector{<:Real}=zeros(length(mask_allc)),
+                                           is_fates_col::Union{AbstractVector{Bool},Nothing}=nothing,
                                            use_soil_matrixcn::Bool=false,
                                            use_fates_bgc::Bool=false,
                                            use_nitrif_denitrif::Bool=false,
-                                           mask_bgc_soilc::Union{BitVector,Nothing}=nothing)
+                                           mask_bgc_soilc::Union{AbstractVector{Bool},Nothing}=nothing)
 
-    # Vertically integrate NO3/NH4 pools
-    if use_nitrif_denitrif
-        for c in bounds_col
-            mask_allc[c] || continue
-            ns.smin_no3_col[c] = 0.0
-            ns.smin_nh4_col[c] = 0.0
-        end
-        for j in 1:nlevdecomp
-            for c in bounds_col
-                mask_allc[c] || continue
-                ns.smin_no3_col[c] += ns.smin_no3_vr_col[c, j] * dzsoi_decomp_vals[j]
-                ns.smin_nh4_col[c] += ns.smin_nh4_vr_col[c, j] * dzsoi_decomp_vals[j]
-            end
-        end
-    end
+    isempty(bounds_col) && return nothing
+    FT = eltype(ns.decomp_npools_vr_col)
+    proto = ns.decomp_npools_vr_col
+    bv(x) = x isa BitVector ? collect(Bool, x) : x
+    isf = is_fates_col === nothing ? falses(length(mask_allc)) : is_fates_col
+    zis = isempty(zisoi_vals) ? zeros(nlevdecomp + 1) : zisoi_vals
 
-    # Vertically integrate each decomposing N pool
-    for l in 1:ndecomp_pools
-        for c in bounds_col
-            mask_allc[c] || continue
-            ns.decomp_npools_col[c, l] = 0.0
-            if use_soil_matrixcn
-                ns.matrix_cap_decomp_npools_col[c, l] = 0.0
-            end
-        end
-    end
-    for l in 1:ndecomp_pools
-        for j in 1:nlevdecomp
-            for c in bounds_col
-                mask_allc[c] || continue
-                ns.decomp_npools_col[c, l] += ns.decomp_npools_vr_col[c, j, l] * dzsoi_decomp_vals[j]
-                if use_soil_matrixcn
-                    ns.matrix_cap_decomp_npools_col[c, l] += ns.matrix_cap_decomp_npools_vr_col[c, j, l] * dzsoi_decomp_vals[j]
-                end
-            end
-        end
-    end
+    mask_k  = _to_backend_like(proto, FT, bv(mask_allc))
+    dz_k    = _to_backend_like(proto, FT, dzsoi_decomp_vals)
+    zi_k    = _to_backend_like(proto, FT, zis)
+    isl_k   = _to_backend_like(proto, FT, bv(is_litter))
+    iss_k   = _to_backend_like(proto, FT, bv(is_soil))
+    ism_k   = _to_backend_like(proto, FT, bv(is_microbe))
+    isc_k   = _to_backend_like(proto, FT, bv(is_cwd))
+    tp2n_k  = _to_backend_like(proto, FT, totn_p2c_col)
+    tvegn_k = _to_backend_like(proto, FT, totvegn_col)
+    isf_k   = _to_backend_like(proto, FT, bv(isf))
 
-    # Vertically integrate to 1 meter
-    if nlevdecomp > 1
-        maxdepth = 1.0
-        for l in 1:ndecomp_pools
-            for c in bounds_col
-                mask_allc[c] || continue
-                ns.decomp_npools_1m_col[c, l] = 0.0
-            end
-        end
-        for l in 1:ndecomp_pools
-            for j in 1:nlevdecomp
-                if zisoi_vals[j+1] <= maxdepth
-                    for c in bounds_col
-                        mask_allc[c] || continue
-                        ns.decomp_npools_1m_col[c, l] += ns.decomp_npools_vr_col[c, j, l] * dzsoi_decomp_vals[j]
-                    end
-                elseif zisoi_vals[j] < maxdepth
-                    for c in bounds_col
-                        mask_allc[c] || continue
-                        ns.decomp_npools_1m_col[c, l] += ns.decomp_npools_vr_col[c, j, l] * (maxdepth - zisoi_vals[j])
-                    end
-                end
-            end
-        end
+    b = _SBNSumView(ns.decomp_npools_vr_col, ns.matrix_cap_decomp_npools_vr_col,
+        ns.sminn_vr_col, ns.ntrunc_vr_col, ns.smin_no3_vr_col, ns.smin_nh4_vr_col,
+        ns.decomp_soiln_vr_col, ns.decomp_npools_col, ns.decomp_npools_1m_col,
+        ns.matrix_cap_decomp_npools_col, ns.smin_no3_col, ns.smin_nh4_col,
+        ns.sminn_col, ns.ntrunc_col, ns.cwdn_col, ns.totlitn_col, ns.totmicn_col,
+        ns.totsomn_col, ns.totlitn_1m_col, ns.totsomn_1m_col, ns.totn_col, ns.totecosysn_col)
 
-        # Vertically-resolved decomposing total soil N pool
-        if nlevdecomp_full > 1
-            for j in 1:nlevdecomp
-                for c in bounds_col
-                    mask_allc[c] || continue
-                    ns.decomp_soiln_vr_col[c, j] = 0.0
-                end
-            end
-            for l in 1:ndecomp_pools
-                if is_soil[l]
-                    for j in 1:nlevdecomp
-                        for c in bounds_col
-                            mask_allc[c] || continue
-                            ns.decomp_soiln_vr_col[c, j] += ns.decomp_npools_vr_col[c, j, l]
-                        end
-                    end
-                end
-            end
-        end
-
-        # Total litter nitrogen to 1m
-        for c in bounds_col
-            mask_allc[c] || continue
-            ns.totlitn_1m_col[c] = 0.0
-        end
-        for l in 1:ndecomp_pools
-            if is_litter[l]
-                for c in bounds_col
-                    mask_allc[c] || continue
-                    ns.totlitn_1m_col[c] += ns.decomp_npools_1m_col[c, l]
-                end
-            end
-        end
-
-        # Total SOM nitrogen to 1m
-        for c in bounds_col
-            mask_allc[c] || continue
-            ns.totsomn_1m_col[c] = 0.0
-        end
-        for l in 1:ndecomp_pools
-            if is_soil[l]
-                for c in bounds_col
-                    mask_allc[c] || continue
-                    ns.totsomn_1m_col[c] += ns.decomp_npools_1m_col[c, l]
-                end
-            end
-        end
-    end
-
-    # Total litter nitrogen
-    for c in bounds_col
-        mask_allc[c] || continue
-        ns.totlitn_col[c] = 0.0
-    end
-    for l in 1:ndecomp_pools
-        if is_litter[l]
-            for c in bounds_col
-                mask_allc[c] || continue
-                ns.totlitn_col[c] += ns.decomp_npools_col[c, l]
-            end
-        end
-    end
-
-    # Total microbial nitrogen
-    for c in bounds_col
-        mask_allc[c] || continue
-        ns.totmicn_col[c] = 0.0
-    end
-    for l in 1:ndecomp_pools
-        if is_microbe[l]
-            for c in bounds_col
-                mask_allc[c] || continue
-                ns.totmicn_col[c] += ns.decomp_npools_col[c, l]
-            end
-        end
-    end
-
-    # Total SOM nitrogen
-    for c in bounds_col
-        mask_allc[c] || continue
-        ns.totsomn_col[c] = 0.0
-    end
-    for l in 1:ndecomp_pools
-        if is_soil[l]
-            for c in bounds_col
-                mask_allc[c] || continue
-                ns.totsomn_col[c] += ns.decomp_npools_col[c, l]
-            end
-        end
-    end
-
-    # Total sminn
-    for c in bounds_col
-        mask_allc[c] || continue
-        ns.sminn_col[c] = 0.0
-    end
-    for j in 1:nlevdecomp
-        for c in bounds_col
-            mask_allc[c] || continue
-            ns.sminn_col[c] += ns.sminn_vr_col[c, j] * dzsoi_decomp_vals[j]
-        end
-    end
-
-    # Total ntrunc
-    for c in bounds_col
-        mask_allc[c] || continue
-        ns.ntrunc_col[c] = 0.0
-    end
-    for j in 1:nlevdecomp
-        for c in bounds_col
-            mask_allc[c] || continue
-            ns.ntrunc_col[c] += ns.ntrunc_vr_col[c, j] * dzsoi_decomp_vals[j]
-        end
-    end
-
-    # CWD nitrogen, ecosystem N, total column N
-    for c in bounds_col
-        mask_allc[c] || continue
-        ns.cwdn_col[c] = 0.0
-    end
-
-    for c in bounds_col
-        mask_allc[c] || continue
-
-        is_fates_c = is_fates_col !== nothing && is_fates_col[c]
-
-        local ecovegn, tvegn
-        if is_fates_c
-            tvegn   = 0.0
-            ecovegn = 0.0
-        else
-            for l in 1:ndecomp_pools
-                if is_cwd[l]
-                    ns.cwdn_col[c] += ns.decomp_npools_col[c, l]
-                end
-            end
-            tvegn   = totn_p2c_col[c]
-            ecovegn = totvegn_col[c]
-        end
-
-        # total ecosystem nitrogen (TOTECOSYSN)
-        ns.totecosysn_col[c] = ns.cwdn_col[c] + ns.totlitn_col[c] +
-                                ns.totmicn_col[c] + ns.totsomn_col[c] +
-                                ns.sminn_col[c] + ecovegn
-
-        # total column nitrogen (TOTCOLN)
-        ns.totn_col[c] = ns.cwdn_col[c] + ns.totlitn_col[c] +
-                          ns.totmicn_col[c] + ns.totsomn_col[c] +
-                          ns.sminn_col[c] + ns.ntrunc_col[c] + tvegn
-    end
-
+    _launch!(_sbn_summary_kernel!, mask_k, b, dz_k, zi_k, isl_k, iss_k, ism_k, isc_k,
+        tp2n_k, tvegn_k, isf_k, first(bounds_col), last(bounds_col),
+        nlevdecomp, nlevdecomp_full, ndecomp_pools, use_soil_matrixcn, use_nitrif_denitrif;
+        ndrange=length(mask_k))
     return nothing
 end
 

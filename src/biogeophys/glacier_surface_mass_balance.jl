@@ -36,18 +36,24 @@
     c = @index(Global)
     @inbounds if lo <= c <= hi && mask_do_smb[c]
         z = zero(eltype(qflx_glcice_melt_col))
-        qflx_glcice_melt_col[c] = z
+        # Accumulate the melt flux into a LOCAL scalar and write the column element
+        # ONCE. A repeated `qflx_glcice_melt_col[c] += …` inside the j-loop hits a
+        # KA-CPU-under-`--check-bounds=yes` miscompile that silently runs the inner
+        # loop a single iteration (halving multi-layer melt). Byte-identical to the
+        # zero-then-accumulate form (same terms, same order, single store).
+        melt = z
         if lun_itype[col_landunit[c]] == ISTICE_
             for j in 1:nlevgrnd
                 jj = j + nlevsno
                 liq = h2osoi_liq_col[c, jj]
                 if liq > z   # ice layer with meltwater
-                    qflx_glcice_melt_col[c] += liq / dt
+                    melt += liq / dt
                     h2osoi_ice_col[c, jj] += liq
                     h2osoi_liq_col[c, jj] = z
                 end
             end
         end
+        qflx_glcice_melt_col[c] = melt
     end
 end
 

@@ -352,6 +352,179 @@ function soil_bgc_carbon_state_init_cold!(cs::SoilBiogeochemCarbonStateData,
     return nothing
 end
 
+# ==========================================================================
+# GPU kernelization of the carbon summary reduction. The Fortran/host loops are
+# a set of independent PER-COLUMN reductions (each column integrates its own vr
+# pools over depth/pools into its own total fields). Fused into ONE kernel, one
+# thread per column, replicating the exact per-column accumulation ORDER so the
+# KA CPU backend is byte-identical to the original loops. The ~16 touched state
+# arrays are grouped into a device-view bundle to stay under Metal's ~31-buffer
+# limit; the host config arrays (masks, dzsoi/zisoi, is_* pool flags, totveg) are
+# moved onto the state backend at launch via `_to_backend_like` (no-op on host).
+# ==========================================================================
+struct _SBCSumView{V,M,A3}
+    decomp_cpools_vr::A3
+    matrix_cap_decomp_cpools_vr::A3
+    ctrunc_vr::M
+    decomp_soilc_vr::M
+    decomp_cpools::M
+    matrix_cap_decomp_cpools::M
+    decomp_cpools_1m::M
+    ctrunc::V
+    totmicc::V
+    totlitc::V
+    totlitc_1m::V
+    totsomc::V
+    totsomc_1m::V
+    cwdc::V
+    totc::V
+    totecosysc::V
+end
+Adapt.@adapt_structure _SBCSumView
+
+@kernel function _sbc_summary_kernel!(@Const(mask), b,
+        @Const(dzsoi), @Const(zisoi),
+        @Const(is_litter), @Const(is_soil), @Const(is_microbe), @Const(is_cwd),
+        @Const(totc_p2c), @Const(totvegc), @Const(is_fates),
+        lo::Int, hi::Int, nlevdecomp::Int, nlevdecomp_full::Int, ndecomp_pools::Int,
+        use_soil_matrixcn::Bool)
+    c = @index(Global)
+    @inbounds if lo <= c <= hi && mask[c]
+        T = eltype(b.decomp_cpools)
+
+        # NOTE: every vertical/pool integral accumulates into a LOCAL scalar and
+        # writes the array element ONCE. An in-place `arr[c,l] += …` inside a nested
+        # loop miscompiles on the KA CPU backend under --check-bounds=yes (the inner
+        # loop runs a single iteration); the local-accumulator form is correct on
+        # both backends and byte-identical to the original per-column sequence.
+
+        # Vertically integrate each decomposing C pool
+        for l in 1:ndecomp_pools
+            s = zero(T); sm = zero(T)
+            for j in 1:nlevdecomp
+                s += b.decomp_cpools_vr[c, j, l] * dzsoi[j]
+                if use_soil_matrixcn
+                    sm += b.matrix_cap_decomp_cpools_vr[c, j, l] * dzsoi[j]
+                end
+            end
+            b.decomp_cpools[c, l] = s
+            if use_soil_matrixcn
+                b.matrix_cap_decomp_cpools[c, l] = sm
+            end
+        end
+
+        # Vertically integrate to 1 meter
+        if nlevdecomp > 1
+            maxdepth = one(T)
+            for l in 1:ndecomp_pools
+                s = zero(T)
+                for j in 1:nlevdecomp
+                    if zisoi[j+1] <= maxdepth
+                        s += b.decomp_cpools_vr[c, j, l] * dzsoi[j]
+                    elseif zisoi[j] < maxdepth
+                        s += b.decomp_cpools_vr[c, j, l] * (maxdepth - zisoi[j])
+                    end
+                end
+                b.decomp_cpools_1m[c, l] = s
+            end
+        end
+
+        # Vertically-resolved decomposing total soil c pool (sum is_soil pools per level;
+        # j-outer/l-inner is byte-identical: each [c,j] sums is_soil l in increasing order)
+        if nlevdecomp_full > 1
+            for j in 1:nlevdecomp
+                s = zero(T)
+                for l in 1:ndecomp_pools
+                    if is_soil[l]
+                        s += b.decomp_cpools_vr[c, j, l]
+                    end
+                end
+                b.decomp_soilc_vr[c, j] = s
+            end
+        end
+
+        # Truncation carbon
+        let s = zero(T)
+            for j in 1:nlevdecomp
+                s += b.ctrunc_vr[c, j] * dzsoi[j]
+            end
+            b.ctrunc[c] = s
+        end
+
+        # Total litter carbon to 1m
+        if nlevdecomp > 1
+            s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_litter[l]
+                    s += b.decomp_cpools_1m[c, l]
+                end
+            end
+            b.totlitc_1m[c] = s
+        end
+
+        # Total SOM carbon to 1m
+        if nlevdecomp > 1
+            s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_soil[l]
+                    s += b.decomp_cpools_1m[c, l]
+                end
+            end
+            b.totsomc_1m[c] = s
+        end
+
+        # Total microbial carbon
+        let s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_microbe[l]
+                    s += b.decomp_cpools[c, l]
+                end
+            end
+            b.totmicc[c] = s
+        end
+
+        # Total litter carbon
+        let s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_litter[l]
+                    s += b.decomp_cpools[c, l]
+                end
+            end
+            b.totlitc[c] = s
+        end
+
+        # Total SOM carbon
+        let s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_soil[l]
+                    s += b.decomp_cpools[c, l]
+                end
+            end
+            b.totsomc[c] = s
+        end
+
+        # CWD, ecosystem C, total column C
+        if is_fates[c]
+            b.cwdc[c] = zero(T)
+            tvegc   = zero(T)
+            ecovegc = zero(T)
+        else
+            s = zero(T)
+            for l in 1:ndecomp_pools
+                if is_cwd[l]
+                    s += b.decomp_cpools[c, l]
+                end
+            end
+            b.cwdc[c] = s
+            tvegc   = totc_p2c[c]
+            ecovegc = totvegc[c]
+        end
+
+        b.totecosysc[c] = b.cwdc[c] + b.totmicc[c] + b.totlitc[c] + b.totsomc[c] + ecovegc
+        b.totc[c] = b.cwdc[c] + b.totmicc[c] + b.totlitc[c] + b.totsomc[c] + b.ctrunc[c] + tvegc
+    end
+end
+
 """
     soil_bgc_carbon_state_summary!(cs, mask_allc, bounds_col;
                                    nlevdecomp, nlevdecomp_full, ndecomp_pools,
@@ -364,213 +537,52 @@ Perform column-level carbon summary calculations.
 Corresponds to `Summary` in the Fortran source.
 """
 function soil_bgc_carbon_state_summary!(cs::SoilBiogeochemCarbonStateData,
-                                        mask_allc::BitVector,
+                                        mask_allc::AbstractVector{Bool},
                                         bounds_col::UnitRange{Int};
                                         nlevdecomp::Int,
                                         nlevdecomp_full::Int=nlevdecomp,
                                         ndecomp_pools::Int,
-                                        dzsoi_decomp_vals::Vector{<:Real},
-                                        zisoi_vals::Vector{<:Real}=Float64[],
-                                        is_litter::BitVector=falses(ndecomp_pools),
-                                        is_soil::BitVector=falses(ndecomp_pools),
-                                        is_microbe::BitVector=falses(ndecomp_pools),
-                                        is_cwd::BitVector=falses(ndecomp_pools),
-                                        totc_p2c_col::Vector{<:Real}=zeros(length(mask_allc)),
-                                        totvegc_col::Vector{<:Real}=zeros(length(mask_allc)),
-                                        is_fates_col::Union{BitVector,Nothing}=nothing,
+                                        dzsoi_decomp_vals::AbstractVector{<:Real},
+                                        zisoi_vals::AbstractVector{<:Real}=Float64[],
+                                        is_litter::AbstractVector{Bool}=falses(ndecomp_pools),
+                                        is_soil::AbstractVector{Bool}=falses(ndecomp_pools),
+                                        is_microbe::AbstractVector{Bool}=falses(ndecomp_pools),
+                                        is_cwd::AbstractVector{Bool}=falses(ndecomp_pools),
+                                        totc_p2c_col::AbstractVector{<:Real}=zeros(length(mask_allc)),
+                                        totvegc_col::AbstractVector{<:Real}=zeros(length(mask_allc)),
+                                        is_fates_col::Union{AbstractVector{Bool},Nothing}=nothing,
                                         use_soil_matrixcn::Bool=false,
                                         use_fates_bgc::Bool=false,
-                                        mask_bgc_soilc::Union{BitVector,Nothing}=nothing)
+                                        mask_bgc_soilc::Union{AbstractVector{Bool},Nothing}=nothing)
 
-    # Vertically integrate each decomposing C pool
-    for l in 1:ndecomp_pools
-        for c in bounds_col
-            mask_allc[c] || continue
-            cs.decomp_cpools_col[c, l] = 0.0
-            if use_soil_matrixcn
-                cs.matrix_cap_decomp_cpools_col[c, l] = 0.0
-            end
-        end
-    end
-    for l in 1:ndecomp_pools
-        for j in 1:nlevdecomp
-            for c in bounds_col
-                mask_allc[c] || continue
-                cs.decomp_cpools_col[c, l] += cs.decomp_cpools_vr_col[c, j, l] * dzsoi_decomp_vals[j]
-                if use_soil_matrixcn
-                    cs.matrix_cap_decomp_cpools_col[c, l] += cs.matrix_cap_decomp_cpools_vr_col[c, j, l] * dzsoi_decomp_vals[j]
-                end
-            end
-        end
-    end
+    isempty(bounds_col) && return nothing
+    FT = eltype(cs.decomp_cpools_vr_col)
+    proto = cs.decomp_cpools_vr_col
+    bv(x) = x isa BitVector ? collect(Bool, x) : x
+    isf = is_fates_col === nothing ? falses(length(mask_allc)) : is_fates_col
+    zis = isempty(zisoi_vals) ? zeros(nlevdecomp + 1) : zisoi_vals
 
-    # Vertically integrate to 1 meter
-    if nlevdecomp > 1
-        maxdepth = 1.0
-        for l in 1:ndecomp_pools
-            for c in bounds_col
-                mask_allc[c] || continue
-                cs.decomp_cpools_1m_col[c, l] = 0.0
-            end
-        end
-        for l in 1:ndecomp_pools
-            for j in 1:nlevdecomp
-                if zisoi_vals[j+1] <= maxdepth
-                    for c in bounds_col
-                        mask_allc[c] || continue
-                        cs.decomp_cpools_1m_col[c, l] += cs.decomp_cpools_vr_col[c, j, l] * dzsoi_decomp_vals[j]
-                    end
-                elseif zisoi_vals[j] < maxdepth
-                    for c in bounds_col
-                        mask_allc[c] || continue
-                        cs.decomp_cpools_1m_col[c, l] += cs.decomp_cpools_vr_col[c, j, l] * (maxdepth - zisoi_vals[j])
-                    end
-                end
-            end
-        end
-    end
+    mask_k  = _to_backend_like(proto, FT, bv(mask_allc))
+    dz_k    = _to_backend_like(proto, FT, dzsoi_decomp_vals)
+    zi_k    = _to_backend_like(proto, FT, zis)
+    isl_k   = _to_backend_like(proto, FT, bv(is_litter))
+    iss_k   = _to_backend_like(proto, FT, bv(is_soil))
+    ism_k   = _to_backend_like(proto, FT, bv(is_microbe))
+    isc_k   = _to_backend_like(proto, FT, bv(is_cwd))
+    tp2c_k  = _to_backend_like(proto, FT, totc_p2c_col)
+    tvegc_k = _to_backend_like(proto, FT, totvegc_col)
+    isf_k   = _to_backend_like(proto, FT, bv(isf))
 
-    # Vertically-resolved decomposing total soil c pool
-    if nlevdecomp_full > 1
-        for j in 1:nlevdecomp
-            for c in bounds_col
-                mask_allc[c] || continue
-                cs.decomp_soilc_vr_col[c, j] = 0.0
-            end
-        end
-        for l in 1:ndecomp_pools
-            if is_soil[l]
-                for j in 1:nlevdecomp
-                    for c in bounds_col
-                        mask_allc[c] || continue
-                        cs.decomp_soilc_vr_col[c, j] += cs.decomp_cpools_vr_col[c, j, l]
-                    end
-                end
-            end
-        end
-    end
+    b = _SBCSumView(cs.decomp_cpools_vr_col, cs.matrix_cap_decomp_cpools_vr_col,
+        cs.ctrunc_vr_col, cs.decomp_soilc_vr_col, cs.decomp_cpools_col,
+        cs.matrix_cap_decomp_cpools_col, cs.decomp_cpools_1m_col, cs.ctrunc_col,
+        cs.totmicc_col, cs.totlitc_col, cs.totlitc_1m_col, cs.totsomc_col,
+        cs.totsomc_1m_col, cs.cwdc_col, cs.totc_col, cs.totecosysc_col)
 
-    # Truncation carbon
-    for c in bounds_col
-        mask_allc[c] || continue
-        cs.ctrunc_col[c] = 0.0
-    end
-    for j in 1:nlevdecomp
-        for c in bounds_col
-            mask_allc[c] || continue
-            cs.ctrunc_col[c] += cs.ctrunc_vr_col[c, j] * dzsoi_decomp_vals[j]
-        end
-    end
-
-    # Total litter carbon to 1m
-    if nlevdecomp > 1
-        for c in bounds_col
-            mask_allc[c] || continue
-            cs.totlitc_1m_col[c] = 0.0
-        end
-        for l in 1:ndecomp_pools
-            if is_litter[l]
-                for c in bounds_col
-                    mask_allc[c] || continue
-                    cs.totlitc_1m_col[c] += cs.decomp_cpools_1m_col[c, l]
-                end
-            end
-        end
-    end
-
-    # Total SOM carbon to 1m
-    if nlevdecomp > 1
-        for c in bounds_col
-            mask_allc[c] || continue
-            cs.totsomc_1m_col[c] = 0.0
-        end
-        for l in 1:ndecomp_pools
-            if is_soil[l]
-                for c in bounds_col
-                    mask_allc[c] || continue
-                    cs.totsomc_1m_col[c] += cs.decomp_cpools_1m_col[c, l]
-                end
-            end
-        end
-    end
-
-    # Total microbial carbon
-    for c in bounds_col
-        mask_allc[c] || continue
-        cs.totmicc_col[c] = 0.0
-    end
-    for l in 1:ndecomp_pools
-        if is_microbe[l]
-            for c in bounds_col
-                mask_allc[c] || continue
-                cs.totmicc_col[c] += cs.decomp_cpools_col[c, l]
-            end
-        end
-    end
-
-    # Total litter carbon
-    for c in bounds_col
-        mask_allc[c] || continue
-        cs.totlitc_col[c] = 0.0
-    end
-    for l in 1:ndecomp_pools
-        if is_litter[l]
-            for c in bounds_col
-                mask_allc[c] || continue
-                cs.totlitc_col[c] += cs.decomp_cpools_col[c, l]
-            end
-        end
-    end
-
-    # Total SOM carbon
-    for c in bounds_col
-        mask_allc[c] || continue
-        cs.totsomc_col[c] = 0.0
-    end
-    for l in 1:ndecomp_pools
-        if is_soil[l]
-            for c in bounds_col
-                mask_allc[c] || continue
-                cs.totsomc_col[c] += cs.decomp_cpools_col[c, l]
-            end
-        end
-    end
-
-    # CWD, ecosystem C, total column C
-    for c in bounds_col
-        mask_allc[c] || continue
-        cs.cwdc_col[c] = 0.0
-    end
-
-    for c in bounds_col
-        mask_allc[c] || continue
-
-        is_fates_c = is_fates_col !== nothing && is_fates_col[c]
-
-        local ecovegc, tvegc
-        if is_fates_c
-            tvegc   = 0.0
-            ecovegc = 0.0
-        else
-            for l in 1:ndecomp_pools
-                if is_cwd[l]
-                    cs.cwdc_col[c] += cs.decomp_cpools_col[c, l]
-                end
-            end
-            tvegc   = totc_p2c_col[c]
-            ecovegc = totvegc_col[c]
-        end
-
-        # total ecosystem carbon (TOTECOSYSC)
-        cs.totecosysc_col[c] = cs.cwdc_col[c] + cs.totmicc_col[c] +
-                               cs.totlitc_col[c] + cs.totsomc_col[c] + ecovegc
-
-        # total column carbon (TOTCOLC)
-        cs.totc_col[c] = cs.cwdc_col[c] + cs.totmicc_col[c] +
-                         cs.totlitc_col[c] + cs.totsomc_col[c] +
-                         cs.ctrunc_col[c] + tvegc
-    end
-
+    _launch!(_sbc_summary_kernel!, mask_k, b, dz_k, zi_k, isl_k, iss_k, ism_k, isc_k,
+        tp2c_k, tvegc_k, isf_k, first(bounds_col), last(bounds_col),
+        nlevdecomp, nlevdecomp_full, ndecomp_pools, use_soil_matrixcn;
+        ndrange=length(mask_k))
     return nothing
 end
 
