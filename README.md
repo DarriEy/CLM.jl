@@ -171,6 +171,23 @@ src/
 | CLM.jl + ForwardDiff (1 param) | ~8 s |
 | CLM.jl + ForwardDiff (7 params) | ~28 s |
 
+### GPU (Metal) — where it helps
+
+The `clm_drv!` timestep also runs on Apple Metal (Float32), and a full annual single-point
+run reproduces the Fortran reference to the same tolerance as the CPU path (69/69 variables).
+For point-scale work like the parity runs above, though, the CPU is far faster: a single
+column is the GPU's worst case — hundreds of tiny kernel launches with no parallel work to
+hide the overhead. The GPU only earns its keep once there are enough columns to fill it.
+
+![clm_drv! CPU vs Metal scaling](scripts/gpu_scaling.png)
+
+Timing one `clm_drv!` biogeophysics step as the column count grows, CPU time scales linearly
+while the GPU sits near a fixed launch/marshaling floor until it saturates — crossing over
+around **~1,150 columns** and reaching **~130×** by 260k columns (trending toward a ~280×
+per-column ceiling). So single points belong on the CPU; grid- to continental-scale runs are
+where on-device execution pays off. This is an early, indicative measurement — Apple M-series
+laptop, Float32, min-of-trials — not a tuned benchmark. (`scripts/gpu_scaling_bench.jl`)
+
 ## Testing
 
 ```bash
