@@ -606,22 +606,36 @@ end
 
 Zero out the 24 hr climate accumulations for the LUNA model.
 """
+# One thread per patch; zeroes the 24 hr accumulators (byte-identical to the host loop
+# on the KA CPU backend). par24d_z/par24x_z rows zeroed by an in-thread z-loop.
+@kernel function _luna_clear24_kernel!(t_veg_day, t_veg_night, nnightsteps, ndaysteps,
+        fpsn24, par24d_z, par24x_z, @Const(mask), lo::Int, hi::Int, ncan::Int)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask[p]
+        T = eltype(t_veg_day)
+        t_veg_day[p]   = zero(T)
+        t_veg_night[p] = zero(T)
+        fpsn24[p]      = zero(T)
+        nnightsteps[p] = 0
+        ndaysteps[p]   = 0
+        for z in 1:ncan
+            par24d_z[p, z] = zero(T)
+            par24x_z[p, z] = zero(T)
+        end
+    end
+end
+
 function clear24_climate_luna!(solarabs::SolarAbsorbedData,
                                photosyns::PhotosynthesisData,
                                temperature::TemperatureData,
                                patchdata::PatchData,
                                mask_patch::AbstractVector{Bool},
                                bounds::UnitRange{Int})
-    for p in bounds
-        mask_patch[p] || continue
-        temperature.t_veg_day_patch[p]   = 0.0
-        temperature.t_veg_night_patch[p] = 0.0
-        solarabs.par24d_z_patch[p, :]   .= 0.0
-        solarabs.par24x_z_patch[p, :]   .= 0.0
-        photosyns.fpsn24_patch[p]        = 0.0
-        temperature.nnightsteps_patch[p] = 0
-        temperature.ndaysteps_patch[p]   = 0
-    end
+    isempty(bounds) && return nothing
+    _launch!(_luna_clear24_kernel!, temperature.t_veg_day_patch, temperature.t_veg_night_patch,
+        temperature.nnightsteps_patch, temperature.ndaysteps_patch, photosyns.fpsn24_patch,
+        solarabs.par24d_z_patch, solarabs.par24x_z_patch, mask_patch,
+        first(bounds), last(bounds), size(solarabs.par24d_z_patch, 2))
     return nothing
 end
 
@@ -645,37 +659,50 @@ function acc24_climate_luna!(canopystate::CanopyStateData,
                              mask_patch::AbstractVector{Bool},
                              bounds::UnitRange{Int},
                              dtime::Real)
-    for p in bounds
-        mask_patch[p] || continue
+    isempty(bounds) && return nothing
+    FT = eltype(temperature.t_veg_patch)
+    _launch!(_luna_acc24_kernel!, temperature.t_veg_day_patch, temperature.t_veg_night_patch,
+        temperature.ndaysteps_patch, temperature.nnightsteps_patch, temperature.t_veg_patch,
+        solarabs.sabv_patch, solarabs.parsun_z_patch, solarabs.par24d_z_patch,
+        solarabs.par24x_z_patch, photosyns.fpsn24_patch, photosyns.fpsn_patch,
+        canopystate.laisun_z_patch, canopystate.laisha_z_patch, surfalb.nrad_patch,
+        mask_patch, first(bounds), last(bounds), FT(dtime), FT(SPVAL))
+    return nothing
+end
 
-        # Check whether it is the first day
-        if temperature.t_veg_day_patch[p] != SPVAL
-            if solarabs.sabv_patch[p] > 0.0
-                temperature.t_veg_day_patch[p] += temperature.t_veg_patch[p]
-                temperature.ndaysteps_patch[p] += 1
+# One thread per patch (byte-identical to the host loop on KA CPU). par24d_z[p,z]+= has
+# z as the loop var → distinct element per iter (safe); fpsn24 accumulates once per patch.
+@kernel function _luna_acc24_kernel!(t_veg_day, t_veg_night, ndaysteps, nnightsteps, t_veg,
+        @Const(sabv), @Const(parsun_z), par24d_z, par24x_z, fpsn24, @Const(fpsn),
+        @Const(laisun_z), @Const(laisha_z), @Const(nrad), @Const(mask),
+        lo::Int, hi::Int, dtime, spval)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask[p]
+        T = eltype(t_veg_day)
+        if t_veg_day[p] != spval
+            if sabv[p] > zero(T)
+                t_veg_day[p] += t_veg[p]
+                ndaysteps[p] += 1
             else
-                temperature.t_veg_night_patch[p] += temperature.t_veg_patch[p]
-                temperature.nnightsteps_patch[p] += 1
+                t_veg_night[p] += t_veg[p]
+                nnightsteps[p] += 1
             end
 
-            nrad_p = surfalb.nrad_patch[p]
+            nrad_p = nrad[p]
             for z in 1:nrad_p
-                # Average of sunlit and shaded leaves
-                tlaii = canopystate.laisun_z_patch[p, z] + canopystate.laisha_z_patch[p, z]
-                if tlaii > 0.0
-                    # RF & GBB: Make LUNA predict sunlit fraction N fractionation
-                    TRad = solarabs.parsun_z_patch[p, z]
-                    solarabs.par24d_z_patch[p, z] += dtime * TRad
-                    if TRad > solarabs.par24x_z_patch[p, z]
-                        solarabs.par24x_z_patch[p, z] = TRad
+                tlaii = laisun_z[p, z] + laisha_z[p, z]
+                if tlaii > zero(T)
+                    TRad = parsun_z[p, z]
+                    par24d_z[p, z] += dtime * TRad
+                    if TRad > par24x_z[p, z]
+                        par24x_z[p, z] = TRad
                     end
                 end
             end
 
-            photosyns.fpsn24_patch[p] += dtime * photosyns.fpsn_patch[p]
+            fpsn24[p] += dtime * fpsn[p]
         end
     end
-    return nothing
 end
 
 # ==========================================================================
@@ -704,64 +731,80 @@ function acc240_climate_luna!(temperature::TemperatureData,
                               rb::Vector{<:Real},
                               rh::Vector{<:Real},
                               dtime::Real)
-    for p in bounds
-        mask_patch[p] || continue
+    isempty(bounds) && return nothing
+    FT = eltype(temperature.t_veg_day_patch)
+    _launch!(_luna_acc240_kernel!, temperature.t_veg_day_patch, temperature.t_veg_night_patch,
+        temperature.ndaysteps_patch, temperature.nnightsteps_patch,
+        temperature.t_veg10_day_patch, temperature.t_veg10_night_patch,
+        solarabs.par24d_z_patch, solarabs.par24x_z_patch,
+        solarabs.par240d_z_patch, solarabs.par240x_z_patch,
+        waterdiag.rh10_af_patch, frictionvel.rb10_patch, _to_backend_like(temperature.t_veg_day_patch, FT, rb),
+        _to_backend_like(temperature.t_veg_day_patch, FT, rh),
+        mask_patch, first(bounds), last(bounds), FT(dtime), FT(SPVAL),
+        size(solarabs.par24d_z_patch, 2))
+    return nothing
+end
 
-        if temperature.t_veg_day_patch[p] != SPVAL
-            # Calculate 10-day running mean radiations
-            ndaysteps_p = temperature.ndaysteps_patch[p]
-            if ndaysteps_p > 0
-                par24d_z_i = solarabs.par24d_z_patch[p, :] ./ (dtime * ndaysteps_p)
-            else
-                par24d_z_i = zeros(eltype(solarabs.par24d_z_patch), size(solarabs.par24d_z_patch, 2))
-            end
-
-            if solarabs.par240d_z_patch[p, 1] == SPVAL  # first day
-                solarabs.par240x_z_patch[p, :] .= solarabs.par24x_z_patch[p, :]
-                solarabs.par240d_z_patch[p, :] .= par24d_z_i
-            else
-                solarabs.par240x_z_patch[p, :] .= 0.9 .* solarabs.par240x_z_patch[p, :] .+ 0.1 .* solarabs.par24x_z_patch[p, :]
-                solarabs.par240d_z_patch[p, :] .= 0.9 .* solarabs.par240d_z_patch[p, :] .+ 0.1 .* par24d_z_i
+# One thread per patch (byte-identical to the host loop on KA CPU). The par24d_z_i slice
+# temp is inlined per-z (used only at the same z); par240*_z[p,z] writes use z as the loop
+# var → distinct element per iter.
+@kernel function _luna_acc240_kernel!(t_veg_day, t_veg_night, ndaysteps, nnightsteps,
+        t_veg10_day, t_veg10_night, @Const(par24d_z), @Const(par24x_z),
+        par240d_z, par240x_z, rh10_af, rb10, @Const(rb), @Const(rh),
+        @Const(mask), lo::Int, hi::Int, dtime, spval, ncan::Int)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask[p]
+        T = eltype(t_veg_day)
+        if t_veg_day[p] != spval
+            ndaysteps_p = ndaysteps[p]
+            first_day = par240d_z[p, 1] == spval
+            for z in 1:ncan
+                par24d_z_i = ndaysteps_p > 0 ? par24d_z[p, z] / (dtime * ndaysteps_p) : zero(T)
+                if first_day
+                    par240x_z[p, z] = par24x_z[p, z]
+                    par240d_z[p, z] = par24d_z_i
+                else
+                    par240x_z[p, z] = T(0.9) * par240x_z[p, z] + T(0.1) * par24x_z[p, z]
+                    par240d_z[p, z] = T(0.9) * par240d_z[p, z] + T(0.1) * par24d_z_i
+                end
             end
 
             # 10-day running mean daytime temperature
             if ndaysteps_p > 0
-                t_veg_dayi = temperature.t_veg_day_patch[p] / ndaysteps_p
+                t_veg_dayi = t_veg_day[p] / ndaysteps_p
             else
-                nnightsteps_p = temperature.nnightsteps_patch[p]
-                t_veg_dayi = temperature.t_veg_night_patch[p] / nnightsteps_p
+                t_veg_dayi = t_veg_night[p] / nnightsteps[p]
             end
-            if temperature.t_veg10_day_patch[p] == SPVAL
-                temperature.t_veg10_day_patch[p] = t_veg_dayi
+            if t_veg10_day[p] == spval
+                t_veg10_day[p] = t_veg_dayi
             end
-            temperature.t_veg10_day_patch[p] = 0.9 * temperature.t_veg10_day_patch[p] + 0.1 * t_veg_dayi
+            t_veg10_day[p] = T(0.9) * t_veg10_day[p] + T(0.1) * t_veg_dayi
 
             # 10-day running mean nighttime temperature
-            nnightsteps_p = temperature.nnightsteps_patch[p]
+            nnightsteps_p = nnightsteps[p]
             if nnightsteps_p > 0
-                t_veg_nighti = temperature.t_veg_night_patch[p] / nnightsteps_p
+                t_veg_nighti = t_veg_night[p] / nnightsteps_p
             else
-                t_veg_nighti = temperature.t_veg_day_patch[p] / ndaysteps_p
+                t_veg_nighti = t_veg_day[p] / ndaysteps_p
             end
-            if temperature.t_veg10_night_patch[p] == SPVAL
-                temperature.t_veg10_night_patch[p] = t_veg_nighti
+            if t_veg10_night[p] == spval
+                t_veg10_night[p] = t_veg_nighti
             end
-            temperature.t_veg10_night_patch[p] = 0.9 * temperature.t_veg10_night_patch[p] + 0.1 * t_veg_nighti
+            t_veg10_night[p] = T(0.9) * t_veg10_night[p] + T(0.1) * t_veg_nighti
 
             # 10-day running mean relative humidity
-            if waterdiag.rh10_af_patch[p] == SPVAL
-                waterdiag.rh10_af_patch[p] = rh[p]
+            if rh10_af[p] == spval
+                rh10_af[p] = rh[p]
             end
-            waterdiag.rh10_af_patch[p] = 0.9 * waterdiag.rh10_af_patch[p] + 0.1 * smooth_min(1.0, rh[p])
+            rh10_af[p] = T(0.9) * rh10_af[p] + T(0.1) * smooth_min(one(T), rh[p])
 
             # 10-day running mean boundary layer resistance
-            if frictionvel.rb10_patch[p] == SPVAL
-                frictionvel.rb10_patch[p] = rb[p]
+            if rb10[p] == spval
+                rb10[p] = rb[p]
             end
-            frictionvel.rb10_patch[p] = 0.9 * frictionvel.rb10_patch[p] + 0.1 * rb[p]
+            rb10[p] = T(0.9) * rb10[p] + T(0.1) * rb[p]
         end
     end
-    return nothing
 end
 
 # ==========================================================================

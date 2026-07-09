@@ -388,6 +388,167 @@ function build_flux_fraction_by_type(pconv::AbstractVector{<:Real})
     return out
 end
 
+# ===========================================================================
+# GPU kernelization of the dyn_cnbal_patch! ORCHESTRATOR loops (the sub-functions
+# dynamic_patch_adjustments_carbon!/_nitrogen! and dyn_cnbal_col! already run on
+# host+Metal via the conservative helpers). One thread per patch; own-index writes
+# are race-free, and the patch->gridcell / patch->column accumulations use the
+# atomic `_scatter_add!` so concurrent patches on the same gridcell/column add
+# correctly. Every kernel is byte-identical to the host loop on the KA CPU backend.
+# Field bundles keep the big re-init launch under Metal's ~31-buffer limit.
+# ===========================================================================
+
+# --- Re-init bundle: cnveg_state fields reset for initiating patches (+ the
+#     column-indexed annavg_t2m_col read). ---
+struct _DCReinitVS{V}
+    dormant_flag::V; days_active::V; onset_flag::V; onset_counter::V
+    onset_gddflag::V; onset_fdd::V; onset_gdd::V; onset_swi::V
+    offset_flag::V; offset_counter::V; offset_fdd::V; offset_swi::V
+    lgsf::V; bglfr::V; bgtr::V; annavg_t2m::V; tempavg_t2m::V
+    c_allometry::V; n_allometry::V; tempsum_potential_gpp::V; annsum_potential_gpp::V
+    tempmax_retransn::V; annmax_retransn::V; downreg::V; annavg_t2m_col::V
+end
+Adapt.@adapt_structure _DCReinitVS
+
+struct _DCReinitCF{V}
+    xsmrpool_recover::V; plant_calloc::V; excess_cflux::V
+    prev_leafc_to_litter::V; prev_frootc_to_litter::V; availc::V
+    gpp_before_downreg::V; tempsum_npp::V; annsum_npp::V
+end
+Adapt.@adapt_structure _DCReinitCF
+
+struct _DCReinitNF{V}
+    plant_ndemand::V; avail_retransn::V; plant_nalloc::V
+end
+Adapt.@adapt_structure _DCReinitNF
+
+# 1. dwt + re-initialize initiating patches (one thread per patch).
+@kernel function _dcp_reinit_kernel!(dwt, dwt_smoothed, laisun, laisha, vs, cfb, nfb,
+        @Const(col_of_p), @Const(lun_of_p), @Const(lun_itype),
+        @Const(wtgcell), @Const(prior_pwtgcell), @Const(initiating),
+        ISTSOIL_::Int, ISTCROP_::Int)
+    p = @index(Global)
+    T = eltype(dwt)
+    @inbounds begin
+        l = lun_of_p[p]
+        lt = lun_itype[l]
+        if lt == ISTSOIL_ || lt == ISTCROP_
+            d = wtgcell[p] - prior_pwtgcell[p]
+            dwt[p] = d
+            dwt_smoothed[p] = d
+            if initiating[p]
+                c = col_of_p[p]
+                z = zero(T); o = one(T)
+                laisun[p] = z; laisha[p] = z
+                vs.dormant_flag[p] = o; vs.days_active[p] = z
+                vs.onset_flag[p] = z; vs.onset_counter[p] = z; vs.onset_gddflag[p] = z
+                vs.onset_fdd[p] = z; vs.onset_gdd[p] = z; vs.onset_swi[p] = z
+                vs.offset_flag[p] = z; vs.offset_counter[p] = z; vs.offset_fdd[p] = z
+                vs.offset_swi[p] = z; vs.lgsf[p] = z; vs.bglfr[p] = z; vs.bgtr[p] = z
+                vs.annavg_t2m[p] = vs.annavg_t2m_col[c]
+                vs.tempavg_t2m[p] = z; vs.c_allometry[p] = z; vs.n_allometry[p] = z
+                vs.tempsum_potential_gpp[p] = z; vs.annsum_potential_gpp[p] = z
+                vs.tempmax_retransn[p] = z; vs.annmax_retransn[p] = z; vs.downreg[p] = z
+                cfb.xsmrpool_recover[p] = z; cfb.plant_calloc[p] = z; cfb.excess_cflux[p] = z
+                cfb.prev_leafc_to_litter[p] = z; cfb.prev_frootc_to_litter[p] = z
+                cfb.availc[p] = z; cfb.gpp_before_downreg[p] = z
+                cfb.tempsum_npp[p] = z; cfb.annsum_npp[p] = z
+                nfb.plant_ndemand[p] = z; nfb.avail_retransn[p] = z; nfb.plant_nalloc[p] = z
+            end
+        else
+            dwt_smoothed[p] = dwt[p]
+        end
+    end
+end
+
+# 2. Flip 3 loss-flux accumulators to positive (own index, all patches).
+@kernel function _dcp_signflip3_kernel!(a, b, cc)
+    p = @index(Global)
+    @inbounds begin
+        a[p] = -a[p]; b[p] = -b[p]; cc[p] = -cc[p]
+    end
+end
+
+# 3. Seeding fluxes: per-patch value + patch->gridcell accumulation.
+@kernel function _dcp_seed_kernel!(sc_leaf_p, sc_leaf_g, sc_ds_p, sc_ds_g,
+        sn_leaf_p, sn_leaf_g, sn_ds_p, sn_ds_g,
+        @Const(dwt_leafc_seed), @Const(dwt_deadstemc_seed),
+        @Const(dwt_leafn_seed), @Const(dwt_deadstemn_seed), @Const(gridcell), dt)
+    p = @index(Global)
+    @inbounds begin
+        g = gridcell[p]
+        v1 = dwt_leafc_seed[p] / dt;     sc_leaf_p[p] = v1; _scatter_add!(sc_leaf_g, g, v1)
+        v2 = dwt_deadstemc_seed[p] / dt; sc_ds_p[p]   = v2; _scatter_add!(sc_ds_g, g, v2)
+        v3 = dwt_leafn_seed[p] / dt;     sn_leaf_p[p] = v3; _scatter_add!(sn_leaf_g, g, v3)
+        v4 = dwt_deadstemn_seed[p] / dt; sn_ds_p[p]   = v4; _scatter_add!(sn_ds_g, g, v4)
+    end
+end
+
+# 4. patch->column litter/CWD fluxes (one thread per patch; atomic into col pools).
+@kernel function _dcp_p2c_kernel!(frootc_col, frootn_col, livecrootc_col, livecrootn_col,
+        deadcrootc_col, deadcrootn_col,
+        @Const(dwt_frootc_to_litter), @Const(dwt_frootn_to_litter),
+        @Const(dwt_livecrootc_to_litter), @Const(dwt_livecrootn_to_litter),
+        @Const(dwt_deadcrootc_to_litter), @Const(dwt_deadcrootn_to_litter),
+        @Const(froot_prof), @Const(croot_prof), @Const(fr_f),
+        @Const(col_of_p), @Const(itype_of_p),
+        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, dt)
+    p = @index(Global)
+    @inbounds begin
+        c = col_of_p[p]
+        ji = itype_of_p[p] + 1
+        for j in 1:nlevdecomp
+            fp = froot_prof[p, j]; cp = croot_prof[p, j]
+            for i in i_litr_min:i_litr_max
+                frf = fr_f[ji, i]
+                _scatter_add!(frootc_col, c, j, i, (dwt_frootc_to_litter[p] * frf) / dt * fp)
+                _scatter_add!(frootn_col, c, j, i, (dwt_frootn_to_litter[p] * frf) / dt * fp)
+            end
+            _scatter_add!(livecrootc_col, c, j, dwt_livecrootc_to_litter[p] / dt * cp)
+            _scatter_add!(livecrootn_col, c, j, dwt_livecrootn_to_litter[p] / dt * cp)
+            _scatter_add!(deadcrootc_col, c, j, dwt_deadcrootc_to_litter[p] / dt * cp)
+            _scatter_add!(deadcrootn_col, c, j, dwt_deadcrootn_to_litter[p] / dt * cp)
+        end
+    end
+end
+
+# 5. Product-pool gain fluxes (own index, positive).
+@kernel function _dcp_product_kernel!(wood_c_p, crop_c_p, wood_n_p, crop_n_p,
+        @Const(wood_product_cflux), @Const(crop_product_cflux),
+        @Const(wood_product_nflux), @Const(crop_product_nflux), dt)
+    p = @index(Global)
+    @inbounds begin
+        wood_c_p[p] = -wood_product_cflux[p] / dt
+        crop_c_p[p] = -crop_product_cflux[p] / dt
+        wood_n_p[p] = -wood_product_nflux[p] / dt
+        crop_n_p[p] = -crop_product_nflux[p] / dt
+    end
+end
+
+# 6. Conversion fluxes: per-patch + patch->gridcell accumulation.
+@kernel function _dcp_conv_kernel!(conv_c_p, conv_c_g, conv_n_p, conv_n_g,
+        @Const(conv_cflux), @Const(conv_nflux), @Const(gridcell), dt)
+    p = @index(Global)
+    @inbounds begin
+        g = gridcell[p]
+        vc = -conv_cflux[p] / dt; conv_c_p[p] = vc; _scatter_add!(conv_c_g, g, vc)
+        vn = -conv_nflux[p] / dt; conv_n_p[p] = vn; _scatter_add!(conv_n_g, g, vn)
+    end
+end
+
+# 7. Slash fluxes (froot+livecroot+deadcroot to litter/CWD): per-patch + p->grc.
+@kernel function _dcp_slash_kernel!(slash_c_p, slash_c_g,
+        @Const(dwt_frootc_to_litter), @Const(dwt_livecrootc_to_litter),
+        @Const(dwt_deadcrootc_to_litter), @Const(gridcell), dt)
+    p = @index(Global)
+    @inbounds begin
+        g = gridcell[p]
+        v = dwt_frootc_to_litter[p] / dt + dwt_livecrootc_to_litter[p] / dt +
+            dwt_deadcrootc_to_litter[p] / dt
+        slash_c_p[p] = v; _scatter_add!(slash_c_g, g, v)
+    end
+end
+
 # ---------------------------------------------------------------------------
 # Public: dyn_cnbal_patch!
 # ---------------------------------------------------------------------------
@@ -449,94 +610,68 @@ function dyn_cnbal_patch!(dynbal::DynConsBiogeochemState,
     ns = cnveg_nitrogenstate
     nf = cnveg_nitrogenflux
 
-    # patch-level local flux arrays (Fortran allocatables), all zeroed
-    z() = zeros(Float64, np)
-    dwt                       = z()
-    dwt_leafc_seed            = z()
-    dwt_leafn_seed            = z()
-    dwt_deadstemc_seed        = z()
-    dwt_deadstemn_seed        = z()
-    dwt_frootc_to_litter      = z()
-    dwt_livecrootc_to_litter  = z()
-    dwt_deadcrootc_to_litter  = z()
-    dwt_frootn_to_litter      = z()
-    dwt_livecrootn_to_litter  = z()
-    dwt_deadcrootn_to_litter  = z()
-    conv_cflux                = z()
-    wood_product_cflux        = z()
-    crop_product_cflux        = z()
-    conv_nflux                = z()
-    wood_product_nflux        = z()
-    crop_product_nflux        = z()
+    # Backend-aware scratch (identity on CPU; device-resident when the CN state is
+    # on GPU → the whole orchestrator runs on-device, byte-identical on KA CPU).
+    _ref = cs.leafc_patch
+    FT = eltype(_ref)
+    _zeros(n) = fill!(similar(_ref, FT, n), zero(FT))
+    _onbk_bool(a) = _ref isa Array ? a : copyto!(similar(_ref, Bool, length(a)), a)
+    _onbk_int(a)  = _ref isa Array ? a : copyto!(similar(_ref, Int, length(a)), a)
 
-    initiating = patch_initiating(updater, bounds)
+    dwt                       = _zeros(np)
+    dwt_leafc_seed            = _zeros(np)
+    dwt_leafn_seed            = _zeros(np)
+    dwt_deadstemc_seed        = _zeros(np)
+    dwt_deadstemn_seed        = _zeros(np)
+    dwt_frootc_to_litter      = _zeros(np)
+    dwt_livecrootc_to_litter  = _zeros(np)
+    dwt_deadcrootc_to_litter  = _zeros(np)
+    dwt_frootn_to_litter      = _zeros(np)
+    dwt_livecrootn_to_litter  = _zeros(np)
+    dwt_deadcrootn_to_litter  = _zeros(np)
+    conv_cflux                = _zeros(np)
+    wood_product_cflux        = _zeros(np)
+    crop_product_cflux        = _zeros(np)
+    conv_nflux                = _zeros(np)
+    wood_product_nflux        = _zeros(np)
+    crop_product_nflux        = _zeros(np)
 
-    # -----------------------------------------------------------------------
-    # 1. Compute dwt and re-initialize newly-initiating patches
-    # -----------------------------------------------------------------------
-    for p in begp:endp
-        c = patch.column[p]
-        l = patch.landunit[p]
-        lt = lun.itype[l]
-        if lt == ISTSOIL || lt == ISTCROP
-            dwt[p] = patch.wtgcell[p] - prior_pwtgcell[p]
-
-            if initiating[p]
-                canopystate.laisun_patch[p] = 0.0
-                canopystate.laisha_patch[p] = 0.0
-
-                cnveg_state.dormant_flag_patch[p]          = 1.0
-                cnveg_state.days_active_patch[p]           = 0.0
-                cnveg_state.onset_flag_patch[p]            = 0.0
-                cnveg_state.onset_counter_patch[p]         = 0.0
-                cnveg_state.onset_gddflag_patch[p]         = 0.0
-                cnveg_state.onset_fdd_patch[p]             = 0.0
-                cnveg_state.onset_gdd_patch[p]             = 0.0
-                cnveg_state.onset_swi_patch[p]             = 0.0
-                cnveg_state.offset_flag_patch[p]           = 0.0
-                cnveg_state.offset_counter_patch[p]        = 0.0
-                cnveg_state.offset_fdd_patch[p]            = 0.0
-                cnveg_state.offset_swi_patch[p]            = 0.0
-                cnveg_state.lgsf_patch[p]                  = 0.0
-                cnveg_state.bglfr_patch[p]                 = 0.0
-                cnveg_state.bgtr_patch[p]                  = 0.0
-                cnveg_state.annavg_t2m_patch[p]            = cnveg_state.annavg_t2m_col[c]
-                cnveg_state.tempavg_t2m_patch[p]           = 0.0
-                cnveg_state.c_allometry_patch[p]           = 0.0
-                cnveg_state.n_allometry_patch[p]           = 0.0
-                cnveg_state.tempsum_potential_gpp_patch[p] = 0.0
-                cnveg_state.annsum_potential_gpp_patch[p]  = 0.0
-                cnveg_state.tempmax_retransn_patch[p]      = 0.0
-                cnveg_state.annmax_retransn_patch[p]       = 0.0
-                cnveg_state.downreg_patch[p]               = 0.0
-
-                cf.xsmrpool_recover_patch[p]      = 0.0
-                cf.plant_calloc_patch[p]          = 0.0
-                cf.excess_cflux_patch[p]          = 0.0
-                cf.prev_leafc_to_litter_patch[p]  = 0.0
-                cf.prev_frootc_to_litter_patch[p] = 0.0
-                cf.availc_patch[p]                = 0.0
-                cf.gpp_before_downreg_patch[p]    = 0.0
-                cf.tempsum_npp_patch[p]           = 0.0
-                cf.annsum_npp_patch[p]            = 0.0
-
-                nf.plant_ndemand_patch[p]  = 0.0
-                nf.avail_retransn_patch[p] = 0.0
-                nf.plant_nalloc_patch[p]   = 0.0
-            end
-        end
-    end
-
-    # Annually-smoothed (dribbled) change in weight: pass-through here.
-    for p in begp:endp
-        cnveg_state.dwt_smoothed_patch[p] = dwt[p]
-    end
-
-    # Soil patch filter (indices), including inactive points
-    filterp = Int[p for p in begp:endp if mask_soilp_with_inactive[p]]
+    dt_ft      = FT(dt)
+    initiating = _onbk_bool(collect(Bool, patch_initiating(updater, bounds)))
+    prior_bk   = _to_backend_like(_ref, FT, prior_pwtgcell)
+    fr_f_bk    = _to_backend_like(_ref, FT, pftcon_data.fr_f)
 
     # -----------------------------------------------------------------------
-    # 2. Adjust patch C and N pools + accumulate loss fluxes
+    # 1. Compute dwt (+ dwt_smoothed pass-through) and re-init initiating patches
+    # -----------------------------------------------------------------------
+    vs = _DCReinitVS(cnveg_state.dormant_flag_patch, cnveg_state.days_active_patch,
+        cnveg_state.onset_flag_patch, cnveg_state.onset_counter_patch,
+        cnveg_state.onset_gddflag_patch, cnveg_state.onset_fdd_patch,
+        cnveg_state.onset_gdd_patch, cnveg_state.onset_swi_patch,
+        cnveg_state.offset_flag_patch, cnveg_state.offset_counter_patch,
+        cnveg_state.offset_fdd_patch, cnveg_state.offset_swi_patch,
+        cnveg_state.lgsf_patch, cnveg_state.bglfr_patch, cnveg_state.bgtr_patch,
+        cnveg_state.annavg_t2m_patch, cnveg_state.tempavg_t2m_patch,
+        cnveg_state.c_allometry_patch, cnveg_state.n_allometry_patch,
+        cnveg_state.tempsum_potential_gpp_patch, cnveg_state.annsum_potential_gpp_patch,
+        cnveg_state.tempmax_retransn_patch, cnveg_state.annmax_retransn_patch,
+        cnveg_state.downreg_patch, cnveg_state.annavg_t2m_col)
+    cfb = _DCReinitCF(cf.xsmrpool_recover_patch, cf.plant_calloc_patch,
+        cf.excess_cflux_patch, cf.prev_leafc_to_litter_patch, cf.prev_frootc_to_litter_patch,
+        cf.availc_patch, cf.gpp_before_downreg_patch, cf.tempsum_npp_patch, cf.annsum_npp_patch)
+    nfb = _DCReinitNF(nf.plant_ndemand_patch, nf.avail_retransn_patch, nf.plant_nalloc_patch)
+    _launch!(_dcp_reinit_kernel!, dwt, cnveg_state.dwt_smoothed_patch,
+        canopystate.laisun_patch, canopystate.laisha_patch, vs, cfb, nfb,
+        patch.column, patch.landunit, lun.itype, patch.wtgcell, prior_bk, initiating,
+        Int(ISTSOIL), Int(ISTCROP))
+
+    # Soil patch filter (indices), including inactive points — built on host then
+    # moved to the state backend (control-flow array, O(np), done once).
+    mask_host = _ref isa Array ? mask_soilp_with_inactive : Array(mask_soilp_with_inactive)
+    filterp = _onbk_int(Int[p for p in begp:endp if mask_host[p]])
+
+    # -----------------------------------------------------------------------
+    # 2. Adjust patch C and N pools + accumulate loss fluxes (device-capable subfns)
     # -----------------------------------------------------------------------
     dynamic_patch_adjustments_carbon!(cs, updater, bounds, patch, pftcon_data,
         mask_soilp_with_inactive, filterp;
@@ -551,13 +686,9 @@ function dyn_cnbal_patch!(dynbal::DynConsBiogeochemState,
         dwt_deadstemc_seed = dwt_deadstemc_seed,
         use_crop = use_crop, nrepr = nrepr)
 
-    # These fluxes are computed as negative quantities, but are expected to be
-    # positive, so flip the signs.
-    for p in begp:endp
-        dwt_frootc_to_litter[p]     = -dwt_frootc_to_litter[p]
-        dwt_livecrootc_to_litter[p] = -dwt_livecrootc_to_litter[p]
-        dwt_deadcrootc_to_litter[p] = -dwt_deadcrootc_to_litter[p]
-    end
+    # Flip loss-flux signs to positive.
+    _launch!(_dcp_signflip3_kernel!, dwt_frootc_to_litter, dwt_livecrootc_to_litter,
+        dwt_deadcrootc_to_litter)
 
     dynamic_patch_adjustments_nitrogen!(ns, updater, bounds, patch, pftcon_data,
         mask_soilp_with_inactive, filterp;
@@ -572,120 +703,54 @@ function dyn_cnbal_patch!(dynbal::DynConsBiogeochemState,
         dwt_deadstemn_seed = dwt_deadstemn_seed,
         use_crop = use_crop, nrepr = nrepr)
 
-    for p in begp:endp
-        dwt_frootn_to_litter[p]     = -dwt_frootn_to_litter[p]
-        dwt_livecrootn_to_litter[p] = -dwt_livecrootn_to_litter[p]
-        dwt_deadcrootn_to_litter[p] = -dwt_deadcrootn_to_litter[p]
-    end
+    _launch!(_dcp_signflip3_kernel!, dwt_frootn_to_litter, dwt_livecrootn_to_litter,
+        dwt_deadcrootn_to_litter)
 
     # -----------------------------------------------------------------------
-    # 3. Column-/gridcell-level seeding fluxes
+    # 3. Seeding fluxes (patch value + patch->gridcell accumulation)
     # -----------------------------------------------------------------------
-    for p in begp:endp
-        g = patch.gridcell[p]
-
-        cf.dwt_seedc_to_leaf_patch[p] = dwt_leafc_seed[p] / dt
-        cf.dwt_seedc_to_leaf_grc[g]   = cf.dwt_seedc_to_leaf_grc[g] +
-                                        cf.dwt_seedc_to_leaf_patch[p]
-
-        cf.dwt_seedc_to_deadstem_patch[p] = dwt_deadstemc_seed[p] / dt
-        cf.dwt_seedc_to_deadstem_grc[g]   = cf.dwt_seedc_to_deadstem_grc[g] +
-                                            cf.dwt_seedc_to_deadstem_patch[p]
-
-        nf.dwt_seedn_to_leaf_patch[p] = dwt_leafn_seed[p] / dt
-        nf.dwt_seedn_to_leaf_grc[g]   = nf.dwt_seedn_to_leaf_grc[g] +
-                                        nf.dwt_seedn_to_leaf_patch[p]
-
-        nf.dwt_seedn_to_deadstem_patch[p] = dwt_deadstemn_seed[p] / dt
-        nf.dwt_seedn_to_deadstem_grc[g]   = nf.dwt_seedn_to_deadstem_grc[g] +
-                                            nf.dwt_seedn_to_deadstem_patch[p]
-    end
+    _launch!(_dcp_seed_kernel!, cf.dwt_seedc_to_leaf_patch, cf.dwt_seedc_to_leaf_grc,
+        cf.dwt_seedc_to_deadstem_patch, cf.dwt_seedc_to_deadstem_grc,
+        nf.dwt_seedn_to_leaf_patch, nf.dwt_seedn_to_leaf_grc,
+        nf.dwt_seedn_to_deadstem_patch, nf.dwt_seedn_to_deadstem_grc,
+        dwt_leafc_seed, dwt_deadstemc_seed, dwt_leafn_seed, dwt_deadstemn_seed,
+        patch.gridcell, dt_ft)
 
     # -----------------------------------------------------------------------
-    # 4. patch-to-column fluxes into litter and CWD pools
+    # 4. patch-to-column litter/CWD fluxes (atomic scatter into column pools)
     # -----------------------------------------------------------------------
     nlevdecomp = size(soilbiogeochem_state.froot_prof_patch, 2)
-    for j in 1:nlevdecomp
-        for p in begp:endp
-            c = patch.column[p]
-            ji = patch.itype[p] + 1  # 1-based pftcon index
-
-            # fine root litter C fluxes
-            for i in i_litr_min:i_litr_max
-                cf.dwt_frootc_to_litr_c_col[c, j, i] =
-                    cf.dwt_frootc_to_litr_c_col[c, j, i] +
-                    (dwt_frootc_to_litter[p] * pftcon_data.fr_f[ji, i]) / dt *
-                    soilbiogeochem_state.froot_prof_patch[p, j]
-            end
-
-            # fine root litter N fluxes
-            for i in i_litr_min:i_litr_max
-                nf.dwt_frootn_to_litr_n_col[c, j, i] =
-                    nf.dwt_frootn_to_litr_n_col[c, j, i] +
-                    (dwt_frootn_to_litter[p] * pftcon_data.fr_f[ji, i]) / dt *
-                    soilbiogeochem_state.froot_prof_patch[p, j]
-            end
-
-            # livecroot -> CWD
-            cf.dwt_livecrootc_to_cwdc_col[c, j] =
-                cf.dwt_livecrootc_to_cwdc_col[c, j] +
-                dwt_livecrootc_to_litter[p] / dt *
-                soilbiogeochem_state.croot_prof_patch[p, j]
-            nf.dwt_livecrootn_to_cwdn_col[c, j] =
-                nf.dwt_livecrootn_to_cwdn_col[c, j] +
-                dwt_livecrootn_to_litter[p] / dt *
-                soilbiogeochem_state.croot_prof_patch[p, j]
-
-            # deadcroot -> CWD
-            cf.dwt_deadcrootc_to_cwdc_col[c, j] =
-                cf.dwt_deadcrootc_to_cwdc_col[c, j] +
-                dwt_deadcrootc_to_litter[p] / dt *
-                soilbiogeochem_state.croot_prof_patch[p, j]
-            nf.dwt_deadcrootn_to_cwdn_col[c, j] =
-                nf.dwt_deadcrootn_to_cwdn_col[c, j] +
-                dwt_deadcrootn_to_litter[p] / dt *
-                soilbiogeochem_state.croot_prof_patch[p, j]
-        end
-    end
+    _launch!(_dcp_p2c_kernel!, cf.dwt_frootc_to_litr_c_col, nf.dwt_frootn_to_litr_n_col,
+        cf.dwt_livecrootc_to_cwdc_col, nf.dwt_livecrootn_to_cwdn_col,
+        cf.dwt_deadcrootc_to_cwdc_col, nf.dwt_deadcrootn_to_cwdn_col,
+        dwt_frootc_to_litter, dwt_frootn_to_litter,
+        dwt_livecrootc_to_litter, dwt_livecrootn_to_litter,
+        dwt_deadcrootc_to_litter, dwt_deadcrootn_to_litter,
+        soilbiogeochem_state.froot_prof_patch, soilbiogeochem_state.croot_prof_patch,
+        fr_f_bk, patch.column, patch.itype,
+        nlevdecomp, i_litr_min, i_litr_max, dt_ft; ndrange = np)
 
     # -----------------------------------------------------------------------
-    # 5. Store fluxes into product pools (positive values)
+    # 5. Product-pool gain fluxes (positive values)
     # -----------------------------------------------------------------------
-    for p in begp:endp
-        cf.dwt_wood_productc_gain_patch[p] = -wood_product_cflux[p] / dt
-        cf.dwt_crop_productc_gain_patch[p] = -crop_product_cflux[p] / dt
-        nf.dwt_wood_productn_gain_patch[p] = -wood_product_nflux[p] / dt
-        nf.dwt_crop_productn_gain_patch[p] = -crop_product_nflux[p] / dt
-    end
+    _launch!(_dcp_product_kernel!, cf.dwt_wood_productc_gain_patch,
+        cf.dwt_crop_productc_gain_patch, nf.dwt_wood_productn_gain_patch,
+        nf.dwt_crop_productn_gain_patch, wood_product_cflux, crop_product_cflux,
+        wood_product_nflux, crop_product_nflux, dt_ft)
 
     # -----------------------------------------------------------------------
-    # 6. Column-level conversion fluxes
+    # 6. Conversion fluxes (patch value + patch->gridcell accumulation)
     # -----------------------------------------------------------------------
-    for p in begp:endp
-        g = patch.gridcell[p]
-
-        cf.dwt_conv_cflux_patch[p] = -conv_cflux[p] / dt
-        cf.dwt_conv_cflux_grc[g]   = cf.dwt_conv_cflux_grc[g] +
-                                     cf.dwt_conv_cflux_patch[p]
-
-        nf.dwt_conv_nflux_patch[p] = -conv_nflux[p] / dt
-        nf.dwt_conv_nflux_grc[g]   = nf.dwt_conv_nflux_grc[g] +
-                                     nf.dwt_conv_nflux_patch[p]
-    end
+    _launch!(_dcp_conv_kernel!, cf.dwt_conv_cflux_patch, cf.dwt_conv_cflux_grc,
+        nf.dwt_conv_nflux_patch, nf.dwt_conv_nflux_grc,
+        conv_cflux, conv_nflux, patch.gridcell, dt_ft)
 
     # -----------------------------------------------------------------------
-    # 7. patch-to-gridcell slash fluxes into litter and CWD pools
+    # 7. Slash fluxes (patch value + patch->gridcell accumulation)
     # -----------------------------------------------------------------------
-    for p in begp:endp
-        g = patch.gridcell[p]
-
-        cf.dwt_slash_cflux_patch[p] =
-            dwt_frootc_to_litter[p] / dt +
-            dwt_livecrootc_to_litter[p] / dt +
-            dwt_deadcrootc_to_litter[p] / dt
-        cf.dwt_slash_cflux_grc[g] = cf.dwt_slash_cflux_grc[g] +
-                                    cf.dwt_slash_cflux_patch[p]
-    end
+    _launch!(_dcp_slash_kernel!, cf.dwt_slash_cflux_patch, cf.dwt_slash_cflux_grc,
+        dwt_frootc_to_litter, dwt_livecrootc_to_litter, dwt_deadcrootc_to_litter,
+        patch.gridcell, dt_ft)
 
     return nothing
 end

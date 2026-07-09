@@ -466,23 +466,41 @@ Patch-to-column area-weighted average.
 
 Ported from `p2c` in `subgridAveMod.F90`.
 """
+# Zero the masked columns (one thread per column), then atomic-scatter each patch's
+# area-weighted contribution into its column (one thread per patch, `_scatter_add!`
+# handles the many-patch→one-column race on the device; plain += on the KA CPU path).
+@kernel function _p2c_irrig_zero_kernel!(col_out, @Const(mask_soilc), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_soilc[c]
+        col_out[c] = zero(eltype(col_out))
+    end
+end
+@kernel function _p2c_irrig_scatter_kernel!(col_out, @Const(patch_in), @Const(pcol),
+        @Const(wtcol), @Const(mask_soilc), cmin::Int, cmax::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        c = pcol[p]
+        if cmin <= c <= cmax && mask_soilc[c]
+            _scatter_add!(col_out, c, patch_in[p] * wtcol[p])
+        end
+    end
+end
+
 function p2c_irrig!(
-    col_out::Vector{<:Real},
-    patch_in::Vector{<:Real},
+    col_out::AbstractVector{<:Real},
+    patch_in::AbstractVector{<:Real},
     patch_data::PatchData,
     mask_soilc::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int}
 )
-    for c in bounds_c
-        mask_soilc[c] || continue
-        col_out[c] = 0.0
-    end
-    for p in bounds_p
-        c = patch_data.column[p]
-        (c in bounds_c && mask_soilc[c]) || continue
-        col_out[c] += patch_in[p] * patch_data.wtcol[p]
-    end
+    FT = eltype(col_out)
+    pcol  = _to_backend_like(col_out, FT, patch_data.column)
+    wtcol = _to_backend_like(col_out, FT, patch_data.wtcol)
+    _launch!(_p2c_irrig_zero_kernel!, col_out, mask_soilc, first(bounds_c), last(bounds_c))
+    _launch!(_p2c_irrig_scatter_kernel!, col_out, patch_in, pcol, wtcol, mask_soilc,
+             first(bounds_c), last(bounds_c), first(bounds_p), last(bounds_p);
+             ndrange = length(patch_in))
     return nothing
 end
 
@@ -498,22 +516,39 @@ Column-to-gridcell area-weighted average (unity scaling).
 
 Ported from `c2g` in `subgridAveMod.F90`.
 """
+# Zero the gridcells (one thread per gridcell), then atomic-scatter each column's
+# area-weighted contribution into its gridcell (one thread per column).
+@kernel function _c2g_irrig_zero_kernel!(garr, gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        garr[g] = zero(eltype(garr))
+    end
+end
+@kernel function _c2g_irrig_scatter_kernel!(garr, @Const(carr), @Const(cgrid),
+        @Const(wtgcell), gmin::Int, gmax::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        g = cgrid[c]
+        if gmin <= g <= gmax
+            _scatter_add!(garr, g, carr[c] * wtgcell[c])
+        end
+    end
+end
+
 function c2g_irrig!(
-    garr::Vector{<:Real},
-    carr::Vector{<:Real},
+    garr::AbstractVector{<:Real},
+    carr::AbstractVector{<:Real},
     col_data::ColumnData,
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int}
 )
-    for g in bounds_g
-        garr[g] = 0.0
-    end
-    for c in bounds_c
-        g = col_data.gridcell[c]
-        if g in bounds_g
-            garr[g] += carr[c] * col_data.wtgcell[c]
-        end
-    end
+    FT = eltype(garr)
+    cgrid   = _to_backend_like(garr, FT, col_data.gridcell)
+    wtgcell = _to_backend_like(garr, FT, col_data.wtgcell)
+    _launch!(_c2g_irrig_zero_kernel!, garr, first(bounds_g), last(bounds_g))
+    _launch!(_c2g_irrig_scatter_kernel!, garr, carr, cgrid, wtgcell,
+             first(bounds_g), last(bounds_g), first(bounds_c), last(bounds_c);
+             ndrange = length(carr))
     return nothing
 end
 
@@ -526,28 +561,28 @@ end
 # per gridcell). Gated on [gmin, gmax] so entries outside bounds_g keep their
 # initialized value (1.0).
 @kernel function _irrig_volr_ratio_kernel!(ratio_grc, @Const(volr), @Const(area),
-                                           river_volume_threshold, deficit_grc_arg,
-                                           gmin::Int, gmax::Int)
+                                           river_volume_threshold, @Const(deficit_grc_arg),
+                                           m3_over_km2_to_mm, gmin::Int, gmax::Int)
     g = @index(Global)
     @inbounds if gmin <= g <= gmax
-        if volr[g] > 0.0
-            available_volr = volr[g] * (1.0 - river_volume_threshold)
-            max_deficit_supported_by_volr = available_volr / area[g] * M3_OVER_KM2_TO_MM
+        T = eltype(ratio_grc)
+        if volr[g] > zero(T)
+            available_volr = volr[g] * (one(T) - river_volume_threshold)
+            max_deficit_supported_by_volr = available_volr / area[g] * m3_over_km2_to_mm
         else
-            max_deficit_supported_by_volr = 0.0
+            max_deficit_supported_by_volr = zero(T)
         end
-        if deficit_grc_arg[g] > max_deficit_supported_by_volr
-            ratio_grc[g] = max_deficit_supported_by_volr / deficit_grc_arg[g]
-        else
-            ratio_grc[g] = 1.0
-        end
+        ratio_grc[g] = deficit_grc_arg[g] > max_deficit_supported_by_volr ?
+            max_deficit_supported_by_volr / deficit_grc_arg[g] : one(T)
     end
 end
 
+# river_volume_threshold is converted to the array element type by the caller so no
+# Float64 reaches the kernel (Metal rejects it); M3_OVER_KM2_TO_MM likewise.
 irrig_volr_ratio!(ratio_grc, volr, area, river_volume_threshold, deficit_grc_arg,
                   gmin::Int, gmax::Int) =
     _launch!(_irrig_volr_ratio_kernel!, ratio_grc, volr, area, river_volume_threshold,
-             deficit_grc_arg, gmin, gmax)
+             deficit_grc_arg, eltype(ratio_grc)(M3_OVER_KM2_TO_MM), gmin, gmax)
 
 # Per-column deficit scaled by its gridcell's limited ratio (independent per
 # column). Gated on the check_for_irrig mask; unmasked columns keep their
@@ -577,28 +612,27 @@ Ported from `CalcDeficitVolrLimited` in `IrrigationMod.F90`.
 """
 function calc_deficit_volr_limited!(
     irrig::IrrigationData,
-    deficit::Vector{<:Real},
-    volr::Vector{<:Real},
-    deficit_volr_limited::Vector{<:Real},
-    check_for_irrig_col::BitVector,
+    deficit::AbstractVector{<:Real},
+    volr::AbstractVector{<:Real},
+    deficit_volr_limited::AbstractVector{<:Real},
+    check_for_irrig_col::AbstractVector{Bool},
     col_data::ColumnData,
     grc::GridcellData,
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int}
 )
-    ng = length(bounds_g)
     FT = eltype(deficit)
-    deficit_grc = zeros(FT, length(volr))
-    deficit_limited_ratio_grc = ones(FT, length(volr))
+    deficit_grc = fill!(similar(deficit, FT, length(volr)), zero(FT))
+    deficit_limited_ratio_grc = fill!(similar(deficit, FT, length(volr)), one(FT))
 
     # Average deficit to gridcell level (unity scaling)
     c2g_irrig!(deficit_grc, deficit, col_data, bounds_c, bounds_g)
 
     irrig_volr_ratio!(deficit_limited_ratio_grc, volr, grc.area,
-                      irrig.params.irrig_river_volume_threshold, deficit_grc,
+                      FT(irrig.params.irrig_river_volume_threshold), deficit_grc,
                       first(bounds_g), last(bounds_g))
 
-    deficit_volr_limited[bounds_c] .= 0.0
+    fill!(view(deficit_volr_limited, bounds_c), zero(FT))
     irrig_deficit_limited!(deficit_volr_limited, check_for_irrig_col, deficit,
                            deficit_limited_ratio_grc, col_data.gridcell,
                            first(bounds_c), last(bounds_c))
@@ -610,6 +644,89 @@ end
 # calc_irrigation_needed! — Determine irrigation need
 # Ported from: CalcIrrigationNeeded in IrrigationMod.F90
 # ---------------------------------------------------------------------------
+
+# (1) Per-patch: inline point_needs_check_for_irrig, set the patch flag, and OR it
+# into the column flag (multiple patches writing `true` to one column race-safely —
+# an idempotent store, no read-modify-write). cfip/cfic must be pre-filled false.
+@kernel function _irrig_need_patchcheck_kernel!(cfip, cfic, @Const(ivt), @Const(elai),
+        @Const(pftcon_irrigated), @Const(local_time_sec), @Const(pcol), @Const(mask_ev),
+        irrig_min_lai, irrig_start_time::Int, dtime_i::Int, isecspday::Int,
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_ev[p]
+        need = false
+        if pftcon_irrigated[ivt[p]] == one(eltype(pftcon_irrigated)) && elai[p] > irrig_min_lai
+            start_offset = irrig_start_time - dtime_i
+            seconds_since = mod(local_time_sec[p] - start_offset, isecspday)
+            if seconds_since < 0
+                seconds_since += isecspday
+            end
+            if seconds_since < dtime_i
+                need = true
+            end
+        end
+        cfip[p] = need
+        if need
+            cfic[pcol[p]] = true
+        end
+    end
+end
+
+# (2) Per-column: walk the soil layers with the reached_max_depth state machine,
+# summing liquid / target / wilting-point water into LOCAL scalars (relsat_to_h2osoi
+# inlined with T(DENH2O) so no Float64 reaches the kernel), then store once.
+@kernel function _irrig_need_layer_kernel!(liq_tot, target_tot, wp_tot, @Const(cfic),
+        @Const(z), @Const(nbedrock), @Const(t_soisno), @Const(h2osoi_liq),
+        @Const(relsat_target), @Const(relsat_wp), @Const(eff_porosity), @Const(dz),
+        irrig_depth, tfrz, denh2o, cmin::Int, cmax::Int, nlevsoi::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && cfic[c]
+        T = eltype(liq_tot)
+        lt = zero(T); tt = zero(T); wt = zero(T)
+        reached = false
+        for j in 1:nlevsoi
+            if !reached
+                if z[c, j] > irrig_depth
+                    reached = true
+                elseif j > nbedrock[c]
+                    reached = true
+                elseif t_soisno[c, j] <= tfrz
+                    reached = true
+                else
+                    lt += h2osoi_liq[c, j]
+                    tt += eff_porosity[c, j] * relsat_target[c, j] * denh2o * dz[c, j]
+                    wt += eff_porosity[c, j] * relsat_wp[c, j] * denh2o * dz[c, j]
+                end
+            end
+        end
+        liq_tot[c] = lt; target_tot[c] = tt; wp_tot[c] = wt
+    end
+end
+
+# (3) Per-column deficit (the host loop's deficit<0 error() is dropped: in this branch
+# liq_tot < threshold <= target_tot, so target_tot - liq_tot > 0 by construction).
+@kernel function _irrig_need_deficit_kernel!(deficit, @Const(cfic), @Const(liq_tot),
+        @Const(target_tot), @Const(wp_tot), threshold_fraction, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && cfic[c]
+        T = eltype(deficit)
+        thresh = wp_tot[c] + threshold_fraction * (target_tot[c] - wp_tot[c])
+        deficit[c] = liq_tot[c] < thresh ? (target_tot[c] - liq_tot[c]) : zero(T)
+    end
+end
+
+# (4) Per-patch: convert the column deficit to an irrigation rate for checked patches.
+@kernel function _irrig_need_rate_kernel!(sfc_rate, rate_demand, nsteps_left,
+        @Const(cfip), @Const(deficit_vl), @Const(deficit), @Const(pcol), @Const(mask_ev),
+        denom, nsteps::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_ev[p] && cfip[p]
+        c = pcol[p]
+        sfc_rate[p]    = deficit_vl[c] / denom
+        rate_demand[p] = deficit[c] / denom
+        nsteps_left[p] = nsteps
+    end
+end
 
 """
     calc_irrigation_needed!(irrig, elai, t_soisno, eff_porosity, h2osoi_liq,
@@ -625,14 +742,14 @@ Ported from `CalcIrrigationNeeded` in `IrrigationMod.F90`.
 """
 function calc_irrigation_needed!(
     irrig::IrrigationData,
-    elai::Vector{<:Real},
-    t_soisno::Matrix{<:Real},
-    eff_porosity::Matrix{<:Real},
-    h2osoi_liq::Matrix{<:Real},
-    volr::Vector{<:Real},
+    elai::AbstractVector{<:Real},
+    t_soisno::AbstractMatrix{<:Real},
+    eff_porosity::AbstractMatrix{<:Real},
+    h2osoi_liq::AbstractMatrix{<:Real},
+    volr::AbstractVector{<:Real},
     rof_prognostic::Bool,
-    pftcon_irrigated::Vector{<:Real},
-    local_time_sec_patch::Vector{Int},
+    pftcon_irrigated::AbstractVector{<:Real},
+    local_time_sec_patch::AbstractVector{<:Integer},
     col_data::ColumnData,
     grc::GridcellData,
     patch_data::PatchData,
@@ -642,115 +759,60 @@ function calc_irrigation_needed!(
     bounds_g::UnitRange{Int},
     nlevsoi::Int
 )
-    nc = length(bounds_c)
+    FT   = eltype(h2osoi_liq)
+    maxc = last(bounds_c)
+    np   = length(elai)
 
-    # Determine which patches need to be checked for irrigation
-    check_for_irrig_patch = falses(length(elai))
-    check_for_irrig_col = falses(length(check_for_irrig_patch) > 0 ?
-                                  maximum(bounds_c) : 0)
-    if length(check_for_irrig_col) < maximum(bounds_c)
-        check_for_irrig_col = falses(maximum(bounds_c))
-    end
+    # Backend-matched temporaries (host Array on the CPU path, device array on the GPU).
+    cfip = fill!(similar(elai, Bool, np), false)     # check_for_irrig_patch
+    cfic = fill!(similar(elai, Bool, maxc), false)   # check_for_irrig_col
+    liq_tot    = fill!(similar(elai, FT, maxc), zero(FT))
+    target_tot = fill!(similar(elai, FT, maxc), zero(FT))
+    wp_tot     = fill!(similar(elai, FT, maxc), zero(FT))
+    deficit    = fill!(similar(elai, FT, maxc), zero(FT))
+    deficit_vl = fill!(similar(elai, FT, maxc), zero(FT))
 
-    for p in bounds_p
-        mask_exposedveg[p] || continue
-        g = patch_data.gridcell[p]
+    # Index/topology arrays onto the state backend (Int-preserving where relevant).
+    pcol = _to_backend_like(liq_tot, FT, patch_data.column)
+    ivt  = _to_backend_like(liq_tot, FT, patch_data.itype)
+    lts  = _to_backend_like(liq_tot, FT, local_time_sec_patch)
+    pfti = _to_backend_like(liq_tot, FT, pftcon_irrigated)
+    nbed = _to_backend_like(liq_tot, FT, col_data.nbedrock)
 
-        check_for_irrig_patch[p] = point_needs_check_for_irrig(
-            irrig, patch_data.itype[p], elai[p], grc.londeg[g],
-            pftcon_irrigated, local_time_sec_patch[p])
+    pmin, pmax = first(bounds_p), last(bounds_p)
+    cmin, cmax = first(bounds_c), last(bounds_c)
 
-        if check_for_irrig_patch[p]
-            c = patch_data.column[p]
-            check_for_irrig_col[c] = true
-        end
-    end
+    # (1) which patches/columns need checking
+    _launch!(_irrig_need_patchcheck_kernel!, cfip, cfic, ivt, elai, pfti, lts, pcol,
+             mask_exposedveg, FT(irrig.params.irrig_min_lai),
+             Int(irrig.params.irrig_start_time), Int(irrig.dtime), Int(ISECSPDAY),
+             pmin, pmax)
 
-    # Initialize accumulators for columns that need irrigation check
-    FT = eltype(h2osoi_liq)
-    h2osoi_liq_tot = zeros(FT, maximum(bounds_c))
-    h2osoi_liq_target_tot = zeros(FT, maximum(bounds_c))
-    h2osoi_liq_wilting_point_tot = zeros(FT, maximum(bounds_c))
-    reached_max_depth = falses(maximum(bounds_c))
+    # (2) soil-water accumulation over layers
+    _launch!(_irrig_need_layer_kernel!, liq_tot, target_tot, wp_tot, cfic,
+             col_data.z, nbed, t_soisno, h2osoi_liq,
+             irrig.relsat_target_col, irrig.relsat_wilting_point_col, eff_porosity,
+             col_data.dz, FT(irrig.params.irrig_depth), FT(TFRZ), FT(DENH2O),
+             cmin, cmax, nlevsoi)
 
-    # Measure soil water and see if irrigation is needed
-    for j in 1:nlevsoi
-        for c in bounds_c
-            check_for_irrig_col[c] || continue
+    # (3) deficits
+    _launch!(_irrig_need_deficit_kernel!, deficit, cfic, liq_tot, target_tot, wp_tot,
+             FT(irrig.params.irrig_threshold_fraction), cmin, cmax)
 
-            if !reached_max_depth[c]
-                if col_data.z[c, j] > irrig.params.irrig_depth
-                    reached_max_depth[c] = true
-                elseif j > col_data.nbedrock[c]
-                    reached_max_depth[c] = true
-                elseif t_soisno[c, j] <= TFRZ
-                    # Frozen level: don't look below
-                    reached_max_depth[c] = true
-                else
-                    h2osoi_liq_tot[c] += h2osoi_liq[c, j]
-
-                    h2osoi_liq_target = relsat_to_h2osoi(
-                        irrig.relsat_target_col[c, j],
-                        eff_porosity[c, j],
-                        col_data.dz[c, j])
-                    h2osoi_liq_target_tot[c] += h2osoi_liq_target
-
-                    h2osoi_liq_wp = relsat_to_h2osoi(
-                        irrig.relsat_wilting_point_col[c, j],
-                        eff_porosity[c, j],
-                        col_data.dz[c, j])
-                    h2osoi_liq_wilting_point_tot[c] += h2osoi_liq_wp
-                end
-            end
-        end
-    end
-
-    # Compute deficits
-    deficit = zeros(FT, maximum(bounds_c))
-    for c in bounds_c
-        check_for_irrig_col[c] || continue
-
-        h2osoi_liq_at_threshold = h2osoi_liq_wilting_point_tot[c] +
-            irrig.params.irrig_threshold_fraction *
-            (h2osoi_liq_target_tot[c] - h2osoi_liq_wilting_point_tot[c])
-
-        if h2osoi_liq_tot[c] < h2osoi_liq_at_threshold
-            deficit[c] = h2osoi_liq_target_tot[c] - h2osoi_liq_tot[c]
-            if deficit[c] < 0.0
-                error("calc_irrigation_needed!: deficit < 0 at column $c. " *
-                      "This implies irrigation target < irrigation threshold.")
-            end
-        else
-            deficit[c] = 0.0
-        end
-    end
-
-    # Limit deficits by available volr if desired
-    limit_irrigation = irrig.params.limit_irrigation_if_rof_enabled && rof_prognostic
-    deficit_volr_limited = zeros(FT, maximum(bounds_c))
-
-    if limit_irrigation
-        calc_deficit_volr_limited!(irrig, deficit, volr, deficit_volr_limited,
-                                   check_for_irrig_col, col_data, grc,
-                                   bounds_c, bounds_g)
+    # (4) limit by available river volume if enabled, else copy through
+    if irrig.params.limit_irrigation_if_rof_enabled && rof_prognostic
+        calc_deficit_volr_limited!(irrig, deficit, volr, deficit_vl,
+                                   cfic, col_data, grc, bounds_c, bounds_g)
     else
-        deficit_volr_limited[bounds_c] .= deficit[bounds_c]
+        copyto!(view(deficit_vl, bounds_c), view(deficit, bounds_c))
     end
 
-    # Convert deficits to irrigation rate
-    for p in bounds_p
-        mask_exposedveg[p] || continue
-        c = patch_data.column[p]
-
-        if check_for_irrig_patch[p]
-            # Convert from mm to mm/sec
-            irrig.sfc_irrig_rate_patch[p] = deficit_volr_limited[c] /
-                (irrig.dtime * irrig.irrig_nsteps_per_day)
-            irrig.irrig_rate_demand_patch[p] = deficit[c] /
-                (irrig.dtime * irrig.irrig_nsteps_per_day)
-            irrig.n_irrig_steps_left_patch[p] = irrig.irrig_nsteps_per_day
-        end
-    end
+    # (5) convert to irrigation rate for checked patches
+    denom = FT(irrig.dtime) * FT(irrig.irrig_nsteps_per_day)
+    _launch!(_irrig_need_rate_kernel!, irrig.sfc_irrig_rate_patch,
+             irrig.irrig_rate_demand_patch, irrig.n_irrig_steps_left_patch,
+             cfip, deficit_vl, deficit, pcol, mask_exposedveg,
+             denom, Int(irrig.irrig_nsteps_per_day), pmin, pmax)
 
     return nothing
 end
@@ -759,6 +821,28 @@ end
 # calc_bulk_withdrawals! — Calculate bulk water irrigation withdrawals
 # Ported from: CalcBulkWithdrawals in IrrigationMod.F90
 # ---------------------------------------------------------------------------
+
+# One thread per patch: set surface-irrig / demand fluxes and decrement the
+# remaining-steps counter (every write is to the patch's own index → race-free,
+# byte-identical to the host loop on the KA CPU backend).
+@kernel function _bulk_withdrawals_patch_kernel!(qflx_sfc, qflx_demand, qflx_gw_demand,
+        nsteps_left, @Const(sfc_rate), @Const(rate_demand), @Const(mask_soilp),
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        T = eltype(qflx_sfc)
+        if nsteps_left[p] > 0
+            qflx_sfc[p]       = sfc_rate[p]
+            qflx_demand[p]    = rate_demand[p]
+            qflx_gw_demand[p] = qflx_demand[p] - qflx_sfc[p]
+            nsteps_left[p]   -= 1
+        else
+            qflx_sfc[p]       = zero(T)
+            qflx_demand[p]    = zero(T)
+            qflx_gw_demand[p] = zero(T)
+        end
+    end
+end
 
 """
     calc_bulk_withdrawals!(irrig, waterfluxbulk, soilhydrology, soilstate,
@@ -786,26 +870,16 @@ function calc_bulk_withdrawals!(
     bounds_p::UnitRange{Int},
     nlevsoi::Int,
     dtime::Real,
-    qflx_sfc_irrig_bulk_patch::Vector{<:Real},
-    qflx_gw_demand_bulk_patch::Vector{<:Real},
-    qflx_gw_demand_bulk_col::Vector{<:Real}
+    qflx_sfc_irrig_bulk_patch::AbstractVector{<:Real},
+    qflx_gw_demand_bulk_patch::AbstractVector{<:Real},
+    qflx_gw_demand_bulk_col::AbstractVector{<:Real}
 )
-    # Calculate per-patch surface irrigation and demand
-    for p in bounds_p
-        mask_soilp[p] || continue
-
-        if irrig.n_irrig_steps_left_patch[p] > 0
-            qflx_sfc_irrig_bulk_patch[p]    = irrig.sfc_irrig_rate_patch[p]
-            irrig.qflx_irrig_demand_patch[p] = irrig.irrig_rate_demand_patch[p]
-            qflx_gw_demand_bulk_patch[p]    = irrig.qflx_irrig_demand_patch[p] -
-                                               qflx_sfc_irrig_bulk_patch[p]
-            irrig.n_irrig_steps_left_patch[p] -= 1
-        else
-            qflx_sfc_irrig_bulk_patch[p]    = 0.0
-            irrig.qflx_irrig_demand_patch[p] = 0.0
-            qflx_gw_demand_bulk_patch[p]    = 0.0
-        end
-    end
+    # Calculate per-patch surface irrigation and demand (one thread per patch)
+    _launch!(_bulk_withdrawals_patch_kernel!, qflx_sfc_irrig_bulk_patch,
+             irrig.qflx_irrig_demand_patch, qflx_gw_demand_bulk_patch,
+             irrig.n_irrig_steps_left_patch, irrig.sfc_irrig_rate_patch,
+             irrig.irrig_rate_demand_patch, mask_soilp,
+             first(bounds_p), last(bounds_p))
 
     # Average patch surface irrigation to column
     p2c_irrig!(waterfluxbulk.wf.qflx_sfc_irrig_col, qflx_sfc_irrig_bulk_patch,
@@ -841,23 +915,30 @@ Calculate total irrigation withdrawal from unconfined aquifer (sum over layers).
 
 Ported from `CalcTotalGWUnconIrrig` in `IrrigationMod.F90`.
 """
+# One thread per column: sum the per-layer unconfined GW irrigation over nlevsoi into
+# a LOCAL scalar (the fixed-index `col[c] += lyr[c,j]`-in-loop form miscompiles on the
+# KA CPU backend under --check-bounds), then store once. Byte-identical (same j order).
+@kernel function _total_gw_uncon_kernel!(tot, @Const(lyr), @Const(mask_soilc),
+        cmin::Int, cmax::Int, nlevsoi::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_soilc[c]
+        s = zero(eltype(tot))
+        for j in 1:nlevsoi
+            s += lyr[c, j]
+        end
+        tot[c] = s
+    end
+end
+
 function calc_total_gw_uncon_irrig!(
     waterflux::WaterFluxData,
     mask_soilc::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     nlevsoi::Int
 )
-    for c in bounds_c
-        mask_soilc[c] || continue
-        waterflux.qflx_gw_uncon_irrig_col[c] = 0.0
-    end
-    for j in 1:nlevsoi
-        for c in bounds_c
-            mask_soilc[c] || continue
-            waterflux.qflx_gw_uncon_irrig_col[c] +=
-                waterflux.qflx_gw_uncon_irrig_lyr_col[c, j]
-        end
-    end
+    _launch!(_total_gw_uncon_kernel!, waterflux.qflx_gw_uncon_irrig_col,
+             waterflux.qflx_gw_uncon_irrig_lyr_col, mask_soilc,
+             first(bounds_c), last(bounds_c), nlevsoi)
     return nothing
 end
 
@@ -865,6 +946,46 @@ end
 # calc_application_fluxes! — Set drip/sprinkler application fluxes
 # Ported from: CalcApplicationFluxes in IrrigationMod.F90
 # ---------------------------------------------------------------------------
+
+# Per-column total groundwater irrigation withdrawn (unconfined + confined).
+@kernel function _app_gw_withdrawn_kernel!(withdrawn, @Const(uncon), @Const(con),
+        @Const(mask_soilc), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax && mask_soilc[c]
+        withdrawn[c] = uncon[c] + con[c]
+    end
+end
+
+# Per-patch drip/sprinkler routing. `is_bulk`/method ids are isbits scalars. The
+# invalid-method error() of the host loop is dropped — set_irrig_method! guarantees
+# the method is DRIP or SPRINKLER, so it never fires (byte-identical on valid input).
+@kernel function _app_fluxes_patch_kernel!(drip, sprinkler, @Const(withdrawn),
+        @Const(sfc_irrig_col), @Const(sfc_bulk_patch), @Const(sfc_bulk_col),
+        @Const(gw_demand_patch), @Const(gw_demand_col), @Const(irrig_method),
+        @Const(pcol), @Const(mask_soilp), is_bulk::Bool, drip_id::Int,
+        sprinkler_id::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax && mask_soilp[p]
+        T = eltype(drip)
+        c = pcol[p]
+        if is_bulk
+            qflx_sfc = sfc_bulk_patch[p]
+        else
+            qflx_sfc = sfc_bulk_col[c] > zero(T) ?
+                sfc_irrig_col[c] * (sfc_bulk_patch[p] / sfc_bulk_col[c]) : zero(T)
+        end
+        qflx_gw = gw_demand_col[c] > zero(T) ?
+            withdrawn[c] * (gw_demand_patch[p] / gw_demand_col[c]) : zero(T)
+        qflx_tot = qflx_sfc + qflx_gw
+        drip[p]      = zero(T)
+        sprinkler[p] = zero(T)
+        if irrig_method[p] == drip_id
+            drip[p] = qflx_tot
+        elseif irrig_method[p] == sprinkler_id
+            sprinkler[p] = qflx_tot
+        end
+    end
+end
 
 """
     calc_application_fluxes!(irrig, waterflux, is_bulk,
@@ -881,63 +1002,34 @@ function calc_application_fluxes!(
     irrig::IrrigationData,
     waterflux::WaterFluxData,
     is_bulk::Bool,
-    qflx_sfc_irrig_bulk_patch::Vector{<:Real},
-    qflx_sfc_irrig_bulk_col::Vector{<:Real},
-    qflx_gw_demand_bulk_patch::Vector{<:Real},
-    qflx_gw_demand_bulk_col::Vector{<:Real},
+    qflx_sfc_irrig_bulk_patch::AbstractVector{<:Real},
+    qflx_sfc_irrig_bulk_col::AbstractVector{<:Real},
+    qflx_gw_demand_bulk_patch::AbstractVector{<:Real},
+    qflx_gw_demand_bulk_col::AbstractVector{<:Real},
     patch_data::PatchData,
     mask_soilc::AbstractVector{Bool},
     mask_soilp::AbstractVector{Bool},
     bounds_c::UnitRange{Int},
     bounds_p::UnitRange{Int}
 )
-    # Compute total groundwater irrigation withdrawn per column
+    # Compute total groundwater irrigation withdrawn per column (backend-matched temp)
     FT = eltype(waterflux.qflx_gw_uncon_irrig_col)
-    qflx_gw_irrig_withdrawn_col = zeros(FT, length(waterflux.qflx_gw_uncon_irrig_col))
-    for c in bounds_c
-        mask_soilc[c] || continue
-        qflx_gw_irrig_withdrawn_col[c] =
-            waterflux.qflx_gw_uncon_irrig_col[c] + waterflux.qflx_gw_con_irrig_col[c]
-    end
+    qflx_gw_irrig_withdrawn_col = fill!(
+        similar(waterflux.qflx_gw_uncon_irrig_col, FT,
+                length(waterflux.qflx_gw_uncon_irrig_col)), zero(FT))
+    _launch!(_app_gw_withdrawn_kernel!, qflx_gw_irrig_withdrawn_col,
+             waterflux.qflx_gw_uncon_irrig_col, waterflux.qflx_gw_con_irrig_col,
+             mask_soilc, first(bounds_c), last(bounds_c))
 
-    for p in bounds_p
-        mask_soilp[p] || continue
-        c = patch_data.column[p]
-
-        # Compute surface irrigation for this patch
-        if is_bulk
-            qflx_sfc_irrig = qflx_sfc_irrig_bulk_patch[p]
-        else
-            if qflx_sfc_irrig_bulk_col[c] > 0.0
-                qflx_sfc_irrig = waterflux.qflx_sfc_irrig_col[c] *
-                    (qflx_sfc_irrig_bulk_patch[p] / qflx_sfc_irrig_bulk_col[c])
-            else
-                qflx_sfc_irrig = 0.0
-            end
-        end
-
-        # Compute groundwater irrigation for this patch
-        if qflx_gw_demand_bulk_col[c] > 0.0
-            qflx_gw_irrig_applied = qflx_gw_irrig_withdrawn_col[c] *
-                (qflx_gw_demand_bulk_patch[p] / qflx_gw_demand_bulk_col[c])
-        else
-            qflx_gw_irrig_applied = 0.0
-        end
-
-        qflx_irrig_tot = qflx_sfc_irrig + qflx_gw_irrig_applied
-
-        # Set drip/sprinkler irrigation based on method
-        waterflux.qflx_irrig_drip_patch[p]      = 0.0
-        waterflux.qflx_irrig_sprinkler_patch[p] = 0.0
-
-        if irrig.irrig_method_patch[p] == IRRIG_METHOD_DRIP
-            waterflux.qflx_irrig_drip_patch[p] = qflx_irrig_tot
-        elseif irrig.irrig_method_patch[p] == IRRIG_METHOD_SPRINKLER
-            waterflux.qflx_irrig_sprinkler_patch[p] = qflx_irrig_tot
-        else
-            error("irrig_method_patch set to invalid value $(irrig.irrig_method_patch[p]) for patch $p")
-        end
-    end
+    pcol = _to_backend_like(qflx_gw_irrig_withdrawn_col, FT, patch_data.column)
+    _launch!(_app_fluxes_patch_kernel!, waterflux.qflx_irrig_drip_patch,
+             waterflux.qflx_irrig_sprinkler_patch, qflx_gw_irrig_withdrawn_col,
+             waterflux.qflx_sfc_irrig_col, qflx_sfc_irrig_bulk_patch,
+             qflx_sfc_irrig_bulk_col, qflx_gw_demand_bulk_patch,
+             qflx_gw_demand_bulk_col, irrig.irrig_method_patch, pcol, mask_soilp,
+             is_bulk, IRRIG_METHOD_DRIP, IRRIG_METHOD_SPRINKLER,
+             first(bounds_p), last(bounds_p);
+             ndrange = length(waterflux.qflx_irrig_drip_patch))
 
     return nothing
 end
@@ -982,9 +1074,15 @@ function calc_irrigation_fluxes!(
     nc = length(bounds_c)
 
     FT = eltype(irrig.sfc_irrig_rate_patch)
-    qflx_sfc_irrig_bulk_patch  = zeros(FT, length(irrig.sfc_irrig_rate_patch))
-    qflx_gw_demand_bulk_patch  = zeros(FT, length(irrig.sfc_irrig_rate_patch))
-    qflx_gw_demand_bulk_col   = zeros(FT, length(waterfluxbulk.wf.qflx_sfc_irrig_col))
+    # Backend-matched temporaries (host Array on CPU, device array on the GPU) so the
+    # kernels launched inside calc_bulk_withdrawals!/calc_application_fluxes! don't mix
+    # host and device operands.
+    qflx_sfc_irrig_bulk_patch = fill!(similar(irrig.sfc_irrig_rate_patch, FT,
+                                              length(irrig.sfc_irrig_rate_patch)), zero(FT))
+    qflx_gw_demand_bulk_patch = fill!(similar(irrig.sfc_irrig_rate_patch, FT,
+                                              length(irrig.sfc_irrig_rate_patch)), zero(FT))
+    qflx_gw_demand_bulk_col   = fill!(similar(waterfluxbulk.wf.qflx_sfc_irrig_col, FT,
+                                    length(waterfluxbulk.wf.qflx_sfc_irrig_col)), zero(FT))
 
     # Calculate bulk withdrawals
     calc_bulk_withdrawals!(irrig, waterfluxbulk, soilhydrology, soilstate,

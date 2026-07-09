@@ -290,7 +290,7 @@ Mapping follows CLM conventions:
   12-14 (grasses)               -> 3 (range land)
   15+ (crops)                   -> 2 (agricultural land)
 """
-function _pft_to_wesely(itype::Int)
+@inline function _pft_to_wesely(itype::Integer)
     if itype == 0
         return 8   # barren land
     elseif itype <= 3
@@ -324,16 +324,20 @@ where:
 
 Returns R_b in s/m.
 """
-function _calc_rb(ustar::Real, dv_species::Real)
+@inline function _calc_rb(ustar::Real, dv_species::Real)
+    # Working type carries the caller's precision (Float64 on host, Float32 on a
+    # device kernel) so no Float64 literal reaches a Metal kernel; byte-identical
+    # to the original on the Float64 host path (T(x)==x).
+    T = promote_type(typeof(ustar), typeof(dv_species))
     # Avoid division by zero
-    ustar_safe = max(ustar, 0.001)
+    ustar_safe = max(T(ustar), T(0.001))
 
     # Schmidt number / Prandtl number ratio
     # D_H2O ~ 0.25 cm^2/s for water vapor at 25 C
-    sc_over_pr = DH2O / max(dv_species, 1.0e-10)
+    sc_over_pr = T(DH2O) / max(T(dv_species), T(1.0e-10))
 
     # R_b = 2/(kappa * u*) * (Sc/Pr)^(2/3)
-    rb = (2.0 / (VKC * ustar_safe)) * sc_over_pr^(2.0 / 3.0)
+    rb = (T(2.0) / (T(VKC) * ustar_safe)) * sc_over_pr^(T(2.0) / T(3.0))
 
     return rb
 end
@@ -367,135 +371,133 @@ function _calc_rc(season::Int, lt::Int, lai::Real,
                   foxd_i::Real, heff_i::Real,
                   t_sfc::Real, solar_flux::Real,
                   has_snow::Bool)
+    # Host wrapper: look the season/land-type resistances up in the module tables,
+    # then delegate to the device-callable arithmetic core.
+    return _calc_rc_core(RI_TABLE[lt, season], RLU_TABLE[lt, season],
+                         RAC_TABLE[lt, season], RGS_SO2_TABLE[lt, season],
+                         RGS_O3_TABLE[lt, season],
+                         lai, foxd_i, heff_i, t_sfc, solar_flux, has_snow)
+end
 
-    # Look up season-dependent resistances from tables
-    ri  = RI_TABLE[lt, season]
-    rlu = RLU_TABLE[lt, season]
-    rac = RAC_TABLE[lt, season]
-    rgs_so2 = RGS_SO2_TABLE[lt, season]
-    rgs_o3  = RGS_O3_TABLE[lt, season]
+"""
+    _calc_rc_core(ri, rlu, rac, rgs_so2, rgs_o3, lai, foxd_i, heff_i,
+                  t_sfc, solar_flux, has_snow) -> R_c
 
-    # --- Stomatal resistance ---
-    # Adjust for solar radiation (stomata open with light)
-    if ri < 9999.0 && solar_flux > 1.0 && t_sfc > TFRZ - 5.0
-        # Light-dependent stomatal opening
-        rs = ri * (1.0 + (200.0 / (solar_flux + 0.1))^2) * (400.0 / (t_sfc - (TFRZ - 40.0)))
+Device-callable surface-resistance arithmetic (the body of `_calc_rc`), taking the
+five already-looked-up Wesely resistances as scalars. Generic in the working type
+`T` with every literal carried at `T`, so it compiles on a Metal-Float32 kernel and
+is byte-identical to the original on the Float64 host path (`T(x) == x`). The LAI
+scale factor of the original was dead (computed, never applied) and is omitted.
+"""
+@inline function _calc_rc_core(ri::T, rlu::T, rac::T, rgs_so2::T, rgs_o3::T,
+                               lai::T, foxd_i::T, heff_i::T,
+                               t_sfc::T, solar_flux::T, has_snow::Bool) where {T<:Real}
+    tfrz = T(TFRZ)
+
+    # --- Stomatal resistance (light-dependent opening) ---
+    if ri < T(9999.0) && solar_flux > one(T) && t_sfc > tfrz - T(5.0)
+        rs = ri * (one(T) + (T(200.0) / (solar_flux + T(0.1)))^2) * (T(400.0) / (t_sfc - (tfrz - T(40.0))))
         rs = max(rs, ri)
     else
-        rs = 1.0e10  # effectively infinite (stomata closed)
+        rs = T(1.0e10)  # effectively infinite (stomata closed)
     end
 
-    # --- Temperature correction for stomatal resistance ---
-    # Stomata close below 0 C and above ~40 C
-    if t_sfc < TFRZ
-        rs = 1.0e10
+    # --- Temperature correction (stomata close below 0 C) ---
+    if t_sfc < tfrz
+        rs = T(1.0e10)
     end
 
     # --- Mesophyll resistance ---
-    # R_m = 1 / (H*/3000 + 100*f0)
-    rm_denom = heff_i / 3000.0 + 100.0 * foxd_i
-    if rm_denom > 1.0e-10
-        rm = 1.0 / rm_denom
+    rm_denom = heff_i / T(3000.0) + T(100.0) * foxd_i
+    if rm_denom > T(1.0e-10)
+        rm = one(T) / rm_denom
     else
-        rm = 1.0e10  # effectively infinite for unreactive species
+        rm = T(1.0e10)
     end
-    rm = max(rm, 0.0)
+    rm = max(rm, zero(T))
 
     # --- Cuticular resistance ---
-    # R_lu for O3/SO2 reactivity scaling
-    if rlu < 9999.0
-        rlu_denom = 1.0e-5 * heff_i + foxd_i
-        if rlu_denom > 1.0e-10
+    if rlu < T(9999.0)
+        rlu_denom = T(1.0e-5) * heff_i + foxd_i
+        if rlu_denom > T(1.0e-10)
             rlu_eff = rlu / rlu_denom
         else
-            rlu_eff = 1.0e10
+            rlu_eff = T(1.0e10)
         end
-        rlu_eff = max(rlu_eff, 1.0)
+        rlu_eff = max(rlu_eff, one(T))
     else
-        rlu_eff = 1.0e10
+        rlu_eff = T(1.0e10)
     end
 
     # --- Ground surface resistance ---
-    # Combine SO2 and O3 ground resistances based on species properties
-    if rgs_so2 > 0.0 && rgs_o3 > 0.0
-        rgs_denom = heff_i / (1.0e5 * rgs_so2) + foxd_i / rgs_o3
-        if rgs_denom > 1.0e-10
-            rgs = 1.0 / rgs_denom
+    if rgs_so2 > zero(T) && rgs_o3 > zero(T)
+        rgs_denom = heff_i / (T(1.0e5) * rgs_so2) + foxd_i / rgs_o3
+        if rgs_denom > T(1.0e-10)
+            rgs = one(T) / rgs_denom
         else
-            rgs = 1.0e10  # unreactive species
+            rgs = T(1.0e10)
         end
-        rgs = max(rgs, 1.0)
+        rgs = max(rgs, one(T))
     else
-        # Water or wetland surface (rgs_so2 or rgs_o3 is zero)
-        # Use the non-zero component if available
-        rgs_denom = 0.0
-        if rgs_so2 > 0.0
-            rgs_denom += heff_i / (1.0e5 * rgs_so2)
-        elseif heff_i > 0.01
-            rgs_denom += heff_i / 1.0e5  # water surface dissolves soluble gases
+        # Water/wetland surface (a ground component is zero): use the non-zero part.
+        rgs_denom = zero(T)
+        if rgs_so2 > zero(T)
+            rgs_denom += heff_i / (T(1.0e5) * rgs_so2)
+        elseif heff_i > T(0.01)
+            rgs_denom += heff_i / T(1.0e5)
         end
-        if rgs_o3 > 0.0
+        if rgs_o3 > zero(T)
             rgs_denom += foxd_i / rgs_o3
         end
-        if rgs_denom > 1.0e-10
-            rgs = 1.0 / rgs_denom
+        if rgs_denom > T(1.0e-10)
+            rgs = one(T) / rgs_denom
         else
-            rgs = 1000.0  # default for unreactive species on water
+            rgs = T(1000.0)
         end
-        rgs = max(rgs, 1.0)
+        rgs = max(rgs, one(T))
     end
 
     # --- In-canopy aerodynamic resistance ---
-    rac_eff = max(rac, 0.0)
+    rac_eff = max(rac, zero(T))
 
     # --- Snow correction ---
-    # Under snow conditions, increase ground resistance
     if has_snow
-        rgs = max(rgs, 500.0)
+        rgs = max(rgs, T(500.0))
     end
 
-    # --- Combine resistances ---
-    # Canopy pathway: stomatal + mesophyll in series
-    if rs < 1.0e9
+    # --- Combine: stomatal + mesophyll in series ---
+    if rs < T(1.0e9)
         r_stom = rs + rm
     else
-        r_stom = 1.0e10
+        r_stom = T(1.0e10)
     end
 
     # Upper canopy: parallel of stomatal and cuticular pathways
-    if r_stom < 1.0e9 && rlu_eff < 1.0e9
-        r_upper = 1.0 / (1.0 / r_stom + 1.0 / rlu_eff)
-    elseif r_stom < 1.0e9
+    if r_stom < T(1.0e9) && rlu_eff < T(1.0e9)
+        r_upper = one(T) / (one(T) / r_stom + one(T) / rlu_eff)
+    elseif r_stom < T(1.0e9)
         r_upper = r_stom
-    elseif rlu_eff < 1.0e9
+    elseif rlu_eff < T(1.0e9)
         r_upper = rlu_eff
     else
-        r_upper = 1.0e10
+        r_upper = T(1.0e10)
     end
 
     # Lower canopy (in-canopy transport + ground)
     r_lower = rac_eff + rgs
 
-    # Total canopy resistance: parallel of upper canopy and lower canopy
-    if r_upper < 1.0e9 && r_lower > 0.0
-        rc = 1.0 / (1.0 / r_upper + 1.0 / r_lower)
-    elseif r_upper < 1.0e9
+    # Total canopy resistance: parallel of upper and lower
+    if r_upper < T(1.0e9) && r_lower > zero(T)
+        rc = one(T) / (one(T) / r_upper + one(T) / r_lower)
+    elseif r_upper < T(1.0e9)
         rc = r_upper
-    elseif r_lower > 0.0
+    elseif r_lower > zero(T)
         rc = r_lower
     else
-        rc = 1.0
+        rc = one(T)
     end
 
-    # Scale by LAI effect: reduce rc when LAI is large
-    # (more leaf area = more deposition surface)
-    if lai > 0.0 && lai < 20.0
-        lai_factor = max(0.5, 1.0 - 0.02 * lai)
-        # don't scale rc by LAI factor for now -- the Wesely tables
-        # already account for typical LAI by season
-    end
-
-    return max(rc, 1.0)
+    return max(rc, one(T))
 end
 
 # =========================================================================
@@ -553,77 +555,107 @@ Arguments:
 
 Ported from `DryDepVelocity` subroutine in `DryDepVelocity.F90`.
 """
+# --- Kernel: one thread per patch; inner loop over species. Every write is to the
+# patch's own (p, i) slot (distinct per species -> race-free, no fixed-index +=).
+# The Wesely season is precomputed for both hemispheres on the host and passed as two
+# Int scalars, so the kernel branches on lat sign only (no Vector/tuple index on-device).
+@kernel function _depvel_kernel!(velocity_patch, @Const(mask_patch),
+        @Const(patch_gridcell), @Const(patch_column), @Const(patch_itype),
+        @Const(ram1_patch), @Const(fv_patch), @Const(elai_patch),
+        @Const(forc_t_col), @Const(forc_solar_col), @Const(frac_sno), @Const(lat_grc),
+        @Const(dv), @Const(foxd), @Const(heff_vals),
+        @Const(ri_tab), @Const(rlu_tab), @Const(rac_tab), @Const(rgs_so2_tab), @Const(rgs_o3_tab),
+        lo::Int, hi::Int, n_drydep::Int, season_nh::Int, season_sh::Int)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask_patch[p]
+        T = eltype(velocity_patch)
+        g = patch_gridcell[p]
+        c = patch_column[p]
+
+        t_sfc = forc_t_col[c]
+        solar = forc_solar_col[c]
+        has_snow = frac_sno[c] > T(0.5)
+        lat = lat_grc[g]
+        lai = max(elai_patch[p], zero(T))
+
+        season = lat >= zero(T) ? season_nh : season_sh   # == _wesely_season(lat, month)
+        lt = _pft_to_wesely(patch_itype[p])
+
+        ra = max(ram1_patch[p], one(T))
+        ustar = max(fv_patch[p], T(0.001))
+
+        for i in 1:n_drydep
+            rb = _calc_rb(ustar, dv[i])
+            rc = _calc_rc_core(ri_tab[lt, season], rlu_tab[lt, season],
+                               rac_tab[lt, season], rgs_so2_tab[lt, season],
+                               rgs_o3_tab[lt, season],
+                               lai, foxd[i], heff_vals[i], t_sfc, solar, has_snow)
+            vd = one(T) / (ra + rb + rc)
+            velocity_patch[p, i] = vd * T(100.0)
+        end
+    end
+end
+
 function depvel_compute!(dd::DryDepVelocityData,
                          mask_patch::AbstractVector{Bool},
                          bounds_patch::UnitRange{Int},
-                         patch_gridcell::Vector{Int},
-                         patch_column::Vector{Int},
-                         patch_landunit::Vector{Int},
-                         patch_itype::Vector{Int},
-                         ram1_patch::Vector{<:Real},
-                         rb1_patch::Vector{<:Real},
-                         fv_patch::Vector{<:Real},
-                         elai_patch::Vector{<:Real},
-                         forc_t_downscaled_col::Vector{<:Real},
-                         forc_solar_col::Vector{<:Real},
-                         frac_sno::Vector{<:Real},
-                         lat_grc::Vector{<:Real},
+                         patch_gridcell::AbstractVector{<:Integer},
+                         patch_column::AbstractVector{<:Integer},
+                         patch_landunit::AbstractVector{<:Integer},
+                         patch_itype::AbstractVector{<:Integer},
+                         ram1_patch::AbstractVector{<:Real},
+                         rb1_patch::AbstractVector{<:Real},
+                         fv_patch::AbstractVector{<:Real},
+                         elai_patch::AbstractVector{<:Real},
+                         forc_t_downscaled_col::AbstractVector{<:Real},
+                         forc_solar_col::AbstractVector{<:Real},
+                         frac_sno::AbstractVector{<:Real},
+                         lat_grc::AbstractVector{<:Real},
                          month::Int;
-                         heff::Vector{<:Real} = Float64[])
+                         heff::AbstractVector{<:Real} = Float64[])
     n_drydep = dd.n_drydep
     if n_drydep == 0
         return nothing
     end
+    isempty(bounds_patch) && return nothing
 
-    # Default effective Henry's law constants
-    heff_vals = if isempty(heff)
-        fill(1.0e-2, n_drydep)  # small default
-    else
-        heff
-    end
+    FT = eltype(dd.velocity_patch)
+    # Default effective Henry's law constants (small default), on host.
+    heff_vals_h = isempty(heff) ? fill(FT(1.0e-2), n_drydep) : heff
 
-    for p in bounds_patch
-        mask_patch[p] || continue
+    # Wesely season is a function of lat SIGN and the global `month`; precompute both
+    # hemispheres on the host so the kernel needs no seasonal lookup array.
+    season_nh = _wesely_season(1.0, month)   # lat >= 0
+    season_sh = _wesely_season(-1.0, month)  # lat < 0
 
-        g = patch_gridcell[p]
-        c = patch_column[p]
+    # Move host constants (resistance tables + species params) and any host-resident
+    # forcing/index arrays onto the state's backend + precision. All no-ops when
+    # `dd.velocity_patch` is a host Array, so the host path stays byte-identical.
+    p = dd.velocity_patch
+    ri_tab  = _to_backend_like(p, FT, RI_TABLE)
+    rlu_tab = _to_backend_like(p, FT, RLU_TABLE)
+    rac_tab = _to_backend_like(p, FT, RAC_TABLE)
+    rgs_so2 = _to_backend_like(p, FT, RGS_SO2_TABLE)
+    rgs_o3  = _to_backend_like(p, FT, RGS_O3_TABLE)
+    heff_v  = _to_backend_like(p, FT, heff_vals_h)
+    pgrid   = _to_backend_like(p, FT, patch_gridcell)
+    pcol    = _to_backend_like(p, FT, patch_column)
+    pitype  = _to_backend_like(p, FT, patch_itype)
+    ram1    = _to_backend_like(p, FT, ram1_patch)
+    fv      = _to_backend_like(p, FT, fv_patch)
+    elai    = _to_backend_like(p, FT, elai_patch)
+    ft_col  = _to_backend_like(p, FT, forc_t_downscaled_col)
+    fsol    = _to_backend_like(p, FT, forc_solar_col)
+    fsno    = _to_backend_like(p, FT, frac_sno)
+    lat     = _to_backend_like(p, FT, lat_grc)
+    maskd   = _to_backend_like(p, FT, mask_patch)  # Bool -> integer overload keeps Bool
 
-        # Get environmental conditions
-        t_sfc = forc_t_downscaled_col[c]
-        solar = forc_solar_col[c]
-        has_snow = frac_sno[c] > 0.5
-        lat = lat_grc[g]
-        lai = max(elai_patch[p], 0.0)
-
-        # Determine Wesely season
-        season = _wesely_season(lat, month)
-
-        # Map PFT to Wesely land type
-        lt = _pft_to_wesely(patch_itype[p])
-
-        # Aerodynamic resistance
-        ra = max(ram1_patch[p], 1.0)
-
-        # Friction velocity for boundary layer resistance
-        ustar = max(fv_patch[p], 0.001)
-
-        for i in 1:n_drydep
-            # Quasi-laminar boundary layer resistance
-            rb = _calc_rb(ustar, dd.dv[i])
-
-            # Surface resistance
-            rc = _calc_rc(season, lt, lai,
-                          dd.foxd[i], heff_vals[i],
-                          t_sfc, solar, has_snow)
-
-            # Total deposition velocity [m/s -> cm/s]
-            # V_d = 1 / (Ra + Rb + Rc)
-            vd = 1.0 / (ra + rb + rc)
-
-            # Convert m/s to cm/s
-            dd.velocity_patch[p, i] = vd * 100.0
-        end
-    end
+    _launch!(_depvel_kernel!, dd.velocity_patch, maskd,
+        pgrid, pcol, pitype, ram1, fv, elai, ft_col, fsol, fsno, lat,
+        dd.dv, dd.foxd, heff_v,
+        ri_tab, rlu_tab, rac_tab, rgs_so2, rgs_o3,
+        first(bounds_patch), last(bounds_patch), n_drydep, season_nh, season_sh;
+        ndrange = size(dd.velocity_patch, 1))
 
     return nothing
 end
