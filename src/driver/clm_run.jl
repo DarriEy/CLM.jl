@@ -48,6 +48,25 @@ function _sync_arrays_convert!(dst, src)
     return nothing
 end
 
+# Refresh a PERSISTENT host view `dst` (built once via `Adapt.adapt(Array, inst_d)`) from
+# the evolving DEVICE tree `src`, IN-PLACE: recurse the struct tree and `copyto!` every
+# matching leaf array (device -> host, same eltype -> no allocation). This replaces a
+# per-step full-tree `Adapt.adapt(Array, ·)` SNAPSHOT whose per-step allocation OOM'd a
+# full-year GPU run. `dst`/`src` share structure by construction (dst = adapt(Array, src)),
+# so we walk fields positionally; arrays are copied, mutable sub-structs are recursed.
+function _refresh_host_tree!(dst, src)
+    @inbounds for i in 1:fieldcount(typeof(src))
+        s = getfield(src, i); d = getfield(dst, i)
+        if s isa AbstractArray && d isa AbstractArray
+            (!isempty(s) && length(s) == length(d)) && copyto!(d, s)
+        elseif ismutable(s) && !(s isa AbstractArray) && fieldcount(typeof(s)) > 0 &&
+               fieldcount(typeof(s)) == fieldcount(typeof(d))
+            _refresh_host_tree!(d, s)
+        end
+    end
+    return nothing
+end
+
 function clm_run!(;
     fsurdat::String,
     paramfile::String,
@@ -296,6 +315,11 @@ function clm_run!(;
         filt_d = device_adapt(filt)
         filt_ia_d = device_adapt(filt_ia)
     end
+    # Persistent host view of the device tree, allocated ONCE and refreshed in-place each
+    # step (see _refresh_host_tree!) — the host shuttle for the host-only lnd2atm! +
+    # history_write_step!. Same Float32 leaves as inst_d so the per-step copy is a plain
+    # device->host memcpy (no allocation).
+    hview = _use_dev ? Adapt.adapt(Array, inst_d) : inst
 
     # ========================================================================
     # Phase 4: Time integration loop
@@ -367,14 +391,14 @@ function clm_run!(;
                      is_beg_curr_day=beg_day, is_end_curr_day=end_day,
                      is_beg_curr_year=beg_year, dtime=Float64(dtime),
                      mon=mon, day=d, photosyns=inst_d.photosyns)
-            hview = Adapt.adapt(Array, inst_d)   # device -> host snapshot (perf TODO: field-level sync)
+            _refresh_host_tree!(hview, inst_d)   # in-place device -> host sync (no per-step alloc)
             lnd2atm!(bounds, hview)
             history_write_step!(hw, hview, tm.current_date; is_end_curr_day=end_day)
             step_probe === nothing || step_probe(hview, tm)
-            # The per-step full-tree snapshot + device scratch churn Apple's unified
-            # memory; collect periodically so a full-year run doesn't OOM (perf TODO:
-            # replace the snapshot with a field-level in-place device->host sync).
-            (step_count % 96 == 0) && GC.gc()
+            # Device kernel scratch (KA temporaries) still churns Apple's unified memory;
+            # collect periodically so a full-year run reclaims it. The host side no longer
+            # allocates per step (in-place refresh above), so this is the only pressure.
+            (step_count % 48 == 0) && GC.gc()
         else
             clm_drv!(config, inst, filt, filt_ia, bounds,
                      doalb, nextsw_cday, declinp1, declin, obliqr,
