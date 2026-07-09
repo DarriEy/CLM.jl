@@ -371,6 +371,10 @@ function clm_run!(;
             lnd2atm!(bounds, hview)
             history_write_step!(hw, hview, tm.current_date; is_end_curr_day=end_day)
             step_probe === nothing || step_probe(hview, tm)
+            # The per-step full-tree snapshot + device scratch churn Apple's unified
+            # memory; collect periodically so a full-year run doesn't OOM (perf TODO:
+            # replace the snapshot with a field-level in-place device->host sync).
+            (step_count % 96 == 0) && GC.gc()
         else
             clm_drv!(config, inst, filt, filt_ia, bounds,
                      doalb, nextsw_cday, declinp1, declin, obliqr,
