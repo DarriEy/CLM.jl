@@ -400,6 +400,7 @@ using CLM
     # first subprocess pays the precompile cost.
     @testset "Isolated subprocesses (global-state-sensitive)" begin
         isolated_files = [
+            "test_fates_photosynthesis.jl",      # FATES daytime GPP guard (real Aripuana stand; gated on data)
             "test_fortran_parity.jl",            # per-step Julia↔Fortran (gated)
             "test_fortran_parity_cn.jl",         # CN/BGC/PHS/LUNA/FUN (gated)
             "test_fortran_parity_luna_decomp.jl",# LUNA cadence + decomp N-source (gated)
