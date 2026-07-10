@@ -236,11 +236,12 @@
         dayl_factor = 1.0
         o3coefjmax = 1.0
 
+        NUEjref, NUEcref, _ = CLM.nue_ref(lp)   # reference NUE now hoisted out of nitrogen_allocation!
         PNstoreopt, PNlcopt, PNetopt, PNrespopt, PNcbopt =
             CLM.nitrogen_allocation!(FNCa, forc_pbot10, relh10, CO2a10, O2a10,
                 PARi10, PARimx10, rb10, hourpd, tair10, tleafd10, tleafn10,
                 jmaxb0_val, jmaxb1_val, wc2wjb0_val, PNlcold, PNetold,
-                PNrespold, PNcbold, dayl_factor, o3coefjmax, lp)
+                PNrespold, PNcbold, dayl_factor, o3coefjmax, NUEjref, NUEcref, lp)
 
         # All fractions should be finite and non-negative
         @test isfinite(PNstoreopt)

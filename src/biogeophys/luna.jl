@@ -135,10 +135,12 @@ end
 Temperature response for Vcmax, with temperature acclimation (Kattge & Knorr 2007).
 """
 function vcmx_t_kattge(tgrow::Real, tleaf::Real)
-    TlimVcmx = 668.39 - 1.07 * smooth_min(smooth_max(tgrow, 11.0), 35.0)
-    Vcmxf1 = 1.0 + exp((TlimVcmx * (25.0 + TFRZ) - 200000.0) / (RGAS * (25.0 + TFRZ)))
-    Vcmxf2 = exp((72000.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
-    Vcmxf3 = 1.0 + exp((TlimVcmx * (tleaf + TFRZ) - 200000.0) / (RGAS * (tleaf + TFRZ)))
+    T = promote_type(typeof(tgrow), typeof(tleaf))
+    tfrz = T(TFRZ); rgas = T(RGAS)
+    TlimVcmx = T(668.39) - T(1.07) * smooth_min(smooth_max(tgrow, T(11.0)), T(35.0))
+    Vcmxf1 = T(1.0) + exp((TlimVcmx * (T(25.0) + tfrz) - T(200000.0)) / (rgas * (T(25.0) + tfrz)))
+    Vcmxf2 = exp((T(72000.0) / (rgas * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tfrz + tleaf)))
+    Vcmxf3 = T(1.0) + exp((TlimVcmx * (tleaf + tfrz) - T(200000.0)) / (rgas * (tleaf + tfrz)))
     return Vcmxf1 * Vcmxf2 / Vcmxf3
 end
 
@@ -148,10 +150,12 @@ end
 Temperature response for Jmax, with temperature acclimation (Kattge & Knorr 2007).
 """
 function jmx_t_kattge(tgrow::Real, tleaf::Real)
-    TlimJmx = 659.7 - 0.75 * smooth_min(smooth_max(tgrow, 11.0), 35.0)
-    Jmxf1 = 1.0 + exp((TlimJmx * (25.0 + TFRZ) - 200000.0) / (RGAS * (25.0 + TFRZ)))
-    Jmxf2 = exp((50000.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (tleaf + TFRZ)))
-    Jmxf3 = 1.0 + exp((TlimJmx * (tleaf + TFRZ) - 200000.0) / (RGAS * (tleaf + TFRZ)))
+    T = promote_type(typeof(tgrow), typeof(tleaf))
+    tfrz = T(TFRZ); rgas = T(RGAS)
+    TlimJmx = T(659.7) - T(0.75) * smooth_min(smooth_max(tgrow, T(11.0)), T(35.0))
+    Jmxf1 = T(1.0) + exp((TlimJmx * (T(25.0) + tfrz) - T(200000.0)) / (rgas * (T(25.0) + tfrz)))
+    Jmxf2 = exp((T(50000.0) / (rgas * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tleaf + tfrz)))
+    Jmxf3 = T(1.0) + exp((TlimJmx * (tleaf + tfrz) - T(200000.0)) / (rgas * (tleaf + tfrz)))
     return Jmxf1 * Jmxf2 / Jmxf3
 end
 
@@ -190,7 +194,8 @@ function resp_t_bernacchi(tleaf::Real)
     # Bernacchi (2001) activation energy 46.39 is in kJ/mol, so RGAS (J/mol/K) must
     # be in kJ/mol/K here (RGAS*1e-3 == Fortran LunaMod's rgas[J/kmol]*1.e-6). Without
     # the 1e-3 the response is ~1.3e8 instead of 1.0 at the 25°C reference.
-    return exp(18.72 - 46.39 / (RGAS * 1.0e-3 * (tleaf + TFRZ)))
+    T = typeof(tleaf)
+    return exp(T(18.72) - T(46.39) / (T(RGAS) * T(1.0e-3) * (tleaf + T(TFRZ))))
 end
 
 # ==========================================================================
@@ -203,25 +208,26 @@ end
 Solve a*x^2 + b*x + c = 0. Matches the Fortran LUNA Quadratic subroutine exactly.
 """
 function quadratic_luna(a::Real, b::Real, c::Real)
-    r1 = 1.0e36
-    r2 = 1.0e36
+    T = promote_type(typeof(a), typeof(b), typeof(c))
+    r1 = T(1.0e36)
+    r2 = T(1.0e36)
 
-    if a == 0.0
+    if a == zero(T)
         return (r1, r2)
     end
 
-    if b >= 0.0
-        q = -0.5 * (b + sqrt(b * b - 4.0 * a * c))
+    if b >= zero(T)
+        q = T(-0.5) * (b + sqrt(b * b - T(4.0) * a * c))
     else
-        q = -0.5 * (b - sqrt(b * b - 4.0 * a * c))
+        q = T(-0.5) * (b - sqrt(b * b - T(4.0) * a * c))
     end
 
     r1 = q / a
 
-    if q != 0.0
+    if q != zero(T)
         r2 = c / q
     else
-        r2 = 1.0e36
+        r2 = T(1.0e36)
     end
 
     return (r1, r2)
@@ -267,14 +273,16 @@ Calculate nitrogen use efficiency under current environmental conditions.
 """
 function nue_calc(O2a::Real, ci::Real, tgrow::Real, tleaf::Real,
                   luna_params::LunaParamsData)
-    Fc = vcmx_t_kattge(tgrow, tleaf) * LUNA_Fc25
-    Fj = jmx_t_kattge(tgrow, tleaf) * LUNA_Fj25
-    k_c = luna_params.kc25_coef * exp((79430.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
-    k_o = luna_params.ko25_coef * exp((36380.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
-    c_p = luna_params.cp25_yr2000 * exp((37830.0 / (RGAS * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
-    awc = k_c * (1.0 + O2a / k_o)
-    Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
-    Kc = smooth_max(ci - c_p, 0.0) / (ci + awc)
+    T = promote_type(typeof(O2a), typeof(ci), typeof(tgrow), typeof(tleaf))
+    tfrz = T(TFRZ); rgas = T(RGAS)
+    Fc = vcmx_t_kattge(tgrow, tleaf) * T(LUNA_Fc25)
+    Fj = jmx_t_kattge(tgrow, tleaf) * T(LUNA_Fj25)
+    k_c = T(luna_params.kc25_coef) * exp((T(79430.0) / (rgas * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tfrz + tleaf)))
+    k_o = T(luna_params.ko25_coef) * exp((T(36380.0) / (rgas * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tfrz + tleaf)))
+    c_p = T(luna_params.cp25_yr2000) * exp((T(37830.0) / (rgas * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tfrz + tleaf)))
+    awc = k_c * (T(1.0) + O2a / k_o)
+    Kj = smooth_max(ci - c_p, zero(T)) / (T(4.0) * ci + T(8.0) * c_p)
+    Kc = smooth_max(ci - c_p, zero(T)) / (ci + awc)
     NUEj = Kj * Fj
     NUEc = Kc * Fc
     Kj2Kc = Kj / Kc
@@ -296,80 +304,83 @@ function photosynthesis_luna!(forc_pbot::Real, tleafd::Real, relh::Real,
                               CO2a::Real, O2a::Real, rb::Real,
                               Vcmax::Real, JmeanL::Real,
                               luna_params::LunaParamsData)
-    rsmax0 = 2.0 * 1.0e4
-    bp = 2000.0
+    T = promote_type(typeof(forc_pbot), typeof(tleafd), typeof(relh), typeof(CO2a),
+                     typeof(O2a), typeof(rb), typeof(Vcmax), typeof(JmeanL))
+    tfrz = T(TFRZ)
+    rsmax0 = T(2.0) * T(1.0e4)
+    bp = T(2000.0)
     tleaf = tleafd
-    tleafk = tleaf + TFRZ
-    aquad = 1.0
-    relhc = smooth_max(luna_params.minrelh, relh)
-    bbb = 1.0 / bp
-    mbb = LUNA_mp
+    tleafk = tleaf + tfrz
+    aquad = T(1.0)
+    relhc = smooth_max(T(luna_params.minrelh), relh)
+    bbb = T(1.0) / bp
+    mbb = T(LUNA_mp)
     CO2c = CO2a
     O2c = O2a
-    ci = 0.7 * CO2c
-    ciold = ci - 0.02
-    cf = forc_pbot / (8.314 * tleafk) * 1.0e6
+    ci = T(0.7) * CO2c
+    ciold = ci - T(0.02)
+    cf = forc_pbot / (T(8.314) * tleafk) * T(1.0e6)
     gb_mol = cf / rb
-    k_c = luna_params.kc25_coef * exp((79430.0 / (8.314 * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
-    k_o = luna_params.ko25_coef * exp((36380.0 / (8.314 * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
-    c_p = luna_params.cp25_yr2000 * exp((37830.0 / (8.314 * (25.0 + TFRZ))) * (1.0 - (TFRZ + 25.0) / (TFRZ + tleaf)))
-    awc = k_c * (1.0 + O2c / k_o)
+    k_c = T(luna_params.kc25_coef) * exp((T(79430.0) / (T(8.314) * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tfrz + tleaf)))
+    k_o = T(luna_params.ko25_coef) * exp((T(36380.0) / (T(8.314) * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tfrz + tleaf)))
+    c_p = T(luna_params.cp25_yr2000) * exp((T(37830.0) / (T(8.314) * (T(25.0) + tfrz))) * (T(1.0) - (tfrz + T(25.0)) / (tfrz + tleaf)))
+    awc = k_c * (T(1.0) + O2c / k_o)
 
     # Initialize variables used across loop scopes
     gs_mol = bbb
-    Kc_val = 0.0
-    Wc = 0.0
-    Wj = 0.0
+    Kc_val = zero(T)
+    Wc = zero(T)
+    Wj = zero(T)
 
     # Rubisco limitation iteration
     i = 1
-    while abs(ci - ciold) > 0.01 && i < 100
+    while abs(ci - ciold) > T(0.01) && i < 100
         i += 1
         ciold = ci
-        Kc_val = smooth_max(ci - c_p, 0.0) / (ci + awc)
+        Kc_val = smooth_max(ci - c_p, zero(T)) / (ci + awc)
         Wc = Kc_val * Vcmax
         gs_mol = bbb + mbb * Wc / CO2c * forc_pbot * relhc
-        phi = forc_pbot * (1.37 * gs_mol + 1.6 * gb_mol) / (gb_mol * gs_mol)
+        phi = forc_pbot * (T(1.37) * gs_mol + T(1.6) * gb_mol) / (gb_mol * gs_mol)
         bquad = awc - CO2c + phi * Vcmax
         cquad = -(c_p * phi * Vcmax + awc * CO2c)
         r1, r2 = quadratic_luna(aquad, bquad, cquad)
         ci = smooth_max(r1, r2)
-        if ci < 0.0
-            ci = c_p + 0.5 * ciold
+        if ci < zero(T)
+            ci = c_p + T(0.5) * ciold
         end
     end
 
-    Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
-    Kc_val = smooth_max(ci - c_p, 0.0) / (ci + awc)
+    Kj = smooth_max(ci - c_p, zero(T)) / (T(4.0) * ci + T(8.0) * c_p)
+    Kc_val = smooth_max(ci - c_p, zero(T)) / (ci + awc)
     Wc = Kc_val * Vcmax
     Wj = Kj * JmeanL
-    ciold = ci - 0.02
+    ciold = ci - T(0.02)
 
     # Light limitation iteration (if Wj < Wc)
     if Wj < Wc
         i = 1
-        while abs(ci - ciold) > 0.01 && i < 100
+        while abs(ci - ciold) > T(0.01) && i < 100
             i += 1
             ciold = ci
             gs_mol = bbb + mbb * Wj / CO2c * forc_pbot * relhc
-            phi = forc_pbot * (1.37 * gs_mol + 1.6 * gb_mol) / (gb_mol * gs_mol)
-            bquad = 2.0 * c_p - CO2c + phi * JmeanL / 4.0
-            cquad = -(c_p * phi * JmeanL / 4.0 + 2.0 * c_p * CO2c)
+            phi = forc_pbot * (T(1.37) * gs_mol + T(1.6) * gb_mol) / (gb_mol * gs_mol)
+            bquad = T(2.0) * c_p - CO2c + phi * JmeanL / T(4.0)
+            cquad = -(c_p * phi * JmeanL / T(4.0) + T(2.0) * c_p * CO2c)
             r1, r2 = quadratic_luna(aquad, bquad, cquad)
             ci = smooth_max(r1, r2)
-            if ci < 0.0
-                ci = c_p + 0.5 * ciold
+            if ci < zero(T)
+                ci = c_p + T(0.5) * ciold
             end
-            Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
+            Kj = smooth_max(ci - c_p, zero(T)) / (T(4.0) * ci + T(8.0) * c_p)
             Wj = Kj * JmeanL
         end
-        Kj = smooth_max(ci - c_p, 0.0) / (4.0 * ci + 8.0 * c_p)
-        Kc_val = smooth_max(ci - c_p, 0.0) / (ci + awc)
+        Kj = smooth_max(ci - c_p, zero(T)) / (T(4.0) * ci + T(8.0) * c_p)
+        Kc_val = smooth_max(ci - c_p, zero(T)) / (ci + awc)
         Wc = Kc_val * Vcmax
         Wj = Kj * JmeanL
     end
 
-    A = (1.0 - luna_params.luna_theta_cj) * smooth_max(Wc, Wj) + luna_params.luna_theta_cj * smooth_min(Wc, Wj)
+    A = (T(1.0) - T(luna_params.luna_theta_cj)) * smooth_max(Wc, Wj) + T(luna_params.luna_theta_cj) * smooth_min(Wc, Wj)
     rs = cf / gs_mol
     rs = smooth_min(rsmax0, rs)
 
@@ -404,20 +415,21 @@ function nitrogen_investments!(KcKjFlag::Int, FNCa::Real, Nlc::Real,
                                jmaxb0::Real, wc2wjb0::Real,
                                Kc_in::Real, Kj_in::Real, ci_in::Real,
                                luna_params::LunaParamsData)
-    leaf_mr_vcm = 0.015
+    T = typeof(FNCa)
+    leaf_mr_vcm = T(0.015)
 
-    theta = 0.292 / (1.0 + 0.076 / (Nlc * LUNA_Cb))
+    theta = T(0.292) / (T(1.0) + T(0.076) / (Nlc * T(LUNA_Cb)))
     ELTRNabsorb = theta * PARi10
     Jmaxb0act = jmaxb0 * FNCa * Fj
 
     # o3coefjmax defaults to 1 unless ozone stress_method == 'stress_falk'
     Jmax = Jmaxb0act + JmaxCoef * ELTRNabsorb * o3coefjmax
 
-    JmaxL = theta * PARimx10 / sqrt(1.0 + (theta * PARimx10 / Jmax)^2.0)
+    JmaxL = theta * PARimx10 / sqrt(T(1.0) + (theta * PARimx10 / Jmax)^T(2.0))
     NUEchg = (NUEc / NUEcref) * (NUEjref / NUEj)
-    Wc2Wj = wc2wjb0 * (NUEchg^0.5)
+    Wc2Wj = wc2wjb0 * (NUEchg^T(0.5))
     Vcmax = Wc2Wj * JmaxL * Kj2Kc
-    JmeanL = theta * PARi10 / sqrt(1.0 + (ELTRNabsorb / Jmax)^2.0)
+    JmeanL = theta * PARi10 / sqrt(T(1.0) + (ELTRNabsorb / Jmax)^T(2.0))
 
     Kc = Kc_in
     Kj = Kj_in
@@ -428,12 +440,12 @@ function nitrogen_investments!(KcKjFlag::Int, FNCa::Real, Nlc::Real,
     else
         Wc = Kc * Vcmax
         Wj = Kj * JmeanL
-        A = (1.0 - luna_params.luna_theta_cj) * smooth_max(Wc, Wj) + luna_params.luna_theta_cj * smooth_min(Wc, Wj)
+        A = (T(1.0) - T(luna_params.luna_theta_cj)) * smooth_max(Wc, Wj) + T(luna_params.luna_theta_cj) * smooth_min(Wc, Wj)
     end
 
-    PSN = LUNA_Cv * A * hourpd
+    PSN = T(LUNA_Cv) * A * hourpd
     Vcmaxnight = vcmx_t_kattge(tair10, tleafn10) / vcmx_t_kattge(tair10, tleafd10) * Vcmax
-    RESP = LUNA_Cv * leaf_mr_vcm * (Vcmax * hourpd + Vcmaxnight * (24.0 - hourpd))
+    RESP = T(LUNA_Cv) * leaf_mr_vcm * (Vcmax * hourpd + Vcmaxnight * (T(24.0) - hourpd))
     Net = Jmax / Fj
     Ncb = Vcmax / Fc
     Nresp = RESP / NUEr
@@ -463,41 +475,42 @@ function nitrogen_allocation!(FNCa::Real, forc_pbot10::Real, relh10::Real,
                               PNlcold::Real, PNetold::Real,
                               PNrespold::Real, PNcbold::Real,
                               dayl_factor::Real, o3coefjmax::Real,
+                              NUEjref::Real, NUEcref::Real,
                               luna_params::LunaParamsData)
 
-    NUEjref, NUEcref, Kj2Kcref = nue_ref(luna_params)
+    T = typeof(FNCa)
     Nlc   = PNlcold * FNCa
     Net   = PNetold * FNCa
     Nresp = PNrespold * FNCa
     Ncb   = PNcbold * FNCa
-    if Nlc > FNCa * 0.5
-        Nlc = 0.5 * FNCa
+    if Nlc > FNCa * T(0.5)
+        Nlc = T(0.5) * FNCa
     end
-    chg_per_step = 0.02 * FNCa
+    chg_per_step = T(0.02) * FNCa
     PNlc = PNlcold
-    PNlcoldi = PNlcold - 0.001
-    PARi10c  = smooth_max(LUNA_PARLowLim, PARi10)
-    PARimx10c = smooth_max(LUNA_PARLowLim, PARimx10)
+    PNlcoldi = PNlcold - T(0.001)
+    PARi10c  = smooth_max(T(LUNA_PARLowLim), PARi10)
+    PARimx10c = smooth_max(T(LUNA_PARLowLim), PARimx10)
     increase_flag = 0
     jj = 1
-    tleafd10c = smooth_min(smooth_max(tleafd10, LUNA_Trange1), LUNA_Trange2)
-    tleafn10c = smooth_min(smooth_max(tleafn10, LUNA_Trange1), LUNA_Trange2)
-    ci = 0.7 * CO2a10
-    JmaxCoef = jmaxb1_val * dayl_factor * (1.0 - exp(-luna_params.relhExp * smooth_max(relh10 -
-        luna_params.minrelh, 0.0) / (1.0 - luna_params.minrelh)))
+    tleafd10c = smooth_min(smooth_max(tleafd10, T(LUNA_Trange1)), T(LUNA_Trange2))
+    tleafn10c = smooth_min(smooth_max(tleafn10, T(LUNA_Trange1)), T(LUNA_Trange2))
+    ci = T(0.7) * CO2a10
+    JmaxCoef = jmaxb1_val * dayl_factor * (T(1.0) - exp(-T(luna_params.relhExp) * smooth_max(relh10 -
+        T(luna_params.minrelh), zero(T)) / (T(1.0) - T(luna_params.minrelh))))
 
     # Initialize Kc, Kj and loop variables for proper scoping
-    Kc = 0.0
-    Kj = 0.0
-    Nstore = 0.0
-    Npsntarget = 0.0
-    PSN = 0.0
+    Kc = zero(T)
+    Kj = zero(T)
+    Nstore = zero(T)
+    Npsntarget = zero(T)
+    PSN = zero(T)
 
     while PNlcoldi != PNlc && jj < 100
-        Fc = vcmx_t_kattge(tair10, tleafd10c) * LUNA_Fc25
-        Fj = jmx_t_kattge(tair10, tleafd10c) * LUNA_Fj25
-        NUEr = LUNA_Cv * LUNA_NUEr25 * (resp_t_bernacchi(tleafd10c) * hourpd +
-            resp_t_bernacchi(tleafn10c) * (24.0 - hourpd))
+        Fc = vcmx_t_kattge(tair10, tleafd10c) * T(LUNA_Fc25)
+        Fj = jmx_t_kattge(tair10, tleafd10c) * T(LUNA_Fj25)
+        NUEr = T(LUNA_Cv) * T(LUNA_NUEr25) * (resp_t_bernacchi(tleafd10c) * hourpd +
+            resp_t_bernacchi(tleafn10c) * (T(24.0) - hourpd))
 
         # Calculate NUE
         NUEj, NUEc, Kj2Kc = nue_calc(O2a10, ci, tair10, tleafd10c, luna_params)
@@ -515,10 +528,10 @@ function nitrogen_allocation!(FNCa::Real, forc_pbot10::Real, relh10::Real,
         Nstore = FNCa - Npsntarget - Nresp
 
         # Test increase of light capture nitrogen
-        if Nstore > 0.0 && (increase_flag == 1 || jj == 1)
+        if Nstore > zero(T) && (increase_flag == 1 || jj == 1)
             Nlc2 = Nlc + chg_per_step
-            if Nlc2 / FNCa > 0.95
-                Nlc2 = 0.95 * FNCa
+            if Nlc2 / FNCa > T(0.95)
+                Nlc2 = T(0.95) * FNCa
             end
             KcKjFlag = 1
             _, _, _, _, Net2, Ncb2, Nresp2, PSN2, RESP2, _, _, _ =
@@ -528,10 +541,10 @@ function nitrogen_allocation!(FNCa::Real, forc_pbot10::Real, relh10::Real,
                     jmaxb0_val, wc2wjb0_val, Kc, Kj, ci, luna_params)
 
             Npsntarget2 = Nlc2 + Ncb2 + Net2
-            Carboncost2 = (Npsntarget2 - Npsntarget) * LUNA_NMCp25 * LUNA_Cv *
-                (resp_t_bernacchi(tleafd10c) * hourpd + resp_t_bernacchi(tleafn10c) * (24.0 - hourpd))
+            Carboncost2 = (Npsntarget2 - Npsntarget) * T(LUNA_NMCp25) * T(LUNA_Cv) *
+                (resp_t_bernacchi(tleafd10c) * hourpd + resp_t_bernacchi(tleafn10c) * (T(24.0) - hourpd))
             Carbongain2 = PSN2 - PSN
-            if Carbongain2 > Carboncost2 && (Npsntarget2 + Nresp2 < 0.95 * FNCa)
+            if Carbongain2 > Carboncost2 && (Npsntarget2 + Nresp2 < T(0.95) * FNCa)
                 Nlc = Nlc2
                 Net = Net2
                 Ncb = Ncb2
@@ -544,13 +557,13 @@ function nitrogen_allocation!(FNCa::Real, forc_pbot10::Real, relh10::Real,
 
         # Test decrease of light capture nitrogen
         if increase_flag == 0
-            if Nstore < 0.0
-                Nlc1 = Nlc * 0.8  # bigger step of decrease if negative
+            if Nstore < zero(T)
+                Nlc1 = Nlc * T(0.8)  # bigger step of decrease if negative
             else
                 Nlc1 = Nlc - chg_per_step
             end
-            if Nlc1 < 0.05
-                Nlc1 = 0.05
+            if Nlc1 < T(0.05)
+                Nlc1 = T(0.05)
             end
             KcKjFlag = 1
             _, _, _, _, Net1, Ncb1, Nresp1, PSN1, RESP1, _, _, _ =
@@ -560,10 +573,10 @@ function nitrogen_allocation!(FNCa::Real, forc_pbot10::Real, relh10::Real,
                     jmaxb0_val, wc2wjb0_val, Kc, Kj, ci, luna_params)
 
             Npsntarget1 = Nlc1 + Ncb1 + Net1
-            Carboncost1 = (Npsntarget - Npsntarget1) * LUNA_NMCp25 * LUNA_Cv *
-                (resp_t_bernacchi(tleafd10c) * hourpd + resp_t_bernacchi(tleafn10c) * (24.0 - hourpd))
+            Carboncost1 = (Npsntarget - Npsntarget1) * T(LUNA_NMCp25) * T(LUNA_Cv) *
+                (resp_t_bernacchi(tleafd10c) * hourpd + resp_t_bernacchi(tleafn10c) * (T(24.0) - hourpd))
             Carbongain1 = PSN - PSN1
-            if (Carbongain1 < Carboncost1 && Nlc1 > 0.05) || (Npsntarget + Nresp) > 0.95 * FNCa
+            if (Carbongain1 < Carboncost1 && Nlc1 > T(0.05)) || (Npsntarget + Nresp) > T(0.95) * FNCa
                 Nlc = Nlc1
                 Net = Net1
                 Ncb = Ncb1
@@ -888,6 +901,10 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
     fnps = 0.15
     FT = eltype(dayl_factor)
     FNCa_z = zeros(FT, nlevcan_val)
+    # Reference NUE is patch-invariant (depends only on luna_params) — compute once here
+    # and pass into nitrogen_allocation! (hoisted out of the per-patch/per-iteration loop;
+    # also keeps it off a future device kernel since it has no working-precision input).
+    NUEjref, NUEcref, _Kj2Kcref = nue_ref(luna_params)
 
     for p in bounds
         mask_patch[p] || continue
@@ -978,7 +995,7 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
                                     PARi10, PARimx10, rb10v, hourpd, tair10, tleafd10, tleafn10,
                                     luna_params.jmaxb0[ft], luna_params.jmaxb1[ft], luna_params.wc2wjb0[ft],
                                     PNlcold, PNetold, PNrespold, PNcbold, dayl_factor[p],
-                                    o3coefjmax[p], luna_params)
+                                    o3coefjmax[p], NUEjref, NUEcref, luna_params)
 
                             vcmx25_opt = PNcbopt * FNCa * LUNA_Fc25
                             jmx25_opt  = PNetopt * FNCa * LUNA_Fj25
