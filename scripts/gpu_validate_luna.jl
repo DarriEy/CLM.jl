@@ -45,6 +45,45 @@ function build_fixture()
     return cs, ps, alb, sa, temp, pch, wdb, fv
 end
 
+# Optimization-triggering fixture for update_photosynthesis_capacity! (C3, fpsn24>0,
+# tlai>0, valid t_veg_day) — self-contained (manual pft params + luna_params).
+function build_luna_opt_fixture()
+    CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+    npft = 20
+    cs = CLM.CanopyStateData();  CLM.canopystate_init!(cs, NP)
+    ps = CLM.PhotosynthesisData(); CLM.photosynthesis_data_init!(ps, NP; use_luna=true)
+    alb = CLM.SurfaceAlbedoData(); CLM.surfalb_init!(alb, NP, NC, NG)
+    sa = CLM.SolarAbsorbedData(); CLM.solarabs_init!(sa, NP, NL; use_luna=true)
+    temp = CLM.TemperatureData(); CLM.temperature_init!(temp, NP, NC, NL, NG)
+    pch = CLM.PatchData(); CLM.patch_init!(pch, NP)
+    wdb = CLM.WaterDiagnosticBulkData(); CLM.waterdiagnosticbulk_init!(wdb, NC, NP, NL, NG)
+    fv = CLM.FrictionVelocityData(); CLM.frictionvel_init!(fv, NP, NC)
+    grc = CLM.GridcellData(); CLM.gridcell_init!(grc, NG)
+    @inbounds for p in 1:NP
+        pch.itype[p] = 0; pch.gridcell[p] = 1; pch.column[p] = 1
+        temp.t_veg_day_patch[p] = 290.0
+        temp.t_veg10_day_patch[p] = 296.8; temp.t_veg10_night_patch[p] = 280.0; temp.t_a10_patch[p] = 285.5
+        ps.lnca_patch[p] = 2.98; ps.fpsn24_patch[p] = 10424.0
+        ps.pnlc_z_patch[p,1] = 0.01; ps.enzs_z_patch[p,1] = 1.0
+        ps.vcmx25_z_patch[p,1] = 49.56; ps.jmx25_z_patch[p,1] = 92.98
+        ps.vcmx25_z_last_valid_patch[p,1] = 49.56; ps.jmx25_z_last_valid_patch[p,1] = 92.98
+        cs.tlai_patch[p] = 0.0476
+        sa.par240d_z_patch[p,1] = 164.4; sa.par240x_z_patch[p,1] = 249.0
+        alb.nrad_patch[p] = 1; alb.tlai_z_patch[p,1] = 0.0476
+        wdb.rh10_af_patch[p] = 0.199; fv.rb10_patch[p] = 42.6
+    end
+    grc.dayl[1] = 57263.8; grc.max_dayl[1] = 57263.8/0.9716
+    c3psn = fill(1.0, npft); slatop = fill(0.012, npft); leafcn = fill(25.0, npft)
+    rhol = fill(0.1, npft, 2); taul = fill(0.05, npft, 2)
+    o3 = fill(1.0, NP); daylf = fill(0.944, NP)
+    pbot = fill(78915.0, NP); co2 = fill(28.96, NP); o2 = fill(16493.0, NP)
+    lp = CLM.LunaParamsData()
+    lp.cp25_yr2000 = 42.75e-6*1e5; lp.kc25_coef = 404.9e-6*1e5; lp.ko25_coef = 278.4e-3*1e5
+    lp.luna_theta_cj = 0.98; lp.enzyme_turnover_daily = 0.0114; lp.relhExp = 6.0686; lp.minrelh = 0.65
+    lp.jmaxb0 = fill(0.0311, npft); lp.jmaxb1 = fill(0.1745, npft); lp.wc2wjb0 = fill(0.8054, npft)
+    return (cs,ps,alb,sa,temp,pch,wdb,fv,grc, c3psn,slatop,leafcn,rhol,taul,o3,daylf,pbot,co2,o2, lp)
+end
+
 reldiff(H, D) = begin
     A = Array(H); B = Array(D); m = 0.0; n = 0
     for i in eachindex(A, B)
@@ -105,8 +144,30 @@ function main(backend)
         @printf("  [%s] clear24.%-11s rel=%.2e over %d\n", ok ? "PASS" : "FAIL", nm, m, n); ok || (nfail+=1)
     end
 
+    # ---- update_photosynthesis_capacity! (the optimization core) ----
+    F = build_luna_opt_fixture()
+    (cs,ps,alb,sa,temp,pch,wdb,fv,grc, c3psn,slatop,leafcn,rhol,taul,o3,daylf,pbot,co2,o2, lp) = F
+    maskU = trues(NP)
+    CLM.update_photosynthesis_capacity!(ps, temp, cs, alb, sa, wdb, fv, pch, grc, maskU, 1:NP,
+        daylf, pbot, co2, o2, c3psn, slatop, leafcn, rhol, taul, o3, lp, 3600.0, CLM.NLEVCAN)
+    G = build_luna_opt_fixture()
+    (cs2,ps2,alb2,sa2,temp2,pch2,wdb2,fv2,grc2, c3psn2,slatop2,leafcn2,rhol2,taul2,o32,daylf2,pbot2,co22,o22, lp2) = G
+    psD = mf(ps2)
+    CLM.update_photosynthesis_capacity!(psD, mf(temp2), mf(cs2), mf(alb2), mf(sa2), mf(wdb2),
+        mf(fv2), mf(pch2), mf(grc2), mf(maskU), 1:NP,
+        daylf2, pbot2, co22, o22, c3psn2, slatop2, leafcn2, rhol2, taul2, o32, lp2, 3600.0, CLM.NLEVCAN)
+    Metal.synchronize()
+    for (nm,h,d) in (("vcmx25_z",ps.vcmx25_z_patch,psD.vcmx25_z_patch),
+                     ("jmx25_z",ps.jmx25_z_patch,psD.jmx25_z_patch),
+                     ("pnlc_z",ps.pnlc_z_patch,psD.pnlc_z_patch),
+                     ("enzs_z",ps.enzs_z_patch,psD.enzs_z_patch))
+        m,n = reldiff(h,d); ok = m < 1f-4
+        @printf("  [%s] update.%-10s rel=%.2e over %d  (host[1]=%.4f dev[1]=%.4f)\n",
+                ok ? "PASS" : "FAIL", nm, m, n, Float64(Array(h)[1]), Float64(Array(d)[1])); ok || (nfail+=1)
+    end
+
     println()
-    println(nfail == 0 ? "  LUNA climate kernels MATCH host on $name" : "  DIVERGENCE ($nfail)")
+    println(nfail == 0 ? "  LUNA climate + capacity-update kernels MATCH host on $name" : "  DIVERGENCE ($nfail)")
     return nfail == 0 ? 0 : 1
 end
 exit(main(detect_backend()))

@@ -168,7 +168,7 @@
         tgrow = 25.0
         tleaf = 25.0
 
-        NUEj, NUEc, Kj2Kc = CLM.nue_calc(O2a, ci, tgrow, tleaf, lp)
+        NUEj, NUEc, Kj2Kc = CLM.nue_calc(O2a, ci, tgrow, tleaf, CLM._LunaScalars(lp, Float64))
         @test NUEj > 0.0
         @test NUEc > 0.0
         @test Kj2Kc > 0.0
@@ -191,7 +191,7 @@
         Vcmax = 50.0
         JmeanL = 40.0
 
-        ci, Kc, Kj, A = CLM.photosynthesis_luna!(forc_pbot, tleafd, relh, CO2a, O2a, rb, Vcmax, JmeanL, lp)
+        ci, Kc, Kj, A = CLM.photosynthesis_luna!(forc_pbot, tleafd, relh, CO2a, O2a, rb, Vcmax, JmeanL, CLM._LunaScalars(lp, Float64))
         @test ci > 0.0
         @test Kc >= 0.0
         @test Kj >= 0.0
@@ -241,7 +241,7 @@
             CLM.nitrogen_allocation!(FNCa, forc_pbot10, relh10, CO2a10, O2a10,
                 PARi10, PARimx10, rb10, hourpd, tair10, tleafd10, tleafn10,
                 jmaxb0_val, jmaxb1_val, wc2wjb0_val, PNlcold, PNetold,
-                PNrespold, PNcbold, dayl_factor, o3coefjmax, NUEjref, NUEcref, lp)
+                PNrespold, PNcbold, dayl_factor, o3coefjmax, NUEjref, NUEcref, CLM._LunaScalars(lp, Float64))
 
         # All fractions should be finite and non-negative
         @test isfinite(PNstoreopt)
@@ -365,7 +365,7 @@
         Fc = CLM.vcmx_t_kattge(25.0, 28.0) * CLM.LUNA_Fc25
         Fj = CLM.jmx_t_kattge(25.0, 28.0) * CLM.LUNA_Fj25
         NUEr = CLM.LUNA_Cv * CLM.LUNA_NUEr25 * (CLM.resp_t_bernacchi(28.0) * 12.0 + CLM.resp_t_bernacchi(18.0) * 12.0)
-        NUEj, NUEc, Kj2Kc = CLM.nue_calc(21232.0, 26.6, 25.0, 28.0, lp)
+        NUEj, NUEc, Kj2Kc = CLM.nue_calc(21232.0, 26.6, 25.0, 28.0, CLM._LunaScalars(lp, Float64))
         NUEjref, NUEcref, _ = CLM.nue_ref(lp)
         JmaxCoef = 0.22 * 1.0 * (1.0 - exp(-lp.relhExp * max(0.6 - lp.minrelh, 0.0) / (1.0 - lp.minrelh)))
 
@@ -373,7 +373,7 @@
             CLM.nitrogen_investments!(0, FNCa, Nlc, 101325.0, 0.6, 38.0, 21232.0,
                 500.0, 800.0, 25.0, 12.0, 25.0, 28.0, 18.0,
                 Kj2Kc, JmaxCoef, Fc, Fj, NUEc, NUEj, NUEcref, NUEjref, NUEr, 1.0,
-                0.03, 0.8, 0.0, 0.0, 26.6, lp)
+                0.03, 0.8, 0.0, 0.0, 26.6, CLM._LunaScalars(lp, Float64))
 
         @test Vcmax > 0.0
         @test Jmax > 0.0

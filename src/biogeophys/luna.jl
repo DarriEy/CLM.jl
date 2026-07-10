@@ -67,6 +67,23 @@ Base.@kwdef mutable struct LunaParamsData
     wc2wjb0::Vector{Float64} = Float64[]     # Baseline ratio of rubisco limited vs light limited rate (Wc:Wj)
 end
 
+# Isbits scalar view of LunaParamsData for device kernels. LunaParamsData's Vector fields
+# can't cross to a GPU, but the LUNA optimization CHAIN reads only these scalar params — so
+# the chain functions take this by-value struct instead. Field NAMES match LunaParamsData so
+# the chain bodies read `luna_params.<field>` unchanged (only the type annotation changes).
+struct _LunaScalars{T}
+    cp25_yr2000::T
+    kc25_coef::T
+    ko25_coef::T
+    luna_theta_cj::T
+    enzyme_turnover_daily::T
+    relhExp::T
+    minrelh::T
+end
+@inline _LunaScalars(lp::LunaParamsData, ::Type{T}) where {T} = _LunaScalars{T}(
+    T(lp.cp25_yr2000), T(lp.kc25_coef), T(lp.ko25_coef), T(lp.luna_theta_cj),
+    T(lp.enzyme_turnover_daily), T(lp.relhExp), T(lp.minrelh))
+
 """
     luna_params_init!(lp, mxpft)
 
@@ -272,7 +289,7 @@ end
 Calculate nitrogen use efficiency under current environmental conditions.
 """
 function nue_calc(O2a::Real, ci::Real, tgrow::Real, tleaf::Real,
-                  luna_params::LunaParamsData)
+                  luna_params::_LunaScalars)
     T = promote_type(typeof(O2a), typeof(ci), typeof(tgrow), typeof(tleaf))
     tfrz = T(TFRZ); rgas = T(RGAS)
     Fc = vcmx_t_kattge(tgrow, tleaf) * T(LUNA_Fc25)
@@ -303,7 +320,7 @@ Uses Ball-Berry stomatal conductance and Farquhar model.
 function photosynthesis_luna!(forc_pbot::Real, tleafd::Real, relh::Real,
                               CO2a::Real, O2a::Real, rb::Real,
                               Vcmax::Real, JmeanL::Real,
-                              luna_params::LunaParamsData)
+                              luna_params::_LunaScalars)
     T = promote_type(typeof(forc_pbot), typeof(tleafd), typeof(relh), typeof(CO2a),
                      typeof(O2a), typeof(rb), typeof(Vcmax), typeof(JmeanL))
     tfrz = T(TFRZ)
@@ -414,7 +431,7 @@ function nitrogen_investments!(KcKjFlag::Int, FNCa::Real, Nlc::Real,
                                NUEr::Real, o3coefjmax::Real,
                                jmaxb0::Real, wc2wjb0::Real,
                                Kc_in::Real, Kj_in::Real, ci_in::Real,
-                               luna_params::LunaParamsData)
+                               luna_params::_LunaScalars)
     T = typeof(FNCa)
     leaf_mr_vcm = T(0.015)
 
@@ -476,7 +493,7 @@ function nitrogen_allocation!(FNCa::Real, forc_pbot10::Real, relh10::Real,
                               PNrespold::Real, PNcbold::Real,
                               dayl_factor::Real, o3coefjmax::Real,
                               NUEjref::Real, NUEcref::Real,
-                              luna_params::LunaParamsData)
+                              luna_params::_LunaScalars)
 
     T = typeof(FNCa)
     Nlc   = PNlcold * FNCa
@@ -834,17 +851,188 @@ end
 
 Update Vcmax25 and Jmax25 profiles using the LUNA nitrogen allocation model.
 """
-# copyto! every same-length array field of a device struct `dev` from its host
-# copy `hst` (used by the LUNA host-fallback to scatter results back to the device).
-@inline function _luna_scatter_back!(dev, hst)
-    T = typeof(dev)
-    for i in 1:fieldcount(T)
-        d = getfield(dev, i); h = getfield(hst, i)
-        if d isa AbstractArray && h isa AbstractArray && !isempty(d) && length(d) == length(h)
-            copyto!(d, h)
-        end
+# ==========================================================================
+# GPU kernelization of the LUNA end-of-day capacity update.
+# One thread per patch runs the whole per-patch Rubisco-N optimization (the
+# bounded nitrogen_allocation! fixed-point + the z-level passes). The chain it
+# calls is already T-generic + allocation-free + device-callable; per-thread
+# FNCa scratch is a (np x nlevcan) backend array (row p). The ~30 state/input
+# arrays across 9 structs are grouped into device-view bundles to stay under
+# Metal's arg limit; the sanity @warn/error checks become pure clamps (device-
+# callable, byte-identical on any path where they don't fire). luna_params'
+# Vector fields can't cross to a GPU, so its scalars ride in an isbits
+# _LunaScalars and its 3 pft-vectors are moved onto the backend in _LunaPft.
+# ==========================================================================
+struct _LunaPsn{V,M}
+    vcmx25_z::M; jmx25_z::M; vcmx25_z_last::M; jmx25_z_last::M
+    pnlc_z::M; enzs_z::M; lnca::V; fpsn24::V
+end
+Adapt.@adapt_structure _LunaPsn
+
+struct _LunaClim{V}
+    t_veg_day::V; t_veg10_day::V; t_veg10_night::V; t_a10::V
+end
+Adapt.@adapt_structure _LunaClim
+
+struct _LunaRad{V,VI,M}
+    tlai::V; nrad::VI; tlai_z::M; par240d_z::M; par240x_z::M; rh10_af::V; rb10::V
+end
+Adapt.@adapt_structure _LunaRad
+
+struct _LunaIdx{V,VI}
+    itype::VI; gridcell::VI; dayl::V; dayl_factor::V
+    forc_pbot10::V; CO2::V; O2::V; o3coefjmax::V
+end
+Adapt.@adapt_structure _LunaIdx
+
+struct _LunaPft{V,M}
+    c3psn::V; slatop::V; rhol::M; taul::M; jmaxb0::V; jmaxb1::V; wc2wjb0::V
+end
+Adapt.@adapt_structure _LunaPft
+
+# Per-patch LUNA capacity update (device-callable; one thread owns patch p).
+@inline function _luna_patch_body!(p, psn, clim, rad, idx, pft, lp, NUEjref, NUEcref, fnca)
+    T = eltype(psn.vcmx25_z)
+    @inbounds begin
+        ft = idx.itype[p] + 1
+        g  = idx.gridcell[p]
+
+        if clim.t_veg_day[p] != T(SPVAL)
+            CO2a10   = idx.CO2[p]
+            O2a10    = idx.O2[p]
+            hourpd   = idx.dayl[g] / T(3600.0)
+            tleafd10 = clim.t_veg10_day[p] - T(TFRZ)
+            tleafn10 = clim.t_veg10_night[p] - T(TFRZ)
+            tleaf10  = (idx.dayl[g] * tleafd10 + (T(86400.0) - idx.dayl[g]) * tleafn10) / T(86400.0)
+            tair10   = clim.t_a10[p] - T(TFRZ)
+            relh10   = smooth_min(T(1.0), rad.rh10_af[p])
+            rb10v    = rad.rb10[p]
+
+            EnzTurnoverTFactor = T(LUNA_Q10Enz)^(T(0.1) * (smooth_min(T(40.0), tleaf10) - T(25.0)))
+            max_daily_pchg = EnzTurnoverTFactor * lp.enzyme_turnover_daily
+
+            rabsorb = T(1.0) - pft.rhol[ft, 1] - pft.taul[ft, 1]
+
+            if rad.tlai[p] > T(0.0) && psn.lnca[p] > T(0.0)
+                RadTop = rad.par240d_z[p, 1] / rabsorb
+                PARTop = RadTop * T(4.6)
+
+                if unsafe_trunc(Int, round(pft.c3psn[ft])) == 1   # round(Int,·) boxes on Metal
+                    if psn.fpsn24[p] > T(0.0)
+                        nrad_p = rad.nrad[p]
+
+                        for z in 1:nrad_p
+                            if rad.tlai_z[p, z] > T(0.0)
+                                qabs = rad.par240d_z[p, z] / rabsorb
+                                PARi10 = qabs * T(4.6)
+                            else
+                                PARi10 = T(0.01)
+                            end
+                            relRad = PARi10 / PARTop
+                            relCLNCa = T(0.1802) * log(relRad) + T(1.0)
+                            relCLNCa = smooth_max(T(0.2), relCLNCa)
+                            relCLNCa = smooth_min(T(1.0), relCLNCa)
+
+                            SNCa = T(1.0) / pft.slatop[ft] * T(LUNA_SNC)
+                            lnc_p = psn.lnca[p]
+                            if T(0.9) * lnc_p > SNCa
+                                fnca[p, z] = relCLNCa * (lnc_p - SNCa)
+                            else
+                                fnca[p, z] = relCLNCa * T(0.1) * lnc_p
+                            end
+                        end
+
+                        for z in 1:nrad_p
+                            FNCa = fnca[p, z]
+                            if FNCa > T(15.0)   # boundary clamp (was @warn)
+                                FNCa = T(15.0)
+                            end
+
+                            radmax2mean = rad.par240x_z[p, z] / rad.par240d_z[p, z]
+                            if rad.tlai_z[p, z] > T(0.0)
+                                qabs = rad.par240d_z[p, z] / rabsorb
+                                PARi10 = qabs * T(4.6)
+                            else
+                                PARi10 = T(0.01)
+                            end
+                            PARimx10 = PARi10 * radmax2mean
+
+                            PNlcold = psn.pnlc_z[p, z]
+                            PNetold = T(0.0)
+                            PNrespold = T(0.0)
+                            PNcbold = T(0.0)
+
+                            PNstoreopt, PNlcopt, PNetopt, PNrespopt, PNcbopt =
+                                nitrogen_allocation!(FNCa, idx.forc_pbot10[p], relh10, CO2a10, O2a10,
+                                    PARi10, PARimx10, rb10v, hourpd, tair10, tleafd10, tleafn10,
+                                    pft.jmaxb0[ft], pft.jmaxb1[ft], pft.wc2wjb0[ft],
+                                    PNlcold, PNetold, PNrespold, PNcbold, idx.dayl_factor[p],
+                                    idx.o3coefjmax[p], NUEjref, NUEcref, lp)
+
+                            vcmx25_opt = PNcbopt * FNCa * T(LUNA_Fc25)
+                            jmx25_opt  = PNetopt * FNCa * T(LUNA_Fj25)
+
+                            chg = vcmx25_opt - psn.vcmx25_z[p, z]
+                            chg_constrn = smooth_min(smooth_abs(chg), psn.vcmx25_z[p, z] * max_daily_pchg)
+                            psn.vcmx25_z[p, z] += sign(chg) * chg_constrn
+                            psn.vcmx25_z_last[p, z] = psn.vcmx25_z[p, z]
+
+                            chg = jmx25_opt - psn.jmx25_z[p, z]
+                            chg_constrn = smooth_min(smooth_abs(chg), psn.jmx25_z[p, z] * max_daily_pchg)
+                            psn.jmx25_z[p, z] += sign(chg) * chg_constrn
+                            psn.jmx25_z_last[p, z] = psn.jmx25_z[p, z]
+
+                            psn.pnlc_z[p, z] = PNlcopt
+
+                            if psn.enzs_z[p, z] < T(1.0)
+                                psn.enzs_z[p, z] *= (T(1.0) + max_daily_pchg)
+                            end
+
+                            # Sanity clamps (were @warn/error; device-callable, byte-identical
+                            # on any path where the abnormal branch does not fire).
+                            if isnan(psn.vcmx25_z[p, z])
+                                psn.vcmx25_z[p, z] = T(50.0)
+                            end
+                            if psn.vcmx25_z[p, z] > T(1000.0) || psn.vcmx25_z[p, z] < T(0.0)
+                                psn.vcmx25_z[p, z] = T(50.0)
+                            end
+                            if isnan(psn.jmx25_z[p, z])
+                                psn.jmx25_z[p, z] = T(85.0)
+                            end
+                            if psn.jmx25_z[p, z] > T(2000.0) || psn.jmx25_z[p, z] < T(0.0)
+                                psn.jmx25_z[p, z] = T(85.0)
+                            end
+                        end  # z loop (growth)
+                    else  # decay during drought or winter
+                        max_daily_decay = smooth_min(T(0.5), T(0.1) * max_daily_pchg)
+                        nrad_p = rad.nrad[p]
+                        for z in 1:nrad_p
+                            if psn.enzs_z[p, z] > T(0.5)
+                                psn.enzs_z[p, z] *= (T(1.0) - max_daily_decay)
+                                psn.jmx25_z[p, z] *= (T(1.0) - max_daily_decay)
+                                psn.vcmx25_z[p, z] *= (T(1.0) - max_daily_decay)
+                            end
+                        end
+                    end  # growth check
+                end  # C3 check
+            else  # no LAI or no LNC: use last valid values
+                nrad_p = rad.nrad[p]
+                for z in 1:nrad_p
+                    psn.jmx25_z[p, z] = psn.jmx25_z_last[p, z]
+                    psn.vcmx25_z[p, z] = psn.vcmx25_z_last[p, z]
+                end
+            end  # LAI/LNC check
+        end  # first day check
     end
     return nothing
+end
+
+@kernel function _luna_capacity_kernel!(psn, clim, rad, idx, pft, lp, @Const(mask),
+        lo::Int, hi::Int, NUEjref, NUEcref, fnca)
+    p = @index(Global)
+    @inbounds if lo <= p <= hi && mask[p]
+        _luna_patch_body!(p, psn, clim, rad, idx, pft, lp, NUEjref, NUEcref, fnca)
+    end
 end
 
 function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
@@ -871,199 +1059,46 @@ function update_photosynthesis_capacity!(photosyns::PhotosynthesisData,
                                          luna_params::LunaParamsData,
                                          dtime::Real,
                                          nlevcan_val::Int)
-    # ----------------------------------------------------------------------
-    # Host-fallback bridge — the LUNA optimization core (nitrogen_allocation!/
-    # investments!/photosynthesis_luna!/nue_* chain, ~250 bare Float64 constants)
-    # is not device-kernelized. When clm_drv! runs on a GPU, gather the touched
-    # inst sub-state to the host, run the host solve (end-of-day cadence → ~365x/yr,
-    # negligible), and scatter every touched struct back. No-op zero-overhead
-    # passthrough on the host path (byte-identical).
-    # ----------------------------------------------------------------------
-    if !(photosyns.vcmx25_z_patch isa Array)
-        psH = Adapt.adapt(Array, photosyns); tpH = Adapt.adapt(Array, temperature)
-        caH = Adapt.adapt(Array, canopystate); saH = Adapt.adapt(Array, surfalb)
-        soH = Adapt.adapt(Array, solarabs); wdH = Adapt.adapt(Array, waterdiag)
-        fvH = Adapt.adapt(Array, frictionvel); pdH = Adapt.adapt(Array, patchdata)
-        gcH = Adapt.adapt(Array, gridcell)
-        update_photosynthesis_capacity!(psH, tpH, caH, saH, soH, wdH, fvH, pdH, gcH,
-            Array(mask_patch), bounds, Array(dayl_factor), Array(forc_pbot10),
-            Array(CO2_p240), Array(O2_p240), Array(c3psn_pft), Array(slatop_pft),
-            Array(leafcn_pft), Array(rhol_pft), Array(taul_pft), Array(o3coefjmax),
-            luna_params, dtime, nlevcan_val)
-        for (dev, hst) in ((photosyns, psH), (temperature, tpH), (canopystate, caH),
-                           (surfalb, saH), (solarabs, soH), (waterdiag, wdH),
-                           (frictionvel, fvH), (patchdata, pdH), (gridcell, gcH))
-            _luna_scatter_back!(dev, hst)
-        end
-        return nothing
-    end
-
-    fnps = 0.15
-    FT = eltype(dayl_factor)
-    FNCa_z = zeros(FT, nlevcan_val)
-    # Reference NUE is patch-invariant (depends only on luna_params) — compute once here
-    # and pass into nitrogen_allocation! (hoisted out of the per-patch/per-iteration loop;
-    # also keeps it off a future device kernel since it has no working-precision input).
+    # FT follows the STATE (photosyns), not the loose forcing args — on a device run the
+    # state is Float32 while the forcing/pft args may arrive as host Float64 (moved to the
+    # backend below); on host both are Float64. Wrong FT here -> MtlArray{Float64} (Metal-fatal).
+    FT = eltype(photosyns.vcmx25_z_patch)
+    # Reference NUE is patch-invariant (host-side); the chain reads only luna_params
+    # SCALARS -> carry them in an isbits _LunaScalars (its Vector fields can't cross to a GPU).
     NUEjref, NUEcref, _Kj2Kcref = nue_ref(luna_params)
+    lp = _LunaScalars(luna_params, FT)
 
-    for p in bounds
-        mask_patch[p] || continue
+    _ref = photosyns.vcmx25_z_patch
+    psn = _LunaPsn(photosyns.vcmx25_z_patch, photosyns.jmx25_z_patch,
+        photosyns.vcmx25_z_last_valid_patch, photosyns.jmx25_z_last_valid_patch,
+        photosyns.pnlc_z_patch, photosyns.enzs_z_patch,
+        photosyns.lnca_patch, photosyns.fpsn24_patch)
+    clim = _LunaClim(temperature.t_veg_day_patch, temperature.t_veg10_day_patch,
+        temperature.t_veg10_night_patch, temperature.t_a10_patch)
+    rad = _LunaRad(canopystate.tlai_patch, surfalb.nrad_patch, surfalb.tlai_z_patch,
+        solarabs.par240d_z_patch, solarabs.par240x_z_patch,
+        waterdiag.rh10_af_patch, frictionvel.rb10_patch)
+    # loose forcing + host pft params moved onto the state backend (no-op on host).
+    idx = _LunaIdx(patchdata.itype, patchdata.gridcell, gridcell.dayl,
+        _to_backend_like(_ref, FT, dayl_factor), _to_backend_like(_ref, FT, forc_pbot10),
+        _to_backend_like(_ref, FT, CO2_p240), _to_backend_like(_ref, FT, O2_p240),
+        _to_backend_like(_ref, FT, o3coefjmax))
+    pft = _LunaPft(_to_backend_like(_ref, FT, c3psn_pft), _to_backend_like(_ref, FT, slatop_pft),
+        _to_backend_like(_ref, FT, rhol_pft), _to_backend_like(_ref, FT, taul_pft),
+        _to_backend_like(_ref, FT, luna_params.jmaxb0), _to_backend_like(_ref, FT, luna_params.jmaxb1),
+        _to_backend_like(_ref, FT, luna_params.wc2wjb0))
 
-        # 1-based PFT index: CLM.jl pftcon arrays are length MXPFT+1 (row p = PFT
-        # p-1), whereas Fortran LunaMod indexes c3psn(itype) with 0-based pftcon.
-        # ft drives only the pftcon lookups (rhol/taul/slatop/c3psn/leafcn) below.
-        ft = patchdata.itype[p] + 1
-        g  = patchdata.gridcell[p]
-        c  = patchdata.column[p]
+    # Per-thread FNCa scratch (row p), allocated once on the state backend.
+    np = size(photosyns.vcmx25_z_patch, 1)
+    fnca = fill!(similar(_ref, FT, np, max(nlevcan_val, 1)), zero(FT))
 
-        # Check whether it is the first day
-        if temperature.t_veg_day_patch[p] != SPVAL
-            # Get climate drivers
-            CO2a10   = CO2_p240[p]
-            O2a10    = O2_p240[p]
-            hourpd   = gridcell.dayl[g] / 3600.0
-            tleafd10 = temperature.t_veg10_day_patch[p] - TFRZ
-            tleafn10 = temperature.t_veg10_night_patch[p] - TFRZ
-            tleaf10  = (gridcell.dayl[g] * tleafd10 + (86400.0 - gridcell.dayl[g]) * tleafn10) / 86400.0
-            tair10   = temperature.t_a10_patch[p] - TFRZ
-            relh10   = smooth_min(1.0, waterdiag.rh10_af_patch[p])
-            rb10v    = frictionvel.rb10_patch[p]
-
-            # Enzyme turnover rate
-            EnzTurnoverTFactor = LUNA_Q10Enz^(0.1 * (smooth_min(40.0, tleaf10) - 25.0))
-            max_daily_pchg = EnzTurnoverTFactor * luna_params.enzyme_turnover_daily
-
-            # Radiation absorption
-            rabsorb = 1.0 - rhol_pft[ft, 1] - taul_pft[ft, 1]
-
-            # Nitrogen allocation model
-            if canopystate.tlai_patch[p] > 0.0 && photosyns.lnca_patch[p] > 0.0
-                RadTop = solarabs.par240d_z_patch[p, 1] / rabsorb
-                PARTop = RadTop * 4.6  # conversion from W/m2 to umol/m2/s
-
-                if round(Int, c3psn_pft[ft]) == 1
-                    if photosyns.fpsn24_patch[p] > 0.0  # only optimize if growth and C3
-                        nrad_p = surfalb.nrad_patch[p]
-
-                        # First pass: compute FNCa_z profile
-                        for z in 1:nrad_p
-                            if surfalb.tlai_z_patch[p, z] > 0.0
-                                qabs = solarabs.par240d_z_patch[p, z] / rabsorb
-                                PARi10 = qabs * 4.6
-                            else
-                                PARi10 = 0.01
-                            end
-                            relRad = PARi10 / PARTop
-                            relCLNCa = 0.1802 * log(relRad) + 1.0  # see Ali et al 2015
-                            relCLNCa = smooth_max(0.2, relCLNCa)
-                            relCLNCa = smooth_min(1.0, relCLNCa)
-
-                            SNCa = 1.0 / slatop_pft[ft] * LUNA_SNC
-                            lnc_p = photosyns.lnca_patch[p]
-                            if 0.9 * lnc_p > SNCa
-                                FNCa_z[z] = relCLNCa * (lnc_p - SNCa)
-                            else
-                                FNCa_z[z] = relCLNCa * 0.1 * lnc_p
-                            end
-                        end
-
-                        # Second pass: nitrogen allocation per layer
-                        for z in 1:nrad_p
-                            FNCa = FNCa_z[z]
-                            if FNCa > 15.0  # boundary check
-                                FNCa = 15.0
-                                @warn "LUNA: leaf nitrogen content unrealistically high (>15.0 g N/m2 leaf) for patch=$p z=$z pft=$ft"
-                            end
-
-                            radmax2mean = solarabs.par240x_z_patch[p, z] / solarabs.par240d_z_patch[p, z]
-                            if surfalb.tlai_z_patch[p, z] > 0.0
-                                qabs = solarabs.par240d_z_patch[p, z] / rabsorb
-                                PARi10 = qabs * 4.6
-                            else
-                                PARi10 = 0.01
-                            end
-                            PARimx10 = PARi10 * radmax2mean
-
-                            # Nitrogen allocation model
-                            PNlcold = photosyns.pnlc_z_patch[p, z]
-                            PNetold = 0.0
-                            PNrespold = 0.0
-                            PNcbold = 0.0
-
-                            PNstoreopt, PNlcopt, PNetopt, PNrespopt, PNcbopt =
-                                nitrogen_allocation!(FNCa, forc_pbot10[p], relh10, CO2a10, O2a10,
-                                    PARi10, PARimx10, rb10v, hourpd, tair10, tleafd10, tleafn10,
-                                    luna_params.jmaxb0[ft], luna_params.jmaxb1[ft], luna_params.wc2wjb0[ft],
-                                    PNlcold, PNetold, PNrespold, PNcbold, dayl_factor[p],
-                                    o3coefjmax[p], NUEjref, NUEcref, luna_params)
-
-                            vcmx25_opt = PNcbopt * FNCa * LUNA_Fc25
-                            jmx25_opt  = PNetopt * FNCa * LUNA_Fj25
-
-                            # Constrained update of vcmx25
-                            chg = vcmx25_opt - photosyns.vcmx25_z_patch[p, z]
-                            chg_constrn = smooth_min(smooth_abs(chg), photosyns.vcmx25_z_patch[p, z] * max_daily_pchg)
-                            photosyns.vcmx25_z_patch[p, z] += sign(chg) * chg_constrn
-                            photosyns.vcmx25_z_last_valid_patch[p, z] = photosyns.vcmx25_z_patch[p, z]
-
-                            # Constrained update of jmx25
-                            chg = jmx25_opt - photosyns.jmx25_z_patch[p, z]
-                            chg_constrn = smooth_min(smooth_abs(chg), photosyns.jmx25_z_patch[p, z] * max_daily_pchg)
-                            photosyns.jmx25_z_patch[p, z] += sign(chg) * chg_constrn
-                            photosyns.jmx25_z_last_valid_patch[p, z] = photosyns.jmx25_z_patch[p, z]
-
-                            photosyns.pnlc_z_patch[p, z] = PNlcopt
-
-                            if photosyns.enzs_z_patch[p, z] < 1.0
-                                photosyns.enzs_z_patch[p, z] *= (1.0 + max_daily_pchg)
-                            end
-
-                            # Sanity checks
-                            if isnan(photosyns.vcmx25_z_patch[p, z])
-                                if _is_ad_type(eltype(photosyns.vcmx25_z_patch))
-                                    @warn "LUNA: Vcmx25 is NaN (AD mode, clamping to 50)" maxlog=1
-                                    photosyns.vcmx25_z_patch[p, z] = 50.0
-                                else
-                                    error("LUNA: Vcmx25 is NaN for patch=$p z=$z pft=$ft")
-                                end
-                            end
-                            if photosyns.vcmx25_z_patch[p, z] > 1000.0 || photosyns.vcmx25_z_patch[p, z] < 0.0
-                                @warn "LUNA: Vcmx25 unrealistic (>1000 or negative) for patch=$p z=$z pft=$ft, resetting to 50"
-                                photosyns.vcmx25_z_patch[p, z] = 50.0
-                            end
-                            if isnan(photosyns.jmx25_z_patch[p, z])
-                                if _is_ad_type(eltype(photosyns.jmx25_z_patch))
-                                    @warn "LUNA: Jmx25 is NaN (AD mode, clamping to 85)" maxlog=1
-                                    photosyns.jmx25_z_patch[p, z] = 85.0
-                                else
-                                    error("LUNA: Jmx25 is NaN for patch=$p z=$z pft=$ft")
-                                end
-                            end
-                            if photosyns.jmx25_z_patch[p, z] > 2000.0 || photosyns.jmx25_z_patch[p, z] < 0.0
-                                @warn "LUNA: Jmx25 unrealistic (>2000 or negative) for patch=$p z=$z pft=$ft, resetting to 85"
-                                photosyns.jmx25_z_patch[p, z] = 85.0
-                            end
-                        end  # z loop (growth)
-                    else  # decay during drought or winter
-                        max_daily_decay = smooth_min(0.5, 0.1 * max_daily_pchg)
-                        nrad_p = surfalb.nrad_patch[p]
-                        for z in 1:nrad_p
-                            if photosyns.enzs_z_patch[p, z] > 0.5
-                                photosyns.enzs_z_patch[p, z] *= (1.0 - max_daily_decay)
-                                photosyns.jmx25_z_patch[p, z] *= (1.0 - max_daily_decay)
-                                photosyns.vcmx25_z_patch[p, z] *= (1.0 - max_daily_decay)
-                            end
-                        end
-                    end  # growth check
-                end  # C3 check
-            else  # no LAI or no LNC: use last valid values
-                nrad_p = surfalb.nrad_patch[p]
-                for z in 1:nrad_p
-                    photosyns.jmx25_z_patch[p, z] = photosyns.jmx25_z_last_valid_patch[p, z]
-                    photosyns.vcmx25_z_patch[p, z] = photosyns.vcmx25_z_last_valid_patch[p, z]
-                end
-            end  # LAI/LNC check
-        end  # first day check
-    end  # patch loop
+    let be = _kernel_backend(_ref)
+        lo = first(bounds); hi = last(bounds)
+        if hi >= lo
+            _luna_capacity_kernel!(be)(psn, clim, rad, idx, pft, lp, mask_patch,
+                lo, hi, FT(NUEjref), FT(NUEcref), fnca; ndrange = hi)
+            KA.synchronize(be)
+        end
+    end
     return nothing
 end
