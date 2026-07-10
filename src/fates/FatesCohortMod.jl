@@ -743,6 +743,78 @@ function InitPRTBoundaryConditions(this::fates_cohort_type)
 end
 
 """
+    sync_cohort_to_prt_bcs!(this)   /   sync_prt_bcs_to_cohort!(this)
+
+Refresh the PARTEH boundary-condition `Ref`s from the live cohort fields before an
+allocation/turnover solve, and copy the updated inout/out `Ref`s back afterward.
+[`InitPRTBoundaryConditions`](@ref) registers every BC as a `Ref(field)` captured ONCE
+at cohort creation — the Julia stand-in for the Fortran pointer that ALIASES the field.
+Nothing else refreshes them, so without this the solve reads stale cold-start inputs
+(most importantly `netdc`/`npp_acc` ≡ 0 → zero allocation → no growth) and its outputs
+(grown `dbh`, effluxes) never reach the cohort. These two functions mirror the exact
+BC↔field map in `InitPRTBoundaryConditions` for each PARTEH hypothesis: push covers all
+`bc_in` + `bc_inout`; pull covers all `bc_inout` + `bc_out`.
+"""
+function sync_cohort_to_prt_bcs!(this::fates_cohort_type)
+    prt = this.prt
+    mode = hlm_parteh_mode[]
+    if mode == prt_carbon_allom_hyp
+        prt.bc_inout[ac_bc_inout_id_dbh].rval[]   = this.dbh
+        prt.bc_inout[ac_bc_inout_id_netdc].rval[] = this.npp_acc
+        prt.bc_in[ac_bc_in_id_cdamage].ival[] = this.crowndamage
+        prt.bc_in[ac_bc_in_id_pft].ival[]     = this.pft
+        prt.bc_in[ac_bc_in_id_ctrim].rval[]   = this.canopy_trim
+        prt.bc_in[ac_bc_in_id_lstat].ival[]   = this.status_coh
+        prt.bc_in[ac_bc_in_id_efleaf].rval[]  = this.efleaf_coh
+        prt.bc_in[ac_bc_in_id_effnrt].rval[]  = this.effnrt_coh
+        prt.bc_in[ac_bc_in_id_efstem].rval[]  = this.efstem_coh
+    elseif mode == prt_cnp_flex_allom_hyp
+        prt.bc_in[acnp_bc_in_id_pft].ival[]      = this.pft
+        prt.bc_in[acnp_bc_in_id_ctrim].rval[]    = this.canopy_trim
+        prt.bc_in[acnp_bc_in_id_lstat].ival[]    = this.status_coh
+        prt.bc_in[acnp_bc_in_id_efleaf].rval[]   = this.efleaf_coh
+        prt.bc_in[acnp_bc_in_id_effnrt].rval[]   = this.effnrt_coh
+        prt.bc_in[acnp_bc_in_id_efstem].rval[]   = this.efstem_coh
+        prt.bc_in[acnp_bc_in_id_netdc].rval[]    = this.npp_acc
+        prt.bc_in[acnp_bc_in_id_nc_repro].rval[] = this.nc_repro
+        prt.bc_in[acnp_bc_in_id_pc_repro].rval[] = this.pc_repro
+        prt.bc_in[acnp_bc_in_id_cdamage].ival[]  = this.crowndamage
+        prt.bc_inout[acnp_bc_inout_id_dbh].rval[]         = this.dbh
+        prt.bc_inout[acnp_bc_inout_id_resp_excess].rval[] = this.resp_excess
+        prt.bc_inout[acnp_bc_inout_id_l2fr].rval[]        = this.l2fr
+        prt.bc_inout[acnp_bc_inout_id_cx_int].rval[]      = this.cx_int
+        prt.bc_inout[acnp_bc_inout_id_emadcxdt].rval[]    = this.ema_dcxdt
+        prt.bc_inout[acnp_bc_inout_id_cx0].rval[]         = this.cx0
+        prt.bc_inout[acnp_bc_inout_id_netdn].rval[]       = this.daily_n_gain
+        prt.bc_inout[acnp_bc_inout_id_netdp].rval[]       = this.daily_p_gain
+    end
+    return nothing
+end
+
+function sync_prt_bcs_to_cohort!(this::fates_cohort_type)
+    prt = this.prt
+    mode = hlm_parteh_mode[]
+    if mode == prt_carbon_allom_hyp
+        this.dbh     = prt.bc_inout[ac_bc_inout_id_dbh].rval[]
+        this.npp_acc = prt.bc_inout[ac_bc_inout_id_netdc].rval[]
+    elseif mode == prt_cnp_flex_allom_hyp
+        this.dbh          = prt.bc_inout[acnp_bc_inout_id_dbh].rval[]
+        this.resp_excess  = prt.bc_inout[acnp_bc_inout_id_resp_excess].rval[]
+        this.l2fr         = prt.bc_inout[acnp_bc_inout_id_l2fr].rval[]
+        this.cx_int       = prt.bc_inout[acnp_bc_inout_id_cx_int].rval[]
+        this.ema_dcxdt    = prt.bc_inout[acnp_bc_inout_id_emadcxdt].rval[]
+        this.cx0          = prt.bc_inout[acnp_bc_inout_id_cx0].rval[]
+        this.daily_n_gain = prt.bc_inout[acnp_bc_inout_id_netdn].rval[]
+        this.daily_p_gain = prt.bc_inout[acnp_bc_inout_id_netdp].rval[]
+        this.daily_c_efflux = prt.bc_out[acnp_bc_out_id_cefflux].rval[]
+        this.daily_n_efflux = prt.bc_out[acnp_bc_out_id_nefflux].rval[]
+        this.daily_p_efflux = prt.bc_out[acnp_bc_out_id_pefflux].rval[]
+        this.cnp_limiter    = prt.bc_out[acnp_bc_out_id_limiter].ival[]
+    end
+    return nothing
+end
+
+"""
     UpdateCohortBioPhysRates(this::fates_cohort_type)
 
 Update the four canopy-top biophysical rates (`vcmax25top`, `jmax25top`,

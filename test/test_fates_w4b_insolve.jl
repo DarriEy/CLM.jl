@@ -233,11 +233,14 @@ const _Cw = CLM
             #     (b) rb_pa is the in-loop boundary-layer resistance, NOT the removed
             #         adjacent path's hard-coded rb=50.0 stand-in (isequal so the
             #         comparison holds even when the MVP cold start leaves rb NaN).
-            #     (c) filter_photo_pa == 2 ("compute") — the pack ran this step.
+            #     (c) filter_photo_pa == 3 ("computed + accumulated") — the in-solve pack
+            #         flagged this patch 2 ("compute") and the post-solve wrap_accumulatefluxes
+            #         step transitioned it 2→3 (mirrors Fortran); it stays 3 until the next
+            #         step's canopy solve resets it to 1. (Both prove the pack ran this step.)
             bc = inst.fates.bc_in[1]
             tveg_solved = inst.temperature.t_veg_patch[pveg]
             @test isequal(bc.t_veg_pa[1], tveg_solved)
-            @test bc.filter_photo_pa[1] == 2
+            @test bc.filter_photo_pa[1] == 3
             @test !isequal(bc.rb_pa[1], 50.0)   # in-loop rb, not the old adjacent stand-in
             # (d) the in-loop pack populated the bc_in with the current-step forcing
             #     (finite, matching the driver) — FATES was genuinely invoked this

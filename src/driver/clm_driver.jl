@@ -1244,6 +1244,18 @@ function clm_drv_core!(config::CLMDriverConfig,
     _medint_pft = _use_calib_med ? _onbk(pftcon.medlynintercept) : fill(100.0, MXPFT + 1)
     _medslp_pft = _use_calib_med ? _onbk(pftcon.medlynslope)     : fill(6.0, MXPFT + 1)
     _crop_pft   = config.use_cn ? _onbk(pftcon.crop)            : Float64[]
+    # FATES: reset the photosynthesis filter to 1 ("do nothing") at the START of the
+    # canopy-flux/photosynthesis step (mirrors Fortran filter_photo_pa(:)=1 in the
+    # CanopyFluxes photosynthesis setup). The in-solve pack re-flags computing patches to
+    # 2; the post-solve accumulate transitions them 2→3. Resetting here (not after the
+    # accumulate) means a step that skips photosynthesis leaves the filter at 1 instead of
+    # a stale 3, so AccumulateFluxes_ED does not re-accumulate stale per-step fluxes.
+    if config.use_fates && inst.fates !== nothing
+        for s in 1:inst.fates.nsites
+            fill!(inst.fates.bc_in[s].filter_photo_pa, 1)
+        end
+    end
+
     # Positional call into canopy_fluxes_core! (no kwarg NamedTuple) so Enzyme
     # reverse-mode can compile the differentiated driver. The trailing args after
     # `overrides` are the "default-only back group". We thread the ones that affect
@@ -1349,6 +1361,32 @@ function clm_drv_core!(config::CLMDriverConfig,
         # canopy_fluxes_core! above — its use_fates branch runs
         # FatesPlantRespPhotosynthDrive for each canopy-solve patch, so the
         # multi-patch ifp-walk is handled there by the per-patch canopy loop.)
+
+        # W4b-accumulate — FATES: mirror the Fortran wrap_accumulatefluxes, called at
+        # the END of CanopyFluxes (CanopyFluxesMod:1634). The in-solve photosynthesis
+        # re-packs filter_photo_pa=2 each Newton iteration and computes FRESH per-step
+        # cohort fluxes (gpp/npp/resp_tstep; 0 at night). Transition the patches that
+        # computed this step (==2 → 3, the Fortran wrap_photosynthesis 2→3 step) and run
+        # AccumulateFluxes_ED (which gates on ==3) so the per-step fluxes roll up into the
+        # DAILY gpp/npp/resp_acc that the daily growth+allocation step (EDMainMod) reads.
+        # WITHOUT this accumulation npp_acc ≡ 0 → the allocation grows nothing (dbh frozen,
+        # stand can only lose carbon). The 1-reset happens at the START of the next step's
+        # canopy solve (mirrors Fortran filter_photo_pa(:)=1), so a step that skips
+        # photosynthesis leaves the filter at 1 and is not re-accumulated with stale fluxes.
+        let s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                fbc = inst.fates.bc_in[s]
+                for (ifp, _p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    fbc.filter_photo_pa[ifp] == 2 && (fbc.filter_photo_pa[ifp] = 3)
+                end
+            end
+        end
+        AccumulateFluxes_ED(inst.fates.nsites, inst.fates.sites,
+                            inst.fates.bc_in, inst.fates.bc_out, dtime)
+
         # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
         # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
         # the just-computed cohort per-step fluxes. Write-only; no-op until the
