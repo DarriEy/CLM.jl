@@ -592,6 +592,22 @@ function clm_drv!(config::CLMDriverConfig,
                    jday::Int = 1,
                    year::Int = 0,
                    photosyns::PhotosynthesisData = PhotosynthesisData())
+    # FATES is CPU-only (host-fallback): its driver hooks scalar-index the per-column
+    # CLM arrays, which are device arrays when the inst lives on a GPU. Under use_fates,
+    # run the step inside GPUArraysCore.@allowscalar so those few per-column/patch scalar
+    # accesses are permitted seamlessly. This is a no-op on a CPU inst (and on any CPU-only
+    # run), and the non-FATES biogeophysics uses kernels (never scalar indexing), so it
+    # hides nothing there — shared scalar-indexing bugs still surface on non-fates GPU runs
+    # (which take the plain branch below). The default (!use_fates) path is byte-identical.
+    # config.use_fates is a compile-time property of CLMDriverConfig{Mode}, so the branch
+    # folds away and the differentiable !use_fates entry never sees the wrapper.
+    if config.use_fates
+        return GPUArraysCore.@allowscalar clm_drv_core!(config, inst, filt,
+            filt_inactive_and_active, bounds_proc, doalb, nextsw_cday, declinp1, declin,
+            obliqr, rstwr, nlend, rdate, rof_prognostic, nstep, is_first_step,
+            is_beg_curr_day, is_end_curr_day, is_beg_curr_year, dtime, mon, day, photosyns,
+            is_end_curr_year, secs, jday, year)
+    end
     return clm_drv_core!(config, inst, filt, filt_inactive_and_active, bounds_proc,
         doalb, nextsw_cday, declinp1, declin, obliqr, rstwr, nlend, rdate, rof_prognostic,
         nstep, is_first_step, is_beg_curr_day, is_end_curr_day, is_beg_curr_year,

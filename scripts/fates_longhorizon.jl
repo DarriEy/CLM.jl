@@ -305,4 +305,8 @@ function main()
     println(nfail == 0 ? "\n  ★ FATES stable + demographically active over $ndays days" : "\n  ✗ $nfail check(s) failed")
     return nfail
 end
-exit(main())
+# Run as a script; when `include`d (e.g. by the Metal FATES harness reusing build()),
+# just define the functions.
+if abspath(PROGRAM_FILE) == @__FILE__
+    exit(main())
+end
