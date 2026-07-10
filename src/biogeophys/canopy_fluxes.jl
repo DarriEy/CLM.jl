@@ -264,12 +264,14 @@ function cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
         dleaf_pft = dleaf_pft, forc_pbot_col = forc_pbot_col, el = el)
     T = eltype(tlbef)
     let be = _kernel_backend(tlbef)
-        _cf_resist_kernel!(be)(o, inp, filterp, patch_data.column, patch_data.gridcell,
-            patch_data.itype, active, T(csoilc_val), use_undercanopy_stability,
-            use_biomass_heat_storage, use_lch4, T(params.cv), T(params.a_coef),
-            T(params.a_exp), T(VKC), T(GRAV), T(NU_PARAM), T(RIA_CANOPY),
-            ABOVE_CANOPY, BELOW_CANOPY; ndrange = fn)
-        KA.synchronize(be)
+        if fn > 0   # empty exposed-veg filter (glacier/bare) -> skip; KA Metal ndrange==0 divides by zero
+            _cf_resist_kernel!(be)(o, inp, filterp, patch_data.column, patch_data.gridcell,
+                patch_data.itype, active, T(csoilc_val), use_undercanopy_stability,
+                use_biomass_heat_storage, use_lch4, T(params.cv), T(params.a_coef),
+                T(params.a_exp), T(VKC), T(GRAV), T(NU_PARAM), T(RIA_CANOPY),
+                ABOVE_CANOPY, BELOW_CANOPY; ndrange = fn)
+            KA.synchronize(be)
+        end
     end
     return nothing
 end
@@ -725,14 +727,16 @@ function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
     _dc2_dbg  = dc2_dbg  === nothing ? similar(wtg) : dc2_dbg
     _efsh_dbg = efsh_dbg === nothing ? similar(wtg) : efsh_dbg
     let be = _kernel_backend(wtg)
-        _cf_energy_kernel!(be)(o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
-            _dc2_dbg, _efsh_dbg,
-            filterp, active, patch_data.column,
-            col_data.snl, canopystate.frac_veg_nosno_patch,
-            soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
-            length(energyflux.canopy_cond_patch), ABOVE_CANOPY, BELOW_CANOPY,
-            nlevsno; ndrange = fn)
-        KA.synchronize(be)
+        if fn > 0   # empty exposed-veg filter (glacier/bare) -> skip; KA Metal ndrange==0 divides by zero
+            _cf_energy_kernel!(be)(o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
+                _dc2_dbg, _efsh_dbg,
+                filterp, active, patch_data.column,
+                col_data.snl, canopystate.frac_veg_nosno_patch,
+                soilevap_beta, soil_resis_sl14, use_lch4, use_hydrstress,
+                length(energyflux.canopy_cond_patch), ABOVE_CANOPY, BELOW_CANOPY,
+                nlevsno; ndrange = fn)
+            KA.synchronize(be)
+        end
     end
     return nothing
 end
@@ -1694,10 +1698,15 @@ function canopy_fluxes_core!(
     lwq_g = CfLwqG(; forc_pco2 = forc_pco2_grc, forc_po2 = forc_po2_grc,
         forc_u = forc_u_grc, forc_v = forc_v_grc)
     let be = _kernel_backend(air)
-        _cf_longwave_qsat_kernel!(be)(lwq_out, lwq_p, lwq_c, lwq_g, nmozsgn,
-            filterp, patch_data.column, patch_data.gridcell,
-            convert(eltype(air), params.wind_min); ndrange = fn)
-        KA.synchronize(be)
+        # Guard the empty filter: a glacier/bare domain can have 0 exposed-veg patches
+        # (fn==0). A 0-ndrange launch is a no-op on the KA CPU backend but hits an integer
+        # divide-by-zero in KA's Metal ndrange partitioning — skip it (byte-identical).
+        if fn > 0
+            _cf_longwave_qsat_kernel!(be)(lwq_out, lwq_p, lwq_c, lwq_g, nmozsgn,
+                filterp, patch_data.column, patch_data.gridcell,
+                convert(eltype(air), params.wind_min); ndrange = fn)
+            KA.synchronize(be)
+        end
     end
 
     # Forcing-height-below-canopy warning (host-side diagnostic; matches the scalar
