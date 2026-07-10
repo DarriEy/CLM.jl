@@ -197,7 +197,16 @@ function main()
     for i in 1:nsteps
         step_start = start_date + Second((i-1)*Int(dtime))
         is_beg = (Dates.hour(step_start)==0 && Dates.minute(step_start)==0 && Dates.second(step_start)==0)
-        _C.read_forcing_step!(fr, inst.atm2lnd, step_start, 1, 1;
+        # Multi-year forcing wrap: the forcing file holds ONE year (fyr=2004). For
+        # runs >365 days the model date rolls into fyr+1… which the file lacks, and
+        # the reader (interp_time=true → _find_bracket_time) would CLAMP to the last
+        # 2004 timestep — freezing stale Dec-31 forcing for the entire 2nd year on.
+        # Map the model instant back onto the forcing year (same month/day/hour, so a
+        # full realistic diurnal+annual cycle repeats each year). yr_off=0 in year 1
+        # → forcing_time==step_start (byte-identical to the old single-year path).
+        yr_off = Dates.year(step_start) - fyr
+        forcing_time = yr_off == 0 ? step_start : step_start - Dates.Year(yr_off)
+        _C.read_forcing_step!(fr, inst.atm2lnd, forcing_time, 1, 1;
             gridcell_latdeg=inst.gridcell.latdeg, gridcell_londeg=inst.gridcell.londeg, dtime=Int(dtime))
         inst.atm2lnd.forc_topo_grc[1]=200.0; inst.topo.topo_col[1]=200.0   # matched → no lapse correction
         _C.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
