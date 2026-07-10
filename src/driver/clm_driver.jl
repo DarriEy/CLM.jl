@@ -1403,6 +1403,16 @@ function clm_drv_core!(config::CLMDriverConfig,
         AccumulateFluxes_ED(inst.fates.nsites, inst.fates.sites,
                             inst.fates.bc_in, inst.fates.bc_out, dtime)
 
+        # W4b-runningmeans — FATES: mirror the Fortran UpdateFatesRMeansTStep, called on
+        # every model timestep after the photosynthesis solve. It rolls the veg-temperature
+        # running means (tveg24 / tveg_lpa / tveg_longterm) from bc_in.t_veg_pa, the seedling
+        # PAR/SMP/MDD means, and the smoothed site NPP (bc_out.ema_npp). WITHOUT this the
+        # temperature means stay FROZEN at their cold-start init (temp_init_veg = 288.15 K =
+        # 15 °C): the FATES cold-deciduous phenology then reads a constant, wrong 15 °C veg
+        # temperature and eventually fires a spurious synchronized leaf-off that never re-
+        # flushes → carbon starvation → a phantom boom/bust die-back on multi-year runs.
+        UpdateFatesRMeansTStep(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
+
         # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
         # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
         # the just-computed cohort per-step fluxes. Write-only; no-op until the
