@@ -5,6 +5,7 @@ using Dates
 using NCDatasets
 import Adapt  # device-movable state structs (Adapt.@adapt_structure)
 import KernelAbstractions  # backend-agnostic physics kernels (CPU/GPU)
+import GPUArraysCore  # @allowscalar for the CPU-only FATES host-fallback on a GPU inst
 import Atomix  # atomic scatter (patch→column accumulation) in kernels
 # Bring the KA macros into module scope HERE (before any include) so kernels can be
 # defined in early-included files too (e.g. types/friction_velocity.jl), not just in
