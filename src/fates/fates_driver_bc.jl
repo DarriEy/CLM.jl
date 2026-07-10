@@ -275,7 +275,7 @@ function fates_pack_bcin_btran!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         tk = temp.t_soisno_col[c, joff + j]
         bc.tempk_sl[j]      = tk
         bc.t_soisno_sl[j]   = tk
-        bc.h2o_liqvol_sl[j] = wdb.h2osoi_liqvol_col[c, j]
+        bc.h2o_liqvol_sl[j] = wdb.h2osoi_liqvol_col[c, joff + j]
         bc.watsat_sl[j]     = ss.watsat_col[c, j]
         bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
     end
@@ -290,7 +290,7 @@ function fates_pack_bcin_btran!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         # where s = liqvol/watsat clamped to [0.01, 1].
         for j in 1:nlevsoil
             wsat = ss.watsat_col[c, j]
-            scl  = wsat > 0.0 ? clamp(wdb.h2osoi_liqvol_col[c, j] / wsat, 0.01, 1.0) : 0.01
+            scl  = wsat > 0.0 ? clamp(wdb.h2osoi_liqvol_col[c, joff + j] / wsat, 0.01, 1.0) : 0.01
             sucsat = ss.sucsat_col[c, j]   # minimum soil suction (mm, positive)
             bsw    = ss.bsw_col[c, j]
             bc.smp_sl[j] = -sucsat * scl^(-bsw)
@@ -388,12 +388,12 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         tk = temp.t_soisno_col[c, joff + j]
         bc.tempk_sl[j]        = tk
         bc.t_soisno_sl[j]     = tk
-        bc.h2o_liqvol_sl[j]   = wdb.h2osoi_liqvol_col[c, j]
+        bc.h2o_liqvol_sl[j]   = wdb.h2osoi_liqvol_col[c, joff + j]
         bc.watsat_sl[j]       = ss.watsat_col[c, j]
         bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
 
         wsat = ss.watsat_col[c, j]
-        scl  = wsat > 0.0 ? clamp(wdb.h2osoi_liqvol_col[c, j] / wsat, 0.01, 1.0) : 0.01
+        scl  = wsat > 0.0 ? clamp(wdb.h2osoi_liqvol_col[c, joff + j] / wsat, 0.01, 1.0) : 0.01
         bc.smp_sl[j] = -ss.sucsat_col[c, j] * scl^(-ss.bsw_col[c, j])
     end
 

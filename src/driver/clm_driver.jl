@@ -1349,6 +1349,39 @@ function clm_drv_core!(config::CLMDriverConfig,
         # canopy_fluxes_core! above — its use_fates branch runs
         # FatesPlantRespPhotosynthDrive for each canopy-solve patch, so the
         # multi-patch ifp-walk is handled there by the per-patch canopy loop.)
+
+        # W4b-accumulate — FATES: mirror the Fortran wrap_accumulatefluxes, called at
+        # the END of CanopyFluxes (CanopyFluxesMod:1634). The in-solve photosynthesis
+        # re-packs filter_photo_pa=2 each Newton iteration and computes FRESH per-step
+        # cohort fluxes (gpp/npp/resp_tstep; 0 at night). Transition the patches that
+        # computed this step (==2 → 3, the wrap_photosynthesis 2→3 step) and run
+        # AccumulateFluxes_ED so the per-step fluxes roll up into the DAILY gpp/npp/
+        # resp_acc that the daily growth+allocation step (EDMainMod) reads. WITHOUT this
+        # accumulation npp_acc ≡ 0 → the allocation grows nothing (dbh frozen, stand can
+        # only lose carbon). Reset the filter to 1 afterward so a step that skips
+        # photosynthesis is not re-accumulated with stale fluxes.
+        let s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                fbc = inst.fates.bc_in[s]
+                for (ifp, _p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    fbc.filter_photo_pa[ifp] == 2 && (fbc.filter_photo_pa[ifp] = 3)
+                end
+            end
+        end
+        AccumulateFluxes_ED(inst.fates.nsites, inst.fates.sites,
+                            inst.fates.bc_in, inst.fates.bc_out, dtime)
+        let s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                fill!(inst.fates.bc_in[s].filter_photo_pa, 1)
+            end
+        end
+
         # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
         # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
         # the just-computed cohort per-step fluxes. Write-only; no-op until the

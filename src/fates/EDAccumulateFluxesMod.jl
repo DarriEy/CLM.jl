@@ -62,12 +62,17 @@ function AccumulateFluxes_ED(nsites::Integer,
                     while ccohort !== nothing
 
                         # Accumulate fluxes from hourly to daily values.
-                        # _tstep fluxes are KgC/indiv/timestep, _acc are KgC/indiv/day
-                        ccohort.npp_acc  = ccohort.npp_acc  + ccohort.npp_tstep
-                        ccohort.gpp_acc  = ccohort.gpp_acc  + ccohort.gpp_tstep
-                        ccohort.resp_acc = ccohort.resp_acc + ccohort.resp_tstep
+                        # _tstep fluxes are KgC/indiv/timestep, _acc are KgC/indiv/day.
+                        # The daily accumulator starts from 0 and sums finite per-step
+                        # fluxes; guard the sums so an unset (NaN) accumulator or a cohort
+                        # whose instantaneous flux was not computed this step (NaN _tstep)
+                        # contributes 0 rather than poisoning the whole-site mass balance.
+                        _fz(x) = isfinite(x) ? x : 0.0
+                        ccohort.npp_acc  = _fz(ccohort.npp_acc)  + _fz(ccohort.npp_tstep)
+                        ccohort.gpp_acc  = _fz(ccohort.gpp_acc)  + _fz(ccohort.gpp_tstep)
+                        ccohort.resp_acc = _fz(ccohort.resp_acc) + _fz(ccohort.resp_tstep)
 
-                        ccohort.sym_nfix_daily = ccohort.sym_nfix_daily + ccohort.sym_nfix_tstep
+                        ccohort.sym_nfix_daily = _fz(ccohort.sym_nfix_daily) + _fz(ccohort.sym_nfix_tstep)
 
                         # weighted mean of D13C by gpp
                         if (ccohort.gpp_acc + ccohort.gpp_tstep) == 0.0

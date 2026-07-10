@@ -381,6 +381,14 @@ function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
             #            update targets here)
             #   phase 3: stature growth from any left-over resources
             # ----------------------------------------------------------------
+            # Refresh the PARTEH boundary-condition Refs from the live cohort fields
+            # before allocating. The port backs each BC by a Ref captured at cohort
+            # registration (Julia stand-in for the Fortran aliasing pointer); nothing
+            # else refreshes them, so without this DailyPRT reads a STALE carbon input
+            # (netdc/npp_acc ≡ cold-start 0) → allocates zero → biomass never grows
+            # (dbh frozen) and the fixed carbon (gpp_acc) has no sink → mass-balance error.
+            sync_cohort_to_prt_bcs!(currentCohort)
+
             if !newly_recovered
                 DailyPRT!(currentCohort.prt, 1)
             end
@@ -396,6 +404,11 @@ function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
             end
 
             DailyPRT!(currentCohort.prt, 3)
+
+            # Copy the updated inout/out Refs (grown dbh, spent netdc, effluxes, CNP
+            # state) BACK into the cohort fields — DailyPRT wrote the Refs; the
+            # height/allometry/diagnostics/mass-balance below read the fields.
+            sync_prt_bcs_to_cohort!(currentCohort)
 
             # Update mass-balance tracking for the daily nutrient uptake flux,
             # then zero the daily uptakes (they have been used).
