@@ -1314,13 +1314,28 @@ function UpdateFatesRMeansTStep(sites::AbstractVector, bc_in::AbstractVector, bc
     for s in 1:length(sites)
         ifp = 0
         site_npp = 0.0
+        # Representative site veg temperature for the temperature running means. The
+        # port's HLM↔FATES photosynthesis coupling is single-veg-patch (canopy_fluxes
+        # packs only bc_in.t_veg_pa[1] with a SOLVED leaf temperature; the disturbance
+        # patches ifp>1 keep a stale value). All FATES patches at a site share the same
+        # column/gridcell climate and the phenology is site-level, so drive every patch's
+        # tveg24/tveg_lpa/tveg_longterm from the first FINITE t_veg_pa. When none is finite
+        # (e.g. a night/dark step with no solved leaf temperature — as in the unit-test
+        # fixtures) skip the temperature-mean updates entirely, leaving the means at their
+        # init rather than poisoning them with NaN. (NPP + seedling means still update.)
+        tveg_rep = NaN
+        for k in 1:length(bc_in[s].t_veg_pa)
+            if isfinite(bc_in[s].t_veg_pa[k]); tveg_rep = bc_in[s].t_veg_pa[k]; break; end
+        end
         cpatch = sites[s].oldest_patch
         while cpatch !== nothing
             if cpatch.patchno != 0
                 ifp += 1
-                UpdateRMean!(cpatch.tveg24,       bc_in[s].t_veg_pa[ifp])
-                UpdateRMean!(cpatch.tveg_lpa,      bc_in[s].t_veg_pa[ifp])
-                UpdateRMean!(cpatch.tveg_longterm, bc_in[s].t_veg_pa[ifp])
+                if isfinite(tveg_rep)
+                    UpdateRMean!(cpatch.tveg24,       tveg_rep)
+                    UpdateRMean!(cpatch.tveg_lpa,      tveg_rep)
+                    UpdateRMean!(cpatch.tveg_longterm, tveg_rep)
+                end
 
                 # Update the seedling-layer running means (TRS regeneration only).
                 if p.regeneration_model == TRS_regeneration
