@@ -97,6 +97,13 @@ function clm_initialize!(;
     varctl.use_bedrock = use_bedrock
     varctl.all_active = all_active
     varctl.soil_layerstruct_predefined = soil_layerstruct
+    # FATES manages its own patches (up to sum(fates_maxpatches_by_landuse) per site via
+    # disturbance). Reserve that many HLM patch slots per FATES natural-veg column — set
+    # BEFORE the subgrid count/build (steps 6/9) so the patch dimension is sized for them.
+    # Without this the HLM reserves only the surfdata natpft count and FATES's extra
+    # (disturbance) patches are dropped from the HLM coupling.
+    varctl.use_fates = use_fates
+    varctl.fates_maxpatch = use_fates ? fates_maxpatch_total() : 0
 
     # ---- Step 2: Read surface file metadata ----
     (numpft, numcft) = surfrd_get_num_patches(fsurdat)
