@@ -155,6 +155,11 @@ Base.@kwdef mutable struct VarCtl
 
     # --- FATES ---
     use_fates::Bool = false
+    # HLM patch slots to reserve per FATES natural-veg column = FATES maxpatch_total
+    # (sum of fates_maxpatches_by_landuse). 0 => fall back to the surfdata natpft count.
+    # Set early in clm_initialize! so the subgrid count/build reserve enough patch slots
+    # for the patches FATES creates via disturbance (else the extras are dropped).
+    fates_maxpatch::Int = 0
     use_fates_sp::Bool = false
     use_fates_bgc::Bool = false
     use_fates_planthydro::Bool = false

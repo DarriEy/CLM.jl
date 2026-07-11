@@ -40,6 +40,31 @@
 const FATES_PARAMS_DEFAULT_CDL = joinpath(@__DIR__, "..", "..", "data", "fates",
                                           "fates_params_default.cdl")
 
+"""
+    fates_maxpatch_total(cdl_path = FATES_PARAMS_DEFAULT_CDL) -> Int
+
+Lightweight early read of `fates_maxpatches_by_landuse` from the FATES CDL — the sum
+is the maximum number of patches a FATES site may create (via disturbance) across all
+land-use types. `clm_initialize!` needs this BEFORE the subgrid patch count/build to
+reserve enough HLM patch slots per FATES column; the full `read_fates_params!` runs
+much later (in `clm_fates_init!`), hence this one-line text parse rather than a full
+parameter-file read. Returns 0 if the file or the parameter is not found (caller then
+falls back to the surfdata natpft count). Skips the `:units`/`:long_name` attribute
+lines and the `double …(…)` declaration (neither has a `= <values> ;` data body).
+"""
+function fates_maxpatch_total(cdl_path::AbstractString = FATES_PARAMS_DEFAULT_CDL)
+    isfile(cdl_path) || return 0
+    for line in eachline(cdl_path)
+        (occursin("fates_maxpatches_by_landuse", line) && occursin('=', line) &&
+         !occursin("fates_maxpatches_by_landuse:", line)) || continue
+        body = split(split(line, '=')[2], ';')[1]              # "9, 4, 1, 1, 1"
+        vals = [tryparse(Float64, strip(x)) for x in split(body, ',')]
+        clean = Float64[v for v in vals if v !== nothing]
+        return isempty(clean) ? 0 : round(Int, sum(clean))
+    end
+    return 0
+end
+
 # -------------------------------------------------------------------------------------
 # CDL parser
 # -------------------------------------------------------------------------------------

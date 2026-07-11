@@ -637,14 +637,21 @@ function count_subgrid_elements(surf::SurfaceInputData, ng::Int)
         if surf.wt_lunit[g, ISTSOIL] > 0.0 || true  # always create soil landunit
             nl += 1
             nc += 1  # one column for natural veg
-            # Count natural PFTs with non-zero weight
+            # Count natural PFTs with non-zero weight (the baseline patch count)
             n_nat = 0
             for m in 1:natpft_size
                 if surf.wt_nat_patch[g, m] > 0.0
                     n_nat += 1
                 end
             end
-            np += max(n_nat, 1)  # at least bare ground
+            n_nat = max(n_nat, 1)  # at least bare ground
+            if varctl.use_fates && varctl.fates_maxpatch > 0
+                # FATES columns are PADDED to fates_maxpatch + 1 patches so disturbance
+                # patches have HLM slots (must match the build in set_landunit_veg_compete!).
+                np += max(n_nat, varctl.fates_maxpatch + 1)
+            else
+                np += n_nat
+            end
         end
 
         # Crop landunit (ISTCROP)

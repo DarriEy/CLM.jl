@@ -107,7 +107,11 @@ function set_landunit_veg_compete!(surf::SurfaceInputData, gi::Int,
     add_landunit!(lun, li, gi, ISTSOIL, wt)
     add_column!(col, lun, ci, li[], 1, 1.0)
 
-    # Add patches for each PFT with non-zero weight
+    # Add patches for each PFT with non-zero weight — IDENTICAL for the non-FATES and
+    # FATES paths, so the initial stand + patch weights (and hence the dynamics) are
+    # unchanged. For FATES we then PAD the column with extra inactive vegetated patch
+    # slots so its disturbance patches have HLM slots to map onto (up to
+    # fates_maxpatch + 1 total) instead of being dropped from the coupling.
     n_added = 0
     for m in 1:natpft_size
         p_wt = surf.wt_nat_patch[gi, m]
@@ -121,6 +125,14 @@ function set_landunit_veg_compete!(surf::SurfaceInputData, gi::Int,
     # Must have at least one patch (bare ground)
     if n_added == 0
         add_patch!(pch, col, lun, pi, ci[], noveg, 1.0)
+        n_added = 1
+    end
+    if varctl.use_fates && varctl.fates_maxpatch > 0
+        # Pad with inactive vegetated slots (weight 0 — FATES sets the real weight/type
+        # from its patch areas when disturbance populates them). Matches count_subgrid_elements.
+        for _ in (n_added + 1):(varctl.fates_maxpatch + 1)
+            add_patch!(pch, col, lun, pi, ci[], varpar.natpft_lb + 1, 0.0)
+        end
     end
 
     nothing
