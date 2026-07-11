@@ -4,6 +4,27 @@ Authoritative burn-down list for getting **all of CLM outside BGC** (and the las
 diagnostics) onto the GPU. Produced by `scripts/gpu_host_loop_census.jl` (AST host-loop
 detector) + a classification pass over every flagged function.
 
+## Status update (post-census burn-down)
+
+The clusters below have since been kernelized + validated on Metal (per-cluster
+`scripts/gpu_validate_*` harnesses):
+
+- **Cluster A (urban, ~34 loops)** — DONE (`urban_albedo!` + canyon-RT + `building_temperature!` + `wasteheat!`).
+- **Cluster B (BGC summaries, ~87 loops)** — DONE (`soil_bgc_{carbon,nitrogen}_state_summary!`, `cnveg_*_summary!`).
+- **Cluster C (~15 misc)** — DONE (`dust_emission_zender2003!`, `cn_veg_struct_update!`, `nitrif_denitrif`, glacier SMB, dry-dep, `_fun_p2c!`).
+- **Feature-gated** — DONE (irrigation, LUNA `update_photosynthesis_capacity!`, flexibleCN, `dyn_cnbal_*`).
+- **Forcing downscaling (`downscale_forcings.jl`, 7 loops)** — DONE. All per-column
+  loops of `downscale_forcings!` / `partition_precip!` / `downscale_longwave!` are now
+  KernelAbstractions kernels (`_downscale_baseline/temp/pco2/…_kernel!`). Host KA.CPU
+  path proven **byte-identical** to the original loop; Metal Float32 parity ~1e-7 over
+  all 12 output fields. Harness: `scripts/gpu_validate_downscale_forcings.jl`.
+
+Remaining flagged loops in the physics dirs are host-reference fallbacks (device variant
+already exists), `*_init_cold!` construction, parsing, accessors, reverse-AD, or the
+config-gated `hillslope_hydrology.jl` (non-default) — no genuine default-hot un-kernelized
+physics remains in `biogeophys`/`biogeochem`. The original per-cluster tables below are
+kept for historical reference.
+
 ## Headline
 
 The raw census flags **1,511** `for`-loops outside `@kernel`. After classifying each as
