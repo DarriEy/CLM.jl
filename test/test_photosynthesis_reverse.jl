@@ -195,12 +195,9 @@
     @test isfinite(g_fd)
     rel_err = abs(g_rev - g_fd) / max(abs(g_fd), 1e-12)
     println("  photosynthesis reverse: Enzyme=$(g_rev), FD=$(g_fd), rel_err=$(rel_err)")
-    # Enzyme reverse-mode is correct on the >=1.11 AD target (the stack resolves under 1.12
-    # per CLAUDE.md). On 1.10 assert finiteness only — see the tridiag note in
-    # test_enzyme_smoke.jl for the 1.10 Enzyme reverse caveat.
-    if VERSION >= v"1.11"
-        @test rel_err < 1e-5
-    else
-        @test_broken rel_err < 1e-5
-    end
+    # The photosynthesis sub-phase reverse is correct on ALL supported versions: it routes the
+    # Ci fixed-point solve through the host-loop fallback (_PSN_CI_AD_HOSTLOOP), so it does NOT
+    # hit the 1.10 Enzyme in-place-tridiagonal reverse bug that test_enzyme_smoke.jl brackets
+    # with @test_broken. Confirmed passing on 1.10 (rel_err ~1.8e-8) — a plain @test everywhere.
+    @test rel_err < 1e-5
 end
