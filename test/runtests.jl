@@ -203,6 +203,9 @@ using CLM
     include("test_parameter_recovery.jl")
     include("test_enzyme_feasibility.jl")
     include("test_enzyme_smoke.jl")
+    # Enzyme reverse-AD of the photosynthesis sub-phase (cf_rev_psn!) vs finite differences
+    # — the psn counterpart of the NO-Enzyme forward guard test_canopy_reverse.jl.
+    include("test_photosynthesis_reverse.jl")
     # Forward-parity guard for the productionized clm_drv! reverse phases
     # (src/driver/driver_reverse.jl). Builds a real inst → placed with the other
     # clm_initialize!-using integration tests, not the fresh-global unit block.
