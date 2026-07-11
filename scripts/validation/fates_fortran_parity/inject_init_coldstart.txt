@@ -1,0 +1,35 @@
+FATES parity instrumentation — injection into clmfates_interfaceMod.F90
+======================================================================
+
+FatesParityDumpMod.F90 provides `fates_parity_dump(sites, nsites, nstep, path)`.
+To fire it at cold start (nstep=0, after the full cohort hierarchy + HLM-dynamics
+update are populated), make TWO edits to a SourceMods/src.clm copy of
+  src/utils/clmfates_interfaceMod.F90
+(FATES compiles on the CLM Filepath, so the FATES SourceMods live in src.clm):
+
+1. Add the use import next to the other EDInitMod imports (~line 154):
+
+     use FatesParityDumpMod    , only : fates_parity_dump   ! FATES parity instrumentation
+
+   (`get_nstep` is already imported near line 101.)
+
+2. In subroutine init_coldstart, immediately BEFORE
+     call t_stopf('fates_initcoldstart')
+   (i.e. after the `!$OMP END PARALLEL DO`), insert:
+
+     ! ---- FATES cold-start parity instrumentation (schema-v1 pdump) ------------
+     do nc = 1, nclumps
+        if ( this%fates(nc)%nsites>0 ) then
+           call fates_parity_dump(this%fates(nc)%sites, this%fates(nc)%nsites, &
+                get_nstep(), 'fates_pdump_fortran_n0.txt')
+        end if
+     end do
+     ! --------------------------------------------------------------------------
+
+The dump is written to <RUNDIR>/fates_pdump_fortran_n0.txt. Compare against the
+Julia cold-start dump with:
+
+  julia +1.12 --project=scripts scripts/fates_fortran_parity.jl compare \
+      <RUNDIR>/fates_pdump_fortran_n0.txt
+
+setup_case.sh performs both edits automatically against the install tree.
