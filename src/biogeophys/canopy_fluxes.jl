@@ -1926,20 +1926,26 @@ function canopy_fluxes_core!(
                 col_data.is_fates[c] || continue
                 s += 1
                 s <= fates.nsites || break
-                p = col_data.patchi[c] + 1   # vegetated patch (bare-ground at +0)
                 g = colidx_h[c]
                 bc = fates.bc_in[s]
-                # pack photosynthesis bc_in from the current in-loop leaf state.
-                bc.forc_pbot          = fpbot_host[c]
-                bc.cair_pa[1]         = pco2_host[g]
-                bc.oair_pa[1]         = po2_host[g]
-                bc.dayl_factor_pa[1]  = dayl_host[p]
-                bc.esat_tv_pa[1]      = svpts_host[p]   # esat(t_veg) — in-loop value
-                bc.eair_pa[1]         = eah_host[p]     # canopy-air vapor pressure
-                bc.rb_pa[1]           = rb_host[p]
-                bc.t_veg_pa[1]        = t_veg_host[p]   # CURRENT iterate leaf temp
-                bc.tgcm_pa[1]         = ft_host[c]
-                bc.filter_photo_pa[1] = 2               # 2 = "compute" branch
+                bc.forc_pbot = fpbot_host[c]            # column scalar (once per column)
+                # Pack photosynthesis bc_in for EVERY FATES vegetated patch — multi-patch
+                # coupling. The canopy solve above produces a per-patch leaf temperature
+                # (t_veg_host[p]) for each FATES HLM patch p = patchi + ifp, so each patch's
+                # cohorts get their own light/temperature/resistance driving. `ifp` indexes
+                # the per-patch bc_*_pa arrays. (Previously only ifp=1 / patch patchi+1 was
+                # packed, so disturbance patches never photosynthesized.)
+                for (ifp, p) in fates_veg_patches(fates.sites[s], c, col_data)
+                    bc.cair_pa[ifp]         = pco2_host[g]
+                    bc.oair_pa[ifp]         = po2_host[g]
+                    bc.dayl_factor_pa[ifp]  = dayl_host[p]
+                    bc.esat_tv_pa[ifp]      = svpts_host[p]   # esat(t_veg) — in-loop value
+                    bc.eair_pa[ifp]         = eah_host[p]     # canopy-air vapor pressure
+                    bc.rb_pa[ifp]           = rb_host[p]
+                    bc.t_veg_pa[ifp]        = t_veg_host[p]   # CURRENT iterate leaf temp
+                    bc.tgcm_pa[ifp]         = ft_host[c]
+                    bc.filter_photo_pa[ifp] = 2               # 2 = "compute" branch
+                end
             end
 
             # Drive FATES plant-respiration / photosynthesis for all sites.
@@ -1953,10 +1959,11 @@ function canopy_fluxes_core!(
                 col_data.is_fates[c] || continue
                 s += 1
                 s <= fates.nsites || break
-                p = col_data.patchi[c] + 1
                 bcout = fates.bc_out[s]
-                photosyns.rssun_patch[p] = bcout.rssun_pa[1]
-                photosyns.rssha_patch[p] = bcout.rssha_pa[1]
+                for (ifp, p) in fates_veg_patches(fates.sites[s], c, col_data)
+                    photosyns.rssun_patch[p] = bcout.rssun_pa[ifp]
+                    photosyns.rssha_patch[p] = bcout.rssha_pa[ifp]
+                end
             end
         end
 

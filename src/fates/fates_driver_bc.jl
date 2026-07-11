@@ -78,7 +78,8 @@ function fates_veg_patches(site, c::Int, col)
             else
                 @warn "FATES column $c has more vegetated patches than reserved HLM " *
                       "patch slots (patchi=$pi patchf=$pf); patch ifp=$ifp dropped. " *
-                      "Increase the column's patch allocation."
+                      "Increase the column's patch allocation to fates_maxpatches_by_landuse " *
+                      "(the HLM currently reserves the surfdata natpft count)." maxlog=8
             end
         end
         cp = cp.younger
