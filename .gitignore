@@ -38,6 +38,7 @@ validation_results/
 
 # stray domain streamflow-comparison CSVs (analysis outputs, not source)
 streamflow_compare_*.csv
+scripts/fates_pdump_*.txt
 __pycache__/
 
 # local one-off diagnostic / oracle scratch scripts (not part of the codebase)
