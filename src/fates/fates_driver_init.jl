@@ -286,11 +286,15 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
                                        nitrogen_spec::Int = 0, phosphorus_spec::Int = 0,
                                        use_tree_damage::Bool = false,
                                        use_planthydro::Bool = false,
+                                       use_fixed_biogeog::Bool = false,
                                        do_check::Bool = true)
     set_fates_ctrlparms("flush_to_unset")
 
-    # Biogeography / competition modes — all OFF (default NBG cold start).
-    set_fates_ctrlparms("use_fixed_biogeog"; ival = ifalse)
+    # Biogeography / competition modes.  Fixed-biogeog is OFF by default (the NBG
+    # cold start seeds every PFT); when the caller enables it the per-site
+    # `use_this_pft` filter (fed from `bc_in.pft_areafrac`) restricts cold-start
+    # seeding + runtime recruitment + seed rain to the climatically-present PFTs.
+    set_fates_ctrlparms("use_fixed_biogeog"; ival = use_fixed_biogeog ? itrue : ifalse)
     set_fates_ctrlparms("use_nocomp";        ival = ifalse)
     set_fates_ctrlparms("use_sp";            ival = ifalse)
     set_fates_ctrlparms("masterproc";        ival = itrue)
@@ -398,7 +402,30 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          parteh_mode::Int = prt_carbon_allom_hyp,
                          nitrogen_spec::Int = 0, phosphorus_spec::Int = 0,
                          use_tree_damage::Bool = false,
-                         use_planthydro::Bool = false)
+                         use_planthydro::Bool = false,
+                         fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
+                         fates_biogeog_screen::Symbol = :none)
+
+    # ---- Fixed-biogeography (climate-appropriate PFT screening) config ----------
+    # Decide up front whether to run the cold start in fixed-biogeography mode. When
+    # active, only a chosen subset of PFTs is seeded at the site (and recruited /
+    # seed-rained thereafter), via the ported `use_this_pft` machinery. The subset
+    # is either supplied explicitly (`fates_pft_areafrac`, a per-FATES-PFT area
+    # vector) or derived by a named climate screen (`fates_biogeog_screen`):
+    #   * :none               — OFF (default); every PFT seeded (byte-identical path)
+    #   * :drop_cold_deciduous — present = PFTs with season_decid==false, i.e. a
+    #                            never-cold (tropical/warm) site cannot host the
+    #                            cold-deciduous PFTs whose forced leaf-off drives the
+    #                            multi-year boom→bust die-back. Yields evergreen +
+    #                            stress(drought)-deciduous PFTs.
+    # Both feed `bc_in.pft_areafrac`; the switch must be known BEFORE the ctrlparms
+    # set (it sizes the bc allocation) — its CONTENT is filled after the param read.
+    if !(fates_biogeog_screen in (:none, :drop_cold_deciduous))
+        error("clm_fates_init!: unknown fates_biogeog_screen=$(fates_biogeog_screen) " *
+              "(expected :none or :drop_cold_deciduous)")
+    end
+    use_fixed_biogeog = (fates_pft_areafrac !== nothing) ||
+                        (fates_biogeog_screen != :none)
 
     # ---- W1.1: FATES globals + parameters (CLMFatesGlobals1) ----
     FatesInterfaceInit(6, false)
@@ -417,6 +444,7 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                                   phosphorus_spec = phosphorus_spec,
                                   use_tree_damage = use_tree_damage,
                                   use_planthydro = use_planthydro,
+                                  use_fixed_biogeog = use_fixed_biogeog,
                                   do_check = !is_cnp)   # CNP: check after the param read
 
     # Read the REAL FATES default parameter file (replaces _fates_spike_setup_pft!).
@@ -454,6 +482,39 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         error("clm_fates_init!: numpft_in=$numpft_in does not match the parameter " *
               "file's fates_pft dimension ($numpft_resolved). Omit numpft_in to " *
               "use the file value.")
+    end
+
+    # ---- Build the fixed-biogeog per-FATES-PFT area vector (post param read) -----
+    # `season_decid` / `numpft` are only known once the param file is read.  The
+    # vector is expressed directly in FATES-PFT space; to feed it through the ported
+    # `_set_site_area_pft!` (which maps HLM-PFT areas onto FATES PFTs via
+    # `hlm_pft_map`) unchanged, we set `hlm_pft_map` to the identity so
+    # `area_PFT[ft] == pft_areafrac[ft]`.  This is the self-consistent "host already
+    # supplies areas in FATES-PFT space" configuration and only runs on this gated
+    # path (default path never touches the param-file crosswalk).
+    fates_areafrac_vec = Float64[]
+    if use_fixed_biogeog
+        fates_areafrac_vec = zeros(Float64, numpft_resolved)
+        if fates_pft_areafrac !== nothing
+            length(fates_pft_areafrac) == numpft_resolved ||
+                error("clm_fates_init!: fates_pft_areafrac has length " *
+                      "$(length(fates_pft_areafrac)); expected numpft=$numpft_resolved.")
+            any(<(0.0), fates_pft_areafrac) &&
+                error("clm_fates_init!: fates_pft_areafrac has negative entries.")
+            fates_areafrac_vec .= fates_pft_areafrac
+        elseif fates_biogeog_screen == :drop_cold_deciduous
+            # A never-cold site cannot host cold(season)-deciduous PFTs.  Give every
+            # non-cold-deciduous PFT equal presence; normalization happens downstream.
+            for ft in 1:numpft_resolved
+                fates_areafrac_vec[ft] = (prt_params.season_decid[ft] == ifalse) ? 1.0 : 0.0
+            end
+        end
+        sum(fates_areafrac_vec) > nearzero ||
+            error("clm_fates_init!: fixed-biogeog PFT area vector is all zero " *
+                  "(screen=$(fates_biogeog_screen)) — no PFT would be seeded.")
+        # Identity HLM<->FATES crosswalk so pft_areafrac maps 1:1 onto area_PFT.
+        edpftvarcon_inst().hlm_pft_map =
+            [Float64(i == j) for i in 1:numpft_resolved, j in 1:numpft_resolved]
     end
 
     # PARTEH element registry + global hypothesis state. InitPARTEHGlobals dispatches
@@ -529,6 +590,15 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         bc.hlm_harvest_catnames = String[]
         bc.hlm_harvest_units    = fates_unset_int
         bc.site_area            = area
+
+        # Fixed-biogeog PFT presence (climate-appropriate seeding).  `pft_areafrac`
+        # is allocated (length numpft) by `allocate_bcin` only when fixed-biogeog is
+        # on; `baregroundfrac` must be finite (the no-LUH `_set_site_area_pft!` branch
+        # has no NaN guard).  A fully-vegetated FATES column => bareground 0.
+        if use_fixed_biogeog
+            bc.pft_areafrac   .= fates_areafrac_vec
+            bc.baregroundfrac  = 0.0
+        end
     end
 
     # ---- W2: cold-start chain (init_coldstart) ----

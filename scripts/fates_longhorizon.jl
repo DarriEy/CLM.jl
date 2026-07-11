@@ -102,6 +102,19 @@ function build()
     paramfile = get(ENV, "FATES_PARAMFILE",
         "$DATA/domain_Aripuana_Amazon/settings/CLM/parameters/clm5_params.nc")
     fyr = parse(Int, get(ENV, "FATES_YEAR", "2004"))
+    # Optional climate-appropriate PFT screening (fixed-biogeography). Default OFF ->
+    # the all-PFT NBG cold start (the boom-bust baseline). FATES_BIOGEOG selects a
+    # named screen: "drop_cold_deciduous" (or "1") seeds only non-cold-deciduous PFTs
+    # (evergreen + drought-deciduous) — the tropical-appropriate set for Aripuana, so
+    # no cold-deciduous cohort is ever seeded/recruited to drive the die-back cycle.
+    biogeog_screen = :none
+    let bg = get(ENV, "FATES_BIOGEOG", "")
+        if bg == "1" || bg == "drop_cold_deciduous"
+            biogeog_screen = :drop_cold_deciduous
+        elseif bg != "" && bg != "0" && bg != "none"
+            biogeog_screen = Symbol(bg)
+        end
+    end
     # REAL cold-start. clm_initialize! reads surfdata/params, runs the CLM init_cold
     # routines and — crucially — computes a CONSISTENT initial surface albedo, so the
     # step-1 surface-energy balance produces FINITE t_grnd/t_veg. That is the piece the
@@ -113,7 +126,9 @@ function build()
     # (real FATES default PFT params). This is the only setup that hands FATES a valid
     # leaf temperature and hence non-NaN photosynthesis.
     inst, bounds, filt, _tm = _C.clm_initialize!(; fsurdat=fsurdat, paramfile=paramfile,
-        use_fates=true, start_date=DateTime(fyr,1,1), dtime=1800)
+        use_fates=true, start_date=DateTime(fyr,1,1), dtime=1800,
+        fates_biogeog_screen=biogeog_screen)
+    biogeog_screen == :none || @printf("  fixed-biogeog screen: %s (climate-appropriate PFTs only)\n", biogeog_screen)
     # coszen closure reads grc.lat/lon (radians); ensure latdeg/londeg exist for the
     # forcing reader's time-interpolation of FSDS (fills from lat/lon if surfdata omits).
     for g in 1:bounds.endg

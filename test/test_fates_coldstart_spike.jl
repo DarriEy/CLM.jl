@@ -159,6 +159,51 @@ end
         @test inst_a.fates !== nothing
         @test inst_a.fates.nsites == 1
 
+        # =================================================================
+        # FIXED-BIOGEOG CLIMATE SCREEN — seed only climate-appropriate PFTs.
+        # The default cold start above seeded all 14 PFTs (fixed-biogeog OFF).
+        # The :drop_cold_deciduous screen restricts seeding + use_this_pft to
+        # the non-cold-deciduous (evergreen + drought-deciduous) PFTs, which
+        # retires the cold-deciduous-driven multi-year boom→bust die-back.
+        # =================================================================
+        season_decid = copy(CLM.prt_params.season_decid)   # from the real param file
+        want = [ft for ft in 1:numpft if season_decid[ft] == CLM.ifalse]
+        @test !isempty(want) && length(want) < numpft   # a real, partial screen
+
+        inst2 = CLM.CLMInstances()
+        CLM.clm_fates_init!(inst2; nsites = 1, nlevsoil = nlevsoil,
+                            nlevdecomp = nlevdecomp,
+                            fates_biogeog_screen = :drop_cold_deciduous)
+        @test CLM.hlm_use_fixed_biogeog[] == CLM.itrue
+        site2 = inst2.fates.sites[1]
+        # use_this_pft flags exactly the non-cold-deciduous PFTs.
+        for ft in 1:numpft
+            @test site2.use_this_pft[ft] ==
+                  (season_decid[ft] == CLM.ifalse ? CLM.itrue : CLM.ifalse)
+        end
+        # Cold-start cohorts cover exactly the screened PFT set — no cold-deciduous.
+        coh2 = vcat((_spike_cohort_list(p) for p in _spike_patch_list(site2))...)
+        @test sort(unique(c.pft for c in coh2)) == want
+        @test all(season_decid[c.pft] == CLM.ifalse for c in coh2)
+        @test length(coh2) == length(want)
+
+        # Explicit per-FATES-PFT presence vector (general mechanism): seed PFT 1 only.
+        inst3 = CLM.CLMInstances()
+        areafrac = zeros(numpft); areafrac[1] = 1.0
+        CLM.clm_fates_init!(inst3; nsites = 1, nlevsoil = nlevsoil,
+                            nlevdecomp = nlevdecomp, fates_pft_areafrac = areafrac)
+        @test CLM.hlm_use_fixed_biogeog[] == CLM.itrue
+        site3 = inst3.fates.sites[1]
+        @test site3.use_this_pft[1] == CLM.itrue
+        @test all(site3.use_this_pft[ft] == CLM.ifalse for ft in 2:numpft)
+        coh3 = vcat((_spike_cohort_list(p) for p in _spike_patch_list(site3))...)
+        @test all(c.pft == 1 for c in coh3)
+
+        # Guard: an all-zero (empty) presence vector is rejected.
+        @test_throws ErrorException CLM.clm_fates_init!(CLM.CLMInstances(); nsites = 1,
+            nlevsoil = nlevsoil, nlevdecomp = nlevdecomp,
+            fates_pft_areafrac = zeros(numpft))
+
     finally
         CLM.prt_global[]                  = old_global
         CLM.num_elements[]                = old_numel

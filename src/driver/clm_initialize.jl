@@ -76,6 +76,8 @@ function clm_initialize!(;
     use_c13::Bool = false,
     use_c14::Bool = false,
     use_fates::Bool = false,
+    fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
+    fates_biogeog_screen::Symbol = :none,
     use_bedrock::Bool = true,
     use_aquifer_layer::Bool = true,
     all_active::Bool = false,
@@ -398,7 +400,9 @@ function clm_initialize!(;
                         nlevdecomp = nlevdecomp_fates,
                         current_year = year(start_date),
                         current_month = month(start_date),
-                        current_day = day(start_date))
+                        current_day = day(start_date),
+                        fates_pft_areafrac = fates_pft_areafrac,
+                        fates_biogeog_screen = fates_biogeog_screen)
     end
 
     return (inst, bounds, filt, tm)
