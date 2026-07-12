@@ -707,6 +707,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     sr = inst.surfrad
     up = inst.urbanparams
     a2l = inst.atm2lnd
+    l2a = inst.lnd2atm
     wsb = inst.water.waterstatebulk_inst
     wdb = inst.water.waterdiagnosticbulk_inst
     wfb = inst.water.waterfluxbulk_inst
@@ -2418,7 +2419,26 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Land to atmosphere
     # ========================================================================
-    # Placeholder: lnd2atm!(bounds_proc, ...) [land-atmosphere coupling]
+    # Placeholder: lnd2atm!(bounds_proc, ...) [gridcell averaging for the coupler]
+    #
+    # The ice-runoff part of lnd2atm IS wired: qflx_ice_runoff_col (= snow-capping
+    # solid runoff + excess-soil-ice solid runoff) is a sink in the column water
+    # balance below (BalanceCheckMod.F90:650), so it must be computed before the
+    # balance check — Fortran likewise calls lnd2atm before BalanceCheck.
+    #
+    # clm_instInit! allocates the outputs; tolerate hand-built instances (and match
+    # the working backend/precision) by allocating on first use.
+    if length(l2a.qflx_ice_runoff_col) != nc
+        l2a.qflx_ice_runoff_col   = _zlike(nc)
+        l2a.qflx_liq_from_ice_col = _zlike(nc)
+    end
+    if length(l2a.eflx_sh_ice_to_liq_col) != nc
+        l2a.eflx_sh_ice_to_liq_col = _zlike(nc)
+    end
+    handle_ice_runoff!(l2a, wfb, col, lun, bc_col)
+    # Melted ice runoff (only when melt_non_icesheet_ice_runoff; off by default)
+    # leaves via qflx_qrgwl instead, which the balance check already accounts for.
+    add_liq_from_ice_to_runoff!(wfb, l2a, col, bc_col)
 
     # ========================================================================
     # Land to GLC
@@ -2452,12 +2472,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     _g_evap_tot     = _zlike(length(grc.lat)); _g_surf      = _zlike(length(grc.lat))
     _g_qrgwl        = _zlike(length(grc.lat)); _g_drain     = _zlike(length(grc.lat))
     _g_drain_perch  = _zlike(length(grc.lat)); _g_sfc_irrig = _zlike(length(grc.lat))
+    _g_ice_runoff   = _zlike(length(grc.lat))
     c2g_unity!(_g_evap_tot,    wfb.wf.qflx_evap_tot_col,      col.gridcell, col.wtgcell, bc_col, bc_grc)
     c2g_unity!(_g_surf,        wfb.wf.qflx_surf_col,          col.gridcell, col.wtgcell, bc_col, bc_grc)
     c2g_unity!(_g_qrgwl,       wfb.wf.qflx_qrgwl_col,         col.gridcell, col.wtgcell, bc_col, bc_grc)
     c2g_unity!(_g_drain,       wfb.wf.qflx_drain_col,         col.gridcell, col.wtgcell, bc_col, bc_grc)
     c2g_unity!(_g_drain_perch, wfb.wf.qflx_drain_perched_col, col.gridcell, col.wtgcell, bc_col, bc_grc)
     c2g_unity!(_g_sfc_irrig,   wfb.wf.qflx_sfc_irrig_col,     col.gridcell, col.wtgcell, bc_col, bc_grc)
+    # qflx_rofice_grc = c2g(qflx_ice_runoff_col) (lnd2atmMod.F90:459). The dynbal
+    # correction Fortran subtracts there is zero in the port (no dynamic landunits
+    # coupling), so the plain aggregate is the whole term.
+    c2g_unity!(_g_ice_runoff,  l2a.qflx_ice_runoff_col,       col.gridcell, col.wtgcell, bc_col, bc_grc)
 
     # BalanceCheck — WIRED
     balance_check!(inst.balcheck, wfb, wsb,
@@ -2473,13 +2498,13 @@ function clm_drv_core!(config::CLMDriverConfig,
                    forc_solai_grc=a2l.forc_solai_grc,
                    forc_lwrad_col=a2l.forc_lwrad_downscaled_col,
                    forc_flood_grc=_zlike(length(grc.lat)),
-                   qflx_ice_runoff_col=_zlike(nc),
+                   qflx_ice_runoff_col=l2a.qflx_ice_runoff_col,
                    qflx_evap_tot_grc=_g_evap_tot,
                    qflx_surf_grc=_g_surf,
                    qflx_qrgwl_grc=_g_qrgwl,
                    qflx_drain_grc=_g_drain,
                    qflx_drain_perched_grc=_g_drain_perch,
-                   qflx_ice_runoff_grc=_zlike(length(grc.lat)),
+                   qflx_ice_runoff_grc=_g_ice_runoff,
                    qflx_sfc_irrig_grc=_g_sfc_irrig,
                    qflx_streamflow_grc=_zlike(length(grc.lat)))
 

@@ -66,6 +66,11 @@ Base.@kwdef mutable struct Lnd2AtmData{FT<:Real,
     ch4_surf_flux_tot_grc          ::V = Float64[]   # net CH4 flux (kg C/m**2/s) [+ to atm]
 
     # lnd->atm (column-level)
+    # Fortran keeps the two water fields below in `waterlnd2atmbulk_inst`
+    # (Waterlnd2atmType.F90); the port has no WaterLnd2Atm type, so they live here
+    # next to the third output of `handle_ice_runoff` (see driver/lnd2atm.jl).
+    qflx_ice_runoff_col            ::V = Float64[]   # total column-level ice runoff (mm H2O/s)
+    qflx_liq_from_ice_col          ::V = Float64[]   # liquid runoff from converted ice runoff (mm H2O/s)
     eflx_sh_ice_to_liq_col         ::V = Float64[]   # sensible HF from ice runoff to liquid conversion (W/m**2) [+ to atm]
 end
 
@@ -138,6 +143,8 @@ function lnd2atm_init!(l2a::Lnd2AtmData, ng::Int, nc::Int;
     l2a.flxdst_grc                    = fill(ival, ng, NDST)
 
     # column-level
+    l2a.qflx_ice_runoff_col           = fill(ival, nc)
+    l2a.qflx_liq_from_ice_col         = fill(ival, nc)
     l2a.eflx_sh_ice_to_liq_col        = fill(ival, nc)
 
     # conditional allocations
@@ -221,6 +228,8 @@ function lnd2atm_clean!(l2a::Lnd2AtmData{FT}) where {FT}
     l2a.fireflx_grc                   = Matrix{FT}(undef, 0, 0)
     l2a.fireztop_grc                  = FT[]
     l2a.ch4_surf_flux_tot_grc         = FT[]
+    l2a.qflx_ice_runoff_col           = FT[]
+    l2a.qflx_liq_from_ice_col         = FT[]
     l2a.eflx_sh_ice_to_liq_col        = FT[]
     nothing
 end

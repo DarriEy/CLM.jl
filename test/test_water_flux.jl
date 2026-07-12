@@ -102,6 +102,12 @@
         @test length(wf.qflx_liq_dynbal_grc) == ng
         @test length(wf.qflx_ice_dynbal_grc) == ng
 
+        # qflx_ice_runoff_xs_col must be ZERO-initialized, not NaN: Fortran
+        # (WaterFluxType.F90:897, InitCold) zeroes it because it "only gets set in the
+        # hydrology filter" — columns outside that filter (lakes) would otherwise carry
+        # NaN into qflx_ice_runoff_col (= snwcp + xs) and poison their errh2o_col.
+        @test all(iszero, wf.qflx_ice_runoff_xs_col)
+
         # NaN initialization for standard fields
         @test all(isnan, wf.qflx_through_snow_patch)
         @test all(isnan, wf.qflx_through_liq_patch)

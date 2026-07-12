@@ -333,6 +333,54 @@
     end
 
     # ================================================================
+    # The driver must hand balance_check! the REAL ice-runoff flux.
+    #
+    # It used to pass a hardcoded zeros array for qflx_ice_runoff_col, so solid
+    # runoff (snow capping / excess soil ice) was invisible to the column water
+    # balance. clm_drv! now calls handle_ice_runoff! (lnd2atmMod.F90) before the
+    # balance check; this pins that the term is genuinely produced and non-zero
+    # where snow capping happened, so it cannot silently regress to zeros.
+    # ================================================================
+    @testset "clm_drv! wires the real ice-runoff flux (not zeros)" begin
+        inst, bounds, filt, filt_ia, config, photosyns = make_driver_data()
+        inst.canopystate.frac_veg_nosno_alb_patch .= 1
+        wf = inst.water.waterfluxbulk_inst.wf
+
+        # handle_ice_runoff! only writes active columns (Fortran guards on col%active).
+        inst.column.active .= true
+
+        # Seed the two solid-runoff fluxes a real run produces: snow-capping runoff
+        # (HydrologyDrainageMod.F90:214 / LakeHydrologyMod.F90:687) and excess-soil-ice
+        # runoff (SoilHydrologyMod.F90:1387). The hydrology chain recomputes both from
+        # state, so park it (this fixture's synthetic soil state is degenerate anyway)
+        # and let the seeded fluxes stand in for a capping event.
+        filt.nolakec .= false     # skip compute_wetland_ice_hydrology! (rewrites snwcp)
+        filt.hydrologyc .= false  # skip soil drainage (rewrites xs)
+        snwcp = 3.5e-4   # mm H2O/s
+        xs    = 1.0e-4   # mm H2O/s
+        wf.qflx_ice_runoff_snwcp_col .= snwcp
+        wf.qflx_ice_runoff_xs_col    .= xs
+
+        CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
+                     true, 1.0, 0.0, 0.0, 0.4091, false, false, "20260101", false;
+                     nstep=1, is_first_step=false, is_beg_curr_day=false,
+                     is_beg_curr_year=false, photosyns=photosyns)
+
+        l2a = inst.lnd2atm
+        @test length(l2a.qflx_ice_runoff_col) == bounds.endc
+
+        # qflx_ice_runoff_col = qflx_ice_runoff_snwcp_col + qflx_ice_runoff_xs_col
+        # (lnd2atmMod.F90:540) — non-zero, and NOT the zeros array the driver used to
+        # hand balance_check!.
+        for c in bounds.begc:bounds.endc
+            inst.column.active[c] || continue
+            @test l2a.qflx_ice_runoff_col[c] ≈ snwcp + xs
+            @test l2a.qflx_ice_runoff_col[c] > 0.0
+        end
+        @test !all(iszero, l2a.qflx_ice_runoff_col[bounds.begc:bounds.endc])
+    end
+
+    # ================================================================
     # Test clm_drv! with different config flags
     # ================================================================
     @testset "clm_drv! config flags" begin

@@ -518,4 +518,69 @@
         @test true
     end
 
+    # -----------------------------------------------------------------------
+    # Ice runoff is a REAL sink in the column water balance
+    # (BalanceCheckMod.F90:650  - qflx_ice_runoff_col(c)).
+    #
+    # Regression guard: the driver used to hand balance_check! a hardcoded zeros
+    # array for qflx_ice_runoff_col, so water leaving a snow-capped column as solid
+    # runoff was invisible to the check. This test pins both halves:
+    #   (a) with the real term, a column whose only sink IS ice runoff balances;
+    #   (b) with the zeros placeholder, the SAME state reports a spurious error of
+    #       exactly -qflx_ice_runoff*dtime.
+    # If anyone re-zeroes the term, (b)'s magnitude shows up in (a) and this fails.
+    # -----------------------------------------------------------------------
+    @testset "BalanceCheck ice runoff enters the column water balance" begin
+        d = make_bc_test_data()
+        dtime = d.dtime
+
+        # Snow-capped column: the only flux is solid (ice) runoff, and storage drops
+        # by exactly the water that left. A correct check sees errh2o == 0.
+        q_ice = 5.7e-1                      # mm H2O/s (magnitude of a real capping event)
+        d.wb.begwb_col .= 12000.0
+        d.wb.endwb_col .= 12000.0 - q_ice * dtime
+        d.qflx_ice_runoff_col .= q_ice
+
+        # Gridcell mirror of the same balance (single gridcell, weights sum to 1).
+        d.wb.begwb_grc .= 12000.0
+        d.wb.endwb_grc .= 12000.0 - q_ice * dtime
+        d.qflx_ice_runoff_grc .= q_ice
+
+        run_check(q_col, q_grc; DAnstep = 2) = CLM.balance_check!(
+            d.bc, d.water.waterfluxbulk_inst,
+            d.water.waterstatebulk_inst, d.wb, d.wdb,
+            d.eflux, d.solarabs, d.canst, d.surfalb,
+            d.col_data, d.lun_data, d.pat_data, d.grc_data,
+            d.mask_allc, d.bounds_c, d.bounds_p, d.bounds_g,
+            1, DAnstep, dtime;
+            forc_rain_col=d.forc_rain_col, forc_snow_col=d.forc_snow_col,
+            forc_rain_grc=d.forc_rain_grc, forc_snow_grc=d.forc_snow_grc,
+            forc_solad_col=d.forc_solad_col, forc_solai_grc=d.forc_solai_grc,
+            forc_lwrad_col=d.forc_lwrad_col, forc_flood_grc=d.forc_flood_grc,
+            qflx_ice_runoff_col=q_col,
+            qflx_evap_tot_grc=d.qflx_evap_tot_grc, qflx_surf_grc=d.qflx_surf_grc,
+            qflx_qrgwl_grc=d.qflx_qrgwl_grc, qflx_drain_grc=d.qflx_drain_grc,
+            qflx_drain_perched_grc=d.qflx_drain_perched_grc,
+            qflx_ice_runoff_grc=q_grc,
+            qflx_sfc_irrig_grc=d.qflx_sfc_irrig_grc,
+            qflx_streamflow_grc=d.qflx_streamflow_grc)
+
+        # (a) Real term wired in → the balance closes. (errh2o_grc is local to
+        # balance_check!; only the column error is stored, so that is what we pin.)
+        run_check(d.qflx_ice_runoff_col, d.qflx_ice_runoff_grc)
+        for c in d.bounds_c
+            @test abs(d.wb.errh2o_col[c]) < 1.0e-10
+        end
+
+        # (b) The old zeros placeholder → spurious error of exactly -q*dtime, i.e. the
+        # ice runoff is unaccounted for. (DAnstep <= skip_steps so it warns, not errors.)
+        zeros_col = zeros(length(d.qflx_ice_runoff_col))
+        zeros_grc = zeros(length(d.qflx_ice_runoff_grc))
+        run_check(zeros_col, zeros_grc; DAnstep = 2)
+        for c in d.bounds_c
+            @test d.wb.errh2o_col[c] ≈ -q_ice * dtime rtol=1.0e-12
+            @test abs(d.wb.errh2o_col[c]) > CLM.BALANCE_ERROR_THRESH   # a real miss, not roundoff
+        end
+    end
+
 end

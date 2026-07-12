@@ -634,6 +634,9 @@ include("fates/fates_driver_bc.jl")
 # Must come AFTER all dyn_subgrid modules above (control/file_io/pft_crop/lake_urban/
 # landunit_area/state-updaters/init_columns/cons_biogeophys + harvest/gross_unrep).
 include("driver/dyn_subgrid_driver.jl")
+# Land->atmosphere ice-runoff handling (lnd2atmMod). Must precede clm_driver.jl,
+# which calls handle_ice_runoff! before the water balance check.
+include("driver/lnd2atm.jl")
 include("driver/clm_driver.jl")
 include("driver/clm_initialize.jl")
 include("driver/clm_run.jl")

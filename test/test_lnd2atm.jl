@@ -190,4 +190,99 @@
         @test length(l.eflx_sh_ice_to_liq_col) == 20
     end
 
+    # ------------------------------------------------------------------
+    # handle_ice_runoff! / add_liq_from_ice_to_runoff! (lnd2atmMod.F90)
+    #
+    # qflx_ice_runoff_col = qflx_ice_runoff_snwcp_col + qflx_ice_runoff_xs_col is the
+    # ice-runoff sink the column water balance subtracts (BalanceCheckMod.F90:650).
+    # ------------------------------------------------------------------
+    function make_ice_runoff_data(; nc = 3, ng = 2, nl = 2)
+        CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+
+        l2a = CLM.Lnd2AtmData()
+        CLM.lnd2atm_init!(l2a, ng, nc)
+
+        col = CLM.ColumnData()
+        col.gridcell = [1, 1, 2]
+        col.landunit = [1, 2, 2]     # col 1 on a soil landunit, cols 2-3 on glacier
+        col.active   = fill(true, nc)
+
+        lun = CLM.LandunitData()
+        lun.itype = [CLM.ISTSOIL, CLM.ISTICE]
+
+        water = CLM.WaterData()
+        CLM.water_init!(water, nc, nc, nl, ng)
+        wfb = water.waterfluxbulk_inst
+        wfb.wf.qflx_ice_runoff_snwcp_col .= [1.0e-3, 2.0e-3, 0.0]
+        wfb.wf.qflx_ice_runoff_xs_col    .= [4.0e-4, 0.0, 0.0]
+        wfb.wf.qflx_qrgwl_col            .= 0.0
+        wfb.wf.qflx_runoff_col           .= 0.0
+
+        return (l2a=l2a, col=col, lun=lun, wfb=wfb, nc=nc, ng=ng, bounds=1:nc)
+    end
+
+    @testset "handle_ice_runoff! sums snwcp + excess-ice runoff" begin
+        d = make_ice_runoff_data()
+        CLM.handle_ice_runoff!(d.l2a, d.wfb, d.col, d.lun, d.bounds)
+
+        # Fortran: qflx_ice_runoff_col = qflx_ice_runoff_snwcp_col + qflx_ice_runoff_xs_col
+        @test d.l2a.qflx_ice_runoff_col ≈ [1.4e-3, 2.0e-3, 0.0]
+        # Non-zero where snow capping / excess ice produced solid runoff — this is the
+        # term the driver must pass to balance_check! (it used to pass zeros).
+        @test d.l2a.qflx_ice_runoff_col[1] > 0.0
+        @test d.l2a.qflx_ice_runoff_col[2] > 0.0
+
+        # melt_non_icesheet_ice_runoff defaults to false (Fortran namelist default)
+        @test d.l2a.params.melt_non_icesheet_ice_runoff == false
+        @test all(iszero, d.l2a.qflx_liq_from_ice_col)
+        @test all(iszero, d.l2a.eflx_sh_ice_to_liq_col)
+    end
+
+    @testset "handle_ice_runoff! melt_non_icesheet_ice_runoff conversion" begin
+        d = make_ice_runoff_data()
+        CLM.lnd2atm_params_init!(d.l2a.params; melt_non_icesheet_ice_runoff = true)
+
+        # No gridcell has its icesheet runoff melted en route (glc_behavior default).
+        CLM.handle_ice_runoff!(d.l2a, d.wfb, d.col, d.lun, d.bounds)
+
+        # col 1 (non-icesheet landunit) converts: ice runoff -> liquid runoff, and the
+        # ice->liquid phase change absorbs energy (negative sensible heat to atm).
+        @test d.l2a.qflx_ice_runoff_col[1] == 0.0
+        @test d.l2a.qflx_liq_from_ice_col[1] ≈ 1.4e-3
+        @test d.l2a.eflx_sh_ice_to_liq_col[1] ≈ -1.4e-3 * CLM.HFUS
+
+        # col 2 (istice, gridcell not flagged) keeps its ice runoff.
+        @test d.l2a.qflx_ice_runoff_col[2] ≈ 2.0e-3
+        @test d.l2a.qflx_liq_from_ice_col[2] == 0.0
+        @test d.l2a.eflx_sh_ice_to_liq_col[2] == 0.0
+
+        # Flag the icesheet gridcell (col 2 is in gridcell 1) -> it converts too.
+        d2 = make_ice_runoff_data()
+        CLM.lnd2atm_params_init!(d2.l2a.params; melt_non_icesheet_ice_runoff = true)
+        CLM.handle_ice_runoff!(d2.l2a, d2.wfb, d2.col, d2.lun, d2.bounds;
+                               ice_runoff_melted_grc = [true, true])
+        @test d2.l2a.qflx_ice_runoff_col[2] == 0.0
+        @test d2.l2a.qflx_liq_from_ice_col[2] ≈ 2.0e-3
+    end
+
+    @testset "add_liq_from_ice_to_runoff! routes melted ice into qrgwl" begin
+        d = make_ice_runoff_data()
+        CLM.lnd2atm_params_init!(d.l2a.params; melt_non_icesheet_ice_runoff = true)
+        CLM.handle_ice_runoff!(d.l2a, d.wfb, d.col, d.lun, d.bounds)
+        CLM.add_liq_from_ice_to_runoff!(d.wfb, d.l2a, d.col, d.bounds)
+
+        # The melted ice must leave via qflx_qrgwl (which the balance check accounts
+        # for), otherwise the converted water would vanish from the balance.
+        @test d.wfb.wf.qflx_qrgwl_col[1] ≈ 1.4e-3
+        @test d.wfb.wf.qflx_runoff_col[1] ≈ 1.4e-3
+        @test d.wfb.wf.qflx_qrgwl_col[2] == 0.0   # istice: still ice runoff, not liquid
+
+        # Default (no conversion) => nothing added.
+        d0 = make_ice_runoff_data()
+        CLM.handle_ice_runoff!(d0.l2a, d0.wfb, d0.col, d0.lun, d0.bounds)
+        CLM.add_liq_from_ice_to_runoff!(d0.wfb, d0.l2a, d0.col, d0.bounds)
+        @test all(iszero, d0.wfb.wf.qflx_qrgwl_col)
+        @test all(iszero, d0.wfb.wf.qflx_runoff_col)
+    end
+
 end
