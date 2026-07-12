@@ -138,8 +138,9 @@ bc_out sinks all exist (`canopystate.*`, `surfalb.*`, `photosyns.rssun/rssha`).
 
 **Top risks:** (1) the AD/GPU exclusion must be a conscious documented boundary; (2) patch
 indexing `p = ifp + col%patchi(c)` + bare-ground patch + `setFilters!` rebuild must mirror
-Fortran exactly or column averages break; (3) hooks-inside-CanopyFluxes; (4) delete the legacy
-orphan `src/biogeochem/fates_interface.jl` (1313-line no-op stub, not `include`d) to avoid confusion.
+Fortran exactly or column averages break; (3) hooks-inside-CanopyFluxes. (4) DONE: the legacy
+orphan `src/biogeochem/fates_interface.jl` (1313-line no-op stub, never `include`d) has been
+deleted; `src/fates/FatesInterfaceMod.jl` is the only FATES host interface.
 
 ---
 

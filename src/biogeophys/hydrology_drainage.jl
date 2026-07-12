@@ -6,8 +6,10 @@
 #   compute_wetland_ice_hydrology!   — Set fluxes for wetland/ice landunits
 #   compute_urban_drainage_fluxes!   — Set drainage fluxes for urban non-pervious
 #   compute_total_runoff!            — Compute total runoff
-#   compute_water_mass_non_lake!     — Compute water mass (stub)
 #   hydrology_drainage!              — Main orchestrator
+# (end-of-timestep water mass comes from compute_water_mass_non_lake! in
+#  biogeophys/total_water_heat.jl, exactly as the Fortran calls
+#  TotalWaterAndHeatMod::ComputeWaterMassNonLake)
 # (adjust_runoff_terms! for glacier SMB lives in glacier_surface_mass_balance.jl)
 # ==========================================================================
 
@@ -176,45 +178,6 @@ function compute_total_runoff!(
 end
 
 # =========================================================================
-# compute_water_mass_non_lake! (stub)
-# =========================================================================
-
-"""
-    compute_water_mass_non_lake!(endwb, waterstatebulk, waterdiagbulk,
-        mask_nolake, bounds)
-
-Compute total water mass for non-lake columns.
-
-Ported from `ComputeWaterMassNonLake` in `TotalWaterAndHeatMod.F90`.
-Stub: TotalWaterAndHeatMod is not yet ported. When ported, this function
-should compute total water mass (liquid + ice + snow + surface water +
-aquifer) for each non-lake column and store in endwb.
-"""
-# ---- compute_water_mass_non_lake! (stub) : zero endwb per non-lake column ----
-# One thread per column, mask-gated. Bare 0.0 store (auto-converts on assignment).
-@kernel function _hyddr_water_mass_stub_kernel!(endwb, @Const(mask))
-    c = @index(Global)
-    @inbounds if mask[c]
-        endwb[c] = 0.0
-    end
-end
-
-function compute_water_mass_non_lake!(
-    endwb::AbstractVector{<:Real},
-    waterstatebulk::WaterStateBulkData,
-    waterdiagbulk::WaterDiagnosticBulkData,
-    mask_nolake::AbstractVector{Bool},
-    bounds::UnitRange{Int}
-)
-    # Stub: sets endwb to 0.0 for all non-lake columns.
-    # When TotalWaterAndHeatMod is ported, replace with actual computation.
-    _launch!(_hyddr_water_mass_stub_kernel!, endwb, mask_nolake;
-             ndrange = length(mask_nolake))
-
-    return nothing
-end
-
-# =========================================================================
 # adjust_runoff_terms! for glacier SMB is now ported in
 # biogeophys/glacier_surface_mass_balance.jl (alongside handle_ice_melt! and
 # compute_surface_mass_balance!). The orchestrator below calls it directly.
@@ -344,10 +307,18 @@ function hydrology_drainage!(
         nlevgrnd, nlevurb, nlevsno)
 
     # --- Compute end-of-timestep water mass ---
+    # Fortran: call ComputeWaterMassNonLake(bounds, num_nolakec, filter_nolakec,
+    #              waterstatebulk_inst, waterdiagnosticbulk_inst,
+    #              subtract_dynbal_baselines = .false., water_mass = endwb(...))
+    # The real implementation lives in biogeophys/total_water_heat.jl. Canopy water
+    # (p2c of liqcan/snocan) is added by the driver's balance seam, consistent with
+    # balance_check.jl's begwb/endwb path; endwb here is used by the wetland/ice
+    # branch below, whose columns carry no canopy water.
     compute_water_mass_non_lake!(
-        waterbalancebulk.endwb_col,
-        waterstatebulk, waterdiagbulk,
-        mask_nolake, bounds)
+        mask_nolake, col,
+        waterstatebulk.ws, waterdiagbulk,
+        false,
+        waterbalancebulk.endwb_col)
 
     # --- Wetland/ice hydrology and urban drainage fluxes ---
     compute_wetland_ice_hydrology!(
