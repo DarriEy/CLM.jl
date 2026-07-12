@@ -42,7 +42,9 @@ moisture, soil properties from surface data, and satellite phenology.
 """
 function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
                                  filt::ClumpFilter, surf::SurfaceInputData;
-                                 use_aquifer_layer::Bool = true)
+                                 use_aquifer_layer::Bool = true,
+                                 use_hillslope_routing::Bool = false)
+    init_water_flux_cold!(inst, bounds; use_hillslope_routing=use_hillslope_routing)
     init_soil_properties!(inst, bounds, surf)
     init_temperatures!(inst, bounds)
     init_soil_moisture!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
@@ -68,6 +70,48 @@ function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
     active_layer_init_cold!(inst.active_layer, inst.column, inst.landunit,
                             bounds.begc:bounds.endc)
     nothing
+end
+
+"""
+    init_water_flux_cold!(inst, bounds; use_hillslope_routing=false)
+
+Run the water-flux cold start: `waterflux_init_cold!` (`waterflux_type%InitCold`,
+WaterFluxType.F90:860) + `waterfluxbulk_init_cold!` (`InitBulkCold`,
+WaterFluxBulkType.F90:255).
+
+Both routines were DEAD in the port — defined, unit-tested, and never called from
+any run path — so Fortran's InitCold zeroing never happened. Fortran zeroes these
+fields precisely because several of them are only ever written *inside the hydrology
+filter*: columns outside that filter (lake, glacier, urban roof/wall, wetland) would
+otherwise keep their allocation-time NaN forever. Confirmed by probe on lake/glacier/
+urban domains: e.g. `qflx_gw_uncon_irrig_col` / `qflx_gw_con_irrig_col` /
+`qflx_irrig_drip_patch` / `qflx_irrig_sprinkler_patch` were NaN on EVERY active
+column/patch after a full driver step (irrigation off), `qflx_tran_veg_patch` /
+`qflx_evap_veg_patch` were NaN on lake and urban patches, and `qflx_phs_neg_col`
+was NaN on every column with PHS off. `qflx_ice_runoff_xs_col` was the same class of
+bug and was worked around at allocation time in PR #207.
+
+In Fortran this is called from `waterflux_type%Init` (WaterFluxType.F90:141), i.e. at
+type-allocation time. The port cannot do that: `waterflux_init!` runs in
+`clm_instances_init!` *before* the subgrid maps (`column.landunit`, `landunit.itype`)
+are populated, and the soil/crop-only branch needs them. So it is called here, at the
+top of `cold_start_initialize!` — the earliest point where the subgrid maps exist, and
+still before every other cold-start routine and before any restart/injection overwrite,
+which preserves Fortran's ordering semantics (InitCold first, restart wins over it).
+"""
+function init_water_flux_cold!(inst::CLMInstances, bounds::BoundsType;
+                                use_hillslope_routing::Bool = false)
+    wfb = inst.water.waterfluxbulk_inst
+    isempty(wfb.wf.qflx_evap_tot_col) && return nothing  # not allocated (unit-test insts)
+    bc = bounds.begc:bounds.endc
+    bp = bounds.begp:bounds.endp
+    bl = bounds.begl:bounds.endl
+    waterflux_init_cold!(wfb.wf, bc, bp, bl;
+                         landunit_col = inst.column.landunit,
+                         lun_itype    = inst.landunit.itype,
+                         use_hillslope_routing = use_hillslope_routing)
+    waterfluxbulk_init_cold!(wfb, bc, bp)
+    return nothing
 end
 
 """

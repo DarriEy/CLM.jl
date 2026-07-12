@@ -186,8 +186,12 @@ function waterflux_init!(wf::WaterFluxData{FT}, nc::Int, np::Int, nl::Int, ng::I
     # Fortran (WaterFluxType.F90:897, InitCold): "This variable only gets set in the
     # hydrology filter; need to initialize it to 0 for the sake of columns outside
     # this filter". Lake columns are outside that filter, so a NaN here would poison
-    # their qflx_ice_runoff_col (= snwcp + xs) and hence errh2o_col. The port never
-    # calls waterflux_init_cold!, so the zeroing has to happen at allocation.
+    # their qflx_ice_runoff_col (= snwcp + xs) and hence errh2o_col. `waterflux_init_cold!`
+    # now zeroes it for real on the run path (wired into cold_start_initialize! via
+    # init_water_flux_cold!), so this allocation-time zero is no longer load-bearing there;
+    # it is kept as belt-and-braces for the many unit-test / GPU harnesses that build a
+    # WaterFluxData through waterflux_init! alone and never run a cold start. Identical
+    # value either way (InitCold zeroes every column unconditionally), so no divergence.
     wf.qflx_ice_runoff_xs_col              = fill(zero(FT), nc)
     wf.qflx_h2osfc_to_ice_col             = fill(FT(NaN), nc)
     wf.qflx_snow_h2osfc_col               = fill(FT(NaN), nc)
@@ -310,20 +314,32 @@ end
                           bounds_col::UnitRange{Int},
                           bounds_patch::UnitRange{Int},
                           bounds_lun::UnitRange{Int};
-                          landunit_col::Vector{Int},
-                          lun_itype::Vector{Int},
+                          landunit_col::AbstractVector{<:Integer},
+                          lun_itype::AbstractVector{<:Integer},
                           use_hillslope_routing::Bool = false)
 
 Initialize cold-start conditions for water flux variables.
 
-Ported from `waterflux_type%InitCold` in `WaterFluxType.F90`.
+Ported from `waterflux_type%InitCold` in `WaterFluxType.F90` (:860). Fortran calls this
+from `waterflux_type%Init` (:141); the port calls it from `cold_start_initialize!` (via
+`init_water_flux_cold!`), the earliest point at which the `col→landunit` map that the
+soil/crop branch needs is populated. Several of these fields are ONLY written inside the
+hydrology filter, so without this zeroing they stay NaN forever on lake / glacier / urban
+/ wetland columns (see `init_water_flux_cold!` for the audited list).
+
+Zeroes exactly Fortran's set, plus a documented superset of four hydrology-chain inputs
+(`qflx_floodc_col`, `qflx_snow_h2osfc_col`, `qflx_rain_plus_snomelt_col`,
+`qflx_top_soil_col`) and `qflx_evap_soi_patch`. Fortran leaves those at its NaN fill.
+Zeroing them can only turn a never-written NaN into 0 (every column Fortran does write
+overwrites them before any read), and it keeps NaN out of the column water balance on the
+non-hydrology landunits.
 """
 function waterflux_init_cold!(wf::WaterFluxData,
                                bounds_col::UnitRange{Int},
                                bounds_patch::UnitRange{Int},
                                bounds_lun::UnitRange{Int};
-                               landunit_col::Vector{Int},
-                               lun_itype::Vector{Int},
+                               landunit_col::AbstractVector{<:Integer},
+                               lun_itype::AbstractVector{<:Integer},
                                use_hillslope_routing::Bool = false)
     # Patch-level zeros
     for p in bounds_patch
