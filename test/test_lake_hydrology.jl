@@ -14,6 +14,7 @@
     #   10. lake_update_h2osoi_vol!
     #   11. lake_top_layer_diagnostics!
     #   12. lake_hydrology! (orchestrator smoke test)
+    #   13. lake_hydrology! ending water balance (real ComputeWaterMassLake)
     # ------------------------------------------------------------------
 
     CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
@@ -662,5 +663,187 @@
         joff = nlevsno
         vol = ws.h2osoi_vol_col[1, 1]
         @test !isnan(vol)
+    end
+
+    # ------------------------------------------------------------------
+    # 13. lake_hydrology! ending water balance (real ComputeWaterMassLake)
+    #
+    # endwb used to be STUBBED as endwb = begwb, which (a) made the lake water
+    # balance close by construction (hiding any real leak) and (b) zeroed the
+    # (endwb-begwb)/dtime storage-change term in the qflx_qrgwl residual runoff.
+    # This asserts endwb is GENUINELY computed: it must equal the lake column's
+    # actual water stores (snow + soil under the lake, per ComputeWaterMassLake
+    # with add_lake_water_and_subtract_dynbal_baselines=.false.) and must NOT
+    # equal the begwb sentinel.
+    #
+    # Geometry deliberately has npatch (4) > ncol (2), with the lake patch at
+    # p=4 > ncol — the real surfdata_lake100 shape. The patch-indexed kernels in
+    # lake_hydrology.jl default to ndrange=length(out) where `out` is a COLUMN
+    # array, which silently truncated the patch loop to ncol and skipped the lake
+    # patch entirely (qflx_evap_tot_col / qflx_qrgwl left unwritten). The
+    # nc==np smoke test above cannot see that; this one can.
+    # ------------------------------------------------------------------
+    @testset "lake_hydrology! ending water balance (real ComputeWaterMassLake)" begin
+        nc = 2      # col 1 = non-lake, col 2 = lake
+        np = 4      # patches 1-3 on col 1 (non-lake), patch 4 on col 2 (LAKE, p > nc)
+        nl = 2
+        ng = 1
+        nlevtot = nlevsno + nlevmaxurbgrnd
+        dtime = 1800.0
+
+        temperature = CLM.TemperatureData();      CLM.temperature_init!(temperature, np, nc, nl, ng)
+        energyflux  = CLM.EnergyFluxData();       CLM.energyflux_init!(energyflux, np, nc, nl, ng)
+        lakestate   = CLM.LakeStateData();        CLM.lakestate_init!(lakestate, nc, np)
+        soilstate   = CLM.SoilStateData();        CLM.soilstate_init!(soilstate, np, nc)
+        waterstatebulk   = CLM.WaterStateBulkData();       CLM.waterstatebulk_init!(waterstatebulk, nc, np, nl, ng)
+        waterdiagbulk    = CLM.WaterDiagnosticBulkData();  CLM.waterdiagnosticbulk_init!(waterdiagbulk, nc, np, nl, ng)
+        waterbalancebulk = CLM.WaterBalanceData();         CLM.waterbalance_init!(waterbalancebulk, nc, np, ng)
+        waterfluxbulk    = CLM.WaterFluxBulkData();        CLM.waterfluxbulk_init!(waterfluxbulk, nc, np, nl, ng)
+        col_data = CLM.ColumnData();  CLM.column_init!(col_data, nc)
+        patch_data = CLM.PatchData(); CLM.patch_init!(patch_data, np)
+
+        col_data.landunit .= [1, 2]
+        col_data.gridcell .= 1
+        col_data.itype    .= [1, CLM.ISTDLAK]
+        col_data.snl      .= 0
+
+        patch_data.column   .= [1, 1, 1, 2]   # lake patch is p = 4 > nc
+        patch_data.gridcell .= 1
+        patch_data.landunit .= [1, 1, 1, 2]
+
+        for c in 1:nc
+            for j in 1:nlevtot
+                col_data.dz[c, j] = 0.1
+                col_data.z[c, j]  = 0.05 + (j - 1) * 0.1
+            end
+            for j in 1:nlevlak
+                col_data.dz_lake[c, j] = 1.0
+                col_data.z_lake[c, j]  = 0.5 + (j - 1) * 1.0
+            end
+        end
+
+        temperature.t_soisno_col .= 270.0
+        temperature.t_grnd_col   .= 270.0
+        temperature.t_lake_col   .= 275.0
+        temperature.t_sno_mul_mss_col .= 0.0
+        temperature.snot_top_col .= CLM.SPVAL
+        temperature.dTdz_top_col .= CLM.SPVAL
+
+        ws = waterstatebulk.ws
+        ws.h2osoi_liq_col .= 10.0
+        ws.h2osoi_ice_col .= 1.0
+        ws.h2osoi_vol_col .= 0.3
+        ws.h2osno_no_layers_col .= 3.0   # unresolved snow on the lake
+
+        waterdiagbulk.frac_sno_col     .= 0.0
+        waterdiagbulk.frac_sno_eff_col .= 0.0
+        waterdiagbulk.snow_depth_col   .= 0.0
+        waterdiagbulk.snowice_col      .= 0.0
+        waterdiagbulk.snowliq_col      .= 0.0
+        waterdiagbulk.snw_rds_col      .= 0.0
+        waterdiagbulk.snw_rds_top_col  .= CLM.SPVAL
+        waterdiagbulk.h2osno_top_col   .= 0.0
+        waterdiagbulk.sno_liq_top_col  .= CLM.SPVAL
+
+        energyflux.eflx_sh_tot_patch    .= 0.0
+        energyflux.eflx_sh_grnd_patch   .= 0.0
+        energyflux.eflx_soil_grnd_patch .= 0.0
+        energyflux.eflx_gnet_patch      .= 10.0
+        energyflux.eflx_grnd_lake_patch .= 0.0
+        energyflux.eflx_snomelt_col     .= 0.0
+
+        lakestate.lake_icefrac_col .= 0.0
+        soilstate.watsat_col       .= 0.4
+
+        wf = waterfluxbulk.wf
+        wf.qflx_evap_soi_patch                  .= 0.0
+        wf.qflx_evap_tot_patch                  .= 0.0
+        wf.qflx_ev_snow_patch                   .= 0.0
+        wf.qflx_solidevap_from_top_layer_patch  .= 0.0
+        wf.qflx_liqevap_from_top_layer_patch    .= 0.0
+        wf.qflx_soliddew_to_top_layer_patch     .= 0.0
+        wf.qflx_liqdew_to_top_layer_patch       .= 0.0
+        # Distinct evap on the LAKE patch (p=4): proves the patch→column copy ran
+        # for a patch index beyond ncol.
+        qflx_evap_lake_patch = 2.5e-5
+        wf.qflx_evap_soi_patch[4] = qflx_evap_lake_patch
+        wf.qflx_evap_tot_patch[4] = qflx_evap_lake_patch
+
+        for a in (wf.qflx_liq_grnd_col, wf.qflx_snow_grnd_col, wf.qflx_evap_tot_col,
+                  wf.qflx_liqevap_from_top_layer_col, wf.qflx_liqdew_to_top_layer_col,
+                  wf.qflx_soliddew_to_top_layer_col, wf.qflx_solidevap_from_top_layer_col,
+                  wf.qflx_snomelt_col, wf.qflx_snow_drain_col, wf.qflx_snwcp_ice_col,
+                  wf.qflx_snwcp_discarded_ice_col, wf.qflx_snwcp_discarded_liq_col,
+                  wf.qflx_drain_perched_col, wf.qflx_rsub_sat_col, wf.qflx_surf_col,
+                  wf.qflx_drain_col, wf.qflx_infl_col, wf.qflx_qrgwl_col,
+                  wf.qflx_runoff_col, wf.qflx_floodc_col, wf.qflx_rain_plus_snomelt_col,
+                  wf.qflx_top_soil_col, wf.qflx_ice_runoff_snwcp_col,
+                  waterfluxbulk.qflx_ev_snow_col, waterfluxbulk.qflx_snomelt_lyr_col)
+            a .= 0.0
+        end
+
+        # begwb sentinel: a value the real endwb cannot possibly equal.
+        begwb_sentinel = -12345.0
+        waterbalancebulk.begwb_col .= begwb_sentinel
+        waterbalancebulk.endwb_col .= NaN
+
+        mask_lake  = BitVector([false, true])
+        mask_lakep = BitVector([false, false, false, true])
+        bounds_col = 1:nc
+        bounds_patch = 1:np
+
+        forc_rain   = fill(0.001,  nc)
+        forc_snow   = fill(0.0005, nc)
+        qflx_floodg = [0.0]
+
+        CLM.lake_hydrology!(
+            temperature, energyflux, lakestate, soilstate,
+            waterstatebulk, waterdiagbulk, waterbalancebulk, waterfluxbulk,
+            col_data, patch_data,
+            mask_lake, mask_lakep,
+            forc_rain, forc_snow, qflx_floodg,
+            bounds_col, bounds_patch,
+            dtime, nlevsno, nlevsoi, nlevgrnd)
+
+        cl = 2  # the lake column
+        endwb = waterbalancebulk.endwb_col[cl]
+
+        # (a) The patch→column copy reached the lake patch p=4 > ncol.
+        @test wf.qflx_evap_tot_col[cl] ≈ qflx_evap_lake_patch
+
+        # (b) endwb is GENUINELY computed — not the begwb stub.
+        @test isfinite(endwb)
+        @test endwb != waterbalancebulk.begwb_col[cl]
+        @test endwb != begwb_sentinel
+
+        # (c) endwb equals the lake column's ACTUAL stores: unresolved snow +
+        #     resolved snow layers (snl=0 → none) + soil under the lake.
+        #     (ComputeWaterMassLake with add_lake_water=false excludes the lake
+        #     water column itself and the dynbal baselines.)
+        expected = ws.h2osno_no_layers_col[cl]
+        for j in 1:nlevgrnd
+            jj = j + nlevsno
+            expected += ws.h2osoi_liq_col[cl, jj] + ws.h2osoi_ice_col[cl, jj]
+        end
+        @test endwb ≈ expected rtol=1e-12
+        @test endwb > 0.0
+
+        # (d) The lake water balance CLOSES with the real endwb: qflx_qrgwl is the
+        #     residual runoff, so errh2o (the BalanceCheck column expression, with
+        #     the lake's zero surf/drain/perched terms) must vanish to roundoff —
+        #     and it is a genuine cancellation, since endwb-begwb is huge here.
+        @test isfinite(wf.qflx_qrgwl_col[cl])
+        errh2o = (endwb - begwb_sentinel) -
+                 (forc_rain[cl] + forc_snow[cl] + wf.qflx_floodc_col[cl] -
+                  wf.qflx_evap_tot_col[cl] - wf.qflx_surf_col[cl] -
+                  wf.qflx_qrgwl_col[cl] - wf.qflx_drain_col[cl] -
+                  wf.qflx_drain_perched_col[cl] - wf.qflx_ice_runoff_snwcp_col[cl] -
+                  wf.qflx_snwcp_discarded_liq_col[cl] -
+                  wf.qflx_snwcp_discarded_ice_col[cl]) * dtime
+        @test abs(errh2o) < 1.0e-5   # CLM's BALANCE_ERROR_THRESH [mm]
+        @test abs(endwb - begwb_sentinel) > 1.0e3   # storage really moved
+
+        # (e) The stub is gone.
+        @test !isdefined(CLM, :lakehyd_endwb_eq_begwb!)
     end
 end
