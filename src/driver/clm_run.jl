@@ -188,21 +188,14 @@ function clm_run!(;
             end
         end
         haskey(ds_p, "accum_factor") && (scf.accum_factor = Float64(ds_p["accum_factor"][1]))
-        haskey(ds_p, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds_p["SNOW_DENSITY_MAX"][1]))
-        haskey(ds_p, "SNOW_DENSITY_MIN") && (snowhydrology_params.rho_min = Float64(ds_p["SNOW_DENSITY_MIN"][1]))
-        # fresh_snw_rds_max sets the WARM (near-0°C) fresh-snow grain radius used by
-        # SNICAR's FreshSnowRadius (snicar_params.fresh_snw_rds_max), NOT snw_rds_min.
-        # The previous wiring set snowhydrology_params.snw_rds_min instead, so the
-        # calibrated value (e.g. 70 µm) never reached SNICAR — fresh snow stayed at the
-        # 204.5 µm CLM5 default → spring snow albedo too low → snowpack melted ~a month
-        # early (Bow May SWE −41 mm) and dried the summer soil. Wire it to SNICAR.
-        haskey(ds_p, "fresh_snw_rds_max") && (snicar_params.fresh_snw_rds_max = Float64(ds_p["fresh_snw_rds_max"][1]))
+        # SNO_Z0MV is per-instance (frictionvel), so it must be wired here rather than
+        # in readParameters!.
         haskey(ds_p, "SNO_Z0MV") && (inst.frictionvel.zsno = Float64(ds_p["SNO_Z0MV"][1]))
-        if haskey(ds_p, "snw_aging_bst")
-            snicar_params.xdrdt = Float64(ds_p["snw_aging_bst"][1])
-        elseif haskey(ds_p, "xdrdt")
-            snicar_params.xdrdt = Float64(ds_p["xdrdt"][1])
-        end
+        # NOTE: the snow/SNICAR scalars that used to be re-read here
+        # (SNOW_DENSITY_MAX/MIN, fresh_snw_rds_max, snw_aging_bst/xdrdt,
+        # interception_fraction) are now wired once, in readParameters!
+        # (infrastructure/read_params.jl), which clm_initialize! already calls.
+        # Keeping two readers of the same file was how params got silently dropped.
         # NOTE: `pc` is the surface-water/frost connectivity threshold (Fortran reads it
         # into params_inst%pc for the frac_h2osfc fd calc + the SurfaceWater infiltration
         # cluster), NOT the baseflow decay depth. Fortran fixes hkdepth = 1/2.5 (0.4 m);
@@ -214,10 +207,8 @@ function clm_run!(;
         # NOT the CLM4 default 0.25*(1-exp(-0.5*lai)). The CLM4 form intercepts ~20% at
         # lai~3 vs ~64% for CLM5 with the calibrated interception_fraction=0.6455 → Julia
         # under-evaporated the canopy all summer (FCEV -17%). Enable CLM5 fpi + read the
-        # calibrated interception_fraction.
+        # calibrated interception_fraction (the latter now read in readParameters!).
         canopy_hydrology_read_nml!(use_clm5_fpi=true)
-        haskey(ds_p, "interception_fraction") &&
-            (canopy_hydrology_params.interception_fraction = Float64(ds_p["interception_fraction"][1]))
         close(ds_p)
     catch e
         @warn "Runtime param wiring failed: $e" maxlog=1

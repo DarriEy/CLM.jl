@@ -55,7 +55,9 @@ const PARAMS_NC_MAP = Dict(
     "interception_fraction"   => "interception_fraction",
     "max_leaf_wetted_frac"    => "maximum_leaf_wetted_fraction",
     "fresh_snw_rds_max"       => "fresh_snw_rds_max",
-    "snw_aging_bst"           => "snw_aging_bst",  # also read as xdrdt fallback
+    # Alias for the Fortran SNICAR param `xdrdt` (snow-aging rate factor). readParameters!
+    # prefers this name over `xdrdt`, so the calibrated value wins on files carrying both.
+    "snw_aging_bst"           => "snw_aging_bst",
     "SNO_Z0MV"                => "SNO_Z0MV",
     "accum_factor"            => "accum_factor",
     "SNOW_DENSITY_MAX"        => "SNOW_DENSITY_MAX",

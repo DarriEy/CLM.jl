@@ -4,6 +4,37 @@
 # ==========================================================================
 
 """
+    SoilStateParams
+
+Time-constant soil-property parameters read from the parameter file.
+
+Ported from `params_type` in `SoilStateInitTimeConstMod.F90` (the
+`readParams` / `readNcdioScalar` block). Consumed by
+`init_soil_properties!` (`infrastructure/cold_start.jl`), which is the
+port of `SoilStateInitTimeConst`.
+
+Defaults are the CLM5 parameter-file values, so a run with no parameter
+file (unit tests) is unchanged.
+"""
+Base.@kwdef mutable struct SoilStateParams
+    tkd_sand   ::Float64 = 8.8      # thermal conductivity of sand (W/m/K)
+    tkd_clay   ::Float64 = 2.92     # thermal conductivity of clay (W/m/K)
+    tkd_om     ::Float64 = 0.05     # thermal conductivity of dry organic soil (W/m/K)
+    tkm_om     ::Float64 = 0.25     # thermal conductivity of organic soil solids (W/m/K)
+    csol_sand  ::Float64 = 2.128    # heat capacity of sand, ×10^6 (J/K/m3)
+    csol_clay  ::Float64 = 2.385    # heat capacity of clay, ×10^6 (J/K/m3)
+    csol_om    ::Float64 = 2.5      # heat capacity of organic soil, ×10^6 (J/K/m3)
+    pd         ::Float64 = 2700.0   # particle density of soil solids (kg/m3)
+    bsw_sf     ::Float64 = 1.0      # scale factor for bsw (unitless)
+    hksat_sf   ::Float64 = 1.0      # scale factor for hksat (unitless)
+    sucsat_sf  ::Float64 = 1.0      # scale factor for sucsat (unitless)
+    watsat_sf  ::Float64 = 1.0      # scale factor for watsat (unitless)
+    om_frac_sf ::Float64 = 1.0      # scale factor for organic matter fraction (unitless)
+end
+
+const soilstate_params = SoilStateParams()
+
+"""
     SoilStateData
 
 Soil state data structure. Holds all soil state variables at patch and

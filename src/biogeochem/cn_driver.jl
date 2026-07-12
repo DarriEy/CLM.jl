@@ -656,7 +656,11 @@ function cn_driver_no_leaching!(
        patch !== nothing && crop !== nothing && cnveg_state !== nothing &&
        temperature !== nothing && water_diag !== nothing && canopystate !== nothing &&
        soilstate !== nothing && gridcell !== nothing
-        _phparams = PhenologyParams()
+        # Use the module-level params instance, which readParams_CNPhenology! fills
+        # from the parameter file. Constructing a fresh PhenologyParams() here meant
+        # the run silently used Fortran's *unit-test* defaults (e.g. ndays_off=30)
+        # instead of the file values (ndays_off=15) — a 2x-too-long leaf-offset ramp.
+        _phparams = cn_phenology_params
         _phstate  = PhenologyState()
         # Resolve the phenology-trigger soil layer from phenology_soil_depth (0.08 m),
         # mirroring Fortran find_soil_layer_containing_depth: the first layer whose
