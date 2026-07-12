@@ -149,16 +149,25 @@ function varpar_init!(vp::VarPar, actual_maxsoil_patches::Int,
         vp.nlevsno = 12  # default max snow layers
     end
 
-    # Decomposition levels.
-    # NOTE: clm5_0 BGC uses vertically-resolved soil C (use_vertsoilc=.true.):
-    # Fortran (clm_varpar.F90:305-306) sets nlevdecomp = nlevsoi (20),
-    # nlevdecomp_full = nlevgrnd (25). The Fortran spinup restart confirms this
-    # (depth-decreasing _vr pools). TODO for true soil-BGC parity: switch to the
-    # vertical values — but the multi-layer decomposition/litter-transport chain
-    # currently NaNs pools 2-7 at nlevdecomp>1 (only ever exercised at 1), a
-    # dedicated debugging effort. Single-step teacher-forced soil-pool parity is
-    # dominated by the injected values, and the veg-CN flux chain is independent of
-    # nlevdecomp, so nlevdecomp=1 is kept here while the veg-CN wiring is validated.
+    # Decomposition levels — vertically-resolved soil C/N (the `_vr` pools).
+    # Matches Fortran clm_varpar.F90:302-310, which for the BGC-active branch
+    # (use_cn .or. (use_fates .and. .not. use_fates_sp)) sets:
+    #     nlevdecomp = nlevsoi (20), nlevdecomp_full = nlevgrnd (25)
+    # The Fortran spinup restart confirms it (depth-decreasing _vr pools).
+    #
+    # The old "nlevdecomp=1 placeholder / NaNs pools 2-7" TODO here was resolved
+    # by 1348de3 (which flipped these to the vertical values and fixed the three
+    # unpopulated-param NaN bugs behind it) — the comment simply outlived the fix.
+    # Verified: clm_drv! with use_cn=true runs the full vertical decomposition and
+    # litter-transport chain over all 7 decomp pools × 20 layers with zero NaN.
+    #
+    # Known (numerically inert) deviation: Fortran's else-branch drops to
+    # nlevdecomp = nlevdecomp_full = 1 when BGC is off. We size unconditionally to
+    # the vertical values instead. With BGC off nothing reads the _vr pools, so this
+    # is pure allocation headroom, not a physics difference; gating on use_cn would
+    # silently collapse the BGC test suite to a single layer, since those tests call
+    # varpar_init! against the varctl default (use_cn=false) and then read
+    # varpar.nlevdecomp. Revisit only if non-BGC memory footprint becomes a concern.
     vp.nlevdecomp = vp.nlevsoi
     vp.nlevdecomp_full = vp.nlevgrnd
 
