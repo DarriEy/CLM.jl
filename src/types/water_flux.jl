@@ -183,7 +183,12 @@ function waterflux_init!(wf::WaterFluxData{FT}, nc::Int, np::Int, nl::Int, ng::I
     wf.qflx_snofrz_col                     = fill(FT(NaN), nc)
     wf.qflx_snow_drain_col                 = fill(zero(FT), nc)
     wf.qflx_ice_runoff_snwcp_col           = fill(FT(NaN), nc)
-    wf.qflx_ice_runoff_xs_col              = fill(FT(NaN), nc)
+    # Fortran (WaterFluxType.F90:897, InitCold): "This variable only gets set in the
+    # hydrology filter; need to initialize it to 0 for the sake of columns outside
+    # this filter". Lake columns are outside that filter, so a NaN here would poison
+    # their qflx_ice_runoff_col (= snwcp + xs) and hence errh2o_col. The port never
+    # calls waterflux_init_cold!, so the zeroing has to happen at allocation.
+    wf.qflx_ice_runoff_xs_col              = fill(zero(FT), nc)
     wf.qflx_h2osfc_to_ice_col             = fill(FT(NaN), nc)
     wf.qflx_snow_h2osfc_col               = fill(FT(NaN), nc)
     wf.qflx_too_small_h2osfc_to_soil_col  = fill(FT(NaN), nc)
