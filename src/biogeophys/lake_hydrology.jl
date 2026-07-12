@@ -95,7 +95,12 @@ lakehyd_patch_to_col!(
              qflx_evap_tot, qflx_liqevap_from_top_layer,
              qflx_liqdew_to_top_layer, qflx_soliddew_to_top_layer,
              qflx_solidevap_from_top_layer, qflx_ev_snow,
-             patch_column, mask_lakep)
+             patch_column, mask_lakep;
+             # PATCH loop: _launch!'s default ndrange is length(out) — and `out` here
+             # is a COLUMN array, so the default would truncate the loop to ncol and
+             # silently skip every lake patch with p > ncol (leaving the lake column's
+             # qflx_evap_tot_col etc. at their NaN init). Must be npatch.
+             ndrange = length(mask_lakep))
 
 # --- lake_soil_hydrology!: maintain soil saturation (per column AND soil layer) ---
 @kernel function _lakehyd_soil_hydrology_kernel!(
@@ -173,7 +178,12 @@ lakehyd_water_balance!(
              forc_rain, forc_snow, qflx_evap_tot,
              qflx_snwcp_ice, qflx_snwcp_discarded_ice, qflx_snwcp_discarded_liq,
              qflx_liq_grnd, qflx_snow_drain, qflx_floodg, begwb, endwb,
-             patch_column, patch_gridcell, mask_lakep, eltype(qflx_qrgwl)(dtime))
+             patch_column, patch_gridcell, mask_lakep, eltype(qflx_qrgwl)(dtime);
+             # PATCH loop (see lakehyd_patch_to_col! above): the default
+             # ndrange = length(out) is the COLUMN count, which skips lake patches
+             # with p > ncol — qflx_qrgwl then never gets the storage-change term
+             # and the lake water balance cannot close. Must be npatch.
+             ndrange = length(mask_lakep))
 
 # --- lake_update_h2osoi_vol!: update volumetric soil water (column AND layer) ---
 @kernel function _lakehyd_update_h2osoi_vol_kernel!(
@@ -228,17 +238,6 @@ end
 lakehyd_build_snowfilter!(mask_lakesnow, mask_lakenosnow, mask_lake, snl) =
     _launch!(_lakehyd_build_snowfilter_kernel!, mask_lakesnow, mask_lakenosnow,
              mask_lake, snl)
-
-# --- endwb = begwb (water-balance stub) for lake columns ---
-@kernel function _lakehyd_endwb_eq_begwb_kernel!(endwb, @Const(mask_lake), @Const(begwb))
-    c = @index(Global)
-    @inbounds if mask_lake[c]
-        endwb[c] = begwb[c]
-    end
-end
-
-lakehyd_endwb_eq_begwb!(endwb, mask_lake, begwb) =
-    _launch!(_lakehyd_endwb_eq_begwb_kernel!, endwb, mask_lake, begwb)
 
 # =========================================================================
 # sum_flux_fluxes_onto_ground!
@@ -1168,11 +1167,16 @@ function lake_hydrology!(
         bounds_col, nlevsno)
 
     # =====================================================================
-    # 12. Compute ending water balance (stub: endwb = begwb for now)
+    # 12. Compute ending water balance
     # =====================================================================
-    # In the Fortran code, ComputeWaterMassLake is called here.
-    # That function is not yet ported, so we use a stub that sets endwb = begwb.
-    lakehyd_endwb_eq_begwb!(endwb, mask_lake, begwb)
+    # Fortran: ComputeWaterMassLake(..., add_lake_water_and_subtract_dynbal_baselines
+    # = .false., water_mass = endwb). With that flag false the lake water/ice column
+    # (dz_lake × lake_icefrac) and the dynbal baselines are EXCLUDED, so endwb sums
+    # only the snow (h2osno_no_layers + resolved snow layers) and the soil under the
+    # lake — exactly the stores LakeHydrology moves. This replaces the old
+    # endwb = begwb stub, which zeroed the (endwb-begwb)/dtime storage-change term in
+    # the qflx_qrgwl residual below and so made the lake balance unclosable.
+    compute_water_mass_lake!(mask_lake, col_data, ws, lakestate, false, endwb)
 
     # =====================================================================
     # 13. Update volumetric soil water
