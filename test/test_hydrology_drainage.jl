@@ -4,7 +4,7 @@
     # Verifies:
     #   1. compute_wetland_ice_hydrology!
     #   2. compute_total_runoff!
-    #   3. compute_water_mass_non_lake! (stub)
+    #   3. (end-of-timestep water mass now comes from total_water_heat.jl)
     #   4. adjust_runoff_terms! (ported, glacier SMB)
     #   5. hydrology_drainage! (orchestrator smoke test)
     # ------------------------------------------------------------------
@@ -146,29 +146,10 @@
     end
 
     # ------------------------------------------------------------------
-    # 3. compute_water_mass_non_lake! (stub)
+    # 3. end-of-timestep water mass: the drainage seam now calls the real
+    #    compute_water_mass_non_lake! from total_water_heat.jl (covered by
+    #    test_total_water_heat.jl); the local zeroing stub is gone.
     # ------------------------------------------------------------------
-    @testset "compute_water_mass_non_lake! (stub)" begin
-        nc = 2
-        np = 1; nl = 1; ng = 1
-
-        waterstatebulk = CLM.WaterStateBulkData()
-        CLM.waterstatebulk_init!(waterstatebulk, nc, np, nl, ng)
-
-        waterdiagbulk = CLM.WaterDiagnosticBulkData()
-        CLM.waterdiagnosticbulk_init!(waterdiagbulk, nc, np, nl, ng)
-
-        endwb = fill(NaN, nc)
-        mask_nolake = BitVector([true, true])
-        bounds = 1:nc
-
-        CLM.compute_water_mass_non_lake!(endwb, waterstatebulk, waterdiagbulk,
-            mask_nolake, bounds)
-
-        # Stub sets endwb to 0.0
-        @test endwb[1] == 0.0
-        @test endwb[2] == 0.0
-    end
 
     # ------------------------------------------------------------------
     # 4. adjust_runoff_terms! (now ported in glacier_surface_mass_balance.jl)
@@ -240,6 +221,7 @@
         col_data.gridcell .= 1
         col_data.itype .= 1  # soil type
         col_data.topo_slope .= 0.01
+        col_data.snl .= 0    # no snow layers (column_init! leaves snl at ispval)
         lun_data.itype .= CLM.ISTSOIL
         lun_data.urbpoi .= false
 
@@ -362,6 +344,7 @@
         col_data.gridcell[1] = 1
         col_data.itype[1] = 1
         col_data.topo_slope[1] = 0.01
+        col_data.snl[1] = 0   # no snow layers (column_init! leaves snl at ispval)
         col_data.nbedrock[1] = nlevsoi
         lun_data.itype[1] = CLM.ISTSOIL
         lun_data.urbpoi[1] = false
