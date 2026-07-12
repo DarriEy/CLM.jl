@@ -55,6 +55,33 @@
         @test all(aer.mss_cnc_dst4_col  .== 0.0)
     end
 
+    @testset "clm_instInit! wires aerosol_init_cold! (masses zeroed, not NaN)" begin
+        # REGRESSION: aerosol_init_cold! (the port of AerosolMod.F90::InitCold, which
+        # Fortran calls inside aerosol_inst%Init) was DEAD CODE — allocated but never
+        # invoked from the init path. The mass arrays therefore kept their
+        # allocation-time NaN, and the only thing that ever zeroed them was the
+        # "layer above snl" branch of aerosol_masses!, which runs at the END of a step.
+        # A column that formed its first snow layer during step 1 (cold-start glacier
+        # under snowfall) hit aerosol_fluxes! (`mss_bcphi[c,top] += flx*dt`) and SNICAR
+        # with NaN -> NaN mss_cnc -> NaN snow albedo/flx_abs -> NaN sabg_lyr -> NaN
+        # soil-temperature solve on the NEXT step. Assert the wiring, not just the
+        # function: this is what makes the whole snow-on-glacier path finite.
+        inst = CLM.make_instances()
+        CLM.clm_instInit!(inst; ng=ng, nl=nc, nc=nc, np=nc)
+        aer = inst.aerosol
+        for f in (:mss_bcpho_col, :mss_bcphi_col, :mss_bctot_col,
+                  :mss_ocpho_col, :mss_ocphi_col, :mss_octot_col,
+                  :mss_dst1_col, :mss_dst2_col, :mss_dst3_col, :mss_dst4_col,
+                  :mss_dsttot_col,
+                  :mss_cnc_bcphi_col, :mss_cnc_bcpho_col,
+                  :mss_cnc_ocphi_col, :mss_cnc_ocpho_col,
+                  :mss_cnc_dst1_col, :mss_cnc_dst2_col,
+                  :mss_cnc_dst3_col, :mss_cnc_dst4_col)
+            arr = getfield(aer, f)
+            @test all(iszero, arr)
+        end
+    end
+
     @testset "aerosol_reset! zeros single column" begin
         aer = CLM.AerosolData()
         CLM.aerosol_init!(aer, nc)

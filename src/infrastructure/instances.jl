@@ -273,7 +273,19 @@ function clm_instInit!(inst::CLMInstances;
     ozone_init!(inst.ozone, np)
 
     # --- Aerosol deposition ---
+    # Fortran `aerosol_inst%Init` = InitAllocate + InitHistory + InitCold, and InitCold
+    # zeros every mss_*/mss_cnc_* snow-layer array. aerosol_init! is the InitAllocate
+    # analogue: it NaN-fills (matching Fortran's allocate-to-nan), so the InitCold zeroing
+    # is what makes those arrays usable. Without it the mass arrays only ever get zeroed
+    # inside aerosol_masses!'s "layer j is above snl" branch — which runs at the END of a
+    # step. A column that forms its first snow layer during step 1 (e.g. a cold-start
+    # glacier under snowfall) therefore reaches aerosol_fluxes! / SNICAR with allocation-
+    # time NaN in mss_bcphi[c, top] → NaN mss_cnc → NaN SNICAR albedo + flx_abs → NaN
+    # sabg_lyr → NaN soil-temperature solve on the NEXT step. Run it here (not only in
+    # cold_start_initialize!) so the restart path is also zeroed before the dump overwrites,
+    # exactly as Fortran's Init does.
     aerosol_init!(inst.aerosol, nc)
+    aerosol_init_cold!(inst.aerosol, 1:nc)
 
     # --- Irrigation ---
     irrigation_init_allocate!(inst.irrigation, np, nc, varpar.nlevsoi)
