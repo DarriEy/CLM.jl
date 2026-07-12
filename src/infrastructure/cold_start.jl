@@ -164,6 +164,11 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
     nlevsoi = varpar.nlevsoi
     nlevgrnd = varpar.nlevgrnd
 
+    # Time-constant soil params from the parameter file (SoilStateInitTimeConstMod
+    # readParams). Defaults equal the CLM5 file values, so unit-test paths that
+    # never call readParameters! behave exactly as before.
+    sp = soilstate_params
+
     for c in bounds.begc:bounds.endc
         g = col.gridcell[c]
         gi = g - bounds.begg + 1
@@ -184,8 +189,9 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             j_surf = min(j, size(surf.pct_sand, 2))
             sand = surf.pct_sand[gi, j_surf]
             clay = surf.pct_clay[gi, j_surf]
+            # om_frac_sf scales the organic fraction (SoilStateInitTimeConstMod.F90:457)
             om_frac = j_surf <= size(surf.organic, 2) ?
-                min(surf.organic[gi, j_surf] / 130.0, 1.0) : 0.0
+                min(sp.om_frac_sf * surf.organic[gi, j_surf] / 130.0, 1.0) : 0.0
             if sand + clay > 0.0
                 last_sand = sand; last_clay = clay; last_om = om_frac
             else
@@ -224,10 +230,15 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             sucsat_organic = min(10.3 - 0.2 * depth_ratio, 10.1)
             xksat_organic = max(0.28 - 0.2799 * depth_ratio, xksat_mineral)
 
-            # Blend mineral + organic
-            watsat_val = (1.0 - om_frac) * watsat_mineral + om_frac * watsat_organic
-            bsw_val = (1.0 - om_frac) * bsw_mineral + om_frac * bsw_organic
-            sucsat_val = (1.0 - om_frac) * sucsat_mineral + om_frac * sucsat_organic
+            # Blend mineral + organic. The *_sf scale factors come from the parameter
+            # file (default 1.0 = no-op); watsat is capped at 0.93 exactly as Fortran
+            # does (SoilStateInitTimeConstMod.F90:550-557).
+            watsat_val = min(sp.watsat_sf *
+                ((1.0 - om_frac) * watsat_mineral + om_frac * watsat_organic), 0.93)
+            bsw_val = sp.bsw_sf *
+                ((1.0 - om_frac) * bsw_mineral + om_frac * bsw_organic)
+            sucsat_val = sp.sucsat_sf *
+                ((1.0 - om_frac) * sucsat_mineral + om_frac * sucsat_organic)
             # hksat is NOT a simple linear blend — organic matter only conducts above
             # a percolation threshold (Lawrence & Slater 2008), so below it the
             # mineral/organic conductances add in SERIES (much lower hksat than the
@@ -249,7 +260,8 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             else
                 uncon_hksat = 0.0
             end
-            hksat_val = uncon_frac * uncon_hksat + (perc_frac * om_frac) * om_hksat
+            hksat_val = sp.hksat_sf *
+                (uncon_frac * uncon_hksat + (perc_frac * om_frac) * om_hksat)
 
             ss.watsat_col[c, j] = watsat_val
             ss.bsw_col[c, j] = bsw_val
@@ -260,18 +272,20 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             # :548-560. The prior code used water/ice conductivities for tkmg
             # instead of the mineral-solids conductivity tkm (sand/clay weighted),
             # making soil ~2x too thermally insulating → too little ground heat
-            # flux → the summer surface over-heats. Params: tkd_sand=8.8,
-            # tkd_clay=2.92, tkm_om=0.25, tkd_om=0.05, csol_*, pd=2700.
-            pd = 2700.0
+            # flux → the summer surface over-heats. tkd_sand/tkd_clay/tkm_om/tkd_om/
+            # csol_*/pd all come from the parameter file (soilstate_params); the
+            # defaults are the CLM5 file values (8.8 / 2.92 / 0.25 / 0.05 / 2700).
+            pd = sp.pd
             bd = (1.0 - watsat_mineral) * pd            # bulk density (mineral watsat)
             sc = sand + clay
             tkm = sc > 0.0 ?
-                (1.0 - om_frac) * (8.8 * sand + 2.92 * clay) / sc + 0.25 * om_frac :
-                0.25
+                (1.0 - om_frac) * (sp.tkd_sand * sand + sp.tkd_clay * clay) / sc +
+                    sp.tkm_om * om_frac :
+                sp.tkm_om
             ss.tkmg_col[c, j] = tkm^(1.0 - watsat_val)
             ss.tksatu_col[c, j] = ss.tkmg_col[c, j] * TKWAT^watsat_val
             ss.tkdry_col[c, j] = ((0.135 * bd + 64.7) / (pd - 0.947 * bd)) *
-                                  (1.0 - om_frac) + 0.05 * om_frac
+                                  (1.0 - om_frac) + sp.tkd_om * om_frac
 
             # Bulk density + organic-matter content per layer for the BGC
             # nitrification/denitrification anoxia calc (SoilBiogeochemNitrifDenitrif).
@@ -285,9 +299,11 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             # (compute_soil_cv!: cv = csol*(1-watsat)*dz). The prior code baked
             # (1-watsat) in here too, double-counting it → soil heat capacity ~2x
             # too low → summer surface over-heats. (csol_sand=2.128e6,
-            # csol_clay=2.385e6, csol_om=2.5e6 J/m3/K.)
-            csol_min = sc > 0.0 ? (2.128e6 * sand + 2.385e6 * clay) / sc : 2.5e6
-            ss.csol_col[c, j] = (1.0 - om_frac) * csol_min + 2.5e6 * om_frac
+            # csol_clay=2.385e6, csol_om=2.5e6 J/m3/K — file values, ×10^6.)
+            csol_min = sc > 0.0 ?
+                (sp.csol_sand * 1.0e6 * sand + sp.csol_clay * 1.0e6 * clay) / sc :
+                sp.csol_om * 1.0e6
+            ss.csol_col[c, j] = (1.0 - om_frac) * csol_min + sp.csol_om * 1.0e6 * om_frac
             # Soil water retention (Clapp-Hornberger watdry, watopt, watfc)
             ss.watdry_col[c, j] = watsat_val * (316230.0 / sucsat_val)^(-1.0 / bsw_val)
             ss.watopt_col[c, j] = watsat_val * (158490.0 / sucsat_val)^(-1.0 / bsw_val)

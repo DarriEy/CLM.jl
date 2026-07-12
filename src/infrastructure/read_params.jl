@@ -40,7 +40,6 @@ function readParameters!(paramfile::String)
 
         # Read snow hydrology parameters (SnowHydrologyMod)
         haskey(ds, "wimp") && (snowhydrology_params.wimp = Float64(ds["wimp"][1]))
-        haskey(ds, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds["SNOW_DENSITY_MAX"][1]))
         # Overburden-compaction viscosity params. ceta in particular DEFAULTS to 250
         # in the struct but the clm5 params file ships 450 — using the default makes
         # the Vionnet2012 viscosity eta = f1·f2·(bi/ceta)·… ~1.8× too large, i.e. the
@@ -64,8 +63,29 @@ function readParameters!(paramfile::String)
         haskey(ds, "drift_gs") && (snowhydrology_params.drift_gs = Float64(ds["drift_gs"][1]))
         haskey(ds, "rho_max") && (snowhydrology_params.rho_max = Float64(ds["rho_max"][1]))
         haskey(ds, "tau_ref") && (snowhydrology_params.tau_ref = Float64(ds["tau_ref"][1]))
-        haskey(ds, "SNO_Z0MV") && nothing  # read in clm_run! → inst.frictionvel.zsno
-        haskey(ds, "snw_aging_bst") && nothing  # TODO: wire to snow aging routine
+        # SNOW_DENSITY_MAX / SNOW_DENSITY_MIN are CLM.jl calibration aliases for
+        # rho_max / rho_min (calibration/param_injection.jl). They are read AFTER the
+        # Fortran-named rho_max so the calibrated knob wins when a file carries both —
+        # the precedence clm_run! had before this wiring was centralized here.
+        haskey(ds, "SNOW_DENSITY_MAX") && (snowhydrology_params.rho_max = Float64(ds["SNOW_DENSITY_MAX"][1]))
+        haskey(ds, "SNOW_DENSITY_MIN") && (snowhydrology_params.rho_min = Float64(ds["SNOW_DENSITY_MIN"][1]))
+        haskey(ds, "ssi") && (snowhydrology_params.ssi = Float64(ds["ssi"][1]))
+        # Aerosol scavenging factors (SnowHydrologyMod readParams) — consumed by
+        # snow_hydrology's aerosol flushing.
+        for f in (:scvng_fct_mlt_sf, :scvng_fct_mlt_bcphi, :scvng_fct_mlt_bcpho,
+                  :scvng_fct_mlt_dst1, :scvng_fct_mlt_dst2, :scvng_fct_mlt_dst3,
+                  :scvng_fct_mlt_dst4)
+            k = String(f)
+            haskey(ds, k) && setfield!(snowhydrology_params, f, Float64(ds[k][1]))
+        end
+
+        # SNICAR snow-aging / grain-radius parameters (SnowSnicarMod readParams).
+        readParams_snicar!(ds)
+
+        # NOTE: zsno/zlnd/zglc (FrictionVelocityMod) are per-instance roughness
+        # lengths — clm_run! reads SNO_Z0MV into inst.frictionvel.zsno, which needs
+        # `inst`. zlnd is also a WaterDiagnosticBulk param, wired here.
+        haskey(ds, "zlnd") && (waterdiagbulk_params.zlnd = Float64(ds["zlnd"][1]))
 
         # Read interception parameters (CanopyHydrologyMod)
         haskey(ds, "interception_fraction") && (canopy_hydrology_params.interception_fraction = Float64(ds["interception_fraction"][1]))
@@ -93,6 +113,31 @@ function readParameters!(paramfile::String)
         haskey(ds, "a_exp")    && (canopy_fluxes_params.a_exp  = Float64(ds["a_exp"][1]))
         haskey(ds, "csoilc")   && (canopy_fluxes_params.csoilc = Float64(ds["csoilc"][1]))
         haskey(ds, "cv")       && (canopy_fluxes_params.cv     = Float64(ds["cv"][1]))
+        # Dry-litter layer (CanopyFluxesMod readParams) — the litter resistance term.
+        haskey(ds, "lai_dl")   && (canopy_fluxes_params.lai_dl = Float64(ds["lai_dl"][1]))
+        haskey(ds, "z_dl")     && (canopy_fluxes_params.z_dl   = Float64(ds["z_dl"][1]))
+
+        # Dry-surface-layer soil-evaporation resistance (SurfaceResistanceMod readParams)
+        haskey(ds, "d_max") && (surface_resistance_params.d_max = Float64(ds["d_max"][1]))
+        haskey(ds, "frac_sat_soil_dsl_init") &&
+            (surface_resistance_params.frac_sat_soil_dsl_init =
+                 Float64(ds["frac_sat_soil_dsl_init"][1]))
+
+        # Time-constant soil properties (SoilStateInitTimeConstMod readParams)
+        readParams_soilstate!(ds)
+
+        # CN phenology parameters (CNPhenologyMod readParams)
+        readParams_CNPhenology!(cn_phenology_params, ds)
+
+        # NOTE: fire params (prh30, ignition_efficiency; CNFireBaseMod readParams) are
+        # NOT wired here because no module-level CNFireParams instance exists — the
+        # fire methods take a caller-supplied `cnfire_params` and clm_driver! does not
+        # instantiate one (fire is driven only from explicit harness/test calls).
+        # Callers that do run fire should populate theirs with readParams_CNFire!.
+        #
+        # NOTE: sand_pf / clay_pf (SoilStateInitTimeConstMod) are PPE perturbation
+        # knobs for cellsand/cellclay and are 0 (no-op) in the shipped params file;
+        # the perturbation branch is deliberately not ported.
 
         # LUNA photosynthetic-N acclimation parameters (jmaxb0/jmaxb1/wc2wjb0 + scalars)
         luna_read_params!(luna_params_inst, ds)
@@ -385,6 +430,93 @@ function readParams_initVertical!(ds::NCDataset)
     _initvert_slopemax[]   = _read_scalar(ds, "slopemax", 0.0)
     _initvert_zbedrock[]   = _read_scalar(ds, "zbedrock", -1.0)
     _initvert_zbedrock_sf[] = _read_scalar(ds, "zbedrock_sf", 1.0)
+    nothing
+end
+
+"""
+    readParams_snicar!(ds::NCDataset)
+
+Read the SNICAR snow-aging / grain-radius parameters (SnowSnicarMod readParams)
+into the module-level `snicar_params`, and the shared `snw_rds_min` into
+`waterdiagbulk_params` (WaterDiagnosticBulkType readParams reads the same
+variable).
+
+`xdrdt` is the arbitrary factor applied to the snow-aging rate `dr`
+(SnowSnicarMod.F90:1659). `snw_aging_bst` is accepted as an alias because the
+CLM.jl calibration layer (`calibration/param_injection.jl`) writes the knob
+under that name.
+"""
+function readParams_snicar!(ds::NCDataset)
+    # snw_aging_bst takes precedence: a calibrated file carries BOTH the stock
+    # `xdrdt` and the injected `snw_aging_bst`, and the calibrated knob must win
+    # (this is the precedence clm_run! used before the wiring moved here).
+    if haskey(ds, "snw_aging_bst")
+        snicar_params.xdrdt = Float64(ds["snw_aging_bst"][1])
+    elseif haskey(ds, "xdrdt")
+        snicar_params.xdrdt = Float64(ds["xdrdt"][1])
+    end
+    haskey(ds, "snw_rds_refrz") &&
+        (snicar_params.snw_rds_refrz = Float64(ds["snw_rds_refrz"][1]))
+    haskey(ds, "C2_liq_Brun89") &&
+        (snicar_params.C2_liq_Brun89 = Float64(ds["C2_liq_Brun89"][1]))
+    haskey(ds, "fresh_snw_rds_max") &&
+        (snicar_params.fresh_snw_rds_max = Float64(ds["fresh_snw_rds_max"][1]))
+    if haskey(ds, "snw_rds_min")
+        v = Float64(ds["snw_rds_min"][1])
+        snicar_params.snw_rds_min = v
+        waterdiagbulk_params.snw_rds_min = v
+    end
+    nothing
+end
+
+"""
+    readParams_soilstate!(ds::NCDataset)
+
+Read the time-constant soil-property parameters (SoilStateInitTimeConstMod
+readParams) into the module-level `soilstate_params`, consumed by
+`init_soil_properties!`.
+"""
+function readParams_soilstate!(ds::NCDataset)
+    for f in (:tkd_sand, :tkd_clay, :tkd_om, :tkm_om,
+              :csol_sand, :csol_clay, :csol_om, :pd,
+              :bsw_sf, :hksat_sf, :sucsat_sf, :watsat_sf, :om_frac_sf)
+        k = String(f)
+        haskey(ds, k) && setfield!(soilstate_params, f, Float64(ds[k][1]))
+    end
+    nothing
+end
+
+"""
+    readParams_CNPhenology!(p::PhenologyParams, ds::NCDataset)
+
+Read the CN phenology parameters (CNPhenologyMod readParams) into `p`.
+
+Note `lwtop_ann` in the file maps to the `lwtop` field, matching Fortran
+(`readNcdioScalar(ncid, 'lwtop_ann', subname, params_inst%lwtop)`).
+"""
+function readParams_CNPhenology!(p, ds::NCDataset)  # p::PhenologyParams (defined later in CLM.jl)
+    for f in (:crit_dayl, :crit_dayl_at_high_lat, :crit_dayl_lat_slope,
+              :ndays_off, :fstor2tran, :crit_onset_fdd, :crit_onset_swi,
+              :soilpsi_on, :crit_offset_fdd, :crit_offset_swi, :soilpsi_off,
+              :phenology_soil_depth, :snow5d_thresh_for_onset)
+        k = String(f)
+        haskey(ds, k) && setfield!(p, f, Float64(ds[k][1]))
+    end
+    haskey(ds, "lwtop_ann") && (p.lwtop = Float64(ds["lwtop_ann"][1]))
+    nothing
+end
+
+"""
+    readParams_CNFire!(p::CNFireParams, ds::NCDataset)
+
+Read the fire parameters (CNFireBaseMod readParams) into `p`. Not called from
+`readParameters!` — there is no module-level CNFireParams instance; harnesses
+that run fire should call this on the instance they pass to `cn_driver_*`.
+"""
+function readParams_CNFire!(p, ds::NCDataset)  # p::CNFireParams (defined later in CLM.jl)
+    haskey(ds, "prh30") && (p.prh30 = Float64(ds["prh30"][1]))
+    haskey(ds, "ignition_efficiency") &&
+        (p.ignition_efficiency = Float64(ds["ignition_efficiency"][1]))
     nothing
 end
 

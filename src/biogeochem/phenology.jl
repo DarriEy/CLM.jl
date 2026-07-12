@@ -52,6 +52,13 @@ Base.@kwdef mutable struct PhenologyParams
     snow5d_thresh_for_onset::Float64 = 0.2       # 5-day snow depth threshold for onset (m)
 end
 
+# Module-level instance (Fortran CNPhenologyMod params_inst). Populated from the
+# parameter file by readParams_CNPhenology! (infrastructure/read_params.jl) and
+# consumed by cn_driver_no_leaching!. The struct defaults above mirror Fortran's
+# CNPhenologySetParams (its *unit-test* defaults) — the production values come
+# from the params file, where e.g. ndays_off is 15 days, not 30.
+const cn_phenology_params = PhenologyParams()
+
 # ---------------------------------------------------------------------------
 # Module-level state (replaces Fortran module variables)
 # ---------------------------------------------------------------------------
