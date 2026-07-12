@@ -217,7 +217,9 @@ end
 Register water flux bulk fields for history file output.
 
 Ported from `InitBulkHistory` in `WaterFluxBulkType.F90`.
-Requires history infrastructure — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function waterfluxbulk_init_history!(wfb::WaterFluxBulkData,
                                       bounds_col::UnitRange{Int})
@@ -230,7 +232,9 @@ end
 Read/write bulk water flux from/to restart file.
 
 Ported from `RestartBulk` in `WaterFluxBulkType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function waterfluxbulk_restart!(wfb::WaterFluxBulkData,
                                   bounds_col::UnitRange{Int};
@@ -244,7 +248,10 @@ end
 Initialize accumulation buffer for AnnET (365-day running mean of total ET).
 
 Ported from `InitAccBuffer` in `WaterFluxBulkType.F90`.
-Requires accumulation infrastructure — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function waterfluxbulk_init_acc_buffer!(wfb::WaterFluxBulkData,
                                           bounds_col::UnitRange{Int})
@@ -257,7 +264,10 @@ end
 Initialize accumulation variables from restart.
 
 Ported from `InitAccVars` in `WaterFluxBulkType.F90`.
-Requires accumulation infrastructure — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function waterfluxbulk_init_acc_vars!(wfb::WaterFluxBulkData,
                                         bounds_col::UnitRange{Int})
@@ -270,7 +280,10 @@ end
 Update accumulation variables (AnnET from qflx_evap_tot_col).
 
 Ported from `UpdateAccVars` in `WaterFluxBulkType.F90`.
-Requires accumulation infrastructure — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function waterfluxbulk_update_acc_vars!(wfb::WaterFluxBulkData,
                                           bounds_col::UnitRange{Int})

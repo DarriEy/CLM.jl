@@ -37,11 +37,13 @@
 #     leaf-area-profile path is the one that runs by default.
 #
 # STUBS (gated, inert by default):
-#   * hlm_use_planthydro paths in DemoteFromLayer!/PromoteIntoLayer!/
-#     update_hlm_dynamics! call InitHydrCohort/UpdateH2OVeg/RecruitWaterStorage,
-#     which are not ported in FatesPlantHydraulicsMod. Guarded behind
-#     `hlm_use_planthydro[] == itrue` (defaults to ifalse) — same convention as
-#     Batches 12-14. See `# TODO Batch NN:` markers.
+#   * The hlm_use_planthydro paths in DemoteFromLayer!/PromoteIntoLayer!/
+#     update_hlm_dynamics! do not issue their Fortran calls to InitHydrCohort /
+#     UpdateH2OVeg / RecruitWaterStorage. NOTE: all three ARE ported
+#     (FatesPlantHydraulicsMod.jl — InitHydrCohort, UpdateH2OVeg!,
+#     RecruitWaterStorage); they are simply not wired into these call sites.
+#     Guarded behind `hlm_use_planthydro[] == itrue` (defaults to ifalse) — same
+#     convention as Batches 12-14. See `# TODO Batch NN:` markers.
 #
 # Reused (NOT reimplemented) helpers: carea_allom/tree_lai/tree_sai/CrownDepth/
 # VegAreaLayer (FatesAllometryMod); terminate_cohorts/terminate_cohort/
@@ -1275,7 +1277,8 @@ function update_hlm_dynamics!(nsites::Integer, sites::AbstractVector,
         end
 
         if hlm_use_planthydro[] == itrue
-            # TODO Batch NN: UpdateH2OVeg not yet ported (FatesPlantHydraulicsMod).
+            # TODO Batch NN: call UpdateH2OVeg! here. It IS ported
+            # (FatesPlantHydraulicsMod.jl:1856) — just not wired into this gated path.
         end
 
         # Pass FATES harvested C to bc_out.

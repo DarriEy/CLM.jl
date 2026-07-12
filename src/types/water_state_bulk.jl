@@ -96,7 +96,9 @@ end
 Register water state bulk fields for history file output.
 
 Ported from `InitBulkHistory` in `WaterStateBulkType.F90`.
-Requires history infrastructure — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function waterstatebulk_init_history!(wsb::WaterStateBulkData,
                                        bounds_col::UnitRange{Int})
@@ -109,7 +111,9 @@ end
 Read/write bulk water state from/to restart file.
 
 Ported from `RestartBulk` in `WaterStateBulkType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function waterstatebulk_restart!(wsb::WaterStateBulkData,
                                    bounds_col::UnitRange{Int};

@@ -156,7 +156,11 @@ end
 """
     irrigation_init_history!(irrig, np)
 
-Initialize irrigation history fields. Stub: to be filled when histFileMod is ported.
+Initialize irrigation history fields (seeds the demand field to SPVAL).
+
+The per-type "register my history fields" body is a no-op: history I/O IS ported
+(`src/infrastructure/history_io.jl`), but CLM.jl declares history fields in a
+central registry rather than per type.
 
 Ported from `IrrigationInitHistory` in `IrrigationMod.F90`.
 """
@@ -333,7 +337,10 @@ end
 """
     irrigation_restart!(irrig)
 
-Handle restart of irrigation variables. Stub: to be filled when restart I/O is ported.
+Handle restart of irrigation variables. No-op: restart I/O IS ported
+(`src/infrastructure/restart_io.jl`), but restart variables are declared in a
+central registry rather than per type. The irrigation counters are not currently
+in that registry.
 
 Ported from `Restart` in `IrrigationMod.F90`.
 """

@@ -267,10 +267,18 @@ function canopystate_set_nml_for_testing!(cs::CanopyStateData{FT}) where {FT}
 end
 
 # ==========================================================================
-# The following subroutines depend on infrastructure modules that are not yet
-# ported (history, restart/IO, accumulator). They are provided as stubs that
-# document the Fortran interface and can be filled in when those modules
-# become available.
+# The following per-type `*_InitHistory` / `*_Restart` / `*_InitAccBuffer` /
+# `*_UpdateAccVars` methods are NOT implemented — they are no-op stubs that
+# document the Fortran interface.
+#
+# This is NOT a missing-infrastructure gap: history I/O
+# (`src/infrastructure/history_io.jl`, `history_writer.jl`), restart I/O
+# (`src/infrastructure/restart_io.jl`, `fortran_restart.jl`) and the
+# accumulator (`src/infrastructure/accumul.jl`) are all ported and live. CLM.jl
+# does not route them through per-type methods the way Fortran does: history
+# fields and restart variables are declared in a CENTRAL registry that reads and
+# writes the `CLMInstances` tree directly. These stubs are therefore a
+# structural artifact of the port, not an unported capability.
 # ==========================================================================
 
 """
@@ -279,11 +287,13 @@ end
 Register canopy state fields for history file output.
 
 Ported from `canopystate_type%InitHistory` in `CanopyStateType.F90`.
-Requires history infrastructure (histFileMod) — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function canopystate_init_history!(cs::CanopyStateData,
                                     bounds_patch::UnitRange{Int})
-    # Stub: history field registration will be added when histFileMod is ported.
+    # No-op: history fields are registered centrally (infrastructure/history_io.jl).
     # Fields that would be registered:
     #   ELAI, ESAI, LAISUN, LAISHA, AGSB, AGLB, FSUN, HBOT, DISPLA, HTOP,
     #   TLAI, TSAI, Z0MV_DENSE, FSUN24, FSUN240, LAI240, RSCANOPY,
@@ -297,12 +307,14 @@ end
 Read/write canopy state from/to restart file.
 
 Ported from `canopystate_type%Restart` in `CanopyStateType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function canopystate_restart!(cs::CanopyStateData,
                                bounds_patch::UnitRange{Int};
                                flag::String = "read")
-    # Stub: restart variable I/O will be added when restUtilMod/ncdio_pio is ported.
+    # No-op: restart variables are declared centrally (infrastructure/restart_io.jl).
     # Variables that would be read/written:
     #   FRAC_VEG_NOSNO_ALB, tlai, tsai, elai, esai, stem_biomass,
     #   leaf_biomass, htop, hbot, mlaidiff, fsun, vegwp, VEGWPLN, VEGWPPD
@@ -315,11 +327,14 @@ end
 Initialize accumulation buffer for canopy state accumulated fields.
 
 Ported from `canopystate_type%InitAccBuffer` in `CanopyStateType.F90`.
-Requires accumulation infrastructure (accumulMod) — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function canopystate_init_acc_buffer!(cs::CanopyStateData,
                                        bounds_patch::UnitRange{Int})
-    # Stub: accumulation field definitions will be added when accumulMod is ported.
+    # No-op: accumulation runs through AccumManager (infrastructure/accumul.jl).
     # Fields that would be initialized:
     #   FSUN24 (runmean, -1 day), FSUN240 (runmean, -10 days),
     #   LAI240 (runmean, -10 days)
@@ -341,7 +356,10 @@ Initialize accumulated variables from the accumulation buffer.
 Called for both initial and restart runs.
 
 Ported from `canopystate_type%InitAccVars` in `CanopyStateType.F90`.
-Requires accumulation infrastructure (accumulMod) — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function canopystate_init_acc_vars!(cs::CanopyStateData,
                                      bounds_patch::UnitRange{Int})
@@ -358,7 +376,8 @@ Update accumulated canopy state variables each timestep.
 Handles fsun24, fsun240, and elai240 running means.
 
 Ported from `canopystate_type%UpdateAccVars` in `CanopyStateType.F90`.
-Core logic is ported; accumulator calls are stubs until accumulMod is ported.
+Core logic is ported; the per-type accumulator calls are no-ops (accumulation
+runs through `AccumManager`, `src/infrastructure/accumul.jl`).
 """
 function canopystate_update_acc_vars!(cs::CanopyStateData,
                                        bounds_patch::UnitRange{Int};

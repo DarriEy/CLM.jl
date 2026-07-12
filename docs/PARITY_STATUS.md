@@ -1,6 +1,40 @@
 # Fortran Parity Status — CN + Biogeophysics
 
-**Last updated:** 2026-06-17
+> ## 🕰️ HISTORICAL SNAPSHOT — 2026-06-17. Do not read this as current status.
+>
+> **Banner added 2026-07-12.** Everything below is preserved verbatim as the
+> record of the *2026-06-17* single-column CN parity campaign at Bow at Banff.
+> It was accurate then. It is **not** the current picture, and its "Not yet
+> validated" list in particular understates today's coverage.
+>
+> **Current sources of truth:**
+> - **Parity coverage / scorecard:** the README's *Validation Against Fortran
+>   CLM5* section (a 20-biome × 69-variable single-point suite, run via
+>   `scripts/parity_run_domain.jl`) — this document predates that suite entirely.
+> - **Strict-gate residuals:** [`docs/STRICT_GATE_RESIDUALS.md`](STRICT_GATE_RESIDUALS.md).
+> - **GPU coverage:** [`docs/GPU_PORT_GAP.md`](GPU_PORT_GAP.md).
+> - **What is actually wired into the driver:** `git grep` in `src/driver/` —
+>   several things this document calls unported/unwired are now live (see below).
+>
+> **Specific claims below that are now WRONG** (verified in-tree on 2026-07-12):
+> - Methane, fire, VOC/MEGAN, dust, irrigation and the C13/C14 isotope path are
+>   all **wired into `clm_drv!`** now: `ch4!` (`clm_driver.jl:2320`),
+>   `dust_emission!` (`:1507`), `voc_emission!` (`:1522`),
+>   `calc_irrigation_fluxes!` (`:1034`), `c13_c14_photosynthesis!` (`:1348`),
+>   `c14_decay!` (`:2161`), `cndv_driver!` (`:2626`). Fire runs from the CN
+>   driver behind `cnfire_method` (`cn_driver.jl:53`, default `:nofire`, so the
+>   default path is unchanged).
+> - The "not yet validated: other sites / other biomes" caveat is superseded by
+>   the multi-biome suite (still single-point, still one year per site — read the
+>   README's own caveats, which remain in force).
+> - Since this was written: FATES was ported and wired (Fortran-FATES bit-parity
+>   is **not** established), matrix-CN was wired, and much of the driver was
+>   kernelized for GPU.
+>
+> The methodology sections (especially the **before-vs-after dump pitfall**) are
+> still valuable and still correct — that is the main reason this file is kept.
+
+**Last updated:** 2026-06-17 *(content frozen; see banner)*
 
 This document records, honestly, the current state of Fortran-parity validation
 for CLM.jl. It covers what has been verified, the known residuals (and why they

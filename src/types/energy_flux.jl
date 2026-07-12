@@ -488,10 +488,18 @@ function energyflux_init_cold!(ef::EnergyFluxData,
 end
 
 # ==========================================================================
-# The following subroutines depend on infrastructure modules that are not yet
-# ported (history, restart/IO, accumulator). They are provided as stubs that
-# document the Fortran interface and can be filled in when those modules
-# become available.
+# The following per-type `*_InitHistory` / `*_Restart` / `*_InitAccBuffer` /
+# `*_UpdateAccVars` methods are NOT implemented — they are no-op stubs that
+# document the Fortran interface.
+#
+# This is NOT a missing-infrastructure gap: history I/O
+# (`src/infrastructure/history_io.jl`, `history_writer.jl`), restart I/O
+# (`src/infrastructure/restart_io.jl`, `fortran_restart.jl`) and the
+# accumulator (`src/infrastructure/accumul.jl`) are all ported and live. CLM.jl
+# does not route them through per-type methods the way Fortran does: history
+# fields and restart variables are declared in a CENTRAL registry that reads and
+# writes the `CLMInstances` tree directly. These stubs are therefore a
+# structural artifact of the port, not an unported capability.
 # ==========================================================================
 
 """
@@ -501,7 +509,9 @@ end
 Register energy flux fields for history file output.
 
 Ported from `energyflux_type%InitHistory` in `EnergyFluxType.F90`.
-Requires history infrastructure (histFileMod) — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function energyflux_init_history!(ef::EnergyFluxData,
                                    bounds_col::UnitRange{Int},
@@ -510,7 +520,7 @@ function energyflux_init_history!(ef::EnergyFluxData,
                                    bounds_grc::UnitRange{Int};
                                    is_simple_buildtemp::Bool = false,
                                    is_prog_buildtemp::Bool = false)
-    # Stub: history field registration will be added when histFileMod is ported.
+    # No-op: history fields are registered centrally (infrastructure/history_io.jl).
     # All fields that would be registered:
     #   EFLX_DYNBAL, FSM, FSM_ICE, FSM_R, FSM_U, FIRA, FIRA_ICE, FIRA_R,
     #   FIRE, FIRE_ICE, FIRE_R, LWup, FCTR, FCEV, FGEV, FSH, FSH_ICE, FSH_R, Qh,
@@ -532,7 +542,9 @@ end
 Read/write energy flux state from/to restart file.
 
 Ported from `energyflux_type%Restart` in `EnergyFluxType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function energyflux_restart!(ef::EnergyFluxData,
                               bounds_col::UnitRange{Int},
@@ -541,7 +553,7 @@ function energyflux_restart!(ef::EnergyFluxData,
                               flag::String = "read",
                               is_simple_buildtemp::Bool = false,
                               is_prog_buildtemp::Bool = false)
-    # Stub: restart variable I/O will be added when restUtilMod/ncdio_pio is ported.
+    # No-op: restart variables are declared centrally (infrastructure/restart_io.jl).
     # Variables that would be read/written:
     #   EFLX_LWRAD_OUT, URBAN_AC_L (landunit), URBAN_HEAT_L (landunit),
     #   EFLX_VENTILATION (landunit), URBAN_AC (column), URBAN_HEAT (column),
@@ -555,11 +567,14 @@ end
 Initialize accumulation buffer for energy flux accumulated fields.
 
 Ported from `energyflux_type%InitAccBuffer` in `EnergyFluxType.F90`.
-Requires accumulation infrastructure (accumulMod) — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function energyflux_init_acc_buffer!(ef::EnergyFluxData,
                                      bounds_patch::UnitRange{Int})
-    # Stub: accumulation field definitions will be added when accumulMod is ported.
+    # No-op: accumulation runs through AccumManager (infrastructure/accumul.jl).
     # Fields that would be initialized:
     #   BTRANAV (timeavg, 1 hour)
     return nothing
@@ -572,7 +587,10 @@ Initialize accumulated variables from the accumulation buffer.
 Called for both initial and restart runs.
 
 Ported from `energyflux_type%InitAccVars` in `EnergyFluxType.F90`.
-Requires accumulation infrastructure (accumulMod) — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function energyflux_init_acc_vars!(ef::EnergyFluxData,
                                    bounds_patch::UnitRange{Int};

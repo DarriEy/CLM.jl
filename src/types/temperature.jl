@@ -524,10 +524,18 @@ function temperature_init_cold!(temp::TemperatureData,
 end
 
 # ==========================================================================
-# The following subroutines depend on infrastructure modules that are not yet
-# ported (history, restart/IO, accumulator). They are provided as stubs that
-# document the Fortran interface and can be filled in when those modules
-# become available.
+# The following per-type `*_InitHistory` / `*_Restart` / `*_InitAccBuffer` /
+# `*_UpdateAccVars` methods are NOT implemented — they are no-op stubs that
+# document the Fortran interface.
+#
+# This is NOT a missing-infrastructure gap: history I/O
+# (`src/infrastructure/history_io.jl`, `history_writer.jl`), restart I/O
+# (`src/infrastructure/restart_io.jl`, `fortran_restart.jl`) and the
+# accumulator (`src/infrastructure/accumul.jl`) are all ported and live. CLM.jl
+# does not route them through per-type methods the way Fortran does: history
+# fields and restart variables are declared in a CENTRAL registry that reads and
+# writes the `CLMInstances` tree directly. These stubs are therefore a
+# structural artifact of the port, not an unported capability.
 # ==========================================================================
 
 """
@@ -537,7 +545,9 @@ end
 Register temperature fields for history file output.
 
 Ported from `temperature_type%InitHistory` in `TemperatureType.F90`.
-Requires history infrastructure (histFileMod) — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function temperature_init_history!(temp::TemperatureData,
                                    bounds_col::UnitRange{Int},
@@ -546,7 +556,7 @@ function temperature_init_history!(temp::TemperatureData,
                                    bounds_grc::UnitRange{Int};
                                    is_simple_buildtemp::Bool = false,
                                    is_prog_buildtemp::Bool = false)
-    # Stub: history field registration will be added when histFileMod is ported.
+    # No-op: history fields are registered centrally (infrastructure/history_io.jl).
     # All fields that would be registered:
     #   TH2OSFC, TG_U, TLAKE, SNO_T, TSA, TSA_R, TREFMNAV, TREFMXAV,
     #   TSA_U, TREFMNAV_U, TREFMXAV_U, TSTEM, TV, TSKIN, TG, TG_R,
@@ -565,7 +575,9 @@ end
 Read/write temperature state from/to restart file.
 
 Ported from `temperature_type%Restart` in `TemperatureType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function temperature_restart!(temp::TemperatureData,
                               bounds_col::UnitRange{Int},
@@ -574,7 +586,7 @@ function temperature_restart!(temp::TemperatureData,
                               flag::String = "read",
                               is_simple_buildtemp::Bool = false,
                               is_prog_buildtemp::Bool = false)
-    # Stub: restart variable I/O will be added when restUtilMod/ncdio_pio is ported.
+    # No-op: restart variables are declared centrally (infrastructure/restart_io.jl).
     # Variables that would be read/written:
     #   T_SOISNO, T_VEG, T_STEM, TH2OSFC, T_LAKE, T_GRND, T_GRND_R, T_GRND_U,
     #   T_REF2M, T_REF2M_R, T_REF2M_U, T_REF2M_MIN/MAX (incl. _R, _U),
@@ -647,7 +659,10 @@ Initialize accumulated variables from the accumulation buffer.
 Called for both initial and restart runs.
 
 Ported from `temperature_type%InitAccVars` in `TemperatureType.F90`.
-Requires accumulation infrastructure (accumulMod) — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function temperature_init_acc_vars!(temp::TemperatureData,
                                    bounds_col::UnitRange{Int},

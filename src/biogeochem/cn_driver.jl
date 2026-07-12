@@ -67,23 +67,28 @@ const MIMICS_DECOMP  = 2
 
 Initialize the CN ecosystem dynamics.
 
-Calls:
-- `SoilBiogeochemCompetitionInit` (not yet ported — placeholder)
-- `CNPhenologyInit` (via `cn_phenology_init!`)
-- `FireInit` (not yet ported — placeholder)
+Fortran's `CNDriverInit` calls `SoilBiogeochemCompetitionInit`, `CNPhenologyInit`
+and `FireInit`. All three ARE ported — they are just initialized elsewhere in
+CLM.jl, so this hook has nothing left to do:
+- `SoilBiogeochemCompetitionInit` → `soil_bgc_competition_init!`
+  (`biogeochem/decomp_competition.jl`), called from `clm_initialize.jl:366`.
+- `CNPhenologyInit` → `cn_phenology_init!` (`biogeochem/phenology.jl`).
+- `FireInit` → the Li-family fire modules (`biogeochem/fire_base.jl`,
+  `fire_li2014.jl` … `fire_li2024.jl`, dispatched by `fire_factory.jl`). Their
+  params/state (`CNFireParams`, `CNFireBaseData`, …) are constructed by the
+  caller and passed into `cn_driver_no_leaching!`, so there is no separate
+  Fortran-style init hook.
+
+This function is therefore a no-op retained for call-structure traceability.
 
 Ported from `CNDriverInit` in `CNDriverMod.F90`.
 """
 function cn_driver_init!(config::CNDriverConfig;
                           bounds::UnitRange{Int} = 1:0)
-    # SoilBiogeochemCompetitionInit — not yet ported
-    # Placeholder: would initialize competition parameters
-
+    # No-op: see the docstring — competition/phenology/fire are all initialized
+    # on their own paths (clm_initialize.jl / caller-supplied fire bundles).
     if config.use_cn
-        # CNPhenologyInit — already ported in phenology.jl
-        # In full CLM, called as: cn_phenology_init!(...)
-        # Fire initialization — not yet ported
-        # Placeholder: cnfire_method%FireInit(bounds, NLFilename)
+        # (CNPhenologyInit / FireInit equivalents run outside this hook.)
     end
 
     return nothing
@@ -103,9 +108,11 @@ These routines happen on the radiation time step so that canopy structure
 stays synchronized with albedo calculations.
 
 The function orchestrates calls to all CN subroutines in the correct order.
-Already-ported state update functions are called directly; subroutines
-that require not-yet-ported infrastructure (nutrient competition, fire,
-vertical transport, isotope fluxes, etc.) are documented as placeholders.
+Nutrient competition, fire, vertical transport and the isotope fluxes are all
+ported now and wired here (fire behind `config.cnfire_method`, default
+`:nofire`; the isotope/matrix paths behind their own `use_*` flags), so the
+"documented as placeholder" comments this docstring used to carry are gone.
+Anything still marked as not wired below names the specific missing piece.
 
 Ported from `CNDriverNoLeaching` in `CNDriverMod.F90`.
 """
@@ -625,10 +632,13 @@ function cn_driver_no_leaching!(
         # Allocation — already ported:
         #   calc_gpp_mr_availc!(...), calc_crop_allocation_fractions!(...), calc_allometry!(...)
     end
-    # NOTE: Plant nutrient demand, soil BGC competition, and plant CN allocation
-    # are not yet wired. These require full nutrient competition infrastructure
-    # (PatchData, CropData, CNSharedParamsData, SoilBGCCompetitionState/Params).
-    # Decomposition proceeds without N limitation in the current implementation.
+    # NOTE (updated — the old "not yet wired" note here was stale): plant nutrient
+    # demand, soil-BGC competition and plant CN allocation ARE ported
+    # (biogeochem/nutrient_competition.jl, decomp_competition.jl) and ARE wired in
+    # this driver — calc_plant_nutrient_demand! and calc_plant_nutrient_competition!
+    # (→ calc_plant_cn_alloc!) both run earlier in this function, whenever the
+    # caller supplies the pftcon/crop/shared-params/competition-state bundle.
+    # Decomposition runs N-limited on that path.
 
     # --------------------------------------------------
     # Actual decomposition
@@ -996,7 +1006,10 @@ function cn_driver_no_leaching!(
             use_crop=config.use_crop, use_nguardrail=config.use_nguardrail,
             use_matrixcn=config.use_matrixcn)
     end
-    # NOTE: Wood product pools (cn_products) not yet wired — requires harvest fluxes
+    # NOTE: the wood-product pools ARE ported (types/cn_products.jl +
+    # biogeochem/cn_products_mod.jl, initialized as CLMInstances.cn_products), but
+    # cn_products_update! is not CALLED from this driver — it needs the harvest
+    # fluxes threaded in. Ported, not wired.
 
     # --------------------------------------------------
     # Fire and Update3
@@ -1171,7 +1184,8 @@ function cn_driver_no_leaching!(
                 ref=_mref, FT=_mFT, state=veg_n_solve_state)
         end
 
-        # C14Decay — not yet ported
+        # C14Decay — ported (c14_decay!, biogeochem/carbon_isotopes.jl) and called
+        # from clm_drv! (clm_driver.jl:2161) under use_c14, not from here.
     end  # num_bgc_vegp > 0
 
     # Soil matrix-CN solve (phase 3) — WIRED (gated on use_soil_matrixcn). Runs after
@@ -1280,7 +1294,11 @@ function cn_driver_leaching!(
             dt=dt)
     end
 
-    # Matrix solutions — not yet ported (CNVegMatrix, CNSoilMatrix)
+    # Matrix solutions (CNVegMatrix / CNSoilMatrix) — PORTED AND WIRED, higher up in
+    # this function: the veg-C/veg-N solves (cn_veg_matrix_solve_c!/_n!) run under
+    # `config.use_matrixcn` and the soil-C/N solve (cn_soil_matrix_advance!) under
+    # `config.use_soil_matrixcn`. Both default off → byte-identical to the
+    # sequential path. (The old "not yet ported" note here was stale.)
 
     return nothing
 end
@@ -1297,8 +1315,12 @@ Call to all CN and SoilBiogeochem summary routines for state variables.
 
 Ported from `CNDriverSummarizeStates` in `CNDriverMod.F90`.
 
-Note: The actual Summary methods on the state types are not yet ported.
-This function documents the call sequence.
+Note: the CNVeg carbon/nitrogen state Summary methods ARE ported and ARE called
+here (`cnveg_carbon_state_summary!` / `cnveg_nitrogen_state_summary!`, in
+`types/cn_veg_carbon_state.jl` / `cn_veg_nitrogen_state.jl`). The SoilBiogeochem
+state summaries are ported too (`soil_bgc_carbon_state_summary!` /
+`soil_bgc_nitrogen_state_summary!`) but are NOT called from here yet — see the
+inline comment below for what they still need threaded in.
 """
 function cn_driver_summarize_states!(
         config::CNDriverConfig;
@@ -1326,7 +1348,9 @@ function cn_driver_summarize_states!(
             use_crop=config.use_crop, patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
     end
     # soilbiogeochem carbon/nitrogen STATE summaries (totsomc_col/totsomn_col/
-    # totecosysc_col) — still stubs: they need the decomp infrastructure
+    # totecosysc_col) — the summary functions themselves are ported
+    # (soil_bgc_carbon_state_summary! / soil_bgc_nitrogen_state_summary!) but are
+    # not called from here: they need the decomp infrastructure
     # (nlevdecomp/ndecomp_pools/dzsoi_decomp/is_soil) threaded here, and totecosysc_col
     # additionally needs totvegc_col (a separate patch->col p2c stub). Follow-up.
     # c13/c14 isotope variants — config-gated off in the default path (not ported).
@@ -1346,8 +1370,12 @@ Call to all CN and SoilBiogeochem summary routines for flux variables.
 
 Ported from `CNDriverSummarizeFluxes` in `CNDriverMod.F90`.
 
-Note: The actual Summary methods on the flux types are not yet ported.
-This function documents the call sequence.
+Note: the CNVeg carbon-flux Summary IS ported and IS called here
+(`cnveg_carbon_flux_summary!`). The CNVeg nitrogen-flux and SoilBiogeochem
+carbon/nitrogen flux summaries are also ported
+(`cnveg_nitrogen_flux_summary!`, `soil_bgc_carbon_flux_summary!`,
+`soil_bgc_nitrogen_flux_summary!`, in `src/types/`) but are NOT called from here
+yet — ported, not wired.
 """
 function cn_driver_summarize_fluxes!(
         config::CNDriverConfig;
@@ -1363,9 +1391,10 @@ function cn_driver_summarize_fluxes!(
 
     num_bgc_vegp = count(mask_bgc_vegp)
 
-    # soilbiogeochem_carbonflux_inst%Summary — not yet ported
-    # c13/c14 variants as well
-    # soilbiogeochem_nitrogenflux_inst%Summary — not yet ported
+    # soilbiogeochem_carbonflux_inst%Summary  — ported (soil_bgc_carbon_flux_summary!,
+    #   types/soil_bgc_carbon_flux.jl), not called here (+ c13/c14 variants).
+    # soilbiogeochem_nitrogenflux_inst%Summary — ported (soil_bgc_nitrogen_flux_summary!),
+    #   not called here.
     if num_bgc_vegp > 0
         # cnveg_carbonflux_inst%Summary — WIRED (sets the C-flux diagnostics,
         # incl. gpp_patch = psnsun_to_cpool + psnshade_to_cpool, npp_patch, mr/gr).
@@ -1377,8 +1406,9 @@ function cn_driver_summarize_fluxes!(
         cnveg_carbon_flux_summary!(cnveg_cf, mask_bgc_vegp, bounds_patch;
             use_crop=config.use_crop, use_fun=config.use_fun,
             patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
-        # c13/c14 variants — config-gated off in the default path (not ported)
-        # cnveg_nitrogenflux_inst%Summary — not yet ported
+        # c13/c14 variants — config-gated off in the default path (not called here)
+        # cnveg_nitrogenflux_inst%Summary — ported
+        # (cnveg_nitrogen_flux_summary!, types/cn_veg_nitrogen_flux.jl), not called here
     end
 
     return nothing

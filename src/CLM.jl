@@ -599,8 +599,14 @@ include("fates/EDInitMod.jl")
 # complete + tested, per-cohort diagnostic copies deferred). (3) FatesInterfaceMod:
 # the CLM↔FATES coupling seam (set_fates_ctrlparms, SetFatesGlobalElements,
 # allocate/zero/set bc_in/bc_out/bc_pconst, SetFatesTime, DetermineGridCellNeighbors).
-# Var-types precede their interfaces; FatesInterfaceMod last. Standalone — NOT yet
-# added to CLMInstances (live-driver wiring is the next milestone).
+# Var-types precede their interfaces; FatesInterfaceMod last.
+#
+# STATUS (superseding the "standalone / next milestone" note this banner used to
+# carry): FATES IS wired. `CLMInstances.fates` holds the interface
+# (infrastructure/instances.jl), `clm_fates_init!` cold-starts the sites
+# (fates/fates_driver_init.jl), and `clm_drv!` drives the live FATES thread
+# (photosynthesis → canopy radiation → EDMain growth/mortality), gated on
+# `use_fates`. What is NOT established is Fortran-FATES bit-parity — see README.
 include("fates/FatesHistoryVariableType.jl")
 include("fates/FatesHistoryInterfaceMod.jl")
 include("fates/FatesRestartVariableType.jl")

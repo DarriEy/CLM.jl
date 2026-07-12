@@ -95,6 +95,23 @@ final result. See also [the warning above](#️-read-this-first-an-agentic-engin
 - Fire (Li 2014), gap mortality, dynamic vegetation (CNDV)
 - Methane (CH4), VOC emissions, dust emission
 
+### FATES Ecosystem Demography (Ported and Running — Parity NOT Established)
+[FATES](https://github.com/NGEET/fates) (size- and age-structured cohort
+demography — the alternative vegetation model to CN) is ported and runs live
+through the timestep driver under `use_fates`: cohorts photosynthesize, grow,
+compete for light, and are recruited and killed, on the official FATES parameter
+file. Treat this as the **least validated** part of the codebase:
+
+- **No Fortran-FATES bit-parity.** Nothing here has been compared against a
+  Fortran FATES run — that reference is blocked on staging DATM forcing for a
+  FATES-enabled Fortran case. What exists is internal consistency plus
+  multi-site equilibrium behaviour checks (`scripts/fates_multisite_validation.jl`,
+  `scripts/fates_fortran_parity.jl` is a scaffold awaiting the reference).
+- Some FATES paths remain gated off (notably plant hydraulics), and the
+  numbers it produces have not been checked against anything authoritative.
+
+If the caveats at the top of this README apply anywhere, they apply here.
+
 ### AD & Calibration
 - All 50+ data structs parameterized on `{FT<:Real}` for dual-number propagation
 - ~520 smoothed discontinuities (`smooth_max`, `smooth_min`, `smooth_heaviside`)

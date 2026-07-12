@@ -395,7 +395,9 @@ end
 Register water flux fields for history file output.
 
 Ported from `waterflux_type%InitHistory` in `WaterFluxType.F90`.
-Requires history infrastructure — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function waterflux_init_history!(wf::WaterFluxData,
                                   bounds_col::UnitRange{Int})
@@ -408,7 +410,9 @@ end
 Read/write water flux from/to restart file.
 
 Ported from `waterflux_type%Restart` in `WaterFluxType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function waterflux_restart!(wf::WaterFluxData,
                               bounds_col::UnitRange{Int};

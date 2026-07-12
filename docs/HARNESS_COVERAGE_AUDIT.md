@@ -1,5 +1,17 @@
 # CLM.jl Fortran-Parity Harness Coverage Audit
 
+> ## 🕰️ HISTORICAL SNAPSHOT — 2026-06-17. Do not read this as current status.
+>
+> **Banner added 2026-07-12.** Preserved for its per-module harness inventory.
+> Its *wiring* column has since gone stale in at least these rows (verified
+> in-tree 2026-07-12): fire IS called from the CN driver (dispatched on
+> `cnfire_method`, `src/biogeochem/cn_driver.jl:53`, default `:nofire`);
+> methane, VOC, dust, irrigation and the C13/C14 isotope path are all called
+> from `clm_drv!`; and FATES is ported and runs live under `use_fates` (its
+> Fortran bit-parity is still not established). See the banner in
+> [`docs/FULL_PLATFORM_COVERAGE_PLAN.md`](FULL_PLATFORM_COVERAGE_PLAN.md) for the
+> line-referenced table, and the README for current parity coverage.
+
 _Read-only audit, 2026-06-17. Scope: which CLM modules the parity harness actually
 exercises against Fortran ground truth, vs. which run unvalidated, vs. which are
 config-gated off in the validated Bow-at-Banff configuration._

@@ -173,7 +173,10 @@ end
 Register surface radiation fields for history output. Sets fields to SPVAL.
 
 Ported from `surfrad_type%InitHistory` in `SurfaceRadiationMod.F90`.
-Requires history infrastructure — stub until histFileMod is ported.
+
+The "register my history fields" half is a no-op: history I/O IS ported
+(`src/infrastructure/history_io.jl`), but CLM.jl declares history fields in a
+central registry rather than per type.
 """
 function surfrad_init_history!(sr::SurfaceRadiationData, bounds_patch::UnitRange{Int};
                                 use_snicar_frc::Bool = false,

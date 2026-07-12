@@ -4,8 +4,9 @@
 # with BitVector masks for GPU-compatible, allocation-free iteration.
 # ==========================================================================
 
-# npcropmin: minimum PFT index for prognostic crops
-# (from pftconMod.F90, not yet ported — defined here as constant)
+# npcropmin: minimum PFT index for prognostic crops. pftconMod IS ported
+# (src/constants/pftcon.jl); this is kept as a module-level constant so the
+# filter builders do not need a PftCon instance threaded in.
 const NPCROPMIN = 17
 
 """

@@ -498,9 +498,18 @@ function cnveg_state_init_cold!(vs::CNVegStateData,
 end
 
 # ==========================================================================
-# The following subroutines depend on infrastructure modules that are not yet
-# ported (history, restart/IO). They are provided as stubs that document the
-# Fortran interface and can be filled in when those modules become available.
+# The following per-type `*_InitHistory` / `*_Restart` / `*_InitAccBuffer` /
+# `*_UpdateAccVars` methods are NOT implemented — they are no-op stubs that
+# document the Fortran interface.
+#
+# This is NOT a missing-infrastructure gap: history I/O
+# (`src/infrastructure/history_io.jl`, `history_writer.jl`), restart I/O
+# (`src/infrastructure/restart_io.jl`, `fortran_restart.jl`) and the
+# accumulator (`src/infrastructure/accumul.jl`) are all ported and live. CLM.jl
+# does not route them through per-type methods the way Fortran does: history
+# fields and restart variables are declared in a CENTRAL registry that reads and
+# writes the `CLMInstances` tree directly. These stubs are therefore a
+# structural artifact of the port, not an unported capability.
 # ==========================================================================
 
 """
@@ -509,12 +518,14 @@ end
 Register CN vegetation state fields for history file output.
 
 Ported from `cnveg_state_type%InitHistory` in `CNVegStateType.F90`.
-Requires history infrastructure (histFileMod) - stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function cnveg_state_init_history!(vs::CNVegStateData,
                                    bounds_patch::UnitRange{Int},
                                    bounds_col::UnitRange{Int})
-    # Stub: history field registration will be added when histFileMod is ported.
+    # No-op: history fields are registered centrally (infrastructure/history_io.jl).
     # Fields that would be registered:
     #   GDDHARV, GDDHARV_PERHARV, LFC2, ANNSUM_COUNTER, CANNAVG_T2M,
     #   NFIRE, FAREA_BURNED, BAF_CROP, BAF_PEATF, ANNAVG_T2M, TEMPAVG_T2M,
@@ -532,13 +543,15 @@ end
 Read/write CN vegetation state from/to restart file.
 
 Ported from `cnveg_state_type%Restart` in `CNVegStateType.F90`.
-Requires NetCDF/restart infrastructure - stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function cnveg_state_restart!(vs::CNVegStateData,
                                bounds_patch::UnitRange{Int},
                                bounds_col::UnitRange{Int};
                                flag::String="read")
-    # Stub: restart variable I/O will be added when restUtilMod/ncdio_pio is ported.
+    # No-op: restart variables are declared centrally (infrastructure/restart_io.jl).
     # Variables that would be read/written:
     #   dormant_flag, days_active, onset_flag, onset_counter, onset_gddflag,
     #   onset_fdd, onset_gdd, onset_swi, offset_flag, offset_counter,
