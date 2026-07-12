@@ -516,9 +516,10 @@ Reassign patch weights of each hillslope column based on each gridcell's
 two most dominant PFTs. Places the highest stature vegetation on the lowland
 column and the second on upland columns.
 
-Stub: This function depends on `find_k_max_indices` and `pftcon` (PFT
-properties like is_tree, is_grass, is_shrub) which are not yet ported.
-When those modules are available, this should be implemented.
+NOT IMPLEMENTED (no-op). Note the reason is NOT missing infrastructure: `pftcon`
+IS ported (`src/constants/pftcon.jl`, including `is_tree`/`is_grass`/`is_shrub`).
+The only missing piece is the `find_k_max_indices` helper, and this routine's own
+body. It is simply unported work, not a blocked dependency.
 
 Ported from `HillslopeDominantLowlandPft` in `HillslopeHydrologyMod.F90`.
 """
@@ -527,8 +528,8 @@ function hillslope_dominant_lowland_pft!(
     pch::PatchData,
     bounds_c::UnitRange{Int}
 )
-    # Stub: depends on find_k_max_indices and pftcon (PFT properties)
-    # which are not yet ported. No-op until those modules are available.
+    # No-op: unimplemented. pftcon IS ported (constants/pftcon.jl); only
+    # find_k_max_indices and this routine's body are missing.
     return nothing
 end
 

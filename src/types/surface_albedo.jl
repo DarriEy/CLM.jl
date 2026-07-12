@@ -348,9 +348,18 @@ function surfalb_init_cold!(sa::SurfaceAlbedoData,
 end
 
 # ==========================================================================
-# The following subroutines depend on infrastructure modules that are not yet
-# ported (history, restart/IO). They are provided as stubs that document the
-# Fortran interface and can be filled in when those modules become available.
+# The following per-type `*_InitHistory` / `*_Restart` / `*_InitAccBuffer` /
+# `*_UpdateAccVars` methods are NOT implemented — they are no-op stubs that
+# document the Fortran interface.
+#
+# This is NOT a missing-infrastructure gap: history I/O
+# (`src/infrastructure/history_io.jl`, `history_writer.jl`), restart I/O
+# (`src/infrastructure/restart_io.jl`, `fortran_restart.jl`) and the
+# accumulator (`src/infrastructure/accumul.jl`) are all ported and live. CLM.jl
+# does not route them through per-type methods the way Fortran does: history
+# fields and restart variables are declared in a CENTRAL registry that reads and
+# writes the `CLMInstances` tree directly. These stubs are therefore a
+# structural artifact of the port, not an unported capability.
 # ==========================================================================
 
 """
@@ -360,7 +369,9 @@ end
 Register surface albedo fields for history file output.
 
 Ported from `surfalb_type%InitHistory` in `SurfaceAlbedoType.F90`.
-Requires history infrastructure (histFileMod) -- stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function surfalb_init_history!(sa::SurfaceAlbedoData,
                                bounds_col::UnitRange{Int},
@@ -384,7 +395,7 @@ function surfalb_init_history!(sa::SurfaceAlbedoData,
             sa.albi_patch[p, ib] = SPVAL
         end
     end
-    # Stub: history field registration will be added when histFileMod is ported.
+    # No-op: history fields are registered centrally (infrastructure/history_io.jl).
     # Fields that would be registered:
     #   AZSUN, COSZEN_GRC, COSZEN, ALBGRD, ALBGRI, ALBDSF, ALBISF, ALBD, ALBI,
     #   ALBD_HIST, ALBI_HIST, ALBGRD_HIST, ALBGRI_HIST, ALBGRD_PUR_HIST, ALBGRI_PUR_HIST,
@@ -400,12 +411,14 @@ end
 Read/write surface albedo state from/to restart file.
 
 Ported from `surfalb_type%Restart` in `SurfaceAlbedoType.F90`.
-Requires NetCDF/restart infrastructure -- stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function surfalb_restart!(sa::SurfaceAlbedoData,
                           bounds_col::UnitRange{Int},
                           bounds_patch::UnitRange{Int})
-    # Stub: restart variable I/O will be added when restUtilMod/ncdio_pio is ported.
+    # No-op: restart variables are declared centrally (infrastructure/restart_io.jl).
     # Variables that would be read/written:
     #   coszen_grc, coszen, albd, albi, albdSF, albiSF, albgrd, albgri,
     #   albsod, albsoi, albsnd_hst, albsni_hst, tlai_z, tsai_z, ncan, nrad,

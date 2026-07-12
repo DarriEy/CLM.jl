@@ -255,9 +255,18 @@ function solarabs_init_cold!(sa::SolarAbsorbedData{FT}, bounds_lun::UnitRange{In
 end
 
 # ==========================================================================
-# The following subroutines depend on infrastructure modules that are not yet
-# ported (history, restart/IO). They are provided as stubs that document the
-# Fortran interface and can be filled in when those modules become available.
+# The following per-type `*_InitHistory` / `*_Restart` / `*_InitAccBuffer` /
+# `*_UpdateAccVars` methods are NOT implemented — they are no-op stubs that
+# document the Fortran interface.
+#
+# This is NOT a missing-infrastructure gap: history I/O
+# (`src/infrastructure/history_io.jl`, `history_writer.jl`), restart I/O
+# (`src/infrastructure/restart_io.jl`, `fortran_restart.jl`) and the
+# accumulator (`src/infrastructure/accumul.jl`) are all ported and live. CLM.jl
+# does not route them through per-type methods the way Fortran does: history
+# fields and restart variables are declared in a CENTRAL registry that reads and
+# writes the `CLMInstances` tree directly. These stubs are therefore a
+# structural artifact of the port, not an unported capability.
 # ==========================================================================
 
 """
@@ -268,7 +277,9 @@ Register solar absorption fields for history file output.
 Sets relevant fields to SPVAL as Fortran does in InitHistory.
 
 Ported from `solarabs_type%InitHistory` in `SolarAbsorbedType.F90`.
-Requires history infrastructure (histFileMod) -- stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function solarabs_init_history!(sa::SolarAbsorbedData,
                                  bounds_patch::UnitRange{Int};
@@ -313,7 +324,7 @@ function solarabs_init_history!(sa::SolarAbsorbedData,
         end
     end
 
-    # Stub: history field registration will be added when histFileMod is ported.
+    # No-op: history fields are registered centrally (infrastructure/history_io.jl).
     # Fields that would be registered:
     #   FSA, FSA_ICE, FSA_R, FSA_U, FSR, SWup, FSR_ICE, SNO_ABS, SNO_ABS_ICE,
     #   SABV, SABG, SABG_PEN, FSDSND, FSDSNI, FSDSNDLN, FSRND, FSRNI, FSRNDLN,
@@ -329,12 +340,14 @@ end
 Read/write solar absorption state from/to restart file.
 
 Ported from `solarabs_type%Restart` in `SolarAbsorbedType.F90`.
-Requires NetCDF/restart infrastructure -- stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function solarabs_restart!(sa::SolarAbsorbedData,
                             bounds_lun::UnitRange{Int},
                             bounds_patch::UnitRange{Int})
-    # Stub: restart variable I/O will be added when restUtilMod/ncdio_pio is ported.
+    # No-op: restart variables are declared centrally (infrastructure/restart_io.jl).
     # Variables that would be read/written:
     #   sabs_roof_dir, sabs_roof_dif, sabs_sunwall_dir, sabs_sunwall_dif,
     #   sabs_shadewall_dir, sabs_shadewall_dif, sabs_improad_dir, sabs_improad_dif,

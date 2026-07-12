@@ -245,7 +245,8 @@ end
                                bounds_col::UnitRange{Int})
 
 Register friction velocity fields for history output.
-Stub until histFileMod is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered centrally.
 
 Ported from `frictionvel_type%InitHistory` in `FrictionVelocityMod.F90`.
 """
@@ -260,7 +261,8 @@ end
                           flag::String="read")
 
 Read/write friction velocity restart variables.
-Stub until restart infrastructure is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`); variables are declared centrally.
 Variables: Z0MG, OBU, rb10.
 
 Ported from `frictionvel_type%Restart` in `FrictionVelocityMod.F90`.

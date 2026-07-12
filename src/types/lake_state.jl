@@ -148,12 +148,14 @@ end
 Register lake state fields for history file output.
 
 Ported from `lakestate_type%InitHistory` in `LakeStateType.F90`.
-Requires history infrastructure (histFileMod) — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function lakestate_init_history!(ls::LakeStateData,
                                   bounds_col::UnitRange{Int},
                                   bounds_patch::UnitRange{Int})
-    # Stub: history field registration will be added when histFileMod is ported.
+    # No-op: history fields are registered centrally (infrastructure/history_io.jl).
     # Fields that would be registered:
     #   LAKEICEFRAC (2D, levlak), LAKEICEFRAC_SURF, LAKEICETHICK,
     #   TKE1, RAM_LAKE, UST_LAKE
@@ -182,12 +184,14 @@ end
 Read/write lake state from/to restart file.
 
 Ported from `lakestate_type%Restart` in `LakeStateType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function lakestate_restart!(ls::LakeStateData,
                              bounds_col::UnitRange{Int};
                              flag::String = "read")
-    # Stub: restart variable I/O will be added when restUtilMod/ncdio_pio is ported.
+    # No-op: restart variables are declared centrally (infrastructure/restart_io.jl).
     # Variables that would be read/written:
     #   LAKE_ICEFRAC (2D, levlak), SAVEDTKE1, USTLAKE
     return nothing

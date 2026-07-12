@@ -595,7 +595,9 @@ end
 Register water diagnostic bulk fields for history file output.
 
 Ported from `InitBulkHistory` in `WaterDiagnosticBulkType.F90`.
-Requires history infrastructure — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function waterdiagnosticbulk_init_history!(wd::WaterDiagnosticBulkData,
                                             bounds_col::UnitRange{Int})
@@ -608,7 +610,9 @@ end
 Read/write water diagnostic bulk from/to restart file.
 
 Ported from `RestartBulk` in `WaterDiagnosticBulkType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function waterdiagnosticbulk_restart!(wd::WaterDiagnosticBulkData,
                                        bounds_col::UnitRange{Int};
@@ -622,7 +626,10 @@ end
 Initialize accumulation buffer for snow 5-day average.
 
 Ported from `InitAccBuffer` in `WaterDiagnosticBulkType.F90`.
-Requires accumulation infrastructure — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function waterdiagnosticbulk_init_acc_buffer!(wd::WaterDiagnosticBulkData,
                                                bounds_col::UnitRange{Int})
@@ -635,7 +642,10 @@ end
 Initialize accumulation variables from restart.
 
 Ported from `InitAccVars` in `WaterDiagnosticBulkType.F90`.
-Requires accumulation infrastructure — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function waterdiagnosticbulk_init_acc_vars!(wd::WaterDiagnosticBulkData,
                                              bounds_col::UnitRange{Int})
@@ -648,7 +658,10 @@ end
 Update accumulation variables (snow 5-day average).
 
 Ported from `UpdateAccVars` in `WaterDiagnosticBulkType.F90`.
-Requires accumulation infrastructure — stub until that module is ported.
+Not implemented (no-op stub). The accumulator IS ported
+(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
+driver (crop GDD, `t_mo_min`); these particular fields are simply not
+registered with it.
 """
 function waterdiagnosticbulk_update_acc_vars!(wd::WaterDiagnosticBulkData,
                                                bounds_col::UnitRange{Int})

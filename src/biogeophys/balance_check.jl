@@ -818,10 +818,11 @@ The error for water balance:
 
 Ported from `BalanceCheck` in `BalanceCheckMod.F90`.
 
-Since `Atm2LndData`, `WaterAtm2LndData`, and `WaterLnd2AtmData` types are
-not yet ported, the forcing and flux fields are passed as keyword arguments.
-The column-level `qflx_ice_runoff_col` (from `WaterLnd2AtmData`) must also
-be passed as a keyword argument.
+`Atm2LndData` IS ported (`src/types/atm2lnd.jl`); the water-tracer containers
+`WaterAtm2LndData` / `WaterLnd2AtmData` are not. Rather than depend on either,
+this routine takes the forcing and flux fields as keyword arguments. The
+column-level `qflx_ice_runoff_col` (Fortran: `WaterLnd2AtmData`) must also be
+passed as a keyword argument.
 """
 function balance_check!(
     bc::BalanceCheckData,

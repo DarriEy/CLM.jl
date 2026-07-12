@@ -534,7 +534,9 @@ end
 Register water state fields for history file output.
 
 Ported from `waterstate_type%InitHistory` in `WaterStateType.F90`.
-Requires history infrastructure — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function waterstate_init_history!(ws::WaterStateData,
                                    bounds_col::UnitRange{Int};
@@ -548,7 +550,9 @@ end
 Read/write water state from/to restart file.
 
 Ported from `waterstate_type%Restart` in `WaterStateType.F90`.
-Requires NetCDF/restart infrastructure — stub until that module is ported.
+Not implemented (no-op stub). Restart I/O IS ported
+(`src/infrastructure/restart_io.jl`, `fortran_restart.jl`); restart variables
+are declared in a central registry rather than per-type methods.
 """
 function waterstate_restart!(ws::WaterStateData,
                                bounds_col::UnitRange{Int};

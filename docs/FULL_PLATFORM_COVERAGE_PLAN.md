@@ -1,8 +1,40 @@
 # CLM.jl — Full-Platform Fortran-Parity Coverage Plan
 
-_Written 2026-06-17. Companion to `docs/HARNESS_COVERAGE_AUDIT.md`. This is the
-plan to take CLM.jl from "biogeophysics + CN/BGC pools validated in one Bow soil
-column" to "every active process module validated against Fortran ground truth"._
+> ## 🕰️ HISTORICAL SNAPSHOT — 2026-06-17. Do not read this as current status.
+>
+> **Banner added 2026-07-12.** This was the *plan* written on 2026-06-17, and it
+> is preserved verbatim for its Fortran-side ground-truth facts (what the Bow
+> `lnd_in` actually sets, what the restart dumps do and do not persist, which
+> validations need a new spinup vs. a flag flip). Those facts still hold.
+>
+> **Its statements about the Julia side are now materially WRONG.** Verified
+> in-tree on 2026-07-12, everything the tables below call a "placeholder",
+> "empty stub" or "never driver-called" is now wired into `clm_drv!`:
+>
+> | Table says | Reality on `main` (2026-07-12) |
+> |---|---|
+> | "Julia driver has `ch4!` as a PLACEHOLDER" | `ch4!` is called — `src/driver/clm_driver.jl:2320` |
+> | "fire … not called in Julia driver" | fire runs from the CN driver, dispatched on `cnfire_method` (`src/biogeochem/cn_driver.jl:53`; default `:nofire`, so the default path is unchanged) — `cnfire_area!` / `cnfire_fluxes_dispatch!`, `cn_driver.jl:1063/1086` |
+> | "`carbon_isotopes.jl` (exists, **never driver-called**)" | `c13_c14_photosynthesis!` (`clm_driver.jl:1348`) and `c14_decay!` (`:2161`) are called under `use_c13`/`use_c14` |
+> | "irrigation … driver calls are empty stubs" | `calc_irrigation_fluxes!` is called — `clm_driver.jl:1034` (IrrigationMod is ported: `src/biogeophys/irrigation.jl`) |
+> | "VOC … Julia driver L998 placeholder" | `voc_emission!` — `clm_driver.jl:1522` |
+> | "Dust … add a dump" (Julia side unwired) | `dust_emission!` — `clm_driver.jl:1507` |
+> | "FATES → `fates_interface.jl` (stub)" | FATES is ported (~77k lines) and runs live through `clm_drv!` under `use_fates`; `CLMInstances.fates` holds the interface. Fortran-FATES **bit-parity is still NOT established** — that part of the row stands |
+> | "CNDV needs a rerun" (Julia side unwired) | `cndv_driver!` is called at end-of-year — `clm_driver.jl:2626` (gated on `use_cndv`) |
+>
+> The *Fortran-side* blockers each row names (new dump boundary, isotope-enabled
+> spinup, crop surfdata, MIMICS spinup, a different domain for lake/urban/glacier)
+> are the parts that are still real — the Julia-side "not wired" halves are not.
+>
+> **Current sources of truth:** the README's *Validation Against Fortran CLM5*
+> section (20-biome × 69-variable single-point suite),
+> [`docs/STRICT_GATE_RESIDUALS.md`](STRICT_GATE_RESIDUALS.md), and
+> [`docs/GPU_PORT_GAP.md`](GPU_PORT_GAP.md).
+
+_Written 2026-06-17 (content frozen; see banner). Companion to
+`docs/HARNESS_COVERAGE_AUDIT.md`. This is the plan to take CLM.jl from
+"biogeophysics + CN/BGC pools validated in one Bow soil column" to "every active
+process module validated against Fortran ground truth"._
 
 The reference Fortran run is the **Bow-at-Banff single column** instrumented
 `cesm.exe` (case `cases/symfluence_build/`), dumping CLM5 restart-format

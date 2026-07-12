@@ -26,7 +26,9 @@ const warn_active = trues(max_ids + 1)
 function FatesGlobalsInit(log_unit::Integer, global_verbose::Bool)
     fates_log_[] = log_unit
     fates_global_verbose_[] = global_verbose
-    # call TwoStreamLogInit(log_unit) -- TwoStream not ported; no-op stub.
+    # call TwoStreamLogInit(log_unit) -- no-op. The two-stream code IS ported
+    # (TwoStreamMLPEMod.jl / FatesTwoStreamUtilsMod.jl); it just has no separate
+    # log unit to initialize in this port.
     return nothing
 end
 

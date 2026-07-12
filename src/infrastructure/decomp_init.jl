@@ -23,7 +23,9 @@
 #   - decompInit_glcp   : gindex_grc / gindex_lun / gindex_col / gindex_patch
 #                         (compressed, land-only, in task order).
 #
-# Because subgridMod (subgrid_get_gcellinfo) is not yet ported, the per-gridcell
+# subgridMod is partly ported (its add_landunit!/add_column!/add_patch! half lives
+# in infrastructure/init_subgrid.jl); its `subgrid_get_gcellinfo` counter is NOT,
+# so the per-gridcell
 # subgrid counts are supplied as arguments (defaulting to 1 landunit / 1 column /
 # 1 patch / 0 cohorts per gridcell). The bookkeeping is otherwise faithful to
 # the Fortran.

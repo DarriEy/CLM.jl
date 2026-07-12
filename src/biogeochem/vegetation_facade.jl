@@ -31,6 +31,17 @@
 #   get_froot_carbon_patch                 — Patch fine root carbon
 #   get_croot_carbon_patch                 — Patch coarse root carbon
 #   get_totvegc_col                        — Column total veg carbon
+#
+# STATUS NOTE (read before believing any "not yet ported" comment below — the
+# ones that were stale have been corrected in place): this facade is LIVE — the
+# driver calls cn_vegetation_init_each_timestep!/_init_*_balance!/
+# _ecosystem_pre_drainage!/_post_drainage!/_balance_check!/_end_of_timestep!
+# from clm_drv!. But several Fortran calls it makes are NOT re-issued from here
+# even though the Julia routine EXISTS. Where a routine is ported, the comment
+# below now names the file — and, when the live driver invokes it on another
+# path (e.g. CNVegStructUpdate, CNPrecisionControl, CNDVDriver), says so. Read
+# "ported, not wired here" as exactly that: the code exists, this facade does
+# not call it.
 # ==========================================================================
 
 # ---------------------------------------------------------------------------
@@ -264,9 +275,10 @@ function cn_vegetation_init2!(veg::CNVegetationData;
                                 bounds::UnitRange{Int} = 1:0)
     cn_driver_init!(veg.driver_config; bounds=bounds)
 
-    # dynCNDV_init — not yet ported
+    # dynCNDV_init — PORTED as dyn_cndv_init! (biogeochem/cndv.jl) and called from
+    # the live init path (driver/clm_initialize.jl:197), not from here.
     # if veg.config.use_cndv
-    #     dynCNDV_init(bounds, veg.dgvs_inst)
+    #     dyn_cndv_init!(veg.dgvs_inst, patch, bounds)
     # end
 
     return nothing
@@ -288,8 +300,11 @@ Should only be called if `use_cn` is true.
 Ported from `InitEachTimeStep` in `CNVegetationFacade.F90`.
 
 Note: In the Fortran, this calls ZeroDWT and ZeroGRU on the carbon flux,
-nitrogen flux, carbon state, and nitrogen state types. Those methods are
-not yet ported; this function documents the call sequence as a placeholder.
+nitrogen flux, carbon state, and nitrogen state types. Those methods ARE ported
+(`cnveg_carbon_flux_zero_dwt!` / `_zero_gru!`, `cnveg_nitrogen_flux_zero_dwt!` /
+`_zero_gru!`, `cnveg_carbon_state_zero_dwt!`, `cnveg_nitrogen_state_zero_dwt!`,
+in `src/types/cn_veg_*.jl`) — they are simply not invoked from this facade.
+Ported, not wired here.
 """
 function cn_vegetation_init_each_timestep!(veg::CNVegetationData;
                                             mask_soilc::AbstractVector{Bool},
@@ -298,19 +313,14 @@ function cn_vegetation_init_each_timestep!(veg::CNVegetationData;
                                             bounds_patch::UnitRange{Int})
     cfg = veg.config
 
-    # ZeroDWT on carbon fluxes
-    # cnveg_carbonflux_inst%ZeroDWT(bounds) — not yet ported
-    # c13_cnveg_carbonflux_inst%ZeroDWT(bounds) — if use_c13
-    # c14_cnveg_carbonflux_inst%ZeroDWT(bounds) — if use_c14
-    # cnveg_nitrogenflux_inst%ZeroDWT(bounds) — not yet ported
-    # cnveg_carbonstate_inst%ZeroDWT(bounds) — not yet ported
-    # cnveg_nitrogenstate_inst%ZeroDWT(bounds) — not yet ported
-
-    # ZeroGRU on carbon fluxes
-    # cnveg_carbonflux_inst%ZeroGRU(bounds) — not yet ported
-    # c13_cnveg_carbonflux_inst%ZeroGRU(bounds) — if use_c13
-    # c14_cnveg_carbonflux_inst%ZeroGRU(bounds) — if use_c14
-    # cnveg_nitrogenflux_inst%ZeroGRU(bounds) — not yet ported
+    # ZeroDWT / ZeroGRU — all four ported (see the docstring), none called here.
+    # cnveg_carbonflux_inst%ZeroDWT   → cnveg_carbon_flux_zero_dwt!   (ported, not wired here)
+    # c13_/c14_ carbonflux ZeroDWT    → same routine on the isotope insts (if use_c13/use_c14)
+    # cnveg_nitrogenflux_inst%ZeroDWT → cnveg_nitrogen_flux_zero_dwt! (ported, not wired here)
+    # cnveg_carbonstate_inst%ZeroDWT  → cnveg_carbon_state_zero_dwt!  (ported, not wired here)
+    # cnveg_nitrogenstate_inst%ZeroDWT→ cnveg_nitrogen_state_zero_dwt!(ported, not wired here)
+    # cnveg_carbonflux_inst%ZeroGRU   → cnveg_carbon_flux_zero_gru!   (ported, not wired here)
+    # cnveg_nitrogenflux_inst%ZeroGRU → cnveg_nitrogen_flux_zero_gru! (ported, not wired here)
 
     return nothing
 end
@@ -350,7 +360,8 @@ function cn_vegetation_init_column_balance!(veg::CNVegetationData;
         soilbgc_cs=soilbgc_cs,
         soilbgc_ns=soilbgc_ns)
 
-    # cn_balance_inst%BeginCNColumnBalance — not yet ported
+    # cn_balance_inst%BeginCNColumnBalance — ported as begin_cn_column_balance!
+    # (biogeochem/cn_balance_check.jl); not called from here.
     # Would set the starting column totals for balance checking
 
     return nothing
@@ -392,8 +403,9 @@ function cn_vegetation_init_gridcell_balance!(veg::CNVegetationData;
         soilbgc_cs=soilbgc_cs,
         soilbgc_ns=soilbgc_ns)
 
-    # c2g (column to gridcell) for total C and N — not yet ported
-    # cn_balance_inst%BeginCNGridcellBalance — not yet ported
+    # c2g (column to gridcell) for total C and N — not wired here.
+    # cn_balance_inst%BeginCNGridcellBalance — ported as begin_cn_gridcell_balance!
+    # (biogeochem/cn_balance_check.jl); not called from here.
 
     return nothing
 end
@@ -408,10 +420,13 @@ end
 
 Execute the main biogeochemistry science that needs to be done before
 hydrology-drainage. Orchestrates calls to:
-- Crop year increment (not yet ported)
+- Crop year increment (`crop_increment_year!`, types/crop.jl — ported, not wired here)
 - CNDriverNoLeaching (already ported)
-- Fire carbon emissions update (not yet ported)
-- Annual update (not yet ported)
+- Fire carbon/trace-gas EMISSIONS update (CNFireEmissionsMod — genuinely not
+  ported; note the fire model itself IS ported: biogeochem/fire_li2014.jl …
+  fire_li2024.jl, dispatched via fire_factory.jl)
+- Annual update (`cn_annual_update!`, biogeochem/cn_annual_update.jl — ported,
+  not wired here)
 
 Can be called for either `use_cn` or `use_fates_bgc`.
 
@@ -489,7 +504,8 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
 
-    # crop_inst%CropIncrementYear — not yet ported
+    # crop_inst%CropIncrementYear — ported as crop_increment_year! (types/crop.jl);
+    # not called from here.
 
     # C13/C14 cascade activation: run the CIsoFlux* cascade only when the parallel
     # veg state (facade) AND soil state (driver-supplied) are both stood up.
@@ -576,8 +592,10 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         mask_actfirec=mask_actfirec,
         mask_actfirep=mask_actfirep)
 
-    # CNFireEmisUpdate — not yet ported
-    # CNAnnualUpdate — not yet ported
+    # CNFireEmisUpdate — genuinely NOT ported (CNFireEmissionsMod: fire trace-gas
+    # emissions). The fire model itself is ported (fire_li2014.jl … fire_li2024.jl).
+    # CNAnnualUpdate — ported as cn_annual_update! (biogeochem/cn_annual_update.jl);
+    # not called from here.
 
     return nothing
 end
@@ -593,11 +611,14 @@ end
 Execute the main biogeochemistry science after hydrology-drainage.
 Orchestrates calls to:
 - CNDriverLeaching (already ported)
-- CNPrecisionControl (not yet ported)
-- SoilBiogeochemPrecisionControl (not yet ported)
+- CNPrecisionControl (`cn_precision_control!`, biogeochem/cn_precision_control.jl
+  — ported, and run on the live path from `cn_driver_no_leaching!`)
+- SoilBiogeochemPrecisionControl (`soil_bgc_precision_control!`,
+  biogeochem/decomp_precision_control.jl — ported, not wired here)
 - CNDriverSummarizeStates (already ported)
 - CNDriverSummarizeFluxes (already ported)
-- CNVegStructUpdate (not yet ported)
+- CNVegStructUpdate (`cn_veg_struct_update!` — ported, and run on the live path
+  from `clm_drv!`, clm_driver.jl:2078)
 
 Should only be called if `use_cn` or `use_fates_bgc` is true.
 
@@ -645,8 +666,10 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         cnveg_ns=veg.cnveg_nitrogenstate_inst,
         cnveg_nf=veg.cnveg_nitrogenflux_inst)
 
-    # CNPrecisionControl — not yet ported
-    # SoilBiogeochemPrecisionControl — not yet ported
+    # CNPrecisionControl — ported (cn_precision_control!); the live path runs it
+    # inside cn_driver_no_leaching!, not here.
+    # SoilBiogeochemPrecisionControl — ported (soil_bgc_precision_control!,
+    # biogeochem/decomp_precision_control.jl); not called from here.
 
     # CNDriverSummarizeStates
     cn_driver_summarize_states!(veg.driver_config;
@@ -673,7 +696,8 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         soilbgc_nf=soilbgc_nf,
         patch_itype=patch_itype)
 
-    # CNVegStructUpdate — not yet ported
+    # CNVegStructUpdate — ported (cn_veg_struct_update!); the live path runs it
+    # from clm_drv! (clm_driver.jl:2078), not here.
     # if num_bgc_vegp > 0 && doalb
     #     CNVegStructUpdate(...)
     # end
@@ -710,8 +734,8 @@ function cn_vegetation_balance_check!(veg::CNVegetationData;
         return nothing
     end
 
-    # cn_balance_inst%CBalanceCheck — not yet ported
-    # cn_balance_inst%NBalanceCheck — not yet ported
+    # cn_balance_inst%CBalanceCheck / NBalanceCheck — ported as c_balance_check! /
+    # n_balance_check! (biogeochem/cn_balance_check.jl); not called from here.
 
     return nothing
 end
@@ -739,7 +763,8 @@ function cn_vegetation_end_of_timestep!(veg::CNVegetationData;
 
     if veg.config.use_cndv
         if is_end_curr_year && !is_first_step
-            # CNDVDriver — not yet ported
+            # CNDVDriver — ported as cndv_driver! (biogeochem/cndv.jl); the live path
+            # runs it from clm_drv! (clm_driver.jl:2626, gated on use_cndv), not here.
             # dynCNDV driver would be called here
         end
     end

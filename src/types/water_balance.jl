@@ -132,7 +132,9 @@ end
 Register water balance fields for history file output.
 
 Ported from `InitHistory` in `WaterBalanceType.F90`.
-Requires history infrastructure — stub until that module is ported.
+Not implemented (no-op stub). History I/O IS ported
+(`src/infrastructure/history_io.jl`); fields are registered in a central
+registry rather than per-type methods.
 """
 function waterbalance_init_history!(wb::WaterBalanceData{FT}, bounds_col::UnitRange{Int}) where {FT}
     return nothing

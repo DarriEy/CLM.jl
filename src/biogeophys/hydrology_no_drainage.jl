@@ -15,7 +15,7 @@
 #   compute_wf2!                           — Soil water fraction of WHC (top 0.17m)
 #   update_snow_top_layer_diagnostics!     — Top-layer snow diagnostics
 #   hydrology_no_drainage!                 — Main orchestrator (calls sub-functions)
-#   calc_and_withdraw_irrigation_fluxes!   — Irrigation withdrawal (stub)
+#   calc_and_withdraw_irrigation_fluxes!   — Irrigation withdrawal (DEAD; see below)
 #   handle_new_snow!                       — Handle new snow falling on ground
 # ==========================================================================
 
@@ -691,9 +691,16 @@ end
 Calculates irrigation withdrawal fluxes and withdraws from groundwater.
 
 In Fortran this calls `irrigation_inst%CalcIrrigationFluxes` and
-`WithdrawGroundwaterIrrigation`. Since IrrigationMod is not yet ported,
-this is a stub that only performs the groundwater withdrawal step when
-`use_groundwater_irrigation` is true.
+`WithdrawGroundwaterIrrigation`.
+
+!!! warning "This function is DEAD CODE"
+    IrrigationMod IS ported (`src/biogeophys/irrigation.jl`) and the live
+    driver calls `calc_irrigation_fluxes!` directly (`clm_driver.jl:1034`),
+    which performs both the bulk withdrawal and the flux application. Nothing
+    in `src/` calls `calc_and_withdraw_irrigation_fluxes!` — only its own unit
+    test does. It is retained only as a record of the Fortran call structure;
+    it does NOT compute irrigation fluxes (it only performs the optional
+    groundwater withdrawal step). Do not wire it in; use `irrigation.jl`.
 
 Ported from `CalcAndWithdrawIrrigationFluxes` in `HydrologyNoDrainageMod.F90`.
 """
@@ -706,8 +713,9 @@ function calc_and_withdraw_irrigation_fluxes!(
     dtime::Real;
     use_groundwater_irrigation::Bool = false
 )
-    # Stub: CalcIrrigationFluxes requires IrrigationMod (not yet ported)
-    # When IrrigationMod is ported, add the irrigation flux calculation here.
+    # No irrigation flux calculation here on purpose: the ported
+    # CalcIrrigationFluxes lives in irrigation.jl (calc_irrigation_fluxes!) and is
+    # called straight from clm_drv!. This path is dead (see the docstring warning).
 
     # Groundwater irrigation withdrawal
     if use_groundwater_irrigation

@@ -1653,7 +1653,11 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
                         pftcon_xl, mask_vegsol_dev, bounds_patch; SFonly=true)
         end
     end
-    # (FATES canopy radiation stub — not yet ported)
+    # (FATES canopy radiation is NOT missing: it is ported — FatesNormanRadMod.jl /
+    #  FatesRadiationDriveMod.jl — and driven from clm_drv!, which runs
+    #  FatesNormalizedCanopyRadiation and unpacks the result back into this
+    #  SurfaceAlbedoData via fates_unpack_bcout_canopy_radiation!. It is deliberately
+    #  NOT called from inside surface_albedo!; see clm_driver.jl:~2383.)
 
     # --- Non-vegetated patches where coszen > 0 ---
     # mask_novegsol is a BitVector (no device backend); the kernel writes device
