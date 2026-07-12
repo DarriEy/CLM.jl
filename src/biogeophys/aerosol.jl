@@ -227,6 +227,13 @@ end
 
 Cold-start initialization: zero all mass and concentration arrays.
 
+Called from `clm_instInit!` right after `aerosol_init!`, mirroring Fortran's
+`aerosol_inst%Init` = InitAllocate + InitHistory + InitCold. This is what makes the
+NaN-filled (allocate-to-nan, as in Fortran) mass arrays usable: `aerosol_masses!` only
+zeros a snow-layer slot in its "layer is above snl" branch, and it runs at the END of a
+step — so a column that forms its first snow layer during step 1 would otherwise hit
+`aerosol_fluxes!` (`mss_bcphi[c,top] += flx*dt`) and SNICAR with allocation-time NaN.
+
 Ported from `InitCold` in `AerosolMod.F90`.
 """
 function aerosol_init_cold!(aer::AerosolData{FT}, bounds::UnitRange{Int}) where {FT}
