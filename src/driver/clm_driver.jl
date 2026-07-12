@@ -872,6 +872,18 @@ function clm_drv_core!(config::CLMDriverConfig,
     water_gridcell_balance!(inst.water, ls, col, lun, grc,
                             filt.nolakec, filt.lakec,
                             bc_col, bc_lun, bc_grc, "begwb")
+    # Canopy water belongs in begwb_grc, evaluated HERE with the BEGIN-of-step
+    # canopy state (Fortran ComputeWaterMassNonLake p2c's canopy into the column
+    # total that WaterGridcellBalance then c2g's; the Julia storage fn stubs it to
+    # zero). This used to be done at the END of the step for begwb_grc AND
+    # endwb_grc from the same end-of-step liqcan/snocan, so the canopy term
+    # cancelled out of (endwb_grc - begwb_grc) — the gridcell balance omitted the
+    # canopy storage change while qflx_evap_tot/forc_rain still carried the canopy
+    # exchanges. That left a real ~0.006 mm/step residual in errh2o_grc which only
+    # ever @warn'd because DAnstep was hardcoded to 0. Mirrors begwb_col below.
+    add_canopy_water_to_grc_storage!(inst.water.waterbalancebulk_inst.begwb_grc,
+                                     wsb.ws.liqcan_patch, wsb.ws.snocan_patch,
+                                     filt.nolakec, col, pch, bc_col, bc_grc)
 
     # ========================================================================
     # Dynamic subgrid weights — WIRED (gated; no-op unless a transient run built
@@ -2461,14 +2473,15 @@ function clm_drv_core!(config::CLMDriverConfig,
                                  filt.nolakec, col, pch)
 
     # Gridcell water balance: mirror the column fix so errh2o_grc is meaningful.
-    # (1) add canopy to begwb_grc/endwb_grc (water_gridcell_balance! computes them
-    # canopy-free); (2) aggregate column output fluxes to gridcell (the call below
+    # (1) add canopy to endwb_grc with the END-of-step canopy state (begwb_grc got
+    # its canopy at the top of the step, with the BEGIN-of-step state — adding both
+    # here from the same liqcan/snocan cancelled the canopy storage change out of
+    # the balance); (2) aggregate column output fluxes to gridcell (the call below
     # previously passed _zlike → errh2o_grc compared ΔS to precip alone). Both are
     # required: once the column fluxes are de-NaN'd, an unfixed grc check spams.
-    let wbk = inst.water.waterbalancebulk_inst, lc = wsb.ws.liqcan_patch, sc = wsb.ws.snocan_patch
-        add_canopy_water_to_grc_storage!(wbk.begwb_grc, lc, sc, filt.nolakec, col, pch, bc_col, bc_grc)
-        add_canopy_water_to_grc_storage!(wbk.endwb_grc, lc, sc, filt.nolakec, col, pch, bc_col, bc_grc)
-    end
+    add_canopy_water_to_grc_storage!(inst.water.waterbalancebulk_inst.endwb_grc,
+                                     wsb.ws.liqcan_patch, wsb.ws.snocan_patch,
+                                     filt.nolakec, col, pch, bc_col, bc_grc)
     _g_evap_tot     = _zlike(length(grc.lat)); _g_surf      = _zlike(length(grc.lat))
     _g_qrgwl        = _zlike(length(grc.lat)); _g_drain     = _zlike(length(grc.lat))
     _g_drain_perch  = _zlike(length(grc.lat)); _g_sfc_irrig = _zlike(length(grc.lat))
@@ -2485,11 +2498,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     c2g_unity!(_g_ice_runoff,  l2a.qflx_ice_runoff_col,       col.gridcell, col.wtgcell, bc_col, bc_grc)
 
     # BalanceCheck — WIRED
+    # DAnstep = steps since run start / restart / last DA state jump (Fortran
+    # get_nstep_since_startup_or_lastDA_restart_or_pause = get_nstep() - DA_nstep).
+    # This used to be a hardcoded 0, which made every hard-error branch in
+    # balance_check! unreachable (they all require DAnstep > skip_steps), so the
+    # top-level water/energy conservation check could only ever @warn. Four real
+    # balance bugs hid behind that. Pass the real counter.
     balance_check!(inst.balcheck, wfb, wsb,
                    inst.water.waterbalancebulk_inst, wdb, ef, sa, cs, alb,
                    col, lun, pch, grc,
                    filt.allc, bc_col, bc_patch, bc_grc,
-                   nstep, 0, dtime;
+                   nstep, get_nstep_since_startup_or_last_da(inst.balcheck, nstep), dtime;
                    forc_rain_col=forc_rain_col,
                    forc_snow_col=forc_snow_col,
                    forc_rain_grc=length(a2l.forc_rain_not_downscaled_grc) > 0 ? a2l.forc_rain_not_downscaled_grc : _zlike(length(grc.lat)),
@@ -2506,7 +2525,12 @@ function clm_drv_core!(config::CLMDriverConfig,
                    qflx_drain_perched_grc=_g_drain_perch,
                    qflx_ice_runoff_grc=_g_ice_runoff,
                    qflx_sfc_irrig_grc=_g_sfc_irrig,
-                   qflx_streamflow_grc=_zlike(length(grc.lat)))
+                   qflx_streamflow_grc=_zlike(length(grc.lat)),
+                   # FATES trips the (now live) check on its own real coupling gaps
+                   # — fsa/fsr unset on FATES patches, ~142 W/m2 solar residual. The
+                   # errors are still computed and warned; only the abort is held
+                   # back. See the TODO at the top of balance_check!.
+                   use_fates=config.use_fates)
 
     # ========================================================================
     # Diagnostics

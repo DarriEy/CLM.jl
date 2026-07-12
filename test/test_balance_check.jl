@@ -583,4 +583,117 @@
         end
     end
 
+    # -----------------------------------------------------------------------
+    # DAnstep: the step counter the hard-error branch gates on.
+    #
+    # Fortran: DAnstep = get_nstep() - DA_nstep (clm_time_manager.F90:801), where
+    # DA_nstep defaults to 0 and is only bumped by update_DA_nstep() (Data
+    # Assimilation / matrix-CN spin-up state jumps). So in a normal run DAnstep is
+    # simply nstep, and the check goes live once nstep > skip_steps.
+    # -----------------------------------------------------------------------
+    @testset "DAnstep = nstep - da_nstep" begin
+        bc = CLM.BalanceCheckData()
+        CLM.balance_check_init!(bc, 1800.0)
+        @test bc.skip_steps == 3
+        @test bc.da_nstep == 0
+        @test bc.hard_error            # Fortran behaviour: endrun past skip_steps
+
+        # No DA → DAnstep is just nstep.
+        for n in (0, 1, 5, 137)
+            @test CLM.get_nstep_since_startup_or_last_da(bc, n) == n
+        end
+
+        # Startup skip window is honoured, and the check DOES go live after it.
+        @test !CLM._bc_should_error(bc, 3)    # nstep 1..3: begwb/endwb not yet consistent
+        @test  CLM._bc_should_error(bc, 4)    # nstep 4+ : live
+
+        # A DA / spin-up state jump at step 1000 re-opens the skip window: the next
+        # skip_steps steps only warn, then the check goes live again.
+        CLM.update_da_nstep!(bc, 1000)
+        @test bc.da_nstep == 1000
+        @test CLM.get_nstep_since_startup_or_last_da(bc, 1003) == 3
+        @test !CLM._bc_should_error(bc, CLM.get_nstep_since_startup_or_last_da(bc, 1003))
+        @test  CLM._bc_should_error(bc, CLM.get_nstep_since_startup_or_last_da(bc, 1004))
+
+        # The hard_error master switch degrades every hard error to the @warn.
+        bc.hard_error = false
+        @test !CLM._bc_should_error(bc, 10_000)
+
+        CLM.balance_check_clean!(bc)
+        @test bc.da_nstep == 0
+    end
+
+    # -----------------------------------------------------------------------
+    # THE CHECK MUST BE ABLE TO FAIL.
+    #
+    # The driver used to pass a LITERAL 0 for DAnstep. Every hard-error branch in
+    # balance_check! requires DAnstep > skip_steps, so with DAnstep pinned at 0 the
+    # check could only ever @warn — four real water-balance bugs (NaN lake errh2o,
+    # zeroed ice runoff, an endwb-zeroing stub fabricating ~46 m/yr of glacier
+    # runoff) sailed straight through it.
+    #
+    # This pins the property that was missing: an unbalanced column, with DAnstep
+    # wired the way the driver now wires it, THROWS. A check that can only pass is
+    # exactly the disease being cured here.
+    # -----------------------------------------------------------------------
+    @testset "BalanceCheck CAN fail: unbalanced column throws past skip_steps" begin
+        # A column that gains 50 mm of water out of nowhere: no precip, no fluxes,
+        # storage just goes up. Nothing in the physics accounts for it.
+        function unbalanced(; nstep::Int, hard_error::Bool = true)
+            d = make_bc_test_data()
+            d.bc.hard_error = hard_error
+            d.wb.begwb_col .= 100.0
+            d.wb.endwb_col .= 150.0     # +50 mm from nowhere
+            d.wb.begwb_grc .= 100.0
+            d.wb.endwb_grc .= 150.0
+            # Keep the energy checks quiet so the water branch is what fires.
+            d.solarabs.fsa_patch .= 100.0
+            d.solarabs.fsr_patch .= 50.0
+            d.forc_solad_col .= 75.0
+            d.forc_solai_grc .= 0.0
+            d.eflux.eflx_lwrad_out_patch .= 300.0
+            d.eflux.eflx_lwrad_net_patch .= 50.0
+            d.forc_lwrad_col .= 250.0
+            d.solarabs.sabv_patch .= 40.0
+            d.solarabs.sabg_chk_patch .= 60.0
+            d.eflux.eflx_sh_tot_patch .= 25.0
+            d.eflux.eflx_lh_tot_patch .= 25.0
+
+            # DAnstep exactly as the driver computes it — not a hand-picked literal.
+            DAnstep = CLM.get_nstep_since_startup_or_last_da(d.bc, nstep)
+            CLM.balance_check!(d.bc, d.water.waterfluxbulk_inst,
+                d.water.waterstatebulk_inst, d.wb, d.wdb,
+                d.eflux, d.solarabs, d.canst, d.surfalb,
+                d.col_data, d.lun_data, d.pat_data, d.grc_data,
+                d.mask_allc, d.bounds_c, d.bounds_p, d.bounds_g,
+                nstep, DAnstep, d.dtime;
+                forc_rain_col=d.forc_rain_col, forc_snow_col=d.forc_snow_col,
+                forc_rain_grc=d.forc_rain_grc, forc_snow_grc=d.forc_snow_grc,
+                forc_solad_col=d.forc_solad_col, forc_solai_grc=d.forc_solai_grc,
+                forc_lwrad_col=d.forc_lwrad_col, forc_flood_grc=d.forc_flood_grc,
+                qflx_ice_runoff_col=d.qflx_ice_runoff_col,
+                qflx_evap_tot_grc=d.qflx_evap_tot_grc, qflx_surf_grc=d.qflx_surf_grc,
+                qflx_qrgwl_grc=d.qflx_qrgwl_grc, qflx_drain_grc=d.qflx_drain_grc,
+                qflx_drain_perched_grc=d.qflx_drain_perched_grc,
+                qflx_ice_runoff_grc=d.qflx_ice_runoff_grc,
+                qflx_sfc_irrig_grc=d.qflx_sfc_irrig_grc,
+                qflx_streamflow_grc=d.qflx_streamflow_grc)
+            return d
+        end
+
+        # nstep=4 > skip_steps=3 → the check is LIVE and must stop the model.
+        @test_throws ErrorException unbalanced(; nstep = 4)
+        @test_throws ErrorException unbalanced(; nstep = 500)
+
+        # Inside the startup skip window (nstep <= skip_steps) Fortran deliberately
+        # only warns: begwb/endwb are not yet mutually consistent right after
+        # startup/restart. Faithful — and the reason this must not just always error.
+        d = @test_logs (:warn,) match_mode=:any unbalanced(; nstep = 2)
+        @test d.wb.errh2o_col[first(d.bounds_c)] ≈ 50.0 rtol=1e-12   # error was still COMPUTED
+
+        # hard_error=false degrades the stop to a warning (AD/GPU probe escape hatch).
+        d = @test_logs (:warn,) match_mode=:any unbalanced(; nstep = 500, hard_error = false)
+        @test abs(d.wb.errh2o_col[first(d.bounds_c)]) > CLM.BALANCE_ERROR_THRESH
+    end
+
 end

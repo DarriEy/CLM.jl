@@ -381,6 +381,45 @@
     end
 
     # ================================================================
+    # The top-level water-balance check must be ABLE TO FAIL.
+    #
+    # clm_drv! used to hand balance_check! a LITERAL 0 for the DAnstep positional
+    # argument. Every hard-error branch inside balance_check! requires
+    # DAnstep > skip_steps, so with DAnstep pinned at 0 that condition was NEVER
+    # true: every water/energy balance violation only @warn'd and the model sailed
+    # on. Four separate real balance bugs sat undetected behind it (NaN lake
+    # errh2o, hardcoded-zero ice runoff, an endwb-zeroing stub fabricating ~46 m/yr
+    # of glacier runoff). clm_drv! now passes the genuine step counter.
+    #
+    # This pins the CALL SITE. (That the check then genuinely throws on an
+    # unbalanced column, given this DAnstep, is pinned in test_balance_check.jl —
+    # "BalanceCheck CAN fail". A full driver-level failure test cannot run on this
+    # fixture: its water state and fluxes are all NaN, and a NaN errh2o compares
+    # false against every threshold, so the check is blind here. See the balance
+    # check's own tests for the live-fire assertion.)
+    # ================================================================
+    @testset "clm_drv! hands balance_check! a LIVE step counter (not a literal 0)" begin
+        # clm_instInit! → balance_check_init!(dtime=1800) → skip_steps = 3, so a
+        # correct DAnstep must be able to exceed 3. The old literal 0 never could.
+        inst, _, _, _, _, _ = make_driver_data()
+        @test inst.balcheck.skip_steps == 3
+        @test CLM.get_nstep_since_startup_or_last_da(inst.balcheck, 0) == 0   # dead
+        @test CLM.get_nstep_since_startup_or_last_da(inst.balcheck, 4) == 4   # live
+        @test CLM._bc_should_error(inst.balcheck,
+                  CLM.get_nstep_since_startup_or_last_da(inst.balcheck, 4))
+
+        # Guard the call site itself: the DAnstep argument clm_drv! passes must be
+        # the real counter, not a constant. Reading the source is blunt, but it is
+        # exactly the regression that hid four bugs, and nothing weaker catches a
+        # positional argument silently reverting to 0.
+        src = read(joinpath(@__DIR__, "..", "src", "driver", "clm_driver.jl"), String)
+        call = match(r"balance_check!\(inst\.balcheck.*?dtime;"s, src)
+        @test call !== nothing
+        @test occursin("get_nstep_since_startup_or_last_da(inst.balcheck, nstep)", call.match)
+        @test !occursin(r"nstep,\s*0,\s*dtime", call.match)   # the old dead wiring
+    end
+
+    # ================================================================
     # Test clm_drv! with different config flags
     # ================================================================
     @testset "clm_drv! config flags" begin
