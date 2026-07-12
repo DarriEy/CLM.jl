@@ -300,4 +300,101 @@
         @test length(wf.volumetric_streamflow_lun) == 3
         @test length(wf.qflx_liq_dynbal_grc) == 2
     end
+
+    # =====================================================================
+    # Regression guard for the DEAD-InitCold class of bug.
+    #
+    # `waterflux_init_cold!` (waterflux_type%InitCold, WaterFluxType.F90:860) and
+    # `waterfluxbulk_init_cold!` (InitBulkCold, WaterFluxBulkType.F90:255) were both
+    # DEAD in the port: defined, unit-tested above, and never called from any run
+    # path. Fortran zeroes these fields because several are ONLY written inside the
+    # hydrology filter, so columns outside it (lake, glacier, urban roof/wall,
+    # wetland) keep their allocation-time NaN forever. `qflx_ice_runoff_xs_col` was
+    # one instance of this class (PR #207); the audit found many more, e.g.
+    # `qflx_gw_uncon_irrig_col` NaN on every column, `qflx_tran_veg_patch` /
+    # `qflx_evap_veg_patch` NaN on lake + urban patches, `qflx_phs_neg_col` NaN
+    # everywhere with PHS off.
+    #
+    # Both routines are now wired into `cold_start_initialize!` via
+    # `init_water_flux_cold!` (src/infrastructure/cold_start.jl). This guard asserts
+    # that EVERY field Fortran's InitCold/InitBulkCold zeroes really is non-NaN on
+    # EVERY column/patch — including a non-soil (lake) landunit that never runs the
+    # hydrology filter. It fails if either routine is ever unwired again.
+    # =====================================================================
+    @testset "InitCold covers every Fortran-zeroed field on non-hydrology landunits" begin
+        # Column 1 = ISTSOIL (runs the hydrology filter),
+        # Column 2 = ISTDLAK (deep lake — outside it; this is the poisoned case).
+        nc, np, nl, ng = 2, 2, 2, 1
+        landunit_col = [1, 2]
+        lun_itype    = [CLM.ISTSOIL, CLM.ISTDLAK]
+
+        wfb = CLM.WaterFluxBulkData()
+        CLM.waterfluxbulk_init!(wfb, nc, np, nl, ng)
+        wf = wfb.wf
+
+        CLM.waterflux_init_cold!(wf, 1:nc, 1:np, 1:nl;
+            landunit_col=landunit_col, lun_itype=lun_itype,
+            use_hillslope_routing=false)
+        CLM.waterfluxbulk_init_cold!(wfb, 1:nc, 1:np)
+
+        # --- Fields Fortran's InitCold zeroes for ALL columns (WaterFluxType.F90:883-903) ---
+        all_col = [:qflx_sfc_irrig_col, :qflx_gw_uncon_irrig_col, :qflx_gw_con_irrig_col,
+                   :qflx_liqevap_from_top_layer_col, :qflx_liqdew_to_top_layer_col,
+                   :qflx_soliddew_to_top_layer_col, :qflx_snow_drain_col,
+                   :qflx_ice_runoff_xs_col, :qflx_glcice_dyn_water_flux_col]
+        # --- ...and for ALL patches (WaterFluxType.F90:875-888, 906-908) ---
+        all_pat = [:qflx_snocanfall_patch, :qflx_liqcanfall_patch, :qflx_snow_unload_patch,
+                   :qflx_liqevap_from_top_layer_patch, :qflx_liqdew_to_top_layer_patch,
+                   :qflx_soliddew_to_top_layer_patch, :qflx_irrig_drip_patch,
+                   :qflx_irrig_sprinkler_patch, :qflx_tran_veg_patch, :qflx_evap_veg_patch]
+        # --- InitBulkCold (WaterFluxBulkType.F90:264-268) ---
+        bulk_col = [:qflx_phs_neg_col, :qflx_h2osfc_surf_col]
+        bulk_pat = [:qflx_snowindunload_patch, :qflx_snotempunload_patch]
+
+        for f in all_col, c in 1:nc
+            v = getfield(wf, f)[c]
+            @test !isnan(v)
+            @test v == 0.0
+        end
+        for f in all_pat, p in 1:np
+            v = getfield(wf, f)[p]
+            @test !isnan(v)
+            @test v == 0.0
+        end
+        for f in bulk_col, c in 1:nc
+            v = getfield(wfb, f)[c]
+            @test !isnan(v)
+            @test v == 0.0
+        end
+        for f in bulk_pat, p in 1:np
+            v = getfield(wfb, f)[p]
+            @test !isnan(v)
+            @test v == 0.0
+        end
+        # 2D irrigation-by-layer, all columns (WaterFluxType.F90:885)
+        for c in 1:nc, j in 1:nlevsoi
+            @test !isnan(wf.qflx_gw_uncon_irrig_lyr_col[c, j])
+            @test wf.qflx_gw_uncon_irrig_lyr_col[c, j] == 0.0
+        end
+
+        # Fortran zeroes drain/surf/latflow/discharge ONLY on soil/crop — the lake
+        # column is intentionally left alone here (it is not in the CNNLeaching loop).
+        # Assert the soil column got them, i.e. the branch really ran.
+        @test wf.qflx_drain_col[1] == 0.0
+        @test wf.qflx_surf_col[1] == 0.0
+        @test wf.qflx_latflow_in_col[1] == 0.0
+        @test wf.qflx_latflow_out_col[1] == 0.0
+        @test wf.volumetric_discharge_col[1] == 0.0
+    end
+
+    @testset "init_water_flux_cold! is wired into the cold-start path" begin
+        # Guards the wiring itself: cold_start_initialize! must call InitCold. If the
+        # call is ever dropped, `init_water_flux_cold!` vanishing (or no longer being
+        # invoked from cold_start_initialize!) is what re-opens the whole bug class.
+        @test isdefined(CLM, :init_water_flux_cold!)
+        src = read(joinpath(@__DIR__, "..", "src", "infrastructure", "cold_start.jl"), String)
+        body = match(r"function cold_start_initialize!.*?\n(.*?)\nend\n"s, src)
+        @test body !== nothing
+        @test occursin("init_water_flux_cold!", body.captures[1])
+    end
 end
