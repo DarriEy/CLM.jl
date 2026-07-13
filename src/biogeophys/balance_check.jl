@@ -271,8 +271,10 @@ at beginning or end of time step as specified by `flag` ("begwb" or "endwb").
 
 Ported from `WaterGridcellBalanceSingle` in `BalanceCheckMod.F90`.
 
-Uses `c2g_unity!` for column-to-gridcell aggregation (equivalent to
-Fortran `c2g` with `c2l_scale_type='urbanf', l2g_scale_type='unity'`).
+Uses `c2g_urbanf!` for column-to-gridcell aggregation — Fortran `c2g` with
+`c2l_scale_type='urbanf', l2g_scale_type='unity'`. (This previously used
+`c2g_unity!` while CLAIMING to be the urbanf equivalent; it is not, and urban
+gridcells could not close as a result.)
 """
 function water_gridcell_balance_single!(
     waterstate::Union{WaterStateData, WaterStateBulkData, Nothing},
@@ -317,8 +319,11 @@ function water_gridcell_balance_single!(
     # Compute water mass for lake columns
     compute_water_mass_lake_bc!(wb_col, waterstate, lakestate, mask_lake, bounds_c, col_data)
 
-    # Column-to-gridcell aggregation
-    c2g_unity!(wb_grc, wb_col, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
+    # Column-to-gridcell aggregation. 'urbanf' scaling, NOT unity — Fortran
+    # BalanceCheckMod.F90:270 uses c2l_scale_type='urbanf' (wall/road columns carry
+    # per-WALL / per-ROAD-area quantities and must be rescaled to per-GROUND-area).
+    # Identical to c2g_unity! on gridcells with no urban landunit.
+    c2g_urbanf!(wb_grc, wb_col, col_data, lun_data, bounds_c, bounds_g)
 
     # Add landunit-level state (stream water volume), convert from m3 to kg/m2.
     # Landunit→gridcell scatter (atomic-safe via _scatter_add!).
@@ -349,8 +354,8 @@ function water_gridcell_balance_single!(
         # endwb_grc requires wa_reset_nonconservation_gain adjustment
         wa_reset_grc = fill!(similar(col_data.wtgcell, FT, ng), zero(FT))
         if use_aquifer_layer && !isempty(wa_reset_nonconservation_gain_col)
-            c2g_unity!(wa_reset_grc, wa_reset_nonconservation_gain_col,
-                       col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
+            c2g_urbanf!(wa_reset_grc, wa_reset_nonconservation_gain_col,
+                        col_data, lun_data, bounds_c, bounds_g)
         end
         @view(endwb_grc[bounds_g]) .= @view(wb_grc[bounds_g]) .- @view(wa_reset_grc[bounds_g])
     else
@@ -642,6 +647,7 @@ function add_canopy_water_to_grc_storage!(
     snocan_patch::AbstractVector{<:Real},
     mask_nolakec::AbstractVector{Bool},
     col_data::ColumnData,
+    lun_data::LandunitData,
     pch_data::PatchData,
     bounds_c::UnitRange{Int},
     bounds_g::UnitRange{Int})
@@ -653,7 +659,7 @@ function add_canopy_water_to_grc_storage!(
     p2c_1d_filter!(liqc, liqcan_patch, mask_nolakec, col_data, pch_data)
     p2c_1d_filter!(snoc, snocan_patch, mask_nolakec, col_data, pch_data)
     can_grc = fill!(similar(storage_grc, FT, length(storage_grc)), zero(FT))
-    c2g_unity!(can_grc, liqc .+ snoc, col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
+    c2g_urbanf!(can_grc, liqc .+ snoc, col_data, lun_data, bounds_c, bounds_g)
     storage_grc .+= can_grc
     return nothing
 end
@@ -1133,12 +1139,13 @@ function balance_check!(
     qflx_snwcp_discarded_liq_grc_arr = _grcz(ng)
     qflx_snwcp_discarded_ice_grc_arr = _grcz(ng)
 
-    c2g_unity!(qflx_glcice_dyn_water_flux_grc_arr, qflx_glcice_dyn_water_flux_col,
-               col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
-    c2g_unity!(qflx_snwcp_discarded_liq_grc_arr, qflx_snwcp_discarded_liq_col,
-               col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
-    c2g_unity!(qflx_snwcp_discarded_ice_grc_arr, qflx_snwcp_discarded_ice_col,
-               col_data.gridcell, col_data.wtgcell, bounds_c, bounds_g)
+    # 'urbanf' scaling — BalanceCheckMod.F90:713-724.
+    c2g_urbanf!(qflx_glcice_dyn_water_flux_grc_arr, qflx_glcice_dyn_water_flux_col,
+                col_data, lun_data, bounds_c, bounds_g)
+    c2g_urbanf!(qflx_snwcp_discarded_liq_grc_arr, qflx_snwcp_discarded_liq_col,
+                col_data, lun_data, bounds_c, bounds_g)
+    c2g_urbanf!(qflx_snwcp_discarded_ice_grc_arr, qflx_snwcp_discarded_ice_col,
+                col_data, lun_data, bounds_c, bounds_g)
 
     if !isempty(bounds_g)
         # streamflow array may be empty when not using hillslope routing; the

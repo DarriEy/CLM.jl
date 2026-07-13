@@ -474,4 +474,110 @@
         end
     end
 
+    # ------------------------------------------------------------------
+    # Urban roof / impervious-road ponding + runoff
+    #
+    # These two routines had NO unit coverage — every existing testset above
+    # passes `mask_urban = falses(nc)`, so the urban branch never executed. That
+    # is exactly how two real bugs survived:
+    #   (1) `update_urban_ponding!` was ported and NEVER CALLED from the driver
+    #       (Fortran calls it right after TotalSurfaceRunoff,
+    #       HydrologyNoDrainageMod.F90:336);
+    #   (2) both urban kernels indexed `h2osoi_liq[c, 1]` — the DEEPEST SNOW slot —
+    #       instead of the top SOIL layer `h2osoi_liq[c, nlevsno+1]`.
+    # Roof / impervious-road columns are not hydrologically active and their h2osfc
+    # is excluded from the column water mass, so this pond IS their only water
+    # store: getting it wrong broke the urban column water balance (0.077 mm on the
+    # impervious road) — invisible only because errh2o was NaN there.
+    # ------------------------------------------------------------------
+    @testset "urban ponding + surface runoff (roof / impervious road)" begin
+        nc = 2
+        jj = CLM.varpar.nlevsno + 1        # top SOIL layer in the combined array
+        dtime = 3600.0
+
+        ws = CLM.WaterStateData()
+        CLM.waterstate_init!(ws, nc, nc, 1, 1)
+        ws.h2osoi_liq_col .= 0.0
+        ws.h2osoi_ice_col .= 0.0
+
+        sh = CLM.SoilHydrologyData()
+        CLM.soilhydrology_init!(sh, nc)
+        sh.xs_urban_col .= 0.0
+
+        wfb = CLM.WaterFluxBulkData()
+        CLM.waterfluxbulk_init!(wfb, nc, nc, 1, 1)
+        wfb.wf.qflx_surf_col .= 0.0
+        wfb.wf.qflx_floodc_col .= 0.0
+        wfb.wf.qflx_liqevap_from_top_layer_col .= 0.0
+        wfb.qflx_infl_excess_surf_col .= 0.0
+        wfb.qflx_h2osfc_surf_col .= 0.0
+        wfb.qflx_sat_excess_surf_col .= 0.0
+
+        col_snl   = fill(0, nc)                                   # no snow layers
+        col_itype = [CLM.ICOL_ROOF, CLM.ICOL_ROAD_IMPERV]
+        col_lun   = fill(1, nc)
+        lun_urb   = [true]
+        mask_hyd  = falses(nc)                                    # NOT hydrologically active
+        mask_urb  = trues(nc)
+
+        # --- Case 1: light rain, below the ponding cap -> stored in the POND,
+        #     no runoff. The pond lives in the top SOIL layer, not a snow slot.
+        rain = 1.0e-4                                             # mm/s -> 0.36 mm over the step
+        wfb.wf.qflx_rain_plus_snomelt_col .= rain
+
+        CLM.total_surface_runoff!(wfb, sh, ws, col_snl, col_itype, col_lun, lun_urb,
+                                  mask_hyd, mask_urb, 1:nc, dtime)
+        CLM.update_urban_ponding!(ws, sh, wfb, col_snl, col_itype, mask_urb, 1:nc, dtime)
+
+        for c in 1:nc
+            @test sh.xs_urban_col[c] ≈ 0.0 atol=1e-12            # under pondmx -> no excess
+            @test wfb.wf.qflx_surf_col[c] ≈ 0.0 atol=1e-12       # ...so no runoff
+            @test ws.h2osoi_liq_col[c, jj] ≈ rain * dtime        # water landed in the POND
+            @test ws.h2osoi_liq_col[c, 1] == 0.0                 # and NOT in the snow slot
+        end
+
+        # --- Case 2: heavy rain, above the ponding cap -> pond pinned at
+        #     PONDMX_URBAN and the excess leaves as surface runoff.
+        ws.h2osoi_liq_col .= 0.0
+        sh.xs_urban_col .= 0.0
+        wfb.wf.qflx_surf_col .= 0.0
+        rain2 = 1.0e-2                                            # 36 mm over the step >> pondmx
+        wfb.wf.qflx_rain_plus_snomelt_col .= rain2
+
+        CLM.total_surface_runoff!(wfb, sh, ws, col_snl, col_itype, col_lun, lun_urb,
+                                  mask_hyd, mask_urb, 1:nc, dtime)
+        CLM.update_urban_ponding!(ws, sh, wfb, col_snl, col_itype, mask_urb, 1:nc, dtime)
+
+        expected_xs = rain2 - CLM.PONDMX_URBAN / dtime
+        for c in 1:nc
+            @test sh.xs_urban_col[c] ≈ expected_xs rtol=1e-10
+            @test wfb.wf.qflx_surf_col[c] ≈ expected_xs rtol=1e-10
+            @test ws.h2osoi_liq_col[c, jj] ≈ CLM.PONDMX_URBAN     # pond pinned at the cap
+            @test ws.h2osoi_liq_col[c, 1] == 0.0
+        end
+
+        # --- Case 3: the column water balance CLOSES over the step.
+        #     Roof / impervious road have no infiltration and no h2osfc in the mass,
+        #     so: d(pond) == (rain + snowmelt - evap - runoff) * dt, exactly.
+        ws.h2osoi_liq_col .= 0.0
+        sh.xs_urban_col .= 0.0
+        wfb.wf.qflx_surf_col .= 0.0
+        rain3 = 5.0e-4
+        evap3 = 1.0e-4
+        wfb.wf.qflx_rain_plus_snomelt_col .= rain3
+        wfb.wf.qflx_liqevap_from_top_layer_col .= evap3
+        pond0 = [0.2, 0.5]
+        for c in 1:nc; ws.h2osoi_liq_col[c, jj] = pond0[c]; end
+
+        CLM.total_surface_runoff!(wfb, sh, ws, col_snl, col_itype, col_lun, lun_urb,
+                                  mask_hyd, mask_urb, 1:nc, dtime)
+        CLM.update_urban_ponding!(ws, sh, wfb, col_snl, col_itype, mask_urb, 1:nc, dtime)
+
+        for c in 1:nc
+            dpond = ws.h2osoi_liq_col[c, jj] - pond0[c]
+            net   = (rain3 - evap3 - wfb.wf.qflx_surf_col[c]) * dtime
+            @test dpond ≈ net atol=1e-10        # <-- the balance the driver was breaking
+        end
+    end
+
 end
