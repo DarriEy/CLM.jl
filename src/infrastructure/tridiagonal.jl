@@ -21,6 +21,16 @@ The system solved for levels jtop:nlevs is:
 - `nlevs::Int`:                 Total number of levels
 
 This is the reference implementation matching Fortran exactly.
+
+!!! note "Reverse-mode AD"
+    Enzyme does NOT differentiate this body: a custom adjoint rule in
+    `src/infrastructure/enzyme_rules.jl` supplies the exact linear-solve adjoint
+    (λ = A⁻ᵀ ū). That is a correctness requirement, not an optimization — on
+    Julia 1.10 Enzyme leaves the shadow of the `cp`/`dp` workspace allocated
+    below UNZEROED, so the generic reverse pass returns a wrong-but-finite
+    gradient and, on a few percent of calls, a NaN/Inf. If you change this
+    function's signature or its band convention, update the rule (and its
+    finite-difference test in `test/test_enzyme_smoke.jl`) with it.
 """
 function tridiagonal_solve!(u::AbstractVector{<:Real}, a::AbstractVector{<:Real},
                             b::AbstractVector{<:Real}, c::AbstractVector{<:Real},
