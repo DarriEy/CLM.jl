@@ -372,6 +372,12 @@ function waterflux_init_cold!(wf::WaterFluxData,
         wf.qflx_snow_h2osfc_col[c]                = 0.0
         wf.qflx_rain_plus_snomelt_col[c]          = 0.0
         wf.qflx_top_soil_col[c]                   = 0.0
+        # Snow-balance sink (bottom snow layer -> top soil). combine_snow_layers!
+        # maintains it, but only for columns in the snow filter — a column that grows
+        # its first snow layer later in the step would otherwise reach the snow balance
+        # check with this still at its NaN init, and a NaN errh2osno compares false
+        # against every threshold (i.e. silently "passes").
+        wf.qflx_sl_top_soil_col[c]                = 0.0
     end
 
     # Column 2D irrigation layers

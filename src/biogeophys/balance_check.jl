@@ -111,6 +111,44 @@ get_nstep_since_startup_or_last_da(bc::BalanceCheckData, nstep::Int) = nstep - b
 _bc_should_error(bc::BalanceCheckData, DAnstep::Int; disabled::Bool=false) =
     bc.hard_error && !disabled && DAnstep > bc.skip_steps
 
+"""
+    _bc_first_nonfinite(err, bounds) -> Int | Nothing
+
+First index in `bounds` whose balance error is NaN/Inf, or `nothing`.
+
+A NaN balance error is NOT a passing balance — but every threshold test in this
+routine is of the form `maximum(abs.(err)) > thresh`, and `NaN > thresh` is
+`false`. So a column whose `begwb`/`endwb` went non-finite sailed through every
+check silently. That is exactly how the lake `errh2o` NaN (and the NaN water
+fields on the urban/glacier landunits) hid for so long: they were not passing the
+balance check, they were invisible to it.
+
+Non-finite is now treated as a FAILURE, scanned before the magnitude tests.
+"""
+function _bc_first_nonfinite(err::AbstractVector, bounds::UnitRange{Int})
+    for c in bounds
+        isfinite(err[c]) || return c
+    end
+    return nothing
+end
+
+# Report a non-finite balance error: always warn; hard-error under the same gate
+# as a threshold violation (AD types degrade to a warning, as elsewhere).
+function _bc_check_nonfinite(err::AbstractVector, bounds::UnitRange{Int}, bc::BalanceCheckData,
+                             DAnstep::Int, nstep::Int, label::String, disabled::Bool)
+    idx = _bc_first_nonfinite(err, bounds)
+    idx === nothing && return nothing
+    @warn "$label balance error is NON-FINITE (NaN/Inf) — the balance is broken, not passing" nstep index=idx err=err[idx]
+    if _bc_should_error(bc, DAnstep; disabled=disabled)
+        if _is_ad_type(eltype(err))
+            @warn "BalanceCheck: non-finite $label balance error (AD mode, continuing)" maxlog=1
+        else
+            error("BalanceCheck: non-finite ($label) balance error at index=$idx")
+        end
+    end
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # GetBalanceCheckSkipSteps
 # --------------------------------------------------------------------------
@@ -1062,6 +1100,10 @@ function balance_check!(
     # Host-only warn/error scan (errh2o_col is a plain Array only on the CPU;
     # on the GPU we skip the String-building / argmax error path entirely).
     if errh2o_col isa Array
+        # A NaN errh2o is a BROKEN balance, not a passing one (NaN > thresh is false).
+        _bc_check_nonfinite(errh2o_col, bounds_c, bc, DAnstep, nstep,
+                            "column-level water", hard_error_disabled)
+
         errh2o_max_val = maximum(abs.(errh2o_col[bounds_c]))
 
         if errh2o_max_val > H2O_WARNING_THRESH
@@ -1115,6 +1157,12 @@ function balance_check!(
     # BUG(rgk, 2021-04-13, ESCOMP/CTSM#1314) Temporarily bypassing gridcell-level check
     # with use_fates_planthydro. Host-only warn/error scan.
     if errh2o_grc isa Array
+        if !use_fates_planthydro
+            _bc_check_nonfinite(errh2o_grc, bounds_g, bc, DAnstep, nstep,
+                                "gridcell-level water", hard_error_disabled ||
+                                use_soil_moisture_streams || for_testing_zero_dynbal_fluxes)
+        end
+
         errh2o_grc_max_val = maximum(abs.(errh2o_grc[bounds_g]))
 
         if errh2o_grc_max_val > H2O_WARNING_THRESH && !use_fates_planthydro
@@ -1153,6 +1201,9 @@ function balance_check!(
 
     # Host-only warn/error scan.
     if errh2osno isa Array
+        _bc_check_nonfinite(errh2osno, bounds_c, bc, DAnstep, nstep,
+                            "column-level snow", hard_error_disabled)
+
         errh2osno_max_val = maximum(abs.(errh2osno[bounds_c]))
 
         if errh2osno_max_val > H2O_WARNING_THRESH

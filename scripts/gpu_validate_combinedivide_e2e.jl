@@ -138,13 +138,15 @@ function build(::Type{FT}) where {FT}
     snl[5] = 0
 
     return (; nc, snl, dz, zi, z, t, ice, liq, snwrds, h2osno_no, snow_depth,
-            frac_sno, frac_sno_eff, int_snow, aer, lun_itype, urbpoi, col_landunit)
+            frac_sno, frac_sno_eff, int_snow, aer, lun_itype, urbpoi, col_landunit,
+            qflx_sl_top_soil = zeros(nc))
 end
 
 function run_cpu!(B, mask, bounds)
     CLM.combine_snow_layers!(B.snl, B.dz, B.zi, B.z, B.t, B.ice, B.liq, B.h2osno_no,
         B.snow_depth, B.frac_sno, B.frac_sno_eff, B.int_snow, B.snwrds, B.aer,
-        B.lun_itype, B.urbpoi, B.col_landunit, mask, bounds, NS)
+        B.lun_itype, B.urbpoi, B.col_landunit, mask, bounds, NS,
+        B.qflx_sl_top_soil, 1800.0)
     CLM.divide_snow_layers!(B.snl, B.dz, B.zi, B.z, B.t, B.ice, B.liq,
         B.frac_sno, B.snwrds, B.aer, false, mask, bounds, NS)
 end
@@ -152,7 +154,8 @@ end
 function run_dev!(D, mask, bounds)
     CLM.combine_snow_layers!(D.snl, D.dz, D.zi, D.z, D.t, D.ice, D.liq, D.h2osno_no,
         D.snow_depth, D.frac_sno, D.frac_sno_eff, D.int_snow, D.snwrds, D.aer,
-        D.lun_itype, D.urbpoi, D.col_landunit, mask, bounds, NS)
+        D.lun_itype, D.urbpoi, D.col_landunit, mask, bounds, NS,
+        D.qflx_sl_top_soil, 1800.0)
     CLM.divide_snow_layers!(D.snl, D.dz, D.zi, D.z, D.t, D.ice, D.liq,
         D.frac_sno, D.snwrds, D.aer, false, mask, bounds, NS)
 end
@@ -186,7 +189,8 @@ function main(backend)
             frac_sno = ad(B.frac_sno), frac_sno_eff = ad(B.frac_sno_eff),
             int_snow = ad(B.int_snow), aer = ad(B.aer),
             lun_itype = ad(B.lun_itype), urbpoi = ad(B.urbpoi),
-            col_landunit = ad(B.col_landunit))
+            col_landunit = ad(B.col_landunit),
+            qflx_sl_top_soil = ad(B.qflx_sl_top_soil))
         m_dev = to(collect(Bool, m_cpu))
 
         # sanity: arrays must actually be on the device

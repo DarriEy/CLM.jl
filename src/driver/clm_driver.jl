@@ -1902,7 +1902,8 @@ function clm_drv_core!(config::CLMDriverConfig,
         wdb.snow_depth_col, wdb.frac_sno_col, wdb.frac_sno_eff_col,
         wsb.int_snow_col, wdb.snw_rds_col,
         aer, lun.itype, lun.urbpoi, col.landunit,
-        filt.snowc, bc_col, nlevsno)
+        filt.snowc, bc_col, nlevsno,
+        wfb.wf.qflx_sl_top_soil_col, dtime)
     # --- 18. Divide thick snow layers ---
     divide_snow_layers!(
         col.snl, col.dz, col.zi, col.z,

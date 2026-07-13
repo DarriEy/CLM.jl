@@ -696,4 +696,73 @@
         @test abs(d.wb.errh2o_col[first(d.bounds_c)]) > CLM.BALANCE_ERROR_THRESH
     end
 
+    # -----------------------------------------------------------------------
+    # A NaN balance error is NOT a passing balance.
+    #
+    # Every threshold test here is `maximum(abs.(err)) > thresh`, and `NaN > thresh`
+    # is FALSE. So a column whose begwb/endwb went non-finite sailed through the
+    # check in complete silence — it was not passing, it was INVISIBLE. That is how
+    # the lake errh2o NaN, the NaN water fluxes on the urban/glacier landunits, and
+    # the never-written qflx_sl_top_soil (NaN errh2osno on every snowy column) all
+    # hid. Non-finite is now a failure in its own right.
+    # -----------------------------------------------------------------------
+    @testset "BalanceCheck CAN fail: non-finite errh2o throws (NaN is not a pass)" begin
+        function with_err(field::Symbol, val::Float64; nstep::Int, hard_error::Bool = true)
+            d = make_bc_test_data()
+            d.bc.hard_error = hard_error
+            # A perfectly closed balance everywhere...
+            d.wb.begwb_col .= 100.0; d.wb.endwb_col .= 100.0
+            d.wb.begwb_grc .= 100.0; d.wb.endwb_grc .= 100.0
+            d.solarabs.fsa_patch .= 100.0; d.solarabs.fsr_patch .= 50.0
+            d.forc_solad_col .= 75.0; d.forc_solai_grc .= 0.0
+            d.eflux.eflx_lwrad_out_patch .= 300.0; d.eflux.eflx_lwrad_net_patch .= 50.0
+            d.forc_lwrad_col .= 250.0
+            d.solarabs.sabv_patch .= 40.0; d.solarabs.sabg_chk_patch .= 60.0
+            d.eflux.eflx_sh_tot_patch .= 25.0; d.eflux.eflx_lh_tot_patch .= 25.0
+            # ...except ONE storage term goes non-finite on column 1.
+            getproperty(d.wb, field)[1] = val
+
+            DAnstep = CLM.get_nstep_since_startup_or_last_da(d.bc, nstep)
+            CLM.balance_check!(d.bc, d.water.waterfluxbulk_inst,
+                d.water.waterstatebulk_inst, d.wb, d.wdb,
+                d.eflux, d.solarabs, d.canst, d.surfalb,
+                d.col_data, d.lun_data, d.pat_data, d.grc_data,
+                d.mask_allc, d.bounds_c, d.bounds_p, d.bounds_g,
+                nstep, DAnstep, d.dtime;
+                forc_rain_col=d.forc_rain_col, forc_snow_col=d.forc_snow_col,
+                forc_rain_grc=d.forc_rain_grc, forc_snow_grc=d.forc_snow_grc,
+                forc_solad_col=d.forc_solad_col, forc_solai_grc=d.forc_solai_grc,
+                forc_lwrad_col=d.forc_lwrad_col, forc_flood_grc=d.forc_flood_grc,
+                qflx_ice_runoff_col=d.qflx_ice_runoff_col,
+                qflx_evap_tot_grc=d.qflx_evap_tot_grc, qflx_surf_grc=d.qflx_surf_grc,
+                qflx_qrgwl_grc=d.qflx_qrgwl_grc, qflx_drain_grc=d.qflx_drain_grc,
+                qflx_drain_perched_grc=d.qflx_drain_perched_grc,
+                qflx_ice_runoff_grc=d.qflx_ice_runoff_grc,
+                qflx_sfc_irrig_grc=d.qflx_sfc_irrig_grc,
+                qflx_streamflow_grc=d.qflx_streamflow_grc)
+            return d
+        end
+
+        # NaN and Inf storage → non-finite errh2o → the model must STOP, not shrug.
+        @test_throws ErrorException with_err(:endwb_col, NaN; nstep = 4)
+        @test_throws ErrorException with_err(:begwb_col, NaN; nstep = 4)
+        @test_throws ErrorException with_err(:endwb_col, Inf; nstep = 4)
+        @test_throws ErrorException with_err(:endwb_grc, NaN; nstep = 4)   # gridcell too
+
+        # The magnitude test alone would NOT have caught any of these: NaN is not
+        # greater than the threshold. Pin that directly, so nobody "optimises" the
+        # non-finite scan away on the grounds that the threshold test covers it.
+        @test !(NaN > CLM.BALANCE_ERROR_THRESH)
+        @test !(abs(NaN) > CLM.H2O_WARNING_THRESH)
+
+        # Inside the startup skip window it still only warns (begwb/endwb genuinely
+        # are not consistent yet there) — same faithful Fortran intent as above.
+        d = @test_logs (:warn,) match_mode=:any with_err(:endwb_col, NaN; nstep = 2)
+        @test isnan(d.wb.errh2o_col[1])
+
+        # And the hard_error switch gates it like every other violation.
+        @test_logs (:warn,) match_mode=:any with_err(:endwb_col, NaN; nstep = 500,
+                                                     hard_error = false)
+    end
+
 end
