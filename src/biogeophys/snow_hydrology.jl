@@ -1515,6 +1515,15 @@ Base.@kwdef struct CombineSnowAero{M}     # per-(col,layer) aerosol mass matrice
 end
 Base.@kwdef struct CombineSnowCol{V}      # per-column float vectors
     h2osno_no_layers::V; snow_depth::V; frac_sno::V; frac_sno_eff::V; int_snow::V
+    # Liquid+ice handed from the bottom snow layer to the top soil layer (or sent to
+    # qflx_qrgwl on landunits with no soil to receive it) when that last snow layer is
+    # eliminated. Produced here (SnowHydrologyMod.F90:2188/2246) and consumed only by
+    # the snow balance check as a SINK. The port never wrote it — it stayed at its NaN
+    # init, so errh2osno was NaN whenever snow layers existed, and a NaN compares false
+    # against every threshold: the snow balance check was silently dead on every snowy
+    # column. Purely diagnostic (no prognostic term reads it), so wiring it changes no
+    # physics — it just makes the check able to see the snowpack again.
+    qflx_sl_top_soil::V
 end
 Adapt.@adapt_structure CombineSnowMat
 Adapt.@adapt_structure CombineSnowAero
@@ -1526,13 +1535,18 @@ Adapt.@adapt_structure CombineSnowCol
 # reaches a Float32-only backend (Metal) while staying byte-identical on Float64 CPU.
 @kernel function _snowhyd_combine_kernel!(snl, m::CombineSnowMat, a::CombineSnowAero,
         cv::CombineSnowCol, @Const(mask_snow), @Const(lun_itype), @Const(urbpoi),
-        @Const(col_landunit), @Const(dzmin), nlevsno::Int, cmin::Int, cmax::Int)
+        @Const(col_landunit), @Const(dzmin), dtime, nlevsno::Int, cmin::Int, cmax::Int)
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask_snow[c]
         T = eltype(m.dz)
         zr = zero(T); thresh50 = T(50.0); ice_thresh = T(0.01); half = T(0.5)
         dzmin1 = T(dzmin[1]); lsadz = T(LSADZ)
         ncol_lyr = size(m.h2osoi_liq, 2)
+        dt = T(dtime)
+
+        # Reset the bottom-snow-layer→top-soil flux for every snow column, as Fortran
+        # does at the head of CombineSnowLayers (SnowHydrologyMod.F90:2188).
+        cv.qflx_sl_top_soil[c] = zr
 
         msn_old = snl[c]
 
@@ -1550,6 +1564,16 @@ Adapt.@adapt_structure CombineSnowCol
                         m.h2osoi_liq[c, jj_next] += m.h2osoi_liq[c, jj]
                         m.h2osoi_ice[c, jj_next] += m.h2osoi_ice[c, jj]
                     end
+                end
+
+                # Last snow layer is going away: its liquid+ice is handed to the top
+                # soil layer (transferred just above on soil/urban/crop) or, on
+                # landunits with no soil to receive it, sent to qflx_qrgwl. Either way
+                # it LEAVES the snowpack, so the snow balance must see it as a sink.
+                # Reads the layer pre-zeroing, exactly as SnowHydrologyMod.F90:2246.
+                if j == 0
+                    cv.qflx_sl_top_soil[c] =
+                        (m.h2osoi_liq[c, jj] + m.h2osoi_ice[c, jj]) / dt
                 end
 
                 if j < 0
@@ -1788,7 +1812,9 @@ function combine_snow_layers!(
     col_landunit::AbstractVector{Int},  # column-to-landunit mapping
     mask_snow::AbstractVector{Bool},
     bounds::UnitRange{Int},
-    nlevsno::Int
+    nlevsno::Int,
+    qflx_sl_top_soil::AbstractVector{<:Real},
+    dtime::Real
 )
     # dzmin/dzminloc as a device-resident array (small, indexed by layer); built to the
     # working precision so no Float64 reaches a Float32-only backend.
@@ -1801,10 +1827,11 @@ function combine_snow_layers!(
         mss_ocphi = aerosol.mss_ocphi_col, mss_ocpho = aerosol.mss_ocpho_col,
         mss_dst1 = aerosol.mss_dst1_col, mss_dst2 = aerosol.mss_dst2_col,
         mss_dst3 = aerosol.mss_dst3_col, mss_dst4 = aerosol.mss_dst4_col)
-    cv = CombineSnowCol(; h2osno_no_layers, snow_depth, frac_sno, frac_sno_eff, int_snow)
+    cv = CombineSnowCol(; h2osno_no_layers, snow_depth, frac_sno, frac_sno_eff, int_snow,
+                        qflx_sl_top_soil)
 
     _launch!(_snowhyd_combine_kernel!, snl, m, a, cv, mask_snow, lun_itype, urbpoi,
-             col_landunit, dzmin, nlevsno, first(bounds), last(bounds);
+             col_landunit, dzmin, dtime, nlevsno, first(bounds), last(bounds);
              ndrange = length(snl))
     return nothing
 end

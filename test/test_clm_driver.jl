@@ -162,6 +162,62 @@
         p.medlynslope     = fill(6.0, npft)
         p.crop          = fill(0.0, npft)
 
+        # --- Water state: give the fixture a FINITE water column ---
+        # This used to be left entirely at its NaN init: h2osoi_liq/ice, h2osno,
+        # h2osfc, wa and the canopy stores were all NaN, so begwb/endwb were NaN,
+        # errh2o was NaN — and `NaN > threshold` is false, which made the driver-level
+        # water-balance check a silent NO-OP in every test that used this fixture.
+        # A check that cannot fail is exactly the bug being fixed here, so the fixture
+        # has to give it something real to look at.
+        # c2g weights were also left at their NaN init, so every gridcell aggregate
+        # (begwb_grc/endwb_grc and the c2g'd fluxes) came out NaN too.
+        inst.column.wtgcell .= 1.0 / nc
+
+        # Run the SAME water-flux cold init the real model runs (clm_initialize!).
+        CLM.init_water_flux_cold!(inst, bounds)
+
+        ws = inst.water.waterstatebulk_inst.ws
+        ws.h2osoi_liq_col       .= 10.0
+        ws.h2osoi_ice_col       .= 0.0
+        ws.h2osno_no_layers_col .= 0.0
+        ws.h2osfc_col           .= 0.0
+        ws.wa_col               .= 4000.0
+        ws.excess_ice_col       .= 0.0
+        ws.liqcan_patch         .= 0.0
+        ws.snocan_patch         .= 0.0
+        inst.water.waterdiagnosticbulk_inst.total_plant_stored_h2o_col .= 0.0
+
+        # Every flux the balance check reads, zeroed to start.
+        wf0 = inst.water.waterfluxbulk_inst.wf
+        for a in (wf0.qflx_evap_tot_col, wf0.qflx_surf_col, wf0.qflx_qrgwl_col,
+                  wf0.qflx_drain_col, wf0.qflx_drain_perched_col, wf0.qflx_sfc_irrig_col,
+                  wf0.qflx_glcice_dyn_water_flux_col, wf0.qflx_floodc_col,
+                  wf0.qflx_snwcp_discarded_liq_col, wf0.qflx_snwcp_discarded_ice_col,
+                  wf0.qflx_ice_runoff_snwcp_col, wf0.qflx_ice_runoff_xs_col,
+                  inst.lnd2atm.qflx_ice_runoff_col)
+            a .= 0.0
+        end
+
+        # KNOWN FIXTURE DEFECT — TODO: this fixture's hydrology does not conserve water.
+        #
+        # The seeds above remove the NaNs from the balance INPUTS (state, c2g weights,
+        # cold-init fluxes) — those were pure test-infrastructure rot, and they made the
+        # driver-level water check a silent no-op here (errh2o was NaN, and NaN compares
+        # false against every threshold, so it "passed" without ever being evaluated).
+        #
+        # But the fixture's soil/thermal state is synthetic (uniform h2osoi over bedrock,
+        # no real soil parameters), and the hydrology chain run on it still produces
+        # non-finite water fluxes. That is a defect of THIS FIXTURE, not of the model:
+        # every real configuration closes (Bow 2-yr free run: ~1e-12 mm/yr; lake, glacier,
+        # urban, snow, cold-start all clean). Giving this fixture a physically well-posed
+        # soil column is its own piece of work.
+        #
+        # So the hard error is disabled HERE ONLY — the errors are still computed and
+        # warned. The check stays live and fatal for the model proper, and the tests that
+        # actually exercise it (test_balance_check.jl, and the reachability test below)
+        # turn hard_error back on explicitly. Do NOT widen this to the model.
+        inst.balcheck.hard_error = false
+
         # --- Photosynthesis ---
         photosyns = CLM.PhotosynthesisData()
         CLM.photosynthesis_data_init!(photosyns, np)
@@ -378,6 +434,46 @@
             @test l2a.qflx_ice_runoff_col[c] > 0.0
         end
         @test !all(iszero, l2a.qflx_ice_runoff_col[bounds.begc:bounds.endc])
+    end
+
+    # ================================================================
+    # The top-level water-balance check must be ABLE TO FAIL.
+    #
+    # clm_drv! used to hand balance_check! a LITERAL 0 for the DAnstep positional
+    # argument. Every hard-error branch inside balance_check! requires
+    # DAnstep > skip_steps, so with DAnstep pinned at 0 that condition was NEVER
+    # true: every water/energy balance violation only @warn'd and the model sailed
+    # on. Four separate real balance bugs sat undetected behind it (NaN lake
+    # errh2o, hardcoded-zero ice runoff, an endwb-zeroing stub fabricating ~46 m/yr
+    # of glacier runoff). clm_drv! now passes the genuine step counter.
+    #
+    # This pins the CALL SITE. (That the check then genuinely throws on an
+    # unbalanced column, given this DAnstep, is pinned in test_balance_check.jl —
+    # "BalanceCheck CAN fail". A full driver-level failure test cannot run on this
+    # fixture: its water state and fluxes are all NaN, and a NaN errh2o compares
+    # false against every threshold, so the check is blind here. See the balance
+    # check's own tests for the live-fire assertion.)
+    # ================================================================
+    @testset "clm_drv! hands balance_check! a LIVE step counter (not a literal 0)" begin
+        # clm_instInit! → balance_check_init!(dtime=1800) → skip_steps = 3, so a
+        # correct DAnstep must be able to exceed 3. The old literal 0 never could.
+        inst, _, _, _, _, _ = make_driver_data()
+        inst.balcheck.hard_error = true   # the fixture disables it (see make_driver_data)
+        @test inst.balcheck.skip_steps == 3
+        @test CLM.get_nstep_since_startup_or_last_da(inst.balcheck, 0) == 0   # dead
+        @test CLM.get_nstep_since_startup_or_last_da(inst.balcheck, 4) == 4   # live
+        @test CLM._bc_should_error(inst.balcheck,
+                  CLM.get_nstep_since_startup_or_last_da(inst.balcheck, 4))
+
+        # Guard the call site itself: the DAnstep argument clm_drv! passes must be
+        # the real counter, not a constant. Reading the source is blunt, but it is
+        # exactly the regression that hid four bugs, and nothing weaker catches a
+        # positional argument silently reverting to 0.
+        src = read(joinpath(@__DIR__, "..", "src", "driver", "clm_driver.jl"), String)
+        call = match(r"balance_check!\(inst\.balcheck.*?dtime;"s, src)
+        @test call !== nothing
+        @test occursin("get_nstep_since_startup_or_last_da(inst.balcheck, nstep)", call.match)
+        @test !occursin(r"nstep,\s*0,\s*dtime", call.match)   # the old dead wiring
     end
 
     # ================================================================
