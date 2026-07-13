@@ -286,6 +286,38 @@ driver (crop GDD, `t_mo_min`); these particular fields are simply not
 registered with it.
 """
 function waterfluxbulk_update_acc_vars!(wfb::WaterFluxBulkData,
-                                          bounds_col::UnitRange{Int})
+                                          bounds_col::UnitRange{Int};
+                                          nstep::Int = 0,
+                                          dtime::Int = 1800,
+                                          use_fun::Bool = false)
+    # Gated on use_fun, exactly as Fortran registers it (WaterFluxBulkType.F90
+    # imports use_fun from CNSharedParamsMod; it is not a `varctl` flag in this
+    # port, so the caller threads it in). AnnET is a 365-day running mean of
+    # qflx_evap_tot_col and is the sole input to free-living N fixation
+    # (CNNDynamicsMod: ffix_to_sminn = f(max(0, AnnET))). This was a no-op stub, so
+    # AnnET stayed at its NaN allocation and would have poisoned that flux.
+    use_fun || return nothing
+    isempty(bounds_col) && return nothing
+    length(wfb.AnnET) >= last(bounds_col) || return nothing
+    # qflx_evap_tot_col lives on the nested base WaterFluxData (`wfb.wf`), not on
+    # WaterFluxBulkData itself.
+    evap = wfb.wf.qflx_evap_tot_col
+    length(evap) >= last(bounds_col) || return nothing
+    _launch!(_annet_kernel!, wfb.AnnET, evap,
+        nstep, accum_window_steps(365, dtime),
+        first(bounds_col), last(bounds_col);
+        ndrange = length(wfb.AnnET))
     return nothing
+end
+
+# AnnET: 365-day running mean of total ET (column).
+@kernel function _annet_kernel!(AnnET, @Const(qflx_evap_tot_col),
+        nstep::Int, win_365::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        et = qflx_evap_tot_col[c]
+        if isfinite(et)
+            AnnET[c] = accum_runmean(AnnET[c], et, nstep, win_365)
+        end
+    end
 end

@@ -391,6 +391,16 @@ function clm_initialize!(;
                           nlevdecomp_full = nlevdecomp_full,
                           ndecomp_pools = 7)
 
+    # ---- Step 15h: InitAccBuffer / InitAccVars -------------------------------
+    # Fortran's accumulator setup phase (clm_instMod.F90 `init_accflds`, then
+    # clm_initializeMod.F90's InitAccVars block after the restart read). NONE of
+    # these had a call site — the same dead-port disease as InitCold. The one with
+    # teeth is temperature_init_acc_vars!, which seeds t_ref2m_max_inst = -spval /
+    # t_ref2m_min_inst = +spval so the daily 2-m min/max trackers start from a
+    # missing-value flag instead of the allocator's NaN.
+    init_acc_buffer!(inst, bounds)
+    init_acc_vars!(inst, bounds; is_startup = true)
+
     # Initialize urban namelist if available
     if isdefined(CLM, :urban_read_nml!) && isdefined(CLM, :urban_ctrl)
         urban_read_nml!(urban_ctrl)

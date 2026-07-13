@@ -176,9 +176,16 @@ function cnveg_state_init!(vs::CNVegStateData, np::Int, nc::Int;
     vs.htmx_patch          = fill(0.0, np)
 
     # --- Column-level GDP/population factors ---
-    vs.lgdp_col            = Vector{Float64}(undef, nc)
-    vs.lgdp1_col           = Vector{Float64}(undef, nc)
-    vs.lpop_col            = Vector{Float64}(undef, nc)
+    # NaN-fill, not `undef`. These three are the fire GDP/population limitation
+    # factors, written ONLY by CNFireArea (i.e. never, when cnfire_method=:nofire).
+    # With `undef` they were raw uninitialized memory, so whether a reader saw NaN
+    # or a plausible-looking float was pure allocator luck — and the NaN audit's
+    # per-domain counts flickered between runs because of it. Fortran's InitAllocate
+    # NaN-fills every field for exactly this reason: an unset value must be loudly
+    # unset. Nothing reads these unless fire is on, so this is inert by default.
+    vs.lgdp_col            = fill(Float64(NaN), nc)
+    vs.lgdp1_col           = fill(Float64(NaN), nc)
+    vs.lpop_col            = fill(Float64(NaN), nc)
 
     # --- Temperature averages ---
     vs.tempavg_t2m_patch   = fill(NaN, np)

@@ -504,8 +504,13 @@ function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
 
     # Update Nutrient history diagnostics (if any).
     if hlm_parteh_mode[] == prt_cnp_flex_allom_hyp
-        # TODO Batch NN: fates_hist%update_history_nutrflux not ported
-        # (FatesHistoryInterfaceMod). Inert in the default carbon-only mode.
+        # GAP (history-only, CNP mode): fates_hist%update_history_nutrflux is not
+        # ported. It writes N/P FLUX history diagnostics only — it feeds no prognostic
+        # state, so the CNP simulation itself is unaffected; the nutrient-flux history
+        # fields are simply absent. Inert in the default carbon-only mode
+        # (hlm_parteh_mode = prt_carbon_allom_hyp), which never enters this branch.
+        # Closing it = port update_history_nutrflux into FatesHistoryInterfaceMod.jl
+        # alongside the other CNP sub-fields still marked there.
         # update_history_nutrflux(fates_hist, currentSite)
     end
 

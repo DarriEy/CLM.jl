@@ -499,6 +499,17 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         waterstate::Union{WaterStateData, Nothing} = nothing,
         gridcell::Union{GridcellData, Nothing} = nothing,
         is_first_step::Bool = false,
+        # Accumulated forcing inputs (Fortran wateratm2lndbulk_type). These feed the
+        # Li fire schemes (fuel moisture / ignition) and CNPhenology's rain-triggered
+        # stress-deciduous onset. They used to be absent here entirely, so cn_driver's
+        # kwarg defaults (empty Float64[]) reached the fire modules — which then read
+        # off the end of a zero-length array under @inbounds.
+        prec10_patch::AbstractVector{<:Real} = Float64[],
+        prec30_patch::AbstractVector{<:Real} = Float64[],
+        prec60_patch::AbstractVector{<:Real} = Float64[],
+        rh30_patch::AbstractVector{<:Real} = Float64[],
+        forc_rh_grc::AbstractVector{<:Real} = Float64[],
+        forc_wind_grc::AbstractVector{<:Real} = Float64[],
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
@@ -587,6 +598,12 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         waterstate=waterstate,
         gridcell=gridcell,
         is_first_step=is_first_step,
+        prec10_patch=prec10_patch,
+        prec30_patch=prec30_patch,
+        prec60_patch=prec60_patch,
+        rh30_patch=rh30_patch,
+        forc_rh_grc=forc_rh_grc,
+        forc_wind_grc=forc_wind_grc,
         h2osoi_vol=h2osoi_vol,
         h2osoi_liq=h2osoi_liq,
         mask_actfirec=mask_actfirec,

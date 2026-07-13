@@ -2121,6 +2121,15 @@ function clm_drv_core!(config::CLMDriverConfig,
             water_diag=wdb,
             gridcell=grc,
             is_first_step=is_first_step,
+            # Accumulated forcing (Fortran wateratm2lndbulk_type). Consumed by the
+            # Li fire schemes and by CNPhenology's rain-triggered stress-decid onset.
+            # These are only allocated under use_cn (as in Fortran's InitAccBuffer).
+            prec10_patch=a2l.prec10_patch,
+            prec30_patch=a2l.prec30_patch,
+            prec60_patch=a2l.prec60_patch,
+            rh30_patch=a2l.rh30_patch,
+            forc_rh_grc=a2l.forc_rh_grc,
+            forc_wind_grc=a2l.forc_wind_grc,
             h2osoi_vol=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_vol_col : nothing),
             h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
             mask_actfirec=filt.actfirec,
@@ -2602,8 +2611,22 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Update accumulators
     # ========================================================================
     if nstep > 0
-        # Atm2Lnd accumulator update — WIRED
-        atm2lnd_update_acc_vars!(a2l, bc_patch, pch.gridcell, pch.column)
+        # Fortran ORDER (clm_driver.F90): atm2lnd → temperature → canopystate →
+        # water → energyflux → bgc_vegetation(dgvs) → crop → fates. Preserved below.
+        #
+        # forc_rh_grc is DERIVED here (this port has no coupler import of RH); it is
+        # the source term for the RH30 / RH24 accumulators.
+        atm2lnd_update_rh!(a2l, bc_grc)
+
+        # AnnET is registered under use_fun in Fortran (WaterFluxBulkType imports it
+        # from CNSharedParamsMod). In this port use_fun lives on the CN driver config.
+        _use_fun_acc = config.use_cn && inst.bgc_vegetation.driver_config.use_fun
+
+        # Atm2Lnd accumulator update — WIRED. Also carries the Fortran
+        # `wateratm2lndbulk_type` accumulators (PREC10/30/60/365/24, RH30/24),
+        # which live on Atm2LndData in this port.
+        atm2lnd_update_acc_vars!(a2l, bc_patch, pch.gridcell, pch.column;
+            bounds_c = bc_col, nstep = nstep, dtime = Int(dtime))
 
         # Temperature accumulators — WIRED. The crop growing-degree-day path
         # (GDD0/8/10 runaccum + GDD020/820/1020 20-yr runmeans) activates only
@@ -2611,6 +2634,25 @@ function clm_drv_core!(config::CLMDriverConfig,
         # ForwardDiff dual-copy of `inst` never sees its non-numeric AccumField
         # vectors; the GDD fields are registered lazily on the first crop step
         # (Fortran temperature_type%InitAccBuffer, called once at init).
+        #
+        # SOIL10 needs `upper_soil_layer` — Fortran's CNSharedParams layer
+        # containing 0.12 m (first layer whose LOWER interface reaches that depth).
+        # zisoi is 1-based with zisoi[1] = 0 and zisoi[i+1] = lower interface of
+        # layer i; empty before the vertical grid is built.
+        _usl = let zi = zisoi[]
+            if isempty(zi)
+                0
+            else
+                l = varpar.nlevgrnd
+                for i in 1:varpar.nlevgrnd
+                    if (i + 1) <= length(zi) && 0.12 <= zi[i + 1]
+                        l = i
+                        break
+                    end
+                end
+                l
+            end
+        end
         if config.use_crop
             crop = inst.crop
             if getfield(config, :accum_mgr) === nothing
@@ -2622,6 +2664,7 @@ function clm_drv_core!(config::CLMDriverConfig,
             end
             temperature_update_acc_vars!(temp, bc_col, bc_patch, lun, pch;
                 nstep=nstep, dtime=Int(dtime),
+                end_cd=is_end_curr_day, upper_soil_layer=_usl,
                 mgr=getfield(config, :accum_mgr), use_crop=true,
                 month=mon, day=day, jday=jday,
                 secs=secs, is_end_curr_year=is_end_curr_year,
@@ -2632,14 +2675,17 @@ function clm_drv_core!(config::CLMDriverConfig,
                 gdd20_season_end=crop.gdd20_season_end_patch)
         else
             temperature_update_acc_vars!(temp, bc_col, bc_patch, lun, pch;
-                nstep=nstep, dtime=Int(dtime))
+                nstep=nstep, dtime=Int(dtime), secs=secs,
+                end_cd=is_end_curr_day, upper_soil_layer=_usl)
         end
 
-        # Canopy state accumulators — WIRED
-        canopystate_update_acc_vars!(cs, bc_patch; nstep=nstep)
+        # Canopy state accumulators — WIRED (FSUN24 / FSUN240 / LAI240; the
+        # windows are derived from dtime, not hardcoded step counts).
+        canopystate_update_acc_vars!(cs, bc_patch; nstep=nstep, dtime=Int(dtime))
 
-        # Water accumulators — WIRED
-        water_update_acc_vars!(inst.water, bc_col)
+        # Water accumulators — WIRED (AnnET [use_fun], SNOW_5D).
+        water_update_acc_vars!(inst.water, bc_col;
+            nstep=nstep, dtime=Int(dtime), use_fun=_use_fun_acc)
 
         # Energy flux accumulators — WIRED. BTRANMN = daily min of the HOURLY-AVERAGED
         # btran (BTRANAV), so nstep is needed to detect hour boundaries.
@@ -2692,8 +2738,15 @@ function clm_drv_core!(config::CLMDriverConfig,
                 month=mon, day=day, secs=secs)
         end
 
+        # Crop accumulators — WIRED. HUI / GDDACCUM / GDDTSOI are `runaccum` fields
+        # reset per-patch when the crop is not live. They were allocated to SPVAL and
+        # NEVER written (crop_update_acc_vars! was a no-op stub with no call site), so
+        # crop phenology read HUI = 1e36 and treated every crop as instantly mature.
+        # Fortran calls this every step (clm_driver.F90, after bgc_vegetation).
         if config.use_crop
-            # Placeholder: crop_inst%CropUpdateAccVars!(bounds_proc, ...) [crop accum]
+            crop_update_acc_vars!(inst.crop, bc_patch, temp.t_ref2m_patch,
+                temp.t_soisno_col;
+                patch = pch, col = col, pftcon = pftcon, dtime = dtime)
         end
         if config.use_fates
             # Placeholder: clm_fates%UpdateAccVars!(bounds_proc) [FATES accum]
@@ -2725,11 +2778,12 @@ function clm_drv_core!(config::CLMDriverConfig,
            !isempty(inst.dgvs.fpcgrid_patch)
             _cveg_cf = inst.bgc_vegetation.cnveg_carbonflux_inst
             _cveg_cs = inst.bgc_vegetation.cnveg_carbonstate_inst
-            # prec365_col (365-day running-mean precip) is not yet a ported field;
-            # pass a zero buffer (suppresses the precip-gated *new* establishment
-            # branch — light competition, sapling/grass growth and mortality still
-            # update the weights). bc_col length = number of columns in this clump.
-            _cndv_prec365 = _zlike(nc)
+            # prec365_col — the 365-day running mean of precipitation, now a real
+            # accumulator (atm2lnd_update_acc_vars!, gated on use_cndv). It used to be
+            # a ZERO BUFFER, which made CNDV establishment's `prec365 >= prec_min_estab`
+            # test false forever: no PFT could ever ESTABLISH. Fall back to zeros only
+            # if the accumulator was never allocated.
+            _cndv_prec365 = length(a2l.prec365_col) >= nc ? a2l.prec365_col : _zlike(nc)
             # cndv_driver! rebuilds this natveg patch mask in-place from
             # present_patch, so any same-length Bool buffer works as scratch.
             _cndv_natvegp = collect(Bool, filt.natvegp)

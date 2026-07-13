@@ -381,54 +381,47 @@ runs through `AccumManager`, `src/infrastructure/accumul.jl`).
 """
 function canopystate_update_acc_vars!(cs::CanopyStateData,
                                        bounds_patch::UnitRange{Int};
-                                       nstep::Int = 0)
+                                       nstep::Int = 0,
+                                       dtime::Int = 1800)
     if !isempty(bounds_patch)
+        # Fortran accumulation PERIODS are in DAYS: FSUN24 = -1, FSUN240 = -10,
+        # LAI240 = -10 (CanopyStateType.F90::InitAccBuffer). accumulMod converts
+        # them to timesteps as `-period * SHR_CONST_CDAY / get_step_size()`.
+        # These windows were previously HARDCODED to 24 and 240 timesteps, which
+        # at the standard dtime = 1800 s is 12 h and 5 days — exactly HALF the
+        # intended 1-day and 10-day windows (48 / 480 steps) — and wrong by a
+        # different factor at every other timestep. Same class of bug as the one
+        # already fixed in `_temp_acc_kernel!`.
+        w1  = accum_window_steps(1,  dtime)
+        w10 = accum_window_steps(10, dtime)
         _launch!(_canopy_acc_kernel!, cs.fsun24_patch, cs.fsun240_patch,
             cs.elai240_patch, cs.fsun_patch, cs.elai_patch,
-            nstep, first(bounds_patch), last(bounds_patch);
+            nstep, w1, w10, first(bounds_patch), last(bounds_patch);
             ndrange = length(cs.fsun24_patch))
     end
 
     return nothing
 end
 
-# Per-patch running means of sunlit fraction (24/240 ts) and exposed LAI (240 ts).
-# Own-index read-modify-write; one thread per patch. T(SPVAL) keeps the
-# missing-value comparison in the device eltype (Metal: Float32-only).
+# Per-patch running means of sunlit fraction (1-day / 10-day) and exposed LAI
+# (10-day). Own-index read-modify-write; one thread per patch. `accum_runmean`
+# handles the NaN/SPVAL cold-start seed in the device eltype (Metal: Float32).
 @kernel function _canopy_acc_kernel!(fsun24_patch, fsun240_patch, elai240_patch,
         @Const(fsun_patch), @Const(elai_patch),
-        nstep::Int, pmin::Int, pmax::Int)
+        nstep::Int, w1::Int, w10::Int, pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
-        T = eltype(fsun24_patch)
-        # FSUN24: 24-timestep running mean of sunlit fraction
+        # FSUN24 / FSUN240: 1-day / 10-day running means of sunlit fraction
         fsun = fsun_patch[p]
         if isfinite(fsun)
-            if isnan(fsun24_patch[p]) || fsun24_patch[p] == T(SPVAL) || nstep <= 1
-                fsun24_patch[p] = fsun
-            else
-                n24 = min(nstep, 24)
-                fsun24_patch[p] += (fsun - fsun24_patch[p]) / n24
-            end
-
-            # FSUN240: 240-timestep running mean of sunlit fraction
-            if isnan(fsun240_patch[p]) || fsun240_patch[p] == T(SPVAL) || nstep <= 1
-                fsun240_patch[p] = fsun
-            else
-                n240 = min(nstep, 240)
-                fsun240_patch[p] += (fsun - fsun240_patch[p]) / n240
-            end
+            fsun24_patch[p]  = accum_runmean(fsun24_patch[p],  fsun, nstep, w1)
+            fsun240_patch[p] = accum_runmean(fsun240_patch[p], fsun, nstep, w10)
         end
 
-        # LAI240: 240-timestep running mean of exposed LAI
+        # LAI240: 10-day running mean of exposed LAI
         elai = elai_patch[p]
         if isfinite(elai)
-            if isnan(elai240_patch[p]) || elai240_patch[p] == T(SPVAL) || nstep <= 1
-                elai240_patch[p] = elai
-            else
-                n240 = min(nstep, 240)
-                elai240_patch[p] += (elai - elai240_patch[p]) / n240
-            end
+            elai240_patch[p] = accum_runmean(elai240_patch[p], elai, nstep, w10)
         end
     end
 end

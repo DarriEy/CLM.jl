@@ -489,16 +489,34 @@ function water_init_acc_vars!(water::WaterData, bounds_col::UnitRange{Int})
 end
 
 """
-    water_update_acc_vars!(water, bounds_col)
+    water_update_acc_vars!(water, bounds_col; nstep=0, dtime=1800, use_fun=false)
 
-Update accumulated variables. Should be called every time step.
+Update accumulated variables. Called every time step, in Fortran's sub-order
+(fluxbulk → atm2lndbulk → diagnosticbulk).
+
+BUG HISTORY: this dispatcher was called every step but did LITERALLY NOTHING —
+both of its sub-calls were no-op stubs and the third (`wateratm2lndbulk`) was
+simply absent. Three accumulator families were silently missing: `AnnET`
+(fluxbulk), `SNOW_5D` (diagnosticbulk), and `PREC10/30/60/365/24` + `RH30/24`
+(atm2lndbulk). See the individual routines for the downstream consequences.
+
+The `wateratm2lndbulk` accumulators are driven from
+[`atm2lnd_update_acc_vars!`](@ref) rather than here: CLM.jl has no separate
+`wateratm2lndbulk_type`, and those fields (plus their rain/snow/RH source terms)
+live on `Atm2LndData`. The ORDER is preserved — the driver calls
+`atm2lnd_update_acc_vars!` before this — and no accumulator reads another's
+output within a step, so the split is behaviourally identical.
 
 Ported from `UpdateAccVars` in `WaterType.F90`.
 """
-function water_update_acc_vars!(water::WaterData, bounds_col::UnitRange{Int})
-    waterfluxbulk_update_acc_vars!(water.waterfluxbulk_inst, bounds_col)
-    # wateratm2lndbulk_inst%UpdateAccVars — not yet ported
-    waterdiagnosticbulk_update_acc_vars!(water.waterdiagnosticbulk_inst, bounds_col)
+function water_update_acc_vars!(water::WaterData, bounds_col::UnitRange{Int};
+                                nstep::Int = 0,
+                                dtime::Int = 1800,
+                                use_fun::Bool = false)
+    waterfluxbulk_update_acc_vars!(water.waterfluxbulk_inst, bounds_col;
+        nstep = nstep, dtime = dtime, use_fun = use_fun)
+    waterdiagnosticbulk_update_acc_vars!(water.waterdiagnosticbulk_inst, bounds_col;
+        nstep = nstep, dtime = dtime)
     return nothing
 end
 

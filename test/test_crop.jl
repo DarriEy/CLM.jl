@@ -246,7 +246,67 @@
         @test CLM.crop_init_acc_vars!(cr, 1:5) === nothing
         @test CLM.crop_restart!(cr, 1:5) === nothing
         @test CLM.crop_check_dates!() === nothing
-        @test CLM.crop_update_acc_vars!(cr, 1:5, zeros(5), zeros(5, 2)) === nothing
+        # NOTE: crop_update_acc_vars! used to be asserted HERE, as a "stub function
+        # that runs without error" — the test encoded the bug. It is a real
+        # accumulator now (HUI / GDDACCUM / GDDTSOI); see the testset below.
+    end
+
+    # crop_update_acc_vars! — the real thing. It was a no-op stub with NO call site,
+    # so hui/gddaccum/gddtsoi sat at their SPVAL (1e36) allocation while crop
+    # phenology read them (`hui >= huigrain` -> every crop instantly mature).
+    @testset "crop_update_acc_vars! accumulates HUI/GDDACCUM/GDDTSOI" begin
+        np, nc = 2, 1
+        cr = CLM.CropData(); CLM.crop_init!(cr, np)
+
+        # nlevsno = 0 here so the test does not depend on global varpar state
+        # (varpar.nlevsno is -1 until varpar_init!); the routine takes it as a kwarg.
+        nlevsno = 0
+
+        pch = CLM.PatchData()
+        pch.active = fill(true, np)
+        pch.itype  = fill(CLM.ntmp_soybean, np)   # a crop PFT with baset/mxtmp set
+        pch.column = fill(1, np)
+
+        col = CLM.ColumnData()
+        col.dz = zeros(nc, 5)
+        col.dz[1, 1] = 0.02
+        col.dz[1, 2] = 0.03
+
+        pftcon = CLM.PftconType()
+        CLM.pftcon_allocate!(pftcon)
+        pftcon.baset[CLM.ntmp_soybean] = 10.0
+        pftcon.mxtmp[CLM.ntmp_soybean] = 30.0
+
+        # 10 K above the base temperature, everywhere.
+        t2m      = fill(CLM.TFRZ + 20.0, np)
+        t_soisno = fill(CLM.TFRZ + 20.0, nc, 5)
+        dtime    = 1800.0
+        # Expected daily increment: min(mxtmp, T - (TFRZ+baset)) * dtime/86400
+        expect  = 10.0 * dtime / CLM.SECSPDAY
+
+        # Patch 1 is a LIVE crop; patch 2 is not.
+        cr.croplive_patch[1] = true
+        cr.croplive_patch[2] = false
+        cr.vf_patch .= 1.0
+
+        CLM.crop_update_acc_vars!(cr, 1:np, t2m, t_soisno;
+            patch = pch, col = col, pftcon = pftcon, dtime = dtime, nlevsno = nlevsno)
+
+        # Live crop: accumulates from a clean 0 (SPVAL start is re-seeded, not added to).
+        @test cr.hui_patch[1]      ≈ expect  rtol=1e-12
+        @test cr.gddaccum_patch[1] ≈ expect  rtol=1e-12
+        @test cr.gddtsoi_patch[1]  ≈ expect  rtol=1e-12
+        @test cr.hui_patch[1] < 1e30          # NOT the SPVAL it used to sit at
+
+        # Not live: runaccum RESET (markreset_accum_field), and no accumulation.
+        @test cr.hui_patch[2]      == 0.0
+        @test cr.gddaccum_patch[2] == 0.0
+        @test cr.gddtsoi_patch[2]  == 0.0
+
+        # A second step accumulates on top (it is a runaccum, not an overwrite).
+        CLM.crop_update_acc_vars!(cr, 1:np, t2m, t_soisno;
+            patch = pch, col = col, pftcon = pftcon, dtime = dtime, nlevsno = nlevsno)
+        @test cr.hui_patch[1] ≈ 2 * expect  rtol=1e-12
     end
 
     @testset "field mutability" begin
