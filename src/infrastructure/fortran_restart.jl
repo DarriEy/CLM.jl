@@ -532,6 +532,20 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
                 # PREVIOUS step's value, so it must be injected, not left at 0.
                 hasproperty(cvf, :leafc_to_litter_fun_patch) &&
                     set_patch_1d!("leafc_to_litter_fun", cvf.leafc_to_litter_fun_patch)
+                # Leaf/froot litterfall MEMORY for the seasonal-deciduous offset ramp.
+                # Restart vars in Fortran (CNVegCarbonFluxType.F90:4291,4296). The
+                # offset litterfall rate is a *linear ramp with memory*
+                # (CNPhenologyMod::CNOffsetLitterfall):
+                #     t1 = dt*2/offset_counter^2
+                #     leafc_to_litter = prev + t1*(leafc - prev*offset_counter)
+                # Leaving prev at 0 collapses that to t1*leafc — only ~2-7% of the
+                # correct flux mid-ramp, so an injected step sheds almost no leaf C.
+                # Invisible in a summer window (offset_flag == 0); it is the whole
+                # story in the autumn leaf-offset window.
+                hasproperty(cvf, :prev_leafc_to_litter_patch) &&
+                    set_patch_1d!("prev_leafc_to_litter", cvf.prev_leafc_to_litter_patch)
+                hasproperty(cvf, :prev_frootc_to_litter_patch) &&
+                    set_patch_1d!("prev_frootc_to_litter", cvf.prev_frootc_to_litter_patch)
             end
         end
     end

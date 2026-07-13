@@ -43,3 +43,6 @@ __pycache__/
 
 # local one-off diagnostic / oracle scratch scripts (not part of the codebase)
 scratch/
+
+# parity suite log
+suite_bgc.log

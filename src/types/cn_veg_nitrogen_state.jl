@@ -736,23 +736,55 @@ Ported from `cnveg_nitrogenstate_type%InitCold`.
 function cnveg_nitrogen_state_init_cold!(ns::CNVegNitrogenStateData,
                                           bounds_patch::UnitRange{Int};
                                           use_matrixcn::Bool=false,
-                                          use_crop::Bool=false)
+                                          use_crop::Bool=false,
+                                          carbonstate=nothing,
+                                          patch_itype=nothing,
+                                          leafcn=nothing,
+                                          frootcn=nothing,
+                                          deadwdcn=nothing,
+                                          woody=nothing)
+    # Fortran CNVegNitrogenStateType::InitCold DERIVES the cold N pools from the cold
+    # C pools via the PFT C:N ratios (CNVegNitrogenStateType.F90):
+    #   leafn          = leafc          / leafcn      leafn_storage  = leafc_storage  / leafcn
+    #   frootn         = frootc         / frootcn     frootn_storage = frootc_storage / frootcn
+    #   deadstemn      = deadstemc      / deadwdcn    (woody only; 0 otherwise)
+    # Seeding them all to 0 (as this routine used to) left the cold vegetation with
+    # carbon but NO nitrogen -- an inconsistent C:N state on the first step.
+    # Without the C state / pftcon the old all-zero behaviour is retained.
+    derive = carbonstate !== nothing && patch_itype !== nothing && leafcn !== nothing
     for p in bounds_patch
-        ns.leafn_patch[p]         = 0.0
-        ns.leafn_storage_patch[p] = 0.0
+        ivt = patch_itype === nothing ? nothing : Int(patch_itype[p])
+        is_woody = ivt !== nothing && woody !== nothing && woody[ivt + 1] == 1.0
+
+        if derive
+            i = ivt + 1
+            ns.leafn_patch[p]         = carbonstate.leafc_patch[p]         / leafcn[i]
+            ns.leafn_storage_patch[p] = carbonstate.leafc_storage_patch[p] / leafcn[i]
+        else
+            ns.leafn_patch[p]         = 0.0
+            ns.leafn_storage_patch[p] = 0.0
+        end
         ns.leafn_xfer_patch[p]    = 0.0
         ns.leafn_storage_xfer_acc_patch[p] = 0.0
         ns.storage_ndemand_patch[p]        = 0.0
 
-        ns.frootn_patch[p]            = 0.0
-        ns.frootn_storage_patch[p]    = 0.0
+        if derive && frootcn !== nothing
+            i = ivt + 1
+            ns.frootn_patch[p]         = carbonstate.frootc_patch[p]         / frootcn[i]
+            ns.frootn_storage_patch[p] = carbonstate.frootc_storage_patch[p] / frootcn[i]
+        else
+            ns.frootn_patch[p]         = 0.0
+            ns.frootn_storage_patch[p] = 0.0
+        end
         ns.frootn_xfer_patch[p]       = 0.0
 
         ns.livestemn_patch[p]         = 0.0
         ns.livestemn_storage_patch[p] = 0.0
         ns.livestemn_xfer_patch[p]    = 0.0
 
-        ns.deadstemn_patch[p]         = 0.0
+        # woody only: deadstemn = deadstemc / deadwdcn  (CNVegNitrogenStateType.F90:907)
+        ns.deadstemn_patch[p]         = (derive && is_woody && deadwdcn !== nothing) ?
+            carbonstate.deadstemc_patch[p] / deadwdcn[ivt + 1] : 0.0
         ns.deadstemn_storage_patch[p] = 0.0
         ns.deadstemn_xfer_patch[p]    = 0.0
 

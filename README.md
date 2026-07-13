@@ -88,12 +88,33 @@ final result. See also [the warning above](#️-read-this-first-an-agentic-engin
 - Urban canyon energy balance (CLMU)
 - Irrigation, hillslope lateral flow
 
-### Biogeochemistry (Implemented, Not Yet Validated)
+### Biogeochemistry (Implemented; CN core validated at ONE site, the rest NOT validated)
 - Carbon-nitrogen cycling (CN mode) with allocation, respiration
 - Decomposition (Century cascade and MIMICS)
 - Nitrification-denitrification, nitrogen leaching
 - Fire (Li 2014), gap mortality, dynamic vegetation (CNDV)
 - Methane (CH4), VOC emissions, dust emission
+
+**What is actually validated** (see [`docs/BGC_PARITY_SCORECARD.md`](docs/BGC_PARITY_SCORECARD.md)):
+the **CN core** — allocation, phenology, litterfall, decomposition, mineral N — is diffed
+against the instrumented Fortran CTSM at the **Bow-at-Banff single column only** (3 patches:
+bare, needleleaf evergreen tree, C3 arctic grass), from a converged BGC spinup:
+
+| | result |
+|---|---|
+| Single-step parity, winter / summer / **autumn leaf-offset** windows | worst CN `max\|rel\|` **5.9e-05 / 2.2e-03 / 2.2e-03** |
+| Leaf-offset litterfall flux through the 15-day senescence ramp | Julia/Fortran ratio **1.0000** at every step |
+| Multi-step drift (inject once, free-run 480 steps through senescence) | **bounded, near-linear**; leafc rel 4e-05 → 2e-02 |
+| `use_cn` cold start vs a Fortran CN cold start | **bit-exact** (worst rel 0.0) |
+
+Generating the **autumn / leaf-offset window** — which had never existed, and which a
+summer-only window is structurally blind to (`offset_flag == 0` all summer) — exposed and
+fixed four real bugs, including a wiped litterfall-ramp memory that made leaf senescence
+~2–7% of its correct rate, and a cold start that gave evergreen PFTs **no canopy at all**.
+
+**NOT validated against Fortran:** any site other than Bow; **fire, methane, isotopes, CNDV,
+MIMICS, and VOC (never diffed at all)**; crop BGC; multi-year trajectories. Julia also has
+**no nitrogen deposition** (`forc_ndep` is identically zero) — a known, unfixed gap.
 
 ### FATES Ecosystem Demography (Ported and Running — Parity NOT Established)
 [FATES](https://github.com/NGEET/fates) (size- and age-structured cohort

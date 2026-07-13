@@ -363,15 +363,35 @@ function init_cold_biogeochem!(inst::CLMInstances, bounds::BoundsType;
                                patch_landunit = pch.landunit,
                                lun_ifspecial  = Vector{Bool}(lun.ifspecial),
                                lun_itype      = lun.itype)
+    # Pass the PFT data so the CN cold start can take Fortran's per-PFT branches
+    # (noveg / evergreen / crop / deciduous, and the woody deadstemc seed). Without it
+    # every patch was seeded as deciduous: evergreen PFTs cold-started with ZERO
+    # displayed leaf and root carbon, and bare-soil patches got storage C.
+    # pftcon is filled by readParameters! before the cold start; if a caller has not
+    # loaded a parameter file these stay empty, in which case fall back to the legacy
+    # (all-deciduous) seeding rather than index an empty array.
+    _pft_ok  = !isempty(pftcon.evergreen) && !isempty(pftcon.woody)
+    _pft_itype = _pft_ok ? pch.itype : nothing
     isempty(veg.cnveg_carbonstate_inst.leafc_patch) ||
         cnveg_carbon_state_init_cold!(veg.cnveg_carbonstate_inst, bp;
                                       ratio = 1.0,
                                       use_matrixcn = use_matrixcn,
-                                      use_crop = use_crop)
+                                      use_crop = use_crop,
+                                      patch_itype = _pft_itype,
+                                      evergreen   = _pft_ok ? pftcon.evergreen : nothing,
+                                      woody       = _pft_ok ? pftcon.woody : nothing)
+    # N is DERIVED from the cold C pools via the PFT C:N ratios (Fortran does the same).
+    _cn_ok = _pft_ok && !isempty(pftcon.leafcn) && !isempty(pftcon.frootcn) && !isempty(pftcon.deadwdcn)
     isempty(veg.cnveg_nitrogenstate_inst.leafn_patch) ||
         cnveg_nitrogen_state_init_cold!(veg.cnveg_nitrogenstate_inst, bp;
                                         use_matrixcn = use_matrixcn,
-                                        use_crop = use_crop)
+                                        use_crop = use_crop,
+                                        carbonstate = _cn_ok ? veg.cnveg_carbonstate_inst : nothing,
+                                        patch_itype = _cn_ok ? pch.itype : nothing,
+                                        leafcn      = _cn_ok ? pftcon.leafcn : nothing,
+                                        frootcn     = _cn_ok ? pftcon.frootcn : nothing,
+                                        deadwdcn    = _cn_ok ? pftcon.deadwdcn : nothing,
+                                        woody       = _cn_ok ? pftcon.woody : nothing)
     isempty(veg.cnveg_carbonflux_inst.gpp_patch) ||
         cnveg_carbon_flux_init_cold!(veg.cnveg_carbonflux_inst, bp, bc;
                                      use_matrixcn = use_matrixcn,

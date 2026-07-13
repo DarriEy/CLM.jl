@@ -8,6 +8,15 @@ const SPINUP_FACTOR_DEADWOOD_DEFAULT = 1.0   # spinup factor used for this simul
 const SPINUP_FACTOR_AD = 10.0                # spinup factor when in Accelerated Decomposition mode
 const INITIAL_VEGC = 20.0                    # initial vegetation carbon for leafc/frootc and storage (gC/m2)
 
+# Fortran `cnvegcstate_const` (CNVegCarbonStateType.F90:232, namelist &cnvegcarbonstate).
+# initial_vegC is a NAMELIST variable, not a hardcoded constant: its CTSM default is
+# 20 gC/m2, but a case can override it (Bow's lnd_in sets initial_vegc = 100). Keeping
+# it hardcoded meant a cold start could never reproduce such a case.
+Base.@kwdef mutable struct CNVegCarbonStateParams
+    initial_vegC::Float64 = INITIAL_VEGC
+end
+const cnvegcstate_const = CNVegCarbonStateParams()
+
 """
     CNVegCarbonStateData
 
@@ -717,15 +726,61 @@ function cnveg_carbon_state_init_cold!(cs::CNVegCarbonStateData,
                                        bounds_patch::UnitRange{Int};
                                        ratio::Real=1.0,
                                        use_matrixcn::Bool=false,
-                                       use_crop::Bool=false)
+                                       use_crop::Bool=false,
+                                       patch_itype=nothing,
+                                       evergreen=nothing,
+                                       woody=nothing,
+                                       # NOTE: the module-level `npcropmin` global is a 0
+                                       # placeholder (never set during init), so it must NOT be
+                                       # used as the crop threshold — `ivt >= 0` would class every
+                                       # PFT as a crop. The CLM5 value is nc4_grass + 1 = 15.
+                                       npcropmin::Int=nc4_grass + 1,
+                                       initial_vegC::Real=cnvegcstate_const.initial_vegC)
+    ivc = Float64(initial_vegC)
     for p in bounds_patch
         cs.leafcmax_patch[p] = 0.0
 
-        # Default: deciduous non-crop (leafc=0, storage=initial_vegC)
-        cs.leafc_patch[p]         = 0.0
-        cs.leafc_storage_patch[p] = INITIAL_VEGC * ratio
-        cs.frootc_patch[p]        = 0.0
-        cs.frootc_storage_patch[p] = INITIAL_VEGC * ratio
+        # Fortran CNVegCarbonStateType::InitCold branches on the PFT
+        # (CNVegCarbonStateType.F90:1512-1600):
+        #   noveg      -> leafc/frootc = 0, storages = 0
+        #   evergreen  -> leafc/frootc = initial_vegC*ratio, storages = 0
+        #   prog. crop -> all 0
+        #   otherwise  -> leafc/frootc = 0, storages = initial_vegC*ratio  (deciduous)
+        #
+        # Without `patch_itype`/`evergreen` this routine used to seed EVERY patch as
+        # deciduous, so an evergreen PFT cold-started with ZERO displayed leaf and
+        # root carbon (all of it parked in storage) and a bare-soil patch was given
+        # storage C it should not have. Callers that can supply the PFT data get the
+        # faithful branching; the no-PFT-data path keeps the old behaviour so direct
+        # unit-test callers are unaffected.
+        ivt  = patch_itype === nothing ? nothing : Int(patch_itype[p])
+        is_noveg  = ivt !== nothing && ivt == noveg
+        is_everg  = ivt !== nothing && evergreen !== nothing && evergreen[ivt + 1] == 1.0
+        is_pcrop  = ivt !== nothing && use_crop && ivt >= npcropmin
+        is_woody  = ivt !== nothing && woody !== nothing && woody[ivt + 1] == 1.0
+
+        if ivt === nothing
+            # legacy path (no PFT data supplied): deciduous non-crop
+            cs.leafc_patch[p]          = 0.0
+            cs.leafc_storage_patch[p]  = ivc * ratio
+            cs.frootc_patch[p]         = 0.0
+            cs.frootc_storage_patch[p] = ivc * ratio
+        elseif is_noveg || is_pcrop
+            cs.leafc_patch[p]          = 0.0
+            cs.leafc_storage_patch[p]  = 0.0
+            cs.frootc_patch[p]         = 0.0
+            cs.frootc_storage_patch[p] = 0.0
+        elseif is_everg
+            cs.leafc_patch[p]          = ivc * ratio
+            cs.leafc_storage_patch[p]  = 0.0
+            cs.frootc_patch[p]         = ivc * ratio
+            cs.frootc_storage_patch[p] = 0.0
+        else
+            cs.leafc_patch[p]          = 0.0
+            cs.leafc_storage_patch[p]  = ivc * ratio
+            cs.frootc_patch[p]         = 0.0
+            cs.frootc_storage_patch[p] = ivc * ratio
+        end
 
         cs.leafc_xfer_patch[p]                = 0.0
         cs.leafc_storage_xfer_acc_patch[p]    = 0.0
@@ -736,7 +791,9 @@ function cnveg_carbon_state_init_cold!(cs::CNVegCarbonStateData,
         cs.livestemc_storage_patch[p]         = 0.0
         cs.livestemc_xfer_patch[p]            = 0.0
 
-        cs.deadstemc_patch[p]                 = 0.0
+        # Fortran seeds a nominal dead-stem pool for WOODY PFTs only
+        # (CNVegCarbonStateType.F90:1588-1594): deadstemc = 0.1 * ratio.
+        cs.deadstemc_patch[p]                 = is_woody ? 0.1 * ratio : 0.0
         cs.deadstemc_storage_patch[p]         = 0.0
         cs.deadstemc_xfer_patch[p]            = 0.0
 
