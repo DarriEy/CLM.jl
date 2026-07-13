@@ -624,6 +624,37 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     fates.hist = _build_fates_history_interface(nsites)
 
     inst.fates = fates
+
+    # ---- Cold-start canopy transfer into the HLM (wrap_update_hlmfates_dyn) ----
+    # Fortran's init_coldstart calls wrap_update_hlmfates_dyn (clmfates_interfaceMod.F90:2202)
+    # so that the canopy state the HLM reads on the FIRST timestep — before any daily
+    # demographic step has run — is FATES's, not the cold-start NaN. Without this the
+    # first albedo/radiation pass on a FATES column classifies its patches off NaN
+    # elai/esai. Flush the whole patch range (bare ground -> exactly zero), then fill
+    # the vegetated patches from bc_out, then rebuild the HLM patch weights.
+    col = inst.column
+    if !isempty(col.is_fates)
+        site_col0 = zeros(Int, nsites)
+        s0 = 0
+        for c in 1:length(col.is_fates)
+            col.is_fates[c] || continue
+            s0 += 1
+            s0 <= nsites || break
+            site_col0[s0] = c
+        end
+        canopy_summarization!(nsites, sites, bc_in)
+        update_hlm_dynamics!(nsites, sites, site_col0, fates.bc_out)
+        for s in 1:nsites
+            c = site_col0[s]
+            c == 0 && continue
+            fates_flush_hlm_canopy!(inst; c=c)
+            for (ifp, p) in fates_veg_patches(sites[s], c, col)
+                fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p, ifp=ifp)
+            end
+            fates_set_filters!(inst; c=c, s=s)
+        end
+    end
+
     return fates
 end
 

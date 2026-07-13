@@ -972,23 +972,32 @@ function balance_check!(
     use_hillslope_routing::Bool=false,
     for_testing_zero_dynbal_fluxes::Bool=false
 )
-    # KNOWN LEAK — TODO: FATES does not close the CLM-side balances.
+    # The blanket `use_fates` hard-error gate #211 added is GONE: the ~142 W/m2 solar
+    # residual it documented was a real FATES<->HLM coupling gap (the FATES radiation
+    # bc_out was written back onto patches FATES had NOT solved, erasing the HLM's own
+    # albedo, and the bare-ground patch of a FATES column was never given its canopy of
+    # zero). Both are fixed at the source, so the ENERGY/SOLAR half of this check is
+    # now LIVE and FATAL for FATES like every other configuration: the FATES solar
+    # balance closes to ~1e-9 W/m2 (test_fates_driver_run.jl asserts it every step).
+    hard_error_disabled = false
+
+    # WATER — still gated for FATES, and ONLY water.
     #
-    # With the check live (see clm_drv!'s DAnstep), a FATES run trips it hard: the
-    # solar balance is off by ~142 W/m2 on FATES patches because they leave
-    # fsa/fsr at 0 while the full incident shortwave is on the books (FATES runs
-    # its own two-stream and never writes back the HLM's absorbed/reflected
-    # diagnostics), and the column water balance breaks alongside it. These are
-    # real gaps in the FATES↔HLM coupling, not artefacts of the check.
+    # A real FATES stand (Aripuana surfdata, test_fates_photosynthesis.jl) leaves a
+    # column water residual of ~1.3e-4 mm on the first step and ~3.3e-5 mm/step after,
+    # against the 1e-5 mm error threshold. That is a SEPARATE, PRE-EXISTING FATES water
+    # coupling gap: it is measured identically with the shortwave fix reverted
+    # (3.3516e-5 vs 3.3352e-5 mm/step), so it is neither caused nor cured by the
+    # radiation write-back. Un-gating it here would only convert a known, quantified
+    # residual into a suite-wide abort; it needs its own diagnosis (the FATES canopy
+    # water / patch-weight transfer is the prime suspect) and its own PR.
     #
-    # FATES is opt-in and still under validation (Fortran bit-parity is blocked on
-    # a FATES-enabled Fortran reference run), and wiring its radiation back into
-    # fsa/fsr is a FATES-coupling task in its own right. Until then a FATES run
-    # would abort on its own known imbalance, so the hard error degrades to the
-    # @warn that balance_check! already emits — the errors are still COMPUTED and
-    # reported. Scoped to FATES only: the check stays live and fatal for the model
-    # proper (exact physics closes to ~1e-12 mm/step). Do NOT widen this.
-    hard_error_disabled = use_fates
+    # This is deliberately NARROW: the errors are still COMPUTED and @warn'd, and every
+    # other balance (solar, longwave, surface energy, soil energy, snow) is fatal for
+    # FATES. Do NOT widen it back to the whole check.
+    # TODO(FATES water coupling): close the ~3e-5 mm/step column water residual on a
+    # FATES column, then delete `water_hard_error_disabled` and this comment.
+    water_hard_error_disabled = use_fates
     # Extract water flux fields
     wf = waterflux isa WaterFluxBulkData ? waterflux.wf : waterflux
     ws = waterstate isa WaterStateBulkData ? waterstate.ws : waterstate
@@ -1108,7 +1117,7 @@ function balance_check!(
     if errh2o_col isa Array
         # A NaN errh2o is a BROKEN balance, not a passing one (NaN > thresh is false).
         _bc_check_nonfinite(errh2o_col, bounds_c, bc, DAnstep, nstep,
-                            "column-level water", hard_error_disabled)
+                            "column-level water", water_hard_error_disabled)
 
         errh2o_max_val = maximum(abs.(errh2o_col[bounds_c]))
 
@@ -1116,7 +1125,7 @@ function balance_check!(
             indexc = bounds_c[argmax(abs.(errh2o_col[bounds_c]))]
             @warn "column-level water balance error" nstep indexc errh2o=errh2o_col[indexc]
 
-            if errh2o_max_val > BALANCE_ERROR_THRESH && _bc_should_error(bc, DAnstep; disabled=hard_error_disabled)
+            if errh2o_max_val > BALANCE_ERROR_THRESH && _bc_should_error(bc, DAnstep; disabled=water_hard_error_disabled)
                 if _is_ad_type(FT_bc)
                     @warn "BalanceCheck: column water balance error exceeded threshold (AD mode, continuing)" maxlog=1
                 else
@@ -1166,7 +1175,7 @@ function balance_check!(
     if errh2o_grc isa Array
         if !use_fates_planthydro
             _bc_check_nonfinite(errh2o_grc, bounds_g, bc, DAnstep, nstep,
-                                "gridcell-level water", hard_error_disabled ||
+                                "gridcell-level water", water_hard_error_disabled ||
                                 use_soil_moisture_streams || for_testing_zero_dynbal_fluxes)
         end
 
@@ -1176,7 +1185,7 @@ function balance_check!(
             indexg = bounds_g[argmax(abs.(errh2o_grc[bounds_g]))]
             @warn "grid cell-level water balance error" nstep indexg errh2o_grc=errh2o_grc[indexg]
 
-            if errh2o_grc_max_val > BALANCE_ERROR_THRESH && _bc_should_error(bc, DAnstep; disabled=hard_error_disabled) &&
+            if errh2o_grc_max_val > BALANCE_ERROR_THRESH && _bc_should_error(bc, DAnstep; disabled=water_hard_error_disabled) &&
                !use_soil_moisture_streams && !for_testing_zero_dynbal_fluxes
                 if _is_ad_type(FT_bc)
                     @warn "BalanceCheck: gridcell water balance error exceeded threshold (AD mode, continuing)" maxlog=1
