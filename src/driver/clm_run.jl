@@ -381,7 +381,8 @@ function clm_run!(;
                      nstep=tm.nstep, is_first_step=first_step,
                      is_beg_curr_day=beg_day, is_end_curr_day=end_day,
                      is_beg_curr_year=beg_year, dtime=Float64(dtime),
-                     mon=mon, day=d, photosyns=inst_d.photosyns)
+                     mon=mon, day=d, jday=dayofyear(tm.current_date), secs=tod,
+                     year=yr, photosyns=inst_d.photosyns)
             _refresh_host_tree!(hview, inst_d)   # in-place device -> host sync (no per-step alloc)
             lnd2atm!(bounds, hview)
             history_write_step!(hw, hview, tm.current_date; is_end_curr_day=end_day)
@@ -397,7 +398,8 @@ function clm_run!(;
                      nstep=tm.nstep, is_first_step=first_step,
                      is_beg_curr_day=beg_day, is_end_curr_day=end_day,
                      is_beg_curr_year=beg_year, dtime=Float64(dtime),
-                     mon=mon, day=d, photosyns=inst.photosyns)
+                     mon=mon, day=d, jday=dayofyear(tm.current_date), secs=tod,
+                     year=yr, photosyns=inst.photosyns)
             lnd2atm!(bounds, inst)
             history_write_step!(hw, inst, tm.current_date; is_end_curr_day=end_day)
             step_probe === nothing || step_probe(inst, tm)

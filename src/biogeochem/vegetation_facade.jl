@@ -115,6 +115,16 @@ mutable struct CNVegetationData{FT<:Real}
     # Nitrogen state and flux
     cnveg_nitrogenstate_inst::CNVegNitrogenStateData
     cnveg_nitrogenflux_inst::CNVegNitrogenFluxData
+
+    # C/N mass-conservation check (Fortran cn_balance_type). Holds the
+    # beginning/end-of-step column + gridcell C and N masses.
+    cn_balance_inst::CNBalanceData
+
+    # Wood/crop product pools (Fortran c_products_inst / n_products_inst). The
+    # balance check needs them as a C/N sink; they are also the destination of
+    # harvest/gross-unrepresented-disturbance fluxes.
+    c_products_inst::CNProductsData
+    n_products_inst::CNProductsData
 end
 
 # Keyword constructor (field-name keyword API replacing @kwdef's). State children
@@ -130,11 +140,15 @@ function CNVegetationData{FT}(;
         c13_cnveg_carbonflux_inst::CNVegCarbonFluxData   = CNVegCarbonFluxData{FT}(),
         c14_cnveg_carbonflux_inst::CNVegCarbonFluxData   = CNVegCarbonFluxData{FT}(),
         cnveg_nitrogenstate_inst::CNVegNitrogenStateData = CNVegNitrogenStateData{FT}(),
-        cnveg_nitrogenflux_inst::CNVegNitrogenFluxData   = CNVegNitrogenFluxData{FT}()) where {FT<:Real}
+        cnveg_nitrogenflux_inst::CNVegNitrogenFluxData   = CNVegNitrogenFluxData{FT}(),
+        cn_balance_inst::CNBalanceData                   = CNBalanceData{FT, Vector{FT}}(),
+        c_products_inst::CNProductsData                  = CNProductsData{FT}(),
+        n_products_inst::CNProductsData                  = CNProductsData{FT}()) where {FT<:Real}
     CNVegetationData{FT}(config, driver_config, cnveg_state_inst,
         cnveg_carbonstate_inst, c13_cnveg_carbonstate_inst, c14_cnveg_carbonstate_inst,
         cnveg_carbonflux_inst, c13_cnveg_carbonflux_inst, c14_cnveg_carbonflux_inst,
-        cnveg_nitrogenstate_inst, cnveg_nitrogenflux_inst)
+        cnveg_nitrogenstate_inst, cnveg_nitrogenflux_inst,
+        cn_balance_inst, c_products_inst, n_products_inst)
 end
 
 # Default precision is Float64; legacy callers that don't specify FT get a Float64 tree.
@@ -248,6 +262,12 @@ function cn_vegetation_init!(veg::CNVegetationData, np::Int, nc::Int, ng::Int;
                                    nlevdecomp_full=nlevdecomp,
                                    ndecomp_pools=ndecomp_pools,
                                    i_litr_max=i_litr_max)
+
+        # C/N mass-balance check state + the wood/crop product pools it needs as a
+        # C/N sink. Fortran allocates all three in CNVegetationFacade::Init.
+        cn_balance_init!(veg.cn_balance_inst, nc, ng)
+        cn_products_init!(veg.c_products_inst, ng)
+        cn_products_init!(veg.n_products_inst, ng)
     end
 
     # Synchronize driver config with facade config
@@ -347,7 +367,16 @@ function cn_vegetation_init_column_balance!(veg::CNVegetationData;
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         soilbgc_cs::SoilBiogeochemCarbonStateData,
-        soilbgc_ns::SoilBiogeochemNitrogenStateData)
+        soilbgc_ns::SoilBiogeochemNitrogenStateData,
+        # Soil-BGC state-summary inputs; needed so totc_col/totn_col (the balance
+        # check's BEGIN mass) are recomputed here, as Fortran does.
+        cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
+        col::Union{ColumnData, Nothing} = nothing,
+        patch::Union{PatchData, Nothing} = nothing,
+        nlevdecomp::Int = 0,
+        ndecomp_pools::Int = 0,
+        dzsoi_decomp::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        zisoi_vals::Union{AbstractVector{<:Real}, Nothing} = nothing)
 
     cn_driver_summarize_states!(veg.driver_config;
         mask_bgc_soilc=mask_bgc_soilc,
@@ -358,11 +387,17 @@ function cn_vegetation_init_column_balance!(veg::CNVegetationData;
         cnveg_cs=veg.cnveg_carbonstate_inst,
         cnveg_ns=veg.cnveg_nitrogenstate_inst,
         soilbgc_cs=soilbgc_cs,
-        soilbgc_ns=soilbgc_ns)
+        soilbgc_ns=soilbgc_ns,
+        cascade_con=cascade_con, col=col, patch=patch,
+        nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+        dzsoi_decomp=dzsoi_decomp, zisoi_vals=zisoi_vals)
 
-    # cn_balance_inst%BeginCNColumnBalance — ported as begin_cn_column_balance!
-    # (biogeochem/cn_balance_check.jl); not called from here.
-    # Would set the starting column totals for balance checking
+    # cn_balance_inst%BeginCNColumnBalance — WIRED. Seeds begcb_col/begnb_col from
+    # the totc_col/totn_col just recomputed by cn_driver_summarize_states! above.
+    # Without this the balance check has no "before" mass and cannot run at all —
+    # which is why the check that would have caught the dead N cycle was itself off.
+    begin_cn_column_balance!(veg.cn_balance_inst, soilbgc_cs, soilbgc_ns,
+                             mask_bgc_soilc, bounds_col)
 
     return nothing
 end
@@ -390,7 +425,16 @@ function cn_vegetation_init_gridcell_balance!(veg::CNVegetationData;
         bounds_col::UnitRange{Int},
         bounds_patch::UnitRange{Int},
         soilbgc_cs::SoilBiogeochemCarbonStateData,
-        soilbgc_ns::SoilBiogeochemNitrogenStateData)
+        soilbgc_ns::SoilBiogeochemNitrogenStateData,
+        # Needed for the c2g aggregation below; omitted => gridcell balance not seeded.
+        col::Union{ColumnData, Nothing} = nothing,
+        bounds_grc::UnitRange{Int} = 1:0,
+        cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
+        patch::Union{PatchData, Nothing} = nothing,
+        nlevdecomp::Int = 0,
+        ndecomp_pools::Int = 0,
+        dzsoi_decomp::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        zisoi_vals::Union{AbstractVector{<:Real}, Nothing} = nothing)
 
     cn_driver_summarize_states!(veg.driver_config;
         mask_bgc_soilc=mask_bgc_soilc,
@@ -401,11 +445,24 @@ function cn_vegetation_init_gridcell_balance!(veg::CNVegetationData;
         cnveg_cs=veg.cnveg_carbonstate_inst,
         cnveg_ns=veg.cnveg_nitrogenstate_inst,
         soilbgc_cs=soilbgc_cs,
-        soilbgc_ns=soilbgc_ns)
+        soilbgc_ns=soilbgc_ns,
+        cascade_con=cascade_con, col=col, patch=patch,
+        nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+        dzsoi_decomp=dzsoi_decomp, zisoi_vals=zisoi_vals)
 
-    # c2g (column to gridcell) for total C and N — not wired here.
-    # cn_balance_inst%BeginCNGridcellBalance — ported as begin_cn_gridcell_balance!
-    # (biogeochem/cn_balance_check.jl); not called from here.
+    # c2g (column -> gridcell) for total C and N, then BeginCNGridcellBalance.
+    # WIRED. Fortran InitGridcellBalance does exactly this pair; n_balance_check!
+    # recomputes the c2g for the END-of-step mass, so the BEGIN side must be
+    # seeded the same way or begnb_grc stays NaN and the gridcell check is dead.
+    if col !== nothing && !isempty(bounds_grc)
+        c2g_unity!(soilbgc_cs.totc_grc, soilbgc_cs.totc_col,
+                   col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+        c2g_unity!(soilbgc_ns.totn_grc, soilbgc_ns.totn_col,
+                   col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+        begin_cn_gridcell_balance!(veg.cn_balance_inst, soilbgc_cs, soilbgc_ns,
+                                   veg.c_products_inst, veg.n_products_inst,
+                                   bounds_grc)
+    end
 
     return nothing
 end
@@ -510,6 +567,12 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         rh30_patch::AbstractVector{<:Real} = Float64[],
         forc_rh_grc::AbstractVector{<:Real} = Float64[],
         forc_wind_grc::AbstractVector{<:Real} = Float64[],
+        # Mineral-N inputs (deposition + fixation) — see cn_driver_no_leaching!.
+        forc_ndep::AbstractVector{<:Real} = Float64[],
+        AnnET::AbstractVector{<:Real} = Float64[],
+        nfix_timeconst::Real = 0.0,
+        dayspyr::Real = 365.0,
+        ndyn_params::Union{NDynamicsParams, Nothing} = nothing,
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
@@ -604,6 +667,11 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         rh30_patch=rh30_patch,
         forc_rh_grc=forc_rh_grc,
         forc_wind_grc=forc_wind_grc,
+        forc_ndep=forc_ndep,
+        AnnET=AnnET,
+        nfix_timeconst=nfix_timeconst,
+        dayspyr=dayspyr,
+        ndyn_params=ndyn_params,
         h2osoi_vol=h2osoi_vol,
         h2osoi_liq=h2osoi_liq,
         mask_actfirec=mask_actfirec,
@@ -611,8 +679,21 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
 
     # CNFireEmisUpdate — genuinely NOT ported (CNFireEmissionsMod: fire trace-gas
     # emissions). The fire model itself is ported (fire_li2014.jl … fire_li2024.jl).
-    # CNAnnualUpdate — ported as cn_annual_update! (biogeochem/cn_annual_update.jl);
-    # not called from here.
+
+    # CNAnnualUpdate — WIRED. Fortran calls it as the LAST thing in
+    # EcosystemDynamicsPreDrainage (CNVegetationFacade.F90:1049). It rolls the
+    # tempsum_* running sums into the annsum_* annual means at end-of-year
+    # (annsum_npp, annsum_potential_gpp, annmax_retransn, annsum_litfall).
+    #
+    # This was dead, and it is the second half of the fixation chain:
+    # `annsum_npp_col` is what CNNFixation reads on the non-lagged branch, and
+    # `annsum_potential_gpp`/`annmax_retransn` scale the plant N demand. Without
+    # it the annual means never advance from their restart values.
+    if col !== nothing && patch !== nothing
+        cn_annual_update!(mask_bgc_soilc, mask_bgc_vegp, bounds_col, bounds_patch,
+                          col, patch, veg.cnveg_state_inst, veg.cnveg_carbonflux_inst;
+                          dt = dt, days_per_year = dayspyr)
+    end
 
     return nothing
 end
@@ -661,7 +742,19 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
-        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
+        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
+        # N-leaching inputs (see cn_driver_leaching!); omitted => no leaching loss.
+        nleach_params::Union{NLeachingParams, Nothing} = nothing,
+        h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        qflx_drain::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        qflx_surf::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        col_dz::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        zisoi::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        nlevsoi::Int = 0,
+        # Column NPP / lagged NPP update (feeds next step's CNNFixation).
+        col::Union{ColumnData, Nothing} = nothing,
+        patch::Union{PatchData, Nothing} = nothing,
+        nfix_timeconst::Real = 0.0)
 
     # CNDriverLeaching — already ported
     cn_driver_leaching!(veg.driver_config;
@@ -681,7 +774,14 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         soilbgc_ns=soilbgc_ns,
         soilbgc_nf=soilbgc_nf,
         cnveg_ns=veg.cnveg_nitrogenstate_inst,
-        cnveg_nf=veg.cnveg_nitrogenflux_inst)
+        cnveg_nf=veg.cnveg_nitrogenflux_inst,
+        nleach_params=nleach_params,
+        h2osoi_liq=h2osoi_liq,
+        qflx_drain=qflx_drain,
+        qflx_surf=qflx_surf,
+        col_dz=col_dz,
+        zisoi=zisoi,
+        nlevsoi=nlevsoi)
 
     # CNPrecisionControl — ported (cn_precision_control!); the live path runs it
     # inside cn_driver_no_leaching!, not here.
@@ -711,7 +811,11 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         cnveg_nf=veg.cnveg_nitrogenflux_inst,
         soilbgc_cf=soilbgc_cf,
         soilbgc_nf=soilbgc_nf,
-        patch_itype=patch_itype)
+        patch_itype=patch_itype,
+        col=col,
+        patch=patch,
+        dt=dt,
+        nfix_timeconst=nfix_timeconst)
 
     # CNVegStructUpdate — ported (cn_veg_struct_update!); the live path runs it
     # from clm_drv! (clm_driver.jl:2078), not here.
@@ -744,15 +848,37 @@ function cn_vegetation_balance_check!(veg::CNVegetationData;
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
-        soilbgc_ns::SoilBiogeochemNitrogenStateData)
+        soilbgc_ns::SoilBiogeochemNitrogenStateData,
+        # Subgrid maps + dt, needed by the checks. Omitted => check stays off
+        # (a caller that cannot supply them gets the previous no-op behaviour).
+        col::Union{ColumnData, Nothing} = nothing,
+        grc::Union{GridcellData, Nothing} = nothing,
+        bounds_grc::UnitRange{Int} = 1:0,
+        dt::Real = 0.0,
+        # Opt-in: running the check is what exposes conservation bugs, but it
+        # `error()`s on failure, so callers gate it explicitly.
+        run_check::Bool = false)
 
     if nstep_since_startup <= veg.config.skip_steps
         # Skip balance check for first timesteps after startup
         return nothing
     end
 
-    # cn_balance_inst%CBalanceCheck / NBalanceCheck — ported as c_balance_check! /
-    # n_balance_check! (biogeochem/cn_balance_check.jl); not called from here.
+    # cn_balance_inst%CBalanceCheck / NBalanceCheck — WIRED. These were dead: the
+    # very check that would have caught nitrogen entering and leaving the
+    # ecosystem nowhere was itself never called.
+    (run_check && col !== nothing && grc !== nothing && dt > 0) || return nothing
+
+    c_balance_check!(veg.cn_balance_inst, soilbgc_cf, soilbgc_cs,
+                     veg.cnveg_carbonflux_inst, veg.c_products_inst,
+                     col, grc, mask_bgc_soilc, bounds_col, bounds_grc, dt)
+
+    n_balance_check!(veg.cn_balance_inst, soilbgc_nf, soilbgc_ns,
+                     veg.cnveg_nitrogenflux_inst, veg.n_products_inst,
+                     col, grc, mask_bgc_soilc, bounds_col, bounds_grc, dt;
+                     use_nitrif_denitrif = veg.driver_config.use_nitrif_denitrif,
+                     use_crop            = veg.driver_config.use_crop,
+                     use_fun             = veg.driver_config.use_fun)
 
     return nothing
 end

@@ -74,7 +74,8 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
                           use_lch4::Bool=false, use_cndv::Bool=false,
                           use_crop::Bool=false, use_fates::Bool=false,
                           fsurdat::String=FSURDAT, paramfile::String=FPARAM,
-                          baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX)
+                          baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
+                          fndep::String="")
     # Bow lnd_in: rooting_profile_method_{water,carbon} = 1 (Jackson 1996 beta
     # profile via rootprof_beta), not the Julia default Zeng-2001 roota/rootb. This
     # sets rootfr, which drives the PHS soil-to-root conductance (k_soil_root). Must
@@ -95,6 +96,7 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         use_lch4=use_lch4, use_cndv=use_cndv, use_crop=use_crop, use_fates=use_fates,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
+        fndep=fndep,
         int_snow_max=int_snow)
     CLM.coldstart_match_fortran!(_prev_cs)
 
@@ -283,9 +285,10 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               use_luna::Bool=use_hydrstress,
                               fsurdat::String=FSURDAT, paramfile::String=FPARAM,
                               baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
-                              forcing_offset_hours::Int=0)
+                              forcing_offset_hours::Int=0, fndep::String="")
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
-                              fsurdat=fsurdat, paramfile=paramfile, baseflow=baseflow, int_snow=int_snow)
+                              fsurdat=fsurdat, paramfile=paramfile, baseflow=baseflow, int_snow=int_snow,
+                              fndep=fndep)
     # LUNA (Bow lnd_in use_luna=.true.): allocate the photosyns LUNA vcmax25/jmax25
     # fields so inject_dump! fills them from the restart's vcmx25_z/jmx25_z.
     if use_luna && isempty(inst.photosyns.vcmx25_z_patch)
@@ -361,7 +364,9 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                  is_beg_curr_day=CLM.is_beg_curr_day(tm),
                  is_end_curr_day=CLM.is_end_curr_day(tm),
                  is_beg_curr_year=CLM.is_beg_curr_year(tm),
-                 dtime=3600.0, mon=mon, day=d, photosyns=inst.photosyns)
+                 dtime=3600.0, mon=mon, day=d,
+                 jday=dayofyear(tm.current_date), secs=tod, year=yr,
+                 photosyns=inst.photosyns)
     CLM.forcing_reader_close!(fr)
     return inst, bounds
 end

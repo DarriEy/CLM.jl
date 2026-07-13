@@ -246,6 +246,55 @@ function n_fixation!(
 end
 
 # ---------------------------------------------------------------------------
+# cn_lag_npp_update! — exponentially-relaxed lagged NPP (feeds n_fixation!)
+# Ported from CNVegCarbonFluxType.F90:5366-5385 (inside Summary, bulk isotope only)
+# ---------------------------------------------------------------------------
+
+# Per-column exponential relaxation of column NPP toward lag_npp with time
+# constant nfixlags. SPVAL marks "never initialised" -> seed with the current NPP
+# (Fortran's `first timestep` branch). Independent per column.
+@kernel function _cn_lag_npp_kernel!(lag_npp_col, @Const(mask), @Const(npp_col),
+                                     decay, spval)
+    T = eltype(lag_npp_col)
+    c = @index(Global)
+    @inbounds if mask[c]
+        if lag_npp_col[c] != spval
+            lag_npp_col[c] = lag_npp_col[c] * decay + npp_col[c] * (one(T) - decay)
+        else
+            lag_npp_col[c] = npp_col[c]     # first timestep
+        end
+    end
+end
+
+"""
+    cn_lag_npp_update!(cf, mask_soilc; dt, nfix_timeconst)
+
+Update the exponentially-relaxed lagged column NPP (`lag_npp_col`, gC/m2/s) that
+`n_fixation!` consumes when `nfix_timeconst ∈ (0, 500)`.
+
+`lag_npp = lag_npp*exp(-dt/τ) + npp*(1 - exp(-dt/τ))`, with `τ = nfix_timeconst`
+days. Only runs on that branch — Fortran guards the whole block the same way, so
+outside it `lag_npp_col` legitimately stays at SPVAL.
+
+Corresponds to the lagged-NPP block inside `CNVegCarbonFluxType::Summary`.
+"""
+function cn_lag_npp_update!(cf::CNVegCarbonFluxData,
+                            mask_soilc::AbstractVector{Bool};
+                            dt::Real,
+                            nfix_timeconst::Real)
+    (nfix_timeconst > 0.0 && nfix_timeconst < 500.0) || return nothing
+    isempty(cf.lag_npp_col) && return nothing
+
+    nfixlags = nfix_timeconst * SECSPDAY
+    T = eltype(cf.lag_npp_col)
+    decay = T(exp(-dt / nfixlags))
+
+    _launch!(_cn_lag_npp_kernel!, cf.lag_npp_col, mask_soilc, cf.npp_col,
+             decay, T(SPVAL))
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # n_fert! — N fertilizer for crops (patch-to-column aggregation)
 # Ported from CNNFert in CNNDynamicsMod.F90
 # ---------------------------------------------------------------------------

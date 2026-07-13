@@ -221,6 +221,19 @@ function cn_driver_no_leaching!(
         waterstate::Union{WaterStateData, Nothing} = nothing,   # for FUN (h2osoi_liq_col)
         gridcell::Union{GridcellData, Nothing} = nothing,
         is_first_step::Bool = false,
+        # ---- Mineral-N INPUTS (CNNDynamicsMod) ----------------------------
+        # forc_ndep: gridcell atmospheric N deposition (gN/m2/s), from the ndep
+        # stream via atm2lnd.forc_ndep_grc. Empty => n_deposition! is skipped and
+        # ndep_to_sminn stays at whatever it was (0), i.e. the historical
+        # behaviour. AnnET: column annual-mean ET (mm/s), only used by the FUN
+        # free-living fixation. nfix_timeconst: clm_varctl (10 d when
+        # use_nitrif_denitrif, else 0) — selects the lagged-NPP vs annual-mean-NPP
+        # branch of CNNFixation.
+        forc_ndep::AbstractVector{<:Real} = Float64[],
+        AnnET::AbstractVector{<:Real} = Float64[],
+        nfix_timeconst::Real = 0.0,
+        dayspyr::Real = 365.0,
+        ndyn_params::Union{NDynamicsParams, Nothing} = nothing,
         # Soil-water state (soil-layer slices) for nitrif/denitrif anoxia.
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
@@ -312,9 +325,58 @@ function cn_driver_no_leaching!(
     # --------------------------------------------------
     # Nitrogen Deposition, Fixation and Respiration
     # --------------------------------------------------
-    # N deposition — already ported: n_deposition!(...)
-    # N fixation — already ported: n_fixation!(...) or n_free_living_fixation!(...)
-    # Crop N fertilization — already ported: n_fert!(...), n_soyfix!(...)
+    # WIRED. Fortran CNDriverNoLeaching lines 301-329: CNNDeposition, then EITHER
+    # CNFreeLivingFixation (use_fun) OR CNNFixation, then the crop pair
+    # (CNNFert/CNSoyfix). These are the ONLY inputs of N to the ecosystem; before
+    # this they were dead ports (definitions with no call site), so ndep_to_sminn
+    # and nfix_to_sminn were identically zero and nitrogen entered nowhere.
+    #
+    # Each call is skipped when its input is absent, so a caller that does not
+    # supply the forcing gets exactly the previous (zero-input) behaviour.
+
+    # CNNDeposition — atmospheric N deposition -> soil mineral N.
+    if !isempty(forc_ndep) && col !== nothing
+        n_deposition!(soilbgc_nf;
+            forc_ndep    = forc_ndep,
+            col_gridcell = col.gridcell,
+            bounds       = bounds_col)
+    end
+
+    # CNFreeLivingFixation (FUN) / CNNFixation (non-FUN) — mutually exclusive in
+    # Fortran, and they write DIFFERENT fields (ffix_to_sminn vs nfix_to_sminn),
+    # which SoilBiogeochemNStateUpdate1 then selects between on use_fun.
+    _ndp = ndyn_params === nothing ? NDynamicsParams() : ndyn_params
+    if config.use_fun
+        # AnnET is a 365-day running-mean ET ACCUMULATOR. Where the accumulator is
+        # not yet maintained it sits at its NaN allocation, and feeding that in would
+        # propagate NaN straight into the mineral-N pool. Require a finite value
+        # rather than silently poisoning the N budget: on the parity/injection path
+        # AnnET comes from the Fortran restart (AnnET_VALUE), and in a free run it
+        # comes from the accumulator once that is live.
+        _annet_ok = !isempty(AnnET) &&
+                    all(c -> !mask_bgc_soilc[c] || isfinite(AnnET[c]), bounds_col)
+        if _annet_ok
+            n_free_living_fixation!(soilbgc_nf, _ndp;
+                mask_soilc = mask_bgc_soilc,
+                bounds     = bounds_col,
+                AnnET      = AnnET,
+                dayspyr    = dayspyr)
+        end
+    else
+        n_fixation!(soilbgc_nf, cnveg_cf;
+            mask_soilc     = mask_bgc_soilc,
+            bounds         = bounds_col,
+            col_is_fates   = col_is_fates,
+            dayspyr        = dayspyr,
+            nfix_timeconst = nfix_timeconst,
+            use_fun        = config.use_fun)
+    end
+
+    # CNNFert / CNSoyfix — crop-only (Fortran gates on use_crop). NOT wired: Bow
+    # has no crop CFT, so there is no Fortran reference here to validate against,
+    # and #218's rule stands — do not wire blind. Both are ported and unit-tested
+    # (n_fert!, n_soyfix! in n_dynamics.jl); they need a crop-active Fortran
+    # reference run before they go live. See docs/N_CYCLE_PARITY.md.
 
     # Maintenance respiration (CNMResp) — WIRED (veg-flux chain). Runs when the
     # veg-flux inputs (photosyns/canopystate/soilstate/temperature/patch/pftcon)
@@ -1267,12 +1329,42 @@ function cn_driver_leaching!(
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
         cnveg_ns::CNVegNitrogenStateData,
-        cnveg_nf::CNVegNitrogenFluxData)
+        cnveg_nf::CNVegNitrogenFluxData,
+        # ---- N leaching inputs (SoilBiogeochemNLeachingMod) ----------------
+        # Supplied by the facade from the water state/flux + column geometry.
+        # All default to `nothing`/empty so a caller that does not provide them
+        # gets exactly the previous behaviour (no leaching loss).
+        nleach_params::Union{NLeachingParams, Nothing} = nothing,
+        h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        qflx_drain::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        qflx_surf::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        col_dz::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        zisoi::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        nlevsoi::Int = 0)
 
     num_bgc_vegp = count(mask_bgc_vegp)
 
-    # N leaching — already ported in n_leaching.jl
-    # Called externally: n_leaching!(soilbgc_nf, soilbgc_ns, params; ...)
+    # SoilBiogeochemNLeaching — WIRED. Fortran CNDriverLeaching line 1070: the N
+    # LOSS term (mineral N leached with drainage + lost with surface runoff),
+    # called immediately before NStateUpdateLeaching, which subtracts it from the
+    # pool. Previously a dead port: the loss was never computed, so mineral N had
+    # an input-free, loss-free budget.
+    if h2osoi_liq !== nothing && qflx_drain !== nothing && qflx_surf !== nothing &&
+       col_dz !== nothing && zisoi !== nothing && nlevsoi > 0
+        n_leaching!(soilbgc_nf, soilbgc_ns,
+            nleach_params === nothing ? NLeachingParams() : nleach_params;
+            mask_bgc_soilc      = mask_bgc_soilc,
+            bounds              = bounds_col,
+            nlevdecomp          = nlevdecomp,
+            nlevsoi             = nlevsoi,
+            dt                  = dt,
+            h2osoi_liq          = h2osoi_liq,
+            qflx_drain          = qflx_drain,
+            qflx_surf           = qflx_surf,
+            col_dz              = col_dz,
+            zisoi               = zisoi,
+            use_nitrif_denitrif = config.use_nitrif_denitrif)
+    end
 
     # NStateUpdateLeaching
     n_state_update_leaching!(soilbgc_ns, soilbgc_nf;
@@ -1338,7 +1430,17 @@ function cn_driver_summarize_states!(
         cnveg_ns::CNVegNitrogenStateData,
         soilbgc_cs::SoilBiogeochemCarbonStateData,
         soilbgc_ns::SoilBiogeochemNitrogenStateData,
-        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
+        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
+        # Soil-BGC state-summary inputs (decomp infrastructure). Supplied => the
+        # soil summaries run here too, as in Fortran. Omitted => skipped (previous
+        # behaviour), so callers without the cascade are unaffected.
+        cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
+        col::Union{ColumnData, Nothing} = nothing,
+        patch::Union{PatchData, Nothing} = nothing,
+        nlevdecomp::Int = 0,
+        ndecomp_pools::Int = 0,
+        dzsoi_decomp::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        zisoi_vals::Union{AbstractVector{<:Real}, Nothing} = nothing)
 
     if count(mask_bgc_vegp) > 0
         # cnveg_carbonstate/nitrogenstate Summary — WIRED. These set the patch-level
@@ -1352,12 +1454,31 @@ function cn_driver_summarize_states!(
         cnveg_nitrogen_state_summary!(cnveg_ns, mask_bgc_vegp, bounds_patch;
             use_crop=config.use_crop, patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
     end
-    # soilbiogeochem carbon/nitrogen STATE summaries (totsomc_col/totsomn_col/
-    # totecosysc_col) — the summary functions themselves are ported
-    # (soil_bgc_carbon_state_summary! / soil_bgc_nitrogen_state_summary!) but are
-    # not called from here: they need the decomp infrastructure
-    # (nlevdecomp/ndecomp_pools/dzsoi_decomp/is_soil) threaded here, and totecosysc_col
-    # additionally needs totvegc_col (a separate patch->col p2c stub). Follow-up.
+    # soilbiogeochem carbon/nitrogen STATE summaries — WIRED. Fortran's
+    # CNDriverSummarizeStates calls these, and it matters: they produce totc_col /
+    # totn_col, which are the BEGIN and END masses of the CN mass-conservation
+    # check. Omitting them here (the previous behaviour) left the check with no
+    # "before" mass at all, so BeginCNColumnBalance could only ever seed zero — one
+    # of the reasons the CN balance check was unusable.
+    if cascade_con !== nothing && col !== nothing && patch !== nothing &&
+       dzsoi_decomp !== nothing && zisoi_vals !== nothing &&
+       nlevdecomp > 0 && ndecomp_pools > 0
+        _nc  = length(mask_allc)
+        _tvc = fill!(similar(soilbgc_cs.totc_col, _nc), 0)
+        _tvn = fill!(similar(soilbgc_ns.totn_col, _nc), 0)
+        p2c_1d_filter!(_tvc, cnveg_cs.totvegc_patch, mask_allc, col, patch)
+        p2c_1d_filter!(_tvn, cnveg_ns.totvegn_patch, mask_allc, col, patch)
+        soil_bgc_carbon_state_summary!(soilbgc_cs, mask_allc, bounds_col;
+            nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+            dzsoi_decomp_vals=dzsoi_decomp, zisoi_vals=zisoi_vals,
+            is_litter=cascade_con.is_litter, is_soil=cascade_con.is_soil,
+            is_cwd=cascade_con.is_cwd, totvegc_col=_tvc)
+        soil_bgc_nitrogen_state_summary!(soilbgc_ns, mask_allc, bounds_col;
+            nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+            dzsoi_decomp_vals=dzsoi_decomp, zisoi_vals=zisoi_vals,
+            is_litter=cascade_con.is_litter, is_soil=cascade_con.is_soil,
+            is_cwd=cascade_con.is_cwd, totvegn_col=_tvn)
+    end
     # c13/c14 isotope variants — config-gated off in the default path (not ported).
 
     return nothing
@@ -1392,7 +1513,12 @@ function cn_driver_summarize_fluxes!(
         cnveg_nf::CNVegNitrogenFluxData,
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
-        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing)
+        patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
+        # Column NPP + lagged NPP (feeds CNNFixation). Omitted => not updated.
+        col::Union{ColumnData, Nothing} = nothing,
+        patch::Union{PatchData, Nothing} = nothing,
+        dt::Real = 0.0,
+        nfix_timeconst::Real = 0.0)
 
     num_bgc_vegp = count(mask_bgc_vegp)
 
@@ -1414,6 +1540,20 @@ function cn_driver_summarize_fluxes!(
         # c13/c14 variants — config-gated off in the default path (not called here)
         # cnveg_nitrogenflux_inst%Summary — ported
         # (cnveg_nitrogen_flux_summary!, types/cn_veg_nitrogen_flux.jl), not called here
+    end
+
+    # Column NPP + the exponentially-relaxed lagged NPP — WIRED. Fortran does both
+    # inside CNVegCarbonFluxType::Summary (the column half: p2c of npp_patch, then
+    # the lag_npp relaxation, CNVegCarbonFluxType.F90:5340-5385).
+    #
+    # This closes the last dead link in the fixation chain: `lag_npp_col` is what
+    # CNNFixation reads when nfix_timeconst ∈ (0,500) (the CLM5 default, 10 d). It
+    # was initialised to SPVAL and never written, so n_fixation! — even once called
+    # — would have taken the SPVAL branch and produced exactly zero fixation.
+    if col !== nothing && patch !== nothing && !isempty(cnveg_cf.npp_col)
+        p2c_1d_filter!(cnveg_cf.npp_col, cnveg_cf.npp_patch, mask_bgc_soilc, col, patch)
+        cn_lag_npp_update!(cnveg_cf, mask_bgc_soilc;
+                           dt = dt, nfix_timeconst = nfix_timeconst)
     end
 
     return nothing

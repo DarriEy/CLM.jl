@@ -71,6 +71,11 @@ Base.@kwdef mutable struct CLMInstances
     atm2lnd::Atm2LndData             = Atm2LndData()
     lnd2atm::Lnd2AtmData             = Lnd2AtmData()
 
+    # --- Atmospheric N-deposition stream (fills atm2lnd.forc_ndep_grc) ---
+    # Inactive by default: `ndep_stream_init!` is called from clm_initialize! only
+    # when an `fndep` file is supplied, so the non-CN path is untouched.
+    ndep_stream::NDepStreamData      = NDepStreamData()
+
     # --- Crop ---
     crop::CropData                   = CropData()
 

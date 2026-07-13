@@ -87,6 +87,11 @@ function clm_initialize!(;
     h2osfcflag::Int = 0,
     fsnowoptics::String = "",
     fsnowaging::String = "",
+    # Atmospheric N-deposition stream (CTSM &ndepdyn_nml stream_fldfilename_ndep).
+    # Empty => no stream => forc_ndep_grc stays 0 (the historical behaviour). Supply
+    # an fndep_* file to activate the only pathway by which N enters the ecosystem.
+    fndep::String = "",
+    ndep_varname::String = "NDEP_month",
     int_snow_max::Real = 2000.0)
 
     # ---- Step 1: Set control flags ----
@@ -209,6 +214,15 @@ function clm_initialize!(;
 
     # ---- Step 12: Read parameters ----
     readParameters!(paramfile)
+
+    # ---- Atmospheric N-deposition stream ----
+    # CTSM CNDriverInit -> ndep_init (ndepStreamMod.F90). This is the ONLY path by
+    # which nitrogen enters the ecosystem; with no stream, forc_ndep_grc stays 0 and
+    # ndep_to_sminn is identically zero (the historical CLM.jl behaviour). Only
+    # activated when the caller supplies a file, so the default is unchanged.
+    if !isempty(fndep)
+        ndep_stream_init!(inst.ndep_stream, fndep; varname = ndep_varname)
+    end
 
     # CNDV ecophysiological constants (twmax/crownarea_max/…) derive from pftcon's
     # pftpar20/28/29/30/31, which are populated ONLY by readParameters! above. The
