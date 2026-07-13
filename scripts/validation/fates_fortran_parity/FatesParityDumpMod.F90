@@ -30,14 +30,18 @@ module FatesParityDumpMod
   ! Fortran instrument") so the comparison can skip it. All FATES-internal cohort
   ! fields (the real parity target) are emitted.
   !
-  ! STATUS: authored against the verified CTSM ctsm5.3.012 FATES type/API names
-  ! (FatesCohortMod / FatesPatchMod / EDTypesMod / PRTGenericMod GetState). It
-  ! COMPILES AND LINKS: dropped into a case SourceMods/src.clm with the one-line
-  ! call injected into clmfates_interfaceMod.F90 init_coldstart, the CLM/FATES
-  ! library builds clean and `nm cesm.exe` shows
-  ! `_fatesparitydumpmod_MOD_fates_parity_dump`. It has not yet EXECUTED because
-  ! the FATES cime run aborts upstream in DATM (absent GSWP3 forcing) before the
-  ! LND/FATES component is realized — see the recipe README BLOCKER.
+  ! STATUS: RUNS. Authored against the verified CTSM ctsm5.3.012 FATES type/API
+  ! names (FatesCohortMod / FatesPatchMod / EDTypesMod / PRTGenericMod GetState),
+  ! dropped into a case SourceMods/src.clm with the one-line call injected into
+  ! clmfates_interfaceMod.F90 init_coldstart. Built and EXECUTED single-point
+  ! (see setup_case.sh): emits 1 site x 1 patch x 14 cohorts at nstep=0, and the
+  ! Julia FATES port matches that dump on all 27 fields (13 of them exactly, the
+  ! PRT carbon pools to 1 ULP) — see README.md for the scorecard.
+  !
+  ! The earlier "blocked in DATM on absent GSWP3 forcing" note is obsolete: that
+  ! was an artifact of running a GLOBAL compset. FATES does not need a global
+  ! grid; setup_case.sh now builds a single-point (SROF, 1x1 ESMF mesh, local
+  ! clmforc.YYYY.nc) case with ZERO missing input files.
   ! ======================================================================================
 
   use FatesConstantsMod, only : r8 => fates_r8
