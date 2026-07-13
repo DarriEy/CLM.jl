@@ -426,7 +426,7 @@ end
         fin[c] = eflx_gnet[p]
         sabg_nir = fsds_nir_d[p] + fsds_nir_i[p] - fsr_nir_d[p] - fsr_nir_i[p]
         sabg_nir = smooth_min(sabg_nir, sabg[p])
-        beta[c] = sabg_nir / smooth_max(T(1.0e-5), sabg[p])
+        beta[c] = sabg_nir / max(T(1.0e-5), sabg[p])   # HARD: constant divide-by-zero guard on a W/m2 axis
         beta[c] = beta[c] + (one(T) - beta[c]) * T(BETAVIS)
     end
 end
@@ -460,8 +460,8 @@ end
         drhodz = (rhow[c, j+1] - rhow[c, j]) / (z_lake[c, j+1] - z_lake[c, j])
         n2 = T(GRAV) / rhow[c, j] * drhodz
         num = T(40.0) * n2 * (T(VKC) * z_lake[c, j])^T(2.0)
-        den = smooth_max(ws[c]^T(2.0) * exp(-T(2.0) * ks[c] * z_lake[c, j]), T(1.0e-10))
-        ri = (-one(T) + sqrt(smooth_max(one(T) + num / den, zero(T)))) / T(20.0)
+        den = max(ws[c]^T(2.0) * exp(-T(2.0) * ks[c] * z_lake[c, j]), T(1.0e-10))   # HARD: 1e-10 divide-by-zero guard (constant). Axis = squared water friction velocity [m2/s2], true value ~1e-6..1e-4 — FAR below the k=50 width 0.0139, so smoothed `den` was ~0.0139 unconditionally, collapsing the Richardson number and inflating lake eddy diffusivity ~56x.
+        ri = (-one(T) + sqrt(max(one(T) + num / den, zero(T)))) / T(20.0)   # HARD: constant-0 branch under a sqrt
         if lakepuddling && j == 1
             frzn[c] = false
         end
@@ -471,7 +471,7 @@ end
                  (one(T) + T(37.0) * ri * ri)
             kme[c, j] = km + ke
             if !lake_no_ed
-                fangkm = T(1.039e-8) * smooth_max(n2, n2min_p)^T(-0.43)
+                fangkm = T(1.039e-8) * max(n2, n2min_p)^T(-0.43)   # HARD: n2min=7.5e-5 s-2 floor (constant). At k=50 it became 0.0139 s-2 (185x), suppressing Fang-Stefan enhanced diffusion ~8x.
                 kme[c, j] = kme[c, j] + fangkm
             end
             if lakedepth[c] >= depthcrit
@@ -481,7 +481,7 @@ end
         else
             kme[c, j] = km
             if !lake_no_ed
-                fangkm = T(1.039e-8) * smooth_max(n2, n2min_p)^T(-0.43)
+                fangkm = T(1.039e-8) * max(n2, n2min_p)^T(-0.43)   # HARD: n2min=7.5e-5 s-2 floor (constant). At k=50 it became 0.0139 s-2 (185x), suppressing Fang-Stefan enhanced diffusion ~8x.
                 kme[c, j] = kme[c, j] + fangkm
                 if lakedepth[c] >= depthcrit
                     kme[c, j] = kme[c, j] * mixfact

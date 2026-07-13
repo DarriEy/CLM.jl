@@ -276,12 +276,17 @@ Adapt.@adapt_structure BgfP3In
         thvstar = tstar * (one(T) + T(0.61) * forc_q_col[c]) + T(0.61) * forc_th_col[c] * qstar
         zeta_patch[p] = zldis[p] * vkc * grav * thvstar / (ustar[p]^2 * thv_col[c])
 
+        # Monin-Obukhov zeta: HARD clamps against CONSTANTS. The clamped branch has zero derivative
+        # (nothing for AD to recover), and the box half-width 0.01 is NARROWER than the k=50
+        # smoothing width 0.0139 — smoothing did not soften this limiter, it destroyed it. See the
+        # matching block in canopy_fluxes.jl.
+
         if zeta_patch[p] >= zero(T)  # stable
-            zeta_patch[p] = smooth_clamp(zeta_patch[p], T(0.01), zetamaxstable)
-            um[p] = smooth_max(ur[p], T(0.1))
+            zeta_patch[p] = clamp(zeta_patch[p], T(0.01), zetamaxstable)
+            um[p] = max(ur[p], T(0.1))
         else  # unstable
-            zeta_patch[p] = smooth_clamp(zeta_patch[p], T(-100.0), T(-0.01))
-            wc_arg = smooth_max(-grav * ustar[p] * thvstar * zii[c] / thv_col[c], zero(T))
+            zeta_patch[p] = clamp(zeta_patch[p], T(-100.0), T(-0.01))
+            wc_arg = max(-grav * ustar[p] * thvstar * zii[c] / thv_col[c], zero(T))
             wc = beta_col[c] * wc_arg^T(0.333)
             um[p] = sqrt(ur[p]^2 + wc^2)
         end

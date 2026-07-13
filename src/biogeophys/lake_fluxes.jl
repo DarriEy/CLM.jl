@@ -199,7 +199,7 @@ end
 
         # Solar absorbed at surface
         sabg = sabg_arr[p]
-        sabg = smooth_max(sabg, zero(T))
+        sabg = max(sabg, zero(T))
 
         # Betaprime: fraction of solar absorbed at surface
         if snl < 0
@@ -212,7 +212,7 @@ end
         thv = forc_th[c] * (one(T) + T(0.61) * forc_q[c])
 
         # Wind speed
-        ur = smooth_max(sqrt(forc_u[g]^2 + forc_v[g]^2), wind_min)
+        ur = max(sqrt(forc_u[g]^2 + forc_v[g]^2), wind_min)
 
         # Forcing heights
         forc_hgt_u = forc_hgt_u_grc[g]
@@ -234,7 +234,7 @@ end
         # Initial roughness lengths
         # ============================================================
         if tgbef > T(TFRZ)  # Unfrozen
-            z0mg = smooth_max(T(MINZ0LAKE), T(CUS) * kva / smooth_max(ur * T(0.1), T(1e-4)))
+            z0mg = max(T(MINZ0LAKE), T(CUS) * kva / max(ur * T(0.1), T(1e-4)))   # HARD: MINZ0LAKE=1e-5 m (constant). At k=50 the floor became 0.0139 m — 1390x — giving a lake the roughness of a forest canopy.
         else  # Frozen
             if snl < 0
                 z0mg = T(0.00085)  # snow roughness
@@ -252,23 +252,23 @@ end
         #     giving frozen z0hg ~25× too small (2.9e-5 vs ~7.2e-4) → rah too high → surface
         #     turbulent fluxes ~18% low → t_grnd too warm → ice formed too slowly.
         if tgbef > T(TFRZ)
-            sqre0 = sqrt(smooth_max(z0mg * ust_lake[c] / kva, T(0.1)))
+            sqre0 = sqrt(max(z0mg * ust_lake[c] / kva, T(0.1)))   # HARD: constant 0.1 floor
             z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
             z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
         else
             z0hg = z0mg / exp(a_coef * (ust_lake[c] * z0mg / kva)^a_exp)
             z0qg = z0hg
         end
-        z0mg = smooth_max(z0mg, T(1.0e-10))
-        z0hg = smooth_max(smooth_max(z0hg, T(1.0e-10)), T(MINZ0LAKE))
-        z0qg = smooth_max(smooth_max(z0qg, T(1.0e-10)), T(MINZ0LAKE))
+        z0mg = max(z0mg, T(1.0e-10))   # HARD: 1e-10 m underflow guard (constant). At k=50 this floor was raised to log(2)/50 = 0.0139 m — 1.4e8x — so a LAKE got the roughness of a forest canopy, wrecking ustar and hence the sensible/latent heat fluxes.
+        z0hg = max(max(z0hg, T(1.0e-10)), T(MINZ0LAKE))   # HARD: constant floors
+        z0qg = max(max(z0qg, T(1.0e-10)), T(MINZ0LAKE))   # HARD: constant floors
 
         # Reference displacement height (zero for lakes)
         displa = zero(T)
 
         # Monin-Obukhov initialization
         zldis = forc_hgt_u - displa
-        zldis = smooth_max(zldis, z0mg + T(0.01))
+        zldis = max(zldis, z0mg + T(0.01))   # HARD
         dth = thm - tgbef
         dqh = forc_q[c] - qsat_water(tgbef, forc_pbot[c])
         dthv = dth * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * dqh
@@ -281,9 +281,9 @@ end
         # (rah ~ 1e3-1e4), drove the turbulent fluxes to ~0, and let the surface
         # radiatively over-cool (TG 250 K vs Fortran 271 K). The Richardson form gives
         # obu<0 + a convective wind speed for unstable, matching Fortran.
-        ustar = smooth_max(T(VKC) * ur / log(zldis / z0mg), T(0.001))  # overwritten in the iteration
+        ustar = max(T(VKC) * ur / log(zldis / z0mg), T(0.001))  # overwritten in the iteration
         if dthv >= zero(T)
-            um = smooth_max(ur, T(0.1))
+            um = max(ur, T(0.1))
         else
             um = sqrt(ur^2 + T(0.25))   # convective velocity wc = 0.5 m/s
         end
@@ -308,9 +308,9 @@ end
             zldis_u = forc_hgt_u - displa
             zldis_t = forc_hgt_t - displa
             zldis_q = forc_hgt_q - displa
-            zldis_u = smooth_max(zldis_u, z0mg + T(0.01))
-            zldis_t = smooth_max(zldis_t, z0hg + T(0.01))
-            zldis_q = smooth_max(zldis_q, z0qg + T(0.01))
+            zldis_u = max(zldis_u, z0mg + T(0.01))
+            zldis_t = max(zldis_t, z0hg + T(0.01))
+            zldis_q = max(zldis_q, z0qg + T(0.01))
 
             # Stability functions
             zeta_u = zldis_u / obu
@@ -330,7 +330,7 @@ end
 
             # Friction velocity
             ustar = T(VKC) * um / (log(zldis_u / z0mg) - stability_func1(zeta_u) + stability_func1(zeta0m))
-            ustar = smooth_max(ustar, T(0.001))
+            ustar = max(ustar, T(0.001))   # HARD: constant 0.001 m/s floor. At k=50 the width 0.0139 m/s is 14x this floor and comparable to ustar itself (~0.03 m/s), so the lake friction velocity was inflated ~8% -> eflx_lh_grnd off by 4.7 W/m2.
 
             # Transfer coefficients
             temp1 = T(VKC) / (log(zldis_t / z0hg) - stability_func2(zeta_t) + stability_func2(zeta0h))
@@ -340,9 +340,9 @@ end
             ram = one(T) / (ustar * T(VKC) / (log(zldis_u / z0mg) - stability_func1(zeta_u) + stability_func1(zeta0m)))
             rah = one(T) / (temp1 * ustar)
             raw = one(T) / (temp2 * ustar)
-            ram = smooth_max(ram, one(T))
-            rah = smooth_max(rah, one(T))
-            raw = smooth_max(raw, one(T))
+            ram = max(ram, one(T))
+            rah = max(rah, one(T))
+            raw = max(raw, one(T))
 
             # Saturation specific humidity at surface
             qsatg = qsat_water(tgbef, forc_pbot[c])
@@ -363,7 +363,7 @@ end
                  htvp * forc_rho[c] / raw * qsatgdT +
                  tksur / dzsur
 
-            bx = smooth_max(bx, T(1.0e-10))
+            bx = max(bx, T(1.0e-10))
             t_grnd_new = ax / bx
 
             # Surface fluxes
@@ -385,7 +385,7 @@ end
 
             if zeta_val >= zero(T)
                 zeta_val = clamp(zeta_val, T(0.01), T(ZETAMAX_LAKE))
-                um = smooth_max(ur, wind_min)
+                um = max(ur, wind_min)
             else
                 zeta_val = clamp(zeta_val, T(-100.0), T(-0.01))
                 wc = T(BETA1) * (-T(GRAV) * ustar * thvstar * T(1000.0) / thv)^(one(T)/T(3.0))
@@ -404,14 +404,14 @@ end
                 cur = T(CUR0) + T(CURM) * exp(max(
                           -(fetch * T(GRAV) / ustar^2)^(one(T)/T(3.0)) / T(FCRIT),
                           -sqrt(lakedepth_c * T(GRAV) / ur^2)))
-                z0mg = smooth_max(smooth_max(T(MINZ0LAKE), T(CUS) * kva / smooth_max(ustar, T(1e-4))),
+                z0mg = max(max(T(MINZ0LAKE), T(CUS) * kva / max(ustar, T(1e-4))),
                            cur * ustar^2 / T(GRAV))
-                sqre0 = sqrt(smooth_max(z0mg * ustar / kva, T(0.1)))
+                sqre0 = sqrt(max(z0mg * ustar / kva, T(0.1)))
                 z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
                 z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
-                z0mg = smooth_max(z0mg, T(1.0e-10))
-                z0hg = smooth_max(z0hg, T(1.0e-10))
-                z0qg = smooth_max(z0qg, T(1.0e-10))
+                z0mg = max(z0mg, T(1.0e-10))   # HARD: 1e-10 m underflow guard (constant). At k=50 this floor was raised to log(2)/50 = 0.0139 m — 1.4e8x — so a LAKE got the roughness of a forest canopy, wrecking ustar and hence the sensible/latent heat fluxes.
+                z0hg = max(z0hg, T(1.0e-10))
+                z0qg = max(z0qg, T(1.0e-10))
             end
         end
 
@@ -491,7 +491,7 @@ end
         d.tauy[p] = -forc_rho[c] * forc_v[g] / ram_final
 
         # 2m wind speed for mixing parameters
-        u2m = smooth_max(T(0.1), ustar / T(VKC) * log(T(2.0) / z0mg))
+        u2m = max(T(0.1), ustar / T(VKC) * log(T(2.0) / z0mg))
         ust_lake[c] = ustar     # carry the friction velocity for next step's z0hg (LakeFluxesMod:761)
         ws_col[c] = T(1.2e-3) * u2m
         # Wave-driven eddy-extinction coefficient ks = 6.6·sqrt(|sin(lat)|)·u2m^-1.84.

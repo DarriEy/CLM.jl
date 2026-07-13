@@ -1060,7 +1060,7 @@ end
             vmax_eff = vmax_oxid_unsat
         end
 
-        porevol = smooth_max(watsat[c, j] - h2osoi_vol[c, j], zero(T))
+        porevol = max(watsat[c, j] - h2osoi_vol[c, j], zero(T))   # HARD: constant-0 branch. Air-filled porosity [m3/m3]; the ReLU sits at its kink in SATURATED soil — exactly where anoxic CH4 production lives — so at k=50 it invented 0.0139 m3/m3 of air there.
         h2osoi_vol_min = smooth_min(watsat[c, j], h2osoi_vol[c, j])
 
         if j <= jwt[c] && smp_l[c, j] < zero(T)
@@ -1208,7 +1208,7 @@ function site_ox_aere!(tranloss::Vector{<:Real},
             k_h_cc = t_soisno[j] / k_h_inv * rgasLatm
             conc_ch4_wat = conc_ch4[j] / ((watsat[j] - h2osoi_vol_min) / k_h_cc + h2osoi_vol_min)
             tranloss[j] = conc_ch4_wat * rootr[j] * qflx_tran_veg / dz[j] / 1000.0
-            tranloss[j] = smooth_max(tranloss[j], 0.0)
+            tranloss[j] = max(tranloss[j], 0.0)   # HARD: mol/m3/s axis (~1e-9); 0.0139 is 7 orders too big
         else
             tranloss[j] = 0.0
         end
@@ -1241,7 +1241,7 @@ function site_ox_aere!(tranloss::Vector{<:Real},
             aerecond = 1.0 / (1.0 / (aerecond + smallnumber) + 1.0 / (grnd_ch4_cond + smallnumber))
 
             aere[j] = aerecond * (conc_ch4[j] / watsat[j] / k_h_cc - c_atm[1]) / dz[j]
-            aere[j] = smooth_max(aere[j], 0.0)
+            aere[j] = max(aere[j], 0.0)   # HARD: mol/m3/s axis (~1e-9)
 
             # O2 diffusion
             k_h_inv = exp(-C_H_INV[2] * (1.0 / t_soisno[j] - 1.0 / KH_TBASE) + log(KH_THETA[2]))
@@ -1250,7 +1250,7 @@ function site_ox_aere!(tranloss::Vector{<:Real},
             aerecond = area_tiller * rootfr[j] * oxdiffus / (z[j] * params.rob)
             aerecond = 1.0 / (1.0 / (aerecond + smallnumber) + 1.0 / (grnd_ch4_cond + smallnumber))
             oxaere[j] = -aerecond * (conc_o2[j] / watsat[j] / k_h_cc - c_atm[2]) / dz[j]
-            oxaere[j] = smooth_max(oxaere[j], 0.0)
+            oxaere[j] = max(oxaere[j], 0.0)   # HARD: mol/m3/s axis (~1e-9)
 
             if !ch4vc.use_aereoxid_prog
                 oxaere[j] = 0.0
@@ -1779,7 +1779,7 @@ end
                                         (tf.h2osoi_liq[c, j] / T(DENH2O) + tf.h2osoi_ice[c, j] / T(DENICE) + sn)
                     end
                 end
-                scr.diffus[c, j] = smooth_max(scr.diffus[c, j], sn)
+                scr.diffus[c, j] = max(scr.diffus[c, j], sn)   # HARD: `sn` = smallnumber = 1e-12 (a constant). Axis = diffusivity [m2/s]: gas ~1e-5, aqueous ~1e-9. At k=50 the floor became 0.0139 m2/s — 1.4e10x the floor and 1.4e7x the true aqueous value — so EVERY layer sat at the kink and the whole CH4/O2 diffusion solve collapsed to a single constant diffusivity.
             end
 
             # Tridiagonal coefficients dm1_zm1 / dp1_zp1 (jwt-branchy)
@@ -1889,7 +1889,7 @@ end
             else
                 for j in 1:nlevsoi
                     jj = j + 1
-                    scr.conc_work[c, jj] = smooth_max(scr.conc_work[c, jj], T(1.0e-12))
+                    scr.conc_work[c, jj] = max(scr.conc_work[c, jj], T(1.0e-12))   # HARD: constant floor; concentration [mol/m3]
                     scr.conc_work[c, jj] = smooth_min(scr.conc_work[c, jj], c_atm[g, 2] / scr.epsilon_t[c, j, 2])
                 end
                 for jj in 1:nlevs; scr.conc_o2_rel[c, jj] = scr.conc_work[c, jj]; end

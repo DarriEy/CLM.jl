@@ -116,7 +116,7 @@ end
             else
                 tlai[p] = slatop[ivt[p] + 1] * leafc[p]
             end
-            tlai[p] = smooth_max(zero(T), tlai[p])
+            tlai[p] = max(zero(T), tlai[p])   # HARD: constant-0 branch on an LAI [m2/m2] axis. A leafless/dormant patch is exactly 0, so this ReLU sat on its kink and gave it +0.0139 of permanent phantom LAI.
 
             # Update the stem area index and height based on LAI, stem mass, and veg type.
             # tsai formula from Zeng et al. 2002, Journal of Climate, p1835
@@ -230,8 +230,8 @@ end
             frac_sno_adjusted = one(T)
         end
 
-        elai[p] = smooth_max(tlai[p] * (one(T) - frac_sno_adjusted) + tlai[p] * fb * frac_sno_adjusted, zero(T))
-        esai[p] = smooth_max(tsai[p] * (one(T) - frac_sno_adjusted) + tsai[p] * fb * frac_sno_adjusted, zero(T))
+        elai[p] = max(tlai[p] * (one(T) - frac_sno_adjusted) + tlai[p] * fb * frac_sno_adjusted, zero(T))
+        esai[p] = max(tsai[p] * (one(T) - frac_sno_adjusted) + tsai[p] * fb * frac_sno_adjusted, zero(T))
 
         # Fraction of vegetation free of snow
         if (elai[p] + esai[p]) > zero(T)

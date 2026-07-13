@@ -71,6 +71,7 @@ using CLM
     include("test_snow_hydrology.jl")
     include("test_phase_snow_smoothing.jl")
     include("test_smooth_conservation.jl")
+    include("test_smooth_axis_guard.jl")
     include("test_snow_capping.jl")
     include("test_snow_cover_fraction.jl")
     include("test_hydrology_no_drainage.jl")

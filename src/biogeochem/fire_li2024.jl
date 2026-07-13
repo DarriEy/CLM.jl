@@ -246,7 +246,7 @@ end
                               (T(15.0) * smooth_min(T(0.0016), dtrotr_col[c] / dt * dayspyr * secspday) + T(0.009)) *
                               smooth_max(zero(T), smooth_min(one(T), (T(0.25) - (forc_rain[c] + forc_snow[c]) * secsphr) / T(0.25)))
                         farea_burned[c] = farea_burned[c] + fb * cli * (cli_scale / secspday)
-                        fbac1[c] = smooth_max(zero(T), fb * cli * (cli_scale / secspday) - T(2) * lfc[c] / dt)
+                        fbac1[c] = max(zero(T), fb * cli * (cli_scale / secspday) - T(2) * lfc[c] / dt)
                     end
                     fbac[c] = farea_burned[c] + fbac1[c]
                 else

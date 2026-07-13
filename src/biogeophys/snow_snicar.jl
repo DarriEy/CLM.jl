@@ -793,13 +793,21 @@ function snicar_rt!(coszen::Vector{<:Real},
 
                         lm = sqrt(c3 * (c1 - ws) * (c1 - ws * gs))
                         ue = c1p5 * (c1 - ws * gs) / lm
-                        extins = smooth_max(exp_min, exp(-lm * ts))
+                        # HARD max. exp_min = exp(-argmax) = exp(-10) = 4.54e-5 is an UNDERFLOW
+                        # GUARD (a constant), so the clamped branch has zero derivative and the
+                        # smoothing recovers nothing. The axis is a layer TRANSMITTANCE (0-1), and
+                        # an optically thick snow layer transmits 1e-9..1e-2 — far below the k=50
+                        # smoothing width log(2)/50 = 0.0139. Smoothed, this floor returned ~0.0139
+                        # instead of the true transmittance (a layer at 1e-3 became 0.0139, +1290%),
+                        # i.e. THICK SNOW BECAME SEMI-TRANSPARENT and the Toon two-stream solve was
+                        # structurally destroyed on the AD path.
+                        extins = max(exp_min, exp(-lm * ts))
                         ne_val = ((ue + c1)^2 / extins) - ((ue - c1)^2 * extins)
 
                         rdif_a[i] = (ue^2 - c1) * (1.0/extins - extins) / ne_val
                         tdif_a[i] = c4 * ue / ne_val
 
-                        trnlay[i] = smooth_max(exp_min, exp(-ts / mu_not))
+                        trnlay[i] = max(exp_min, exp(-ts / mu_not))
 
                         alp = cp75 * ws * mu_not * ((c1 + gs * (c1 - ws)) / (c1 - lm^2 * mu_not^2))
                         gam = cp5 * ws * ((c1 + c3 * gs * (c1 - ws) * mu_not^2) / (c1 - lm^2 * mu_not^2))
@@ -816,7 +824,7 @@ function snicar_rt!(coszen::Vector{<:Real},
                             mu = SNICAR_DIFGAUSPT[ng]
                             gwt = SNICAR_DIFGAUSWT[ng]
                             swt += mu * gwt
-                            trn = smooth_max(exp_min, exp(-ts / mu))
+                            trn = max(exp_min, exp(-ts / mu))
                             alp = cp75 * ws * mu * ((c1 + gs * (c1 - ws)) / (c1 - lm^2 * mu^2))
                             gam = cp5 * ws * ((c1 + c3 * gs * (c1 - ws) * mu^2) / (c1 - lm^2 * mu^2))
                             apg = alp + gam
@@ -910,7 +918,7 @@ function snicar_rt!(coszen::Vector{<:Real},
 
                 # Underflow check
                 for i in snl_top_j:snl_btm_itf
-                    flx_abs_lcl[i, bnd_idx] = smooth_max(0.0, flx_abs_lcl[i, bnd_idx])
+                    flx_abs_lcl[i, bnd_idx] = max(0.0, flx_abs_lcl[i, bnd_idx])
                 end
 
                 albout_lcl[bnd_idx] = albedo
@@ -1075,8 +1083,8 @@ end
             dr *= xdrdt
 
             # 4. INCREMENT EFFECTIVE RADIUS
-            newsnow = smooth_max(zero(T), qflx_snow_grnd_col[c] * dtime)
-            refrzsnow = smooth_max(zero(T), qflx_snofrz_lyr[c, i] * dtime)
+            newsnow = max(zero(T), qflx_snow_grnd_col[c] * dtime)
+            refrzsnow = max(zero(T), qflx_snofrz_lyr[c, i] * dtime)
 
             frc_refrz = refrzsnow / h2osno_lyr
 
