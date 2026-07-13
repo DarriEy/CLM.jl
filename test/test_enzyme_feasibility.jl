@@ -115,6 +115,11 @@ end
             dx = Enzyme.autodiff(Enzyme.Reverse, tridiag_test,
                 Enzyme.Active, Enzyme.Active(2.0))
             @test isfinite(dx[1][1])
+            # Finiteness alone is not enough here: without the custom adjoint rule in
+            # src/infrastructure/enzyme_rules.jl this call returned a *wrong-but-finite*
+            # gradient on Julia 1.10 (unzeroed shadow of the solver's in-callee Thomas
+            # workspace). Pin the value; test_enzyme_smoke.jl carries the full FD check.
+            @test abs(dx[1][1] - (-0.5547337278106509)) < 1.0e-8
             println("  tridiagonal solver: PASS")
         catch e
             @test_broken false
