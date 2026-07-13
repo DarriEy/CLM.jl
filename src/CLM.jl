@@ -101,6 +101,7 @@ include("infrastructure/dyn_patch_state_updater.jl")  # conservative patch-state
 include("infrastructure/dyn_init_columns.jl")
 include("infrastructure/dyn_column_state_updater.jl")  # conservative column-state updates on transient column-area change (dyn_subgrid)
 include("infrastructure/time_manager.jl")
+include("infrastructure/ndep_stream.jl")  # atmospheric N-deposition stream -> forc_ndep_grc
 include("infrastructure/surfdata.jl")
 include("infrastructure/urban_input.jl")
 include("infrastructure/init_gridcells.jl")

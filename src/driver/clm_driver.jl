@@ -854,7 +854,13 @@ function clm_drv_core!(config::CLMDriverConfig,
             bounds_col=bc_col,
             bounds_patch=bc_patch,
             soilbgc_cs=inst.soilbiogeochem_carbonstate,
-            soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
+            # c2g + BeginCNGridcellBalance (seeds begcb_grc/begnb_grc).
+            bounds_grc=bc_grc,
+            cascade_con=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_cascade : nothing),
+            col=col, patch=pch,
+            nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
+            dzsoi_decomp=dzsoi_decomp[], zisoi_vals=zisoi[])
     end
     if config.use_lch4 && !isempty(inst.ch4.ch4_surf_flux_tot_col)
         # ch4_init_gridcell_balance_check! — WIRED. dz is soil-indexed (drop the
@@ -986,7 +992,11 @@ function clm_drv_core!(config::CLMDriverConfig,
             bounds_col=bc_col,
             bounds_patch=bc_patch,
             soilbgc_cs=inst.soilbiogeochem_carbonstate,
-            soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
+            cascade_con=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_cascade : nothing),
+            col=col, patch=pch,
+            nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
+            dzsoi_decomp=dzsoi_decomp[], zisoi_vals=zisoi[])
     end
     if config.use_lch4 && !isempty(inst.ch4.ch4_surf_flux_tot_col)
         # ch4_init_column_balance_check! — WIRED. Seeds totcolch4_bef_col for the
@@ -1002,7 +1012,16 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Update dynamic N deposition / forcing interpolation
     # ========================================================================
     if config.use_cn && !config.ndep_from_cpl
-        # Placeholder: ndep_interp!(bounds_proc, a2l) [N deposition]
+        # ndep_interp! — WIRED. Fills atm2lnd.forc_ndep_grc (gN/m2/s) from the
+        # N-deposition stream. Fortran clm_drv: `if (use_cn .and. .not. ndep_from_cpl)
+        # call ndep_interp(bounds_proc, atm2lnd_inst)` (ndepStreamMod.F90).
+        # No-op when no stream file was supplied (ndep_stream.active == false), which
+        # leaves forc_ndep_grc at its initialised value exactly as before.
+        # dayspyr = 365 (NO_LEAP), the convention used throughout the CN driver.
+        ndep_interp!(inst.atm2lnd, inst.ndep_stream, grc;
+                     calday     = jday + secs / SECSPDAY,
+                     dayspyr    = 365.0,
+                     bounds_grc = bc_grc)
     end
     if config.use_cn
         # Placeholder: bgc_vegetation_inst%InterpFileInputs(bounds_proc) [CN file inputs]
@@ -2130,6 +2149,17 @@ function clm_drv_core!(config::CLMDriverConfig,
             rh30_patch=a2l.rh30_patch,
             forc_rh_grc=a2l.forc_rh_grc,
             forc_wind_grc=a2l.forc_wind_grc,
+            # ---- Mineral-N inputs (deposition + fixation) ----
+            # forc_ndep_grc is filled by ndep_interp! above (zero when no stream is
+            # configured, which reproduces the historical no-N-input behaviour).
+            # nfix_timeconst comes from clm_varctl (control.jl derives it as 10 d
+            # when use_nitrif_denitrif, else 0) and selects CNNFixation's lagged-NPP
+            # vs annual-mean-NPP branch. AnnET drives the FUN free-living fixation
+            # (a 365-day running mean, now maintained by the accumulator subsystem).
+            forc_ndep=a2l.forc_ndep_grc,
+            AnnET=wfb.AnnET,
+            nfix_timeconst=varctl.nfix_timeconst,
+            dayspyr=365.0,
             h2osoi_vol=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_vol_col : nothing),
             h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
             mask_actfirec=filt.actfirec,
@@ -2212,7 +2242,23 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_cf=inst.soilbiogeochem_carbonflux,
             soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
             soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
-            patch_itype=pch.itype)
+            patch_itype=pch.itype,
+            # ---- N leaching (the mineral-N LOSS term) ----
+            # Post-drainage, so qflx_drain/qflx_surf are this step's final values —
+            # which is exactly why Fortran calls SoilBiogeochemNLeaching here and not
+            # in the pre-drainage half. Soil-layer slices (drop the snow levels).
+            h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ?
+                        wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
+            qflx_drain=(_decomp_initialized(inst.decomp_cascade) ? wfb.wf.qflx_drain_col : nothing),
+            qflx_surf=(_decomp_initialized(inst.decomp_cascade) ? wfb.wf.qflx_surf_col : nothing),
+            col_dz=(_decomp_initialized(inst.decomp_cascade) ?
+                    col.dz[:, (varpar.nlevsno+1):end] : nothing),
+            zisoi=(_decomp_initialized(inst.decomp_cascade) ? zisoi[] : nothing),
+            nlevsoi=(_decomp_initialized(inst.decomp_cascade) ? varpar.nlevsoi : 0),
+            # Column NPP + lagged NPP (consumed by NEXT step's n_fixation!).
+            col=col,
+            patch=pch,
+            nfix_timeconst=varctl.nfix_timeconst)
 
         # C14 radioactive decay — WIRED (gated on config.use_c14). Mirrors the
         # Fortran C14Decay call in CNDriver: after the C/N state updates, decay
@@ -2367,7 +2413,13 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_cf=inst.soilbiogeochem_carbonflux,
             soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
             soilbgc_cs=inst.soilbiogeochem_carbonstate,
-            soilbgc_ns=inst.soilbiogeochem_nitrogenstate)
+            soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
+            col=col, grc=grc, bounds_grc=bc_grc, dt=dtime,
+            # The CN mass-conservation check. OFF by default (it error()s on
+            # failure and the C side has known residuals from the not-yet-wired
+            # product pools); flip on with `CLM.cn_balance_check_enabled!(true)`
+            # or per-instance via the facade config. See docs/N_CYCLE_PARITY.md.
+            run_check=cn_balance_check_enabled())
     end
 
     # ========================================================================

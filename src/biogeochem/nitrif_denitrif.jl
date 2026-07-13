@@ -566,6 +566,7 @@ Adapt.@adapt_structure _NSU1Out
 Base.@kwdef struct _NSU1Flux{V,M}
     ndep_to_sminn_col::V
     nfix_to_sminn_col::V
+    ffix_to_sminn_col::V
     gross_nmin_vr_col::M
     actual_immob_nh4_vr_col::M
     actual_immob_no3_vr_col::M
@@ -592,9 +593,14 @@ Adapt.@adapt_structure _NSU1Prof
     @inbounds if lo <= c <= hi && mask_bgc_soilc[c]
         T = eltype(out.smin_nh4_vr_col)
         for j in 1:nlevdecomp
-            # N deposition + fixation (all into NH4)
+            # N deposition + fixation (all into NH4).
+            # Fortran SoilBiogeochemNStateUpdate1Mod.F90:70-85 — under FUN the fixed
+            # N goes straight to the plant, so the pool receives the FREE-LIVING
+            # fixation (ffix) instead of the symbiotic one (nfix). Selecting the
+            # wrong one here silently drops the entire FUN fixation input.
+            _fix = use_fun ? flux.ffix_to_sminn_col[c] : flux.nfix_to_sminn_col[c]
             out.smin_nh4_vr_col[c, j] += flux.ndep_to_sminn_col[c] * dt * prof.ndep_prof_col[c, j]
-            out.smin_nh4_vr_col[c, j] += flux.nfix_to_sminn_col[c] * dt * prof.nfixation_prof_col[c, j]
+            out.smin_nh4_vr_col[c, j] += _fix * dt * prof.nfixation_prof_col[c, j]
             # gross mineralization → NH4
             out.smin_nh4_vr_col[c, j] += flux.gross_nmin_vr_col[c, j] * dt
             # immobilization ← NH4 / NO3
@@ -636,6 +642,7 @@ function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
                      sminn_vr_col=ns.sminn_vr_col)
     flux = _NSU1Flux(; ndep_to_sminn_col=nf.ndep_to_sminn_col,
                        nfix_to_sminn_col=nf.nfix_to_sminn_col,
+                       ffix_to_sminn_col=nf.ffix_to_sminn_col,
                        gross_nmin_vr_col=nf.gross_nmin_vr_col,
                        actual_immob_nh4_vr_col=nf.actual_immob_nh4_vr_col,
                        actual_immob_no3_vr_col=nf.actual_immob_no3_vr_col,

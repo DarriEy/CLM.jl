@@ -114,6 +114,7 @@ using CLM
     include("test_nitrif_denitrif.jl")
     include("test_n_leaching.jl")
     include("test_n_dynamics.jl")
+    include("test_ndep_stream.jl")
     include("test_c_state_update1.jl")
     include("test_c_state_update2.jl")
     include("test_c_state_update3.jl")

@@ -527,6 +527,26 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
             if hasproperty(inst.bgc_vegetation, :cnveg_carbonflux_inst)
                 cvf = inst.bgc_vegetation.cnveg_carbonflux_inst
                 hasproperty(cvf, :annsum_npp_patch) && set_patch_1d!("annsum_npp", cvf.annsum_npp_patch)
+                # Column-level NPP accumulators consumed by CNNFixation. Genuine
+                # Fortran restart variables (CNVegCarbonFluxType.F90:4311 'col_lag_npp',
+                # 'cannsum_npp') that the reader never mapped — so an injected state
+                # resumed with lag_npp_col at SPVAL and annsum_npp_col at NaN, and
+                # N fixation could only ever come out as zero.
+                hasproperty(cvf, :lag_npp_col) && !isempty(cvf.lag_npp_col) &&
+                    set_col_1d!("col_lag_npp", v -> (cvf.lag_npp_col[1] = v))
+                hasproperty(cvf, :annsum_npp_col) && !isempty(cvf.annsum_npp_col) &&
+                    set_col_1d!("cannsum_npp", v -> (cvf.annsum_npp_col[1] = v))
+            end
+            # AnnET (365-day running-mean ET) — a Fortran ACCUMULATOR restart var
+            # (dumped as AnnET_VALUE). It drives FUN's free-living N fixation
+            # (ffix_to_sminn = f(max(0, AnnET))). The accumulator that maintains it in
+            # a free run is live (#218), but a 365-day running mean cannot be rebuilt
+            # from a mid-run injection — so on the injection/parity path we take
+            # Fortran's value straight from the restart, which is what a restart is
+            # for, and which makes the ffix parity check exact rather than approximate.
+            let _wfb = inst.water.waterfluxbulk_inst
+                hasproperty(_wfb, :AnnET) && !isempty(_wfb.AnnET) &&
+                    set_col_1d!("AnnET_VALUE", v -> (_wfb.AnnET[1] = v))
                 # leaf litterfall used by FUN for retranslocation accounting. A
                 # restart var: FUN (which runs before phenology phase-2) reads the
                 # PREVIOUS step's value, so it must be injected, not left at 0.
