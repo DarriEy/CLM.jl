@@ -37,6 +37,51 @@ const BC_AQUIFER     = 4
 const M_TO_MM = 1.0e3
 
 # ===========================================================================
+# AD-smoothing sharpness for the soil-hydraulics clamps  (see infrastructure/smooth_ad.jl)
+#
+# `k` IS DIMENSIONAL. A smooth_min/smooth_max transition has width log(2)/k IN THE UNITS OF THE
+# AXIS IT IS APPLIED TO, and smooth_max(0,x) overshoots max(0,x) by that amount. The generic
+# k = 50 default is calibrated for an O(1) axis; it puts the width at log(2)/50 = 0.0139, which
+# on the axes below is not a rounded corner but a physical error:
+#
+#   AXIS                            scale      err @ k=50   CONSEQUENCE (measured, Bow 200 d)
+#   ------------------------------  ---------  -----------  -------------------------------------
+#   relative saturation s      [-]  0 .. 1     0.0139       hk ∝ s^(2b+3), 2b+3 ≈ 15, so a 1.4%
+#                                                           depression of s at saturation makes
+#                                                           hk 19% LOW; smp ∝ s^(-b) → ~9% bias.
+#   volumetric ice        [m3/m3]   0 .. 0.5   0.0139       icefrac 3.5% low ⇒ the ice impedance
+#                                                           imp = 10^(-e_ice·icefrac) comes out
+#                                                           ~1.6x too HIGH ⇒ frozen soil ~60% too
+#                                                           permeable.
+#   layer liquid mass         [mm]  0 .. 1e2   0.0139       a dry/frozen layer is handed 0.0139 mm
+#                                                           of liquid it does not have.
+#   aquifer recharge qcharge[mm/s]  |q| ≲ 1e-4 0.0139       CATASTROPHIC: qcharge is clamped to the
+#                                                           BOX ±10/dtime = ±5.56e-3 mm/s, which is
+#                                                           NARROWER THAN THE SMOOTHING WIDTH. So
+#                                                           neither the smooth_max nor the smooth_min
+#                                                           ever saturates, the clamp is destroyed,
+#                                                           and the composition collapses to a near
+#                                                           CONSTANT ≈ -5.65e-3 mm/s (-488 mm/day)
+#                                                           regardless of the true recharge — sign
+#                                                           included. (Invisible to the water balance:
+#                                                           qcharge only MOVES water between the soil
+#                                                           column and the aquifer, so total column
+#                                                           storage still closes.)
+#
+# Every one of these clamps bounds a quantity by a CONSTANT (1, watsat, 0.01, 1e-6, smpmin,
+# ±10/dtime). The clamped branch therefore carries NO derivative information — smoothing buys
+# nothing there and only biases the value. We keep the calls C∞ (AD still flows and the interior
+# branch keeps its exact derivative) but move the transition onto the axis it actually lives on:
+# width = log(2)/1e9 ≈ 6.9e-10, i.e. ~7e-10 of a saturation / 7e-10 mm of water / 7e-10 mm/s of
+# recharge — negligible against every scale in the table, and against the 1e-5 mm balance
+# threshold. (Same reasoning and same value as SNOW_PERC_WATER_K / PHASE_CHANGE_MASS_K, PR #214.)
+#
+# Plain `const` (not a `Ref`): several of these clamps live inside KernelAbstractions @kernel
+# bodies, which cannot dereference a host-side mutable global. A const Float64 inlines as a
+# compile-time literal and is GPU-safe.
+const SOIL_HYDRAULIC_K = 1.0e9
+
+# ===========================================================================
 # GPU kernels (KernelAbstractions) for fully per-element soil-water loops.
 # Each (column, layer) element is computed from inputs at its OWN index
 # (with constant snow offsets); no neighbor-layer reads, no accumulation,
@@ -60,9 +105,16 @@ const M_TO_MM = 1.0e3
         dzmm[c, j] = dz[c, joff + j] * T(1.0e3)
         zimm_arr[c, j+1] = zi[c, joff_zi + j] * T(1.0e3)  # j+1: index 1 = Fortran j=0
 
-        vol_ice[c, j] = smooth_min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * denice))
-        icefrac[c, j] = smooth_min(one(T), vol_ice[c, j] / watsat[c, j])
-        vwc_liq[c, j] = smooth_max(h2osoi_liq[c, joff + j], T(1.0e-6)) / (dz[c, joff + j] * denh2o)
+        # Axis-scaled sharpness (see SOIL_HYDRAULIC_K): these three clamp a volumetric water
+        # content [m3/m3], a relative ice fraction [-] and a layer liquid MASS [mm] against
+        # CONSTANT bounds. At the generic k = 50 the smoothing width is 0.0139 in each of those
+        # units, which makes a fully-frozen layer read as icefrac ≈ 0.965 instead of 1 — and the
+        # ice impedance 10^(-e_ice·icefrac) is then ~1.6x too high, i.e. frozen soil ~60% too
+        # permeable.
+        kh = T(SOIL_HYDRAULIC_K)
+        vol_ice[c, j] = smooth_min(watsat[c, j], h2osoi_ice[c, joff + j] / (dz[c, joff + j] * denice); k = kh)
+        icefrac[c, j] = smooth_min(one(T), vol_ice[c, j] / watsat[c, j]; k = kh)
+        vwc_liq[c, j] = smooth_max(h2osoi_liq[c, joff + j], T(1.0e-6); k = kh) / (dz[c, joff + j] * denh2o)
     end
 end
 
@@ -178,9 +230,14 @@ soilwm_voleq_zq!(vol_eq, zq, mask, zwtmm, zimm_arr, watsat, sucsat, bsw, smpmin,
         jp1 = min(nlevsoi, j + 1)
         b   = bsw[c, j]
 
+        # Axis-scaled sharpness (see SOIL_HYDRAULIC_K). The relative-saturation axis is [0,1],
+        # but hk ∝ s1^(2b+3) with 2b+3 ≈ 15 AMPLIFIES any error in s1 fifteen-fold: at k = 50 the
+        # cap returns s1 = 1 - log(2)/50 = 0.9861 for a SATURATED layer, and hk comes out
+        # 0.9861^15 = 19% LOW. smp ∝ s_node^(-b) is biased the same way.
+        kh = T(SOIL_HYDRAULIC_K)
         s1 = T(0.5) * (vwc_liq[c, j] + vwc_liq[c, jp1]) /
              (T(0.5) * (watsat[c, j] + watsat[c, jp1]))
-        s1 = smooth_min(one(T), s1)
+        s1 = smooth_min(one(T), s1; k = kh)
         s2 = hksat[c, j] * s1^(T(2.0) * b + T(2.0))
 
         imp = T(10.0)^(-e_ice * (T(0.5) * (icefrac[c, j] + icefrac[c, jp1])))
@@ -190,8 +247,8 @@ soilwm_voleq_zq!(vol_eq, zq, mask, zwtmm, zimm_arr, watsat, sucsat, bsw, smpmin,
         dhkdw[c, j] = imp * (T(2.0) * b + T(3.0)) * s2 *
                       (one(T) / (watsat[c, j] + watsat[c, jp1]))
 
-        s_node = smooth_max(vwc_liq[c, j] / watsat[c, j], T(0.01))
-        s_node = smooth_min(one(T), s_node)
+        s_node = smooth_max(vwc_liq[c, j] / watsat[c, j], T(0.01); k = kh)
+        s_node = smooth_min(one(T), s_node; k = kh)
 
         smpv = -sucsat[c, j] * s_node^(-b)
         smpv = smooth_max(smpmin[c], smpv)
@@ -434,8 +491,11 @@ Adapt.@adapt_structure SwmTriIn
             out.bmx[c, j+1] = tin.dzmm[c, j+1] / dtime
             out.cmx[c, j+1] = zero(T)
         else            # water table is below soil column
-            s_node = smooth_max(T(0.5) * ((tin.vwc_zwt[c] + tin.vwc_liq[c, j]) / tin.watsat[c, j]), T(0.01))
-            s_node = smooth_min(one(T), s_node)
+            # Axis-scaled: relative saturation [0,1], amplified by s^(-b) into smp (see
+            # SOIL_HYDRAULIC_K).
+            s_node = smooth_max(T(0.5) * ((tin.vwc_zwt[c] + tin.vwc_liq[c, j]) / tin.watsat[c, j]),
+                                T(0.01); k = T(SOIL_HYDRAULIC_K))
+            s_node = smooth_min(one(T), s_node; k = T(SOIL_HYDRAULIC_K))
             smp1 = -tin.sucsat[c, j] * s_node^(-tin.bsw[c, j])
             smp1 = smooth_max(tin.smpmin[c], smp1)
             dsmpdw1 = -tin.bsw[c, j] * smp1 / (s_node * tin.watsat[c, j])
@@ -511,19 +571,26 @@ end
 
         jw = jwt[c]
         if jw < nlevsoi
+            kh = T(SOIL_HYDRAULIC_K)
             wh_zwt = zero(T)
-            s_node = smooth_max(h2osoi_vol[c, jw+1] / watsat[c, jw+1], T(0.01))
-            s1 = smooth_min(one(T), s_node)
+            s_node = smooth_max(h2osoi_vol[c, jw+1] / watsat[c, jw+1], T(0.01); k = kh)
+            s1 = smooth_min(one(T), s_node; k = kh)
             ka = imped_arr[c, jw+1] * hksat[c, jw+1] * s1^(T(2.0) * bsw[c, jw+1] + T(3.0))
-            smp1 = smooth_max(smpmin[c], smp_arr[c, max(1, jw)])
+            smp1 = smooth_max(smpmin[c], smp_arr[c, max(1, jw)]; k = kh)
             wh = smp1 - zq[c, max(1, jw)]
             if jw == 0
                 qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] + T(1.0e-3)) * T(1000.0))
             else
                 qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, joff + jw]) * T(1000.0) * T(2.0))
             end
-            qcharge[c] = smooth_max(-T(10.0) / dtime, qcharge[c])
-            qcharge[c] = smooth_min(T(10.0) / dtime, qcharge[c])
+            # Safety limiter on the recharge. THE BOX IS NARROWER THAN THE k=50 SMOOTHING WIDTH:
+            # ±10/dtime = ±5.56e-3 mm/s vs log(2)/50 = 1.39e-2 mm/s. At k = 50 neither call ever
+            # saturates, the clamp is destroyed, and the composition collapses to a near-CONSTANT
+            # ≈ -5.65e-3 mm/s (-488 mm/day) — the true qcharge is discarded, sign and all. Scaled
+            # to the mm/s axis (see SOIL_HYDRAULIC_K) the limiter is a true clamp again: it is a
+            # no-op for physical recharge (|qcharge| ≲ 1e-4 mm/s) and is C∞ where it does bite.
+            qcharge[c] = smooth_max(-T(10.0) / dtime, qcharge[c]; k = kh)
+            qcharge[c] = smooth_min( T(10.0) / dtime, qcharge[c]; k = kh)
         else
             qcharge[c] = dwat2[c, nlevsoi+1] * dzmm[c, nlevsoi+1] / dtime
         end
@@ -1113,14 +1180,16 @@ function compute_qcharge!(col_data::ColumnData,
         if jwt < nlevsoi
             wh_zwt = -sucsat[c, jwt+1] - zwt[c] * M_TO_MM
 
-            # Recharge rate to groundwater (positive to aquifer)
-            s1 = smooth_max(vwc_liq[c, jwt+1] / watsat[c, jwt+1], 0.01)
-            s1 = smooth_min(1.0, s1)
+            # Recharge rate to groundwater (positive to aquifer). Axis-scaled sharpness
+            # throughout — see SOIL_HYDRAULIC_K.
+            kh = SOIL_HYDRAULIC_K
+            s1 = smooth_max(vwc_liq[c, jwt+1] / watsat[c, jwt+1], 0.01; k = kh)
+            s1 = smooth_min(1.0, s1; k = kh)
 
             # Unsaturated hydraulic conductivity
             ka, _ = soil_hk!(swrc, c, jwt+1, s1, imped[c, jwt+1], soilstate)
 
-            smp1 = smooth_max(smpmin[c], smp[c, max(1, jwt)])
+            smp1 = smooth_max(smpmin[c], smp[c, max(1, jwt)]; k = kh)
             wh = smp1 - z[c, joff + max(1, jwt)] * M_TO_MM
 
             if jwt == 0
@@ -1129,9 +1198,11 @@ function compute_qcharge!(col_data::ColumnData,
                 qcharge[c] = -ka * (wh_zwt - wh) / ((zwt[c] - z[c, joff + jwt]) * M_TO_MM * 2.0)
             end
 
-            # Limit qcharge
-            qcharge[c] = smooth_max(-10.0 / dtime, qcharge[c])
-            qcharge[c] = smooth_min(10.0 / dtime, qcharge[c])
+            # Limit qcharge. The ±10/dtime box is NARROWER than the k=50 smoothing width
+            # (5.56e-3 vs 1.39e-2 mm/s), so at k=50 the clamp is destroyed and qcharge collapses
+            # to a near-constant -5.65e-3 mm/s. See the SOIL_HYDRAULIC_K block.
+            qcharge[c] = smooth_max(-10.0 / dtime, qcharge[c]; k = kh)
+            qcharge[c] = smooth_min( 10.0 / dtime, qcharge[c]; k = kh)
         end
     end
 
@@ -1185,15 +1256,24 @@ Adapt.@adapt_structure MfScr
         while true
             nsubstep += 1
 
+            # NOTE: this is the DEFAULT Richards solver (moisture form) — the clamps below are
+            # the ones that actually run. All of them bound a quantity by a CONSTANT (1e-6 mm,
+            # 1.0, 0.01), so the clamped branch carries no derivative and the smoothing buys
+            # nothing there; at the generic k = 50 it only injects log(2)/50 = 0.0139 in the
+            # axis's own units. Here that is fatal twice over: the saturation cap returns
+            # s = 0.9861 for a SATURATED layer and hk ∝ s^(2b+3) (2b+3 ≈ 15) makes hk 19% LOW,
+            # while the 1e-6 mm liquid floor is raised to 0.0139 mm. See SOIL_HYDRAULIC_K.
+            kh = T(SOIL_HYDRAULIC_K)
             for j in 1:nlayers
-                scr.vwc_liq[c, j] = smooth_max(st.h2osoi_liq[c, joff + j], T(1.0e-6)) / (mfin.dz[c, joff + j] * denh2o)
+                scr.vwc_liq[c, j] = smooth_max(st.h2osoi_liq[c, joff + j], T(1.0e-6); k = kh) /
+                                    (mfin.dz[c, joff + j] * denh2o)
                 scr.dt_dz[c, j]   = dtsub / (m_to_mm * mfin.dz[c, joff + j])
             end
 
             # ---- hydraulic properties (Clapp-Hornberger inlined) ----
             for j in 1:nlayers
                 s = scr.vwc_liq[c, j] / mfin.watsat[c, j]
-                s = smooth_min(s, one(T)); s = smooth_max(T(0.01), s)
+                s = smooth_min(s, one(T); k = kh); s = smooth_max(T(0.01), s; k = kh)
                 scr.s2[c, j] = s
             end
             for j in 1:nlayers
@@ -1205,7 +1285,7 @@ Adapt.@adapt_structure MfScr
                     imp = T(10.0)^(-e_ice * (T(0.5) * (mfin.icefrac[c, j] + mfin.icefrac[c, j+1])))
                 end
                 scr.imped[c, j] = imp
-                s1 = smooth_min(s1, one(T)); s1 = smooth_max(T(0.01), s1)
+                s1 = smooth_min(s1, one(T); k = kh); s1 = smooth_max(T(0.01), s1; k = kh)
                 b  = mfin.bsw[c, j]
                 hkv   = imp * mfin.hksat[c, j] * s1^(T(2.0) * b + T(3.0))
                 dhkds = (T(2.0) * b + T(3.0)) * hkv / s1
@@ -1463,7 +1543,10 @@ function soilwater_moisture_form!(col_data::ColumnData,
             mask_hydrology[c] || continue
             nlayers = nbedrock[c]
             for j in 1:min(nlayers, nlevsoi)
-                vwc_2d[c, j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6) / (dz[c, joff + j] * DENH2O)
+                # 1e-6 mm liquid floor on a kg/m2 axis — axis-scaled (see SOIL_HYDRAULIC_K);
+                # at k=50 the floor is silently raised to 0.0139 mm.
+                vwc_2d[c, j] = smooth_max(h2osoi_liq[c, joff + j], 1.0e-6; k = SOIL_HYDRAULIC_K) /
+                               (dz[c, joff + j] * DENH2O)
             end
         end
 

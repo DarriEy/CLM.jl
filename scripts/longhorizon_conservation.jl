@@ -34,7 +34,7 @@
 # to the same order as the exact path; the smoothed ReLU guards that used to leak there
 # are documented in snow_hydrology.jl / soil_temperature.jl / canopy_fluxes.jl.
 # =============================================================================
-using CLM, NCDatasets, Dates, Printf, Statistics
+using CLM, NCDatasets, Dates, Printf, Statistics, SHA
 
 # ---- CLI ----
 _argval(flag, default) = begin
@@ -271,6 +271,12 @@ mutable struct DayRec
     date::Date
     # max balance residuals over the day
     errh2o::Float64; errh2osno::Float64; errseb::Float64; errsol::Float64; errlon::Float64
+    # SOIL/LAKE energy conservation residual (W/m2). errseb is the SURFACE energy balance;
+    # errsoi is the COLUMN (soil+snow) one, and it is the check that a smoothed guard on a
+    # kg/m2 or W/m2 axis shows up in (a phase-change mass error of dm fabricates hfus*dm/dt
+    # W/m2 of latent heat, which errseb never sees but errsoi does). Same 1e-5 threshold as
+    # balance_check.jl:1310.
+    errsoi::Float64
     # end-of-day storage (mm) and daily integrated fluxes (mm/day)
     storage::Float64; precip::Float64; et::Float64; runoff::Float64
     # signed water residual accumulated over the day (mm) — localizes the leak
@@ -279,7 +285,7 @@ mutable struct DayRec
     tg::Float64; h2osno::Float64; nsamp::Int
     nonfinite::Int
 end
-DayRec(d) = DayRec(d, 0,0,0,0,0, NaN, 0,0,0, 0, 0,0,0, 0)
+DayRec(d) = DayRec(d, 0,0,0,0,0, 0, NaN, 0,0,0, 0, 0,0,0, 0)
 
 days = DayRec[]
 cur_day = Date(start_date)
@@ -326,6 +332,7 @@ while tm.current_date < end_date
     rec.errseb    = max(rec.errseb,    _amax(ef().errseb_patch, pa))
     rec.errsol    = max(rec.errsol,    _amax(ef().errsol_patch, pa))
     rec.errlon    = max(rec.errlon,    _amax(ef().errlon_patch, pa))
+    rec.errsoi    = max(rec.errsoi,    _amax(ef().errsoi_col, filt.nolakec))
     # fluxes (mm/s) -> integrate to mm over the step
     p_in = (a2l().forc_rain_downscaled_col[1] + a2l().forc_snow_downscaled_col[1]) * DTIME
     et   = wf().qflx_evap_tot_col[1] * DTIME
@@ -453,6 +460,7 @@ run_years = max(1e-9, length(days) / 365.25)
         cum_errh2o, run_years, cum_errh2o / run_years)
 @printf("  max |errh2osno| (snow,   mm/step) : %.3e\n", gmax(r->r.errh2osno))
 @printf("  max |errseb|    (sfc E,  W/m2) : %.3e   [threshold %.0e]\n", gmax(r->r.errseb), 1e-5)
+@printf("  max |errsoi|    (soil E, W/m2) : %.3e   [threshold %.0e]\n", gmax(r->r.errsoi), 1e-5)
 @printf("  max |errsol|    (solar,  W/m2) : %.3e\n", gmax(r->r.errsol))
 @printf("  max |errlon|    (longw,  W/m2) : %.3e\n", gmax(r->r.errlon))
 totnf = sum(r->r.nonfinite, days)
@@ -522,8 +530,50 @@ ok_fin = totnf == 0
 drift_rate = abs(cum_errh2o) / run_years          # mm/yr
 ok_h2o = drift_rate < 1.0                          # <1 mm/yr vs ~5400 mm storage
 ok_seb = gmax(r->r.errseb) < 1e-5
+ok_soi = gmax(r->r.errsoi) < 1e-5
 @printf("  finiteness     : %s\n", ok_fin ? "PASS (no NaN/Inf over full horizon)" : "FAIL")
 @printf("  water budget   : %s (cumulative drift %+.3e mm/yr; per-step max %.2e mm)\n",
         ok_h2o ? "CONSERVED" : "DRIFT", cum_errh2o / run_years, gmax(r->r.errh2o))
-@printf("  energy closure : %s (errseb < 1e-5 W/m2 every step)\n", ok_seb ? "PASS" : "FAIL")
+@printf("  sfc energy     : %s (errseb < 1e-5 W/m2 every step)\n", ok_seb ? "PASS" : "FAIL")
+@printf("  soil energy    : %s (errsoi < 1e-5 W/m2 every step)\n", ok_soi ? "PASS" : "FAIL")
 println("="^70)
+
+# --hash : print a bit-exact SHA-256 digest of every prognostic state array at the end of the
+# run. This is the BIT-IDENTITY probe for the default (exact) physics: a change that is meant
+# to be a provable no-op on the exact path — e.g. a hard floor added to guard a SMOOTHED path
+# — must leave every one of these digests unchanged. Run the same script in a worktree of the
+# base commit and diff the digests; equality at full precision over a multi-step trajectory is
+# the only honest check (a max-abs-diff of 0.0 on a single step is not).
+if "--hash" in ARGS
+    _digest(x) = begin
+        ctx = SHA.SHA256_CTX()
+        for v in x
+            SHA.update!(ctx, reinterpret(UInt8, [Float64(v)]))
+        end
+        bytes2hex(SHA.digest!(ctx))[1:16]
+    end
+    ws_h = inst.water.waterstatebulk_inst.ws
+    wf_h = inst.water.waterfluxbulk_inst.wf
+    t_h  = inst.temperature
+    println("\n", "="^70)
+    println("  PROGNOSTIC STATE DIGEST  (steps=$step_count, mode=",
+            SMOOTH ? "SMOOTHED" : "EXACT", ")")
+    println("="^70)
+    for (name, arr) in (
+        ("h2osoi_liq",  ws_h.h2osoi_liq_col),
+        ("h2osoi_ice",  ws_h.h2osoi_ice_col),
+        ("h2osoi_vol",  ws_h.h2osoi_vol_col),
+        ("h2osfc",      ws_h.h2osfc_col),
+        ("wa",          ws_h.wa_col),
+        ("liqcan",      ws_h.liqcan_patch),
+        ("snocan",      ws_h.snocan_patch),
+        ("t_soisno",    t_h.t_soisno_col),
+        ("t_grnd",      t_h.t_grnd_col),
+        ("t_veg",       t_h.t_veg_patch),
+        ("qflx_evap_tot", wf_h.qflx_evap_tot_col),
+        ("qflx_runoff",   wf_h.qflx_runoff_col),
+    )
+        @printf("  %-16s %s\n", name, _digest(arr))
+    end
+    println("="^70)
+end

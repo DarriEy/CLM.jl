@@ -484,7 +484,7 @@ end
         # Litter layer resistance (Sakaguchi)
         snow_depth_c = z_dl
         fsno_dl = snow_depth_col[c] / snow_depth_c
-        elai_dl = lai_dl * (one(T) - smooth_min(fsno_dl, one(T)))
+        elai_dl = lai_dl * (one(T) - min(fsno_dl, one(T)))   # hard: constant cap (full burial)
         rdl = (one(T) - exp(-elai_dl)) / (T(0.004) * uaf_patch[p])
 
         if delq[p] < zero(T)
@@ -625,16 +625,27 @@ end
         zeta_patch[p] = zldis[p] * vkc * grav * thvstar /
             (ustar_patch[p]^2 * thv_col[c])
 
+        # Monin-Obukhov stability parameter zeta = z/L. The ±0.01 near-neutral bounds keep
+        # obu = zldis/zeta finite. These are HARD clamps against CONSTANTS, deliberately:
+        #  * the clamped branch is a constant, so its derivative is identically zero — a smooth
+        #    version recovers no gradient information, it only biases the primal; and
+        #  * the box half-width (0.01) is SMALLER than the k=50 smoothing width (log(2)/50 =
+        #    0.0139), so smoothing did not soften this limiter, it DESTROYED it: the effective
+        #    bound became ±0.024 (+139%) and near-neutral conditions — the common case — were
+        #    pushed onto the wrong stability branch. zeta feeds obu → ustar → temp1/temp2, i.e.
+        #    the sensible and latent heat fluxes. (Measured: one smoothed step moved
+        #    eflx_lh_grnd by 4.66 W/m2 on a 4.46 W/m2 flux, with errseb still closing at 1e-14 —
+        #    the energy balance cannot see a mis-PARTITION.)
         if zeta_patch[p] >= zero(T)  # stable
-            zeta_patch[p] = smooth_clamp(zeta_patch[p], T(0.01), zetamaxstable)
-            um_patch[p] = smooth_max(ur[p], T(0.1))
+            zeta_patch[p] = clamp(zeta_patch[p], T(0.01), zetamaxstable)
+            um_patch[p] = max(ur[p], T(0.1))   # hard: constant 0.1 m/s floor (0.0139 is 14% of it)
         else  # unstable
-            zeta_patch[p] = smooth_clamp(zeta_patch[p], T(-100.0), T(-0.01))
+            zeta_patch[p] = clamp(zeta_patch[p], T(-100.0), T(-0.01))
             if ustar_patch[p] * thvstar > zero(T)
                 wc = zero(T)
             else
-                wc_arg = smooth_max(-grav * ustar_patch[p] * thvstar *
-                    zii_canopy / thv_col[c], zero(T))
+                wc_arg = max(-grav * ustar_patch[p] * thvstar *
+                        zii_canopy / thv_col[c], zero(T))   # hard: constant-0 branch (stable side, wc==0)
                 wc = beta_canopy * wc_arg^T(0.333)
             end
             um_patch[p] = sqrt(ur[p]^2 + wc^2)
@@ -918,7 +929,7 @@ end
         p = filterp[fi]
         g = gridcell[p]
         T = eltype(dayl_factor)
-        dayl_factor[p] = smooth_clamp(
+        dayl_factor[p] = clamp(
             (dayl_grc[g] * dayl_grc[g]) / (max_dayl_grc[g] * max_dayl_grc[g]), T(0.01), one(T))
     end
 end
@@ -1015,9 +1026,9 @@ end
             # a zero-height canopy (htop=0 → z0mv=0, e.g. the first cold-start step
             # before veg-structure sets htop) log(0)=-Inf and egvf·log(0) → NaN.
             # Flooring → z0mv collapses to z0mg (the bare-ground limit), finite.
-            z0mv[p] = exp(egvf * log(smooth_max(z0mv[p], z0mg[c])) + (one(T) - egvf) * log(z0mg[c]))
+            z0mv[p] = exp(egvf * log(max(z0mv[p], z0mg[c])) + (one(T) - egvf) * log(z0mg[c]))
         else                # Meier2022 (z0_method == 2; host-validated)
-            lt = smooth_max(T(1.0e-5), elai[p] + esai[p])
+            lt = max(T(1.0e-5), elai[p] + esai[p])   # hard: constant 1e-5 floor, silently raised to 0.0139 at k=50
             displa[p] = htop[p] *
                 (one(T) - (one(T) - exp(-(T(CD1_PARAM) * lt)^T(0.5))) / (T(CD1_PARAM) * lt)^T(0.5))
             lt = smooth_min(lt, z0v_LAImax_pft[ft])
@@ -1233,10 +1244,17 @@ Adapt.@adapt_structure CfDiagC
         # water-balance error under SMOOTH_MODE=:always — the growing-season half of the
         # leak PR #211 gated the hard error off for). The phase SPLIT below stays smooth:
         # it only redistributes _h2ocan_new between liqcan/snocan, so it is mass-neutral.
+        # The phase split is mass-neutral (snocan = _h2ocan_new - liqcan by construction), but the
+        # SPLIT ITSELF was badly wrong under smoothing: all three guards below clamp against a
+        # CONSTANT (0, 1e-15) on a mm-of-canopy-water axis, so the clamped branch has zero
+        # derivative and smoothing recovers nothing — while the 1e-15 denominator floor was
+        # silently raised to log(2)/50 = 0.0139 mm. For a canopy holding 1e-3 mm of dew that
+        # collapses the liquid fraction to ~7% of its true value, i.e. the water is re-labelled as
+        # ice. Hard guards make the ratio exact.
         _h2ocan_new = max(zero(T), out.liqcan[p] + out.snocan[p] + _net_evap)
-        _w_liq = out.liqcan[p] + _frac_liq * smooth_max(zero(T), _net_evap)
-        _w_sno = out.snocan[p] + _frac_ice * smooth_max(zero(T), _net_evap)
-        _denom = smooth_max(T(1.0e-15), _w_liq + _w_sno)
+        _w_liq = out.liqcan[p] + _frac_liq * max(zero(T), _net_evap)
+        _w_sno = out.snocan[p] + _frac_ice * max(zero(T), _net_evap)
+        _denom = max(T(1.0e-15), _w_liq + _w_sno)
         out.liqcan[p] = _h2ocan_new * (_w_liq / _denom)
         out.snocan[p] = _h2ocan_new - out.liqcan[p]
     end

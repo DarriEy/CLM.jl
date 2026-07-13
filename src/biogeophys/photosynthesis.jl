@@ -578,6 +578,19 @@ function quadratic_solve(a::Real, b::Real, c::Real)
     if r1 < r2
         r1, r2 = r2, r1
     end
+    # CONTRACT: the roots are returned SORTED, r1 >= r2, ALWAYS.
+    #
+    # Callers must therefore use `r1` / `r2` directly to select the larger / smaller root. Do NOT
+    # wrap them in smooth_max(r1, r2) / smooth_min(r1, r2): the selection is not a physical branch,
+    # it is an already-resolved sort, so the smoothing recovers no derivative information — while
+    # smooth_max(a,b) OVERSHOOTS max(a,b) by up to log(2)/k IN THE UNITS OF THE ROOTS. Those units
+    # are not O(1): for the Medlyn stomatal-conductance quadratic the roots are a conductance in
+    # mol H2O/m2/s (~0.001-0.5), so the generic k = 50 imposed a
+    #     log(2)/50 = 0.0139 mol/m2/s = 13 900 umol/m2/s
+    # FLOOR on gs_mol — 139x the medlynintercept of 100 umol/m2/s, i.e. stomata that can never
+    # close. (Measured directly: one smoothed step moved gs_mol from 100 to 1.39e4.) The same
+    # guards on the co-limitation quadratics fabricated ~0.008-0.024 umol/m2/s of photosynthesis on
+    # patches whose true assimilation is exactly zero.
     return (r1, r2)
 end
 
@@ -796,13 +809,13 @@ function _ci_func_core!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
     bquad = -(ac[p, iv] + aj[p, iv])
     cquad = ac[p, iv] * aj[p, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ai = smooth_min(r1, r2)
+    ai = r2
 
     aquad = theta_ip_val
     bquad = -(ai + ap[p, iv])
     cquad = ai * ap[p, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ag[p, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
+    ag[p, iv] = max(zero(r1), r2)
 
     an[p, iv] = ag[p, iv] - lmr_z
     if an[p, iv] < zero(T)
@@ -821,13 +834,13 @@ function _ci_func_core!(ci::Real, p::Int, iv::Int, forc_pbot_c::Real,
                 (T(2.0) * medlynintercept_val * T(1.0e-06) + term *
                  (one(T) - medlynslope_val^2 / rh_can)) * term
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        gs_mol = smooth_max(smooth_max(r1, r2) * T(1.0e06), one(T))
+        gs_mol = max(r1 * T(1.0e06), one(T))
     elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
         aquad = cs
         bquad = cs * (gb_mol - bbb_p) - mbb_p * an[p, iv] * forc_pbot_c
         cquad = -gb_mol * (cs * bbb_p + mbb_p * an[p, iv] * forc_pbot_c * rh_can)
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        gs_mol = smooth_max(smooth_max(r1, r2), bbb_p)
+        gs_mol = max(r1, bbb_p)
     end
 
     fval = ci - cair + an[p, iv] * forc_pbot_c * (T(1.4) * gs_mol + T(1.6) * gb_mol) / (gb_mol * gs_mol)
@@ -1220,7 +1233,7 @@ end
                 bquad = -(qabs + jmax_z_local[p, iv])
                 cquad = qabs * jmax_z_local[p, iv]
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je = smooth_min(r1, r2)
+                je = r2
 
                 # Initial guess for ci
                 if c3flag[p]
@@ -1842,8 +1855,8 @@ end
             root_cond = (fs_j * rai_j * phs_params.krmax[ivt_p]) /
                         (croot_average_length + z_col[c, j])
 
-            soil_cond = smooth_max(soil_cond, T(1.0e-16))
-            root_cond = smooth_max(root_cond, T(1.0e-16))
+            soil_cond = max(soil_cond, T(1.0e-16))   # hard: constant floor, zero derivative on the clamped branch. At k=50 this 1e-16 floor was silently raised to log(2)/50 = 0.0139 [s-1], which is ~13 orders above the floor and inflates even WET-soil conductance (~0.018) by ~38%.
+            root_cond = max(root_cond, T(1.0e-16))   # hard: see soil_cond above.
 
             root_conductance_out[p, j] = root_cond
             soil_conductance_out[p, j] = soil_cond
@@ -3685,26 +3698,26 @@ function ci_func_PHS!(x::AbstractVector{<:Real}, cisun::Real, cisha::Real,
     bquad = -(ac[p, SUN, iv] + aj[p, SUN, iv])
     cquad = ac[p, SUN, iv] * aj[p, SUN, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ai = smooth_min(r1, r2)
+    ai = r2
 
     aquad = params_inst.theta_ip
     bquad = -(ai + ap[p, SUN, iv])
     cquad = ai * ap[p, SUN, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ag[p, SUN, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
+    ag[p, SUN, iv] = max(zero(r1), r2)
 
     # Gross photosynthesis - Shaded
     aquad = params_inst.theta_cj[ivt_p]
     bquad = -(ac[p, SHA, iv] + aj[p, SHA, iv])
     cquad = ac[p, SHA, iv] * aj[p, SHA, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ai = smooth_min(r1, r2)
+    ai = r2
 
     aquad = params_inst.theta_ip
     bquad = -(ai + ap[p, SHA, iv])
     cquad = ai * ap[p, SHA, iv]
     r1, r2 = quadratic_solve(aquad, bquad, cquad)
-    ag[p, SHA, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
+    ag[p, SHA, iv] = max(zero(r1), r2)
 
     # Net photosynthesis
     an_sun[p, iv] = ag[p, SUN, iv] - bsun * lmr_z_sun
@@ -3750,7 +3763,7 @@ function ci_func_PHS!(x::AbstractVector{<:Real}, cisun::Real, cisha::Real,
                     (2.0 * medlynintercept_val * 1.0e-06 + term *
                      (1.0 - medlynslope_val^2 / rh_can)) * term
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sun = smooth_max(smooth_max(r1, r2) * 1.0e06, 1.0)
+            gs_mol_sun = max(r1 * 1.0e06, 1.0)
         end
 
         # Shaded
@@ -3765,7 +3778,7 @@ function ci_func_PHS!(x::AbstractVector{<:Real}, cisun::Real, cisha::Real,
                     (2.0 * medlynintercept_val * 1.0e-06 + term *
                      (1.0 - medlynslope_val^2 / rh_can)) * term
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sha = smooth_max(smooth_max(r1, r2) * 1.0e06, 1.0)
+            gs_mol_sha = max(r1 * 1.0e06, 1.0)
         end
     elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987
         if an_sun[p, iv] >= 0.0
@@ -3774,7 +3787,7 @@ function ci_func_PHS!(x::AbstractVector{<:Real}, cisun::Real, cisha::Real,
             bquad = cs_sun * (gb_mol - bsun_bbb) - mbb_p * an_sun[p, iv] * forc_pbot_c
             cquad = -gb_mol * (cs_sun * bsun_bbb + mbb_p * an_sun[p, iv] * forc_pbot_c * rh_can)
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sun = smooth_max(smooth_max(r1, r2), bbb_p)
+            gs_mol_sun = max(r1, bbb_p)
         end
 
         # Shaded
@@ -3786,7 +3799,7 @@ function ci_func_PHS!(x::AbstractVector{<:Real}, cisun::Real, cisha::Real,
             bquad = cs_sha * (gb_mol - bsha_bbb) - mbb_p * an_sha[p, iv] * forc_pbot_c
             cquad = -gb_mol * (cs_sha * bsha_bbb + mbb_p * an_sha[p, iv] * forc_pbot_c * rh_can)
             r1, r2 = quadratic_solve(aquad, bquad, cquad)
-            gs_mol_sha = smooth_max(smooth_max(r1, r2), bbb_p)
+            gs_mol_sha = max(r1, bbb_p)
         end
     end
 
@@ -3885,26 +3898,26 @@ end
         bquad = -(ac[p, SUN, iv] + aj[p, SUN, iv])
         cquad = ac[p, SUN, iv] * aj[p, SUN, iv]
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        ai = smooth_min(r1, r2)
+        ai = r2
 
         aquad = theta_ip_val
         bquad = -(ai + ap[p, SUN, iv])
         cquad = ai * ap[p, SUN, iv]
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        ag[p, SUN, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
+        ag[p, SUN, iv] = max(zero(r1), r2)
 
         # Gross photosynthesis - Shaded
         aquad = theta_cj_p
         bquad = -(ac[p, SHA, iv] + aj[p, SHA, iv])
         cquad = ac[p, SHA, iv] * aj[p, SHA, iv]
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        ai = smooth_min(r1, r2)
+        ai = r2
 
         aquad = theta_ip_val
         bquad = -(ai + ap[p, SHA, iv])
         cquad = ai * ap[p, SHA, iv]
         r1, r2 = quadratic_solve(aquad, bquad, cquad)
-        ag[p, SHA, iv] = smooth_max(zero(r1), smooth_min(r1, r2))
+        ag[p, SHA, iv] = max(zero(r1), r2)
 
         an_sun[p, iv] = ag[p, SUN, iv] - bsun * lmr_z_sun
         an_sha[p, iv] = ag[p, SHA, iv] - bsha * lmr_z_sha
@@ -3948,7 +3961,7 @@ end
                         (T(2.0) * medlynintercept_val * T(1.0e-06) + term *
                          (one(T) - medlynslope_val^2 / rh_can)) * term
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                gs_mol_sun = smooth_max(smooth_max(r1, r2) * T(1.0e06), one(T))
+                gs_mol_sun = max(r1 * T(1.0e06), one(T))
             end
             if an_sha[p, iv] >= zero(T)
                 cs_sha = cair - T(1.4) / gb_mol * an_sha[p, iv] * forc_pbot_c
@@ -3961,7 +3974,7 @@ end
                         (T(2.0) * medlynintercept_val * T(1.0e-06) + term *
                          (one(T) - medlynslope_val^2 / rh_can)) * term
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                gs_mol_sha = smooth_max(smooth_max(r1, r2) * T(1.0e06), one(T))
+                gs_mol_sha = max(r1 * T(1.0e06), one(T))
             end
         elseif stomatalcond_mtd == STOMATALCOND_MTD_BB1987_
             if an_sun[p, iv] >= zero(T)
@@ -3970,7 +3983,7 @@ end
                 bquad = cs_sun * (gb_mol - bsun_bbb) - mbb_p * an_sun[p, iv] * forc_pbot_c
                 cquad = -gb_mol * (cs_sun * bsun_bbb + mbb_p * an_sun[p, iv] * forc_pbot_c * rh_can)
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                gs_mol_sun = smooth_max(smooth_max(r1, r2), bbb_p)
+                gs_mol_sun = max(r1, bbb_p)
             end
             if an_sha[p, iv] >= zero(T)
                 cs_sha = cair - T(1.4) / gb_mol * an_sha[p, iv] * forc_pbot_c
@@ -3980,7 +3993,7 @@ end
                 bquad = cs_sha * (gb_mol - bsha_bbb) - mbb_p * an_sha[p, iv] * forc_pbot_c
                 cquad = -gb_mol * (cs_sha * bsha_bbb + mbb_p * an_sha[p, iv] * forc_pbot_c * rh_can)
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                gs_mol_sha = smooth_max(smooth_max(r1, r2), bbb_p)
+                gs_mol_sha = max(r1, bbb_p)
             end
         end
 
@@ -4931,7 +4944,7 @@ end
                 bsha_arr[p] = bsha_val
                 # Night transpiration: Fortran sets qflx_tran_veg(p)=soilflux inside the
                 # night calcstress->getvegwp path; without this it stays at its NaN init.
-                qflx_tran_veg[p] = smooth_max(soilflux_night, zero(T))
+                qflx_tran_veg[p] = max(soilflux_night, zero(T))   # HARD: transpiration is kg/m2/s. smooth_max(x,0) sits AT its kink here and returned log(2)/50 = 0.0139 mm/s = 1200 mm/day of water no store paid for.
 
                 ac[p, SUN, iv] = zero(T)
                 aj[p, SUN, iv] = zero(T)
@@ -4982,7 +4995,7 @@ end
                 bquad = -(qabs + jmax_z_local[p, SUN, iv])
                 cquad = qabs * jmax_z_local[p, SUN, iv]
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je_sun = smooth_min(r1, r2)
+                je_sun = r2
 
                 # Electron transport - Shade
                 qabs = T(0.5) * (one(T) - fnps) * par_z_sha_in[p, iv] * T(4.6)
@@ -4990,7 +5003,7 @@ end
                 bquad = -(qabs + jmax_z_local[p, SHA, iv])
                 cquad = qabs * jmax_z_local[p, SHA, iv]
                 r1, r2 = quadratic_solve(aquad, bquad, cquad)
-                je_sha = smooth_min(r1, r2)
+                je_sha = r2
 
                 # Initial ci guess
                 if c3flag[p]
@@ -5025,7 +5038,7 @@ end
                 gs_mol_sha[p, iv] = gs_mol_sha_val
                 bsun_arr[p] = bsun_val
                 bsha_arr[p] = bsha_val
-                qflx_tran_veg[p] = smooth_max(soilflux, zero(soilflux))
+                qflx_tran_veg[p] = max(soilflux, zero(soilflux))   # HARD: see the night branch — mm/s axis, ReLU at its kink.
 
                 # gs min for error checking
                 if stomatalcond_mtd == STOMATALCOND_MTD_MEDLYN2011_

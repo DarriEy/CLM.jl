@@ -1244,8 +1244,8 @@ Adapt.@adapt_structure _SCompDV
                         # (SnowHydrologyMod). Without the flag a use_subgrid_fluxes=false
                         # run would wrongly take the subgrid path. Bow has it true.
                         if use_subgrid && !dv.lakpoi[l] && !dv.urbpoi[l]
-                            ddz3 = smooth_max(zero(T),
-                                smooth_min(one(T), (dv.swe_old[c, jj] - wx) / wx))
+                            ddz3 = max(zero(T),
+                                min(one(T), (dv.swe_old[c, jj] - wx) / wx))   # HARD: constant 0/1 branches on a dimensionless fractional-SWE-change axis; result is divided by dtime, so a 0.0139 offset became a full-strength compaction rate.
                             if (dv.swe_old[c, jj] - wx) > zero(T)
                                 wsum = zero(T)
                                 for jj2 in (snl[c] + 1):0
@@ -1271,13 +1271,13 @@ Adapt.@adapt_structure _SCompDV
                                 if (fsno_melt + dv.frac_h2osfc[c]) > one(T)
                                     fsno_melt = one(T) - dv.frac_h2osfc[c]
                                 end
-                                ddz3 = ddz3 - smooth_max(zero(T),
-                                    (fsno_melt - dv.frac_sno[c]) / dv.frac_sno[c])
+                                ddz3 = ddz3 - max(zero(T),
+                                    (fsno_melt - dv.frac_sno[c]) / dv.frac_sno[c])   # HARD: constant-0 branch
                             end
                             ddz3 = -one(T) / dtime * ddz3
                         else
-                            ddz3 = -one(T) / dtime * smooth_max(zero(T),
-                                (dv.frac_iceold[c, jj] - fi) / dv.frac_iceold[c, jj])
+                            ddz3 = -one(T) / dtime * max(zero(T),
+                                (dv.frac_iceold[c, jj] - fi) / dv.frac_iceold[c, jj])   # HARD: constant-0 branch
                         end
                     else
                         ddz3 = zero(T)

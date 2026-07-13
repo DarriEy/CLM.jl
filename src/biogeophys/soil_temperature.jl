@@ -98,8 +98,8 @@ end
         T = eltype(c_h2osfc_out)
         thin = T(THIN_SFCLAYER)
         if h2osfc[c] > thin && frac_h2osfc[c] > thin
-            c_h2osfc_out[c] = smooth_max(thin, T(CPLIQ) * h2osfc[c] / frac_h2osfc[c])
-            dz_h2osfc[c] = smooth_max(thin, T(1.0e-3) * h2osfc[c] / frac_h2osfc[c])
+            c_h2osfc_out[c] = max(thin, T(CPLIQ) * h2osfc[c] / frac_h2osfc[c])   # HARD: constant guard
+            dz_h2osfc[c] = max(thin, T(1.0e-3) * h2osfc[c] / frac_h2osfc[c])   # HARD: THIN_SFCLAYER=1e-6 m guard; the enclosing `if` already guarantees it cannot bite, so it is provably dead in exact physics — but at k=50 it inflated a 5 mm ponded layer to 16.5 mm (3.3x).
         else
             c_h2osfc_out[c] = thin
             dz_h2osfc[c] = thin
@@ -635,10 +635,10 @@ end
             if (!is_special) || (it == ICOL_ROAD_IMPERV && j > nlev_improad[l])
                 satw = (h2osoi_liq[c, jj] / T(DENH2O) + h2osoi_ice[c, jj] / T(DENICE) +
                         excess_ice[c, j] / T(DENICE)) / (dz[c, jj] * watsat[c, j])
-                satw = smooth_min(one(T), satw)
+                satw = min(one(T), satw)   # HARD: constant cap
                 if satw > T(1.0e-7)
                     if t_soisno[c, jj] >= T(TFRZ)
-                        dke = smooth_max(zero(T), log10(satw) + one(T))
+                        dke = max(zero(T), log10(satw) + one(T))   # HARD: constant-0 branch; Kersten number. Also removes the log10 singular-derivative hazard the _SMOOTH_SAT guard exists for.
                     else
                         dke = satw
                     end
@@ -668,7 +668,7 @@ end
 
         # Thermal conductivity of snow
         if snl[c] + 1 < 1 && j >= snl[c] + 1 && j <= 0
-            denom = smooth_max(frac_sno[c], T(1.0e-6)) * smooth_max(dz[c, jj], T(1.0e-6))
+            denom = max(frac_sno[c], T(1.0e-6)) * max(dz[c, jj], T(1.0e-6))   # HARD: both are 1e-6 divide-by-zero guards (constant branches). At k=50 the floors were raised to 0.0139 in TWO different unit systems at once (a [0-1] fraction and metres), corrupting snow bulk density bw -> thermal conductivity -> ground heat flux (up to +95%).
             bwv = (h2osoi_ice[c, jj] + h2osoi_liq[c, jj]) / denom
             bw[c, jj] = bwv
             if snow_code == 1            # Jordan1991

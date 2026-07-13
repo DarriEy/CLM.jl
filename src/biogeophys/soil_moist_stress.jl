@@ -452,8 +452,8 @@ smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd::Int) =
             smp_node = soil_suction_clapp_hornberger(sucsat[c, j], s_node, bsw[c, j])
             smp_node = smooth_max(smpsc[itype], smp_node; k = smk)
 
-            rresis_j = smooth_min((eff_porosity[c, j] / watsat[c, j]) *
-                (smp_node - smpsc[itype]) / (smpso[itype] - smpsc[itype]), one(T); k = smk)
+            rresis_j = min((eff_porosity[c, j] / watsat[c, j]) *
+                (smp_node - smpsc[itype]) / (smpso[itype] - smpsc[itype]), one(T))   # HARD: the cap is the CONSTANT 1 (a fully unstressed layer). Its derivative there is zero, so smoothing recovers nothing and only cost a flat log(2)/50 = 1.4% off btran on EVERY well-watered rooted layer -> -1.4% on gs/GPP/transpiration. The s_node and smp_node transitions above stay smooth (BTRAN_SMOOTH_K) — those are the real wilting-point physics.
 
             rootfr_j = use_unf ? rootfr_unf[p, j] : rootfr[p, j]
             rootr_wet = rootfr_j * rresis_j

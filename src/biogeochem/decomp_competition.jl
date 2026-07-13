@@ -184,12 +184,12 @@ decompc_sum_ndemand!(sum_ndemand_vr, mask, plant_ndemand, nuptake_prof, potentia
             fpi_vr[c, j] = one(T)
             actual_immob_vr[c, j] = pim
             sminn_to_plant_vr[c, j] = pdem
-            supplement_to_sminn_vr[c, j] = smooth_max(zero(T), sd - smn / dt)
+            supplement_to_sminn_vr[c, j] = max(zero(T), sd - smn / dt)   # HARD: constant-0 branch. Axis = gN/m3/s (~1e-9), so at k=50 this ReLU injected +0.0139 gN/m3/s of SUPPLEMENTAL NITROGEN every step — and because supplement_to_sminn is a LEGITIMATE ACCOUNTED INPUT, the N balance check stays perfectly happy while the model invents nitrogen. The classic silent failure.
         else
             frac = sd > zero(T) ? smn / (sd * dt) : T(2)     # availability ratio (≥1 ⇒ unlimited)
             fpi_vr[c, j] = smooth_min(one(T), frac)
             actual_immob_vr[c, j] = fpi_vr[c, j] * pim
-            sminn_to_plant_vr[c, j] = smooth_min(pdem, smn / dt - actual_immob_vr[c, j])
+            sminn_to_plant_vr[c, j] = min(pdem, smn / dt - actual_immob_vr[c, j])   # HARD: gN/m3/s axis (~1e-8); at k=50 the smooth_min biased plant N uptake NEGATIVE by ~0.0139.
         end
     end
 end

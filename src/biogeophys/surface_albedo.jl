@@ -93,8 +93,8 @@ surfalb_lai_weight!(wl, ws_arr, mask, elai, esai, mpe) =
     p, ib = @index(Global, NTuple)
     @inbounds if mask[p]
         itype = itype_p[p] + 1  # Fortran 0-based PFT -> Julia 1-based
-        rho[p, ib] = smooth_max(pftcon_rhol[itype, ib] * wl[p] + pftcon_rhos[itype, ib] * ws_arr[p], mpe)
-        tau[p, ib] = smooth_max(pftcon_taul[itype, ib] * wl[p] + pftcon_taus[itype, ib] * ws_arr[p], mpe)
+        rho[p, ib] = max(pftcon_rhol[itype, ib] * wl[p] + pftcon_rhos[itype, ib] * ws_arr[p], mpe)
+        tau[p, ib] = max(pftcon_taul[itype, ib] * wl[p] + pftcon_taus[itype, ib] * ws_arr[p], mpe)   # HARD: mpe=1e-6 is a divide-by-zero guard (constant branch). tau_vis ~ 0.05 sits only k*d=2.5 from it, so at k=50 it was inflated ~4%.
     end
 end
 
@@ -616,7 +616,7 @@ Adapt.@adapt_structure _SaSoilCon
             for ib in 1:nband
                 if it == ISTSOIL || it == ISTCROP
                     # Soil
-                    inc = smooth_max(T(0.11) - T(0.40) * in.h2osoi_vol[c, 1], zero(T))
+                    inc = max(T(0.11) - T(0.40) * in.h2osoi_vol[c, 1], zero(T))   # HARD: constant-0 branch. This ReLU sits at its kink for ALL WET SOIL (0.11-0.4*theta <= 0 once theta >= 0.275), and the axis is ALBEDO: at k=50 it added log(2)/50 = 0.0139 of albedo to every wet-soil column (measured: albsoi/albgri Delta = 1.386294e-02, i.e. EXACTLY log(2)/50).
                     soilcol = in.isoicol[c]
                     o.albsod[c, ib] = min(cn.albsat[soilcol, ib] + inc,
                                           cn.albdry[soilcol, ib])
@@ -644,10 +644,10 @@ Adapt.@adapt_structure _SaSoilCon
                     if it == ISTDLAK && !lakepuddling && in.snl[c] == 0
                         sicefr = one(T) - exp(-calb * (tfrz - in.t_grnd[c]) / tfrz)
                         albsod_frozen = sicefr * cn.ablak[ib] +
-                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib],
-                                                  T(0.05) / (smooth_max(T(0.001), in.coszen_col[c]) + T(0.15)))
+                            (one(T) - sicefr) * max(cn.alblakwi[ib],
+                                                  T(0.05) / (max(T(0.001), in.coszen_col[c]) + T(0.15)))   # HARD: constant branches on an ALBEDO axis
                         albsoi_frozen = sicefr * cn.ablak[ib] +
-                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib], T(0.10))
+                            (one(T) - sicefr) * max(cn.alblakwi[ib], T(0.10))   # HARD: alblakwi == 0.10 in the params, so this ReLU sat EXACTLY on its kink and added log(2)/50 = 0.0139 of albedo every step (the measured albgri/albi delta was exactly 1.386294e-02).
                     else
                         albsod_frozen = cn.ablak[ib]
                         albsoi_frozen = albsod_frozen
@@ -662,10 +662,10 @@ Adapt.@adapt_structure _SaSoilCon
                     if it == ISTDLAK && !lakepuddling && in.snl[c] == 0
                         sicefr = one(T) - exp(-calb * (tfrz - in.t_grnd[c]) / tfrz)
                         o.albsod[c, ib] = sicefr * cn.ablak[ib] +
-                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib],
-                                                  T(0.05) / (smooth_max(T(0.001), in.coszen_col[c]) + T(0.15)))
+                            (one(T) - sicefr) * max(cn.alblakwi[ib],
+                                                  T(0.05) / (max(T(0.001), in.coszen_col[c]) + T(0.15)))   # HARD: constant branches on an ALBEDO axis
                         o.albsoi[c, ib] = sicefr * cn.ablak[ib] +
-                            (one(T) - sicefr) * smooth_max(cn.alblakwi[ib], T(0.10))
+                            (one(T) - sicefr) * max(cn.alblakwi[ib], T(0.10))   # HARD: alblakwi == 0.10 in the params, so this ReLU sat EXACTLY on its kink and added log(2)/50 = 0.0139 of albedo every step (the measured albgri/albi delta was exactly 1.386294e-02).
                     else
                         o.albsod[c, ib] = cn.ablak[ib]
                         o.albsoi[c, ib] = o.albsod[c, ib]
@@ -1434,8 +1434,8 @@ function surface_albedo!(surfalb::SurfaceAlbedoData,
             mask_h[c] || continue
             # Snow layer water content (first nlevsno slots are snow layers)
             for j in 1:nlevsno_val
-                h2osno_liq_snw[c, j] = smooth_max(0.0, h2osoi_liq_h[c, j])
-                h2osno_ice_snw[c, j] = smooth_max(0.0, h2osoi_ice_h[c, j])
+                h2osno_liq_snw[c, j] = max(0.0, h2osoi_liq_h[c, j])   # HARD: kg/m2 axis; empty snow slots are exactly 0
+                h2osno_ice_snw[c, j] = max(0.0, h2osoi_ice_h[c, j])   # HARD: see above
             end
             # Snow grain radius (Float64 → Int, microns)
             for j in 1:nlevsno_val

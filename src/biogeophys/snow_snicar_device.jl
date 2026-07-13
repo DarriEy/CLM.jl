@@ -403,11 +403,11 @@ end
                     ts = s.tau_star[c, i]; ws = s.omega_star[c, i]; gs = s.g_star[c, i]
                     lm = sqrt(c3 * (c1 - ws) * (c1 - ws * gs))
                     ue = c1p5 * (c1 - ws * gs) / lm
-                    extins = smooth_max(exp_min, exp(-lm * ts))
+                    extins = max(exp_min, exp(-lm * ts))
                     ne_val = ((ue + c1)^2 / extins) - ((ue - c1)^2 * extins)
                     s.rdif_a[c, i] = (ue^2 - c1) * (one(T) / extins - extins) / ne_val
                     s.tdif_a[c, i] = c4 * ue / ne_val
-                    s.trnlay[c, i] = smooth_max(exp_min, exp(-ts / mu_not))
+                    s.trnlay[c, i] = max(exp_min, exp(-ts / mu_not))
                     alp = cp75 * ws * mu_not * ((c1 + gs * (c1 - ws)) / (c1 - lm^2 * mu_not^2))
                     gam = cp5 * ws * ((c1 + c3 * gs * (c1 - ws) * mu_not^2) / (c1 - lm^2 * mu_not^2))
                     apg = alp + gam; amg = alp - gam
@@ -419,7 +419,7 @@ end
                     for ng in 1:SNICAR_NGMAX
                         mu = cst.difgauspt[ng]; gwt = cst.difgauswt[ng]
                         swt += mu * gwt
-                        trn = smooth_max(exp_min, exp(-ts / mu))
+                        trn = max(exp_min, exp(-ts / mu))
                         alpg = cp75 * ws * mu * ((c1 + gs * (c1 - ws)) / (c1 - lm^2 * mu^2))
                         gamg = cp5 * ws * ((c1 + c3 * gs * (c1 - ws) * mu^2) / (c1 - lm^2 * mu^2))
                         apgg = alpg + gamg; amgg = alpg - gamg
