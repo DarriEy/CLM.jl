@@ -147,7 +147,11 @@ end
     (l >= 1 && l <= length(lun_urbpoi) && lun_urbpoi[l]) || return one(T)
     it = col_itype[c]
     if it == ICOL_SUNWALL || it == ICOL_SHADEWALL
-        return T(3) * T(lun_canyon_hwr[l])
+        # canyon_hwr is populated by urbanparams_populate! on every real urban run
+        # (clm_initialize! Step 13a). Minimal unit-test fixtures that flag a landunit
+        # urban WITHOUT loading the morphology leave it unallocated; fall back to the
+        # unity scale there rather than reading out of bounds.
+        return l <= length(lun_canyon_hwr) ? T(3) * T(lun_canyon_hwr[l]) : one(T)
     elseif it == ICOL_ROAD_PERV || it == ICOL_ROAD_IMPERV
         return T(3)
     else                                    # ICOL_ROOF (and any other urban col)
