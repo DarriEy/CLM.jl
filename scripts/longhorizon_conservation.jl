@@ -27,6 +27,12 @@
 #   julia +1.12 --project=. scripts/longhorizon_conservation.jl            # 2yr (2003-2004)
 #   julia +1.12 --project=. scripts/longhorizon_conservation.jl --years 3  # 2002-2004
 #   julia +1.12 --project=. scripts/longhorizon_conservation.jl --days 30  # short smoke
+#   julia +1.12 --project=. scripts/longhorizon_conservation.jl --smooth   # AD-smoothed physics
+#
+# --smooth runs the whole trajectory under SMOOTH_MODE[] = :always — the smoothed
+# (differentiable) physics that gradient-based calibration evaluates. It must conserve
+# to the same order as the exact path; the smoothed ReLU guards that used to leak there
+# are documented in snow_hydrology.jl / soil_temperature.jl / canopy_fluxes.jl.
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf, Statistics
 
@@ -38,6 +44,9 @@ end
 const NDAYS_OVERRIDE = let v = _argval("--days", ""); isempty(v) ? 0 : parse(Int, v); end
 const NYEARS         = parse(Int, _argval("--years", "2"))
 const DTIME          = 1800
+# --smooth : run the AD-smoothed physics (SMOOTH_MODE=:always) instead of the exact one.
+const SMOOTH         = ("--smooth" in ARGS)
+SMOOTH && (CLM.SMOOTH_MODE[] = :always)
 # --probe YYYY-MM-DD : dump the per-step water budget + every nonzero candidate
 # flux on that day, to localize which term carries the residual.
 const PROBE_DATE     = let v = _argval("--probe", ""); isempty(v) ? nothing : Date(v); end
@@ -80,6 +89,7 @@ println("  CLM.jl — MULTI-YEAR STABILITY + CONSERVATION",
 println("  IC: Fortran spun-up restart 2003-01-01 | forcing: clmforc.2002_2004.nc",
         REPEAT_YEAR > 0 ? " mapped→$(REPEAT_YEAR)" : "")
 @printf("  Window: %s .. %s  (dtime=%ds)\n", start_date, end_date, DTIME)
+println("  Physics: ", SMOOTH ? "AD-SMOOTHED (SMOOTH_MODE=:always)" : "exact (SMOOTH_MODE=:auto)")
 REPEAT_YEAR > 0 && println("  Every model year sees IDENTICAL weather → year-over-year Δ = pure model drift")
 println("="^70)
 

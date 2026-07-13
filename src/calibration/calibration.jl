@@ -163,31 +163,16 @@ function run_clm_with_params(prob::CalibrationProblem, theta::AbstractVector{T})
     (inst_f64, bounds, filt, tm) = clm_initialize!(;
         fsurdat=prob.fsurdat, paramfile=prob.paramfile)
 
-    # ------------------------------------------------------------------
-    # KNOWN LEAK — TODO: the smoothed (AD) physics path does NOT conserve water.
-    #
-    # The top-level water-balance check is live by default (balcheck.hard_error =
-    # true; clm_drv! passes a real DAnstep). Under the exact physics it closes to
-    # machine precision everywhere tested (Bow 2-yr free run: 1.5e-12 mm/yr; lake,
-    # glacier, urban, snow, cold-start: all clean).
-    #
-    # But with SMOOTH_MODE[] = :always — which `smooth_override` turns on here so
-    # the Float64 FD evaluation matches the Dual AD one — the column water balance
-    # breaks by ~6.3e-3 mm/step (~110 mm/yr), ~600x the 1e-5 mm error threshold,
-    # and it does NOT decay. The leak is on the STORAGE side: the smoothed canopy
-    # interception / unloading partitioning gains water that no flux accounts for
-    # (fluxes shift by only ~1e-4 mm/step, storage by ~6.2e-3). The smoothed
-    # min/max replacements in the canopy water branch are not conservation-
-    # preserving. Exact physics (SMOOTH_MODE[] = :auto, the default) is clean.
-    #
-    # Until that is fixed in the smoothing layer, this opt-in path would abort on
-    # its own (real) imbalance, so the hard error is degraded to the @warn that
-    # balance_check! already emits. This is scoped to the smoothed path ONLY — the
-    # check stays live and fatal for the model proper. Do NOT widen this.
-    # ------------------------------------------------------------------
-    if smooth_override
-        inst_f64.balcheck.hard_error = false
-    end
+    # The smoothed (SMOOTH_MODE[] = :always) path CONSERVES water and is covered by
+    # the live, fatal top-level balance check like every other path — no gate here.
+    # (It did not always: the smoothed physics used to leak ~4 mm/step in snow and
+    # ~7.5e-3 mm/step in the growing season, because several smooth_max/smooth_min
+    # replacements sat on ReLU GUARDS whose argument is a water mass, where the
+    # LogSumExp overshoot log(2)/k = 0.0139 conjures 0.0139 mm of water rather than
+    # rounding a corner. Those are fixed at the source — the storage update and the
+    # flux that pays for it now come from the same expression — in snow_hydrology.jl
+    # (percolation), soil_temperature.jl (phase change), canopy_fluxes.jl (canopy
+    # store) and soil_moist_stress.jl (the btran/rootr sum-to-one identity).)
 
     ng = bounds.endg
     nc = bounds.endc

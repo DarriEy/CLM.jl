@@ -598,6 +598,73 @@
         @test wsb.ws.h2osoi_ice_col[c, jj_test] < 5.0
     end
 
+    # ==================================================================
+    # phase_change_beta! conserves layer MASS — including under the
+    # AD-smoothed physics (SMOOTH_MODE = :always).
+    #
+    # The phase change only moves water BETWEEN phases, so per layer
+    #     ice + liq + excess_ice  ==  wmass0  (its value on entry)
+    # must hold to machine precision. It holds because h2osoi_liq is written as
+    # the exact remainder `wmass0 - ice - excess_ice` under a HARD floor. When
+    # that floor was a smooth_max, its LogSumExp overshoot (log(2)/k = 0.0139)
+    # handed every FULLY FROZEN layer 0.0139 mm of liquid that no flux paid for —
+    # ~3.2e-3 mm/step of column water-balance error under SMOOTH_MODE=:always.
+    # ==================================================================
+    @testset "phase_change_beta! conserves mass (exact AND smoothed physics)" begin
+        for mode in (:auto, :always)
+            saved_mode = CLM.SMOOTH_MODE[]
+            CLM.SMOOTH_MODE[] = mode
+            try
+                col, lun, patch_data, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
+                    mask_nolakec, mask_nolakep, mask_urbanl, mask_urbanc,
+                    bounds_col, bounds_lun, bounds_patch = setup_test_data()
+
+                c = 1; p = 1; l = 1
+                setup_soil_column!(col, lun, patch_data, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
+                                   mask_nolakec, mask_nolakep, mask_urbanc, c, p, l)
+
+                dtime = 1800.0
+                dhsdT = fill(-5.0, nc)
+
+                # A column that exercises BOTH branches and the degenerate ends:
+                #   melting ice, freezing liquid, a FULLY FROZEN layer (liq == 0 —
+                #   where the smoothed floor used to conjure water) and a dry layer.
+                for j in 1:nlevgrnd
+                    jj = j + joff
+                    temp.fact_col[c, jj] = dtime / (2.0e6 * col.dz[c, jj])
+                end
+                jj(j) = j + joff
+                wsb.ws.h2osoi_ice_col[c, jj(1)] = 4.0;  wsb.ws.h2osoi_liq_col[c, jj(1)] = 1.0
+                temp.t_soisno_col[c, jj(1)] = CLM.TFRZ + 3.0     # melting
+                wsb.ws.h2osoi_ice_col[c, jj(2)] = 0.0;  wsb.ws.h2osoi_liq_col[c, jj(2)] = 6.0
+                temp.t_soisno_col[c, jj(2)] = CLM.TFRZ - 3.0     # freezing
+                wsb.ws.h2osoi_ice_col[c, jj(3)] = 7.0;  wsb.ws.h2osoi_liq_col[c, jj(3)] = 0.0
+                temp.t_soisno_col[c, jj(3)] = CLM.TFRZ - 1.0     # FULLY FROZEN (liq == 0)
+                wsb.ws.h2osoi_ice_col[c, jj(4)] = 0.0;  wsb.ws.h2osoi_liq_col[c, jj(4)] = 0.0
+                temp.t_soisno_col[c, jj(4)] = CLM.TFRZ - 1.0     # dry
+                wsb.ws.h2osoi_ice_col[c, jj(5)] = 0.5;  wsb.ws.h2osoi_liq_col[c, jj(5)] = 0.05
+                temp.t_soisno_col[c, jj(5)] = CLM.TFRZ + 0.5     # nearly melted out
+
+                wmass0 = [wsb.ws.h2osoi_ice_col[c, jj(j)] + wsb.ws.h2osoi_liq_col[c, jj(j)] +
+                          wsb.ws.excess_ice_col[c, j] for j in 1:nlevgrnd]
+
+                CLM.phase_change_beta!(col, lun, temp, ef, ss, wsb, wdb, wfb,
+                                       mask_nolakec, bounds_col, dtime, dhsdT)
+
+                for j in 1:nlevgrnd
+                    mass = wsb.ws.h2osoi_ice_col[c, jj(j)] + wsb.ws.h2osoi_liq_col[c, jj(j)] +
+                           wsb.ws.excess_ice_col[c, j]
+                    # Mass conserved to machine precision, NOT to the smoothing width.
+                    @test isapprox(mass, wmass0[j]; atol = 1.0e-12, rtol = 1.0e-12)
+                    @test wsb.ws.h2osoi_liq_col[c, jj(j)] >= 0.0
+                    @test wsb.ws.h2osoi_ice_col[c, jj(j)] >= 0.0
+                end
+            finally
+                CLM.SMOOTH_MODE[] = saved_mode
+            end
+        end
+    end
+
     @testset "building_hac! — cooling mode" begin
         col, lun, patch_data, temp, ef, ss, wsb, wdb, wfb, sa, cs, up,
             mask_nolakec, mask_nolakep, mask_urbanl, mask_urbanc,

@@ -146,6 +146,25 @@ const LSADZ = 0.03  # additional minimum thickness for lake snow layers (m)
 const SNOW_COMBO_TEMP_K = Ref(50.0)
 const SNOW_THRESH_K     = Ref(50.0)
 
+# SNOW_PERC_WATER_K — sharpness of the snow-percolation drainage-onset floor
+#   `max(0, (vol_liq - ssi*eff_porosity) * dz * frac_sno_eff)`, whose argument is a
+#   WATER DEPTH IN METRES (O(1e-4) m for a snow layer), NOT an O(1) quantity.
+#
+# The sharpness is 1/width IN THE UNITS OF THE AXIS. The generic k = 50 default is
+# calibrated for O(1) axes; on a metres-of-water axis it puts the LogSumExp floor at
+# log(2)/50 = 1.4e-2 m = 13.9 kg/m2 — i.e. the smoothed `max` returned ~14 mm of
+# drainage out of a snow layer holding ~6 mm even when the exact physics drains
+# NOTHING. That over-drain drove h2osoi_liq negative, and the downstream re-clamps
+# then manufactured water: ~4 mm/step of column water-balance error under
+# SMOOTH_MODE=:always (the leak PR #211 gated the hard error off for).
+#
+# k = 1e9 puts the transition width at log(2)/1e9 ≈ 7e-10 m = 7e-7 mm of water —
+# negligible against both the physics and the 1e-5 mm balance threshold — while
+# keeping the function C∞ (the smooth_min/max saturation guard means anything more
+# than 3.6e-8 m from the kink evaluates the exact branch, so no overflow and the
+# derivative is the exact one almost everywhere).
+const SNOW_PERC_WATER_K = Ref(1.0e9)
+
 # =========================================================================
 # NewSnowBulkDensity
 # =========================================================================
@@ -707,7 +726,7 @@ function bulk_flux_snow_percolation!(
     FT = eltype(qflx_snow_percolation)
     snowhyd_snow_percolation_flux!(qflx_snow_percolation, mask_snow, snl, dz,
         frac_sno_eff, h2osoi_ice, h2osoi_liq, dtime, nlevsno,
-        FT(params.wimp), FT(params.ssi), bounds)
+        FT(params.wimp), FT(params.ssi), FT(SNOW_PERC_WATER_K[]), bounds)
 end
 
 # Partial volume of ice / effective porosity / partial volume of liquid for one
@@ -728,13 +747,18 @@ end
 @kernel function _snowhyd_snow_percolation_flux_kernel!(qflx_snow_percolation,
         @Const(mask_snow), @Const(snl), @Const(dz), @Const(frac_sno_eff),
         @Const(h2osoi_ice), @Const(h2osoi_liq), dtime, nlevsno::Int,
-        wimp, ssi, cmin::Int, cmax::Int)
+        wimp, ssi, kwat, cmin::Int, cmax::Int)
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask_snow[c]
         T = eltype(qflx_snow_percolation)
         fse = frac_sno_eff[c]
         wimp_T = T(wimp)
         ssi_T = T(ssi)
+        # Sharpness for the smooth min/max on the WATER-DEPTH (m) axis. The generic
+        # k = 50 default is for O(1) axes; q here is O(1e-4) m, so k = 50 would put
+        # the LogSumExp floor at 1.4e-2 m = 14 kg/m2 of phantom drainage (see
+        # SNOW_PERC_WATER_K).
+        kq = T(kwat)
         for j in (snl[c] + 1):0
             jj = j + nlevsno
             vol_ice, eff_porosity, vol_liq =
@@ -748,14 +772,24 @@ end
                     q = zero(T)
                 else
                     q = smooth_max(zero(T),
-                        (vol_liq - ssi_T * eff_porosity) * dz[c, jj] * fse)
+                        (vol_liq - ssi_T * eff_porosity) * dz[c, jj] * fse; k = kq)
                     q = smooth_min(q,
-                        (one(T) - vol_ice_n - vol_liq_n) * dz[c, jj_next] * fse)
+                        (one(T) - vol_ice_n - vol_liq_n) * dz[c, jj_next] * fse; k = kq)
                 end
             else  # j == 0, bottom layer
                 q = smooth_max(zero(T),
-                    (vol_liq - ssi_T * eff_porosity) * dz[c, jj] * fse)
+                    (vol_liq - ssi_T * eff_porosity) * dz[c, jj] * fse; k = kq)
             end
+            # Physical box on the drainage: a layer can drain neither a negative
+            # amount nor more liquid water than it holds. In the EXACT physics this
+            # is a mathematical no-op — vol_liq <= h2osoi_liq/(dz*fse*DENH2O) and
+            # ssi*eff_porosity >= 0, so q <= h2osoi_liq/1000 always, with >= 3% (ssi)
+            # margin — so the default path is bit-identical. It is load-bearing for
+            # the SMOOTHED path: it is what makes the flux and the storage update it
+            # drives conserve BY CONSTRUCTION, because a smoothed q that exceeded the
+            # layer's liquid drove h2osoi_liq negative and the downstream re-clamps
+            # then created water out of nothing.
+            q = min(max(q, zero(T)), h2osoi_liq[c, jj] / T(1000))
             # Convert from m to mm H2O/s
             qflx_snow_percolation[c, jj] = (q * T(1000)) / dtime
         end
@@ -763,10 +797,10 @@ end
 end
 
 snowhyd_snow_percolation_flux!(qflx_snow_percolation, mask_snow, snl, dz,
-        frac_sno_eff, h2osoi_ice, h2osoi_liq, dtime, nlevsno, wimp, ssi, bounds) =
+        frac_sno_eff, h2osoi_ice, h2osoi_liq, dtime, nlevsno, wimp, ssi, kwat, bounds) =
     _launch!(_snowhyd_snow_percolation_flux_kernel!, qflx_snow_percolation, mask_snow,
              snl, dz, frac_sno_eff, h2osoi_ice, h2osoi_liq, dtime, nlevsno,
-             wimp, ssi, first(bounds), last(bounds); ndrange = length(snl))
+             wimp, ssi, kwat, first(bounds), last(bounds); ndrange = length(snl))
 
 # =========================================================================
 # UpdateState_SnowPercolation
