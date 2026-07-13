@@ -236,6 +236,29 @@ const _C = CLM
 
         # ---- cold-start a real-param (14-PFT) carbon-only FATES site ----
         fates = _C.clm_fates_init!(inst; nsites=1, nlevsoil=nlevsoil, nlevdecomp=nlevdecomp)
+
+        # ---- COLD-START LEAF-AREA PROFILE (regression, Fortran-FATES parity) ----
+        # Fortran `init_coldstart` runs canopy_summarization (via
+        # wrap_update_hlmfates_dyn) after ed_update_site, so the cold-start cohorts
+        # already have a leaf-area profile: nv >= 1 leaf layers and a finite patch
+        # total_canopy_area. The port used to skip it, leaving nv = 0 /
+        # total_canopy_area = NaN -> FATES had ZERO leaf layers on the very first
+        # timestep (no photosynthesis, no leaf dark respiration). Caught by the
+        # time-stepped Fortran-FATES parity harness (scripts/fates_fortran_parity.jl).
+        let site = fates.sites[1], cp = site.oldest_patch
+            nv_ok = true; tca_ok = true
+            while cp !== nothing
+                isfinite(cp.total_canopy_area) || (tca_ok = false)
+                cc = cp.tallest
+                while cc !== nothing
+                    cc.nv >= 1 || (nv_ok = false)
+                    cc = cc.shorter
+                end
+                cp = cp.younger
+            end
+            @test tca_ok
+            @test nv_ok
+        end
         @test inst.fates !== nothing
         @test inst.fates.nsites == 1
         @test _C.numpft[] == 14
@@ -367,6 +390,31 @@ const _C = CLM
             # ---- FATES census finiteness/physicality each step ----
             cen = fates_census(inst)
             isempty(cen.bad) || push!(nan_steps, "step$i:census$(cen.bad)")
+
+            # ---- ALLOMETRIC CONSISTENCY (regression, Fortran-FATES parity) ----
+            # Every cohort's height must equal its own diameter allometry,
+            # height == h_allom(dbh)[1]. `h_allom` returns (height, dh/ddbh); the
+            # daily growth step in EDMainMod used to destructure that BACKWARDS and
+            # assign the DERIVATIVE to cohort.height, so height drifted off its
+            # allometry a little more every day (1.30 -> 5.99 m in 14 steps for a
+            # PFT whose dbh was not growing at all), corrupting canopy layering,
+            # crown area and the tallest->shortest ordering. Caught by the
+            # time-stepped Fortran-FATES parity harness
+            # (scripts/fates_fortran_parity.jl); this asserts it stays fixed.
+            let site = inst.fates.sites[1]
+                cp = site.oldest_patch
+                while cp !== nothing
+                    cc = cp.tallest
+                    while cc !== nothing
+                        h_expect, _ = _C.h_allom(cc.dbh, cc.pft)
+                        isapprox(cc.height, h_expect; rtol=1e-8) ||
+                            push!(nan_steps,
+                                  "step$i:allom pft=$(cc.pft) h=$(cc.height) != h_allom(dbh=$(cc.dbh))=$(h_expect)")
+                        cc = cc.shorter
+                    end
+                    cp = cp.younger
+                end
+            end
             # area is conserved at AREA each step.
             isapprox(cen.totarea, _C.area; atol=1e-4) || push!(nan_steps, "step$i:area=$(cen.totarea)")
 
@@ -412,6 +460,7 @@ const _C = CLM
 
         # 4. the daily demographic step fired at least once (>= 1 day boundary).
         @test daily_fires >= 1
+
 
         # 2. no NaN/Inf in CLM outputs nor FATES census over the whole run.
         @test isempty(nan_steps)

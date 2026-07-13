@@ -611,8 +611,22 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     set_site_properties!(nsites, sites, bc_in)
     init_patches!(nsites, sites, bc_in)
     for s in 1:nsites
+        # CLM has not computed last year's maximum rooting depth yet (it will at the
+        # start of the timestep loop), so the litter-flux boundary starts trivial.
+        bc_in[s].max_rooting_depth_index_col = bc_in[s].nlevsoil
         ed_update_site(sites[s], bc_in[s], fates.bc_out[s], false)
     end
+    # Fortran `init_coldstart` follows the ed_update_site loop with
+    #     call this%wrap_update_hlmfates_dyn(nc, bounds_clump, ..., .false.)
+    # which runs canopy_summarization + update_hlm_dynamics. Without it the cold-start
+    # cohorts have NO leaf-area profile: `nv` (number of leaf layers) stays 0 and the
+    # patch `total_canopy_area` stays NaN, so the FATES canopy has zero leaf layers on
+    # the very first timestep — photosynthesis and leaf dark respiration are identically
+    # zero for that step, and the HLM canopy diagnostics are NaN. (Caught by the
+    # time-stepped Fortran-FATES parity harness: Fortran has nv=2 / tcanarea=6260 at
+    # nstep=0 where the port had nv=0 / NaN.) The HLM unpack is NOT done here: the
+    # cold-start caller owns the canopystate/filter wiring.
+    canopy_summarization!(nsites, sites, bc_in)
 
     # ---- W6: history-output interface (registry + buffers) ----
     # Each FATES site `s` writes into history-output slot `h_gid = s` (the Fortran

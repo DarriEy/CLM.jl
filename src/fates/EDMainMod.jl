@@ -133,6 +133,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
 
     # Zero the mass balance.
     TotalBalanceCheck(currentSite, 0)
+    fates_parity_hook(currentSite, bc_in, 10)   # parity: dyn_in (daily-step input state)
 
     # Phenology. Not allowed while in ST3 mode (litter fluxes of flushing /
     # turning over leaves are not plugged in for non-dynamics runs).
@@ -143,6 +144,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
             satellite_phenology(currentSite, bc_in)
         end
     end
+    fates_parity_hook(currentSite, bc_in, 11)   # parity: after phenology
 
     if hlm_use_ed_st3[] == ifalse && hlm_use_sp[] == ifalse   # bypass if ST3 / SP
 
@@ -155,9 +157,11 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
 
         # Disturbance + mortality from previous-timestep vegetation.
         disturbance_rates(currentSite, bc_in)
+        fates_parity_hook(currentSite, bc_in, 12)   # parity: after fire + disturbance_rates
 
         # Integrate state variables from annual rates to the daily timestep.
         ed_integrate_state_variables(currentSite, bc_in, bc_out)
+        fates_parity_hook(currentSite, bc_in, 13)   # parity: after growth/allocation/PRT
 
         # The transition flag is no longer needed once we have integrated.
         if currentSite.transition_landuse_from_off_to_on
@@ -185,6 +189,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
         end
 
         TotalBalanceCheck(currentSite, 1)
+        fates_parity_hook(currentSite, bc_in, 14)   # parity: after recruitment
 
         currentPatch = currentSite.oldest_patch
         while currentPatch !== nothing
@@ -197,6 +202,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
     end
 
     TotalBalanceCheck(currentSite, 2)
+    fates_parity_hook(currentSite, bc_in, 15)   # parity: after cohort sort/terminate/fuse
 
     # ----------------------------------------------------------------------
     # Patch dynamics: fusion, new-patch spawning, termination.
@@ -213,6 +219,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
         spawn_patches(currentSite, bc_in)
 
         TotalBalanceCheck(currentSite, 3)
+        fates_parity_hook(currentSite, bc_in, 16)   # parity: after spawn_patches
 
         # fuse on the spawned patches.
         fuse_patches(currentSite, bc_in)
@@ -233,6 +240,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
 
     # Final instantaneous mass balance check.
     TotalBalanceCheck(currentSite, 5)
+    fates_parity_hook(currentSite, bc_in, 17)   # parity: end of ed_ecosystem_dynamics
 
     return nothing
 end
@@ -447,7 +455,18 @@ function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
             currentCohort.isnew = false
 
             # Update plant height (if it has grown).
-            _, currentCohort.height = h_allom(currentCohort.dbh, ft)
+            # `h_allom` returns (height, dh/ddbh) — the Fortran is
+            #     call h_allom(currentCohort%dbh, ft, currentCohort%height)
+            # i.e. the HEIGHT is the output. The destructuring here used to be
+            # reversed (`_, height = ...`), which assigned the allometric DERIVATIVE
+            # dh/ddbh to cohort height on EVERY daily growth step — height then drifted
+            # away from its own allometry (e.g. a PFT-1 sapling at dbh=0.764 cm has
+            # h=1.30 m and dh/ddbh=1.36, so height jumped 1.30 -> 1.36 m on day one with
+            # ddbhdt == 0) and kept climbing, corrupting canopy layering, crown area and
+            # the tallest->shortest cohort ordering. Every other h_allom call site in the
+            # port already uses `h, _ = h_allom(...)`. Caught by the time-stepped
+            # Fortran-FATES parity harness (scripts/fates_fortran_parity.jl).
+            currentCohort.height, _ = h_allom(currentCohort.dbh, ft)
 
             currentCohort.dhdt   = (currentCohort.height - height_old) / hlm_freq_day[]
             currentCohort.ddbhdt = (currentCohort.dbh - dbh_old) / hlm_freq_day[]
@@ -607,6 +626,8 @@ function ed_update_site(currentSite::ed_site_type, bc_in, bc_out, is_restarting:
             trim_canopy(currentSite)
         end
     end
+
+    is_restarting || fates_parity_hook(currentSite, bc_in, 18)   # parity: end of daily step
 
     return nothing
 end

@@ -484,11 +484,19 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 
     joff = varpar.nlevsno  # snow layers offset into t_soisno / h2osoi arrays
 
+    ws = inst.water.waterstatebulk_inst.ws
+
     for j in 1:nlevsoil
         tk = temp.t_soisno_col[c, joff + j]
         bc.tempk_sl[j]        = tk
         bc.t_soisno_sl[j]     = tk
-        bc.h2o_liqvol_sl[j]   = wdb.h2osoi_liqvol_col[c, joff + j]
+        # The DAILY pack mirrors Fortran `dynamics_driv`, which fills h2o_liqvol_sl
+        # from the column's TOTAL volumetric water:
+        #     bc_in(s)%h2o_liqvol_sl(1:nlevsoil) = waterstatebulk_inst%h2osoi_vol_col(c,1:nlevsoil)
+        # (clmfates_interfaceMod.F90). Only the sub-daily `wrap_btran` pack uses the
+        # liquid-only h2osoi_liqvol. Packing liquid-only here understated the soil water
+        # the daily FATES step sees whenever any layer held ice.
+        bc.h2o_liqvol_sl[j]   = ws.h2osoi_vol_col[c, j]
         bc.watsat_sl[j]       = ss.watsat_col[c, j]
         bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
 

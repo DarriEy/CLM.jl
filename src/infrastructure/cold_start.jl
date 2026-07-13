@@ -600,13 +600,24 @@ function init_soil_moisture!(inst::CLMInstances, bounds::BoundsType;
         # Set soil layers to initial volumetric water content.
         for j in 1:nlevsoi
             if COLDSTART_MATCH_FORTRAN[]
-                # Fortran WaterStateType::InitCold standard soil: h2osoi_vol = 0.15
-                # for j <= nbedrock, else 0 (bedrock layers stay dry). The 0.75*watsat
-                # branch is for organic/special columns only. The vol is then split by
-                # temperature: a frozen layer (t_soisno <= TFRZ) becomes ALL ICE
-                # (dz*DENICE*vol), a thawed layer all liquid (dz*DENH2O*vol).
+                # Fortran WaterStateType::InitCold (istsoil/istcrop): for j <= nbedrock
+                #     if (use_fates) then  h2osoi_vol = 0.75 * watsat * ratio
+                #     else                 h2osoi_vol = 0.15 * ratio
+                # (else 0 — bedrock layers stay dry). The `use_fates` branch is NOT an
+                # organic/special-column case: CTSM deliberately cold-starts a FATES
+                # column WET (0.75 of saturation) instead of the CLM default 0.15,
+                # because FATES cohorts are seeded with leaves and a 0.15 profile at the
+                # cold-start soil temperature (272 K) is entirely ICE -> zero liquid ->
+                # btran_ft = 0 -> btran <= hf_sm_threshold (1e-6) -> FATES fires
+                # hydraulic-failure mortality (mort_scalar_hydrfailure = 0.6/yr) on day
+                # one, a ~44x inflation of the total mortality rate. Omitting the branch
+                # was a real port bug, caught by the time-stepped Fortran-FATES parity
+                # harness (scripts/fates_fortran_parity.jl).
+                # The vol is then split by temperature: a frozen layer (t_soisno <= TFRZ)
+                # becomes ALL ICE (dz*DENICE*vol), a thawed layer all liquid (dz*DENH2O*vol).
                 nbr = min(col.nbedrock[c], nlevsoi)  # nbedrock = nlevsoi when use_bedrock=false
-                vol = j <= nbr ? 0.15 : 0.0
+                vol = j <= nbr ?
+                      (varctl.use_fates ? 0.75 * ss.watsat_col[c, j] : 0.15) : 0.0
                 ws.h2osoi_vol_col[c, j] = vol
                 if inst.temperature.t_soisno_col[c, j + joff] <= TFRZ
                     ws.h2osoi_ice_col[c, j + joff] = col.dz[c, j + joff] * DENICE * vol
