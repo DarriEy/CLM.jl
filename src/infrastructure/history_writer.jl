@@ -680,14 +680,24 @@ function history_fpsn_patch(inst::CLMInstances)
     n = length(fp)
     out = fill(NaN, n)
     @inbounds for p in 1:n
-        # Bare-ground (noveg) patches → 0.0, INCLUDED in the gridcell average with
-        # their full area weight. Fortran (PhotosynthesisMod TimeStepInit) sets
-        # fpsn_patch = 0 for EVERY non-lake patch, bare ground included; only lake
-        # patches keep spval. So the gridcell FPSN is area-weighted over the whole
-        # gridcell (bare fraction dilutes it), NOT renormalized to vegetated area.
-        # Excluding bare here over-weighted the vegetated patches and inflated FPSN
-        # by 1/vegfrac (Stillwater vegfrac≈0.70 → +43% instantaneous, +33% on the
-        # annual mean). Lake/urban are handled 0-valued by their own patch types.
+        # Every patch is INCLUDED in the gridcell average at its full area weight, so
+        # the gridcell FPSN is area-weighted over the WHOLE gridcell (the bare/lake
+        # fraction dilutes it) and is NOT renormalized to vegetated area. Excluding
+        # non-photosynthesizing patches here over-weighted the vegetated ones and
+        # inflated FPSN by 1/vegfrac (Stillwater vegfrac≈0.70 → +43% instantaneous,
+        # +33% on the annual mean).
+        #
+        # The `isfinite` fallback is now LOAD-BEARING FOR LAKE PATCHES ONLY, and it is
+        # a physical mapping rather than a NaN paper-over: Fortran's
+        # PhotosynthesisMod::TimeStepInit zeroes fpsn on every NON-LAKE patch and
+        # deliberately leaves LAKE patches at spval (a lake photosynthesizes nothing),
+        # which the area average must count as 0.
+        #
+        # It used to be doing much more than that — silently rescuing BARE-GROUND
+        # patches, whose fpsn sat at the allocator's NaN for the whole run because
+        # `photosynthesis_timestep_init!` was ported and never called. That root cause
+        # is now fixed at the source (the call is wired in clm_driver.jl), so bare
+        # ground arrives here as a real 0.0 and no longer depends on this fallback.
         v = fp[p]
         out[p] = isfinite(v) ? Float64(v) : 0.0
     end

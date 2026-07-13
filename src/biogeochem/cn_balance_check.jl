@@ -111,6 +111,98 @@ function c2g_unity!(
 end
 
 # --------------------------------------------------------------------------
+# c2g with Fortran's 'urbanf' column-to-landunit scaling
+# --------------------------------------------------------------------------
+#
+# Fortran's WATER balance check aggregates every column term to the gridcell with
+#     call c2g(..., c2l_scale_type='urbanf', l2g_scale_type='unity')
+# (BalanceCheckMod.F90:270, :332, :713-724). 'urbanf' is the scaling for
+# EXTENSIVE, per-m^2 urban quantities: an urban WALL flux is expressed per m^2 of
+# VERTICAL WALL area, and a canyon-floor flux per m^2 of ROAD area, so both must
+# be converted to per-m^2 of GROUND area before they can be area-averaged with the
+# rest of the gridcell (subgridAveMod::set_c2l_scale):
+#
+#     sunwall / shadewall -> 3 * canyon_hwr
+#     road (perv/imperv)  -> 3
+#     roof                -> 1
+#     everything non-urban-> 1
+#
+# The port was using `c2g_unity!` (scale == 1 everywhere) for the water balance —
+# and its docstring even CLAIMED that was "equivalent to c2l_scale_type='urbanf'".
+# It is not. On a gridcell with urban landunits the wall/road columns entered the
+# gridcell sum unscaled, so `errh2o_grc` could not close even when EVERY COLUMN
+# closed to machine precision (mexicocity: columns ~1e-13, gridcell -2.6e-4 mm).
+# This was invisible until the water InitCold + urban-ponding fixes made those
+# columns finite and closing.
+#
+# On a gridcell with NO urban landunit every scale is 1.0, so this is EXACTLY
+# `c2g_unity!` there — the non-urban domains stay bit-identical.
+#
+# The scale is recomputed inside the kernel from fields that are already
+# device-resident (col.itype / col.landunit / lun.urbpoi / lun.canyon_hwr), so
+# there is no host scale vector to allocate or move to the GPU.
+@inline function _c2l_urbanf_scale(::Type{T}, c, col_itype, col_landunit,
+                                   lun_urbpoi, lun_canyon_hwr) where {T}
+    l = col_landunit[c]
+    (l >= 1 && l <= length(lun_urbpoi) && lun_urbpoi[l]) || return one(T)
+    it = col_itype[c]
+    if it == ICOL_SUNWALL || it == ICOL_SHADEWALL
+        # canyon_hwr is populated by urbanparams_populate! on every real urban run
+        # (clm_initialize! Step 13a). Minimal unit-test fixtures that flag a landunit
+        # urban WITHOUT loading the morphology leave it unallocated; fall back to the
+        # unity scale there rather than reading out of bounds.
+        return l <= length(lun_canyon_hwr) ? T(3) * T(lun_canyon_hwr[l]) : one(T)
+    elseif it == ICOL_ROAD_PERV || it == ICOL_ROAD_IMPERV
+        return T(3)
+    else                                    # ICOL_ROOF (and any other urban col)
+        return one(T)
+    end
+end
+
+@kernel function _c2g_scatter_urbanf_kernel!(garr, @Const(carr), @Const(col_gridcell),
+        @Const(col_wtgcell), @Const(col_itype), @Const(col_landunit),
+        @Const(lun_urbpoi), @Const(lun_canyon_hwr),
+        cmin::Int, cmax::Int, gmin::Int, gmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        g = col_gridcell[c]
+        if gmin <= g <= gmax
+            T = eltype(garr)
+            s = _c2l_urbanf_scale(T, c, col_itype, col_landunit,
+                                  lun_urbpoi, lun_canyon_hwr)
+            _scatter_add!(garr, g, carr[c] * s * col_wtgcell[c])
+        end
+    end
+end
+
+"""
+    c2g_urbanf!(garr, carr, col, lun, bounds_c, bounds_g)
+
+Column-to-gridcell area-weighted sum with Fortran's `c2l_scale_type='urbanf'`
+scaling. Use this — not [`c2g_unity!`](@ref) — for every term of the WATER
+balance, matching `BalanceCheckMod.F90`. Identical to `c2g_unity!` on gridcells
+with no urban landunit.
+"""
+function c2g_urbanf!(
+    garr::AbstractVector{<:Real},
+    carr::AbstractVector{<:Real},
+    col,
+    lun,
+    bounds_c::UnitRange{Int},
+    bounds_g::UnitRange{Int}
+)
+    isempty(bounds_g) && return nothing
+    _launch!(_c2g_zero_kernel!, garr, first(bounds_g), last(bounds_g);
+        ndrange = length(garr))
+    isempty(bounds_c) && return nothing
+    _launch!(_c2g_scatter_urbanf_kernel!, garr, carr, col.gridcell, col.wtgcell,
+        col.itype, col.landunit, lun.urbpoi, lun.canyon_hwr,
+        first(bounds_c), last(bounds_c), first(bounds_g), last(bounds_g);
+        ndrange = length(carr))
+    return nothing
+end
+
+# --------------------------------------------------------------------------
 # BeginCNGridcellBalance
 # --------------------------------------------------------------------------
 

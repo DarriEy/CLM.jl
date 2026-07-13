@@ -124,6 +124,10 @@ const C3_R2 = 1.0 - C3_R1
 const C4_R1 = PDB * (1.0 + C4_DEL13C / 1000.0) / (1.0 + PDB * (1.0 + C4_DEL13C / 1000.0))
 const C4_R2 = 1.0 - C4_R1
 const C14RATIO = 1.0e-12       # baseline C14/C ratio
+# 13C/(12+13)C of the pre-industrial atmosphere — the `ratio` Fortran passes to
+# c13_soilbiogeochem_carbonstate_inst%Init (clm_varcon.F90:134, clm_instMod.F90:427),
+# which its InitCold uses to scale the C13 decomposition pools off the C12 ones.
+const C13RATIO = PREIND_ATM_RATIO / (1.0 + PREIND_ATM_RATIO)
 
 # --- Nitrogen constants ---
 const NITRIF_N2O_LOSS_FRAC = 6.0e-4      # fraction of nitrification lost as N2O

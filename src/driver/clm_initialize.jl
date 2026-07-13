@@ -368,6 +368,29 @@ function clm_initialize!(;
                                     dt=Float64(dtime))
     end
 
+    # ---- Step 15g: InitCold for the soil-BGC / CN-vegetation state ----------
+    # Fortran runs soilbiogeochem_carbonstate_inst%Init (→ InitCold, which seeds
+    # decomp_cpools_vr from decomp_cascade_con%initial_stock and the exponential
+    # depth profile) AFTER init_decompcascade_bgc — clm_instMod.F90:414-425. So
+    # this cannot live in cold_start_initialize! (Step 14): the cascade's
+    # initial_stock is only populated in Step 15f above.
+    #
+    # Before this, a use_cn=true COLD START left the ENTIRE CN carbon/nitrogen
+    # state at the allocator's NaN — nothing on the live init path wrote leafc,
+    # deadstemc or decomp_cpools_vr; only a restart/Fortran-dump injection did
+    # (which is why the CN parity harness never caught it, and why
+    # scripts/clmdrv_cn_fixture.jl had to hand-roll these very calls).
+    #
+    # Unconditional, not gated on use_cn: Fortran gates the whole Init
+    # (allocate + InitCold), but clm_instInit! allocates these arrays
+    # unconditionally, so the InitCold must be unconditional to keep the pairing.
+    # With use_cn=false the cascade initial_stock is all-zero and the arrays are
+    # never read — inert, and strictly safer than NaN. See init_cold.jl.
+    init_cold_biogeochem!(inst, bounds;
+                          nlevdecomp = varpar.nlevdecomp,
+                          nlevdecomp_full = nlevdecomp_full,
+                          ndecomp_pools = 7)
+
     # Initialize urban namelist if available
     if isdefined(CLM, :urban_read_nml!) && isdefined(CLM, :urban_ctrl)
         urban_read_nml!(urban_ctrl)

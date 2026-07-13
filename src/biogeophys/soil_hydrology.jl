@@ -244,6 +244,13 @@ soilhyd_surf_runoff!(qflx_surf, mask, qflx_sat_excess_surf, qflx_infl_excess_sur
              qflx_infl_excess_surf, qflx_h2osfc_surf)
 
 # ---- total_surface_runoff! : qflx_surf for non-hydrologic urban columns ----
+#
+# `joff` (= nlevsno) converts Fortran's soil-layer index to CLM.jl's COMBINED
+# snow+soil array index: Fortran `h2osoi_liq(c,1)` (top SOIL layer) is Julia
+# `h2osoi_liq[c, joff+1]`. These two urban kernels used a bare `h2osoi_liq[c, 1]`
+# — which is the DEEPEST SNOW slot, nlevsno(=12) rows above the soil — so the
+# roof / impervious-road ponding store they read was always the (zero) snow slot
+# instead of the real pond. See the water-balance write-up in update_urban_ponding!.
 @kernel function _soilhyd_surf_runoff_urban_kernel!(qflx_surf, xs_urban, @Const(mask_urban),
                                                     @Const(col_itype), @Const(col_snl),
                                                     @Const(qflx_rain_plus_snomelt),
@@ -252,7 +259,7 @@ soilhyd_surf_runoff!(qflx_surf, mask, qflx_sat_excess_surf, qflx_infl_excess_sur
                                                     @Const(qflx_floodc),
                                                     icol_roof::Int, icol_road_imperv::Int,
                                                     icol_sunwall::Int, icol_shadewall::Int,
-                                                    pondmx_urban, dtime)
+                                                    joff::Int, pondmx_urban, dtime)
     c = @index(Global)
     @inbounds if mask_urban[c]
         T = eltype(qflx_surf)
@@ -263,7 +270,7 @@ soilhyd_surf_runoff!(qflx_surf, mask, qflx_sat_excess_surf, qflx_infl_excess_sur
                 qflx_surf[c] = smooth_max(zero(T), qflx_rain_plus_snomelt[c])
             else
                 xs_urban[c] = smooth_max(zero(T),
-                    h2osoi_liq[c, 1] / dt + qflx_rain_plus_snomelt[c] -
+                    h2osoi_liq[c, joff + 1] / dt + qflx_rain_plus_snomelt[c] -
                     qflx_liqevap_from_top_layer[c] - pmx / dt)
                 qflx_surf[c] = xs_urban[c]
             end
@@ -277,11 +284,13 @@ end
 soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
                            qflx_rain_plus_snomelt, h2osoi_liq, qflx_liqevap_from_top_layer,
                            qflx_floodc, icol_roof::Int, icol_road_imperv::Int,
-                           icol_sunwall::Int, icol_shadewall::Int, pondmx_urban, dtime) =
+                           icol_sunwall::Int, icol_shadewall::Int, pondmx_urban, dtime;
+                           joff::Int = varpar.nlevsno) =
     _launch!(_soilhyd_surf_runoff_urban_kernel!, qflx_surf, xs_urban, mask_urban,
              col_itype, col_snl, qflx_rain_plus_snomelt, h2osoi_liq,
              qflx_liqevap_from_top_layer, qflx_floodc, icol_roof, icol_road_imperv,
-             icol_sunwall, icol_shadewall, convert(eltype(qflx_surf), pondmx_urban),
+             icol_sunwall, icol_shadewall, joff,
+             convert(eltype(qflx_surf), pondmx_urban),
              convert(eltype(qflx_surf), dtime))
 
 # ---- update_urban_ponding! : ponding state on urban surfaces ----
@@ -291,7 +300,7 @@ soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
                                                 @Const(qflx_rain_plus_snomelt),
                                                 @Const(qflx_liqevap_from_top_layer),
                                                 icol_roof::Int, icol_road_imperv::Int,
-                                                pondmx_urban, dtime)
+                                                joff::Int, pondmx_urban, dtime)
     c = @index(Global)
     @inbounds if mask_urban[c]
         T = eltype(h2osoi_liq)        # working precision (Float32 on Metal); no Float64 literals
@@ -299,9 +308,9 @@ soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
         if col_itype[c] == icol_roof || col_itype[c] == icol_road_imperv
             if col_snl[c] >= 0
                 if xs_urban[c] > zr
-                    h2osoi_liq[c, 1] = pondmx_urban
+                    h2osoi_liq[c, joff + 1] = pondmx_urban
                 else
-                    h2osoi_liq[c, 1] = smooth_max(zr, h2osoi_liq[c, 1] +
+                    h2osoi_liq[c, joff + 1] = smooth_max(zr, h2osoi_liq[c, joff + 1] +
                         (qflx_rain_plus_snomelt[c] - qflx_liqevap_from_top_layer[c]) * dtime)
                 end
             end
@@ -309,13 +318,21 @@ soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
     end
 end
 
+# ndrange MUST be the COLUMN count, not `length(out)`. `_launch!` defaults to
+# `ndrange = length(out)` and `out` here is the h2osoi_liq MATRIX (nc x nlevtot),
+# so the default would run nc*nlevtot threads and index mask_urban/col_itype far
+# past their ends — silently reading garbage under @inbounds, and throwing under
+# CI's --check-bounds=yes. Latent only because this routine was never called.
 soilhyd_urban_ponding!(h2osoi_liq, mask_urban, col_itype, col_snl, xs_urban,
                        qflx_rain_plus_snomelt, qflx_liqevap_from_top_layer,
-                       icol_roof::Int, icol_road_imperv::Int, pondmx_urban, dtime) =
+                       icol_roof::Int, icol_road_imperv::Int, pondmx_urban, dtime;
+                       joff::Int = varpar.nlevsno) =
     _launch!(_soilhyd_urban_ponding_kernel!, h2osoi_liq, mask_urban, col_itype,
              col_snl, xs_urban, qflx_rain_plus_snomelt, qflx_liqevap_from_top_layer,
-             icol_roof, icol_road_imperv, convert(eltype(h2osoi_liq), pondmx_urban),
-             convert(eltype(h2osoi_liq), dtime))
+             icol_roof, icol_road_imperv, joff,
+             convert(eltype(h2osoi_liq), pondmx_urban),
+             convert(eltype(h2osoi_liq), dtime);
+             ndrange = length(mask_urban))
 
 # ---- withdraw_groundwater_irrigation! : per-(column,layer) liq withdrawal ----
 @kernel function _soilhyd_withdraw_gw_lyr_kernel!(h2osoi_liq, @Const(mask),

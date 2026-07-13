@@ -253,6 +253,11 @@ include("infrastructure/fortran_restart.jl")
 # ===========================================================================
 # Initialization (depends on instances + all types)
 # ===========================================================================
+# init_cold.jl is the single dispatch point for Fortran's InitCold phase — the
+# ~20 ported `*_init_cold!` routines that InitAllocate's NaN-fill depends on.
+# cold_start.jl calls init_cold_biogeophys! at its top; clm_initialize.jl calls
+# init_cold_biogeochem! after the decomposition cascade is built.
+include("infrastructure/init_cold.jl")
 include("infrastructure/cold_start.jl")
 
 # ===========================================================================

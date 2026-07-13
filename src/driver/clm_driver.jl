@@ -883,7 +883,7 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ever @warn'd because DAnstep was hardcoded to 0. Mirrors begwb_col below.
     add_canopy_water_to_grc_storage!(inst.water.waterbalancebulk_inst.begwb_grc,
                                      wsb.ws.liqcan_patch, wsb.ws.snocan_patch,
-                                     filt.nolakec, col, pch, bc_col, bc_grc)
+                                     filt.nolakec, col, lun, pch, bc_col, bc_grc)
 
     # ========================================================================
     # Dynamic subgrid weights — WIRED (gated; no-op unless a transient run built
@@ -1284,6 +1284,25 @@ function clm_drv_core!(config::CLMDriverConfig,
             fill!(inst.fates.bc_in[s].filter_photo_pa, 1)
         end
     end
+
+    # PhotosynthesisMod::TimeStepInit — zero psnsun/psnsha/fpsn (+ the wc/wj/wp
+    # splits and the C13/C14 twins) on EVERY NON-LAKE patch at the start of the
+    # canopy-flux step. Fortran calls this at the top of CanopyFluxes
+    # (CanopyFluxesMod.F90:661).
+    #
+    # `photosynthesis_timestep_init!` was PORTED (photosynthesis.jl) and then
+    # never called — the same dead-port class as the `*_init_cold!` sweep in
+    # src/infrastructure/init_cold.jl. The consequence: a BARE-GROUND patch never
+    # enters the photosynthesis solve, so nothing ever wrote its psnsun/psnsha/
+    # fpsn and they sat at the allocator's NaN for the whole run. That NaN was
+    # being papered over downstream by an `isfinite(v) ? v : 0.0` fallback in
+    # history_fpsn_patch (history_writer.jl) — a guard added to fix the +43% FPSN
+    # aggregation bug whose ROOT CAUSE was this missing call. Zeroing at the
+    # source is what Fortran does; the history fallback stays only to map the
+    # LAKE patches' deliberate spval to 0.
+    photosynthesis_timestep_init!(ps, filt.nolakep, bc_patch;
+                                  use_c13 = config.use_c13,
+                                  use_c14 = config.use_c14)
 
     # Positional call into canopy_fluxes_core! (no kwarg NamedTuple) so Enzyme
     # reverse-mode can compile the differentiated driver. The trailing args after
@@ -1746,6 +1765,30 @@ function clm_drv_core!(config::CLMDriverConfig,
         wfb, sh, wsb.ws,
         col.snl, col.itype, col.landunit, lun.urbpoi,
         filt.hydrologyc, filt.urbanc,
+        bc_col, dtime)
+
+    # --- 10b. Urban ponding state (roof / impervious road) ---
+    # Fortran calls UpdateUrbanPonding IMMEDIATELY after TotalSurfaceRunoff
+    # (HydrologyNoDrainageMod.F90:336). `update_urban_ponding!` was PORTED and
+    # never called — another dead port, the same class as the *_init_cold! sweep.
+    #
+    # Roof and impervious-road columns are NOT hydrologically active: they have no
+    # infiltration and their h2osfc is excluded from the column water mass
+    # (TotalWaterAndHeatMod: "Nothing more to add in this case"). Their ONLY water
+    # store is the pond held in the top soil layer, and UpdateUrbanPonding is the
+    # ONLY routine that advances it:
+    #     h2osoi_liq(c,1) += (qflx_rain_plus_snomelt - qflx_liqevap_from_top_layer)*dt
+    # (capped at pondmx_urban, floored at 0).
+    #
+    # Without it, rain landing on a roof was neither STORED nor RUN OFF, and the
+    # evaporation charged against those columns was never DEBITED from any store —
+    # so `endwb - begwb` could not match the flux sum. That is the 0.077 mm
+    # impervious-road water-balance error, which was invisible only because
+    # `errh2o` was NaN there (waterflux InitCold was dead) and `abs(NaN) > tol` is
+    # false, so the check silently passed.
+    update_urban_ponding!(
+        wsb.ws, sh, wfb,
+        col.snl, col.itype, filt.urbanc,
         bc_col, dtime)
 
     # --- 11. Root water uptake (transpiration sink) ---
@@ -2482,21 +2525,26 @@ function clm_drv_core!(config::CLMDriverConfig,
     # required: once the column fluxes are de-NaN'd, an unfixed grc check spams.
     add_canopy_water_to_grc_storage!(inst.water.waterbalancebulk_inst.endwb_grc,
                                      wsb.ws.liqcan_patch, wsb.ws.snocan_patch,
-                                     filt.nolakec, col, pch, bc_col, bc_grc)
+                                     filt.nolakec, col, lun, pch, bc_col, bc_grc)
     _g_evap_tot     = _zlike(length(grc.lat)); _g_surf      = _zlike(length(grc.lat))
     _g_qrgwl        = _zlike(length(grc.lat)); _g_drain     = _zlike(length(grc.lat))
     _g_drain_perch  = _zlike(length(grc.lat)); _g_sfc_irrig = _zlike(length(grc.lat))
     _g_ice_runoff   = _zlike(length(grc.lat))
-    c2g_unity!(_g_evap_tot,    wfb.wf.qflx_evap_tot_col,      col.gridcell, col.wtgcell, bc_col, bc_grc)
-    c2g_unity!(_g_surf,        wfb.wf.qflx_surf_col,          col.gridcell, col.wtgcell, bc_col, bc_grc)
-    c2g_unity!(_g_qrgwl,       wfb.wf.qflx_qrgwl_col,         col.gridcell, col.wtgcell, bc_col, bc_grc)
-    c2g_unity!(_g_drain,       wfb.wf.qflx_drain_col,         col.gridcell, col.wtgcell, bc_col, bc_grc)
-    c2g_unity!(_g_drain_perch, wfb.wf.qflx_drain_perched_col, col.gridcell, col.wtgcell, bc_col, bc_grc)
-    c2g_unity!(_g_sfc_irrig,   wfb.wf.qflx_sfc_irrig_col,     col.gridcell, col.wtgcell, bc_col, bc_grc)
+    # 'urbanf' c2l scaling, NOT unity — Fortran BalanceCheckMod aggregates every
+    # water-balance column term with c2l_scale_type='urbanf' (walls x 3*canyon_hwr,
+    # roads x 3), because those fluxes are per-m2 of WALL / ROAD area, not of
+    # GROUND area. With unity the urban gridcell could not close even when every
+    # column closed to 1e-13. Identical to c2g_unity! with no urban landunit.
+    c2g_urbanf!(_g_evap_tot,    wfb.wf.qflx_evap_tot_col,      col, lun, bc_col, bc_grc)
+    c2g_urbanf!(_g_surf,        wfb.wf.qflx_surf_col,          col, lun, bc_col, bc_grc)
+    c2g_urbanf!(_g_qrgwl,       wfb.wf.qflx_qrgwl_col,         col, lun, bc_col, bc_grc)
+    c2g_urbanf!(_g_drain,       wfb.wf.qflx_drain_col,         col, lun, bc_col, bc_grc)
+    c2g_urbanf!(_g_drain_perch, wfb.wf.qflx_drain_perched_col, col, lun, bc_col, bc_grc)
+    c2g_urbanf!(_g_sfc_irrig,   wfb.wf.qflx_sfc_irrig_col,     col, lun, bc_col, bc_grc)
     # qflx_rofice_grc = c2g(qflx_ice_runoff_col) (lnd2atmMod.F90:459). The dynbal
     # correction Fortran subtracts there is zero in the port (no dynamic landunits
     # coupling), so the plain aggregate is the whole term.
-    c2g_unity!(_g_ice_runoff,  l2a.qflx_ice_runoff_col,       col.gridcell, col.wtgcell, bc_col, bc_grc)
+    c2g_urbanf!(_g_ice_runoff,  l2a.qflx_ice_runoff_col,      col, lun, bc_col, bc_grc)
 
     # BalanceCheck — WIRED
     # DAnstep = steps since run start / restart / last DA state jump (Fortran

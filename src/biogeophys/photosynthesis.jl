@@ -374,6 +374,53 @@ function photosynthesis_data_init!(ps::PhotosynthesisData{FT}, np::Int;
 end
 
 """
+    photosyns_init_cold!(ps, patch_data, lun, bounds_patch)
+
+Cold-start initialization for the photosynthesis state.
+
+Ported from `photosyns_type%InitCold` in `PhotosynthesisMod.F90`. Fortran's
+InitCold is small and does exactly two things:
+
+  * `alphapsnsun/alphapsnsha` → `spval` (an isotope diagnostic that is only
+    defined where the C13 discrimination solve runs; spval is the deliberate
+    missing-value flag, NOT zero);
+  * `psnsun/psnsha` (and the C13/C14 twins) → `0.0` on SPECIAL landunits
+    (urban / glacier / lake / wetland). Those patches never enter the
+    photosynthesis solve, so nothing else ever writes their photosynthesis
+    rate — yet `psnsun/psnsha` are summed into the patch→column→gridcell GPP
+    aggregation. Left at the allocator's NaN they poison it.
+
+This routine had NO Julia port (unlike the ~20 `*_init_cold!` that were ported
+and then never called); it is added here so the InitCold class is complete.
+"""
+function photosyns_init_cold!(ps::PhotosynthesisData,
+                              patch_data::PatchData,
+                              lun::LandunitData,
+                              bounds_patch::UnitRange{Int})
+    has_c13 = !isempty(ps.c13_psnsun_patch)
+    has_c14 = !isempty(ps.c14_psnsun_patch)
+    for p in bounds_patch
+        l = patch_data.landunit[p]
+
+        ps.alphapsnsun_patch[p] = SPVAL
+        ps.alphapsnsha_patch[p] = SPVAL
+
+        (l >= 1 && l <= length(lun.ifspecial) && lun.ifspecial[l]) || continue
+        ps.psnsun_patch[p] = 0.0
+        ps.psnsha_patch[p] = 0.0
+        if has_c13
+            ps.c13_psnsun_patch[p] = 0.0
+            ps.c13_psnsha_patch[p] = 0.0
+        end
+        if has_c14
+            ps.c14_psnsun_patch[p] = 0.0
+            ps.c14_psnsha_patch[p] = 0.0
+        end
+    end
+    return nothing
+end
+
+"""
     photosynthesis_data_clean!(ps::PhotosynthesisData)
 
 Reset all fields to empty arrays.
