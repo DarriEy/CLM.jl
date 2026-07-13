@@ -17,7 +17,19 @@
 #      the FATES branch — distinct from the non-FATES path),
 #   4. the daily demographic step advanced the census & TotalBalanceCheck held
 #      (n>=0, dbh>0, patch areas sum to AREA),
-#   5. values stay physical over the multi-day horizon (no blow-up).
+#   5. values stay physical over the multi-day horizon (no blow-up),
+#   6. the FATES<->HLM SHORTWAVE COUPLING closes: on every patch of the FATES column
+#      incident == fsa + fsr to roundoff, and fsa/fsr/sabv are strictly POSITIVE in
+#      daylight (they used to be exactly 0 — FATES ran its own two-stream and never
+#      wrote the result back, leaving ~142 W/m2 of incident shortwave unaccounted for;
+#      PR #211 gated the balance check's hard error off for FATES because of it).
+#
+# The column is given a REAL cold start (initVertical! + cold_start_initialize! +
+# soil-hydrology controls + soil-colour albedo tables + lat/lon + subgrid weights).
+# Without it the run was silently degenerate: coszen was NaN so it never saw daylight,
+# and the soil column was NaN so every balance error was NaN — which is not a passing
+# balance, it is an invisible one. The top-level balance check now runs LIVE and FATAL
+# over this run (no FATES gate).
 #
 # clm_fates_init! mutates FATES module-global control Refs + parameter tables, so
 # save/restore them (same set as test_fates_driver_hooks.jl) to leave the
@@ -67,6 +79,7 @@ const _C = CLM
     old_nlevsoi  = _C.varpar.nlevsoi
     old_nlevgrnd = _C.varpar.nlevgrnd
     old_nlevmaxu = _C.varpar.nlevmaxurbgrnd
+    old_fff      = _C.sat_excess_runoff_params.fff
 
     try
         nlevsoil = 5
@@ -89,15 +102,30 @@ const _C = CLM
         _C.clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                          nlevdecomp_full=_C.varpar.nlevdecomp_full)
 
+        # Gridcell geometry. The solar-zenith closure reads lat/lon (radians); leave
+        # them NaN and coszen is NaN, which silently pins the whole run in the
+        # "sun below horizon" branch — the run never exercises daytime radiation.
+        grc = inst.gridcell
+        grc.lat[1] = 0.6; grc.lon[1] = 0.0          # ~34.4 N, prime meridian
+        grc.latdeg[1] = 34.4; grc.londeg[1] = 0.0
+
         col = inst.column
         col.landunit[1] = 1; col.gridcell[1] = 1; col.snl[1] = 0
         col.patchi[1] = 1; col.patchf[1] = 2; col.npatches[1] = 2
         col.nbedrock[1] = _C.varpar.nlevsoi
         col.is_fates[1] = true
+        col.active[1] = true
+        # Subgrid weights: the gridcell-level water balance is a weighted c2g sum, so
+        # a NaN wtgcell makes errh2o_grc NaN (a BROKEN balance, not a passing one).
+        col.wtgcell[1] = 1.0; col.wtlunit[1] = 1.0; col.itype[1] = _C.ISTSOIL
 
         lun = inst.landunit
         lun.itype[1] = _C.ISTSOIL; lun.urbpoi[1] = false
         lun.lakpoi[1] = false; lun.active[1] = true
+        lun.wtgcell[1] = 1.0
+        lun.gridcell[1] = 1
+        lun.coli[1] = 1; lun.colf[1] = 1     # landunit -> column range (init_cold walks it)
+        lun.patchi[1] = 1; lun.patchf[1] = np
 
         pch = inst.patch
         for p in 1:np
@@ -105,6 +133,8 @@ const _C = CLM
             pch.column[p] = 1; pch.itype[p] = 1
         end
         pch.wtcol[1] = 0.0; pch.wtcol[2] = 1.0
+        pch.wtgcell[1] = 0.0; pch.wtgcell[2] = 1.0
+        pch.wtlunit[1] = 0.0; pch.wtlunit[2] = 1.0
         pch.is_fates[1] = true; pch.is_fates[2] = true
 
         bounds = _C.BoundsType(begg=1, endg=ng, begl=1, endl=nl, begc=1, endc=nc,
@@ -150,6 +180,10 @@ const _C = CLM
         pc.c3psn=fill(1.0,npft_clm); pc.woody=fill(0.0,npft_clm)
         pc.smpso=fill(-66000.0,npft_clm); pc.smpsc=fill(-275000.0,npft_clm)
         pc.z0mr=fill(0.055,npft_clm); pc.displar=fill(0.67,npft_clm)
+        # Rooting profile (Zeng 2001) — init_root_fractions! indexes these per PFT;
+        # left empty they are an out-of-bounds read (silent under @inbounds, a
+        # BoundsError under --check-bounds=yes).
+        pc.roota_par=fill(6.0,npft_clm); pc.rootb_par=fill(3.0,npft_clm)
         pc.xl=fill(0.1,npft_clm); pc.rhol=fill(0.1,npft_clm,2); pc.rhos=fill(0.2,npft_clm,2)
         pc.taul=fill(0.05,npft_clm,2); pc.taus=fill(0.1,npft_clm,2)
         pc.medlynintercept=fill(100.0,npft_clm); pc.medlynslope=fill(6.0,npft_clm)
@@ -157,6 +191,48 @@ const _C = CLM
 
         photosyns = inst.photosyns
         inst.canopystate.frac_veg_nosno_alb_patch .= 1
+
+        # ---- REAL cold start of the CLM column (soil / water / temperature) ----
+        # Without this the column runs on the allocator's NaN (h2osoi_liq, watsat,
+        # t_grnd, ...), the soil albedo comes out NaN, and every balance error is
+        # NaN — which is not a passing balance, it is an invisible one. The FATES
+        # SW-closure assertions below need a physically initialized column.
+        surf = _C.SurfaceInputData(
+            wt_lunit    = reshape([1.0], 1, 1),
+            wt_nat_patch = reshape([1.0], 1, 1),
+            pct_sand    = fill(40.0, ng, nlevsoil),
+            pct_clay    = fill(20.0, ng, nlevsoil),
+            organic     = zeros(ng, nlevsoil),
+            soil_color  = [4],
+            zbedrock    = [10.0],
+            lakedepth   = [10.0],
+            slope       = [0.05],
+            std_elev    = [10.0],
+            fmax        = [0.35],
+            monthly_lai = zeros(ng, 12, 1),
+            monthly_sai = zeros(ng, 12, 1),
+            monthly_htop = zeros(ng, 12, 1),
+            monthly_hbot = zeros(ng, 12, 1))
+        # Vertical grid (col.dz/z/zi) — the cold start converts h2osoi_vol -> liq/ice
+        # through dz, so a NaN dz makes the whole soil column NaN.
+        _C.initVertical!(bounds, grc, lun, col, surf)
+        _C.cold_start_initialize!(inst, bounds, filt, surf; use_aquifer_layer=false)
+        # Soil-hydrology runtime controls + the surface-water "fill & spill" threshold
+        # (clm_initialize! steps 14a/14b). h2osfc_thresh_col is NaN without them, which
+        # NaNs h2osfc -> infiltration -> the whole soil column.
+        _C.soilhydrology_read_nl!(inst.soilhydrology; h2osfcflag=1)
+        _C.compute_h2osfc_thresh!(inst.soilhydrology.h2osfc_thresh_col,
+                                  col.micro_sigma, trues(nc), 1:nc; h2osfcflag=1)
+        # Soil-color -> saturated/dry soil albedo tables (albgrd/albgri are NaN
+        # without them, and a NaN ground albedo poisons FATES's two-stream input).
+        _C.surface_albedo_init_time_const!(inst.surfalb_con, 20, surf.soil_color,
+                                           col.gridcell, 1:nc, 1:ng)
+
+        # Params-file scalars the harness needs but never reads (read_params! wants the
+        # real clm5_params.nc). `fff` (the TOPMODEL saturated-area decay factor) is NaN
+        # by default; a NaN fff makes fsat NaN -> qflx_sat_excess_surf NaN -> the whole
+        # infiltration / soil-water chain NaN, i.e. an invisible water balance.
+        _C.sat_excess_runoff_params.fff = 0.5   # CLM5 default (1/m)
 
         # ---- cold-start a real-param (14-PFT) carbon-only FATES site ----
         fates = _C.clm_fates_init!(inst; nsites=1, nlevsoil=nlevsoil, nlevdecomp=nlevdecomp)
@@ -240,6 +316,11 @@ const _C = CLM
         # FATES-drove-it trackers (max over the run of the FATES-branch outputs).
         max_laisha = 0.0; max_canopy_alb = 0.0; saw_rssun = false
         prev_npatch = cen0.npatch
+        # SHORTWAVE-CLOSURE trackers (the FATES<->HLM radiation coupling).
+        max_errsol = 0.0                      # max |fsa + fsr - incident| over the run
+        max_fsa = 0.0; max_fsr = 0.0          # must be > 0: the old (broken) state left
+        max_sabv = 0.0                        # fsa/fsr at EXACTLY 0 on FATES patches
+        sw_steps = 0                          # daylight steps actually exercised
 
         for i in 1:nsteps
             is_beg = (secs == 0)
@@ -289,6 +370,26 @@ const _C = CLM
             # area is conserved at AREA each step.
             isapprox(cen.totarea, _C.area; atol=1e-4) || push!(nan_steps, "step$i:area=$(cen.totarea)")
 
+            # ---- SHORTWAVE CLOSURE on the FATES column (the coupling under test) ----
+            # incident = absorbed + reflected, per patch, to roundoff. This is exactly
+            # the top-level check's errsol; assert it directly on EVERY patch of the
+            # FATES column (bare ground + vegetated), every step.
+            sol = inst.solarabs; a2l = inst.atm2lnd
+            incident = a2l.forc_solad_downscaled_col[c, 1] + a2l.forc_solad_downscaled_col[c, 2] +
+                       a2l.forc_solai_grc[1, 1] + a2l.forc_solai_grc[1, 2]
+            for p in col.patchi[c]:col.patchf[c]
+                pch.active[p] || continue
+                e_sol = sol.fsa_patch[p] + sol.fsr_patch[p] - incident
+                isfinite(e_sol) || push!(nan_steps, "step$i:errsol_p$p=NaN")
+                isfinite(e_sol) && (max_errsol = max(max_errsol, abs(e_sol)))
+            end
+            if inst.surfalb.coszen_col[c] > 0.0 && incident > 0.0
+                sw_steps += 1
+                max_fsa  = max(max_fsa,  sol.fsa_patch[pveg])
+                max_fsr  = max(max_fsr,  sol.fsr_patch[pveg])
+                max_sabv = max(max_sabv, sol.sabv_patch[pveg])
+            end
+
             # ---- FATES-drove-it trackers ----
             isfinite(cs.laisha_patch[pveg]) && (max_laisha = max(max_laisha, cs.laisha_patch[pveg]))
             isfinite(sa.albd_patch[pveg,1]) && (max_canopy_alb = max(max_canopy_alb, sa.albd_patch[pveg,1]))
@@ -322,6 +423,28 @@ const _C = CLM
         @test max_laisha > 0.0
         @test saw_rssun
 
+        # 6. FATES<->HLM SHORTWAVE COUPLING (the gap PR #211 gated the balance check
+        #    off for: FATES ran its own two-stream and the HLM's absorbed/reflected
+        #    diagnostics stayed at 0, leaving ~142 W/m2 of incident shortwave
+        #    unaccounted for on FATES patches).
+        #
+        #    a) daylight was actually exercised (a NaN coszen would silently pin the
+        #       whole run in the night branch and make (b)/(c) vacuous),
+        @test sw_steps > 0
+        #    b) the FATES patch ABSORBS and REFLECTS: fsa/fsr/sabv are strictly
+        #       positive in daylight. The broken state left them at exactly 0, so a
+        #       finiteness-only check would not have caught it.
+        @test max_fsa > 0.0
+        @test max_fsr > 0.0
+        @test max_sabv > 0.0     # canopy absorption -> FATES's fabd/fabi reached the HLM
+        #    c) the solar balance CLOSES to roundoff on every patch of the FATES
+        #       column, every step: incident == absorbed + reflected. Measured max is
+        #       ~1e-9 W/m2 on a ~700 W/m2 incident flux (~1e-12 relative — the
+        #       accumulation roundoff of FATES's two-stream normalization), against the
+        #       ~142 W/m2 residual this coupling gap used to leave on the books and the
+        #       1e-4 W/m2 the balance check errors out at.
+        @test max_errsol < 1.0e-8
+
         # 5. census stays physical + area conserved over the multi-day horizon.
         cenF = fates_census(inst)
         @test isempty(cenF.bad)
@@ -335,6 +458,7 @@ const _C = CLM
         @test _C.TotalBalanceCheck(inst.fates.sites[1], -1) === nothing
 
     finally
+        _C.sat_excess_runoff_params.fff  = old_fff
         _C.prt_global[]                  = old_global
         _C.num_elements[]                = old_numel
         empty!(_C.element_list); append!(_C.element_list, old_ellist)

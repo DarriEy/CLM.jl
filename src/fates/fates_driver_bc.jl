@@ -88,6 +88,59 @@ function fates_veg_patches(site, c::Int, col)
 end
 
 """
+    fates_flush_hlm_canopy!(inst; c)
+
+Flush the HLM canopy-structure fields over the WHOLE patch range of FATES column
+`c` (bare-ground patch INCLUDED), mirroring the Fortran host
+`wrap_update_hlmfates_dyn` (clmfates_interfaceMod.F90:1590):
+
+```fortran
+elai(col%patchi(c):col%patchf(c)) = 0.0_r8
+esai(col%patchi(c):col%patchf(c)) = 0.0_r8
+hbot(col%patchi(c):col%patchf(c)) = 0.0_r8
+tlai(col%patchi(c):col%patchf(c)) = 0.0_r8   ! (non-SP branch)
+tsai(col%patchi(c):col%patchf(c)) = 0.0_r8
+htop(col%patchi(c):col%patchf(c)) = 0.0_r8
+frac_veg_nosno_alb(col%patchi(c):col%patchf(c)) = 0.0_r8
+```
+
+Fortran flushes FIRST and only then fills the *vegetated* patches from `bc_out`;
+the bare-ground patch (`col.patchi[c]`, FATES's `ifp = 0`) therefore ends the step
+with a canopy of exactly ZERO. That zero is load-bearing: `surface_albedo!`'s
+solar-vegetated filter is `coszen > 0 && (elai + esai) > 0`, so a zeroed bare-ground
+patch falls into the NON-vegetated branch (`fabd = 0`, `ftdd = 1`, `albd = albgrd`)
+and its shortwave closes on the ground alone. The port previously never wrote the
+bare-ground patch at all, leaving it at the cold-start `NaN`, which poisoned both
+the albedo classification and the canopy water/energy balance on FATES columns.
+"""
+function fates_flush_hlm_canopy!(inst::CLMInstances; c::Int)
+    cs = inst.canopystate
+    col = inst.column
+
+    pi = col.patchi[c]
+    pf = col.patchf[c]
+    if pf < pi
+        npc = col.npatches[c]
+        pf = npc >= 1 ? pi + npc - 1 : pi
+    end
+
+    for p in pi:pf
+        (1 <= p <= length(cs.elai_patch)) || continue
+        cs.elai_patch[p] = 0.0
+        cs.esai_patch[p] = 0.0
+        cs.hbot_patch[p] = 0.0
+        cs.tlai_patch[p] = 0.0
+        cs.tsai_patch[p] = 0.0
+        cs.htop_patch[p] = 0.0
+        if !isempty(cs.frac_veg_nosno_alb_patch)
+            cs.frac_veg_nosno_alb_patch[p] = 0
+        end
+    end
+
+    return inst
+end
+
+"""
     fates_set_filters!(inst; c, s)
 
 Rebuild the HLM per-patch weights for FATES column `c` from the freshly-advanced
@@ -184,6 +237,45 @@ function _fates_first_fates_column(col)
 end
 
 """
+    fates_in_vegsol_filter(inst, p, coszen) -> Bool
+
+Is HLM patch `p` in CLM's SOLAR-VEGETATED filter (`filter_vegsol`)?
+
+Mirrors `SurfaceAlbedoMod.F90`'s filter construction (and the identical host-side
+classification in `surface_albedo!`):
+
+```fortran
+if (coszen(p) > 0._r8) then
+   if ((lun%itype(l) == istsoil .or. lun%itype(l) == istcrop) .and. &
+       (elai(p) + esai(p)) > 0._r8) then   ! -> filter_vegsol
+```
+
+`wrap_canopy_radiation` hands FATES exactly this filter and copies the FATES
+radiation `bc_out` back onto exactly this filter, so it is the gate for both the
+FATES radiation pack and the HLM write-back.
+"""
+function fates_in_vegsol_filter(inst::CLMInstances, p::Int, coszen::Real)
+    coszen > 0.0 || return false
+    pch = inst.patch
+    lun = inst.landunit
+    cs  = inst.canopystate
+
+    # Landunit test — only when the patch->landunit map is actually populated.
+    # (Hand-built FATES harnesses leave patch.landunit at ISPVAL; a FATES column is
+    # a natural-vegetation column by construction, so an unmapped patch is treated
+    # as rural rather than indexed out of bounds.)
+    if !isempty(pch.landunit) && p <= length(pch.landunit)
+        l = pch.landunit[p]
+        if 1 <= l <= length(lun.itype)
+            (lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP) || return false
+        end
+    end
+
+    p <= length(cs.elai_patch) || return false
+    return (cs.elai_patch[p] + cs.esai_patch[p]) > 0.0
+end
+
+"""
     fates_pack_bcin_radiation!(inst; s=1, c=1, p=1, coszen)
 
 Fill the FATES radiation `bc_in` fields for site `s` from CLM column `c` /
@@ -192,7 +284,14 @@ vegetated patch `p` state:
   * `solad_parb` / `solai_parb` — direct/diffuse downwelling radiation per band
     (from atm2lnd `forc_solad_downscaled_col` / `forc_solai_grc`).
   * `coszen_pa` — cosine of the solar zenith angle (driver-supplied `coszen`).
-  * `filter_vegzen_pa` — daylight flag (coszen > 0).
+  * `filter_vegzen_pa` — the patch is in CLM's SOLAR-VEGETATED filter
+    (`filter_vegsol`): `coszen > 0` AND a rural (soil/crop) landunit AND
+    `elai + esai > 0`. This is exactly the set of patches the Fortran host passes
+    to (and reads back from) FATES radiation — `wrap_canopy_radiation` sets
+    `filter_vegzen_pa(ifp) = any(filter_vegsol == p)` and copies `bc_out` back only
+    for `filter_vegsol`. Patches OUTSIDE it (night, or a leafless/bare FATES patch)
+    are handled by the HLM's own `surface_albedo!` branches — FATES must not
+    clobber those with its unsolved (zero) `bc_out`.
   * `albgr_dir_rb` / `albgr_dif_rb` — ground albedo per band (surfalb
     `albgrd_col` / `albgri_col`).
   * `fcansno_pa` — fraction of canopy covered in snow (0 stand-in; no CLM source
@@ -226,7 +325,7 @@ function fates_pack_bcin_radiation!(inst::CLMInstances; s::Int = 1, c::Int = 1,
     end
 
     bc.coszen_pa[ifp]        = coszen
-    bc.filter_vegzen_pa[ifp] = coszen > 0.0
+    bc.filter_vegzen_pa[ifp] = fates_in_vegsol_filter(inst, p, coszen)
     bc.fcansno_pa[ifp]       = 0.0  # no snow-on-canopy source on the carbon-only path
 
     # Ground albedo (site broadband). Default to 0 if surfalb not yet computed
@@ -538,6 +637,11 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     for s in 1:fates.nsites
         c = site_col[s]
         c == 0 && continue
+        # Fortran flushes the canopy over the column's WHOLE patch range (bare
+        # ground included) BEFORE filling the vegetated patches from bc_out, so the
+        # bare-ground patch carries elai=esai=0 (not the cold-start NaN) into the
+        # albedo/radiation filters.
+        fates_flush_hlm_canopy!(inst; c=c)
         for (ifp, p) in fates_veg_patches(fates.sites[s], c, col)
             fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p, ifp=ifp)
         end
@@ -699,6 +803,21 @@ end
 Write the FATES normalized-canopy-radiation `bc_out` back to CLM surfalb for
 patch `p`: `albd_parb -> albd_patch`, `albi_parb -> albi_patch`,
 `fabd/fabi_parb -> fabd/fabi_patch`, `ftdd/ftid/ftii_parb -> ftdd/ftid/ftii_patch`.
+
+These seven per-band fractions ARE the FATES→HLM shortwave transfer: CLM's
+`surface_radiation!` builds `fsa` (absorbed), `fsr` (reflected), `sabv` and `sabg`
+from them and nothing else, so the FATES column's solar balance
+(`fsa + fsr == incident`) closes iff FATES's two-stream normalization holds. This
+is precisely the copy-back loop of the Fortran host `wrap_canopy_radiation`
+(clmfates_interfaceMod.F90:2828).
+
+Written ONLY for patches in the solar-vegetated filter — the ones FATES actually
+solved (`bc_in.filter_vegzen_pa[ifp]`, see [`fates_in_vegsol_filter`](@ref)), exactly
+as Fortran loops `do icp = 1,num_vegsol`. Outside it (night, or a leafless/bare
+FATES patch) FATES's `bc_out` holds an unsolved ZERO; writing that would erase the
+HLM's own albedo (`albd = 1` at night, `albd = albgrd` on bare ground) and drop the
+whole incident flux out of the energy budget — which is exactly how the FATES
+columns came to leave `fsa`/`fsr` at 0 with the full incident shortwave on the books.
 """
 function fates_unpack_bcout_canopy_radiation!(inst::CLMInstances; s::Int = 1,
                                               c::Int = 1, p::Int = 1, ifp::Int = 1)
@@ -706,6 +825,9 @@ function fates_unpack_bcout_canopy_radiation!(inst::CLMInstances; s::Int = 1,
     fates === nothing && return inst
     bc = fates.bc_out[s]
     sa = inst.surfalb
+
+    # Only the patches FATES solved (Fortran: the filter_vegsol copy-back loop).
+    fates.bc_in[s].filter_vegzen_pa[ifp] || return inst
 
     for ib in 1:num_swb
         sa.albd_patch[p, ib] = bc.albd_parb[ifp, ib]
@@ -765,9 +887,14 @@ end
     fates_unpack_bcout_canopy_structure!(inst; s=1, c=1, p=1, ifp=1)
 
 Write the FATES canopy-structure `bc_out` back to CLM canopystate for patch `p`
-(vegetated-patch slot `ifp`): `elai/esai_pa`, `htop/hbot_pa`, `z0m/displa/dleaf_pa`.
+(vegetated-patch slot `ifp`): `elai/esai_pa`, `tlai/tsai_pa`, `htop/hbot_pa`,
+`frac_veg_nosno_alb_pa`, `z0m/displa/dleaf_pa` — the full vegetated-patch transfer
+of the Fortran host `wrap_update_hlmfates_dyn` (clmfates_interfaceMod.F90:1636).
 The daily step runs `canopy_summarization!` + `update_hlm_dynamics!` before this, so
 the `bc_out` `*_pa[ifp]` slots are finite.
+
+Call [`fates_flush_hlm_canopy!`](@ref) over the column first: Fortran zeroes the
+whole patch range (bare ground included) before this per-vegetated-patch fill.
 """
 function fates_unpack_bcout_canopy_structure!(inst::CLMInstances; s::Int = 1,
                                               c::Int = 1, p::Int = 1, ifp::Int = 1)
@@ -778,11 +905,16 @@ function fates_unpack_bcout_canopy_structure!(inst::CLMInstances; s::Int = 1,
 
     cs.elai_patch[p]   = bc.elai_pa[ifp]
     cs.esai_patch[p]   = bc.esai_pa[ifp]
+    cs.tlai_patch[p]   = bc.tlai_pa[ifp]
+    cs.tsai_patch[p]   = bc.tsai_pa[ifp]
     cs.htop_patch[p]   = bc.htop_pa[ifp]
     cs.hbot_patch[p]   = bc.hbot_pa[ifp]
     cs.z0m_patch[p]    = bc.z0m_pa[ifp]
     cs.displa_patch[p] = bc.displa_pa[ifp]
     cs.dleaf_patch[p]  = bc.dleaf_pa[ifp]
+    if !isempty(cs.frac_veg_nosno_alb_patch)
+        cs.frac_veg_nosno_alb_patch[p] = round(Int, bc.frac_veg_nosno_alb_pa[ifp])
+    end
 
     return inst
 end
