@@ -269,21 +269,118 @@ function crop_restart!(cr::CropData{FT}, bounds_patch::UnitRange{Int}) where {FT
 end
 
 """
-    crop_update_acc_vars!(cr, bounds_patch, t_ref2m_patch, t_soisno_col)
+    crop_update_acc_vars!(cr, bounds_patch, t_ref2m_patch, t_soisno_col;
+                          patch, col, pftcon, dtime, nlevsno=NLEVSNO)
 
-Stub for accumulation variable update (no-op in Julia port until accumulation
-infrastructure is ported).
+Accumulate the three crop `runaccum` fields, every timestep:
 
-In the Fortran source this routine:
-  - Updates HUI (heat unit index) accumulation
-  - Updates GDDACCUM (growing degree-days from air temperature)
-  - Updates GDDTSOI (growing degree-days from top two soil layers)
+- `hui_patch`     — heat unit index since planting (HUI)
+- `gddaccum_patch`— growing degree-days since planting, from air temperature
+- `gddtsoi_patch` — growing degree-days since planting, from the top two soil layers
 
-Corresponds to `CropUpdateAccVars` in the Fortran source.
+For a live crop (`croplive_patch`) each accumulates a daily increment
+
+    max(0, min(mxtmp[ivt], T - (TFRZ + baset))) * dtime/SECSPDAY
+
+(with `T` = `t_ref2m` for HUI/GDDACCUM and the dz-weighted mean of the top two
+soil layers for GDDTSOI), scaled by the vernalization factor `vf` for winter
+wheat. When the crop is not live the accumulator is RESET to zero — Fortran's
+per-patch `markreset_accum_field`, which (per `update_accum_field_runaccum`)
+resets WITHOUT also accumulating on that step.
+
+`baset` is `pftcon.baset[ivt]`, except under `baset_mapping ==
+"varytropicsbylat"` for (spring wheat, sugarcane), where the latitude-varying
+`latbaset_patch` is used instead.
+
+BUG HISTORY: this was a no-op stub AND had no call site. `hui_patch`,
+`gddaccum_patch` and `gddtsoi_patch` are allocated to SPVAL (1e36) and were never
+written by anything, yet they ARE read — by `cn_crop_phenology!` (`hui >=
+huigrain` gates grain fill), by crop allocation, and by `n_dynamics`' soybean
+fixation. A crop run therefore saw HUI pinned at SPVAL, i.e. "infinitely mature"
+from the first step.
+
+Fortran reconciles the accumulator buffer against external writes to `hui_patch`
+by CropPhenology (extract, subtract, re-update). Here `hui_patch` IS the
+accumulator, so that reconciliation is a no-op by construction and is omitted.
+
+Ported from `CropUpdateAccVars` in `CropType.F90`.
 """
 function crop_update_acc_vars!(cr::CropData, bounds_patch::UnitRange{Int},
-                                t_ref2m_patch::Vector{<:Real},
-                                t_soisno_col::Matrix{<:Real})
+                                t_ref2m_patch::AbstractVector{<:Real},
+                                t_soisno_col::AbstractMatrix{<:Real};
+                                patch::PatchData,
+                                col::ColumnData,
+                                pftcon,
+                                dtime::Real,
+                                nlevsno::Int = varpar.nlevsno)
+    isempty(bounds_patch) && return nothing
+    length(cr.hui_patch) >= last(bounds_patch) || return nothing
+
+    fracday = dtime / SECSPDAY
+    latvary = (cr.baset_mapping == BASET_MAP_LATVARY)
+
+    @inbounds for p in bounds_patch
+        patch.active[p] || continue
+        ivt = patch.itype[p]
+        (ivt >= 1 && ivt <= length(pftcon.baset)) || continue
+
+        if !cr.croplive_patch[p]
+            # markreset_accum_field(..., p): reset, and do NOT accumulate this step.
+            cr.hui_patch[p]      = 0.0
+            cr.gddaccum_patch[p] = 0.0
+            cr.gddtsoi_patch[p]  = 0.0
+            continue
+        end
+
+        # Base temperature: latitude-varying for spring wheat / sugarcane under
+        # the varytropicsbylat mapping, else the per-PFT constant.
+        baset = if latvary && (ivt == nswheat || ivt == nirrig_swheat ||
+                               ivt == nsugarcane || ivt == nirrig_sugarcane)
+            cr.latbaset_patch[p]
+        else
+            pftcon.baset[ivt]
+        end
+        isfinite(baset) || continue
+        mxtmp = pftcon.mxtmp[ivt]
+        winter_wheat = (ivt == nwwheat || ivt == nirrig_wwheat)
+
+        # --- HUI / GDDACCUM: air-temperature degree-days ---
+        t2m = t_ref2m_patch[p]
+        if isfinite(t2m)
+            incr = max(0.0, min(mxtmp, t2m - (TFRZ + baset))) * fracday
+            if winter_wheat
+                incr *= cr.vf_patch[p]
+            end
+            cur_h = cr.hui_patch[p]
+            cur_g = cr.gddaccum_patch[p]
+            # runaccum clamps to [0, 99999]; a non-finite/SPVAL start re-seeds at 0.
+            cr.hui_patch[p]      = min(max((isfinite(cur_h) && cur_h < SPVAL ? cur_h : 0.0) + incr, 0.0), 99999.0)
+            cr.gddaccum_patch[p] = min(max((isfinite(cur_g) && cur_g < SPVAL ? cur_g : 0.0) + incr, 0.0), 99999.0)
+        end
+
+        # --- GDDTSOI: degree-days from the dz-weighted top TWO soil layers ---
+        # (agroibis computes this to 0.05 m). t_soisno is snow-padded here.
+        c = patch.column[p]
+        dz1 = col.dz[c, nlevsno + 1]
+        dz2 = col.dz[c, nlevsno + 2]
+        ts1 = t_soisno_col[c, nlevsno + 1]
+        ts2 = t_soisno_col[c, nlevsno + 2]
+        if isfinite(ts1) && isfinite(ts2) && (dz1 + dz2) > 0
+            tsoi = (ts1 * dz1 + ts2 * dz2) / (dz1 + dz2)
+            incr = max(0.0, min(mxtmp, tsoi - (TFRZ + baset))) * fracday
+            # UPSTREAM BUG, REPRODUCED DELIBERATELY: Fortran guards this branch with
+            # `if (ivt == nwwheat .or. ivt == nwwheat)` — the second disjunct is a
+            # typo for `nirrig_wwheat`. So GDDTSOI applies the vernalization factor
+            # to RAINFED winter wheat only, while HUI/GDDACCUM above apply it to both
+            # rainfed and irrigated. Matching CTSM bit-for-bit means keeping this.
+            if ivt == nwwheat
+                incr *= cr.vf_patch[p]
+            end
+            cur_t = cr.gddtsoi_patch[p]
+            cr.gddtsoi_patch[p] = min(max((isfinite(cur_t) && cur_t < SPVAL ? cur_t : 0.0) + incr, 0.0), 99999.0)
+        end
+    end
+
     return nothing
 end
 

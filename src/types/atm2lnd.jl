@@ -108,6 +108,13 @@ Base.@kwdef mutable struct Atm2LndData{FT<:Real,
     forc_snow_downscaled_col          ::V = Float64[]   # snow rate (mm H2O/s)
     forc_q_downscaled_col             ::V = Float64[]   # specific humidity (kg/kg)
 
+    # --- relative humidity forcing (gridcell-level) ---
+    # Fortran carries forc_rh as an atm->lnd import field on wateratm2lndbulk_type.
+    # This port has no coupler import, so it is DERIVED from the (already present)
+    # q / T / pbot forcing by `atm2lnd_update_rh!` each step. It is the source term
+    # for the RH30 (use_cn) and RH24 (use_fates) accumulators below.
+    forc_rh_grc                   ::V = Float64[]   # relative humidity (%)
+
     # --- time averaged quantities (patch-level) ---
     fsd24_patch                   ::V = Float64[]   # patch 24hr average of direct beam radiation
     fsd240_patch                  ::V = Float64[]   # patch 240hr average of direct beam radiation
@@ -116,6 +123,28 @@ Base.@kwdef mutable struct Atm2LndData{FT<:Real,
     wind24_patch                  ::V = Float64[]   # patch 24-hour running mean of wind
     t_mo_patch                    ::V = Float64[]   # patch 30-day average temperature (K)
     t_mo_min_patch                ::V = Float64[]   # patch annual min of t_mo (K)
+
+    # TDA is a `timeavg` accumulator (accum_period = -30 days), NOT a runmean:
+    # `extract_accum_field` returns the 30-day mean only at a period boundary and
+    # SPVAL in between, so `t_mo_min` tracks the minimum of the 30-day MEANS, not
+    # of the instantaneous temperature. These two scratch arrays are the in-array
+    # equivalent of accumulMod's per-field `val`/`nsteps` buffers for TDA.
+    tda_accum_patch               ::V = Float64[]   # running sum over the current 30-day window
+    tda_naccum_patch              ::V = Float64[]   # steps accumulated in the current window
+
+    # --- Fortran `wateratm2lndbulk_type` accumulators ---------------------------
+    # Ported from `Wateratm2lndBulkType.F90` (InitAccBuffer / UpdateAccVars).
+    # CLM.jl has no separate wateratm2lndbulk_type; these members are hosted on
+    # Atm2LndData because that is already the home of the forcing accumulators
+    # (fsd24/fsi24/wind24/forc_pco2_240) and because their source terms
+    # (forc_rain_downscaled_col, forc_snow_downscaled_col, forc_rh_grc) live here.
+    prec10_patch                  ::V = Float64[]   # 10-day running mean of total precip (mm H2O/s) [use_cn]
+    prec30_patch                  ::V = Float64[]   # 30-day running mean of total precip (mm H2O/s) [use_cn]
+    prec60_patch                  ::V = Float64[]   # 60-day running mean of total precip (mm H2O/s) [use_cn]
+    rh30_patch                    ::V = Float64[]   # 30-day running mean of relative humidity (%)   [use_cn]
+    prec365_col                   ::V = Float64[]   # 365-day running mean of total precip (mm H2O/s) [use_cndv]
+    prec24_patch                  ::V = Float64[]   # 24-hr running mean of total precip (mm H2O/s)  [use_fates]
+    rh24_patch                    ::V = Float64[]   # 24-hr running mean of relative humidity (%)    [use_fates]
 end
 
 Atm2LndData{FT}(; kwargs...) where {FT<:Real} =
@@ -295,6 +324,9 @@ function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {F
     a2l.forc_snow_downscaled_col      = fill(ival, nc)
     a2l.forc_q_downscaled_col         = fill(ival, nc)
 
+    # relative humidity (derived from q/T/pbot each step by atm2lnd_update_rh!)
+    a2l.forc_rh_grc                   = fill(ival, ng)
+
     # time-averaged (patch-level)
     a2l.fsd24_patch                   = fill(FT(NaN), np)
     a2l.fsd240_patch                  = fill(FT(NaN), np)
@@ -305,6 +337,25 @@ function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {F
     end
     a2l.t_mo_patch                    = fill(FT(NaN), np)
     a2l.t_mo_min_patch                = fill(FT(SPVAL), np)
+    a2l.tda_accum_patch               = fill(FT(0), np)
+    a2l.tda_naccum_patch              = fill(FT(0), np)
+
+    # wateratm2lndbulk accumulators — allocated under the same gates Fortran
+    # registers them under (Wateratm2lndBulkType.F90::InitAccBuffer), so an
+    # ungated run neither allocates nor accumulates them.
+    if varctl.use_cn
+        a2l.prec10_patch              = fill(FT(NaN), np)
+        a2l.prec30_patch              = fill(FT(NaN), np)
+        a2l.prec60_patch              = fill(FT(NaN), np)
+        a2l.rh30_patch                = fill(FT(NaN), np)
+    end
+    if varctl.use_cndv
+        a2l.prec365_col               = fill(FT(NaN), nc)
+    end
+    if varctl.use_fates
+        a2l.prec24_patch              = fill(FT(NaN), np)
+        a2l.rh24_patch                = fill(FT(NaN), np)
+    end
 
     nothing
 end
@@ -417,123 +468,287 @@ end
 # --------------------------------------------------------------------------
 
 """
-    atm2lnd_update_acc_vars!(a2l, bounds_p, bounds_c;
-        patch_gridcell, patch_column,
-        fsd24_update!, fsd240_update!, fsi24_update!, fsi240_update!,
-        [wind24_update!, tda_update!, pco2_240_update!, po2_240_update!, pbot240_update!])
+    atm2lnd_update_rh!(a2l, bounds_grc)
 
-Update time-accumulated forcing variables. The actual accumulation/extraction
-is delegated to caller-provided update functions (replacing Fortran accumulMod).
+Derive `forc_rh_grc` (relative humidity, %) from the specific-humidity,
+temperature and pressure forcing: `rh = 100 * q / qsat(T, pbot)`, clamped to
+[0, 100].
 
-Ported from `UpdateAccVars` in `atm2lndType.F90`.
+Fortran imports `forc_rh` from the coupler onto `wateratm2lndbulk_type`; this
+port has no coupler, so RH is reconstructed from forcing that IS present. It is
+the source term for the RH30 (`use_cn`) and RH24 (`use_fates`) accumulators.
+"""
+function atm2lnd_update_rh!(a2l::Atm2LndData, bounds_grc::UnitRange{Int})
+    isempty(bounds_grc) && return nothing
+    length(a2l.forc_rh_grc) >= last(bounds_grc) || return nothing
+    @inbounds for g in bounds_grc
+        t = a2l.forc_t_not_downscaled_grc[g]
+        p = a2l.forc_pbot_not_downscaled_grc[g]
+        q = a2l.forc_q_not_downscaled_grc[g]
+        if isfinite(t) && isfinite(p) && isfinite(q) && p > 0
+            qs, _es = qsat_no_derivs(t, p)
+            a2l.forc_rh_grc[g] = qs > 0 ? min(100.0, max(0.0, 100.0 * q / qs)) : 0.0
+        end
+    end
+    return nothing
+end
+
+"""
+    atm2lnd_update_acc_vars!(a2l, bounds_p, bounds_c, patch_gridcell, patch_column;
+                             nstep=0, dtime=1800)
+
+Update the time-accumulated forcing variables — every one a genuine `accumulMod`
+running mean, with its window derived from Fortran's accumulation period in DAYS
+and the model timestep (see [`accum_runmean`](@ref) / [`accum_window_steps`](@ref)):
+
+| field                                | acctype | Fortran period | gate      |
+|--------------------------------------|---------|----------------|-----------|
+| `fsd24` / `fsi24`                    | runmean | -1 day         | always    |
+| `fsd240` / `fsi240`                  | runmean | -10 days       | always    |
+| `prec10` / `prec30` / `prec60`       | runmean | -10/-30/-60 d  | use_cn    |
+| `rh30`                               | runmean | -30 days       | use_cn    |
+| `prec365`                            | runmean | -365 days      | use_cndv  |
+| `t_mo` (TDA) → `t_mo_min`            | timeavg | -30 days       | use_cndv  |
+| `wind24` / `prec24` / `rh24`         | runmean | -1 day         | use_fates |
+| `forc_pco2_240` / `_po2_240` / `_pbot240` | runmean | -10 days  | use_luna  |
+
+BUG HISTORY: every one of these was previously a PASS-THROUGH — the kernels
+assigned the INSTANTANEOUS forcing value to the "24hr"/"240hr"/"10-day mean"
+field. The routine was called every step, so it looked wired, but no averaging
+happened at all. Consequences: LUNA acclimated to the instantaneous
+CO2/O2/pressure rather than their 10-day means (`LunaMod` `CO2_p240`/`O2_p240`/
+`forc_pbot10`); MEGAN/VOC saw instantaneous rather than 24h/240h radiation; and
+CNDV's `t_mo_min` tracked the coldest INSTANT of the year instead of the coldest
+30-day MEAN, which is a completely different (and far colder) bioclimatic limit.
+
+Ported from `UpdateAccVars` in `atm2lndType.F90` and
+`Wateratm2lndBulkType.F90`.
 """
 function atm2lnd_update_acc_vars!(a2l::Atm2LndData,
         bounds_p::UnitRange{Int},
         patch_gridcell::AbstractVector{Int},
-        patch_column::AbstractVector{Int})
+        patch_column::AbstractVector{Int};
+        bounds_c::UnitRange{Int} = 1:0,
+        nstep::Int = 0,
+        dtime::Int = 1800)
 
     isempty(bounds_p) && return nothing
     pmin = first(bounds_p)
     pmax = last(bounds_p)
 
-    # Accumulate direct beam radiation: FSD24, FSD240
+    w1   = accum_window_steps(1,   dtime)
+    w10  = accum_window_steps(10,  dtime)
+    w30  = accum_window_steps(30,  dtime)
+    w60  = accum_window_steps(60,  dtime)
+    w365 = accum_window_steps(365, dtime)
+
+    # FSD24 (-1 day) / FSD240 (-10 days) — direct-beam radiation.
     _launch!(_a2l_solad_kernel!, a2l.fsd24_patch, a2l.fsd240_patch,
-        patch_gridcell, a2l.forc_solad_not_downscaled_grc, pmin, pmax;
+        patch_gridcell, a2l.forc_solad_not_downscaled_grc, nstep, w1, w10, pmin, pmax;
         ndrange = length(a2l.fsd24_patch))
 
-    # Accumulate diffuse radiation: FSI24, FSI240
+    # FSI24 (-1 day) / FSI240 (-10 days) — diffuse radiation.
     _launch!(_a2l_solai_kernel!, a2l.fsi24_patch, a2l.fsi240_patch,
-        patch_gridcell, a2l.forc_solai_grc, pmin, pmax;
+        patch_gridcell, a2l.forc_solai_grc, nstep, w1, w10, pmin, pmax;
         ndrange = length(a2l.fsi24_patch))
 
-    # CNDV: accumulate temperature (TDA)
-    if varctl.use_cndv
-        _launch!(_a2l_cndv_kernel!, a2l.t_mo_patch, a2l.t_mo_min_patch,
-            patch_column, a2l.forc_t_downscaled_col, pmin, pmax;
-            ndrange = length(a2l.t_mo_patch))
+    # PREC10 / PREC30 / PREC60 / RH30 (use_cn). Precip is the column-downscaled
+    # rain + snow mapped onto the patch; RH is the gridcell forcing RH.
+    if varctl.use_cn && length(a2l.prec10_patch) >= pmax
+        _launch!(_a2l_preccn_kernel!, a2l.prec10_patch, a2l.prec30_patch,
+            a2l.prec60_patch, a2l.rh30_patch, patch_column, patch_gridcell,
+            a2l.forc_rain_downscaled_col, a2l.forc_snow_downscaled_col,
+            a2l.forc_rh_grc, nstep, w10, w30, w60, pmin, pmax;
+            ndrange = length(a2l.prec10_patch))
     end
 
-    # FATES: accumulate wind
+    # CNDV: TDA (30-day TIMEAVG) → t_mo, and the running min of those 30-day
+    # means → t_mo_min. PREC365 is COLUMN-level (Fortran: "we cannot use a
+    # patch-level accumulator for CNDV because this is used for establishment,
+    # so must be available for inactive patches").
+    if varctl.use_cndv
+        _launch!(_a2l_cndv_kernel!, a2l.t_mo_patch, a2l.t_mo_min_patch,
+            a2l.tda_accum_patch, a2l.tda_naccum_patch,
+            patch_column, a2l.forc_t_downscaled_col, nstep, w30, pmin, pmax;
+            ndrange = length(a2l.t_mo_patch))
+
+        if !isempty(bounds_c) && length(a2l.prec365_col) >= last(bounds_c)
+            _launch!(_a2l_prec365_kernel!, a2l.prec365_col,
+                a2l.forc_rain_downscaled_col, a2l.forc_snow_downscaled_col,
+                nstep, w365, first(bounds_c), last(bounds_c);
+                ndrange = length(a2l.prec365_col))
+        end
+    end
+
+    # FATES: WIND24 / PREC24 / RH24 (all -1 day).
     if varctl.use_fates
-        _launch!(_a2l_fates_kernel!, a2l.wind24_patch,
-            patch_gridcell, a2l.forc_wind_grc, pmin, pmax;
+        _launch!(_a2l_fates_kernel!, a2l.wind24_patch, a2l.prec24_patch,
+            a2l.rh24_patch, patch_gridcell, patch_column, a2l.forc_wind_grc,
+            a2l.forc_rain_downscaled_col, a2l.forc_snow_downscaled_col,
+            a2l.forc_rh_grc, nstep, w1, pmin, pmax;
             ndrange = length(a2l.wind24_patch))
     end
 
-    # LUNA: accumulate pco2, po2, pbot
+    # LUNA: pco2_240 / po2_240 / pbot240 (all -10 days).
     if varctl.use_luna
         _launch!(_a2l_luna_kernel!, a2l.forc_pco2_240_patch,
             a2l.forc_po2_240_patch, a2l.forc_pbot240_downscaled_patch,
             patch_gridcell, patch_column, a2l.forc_pco2_grc, a2l.forc_po2_grc,
-            a2l.forc_pbot_downscaled_col, pmin, pmax;
+            a2l.forc_pbot_downscaled_col, nstep, w10, pmin, pmax;
             ndrange = length(a2l.forc_pco2_240_patch))
     end
 
     nothing
 end
 
-# Per-patch: gather direct beam radiation into FSD24/FSD240.
+# Per-patch running means of direct-beam radiation: FSD24 (1 day), FSD240 (10 days).
 @kernel function _a2l_solad_kernel!(fsd24_patch, fsd240_patch,
         @Const(patch_gridcell), @Const(forc_solad_not_downscaled_grc),
-        pmin::Int, pmax::Int)
+        nstep::Int, w1::Int, w10::Int, pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
         g = patch_gridcell[p]
         val = forc_solad_not_downscaled_grc[g, 1]
-        fsd24_patch[p] = val
-        fsd240_patch[p] = val
+        if isfinite(val)
+            fsd24_patch[p]  = accum_runmean(fsd24_patch[p],  val, nstep, w1)
+            fsd240_patch[p] = accum_runmean(fsd240_patch[p], val, nstep, w10)
+        end
     end
 end
 
-# Per-patch: gather diffuse radiation into FSI24/FSI240.
+# Per-patch running means of diffuse radiation: FSI24 (1 day), FSI240 (10 days).
 @kernel function _a2l_solai_kernel!(fsi24_patch, fsi240_patch,
         @Const(patch_gridcell), @Const(forc_solai_grc),
-        pmin::Int, pmax::Int)
+        nstep::Int, w1::Int, w10::Int, pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
         g = patch_gridcell[p]
         val = forc_solai_grc[g, 1]
-        fsi24_patch[p] = val
-        fsi240_patch[p] = val
+        if isfinite(val)
+            fsi24_patch[p]  = accum_runmean(fsi24_patch[p],  val, nstep, w1)
+            fsi240_patch[p] = accum_runmean(fsi240_patch[p], val, nstep, w10)
+        end
     end
 end
 
-# CNDV: per-patch temperature accumulation (TDA) + running monthly min.
-@kernel function _a2l_cndv_kernel!(t_mo_patch, t_mo_min_patch,
-        @Const(patch_column), @Const(forc_t_downscaled_col),
+# use_cn: PREC10/PREC30/PREC60 (patch running means of column rain+snow) and
+# RH30 (patch running mean of gridcell RH). Feeds the Li fire schemes' fuel
+# moisture / ignition terms and CNPhenology's rain-triggered stress-decid onset.
+@kernel function _a2l_preccn_kernel!(prec10_patch, prec30_patch, prec60_patch,
+        rh30_patch, @Const(patch_column), @Const(patch_gridcell),
+        @Const(forc_rain_downscaled_col), @Const(forc_snow_downscaled_col),
+        @Const(forc_rh_grc), nstep::Int, w10::Int, w30::Int, w60::Int,
         pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
         c = patch_column[p]
-        t_val = forc_t_downscaled_col[c]
-        t_mo_patch[p] = t_val
-        t_mo_min_patch[p] = min(t_mo_min_patch[p], t_val)
+        g = patch_gridcell[p]
+        prec = forc_rain_downscaled_col[c] + forc_snow_downscaled_col[c]
+        if isfinite(prec)
+            prec10_patch[p] = accum_runmean(prec10_patch[p], prec, nstep, w10)
+            prec30_patch[p] = accum_runmean(prec30_patch[p], prec, nstep, w30)
+            prec60_patch[p] = accum_runmean(prec60_patch[p], prec, nstep, w60)
+        end
+        rh = forc_rh_grc[g]
+        if isfinite(rh)
+            rh30_patch[p] = accum_runmean(rh30_patch[p], rh, nstep, w30)
+        end
     end
 end
 
-# FATES: per-patch wind accumulation.
-@kernel function _a2l_fates_kernel!(wind24_patch,
-        @Const(patch_gridcell), @Const(forc_wind_grc),
-        pmin::Int, pmax::Int)
+# use_cndv: TDA is a 30-day TIMEAVG (not a runmean). Accumulate the sum over the
+# window; at a window boundary emit the mean into t_mo and fold it into the
+# running minimum t_mo_min, then reset. This mirrors accumulMod's timeavg
+# extract, which returns the mean only at `mod(nstep, period) == 0` and SPVAL
+# otherwise — so `min(t_mo_min, SPVAL)` is a no-op on non-boundary steps and
+# t_mo_min ends up tracking the coldest 30-day MEAN.
+@kernel function _a2l_cndv_kernel!(t_mo_patch, t_mo_min_patch,
+        tda_accum_patch, tda_naccum_patch,
+        @Const(patch_column), @Const(forc_t_downscaled_col),
+        nstep::Int, w30::Int, pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(t_mo_patch)
+        c = patch_column[p]
+        t_val = forc_t_downscaled_col[c]
+        if isfinite(t_val)
+            tda_accum_patch[p]  += t_val
+            tda_naccum_patch[p] += one(T)
+        end
+        if nstep % w30 == 0
+            n = tda_naccum_patch[p]
+            if n > zero(T)
+                avg = tda_accum_patch[p] / n
+                t_mo_patch[p] = avg
+                cur = t_mo_min_patch[p]
+                t_mo_min_patch[p] = (cur == T(SPVAL) || !isfinite(cur)) ? avg : min(cur, avg)
+            end
+            tda_accum_patch[p]  = zero(T)
+            tda_naccum_patch[p] = zero(T)
+        end
+    end
+end
+
+# use_cndv: PREC365 — COLUMN-level 365-day running mean of rain+snow.
+@kernel function _a2l_prec365_kernel!(prec365_col,
+        @Const(forc_rain_downscaled_col), @Const(forc_snow_downscaled_col),
+        nstep::Int, w365::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        prec = forc_rain_downscaled_col[c] + forc_snow_downscaled_col[c]
+        if isfinite(prec)
+            prec365_col[c] = accum_runmean(prec365_col[c], prec, nstep, w365)
+        end
+    end
+end
+
+# use_fates: WIND24 / PREC24 / RH24 — all 1-day running means (SPITFIRE inputs).
+@kernel function _a2l_fates_kernel!(wind24_patch, prec24_patch, rh24_patch,
+        @Const(patch_gridcell), @Const(patch_column), @Const(forc_wind_grc),
+        @Const(forc_rain_downscaled_col), @Const(forc_snow_downscaled_col),
+        @Const(forc_rh_grc), nstep::Int, w1::Int, pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
         g = patch_gridcell[p]
-        wind24_patch[p] = forc_wind_grc[g]
+        c = patch_column[p]
+        wnd = forc_wind_grc[g]
+        if isfinite(wnd)
+            wind24_patch[p] = accum_runmean(wind24_patch[p], wnd, nstep, w1)
+        end
+        prec = forc_rain_downscaled_col[c] + forc_snow_downscaled_col[c]
+        if isfinite(prec)
+            prec24_patch[p] = accum_runmean(prec24_patch[p], prec, nstep, w1)
+        end
+        rh = forc_rh_grc[g]
+        if isfinite(rh)
+            rh24_patch[p] = accum_runmean(rh24_patch[p], rh, nstep, w1)
+        end
     end
 end
 
-# LUNA: per-patch pco2/po2/pbot accumulation.
+# use_luna: 10-day running means of CO2/O2 partial pressure and air pressure.
+# These are LunaMod's CO2_p240 / O2_p240 / forc_pbot10 — the acclimation climate.
 @kernel function _a2l_luna_kernel!(forc_pco2_240_patch, forc_po2_240_patch,
         forc_pbot240_downscaled_patch, @Const(patch_gridcell), @Const(patch_column),
         @Const(forc_pco2_grc), @Const(forc_po2_grc), @Const(forc_pbot_downscaled_col),
-        pmin::Int, pmax::Int)
+        nstep::Int, w10::Int, pmin::Int, pmax::Int)
     p = @index(Global)
     @inbounds if pmin <= p <= pmax
         g = patch_gridcell[p]
         c = patch_column[p]
-        forc_pco2_240_patch[p] = forc_pco2_grc[g]
-        forc_po2_240_patch[p] = forc_po2_grc[g]
-        forc_pbot240_downscaled_patch[p] = forc_pbot_downscaled_col[c]
+        vco2 = forc_pco2_grc[g]
+        if isfinite(vco2)
+            forc_pco2_240_patch[p] = accum_runmean(forc_pco2_240_patch[p], vco2, nstep, w10)
+        end
+        vo2 = forc_po2_grc[g]
+        if isfinite(vo2)
+            forc_po2_240_patch[p] = accum_runmean(forc_po2_240_patch[p], vo2, nstep, w10)
+        end
+        vpb = forc_pbot_downscaled_col[c]
+        if isfinite(vpb)
+            forc_pbot240_downscaled_patch[p] =
+                accum_runmean(forc_pbot240_downscaled_patch[p], vpb, nstep, w10)
+        end
     end
 end
 
@@ -611,6 +826,8 @@ function atm2lnd_clean!(a2l::Atm2LndData{FT}) where {FT}
     a2l.forc_snow_downscaled_col      = FT[]
     a2l.forc_q_downscaled_col         = FT[]
 
+    a2l.forc_rh_grc                   = FT[]
+
     # time-averaged
     a2l.fsd24_patch                   = FT[]
     a2l.fsd240_patch                  = FT[]
@@ -618,9 +835,22 @@ function atm2lnd_clean!(a2l::Atm2LndData{FT}) where {FT}
     a2l.fsi240_patch                  = FT[]
     if varctl.use_fates
         a2l.wind24_patch              = FT[]
+        a2l.prec24_patch              = FT[]
+        a2l.rh24_patch                = FT[]
     end
     a2l.t_mo_patch                    = FT[]
     a2l.t_mo_min_patch                = FT[]
+    a2l.tda_accum_patch               = FT[]
+    a2l.tda_naccum_patch              = FT[]
+    if varctl.use_cn
+        a2l.prec10_patch              = FT[]
+        a2l.prec30_patch              = FT[]
+        a2l.prec60_patch              = FT[]
+        a2l.rh30_patch                = FT[]
+    end
+    if varctl.use_cndv
+        a2l.prec365_col               = FT[]
+    end
 
     nothing
 end

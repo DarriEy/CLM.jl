@@ -389,3 +389,75 @@ end
 # init_cold_biogeochem! decoupled from the exact CNVegetation config schema.
 getfield_or(obj, name::Symbol, default) =
     hasproperty(obj, name) ? getproperty(obj, name) : default
+
+# ==========================================================================
+# InitAccVars — the accumulator sibling of the InitCold class above.
+#
+# Fortran splits accumulator setup in two (clm_instMod.F90 / clm_initializeMod.F90):
+#
+#   InitAccBuffer  — at init, REGISTERS each accumulated field (name, acctype,
+#                    period, init_value) with accumulMod.
+#   InitAccVars    — AFTER the restart read, EXTRACTS the (possibly restarted)
+#                    buffer values back into the derived-type members, so the
+#                    first physics call of the run sees the right running means.
+#   UpdateAccVars  — every step, from clm_driver.
+#
+# CLM.jl evaluates the always-on accumulators IN-ARRAY on the state field itself
+# (see `accum_runmean` in accumul.jl), so there is no separate buffer to register
+# or extract, and most `*_init_acc_buffer!` / `*_init_acc_vars!` ports are
+# genuinely no-ops. The ONE that is not is `temperature_init_acc_vars!`: on a
+# startup run Fortran seeds the daily min/max trackers to their missing-value
+# flags (`t_ref2m_max_inst = -spval`, `t_ref2m_min_inst = +spval`) so the first
+# max()/min() latches onto a real value rather than the allocator's NaN.
+#
+# It was never called. This is the call site.
+# ==========================================================================
+
+"""
+    init_acc_vars!(inst, bounds; is_startup=true)
+
+Run Fortran's `InitAccVars` phase for every accumulator-owning type, in
+`clm_initializeMod.F90` order (atm2lnd → temperature → water → energyflux →
+canopystate → crop).
+
+Called once from `clm_initialize!`, after the cold start. Fortran's ordering
+constraint is "after the restart file is read"; CLM.jl has no restart read on the
+cold-start path, so the equivalent window is the end of initialization.
+"""
+function init_acc_vars!(inst::CLMInstances, bounds::BoundsType;
+                        is_startup::Bool = true)
+    bc = bounds.begc:bounds.endc
+    bp = bounds.begp:bounds.endp
+
+    atm2lnd_init_acc_vars!(inst.atm2lnd, bp)
+    temperature_init_acc_vars!(inst.temperature, bc, bp; is_startup = is_startup)
+    water_init_acc_vars!(inst.water, bc)
+    energyflux_init_acc_vars!(inst.energyflux, bp; is_startup = is_startup)
+    canopystate_init_acc_vars!(inst.canopystate, bp)
+    crop_init_acc_vars!(inst.crop, bp)
+
+    return nothing
+end
+
+"""
+    init_acc_buffer!(inst, bounds)
+
+Run Fortran's `InitAccBuffer` phase. In CLM.jl the always-on accumulators need no
+registration (they are evaluated in-array), so these are no-ops kept for
+traceability and to give the wiring guard a live call site. The one accumulator
+that DOES use the generic `AccumManager` — the crop GDD family — is registered
+lazily on the first crop step in `clm_drv!`, because its manager must live on the
+(non-dual) config rather than on the instance.
+"""
+function init_acc_buffer!(inst::CLMInstances, bounds::BoundsType)
+    bc = bounds.begc:bounds.endc
+    bp = bounds.begp:bounds.endp
+
+    atm2lnd_init_acc_buffer!(inst.atm2lnd)
+    water_init_acc_buffer!(inst.water, bc)
+    energyflux_init_acc_buffer!(inst.energyflux, bp)
+    canopystate_init_acc_buffer!(inst.canopystate, bp)
+    crop_init_acc_buffer!(inst.crop)
+
+    return nothing
+end

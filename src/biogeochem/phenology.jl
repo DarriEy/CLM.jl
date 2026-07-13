@@ -885,7 +885,8 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        phase::Int;
                        varctl::VarCtl=VarCtl(),
                        is_first_step::Bool=false,
-                       avg_dayspyr::Real=365.0)
+                       avg_dayspyr::Real=365.0,
+                       prec10_patch::AbstractVector{<:Real}=Float64[])
 
     if phase == 1
         cn_phenology_climate!(pstate, mask_soilp, temperature, cnveg_state, crop,
@@ -905,7 +906,8 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                                    cnveg_state, cnveg_cs, cnveg_ns,
                                    cnveg_cf, cnveg_nf,
                                    patch_data, gridcell, cn_params;
-                                   avg_dayspyr=avg_dayspyr)
+                                   avg_dayspyr=avg_dayspyr,
+                                   prec10_patch=prec10_patch)
 
         if any(mask_pcropp) && !is_first_step
             crop_phenology!(pstate, params, mask_pcropp, pftcon,
@@ -984,12 +986,24 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
                                  avg_dayspyr::Real)
     dt         = pstate.dt
     # The evergreen storage→transfer uses Fortran's FIXED tranr = 0.0002
-    # (CNPhenologyMod CNEvergreenPhenology, gated on cn_evergreen_phenology_opt==1,
-    # which the Bow run sets), NOT fstor2tran=0.5 — that 0.5 is the DECIDUOUS onset
-    # fraction. Using fstor2tran here drained evergreen storage 2500x too fast
-    # (halving leafc_storage every step). With opt==0 (CLM default) Fortran skips
-    # the transfer entirely; 0.0002 is small enough that the always-on form here
-    # stays negligible for that case (TODO: thread the opt flag to gate it off).
+    # (CNPhenologyMod CNEvergreenPhenology), NOT fstor2tran=0.5 — that 0.5 is the
+    # DECIDUOUS onset fraction. Using fstor2tran here drained evergreen storage
+    # 2500x too fast (halving leafc_storage every step).
+    #
+    # KNOWN DIVERGENCE (deliberate, not an oversight — do not "fix" casually):
+    # Fortran applies this transfer ONLY when `cn_evergreen_phenology_opt == 1`;
+    # with opt == 0 it skips the storage→transfer entirely. `varctl` HAS the flag
+    # (`CN_evergreen_phenology_opt::Int = 0`, varctl.jl:112) and its default is 0 —
+    # so a faithful port would skip. CLM.jl instead applies tranr = 0.0002
+    # UNCONDITIONALLY. The rate is small, but "small" is not "zero", and this is a
+    # real fidelity gap, not a rounding detail.
+    #
+    # It is NOT gated here because the whole 16-biome parity scorecard (1102/1104
+    # vars within tol) was validated against the current always-on behaviour;
+    # switching it off is a result-changing change that needs its own re-validation
+    # against the Fortran reference, not a rider on an unrelated PR. Gating it =
+    # `tranr = (varctl.CN_evergreen_phenology_opt == 1) ? 0.0002 : 0.0`, then re-run
+    # scripts/parity_run_domain.jl across the scorecard.
     tranr = 0.0002
 
     # Per-patch independent: evergreen background rates + storage→transfer.
@@ -1629,6 +1643,9 @@ Base.@kwdef struct _PhenStressSD_In{V}
     livestemn_storage_patch::V; deadstemn_storage_patch::V
     livecrootn_storage_patch::V; deadcrootn_storage_patch::V
     leafc_patch::V; frootc_patch::V
+    # 10-day running mean of total precipitation (mm H2O/s). Feeds the
+    # `constrain_stress_deciduous_onset` rain trigger below.
+    prec10_patch::V
 end
 Adapt.@adapt_structure _PhenStressSD_In
 
@@ -1647,6 +1664,12 @@ Base.@kwdef struct _PhenStressSDScalars{T}
     crit_offset_fdd::T; crit_offset_swi::T; soilpsi_off::T
     secspqtrday::T; avg_dayspyr::T
     tfrz::T; secspday::T
+    # Rain trigger for stress-deciduous onset (CNPhenologyMod: rain_threshold =
+    # 20 mm accumulated over the prec10 window). `constrain_onset` is
+    # CNParamsShare's `constrain_stress_deciduous_onset`; when false the condition
+    # is unconditionally true, which is the clm4_5 behaviour.
+    rain_threshold::T
+    constrain_onset::Bool
 end
 
 @kernel function _phen_stress_decid_kernel!(
@@ -1837,8 +1860,20 @@ end
                 if onset_gddflag_patch[p] == one(T)
                     onset_gdd_patch[p] += smooth_max(soilt - TFRZ, zero(T)) * fracday
                 end
-                # soil water index
-                additional_onset_condition = true  # prec10 stub: always true
+                # Rain trigger (CNPhenologyMod.F90:1638-1644). Was hardcoded
+                # `true` because prec10 did not exist as a field; it does now (a
+                # real 10-day running mean, accumulated in atm2lnd_update_acc_vars!).
+                # Gated on constrain_stress_deciduous_onset, whose CLM.jl default is
+                # false → this stays unconditionally true by default, exactly as
+                # before. (NOTE: Fortran's CLM5/CLM6 namelist default for that flag
+                # is .true.; only clm4_5 is .false. Flipping the CLM.jl default is a
+                # separate, parity-validated change — not made here.)
+                additional_onset_condition = true
+                if sc.constrain_onset
+                    if inp.prec10_patch[p] * (T(3600) * T(10) * T(24)) < sc.rain_threshold
+                        additional_onset_condition = false
+                    end
+                end
                 if psi >= soilpsi_on
                     onset_swi_patch[p] += fracday
                 end
@@ -1982,7 +2017,8 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
                                     patch_data::PatchData,
                                     gridcell::GridcellData,
                                     cn_params::CNSharedParamsData;
-                                    avg_dayspyr::Real=365.0)
+                                    avg_dayspyr::Real=365.0,
+                                    prec10_patch::AbstractVector{<:Real}=Float64[])
     dt              = pstate.dt
     fracday         = pstate.fracday
     ndays_off_val   = pstate.ndays_off
@@ -2078,7 +2114,13 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
         livecrootn_storage_patch = cnveg_ns.livecrootn_storage_patch,
         deadcrootn_storage_patch = cnveg_ns.deadcrootn_storage_patch,
         leafc_patch  = cnveg_cs.leafc_patch,
-        frootc_patch = cnveg_cs.frootc_patch)
+        frootc_patch = cnveg_cs.frootc_patch,
+        # prec10 is only READ when constrain_stress_deciduous_onset; supply a
+        # correctly-sized zero buffer if the accumulator was never allocated
+        # (use_cn=false paths that still construct this bundle).
+        prec10_patch = (length(prec10_patch) >= length(cnveg_cs.leafc_patch) ?
+                        prec10_patch :
+                        fill!(similar(cnveg_cs.leafc_patch), zero(eltype(cnveg_cs.leafc_patch)))))
 
     col = _PhenStressSD_Col(;
         t_soisno_col = temperature.t_soisno_col,
@@ -2099,7 +2141,9 @@ function cn_stress_decid_phenology!(pstate::PhenologyState,
         secspqtrday     = T(secspqtrday),
         avg_dayspyr     = T(avg_dayspyr),
         tfrz            = T(TFRZ),
-        secspday        = T(SECSPDAY))
+        secspday        = T(SECSPDAY),
+        rain_threshold  = T(20.0),
+        constrain_onset = cn_params.constrain_stress_deciduous_onset)
 
     # Struct-first kernel: manual backend (struct args carry no backend) + synchronize.
     isempty(mask_soilp) && return nothing

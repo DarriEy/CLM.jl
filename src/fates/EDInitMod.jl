@@ -588,9 +588,10 @@ function init_patches!(nsites::Integer, sites::AbstractVector, bc_in::AbstractVe
             # Read LUH state data to determine the initial land-use types.
             state_vector = zeros(n_landuse_cats)
             if hlm_use_luh[] == itrue
-                # TODO Batch NN: GetLUHStatedata (FatesLandUseChangeMod) is not yet
-                # ported; LUH2 init is off by default (hlm_use_luh defaults to unset/
-                # ifalse).  When ported, fill state_vector + landuse_vector_gt_min here.
+                # GetLUHStatedata IS ported (FatesLandUseChangeMod.jl) and this call
+                # is live. (The "not yet ported" TODO that used to sit here was stale
+                # — it outlived the port and contradicted the call right below it.)
+                # LUH2 init remains off by default: hlm_use_luh defaults to unset.
                 state_vector .= GetLUHStatedata(bc_in[s])
                 for i_lu in 1:n_landuse_cats
                     site.landuse_vector_gt_min[i_lu] =

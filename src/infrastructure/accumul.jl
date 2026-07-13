@@ -19,6 +19,67 @@ const ACCTYPE_RUNMEAN  = 2
 const ACCTYPE_RUNACCUM = 3
 
 # --------------------------------------------------------------------------
+# GPU-safe in-array accumulator primitives
+#
+# The `AccumManager` above is the faithful, host-side port of `accumulMod`. It
+# owns its own `val`/`nsteps` buffers, which makes it unusable from inside a
+# KernelAbstractions kernel and invisible to a ForwardDiff dual copy of the
+# instance. The always-on per-timestep accumulators (T10, SOIL10, FSD24, …) are
+# therefore evaluated IN-ARRAY on the state field itself, with these two
+# helpers reproducing `accumulMod`'s arithmetic exactly.
+#
+# `accum_runmean` mirrors `update_accum_field_runmean` (accumulMod.F90):
+#
+#     nsteps = min(nsteps + 1, period)
+#     val    = ((nsteps - 1) * val + field) / nsteps
+#
+# For a point that is active and updated on EVERY step from nstep = 1 (which is
+# true of every accumulator the driver drives — the driver's `if nstep > 0`
+# guard mirrors Fortran's), the per-point `nsteps` counter is exactly
+# `min(nstep, period)`, so it needs no extra state array. At nstep == 1 the
+# recurrence collapses to `val = field`, which is why Fortran's `init_value` is
+# discarded on the first update — reproduced here by the `nstep <= 1` branch
+# (and by the NaN/SPVAL branch, so a cold-started missing-value flag seeds
+# from the first real sample rather than poisoning the mean).
+# --------------------------------------------------------------------------
+
+"""
+    accum_runmean(cur, val, nstep, win) -> T
+
+One step of a `runmean` accumulator with window `win` (in TIMESTEPS): returns
+the updated running mean given the current mean `cur` and this step's sample
+`val`. Reproduces `update_accum_field_runmean` in `accumulMod.F90`.
+
+`cur` being NaN or `SPVAL` (the cold-start missing-value flag), or `nstep <= 1`,
+re-seeds the mean from `val` — matching Fortran, where the first update divides
+by `nsteps == 1` and so discards `init_value`.
+
+Pure and scalar → callable from inside a GPU kernel.
+"""
+@inline function accum_runmean(cur::T, val::T, nstep::Int, win::Int) where {T}
+    if !isfinite(cur) || cur == T(SPVAL) || nstep <= 1
+        return val
+    end
+    n = T(min(nstep, win))
+    return cur + (val - cur) / n
+end
+
+"""
+    accum_window_steps(days, dtime) -> Int
+
+Convert an `accumulMod` accumulation period expressed in DAYS (Fortran passes it
+as a negative `accum_period`) into a number of TIMESTEPS, exactly as
+`init_accum_field` does:
+
+    period = (-accum_period) * SHR_CONST_CDAY / get_step_size()
+
+These windows MUST scale with `dtime`. Hardcoding them to their `dtime = 1800`
+values silently mis-sizes every running mean at any other timestep.
+"""
+@inline accum_window_steps(days::Int, dtime::Int) =
+    max(1, round(Int, days * SECSPDAY / (dtime > 0 ? dtime : 1800)))
+
+# --------------------------------------------------------------------------
 # AccumField — per-field data structure
 # --------------------------------------------------------------------------
 

@@ -703,7 +703,8 @@ function cn_driver_no_leaching!(
                 cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
                 crop, patch, gridcell, cn_shared_params,
                 _lprof, _fprof, _phase;
-                varctl = varctl, is_first_step = is_first_step, avg_dayspyr = 365.0)
+                varctl = varctl, is_first_step = is_first_step, avg_dayspyr = 365.0,
+                prec10_patch = prec10_patch)
         end
     end
 

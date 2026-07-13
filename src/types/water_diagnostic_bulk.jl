@@ -653,17 +653,39 @@ function waterdiagnosticbulk_init_acc_vars!(wd::WaterDiagnosticBulkData,
 end
 
 """
-    waterdiagnosticbulk_update_acc_vars!(wd, bounds_col)
+    waterdiagnosticbulk_update_acc_vars!(wd, bounds_col; nstep=0, dtime=1800)
 
-Update accumulation variables (snow 5-day average).
+Update the SNOW_5D accumulator: a 5-day running mean of `snow_depth_col`,
+extracted into `snow_5day_col`.
+
+BUG HISTORY: this was a no-op stub, so `snow_5day_col` — allocated NaN — stayed
+NaN for the whole run. It is read by CNPhenology's seasonal-deciduous onset test
+(`snow_5day < snow5d_thresh`); a NaN makes that comparison false forever, so the
+snow-gated branch of leaf-out could never fire.
 
 Ported from `UpdateAccVars` in `WaterDiagnosticBulkType.F90`.
-Not implemented (no-op stub). The accumulator IS ported
-(`src/infrastructure/accumul.jl`, `AccumManager`) and is used by the live
-driver (crop GDD, `t_mo_min`); these particular fields are simply not
-registered with it.
 """
 function waterdiagnosticbulk_update_acc_vars!(wd::WaterDiagnosticBulkData,
-                                               bounds_col::UnitRange{Int})
+                                               bounds_col::UnitRange{Int};
+                                               nstep::Int = 0,
+                                               dtime::Int = 1800)
+    isempty(bounds_col) && return nothing
+    length(wd.snow_5day_col) >= last(bounds_col) || return nothing
+    _launch!(_snow5d_kernel!, wd.snow_5day_col, wd.snow_depth_col,
+        nstep, accum_window_steps(5, dtime),
+        first(bounds_col), last(bounds_col);
+        ndrange = length(wd.snow_5day_col))
     return nothing
+end
+
+# SNOW_5D: 5-day running mean of snow depth (column).
+@kernel function _snow5d_kernel!(snow_5day_col, @Const(snow_depth_col),
+        nstep::Int, win_5day::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        sd = snow_depth_col[c]
+        if isfinite(sd)
+            snow_5day_col[c] = accum_runmean(snow_5day_col[c], sd, nstep, win_5day)
+        end
+    end
 end

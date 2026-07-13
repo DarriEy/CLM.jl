@@ -76,6 +76,18 @@ Base.@kwdef mutable struct TemperatureData{FT<:Real,
     t_ref2m_max_inst_r_patch ::V = Float64[]   # patch instantaneous daily max - rural (K)
     t_ref2m_max_inst_u_patch ::V = Float64[]   # patch instantaneous daily max - urban (K)
 
+    # TREFAV / TREFAV_U / TREFAV_R are hourly `timeavg` accumulators
+    # (accum_period = nint(3600/dtime)); the daily min/max above track the min/max
+    # of the HOURLY AVERAGES, not of the raw per-step t_ref2m. These scratch pairs
+    # are the in-array equivalent of accumulMod's per-field val/nsteps buffers
+    # (same pattern as BTRANAV in EnergyFluxType).
+    trefav_accum_patch       ::V = Float64[]   # running sum of t_ref2m over the current hour
+    trefav_naccum_patch      ::V = Float64[]   # steps accumulated in the current hour
+    trefav_u_accum_patch     ::V = Float64[]   # ... urban
+    trefav_u_naccum_patch    ::V = Float64[]
+    trefav_r_accum_patch     ::V = Float64[]   # ... rural
+    trefav_r_naccum_patch    ::V = Float64[]
+
     # --- Running mean temperatures (patch-level) ---
     t_a10_patch              ::V = Float64[]   # patch 10-day running mean of 2m temperature (K)
     t_a10min_patch           ::V = Float64[]   # patch 10-day running mean of min 2m temperature (K)
@@ -202,6 +214,14 @@ function temperature_init!(temp::TemperatureData{FT}, np::Int, nc::Int, nl::Int,
     temp.t_ref2m_max_inst_r_patch = fill(FT(NaN), np)
     temp.t_ref2m_max_inst_u_patch = fill(FT(NaN), np)
 
+    # TREFAV/_U/_R hourly-timeavg scratch (see the field declarations).
+    temp.trefav_accum_patch       = fill(FT(0), np)
+    temp.trefav_naccum_patch      = fill(FT(0), np)
+    temp.trefav_u_accum_patch     = fill(FT(0), np)
+    temp.trefav_u_naccum_patch    = fill(FT(0), np)
+    temp.trefav_r_accum_patch     = fill(FT(0), np)
+    temp.trefav_r_naccum_patch    = fill(FT(0), np)
+
     # --- Running mean temperatures (patch-level) ---
     temp.t_a10_patch              = fill(FT(NaN), np)
     temp.t_a10min_patch           = fill(FT(NaN), np)
@@ -276,6 +296,12 @@ function temperature_clean!(temp::TemperatureData{FT}) where {FT}
     temp.t_ref2m_max_inst_patch   = FT[]
     temp.t_ref2m_max_inst_r_patch = FT[]
     temp.t_ref2m_max_inst_u_patch = FT[]
+    temp.trefav_accum_patch       = FT[]
+    temp.trefav_naccum_patch      = FT[]
+    temp.trefav_u_accum_patch     = FT[]
+    temp.trefav_u_naccum_patch    = FT[]
+    temp.trefav_r_accum_patch     = FT[]
+    temp.trefav_r_naccum_patch    = FT[]
     temp.t_a10_patch              = FT[]
     temp.t_a10min_patch           = FT[]
     temp.t_a5min_patch            = FT[]
@@ -743,6 +769,7 @@ function temperature_update_acc_vars!(temp::TemperatureData,
                                      active::AbstractVector{Bool} = Bool[],
                                      itype::AbstractVector{Int} = Int[],
                                      npcropmin::Int = typemax(Int),
+                                     upper_soil_layer::Int = 0,
                                      gdd20_season_start::AbstractVector{<:Real} = Float64[],
                                      gdd20_season_end::AbstractVector{<:Real} = Float64[])
     # Running-mean window lengths, in TIMESTEPS, derived from the accumulation
@@ -756,14 +783,81 @@ function temperature_update_acc_vars!(temp::TemperatureData,
     # (vcmaxse = 668.39 - 1.07·t10) → excessive high-T inhibition of vcmax at hot
     # midday → low assimilation → low gs → low transpiration.
     _dt = dtime > 0 ? dtime : 1800
-    _win_1day  = max(1, round(Int,  1 * 86400 / _dt))
-    _win_10day = max(1, round(Int, 10 * 86400 / _dt))
+    _win_1day  = accum_window_steps(1,  _dt)
+    _win_10day = accum_window_steps(10, _dt)
+    _win_5day  = accum_window_steps(5,  _dt)
 
     if !isempty(bounds_patch)
         _launch!(_temp_acc_kernel!, temp.t_veg24_patch, temp.t_veg240_patch,
             temp.t_a10_patch, temp.t_veg_patch, temp.t_ref2m_patch,
             nstep, _win_1day, _win_10day, first(bounds_patch), last(bounds_patch);
             ndrange = length(temp.t_veg24_patch))
+
+        # --- TREFAV / TREFAV_U / TREFAV_R -> daily min/max of 2-m temperature ---
+        # Fortran averages t_ref2m over each HOUR (the TREFAV `timeavg` accumulator,
+        # accum_period = nint(3600/dtime)) and tracks the daily min/max of those
+        # HOURLY AVERAGES. These four fields (and their _r/_u splits) were allocated
+        # NaN and NEVER written — the accumulator was simply absent — so every
+        # consumer read NaN: CNPhenology's `vernalization!` (t_ref2m_max/min drive
+        # `cumvd` -> the winter-cereal vernalization factor `vf`), TDM5/TDM10 below,
+        # and the TREFMXAV/TREFMNAV history fields.
+        _hour_period = max(1, round(Int, 3600 / _dt, RoundNearestTiesAway))
+        _hour_end    = (nstep % _hour_period == 0)
+        _first_step_of_day = (secs == dtime)
+        if length(temp.trefav_accum_patch) >= last(bounds_patch)
+            _launch!(_trefav_kernel!,
+                temp.t_ref2m_max_patch, temp.t_ref2m_min_patch,
+                temp.t_ref2m_max_inst_patch, temp.t_ref2m_min_inst_patch,
+                temp.trefav_accum_patch, temp.trefav_naccum_patch,
+                temp.t_ref2m_patch, _hour_end, end_cd, _first_step_of_day,
+                first(bounds_patch), last(bounds_patch);
+                ndrange = length(temp.t_ref2m_patch))
+
+            # Urban split: the end-of-day copy happens only on urban patches
+            # (Fortran `if (lun%urbpoi(l))`); elsewhere max/min_u stay at their
+            # missing-value flag. Same for rural with `.not. lun%ifspecial(l)`.
+            _launch!(_trefav_masked_kernel!,
+                temp.t_ref2m_max_u_patch, temp.t_ref2m_min_u_patch,
+                temp.t_ref2m_max_inst_u_patch, temp.t_ref2m_min_inst_u_patch,
+                temp.trefav_u_accum_patch, temp.trefav_u_naccum_patch,
+                temp.t_ref2m_u_patch, patch_data.landunit, lun.urbpoi, true,
+                _hour_end, end_cd, _first_step_of_day,
+                first(bounds_patch), last(bounds_patch);
+                ndrange = length(temp.t_ref2m_patch))
+
+            _launch!(_trefav_masked_kernel!,
+                temp.t_ref2m_max_r_patch, temp.t_ref2m_min_r_patch,
+                temp.t_ref2m_max_inst_r_patch, temp.t_ref2m_min_inst_r_patch,
+                temp.trefav_r_accum_patch, temp.trefav_r_naccum_patch,
+                temp.t_ref2m_r_patch, patch_data.landunit, lun.ifspecial, false,
+                _hour_end, end_cd, _first_step_of_day,
+                first(bounds_patch), last(bounds_patch);
+                ndrange = length(temp.t_ref2m_patch))
+
+            # --- TDM5 (always) / TDM10 (use_crop) ---
+            # Fortran: rbufslp = min(t_ref2m_min, t_ref2m_min_inst), and if that is
+            # > 1e30 (i.e. both are still the spval flag, early in the run) it falls
+            # back to TFRZ. Then a 5-day (TDM5) / 10-day (TDM10) running mean.
+            # t_a5min feeds CNPhenology's seasonal-deciduous onset test; it was NaN.
+            _launch!(_tdm_kernel!, temp.t_a5min_patch, temp.t_a10min_patch,
+                temp.t_ref2m_min_patch, temp.t_ref2m_min_inst_patch,
+                nstep, _win_5day, _win_10day, use_crop,
+                first(bounds_patch), last(bounds_patch);
+                ndrange = length(temp.t_a5min_patch))
+        end
+    end
+
+    # --- SOIL10: 10-day running mean of the `upper_soil_layer` soil temperature ---
+    # Fortran reads t_soisno_col(c, upper_soil_layer) where upper_soil_layer comes
+    # from CNSharedParams (the layer containing 0.12 m). t_soisno is snow-padded in
+    # this port, so the soil layer lives at varpar.nlevsno + upper_soil_layer. soila10_col
+    # feeds CNPhenology's onset criteria and was NaN for the whole run.
+    if upper_soil_layer > 0 && !isempty(bounds_col) &&
+            length(temp.soila10_col) >= last(bounds_col)
+        _launch!(_soil10_kernel!, temp.soila10_col, temp.t_soisno_col,
+            varpar.nlevsno + upper_soil_layer, nstep, _win_10day,
+            first(bounds_col), last(bounds_col);
+            ndrange = length(temp.soila10_col))
     end
 
     # --- Crop growing-degree-day accumulation (use_crop only) ---
@@ -842,6 +936,139 @@ end
                     t_a10_patch[p] += (t2m - t_a10_patch[p]) / n480
                 end
             end
+        end
+    end
+end
+
+# TREFAV: hourly `timeavg` of t_ref2m, feeding the daily min/max. Mirrors the
+# BTRANAV pattern in EnergyFluxType. `_first_step_of_day` reproduces Fortran's
+# `else if (secs == dtime)` branch, which flags max/min as missing at the start of
+# a day so that a partial day never reports a bogus extreme.
+@kernel function _trefav_kernel!(t_ref2m_max_patch, t_ref2m_min_patch,
+        t_ref2m_max_inst_patch, t_ref2m_min_inst_patch,
+        trefav_accum_patch, trefav_naccum_patch, @Const(t_ref2m_patch),
+        hour_end::Bool, end_cd::Bool, first_step_of_day::Bool,
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(t_ref2m_max_patch)
+        t2m = t_ref2m_patch[p]
+        if isfinite(t2m) && t2m != T(SPVAL)
+            trefav_accum_patch[p]  += t2m
+            trefav_naccum_patch[p] += one(T)
+        end
+
+        # Hour boundary: extract the hourly average and fold into the daily extremes.
+        if hour_end
+            n = trefav_naccum_patch[p]
+            if n > zero(T)
+                avg = trefav_accum_patch[p] / n
+                cmax = t_ref2m_max_inst_patch[p]
+                cmin = t_ref2m_min_inst_patch[p]
+                t_ref2m_max_inst_patch[p] =
+                    (!isfinite(cmax) || cmax == -T(SPVAL)) ? avg : max(avg, cmax)
+                t_ref2m_min_inst_patch[p] =
+                    (!isfinite(cmin) || cmin ==  T(SPVAL)) ? avg : min(avg, cmin)
+            end
+            trefav_accum_patch[p]  = zero(T)
+            trefav_naccum_patch[p] = zero(T)
+        end
+
+        if end_cd
+            t_ref2m_max_patch[p]      =  t_ref2m_max_inst_patch[p]
+            t_ref2m_min_patch[p]      =  t_ref2m_min_inst_patch[p]
+            t_ref2m_max_inst_patch[p] = -T(SPVAL)
+            t_ref2m_min_inst_patch[p] =  T(SPVAL)
+        elseif first_step_of_day
+            t_ref2m_max_patch[p] = T(SPVAL)
+            t_ref2m_min_patch[p] = T(SPVAL)
+        end
+    end
+end
+
+# TREFAV_U / TREFAV_R: same as above, but the end-of-day copy is gated on a
+# landunit predicate — urban (`lun%urbpoi`) for _U, non-special (`.not.
+# lun%ifspecial`) for _R. `want` selects which sense of the flag passes.
+@kernel function _trefav_masked_kernel!(t_ref2m_max_x, t_ref2m_min_x,
+        t_ref2m_max_inst_x, t_ref2m_min_inst_x,
+        accum_x, naccum_x, @Const(t_ref2m_x),
+        @Const(patch_landunit), @Const(lun_flag), want::Bool,
+        hour_end::Bool, end_cd::Bool, first_step_of_day::Bool,
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(t_ref2m_max_x)
+        t2m = t_ref2m_x[p]
+        if isfinite(t2m) && t2m != T(SPVAL)
+            accum_x[p]  += t2m
+            naccum_x[p] += one(T)
+        end
+
+        if hour_end
+            n = naccum_x[p]
+            if n > zero(T)
+                avg = accum_x[p] / n
+                cmax = t_ref2m_max_inst_x[p]
+                cmin = t_ref2m_min_inst_x[p]
+                t_ref2m_max_inst_x[p] =
+                    (!isfinite(cmax) || cmax == -T(SPVAL)) ? avg : max(avg, cmax)
+                t_ref2m_min_inst_x[p] =
+                    (!isfinite(cmin) || cmin ==  T(SPVAL)) ? avg : min(avg, cmin)
+            end
+            accum_x[p]  = zero(T)
+            naccum_x[p] = zero(T)
+        end
+
+        l = patch_landunit[p]
+        passes = (lun_flag[l] == want)
+        if end_cd
+            if passes
+                t_ref2m_max_x[p]      =  t_ref2m_max_inst_x[p]
+                t_ref2m_min_x[p]      =  t_ref2m_min_inst_x[p]
+                t_ref2m_max_inst_x[p] = -T(SPVAL)
+                t_ref2m_min_inst_x[p] =  T(SPVAL)
+            end
+        elseif first_step_of_day
+            t_ref2m_max_x[p] = T(SPVAL)
+            t_ref2m_min_x[p] = T(SPVAL)
+        end
+    end
+end
+
+# TDM5 (5-day) / TDM10 (10-day, use_crop): running means of the daily minimum
+# 2-m temperature. Fortran takes min(t_ref2m_min, t_ref2m_min_inst) and falls
+# back to TFRZ while both are still the (huge) spval flag.
+@kernel function _tdm_kernel!(t_a5min_patch, t_a10min_patch,
+        @Const(t_ref2m_min_patch), @Const(t_ref2m_min_inst_patch),
+        nstep::Int, win_5day::Int, win_10day::Int, use_crop::Bool,
+        pmin::Int, pmax::Int)
+    p = @index(Global)
+    @inbounds if pmin <= p <= pmax
+        T = eltype(t_a5min_patch)
+        a = t_ref2m_min_patch[p]
+        b = t_ref2m_min_inst_patch[p]
+        va = isfinite(a) ? a : T(SPVAL)
+        vb = isfinite(b) ? b : T(SPVAL)
+        v  = min(va, vb)
+        if v > T(1.0e30)
+            v = T(TFRZ)
+        end
+        t_a5min_patch[p] = accum_runmean(t_a5min_patch[p], v, nstep, win_5day)
+        if use_crop
+            t_a10min_patch[p] = accum_runmean(t_a10min_patch[p], v, nstep, win_10day)
+        end
+    end
+end
+
+# SOIL10: 10-day running mean of the soil temperature at `lev` (= NLEVSNO +
+# upper_soil_layer, the snow-padded index of the layer containing 0.12 m).
+@kernel function _soil10_kernel!(soila10_col, @Const(t_soisno_col),
+        lev::Int, nstep::Int, win_10day::Int, cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        ts = t_soisno_col[c, lev]
+        if isfinite(ts)
+            soila10_col[c] = accum_runmean(soila10_col[c], ts, nstep, win_10day)
         end
     end
 end
