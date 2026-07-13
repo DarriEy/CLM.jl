@@ -1478,6 +1478,21 @@ function _zero_cnveg_flux_arrays!(cf)
         # zero it): phenology phase-2 sets it, and FUN — which runs BEFORE phase-2
         # — reads the previous step's value for retranslocation accounting.
         name === :leafc_to_litter_fun_patch && continue
+        # prev_{leafc,frootc}_to_litter carry the seasonal/stress-deciduous OFFSET
+        # LITTERFALL RAMP MEMORY across steps. Fortran's CNVegCarbonFluxType::SetValues
+        # does NOT zero them (they are set only in InitCold — CNVegCarbonFluxType.F90:
+        # 3986/3988 — and are restart vars, ibid. 4291/4296). They are reset to 0 in
+        # exactly two places, both in CNPhenologyMod: at the offset TRIGGER and at the
+        # ramp-END cleanup — which phenology.jl already does.
+        #
+        # Zeroing them here collapsed CNOffsetLitterfall's ramp
+        #     leafc_to_litter = prev + t1*(leafc - prev*offset_counter)
+        # to just t1*leafc — only ~2-7% of the correct flux mid-ramp. Leaves were then
+        # not shed gradually over ndays_off; the pool instead sat ~full for the whole
+        # offset period and was dumped in a single timestep by the final-step branch.
+        # Invisible in a summer window (offset_flag == 0 all summer); it is the entire
+        # story in the autumn leaf-offset window.
+        (name === :prev_leafc_to_litter_patch || name === :prev_frootc_to_litter_patch) && continue
         # Persistent soil-matrix B-input: accumulated across drivers (the dyn_subgrid
         # dwt inputs are added BEFORE this per-step reset) and zeroed only after the
         # soil-matrix solve — so it must survive the step-start reset.

@@ -695,9 +695,26 @@
             d.cnveg_state, d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf,
             d.crop, d.patch_data)
 
-        # Dump all remaining: leafc_to_litter = (1/dt) * leafc
-        @test d.cnveg_cf.leafc_to_litter_patch[1] ≈ d.cnveg_cs.leafc_patch[1] / dt
+        # Fine roots are dumped for EVERY PFT on the final offset step.
         @test d.cnveg_cf.frootc_to_litter_patch[1] ≈ d.cnveg_cs.frootc_patch[1] / dt
+
+        # Leaves are NOT. Fortran (CNPhenologyMod::CNOffsetLitterfall) sets
+        # leafc_to_litter in the final-step branch only inside
+        # `if (ivt(p) >= npcropmin)` -- i.e. for prognostic CROPS. This test PFT is
+        # itype 4 (a tree), so leafc_to_litter stays 0 and a small leaf residual
+        # carries into dormancy. Confirmed against the Fortran autumn reference at
+        # Bow: on the final offset step leafc is unchanged (0.1919 gC/m2) and
+        # prev_leafc_to_litter is 0.
+        @test d.cnveg_cf.leafc_to_litter_patch[1] == 0.0
+
+        # ... but a prognostic-crop patch DOES dump its leaves.
+        dc = make_test_data()
+        dc.cnveg_state.offset_flag_patch[1] = 1.0
+        dc.cnveg_state.offset_counter_patch[1] = dc.pstate.dt
+        CLM.cn_offset_litterfall!(dc.pstate, dc.mask_soilp, dc.pftcon,
+            dc.cnveg_state, dc.cnveg_cs, dc.cnveg_ns, dc.cnveg_cf, dc.cnveg_nf,
+            dc.crop, dc.patch_data; mask_pcropp = trues(1))
+        @test dc.cnveg_cf.leafc_to_litter_patch[1] ≈ dc.cnveg_cs.leafc_patch[1] / dc.pstate.dt
     end
 
     @testset "cn_offset_litterfall! CNratio_floating" begin
@@ -706,9 +723,11 @@
         d.cnveg_state.offset_flag_patch[1] = 1.0
         d.cnveg_state.offset_counter_patch[1] = dt
 
+        # Exercise the N split on the CROP path, where the final step actually
+        # produces a non-zero leafc_to_litter (see the test above).
         CLM.cn_offset_litterfall!(d.pstate, d.mask_soilp, d.pftcon,
             d.cnveg_state, d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf,
-            d.crop, d.patch_data; CNratio_floating=true)
+            d.crop, d.patch_data; CNratio_floating=true, mask_pcropp = trues(1))
 
         # With floating CN: N litter = 0.5 * leafc_to_litter * (leafn/leafc)
         leafc_to_lit = d.cnveg_cs.leafc_patch[1] / dt

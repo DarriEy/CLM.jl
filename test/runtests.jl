@@ -38,6 +38,7 @@ using CLM
     include("test_cn_veg_carbon_state.jl")
     include("test_cn_veg_nitrogen_state.jl")
     include("test_cn_veg_carbon_flux.jl")
+    include("test_cn_offset_coldstart.jl")
     include("test_cn_veg_nitrogen_flux.jl")
     include("test_soil_bgc_carbon_state.jl")
     include("test_soil_bgc_nitrogen_state.jl")

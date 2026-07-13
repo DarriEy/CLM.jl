@@ -544,7 +544,7 @@ end
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
-        @Const(mask), @Const(itype),
+        @Const(mask), @Const(itype), @Const(mask_pcrop),
         @Const(offset_flag), @Const(offset_counter),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
@@ -557,7 +557,17 @@ end
             if abs(offset_counter[p] - dt) <= dt / T(2)
                 t1 = one(T) / dt
                 frootc_to_litter[p] = t1 * frootc[p]
-                leafc_to_litter[p]  = t1 * leafc[p]
+                # FINAL offset step. Fortran (CNPhenologyMod::CNOffsetLitterfall)
+                # sets frootc_to_litter for every PFT, but sets leafc_to_litter here
+                # ONLY inside `if (ivt(p) >= npcropmin)` -- i.e. for PROGNOSTIC CROPS.
+                # For a natural (non-crop) seasonal/stress-deciduous PFT it leaves
+                # leafc_to_litter at 0 (SetValues zeroed it), so the leaf pool keeps a
+                # small residual into dormancy rather than being dumped in one step.
+                # Setting it unconditionally shed that residual a step early (at Bow:
+                # 0.19 gC/m2, ~0.5% of peak leafc, once per year).
+                if mask_pcrop[p]
+                    leafc_to_litter[p] = t1 * leafc[p]
+                end
             else
                 t1 = dt * T(2) / (offset_counter[p]^2)
                 leafc_to_litter[p]  = prev_leafc_to_litter[p] +
@@ -603,14 +613,14 @@ function phen_offset_litterfall!(
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
-        mask, itype, offset_flag, offset_counter,
+        mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
         dt, CNratio_floating, use_fun)
     _launch!(_phen_offset_litterfall_kernel!,
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
-        mask, itype, offset_flag, offset_counter,
+        mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
         eltype(leafc_to_litter)(dt), CNratio_floating, use_fun)
 end
@@ -922,7 +932,8 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
 
         cn_offset_litterfall!(pstate, mask_soilp, pftcon,
                               cnveg_state, cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
-                              crop, patch_data; use_fun=cn_params.use_fun,
+                              crop, patch_data; mask_pcropp=mask_pcropp,
+                              use_fun=cn_params.use_fun,
                               CNratio_floating=varctl.CNratio_floating,
                               for_testing_no_crop_seed_replenishment=varctl.for_testing_no_crop_seed_replenishment)
 
@@ -2488,10 +2499,16 @@ function cn_offset_litterfall!(pstate::PhenologyState,
                                cnveg_nf::CNVegNitrogenFluxData,
                                crop::CropData,
                                patch_data::PatchData;
+                               mask_pcropp::Union{Nothing,AbstractVector{Bool}}=nothing,
                                use_fun::Bool=false,
                                CNratio_floating::Bool=false,
                                for_testing_no_crop_seed_replenishment::Bool=false)
     dt = pstate.dt
+    # Prognostic-crop patch mask == Fortran's `ivt(p) >= npcropmin` test. Only crops
+    # get the leaf pool dumped on the final offset step (see the kernel). Default
+    # (nothing) => no crops, which is the correct natural-PFT behaviour.
+    mask_pcrop = mask_pcropp === nothing ?
+        falses(length(mask_soilp)) : mask_pcropp
 
     # Per-patch independent: display→litter fluxes during offset.
     phen_offset_litterfall!(
@@ -2500,7 +2517,7 @@ function cn_offset_litterfall!(pstate::PhenologyState,
         cnveg_cf.prev_leafc_to_litter_patch, cnveg_cf.prev_frootc_to_litter_patch,
         cnveg_nf.leafn_to_litter_patch, cnveg_nf.leafn_to_retransn_patch,
         cnveg_nf.frootn_to_litter_patch,
-        mask_soilp, patch_data.itype,
+        mask_soilp, patch_data.itype, mask_pcrop,
         cnveg_state.offset_flag_patch, cnveg_state.offset_counter_patch,
         cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,

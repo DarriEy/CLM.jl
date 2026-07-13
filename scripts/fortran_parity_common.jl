@@ -329,14 +329,25 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     end
 
     step_start  = tm.current_date
+    # CTSM's clm_time_manager::get_curr_calday() returns the calendar day at the END
+    # of the current timestep, and clm_driver's UpdateDaylength runs on that. So the
+    # orbital/daylength state must be built from the POST-advance calday — which is
+    # exactly what the production driver does (clm_run.jl: advance_timestep! then
+    # get_curr_calday). Computing it pre-advance left dayl one timestep behind
+    # Fortran, which shifted the seasonal-deciduous leaf-offset trigger
+    # (dayl < crit_dayl) by one step in the autumn window.
+    CLM.advance_timestep!(tm)
     calday      = CLM.get_curr_calday(tm)
     (declin, _) = CLM.compute_orbital(calday)
     obliqr      = CLM.ORB_OBLIQR_DEFAULT
-    nextsw_cday = calday + 3600.0 / CLM.SECSPDAY
+    # nextsw_cday is the calday of the NEXT radiation time, i.e. the END of this step —
+    # which is exactly the post-advance calday. (Pre-advance this was written as
+    # calday_start + dtime/SECSPDAY, the same number; do NOT add dtime again here or the
+    # albedo is computed a whole step late.)
+    nextsw_cday = calday
     (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
     CLM.init_daylength!(inst.gridcell, declin, declinm1, obliqr, 1:bounds.endg)
 
-    CLM.advance_timestep!(tm)
     # forcing_offset_hours lets the harness match Fortran datm's record-alignment
     # convention (datm applies the record one step behind the CLM.jl step-start read).
     CLM.read_forcing_step!(fr, inst.atm2lnd, step_start + Hour(forcing_offset_hours), ng, nc)
