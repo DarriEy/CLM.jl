@@ -171,9 +171,13 @@ function Adapt.adapt_structure(to, x::CNVegetationData)
     st    = Adapt.adapt(to, x.cnveg_state_inst)
     ns    = Adapt.adapt(to, x.cnveg_nitrogenstate_inst)
     nf    = Adapt.adapt(to, x.cnveg_nitrogenflux_inst)
+    bal   = Adapt.adapt(to, x.cn_balance_inst)
+    cprod = Adapt.adapt(to, x.c_products_inst)
+    nprod = Adapt.adapt(to, x.n_products_inst)
     FT    = typeof(cs).parameters[1]
     return CNVegetationData{FT}(x.config, x.driver_config, st,
-        cs, c13cs, c14cs, cf, c13cf, c14cf, ns, nf)
+        cs, c13cs, c14cs, cf, c13cf, c14cf, ns, nf,
+        bal, cprod, nprod)
 end
 
 # ---------------------------------------------------------------------------

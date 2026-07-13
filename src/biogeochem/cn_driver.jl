@@ -363,13 +363,27 @@ function cn_driver_no_leaching!(
                 dayspyr    = dayspyr)
         end
     else
-        n_fixation!(soilbgc_nf, cnveg_cf;
-            mask_soilc     = mask_bgc_soilc,
-            bounds         = bounds_col,
-            col_is_fates   = col_is_fates,
-            dayspyr        = dayspyr,
-            nfix_timeconst = nfix_timeconst,
-            use_fun        = config.use_fun)
+        # CNNFixation reads the LAGGED NPP when nfix_timeconst ∈ (0,500) (the CLM5
+        # default, 10 d) and the ANNUAL-MEAN NPP otherwise. Fortran guards the
+        # former with its own SPVAL check; the latter it does not guard, because
+        # Fortran's annsum_npp is always initialised (to 0 in InitCold). Julia
+        # allocates it as NaN, so an un-summarised annsum_npp would push NaN
+        # straight into the mineral-N pool. Require a finite input for whichever
+        # branch will actually be taken — same rule as AnnET above: never poison
+        # the N budget with an accumulator that has not been computed yet.
+        _npp_src = (nfix_timeconst > 0.0 && nfix_timeconst < 500.0) ?
+                   cnveg_cf.lag_npp_col : cnveg_cf.annsum_npp_col
+        _npp_ok = !isempty(_npp_src) &&
+                  all(c -> !mask_bgc_soilc[c] || isfinite(_npp_src[c]), bounds_col)
+        if _npp_ok
+            n_fixation!(soilbgc_nf, cnveg_cf;
+                mask_soilc     = mask_bgc_soilc,
+                bounds         = bounds_col,
+                col_is_fates   = col_is_fates,
+                dayspyr        = dayspyr,
+                nfix_timeconst = nfix_timeconst,
+                use_fun        = config.use_fun)
+        end
     end
 
     # CNNFert / CNSoyfix — crop-only (Fortran gates on use_crop). NOT wired: Bow
