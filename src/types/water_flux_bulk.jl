@@ -299,7 +299,11 @@ function waterfluxbulk_update_acc_vars!(wfb::WaterFluxBulkData,
     use_fun || return nothing
     isempty(bounds_col) && return nothing
     length(wfb.AnnET) >= last(bounds_col) || return nothing
-    _launch!(_annet_kernel!, wfb.AnnET, wfb.qflx_evap_tot_col,
+    # qflx_evap_tot_col lives on the nested base WaterFluxData (`wfb.wf`), not on
+    # WaterFluxBulkData itself.
+    evap = wfb.wf.qflx_evap_tot_col
+    length(evap) >= last(bounds_col) || return nothing
+    _launch!(_annet_kernel!, wfb.AnnET, evap,
         nstep, accum_window_steps(365, dtime),
         first(bounds_col), last(bounds_col);
         ndrange = length(wfb.AnnET))
