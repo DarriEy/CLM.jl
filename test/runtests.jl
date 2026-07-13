@@ -415,6 +415,7 @@ using CLM
             "test_lake_water_balance.jl",        # lake istdlak column water balance closes (gated)
             "test_snow_robustness.jl",           # deep-snowpack / cold-soil robustness (gated)
             "test_urban_robustness.jl",          # urban isturb roof/wall/road robustness (gated)
+            "test_init_cold_wiring.jl",          # every *_init_cold! is CALLED on the live init path (+ NaN sweep, gated)
             "test_run_clm.jl",                   # standalone run harness: run→h0+restart→continue (gated)
             "test_ad_robustness.jl",             # AD near phase-change discontinuities
         ]

@@ -44,11 +44,32 @@ function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
                                  filt::ClumpFilter, surf::SurfaceInputData;
                                  use_aquifer_layer::Bool = true,
                                  use_hillslope_routing::Bool = false)
+    # WaterFluxType / WaterFluxBulkType::InitCold (PR #209). Part of the same
+    # InitCold sweep as init_cold_biogeophys! below, but kept as its own entry
+    # point because it threads `use_hillslope_routing` (which selects whether the
+    # lateral-flow fluxes are zeroed or left at their missing-value flag).
     init_water_flux_cold!(inst, bounds; use_hillslope_routing=use_hillslope_routing)
+
+    # `col.snl` is allocated to ISPVAL by column_init!; init_snow_state! sets the
+    # cold-start value 0 (no snow layers). It is HOISTED above the InitCold sweep
+    # because temperature_init_cold! / waterdiagnosticbulk_init_cold! index
+    # t_soisno / snw_rds by `snl`. Nothing before it reads snl, so hoisting is
+    # byte-identical.
+    init_snow_state!(inst, bounds)
+
+    # Soil physical properties first: waterstate_init_cold! clamps h2osoi_vol to
+    # watsat (Fortran orders soilstate_inst%Init before water_inst%Init too).
     init_soil_properties!(inst, bounds, surf)
+
+    # ---- Fortran's InitCold phase (src/infrastructure/init_cold.jl) ----------
+    # Runs BEFORE the bespoke Julia seeds below, so those overwrite every field
+    # they own (validated domains stay bit-identical) while the fields nothing
+    # else writes get their faithful Fortran InitCold value instead of the
+    # allocator's NaN. See init_cold.jl for the full rationale + ordering.
+    init_cold_biogeophys!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
+
     init_temperatures!(inst, bounds)
     init_soil_moisture!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
-    init_snow_state!(inst, bounds)
     init_water_diagnostic_state!(inst, bounds)
     init_soil_state_defaults!(inst, bounds)
     init_eff_porosity!(inst, bounds)

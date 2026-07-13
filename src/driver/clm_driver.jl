@@ -1285,6 +1285,25 @@ function clm_drv_core!(config::CLMDriverConfig,
         end
     end
 
+    # PhotosynthesisMod::TimeStepInit — zero psnsun/psnsha/fpsn (+ the wc/wj/wp
+    # splits and the C13/C14 twins) on EVERY NON-LAKE patch at the start of the
+    # canopy-flux step. Fortran calls this at the top of CanopyFluxes
+    # (CanopyFluxesMod.F90:661).
+    #
+    # `photosynthesis_timestep_init!` was PORTED (photosynthesis.jl) and then
+    # never called — the same dead-port class as the `*_init_cold!` sweep in
+    # src/infrastructure/init_cold.jl. The consequence: a BARE-GROUND patch never
+    # enters the photosynthesis solve, so nothing ever wrote its psnsun/psnsha/
+    # fpsn and they sat at the allocator's NaN for the whole run. That NaN was
+    # being papered over downstream by an `isfinite(v) ? v : 0.0` fallback in
+    # history_fpsn_patch (history_writer.jl) — a guard added to fix the +43% FPSN
+    # aggregation bug whose ROOT CAUSE was this missing call. Zeroing at the
+    # source is what Fortran does; the history fallback stays only to map the
+    # LAKE patches' deliberate spval to 0.
+    photosynthesis_timestep_init!(ps, filt.nolakep, bc_patch;
+                                  use_c13 = config.use_c13,
+                                  use_c14 = config.use_c14)
+
     # Positional call into canopy_fluxes_core! (no kwarg NamedTuple) so Enzyme
     # reverse-mode can compile the differentiated driver. The trailing args after
     # `overrides` are the "default-only back group". We thread the ones that affect
