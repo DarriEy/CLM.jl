@@ -21,6 +21,38 @@ const warning_override = false  # set true to suppress all of these warnings
 const warn_counts = zeros(Int, max_ids + 1)
 const warn_active = trues(max_ids + 1)
 
+# ---------------------------------------------------------------------------
+# FATES parity instrumentation hook (Fortran-parity harness only; nothing in the
+# model reads it). `scripts/fates_fortran_parity.jl` installs a callback here and
+# the FATES driver calls it at every phase boundary of the daily step
+# (EDMainMod.jl) plus once per timestep after the photosynthesis/flux solve
+# (clm_driver.jl), so a Julia-vs-Fortran divergence can be attributed to the FATES
+# phase that produced it. The Fortran side is instrumented at the SAME boundaries
+# (scripts/validation/fates_fortran_parity/instrument.py), with the same phase
+# codes:
+#
+#     0  coldstart    10 dyn_in      13 integrate   16 spawn
+#     1  fast         11 phenology   14 recruit     17 patchfuse
+#                     12 distrates   15 cohortfuse  18 updatesite
+#
+# Default `nothing` -> every call site is a single Ref load + `=== nothing` test
+# inside an already-`use_fates`-gated branch, so the default (and every non-FATES)
+# path is untouched.
+# ---------------------------------------------------------------------------
+const FATES_PARITY_HOOK = Ref{Any}(nothing)
+
+"""
+    fates_parity_hook(site, bc_in, phase::Int)
+
+Invoke the installed FATES parity-dump callback, if any. No-op by default.
+"""
+@inline function fates_parity_hook(site, bc_in, phase::Int)
+    h = FATES_PARITY_HOOK[]
+    h === nothing && return nothing
+    h(site, bc_in, phase)
+    return nothing
+end
+
 # =====================================================================================
 
 function FatesGlobalsInit(log_unit::Integer, global_verbose::Bool)

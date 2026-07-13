@@ -2262,6 +2262,18 @@ function clm_drv_core!(config::CLMDriverConfig,
     if config.use_fates
         # Placeholder: clm_fates%WrapUpdateFatesRmean(...) [FATES running mean]
         # Placeholder: clm_fates%wrap_update_hifrq_hist(...) [FATES history]
+
+        # FATES parity instrumentation — "fast" (sub-daily) phase. Fires on EVERY
+        # timestep at exactly the point the Fortran clm_driver does (after the
+        # photosynthesis/flux solve, the FATES running-mean update and the hifrq
+        # history fill; BEFORE the daily dynamics branch), so the fast thread can be
+        # scored on its own. No-op unless a harness installs FATES_PARITY_HOOK.
+        if inst.fates !== nothing && FATES_PARITY_HOOK[] !== nothing
+            for s in 1:inst.fates.nsites
+                fates_parity_hook(inst.fates.sites[s], inst.fates.bc_in[s], 1)
+            end
+        end
+
         if is_beg_curr_day && inst.fates !== nothing
             # SPITFIRE fire-weather (gated): when SPITFIRE is on, derive the per-day
             # representative precip / relative-humidity / wind from the FATES column's
