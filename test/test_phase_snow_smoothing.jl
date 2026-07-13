@@ -136,24 +136,49 @@ using CLM
     # exercise the exact clamped expression with the kernel's sharpness Ref.
     @testset "(phase) freeze/thaw mass clamp: smooth ON finite, OFF byte-identical" begin
         wice0 = 5.0
-        ice_left(xm) = CLM.smooth_max(zero(typeof(xm)), wice0 - xm;
-                                      k = oftype(xm, CLM.PHASE_CHANGE_MASS_K[]))
+        kmass = CLM.PHASE_CHANGE_MASS_K[]
+        ice_left(xm) = CLM.smooth_max(zero(typeof(xm)), wice0 - xm; k = oftype(xm, kmass))
         # Float64 byte-identical to the hard floor max(0, wice0-xm)
         maxd = 0.0
         for xm in 0.0:0.1:10.0
             maxd = max(maxd, abs(ice_left(xm) - max(0.0, wice0 - xm)))
         end
         @test maxd == 0.0
-        # Dual: gradient finite & continuous across xm == wice0 (the kink)
+
+        # Dual: gradient finite & continuous across xm == wice0 (the kink).
+        #
+        # SAMPLE AT THE SMOOTHING WIDTH. The width of this clamp is log(2)/k IN THE
+        # UNITS OF THE AXIS, and the axis is a water mass in kg/m2, so the width is
+        # ~7e-10 kg/m2 (PHASE_CHANGE_MASS_K = 1e9 — see the note on the Ref). It has to
+        # be: these clamps sit AT their kink for any snow layer holding ~0 liquid, so a
+        # width of the old 0.0139 kg/m2 did not round the corner, it MOVED 0.0139 mm of
+        # ice into liquid that never melted — fabricating 2.6 W/m2 of latent heat per
+        # layer and breaking the soil energy balance. Probing at the old 0.05 spacing
+        # would only tell us the function looks hard when you stand 1e8 widths away from
+        # it (it does, and that is the point). The C¹ property lives at the width.
+        eps_k = 1.0 / kmass
         anynan = false; prev = nothing; smooth_maxjump = 0.0
-        for xm in (wice0 - 1.0):0.05:(wice0 + 1.0)
+        for i in -20:20
+            xm = wice0 + i * eps_k
             g = ForwardDiff.derivative(ice_left, xm)
             isfinite(g) || (anynan = true)
             prev !== nothing && (smooth_maxjump = max(smooth_maxjump, abs(g - prev)))
             prev = g
         end
         @test !anynan
-        @test smooth_maxjump < 1.0
+        @test smooth_maxjump < 1.0          # no step: the derivative ramps 0 → -1
+        # and it really does traverse the whole ramp (not a flat sample of one branch)
+        @test ForwardDiff.derivative(ice_left, wice0 - 40 * eps_k) ≈ -1.0 atol = 1e-6
+        @test abs(ForwardDiff.derivative(ice_left, wice0 + 40 * eps_k)) < 1e-6
+        # AT the kink the smooth derivative is the midpoint -1/2 (a true C¹ rounding)
+        @test ForwardDiff.derivative(ice_left, wice0) ≈ -0.5 atol = 1e-6
+        # The PRICE of that rounding is bounded by the width: the smoothed mass never
+        # departs from the hard clamp by more than log(2)/k (~7e-10 kg/m2 → ~1e-7 W/m2
+        # of latent heat, vs the 1e-4 W/m2 balance threshold).
+        worst = maximum(abs(value(CLM.smooth_max(Dual(0.0, 0.0), Dual(wice0 - xm, 0.0); k = kmass)) -
+                            max(0.0, wice0 - xm))
+                        for xm in (wice0 - 10 * eps_k):(eps_k):(wice0 + 10 * eps_k))
+        @test worst <= log(2.0) / kmass + 1e-15
     end
 
     @testset "(phase) freeze/thaw mass clamp: smooth → hard as k → ∞" begin

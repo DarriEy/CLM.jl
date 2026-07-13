@@ -51,7 +51,26 @@ const THIN_SFCLAYER = 1.0e-6  # Threshold for thin surface layer
 # follows once a (discrete) imelt label is set — the temperature and water
 # fields then vary C¹ within each imelt regime — but we do not pretend the
 # integer regime label itself is smooth.
-const PHASE_CHANGE_MASS_K = Ref(50.0)
+#
+# THE SHARPNESS IS 1/WIDTH IN THE UNITS OF THE AXIS, and this axis is a WATER MASS
+# in kg/m2. The generic k = 50 default (calibrated for O(1) axes) puts the LogSumExp
+# width at log(2)/50 = 0.0139 kg/m2 of ice — and these clamps sit AT their kink in the
+# common case, not the rare one: a winter snow layer holds ~0 liquid, so
+# `smooth_min(wmass0, wice0 - xm)` with wmass0 == wice0 undershoots by the full width
+# and reassigns 0.0139 mm of ice into liquid that never melted. That is not rounding a
+# corner:
+#   * it fabricates latent heat — hfus*0.0139/dtime = 2.6 W/m2 per layer — which broke
+#     the soil ENERGY balance (errsoi ~1e2 W/m2 vs a 1e-4 threshold), and
+#   * the phantom liquid film re-triggers the freeze branch every step, pinning the
+#     layer at tfrz indefinitely (a corrupted snow-pack trajectory).
+# Both were invisible while the smoothed path's hard balance error was gated off.
+#
+# k = 1e9 puts the width at log(2)/1e9 ≈ 7e-10 kg/m2 — a latent-heat error of ~1e-7 W/m2,
+# far under the 1e-4 W/m2 balance threshold — while keeping the clamp C∞ (the
+# smooth_min/max saturation guard evaluates the exact branch more than 3.6e-8 kg/m2 from
+# the kink, so the gradient is finite and is the exact one almost everywhere). Same axis,
+# same reasoning, same value as snow_hydrology.jl's SNOW_PERC_WATER_K.
+const PHASE_CHANGE_MASS_K = Ref(1.0e9)
 
 # =========================================================================
 # Kernels for the soil_temperature! orchestrator's own per-column/-level loops
@@ -1985,7 +2004,12 @@ Adapt.@adapt_structure PcbTmp
                     if j == 1
                         if colv.h2osno_no_layers[c] > zero(T) && tmp.xm[c, jj] > zero(T)
                             temp1 = colv.h2osno_no_layers[c]
-                            colv.h2osno_no_layers[c] = smooth_max(zero(T), temp1 - tmp.xm[c, jj]; k = mk)
+                            # HARD floor (see the mass-identity note at the h2osoi_liq
+                            # update below): xm > 0 here, so `temp1 - xm < temp1` and the
+                            # floor is a pure guard in the exact physics — but a SMOOTHED
+                            # floor overshoots by log(2)/k and would leave MORE unresolved
+                            # snow than there was before melting it.
+                            colv.h2osno_no_layers[c] = max(zero(T), temp1 - tmp.xm[c, jj])
                             propor = colv.h2osno_no_layers[c] / temp1
                             colv.snow_depth[c] = propor * colv.snow_depth[c]
                             heatr = tmp.hm[c, jj] - hfus * (temp1 - colv.h2osno_no_layers[c]) / dtime
@@ -1996,7 +2020,12 @@ Adapt.@adapt_structure PcbTmp
                                 tmp.xm[c, jj] = zero(T)
                                 tmp.hm[c, jj] = zero(T)
                             end
-                            colv.qflx_snomelt[c] = smooth_max(zero(T), temp1 - colv.h2osno_no_layers[c]; k = mk) / dtime
+                            # The melt FLUX must be exactly the drop in the unresolved-snow
+                            # STORE it came from (the column balance debits it), so it is
+                            # the same subtraction, hard-floored: with h2osno_no_layers
+                            # floored above, `temp1 - h2osno_no_layers >= 0` and the floor
+                            # is again a no-op guard.
+                            colv.qflx_snomelt[c] = max(zero(T), temp1 - colv.h2osno_no_layers[c]) / dtime
                             colv.xmf[c] = hfus * colv.qflx_snomelt[c]
                             colv.qflx_snow_drain[c] = colv.qflx_snomelt[c]
                         end
@@ -2029,7 +2058,22 @@ Adapt.@adapt_structure PcbTmp
                     end
 
                     ei_val = j >= 1 ? lyr.excess_ice[c, j] : zero(T)
-                    lyr.h2osoi_liq[c, jj] = smooth_max(zero(T), tmp.wmass0[c, jj] - lyr.h2osoi_ice[c, jj] - ei_val; k = mk)
+                    # MASS IDENTITY of the phase change: the layer only moves water
+                    # BETWEEN phases, so ice + liq + excess_ice must come back out at
+                    # exactly wmass0 = wice0 + wliq0 + wexice0. That holds iff the liquid
+                    # is the exact remainder `wmass0 - ice - excess_ice`.
+                    #
+                    # The floor stays a HARD max: the smooth_min/max bounds above keep
+                    # ice + excess_ice <= wmass0 in the exact physics, so the remainder is
+                    # >= 0 and the floor never bites (byte-identical default). A SMOOTHED
+                    # floor bites everywhere: smooth_max(0, x) OVERSHOOTS max(0, x) by up to
+                    # log(2)/k, so a FULLY FROZEN layer (remainder == 0) was handed 0.0139 mm
+                    # of liquid water that no flux paid for — every layer, every step
+                    # (~3.2e-3 mm/step of column water-balance error under
+                    # SMOOTH_MODE=:always). The melt/freeze DECISION above stays smooth:
+                    # it is a real discontinuity and it only redistributes wmass0 between
+                    # the phases, so it is mass-neutral.
+                    lyr.h2osoi_liq[c, jj] = max(zero(T), tmp.wmass0[c, jj] - lyr.h2osoi_ice[c, jj] - ei_val)
 
                     if abs(heatr) > zero(T)
                         if j == snl[c] + 1

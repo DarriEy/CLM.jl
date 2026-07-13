@@ -1218,7 +1218,22 @@ Adapt.@adapt_structure CfDiagC
         # undebited -> phantom water (a ~64 mm/yr column water-balance leak).
         # Removals now draw from existing phase amounts; additions (dew) follow the
         # leaf-temperature phase. _denom guard keeps it AD-safe at h2ocan -> 0.
-        _h2ocan_new = smooth_max(zero(T), out.liqcan[p] + out.snocan[p] + _net_evap)
+        #
+        # The non-negativity floor on the TOTAL store stays a HARD max: it is the one
+        # expression that sets how much water the canopy sheds, and the column balance
+        # debits (qflx_evap_veg - qflx_tran_veg) = -_net_evap for it, so storage and
+        # flux only agree if the store moves by EXACTLY _net_evap. It does: the upstream
+        # ecidif cap (`qflx_evap_veg = min(qflx_evap_veg, qflx_tran_veg + h2ocan/dtime)`,
+        # a hard min in both the PHS and non-PHS branches) guarantees
+        # |_net_evap| <= h2ocan, so the floor never bites and is a pure guard —
+        # differentiable (identity branch) wherever the physics actually lives.
+        # A SMOOTHED floor DOES bite: smooth_max(0, x) OVERSHOOTS max(0, x) by up to
+        # log(2)/k, and k = 50 on this mm-of-water axis is 0.0139 mm of canopy water
+        # conjured per patch per step that no flux paid for (~7.5e-3 mm/step of column
+        # water-balance error under SMOOTH_MODE=:always — the growing-season half of the
+        # leak PR #211 gated the hard error off for). The phase SPLIT below stays smooth:
+        # it only redistributes _h2ocan_new between liqcan/snocan, so it is mass-neutral.
+        _h2ocan_new = max(zero(T), out.liqcan[p] + out.snocan[p] + _net_evap)
         _w_liq = out.liqcan[p] + _frac_liq * smooth_max(zero(T), _net_evap)
         _w_sno = out.snocan[p] + _frac_ice * smooth_max(zero(T), _net_evap)
         _denom = smooth_max(T(1.0e-15), _w_liq + _w_sno)

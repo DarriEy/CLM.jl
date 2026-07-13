@@ -466,7 +466,29 @@ smstress_normalize_rootr!(rootr, mask_patch, btran, btran0, nlevgrnd::Int) =
             rresis[p, j] = w_gate * rresis_j + (one(T) - w_gate) * rresis[p, j]
             rootr[p, j]  = w_gate * rootr_wet
 
-            acc += smooth_max(rootr[p, j], zero(T); k = smk)
+            # btran is the NORMALIZER for rootr (`rootr /= btran` below), so the
+            # partition of transpiration over the soil column sums to one — and the
+            # water the soil loses equals qflx_tran_veg — IF AND ONLY IF btran is the
+            # exact sum of the SAME rootr values that get normalized.
+            #
+            # Fortran writes `btran += max(rootr(p,j), 0)` (SoilMoistStressMod.F90:413),
+            # where the max is a pure guard: rootr = rootfr*rresis >= 0 always
+            # (rootfr >= 0; rresis = min(x,1) with x >= 0 because eff_porosity is floored
+            # at 0.01 and smp_node is floored at smpsc). So in the EXACT physics the max
+            # never bites and btran == sum(rootr) identically — which is what makes
+            # transpiration conserve.
+            #
+            # A SMOOTHED max does bite: smooth_max(r, 0) overshoots max(r, 0) by up to
+            # log(2)/k per layer (0.014 at k=50, and rootr itself is O(0.01-0.5)), and it
+            # overshoots the ZEROED layers too. That inflated btran WITHOUT changing
+            # sum(rootr), so after normalization sum_j rootr[p,j] < 1: the soil gave up
+            # less water than the qflx_tran_veg the balance check debits, creating water
+            # every step (~9.4e-5 mm/step at Bow).
+            #
+            # Summing rootr directly keeps storage and flux on the SAME expression, so
+            # sum(rootr)/btran == 1 by construction in both paths. Identical to Fortran
+            # (and byte-identical for Float64) because rootr >= 0 there.
+            acc += rootr[p, j]
         end
         btran[p] = btran[p] + acc
     end
