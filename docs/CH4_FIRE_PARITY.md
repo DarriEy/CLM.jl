@@ -273,6 +273,29 @@ already handled in `build_bow_inst`). Applying it took `LGDP` from `relerr 1.5e-
 
 ---
 
+## 4d. Bonus: the CN gridcell balance check was reading GARBAGE MEMORY
+
+Running the suite under `--check-bounds=yes` (as CI does) surfaced an eleventh bug, latent
+since #221 and unrelated to fire/CH4 except that it blocked a green suite.
+
+`_cnbal_begin_grc_kernel!` (`cn_balance_check.jl:266`) indexes three "dribbler" arrays
+(`hrv_xsmrpool_amount_left`, `gru_conv_cflux_amount_left`, `dwt_conv_cflux_amount_left`)
+**unconditionally** on the `!use_fates_bgc` branch. They default to `Float64[]`, and the
+production caller (`vegetation_facade.jl:472`) **never supplies them** — the dribblers are not
+ported. So the kernel indexed a **0-element array**, inside `@inbounds`:
+
+* with `@inbounds` active (a normal run), this **silently read out-of-bounds memory** straight
+  into `begcb_grc` — the *beginning* carbon mass of the CN gridcell balance check;
+* only `--check-bounds=yes` turns it into the `BoundsError` that exposed it.
+
+Fixed by substituting explicit zeros (via `similar`, so the GPU backends are preserved) —
+"no dribbler" contributes `0.0`, which is exactly what Fortran's `InitGridcellBalance` sums
+when the dribblers are empty. This is the `check-bounds` trap the repo has hit before, and it
+is a reminder that `@inbounds` + an unported-and-therefore-empty array is a silent-corruption
+pattern worth grepping for.
+
+---
+
 ## 5. SCORECARD — Fire (Li2016), boundary `after_fire`, single-step oracle
 
 Injected Fortran state → one Julia step → diff the same-step dump.
