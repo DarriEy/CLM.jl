@@ -288,19 +288,23 @@ The dribbler amounts (`hrv_xsmrpool_amount_left`, `gru_conv_cflux_amount_left`,
 and treated as zero.
 """
 # One thread per gridcell. The dribbler arrays are only indexed on the
-# !use_fates_bgc branch; under use_fates_bgc they may be empty (never read).
+# !use_fates_bgc branch, and only when the dribblers actually exist: a config that
+# never allocated them leaves them EMPTY, and reading them is an out-of-bounds read
+# that `@inbounds` hides (it throws only under --check-bounds=yes). `has_dribbler`
+# encodes `!isempty(hrv_xsmrpool_amount_left)` — the same guard the matching END
+# kernel `_cbal_grc_kernel!` already applies. Without it, the begin/end balance pair
+# was ASYMMETRIC as well as unsafe: the end kernel skipped the dribblers and the
+# begin kernel read past the end of an empty vector.
 @kernel function _cnbal_begin_grc_kernel!(begcb_grc, begnb_grc,
         @Const(totc), @Const(totn), @Const(c_tot_woodprod), @Const(c_cropprod1),
         @Const(n_tot_woodprod), @Const(n_cropprod1),
-        @Const(hrv_left), @Const(gru_left), @Const(dwt_left),
+        @Const(hrv_left), @Const(gru_left), @Const(dwt_left), has_dribbler::Bool,
         use_fates_bgc::Bool, gmin::Int, gmax::Int)
     g = @index(Global)
     @inbounds if gmin <= g <= gmax
-        if use_fates_bgc
-            begcb_grc[g] = totc[g] + c_tot_woodprod[g] + c_cropprod1[g]
-        else
-            begcb_grc[g] = totc[g] + c_tot_woodprod[g] + c_cropprod1[g] +
-                           hrv_left[g] + gru_left[g] + dwt_left[g]
+        begcb_grc[g] = totc[g] + c_tot_woodprod[g] + c_cropprod1[g]
+        if !use_fates_bgc && has_dribbler
+            begcb_grc[g] += hrv_left[g] + gru_left[g] + dwt_left[g]
         end
         begnb_grc[g] = totn[g] + n_tot_woodprod[g] + n_cropprod1[g]
     end
@@ -326,10 +330,12 @@ function begin_cn_gridcell_balance!(
     n_tot_woodprod = n_products.tot_woodprod_grc
 
     isempty(bounds_g) && return nothing
+    # Same dribbler-presence guard as the END kernel (`_cbal_grc_kernel!`).
+    has_dribbler = !isempty(hrv_xsmrpool_amount_left)
     _launch!(_cnbal_begin_grc_kernel!, bal.begcb_grc, bal.begnb_grc,
         totc, totn, c_tot_woodprod, c_cropprod1, n_tot_woodprod, n_cropprod1,
         hrv_xsmrpool_amount_left, gru_conv_cflux_amount_left, dwt_conv_cflux_amount_left,
-        use_fates_bgc, first(bounds_g), last(bounds_g);
+        has_dribbler, use_fates_bgc, first(bounds_g), last(bounds_g);
         ndrange = length(bal.begcb_grc))
     return nothing
 end
