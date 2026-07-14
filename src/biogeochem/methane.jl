@@ -137,17 +137,34 @@ end
 Methane model control flags and configuration.
 Ported from `ch4varcon` module in CLM Fortran.
 """
+# Finundation method codes -- mirror the PARAMETERs in ch4varcon.F90:42-45.
+# NOTE the Fortran values: h2osfc == 0, ZWT_inversion == 1, TWS_inversion == 2.
+const FINUNDATION_MTD_H2OSFC        = 0   # use prognostic fsat h2osfc  (CTSM default)
+const FINUNDATION_MTD_ZWT_INVERSION = 1   # inversion of ZWT to Prigent satellite obs
+const FINUNDATION_MTD_TWS_INVERSION = 2   # inversion of TWS to Prigent satellite obs
+
 Base.@kwdef mutable struct CH4VarCon
-    allowlakeprod       ::Bool    = false   # allow CH4 production in lakes
-    replenishlakec      ::Bool    = true    # replenish lake soil C (keep it constant)
-    anoxicmicrosites    ::Bool    = true    # allow CH4 production above WT in anoxic microsites
-    usephfact           ::Bool    = false   # use pH factor for CH4 production
-    ch4rmcnlim          ::Bool    = true    # remove CN N limitation for methanogenesis
-    ch4offline          ::Bool    = true    # use prescribed atmospheric CH4
-    transpirationloss   ::Bool    = true    # include transpiration CH4 loss
-    use_aereoxid_prog   ::Bool    = false   # prognostic aerenchyma oxidation via O2 diffusion
-    ch4frzout           ::Bool    = false   # freeze-out effect on CH4 diffusion
-    finundation_mtd_h2osfc ::Int  = 1       # finundation method h2osfc
+    # Defaults below are the CTSM `ch4varcon.F90` module defaults, verified
+    # line-by-line against the Fortran source. Three of them were WRONG in this
+    # port (anoxicmicrosites, ch4rmcnlim, use_aereoxid_prog) -- they had been
+    # given the opposite of the Fortran default, which silently made the Julia
+    # methane model a different model (production above the water table on,
+    # the CN/moisture HR limitation removed, aerenchyma oxidation prescribed
+    # rather than prognostic).
+    allowlakeprod       ::Bool    = false   # ch4varcon.F90:27  .false.
+    replenishlakec      ::Bool    = true    # ch4varcon.F90:35  .true.
+    anoxicmicrosites    ::Bool    = false   # ch4varcon.F90:63  .false.  (was: true)
+    usephfact           ::Bool    = false   # ch4varcon.F90:33  .false.
+    ch4rmcnlim          ::Bool    = false   # ch4varcon.F90:58  .false.  (was: true)
+    ch4offline          ::Bool    = true    # ch4varcon.F90:54  .true.
+    transpirationloss   ::Bool    = true    # ch4varcon.F90:21  .true.
+    use_aereoxid_prog   ::Bool    = true    # ch4varcon.F90:17  .true.   (was: false)
+    ch4frzout           ::Bool    = false   # ch4varcon.F90:66  .false.
+    usefrootc           ::Bool    = false   # ch4varcon.F90:47  .false.
+    # Active finundation method. CTSM's namelist default is 'h2osfc' (the
+    # prognostic frac_h2osfc route); the two inversion methods need a satellite
+    # regression stream file that is not ported.
+    finundation_mtd     ::Int     = FINUNDATION_MTD_H2OSFC
 end
 
 # ---------------------------------------------------------------------------
@@ -1550,7 +1567,12 @@ function ch4_ebul!(ch4::CH4Data,
     bubble_f = 0.57
     vgc_min = vgc_max
     ebul_timescale = dtime
-    rgasm = RGAS / 1000.0
+    # rgasm [J/K/mol]. ch4Mod.F90:1843 is `rgasm = rgas / 1000`, where Fortran's
+    # `rgas` is SHR_CONST_RGAS = 8314.47 J/K/KMOL -- the /1000 is the kmol->mol
+    # conversion. Julia's `RGAS` (varcon.jl:29) is ALREADY per-mol (8.3145 J/K/mol),
+    # so repeating the /1000 made rgasm 1000x too small, which made every
+    # atmospheric boundary concentration c_atm = p/(rgasm*T) 1000x TOO LARGE.
+    rgasm = RGAS
 
     nc = length(mask_soil)
     meth_ebul!(ch4_ebul_depth, mask_soil, jwt, t_soisno, conc_ch4, watsat,
@@ -2112,12 +2134,30 @@ end
     end
 end
 
-# finundated (snow-adjusted + lagged) per column.
+# finundated: CalcFinundated + snow-adjust + lag, per column.
+#
+# PORTED FROM: ch4Mod.F90:1892-1920, which is TWO steps:
+#   (1) the `CalcFinundated` call (ch4FInundatedStreamType.F90:295-317) that
+#       actually SETS finundated -- for the CTSM-default `finundation_mtd_h2osfc`
+#       this is simply `finundated(c) = frac_h2osfc(c)`;
+#   (2) the snow-season hold + the redox lag.
+#
+# Step (1) was MISSING from this port: only (2) was implemented, so the kernel
+# clamped finundated against ITSELF and lagged it toward ITSELF -- a no-op fixed
+# point that left every column pinned at its cold-start value of 0.1 forever.
+# finundated weights the whole saturated/unsaturated CH4 flux partition, so the
+# model was running "10% inundated, always, everywhere".
 @kernel function _ch4o_finund_kernel!(finundated, finundated_pre_snow, finundated_lag,
-        @Const(mask), @Const(snow_depth), dtime, redoxlags)
+        @Const(mask), @Const(snow_depth), @Const(frac_h2osfc), dtime, redoxlags,
+        finundation_mtd::Int)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(finundated)
+        # (1) CalcFinundated -- prognostic h2osfc route.
+        if finundation_mtd == FINUNDATION_MTD_H2OSFC
+            finundated[c] = frac_h2osfc[c]
+        end
+        # (2) snow-season hold + redox lag.
         if snow_depth[c] <= zero(T)
             finundated[c] = smooth_max(smooth_min(finundated[c], one(T)), zero(T))
             finundated_pre_snow[c] = finundated[c]
@@ -2323,7 +2363,12 @@ function ch4!(ch4d::CH4Data,
     FT = eltype(t_soisno)
     ref = t_soisno
 
-    rgasm = RGAS / 1000.0
+    # rgasm [J/K/mol]. ch4Mod.F90:1843 is `rgasm = rgas / 1000`, where Fortran's
+    # `rgas` is SHR_CONST_RGAS = 8314.47 J/K/KMOL -- the /1000 is the kmol->mol
+    # conversion. Julia's `RGAS` (varcon.jl:29) is ALREADY per-mol (8.3145 J/K/mol),
+    # so repeating the /1000 made rgasm 1000x too small, which made every
+    # atmospheric boundary concentration c_atm = p/(rgasm*T) 1000x TOO LARGE.
+    rgasm = RGAS
     dtime_ch4 = dtime
     redoxlag = params.redoxlag; redoxlag_vertical = params.redoxlag_vertical
     atmch4 = params.atmch4; qflxlagd = params.qflxlagd; highlatfact = params.highlatfact
@@ -2355,9 +2400,16 @@ function ch4!(ch4d::CH4Data,
              gc_d, forc_pbot, latdeg, qflx_surf, ch4d.finundated_col, FT(dtime),
              FT(qflxlagd), FT(highlatfact), FT(SECSPDAY); ndrange = nc)
 
-    # --- finundated (snow-adjusted + lagged) ---
+    # --- finundated: CalcFinundated (h2osfc) + snow-adjust + lag ---
+    if ch4vc.finundation_mtd != FINUNDATION_MTD_H2OSFC
+        error("ch4!: only finundation_mtd = FINUNDATION_MTD_H2OSFC (the CTSM namelist " *
+              "default) is ported. The ZWT/TWS inversion methods need the Prigent " *
+              "satellite-regression stream file (ch4FInundatedStreamType.F90), which " *
+              "has no reader here. Got finundation_mtd = $(ch4vc.finundation_mtd).")
+    end
     _launch!(_ch4o_finund_kernel!, ch4d.finundated_col, ch4d.finundated_pre_snow_col,
-             ch4d.finundated_lag_col, mask_s, snow_depth, FT(dtime), FT(redoxlags); ndrange = nc)
+             ch4d.finundated_lag_col, mask_s, snow_depth, frac_h2osfc, FT(dtime),
+             FT(redoxlags), ch4vc.finundation_mtd; ndrange = nc)
 
     # --- finundated change -> conc_ch4_sat adjust / dfsat flux ---
     _launch!(_ch4o_dfsat_kernel!, ch4d.conc_ch4_sat_col, ch4d.ch4_dfsat_flux_col, mask_s,

@@ -344,10 +344,19 @@ function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {F
     # registers them under (Wateratm2lndBulkType.F90::InitAccBuffer), so an
     # ungated run neither allocates nor accumulates them.
     if varctl.use_cn
-        a2l.prec10_patch              = fill(FT(NaN), np)
-        a2l.prec30_patch              = fill(FT(NaN), np)
-        a2l.prec60_patch              = fill(FT(NaN), np)
-        a2l.rh30_patch                = fill(FT(NaN), np)
+        # Zero, NOT NaN: Fortran registers these with `init_value=0._r8`
+        # (Wateratm2lndBulkType.F90::InitAccBuffer) and `InitAccVars` copies the
+        # accumulator into the patch field BEFORE the first timestep, so they are
+        # finite (0 on a cold start, the restart value on a warm start) by the time
+        # any consumer runs. Allocating them NaN meant the step-1 consumers — the Li
+        # fire fuel-moisture/ignition terms (prec10/prec60/rh30) and CNPhenology's
+        # rain-triggered stress-deciduous onset — read NaN on the first step.
+        # accum_runmean still returns `val` verbatim at nstep<=1, so a cold-start run
+        # accumulates exactly as before.
+        a2l.prec10_patch              = fill(FT(0), np)
+        a2l.prec30_patch              = fill(FT(0), np)
+        a2l.prec60_patch              = fill(FT(0), np)
+        a2l.rh30_patch                = fill(FT(0), np)
     end
     if varctl.use_cndv
         a2l.prec365_col               = fill(FT(NaN), nc)

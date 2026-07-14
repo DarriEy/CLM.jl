@@ -51,6 +51,10 @@ Base.@kwdef mutable struct CNDriverConfig
     # state update) runs only when this is set to :li2014/:li2016/:li2021/:li2024
     # AND the fire-input bundle is supplied to cn_driver_no_leaching!.
     cnfire_method::Symbol = :nofire
+    # Dynamic global vegetation. Only consumed by the fire path here: CNFireBaseMod's
+    # CNFireFluxes decrements the DGVS individual density `nind` inside an
+    # `if (use_cndv)` block. Default false => unchanged.
+    use_cndv::Bool = false
 end
 
 # Decomposition method constants (from SoilBiogeochemDecompCascadeConType)
@@ -1181,7 +1185,7 @@ function cn_driver_no_leaching!(
                 dt = dt, dayspyr = 365.0, nlevdecomp = nlevdecomp,
                 ndecomp_pools = ndecomp_pools, i_met_lit = i_litr_min,
                 i_litr_max = i_litr_max, transient_landcover = transient_landcover,
-                use_matrixcn = config.use_matrixcn,
+                use_matrixcn = config.use_matrixcn, use_cndv = config.use_cndv,
                 kmo = fire_kmo, kda = fire_kda, mcsec = fire_mcsec)
             # Copy the returned active-fire masks into the caller-provided outputs.
             for c in eachindex(mask_actfirec); mask_actfirec[c] = _maskc[c]; end
@@ -1468,8 +1472,12 @@ function cn_driver_summarize_states!(
         # at restart-init NaN/0 in history output. (npcropmin/nrepr only matter for the
         # use_crop reproductive pools; CNDriverConfig has no such field -> standard
         # CLM5 literals, moot when use_crop=false.)
+        # col/patch/mask_bgc_soilc enable the column-level p2c (totvegc_col /
+        # totc_p2c_col) — Fortran's "column level summary" block. totvegc_col is a
+        # LIVE input to the Li fire fuel load, so without it fire burns NaN.
         cnveg_carbon_state_summary!(cnveg_cs, mask_bgc_vegp, bounds_patch;
-            use_crop=config.use_crop, patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
+            use_crop=config.use_crop, patch_itype=patch_itype, npcropmin=17, nrepr=NREPR,
+            mask_soilc=mask_bgc_soilc, col=col, patch=patch)
         cnveg_nitrogen_state_summary!(cnveg_ns, mask_bgc_vegp, bounds_patch;
             use_crop=config.use_crop, patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
     end

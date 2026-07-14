@@ -677,10 +677,18 @@ end
                                  use_crop=false, patch_itype=nothing,
                                  npcropmin=0, nrepr=NREPR)
 
-Perform patch-level carbon summary calculations.
-Ported from `cnveg_carbonstate_type%Summary_carbonstate`.
+Perform patch-level carbon summary calculations, then the column-level p2c
+averages (`totvegc_col`, `totc_p2c_col`).
 
-Note: column-level p2c averaging is stubbed out pending subgridAveMod port.
+Ported from `cnveg_carbonstate_type%Summary_carbonstate`, whose "column level
+summary" block is exactly the two `p2c(..., filter_bgc_soilc, ...)` calls
+reproduced here (CNVegCarbonStateType.F90:4622-4631).
+
+The p2c runs only when `mask_soilc`/`col`/`patch` are supplied. That is not
+cosmetic: `totvegc_col` is a live INPUT to the Li fire fuel load
+(`fc = totlitc + totvegc - rootc - fuelc_crop*cropf` in CNFireArea), and while
+the p2c was stubbed it stayed at its allocate-time NaN forever — i.e. any fire
+run produced NaN burned area.
 """
 function cnveg_carbon_state_summary!(cs::CNVegCarbonStateData,
                                      mask_patch::AbstractVector{Bool},
@@ -688,7 +696,10 @@ function cnveg_carbon_state_summary!(cs::CNVegCarbonStateData,
                                      use_crop::Bool=false,
                                      patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
                                      npcropmin::Int=0,
-                                     nrepr::Int=NREPR)
+                                     nrepr::Int=NREPR,
+                                     mask_soilc::Union{AbstractVector{Bool},Nothing}=nothing,
+                                     col=nothing,
+                                     patch=nothing)
     isempty(bounds_patch) && return nothing
     b = _CVCSumView(cs.leafc_patch, cs.frootc_patch, cs.livestemc_patch,
         cs.deadstemc_patch, cs.livecrootc_patch, cs.deadcrootc_patch, cs.cpool_patch,
@@ -709,7 +720,12 @@ function cnveg_carbon_state_summary!(cs::CNVegCarbonStateData,
     _launch!(_cvc_summary_kernel!, mask_patch, b, pit,
         first(bounds_patch), last(bounds_patch), do_crop, use_crop, npcropmin, nrepr)
 
-    # Column-level p2c averaging is stubbed pending subgridAveMod port
+    # --- column level summary (Fortran: the two p2c calls over filter_bgc_soilc) ---
+    if mask_soilc !== nothing && col !== nothing && patch !== nothing &&
+       !isempty(cs.totvegc_col)
+        p2c_1d_filter!(cs.totvegc_col,  cs.totvegc_patch, mask_soilc, col, patch)
+        p2c_1d_filter!(cs.totc_p2c_col, cs.totc_patch,    mask_soilc, col, patch)
+    end
     return nothing
 end
 
