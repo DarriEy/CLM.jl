@@ -36,6 +36,55 @@ const DUMPDIR  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_r
 const BASEFLOW_SCALAR = 0.0022119554
 const INT_SNOW_MAX    = 3113.2227
 
+# ---------------------------------------------------------------------------
+# datm stream cycling — WHICH FORCING YEAR IS THE FORTRAN RUN ACTUALLY SEEING?
+#
+# Bow's datm.streams.xml (all three CLMNCEP streams):
+#     year_first = 2002, year_last = 2009, year_align = 2002, taxmode = 'cycle'
+# so a model year Y is driven by DATA year
+#     year_first + mod(Y - year_align, year_last - year_first + 1)
+#
+# This matters enormously and is easy to get wrong:
+#   * the SP parity anchor sits at model year 2003  -> data year 2003
+#   * the BGC-spinup reference windows sit at model year **2202** -> 2002 + mod(200, 8)
+#     = **data year 2002**, NOT 2003.
+#
+# Driving the Julia oracle from clmforc.2003.nc against a Fortran run forced by
+# 2002 weather makes every flux downstream of precipitation disagree — with a
+# correlation of ~0 rather than an obvious offset, so it does not look like a
+# forcing bug, it looks like a physics bug. That is exactly what happened: PR
+# #221's N-cycle harness used the 2003 file on the 2202 windows and reported the
+# resulting `qflx_surf` mismatch as a hydrology defect. It was not one; the
+# surface-runoff partition is faithful (FSAT agrees to 6e-9).
+#
+# Use `parity_forcing(model_date)` — never hand-pick a forcing file.
+# ---------------------------------------------------------------------------
+const DATM_YEAR_FIRST = 2002
+const DATM_YEAR_LAST  = 2009
+const DATM_YEAR_ALIGN = 2002
+
+datm_data_year(model_year::Integer) = DATM_YEAR_FIRST +
+    mod(model_year - DATM_YEAR_ALIGN, DATM_YEAR_LAST - DATM_YEAR_FIRST + 1)
+
+bow_forcing_file(data_year::Integer) =
+    joinpath(BOW_BASE, "data/forcing/CLM_input", "clmforc.$(data_year).nc")
+
+"""
+    parity_forcing(model_date::DateTime) -> (forcing_file, step_date)
+
+Map a **Fortran model date** (e.g. 2202-07-16T16:00 in a BGC-spinup window) onto
+the datm data year the CTSM run was actually forced with, returning the matching
+forcing file and the Julia step date (same month/day/hour, in the DATA year).
+
+This is the only correct way to pick the forcing for a parity step.
+"""
+function parity_forcing(model_date::DateTime)
+    dy = datm_data_year(year(model_date))
+    return (bow_forcing_file(dy),
+            DateTime(dy, month(model_date), day(model_date),
+                     hour(model_date), minute(model_date), second(model_date)))
+end
+
 # ---- NaN-aware diffs (reused pattern from gpu_validate_*) ----
 reldiff(a, b) = begin
     A = Array(a); B = Array(b); m = 0.0
@@ -78,7 +127,8 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
                           baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
                           fndep::String="",
                           cnfire_method::Symbol=:nofire,
-                          flnfm::String="", fhdm::String="")
+                          flnfm::String="", fhdm::String="",
+                          h2osfcflag::Int=1)
     # Bow lnd_in: rooting_profile_method_{water,carbon} = 1 (Jackson 1996 beta
     # profile via rootprof_beta), not the Julia default Zeng-2001 roota/rootb. This
     # sets rootfr, which drives the PHS soil-to-root conductance (k_soil_root). Must
@@ -99,7 +149,13 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         use_lch4=use_lch4, use_cndv=use_cndv, use_crop=use_crop, use_fates=use_fates,
         use_c13=use_c13, use_c14=use_c14,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
-        h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
+        # h2osfcflag: CTSM's namelist DEFAULT is 1 (SoilHydrologyType.F90 `h2osfcflag = 1`),
+        # and the Bow lnd_in never sets it — so the Fortran reference this harness scores
+        # against runs with the surface-water (h2osfc) store ACTIVE. This used to be
+        # hard-coded to 0, which disabled h2osfc in the Julia oracle only: infiltration
+        # excess was dumped straight to surface runoff instead of being ponded. That is
+        # the `qflx_surf` divergence PR #221 surfaced via n_leaching!.
+        h2osfcflag=h2osfcflag, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
         fndep=fndep,
         cnfire_method=cnfire_method, flnfm=flnfm, fhdm=fhdm,
         int_snow_max=int_snow)
@@ -296,12 +352,14 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               cnfire_method::Symbol=:nofire,
                               flnfm::String="", fhdm::String="",
                               forcing_date::Union{DateTime,Nothing}=nothing,
-                              pre_step_hook=nothing)
+                              pre_step_hook=nothing,
+                              h2osfcflag::Int=1)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
                               use_lch4=use_lch4, use_c13=use_c13, use_c14=use_c14,
                               fsurdat=fsurdat, paramfile=paramfile, baseflow=baseflow, int_snow=int_snow,
                               fndep=fndep,
-                              cnfire_method=cnfire_method, flnfm=flnfm, fhdm=fhdm)
+                              cnfire_method=cnfire_method, flnfm=flnfm, fhdm=fhdm,
+                              h2osfcflag=h2osfcflag)
     # LUNA (Bow lnd_in use_luna=.true.): allocate the photosyns LUNA vcmax25/jmax25
     # fields so inject_dump! fills them from the restart's vcmx25_z/jmx25_z.
     if use_luna && isempty(inst.photosyns.vcmx25_z_patch)

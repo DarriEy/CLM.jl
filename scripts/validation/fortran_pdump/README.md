@@ -70,3 +70,41 @@ source "$CASE/.env_mach_specific.sh" ; export NETCDF_PATH=/usr/local
 No Julia-repo changes are needed to *consume* new dumps — `oracle_parity` /
 `compare_inst_to_dump` already read exactly the 16 fields `pdumpMod` emits; just add a
 `vcfg("...-parity"; oracles=[:parity], ...)` row pointing at the new nstep.
+
+---
+
+## Flux references: the pdumps CANNOT score fluxes
+
+`restFile_write_dump` writes a **restart-format** snapshot, so it carries only
+*prognostic state*. Fluxes (`qflx_surf`, `qflx_infl`, `fsat`, `frac_h2osfc`, …)
+are simply not in it, and no dump boundary can ever produce them.
+
+For flux parity use CTSM's **history** mechanism at per-step instantaneous
+resolution instead — no `restFileMod` change needed:
+
+```
+hist_nhtfrq          = -8760, 1     ! tape 2 = every step
+hist_mfilt           = 20, 400
+hist_avgflag_pertape = 'A', 'I'     ! tape 2 = INSTANTANEOUS, not a time mean
+hist_fincl2          = 'QOVER', 'QINFL', 'FSAT', ...
+```
+
+For fluxes with no stock `hist_addfld` registration, add one in a SourceMods copy
+of the owning type. `WaterFluxBulkType.runoff_hist.diff` in this directory is the
+worked example: it registers the eight surface-runoff-chain internals
+(`QSATEXCS`, `QINFLEXC`, `QINFLEXCS`, `QINSOIL`, `QINSOILL`, `QTS2SFC`,
+`QINH2OSFC`, `QSFCDRAIN`) that let `qflx_surf` be bisected term by term.
+Consumed by `scripts/fortran_parity_qflx_surf.jl`; see `docs/SURFACE_RUNOFF_PARITY.md`.
+
+### Three traps that cost real time here
+
+1. **A CTSM branch run needs the `.rh0` restart-history file**, not just `.r`.
+   Without it the exe dies with a bare `SIGTRAP` immediately after the
+   decomposition printout and **no CLM error message** — it looks like a
+   compiler/allocator crash, but it is a missing input.
+2. **`case.build` requires Python ≤ 3.11** (CIME imports `distutils`). On 3.12+
+   it dies inside `standard_script_setup`; if you pipe its output through `tail`
+   you will see a misleading exit 0 and then silently run a **stale exe**.
+3. **Do not add `hist_addfld1d` to the base `WaterFluxType.F90`.** That type is
+   instantiated per water tracer and a registration there traps during init. Put
+   bulk-only fields in `WaterFluxBulkType.F90`.

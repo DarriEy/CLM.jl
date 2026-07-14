@@ -53,7 +53,7 @@ state, and returns all data structures ready for `clm_drv!()`.
 - `lat::Float64`          — gridcell latitude  (default: read from surfdata)
 - `lon::Float64`          — gridcell longitude (default: read from surfdata)
 - `soil_layerstruct::String` — soil layer structure (default "20SL_8.5m")
-- `h2osfcflag::Int`       — surface water flag for soil hydrology (default 0)
+- `h2osfcflag::Int`       — surface water flag for soil hydrology (default 1 = CTSM default)
 
 # Returns
 - `inst::CLMInstances`  — all physics/BGC data instances
@@ -91,7 +91,16 @@ function clm_initialize!(;
     lat::Real = NaN,
     lon::Real = NaN,
     soil_layerstruct::String = "20SL_8.5m",
-    h2osfcflag::Int = 0,
+    # CTSM's namelist default is h2osfcflag = 1 (SoilHydrologyType.F90:
+    # `h2osfcflag = 1` in clm_soilhydrology_inparm), i.e. the surface-water
+    # (h2osfc) store is ACTIVE unless a case explicitly turns it off. This entry
+    # point defaulted to 0, which silently disabled h2osfc for every caller that
+    # did not pass the flag: infiltration excess went straight to surface runoff
+    # instead of being ponded and re-infiltrated, and frac_h2osfc was pinned at 0.
+    # SoilHydrologyData itself already defaults to 1 — only the driver entry
+    # points disagreed, and scripts/parity_run_domain.jl (the multi-biome
+    # scorecard) already had to pass 1 explicitly to work around this.
+    h2osfcflag::Int = 1,
     fsnowoptics::String = "",
     fsnowaging::String = "",
     # Atmospheric N-deposition stream (CTSM &ndepdyn_nml stream_fldfilename_ndep).

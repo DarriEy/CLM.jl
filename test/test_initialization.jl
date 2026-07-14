@@ -78,7 +78,9 @@
             # ---- Time manager checks ----
             @test CLM.get_nstep(tm) == 0
             @test CLM.get_curr_calday(tm) ≈ 1.0
-            @test inst.soilhydrology.h2osfcflag == 0
+            # CTSM namelist default (SoilHydrologyType.F90 clm_soilhydrology_inparm)
+            # is h2osfcflag = 1 — the surface-water store is ACTIVE by default.
+            @test inst.soilhydrology.h2osfcflag == 1
 
             # ---- Active checks ----
             @test any(inst.column.active[1:bounds.endc])
@@ -91,11 +93,18 @@
         end
 
         @testset "clm_initialize! h2osfcflag override" begin
+            # Override away from the CTSM default (1) to the no-surface-water case.
             (inst1, _, _, _) = CLM.clm_initialize!(
                 fsurdat=fsurdat,
                 paramfile=paramfile,
+                h2osfcflag=0)
+            @test inst1.soilhydrology.h2osfcflag == 0
+            # ...and back to the default explicitly.
+            (inst2, _, _, _) = CLM.clm_initialize!(
+                fsurdat=fsurdat,
+                paramfile=paramfile,
                 h2osfcflag=1)
-            @test inst1.soilhydrology.h2osfcflag == 1
+            @test inst2.soilhydrology.h2osfcflag == 1
         end
 
         @testset "clm_initialize! use_aquifer_layer=false initializes ZWT at bedrock" begin

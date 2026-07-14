@@ -1,0 +1,76 @@
+--- /Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/src/biogeophys/WaterFluxBulkType.F90	2026-06-27 16:14:42
++++ /Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/cases/symfluence_build/SourceMods/src.clm/WaterFluxBulkType.F90	2026-07-14 08:09:22
+@@ -245,6 +245,73 @@
+          long_name=this%info%lname('Annual ET'), &
+          ptr_col=this%AnnET, c2l_scale_type='urbanf', default='inactive')
+          
++
++    ! CLM.jl parity: surface-runoff chain internals (qflx_surf bisection)
++
++    this%qflx_sat_excess_surf_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QSATEXCS'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('surface runoff due to saturated surface'), &
++         ptr_col=this%qflx_sat_excess_surf_col, default='inactive')
++
++    this%qflx_infl_excess_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QINFLEXC'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('infiltration excess runoff (pre-routing)'), &
++         ptr_col=this%qflx_infl_excess_col, default='inactive')
++
++    this%qflx_infl_excess_surf_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QINFLEXCS'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('surface runoff due to infiltration excess'), &
++         ptr_col=this%qflx_infl_excess_surf_col, default='inactive')
++
++    this%qflx_in_soil_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QINSOIL'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('surface input to soil'), &
++         ptr_col=this%qflx_in_soil_col, default='inactive')
++
++    this%qflx_in_soil_limited_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QINSOILL'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('surface input to soil, limited by qinmax'), &
++         ptr_col=this%qflx_in_soil_limited_col, default='inactive')
++
++    this%qflx_top_soil_to_h2osfc_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QTS2SFC'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('portion of qflx_top_soil going to h2osfc'), &
++         ptr_col=this%qflx_top_soil_to_h2osfc_col, default='inactive')
++
++    this%qflx_in_h2osfc_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QINH2OSFC'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('total surface input to h2osfc'), &
++         ptr_col=this%qflx_in_h2osfc_col, default='inactive')
++
++    this%qflx_h2osfc_drain_col(begc:endc) = spval
++    call hist_addfld1d ( &
++         fname=this%info%fname('QSFCDRAIN'),  &
++         units='mm/s',  &
++         avgflag='A', &
++         long_name=this%info%lname('drainage from h2osfc into soil'), &
++         ptr_col=this%qflx_h2osfc_drain_col, default='inactive')
++
+   end subroutine InitBulkHistory
+   
+   

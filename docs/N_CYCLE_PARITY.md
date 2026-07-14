@@ -158,32 +158,51 @@ it must move Julia *toward* the reference.
 **Every field, every probe, improves.** Mineral-N error drops by roughly
 **7–670×**. Direction: unambiguously toward Fortran.
 
-### 4d. N LOSS (leaching) — port is faithful; residual is in the WATER, not the N
+### 4d. N LOSS (leaching) — **CLOSED**: the totals now match to 4.4e-07
 
 The autumn window turned out to be **unable to test leaching at all**: Fortran's
 own `no3` pre→post change there is *identically zero* (frozen/dry column, no
 drainage). That is itself a finding — it is why the summer window was generated.
 
-In the summer window (147 of 186 steps have active drainage), the raw totals
-disagree badly (rel 1.0–16.4). **This is not an N-cycle bug.** Evidence:
+In the summer window, `n_leaching!` reproduces Fortran's leaching operator
+exactly. The *totals* originally disagreed (rel 1.0–16.4), which this document
+attributed to a `qflx_surf` hydrology bug. **That diagnosis was wrong, and the
+follow-up PR proved it: the surface-runoff port is faithful.**
 
-1. Both codes confine the loss to **levels 1–2 only** (the top 0.05 m
-   `depth_runoff_Nloss` band) and put exactly zero below — Julia reproduces
-   Fortran's vertical structure exactly.
-2. The level-1 : level-2 **ratio matches to 1e-4** (F 1.17910, J 1.17921).
-3. Decisively: calibrate **one** scalar (the water-flux ratio) on **level 1
-   only**, then *predict* levels 2…20. The prediction matches Fortran to
-   **≤ 4.4e-07** (and to 8e-13 at one step), including every zero below level 2.
+> **The real cause was in THIS harness.** Bow's datm streams cycle
+> `year_first=2002, year_last=2009, year_align=2002, taxmode='cycle'`, so the
+> BGC-spinup windows — at Fortran model year **2202** — are forced by data year
+> `2002 + mod(200, 8)` = **2002**. `fortran_parity_ncycle.jl` drove Julia from
+> `clmforc.2003.nc` on a 2003 step date. Julia and Fortran were therefore seeing
+> **different years' weather**, which decorrelates (corr ≈ 0, not a clean offset)
+> everything downstream of precipitation. `qflx_surf` is `fsat · (rain+snowmelt)`,
+> so it was the first place the wrong weather became visible, and `n_leaching!`
+> the first consumer that multiplied it.
+>
+> `scripts/fortran_parity_cn_summer.jl` had already documented this exact rule;
+> the N-cycle harness simply did not apply it. The mapping now lives in
+> `parity_forcing()` (`scripts/fortran_parity_common.jl`) so it cannot be
+> forgotten again.
 
-So `n_leaching!` reproduces Fortran's leaching operator to ~1e-7 given the same
-water. The total differs because **Julia's `qflx_surf` differs from Fortran's**
-at these steps (both are absolutely tiny, ~1e-7 mm/s — Julia's is ~17× Fortran's
-at one step and ~1/36500 at another).
+With the correct forcing year, every N-loss number falls into line:
 
-**FINDING (open, out of scope here): surface-runoff (`qflx_surf`) parity.** This
-is a hydrology residual, not a nitrogen one. It is only visible now because
-`n_leaching!` is the first consumer that multiplies it. Needs its own
-parity-validated PR.
+| metric | with 2003 forcing (wrong) | with 2002 forcing (correct) |
+|---|---|---|
+| leaching total, worst \|rel\| | **1.0 – 16.4** | **4.37e-07** |
+| `smin_nh4_vr` | 2.0e-05 | **7.26e-07** |
+| `smin_no3_vr` | 2.5e-07 | **5.55e-09** |
+| `sminn_vr`    | 6.5e-07 | **1.88e-08** |
+
+`ndep_to_sminn` and `ffix_to_sminn` remain EXACT, and the directional test still
+improves at every probe. The leaching **operator** result quoted before (predict
+levels 2…20 from one scalar calibrated on level 1, to ≤ 4.4e-07) was correct —
+it was measuring the operator around the wrong water flux, and that same 4.4e-07
+is now the error of the **absolute totals**.
+
+**Surface-runoff (`qflx_surf`) parity: CLOSED.** Scored directly against a
+200-step instantaneous Fortran history reference
+(`scripts/fortran_parity_qflx_surf.jl`): `QOVER` max \|rel\| = **6.9e-09**,
+`FSAT` = 5.8e-09, `RAIN` exact. See §7.
 
 ---
 
@@ -248,7 +267,7 @@ column C-flux aggregates wired in a separate PR.
 | `cn_products_update!` | **UNWIRED** | Needs the harvest / gross-unrepresented-disturbance flux inputs, which are themselves not on the live path at Bow (`do_harvest = false`). The product **pools** are now allocated (the balance check needs them as a sink) but are not updated. **TODO:** needs a transient-landcover Fortran reference. |
 | non-`use_nitrif_denitrif` branch of `SoilBiogeochemNStateUpdate1` | **NOT PORTED** | Julia's mineral-N state update implements only the nitrif/denitrif path, and `clm_initialize!` sets `use_nitrif_denitrif = use_cn`, so the other branch is unreachable in practice. Documented rather than written blind. |
 | column-level C flux aggregates (`gpp_col`, `er_col`, …) | **UNWIRED** | Blocks the carbon half of the balance check — see §5. |
-| `qflx_surf` parity | **OPEN** | Hydrology residual surfaced by §4d. |
+| `qflx_surf` parity | **CLOSED** | Was never a hydrology bug — it was this harness's forcing year. `QOVER` max \|rel\| = 6.9e-09 against a 200-step instantaneous Fortran history. See §4d and `scripts/fortran_parity_qflx_surf.jl`. |
 
 ---
 
