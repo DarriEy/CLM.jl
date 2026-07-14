@@ -142,9 +142,12 @@
 
         # --- Patch data ---
         patch_column = [1, 1, 2, 2, 3, 4]
-        ivt          = fill(1, np)
+        ivt          = fill(1, np)   # PFT 1 — non-woody
         woody        = zeros(Float64, 80)
-        woody[2]     = 1.0
+        # pftcon arrays are 1-based with row i holding RAW (0-based) PFT index i-1
+        # (bare ground == PFT 0 == row 1), so kernels read `woody[ivt[p] + 1]`.
+        # See the note in test_c_state_update1.jl.
+        woody[3]     = 1.0           # PFT 2 is woody (pftcon row = PFT + 1)
         harvdate     = fill(999, np)
         col_is_fates = fill(false, nc)
 

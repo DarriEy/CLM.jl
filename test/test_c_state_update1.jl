@@ -185,9 +185,19 @@
 
         # --- Patch data ---
         patch_column = [1, 1, 2, 2, 3, 4]
-        ivt          = fill(1, np)  # non-woody, non-crop by default
+        ivt          = fill(1, np)  # PFT 1 — non-woody, non-crop by default
         woody        = zeros(Float64, 80)
-        woody[2]     = 1.0  # PFT 2 is woody
+        # `woody` is a pftcon array: it is 1-based, and row i holds the value for the
+        # RAW (0-based) Fortran PFT index i-1 — bare ground is PFT 0 == row 1. So the
+        # kernel must read `woody[ivt[p] + 1]`, which is what allocation.jl, the
+        # gap-mortality kernel and c_iso_flux.jl all do.
+        #
+        # This fixture used to set woody[2] = 1.0 and call PFT 2 "woody", which is only
+        # self-consistent with the OLD, BUGGY `woody[ivt[p]]` indexing — it encoded the
+        # off-by-one that made every TREE non-woody in the C/N state updates (carbon was
+        # counted as respired in `ar` but never debited from any pool). Corrected to the
+        # real convention: PFT 2 is woody => row 3.
+        woody[3]     = 1.0  # PFT 2 is woody (pftcon row = PFT + 1)
         harvdate     = fill(999, np)
         col_is_fates = fill(false, nc)
 
