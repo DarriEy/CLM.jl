@@ -343,27 +343,48 @@ function fates_pack_bcin_radiation!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 end
 
 """
-    fates_pack_bcin_btran!(inst; s=1, c=1, nlevsoil, smp_sl=nothing)
+    fates_pack_bcin_btran!(inst; s=1, c=1, nlevsoil, filter_btran=true)
 
 Fill the FATES BTRAN `bc_in` soil-hydrology fields for site `s` from CLM column
-`c` state (reusing the existing CLM soil-suction `smp_l` path):
+`c` state. Mirrors the Fortran `clm_fates%wrap_btran` (clmfates_interfaceMod.F90),
+which is a three-stage sequence:
 
-  * `tempk_sl` / `t_soisno_sl` — soil-layer temperature (K).
-  * `h2o_liqvol_sl` — liquid volume in soil layer (m3/m3).
-  * `watsat_sl` — saturated volumetric water (porosity).
-  * `eff_porosity_sl` — effective porosity.
-  * `smp_sl` — soil suction potential (mm, negative). Supplied via `smp_sl`
-    (the host-computed CLM `smp_l_col` slice); if `nothing`, derived from the
-    Clapp-Hornberger retention curve using watsat/sucsat/bsw + h2o_liqvol.
+ 1. Pack the raw soil state — but only for columns in the *exposed-vegetation*
+    filter (`filter_btran`); hydrologic diagnostics like `h2osoi_liqvol` are not
+    computed outside that filter. Non-exposed columns get `-999` and
+    `filter_btran = .false.`, which makes every layer fail `check_layer_water`
+    and drives `btran_ft` to zero.
+      * `tempk_sl` / `t_soisno_sl` — soil-layer temperature (K).
+      * `h2o_liqvol_sl` — liquid volume in soil layer (m3/m3).
+      * `watsat_sl` — saturated volumetric water (porosity).
+      * `eff_porosity_sl` — effective porosity (porosity minus ice).
+ 2. Ask FATES which layers can support uptake (`get_active_suction_layers` →
+    `bc_out.active_suction_sl`).
+ 3. Compute the soil suction `smp_sl` **on those layers only**, from the
+    Clapp-Hornberger retention curve.
 
-`max_rooting_depth_index_col` is left as set by `clm_fates_init!`.
+The suction uses the **effective** porosity as the denominator:
+
+    s_node = max(h2osoi_liqvol(c,j) / eff_porosity(c,j), 0.01)
+    smp    = -sucsat * s_node**(-bsw)
+
+(`wrap_btran` + `SoilWaterRetentionCurveClappHornberg1978Mod::soil_suction`).
+That distinction is not cosmetic: in a partially-frozen layer `eff_porosity` is
+the *unfrozen* pore space, so a layer whose remaining pore space is full of
+liquid is at (near-)zero suction and is NOT water-stressed. Dividing by the
+total porosity `watsat` instead reports such a layer as bone dry, which clamps
+its suction at `smpsc` and silently deletes its contribution to BTRAN. There is
+also no upper clamp on `s_node` in the Fortran.
+
+`max_rooting_depth_index_col` is NOT set here — the Fortran sets it in the daily
+`dynamics_driv` pack (see [`fates_pack_bcin_daily!`](@ref)).
 """
 function fates_pack_bcin_btran!(inst::CLMInstances; s::Int = 1, c::Int = 1,
-                                nlevsoil::Int,
-                                smp_sl::Union{AbstractVector, Nothing} = nothing)
+                                nlevsoil::Int, filter_btran::Bool = true)
     fates = inst.fates
     fates === nothing && return inst
-    bc = fates.bc_in[s]
+    bc  = fates.bc_in[s]
+    bco = fates.bc_out[s]
 
     temp = inst.temperature
     wdb  = inst.water.waterdiagnosticbulk_inst
@@ -371,33 +392,77 @@ function fates_pack_bcin_btran!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 
     joff = varpar.nlevsno  # snow layers offset into t_soisno / h2osoi arrays
 
+    # ---- 1. raw soil state (only meaningful inside the exposed-veg filter) ----
+    bc.filter_btran = filter_btran
     for j in 1:nlevsoil
         tk = temp.t_soisno_col[c, joff + j]
-        bc.tempk_sl[j]      = tk
-        bc.t_soisno_sl[j]   = tk
-        bc.h2o_liqvol_sl[j] = wdb.h2osoi_liqvol_col[c, joff + j]
-        bc.watsat_sl[j]     = ss.watsat_col[c, j]
-        bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
+        # t_soisno_sl is packed by wrap_photosynthesis in the Fortran, i.e. for
+        # every FATES column regardless of the btran filter; keep it unfiltered.
+        bc.t_soisno_sl[j] = tk
+        if filter_btran
+            bc.tempk_sl[j]        = tk
+            bc.h2o_liqvol_sl[j]   = wdb.h2osoi_liqvol_col[c, joff + j]
+            bc.watsat_sl[j]       = ss.watsat_col[c, j]
+            bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
+        else
+            bc.tempk_sl[j]        = -999.0
+            bc.h2o_liqvol_sl[j]   = -999.0
+            bc.watsat_sl[j]       = -999.0
+            bc.eff_porosity_sl[j] = -999.0
+        end
     end
 
-    if smp_sl !== nothing
-        for j in 1:nlevsoil
-            bc.smp_sl[j] = smp_sl[j]
-        end
-    else
-        # Derive soil matric suction from the Clapp-Hornberger retention curve,
-        # matching the CLM soil-water-potential path: smp = -sucsat * s^(-bsw),
-        # where s = liqvol/watsat clamped to [0.01, 1].
-        for j in 1:nlevsoil
-            wsat = ss.watsat_col[c, j]
-            scl  = wsat > 0.0 ? clamp(wdb.h2osoi_liqvol_col[c, joff + j] / wsat, 0.01, 1.0) : 0.01
-            sucsat = ss.sucsat_col[c, j]   # minimum soil suction (mm, positive)
-            bsw    = ss.bsw_col[c, j]
-            bc.smp_sl[j] = -sucsat * scl^(-bsw)
-        end
-    end
+    # ---- 2. which layers can support root uptake (FATES decides) ----
+    _fates_set_active_suction!(bc, bco, nlevsoil)
+
+    # ---- 3. suction on the active layers only ----
+    _fates_pack_smp!(bc, bco, ss, c, nlevsoil)
 
     return inst
+end
+
+"""
+    _fates_set_active_suction!(bc, bc_out, nlevsoil)
+
+Fill `bc_out.active_suction_sl` from the packed soil state. Mirrors the Fortran
+`EDBtranMod::get_active_suction_layers` (which the interface calls in between
+packing the soil state and computing suction, in both `wrap_btran` and
+`dynamics_driv`): a layer is active iff the column is in the btran filter AND the
+layer holds liquid water above the soil-freezing threshold.
+"""
+function _fates_set_active_suction!(bc::bc_in_type, bco::bc_out_type, nlevsoil::Int)
+    if bc.filter_btran
+        for j in 1:nlevsoil
+            bco.active_suction_sl[j] =
+                check_layer_water(bc.h2o_liqvol_sl[j], bc.tempk_sl[j])
+        end
+    else
+        fill!(bco.active_suction_sl, false)
+    end
+    return nothing
+end
+
+"""
+    _fates_pack_smp!(bc, bc_out, ss, c, nlevsoil)
+
+Soil matric suction handed to FATES, on the active-suction layers only:
+
+    s_node = max(h2o_liqvol_sl(j) / eff_porosity_sl(j), 0.01)
+    smp_sl = -sucsat * s_node^(-bsw)
+
+Identical in the Fortran's sub-daily (`wrap_btran`) and daily (`dynamics_driv`)
+packs — they differ only in what `h2o_liqvol_sl` was filled with (liquid volume
+vs. total volume). Inactive layers keep their previous value, exactly as in the
+Fortran (which leaves `smp_sl(j)` untouched outside `active_suction_sl`).
+"""
+function _fates_pack_smp!(bc::bc_in_type, bco::bc_out_type, ss, c::Int, nlevsoil::Int)
+    for j in 1:nlevsoil
+        bco.active_suction_sl[j] || continue
+        eff = bc.eff_porosity_sl[j]
+        s_node = max(bc.h2o_liqvol_sl[j] / eff, 0.01)
+        bc.smp_sl[j] = -ss.sucsat_col[c, j] * s_node^(-ss.bsw_col[c, j])
+    end
+    return nothing
 end
 
 """
@@ -499,11 +564,26 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         bc.h2o_liqvol_sl[j]   = ws.h2osoi_vol_col[c, j]
         bc.watsat_sl[j]       = ss.watsat_col[c, j]
         bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
-
-        wsat = ss.watsat_col[c, j]
-        scl  = wsat > 0.0 ? clamp(wdb.h2osoi_liqvol_col[c, joff + j] / wsat, 0.01, 1.0) : 0.01
-        bc.smp_sl[j] = -ss.sucsat_col[c, j] * scl^(-ss.bsw_col[c, j])
     end
+
+    # Deepest soil layer roots may occupy. Fortran `dynamics_driv`:
+    #     bc_in(s)%max_rooting_depth_index_col = &
+    #          min(nlevsoil, active_layer_inst%altmax_lastyear_indx_col(c))
+    # This is the ONLY place the Fortran sets it, and it sets it EVERY day. The port
+    # pinned it to `nlevsoil` at init and never updated it, so every FATES root
+    # profile (`set_root_fraction`) was spread over the whole soil column instead of
+    # over last year's active layer. CLM cold-starts `altmax_lastyear_indx_col = 0`
+    # (ActiveLayerMod::InitCold), i.e. FATES puts the entire root profile in the top
+    # soil layer until the first year boundary -- see `set_root_fraction`, whose
+    # normalization correction (`argmax` of an all-zero profile) lands the full 1.0
+    # in layer 1 when `max_nlevroot == 0`.
+    bc.max_rooting_depth_index_col =
+        min(nlevsoil, inst.active_layer.altmax_lastyear_indx_col[c])
+
+    # Active-uptake layers + soil suction (same retention curve as the sub-daily
+    # btran pack; here `h2o_liqvol_sl` holds the TOTAL volumetric water).
+    _fates_set_active_suction!(bc, fates.bc_out[s], nlevsoil)
+    _fates_pack_smp!(bc, fates.bc_out[s], ss, c, nlevsoil)
 
     # Soil-decomposition limitation scalars: live only under use_fates_bgc, else 0
     # (matches the Fortran w_scalar/t_scalar gate in dynamics_driv). Clamp the loop

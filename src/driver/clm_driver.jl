@@ -1237,7 +1237,19 @@ function clm_drv_core!(config::CLMDriverConfig,
             col.is_fates[c] || continue
             s += 1
             s <= inst.fates.nsites || break
-            fates_pack_bcin_btran!(inst; s=s, c=c, nlevsoil=nlevsoil_f)
+            # Fortran CanopyFluxes hands wrap_btran the COLUMNS of the exposed-veg
+            # patch filter (`filterc_tmp(f) = patch%column(filterp(f))`); columns
+            # outside it get `filter_btran = .false.` and a -999 soil state, because
+            # h2osoi_liqvol is not computed for them.
+            exposed = false
+            for p in eachindex(filt.exposedvegp)
+                if filt.exposedvegp[p] && pch.column[p] == c
+                    exposed = true
+                    break
+                end
+            end
+            fates_pack_bcin_btran!(inst; s=s, c=c, nlevsoil=nlevsoil_f,
+                                   filter_btran=exposed)
         end
         btran_ed!(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
         s = 0
