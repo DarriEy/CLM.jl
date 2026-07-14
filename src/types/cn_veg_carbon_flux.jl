@@ -331,6 +331,7 @@ Base.@kwdef mutable struct CNVegCarbonFluxData{FT<:Real,
     somfire_col                               ::V = Float64[]
     totfire_col                               ::V = Float64[]
     hrv_xsmrpool_to_atm_col                  ::V = Float64[]
+    hrv_xsmrpool_to_atm_grc                  ::V = Float64[]
 
     # --- Fire summary ---
     fire_closs_patch                          ::V = Float64[]
@@ -793,6 +794,7 @@ function cnveg_carbon_flux_init!(cf::CNVegCarbonFluxData{FT}, np::Int, nc::Int, 
     cf.fire_closs_col                       = nanvec(nc)
     cf.wood_harvestc_col                    = nanvec(nc)
     cf.hrv_xsmrpool_to_atm_col             = zeros(FT, nc)
+    cf.hrv_xsmrpool_to_atm_grc             = zeros(FT, ng)
     cf.tempsum_npp_patch                    = nanvec(np)
     cf.annsum_npp_patch                     = nanvec(np)
     cf.tempsum_litfall_patch                = nanvec(np)
@@ -1510,7 +1512,216 @@ function cnveg_carbon_flux_summary!(cf::CNVegCarbonFluxData,
     _launch!(_cvcf_summary_kernel!, mask_patch, b, pit,
         first(bounds_patch), last(bounds_patch), do_crop, use_fun, carbon_resp_opt, npcropmin, nrepr)
 
-    # Column-level p2c aggregation is stubbed pending subgridAveMod port
+    # The COLUMN/GRIDCELL half of Fortran's Summary_carbonflux lives in
+    # `cnveg_carbon_flux_summary_col!` below (it needs the soil-BGC HR, which is
+    # not available here). CNDriverSummarizeFluxes calls both, in that order.
+    return nothing
+end
+
+# ==========================================================================
+# cnveg_carbon_flux_summary_col! — the COLUMN + GRIDCELL half of
+# `Summary_carbonflux` (CNVegCarbonFluxType.F90:5322-5505).
+#
+# This half was a one-line stub ("Column-level p2c aggregation is stubbed
+# pending subgridAveMod port") for the entire life of the port — even though
+# subgridAveMod *is* ported (p2c_1d_filter! / c2g). The consequence: EVERY
+# column and gridcell carbon flux was dead. `gpp_col`, `ar_col`, `rr_col`,
+# `er_col`, `nep_col`, `fire_closs_col`, `hrv_xsmrpool_to_atm_col`,
+# `gru_conv_cflux_col`, `nbp_grc`, `nee_grc` and `landuseflux_grc` were
+# allocated to NaN, zeroed once per step by SetValues, and never written
+# again. That is exactly why the carbon half of the CN balance check could
+# not run: it reads gpp_col and er_col, which were structurally 0.0.
+#
+# Verified against the live model before the fix: ar_patch = 1.5e-7 but
+# ar_col = 0.0 — the p2c was not merely wrong, it was absent.
+# ==========================================================================
+
+"""
+    cnveg_carbon_flux_summary_col!(cf, mask_bgc_soilc, bounds_col, bounds_grc,
+        col, pch; soilbgc_hr_col, ...)
+
+Column- and gridcell-level half of the CNVeg carbon-flux summary: the patch→column
+aggregations (`gpp_col`, `ar_col`, `rr_col`, `npp_col`, `fire_closs_p2c_col`,
+`hrv_xsmrpool_to_atm_col`, `gru_conv_cflux_col`), the vertically-integrated column
+fire losses, the derived column fluxes (`sr_col`, `er_col`, `nep_col`,
+`fire_closs_col`), and the gridcell aggregates (`nee_grc`, `landuseflux_grc`,
+`nbp_grc`).
+
+Must be called AFTER `soil_bgc_carbon_flux_summary!` (it consumes `hr_col`,
+`cwdhr_col`, `lithr_col`) and after the patch-level `cnveg_carbon_flux_summary!`.
+
+Ported from the column/gridcell section of `Summary_carbonflux` in
+`CNVegCarbonFluxType.F90`.
+
+!!! note "Annual flux dribblers are not ported"
+    Fortran routes `hrv_xsmrpool_to_atm`, `dwt_conv_cflux` and `gru_conv_cflux`
+    through `annual_flux_dribbler_gridcell` before they enter NEE/land-use flux,
+    which spreads each year's pulse evenly over the following year. That subsystem
+    is not ported (see `dyn_cons_biogeochem.jl`), so here the **dribbled flux is
+    the instantaneous flux** and the dribbler's `amount_left` is identically zero.
+
+    This is a *timing* difference in the NBP/NEE **diagnostic**, not a conservation
+    hole: whatever leaves the column is counted in NBP in the same step it leaves,
+    so the gridcell budget still closes exactly (the balance check's `amount_left`
+    terms are zero on both the begin and end side, consistently). In every
+    configuration validated here (no land-use change, no wood harvest, no crop)
+    all three source fluxes are identically zero, so this is also bit-identical to
+    Fortran. `c_balance_check!` asserts that (see `dribbler_flux_tol`).
+"""
+function cnveg_carbon_flux_summary_col!(
+        cf::CNVegCarbonFluxData,
+        mask_bgc_soilc::AbstractVector{Bool},
+        bounds_col::UnitRange{Int},
+        bounds_grc::UnitRange{Int},
+        col::ColumnData,
+        pch::PatchData;
+        soilbgc_hr_col::AbstractVector{<:Real},
+        soilbgc_cwdhr_col::AbstractVector{<:Real},
+        soilbgc_lithr_col::AbstractVector{<:Real},
+        soilbgc_decomp_cascade_ctransfer_col::AbstractMatrix{<:Real},
+        product_closs_grc::AbstractVector{<:Real},
+        nlevdecomp::Int,
+        ndecomp_pools::Int,
+        ndecomp_cascade_transitions::Int,
+        dzsoi_decomp_vals::AbstractVector{<:Real},
+        cascade_donor_pool::AbstractVector{Int},
+        is_cwd::AbstractVector{Bool},
+        is_litter::AbstractVector{Bool},
+        use_crop::Bool=false,
+        dribble_crophrv_xsmrpool_2atm::Bool=false)
+
+    isempty(bounds_col) && return nothing
+
+    # ---- p2c: patch → column (Fortran CNVegCarbonFluxType.F90:5328-5366) ----
+    p2c_1d_filter!(cf.hrv_xsmrpool_to_atm_col, cf.hrv_xsmrpool_to_atm_patch,
+                   mask_bgc_soilc, col, pch)
+    if use_crop && dribble_crophrv_xsmrpool_2atm
+        p2c_1d_filter!(cf.xsmrpool_to_atm_col, cf.xsmrpool_to_atm_patch,
+                       mask_bgc_soilc, col, pch)
+        c2g_unity!(cf.xsmrpool_to_atm_grc, cf.xsmrpool_to_atm_col,
+                   col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+    end
+    p2c_1d_filter!(cf.gru_conv_cflux_col, cf.gru_conv_cflux_patch, mask_bgc_soilc, col, pch)
+    p2c_1d_filter!(cf.fire_closs_p2c_col, cf.fire_closs_patch,   mask_bgc_soilc, col, pch)
+    p2c_1d_filter!(cf.npp_col,            cf.npp_patch,          mask_bgc_soilc, col, pch)
+    p2c_1d_filter!(cf.rr_col,             cf.rr_patch,           mask_bgc_soilc, col, pch)
+    p2c_1d_filter!(cf.ar_col,             cf.ar_patch,           mask_bgc_soilc, col, pch)
+    p2c_1d_filter!(cf.gpp_col,            cf.gpp_patch,          mask_bgc_soilc, col, pch)
+
+    # ---- vertically integrate column-level carbon fire losses ----
+    if !isempty(cf.m_decomp_cpools_to_fire_vr_col)
+        for l in 1:ndecomp_pools, j in 1:nlevdecomp, c in bounds_col
+            mask_bgc_soilc[c] || continue
+            cf.m_decomp_cpools_to_fire_col[c, l] =
+                cf.m_decomp_cpools_to_fire_col[c, l] +
+                cf.m_decomp_cpools_to_fire_vr_col[c, j, l] * dzsoi_decomp_vals[j]
+        end
+    end
+
+    # ---- derived column fluxes ----
+    for c in bounds_col
+        mask_bgc_soilc[c] || continue
+
+        cf.litfire_col[c] = 0.0
+        cf.somfire_col[c] = 0.0
+        cf.totfire_col[c] = cf.litfire_col[c] + cf.somfire_col[c]
+
+        # carbon losses to fire, including patch losses
+        fc_c = cf.fire_closs_p2c_col[c]
+        if !isempty(cf.m_decomp_cpools_to_fire_col)
+            for l in 1:ndecomp_pools
+                fc_c += cf.m_decomp_cpools_to_fire_col[c, l]
+            end
+        end
+        cf.fire_closs_col[c] = fc_c
+
+        # total soil respiration, heterotrophic + root respiration (SR)
+        cf.sr_col[c] = cf.rr_col[c] + soilbgc_hr_col[c]
+        # total ecosystem respiration, autotrophic + heterotrophic (ER)
+        cf.er_col[c] = cf.ar_col[c] + soilbgc_hr_col[c]
+        # net ecosystem production (NEP) — excludes fire, landcover change, products
+        cf.nep_col[c] = cf.gpp_col[c] - cf.er_col[c]
+    end
+
+    # ---- c2g: column → gridcell (c2l_scale_type='unity', l2g_scale_type='unity') ----
+    if !isempty(bounds_grc)
+        FT = eltype(cf.nep_col)
+        ng = length(cf.nbp_grc)
+        nep_grc        = fill!(similar(cf.nbp_grc, FT, ng), zero(FT))
+        fire_closs_grc = fill!(similar(cf.nbp_grc, FT, ng), zero(FT))
+
+        c2g_unity!(nep_grc, cf.nep_col, col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+        c2g_unity!(fire_closs_grc, cf.fire_closs_col, col.gridcell, col.wtgcell,
+                   bounds_col, bounds_grc)
+        c2g_unity!(cf.hrv_xsmrpool_to_atm_grc, cf.hrv_xsmrpool_to_atm_col,
+                   col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+        c2g_unity!(cf.gru_conv_cflux_grc, cf.gru_conv_cflux_col,
+                   col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+
+        # Annual flux dribblers are NOT ported: dribbled == instantaneous. See the
+        # docstring note — this is a diagnostic-timing difference, not a budget hole,
+        # and all three fluxes are identically zero in every validated config.
+        for g in bounds_grc
+            cf.dwt_conv_cflux_dribbled_grc[g] = cf.dwt_conv_cflux_grc[g]
+            cf.gru_conv_cflux_dribbled_grc[g] = cf.gru_conv_cflux_grc[g]
+        end
+
+        for g in bounds_grc
+            # net ecosystem exchange, incl. fire + hrv_xsmrpool; positive = source
+            cf.nee_grc[g] = -nep_grc[g] + fire_closs_grc[g] +
+                            cf.hrv_xsmrpool_to_atm_grc[g]
+
+            cf.landuseflux_grc[g] = cf.dwt_conv_cflux_dribbled_grc[g] +
+                                    cf.gru_conv_cflux_dribbled_grc[g] +
+                                    product_closs_grc[g]
+
+            # net biome production; positive = sink
+            cf.nbp_grc[g] = -cf.nee_grc[g] - cf.landuseflux_grc[g]
+            if dribble_crophrv_xsmrpool_2atm
+                cf.nbp_grc[g] -= cf.xsmrpool_to_atm_grc[g]
+            end
+        end
+    end
+
+    # ---- coarse woody debris + litter C loss (diagnostics) ----
+    for c in bounds_col
+        mask_bgc_soilc[c] || continue
+        cf.cwdc_loss_col[c]    = soilbgc_cwdhr_col[c]
+        cf.litterc_loss_col[c] = soilbgc_lithr_col[c]
+    end
+    if !isempty(cf.m_decomp_cpools_to_fire_col)
+        for l in 1:ndecomp_pools
+            is_cwd[l] || continue
+            for c in bounds_col
+                mask_bgc_soilc[c] || continue
+                cf.cwdc_loss_col[c] += cf.m_decomp_cpools_to_fire_col[c, l]
+            end
+        end
+        for l in 1:ndecomp_pools
+            is_litter[l] || continue
+            for c in bounds_col
+                mask_bgc_soilc[c] || continue
+                cf.litterc_loss_col[c] += cf.m_decomp_cpools_to_fire_col[c, l]
+            end
+        end
+    end
+    for k in 1:ndecomp_cascade_transitions
+        donor = cascade_donor_pool[k]
+        (donor >= 1 && donor <= ndecomp_pools) || continue
+        if is_cwd[donor]
+            for c in bounds_col
+                mask_bgc_soilc[c] || continue
+                cf.cwdc_loss_col[c] += soilbgc_decomp_cascade_ctransfer_col[c, k]
+            end
+        end
+        if is_litter[donor]
+            for c in bounds_col
+                mask_bgc_soilc[c] || continue
+                cf.litterc_loss_col[c] += soilbgc_decomp_cascade_ctransfer_col[c, k]
+            end
+        end
+    end
+
     return nothing
 end
 

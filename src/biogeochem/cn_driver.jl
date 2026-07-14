@@ -780,7 +780,12 @@ function cn_driver_no_leaching!(
                 crop, patch, gridcell, cn_shared_params,
                 _lprof, _fprof, _phase;
                 varctl = varctl, is_first_step = is_first_step, avg_dayspyr = 365.0,
-                prec10_patch = prec10_patch)
+                prec10_patch = prec10_patch,
+                # REQUIRED: without these, cn_litter_to_column! defaults to
+                # nlevdecomp=1 and destroys ~86% of all phenological leaf/fine-root
+                # litterfall C and N (see phenology.jl).
+                nlevdecomp = nlevdecomp, i_litr_min = i_litr_min,
+                i_litr_max = i_litr_max, npcropmin = npcropmin)
         end
     end
 
@@ -1480,18 +1485,46 @@ function cn_driver_summarize_states!(
         _nc  = length(mask_allc)
         _tvc = fill!(similar(soilbgc_cs.totc_col, _nc), 0)
         _tvn = fill!(similar(soilbgc_ns.totn_col, _nc), 0)
-        p2c_1d_filter!(_tvc, cnveg_cs.totvegc_patch, mask_allc, col, patch)
-        p2c_1d_filter!(_tvn, cnveg_ns.totvegn_patch, mask_allc, col, patch)
+        # TWO DIFFERENT veg aggregates (SoilBiogeochemCarbonStateType.F90:1627-1644):
+        #   totecosysc_col (TOTECOSYSC) <- totvegc_col : p2c of totvegc_patch, EXCLUDES cpool
+        #   totc_col       (TOTCOLC)    <- totc_p2c_col: p2c of totc_patch,    INCLUDES cpool
+        # The CN balance check integrates totc_col, so it needs the cpool-INCLUSIVE
+        # aggregate. Passing only totvegc_col left totc_p2c_col at its zeros() default,
+        # so totc_col carried no vegetation carbon at all — see the long note at the
+        # matching block in clm_driver.jl. This is the BEGIN-of-step summary (it seeds
+        # begcb_col), so getting it wrong here while the END-of-step summary was right
+        # produced a constant ~totvegc offset (391.7 gC/m2 at Bow) in every step's errcb.
+        _tp2c = fill!(similar(soilbgc_cs.totc_col, _nc), 0)
+        _tn2c = fill!(similar(soilbgc_ns.totn_col, _nc), 0)
+        p2c_1d_filter!(_tvc,  cnveg_cs.totvegc_patch, mask_allc, col, patch)
+        p2c_1d_filter!(_tvn,  cnveg_ns.totvegn_patch, mask_allc, col, patch)
+        p2c_1d_filter!(_tp2c, cnveg_cs.totc_patch,    mask_allc, col, patch)
+        p2c_1d_filter!(_tn2c, cnveg_ns.totn_patch,    mask_allc, col, patch)
+        if !isempty(cnveg_cs.totc_p2c_col); copyto!(cnveg_cs.totc_p2c_col, _tp2c); end
+        if !isempty(cnveg_ns.totn_p2c_col); copyto!(cnveg_ns.totn_p2c_col, _tn2c); end
         soil_bgc_carbon_state_summary!(soilbgc_cs, mask_allc, bounds_col;
             nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
             dzsoi_decomp_vals=dzsoi_decomp, zisoi_vals=zisoi_vals,
             is_litter=cascade_con.is_litter, is_soil=cascade_con.is_soil,
-            is_cwd=cascade_con.is_cwd, totvegc_col=_tvc)
+            is_cwd=cascade_con.is_cwd, totvegc_col=_tvc, totc_p2c_col=_tp2c)
         soil_bgc_nitrogen_state_summary!(soilbgc_ns, mask_allc, bounds_col;
             nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
             dzsoi_decomp_vals=dzsoi_decomp, zisoi_vals=zisoi_vals,
             is_litter=cascade_con.is_litter, is_soil=cascade_con.is_soil,
-            is_cwd=cascade_con.is_cwd, totvegn_col=_tvn)
+            is_cwd=cascade_con.is_cwd, totvegn_col=_tvn, totn_p2c_col=_tn2c)
+
+        # Special (non-soil-BGC) columns carry no C/N budget: Fortran zeroes their state
+        # (SoilBiogeochemCarbonStateType.F90:686). Leaving them NaN makes the gridcell
+        # c2g compute NaN*0.0 == NaN, which silently disables the gridcell balance check
+        # (NaN > cerror is false). This is the BEGIN-of-step summary that seeds
+        # begcb_grc/begnb_grc, so it needs the same treatment as the END-of-step one.
+        for c in bounds_col
+            mask_bgc_soilc[c] && continue
+            soilbgc_cs.totc_col[c] = 0
+            soilbgc_cs.totecosysc_col[c] = 0
+            soilbgc_ns.totn_col[c] = 0
+            soilbgc_ns.totecosysn_col[c] = 0
+        end
     end
     # c13/c14 isotope variants — config-gated off in the default path (not ported).
 
@@ -1510,12 +1543,25 @@ Call to all CN and SoilBiogeochem summary routines for flux variables.
 
 Ported from `CNDriverSummarizeFluxes` in `CNDriverMod.F90`.
 
-Note: the CNVeg carbon-flux Summary IS ported and IS called here
-(`cnveg_carbon_flux_summary!`). The CNVeg nitrogen-flux and SoilBiogeochem
-carbon/nitrogen flux summaries are also ported
-(`cnveg_nitrogen_flux_summary!`, `soil_bgc_carbon_flux_summary!`,
-`soil_bgc_nitrogen_flux_summary!`, in `src/types/`) but are NOT called from here
-yet — ported, not wired.
+Calls, in Fortran's order:
+1. `soil_bgc_carbon_flux_summary!`   — vertically integrates HR / decomp cascade,
+   producing `hr_col`, `somhr_col`, `lithr_col`, `cwdhr_col`, `som_c_leached_col`.
+2. `soil_bgc_nitrogen_flux_summary!` — produces `denit_col`, `f_n2o_nit_col`,
+   `smin_no3_leached_col`, `smin_no3_runoff_col`, `som_n_leached_col`.
+3. `cnveg_carbon_flux_summary!` (patch) then `cnveg_carbon_flux_summary_col!`
+   (column+gridcell — consumes step 1's `hr_col`).
+4. `cnveg_nitrogen_flux_summary!` (patch) then `cnveg_nitrogen_flux_summary_col!`.
+
+Steps 1, 2, and the column halves of 3 and 4 were **ported but never called** —
+every column/gridcell C and N flux (`gpp_col`, `er_col`, `hr_col`, `f_n2o_nit_col`,
+`nbp_grc`, ...) was structurally dead, which is precisely why the carbon half of
+the CN balance check could not run. See `cnveg_carbon_flux_summary_col!`.
+
+The soil-BGC summaries need the decomp cascade metadata (`decomp`, `dzsoi_decomp_vals`);
+the column/gridcell halves need the subgrid maps (`col`, `patch`, `lun`, `bounds_grc`)
+and the product pools (`c_products`). When those are omitted the corresponding
+summary is skipped — that keeps the many unit-test call sites (which pass only the
+flux structs) working, and the live driver always supplies them.
 """
 function cn_driver_summarize_fluxes!(
         config::CNDriverConfig;
@@ -1528,44 +1574,97 @@ function cn_driver_summarize_fluxes!(
         soilbgc_cf::SoilBiogeochemCarbonFluxData,
         soilbgc_nf::SoilBiogeochemNitrogenFluxData,
         patch_itype::Union{AbstractVector{<:Integer},Nothing}=nothing,
-        # Column NPP + lagged NPP (feeds CNNFixation). Omitted => not updated.
+        # Subgrid maps — needed for every p2c/c2g. Omitted => column halves skipped.
         col::Union{ColumnData, Nothing} = nothing,
         patch::Union{PatchData, Nothing} = nothing,
+        bounds_grc::UnitRange{Int} = 1:0,
+        # Decomp cascade metadata — needed by the soil-BGC summaries.
+        decomp = nothing,
+        dzsoi_decomp_vals::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        nlevdecomp::Int = 0,
+        ndecomp_pools::Int = 0,
+        ndecomp_cascade_transitions::Int = 0,
+        # Wood/crop product pools (product_closs_grc feeds landuseflux_grc → nbp_grc).
+        c_products::Union{CNProductsData, Nothing} = nothing,
         dt::Real = 0.0,
         nfix_timeconst::Real = 0.0)
 
     num_bgc_vegp = count(mask_bgc_vegp)
+    have_decomp = decomp !== nothing && dzsoi_decomp_vals !== nothing &&
+                  nlevdecomp > 0 && ndecomp_pools > 0 && ndecomp_cascade_transitions > 0
+    have_subgrid = col !== nothing && patch !== nothing && !isempty(bounds_grc)
+    dzv = have_decomp ? collect(Float64.(dzsoi_decomp_vals)) : Float64[]
 
-    # soilbiogeochem_carbonflux_inst%Summary  — ported (soil_bgc_carbon_flux_summary!,
-    #   types/soil_bgc_carbon_flux.jl), not called here (+ c13/c14 variants).
-    # soilbiogeochem_nitrogenflux_inst%Summary — ported (soil_bgc_nitrogen_flux_summary!),
-    #   not called here.
+    # ---- 1. soilbiogeochem_carbonflux_inst%Summary ----
+    # (c13/c14 variants: config-gated off in the default path.)
+    # `is_microbe` is a MIMICS-only pool flag with no field on DecompCascadeData
+    # (decomp_method=1/century is the default); falses() reproduces Fortran there.
+    if have_decomp
+        soil_bgc_carbon_flux_summary!(soilbgc_cf, BitVector(mask_bgc_soilc), bounds_col;
+            ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+            nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+            dzsoi_decomp_vals=dzv,
+            cascade_donor_pool=decomp.cascade_donor_pool,
+            is_soil=decomp.is_soil, is_litter=decomp.is_litter,
+            is_cwd=decomp.is_cwd, is_microbe=falses(ndecomp_pools))
+
+        # ---- 2. soilbiogeochem_nitrogenflux_inst%Summary ----
+        soil_bgc_nitrogen_flux_summary!(soilbgc_nf, BitVector(mask_bgc_soilc), bounds_col;
+            ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+            nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+            dzsoi_decomp_vals=dzv,
+            use_nitrif_denitrif=config.use_nitrif_denitrif)
+    end
+
     if num_bgc_vegp > 0
-        # cnveg_carbonflux_inst%Summary — WIRED (sets the C-flux diagnostics,
-        # incl. gpp_patch = psnsun_to_cpool + psnshade_to_cpool, npp_patch, mr/gr).
-        # These are diagnostics (no downstream physics reads them); without this they
-        # stay at their restart-init NaN/0 in history output.
+        # ---- 3. cnveg_carbonflux_inst%Summary — patch half ----
         # npcropmin/nrepr only matter for the use_crop branch (crop reproductive MR);
         # CNDriverConfig has no such field, so use the standard CLM5 values — harmless
         # when use_crop=false (the default path), correct for crops (npcropmin=17).
         cnveg_carbon_flux_summary!(cnveg_cf, mask_bgc_vegp, bounds_patch;
             use_crop=config.use_crop, use_fun=config.use_fun,
             patch_itype=patch_itype, npcropmin=17, nrepr=NREPR)
-        # c13/c14 variants — config-gated off in the default path (not called here)
-        # cnveg_nitrogenflux_inst%Summary — ported
-        # (cnveg_nitrogen_flux_summary!, types/cn_veg_nitrogen_flux.jl), not called here
+
+        # ---- 3b. column + gridcell half (consumes hr_col from step 1) ----
+        if have_decomp && have_subgrid && c_products !== nothing
+            cnveg_carbon_flux_summary_col!(cnveg_cf, mask_bgc_soilc, bounds_col,
+                bounds_grc, col, patch;
+                soilbgc_hr_col=soilbgc_cf.hr_col,
+                soilbgc_cwdhr_col=soilbgc_cf.cwdhr_col,
+                soilbgc_lithr_col=soilbgc_cf.lithr_col,
+                soilbgc_decomp_cascade_ctransfer_col=soilbgc_cf.decomp_cascade_ctransfer_col,
+                product_closs_grc=c_products.product_loss_grc,
+                nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+                ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+                dzsoi_decomp_vals=dzv,
+                cascade_donor_pool=decomp.cascade_donor_pool,
+                is_cwd=decomp.is_cwd, is_litter=decomp.is_litter,
+                use_crop=config.use_crop,
+                dribble_crophrv_xsmrpool_2atm=config.dribble_crophrv_xsmrpool_2atm)
+        end
+
+        # ---- 4. cnveg_nitrogenflux_inst%Summary — patch then column ----
+        cnveg_nitrogen_flux_summary!(cnveg_nf, BitVector(mask_bgc_vegp), bounds_patch)
+        if have_decomp && have_subgrid
+            cnveg_nitrogen_flux_summary_col!(cnveg_nf, mask_bgc_soilc, bounds_col,
+                bounds_grc, col, patch;
+                nlevdecomp=nlevdecomp, ndecomp_pools=ndecomp_pools,
+                dzsoi_decomp_vals=dzv)
+        end
     end
 
-    # Column NPP + the exponentially-relaxed lagged NPP — WIRED. Fortran does both
-    # inside CNVegCarbonFluxType::Summary (the column half: p2c of npp_patch, then
-    # the lag_npp relaxation, CNVegCarbonFluxType.F90:5340-5385).
+    # The exponentially-relaxed lagged NPP. Fortran does this inside
+    # CNVegCarbonFluxType::Summary right after the npp_patch p2c
+    # (CNVegCarbonFluxType.F90:5368-5385); `npp_col` itself is now p2c'd by
+    # cnveg_carbon_flux_summary_col! above, so this only runs the relaxation.
     #
-    # This closes the last dead link in the fixation chain: `lag_npp_col` is what
-    # CNNFixation reads when nfix_timeconst ∈ (0,500) (the CLM5 default, 10 d). It
-    # was initialised to SPVAL and never written, so n_fixation! — even once called
-    # — would have taken the SPVAL branch and produced exactly zero fixation.
+    # `lag_npp_col` is what CNNFixation reads when nfix_timeconst ∈ (0,500) (the
+    # CLM5 default, 10 d).
     if col !== nothing && patch !== nothing && !isempty(cnveg_cf.npp_col)
-        p2c_1d_filter!(cnveg_cf.npp_col, cnveg_cf.npp_patch, mask_bgc_soilc, col, patch)
+        if !(have_decomp && have_subgrid)
+            # Column half did not run (unit-test call shape): still supply npp_col.
+            p2c_1d_filter!(cnveg_cf.npp_col, cnveg_cf.npp_patch, mask_bgc_soilc, col, patch)
+        end
         cn_lag_npp_update!(cnveg_cf, mask_bgc_soilc;
                            dt = dt, nfix_timeconst = nfix_timeconst)
     end
@@ -1648,6 +1747,17 @@ function _zero_cnveg_flux_arrays!(cf)
         # Invisible in a summer window (offset_flag == 0 all summer); it is the entire
         # story in the autumn leaf-offset window.
         (name === :prev_leafc_to_litter_patch || name === :prev_frootc_to_litter_patch) && continue
+        # lag_npp_col is the EXPONENTIALLY-RELAXED NPP memory that CNNFixation reads
+        # (nfix_timeconst ∈ (0,500) — the CLM5 default is 10 days). Fortran's
+        # CNVegCarbonFluxType::SetValues does NOT zero it: it is spval-init in
+        # InitAllocate (CNVegCarbonFluxType.F90:1149), it is a RESTART variable
+        # (ibid. 4314), and it is written only by the Summary relaxation
+        #     lag_npp = lag_npp*exp(-dt/tau) + npp*(1-exp(-dt/tau))     (ibid. 5375-5381)
+        # Blanket-zeroing it here destroyed that memory every single step, collapsing
+        # the relaxation to `npp*(1-exp(-dt/tau))` — i.e. ~0.4% of NPP at the 10-day
+        # default, with no history at all. The lag is a whole-year smoother; a
+        # step-local fraction is a different quantity entirely.
+        name === :lag_npp_col && continue
         # Persistent soil-matrix B-input: accumulated across drivers (the dyn_subgrid
         # dwt inputs are added BEFORE this per-step reset) and zeroed only after the
         # soil-matrix solve — so it must survive the step-start reset.

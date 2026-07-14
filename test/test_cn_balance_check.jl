@@ -500,4 +500,176 @@
         @test d.bal.begcb_col[3] ≈ 100.0
     end
 
+    # =======================================================================
+    # THE CARBON CHECK MUST BE ABLE TO FAIL — on the REAL (non-FATES) column
+    # path, the one that reads gpp_col / er_col.
+    #
+    # Before this PR the C half could not run at all: gpp_col and er_col were
+    # dead p2c's (structurally 0.0), so `col_cinputs - col_coutputs` was 0 and
+    # the check could never disagree with anything. Every assertion below is on
+    # the VALUE of the imbalance, not on `isfinite` — an isfinite assertion is
+    # nearly worthless (PR #220 shipped a gradient that was silently 7% wrong
+    # 98% of the time behind exactly that).
+    # =======================================================================
+    @testset "c_balance_check! REAL column path — errcb VALUE" begin
+        d = make_balance_test_data()
+        dt = d.dt
+
+        CLM.begin_cn_column_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.mask_soil, d.bounds_c)
+        CLM.begin_cn_gridcell_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.c_products, d.n_products, d.bounds_g; use_fates_bgc=true)
+
+        # Real path: inputs = gpp_col, outputs = er_col (+ fire/harvest/leach = 0).
+        # Net C gain over the step must show up 1:1 in totc_col.
+        gpp = 0.05
+        er  = 0.02
+        d.cnveg_cflux.gpp_col .= gpp
+        d.cnveg_cflux.er_col  .= er
+        d.soilbgc_cstate.totc_col .= 100.0 .+ (gpp - er) * dt   # exactly consistent
+
+        CLM.c_balance_check!(d.bal, d.soilbgc_cflux, d.soilbgc_cstate,
+            d.cnveg_cflux, d.c_products, d.col_data, d.grc_data,
+            d.mask_soil, d.bounds_c, d.bounds_g, d.dt;
+            use_fates_bgc=true)
+
+        # The imbalance is zero to round-off (|errcb| <= 1e-12, i.e. FIVE orders
+        # below cerror=1e-7 — a value assertion, not an isfinite one), and endcb
+        # carries the new mass.
+        for c in 1:3
+            @test abs(d.bal.errcb_col[c]) < 1.0e-12
+            @test d.bal.endcb_col[c] ≈ 100.0 + (gpp - er) * dt
+        end
+        # er_col is genuinely consumed: if it were still a dead 0.0, the check
+        # would have seen inputs=gpp only and errcb would be er*dt, not 0.
+        @test d.bal.errcb_col[1] != er * dt
+    end
+
+    @testset "c_balance_check! THROWS on a deliberately unbalanced column" begin
+        d = make_balance_test_data()
+        dt = d.dt
+
+        CLM.begin_cn_column_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.mask_soil, d.bounds_c)
+        CLM.begin_cn_gridcell_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.c_products, d.n_products, d.bounds_g; use_fates_bgc=true)
+
+        # Carbon fixed by photosynthesis that lands in NO pool: the exact signature
+        # of the bugs this check now catches (dead litter fractions, litterfall
+        # routed to one soil layer, a tree treated as non-woody...).
+        gpp = 0.05
+        er  = 0.02
+        leak = 1.0e-4                       # gC/m2 destroyed over the step
+        d.cnveg_cflux.gpp_col .= gpp
+        d.cnveg_cflux.er_col  .= er
+        d.soilbgc_cstate.totc_col .= 100.0 .+ (gpp - er) * dt .- leak
+
+        @test_throws ErrorException CLM.c_balance_check!(
+            d.bal, d.soilbgc_cflux, d.soilbgc_cstate,
+            d.cnveg_cflux, d.c_products, d.col_data, d.grc_data,
+            d.mask_soil, d.bounds_c, d.bounds_g, d.dt;
+            use_fates_bgc=true)
+
+        # And it reports the RIGHT number: errcb = (in-out)*dt - (end-beg) = +leak.
+        @test d.bal.errcb_col[1] ≈ leak  atol=1e-12
+        @test abs(d.bal.errcb_col[1]) > d.bal.cerror     # i.e. it really is fatal
+    end
+
+    @testset "c_balance_check! is sensitive at the cerror threshold" begin
+        # A check that only fires on huge errors is not a check. Verify the
+        # boundary: just under cerror passes, just over throws.
+        for (leak, should_throw) in ((0.5e-7, false), (2.0e-7, true))
+            d = make_balance_test_data()
+            dt = d.dt
+            CLM.begin_cn_column_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+                d.mask_soil, d.bounds_c)
+            CLM.begin_cn_gridcell_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+                d.c_products, d.n_products, d.bounds_g; use_fates_bgc=true)
+            d.cnveg_cflux.gpp_col .= 0.05
+            d.cnveg_cflux.er_col  .= 0.02
+            d.soilbgc_cstate.totc_col .= 100.0 .+ (0.05 - 0.02) * dt .- leak
+
+            call() = CLM.c_balance_check!(d.bal, d.soilbgc_cflux, d.soilbgc_cstate,
+                d.cnveg_cflux, d.c_products, d.col_data, d.grc_data,
+                d.mask_soil, d.bounds_c, d.bounds_g, d.dt; use_fates_bgc=true)
+            if should_throw
+                @test_throws ErrorException call()
+            else
+                call()                       # must NOT throw
+                @test abs(d.bal.errcb_col[1]) <= d.bal.cerror
+            end
+            @test d.bal.errcb_col[1] ≈ leak  atol=1e-12
+        end
+    end
+
+    @testset "gridcell C check is not disabled by a NaN*0 special column" begin
+        # A special (non-soil) column has wtgcell == 0. If its totc_col is left at
+        # the NaN allocation default, the c2g computes NaN*0.0 == NaN, and
+        # `abs(NaN) > cerror` is FALSE — the gridcell check silently cannot fail.
+        # Fortran zeroes special columns (SoilBiogeochemCarbonStateType.F90:686);
+        # so do we now. Guard that the gridcell imbalance is a real number.
+        d = make_balance_test_data(nc=2, ng=1)
+        dt = d.dt
+        d.col_data.wtgcell = [1.0, 0.0]        # col 2 = special, zero weight
+        d.soilbgc_cstate.totc_col = [100.0, 0.0]
+
+        CLM.begin_cn_column_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.mask_soil, d.bounds_c)
+        CLM.begin_cn_gridcell_balance!(d.bal, d.soilbgc_cstate, d.soilbgc_nstate,
+            d.c_products, d.n_products, d.bounds_g; use_fates_bgc=true)
+
+        leak = 1.0e-4
+        d.cnveg_cflux.gpp_col .= 0.05
+        d.cnveg_cflux.er_col  .= 0.02
+        d.soilbgc_cstate.totc_col = [100.0 + (0.05 - 0.02) * dt - leak, 0.0]
+
+        @test_throws ErrorException CLM.c_balance_check!(
+            d.bal, d.soilbgc_cflux, d.soilbgc_cstate,
+            d.cnveg_cflux, d.c_products, d.col_data, d.grc_data,
+            d.mask_soil, d.bounds_c, d.bounds_g, d.dt; use_fates_bgc=true)
+
+        @test !isnan(d.bal.errcb_col[1])
+        @test d.bal.errcb_col[1] ≈ leak  atol=1e-12
+    end
+
+    # =======================================================================
+    # Regression: the litter fractions lf_f / fr_f must actually be POPULATED.
+    #
+    # They were allocated as zeros(npft, ndecomp_pools) and never filled from the
+    # lf_flab/lf_fcel/lf_flig params that ARE read. Every leaf and fine-root
+    # litter flux is formed as `flux * lf_f[ivt,i]`, so with lf_f == 0 the entire
+    # leaf + fine-root litterfall (phenology, gap mortality AND fire; C and N)
+    # was multiplied by zero and destroyed. Fortran packs them in
+    # pftconMod.F90:822-834.
+    # =======================================================================
+    @testset "pftcon lf_f / fr_f are populated and sum to 1" begin
+        p = CLM.PftconType()
+        CLM.pftcon_allocate!(p)
+        n = length(p.lf_flab)
+        # CENTURY (decomp_method = 1): met / cel / lig kept separate.
+        p.lf_flab .= 0.25; p.lf_fcel .= 0.50; p.lf_flig .= 0.25
+        p.fr_flab .= 0.20; p.fr_fcel .= 0.55; p.fr_flig .= 0.25
+        CLM._pftcon_derive_litter_fractions!(p; decomp_method=1)
+        for i in 1:min(n, size(p.lf_f, 1))
+            @test p.lf_f[i, 1] == 0.25
+            @test p.lf_f[i, 2] == 0.50
+            @test p.lf_f[i, 3] == 0.25
+            @test p.fr_f[i, 1] == 0.20
+            @test p.fr_f[i, 2] == 0.55
+            @test p.fr_f[i, 3] == 0.25
+            # The three fractions must partition the litter flux exactly — if they
+            # sum to anything but 1, litter C/N is silently created or destroyed.
+            @test sum(p.lf_f[i, 1:3]) ≈ 1.0
+            @test sum(p.fr_f[i, 1:3]) ≈ 1.0
+        end
+
+        # MIMICS (decomp_method = 2): cel+lig lumped into pool 2, pool 3 empty.
+        CLM._pftcon_derive_litter_fractions!(p; decomp_method=2)
+        for i in 1:min(n, size(p.lf_f, 1))
+            @test p.lf_f[i, 2] ≈ 0.75
+            @test p.lf_f[i, 3] == 0.0
+            @test sum(p.lf_f[i, 1:3]) ≈ 1.0
+        end
+    end
+
 end

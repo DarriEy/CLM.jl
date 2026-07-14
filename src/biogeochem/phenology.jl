@@ -896,7 +896,20 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        varctl::VarCtl=VarCtl(),
                        is_first_step::Bool=false,
                        avg_dayspyr::Real=365.0,
-                       prec10_patch::AbstractVector{<:Real}=Float64[])
+                       prec10_patch::AbstractVector{<:Real}=Float64[],
+                       # Vertical/litter-pool geometry for cn_litter_to_column! (phase 2).
+                       # These MUST be the model's real values: the litter that phenology
+                       # sends to the column is spread over soil layers 1:nlevdecomp
+                       # weighted by leaf_prof/froot_prof, and those profiles are
+                       # normalised so that sum_j prof(p,j)*dzsoi_decomp(j) == 1. Passing
+                       # nlevdecomp=1 therefore delivers only layer 1's share of the
+                       # profile (~14% at Bow) and DESTROYS the other ~86% of every leaf
+                       # and fine-root litterfall flux, C and N alike. See the note at the
+                       # cn_litter_to_column! call below.
+                       nlevdecomp::Int=1,
+                       i_litr_min::Int=1,
+                       i_litr_max::Int=3,
+                       npcropmin::Int=17)
 
     if phase == 1
         cn_phenology_climate!(pstate, mask_soilp, temperature, cnveg_state, crop,
@@ -952,9 +965,21 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                                           cnveg_cf, cnveg_nf, patch_data;
                                           use_crop=varctl.use_crop)
 
+        # The vertical geometry is REQUIRED here, not optional. This call used to omit
+        # nlevdecomp/i_litr_*/npcropmin entirely and silently take the kwarg defaults —
+        # `nlevdecomp = 1`. The kernel loops `for j in 1:nlevdecomp` and deposits
+        #     leafc_to_litter[p] * lf_f[ivt,i] * wtcol[p] * leaf_prof[p,j]
+        # into layer j. leaf_prof/froot_prof are normalised over the FULL decomposition
+        # column (sum_j prof*dzsoi_decomp == 1), so restricting the loop to j = 1 delivers
+        # only prof[p,1]*dz[1] — about 14% at Bow — and the remaining ~86% of every
+        # phenological leaf and fine-root litterfall flux (C and N) was destroyed: it left
+        # the vegetation pools and never entered the soil.
         cn_litter_to_column!(mask_soilp, pftcon,
                              cnveg_state, cnveg_cf, cnveg_nf,
                              patch_data, leaf_prof_patch, froot_prof_patch;
+                             nlevdecomp=nlevdecomp,
+                             i_litr_min=i_litr_min, i_litr_max=i_litr_max,
+                             npcropmin=npcropmin,
                              use_grainproduct=false)
     else
         error("bad phase: $phase")

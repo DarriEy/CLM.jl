@@ -1022,7 +1022,77 @@ function cnveg_nitrogen_flux_summary!(nf::CNVegNitrogenFluxData,
             nf.gru_deadcrootn_xfer_to_atm_patch[p]
     end
 
+    # The COLUMN half lives in `cnveg_nitrogen_flux_summary_col!` below.
     nothing
+end
+
+# ==========================================================================
+# cnveg_nitrogen_flux_summary_col! — COLUMN half of `Summary_nitrogenflux`
+# (CNVegNitrogenFluxType.F90:2706-2752).
+#
+# Same dead-p2c story as the carbon side: `fire_nloss_col` and
+# `gru_conv_nflux_col` are read by the N balance check but were never
+# aggregated from their patch sources.
+# ==========================================================================
+
+"""
+    cnveg_nitrogen_flux_summary_col!(nf, mask_bgc_soilc, bounds_col, bounds_grc,
+                                     col, pch; nlevdecomp, ndecomp_pools,
+                                     dzsoi_decomp_vals)
+
+Column/gridcell half of the CNVeg nitrogen-flux summary: p2c of `fire_nloss_patch`
+and `gru_conv_nflux_patch`, the c2g of the GRU fluxes, the vertically-integrated
+column fire N losses, and the total `fire_nloss_col`.
+
+Ported from the column section of `Summary_nitrogenflux` in
+`CNVegNitrogenFluxType.F90`.
+"""
+function cnveg_nitrogen_flux_summary_col!(
+        nf::CNVegNitrogenFluxData,
+        mask_bgc_soilc::AbstractVector{Bool},
+        bounds_col::UnitRange{Int},
+        bounds_grc::UnitRange{Int},
+        col::ColumnData,
+        pch::PatchData;
+        nlevdecomp::Int,
+        ndecomp_pools::Int,
+        dzsoi_decomp_vals::AbstractVector{<:Real})
+
+    isempty(bounds_col) && return nothing
+
+    p2c_1d_filter!(nf.fire_nloss_p2c_col, nf.fire_nloss_patch,   mask_bgc_soilc, col, pch)
+    p2c_1d_filter!(nf.gru_conv_nflux_col, nf.gru_conv_nflux_patch, mask_bgc_soilc, col, pch)
+
+    if !isempty(bounds_grc)
+        c2g_unity!(nf.gru_conv_nflux_grc, nf.gru_conv_nflux_col,
+                   col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+        c2g_unity!(nf.gru_wood_productn_gain_grc, nf.gru_wood_productn_gain_col,
+                   col.gridcell, col.wtgcell, bounds_col, bounds_grc)
+    end
+
+    # vertically integrate column-level fire N losses
+    if !isempty(nf.m_decomp_npools_to_fire_vr_col)
+        for k in 1:ndecomp_pools, j in 1:nlevdecomp, c in bounds_col
+            mask_bgc_soilc[c] || continue
+            nf.m_decomp_npools_to_fire_col[c, k] =
+                nf.m_decomp_npools_to_fire_col[c, k] +
+                nf.m_decomp_npools_to_fire_vr_col[c, j, k] * dzsoi_decomp_vals[j]
+        end
+    end
+
+    # total column-level fire N losses
+    for c in bounds_col
+        mask_bgc_soilc[c] || continue
+        v = nf.fire_nloss_p2c_col[c]
+        if !isempty(nf.m_decomp_npools_to_fire_col)
+            for k in 1:ndecomp_pools
+                v += nf.m_decomp_npools_to_fire_col[c, k]
+            end
+        end
+        nf.fire_nloss_col[c] = v
+    end
+
+    return nothing
 end
 
 # ==========================================================================

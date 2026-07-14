@@ -199,12 +199,60 @@ function _read_scalar(ds::NCDataset, varname::String, default::Float64)
 end
 
 """
-    pftcon_read!(p::PftconType, ds::NCDataset)
+    _pftcon_derive_litter_fractions!(p::PftconType; decomp_method::Int=1)
+
+Pack the leaf/fine-root litter fractions into the 2-D `lf_f` / `fr_f` arrays that
+every litter-routing kernel indexes as `lf_f[pft, i]` over the litter pools
+i = metabolic/cellulose/lignin.
+
+Ported from `pftconMod.F90:822-834`.
+
+!!! danger "This was never called"
+    `lf_flab/lf_fcel/lf_flig` (and the fine-root trio) are read from the parameter
+    file as vectors, but `lf_f` / `fr_f` were allocated as `zeros(n, ndecomp_pools)`
+    and **never filled**. Every leaf and fine-root litter flux is formed as
+    `flux * lf_f[ivt, i] * ...`, so with `lf_f == 0` the ENTIRE leaf + fine-root
+    litterfall — from phenology, from gap mortality, and from fire — was multiplied
+    by zero and silently destroyed: it left the vegetation pools and never arrived
+    in the soil. Only the woody→CWD path (which does not use `lf_f`) survived.
+    Worth 4.4e-4 gC/m2/step at Bow, against a `cerror` of 1e-7.
+
+`decomp_method`: 1 = CENTURY (default; met/cel/lig separate), 2 = MIMICS (cellulose
+and lignin lumped into pool 2, pool 3 left empty).
+"""
+function _pftcon_derive_litter_fractions!(p::PftconType; decomp_method::Int=1)
+    (!isempty(p.lf_f) && size(p.lf_f, 2) >= 3) || return nothing
+    npft_lf = min(size(p.lf_f, 1), length(p.lf_flab))
+    mimics = (decomp_method == 2)
+    for i in 1:npft_lf
+        p.fr_f[i, 1] = p.fr_flab[i]
+        p.lf_f[i, 1] = p.lf_flab[i]
+        if mimics
+            p.fr_f[i, 2] = p.fr_fcel[i] + p.fr_flig[i]
+            p.fr_f[i, 3] = 0.0
+            p.lf_f[i, 2] = p.lf_fcel[i] + p.lf_flig[i]
+            p.lf_f[i, 3] = 0.0
+        else
+            p.fr_f[i, 2] = p.fr_fcel[i]
+            p.fr_f[i, 3] = p.fr_flig[i]
+            p.lf_f[i, 2] = p.lf_fcel[i]
+            p.lf_f[i, 3] = p.lf_flig[i]
+        end
+    end
+    return nothing
+end
+
+"""
+    pftcon_read!(p::PftconType, ds::NCDataset; decomp_method::Int=1)
 
 Populate PftconType arrays from an open clm5_params.nc dataset.
 Corresponds to Fortran pftconMod::InitRead.
+
+`decomp_method` (1 = CENTURY, the CLM5 default; 2 = MIMICS) only selects how the
+leaf/fine-root litter fractions are packed into `lf_f` / `fr_f` — see the block
+that derives them below.
 """
-function pftcon_read!(p::PftconType, ds::NCDataset)
+function pftcon_read!(p::PftconType, ds::NCDataset; decomp_method::Int=1)
     # Ensure pftcon is allocated
     if isempty(p.slatop)
         pftcon_allocate!(p)
@@ -374,6 +422,30 @@ function pftcon_read!(p::PftconType, ds::NCDataset)
             end
         end
     end
+
+    # --- Derived litter-fraction MATRICES lf_f / fr_f ------------------------
+    #
+    # `lf_flab/lf_fcel/lf_flig` (and the fine-root trio) are read above as VECTORS.
+    # Every litter-routing kernel, however, indexes the 2-D forms `lf_f[pft, i]` /
+    # `fr_f[pft, i]` over the litter pools i = met/cel/lig. Fortran packs the
+    # vectors into those matrices in pftconMod.F90:822-834 — the port allocated
+    # them as zeros(n, ndecomp_pools) and NEVER FILLED THEM.
+    #
+    # The consequence was total, silent destruction of carbon and nitrogen: every
+    # leaf and fine-root litter flux is formed as `flux * lf_f[ivt,i] * ...`, so
+    # with lf_f == 0 the ENTIRE leaf + fine-root litterfall — from phenology, from
+    # gap mortality, and from fire — was multiplied by zero and vanished. It left
+    # the vegetation pools and never arrived in the soil. Only the woody->CWD path
+    # (which does not use lf_f) survived, which is why the soil still received
+    # ~38% of the litter flux and the leak was not obvious. This was worth
+    # 4.4e-4 gC/m2/step at Bow (vs a cerror of 1e-7) and is the single largest
+    # term in the carbon non-closure that the newly-live C balance check exposed.
+    #
+    # Fortran comment at that site: "Three hardwired fr_f* and lf_f* values: We
+    # pass them to 2d arrays for use in do-loops."  MIMICS (decomp_method == 2)
+    # lumps cellulose+lignin into pool 2 and leaves pool 3 empty; CENTURY (the
+    # default, decomp_method == 1) keeps them separate.
+    _pftcon_derive_litter_fractions!(p; decomp_method = decomp_method)
 
     # --- Constants that don't come from file ---
     n = length(p.dwood)

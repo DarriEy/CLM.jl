@@ -278,7 +278,13 @@ end
         use_matrixcn::Bool, use_fun::Bool, dt)
     p = @index(Global)
     @inbounds if mask_soilp[p] && ivt[p] >= 1  # skip masked + bare ground (PFT index 0)
-        is_woody = woody[ivt[p]] == one(eltype(woody))
+        # OFF-BY-ONE (fixed) — the nitrogen mirror of the C bug; see the long note in
+        # c_state_update1.jl. `ivt[p]` is the raw 0-based Fortran PFT index; pftcon
+        # rows are 1-based, so the PFT is `ivt[p] + 1`. Indexing with the raw value read
+        # the previous PFT's woody flag and made every TREE non-woody, skipping the
+        # woody npool debits (livestem/livecroot/deadstem/deadcroot allocation) while
+        # the demand/allocation code still counted them.
+        is_woody = woody[ivt[p] + 1] == one(eltype(woody))
 
         # === Phenology: transfer growth fluxes ===
         if !use_matrixcn
