@@ -27,6 +27,15 @@ Base.@kwdef mutable struct CNBalanceData{FT<:Real,
     endcb_grc ::V = Float64[]  # (gC/m2) gridcell carbon mass, end of time step
     begnb_grc ::V = Float64[]  # (gN/m2) gridcell nitrogen mass, beginning of time step
     endnb_grc ::V = Float64[]  # (gN/m2) gridcell nitrogen mass, end of time step
+    # Last-computed imbalances. Fortran keeps these as subroutine locals; retaining
+    # them makes the check INSPECTABLE — the harnesses quantify the non-closure from
+    # them, and the tests assert their VALUE rather than merely that a run did not
+    # throw. (An `@test isfinite(x)` assertion is nearly worthless: PR #220 shipped a
+    # gradient that was silently 7% wrong 98% of the time behind exactly that.)
+    errcb_col ::V = Float64[]  # (gC/m2) column carbon imbalance, last step
+    errnb_col ::V = Float64[]  # (gN/m2) column nitrogen imbalance, last step
+    errcb_grc ::V = Float64[]  # (gC/m2) gridcell carbon imbalance, last step
+    errnb_grc ::V = Float64[]  # (gN/m2) gridcell nitrogen imbalance, last step
     cwarning  ::Float64 = 1.0e-8   # (gC/m2) carbon balance warning threshold
     nwarning  ::Float64 = 1.0e-7   # (gN/m2) nitrogen balance warning threshold
     cerror    ::Float64 = 1.0e-7   # (gC/m2) carbon balance error threshold
@@ -45,20 +54,42 @@ Allocate and initialize a `CNBalanceData` instance for `nc` columns and `ng` gri
 Ported from `Init` and `InitAllocate` in `CNBalanceCheckMod.F90`.
 """
 # --------------------------------------------------------------------------
-# Global enable switch for the CN mass-conservation check.
+# Global enable switch for the CN mass-conservation check.  DEFAULT: ON.
 #
-# The check is a genuine `error()`-on-failure guard (it is how CTSM catches a
-# broken C or N budget). It is DEFAULT OFF here because the CARBON half still
-# has an open residual: the wood/crop product pools are allocated but
-# `cn_products_update!` is not yet on the live path, so harvest//gross-unrep
-# C that Fortran parks in the product pools is unaccounted for in Julia's
-# column budget. Turning the check on with that gap present would abort runs
-# for a reason unrelated to the caller's model.
+# The check is a genuine `error()`-on-failure guard — it is how CTSM catches a
+# broken C or N budget, and a conservation check that cannot fail is worse than
+# no check at all.
 #
-# The NITROGEN half is validated and passing (see docs/N_CYCLE_PARITY.md) — the
-# switch exists so it can be exercised without also tripping the C residual.
+# It used to be default-OFF, and the stated reason was a supposed product-pool
+# gap on the carbon side. That reason was wrong. The real reason the carbon half
+# "could not run" was that EVERY term it reads was structurally dead:
+# `gpp_col`/`er_col`/`hr_col`/`nbp_grc` were never aggregated (the column half of
+# CNVegCarbonFluxType::Summary was a stub and the two SoilBiogeochem flux
+# summaries were never called), and `totc_col` contained no vegetation carbon at
+# all. With nothing to compare, the check was structurally incapable of failing.
+#
+# Once those were wired the check ran — and it FAILED, by 4.5e-2 gC/m2/step
+# against a 1e-7 threshold. Chasing that down produced four independent, real
+# carbon-destroying/creating bugs (dead `lf_f`/`fr_f` litter fractions; the
+# phenology litter routing collapsed to one soil layer; the veg-C total missing
+# cpool; and a PFT off-by-one that made every TREE non-woody in the C/N state
+# update). See the PR for the full chain.
+#
+# Bow `use_cn`, summer + autumn windows and a 480-step free run now close to
+#     |errcb_col| <= 1.0e-11   and   |errcb_grc| <= 1.0e-11
+# against `cerror` = 1e-7 — four orders of margin. So the carbon check is ON and
+# FATAL, exactly like the water balance check (#211).
+#
+# NITROGEN: `n_balance_check!` also runs and is fatal at Fortran's `nerror`
+# (1e-3), which it passes (|errnb| ~ 3.1e-4). It does NOT yet clear the 1e-7
+# `nwarning`: nitrogen is still being CREATED in the vegetation pools at
+# ~3.3e-4 gN/m2/step (the veg N pools gain ~9.9e-4 while the soil supplies only
+# ~6.7e-4). That is a REAL, open, documented non-closure — see
+# docs/CN_BALANCE_STATUS.md. It is left as a WARNING (not silenced, not
+# retuned) rather than an abort, because Fortran's own error threshold is 1e-3
+# and we are inside it.
 # --------------------------------------------------------------------------
-const _CN_BALANCE_CHECK_ENABLED = Ref(false)
+const _CN_BALANCE_CHECK_ENABLED = Ref(true)
 
 """Return whether the CN mass-conservation check runs inside `clm_drv!`."""
 cn_balance_check_enabled() = _CN_BALANCE_CHECK_ENABLED[]
@@ -66,8 +97,9 @@ cn_balance_check_enabled() = _CN_BALANCE_CHECK_ENABLED[]
 """
     cn_balance_check_enabled!(on::Bool)
 
-Enable/disable the CN mass-conservation check inside `clm_drv!`. Default `false`
-— see the note above for why (an open CARBON-side gap, not an N-side one).
+Enable/disable the CN mass-conservation check inside `clm_drv!`. Default **`true`**
+(fatal on failure) — see the note above. Turn it off only to *investigate* a
+failure, never to hide one.
 """
 cn_balance_check_enabled!(on::Bool) = (_CN_BALANCE_CHECK_ENABLED[] = on)
 
@@ -80,6 +112,10 @@ function cn_balance_init!(bal::CNBalanceData, nc::Int, ng::Int)
     bal.endcb_grc = fill(NaN, ng)
     bal.begnb_grc = fill(NaN, ng)
     bal.endnb_grc = fill(NaN, ng)
+    bal.errcb_col = zeros(nc)
+    bal.errnb_col = zeros(nc)
+    bal.errcb_grc = zeros(ng)
+    bal.errnb_grc = zeros(ng)
 
     bal.cwarning = 1.0e-8
     bal.nwarning = 1.0e-7
@@ -495,6 +531,11 @@ function c_balance_check!(
             FT(dt), first(bounds_c), last(bounds_c); ndrange = length(col_endcb))
     end
 
+    # Publish the imbalance so callers/tests can assert its VALUE (see CNBalanceData).
+    if length(bal.errcb_col) == length(col_errcb)
+        copyto!(bal.errcb_col, col_errcb)
+    end
+
     # --- Host-only warn/error scan (col_errcb is a plain Array only on the CPU;
     #     on the GPU we skip the String-building error path entirely) ---
     err_found = false
@@ -560,6 +601,10 @@ function c_balance_check!(
             has_dribbler, nbp_grc, dwt_seedc_to_leaf_grc, dwt_seedc_to_deadstem_grc,
             som_c_leached_grc, use_fates_bgc, FT(dt), first(bounds_g), last(bounds_g);
             ndrange = length(grc_endcb))
+    end
+
+    if length(bal.errcb_grc) == length(grc_errcb)
+        copyto!(bal.errcb_grc, grc_errcb)
     end
 
     err_found = false
@@ -810,6 +855,10 @@ function n_balance_check!(
         KA.synchronize(backend)
     end
 
+    if length(bal.errnb_col) == length(col_errnb)
+        copyto!(bal.errnb_col, col_errnb)
+    end
+
     # Host-only warn/error scan (CPU path only; device just computes numbers).
     err_found = false
     err_index = 0
@@ -821,7 +870,13 @@ function n_balance_check!(
                 err_index = c
             end
             if abs(col_errnb[c]) > bal.nwarning
-                @warn "nbalance warning at c = $c" col_errnb=col_errnb[c] col_endnb=col_endnb[c] inputs_ffix=ffix_to_sminn[c]*dt inputs_nfix=nfix_to_sminn[c]*dt inputs_ndep=ndep_to_sminn[c]*dt outputs_lch=smin_no3_leached[c]*dt outputs_roff=smin_no3_runoff[c]*dt outputs_dnit=f_n2o_nit[c]*dt
+                # KNOWN OPEN RESIDUAL — see docs/CN_BALANCE_STATUS.md. The N budget
+                # clears Fortran's `nerror` (1e-3) but not its `nwarning` (1e-7):
+                # nitrogen is still created in the VEGETATION pools at ~3.3e-4
+                # gN/m2/step. Neither threshold is retuned and the check is not
+                # silenced — `maxlog` only stops one documented, non-fatal residual
+                # from emitting an identical line on all 480 steps of a free run.
+                @warn "nbalance warning at c = $c (KNOWN open residual — see docs/CN_BALANCE_STATUS.md)" col_errnb=col_errnb[c] col_endnb=col_endnb[c] inputs_ffix=ffix_to_sminn[c]*dt inputs_nfix=nfix_to_sminn[c]*dt inputs_ndep=ndep_to_sminn[c]*dt outputs_lch=smin_no3_leached[c]*dt outputs_roff=smin_no3_runoff[c]*dt outputs_dnit=f_n2o_nit[c]*dt maxlog=3
             end
         end
     end
@@ -874,6 +929,10 @@ function n_balance_check!(
                 FT(dt), first(bounds_g), last(bounds_g); ndrange = length(grc_endnb))
         end
 
+        if length(bal.errnb_grc) == length(grc_errnb)
+            copyto!(bal.errnb_grc, grc_errnb)
+        end
+
         err_found = false
         err_index = 0
         if grc_errnb isa Array
@@ -883,7 +942,8 @@ function n_balance_check!(
                     err_index = g
                 end
                 if abs(grc_errnb[g]) > bal.nwarning
-                    @warn "nbalance warning at g = $g" grc_errnb=grc_errnb[g] grc_endnb=grc_endnb[g]
+                    # Same KNOWN open residual as the column warning above.
+                    @warn "nbalance warning at g = $g (KNOWN open residual — see docs/CN_BALANCE_STATUS.md)" grc_errnb=grc_errnb[g] grc_endnb=grc_endnb[g] maxlog=3
                 end
             end
         end

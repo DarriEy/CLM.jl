@@ -758,7 +758,13 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         # Column NPP / lagged NPP update (feeds next step's CNNFixation).
         col::Union{ColumnData, Nothing} = nothing,
         patch::Union{PatchData, Nothing} = nothing,
-        nfix_timeconst::Real = 0.0)
+        nfix_timeconst::Real = 0.0,
+        # CNDriverSummarizeFluxes: the soil-BGC flux summaries + the column/gridcell
+        # halves of the CNVeg summaries need the decomp cascade, the subgrid maps and
+        # the product pools. Omitted => those summaries are skipped.
+        bounds_grc::UnitRange{Int} = 1:0,
+        decomp = nothing,
+        dzsoi_decomp_vals::Union{AbstractVector{<:Real}, Nothing} = nothing)
 
     # CNDriverLeaching — already ported
     cn_driver_leaching!(veg.driver_config;
@@ -818,6 +824,13 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         patch_itype=patch_itype,
         col=col,
         patch=patch,
+        bounds_grc=bounds_grc,
+        decomp=decomp,
+        dzsoi_decomp_vals=dzsoi_decomp_vals,
+        nlevdecomp=nlevdecomp,
+        ndecomp_pools=ndecomp_pools,
+        ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+        c_products=veg.c_products_inst,
         dt=dt,
         nfix_timeconst=nfix_timeconst)
 

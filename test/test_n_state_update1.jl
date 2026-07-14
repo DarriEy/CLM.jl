@@ -126,9 +126,13 @@
         mask_soilc_with_inactive = trues(nc)
 
         # --- Patch data ---
-        ivt          = fill(1, np)  # non-woody, non-crop by default
+        ivt          = fill(1, np)  # PFT 1 — non-woody, non-crop by default
         woody        = zeros(Float64, 80)
-        woody[2]     = 1.0  # PFT 2 is woody
+        # pftcon arrays are 1-based with row i holding RAW (0-based) PFT index i-1
+        # (bare ground == PFT 0 == row 1), so the kernel reads `woody[ivt[p] + 1]`.
+        # Setting woody[2] and calling PFT 2 "woody" was only self-consistent with the
+        # old, buggy `woody[ivt[p]]` indexing — see the note in test_c_state_update1.jl.
+        woody[3]     = 1.0  # PFT 2 is woody (pftcon row = PFT + 1)
         col_is_fates = fill(false, nc)
 
         return (ns_veg=ns_veg, nf_veg=nf_veg, nf_soil=nf_soil, ns_soil=ns_soil,

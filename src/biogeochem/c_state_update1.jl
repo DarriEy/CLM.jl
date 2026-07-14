@@ -396,7 +396,25 @@ end
     @inbounds if mask_soilp[p] && ivt[p] >= 1  # skip masked + bare ground (PFT index 0)
         T = typeof(dt)
         kprod05 = T(1.44e-7)            # decay constant for 0.5-year product pool (1/s)
-        is_woody = woody[ivt[p]] == one(eltype(woody))
+        # OFF-BY-ONE (fixed): `ivt[p]` is the RAW Fortran PFT index (bare ground == 0,
+        # which is exactly what the `ivt[p] >= 1` guard above skips). Every pftcon
+        # array is 1-based, so the PFT's row is `ivt[p] + 1` — that is what
+        # allocation.jl (`ivt = itype[p] + 1`), the gap-mortality kernel and
+        # c_iso_flux.jl all do. This line indexed with the raw value and therefore read
+        # the PREVIOUS PFT's woody flag: for patch type 1 (needleleaf evergreen
+        # temperate TREE) it read woody[1] — bare ground — and got 0.0. Every tree in
+        # the model was treated as NON-WOODY by the C state update.
+        #
+        # Consequence: the entire `if is_woody` branch below was skipped for trees, so
+        # cpool was never debited for livestem/livecroot maintenance respiration, for
+        # the allocation to livestemc/deadstemc/livecrootc/deadcrootc (+ their storage),
+        # or for the woody growth respiration — while allocation.jl (which indexes
+        # CORRECTLY) still put all of those fluxes into `mr`, `gr` and hence `ar`.
+        # Carbon was counted as respired but never removed from any pool: ~4.4e-4
+        # gC/m2/step created from nothing in the Bow tree patch, every step. The grass
+        # patch closed to 1.9e-14 precisely because grass is genuinely non-woody, so
+        # the wrong flag happened to be harmless there.
+        is_woody = woody[ivt[p] + 1] == one(eltype(woody))
 
         # === Phenology: transfer growth fluxes ===
         if !use_matrixcn

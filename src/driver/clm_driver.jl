@@ -2258,7 +2258,15 @@ function clm_drv_core!(config::CLMDriverConfig,
             # Column NPP + lagged NPP (consumed by NEXT step's n_fixation!).
             col=col,
             patch=pch,
-            nfix_timeconst=varctl.nfix_timeconst)
+            nfix_timeconst=varctl.nfix_timeconst,
+            # CNDriverSummarizeFluxes: the soil-BGC C/N flux summaries and the
+            # column/gridcell halves of the CNVeg C/N flux summaries. These produce
+            # hr_col / som_c_leached_col / denit_col / f_n2o_nit_col / gpp_col /
+            # er_col / nbp_grc — i.e. EVERY term the CN balance check reads. Before
+            # this they were structurally dead (see cnveg_carbon_flux_summary_col!).
+            bounds_grc=bc_grc,
+            decomp=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_cascade : nothing),
+            dzsoi_decomp_vals=(_decomp_initialized(inst.decomp_cascade) ? dzsoi_decomp[] : nothing))
 
         # C14 radioactive decay — WIRED (gated on config.use_c14). Mirrors the
         # Fortran C14Decay call in CNDriver: after the C/N state updates, decay
@@ -2293,21 +2301,63 @@ function clm_drv_core!(config::CLMDriverConfig,
             _scs = inst.soilbiogeochem_carbonstate
             _sns = inst.soilbiogeochem_nitrogenstate
             _dc  = inst.decomp_cascade
-            _tvc = zeros(bc.endc); _tvn = zeros(bc.endc)
-            p2c_1d!(_tvc, inst.bgc_vegetation.cnveg_carbonstate_inst.totvegc_patch,
-                    bc, "unity", pch)
-            p2c_1d!(_tvn, inst.bgc_vegetation.cnveg_nitrogenstate_inst.totvegn_patch,
-                    bc, "unity", pch)
+            _ccs = inst.bgc_vegetation.cnveg_carbonstate_inst
+            _cns = inst.bgc_vegetation.cnveg_nitrogenstate_inst
+            # TWO DIFFERENT veg aggregates — Fortran does not use one for both
+            # (SoilBiogeochemCarbonStateType.F90:1627-1644):
+            #
+            #   totecosysc_col (TOTECOSYSC) += totvegc_col  <- p2c of totvegc_patch,
+            #                                                  EXCLUDES cpool
+            #   totc_col       (TOTCOLC)    += totc_p2c_col <- p2c of totc_patch,
+            #                                                  INCLUDES cpool/xsmrpool/ctrunc
+            #
+            # `totc_col` is the pool the CN balance check integrates (begcb/endcb), so
+            # it MUST be the cpool-INCLUSIVE one. The port passed the p2c of
+            # totvegc_patch for both and never supplied totc_p2c_col at all — it
+            # defaulted to zeros(), so totc_col carried *no vegetation carbon whatsoever*.
+            #
+            # GPP lands in cpool before it is allocated to the tissue pools. With cpool
+            # outside the budget, every gC of GPP looked like carbon created from
+            # nothing: the column C imbalance was ~gpp*dt (0.045 gC/m2/step at Bow in
+            # summer, vs a cerror of 1e-7). This is the bug the carbon balance check
+            # was built to catch, and it could not run to catch it because gpp_col/er_col
+            # were themselves dead. Same story verbatim on the N side (totn_p2c_col).
+            _tvc  = zeros(bc.endc); _tvn  = zeros(bc.endc)
+            _tp2c = zeros(bc.endc); _tn2c = zeros(bc.endc)
+            p2c_1d!(_tvc,  _ccs.totvegc_patch, bc, "unity", pch)
+            p2c_1d!(_tvn,  _cns.totvegn_patch, bc, "unity", pch)
+            p2c_1d!(_tp2c, _ccs.totc_patch,    bc, "unity", pch)
+            p2c_1d!(_tn2c, _cns.totn_patch,    bc, "unity", pch)
+            # Keep the canonical fields in sync (they are history/restart outputs).
+            if !isempty(_ccs.totc_p2c_col); copyto!(_ccs.totc_p2c_col, _tp2c); end
+            if !isempty(_cns.totn_p2c_col); copyto!(_cns.totn_p2c_col, _tn2c); end
             soil_bgc_carbon_state_summary!(_scs, filt.allc, bc_col;
                 nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
                 dzsoi_decomp_vals=dzsoi_decomp[], zisoi_vals=zisoi[],
                 is_litter=_dc.is_litter, is_soil=_dc.is_soil, is_cwd=_dc.is_cwd,
-                totvegc_col=_tvc)
+                totvegc_col=_tvc, totc_p2c_col=_tp2c)
             soil_bgc_nitrogen_state_summary!(_sns, filt.allc, bc_col;
                 nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
                 dzsoi_decomp_vals=dzsoi_decomp[], zisoi_vals=zisoi[],
                 is_litter=_dc.is_litter, is_soil=_dc.is_soil, is_cwd=_dc.is_cwd,
-                totvegn_col=_tvn)
+                totvegn_col=_tvn, totn_p2c_col=_tn2c)
+
+            # SPECIAL (non-soil) columns carry NO carbon/nitrogen budget. Fortran zeroes
+            # their C/N state outright — SoilBiogeochemCarbonStateType.F90:686
+            # (`this%totc_col(c) = 0._r8` for the special-column filter). The port left
+            # them at the NaN allocation default, and the gridcell balance then computed
+            #     totc_grc += totc_col[c] * wtgcell[c]   ==   NaN * 0.0   ==   NaN
+            # — the NaN*0 trap. Every gridcell C and N imbalance was NaN, so the
+            # GRIDCELL half of the CN balance check could never fail no matter how badly
+            # it was violated (NaN > cerror is false). Zeroing them, as Fortran does,
+            # makes the gridcell check able to fail.
+            for c in bc_col
+                filt.soilc[c] && continue
+                _scs.totc_col[c] = 0.0
+                _scs.totecosysc_col[c] = 0.0
+                _sns.totn_col[c] = 0.0
+                _sns.totecosysn_col[c] = 0.0
+            end
         end
     end
 
