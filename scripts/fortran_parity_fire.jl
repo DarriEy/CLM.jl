@@ -74,33 +74,25 @@ Verbatim from `bgc_ref_firech4/lnd_in`:
     borpeat_fire_soilmoist_denom = 0.3     nonborpeat_fire_precip_denom = 1.0
 """
 # ---------------------------------------------------------------------------
-# Inject the Fortran fire ACCUMULATORS (prec10 / prec60 / rh30) from the dump.
+# Restore the Fortran runmean forcing ACCUMULATORS (rh30 / prec10 / prec30 /
+# prec60) from the dump, via the ported `accumulRest` restore path
+# (CLM.restore_atm2lnd_runmean_accum!, src/infrastructure/accumul_restart.jl).
 #
-# `read_fortran_restart!` does not read them (it maps 170 vars, none of them the
-# accumul fields), so without this the Julia side starts them cold and `fire_m` --
-# which reads rh30 -- is evaluated at the wrong 30-day mean. Fortran's rh30 in this
-# window is ~65.7 %, not the cold-start value.
+# `read_fortran_restart!` maps ~170 prognostic restart variables but NONE of the
+# `accumul` fields, so before this the Julia side started them cold. The restore
+# copies each persisted `<NAME>_VALUE` into its Atm2LndData patch vector and reads
+# `<NAME>_NSTEPS`. The single-step oracle reads the fire accumulators (during
+# CNFireArea, inside PreDrainage) BEFORE the end-of-step accumulator update, so
+# the VALUE restore is what the fire physics sees; `warm_nstep` is the counter a
+# multi-step restart would run at so `accum_runmean` continues the mean.
 #
-# This is a REAL PORTING GAP, not merely a harness gap: CLM.jl cannot restart a fire
-# run from a Fortran restart, because the accumulator restart I/O is unported.
-# Reported in the scorecard; injected here so the single-step oracle starts from
-# exactly Fortran's state.
+# NB (see docs/CH4_FIRE_PARITY.md re-score): at Bow the fuel load keeps `afuel=0`,
+# so `rh30` carries ZERO weight in `fire_m`. Restoring the accumulators is a real
+# porting fix but does not move NFIRE here — the residual is the fire root-wetness
+# `btran2`, not the rh30 accumulator.
 # ---------------------------------------------------------------------------
 function inject_fire_accum!(inst, bounds, dumpfile::String)
-    a = inst.atm2lnd
-    np = bounds.endp
-    NCDataset(dumpfile, "r") do ds
-        _put!(dst, name) = begin
-            v = _dv(ds, name); v === nothing && return
-            for p in 1:min(np, length(v))
-                x = v[p]; ismissing(x) || (dst[p] = Float64(x))
-            end
-        end
-        _put!(a.prec10_patch, "PREC10_VALUE")
-        _put!(a.prec60_patch, "PREC60_VALUE")
-        _put!(a.rh30_patch,   "RH30_VALUE")
-        haskey(ds, "PREC30_VALUE") && _put!(a.prec30_patch, "PREC30_VALUE")
-    end
+    CLM.restore_atm2lnd_runmean_accum!(inst.atm2lnd, dumpfile, bounds; dtime = 3600)
     return inst
 end
 
