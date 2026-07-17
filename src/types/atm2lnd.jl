@@ -487,18 +487,29 @@ Fortran imports `forc_rh` from the coupler onto `wateratm2lndbulk_type`; this
 port has no coupler, so RH is reconstructed from forcing that IS present. It is
 the source term for the RH30 (`use_cn`) and RH24 (`use_fates`) accumulators.
 """
+@kernel function _atm2lnd_rh_kernel!(forc_rh, @Const(forc_t), @Const(forc_pbot),
+                                     @Const(forc_q), gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        t = forc_t[g]; p = forc_pbot[g]; q = forc_q[g]
+        if isfinite(t) && isfinite(p) && isfinite(q) && p > zero(p)
+            qs, _es = qsat_no_derivs(t, p)
+            T = eltype(forc_rh)
+            forc_rh[g] = qs > zero(qs) ? min(T(100), max(zero(T), T(100) * q / qs)) : zero(T)
+        end
+    end
+end
+
 function atm2lnd_update_rh!(a2l::Atm2LndData, bounds_grc::UnitRange{Int})
     isempty(bounds_grc) && return nothing
     length(a2l.forc_rh_grc) >= last(bounds_grc) || return nothing
-    @inbounds for g in bounds_grc
-        t = a2l.forc_t_not_downscaled_grc[g]
-        p = a2l.forc_pbot_not_downscaled_grc[g]
-        q = a2l.forc_q_not_downscaled_grc[g]
-        if isfinite(t) && isfinite(p) && isfinite(q) && p > 0
-            qs, _es = qsat_no_derivs(t, p)
-            a2l.forc_rh_grc[g] = qs > 0 ? min(100.0, max(0.0, 100.0 * q / qs)) : 0.0
-        end
-    end
+    # Kernelized (was a host @inbounds loop that scalar-indexed device arrays and
+    # broke the use_cn Metal composite). _launch! runs the KA CPU kernel on host
+    # (byte-identical: each g writes its own forc_rh_grc[g]) and the device kernel on GPU.
+    _launch!(_atm2lnd_rh_kernel!, a2l.forc_rh_grc,
+        a2l.forc_t_not_downscaled_grc, a2l.forc_pbot_not_downscaled_grc,
+        a2l.forc_q_not_downscaled_grc, first(bounds_grc), last(bounds_grc);
+        ndrange = length(a2l.forc_rh_grc))
     return nothing
 end
 

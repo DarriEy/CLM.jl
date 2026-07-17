@@ -11,6 +11,16 @@
 #   cn_driver_summarize_fluxes!  — Summarize flux variables
 # ==========================================================================
 
+# Device-safe "every masked column has a finite value" guard (used before wiring an
+# accumulator-sourced flux, e.g. N fixation from lagged/annual NPP or AnnET). On a
+# host Array this is the allocation-free short-circuit loop (byte-identical). On a
+# device array (the use_cn GPU composite) a per-index closure would scalar-index the
+# device array (disallowed on Metal/CUDA), so use a bulk broadcast + reduce instead.
+_masked_all_finite(src::AbstractVector, mask::AbstractVector, bounds::UnitRange{Int}) =
+    src isa Array ?
+        all(c -> !mask[c] || isfinite(src[c]), bounds) :
+        !any(view(mask, bounds) .& .!isfinite.(view(src, bounds)))
+
 # ---------------------------------------------------------------------------
 # CNDriverConfig — control flags for the CN driver
 # Holds all configuration flags referenced throughout the driver.
@@ -358,7 +368,7 @@ function cn_driver_no_leaching!(
         # AnnET comes from the Fortran restart (AnnET_VALUE), and in a free run it
         # comes from the accumulator once that is live.
         _annet_ok = !isempty(AnnET) &&
-                    all(c -> !mask_bgc_soilc[c] || isfinite(AnnET[c]), bounds_col)
+                    _masked_all_finite(AnnET, mask_bgc_soilc, bounds_col)
         if _annet_ok
             n_free_living_fixation!(soilbgc_nf, _ndp;
                 mask_soilc = mask_bgc_soilc,
@@ -378,7 +388,7 @@ function cn_driver_no_leaching!(
         _npp_src = (nfix_timeconst > 0.0 && nfix_timeconst < 500.0) ?
                    cnveg_cf.lag_npp_col : cnveg_cf.annsum_npp_col
         _npp_ok = !isempty(_npp_src) &&
-                  all(c -> !mask_bgc_soilc[c] || isfinite(_npp_src[c]), bounds_col)
+                  _masked_all_finite(_npp_src, mask_bgc_soilc, bounds_col)
         if _npp_ok
             n_fixation!(soilbgc_nf, cnveg_cf;
                 mask_soilc     = mask_bgc_soilc,

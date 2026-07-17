@@ -44,7 +44,22 @@ end
 
 CNBalanceData{FT}(; kwargs...) where {FT<:Real} =
     CNBalanceData{FT, Vector{FT}}(; kwargs...)
-Adapt.@adapt_structure CNBalanceData
+
+# Hand-written adaptor: adapt ONLY the 12 vector fields onto the target backend/
+# precision; pass the 4 scalar thresholds (cwarning/nwarning/cerror/nerror) through
+# UNCHANGED as Float64. The auto `@adapt_structure` adapts every field, so a Float32
+# device adaptor converts the scalars to Float32 and the positional constructor —
+# which requires `::Float64` for them — throws a MethodError (breaks the use_cn Metal
+# composite). The thresholds are never inside a device kernel, so keeping them Float64
+# in an otherwise-Float32 instance is correct (this is the "arrays-only" intent above).
+Adapt.adapt_structure(to, x::CNBalanceData) = CNBalanceData(
+    Adapt.adapt(to, x.begcb_col), Adapt.adapt(to, x.endcb_col),
+    Adapt.adapt(to, x.begnb_col), Adapt.adapt(to, x.endnb_col),
+    Adapt.adapt(to, x.begcb_grc), Adapt.adapt(to, x.endcb_grc),
+    Adapt.adapt(to, x.begnb_grc), Adapt.adapt(to, x.endnb_grc),
+    Adapt.adapt(to, x.errcb_col), Adapt.adapt(to, x.errnb_col),
+    Adapt.adapt(to, x.errcb_grc), Adapt.adapt(to, x.errnb_grc),
+    x.cwarning, x.nwarning, x.cerror, x.nerror)
 
 """
     cn_balance_init!(bal::CNBalanceData, nc::Int, ng::Int)
@@ -332,9 +347,16 @@ function begin_cn_gridcell_balance!(
     isempty(bounds_g) && return nothing
     # Same dribbler-presence guard as the END kernel (`_cbal_grc_kernel!`).
     has_dribbler = !isempty(hrv_xsmrpool_amount_left)
+    # The dribbler args default to host Float64[] (unported); move them onto the
+    # state's backend/precision so the device kernel doesn't get host Vector{Float64}
+    # args (Metal/CUDA compile fail). No-op on host (returns v) → byte-identical.
+    FT = eltype(bal.begcb_grc)
+    hrv_bl = _to_backend_like(bal.begcb_grc, FT, hrv_xsmrpool_amount_left)
+    gru_bl = _to_backend_like(bal.begcb_grc, FT, gru_conv_cflux_amount_left)
+    dwt_bl = _to_backend_like(bal.begcb_grc, FT, dwt_conv_cflux_amount_left)
     _launch!(_cnbal_begin_grc_kernel!, bal.begcb_grc, bal.begnb_grc,
         totc, totn, c_tot_woodprod, c_cropprod1, n_tot_woodprod, n_cropprod1,
-        hrv_xsmrpool_amount_left, gru_conv_cflux_amount_left, dwt_conv_cflux_amount_left,
+        hrv_bl, gru_bl, dwt_bl,
         has_dribbler, use_fates_bgc, first(bounds_g), last(bounds_g);
         ndrange = length(bal.begcb_grc))
     return nothing
@@ -526,11 +548,15 @@ function c_balance_check!(
     nc = length(bounds_c) > 0 ? last(bounds_c) : 0
     col_errcb = fill!(similar(bal.begcb_col, FT, nc), zero(FT))
     has_fates = !isempty(is_fates_col)
+    # is_fates_col is a host kwarg (default Bool[]); move it onto the state backend so
+    # the device kernel doesn't get a host Vector{Bool} (Bool<:Integer → the type-
+    # preserving _to_backend_like overload; no-op on host).
+    is_fates_bl = _to_backend_like(bal.begcb_col, FT, is_fates_col)
 
     # --- Column-level balance check (numeric pass on device/host) ---
     if !isempty(bounds_c)
         _launch!(_cbal_col_kernel!, col_endcb, col_errcb,
-            mask_soil, is_fates_col, has_fates,
+            mask_soil, is_fates_bl, has_fates,
             totcolc, col_begcb, gpp, er, col_fire_closs, col_hrv_xsmrpool_to_atm,
             col_xsmrpool_to_atm, gru_conv_cflux, wood_harvestc, gru_wood_productc_gain,
             crop_harvestc_to_cropprodc, som_c_leached, fates_litter_flux, hr_col,
@@ -599,11 +625,15 @@ function c_balance_check!(
 
     grc_errcb = fill!(similar(bal.begcb_grc, FT, ng), zero(FT))
     has_dribbler = !isempty(hrv_xsmrpool_amount_left)
+    # Move the unported host dribbler arrays onto the state backend (no-op on host).
+    hrv_bl = _to_backend_like(bal.begcb_grc, FT, hrv_xsmrpool_amount_left)
+    gru_bl = _to_backend_like(bal.begcb_grc, FT, gru_conv_cflux_amount_left)
+    dwt_bl = _to_backend_like(bal.begcb_grc, FT, dwt_conv_cflux_amount_left)
 
     if !isempty(bounds_g)
         _launch!(_cbal_grc_kernel!, grc_endcb, grc_errcb,
             grc_begcb, totgrcc, tot_woodprod_grc, cropprod1_grc,
-            hrv_xsmrpool_amount_left, gru_conv_cflux_amount_left, dwt_conv_cflux_amount_left,
+            hrv_bl, gru_bl, dwt_bl,
             has_dribbler, nbp_grc, dwt_seedc_to_leaf_grc, dwt_seedc_to_deadstem_grc,
             som_c_leached_grc, use_fates_bgc, FT(dt), first(bounds_g), last(bounds_g);
             ndrange = length(grc_endcb))
@@ -853,9 +883,10 @@ function n_balance_check!(
 
     if !isempty(bounds_c)
         backend = _kernel_backend(col_endnb)
+        is_fates_bl = _to_backend_like(col_endnb, FT, is_fates_col)
         _nbal_col_kernel!(backend)(col_endnb, col_ninputs, col_noutputs,
             col_ninputs_partial, col_noutputs_partial, col_errnb,
-            nb_in, mask_soil, is_fates_col,
+            nb_in, mask_soil, is_fates_bl,
             has_fates, use_fun, use_crop, use_nitrif_denitrif,
             FT(dt), first(bounds_c), last(bounds_c); ndrange = length(col_endnb))
         KA.synchronize(backend)
