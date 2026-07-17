@@ -65,11 +65,27 @@ const AREAFRAC_TEMPERATE = _areafrac((2, 4, 6))
 # frozen-root exclusion doesn't spuriously zero water uptake (real leaf temp still
 # comes from the energy balance on the real forcing). Tropical ~299, boreal ~281,
 # temperate ~286 K.
+# soil_h2o: OPTIONAL cold-start root-zone LIQUID moisture prime (fraction of watsat),
+# mirroring soil_tk. The generic surfdata cold start loads the FATES column with
+# 0.75*watsat of water, but at the ~272 K cold-start temperature that water is stored
+# entirely as ICE; the harness then warms the soil (soil_tk) but never thaws the ice.
+# Over a wrapped single-year of forcing the ice melts and the meltwater DRAINS away, so
+# by growing season the boreal root zone is bone-dry (smp << wilting) -> btran=0 -> GPP=0
+# -> the stand starves on maintenance respiration. A real spun-up boreal soil holds
+# field-capacity liquid water through the growing season, so this is a cold-start /
+# short-spin artifact, not real physics. `soil_h2o` re-asserts that growing-season
+# liquid state at cold start for cold/under-moist sites (see build_site).
+# `nothing` = no prime (tropical/temperate already reach healthy equilibria — leave them
+# byte-identical). Bounded by watsat, so it can never exceed pore space.
 struct SiteCfg
     key::String; label::String; domain::String; fyr::Int
     screen::Symbol; areafrac::Union{Nothing,Vector{Float64}}
     soil_tk::Float64; band_lo::Float64; band_hi::Float64
+    soil_h2o::Union{Nothing,Float64}
 end
+# convenience ctor keeping the pre-existing positional call sites working (no prime)
+SiteCfg(key,label,domain,fyr,screen,areafrac,soil_tk,band_lo,band_hi) =
+    SiteCfg(key,label,domain,fyr,screen,areafrac,soil_tk,band_lo,band_hi,nothing)
 const SITES = Dict(
     "aripuana_screened" => SiteCfg("aripuana_screened",
         "Aripuana Amazon (tropical) — SCREENED :drop_cold_deciduous",
@@ -79,7 +95,7 @@ const SITES = Dict(
         "domain_Aripuana_Amazon", 2004, :none, nothing, 299.0, 0.0, Inf),
     "krycklan_screened" => SiteCfg("krycklan_screened",
         "Krycklan (boreal Sweden) — SCREENED boreal tree set {2,3,6}",
-        "domain_Boreal_Krycklan_Sweden", 2010, :none, AREAFRAC_BOREAL, 281.0, 200.0, 6000.0),
+        "domain_Boreal_Krycklan_Sweden", 2010, :none, AREAFRAC_BOREAL, 281.0, 200.0, 6000.0, 0.75),
     "krycklan_baseline" => SiteCfg("krycklan_baseline",
         "Krycklan (boreal Sweden) — BASELINE all-14-PFT",
         "domain_Boreal_Krycklan_Sweden", 2010, :none, nothing, 281.0, 0.0, Inf),
@@ -134,6 +150,45 @@ function max_dbh(site)
     return md
 end
 
+# ---- growing-season root-zone moisture prescription --------------------------
+# Prescribe a spun-up boreal soil-moisture boundary condition on the FATES column's
+# root zone: set each (thawed) soil layer to `frac`*watsat of LIQUID water, zeroing its
+# ice. This is NOT a water-conservation claim — it is a prescribed-soil-moisture forcing
+# (a standard land-model technique for isolating vegetation dynamics from water-balance
+# spin-up), applied only to sites that carry a soil_h2o. The short single-year wrapped
+# forcing here cannot reproduce the multi-decade boreal water balance: the cold-start
+# ice load drains below field capacity before leaf-on, so without this the boreal root
+# zone is desert-dry (smp << wilting) all growing season -> btran=0 -> GPP=0 -> collapse.
+# A real spun-up boreal forest's thawed active layer holds ~field-capacity water through
+# the growing season. `thawed_only=true` (the daily re-assertion) touches only layers
+# above freezing, so it never fights the freeze/thaw physics; frozen layers are correctly
+# left as non-uptake layers. Bounded by watsat -> never exceeds pore space. Carbon
+# conservation (the harness's actual invariant) is unaffected.
+# Effective moisture-prime fraction: the per-site cfg.soil_h2o, overridable for tuning
+# via FATES_SOIL_H2O (returns `nothing` unchanged so unprimed sites stay unprimed).
+_soil_h2o(cfg::SiteCfg) = cfg.soil_h2o === nothing ? nothing :
+    something(tryparse(Float64, get(ENV, "FATES_SOIL_H2O", "")), cfg.soil_h2o)
+
+function prime_fates_soil_moisture!(inst, bounds, frac::Float64; thawed_only::Bool)
+    col=inst.column; ss=inst.soilstate; temp=inst.temperature
+    ws=inst.water.waterstatebulk_inst.ws
+    joff=_C.varpar.nlevsno; nsoi=_C.varpar.nlevsoi; np=0
+    for c in 1:bounds.endc
+        col.is_fates[c] || continue
+        np += 1
+        for j in 1:nsoi
+            ws_j = ss.watsat_col[c, j]
+            (isfinite(ws_j) && ws_j > 0.0) || continue
+            thawed_only && temp.t_soisno_col[c, joff+j] <= _C.TFRZ && continue
+            vol = frac * ws_j
+            ws.h2osoi_vol_col[c, j]      = vol
+            ws.h2osoi_liq_col[c, joff+j] = vol * col.dz[c, joff+j] * _C.DENH2O
+            ws.h2osoi_ice_col[c, joff+j] = 0.0
+        end
+    end
+    return np
+end
+
 # ---- per-site build (parameterized clone of fates_longhorizon.build) ---------
 function build_site(cfg::SiteCfg)
     dom = "$DATA/$(cfg.domain)"
@@ -170,6 +225,16 @@ function build_site(cfg::SiteCfg)
             temp.t_grnd_col[c]=cfg.soil_tk
             for j in 1:ngr; temp.t_soisno_col[c, joff+j]=cfg.soil_tk; end
         end
+    end
+    # Climate-appropriate growing-season root-zone LIQUID moisture prescription (see the
+    # SiteCfg.soil_h2o note + prime_fates_soil_moisture!). Applied once here at cold start;
+    # run_site re-asserts it each growing-season day for THAWED layers, because the short
+    # wrapped forcing drains the root zone below field capacity long before the growing
+    # season otherwise. Gated on cfg.soil_h2o !== nothing so tropical/temperate stay
+    # byte-identical.
+    if _soil_h2o(cfg) !== nothing
+        np = prime_fates_soil_moisture!(inst, bounds, _soil_h2o(cfg); thawed_only=false)
+        @printf("  soil moisture prime: %d FATES col(s) root zone set to %.2f*watsat LIQUID\n", np, _soil_h2o(cfg))
     end
     config = _C.CLMDriverConfig(use_fates=true)
     filt_ia = _C.clump_filter_inactive_and_active
@@ -210,6 +275,11 @@ function run_site(cfg::SiteCfg, ndays::Int)
         sod = Dates.hour(step_start)*3600 + Dates.minute(step_start)*60 + Dates.second(step_start)
         calday = Dates.dayofyear(step_start) + sod/86400.0
         (declin, _e) = _C.compute_orbital(calday); nextsw_cday = calday + Int(dtime)/86400.0
+        # Re-assert the prescribed growing-season root-zone moisture for THAWED layers
+        # once per day (see prime_fates_soil_moisture!). Only for sites carrying soil_h2o.
+        if is_beg && _soil_h2o(cfg) !== nothing
+            prime_fates_soil_moisture!(inst, bounds, _soil_h2o(cfg); thawed_only=true)
+        end
         try
             _C.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw_cday, declin, declin, 0.4091,
                 false, false, "20260101", false; nstep=i, is_first_step=(i==1), is_beg_curr_day=is_beg,
@@ -229,6 +299,41 @@ function run_site(cfg::SiteCfg, ndays::Int)
                 end
                 cp=cp.younger
             end
+        end
+        # Optional soil-bc / btran diagnostic (FATES_PROBE=1). Mirrors the probe in
+        # fates_longhorizon.jl: at midday on selected days it prints btran, the packed
+        # FATES soil bc (smp_sl / h2o_liqvol_sl / eff_porosity_sl / tempk_sl) plus the
+        # raw column liquid/ice split, to distinguish a genuinely DRY root zone from
+        # water that is present but locked as ICE by the cold-start freeze.
+        if get(ENV,"FATES_PROBE","")=="1" && Dates.hour(step_start)==12 && Dates.minute(step_start)==0 &&
+                (daycount <= 8 || daycount % 15 == 0)
+            btmax=0.0; gmax=0.0; vcmax=0.0; cp=site.oldest_patch
+            while cp!==nothing
+                try; btmax = max(btmax, maximum(x->isfinite(x) ? x : 0.0, cp.btran_ft)); catch; end
+                cc=cp.tallest
+                while cc!==nothing
+                    isfinite(cc.gpp_tstep)&&(gmax=max(gmax,cc.gpp_tstep))
+                    isfinite(cc.vcmax25top)&&(vcmax=max(vcmax,cc.vcmax25top))
+                    cc=cc.shorter
+                end
+                cp=cp.younger
+            end
+            bc=inst.fates.bc_in[1]
+            wsb=inst.water.waterstatebulk_inst; joff=_C.varpar.nlevsno
+            fc = findfirst(inst.column.is_fates[1:bounds.endc]); fc===nothing && (fc=1)
+            liq = [wsb.ws.h2osoi_liq_col[fc, joff+j] for j in 1:5]
+            ice = [wsb.ws.h2osoi_ice_col[fc, joff+j] for j in 1:5]
+            @printf("  [PROBE day%d %02d:00] btran=%.4f vc25=%.1f gpp=%.5g elai=%.3f tveg=%.2f\n",
+                    daycount, Dates.hour(step_start), btmax, vcmax, gmax,
+                    inst.canopystate.elai_patch[2], inst.temperature.t_veg_patch[2])
+            @printf("        smp_sl(1:5)=%s  liqvol(1:5)=%s  eff_por(1:5)=%s  tempk(1:5)=%s\n",
+                    string(round.(bc.smp_sl[1:5],digits=0)), string(round.(bc.h2o_liqvol_sl[1:5],digits=3)),
+                    string(round.(bc.eff_porosity_sl[1:5],digits=3)), string(round.(bc.tempk_sl[1:5],digits=1)))
+            @printf("        h2osoi_liq(1:5)=%s  h2osoi_ice(1:5)=%s [kg/m2]\n",
+                    string(round.(liq,digits=2)), string(round.(ice,digits=2)))
+            ep=_C.EDPftvarcon_inst[]
+            @printf("        PFT2 smpsc=%.0f smpso=%.0f | PFT3 smpsc=%.0f smpso=%.0f\n",
+                    ep.smpsc[2], ep.smpso[2], ep.smpsc[3], ep.smpso[3])
         end
         if is_beg && i>1
             daycount = (Dates.value(step_start - start_date) ÷ 86400_000)  # cumulative day index
