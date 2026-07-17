@@ -292,6 +292,7 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               forcing_offset_hours::Int=0, fndep::String="",
                               cnfire_method::Symbol=:nofire,
                               flnfm::String="", fhdm::String="",
+                              forcing_date::Union{DateTime,Nothing}=nothing,
                               pre_step_hook=nothing)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
                               use_lch4=use_lch4,
@@ -368,7 +369,13 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
 
     # forcing_offset_hours lets the harness match Fortran datm's record-alignment
     # convention (datm applies the record one step behind the CLM.jl step-start read).
-    CLM.read_forcing_step!(fr, inst.atm2lnd, step_start + Hour(forcing_offset_hours), ng, nc)
+    # `forcing_date`, if given, overrides the forcing TARGET time entirely — needed
+    # when the model clock (which drives orbital/daylength) and the recycled forcing
+    # stream live in different calendar years (e.g. the BGC-spinup recycles model-year
+    # 2202 to forcing-year 2002, one hour behind). The model clock is untouched.
+    forc_target = forcing_date === nothing ?
+                  (step_start + Hour(forcing_offset_hours)) : forcing_date
+    CLM.read_forcing_step!(fr, inst.atm2lnd, forc_target, ng, nc)
     CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
     (yr, mon, d, tod) = CLM.get_curr_date(tm)
 
