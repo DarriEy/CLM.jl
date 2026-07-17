@@ -253,6 +253,7 @@ include("infrastructure/restart_io.jl")
 include("infrastructure/checkpoint.jl")  # complete bit-exact-resumable checkpoints
 include("infrastructure/init_interp.jl")
 include("infrastructure/fortran_restart.jl")
+include("infrastructure/accumul_restart.jl")  # restore runmean forcing accumulators from a Fortran restart
 
 # ===========================================================================
 # Initialization (depends on instances + all types)

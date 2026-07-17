@@ -154,6 +154,7 @@ using CLM
     include("test_topo.jl")
     include("test_subgrid_ave.jl")
     include("test_accumul.jl")
+    include("test_accumul_restart.jl")
     include("test_crop_gdd.jl")
     include("test_pftcon.jl")
     include("test_control.jl")
