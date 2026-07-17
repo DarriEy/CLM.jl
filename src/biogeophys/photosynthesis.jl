@@ -3112,18 +3112,20 @@ function getvegwp!(p::Int, c::Int, gb_mol::Real,
         x[SUN] = x[XYL]
     end
 
-    # Calculate soil flux. With no root water access (frozen soil; sum_ksr below
-    # threshold), soilflux = transpiration demand by mass balance (= what the
-    # else-branch loop yields by cancellation). The threshold branch's unweighted-mean
-    # xroot breaks that cancellation, leaving a spurious k·smp residual; use the
-    # demand instead. See _getvegwp for the detailed rationale.
+    # Calculate soil flux = the actual soil→root water supply. This ALWAYS uses the
+    # per-layer loop (matching Fortran getvegwp), because `qflx_tran_veg` is set to
+    # `soilflux` and MUST equal the soil root extraction that
+    # Compute_EffecRootFrac_And_VertTranSink_HydStress later debits from the soil
+    # (qflx_rootsoi_col = Σ_j k_soil_root·(smp − vegwp[root] − grav2)); any difference
+    # leaks the column water balance. In the no-root-access branch xroot is the
+    # k-WEIGHTED mean of (smp−grav2) (= ksmp/sum_ksr), so the loop telescopes to
+    # exactly 0 (ksmp − xroot·sum_ksr) — the physically-correct supply-limited flux
+    # (frozen roots → no transpiration), identical to what the sink computes. Setting
+    # soilflux to the atmospheric DEMAND here instead over-transpired frozen-soil
+    # patches into the balance while the soil gave up ~0, leaking errh2o at green-up.
     soilflux = 0.0
-    if no_root_access
-        soilflux = qflx_sun + qflx_sha
-    else
-        for j in 1:nlevsoi
-            soilflux += k_soil_root_p[j] * (smp_c[j] - x[ROOT_SEG] - grav2[j])
-        end
+    for j in 1:nlevsoi
+        soilflux += k_soil_root_p[j] * (smp_c[j] - x[ROOT_SEG] - grav2[j])
     end
 
     return (x, soilflux)
@@ -3198,23 +3200,20 @@ end
         xsun = xxyl
     end
 
-    # Soil flux (host order: grav2[j]=z_col[c,j]*1000). When there is effectively no
-    # root water access (sum_ksr below threshold, e.g. frozen soil), the soil-to-root
-    # flux equals the transpiration demand by mass balance — which is exactly what the
-    # else-branch loop yields via cancellation (soilflux = Σk(smp-xroot-grav2) =
-    # qflx_sun+qflx_sha). The threshold branch uses the UNWEIGHTED mean for xroot
-    # (NaN-safety), which breaks that cancellation and would otherwise leave a spurious
-    # residual ∝ k·smp (huge with very-negative frozen smp → bogus late-season
-    # transpiration). Set soilflux to the mass-balance demand instead. Fortran's
-    # getvegwp takes the else-branch (sum(k_soil_root)==0 only when ALL layers are 0),
-    # so its soilflux is always = qflx; this matches that limit.
+    # Soil flux (host order: grav2[j]=z_col[c,j]*1000) = the actual soil→root water
+    # supply. ALWAYS the per-layer loop (matching Fortran getvegwp): `qflx_tran_veg` is
+    # set to `soilflux` and MUST equal the soil extraction that the HydStress transpiration
+    # sink later debits (qflx_rootsoi_col = Σ_j k_soil_root·(smp − vegwp[root] − grav2)),
+    # or the column water balance leaks. In the no-root-access branch xroot is the
+    # k-WEIGHTED mean of (smp−grav2) (= s/sum_ksr), so this loop telescopes to exactly 0
+    # (s − xroot·sum_ksr) — the physically-correct supply-limited flux (frozen roots →
+    # no transpiration), bit-identical to what the sink computes with the same xroot.
+    # The previous no_root_access branch set soilflux to the atmospheric DEMAND
+    # (qflx_sun+qflx_sha), so frozen-soil patches were over-transpired into the balance
+    # while the soil gave up ~0 → errh2o leak (spiked over threshold at spring green-up).
     soilflux = zero(T)
-    if no_root_access
-        soilflux = qflx_sun + qflx_sha
-    else
-        @inbounds for j in 1:nlevsoi
-            soilflux += k_soil_root[p, j] * (smp_l[c, j] - xroot - z_col[c, j] * T(1000.0))
-        end
+    @inbounds for j in 1:nlevsoi
+        soilflux += k_soil_root[p, j] * (smp_l[c, j] - xroot - z_col[c, j] * T(1000.0))
     end
 
     return (xsun, xsha, xxyl, xroot, soilflux)
