@@ -20,7 +20,9 @@
 
 using NCDatasets, Dates, Printf, CLM
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
-const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+# Data root is env-overridable so the harness is portable across machines / a Drive
+# copy: set SYMFLUENCE_DATA to relocate. Defaults to the original Calgary-laptop path.
+const DATA = get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
 
 # SNICAR optics/aging (shared); prefer the local copy, fall back to projects.
 _snicar(f) = let d1 = "$DATA/installs/cesm-inputdata/lnd/clm2/snicardata",
