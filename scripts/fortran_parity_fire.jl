@@ -43,7 +43,21 @@ using Printf
 const DUMPDIR_FIRE = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_firech4"
 const N0    = 4720
 const NLAST = 4888
+# Model CLOCK date: nstep 4720 == model 2202-07-16 16:00. The harness uses the
+# 2003 calendar as a day-of-year proxy for 2202 to drive orbital / daylength.
 const DATE0 = DateTime(2003, 7, 16, 16)
+
+# --- Forcing alignment (see docs/CH4_FIRE_PARITY.md §5) ---------------------
+# The Fortran BGC-spinup datm recycles model-year 2202 to forcing-year *2002*
+# (NOT 2003) and delivers each record *one hour behind* the model timestamp.
+# The model clock stays on the 2003 proxy (orbital/daylength); ONLY the forcing
+# read is redirected to clmforc.2002 at (model_hour − 1). Verified across all 5
+# probe steps: the implied Fortran forc_rh matches clmforc.2002 at (date−1h) to
+# ~0.04% (residual = QSat formula), and with it fire_m matches Fortran to ~0.3%.
+# Empirically: forcing_date(n) = DateTime(2002,7,16,15) + Hour(n − N0).
+const FFORCING2002 = joinpath(dirname(FFORCING), "clmforc.2002.nc")
+const FORCE_DATE0  = DateTime(2002, 7, 16, 15)   # = DATE0 − 1 year − 1 hour
+fire_forcing_date(n::Int) = FORCE_DATE0 + Hour(n - N0)
 const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
 const FIRED = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/firedata"
@@ -86,10 +100,13 @@ Verbatim from `bgc_ref_firech4/lnd_in`:
 # the VALUE restore is what the fire physics sees; `warm_nstep` is the counter a
 # multi-step restart would run at so `accum_runmean` continues the mean.
 #
-# NB (see docs/CH4_FIRE_PARITY.md re-score): at Bow the fuel load keeps `afuel=0`,
-# so `rh30` carries ZERO weight in `fire_m`. Restoring the accumulators is a real
-# porting fix but does not move NFIRE here — the residual is the fire root-wetness
-# `btran2`, not the rh30 accumulator.
+# NB (see docs/CH4_FIRE_PARITY.md §5): at Bow the fuel load keeps `afuel=0` and the
+# root wetness keeps `btran_col/wtlf < bt_min` (so the btran term saturates at 1),
+# hence NEITHER `rh30` NOR `btran2` carries weight in `fire_m` here — `fire_m`
+# reduces to `arh^1.5`, i.e. a pure function of instantaneous `forc_rh`. Restoring
+# the accumulators is a real porting fix but does not move NFIRE at Bow. (An earlier
+# note here wrongly blamed `btran2`; the actual NFIRE divergence was a scorecard
+# forcing-alignment bug — wrong recycle year + datm 1-hour lag — now fixed above.)
 # ---------------------------------------------------------------------------
 function inject_fire_accum!(inst, bounds, dumpfile::String)
     CLM.restore_atm2lnd_runmean_accum!(inst.atm2lnd, dumpfile, bounds; dtime = 3600)
@@ -183,6 +200,7 @@ function score_step(nstep::Int)
         use_cn = true, use_lch4 = true, use_hydrstress = true,
         dumpdir = DUMPDIR_FIRE,
         step_date = DATE0 + Hour(nstep - N0),
+        forcing_file = FFORCING2002, forcing_date = fire_forcing_date(nstep),
         fndep = FNDEP,
         cnfire_method = :li2016, flnfm = FLNFM, fhdm = FHDM,
         pre_step_hook = (i, b, df) -> begin

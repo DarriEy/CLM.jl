@@ -310,43 +310,73 @@ Injected Fortran state → one Julia step → diff the same-step dump.
 | `FD_COL` (fire duration) | **0.0** | 8.21e+4 | **EXACT** |
 | `LFWT` | **0.0** | 9.50e-1 | **EXACT** |
 | `WTLF` | **0.0** | 9.50e-1 | **EXACT** |
-| `FUELC` | 2.3e-06 | 2.39e+3 | near-exact |
-| `ROOTC_COL` | 5.1e-05 | 1.65e+2 | near-exact |
-| **`NFIRE`** | **1.24e+00** | 8.11e-9 | **DIVERGES** |
-| **`FAREA_BURNED`** | **4.76e+00** | 1.12e-8 | **DIVERGES** |
-| `M_LEAFC_TO_FIRE` | 4.758e+00 | 3.12e-7 | DIVERGES (inherited) |
-| `M_LIVESTEMC_TO_FIRE` | 4.757e+00 | 2.68e-9 | DIVERGES (inherited) |
-| `M_DEADSTEMC_TO_FIRE` | 4.758e+00 | 1.05e-6 | DIVERGES (inherited) |
-| `M_LEAFC_TO_LITTER_FIRE` | 4.758e+00 | 6.24e-8 | DIVERGES (inherited) |
-| `FIRE_MORTALITY_C_TO_CWDC` | 4.749e+00 | 4.61e-6 | DIVERGES (inherited) |
-| `FIRE_MORTALITY_N_TO_CWDN` | 4.749e+00 | 1.07e-8 | DIVERGES (inherited) |
+| **`NFIRE`** | **6.1e-16** | 1.06e-8 | **EXACT** (was 1.24) |
+| **`FAREA_BURNED`** | **1.3e-15** | 1.61e-8 | **EXACT** (was 4.76) |
+| `FUELC` | 1.7e-06 | 2.39e+3 | near-exact |
+| `ROOTC_COL` | 2.5e-07 | 1.65e+2 | near-exact |
+| `M_LEAFC_TO_FIRE` | 8.5e-06 | 4.46e-7 | near-exact (was 4.758) |
+| `M_LIVESTEMC_TO_FIRE` | 9.9e-05 | 3.84e-9 | near-exact (was 4.757) |
+| `M_DEADSTEMC_TO_FIRE` | 2.3e-06 | 1.50e-6 | near-exact (was 4.758) |
+| `M_LEAFC_TO_LITTER_FIRE` | 8.5e-06 | 8.92e-8 | near-exact (was 4.758) |
+| `FIRE_MORTALITY_C_TO_CWDC` | 1.4e-03 | 6.60e-6 | near-exact (was 4.749) |
+| `FIRE_MORTALITY_N_TO_CWDN` | 1.4e-03 | 1.54e-8 | near-exact (was 4.749) |
 | `BAF_CROP`, `BAF_PEATF`, `LFC`, `FBAC`, `FBAC1`, `CROPF`, `TROTR1/2`, `DTROTR`, `FUELC_CROP`, `SOMC_FIRE`, `M_FROOTC_TO_FIRE` | — | **0** | *vacuous* (F ≡ 0 — proves nothing; no crop, no peat, no tropical tree, no land-use transition at Bow) |
 
-**19 / 29 fields within 1e-9.**
+**21 / 29 fields within 1e-9** (up from 19). `NFIRE` and `FAREA_BURNED` are now
+**bit-exact**; the fire C/N fluxes, no longer inheriting a burned-area error, fall
+to their own near-exact injected-state residual (≤1.4e-3, same class as `FUELC`).
 
-### Attribution — this is a clean, single-cause divergence
+### Root cause — a scorecard forcing-alignment bug, NOT a fire-physics defect (RESOLVED)
 
-Every fire C/N flux carries the **identical** relative error (4.758, to 4 significant
-figures) as `FAREA_BURNED`. That is the signature of a **single upstream defect**: the fluxes
-are all strictly proportional to burned area, so the combustion/partitioning code is
-**correct** and simply inherits the error. Combined with `LGDP`/`LGDP1`/`LPOP`/`FSR`/`FD`/
-`WTLF` being **exact** and `FUELC` near-exact, the defect is localized to a single term:
+The original ~1.6–4.8× `NFIRE`/`FAREA_BURNED` divergence was chased to a single term —
+**`fire_m`** (the climate/fuel-moisture factor) in `nfire = ig/secsphr · fb · fire_m · lgdp` —
+because `ig`, `fb` and `lgdp` are all bit-exact (synthetic uniform lnfm/hdm, exact `lgdp`,
+saturated `fb`). Instrumenting `fire_m`'s three inputs at Bow:
 
-> **`fire_m`** (the climate/fuel-moisture factor) in `nfire = ig/secsphr · fb · fire_m · lgdp`.
+* **`afuel = 0`** — the fuel load (`fuelc ≈ 2385`) sits below the 2500 gC/m² threshold, so
+  the `rh30`-weighted branch carries **zero weight**. (This is why restoring the `rh30`
+  accumulator from the restart, PR #231, did *not* move `NFIRE` — a genuine finding that
+  correctly **ruled `rh30` out**.)
+* **`btran_term = 1`** — the injected soil moisture (`H2OSOI_LIQ` → `h2osoi_vol ≈ 0.08–0.16`,
+  `s ≈ 0.3`) makes the leaf-weighted `btran2 ≈ 0.5`, well below `bt_min = 0.85`, so the root-
+  wetness factor saturates at 1 in **both** codes. (An earlier note blamed `btran2`; that was
+  wrong — one hydrology step cannot lift `s` from 0.3 to near-saturation, and the injected
+  and fire-time `h2osoi_vol` are identical.)
 
-`fire_m` reads `rh30_col` — a **30-day running-mean accumulator**. The prime suspect is that
-CLM.jl's **accumulator restart I/O is unported**: `read_fortran_restart!` maps 170 variables,
-**none of them the `accumul` fields**. Injecting `RH30_VALUE`/`PREC10_VALUE`/`PREC60_VALUE`
-alone does not help, because the accumulator's **`NSTEPS` counter** is also cold, so
-`atm2lnd_update_acc_vars!` resets the running mean to the instantaneous value on the first
-step. The single-step oracle therefore **cannot currently reproduce Fortran's 30-day mean
-state**, and `fire_m` is evaluated at the wrong `rh30`.
+So `fire_m` reduces to **`arh^1.5`**, a pure function of the *instantaneous* `forc_rh`. Julia
+computed `forc_rh = 41.8 %`; back-deriving Fortran's from its dumped `NFIRE` gave the value
+Fortran's `fire_m` must have used: **`forc_rh_F ≈ 57.7 %`**. The `forc_rh` formula
+(`100·q/qsat`) and the forcing file (`clmforc.2003.nc`) are identical between codes, so the
+difference could only be *which forcing record was read*. It was:
 
-**This is a real porting gap, not merely a harness artefact: CLM.jl cannot restart a fire run
-from a Fortran restart.** Closing it (porting `accumulRest`) is the next step for fire, and
-is required before `NFIRE`/`FAREA_BURNED` can be honestly scored. **Not fixed here** — it is
-a separate piece of work, and guessing at it would be exactly the kind of tuning this
-document refuses to do.
+> **The Fortran BGC-spinup datm recycles model-year 2202 to forcing-year `2002` (not `2003`)
+> and delivers each record one hour behind the model timestamp.** Julia's fire scorecard read
+> `clmforc.2003` at the model hour.
+
+Verified across all 5 probe steps — the implied Fortran `forc_rh` matches **`clmforc.2002` at
+(model_date − 1 h)** to within 0.04 % (residual = the QSat-vs-approx formula), and with that
+forcing `fire_m` matches Fortran to ~0.3 %:
+
+| step | model date | implied `forc_rh_F` | `clmforc.2002` (−1 h) |
+|---|---|---|---|
+| 4721 | 07-16 17:00 | 57.68 | **57.73** |
+| 4763 | 07-18 11:00 | 66.81 | **66.85** |
+| 4804 | 07-20 04:00 | 41.34 | **41.37** |
+| 4846 | 07-21 22:00 | 33.66 | **33.69** |
+| 4888 | 07-23 16:00 | 45.93 | **45.97** |
+
+**Fix (this PR):** point only the *forcing read* at `clmforc.2002` at `(model_hour − 1)` while
+leaving the model clock on the 2003 day-of-year proxy that drives orbital/daylength (added a
+default-preserving `forcing_date` override to `run_one_parity_step!`). This is configuration —
+matching the reference's datm stream, exactly like the `&lifire_inparm` namelist in §4c — not
+tuning. `NFIRE`/`FAREA_BURNED` go from 1.24 / 4.76 to **6e-16 / 1e-15** (bit-exact).
+
+**The Li2016 fire scheme is now validated end-to-end against Fortran, `farea_burned` included.**
+The only forcing-dependent quantity in the fire dump was `NFIRE`/`FAREA_BURNED` via `forc_rh`;
+every other field is injected state, which is why the misalignment hid until `fire_m` was
+instrumented. The residual ≤1.4e-3 on the fire C/N *mortality* fluxes is a separate near-exact
+injected-carbon-state artefact of the single-step oracle (same class as `FUELC`'s 1.7e-6), not
+a fire-formula defect.
 
 ---
 
@@ -414,15 +444,16 @@ for production and O2, but the transport/aerenchyma half is still badly wrong.
 
 **Validated:**
 * The **Li2016 fire scheme is correctly ported** — the burned-area *formula*, the spread
-  rate, the fire duration, and all three suppression terms are **bit-exact** against Fortran,
-  and the entire fire C/N combustion/partitioning chain is exact-up-to-`farea_burned`.
+  rate, the fire duration, all three suppression terms, **AND `NFIRE` / `FAREA_BURNED`
+  themselves** are **bit-exact** against Fortran (once the scorecard's forcing was aligned to
+  the reference's recycle-year `2002` + 1-hour datm lag; see §5). The fire C/N combustion/
+  partitioning chain is exact-up-to a ≤1.4e-3 injected-carbon-state residual.
 * The methane **atmospheric boundary condition** and **production** terms now agree with
   Fortran to the right order of magnitude, from a state where they were 1000× out and zero
   respectively.
 * **Heterotrophic respiration is alive** for the first time.
 
 **NOT validated (do not claim otherwise):**
-* `NFIRE` / `FAREA_BURNED` — blocked on the unported accumulator restart I/O.
 * The whole methane **transport / aerenchyma / surface-flux** half.
 * **Methane as a SOURCE.** Bow has `finundated ≡ 0`. The wetland regime — the one that
   matters — is untested and needs a peatland site.
