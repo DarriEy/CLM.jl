@@ -2,6 +2,13 @@
 
 > ## 🕰️ HISTORICAL SNAPSHOT — 2026-06-17. Do not read this as current status.
 >
+> **➡️ For the run-verified status of the newer `fortran_parity_*.jl` harnesses
+> (active-layer, aerosol, albedo, decomprates, soilresis, daylength, luna_update,
+> isotopes, lake, soilparam), see [`PARITY_COVERAGE_2026-07.md`](PARITY_COVERAGE_2026-07.md)
+> (2026-07-17 refresh).** In particular, Table B's "albedo RT injection can mask a
+> bug" and the active-layer / soilresis "never diffed" rows are now closed
+> (VALIDATED), and LUNA's EOD vcmax update is a KNOWN ~5% diverge.
+>
 > **Banner added 2026-07-12.** Preserved for its per-module harness inventory.
 > Its *wiring* column has since gone stale in at least these rows (verified
 > in-tree 2026-07-12): fire IS called from the CN driver (dispatched on

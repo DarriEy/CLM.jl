@@ -19,6 +19,15 @@ Apple-Silicon dev box and must happen before it is returned.)
   currently *injects* it), aerosol/dust/ozone — all present in existing dumps, just not
   diffed. Pure harness work.
 
+**Run-verified harness status (2026-07-17):** see
+[`docs/PARITY_COVERAGE_2026-07.md`](PARITY_COVERAGE_2026-07.md) for the refreshed
+scorecard — every `scripts/fortran_parity_*.jl` added since the 2026-06-17 audit was
+executed against the surviving local dumps. Headlines: active-layer / soilresis /
+albedo (no-injection) are now **VALIDATED**; aerosol / daylength are green-by-skip
+(need a snowy / `dayl` dump); **LUNA's EOD vcmax update DIVERGES ~5.3–5.6% high** (a
+documented Rubisco-N optimum residual, jmax matches exactly); lake was validated
+historically but its dump domain is gone; isotopes still need a c13/c14 spinup.
+
 Cross-references: `docs/HARNESS_COVERAGE_AUDIT.md` (per-module coverage, tables A/B/C),
 `docs/CH4_FIRE_PARITY.md` (§7 "not validated"), `docs/N_CYCLE_PARITY.md`,
 `docs/PARITY_STATUS.md`. Ground-truth recipe: the `restFile_write_dump` /
@@ -41,7 +50,7 @@ instrumented `cesm.exe` **plainly** (never under lldb — macOS xzone `brk` guar
 
 | # | Item | Julia module(s) | Fortran run | Notes |
 |---|------|-----------------|-------------|-------|
-| B1 | **Lake** | `lake_*.jl` (con/fluxes/hydrology/temperature) | lake-landunit column | `fortran_parity_lake.jl` EXISTS — verify whether it already has a dump before counting fully open; a `lake-water-balance-real-endwb` branch is preserved on origin |
+| B1 | **Lake** | `lake_*.jl` (con/fluxes/hydrology/temperature) | lake-landunit column | `fortran_parity_lake.jl` was **VALIDATED historically** (thermodynamics + surface turbulent-flux solve, through 3 real fixes ending commit `3db0c1a` "closes the surface-flux residual"). **The `clm_lake_run` h0 domain is now ABSENT on disk (2026-07-17)** → needs regenerating to reproduce, but is not un-validated. See `docs/PARITY_COVERAGE_2026-07.md`. |
 | B2 | **Urban** | `urban_*.jl` (albedo/fluxes/radiation) | urban-landunit column | Metal-validated; `urban_radiation` is called but no-ops in Bow |
 | B3 | **Glacier (glcmec)** | glacier path | glcmec-landunit column | only surfdata/init coverage today |
 | B4 | **Hillslope** | `hillslope_hydrology.jl` | hillslope routing config | unit-tested only |
@@ -50,7 +59,8 @@ instrumented `cesm.exe` **plainly** (never under lldb — macOS xzone `brk` guar
 
 | # | Item | Julia module(s) | Fortran run | Notes |
 |---|------|-----------------|-------------|-------|
-| C1 | **Isotopes** (C13/C14) | `carbon_isotopes.jl`, `c_iso_flux.jl` | `use_c13/use_c14=.true.` rerun | `fortran_parity_isotopes.jl` EXISTS — verify dump/pass status |
+| C1 | **Isotopes** (C13/C14) | `carbon_isotopes.jl`, `c_iso_flux.jl` | `use_c13/use_c14=.true.` rerun | `fortran_parity_isotopes.jl` RAN (2026-07-17): confirmed the Fortran `use_c13/use_c14=.true.` branch **crashes at restart read** (the `tier1_iso` branch restart carries no c13/c14 vars) → **still needs a c13/c14-enabled spinup**. The irrigate=.true. half runs clean but is inactive at Bow (no crop CFT). See `docs/PARITY_COVERAGE_2026-07.md`. |
+| C1a | **LUNA vcmax EOD update** (Rubisco-N optimum) | `luna.jl` `update_photosynthesis_capacity!` / `nitrogen_allocation!` | Fortran `Allocation` **internal** instrumentation (emit `Ncb`/`vcmx25_opt`, not just post `vcmx25_z`) | **KNOWN DIVERGE (2026-07-17):** `fortran_parity_luna_update.jl` shows Julia's post-EOD `vcmx25_z` runs **+5.2–5.6% high** (jmx25_z matches exactly). Constants byte-identical to `LunaMod.F90`; the residual is in the joint N-allocation optimizer's carboxylation pool `Ncb`. Not tuned. See `docs/PARITY_COVERAGE_2026-07.md` §"LUNA vcmax residual". |
 | C2 | **CNDV** (dynamic vegetation) | `cndv.jl` | `use_cndv` rerun | Metal-validated only |
 | C3 | **VOC / MEGAN** | `voc_emission.jl` | non-empty MEGAN compound list | not called in Bow (empty compound list) |
 | C4 | **MIMICS decomposition** | `decomp_mimics.jl` | `decomp_method='MIMICS'` rerun | Bow uses CENTURY/BGC |
