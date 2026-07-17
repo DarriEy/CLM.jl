@@ -414,21 +414,57 @@ After all four §3 fixes. CH4 prognostics injected from the dump.
 (concentrations 1000× out, production identically zero) to *the right order of magnitude*
 for production and O2, but the transport/aerenchyma half is still badly wrong.
 
-### Known remaining leads (reported, not fixed)
+### Lead (a) — `grnd_ch4_cond_patch` frozen at cold-start `0.01` — FIXED (PR #234)
 
-* **`grnd_ch4_cond_patch` is stuck at its cold-start `0.01`.** `bareground_fluxes.jl:438` and
-  `canopy_fluxes.jl:213` *can* write it, but `clm_driver.jl:1612` passes a
-  `_zlike(nc)` **placeholder** with the comment *"CH4 module provides when active"* — it
-  never does. This starves the aerenchyma boundary conductance, and `CH4_AERE_*` /
-  `CH4_SURF_AERE_*` are ≈ 0 in Julia. **Prime suspect for the aerenchyma column.**
-* **`fphr_col` is NaN** at the `ch4_prod!` read: `soil_biogeochem_decomp!` is called from
-  `cn_driver.jl` **without** `use_lch4`, so the `fphr` kernel never runs. Silently inert
+`bareground_fluxes.jl` and `canopy_fluxes.jl` each have a guarded write
+(`if use_lch4 && length(grnd_ch4_cond_patch) >= p: grnd_ch4_cond_patch[p] = 1/raw`),
+mirroring `BareGroundFluxesMod.F90:401` and `CanopyFluxesMod.F90:1097`, which in Fortran
+write `1/raw` **directly into `ch4_inst%grnd_ch4_cond_patch`**. But the Julia driver called
+**both** flux routines with `use_lch4=false` and an **empty** `grnd_ch4_cond_patch`
+(`bareground_fluxes!` omitted the kwargs entirely; `canopy_fluxes_core!` passed `false, …,
+Float64[]` in those positional slots). So the write never fired and `ch4.grnd_ch4_cond_patch`
+stayed pinned at its cold-start `0.01` forever — starving the aerenchyma boundary conductance.
+
+**Fixed:** the driver now threads `inst.ch4.grnd_ch4_cond_patch` into both calls under
+`use_lch4` (Float64[] otherwise, so the non-CH4 and reverse-AD paths are byte-identical; the
+kernel write itself is already `use_lch4`-guarded). Verified live: at Bow the field goes from
+`[0.01, 0.01, 0.01, 0.01]` (frozen) to physical aerodynamic values `[0.0082, 0.0167, 0.0106,
+0.01]` after one step. `test_methane.jl` 124/124; the ch4 path passes `--check-bounds=yes`
+(the newly-active `@inbounds` write does not OOB).
+
+> **Its effect on the Bow scorecard is masked** — `CH4_AERE_*` did *not* move, because at Bow
+> `CONC_CH4_SAT` itself collapses to ≈ 0 in Julia (see the dominant lead below) and the
+> aerenchyma flux is proportional to concentration. The fix is a **verified correctness
+> repair**, not a validation of aerenchyma — that still needs a `finundated>0` wetland
+> reference, which is **blocked** (see §7).
+
+### Dominant remaining lead — the SATURATED column collapses to ≈ 0 in Julia (NEW, isolated this pass)
+
+The single biggest signal in the §6 table: the **saturated** column's state collapses after
+one step while the **unsaturated** column is near-right. The harness *injects* Fortran's
+`CONC_CH4_SAT` / `CONC_O2_SAT` / `O2STRESS_SAT` as the IC, yet one Julia step drives them to
+≈ 0 (`CONC_CH4_SAT` relerr 1.0, `O2STRESS_SAT` relerr 0.999 → Julia ≈ 0), whereas
+`O2STRESS_UNSAT` is **exact** and `CONC_O2_UNSAT` is close (0.17). Because every `*_SAT`
+transport/aerenchyma diagnostic (`CH4_AERE_SAT`, `CH4_TRAN_SAT`, `CH4_SURF_*_SAT`) is
+proportional to the sat concentration, they are all ≈ 0 as a *consequence*. This — not
+`grnd_ch4_cond` — is what dominates the sat-column divergence, and it is exactly the regime a
+wetland (`finundated>0`, sat column heavily weighted) would stress hardest. **Prime suspect:
+the saturated-column diffusion/transport solve (`ch4_tran` `sat=1` path).** Not fixed here:
+isolating it responsibly needs the wetland ground truth (blocked), and CTSM integrates the sat
+column every step *regardless* of `finundated`, so it cannot be chased from Bow alone.
+
+### Other known remaining leads (reported, not fixed)
+* **`fphr_col` is NaN** at the `ch4_prod!` read: `soil_biogeochem_decomp!` (`cn_driver.jl:699`)
+  is called **without** `use_lch4`, so the `fphr` kernel never runs. Silently inert
   (guarded by `> 0`, and `NaN > 0` is false), which makes the `ch4rmcnlim` CN-limit removal
   a no-op.
-* **The CH4 → decomp anoxia feedback is open-loop**: `clm_driver.jl:2481` hardcodes
-  `use_nitrif_denitrif=false, anoxia=false`, so `o_scalar` is a constant 1.0 and
-  `o2stress_unsat` never feeds back into decomposition.
-* **`site_ox_aere!`** (`methane.jl:1173`) is defined and never called from `src/` (its body
+* **The CH4 → decomp anoxia feedback is open-loop**: the `ch4!` call in `clm_driver.jl`
+  (the `config.use_cn, false, false` positional args, currently ~line 2608) hardcodes
+  `use_nitrif_denitrif=false, anoxia=false` — even though the reference config has
+  `use_nitrif_denitrif=.true.`. So `o_scalar` is a constant 1.0 and `o2stress_unsat` never
+  feeds back into decomposition. (Not a clean flag-flip: closing the loop needs the decomp
+  step to read the ch4-written `o_scalar`, and validation needs the wetland reference.)
+* **`site_ox_aere!`** (`methane.jl:1190`) is defined and never called from `src/` (its body
   was inlined into `_ch4aere_patch_kernel!`); **`qflx_surf_lag_col`** is computed and read by
   nothing.
 * **No CH4 restart I/O** in `read_fortran_restart!` — CLM.jl cannot restart a methane run
@@ -454,11 +490,32 @@ for production and O2, but the transport/aerenchyma half is still badly wrong.
 * **Heterotrophic respiration is alive** for the first time.
 
 **NOT validated (do not claim otherwise):**
-* The whole methane **transport / aerenchyma / surface-flux** half.
+* The whole methane **transport / aerenchyma / surface-flux** half. The `grnd_ch4_cond`
+  wiring (lead a) is now correct and live, but the dominant divergence is the
+  **saturated-column collapse** (above), still open.
 * **Methane as a SOURCE.** Bow has `finundated ≡ 0`. The wetland regime — the one that
   matters — is untested and needs a peatland site.
 * Fire's crop / peat / deforestation / tropical-tree branches: `baf_crop`, `baf_peatf`,
   `lfc`, `fbac`, `dtrotr` are all identically zero at Bow. **Vacuous.**
+
+### CH4-as-source at MerBleue — attempted, BLOCKED on missing site assets (2026-07-17)
+
+The plan was to generate the first `finundated>0` Fortran reference at MerBleue (peatland,
+`finundation_method='h2osfc'` ⇒ `finundated = frac_h2osfc > 0`) and diff the Julia transport/
+aerenchyma/ebullition half against it. **Phase 1 could not start**: the MerBleue domain assets
+referenced by `scripts/parity_config.py:36` and `scripts/parity_run_domain.jl:121-125`
+(`$SYMFLUENCE_DATA/domain_Peatland_MerBleue_Canada/` — surfdata, `clmforc.2017.nc`, the
+converged `clm_peatland` restart) are **absent from this machine's `SYMFLUENCE_data`** (only
+`domain_Bow_at_Banff_*`, `domain_Iceland_*`, `domain_Logan_River_*` are present; `ls`/`du`/
+`stat` all confirm no MerBleue/Peatland tree — not FS flakiness). No other wetland site is
+available, and with `finundation_method='h2osfc'` a `finundated>0` reference requires a
+site whose surfdata + wet forcing produce `frac_h2osfc>0` (Bow's harness even runs
+`h2osfcflag=0`). So the CTSM case could not be configured, let alone built/run.
+
+**To unblock:** restore `domain_Peatland_MerBleue_Canada/` (surfdata + `data/forcing` +
+`simulations/clm_peatland/CLM/*.clm2.r.*`), then follow §2/§8 (startup + `finidat`, spin CH4
+ON ~196 days, dump `after_ch4`, **verify `finundated>0`** before diffing). The dominant
+sat-column lead above is the first thing that reference would expose.
 
 ## 8. Reproducing
 
