@@ -1221,6 +1221,13 @@ function clm_drv_core!(config::CLMDriverConfig,
 
 
     # BareGroundFluxes — WIRED
+    # CH4 aerenchyma boundary conductance (grnd_ch4_cond_patch): BareGroundFluxesMod.F90:401
+    # writes `1/raw` DIRECTLY into ch4_inst%grnd_ch4_cond_patch. The Julia driver used to
+    # omit it, leaving ch4.grnd_ch4_cond_patch frozen at its cold-start 0.01 (which starved
+    # the aerenchyma boundary conductance in ch4!). Thread the ch4 struct field so the bare
+    # fraction is populated, exactly as Fortran does. Gated on use_lch4 (the write in
+    # bareground_fluxes! is itself guarded by use_lch4), so the non-CH4 path is unchanged.
+    _bare_ch4_cond = config.use_lch4 ? inst.ch4.grnd_ch4_cond_patch : Float64[]
     bareground_fluxes!(cs, ef, fv, temp, ss, wfb, wsb, wdb, ps,
                        pch, col, lun,
                        filt.noexposedvegp, bc_patch,
@@ -1228,7 +1235,9 @@ function clm_drv_core!(config::CLMDriverConfig,
                        a2l.forc_th_downscaled_col, a2l.forc_rho_downscaled_col,
                        a2l.forc_t_downscaled_col,
                        a2l.forc_u_grc, a2l.forc_v_grc,
-                       a2l.forc_hgt_t_grc, a2l.forc_hgt_u_grc, a2l.forc_hgt_q_grc)
+                       a2l.forc_hgt_t_grc, a2l.forc_hgt_u_grc, a2l.forc_hgt_q_grc;
+                       use_lch4 = config.use_lch4,
+                       grnd_ch4_cond_patch = _bare_ch4_cond)
 
     # Volumetric liquid water content for root moisture stress — 2D kernel
     # over (column, soil layer). See kernels.jl.
@@ -1406,14 +1415,18 @@ function clm_drv_core!(config::CLMDriverConfig,
                    fill(0.35, MXPFT + 1), fill(0.003, MXPFT + 1), fill(0.25, MXPFT + 1),
                    fill(2.0, MXPFT + 1), fill(8.0, MXPFT + 1),
                    config.use_cn,
-                   false, false, config.use_hydrstress, phs_froot_c,
+                   config.use_lch4, false, config.use_hydrstress, phs_froot_c,
                    config.use_fates, config.use_luna,
                    # Re-state the four default-only positionals between use_luna and
-                   # the FATES handle EXACTLY at their canopy_fluxes_core! defaults
-                   # (z0param_method / grnd_ch4_cond_patch / forc_pc13o2_grc /
-                   # leaf_mr_vcm) so the default path stays byte-identical — they are
-                   # only spelled out here to reach the trailing fates_handle slot.
-                   "ZengWang2007", Float64[], Float64[], 0.015,
+                   # the FATES handle. z0param_method / forc_pc13o2_grc / leaf_mr_vcm keep
+                   # their canopy_fluxes_core! defaults. grnd_ch4_cond_patch is threaded
+                   # from the ch4 struct under use_lch4: CanopyFluxesMod.F90:1097 writes
+                   # `1/(raw_above+raw_below)` DIRECTLY into ch4_inst%grnd_ch4_cond_patch
+                   # (the exposed-veg counterpart of the bareground write above). Under
+                   # use_lch4=false it is Float64[], so the default/AD path is byte-identical.
+                   "ZengWang2007",
+                   (config.use_lch4 ? inst.ch4.grnd_ch4_cond_patch : Float64[]),
+                   Float64[], 0.015,
                    # W4b: FATES handle — threaded as the trailing optional positional.
                    # In Fortran, FATES photosynthesis is called from INSIDE the
                    # CanopyFluxes iterative solve (CanopyFluxesMod:1117). The gated
