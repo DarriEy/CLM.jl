@@ -500,6 +500,10 @@ column every step *regardless* of `finundated`, so it cannot be chased from Bow 
 
 ### CH4-as-source at MerBleue — attempted, BLOCKED on missing site assets (2026-07-17)
 
+> **UPDATE (§9): the assets were RESTORED and the reference was generated — but the site does
+> not inundate (`finundated≡0`, water table ~1.9 m deep). The blocker is now physical
+> hydrology, not missing assets. See §9 for the full round-2 result.**
+
 The plan was to generate the first `finundated>0` Fortran reference at MerBleue (peatland,
 `finundation_method='h2osfc'` ⇒ `finundated = frac_h2osfc > 0`) and diff the Julia transport/
 aerenchyma/ebullition half against it. **Phase 1 could not start**: the MerBleue domain assets
@@ -528,4 +532,119 @@ julia --project=. scripts/validation/make_fire_streams.jl <inputdata>/lnd/clm2/f
 
 julia --project=. scripts/fortran_parity_ch4.jl  5    # methane scorecard
 julia --project=. scripts/fortran_parity_fire.jl 5    # fire scorecard
+```
+
+---
+
+## 9. MerBleue peatland — CH4-as-a-SOURCE, round 2: the site does NOT inundate (2026-07-17)
+
+The plan (§7): now that `domain_Peatland_MerBleue_Canada` has been **restored**, generate the
+first `finundated>0` Fortran CH4 reference at a peatland and finally diff the transport /
+aerenchyma / **ebullition** half of the model — the regime Bow cannot reach.
+
+**Phase 1 was executed end-to-end. The Fortran reference was generated. The GATE FAILED:
+`finundated ≡ 0` across the whole window. MerBleue, as configured, does not inundate.**
+
+### What was built and run
+* Run dir `SYMFLUENCE_data/clm_bgc_spinup/merbleue_ref_ch4` (adapted from §2's Bow firech4
+  recipe): the existing `symfluence_build` `cesm.exe` (already carries the `bgcdumpMod` /
+  `ch4Mod` public-pointer / `clm_driver` `after_ch4` SourceMods — **no rebuild needed**),
+  pointed at the MerBleue surfdata + `clmforc.2016/2017.nc` + the converged SP restart.
+* Config = the §2 CH4 namelist (`use_lch4=.true.`, `finundation_method='h2osfc'`,
+  `use_cn/use_fun/use_nitrif_denitrif/use_hydrstress/use_luna=.true.`,
+  `soil_decomp_method='CENTURYKoven2013'`), **`fire_method='nofire'`** (fire is orthogonal to
+  CH4-as-source and drops the synthetic lnfm/hdm stream dependency).
+* **Startup + `use_init_interp` from the SP restart.** The restored MerBleue restart is
+  **SP-only** — 114 vars, **no CN and no CH4 fields** (a `use_cn=.false.` spinup). No BGC
+  restart for MerBleue exists anywhere in the tree, so CN + CH4 are `init_interp`
+  cold-started, then spun **4720 steps** (start 2017-01-01 → mid-July 2017), dumping the
+  `after_ch4` + `pdump` window nstep 4720..4888.
+
+### The macOS-26 launch recipe (differs from §8 — banked)
+The bare `./cesm.exe` run **aborts with `SIGTRAP` (exit 133)** — the macOS-26 xzone `brk #0x1`
+heap-guard, caught fatally by gfortran's own signal handler. Three findings, in order:
+1. `export MallocNanoZone=0` clears the **init-phase** trap (routes small allocs off the nano
+   zone). Necessary but not sufficient.
+2. `init_interp` writes `./init_generated_files/finidat_interp_dest.nc` — that subdirectory
+   must be **`mkdir`'d** in the run dir first (else PIO `createfile` → "No such file or
+   directory").
+3. A *second* `brk` guard still fires in the first `clm_drv!` when run plainly — but **running
+   the same binary under `lldb -b` (batch) passes the guards and the run completes to status
+   0**, producing the full dump window. So for this config the working launch is `lldb -b`,
+   the **opposite** of the §8/`macos26-lldb-xzone` note (which was for a warm-CN Bow config).
+   Also needs the `fd.yaml` NUOPC field dictionary copied into the run dir.
+
+### GATE RESULT — `finundated ≡ 0` (BLOCKER, physical this time)
+
+| nstep | date | FINUNDATED | H2OSFC | ZWT | CH4_SURF_FLUX_TOT |
+|---|---|---|---|---|---|
+| 4720 | 2017-07-16 16:00 | **0.0** | 0.0 | 1.90 m | −4.4e-12 (sink) |
+| 4800 | 2017-07-20 | **0.0** | 0.0 | 1.92 m | −4.3e-12 (sink) |
+| 4888 | 2017-07-23 16:00 | **0.0** | 0.0 | 1.94 m | −5.0e-12 (sink) |
+
+**Why it does not inundate:** the MerBleue surfdata models the bog as `PCT_NATVEG=100` (a
+normal vegetated column, **not** a CLM `wetland` landunit — `PCT_WETLAND=0`), `FMAX=0.5`,
+`20SL_8.5m` + `use_bedrock`, `baseflow_scalar=0.001`. That column equilibrates with the water
+table ~1.9 m deep even in mid-July; the `h2osfc` surface-water store (which `finundated =
+frac_h2osfc` reads under the `h2osfc` method) requires the water table to reach the **surface**
+(saturation excess), which never happens. This is a genuine property of the SYMFLUENCE MerBleue
+CLM configuration — the multi-biome scorecard's "MerBleue 69/69" parity agrees on this (dry)
+hydrology between the two codes. Forcing inundation would mean re-engineering the site
+(wetland landunit / zeroed drainage / raised WT) — a different, un-converged model, not "point
+the reference at MerBleue." **`CH4_EBUL_*` and `CH4_DFSAT_FLUX` are identically zero — vacuous,
+exactly as at Bow. CH4-as-a-source is NOT unlocked.**
+
+### Phase 2 — the sat column reproduces the divergence, but MerBleue cannot isolate it
+
+`scripts/fortran_parity_ch4_merbleue.jl` (single-step injection oracle, same pattern as the Bow
+harness, parameterized for the MerBleue site/dump/date; disables the fatal CN veg balance check
+since injecting partial state is not mass-conservative). Scorecard (worst rel.err over 3 window
+steps): the SAT column is badly wrong — `CONC_O2_SAT` 44×, `CONC_CH4_SAT` 0.88, `O2STRESS_SAT`
+0.38, `CH4_OXID_SAT` 1.68, `CH4_SURF_DIFF_SAT` 1e5 — while the UNSAT path is largely right
+(`O2STRESS_UNSAT`, `CH4STRESS_SAT` **exact**). So the "saturated-column collapse" reproduces at
+a **second, organic-soil site** — it is not Bow-specific.
+
+**But MerBleue cannot cleanly attribute it to a transport bug**, for two reasons found here:
+1. **Cold-CN confound.** No BGC restart exists ⇒ Julia's CN (and O₂ demand / production)
+   cold-starts and diverges from the Fortran reference. `CH4_PROD_SAT` differs 27% for this
+   reason alone; less decomposition ⇒ less O₂ consumed ⇒ `CONC_O2_SAT` accumulates — most of
+   the 44× is this, not transport.
+2. **At `finundated=0` the sat surface fluxes are zero-weighted and physically negligible**
+   (`|F|` scale ~1e-10), so their huge rel.err (`CH4_SURF_DIFF_SAT` 1e5) is noise on a
+   vanishing quantity, not a diagnostic signal.
+
+### Hypotheses tested against the source (methane.jl ↔ ch4Mod.F90)
+* **`jwt` not zeroed for the sat pass** (prime suspect from §6) — **REFUTED.** Fortran sets
+  `jwt(c)=0` for `sat==1` (`ch4Mod.F90:2060`); Julia does the same via
+  `_ch4o_jwt_zero_kernel!(jwt, mask_s)` (`methane.jl:2438`), over the correct soil mask. The
+  `epsilon_t` / diffusivity branch (`j<=jwt` gas-phase vs `j>jwt` liquid) is therefore driven
+  identically ⇒ the sat column correctly uses liquid diffusion.
+* **AD-smoothing (`smooth_min/max`, the dimensional-`k` bug class) polluting the Float64 parity
+  run** — **REFUTED.** `smooth_ad.jl` makes the Float64 methods **exact** (they smooth only for
+  `ForwardDiff.Dual`); the parity run uses exact min/max.
+
+### Verdict (honest)
+* **CH4-as-a-source (`finundated>0` wetland regime): STILL BLOCKED**, now for a
+  physical-hydrology reason — MerBleue as configured is a dry column. Needs a site whose
+  surfdata + forcing actually produce `frac_h2osfc>0` (a true wetland landunit, or a
+  water-table-shallow config), which is not available.
+* **The saturated-column divergence is real and site-independent** (reproduced at MerBleue),
+  but **isolating the transport-solve bug is not possible from either dry site** while the CN
+  state is cold-started. The clean path — **inject Fortran's per-layer flux terms**
+  (`CH4_PROD/OXID/AERE/EBUL_SAT`, all present in the `bgcdump`) so only the `ch4_tran` solve is
+  under test, removing the cold-CN confound — is the documented next step. **No `methane.jl`
+  fix was made: the honest "isolated to the sat column, jwt+smoothing refuted, clean isolation
+  needs flux-injection or `finundated>0`" beats a tuned match.** `test_methane.jl` 124/124;
+  `src/` untouched (default path byte-identical).
+
+### Reproducing
+```bash
+# Fortran reference (in SYMFLUENCE_data/clm_bgc_spinup/merbleue_ref_ch4/):
+#   cp fd.yaml + MerBleue datm/drv/runconfig; lnd_in = §2 CH4 namelist + MerBleue paths
+#   + use_init_interp=.true. + fire_method='nofire'; runconfig start_ymd=20170101,
+#   stop_option=nsteps stop_n=4900; mkdir init_generated_files
+#   export MallocNanoZone=0 HWLOC_COMPONENTS=-opencl \
+#          PDUMP_NSTEP_LO=4720 PDUMP_NSTEP_HI=4888 BGCDUMP_NSTEP_LO=4720 BGCDUMP_NSTEP_HI=4888
+#   lldb -b -o run -o quit ./cesm.exe        # NB: lldb, not plain — see §9 launch recipe
+julia --project=. scripts/fortran_parity_ch4_merbleue.jl 3   # MerBleue methane scorecard
 ```
