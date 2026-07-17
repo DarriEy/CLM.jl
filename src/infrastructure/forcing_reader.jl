@@ -412,6 +412,12 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
         for g in 1:ng
             # e = q * p / (0.622 + 0.378 * q)
             a2l.forc_vp_grc[g] = qbot[g] * psrf[g] / (0.622 + 0.378 * qbot[g])
+            # Fortran carries Sa_shum straight through to forc_q_not_downscaled_grc.
+            # This port was leaving that field at its init value, which made
+            # atm2lnd_update_rh! (its ONLY consumer) compute forc_rh_grc = 0 for every
+            # run — i.e. the RH30 accumulator and the Li fire RH terms saw a
+            # permanently bone-dry atmosphere. Set it from QBOT.
+            a2l.forc_q_not_downscaled_grc[g] = qbot[g]
         end
     elseif haskey(ds, "RH")
         rh = _read_var("RH", 70.0)
@@ -421,6 +427,10 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
             tc = tbot[g] - TFRZ
             esat = 611.0 * exp(17.27 * tc / (tc + 237.3))
             a2l.forc_vp_grc[g] = rh_g * esat
+            # q from e (inverse of the QBOT branch above), so forc_rh_grc is
+            # reconstructible on the RH-forced path too.
+            e = a2l.forc_vp_grc[g]
+            a2l.forc_q_not_downscaled_grc[g] = 0.622 * e / max(psrf[g] - 0.378 * e, 1.0)
         end
     end
 

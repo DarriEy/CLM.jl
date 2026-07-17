@@ -158,7 +158,11 @@ end
                 _scatter_add!(lpop_col, c, wtcol[p] / (one(T) - cropf_col[c]))
             end
 
-            _scatter_add!(fd_col, c, fd_pft[itype[p]] * wtcol[p] * secsphr / (one(T) - cropf_col[c]))
+            # fd_pft is a 0-based pftcon array in Fortran (`fd_pft(patch%itype(p))`),
+            # so the Julia (1-based) index is itype+1 — same as fsr_pft above. Without
+            # the +1 this read the WRONG PFT's fire duration (and, for a bare-soil
+            # patch itype=0, indexed element 0 under @inbounds).
+            _scatter_add!(fd_col, c, fd_pft[itype[p] + 1] * wtcol[p] * secsphr / (one(T) - cropf_col[c]))
         end
     end
 end

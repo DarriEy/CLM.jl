@@ -13,6 +13,8 @@
 #     default and the fire call is a no-op when not opted into).
 # ==========================================================================
 
+using NCDatasets
+
 @testset "CN fire wiring (cn_driver_no_leaching!)" begin
 
     # ----------------------------------------------------------------
@@ -205,6 +207,8 @@
         forc_snow_col  = fill(0.0, nc)
         prec60_patch   = fill(2.0e-5, np)
         prec10_patch   = fill(3.0e-5, np)
+        # rh30 (30-day mean RH, %) is read by li2016/li2021/li2024 (not li2014).
+        rh30_patch     = fill(40.0, np)
         fsat_col       = fill(0.1, nc)
         wf_col         = fill(0.3, nc)
         wf2_col        = fill(0.25, nc)
@@ -223,7 +227,7 @@
                 pftcon_fire, pftcon_fire_li2014, cnfire_const, cnfire_params,
                 fire_data, fire_li2014, dgvs_fire,
                 forc_rh_grc, forc_wind_grc, forc_t_col, forc_rain_col, forc_snow_col,
-                prec60_patch, prec10_patch, fsat_col, wf_col, wf2_col)
+                prec60_patch, prec10_patch, rh30_patch, fsat_col, wf_col, wf2_col)
     end
 
     # Drive cn_driver_no_leaching! with (or without) the fire bundle.
@@ -252,6 +256,7 @@
             forc_snow_fire_col  = d.forc_snow_col,
             prec60_patch        = d.prec60_patch,
             prec10_patch        = d.prec10_patch,
+            rh30_patch          = d.rh30_patch,
             fsat_fire_col       = d.fsat_col,
             wf_fire_col         = d.wf_col,
             wf2_fire_col        = d.wf2_col,
@@ -393,6 +398,148 @@
         @test dA.cs_soil.decomp_cpools_vr_col == dB.cs_soil.decomp_cpools_vr_col
         # And the fire flux arrays were never touched.
         @test all(dA.cf_veg.m_leafc_to_fire_patch .== 0.0)
+    end
+
+    # ================================================================
+    # Fire INPUT plumbing: the lnfm/hdm streams + the gdp/peatf/abm surfdata
+    # scatter + the instance gate. These are what make the ported fire chain
+    # actually RUNNABLE (before this, the Li ignition term had no lightning
+    # source anywhere in src/).
+    # ================================================================
+
+    # The synthetic reference constants (scripts/validation/make_fire_streams.jl).
+    # Uniform in space + constant in time, so bilinear regrid and linear time
+    # interpolation are both exact and Fortran's forc_lnfm/forc_hdm are known
+    # analytically — the same trick the ndep parity stream uses.
+    LNFM_REF = 4.57e-4   # counts/km^2/hr
+    HDM_REF  = 4.2       # counts/km^2
+
+    function _write_uniform_fire_stream(path, varname, value, units)
+        lon = collect(0.0:1.25:358.75)          # 288
+        lat = collect(-90.0:(180.0/191):90.0)   # 192
+        tvals = [15.5, 45.0, 74.5]
+        NCDataset(path, "c") do ds
+            ds.dim["lon"] = length(lon); ds.dim["lat"] = length(lat)
+            ds.dim["time"] = length(tvals)
+            v = defVar(ds, "lon", Float64, ("lon",)); v[:] = lon
+            v = defVar(ds, "lat", Float64, ("lat",)); v[:] = lat
+            v = defVar(ds, "time", Float64, ("time",))
+            v.attrib["units"] = "days since 2000-01-01 00:00:00"
+            v.attrib["calendar"] = "gregorian"
+            v.var[:] = tvals
+            v = defVar(ds, varname, Float64, ("lon", "lat", "time"))
+            v[:, :, :] = fill(value, length(lon), length(lat), length(tvals))
+            v.attrib["units"] = units
+        end
+        return path
+    end
+
+    @testset "fire streams: lnfm/hdm read + interp onto gridcells" begin
+        dir = mktempdir()
+        flnfm = _write_uniform_fire_stream(joinpath(dir, "lnfm.nc"), "lnfm",
+                                           LNFM_REF, "counts/km^2/hr")
+        fhdm  = _write_uniform_fire_stream(joinpath(dir, "hdm.nc"), "hdm",
+                                           HDM_REF, "counts/km^2")
+
+        s = CLM.FireStreamData()
+        @test !s.lnfm.active && !s.hdm.active
+        CLM.fire_stream_init!(s; flnfm = flnfm, fhdm = fhdm)
+        @test s.lnfm.active && s.hdm.active
+
+        ng = 2
+        grc = CLM.GridcellData()
+        grc.latdeg = [51.2, -10.0]
+        grc.londeg = [244.4, 30.0]
+
+        fl = CLM.CNFireLi2014Data(forc_lnfm = zeros(ng), forc_hdm = zeros(ng))
+        CLM.fire_stream_interp!(fl, s, grc; calday = 60.0, dayspyr = 365.0,
+                                bounds_grc = 1:ng)
+
+        # Uniform + constant => both interpolations are exact.
+        @test all(fl.forc_lnfm .≈ LNFM_REF)
+        @test all(fl.forc_hdm  .≈ HDM_REF)
+
+        # An unread stream is a no-op (leaves the array alone).
+        s2 = CLM.FireStreamData()
+        fl2 = CLM.CNFireLi2014Data(forc_lnfm = fill(-1.0, ng), forc_hdm = fill(-1.0, ng))
+        CLM.fire_stream_interp!(fl2, s2, grc; calday = 60.0, dayspyr = 365.0,
+                                bounds_grc = 1:ng)
+        @test all(fl2.forc_lnfm .== -1.0)
+        @test all(fl2.forc_hdm  .== -1.0)
+    end
+
+    @testset "fire surfdata: gdp/peatf/abm gridcell -> column" begin
+        ng = 2; nc = 3; np = 4
+        col = CLM.ColumnData()
+        col.gridcell = [1, 1, 2]
+
+        surf = CLM.SurfaceInputData()
+        surf.gdp   = [40.0, 3.0]
+        surf.peatf = [0.0, 0.25]
+        surf.abm   = [7, 11]
+
+        fl = CLM.CNFireLi2014Data()
+        fd = CLM.CNFireBaseData()
+        dg = CLM.DgvsFireData()
+        CLM.cnfire_init_allocate!(fd, fl, dg, nc, np, ng)
+        @test length(fd.btran2_patch) == np
+        @test length(fl.forc_lnfm) == ng && length(fl.forc_hdm) == ng
+        @test all(fl.abm_lf_col .== 13)   # 13 = "no crop-fire month"
+
+        CLM.cnfire_surfdata_read!(fl, surf, col, 1:nc)
+        @test fl.gdp_lf_col   == [40.0, 40.0, 3.0]
+        @test fl.peatf_lf_col == [0.0, 0.0, 0.25]
+        @test fl.abm_lf_col   == [7, 7, 11]
+
+        # Fortran endruns when the variable is absent from fsurdat; so do we.
+        surf_bad = CLM.SurfaceInputData()
+        @test_throws ErrorException CLM.cnfire_surfdata_read!(fl, surf_bad, col, 1:nc)
+    end
+
+    @testset "fire bundle is OFF by default in CLMInstances" begin
+        inst = CLM.CLMInstances()
+        @test isempty(inst.cnfire_li2014.forc_lnfm)
+        @test isempty(inst.cnfire_li2014.forc_hdm)
+        @test isempty(inst.cnfire_base.btran2_patch)
+        @test !inst.cnfire_stream.lnfm.active
+        @test !inst.cnfire_stream.hdm.active
+        # Facade + driver config both default to :nofire, and the facade->driver
+        # sync carries the method (this is what turns _fire_active on).
+        @test CLM.CNVegetationConfig().cnfire_method === :nofire
+        veg = CLM.CNVegetationData()
+        veg.config.cnfire_method = :li2016
+        veg.config.use_cndv = true
+        CLM._sync_driver_config!(veg)
+        @test veg.driver_config.cnfire_method === :li2016
+        @test veg.driver_config.use_cndv
+    end
+
+    # ================================================================
+    # li2016 driven by the SYNTHETIC reference constants: the fire gate must be
+    # live and produce a FINITE, NONZERO burned area (this is the check that the
+    # whole chain — ignition from lnfm/hdm, fuel from totvegc/totlitc, spread —
+    # is actually running, not just present).
+    # ================================================================
+    @testset "li2016 + synthetic lnfm/hdm => finite, nonzero farea_burned" begin
+        d = make_fire_driver_data(cnfire_method = :li2016)
+        # Swap in the reference stream constants + realistic Li spread params.
+        d.fire_li2014.forc_lnfm .= LNFM_REF
+        d.fire_li2014.forc_hdm  .= HDM_REF
+        d.pftcon_fire_li2014.fsr_pft .= 0.28   # km/hr
+        d.pftcon_fire_li2014.fd_pft  .= 22.8   # hr
+
+        run_driver!(d; with_fire = true)
+
+        fa = d.cnveg_state.farea_burned_col
+        @test all(isfinite, fa)
+        @test all(0.0 .<= fa .<= 1.0)
+        @test fa[1] > 0.0                       # ignition actually happened
+        @test isfinite(d.cnveg_state.nfire_col[1]) && d.cnveg_state.nfire_col[1] > 0.0
+        @test isfinite(d.cs_veg.fuelc_col[1]) && d.cs_veg.fuelc_col[1] > 0.0
+        # …and the burn removed leaf C somewhere.
+        @test any(d.cf_veg.m_leafc_to_fire_patch .> 0.0)
+        @test all(isfinite, d.cf_veg.m_leafc_to_fire_patch)
+        @test all(isfinite, d.cs_veg.leafc_patch)
     end
 
 end

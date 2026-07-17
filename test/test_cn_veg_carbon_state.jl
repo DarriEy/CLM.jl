@@ -221,6 +221,26 @@
 
         # woodc = deadstemc + livestemc + deadcrootc + livecrootc = 4+3+6+5 = 18
         @test cs.woodc_patch[1] ≈ 18.0
+
+        # --- column level summary (the two p2c calls in Summary_carbonstate) ---
+        # Without col/patch this stays untouched (the historical call signature).
+        @test all(isnan, cs.totvegc_col)
+
+        # With them, totvegc_col / totc_p2c_col are the patch-weighted column means.
+        # This is NOT cosmetic: totvegc_col is a live input to the Li fire fuel load,
+        # and while this p2c was stubbed it stayed NaN forever => NaN burned area.
+        col = CLM.ColumnData()
+        col.patchi = [1, 3]
+        col.patchf = [2, 3]
+        patch = CLM.PatchData()
+        patch.active = [true, true, true]
+        patch.wtcol  = [0.25, 0.75, 1.0]
+        mask_c = BitVector([true, true])
+        CLM.cnveg_carbon_state_summary!(cs, mask, 1:np;
+                                        mask_soilc=mask_c, col=col, patch=patch)
+        @test cs.totvegc_col[1] ≈ 22.9      # both patches carry the same totvegc
+        @test cs.totvegc_col[2] ≈ 22.9
+        @test cs.totc_p2c_col[1] ≈ 23.4
     end
 
     @testset "cnveg_carbon_state_init_cold! basic" begin

@@ -172,3 +172,110 @@ function cnfire_fluxes_dispatch!(method::Symbol, args...; kwargs...)
         error("cnfire_fluxes_dispatch!: unknown method $(method)")
     end
 end
+
+# ==========================================================================
+# Fire-bundle initialization (Fortran: CNFireFactory's `create_cnfire_method`
+# followed by `fire_method%FireInit(bounds, NLFilename)` = BaseFireInit ->
+# InitAllocate + surfdataread; FireDataBaseType.F90 / CNFireBaseMod.F90).
+#
+# Lives here (not in fire_base.jl) because the signatures reference
+# CNFireLi2014Data / PftConFireLi2014, which are defined in fire_li2014.jl —
+# included after fire_base.jl.
+# ==========================================================================
+
+"""
+    cnfire_init_allocate!(fire_data, fire_li2014, dgvs_fire, nc, np, ng)
+
+Allocate the fire state arrays: `btran2_patch` (patch), `forc_hdm`/`forc_lnfm`
+(gridcell), `gdp_lf_col`/`peatf_lf_col`/`abm_lf_col` (column), plus the DGVS
+`nind_patch` the fire mortality decrements.
+
+Ported from `BaseFireInit` (`InitAllocate`) in `CNFireBaseMod.F90` /
+`FireDataBaseType.F90`. Fortran allocates to NaN; we allocate to zero and rely on
+`cnfire_surfdata_read!` + `fire_stream_interp!` to fill the inputs, so a missing
+input degrades to "no ignition" rather than NaN-poisoning the live (and fatal)
+C/N balance check. `abm_lf_col` starts at 13 = "no crop-fire month" (the crop-fire
+kernel fires only when `kmo == abm_lf[c]`, and month 13 never matches).
+
+`dgvs_fire.nind_patch` is left alone when already non-empty, so a use_cndv run can
+alias the live `DGVSData.nind_patch` array into it and see the fire mortality.
+"""
+function cnfire_init_allocate!(fire_data::CNFireBaseData,
+                               fire_li2014::CNFireLi2014Data,
+                               dgvs_fire::DgvsFireData,
+                               nc::Int, np::Int, ng::Int)
+    fire_data.btran2_patch   = zeros(np)
+    fire_li2014.forc_hdm     = zeros(ng)
+    fire_li2014.forc_lnfm    = zeros(ng)
+    fire_li2014.gdp_lf_col   = zeros(nc)
+    fire_li2014.peatf_lf_col = zeros(nc)
+    fire_li2014.abm_lf_col   = fill(13, nc)
+    isempty(dgvs_fire.nind_patch) && (dgvs_fire.nind_patch = zeros(np))
+    return nothing
+end
+
+"""
+    cnfire_surfdata_read!(fire_li2014, surf, col, bounds_col)
+
+Scatter the surface-dataset fire inputs (`gdp`, `peatf`, `abm`) from gridcell to
+column: `gdp_lf_col[c] = gdp[col.gridcell[c]]`, and likewise for peatf/abm.
+
+Ported from `surfdataread` in `cpl/share_esmf/FireDataBaseType.F90`, including its
+hard error when any of the three is missing from `fsurdat`. No unit conversion —
+Fortran applies none.
+"""
+function cnfire_surfdata_read!(fire_li2014::CNFireLi2014Data,
+                               surf, col::ColumnData,
+                               bounds_col::UnitRange{Int})
+    isempty(surf.gdp) &&
+        error("cnfire_surfdata_read!: gdp NOT on surfdata file (required by the Li fire model)")
+    isempty(surf.peatf) &&
+        error("cnfire_surfdata_read!: peatf NOT on surfdata file (required by the Li fire model)")
+    isempty(surf.abm) &&
+        error("cnfire_surfdata_read!: abm NOT on surfdata file (required by the Li fire model)")
+
+    for c in bounds_col
+        g = col.gridcell[c]
+        (1 <= g <= length(surf.gdp)) || continue
+        fire_li2014.gdp_lf_col[c]   = surf.gdp[g]
+        fire_li2014.peatf_lf_col[c] = surf.peatf[g]
+        fire_li2014.abm_lf_col[c]   = surf.abm[g]
+    end
+    return nothing
+end
+
+"""
+    cnfire_pftcon_init!(pftcon_fire, pftcon_fire_li2014, p)
+
+Fill the fire PFT-parameter holders from the global `pftcon` `p` (populated by
+`readParameters!`). These are exactly the `pftcon` members the Fortran fire
+modules `associate` to; the holders exist only because the Julia fire kernels take
+a narrow, GPU-adaptable parameter struct rather than the whole pftcon.
+
+Arrays are ALIASED, not copied, so a later pftcon override is picked up.
+"""
+function cnfire_pftcon_init!(pftcon_fire::PftConFireBase,
+                             pftcon_fire_li2014::PftConFireLi2014,
+                             p)
+    pftcon_fire.woody    = p.woody
+    pftcon_fire.cc_leaf  = p.cc_leaf
+    pftcon_fire.cc_lstem = p.cc_lstem
+    pftcon_fire.cc_dstem = p.cc_dstem
+    pftcon_fire.cc_other = p.cc_other
+    pftcon_fire.fm_leaf  = p.fm_leaf
+    pftcon_fire.fm_lstem = p.fm_lstem
+    pftcon_fire.fm_other = p.fm_other
+    pftcon_fire.fm_root  = p.fm_root
+    pftcon_fire.fm_lroot = p.fm_lroot
+    pftcon_fire.fm_droot = p.fm_droot
+    pftcon_fire.lf_f     = p.lf_f
+    pftcon_fire.fr_f     = p.fr_f
+    pftcon_fire.smpso    = p.smpso
+    pftcon_fire.smpsc    = p.smpsc
+    pftcon_fire.rswf_min = p.rswf_min
+    pftcon_fire.rswf_max = p.rswf_max
+
+    pftcon_fire_li2014.fsr_pft = p.fsr_pft
+    pftcon_fire_li2014.fd_pft  = p.fd_pft
+    return nothing
+end

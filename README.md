@@ -88,11 +88,11 @@ final result. See also [the warning above](#️-read-this-first-an-agentic-engin
 - Urban canyon energy balance (CLMU)
 - Irrigation, hillslope lateral flow
 
-### Biogeochemistry (Implemented; CN core validated at ONE site, the rest NOT validated)
+### Biogeochemistry (Implemented; CN core validated at ONE site. Fire/CH4 diffed for the first time — and they FAILED)
 - Carbon-nitrogen cycling (CN mode) with allocation, respiration
 - Decomposition (Century cascade and MIMICS)
 - Nitrification-denitrification, nitrogen leaching
-- Fire (Li 2014), gap mortality, dynamic vegetation (CNDV)
+- Fire (Li 2014 / **2016** / 2021 / 2024), gap mortality, dynamic vegetation (CNDV)
 - Methane (CH4), VOC emissions, dust emission
 
 **What is actually validated** (see [`docs/BGC_PARITY_SCORECARD.md`](docs/BGC_PARITY_SCORECARD.md)):
@@ -112,9 +112,44 @@ summer-only window is structurally blind to (`offset_flag == 0` all summer) — 
 fixed four real bugs, including a wiped litterfall-ramp memory that made leaf senescence
 ~2–7% of its correct rate, and a cold start that gave evergreen PFTs **no canopy at all**.
 
-**NOT validated against Fortran:** any site other than Bow; **fire, methane, isotopes, CNDV,
-MIMICS, and VOC (never diffed at all)**; crop BGC; multi-year trajectories. Julia also has
-**no nitrogen deposition** (`forc_ndep` is identically zero) — a known, unfixed gap.
+#### Fire and methane — first-ever Fortran diff (see [`docs/CH4_FIRE_PARITY.md`](docs/CH4_FIRE_PARITY.md))
+
+Fire and methane had **never** been compared to Fortran — not because it was hard, but
+because the reference run had `use_lch4=.false.` and `fire_method='nofire'`, so **neither
+subsystem ever ran in Fortran either**. A new reference (`use_lch4=.true.`,
+`fire_method='li2016crufrc'`) and two new dump boundaries (`after_ch4`, `after_fire`) now
+exist. Turning the lights on found, and this PR fixed, **ten real bugs** — including three
+that were silently corrupting **every** CLM.jl run, fire or not:
+
+- **`forc_rh_grc` was identically ZERO in every run, ever.** The forcing reader never wrote
+  `forc_q_not_downscaled_grc`, the sole input to `atm2lnd_update_rh!`. Relative humidity was
+  dead model-wide (Bow: 0 → **44.9 %**).
+- **`soil_bgc_carbon_flux_summary!` was never called** — so **all heterotrophic respiration
+  (`somhr`/`lithr`/`hr_vr`) was identically ZERO**, which in turn made CH4 production zero.
+- **`cnveg_carbon_state_summary!`'s column `p2c` was stubbed** → `totvegc_col` was
+  allocate-NaN forever (and is a live input to the fire fuel load).
+- **`rgasm` was 1000× too small** (a `/1000` applied twice) — *every* CH4/O2/CO2 atmospheric
+  boundary concentration was **1000× too large**.
+- **`finundated` was frozen at 0.1 forever** — CTSM's `CalcFinundated` was never ported.
+- **Three `CH4VarCon` defaults were the OPPOSITE of CTSM's** (`anoxicmicrosites`,
+  `ch4rmcnlim`, `use_aereoxid_prog`) — the Julia methane model was a *different model*.
+- **The entire Li fire chain was dead**: `_fire_active` was structurally unreachable, the
+  seven fire structs were never instantiated, and lightning/popdens/GDP/peat had no reader.
+  Now wired (default `:nofire` stays bit-identical). Plus an `fd_pft` **off-by-one** and
+  NaN-initialised `prec10/30/60`/`rh30` accumulators.
+
+**Status after the fixes — honest:**
+
+| | |
+|---|---|
+| **Fire — Li2016 formula** | `LGDP`, `LGDP1`, `LPOP`, `FSR`, `FD`, `WTLF` **EXACT (0.0)**; `FUELC` 2e-06. The whole fire C/N combustion chain is exact **up to `farea_burned`** (every flux carries its error identically). **19/29 fields exact.** |
+| **Fire — `NFIRE`/`FAREA_BURNED`** | **DIVERGE** (rel 1.2 / 4.8). Localized to `fire_m`, whose `rh30` input cannot be reproduced because **CLM.jl's accumulator restart I/O is unported**. NOT validated. |
+| **Methane** | **NOT validated.** Production and the O2 boundary now agree to the right order (from 1000× out / identically zero); the **transport + aerenchyma half is still badly wrong** (`grnd_ch4_cond` is stuck at its cold-start 0.01 — the driver passes a placeholder). **11/33 within 1e-9, 8 of those vacuous.** |
+| **Methane as a SOURCE** | **UNTESTED.** Bow is dry: `finundated ≡ 0`, so the column is a net CH4 *sink*. The wetland regime — the one that matters — needs a peatland site. |
+
+**NOT validated against Fortran:** any site other than Bow; **isotopes, CNDV, MIMICS, and VOC
+(never diffed at all)**; crop BGC; multi-year trajectories; and — per the table above — fire's
+burned area and methane's transport.
 
 ### FATES Ecosystem Demography (Ported and Running — Parity NOT Established)
 [FATES](https://github.com/NGEET/fates) (size- and age-structured cohort

@@ -1,0 +1,3 @@
+94:  use bgcdumpMod             , only : bgcdump_write   ! CLM.jl parity: ch4 + fire diagnostics
+1058:          call bgcdump_write(bounds_clump, 'after_fire')
+1244:          call bgcdump_write(bounds_clump, 'after_ch4')   ! CLM.jl parity

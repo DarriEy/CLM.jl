@@ -411,7 +411,10 @@ end
                     _scatter_add!(lpop_col, c, wtcol[p] / lfwt[c])
                 end
             end
-            _scatter_add!(fd_col, c, fd_pft[itype[p]] * wtcol[p] * secsphr / (one(T) - cropf_col[c]))
+            # fd_pft is 0-based in Fortran (`fd_pft(patch%itype(p))`) -> +1 here, as for
+            # fsr_pft above. Without it this read the wrong PFT's fire duration (and
+            # element 0, under @inbounds, for a bare-soil patch itype=0).
+            _scatter_add!(fd_col, c, fd_pft[itype[p] + 1] * wtcol[p] * secsphr / (one(T) - cropf_col[c]))
         end
     end
 end

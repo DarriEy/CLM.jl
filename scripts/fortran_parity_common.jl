@@ -75,7 +75,9 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
                           use_crop::Bool=false, use_fates::Bool=false,
                           fsurdat::String=FSURDAT, paramfile::String=FPARAM,
                           baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
-                          fndep::String="")
+                          fndep::String="",
+                          cnfire_method::Symbol=:nofire,
+                          flnfm::String="", fhdm::String="")
     # Bow lnd_in: rooting_profile_method_{water,carbon} = 1 (Jackson 1996 beta
     # profile via rootprof_beta), not the Julia default Zeng-2001 roota/rootb. This
     # sets rootfr, which drives the PHS soil-to-root conductance (k_soil_root). Must
@@ -97,6 +99,7 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
         fndep=fndep,
+        cnfire_method=cnfire_method, flnfm=flnfm, fhdm=fhdm,
         int_snow_max=int_snow)
     CLM.coldstart_match_fortran!(_prev_cs)
 
@@ -283,12 +286,18 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               step_date::DateTime=DateTime(2003, 1, 1) + Hour(nstep - 8761),
                               forcing_file::String=FFORCING, use_hydrstress::Bool=false,
                               use_luna::Bool=use_hydrstress,
+                              use_lch4::Bool=false,
                               fsurdat::String=FSURDAT, paramfile::String=FPARAM,
                               baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
-                              forcing_offset_hours::Int=0, fndep::String="")
+                              forcing_offset_hours::Int=0, fndep::String="",
+                              cnfire_method::Symbol=:nofire,
+                              flnfm::String="", fhdm::String="",
+                              pre_step_hook=nothing)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
+                              use_lch4=use_lch4,
                               fsurdat=fsurdat, paramfile=paramfile, baseflow=baseflow, int_snow=int_snow,
-                              fndep=fndep)
+                              fndep=fndep,
+                              cnfire_method=cnfire_method, flnfm=flnfm, fhdm=fhdm)
     # LUNA (Bow lnd_in use_luna=.true.): allocate the photosyns LUNA vcmax25/jmax25
     # fields so inject_dump! fills them from the restart's vcmx25_z/jmx25_z.
     if use_luna && isempty(inst.photosyns.vcmx25_z_patch)
@@ -297,6 +306,11 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     end
     dumpfile = joinpath(dumpdir, "pdump_before_step_n$(nstep).nc")
     inject_dump!(inst, bounds, dumpfile)
+
+    # Subsystem-specific injection (e.g. the ch4 prognostics, which
+    # read_fortran_restart! does not handle). Runs after the 16-field oracle
+    # registry is in place and before the step is taken.
+    pre_step_hook === nothing || pre_step_hook(inst, bounds, dumpfile)
 
     # PHS (plant hydraulic stress): seed vegwp from the Fortran dump so the vegwp
     # Newton solve starts finite. dump vegwp is (vegwcs=4, pft=3) → Julia [patch,4].
@@ -313,7 +327,8 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     end
 
     config  = CLM.CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=false,
-                                  use_hydrstress=use_hydrstress, use_luna=use_luna)
+                                  use_hydrstress=use_hydrstress, use_luna=use_luna,
+                                  use_lch4=use_lch4, cnfire_method=cnfire_method)
     filt_ia = CLM.clump_filter_inactive_and_active
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 

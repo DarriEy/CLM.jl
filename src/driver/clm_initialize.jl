@@ -92,6 +92,14 @@ function clm_initialize!(;
     # an fndep_* file to activate the only pathway by which N enters the ecosystem.
     fndep::String = "",
     ndep_varname::String = "NDEP_month",
+    # CN fire (Li family). `:nofire` (default) => the fire bundle is never allocated
+    # and the CN driver's fire gate is structurally off => byte-identical behaviour.
+    # Set e.g. cnfire_method = cnfire_method_symbol("li2016crufrc") together with the
+    # lightning (flnfm) and population-density (fhdm) stream files to run fire.
+    # gdp/peatf/abm come from the surface dataset (read by surfrd_fire!).
+    cnfire_method::Symbol = :nofire,
+    flnfm::String = "",
+    fhdm::String = "",
     int_snow_max::Real = 2000.0)
 
     # ---- Step 1: Set control flags ----
@@ -178,7 +186,8 @@ function clm_initialize!(;
                   use_lch4=use_lch4,
                   use_cndv=use_cndv,
                   use_c13=use_c13,
-                  use_c14=use_c14)
+                  use_c14=use_c14,
+                  cnfire_method=cnfire_method)
 
     # ---- Step 9: Build subgrid hierarchy ----
     # Get scalar lat/lon fallback from surface file if not provided. In full-grid
@@ -222,6 +231,41 @@ function clm_initialize!(;
     # activated when the caller supplies a file, so the default is unchanged.
     if !isempty(fndep)
         ndep_stream_init!(inst.ndep_stream, fndep; varname = ndep_varname)
+    end
+
+    # ---- CN fire (Li family) init ----
+    # CTSM: CNFireFactory creates the fire_method object, then FireInit ->
+    # BaseFireInit (allocate + hdm_init/lnfm_init when need_lightning_and_popdens)
+    # + surfdataread (gdp/peatf/abm from fsurdat) + readParams (prh30,
+    # ignition_efficiency). The allocation already happened in clm_instInit!; the
+    # three fills below need col%gridcell (built in step 9) and pftcon (filled by
+    # readParameters! just above), so they run here.
+    # No-op for the default :nofire => the fire arrays stay zero-length => the CN
+    # driver's `_fire_active` gate is structurally false, as before.
+    if cnfire_method !== :nofire
+        # Set BOTH configs: _sync_driver_config! only runs inside cn_vegetation_init!
+        # (already done in step 8), so a facade-config write here would never reach
+        # the CN driver config the fire gate actually reads.
+        inst.bgc_vegetation.config.cnfire_method = cnfire_method
+        inst.bgc_vegetation.config.use_cndv      = use_cndv
+        inst.bgc_vegetation.driver_config.cnfire_method = cnfire_method
+        inst.bgc_vegetation.driver_config.use_cndv      = use_cndv
+
+        # params file: prh30 + ignition_efficiency (CNFireBaseMod readParams).
+        NCDataset(paramfile, "r") do ds
+            readParams_CNFire!(inst.cnfire_params, ds)
+        end
+        # pftcon members the fire kernels associate to (cc_*/fm_*/fsr_pft/fd_pft/…).
+        cnfire_pftcon_init!(inst.pftcon_fire, inst.pftcon_fire_li2014, pftcon)
+        # gdp / peatf / abm: gridcell -> column (FireDataBaseType::surfdataread).
+        cnfire_surfdata_read!(inst.cnfire_li2014, surf, inst.column,
+                              bounds.begc:bounds.endc)
+        # Lightning + population-density streams (lnfm_init / hdm_init). Left
+        # inactive when no file is supplied: forc_lnfm/forc_hdm then stay 0, which
+        # zeroes the ignition term (no fire) rather than reading uninitialized data.
+        if need_lightning_and_popdens(cnfire_method) && !(isempty(flnfm) && isempty(fhdm))
+            fire_stream_init!(inst.cnfire_stream; flnfm = flnfm, fhdm = fhdm)
+        end
     end
 
     # CNDV ecophysiological constants (twmax/crownarea_max/…) derive from pftcon's

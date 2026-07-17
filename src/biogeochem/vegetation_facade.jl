@@ -71,6 +71,12 @@ Base.@kwdef mutable struct CNVegetationConfig
     reseed_dead_plants::Bool = false
     dribble_crophrv_xsmrpool_2atm::Bool = false
     skip_steps::Int = 0
+    # CN fire method (namelist `fire_method`, mapped by cnfire_method_symbol).
+    # Default :nofire => byte-identical to the historical no-fire path. Synced onto
+    # the CN driver config by _sync_driver_config!; the live Li fire additionally
+    # needs the fire bundle (fire_data/fire_li2014/params/pftcon/…) threaded into
+    # cn_vegetation_ecosystem_pre_drainage!.
+    cnfire_method::Symbol = :nofire
 end
 
 # ---------------------------------------------------------------------------
@@ -579,6 +585,30 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         ndyn_params::Union{NDynamicsParams, Nothing} = nothing,
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        # ---- CN fire (Li family) bundle -----------------------------------
+        # Threaded straight through to cn_driver_no_leaching!, whose `_fire_active`
+        # gate needs BOTH config.cnfire_method !== :nofire AND every one of these to
+        # be non-nothing. All default to nothing/empty, so a caller that does not opt
+        # into fire produces the byte-identical no-fire path.
+        fire_data::Union{CNFireBaseData, Nothing} = nothing,
+        fire_li2014::Union{CNFireLi2014Data, Nothing} = nothing,
+        cnfire_const::Union{CNFireConstData, Nothing} = nothing,
+        cnfire_params::Union{CNFireParams, Nothing} = nothing,
+        pftcon_fire::Union{PftConFireBase, Nothing} = nothing,
+        pftcon_fire_li2014::Union{PftConFireLi2014, Nothing} = nothing,
+        dgvs_fire::Union{DgvsFireData, Nothing} = nothing,
+        mask_exposedvegp_fire::Union{AbstractVector{Bool}, Nothing} = nothing,
+        mask_noexposedvegp_fire::Union{AbstractVector{Bool}, Nothing} = nothing,
+        # Fire forcing / water-state inputs (column) + date/step scalars.
+        forc_t_fire_col::AbstractVector{<:Real} = Float64[],
+        forc_rain_fire_col::AbstractVector{<:Real} = Float64[],
+        forc_snow_fire_col::AbstractVector{<:Real} = Float64[],
+        fsat_fire_col::AbstractVector{<:Real} = Float64[],
+        wf_fire_col::AbstractVector{<:Real} = Float64[],
+        wf2_fire_col::AbstractVector{<:Real} = Float64[],
+        fire_kmo::Int = 1, fire_kda::Int = 1, fire_mcsec::Int = 0, fire_nstep::Int = 1,
+        nlevgrnd_fire::Int = 10,
+        transient_landcover::Bool = false,
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
         mask_actfirep::AbstractVector{Bool} = falses(length(bounds_patch)))
 
@@ -678,6 +708,26 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         ndyn_params=ndyn_params,
         h2osoi_vol=h2osoi_vol,
         h2osoi_liq=h2osoi_liq,
+        # CN fire bundle (see the kwarg block above).
+        fire_data=fire_data,
+        fire_li2014=fire_li2014,
+        cnfire_const=cnfire_const,
+        cnfire_params=cnfire_params,
+        pftcon_fire=pftcon_fire,
+        pftcon_fire_li2014=pftcon_fire_li2014,
+        dgvs_fire=dgvs_fire,
+        mask_exposedvegp_fire=mask_exposedvegp_fire,
+        mask_noexposedvegp_fire=mask_noexposedvegp_fire,
+        forc_t_fire_col=forc_t_fire_col,
+        forc_rain_fire_col=forc_rain_fire_col,
+        forc_snow_fire_col=forc_snow_fire_col,
+        fsat_fire_col=fsat_fire_col,
+        wf_fire_col=wf_fire_col,
+        wf2_fire_col=wf2_fire_col,
+        fire_kmo=fire_kmo, fire_kda=fire_kda,
+        fire_mcsec=fire_mcsec, fire_nstep=fire_nstep,
+        nlevgrnd_fire=nlevgrnd_fire,
+        transient_landcover=transient_landcover,
         mask_actfirec=mask_actfirec,
         mask_actfirep=mask_actfirep)
 
@@ -1172,6 +1222,11 @@ function _sync_driver_config!(veg::CNVegetationData)
     dc.use_matrixcn = fc.use_matrixcn
     dc.use_soil_matrixcn = fc.use_soil_matrixcn
     dc.dribble_crophrv_xsmrpool_2atm = fc.dribble_crophrv_xsmrpool_2atm
+    # Fire method + CNDV (the fire mortality decrements DGVS nind only when use_cndv,
+    # exactly as in CNFireBaseMod's `if (use_cndv)` block). Both default-off, so the
+    # default driver config is unchanged.
+    dc.cnfire_method = fc.cnfire_method
+    dc.use_cndv = fc.use_cndv
 
     return nothing
 end

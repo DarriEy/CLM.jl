@@ -128,11 +128,25 @@
     end
 
     @testset "CH4VarCon construction" begin
+        # These MUST be the CTSM `ch4varcon.F90` module defaults. Three of them used to
+        # be the OPPOSITE of Fortran's, which silently made the Julia methane model a
+        # different model (production above the water table on, the CN/moisture HR
+        # limitation removed, aerenchyma oxidation prescribed rather than prognostic).
+        # The Fortran reference independently confirms anoxicmicrosites=.false.:
+        # CH4_PROD_UNSAT is identically zero in the CTSM dump. See docs/CH4_FIRE_PARITY.md.
         vc = CLM.CH4VarCon()
-        @test vc.allowlakeprod == false
-        @test vc.ch4offline == true
-        @test vc.transpirationloss == true
-        @test vc.anoxicmicrosites == true
+        @test vc.allowlakeprod == false        # ch4varcon.F90:27
+        @test vc.ch4offline == true            # ch4varcon.F90:54
+        @test vc.transpirationloss == true     # ch4varcon.F90:21
+        @test vc.anoxicmicrosites == false     # ch4varcon.F90:63  (was wrongly true)
+        @test vc.ch4rmcnlim == false           # ch4varcon.F90:58  (was wrongly true)
+        @test vc.use_aereoxid_prog == true     # ch4varcon.F90:17  (was wrongly false)
+        @test vc.replenishlakec == true        # ch4varcon.F90:35
+        @test vc.usephfact == false            # ch4varcon.F90:33
+        @test vc.ch4frzout == false            # ch4varcon.F90:66
+        @test vc.usefrootc == false            # ch4varcon.F90:47
+        # finundated is now COMPUTED (CalcFinundated), not frozen at its cold-start 0.1.
+        @test vc.finundation_mtd == CLM.FINUNDATION_MTD_H2OSFC
     end
 
     @testset "CH4Data construction" begin

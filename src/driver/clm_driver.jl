@@ -59,6 +59,11 @@ Base.@kwdef struct CNMode <: AbstractBGCMode
     i_cwd::Int = 7
     npcropmin::Int = 17
     nrepr::Int = 1
+    # CN fire method (CTSM namelist `fire_method`; use cnfire_method_symbol to map the
+    # string). Default :nofire keeps the driver byte-identical to the historical
+    # no-fire path. Set to :li2014/:li2016/:li2021/:li2024 (and initialize with
+    # clm_initialize!(; cnfire_method=…, flnfm=…, fhdm=…)) to run the Li fire chain.
+    cnfire_method::Symbol = :nofire
 end
 
 """FATES (Functionally Assembled Terrestrial Ecosystem Simulator) mode."""
@@ -176,6 +181,8 @@ function Base.getproperty(c::CLMDriverConfig, s::Symbol)
         return m isa CNMode ? m.npcropmin : 17
     elseif s === :nrepr
         return m isa CNMode ? m.nrepr : 1
+    elseif s === :cnfire_method
+        return m isa CNMode ? m.cnfire_method : :nofire
     else
         return getfield(c, s)
     end
@@ -201,6 +208,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           ndecomp_pools::Int=7, ndecomp_cascade_transitions::Int=10,
                           i_litr_min::Int=1, i_litr_max::Int=3, i_cwd::Int=7,
                           npcropmin::Int=17, nrepr::Int=1,
+                          cnfire_method::Symbol=:nofire,
                           use_threaded_clumps::Bool=false)
     if use_fates
         mode = FATESMode(; use_fates_sp, use_fates_bgc,
@@ -210,7 +218,8 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                        use_cropcal_streams, use_matrixcn, use_cndv, ndep_from_cpl,
                        decomp_method, no_soil_decomp,
                        ndecomp_pools, ndecomp_cascade_transitions,
-                       i_litr_min, i_litr_max, i_cwd, npcropmin, nrepr)
+                       i_litr_min, i_litr_max, i_cwd, npcropmin, nrepr,
+                       cnfire_method)
     else
         mode = SPMode()
     end
@@ -1024,7 +1033,19 @@ function clm_drv_core!(config::CLMDriverConfig,
                      bounds_grc = bc_grc)
     end
     if config.use_cn
-        # Placeholder: bgc_vegetation_inst%InterpFileInputs(bounds_proc) [CN file inputs]
+        # bgc_vegetation_inst%InterpFileInputs → CNVegetationFacade::InterpFileInputs
+        # → cnfire_method%FireInterp(bounds) (FireDataBaseType.F90). WIRED: fills
+        # cnfire_li2014.forc_lnfm (counts/km2/hr) + forc_hdm (counts/km2) — the
+        # lightning + population-density ignition sources of the Li fire schemes.
+        # Fortran runs this only when need_lightning_and_popdens() (i.e. a Li method);
+        # no-op when the streams were never read (no file supplied), so the default
+        # (:nofire) path is untouched.
+        if need_lightning_and_popdens(config.cnfire_method)
+            fire_stream_interp!(inst.cnfire_li2014, inst.cnfire_stream, grc;
+                                calday     = jday + secs / SECSPDAY,
+                                dayspyr    = 365.0,
+                                bounds_grc = bc_grc)
+        end
     end
     # Placeholder: urbantv_interp!(bounds_proc) [urban TV]
 
@@ -1048,6 +1069,15 @@ function clm_drv_core!(config::CLMDriverConfig,
 
     # Placeholder: topo_inst%UpdateTopo!(bc, ...) [topography update]
     # Placeholder: downscale_forcings!(bc, ...) [atmospheric downscaling]
+
+    # Derive forc_rh_grc from the CURRENT step's forcing (t/pbot/q). Fortran gets
+    # forc_rh from the coupler in the atm->lnd import at the TOP of the step; this
+    # port derives it, and used to do so only in the end-of-step accumulator block
+    # (it is still called there, immediately before atm2lnd_update_acc_vars!, so the
+    # accumulated RH30/RH24 are bit-identical — same value, just computed earlier).
+    # Deriving it here as well is what lets the Li fire schemes see THIS step's RH
+    # instead of the previous step's (0 on step 1, i.e. maximum flammability).
+    atm2lnd_update_rh!(a2l, bc_grc)
 
     # Update exposed vegetation filter
     set_exposedvegp_filter!(filt, bc,
@@ -2084,6 +2114,11 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Ecosystem dynamics
     # ========================================================================
+    # CN fire (Li family) active? Needs the method selected AND the fire bundle
+    # sized by clm_instInit!(; cnfire_method=…) — see the fire-bundle kwargs below.
+    _fire_on = config.cnfire_method !== :nofire &&
+               !isempty(inst.cnfire_li2014.forc_lnfm) &&
+               !isempty(inst.cnfire_base.btran2_patch)
     if config.use_cn || config.use_fates_bgc
         # EcosystemDynamicsPreDrainage — WIRED
         cn_vegetation_ecosystem_pre_drainage!(inst.bgc_vegetation;
@@ -2174,6 +2209,32 @@ function clm_drv_core!(config::CLMDriverConfig,
             dayspyr=365.0,
             h2osoi_vol=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_vol_col : nothing),
             h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
+            # ---- CN fire (Li family) bundle ----
+            # Supplied ONLY when config.cnfire_method !== :nofire; otherwise every
+            # entry is `nothing`/empty and cn_driver's `_fire_active` gate is false,
+            # so the default path is byte-identical. `_fire_on` also guards on the
+            # bundle actually having been allocated by clm_instInit! (a caller that
+            # asked for fire but never initialized it gets no fire rather than an
+            # out-of-bounds read on a zero-length forc_lnfm).
+            fire_data          = _fire_on ? inst.cnfire_base : nothing,
+            fire_li2014        = _fire_on ? inst.cnfire_li2014 : nothing,
+            cnfire_const       = _fire_on ? inst.cnfire_const : nothing,
+            cnfire_params      = _fire_on ? inst.cnfire_params : nothing,
+            pftcon_fire        = _fire_on ? inst.pftcon_fire : nothing,
+            pftcon_fire_li2014 = _fire_on ? inst.pftcon_fire_li2014 : nothing,
+            dgvs_fire          = _fire_on ? inst.dgvs_fire : nothing,
+            mask_exposedvegp_fire   = _fire_on ? filt.exposedvegp : nothing,
+            mask_noexposedvegp_fire = _fire_on ? filt.noexposedvegp : nothing,
+            # Fire forcing + water-state inputs (all column-level).
+            forc_t_fire_col    = _fire_on ? a2l.forc_t_downscaled_col : Float64[],
+            forc_rain_fire_col = _fire_on ? forc_rain_col : Float64[],
+            forc_snow_fire_col = _fire_on ? forc_snow_col : Float64[],
+            fsat_fire_col      = _fire_on ? inst.sat_excess_runoff.fsat_col : Float64[],
+            wf_fire_col        = _fire_on ? wdb.wf_col : Float64[],
+            wf2_fire_col       = _fire_on ? wdb.wf2_col : Float64[],
+            fire_kmo = mon, fire_kda = day, fire_mcsec = secs, fire_nstep = nstep,
+            nlevgrnd_fire = varpar.nlevgrnd,
+            transient_landcover = (config.dyn_subgrid !== nothing),
             mask_actfirec=filt.actfirec,
             mask_actfirep=filt.actfirep)
     end
@@ -2255,6 +2316,10 @@ function clm_drv_core!(config::CLMDriverConfig,
             soilbgc_ns=inst.soilbiogeochem_nitrogenstate,
             soilbgc_nf=inst.soilbiogeochem_nitrogenflux,
             patch_itype=pch.itype,
+            # NB: the SoilBiogeochem carbon-flux Summary (somhr/lithr/hr_vr — CH4's
+            # substrate) is wired by #223, which supplies `decomp`/`dzsoi_decomp_vals`
+            # further down this same call. It was independently found dead by both that
+            # work and this one.
             # ---- N leaching (the mineral-N LOSS term) ----
             # Post-drainage, so qflx_drain/qflx_surf are this step's final values —
             # which is exactly why Fortran calls SoilBiogeochemNLeaching here and not

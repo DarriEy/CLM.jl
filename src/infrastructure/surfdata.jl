@@ -49,6 +49,15 @@ Base.@kwdef mutable struct SurfaceInputData
     # Glacier MEC weights [ng, maxpatch_glc]
     wt_glc_mec::Matrix{Float64}    = Matrix{Float64}(undef, 0, 0)
 
+    # ---- Fire (Li-family) gridcell inputs, read from the surface dataset ----
+    # Fortran reads these in FireDataBaseType::surfdataread (not surfrdMod), but
+    # they come off the SAME fsurdat file, so they are read here with everything
+    # else and scattered gridcell -> column by cnfire_surfdata_read!.
+    # gdp   (k US$/capita), peatf (0-1), abm (peak crop-fire month, 1-12; 13 = none)
+    gdp::Vector{Float64}           = Float64[]
+    peatf::Vector{Float64}         = Float64[]
+    abm::Vector{Int}               = Int[]
+
     # ---- 2D grid topology (multi-gridcell support) ----
     # Per-gridcell latitude/longitude (degrees), length ng. For a single-gridcell
     # (or tiled) run these may be left empty and lat/lon supplied externally.
@@ -286,6 +295,9 @@ function surfrd_get_data!(surf::SurfaceInputData, begg::Int, endg::Int, fsurdat:
         # Read monthly phenology
         surfrd_phenology!(surf, ds, ng)
 
+        # Read the Li-family fire inputs (gdp / peatf / abm)
+        surfrd_fire!(surf, ds, ng)
+
     finally
         close(ds)
     end
@@ -494,6 +506,31 @@ function surfrd_soil!(surf::SurfaceInputData, ds::NCDataset, ng::Int)
         end
     end
 
+    nothing
+end
+
+"""
+    surfrd_fire!(surf, ds, ng)
+
+Read the Li-family fire inputs from the surface dataset: `gdp` (k US\$/capita),
+`peatf` (peatland fraction, 0-1) and `abm` (peak month of crop-fire emissions,
+1-12).
+
+Ported from `surfdataread` in `cpl/share_esmf/FireDataBaseType.F90`, which opens
+`fsurdat` and reads exactly these three variables (no unit conversion). Fortran
+`endrun`s when a variable is missing; here the arrays are simply left empty when
+absent, and `cnfire_surfdata_read!` raises the error — so a non-fire run on a
+surface file without them is unaffected.
+"""
+function surfrd_fire!(surf::SurfaceInputData, ds::NCDataset, ng::Int)
+    surf.gdp   = haskey(ds, "gdp")   ? _read_spatial_scalar(ds, "gdp", ng, 0.0)   : Float64[]
+    surf.peatf = haskey(ds, "peatf") ? _read_spatial_scalar(ds, "peatf", ng, 0.0) : Float64[]
+    if haskey(ds, "abm")
+        raw = _read_spatial_scalar(ds, "abm", ng, 13.0)
+        surf.abm = [Int(round(raw[g])) for g in 1:ng]
+    else
+        surf.abm = Int[]
+    end
     nothing
 end
 

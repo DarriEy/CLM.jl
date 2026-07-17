@@ -132,6 +132,24 @@ Base.@kwdef mutable struct CLMInstances
     dgvs::DGVSData                   = DGVSData()
     dgv_ecophyscon::DGVEcophysCon    = DGVEcophysCon()
 
+    # --- CN fire (Li family) — only sized/used when cnfire_method !== :nofire ---
+    # The Fortran fire_method object (CNFireFactoryMod) owns all of these: the
+    # base state (btran2), the Li-specific inputs (lightning/popdens streams +
+    # gdp/peatf/abm from fsurdat), the shared constants, the params-file params,
+    # and the pftcon members the fire kernels associate to. `cnfire_stream` is the
+    # lnfm/hdm stream reader (infrastructure/fire_streams.jl), inactive unless the
+    # caller supplies the stream files — exactly like `ndep_stream` above.
+    # All zero-length by default => the fire gate in cn_driver_no_leaching! stays
+    # structurally off and the default path is byte-identical.
+    cnfire_base::CNFireBaseData          = CNFireBaseData()
+    cnfire_li2014::CNFireLi2014Data      = CNFireLi2014Data()
+    cnfire_const::CNFireConstData        = CNFireConstData()
+    cnfire_params::CNFireParams          = CNFireParams()
+    pftcon_fire::PftConFireBase          = PftConFireBase()
+    pftcon_fire_li2014::PftConFireLi2014 = PftConFireLi2014()
+    dgvs_fire::DgvsFireData              = DgvsFireData()
+    cnfire_stream::FireStreamData        = FireStreamData()
+
     # --- Decomposition cascade ---
     decomp_cascade::DecompCascadeConData = DecompCascadeConData()
 
@@ -240,7 +258,8 @@ function clm_instInit!(inst::CLMInstances;
                        use_lch4::Bool = false,
                        use_cndv::Bool = false,
                        use_c13::Bool = false,
-                       use_c14::Bool = false)
+                       use_c14::Bool = false,
+                       cnfire_method::Symbol = :nofire)
 
     # --- Grid hierarchy ---
     gridcell_init!(inst.gridcell, ng)
@@ -337,6 +356,7 @@ function clm_instInit!(inst::CLMInstances;
         ch4_init_allocate!(inst.ch4, nc, np, ng, varpar.nlevsoi)
     end
 
+
     # --- Emissions ---
     dust_emis_init!(inst.dust_emis, np; nc=nc)
     vocemis_init!(inst.vocemis, np, ng, 20, 20)
@@ -371,6 +391,28 @@ function clm_instInit!(inst::CLMInstances;
         if !isempty(pftcon.pftpar20)
             dgv_ecophyscon_init!(inst.dgv_ecophyscon, pftcon)
         end
+    end
+
+    # --- CN fire (Li family) — size the fire bundle only when active ---
+    # Mirrors the use_lch4 gate above (and Fortran's CNFireFactory: a fire_method
+    # object exists for NoFire too, but BaseFireInit only allocates the
+    # lightning/popdens/gdp/peatf/abm inputs when need_lightning_and_popdens()).
+    # Left at size 0 for :nofire, so cn_driver's `_fire_active` gate can never see a
+    # populated bundle and the default path stays byte-identical.
+    #
+    # The gridcell->column surfdata scatter (gdp/peatf/abm), the params-file read
+    # and the pftcon aliasing all happen in clm_initialize!: they need col%gridcell
+    # (built after this call) and readParameters! (called after this).
+    #
+    # nind_patch is ALIASED onto the live DGVS array when use_cndv (run after the
+    # dgvs cold-start above), so the fire mortality's nind decrement lands on the
+    # prognostic DGVS state instead of a private copy.
+    if cnfire_method !== :nofire
+        if use_cndv && !isempty(inst.dgvs.nind_patch)
+            inst.dgvs_fire.nind_patch = inst.dgvs.nind_patch
+        end
+        cnfire_init_allocate!(inst.cnfire_base, inst.cnfire_li2014, inst.dgvs_fire,
+                              nc, np, ng)
     end
 
     # --- Saturated / infiltration excess runoff ---
