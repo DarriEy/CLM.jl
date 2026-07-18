@@ -191,14 +191,24 @@ Base.@kwdef mutable struct CH4Params
     pHmin               ::Float64 = 2.2      # minimum pH for CH4 production
     oxinhib             ::Float64 = 10.0     # inhibition of CH4 production by oxygen (m^3/mol)
 
-    # CH4 oxidation constants
-    vmax_ch4_oxid       ::Float64 = 0.0125   # oxidation rate constant [mol/m3-w/s]
-    k_m                 ::Float64 = 5.0e-3   # Michaelis-Menten rate constant for CH4 conc
-    q10_ch4oxid         ::Float64 = 1.9      # Q10 oxidation constant
-    smp_crit            ::Float64 = -2.4e5   # critical soil moisture potential (mm)
-    k_m_o2              ::Float64 = 2.0e-2   # Michaelis-Menten rate constant for O2 conc
-    k_m_unsat           ::Float64 = 5.0e-3   # Michaelis-Menten rate constant for CH4 conc (unsat)
-    vmax_oxid_unsat     ::Float64 = 1.25e-3  # oxidation vmax for unsaturated conditions [mol/m3-w/s]
+    # CH4 oxidation constants.
+    # These five are HARDCODED in ch4Mod.F90 readParams (the param-file read is
+    # commented out), so the Julia default MUST equal the Fortran expression exactly:
+    #   vmax_ch4_oxid   = 45e-6 * 1000 / 3600        = 1.25e-5   (was 0.0125 — 1000x too big)
+    #   k_m             = 5e-6  * 1000               = 5.0e-3    (correct)
+    #   k_m_o2          = 20e-6 * 1000               = 2.0e-2    (correct)
+    #   k_m_unsat       = 5e-6  * 1000 / 10          = 5.0e-4    (was 5.0e-3  — 10x too big)
+    #   vmax_oxid_unsat = 45e-6 * 1000 / 3600 / 10   = 1.25e-6   (was 1.25e-3 — 1000x too big)
+    # The 1000x/10x defaults dropped the /3600 (per-hour→per-sec) and /10 factors, so
+    # CH4 oxidation ran 1000x (sat) / 100x (unsat, = vmax 1000x / k_m 10x) too fast.
+    # (kept as the exact Fortran expressions so they are bit-identical to ch4Mod's)
+    vmax_ch4_oxid       ::Float64 = 45.0e-6 * 1000.0 / 3600.0         # 1.25e-5 [mol/m3-w/s]
+    k_m                 ::Float64 = 5.0e-6  * 1000.0                  # 5.0e-3  MM const for CH4 conc
+    q10_ch4oxid         ::Float64 = 1.9      # Q10 oxidation constant (read from param file)
+    smp_crit            ::Float64 = -2.4e5   # critical soil moisture potential (mm) (read from param file)
+    k_m_o2              ::Float64 = 20.0e-6 * 1000.0                  # 2.0e-2  MM const for O2 conc
+    k_m_unsat           ::Float64 = 5.0e-6  * 1000.0 / 10.0          # 5.0e-4  MM const for CH4 conc (unsat)
+    vmax_oxid_unsat     ::Float64 = 45.0e-6 * 1000.0 / 3600.0 / 10.0 # 1.25e-6 oxidation vmax (unsat)
 
     # CH4 aerenchyma constants
     aereoxid            ::Float64 = 0.5      # fraction of CH4 in aerenchyma oxidized

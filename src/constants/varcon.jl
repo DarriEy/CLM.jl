@@ -208,9 +208,16 @@ const D_CON_G = [
     0.1325   0.0009     # CO2
 ]
 
-# Henry's law constants [ngases]
-const C_H_INV = [600.0, 1.3, 36.0]
-const KH_THETA = [1600.0, 1500.0, 2400.0]
+# Henry's law constants [ngases] — CH4, O2, CO2.
+# From CLM clm_varcon.F90:
+#   data c_h_inv(1:3)  /1600._r8, 1500._r8, 2400._r8/   ! (K) temp-dependence const (Wania 4.12)
+#   data kh_theta(1:3) /714.29_r8, 769.23_r8, 29.4_r8/  ! (L.atm/mol) Henry const at 298 K
+# The earlier port had these mangled (KH_THETA held the c_h_inv values and C_H_INV
+# held garbage), which corrupted every CH4/O2 gas–liquid partition
+# (k_h_inv = exp(-c_h_inv*(1/T - 1/kh_tbase) + log(kh_theta))) across oxidation,
+# aerenchyma, ebullition and the ch4_tran diffusivity — see ch4Mod.
+const C_H_INV = [1600.0, 1500.0, 2400.0]
+const KH_THETA = [714.29, 769.23, 29.4]
 
 # Snow capping constants
 const H2OSNO_MAX = 10000.0       # Maximum allowed SWE [mm H2O]
