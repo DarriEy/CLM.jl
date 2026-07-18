@@ -14,14 +14,13 @@ println("=" ^ 70)
 println("MULTI-SITE CALIBRATION TESTS for CLM.jl")
 println("=" ^ 70)
 
-const FSURDAT_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+include(joinpath(@__DIR__, "testdata.jl"))
+const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
 
 @testset "Multi-Site Calibration" begin
 
     if !isfile(FSURDAT_PATH) || !isfile(PARAMFILE_PATH)
-        @warn "Skipping multi-site tests: input files not found"
-        @test true
+        testdata_missing("multi-site tests", FSURDAT_PATH, PARAMFILE_PATH)
         return
     end
 

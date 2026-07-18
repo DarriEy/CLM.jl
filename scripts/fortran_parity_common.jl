@@ -15,6 +15,11 @@
 # inputs ~1e-10 relative is the Float64 cross-compiler floor.
 # ==========================================================================
 
+# NB: `Base.include(@__MODULE__, ...)`, not bare `include`. Several of these
+# scripts are loaded by their tests into a fresh `Module(:X)`, which does NOT
+# bind a bare `include` — that form throws UndefVarError there.
+Base.include(@__MODULE__, joinpath(@__DIR__, "..", "test", "testdata.jl"))
+
 using CLM
 using NCDatasets
 using Printf
@@ -23,14 +28,14 @@ using Dates
 const _read_fortran_restart! = getfield(CLM, Symbol("read_fortran_restart!"))
 
 # ---- Bow-at-Banff paths (the instrumented Fortran run's config) ----
-const BOW_BASE = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const BOW_BASE = bow_domain_dir()
 const BOW_CAL  = joinpath(BOW_BASE, "optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters")
 const FSURDAT  = joinpath(BOW_CAL, "surfdata_clm.nc")
 const FPARAM   = joinpath(BOW_CAL, "clm5_params.nc")
 const FFORCING = joinpath(BOW_BASE, "data/forcing/CLM_input/clmforc.2003.nc")
-const FSNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const FSNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
-const DUMPDIR  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run"
+const FSNOWOPT = snicar_optics()
+const FSNOWAGE = snicar_aging()
+const DUMPDIR  = symfluence_path("clm_parity_run")
 
 # Calibrated namelist values from the Fortran run (user_nl_clm / verify_vs_fortran.jl)
 const BASEFLOW_SCALAR = 0.0022119554

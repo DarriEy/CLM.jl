@@ -21,16 +21,19 @@
 #
 # Usage: julia +1.12 --project=. scripts/urban_smoke.jl
 # =============================================================================
+# NB: `Base.include(@__MODULE__, ...)`, not bare `include`. Several of these
+# scripts are loaded by their tests into a fresh `Module(:X)`, which does NOT
+# bind a bare `include` — that form throws UndefVarError there.
+Base.include(@__MODULE__, joinpath(@__DIR__, "..", "test", "testdata.jl"))
+
 using CLM, NCDatasets, Dates, Printf
 
-const URB_FS = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/" *
-               "python/ctsm/test/testinputs/" *
-               "surfdata_1x1_mexicocityMEX_hist_16pfts_CMIP6_2000_c231103.nc"
-const BOW_CAL = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/" *
-                "domain_Bow_at_Banff_lumped/settings/CLM/parameters"
+const URB_FS = symfluence_path("installs", "clm", "python", "ctsm", "test", "testinputs",
+                               "surfdata_1x1_mexicocityMEX_hist_16pfts_CMIP6_2000_c231103.nc")
+const BOW_CAL = domain_params_dir("domain_Bow_at_Banff_lumped")
 const URB_FP = joinpath(BOW_CAL, "clm5_params.nc")
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const SNOWOPT = snicar_optics()
+const SNOWAGE = snicar_aging()
 
 # Warm, dry daytime forcing (Mexico City ~2240 m): mild air, no snow.
 function set_urban_forcing!(inst, ng, nc)

@@ -24,8 +24,10 @@
 # ==========================================================================
 using Test, CLM, NCDatasets, Dates, Printf
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Fortran LUNA EOD update (gated)" begin
-    bgcdir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup"
+    bgcdir = symfluence_path("clm_bgc_spinup")
     edump  = joinpath(bgcdir, "pdump_before_step_n1757880.nc")
     if !isfile(edump)
         @info "LUNA-update parity: dumps absent, skipping" edump

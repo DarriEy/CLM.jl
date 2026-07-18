@@ -35,9 +35,11 @@ using CLM
 using NCDatasets
 using Dates
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Fortran CN/BGC parity (gated)" begin
     common  = joinpath(@__DIR__, "..", "scripts", "fortran_parity_common.jl")
-    dumpdir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+    dumpdir = symfluence_path("clm_bgc_spinup", "bgc_ref_summer")
 
     # The BGC run cycles datm 2002-2009 (year_align=2002): model year 2202 maps
     # to forcing year 2002. nstep -> date base DateTime(2002,1,1)+Hour(n-1753153).

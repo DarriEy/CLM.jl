@@ -1,3 +1,5 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Methane (ch4Mod)" begin
 
     # Helper to create minimal test data
@@ -693,20 +695,17 @@
     @testset "read_ch4_finundated_stream! (real inversiondata file)" begin
         # The Prigent/Swenson regression stream, if present. Absence is a valid
         # partial outcome (the PORT is the deliverable); the test then skips.
+        finund = "finundated_inversiondata_0.9x1.25_c170706.nc"
         candidates = [
-            joinpath(@__DIR__, "..", "..", "..", "..", "..", "..",
-                     "compHydro", "SYMFLUENCE_data", "installs", "cesm-inputdata",
-                     "lnd", "clm2", "paramdata",
-                     "finundated_inversiondata_0.9x1.25_c170706.nc"),
-            "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/cesm-inputdata/lnd/clm2/paramdata/finundated_inversiondata_0.9x1.25_c170706.nc",
+            symfluence_path("installs", "cesm-inputdata", "lnd", "clm2", "paramdata", finund),
+            joinpath(cesm_inputdata_root(), "lnd", "clm2", "paramdata", finund),
         ]
         path = ""
         for cand in candidates
             if isfile(cand); path = cand; break; end
         end
         if isempty(path)
-            @info "finundated_inversiondata stream not found; skipping real-file read test"
-            @test_skip false
+            testdata_missing("finundated_inversiondata real-file read test", candidates...)
         else
             # MerBleue peatland ~45.41 N, 75.52 W (=284.48 E).
             stream = CLM.CH4FInundatedStream()

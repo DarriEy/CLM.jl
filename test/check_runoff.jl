@@ -1,6 +1,8 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using NCDatasets, Dates, Statistics, CLM
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
-const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const basedir = bow_domain_dir()
 
 fh = tempname() * "_runoff.nc"
 # Use calibrated parameters (from DDS optimization) for parity with Fortran reference
@@ -11,8 +13,8 @@ inst = run_clm!(;
     fforcing=joinpath(basedir, "data/forcing/CLM_input/clmforc.2002.nc"),
     fhistory=fh,
     start_date=DateTime(2002,1,1), end_date=DateTime(2003,1,1),
-    fsnowoptics="/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc",
-    fsnowaging="/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc",
+    fsnowoptics=snicar_optics(),
+    fsnowaging=snicar_aging(),
     use_aquifer_layer=false,
     baseflow_scalar=0.0022119554,
     int_snow_max=3113.2227,

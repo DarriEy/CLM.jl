@@ -12,6 +12,8 @@ using Test
 using ForwardDiff
 using CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Calibration Framework" begin
 
     # =====================================================================
@@ -83,13 +85,10 @@ using CLM
     # Integration test: calibration objective runs without error
     # =====================================================================
     @testset "Calibration objective smoke test" begin
-        fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-        paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+        fsurdat, paramfile = bow_params()
 
         if !isfile(fsurdat) || !isfile(paramfile)
-            @warn "Skipping calibration integration tests: input files not found"
-            @test true
-            return
+            testdata_missing("calibration integration tests", fsurdat, paramfile) && return
         end
 
         # Simple single-parameter problem: ground temperature target
@@ -160,13 +159,10 @@ using CLM
     # Optimization test: gradient descent takes a step
     # =====================================================================
     @testset "Optimization smoke test" begin
-        fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-        paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+        fsurdat, paramfile = bow_params()
 
         if !isfile(fsurdat) || !isfile(paramfile)
-            @warn "Skipping optimization tests: input files not found"
-            @test true
-            return
+            testdata_missing("optimization tests", fsurdat, paramfile) && return
         end
 
         # Simple problem: match ground temperature

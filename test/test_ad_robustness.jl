@@ -20,21 +20,18 @@ using ForwardDiff
 using ForwardDiff: Dual, Tag, value, partials
 using CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "AD Robustness — Multi-scenario" begin
 
-    # Data root is env-overridable so this test still RUNS off the Drive migration copy
-    # once the original Calgary-laptop path is gone (same pattern as
-    # scripts/parity_run_domain.jl). Without this, the skip below turns the whole
-    # testset into a permanent `@test true` — vacuously green forever.
-    DATA = get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
-    params_dir = joinpath(DATA, "domain_Bow_at_Banff_lumped", "settings", "CLM", "parameters")
-    fsurdat = joinpath(params_dir, "surfdata_clm.nc")
-    paramfile = joinpath(params_dir, "clm5_params.nc")
+    # Data root is env-overridable (see test/testdata.jl) so this test still RUNS
+    # off the Drive migration copy once the original Calgary-laptop path is gone.
+    # Without this, the skip below turned the whole testset into a permanent
+    # `@test true` — vacuously green forever.
+    fsurdat, paramfile = bow_params()
 
     if !isfile(fsurdat) || !isfile(paramfile)
-        @warn "Skipping AD robustness tests: input files not found"
-        @test true
-        return
+        testdata_missing("AD robustness tests", fsurdat, paramfile) && return
     end
 
     # Runs on the global default cold start (Fortran-matching). No pin is needed: the FD

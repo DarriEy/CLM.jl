@@ -13,14 +13,13 @@ println("=" ^ 70)
 println("CN/BGC INTEGRATION TESTS for CLM.jl")
 println("=" ^ 70)
 
-const FSURDAT_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+include(joinpath(@__DIR__, "testdata.jl"))
+const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
 
 @testset "CN Integration" begin
 
     if !isfile(FSURDAT_PATH) || !isfile(PARAMFILE_PATH)
-        @warn "Skipping CN integration tests: input files not found"
-        @test true
+        testdata_missing("CN integration tests", FSURDAT_PATH, PARAMFILE_PATH)
         return
     end
 

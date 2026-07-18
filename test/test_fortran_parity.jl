@@ -20,9 +20,11 @@
 
 using Test
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Fortran parity (per-step, gated)" begin
     common = joinpath(@__DIR__, "..", "scripts", "fortran_parity_common.jl")
-    dumpdir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run"
+    dumpdir = symfluence_path("clm_parity_run")
 
     # Steps to check + the field tolerances (abs). Daytime (n13461, peak sun)
     # exercises the radiation/canopy path; night (n13470) exercises the

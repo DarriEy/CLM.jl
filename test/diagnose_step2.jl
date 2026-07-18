@@ -1,9 +1,11 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using CLM, Dates, Printf
 
 # Initialize
-fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
-fforcing = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2002.nc"
+fsurdat = first(bow_params())
+paramfile = last(bow_params())
+fforcing = bow_forcing("clmforc.2002.nc")
 
 fhistory = tempname() * "_diag.nc"
 ndays = 1

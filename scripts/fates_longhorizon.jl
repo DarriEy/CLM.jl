@@ -15,9 +15,14 @@
 #
 #   FATES_NDAYS=365 julia +1.12 --project=. scripts/fates_longhorizon.jl
 # ==========================================================================
+# NB: `Base.include(@__MODULE__, ...)`, not bare `include`. Several of these
+# scripts are loaded by their tests into a fresh `Module(:X)`, which does NOT
+# bind a bare `include` — that form throws UndefVarError there.
+Base.include(@__MODULE__, joinpath(@__DIR__, "..", "test", "testdata.jl"))
+
 using CLM, Printf, Dates
 const _C = CLM
-const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+const DATA = symfluence_data_root()
 
 # ---- census / carbon helpers (mirror test_fates_live_modes.jl / test_fates_spinup.jl) ----
 function census(inst)
