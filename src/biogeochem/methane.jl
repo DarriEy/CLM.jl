@@ -1335,6 +1335,10 @@ Base.@kwdef struct _CH4AereP{T}
     tfrz::T; spval::T; rpi::T; poros_base::T
     transpirationloss::Bool; use_aereoxid_prog::Bool
     sat::Int; noveg::Int; nlevsoi::Int
+    # Lowest grass PFT index (nc3_arctic_grass). Grasses (12,13,14) and crops
+    # (>=15) are exactly the itypes >= this, which is CTSM ch4_aere's grass/crop
+    # branch for the full-porosity tiller (see the kernel's poros_tiller comment).
+    nc3_arctic_grass::Int
 end
 Adapt.@adapt_structure _CH4AereP
 
@@ -1355,7 +1359,16 @@ Adapt.@adapt_structure _CH4AereP
         else
             is_vegetated = d.patch_itype[p] != p_par.noveg
         end
-        poros_tiller = p_par.poros_base * p_par.nongrassporosratio
+        # CTSM ch4Mod ch4_aere: GRASS and CROP patches use the full root porosity
+        # (0.3, Colmer 2003); every other PFT uses 0.3*nongrassporosratio. The
+        # Fortran OR-condition {nc3_arctic_grass, nc3_nonarctic_grass, nc4_grass,
+        # crop(itype)==1} is exactly the itypes >= nc3_arctic_grass (grasses are
+        # 12/13/14, crops are >=15), so the >= test reproduces it. This kernel had
+        # applied nongrassporosratio UNCONDITIONALLY, making grass-patch aerenchyma
+        # (the dominant CH4 conduit) 1/nongrassporosratio ~3x too small.
+        poros_tiller = d.patch_itype[p] >= p_par.nc3_arctic_grass ?
+                       p_par.poros_base :
+                       p_par.poros_base * p_par.nongrassporosratio
 
         jwt_c = d.jwt[c]
         for j in 1:p_par.nlevsoi
@@ -1521,7 +1534,8 @@ function ch4_aere!(ch4::CH4Data,
             rpi = T(RPI), poros_base = T(0.3),
             transpirationloss = ch4vc.transpirationloss,
             use_aereoxid_prog = ch4vc.use_aereoxid_prog,
-            sat = sat, noveg = noveg, nlevsoi = nlevsoi)
+            sat = sat, noveg = noveg, nlevsoi = nlevsoi,
+            nc3_arctic_grass = nc3_arctic_grass)
 
         # Per-patch kernel: site_ox_aere! math inline (sequential j-loop) +
         # patch→column scatter into the (zeroed) column arrays. The first arg
