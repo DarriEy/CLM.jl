@@ -121,7 +121,15 @@
         p = CLM.CH4Params()
         @test p.q10ch4 == 1.5
         @test p.f_ch4 == 0.2
-        @test p.vmax_ch4_oxid == 0.0125
+        # Oxidation rate constants are HARDCODED in ch4Mod.F90 readParams (file read
+        # commented out) — must equal the Fortran expressions exactly. These defaults
+        # were previously 1000x/10x too big (dropped the /3600 and /10 factors), which
+        # ran CH4 oxidation 1000x (sat) / 100x (unsat) too fast.
+        @test p.vmax_ch4_oxid   == 45.0e-6 * 1000.0 / 3600.0          # 1.25e-5
+        @test p.k_m             == 5.0e-6  * 1000.0                    # 5.0e-3
+        @test p.k_m_o2          == 20.0e-6 * 1000.0                   # 2.0e-2
+        @test p.k_m_unsat       == 5.0e-6  * 1000.0 / 10.0            # 5.0e-4
+        @test p.vmax_oxid_unsat == 45.0e-6 * 1000.0 / 3600.0 / 10.0  # 1.25e-6
         @test p.vgc_max == 0.15
         @test p.satpow == 2.0
         @test p.f_sat == 0.95

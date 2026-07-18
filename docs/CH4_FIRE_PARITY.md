@@ -648,3 +648,83 @@ a **second, organic-soil site** — it is not Bow-specific.
 #   lldb -b -o run -o quit ./cesm.exe        # NB: lldb, not plain — see §9 launch recipe
 julia --project=. scripts/fortran_parity_ch4_merbleue.jl 3   # MerBleue methane scorecard
 ```
+
+---
+
+## 10. The CH4 SOURCE-term residual — four mis-ported constants (oxidation kinetics + Henry's law)
+
+After #237 fixed the saturated-column TRANSPORT (the `1.0e3` diffusivity placeholder), the
+Bow scorecard still showed `CONC_CH4_SAT ~12%`, `O2STRESS_SAT ~1`, and huge `CH4_OXID_*`.
+#237 isolated the remaining lead to the SOURCE recompute (production + oxidation). This pass
+found it: **the oxidation kinetics were running 1000× (sat) / 100× (unsat) too fast, plus a
+mangled Henry's-law table** — five constants, all verified line-by-line against `ch4Mod.F90`
+`readParams` and `clm_varcon.F90`.
+
+### The clean isolation — `scripts/ch4_oxid_source_injection.jl`
+Oxidation (`ch4_oxid`) is a pure function of INJECTABLE before-step state (conc_ch4, conc_o2,
+watsat, h2osoi_vol, smp_l, t_soisno, jwt) — nothing from the CN driver enters it, unlike
+production (which reads warm-CN `somhr`/`hr_vr`, not dumped). So a clean oracle: inject
+Fortran's before-step state, call `ch4_oxid!` directly, and diff.
+
+**Key subtlety:** the dumped `CH4_OXID` is POST-competition — `ch4_tran` overwrites
+`ch4_oxid_depth *= ch4stress` (or `*= o2stress`) (`ch4Mod.F90:3609,3623`). At Bow's sat column
+`O2STRESS_SAT≈0`, scaling the raw rate down ~1000×. The isolation applies Fortran's own dumped
+`min(ch4stress,o2stress)` to Julia's raw rate to compare against the dump. The residual was a
+**uniform** ×1000 (sat) / ×100 (unsat) offset — a constant/param bug, not a per-layer formula
+error. Deep layers (where the MM factor is linear) pinned the factors to *exactly* 1000 and 100.
+
+### The bugs (all HARDCODED in `ch4Mod.F90 readParams`, file read commented out)
+| param | Fortran | CLM.jl (was) | factor | affects |
+|---|---|---|---|---|
+| `vmax_ch4_oxid`   | `45e-6*1000/3600`      = 1.25e-5 | **0.0125**  | 1000× | sat + unsat oxidation |
+| `vmax_oxid_unsat` | `45e-6*1000/3600/10`   = 1.25e-6 | **1.25e-3** | 1000× | unsat oxidation |
+| `k_m_unsat`       | `5e-6*1000/10`         = 5.0e-4  | **5.0e-3**  | 10×   | unsat oxidation MM |
+
+The defaults had dropped the `/3600` (per-hour→per-sec) and `/10` factors. `k_m`=5.0e-3 and
+`k_m_o2`=2.0e-2 were already correct. In the linear MM regime `oxid ∝ vmax/k_m`, so the unsat
+error = 1000/10 = **exactly 100×**, and the sat error = **exactly 1000×** — matching the probe.
+
+### Plus the Henry's-law table (`clm_varcon.F90`), mangled — `src/constants/varcon.jl`
+`k_h_inv = exp(-c_h_inv·(1/T − 1/kh_tbase) + log(kh_theta))` drives every CH4/O2 gas–liquid
+partition (oxidation above-WT, aerenchyma, ebullition, and the `ch4_tran` diffusivity).
+| const (CH4,O2,CO2) | Fortran | CLM.jl (was) |
+|---|---|---|
+| `C_H_INV`  | `[1600, 1500, 2400]`     | **[600, 1.3, 36]** (garbage) |
+| `KH_THETA` | `[714.29, 769.23, 29.4]` | **[1600, 1500, 2400]** (= Fortran's c_h_inv!) |
+
+### Before → after (Bow scorecard, worst rel.err over 3 window steps)
+| field | baseline (post-#237) | + Henry | + oxid params (this PR) |
+|---|---|---|---|
+| `CH4_OXID_UNSAT` | 18.2   | 18.2   | **0.098** |
+| `CH4_OXID_SAT`   | 1.67   | 1.68   | **0.167** |
+| `CONC_CH4_SAT`   | 0.125  | 0.0085 | **0.0033** |
+| `O2STRESS_SAT`   | 0.997  | 0.997  | **0.558** |
+| `CH4STRESS_SAT`  | 0.938  | 0.938  | **0.238** |
+| `TOTCOLCH4`      | 0.171  | 0.170  | **0.0045** |
+| `CH4_SURF_FLUX_TOT` | 2.45 | 2.50  | **0.256** |
+| `CONC_O2_SAT`    | 0.120  | **0.069** | 0.069 |
+| `CH4_SURF_DIFF_SAT` | 0.596 | **0.065** | 0.065 |
+
+The oxidation-kernel isolation (competition-compensated) went from **987 / 92** (sat/unsat) to
+**0.095 / 0.143**, with deep layers now bit-matching Fortran (e.g. lev 20: 1.9857e-54 in both).
+
+### What still remains (reported honestly, NOT tuned)
+* **`CH4_PROD_SAT` = 7.7%, unchanged.** Production reads the warm-CN `somhr`/`lithr`/`hr_vr`,
+  which are Julia-recomputed and NOT dumped, so this residual is a CN-state confound, not a
+  clear production-kernel bug. The production kernel matches `ch4Mod.F90` line-by-line.
+* **The saturated-column transport half** (`CH4_TRAN_SAT ~1`, `O2STRESS_SAT 0.56`,
+  `CONC_O2_SAT/UNSAT ~6%`) is much improved but not closed. This is the transport/competition
+  solve, still needing a `finundated>0` wetland ground truth (blocked, §7/§9) to isolate.
+* `CH4_AERE_SAT` moved 0.14→0.61: a single-step sensitivity on a Bow-degenerate
+  (`finundated≡0`, tiny `|F|`) diagnostic — not load-bearing.
+
+`test_methane.jl` + `test_constants.jl` 198/198 under `--check-bounds=yes`; the five corrected
+values are now asserted against their exact Fortran expressions. Default (non-CH4) path is
+byte-identical — `C_H_INV`/`KH_THETA` and the `CH4Params` oxidation constants are used ONLY in
+`methane.jl` under `use_lch4`.
+
+### Reproducing
+```bash
+julia --project=. scripts/ch4_oxid_source_injection.jl 4721   # clean oxidation-kernel oracle
+julia --project=. scripts/fortran_parity_ch4.jl 3             # full Bow scorecard
+```

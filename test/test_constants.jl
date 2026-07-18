@@ -111,6 +111,14 @@
         @test CLM.D_CON_G ≈ [0.1875 0.0013;
                              0.1759 0.00117;
                              0.1325 0.0009]
+
+        # Henry's-law constants (CH4, O2, CO2) from clm_varcon.F90:
+        #   data c_h_inv(1:3)  /1600., 1500., 2400./    (K) temp-dependence const
+        #   data kh_theta(1:3) /714.29, 769.23, 29.4/   (L.atm/mol) Henry const @298K
+        # A prior port had these mangled (KH_THETA held the c_h_inv values, C_H_INV
+        # held garbage), corrupting every CH4/O2 gas-liquid partition in ch4Mod.
+        @test CLM.C_H_INV  ≈ [1600.0, 1500.0, 2400.0]
+        @test CLM.KH_THETA ≈ [714.29, 769.23, 29.4]
     end
 
 end
