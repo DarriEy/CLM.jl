@@ -2247,7 +2247,17 @@ function clm_drv_core!(config::CLMDriverConfig,
             wf2_fire_col       = _fire_on ? wdb.wf2_col : Float64[],
             fire_kmo = mon, fire_kda = day, fire_mcsec = secs, fire_nstep = nstep,
             nlevgrnd_fire = varpar.nlevgrnd,
-            transient_landcover = (config.dyn_subgrid !== nothing),
+            # CTSM: `transient_landcover = run_has_transient_landcover()`, which is
+            # do_transient_pfts .OR. do_transient_crops .OR. do_transient_urban —
+            # NOT "a dyn_subgrid state exists". A DynSubgridState is constructed with
+            # ALL transient aspects off (a near-identity reweight), and one built for
+            # do_transient_LAKES only must still report false (lakes are deliberately
+            # excluded from the Fortran predicate). Testing `!== nothing` turned both
+            # of those into `true`, which switches CNFireFluxes' per-patch burned
+            # fraction from `farea_burned` to `fbac` and enables the lfc/lfc2
+            # deforestation bookkeeping in runs where CTSM leaves them off.
+            transient_landcover = (config.dyn_subgrid !== nothing &&
+                                   run_has_transient_landcover(config.dyn_subgrid.ctl)),
             mask_actfirec=filt.actfirec,
             mask_actfirep=filt.actfirep)
     end

@@ -383,7 +383,7 @@ function _read_variable!(var::DynVarTimeUninterp, nt::Int)
     # dimension(s) first and 'time' last (CLM/NetCDF convention), so we slice the
     # trailing time index. The result is reshaped/flattened to data_at_tlower.
     ncvar = ds[var.varname]
-    rawslice = _read_time_slice(ncvar, nt, ndims)
+    rawslice = _read_time_slice(ncvar, nt, ndims, var.data_shape)
     arrayl = Float64.(replace(rawslice, missing => NaN))
 
     # Apply conversion: data are DIVIDED by conversion_factor.
@@ -399,22 +399,44 @@ function _read_variable!(var::DynVarTimeUninterp, nt::Int)
 end
 
 # Read the nt-th time slice from a NetCDF variable whose trailing dimension is
-# 'time'. ndims is the number of spatial dimensions (1 or 2).
-function _read_time_slice(ncvar, nt::Int, ndims::Int)
+# 'time'. `ndims` is the number of dimensions of the in-memory array
+# (`data_shape`); `data_shape` is that shape.
+#
+# The gridcell axis may be stored on file EITHER as a single 'lndgrid' dimension
+# OR — as in every real CTSM surface / landuse_timeseries dataset — as a pair of
+# ('lsmlon', 'lsmlat') dimensions. Fortran reads both through the same `grlnd`
+# decomposition (ncdio_pio collapses the horizontal dims into the gridcell axis),
+# so we do the same: any extra non-time dimensions are folded into the gridcell
+# axis by reshaping the slice to `data_shape`.
+#
+# NB: this requires the gridcell dims to be the SLOWEST-varying non-time dims,
+# i.e. `PCT_NAT_PFT(time, lsmlat, lsmlon, natpft)` in ncdump order — the same
+# natpft-fastest convention the surfdata reader already assumes (and that Bow's
+# real surfdata uses). Rejecting these files outright meant CLM.jl could not read
+# ANY real CTSM flanduse_timeseries.
+function _read_time_slice(ncvar, nt::Int, ndims::Int, data_shape)
     nd_total = Base.ndims(ncvar)
-    if nd_total == ndims
-        # No explicit time dimension on the variable (single time sample) — read whole.
-        return Array(ncvar)
-    elseif nd_total == ndims + 1
-        if ndims == 1
-            return Array(ncvar[:, nt])
-        else # ndims == 2
-            return Array(ncvar[:, :, nt])
-        end
+    expected = prod(data_shape)
+
+    slice = if nd_total == ndims && length(ncvar) == expected
+        # No explicit time dimension on the variable (single time sample).
+        Array(ncvar)
+    elseif nd_total >= ndims
+        # Slice the trailing time index; keep every other dimension whole.
+        idx = Any[Colon() for _ in 1:(nd_total - 1)]
+        push!(idx, nt)
+        Array(view(ncvar, idx...))
     else
-        error("_read_time_slice: variable has $nd_total dims; " *
-              "expected $ndims or $(ndims + 1)")
+        error("_read_time_slice: variable has $nd_total dims; expected at least $ndims")
     end
+
+    length(slice) == expected || error(
+        "_read_time_slice: time slice has $(length(slice)) elements " *
+        "($(size(slice))); expected $expected for data_shape $(Tuple(data_shape)). " *
+        "The gridcell dimension(s) must be the slowest-varying non-time dims.")
+
+    return length(size(slice)) == ndims && size(slice) == Tuple(data_shape) ?
+           slice : reshape(slice, Tuple(data_shape))
 end
 
 # check_sums_equal_1 (surfrdUtilsMod): for a 2-d array, verify that the sum over

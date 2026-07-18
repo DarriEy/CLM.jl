@@ -352,6 +352,8 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               cnfire_method::Symbol=:nofire,
                               flnfm::String="", fhdm::String="",
                               forcing_date::Union{DateTime,Nothing}=nothing,
+                              flanduse::String="", flanduse_year::Int=0,
+                              natpft_size::Int=15,
                               pre_step_hook=nothing,
                               h2osfcflag::Int=1)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
@@ -392,6 +394,29 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                                   use_hydrstress=use_hydrstress, use_luna=use_luna,
                                   use_lch4=use_lch4, use_c13=use_c13, use_c14=use_c14,
                                   cnfire_method=cnfire_method)
+
+    # Prescribed transient PFTs (`flanduse_timeseries`). Needed by the tropical
+    # deforestation-fire branch: `dtrotr_col` accumulates ONLY when
+    # run_has_transient_landcover() is true. Reading the SAME flanduse file the
+    # Fortran reference reads (at `flanduse_year`) also puts the patch weights on
+    # the post-transition values, so trotr1/trotr2 are derived from the shared
+    # input rather than hard-coded in the harness.
+    if !isempty(flanduse)
+        ctl = CLM.dyn_subgrid_control_init(; flanduse_timeseries=flanduse,
+                                             do_transient_pfts=true, use_cn=use_cn)
+        # dynSubgrid_init! asserts PROC-level bounds; single-clump, so the harness
+        # bounds ARE the proc bounds (same view the driver builds at clm_driver.jl).
+        bproc = CLM.BoundsType(begg=bounds.begg, endg=bounds.endg,
+                               begl=bounds.begl, endl=bounds.endl,
+                               begc=bounds.begc, endc=bounds.endc,
+                               begp=bounds.begp, endp=bounds.endp,
+                               level=CLM.BOUNDS_LEVEL_PROC)
+        CLM.setup_dyn_subgrid!(config, ctl, bproc, inst;
+                               current_year=flanduse_year,
+                               natpft_size=natpft_size,
+                               check_dynpft_consistency=false)
+    end
+
     filt_ia = CLM.clump_filter_inactive_and_active
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 
