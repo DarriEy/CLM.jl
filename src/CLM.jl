@@ -207,6 +207,7 @@ include("biogeochem/fire_factory.jl")
 # lightning (lnfm) + population-density (hdm) streams -> fire_li2014.forc_lnfm/forc_hdm.
 # Included AFTER fire_li2014.jl: its signatures reference CNFireLi2014Data.
 include("infrastructure/fire_streams.jl")
+include("infrastructure/ch4_finundated_stream.jl")
 include("biogeochem/methane.jl")
 include("biogeochem/voc_emission.jl")
 include("biogeochem/dust_emission.jl")

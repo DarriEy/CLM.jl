@@ -2173,6 +2173,62 @@ end
     end
 end
 
+# finundated for the two satellite-regression inversion methods, per column.
+#
+# PORTED FROM: ch4FInundatedStreamType.F90:295-317 (CalcFinundated, the
+# ZWT_inversion + TWS_inversion cases) followed by the SAME snow-season hold +
+# redox lag as the h2osfc kernel (ch4Mod.F90:1904-1920). This is the DECOUPLED
+# inundation path: finundated comes from the fitted regression coefficients read
+# from `finundated_inversiondata_*.nc`, NOT from the column's own h2osfc pond, so
+# a wetland gridcell inundates from the satellite regression even when its
+# single-point soil column has drained (frac_h2osfc == 0 => h2osfc method gives
+# finundated == 0, the MerBleue/Bow degenerate regime).
+#
+#   TWS_inversion: finundated = fws_slope*TWS + fws_intercept
+#   ZWT_inversion: if zwt0>0:  finundated = f0*exp(-zwt_actual/zwt0) + p3*qflx_surf_lag
+#                  else:       finundated = p3*qflx_surf_lag
+#                  zwt_actual = zwt_perched if (zwt_perched < z[nlevsoi]-1e-5 && zwt_perched < zwt) else zwt
+# then clamp to [0,1].
+@kernel function _ch4o_finund_inv_kernel!(finundated, finundated_pre_snow, finundated_lag,
+        @Const(mask), @Const(col_gridcell), @Const(snow_depth), @Const(qflx_surf_lag),
+        @Const(zwt), @Const(zwt_perched), @Const(tws), @Const(z),
+        @Const(zwt0_gdc), @Const(f0_gdc), @Const(p3_gdc),
+        @Const(fws_slope_gdc), @Const(fws_intercept_gdc),
+        dtime, redoxlags, nlevsoi::Int, finundation_mtd::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        T = eltype(finundated)
+        g = col_gridcell[c]
+        # (1) CalcFinundated -- inversion route.
+        fin = zero(T)
+        if finundation_mtd == FINUNDATION_MTD_TWS_INVERSION
+            fin = fws_slope_gdc[g] * tws[g] + fws_intercept_gdc[g]
+        elseif finundation_mtd == FINUNDATION_MTD_ZWT_INVERSION
+            if zwt0_gdc[g] > zero(T)
+                zwt_actual = (zwt_perched[c] < z[c, nlevsoi] - T(1.0e-5) &&
+                              zwt_perched[c] < zwt[c]) ? zwt_perched[c] : zwt[c]
+                fin = f0_gdc[g] * exp(-zwt_actual / zwt0_gdc[g]) + p3_gdc[g] * qflx_surf_lag[c]
+            else
+                fin = p3_gdc[g] * qflx_surf_lag[c]
+            end
+        end
+        finundated[c] = smooth_max(smooth_min(fin, one(T)), zero(T))
+        # (2) snow-season hold + redox lag (identical to the h2osfc kernel).
+        if snow_depth[c] <= zero(T)
+            finundated[c] = smooth_max(smooth_min(finundated[c], one(T)), zero(T))
+            finundated_pre_snow[c] = finundated[c]
+        else
+            finundated[c] = finundated_pre_snow[c]
+        end
+        if redoxlags > zero(T)
+            finundated_lag[c] = finundated_lag[c] * exp(-dtime / redoxlags) +
+                                finundated[c] * (one(T) - exp(-dtime / redoxlags))
+        else
+            finundated_lag[c] = finundated[c]
+        end
+    end
+end
+
 # dfsat adjustment of conc_ch4_sat (per column; internal j-loop, own-index).
 @kernel function _ch4o_dfsat_kernel!(conc_ch4_sat, ch4_dfsat_flux, @Const(mask),
         @Const(col_gridcell), @Const(conc_ch4_unsat), @Const(finundated), @Const(fsat_bef),
@@ -2357,7 +2413,11 @@ function ch4!(ch4d::CH4Data,
               anoxia::Bool,
               agnpp::AbstractVector{<:Real},
               bgnpp::AbstractVector{<:Real},
-              secsperyear::Real)
+              secsperyear::Real;
+              finundated_stream = nothing,
+              zwt::Union{Nothing,AbstractVector{<:Real}}       = nothing,
+              zwt_perched::Union{Nothing,AbstractVector{<:Real}} = nothing,
+              tws::Union{Nothing,AbstractVector{<:Real}}       = nothing)
     nc = length(mask_soil)
     np = length(mask_soilp)
     FT = eltype(t_soisno)
@@ -2400,16 +2460,37 @@ function ch4!(ch4d::CH4Data,
              gc_d, forc_pbot, latdeg, qflx_surf, ch4d.finundated_col, FT(dtime),
              FT(qflxlagd), FT(highlatfact), FT(SECSPDAY); ndrange = nc)
 
-    # --- finundated: CalcFinundated (h2osfc) + snow-adjust + lag ---
-    if ch4vc.finundation_mtd != FINUNDATION_MTD_H2OSFC
-        error("ch4!: only finundation_mtd = FINUNDATION_MTD_H2OSFC (the CTSM namelist " *
-              "default) is ported. The ZWT/TWS inversion methods need the Prigent " *
-              "satellite-regression stream file (ch4FInundatedStreamType.F90), which " *
-              "has no reader here. Got finundation_mtd = $(ch4vc.finundation_mtd).")
+    # --- finundated: CalcFinundated + snow-adjust + lag ---
+    # Default (h2osfc) path is unchanged/byte-identical; the two satellite-
+    # regression inversion methods (ch4FInundatedStreamType.F90 CalcFinundated)
+    # dispatch to a separate kernel and require the regression-coefficient stream
+    # plus the zwt/tws inputs those regressions consume.
+    if ch4vc.finundation_mtd == FINUNDATION_MTD_H2OSFC
+        _launch!(_ch4o_finund_kernel!, ch4d.finundated_col, ch4d.finundated_pre_snow_col,
+                 ch4d.finundated_lag_col, mask_s, snow_depth, frac_h2osfc, FT(dtime),
+                 FT(redoxlags), ch4vc.finundation_mtd; ndrange = nc)
+    else
+        finundated_stream === nothing && error("ch4!: finundation_mtd = " *
+            "$(ch4vc.finundation_mtd) (ZWT/TWS inversion) requires the " *
+            "`finundated_stream` regression coefficients (read via " *
+            "read_ch4_finundated_stream!); none were passed.")
+        # Coefficient (gridcell) arrays; empty for the method not selected.
+        _dz(v) = isempty(v) ? fill!(similar(ref, FT, ng), zero(FT)) : _dvec(v, FT)
+        zwt0_d  = _dz(finundated_stream.zwt0_gdc)
+        f0_d    = _dz(finundated_stream.f0_gdc)
+        p3_d    = _dz(finundated_stream.p3_gdc)
+        slope_d = _dz(finundated_stream.fws_slope_gdc)
+        inter_d = _dz(finundated_stream.fws_intercept_gdc)
+        # Column / gridcell hydrology inputs (fall back to zeros if a method that
+        # does not need them left one unset).
+        zwt_d  = zwt         === nothing ? fill!(similar(ref, FT, nc), zero(FT)) : _dvec(zwt, FT)
+        zwtp_d = zwt_perched === nothing ? fill!(similar(ref, FT, nc), zero(FT)) : _dvec(zwt_perched, FT)
+        tws_d  = tws         === nothing ? fill!(similar(ref, FT, ng), zero(FT)) : _dvec(tws, FT)
+        _launch!(_ch4o_finund_inv_kernel!, ch4d.finundated_col, ch4d.finundated_pre_snow_col,
+                 ch4d.finundated_lag_col, mask_s, gc_d, snow_depth, ch4d.qflx_surf_lag_col,
+                 zwt_d, zwtp_d, tws_d, z, zwt0_d, f0_d, p3_d, slope_d, inter_d,
+                 FT(dtime), FT(redoxlags), nlevsoi, ch4vc.finundation_mtd; ndrange = nc)
     end
-    _launch!(_ch4o_finund_kernel!, ch4d.finundated_col, ch4d.finundated_pre_snow_col,
-             ch4d.finundated_lag_col, mask_s, snow_depth, frac_h2osfc, FT(dtime),
-             FT(redoxlags), ch4vc.finundation_mtd; ndrange = nc)
 
     # --- finundated change -> conc_ch4_sat adjust / dfsat flux ---
     _launch!(_ch4o_dfsat_kernel!, ch4d.conc_ch4_sat_col, ch4d.ch4_dfsat_flux_col, mask_s,
