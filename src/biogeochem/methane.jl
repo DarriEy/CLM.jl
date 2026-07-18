@@ -2212,10 +2212,13 @@ end
                 fin = p3_gdc[g] * qflx_surf_lag[c]
             end
         end
-        finundated[c] = smooth_max(smooth_min(fin, one(T)), zero(T))
+        # finundated is a FRACTION → HARD clamp (Fortran min(1,max(0,·))). A default-k smooth
+        # clamp injects ~1.4% bias on a 0-1 axis ([[smooth-k-is-dimensional]]) and trips the
+        # smooth-axis guard.
+        finundated[c] = clamp(fin, zero(T), one(T))
         # (2) snow-season hold + redox lag (identical to the h2osfc kernel).
         if snow_depth[c] <= zero(T)
-            finundated[c] = smooth_max(smooth_min(finundated[c], one(T)), zero(T))
+            finundated[c] = clamp(finundated[c], zero(T), one(T))
             finundated_pre_snow[c] = finundated[c]
         else
             finundated[c] = finundated_pre_snow[c]

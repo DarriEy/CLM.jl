@@ -409,7 +409,17 @@ function _calib_dual_copy(src, ::Type{D}) where D
     if wrapper === T
         return src
     end
-    dst = wrapper{D}()
+    # `wrapper{D}()` assumes the struct's type parameter IS the dual element type. A
+    # read-only struct parametrized by its VECTOR type instead (e.g. CH4FInundatedStream{V}
+    # where V<:AbstractVector) can't be rebuilt as `wrapper{Dual}` — pass it by-ref (it holds
+    # read-only input coefficients, not a differentiated state).
+    local dst
+    try
+        dst = wrapper{D}()
+    catch e
+        e isa TypeError || rethrow()
+        return src
+    end
     for name in fieldnames(T)
         sv = getfield(src, name)
         try
