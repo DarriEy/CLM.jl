@@ -147,8 +147,11 @@ function dynpft_check_consistency(dynpft_file::DynFile,
               "landuse_timeseries file")
 
     # Read first time slice (nt = 1) and convert from PCT to weight on grid cell.
+    # The target shape comes from the surface dataset, so real CTSM files (which
+    # carry the gridcell axis as an (lsmlon, lsmlat) PAIR) fold correctly here too.
     ncvar = ds[DYNPFT_VARNAME]
-    rawslice = _read_time_slice(ncvar, 1, 2)              # (natpft, ngridcells)
+    shape = (size(wt_nat_patch, 1), size(wt_nat_patch, 2))
+    rawslice = _read_time_slice(ncvar, 1, 2, shape)       # (natpft, ngridcells)
     wtpatch_time1 = Float64.(replace(rawslice, missing => NaN)) ./ 100.0
 
     ngridcells = size(wtpatch_time1, 2)

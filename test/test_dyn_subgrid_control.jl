@@ -66,6 +66,38 @@
     end
 
     # ------------------------------------------------------------------
+    # WIRING: the driver must actually CONSULT this predicate.
+    #
+    # run_has_transient_landcover was ported and unit-tested (above) but the
+    # fire call in clm_driver.jl passed `config.dyn_subgrid !== nothing`
+    # instead — the "ported then never called" bug class. That is not a
+    # harmless alias: a DynSubgridState is constructed with ALL transient
+    # aspects off, and a lakes-only one must still report false, yet both gave
+    # `true`. A true `transient_landcover` switches CNFireFluxes' per-patch
+    # burned fraction from `farea_burned` to `fbac` and enables the lfc/lfc2
+    # deforestation bookkeeping — real flux consequences in runs where CTSM
+    # leaves them off.
+    # ------------------------------------------------------------------
+    @testset "clm_driver consults run_has_transient_landcover for fire" begin
+        src = read(joinpath(@__DIR__, "..", "src", "driver", "clm_driver.jl"), String)
+        m = match(r"transient_landcover\s*=\s*\(([^\n]*\n?[^\n]*)\)", src)
+        @test m !== nothing
+        @test occursin("run_has_transient_landcover", m.captures[1])
+
+        # The two states the old `!== nothing` test got WRONG.
+        for kw in ((), (do_transient_lakes = true,))
+            ctl = CLM.dyn_subgrid_control_init(;
+                flanduse_timeseries = "landuse.timeseries.nc", kw...)
+            @test CLM.run_has_transient_landcover(ctl) == false
+        end
+        # ... and one it happened to get right, so the test can still fail if
+        # the predicate is inverted.
+        ctl_on = CLM.dyn_subgrid_control_init(
+            flanduse_timeseries = "landuse.timeseries.nc", do_transient_pfts = true)
+        @test CLM.run_has_transient_landcover(ctl_on) == true
+    end
+
+    # ------------------------------------------------------------------
     # Uninitialized getter assertion
     # ------------------------------------------------------------------
     @testset "uninitialized getter throws" begin

@@ -224,4 +224,72 @@ using NCDatasets
         end
     end
 
+    # ==================================================================
+    # REAL CTSM layout: the gridcell axis stored as an (lsmlon, lsmlat) PAIR.
+    #
+    # Every real CTSM surface / landuse_timeseries dataset carries the
+    # horizontal axis as two dimensions, not a single 'lndgrid'. Fortran reads
+    # both through the same `grlnd` decomposition. CLM.jl's reader used to
+    # hard-reject anything with more than 2 spatial dims ("variable has 4 dims;
+    # expected 2 or 3"), which meant it could not read ANY real CTSM
+    # flanduse_timeseries — the unit tests above only ever fabricated the
+    # 1-D 'lndgrid' flavour, so nothing caught it. Found by generating the
+    # dtrotr (tropical deforestation-fire) parity reference, which needs a real
+    # flanduse file that BOTH codes read.
+    # ==================================================================
+    @testset "dynpft reads the (lsmlon, lsmlat) gridcell layout" begin
+        file_years = [2000, 2001]
+        natpft_size = 3
+        nlon, nlat = 2, 3
+        ng = nlon * nlat
+
+        # (natpft, lsmlon, lsmlat, time); each gridcell's PFT weights sum to 100.
+        pct = Array{Float64}(undef, natpft_size, nlon, nlat, length(file_years))
+        for t in 1:length(file_years), j in 1:nlat, i in 1:nlon
+            a = 10.0 * i + 5.0 * j + 20.0 * t          # varies per cell AND year
+            b = 30.0
+            pct[:, i, j, t] = [a, b, 100.0 - a - b]
+        end
+
+        mktempdir() do dir
+            fn = joinpath(dir, "flanduse_lonlat.nc")
+            NCDataset(fn, "c") do ds
+                defDim(ds, "natpft", natpft_size)
+                defDim(ds, "lsmlon", nlon)
+                defDim(ds, "lsmlat", nlat)
+                defDim(ds, "time", length(file_years))
+                defVar(ds, "YEAR", Int, ("time",))[:] = file_years
+                pv = defVar(ds, "PCT_NAT_PFT", Float64,
+                            ("natpft", "lsmlon", "lsmlat", "time"))
+                for t in 1:length(file_years)
+                    pv[:, :, :, t] = pct[:, :, :, t]
+                end
+            end
+
+            # The (lsmlon, lsmlat) pair must fold into the gridcell axis, giving
+            # exactly the same data_shape [natpft, ng] as the 'lndgrid' flavour.
+            # Assert the VALUES, not merely that init did not throw.
+            expect(t) = reshape(pct[:, :, :, t], natpft_size, ng) ./ 100.0
+
+            state = CLM.dynpft_init(fn; ngridcells = ng, natpft_size = natpft_size,
+                current_year = 2000, wt_nat_patch = expect(1),
+                check_dynpft_consistency = true)
+            got = reshape(state.wtpatch.data_at_tlower, natpft_size, ng)
+            @test got ≈ expect(1)
+            # ... and it must be a real read, not a coincidence: the year-2001
+            # slice differs from year-2000 everywhere.
+            @test !isapprox(expect(2), expect(1))
+
+            state2 = CLM.dynpft_init(fn; ngridcells = ng, natpft_size = natpft_size,
+                current_year = 2001, check_dynpft_consistency = false)
+            @test reshape(state2.wtpatch.data_at_tlower, natpft_size, ng) ≈ expect(2)
+
+            # A genuinely wrong element count must still be rejected, not
+            # silently reshaped.
+            @test_throws Exception CLM.dynpft_init(fn; ngridcells = ng + 1,
+                natpft_size = natpft_size, current_year = 2000,
+                check_dynpft_consistency = false)
+        end
+    end
+
 end
