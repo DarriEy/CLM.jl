@@ -455,6 +455,12 @@ response.** No FATES-port mis-port was found — closing it is a CLM soil-hydrol
 by the documented early ~25 %-high GPP, but the primary driver is the top-layer moisture
 bias). Fix attempts belong to the host hydrology, not `src/fates/`.
 
+> **CORRECTION (D2, 2026-07-18): it was NOT a host soil-hydrology mis-port — it was a
+> `use_bedrock` HARNESS↔REFERENCE namelist mismatch.** See section 4 below. The
+> soil-hydrology port (`drainage!`, `clamp_zwt_to_bedrock!`, `init_bedrock!`, the `zwt`
+> cold start) is faithful; with the harness config matched to the Fortran case the
+> over-drying, the `btran_ft=0` collapse, and the day-13 stature-growth stall all vanish.
+
 **Reproduce** (surviving build, no CTSM rebuild needed):
 ```bash
 # Fortran 20-day reference (edit stop_n=480 in the run dir's nuopc.runconfig):
@@ -493,3 +499,78 @@ does **not** cover either, and neither has a clean short-horizon Fortran oracle:
   (`use_fates_fixed_biogeog=.true.` with a matched `pft_areafrac`) is the remaining item,
   and carries a real config-crosswalk risk (the #233/#240/#243 "harness input, not port"
   trap) that must be controlled before any divergence is trusted.
+
+---
+
+# D2 ROOT CAUSE (2026-07-18): the top-layer over-drying was a `use_bedrock` harness mismatch
+
+The D1 section (above) isolated the over-drying to the *host* CLM top-soil moisture and,
+correctly, exonerated `src/fates/` — but it left the CLM cause open ("a CLM soil-hydrology
+task"). D2 closes it, and the answer is **not a soil-hydrology mis-port**: it is the
+`#233/#240/#248` trap the D1 note itself flagged — a **namelist mismatch between the Julia
+harness and its Fortran reference case**.
+
+## The measurement that found it
+
+A new **per-column water-budget dump** was added on both sides (`SoilBudgetDumpMod.F90` on
+the Fortran side, injected by `instrument.py` at the same "fast" point as the FATES dump —
+which is *after* `HydrologyDrainage`; `scripts/soil_budget_probe.jl` on the Julia side,
+reusing the harness build/step loop). It dumps, per soil column per step, the per-layer
+`h2osoi`, the water table `zwt`, the SL14 resistance, and **every flux that sets the top
+layer**: infiltration, surface runoff, **subsurface drainage**, soil evaporation,
+transpiration and per-layer root extraction.
+
+Diffing the 20-day budget layer-by-layer, the diverging process was unambiguous:
+
+```
+day |  hvol1 (top layer)  |   qflx_drain (mm/day)   |  zwt (m)
+    | Julia(bug) Fortran  |  Julia(bug)   Fortran   | Julia  Fortran
+  3 |   0.236    0.348    |    15.48       0.00      |  2.28   8.60
+  8 |   0.170    0.328    |    17.21       0.00      |  2.28   8.60
+ 13 |   0.122    0.330    |     9.40       0.00      |  2.28   8.60
+```
+
+**Fortran drains ZERO every day; the port drains 3–17 mm/day** — ~150 mm over the window,
+which bleeds the whole column (all three top layers dry together), and the thin top layer
+follows fastest. (Fortran's evaporation and transpiration are actually *higher* — it is the
+wetter model — so those are exonerated: the sole cause is the spurious drainage.)
+
+## The chain
+
+`qflx_drain` in `SoilHydrologyMod::Drainage` is `rsub_top = imped·rsub_top_max·exp(-zwt/hkdepth)`
+— exponentially sensitive to the water table depth. Fortran's `zwt = 8.60 m` makes
+`exp(-8.60/0.4) ≈ 5e-10` → no drainage. The port's `zwt = 2.28 m` makes `exp(-2.28/0.4) ≈ 3e-3`
+→ ~10 mm/day. Why 2.28 vs 8.60?
+
+* The Fortran case's `lnd_in` (CLM `build-namelist` for `I2000Clm50FatesRs`) sets
+  **`use_bedrock = .false.`** → `initVerticalMod` forces `nbedrock = nlevsoi` (`zi = 8.6 m`),
+  so the per-step `zwt→bedrock` clamp keeps the water table at 8.6 m.
+* `clm_initialize!` **defaults `use_bedrock = true`**, and `scripts/fates_fortran_parity.jl::build()`
+  left it unset — so the port read the Bow surfdata's shallow `zbedrock ≈ 2.28 m`
+  (`nbedrock = 12`), and `clamp_zwt_to_bedrock!` (faithful to CTSM, called every step) dragged
+  `zwt` from 8.6 m down to 2.28 m — igniting the drainage.
+
+## The fix (harness config, not `src/`)
+
+`build()` now passes **`use_bedrock=false`** to match the reference `lnd_in`. That single
+line makes `zwt` hold 8.6 m, `qflx_drain ≡ 0` like Fortran, and the top-layer `h2ovol1`
+track the Fortran ground truth to **~0.01–0.02** (was a 3× dry-down). Because the fix is a
+harness namelist and touches **no `src/` soil-hydrology path**, the shared Bow water balance,
+the 69/69 multi-biome scorecard and `longhorizon_conservation` are structurally unaffected;
+the 5-day FATES scorecard is unchanged-to-improved (cold start still `7.133e-16`; the
+worst `dyn_in` `bc_in` field moved off `h2ovol1`).
+
+**This does not invent water** — it is the same phenomenon as `#227` seen from the other
+side: the port's soil-hydrology is faithful, and once its cold-start config matches the
+reference's, the Bow column retains water exactly as Fortran does.
+
+**Reproduce:**
+```bash
+# the divergence (harness default before the fix):
+USE_BEDROCK=true  julia +1.12 --project=. scripts/soil_budget_probe.jl 480
+# matched to the Fortran case (after the fix):
+USE_BEDROCK=false julia +1.12 --project=. scripts/soil_budget_probe.jl 480
+# Fortran side (surviving fates_parity_1pt build; SoilBudgetDumpMod now injected):
+#   bash scripts/validation/fates_fortran_parity/setup_case.sh   (SKIP_BUILD=1 to reuse)
+#   -> writes soil_budget_fortran.txt in the run dir
+```

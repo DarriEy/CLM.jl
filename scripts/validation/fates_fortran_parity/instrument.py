@@ -61,6 +61,14 @@ shutil.copy(os.path.join(HERE, "FatesParityDumpMod.F90"),
             os.path.join(SM, "FatesParityDumpMod.F90"))
 print("[ok] FatesParityDumpMod.F90 ->", SM)
 
+# The CLM host top-soil-layer WATER BUDGET dump (per soil column, per timestep).
+# Companion to FatesParityDumpMod that emits the fluxes SETTING the soil moisture
+# FATES sees — added for the PR #247 D1 "top layer over-dries" root cause (isolated
+# to spurious subsurface drainage from a use_bedrock namelist mismatch).
+shutil.copy(os.path.join(HERE, "SoilBudgetDumpMod.F90"),
+            os.path.join(SM, "SoilBudgetDumpMod.F90"))
+print("[ok] SoilBudgetDumpMod.F90 ->", SM)
+
 # --------------------------------------------------------------------------------
 # 1. clmfates_interfaceMod.F90
 # --------------------------------------------------------------------------------
@@ -149,7 +157,8 @@ patch("src/utils/clmfates_interfaceMod.F90", [
 # --------------------------------------------------------------------------------
 DRV_USE_ANCHOR = "  use clm_time_manager       , only : get_nstep, is_beg_curr_day, is_beg_curr_year\n"
 DRV_USE = DRV_USE_ANCHOR + \
-    "  use FatesParityDumpMod     , only : parity_nstep   ! FATES parity instrumentation\n"
+    "  use FatesParityDumpMod     , only : parity_nstep   ! FATES parity instrumentation\n" + \
+    "  use SoilBudgetDumpMod      , only : soil_budget_dump ! CLM top-soil water budget dump\n"
 
 # Emitted at the top of the FATES dynamics branch: after WrapUpdateFatesRmean and
 # wrap_update_hifrq_hist (the last per-timestep FATES updates), before the daily step.
@@ -162,6 +171,13 @@ DRV_FAST_ANCHOR = """          if( is_beg_curr_day() ) then
 DRV_FAST = """          ! ---- FATES parity instrumentation: fast (sub-daily) phase = 1 -----------
           parity_nstep = get_nstep()
           call clm_fates%parity_dump(nc, 1)
+          ! ---- CLM host top-soil-layer water budget (per soil column, this step) --
+          ! This point is AFTER HydrologyDrainage, so every qflx_* is the value that
+          ! acted this timestep (infiltration / surface runoff / subsurface drainage /
+          ! soil evap / transpiration / per-layer root extraction / zwt / soilresis).
+          call soil_budget_dump(bounds_clump, filter(nc)%num_soilc, filter(nc)%soilc, &
+               parity_nstep, water_inst%waterstatebulk_inst, water_inst%waterfluxbulk_inst, &
+               soilstate_inst, soilhydrology_inst, temperature_inst)
           ! -------------------------------------------------------------------------
 
 """ + DRV_FAST_ANCHOR
