@@ -1,8 +1,10 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using NCDatasets, Dates, Printf, Statistics
 using CLM
 
 # Diagnostic: run a few summer timesteps and print radiation intermediates
-const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const basedir = bow_domain_dir()
 fsurdat  = joinpath(basedir, "settings/CLM/parameters/surfdata_clm.nc")
 paramfile = joinpath(basedir, "settings/CLM/parameters/clm5_params.nc")
 fforcing = joinpath(basedir, "data/forcing/CLM_input/clmforc.2002.nc")

@@ -10,14 +10,16 @@
 # Default: 5 cycles of 2002-2009 (8 years each = 40 years total)
 # ==========================================================================
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using Dates, Printf, CLM
 
 # ---- Configuration ----
-basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+basedir = bow_domain_dir()
 fsurdat = joinpath(basedir, "settings/CLM/parameters/surfdata_clm.nc")
 paramfile = joinpath(basedir, "settings/CLM/parameters/clm5_params.nc")
-fsnowoptics = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-fsnowaging = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+fsnowoptics = snicar_optics()
+fsnowaging = snicar_aging()
 
 # Forcing files available: 2002-2009
 forcing_dir = joinpath(basedir, "data/forcing/CLM_input")

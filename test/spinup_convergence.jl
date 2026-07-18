@@ -4,17 +4,19 @@
 # and tracks key state variables to verify equilibration.
 # ==========================================================================
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using NCDatasets, Dates, Printf, Statistics, CLM
 
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
 
-const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const basedir = bow_domain_dir()
 const caldir = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters")
 
 const fsurdat  = joinpath(caldir, "surfdata_clm.nc")
 const paramfile = joinpath(caldir, "clm5_params.nc")
-const fsnowoptics = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const fsnowaging  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const fsnowoptics = snicar_optics()
+const fsnowaging  = snicar_aging()
 
 const FORCING_YEARS = 2002:2009
 const N_SPINUP_YEARS = parse(Int, get(ARGS, 1, "8"))  # default 8 years (one full cycle)

@@ -1,7 +1,9 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using CLM, Dates, Printf
 
-fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+fsurdat = first(bow_params())
+paramfile = last(bow_params())
 
 # Just initialize, don't run
 (inst, bounds, filt, tm) = CLM.clm_initialize!(fsurdat=fsurdat, paramfile=paramfile)

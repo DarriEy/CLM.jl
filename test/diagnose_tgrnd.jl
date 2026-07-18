@@ -1,3 +1,5 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using CLM, Printf, Dates, LinearAlgebra
 
 const clm_init! = getfield(CLM, Symbol("clm_initialize!"))
@@ -5,8 +7,8 @@ const clm_drv! = getfield(CLM, Symbol("clm_drv!"))
 
 println("=== T_GRND Diagnostic ===\n")
 
-fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+fsurdat = first(bow_params())
+paramfile = last(bow_params())
 
 inst, bounds, filt, tm = clm_init!(; fsurdat=fsurdat, paramfile=paramfile,
                                      start_date=DateTime(2002,1,1), dtime=1800, use_cn=false)
@@ -100,7 +102,7 @@ ef = inst.energyflux
 println("\n=== RUNNING ONE TIMESTEP ===")
 
 # Load forcing
-fforcing = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2002.nc"
+fforcing = bow_forcing("clmforc.2002.nc")
 fr = CLM.ForcingReader()
 CLM.forcing_reader_init!(fr, fforcing)
 ng = 1  # gridcells

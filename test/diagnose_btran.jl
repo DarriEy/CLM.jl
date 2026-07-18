@@ -1,6 +1,8 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using Dates, Printf, CLM
 
-basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+basedir = bow_domain_dir()
 init_fn = getfield(CLM, Symbol("clm_initialize!"))
 (inst, bounds, filt, tm) = init_fn(;
     fsurdat=joinpath(basedir, "settings/CLM/parameters/surfdata_clm.nc"),

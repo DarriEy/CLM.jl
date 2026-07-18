@@ -1,5 +1,7 @@
 # Feature parity test: runs CLM with different feature flags and compares annual means to Fortran.
 # Usage: julia --project=. test/verify_features.jl [--luna] [--phs] [--all]
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using NCDatasets, Dates, Printf, Statistics, CLM
 
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
@@ -10,13 +12,13 @@ const DO_PHS  = any(==("--phs"), ARGS) || any(==("--all"), ARGS)
 const DO_COMBINED = any(==("--all"), ARGS)
 
 # --- Input file paths ---
-const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const basedir = bow_domain_dir()
 const caldir  = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters")
 const fsurdat  = joinpath(caldir, "surfdata_clm.nc")
 const paramfile = joinpath(caldir, "clm5_params.nc")
 const fforcing = joinpath(basedir, "data/forcing/CLM_input/clmforc.2002.nc")
-const fsnowoptics = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const fsnowaging  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const fsnowoptics = snicar_optics()
+const fsnowaging  = snicar_aging()
 const f_h0 = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/Bow_at_Banff_lumped.clm2.h0.2002-01-01-00000.nc")
 
 # Fortran reference annual means

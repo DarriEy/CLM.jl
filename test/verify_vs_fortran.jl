@@ -1,3 +1,5 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 using NCDatasets, Dates, Printf, Statistics, CLM
 
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
@@ -23,7 +25,7 @@ println("================================================================")
 println()
 
 # --- Input file paths ---
-const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const basedir = bow_domain_dir()
 const caldir = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters")
 
 fsurdat  = USE_CALIBRATED ? joinpath(caldir, "surfdata_clm.nc") :
@@ -35,11 +37,11 @@ fhistory = tempname() * "_verify.nc"
 
 # Fortran spun-up restart IC (only in --spinup mode)
 ffortran_restart = USE_SPINUP ?
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.r.$(YEAR)-01-01-00000.nc" : ""
+    symfluence_path("clm_parity_run", "Bow_at_Banff_lumped.clm2.r.$(YEAR)-01-01-00000.nc") : ""
 
 # SNICAR data files
-fsnowoptics = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-fsnowaging  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+fsnowoptics = snicar_optics()
+fsnowaging  = snicar_aging()
 
 # Fortran reference
 f_h0 = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/Bow_at_Banff_lumped.clm2.h0.$(YEAR)-01-01-00000.nc")
