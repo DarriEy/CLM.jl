@@ -24,7 +24,8 @@ to output. This is the top-level entry point for offline CLM simulations.
 - `end_date::DateTime`   — Simulation end date (default 2000-02-01)
 - `dtime::Int`           — Timestep in seconds (default 1800)
 - `use_cn::Bool`         — Use CN biogeochemistry (default false)
-- `use_bedrock::Bool`    — Use bedrock-limited soil column (default true)
+- `use_bedrock::Union{Bool,Nothing}` — Use bedrock-limited soil column. `nothing` (default)
+  defers to clm_initialize!'s CTSM-conditional default; non-FATES resolves to `true`.
 - `use_aquifer_layer::Bool` — Use aquifer lower boundary (default true)
 - `hist_fields`          — Custom history fields (default: default_hist_fields())
 - `verbose::Bool`        — Print progress messages (default true)
@@ -76,7 +77,9 @@ function clm_run!(;
     end_date::DateTime = DateTime(2000, 2, 1),
     dtime::Int = 1800,
     use_cn::Bool = false,
-    use_bedrock::Bool = true,
+    # `nothing` defers to clm_initialize!'s CTSM-conditional default (.false. under FATES,
+    # .true. otherwise). This driver is non-FATES, so it resolves to .true. as before.
+    use_bedrock::Union{Bool,Nothing} = nothing,
     use_aquifer_layer::Bool = true,
     use_luna::Bool = false,
     use_hydrstress::Bool = false,

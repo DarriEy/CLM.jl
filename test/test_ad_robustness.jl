@@ -22,8 +22,14 @@ using CLM
 
 @testset "AD Robustness — Multi-scenario" begin
 
-    fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-    paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+    # Data root is env-overridable so this test still RUNS off the Drive migration copy
+    # once the original Calgary-laptop path is gone (same pattern as
+    # scripts/parity_run_domain.jl). Without this, the skip below turns the whole
+    # testset into a permanent `@test true` — vacuously green forever.
+    DATA = get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
+    params_dir = joinpath(DATA, "domain_Bow_at_Banff_lumped", "settings", "CLM", "parameters")
+    fsurdat = joinpath(params_dir, "surfdata_clm.nc")
+    paramfile = joinpath(params_dir, "clm5_params.nc")
 
     if !isfile(fsurdat) || !isfile(paramfile)
         @warn "Skipping AD robustness tests: input files not found"
@@ -37,29 +43,13 @@ using CLM
     # smooth-AD derivative — they match to FD truncation error in every scenario.
 
     # --- Helper: create a Dual-typed copy of a parameterized struct ---
-    function make_dual_copy(src, ::Type{D}) where D
-        T = typeof(src)
-        wrapper = T.name.wrapper
-        if wrapper === T
-            return src
-        end
-        dst = wrapper{D}()
-        for name in fieldnames(T)
-            sv = getfield(src, name)
-            try
-                if sv isa Array{Float64}
-                    setfield!(dst, name, D.(sv))
-                elseif sv isa Float64
-                    setfield!(dst, name, D(sv))
-                else
-                    setfield!(dst, name, sv)
-                end
-            catch e
-                e isa TypeError || rethrow()
-            end
-        end
-        return dst
-    end
+    # Delegate to the PRODUCTION routine rather than keeping a private copy of it.
+    # This file used to carry a duplicate that drifted: when #238 added
+    # CH4FInundatedStream{V<:AbstractVector} to the instance tree, `wrapper{D}()`
+    # started throwing `TypeError: in V, expected V<:AbstractVector, got Dual`, and
+    # only calibration.jl's copy got the by-ref guard — so this whole testset errored
+    # while the production path was fine. One implementation, one guard.
+    make_dual_copy(src, ::Type{D}) where {D} = CLM._calib_dual_copy(src, D)
 
     # --- Helper: set up forcing ---
     function setup_forcing!(a2l, T, ng; precip_rain=0.0, precip_snow=0.0001,
