@@ -138,11 +138,88 @@ def patch_namelist(path: Path, flags: dict[str, str]) -> None:
     path.write_text(text)
 
 
-def replace_paths(path: Path, old_sub: str, new: str) -> None:
-    """Repoint every path containing ``old_sub`` at ``new`` (mesh redirection)."""
+def replace_paths(path: Path, old_sub: str, new: str) -> int:
+    """Repoint every path containing ``old_sub`` at ``new`` (mesh redirection).
+
+    The delimiter class must exclude ``<`` and ``>``: in ``datm.streams.xml``
+    the path sits inside ``<meshfile>...</meshfile>`` with no surrounding
+    whitespace or quotes, so a class of only ``[^\\s'"]`` swallows the tags
+    themselves and silently deletes the element -- which CTSM reports much
+    later as the opaque "ERROR: mesh file name must be provided".
+    """
     text = path.read_text()
-    text = re.sub(rf"[^\s'\"]*{re.escape(old_sub)}[^\s'\"]*", new, text)
+    text, n = re.subn(rf"[^\s'\"<>]*{re.escape(old_sub)}[^\s'\"<>]*", new, text)
     path.write_text(text)
+    return n
+
+
+def verify_case(case: Path) -> int:
+    """Assert the generated case is structurally sound. Returns 0 if OK."""
+    errs: list[str] = []
+
+    lnd = (case / "lnd_in").read_text()
+    for key, want in LND_FLAGS.items():
+        m = re.search(rf"^\s*{re.escape(key)}\s*=\s*(.+?)\s*$", lnd, re.MULTILINE)
+        if m is None:
+            errs.append(f"lnd_in: {key} absent (an unset flag is not a matched flag)")
+        elif m.group(1) != want:
+            errs.append(f"lnd_in: {key} = {m.group(1)!r}, expected {want!r}")
+
+    streams = (case / "datm.streams.xml").read_text()
+    n_streams = len(re.findall(r"<stream_info ", streams))
+    meshes = re.findall(r"<meshfile>([^<]*)</meshfile>", streams)
+    if len(meshes) != n_streams:
+        errs.append(
+            f"datm.streams.xml: {len(meshes)} <meshfile> for {n_streams} streams "
+            "(every stream needs one; CTSM reports this as 'mesh file name must be provided')"
+        )
+    for mf in meshes:
+        if mf != str(MESH):
+            errs.append(f"datm.streams.xml: meshfile {mf!r} is not the crop mesh")
+
+    forcing_files = re.findall(r"<file>([^<]*clmforc[^<]*)</file>", streams)
+    if not forcing_files:
+        errs.append("datm.streams.xml: no clmforc data files")
+    for f in set(forcing_files):
+        if not Path(f).exists():
+            errs.append(f"datm.streams.xml: forcing file missing on disk: {f}")
+    # The forcing years must be exactly the cycled window -- a year/hour
+    # mismatch between harness and reference was the #233 root cause.
+    years = sorted({int(re.search(r"clmforc\.(\d{4})\.nc", f).group(1)) for f in forcing_files})
+    if years != sorted(FORCING_YEARS):
+        errs.append(f"datm.streams.xml: forcing years {years} != {sorted(FORCING_YEARS)}")
+    for tag, want in (("year_first", FORCING_YEARS[0]), ("year_last", FORCING_YEARS[-1])):
+        got = {int(v) for v in re.findall(rf"<{tag}>(\d+)</{tag}>", streams)}
+        if got != {want}:
+            errs.append(f"datm.streams.xml: {tag} = {got}, expected {{{want}}}")
+
+    for f in re.findall(r"<file>([^<]*topo_forcing[^<]*)</file>", streams):
+        if "MerBleue" not in f:
+            errs.append(
+                f"datm.streams.xml: topo stream {f!r} is not the met donor's -- "
+                "the lapse-rate reference elevation would be wrong"
+            )
+
+    rc_text = (case / "nuopc.runconfig").read_text()
+    for key, want in (("mesh_lnd", str(MESH)), ("mesh_atm", str(MESH)), ("mesh_mask", str(MESH))):
+        m = re.search(rf"^\s*{key}\s*=\s*(.+?)\s*$", rc_text, re.MULTILINE)
+        if m is None or m.group(1) != want:
+            errs.append(f"nuopc.runconfig: {key} = {m and m.group(1)!r}, expected {want!r}")
+    if re.search(r"^\s*restart_ymd\s*=\s*-999\s*$", rc_text, re.MULTILINE) is None:
+        errs.append("nuopc.runconfig: restart_ymd sentinel -999 was clobbered")
+
+    for f in ("fd.yaml", "lnd_in", "drv_in", "datm_in", "nuopc.runconfig",
+              "nuopc.runseq", "drv_flds_in", "datm.streams.xml"):
+        if not (case / f).exists():
+            errs.append(f"missing case file: {f}")
+
+    if errs:
+        print("\n>> CASE VERIFICATION FAILED:", file=sys.stderr)
+        for e in errs:
+            print(f"   - {e}", file=sys.stderr)
+        return 1
+    print(">> case verified: flags, meshes, forcing years, topo donor, run control")
+    return 0
 
 
 def main() -> int:
@@ -183,9 +260,12 @@ def main() -> int:
     print(f">> case: {case}")
 
     # 1. namelist scaffold from the known-good CN donor -----------------------
+    # fd.yaml is the NUOPC field dictionary -- omitting it aborts in
+    # ESMF_IO_YAMLRead before the model ever starts, with a bare
+    # "Caught exception reading content from file".
     for f in (
         "lnd_in", "drv_in", "datm_in", "datm.streams.xml",
-        "nuopc.runconfig", "nuopc.runseq", "drv_flds_in",
+        "nuopc.runconfig", "nuopc.runseq", "drv_flds_in", "fd.yaml",
     ):
         shutil.copy(DONOR / f, case / f)
     print(f">> scaffolded namelists from {DONOR.name}")
@@ -314,6 +394,16 @@ done
 echo "FINAL_OK=$ok"
 """)
     run_sh.chmod(0o755)
+
+    # 7. VERIFY the generated case ------------------------------------------
+    # The generator is not trusted; every field it wrote is read back. Three
+    # silent malformations have already been caught this way (space-truncated
+    # mesh path, start_ymd clobbering restart_ymd, a wrong-site topo stream),
+    # plus an XML regex that deleted the <meshfile> elements outright. A
+    # malformed case does not fail loudly -- it either aborts with an opaque
+    # ESMF error or, worse, runs to completion on the wrong inputs.
+    if (rc := verify_case(case)) != 0:
+        return rc
 
     print(f">> wrote {run_sh}")
     print(f">> flags: " + " ".join(f"{k}={v}" for k, v in LND_FLAGS.items()
