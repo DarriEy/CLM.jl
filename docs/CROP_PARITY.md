@@ -10,12 +10,30 @@ gap is code vs. reference).
 
 ## TL;DR
 
-- **Fortran crop reference: BLOCKED — not generated.** No crop-resolved surfdata
-  (a `cft` dimension carrying the crop CFTs) exists for Mead or anywhere on disk,
-  and none can be built: there is no `inputdata` tree and no raw crop datasets to
-  drive `mksurfdata_esmf`, and no global crop surfdata to `subset_data` from. The
-  migrated Mead assets are an **SP run** (`use_crop/use_cn/irrigate = .false.`,
-  `cft = 2`), whose dumps are snow/hydrology-only.
+- **UPDATE 2026-07-18 — a crop-CFT surfdata now EXISTS (the "no surfdata"
+  blocker is retired).** The earlier "no `inputdata` tree / no global crop
+  surfdata" conclusion was drawn from the Drive-only Mead migration copy. The
+  **local box does have an inputdata tree** —
+  `installs/cesm-inputdata/` — and it ships a **global crop-resolved surfdata**:
+  `lnd/clm2/surfdata_esmf/ctsm5.4.0/surfdata_ne3np4_hist_2000_78pfts_c251022.nc`
+  (`cft = 64`, `natpft = 15`, `lsmpft = 79`; 488 gridcells on the ne3np4
+  cubed-sphere) plus its ESMF mesh + domain. A **single-point crop surfdata** has
+  been extracted from it (US Great Plains corn/soybean/wheat cell, `PCT_CROP=45%`)
+  and validated CLM.jl-readable. See § "Crop-CFT surfdata OBTAINED" below. What
+  remains for the Fortran reference is only multi-year datm forcing at the point +
+  a CN-crop spin-up (the serialized Fortran-box step), **not** a missing surfdata.
+- **SYMFLUENCE cannot build a crop surfdata itself.** Its
+  `CLMSurfaceGenerator.generate_surface_data` is hardwired to the SP layout
+  (`cft=2, natpft=15, lsmpft=17`) and `CLMNuopcGenerator` writes `use_crop=.false.`
+  into `lnd_in` with no crop config surface. So the crop surfdata had to be
+  extracted from the shipped global 78-pft file (option 2), not produced via
+  SYMFLUENCE (option 1).
+- **Original blocker (now superseded), for the record:** No crop-resolved surfdata
+  was thought to exist; the migrated Mead assets are an **SP run**
+  (`use_crop/use_cn/irrigate = .false.`, `cft = 2`), whose dumps are
+  snow/hydrology-only. The stock `subset_data` tool still cannot slice the ne3np4
+  file (it expects a structured `lsmlat/lsmlon` global surfdata, not the
+  unstructured `gridcell`-dimensioned one) — hence the direct-reshape extract.
 - **`n_fert!` / `n_soyfix!`: NOT wired** — correctly refused (#218), still
   awaiting the reference. Not changed here.
 - **No source-verifiable mis-port fix was made.** Every remaining crop gap
@@ -45,26 +63,75 @@ surfdata is the SP layout and is **incompatible** with `use_crop = .true.` (CTSM
 aborts on the CFT-dimension mismatch). Flipping the namelist alone cannot fix
 this.
 
-### Why a crop-resolved surfdata cannot be produced here
+### Why the *Mead* assets are not a crop reference (original finding)
 
-- **No `inputdata` tree** exists in the CLM install; there is **no global crop
-  surfdata** to extract a Mead single point from via
-  `tools/site_and_regional/subset_data`.
-- **No raw crop datasets** (`mksrf_*` PCT_CFT / land-use) are on disk, so
-  `tools/mksurfdata_esmf` cannot build one either. Acquiring them is a large,
-  network-heavy, uncertain download on a shared box.
-- The only crop-resolved surfdatas present are CTSM **test inputs** for the wrong
-  places (`surfdata_5x5_amazon_hist_78pfts_…_with_crop.nc`,
-  `surfdata_1x1_mexicocityMEX_…`), which would require standing up an entirely
-  different NUOPC domain / mesh / datm forcing — a fresh crop configuration, not a
-  Mead run.
+- The migrated Mead assets on the Drive are the SP `cft=2` run above.
+- The stock `tools/site_and_regional/subset_data` still cannot be pointed at the
+  ne3np4 global crop surfdata: that tool's `SinglePointCase` reads a **structured**
+  (`lsmlat/lsmlon`) global surfdata (`create_1d_coord(..., "lsmlon","lsmlat")`),
+  but the shipped 78-pft file is **unstructured** (`gridcell`-dimensioned). Hence
+  the direct-reshape extract below rather than a `subset_data` call.
+- `tools/mksurfdata_esmf` would need the raw `mksrf_*` PCT_CFT / land-use rasters,
+  which are not on disk — a large, network-heavy download, and unnecessary now
+  that a global crop surfdata is available to slice.
 
-**To unblock A2/A3/A4, the missing prerequisite is a crop-resolved surfdata (crop
-CFTs) for a crop-bearing point, plus a CN-crop cold-start spin-up long enough for
-the crop to plant, accumulate GDD/HUI, grow and harvest, and crop pdump/BGCDUMP
-instrumentation.** The site need not be Mead specifically — single-step parity
-validates the crop *code path* against the same inputs — but it must be a
-crop-CFT surfdata.
+## Crop-CFT surfdata OBTAINED (2026-07-18)
+
+The local inputdata tree ships a **global crop-resolved surfdata**:
+
+    installs/cesm-inputdata/lnd/clm2/surfdata_esmf/ctsm5.4.0/surfdata_ne3np4_hist_2000_78pfts_c251022.nc
+
+with `cft = 64`, `natpft = 15`, `lsmpft = 79` over 488 ne3np4 cubed-sphere
+gridcells (real crop area — many cells `PCT_CROP > 40%`), plus its ESMF mesh
+(`share/meshes/ne3np4_ESMFmesh_c230714_cdf5.nc`) and domain
+(`share/domains/domain.lnd.ne3np4_gx3v7.230718.nc`). This is a complete,
+known-good global crop configuration.
+
+**Single-point crop surfdata built from it** (the new asset), via
+`scripts/build_crop_cft_surfdata.py` → stored on the Drive at
+`data/SYMFLUENCE_data/crop_cft_surfdata/`:
+
+| File | What |
+|---|---|
+| `surfdata_cropCFT_USplains_1pt.nc` | `lsmlat=1,lsmlon=1,natpft=15,cft=64,lsmpft=79`; `PCT_CROP=45.0`, `PCT_CFT` sums 100; lon 263.29 (−96.71) / lat 44.80. Dominant CFTs: temperate soybean (35%), temperate corn (31%), spring wheat (12%). |
+| `esmf_mesh_croppt.nc` | matching 1-element ESMF mesh, `centerCoords == LONGXY/LATIXY`. |
+
+Built by extracting **gridcell 352** and applying the same
+`gridcell → (lsmlat=1, lsmlon=1)` reshape that
+`subset_data.create_surfdata_at_point` performs (done directly on the
+unstructured file). Validated **without the Fortran box**: all CLM init-required
+vars present (`AREA` excepted — mesh-supplied in NUOPC), and CLM.jl's own reader
+(`surfrd_get_num_patches`/`surfrd_get_grid_dims`) reads it as
+`numpft=15, numcft=64, grid=(1,1)`.
+
+### Runnable crop config (recipe)
+
+Mirror the working single-point MerBleue CN case
+(`domain_Peatland_MerBleue_Canada/settings/CLM/`), swapping in the crop assets:
+
+1. `fsurdat = …/surfdata_cropCFT_USplains_1pt.nc`; land + datm `meshfile =
+   …/esmf_mesh_croppt.nc`. (Alternatively, create a SYMFLUENCE domain whose
+   centroid is 263.29/44.80 so its generated mesh matches, then overwrite the
+   generated `cft=2` surfdata with the crop one.)
+2. `lnd_in`: `use_cn=.true.  use_crop=.true.  irrigate=.true.
+   use_fertilizer=.true.  use_grainproduct=.true.  create_crop_landunit=.true.
+   finidat=''` (cold start). SYMFLUENCE writes `lnd_in` directly (bypassing
+   `bldnml`), so these are set by editing the generated `lnd_in`.
+3. Multi-year datm forcing at the point — **the one remaining acquisition**
+   (GSWP3 or ERA5-derived, as for the other domains) — plus a CN-crop spin-up long
+   enough for a crop to plant / accumulate GDD-HUI / grow / harvest.
+4. **Open question for the run step:** whether the shared `cesm.exe` engages crops
+   from the namelist flags alone. CTSM compiles the crop code unconditionally
+   (`use_crop` is a runtime flag, not an ifdef), so it *should*; if the build
+   rejects `use_crop=.true.` (e.g. it was configured `-bgc sp`), rebuild the case
+   `-bgc bgc -crop`. This needs the Fortran box and is deferred as the serialized
+   stretch (a sibling agent holds the box).
+
+**To finish A2/A3/A4, the only remaining prerequisite is the datm forcing + a
+CN-crop cold-start spin-up** long enough for the crop to plant, accumulate
+GDD/HUI, grow and harvest, plus crop pdump/BGCDUMP instrumentation. The site need
+not be Mead — single-step parity validates the crop *code path* against the same
+inputs.
 
 ## Verified Julia wiring state (no run required)
 
