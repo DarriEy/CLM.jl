@@ -2619,7 +2619,11 @@ function clm_drv_core!(config::CLMDriverConfig,
              5, 0.01, 130.0,
              bc.endg, noveg, dtime,
              config.use_cn, false, false,
-             cveg_cf.agnpp_patch, cveg_cf.bgnpp_patch, 365.0 * SECSPDAY)
+             cveg_cf.agnpp_patch, cveg_cf.bgnpp_patch, 365.0 * SECSPDAY;
+             finundated_stream = (inst.ch4_varcon.finundation_mtd == FINUNDATION_MTD_H2OSFC ?
+                                  nothing : inst.ch4_finundated_stream),
+             zwt = sh.zwt_col, zwt_perched = sh.zwt_perched_col,
+             tws = inst.water.waterdiagnosticbulk_inst.tws_grc)
     end
 
     # ========================================================================
@@ -2739,6 +2743,19 @@ function clm_drv_core!(config::CLMDriverConfig,
     add_canopy_water_to_grc_storage!(inst.water.waterbalancebulk_inst.endwb_grc,
                                      wsb.ws.liqcan_patch, wsb.ws.snocan_patch,
                                      filt.nolakec, col, lun, pch, bc_col, bc_grc)
+
+    # Total water storage (tws_grc) for the CH4 TWS_inversion finundation method.
+    # lnd2atmMod.F90:470-483 sets tws_grc = c2g(endwb_col) + river-storage depth;
+    # with no active river model the river term is 0, so tws is the gridcell-total
+    # end-of-step column water storage. Written here (end of step) so the NEXT
+    # step's ch4! reads it — matching CTSM, where lnd2atm runs after the step and
+    # ch4 consumes the persisted value. Only consulted by the inversion methods;
+    # the default h2osfc finundation path never reads it.
+    let wdbulk = inst.water.waterdiagnosticbulk_inst
+        if !isempty(wdbulk.tws_grc)
+            copyto!(wdbulk.tws_grc, inst.water.waterbalancebulk_inst.endwb_grc)
+        end
+    end
     _g_evap_tot     = _zlike(length(grc.lat)); _g_surf      = _zlike(length(grc.lat))
     _g_qrgwl        = _zlike(length(grc.lat)); _g_drain     = _zlike(length(grc.lat))
     _g_drain_perch  = _zlike(length(grc.lat)); _g_sfc_irrig = _zlike(length(grc.lat))

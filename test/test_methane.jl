@@ -483,4 +483,157 @@
         end
     end
 
+    # ------------------------------------------------------------------
+    # Satellite-inversion finundation (ch4FInundatedStreamType.F90
+    # CalcFinundated, TWS_inversion + ZWT_inversion). Runs the full ch4!
+    # driver so the whole dispatch (kernel gating + snow hold + redox lag)
+    # is exercised, and asserts finundated_col vs the hand-computed
+    # regression -- the DECOUPLED wetland-inundation path that produces
+    # finundated > 0 where the h2osfc method drains to 0.
+    # ------------------------------------------------------------------
+    # Build the full ch4! call for a given finundation config and return
+    # finundated_col. col_gridcell = [1,1,2], nc=3, ng=2.
+    function run_ch4_finund(d; method, stream, tws, zwt, zwt_perched,
+                            snow_depth=zeros(d.nc), qflx_surf=zeros(d.nc))
+        d.ch4vc.finundation_mtd = method
+        patch_column = [1, 1, 2, 3]; patch_itype = [1, 2, 1, 1]
+        patch_wtcol = [0.5, 0.5, 1.0, 1.0]
+        col_gridcell = [1, 1, 2]; col_wtgcell = [0.5, 0.5, 1.0]
+        is_fates = falses(d.nc); latdeg = [45.0, 30.0]
+        forc_pbot = fill(101325.0, d.ng); forc_t_grc = fill(CLM.TFRZ + 15.0, d.ng)
+        forc_po2 = fill(101325.0 * 0.209, d.ng); forc_pco2 = fill(40.0, d.ng)
+        forc_pch4 = fill(101325.0 * 1.7e-6, d.ng)
+        h2osoi_liq = fill(0.3 * CLM.DENH2O * 0.1, d.nc, d.nlevsoi)
+        h2osoi_ice = zeros(d.nc, d.nlevsoi); h2osfc_v = zeros(d.nc)
+        bsw = fill(5.0, d.nc, d.nlevsoi); cellorg = fill(10.0, d.nc, d.nlevsoi)
+        t_grnd = fill(CLM.TFRZ + 15.0, d.nc); t_h2osfc = fill(CLM.TFRZ + 15.0, d.nc)
+        frac_h2osfc = zeros(d.nc); snl_v = zeros(Int, d.nc)
+        rootfr_p = fill(0.2, d.np, d.nlevsoi); rootfr_col = fill(0.2, d.nc, d.nlevsoi)
+        crootfr = fill(0.2, d.np, d.nlevsoi); rootr_p = fill(0.2, d.np, d.nlevsoi)
+        elai_v = fill(2.0, d.np); qflx_tran_veg = fill(1.0e-3, d.np)
+        annsum_npp_v = fill(500.0, d.np); rr_v = fill(1.0e-6, d.np)
+        somhr = fill(1.0e-6, d.nc); lithr = fill(1.0e-7, d.nc)
+        hr_vr = fill(1.0e-8, d.nc, d.nlevsoi); o_scalar = ones(d.nc, d.nlevsoi)
+        fphr = ones(d.nc, d.nlevsoi); pot_f_nit_vr = zeros(d.nc, d.nlevsoi)
+        lake_icefrac = zeros(d.nc, d.nlevsoi); lakedepth = fill(5.0, d.nc)
+        agnpp = fill(1.0e-5, d.np); bgnpp = fill(1.0e-5, d.np)
+        d.ch4.ch4_first_time_grc .= true; d.ch4.totcolch4_bef_col .= 0.0
+        # qflx_surf_lag starts at 0; with redoxlag on, finundated_col is the
+        # pre-lag clamped regression (snow_depth<=0 branch) -> deterministic.
+        d.ch4.qflx_surf_lag_col .= 0.0
+        d.ch4.finundated_lag_col .= 0.0
+        CLM.ch4!(d.ch4, d.params, d.ch4vc,
+                 d.mask_soil, d.mask_soilp, d.mask_lake, d.mask_nolake,
+                 col_gridcell, col_wtgcell, patch_column, patch_itype, patch_wtcol,
+                 is_fates, latdeg,
+                 forc_pbot, forc_t_grc, forc_po2, forc_pco2, forc_pch4,
+                 d.watsat, d.h2osoi_vol, h2osoi_liq, h2osoi_ice, h2osfc_v,
+                 bsw, cellorg, d.smp_l, d.t_soisno, t_grnd, t_h2osfc,
+                 frac_h2osfc, snow_depth, snl_v, qflx_surf,
+                 rootfr_p, rootfr_col, crootfr, rootr_p, elai_v,
+                 qflx_tran_veg, annsum_npp_v, rr_v,
+                 somhr, lithr, hr_vr, o_scalar, fphr, pot_f_nit_vr,
+                 lake_icefrac, lakedepth,
+                 d.z, d.dz, d.zi,
+                 d.nlevsoi, 5, 1, d.nlevsoi,
+                 5, 0.01, 130.0,
+                 d.ng, 0, 1800.0,
+                 true, false, false,
+                 agnpp, bgnpp, 365.0 * 86400.0;
+                 finundated_stream=stream, tws=tws, zwt=zwt, zwt_perched=zwt_perched)
+        return copy(d.ch4.finundated_col)
+    end
+
+    @testset "CalcFinundated TWS_inversion" begin
+        d = make_ch4_test_data()
+        # finundated = FWS_TWS_A * TWS + FWS_TWS_B (per gridcell), clamped [0,1].
+        stream = CLM.CH4FInundatedStream(active=true,
+                                         fws_slope_gdc=[0.01, 0.02],
+                                         fws_intercept_gdc=[0.05, 0.10])
+        tws = [20.0, 30.0]   # gridcell TWS (kg/m^2)
+        fin = run_ch4_finund(d; method=CLM.FINUNDATION_MTD_TWS_INVERSION,
+                             stream=stream, tws=tws, zwt=nothing, zwt_perched=nothing)
+        # g1: 0.01*20+0.05 = 0.25 (cols 1,2);  g2: 0.02*30+0.10 = 0.70 (col 3)
+        @test fin[1] ≈ 0.25 atol=1e-12
+        @test fin[2] ≈ 0.25 atol=1e-12
+        @test fin[3] ≈ 0.70 atol=1e-12
+        @test all(fin .> 0.0)   # the whole point: finundated > 0 at a wetland col
+
+        # Clamp: huge TWS -> 1, negative regression -> 0.
+        d2 = make_ch4_test_data()
+        stream2 = CLM.CH4FInundatedStream(active=true,
+                                          fws_slope_gdc=[0.05, -0.01],
+                                          fws_intercept_gdc=[0.0, 0.05])
+        fin2 = run_ch4_finund(d2; method=CLM.FINUNDATION_MTD_TWS_INVERSION,
+                              stream=stream2, tws=[100.0, 100.0],
+                              zwt=nothing, zwt_perched=nothing)
+        @test fin2[1] ≈ 1.0 atol=1e-12   # 0.05*100 = 5 -> clamp to 1
+        @test fin2[3] ≈ 0.0 atol=1e-12   # -0.01*100+0.05 = -0.95 -> clamp to 0
+    end
+
+    @testset "CalcFinundated ZWT_inversion" begin
+        d = make_ch4_test_data()
+        # finundated = F0*exp(-zwt_actual/ZWT0) + P3*qflx_surf_lag, clamped.
+        stream = CLM.CH4FInundatedStream(active=true,
+                                         zwt0_gdc=[0.5, 0.5], f0_gdc=[0.9, 0.9],
+                                         p3_gdc=[0.0, 0.0])
+        # zwt_perched large -> condition false -> zwt_actual = zwt.
+        zwt = [0.1, 0.1, 2.0]; zwt_perched = fill(10.0, d.nc)
+        fin = run_ch4_finund(d; method=CLM.FINUNDATION_MTD_ZWT_INVERSION,
+                             stream=stream, tws=nothing, zwt=zwt, zwt_perched=zwt_perched)
+        @test fin[1] ≈ 0.9 * exp(-0.1 / 0.5) atol=1e-12   # ~0.7368
+        @test fin[3] ≈ 0.9 * exp(-2.0 / 0.5) atol=1e-12   # ~0.0165
+        @test all(fin .> 0.0)
+
+        # Perched branch: zwt_perched < z[nlevsoi]-1e-5 (=0.44995) and < zwt.
+        d2 = make_ch4_test_data()
+        zwt2 = [0.4, 0.4, 0.4]; zwtp2 = [0.05, 0.05, 0.05]
+        fin2 = run_ch4_finund(d2; method=CLM.FINUNDATION_MTD_ZWT_INVERSION,
+                              stream=stream, tws=nothing, zwt=zwt2, zwt_perched=zwtp2)
+        @test fin2[1] ≈ 0.9 * exp(-0.05 / 0.5) atol=1e-12   # uses perched, not zwt
+    end
+
+    @testset "read_ch4_finundated_stream! (real inversiondata file)" begin
+        # The Prigent/Swenson regression stream, if present. Absence is a valid
+        # partial outcome (the PORT is the deliverable); the test then skips.
+        candidates = [
+            joinpath(@__DIR__, "..", "..", "..", "..", "..", "..",
+                     "compHydro", "SYMFLUENCE_data", "installs", "cesm-inputdata",
+                     "lnd", "clm2", "paramdata",
+                     "finundated_inversiondata_0.9x1.25_c170706.nc"),
+            "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/cesm-inputdata/lnd/clm2/paramdata/finundated_inversiondata_0.9x1.25_c170706.nc",
+        ]
+        path = ""
+        for cand in candidates
+            if isfile(cand); path = cand; break; end
+        end
+        if isempty(path)
+            @info "finundated_inversiondata stream not found; skipping real-file read test"
+            @test_skip false
+        else
+            # MerBleue peatland ~45.41 N, 75.52 W (=284.48 E).
+            stream = CLM.CH4FInundatedStream()
+            CLM.read_ch4_finundated_stream!(stream, path, [45.41], [284.48];
+                                            method=CLM.FINUNDATION_MTD_TWS_INVERSION)
+            @test stream.active
+            @test length(stream.fws_slope_gdc) == 1
+            @test isfinite(stream.fws_slope_gdc[1])
+            @test isfinite(stream.fws_intercept_gdc[1])
+            # Drive ch4! at MerBleue coeffs with a plausibly-wet TWS and confirm
+            # the model can now produce finundated > 0 at a draining single point.
+            # Use the default nc=3/ng=2 topology; put the MerBleue coeffs on both
+            # gridcells so run_ch4_finund's hardcoded col_gridcell=[1,1,2] applies.
+            a = stream.fws_slope_gdc[1]; b = stream.fws_intercept_gdc[1]
+            d = make_ch4_test_data()
+            stream1 = CLM.CH4FInundatedStream(active=true,
+                        fws_slope_gdc=[a, a], fws_intercept_gdc=[b, b])
+            # pick a TWS that yields an in-range regression for this cell
+            tws_target = a != 0.0 ? clamp((0.5 - b) / a, 0.0, 5000.0) : 0.0
+            fin = run_ch4_finund(d; method=CLM.FINUNDATION_MTD_TWS_INVERSION,
+                                 stream=stream1, tws=[tws_target, tws_target],
+                                 zwt=nothing, zwt_perched=nothing)
+            @test fin[1] ≈ clamp(a * tws_target + b, 0.0, 1.0) atol=1e-10
+        end
+    end
+
 end

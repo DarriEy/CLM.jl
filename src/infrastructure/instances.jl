@@ -99,6 +99,10 @@ Base.@kwdef mutable struct CLMInstances
     ch4::CH4Data                     = CH4Data{Float64}()
     ch4_params::CH4Params            = CH4Params()
     ch4_varcon::CH4VarCon            = CH4VarCon()
+    # Satellite-regression inundation coefficients (ch4FInundatedStreamType.F90);
+    # inactive unless finundation_mtd selects a ZWT/TWS inversion method and the
+    # `finundated_inversiondata_*.nc` stream has been read.
+    ch4_finundated_stream::CH4FInundatedStream = CH4FInundatedStream()
 
     # --- Emissions ---
     dust_emis::DustEmisBaseData      = DustEmisBaseData()
