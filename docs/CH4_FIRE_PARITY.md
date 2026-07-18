@@ -728,3 +728,112 @@ byte-identical — `C_H_INV`/`KH_THETA` and the `CH4Params` oxidation constants 
 julia --project=. scripts/ch4_oxid_source_injection.jl 4721   # clean oxidation-kernel oracle
 julia --project=. scripts/fortran_parity_ch4.jl 3             # full Bow scorecard
 ```
+
+---
+
+## 11. CH4-AS-A-SOURCE, UNBLOCKED — `finundation_mtd=TWS_inversion` at Bow (2026-07-18)
+
+**The three-round blocker is gone: `finundated>0` was achieved, the saturated source
+regime was diffed against Fortran for the first time, and a real mis-port was found and
+fixed.** The sat-column divergence that §6/§9/§10 chased through jwt / smoothing /
+diffusivity (#237) / oxidation constants (#239) had TWO remaining causes — a harness
+forcing misalignment and a genuine aerenchyma porosity bug — both resolved here.
+
+### The unblock — a wetter finundation method, not a wetter site
+Rounds 1–2 (§7/§9) assumed CH4-as-a-source needed a site that PONDS (`frac_h2osfc>0`).
+It does not. #238 ported `finundation_mtd=TWS_inversion`: `finundated = FWS_TWS_A*TWS +
+FWS_TWS_B`, the Prigent **satellite regression**, which is DECOUPLED from the column's own
+h2osfc pond. Evaluating the fitted coefficients (`finundated_inversiondata_0.9x1.25`) at
+every migrated site's gridcell showed **several inundate**, including Bow itself: at Bow's
+`(51.4,244.0)` cell `FWS_TWS_A=-3.957e-5, FWS_TWS_B=+0.0678`, so `finundated ≈ 0.045 > 0`
+for the site's `TWS≈586 kg/m²`. (MerBleue does NOT: its cell needs `TWS>2242` — the h2osfc
+result of §9 was not a fluke, the coarse-grid regression there is genuinely dry.)
+
+**Why Bow, not a peatland:** Bow is the ONLY site with a converged BGC restart, so the CN
+state (production, O₂ demand) is warm — avoiding the cold-CN confound that made the
+MerBleue-as-source diff un-attributable (§9 Phase 2). finundated≈0.045 is modest but makes
+the whole source regime NON-vacuous: the sat/unsat surface-flux partition is no longer
+degenerate and `CH4_SURF_AERE_SAT` (saturated aerenchyma surface flux) is non-zero.
+
+### The reference + harness
+* Reference `SYMFLUENCE_data/clm_bgc_spinup/bow_ref_ch4tws`: IDENTICAL to §2's
+  `bgc_ref_firech4` except `finundation_method='TWS_inversion'`. The `&ch4finundated` stream
+  file was already in the namelist; the missing `_ESMFmesh_cdf5_130621` mesh was substituted
+  with the `fv0.9x1.25` ESMFmesh (same 0.9x1.25 grid, exactly as the ndep stream does). No
+  rebuild (the shared `cesm.exe` carries the bgcdump SourceMods). Launch = plain (the
+  macOS-26 xzone `brk` guard is nondeterministic; it fired once, a retry ran clean to
+  EXIT_CODE=0 — do NOT reach for `lldb -b`, which `-o quit`s at the first guard). Verified
+  **`FINUNDATED=0.0446` across the whole nstep 4720..4888 window.**
+* Harness `scripts/fortran_parity_ch4_tws.jl`: sets `finundation_mtd=TWS_inversion`, reads
+  the REAL stream coefficients at Bow's cell, and back-derives Fortran's per-step `tws` from
+  the dumped `FINUNDATED` (the bgcdump carries no TWS; adding it needs a Fortran rebuild) so
+  `CalcFinundated` reproduces `FINUNDATED` exactly (validated: `4e-5`) and the transport diff
+  is clean.
+
+### Bug 1 (harness) — the datm misalignment, exactly as #233
+grnd_ch4_cond (the aerodynamic boundary conductance = `1/raw`, which gates the aerenchyma
+O₂/CH4 supply) is RECOMPUTED from the forcing wind/T each step; it diverged **11–78%
+step-dependent**. The CH4 harness read `clmforc.2003` at the model hour, but the Bow
+BGC-spinup datm recycles model-year 2202 to **forcing-year 2002, one hour behind** (§5).
+Pointing the forcing at `clmforc.2002` at `(model_hour−1)` made grnd_ch4_cond **bit-exact**
+(0.0123960 vs 0.0123960) and collapsed the whole UNSAT column to parity
+(`CONC_CH4/O2_UNSAT`, `CH4_OXID_UNSAT`, `CH4_TRAN_UNSAT` all `≤1e-5`). CH4 prognostics are
+injected so they barely feel the forcing — but the aerodynamic conductance does not, and it
+gates aerenchyma. **The lesson of #233 repeats for methane: align the datm before blaming
+the port.**
+
+### Bug 2 (real mis-port, FIXED) — grass patches lost 2/3 of their aerenchyma
+With grnd_ch4_cond exact, `CH4_AERE_SAT` still diverged **61%** (Julia ~2× low, layer-varying
+factor). Isolation: grnd exact, `CONC_CH4_SAT` exact (0.4%), so the error was in the plant
+tiller term `area_tiller·rootfr/z`. Bow's patches are 5% bare / 60% needleleaf tree / **35%
+C3 grass**. `ch4Mod.F90 ch4_aere` gives **grass and crop** patches the full root porosity
+(`poros_tiller=0.3`, Colmer 2003) but every other PFT only `0.3*nongrassporosratio`
+(=0.099). **`methane.jl:_ch4aere_patch_kernel!` applied `nongrassporosratio`
+UNCONDITIONALLY**, so the grass patch — the dominant CH4 conduit — had `1/nongrassporosratio
+≈ 3×` too little aerenchyma. Fixed: `poros_tiller` is full for `itype >= nc3_arctic_grass`
+(grasses 12/13/14 and crops ≥15 are exactly that set, reproducing CTSM's OR-condition),
+reduced otherwise. `use_lch4`-gated (the kernel runs only under `use_lch4`); default path
+byte-identical; guarded by a new `test_methane.jl` assertion (grass/tree aere ratio →
+`1/nongrassporosratio`).
+
+### Scorecard — Bow TWS_inversion, `after_ch4`, converged CN, aligned forcing
+Both fixes applied (worst rel.err over 5 window steps; `|F|` = Fortran profile scale):
+
+| field | before (this section) | after |
+|---|---|---|
+| `CH4_AERE_SAT`      | 0.610 | **4.7e-3** |
+| `CH4_SURF_AERE_SAT` | 0.569 | **1.1e-3** |
+| `CONC_O2_SAT`       | 0.069 | **2.5e-4** |
+| `O2STRESS_SAT`      | 0.550 | **1.6e-2** |
+| `CH4_OXID_SAT`      | 0.383 | **4.1e-2** |
+| `CONC_CH4_SAT`      | 4.4e-3| **3.7e-4** |
+| `CH4_SURF_FLUX_TOT` | 9.09  | **9.9e-3** |
+| `TOTCOLCH4`         | 2.8e-3| **4.4e-4** |
+| `FINUNDATED`        | —     | **4.2e-5** (validates the `CalcFinundated` TWS_inversion port) |
+| `GRND_CH4_COND`     | 0.78  | **1.5e-5** |
+| UNSAT column (`CONC_CH4/O2_UNSAT`, `CH4_OXID/TRAN/AERE_UNSAT`, stresses) | ~1 | **≤1e-5–1e-3 / EXACT** |
+
+**The saturated CH4 source regime now agrees with Fortran to the single-step-oracle floor
+(~1e-3–1e-4), the same near-exact class as the fire C/N fluxes (§5).** The "saturated-column
+collapse" (Julia≈0) of §6 is GONE — it was the diffusivity (#237) + oxidation constants
+(#239) + the datm alignment + the grass porosity, in that order of discovery.
+
+### What remains (reported, NOT tuned)
+* **`CH4_PROD_SAT` = 7.9%, unchanged** — production reads the warm-CN `somhr`/`lithr`/`hr_vr`,
+  which are Julia-recomputed and NOT in the dump; a CN-state confound, not a production-kernel
+  bug (the kernel matches line-by-line; same residual as §10).
+* **Ebullition is still physically ZERO at Bow** (`CH4_EBUL_*`, `CH4_DFSAT_FLUX` ≡ 0): the
+  code path runs, but Bow's saturated CH4 concentration stays below the bubble threshold (a
+  dry, low-production column). Strong ebullition needs a wet, high-production column WITH a
+  converged BGC restart — which does not exist in the migrated set. This is the one remaining
+  source-regime term the current assets cannot exercise (honest, not vacuous-hidden).
+* `CH4_DFSAT_FLUX` relerr ~1 on a `1e-14` scale — finundated is quasi-steady (0.0446±1e-4),
+  so the dfsat redistribution is negligible; not load-bearing.
+
+### Reproducing
+```bash
+# Fortran reference (already generated): SYMFLUENCE_data/clm_bgc_spinup/bow_ref_ch4tws/
+#   lnd_in = bgc_ref_firech4 lnd_in with finundation_method='TWS_inversion' + the fv0.9x1.25
+#   mesh for &ch4finundated; run ./run_bow_ch4tws.sh (plain; retry if the xzone brk fires).
+julia --project=. scripts/fortran_parity_ch4_tws.jl 5    # Bow TWS_inversion source-regime scorecard
+```

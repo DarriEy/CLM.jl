@@ -342,6 +342,53 @@
         end
     end
 
+    @testset "ch4_aere! grass patch uses full tiller porosity" begin
+        # CTSM ch4_aere gives GRASS/CROP patches the full root porosity (0.3,
+        # Colmer 2003) but every other PFT only 0.3*nongrassporosratio. Two
+        # otherwise-identical saturated columns differing ONLY in PFT (grass vs
+        # needleleaf tree) must therefore produce MORE aerenchyma in the grass
+        # column. Regression guard for the poros_tiller mis-port that had applied
+        # nongrassporosratio unconditionally (grass aerenchyma ~3x too small).
+        nc, np, nlevsoi = 2, 2, 5
+        d = make_ch4_test_data(nc=nc, np=np, ng=1, nlevsoi=nlevsoi)
+        patch_column = [1, 2]                       # col1 = grass, col2 = tree
+        patch_itype  = [CLM.nc3_arctic_grass, 1]    # grass (12) vs NET tree (1)
+        patch_wtcol  = [1.0, 1.0]
+        col_gridcell = [1, 1]
+        is_fates = falses(nc)
+        for c in 1:nc, j in 1:nlevsoi
+            d.ch4.conc_ch4_sat_col[c, j]       = 0.1        # well above c_atm gradient
+            d.ch4.conc_o2_sat_col[c, j]        = 0.05
+            d.ch4.ch4_prod_depth_sat_col[c, j] = 1.0e-3     # keep the aeretran cap slack
+        end
+        fill!(d.ch4.ch4_aere_depth_sat_col, 0.0)
+        fill!(d.ch4.ch4_tran_depth_sat_col, 0.0)
+        fill!(d.ch4.o2_aere_depth_sat_col, 0.0)
+        d.ch4.grnd_ch4_cond_patch .= 1.0e3   # large => area-limited (ratio -> 1/nongrassporosratio)
+        watsat = fill(0.45, nc, nlevsoi)
+        h2osoi_vol = fill(0.4, nc, nlevsoi)
+        t_soisno = fill(CLM.TFRZ + 15.0, nc, nlevsoi)
+        rootr = fill(0.2, np, nlevsoi)
+        rootfr = fill(0.2, np, nlevsoi)
+        elai = fill(2.0, np)
+        qflx_tran_veg = fill(1.0e-3, np)
+        annsum_npp = fill(500.0, np)
+        z = [(j - 0.5) * 0.1 for c in 1:nc, j in 1:nlevsoi]
+        dz = fill(0.1, nc, nlevsoi)
+        jwt = fill(0, nc)                    # fully saturated
+        CLM.ch4_aere!(d.ch4, d.params, d.ch4vc, trues(nc), trues(np),
+                      patch_column, patch_itype, patch_wtcol, col_gridcell, is_fates,
+                      watsat, h2osoi_vol, t_soisno, rootr, rootfr, elai,
+                      qflx_tran_veg, annsum_npp, z, dz, jwt, 1, false,
+                      nlevsoi, 3600.0, CLM.noveg)
+        aere_grass = sum(d.ch4.ch4_aere_depth_sat_col[1, :])
+        aere_tree  = sum(d.ch4.ch4_aere_depth_sat_col[2, :])
+        @test aere_grass > aere_tree
+        # area-limited regime: grass/tree ratio approaches 1/nongrassporosratio (~3)
+        @test aere_grass / aere_tree > 1.5
+        @test isapprox(aere_grass / aere_tree, 1.0 / d.params.nongrassporosratio; rtol = 0.15)
+    end
+
     @testset "ch4_prod! basic" begin
         d = make_ch4_test_data()
         jwt = fill(2, d.nc)
