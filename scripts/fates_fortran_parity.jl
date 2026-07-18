@@ -167,8 +167,19 @@ end
 # Build: the Julia FATES port on the SAME site the Fortran case runs.
 # ==========================================================================
 function build()
+    # use_bedrock=false MATCHES the Fortran case's lnd_in (`use_bedrock = .false.`,
+    # from CLM build-namelist for I2000Clm50FatesRs — see setup_case.sh / the run dir).
+    # clm_initialize! DEFAULTS use_bedrock=true; leaving it unset ran the port with a
+    # shallow Bow bedrock (surfdata zbedrock≈2.28 m → nbedrock=12), which the per-step
+    # clamp_zwt_to_bedrock! then used to drag the water table 8.6 m → 2.28 m, and the
+    # SoilHydrology drainage `rsub_top ∝ exp(-zwt/hkdepth)` blew up to ~10 mm/day of
+    # spurious subsurface runoff — draining the whole column and over-drying the top
+    # layer (h2ovol1 0.11–0.14 vs Fortran 0.32–0.34, PR #247 D1). With use_bedrock=false
+    # nbedrock=nlevsoi, zwt stays 8.6 m, qflx_drain≡0 like Fortran, and h2ovol1 tracks
+    # the Fortran ground truth to ~0.01–0.02. The soil-hydrology port itself is faithful;
+    # this was a harness↔reference namelist mismatch (the #233/#240/#248 trap).
     inst, bounds, filt, tm = _C.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
-        use_fates=true, start_date=START, dtime=Int(DTIME))
+        use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false)
     for g in 1:bounds.endg
         isfinite(inst.gridcell.latdeg[g]) || (inst.gridcell.latdeg[g] = inst.gridcell.lat[g]*180/π)
         isfinite(inst.gridcell.londeg[g]) || (inst.gridcell.londeg[g] = inst.gridcell.lon[g]*180/π)
