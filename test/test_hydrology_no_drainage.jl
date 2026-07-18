@@ -340,6 +340,47 @@
     end
 
     # ------------------------------------------------------------------
+    # 9b. compute_wf2! — CTSM carryover (top-0.17m WHC frac, no reset between
+    #     the 0.05m and 0.17m accumulations => top layers double-counted).
+    # ------------------------------------------------------------------
+    @testset "compute_wf2! carryover" begin
+        nc2 = 1
+        nlevtot = nlevsno + nlevmaxurbgrnd
+        joff = nlevsno
+        wf2_out = zeros(nc2)
+        # top layer wetter than the rest, so the double-count is observable
+        h2osoi_vol = fill(0.30, nc2, nlevmaxurbgrnd); h2osoi_vol[1, 1] = 0.35
+        watsat = fill(0.4, nc2, nlevgrnd)
+        sucsat = fill(200.0, nc2, nlevgrnd)
+        bsw    = fill(5.0, nc2, nlevgrnd)
+        z  = zeros(nc2, nlevtot); dz = fill(0.02, nc2, nlevtot)
+        for j in 1:nlevgrnd; z[1, j + joff] = 0.01 + (j - 1) * 0.02; end
+        mask = BitVector([true]); bnds = 1:nc2
+
+        CLM.compute_wf2!(wf2_out, h2osoi_vol, watsat, sucsat, bsw,
+            z, dz, mask, bnds, nlevgrnd, nlevsno, 0.05, 0.17)
+
+        # Reference: replicate the two-loop accumulation WITHOUT reset.
+        wd = 0.4 * (316230.0 / 200.0)^(-1.0 / 5.0)
+        rwat = 0.0; swat = 0.0; rz = 0.0
+        for lim in (0.05, 0.17), j in 1:nlevgrnd
+            if z[1, j + joff] + 0.5 * dz[1, j + joff] <= lim
+                rwat += (h2osoi_vol[1, j] - wd) * dz[1, j + joff]
+                swat += (watsat[1, j] - wd) * dz[1, j + joff]
+                rz   += dz[1, j + joff]
+            end
+        end
+        @test wf2_out[1] ≈ (rwat / rz) / (swat / rz)
+
+        # A clean single-0.17m accumulation (compute_wf!) must DIFFER, proving the
+        # carryover is not a no-op (top layer is double-counted here).
+        wf2_single = zeros(nc2)
+        CLM.compute_wf!(wf2_single, h2osoi_vol, watsat, sucsat, bsw,
+            z, dz, mask, bnds, nlevgrnd, nlevsno, 0.17)
+        @test !(wf2_out[1] ≈ wf2_single[1])
+    end
+
+    # ------------------------------------------------------------------
     # 10. update_snow_top_layer_diagnostics!
     # ------------------------------------------------------------------
     @testset "update_snow_top_layer_diagnostics!" begin

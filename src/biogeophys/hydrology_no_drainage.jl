@@ -614,6 +614,79 @@ function compute_wf!(
 end
 
 # =========================================================================
+# compute_wf2! — top-0.17m WHC fraction, replicating the CTSM CARRYOVER
+# =========================================================================
+# CTSM (HydrologyNoDrainageMod.F90:640-699) computes wf (top 0.05m) then wf2
+# (top 0.17m) in ONE routine, and — crucially — does NOT reset rwat/swat/rz
+# between the two depth loops. So the top-0.05m layers are accumulated TWICE
+# into wf2 (once from the leftover wf sums, once in the 0.17m loop). Computing
+# wf2 as an independent single accumulation to 0.17m (as compute_wf! would)
+# omits that double-count and biases wf2 by O(0.01) — enough to flip it across
+# the `max(wf2,0)` kink in the peatland-fire baf_peatf branch. This kernel
+# reproduces the carryover exactly: accumulate <=inner_depth, then continue
+# accumulating <=outer_depth (no reset), then finalize with the rz==0 fallback.
+@kernel function _hydrond_compute_wf2_kernel!(wf2_out, @Const(h2osoi_vol),
+        @Const(watsat), @Const(sucsat), @Const(bsw), @Const(z), @Const(dz),
+        @Const(mask_hydrology), nlevgrnd::Int, joff::Int,
+        inner_depth, outer_depth, cmin::Int, cmax::Int)
+    c = @index(Global)
+    T = eltype(wf2_out)
+    @inbounds if cmin <= c <= cmax && mask_hydrology[c]
+        rwat = zero(T); swat = zero(T); rz = zero(T)
+        # inner (0.05m) accumulation — NOT reset before the outer loop (CTSM quirk)
+        for j in 1:nlevgrnd
+            if z[c, j + joff] + T(0.5) * dz[c, j + joff] <= inner_depth
+                watdry = watsat[c, j] * (T(316230.0) / sucsat[c, j])^(T(-1.0) / bsw[c, j])
+                rwat += (h2osoi_vol[c, j] - watdry) * dz[c, j + joff]
+                swat += (watsat[c, j]      - watdry) * dz[c, j + joff]
+                rz   += dz[c, j + joff]
+            end
+        end
+        # outer (0.17m) accumulation on TOP of the inner sums (double-counts <=inner)
+        for j in 1:nlevgrnd
+            if z[c, j + joff] + T(0.5) * dz[c, j + joff] <= outer_depth
+                watdry = watsat[c, j] * (T(316230.0) / sucsat[c, j])^(T(-1.0) / bsw[c, j])
+                rwat += (h2osoi_vol[c, j] - watdry) * dz[c, j + joff]
+                swat += (watsat[c, j]      - watdry) * dz[c, j + joff]
+                rz   += dz[c, j + joff]
+            end
+        end
+        if rz != zero(T)
+            tsw  = rwat / rz
+            stsw = swat / rz
+        else
+            watdry = watsat[c, 1] * (T(316230.0) / sucsat[c, 1])^(T(-1.0) / bsw[c, 1])
+            tsw  = h2osoi_vol[c, 1] - watdry
+            stsw = watsat[c, 1] - watdry
+        end
+        wf2_out[c] = tsw / stsw
+    end
+end
+
+function compute_wf2!(
+    wf2_out::AbstractVector{<:Real},
+    h2osoi_vol::AbstractMatrix{<:Real},
+    watsat::AbstractMatrix{<:Real},
+    sucsat::AbstractMatrix{<:Real},
+    bsw::AbstractMatrix{<:Real},
+    z::AbstractMatrix{<:Real},
+    dz::AbstractMatrix{<:Real},
+    mask_hydrology::AbstractVector{Bool},
+    bounds::UnitRange{Int},
+    nlevgrnd::Int,
+    nlevsno::Int,
+    inner_depth::Real,
+    outer_depth::Real,
+)
+    joff = nlevsno
+    _launch!(_hydrond_compute_wf2_kernel!, wf2_out, h2osoi_vol, watsat, sucsat, bsw,
+             z, dz, mask_hydrology, nlevgrnd, joff,
+             eltype(wf2_out)(inner_depth), eltype(wf2_out)(outer_depth),
+             first(bounds), last(bounds); ndrange = last(bounds))
+    return nothing
+end
+
+# =========================================================================
 # update_snow_top_layer_diagnostics!
 # =========================================================================
 
@@ -1040,14 +1113,16 @@ function hydrology_no_drainage!(
         mask_hydrology, bounds, nlevgrnd, nlevsno, 0.05)
 
     # --- Soil water as fraction of WHC (top 0.17m) ---
-    compute_wf!(
+    # CTSM accumulates the 0.17m sums ON TOP of the 0.05m sums (no reset between
+    # the wf and wf2 loops) — compute_wf2! reproduces that carryover exactly.
+    compute_wf2!(
         waterdiagbulk.wf2_col,
         waterstatebulk.ws.h2osoi_vol_col,
         soilstate.watsat_col,
         soilstate.sucsat_col,
         soilstate.bsw_col,
         col.z, col.dz,
-        mask_hydrology, bounds, nlevgrnd, nlevsno, 0.17)
+        mask_hydrology, bounds, nlevgrnd, nlevsno, 0.05, 0.17)
 
     # --- Top-layer snow diagnostics ---
     update_snow_top_layer_diagnostics!(

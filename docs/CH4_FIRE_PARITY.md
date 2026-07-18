@@ -837,3 +837,109 @@ collapse" (Julia≈0) of §6 is GONE — it was the diffusivity (#237) + oxidati
 #   mesh for &ch4finundated; run ./run_bow_ch4tws.sh (plain; retry if the xzone brk fires).
 julia --project=. scripts/fortran_parity_ch4_tws.jl 5    # Bow TWS_inversion source-regime scorecard
 ```
+
+---
+
+## 12. FIRE PEATLAND branch (`baf_peatf`) VALIDATED — a real wf2 double-count bug (2026-07-18)
+
+**The peatland-fire term `baf_peatf` is now diffed against Fortran for the first
+time, is BIT-EXACT, and finding it exposed & fixed a real port bug in the soil
+`wf2` diagnostic.** (Backlog A2, peat row.)
+
+### The unblock — a synthetic `peatf`, not a new site
+`baf_peatf` is `F≡0` vacuous at Bow (and at *every* migrated site) because the
+SYMFLUENCE surfdata pipeline never populates `peatf` — it is **0 in all 21
+domain surfdatas**, MerBleue included. So the peat branch cannot be reached by
+picking a peatland site. The unblock: `peatf` feeds **only** the CNFire modules
+in CTSM (verified — `CNFire*Mod` + `CNVegStateType`/`FireDataBaseType`, nothing
+else), so setting `peatf=0.5` in a COPY of Bow's surfdata is surgical — the
+warm-CN Bow state is otherwise byte-unperturbed, and both CLM.jl and CTSM read
+the SAME edited surfdata, so the diff measures the `_fire_peatland_kernel!`
+physics, not the surfdata value (exactly like the synthetic uniform lnfm/hdm
+streams of §2). Bow at 51.4°N > `borealat`=40 with unfrozen summer soil hits the
+**boreal** peat branch.
+
+### The reference + harness
+* Reference `SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firepeat`: identical to
+  `bow_ref_ch4tws` (warm-CN, `fire_method='li2016crufrc'`) except `fsurdat`
+  points at `surfdata_peatf.nc` (peatf=0.5). Ran **plain**, EXIT_CODE=0, the full
+  nstep 4720..4888 window. `BAF_PEATF=1.67382e-10 /s` across the window (nonzero).
+* Harness `scripts/fortran_parity_firepeat.jl`: single-step oracle; the pre-step
+  hook injects the fire accumulators + `apply_bow_lifire_inparm!` + sets
+  `cnfire_li2014.peatf_lf_col .= 0.5` to match. `baf_peatf` is a pure per-column
+  function of injected before-step state (prec60, wf2, tsoi17, fsat) + peatf, so
+  no cold-CN confound.
+
+### The bug — `wf2` omitted the CTSM carryover double-count (FIXED)
+First diff showed `BAF_PEATF` **7.7% high**, `NFIRE` bit-exact. Attribution probe
+(`scripts/probe_firepeat_factors.jl`): the residual sat **exactly on the
+`max(wf2,0)` kink** in the boreal formula `exp(-π·max(wf2,0)/0.3)`. At two of
+three steps Julia's `wf2` was negative → factor 1.0 → EXACT; at nstep 4720
+Julia's `wf2=+0.008` gave factor 0.919 while Fortran's implied `wf2≤0`.
+
+Root cause: **CTSM `HydrologyNoDrainageMod.F90:640-699` computes `wf` (top 0.05m)
+then `wf2` (top 0.17m) in one routine and does NOT reset `rwat/swat/rz` between
+the two depth loops** — so the top-0.05m layers are accumulated TWICE into `wf2`.
+Julia's `compute_wf!` computed `wf2` as an independent single accumulation to
+0.17m, omitting the double-count. At Bow's dry summer top-soil the shallow layers
+are drier than watdry (negative contribution), so double-counting them pushes
+`wf2` from +0.008 to ≤0 — flipping the kink. Fix: new `compute_wf2!`
+(hydrology_no_drainage.jl) replicates the carryover exactly (accumulate ≤0.05,
+then continue ≤0.17 without reset). `wf2_col` is consumed **only** by the peat
+fire branch (not history/restart), so the default (`:nofire`) path is
+byte-identical. Guarded by a `compute_wf2! carryover` test (proves it differs
+from the single accumulation) under `--check-bounds=yes`.
+
+### Scorecard — Bow peat branch, `after_fire`, converged CN
+| field | before fix | after fix |
+|---|---|---|
+| `BAF_PEATF`    | 7.70e-2 | **0.0 (bit-exact)** |
+| `FAREA_BURNED` | 6.47e-3 | **1.3e-15** |
+| `SOMC_FIRE`    | 7.70e-2 | **0.0** |
+| `NFIRE`        | 6.1e-16 | 6.1e-16 |
+
+**5/5 within 1e-9.** The peatland-fire branch is validated to the
+single-step-oracle floor, same class as the fire C/N fluxes (§5).
+
+### Still blocked — the tropical DEFORESTATION-fire term (`dtrotr`)
+`baf_crop` (crop) and the tropical **deforestation** fire term remain
+un-generatable on current assets:
+* `dtrotr_col` accumulates `-dwt_smoothed[p]` **only** when `transient_landcover`
+  is true (a `flanduse_timeseries` with `do_transient_pfts/lu`). **No migrated
+  domain has a flanduse_timeseries** — so `dwt≡0` ⇒ `dtrotr≡0` even at
+  Aripuanã/Leticia, where `trotr1+trotr2 > 0.6` (tropical BET ≈ 0.61/0.70) DOES
+  meet the tree-cover gate. Plus those tropical sites have **no BGC restart**
+  (cold-CN confound). Generating `dtrotr>0` needs BOTH a transient-land-use
+  config AND a BGC spinup at a tropical site — a precise, un-generatable blocker.
+
+### Reproducing
+```bash
+# Fortran reference (already generated): SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firepeat/
+#   cp bow_ref_ch4tws config; fsurdat -> a peatf=0.5 copy of Bow surfdata (surfdata_peatf.nc);
+#   run ./run_bow_firepeat.sh (plain).
+julia +1.12 --project=. scripts/fortran_parity_firepeat.jl 5   # Bow peat-branch scorecard
+julia +1.12 --project=. scripts/probe_firepeat_factors.jl      # per-factor attribution
+```
+
+---
+
+## 13. CH4 EBULLITION (`CH4_EBUL_*`) — precise blocker, NOT generatable on current assets (2026-07-18)
+
+**Ebullition (`CH4_EBUL_TOTAL_SAT/UNSAT`) cannot be validated numerically on any
+on-disk site — the Fortran reference itself is `≡0`.** (Backlog A1 residual.)
+
+* The `_meth_ebul_kernel!` port is verified **line-by-line** against `ch4Mod.F90`
+  `ch4_ebullition`: `bubble_f=0.57`, `vgc_max=vgc_min=0.15`, threshold
+  `vgc > vgc_max·bubble_f = 0.0855`, `vgc = conc_ch4/watsat/k_h_cc·rgasm·T/pressure`.
+* The Bow-TWS_inversion reference (§11, the ONLY site with `finundated>0` AND a
+  converged BGC restart) gives **`CH4_EBUL_TOTAL_SAT ≡ 0`**: its peak
+  `CONC_CH4_SAT ≈ 0.029 mol/m³` yields `vgc` well below the 0.0855 bubble
+  threshold — Bow is a dry, low-CH4-production column. There is nothing to diff.
+* Crossing the threshold needs a column that is SIMULTANEOUSLY (a) inundated
+  (`finundated>0`), (b) high-CH4-production, and (c) has a converged BGC restart.
+  **No migrated site provides all three:** Bow-TWS has (a)+(c) but not (b);
+  MerBleue has the peat/production potential but neither inundates under
+  TWS_inversion (its cell needs `TWS>2242` vs ~627, §11) nor has a BGC restart
+  (SP-only, cold-CN). Missing asset = **a wetland/high-water-table site with a
+  CN/CH4 spinup restart** (e.g. a MerBleue BGC spinup + a shallow-WT or
+  PCT_WETLAND>0 surfdata). Un-generatable without new spinup + surfdata assets.
