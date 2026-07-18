@@ -200,6 +200,22 @@ genuinely grows corn and soybean, so a crop lifecycle remains physically
 plausible. Pass `--real-era5` to `setup_crop_ref_case.py` to substitute a
 site-native pull once someone can absorb the transfer time.
 
+> **The `--real-era5` path is UNVALIDATED.** `acquire_crop_forcing.py` carries a
+> `--validate-merbleue` self-check that re-derives forcing at the MerBleue point
+> and correlates it against that domain's independently-produced
+> `clmforc.2016.nc`, specifically to prove the ERA5→CLM conversions (the
+> accumulated-flux `/3600`, the dewpoint→specific-humidity inversion) before
+> they are trusted as a parity input. **It was started and never completed** —
+> the ARCO transfer outran the session. So the conversion arithmetic in
+> `to_clm()` has *not* been checked against ground truth and must not be
+> assumed correct.
+>
+> This does **not** affect the reference this document reports: the case was
+> built with `--relabel`, which copies every meteorological value through
+> unaltered and touches only coordinate labels — no conversion is involved.
+> Anyone taking the `--real-era5` path must run `--validate-merbleue` to
+> completion first.
+
 ### The case is a self-contained run dir, not a CIME case
 
 Every working CN reference on this box (`clm_bgc_spinup/bow_ref_*`,
