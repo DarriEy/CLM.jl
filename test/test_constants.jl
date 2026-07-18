@@ -98,6 +98,19 @@
         @test size(CLM.D_CON_G) == (3, 2)
         @test length(CLM.C_H_INV) == CLM.NGASES
         @test length(CLM.KH_THETA) == CLM.NGASES
+
+        # VALUE checks (not just shape): these are the raw polynomial coefficients
+        # from clm_varcon.F90 d_con_w / d_con_g. The consumers (ch4Mod / nitrif)
+        # apply the 1e-9 (water) and 1e-4 (gas) scale in-formula and use ALL
+        # coefficients — so a mis-ported table (e.g. a 1.0e3 placeholder for the
+        # higher-order term) silently explodes the saturated-column CH4 diffusivity
+        # by ~1e5x. Guard the exact Fortran values.
+        @test CLM.D_CON_W ≈ [0.9798 0.02986 0.0004381;
+                             1.172   0.03443 0.0005048;
+                             0.939   0.02671 0.0004095]
+        @test CLM.D_CON_G ≈ [0.1875 0.0013;
+                             0.1759 0.00117;
+                             0.1325 0.0009]
     end
 
 end
