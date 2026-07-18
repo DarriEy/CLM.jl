@@ -3,6 +3,7 @@ using CLM
 
 @testset "CLM.jl" begin
     include("test_constants.jl")
+    include("test_driver_defaults_audit.jl")  # driver/varctl defaults pinned vs CTSM (docs/DRIVER_DEFAULTS_AUDIT.md)
     include("test_qsat.jl")
     include("test_tridiagonal.jl")
     include("test_decomp.jl")
