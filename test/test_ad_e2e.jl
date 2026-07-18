@@ -775,28 +775,10 @@ using CLM
         # CLMInstances is unparameterized — test make_dual_copy of child structs
         @test typeof(CLM.CLMInstances()) == CLM.CLMInstances
 
-        # Test make_dual_copy on individual parameterized child structs
-        function _make_dual_copy(src, ::Type{DD}) where DD
-            T = typeof(src)
-            wrapper = T.name.wrapper
-            wrapper === T && return src
-            dst = wrapper{DD}()
-            for name in fieldnames(T)
-                sv = getfield(src, name)
-                try
-                    if sv isa Array{Float64}
-                        setfield!(dst, name, DD.(sv))
-                    elseif sv isa Float64
-                        setfield!(dst, name, DD(sv))
-                    else
-                        setfield!(dst, name, sv)
-                    end
-                catch e
-                    e isa TypeError || rethrow()
-                end
-            end
-            return dst
-        end
+        # Test make_dual_copy on individual parameterized child structs.
+        # Delegates to the production routine — see the note at the second call site
+        # below; private duplicates of this helper drift out of sync with its guards.
+        _make_dual_copy(src, ::Type{DD}) where {DD} = CLM._calib_dual_copy(src, DD)
 
         # Construct Float64 structs, populate, and copy to Dual
         nc_test = 3
@@ -856,33 +838,16 @@ using CLM
 
         # --- Helper: create a Dual-typed copy of a parameterized struct ---
         # For a struct like TemperatureData{Float64}, this creates TemperatureData{D}()
-        # and copies all Float64 arrays as Dual arrays.  Non-array fields are copied
-        # as-is. Non-parameterized structs are returned by reference.
-        function make_dual_copy(src, ::Type{D}) where D
-            T = typeof(src)
-            wrapper = T.name.wrapper
-            if wrapper === T
-                # Not parameterized — return as-is (shared reference)
-                return src
-            end
-            dst = wrapper{D}()
-            for name in fieldnames(T)
-                sv = getfield(src, name)
-                try
-                    if sv isa Array{Float64}
-                        setfield!(dst, name, D.(sv))
-                    elseif sv isa Float64
-                        # Scalar FT fields: convert Float64 → D
-                        setfield!(dst, name, D(sv))
-                    else
-                        setfield!(dst, name, sv)
-                    end
-                catch e
-                    e isa TypeError || rethrow()
-                end
-            end
-            return dst
-        end
+        # and copies all Float64 arrays as Dual arrays. Non-array fields are copied
+        # as-is. Non-parameterized structs are returned by reference — as are structs
+        # parametrized by their VECTOR type (CH4FInundatedStream{V<:AbstractVector}),
+        # which cannot be rebuilt as wrapper{Dual} at all.
+        #
+        # Delegate to the PRODUCTION routine rather than duplicating it. The duplicate
+        # that used to live here errored the whole testset once #238 put a
+        # vector-parametrized struct in the instance tree: only calibration.jl's copy
+        # had the by-ref guard. One implementation, one guard, cannot drift again.
+        make_dual_copy(src, ::Type{D}) where {D} = CLM._calib_dual_copy(src, D)
 
         # --- Helper: set up forcing on an Atm2LndData ---
         function setup_forcing!(a2l, T, ng)
