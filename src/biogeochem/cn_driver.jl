@@ -839,6 +839,7 @@ function cn_driver_no_leaching!(
                 collect(Int, cascade_donor_pool), nlevdecomp,
                 ndecomp_cascade_transitions, _tag;
                 use_crop=config.use_crop, nrepr=nrepr, npcropmin=npcropmin,
+                i_litr_min=i_litr_min, i_litr_max=i_litr_max,
                 patch_column=_iso_pcol, patch_itype=_iso_pivt, patch_wtcol=_iso_pwtcol,
                 lf_f=_iso_lf_f, fr_f=_iso_fr_f, leaf_prof=_lprof, froot_prof=_fprof)
         end
@@ -969,7 +970,8 @@ function cn_driver_no_leaching!(
                 c_iso_flux2!(soilbgc_state, cnveg_cf, cnveg_cs, _icf, _ics,
                     _mvegp, bounds_patch, nlevdecomp, _tag;
                     patch_column=_iso_pcol, patch_itype=_iso_pivt,
-                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f)
+                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f,
+                    i_litr_min=i_litr_min, i_litr_max=i_litr_max)
             end
         end
 
@@ -1019,7 +1021,8 @@ function cn_driver_no_leaching!(
                 c_iso_flux2h!(soilbgc_state, cnveg_cf, cnveg_cs, _icf, _ics,
                     _mvegp, bounds_patch, nlevdecomp, _tag;
                     patch_column=_iso_pcol, patch_itype=_iso_pivt,
-                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f)
+                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f,
+                    i_litr_min=i_litr_min, i_litr_max=i_litr_max)
             end
         end
 
@@ -1067,7 +1070,8 @@ function cn_driver_no_leaching!(
                 c_iso_flux2g!(soilbgc_state, cnveg_cf, cnveg_cs, _icf, _ics,
                     _mvegp, bounds_patch, nlevdecomp, _tag;
                     patch_column=_iso_pcol, patch_itype=_iso_pivt,
-                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f)
+                    patch_wtcol=_iso_pwtcol, lf_f=_iso_lf_f, fr_f=_iso_fr_f,
+                    i_litr_min=i_litr_min, i_litr_max=i_litr_max)
             end
         end
 
