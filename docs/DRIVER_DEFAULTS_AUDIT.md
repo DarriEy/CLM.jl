@@ -324,6 +324,18 @@ down without fixing them is that the next person to see
 `use_hydrstress = true` in a harness will know it is a workaround for a known
 wrong default, not a deliberate experimental setting.
 
+## Verification
+
+- `test/test_driver_defaults_audit.jl` standalone, `--check-bounds=yes`: **70/70 pass**.
+- Full suite, Julia 1.12, `--check-bounds=yes`:
+  **26141 passed, 0 failed, 0 errored, 3 broken** (40m54s, exit 0).
+  Subtracting this file's 70 new assertions gives a 26071 baseline, i.e. the
+  suite is unchanged apart from the additions — as expected, since **this audit
+  changes no default**. The three broken tests are the pre-existing ones.
+
+A first full-suite attempt was killed by SIGTERM (`EXIT=143`) mid-run on the
+loaded shared box; it was rerun to completion rather than reported as green.
+
 ## Method note
 
 For each flag the check is three-layered, because agreeing with only one layer
