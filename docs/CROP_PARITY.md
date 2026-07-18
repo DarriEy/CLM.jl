@@ -249,6 +249,75 @@ python3 scripts/setup_crop_ref_case.py          # build case (default 4 yr spin-
 bash /Users/.../clm_bgc_spinup/crop_ref_usplains/run_crop_ref.sh
 ```
 
+## THE FORTRAN CN-CROP RUN SUCCEEDED (2026-07-18)
+
+`FINAL_OK=1` on the first attempt — 4 model years (2016→2020, nstep 35064),
+cold start, **no rebuild**, no macOS-26 xzone retry needed. That confirms the
+symbol-table analysis above empirically: `use_crop=.true.` from the namelist
+alone engages the crop model in the stock `-bgc sp` `cesm.exe`. CTSM's own
+`cropcal_stream DERIVED settings` block appears in `lnd.log`, which only prints
+on the crop path.
+
+**A crop plants, grows, and harvests every year.** Annual means from
+`Crop_USplains.clm2.h0.2016-01-01-14400.nc`:
+
+| Field | 2016 | 2016-12 | 2017 | 2018 | 2019 |
+|---|---|---|---|---|---|
+| `CPHASE` | nan | nan | 2.848 | 3.469 | 3.394 |
+| `HUI` | 0 | 0 | 129.45 | 107.85 | 124.38 |
+| `GDDACCUM` | 0 | 0 | 123.81 | 107.85 | 124.38 |
+| `TLAI` | 0 | 0.522 | 1.451 | 1.518 | 1.534 |
+| `LEAFC` | 2.56 | 15.36 | 38.92 | 40.27 | 40.39 |
+| `TOTVEGC` | 102.1 | 189.2 | 391.7 | 448.6 | 450.6 |
+| `TOTVEGN` | 2.99 | 5.00 | 10.02 | 11.86 | 11.49 |
+| **`NFERTILIZATION`** | 0 | 0 | 1.360e-7 | 1.360e-7 | 1.360e-7 |
+| **`QIRRIG_DEMAND`** | 0 | 0 | 1.750e-8 | 3.466e-8 | 1.504e-8 |
+| **`BAF_CROP`** | 0 | 0 | 1.178e-11 | 8.566e-12 | 1.178e-11 |
+
+`HUI_PERHARV` = **1469 / 1481 / 1425** in 2017/2018/2019 (second slot `-1`, the
+no-second-harvest sentinel) — i.e. exactly **one completed harvest per year**,
+each after ~1400–1500 accumulated heat units. `CPHASE ≈ 3` is grain fill. The
+lifecycle is complete: plant → GDD/HUI accumulation → grain fill → harvest.
+
+### Every blocked backlog row now has a live, non-zero reference
+
+| Row | Was | Now |
+|---|---|---|
+| **A3** crop pools / GDD-HUI / harvest | BLOCKED — no crop-CFT surfdata | `CPHASE`/`HUI`/`GDDACCUM`/`*_PERHARV` all populated, 3 harvests |
+| **A3** crop N (`n_fert!`/`n_soyfix!`) | unwired, no reference | `NFERTILIZATION` = 1.360e-7, non-zero and steady |
+| **A4** irrigation | un-validatable (no irrigated CFT patch) | `QIRRIG_DEMAND` non-zero, varies year to year |
+| **A2** fire crop branch | `≡ 0` without a crop CFT | `BAF_CROP` non-zero (1.18e-11) |
+
+Note `NFIRE` is non-zero only in 2016 while `BAF_CROP` is non-zero only from
+2017 — the crop-CFT fire branch and the natural-veg branch are separately
+exercised, which is what the A2 crop/non-crop split needs.
+
+**Caveat on interpretation:** these are 4 cold-start years, not a spun-up CN
+equilibrium; `TOTVEGC` is still rising (102 → 451). They establish that the
+crop *code path* runs and produces non-degenerate state — which is what
+single-step parity needs. They are not a claim about equilibrium pool sizes,
+and (per the forcing substitution above) not a claim about this location's
+agronomy.
+
+### Two more generator defects the run itself surfaced
+
+Both aborted *after* initialization, so only a real run could find them:
+
+4. **`fd.yaml` (the NUOPC field dictionary) was never copied** — aborts inside
+   `ESMF_IO_YAMLRead` with a bare "Caught exception reading content from file",
+   naming no file.
+5. **A global `<datafiles>` edit injected the met files into `topo.observed`**,
+   which then tried to read `TOPO` out of a `clmforc` file. datm reported only
+   "NetCDF: Variable not found" — no file, no variable name; the PIO stack
+   frame was the only handle. Stream patching is now per-`<stream_info>`.
+
+Plus a sixth, from the history stream: `GDDPLANT`, `GRAINC`, `GRAINN`,
+`CROPPROD1C`, `GRAINC_TO_FOOD` and `QIRRIG` are **not** CTSM history field
+names (`QIRRIG_DEMAND` is; the grain-C fields are not registered under those
+literals). An unknown name aborts at `histFileMod.F90:887` after
+initialization. The generator now validates `hist_fincl1` against the names
+CTSM actually registers and drops unknowns with a warning.
+
 ## Verified Julia wiring state (no run required)
 
 Checked against current `main` (source, not comments) and CTSM

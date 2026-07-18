@@ -112,13 +112,37 @@ LND_FLAGS = {
 
 # Crop / irrigation / crop-fire diagnostics on the h0 stream, so the spin-up can
 # be checked for "did a crop actually plant, grow and harvest" without parsing
-# the dumps.
+# the dumps. Validated against the CTSM source before use -- an unknown name
+# aborts the run at histFileMod.F90:887 ("... in fincl(N) ... not found") after
+# initialization has already burned minutes.
 HIST_FIELDS = [
+    # planting-decision / phenology degree-day accumulators
     "GDD0", "GDD8", "GDD10", "GDD020", "GDD820", "GDD1020",
-    "GDDPLANT", "GDDHARV", "HUI", "CPHASE", "CROPPROD1C", "GRAINC",
-    "GRAINN", "GRAINC_TO_FOOD", "QIRRIG", "TOTVEGC", "TOTVEGN",
-    "NFERTILIZATION", "LEAFC", "TLAI", "BAF_CROP", "NFIRE",
+    "GDDACCUM", "GDDTSOI", "GDDHARV", "HUI", "CPHASE",
+    "GDDACCUM_PERHARV", "GDDHARV_PERHARV", "HUI_PERHARV",
+    # growth / stocks
+    "TOTVEGC", "TOTVEGN", "LEAFC", "TLAI",
+    # crop N + irrigation + the crop fire branch
+    "NFERTILIZATION", "QIRRIG_DEMAND", "BAF_CROP", "NFIRE",
 ]
+
+CTSM_SRC = SYM / "installs/clm/src"
+
+
+def known_hist_fields() -> set[str]:
+    """Field names CTSM registers via a literal ``fname='X'``.
+
+    Heuristic: some fields are registered with computed names, so absence here
+    is not proof a field is invalid. Used only to DROP suspicious names (safe
+    direction: a wrong name aborts the run, a missing diagnostic does not).
+    """
+    out: set[str] = set()
+    for f in CTSM_SRC.rglob("*.F90"):
+        try:
+            out.update(re.findall(r"fname\s*=\s*'([A-Z0-9_]+)'", f.read_text(errors="ignore")))
+        except OSError:
+            pass
+    return out
 
 
 def sh(cmd: list[str]) -> None:
@@ -321,9 +345,13 @@ def main() -> int:
     for f in ("nuopc.runconfig", "datm_in", "datm.streams.xml"):
         replace_paths(case / f, "esmf_mesh.nc", str(MESH))
     patch_namelist(case / "lnd_in", LND_FLAGS)
+    known = known_hist_fields()
+    fields = [v for v in HIST_FIELDS if v in known]
+    if dropped := [v for v in HIST_FIELDS if v not in known]:
+        print(f">> dropped unknown hist fields (not registered in CTSM): {dropped}")
     patch_namelist(
         case / "lnd_in",
-        {"hist_fincl1": ",".join(f"'{v}'" for v in HIST_FIELDS)},
+        {"hist_fincl1": ",".join(f"'{v}'" for v in fields)},
     )
 
     # 4. point the datm streams at our forcing, on the right YEARS ------------
