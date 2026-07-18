@@ -437,6 +437,7 @@ function cn_driver_no_leaching!(
         _ap = AllocationParams()
         calc_gpp_mr_availc!(mask_bgc_vegp, bounds_patch, _ap, _pfta, cn_shared_params,
                   patch, crop, photosyns, canopystate, cnveg_cs, cnveg_cf;
+                  c13_cnveg_cf = c13_cnveg_cf, c14_cnveg_cf = c14_cnveg_cf,
                   use_c13 = config.use_c13, use_c14 = config.use_c14,
                   npcropmin = npcropmin, nrepr = nrepr)
     end
@@ -824,6 +825,19 @@ function cn_driver_no_leaching!(
         bounds_patch=bounds_patch,
         dt=dt)
 
+    # CStateUpdate0 for the C13/C14 isotope veg pools — CTSM CNDriverMod calls
+    # CStateUpdate0 a second/third time on the c13/c14 carbonflux+carbonstate
+    # instances (identical subroutine, isotope instances). Gated _have_iso so the
+    # default (non-isotope) path is byte-identical.
+    if _have_iso
+        for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+            c_state_update0!(_ics, _icf;
+                mask_soilp=mask_bgc_vegp,
+                bounds_patch=bounds_patch,
+                dt=dt)
+        end
+    end
+
     # --------------------------------------------------
     # CIsoFlux1 — non-mortality carbon-isotope fluxes (WIRED).
     # Scales every veg + decomposition C flux into its C13/C14 counterpart by the
@@ -871,6 +885,38 @@ function cn_driver_no_leaching!(
         use_soil_matrixcn=config.use_soil_matrixcn,
         dribble_crophrv_xsmrpool_2atm=config.dribble_crophrv_xsmrpool_2atm,
         dt=dt)
+
+    # CStateUpdate1 for the C13/C14 isotope veg pools — mirrors the bulk call
+    # exactly (CTSM CNDriverMod calls CStateUpdate1 3×), passing the isotope
+    # veg carbon state/flux + the isotope SOIL carbon flux (_iscf). This is what
+    # APPLIES the CIsoFlux1-computed isotope fluxes to the isotope pools.
+    if _have_iso
+        for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+            c_state_update1!(_ics, _icf, _iscf;
+                mask_soilc=mask_bgc_soilc,
+                mask_soilp=mask_bgc_vegp,
+                bounds_col=bounds_col,
+                bounds_patch=bounds_patch,
+                patch_column=patch_column,
+                ivt=ivt,
+                woody=woody,
+                cascade_donor_pool=cascade_donor_pool,
+                cascade_receiver_pool=cascade_receiver_pool,
+                harvdate=harvdate,
+                col_is_fates=col_is_fates,
+                nlevdecomp=nlevdecomp,
+                ndecomp_cascade_transitions=ndecomp_cascade_transitions,
+                i_litr_min=i_litr_min,
+                i_litr_max=i_litr_max,
+                i_cwd=i_cwd,
+                npcropmin=npcropmin,
+                nrepr=nrepr,
+                use_matrixcn=config.use_matrixcn,
+                use_soil_matrixcn=config.use_soil_matrixcn,
+                dribble_crophrv_xsmrpool_2atm=config.dribble_crophrv_xsmrpool_2atm,
+                dt=dt)
+        end
+    end
 
     # --------------------------------------------------
     # NStateUpdate1
@@ -988,6 +1034,25 @@ function cn_driver_no_leaching!(
             use_soil_matrixcn=config.use_soil_matrixcn,
             dt=dt)
 
+        # CStateUpdate2 (gap-mortality) for C13/C14 — passes the isotope soil
+        # carbon STATE (_iscs), applying the CIsoFlux2 gap-mortality isotope fluxes.
+        if _have_iso
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_state_update2!(_ics, _icf, _iscs;
+                    mask_soilc=mask_bgc_soilc,
+                    mask_soilp=mask_bgc_vegp,
+                    bounds_col=bounds_col,
+                    bounds_patch=bounds_patch,
+                    nlevdecomp=nlevdecomp,
+                    i_litr_min=i_litr_min,
+                    i_litr_max=i_litr_max,
+                    i_cwd=i_cwd,
+                    use_matrixcn=config.use_matrixcn,
+                    use_soil_matrixcn=config.use_soil_matrixcn,
+                    dt=dt)
+            end
+        end
+
         n_state_update2!(cnveg_ns, cnveg_nf, soilbgc_ns;
             mask_soilc=mask_bgc_soilc,
             mask_soilp=mask_bgc_vegp,
@@ -1039,6 +1104,24 @@ function cn_driver_no_leaching!(
             use_soil_matrixcn=config.use_soil_matrixcn,
             dt=dt)
 
+        # CStateUpdate2h (harvest-mortality) for C13/C14 — applies CIsoFlux2h.
+        if _have_iso
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_state_update2h!(_ics, _icf, _iscs;
+                    mask_soilc=mask_bgc_soilc,
+                    mask_soilp=mask_bgc_vegp,
+                    bounds_col=bounds_col,
+                    bounds_patch=bounds_patch,
+                    nlevdecomp=nlevdecomp,
+                    i_litr_min=i_litr_min,
+                    i_litr_max=i_litr_max,
+                    i_cwd=i_cwd,
+                    use_matrixcn=config.use_matrixcn,
+                    use_soil_matrixcn=config.use_soil_matrixcn,
+                    dt=dt)
+            end
+        end
+
         n_state_update2h!(cnveg_ns, cnveg_nf, soilbgc_ns;
             mask_soilc=mask_bgc_soilc,
             mask_soilp=mask_bgc_vegp,
@@ -1087,6 +1170,24 @@ function cn_driver_no_leaching!(
             use_matrixcn=config.use_matrixcn,
             use_soil_matrixcn=config.use_soil_matrixcn,
             dt=dt)
+
+        # CStateUpdate2g (gross-unrepresented-LCC) for C13/C14 — applies CIsoFlux2g.
+        if _have_iso
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_state_update2g!(_ics, _icf, _iscs;
+                    mask_soilc=mask_bgc_soilc,
+                    mask_soilp=mask_bgc_vegp,
+                    bounds_col=bounds_col,
+                    bounds_patch=bounds_patch,
+                    nlevdecomp=nlevdecomp,
+                    i_litr_min=i_litr_min,
+                    i_litr_max=i_litr_max,
+                    i_cwd=i_cwd,
+                    use_matrixcn=config.use_matrixcn,
+                    use_soil_matrixcn=config.use_soil_matrixcn,
+                    dt=dt)
+            end
+        end
 
         n_state_update2g!(cnveg_ns, cnveg_nf, soilbgc_ns;
             mask_soilc=mask_bgc_soilc,
@@ -1238,6 +1339,27 @@ function cn_driver_no_leaching!(
             use_matrixcn=config.use_matrixcn,
             use_soil_matrixcn=config.use_soil_matrixcn,
             dt=dt)
+
+        # CStateUpdate3 (fire-mortality) for C13/C14 — applies CIsoFlux3. CTSM
+        # follows the c14 CStateUpdate3 with C14Decay, which the port already runs
+        # from clm_drv! (clm_driver.jl) under use_c14, so it is not repeated here.
+        if _have_iso
+            for (_tag, _ics, _icf, _iscs, _iscf) in _iso_active
+                c_state_update3!(_ics, _icf, _iscs;
+                    mask_soilc=mask_bgc_soilc,
+                    mask_soilp=mask_bgc_vegp,
+                    bounds_col=bounds_col,
+                    bounds_patch=bounds_patch,
+                    nlevdecomp=nlevdecomp,
+                    ndecomp_pools=ndecomp_pools,
+                    i_litr_min=i_litr_min,
+                    i_litr_max=i_litr_max,
+                    i_cwd=i_cwd,
+                    use_matrixcn=config.use_matrixcn,
+                    use_soil_matrixcn=config.use_soil_matrixcn,
+                    dt=dt)
+            end
+        end
 
         # Matrix-CN veg-C solve — WIRED (gated on use_matrixcn, phase 1: natveg).
         # In matrix mode the c_state_update1/2/3 blocks above skipped every veg-pool
