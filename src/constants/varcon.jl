@@ -187,18 +187,25 @@ const S_CON = [
     8.6e-6    2400.0   6.5     0.0     # CO2
 ]
 
-# d_con_w: diffusivity in water [ngases × 3]
+# d_con_w: aqueous-diffusivity polynomial coefficients [ngases × 3]
+# From CLM clm_varcon.F90 d_con_w. Consumers apply the 1e-9 scale in-formula:
+#   D_aq = (c1 + c2*Tc + c3*Tc^2) * 1e-9   [m^2/s]
+# (the earlier port stored pre-scaled leading values with a 1.0e3 placeholder for
+#  the higher-order terms, which made Tc^2*1e3*1e-9 ~ 2e-4 m^2/s and blew up the
+#  saturated-column CH4 transport — see ch4Mod ch4_tran diffusivity block.)
 const D_CON_W = [
-    1.5e-9   1.7e-9   1.0e3   # CH4
-    2.4e-9   2.0e-9   1.0e3   # O2
-    1.9e-9   1.8e-9   1.0e3   # CO2
+    0.9798   0.02986   0.0004381   # CH4
+    1.172    0.03443   0.0005048   # O2
+    0.939    0.02671   0.0004095   # CO2
 ]
 
-# d_con_g: diffusivity in air [ngases × 2]
+# d_con_g: gas-diffusivity polynomial coefficients [ngases × 2]
+# From CLM clm_varcon.F90 d_con_g. Consumers apply the 1e-4 scale in-formula:
+#   D_gas = (c1 + c2*Tc) * 1e-4   [m^2/s]
 const D_CON_G = [
-    2.0e-5   1.0e3    # CH4
-    2.0e-5   1.0e3    # O2
-    1.5e-5   1.0e3    # CO2
+    0.1875   0.0013     # CH4
+    0.1759   0.00117    # O2
+    0.1325   0.0009     # CO2
 ]
 
 # Henry's law constants [ngases]
