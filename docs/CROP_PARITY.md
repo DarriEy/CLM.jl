@@ -133,6 +133,122 @@ GDD/HUI, grow and harvest, plus crop pdump/BGCDUMP instrumentation. The site nee
 not be Mead — single-step parity validates the crop *code path* against the same
 inputs.
 
+## Fortran-box survey (2026-07-18) — the run step is now scripted
+
+The remaining prerequisites above were surveyed on the box and are resolved.
+`scripts/setup_crop_ref_case.py` builds the whole case in one command; the
+findings behind it:
+
+### OPEN QUESTION ANSWERED — **no rebuild is needed**
+
+The shared `cesm.exe` engages crops **from the namelist flags alone**. Two
+independent lines of evidence:
+
+1. **No CPP gate exists.** CTSM has no `#ifdef` on crop anywhere in `src/`;
+   `use_crop` is a runtime `clm_varctl` flag branched on in normal code (e.g.
+   `clm_varpar.F90:329`). `CLM_BLDNML_OPTS="-bgc sp"` steers `bldnml`'s
+   *namelist defaults* — it is not a compile-time configuration.
+2. **The crop code is already in the binary.** `nm` on the built
+   `cases/symfluence_build/bld/cesm.exe` (the `-bgc sp` one every existing
+   reference uses) finds the full crop path compiled in:
+
+   | Module | Symbols | Notable |
+   |---|---|---|
+   | `CropType` | 15 | `cropupdateaccvars`, `initcold`, `latbaset`, `restart` |
+   | `irrigationMod` | 33 | the whole A4 path |
+   | `CNPhenologyMod` | — | `cropphenology`, `cropphase`, `cncropharvesttoproductpools` |
+   | `CNNDynamicsMod` | — | **`cnnfert`, `cnsoyfix`** — the two unwired routines |
+   | `CNFire*` | 68 | the A2 `baf_crop` branch |
+
+   `PlantCrop`/`Vernalization` are `contains`-scoped inside `CropPhenology` and
+   so carry no separate external symbols; their enclosing routine is present.
+
+This retires the last deferred unknown from the § "Runnable crop config" recipe.
+
+### Parameter file — covers the crop CFTs unchanged
+
+The Bow CN reference paramfile
+(`domain_Bow_at_Banff_lumped/.../clm5_params.nc`) is dimensioned `pft = 79` and
+carries every crop parameter (`gddmin`, `hybgdd`, `mxmat`, `baset`, `fertnitro`,
+`declfact`, …). No crop-specific paramfile has to be built.
+
+### Forcing at the point — acquisition path + the substitution actually used
+
+There is **no datm forcing at or near the crop point**: the box's `inputdata`
+tree ships no `atm/datm7`, and every SYMFLUENCE domain with `clmforc.YYYY.nc`
+is elsewhere (MerBleue 45.41N/-75.52 ×2yr; Bow ×11yr; the rest have none).
+ERA5 is reachable **without CDS credentials** — SYMFLUENCE pulls it from the
+public ARCO-ERA5 zarr on GCS (`gcp-public-data-arco-era5/ar/…`, anonymous), and
+`xarray`/`zarr`/`gcsfs` are all installed. `scripts/acquire_crop_forcing.py`
+does that pull directly (a single-cell extraction does not need a whole
+SYMFLUENCE domain build).
+
+**Cost caveat:** the ARCO store chunks *one global field per (hour, variable)*,
+so a 2-year hourly 8-variable pull is ~140k chunk reads and runs for hours — it
+is the slowest step by far, and it does not parallelise with the serialized
+Fortran box.
+
+**What the generated case therefore uses by default:** the MerBleue 2016–2017
+forcing, **relabeled onto the crop point's coordinates** (`--relabel`;
+meteorological values copied through unaltered, only coordinate labels change).
+This is sound *for a parity test and only for that* — CTSM and CLM.jl read the
+identical file, so the diff isolates the crop code path exactly as site-native
+met would. It is **not** a climatology of the surfdata's location, so absolute
+yields from this run carry no site meaning. The donor (45.41N) and the crop
+point (44.80N) are 0.6° apart and share a humid-continental regime that
+genuinely grows corn and soybean, so a crop lifecycle remains physically
+plausible. Pass `--real-era5` to `setup_crop_ref_case.py` to substitute a
+site-native pull once someone can absorb the transfer time.
+
+### The case is a self-contained run dir, not a CIME case
+
+Every working CN reference on this box (`clm_bgc_spinup/bow_ref_*`,
+`merbleue_ref_ch4`, `bgc_ref_*`) is run by writing `lnd_in`/`drv_in`/`datm_in`/
+`nuopc.*` directly and invoking the shared `cesm.exe` in place — SYMFLUENCE
+bypasses `bldnml` and `case.submit` entirely. The crop case mirrors that, so it
+stays consistent with the references the parity harnesses already consume.
+Instrumentation is already baked into the exe and gated by the
+`PDUMP_NSTEP_LO/HI` and `BGCDUMP_NSTEP_LO/HI` environment variables — the
+spin-up runs with the window closed, then the diff run re-runs a short bracket
+with it open.
+
+**Every flag is set explicitly** in `LND_FLAGS`, including ones that merely
+match the donor. Per #251, an unset flag is not a matched flag.
+
+### Three harness bugs caught by verifying the GENERATED namelists
+
+The case generator was not trusted; every field it wrote was read back. That
+found three defects, each of which would have produced a "port bug" that was
+really a harness bug — the #233/#240/#243/#248/#251 pattern, a sixth and
+seventh time:
+
+1. **Mesh path truncated by a space.** The crop assets live under
+   `.../My Drive/...`, and `nuopc.runconfig` fields are **unquoted**
+   (`mesh_lnd = /path/…`). The space would have truncated the path and dropped
+   the run onto a different grid. Fixed by staging the assets to a space-free
+   directory on the box; asserted in the script.
+2. **`start_ymd` clobbered `restart_ymd`.** An unanchored regex matched the
+   substring, overwriting the `-999` sentinel with `20160101`. Fixed by
+   anchoring to line start and asserting each key matches exactly once.
+3. **The topo stream still pointed at the donor CN case's Bow file — the worst
+   of the three.** `topo_forcing.nc` supplies the elevation the atm forcing is
+   lapse-rate downscaled *from*: **Bow 2138.8 m vs MerBleue 71.5 m**, a 2067 m
+   error, i.e. **~12.4 K** of spurious temperature shift at
+   `lapse_rate = 0.006`. That feeds directly into GDD accumulation and the crop
+   planting decision — it would have silently prevented or grossly distorted
+   the crop lifecycle this whole reference exists to exercise. The topo stream
+   must match whichever site the met came from.
+
+Note that none of the three would have raised an error; all three would have
+run to completion and produced confident, wrong numbers.
+
+### Reproducing it
+
+```bash
+python3 scripts/setup_crop_ref_case.py          # build case (default 4 yr spin-up)
+bash /Users/.../clm_bgc_spinup/crop_ref_usplains/run_crop_ref.sh
+```
+
 ## Verified Julia wiring state (no run required)
 
 Checked against current `main` (source, not comments) and CTSM

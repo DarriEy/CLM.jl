@@ -230,9 +230,55 @@ def validate_merbleue() -> int:
     return 0 if ok else 1
 
 
+def relabel_existing(src_files: list[Path], outdir: Path, lat: float, lon: float) -> int:
+    """Re-coordinate existing ``clmforc.YYYY.nc`` files onto the crop point.
+
+    A deliberate, documented substitution used when a real ERA5 pull at the crop
+    point is unavailable.  The ARCO store chunks one *global* field per
+    (hour, variable), so a two-year hourly pull costs ~140k chunk reads and can
+    run for hours; this keeps the (serialized) Fortran box productive.
+
+    This is legitimate for a *parity* test and only for that: both CTSM and
+    CLM.jl read the identical file, so the Julia-vs-Fortran diff isolates the
+    crop code path exactly as it would with site-native met.  What it is NOT is
+    a climatology of the surfdata's location -- absolute crop yields from this
+    run carry no site meaning.  The donor (MerBleue, 45.41N) and the crop point
+    (44.80N) are 0.6 degrees apart in latitude and share a humid-continental
+    regime that genuinely grows corn and soybean, so the forcing remains
+    physically plausible for a crop lifecycle.
+
+    Only the coordinate labels change; every meteorological value is copied
+    through unaltered.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    for src in src_files:
+        ds = xr.open_dataset(src, decode_times=False)
+        ds["LATIXY"] = ("LATIXY", np.array([lat], dtype="float64"))
+        ds["LONGXY"] = ("LONGXY", np.array([lon % 360.0], dtype="float64"))
+        ds["LATIXY_data"][:] = lat
+        ds["LONGXY_data"][:] = lon % 360.0
+        ds.attrs["relabeled_from"] = str(src)
+        ds.attrs["relabel_note"] = (
+            "Coordinates relabeled onto the crop-CFT parity point; met values are "
+            "the donor site's, unaltered. Valid for Julia-vs-Fortran parity only, "
+            "not as site climatology."
+        )
+        dst = outdir / src.name
+        enc = {v: {"_FillValue": FILL} for v in ds.data_vars if v.startswith(("TBOT", "QBOT", "WIND", "FSDS", "FLDS", "PSRF", "PREC", "LATIXY_d", "LONGXY_d"))}
+        ds.to_netcdf(dst, encoding=enc)
+        print(f"  relabeled {src.name} -> {dst} at {lat}/{lon % 360.0}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--validate-merbleue", action="store_true")
+    ap.add_argument(
+        "--relabel",
+        type=Path,
+        nargs="+",
+        help="existing clmforc.YYYY.nc files to re-coordinate onto the crop point",
+    )
     ap.add_argument("--lat", type=float, default=44.80)
     ap.add_argument("--lon", type=float, default=-96.71)
     ap.add_argument("--years", type=int, nargs="+", default=[2016, 2017])
@@ -244,6 +290,10 @@ def main() -> int:
 
     if args.outdir is None:
         ap.error("--outdir is required unless --validate-merbleue")
+
+    if args.relabel:
+        return relabel_existing(args.relabel, args.outdir, args.lat, args.lon)
+
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     ds = open_arco()
