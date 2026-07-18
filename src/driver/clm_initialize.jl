@@ -46,7 +46,8 @@ state, and returns all data structures ready for `clm_drv!()`.
 - `dtime::Int`            — timestep in seconds (default 1800)
 - `use_cn::Bool`          — use CN biogeochemistry (default false)
 - `use_crop::Bool`        — use crop model (default false)
-- `use_bedrock::Bool`     — use bedrock (default true)
+- `use_bedrock::Union{Bool,Nothing}` — use bedrock. `nothing` (default) reproduces CTSM's
+  conditional namelist default: `false` under FATES, `true` otherwise (CLM5).
 - `use_aquifer_layer::Bool` — use aquifer lower boundary (default true)
 - `all_active::Bool`      — all points active (default false)
 - `lat::Float64`          — gridcell latitude  (default: read from surfdata)
@@ -78,7 +79,13 @@ function clm_initialize!(;
     use_fates::Bool = false,
     fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
     fates_biogeog_screen::Symbol = :none,
-    use_bedrock::Bool = true,
+    # CTSM's use_bedrock default is CONDITIONAL (bld/namelist_files/namelist_defaults_ctsm.xml
+    # 178-181): .false. under use_fates / vichydro / phys=clm4_5, .true. otherwise (CLM5).
+    # `nothing` reproduces that conditional; pass an explicit Bool to override it. Getting
+    # this wrong is not cosmetic: use_bedrock=true on a shallow-zbedrock surfdata makes
+    # clamp_zwt_to_bedrock! drag zwt up to the bedrock depth, and qflx_drain ~ exp(-zwt/hkdepth)
+    # then ignites drainage that bleeds the column (the FATES top-layer over-drying, #251).
+    use_bedrock::Union{Bool,Nothing} = nothing,
     use_aquifer_layer::Bool = true,
     all_active::Bool = false,
     lat::Real = NaN,
@@ -109,7 +116,9 @@ function clm_initialize!(;
     varctl.use_hydrstress = use_hydrstress
     varctl.use_cndv = use_cndv
     varctl.create_crop_landunit = use_crop
-    varctl.use_bedrock = use_bedrock
+    # Resolve the conditional default (see the keyword's comment): FATES runs default to
+    # .false. exactly as CTSM's namelist_defaults does; everything else keeps CLM5's .true.
+    varctl.use_bedrock = use_bedrock === nothing ? !use_fates : use_bedrock
     varctl.all_active = all_active
     varctl.soil_layerstruct_predefined = soil_layerstruct
     # FATES manages its own patches (up to sum(fates_maxpatches_by_landuse) per site via
