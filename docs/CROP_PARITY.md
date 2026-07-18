@@ -318,6 +318,59 @@ literals). An unknown name aborts at `histFileMod.F90:887` after
 initialization. The generator now validates `hist_fincl1` against the names
 CTSM actually registers and drops unknowns with a warning.
 
+## Wiring `n_fert!` — it would be a NO-OP today. Do not wire it yet.
+
+The task brief scoped "wire `n_fert!`/`n_soyfix!` now that a reference exists".
+Reading the two sides against each other says **the reference is not the
+binding constraint for `n_fert!`, and wiring it would create a green-looking
+dead path** — the exact bug class in `dead-initcold-systemic` ("assert the
+wiring **and a non-no-op body**").
+
+**What `n_fert!` actually does.** `src/biogeochem/n_dynamics.jl:332` is a pure
+aggregation: it zeroes `soilbgc_nf.fert_to_sminn_col` and scatters
+`cnveg_nf.fert_patch` into it, weighted by `patch.wtcol`. It computes no
+fertilizer. It is a faithful port of `CNNFert`, which is also only a `p2c`.
+
+**`fert_patch` is never computed in CLM.jl.** Every occurrence in `src/` is a
+declaration, an allocation, or a zeroing:
+
+| Site | What |
+|---|---|
+| `types/cn_veg_nitrogen_flux.jl:172` | field declaration |
+| `types/cn_veg_nitrogen_flux.jl:548` | `nanvec(np)` allocation |
+| `types/cn_veg_nitrogen_flux.jl:1111` | `= 0.0` (zero-flux reset) |
+| `biogeochem/n_dynamics.jl:341` | **read** by `n_fert!` |
+
+**Where CTSM computes it:** `CNPhenologyMod.F90:2529`, *inside*
+`CropPhenology`:
+
+```fortran
+fert(p) = (manunitro(ivt(p)) * 1000._r8 + fertnitro(p)) / fert_counter(p)
+```
+
+i.e. fertilizer is applied over a counted window after planting, from the
+`fertnitro_patch` surfdata/param input and the manure term. That is precisely
+the part of `CropPhenology` that `crop_phenology!` (`phenology.jl:2344`) does
+**not** port — it only sets `cphase` and the grain-fill `bglfr`.
+
+**So the dependency order is:** port the fertilization window inside crop
+phenology (which needs `plant_crop!` driven, so a planting date exists to count
+from) → *then* `fert_patch` becomes non-zero → *then* wiring `n_fert!` moves
+real nitrogen. Wiring `n_fert!` first would scatter an all-zero array, pass
+any "is it wired?" test, and change nothing — a vacuous green.
+
+`n_soyfix!` is different: it computes `soyfixn_patch` itself from soil
+moisture / growth phase / mineral N, and takes `crop::CropData` directly. It
+is not blocked on `fert_patch`. It *is* blocked on the crop lifecycle state
+(`cphase`, `croplive`) being driven, which is the same `plant_crop!` gap.
+
+**Conclusion:** the honest next step is not "wire the two N routines" but
+"finish `crop_phenology!` against the Fortran reference — planting decision,
+vernalization, phase transitions, the fertilization window, harvest — and wire
+the N routines behind it". The reference this task produced is what makes that
+verifiable; the reference alone does not make the N wiring meaningful. Not
+wired here, deliberately, and for a sharper reason than #218's original one.
+
 ## Verified Julia wiring state (no run required)
 
 Checked against current `main` (source, not comments) and CTSM
