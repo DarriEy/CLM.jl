@@ -188,10 +188,15 @@ def verify_case(case: Path) -> int:
     years = sorted({int(re.search(r"clmforc\.(\d{4})\.nc", f).group(1)) for f in forcing_files})
     if years != sorted(FORCING_YEARS):
         errs.append(f"datm.streams.xml: forcing years {years} != {sorted(FORCING_YEARS)}")
-    for tag, want in (("year_first", FORCING_YEARS[0]), ("year_last", FORCING_YEARS[-1])):
-        got = {int(v) for v in re.findall(rf"<{tag}>(\d+)</{tag}>", streams)}
-        if got != {want}:
-            errs.append(f"datm.streams.xml: {tag} = {got}, expected {{{want}}}")
+    # Only the CLMNCEP met streams cycle the forcing years; topo.observed is a
+    # static field and legitimately keeps year_first=year_last=1.
+    for block in re.findall(r"<stream_info name=.*?</stream_info>", streams, re.DOTALL):
+        if not re.search(r'name="CLMNCEP', block):
+            continue
+        for tag, want in (("year_first", FORCING_YEARS[0]), ("year_last", FORCING_YEARS[-1])):
+            got = {int(v) for v in re.findall(rf"<{tag}>(\d+)</{tag}>", block)}
+            if got != {want}:
+                errs.append(f"datm.streams.xml: {tag} = {got}, expected {{{want}}}")
 
     for f in re.findall(r"<file>([^<]*topo_forcing[^<]*)</file>", streams):
         if "MerBleue" not in f:
@@ -199,6 +204,30 @@ def verify_case(case: Path) -> int:
                 f"datm.streams.xml: topo stream {f!r} is not the met donor's -- "
                 "the lapse-rate reference elevation would be wrong"
             )
+
+    # Every variable a stream declares must actually exist in every file that
+    # stream reads. Injecting the met files into the topo stream passed all the
+    # checks above and still aborted deep in datm with a bare
+    # "NetCDF: Variable not found" naming neither the file nor the variable.
+    try:
+        import xarray as xr
+
+        for block in re.findall(r"<stream_info name=.*?</stream_info>", streams, re.DOTALL):
+            name = re.search(r'<stream_info name="([^"]+)"', block).group(1)
+            want = [v.split()[0] for v in re.findall(r"<var>([^<]+)</var>", block)]
+            for f in re.findall(r"<file>([^<]+)</file>", block):
+                if not Path(f).exists():
+                    errs.append(f"stream {name}: file missing: {f}")
+                    continue
+                have = set(xr.open_dataset(f, decode_times=False).variables)
+                for v in want:
+                    if v not in have:
+                        errs.append(
+                            f"stream {name}: declares <var>{v}</var> but "
+                            f"{Path(f).name} does not contain it"
+                        )
+    except ImportError:
+        print(">> (xarray unavailable; skipped stream variable check)", file=sys.stderr)
 
     rc_text = (case / "nuopc.runconfig").read_text()
     for key, want in (("mesh_lnd", str(MESH)), ("mesh_atm", str(MESH)), ("mesh_mask", str(MESH))):
@@ -299,30 +328,48 @@ def main() -> int:
 
     # 4. point the datm streams at our forcing, on the right YEARS ------------
     # taxmode=cycle repeats [year_first, year_last] for the whole spin-up.
+    # Patch PER STREAM. A global <datafiles> substitution also injects the met
+    # files into the topo.observed stream, which then aborts trying to read
+    # TOPO out of a clmforc file ("NetCDF: Variable not found"). Only the
+    # CLMNCEP.* met streams take the clmforc files; topo keeps its own.
     s = (case / "datm.streams.xml").read_text()
-    s = re.sub(r"<file>[^<]*clmforc[^<]*</file>", "", s)
+
+    def patch_stream(block: str) -> str:
+        name = re.search(r'<stream_info name="([^"]+)"', block).group(1)
+        if name.startswith("CLMNCEP"):
+            files = "\n".join(
+                f"      <file>{forcing}/clmforc.{y}.nc</file>" for y in FORCING_YEARS
+            )
+            block = re.sub(
+                r"<datafiles>.*?</datafiles>",
+                f"<datafiles>\n{files}\n   </datafiles>",
+                block,
+                flags=re.DOTALL,
+            )
+            for tag, val in (
+                ("year_first", FORCING_YEARS[0]),
+                ("year_last", FORCING_YEARS[-1]),
+                ("year_align", FORCING_YEARS[0]),
+            ):
+                block = re.sub(rf"<{tag}>\d+</{tag}>", f"<{tag}>{val}</{tag}>", block)
+        else:
+            # The topo stream supplies the elevation the atm forcing is
+            # lapse-rate downscaled FROM. Left at the donor CN case's value it
+            # would be Bow's ~2139 m against MerBleue-derived met at ~72 m --
+            # ~12.4 K of spurious shift at lapse_rate=0.006, straight into GDD
+            # accumulation and the crop planting decision.
+            block = re.sub(
+                r"<file>[^<]*topo_forcing\.nc</file>",
+                f"<file>{DONOR_FORCING / 'topo_forcing.nc'}</file>",
+                block,
+            )
+        return block
+
     s = re.sub(
-        r"<datafiles>\s*",
-        "<datafiles>\n"
-        + "\n".join(f"      <file>{forcing}/clmforc.{y}.nc</file>" for y in FORCING_YEARS)
-        + "\n   ",
+        r"<stream_info name=.*?</stream_info>",
+        lambda m: patch_stream(m.group(0)),
         s,
-    )
-    for tag, val in (
-        ("year_first", FORCING_YEARS[0]),
-        ("year_last", FORCING_YEARS[-1]),
-        ("year_align", FORCING_YEARS[0]),
-    ):
-        s = re.sub(rf"<{tag}>\d+</{tag}>", f"<{tag}>{val}</{tag}>", s)
-    # The topo stream supplies the elevation the atm forcing is lapse-rate
-    # downscaled FROM. Left at the donor CN case's value it would be Bow's
-    # ~1400 m against a ~500 m plains surfdata -- a multi-K temperature shift,
-    # straight into GDD accumulation and the crop planting decision. It must
-    # match whichever site the met actually came from.
-    s = re.sub(
-        r"<file>[^<]*topo_forcing\.nc</file>",
-        f"<file>{DONOR_FORCING / 'topo_forcing.nc'}</file>",
-        s,
+        flags=re.DOTALL,
     )
     (case / "datm.streams.xml").write_text(s)
 
