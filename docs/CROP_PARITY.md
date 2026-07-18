@@ -133,6 +133,308 @@ GDD/HUI, grow and harvest, plus crop pdump/BGCDUMP instrumentation. The site nee
 not be Mead — single-step parity validates the crop *code path* against the same
 inputs.
 
+## Fortran-box survey (2026-07-18) — the run step is now scripted
+
+The remaining prerequisites above were surveyed on the box and are resolved.
+`scripts/setup_crop_ref_case.py` builds the whole case in one command; the
+findings behind it:
+
+### OPEN QUESTION ANSWERED — **no rebuild is needed**
+
+The shared `cesm.exe` engages crops **from the namelist flags alone**. Two
+independent lines of evidence:
+
+1. **No CPP gate exists.** CTSM has no `#ifdef` on crop anywhere in `src/`;
+   `use_crop` is a runtime `clm_varctl` flag branched on in normal code (e.g.
+   `clm_varpar.F90:329`). `CLM_BLDNML_OPTS="-bgc sp"` steers `bldnml`'s
+   *namelist defaults* — it is not a compile-time configuration.
+2. **The crop code is already in the binary.** `nm` on the built
+   `cases/symfluence_build/bld/cesm.exe` (the `-bgc sp` one every existing
+   reference uses) finds the full crop path compiled in:
+
+   | Module | Symbols | Notable |
+   |---|---|---|
+   | `CropType` | 15 | `cropupdateaccvars`, `initcold`, `latbaset`, `restart` |
+   | `irrigationMod` | 33 | the whole A4 path |
+   | `CNPhenologyMod` | — | `cropphenology`, `cropphase`, `cncropharvesttoproductpools` |
+   | `CNNDynamicsMod` | — | **`cnnfert`, `cnsoyfix`** — the two unwired routines |
+   | `CNFire*` | 68 | the A2 `baf_crop` branch |
+
+   `PlantCrop`/`Vernalization` are `contains`-scoped inside `CropPhenology` and
+   so carry no separate external symbols; their enclosing routine is present.
+
+This retires the last deferred unknown from the § "Runnable crop config" recipe.
+
+### Parameter file — covers the crop CFTs unchanged
+
+The Bow CN reference paramfile
+(`domain_Bow_at_Banff_lumped/.../clm5_params.nc`) is dimensioned `pft = 79` and
+carries every crop parameter (`gddmin`, `hybgdd`, `mxmat`, `baset`, `fertnitro`,
+`declfact`, …). No crop-specific paramfile has to be built.
+
+### Forcing at the point — acquisition path + the substitution actually used
+
+There is **no datm forcing at or near the crop point**: the box's `inputdata`
+tree ships no `atm/datm7`, and every SYMFLUENCE domain with `clmforc.YYYY.nc`
+is elsewhere (MerBleue 45.41N/-75.52 ×2yr; Bow ×11yr; the rest have none).
+ERA5 is reachable **without CDS credentials** — SYMFLUENCE pulls it from the
+public ARCO-ERA5 zarr on GCS (`gcp-public-data-arco-era5/ar/…`, anonymous), and
+`xarray`/`zarr`/`gcsfs` are all installed. `scripts/acquire_crop_forcing.py`
+does that pull directly (a single-cell extraction does not need a whole
+SYMFLUENCE domain build).
+
+**Cost caveat:** the ARCO store chunks *one global field per (hour, variable)*,
+so a 2-year hourly 8-variable pull is ~140k chunk reads and runs for hours — it
+is the slowest step by far, and it does not parallelise with the serialized
+Fortran box.
+
+**What the generated case therefore uses by default:** the MerBleue 2016–2017
+forcing, **relabeled onto the crop point's coordinates** (`--relabel`;
+meteorological values copied through unaltered, only coordinate labels change).
+This is sound *for a parity test and only for that* — CTSM and CLM.jl read the
+identical file, so the diff isolates the crop code path exactly as site-native
+met would. It is **not** a climatology of the surfdata's location, so absolute
+yields from this run carry no site meaning. The donor (45.41N) and the crop
+point (44.80N) are 0.6° apart and share a humid-continental regime that
+genuinely grows corn and soybean, so a crop lifecycle remains physically
+plausible. Pass `--real-era5` to `setup_crop_ref_case.py` to substitute a
+site-native pull once someone can absorb the transfer time.
+
+> **The `--real-era5` path is UNVALIDATED.** `acquire_crop_forcing.py` carries a
+> `--validate-merbleue` self-check that re-derives forcing at the MerBleue point
+> and correlates it against that domain's independently-produced
+> `clmforc.2016.nc`, specifically to prove the ERA5→CLM conversions (the
+> accumulated-flux `/3600`, the dewpoint→specific-humidity inversion) before
+> they are trusted as a parity input. **It was started and never completed** —
+> the ARCO transfer outran the session. So the conversion arithmetic in
+> `to_clm()` has *not* been checked against ground truth and must not be
+> assumed correct.
+>
+> This does **not** affect the reference this document reports: the case was
+> built with `--relabel`, which copies every meteorological value through
+> unaltered and touches only coordinate labels — no conversion is involved.
+> Anyone taking the `--real-era5` path must run `--validate-merbleue` to
+> completion first.
+
+### The case is a self-contained run dir, not a CIME case
+
+Every working CN reference on this box (`clm_bgc_spinup/bow_ref_*`,
+`merbleue_ref_ch4`, `bgc_ref_*`) is run by writing `lnd_in`/`drv_in`/`datm_in`/
+`nuopc.*` directly and invoking the shared `cesm.exe` in place — SYMFLUENCE
+bypasses `bldnml` and `case.submit` entirely. The crop case mirrors that, so it
+stays consistent with the references the parity harnesses already consume.
+Instrumentation is already baked into the exe and gated by the
+`PDUMP_NSTEP_LO/HI` and `BGCDUMP_NSTEP_LO/HI` environment variables — the
+spin-up runs with the window closed, then the diff run re-runs a short bracket
+with it open.
+
+**Every flag is set explicitly** in `LND_FLAGS`, including ones that merely
+match the donor. Per #251, an unset flag is not a matched flag.
+
+### Three harness bugs caught by verifying the GENERATED namelists
+
+The case generator was not trusted; every field it wrote was read back. That
+found three defects, each of which would have produced a "port bug" that was
+really a harness bug — the #233/#240/#243/#248/#251 pattern, a sixth and
+seventh time:
+
+1. **Mesh path truncated by a space.** The crop assets live under
+   `.../My Drive/...`, and `nuopc.runconfig` fields are **unquoted**
+   (`mesh_lnd = /path/…`). The space would have truncated the path and dropped
+   the run onto a different grid. Fixed by staging the assets to a space-free
+   directory on the box; asserted in the script.
+2. **`start_ymd` clobbered `restart_ymd`.** An unanchored regex matched the
+   substring, overwriting the `-999` sentinel with `20160101`. Fixed by
+   anchoring to line start and asserting each key matches exactly once.
+3. **The topo stream still pointed at the donor CN case's Bow file — the worst
+   of the three.** `topo_forcing.nc` supplies the elevation the atm forcing is
+   lapse-rate downscaled *from*: **Bow 2138.8 m vs MerBleue 71.5 m**, a 2067 m
+   error, i.e. **~12.4 K** of spurious temperature shift at
+   `lapse_rate = 0.006`. That feeds directly into GDD accumulation and the crop
+   planting decision — it would have silently prevented or grossly distorted
+   the crop lifecycle this whole reference exists to exercise. The topo stream
+   must match whichever site the met came from.
+
+Note that none of the three would have raised an error; all three would have
+run to completion and produced confident, wrong numbers.
+
+### Reproducing it
+
+```bash
+python3 scripts/setup_crop_ref_case.py          # build case (default 4 yr spin-up)
+bash /Users/.../clm_bgc_spinup/crop_ref_usplains/run_crop_ref.sh
+```
+
+## THE FORTRAN CN-CROP RUN SUCCEEDED (2026-07-18)
+
+`FINAL_OK=1` on the first attempt — 4 model years (2016→2020, nstep 35064),
+cold start, **no rebuild**, no macOS-26 xzone retry needed. That confirms the
+symbol-table analysis above empirically: `use_crop=.true.` from the namelist
+alone engages the crop model in the stock `-bgc sp` `cesm.exe`. CTSM's own
+`cropcal_stream DERIVED settings` block appears in `lnd.log`, which only prints
+on the crop path.
+
+**A crop plants, grows, and harvests every year.** Annual means from
+`Crop_USplains.clm2.h0.2016-01-01-14400.nc`:
+
+| Field | 2016 | 2016-12 | 2017 | 2018 | 2019 |
+|---|---|---|---|---|---|
+| `CPHASE` | nan | nan | 2.848 | 3.469 | 3.394 |
+| `HUI` | 0 | 0 | 129.45 | 107.85 | 124.38 |
+| `GDDACCUM` | 0 | 0 | 123.81 | 107.85 | 124.38 |
+| `TLAI` | 0 | 0.522 | 1.451 | 1.518 | 1.534 |
+| `LEAFC` | 2.56 | 15.36 | 38.92 | 40.27 | 40.39 |
+| `TOTVEGC` | 102.1 | 189.2 | 391.7 | 448.6 | 450.6 |
+| `TOTVEGN` | 2.99 | 5.00 | 10.02 | 11.86 | 11.49 |
+| **`NFERTILIZATION`** | 0 | 0 | 1.360e-7 | 1.360e-7 | 1.360e-7 |
+| **`QIRRIG_DEMAND`** | 0 | 0 | 1.750e-8 | 3.466e-8 | 1.504e-8 |
+| **`BAF_CROP`** | 0 | 0 | 1.178e-11 | 8.566e-12 | 1.178e-11 |
+
+`HUI_PERHARV` = **1469 / 1481 / 1425** in 2017/2018/2019 (second slot `-1`, the
+no-second-harvest sentinel) — i.e. exactly **one completed harvest per year**,
+each after ~1400–1500 accumulated heat units. `CPHASE ≈ 3` is grain fill. The
+lifecycle is complete: plant → GDD/HUI accumulation → grain fill → harvest.
+
+### Every blocked backlog row now has a live, non-zero reference
+
+| Row | Was | Now |
+|---|---|---|
+| **A3** crop pools / GDD-HUI / harvest | BLOCKED — no crop-CFT surfdata | `CPHASE`/`HUI`/`GDDACCUM`/`*_PERHARV` all populated, 3 harvests |
+| **A3** crop N (`n_fert!`/`n_soyfix!`) | unwired, no reference | `NFERTILIZATION` = 1.360e-7, non-zero and steady |
+| **A4** irrigation | un-validatable (no irrigated CFT patch) | `QIRRIG_DEMAND` non-zero, varies year to year |
+| **A2** fire crop branch | `≡ 0` without a crop CFT | `BAF_CROP` non-zero (1.18e-11) |
+
+Note `NFIRE` is non-zero only in 2016 while `BAF_CROP` is non-zero only from
+2017 — the crop-CFT fire branch and the natural-veg branch are separately
+exercised, which is what the A2 crop/non-crop split needs.
+
+**Caveat on interpretation:** these are 4 cold-start years, not a spun-up CN
+equilibrium; `TOTVEGC` is still rising (102 → 451). They establish that the
+crop *code path* runs and produces non-degenerate state — which is what
+single-step parity needs. They are not a claim about equilibrium pool sizes,
+and (per the forcing substitution above) not a claim about this location's
+agronomy.
+
+### Two more generator defects the run itself surfaced
+
+Both aborted *after* initialization, so only a real run could find them:
+
+4. **`fd.yaml` (the NUOPC field dictionary) was never copied** — aborts inside
+   `ESMF_IO_YAMLRead` with a bare "Caught exception reading content from file",
+   naming no file.
+5. **A global `<datafiles>` edit injected the met files into `topo.observed`**,
+   which then tried to read `TOPO` out of a `clmforc` file. datm reported only
+   "NetCDF: Variable not found" — no file, no variable name; the PIO stack
+   frame was the only handle. Stream patching is now per-`<stream_info>`.
+
+Plus a sixth, from the history stream: `GDDPLANT`, `GRAINC`, `GRAINN`,
+`CROPPROD1C`, `GRAINC_TO_FOOD` and `QIRRIG` are **not** CTSM history field
+names (`QIRRIG_DEMAND` is; the grain-C fields are not registered under those
+literals). An unknown name aborts at `histFileMod.F90:887` after
+initialization. The generator now validates `hist_fincl1` against the names
+CTSM actually registers and drops unknowns with a warning.
+
+## Instrumented crop reference dumps GENERATED (two windows)
+
+`bgcdumpMod.F90` was extended with the crop lifecycle + crop N fields (see
+`scripts/validation/fortran_sourcemods/bgcdumpMod.F90`, all behind
+`if (use_crop)` so non-crop references stay byte-identical) and the case
+rebuilt — an incremental `./case.build`, ~9 s total; verify it took by checking
+`strings bld/cesm.exe | grep CROPLIVE`, since CIME reports SUCCESS even when
+nothing recompiled.
+
+Dumps are produced by the proven two-stage pattern: advance to the window with
+`PDUMP/BGCDUMP_NSTEP_*` closed, write a restart, then run a short bracket from
+it with the window wide open.
+
+| Ref dir | Date | nsteps | Files | What it captures |
+|---|---|---|---|---|
+| `refs_crop_may/` | 2020-05-30 | 38665–38676 | 48 | **the fertilization window** |
+| `refs_crop_july/` | 2020-07-19 | 39865–39876 | 48 | mid-season growth / grain fill |
+
+(Both under `clm_bgc_spinup/crop_ref_usplains/`; 12 `bgcdump_after_fire` +
+36 `pdump` per window.)
+
+### What the reference actually contains
+
+Patch indices **5–12 are the eight live crop patches** (`CROPLIVE = 1`,
+`NYRS_CROP_ACTIVE = 4`); everything else is `1e36`/0 fill, which is the correct
+non-crop signature.
+
+**May window (n38665)** — CPHASE = 2 (leaf emergence) on all eight:
+
+| Field | Values across the 8 crop patches |
+|---|---|
+| `HUI` | 131.99, 131.85, 342.10, 342.03, 64.93, 63.19, 162.45, 162.29 |
+| **`FERT`** | **9.693e-6, 9.693e-6, 5.727e-6, 5.779e-6, 1.567e-6, 1.567e-6, 9.693e-6, 9.693e-6** |
+| `FERT_TO_SMINN` | 8 non-zero columns, max 9.693e-6 |
+| `SOYFIXN` | 0 |
+
+**July window (n39865)** — CPHASE 2 and 3 (grain fill), `HUI` 552–1274,
+`FERTNITRO` 0.71–14.75, but `FERT = 0`: **the fertilization window has already
+closed by mid-July.** That is why the May window exists, and it is a concrete
+reminder that "the crop is growing" and "the crop-N flux is live" are different
+windows — a mid-season dump alone would have shown `FERT ≡ 0` and looked like a
+dead path.
+
+`SOYFIXN` is 0 in **both** windows. CTSM's `CNSoyfix` requires a later growth
+phase than either window sampled, so the soybean-fixation reference is still
+outstanding — a third window (or a phase-targeted bracket) is needed before
+`n_soyfix!` can be validated. Recorded as a known gap rather than papered over.
+
+## Wiring `n_fert!` — it would be a NO-OP today. Do not wire it yet.
+
+The task brief scoped "wire `n_fert!`/`n_soyfix!` now that a reference exists".
+Reading the two sides against each other says **the reference is not the
+binding constraint for `n_fert!`, and wiring it would create a green-looking
+dead path** — the exact bug class in `dead-initcold-systemic` ("assert the
+wiring **and a non-no-op body**").
+
+**What `n_fert!` actually does.** `src/biogeochem/n_dynamics.jl:332` is a pure
+aggregation: it zeroes `soilbgc_nf.fert_to_sminn_col` and scatters
+`cnveg_nf.fert_patch` into it, weighted by `patch.wtcol`. It computes no
+fertilizer. It is a faithful port of `CNNFert`, which is also only a `p2c`.
+
+**`fert_patch` is never computed in CLM.jl.** Every occurrence in `src/` is a
+declaration, an allocation, or a zeroing:
+
+| Site | What |
+|---|---|
+| `types/cn_veg_nitrogen_flux.jl:172` | field declaration |
+| `types/cn_veg_nitrogen_flux.jl:548` | `nanvec(np)` allocation |
+| `types/cn_veg_nitrogen_flux.jl:1111` | `= 0.0` (zero-flux reset) |
+| `biogeochem/n_dynamics.jl:341` | **read** by `n_fert!` |
+
+**Where CTSM computes it:** `CNPhenologyMod.F90:2529`, *inside*
+`CropPhenology`:
+
+```fortran
+fert(p) = (manunitro(ivt(p)) * 1000._r8 + fertnitro(p)) / fert_counter(p)
+```
+
+i.e. fertilizer is applied over a counted window after planting, from the
+`fertnitro_patch` surfdata/param input and the manure term. That is precisely
+the part of `CropPhenology` that `crop_phenology!` (`phenology.jl:2344`) does
+**not** port — it only sets `cphase` and the grain-fill `bglfr`.
+
+**So the dependency order is:** port the fertilization window inside crop
+phenology (which needs `plant_crop!` driven, so a planting date exists to count
+from) → *then* `fert_patch` becomes non-zero → *then* wiring `n_fert!` moves
+real nitrogen. Wiring `n_fert!` first would scatter an all-zero array, pass
+any "is it wired?" test, and change nothing — a vacuous green.
+
+`n_soyfix!` is different: it computes `soyfixn_patch` itself from soil
+moisture / growth phase / mineral N, and takes `crop::CropData` directly. It
+is not blocked on `fert_patch`. It *is* blocked on the crop lifecycle state
+(`cphase`, `croplive`) being driven, which is the same `plant_crop!` gap.
+
+**Conclusion:** the honest next step is not "wire the two N routines" but
+"finish `crop_phenology!` against the Fortran reference — planting decision,
+vernalization, phase transitions, the fertilization window, harvest — and wire
+the N routines behind it". The reference this task produced is what makes that
+verifiable; the reference alone does not make the N wiring meaningful. Not
+wired here, deliberately, and for a sharper reason than #218's original one.
+
 ## Verified Julia wiring state (no run required)
 
 Checked against current `main` (source, not comments) and CTSM
