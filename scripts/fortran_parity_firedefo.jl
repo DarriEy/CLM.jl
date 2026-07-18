@@ -36,17 +36,25 @@
 #             applies land-cover change on the first step of the year and then
 #             DRIBBLES it over the year, so dwt_smoothed is nonzero only after a
 #             year boundary inside the run.
-#   window  : nstep 1536..1620, dtime = 3600 s, start 2202-10-29-00000
+#   window  : nstep 1536..1780, dtime = 3600 s, start 2202-10-29-00000
 #             ⇒ nstep 1536 == 2203-01-01 00:00 exactly.
 #   boundary: 'after_fire'
 #
 #   nstep 1536 is the `kmo==1 .and. kda==1 .and. mcsec==0` step: Fortran gives
-#   DTROTR=0, TROTR1/2 = the PRE-transition 0.40/0.30, FAREA_BURNED=0. From 1537
-#   on: TROTR1=0.385, TROTR2=0.289, DTROTR=2.968e-6, LFC≈0.0258 (decaying as
-#   lfc2 burns it off), LFC2≈2.4e-6, FBAC1=0, FAREA_BURNED≈1.24e-7.
+#   DTROTR=0, TROTR1/2 = the PRE-transition 0.40/0.30, FAREA_BURNED=0. The probe
+#   window deliberately starts at 1537 — the harness is a single-step oracle and
+#   does NOT reproduce the Jan-1 land-cover-change event itself.
 #
-#   The probe window deliberately starts at 1537 — the harness is a single-step
-#   oracle and does NOT reproduce the Jan-1 land-cover-change event itself.
+#   The window spans BOTH regimes of the branch, which is why it runs to 1780:
+#     * nstep 1537..~1675 — `lfc > 0`: the conversion area has not yet all burned,
+#       so `fbac1` clamps to 0 (fb*cli*cli_scale/secspday ~ 1e-7 can never exceed
+#       2*lfc/dt ~ 1.4e-5) and the `lfc2` drawdown branch runs. LFC decays ~2.2e-4
+#       per step from 0.0258.
+#     * nstep ~1676..1780 — `lfc` exhausted: `lfc2` -> 0 and `fbac1`/`fbac` turn
+#       ON (~1.2e-7), which is the branch that actually feeds the deforestation
+#       CARBON flux (CNFireFluxes uses f = (fbac-baf_crop)/(1-cropf) when
+#       transient_landcover). Probing only the first regime would leave
+#       FBAC/FBAC1 F≡0 vacuous — a green scorecard blind to half the branch.
 #
 # THE INJECTION
 #   `dwt_smoothed_patch` is a dribbler output, not a restart variable, so it is
@@ -69,7 +77,7 @@ const FLANDUSE     = joinpath(DUMPDIR_DEFO, "landuse_timeseries_defo.nc")
 
 const N0    = 1536                       # 2203-01-01 00:00 (the jan1-0 step)
 const NFIRST = 1537                      # first step with dtrotr > 0
-const NLAST = 1620
+const NLAST = 1780
 const LANDUSE_YEAR = 2203                # post-transition flanduse slice
 
 # --- clock alignment (this branch is DATE-GATED, so this must be exact) ------

@@ -1021,3 +1021,138 @@ Ebullition was the last one that no on-disk asset could exercise.
 julia +1.12 --project=. scripts/probe_ch4_ebul_threshold.jl 5   # confirm scale crosses threshold (no box)
 julia +1.12 --project=. scripts/fortran_parity_ch4_ebul.jl 1    # n0 ebullition scorecard
 ```
+
+---
+
+## 15. FIRE TROPICAL-DEFORESTATION branch (`dtrotr`) VALIDATED — two real bugs (2026-07-18)
+
+**The tropical land-use ("slash and burn") fire term — `dtrotr_col` / `lfc` /
+`lfc2` / `fbac1` — is now diffed against Fortran for the first time and is
+BIT-EXACT, 8/8. It was the LAST unexercised fire branch (backlog A2, and the
+open item at the end of §12). Making it non-vacuous exposed two real port
+bugs, neither of which any existing test could see.**
+
+### What `dtrotr` actually requires
+Three conditions, ALL necessary (`CNFireLi2016Mod` lines 352/405-427/488-499/630-648):
+
+1. **`run_has_transient_landcover()` true.** `dtrotr_col` accumulates
+   `-dwt_smoothed(p)` only inside `if (transient_landcover)`. That predicate is
+   `do_transient_pfts .or. do_transient_crops .or. do_transient_urban` — it needs
+   a `flanduse_timeseries` file. **No migrated domain has one** ⇒ `dwt ≡ 0`.
+2. **`trotr1+trotr2 > 0.6`** — the column must be >60% tropical broadleaf tree
+   (natpft 4 = BET-tropical, natpft 6 = BDT-tropical). Bow is boreal.
+3. **A year boundary INSIDE the run.** CTSM applies land-cover change on the
+   first timestep of the year and then DRIBBLES it (`AnnualFluxDribbler`) over
+   the year, so `dwt_smoothed` is nonzero only after a Jan 1 the run crossed.
+   `dwt_smoothed_patch` is a dribbler output, **not a restart variable**.
+
+### The unblock — a synthetic surfdata + a synthetic flanduse, not a new site
+Same technique as the synthetic lnfm/hdm streams (§2), `peatf=0.5` (§12) and
+`CONC_CH4 x5` (§14). `scripts/make_firedefo_inputs.jl` writes:
+
+* **`surfdata_defo.nc`** — Bow's surfdata with `PCT_NAT_PFT` re-composed to 40%
+  BET-tropical + 30% BDT-tropical (`trotr1+trotr2 = 0.70`). **Every other natpft
+  gets a small nonzero weight**, deliberately: `subgridMod::natveg_patch_exists`
+  allocates ALL 15 natveg patches when `do_transient_pfts` is on but only
+  nonzero-weight ones otherwise, so this makes the Fortran (transient) and CLM.jl
+  (non-transient) patch vectors the same length and order — the dumps index-align
+  with no remapping.
+* **`landuse_timeseries_defo.nc`** — 2 slices; slice 1 is byte-equal to the
+  surfdata (so `dynpft_check_consistency` passes on its own terms), slice 2
+  (YEAR 2203) drops the tropical fraction by **2.6 pp**. That magnitude is
+  chosen, not arbitrary: `min(1, 19*dtrotr*dayspyr*secspday/dt - 0.001)`
+  **saturates at 1 for any annual loss above ~0.53 pp**, so a larger, more
+  "realistic" deforestation would have pinned the term at a clamp and the diff
+  would have proved nothing. 2.6 pp lands it at 0.493 — interior to both clamps.
+
+### The reference
+`SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firedefo`: `bow_ref_firepeat` plus
+`do_transient_pfts` + the two synthetic files, `finidat` = the **2202-10-29**
+warm-CN restart (so the run crosses Jan 1 2203) and `use_init_interp = .true.`
+with **`init_interp_method = 'general'`** — an EMPTY `&clm_initinterp_inparm`
+aborts with "Unknown value for init_interp_method"; an unset flag is not a
+matched flag. init_interp is required because the transient run has 15 natveg
+patches and the spun-up restart has 3; CTSM fills the new PFT types from bare
+soil (`initInterpMindist::do_fill_missing_with_natveg` — "also supports adding a
+new PFT type"), and crucially the **column-level** C/N, which is what feeds
+`fuelc`/`fb`, stays WARM. Ran plain, EXIT_CODE=0.
+
+`bgcdumpMod.F90` (case SourceMods) gained `LFC2` and the patch-level
+`DWT_SMOOTHED`; `TROTR1/TROTR2/DTROTR/LFC/FBAC/FBAC1` were already dumped.
+
+### The window covers BOTH regimes — deliberately
+`nstep 1536..1780`. nstep 1536 is the `kmo==1 .and. kda==1 .and. mcsec==0` step.
+Then:
+
+* **1537..~1675 (`lfc > 0`)** — `fbac1` clamps to 0 (`fb*cli*cli_scale/secspday`
+  ~1e-7 can never exceed `2*lfc/dt` ~1.4e-5; this is scale-invariant, so it is
+  not fixable by choosing a different deforestation rate) and the `lfc2`
+  drawdown branch runs. `LFC` decays ~2.2e-4 per step from 0.0258.
+* **~1676..1780 (`lfc` exhausted)** — `lfc2 -> 0` and **`fbac1`/`fbac` turn on**
+  (~1.2e-7). This is the regime that actually feeds the deforestation CARBON
+  flux, since `CNFireFluxes` uses `f = (fbac-baf_crop)/(1-cropf)` when
+  `transient_landcover`. **Stopping the window at 1620 would have produced a
+  green 6/6 scorecard that was structurally blind to half the branch** — the
+  first window did exactly that, with `FBAC`/`FBAC1` reported `F≡0 vacuous`.
+
+### BUG 1 — `transient_landcover` was "a dyn_subgrid state exists" (FIXED)
+`clm_driver.jl` passed `transient_landcover = (config.dyn_subgrid !== nothing)`.
+CTSM's predicate is `do_transient_pfts .or. _crops .or. _urban`. A
+`DynSubgridState` is constructed with **all** transient aspects off (its own
+docstring says so), and one built for transient **lakes** only must still report
+false — lakes are deliberately excluded from the Fortran predicate. Both cases
+returned `true`, which switches `CNFireFluxes`' per-patch burned fraction from
+`farea_burned` to `fbac` and enables the `lfc`/`lfc2` bookkeeping in runs where
+CTSM leaves them off.
+
+`run_has_transient_landcover` **was already ported and already unit-tested**
+(`test_dyn_subgrid_control.jl`) — and never called by the driver. The
+[[dead-initcold-systemic]] "ported then never called" class again. Now guarded by
+a WIRING test that asserts the driver's gate expression names the predicate.
+
+### BUG 2 — CLM.jl could not read ANY real CTSM flanduse/surface file (FIXED)
+`_read_time_slice` errored with *"variable has 4 dims; expected 2 or 3"* on
+anything carrying more than one spatial dimension. **Every real CTSM surface and
+`landuse_timeseries` dataset stores the gridcell axis as an `(lsmlon, lsmlat)`
+PAIR**; Fortran reads both layouts through the same `grlnd` decomposition. The
+port only ever saw the 1-D `lndgrid` flavour **that its own unit tests
+fabricate** — so the reader was green on synthetic input of a shape no real
+dataset uses. Fixed in both call sites (`dyn_file_io.jl` and the separate
+`dynpft_check_consistency` path, which had the same 3-arg call and would have
+failed identically) by folding extra non-time dims into the gridcell axis, with
+an explicit element-count check so a genuinely wrong shape is still rejected.
+Guarded by a new `(lsmlon, lsmlat)` test asserting the VALUES and that the two
+year slices actually differ.
+
+### A latent harness clock off-by-one (FIXED)
+The Fortran dumps record `get_curr_date`, the **END**-of-step time (verified:
+n1536 tod=0, n1537 tod=3600, n1538 tod=7200), so `run_one_parity_step!`'s
+pre-advance `step_date` must be end-of-step **minus dt**.
+`fortran_parity_firepeat.jl` passes the end-of-step time — nothing in the peat
+branch is date-gated, so the hour never showed. Here `lfc` is set **only** on the
+`mcsec == dt` step: an hour late and `lfc ≡ 0`, which is exactly how the first
+run failed (LFC/LFC2 rel.err 1.0 while everything else was already bit-exact).
+
+### Scorecard — Bow deforestation branch, `after_fire`, converged CN
+| field | worst rel.err | \|F\| scale |
+|---|---|---|
+| `TROTR1`       | **0.0** | 3.850e-01 |
+| `TROTR2`       | **0.0** | 2.890e-01 |
+| `DTROTR`       | **0.0** | 2.968e-06 |
+| `LFC`          | **0.0** | 2.578e-02 |
+| `LFC2`         | **0.0** | 2.378e-06 |
+| `FBAC`         | **0.0** | 1.314e-07 |
+| `FBAC1`        | **0.0** | 1.314e-07 |
+| `FAREA_BURNED` | **0.0** | 1.376e-07 |
+
+**8/8 bit-exact.** `NFIRE`/`BAF_CROP`/`BAF_PEATF` are legitimately `F≡0` here
+(the `trotr>0.6` gate skips the nfire/spread branch entirely; no crops; peatf=0)
+and are covered by the §5 and §12 scorecards. **With this, every branch of the
+Li2016 fire module has been diffed against Fortran.**
+
+### Reproducing
+```bash
+julia +1.12 --project=. scripts/make_firedefo_inputs.jl      # synthetic surfdata + flanduse
+bash /Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firedefo/run_bow_firedefo.sh
+julia +1.12 --project=. scripts/fortran_parity_firedefo.jl 6 # dtrotr scorecard
+```
