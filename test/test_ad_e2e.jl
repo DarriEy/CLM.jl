@@ -23,6 +23,8 @@ using ForwardDiff
 using ForwardDiff: Dual, Tag, value, partials
 using CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "AD End-to-End (ForwardDiff)" begin
 
     # =====================================================================
@@ -827,13 +829,10 @@ using CLM
     # =====================================================================
 
     @testset "Level 8: Full clm_drv! timestep AD" begin
-        fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-        paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+        fsurdat, paramfile = bow_params()
 
         if !isfile(fsurdat) || !isfile(paramfile)
-            @warn "Skipping Level 8: input files not found"
-            @test true
-            return
+            testdata_missing("Level 8", fsurdat, paramfile) && return
         end
 
         # --- Helper: create a Dual-typed copy of a parameterized struct ---

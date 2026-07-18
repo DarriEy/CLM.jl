@@ -17,14 +17,13 @@ println("=" ^ 70)
 println("PARAMETER RECOVERY TESTS for CLM.jl")
 println("=" ^ 70)
 
-const FSURDAT_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-const PARAMFILE_PATH = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+include(joinpath(@__DIR__, "testdata.jl"))
+const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
 
 @testset "Parameter Recovery" begin
 
     if !isfile(FSURDAT_PATH) || !isfile(PARAMFILE_PATH)
-        @warn "Skipping parameter recovery tests: input files not found"
-        @test true
+        testdata_missing("parameter recovery tests", FSURDAT_PATH, PARAMFILE_PATH)
         return
     end
 
