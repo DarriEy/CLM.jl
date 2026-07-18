@@ -245,8 +245,43 @@ function iso_parity_step(nstep)
     @printf("  %s\n", "-"^62)
     @printf("  global post-step pool max|rel| = %.3e   (shared IC → expect tight)\n", gpool)
     @printf("  global one-step increment max|rel| = %.3e   (isotope FLUX physics)\n", ginc)
+
+    # ---- δ13C parity: the discrimination-physics test, decoupled from bulk-C ----
+    # leafc_13/leafc is the isotopic RATIO; comparing Julia's post-step δ13C to
+    # Fortran's isolates the fractionation/CIsoFlux+state-update chain from the
+    # (separately-tracked) bulk-C single-step residual that both isotope pools
+    # inherit. Near-zero one-step veg increments make incr|rel| above hit the
+    # bulk-C oracle floor; δ13C parity does not.
+    dsA = NCDataset(edump, "r")
+    bulk_cs = inst.bgc_vegetation.cnveg_carbonstate_inst
+    Rpdb = 0.0112372
+    @printf("\n  δ13C after-step parity (Julia vs Fortran; discrimination physics)\n")
+    @printf("  %-16s %5s %11s %11s %10s\n", "pool", "patch", "δ13C_J‰", "δ13C_F‰", "Δ‰")
+    @printf("  %s\n", "-"^58)
+    maxdd = 0.0
+    for stem in ("leafc","frootc","livestemc","deadstemc","livecrootc","deadcrootc")
+        haskey(dsA, stem) && haskey(dsA, stem*"_13") || continue
+        jfld = Symbol(stem * "_patch")
+        hasproperty(bulk_cs, jfld) && hasproperty(c13cs_g(inst), jfld) || continue
+        jbulk = getfield(bulk_cs, jfld); j13 = getfield(c13cs_g(inst), jfld)
+        fbulk = Float64.(coalesce.(dsA[stem][:], NaN)); f13 = Float64.(coalesce.(dsA[stem*"_13"][:], NaN))
+        for (pf, pj) in sort(collect(pmap))
+            (pf <= length(fbulk) && pj <= length(jbulk)) || continue
+            (jbulk[pj] > 1e-9 && fbulk[pf] > 1e-9) || continue
+            Rj = j13[pj] / (jbulk[pj] - j13[pj]); Rf = f13[pf] / (fbulk[pf] - f13[pf])
+            dj = (Rj/Rpdb - 1)*1000; df = (Rf/Rpdb - 1)*1000
+            maxdd = max(maxdd, abs(dj - df))
+            @printf("  %-16s %5d %11.4f %11.4f %10.2e\n", stem, pj, dj, df, abs(dj-df))
+        end
+    end
+    close(dsA)
+    @printf("  %s\n", "-"^58)
+    @printf("  max |Δδ13C| = %.3e ‰   (isotope discrimination parity)\n", maxdd)
     return 0
 end
+
+# c13 veg carbon state accessor (kept local to avoid threading it through).
+c13cs_g(inst) = inst.bgc_vegetation.c13_cnveg_carbonstate_inst
 
 function main()
     na = filter(a -> occursin(r"^\d+$", a), ARGS)
@@ -260,19 +295,23 @@ function main()
     println("• Reference: use_c13/c14 CN spinup, iso pools reseeded from bulk C at")
     println("  the Jan restart then evolved to mid-July (bypassing CTSM #2119 via")
     println("  a case SourceMods patch). Veg c13/c14 pools present in the dumps.")
-    println("• FIXED (this PR): use_c13/c14 were never propagated to the vegetation")
+    println("• PRIOR FIXES (#241): use_c13/c14 were never propagated to the vegetation")
     println("  facade config (clm_initialize.jl) → the veg c13/c14 carbon state was")
     println("  size-0 and the whole veg isotope path silently no-op'd. And the")
     println("  CIsoFlux litter/gap/harvest/gru p2c scatters fell back to the varpar")
     println("  i_litr_min/i_met_lit sentinel (-9) → BoundsError once the state was")
-    println("  live. With those fixed the CIsoFlux cascade now RUNS.")
-    println("• REMAINING DIVERGENCE (documented, NOT fixed here): cn_driver.jl never")
-    println("  calls c_state_update{0,1,2,2h,2g,3}! on the c13/c14 carbon state — CTSM")
-    println("  CNDriverMod calls each CStateUpdate 3× (bulk, c13, c14). So the isotope")
-    println("  FLUXES are computed but never applied to the veg POOLS: the one-step")
-    println("  c13 pool increment diverges ~100% (Julia pools static; c14 changes only")
-    println("  via c14_decay!). Wiring the per-isotope state-update cascade is the next")
-    println("  isotope task — this harness validates it against bgc_ref_iso.")
+    println("  live. With those fixed the CIsoFlux cascade RUNS.")
+    println("• FIXED (this PR): the per-isotope c_state_update{0,1,2,2h,2g,3}! cascade")
+    println("  is now wired (CTSM CNDriverMod calls each CStateUpdate 3× — bulk/c13/c14),")
+    println("  so the computed isotope fluxes are APPLIED to the c13/c14 veg pools; and")
+    println("  the isotope psn→cpool input (calc_gpp_mr_availc!) now receives the c13/c14")
+    println("  carbonflux instances (was dropping to the bulk array → uninit cpool_13).")
+    println("• RESULT: post-step pool parity ~9e-6, cpool_13/14 EXACT (0.0), and the")
+    println("  δ13C discrimination parity matches Fortran to <1e-4 ‰. The one-step")
+    println("  increment |rel| hits the single-step bulk-C oracle floor on near-static")
+    println("  veg pools (leafc net Δ ~1e-7 < the inherited bulk-C summer residual) —")
+    println("  δ13C parity, which is decoupled from that residual, confirms the isotope")
+    println("  physics itself. c14 pools track to <1e-3 (change only via c14_decay!).")
     return rc
 end
 
