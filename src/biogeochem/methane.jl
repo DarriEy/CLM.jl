@@ -1379,7 +1379,7 @@ Adapt.@adapt_structure _CH4AereP
                 k_h_cc = d.t_soisno[c, j] / k_h_inv * p_par.rgaslatm
                 conc_ch4_wat = d.conc_ch4[c, j] / ((d.watsat[c, j] - h2osoi_vol_min) / k_h_cc + h2osoi_vol_min)
                 tranloss = conc_ch4_wat * d.rootr[p, j] * d.qflx_tran_veg[p] / d.dz[c, j] / T(1000.0)
-                tranloss = smooth_max(tranloss, zero(T))
+                tranloss = max(tranloss, zero(T))   # HARD: mol/m3/s axis (~1e-9); log(2)/50=0.0139 is 7 orders too big. Matches site_ox_aere! l.1238.
             else
                 tranloss = zero(T)
             end
@@ -1412,7 +1412,7 @@ Adapt.@adapt_structure _CH4AereP
                 aerecond = one(T) / (one(T) / (aerecond + p_par.smallnumber) + one(T) / (d.grnd_ch4_cond_patch[p] + p_par.smallnumber))
 
                 aere = aerecond * (d.conc_ch4[c, j] / d.watsat[c, j] / k_h_cc - d.c_atm_grc[g, 1]) / d.dz[c, j]
-                aere = smooth_max(aere, zero(T))
+                aere = max(aere, zero(T))   # HARD: mol/m3/s axis (~1e-9); smoothing floors it at 0.0139. Matches site_ox_aere! l.1271.
 
                 # O2 diffusion
                 k_h_inv = exp(-p_par.c_h_inv2 * (one(T) / d.t_soisno[c, j] - one(T) / p_par.kh_tbase) + log(p_par.kh_theta2))
@@ -1421,7 +1421,7 @@ Adapt.@adapt_structure _CH4AereP
                 aerecond = area_tiller * d.rootfr[p, j] * oxdiffus / (d.z[c, j] * p_par.rob)
                 aerecond = one(T) / (one(T) / (aerecond + p_par.smallnumber) + one(T) / (d.grnd_ch4_cond_patch[p] + p_par.smallnumber))
                 oxaere = -aerecond * (d.conc_o2[c, j] / d.watsat[c, j] / k_h_cc - d.c_atm_grc[g, 2]) / d.dz[c, j]
-                oxaere = smooth_max(oxaere, zero(T))
+                oxaere = max(oxaere, zero(T))   # HARD: mol/m3/s axis (~1e-9); smoothing floors it at 0.0139. Matches site_ox_aere! l.1280.
 
                 if !p_par.use_aereoxid_prog
                     oxaere = zero(T)
@@ -1432,9 +1432,11 @@ Adapt.@adapt_structure _CH4AereP
             end
 
             # --- Scatter the per-patch contribution into the column arrays ---
-            aeretran = smooth_min(aere + tranloss, d.conc_ch4[c, j] / dtime + d.ch4_prod_depth[c, j])
+            # HARD min: both args are mol/m3/s CH4 fluxes (~1e-9); smooth_min biases the
+            # SCATTERED flux by log(2)/50=0.0139 (7 orders too big). Fortran ch4Mod uses min().
+            aeretran = min(aere + tranloss, d.conc_ch4[c, j] / dtime + d.ch4_prod_depth[c, j])
             _scatter_add!(d.ch4_aere_depth, c, j, aeretran * wt)
-            _scatter_add!(d.ch4_tran_depth, c, j, smooth_min(tranloss, aeretran) * wt)
+            _scatter_add!(d.ch4_tran_depth, c, j, min(tranloss, aeretran) * wt)
             _scatter_add!(d.o2_aere_depth,  c, j, oxaere * wt)
         end
     end
