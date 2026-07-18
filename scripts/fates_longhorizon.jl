@@ -15,9 +15,11 @@
 #
 #   FATES_NDAYS=365 julia +1.12 --project=. scripts/fates_longhorizon.jl
 # ==========================================================================
+include(joinpath(@__DIR__, "..", "test", "testdata.jl"))
+
 using CLM, Printf, Dates
 const _C = CLM
-const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+const DATA = symfluence_data_root()
 
 # ---- census / carbon helpers (mirror test_fates_live_modes.jl / test_fates_spinup.jl) ----
 function census(inst)

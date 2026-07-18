@@ -27,13 +27,15 @@
 # Programmatic: lake_water_balance_report(; nsteps=24) -> NamedTuple or `missing`
 #               (missing = machine-local inputs absent -> caller should skip).
 # =============================================================================
+include(joinpath(@__DIR__, "..", "test", "testdata.jl"))
+
 using CLM, NCDatasets, Dates, Printf
 
 const LWB_LAKE    = joinpath(@__DIR__, "..", "test_inputs", "lake", "surfdata_lake100.nc")
-const LWB_FP      = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
-const LWB_FFORC   = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2003.nc"
-const LWB_SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const LWB_SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const LWB_FP      = last(bow_params())
+const LWB_FFORC   = bow_forcing("clmforc.2003.nc")
+const LWB_SNOWOPT = snicar_optics()
+const LWB_SNOWAGE = snicar_aging()
 
 """
     lake_water_balance_report(; nsteps=24, verbose=false)

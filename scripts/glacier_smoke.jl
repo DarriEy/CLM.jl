@@ -52,14 +52,15 @@
 # (2026-07-12): + the dead-aerosol-InitCold fix above, which only became findable once
 # this gate was reshaped to actually form snow layers.
 # =============================================================================
+include(joinpath(@__DIR__, "..", "test", "testdata.jl"))
+
 using CLM, NCDatasets, Dates, Printf
 
 const GLAC_FS = joinpath(@__DIR__, "..", "test_inputs", "glacier", "surfdata_glacier100.nc")
-const BOW_CAL = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/" *
-                "domain_Bow_at_Banff_lumped/settings/CLM/parameters"
+const BOW_CAL = domain_params_dir("domain_Bow_at_Banff_lumped")
 const GLAC_FP = joinpath(BOW_CAL, "clm5_params.nc")
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const SNOWOPT = snicar_optics()
+const SNOWAGE = snicar_aging()
 
 # Moderate snowfall [mm H2O/s]: 5e-4 * 3600 s = 1.8 kg/m2 per step, which crosses the
 # snow-layer-creation threshold on step 1 and builds a multi-layer pack within a day.
