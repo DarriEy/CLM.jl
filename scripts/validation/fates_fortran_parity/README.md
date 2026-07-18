@@ -382,3 +382,114 @@ root-fraction-weighted sum of per-layer resistances, each capped at 1, so a plat
 0.62 says "38 % of my root profile is in layers that are contributing nothing" — which
 is a *root profile* statement, not a *soil moisture* one. That is what pointed at
 `set_root_fraction`'s `max_nlevroot` rather than at the hydrology.
+
+---
+
+# EXTENDED-WINDOW (20-day) VALIDATION + D1 STATUS (2026-07-18, backlog D1)
+
+The scorecard above is the committed **5-day** (120-step) oracle. This section records
+the **D1 "deeper FATES validation"** pass: (1) re-confirming that oracle still holds on
+current `main` after the gated FATES config work landed (#197 fixed-biogeog screen, #227
+boreal cold-start moisture BC), and (2) a **fresh 20-day (480-step) Fortran run** that
+extends the demographic window and surfaces a divergence the 5-day window is blind to.
+
+## 1. The committed 5-day oracle still holds on current `main`
+
+Re-ran `fates_fortran_parity.jl compare fates_pdump_fortran.txt.gz` on `main` (post
+#197/#227). The scorecard reproduces the committed one **to the digit**: cold-start
+`carbon` 7.133e-16 (match); first divergence `npp` rel **4.9218e-09** at step 0 phase 1
+(host-driven, identical bytes); per-phase `dndt` 2.069e+02 / `fast` MISM 47/121 — every
+line unchanged. So the two gated changes did **not** regress the validated dynamics: #227
+is **scripts-only** (a prescribed growing-season soil-moisture BC in
+`fates_multisite_validation.jl`, gated on `SiteCfg.soil_h2o`; not on this Bow path), and
+#197's `src/` edits are gated behind `fates_biogeog_screen` (default `:none` → the
+all-14-PFT NBG cold start is byte-identical, which this harness runs).
+
+## 2. Fresh 20-day Fortran run — a HOST soil-moisture divergence, amplified
+
+Re-ran the **surviving instrumented FATES `cesm.exe`** (`fates_parity_1pt`, no rebuild —
+the 4-file SourceMods build from #217/#223 is intact) with `stop_n = 480` (20 days) and
+scored the port against it at `FATES_PARITY_STEPS=480`. Cold start still 7.133e-16; the
+`fast`/`npp` first divergence and the day-3 `cohortfuse` marginal-patch-2 structural
+divergence are unchanged. But the **site-level trajectory diverges over the longer
+window** in a way 5 days cannot show:
+
+| day | Julia carbon | Fortran carbon | relC | Julia maxdbh | Fortran maxdbh | relDBH |
+|---|---|---|---|---|---|---|
+| 3  | 2588.06 | 2584.07 | 1.5e-3 | 1.8861 | 1.8860 | 6.7e-5 |
+| 12 | ~2660   | ~2660   | ~1e-3  | 1.8900 | 1.8906 | 3.4e-4 |
+| 19 | 2730.31 | 2888.45 | **5.5e-2** | 1.9754 | 2.5199 | **2.2e-1** |
+
+`gpp`/`npp` stay tight the whole run (worst rel ~4e-4). The break is **stature growth**:
+around **day 13** Fortran's largest cohort — a **PFT-13 (stress-deciduous, grass-form:
+`structc=0`, height decoupled from dbh) cohort in patch 1 at full density n≈2000** —
+enters vigorous dbh growth (1.89 → 2.52 by day 19). The port's identical cohort **stalls**
+its dbh/leafc/storec around days 11–13, then only partly recovers.
+
+### Attribution — it is the HOST (CLM top-soil-layer moisture), not the FATES port
+
+The phase-tagged `bc_in` makes this mechanical, and it is the **same class** as the 5-day
+residual noted above ("the host CLM top-soil-layer phase change is the binding residual"),
+now amplified:
+
+```
+  PFT-13 patch-1 dbh STALLS days 11–13   (COHORT.dbh @ updatesite)
+    └─ gpp_acc COLLAPSES: day 12 rel 0.92, day 13 = 0.000   (COHORT.gpp_acc @ dyn_in)
+        └─ leaf status STAYS 2 (leaf-on)  → NOT a phenology leaf-off
+        └─ btran_ft → 0.0 on days 11–13   (PATCH.btran_ft @ dyn_in; Fortran stays 1.0)
+            └─ h2ovol1 (top soil layer handed to FATES) J 0.11–0.14 vs F 0.32–0.34
+                — a 3× dry-down, PERSISTENT from day 1 (day1 J 0.302 vs F 0.350)
+                └─ incident solar BIT-ALIGNED: daily-integrated solad1 rel = 0.00
+                   EVERY day (forcing-misalignment ruled out — the #233 lesson)
+```
+
+At cold start FATES's entire root profile sits in soil layer 1 (README bug 6), so layer
+1's liquid water **is** the FATES water stress. The port's CLM top layer over-dries under
+bit-identical forcing (soil-evaporation / phase-change / drainage residual, present from
+day 1); on the mid-July dry days 11–13 it drops below wilting, `btran_ft` correctly
+collapses to 0, GPP → 0, and PARTEH's phase-3 stature-growth gate (`carbon_balance > 0`)
+is never entered, so dbh freezes. **This is a CLM host divergence: the `bc_in` soil
+moisture FATES is handed already differs 3×, and `btran_ft = 0` is the correct FATES
+response.** No FATES-port mis-port was found — closing it is a CLM soil-hydrology task
+(out of FATES scope; there is a plausible GPP↔transpiration↔soil-moisture feedback seeded
+by the documented early ~25 %-high GPP, but the primary driver is the top-layer moisture
+bias). Fix attempts belong to the host hydrology, not `src/fates/`.
+
+**Reproduce** (surviving build, no CTSM rebuild needed):
+```bash
+# Fortran 20-day reference (edit stop_n=480 in the run dir's nuopc.runconfig):
+cd <fates_parity_1pt run dir> && sed -i '' 's/stop_n = 120/stop_n = 480/' nuopc.runconfig
+MallocNanoZone=0 HWLOC_COMPONENTS=-opencl <EXEROOT>/cesm.exe   # retry on xzone trap
+# Julia side, scored against it:
+FATES_PARITY_STEPS=480 julia +1.12 --project=. scripts/fates_fortran_parity.jl \
+    compare <run dir>/fates_pdump_fortran.txt
+```
+(The 480-step dump is ~8 MB gzipped and is **not** committed; the 120-step
+`fates_pdump_fortran.txt.gz` remains the committed anchor.)
+
+## 3. #227 (boreal cold-start) and #197 (fixed-biogeog screen) vs Fortran
+
+Both are **validated internally only**; the committed ground truth (unscreened Bow, 51°N)
+does **not** cover either, and neither has a clean short-horizon Fortran oracle:
+
+* **#227 — boreal cold-start moisture prescription.** A **harness-only** BC (no `src`
+  change): it re-asserts growing-season root-zone liquid water for a *thawed*-but-drained
+  cold-start boreal column, compensating for a freeze/thaw/drain **short-spin artifact**
+  that a Fortran run cold-started the same way would *share* (a spun-up boreal soil holds
+  field-capacity liquid; a cold start does not). Because the fix deliberately **overrides**
+  soil initialization, there is no independent Fortran oracle for it short of a spun-up
+  boreal FATES restart, which does not exist. The 20-day Bow result here is the same
+  phenomenon from the other side: the *unprimed* Bow column also over-dries its top layer
+  vs Fortran — i.e. #227 is treating a real, now-Fortran-confirmed CLM cold-start
+  soil-moisture bias, not inventing water.
+
+* **#197 — fixed-biogeog PFT screen (`:drop_cold_deciduous`).** Gated cold-start seeding
+  that drops 5 of the 14 default PFTs via the ported `use_this_pft` machinery — the **same
+  mechanism** FATES's `use_fixed_biogeog` uses. Its cold start is therefore a **subset** of
+  the already-Fortran-validated all-14-PFT cold start (27/27 at nstep 0), and the demographic
+  engine it feeds is the one validated bit-for-bit here. Its *distinctive* value — a
+  bounded, no-boom-bust **multi-year** stand — only manifests over a multi-year run, which
+  is beyond tractable Fortran-side wall time on this box. A dedicated screened Fortran run
+  (`use_fates_fixed_biogeog=.true.` with a matched `pft_areafrac`) is the remaining item,
+  and carries a real config-crosswalk risk (the #233/#240/#243 "harness input, not port"
+  trap) that must be controlled before any divergence is trusted.
