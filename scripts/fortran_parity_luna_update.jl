@@ -8,14 +8,22 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
 # Fortran ground truth at nstep 1757880 (from LunaMod PARITYLUNA/PARITYLUNO).
-# pre-update vcmx25_z/jmx25_z from pdump_before_step_n1757880.nc.
+# pre-update vcmx25_z/jmx25_z + the persisted pnlc_z/enzs_z from
+# pdump_before_step_n1757880.nc. pnlc IS the LUNA optimizer's initial guess
+# (PNlcold): the nitrogen-allocation loop is a start-dependent discrete hill-climb
+# (increase_flag latches on the first iteration), so injecting Fortran's REAL
+# per-patch pnlc_z — not a uniform placeholder — is required for a valid vcmx25_z
+# comparison. With it, Julia matches Fortran to <1e-4 (see PR: the earlier ~5%
+# vcmax "divergence" was this harness placeholder, NOT a LunaMod port error).
 const F = Dict(
  2 => (tvd10=296.8046, tvn10=280.0893, gppday=10424.38, rh10=0.198959, rb10=42.6012,
        par240d=164.3697, par240x=248.9905, t10=285.5351, lnca=2.97826, tlai=0.0476,
-       vcpre=49.5631, jmpre=92.9850, vcpost=49.8445, jmpost=92.9847),
+       vcpre=49.5631, jmpre=92.9850, vcpost=49.8445, jmpost=92.9847,
+       pnlc=0.0499999999999986, enzs=1.00900022224095),
  3 => (tvd10=291.0896, tvn10=279.7898, gppday=119618.3, rh10=0.390046, rb10=51.8405,
        par240d=125.3865, par240x=180.0593, t10=285.1617, lnca=8.35148, tlai=0.2354,
-       vcpre=136.8619, jmpre=336.0765, vcpost=136.1970, jmpost=334.2716))
+       vcpre=136.8619, jmpre=336.0765, vcpost=136.1970, jmpost=334.2716,
+       pnlc=0.0899999999999997, enzs=1.00494913755897))
 const CO2_240=28.96185; const O2_240=16493.26; const PBOT240=78915.11; const DAYLF=0.944373
 
 (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=DateTime(2002,7,15,23),
@@ -30,7 +38,7 @@ for p in 2:3
     ps.vcmx25_z_patch[p,1]=f.vcpre;  ps.jmx25_z_patch[p,1]=f.jmpre
     ps.vcmx25_z_last_valid_patch[p,1]=f.vcpre; ps.jmx25_z_last_valid_patch[p,1]=f.jmpre
     ps.lnca_patch[p]=f.lnca; ps.fpsn24_patch[p]=f.gppday
-    ps.pnlc_z_patch[p,1]=0.01; ps.enzs_z_patch[p,1]=1.0
+    ps.pnlc_z_patch[p,1]=f.pnlc; ps.enzs_z_patch[p,1]=f.enzs
     temp.t_veg10_day_patch[p]=f.tvd10; temp.t_veg10_night_patch[p]=f.tvn10
     temp.t_a10_patch[p]=f.t10; temp.t_veg_day_patch[p]=290.0  # non-SPVAL → pass first-day guard
     wdb.rh10_af_patch[p]=f.rh10; fv.rb10_patch[p]=f.rb10
