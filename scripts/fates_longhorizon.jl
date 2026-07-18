@@ -15,7 +15,10 @@
 #
 #   FATES_NDAYS=365 julia +1.12 --project=. scripts/fates_longhorizon.jl
 # ==========================================================================
-include(joinpath(@__DIR__, "..", "test", "testdata.jl"))
+# NB: `Base.include(@__MODULE__, ...)`, not bare `include`. Several of these
+# scripts are loaded by their tests into a fresh `Module(:X)`, which does NOT
+# bind a bare `include` — that form throws UndefVarError there.
+Base.include(@__MODULE__, joinpath(@__DIR__, "..", "test", "testdata.jl"))
 
 using CLM, Printf, Dates
 const _C = CLM

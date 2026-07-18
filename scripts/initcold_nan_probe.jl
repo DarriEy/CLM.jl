@@ -17,7 +17,10 @@
 #   julia +1.12 --project=. scripts/initcold_nan_probe.jl            # all domains
 #   julia +1.12 --project=. scripts/initcold_nan_probe.jl bow_cn     # one domain
 # =============================================================================
-include(joinpath(@__DIR__, "..", "test", "testdata.jl"))
+# NB: `Base.include(@__MODULE__, ...)`, not bare `include`. Several of these
+# scripts are loaded by their tests into a fresh `Module(:X)`, which does NOT
+# bind a bare `include` — that form throws UndefVarError there.
+Base.include(@__MODULE__, joinpath(@__DIR__, "..", "test", "testdata.jl"))
 
 using CLM, NCDatasets, Dates, Printf
 
