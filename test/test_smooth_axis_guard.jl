@@ -153,6 +153,19 @@ const _SRCDIR = normpath(joinpath(@__DIR__, "..", "src"))
             "biogeophys/soil_moist_stress.jl" => [
                 ("rresis_j = smooth_min", "rresis cap at the CONSTANT 1.0 cost a flat 1.4% of btran on every well-watered rooted layer -> -1.4% GPP/transpiration"),
             ],
+            "biogeochem/methane.jl" => [
+                # The ch4_aere! KERNEL (the live runtime path) had smoothed the aerenchyma/
+                # transpiration CH4 & O2 fluxes, which live on a mol/m3/s axis ~1e-9. The
+                # log(2)/50 = 0.0139 floor is ~7 ORDERS OF MAGNITUDE larger than the flux, so
+                # the smoothed (AD / SMOOTH_MODE=:always) methane transport was fabricated. The
+                # site-level reference site_ox_aere! already used hard max on the SAME axis
+                # (with a "0.0139 is 7 orders too big" comment); the kernel now matches it.
+                ("aere = smooth_max(aere", "CH4 aerenchyma flux (mol/m3/s ~1e-9): 0-floor became 0.0139, 7 orders > flux; site_ox_aere! l.1271 is hard"),
+                ("oxaere = smooth_max(oxaere", "O2 aerenchyma flux (mol/m3/s ~1e-9): same 7-orders floor; site_ox_aere! l.1280 is hard"),
+                ("tranloss = smooth_max(tranloss", "CH4 transpiration flux (mol/m3/s ~1e-9): same 7-orders floor; site_ox_aere! l.1238 is hard"),
+                ("smooth_min(aere + tranloss", "scattered CH4 aerenchyma flux capped by availability — smoothing biases the TRANSPORTED CH4 by 0.0139 mol/m3/s"),
+                ("smooth_min(tranloss, aeretran)", "scattered CH4 transpiration flux — same mol/m3/s flux-axis bias"),
+            ],
         )
 
         # Match CODE only — these files now document the bug class in prose, and the comments
@@ -197,7 +210,7 @@ const _SRCDIR = normpath(joinpath(@__DIR__, "..", "src"))
             "biogeochem/fire_li2016.jl" => 24,
             "biogeochem/fire_li2021.jl" => 21,
             "biogeochem/fire_li2024.jl" => 21,
-            "biogeochem/methane.jl" => 23,
+            "biogeochem/methane.jl" => 18,   # 5 aerenchyma/transpiration mol/m3/s flux guards hardened (see "hardened guards stay hard")
             "biogeochem/phenology.jl" => 34,
             "biogeochem/veg_struct_update.jl" => 23,
             "biogeophys/bareground_fluxes.jl" => 4,
