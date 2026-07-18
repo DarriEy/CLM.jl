@@ -110,6 +110,9 @@ lake h0), but should record that a validated result already existed.
 | C1 Isotopes | "harness EXISTS — verify dump/pass" | Confirmed: c13/c14 **needs a c13/c14-enabled spinup** (Fortran branch restart has no isotope vars → hard crash). Irrigation half runs but is inactive at Bow. Stays NEEDS-FORTRAN-RUN. |
 | — (new) C1a LUNA vcmax | (implicit in Table B "LUNA injected/unvalidated") | Promoted to a KNOWN **DIVERGES** (~5.3–5.6% vcmax high); needs Fortran `Allocation` internal (`Ncb`/`vcmx25_opt`) instrumentation. |
 | Audit Table B: albedo bands, active-layer, soilresis, aerosol, daylength | "runs but NOT validated / injection can mask" | activelayer/soilresis/albedo now **VALIDATED** (albedo computed, no injection → masking concern closed); aerosol/daylength **GREEN-BY-SKIP** (need snowy / a `dayl` dump field). |
+| A2 fire-crop / A3 crops+crop-N / A4 irrigation | "needs a Mead crop run" | **BLOCKED (2026-07-18, docs/CROP_PARITY.md).** Migrated Mead assets are SP-only (`use_crop/use_cn/irrigate=.false.`, surfdata `cft=2`, snow-only pdumps); `use_crop=.true.` needs a crop-CFT surfdata — none on disk, no raw crop `inputdata` to build one. Julia wiring VERIFIED: crop accumulators live, irrigation driver calls real+gated (A4 "empty stub" concern resolved), `n_fert!`/`n_soyfix!` correctly UNWIRED, `crop_phenology!` planting/vernalization/harvest not driven. All stay NEEDS-FORTRAN-RUN. |
 
 No src fix was warranted: the single divergence (LUNA vcmax) is a documented,
 non-self-contained optimizer residual and was deliberately not tuned to pass.
+The crop/irrigation/fire-crop rows (A2/A3/A4) are BLOCKED on a crop-resolved
+surfdata that does not exist on disk — no blind-wiring was done (#218 rule).
