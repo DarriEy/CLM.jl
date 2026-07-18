@@ -37,11 +37,15 @@
 #     end
 # ==========================================================================
 
+# `using Test` MUST be outside the guard below: the `@test`/`@test_skip` in
+# testdata_missing are expanded when the `if` block is lowered, which happens
+# BEFORE any `using` inside that block would run. Inside, the macros resolve to
+# UndefVarError in a caller that has not already done `using Test`.
+using Test
+
 # Idempotent: several test files include this, and runtests.jl includes them
 # all into one scope. Re-including must be a no-op, not a redefinition error.
 if !isdefined(@__MODULE__, :SYMFLUENCE_DATA_ROOT)
-
-using Test
 
 """
     symfluence_data_root() -> String
