@@ -73,6 +73,7 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
                           use_cn::Bool=false, use_luna::Bool=false,
                           use_lch4::Bool=false, use_cndv::Bool=false,
                           use_crop::Bool=false, use_fates::Bool=false,
+                          use_c13::Bool=false, use_c14::Bool=false,
                           fsurdat::String=FSURDAT, paramfile::String=FPARAM,
                           baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
                           fndep::String="",
@@ -96,6 +97,7 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         fsurdat=fsurdat, paramfile=paramfile,
         start_date=start_date, dtime=dtime, use_cn=use_cn, use_luna=use_luna,
         use_lch4=use_lch4, use_cndv=use_cndv, use_crop=use_crop, use_fates=use_fates,
+        use_c13=use_c13, use_c14=use_c14,
         use_bedrock=true, use_aquifer_layer=use_aquifer_layer,
         h2osfcflag=0, fsnowoptics=FSNOWOPT, fsnowaging=FSNOWAGE,
         fndep=fndep,
@@ -287,6 +289,7 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               forcing_file::String=FFORCING, use_hydrstress::Bool=false,
                               use_luna::Bool=use_hydrstress,
                               use_lch4::Bool=false,
+                              use_c13::Bool=false, use_c14::Bool=false,
                               fsurdat::String=FSURDAT, paramfile::String=FPARAM,
                               baseflow::Float64=BASEFLOW_SCALAR, int_snow::Float64=INT_SNOW_MAX,
                               forcing_offset_hours::Int=0, fndep::String="",
@@ -295,7 +298,7 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               forcing_date::Union{DateTime,Nothing}=nothing,
                               pre_step_hook=nothing)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
-                              use_lch4=use_lch4,
+                              use_lch4=use_lch4, use_c13=use_c13, use_c14=use_c14,
                               fsurdat=fsurdat, paramfile=paramfile, baseflow=baseflow, int_snow=int_snow,
                               fndep=fndep,
                               cnfire_method=cnfire_method, flnfm=flnfm, fhdm=fhdm)
@@ -329,7 +332,8 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
 
     config  = CLM.CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=false,
                                   use_hydrstress=use_hydrstress, use_luna=use_luna,
-                                  use_lch4=use_lch4, cnfire_method=cnfire_method)
+                                  use_lch4=use_lch4, use_c13=use_c13, use_c14=use_c14,
+                                  cnfire_method=cnfire_method)
     filt_ia = CLM.clump_filter_inactive_and_active
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
 

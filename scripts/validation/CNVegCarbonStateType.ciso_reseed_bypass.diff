@@ -1,0 +1,40 @@
+# SourceMods patch for the C13/C14 (isotope) Fortran parity reference.
+# Applied to: cases/symfluence_build/SourceMods/src.clm/CNVegCarbonStateType.F90
+# Purpose: bypass CTSM's #2119 hard-abort ("Cannot initialize from a run
+#   without c13 to a run with c13") so the reseed logic immediately below it
+#   (leafc_13 = leafc*c3_r2, totvegc_col_13 = totvegc_col*c13ratio, ...) runs
+#   and cold-starts the isotope pools from bulk C at a non-isotope BGC restart.
+#   Lets a use_c13/c14=.true. spinup start from the Bow 2202-01-01 BGC restart
+#   (which carries no c13/c14 vars). Only executes under use_c13/use_c14 —
+#   default (non-isotope) Fortran runs are byte-identical.
+# Reference produced: clm_bgc_spinup/bgc_ref_iso (nstep window 4700-4725,
+#   mid-July 2202 == forcing 2002). Consumed by scripts/fortran_parity_isotopes.jl.
+#
+--- /Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/src/biogeochem/CNVegCarbonStateType.F90	2026-06-27 10:14:42
++++ /Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/cases/symfluence_build/SourceMods/src.clm/CNVegCarbonStateType.F90	2026-07-17 20:19:40
+@@ -2622,7 +2622,14 @@
+              write(iulog,*) 'Either use an input initial conditions file with c13 information,'
+              write(iulog,*) 'or re-spinup from cold start.'
+           end if
+-          missing_ciso = .true.
++          ! CLM.jl parity (2026-07): bypass the #2119 hard-abort so the reseed
++          ! logic below (totvegc_col_13 = totvegc_col*c13ratio, leafc_13 =
++          ! leafc*c3_r2, ...) runs and bootstraps the c13 pools from bulk C.
++          ! This is the "cold-start the isotope pools" path used to generate a
++          ! use_c13/c14 Fortran reference from a non-isotope BGC restart. Only
++          ! executes under use_c13; non-isotope (default) runs are unaffected.
++          if (masterproc) write(iulog,*) 'CLM.jl parity: proceeding to reseed c13 from bulk (bypass #2119)'
++          ! missing_ciso = .true.   ! DISABLED for CLM.jl reference generation
+        end if
+ 
+     end if
+@@ -2648,7 +2655,8 @@
+              write(iulog,*) 'Either use an input initial conditions file with c14 information,'
+              write(iulog,*) 'or re-spinup from cold start.'
+           end if
+-          missing_ciso = .true.
++          if (masterproc) write(iulog,*) 'CLM.jl parity: proceeding to reseed c14 from bulk (bypass #2119)'
++          ! missing_ciso = .true.   ! DISABLED for CLM.jl reference generation
+        endif
+     end if
+ 

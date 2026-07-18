@@ -299,7 +299,9 @@ function c_iso_flux1!(soilbiogeochem_state::SoilBiogeochemStateData,
                       lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                       fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
                       leaf_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                      froot_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
+                      froot_prof::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      i_litr_min::Int=varpar.i_litr_min,
+                      i_litr_max::Int=varpar.i_litr_max)
 
     # Helper for 1D patch-level iso flux calc
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
@@ -561,6 +563,7 @@ function c_iso_flux1!(soilbiogeochem_state::SoilBiogeochemStateData,
                                patch_wtcol=patch_wtcol, lf_f=lf_f, fr_f=fr_f,
                                use_crop=use_crop, use_grainproduct=use_grainproduct,
                                npcropmin=npcropmin,
+                               i_litr_min=i_litr_min, i_litr_max=i_litr_max,
                                repr_grain_min=repr_grain_min, repr_grain_max=repr_grain_max,
                                repr_structure_min=repr_structure_min, repr_structure_max=repr_structure_max)
 
@@ -615,7 +618,9 @@ function c_iso_flux2!(soilbiogeochem_state::SoilBiogeochemStateData,
                       patch_itype::Vector{Int}=Int[],
                       patch_wtcol::Vector{<:Real}=Float64[],
                       lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                      fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
+                      fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                      i_litr_min::Int=varpar.i_litr_min,
+                      i_litr_max::Int=varpar.i_litr_max)
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -666,7 +671,9 @@ function c_iso_flux2!(soilbiogeochem_state::SoilBiogeochemStateData,
     cn_c_iso_gap_pft_to_column!(iso_cnveg_cf, soilbiogeochem_state,
                                 mask_soilp, bounds_p, nlevdecomp,
                                 patch_column=patch_column, patch_itype=patch_itype,
-                                patch_wtcol=patch_wtcol, lf_f=lf_f, fr_f=fr_f)
+                                patch_wtcol=patch_wtcol, lf_f=lf_f, fr_f=fr_f,
+                                i_litr_min=i_litr_min, i_litr_max=i_litr_max,
+                                i_met_lit=i_litr_min)
 
     return nothing
 end
@@ -698,7 +705,9 @@ function c_iso_flux2h!(soilbiogeochem_state::SoilBiogeochemStateData,
                        patch_itype::Vector{Int}=Int[],
                        patch_wtcol::Vector{<:Real}=Float64[],
                        lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                       fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
+                       fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                       i_litr_min::Int=varpar.i_litr_min,
+                       i_litr_max::Int=varpar.i_litr_max)
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -750,7 +759,9 @@ function c_iso_flux2h!(soilbiogeochem_state::SoilBiogeochemStateData,
     cn_c_iso_harvest_pft_to_column!(iso_cnveg_cf, soilbiogeochem_state,
                                     mask_soilp, bounds_p, nlevdecomp,
                                     patch_column=patch_column, patch_itype=patch_itype,
-                                    patch_wtcol=patch_wtcol, lf_f=lf_f, fr_f=fr_f)
+                                    patch_wtcol=patch_wtcol, lf_f=lf_f, fr_f=fr_f,
+                                    i_litr_min=i_litr_min, i_litr_max=i_litr_max,
+                                    i_met_lit=i_litr_min)
 
     return nothing
 end
@@ -782,7 +793,9 @@ function c_iso_flux2g!(soilbiogeochem_state::SoilBiogeochemStateData,
                        patch_itype::Vector{Int}=Int[],
                        patch_wtcol::Vector{<:Real}=Float64[],
                        lf_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
-                       fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0))
+                       fr_f::Matrix{<:Real}=Matrix{Float64}(undef, 0, 0),
+                       i_litr_min::Int=varpar.i_litr_min,
+                       i_litr_max::Int=varpar.i_litr_max)
 
     calc1d! = (iso_f, tot_f, iso_s, tot_s) -> c_iso_flux_calc!(
         iso_f, tot_f, iso_s, tot_s, mask_soilp, bounds_p, 1.0, isotope)
@@ -836,7 +849,8 @@ function c_iso_flux2g!(soilbiogeochem_state::SoilBiogeochemStateData,
     cn_c_iso_gross_unrep_pft_to_column!(iso_cnveg_cf, soilbiogeochem_state,
                                         mask_soilp, bounds_p, nlevdecomp,
                                         patch_column=patch_column, patch_itype=patch_itype,
-                                        patch_wtcol=patch_wtcol, lf_f=lf_f, fr_f=fr_f)
+                                        patch_wtcol=patch_wtcol, lf_f=lf_f, fr_f=fr_f,
+                                        i_litr_min=i_litr_min, i_litr_max=i_litr_max)
 
     return nothing
 end

@@ -166,6 +166,16 @@ function clm_initialize!(;
     inst.surfdata = surf
     # Propagate CN flag to vegetation facade config before init
     inst.bgc_vegetation.config.use_cn = use_cn
+    # Propagate the C13/C14 isotope flags to the vegetation facade config BEFORE
+    # cn_vegetation_init! runs — the veg isotope carbon/flux state is allocated
+    # gated on veg.config.use_c13/use_c14 (vegetation_facade.jl cn_vegetation_init!),
+    # which reads the facade config, NOT the clm_instInit! arg. Without this the
+    # soil isotope state allocates (instances.jl) but the veg c13_/c14_cnveg_*_inst
+    # pools stay size-0, so c13_c14_photosynthesis! + the CIsoFlux cascade silently
+    # no-op even with use_c13=.true. (their !isempty guards never fire). Gated on the
+    # caller's flags → default (non-isotope) path is byte-identical.
+    inst.bgc_vegetation.config.use_c13 = use_c13
+    inst.bgc_vegetation.config.use_c14 = use_c14
     # clm5_0 BGC defaults to nitrification/denitrification ON (use_nitrif_denitrif);
     # the Fortran BGC spinup used it, so the mineral N is tracked as NO3/NH4.
     inst.bgc_vegetation.config.use_nitrif_denitrif = use_cn
