@@ -222,11 +222,107 @@ anyway: an inert wrong default is a landmine for the first consumer).
 
 ### `varctl` global control state
 
-See the generated rows below. Fields marked INERT have zero reads in `src/`.
+79 fields swept. "reads" = `grep -rn "varctl.<field>" src/ | wc -l`; a field with
+0 reads is **INERT** (mismatch is documentation-only *today*, but is a landmine
+for the first consumer — recorded rather than dismissed).
 
-<!-- VARCTL-SWEEP -->
+A structural observation that explains most of the mismatches below: **where
+CTSM's namelist default and its Fortran code fallback disagree, CLM.jl copied
+the code fallback every single time.** That is precisely the #252 failure mode,
+and it recurs in 14 fields: `co2_ppmv`, `convert_ocean_to_land`,
+`n_dom_landunits`, `n_dom_pfts`, the six `toosmall_*`,
+`downscale_hillslope_meteorology`, `nyr_forcing`, `nsegspc`,
+`glc_snow_persistence_max_days`. The port faithfully mirrored
+`clm_varctl.F90`'s initialisers — but those initialisers are the value you get
+when build-namelist emits *nothing*, which never happens in a real CTSM run.
+
+| Field | CLM.jl | CTSM (clm5_0, non-FATES) + conditions / code fallback | Verdict | Reads |
+|---|---|---|---|---|
+| `convert_ocean_to_land` | `false` | **`.true.`** (`defaults:2382`, unconditional). Code fallback `.false.` — **disagrees** | **MISMATCH (live)** | 1 |
+| `co2_ppmv` | `355.0` | **`379.0`** at default `sim_year=2000` (`defaults:25`). 1850/PtVg 284.7, 1979 336.6, 2010 388.8, 2015 397.5, 2018 408.83. Code fallback `355.0` — **disagrees** | **MISMATCH** | 0 (but threaded as a plain arg through 19 sites) |
+| `glc_snow_persistence_max_days` | `7300` | **`0`**; `7300` is the **clm4_5** variant (`defaults:540-541`). Code fallback 7300 — disagrees | **MISMATCH (live)** | 0 in varctl, but the live kwarg at `glacier_surface_mass_balance.jl:146` also defaults 7300 |
+| `nsegspc` | `20` | **`35`** (`defaults:2404`). Code fallback 20; CTSM's own *definition* docs say 20 (stale) | MISMATCH (INERT) | 0 |
+| `nyr_forcing` | `10` | **`1`** (`defaults:688`); 20 under matrix spinup. Code fallback 10 | MISMATCH (INERT) | 0 |
+| `h2osno_max` | `-999.0` | **`10000.0`** (`defaults:465`); fast 5000, clm4_5 1000. No code fallback — `controlMod.F90:557` **hard-errors if `<= 0`** | MISMATCH (INERT — physics correctly uses `varcon.H2OSNO_MAX = 10000.0`; `varctl` copy is a dead duplicate) | 0 |
+| `n_dom_landunits` | `-1` | **`0`** (`defaults:2387`); fast 1. Code fallback −1 | MISMATCH (inert: guards are `> 0`, so −1 ≡ 0) | 2 |
+| `n_dom_pfts` | `-1` | **`0`** (`defaults:2390`) | MISMATCH (INERT) | 0 |
+| `toosmall_soil`/`_crop`/`_glacier`/`_lake`/`_wetland`/`_urban` | `-1.0` | **`0.d00`** (`defaults:2393-2398`). Code fallback −1 | MISMATCH ×6 (inert: guards `> 0`) | 2 each |
+| `downscale_hillslope_meteorology` | `false` | **`.true.`** (`defaults:665`, unconditional). Code fallback `.false.` | MISMATCH (INERT — hillslope off) | 0 |
+| `z0param_method` | `""` | `ZengWang2007`; `Meier2022` for clm5_1/clm6_0. No code fallback (namelist mandatory) | MISMATCH (cosmetic — `friction_velocity.jl:322` branches only on `== "Meier2022"`, so `""` *is* ZengWang2007) | 0 |
+| `irrigate` | `false` | `.false.` at `sim_year_range=constant`; **`.true.`** for clm5_0 transient `1850-2100` non-CNDV | MATCH (constant); COND for transient | 1 |
+| `snow_cover_fraction_method` | `""` | `SwensonLawrence2012` | MATCH in effect (`clm_initialize.jl:382-383` fills it) | 2 |
+| `use_biomass_heat_storage` | `false` | `.false.` for **clm5_0** (`.true.` generic/clm5_1/clm6_0) | MATCH | — |
+| `spinup_state` | `0` | `0` at `clm_accelerated_spinup=off` | MATCH | — |
+| `use_c13`, `use_c14`, `use_cndv`, `use_cn`, `use_noio`, `use_vichydro`, `use_extralakelayers`, `use_excess_ice`, `use_snicar_frc`, `use_SSRE`, `use_soil_moisture_streams`, `use_lai_streams`, `use_z0m_snowmelt`, `hist_wrtch4diag`, `glc_do_dynglacier`, `use_hillslope`, `use_hillslope_routing`, `hillslope_fsat_equals_zero`, `run_zero_weight_urban`, `collapse_urban`, `crop_fsat_equals_zero`, `crop_residue_removal_frac`, `all_active`, `use_subgrid_fluxes`, `spinup_matrixcn`, `hist_wrt_matrixcn_diag`, `nyr_SASU`, `iloop_avg`, `o3_veg_stress_method`, `co2_type`, `reduce_dayl_factor` | as declared | agree under this port's conditions | **MATCH** ×31 | — |
+| `snicar_solarspec`, `snicar_dust_optics`, `snicar_use_aerosol`, `snicar_snobc_intmix`, `snicar_snodst_intmix`, `do_sno_oc`, `snicar_numrad_snw`, `snicar_snw_shape` | as declared | agree for clm5_0 (`snw_shape=sphere` is the clm5_0/clm4_5 variant; `hexagonal_plate` is clm5_1+ — already documented in-source) | **MATCH** ×8 | — |
+| `outnc_large_files`, `ndep_from_cpl`, `bound_h2osoi`, `nhillslope`, `max_columns_hillslope`, `o3_ppbv`, `anoxia`, `nfix_timeconst` | as declared | **not namelist variables in CTSM** — code fallback is the only authority, and CLM.jl matches all | **MATCH** (NOT-IN-CTSM) ×8 | — |
+
+### M6 — the `use_flexibleCN` cascade (CONDITIONAL-MISMATCH cluster, applies to every CN run)
+
+The largest *cluster* found. Under `phys=clm5_0` **with `use_cn=.true.`**, CTSM
+turns on `use_flexibleCN`:
+
+```xml
+<use_flexibleCN                    >.false.</use_flexibleCN>
+<use_flexibleCN use_cn=".true."    >.true.</use_flexibleCN>   <!-- clm4_5+CN → .false. -->
+```
+
+which then cascades into seven further defaults, all of which CLM.jl hardcodes
+at their SP-mode (`false`/`0`) values:
+
+| Flag | CLM.jl | CTSM under `clm5_0` + `use_cn` | Reads |
+|---|---|---|---|
+| `use_flexibleCN` | `false` | **`.true.`** | 0 |
+| `MM_Nuptake_opt` | `false` | **`.true.`** | 0 |
+| `CNratio_floating` | `false` | **`.true.`** | 3 (live) |
+| `lnc_opt` | `false` | **`.true.`** | 0 |
+| `vcmax_opt` | `0` | **`3`** | 0 |
+| `CN_evergreen_phenology_opt` | `0` | **`1`** | 1 (live) |
+| `carbon_resp_opt` | `0` | **`1`** (`0` if FUN on) | live branch at `cn_veg_carbon_flux.jl:1376` |
+| `use_nguardrail` | `false` | **`.true.`** | 0 |
+
+These are **not hypothetical**: CLM.jl's BGC work runs with `use_cn=true`, so
+the port is running CLM5 BGC with the flexible-CN package off. This is flagged
+here rather than fixed — flipping flexible-CN on is a model-configuration change
+of a different magnitude to a single wrong boolean, and it needs its own
+validation campaign against a Fortran reference (see "Not fixed here" below).
 
 ---
+
+---
+
+## Scorecard
+
+| Category | Count |
+|---|---|
+| Flags audited | **~110** (16 driver-entry keywords + 79 `varctl` fields + `CLMDriverConfig` switches + the `use_flexibleCN` cascade) |
+| MATCH | ~85 |
+| MISMATCH — live physics | **6** (`use_aquifer_layer`, `baseflow_scalar`, `use_hydrstress`, `use_luna`, `create_crop_landunit`, `convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg) |
+| MISMATCH — inert (0 reads / guarded) | 12 (`nsegspc`, `nyr_forcing`, `h2osno_max`, `n_dom_landunits`, `n_dom_pfts`, 6× `toosmall_*`, `downscale_hillslope_meteorology`, `z0param_method`) |
+| CONDITIONAL-MISMATCH under `use_cn=true` | 8 (the `use_flexibleCN` cascade, M6) |
+| Namelist-vs-code-fallback disagreements found | **14** — CLM.jl copied the code fallback in *every* case |
+
+## Not fixed here, and why
+
+Three of the live mismatches are deliberately **documented rather than
+changed**, because each is a model-configuration decision rather than a
+mechanical correction, and flipping them silently would be the mirror image of
+the bug this audit exists to catch:
+
+- **`use_hydrstress` / `use_luna` (M3, M4).** Turning PHS and LUNA on by default
+  switches the photosynthesis pathway for every caller. Both are already
+  validated *when enabled* (see the PHS and LUNA parity work), so the physics is
+  not in question — but the default flip changes every number in every test that
+  does not pass them explicitly, and it should land as its own change with its
+  own parity evidence, not buried in a defaults sweep.
+- **The `use_flexibleCN` cascade (M6).** Eight coupled flags; enabling
+  flexible-CN needs a validation campaign against a Fortran CN reference, not a
+  one-line default change.
+
+These are recorded as **open, evidenced findings**. The value of writing them
+down without fixing them is that the next person to see
+`use_hydrstress = true` in a harness will know it is a workaround for a known
+wrong default, not a deliberate experimental setting.
 
 ## Method note
 
