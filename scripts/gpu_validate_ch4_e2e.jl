@@ -8,6 +8,12 @@
 # the CPU, adapts the whole CH4Data + every forcing array to Float32/Metal, runs the
 # SAME call on the device, and compares the mutated column/gridcell outputs.
 #
+# Covers TWO finundation configurations:
+#   (1) h2osfc      (CTSM default; _ch4o_finund_kernel!)
+#   (2) TWS_inversion (#238; _ch4o_finund_inv_kernel! — the satellite-regression
+#       CalcFinundated device kernel, previously NOT Metal-validated: the default
+#       ch4! harness only ever exercised the h2osfc route where finundated≡frac_h2osfc).
+#
 #   julia --project=scripts scripts/gpu_validate_ch4_e2e.jl
 # ==========================================================================
 
@@ -32,7 +38,7 @@ CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlAr
 CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(collect(Int, x))
 CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{Bool})            = Metal.MtlArray(collect(Bool, x))
 
-function build(::Type{FT}) where {FT}
+function build(::Type{FT}; finmtd=CLM.FINUNDATION_MTD_H2OSFC) where {FT}
     nc=3; np=4; ng=2; nlevsoi=5
     M(v) = fill(FT(v), nc, nlevsoi); Mp(v) = fill(FT(v), np, nlevsoi)
     V(v) = fill(FT(v), nc); Vp(v) = fill(FT(v), np); Vg(v) = fill(FT(v), ng)
@@ -67,7 +73,18 @@ function build(::Type{FT}) where {FT}
         tempavg_agnpp_patch=Vp(1.0e-6), tempavg_bgnpp_patch=Vp(1.0e-6),
         grnd_ch4_cond_patch=Vp(0.01), grnd_ch4_cond_col=V(0.01),
         ch4_first_time_grc=fill(true, ng))
-    return (; ch4, params=CLM.CH4Params(), ch4vc=CLM.CH4VarCon(),
+    # TWS_inversion needs a satellite-regression stream (fws_slope*TWS + fws_intercept,
+    # per gridcell) + a tws gridcell vector; the coeffs vary by gridcell so finundated
+    # ends up gridcell-distinct and far from the cold-start 0.1 (a meaningful device test).
+    # Stays a HOST CH4FInundatedStream (Float64); ch4! copies its coeff vectors to the
+    # backend internally (the _dz/_dvec path) — exactly the production device flow.
+    stream = finmtd == CLM.FINUNDATION_MTD_TWS_INVERSION ?
+        CLM.CH4FInundatedStream(active=true,
+            fws_slope_gdc     = FT[0.05, 0.03],
+            fws_intercept_gdc = FT[0.10, 0.20]) : nothing
+    tws = finmtd == CLM.FINUNDATION_MTD_TWS_INVERSION ? FT[2.0, 8.0] : nothing
+    return (; ch4, params=CLM.CH4Params(), ch4vc=CLM.CH4VarCon(finundation_mtd=finmtd),
+        stream, tws,
         nc, np, ng, nlevsoi,
         mask_soil=trues(nc), mask_soilp=trues(np), mask_lake=falses(nc), mask_nolake=trues(nc),
         col_gridcell=[1,1,2], col_wtgcell=V(0.5), patch_column=[1,1,2,3], patch_itype=[1,2,1,1],
@@ -83,6 +100,8 @@ function build(::Type{FT}) where {FT}
         lake_icefrac=M(0.0), lakedepth=V(5.0), z=M(0.2), dz=M(0.1), zi=M(0.25), agnpp=Vp(1.0e-5), bgnpp=Vp(1.0e-5))
 end
 
+# The TWS_inversion coeff stream + tws stay HOST (Float64); ch4! copies them to the
+# backend internally, so the same host stream feeds both the CPU and device runs.
 run_ch4!(S, ch4) = CLM.ch4!(ch4, S.params, S.ch4vc,
     S.mask_soil, S.mask_soilp, S.mask_lake, S.mask_nolake,
     S.col_gridcell, S.col_wtgcell, S.patch_column, S.patch_itype, S.patch_wtcol, S.is_fates, S.latdeg,
@@ -92,18 +111,16 @@ run_ch4!(S, ch4) = CLM.ch4!(ch4, S.params, S.ch4vc,
     S.rootfr_p, S.rootfr_col, S.crootfr, S.rootr_p, S.elai, S.qflx_tran_veg, S.annsum_npp, S.rr,
     S.somhr, S.lithr, S.hr_vr, S.o_scalar, S.fphr, S.pot_f_nit_vr, S.lake_icefrac, S.lakedepth,
     S.z, S.dz, S.zi, S.nlevsoi, 5, 1, S.nlevsoi, 5, 0.01, 130.0, S.ng, 0, 1800.0,
-    true, false, false, S.agnpp, S.bgnpp, 365.0 * 86400.0)
+    true, false, false, S.agnpp, S.bgnpp, 365.0 * 86400.0;
+    finundated_stream = S.stream, tws = S.tws)
 
-function main(backend)
-    println("=" ^ 70); println("END-TO-END Metal parity for ch4! (methane orchestrator)"); println("=" ^ 70)
-    backend === nothing && (println("  No GPU backend."); return 0)
-    name, to, FT = backend
-    @printf("  Backend: %s   (working precision: %s)\n", name, FT)
-
-    H = build(Float64); B = build(Float64)
+function check_config(name, FT, label; finmtd)
+    @printf("\n  --- config: %s ---\n", label)
+    H = build(Float64; finmtd=finmtd); B = build(Float64; finmtd=finmtd)
     ad(x) = CLM.Adapt.adapt(MF32(), x)
-    # Device snapshot: whole CH4Data + every array arg.
-    Sd = (; B.params, B.ch4vc, B.nc, B.np, B.ng, B.nlevsoi,
+    # Device snapshot: whole CH4Data + every array arg. The stream/tws stay HOST
+    # (ch4! copies their coeff vectors to the backend internally).
+    Sd = (; B.params, B.ch4vc, B.stream, B.tws, B.nc, B.np, B.ng, B.nlevsoi,
         mask_soil=ad(B.mask_soil), mask_soilp=ad(B.mask_soilp), mask_lake=ad(B.mask_lake), mask_nolake=ad(B.mask_nolake),
         col_gridcell=ad(B.col_gridcell), col_wtgcell=ad(B.col_wtgcell), patch_column=ad(B.patch_column),
         patch_itype=ad(B.patch_itype), patch_wtcol=ad(B.patch_wtcol), is_fates=ad(B.is_fates), latdeg=ad(B.latdeg),
@@ -141,8 +158,33 @@ function main(backend)
         @printf("  [%s] %-18s rel|dev-cpu| = %.3e\n", ok ? "PASS" : "FAIL", nm, d)
         ok || (nfail += 1)
     end
+    # For the inversion config, prove the kernel actually did regression work rather
+    # than sitting at the cold-start finundated=0.1 fixed point (a no-op would be a
+    # trivially-identical, meaningless "pass"). finundated = fws_slope*tws + fws_intercept
+    # then lagged toward it; with the coeffs above the host value must be well off 0.1.
+    if finmtd == CLM.FINUNDATION_MTD_TWS_INVERSION
+        fh = Array(H.ch4.finundated_col)
+        @printf("  [info] host finundated (TWS inversion) = %s\n", fh)
+        if all(f -> abs(f - 0.1) < 1e-6, fh)
+            println("  [FAIL] inversion kernel was a NO-OP (finundated pinned at cold-start 0.1)")
+            nfail += 1
+        end
+    end
+    return nfail
+end
+
+function main(backend)
+    println("=" ^ 70); println("END-TO-END Metal parity for ch4! (methane orchestrator)"); println("=" ^ 70)
+    backend === nothing && (println("  No GPU backend."); return 0)
+    name, to, FT = backend
+    @printf("  Backend: %s   (working precision: %s)\n", name, FT)
+
+    nfail = 0
+    nfail += check_config(name, FT, "h2osfc (default)";       finmtd=CLM.FINUNDATION_MTD_H2OSFC)
+    nfail += check_config(name, FT, "TWS_inversion (#238)";   finmtd=CLM.FINUNDATION_MTD_TWS_INVERSION)
     println()
-    println(nfail == 0 ? "  WHOLE ch4! MATCHES CPU ON $name ($FT)" : "  DIVERGENCE — investigate ($nfail failed).")
+    println(nfail == 0 ? "  WHOLE ch4! MATCHES CPU ON $name ($FT) — both finundation methods" :
+                         "  DIVERGENCE — investigate ($nfail failed).")
     return nfail == 0 ? 0 : 1
 end
 
