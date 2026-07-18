@@ -137,9 +137,13 @@ const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
         sh_obs = inst_true.energyflux.eflx_sh_tot_patch[2]
         println("  True csoilc=$(true_csoilc), observed SH=$(round(sh_obs, digits=4))")
 
+        # Non-finite (or identically zero) here is a REAL FAILURE, not a skip: the old
+        # `@test true` laundered a NaN into a green tick — the bug class swept in #255
+        # /#252. A zero SH is equally fatal to a recovery test (nothing to recover from),
+        # so assert both. The early return only prevents cascading garbage below.
         if !isfinite(sh_obs) || abs(sh_obs) < 1e-10
-            @warn "SH observation is zero or non-finite, skipping recovery"
-            @test true
+            @error "SH observation is zero or non-finite — no signal to recover" sh_obs
+            @test isfinite(sh_obs) && abs(sh_obs) >= 1e-10
             return
         end
 
@@ -218,9 +222,10 @@ const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
         println("  True: medlyn=$(true_medlyn), vcmax_scale=$(true_vcmax)")
         println("  Observed: LH=$(round(lh_obs, digits=4)), GPP=$(round(gpp_obs, sigdigits=4))")
 
+        # Same as above: a non-finite observation is a failure, never a silent pass.
         if !isfinite(lh_obs) || !isfinite(gpp_obs)
-            @warn "Observations non-finite, skipping two-param recovery"
-            @test true
+            @error "Non-finite observation — the physics returned NaN" lh_obs gpp_obs
+            @test isfinite(lh_obs) && isfinite(gpp_obs)
             return
         end
 
