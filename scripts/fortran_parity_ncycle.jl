@@ -50,12 +50,21 @@ const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
 const DT = 3600.0
 
+# NOTE the model dates below are the FORTRAN model dates (year 2202). They are
+# fed through `parity_forcing` (fortran_parity_common.jl), which applies the datm
+# cycling rule (year_first=2002, year_last=2009, year_align=2002, cycle) to pick
+# the DATA year the CTSM run was actually forced with — 2002 for model year 2202.
+#
+# This file previously hard-coded year 2003 here and used the default 2003 forcing
+# file. That drove Julia with a completely different year's weather than Fortran
+# saw, which is why the leaching TOTALS (and `qflx_surf`, which drives them)
+# disagreed while the leaching OPERATOR was exact. There was no hydrology bug.
 const WINDOWS = Dict(
-    # name   => (dumpdir, first nstep, last nstep, model date of first nstep)
+    # name   => (dumpdir, first nstep, last nstep, FORTRAN model date of first nstep)
     "autumn" => ("/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_ndep",
-                 1760377, 1760560, DateTime(2003, 10, 29, 0)),
+                 1760377, 1760560, DateTime(2202, 10, 29, 0)),
     "summer" => ("/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_ndep_summer",
-                 1757873, 1758060, DateTime(2003, 7, 16, 16)),
+                 1757873, 1758060, DateTime(2202, 7, 16, 16)),
 )
 
 _dv(ds, n) = haskey(ds, n) ? vec(Float64.(Array(ds[n][:]))) : nothing
@@ -89,9 +98,12 @@ end
 function score_step(win::String, nstep::Int; with_ndep::Bool = true)
     (dumpdir, n0, _, date0) = WINDOWS[win]
 
+    # Fortran model date of this step -> the datm data year it was forced with.
+    (forcing_file, step_date) = parity_forcing(date0 + Hour(nstep - n0))
+
     inst, _ = run_one_parity_step!(nstep;
         use_cn = true, dumpdir = dumpdir,
-        step_date = date0 + Hour(nstep - n0),
+        step_date = step_date, forcing_file = forcing_file,
         use_hydrstress = true,
         fndep = with_ndep ? FNDEP : "")
 

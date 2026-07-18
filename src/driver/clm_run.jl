@@ -29,7 +29,7 @@ to output. This is the top-level entry point for offline CLM simulations.
 - `use_aquifer_layer::Bool` — Use aquifer lower boundary (default true)
 - `hist_fields`          — Custom history fields (default: default_hist_fields())
 - `verbose::Bool`        — Print progress messages (default true)
-- `h2osfcflag::Int`      — Surface water flag for soil hydrology (default 0)
+- `h2osfcflag::Int`      — Surface water flag for soil hydrology (default 1 = CTSM default)
 
 # Returns
 - `inst::CLMInstances` — Final state of all CLM data instances
@@ -83,7 +83,10 @@ function clm_run!(;
     use_aquifer_layer::Bool = true,
     use_luna::Bool = false,
     use_hydrstress::Bool = false,
-    h2osfcflag::Int = 0,
+    # CTSM namelist default (SoilHydrologyType.F90 clm_soilhydrology_inparm) is 1.
+    # See the note on clm_initialize!'s h2osfcflag: this entry point defaulted to 0
+    # and silently disabled the surface-water store.
+    h2osfcflag::Int = 1,
     hist_fields::Union{Vector{HistFieldDef}, Nothing} = nothing,
     verbose::Bool = true,
     fsnowoptics::String = "",
