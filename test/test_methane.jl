@@ -304,6 +304,48 @@
         @test has_ebul
     end
 
+    @testset "ch4_ebul! bubble threshold + analytic rate" begin
+        # The ebullition FIRING regime (vgc > vgc_max*bubble_f) is vacuous at every
+        # on-disk Fortran site (Bow's physical peak CONC_CH4_SAT gives vgc ~= 0.045 <
+        # 0.0855) — see docs/CH4_FIRE_PARITY.md §13. This locks the bubble threshold,
+        # the vgc formula, and the release rate against an inline analytic oracle so a
+        # regression in _meth_ebul_kernel! cannot hide behind the field being ~0.
+        d = make_ch4_test_data(nc=1, nlevsoi=5)
+        jwt = fill(0, d.nc)               # full saturation -> jwt=0, all layers eligible
+        forc_pbot = fill(101325.0, d.nc)
+        h2osfc = zeros(d.nc); frac_h2osfc = zeros(d.nc)
+        lake_icefrac = zeros(d.nc, d.nlevsoi); lakedepth = fill(5.0, d.nc)
+        bubble_f = 0.57; vgc_max = d.params.vgc_max; vgc_min = vgc_max; dtime = 1800.0
+
+        # Analytic ch4_ebul oracle (transcribed from methane.jl:_meth_ebul_kernel!).
+        function ebul_oracle(conc, watsat, T, pbot, z)
+            k_h_inv = exp(-CLM.C_H_INV[1]*(1.0/T - 1.0/CLM.KH_TBASE) + log(CLM.KH_THETA[1]))
+            k_h_cc  = T * (1.0/k_h_inv) * CLM.rgasLatm
+            pressure = pbot + CLM.DENH2O * CLM.GRAV * z   # jwt=0 -> zi_jwt=0
+            vgc = conc / watsat / k_h_cc * CLM.RGAS * T / pressure
+            vgc > vgc_max*bubble_f ? (vgc - vgc_min*bubble_f)*conc/dtime : 0.0
+        end
+
+        # (a) ABOVE threshold everywhere -> exact analytic rate, layer by layer.
+        d.ch4.conc_ch4_sat_col .= 0.12                # vgc ~ 0.16 > 0.0855
+        CLM.ch4_ebul!(d.ch4, d.params, d.mask_soil, d.watsat, d.h2osoi_vol,
+                      d.t_soisno, forc_pbot, h2osfc, frac_h2osfc, lake_icefrac,
+                      lakedepth, d.z, d.dz, d.zi, jwt, 1, false, d.nlevsoi, dtime)
+        for j in 1:d.nlevsoi
+            want = ebul_oracle(0.12, d.watsat[1,j], d.t_soisno[1,j], forc_pbot[1], d.z[1,j])
+            @test want > 0.0                          # confirms threshold is crossed
+            @test isapprox(d.ch4.ch4_ebul_depth_sat_col[1,j], want; rtol=1e-12, atol=0.0)
+        end
+
+        # (b) BELOW threshold -> identically zero (the gating branch).
+        d.ch4.ch4_ebul_depth_sat_col .= 0.0
+        d.ch4.conc_ch4_sat_col .= 0.03                # vgc ~ 0.04 < 0.0855
+        CLM.ch4_ebul!(d.ch4, d.params, d.mask_soil, d.watsat, d.h2osoi_vol,
+                      d.t_soisno, forc_pbot, h2osfc, frac_h2osfc, lake_icefrac,
+                      lakedepth, d.z, d.dz, d.zi, jwt, 1, false, d.nlevsoi, dtime)
+        @test all(d.ch4.ch4_ebul_depth_sat_col[1, 1:d.nlevsoi] .== 0.0)
+    end
+
     @testset "site_ox_aere! basic" begin
         nlevsoi = 5
         tranloss = zeros(nlevsoi)

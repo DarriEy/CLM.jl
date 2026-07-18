@@ -923,10 +923,11 @@ julia +1.12 --project=. scripts/probe_firepeat_factors.jl      # per-factor attr
 
 ---
 
-## 13. CH4 EBULLITION (`CH4_EBUL_*`) — precise blocker, NOT generatable on current assets (2026-07-18)
+## 13. CH4 EBULLITION (`CH4_EBUL_*`) — the original blocker (2026-07-18)
 
-**Ebullition (`CH4_EBUL_TOTAL_SAT/UNSAT`) cannot be validated numerically on any
-on-disk site — the Fortran reference itself is `≡0`.** (Backlog A1 residual.)
+**Ebullition (`CH4_EBUL_TOTAL_SAT/UNSAT`) could not be validated numerically on any
+on-disk site — the Fortran reference itself was `≡0`.** (Backlog A1 residual.)
+**This was RESOLVED — see §14.**
 
 * The `_meth_ebul_kernel!` port is verified **line-by-line** against `ch4Mod.F90`
   `ch4_ebullition`: `bubble_f=0.57`, `vgc_max=vgc_min=0.15`, threshold
@@ -940,6 +941,83 @@ on-disk site — the Fortran reference itself is `≡0`.** (Backlog A1 residual.
   **No migrated site provides all three:** Bow-TWS has (a)+(c) but not (b);
   MerBleue has the peat/production potential but neither inundates under
   TWS_inversion (its cell needs `TWS>2242` vs ~627, §11) nor has a BGC restart
-  (SP-only, cold-CN). Missing asset = **a wetland/high-water-table site with a
-  CN/CH4 spinup restart** (e.g. a MerBleue BGC spinup + a shallow-WT or
-  PCT_WETLAND>0 surfdata). Un-generatable without new spinup + surfdata assets.
+  (SP-only, cold-CN). A full MerBleue BGC spinup (centuries of accelerated
+  decomposition) is un-generatable in-session — but that is NOT required (§14).
+
+---
+
+## 14. CH4 EBULLITION — VALIDATED via a synthetic conc perturbation (2026-07-18)
+
+**Ebullition is now diffed against Fortran for the first time and matches to the
+single-step-oracle floor (`CH4_EBUL_TOTAL_SAT` rel.err 3.0e-5). No port bug — the
+line-by-line-verified kernel is numerically confirmed.**
+
+### The unblock — a threshold-crossing CONCENTRATION, not a new site
+§13 assumed ebullition needs a physically high-production wetland (a MerBleue BGC
+spinup). It does not — for a *kernel parity diff* it needs only that BOTH codes
+compute ebullition from the **same** saturated CH4 concentration that happens to
+cross the bubble threshold. Bow's peak `CONC_CH4_SAT ≈ 0.029` is only **~1.9×
+below** threshold (vgc ≈ 0.045 vs 0.0855) — a *modest* gap, not orders of
+magnitude. So the reference is Bow-TWS (which already has `finundated>0` + a warm
+BGC restart, §11) with `CONC_CH4_SAT/UNSAT` scaled **×5** in a copy of the warm
+restart. Both CLM.jl and CTSM read the identical scaled before-step concentration
+from the `pdump`, so the diff isolates the `_meth_ebul_kernel!` physics — the exact
+**synthetic-shared-input** technique of the peatf (§12, edited surfdata) and
+lnfm/hdm (§2, synthetic streams) references, applied to a state variable.
+
+### The reference + harness
+* Reference `SYMFLUENCE_data/clm_bgc_spinup/bow_ref_ch4ebul`: a **short (6-step)
+  startup continuation** from the ch4tws warm restart at `2202-07-24-14400`, with
+  `finidat = finidat_ch4ebul_x5.nc` (`CONC_CH4_SAT/UNSAT ×5` via
+  `scripts/probe_ch4_ebul_threshold.jl`'s edit). `start_ymd=22020724
+  start_tod=14400`, `stop_n=6`, dump window wide (`get_nstep` resets to 0 for a
+  startup → dumps `n0..n6`). Ran **plain**, EXIT_CODE=0. `CH4_EBUL_TOTAL_SAT =
+  1.208e-6` at n0, decaying (7.9e-7, 5.7e-7, …) as transport dissipates the
+  injected conc — n0 (pristine scaled conc) is the highest-signal step.
+* The conc scale needed was verified in Julia FIRST (`probe_ch4_ebul_threshold.jl`,
+  no Fortran box): with the model's real `watsat`, scale 1 → `CH4_EBUL_TOTAL_SAT=0`
+  (Bow reality), scale 5 → `1.07e-6` (fires). This de-risked the box run.
+* Harness `scripts/fortran_parity_ch4_ebul.jl`: identical to the §11 TWS harness
+  (injects the scaled before-step conc + TWS_inversion finundated) but pointed at
+  the ebul reference, `N0=0`, boundary `after_ch4`.
+
+### Forcing alignment (the §11/§233 lesson, re-checked)
+Unlike the recycled LONG run (datm 1 h behind, §5), this **fresh startup** aligns
+the datm record to the model hour EXACTLY (offset **0**): at n0
+`GRND_CH4_COND` is **bit-exact** (J=F=1.03706e-2, rel 1.7e-11) and `CH4_AERE_SAT`
+is bit-exact at every step. (At n1+ the fresh-startup datm record drifts from a
+constant-offset read for `GRND_CH4_COND` specifically, but this does NOT propagate
+to the aerenchyma or ebullition fluxes — n0 is the fully-aligned reference step.)
+
+### Scorecard — Bow ebul reference, n0, `after_ch4`, aligned forcing
+| field | worst rel.err (n0) | \|F\| scale | note |
+|---|---|---|---|
+| `GRND_CH4_COND`     | **1.7e-11** | 1.04e-2 | forcing-sensitive path aligned (bit-exact) |
+| `CH4_EBUL_SAT`      | **2.7e-5**  | 6.53e-6 | per-layer ebullition rate |
+| `CH4_EBUL_TOTAL_SAT`| **3.0e-5**  | 1.21e-6 | **the term unlocked** |
+| `CH4_SURF_EBUL_SAT` | **3.0e-5**  | 1.21e-6 | surface ebullition flux |
+| `CONC_CH4_SAT`      | 4.3e-5      | 1.21e-1 | the injected (scaled) conc |
+| `CH4_AERE_SAT`      | 1.5e-5      | 1.44e-7 | |
+
+**Ebullition agrees with Fortran to ~3e-5** — the same single-step-oracle floor as
+the §11 CH4 source fluxes and the §5 fire C/N fluxes. The residual traces to
+`CONC_CH4_SAT` (4.3e-5), the one-step-recomputed warm-CN production confound
+(§10/§11), NOT the ebullition kernel. The bubble threshold, vgc formula, and
+release rate are validated. **No `methane.jl` change** — the `use_lch4` path is
+byte-identical; guarded by a new `test_methane.jl` analytic-oracle assertion
+(threshold gating + exact rate) under `--check-bounds=yes`.
+
+### What is now validated end-to-end (the last CH4 source term)
+Combined with §11 (production/oxidation/aerenchyma/diffusive surface flux at
+`finundated>0`), **every CH4 source-regime term is now diffed against Fortran.**
+Ebullition was the last one that no on-disk asset could exercise.
+
+### Reproducing
+```bash
+# 1. edit a warm restart's CONC_CH4 (×5) and generate the Fortran reference:
+#    julia +1.12 --project=. scripts/edit_ch4_restart.jl <raw.r.nc> finidat_ch4ebul_x5.nc 5.0
+#    (already applied; run dir SYMFLUENCE_data/clm_bgc_spinup/bow_ref_ch4ebul/)
+#    bash SYMFLUENCE_data/clm_bgc_spinup/bow_ref_ch4ebul/run_bow_ch4ebul.sh   # plain, ~6 steps
+julia +1.12 --project=. scripts/probe_ch4_ebul_threshold.jl 5   # confirm scale crosses threshold (no box)
+julia +1.12 --project=. scripts/fortran_parity_ch4_ebul.jl 1    # n0 ebullition scorecard
+```
