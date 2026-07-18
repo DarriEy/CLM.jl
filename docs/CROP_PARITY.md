@@ -318,6 +318,54 @@ literals). An unknown name aborts at `histFileMod.F90:887` after
 initialization. The generator now validates `hist_fincl1` against the names
 CTSM actually registers and drops unknowns with a warning.
 
+## Instrumented crop reference dumps GENERATED (two windows)
+
+`bgcdumpMod.F90` was extended with the crop lifecycle + crop N fields (see
+`scripts/validation/fortran_sourcemods/bgcdumpMod.F90`, all behind
+`if (use_crop)` so non-crop references stay byte-identical) and the case
+rebuilt — an incremental `./case.build`, ~9 s total; verify it took by checking
+`strings bld/cesm.exe | grep CROPLIVE`, since CIME reports SUCCESS even when
+nothing recompiled.
+
+Dumps are produced by the proven two-stage pattern: advance to the window with
+`PDUMP/BGCDUMP_NSTEP_*` closed, write a restart, then run a short bracket from
+it with the window wide open.
+
+| Ref dir | Date | nsteps | Files | What it captures |
+|---|---|---|---|---|
+| `refs_crop_may/` | 2020-05-30 | 38665–38676 | 48 | **the fertilization window** |
+| `refs_crop_july/` | 2020-07-19 | 39865–39876 | 48 | mid-season growth / grain fill |
+
+(Both under `clm_bgc_spinup/crop_ref_usplains/`; 12 `bgcdump_after_fire` +
+36 `pdump` per window.)
+
+### What the reference actually contains
+
+Patch indices **5–12 are the eight live crop patches** (`CROPLIVE = 1`,
+`NYRS_CROP_ACTIVE = 4`); everything else is `1e36`/0 fill, which is the correct
+non-crop signature.
+
+**May window (n38665)** — CPHASE = 2 (leaf emergence) on all eight:
+
+| Field | Values across the 8 crop patches |
+|---|---|
+| `HUI` | 131.99, 131.85, 342.10, 342.03, 64.93, 63.19, 162.45, 162.29 |
+| **`FERT`** | **9.693e-6, 9.693e-6, 5.727e-6, 5.779e-6, 1.567e-6, 1.567e-6, 9.693e-6, 9.693e-6** |
+| `FERT_TO_SMINN` | 8 non-zero columns, max 9.693e-6 |
+| `SOYFIXN` | 0 |
+
+**July window (n39865)** — CPHASE 2 and 3 (grain fill), `HUI` 552–1274,
+`FERTNITRO` 0.71–14.75, but `FERT = 0`: **the fertilization window has already
+closed by mid-July.** That is why the May window exists, and it is a concrete
+reminder that "the crop is growing" and "the crop-N flux is live" are different
+windows — a mid-season dump alone would have shown `FERT ≡ 0` and looked like a
+dead path.
+
+`SOYFIXN` is 0 in **both** windows. CTSM's `CNSoyfix` requires a later growth
+phase than either window sampled, so the soybean-fixation reference is still
+outstanding — a third window (or a phase-targeted bracket) is needed before
+`n_soyfix!` can be validated. Recorded as a known gap rather than papered over.
+
 ## Wiring `n_fert!` — it would be a NO-OP today. Do not wire it yet.
 
 The task brief scoped "wire `n_fert!`/`n_soyfix!` now that a reference exists".
