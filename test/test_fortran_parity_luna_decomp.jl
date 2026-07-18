@@ -42,9 +42,11 @@ using CLM
 using NCDatasets
 using Dates
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Fortran LUNA-cadence + decomp N-source parity (gated)" begin
     common  = joinpath(@__DIR__, "..", "scripts", "fortran_parity_common.jl")
-    dumpdir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+    dumpdir = symfluence_path("clm_bgc_spinup", "bgc_ref_summer")
     date_base = 1753153
 
     window    = 1757845:1757872

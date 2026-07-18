@@ -13,13 +13,15 @@
 # ==========================================================================
 using Test, CLM
 
-const _BOW_ROOT = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+include(joinpath(@__DIR__, "testdata.jl"))
+
+const _BOW_ROOT = symfluence_data_root()
 const _BOW_DIR  = joinpath(_BOW_ROOT, "domain_Bow_at_Banff_lumped")
 const _BOW_FS   = joinpath(_BOW_DIR, "settings", "CLM", "parameters", "surfdata_clm.nc")
 const _BOW_FP   = joinpath(_BOW_DIR, "settings", "CLM", "parameters", "clm5_params.nc")
 const _BOW_FORC = joinpath(_BOW_DIR, "data", "forcing", "CLM_input", "clmforc.2002_2004.nc")
-const _SNOWOPT  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const _SNOWAGE  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const _SNOWOPT  = snicar_optics()
+const _SNOWAGE  = snicar_aging()
 
 # Build a fresh (inst, bounds, filt, tm) + opened ForcingReader for Bow.
 function _bow_setup(start_date)
