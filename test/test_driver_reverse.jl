@@ -7,13 +7,12 @@
 # scripts/enzyme_driver_reverse_full.jl (canopy+soil_temp+soil_water) and
 # scripts/enzyme_driver_reverse_hydro.jl (+ water_table!).
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "driver reverse-phase forward parity" begin
-    fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-    paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+    fsurdat, paramfile = bow_params()
     if !isfile(fsurdat) || !isfile(paramfile)
-        @warn "Skipping driver-reverse forward parity: input files not found"
-        @test true
-        return
+        testdata_missing("driver-reverse forward parity", fsurdat, paramfile) && return
     end
 
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=fsurdat, paramfile=paramfile)

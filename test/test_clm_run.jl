@@ -3,18 +3,16 @@
 # ==========================================================================
 
 include("generate_forcing.jl")
+include(joinpath(@__DIR__, "testdata.jl"))
 
 @testset "CLM End-to-End Simulation" begin
 
     # Input data paths
-    fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-    paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+    fsurdat, paramfile = bow_params()
 
     # Skip if input files not available
     if !isfile(fsurdat) || !isfile(paramfile)
-        @warn "Skipping integration test: input files not found"
-        @test true  # placeholder pass
-        return
+        testdata_missing("integration test", fsurdat, paramfile) && return
     end
 
     # ---- Test 1: Generate synthetic forcing file ----

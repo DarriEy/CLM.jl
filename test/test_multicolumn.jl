@@ -9,13 +9,12 @@
 using Test
 using CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Multi-column harness (ncopies)" begin
-    fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-    paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+    fsurdat, paramfile = bow_params()
     if !isfile(fsurdat) || !isfile(paramfile)
-        @warn "Skipping multi-column test: input files not found"
-        @test true
-        return
+        testdata_missing("multi-column test", fsurdat, paramfile) && return
     end
 
     function setup_forcing!(a2l, T, ng)

@@ -1,13 +1,13 @@
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Initialization Pipeline" begin
     using Dates
 
-    fsurdat  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-    paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+    fsurdat, paramfile = bow_params()
 
     # Skip if input files are not available
     if !isfile(fsurdat) || !isfile(paramfile)
-        @warn "Skipping initialization tests: input files not found"
-        @test true  # placeholder
+        testdata_missing("initialization tests", fsurdat, paramfile)
     else
         @testset "surfrd_get_num_patches" begin
             (numpft, numcft) = CLM.surfrd_get_num_patches(fsurdat)
