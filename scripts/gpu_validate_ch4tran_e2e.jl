@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_ch4tran_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_ch4tran_e2e.jl — end-to-end GPU parity for the WHOLE
 # ch4_tran! routine (the 2-species CH4/O2 reaction-diffusion vertical transport,
 # the hardest methane function). One per-column kernel runs competition, the
 # ebullition/aerenchyma reductions, the 2-species source/epsilon setup, and for
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -85,7 +84,7 @@ function check_case(to, FT, label; sat, lake)
     B = build(Float64)   # device source
 
     ad(x) = to(x isa AbstractArray ? (eltype(x) <: AbstractFloat ? FT.(x) : x) : x)
-    ch4_d = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), B.ch4))
+    ch4_d = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), B.ch4))
     Sd = (; B.params, B.ch4vc,
         mask_soil = B.mask_soil,   # ch4_tran! moves it to backend internally
         col_gridcell = B.col_gridcell,
@@ -95,7 +94,7 @@ function check_case(to, FT, label; sat, lake)
         frac_h2osfc=ad(B.frac_h2osfc), snow_depth=ad(B.snow_depth), snl=B.snl,
         z=ad(B.z), dz=ad(B.dz), zi=ad(B.zi), jwt=B.jwt, B.nlevsoi, B.nlevsno, B.organic_max)
 
-    if !(ch4_d.conc_ch4_sat_col isa Metal.MtlArray)
+    if !(ch4_d.conc_ch4_sat_col isa device_array_type())
         println("  BLOCKED: CH4Data did not move to the device under adapt.")
         return 2
     end
@@ -131,7 +130,7 @@ CLM.Adapt.adapt_storage(::_F32, x::AbstractArray{Bool}) = x
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for ch4_tran! (2-species reaction-diffusion)")
+    println("END-TO-END GPU parity for ch4_tran! (2-species reaction-diffusion)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU exercised by the suite).")

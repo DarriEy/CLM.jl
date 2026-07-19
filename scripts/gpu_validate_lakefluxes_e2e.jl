@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_lakefluxes_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_lakefluxes_e2e.jl — end-to-end GPU parity for the WHOLE
 # lake_fluxes! driver (the single per-patch _lake_fluxes_kernel! with its
 # internal sequential Monin-Obukhov stability iteration).
 #
@@ -23,7 +23,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -149,7 +148,7 @@ run_lf!(d, m_c, m_p) = CLM.lake_fluxes!(d.temp, d.ef, d.fv, d.sa, d.ls, d.wsb, d
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for lake_fluxes! (whole per-patch driver)")
+    println("END-TO-END GPU parity for lake_fluxes! (whole per-patch driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -162,7 +161,7 @@ function main(backend)
     try
         B = build(FT)
         m_c = fill(true, B.nc); m_p = fill(true, B.np)
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         D = (; nc = B.nc, np = B.np,
             col = ad(B.col), patch = ad(B.patch), lun = ad(B.lun), temp = ad(B.temp),
             sa = ad(B.sa), wsb = ad(B.wsb), wdb = ad(B.wdb), wfb = ad(B.wfb),
@@ -171,7 +170,7 @@ function main(backend)
             forc_pbot = to(B.forc_pbot), forc_rho = to(B.forc_rho), forc_lwrad = to(B.forc_lwrad),
             forc_u = to(B.forc_u), forc_v = to(B.forc_v),
             forc_hgt_u = to(B.forc_hgt_u), forc_hgt_t = to(B.forc_hgt_t), forc_hgt_q = to(B.forc_hgt_q))
-        if !(D.temp.t_grnd_col isa Metal.MtlArray && D.fv.ustar_patch isa Metal.MtlArray)
+        if !(D.temp.t_grnd_col isa device_array_type() && D.fv.ustar_patch isa device_array_type())
             println("  BLOCKED: a lake state struct did not move to the device under adapt.")
             return 2
         end

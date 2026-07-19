@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_satellite_phenology_e2e.jl — end-to-end Metal parity for the
+# gpu_validate_satellite_phenology_e2e.jl — end-to-end GPU parity for the
 # prescribed-LAI (satellite phenology) path: satellite_phenology! (LAI/SAI/
 # height interpolation + snow burial), read_annual_vegetation!, and
 # read_monthly_vegetation! — all per-patch kernels.
@@ -8,7 +8,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -54,17 +53,17 @@ function run_all!(d)
 end
 
 function main(backend)
-    println("=" ^ 66); println("END-TO-END Metal parity for satellite_phenology! (prescribed LAI)"); println("=" ^ 66)
+    println("=" ^ 66); println("END-TO-END GPU parity for satellite_phenology! (prescribed LAI)"); println("=" ^ 66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = build(); B = build()
     run_all!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     D = (; sp=mf(B.sp), cs=mf(B.cs), wd=mf(B.wd), patch=mf(B.patch),
          mlai=mf(B.mlai), msai=mf(B.msai), mht=mf(B.mht), mhb=mf(B.mhb),
-         mask=Metal.MtlArray(collect(B.mask)), bounds=B.bounds, np=B.np, nc=B.nc, ng=B.ng)
-    if !(D.cs.elai_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+         mask=device_array_type()(collect(B.mask)), bounds=B.bounds, np=B.np, nc=B.nc, ng=B.ng)
+    if !(D.cs.elai_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_all!(D)
     checks = [("tlai", H.cs.tlai_patch, D.cs.tlai_patch),
               ("tsai", H.cs.tsai_patch, D.cs.tsai_patch),

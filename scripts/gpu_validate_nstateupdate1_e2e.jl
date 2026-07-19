@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_nstateupdate1_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_nstateupdate1_e2e.jl — end-to-end GPU parity for the WHOLE
 # n_state_update1! + n_state_update_dyn_patch! BGC drivers (the nitrogen analog
 # of the Phase B C-state cascade entry point).
 #
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the device-view structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # NaN-aware mixed abs/rel diff; asserts the CPU reference is finite so a both-NaN
@@ -43,9 +42,9 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 # reconstructs the struct (integer/bool arrays move as-is). @adapt_structure rebuilds
 # each struct positionally, inferring the new {Float32,…} params from the adapted fields.
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 const NC = 4
 const NP = 6
@@ -203,7 +202,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for n_state_update1! (BGC N-state cascade)")
+    println("END-TO-END GPU parity for n_state_update1! (BGC N-state cascade)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -221,7 +220,7 @@ function main(backend)
     nfs_d = ad(B.nf_soil); nss_d = ad(B.ns_soil)
     Sd = (; ns_veg=ns_d, nf_veg=nf_d, nf_soil=nfs_d, ns_soil=nss_d)
 
-    if !(ns_d.npool_patch isa Metal.MtlArray)
+    if !(ns_d.npool_patch isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

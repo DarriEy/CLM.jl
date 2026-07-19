@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_bgc_pipeline_decomp_e2e.jl — WHOLE-DRIVER Metal parity for the
+# gpu_validate_bgc_pipeline_decomp_e2e.jl — WHOLE-DRIVER GPU parity for the
 # FULL-DECOMP branch of cn_driver_no_leaching! (_has_decomp = true). Drives the
 # real BGC decomposition chain through the orchestrator on the CPU and on Metal:
 #   decomp_rate_constants_bgc! -> soil_bgc_potential! -> soil_biogeochem_decomp!
@@ -12,7 +12,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # _F32: arrays only (the soil/cnveg state structs pin concrete ::Float64 scalars
@@ -140,9 +139,9 @@ function scenario(backend, nlevdecomp)
             nlevdecomp == 1 ? "single-level, col_dz path" : "multi-level")
     H = make_data(; nlevdecomp); B = make_data(; nlevdecomp)
     run_driver!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mfS(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))
-    mm(b) = Metal.MtlArray(collect(b))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mfS(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32S(), x))
+    mm(b) = device_array_type()(collect(b))
     # state structs + decomp_bgc_state + forcing + col -> device; cascade_con + params stay host
     D = (; config=B.config, bgc_params=B.bgc_params, cn_params=B.cn_params,
          bgc_state=mfS(B.bgc_state), cascade_con=B.cascade_con, decomp_params=B.decomp_params,
@@ -156,7 +155,7 @@ function scenario(backend, nlevdecomp)
          t_soisno=mf(B.t_soisno), soilpsi=mf(B.soilpsi), dzsoi_decomp=mf(B.dzsoi_decomp), zsoi_vals=mf(B.zsoi_vals),
          nc=B.nc, np=B.np, ng=B.ng, dt=B.dt, nlevdecomp=B.nlevdecomp, ndecomp_pools=B.ndecomp_pools,
          ndct=B.ndct, nrepr=B.nrepr, i_litr_min=B.i_litr_min, i_litr_max=B.i_litr_max, i_cwd=B.i_cwd)
-    if !(D.cf_soil.decomp_k_col isa Metal.MtlArray); println("  BLOCKED."); return 1; end
+    if !(D.cf_soil.decomp_k_col isa device_array_type()); println("  BLOCKED."); return 1; end
     run_driver!(D)
     checks = [
         ("cf_soil.decomp_k (rates)", H.cf_soil.decomp_k_col, D.cf_soil.decomp_k_col),
@@ -180,7 +179,7 @@ function scenario(backend, nlevdecomp)
 end
 
 function main(backend)
-    println("="^66); println("WHOLE-DRIVER Metal parity — FULL-DECOMP branch (_has_decomp)"); println("="^66)
+    println("="^66); println("WHOLE-DRIVER GPU parity — FULL-DECOMP branch (_has_decomp)"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)

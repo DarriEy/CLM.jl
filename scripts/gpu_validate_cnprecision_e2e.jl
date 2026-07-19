@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_cnprecision_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_cnprecision_e2e.jl — end-to-end GPU parity for the WHOLE
 # cn_precision_control! driver (the per-patch precision-truncation cascade over
 # ~40 C/N pool pairs + crop reproductive pools + optional c13/c14 isotopes).
 #
@@ -22,7 +22,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -36,10 +35,10 @@ end
 
 # --------------------------------------------------------------------------
 # MetalF32 adaptor: the CN state structs are parametric ({FT,V,M}); we build the
-# host reference at Float32 then Adapt.adapt(MtlArray, ·) to move every array
+# host reference at Float32 then Adapt.adapt(device_array_type(), ·) to move every array
 # field onto the device (Metal has no Float64, so the host struct is Float32).
 # --------------------------------------------------------------------------
-to_metal(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+to_metal(x) = CLM.Adapt.adapt(device_array_type(), x)
 
 # Build a minimal CNVegCarbonStateData with np patches at host precision FT.
 function make_cs(::Type{FT}, np; nrepr=1, val=FT(0.0)) where {FT}
@@ -158,7 +157,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for cn_precision_control! (whole driver)")
+    println("END-TO-END GPU parity for cn_precision_control! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -185,7 +184,7 @@ function main(backend)
         filter = [1, 2, 3, 4]; itype = [1, 1, 1, 1]
 
         csD = to_metal(deepcopy(csH)); nsD = to_metal(deepcopy(nsH))
-        fD = Metal.MtlArray(filter); iD = Metal.MtlArray(itype)
+        fD = device_array_type()(filter); iD = device_array_type()(itype)
 
         CLM.cn_precision_control!(csH, nsH, filter, itype)
         CLM.cn_precision_control!(csD, nsD, fD, iD)
@@ -201,7 +200,7 @@ function main(backend)
         filter = [1, 2, 3]; itype = [1, 15, 16]  # patches 2,3 are crops
 
         csD = to_metal(deepcopy(csH)); nsD = to_metal(deepcopy(nsH))
-        fD = Metal.MtlArray(filter); iD = Metal.MtlArray(itype)
+        fD = device_array_type()(filter); iD = device_array_type()(itype)
 
         CLM.cn_precision_control!(csH, nsH, filter, itype; use_crop=true)
         CLM.cn_precision_control!(csD, nsD, fD, iD; use_crop=true)
@@ -220,7 +219,7 @@ function main(backend)
 
         csD  = to_metal(deepcopy(csH));  nsD  = to_metal(deepcopy(nsH))
         c13D = to_metal(deepcopy(c13H)); c14D = to_metal(deepcopy(c14H))
-        fD = Metal.MtlArray(filter); iD = Metal.MtlArray(itype)
+        fD = device_array_type()(filter); iD = device_array_type()(itype)
 
         CLM.cn_precision_control!(csH, nsH, filter, itype;
             c13cs=c13H, c14cs=c14H, use_c13=true, use_c14=true)
@@ -248,7 +247,7 @@ function main(backend)
         filter = [1, 2, 3, 4]; itype = [1, 1, 1, 1]
 
         csD = to_metal(deepcopy(csH)); nsD = to_metal(deepcopy(nsH))
-        fD = Metal.MtlArray(filter); iD = Metal.MtlArray(itype)
+        fD = device_array_type()(filter); iD = device_array_type()(itype)
 
         CLM.cn_precision_control!(csH, nsH, filter, itype;
             use_matrixcn=true, use_nguardrail=true)

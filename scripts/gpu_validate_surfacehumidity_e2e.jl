@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_surfacehumidity_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_surfacehumidity_e2e.jl — end-to-end GPU parity for the WHOLE
 # calculate_surface_humidity! driver (per-column kernel with an internal
 # sequential nlevgrnd loop for the pervious-road branch, plus qsat() calls).
 #
@@ -7,7 +7,7 @@
 # branches: soil/crop (snl=0 and snl<0 snow), soil with surface water, wet,
 # ice, urban sunwall (qred=0), urban roof (qred=1), and pervious road (the
 # nlevgrnd normalization loop). Runs calculate_surface_humidity! on the CPU,
-# adapts every state struct (+ Bool mask + forcings) to Metal, runs the SAME
+# adapts every state struct (+ Bool mask + forcings) to the GPU, runs the SAME
 # call on the device, and compares the mutated outputs field-by-field.
 #
 #   julia --project=scripts scripts/gpu_validate_surfacehumidity_e2e.jl
@@ -18,7 +18,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -110,7 +109,7 @@ run!(S, fp, fq, m) = CLM.calculate_surface_humidity!(S.col, S.lun, S.temp, S.ss,
 
 function main(backend)
     println("="^70)
-    println("END-TO-END Metal parity for calculate_surface_humidity! (whole driver)")
+    println("END-TO-END GPU parity for calculate_surface_humidity! (whole driver)")
     println("="^70)
     if backend === nothing
         println("  No GPU backend — nothing to validate.")
@@ -120,9 +119,9 @@ function main(backend)
     @printf("  Backend: %s   (working precision: %s)\n\n", name, FT)
 
     H = build(FT); B = build(FT)
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
-    if !(Sd.wdb.qg_col isa Metal.MtlArray)
+    if !(Sd.wdb.qg_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

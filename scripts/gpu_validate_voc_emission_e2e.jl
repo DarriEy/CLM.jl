@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_voc_emission_e2e.jl — end-to-end Metal parity for voc_emission!
+# gpu_validate_voc_emission_e2e.jl — end-to-end GPU parity for voc_emission!
 # (MEGAN VOC emissions). The per-patch kernel calls the 6 hardened get_gamma_*
 # helpers + get_map_EF and reads the flattened compound metadata + the
 # device-movable MEGANFactors. The Vector{MEGANCompound/MechComp} metadata stays
@@ -9,7 +9,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -61,16 +60,16 @@ run_voc!(d) = CLM.voc_emission!(d.voc, d.meg_compounds, d.mech_comps, d.mfac,
     d.cisun_z, d.cisha_z, d.t_veg, d.t_veg24, d.t_veg240, d.btran)
 
 function main(backend)
-    println("="^66); println("END-TO-END Metal parity for voc_emission! (MEGAN)"); println("="^66)
+    println("="^66); println("END-TO-END GPU parity for voc_emission! (MEGAN)"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = make_data(); B = make_data()
     run_voc!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     D = (; voc=mf(B.voc), meg_compounds=B.meg_compounds, mech_comps=B.mech_comps,
          mfac=mf(B.mfac), patch=mf(B.patch), bounds_p=B.bounds_p,
-         mask=Metal.MtlArray(collect(B.mask)),
+         mask=device_array_type()(collect(B.mask)),
          forc_solad_col=mf(B.forc_solad_col), forc_solai_grc=mf(B.forc_solai_grc),
          forc_pbot_col=mf(B.forc_pbot_col), forc_pco2_grc=mf(B.forc_pco2_grc),
          fsd24=mf(B.fsd24), fsd240=mf(B.fsd240), fsi24=mf(B.fsi24), fsi240=mf(B.fsi240),
@@ -78,7 +77,7 @@ function main(backend)
          elai=mf(B.elai), elai240=mf(B.elai240),
          cisun_z=mf(B.cisun_z), cisha_z=mf(B.cisha_z),
          t_veg=mf(B.t_veg), t_veg24=mf(B.t_veg24), t_veg240=mf(B.t_veg240), btran=mf(B.btran))
-    if !(D.voc.vocflx_tot_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.voc.vocflx_tot_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_voc!(D)
     checks = [("vocflx_tot_patch", H.voc.vocflx_tot_patch, D.voc.vocflx_tot_patch),
               ("vocflx_patch", H.voc.vocflx_patch, D.voc.vocflx_patch),

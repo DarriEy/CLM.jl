@@ -1,19 +1,18 @@
 # ==========================================================================
-# gpu_validate_soilwater_mf_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_soilwater_mf_e2e.jl — end-to-end GPU parity for the WHOLE
 # moisture-form Richards solver (soilwater_moisture_form!, the non-default
 # soil_water! path used when use_aquifer_layer=false → MOISTURE_FORM + BC_ZERO_FLUX).
 #
 # Exercises the full per-column adaptive-substep kernel (hydraulic properties,
 # boundary fluxes, RHS/LHS, in-thread tridiagonal solve, substep accept/reject)
 # end-to-end: builds a Float32 instance, runs soil_water! on CPU, adapts every
-# struct to Metal, runs the SAME call on device, compares mutated outputs.
+# struct to the GPU, runs the SAME call on device, compares mutated outputs.
 #
 #   julia --project=scripts scripts/gpu_validate_soilwater_mf_e2e.jl
 # ==========================================================================
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 const NS = 5; const NG = 10; const NSOI = 10; const NMAX = 10
@@ -84,7 +83,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soilwater_moisture_form! (whole solver)")
+    println("END-TO-END GPU parity for soilwater_moisture_form! (whole solver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU solver exercised by the suite).")
@@ -105,12 +104,12 @@ function main(backend)
                                           lower_boundary_condition = CLM.BC_ZERO_FLUX)
         dt = FT(1800)
 
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         D = (; nc = B.nc, col = ad(B.col), temp = ad(B.temp), ef = ad(B.ef), ss = ad(B.ss),
              wsb = ad(B.wsb), wfb = ad(B.wfb), cs = ad(B.cs), sh = ad(B.sh))
         dmask(m) = to(collect(Bool, m))
 
-        if !(D.sh.zwt_col isa Metal.MtlArray && D.wsb.ws.h2osoi_liq_col isa Metal.MtlArray)
+        if !(D.sh.zwt_col isa device_array_type() && D.wsb.ws.h2osoi_liq_col isa device_array_type())
             println("  BLOCKED: a state struct did not move to the device under adapt.")
             return 2
         end

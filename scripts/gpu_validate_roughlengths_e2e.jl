@@ -1,12 +1,12 @@
 # ==========================================================================
-# gpu_validate_roughlengths_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_roughlengths_e2e.jl — end-to-end GPU parity for the WHOLE
 # set_actual_roughness_lengths! driver (per-patch priority selection of the
 # momentum roughness length: exposed-veg > no-exposed-veg > urban > lake).
 #
 # Builds a multi-patch FrictionVelocityData at Float32 with one patch per
 # priority class (so every branch of the kernel is exercised), runs
 # set_actual_roughness_lengths! on the CPU, adapts fv + the masks/index vectors
-# to Metal, runs the SAME call on the device, and compares z0m_actual_patch.
+# to the GPU, runs the SAME call on the device, and compares z0m_actual_patch.
 #
 # CRITICAL: source roughness lengths are real defaults so the CPU reference is
 # FINITE; we assert finiteness before trusting parity.
@@ -16,7 +16,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -59,7 +58,7 @@ run_sar!(H, fv, mev, mnev, mu, ml, col, lun, ltown) =
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for set_actual_roughness_lengths! (whole driver)")
+    println("END-TO-END GPU parity for set_actual_roughness_lengths! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -71,7 +70,7 @@ function main(backend)
     H = build(FT)
     B = build(FT)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     fv_d   = ad(B.fv)
     ltown_d = ad(B.lun_z_0_town)
     col_d  = to(collect(Int32, B.patch_column))
@@ -81,7 +80,7 @@ function main(backend)
     mu_d   = to(collect(Bool, B.m_urban))
     ml_d   = to(collect(Bool, B.m_lake))
 
-    if !(fv_d.z0m_actual_patch isa Metal.MtlArray)
+    if !(fv_d.z0m_actual_patch isa device_array_type())
         println("  BLOCKED: FrictionVelocityData did not move to the device under adapt.")
         return 2
     end

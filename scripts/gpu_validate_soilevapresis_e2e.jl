@@ -1,12 +1,12 @@
 # ==========================================================================
-# gpu_validate_soilevapresis_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_soilevapresis_e2e.jl — end-to-end GPU parity for the WHOLE
 # calc_soilevap_resis! driver (both methods: Lee-Pielke 1992 beta and the
 # Swenson & Lawrence 2014 dry-surface-layer resistance).
 #
 # Builds a small Float32 instance with several columns exercising the real
 # branches (soil below/above field capacity, snow+h2osfc, wet/ice landunit,
 # urban column types), runs calc_soilevap_resis! on the CPU, adapts every
-# state struct (+ Bool mask) to Metal, runs the SAME call on the device, and
+# state struct (+ Bool mask) to the GPU, runs the SAME call on the device, and
 # compares the mutated outputs field-by-field. Both methods are validated.
 #
 #   julia --project=scripts scripts/gpu_validate_soilevapresis_e2e.jl
@@ -17,7 +17,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -92,7 +91,7 @@ run!(S, m) = CLM.calc_soilevap_resis!(S.col, S.lun, S.ss, S.wsb, S.wdb, S.temp,
 
 function main(backend)
     println("="^70)
-    println("END-TO-END Metal parity for calc_soilevap_resis! (whole driver)")
+    println("END-TO-END GPU parity for calc_soilevap_resis! (whole driver)")
     println("="^70)
     if backend === nothing
         println("  No GPU backend — nothing to validate.")
@@ -101,7 +100,7 @@ function main(backend)
     name, to, FT = backend
     @printf("  Backend: %s   (working precision: %s)\n\n", name, FT)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     nfail = 0
 
     for method in (CLM.SOIL_RESIS_LEEPIELKE_1992, CLM.SOIL_RESIS_SL_14)
@@ -112,7 +111,7 @@ function main(backend)
 
         H = build(FT); B = build(FT)
         Sd = map(ad, B.S)
-        if !(Sd.ss.soilbeta_col isa Metal.MtlArray)
+        if !(Sd.ss.soilbeta_col isa device_array_type())
             println("  BLOCKED: a state struct did not move to the device under adapt.")
             return 2
         end

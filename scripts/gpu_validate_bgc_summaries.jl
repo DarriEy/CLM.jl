@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_bgc_summaries.jl — host-vs-Metal parity for the BGC state-summary
+# gpu_validate_bgc_summaries.jl — host-vs-GPU parity for the BGC state-summary
 # reductions (soil_bgc_carbon_state_summary! + soil_bgc_nitrogen_state_summary!),
 # kernelized as one-thread-per-column fused reductions.
 #
@@ -7,10 +7,9 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 function reldiff(H, D)
     A = Array(H); B = Array(D); m = 0.0; n = 0
@@ -64,12 +63,12 @@ function main(backend)
 
     # ---- carbon ----
     csH = make_cs(nc, ng, nlev, npools); csD = mf(make_cs(nc, ng, nlev, npools))
-    csD.decomp_cpools_vr_col isa Metal.MtlArray || (println("  BLOCKED: cs adapt"); return 2)
+    csD.decomp_cpools_vr_col isa device_array_type() || (println("  BLOCKED: cs adapt"); return 2)
     kw = (; nlevdecomp=nlev, nlevdecomp_full=nlev, ndecomp_pools=npools,
           dzsoi_decomp_vals=dzsoi, zisoi_vals=zisoi,
           is_litter=is_litter, is_soil=is_soil, is_microbe=is_microbe, is_cwd=is_cwd)
     CLM.soil_bgc_carbon_state_summary!(csH, mask, 1:nc; kw...)
-    CLM.soil_bgc_carbon_state_summary!(csD, mf(mask), 1:nc; kw...); Metal.synchronize()
+    CLM.soil_bgc_carbon_state_summary!(csD, mf(mask), 1:nc; kw...); device_synchronize()
     for f in (:decomp_cpools_col, :decomp_cpools_1m_col, :decomp_soilc_vr_col, :ctrunc_col,
               :totlitc_col, :totsomc_col, :totmicc_col, :totlitc_1m_col, :totsomc_1m_col,
               :cwdc_col, :totecosysc_col, :totc_col)
@@ -85,7 +84,7 @@ function main(backend)
           is_litter=is_litter, is_soil=is_soil, is_microbe=is_microbe, is_cwd=is_cwd,
           use_nitrif_denitrif=true)
     CLM.soil_bgc_nitrogen_state_summary!(nsH, mask, 1:nc; kwn...)
-    CLM.soil_bgc_nitrogen_state_summary!(nsD, mf(mask), 1:nc; kwn...); Metal.synchronize()
+    CLM.soil_bgc_nitrogen_state_summary!(nsD, mf(mask), 1:nc; kwn...); device_synchronize()
     for f in (:decomp_npools_col, :decomp_npools_1m_col, :decomp_soiln_vr_col, :sminn_col,
               :ntrunc_col, :smin_no3_col, :smin_nh4_col, :totlitn_col, :totsomn_col,
               :totmicn_col, :totlitn_1m_col, :totsomn_1m_col, :cwdn_col, :totecosysn_col, :totn_col)

@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_maint_resp_e2e.jl — end-to-end Metal parity for cn_mresp!
+# gpu_validate_maint_resp_e2e.jl — end-to-end GPU parity for cn_mresp!
 # (maintenance respiration: tcsoi column kernel + leaf/livewood patch kernel
 # + froot-by-layer kernel). Validates the device-resident tcsoi scratch fix.
 #
@@ -7,7 +7,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -67,19 +66,19 @@ run_mresp!(d) = CLM.cn_mresp!(d.mask_c, d.mask_p, d.bounds_c, d.bounds_p,
     d.params, d.cn_params, d.pftcon, d.patch, d.cs, d.ss, d.temp, d.ps, d.cf, d.ns)
 
 function main(backend)
-    println("="^66); println("END-TO-END Metal parity for cn_mresp! (maint_resp)"); println("="^66)
+    println("="^66); println("END-TO-END GPU parity for cn_mresp! (maint_resp)"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = make_mresp(); B = make_mresp()
     run_mresp!(H)
-    mf(x)  = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mfS(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))
-    mm(b)  = Metal.MtlArray(collect(b))
+    mf(x)  = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mfS(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32S(), x))
+    mm(b)  = device_array_type()(collect(b))
     D = (; params=B.params, cn_params=B.cn_params, pftcon=mf(B.pftcon), patch=mf(B.patch),
          cs=mf(B.cs), ss=mf(B.ss), temp=mfS(B.temp), ps=mf(B.ps), cf=mf(B.cf), ns=mf(B.ns),
          mask_c=mm(B.mask_c), mask_p=mm(B.mask_p), bounds_c=B.bounds_c, bounds_p=B.bounds_p)
-    if !(D.cf.leaf_mr_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.cf.leaf_mr_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_mresp!(D)
     checks = [("leaf_mr", H.cf.leaf_mr_patch, D.cf.leaf_mr_patch),
               ("froot_mr", H.cf.froot_mr_patch, D.cf.froot_mr_patch),

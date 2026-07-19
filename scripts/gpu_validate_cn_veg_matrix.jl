@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_cn_veg_matrix.jl — focused REAL-Metal parity for the matrix-CN
+# gpu_validate_cn_veg_matrix.jl — focused REAL-GPU parity for the matrix-CN
 # VEGETATION solves (cn_veg_matrix_solve_c! / cn_veg_matrix_solve_n!) driven the
 # way the CN driver drives them: accumulate the transfer/turnover matrices from
 # the LIVE per-flux fields (cn_veg_matrix_accumulate_{ph,gm,fi}_{c,n}!), then
@@ -21,7 +21,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # Float32-converting device adaptor for whole state/flux/solve-state structs: floats

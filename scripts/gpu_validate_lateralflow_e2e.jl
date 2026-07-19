@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_lateralflow_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_lateralflow_e2e.jl — end-to-end GPU parity for the WHOLE
 # perched_lateral_flow! AND subsurface_lateral_flow! drivers (the two
 # largest/hardest A8 soil-hydrology functions): one thread per hydrology
 # column running the full per-column sequence in-thread.
@@ -35,7 +35,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -173,7 +172,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for perched_lateral_flow! + subsurface_lateral_flow!")
+    println("END-TO-END GPU parity for perched_lateral_flow! + subsurface_lateral_flow!")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU drivers exercised by the suite).")
@@ -185,11 +184,11 @@ function main(backend)
     H = build(FT)   # CPU reference
     B = build(FT)   # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = (; sh = ad(B.S.sh), ss = ad(B.S.ss), ws = ad(B.S.ws),
             wfb = ad(B.S.wfb), col = ad(B.S.col), lun = ad(B.S.lun))
 
-    if !(Sd.sh.zwt_col isa Metal.MtlArray)
+    if !(Sd.sh.zwt_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

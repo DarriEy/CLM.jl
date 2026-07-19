@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_veg_compute_seed.jl — Metal parity for compute_seed_amounts!
+# gpu_validate_veg_compute_seed.jl — GPU parity for compute_seed_amounts!
 # (dyn_subgrid seed amounts for newly-grown patch area). Per-patch own-index
 # kernel with leaf_proportions + species_type_multiplier inlined.
 #
@@ -13,7 +13,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -62,7 +61,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("Metal parity for compute_seed_amounts! (dyn_subgrid seed amounts)")
+    println("GPU parity for compute_seed_amounts! (dyn_subgrid seed amounts)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -71,8 +70,8 @@ function main(backend)
     @printf("  Backend: %s   (working precision: %s)\n", name, FT)
 
     pc = make_pftcon()
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mb(x) = Metal.MtlArray(collect(x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mb(x) = device_array_type()(collect(x))
     nfail = 0
 
     for (sp, spname) in ((CLM.CN_SPECIES_C12, "C12"), (CLM.CN_SPECIES_N, "N"))

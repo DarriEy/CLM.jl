@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_clmdrv_cn_e2e.jl — WHOLE-TIMESTEP Metal parity for clm_drv! with
+# gpu_validate_clmdrv_cn_e2e.jl — WHOLE-TIMESTEP GPU parity for clm_drv! with
 # the CN cycle ON (use_cn=true) — the biogeophys + BGC COMPOSITE. The biogeophys
 # path (use_cn=false) is validated by gpu_validate_clmdrv_e2e.jl and the BGC path
 # by the bgc/matrix harnesses; this checks that the two halves COMPOSE on one
@@ -15,12 +15,11 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
 include(joinpath(@__DIR__, "clmdrv_make_data.jl"))
 include(joinpath(@__DIR__, "clmdrv_cn_fixture.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 const DRV_ARGS = (true, 1.0, 0.0, 0.0, 0.4091, false, false, "20260101", false)
 drv!(cfg, inst, filt, filt_ia, bounds, ps) = CLM.clm_drv!(cfg, inst, filt, filt_ia, bounds, DRV_ARGS...;
@@ -36,7 +35,7 @@ function reldiff_finite(H, D)
 end
 
 function main(backend)
-    println("="^72); println("WHOLE-TIMESTEP Metal parity for clm_drv! — CN COMPOSITE (use_cn=true)"); println("="^72)
+    println("="^72); println("WHOLE-TIMESTEP GPU parity for clm_drv! — CN COMPOSITE (use_cn=true)"); println("="^72)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s (%s)\n\n", name, FT)
@@ -54,9 +53,9 @@ function main(backend)
     instB.canopystate.frac_veg_nosno_alb_patch .= 1
     populate_cn_cold!(instB; nc=4, np=6, ng=2)
     inst_d = mf(instB); ps_d = mf(psB); filt_d = mf(filtB); filt_ia_d = mf(filt_iaB)
-    inst_d.temperature.t_soisno_col isa Metal.MtlArray || (println("  BLOCKED: adapt."); return 2)
+    inst_d.temperature.t_soisno_col isa device_array_type() || (println("  BLOCKED: adapt."); return 2)
     try
-        drv!(cfg, inst_d, filt_d, filt_ia_d, boundsB, ps_d); Metal.synchronize()
+        drv!(cfg, inst_d, filt_d, filt_ia_d, boundsB, ps_d); device_synchronize()
     catch e
         msg = sprint(showerror, e)
         bt = stacktrace(catch_backtrace())

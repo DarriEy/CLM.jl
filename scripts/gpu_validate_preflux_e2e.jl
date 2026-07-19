@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_preflux_e2e.jl — end-to-end Metal parity for the kernelized
+# gpu_validate_preflux_e2e.jl — end-to-end GPU parity for the kernelized
 # portions of biogeophys_pre_flux_calcs!: set_z0m_displa! (step 1) and
 # calc_initial_temp_energy! (step 3). Both run WHOLE on Metal here.
 #
@@ -16,7 +16,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -111,7 +110,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for pre_flux_calcs.jl kernels")
+    println("END-TO-END GPU parity for pre_flux_calcs.jl kernels")
     println("(set_z0m_displa! + calc_initial_temp_energy!, whole on device)")
     println("=" ^ 70)
     if backend === nothing
@@ -124,11 +123,11 @@ function main(backend)
     H = build(FT)
     B = build(FT)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     dmask(m) = to(collect(Bool, m))
 
-    if !(Sd.temperature.t_grnd_col isa Metal.MtlArray)
+    if !(Sd.temperature.t_grnd_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

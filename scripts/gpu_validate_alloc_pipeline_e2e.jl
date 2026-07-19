@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_alloc_pipeline_e2e.jl — end-to-end Metal parity for the three
+# gpu_validate_alloc_pipeline_e2e.jl — end-to-end GPU parity for the three
 # already-kernelized allocation.jl functions:
 #   calc_gpp_mr_availc!            (GPP / maintenance-resp / available-C)
 #   calc_allometry!                (C/N allometry coefficients)
@@ -9,7 +9,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # _F32: convert float arrays only (for structs with concrete ::Float64 scalar
@@ -73,7 +72,7 @@ run_allom!(d) = CLM.calc_allometry!(d.mask, d.bounds, d.pftcon, d.cn_shared, d.p
 run_crop!(d) = CLM.calc_crop_allocation_fractions!(d.mask, d.bounds, d.pftcon, d.patch, d.crop, d.vs)
 
 function main(backend)
-    println("="^66); println("END-TO-END Metal parity for allocation.jl (gpp/availc)"); println("="^66)
+    println("="^66); println("END-TO-END GPU parity for allocation.jl (gpp/availc)"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
@@ -81,12 +80,12 @@ function main(backend)
            froot_mr=0.0005, livestem_mr=0.0003, livecroot_mr=0.0002, xsmrpool=-100.0)
     H = make_woody(; cfg...); B = make_woody(; cfg...)
     run_gpp!(H); run_allom!(H); run_crop!(H)
-    mf(x)  = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mfS(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))
+    mf(x)  = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mfS(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32S(), x))
     D = (; alloc_params=B.alloc_params, pftcon=mf(B.pftcon), cn_shared=B.cn_shared,
          patch=mf(B.patch), crop=mfS(B.crop), photo=mf(B.photo), cstate=mf(B.cstate),
-         cs=mf(B.cs), cf=mf(B.cf), vs=mf(B.vs), mask=Metal.MtlArray(collect(B.mask)), bounds=B.bounds)
-    if !(D.cf.availc_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+         cs=mf(B.cs), cf=mf(B.cf), vs=mf(B.vs), mask=device_array_type()(collect(B.mask)), bounds=B.bounds)
+    if !(D.cf.availc_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_gpp!(D); run_allom!(D); run_crop!(D)
     checks = [("psnsun_to_cpool", H.cf.psnsun_to_cpool_patch, D.cf.psnsun_to_cpool_patch),
               ("psnshade_to_cpool", H.cf.psnshade_to_cpool_patch, D.cf.psnshade_to_cpool_patch),

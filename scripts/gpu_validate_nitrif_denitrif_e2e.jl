@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_nitrif_denitrif_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_nitrif_denitrif_e2e.jl — end-to-end GPU parity for the WHOLE
 # nitrif_denitrif! driver (nitrification + denitrification: soil diffusivity,
 # anaerobic fraction, CENTURY nitrification, del Grosso denitrification, N2:N2O).
 # One per-column kernel with an internal level loop; exp/atan/sqrt/pow-heavy.
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -80,14 +79,14 @@ function check_case(name, FT, use_lch4)
     @printf("\n  --- use_lch4=%s ---\n", use_lch4)
     H = build(); B = build()
     run_nd!(H; use_lch4=use_lch4)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     D = (; params=B.params, cn_params=B.cn_params, nf=mf(B.nf), ns=mf(B.ns), cf=mf(B.cf),
         watsat=mf(B.watsat), watfc=mf(B.watfc), bd=mf(B.bd), bsw=mf(B.bsw), cellorg=mf(B.cellorg),
         sucsat=mf(B.sucsat), soilpsi=mf(B.soilpsi), h2osoi_vol=mf(B.h2osoi_vol), h2osoi_liq=mf(B.h2osoi_liq),
         t_soisno=mf(B.t_soisno), col_dz=mf(B.col_dz),
         o2_decomp_depth_unsat=mf(B.o2_decomp_depth_unsat), conc_o2_unsat=mf(B.conc_o2_unsat),
-        mask_bgc_soilc=Metal.MtlArray(collect(B.mask_bgc_soilc)), nlevdecomp=B.nlevdecomp, nc=B.nc)
-    if !(D.nf.diffus_col isa Metal.MtlArray); println("  BLOCKED: nf not on device."); return 2; end
+        mask_bgc_soilc=device_array_type()(collect(B.mask_bgc_soilc)), nlevdecomp=B.nlevdecomp, nc=B.nc)
+    if !(D.nf.diffus_col isa device_array_type()); println("  BLOCKED: nf not on device."); return 2; end
     run_nd!(D; use_lch4=use_lch4)
     nfail = 0
     for f in OUT
@@ -101,7 +100,7 @@ function check_case(name, FT, use_lch4)
 end
 
 function main(backend)
-    println("=" ^ 72); println("END-TO-END Metal parity for nitrif_denitrif!"); println("=" ^ 72)
+    println("=" ^ 72); println("END-TO-END GPU parity for nitrif_denitrif!"); println("=" ^ 72)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (working precision: %s)\n", name, FT)

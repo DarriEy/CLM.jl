@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_ch4_e2e.jl — end-to-end Metal parity for the WHOLE ch4! methane
+# gpu_validate_ch4_e2e.jl — end-to-end GPU parity for the WHOLE ch4! methane
 # orchestrator: its per-column/per-(c,j) pre/post loops + the grnd_ch4_cond
 # patch->column and the column->gridcell flux scatters are kernels; the sat/lake
 # dispatch calls the 6 device process kernels; conservation @warn checks run host.
@@ -19,7 +19,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -34,9 +33,9 @@ allfinite(a) = all(isfinite, Array(a))
 
 # Float32 down-convert adaptor for the whole CH4Data + arrays.
 struct MF32 end
-CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(collect(Int, x))
-CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{Bool})            = Metal.MtlArray(collect(Bool, x))
+CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{<:Integer})       = device_array_type()(collect(Int, x))
+CLM.Adapt.adapt_storage(::MF32, x::AbstractArray{Bool})            = device_array_type()(collect(Bool, x))
 
 function build(::Type{FT}; finmtd=CLM.FINUNDATION_MTD_H2OSFC) where {FT}
     nc=3; np=4; ng=2; nlevsoi=5
@@ -174,7 +173,7 @@ function check_config(name, FT, label; finmtd)
 end
 
 function main(backend)
-    println("=" ^ 70); println("END-TO-END Metal parity for ch4! (methane orchestrator)"); println("=" ^ 70)
+    println("=" ^ 70); println("END-TO-END GPU parity for ch4! (methane orchestrator)"); println("=" ^ 70)
     backend === nothing && (println("  No GPU backend."); return 0)
     name, to, FT = backend
     @printf("  Backend: %s   (working precision: %s)\n", name, FT)

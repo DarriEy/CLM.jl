@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_ndemand_e2e.jl — end-to-end Metal parity for
+# gpu_validate_ndemand_e2e.jl — end-to-end GPU parity for
 # calc_plant_nitrogen_demand! (plant N demand + crop grain-fill retransn +
 # avail-retransn kernels). Run with call_is_for_pcrop=true to exercise the
 # device-resident crop_phase_vals scratch fix + crop_phase! on Metal.
@@ -8,7 +8,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -67,18 +66,18 @@ run_nd!(d) = CLM.calc_plant_nitrogen_demand!(d.mask, d.bounds, true,
     d.pftcon, d.cn_shared, d.patch, d.crop, d.vs, d.cs, d.cf, d.ns, d.nf; dt=d.dt)
 
 function main(backend)
-    println("="^66); println("END-TO-END Metal parity for calc_plant_nitrogen_demand!"); println("="^66)
+    println("="^66); println("END-TO-END GPU parity for calc_plant_nitrogen_demand!"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = make_data(); B = make_data()
     run_nd!(H)
-    mf(x)  = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mfS(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))
+    mf(x)  = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mfS(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32S(), x))
     D = (; pftcon=mf(B.pftcon), cn_shared=B.cn_shared, patch=mf(B.patch), crop=mfS(B.crop),
          vs=mf(B.vs), cs=mf(B.cs), cf=mf(B.cf), ns=mf(B.ns), nf=mf(B.nf),
-         mask=Metal.MtlArray(collect(B.mask)), bounds=B.bounds, dt=B.dt)
-    if !(D.nf.plant_ndemand_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+         mask=device_array_type()(collect(B.mask)), bounds=B.bounds, dt=B.dt)
+    if !(D.nf.plant_ndemand_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_nd!(D)
     checks = [("plant_ndemand", H.nf.plant_ndemand_patch, D.nf.plant_ndemand_patch),
               ("tempsum_potential_gpp", H.vs.tempsum_potential_gpp_patch, D.vs.tempsum_potential_gpp_patch),

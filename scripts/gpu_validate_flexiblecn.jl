@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_flexiblecn.jl — Metal parity for the FlexibleCN nutrient path:
+# gpu_validate_flexiblecn.jl — GPU parity for the FlexibleCN nutrient path:
 # calc_plant_nutrient_demand_flexiblecn! (5 per-patch kernels) +
 # calc_plant_nutrient_competition_flexiblecn! -> calc_plant_cn_alloc_flexiblecn!
 # (one per-patch allocation kernel with _FlexAllocOut/_FlexAllocIn device-view
@@ -9,11 +9,10 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x)  = mf(Metal.MtlArray, x)
-mfs(x) = mfs(Metal.MtlArray, x)
+mf(x)  = mf(device_array_type(), x)
+mfs(x) = mfs(device_array_type(), x)
 
 function reldiff(a, b)
     A = Array(a); B = Array(b); m = 0.0
@@ -98,7 +97,7 @@ function run_flex!(d, dt)
 end
 
 function main(backend)
-    println("="^70); println("Metal parity — FlexibleCN nutrient demand + competition"); println("="^70)
+    println("="^70); println("GPU parity — FlexibleCN nutrient demand + competition"); println("="^70)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s (%s)\n", name, FT)
@@ -110,9 +109,9 @@ function main(backend)
         crop=mfs(B.crop), canopystate=mf(B.canopystate), cnveg_state=mfs(B.cnveg_state),
         cnveg_cs=mf(B.cnveg_cs), cnveg_cf=mf(B.cnveg_cf), cnveg_ns=mf(B.cnveg_ns), cnveg_nf=mf(B.cnveg_nf),
         soilbgc_ns=mf(B.soilbgc_ns), soilbgc_cf=mf(B.soilbgc_cf),
-        mask_soilp=Metal.MtlArray(collect(Bool, B.mask_soilp)), fpg_col=mf(B.fpg_col),
+        mask_soilp=device_array_type()(collect(Bool, B.mask_soilp)), fpg_col=mf(B.fpg_col),
         bounds=B.bounds, dzsoi_decomp=B.dzsoi_decomp, nlevdecomp=B.nlevdecomp)
-    if !(D.cnveg_cf.plant_calloc_patch isa Metal.MtlArray); println("  BLOCKED: adapt."); return 2; end
+    if !(D.cnveg_cf.plant_calloc_patch isa device_array_type()); println("  BLOCKED: adapt."); return 2; end
     run_flex!(D, dt)
 
     checks = [

@@ -1,18 +1,18 @@
 # gpu_validate_dynharvest_e2e.jl — whole cn_harvest! + cn_harvest_pft_to_column!
-# on Metal parity.
+# on GPU parity.
 #
 # Mirrors the conservation scenario in test/test_dyn_harvest.jl (2 tree patches +
 # 1 bare, on one column), runs the harvest mortality + p2c scatter on the CPU,
-# then adapts every struct + mask + harvest state to Metal (Float32) and reruns
+# then adapts every struct + mask + harvest state to GPU and reruns
 # on-device, comparing the patch fluxes and the column litter/CWD/product pools.
 #
 # Run: julia +1.12 --project=scripts scripts/gpu_validate_dynharvest_e2e.jl
 
 using CLM, Printf
-import Metal
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))   # mf / mfs Float32 down-adaptors
-ad(x)    = mf(Metal.MtlArray, x)
-to(x)    = Metal.MtlArray(x)
+ad(x)    = mf(device_array_type(), x)
+to(x)    = device_array_type()(x)
 dmask(m) = to(collect(Bool, m))
 
 const NP, NC, NG, NLEV, NPOOL = 3, 1, 1, 1, 3
@@ -94,8 +94,8 @@ cpu_c = Dict(f => copy(getfield(cpu.cf, f)) for f in outs_c)
 cpu_n = Dict(f => copy(getfield(cpu.nf, f)) for f in outs_n)
 
 # ---- Metal device run -----------------------------------------------------
-if !Metal.functional()
-    println("Metal not functional — skipping device leg."); exit(0)
+if !gpu_functional()
+    println("No GPU backend detected — skipping device leg."); exit(0)
 end
 dd = build()
 dev = (; patch = ad(dd.patch), sbs = ad(dd.sbs), cs = ad(dd.cs), ns = ad(dd.ns),
@@ -103,7 +103,7 @@ dev = (; patch = ad(dd.patch), sbs = ad(dd.sbs), cs = ad(dd.cs), ns = ad(dd.ns),
 pft_d = (lf_f = to(Float32.(dd.pftcon.lf_f)), fr_f = to(Float32.(dd.pftcon.fr_f)))
 dev_state = CLM.DynHarvestState(harvest = to(Float32[0.25]), do_harvest = true,
                                 harvest_units = CLM.harvest_unitless_units)
-if !(dev.cs.leafc_patch isa Metal.MtlArray)
+if !(dev.cs.leafc_patch isa device_array_type())
     println("  BLOCKED: a struct did not move to the device under adapt."); exit(1)
 end
 run!(dev_state, dmask([true, true, true]), dev, pft_d)

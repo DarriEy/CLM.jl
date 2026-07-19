@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_building_temp.jl — whole-routine Metal parity for the prognostic
+# gpu_validate_building_temp.jl — whole-routine GPU parity for the prognostic
 # urban interior building-temperature solve (building_temperature!,
 # UrbBuildTempOleson2015). Builds a single urban landunit (roof + sunwall +
 # shadewall columns), runs building_temperature! on the host and on Metal, and
@@ -9,10 +9,9 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 # ---- set module globals for the prognostic-building-temp scenario -----------
 function set_globals!()
@@ -83,7 +82,7 @@ outs(temp, ef) = (
 
 function main(backend)
     println("="^72)
-    println("Metal parity — building_temperature! (urban prognostic 5x5 solve)")
+    println("GPU parity — building_temperature! (urban prognostic 5x5 solve)")
     println("="^72)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
@@ -106,11 +105,11 @@ function main(backend)
         col2, lun2, temp2, ef2, up2, tk2, tbmax2, p_ac2, mu2, mn2 = build_fixture(tbmax_val)
         colD = mf(col2); lunD = mf(lun2); tempD = mf(temp2); efD = mf(ef2); upD = mf(up2)
         tkD = mf(tk2); tbmaxD = mf(tbmax2); p_acD = mf(p_ac2); muD = mf(mu2); mnD = mf(mn2)
-        tempD.t_soisno_col isa Metal.MtlArray || (println("  BLOCKED: adapt failed."); return 2)
+        tempD.t_soisno_col isa device_array_type() || (println("  BLOCKED: adapt failed."); return 2)
         try
             CLM.building_temperature!(colD, lunD, tempD, efD, upD, tbmaxD, p_acD, tkD,
                                       muD, mnD, 1:1, dtime)
-            Metal.synchronize()
+            device_synchronize()
         catch e
             println("\n  ✗ DEVICE FAILURE:")
             println("      ", first(split(sprint(showerror, e), "\n")))

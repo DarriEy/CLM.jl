@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_n_dynamics_e2e.jl — end-to-end Metal parity for the N-dynamics
+# gpu_validate_n_dynamics_e2e.jl — end-to-end GPU parity for the N-dynamics
 # column-input fluxes: n_deposition!, n_free_living_fixation!, n_fixation!,
 # n_fert! (patch->col scatter), n_soyfix! (patch->col scatter). Exercises the
 # per-column gather/fixation kernels + the two new _scatter_add! reductions.
@@ -9,7 +9,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end   # arrays only — leaves scalar Float64 fields (N structs pin ::Float64)
@@ -74,21 +73,21 @@ const OUT = (:ndep_to_sminn_col, :ffix_to_sminn_col, :nfix_to_sminn_col,
              :fert_to_sminn_col, :soyfixn_to_sminn_col)
 
 function main(backend)
-    println("=" ^ 72); println("END-TO-END Metal parity for N-dynamics (deposition/fixation/fert/soyfix)"); println("=" ^ 72)
+    println("=" ^ 72); println("END-TO-END GPU parity for N-dynamics (deposition/fixation/fert/soyfix)"); println("=" ^ 72)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (working precision: %s)\n", name, FT)
     H = build(); B = build()
     run_all!(H)
-    mf(x)  = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mfs(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))  # crop: ::FT scalars
+    mf(x)  = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mfs(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32S(), x))  # crop: ::FT scalars
     D = (; nf=mf(B.nf), ns=mf(B.ns), soilbgc_st=mf(B.soilbgc_st), cf=mf(B.cf),
         cnveg_nf=mf(B.cnveg_nf), cnveg_state=mfs(B.cnveg_state), crop=mfs(B.crop),
         wdiag=mf(B.wdiag), wfb=mf(B.wfb), col=mf(B.col), patch=mf(B.patch),
         params=B.params, forc_ndep=mf(B.forc_ndep),
-        mask_soilc=Metal.MtlArray(collect(B.mask_soilc)), mask_soilp=Metal.MtlArray(collect(B.mask_soilp)),
+        mask_soilc=device_array_type()(collect(B.mask_soilc)), mask_soilp=device_array_type()(collect(B.mask_soilp)),
         np=B.np, nc=B.nc, ng=B.ng)
-    if !(D.nf.fert_to_sminn_col isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.nf.fert_to_sminn_col isa device_array_type()); println("  BLOCKED."); return 2; end
     run_all!(D)
     nfail = 0
     for f in OUT

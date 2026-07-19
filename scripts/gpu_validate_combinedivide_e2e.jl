@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_combinedivide_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_combinedivide_e2e.jl — end-to-end GPU parity for the WHOLE
 # combine_snow_layers! + divide_snow_layers! drivers (A7, the hardest mechanical
 # snow cluster): one thread per column running the full sequential, loop-carried
 # snow-layer restructuring in-thread on its own fixed-max PADDED slice —
@@ -25,7 +25,6 @@
 
 using CLM
 using Printf
-import Metal   # Metal-specific; MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -162,7 +161,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for combine_snow_layers! + divide_snow_layers!")
+    println("END-TO-END GPU parity for combine_snow_layers! + divide_snow_layers!")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -181,7 +180,7 @@ function main(backend)
         m_cpu = falses(nc); for c in 1:4; m_cpu[c] = true; end   # col 5 (snl=0) excluded
 
         # Device snapshot of the populated initial state BEFORE the CPU run mutates B.
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         D = (; nc,
             snl = ad(B.snl), dz = ad(B.dz), zi = ad(B.zi), z = ad(B.z), t = ad(B.t),
             ice = ad(B.ice), liq = ad(B.liq), snwrds = ad(B.snwrds),
@@ -194,7 +193,7 @@ function main(backend)
         m_dev = to(collect(Bool, m_cpu))
 
         # sanity: arrays must actually be on the device
-        if !(D.dz isa Metal.MtlArray)
+        if !(D.dz isa device_array_type())
             println("  BLOCKED: dz did not move to the device under adapt.")
             return 2
         end

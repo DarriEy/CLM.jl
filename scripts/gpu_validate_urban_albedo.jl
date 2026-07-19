@@ -1,15 +1,14 @@
 # ==========================================================================
-# gpu_validate_urban_albedo.jl — WHOLE-function Metal parity for the urban
+# gpu_validate_urban_albedo.jl — WHOLE-function GPU parity for the urban
 # canyon radiative-transfer kernels: incident_direct!, incident_diffuse!,
 # net_solar! (iterative multiple-reflection solve), and wasteheat!.
 #
 #   julia --project=scripts scripts/gpu_validate_urban_albedo.jl
 # ==========================================================================
 using CLM, Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 function reldiff(H, D)
     A = Array(H); B = Array(D); m = 0.0; n = 0
@@ -62,7 +61,7 @@ function main(backend)
     CLM.incident_direct!(mask, canyon_hwr, coszen, zen, sdir, hr, hs, hh)
     dr, ds, dh = mf(mk_out()), mf(mk_out()), mf(mk_out())
     CLM.incident_direct!(mf(mask), mf(canyon_hwr), mf(coszen), mf(zen), mf(sdir), dr, ds, dh)
-    Metal.synchronize()
+    device_synchronize()
     for (nm, H, D) in (("id_road", hr, dr), ("id_sunwall", hs, ds), ("id_shadewall", hh, dh))
         r, n = reldiff(H, D); ncmp += n; ok = r < 1f-3; ok || (nfail += 1)
         @printf("  [%s] %-14s rel=%.2e over %d\n", ok ? "PASS" : "FAIL", nm, r, n)
@@ -73,7 +72,7 @@ function main(backend)
     CLM.incident_diffuse!(mask, canyon_hwr, sdif, fr, fs, fh, up)
     dfr, dfs, dfh = mf(mk_out()), mf(mk_out()), mf(mk_out())
     CLM.incident_diffuse!(mf(mask), mf(canyon_hwr), mf(sdif), dfr, dfs, dfh, mf(up))
-    Metal.synchronize()
+    device_synchronize()
     for (nm, H, D) in (("if_road", fr, dfr), ("if_sunwall", fs, dfs), ("if_shadewall", fh, dfh))
         r, n = reldiff(H, D); ncmp += n; ok = r < 1f-3; ok || (nfail += 1)
         @printf("  [%s] %-14s rel=%.2e over %d\n", ok ? "PASS" : "FAIL", nm, r, n)
@@ -98,7 +97,7 @@ function main(backend)
         mf(hr), mf(hs), mf(hh), mf(fr), mf(fs), mf(fh),
         srd[1], srd[2], srd[3], srd[4], srd[5], srd[6], srd[7], srd[8], srd[9], srd[10],
         upd, saD)
-    Metal.synchronize()
+    device_synchronize()
     snames = ["sref_improad_dir","sref_perroad_dir","sref_sunwall_dir","sref_shadewall_dir","sref_roof_dir",
               "sref_improad_dif","sref_perroad_dif","sref_sunwall_dif","sref_shadewall_dif","sref_roof_dif"]
     for i in 1:10
@@ -130,7 +129,7 @@ function main(backend)
     CLM.wasteheat!(efH, lun, nl, filt, whr, whs, whh, hcr, hcs, hch)
     efB = mk_ef(); efD = mf(efB); lunD = mf(lun)
     CLM.wasteheat!(efD, lunD, nl, mf(filt), mf(whr), mf(whs), mf(whh), mf(hcr), mf(hcs), mf(hch))
-    Metal.synchronize()
+    device_synchronize()
     for (nm, hf, df) in (("eflx_wasteheat", efH.eflx_wasteheat_lun, efD.eflx_wasteheat_lun),
                          ("eflx_heat_from_ac", efH.eflx_heat_from_ac_lun, efD.eflx_heat_from_ac_lun))
         r, n = reldiff(hf, df); ncmp += n; ok = r < 1f-3; ok || (nfail += 1)
@@ -182,7 +181,7 @@ function main(backend)
     saB2d = mf(saB2); sbB2d = mf(sbB)
     CLM.urban_albedo!(mf(mlB), mf(mcB), mf(mpB), mf(lunB), mf(colB), mf(pchB), mf(wsbB),
                       mf(wdbB), mf(upB), saB2d, sbB2d)
-    Metal.synchronize()
+    device_synchronize()
     orch = [("albd", sbH.albd_patch, sbB2d.albd_patch), ("albi", sbH.albi_patch, sbB2d.albi_patch),
             ("albgrd", sbH.albgrd_col, sbB2d.albgrd_col), ("albgri", sbH.albgri_col, sbB2d.albgri_col),
             ("fabd", sbH.fabd_patch, sbB2d.fabd_patch), ("ftdd", sbH.ftdd_patch, sbB2d.ftdd_patch),

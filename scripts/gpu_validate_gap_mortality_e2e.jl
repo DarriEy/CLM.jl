@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_gap_mortality_e2e.jl — end-to-end Metal parity for cn_gap_mortality!
+# gpu_validate_gap_mortality_e2e.jl — end-to-end GPU parity for cn_gap_mortality!
 # (per-patch mortality fluxes, device-view-grouped) + cn_gap_patch_to_column!
 # (3-level patch->column litter/CWD scatter via _scatter_add!).
 #
@@ -7,7 +7,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end     # arrays only
@@ -97,21 +96,21 @@ function run_both!(d)
 end
 
 function main(backend)
-    println("=" ^ 64); println("END-TO-END Metal parity for gap_mortality (+ patch->col scatter)"); println("=" ^ 64)
+    println("=" ^ 64); println("END-TO-END GPU parity for gap_mortality (+ patch->col scatter)"); println("=" ^ 64)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = build(); B = build()
     run_both!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mfs(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mfs(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32S(), x))
     D = (; params=mfs(B.params), pftcon=mf(B.pftcon), dgvs=mf(B.dgvs), patch=mf(B.patch),
          canopystate=mf(B.canopystate), cnveg_cs=mf(B.cnveg_cs), cnveg_cf=mf(B.cnveg_cf),
          cnveg_ns=mf(B.cnveg_ns), cnveg_nf=mf(B.cnveg_nf),
-         mask=Metal.MtlArray(collect(B.mask)), bounds=B.bounds,
+         mask=device_array_type()(collect(B.mask)), bounds=B.bounds,
          leaf_prof=mf(B.leaf_prof), froot_prof=mf(B.froot_prof), croot_prof=mf(B.croot_prof),
          stem_prof=mf(B.stem_prof), nc=B.nc, nlevdecomp=B.nlevdecomp, n_litr=B.n_litr)
-    if !(D.cnveg_cf.m_leafc_to_litter_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.cnveg_cf.m_leafc_to_litter_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_both!(D)
     checks = [("m_leafc_to_litter", H.cnveg_cf.m_leafc_to_litter_patch, D.cnveg_cf.m_leafc_to_litter_patch),
               ("m_deadstemc_to_litter", H.cnveg_cf.m_deadstemc_to_litter_patch, D.cnveg_cf.m_deadstemc_to_litter_patch),

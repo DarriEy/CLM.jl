@@ -1,10 +1,10 @@
 # ==========================================================================
-# gpu_validate_canopy_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_canopy_e2e.jl — end-to-end GPU parity for the WHOLE
 # canopy_fluxes! driver (Newton iteration + all surrounding kernels).
 #
 # Mirrors test/test_canopy_fluxes.jl's single-patch smoke setup at Float32,
 # runs canopy_fluxes! on the CPU, adapts every state struct (and the forcing /
-# PFT-parameter arrays the kernels touch) to Metal, runs the SAME call on the
+# PFT-parameter arrays the kernels touch) to the GPU, runs the SAME call on the
 # device, and compares the mutated outputs. The full photosynthesis! solver is
 # NOT exercised (nrad/parsun left empty, as in the test), so the inner Ci
 # solver is out of scope here — this validates the canopy energy-balance /
@@ -15,7 +15,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -134,7 +133,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for canopy_fluxes! (whole driver)")
+    println("END-TO-END GPU parity for canopy_fluxes! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -148,13 +147,13 @@ function main(backend)
     setconfig!()
     H = build(FT)   # independent host copy (CPU reference)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)                       # adapt every state struct
     forc_d = (; (k => ad(getfield(B.forc, k)) for k in keys(B.forc))...)
     pft_d  = (; (k => ad(getfield(B.pft,  k)) for k in keys(B.pft))...)
     mask_d = B.mask   # host-only mask (kept on host by design)
 
-    if !(Sd.temperature.t_veg_patch isa Metal.MtlArray)
+    if !(Sd.temperature.t_veg_patch isa device_array_type())
         println("  BLOCKED: a canopy state struct did not move to the device under adapt.")
         return 2
     end

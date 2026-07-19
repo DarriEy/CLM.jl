@@ -1,17 +1,17 @@
-# gpu_validate_dyngru_e2e.jl — whole cn_gross_unrep! + p2c scatter on Metal parity.
+# gpu_validate_dyngru_e2e.jl — whole cn_gross_unrep! + p2c scatter on GPU parity.
 #
 # Two natural-PFT patches + one bare (gated out) on one column. Runs the gross
 # unrepresented-landcover mortality + p2c scatter on the CPU, then adapts every
-# struct + mask + gross-unrep state to Metal (Float32) and reruns on-device,
+# struct + mask + gross-unrep state to GPU and reruns on-device,
 # comparing patch fluxes and the column litter/CWD/product accumulators.
 #
 # Run: julia +1.12 --project=scripts scripts/gpu_validate_dyngru_e2e.jl
 
 using CLM, Printf
-import Metal
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-ad(x)    = mf(Metal.MtlArray, x)
-to(x)    = Metal.MtlArray(x)
+ad(x)    = mf(device_array_type(), x)
+to(x)    = device_array_type()(x)
 dmask(m) = to(collect(Bool, m))
 
 const NP, NC, NG, NLEV, NLITR = 3, 1, 1, 1, 3
@@ -93,8 +93,8 @@ cpu_c = Dict(f => copy(getfield(cpu.cf, f)) for f in outs_c)
 cpu_n = Dict(f => copy(getfield(cpu.nf, f)) for f in outs_n)
 
 # ---- Metal device run -----------------------------------------------------
-if !Metal.functional()
-    println("Metal not functional — skipping device leg."); exit(0)
+if !gpu_functional()
+    println("No GPU backend detected — skipping device leg."); exit(0)
 end
 dd = build()
 dev = (; patch = ad(dd.patch), sbs = ad(dd.sbs), cs = ad(dd.cs), ns = ad(dd.ns),
@@ -102,7 +102,7 @@ dev = (; patch = ad(dd.patch), sbs = ad(dd.sbs), cs = ad(dd.cs), ns = ad(dd.ns),
 pft_d = CLM.PftConGrossUnrep(pconv = to(Float32.(dd.pftcon.pconv)),
     lf_f = to(Float32.(dd.pftcon.lf_f)), fr_f = to(Float32.(dd.pftcon.fr_f)))
 dev_state = CLM.DynGrossUnrepState(grossunrepfrac = to(Float32.(grf())), do_grossunrep = true)
-if !(dev.cs.leafc_patch isa Metal.MtlArray)
+if !(dev.cs.leafc_patch isa device_array_type())
     println("  BLOCKED: a struct did not move to the device under adapt."); exit(1)
 end
 run!(dev_state, dmask([true, true, true]), dev, pft_d)

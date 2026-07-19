@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_decomp_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_decomp_e2e.jl — end-to-end GPU parity for the WHOLE
 # soil_biogeochem_decomp! routine (every per-(c)/internal-l/j/k loop now a
 # KernelAbstractions kernel: the C:N-ratio loop, the decomposition-cascade
 # application, the methane fphr loop, and the vertical integration).
@@ -16,7 +16,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the device arrays
 const Adapt = CLM.Adapt   # Adapt isn't in scripts/Project.toml; reach it via CLM
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "gpu_backends.jl"))
@@ -41,13 +40,13 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 # --------------------------------------------------------------------------
 struct MetalF32 end
 Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) =
-    Metal.MtlArray(Float32.(Array(x)))
+    device_array_type()(Float32.(Array(x)))
 Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer}) =
-    Metal.MtlArray(Int32.(Array(x)))
+    device_array_type()(Int32.(Array(x)))
 Adapt.adapt_storage(::MetalF32, x::BitArray) =
-    Metal.MtlArray(collect(Bool, x))
+    device_array_type()(collect(Bool, x))
 Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool}) =
-    Metal.MtlArray(collect(Bool, x))
+    device_array_type()(collect(Bool, x))
 adf(x) = Adapt.adapt(MetalF32(), x)
 
 # --------------------------------------------------------------------------
@@ -206,7 +205,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soil_biogeochem_decomp! (whole routine)")
+    println("END-TO-END GPU parity for soil_biogeochem_decomp! (whole routine)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU routine exercised by the suite).")

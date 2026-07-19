@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_irrigation_needed.jl — host-vs-Metal parity for the kernelized
+# gpu_validate_irrigation_needed.jl — host-vs-GPU parity for the kernelized
 # IrrigationMod science functions (feature-gated: crop + irrigate):
 #   calc_irrigation_needed!  (patch-check + layer accumulation + deficit + rate,
 #                             incl. the volr-limit path: c2g_irrig!/irrig_volr_ratio!/
@@ -8,17 +8,16 @@
 #                             calc_application_fluxes! drip/sprinkler)
 #   calc_total_gw_uncon_irrig!  (per-column layer sum — tested standalone)
 #
-# Each whole function runs on the CPU (Float64) and on Metal (Float32); every
+# Each whole function runs on the CPU (Float64) and on GPU; every
 # mutated field is compared with a NaN-aware reldiff.
 #
 #   julia --project=scripts scripts/gpu_validate_irrigation_needed.jl
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 function reldiff(a, b)
     A = Array(a); B = Array(b); m = 0.0; n = 0

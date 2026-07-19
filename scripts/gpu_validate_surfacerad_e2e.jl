@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_surfacerad_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_surfacerad_e2e.jl — end-to-end GPU parity for the WHOLE
 # radiation pair: canopy_sun_shade_fracs! + surface_radiation!.
 #
 # Builds a small Float32 instance with TWO patches that exercise both sides of
@@ -10,7 +10,7 @@
 #   patch 2: URBAN column (snl=0, no snow) — drives the urban pass and the
 #            no-snow / fsun-zeroing paths.
 # Runs BOTH whole functions on the CPU, adapts every state struct (+ masks /
-# forcing) to Metal, runs the SAME calls on the device, and compares every
+# forcing) to the GPU, runs the SAME calls on the device, and compares every
 # mutated field with reldiff.
 #
 # CRITICAL: every required param/input is set to a real CLM default so the CPU
@@ -22,7 +22,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -160,7 +159,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for canopy_sun_shade_fracs! + surface_radiation!")
+    println("END-TO-END GPU parity for canopy_sun_shade_fracs! + surface_radiation!")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -172,11 +171,11 @@ function main(backend)
     H = build(FT)   # CPU reference
     B = build(FT)   # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     dmask(m) = to(collect(Bool, m))
 
-    if !(Sd.solarabs.sabg_patch isa Metal.MtlArray)
+    if !(Sd.solarabs.sabg_patch isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

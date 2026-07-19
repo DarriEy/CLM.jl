@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_decompvprofile_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_decompvprofile_e2e.jl — end-to-end GPU parity for the WHOLE
 # soil_bgc_vertical_profile! decomposition vertical-profile driver.
 #
 # soil_bgc_vertical_profile! runs whole-function on Metal: per-patch and
@@ -24,7 +24,6 @@
 
 using CLM
 using Printf
-import Metal
 const Adapt = CLM.Adapt   # Adapt isn't in scripts/Project.toml; reach it via CLM
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
@@ -46,11 +45,11 @@ allfinite(a) = all(isfinite, Array(a))
 # masks become device Vector{Bool}.
 # --------------------------------------------------------------------------
 struct MetalF32 end
-Adapt.adapt_storage(::MetalF32, x::AbstractArray{Float64}) = Metal.MtlArray(Float32.(x))
-Adapt.adapt_storage(::MetalF32, x::AbstractArray{Float32}) = Metal.MtlArray(x)
-Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer}) = Metal.MtlArray(collect(x))
-Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool}) = Metal.MtlArray(collect(Bool, x))
-Adapt.adapt_storage(::MetalF32, x::BitArray) = Metal.MtlArray(collect(Bool, x))
+Adapt.adapt_storage(::MetalF32, x::AbstractArray{Float64}) = device_array_type()(Float32.(x))
+Adapt.adapt_storage(::MetalF32, x::AbstractArray{Float32}) = device_array_type()(x)
+Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer}) = device_array_type()(collect(x))
+Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool}) = device_array_type()(collect(Bool, x))
+Adapt.adapt_storage(::MetalF32, x::BitArray) = device_array_type()(collect(Bool, x))
 adF32(x) = Adapt.adapt(MetalF32(), x)
 
 # --------------------------------------------------------------------------
@@ -112,7 +111,7 @@ run_dvp!(S) = CLM.soil_bgc_vertical_profile!(
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soil_bgc_vertical_profile! (whole driver)")
+    println("END-TO-END GPU parity for soil_bgc_vertical_profile! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -137,11 +136,11 @@ function main(backend)
             dzsoi_decomp    = adF32(B.dzsoi_decomp),
             zsoi            = adF32(B.zsoi))
 
-    if !(Sd.bgc_state.nfixation_prof_col isa Metal.MtlArray)
+    if !(Sd.bgc_state.nfixation_prof_col isa device_array_type())
         println("  BLOCKED: SoilBiogeochemStateData did not move to the device under adapt.")
         return 2
     end
-    if !(Sd.patch.column isa Metal.MtlArray) || eltype(Sd.patch.column) != Int
+    if !(Sd.patch.column isa device_array_type()) || eltype(Sd.patch.column) != Int
         println("  BLOCKED: patch.column index vector lost its Int eltype on the device.")
         return 2
     end

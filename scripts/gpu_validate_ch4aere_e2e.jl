@@ -1,12 +1,12 @@
 # ==========================================================================
-# gpu_validate_ch4aere_e2e.jl — end-to-end Metal parity for the WHOLE ch4_aere!
+# gpu_validate_ch4aere_e2e.jl — end-to-end GPU parity for the WHOLE ch4_aere!
 # BGC driver (aerenchyma transport: site_ox_aere! math inlined into a per-PATCH
 # kernel that scatters into ch4_aere_depth / ch4_tran_depth / o2_aere_depth).
 #
 # Builds a small multi-column / multi-patch CH4Data mirroring test/test_methane.jl
 # (there is no ch4_aere! unit test, so the call is assembled from the ch4! call
 # site), runs ch4_aere! on the CPU, converts the CH4Data + arg arrays to Float32
-# and adapts to Metal, runs the SAME call on the device, and compares the mutated
+# and adapts to the GPU, runs the SAME call on the device, and compares the mutated
 # column outputs field-by-field. The scenario exercises both the unsaturated
 # (sat=0) and saturated (sat=1) branches, the transpirationloss + prognostic
 # aerenchyma-oxidation flags, and a FATES column (forced-vegetated path).
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -37,9 +36,9 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 # Float32-down-converting Metal adaptor (CH4Data is concretely typed; build at
 # Float64 then down-convert float arrays as adapt rebuilds the struct).
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 const NC = 4
 const NP = 6
@@ -119,7 +118,7 @@ run_aere!(S, ch4, m_soil, m_soilp, pcol, pitype, pwt, cgrid, fates,
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for ch4_aere! (BGC aerenchyma scatter)")
+    println("END-TO-END GPU parity for ch4_aere! (BGC aerenchyma scatter)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -133,7 +132,7 @@ function main(backend)
 
     ad(x) = CLM.Adapt.adapt(MetalF32(), x)
     ch4_d = ad(B.ch4)
-    if !(ch4_d.ch4_aere_depth_unsat_col isa Metal.MtlArray)
+    if !(ch4_d.ch4_aere_depth_unsat_col isa device_array_type())
         println("  BLOCKED: CH4Data did not move to the device under adapt.")
         return 2
     end

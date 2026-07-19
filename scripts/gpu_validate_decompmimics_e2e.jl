@@ -1,11 +1,11 @@
 # ==========================================================================
-# gpu_validate_decompmimics_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_decompmimics_e2e.jl — end-to-end GPU parity for the WHOLE
 # decomp_rates_mimics! function (every per-(c)/per-(c,j) compute loop now a
 # KernelAbstractions kernel).
 #
 # Builds a small Float32 instance mirroring test/test_decomp_mimics.jl's setup,
 # runs decomp_rates_mimics! on the CPU, adapts the carbon-flux struct + the MIMICS
-# state's spatially-varying arrays + the input arrays to Metal, runs the SAME call
+# state's spatially-varying arrays + the input arrays to the GPU, runs the SAME call
 # on the device, and compares the mutated outputs (decomp_k, pathfrac, rf, cn,
 # w_scalar, o_scalar) field-by-field.
 #
@@ -17,7 +17,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # Float32-down-converting Metal adaptor: init_decompcascade_mimics! allocates the
@@ -25,9 +24,9 @@ include(joinpath(@__DIR__, "gpu_backends.jl"))
 # adapt-reconstruct the struct with device Float32 arrays (scalar coeff fields, which
 # never reach a kernel, pass through unchanged).
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence). Also asserts
 # the CPU reference is FINITE so a both-NaN false PASS can't slip through.
@@ -145,7 +144,7 @@ function check_case(to, FT, nlevdecomp)
             mask_bgc_soilc=dmask(B.mask_bgc_soilc),
             B.nc, B.nlevdecomp, B.ndecomp_pools, B.ndecomp_cascade_transitions)
 
-    if !(cfd.decomp_k_col isa Metal.MtlArray)
+    if !(cfd.decomp_k_col isa device_array_type())
         println("  BLOCKED: carbon-flux struct did not move to the device under adapt.")
         return 2
     end
@@ -176,7 +175,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for decomp_rates_mimics! (whole function)")
+    println("END-TO-END GPU parity for decomp_rates_mimics! (whole function)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")

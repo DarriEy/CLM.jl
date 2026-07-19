@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_ch4prod_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_ch4prod_e2e.jl — end-to-end GPU parity for the WHOLE
 # ch4_prod! methane-production driver (the C/N decomposition -> CH4 production
 # cascade). Two kernels run on the device:
 #   1. _ch4prod_rrvr_kernel!  — per-PATCH scatter of root respiration into the
@@ -117,7 +117,7 @@ const CONFIGS = [
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for ch4_prod!  (CH4 production driver)")
+    println("END-TO-END GPU parity for ch4_prod!  (CH4 production driver)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -142,7 +142,7 @@ function main(backend)
         # would re-pin V=Vector{FT}/M=Matrix{FT} and pull the arrays back to the host.
         Bf = build(FT)
         ad(x) = _dev(to, x)
-        dch4 = CLM.Adapt.adapt(Metal.MtlArray, Bf.ch4)
+        dch4 = CLM.Adapt.adapt(device_array_type(), Bf.ch4)
         D = (; ch4=dch4, nc=Bf.nc, np=Bf.np, nlevsoi=Bf.nlevsoi,
              mask_soil=ad(Bf.mask_soil), mask_soilp=ad(Bf.mask_soilp),
              patch_column=ad(Bf.patch_column), patch_itype=ad(Bf.patch_itype),

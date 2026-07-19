@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_soilhydrology_e2e.jl — end-to-end Metal parity for the seven
+# gpu_validate_soilhydrology_e2e.jl — end-to-end GPU parity for the seven
 # A8 soil-hydrology functions whose per-column / per-(c,j) loops are now
 # KernelAbstractions kernels:
 #
@@ -9,7 +9,7 @@
 #
 # Builds a small Float32 instance covering the major branches (one non-urban
 # soil column + one urban impervious-roof column), runs each WHOLE function on
-# the CPU, adapts every state struct (+ masks) to Metal, runs the SAME calls on
+# the CPU, adapts every state struct (+ masks) to the GPU, runs the SAME calls on
 # the device, and compares every mutated field with a NaN-aware reldiff.
 #
 #   julia --project=scripts scripts/gpu_validate_soilhydrology_e2e.jl
@@ -17,7 +17,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -138,7 +137,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soil-hydrology A8 functions (7 whole fns)")
+    println("END-TO-END GPU parity for soil-hydrology A8 functions (7 whole fns)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU exercised by the suite).")
@@ -150,11 +149,11 @@ function main(backend)
     H = build(FT)   # CPU reference
     B = build(FT)   # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = (; soilhyd = ad(B.S.soilhyd), soilstate = ad(B.S.soilstate),
             wsb = ad(B.S.wsb), wdb = ad(B.S.wdb), wfb = ad(B.S.wfb))
 
-    if !(Sd.wfb.wf.qflx_infl_col isa Metal.MtlArray)
+    if !(Sd.wfb.wf.qflx_infl_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

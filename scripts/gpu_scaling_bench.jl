@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_scaling_bench.jl — CPU-vs-Metal scaling of a whole clm_drv! biogeophys
+# gpu_scaling_bench.jl — CPU-vs-GPU scaling of a whole clm_drv! biogeophys
 # step as the column count N grows. Single-column is GPU-hostile (all launch +
 # marshaling overhead, no parallelism); this finds the crossover where the GPU
 # overtakes the CPU and the asymptotic speedup, to extrapolate continental scale.
@@ -10,11 +10,10 @@
 # meaningful even while other Metal work runs in the background).
 # ==========================================================================
 using CLM, Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
 include(joinpath(@__DIR__, "clmdrv_make_data.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 const DRV = (true, 1.0, 0.0, 0.0, 0.4091, false, false, "20260101", false)
 const CFG = CLM.CLMDriverConfig(use_cn=false)   # biogeophys (SP) step — the parity path's bulk
@@ -33,15 +32,15 @@ function bench_N(N; ktrial=5)
     tcpu = bestof(() -> step!(inst, filt, fia, bounds, ps), ktrial)
     # ---- Metal ----
     inst_d = mf(inst); ps_d = mf(ps); filt_d = mf(filt); fia_d = mf(fia)
-    inst_d.temperature.t_soisno_col isa Metal.MtlArray || return (N, tcpu, NaN, NaN)
-    step!(inst_d, filt_d, fia_d, bounds, ps_d); Metal.synchronize()   # warmup / compile
-    tgpu = bestof(() -> (step!(inst_d, filt_d, fia_d, bounds, ps_d); Metal.synchronize()), ktrial)
+    inst_d.temperature.t_soisno_col isa device_array_type() || return (N, tcpu, NaN, NaN)
+    step!(inst_d, filt_d, fia_d, bounds, ps_d); device_synchronize()   # warmup / compile
+    tgpu = bestof(() -> (step!(inst_d, filt_d, fia_d, bounds, ps_d); device_synchronize()), ktrial)
     return (N, tcpu, tgpu, tcpu / tgpu)
 end
 
 function main()
     println("="^68)
-    println("  clm_drv! (biogeophys) CPU-vs-Metal scaling — one step, min-of-trials")
+    println("  clm_drv! (biogeophys) CPU-vs-GPU scaling — one step, min-of-trials")
     println("="^68)
     @printf("  %10s %12s %12s %10s\n", "N cols", "CPU (ms)", "GPU (ms)", "speedup")
     println("  " * "-"^46)

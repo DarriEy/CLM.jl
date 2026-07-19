@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_dyn_cnbal_col_e2e.jl — whole-function Metal parity for
+# gpu_validate_dyn_cnbal_col_e2e.jl — whole-function GPU parity for
 # dyn_cnbal_col! (the dyn_cnbal SOIL column-state conservation path): for every
 # decomp pool / level it conservatively redistributes the vertically-resolved
 # soil C/N pools across shrinking/growing columns (via the column-state updater)
@@ -15,7 +15,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -79,7 +78,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("WHOLE-FN Metal parity for dyn_cnbal_col! (dyn_cnbal soil-column C/N path)")
+    println("WHOLE-FN GPU parity for dyn_cnbal_col! (dyn_cnbal soil-column C/N path)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -90,10 +89,10 @@ function main(backend)
     bH, colH, csuH, scH, snH = build()
     CLM.dyn_cnbal_col!(bH, 1, csuH, colH, scH, snH)
 
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     bD, colD, csuD, scD, snD = build()
     csuD = mf(csuD); colD = mf(colD); scD = mf(scD); snD = mf(snD)
-    if !(scD.decomp_cpools_vr_col isa Metal.MtlArray)
+    if !(scD.decomp_cpools_vr_col isa device_array_type())
         println("  BLOCKED: soil BGC state did not move to the device."); return 2
     end
     CLM.dyn_cnbal_col!(bD, 1, csuD, colD, scD, snD)

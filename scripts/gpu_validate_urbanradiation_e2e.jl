@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_urbanradiation_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_urbanradiation_e2e.jl — end-to-end GPU parity for the WHOLE
 # urban canyon radiation function urban_radiation! (which internally drives the
 # kernelized net_longwave! canyon longwave solve).
 #
@@ -18,7 +18,7 @@
 #          while the longwave canyon solve still runs.
 #
 # Runs urban_radiation! WHOLE on the CPU, adapts every state struct (+ masks /
-# forcing) to Metal, runs the SAME call on the device, and compares every
+# forcing) to the GPU, runs the SAME call on the device, and compares every
 # mutated field with reldiff.
 #
 # CRITICAL: every required param/input is a real CLM default so the CPU
@@ -30,7 +30,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -165,11 +164,11 @@ function validate(name, to, FT, daytime)
     H = build(FT; daytime = daytime)   # CPU reference
     B = build(FT; daytime = daytime)   # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     dmask(m) = to(collect(Bool, m))
 
-    if !(Sd.solarabs.sabg_patch isa Metal.MtlArray)
+    if !(Sd.solarabs.sabg_patch isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end
@@ -222,7 +221,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for urban_radiation! (canyon longwave + solar)")
+    println("END-TO-END GPU parity for urban_radiation! (canyon longwave + solar)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")

@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_urbanfluxes_e2e.jl — end-to-end Metal parity for the
+# gpu_validate_urbanfluxes_e2e.jl — end-to-end GPU parity for the
 # column-INDEPENDENT, device-resident portion of urban_fluxes! run WHOLE on the
 # GPU: urban_fluxes_diagnostics!.
 #
@@ -9,7 +9,7 @@
 # instance with ALL FIVE urban column types (roof / sunwall / shadewall /
 # road_imperv / road_perv) wired one-patch-per-column, PLUS a non-urban landunit so
 # the SPVAL-restart branch is exercised, runs urban_fluxes_diagnostics! on the CPU,
-# adapts every state struct + masks + forcing to Metal, runs the SAME call on the
+# adapts every state struct + masks + forcing to the GPU, runs the SAME call on the
 # device, and compares every mutated field with reldiff.
 #
 # The iterative canyon-air solve (canyontop wind, stability iteration via
@@ -22,7 +22,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence). Asserts the
@@ -191,13 +190,13 @@ end
 
 function main_canyon(name, to, FT)
     println("\n" * "=" ^ 70)
-    println("END-TO-END Metal parity for urban_fluxes_canyon_surface! (per-patch flux block)")
+    println("END-TO-END GPU parity for urban_fluxes_canyon_surface! (per-patch flux block)")
     println("=" ^ 70)
 
     H = build_canyon(FT)
     B = build_canyon(FT)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     Wd = (; wts = ad(B.W.wts), wtq = ad(B.W.wtq),
             ramu = to(B.W.ramu), zeta_lunit = to(B.W.zeta_lunit),
@@ -206,7 +205,7 @@ function main_canyon(name, to, FT)
             forc_rho_grc = to(B.W.forc_rho_grc), forc_u_grc = to(B.W.forc_u_grc),
             forc_v_grc = to(B.W.forc_v_grc))
 
-    if !(Sd.energyflux.cgrnd_patch isa Metal.MtlArray)
+    if !(Sd.energyflux.cgrnd_patch isa device_array_type())
         println("  BLOCKED: energyflux did not move to the device under adapt.")
         return 2
     end
@@ -387,19 +386,19 @@ end
 function main_full(name, to, FT; lowwind::Bool=false)
     tag = lowwind ? "LOW-WIND" : "DAY"
     println("\n" * "=" ^ 70)
-    println("END-TO-END Metal parity for the WHOLE urban_fluxes! ($tag) — incl. iterative solve")
+    println("END-TO-END GPU parity for the WHOLE urban_fluxes! ($tag) — incl. iterative solve")
     println("=" ^ 70)
 
     H = build_full(FT; lowwind=lowwind)
     B = build_full(FT; lowwind=lowwind)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     Fd = (; forc_t = to(B.F.forc_t), forc_th = to(B.F.forc_th), forc_rho = to(B.F.forc_rho),
             forc_q = to(B.F.forc_q), forc_pbot = to(B.F.forc_pbot),
             forc_u = to(B.F.forc_u), forc_v = to(B.F.forc_v))
 
-    if !(Sd.temperature.taf_lun isa Metal.MtlArray)
+    if !(Sd.temperature.taf_lun isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end
@@ -464,7 +463,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for urban_fluxes_diagnostics! (device passes)")
+    println("END-TO-END GPU parity for urban_fluxes_diagnostics! (device passes)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -476,11 +475,11 @@ function main(backend)
     H = build(FT)   # CPU reference
     B = build(FT)   # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     dmask(m) = to(collect(Bool, m))
 
-    if !(Sd.temperature.taf_lun isa Metal.MtlArray)
+    if !(Sd.temperature.taf_lun isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

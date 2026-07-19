@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_dyn_column_state_updater.jl — Metal parity for the dyn_subgrid
+# gpu_validate_dyn_column_state_updater.jl — GPU parity for the dyn_subgrid
 # COLUMN-state conservative updater (the update path: gridcell reduction-scatter
 # of shrinking-column mass, per-gridcell finalize, distribute-to-growing-columns).
 #
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -65,7 +64,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("Metal parity for the dyn_subgrid COLUMN-state updater (conservation core)")
+    println("GPU parity for the dyn_subgrid COLUMN-state updater (conservation core)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -73,7 +72,7 @@ function main(backend)
     name, _, FT = backend
     @printf("  Backend: %s   (working precision: %s)\n", name, FT)
 
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     nfail = 0
     report(nm, a, b) = begin
         dd = reldiff(a, b); ok = dd < 1f-3
@@ -91,7 +90,7 @@ function main(backend)
     csuD = mf(prep_updater(bD, grcD, lunD, colD, [0.1, 0.5, 0.4]))
     colDm = mf(colD)
     varD = mf([10.0, 4.0, 7.0]); adjD = mf(zeros(3))
-    if !(csuD.area_gained_col isa Metal.MtlArray)
+    if !(csuD.area_gained_col isa device_array_type())
         println("  BLOCKED: ColumnStateUpdater did not move to the device."); return 2
     end
     CLM.update_column_state_no_special_handling!(csuD, b, 1, colDm, varD; adjustment=adjD)

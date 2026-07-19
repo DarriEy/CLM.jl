@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_fire_area_li2021_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_fire_area_li2021_e2e.jl — end-to-end GPU parity for the WHOLE
 # cnfire_area_li2021! burned-area driver (revised fire-occurrence formulation:
 # rswf-rescaled btran, no bt clamp, revised deforestation cli
 # lightning normalization, and the AD-spinup fuel branch).
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -120,7 +119,7 @@ const OUT_FIELDS = (:farea_burned_col, :nfire_col, :fbac_col, :fbac1_col, :baf_c
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for cnfire_area_li2021! (Li2021 burned area)")
+    println("END-TO-END GPU parity for cnfire_area_li2021! (Li2021 burned area)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -134,8 +133,8 @@ function main(backend)
 
     run_area!(H)   # CPU reference
 
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mb(x) = Metal.MtlArray(collect(x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mb(x) = device_array_type()(collect(x))
 
     D = (; fire_li2014=mf(B.fire_li2014), pftcon_li2014=mf(B.pftcon_li2014),
         fire_data=mf(B.fire_data), cnfire_const=B.cnfire_const, cnfire_params=B.cnfire_params,
@@ -153,7 +152,7 @@ function main(backend)
         np=B.np, nc=B.nc, ng=B.ng, nlevgrnd=B.nlevgrnd, nlevdecomp=B.nlevdecomp,
         ndecomp_pools=B.ndecomp_pools)
 
-    if !(D.cnveg_state.farea_burned_col isa Metal.MtlArray)
+    if !(D.cnveg_state.farea_burned_col isa device_array_type())
         println("  BLOCKED: cnveg_state did not move to the device."); return 2
     end
 

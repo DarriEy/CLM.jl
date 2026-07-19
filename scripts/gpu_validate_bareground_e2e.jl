@@ -1,12 +1,12 @@
 # ==========================================================================
-# gpu_validate_bareground_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_bareground_e2e.jl — end-to-end GPU parity for the WHOLE
 # bareground_fluxes! driver (Phase 1 init + Phase 2 Monin-Obukhov init +
 # Phase 3 stability iteration (friction_velocity! + stability kernel) +
 # Phase 4 post-iteration fluxes / diagnostics).
 #
 # Mirrors test/test_bareground_fluxes.jl's single-patch smoke setup at Float32,
 # runs bareground_fluxes! on the CPU, adapts every state struct (and the forcing
-# arrays the kernels touch) to Metal, runs the SAME call on the device, and
+# arrays the kernels touch) to the GPU, runs the SAME call on the device, and
 # compares the mutated outputs with reldiff.
 #
 # CRITICAL: every required scalar param / input is set to a real CLM default so
@@ -19,7 +19,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -131,7 +130,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for bareground_fluxes! (whole driver)")
+    println("END-TO-END GPU parity for bareground_fluxes! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -145,12 +144,12 @@ function main(backend)
     setconfig!()
     B = build(FT)   # device copy
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     forc_d = (; (k => ad(getfield(B.forc, k)) for k in keys(B.forc))...)
     mask_d = B.mask   # host-only mask (kept on host by design)
 
-    if !(Sd.temperature.t_veg_patch isa Metal.MtlArray)
+    if !(Sd.temperature.t_veg_patch isa device_array_type())
         println("  BLOCKED: a bareground state struct did not move to the device under adapt.")
         return 2
     end

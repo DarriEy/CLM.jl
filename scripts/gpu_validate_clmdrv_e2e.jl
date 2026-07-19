@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_clmdrv_e2e.jl — WHOLE-TIMESTEP Metal parity for clm_drv!.
+# gpu_validate_clmdrv_e2e.jl — WHOLE-TIMESTEP GPU parity for clm_drv!.
 #
 # Runs the ACTUAL top-level `clm_drv!` driver (the full biogeophys/hydrology
 # chain: drv_init -> radiation -> fluxes -> soil temp/water -> snow -> hydrology
@@ -16,13 +16,12 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # Float32 down-adaptor (arrays + ::FT scalars -> Float32, concrete-Float64 scalars
 # kept) — shared across the gpu_validate_* harnesses; see gpu_adapt.jl.
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 # Finite-only relative diff: compares only entries finite on BOTH backends (the
 # minimal smoke-test fixture leaves much of the physics NaN/Inf on both). Returns
@@ -71,7 +70,7 @@ end
 
 function main(backend)
     println("="^72)
-    println("WHOLE-TIMESTEP Metal parity for clm_drv! (default biogeophys path)")
+    println("WHOLE-TIMESTEP GPU parity for clm_drv! (default biogeophys path)")
     println("="^72)
     if backend === nothing
         println("  No GPU backend — CPU path exercised by the suite.")
@@ -95,7 +94,7 @@ function main(backend)
     filt_d = mf(filtB)
     filt_ia_d = mf(filt_iaB)
 
-    if !(inst_d.temperature.t_soisno_col isa Metal.MtlArray)
+    if !(inst_d.temperature.t_soisno_col isa device_array_type())
         println("  BLOCKED: inst tree did not move to the device under mf().")
         return 2
     end

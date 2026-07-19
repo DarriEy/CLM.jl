@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_soiltemp_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_soiltemp_e2e.jl — end-to-end GPU parity for the WHOLE
 # soil_temperature! driver (not just its individual kernels).
 #
 # Builds a small Float32 instance (one soil column), runs soil_temperature! on the CPU,
@@ -13,7 +13,6 @@
 
 using CLM
 using Printf
-import Metal   # this e2e is Metal-specific; MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 const NS = 5; const NG = 10; const NU = 5; const NMAX = 10; const NSOI = 8
@@ -117,7 +116,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soil_temperature! (whole driver)")
+    println("END-TO-END GPU parity for soil_temperature! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -142,9 +141,9 @@ function main(backend)
         dt = FT(1800)
 
         # Device snapshot of the populated initial state (adapt copies), BEFORE the CPU run mutates B.
-        # NB: the Adapt adaptor must be the device ARRAY TYPE (Metal.MtlArray), not the `to`
+        # NB: the Adapt adaptor must be the device ARRAY TYPE (device_array_type()), not the `to`
         # converter function — adapt(::Function, x) is a silent no-op.
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         D = (; nc = B.nc, np = B.np, nl = B.nl,
             col = ad(B.col), lun = ad(B.lun), patch = ad(B.patch), temp = ad(B.temp),
             ef = ad(B.ef), ss = ad(B.ss), wsb = ad(B.wsb), wdb = ad(B.wdb), wfb = ad(B.wfb),
@@ -156,7 +155,7 @@ function main(backend)
         # Sanity: every adapted struct field must have actually moved to the device. Structs
         # whose fields are pinned to `Vector{FT}`/`Matrix{FT}` (rather than a loose array-type
         # param) are a no-op under adapt and would hand a host Array to a device kernel.
-        if !(D.wdb.frac_sno_eff_col isa Metal.MtlArray)
+        if !(D.wdb.frac_sno_eff_col isa device_array_type())
             println("  BLOCKED: WaterDiagnosticBulkData did not move to the device under adapt.")
             println("           Its fields are typed ::Vector{FT}/::Matrix{FT} (pinned), unlike the")
             println("           other 11 state structs (loose array-type params, which adapted fine).")

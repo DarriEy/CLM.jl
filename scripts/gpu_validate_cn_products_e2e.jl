@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_cn_products_e2e.jl — end-to-end Metal parity for the wood/crop
+# gpu_validate_cn_products_e2e.jl — end-to-end GPU parity for the wood/crop
 # product-pool partitioning: cn_products_partition_wood_fluxes! +
 # cn_products_partition_crop_fluxes! (per-fp filter kernels, the kernelized
 # unity-scale p2g_1d! patch->gridcell average, and the dwt patch->gridcell
@@ -9,7 +9,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -60,13 +59,13 @@ function run_both!(d)
 end
 
 function main(backend)
-    println("=" ^ 66); println("END-TO-END Metal parity for cn_products partition fns"); println("=" ^ 66)
+    println("=" ^ 66); println("END-TO-END GPU parity for cn_products partition fns"); println("=" ^ 66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = build(); B = build()
     run_both!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     md(x) = mf(x)
     # col/lun/bounds stay host (unity p2g path doesn't use them).
     D = (; prod=mf(B.prod), pch=mf(B.pch), col=B.col, lun=B.lun, bounds=B.bounds,
@@ -75,7 +74,7 @@ function main(backend)
          crop_harv=mf(B.crop_harv), dwt_crop=mf(B.dwt_crop),
          pprod10=mf(B.pprod10), pprod100=mf(B.pprod100), pprodharv10=mf(B.pprodharv10),
          np=B.np, ng=B.ng)
-    if !(D.prod.gru_prod10_gain_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.prod.gru_prod10_gain_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_both!(D)
     checks = [("gru_prod10_gain_patch", H.prod.gru_prod10_gain_patch, D.prod.gru_prod10_gain_patch),
               ("gru_prod100_gain_patch", H.prod.gru_prod100_gain_patch, D.prod.gru_prod100_gain_patch),
