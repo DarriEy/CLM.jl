@@ -192,7 +192,7 @@ CTSM `clm5_0` / non-FATES → **`.true.`**. CLM.jl defaults **`false`**.
 Consequence: no LUNA photosynthetic-N acclimation, so `vcmax25` is the static
 PFT value rather than the acclimated `vcmx25_z`.
 
-### M5 — `create_crop_landunit` (MISMATCH, live)
+### M5 — `create_crop_landunit` (FIXED — was MISMATCH, live)
 
 ```xml
 <create_crop_landunit     use_fates=".false.">.true.</create_crop_landunit>
@@ -200,9 +200,21 @@ PFT value rather than the acclimated `vcmx25_z`.
 ```
 
 CTSM keys this on **`use_fates`**, not on `use_crop`: for any non-FATES run it is
-`.true.`. `clm_initialize.jl:138` sets `varctl.create_crop_landunit = use_crop`,
-so a non-FATES, non-crop run gets `.false.` where CTSM gives `.true.`. Live
-(4 reads in `src/`) — it affects subgrid landunit construction.
+`.true.`. `clm_initialize.jl:138` used to set
+`varctl.create_crop_landunit = use_crop`, so a non-FATES, non-crop run got
+`.false.` where CTSM gives `.true.`. Live (4 reads in `src/`) — it affects
+subgrid landunit construction.
+
+**Fixed:** `clm_initialize.jl` now derives `!use_fates`, and `varpar_init!`
+(`varpar.jl`) branches on `varctl.create_crop_landunit` rather than
+`varctl.use_crop`, mirroring `clm_varpar.F90:209`.
+
+The `VarCtl` struct field default stays `false` — that is *correct*, mirroring
+CTSM's code fallback `clm_varctl.F90:154`. Only the derivation (CTSM's
+`CLMBuildNamelist` step) and the `varpar_init!` branch were wrong. A consequence
+worth stating: tests that call `varpar_init!` directly without setting the flag
+keep the old `cft_size = 0` behaviour, so the change is confined to the driver
+path.
 
 **Verified against CTSM source (2026-07-19).** The default is not merely a
 namelist preference — for a non-FATES run CTSM makes `.false.` a *fatal build
@@ -239,7 +251,7 @@ entirely on whether the surfdata has crop area:
 | surfdata | `PCT_CROP` | subgrid change |
 |---|---|---|
 | `domain_Bow_at_Banff_lumped` (and every scorecard domain checked: Stillwater, Donga, HubbardBrook, Tagus, Cropland_Mead) | `0` | **none** — `nl/nc/np = 2/2/4` both ways, identical landunit types and weights |
-| `crop_cft_surfdata/surfdata_cropCFT_USplains_1pt.nc` | `45.01%` | **structural** — `nl/nc/np` `4/12/16` → `5/13/17`; `wt_lunit[ISTSOIL]` `0.9628` → `0.5127` with a new `ISTCROP` landunit at `0.4501` |
+| `crop_cft_surfdata/surfdata_cropCFT_USplains_1pt.nc` | `45.01%` | **structural** — `nl/nc/np` `4/12/16` → `5/16/20`; `wt_lunit[ISTSOIL]` `0.9628` → `0.5127` with a new `ISTCROP` landunit at `0.4501`, carrying 4 crop patches `[17, 19, 23, 75]` (corn / spring wheat / soybean / generic, rainfed-only at `irrigate=false`) |
 
 So the divergence is **latent on every domain this port currently validates**:
 `set_landunit_crop_noncompete!` returns early on
@@ -514,7 +526,7 @@ CN campaign outright.
 |---|---|
 | Flags audited | **~110** (16 driver-entry keywords + 79 `varctl` fields + `CLMDriverConfig` switches + the `use_flexibleCN` cascade) |
 | MATCH | ~85 |
-| MISMATCH — live physics | **6** (`use_aquifer_layer`, `baseflow_scalar`, `use_hydrstress`, `use_luna`, `create_crop_landunit`, `convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg) |
+| MISMATCH — live physics | **5** (`use_aquifer_layer`, `baseflow_scalar`, `use_hydrstress`, `use_luna`, `convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). `create_crop_landunit` was the 6th — **fixed**, see M5 |
 | MISMATCH — inert (0 reads / guarded) | 12 (`nsegspc`, `nyr_forcing`, `h2osno_max`, `n_dom_landunits`, `n_dom_pfts`, 6× `toosmall_*`, `downscale_hillslope_meteorology`, `z0param_method`) |
 | CONDITIONAL-MISMATCH under `use_cn=true` | 8 (the `use_flexibleCN` cascade, M6) |
 | Namelist-vs-code-fallback disagreements found | **14** — CLM.jl copied the code fallback in *every* case |
