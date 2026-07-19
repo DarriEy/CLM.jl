@@ -1922,6 +1922,7 @@ function canopy_fluxes_core!(
                 mask_exposedvegp, bounds_patch, "sha";
                 use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
                 leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft_s,
+                vcmaxcint_sun=vcmaxcint_sun_patch,
                 overrides=overrides)
           end  # use_hydrstress
 

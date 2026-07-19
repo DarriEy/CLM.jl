@@ -1530,30 +1530,39 @@ end
 # scratch matrices; lmr_z is the phase-selected ps field.
 @kernel function _psn_pass2_kernel!(ps, kn, jmax_z_local, @Const(mask_patch),
         @Const(ivt), @Const(slatop_pft), @Const(leafcn_pft), @Const(flnr_pft),
-        @Const(fnitr_pft), @Const(lmr_intercept_atkin), @Const(dayl_factor), @Const(t10), @Const(t_veg),
+        @Const(fnitr_pft), @Const(lmr_intercept_atkin), @Const(crop_pft),
+        @Const(dayl_factor), @Const(t10), @Const(t_veg),
         @Const(btran), @Const(tlai_z), @Const(par_z_in), @Const(vcmaxcint),
-        @Const(nrad), prm, vcmax25_scale, jmax25top_sf_val, leaf_mr_vcm,
-        use_cn::Bool, light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
+        @Const(vcmaxcint_sun), @Const(nrad), prm, vcmax25_scale, jmax25top_sf_val,
+        leaf_mr_vcm, use_cn::Bool, use_luna::Bool,
+        light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
         is_sun::Bool, leafresp_ryan::Int)
     p = @index(Global)
     _psn_pass2_body!(p, ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft, leafcn_pft,
-        flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
-        par_z_in, vcmaxcint, nrad, prm, vcmax25_scale, jmax25top_sf_val, leaf_mr_vcm,
-        use_cn, light_inhibit, leafresp_method, nlevcan, is_sun, leafresp_ryan)
+        flnr_pft, fnitr_pft, lmr_intercept_atkin, crop_pft, dayl_factor, t10, t_veg,
+        btran, tlai_z, par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, vcmax25_scale,
+        jmax25top_sf_val, leaf_mr_vcm, use_cn, use_luna, light_inhibit, leafresp_method,
+        nlevcan, is_sun, leafresp_ryan)
 end
 
 # Shared per-patch body for Pass 2 (KA kernel + AD host loop) — see _photosynth_ci_body!.
 @inline function _psn_pass2_body!(p, ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-        leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg,
-        btran, tlai_z, par_z_in, vcmaxcint, nrad, prm, vcmax25_scale, jmax25top_sf_val,
-        leaf_mr_vcm, use_cn::Bool, light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
-        is_sun::Bool, leafresp_ryan::Int)
+        leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, crop_pft, dayl_factor, t10,
+        t_veg, btran, tlai_z, par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, vcmax25_scale,
+        jmax25top_sf_val, leaf_mr_vcm, use_cn::Bool, use_luna::Bool, light_inhibit::Bool,
+        leafresp_method::Int, nlevcan::Int, is_sun::Bool, leafresp_ryan::Int)
     @inbounds if mask_patch[p]
         T = eltype(t_veg)
         ivt_p = ivt[p]
         lmr_z = is_sun ? ps.lmrsun_z_patch : ps.lmrsha_z_patch
         vcmax_z = ps.vcmax_z_patch; tpu_z = ps.tpu_z_patch; kp_z = ps.kp_z_patch
         c3flag_p = ps.c3flag_patch[p]
+        vcmx25_z = ps.vcmx25_z_patch; jmx25_z = ps.jmx25_z_patch
+        # LUNA acclimation applies to non-crop C3 patches only
+        # (PhotosynthesisMod.F90:1721/1748 `use_luna .and. c3flag .and. crop(ivt)==0`).
+        # `crop_pft` is 0/1 valued, so round(Int,·)==0 ⟺ <0.5 (see _psn_phs_pass4_body!).
+        # Short-circuits before indexing, so crop_pft may be empty when use_luna=false.
+        luna_p = use_luna && c3flag_p && !(crop_pft[ivt_p] > T(0.5))
 
         lnc_p = one(T) / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
         ps.lnca_patch[p] = lnc_p
@@ -1607,6 +1616,14 @@ end
                 nscaler = exp(-kn[p] * laican)
             end
             lmr25 = lmr25top * nscaler
+            # LUNA leaf-respiration base rate: with LUNA but no prognostic CN, leaf
+            # maintenance respiration scales with the LUNA-acclimated vcmax25 (vcmx25_z)
+            # instead of the static lnc-based vcmax25top*nscaler. With CN on, leaf N
+            # already predicts respiration (lmr25top above) and LUNA does not override.
+            # PhotosynthesisMod.F90:1721-1725.
+            if luna_p && !use_cn
+                lmr25 = T(leaf_mr_vcm) * vcmx25_z[p, iv]
+            end
             if c3flag_p
                 lmr_z[p, iv] = lmr25 * ft_photo(t_veg[p], prm.lmrha) *
                                fth_photo(t_veg[p], prm.lmrhd, prm.lmrse, prm.lmrc)
@@ -1618,9 +1635,26 @@ end
                 vcmax_z[p, iv] = zero(T); jmax_z_local[p, iv] = zero(T)
                 tpu_z[p, iv] = zero(T); kp_z[p, iv] = zero(T)
             else
-                vcmax25 = vcmax25top * nscaler
-                jmax25  = jmax25top * nscaler
-                tpu25   = tpu25top * nscaler
+                # LUNA-acclimated vcmax25/jmax25 override the static lnc-based
+                # vcmax25top*nscaler. tpu25 is re-derived from the LUNA vcmax25.
+                # The shaded phase rescales by the canopy sun/sha integration ratio
+                # (LUNA acclimates a SUNLIT-average vcmx25_z). kp25 stays on the
+                # static profile in both cases. PhotosynthesisMod.F90:1748-1763.
+                if luna_p
+                    vcmax25 = vcmx25_z[p, iv]
+                    jmax25  = jmx25_z[p, iv]
+                    tpu25   = prm.tpu25ratio * vcmax25
+                    if !is_sun && vcmaxcint_sun[p] > zero(T) && nlevcan == 1
+                        _luna_r = vcmaxcint[p] / vcmaxcint_sun[p]
+                        vcmax25 = vcmax25 * _luna_r
+                        jmax25  = jmax25 * _luna_r
+                        tpu25   = tpu25 * _luna_r
+                    end
+                else
+                    vcmax25 = vcmax25top * nscaler
+                    jmax25  = jmax25top * nscaler
+                    tpu25   = tpu25top * nscaler
+                end
                 kp25    = kp25top * nscaler
                 vcmaxse = (T(668.39) - T(1.07) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.vcmaxse_sf
                 jmaxse  = (T(659.70) - T(0.75) * smooth_clamp(t10[p] - T(TFRZ), T(11.0), T(35.0))) * prm.jmaxse_sf
@@ -1651,9 +1685,9 @@ end
 end
 
 function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-        leafcn_pft, flnr_pft, fnitr_pft, dayl_factor, t10, t_veg, btran, tlai_z,
-        par_z_in, vcmaxcint, nrad, use_cn::Bool, leaf_mr_vcm, nlevcan::Int,
-        is_sun::Bool, overrides, bounds_patch)
+        leafcn_pft, flnr_pft, fnitr_pft, crop_pft, dayl_factor, t10, t_veg, btran, tlai_z,
+        par_z_in, vcmaxcint, vcmaxcint_sun, nrad, use_cn::Bool, use_luna::Bool,
+        leaf_mr_vcm, nlevcan::Int, is_sun::Bool, overrides, bounds_patch)
     T = eltype(t_veg)
     lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
     prm = (fnr = T(params_inst.fnr), act25 = T(params_inst.act25),
@@ -1674,17 +1708,19 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
     if _PSN_CI_AD_HOSTLOOP[]
         @inbounds for p in 1:length(bounds_patch)
             _psn_pass2_body!(p, dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-                leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
-                par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
-                T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
+                leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, crop_pft, dayl_factor,
+                t10, t_veg, btran, tlai_z,
+                par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, T(overrides.vcmax25_scale),
+                T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, use_luna, ps.light_inhibit,
                 ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991)
         end
     else
         be = _kernel_backend(t_veg)
         _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-            leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, dayl_factor, t10, t_veg, btran, tlai_z,
-            par_z_in, vcmaxcint, nrad, prm, T(overrides.vcmax25_scale),
-            T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, ps.light_inhibit,
+            leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, crop_pft, dayl_factor,
+            t10, t_veg, btran, tlai_z,
+            par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, T(overrides.vcmax25_scale),
+            T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, use_luna, ps.light_inhibit,
             ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991;
             ndrange = length(bounds_patch))
         KA.synchronize(be)
@@ -2306,6 +2342,11 @@ function photosynthesis!(ps,
                          use_c13::Bool=false,
                          leaf_mr_vcm::Real=0.015,
                          crop_pft::AbstractVector{<:Real}=Float64[],
+                         # Sunlit canopy-integration factor. Only read on the LUNA
+                         # shaded-phase path, which rescales the (sunlit-average)
+                         # vcmx25_z by vcmaxcintsha/vcmaxcintsun. On the "sun" phase
+                         # `vcmaxcint` already IS the sunlit factor.
+                         vcmaxcint_sun::AbstractVector{<:Real}=Float64[],
                          # Calibration overrides (NaN = use defaults)
                          overrides::CalibrationOverrides=CalibrationOverrides())
     # Aliases for output arrays based on phase
@@ -2377,9 +2418,23 @@ function photosynthesis!(ps,
         forc_pbot, oair, t_veg, btran, stomatalcond_mtd, bounds_patch)
 
     # ---- Pass 2: Nitrogen profile and vcmax (kernelized) ----
+    # LUNA inputs. These are only READ when use_luna is true, but a use_luna caller
+    # that fails to supply them would silently fall back to the static (LUNA-free)
+    # vcmax profile — the exact "wired but no-op" failure this branch was missing
+    # for. So demand them loudly instead.
+    if use_luna
+        isempty(ps.vcmx25_z_patch) && error("photosynthesis!: use_luna=true but " *
+            "ps.vcmx25_z_patch is empty — call photosynthesis_data_init!(...; use_luna=true).")
+        isempty(crop_pft) && error("photosynthesis!: use_luna=true requires crop_pft " *
+            "(LUNA acclimation applies to non-crop C3 patches only).")
+        (phase != "sun" && isempty(vcmaxcint_sun)) && error("photosynthesis!: " *
+            "use_luna=true with phase=\"$(phase)\" requires vcmaxcint_sun to rescale the " *
+            "sunlit-average vcmx25_z to the shaded canopy.")
+    end
     psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-        leafcn_pft, flnr_pft, fnitr_pft, dayl_factor, t10, t_veg, btran, tlai_z,
-        par_z_in, vcmaxcint, nrad, use_cn, leaf_mr_vcm, nlevcan,
+        leafcn_pft, flnr_pft, fnitr_pft, crop_pft, dayl_factor, t10, t_veg, btran, tlai_z,
+        par_z_in, vcmaxcint, (phase == "sun" ? vcmaxcint : vcmaxcint_sun), nrad,
+        use_cn, use_luna, leaf_mr_vcm, nlevcan,
         phase == "sun", overrides, bounds_patch)
 
     # ---- Pass 3: Leaf-level photosynthesis and stomatal conductance ----
