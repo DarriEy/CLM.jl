@@ -409,6 +409,91 @@ test while moving nothing — the exact failure #218, #253 and #266 each refused
 Until (1) exists, **`n_soyfix!` is blocked on a reference-configuration gap, not
 on Julia code.** The port side is ready; the ground truth is not.
 
+## 3e. Second blocker, found by generating the run: `fpg ≡ 1` (N-replete site)
+
+Flipping `use_fun` was necessary but **not sufficient**. A fresh cold-start
+non-FUN spin-up was generated (`crop_ref_nofun_cold`, 5 model years
+2016-2020, ~2.5 min wall) with the instrumented dump described below.
+`CNSoyfix` now genuinely executes — and still returns 0, for a **third,
+different reason**.
+
+At `n39870` (2020-07-19), soybean patches p0 = 9 / 10:
+
+| Input | p0 = 9 | p0 = 10 | Gate |
+|---|---|---|---|
+| `CROPLIVE` | 1 | 1 | (A) PASS |
+| itype | 23 | 24 | (B) PASS |
+| `HUI` | 568.226 | 567.706 | — |
+| `GDDMATURITY` | 1304.541 | 1303.836 | — |
+| `GDDfrac` | 0.4356 | 0.4354 | `fxg` = **1** (plateau) |
+| `WF` | 0.4547 | 0.4723 | `fxw` = 0.535 / 0.556 |
+| `SMINN` | 19.765 | 19.241 | `fxn` = 0.512 / 0.538 |
+| `PLANT_NDEMAND` | 1.46898e-7 | 1.47982e-7 | non-zero — the non-FUN path computes it |
+| **`FPG`** | **1.000000** | **1.000000** | **(C) FAIL** |
+| `SOYFIXN` | 0.0 | 0.0 | correct given (C) |
+
+Every other gate passes and every other factor is favourable. `fpg` is
+**exactly 1.0 on all eight crop columns**: the soil mineral-N pool
+(`SMINN` ≈ 19-41 gN/m²) vastly exceeds plant demand (≈1.5e-7 gN/m²/s), so the
+plants get 100% of the N they ask for. `soy_ndemand = pnd*(1 - fpg) = 0`, and
+`CNSoyfix` returns 0 **correctly**. This is a true computed zero — the routine
+is live, the physics simply has no N deficit to fix.
+
+So `SOYFIXN ≡ 0` has now been traced through **three** distinct causes, only the
+first of which is a "window" question:
+
+1. **May window** — `GDDfrac` = 0.0516 → `fxg` = 0. Timing.
+2. **Both existing windows** — `use_fun = .true.` → routine never called. Config.
+3. **Non-FUN cold run** — `fpg` = 1 → no N deficit. **Site N status.**
+
+**A reference for `n_soyfix!` requires an N-LIMITED soybean column**
+(`fpg < 1`), not merely a later date. The natural lever is
+`use_fertilizer = .false.` (a runtime flag, no rebuild), which removes the
+`FERT` N subsidy that is holding `fpg` at 1; ndep reduction or a longer
+N-depleting spin-up are alternatives. Whether that is enough to push `fpg`
+below 1 at this site is an empirical question, and it must be **verified in the
+dump, not assumed** — the same rule that caught causes (2) and (3).
+
+## 3f. Instrumentation added (reusable — this is what made the diagnosis possible)
+
+The existing bgcdump carried only `SOYFIXN`, which is why two prior attempts
+could only report "it's zero" without knowing why. Two SourceMods changes in
+`installs/clm/cases/symfluence_build/SourceMods/src.clm/` now expose the whole
+criterion:
+
+1. **`bgcdumpMod.F90`** — dumps `CNSoyfix`'s five inputs alongside its output:
+   `FPG`, `SMINN`, `WF` (column) and `PLANT_NDEMAND`, `GDDMATURITY` (patch).
+   With these, each of `fxw`/`fxn`/`fxg`/`fxr` can be validated in isolation
+   rather than through one end-to-end number that many wrong formulas reproduce.
+2. **`CNDriverMod.F90`** — a new dump point `bgcdump_write(bounds,'after_soyfix')`
+   placed **immediately after** the `CNSoyfix` call. This matters: `CNSoyfix`
+   runs near the top of `CNDriverNoLeaching`, long before allocation updates
+   `fpg`/`plant_ndemand`/`sminn`. Dumping at end-of-step (`after_fire`, the only
+   pre-existing hook) would pair the output with *post-allocation* inputs and
+   silently mis-attribute the result — the before-vs-after dump trap that has
+   already manufactured one phantom bug in this port. `CNSoyfix` writes only
+   `soyfixn`/`soyfixn_to_sminn`, so at this point the dumped inputs are exactly
+   what it read.
+
+Verified in the binary with `strings bld/cesm.exe | grep after_soyfix` — CIME
+reported `MODEL BUILD HAS FINISHED SUCCESSFULLY` after a **2.0 s** clm build,
+which is precisely the "nothing recompiled" false-green the recipe warns about;
+the string check is what confirms the rebuild was real.
+
+Reproduction: `crop_ref_nofun_cold/run_cold.sh` (cold start, `use_fun=.false.`,
+`BGCDUMP_NSTEP_LO/HI=39865/39876`). `nstep` 39865 ↔ 2020-07-19 tod 18000 is
+exact for a 2016-01-01 tod 14400 start at dt = 3600 s, so the cold run's step
+numbering lines up with the original reference windows.
+
+### Also learned: a FUN restart cannot be reused for a non-FUN run
+
+Restarting `2020-07-19-14400` (a `use_fun=.true.` restart) into a
+`use_fun=.false.` run **SIGSEGVs** reproducibly after the first step. The FUN
+restart carries `fpg` = NaN and `plant_ndemand` = 0, which the non-FUN
+nutrient-competition path is not written to absorb. The warm-restart shortcut is
+therefore not available: a non-FUN reference must be **cold-started**. (Cheap in
+practice — 5 model years is ~2.5 min at this single point.)
+
 ## 4. Standing rules for this work
 
 - Do **not** wire a call whose upstream input is still zero (#253's refusal of
