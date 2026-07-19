@@ -95,20 +95,33 @@ Columns where `mask[col] == false` are skipped.
         bet = b[col, j]
         tiny = oftype(bet, 1e-30)
         if abs(bet) < tiny; bet = tiny; end
-        cp[col, j] = c[col, j] / bet
-        dp[col, j] = r[col, j] / bet
+        # The sweeps carry cp/dp/u from the previous level in a LOCAL, and store to
+        # the arrays only for the back-substitution's benefit. Do NOT re-read
+        # cp[col,jj-1] / dp[col,jj-1] / u[col,jj+1] from memory here: that
+        # store-then-load recurrence is miscompiled by LLVM at -O2 on the KA CPU
+        # backend, silently returning wrong values (or NaN) for nlevs >= 5 and
+        # corrupting the jtop > 1 path. Keeping it in a register is both correct
+        # and cheaper. See test_tridiagonal.jl's deep-column regression tests.
+        cp_prev = c[col, j] / bet
+        dp_prev = r[col, j] / bet
+        cp[col, j] = cp_prev
+        dp[col, j] = dp_prev
 
         for jj in (j+1):nlevs
-            denom = b[col, jj] - a[col, jj] * cp[col, jj-1]
+            denom = b[col, jj] - a[col, jj] * cp_prev
             if abs(denom) < tiny; denom = copysign(tiny, denom == 0 ? one(denom) : denom); end
-            cp[col, jj] = c[col, jj] / denom
-            dp[col, jj] = (r[col, jj] - a[col, jj] * dp[col, jj-1]) / denom
+            cp_prev = c[col, jj] / denom
+            dp_prev = (r[col, jj] - a[col, jj] * dp_prev) / denom
+            cp[col, jj] = cp_prev
+            dp[col, jj] = dp_prev
         end
 
-        # Back substitution
-        u[col, nlevs] = dp[col, nlevs]
+        # Back substitution (dp_prev still holds dp[col, nlevs])
+        u_next = dp_prev
+        u[col, nlevs] = u_next
         for jj in (nlevs-1):-1:j
-            u[col, jj] = dp[col, jj] - cp[col, jj] * u[col, jj+1]
+            u_next = dp[col, jj] - cp[col, jj] * u_next
+            u[col, jj] = u_next
         end
     end
 end

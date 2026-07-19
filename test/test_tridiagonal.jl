@@ -1,3 +1,6 @@
+using Random
+using LinearAlgebra
+
 @testset "Tridiagonal Solver" begin
 
     @testset "Simple 3x3 system" begin
@@ -110,6 +113,34 @@
         @test all(u[2, :] .== 0.0)  # skipped
         @test all(u[1, :] .> 0.0)   # solved
         @test all(u[3, :] .> 0.0)   # solved
+    end
+
+    # Deep columns vs an INDEPENDENT dense solve. The shallow (nlevs == 3) cases
+    # above cannot catch a miscompiled forward sweep: the -O2 KA-CPU bug that
+    # motivated the register-carried recurrence only appears from nlevs >= 5, and
+    # real CLM runs this at nlevsoi+1 (~21) levels. Checking against LinearAlgebra's
+    # Tridiagonal rather than a residual also catches a self-consistently wrong answer.
+    @testset "Multi-column deep (nlevs >= 5) vs dense solve" begin
+        rng = MersenneTwister(2)
+        for (ncols, nlevs, jt) in ((48, 20, 1), (48, 5, 1), (7, 25, 1), (48, 20, 4), (1, 21, 1))
+            a = -0.5 .* ones(ncols, nlevs)
+            c = -0.5 .* ones(ncols, nlevs)
+            b = 2 .+ 0.5 .* rand(rng, ncols, nlevs)
+            r = rand(rng, ncols, nlevs)
+            a[:, 1] .= 0.0
+            c[:, nlevs] .= 0.0
+            jtop = fill(jt, ncols)
+            mask = trues(ncols)
+
+            u = zeros(ncols, nlevs)
+            CLM.tridiagonal_multi!(u, a, b, c, r, jtop, mask, ncols, nlevs)
+
+            @test all(isfinite, u)
+            for col in 1:ncols
+                M = Tridiagonal(a[col, jt+1:nlevs], b[col, jt:nlevs], c[col, jt:nlevs-1])
+                @test u[col, jt:nlevs] ≈ M \ r[col, jt:nlevs] atol=1e-10
+            end
+        end
     end
 
 end
