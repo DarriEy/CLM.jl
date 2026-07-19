@@ -109,6 +109,48 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         @test _RUN_KW[:use_bedrock] === :nothing
     end
 
+    @testset "create_crop_landunit derives from use_fates (M5, FIXED)" begin
+        # CTSM keys this on use_fates ALONE
+        # (namelist_defaults_ctsm.xml:2377-2378), and CLMBuildNamelist.pm:2248-2250
+        # makes `.false.` a FATAL error for any non-FATES run. Deriving it from
+        # use_crop gave a default non-crop run cft_size=0 and folded crop area
+        # into natural veg, where CTSM builds a separate crop landunit.
+        #
+        # The struct field default stays `false` on purpose: that mirrors CTSM's
+        # CODE fallback (clm_varctl.F90:154). It is the DERIVATION that has to
+        # key on use_fates, exactly as CLMBuildNamelist does.
+        @test CLM.VarCtl().create_crop_landunit == false   # clm_varctl.F90:154
+
+        init_src = read(joinpath(_SRC, "driver", "clm_initialize.jl"), String)
+        @test occursin(r"varctl\.create_crop_landunit\s*=\s*!use_fates", init_src)
+        @test !occursin(r"varctl\.create_crop_landunit\s*=\s*use_crop\b", init_src)
+
+        # varpar_init! must branch on the FLAG, not on use_crop — this is the
+        # port's mirror of clm_varpar.F90:209.
+        varpar_src = read(joinpath(_SRC, "constants", "varpar.jl"), String)
+        @test occursin("if varctl.create_crop_landunit", varpar_src)
+
+        # ...and behaviourally, not just textually.
+        old_clu  = CLM.varctl.create_crop_landunit
+        old_crop = CLM.varctl.use_crop
+        try
+            CLM.varctl.use_crop = false          # a NON-crop run, the default
+            CLM.varctl.create_crop_landunit = true
+            CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+            @test CLM.varpar.cft_size == 2       # CTSM: cft_size = surf_numcft
+            @test CLM.varpar.cft_lb == 15
+            @test CLM.varpar.cft_ub == 16
+
+            # The FATES branch (create_crop_landunit=.false.) still collapses.
+            CLM.varctl.create_crop_landunit = false
+            CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+            @test CLM.varpar.cft_size == 0
+        finally
+            CLM.varctl.create_crop_landunit = old_clu
+            CLM.varctl.use_crop = old_crop
+        end
+    end
+
     @testset "int_snow_max == 2000.0" begin
         # namelist_defaults_ctsm.xml:476 (clm4_5 variant is 1.e30).
         @test _INIT_KW[:int_snow_max] == 2000.0
