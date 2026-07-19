@@ -200,7 +200,10 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           # CTSM-derived default: .false. for clm5_0 (see clm_initialize!).
                           use_aquifer_layer::Bool=false,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
-                          n_drydep::Int=0, use_hydrstress::Bool=false,
+                          n_drydep::Int=0,
+                          # CTSM-conditional default: .false. under FATES, .true.
+                          # otherwise (clm5_0 configuration="clm"). See clm_initialize!.
+                          use_hydrstress::Union{Bool,Nothing}=nothing,
                           # CTSM-conditional default (namelist_defaults_ctsm.xml:578-580):
                           # .false. under FATES, .true. otherwise. See clm_initialize!.
                           use_luna::Union{Bool,Nothing}=nothing,
@@ -237,8 +240,11 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     # Resolve the conditional default: FATES runs get .false. (CTSM endrun's on
     # LUNA+FATES, controlMod.F90:505); everything else gets CLM5's .true.
     _use_luna = use_luna === nothing ? !use_fates : use_luna
+    # Same conditional for PHS: control.jl:102 endruns on PHS+FATES, so the CLM5
+    # .true. default applies to the non-FATES configuration only.
+    _use_hydrstress = use_hydrstress === nothing ? !use_fates : use_hydrstress
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
-                    use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, _use_luna,
+                    use_soil_moisture_streams, use_lai_streams, n_drydep, _use_hydrstress, _use_luna,
                     use_voc, use_ozone, megan, nothing, dust, dyn_subgrid, use_threaded_clumps)
 end
 

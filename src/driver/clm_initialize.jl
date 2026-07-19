@@ -82,7 +82,14 @@ function clm_initialize!(;
     # too -- CTSM endrun's on LUNA+FATES (controlMod.F90:505), mirrored here at
     # control.jl:104 -- so `nothing` resolves the condition.
     use_luna::Union{Bool,Nothing} = nothing,
-    use_hydrstress::Bool = false,
+    # CTSM's use_hydrstress default is CONDITIONAL (namelist_defaults_ctsm.xml):
+    # .true. for phys=clm5_0 configuration="clm", .false. under use_fates. Plant
+    # hydraulic stress is CLM5's vegetation-water physics; the port shipped
+    # `false`, which is CTSM's CODE FALLBACK (clm_varctl.F90) — the value the
+    # namelist overrides, the same root cause as #252/#259/#267. A bare `true`
+    # would be wrong too: control.jl:102 endruns on PHS+FATES, mirroring CTSM,
+    # so `nothing` resolves the condition. See docs/PHS_DEFAULT_BLOCKERS.md.
+    use_hydrstress::Union{Bool,Nothing} = nothing,
     use_lch4::Bool = false,
     use_cndv::Bool = false,
     use_c13::Bool = false,
@@ -147,7 +154,11 @@ function clm_initialize!(;
     # .true. `use_luna` is Union{Bool,Nothing} from here on -- use `_use_luna`.
     _use_luna = use_luna === nothing ? !use_fates : use_luna
     varctl.use_luna = _use_luna
-    varctl.use_hydrstress = use_hydrstress
+    # Resolve the conditional default (see the keyword's comment): FATES runs get
+    # .false. (control.jl:102 endruns on PHS+FATES); everything else gets CLM5's
+    # .true. `use_hydrstress` is Union{Bool,Nothing} from here on -- use `_use_hydrstress`.
+    _use_hydrstress = use_hydrstress === nothing ? !use_fates : use_hydrstress
+    varctl.use_hydrstress = _use_hydrstress
     varctl.use_cndv = use_cndv
     # CTSM keys this on use_fates ALONE (namelist_defaults_ctsm.xml:2377-2378),
     # not on use_crop: CLMBuildNamelist.pm:2248-2250 makes `.false.` a fatal
