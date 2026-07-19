@@ -127,9 +127,14 @@ const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
         inst_cool = CLM.run_clm_with_params(prob_cool, true_theta)
         sh_cool = inst_cool.energyflux.eflx_sh_tot_patch[2]
 
+        # A non-finite observation is a REAL FAILURE, not a reason to skip. The old
+        # `@test true` here laundered a NaN into a green tick — the same bug class
+        # swept in #255 (data-gated skips) and #252 (a broken AD suite hidden by one).
+        # Assert the value so a NaN can never again be reported as a pass; the early
+        # return only avoids cascading garbage through the optimizer below.
         if !isfinite(sh_warm) || !isfinite(sh_cool)
-            @warn "Non-finite observations, skipping optimization"
-            @test true
+            @error "Non-finite SH observation — the physics returned NaN" sh_warm sh_cool
+            @test isfinite(sh_warm) && isfinite(sh_cool)
             return
         end
 
