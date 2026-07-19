@@ -92,7 +92,9 @@ Base.@kwdef mutable struct VarCtl
     nhillslope::Int = 0
     max_columns_hillslope::Int = 1
     use_hillslope::Bool = false
-    downscale_hillslope_meteorology::Bool = false
+    # CTSM namelist_defaults:665 = .true. (unconditional); code fallback .false.
+    # INERT here: hillslope hydrology is off by default, so nothing reads this.
+    downscale_hillslope_meteorology::Bool = true
     use_hillslope_routing::Bool = false
     hillslope_fsat_equals_zero::Bool = false
 
@@ -125,7 +127,9 @@ Base.@kwdef mutable struct VarCtl
     # --- Spinup matrix method ---
     spinup_matrixcn::Bool = false
     hist_wrt_matrixcn_diag::Bool = false
-    nyr_forcing::Int = 10
+    # CTSM namelist_defaults:688 = 1 (20 under matrix spinup); code fallback 10.
+    # INERT: 0 reads in the port.
+    nyr_forcing::Int = 1
     nyr_SASU::Int = 1
     iloop_avg::Int = -999
 
@@ -153,8 +157,15 @@ Base.@kwdef mutable struct VarCtl
     snow_cover_fraction_method::String = ""
     snow_thermal_cond_method::String = "Jordan1991"
     use_z0m_snowmelt::Bool = false
-    z0param_method::String = ""
-    h2osno_max::Float64 = -999.0
+    # CTSM: ZengWang2007 for clm5_0 (Meier2022 for clm5_1/clm6_0); namelist is
+    # mandatory, no code fallback. Cosmetic only — friction_velocity.jl:322
+    # branches solely on == "Meier2022", so "" already behaved as ZengWang2007.
+    z0param_method::String = "ZengWang2007"
+    # CTSM namelist_defaults:465 = 10000.0 (fast 5000, clm4_5 1000). There is no
+    # code fallback — controlMod.F90:557 HARD-ERRORS if <= 0, so -999.0 is a value
+    # CTSM would refuse to start on. INERT here only because this varctl copy is a
+    # dead duplicate: the physics reads varcon.H2OSNO_MAX (already 10000.0).
+    h2osno_max::Float64 = 10000.0
 
     # --- LUNA ---
     use_luna::Bool = false
@@ -232,7 +243,9 @@ Base.@kwdef mutable struct VarCtl
     inst_suffix::String = ""
 
     # --- Decomposition ---
-    nsegspc::Int = 20
+    # CTSM namelist_defaults:2404 = 35; code fallback 20 (CTSM's own definition
+    # docs still say 20 — stale). INERT: 0 reads in the port.
+    nsegspc::Int = 35
 
     # --- Restart pointer ---
     rpntdir::String = "."
