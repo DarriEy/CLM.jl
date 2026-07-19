@@ -1137,6 +1137,23 @@ end
 # is guaranteed because both paths execute the same `_photosynth_ci_body!`.
 const _PSN_CI_AD_HOSTLOOP = Ref(false)
 
+# Bring a CONSTANT per-PFT parameter vector (always a host Vector{Float64} out of
+# `params_inst`) onto the same array type as the sibling per-PFT vectors already
+# in hand (`ref`, e.g. slatop_pft) — host Array on CPU, device array on GPU.
+#
+# Two invariants, both load-bearing:
+#  1. NO promotion to the AD element type. These are constants: they carry no
+#     derivative, so widening them to `Dual` is pure waste AND it breaks the
+#     single shared type parameter of `_Psn2Pft{Vp}`/`_Psn2Idx` — six pft fields
+#     arrive `Vector{Float64}`, the promoted one arrives `Vector{Dual}`, `Vp`
+#     cannot unify, and construction throws `MethodError`. That is what made the
+#     whole PHS photosynthesis path non-differentiable.
+#  2. Matching `ref`'s container keeps the GPU path intact: `_Psn2Pft` is
+#     `Adapt.@adapt_structure`'d, so every field must already live on the device.
+# Identity fast-path when the types already agree, so the host case is a no-op.
+@inline _psn_pft_like(ref::AbstractVector, x::AbstractVector) =
+    typeof(ref) === typeof(x) ? x : convert(typeof(ref), x)
+
 # PARITY localization (Phase 3c): opt-in debug dump of converged PHS sunlit-leaf
 # photosynthesis internals (vcmax_z → an → gs chain) for patches in PHS_PHOTO_DEBUG_PATCHES.
 # Default OFF → forward/GPU/AD runs are byte-identical (the dump is a read-only loop
@@ -1650,9 +1667,9 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
            tpuha = T(params_inst.tpuha))
     jmax25top_sf_val = isnan(overrides.jmax25top_sf) ? params_inst.jmax25top_sf : overrides.jmax25top_sf
     # Atkin2015 leaf-resp base rate: per-PFT param, only indexed when
-    # leafresp_method≠Ryan. Match slatop_pft's backend (host on CPU, device on GPU).
-    _lmratk = T.(params_inst.lmr_intercept_atkin)
-    lmr_intercept_atkin = slatop_pft isa Array ? _lmratk : convert(typeof(slatop_pft), _lmratk)
+    # leafresp_method≠Ryan. It is a CONSTANT parameter — it carries no derivative,
+    # so it must NOT be promoted to the AD element type T (see _psn_pft_like).
+    lmr_intercept_atkin = _psn_pft_like(slatop_pft, params_inst.lmr_intercept_atkin)
     dv = _psn_dv(ps)
     if _PSN_CI_AD_HOSTLOOP[]
         @inbounds for p in 1:length(bounds_patch)
@@ -2200,8 +2217,7 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
     # group loose @Const arrays into device-view bundles + scalars into one isbits
     # struct (Metal 31-arg-buffer reduction); same refs, so behaviour unchanged.
     idx = _Psn2Idx(; mask_patch = mask_patch, ivt = ivt, nrad = nrad)
-    _lmratk = T.(params_inst.lmr_intercept_atkin)
-    lmr_intercept_atkin = slatop_pft isa Array ? _lmratk : convert(typeof(slatop_pft), _lmratk)
+    lmr_intercept_atkin = _psn_pft_like(slatop_pft, params_inst.lmr_intercept_atkin)
     pft = _Psn2Pft(; c3psn_pft = c3psn_pft, mbbopt_pft = mbbopt_pft,
         slatop_pft = slatop_pft, leafcn_pft = leafcn_pft, flnr_pft = flnr_pft,
         fnitr_pft = fnitr_pft, lmr_intercept_atkin = lmr_intercept_atkin)
