@@ -1,5 +1,23 @@
 # Crop / irrigation / fire-crop Fortran parity — status (2026-07-18)
 
+> **SUPERSEDED IN PART (2026-07-19).** The crop lifecycle is now wired and
+> validated against this document's reference — see **`docs/CROP_LIFECYCLE_MAP.md`**,
+> which is authoritative for the lifecycle. In particular:
+> - The § "Wiring `n_fert!` — it would be a NO-OP today" analysis was correct and
+>   its precondition is now MET: `crop_phenology!` computes `fert_patch`, whose
+>   value matches the May reference to relative error 0.0, so `n_fert!` is wired.
+>   **`n_soyfix!` is still NOT wired** — `SOYFIXN` ≡ 0 in both windows.
+> - The § "Verified Julia wiring state" rows for `crop_phenology!` /
+>   `plant_crop!` / `vernalization!` are out of date (all three now have live call
+>   sites).
+> - **Path correction:** the reference lives at
+>   `SYMFLUENCE_data/clm_bgc_spinup/crop_ref_usplains/` — directly under
+>   `SYMFLUENCE_data`, *not* under `installs/` as written below.
+> - The **restart file** (`Crop_USplains.clm2.r.2020-05-30-14400.nc`) is a richer
+>   reference than the bgcdumps and was unused by this document: it carries
+>   `idop`, `gddmaturity`, `huileaf`, `huigrain`, `fert_counter`, `onset_counter`,
+>   letting each lifecycle step be validated in isolation.
+
 Backlog items **A3 (crops + crop N)**, **A4 (irrigation)** and the **A2 fire crop
 branch** share a single Fortran ground-truth run: a crop-bearing spin-up with
 `use_crop = .true.`, `use_cn = .true.`, `irrigate = .true.`. This documents an

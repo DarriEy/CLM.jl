@@ -152,7 +152,17 @@ function cn_driver_no_leaching!(
         i_cwd::Int,
         # Vegetation parameters
         npcropmin::Int = 17,
+        npcropmax::Int = 78,
+        maxveg::Int = 78,
         nrepr::Int = 1,
+        # Crop lifecycle time inputs (used only when config.use_crop). CTSM's
+        # CropPhenology takes the day-of-year at the START of the timestep
+        # (get_prev_calday) — see CTSM issue #1623.
+        crop_jday::Int = 1,
+        crop_kyr::Int = 1,
+        use_fertilizer::Bool = false,
+        is_beg_curr_year::Bool = false,
+        is_end_curr_day::Bool = false,
         # Patch/column metadata (from PatchData, PftCon, CropData, etc.)
         patch_column::AbstractVector{<:Integer},
         ivt::AbstractVector{<:Integer},
@@ -400,11 +410,30 @@ function cn_driver_no_leaching!(
         end
     end
 
-    # CNNFert / CNSoyfix — crop-only (Fortran gates on use_crop). NOT wired: Bow
-    # has no crop CFT, so there is no Fortran reference here to validate against,
-    # and #218's rule stands — do not wire blind. Both are ported and unit-tested
-    # (n_fert!, n_soyfix! in n_dynamics.jl); they need a crop-active Fortran
-    # reference run before they go live. See docs/N_CYCLE_PARITY.md.
+    # CNNFert — crop-only (Fortran gates on use_crop). NOW WIRED.
+    #
+    # This stayed unwired on purpose until now. n_fert! is a pure p2c scatter of
+    # cnveg_nf.fert_patch; nothing in the port ever COMPUTED fert_patch, so wiring
+    # it would have scattered an all-zero array, passed any "is it wired?" test and
+    # moved no nitrogen at all — a vacuous green (#218, and docs/CROP_PARITY.md
+    # restated it). The blocking upstream is now real: crop_phenology! computes
+    # fert_patch inside the leaf-emergence onset window, and its VALUE is validated
+    # against the Fortran May-window reference to round-off on all 8 crop patches
+    # (test/test_crop_lifecycle.jl; docs/CROP_LIFECYCLE_MAP.md).
+    #
+    # CNSoyfix remains UNWIRED, deliberately and for the original reason: SOYFIXN is
+    # identically 0 in BOTH reference windows, so there is still no non-zero ground
+    # truth to validate it against. Wiring it would be exactly the blind wiring this
+    # comment used to describe. See docs/N_CYCLE_PARITY.md.
+    if config.use_crop && soilbgc_nf !== nothing && patch !== nothing &&
+       num_bgc_vegp > 0 && !isempty(cnveg_nf.fert_patch)
+        n_fert!(soilbgc_nf, cnveg_nf;
+                mask_soilc = mask_bgc_soilc,
+                bounds     = bounds_col,
+                patch      = patch,
+                mask_soilp = mask_pcropp,
+                bounds_p   = bounds_patch)
+    end
 
     # Maintenance respiration (CNMResp) — WIRED (veg-flux chain). Runs when the
     # veg-flux inputs (photosyns/canopystate/soilstate/temperature/patch/pftcon)
@@ -784,7 +813,27 @@ function cn_driver_no_leaching!(
             gddmin = Float64.(pftcon_main.gddmin), lfemerg = Float64.(pftcon_main.lfemerg),
             grnfill = Float64.(pftcon_main.grnfill), hybgdd = Float64.(pftcon_main.hybgdd),
             mxmat = Int.(pftcon_main.mxmat), manunitro = Float64.(pftcon_main.manunitro),
+            # REQUIRED for the crop lifecycle: these four are what
+            # crop_phenology_init! turns into minplantjday/maxplantjday, i.e. the
+            # sowing window. They were omitted here, so PftConPhenology carried EMPTY
+            # planting-date vectors and no crop could ever have been planted even if
+            # the phenology were fully ported. See docs/CROP_LIFECYCLE_MAP.md (G5).
+            mnNHplantdate = Float64.(pftcon_main.mnNHplantdate),
+            mxNHplantdate = Float64.(pftcon_main.mxNHplantdate),
+            mnSHplantdate = Float64.(pftcon_main.mnSHplantdate),
+            mxSHplantdate = Float64.(pftcon_main.mxSHplantdate),
             is_pft_known_to_model = Bool.(pftcon_main.is_pft_known_to_model))
+
+        # Crop-window initialization. cn_phenology_init! above cannot do this — it is
+        # called without pftcon/patch/gridcell — so crop_phenology_init! had NO live
+        # call site and inhemi/minplantjday/maxplantjday stayed empty for the whole
+        # life of the port (docs/CROP_LIFECYCLE_MAP.md, G6). Gated on use_crop so the
+        # default path is untouched; crop_phenology! asserts these are non-empty.
+        if config.use_crop && patch !== nothing && gridcell !== nothing &&
+           isempty(_phstate.minplantjday)
+            crop_phenology_init!(_phstate, _pftph, patch, gridcell,
+                                 npcropmin, npcropmax, maxveg)
+        end
         _lprof = soilbgc_state.leaf_prof_patch
         _fprof = soilbgc_state.froot_prof_patch
         for _phase in (1, 2)
@@ -800,7 +849,11 @@ function cn_driver_no_leaching!(
                 # nlevdecomp=1 and destroys ~86% of all phenological leaf/fine-root
                 # litterfall C and N (see phenology.jl).
                 nlevdecomp = nlevdecomp, i_litr_min = i_litr_min,
-                i_litr_max = i_litr_max, npcropmin = npcropmin)
+                i_litr_max = i_litr_max, npcropmin = npcropmin,
+                crop_jday = crop_jday, crop_kyr = crop_kyr, dayspyr = dayspyr,
+                use_fertilizer = use_fertilizer,
+                is_beg_curr_year = is_beg_curr_year,
+                is_end_curr_day = is_end_curr_day)
         end
     end
 

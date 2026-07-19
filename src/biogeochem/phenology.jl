@@ -909,7 +909,19 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                        nlevdecomp::Int=1,
                        i_litr_min::Int=1,
                        i_litr_max::Int=3,
-                       npcropmin::Int=17)
+                       npcropmin::Int=17,
+                       # Crop lifecycle time/namelist inputs. These used to be kwargs
+                       # of crop_phenology! that NOTHING ever supplied, so they took
+                       # their defaults (jday=1, kyr=1, use_fertilizer=false) on every
+                       # single call — i.e. the planting-window test was evaluated on
+                       # January 1 forever and fertilizer was permanently off. They
+                       # are threaded from the driver now; see docs/CROP_LIFECYCLE_MAP.md.
+                       crop_jday::Int=1,
+                       crop_kyr::Int=1,
+                       dayspyr::Real=365.0,
+                       use_fertilizer::Bool=false,
+                       is_beg_curr_year::Bool=false,
+                       is_end_curr_day::Bool=false)
 
     if phase == 1
         cn_phenology_climate!(pstate, mask_soilp, temperature, cnveg_state, crop,
@@ -937,7 +949,11 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                             water_diag, temperature, crop, canopy_state,
                             cnveg_state, cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
                             patch_data, gridcell;
-                            varctl=varctl, avg_dayspyr=avg_dayspyr)
+                            varctl=varctl, avg_dayspyr=avg_dayspyr,
+                            jday=crop_jday, kyr=crop_kyr, dayspyr=dayspyr,
+                            use_fertilizer=use_fertilizer,
+                            is_beg_curr_year=is_beg_curr_year,
+                            is_end_curr_day=is_end_curr_day)
         end
 
     elseif phase == 2
@@ -2276,13 +2292,23 @@ function crop_phenology_init!(pstate::PhenologyState,
 
     pstate.jdayyrstart = [1, 182]
 
-    # Convert planting dates
+    # Convert planting dates.
+    # INDEXING: `n` is a 0-based Fortran PFT index (npcropmin/npcropmax come from
+    # pftcon.jl's 0-based globals), while every Julia pftcon array is 1-based with
+    # julia_index == fortran_index + 1 — the same `ivt = itype[p] + 1` convention the
+    # kernels use. This loop previously indexed BOTH pftcon and minplantjday with a
+    # bare `n`, i.e. off by one on both sides, reading the planting dates of the
+    # PREVIOUS crop type. It was invisible because (a) this routine had no live call
+    # site at all (it is only reached once cn_driver fires it), and (b) the unit test
+    # fills every PFT's planting date with the SAME value, so it cannot distinguish
+    # n from n+1. Both are fixed here; the test is made value-distinguishing.
     for n in npcropmin:npcropmax
-        if n <= length(pftcon.is_pft_known_to_model) && pftcon.is_pft_known_to_model[n]
-            pstate.minplantjday[n, inNH] = round(Int, pftcon.mnNHplantdate[n])
-            pstate.maxplantjday[n, inNH] = round(Int, pftcon.mxNHplantdate[n])
-            pstate.minplantjday[n, inSH] = round(Int, pftcon.mnSHplantdate[n])
-            pstate.maxplantjday[n, inSH] = round(Int, pftcon.mxSHplantdate[n])
+        nj = n + 1
+        if nj <= length(pftcon.is_pft_known_to_model) && pftcon.is_pft_known_to_model[nj]
+            pstate.minplantjday[nj, inNH] = round(Int, pftcon.mnNHplantdate[nj])
+            pstate.maxplantjday[nj, inNH] = round(Int, pftcon.mxNHplantdate[nj])
+            pstate.minplantjday[nj, inSH] = round(Int, pftcon.mnSHplantdate[nj])
+            pstate.maxplantjday[nj, inSH] = round(Int, pftcon.mxSHplantdate[nj])
         end
     end
 
@@ -2341,6 +2367,79 @@ end
     end
 end
 
+"""
+    _crop_is_corn_family(ivt0)
+
+True for the crop types that take CTSM's `crmcorn` "comparative relative maturity"
+adjustment when deriving `huigrain` from `grnfill` (`CNPhenologyMod.F90:2352-2371`):
+temperate/tropical corn, sugarcane, miscanthus and switchgrass, rainfed + irrigated.
+Everything else uses `huigrain = grnfill * gddmaturity` directly.
+
+`ivt0` is the 0-based Fortran PFT index.
+
+This branch is NOT cosmetic: on the crop reference the two branches differ by 7-11%
+of `huigrain`, and the reference distinguishes them — back-solving `grnfill` from
+`huigrain/gddmaturity` gives clean round numbers (0.65 corn, 0.50 soybean, 0.60
+spring wheat) ONLY when each patch takes the branch encoded here.
+"""
+@inline function _crop_is_corn_family(ivt0::Int)
+    return ivt0 == ntmp_corn      || ivt0 == nirrig_tmp_corn   ||
+           ivt0 == ntrp_corn      || ivt0 == nirrig_trp_corn   ||
+           ivt0 == nsugarcane     || ivt0 == nirrig_sugarcane  ||
+           ivt0 == nmiscanthus    || ivt0 == nirrig_miscanthus ||
+           ivt0 == nswitchgrass   || ivt0 == nirrig_switchgrass
+end
+
+@inline _crop_is_winter_cereal(ivt0::Int) = (ivt0 == nwwheat || ivt0 == nirrig_wwheat)
+
+@inline function _crop_is_soybean(ivt0::Int)
+    return ivt0 == ntmp_soybean || ivt0 == nirrig_tmp_soybean ||
+           ivt0 == ntrp_soybean || ivt0 == nirrig_trp_soybean
+end
+
+"""
+    _crop_gdd20_for(ivt0, temperature, p)
+
+Which 20-year GDD mean this crop type keys off (`CNPhenologyMod.F90:2893-2911`):
+soybean -> gdd1020, corn family -> gdd820, wheat/cotton/rice -> gdd020.
+Returns `NaN` for an unrecognised crop type (CTSM calls `endrun` there; we surface it
+to the caller, which refuses to plant rather than aborting the whole model).
+"""
+@inline function _crop_gdd20_for(ivt0::Int, temperature::TemperatureData, p::Int)
+    if _crop_is_soybean(ivt0)
+        return temperature.gdd1020_patch[p]
+    elseif _crop_is_corn_family(ivt0)
+        return temperature.gdd820_patch[p]
+    elseif ivt0 == nswheat || ivt0 == nirrig_swheat ||
+           ivt0 == nwwheat || ivt0 == nirrig_wwheat ||
+           ivt0 == ncotton || ivt0 == nirrig_cotton ||
+           ivt0 == nrice   || ivt0 == nirrig_rice
+        return temperature.gdd020_patch[p]
+    else
+        return NaN
+    end
+end
+
+"""
+    crop_phenology!(...)
+
+Full port of CTSM `CropPhenology` (`CNPhenologyMod.F90:2006-2638`) — the crop
+lifecycle state machine: sowing window -> planting decision -> `plant_crop!` ->
+phase thresholds -> phase transitions -> fertilizer window -> harvest.
+
+Replaces a simplified kernel that only set `cphase` and the grain-fill `bglfr`. That
+stub could never move the lifecycle, because `plant_crop!` (the ONLY writer of
+`croplive_patch = true`) had no caller anywhere in the port — so the whole
+`if croplive` branch was structurally dead and crop state was identically zero.
+
+See `docs/CROP_LIFECYCLE_MAP.md` for the dependency ordering and the per-field
+reference numbers this is validated against.
+
+This is a scalar host loop, deliberately: the body is a branchy per-patch state
+machine with sowing/harvest bookkeeping (matching CTSM's own scalar loop), and it
+runs only for `use_crop` runs over the handful of crop patches. Kernelizing it is a
+separate exercise and is not needed for parity.
+"""
 function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
                          mask_pcropp::AbstractVector{Bool},
                          pftcon::PftConPhenology,
@@ -2358,18 +2457,301 @@ function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
                          varctl::VarCtl=VarCtl(),
                          avg_dayspyr::Real=365.0,
                          jday::Int=1, kyr::Int=1, dayspyr::Real=365.0,
-                         use_fertilizer::Bool=false)
+                         use_fertilizer::Bool=false,
+                         is_beg_curr_year::Bool=false,
+                         is_end_curr_day::Bool=false)
     dt = pstate.dt
-    T = eltype(cnveg_state.bglfr_patch)   # working precision (Float32 on Metal)
 
-    _launch!(_phen_crop_phenology_kernel!,
-        crop.cphase_patch, cnveg_state.bglfr_patch, cnveg_state.bgtr_patch,
-        cnveg_state.lgsf_patch, cnveg_state.onset_flag_patch,
-        cnveg_state.offset_flag_patch, cnveg_state.onset_counter_patch,
-        mask_pcropp, patch_data.itype, crop.croplive_patch,
-        crop.hui_patch, cnveg_state.huigrain_patch, pftcon.leaf_long,
-        T(dt), T(avg_dayspyr), T(SECSPDAY),
-        T(cphase_planted), T(cphase_grainfill))
+    # The planting-window tables MUST have been built by crop_phenology_init!. If
+    # they are empty the sowing window cannot be computed and NOTHING would ever be
+    # planted — the crop model would run, stay silently at croplive=false forever,
+    # and look like a physics problem. That was the state of the port before this
+    # change (crop_phenology_init! had no live call site). Fail loudly instead.
+    if isempty(pstate.minplantjday) || isempty(pstate.inhemi)
+        error("crop_phenology!: minplantjday/inhemi are empty — crop_phenology_init! " *
+              "was never called. Without them no crop can ever be planted.")
+    end
+
+    # ndays_on: CTSM applies fertilizer over a 20-day window after leaf emergence.
+    ndays_on = use_fertilizer ? 20.0 : 0.0
+
+    for p in eachindex(mask_pcropp)
+        mask_pcropp[p] || continue
+        ivt0 = patch_data.itype[p]        # 0-based Fortran PFT index
+        ivt  = ivt0 + 1                   # 1-based Julia pftcon index
+        c = patch_data.column[p]
+        h = pstate.inhemi[p]
+
+        # --- background rates reset every step -------------------------------
+        cnveg_state.bglfr_patch[p] = 0.0
+        cnveg_state.bgtr_patch[p]  = 0.0
+        cnveg_state.lgsf_patch[p]  = 0.0
+        harvest_reason = 0.0
+
+        # --- annual reset of the per-year sowing/harvest bookkeeping ----------
+        if is_beg_curr_year
+            crop.sowing_count[p]  = 0
+            crop.harvest_count[p] = 0
+            for s in 1:size(crop.sdates_thisyr_patch, 2)
+                crop.sdates_thisyr_patch[p, s]        = -1.0
+                crop.swindow_starts_thisyr_patch[p, s] = -1.0
+                crop.swindow_ends_thisyr_patch[p, s]   = -1.0
+                crop.sowing_reason_thisyr_patch[p, s]  = -1.0
+            end
+            for s in 1:size(crop.hdates_thisyr_patch, 2)
+                crop.sdates_perharv_patch[p, s]        = -1.0
+                crop.syears_perharv_patch[p, s]        = -1.0
+                crop.hdates_thisyr_patch[p, s]         = -1.0
+                cnveg_state.gddmaturity_thisyr[p, s]   = -1.0
+                crop.gddaccum_thisyr_patch[p, s]       = -1.0
+                crop.hui_thisyr_patch[p, s]            = -1.0
+                crop.harvest_reason_thisyr_patch[p, s] = -1.0
+            end
+        end
+
+        # --- (1) sowing window ------------------------------------------------
+        sw = get_swindow(jday,
+                         @view(crop.rx_swindow_starts_thisyr_patch[p, :]),
+                         @view(crop.rx_swindow_ends_thisyr_patch[p, :]),
+                         pstate.minplantjday[ivt, h], pstate.maxplantjday[ivt, h])
+        swin_start, swin_end = sw.start_w, sw.end_w
+
+        is_in_sowing_window  = _is_doy_in_interval(swin_start, swin_end, jday)
+        crop.sown_in_this_window[p] = was_sown_in_this_window(
+            swin_start, swin_end, jday, cnveg_state.idop_patch[p],
+            crop.sown_in_this_window[p])
+        is_end_sowing_window = (jday == swin_end)
+
+        has_rx_sowing_date  = (swin_start == swin_end)
+        do_plant_prescribed = has_rx_sowing_date && swin_start == jday &&
+                              !crop.sown_in_this_window[p]
+
+        if jday == swin_end
+            crop.swindow_starts_thisyr_patch[p, sw.w] = swin_start
+            crop.swindow_ends_thisyr_patch[p, sw.w]   = swin_end
+        end
+
+        # --- (2) planting decision -------------------------------------------
+        allow_unprescribed = !has_rx_sowing_date
+        gdd20 = _crop_gdd20_for(ivt0, temperature, p)
+
+        do_plant_normal     = false
+        do_plant_lastchance = false
+        if crop.sowing_count[p] >= MXSOWINGS
+            # already sown the maximum number of times this year
+        elseif _crop_is_winter_cereal(ivt0)
+            # Winter cereal keys off gdd0 and the 5-day min temperature.
+            g020 = temperature.gdd020_patch[p]
+            a5   = temperature.t_a5min_patch[p]
+            gdd_ok = isfinite(g020) && g020 >= pftcon.gddmin[ivt]
+            do_plant_normal = allow_unprescribed && isfinite(a5) &&
+                              a5 <= pftcon.minplanttemp[ivt] &&
+                              is_in_sowing_window && gdd_ok
+            do_plant_lastchance = allow_unprescribed && !do_plant_normal &&
+                                  is_end_sowing_window && gdd_ok
+        else
+            t10  = temperature.t_a10_patch[p]
+            a10  = temperature.t_a10min_patch[p]
+            g820 = temperature.gdd820_patch[p]
+            do_plant_normal = allow_unprescribed &&
+                              isfinite(t10) && isfinite(a10) &&
+                              t10 > pftcon.planttemp[ivt] &&
+                              a10 > pftcon.minplanttemp[ivt] &&
+                              is_in_sowing_window &&
+                              isfinite(g820) && g820 >= pftcon.gddmin[ivt]
+            do_plant_lastchance = allow_unprescribed && !do_plant_normal &&
+                                  is_end_sowing_window &&
+                                  isfinite(g820) && g820 > 0.0
+        end
+
+        do_plant = (do_plant_prescribed || do_plant_normal || do_plant_lastchance) &&
+                   !crop.sown_in_this_window[p]
+
+        # --- (3)+(4) plant, then derive the phase thresholds ------------------
+        if !crop.croplive_patch[p] && crop.sowing_count[p] == 0
+            if do_plant && isfinite(gdd20)
+                if _crop_is_winter_cereal(ivt0)
+                    cnveg_state.cumvd_patch[p] = 0.0
+                    cnveg_state.hdidx_patch[p] = 0.0
+                    crop.vf_patch[p]           = 0.0
+                end
+
+                # gddmaturity — the GDD target for this growing season.
+                gddmat = if _crop_is_winter_cereal(ivt0)
+                    pftcon.hybgdd[ivt]
+                elseif _crop_is_corn_family(ivt0)
+                    gm = max(950.0, min(gdd20 * 0.85, pftcon.hybgdd[ivt]))
+                    do_plant_normal ? max(950.0, min(gm + 150.0, 1850.0)) : gm
+                else
+                    min(gdd20, pftcon.hybgdd[ivt])
+                end
+                gddmat = max(gddmat, _min_gddmaturity[])
+                cnveg_state.gddmaturity_patch[p] = gddmat
+
+                plant_crop!(p, pftcon.leafcn[ivt], jday, kyr, crop, cnveg_state,
+                            cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf, dt)
+
+                this_reason = do_plant_prescribed ? 10.0 : 0.0
+                this_reason += do_plant_normal ? 1.0 : (do_plant_lastchance ? 2.0 : 0.0)
+                crop.sowing_reason_patch[p] = round(Int, this_reason)
+                if crop.sowing_count[p] >= 1
+                    crop.sdates_thisyr_patch[p, crop.sowing_count[p]] = Float64(jday)
+                    crop.sowing_reason_thisyr_patch[p, crop.sowing_count[p]] = this_reason
+                end
+            else
+                cnveg_state.gddmaturity_patch[p] = 0.0
+            end
+
+            gddmat = cnveg_state.gddmaturity_patch[p]
+
+            # Phase-1 -> phase-2 threshold.
+            cnveg_state.huileaf_patch[p] = pftcon.lfemerg[ivt] * gddmat
+
+            # Phase-2 -> phase-3 threshold. The corn family gets the crmcorn
+            # adjustment; everything else uses grnfill directly. See
+            # _crop_is_corn_family — the reference distinguishes these branches.
+            if _crop_is_corn_family(ivt0)
+                crmcorn = max(73.0, min(135.0, (gddmat + 53.683) / 13.882))
+                hg = -0.002 * (crmcorn - 73.0) + pftcon.grnfill[ivt]
+                hg = min(max(hg, pftcon.grnfill[ivt] - 0.1), pftcon.grnfill[ivt])
+                cnveg_state.huigrain_patch[p] = hg * gddmat
+            else
+                cnveg_state.huigrain_patch[p] = pftcon.grnfill[ivt] * gddmat
+            end
+        end
+
+        # --- (5) phase transitions while live ---------------------------------
+        cnveg_state.onset_flag_patch[p]  = 0.0
+        cnveg_state.offset_flag_patch[p] = 0.0
+
+        if crop.croplive_patch[p]
+            crop.cphase_patch[p] = cphase_planted
+
+            # (5a) vernalization — winter cereal only.
+            # NOTE: this branch is UNVALIDATED. The crop reference carries no
+            # winter-wheat CFT (no itype 21/22 patch) and its cumvd/hdidx are NaN on
+            # every patch, so there is no ground truth for it here. It is wired
+            # because leaving the only caller absent is what kept the whole
+            # lifecycle dead, but it must not be reported as validated.
+            vernalization_forces_harvest = false
+            if isfinite(temperature.t_ref2m_min_patch[p]) &&
+               crop.vf_patch[p] != 1.0 && _crop_is_winter_cereal(ivt0)
+                vernalization_forces_harvest = vernalization!(
+                    p, pstate, canopy_state, temperature, water_diag,
+                    cnveg_state, crop, patch_data)
+            end
+
+            idpp = days_past_planting(cnveg_state.idop_patch[p], jday;
+                                      dayspyr = round(Int, dayspyr))
+            cnveg_state.onset_counter_patch[p] -= dt
+
+            if cnveg_state.peaklai_patch[p] >= 1
+                crop.hui_patch[p] = max(crop.hui_patch[p], cnveg_state.huigrain_patch[p])
+            end
+
+            mxmat = _use_mxmat[] ? pftcon.mxmat[ivt] : 999
+
+            # (5d) harvest decision
+            do_harvest = false
+            if vernalization_forces_harvest
+                do_harvest = true
+                harvest_reason = HARVEST_REASON_VERNFREEZEKILL
+            else
+                do_harvest = crop.hui_patch[p] >= cnveg_state.gddmaturity_patch[p] ||
+                             idpp >= mxmat
+                if crop.hui_patch[p] >= cnveg_state.gddmaturity_patch[p]
+                    harvest_reason = HARVEST_REASON_MATURE
+                elseif idpp >= mxmat
+                    harvest_reason = HARVEST_REASON_MAXSEASLENGTH
+                end
+            end
+
+            if !do_harvest && crop.gddtsoi_patch[p] >= cnveg_state.huileaf_patch[p] &&
+               crop.hui_patch[p] < cnveg_state.huigrain_patch[p] && idpp < mxmat
+                # phase 2: leaf emergence
+                crop.cphase_patch[p] = cphase_leafemerge
+                if abs(cnveg_state.onset_counter_patch[p]) > 1.0e-6
+                    cnveg_state.onset_flag_patch[p]    = 1.0
+                    cnveg_state.onset_counter_patch[p] = dt
+                    # (6) FERTILIZER — assigned ONCE, here, at the single timestep of
+                    # the phase-1 -> phase-2 onset, then HELD every step until
+                    # fert_counter runs out (see the tail of this block). This is why
+                    # the reference shows FERT non-zero in May and identically 0 in
+                    # July: the window closed, the path is not dead.
+                    cnveg_nf.fert_counter_patch[p] = ndays_on * SECSPDAY
+                    if ndays_on > 0.0
+                        cnveg_nf.fert_patch[p] =
+                            (pftcon.manunitro[ivt] * 1000.0 + crop.fertnitro_patch[p]) /
+                            cnveg_nf.fert_counter_patch[p]
+                    else
+                        cnveg_nf.fert_patch[p] = 0.0
+                    end
+                else
+                    # prevents re-entry to the onset of phase 2
+                    cnveg_state.onset_counter_patch[p] = dt
+                end
+
+            elseif do_harvest
+                if cnveg_state.idop_patch[p] != jday   # never harvest on the sowing day
+                    if crop.harvdate_patch[p] >= NOT_Harvested
+                        crop.harvdate_patch[p] = jday
+                    end
+                    crop.harvest_count[p] += 1
+                    hc = crop.harvest_count[p]
+                    if hc >= 1 && hc <= size(crop.hdates_thisyr_patch, 2)
+                        crop.sdates_perharv_patch[p, hc]        = Float64(cnveg_state.idop_patch[p])
+                        crop.syears_perharv_patch[p, hc]        = Float64(cnveg_state.iyop_patch[p])
+                        crop.hdates_thisyr_patch[p, hc]         = Float64(jday)
+                        cnveg_state.gddmaturity_thisyr[p, hc]   = cnveg_state.gddmaturity_patch[p]
+                        crop.gddaccum_thisyr_patch[p, hc]       = crop.gddaccum_patch[p]
+                        crop.hui_thisyr_patch[p, hc]            = crop.hui_patch[p]
+                        crop.sowing_reason_perharv_patch[p, hc] = Float64(crop.sowing_reason_patch[p])
+                        crop.harvest_reason_thisyr_patch[p, hc] = harvest_reason
+                    end
+                    crop.sowing_reason_patch[p] = -1
+
+                    crop.croplive_patch[p] = false
+                    crop.cphase_patch[p]   = cphase_harvest
+                    if canopy_state.tlai_patch[p] > 0.0
+                        cnveg_state.offset_flag_patch[p]    = 1.0
+                        cnveg_state.offset_counter_patch[p] = dt
+                    else
+                        # never emerged: revert the planting transfers so the crop
+                        # seed deficit is replenished (mass conservation).
+                        cnveg_cf.crop_seedc_to_leaf_patch[p] -= cnveg_cs.leafc_xfer_patch[p] / dt
+                        cnveg_nf.crop_seedn_to_leaf_patch[p] -= cnveg_ns.leafn_xfer_patch[p] / dt
+                        cnveg_cs.leafc_xfer_patch[p] = 0.0
+                        cnveg_ns.leafn_xfer_patch[p] = 0.0
+                    end
+                end
+
+            elseif crop.hui_patch[p] >= cnveg_state.huigrain_patch[p]
+                # phase 3: grain fill
+                crop.cphase_patch[p] = cphase_grainfill
+                cnveg_state.bglfr_patch[p] =
+                    1.0 / (pftcon.leaf_long[ivt] * avg_dayspyr * SECSPDAY)
+            end
+
+            # (7) fertilizer window countdown — hold `fert` until the counter runs out
+            if cnveg_nf.fert_counter_patch[p] <= 0.0
+                cnveg_nf.fert_patch[p] = 0.0
+            else
+                cnveg_nf.fert_counter_patch[p] -= dt
+            end
+
+        else
+            # crop not live: conserve mass if leaf*_xfer > 0
+            cnveg_cf.crop_seedc_to_leaf_patch[p] -= cnveg_cs.leafc_xfer_patch[p] / dt
+            cnveg_nf.crop_seedn_to_leaf_patch[p] -= cnveg_ns.leafn_xfer_patch[p] / dt
+            cnveg_state.onset_counter_patch[p] = 0.0
+            cnveg_cs.leafc_xfer_patch[p] = 0.0
+            cnveg_ns.leafn_xfer_patch[p] = 0.0
+        end
+
+        if is_end_sowing_window && is_end_curr_day
+            crop.sown_in_this_window[p] = false
+        end
+    end
 
     return nothing
 end

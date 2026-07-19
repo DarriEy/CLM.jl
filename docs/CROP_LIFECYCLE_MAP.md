@@ -177,6 +177,62 @@ like a physics bug.**
 
 Everything gated on `use_crop` so the default path stays byte-identical.
 
+## 3b. WIRED AND VALIDATED (2026-07-19)
+
+S0-S6 are implemented and validated; `test/test_crop_lifecycle.jl` (106 assertions)
+carries the reference numbers. Tolerances are at **round-off** (`rtol` 1e-12/1e-13),
+not a loose band — the full-precision reference values were taken from the files
+rather than the rounded ones printed in `docs/CROP_PARITY.md`, which is what makes a
+tight tolerance possible.
+
+| Step | Field | Julia | Reference | Agreement |
+|---|---|---|---|---|
+| S1 | `croplive` | `true` ×8 | `CROPLIVE` = 1 ×8 | flips (was structurally impossible) |
+| S1 | `idop` / `iyop` | 136 / 2020 | — | set (date itself not under test, see below) |
+| S1 | `gddmaturity` | 1477.2873853187507 … 1334.2627384206983 | identical | `rtol` 1e-12 |
+| S2 | `huileaf` | 44.318621559562516 … 40.02788215262095 | identical | `rtol` 1e-12 |
+| S2 | `huigrain` | 850.0767538833009 … 595.1300578305277 | identical | `rtol` 1e-12 |
+| S3 | `cphase` | 2 (leafemerge) | `CPHASE` = 2 (May) | exact |
+| S4 | `fert` | 9.69260860321513e-6, 5.726995403717921e-6, 1.5668663836927799e-6, … | identical | **relative error 0.0** |
+| S4b | `fert` after window | 0.0, `croplive` still true | July `FERT` ≡ 0 | exact |
+| S5 | `n_fert!` | wired | `FERT_TO_SMINN` 8 non-zero cols | scatter now non-vacuous |
+| S6 | harvest | `croplive`→false, `harvdate`, `harvest_reason`=MATURE | one harvest/yr | exact |
+
+The `huigrain` branch is asserted **discriminatively**: the test requires that itypes
+17/18/75/76 do NOT equal `grnfill*gddmaturity` and that 19/20/23/24 DO. Taking the
+wrong branch is a 7-18% error and fails.
+
+Confirmation the parameters are real, not fitted: `clm5_params.nc` (pft=79) gives
+`lfemerg` = 0.03/0.05, `grnfill` = 0.65/0.60/0.50, `manunitro` = 0.002 — exactly the
+values back-solved from the reference before the paramfile was opened. itypes 75/76
+are `tropical_corn` / `irrigated_tropical_corn`, which is why they take the
+corn-family branch.
+
+### Not validated — stated so a green suite is not over-read
+
+- **Planting DATE selection.** The reference `idop` (136/127/145/106) depends on the
+  run's 20-year GDD climatology (`gdd020/gdd820/gdd1020` are 20-yr running means),
+  which is not reconstructible from the dumps. The planting *conditions* are
+  synthesized in the test; the date is an input, not an output under test. The
+  decision logic is ported but its date output is unverified.
+- **`vernalization!`** — wired (it had no caller, which is what kept it dead) but
+  **UNVALIDATED**: the reference has no winter-wheat CFT and its `cumvd`/`hdidx` are
+  NaN on every patch.
+- **`n_soyfix!`** — still NOT wired, deliberately. `SOYFIXN` ≡ 0 in *both* reference
+  windows, so wiring it would be precisely the blind wiring #218/#253 refused.
+
+### Remaining work, in order
+
+1. A third reference window (or phase-targeted bracket) that reaches the growth phase
+   `CNSoyfix` requires → then wire and validate `n_soyfix!`.
+2. A winter-wheat CFT reference → validate `vernalization!`.
+3. An end-to-end `scripts/fortran_parity_crop.jl` single-step diff on the
+   `fortran_parity_common.jl` pattern, which would also close the planting-date gap
+   by running from the reference restart (verify the harness datm year/hour first —
+   the #233/#240/#243 lesson).
+4. Crop allocation (`arepr`/grain pools) and `CNCropHarvestToProductPools` value
+   parity — reachable now that the lifecycle drives `cphase`.
+
 ## 4. Standing rules for this work
 
 - Do **not** wire a call whose upstream input is still zero (#253's refusal of
