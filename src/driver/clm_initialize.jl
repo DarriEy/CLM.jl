@@ -282,7 +282,7 @@ function clm_initialize!(;
     # + surfdataread (gdp/peatf/abm from fsurdat) + readParams (prh30,
     # ignition_efficiency). The allocation already happened in clm_instInit!; the
     # three fills below need col%gridcell (built in step 9) and pftcon (filled by
-    # readParameters! just above), so they run here.
+    # readParameters! in Step 4a), so they run here.
     # No-op for the default :nofire => the fire arrays stay zero-length => the CN
     # driver's `_fire_active` gate is structurally false, as before.
     if cnfire_method !== :nofire
