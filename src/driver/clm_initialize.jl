@@ -48,6 +48,9 @@ state, and returns all data structures ready for `clm_drv!()`.
 - `use_crop::Bool`        — use crop model (default false)
 - `use_bedrock::Union{Bool,Nothing}` — use bedrock. `nothing` (default) reproduces CTSM's
   conditional namelist default: `false` under FATES, `true` otherwise (CLM5).
+- `use_luna::Union{Bool,Nothing}` — LUNA photosynthetic-N acclimation. `nothing` (default)
+  reproduces CTSM's conditional namelist default: `false` under FATES, `true` otherwise
+  (CLM5). CTSM `endrun`s on LUNA+FATES, so this must stay conditional.
 - `use_aquifer_layer::Bool` — use aquifer lower boundary. Default `false`, matching
   CTSM's derivation for clm5_0 (lbc=bc_zero_flux). `true` selects ZD09+BC_AQUIFER.
 - `all_active::Bool`      — all points active (default false)
@@ -71,7 +74,14 @@ function clm_initialize!(;
     dtime::Int = 1800,
     use_cn::Bool = false,
     use_crop::Bool = false,
-    use_luna::Bool = false,
+    # CTSM's use_luna default is CONDITIONAL (namelist_defaults_ctsm.xml:578-580):
+    # .true. generally, .false. under use_fates and under phys=clm4_5. For clm5_0
+    # non-FATES -- this port's target -- it is .true. The port shipped `false`,
+    # which is CTSM's CODE FALLBACK (clm_varctl.F90:371), the value the namelist
+    # overrides: the same root cause as #252/#259. A bare `true` would be wrong
+    # too -- CTSM endrun's on LUNA+FATES (controlMod.F90:505), mirrored here at
+    # control.jl:104 -- so `nothing` resolves the condition.
+    use_luna::Union{Bool,Nothing} = nothing,
     use_hydrstress::Bool = false,
     use_lch4::Bool = false,
     use_cndv::Bool = false,
@@ -132,7 +142,11 @@ function clm_initialize!(;
     # ---- Step 1: Set control flags ----
     varctl.use_cn = use_cn
     varctl.use_crop = use_crop
-    varctl.use_luna = use_luna
+    # Resolve the conditional default (see the keyword's comment): FATES runs get
+    # .false. exactly as CTSM's namelist_defaults does; everything else gets CLM5's
+    # .true. `use_luna` is Union{Bool,Nothing} from here on -- use `_use_luna`.
+    _use_luna = use_luna === nothing ? !use_fates : use_luna
+    varctl.use_luna = _use_luna
     varctl.use_hydrstress = use_hydrstress
     varctl.use_cndv = use_cndv
     # CTSM keys this on use_fates ALONE (namelist_defaults_ctsm.xml:2377-2378),
@@ -240,7 +254,7 @@ function clm_initialize!(;
                   nlevdecomp_full=nlevdecomp_full,
                   ndecomp_cascade_transitions=ndecomp_cascade_transitions,
                   nlevurb=nlevurb,
-                  use_luna=use_luna,
+                  use_luna=_use_luna,
                   use_lch4=use_lch4,
                   use_cndv=use_cndv,
                   use_c13=use_c13,

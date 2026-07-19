@@ -28,6 +28,8 @@ to output. This is the top-level entry point for offline CLM simulations.
   defers to clm_initialize!'s CTSM-conditional default; non-FATES resolves to `true`.
 - `use_aquifer_layer::Bool` — Use aquifer lower boundary. Default `false` (CTSM clm5_0
   derivation); `true` selects the ZD09 + BC_AQUIFER solver.
+- `use_luna::Union{Bool,Nothing}` — LUNA photosynthetic-N acclimation. `nothing` (default)
+  defers to clm_initialize!'s CTSM-conditional default; non-FATES resolves to `true`.
 - `hist_fields`          — Custom history fields (default: default_hist_fields())
 - `verbose::Bool`        — Print progress messages (default true)
 - `h2osfcflag::Int`      — Surface water flag for soil hydrology (default 1 = CTSM default)
@@ -92,7 +94,10 @@ function clm_run!(;
     # moisture-form solver + BC_ZERO_FLUX (see clm_driver.jl's swm_cfg switch).
     # 71 of the 75 explicit call sites in scripts/+test/ already pass `false`.
     use_aquifer_layer::Bool = false,
-    use_luna::Bool = false,
+    # `nothing` defers to clm_initialize!'s CTSM-conditional default
+    # (namelist_defaults_ctsm.xml:578-580: .false. under FATES, .true. otherwise).
+    # This driver is non-FATES, so it resolves to .true. -- CLM5's LUNA path.
+    use_luna::Union{Bool,Nothing} = nothing,
     use_hydrstress::Bool = false,
     # CTSM namelist default (SoilHydrologyType.F90 clm_soilhydrology_inparm) is 1.
     # See the note on clm_initialize!'s h2osfcflag: this entry point defaulted to 0
