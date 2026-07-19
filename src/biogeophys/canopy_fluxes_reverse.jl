@@ -218,7 +218,7 @@ function cf_rev_psn_phs_pass2!(b, aux)
     sc = b.scratch; ph = aux.phs; pn = aux.psn; tp = b.temperature; ps = b.photosyns
     psn_phs_pass2_update!(ps, sc.phs_kn, sc.phs_jmax, aux.mask, aux.ivt,
         pn.c3psn, pn.mbbopt, aux.forc_pbot_patch, sc.o2_arr, pn.slatop, pn.leafcn,
-        pn.flnr, pn.fnitr, sc.dayl_factor, pn.t10, tp.t_veg_patch, pn.tlai_z,
+        pn.flnr, pn.fnitr, ph.crop_pft, sc.dayl_factor, pn.t10, tp.t_veg_patch, pn.tlai_z,
         pn.parsun_z, pn.parsha_z, pn.vcmaxcint_sun, pn.vcmaxcint_sha, pn.nrad,
         false, false, 0.015, NLEVCAN, ps.stomatalcond_mtd, ps.light_inhibit,
         ps.leafresp_method, CalibrationOverrides(), 1:length(sc.air))
