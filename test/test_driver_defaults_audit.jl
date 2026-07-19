@@ -151,6 +151,22 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         end
     end
 
+    @testset "use_luna is CONDITIONAL, not a bare Bool (row M4)" begin
+        # namelist_defaults_ctsm.xml:578-580 — .true. generally, .false. under
+        # use_fates and under phys=clm4_5. The port shipped `false`, which is the
+        # CODE FALLBACK (clm_varctl.F90:371) — same root cause as #252/#259.
+        # A bare `true` would be wrong too: CTSM endrun's on LUNA+FATES
+        # (controlMod.F90:505), mirrored at control.jl:104. Hence `nothing`.
+        @test _INIT_KW[:use_luna] === :nothing
+        @test _RUN_KW[:use_luna] === :nothing
+
+        # The conditional must actually RESOLVE — pin the resolved values, not
+        # just the sentinel, so this cannot go vacuously green.
+        @test CLM.CLMDriverConfig().use_luna === true
+        @test CLM.CLMDriverConfig(use_fates=true).use_luna === false
+        @test CLM.CLMDriverConfig(use_luna=false).use_luna === false
+    end
+
     @testset "int_snow_max == 2000.0" begin
         # namelist_defaults_ctsm.xml:476 (clm4_5 variant is 1.e30).
         @test _INIT_KW[:int_snow_max] == 2000.0
