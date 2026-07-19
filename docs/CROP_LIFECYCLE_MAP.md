@@ -319,6 +319,96 @@ window, `fpg` and `GDDfrac` must be read out of the July reference to determine
 which of the two zeros is in play. If `fpg == 1` at July, a new dump window is
 the wrong instrument and the blocker is an N-budget one.
 
+## 3d. Why `SOYFIXN` ≡ 0 — ROOT CAUSE FOUND: `use_fun = .true.`
+
+**The existing reference cannot produce a non-zero `SOYFIXN` at any window, and
+the reason is not timing.** `CNSoyfix` is never called in it.
+
+`CNDriverMod.F90:319-329`:
+
+```fortran
+if (use_crop) then
+   call CNNFert(...)
+   if (.not. use_fun) then  ! if FUN is active, then soy fixation handled by FUN
+      call CNSoyfix (...)
+   end if
+end if
+```
+
+and `crop_ref_usplains/lnd_in` has:
+
+```
+ use_cn   = .true.
+ use_crop = .true.
+ use_fun  = .true.        <-- CNSoyfix is compiled in but NEVER CALLED
+ use_nitrif_denitrif = .true.
+```
+
+With FUN active, soybean fixation is handled inside `CNFUNMod` and
+`soyfixn_patch` is simply never written — it holds its initialized value, 0.
+`SOYFIXN` in the dumps is therefore **not a computed zero at all**; it is an
+untouched field. The `p2c` scatter to `SOYFIXN_TO_SMINN` likewise never runs.
+
+### The evidence that rules out the timing hypothesis
+
+The natural assumption (recorded in prior docs) was that the windows sample the
+wrong growth phase. **The July window disproves that**: at `n39865` the two
+soybean patches sit at the *most favourable possible* point of the criterion.
+
+| Quantity | p0 = 9 (itype 23) | p0 = 10 (itype 24) | Gate |
+|---|---|---|---|
+| `CROPLIVE` | 1 | 1 | (A) PASS |
+| itype | 23 `temperate_soybean` | 24 `irrigated_temperate_soybean` | (B) PASS |
+| `HUI` | 552.196 | 549.678 | — |
+| `gddmaturity` | 1259.261 | 1257.360 | — |
+| `GDDfrac` | **0.43851** | **0.43717** | in (0.30, 0.55] → **`fxg` = 1**, the plateau |
+| `SOYFIXN` | **0.0** | **0.0** | — |
+
+Every gate that a *window* controls is satisfied, and the growth-stage factor is
+at its maximum. A zero here cannot be explained by phase. (For completeness the
+May window *is* a genuine timing zero: `HUI` = 64.93 → `GDDfrac` = 0.0516 →
+`fxg` = 0. The two windows are zero for two different reasons, and neither is
+fixable by choosing a third window.)
+
+Corroborating: the July restart has `fpg` = **NaN** on all soil columns and
+`plant_ndemand` = **0.0 on all 24 patches** — both are FUN-path artifacts. Under
+`use_fun = .true.` the `fpg`/`plant_ndemand` pair that `CNSoyfix` consumes is not
+maintained by the non-FUN nutrient-competition path at all, so even a forced call
+would have read NaN/zero inputs.
+
+### Consequence — `n_soyfix!` stays UNWIRED
+
+`SOYFIXN ≡ 0` is **not** evidence about a window. It is evidence that this
+reference is configured for a code path that excludes `CNSoyfix` entirely.
+Wiring `n_soyfix!` against it would scatter zeros and pass any "is it wired?"
+test while moving nothing — the exact failure #218, #253 and #266 each refused.
+**The refusal stands.**
+
+### What would actually unblock it (precise, in order)
+
+1. **A reference run with `use_fun = .false.`** — this is the whole blocker. It
+   is a *runtime* namelist flag (no rebuild; same binary), so the existing case
+   from `scripts/setup_crop_ref_case.py` can be reconfigured. Note this is not a
+   cosmetic switch: it swaps FUN for `NutrientCompetitionFlexibleCNMod`, which is
+   what computes the `fpg`/`plant_ndemand` pair `CNSoyfix` needs
+   (`NutrientCompetitionFlexibleCNMod.F90:442`).
+2. **Restart it from `Crop_USplains.clm2.r.2020-07-19-14400.nc`** and dump the
+   same `n39865..76` bracket. That restart already sits on the `fxg = 1` plateau
+   (table above), so the growth-stage gate is pre-satisfied and only a handful of
+   steps are needed — a warm restart, not a re-spin-up. Whether a FUN restart
+   loads cleanly into a non-FUN run is the open risk and must be verified, not
+   assumed.
+3. **Extend the BGCDUMP instrumentation to carry `CNSoyfix`'s inputs**, which the
+   current dump does not: `fpg_col`, `plant_ndemand_patch`, `sminn_col`, `wf_col`
+   (plus the existing `HUI`/`gddmaturity`/`CROPLIVE`). Without them the only
+   possible test is end-to-end; with them each of `fxw`/`fxn`/`fxg`/`fxr` can be
+   validated in isolation, which is what makes the branch structure
+   discriminative rather than a single number that many wrong formulas reproduce.
+4. Only then wire `n_soyfix!` and assert values.
+
+Until (1) exists, **`n_soyfix!` is blocked on a reference-configuration gap, not
+on Julia code.** The port side is ready; the ground truth is not.
+
 ## 4. Standing rules for this work
 
 - Do **not** wire a call whose upstream input is still zero (#253's refusal of
