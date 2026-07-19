@@ -172,6 +172,16 @@ function main(; nsteps::Int = 48)
                 inst.energyflux.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1,s]),
                 inst.energyflux.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1,s]))
         end
+        # LAKE_DUMP: raw Julia-vs-Fortran values (not relative diffs) for the fields
+        # in the open surface-flux residual, every step. Relative diffs hide a value
+        # that is CONSTANT because it is never written (see TSA).
+        if get(ENV, "LAKE_DUMP", "") == "1"
+            @printf("  [dump s=%2d] TSA J=%8.3f F=%8.3f | FSH J=%8.3f F=%8.3f | LH J=%8.3f F=%8.3f | TG J=%8.3f F=%8.3f\n",
+                s, temp.t_ref2m_patch[p_lake], _fv(fds["TSA"][1,s]),
+                ef.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1,s]),
+                ef.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1,s]),
+                temp.t_grnd_col[c_lake], _fv(fds["TG"][1,s]))
+        end
         gmax = maximum(v for v in values(per) if !isnan(v); init=0.0)
         gmax_run = max(gmax_run, gmax)
         if s == 1 && SHOWALL
