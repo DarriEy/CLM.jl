@@ -88,8 +88,22 @@ against whether the lake path consults `z0method` at all (lake `z0` is a functio
 
 | Input | Fortran | Harness | Verdict |
 |---|---|---|---|
-| `forc_hgt_u/t/q` | from coupler `Sa_z` (datm CLMNCEP) | **hard-set `30.0`** | **TO VERIFY** |
+| `forc_hgt_u/t/q` | `Sa_z = 30.0` | hard-set `30.0` | **MATCH — verified** |
+| TBOT/WIND/QBOT/PSRF/FLDS time interp | `tintalgo = linear` | exact record read | MATCH at exact stream times |
+| FSDS time interp | `tintalgo = coszen` | — | differs off-record (dt == stream interval, so inert) |
+| PRECT time interp | `tintalgo = nearest` | — | inert |
+| stream `<offset>` | `0` (all streams) | n/a | MATCH |
 | forcing hour mapping | datm advances with the model clock | `base + Hour(max(s-1, 1))` | **SUSPECT — see below** |
+
+`Sa_z` verified at `components/cdeps/datm/datm_datamode_clmncep_mod.F90:416` —
+`if (.not. associated(strm_z)) Sa_z(n) = 30.0_r8`. The Bow forcing file
+(`clmforc.2003.nc`) carries no `ZBOT`/height variable, so this fallback fires and the
+Fortran reference genuinely runs at 30 m. The harness's hard-set 30.0 is correct.
+
+Stream settings read from `clm_lake_run/datm.streams.xml` (`CLMNCEP.TPQW` block).
+Because the model timestep (3600 s) equals the forcing interval (hourly), `linear`
+interpolation evaluated at a stream time returns that record exactly — so the
+interpolation algorithm is not a source of error, but **which hour is evaluated** is.
 
 **Forcing-hour mapping.** The harness maps step `s` to forcing hour `max(s-1, 1)`:
 steps 1 and 2 BOTH read hour 1, and every step from 2 onward is therefore offset one
