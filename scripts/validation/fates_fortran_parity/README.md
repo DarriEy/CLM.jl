@@ -574,3 +574,51 @@ USE_BEDROCK=false julia +1.12 --project=. scripts/soil_budget_probe.jl 480
 #   bash scripts/validation/fates_fortran_parity/setup_case.sh   (SKIP_BUILD=1 to reuse)
 #   -> writes soil_budget_fortran.txt in the run dir
 ```
+
+---
+
+# D3 (2026-07-19): full flag audit — harness vs. reference `lnd_in`, flag by flag
+
+Several CLM driver defaults moved in the days after #247 was measured (#252
+`use_bedrock`, #259 `use_aquifer_layer`, #225 `h2osfcflag`, #265
+`create_crop_landunit`, #267–#269 `use_luna`, #273 `use_hydrstress`). Because
+`scripts/fates_fortran_parity.jl::build()` **inherits** most of them rather than
+setting them, every one of those moves silently re-specifies this harness. A
+namelist mismatch of exactly this kind has been the actual cause 8 times in this
+repo (#233, #240, #243, #248, #251/#252 …), so the audit is run **before** any
+number is trusted.
+
+Reference = `<run dir>/lnd_in` from the surviving `fates_parity_1pt` case
+(`I2000Clm50FatesRs`, CLM `build-namelist`). Julia = the flags actually resolved by
+`clm_initialize!(use_fates=true, use_bedrock=false)` as `build()` calls it, read back
+out of `varctl` / `SoilHydrologyData` after init.
+
+| flag | Fortran `lnd_in` | Julia (resolved) | verdict |
+|---|---|---|---|
+| `use_fates` | `.true.` | `true` | match |
+| `use_cn` | `.false.` | `false` | match |
+| `use_crop` | `.false.` | `false` | match |
+| `create_crop_landunit` | `.false.` | `false` | match — `clm_initialize.jl:159` sets `!use_fates`, so #265 lands on the correct side here |
+| `use_bedrock` | `.false.` | `false` | match — set explicitly by `build()` (#251/#252); with #252's conditional default (`use_fates` ⇒ `.false.`) the explicit pass is now belt-and-braces |
+| `use_aquifer_layer` | derived `.false.` (`lower_boundary_condition = 2` = `bc_zero_flux`; `SoilWaterMovementMod.F90:221-236`) | `false` (#259) | match |
+| `h2osfcflag` | not in `lnd_in` ⇒ CTSM default `1` (`SoilHydrologyType.F90:339`) | `1` (#225) | match |
+| `use_luna` | `.false.` | `false` | match — CTSM `endrun`s on LUNA+FATES (`controlMod.F90:505`), mirrored at `control.jl:104`; #267's `nothing` default resolves to `false` under FATES |
+| `use_hydrstress` | `.false.` | `false` | match — also mutually exclusive with FATES (`control.jl:102`) |
+| `use_fun` | `.false.` | n/a (no `varctl` field; FATES path never sets `bgc_vegetation.config.use_fun`) | match by construction |
+| `use_nitrif_denitrif` | `.true.` | `true` | match (inert at `use_cn=false`) |
+| `use_subgrid_fluxes` | `.true.` | `true` | match |
+| `irrigate` | `.false.` | `false` | match |
+| `use_cndv` / `use_c13` / `use_c14` | `.false.` | `false` | match |
+| all 13 `use_fates_*` sub-flags | `.false.` (incl. `fixed_biogeog`, `nocomp`, `sp`, `planthydro`, `cohort_age_tracking`, `tree_damage`, `ed_st3`, `ed_prescribed_phys`, `inventory_init`, `luh`, `lupft`, `potentialveg`) | all `false` | match — in particular `use_fates_fixed_biogeog=.false.` confirms the reference is the **unscreened** 14-PFT case #197 is *not* covered by |
+| `use_lch4` | `.false.` | `varctl.use_lch4 = true` **(≠)**, but `CLMDriverConfig.use_lch4 = false` | **benign, latent trap** — see below |
+
+**Verdict: no active mismatch.** The one discrepancy is cosmetic *on this path* but is
+a real latent trap worth recording: `clm_initialize!`'s kwarg default is
+`use_lch4=false` and it is what drives allocation and `CLMDriverConfig`, but the
+kwarg is **never written back to the `varctl` global**, which keeps its own
+independent default of `true` (`varctl.jl:110`). Nothing on the FATES path reads
+`varctl.use_lch4` (only `lake_temperature.jl:1158` and `control.jl`'s validator do,
+and this site has no lake column), so the 20-day comparison is unaffected — but any
+future harness that reads the global instead of the config would silently run a
+different model. Same class as #252/#259: a struct default that is CTSM's *code
+fallback* rather than its *namelist* value.
