@@ -233,6 +233,92 @@ corn-family branch.
 4. Crop allocation (`arepr`/grain pools) and `CNCropHarvestToProductPools` value
    parity — reachable now that the lifecycle drives `cphase`.
 
+## 3c. `CNSoyfix` activation criterion (2026-07-19, read from source)
+
+Source: `CNNDynamicsMod.F90:319-463`, called from `CNDriverMod.F90:325`.
+
+**Correction to a standing assumption.** `docs/CROP_LIFECYCLE_MAP.md` §3 and
+`docs/CROP_PARITY.md` both say `n_soyfix!` "needs `cphase`" and that
+`CNSoyfix` "fires only in a later growth phase". **Neither is true.**
+`CNSoyfix` never reads `cphase`. It is not phase-gated. The real gate is
+`fpg`, and that changes what a valid reference window is.
+
+The routine writes `soyfixn_patch` on **every** patch every step (it has an
+explicit `else → soyfixn = 0` on both branches), then `p2c`-scatters to
+`soyfixn_to_sminn_col`. So it is never "skipped" — a zero is a computed zero.
+
+### The three gates, in order
+
+```
+(A) croplive(p) == .true.
+(B) patch%itype(p) ∈ {ntmp_soybean, nirrig_tmp_soybean,
+                      ntrp_soybean, nirrig_trp_soybean}
+(C) fpg(c) < 1.0            <-- THE LOAD-BEARING GATE
+```
+
+If (A) or (B) fails → `soyfixn = 0`. If (C) fails → `soyfixn = 0` explicitly
+("if nitrogen demand met, no fixation"). Only when all three hold is anything
+computed.
+
+In the 8-patch collapsed set, (B) selects **exactly patches p0 = 9 (itype 23,
+`temperate_soybean`) and p0 = 10 (itype 24, `irrigated_temperate_soybean`)**.
+`ntrp_soybean`/`nirrig_trp_soybean` are the *tropical* soybeans (not 75/76 —
+those are `tropical_corn`/`irrigated_tropical_corn`, per §3b) and are absent
+from this surfdata. **So at most 2 of 8 patches can ever be non-zero here**,
+and a test asserting non-zero on all 8 would be wrong.
+
+### The computation when all three gates hold
+
+```
+soy_ndemand = plant_ndemand(p) - plant_ndemand(p)*fpg(c)      ! = pnd*(1-fpg)
+
+fxw = wf(c) / 0.85                                            ! wf = soil water
+                                                              !   frac of whc, top 0.5 m
+fxn = 0                       if sminn(c) >  30
+    = 1.5 - 0.005*(sminn*10)  if 10 < sminn(c) <= 30
+    = 1                       if sminn(c) <= 10
+
+GDDfrac = hui(p) / gddmaturity(p)
+fxg = 0                    if GDDfrac <= 0.15
+    = 6.67*GDDfrac - 1     if 0.15 < GDDfrac <= 0.30
+    = 1                    if 0.30 < GDDfrac <= 0.55
+    = 3.75 - 5*GDDfrac     if 0.55 < GDDfrac <= 0.75
+    = 0                    if GDDfrac >  0.75
+
+fxr = max(0, min(1, fxw, fxn) * fxg)
+soyfixn(p) = min(fxr * soy_ndemand, soy_ndemand)
+```
+
+Note `min(1, fxw, fxn)` is a 3-way min including the literal `1`, so the water
+and N factors are capped at 1 but `fxg` is applied *after* the cap and is not
+itself capped by it. The final `min(soyfixn, soy_ndemand)` is redundant given
+`fxr <= 1` but is kept for fidelity.
+
+### Where to bracket a dump — and the trap
+
+The **GDD window** is `0.15 < hui/gddmaturity < 0.75`. With soybean
+`gddmaturity` ≈ 1259 / 1257 (p0 9/10, from the restart), that is
+`hui ∈ (189, 944)`, peaking at `fxg = 1` for `hui ∈ (378, 692)`. A dump
+bracketing the `fxg = 1` plateau is the most discriminative target, because
+there `soyfixn = min(1, fxw, fxn) * plant_ndemand * (1 - fpg)` exactly.
+
+**Why the two existing windows are zero is NOT the same reason in each:**
+
+- **May (n38665, 2020-05-30):** soybean `idop` = 145, so at jday 151 `hui` is
+  barely accumulating → `GDDfrac <= 0.15` → `fxg = 0`. A *timing* zero. A
+  later window fixes this.
+- **July (n39865, 2020-07-19):** `GDDfrac` is plausibly inside the window here,
+  so if this dump is also zero the cause is likely **gate (C)**: `fpg = 1`,
+  i.e. the soil supplies all the N the plants demand and there is no deficit to
+  fix. That is a *state* zero, and **no choice of window fixes it** — it is a
+  property of the run's N budget (a fertilized, spun-up soil column), not of
+  when you look.
+
+**This distinction is the whole risk of the task.** Before generating any new
+window, `fpg` and `GDDfrac` must be read out of the July reference to determine
+which of the two zeros is in play. If `fpg == 1` at July, a new dump window is
+the wrong instrument and the blocker is an N-budget one.
+
 ## 4. Standing rules for this work
 
 - Do **not** wire a call whose upstream input is still zero (#253's refusal of
