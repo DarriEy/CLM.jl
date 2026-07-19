@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_ozonestress_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_ozonestress_e2e.jl — end-to-end GPU parity for the WHOLE
 # ozone driver: calc_ozone_uptake! (per-patch stomatal uptake, both the
 # LAI>thresh "active" branch and the LAI<thresh reset branch) followed by
 # calc_ozone_stress! / calc_ozone_stress_lombardozzi2015! (o3uptake>0 active
@@ -10,7 +10,7 @@
 #   p2 exposed, nonwoody broadleaf, high ozone (uptake active, stress active)
 #   p3 exposed, LAI below threshold (uptake reset to 0 -> stress inactive)
 #   p4 non-exposed veg (reset-to-1 branch)
-# Runs both on CPU, adapts to Metal, runs the SAME calls on the device, and
+# Runs both on CPU, adapts to the GPU, runs the SAME calls on the device, and
 # compares the mutated outputs field-by-field.
 #
 #   julia --project=scripts scripts/gpu_validate_ozonestress_e2e.jl
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -86,7 +85,7 @@ end
 
 function main(backend)
     println("="^70)
-    println("END-TO-END Metal parity for calc_ozone_uptake!/calc_ozone_stress! (whole driver)")
+    println("END-TO-END GPU parity for calc_ozone_uptake!/calc_ozone_stress! (whole driver)")
     println("="^70)
     if backend === nothing
         println("  No GPU backend — nothing to validate.")
@@ -96,9 +95,9 @@ function main(backend)
     @printf("  Backend: %s   (working precision: %s)\n\n", name, FT)
 
     H = build(FT); B = build(FT)
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
-    if !(Sd.oz.o3uptakesha_patch isa Metal.MtlArray)
+    if !(Sd.oz.o3uptakesha_patch isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

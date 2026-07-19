@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_nutrient_comp_e2e.jl — end-to-end Metal parity for the CN
+# gpu_validate_nutrient_comp_e2e.jl — end-to-end GPU parity for the CN
 # allocation pipeline calc_plant_nutrient_competition! -> calc_plant_cn_alloc!
 # (per-patch C/N allocation; _cnalloc_main_kernel! ~69 args grouped into
 # _CnAllocOut{V,M}/_CnAllocIn{V,M,VB} device-view bundles).
@@ -8,7 +8,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -80,18 +79,18 @@ run_c!(d) = CLM.calc_plant_nutrient_competition!(d.mask_soilp, d.bounds, d.pftco
     d.patch, d.crop, d.cnveg_state, d.cnveg_cs, d.cnveg_cf, d.cnveg_nf; fpg_col=d.fpg_col)
 
 function main(backend)
-    println("=" ^ 66); println("END-TO-END Metal parity for calc_plant_nutrient_competition!"); println("=" ^ 66)
+    println("=" ^ 66); println("END-TO-END GPU parity for calc_plant_nutrient_competition!"); println("=" ^ 66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = build(); B = build()
     run_c!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mfs(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32S(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mfs(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32S(), x))
     D = (; pftcon=mf(B.pftcon), cn_shared_params=B.cn_shared_params, patch=mf(B.patch), crop=mfs(B.crop),
          cnveg_state=mf(B.cnveg_state), cnveg_cs=mf(B.cnveg_cs), cnveg_cf=mf(B.cnveg_cf), cnveg_nf=mf(B.cnveg_nf),
-         mask_soilp=Metal.MtlArray(collect(B.mask_soilp)), bounds=B.bounds, fpg_col=mf(B.fpg_col), nc=B.nc)
-    if !(D.cnveg_cf.plant_calloc_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+         mask_soilp=device_array_type()(collect(B.mask_soilp)), bounds=B.bounds, fpg_col=mf(B.fpg_col), nc=B.nc)
+    if !(D.cnveg_cf.plant_calloc_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_c!(D)
     checks = [("plant_calloc", H.cnveg_cf.plant_calloc_patch, D.cnveg_cf.plant_calloc_patch),
               ("plant_nalloc", H.cnveg_nf.plant_nalloc_patch, D.cnveg_nf.plant_nalloc_patch),

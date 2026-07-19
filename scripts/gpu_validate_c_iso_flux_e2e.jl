@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_c_iso_flux_e2e.jl — end-to-end Metal parity for the carbon-
+# gpu_validate_c_iso_flux_e2e.jl — end-to-end GPU parity for the carbon-
 # isotope flux module (CNCIsoFluxMod).  Exercises the two grouped patch->
 # column scatter wrappers that needed device-view struct grouping to clear
 # Metal's ~31-arg limit:
@@ -11,7 +11,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -98,12 +97,12 @@ run_harvest!(d) = CLM.cn_c_iso_harvest_pft_to_column!(d.cf, d.sb, d.mask, d.boun
                                               i_met_lit=d.i_met_lit)
 
 function main(backend)
-    println("=" ^ 66); println("END-TO-END Metal parity for CNCIsoFluxMod"); println("=" ^ 66)
+    println("=" ^ 66); println("END-TO-END GPU parity for CNCIsoFluxMod"); println("=" ^ 66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mmask(b) = Metal.MtlArray(collect(b))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mmask(b) = device_array_type()(collect(b))
     checks = Tuple{String,Any,Any}[]
 
     movedev(d) = (; cf=mf(d.cf), sb=mf(d.sb), mask=mmask(d.mask), bounds=d.bounds, nlevdecomp=d.nlevdecomp,
@@ -113,7 +112,7 @@ function main(backend)
 
     # (1) gap-mortality patch->column scatter (grouped device-view kernel)
     Hg = build_gap(); Bg = build_gap(); run_gap!(Hg); Dg = movedev(Bg)
-    if !(Dg.cf.gap_mortality_c_to_litr_c_col isa Metal.MtlArray); println("  BLOCKED (gap)."); return 2; end
+    if !(Dg.cf.gap_mortality_c_to_litr_c_col isa device_array_type()); println("  BLOCKED (gap)."); return 2; end
     run_gap!(Dg)
     push!(checks, ("gap_mortality_c_to_litr_c_col", Hg.cf.gap_mortality_c_to_litr_c_col, Dg.cf.gap_mortality_c_to_litr_c_col))
     push!(checks, ("gap_mortality_c_to_cwdc_col", Hg.cf.gap_mortality_c_to_cwdc_col, Dg.cf.gap_mortality_c_to_cwdc_col))

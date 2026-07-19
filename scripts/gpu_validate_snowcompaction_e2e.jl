@@ -1,10 +1,10 @@
 # ==========================================================================
-# gpu_validate_snowcompaction_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_snowcompaction_e2e.jl — end-to-end GPU parity for the WHOLE
 # snow_compaction! driver (the per-column sequential snow-layer compaction).
 #
 # Builds a small set of snow columns with DIFFERENT snow-layer counts
 # (snl = -1, -2, -3, plus a no-snow column), runs snow_compaction! on the CPU,
-# then runs the SAME call with every array adapted to the Metal device, and
+# then runs the SAME call with every array adapted to the GPU device, and
 # compares the mutated `dz` (the only output) field.
 #
 # Each snow column is set up so the destructive-metamorphism, overburden, melt,
@@ -153,7 +153,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for snow_compaction! (whole per-column kernel)")
+    println("END-TO-END GPU parity for snow_compaction! (whole per-column kernel)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")

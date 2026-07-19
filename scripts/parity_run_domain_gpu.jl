@@ -16,9 +16,9 @@
 # ==========================================================================
 
 using Dates, Printf, CLM
-import Metal
-include(joinpath(@__DIR__, "gpu_adapt.jl"))   # mf(MtlArray, x): host tree -> device Float32
-mf(x) = mf(Metal.MtlArray, x)
+include(joinpath(@__DIR__, "gpu_backends.jl"))
+include(joinpath(@__DIR__, "gpu_adapt.jl"))   # mf(device_array_type(), x): host tree -> device Float32
+mf(x) = mf(device_array_type(), x)
 
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
 const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
@@ -67,8 +67,8 @@ haskey(DOMAINS, DOM) || error("Unknown DOMAIN=$DOM; have $(collect(keys(DOMAINS)
 cfg = DOMAINS[DOM]
 yr  = cfg.year
 
-if !Metal.functional()
-    println("Metal not functional on this host — aborting GPU parity run."); exit(2)
+if !gpu_functional()
+    println("No GPU backend detected on this host — aborting GPU parity run."); exit(2)
 end
 
 fsurdat   = joinpath(cfg.caldir, "surfdata_clm.nc")

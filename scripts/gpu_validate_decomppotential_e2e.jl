@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_decomppotential_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_decomppotential_e2e.jl — end-to-end GPU parity for the WHOLE
 # soil_bgc_potential! BGC driver (potential decomposition / immobilization demand).
 #
 # Builds two small multi-column / multi-level instances mirroring
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the device-view structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # NaN-aware mixed abs/rel diff; asserts the CPU reference is finite so a both-NaN
@@ -40,9 +39,9 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 # reconstructs each struct (integer/bool arrays move as-is). @adapt_structure rebuilds
 # each struct positionally, inferring the new {Float32,…} params from adapted fields.
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 # --------------------------------------------------------------------------
 # Standard (non-MIMICS) instance — mirrors test_decomp_potential.jl make_test_data
@@ -195,7 +194,7 @@ function run_case(name, builder, backend)
             ntrans=B.ntrans, use_mimics=B.use_mimics,
             i_cop_mic=B.i_cop_mic, i_oli_mic=B.i_oli_mic)
 
-    if !(cs_d.decomp_cpools_vr_col isa Metal.MtlArray)
+    if !(cs_d.decomp_cpools_vr_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end
@@ -238,7 +237,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soil_bgc_potential! (potential decomposition)")
+    println("END-TO-END GPU parity for soil_bgc_potential! (potential decomposition)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")

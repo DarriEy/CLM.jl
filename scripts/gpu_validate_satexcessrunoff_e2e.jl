@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_satexcessrunoff_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_satexcessrunoff_e2e.jl — end-to-end GPU parity for the WHOLE
 # saturated_excess_runoff! routine (the fused per-column kernel).
 #
 # Builds a small Float32 instance with several columns exercising every branch:
@@ -11,7 +11,7 @@
 # A second pass exercises the VIC fsat_method.
 #
 # Runs the whole function on the CPU, adapts every state struct (+ the ser
-# fsat/fcov arrays + the Bool mask) to Metal, runs the SAME call on the device,
+# fsat/fcov arrays + the Bool mask) to the GPU, runs the SAME call on the device,
 # and compares every mutated field with reldiff.
 #
 # CRITICAL: every required param/input is set to a real value so the CPU
@@ -23,7 +23,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -86,7 +85,7 @@ run_ser!(S) = CLM.saturated_excess_runoff!(
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for saturated_excess_runoff! (whole routine)")
+    println("END-TO-END GPU parity for saturated_excess_runoff! (whole routine)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU routine exercised by the suite).")
@@ -101,12 +100,12 @@ function main(backend)
         H = build(FT, use_vic)   # CPU reference
         B = build(FT, use_vic)   # device source
 
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         # Adapt the full state structs (their fields become MtlArrays).
         cold = ad(B.col); lund = ad(B.lun); shd = ad(B.sh)
         ssd = ad(B.ss); wfbd = ad(B.wfb); serd = ad(B.ser)
 
-        if !(shd.zwt_col isa Metal.MtlArray) || !(serd.fsat_col isa Metal.MtlArray)
+        if !(shd.zwt_col isa device_array_type()) || !(serd.fsat_col isa device_array_type())
             println("  BLOCKED: a state struct did not move to the device under adapt.")
             return 2
         end

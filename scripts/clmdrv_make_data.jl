@@ -403,7 +403,7 @@ function make_driver_data_physical(; ng=2, nl=3, nc=4, np=6)
     # hydrology that the warmup's albedo then reads). Lighting these up needs a
     # real CLM cold start (clm_initialize!/cold_start! computes a consistent
     # initial albedo + state). Out of scope for this fixture; the 410 finite
-    # entries still give a real CPU-vs-Metal parity signal across the rest.
+    # entries still give a real CPU-vs-GPU parity signal across the rest.
 
     return inst, bounds, filt, filt_ia, config, photosyns
 end

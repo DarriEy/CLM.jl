@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_luna.jl — host-vs-Metal parity for the LUNA 24hr/240hr climate
+# gpu_validate_luna.jl — host-vs-GPU parity for the LUNA 24hr/240hr climate
 # accumulation kernels (clear24_climate_luna! / acc24_climate_luna! /
 # acc240_climate_luna!). These run every timestep / end-of-day under use_luna.
 #
@@ -13,10 +13,9 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 const NP, NC, NL, NG = 2, 5, 2, 1
 
@@ -106,7 +105,7 @@ function main(backend)
     csD,psD,albD,saD,tempD,pchD = mf(cs),mf(ps),mf(alb),mf(sa),mf(temp),mf(pch)
     maskD = mf(mask)
     CLM.acc24_climate_luna!(cs, ps, alb, sa, temp, pch, mask, bounds, dtime)
-    CLM.acc24_climate_luna!(csD, psD, albD, saD, tempD, pchD, maskD, bounds, dtime); Metal.synchronize()
+    CLM.acc24_climate_luna!(csD, psD, albD, saD, tempD, pchD, maskD, bounds, dtime); device_synchronize()
     for (nm,h,d) in (("t_veg_day",temp.t_veg_day_patch,tempD.t_veg_day_patch),
                      ("par24d_z",sa.par24d_z_patch,saD.par24d_z_patch),
                      ("par24x_z",sa.par24x_z_patch,saD.par24x_z_patch),
@@ -122,7 +121,7 @@ function main(backend)
     rb = fill(40.0, NP); rh = fill(0.6, NP); oair = fill(21000.0, NP); cair = fill(38.0, NP)
     CLM.acc240_climate_luna!(temp, ps, alb, sa, wdb, fv, pch, mask, bounds, oair, cair, rb, rh, dtime)
     CLM.acc240_climate_luna!(tempD, mf(ps), mf(alb), saD, wdbD, fvD, mf(pch), maskD,
-        bounds, oair, cair, rb, rh, dtime); Metal.synchronize()
+        bounds, oair, cair, rb, rh, dtime); device_synchronize()
     for (nm,h,d) in (("par240d_z",sa.par240d_z_patch,saD.par240d_z_patch),
                      ("par240x_z",sa.par240x_z_patch,saD.par240x_z_patch),
                      ("t_veg10_day",temp.t_veg10_day_patch,tempD.t_veg10_day_patch),
@@ -137,7 +136,7 @@ function main(backend)
     cs,ps,alb,sa,temp,pch,wdb,fv = build_fixture()
     psD,saD,tempD = mf(ps),mf(sa),mf(temp)
     CLM.clear24_climate_luna!(sa, ps, temp, pch, mask, bounds)
-    CLM.clear24_climate_luna!(saD, psD, tempD, mf(pch), mf(mask), bounds); Metal.synchronize()
+    CLM.clear24_climate_luna!(saD, psD, tempD, mf(pch), mf(mask), bounds); device_synchronize()
     for (nm,h,d) in (("par24d_z",sa.par24d_z_patch,saD.par24d_z_patch),
                      ("fpsn24",ps.fpsn24_patch,psD.fpsn24_patch))
         m,n = reldiff(h,d); ok = m < 1f-3
@@ -156,7 +155,7 @@ function main(backend)
     CLM.update_photosynthesis_capacity!(psD, mf(temp2), mf(cs2), mf(alb2), mf(sa2), mf(wdb2),
         mf(fv2), mf(pch2), mf(grc2), mf(maskU), 1:NP,
         daylf2, pbot2, co22, o22, c3psn2, slatop2, leafcn2, rhol2, taul2, o32, lp2, 3600.0, CLM.NLEVCAN)
-    Metal.synchronize()
+    device_synchronize()
     for (nm,h,d) in (("vcmx25_z",ps.vcmx25_z_patch,psD.vcmx25_z_patch),
                      ("jmx25_z",ps.jmx25_z_patch,psD.jmx25_z_patch),
                      ("pnlc_z",ps.pnlc_z_patch,psD.pnlc_z_patch),

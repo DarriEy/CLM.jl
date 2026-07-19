@@ -1,10 +1,10 @@
 # ==========================================================================
-# gpu_validate_soilfluxes_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_soilfluxes_e2e.jl — end-to-end GPU parity for the WHOLE
 # soil_fluxes! driver (every per-(c)/per-(p) loop + the errsoi p2c scatter).
 #
 # Builds a small Float32 instance (one non-urban soil column / patch) mirroring
 # test/test_soil_fluxes.jl's smoke setup, runs soil_fluxes! on the CPU, adapts
-# every state struct (+ masks/forcing) to Metal, runs the SAME call on the device,
+# every state struct (+ masks/forcing) to the GPU, runs the SAME call on the device,
 # and compares the mutated outputs field-by-field. This exercises the flux
 # correction, evap partition + limiting, ground-heat/total-flux/lwrad loops, the
 # errsoi layer summation, and the patch->column errsoi scatter together.
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal   # Metal-specific; MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence). Also asserts
@@ -107,7 +106,7 @@ run_sf!(S, m_c, m_p, m_u, forc_lwrad, dtime) = CLM.soil_fluxes!(
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soil_fluxes! (whole driver)")
+    println("END-TO-END GPU parity for soil_fluxes! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -119,11 +118,11 @@ function main(backend)
     H = build(FT)               # CPU reference
     B = build(FT)               # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     dmask(m) = to(collect(Bool, m))
 
-    if !(Sd.waterdiagbulk.frac_sno_eff_col isa Metal.MtlArray)
+    if !(Sd.waterdiagbulk.frac_sno_eff_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

@@ -9,9 +9,8 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
-using Metal: MtlArray
-dev = MtlArray
+include(joinpath(@__DIR__, "gpu_backends.jl"))
+dev = device_array_type()
 
 struct DevF32{F}; f::F; end
 CLM.Adapt.adapt_storage(d::DevF32, x::AbstractArray{<:AbstractFloat}) = d.f(Float32.(x))
@@ -22,10 +21,10 @@ mvf(x) = CLM.Adapt.adapt(DevF32(dev), x)
 # min elapsed over K reps (after a warm-up); Metal solve is synchronous (each
 # _launch! calls KA.synchronize), and we add a final device sync to be safe.
 function timeit(f, K; sync=false)
-    f(); sync && Metal.synchronize()
+    f(); sync && device_synchronize()
     t = Inf
     for _ in 1:K
-        dt = @elapsed (f(); sync && Metal.synchronize())
+        dt = @elapsed (f(); sync && device_synchronize())
         t = min(t, dt)
     end
     return t
@@ -103,7 +102,7 @@ function bench_soil(nc, K)
 end
 
 function main()
-    bk = Metal.functional() ? "Metal (Float32)" : "no Metal"
+    bk = gpu_functional() ? gpu_backend_name() : "no GPU"
     println("=" ^ 62); println("matrix-CN solve: HOST (KA CPU, Float64) vs $bk"); println("=" ^ 62)
     println("  VEG-C solve (per patch):")
     @printf("  %-10s %12s %12s %9s %14s\n", "np", "host (ms)", "metal (ms)", "speedup", "M patch/s")

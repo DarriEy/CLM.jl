@@ -1,10 +1,10 @@
 # ==========================================================================
-# gpu_validate_phs_e2e.jl — WHOLE-FUNCTION Metal parity for photosynthesis_hydrstress!
+# gpu_validate_phs_e2e.jl — WHOLE-FUNCTION GPU parity for photosynthesis_hydrstress!
 # (the PHS / plant-hydraulic-stress photosynthesis path), all 4 passes on device.
 #
 # Builds the same small Float32 PHS case as the CPU oracle
 # (gpu_validate_phs_cpu_oracle.jl), runs photosynthesis_hydrstress! on the CPU,
-# adapts ps + every input array to Metal, runs the SAME call on device, and
+# adapts ps + every input array to the GPU, runs the SAME call on device, and
 # compares the mutated outputs. This is the parity gate for Passes 1-4 together.
 # Passes 1/2/4 run on the GPU; Pass 3's fused Newton solve runs via the HYBRID
 # fallback (on the CPU over host copies, results copied back to the device) because
@@ -16,7 +16,7 @@
 
 using CLM
 using Printf
-import Metal
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 reldiff(a, b) = begin
     A = Array(a); B = Array(b); m = 0.0
@@ -32,10 +32,10 @@ include(joinpath(@__DIR__, "gpu_validate_phs_cpu_oracle.jl"))  # defines setpara
 
 function main_e2e()
     println("=" ^ 72)
-    println("WHOLE-FN Metal parity for photosynthesis_hydrstress! (PHS, all 4 passes)")
+    println("WHOLE-FN GPU parity for photosynthesis_hydrstress! (PHS, all 4 passes)")
     println("=" ^ 72)
-    if !Metal.functional()
-        println("  Metal not functional — nothing to validate."); return 0
+    if !gpu_functional()
+        println("  No GPU backend detected — nothing to validate."); return 0
     end
     CLM.varpar_init!(CLM.varpar, 5, 16, 0, 5)
     nlevsoi = 5
@@ -46,15 +46,15 @@ function main_e2e()
     setparams!()
     B = build(FT, nlevsoi)        # to be adapted to device
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     # Adapt ps + every input array + vegwp/vegwp_ln; mask -> device Bool.
     Bd = (; np = B.np, nc = B.nc, nlevsoi = B.nlevsoi, nlevcan = B.nlevcan,
             ps = ad(B.ps),
             vegwp = ad(B.vegwp), vegwp_ln = ad(B.vegwp_ln),
             inp = (; (k => ad(getfield(B.inp, k)) for k in keys(B.inp))...),
-            mask = Metal.MtlArray(collect(Bool, B.mask)))
+            mask = device_array_type()(collect(Bool, B.mask)))
 
-    if !(Bd.ps.ac_phs_patch isa Metal.MtlArray)
+    if !(Bd.ps.ac_phs_patch isa device_array_type())
         println("  BLOCKED: PhotosynthesisData did not move to the device under adapt."); return 2
     end
 
@@ -85,7 +85,7 @@ function main_e2e()
         ok || (nfail += 1)
     end
     println()
-    println(nfail == 0 ? "  WHOLE photosynthesis_hydrstress! MATCHES CPU ON Metal (Float32) ✓" :
+    println(nfail == 0 ? "  WHOLE photosynthesis_hydrstress! MATCHES CPU ON GPU ✓" :
                          "  DIVERGENCE ($nfail) — investigate.")
     return nfail == 0 ? 0 : 1
 end

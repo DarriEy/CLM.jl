@@ -7,10 +7,9 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 function reldiff(H, D)
     A = Array(H); B = Array(D); m = 0.0; n = 0
@@ -70,7 +69,7 @@ function run_smb!(f, dev)
     CLM.compute_surface_mass_balance!(glc, frz, dyn, snwcp, melt, persist, routing,
         cl, cg, li, allc, smb, bounds; glc_snow_persistence_max_days=f.max_days)
     CLM.adjust_runoff_terms!(qrgwl, icerun, frz, melt, routing, cg, smb, bounds)
-    dev && Metal.synchronize()
+    dev && device_synchronize()
     return (; melt, ice, liq, glc, frz, dyn, qrgwl, icerun)
 end
 

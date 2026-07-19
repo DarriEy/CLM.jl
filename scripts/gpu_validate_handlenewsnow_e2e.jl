@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_handlenewsnow_e2e.jl — Metal parity for the host loops that were
+# gpu_validate_handlenewsnow_e2e.jl — GPU parity for the host loops that were
 # kernelized inside handle_new_snow! (HydrologyNoDrainageMod / A7).
 #
 # handle_new_snow! is a large orchestrator: most of its sub-steps are already
@@ -25,7 +25,6 @@
 
 using CLM
 using Printf
-import Metal
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
@@ -88,7 +87,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for handle_new_snow! kernelized loops (A7)")
+    println("END-TO-END GPU parity for handle_new_snow! kernelized loops (A7)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -117,7 +116,7 @@ function main(backend)
     luit_d   = to(fill(0, B.nc))
     urb_d    = db(fill(false, B.nc))
 
-    if !(bifall_d isa Metal.MtlArray)
+    if !(bifall_d isa device_array_type())
         println("  BLOCKED: device arrays did not move under to().")
         return 2
     end

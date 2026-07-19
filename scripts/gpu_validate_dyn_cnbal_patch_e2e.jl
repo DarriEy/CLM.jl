@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_dyn_cnbal_patch_e2e.jl — WHOLE-FUNCTION Metal parity for the
+# gpu_validate_dyn_cnbal_patch_e2e.jl — WHOLE-FUNCTION GPU parity for the
 # dyn_cnbal_patch! ORCHESTRATOR (the transient-land-use patch C/N balance).
 #
 # The sub-functions dynamic_patch_adjustments_carbon!/_nitrogen! (see
@@ -17,7 +17,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))   # shared mf: keeps pinned ::Float64 scalars (leaf_mr_vcm)
 
@@ -124,7 +123,7 @@ run!(f, pftcon, mask) = CLM.dyn_cnbal_patch!(f.dynbal, f.bounds, mask, PWT_OLD, 
 
 function main(backend)
     println("=" ^ 72)
-    println("WHOLE-FN Metal parity for dyn_cnbal_patch! (transient land-use orchestrator)")
+    println("WHOLE-FN GPU parity for dyn_cnbal_patch! (transient land-use orchestrator)")
     println("=" ^ 72)
     if backend === nothing; println("  No GPU backend — nothing to validate."); return 0; end
     name, _, FT = backend
@@ -135,15 +134,15 @@ function main(backend)
     H = build(); run!(H, pftcon, trues(NP))
 
     # Device
-    dev(x) = mf(Metal.MtlArray, x)
+    dev(x) = mf(device_array_type(), x)
     D = build()
     D = (dynbal=D.dynbal, bounds=D.bounds, updater=dev(D.updater),
          pch=dev(D.pch), lun=dev(D.lun), col=dev(D.col), cs=dev(D.cs), cf=dev(D.cf),
          ns=dev(D.ns), nf=dev(D.nf), cnst=dev(D.cnst), canopy=dev(D.canopy), sbgc=dev(D.sbgc))
-    if !(D.cs.leafc_patch isa Metal.MtlArray)
+    if !(D.cs.leafc_patch isa device_array_type())
         println("  BLOCKED: CN carbon state did not move to the device."); return 2
     end
-    run!(D, pftcon, trues(NP)); Metal.synchronize()
+    run!(D, pftcon, trues(NP)); device_synchronize()
 
     # compare the mutated fields
     checks = [

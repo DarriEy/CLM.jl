@@ -1,12 +1,12 @@
 # ==========================================================================
-# gpu_validate_daylength_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_daylength_e2e.jl — end-to-end GPU parity for the WHOLE
 # update_daylength! driver (per-grid-cell advance of prev_dayl/dayl +
 # compute_max_daylength!), plus the underlying elemental daylength().
 #
 # Builds a multi-grid-cell GridcellData at Float32 with latitudes spanning the
 # pole, mid-NH, equator, mid-SH (so the >0 / <=0 hemisphere branch in
 # compute_max_daylength! and the pole-clamp branch in daylength() are both
-# exercised), runs update_daylength! on the CPU, adapts grc to Metal, runs the
+# exercised), runs update_daylength! on the CPU, adapts grc to the GPU, runs the
 # SAME call on the device, and compares dayl / prev_dayl / max_dayl with reldiff.
 #
 # CRITICAL: latitudes are real (radians) so the CPU reference is FINITE on the
@@ -17,7 +17,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -50,7 +49,7 @@ run_ud!(H) = CLM.update_daylength!(H.grc, H.declin, H.obliquity, false, 1:H.ng)
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for update_daylength! (whole driver)")
+    println("END-TO-END GPU parity for update_daylength! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -62,8 +61,8 @@ function main(backend)
     H = build(FT)
     B = build(FT)
 
-    grc_d = CLM.Adapt.adapt(Metal.MtlArray, B.grc)
-    if !(grc_d.dayl isa Metal.MtlArray)
+    grc_d = CLM.Adapt.adapt(device_array_type(), B.grc)
+    if !(grc_d.dayl isa device_array_type())
         println("  BLOCKED: GridcellData did not move to the device under adapt.")
         return 2
     end

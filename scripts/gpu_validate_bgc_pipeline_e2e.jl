@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_bgc_pipeline_e2e.jl — WHOLE-DRIVER Metal parity for the BGC
+# gpu_validate_bgc_pipeline_e2e.jl — WHOLE-DRIVER GPU parity for the BGC
 # pipeline. Runs the actual cn_driver_no_leaching! orchestrator (flux-zero glue
 # -> C/N state-update cascade -> precision control -> summarize) on the CPU and
 # on Metal over the SAME synthetic CN+soil state, and compares the full resulting
@@ -10,7 +10,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -102,14 +101,14 @@ function run_driver!(d)
 end
 
 function main(backend)
-    println("="^66); println("WHOLE-DRIVER Metal parity for cn_driver_no_leaching!"); println("="^66)
+    println("="^66); println("WHOLE-DRIVER GPU parity for cn_driver_no_leaching!"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = make_data(); B = make_data()
     run_driver!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mm(b) = Metal.MtlArray(collect(b))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mm(b) = device_array_type()(collect(b))
     D = (; config=B.config, cs_veg=mf(B.cs_veg), cf_veg=mf(B.cf_veg), ns_veg=mf(B.ns_veg),
          nf_veg=mf(B.nf_veg), cs_soil=mf(B.cs_soil), cf_soil=mf(B.cf_soil), ns_soil=mf(B.ns_soil),
          nf_soil=mf(B.nf_soil), soilbgc_st=mf(B.soilbgc_st),
@@ -119,7 +118,7 @@ function main(backend)
          nc=B.nc, np=B.np, ng=B.ng, dt=B.dt, nlevdecomp=B.nlevdecomp, ndecomp_pools=B.ndecomp_pools,
          ndecomp_cascade_transitions=B.ndecomp_cascade_transitions, nrepr=B.nrepr,
          i_litr_min=B.i_litr_min, i_litr_max=B.i_litr_max, i_cwd=B.i_cwd)
-    if !(D.cs_veg.leafc_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.cs_veg.leafc_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_driver!(D)
     checks = [
         ("cs_veg.cpool", H.cs_veg.cpool_patch, D.cs_veg.cpool_patch),

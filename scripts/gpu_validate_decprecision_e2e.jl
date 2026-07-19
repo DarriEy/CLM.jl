@@ -1,10 +1,10 @@
 # ==========================================================================
-# gpu_validate_decprecision_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_decprecision_e2e.jl — end-to-end GPU parity for the WHOLE
 # soil_bgc_precision_control! BGC routine (decomposition C/N precision control).
 #
 # Builds a small multi-column / multi-level / multi-pool instance mirroring
 # test/test_decomp_precision_control.jl, runs soil_bgc_precision_control! on the
-# CPU, converts every state struct to Float32 + adapts to Metal, runs the SAME
+# CPU, converts every state struct to Float32 + adapts to the GPU, runs the SAME
 # call on the device, and compares the mutated outputs field-by-field. The
 # scenario deliberately exercises the branchy config paths in one shot:
 #   * the base C/N pool truncation + own-index ctrunc/ntrunc sinks
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the state structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # NaN-aware mixed abs/rel diff; asserts the CPU reference is finite so a both-NaN
@@ -40,9 +39,9 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 # Float64-typed and *_init! fills Float64, so we adapt with a custom storage rule
 # that down-converts float arrays to Float32 while reconstructing the struct.
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 const NC = 4
 const NLEVDECOMP = 3
@@ -111,7 +110,7 @@ run_dpc!(cs, ns, mask; c13cs, c14cs) =
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soil_bgc_precision_control! (BGC C/N precision)")
+    println("END-TO-END GPU parity for soil_bgc_precision_control! (BGC C/N precision)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -130,7 +129,7 @@ function main(backend)
     c13cs_d = ad(B.c13cs)
     c14cs_d = ad(B.c14cs)
 
-    if !(cs_d.decomp_cpools_vr_col isa Metal.MtlArray)
+    if !(cs_d.decomp_cpools_vr_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

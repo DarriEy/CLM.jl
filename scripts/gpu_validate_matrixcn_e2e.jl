@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_matrixcn_e2e.jl — REAL-Metal parity for the matrix-CN sparse
+# gpu_validate_matrixcn_e2e.jl — REAL-GPU parity for the matrix-CN sparse
 # operator layer (sparse_matrix_multiply.jl). The matrix-CN veg + soil solvers
 # are built entirely on these per-unit KA kernels; this runs each one on the CPU
 # (Float64 golden) and on the GPU (Float32) over the SAME operands and compares.
@@ -24,7 +24,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # Adaptor that moves every array field of a sparse struct to the device via the

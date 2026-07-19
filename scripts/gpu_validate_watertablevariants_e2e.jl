@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_watertablevariants_e2e.jl — end-to-end Metal parity for the
+# gpu_validate_watertablevariants_e2e.jl — end-to-end GPU parity for the
 # WHOLE perched_water_table! AND theta_based_water_table! drivers: one thread
 # per hydrology column running the full nested, loop-carried water-table-depth
 # search in-thread —
@@ -15,7 +15,7 @@
 #   col 4: at/below bedrock (nbedrock < nlevsoi for theta; frozen upper layers
 #          for the perched frost-table search)     -> bedrock + perched branches
 # Runs each whole function on the CPU (Float64-equivalent reference at FT),
-# adapts every state struct (+ mask + geometry) to Metal, runs the SAME call
+# adapts every state struct (+ mask + geometry) to the GPU, runs the SAME call
 # on the device, and compares the mutated outputs field-by-field. CPU-reference
 # fields are asserted finite first so a both-NaN false PASS cannot slip through.
 #
@@ -24,7 +24,6 @@
 
 using CLM
 using Printf
-import Metal   # Metal-specific; MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -131,7 +130,7 @@ run_theta!(S, mask, nc, nlevsoi) = CLM.theta_based_water_table!(
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for perched_water_table! + theta_based_water_table!")
+    println("END-TO-END GPU parity for perched_water_table! + theta_based_water_table!")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU drivers exercised by the suite).")
@@ -141,7 +140,7 @@ function main(backend)
     @printf("  Backend: %s   (working precision: %s)\n\n", name, FT)
 
     nfail = 0
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     dmask(m) = to(collect(Bool, m))
 
     # ============================ perched_water_table! ====================
@@ -150,7 +149,7 @@ function main(backend)
         Sd = (; sh = ad(B.S.sh), ss = ad(B.S.ss), ws = ad(B.S.ws), temp = ad(B.S.temp),
                 col_dz = to(B.S.col_dz), col_z = to(B.S.col_z), col_zi = to(B.S.col_zi),
                 col_nbedrock = to(B.S.col_nbedrock))
-        if !(Sd.sh.zwt_perched_col isa Metal.MtlArray)
+        if !(Sd.sh.zwt_perched_col isa device_array_type())
             println("  BLOCKED: perched state did not move to the device under adapt.")
             return 2
         end

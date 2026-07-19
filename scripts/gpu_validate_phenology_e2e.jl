@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_phenology_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_phenology_e2e.jl — end-to-end GPU parity for the WHOLE
 # cn_phenology! driver (CN phenology: climate avg, evergreen, seasonal- and
 # stress-deciduous FSMs, crop phenology, onset/offset/background litterfall,
 # livewood turnover, crop harvest, and the patch->column litter scatter).
@@ -15,7 +15,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # Float32 down-convert adaptor (state arrays are Float64 on the CPU build).
@@ -205,7 +204,7 @@ const STATE_FIELDS = (:bglfr_patch, :bgtr_patch, :lgsf_patch,
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for cn_phenology! (CN phenology driver)")
+    println("END-TO-END GPU parity for cn_phenology! (CN phenology driver)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -223,7 +222,7 @@ function main(backend)
     # cn_params/canopy_state are NOT indexed by any phenology kernel (pstate only
     # supplies host-side scalars to the wrappers) — keep them host-side so their
     # concrete-Float64 scalar fields don't trip the @adapt_structure reconstruction.
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     D = (; pstate = Bsrc.pstate, params = Bsrc.params, pftcon = mf(Bsrc.pftcon),
          patch_data = mf(Bsrc.patch_data), gridcell = mf(Bsrc.gridcell),
          temperature = mf(Bsrc.temperature), water_diag = mf(Bsrc.water_diag),
@@ -231,18 +230,18 @@ function main(backend)
          cnveg_state = mf(Bsrc.cnveg_state), cnveg_cs = mf(Bsrc.cnveg_cs),
          cnveg_cf = mf(Bsrc.cnveg_cf), cnveg_ns = mf(Bsrc.cnveg_ns), cnveg_nf = mf(Bsrc.cnveg_nf),
          crop = mf(Bsrc.crop), cn_params = Bsrc.cn_params,
-         mask_soilp = Metal.MtlArray(collect(Bsrc.mask_soilp)),   # BitVector -> device Bool
-         mask_pcropp = Metal.MtlArray(collect(Bsrc.mask_pcropp)),
-         mask_soilc = Metal.MtlArray(collect(Bsrc.mask_soilc)),
+         mask_soilp = device_array_type()(collect(Bsrc.mask_soilp)),   # BitVector -> device Bool
+         mask_pcropp = device_array_type()(collect(Bsrc.mask_pcropp)),
+         mask_soilc = device_array_type()(collect(Bsrc.mask_soilc)),
          nlevdecomp = Bsrc.nlevdecomp)
 
-    if !(D.cnveg_state.bglfr_patch isa Metal.MtlArray)
+    if !(D.cnveg_state.bglfr_patch isa device_array_type())
         println("  BLOCKED: state structs did not move to the device under adapt.")
         return 2
     end
 
-    leaf_prof_d  = Metal.MtlArray(Float32.(leaf_prof))
-    froot_prof_d = Metal.MtlArray(Float32.(froot_prof))
+    leaf_prof_d  = device_array_type()(Float32.(leaf_prof))
+    froot_prof_d = device_array_type()(Float32.(froot_prof))
 
     # Run phase 1 then phase 2 on both backends.
     for phase in (1, 2)

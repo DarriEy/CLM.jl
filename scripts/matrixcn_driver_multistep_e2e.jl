@@ -1,7 +1,7 @@
 # ==========================================================================
 # matrixcn_driver_multistep_e2e.jl — sustained MULTI-DAY whole-BGC-driver
 # ROBUSTNESS: cn_driver_no_leaching! with the matrix-CN path (use_matrixcn) called
-# for N timesteps (≈10 days at Δt=1800s) on Metal (Float32) vs the host (Float64),
+# for N timesteps (≈10 days at Δt=1800s) on GPU vs the host (Float64),
 # confirming the device driver stays bit-identical + finite over a long run (no
 # per-step device-state corruption / leak / NaN — which the single-step
 # gpu_validate_matrixcn_driver_e2e cannot catch).
@@ -19,7 +19,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -102,7 +101,7 @@ function main(backend)
     vh = vegc(H); lh = leafv(H); sh = soilc(H); shv = soilv(H)
 
     # DEVICE trajectory (same forcing; prebuilt structure)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x)); mm(b) = Metal.MtlArray(collect(b))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x)); mm(b) = device_array_type()(collect(b))
     B = make_data()
     D = (; config=B.config, cs_veg=mf(B.cs_veg), cf_veg=mf(B.cf_veg), ns_veg=mf(B.ns_veg), nf_veg=mf(B.nf_veg),
          cs_soil=mf(B.cs_soil), cf_soil=mf(B.cf_soil), ns_soil=mf(B.ns_soil), nf_soil=mf(B.nf_soil), soilbgc_st=mf(B.soilbgc_st),
@@ -111,10 +110,10 @@ function main(backend)
          cascade_donor_pool=mf(B.cascade_donor_pool), cascade_receiver_pool=mf(B.cascade_receiver_pool),
          nc=B.nc, np=B.np, ng=B.ng, dt=B.dt, nlevdecomp=B.nlevdecomp, ndecomp_pools=B.ndecomp_pools,
          ndecomp_cascade_transitions=B.ndecomp_cascade_transitions, nrepr=B.nrepr, i_litr_min=B.i_litr_min, i_litr_max=B.i_litr_max, i_cwd=B.i_cwd)
-    if !(D.cs_veg.leafc_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
-    stc_d = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), stc)); stn_d = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), stn))
+    if !(D.cs_veg.leafc_patch isa device_array_type()); println("  BLOCKED."); return 2; end
+    stc_d = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), stc)); stn_d = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), stn))
     for _ in 1:N; gpp_step!(D, rate); run_driver!(D, stc_d, stn_d); end
-    Metal.synchronize()
+    device_synchronize()
     vd = vegc(D); ld = leafv(D); sd = soilc(D); sdv = soilv(D)
 
     vmoved = abs(lh[1] - leaf0) / leaf0; smoved = abs(sh - soil0) / soil0

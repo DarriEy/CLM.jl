@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_cnveg_summaries.jl — host-vs-Metal parity for the 3 cnveg per-patch
+# gpu_validate_cnveg_summaries.jl — host-vs-GPU parity for the 3 cnveg per-patch
 # summary reductions (cnveg_carbon_state_summary! / cnveg_nitrogen_state_summary! /
 # cnveg_carbon_flux_summary!), kernelized as one-thread-per-patch reductions.
 # Exercises the crop reproductive branch (use_crop + nrepr=2 → the `for k` path) so
@@ -9,10 +9,9 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 function reldiff(H, D)
     A = Array(H); B = Array(D); m = 0.0; n = 0
@@ -58,10 +57,10 @@ function main(backend)
     csH = CLM.CNVegCarbonStateData{Float64}(); CLM.cnveg_carbon_state_init!(csH, np, nc, ng; nrepr=nrepr)
     fill_patch_state!(csH, np, nrepr)
     csD = mf(deepcopy(csH))
-    csD.dispvegc_patch isa Metal.MtlArray || (println("  BLOCKED: cs adapt"); return 2)
+    csD.dispvegc_patch isa device_array_type() || (println("  BLOCKED: cs adapt"); return 2)
     kw = (; use_crop=true, patch_itype=patch_itype, npcropmin=npcropmin, nrepr=nrepr)
     CLM.cnveg_carbon_state_summary!(csH, mask, 1:np; kw...)
-    CLM.cnveg_carbon_state_summary!(csD, mf(mask), 1:np; kw...); Metal.synchronize()
+    CLM.cnveg_carbon_state_summary!(csD, mf(mask), 1:np; kw...); device_synchronize()
     for f in (:dispvegc_patch, :storvegc_patch, :totvegc_patch, :totc_patch, :woodc_patch)
         r, n = reldiff(getfield(csH, f), getfield(csD, f)); ncmp += n
         ok = r < 1f-3; ok || (nfail += 1)
@@ -73,7 +72,7 @@ function main(backend)
     fill_patch_state!(nsH, np, nrepr)
     nsD = mf(deepcopy(nsH))
     CLM.cnveg_nitrogen_state_summary!(nsH, mask, 1:np; kw...)
-    CLM.cnveg_nitrogen_state_summary!(nsD, mf(mask), 1:np; kw...); Metal.synchronize()
+    CLM.cnveg_nitrogen_state_summary!(nsD, mf(mask), 1:np; kw...); device_synchronize()
     for f in (:dispvegn_patch, :storvegn_patch, :totvegn_patch, :totn_patch)
         r, n = reldiff(getfield(nsH, f), getfield(nsD, f)); ncmp += n
         ok = r < 1f-3; ok || (nfail += 1)
@@ -88,7 +87,7 @@ function main(backend)
     kwf = (; use_crop=true, use_fun=true, carbon_resp_opt=1,
            patch_itype=patch_itype, npcropmin=npcropmin, nrepr=nrepr)
     CLM.cnveg_carbon_flux_summary!(cfH, mask, 1:np; kwf...)
-    CLM.cnveg_carbon_flux_summary!(cfD, mf(mask), 1:np; kwf...); Metal.synchronize()
+    CLM.cnveg_carbon_flux_summary!(cfD, mf(mask), 1:np; kwf...); device_synchronize()
     for f in (:mr_patch, :current_gr_patch, :transfer_gr_patch, :storage_gr_patch, :gr_patch,
               :ar_patch, :gpp_patch, :npp_patch, :rr_patch, :agnpp_patch, :bgnpp_patch,
               :litfall_patch, :fire_closs_patch, :frootc_alloc_patch, :frootc_loss_patch,

@@ -1,6 +1,6 @@
 # ==========================================================================
 # matrixcn_multistep_e2e.jl — sustained multi-step numerical stability of the
-# matrix-CN solve on Metal (Float32) vs the host (Float64). Single-step parity is
+# matrix-CN solve on GPU vs the host (Float64). Single-step parity is
 # ~1e-8 (gpu_validate_matrixcn_e2e); here we run N steps of the SAME solve with
 # steady forcing and track the host-vs-device pool drift + a mass-conservation
 # check, confirming the device path stays bounded/stable (Float32 error does not
@@ -10,9 +10,8 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
-using Metal: MtlArray
-dev = MtlArray
+include(joinpath(@__DIR__, "gpu_backends.jl"))
+dev = device_array_type()
 
 struct DevF32{F}; f::F; end
 CLM.Adapt.adapt_storage(d::DevF32, x::AbstractArray{<:AbstractFloat}) = d.f(Float32.(x))
@@ -45,7 +44,7 @@ end
 
 function main()
     np = 2000; N = 2000
-    bk = Metal.functional() ? "Metal (Float32)" : "no Metal"
+    bk = gpu_functional() ? "GPU" : "no GPU"
     println("=" ^ 66); println("matrix-CN multi-step stability: HOST (Float64) vs $bk"); @printf("  np=%d, N=%d steps\n", np, N); println("=" ^ 66)
     args = (; mask_soilp=trues(np), bounds_patch=1:np, ivt=ones(Int, np), woody=ones(np),
         npcropmin=15, nvegcpool=NVEG, counts=CNT, dt=1800.0, num_actfirep=0)
@@ -61,7 +60,7 @@ function main()
     argsd = (; args..., ivt=ivt_d, ref=dev(zeros(Float32, 1, 1)), FT=Float32, state=st_d)
     st_d.init_ph = true; st_d.init_fi = true; st_d.ab_ready = true   # reuse the built structure
     for _ in 1:N; CLM.cn_veg_matrix_solve_c!(csd, cfd; argsd...); end
-    Metal.synchronize()
+    device_synchronize()
     sumd = poolsum(csd); leafd = leaf(csd)
 
     reld = maximum(abs.(leafd .- leafh) ./ (1.0 .+ abs.(leafh)))

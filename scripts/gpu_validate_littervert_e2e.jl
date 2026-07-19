@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_littervert_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_littervert_e2e.jl — end-to-end GPU parity for the WHOLE
 # litter_vert_transp! routine (the layer-coupled advection-diffusion vertical
 # transport of all decomposing C and N pools).
 #
@@ -17,7 +17,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -32,9 +31,9 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 
 # Float32-down-converting Metal adaptor (CN state structs build Float64).
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 # Build a Float64 instance mirroring test/test_litter_vert_transp.jl make_test_data.
 # `altmax_val` selects the mixing regime: <= max_altdepth_cryoturbation -> cryoturbation,
@@ -116,7 +115,7 @@ function check_case(to, FT, label; altmax_val, spinup_state)
             dtime=FT(B.dtime), B.nlevdecomp, B.ndecomp_pools,
             zsoi_vals=B.zsoi_vals, dzsoi_decomp_vals=B.dzsoi_decomp_vals, zisoi_vals=B.zisoi_vals)
 
-    if !(Sd.cs.decomp_cpools_vr_col isa Metal.MtlArray)
+    if !(Sd.cs.decomp_cpools_vr_col isa device_array_type())
         println("  BLOCKED: carbon state did not move to the device under adapt.")
         return 2
     end
@@ -147,7 +146,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for litter_vert_transp! (whole vertical transport)")
+    println("END-TO-END GPU parity for litter_vert_transp! (whole vertical transport)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")

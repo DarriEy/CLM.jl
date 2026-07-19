@@ -12,10 +12,9 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 const NR = CLM.NUMRAD
 
@@ -188,7 +187,7 @@ end
 function run_device!(f)
     a2l = mf(f.a2l); col = mf(f.col); lun = mf(f.lun); topo = mf(f.topo)
     CLM.downscale_forcings!(f.bounds, a2l, col, lun, topo)
-    Metal.synchronize()
+    device_synchronize()
     return a2l
 end
 

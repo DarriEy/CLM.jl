@@ -1,12 +1,12 @@
 # ==========================================================================
-# gpu_validate_dustdrydep_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_dustdrydep_e2e.jl — end-to-end GPU parity for the WHOLE
 # dust_dry_dep! turbulent dry-deposition driver (3 per-patch passes:
 # thermokinetic props + Stokes settling, quasi-laminar resistance, lowest-layer
 # turbulent deposition + per-bin copy).
 #
 # Builds a multi-patch / multi-column DustEmisBaseData at Float32, runs
 # dust_dry_dep! on the CPU, adapts the dust struct + every forcing array the
-# kernels touch to Metal, runs the SAME call on the device, and compares the
+# kernels touch to the GPU, runs the SAME call on the device, and compares the
 # mutated outputs with reldiff.
 #
 # Exercises active AND inactive patches (the active mask), several columns at
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -58,7 +57,7 @@ run_ddd!(H) = CLM.dust_dry_dep!(H.dust, H.patch_active, H.patch_column, H.bounds
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for dust_dry_dep! (whole driver)")
+    println("END-TO-END GPU parity for dust_dry_dep! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -70,7 +69,7 @@ function main(backend)
     H = build(FT)   # CPU reference
     B = build(FT)   # device copy
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     dust_d = ad(B.dust)
     forc_pbot_d = ad(B.forc_pbot); forc_rho_d = ad(B.forc_rho); forc_t_d = ad(B.forc_t)
     ram1_d = ad(B.ram1); fv_d = ad(B.fv)
@@ -78,7 +77,7 @@ function main(backend)
     active_d = to(collect(Bool, B.patch_active))
     col_d    = to(collect(Int32, B.patch_column))
 
-    if !(dust_d.vlc_trb_patch isa Metal.MtlArray)
+    if !(dust_d.vlc_trb_patch isa device_array_type())
         println("  BLOCKED: dust struct did not move to the device under adapt.")
         return 2
     end

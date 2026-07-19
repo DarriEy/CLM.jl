@@ -8,10 +8,9 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 function reldiff(H, D)
     A = Array(H); B = Array(D); m = 0.0; n = 0
@@ -61,7 +60,7 @@ function run_depvel!(dd, f, dev)
         id(f.patch_gridcell), id(f.patch_column), id(f.patch_landunit), id(f.patch_itype),
         id(f.ram1_patch), id(f.rb1_patch), id(f.fv_patch), id(f.elai_patch),
         id(f.forc_t_col), id(f.forc_solar_col), id(f.frac_sno), id(f.lat_grc), f.month)
-    dev && Metal.synchronize()
+    dev && device_synchronize()
     return dd.velocity_patch
 end
 

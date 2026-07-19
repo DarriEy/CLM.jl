@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_growth_resp_e2e.jl — end-to-end Metal parity for cn_gresp!
+# gpu_validate_growth_resp_e2e.jl — end-to-end GPU parity for cn_gresp!
 # (growth respiration; one per-patch kernel grouped into _GrespOut/_GrespIn
 # device-view bundles incl. reproductive [p,k] matrix fields).
 #
@@ -7,7 +7,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -50,16 +49,16 @@ const OUT = (:cpool_leaf_gr_patch, :transfer_leaf_gr_patch, :cpool_froot_gr_patc
              :cpool_deadcroot_gr_patch, :cpool_livestem_storage_gr_patch)
 
 function main(backend)
-    println("=" ^ 64); println("END-TO-END Metal parity for cn_gresp!"); println("=" ^ 64)
+    println("=" ^ 64); println("END-TO-END GPU parity for cn_gresp!"); println("=" ^ 64)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = build(); B = build()
     run_g!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     D = (; pftcon=mf(B.pftcon), patch=mf(B.patch), cnveg_cf=mf(B.cnveg_cf),
-         mask=Metal.MtlArray(collect(B.mask)), bounds=B.bounds, nrepr=B.nrepr)
-    if !(D.cnveg_cf.cpool_leaf_gr_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+         mask=device_array_type()(collect(B.mask)), bounds=B.bounds, nrepr=B.nrepr)
+    if !(D.cnveg_cf.cpool_leaf_gr_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_g!(D)
     nfail = 0
     for f in OUT

@@ -1,10 +1,10 @@
 # ==========================================================================
-# gpu_validate_decompbgc_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_decompbgc_e2e.jl — end-to-end GPU parity for the WHOLE
 # decomp_rate_constants_bgc! BGC decomposition rate-constant driver.
 #
 # Builds a small multi-column instance mirroring test/test_decomp_bgc.jl, runs
 # decomp_rate_constants_bgc! on the CPU, converts the carbon-flux + bgc_state
-# structs to Float32 + adapts to Metal, runs the SAME call on the device, and
+# structs to Float32 + adapts to the GPU, runs the SAME call on the device, and
 # compares the mutated outputs (t/w/o scalars, decomp_k, pathfrac, rf) field by
 # field. Several branchy config paths are exercised in separate scenarios:
 #   - nlevdecomp == 1, Q10 temperature function, no anoxia
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the device-view structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # NaN-aware mixed abs/rel diff; asserts the CPU reference is finite so a both-NaN
@@ -38,12 +37,12 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 
 # Float32-down-converting Metal adaptor (same pattern as cstateupdate1 harness).
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 # DecompBGCState mixes scalar FT fields with array fields under one {FT,M<:AbstractMatrix{FT}}
 # struct — down-convert scalar floats too so the whole struct lands as Float32 (FT==Float32,
-# M==MtlMatrix{Float32}) and no Float64 scalar reaches a Metal kernel.
+# M==MtlMatrix{Float32}) and no Float64 scalar reaches a GPU kernel.
 CLM.Adapt.adapt_storage(::MetalF32, x::AbstractFloat) = Float32(x)
 
 const NC = 4
@@ -149,13 +148,13 @@ function scenario(name, backend; nlevdecomp, use_century_tfunc=false,
          col_dz=H.col_dz, o2stress=H.o2stress, zsoi_vals=H.zsoi_vals,
          col_gridcell=H.col_gridcell, latdeg=H.latdeg)
 
-    # Device snapshot: adapt the mutated/read state structs to Metal (Float32).
+    # Device snapshot: adapt the mutated/read state structs to GPU.
     ad(x) = CLM.Adapt.adapt(MetalF32(), x)
     cf_d  = ad(B.cf)
     bgc_d = ad(B.bgc_state)
     dmask(m) = to(collect(Bool, m))
 
-    if !(cf_d.decomp_k_col isa Metal.MtlArray)
+    if !(cf_d.decomp_k_col isa device_array_type())
         @printf("  [%s] BLOCKED: cf did not move to device under adapt.\n", name)
         return 2
     end
@@ -191,7 +190,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for decomp_rate_constants_bgc!")
+    println("END-TO-END GPU parity for decomp_rate_constants_bgc!")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")

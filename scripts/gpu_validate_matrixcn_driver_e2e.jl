@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_matrixcn_driver_e2e.jl — WHOLE-DRIVER Metal parity for the
+# gpu_validate_matrixcn_driver_e2e.jl — WHOLE-DRIVER GPU parity for the
 # matrix-CN path. Runs cn_driver_no_leaching! with use_matrixcn=true (the veg-C
 # + veg-N matrix solves, fed by the kernelized wiring accumulate helpers) on the
 # CPU and on Metal over the SAME synthetic CN state, and compares the veg pools.
@@ -12,7 +12,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -79,7 +78,7 @@ function run_driver!(d, stc, stn)
 end
 
 function main(backend)
-    println("=" ^ 70); println("WHOLE-DRIVER Metal parity for cn_driver_no_leaching! (use_matrixcn)"); println("=" ^ 70)
+    println("=" ^ 70); println("WHOLE-DRIVER GPU parity for cn_driver_no_leaching! (use_matrixcn)"); println("=" ^ 70)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
@@ -93,8 +92,8 @@ function main(backend)
     H = make_data(); run_driver!(H, CLM.CNVegMatrixSolveState(), CLM.CNVegMatrixSolveState())
 
     # Device solve: adapt state + the prebuilt solve states to Metal.
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mm(b) = Metal.MtlArray(collect(b))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mm(b) = device_array_type()(collect(b))
     B = make_data()
     D = (; config=B.config, cs_veg=mf(B.cs_veg), cf_veg=mf(B.cf_veg), ns_veg=mf(B.ns_veg), nf_veg=mf(B.nf_veg),
          cs_soil=mf(B.cs_soil), cf_soil=mf(B.cf_soil), ns_soil=mf(B.ns_soil), nf_soil=mf(B.nf_soil), soilbgc_st=mf(B.soilbgc_st),
@@ -103,9 +102,9 @@ function main(backend)
          cascade_donor_pool=mf(B.cascade_donor_pool), cascade_receiver_pool=mf(B.cascade_receiver_pool),
          nc=B.nc, np=B.np, ng=B.ng, dt=B.dt, nlevdecomp=B.nlevdecomp, ndecomp_pools=B.ndecomp_pools,
          ndecomp_cascade_transitions=B.ndecomp_cascade_transitions, nrepr=B.nrepr, i_litr_min=B.i_litr_min, i_litr_max=B.i_litr_max, i_cwd=B.i_cwd)
-    if !(D.cs_veg.leafc_patch isa Metal.MtlArray); println("  BLOCKED (adapt)."); return 2; end
-    run_driver!(D, CLM.Adapt.adapt(_F32(), stc) |> x -> CLM.Adapt.adapt(Metal.MtlArray, x),
-                   CLM.Adapt.adapt(_F32(), stn) |> x -> CLM.Adapt.adapt(Metal.MtlArray, x))
+    if !(D.cs_veg.leafc_patch isa device_array_type()); println("  BLOCKED (adapt)."); return 2; end
+    run_driver!(D, CLM.Adapt.adapt(_F32(), stc) |> x -> CLM.Adapt.adapt(device_array_type(), x),
+                   CLM.Adapt.adapt(_F32(), stn) |> x -> CLM.Adapt.adapt(device_array_type(), x))
 
     checks = [("cs_veg.leafc", H.cs_veg.leafc_patch, D.cs_veg.leafc_patch),
               ("cs_veg.frootc", H.cs_veg.frootc_patch, D.cs_veg.frootc_patch),

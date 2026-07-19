@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_snowfiltercapping_e2e.jl — end-to-end Metal parity for the A7
+# gpu_validate_snowfiltercapping_e2e.jl — end-to-end GPU parity for the A7
 # snow-filter + snow-capping group, run WHOLE-FUNCTION on the device:
 #   build_snow_filter!                       (snow / no-snow column split by snl)
 #   init_flux_snow_capping!                  (zero the 4 capping flux fields)
@@ -23,7 +23,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -134,7 +133,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for build_snow_filter! + snow-capping group (A7)")
+    println("END-TO-END GPU parity for build_snow_filter! + snow-capping group (A7)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -157,7 +156,7 @@ function main(backend)
             h2osno_total = to(B.h2osno_total), topo = to(B.topo),
             col_landunit = to(B.col_landunit), lun_itype = to(B.lun_itype),
             dz_bottom = to(B.dz_bottom), ice_bottom = to(B.ice_bottom),
-            liq_bottom = to(B.liq_bottom), aer = CLM.Adapt.adapt(Metal.MtlArray, B.aer),
+            liq_bottom = to(B.liq_bottom), aer = CLM.Adapt.adapt(device_array_type(), B.aer),
             qflx_snwcp_ice = to(B.qflx_snwcp_ice), qflx_snwcp_liq = to(B.qflx_snwcp_liq),
             qflx_snwcp_discarded_ice = to(B.qflx_snwcp_discarded_ice),
             qflx_snwcp_discarded_liq = to(B.qflx_snwcp_discarded_liq),
@@ -165,7 +164,7 @@ function main(backend)
             mask_snow = db(B.mask_snow), mask_nosnow = db(B.mask_nosnow),
             mask_capping = db(B.mask_capping), dtime = B.dtime)
 
-    if !(Sd.dz_bottom isa Metal.MtlArray)
+    if !(Sd.dz_bottom isa device_array_type())
         println("  BLOCKED: device arrays did not move under adapt/to.")
         return 2
     end
@@ -228,7 +227,7 @@ function main(backend)
             h2osno_total = to(Br.h2osno_total), topo = to(Br.topo),
             col_landunit = to(Br.col_landunit), lun_itype = to(Br.lun_itype),
             dz_bottom = to(Br.dz_bottom), ice_bottom = to(Br.ice_bottom),
-            liq_bottom = to(Br.liq_bottom), aer = CLM.Adapt.adapt(Metal.MtlArray, Br.aer),
+            liq_bottom = to(Br.liq_bottom), aer = CLM.Adapt.adapt(device_array_type(), Br.aer),
             qflx_snwcp_ice = to(Br.qflx_snwcp_ice), qflx_snwcp_liq = to(Br.qflx_snwcp_liq),
             qflx_snwcp_discarded_ice = to(Br.qflx_snwcp_discarded_ice),
             qflx_snwcp_discarded_liq = to(Br.qflx_snwcp_discarded_liq),

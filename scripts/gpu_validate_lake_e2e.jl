@@ -1,9 +1,9 @@
 # ==========================================================================
-# gpu_validate_lake_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_lake_e2e.jl — end-to-end GPU parity for the WHOLE
 # lake_temperature! driver (all lt1..lt7 kernels together).
 #
 # Builds a small Float32 lake instance (mirroring test_lake_temperature.jl's
-# setup), runs lake_temperature! on the CPU, adapts every state struct to Metal,
+# setup), runs lake_temperature! on the CPU, adapts every state struct to the GPU,
 # runs the SAME call on device, and compares the mutated outputs. Exercises the
 # full chain: thermal properties, phase change, diffusivity, solar heat source,
 # extended-column tridiagonal assembly + batched solve, convective mixing, and
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -104,7 +103,7 @@ run_lt!(d, m_c, m_p, dt) = CLM.lake_temperature!(d.col, d.patch, d.sa, d.ss, d.w
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for lake_temperature! (whole driver)")
+    println("END-TO-END GPU parity for lake_temperature! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -118,12 +117,12 @@ function main(backend)
         B = build(FT)
         m_c = falses(B.nc); m_p = falses(B.np); m_c .= true; m_p .= true
         dt = FT(1800)
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         D = (; nc = B.nc, np = B.np, col = ad(B.col), patch = ad(B.patch), sa = ad(B.sa),
              ss = ad(B.ss), wsb = ad(B.wsb), wdb = ad(B.wdb), wfb = ad(B.wfb),
              ef = ad(B.ef), temp = ad(B.temp), ls = ad(B.ls), grnd_ch4 = ad(B.grnd_ch4))
         dmask(m) = to(collect(Bool, m))
-        if !(D.temp.t_lake_col isa Metal.MtlArray && D.ls.lake_icefrac_col isa Metal.MtlArray)
+        if !(D.temp.t_lake_col isa device_array_type() && D.ls.lake_icefrac_col isa device_array_type())
             println("  BLOCKED: a lake state struct did not move to the device under adapt.")
             return 2
         end

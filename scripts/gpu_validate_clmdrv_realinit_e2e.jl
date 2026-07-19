@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_clmdrv_realinit_e2e.jl — whole-clm_drv! Metal parity on a REAL
+# gpu_validate_clmdrv_realinit_e2e.jl — whole-clm_drv! GPU parity on a REAL
 # cold-start state (clm_initialize! from the Bow-at-Banff surfdata/params NetCDF).
 #
 # Unlike the synthetic gpu_validate_clmdrv_e2e.jl, this uses the real cold-start,
@@ -9,9 +9,9 @@
 #   julia --project=scripts scripts/gpu_validate_clmdrv_realinit_e2e.jl
 # ==========================================================================
 using CLM, Printf
-import Metal
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mfm(x) = mf(Metal.MtlArray, x)
+mfm(x) = mf(device_array_type(), x)
 const FSURDAT = get(ENV, "CLM_FSURDAT",
     "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = get(ENV, "CLM_PARAMFILE",
@@ -64,13 +64,13 @@ reldiff(a,b) = begin
 end
 
 function main()
-    if !Metal.functional(); println("Metal not functional"); return 0; end
+    if !gpu_functional(); println("No GPU backend detected"); return 0; end
     instH, bounds, filtH = build()
     for n in 1:3; runstep!(instH, filtH, filt_ia, bounds, n; first=(n==1)); end   # CPU warmup
     instB, boundsB, filtB = build()
     for n in 1:3; runstep!(instB, filtB, filt_ia, boundsB, n; first=(n==1)); end
     inst_d = mfm(instB); filt_d = mfm(filtB); filt_ia_d = mfm(filt_ia)
-    println("moved to device: ", inst_d.temperature.t_soisno_col isa Metal.MtlArray)
+    println("moved to device: ", inst_d.temperature.t_soisno_col isa device_array_type())
     runstep!(instH, filtH, filt_ia, bounds, 4)            # CPU compared step
     runstep!(inst_d, filt_d, filt_ia_d, boundsB, 4)       # device compared step
     println("both step-4 runs completed")

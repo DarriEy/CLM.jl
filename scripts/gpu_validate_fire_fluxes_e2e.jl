@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_fire_fluxes_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_fire_fluxes_e2e.jl — end-to-end GPU parity for the WHOLE
 # cnfire_fluxes_li2014! fire C/N flux driver (delegates to cnfire_fluxes!):
 # per-patch combustion/mortality fluxes, the (j,p) litter/CWD patch->column
 # scatter, the (c,j,l) decomposing-pool fire loss, deforestation C loss, and
@@ -15,7 +15,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -149,7 +148,7 @@ run_flux!(d) = CLM.cnfire_fluxes_li2014!(
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for cnfire_fluxes_li2014! (fire C/N fluxes)")
+    println("END-TO-END GPU parity for cnfire_fluxes_li2014! (fire C/N fluxes)")
     println("=" ^ 72)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
@@ -158,8 +157,8 @@ function main(backend)
     H = build(); B = build()
     run_flux!(H)
 
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mb(x) = Metal.MtlArray(collect(x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mb(x) = device_array_type()(collect(x))
     # decomp_cascade_con stays host (BitVector struct); cnfire_fluxes! copies
     # is_litter/is_cwd onto the working backend internally.
     D = (; pftcon=mf(B.pftcon), cnfire_const=B.cnfire_const, patch=mf(B.patch),
@@ -172,7 +171,7 @@ function main(backend)
         mask_soilc=mb(B.mask_soilc), mask_soilp=mb(B.mask_soilp),
         np=B.np, nc=B.nc, nlevdecomp=B.nlevdecomp, ndecomp_pools=B.ndecomp_pools, n_litr=B.n_litr)
 
-    if !(D.cnveg_cf.m_leafc_to_fire_patch isa Metal.MtlArray)
+    if !(D.cnveg_cf.m_leafc_to_fire_patch isa device_array_type())
         println("  BLOCKED: structs did not move to device."); return 2
     end
     run_flux!(D)

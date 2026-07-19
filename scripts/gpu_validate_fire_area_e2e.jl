@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_fire_area_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_fire_area_e2e.jl — end-to-end GPU parity for the WHOLE
 # cnfire_area_li2014! burned-area driver (the Li2014 fire module's column-level
 # burned-area computation: p2c! patch->col averages, root wetness, cropf/fuel
 # scatters, the noncrop GDP/pop/tropical column-var loop, peatland fire, the crop
@@ -15,7 +15,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -114,7 +113,7 @@ const OUT_FIELDS = (:farea_burned_col, :nfire_col, :fbac_col, :fbac1_col, :baf_c
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for cnfire_area_li2014! (Li2014 burned area)")
+    println("END-TO-END GPU parity for cnfire_area_li2014! (Li2014 burned area)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -128,8 +127,8 @@ function main(backend)
 
     run_area!(H)   # CPU reference
 
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mb(x) = Metal.MtlArray(collect(x))   # BitVector -> device Bool
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mb(x) = device_array_type()(collect(x))   # BitVector -> device Bool
     # decomp_cascade_con's is_litter/is_cwd are read in a HOST loop (i_cwd detection,
     # passed as a scalar) — keep host so it isn't scalar-indexed on the device.
 
@@ -149,7 +148,7 @@ function main(backend)
         np=B.np, nc=B.nc, ng=B.ng, nlevgrnd=B.nlevgrnd, nlevdecomp=B.nlevdecomp,
         ndecomp_pools=B.ndecomp_pools)
 
-    if !(D.cnveg_state.farea_burned_col isa Metal.MtlArray)
+    if !(D.cnveg_state.farea_burned_col isa device_array_type())
         println("  BLOCKED: cnveg_state did not move to the device."); return 2
     end
 

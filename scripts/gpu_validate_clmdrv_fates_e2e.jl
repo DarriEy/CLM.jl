@@ -9,18 +9,18 @@
 #
 # This harness adapts a real cold-started tropical FATES inst (build() from
 # fates_longhorizon.jl) to Metal and runs clm_drv! on-device to (phase 1) find where
-# the FATES hooks still scalar-index device arrays, and (phase 2) confirm CPU-vs-Metal
+# the FATES hooks still scalar-index device arrays, and (phase 2) confirm CPU-vs-GPU
 # parity on the FATES-driven fields.
 #
 #   julia +1.12 --project=scripts scripts/gpu_validate_clmdrv_fates_e2e.jl
 # ==========================================================================
 using CLM, Printf, Dates
-import Metal
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 const _C = CLM
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
 include(joinpath(@__DIR__, "fates_longhorizon.jl"))   # reuse build() (guarded exit)
 
-df(x) = Metal.MtlArray(x)
+df(x) = device_array_type()(x)
 
 # Static daytime tropical forcing on the HOST inst (grc + downscaled col), so after
 # adapting there is a consistent on-device forcing without a per-step host read.
@@ -79,16 +79,16 @@ end
 reld(a, b) = abs(a - b) / (1.0 + abs(a))
 
 function main()
-    Metal.functional() || (println("Metal not functional."); return 0)
-    println("="^70); println("  clm_drv! + use_fates on Metal — CPU-vs-Metal host-fallback parity"); println("="^70)
+    gpu_functional() || (println("No GPU backend detected."); return 0)
+    println("="^70); println("  clm_drv! + use_fates on Metal — CPU-vs-GPU host-fallback parity"); println("="^70)
     nsteps = parse(Int, get(ENV, "FATES_GPU_STEPS", "144"))   # ~3 days of perpetual-noon growth
 
     # Two independent, identical cold-started insts (clm_initialize! is deterministic).
     instH, _fH, config, bounds, filt, filt_ia = build(); set_static_forcing!(instH, bounds)
     instS, _fS, _cfg, boundsS, filtS, filt_iaS = build(); set_static_forcing!(instS, bounds)
-    instD    = mf(Metal.MtlArray, instS)
-    filtD    = mf(Metal.MtlArray, filtS)
-    filt_iaD = mf(Metal.MtlArray, filt_ia)
+    instD    = mf(device_array_type(), instS)
+    filtD    = mf(device_array_type(), filtS)
+    filt_iaD = mf(device_array_type(), filt_ia)
     println("  built CPU + Metal insts (nc=$(bounds.endc)); fates preserved through adapt: $(instD.fates === instS.fates)")
     println("  t_veg_patch device type: $(typeof(instD.temperature.t_veg_patch))")
     cold = fates_summary(instH)
@@ -114,7 +114,7 @@ function main()
     end
     nfail = count(!, checks)
     println("\n  " * (nfail == 0 ?
-        "★ FATES runs on Metal (host-fallback) at CPU parity ($(length(checks))/$(length(checks)) fields)" :
+        "★ FATES runs on the GPU (host-fallback) at CPU parity ($(length(checks))/$(length(checks)) fields)" :
         "✗ $nfail field(s) diverged"))
     return nfail
 end

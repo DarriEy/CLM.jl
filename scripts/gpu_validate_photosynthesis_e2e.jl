@@ -1,11 +1,11 @@
 # ==========================================================================
-# gpu_validate_photosynthesis_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_photosynthesis_e2e.jl — end-to-end GPU parity for the WHOLE
 # non-hydrstress photosynthesis! (Pass 1/2/4 + the Ci solve cascade).
 #
 # There is no full-photosynthesis! test in the suite (test_photosynthesis.jl
 # only covers components), so this constructs the full call directly: a small
 # Float32 instance (sized ps + all per-patch / per-canopy-layer inputs), runs
-# photosynthesis! (sun phase) on the CPU, adapts ps + the inputs to Metal, runs
+# photosynthesis! (sun phase) on the CPU, adapts ps + the inputs to the GPU, runs
 # the SAME call on device, and compares the mutated ps outputs.
 #
 #   julia --project=scripts scripts/gpu_validate_photosynthesis_e2e.jl
@@ -13,7 +13,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -117,7 +116,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for photosynthesis! + tail (init/total/fractionation)")
+    println("END-TO-END GPU parity for photosynthesis! + tail (init/total/fractionation)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -132,12 +131,12 @@ function main(backend)
     setparams!()
     B = build(FT)            # to be adapted to device (fresh initial state)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     ps_d  = ad(B.ps)
     inp_d = (; (k => ad(getfield(B.inp, k)) for k in keys(B.inp))...)
     mask_d = to(collect(Bool, B.mask))
 
-    if !(ps_d.ac_patch isa Metal.MtlArray)
+    if !(ps_d.ac_patch isa device_array_type())
         println("  BLOCKED: PhotosynthesisData did not move to the device under adapt.")
         return 2
     end

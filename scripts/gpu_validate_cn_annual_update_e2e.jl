@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_cn_annual_update_e2e.jl — end-to-end Metal parity for
+# gpu_validate_cn_annual_update_e2e.jl — end-to-end GPU parity for
 # cn_annual_update! (end-of-year column flag kernel + patch annual-rollover
 # kernel + the kernelized p2c_1d_filter! averaging). Triggers end-of-year so
 # the p2c averaging path actually runs on the device.
@@ -8,7 +8,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -62,18 +61,18 @@ run_au!(d) = CLM.cn_annual_update!(d.mask_c, d.mask_p, d.bounds_c, d.bounds_p,
     d.col, d.patch, d.vs, d.cf; dt=d.dt, days_per_year=d.days_per_year, secspday=d.secspday)
 
 function main(backend)
-    println("="^66); println("END-TO-END Metal parity for cn_annual_update!"); println("="^66)
+    println("="^66); println("END-TO-END GPU parity for cn_annual_update!"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = make_data(); B = make_data()
     run_au!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mm(b) = Metal.MtlArray(collect(b))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mm(b) = device_array_type()(collect(b))
     D = (; col=mf(B.col), patch=mf(B.patch), vs=mf(B.vs), cf=mf(B.cf),
          mask_c=mm(B.mask_c), mask_p=mm(B.mask_p), bounds_c=B.bounds_c, bounds_p=B.bounds_p,
          dt=B.dt, days_per_year=B.days_per_year, secspday=B.secspday)
-    if !(D.vs.annsum_potential_gpp_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.vs.annsum_potential_gpp_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_au!(D)
     checks = [("annsum_potential_gpp", H.vs.annsum_potential_gpp_patch, D.vs.annsum_potential_gpp_patch),
               ("tempsum_potential_gpp", H.vs.tempsum_potential_gpp_patch, D.vs.tempsum_potential_gpp_patch),

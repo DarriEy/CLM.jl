@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_irrigation_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_irrigation_e2e.jl — end-to-end GPU parity for the WHOLE
 # irrigation / urban-ponding trio in SoilHydrologyMod:
 #
 #   update_urban_ponding!            — ponding state on urban roof/road surfaces
@@ -32,7 +32,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -170,7 +169,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for irrigation/urban-ponding trio (3 whole fns)")
+    println("END-TO-END GPU parity for irrigation/urban-ponding trio (3 whole fns)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU exercised by the suite).")
@@ -188,10 +187,10 @@ function main(backend)
     run_calc!(H.S, H.P)
     run_calc!(B.S, B.P)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = (; sh = ad(B.S.sh), ss = ad(B.S.ss), wsb = ad(B.S.wsb), wfb = ad(B.S.wfb))
 
-    if !(Sd.wsb.ws.wa_col isa Metal.MtlArray) || !(Sd.wfb.wf.qflx_gw_con_irrig_col isa Metal.MtlArray)
+    if !(Sd.wsb.ws.wa_col isa device_array_type()) || !(Sd.wfb.wf.qflx_gw_con_irrig_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

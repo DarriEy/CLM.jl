@@ -1,11 +1,11 @@
 # ==========================================================================
-# gpu_validate_rootmoiststress_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_rootmoiststress_e2e.jl — end-to-end GPU parity for the WHOLE
 # calc_root_moist_stress! driver (every per-(p)/per-(p,j) kernel together).
 #
 # Builds a small Float32 instance (one soil patch/column, multiple ground layers)
 # mirroring test/test_soil_moist_stress.jl's dispatcher setup, runs
 # calc_root_moist_stress! on the CPU, adapts every state struct (+ masks/params)
-# to Metal, runs the SAME call on the device, and compares the mutated outputs
+# to the GPU, runs the SAME call on the device, and compares the mutated outputs
 # field-by-field. This exercises: btran zeroing, the unfrozen-rootfr normalization
 # (array_normalization sum-to-one), the per-patch rresis/rootr + btran accumulation
 # (sequential layer reduction in-kernel), and the btran-normalize kernel together.
@@ -15,7 +15,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -89,7 +88,7 @@ run_rms!(S, smpso, smpsc, altmax_l, altmax_i, m_p, nlevgrnd, nlevsno) =
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for calc_root_moist_stress! (whole driver)")
+    println("END-TO-END GPU parity for calc_root_moist_stress! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -101,11 +100,11 @@ function main(backend)
     H = build(FT)
     B = build(FT)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
     dmask(m) = to(collect(Bool, m))
 
-    if !(Sd.soilstate.rootr_patch isa Metal.MtlArray)
+    if !(Sd.soilstate.rootr_patch isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

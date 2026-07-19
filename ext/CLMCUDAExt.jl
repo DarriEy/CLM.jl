@@ -26,6 +26,25 @@ using CLM
 using CUDA
 import Adapt
 
+# ---------------------------------------------------------------------------
+# Device-only override: `CLM._smooth_f64()` reads the host-side `SMOOTH_MODE`
+# Ref (src/infrastructure/smooth_ad.jl). The Float64-specific smooth_* methods
+# consult it, and a GPU kernel cannot dereference a host pointer — the result is
+# ERROR_ILLEGAL_ADDRESS (code 700), not a catchable error.
+#
+# smooth_ad.jl documented this as GPU-safe on the grounds that "device kernels
+# are Float32 and dispatch to the generic type-based path". That held on Metal
+# (Float32-only hardware). CUDA runs Float64, so Float64 args select the method
+# that reads the global and every kernel calling smooth_min/max/clamp/abs/ifelse
+# faults.
+#
+# Overriding to `false` on device reproduces the default `:auto` behaviour
+# (Float64 -> exact min/max), which is what the forward physics already assumes.
+# The `:always` override stays host-only, exactly as smooth_ad.jl intends: this
+# override is invisible to host code, so calibration FD/AD-consistency and
+# Enzyme reverse-mode are unaffected.
+CUDA.@device_override CLM._smooth_f64() = false
+
 function __init__()
     CLM._register_backend!(:cuda,
         x -> Adapt.adapt(CUDA.CuArray, x),   # adapt_to

@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_cn_balance_check_e2e.jl — end-to-end Metal parity for the CN
+# gpu_validate_cn_balance_check_e2e.jl — end-to-end GPU parity for the CN
 # mass-balance check module (CNBalanceCheckMod). Exercises every kernel:
 #   begin_cn_gridcell_balance!  (per-gridcell)
 #   begin_cn_column_balance!    (per-column, masked)
@@ -15,7 +15,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -105,20 +104,20 @@ function run_all!(d)
 end
 
 function main(backend)
-    println("=" ^ 66); println("END-TO-END Metal parity for CNBalanceCheckMod"); println("=" ^ 66)
+    println("=" ^ 66); println("END-TO-END GPU parity for CNBalanceCheckMod"); println("=" ^ 66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
     H = build(); B = build()
     run_all!(H)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mmask(b) = Metal.MtlArray(collect(b))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mmask(b) = device_array_type()(collect(b))
     D = (; bal=mf(B.bal), col_data=mf(B.col_data), grc_data=mf(B.grc_data),
          cstate=mf(B.cstate), nstate=mf(B.nstate), cflux=mf(B.cflux), nflux=mf(B.nflux),
          cncf=mf(B.cncf), cnnf=mf(B.cnnf), cprod=mf(B.cprod), nprod=mf(B.nprod),
          mask=mmask(B.mask), is_fates=mmask(B.is_fates), drib=mf(B.drib),
          bounds_c=B.bounds_c, bounds_g=B.bounds_g, dt=B.dt, nc=B.nc, ng=B.ng)
-    if !(D.bal.begcb_col isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(D.bal.begcb_col isa device_array_type()); println("  BLOCKED."); return 2; end
     run_all!(D)
 
     checks = [("begcb_col", H.bal.begcb_col, D.bal.begcb_col),

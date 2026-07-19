@@ -1,11 +1,11 @@
 # ==========================================================================
-# gpu_validate_clusterC_misc.jl — Metal parity for the Cluster-C default-hot
+# gpu_validate_clusterC_misc.jl — GPU parity for the Cluster-C default-hot
 # kernelizations (Phase 3 Batch 2):
 #   1. dust_emission_zender2003!         (DEFAULT dust scheme, per-patch)
 #   2. soilbiogeochem_n_state_update1!   (mineral NH4/NO3 state update, per-column)
 #
 # Each builds a small Float64 fixture, runs the routine on the CPU, adapts the
-# state + inputs to Metal (Float32), reruns on-device, and compares the mutated
+# state + inputs to GPU, reruns on-device, and compares the mutated
 # outputs. (depvel_compute! is intentionally excluded — it returns early when
 # n_drydep==0, the default, and depends on non-device-callable Wesely-table
 # helpers; see the fork report.)
@@ -14,14 +14,13 @@
 # ==========================================================================
 
 using CLM, Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))   # shared Float32 struct adaptor `mf`
 
-to(x)    = Metal.MtlArray(x)
+to(x)    = device_array_type()(x)
 dmask(m) = to(collect(Bool, m))
 tof(x)   = to(Float32.(x))
-mfs(x)   = mf(Metal.MtlArray, x)   # handles DustEmisBaseData + Soil-BGC N structs
+mfs(x)   = mf(device_array_type(), x)   # handles DustEmisBaseData + Soil-BGC N structs
 
 reldiff(a, b) = begin
     A = Array(a); B = Array(b); m = 0.0
@@ -60,7 +59,7 @@ function check_dust()
         1:1, 1, tof(s.forc_rho), tof(s.gwc_thr), tof(s.mss_frc_cly_vld), tof(s.watsat),
         tof(s.tlai), tof(s.tsai), tof(s.frac_sno), tof(s.h2osoi_vol), tof(s.h2osoi_liq),
         tof(s.h2osoi_ice), tof(s.fv), tof(s.u10))
-    dust_d.flx_mss_vrt_dst_patch isa Metal.MtlArray || (println("    BLOCKED: dust not on device."); return 1)
+    dust_d.flx_mss_vrt_dst_patch isa device_array_type() || (println("    BLOCKED: dust not on device."); return 1)
     db = reldiff(cbin, dust_d.flx_mss_vrt_dst_patch)
     dt = reldiff(ctot, dust_d.flx_mss_vrt_dst_tot_patch)
     ok = db < 1e-4 && dt < 1e-4
@@ -108,8 +107,8 @@ function check_nsu()
     H = nsu_scene(); run_nsu!(H)
     B = nsu_scene()
     D = (; ns=mfs(B.ns), nf=mfs(B.nf), st=mfs(B.st),
-         mask=Metal.MtlArray(collect(B.mask)), nc=B.nc, nlevdecomp=B.nlevdecomp)
-    D.ns.smin_nh4_vr_col isa Metal.MtlArray || (println("    BLOCKED: ns not on device."); return 1)
+         mask=device_array_type()(collect(B.mask)), nc=B.nc, nlevdecomp=B.nlevdecomp)
+    D.ns.smin_nh4_vr_col isa device_array_type() || (println("    BLOCKED: ns not on device."); return 1)
     run_nsu!(D)
     nfail = 0
     for f in (:smin_nh4_vr_col, :smin_no3_vr_col, :sminn_vr_col)
@@ -120,7 +119,7 @@ function check_nsu()
 end
 
 function main(backend)
-    println("=" ^ 72); println("Cluster-C misc kernelizations — Metal parity"); println("=" ^ 72)
+    println("=" ^ 72); println("Cluster-C misc kernelizations — GPU parity"); println("=" ^ 72)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (working precision: %s)\n", name, FT)

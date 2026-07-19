@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_cndv_light_e2e.jl — end-to-end Metal parity for cndv_light!
+# gpu_validate_cndv_light_e2e.jl — end-to-end GPU parity for cndv_light!
 # (CNDV light competition: per-patch crown/LAI/FPC + patch->gridcell scatter
 # of tree/shrub/grass FPC totals + per-gridcell max + per-patch competition).
 # eco/PftconType stay host (their fields are extracted into a device bundle);
@@ -9,7 +9,6 @@
 # ==========================================================================
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -77,21 +76,21 @@ run_estab!(d) = CLM.cndv_establishment!(d.dgvs, d.eco, d.prec365, d.annsum_npp, 
     d.deadstemc, d.leafcmax, d.pft, d.patch, d.lun, 1:d.np; bounds_gridcell=1:d.ng)
 
 function main(backend)
-    println("="^66); println("END-TO-END Metal parity for cndv_light!"); println("="^66)
+    println("="^66); println("END-TO-END GPU parity for cndv_light!"); println("="^66)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (precision: %s)\n", name, FT)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     movedev(B) = (; dgvs=mf(B.dgvs), eco=B.eco, pft=B.pft, patch=mf(B.patch), lun=mf(B.lun),
         np=B.np, ng=B.ng, deadstemc=mf(B.deadstemc), leafcmax=mf(B.leafcmax),
         t_a10=mf(B.t_a10), t_ref2m=mf(B.t_ref2m), prec365=mf(B.prec365),
         annsum_npp=mf(B.annsum_npp), annsum_litfall=mf(B.annsum_litfall),
-        mask=Metal.MtlArray(collect(B.mask)))
+        mask=device_array_type()(collect(B.mask)))
     checks = Tuple{String,Any,Any}[]
 
     # cndv_light! (the scatter/competition kernel) — run on its own fresh data
     Hl = make_data(); Dl = movedev(make_data())
-    if !(Dl.dgvs.fpcgrid_patch isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    if !(Dl.dgvs.fpcgrid_patch isa device_array_type()); println("  BLOCKED."); return 2; end
     run_light!(Hl); run_light!(Dl)
     push!(checks, ("light: crownarea", Hl.dgvs.crownarea_patch, Dl.dgvs.crownarea_patch))
     push!(checks, ("light: fpcgrid", Hl.dgvs.fpcgrid_patch, Dl.dgvs.fpcgrid_patch))

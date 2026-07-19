@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_clmdrvinit_e2e.jl — Metal parity for clm_drv_init!'s per-col /
+# gpu_validate_clmdrvinit_e2e.jl — GPU parity for clm_drv_init!'s per-col /
 # per-patch driver-init loops (A10).
 #
 # clm_drv_init! has four element-wise init loops, now per-element kernels:
@@ -22,7 +22,6 @@
 
 using CLM
 using Printf
-import Metal
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
@@ -84,7 +83,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for clm_drv_init! init loops (A10)")
+    println("END-TO-END GPU parity for clm_drv_init! init loops (A10)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -114,7 +113,7 @@ function main(backend)
     fvns_d  = to(fill(FT(-1.0), B.np))
     iceold_d = to(fill(FT(0.25), B.nc, NLEVSNO))
 
-    if !(cisun_d isa Metal.MtlArray)
+    if !(cisun_d isa device_array_type())
         println("  BLOCKED: device arrays did not move under to().")
         return 2
     end

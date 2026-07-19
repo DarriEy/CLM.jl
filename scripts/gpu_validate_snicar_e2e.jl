@@ -10,9 +10,9 @@
 #   julia --project=scripts scripts/gpu_validate_snicar_e2e.jl
 # ==========================================================================
 using CLM, Printf
-import Metal
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mfm(x) = mf(Metal.MtlArray, x)
+mfm(x) = mf(device_array_type(), x)
 const FSURDAT = get(ENV, "CLM_FSURDAT",
     "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = get(ENV, "CLM_PARAMFILE",
@@ -105,14 +105,14 @@ reldiff(a,b) = begin
 end
 
 function main()
-    if !Metal.functional(); println("Metal not functional"); return 0; end
+    if !gpu_functional(); println("No GPU backend detected"); return 0; end
     instH, bounds, filtH = build()
     run_albedo!(instH, filtH, bounds)
     println("CPU albedo (with injected snow) done. snl=", Array(instH.column.snl[1:bounds.endc]))
 
     instB, boundsB, filtB = build()
     inst_d = mfm(instB); filt_ia_d = mfm(filt_ia)
-    println("moved to device: ", inst_d.surfalb.albsnd_hst_col isa Metal.MtlArray)
+    println("moved to device: ", inst_d.surfalb.albsnd_hst_col isa device_array_type())
     # surface_albedo! reads filt_ia masks via the closure-captured global; for the
     # device run we need the device filter — rebind the global temporarily.
     CLM.surface_albedo!(inst_d.surfalb, inst_d.surfalb_con, inst_d.gridcell, inst_d.column,

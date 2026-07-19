@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_carbon_isotopes_e2e.jl — Metal parity for the C13/C14 tracer
+# gpu_validate_carbon_isotopes_e2e.jl — GPU parity for the C13/C14 tracer
 # routines: c14_decay! (radioactive decay of all C14 pools — gridcell seedc,
 # soil decomp vr pools incl. the spinup-accelerated branch, and the veg patch
 # pools) and c13_c14_photosynthesis! (C13 fractionation + C14 bomb-factor flux).
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -33,9 +32,9 @@ reldiff(a, b) = begin
     m
 end
 
-mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-mb(x) = Metal.MtlArray(collect(x))
-mi(x) = Metal.MtlArray(collect(Int32.(x)))
+mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+mb(x) = device_array_type()(collect(x))
+mi(x) = device_array_type()(collect(Int32.(x)))
 
 function make_c14(nc, np, ng, nlevdecomp, ndecomp_pools)
     cs = CLM.CNVegCarbonStateData(); CLM.cnveg_carbon_state_init!(cs, np, nc, ng)
@@ -58,7 +57,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("Metal parity for the C13/C14 tracer routines (c14_decay! + photosynthesis)")
+    println("GPU parity for the C13/C14 tracer routines (c14_decay! + photosynthesis)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -82,7 +81,7 @@ function main(backend)
         nlevdecomp=nlev, ndecomp_pools=ndp)
 
     csD, scsD = make_c14(nc, np, ng, nlev, ndp); csD = mf(csD); scsD = mf(scsD)
-    if !(csD.leafc_patch isa Metal.MtlArray)
+    if !(csD.leafc_patch isa device_array_type())
         println("  BLOCKED: C14 state did not move to the device."); return 2
     end
     CLM.c14_decay!(csD, cfH, scsD, scfH; mask_soilc=mb(trues(nc)), mask_soilp=mb(trues(np)),

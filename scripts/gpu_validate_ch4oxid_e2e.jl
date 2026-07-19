@@ -1,11 +1,11 @@
 # ==========================================================================
-# gpu_validate_ch4oxid_e2e.jl — end-to-end Metal parity for the WHOLE ch4_oxid!
+# gpu_validate_ch4oxid_e2e.jl — end-to-end GPU parity for the WHOLE ch4_oxid!
 # function (the single per-(column, soil layer) _ch4oxid_kernel! computing
 # ch4_oxid_depth / o2_oxid_depth via double Michaelis-Menten kinetics).
 #
 # Builds the test_methane.jl CH4Data + ch4_oxid! arg setup at Float32, runs the
-# CPU reference, then drives the SAME kernel on the Metal device via the loose-
-# array launcher CLM.meth_oxid! with every input array adapted to MtlArray, and
+# CPU reference, then drives the SAME kernel on the GPU device via the loose-
+# array launcher CLM.meth_oxid! with every input array adapted to device_array_type(), and
 # compares the mutated outputs (ch4_oxid_depth, o2_oxid_depth) with reldiff.
 #
 # Exercises all the branches of ch4_oxid!:
@@ -16,7 +16,7 @@
 #
 # Note (worktree foundation): on this branch CH4Data is NOT yet @adapt_structure'd
 # (Float64 fields), so the device path drives the loose-array kernel launcher
-# CLM.meth_oxid! directly with Float32 MtlArray inputs — exactly the arrays the
+# CLM.meth_oxid! directly with Float32 device_array_type() inputs — exactly the arrays the
 # kernelized ch4_oxid! extracts from the struct. This validates the kernel itself.
 #
 # IMPORTANT (A1 lesson): reldiff silently PASSES when both sides are NaN, so this
@@ -28,7 +28,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -80,7 +79,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for ch4_oxid! (per-(column,layer) kernel)")
+    println("END-TO-END GPU parity for ch4_oxid! (per-(column,layer) kernel)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -128,7 +127,7 @@ function main(backend)
         d_smp = to(B.smp_l); d_tsoi = to(B.t_soisno)
         d_cch4 = to(conc_ch4); d_co2 = to(conc_o2)
 
-        if !(d_ch4 isa Metal.MtlArray)
+        if !(d_ch4 isa device_array_type())
             println("  BLOCKED: output array did not move to the device under to().")
             return 2
         end

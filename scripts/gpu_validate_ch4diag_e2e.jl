@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_ch4diag_e2e.jl — end-to-end Metal parity for the CH4 "diagnostic"
+# gpu_validate_ch4diag_e2e.jl — end-to-end GPU parity for the CH4 "diagnostic"
 # function-group of methane.jl:
 #   • get_jwt!           — water-table layer search (per-column, in-thread j-loops)
 #   • ch4_annualupdate!  — annual mean update (3 kernels: counter / col / patch /
@@ -26,7 +26,6 @@
 using CLM
 using Printf
 include(joinpath(@__DIR__, "gpu_backends.jl"))
-import Metal   # for adapt(Metal.MtlArray, ch4) — CH4Data is @adapt_structure'd on this branch
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
 function reldiff(a, b)
@@ -142,7 +141,7 @@ function main(backend)
     CLM.ch4_totcolch4!(tot_h, H.ch4, H.mask_nolake, H.mask_lake, H.dz, H.nlevsoi, true)
 
     tot_d = to(zeros(FT, B.nc))
-    ch4_d_tot = CLM.Adapt.adapt(Metal.MtlArray, B.ch4)
+    ch4_d_tot = CLM.Adapt.adapt(device_array_type(), B.ch4)
     CLM.ch4_totcolch4!(tot_d, ch4_d_tot, dmask(B.mask_nolake), dmask(B.mask_lake),
                        dvec(B.dz), B.nlevsoi, true)
     check("totcolch4 (lakeprod)", tot_h, tot_d)
@@ -159,7 +158,7 @@ function main(backend)
     CLM.ch4_annualupdate!(H.ch4, H.mask_soil, H.mask_soilp, H.patch_column,
                           H.is_fates, H.somhr, H.agnpp, H.bgnpp, H.dt, H.secsperyear)
 
-    ch4_d = CLM.Adapt.adapt(Metal.MtlArray, B.ch4)
+    ch4_d = CLM.Adapt.adapt(device_array_type(), B.ch4)
     CLM.ch4_annualupdate!(ch4_d, dmask(B.mask_soil), dmask(B.mask_soilp),
                           dvec(B.patch_column), dmask(B.is_fates), dvec(B.somhr),
                           dvec(B.agnpp), dvec(B.bgnpp), B.dt, B.secsperyear)
@@ -182,7 +181,7 @@ function main(backend)
     CLM.ch4_annualupdate!(H2.ch4, H2.mask_soil, H2.mask_soilp, H2.patch_column,
                           H2.is_fates, H2.somhr, H2.agnpp, H2.bgnpp, H2.dt, H2.secsperyear)
 
-    ch4_d2 = CLM.Adapt.adapt(Metal.MtlArray, B2.ch4)
+    ch4_d2 = CLM.Adapt.adapt(device_array_type(), B2.ch4)
     CLM.ch4_annualupdate!(ch4_d2, dmask(B2.mask_soil), dmask(B2.mask_soilp),
                           dvec(B2.patch_column), dmask(B2.is_fates), dvec(B2.somhr),
                           dvec(B2.agnpp), dvec(B2.bgnpp), B2.dt, B2.secsperyear)

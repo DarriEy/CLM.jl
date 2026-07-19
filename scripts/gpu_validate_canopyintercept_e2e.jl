@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_canopyintercept_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_canopyintercept_e2e.jl — end-to-end GPU parity for the WHOLE
 # canopy_interception_and_throughfall! driver (all 9 steps: top-of-canopy
 # inputs, interception/throughfall, canopy-excess, snow unloading, the
 # patch->column scatter of fluxes onto the ground via _scatter_add!, and the
@@ -21,7 +21,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -95,7 +94,7 @@ run_cit!(S, masks, forc, irrig, dtime, np, nc, ng) =
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for canopy_interception_and_throughfall! (whole driver)")
+    println("END-TO-END GPU parity for canopy_interception_and_throughfall! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -109,7 +108,7 @@ function main(backend)
     setconfig!()
     B = build(FT)             # to be adapted to device (fresh initial state)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = (; patch = ad(B.patch), col = ad(B.col), cs = ad(B.cs), water = ad(B.water))
     forc_d  = (; (k => ad(getfield(B.forc,  k)) for k in keys(B.forc))...)
     irrig_d = (; (k => ad(getfield(B.irrig, k)) for k in keys(B.irrig))...)
@@ -118,7 +117,7 @@ function main(backend)
                  nolakep = to(collect(Bool, B.masks.nolakep)),
                  nolakec = to(collect(Bool, B.masks.nolakec)))
 
-    if !(Sd.water.waterstatebulk_inst.ws.snocan_patch isa Metal.MtlArray)
+    if !(Sd.water.waterstatebulk_inst.ws.snocan_patch isa device_array_type())
         println("  BLOCKED: WaterData did not move to the device under adapt.")
         return 2
     end

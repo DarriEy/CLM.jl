@@ -1913,6 +1913,16 @@ function psn_phs_pass1_update!(ps, mask_patch, col_of_patch, ivt, froot_carbon,
         _frl = _to_backend_like(smp_l, _FTp, froot_leaf_pft)
         _rr  = _to_backend_like(smp_l, _FTp, root_radius_pft)
         _rd  = _to_backend_like(smp_l, _FTp, root_density_pft)
+        # The kernel indexes these pftcon vectors by ivt under @inbounds. If a caller
+        # never populated them they are EMPTY, which reads adjacent heap garbage on the
+        # host (silently wrong physics) and is an invalid device read on the GPU
+        # (ERROR_ILLEGAL_ADDRESS, unrecoverable — it kills the CUDA context). One O(1)
+        # host-side check per launch turns both into a clear error.
+        (isempty(_frl) || isempty(_rr) || isempty(_rd)) && error(
+            "psn_phs_pass1_update!: pftcon root/leaf parameters are empty " *
+            "(froot_leaf=$(length(_frl)), root_radius=$(length(_rr)), " *
+            "root_density=$(length(_rd))) — pftcon was not initialized for a " *
+            "use_hydrstress run. The kernel indexes these by ivt.")
         _psn_phs_pass1_kernel!(be)(mask_patch, col_of_patch, ivt, phs_params,
             froot_carbon, rootfr, dz, tsai, tlai, _frl, _rr,
             _rd, hksat, hk_l, smp_l, z_col, k_soil_root,

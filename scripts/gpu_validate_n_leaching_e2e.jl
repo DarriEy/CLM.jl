@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_n_leaching_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_n_leaching_e2e.jl — end-to-end GPU parity for the WHOLE
 # n_leaching! driver (mineral-N leaching + runoff): per-column level reductions
 # (tot_water/surface_water via in-thread j-loops) + per-(c,j) leaching/runoff
 # physics, depth-conditional, for both use_nitrif_denitrif modes.
@@ -9,7 +9,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -53,13 +52,13 @@ function check_case(name, FT, use_nitrif)
     @printf("\n  --- use_nitrif_denitrif=%s ---\n", use_nitrif)
     H = build(); B = build()
     run_leach!(H, H.zisoi; use_nitrif=use_nitrif)
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
     D = (; params=B.params, nf=mf(B.nf), ns=mf(B.ns), h2osoi_liq=mf(B.h2osoi_liq),
         qflx_drain=mf(B.qflx_drain), qflx_surf=mf(B.qflx_surf), col_dz=mf(B.col_dz),
-        dt=B.dt, mask_bgc_soilc=Metal.MtlArray(collect(B.mask_bgc_soilc)),
+        dt=B.dt, mask_bgc_soilc=device_array_type()(collect(B.mask_bgc_soilc)),
         nlevdecomp=B.nlevdecomp, nlevsoi=B.nlevsoi, nc=B.nc)
-    zisoi_d = Metal.MtlArray(Float32.(B.zisoi))
-    if !(D.nf.sminn_leached_vr_col isa Metal.MtlArray); println("  BLOCKED."); return 2; end
+    zisoi_d = device_array_type()(Float32.(B.zisoi))
+    if !(D.nf.sminn_leached_vr_col isa device_array_type()); println("  BLOCKED."); return 2; end
     run_leach!(D, zisoi_d; use_nitrif=use_nitrif)
     outs = use_nitrif ? (:smin_no3_leached_vr_col, :smin_no3_runoff_vr_col) : (:sminn_leached_vr_col,)
     nfail = 0
@@ -74,7 +73,7 @@ function check_case(name, FT, use_nitrif)
 end
 
 function main(backend)
-    println("=" ^ 72); println("END-TO-END Metal parity for n_leaching!"); println("=" ^ 72)
+    println("=" ^ 72); println("END-TO-END GPU parity for n_leaching!"); println("=" ^ 72)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s   (working precision: %s)\n", name, FT)

@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_altcalc_e2e.jl — end-to-end Metal parity for the WHOLE alt_calc!
+# gpu_validate_altcalc_e2e.jl — end-to-end GPU parity for the WHOLE alt_calc!
 # active-layer-thickness driver (annual-maxima reset kernel on the set annual
 # timestep + the per-column ALT search/interpolation kernel).
 #
@@ -10,7 +10,7 @@
 #   col 3 — partial thaw (warm shallow, frozen deep)       -> linear interp branch
 # and both hemispheres (NH lat>0 / SH lat<=0) for the Jan-1 reset.
 #
-# Runs alt_calc! on the CPU, adapts the structs to Metal, runs the SAME call on
+# Runs alt_calc! on the CPU, adapts the structs to the GPU, runs the SAME call on
 # the device, and compares alt / alt_indx / altmax / altmax_indx /
 # altmax_lastyear / altmax_lastyear_indx with reldiff.
 #
@@ -22,7 +22,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 function reldiff(a, b)
@@ -105,7 +104,7 @@ run_alt!(H) = CLM.alt_calc!(H.al, H.mask, H.temperature, H.col_data, H.grc;
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for alt_calc! (whole driver)")
+    println("END-TO-END GPU parity for alt_calc! (whole driver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -117,16 +116,16 @@ function main(backend)
     H = build(FT)
     B = build(FT)
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     al_d   = ad(B.al)
     temp_d = ad(B.temperature)
     col_d  = ad(B.col_data)
     grc_d  = ad(B.grc)
     # The whole alt_calc! runs on the device, so its mask must be a device Bool
-    # vector (BitVector can't reach a Metal kernel); convert BitArray -> Bool.
+    # vector (BitVector can't reach a GPU kernel); convert BitArray -> Bool.
     mask_d = to(collect(Bool, B.mask))
 
-    if !(al_d.alt_col isa Metal.MtlArray)
+    if !(al_d.alt_col isa device_array_type())
         println("  BLOCKED: ActiveLayerData did not move to the device under adapt.")
         return 2
     end

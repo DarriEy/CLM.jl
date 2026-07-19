@@ -1,20 +1,20 @@
-# gpu_validate_fun_e2e.jl — whole-cnfun!-on-Metal parity.
+# gpu_validate_fun_e2e.jl — whole-cnfun!-on-GPU parity.
 #
 # Builds a use_fun FUN scenario (mirrors test/test_fun.jl make_fun_test_data),
 # runs the WHOLE cnfun! (phase-1 kernels + setup + pack → substep → unpack + p2c)
-# on the CPU, then adapts every struct + mask to Metal (Float32) and runs cnfun!
+# on the CPU, then adapts every struct + mask to GPU and runs cnfun!
 # on-device, comparing the cnveg N/C flux outputs.
 #
 # Run: julia +1.12 --project=scripts scripts/gpu_validate_fun_e2e.jl
 
 using CLM, Printf
-import Metal
+include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))   # mf / mfs Float32 down-adaptors
 # mf: arrays + ::FT scalars -> Float32 (keeps concrete-Float64 structs);
 # mfs: also converts loose Float64 scalars (for ::FT-scalar structs).
-ad(x)   = mf(Metal.MtlArray, x)
-ads(x)  = mfs(Metal.MtlArray, x)
-to(x)   = Metal.MtlArray(x)
+ad(x)   = mf(device_array_type(), x)
+ads(x)  = mfs(device_array_type(), x)
+to(x)   = device_array_type()(x)
 dmask(m) = to(collect(Bool, m))
 
 # ---- Build the FUN scenario (np=1, nc=1, nlevdecomp=2) --------------------
@@ -89,8 +89,8 @@ cpu_nf = Dict(f => copy(getfield(cpu.cnveg_nf, f)) for f in outs)
 cpu_cf = Dict(f => copy(getfield(cpu.cnveg_cf, f)) for f in outc)
 
 # ---- Metal device run -----------------------------------------------------
-if !Metal.functional()
-    println("Metal not functional — skipping device leg."); exit(0)
+if !gpu_functional()
+    println("No GPU backend detected — skipping device leg."); exit(0)
 end
 dd = build()
 pft_d = CLM.PftConFUN(; (k => to(Float32.(getfield(dd.pftcon,k))) for k in fieldnames(CLM.PftConFUN))...)
@@ -99,7 +99,7 @@ dev = (; patch=ad(dd.patch), waterstate=ads(dd.waterstate), temperature=ads(dd.t
          cnveg_cs=ad(dd.cnveg_cs), cnveg_cf=ad(dd.cnveg_cf), cnveg_ns=ad(dd.cnveg_ns),
          cnveg_nf=ad(dd.cnveg_nf), soilbgc_nf=ad(dd.soilbgc_nf), soilbgc_cf=ad(dd.soilbgc_cf),
          soilbgc_ns=ad(dd.soilbgc_ns), fun_params=dd.fun_params, np=dd.np, nc=dd.nc, nlevdecomp=dd.nlevdecomp)
-if !(dev.soilstate.crootfr_patch isa Metal.MtlArray)
+if !(dev.soilstate.crootfr_patch isa device_array_type())
     println("  BLOCKED: a struct did not move to the device under adapt."); exit(1)
 end
 run_fun!(dev, dmask(BitVector([true])), dmask(BitVector([true])), to(Float32.(dd.dzsoi)), pft_d)

@@ -1,11 +1,11 @@
 # ==========================================================================
-# gpu_validate_cstateupdate3_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_cstateupdate3_e2e.jl — end-to-end GPU parity for the WHOLE
 # c_state_update3! BGC driver (fire C fluxes; part of the Phase B C/N
 # state-update cascade).
 #
 # Builds a small multi-column / multi-patch instance mirroring
 # test/test_c_state_update3.jl, runs c_state_update3! on the CPU, converts every
-# state struct to Float32 + adapts to Metal, runs the SAME call on the device, and
+# state struct to Float32 + adapts to the GPU, runs the SAME call on the device, and
 # compares the mutated outputs field-by-field. The scenario exercises the fused
 # column kernel (fire mortality -> cwd/litter additions, then per-pool fire losses)
 # and the patch kernel (gresp + displayed/storage/transfer pool fire fluxes,
@@ -20,7 +20,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the device-view structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # NaN-aware mixed abs/rel diff; asserts the CPU reference is finite so a both-NaN
@@ -37,9 +36,9 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 
 # Float32-down-converting Metal adaptor (see gpu_validate_cstateupdate1_e2e.jl).
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 const NC = 4
 const NP = 6
@@ -152,7 +151,7 @@ run_csu3!(S, m_c, m_p, dt) =
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for c_state_update3! (BGC fire C-state)")
+    println("END-TO-END GPU parity for c_state_update3! (BGC fire C-state)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -168,7 +167,7 @@ function main(backend)
     cs_d  = ad(B.cs_veg); cf_d = ad(B.cf_veg); css_d = ad(B.cs_soil)
     Sd = (; cs_veg=cs_d, cf_veg=cf_d, cs_soil=css_d)
 
-    if !(cs_d.leafc_patch isa Metal.MtlArray)
+    if !(cs_d.leafc_patch isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

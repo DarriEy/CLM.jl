@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_dyn_cnbal_patch_carbon_e2e.jl — whole-function Metal parity for
+# gpu_validate_dyn_cnbal_patch_carbon_e2e.jl — whole-function GPU parity for
 # dynamic_patch_adjustments_carbon! (the dyn_cnbal carbon patch-adjustment path):
 # compute_seed_amounts! + the ~25 conservative update_patch_state! calls + the
 # deadstem partition-flux-by-type, all composed on-device.
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -97,7 +96,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("WHOLE-FN Metal parity for dynamic_patch_adjustments_carbon! (dyn_cnbal C path)")
+    println("WHOLE-FN GPU parity for dynamic_patch_adjustments_carbon! (dyn_cnbal C path)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -113,12 +112,12 @@ function main(backend)
     run!(csH, updH, bH, pchH, pftcon, maskH, filterH, fxH)
 
     # Device
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mi(x) = Metal.MtlArray(collect(Int32.(x)))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mi(x) = device_array_type()(collect(Int32.(x)))
     bD, pchD, _, updD, csD = build()
     csD = mf(csD); updD = mf(updD); pchD = mf(pchD)
     fxD = map(mf, newfluxes())
-    if !(csD.leafc_patch isa Metal.MtlArray)
+    if !(csD.leafc_patch isa device_array_type())
         println("  BLOCKED: CN carbon state did not move to the device."); return 2
     end
     # mask stays a host BitVector (the orchestrator collects+copies it to backend)

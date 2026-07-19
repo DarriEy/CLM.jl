@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_snowcoverfrac_e2e.jl — Metal parity for the handle_new_snow! tail
+# gpu_validate_snowcoverfrac_e2e.jl — GPU parity for the handle_new_snow! tail
 # (A10): bulkdiag_new_snow_diagnostics! and the snow_cover_fraction.jl helpers it
 # drives — update_snow_depth_and_frac!, add_newsnow_to_intsnow!, calc_frac_sno_eff!.
 #
@@ -27,7 +27,6 @@
 
 using CLM
 using Printf
-import Metal
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
@@ -110,7 +109,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("END-TO-END Metal parity for handle_new_snow! tail (bulkdiag + scf) (A10)")
+    println("END-TO-END GPU parity for handle_new_snow! tail (bulkdiag + scf) (A10)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -134,7 +133,7 @@ function main(backend)
             snow_depth = to(B.snow_depth), swe_old = to(B.swe_old), dz = to(B.dz),
             lun_itype = to(B.lun_itype), urbpoi = db(B.urbpoi), n_melt = to(B.n_melt))
 
-    if !(Sd.int_snow isa Metal.MtlArray)
+    if !(Sd.int_snow isa device_array_type())
         println("  BLOCKED: device arrays did not move under to().")
         return 2
     end

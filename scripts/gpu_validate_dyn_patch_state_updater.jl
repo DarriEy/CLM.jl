@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_dyn_patch_state_updater.jl — Metal parity for the shared
+# gpu_validate_dyn_patch_state_updater.jl — GPU parity for the shared
 # conservative patch-state updater infra (dyn_subgrid): set_old_weights!,
 # set_new_weights!, update_patch_state! (with seed + col/grc fluxes), and
 # update_patch_state_partition_flux_by_type!.
@@ -14,7 +14,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 struct _F32 end
@@ -54,7 +53,7 @@ end
 function run_seq!(updater, b, pch, col, var, flux_col, flux_grc, seed, seed_add,
                   flux1, flux2, filterp, frac)
     CLM.set_old_weights!(updater, b, pch, col)
-    pch.wtgcell .= (pch.wtgcell isa Metal.MtlArray ? Metal.MtlArray(Float32.(PWT_NEW)) : PWT_NEW)
+    pch.wtgcell .= (pch.wtgcell isa device_array_type() ? device_array_type()(Float32.(PWT_NEW)) : PWT_NEW)
     CLM.set_new_weights!(updater, b, pch)
     CLM.update_patch_state!(updater, b, pch, filterp, var;
         flux_out_col_area=flux_col, flux_out_grc_area=flux_grc,
@@ -67,7 +66,7 @@ end
 
 function main(backend)
     println("=" ^ 72)
-    println("Metal parity for the dyn_subgrid patch-state updater (conservative infra)")
+    println("GPU parity for the dyn_subgrid patch-state updater (conservative infra)")
     println("=" ^ 72)
     if backend === nothing
         println("  No GPU backend — nothing to validate."); return 0
@@ -88,8 +87,8 @@ function main(backend)
     run_seq!(uH, b, pchH, colH, varH, fcolH, fgrcH, seedH, saddH, f1H, f2H, filterH, fracH)
 
     # --- Device run ---
-    mf(x) = CLM.Adapt.adapt(Metal.MtlArray, CLM.Adapt.adapt(_F32(), x))
-    mi(x) = Metal.MtlArray(collect(Int32.(x)))
+    mf(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_F32(), x))
+    mi(x) = device_array_type()(collect(Int32.(x)))
     pchD, colD = make()
     pchD = mf(pchD); colD = mf(colD)
     uD = mf(CLM.PatchStateUpdater(b))
@@ -101,7 +100,7 @@ function main(backend)
     fracD = mf(fracH2)
     filterD = mi(collect(1:NP))
 
-    if !(uD.dwt isa Metal.MtlArray)
+    if !(uD.dwt isa device_array_type())
         println("  BLOCKED: PatchStateUpdater did not move to the device."); return 2
     end
 

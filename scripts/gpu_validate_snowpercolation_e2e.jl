@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_snowpercolation_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_snowpercolation_e2e.jl — end-to-end GPU parity for the WHOLE
 # snow-percolation chain (A7), run on the CPU and on the device and compared.
 #
 # Functions exercised (all whole-function, in the order they fire in the driver):
@@ -23,7 +23,6 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 const NS = 5  # nlevsno
@@ -146,7 +145,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for the snow-percolation chain (A7)")
+    println("END-TO-END GPU parity for the snow-percolation chain (A7)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU chain exercised by the suite).")
@@ -165,7 +164,7 @@ function main(backend)
         mask_nosnow = [snl[c] == 0 for c in 1:B.nc]   # no snow layers
 
         # Device snapshot BEFORE the CPU run mutates B.
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         D = (; nc = B.nc,
             dz = ad(B.dz), h2osoi_ice = ad(B.h2osoi_ice), h2osoi_liq = ad(B.h2osoi_liq),
             qflx_snow_percolation = ad(B.qflx_snow_percolation),
@@ -181,7 +180,7 @@ function main(backend)
             qflx_rain_plus_snomelt = ad(B.qflx_rain_plus_snomelt),
             qflx_snomelt = ad(B.qflx_snomelt))
 
-        if !(D.aer.mss_bcphi_col isa Metal.MtlArray)
+        if !(D.aer.mss_bcphi_col isa device_array_type())
             println("  BLOCKED: AerosolData did not move to the device under adapt.")
             return 2
         end

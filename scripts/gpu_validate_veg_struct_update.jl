@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_veg_struct_update.jl — Metal parity for cn_veg_struct_update!
+# gpu_validate_veg_struct_update.jl — GPU parity for cn_veg_struct_update!
 # (the per-patch vegetation-structure diagnosis kernelized in veg_struct_update.jl).
 #
 # Builds the mixed-PFT fixture from test/test_veg_struct_update.jl (noveg + woody
@@ -14,10 +14,9 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
-mf(x) = mf(Metal.MtlArray, x)
+mf(x) = mf(device_array_type(), x)
 
 function reldiff_finite(H, D)
     A = Array(H); B = Array(D); m = 0.0; n = 0
@@ -93,7 +92,7 @@ run_it(d, mask) = CLM.cn_veg_struct_update!(mask, d.bounds, d.patch, d.cs,
     d.cnveg_cs, d.wd, d.fv, d.vs, d.cr, d.pft; KW...)
 
 function main(backend)
-    println("="^70); println("Metal parity — cn_veg_struct_update! (per-patch kernel)"); println("="^70)
+    println("="^70); println("GPU parity — cn_veg_struct_update! (per-patch kernel)"); println("="^70)
     if backend === nothing; println("  No GPU backend."); return 0; end
     name, _, FT = backend
     @printf("  Backend: %s (%s)\n\n", name, FT)
@@ -107,10 +106,10 @@ function main(backend)
            wd = mf(dD.wd), fv = mf(dD.fv), vs = mf(dD.vs), cr = mf(dD.cr),
            pft = dD.pft, bounds = dD.bounds)          # pft stays host (moved internally)
     mask_d = mf(dD.mask)
-    dev.cs.tlai_patch isa Metal.MtlArray || (println("  BLOCKED: adapt did not reach device."); return 2)
+    dev.cs.tlai_patch isa device_array_type() || (println("  BLOCKED: adapt did not reach device."); return 2)
     CLM.cn_veg_struct_update!(mask_d, dev.bounds, dev.patch, dev.cs, dev.cnveg_cs,
         dev.wd, dev.fv, dev.vs, dev.cr, dev.pft; KW...)
-    Metal.synchronize()
+    device_synchronize()
     println("  cn_veg_struct_update! completed on $name.\n")
 
     checks = [("tlai", dH.cs.tlai_patch, dev.cs.tlai_patch),

@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_drainage_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_drainage_e2e.jl — end-to-end GPU parity for the WHOLE
 # drainage! AND clm_vic_map! drivers (one thread per column running the full
 # per-column subroutine in-thread).
 #
@@ -31,7 +31,6 @@
 
 using CLM
 using Printf
-import Metal   # Metal-specific; MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -204,7 +203,7 @@ run_vic!(S, P, dmask) = CLM.clm_vic_map!(
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for drainage! + clm_vic_map! (whole drivers)")
+    println("END-TO-END GPU parity for drainage! + clm_vic_map! (whole drivers)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU driver exercised by the suite).")
@@ -216,12 +215,12 @@ function main(backend)
     H = build(FT)               # CPU reference
     B = build(FT)               # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = (; sh = ad(B.S.sh), ss = ad(B.S.ss), wsb = ad(B.S.wsb), wfb = ad(B.S.wfb),
             temp = ad(B.S.temp),
             col_dz = to(B.S.col_dz), col_z = to(B.S.col_z), col_zi = to(B.S.col_zi))
 
-    if !(Sd.sh.zwt_col isa Metal.MtlArray)
+    if !(Sd.sh.zwt_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

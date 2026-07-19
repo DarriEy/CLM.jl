@@ -1,12 +1,12 @@
 # ==========================================================================
-# gpu_validate_cstateupdate0_dyn_e2e.jl — end-to-end Metal parity for the two
+# gpu_validate_cstateupdate0_dyn_e2e.jl — end-to-end GPU parity for the two
 # small sibling C-state updates: c_state_update0! (photosynthesis cpool update,
 # one thread per patch) and c_state_update_dyn_patch! (dyn_cnbal_patch litter/CWD
 # input, one thread per column + seed carbon, one thread per gridcell).
 #
 # Builds a small multi-column / multi-patch / multi-gridcell instance mirroring
 # test/test_c_state_update1.jl, runs each function on the CPU, converts every state
-# struct to Float32 + adapts to Metal, runs the SAME calls on the device, and
+# struct to Float32 + adapts to the GPU, runs the SAME calls on the device, and
 # compares the mutated outputs field-by-field. The dyn scenario exercises the
 # per-column j/i litter loops (litter pools + CWD) and the per-gridcell seed loop;
 # update0 exercises the per-patch cpool accumulation.
@@ -20,7 +20,6 @@
 
 using CLM
 using Printf
-import Metal   # MtlArray is the Adapt adaptor type for the device-view structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # NaN-aware mixed abs/rel diff; asserts the CPU reference is finite so a both-NaN
@@ -42,9 +41,9 @@ cpu_has_finite(a) = any(isfinite, Array(a))
 # reconstructs the struct (integer/bool arrays move as-is). @adapt_structure rebuilds
 # each struct positionally, inferring the new {Float32,…} params from the adapted fields.
 struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = device_array_type()(Float32.(x))
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = device_array_type()(x)
+CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = device_array_type()(x)
 
 const NC = 4
 const NP = 6
@@ -102,7 +101,7 @@ run_dyn!(S, m_c, dt) =
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for c_state_update0! + c_state_update_dyn_patch!")
+    println("END-TO-END GPU parity for c_state_update0! + c_state_update_dyn_patch!")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU path exercised by the suite).")
@@ -119,7 +118,7 @@ function main(backend)
     cs_d  = ad(B.cs_veg); cf_d = ad(B.cf_veg); css_d = ad(B.cs_soil)
     Sd = (; cs_veg=cs_d, cf_veg=cf_d, cs_soil=css_d)
 
-    if !(cs_d.cpool_patch isa Metal.MtlArray)
+    if !(cs_d.cpool_patch isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return 2
     end

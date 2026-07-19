@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_soilwater_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_soilwater_e2e.jl — end-to-end GPU parity for the WHOLE
 # soilwater_zengdecker2009! solver (the default soil_water! path), not just its
 # individual kernels.
 #
@@ -18,7 +18,6 @@
 
 using CLM
 using Printf
-import Metal   # Metal-specific; MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 const NS = 5; const NG = 10; const NSOI = 10; const NMAX = 10
@@ -101,7 +100,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for soilwater_zengdecker2009! (whole solver)")
+    println("END-TO-END GPU parity for soilwater_zengdecker2009! (whole solver)")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU solver exercised by the suite).")
@@ -122,14 +121,14 @@ function main(backend)
         dt = FT(1800)
 
         # Device snapshot of the populated initial state (BEFORE the CPU run mutates B).
-        # The Adapt adaptor must be the device ARRAY TYPE (Metal.MtlArray), not `to`.
-        ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+        # The Adapt adaptor must be the device ARRAY TYPE (device_array_type()), not `to`.
+        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
         D = (; nc = B.nc, col = ad(B.col), temp = ad(B.temp), ef = ad(B.ef), ss = ad(B.ss),
              wsb = ad(B.wsb), wfb = ad(B.wfb), cs = ad(B.cs), sh = ad(B.sh))
         dmask(m) = to(collect(Bool, m))
 
         # Sanity: a representative field of each struct must have actually moved to device.
-        if !(D.sh.zwt_col isa Metal.MtlArray && D.wsb.ws.h2osoi_liq_col isa Metal.MtlArray)
+        if !(D.sh.zwt_col isa device_array_type() && D.wsb.ws.h2osoi_liq_col isa device_array_type())
             println("  BLOCKED: a state struct did not move to the device under adapt (pinned fields).")
             return 2
         end

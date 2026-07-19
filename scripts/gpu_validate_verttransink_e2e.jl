@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_verttransink_e2e.jl — end-to-end Metal parity for the WHOLE
+# gpu_validate_verttransink_e2e.jl — end-to-end GPU parity for the WHOLE
 # compute_effec_rootfrac_and_vert_tran_sink! wrapper (and its children:
 # _Default, _HydStress_Roads, _HydStress).
 #
@@ -18,7 +18,6 @@
 
 using CLM
 using Printf
-import Metal   # Metal-specific; MtlArray is the Adapt adaptor type for the structs
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
@@ -142,10 +141,10 @@ function run_one(to, FT, use_hydrstress::Bool)
     H = build(FT)               # CPU reference
     B = build(FT)               # source for the device snapshot
 
-    ad(x) = CLM.Adapt.adapt(Metal.MtlArray, x)
+    ad(x) = CLM.Adapt.adapt(device_array_type(), x)
     Sd = map(ad, B.S)
 
-    if !(Sd.ss.rootr_col isa Metal.MtlArray)
+    if !(Sd.ss.rootr_col isa device_array_type())
         println("  BLOCKED: a state struct did not move to the device under adapt.")
         return (2, [])
     end
@@ -169,7 +168,7 @@ end
 
 function main(backend)
     println("=" ^ 70)
-    println("END-TO-END Metal parity for compute_effec_rootfrac_and_vert_tran_sink!")
+    println("END-TO-END GPU parity for compute_effec_rootfrac_and_vert_tran_sink!")
     println("=" ^ 70)
     if backend === nothing
         println("  No GPU backend — nothing to validate (CPU wrapper exercised by suite).")
