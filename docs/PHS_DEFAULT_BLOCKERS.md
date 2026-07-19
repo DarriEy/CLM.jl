@@ -74,8 +74,10 @@ stays a device array, so the GPU path is unperturbed).
 **Measured:** `test_ad_robustness` with PHS on goes from **6 errors / 0 passes**
 to **96 passes / 0 errors**, with AD-vs-finite-difference relative error
 **0.0%** on `d(LH)/d(T)`, `d(SH)/d(T)` and `d(T_grnd)/d(T)` in all six climate
-scenarios. The test count rises because the scenarios now run to completion
-instead of throwing at the first PHS call.
+scenarios. 96 is exactly the PHS-**off** baseline for that file, so this is a
+RESTORATION, not an inflated count: each scenario previously threw at the first
+PHS call, so its six assertions never ran. The suite total is unaffected by
+this file.
 
 A sweep for the same bug class found LUNA's `_LunaPft` promotes *all* its pft
 fields to `FT` — wasteful, but it unifies, so it is not broken. `crop_pft` was
