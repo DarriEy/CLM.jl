@@ -49,6 +49,8 @@
 using CLM, NCDatasets, Dates, Printf
 
 const SHOWALL = any(==("--all"), ARGS)
+# Hour shift applied to the forcing lookup (diagnostic; 0 = historical behaviour).
+const LAKE_FORC_OFFSET = parse(Int, get(ENV, "LAKE_FORC_OFFSET", "0"))
 
 const LAKE   = "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/clm_ports/CLM.jl/test_inputs/lake/surfdata_lake100.nc"
 const FP     = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters/clm5_params.nc"
@@ -116,7 +118,12 @@ function main(; nsteps::Int = 48)
         nextsw = calday + 3600.0/CLM.SECSPDAY
         CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
         CLM.advance_timestep!(tm)
-        force_date = base + Hour(max(s - 1, 1))
+        # Forcing-hour mapping. The historical expression is `Hour(max(s-1, 1))`,
+        # inherited from the SINGLE-step stillwater probe where max(.,1) only guards
+        # N=1; in a LOOP it makes steps 1 and 2 BOTH read hour 1 and lags every later
+        # step by one hour. LAKE_FORC_OFFSET lets us test the alignment empirically
+        # (a harness forcing misalignment was the whole of the #233 fire "residual").
+        force_date = base + Hour(max(s - 1, 1) + LAKE_FORC_OFFSET)
         CLM.read_forcing_step!(fr, inst.atm2lnd, force_date, ng, nc)
         for g in 1:ng
             inst.atm2lnd.forc_hgt_u_grc[g] = 30.0
