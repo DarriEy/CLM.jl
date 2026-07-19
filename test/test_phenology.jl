@@ -1075,12 +1075,19 @@
     # =====================================================================
     @testset "crop_phenology_init!" begin
         ps = CLM.PhenologyState()
+        # VALUE-DISTINGUISHING by construction: every PFT gets a DIFFERENT planting
+        # date, so an off-by-one in the 0-based-Fortran -> 1-based-Julia index
+        # mapping changes the asserted numbers. The previous version of this test
+        # filled all 20 entries with the same constant, so it passed identically
+        # whether the routine indexed with `n` or `n+1` — and it did index with `n`,
+        # i.e. it read the wrong crop's planting dates. Do not reintroduce fill().
+        nh_min(n) = 100.0 + n      # 0-based fortran pft index n -> julia index n+1
         pftcon = CLM.PftConPhenology(
             is_pft_known_to_model = fill(true, 20),
-            mnNHplantdate = fill(100.0, 20),
-            mxNHplantdate = fill(170.0, 20),
-            mnSHplantdate = fill(280.0, 20),
-            mxSHplantdate = fill(350.0, 20),
+            mnNHplantdate = [nh_min(j - 1)         for j in 1:20],
+            mxNHplantdate = [nh_min(j - 1) + 70.0  for j in 1:20],
+            mnSHplantdate = [nh_min(j - 1) + 180.0 for j in 1:20],
+            mxSHplantdate = [nh_min(j - 1) + 250.0 for j in 1:20],
         )
         patch_data = CLM.PatchData()
         patch_data.itype = [4, 16]  # 0-based Fortran PFT indices
@@ -1093,10 +1100,16 @@
         @test length(ps.inhemi) == 2
         @test ps.inhemi[1] == CLM.inNH  # lat > 0
         @test ps.inhemi[2] == CLM.inNH
-        @test ps.minplantjday[17, CLM.inNH] == 100
-        @test ps.maxplantjday[17, CLM.inNH] == 170
-        @test ps.minplantjday[17, CLM.inSH] == 280
-        @test ps.maxplantjday[17, CLM.inSH] == 350
+        # Fortran pft 17 -> Julia row 18, and its date must be pft 17's (117), NOT
+        # pft 16's (116) — that difference is exactly the bug this test now catches.
+        @test ps.minplantjday[18, CLM.inNH] == 117
+        @test ps.maxplantjday[18, CLM.inNH] == 187
+        @test ps.minplantjday[18, CLM.inSH] == 297
+        @test ps.maxplantjday[18, CLM.inSH] == 367
+        @test ps.minplantjday[19, CLM.inNH] == 118          # fortran pft 18
+        # Rows outside [npcropmin, npcropmax] must stay untouched.
+        @test ps.minplantjday[17, CLM.inNH] == typemax(Int)  # fortran pft 16: not a crop here
+        @test ps.minplantjday[20, CLM.inNH] == typemax(Int)  # fortran pft 19: above npcropmax
     end
 
     @testset "crop_phenology_init! southern hemisphere" begin

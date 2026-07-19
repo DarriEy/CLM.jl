@@ -199,6 +199,7 @@ using CLM
     include("test_initialization.jl")
     include("test_multigridcell_surfdata.jl")
     include("test_crop_collapse_static.jl")
+    include("test_crop_lifecycle.jl")  # crop lifecycle vs the CTSM CN-crop Fortran reference
     include("test_multicolumn.jl")
     include("test_device_adapt.jl")
     include("test_backend.jl")  # centralized backend-selection API + multi-GPU-over-MPI plumbing (CPU proxy)
