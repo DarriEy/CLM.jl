@@ -68,6 +68,17 @@ function collapse_crop_types!(wt_cft::AbstractMatrix{Float64},
     cftsize = size(wt_cft, 2)
     cftsize > 0 || return nothing
 
+    # The merge mapping comes from the paramfile (pftcon_read!). If it is empty we
+    # would silently collapse nothing and hand back the uncollapsed 64-CFT set,
+    # which is exactly the failure this routine exists to prevent — so fail loudly
+    # rather than no-op. Fortran guarantees the ordering with `call pftcon%Init()`
+    # ("Needs to stay before surfrd_get_data", clm_initializeMod.F90:253); CLM.jl
+    # matches it by reading parameters before the surface data in clm_initialize!.
+    if isempty(pftcon.mergetoclmpft)
+        error("collapse_crop_types!: pftcon.mergetoclmpft is empty (cftsize=$cftsize). " *
+              "The paramfile must be read before the surface data.")
+    end
+
     total_sum = sumto === nothing ? ones(endg - begg + 1) : sumto
 
     # If not using irrigation, merge irrigated into rainfed

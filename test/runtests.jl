@@ -198,6 +198,7 @@ using CLM
     include("test_dyn_subgrid_cnbal_wiring.jl")
     include("test_initialization.jl")
     include("test_multigridcell_surfdata.jl")
+    include("test_crop_collapse_static.jl")
     include("test_multicolumn.jl")
     include("test_device_adapt.jl")
     include("test_backend.jl")  # centralized backend-selection API + multi-GPU-over-MPI plumbing (CPU proxy)

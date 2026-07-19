@@ -197,7 +197,28 @@ Read surface dataset metadata to determine PFT/CFT dimensions.
 function surfrd_get_num_patches(fsurdat::String)
     ds = NCDataset(fsurdat, "r")
     try
-        numpft = haskey(ds.dim, "natpft") ? ds.dim["natpft"] : 15
+        # NOTE on conventions — these two returns are NOT the same kind of number,
+        # and conflating them was a real bug (see below).
+        #   numpft is the *highest natural PFT index* (0-based), because
+        #     varpar_init! assigns `natpft_ub = surf_numpft` directly. The natpft
+        #     dimension is a COUNT (15 = PFTs 0..14), so the index is dim - 1.
+        #   numcft is a COUNT, because varpar_init! does
+        #     `cft_ub = cft_lb + surf_numcft - 1`.
+        # Fortran's surfrd_get_num_patches returns actual_numpft as a count and
+        # clm_varpar_init then does `natpft_ub = natpft_lb + natpft_size - 1`; the
+        # subtraction has to happen on exactly one side, and in CLM.jl it lives
+        # here (every other caller of varpar_init! — ~50 tests and the GPU
+        # validation scripts — already passes the max-index form, e.g. 14).
+        #
+        # Returning the raw dimension here made natpft_ub = 15, which cascaded to
+        # cft_lb = 16, cft_ub = 79 and maxveg = 79. On natural-veg runs that was
+        # invisible: it only added a 16th natural PFT slot that
+        # _read_spatial_layered zero-pads, so no patch was ever built from it. On a
+        # crop run it was fatal — every crop CFT itype came out one too high
+        # (corn 18 instead of 17) and maxveg = 79 indexed mergetoclmpft (length 79)
+        # at 80. Cross-check: satellite_phenology/voc_emission/phenology all
+        # hardcode maxveg = 78 and npcropmin = 17, i.e. the CTSM-correct values.
+        numpft = (haskey(ds.dim, "natpft") ? ds.dim["natpft"] : 15) - 1
         numcft = haskey(ds.dim, "cft") ? ds.dim["cft"] : 2
         return (numpft, numcft)
     finally
@@ -457,6 +478,24 @@ function surfrd_veg_all!(surf::SurfaceInputData, ds::NCDataset, ng::Int)
         end
         # Read fertilizer
         surf.fert_cft = _read_spatial_layered(ds, "FERTNITRO_CFT", ng, cft_size)
+
+        # Collapse unused crop types into the ones this run actually models.
+        # Fortran calls collapse_crop_types TWICE: here, in the static surfdata
+        # read (surfrdMod.F90:991 — "The call collapse_crop_types also appears in
+        # subroutine dyncrop_interp"), and in dyncrop_interp for the transient
+        # landuse path. CLM.jl only ever had the transient call
+        # (dyn_pft_crop_file.jl); the static one was never ported, so a STATIC crop
+        # run kept all 64 CFTs of the surfdata instead of merging them down to the
+        # crops CLM has parameterizations for. On the US-plains crop point that is
+        # 22 patches where Fortran builds 8, and the two patch vectors do not
+        # index-align — which makes any per-patch crop parity number meaningless.
+        #
+        # cft_size > 0 only when use_crop, so non-crop runs never reach this and
+        # stay byte-identical.
+        collapse_crop_types!(surf.wt_cft, surf.fert_cft, 1, ng)
+        # Re-check after merging: collapse moves weight between columns but must
+        # not create or destroy any (Fortran check_sums_equal_1 after the merge).
+        check_sums_equal_1!(surf.wt_cft, "wt_cft (post-collapse)")
     else
         surf.wt_cft = zeros(ng, 0)
         surf.fert_cft = zeros(ng, 0)

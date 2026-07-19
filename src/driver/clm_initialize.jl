@@ -159,6 +159,18 @@ function clm_initialize!(;
     # ---- Step 4: Initialize varcon (vertical coordinate arrays) ----
     varcon_init!()
 
+    # ---- Step 4a: Read parameters ----
+    # Fortran does this immediately before surfrd_get_data, with the comment
+    # "Independent of model resolution, Needs to stay before surfrd_get_data"
+    # (clm_initializeMod.F90:253, `call pftcon%Init()`). The reason is concrete:
+    # surfrd_get_data -> collapse_crop_types needs pftcon%mergetoclmpft to know
+    # which crop types this run can model. CLM.jl used to read parameters much
+    # later (old Step 12), which is why the static collapse could not have been
+    # wired where Fortran has it. readParameters! only fills module-global
+    # parameter state (pftcon and the various *_params singletons) — it touches no
+    # subgrid structure — so moving it earlier is safe.
+    readParameters!(paramfile)
+
     # ---- Step 5: Read surface data ----
     surf = SurfaceInputData()
     if read_full_grid
@@ -260,8 +272,11 @@ function clm_initialize!(;
     set_filters!(bounds, inst.column, inst.landunit, inst.patch, inst.gridcell)
     filt = clump_filter
 
-    # ---- Step 12: Read parameters ----
-    readParameters!(paramfile)
+    # ---- Step 12: (parameters were read in Step 4a) ----
+    # readParameters! moved to Step 4a so that the static collapse_crop_types! in
+    # surfrd_get_data! can see pftcon.mergetoclmpft, matching Fortran's ordering.
+    # Everything below still runs here because it depends on subgrid structure
+    # built in Step 9.
 
     # ---- Atmospheric N-deposition stream ----
     # CTSM CNDriverInit -> ndep_init (ndepStreamMod.F90). This is the ONLY path by
@@ -278,7 +293,7 @@ function clm_initialize!(;
     # + surfdataread (gdp/peatf/abm from fsurdat) + readParams (prh30,
     # ignition_efficiency). The allocation already happened in clm_instInit!; the
     # three fills below need col%gridcell (built in step 9) and pftcon (filled by
-    # readParameters! just above), so they run here.
+    # readParameters! in Step 4a), so they run here.
     # No-op for the default :nofire => the fire arrays stay zero-length => the CN
     # driver's `_fire_active` gate is structurally false, as before.
     if cnfire_method !== :nofire
