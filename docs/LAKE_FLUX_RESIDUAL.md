@@ -35,7 +35,7 @@ port's own default applies (the dangerous case).
 |---|---|---|---|---|
 | `zetamaxstable` | `0.5d00` | DEFAULT | `0.5` (friction_velocity.jl:187) | MATCH |
 | `wind_min` | paramfile (`clm5_params.nc`) | from paramfile | read via read_params.jl:104 | MATCH (same paramfile) |
-| `z0param_method` | `'ZengWang2007'` | DEFAULT | `""` → z0method=0 | **UNSET — see note Z** |
+| `z0param_method` | `'ZengWang2007'` | DEFAULT | `"ZengWang2007"` (varctl.jl:163) | MATCH — see note Z |
 | `nlevsno` | `12` | DEFAULT | `12` (varpar.jl:148) | MATCH |
 | `soil_layerstruct_predefined` | `'20SL_8.5m'` | DEFAULT | `"20SL_8.5m"` | MATCH |
 | `use_subgrid_fluxes` | `.true.` | DEFAULT | n/a (single gridcell) | inert here |
@@ -47,10 +47,17 @@ port's own default applies (the dangerous case).
 Note Z: the whole `&clm_lake_inparm` group is ABSENT from the reference `lnd_in`, so the
 Fortran run takes CTSM's lake defaults — which the port's `lake_con.jl` defaults
 reproduce. The lake namelist is therefore **not** the source of the residual.
-`z0param_method` is unset in the harness (port resolves `z0method=0`, i.e. neither
-ZengWang2007 nor Meier2022) where Fortran sets `ZengWang2007`; this needs confirming
-against whether the lake path consults `z0method` at all (lake `z0` is a function of
-`ustar`, unlike land).
+
+**`z0param_method` is a DEAD END — corrected after first writing this table.** An
+earlier revision of this document flagged it as UNSET. That was wrong, for two
+independent reasons, and it is recorded here so nobody chases it again:
+1. `varctl.z0param_method` already defaults to `"ZengWang2007"` (`src/constants/varctl.jl:163`,
+   set by #260), matching the reference. The `""` defaults visible in
+   `src/types/friction_velocity.jl:303,566` are per-function argument defaults, not the
+   driver default — reading those first is what produced the false flag.
+2. More decisively, **`lake_fluxes.jl` never consults `z0param_method` or `z0method` at
+   all** (zero occurrences). It applies the ZengWang2007 form unconditionally at
+   `lake_fluxes.jl:259`. The flag cannot move the lake result in either setting.
 
 ### Flags that differ
 
