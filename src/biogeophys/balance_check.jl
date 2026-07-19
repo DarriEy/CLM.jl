@@ -126,8 +126,17 @@ balance check, they were invisible to it.
 Non-finite is now treated as a FAILURE, scanned before the magnitude tests.
 """
 function _bc_first_nonfinite(err::AbstractVector, bounds::UnitRange{Int})
-    for c in bounds
-        isfinite(err[c]) || return c
+    # Scalar-indexing `err[c]` in a host loop is a composition leak on a device
+    # run: on a GPU array every iteration is a separate device read, and the
+    # balance check runs each step on the whole column set. Screen with ONE
+    # device-side reduction (no scalar reads, backend-agnostic), and only fall
+    # back to the host scan on the rare broken-balance path, where a single
+    # transfer is free relative to the error being reported.
+    v = view(err, bounds)
+    any(x -> !isfinite(x), v) || return nothing
+    h = Array(v)
+    for i in eachindex(h)
+        isfinite(h[i]) || return first(bounds) + i - 1
     end
     return nothing
 end
