@@ -19,6 +19,12 @@ const SURFDATA = joinpath(
     "SYMFLUENCE_data/crop_cft_surfdata/surfdata_cropCFT_USplains_1pt.nc",
 )
 
+const PARAMFILE = joinpath(
+    homedir(),
+    "Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data",
+    "SYMFLUENCE_data/domain_Aripuana_Amazon/settings/CLM/parameters/clm5_params.nc",
+)
+
 # The 8 crop CFT patches the Fortran reference builds, from the collapsed
 # mergetoclmpft mapping with irrigate=.true. (so the irrigated CFTs survive).
 const FORTRAN_ITYPES = [17, 18, 19, 20, 23, 24, 75, 76]
@@ -30,23 +36,22 @@ function main()
     CLM.varctl.create_crop_landunit = true
     CLM.varctl.irrigate = true
 
+    # numpft is the highest natural PFT index (0-based); numcft is a count.
     (numpft, numcft) = CLM.surfrd_get_num_patches(SURFDATA)
     nlevurb = CLM.surfrd_get_nlevurb(SURFDATA)
-    @printf("surfdata dims: natpft=%d cft=%d\n", numpft, numcft)
+    @printf("surfdata: max natural PFT index=%d, cft count=%d\n", numpft, numcft)
 
     CLM.varpar_init!(CLM.varpar, 1, numpft, numcft, nlevurb)
-    @printf("varpar: natpft_lb=%d natpft_ub=%d cft_lb=%d cft_ub=%d maxveg=%d\n",
+    @printf("varpar:       natpft_lb=%d natpft_ub=%d cft_lb=%d cft_ub=%d maxveg=%d\n",
             CLM.varpar.natpft_lb, CLM.varpar.natpft_ub,
             CLM.varpar.cft_lb, CLM.varpar.cft_ub, CLM.varpar.maxveg)
-    @printf("CTSM expects:   natpft_lb=0 natpft_ub=%d cft_lb=%d cft_ub=%d maxveg=%d\n",
-            numpft - 1, numpft, numpft + numcft - 1, numpft + numcft - 1)
-
-    n_merge = length(CLM.pftcon.mergetoclmpft)
-    @printf("mergetoclmpft length=%d; loop indexes up to maxveg+1=%d -> %s\n",
-            n_merge, CLM.varpar.maxveg + 1,
-            CLM.varpar.maxveg + 1 <= n_merge ? "IN BOUNDS" : "OUT OF BOUNDS (would throw)")
+    @printf("CTSM expects: natpft_lb=0 natpft_ub=14 cft_lb=15 cft_ub=78 maxveg=78\n")
 
     CLM.varcon_init!()
+    CLM.readParameters!(PARAMFILE)
+    @printf("mergetoclmpft length after paramfile read = %d\n",
+            length(CLM.pftcon.mergetoclmpft))
+
     surf = CLM.SurfaceInputData()
     CLM.surfrd_get_data!(surf, 1, 1, SURFDATA)
 
