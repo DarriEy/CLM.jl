@@ -84,6 +84,23 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         @test _RUN_KW[:h2osfcflag] == 1
     end
 
+    @testset "use_aquifer_layer == false (fixed in the defaults campaign)" begin
+        # CTSM does not read this from a namelist — it DERIVES it:
+        #   namelist_defaults_ctsm.xml:419-428 → soilwater_movement_method=1
+        #   (clm5_0) → lower_boundary_condition=2 (bc_zero_flux)
+        #   SoilWaterMovementMod.F90:221-236 → use_aquifer_layer() is true only
+        #   for bc_aquifer(4)/bc_watertable ⇒ .false. for clm5_0.
+        # The port shipped `true`, which is CTSM's CODE FALLBACK
+        # (SoilWaterMovementMod.F90:~150, under the comment "Default values for
+        # namelist" — i.e. the value the namelist overrides). `true` also pairs
+        # with use_bedrock into a config CTSM endrun's on (same file:181).
+        # It selects the whole soil-water solver (ZD09+BC_AQUIFER vs the CLM5
+        # moisture-form solver + BC_ZERO_FLUX) via clm_driver.jl's swm_cfg switch.
+        # 71 of the 75 explicit call sites in scripts/+test/ already passed false.
+        @test _INIT_KW[:use_aquifer_layer] === false
+        @test _RUN_KW[:use_aquifer_layer] === false
+    end
+
     @testset "use_bedrock is CONDITIONAL, not a bare Bool (fixed in #252)" begin
         # namelist_defaults_ctsm.xml:178-181 — .false. under use_fates /
         # vichydro / clm4_5, .true. otherwise. The `nothing` sentinel is what
