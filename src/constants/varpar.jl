@@ -176,7 +176,11 @@ function varpar_init!(vp::VarPar, actual_maxsoil_patches::Int,
     vp.natpft_ub = surf_numpft
     vp.natpft_size = vp.natpft_ub - vp.natpft_lb + 1
 
-    if varctl.use_crop
+    # Fortran clm_varpar.F90:209 branches on create_crop_landunit, NOT use_crop,
+    # and comments its else-branch "only true when FATES is active". Branching on
+    # use_crop here gave a default non-crop, non-FATES run cft_size=0 where CTSM
+    # gives surf_numcft. See docs/DRIVER_DEFAULTS_AUDIT.md M5.
+    if varctl.create_crop_landunit
         vp.cft_lb = vp.natpft_ub + 1
         vp.cft_ub = vp.cft_lb + surf_numcft - 1
         vp.cft_size = vp.cft_ub - vp.cft_lb + 1

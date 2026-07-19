@@ -135,7 +135,14 @@ function clm_initialize!(;
     varctl.use_luna = use_luna
     varctl.use_hydrstress = use_hydrstress
     varctl.use_cndv = use_cndv
-    varctl.create_crop_landunit = use_crop
+    # CTSM keys this on use_fates ALONE (namelist_defaults_ctsm.xml:2377-2378),
+    # not on use_crop: CLMBuildNamelist.pm:2248-2250 makes `.false.` a fatal
+    # error for any non-FATES run, and surfrdMod.F90:943 endruns on a modern
+    # CFT-format surfdata read with it off. Deriving it from use_crop gave a
+    # default (non-crop, non-FATES) run cft_size=0 and folded crop area into
+    # natural veg, where CTSM builds a separate crop landunit — a different
+    # subgrid from the same surfdata. See docs/DRIVER_DEFAULTS_AUDIT.md M5.
+    varctl.create_crop_landunit = !use_fates
     # Resolve the conditional default (see the keyword's comment): FATES runs default to
     # .false. exactly as CTSM's namelist_defaults does; everything else keeps CLM5's .true.
     varctl.use_bedrock = use_bedrock === nothing ? !use_fates : use_bedrock

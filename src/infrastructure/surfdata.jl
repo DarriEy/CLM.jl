@@ -596,11 +596,19 @@ end
 Read monthly LAI/SAI/HTOP/HBOT from surface dataset.
 The surface file stores these as (lsmlon, lsmlat, lsmpft, time).
 `lsmpft` includes ALL PFTs (bare+natural+crop), typically 17.
-We read the first `npft` natural PFTs.
+We read all of them, up to `maxveg + 1`.
+
+This used to truncate to the natural PFTs only (`natpft_size`, 15). That was
+invisible while `cft_size` was always 0 — no patch could ever have an itype
+above `natpft_ub`, so the missing crop columns were never indexed. The moment
+`create_crop_landunit` started defaulting to CTSM's value (M5 in
+docs/DRIVER_DEFAULTS_AUDIT.md), a crop patch with `itype = cft_lb = 15` indexed
+`monthly_lai[g, 16, mon]` and ran off the end of a 15-wide array.
+`maxveg + 1` is exactly the file's own `lsmpft` (15 natpft + 2 cft = 17), and
+matches the `l + 1` indexing bound documented on `_satphen_monthly_kernel!`.
 """
 function surfrd_phenology!(surf::SurfaceInputData, ds::NCDataset, ng::Int)
-    natpft_size = varpar.natpft_ub - varpar.natpft_lb + 1
-    npft = natpft_size
+    npft = varpar.maxveg + 1
 
     surf.monthly_lai = zeros(ng, npft, 12)
     surf.monthly_sai = zeros(ng, npft, 12)
