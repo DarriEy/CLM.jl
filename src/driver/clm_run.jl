@@ -26,7 +26,8 @@ to output. This is the top-level entry point for offline CLM simulations.
 - `use_cn::Bool`         — Use CN biogeochemistry (default false)
 - `use_bedrock::Union{Bool,Nothing}` — Use bedrock-limited soil column. `nothing` (default)
   defers to clm_initialize!'s CTSM-conditional default; non-FATES resolves to `true`.
-- `use_aquifer_layer::Bool` — Use aquifer lower boundary (default true)
+- `use_aquifer_layer::Bool` — Use aquifer lower boundary. Default `false` (CTSM clm5_0
+  derivation); `true` selects the ZD09 + BC_AQUIFER solver.
 - `hist_fields`          — Custom history fields (default: default_hist_fields())
 - `verbose::Bool`        — Print progress messages (default true)
 - `h2osfcflag::Int`      — Surface water flag for soil hydrology (default 1 = CTSM default)
@@ -80,7 +81,17 @@ function clm_run!(;
     # `nothing` defers to clm_initialize!'s CTSM-conditional default (.false. under FATES,
     # .true. otherwise). This driver is non-FATES, so it resolves to .true. as before.
     use_bedrock::Union{Bool,Nothing} = nothing,
-    use_aquifer_layer::Bool = true,
+    # CTSM DERIVES this from lower_boundary_condition rather than reading a
+    # namelist flag: for phys=clm5_0 the chain is soilwater_movement_method=1 ->
+    # lower_boundary_condition=2 (bc_zero_flux) -> use_aquifer_layer() = .false.
+    # (namelist_defaults_ctsm.xml:419-428; SoilWaterMovementMod.F90:221-236).
+    # The port defaulted `true`, which is CTSM's *code fallback* (bc_aquifer) --
+    # the value the namelist overrides -- and `true` together with use_bedrock
+    # is a combination CTSM itself endrun's on (SoilWaterMovementMod.F90:181).
+    # It selects the whole soil-water solver: ZD09+BC_AQUIFER vs the CLM5
+    # moisture-form solver + BC_ZERO_FLUX (see clm_driver.jl's swm_cfg switch).
+    # 71 of the 75 explicit call sites in scripts/+test/ already pass `false`.
+    use_aquifer_layer::Bool = false,
     use_luna::Bool = false,
     use_hydrstress::Bool = false,
     # CTSM namelist default (SoilHydrologyType.F90 clm_soilhydrology_inparm) is 1.

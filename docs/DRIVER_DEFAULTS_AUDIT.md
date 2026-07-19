@@ -67,7 +67,23 @@ That block is four workarounds in four consecutive lines. `h2osfcflag` was
 already recognised as one and fixed in #225. The other three are the same bug,
 unfixed.
 
-### M1 — `use_aquifer_layer` (MISMATCH, live, highest severity)
+### M1 — `use_aquifer_layer` — **CLOSED** (was: MISMATCH, live, highest severity)
+
+> **Resolved.** Default flipped to `false` in `clm_initialize!`, `clm_run!` and
+> `CLMDriverConfig`, matching CTSM's derivation for `clm5_0`. Verified: the flip
+> reaches the solver switch (`clm_driver.jl` `swm_cfg`) and now selects
+> `MOISTURE_FORM` + `BC_ZERO_FLUX`, so `use_aquifer_layer(cfg)` derives `false` —
+> exactly CTSM's chain. Full suite `--check-bounds=yes` is **byte-identical to
+> baseline: 26150 passed / 3 broken / 0 failed / 0 errored** (baseline confirmed
+> by two independent runs). That is a NO-REGRESSION result, not proof the physics
+> is unchanged — it cannot be, the solver differs. Nothing moved because the
+> harnesses sensitive to the lower boundary condition pass the flag explicitly
+> (`longhorizon_conservation.jl` via a const; `parity_run_domain.jl:195` via
+> `get(cfg, :aquifer, false)` — note the scorecard *already* defaulted to
+> `false`, independent corroboration), and the suites that do inherit the default
+> assert on canopy/energy quantities over 1–4 timesteps. Pinned in
+> `test/test_driver_defaults_audit.jl`.
+
 
 CTSM does not expose `use_aquifer_layer` as a namelist flag at all. It is a
 **derived function** (`src/biogeophys/SoilWaterMovementMod.F90:221`):
