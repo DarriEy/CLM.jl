@@ -58,11 +58,17 @@
 # Patch-level running-mean definitions
 # ---------------------------------------------------------------------------
 # In Fortran these `rmean_def_type` instances are module globals in
-# FatesRunningMeanMod, configured once at proc init from parameter-file
-# timescales. That configuration step is not yet ported; we provide
-# self-contained default definitions here so a patch's running means can be
-# constructed and initialized (`InitRunningMeans!`). They can be re-pointed to
-# the real definitions once the timescale-parameter wiring is ported.
+# FatesRunningMeanMod, configured once at proc init from the HOST TIMESTEP plus the
+# parameter-file timescales (`FatesInterfaceMod.F90:1041-1047`, all with
+# `up_period = hlm_stepsize`). That configuration IS ported --
+# `InitTimeAveragingGlobals()` in FatesInterfaceMod.jl -- and as of D3 it is actually
+# called from `clm_fates_init!`, so `InitRunningMeans!` below uses those globals.
+#
+# The `_patch_*` constants here remain only as a FALLBACK for callers that construct
+# a patch without ever running FATES init (unit-test fixtures). They hardcode a
+# 1800 s update period; using them under a host with a different `dtime` gives a
+# window of the wrong LENGTH IN TIME (at dtime=3600 the "24-hour" fixed window spans
+# 48 hours), which is precisely the D3 mid-July cold-leaf-off bug. Prefer the globals.
 const _patch_fixed_24hr   = rmean_def_type(mem_period = 86400.0, up_period = 1800.0, n_mem = 48, method = fixed_window)
 const _patch_ema_lpa      = rmean_def_type(mem_period = 2.592e6, up_period = 86400.0, n_mem = 30, method = moving_ema_window)
 const _patch_ema_longterm = rmean_def_type(mem_period = 3.1536e7, up_period = 86400.0, n_mem = 365, method = moving_ema_window)
@@ -509,10 +515,20 @@ end
 
 Set initial values for the patch running means (24-hr veg temperature and the
 leaf-photosynthesis-acclimation means; under the TRS regeneration model also the
-seedling-layer means). Mirrors the Fortran `InitRunningMeans`. The running-mean
-*definitions* used here are the module-local defaults
-([`_patch_fixed_24hr`](@ref) etc.).
+seedling-layer means). Mirrors the Fortran `InitRunningMeans`.
+
+The running-mean *definitions* come from the FATES module globals that
+`InitTimeAveragingGlobals()` builds from the host timestep (`up_period =
+hlm_stepsize`), exactly as Fortran does. If FATES init has not run (a unit-test
+fixture constructing a patch directly), `_rmdef` falls back to the module-local
+`_patch_*` default with its hardcoded 1800 s update period.
 """
+# Pick the FATES-init-defined global when it has been defined (n_mem > 0), else the
+# legacy module-local default. `define!` sets n_mem = nint(mem_period/up_period) > 0,
+# so n_mem == 0 uniquely identifies an undefined global.
+_rmdef(global_def::rmean_def_type, fallback::rmean_def_type) =
+    global_def.n_mem > 0 ? global_def : fallback
+
 function InitRunningMeans!(this::fates_patch_type, current_tod::Integer,
                            regeneration_model::Integer, numpft::Integer)
     # PARAMETERS
@@ -525,10 +541,10 @@ function InitRunningMeans!(this::fates_patch_type, current_tod::Integer,
     this.tveg_longterm = rmean_type()
 
     # set initial values for running means
-    InitRMean!(this.tveg24, _patch_fixed_24hr; init_value = temp_init_veg,
+    InitRMean!(this.tveg24, _rmdef(fixed_24hr, _patch_fixed_24hr); init_value = temp_init_veg,
                init_offset = Float64(current_tod))
-    InitRMean!(this.tveg_lpa, _patch_ema_lpa; init_value = temp_init_veg)
-    InitRMean!(this.tveg_longterm, _patch_ema_longterm; init_value = temp_init_veg)
+    InitRMean!(this.tveg_lpa, _rmdef(ema_lpa, _patch_ema_lpa); init_value = temp_init_veg)
+    InitRMean!(this.tveg_longterm, _rmdef(ema_longterm, _patch_ema_longterm); init_value = temp_init_veg)
 
     if regeneration_model == TRS_regeneration
         this.seedling_layer_par24 = rmean_type()
@@ -537,19 +553,19 @@ function InitRunningMeans!(this::fates_patch_type, current_tod::Integer,
         this.sdlng_mort_par       = rmean_type()
         this.sdlng2sap_par        = rmean_type()
 
-        InitRMean!(this.seedling_layer_par24, _patch_fixed_24hr;
+        InitRMean!(this.seedling_layer_par24, _rmdef(fixed_24hr, _patch_fixed_24hr);
                    init_value = init_seedling_par, init_offset = Float64(current_tod))
-        InitRMean!(this.sdlng_mort_par, _patch_ema_sdlng_mort_par;
+        InitRMean!(this.sdlng_mort_par, _rmdef(ema_sdlng_mort_par, _patch_ema_sdlng_mort_par);
                    init_value = temp_init_veg)
-        InitRMean!(this.sdlng2sap_par, _patch_ema_sdlng2sap_par;
+        InitRMean!(this.sdlng2sap_par, _rmdef(ema_sdlng2sap_par, _patch_ema_sdlng2sap_par);
                    init_value = init_seedling_par)
 
         for pft in 1:numpft
             this.sdlng_mdd[pft].p       = rmean_type()
             this.sdlng_emerg_smp[pft].p = rmean_type()
 
-            InitRMean!(this.sdlng_mdd[pft].p, _patch_ema_sdlng_mdd; init_value = 0.0)
-            InitRMean!(this.sdlng_emerg_smp[pft].p, _patch_ema_sdlng_emerg_h2o;
+            InitRMean!(this.sdlng_mdd[pft].p, _rmdef(ema_sdlng_mdd, _patch_ema_sdlng_mdd); init_value = 0.0)
+            InitRMean!(this.sdlng_emerg_smp[pft].p, _rmdef(ema_sdlng_emerg_h2o, _patch_ema_sdlng_emerg_h2o);
                        init_value = init_seedling_smp)
         end
     end

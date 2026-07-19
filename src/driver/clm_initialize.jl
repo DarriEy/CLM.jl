@@ -568,7 +568,8 @@ function clm_initialize!(;
                         current_month = month(start_date),
                         current_day = day(start_date),
                         fates_pft_areafrac = fates_pft_areafrac,
-                        fates_biogeog_screen = fates_biogeog_screen)
+                        fates_biogeog_screen = fates_biogeog_screen,
+                        dtime = dtime)
     end
 
     return (inst, bounds, filt, tm)

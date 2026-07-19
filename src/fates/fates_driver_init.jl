@@ -404,7 +404,8 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          use_tree_damage::Bool = false,
                          use_planthydro::Bool = false,
                          fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
-                         fates_biogeog_screen::Symbol = :none)
+                         fates_biogeog_screen::Symbol = :none,
+                         dtime::Real = 1800.0)
 
     # ---- Fixed-biogeography (climate-appropriate PFT screening) config ----------
     # Decide up front whether to run the cold start in fixed-biogeography mode. When
@@ -524,6 +525,19 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # site.mass_balance by element_pos, so this MUST run before the cold start.
     InitPARTEHGlobals()
     nleafage[] = size(prt_params.leaf_long, 2)
+
+    # Running-mean time-averaging globals. Fortran FatesInterfaceMod:1041-1047 defines
+    # every rmean_def with `up_period = hlm_stepsize` -- the HOST's actual timestep --
+    # and derives `n_mem = nint(mem_period/up_period)`. Both `hlm_stepsize` and
+    # `InitTimeAveragingGlobals()` were ported and then never called (the "ported then
+    # never wired" class), so every patch fell back to the hardcoded `_patch_*`
+    # definitions in FatesPatchMod.jl, which assume a 1800 s step. On the reference
+    # FATES case (dtime = 3600 s) that makes the "24-hour" fixed window 48 samples
+    # long = 48 HOURS: `tveg24` advances only every second day, `vegtemp_memory` fills
+    # at half rate, and its unfilled 0.0 slots count as cold days (0 < phen_coldtemp),
+    # firing a spurious cold leaf-off on all cold-deciduous PFTs in mid-July (D3).
+    hlm_stepsize[] = Float64(dtime)
+    InitTimeAveragingGlobals()
 
     # SetFatesGlobalElements1 sizes maxpatch_total / fates_maxPatchesPerSite from the
     # ed_params.maxpatches_by_landuse table we set above (non-SP / non-nocomp branch:
