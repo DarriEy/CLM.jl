@@ -72,6 +72,16 @@ PARAMFILE = (
 )
 DONOR_FORCING = SYM / "domain_Peatland_MerBleue_Canada/data/forcing/CLM_input"
 
+# Global surface geopotential, used to derive the crop point's OWN elevation.
+# The case used to inherit the donor's topo_forcing.nc (MerBleue, 71.55 m at
+# -75.55/45.41) while running the land at -96.71/44.80 -- the #253 defect class,
+# inherited by cloning. The topo must describe the LAND POINT, not the met donor.
+PHIS_FILE = (
+    SYM / "installs/cesm-inputdata/atm/cam/topo"
+    / "fv_0.9x1.25_nc3000_Nsw006_Nrs002_Co008_Fi001_ZR_c160505.nc"
+)
+GRAV = 9.80616  # m s-2, CESM's shr_const_g -- PHIS is geopotential (m2 s-2)
+
 CASE = SYM / "clm_bgc_spinup/crop_ref_usplains"
 
 CROP_LAT, CROP_LON = 44.80, -96.71
@@ -143,6 +153,65 @@ def known_hist_fields() -> set[str]:
         except OSError:
             pass
     return out
+
+
+def build_topo_at_point(out: Path, lat: float, lon: float) -> float:
+    """Write a single-point ``topo_forcing.nc`` for THIS case's land point.
+
+    Elevation is sampled from the shipped global CAM surface geopotential
+    (``PHIS / g``) rather than copied from whatever donor the case was cloned
+    from. Returns the elevation written, after reading it back off disk.
+
+    NOTE ON IMPACT: this is a provenance fix, not a physics fix. CTSM only
+    applies lapse-rate downscaling to columns in ``downscale_filter_c``
+    (``TopoMod.F90:339``), which contains only glacier/glc2lnd/hillslope
+    columns; for every other column ``TopoMod.F90:282`` sets
+    ``topo_col = atm_topo``, so ``hsurf_c - hsurf_g == 0`` and the correction is
+    identically zero. With ``PCT_GLACIER = 0`` and ``use_hillslope = .false.``
+    the filter here is EMPTY. See docs/CROP_PARITY.md -- the elevation was
+    wrong, but it was also inert.
+    """
+    import numpy as np
+    import xarray as xr
+
+    lon360 = lon % 360.0
+    with xr.open_dataset(PHIS_FILE, decode_times=False) as d:
+        phis = float(d["PHIS"].sel(lon=lon360, lat=lat, method="nearest"))
+        glon = float(d["lon"].sel(lon=lon360, method="nearest"))
+        glat = float(d["lat"].sel(lat=lat, method="nearest"))
+    elev = phis / GRAV
+
+    ds = xr.Dataset(
+        {
+            "LONGXY": (("time", "lat", "lon"), np.array([[[lon]]], dtype="f8")),
+            "LATIXY": (("time", "lat", "lon"), np.array([[[lat]]], dtype="f8")),
+            "TOPO": (("time", "lat", "lon"), np.array([[[elev]]], dtype="f8")),
+        },
+        coords={"time": np.array([0.0])},
+        attrs={
+            "title": f"Topography forcing at the crop point ({lat}N {lon}E)",
+            "source": f"{PHIS_FILE.name}: PHIS/{GRAV} at nearest cell "
+                      f"({glat:.3f}N {glon:.3f}E)",
+            "note": "derived from the target point, NOT inherited from a donor case",
+        },
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(out)
+
+    # READ BACK. #253's lesson is that the generator's exit code is not
+    # evidence -- the file on disk is. Assert coordinates AND value.
+    with xr.open_dataset(out, decode_times=False) as chk:
+        got_lon = float(chk["LONGXY"].values.ravel()[0])
+        got_lat = float(chk["LATIXY"].values.ravel()[0])
+        got_topo = float(chk["TOPO"].values.ravel()[0])
+    if abs(got_lon - lon) > 1e-6 or abs(got_lat - lat) > 1e-6:
+        raise SystemExit(
+            f"topo readback: wrote ({lat},{lon}) but disk has ({got_lat},{got_lon})"
+        )
+    if not (-500.0 < got_topo < 9000.0):
+        raise SystemExit(f"topo readback: implausible elevation {got_topo} m")
+    print(f">> topo at land point: {got_topo:.2f} m ({got_lat}N {got_lon}E) -> {out.name}")
+    return got_topo
 
 
 def sh(cmd: list[str]) -> None:
@@ -222,12 +291,35 @@ def verify_case(case: Path) -> int:
             if got != {want}:
                 errs.append(f"datm.streams.xml: {tag} = {got}, expected {{{want}}}")
 
-    for f in re.findall(r"<file>([^<]*topo_forcing[^<]*)</file>", streams):
-        if "MerBleue" not in f:
-            errs.append(
-                f"datm.streams.xml: topo stream {f!r} is not the met donor's -- "
-                "the lapse-rate reference elevation would be wrong"
-            )
+    # The topo stream must describe THIS case's land point. It used to be
+    # asserted to be the *met donor's* file, which encoded the wrong invariant
+    # and is how the donor's 71.55 m survived into a validated reference.
+    topo_files = re.findall(r"<file>([^<]*topo_forcing[^<]*)</file>", streams)
+    if not topo_files:
+        errs.append("datm.streams.xml: no topo_forcing file in the topo stream")
+    for f in topo_files:
+        if not Path(f).exists():
+            errs.append(f"datm.streams.xml: topo file missing on disk: {f}")
+            continue
+        try:
+            import xarray as xr
+
+            with xr.open_dataset(f, decode_times=False) as d:
+                tlon = float(d["LONGXY"].values.ravel()[0])
+                tlat = float(d["LATIXY"].values.ravel()[0])
+                telev = float(d["TOPO"].values.ravel()[0])
+            # compare in [-180,180) to keep 263.29 and -96.71 comparable
+            dlon = abs(((tlon - CROP_LON) + 180.0) % 360.0 - 180.0)
+            if dlon > 0.5 or abs(tlat - CROP_LAT) > 0.5:
+                errs.append(
+                    f"datm.streams.xml: topo stream is at ({tlat:.4f}, {tlon:.4f}) "
+                    f"but the land point is ({CROP_LAT}, {CROP_LON}) -- this is the "
+                    "#253 wrong-site topo defect"
+                )
+            if not (-500.0 < telev < 9000.0):
+                errs.append(f"topo stream: implausible elevation {telev} m")
+        except ImportError:
+            pass
 
     # Every variable a stream declares must actually exist in every file that
     # stream reads. Injecting the met files into the topo stream passed all the
@@ -338,6 +430,10 @@ def main() -> int:
             "--lat", str(CROP_LAT), "--lon", str(CROP_LON)])
     print(f">> forcing in {forcing}")
 
+    # 2b. topo AT THE LAND POINT (not inherited from the donor) ---------------
+    topo_nc = forcing / "topo_forcing.nc"
+    build_topo_at_point(topo_nc, CROP_LAT, CROP_LON)
+
     # 3. crop surfdata + the single-point crop mesh everywhere ----------------
     # Mesh appears in FOUR places; missing any one silently leaves the run on
     # the donor's grid, which is exactly the class of harness mismatch that
@@ -382,13 +478,13 @@ def main() -> int:
                 block = re.sub(rf"<{tag}>\d+</{tag}>", f"<{tag}>{val}</{tag}>", block)
         else:
             # The topo stream supplies the elevation the atm forcing is
-            # lapse-rate downscaled FROM. Left at the donor CN case's value it
-            # would be Bow's ~2139 m against MerBleue-derived met at ~72 m --
-            # ~12.4 K of spurious shift at lapse_rate=0.006, straight into GDD
-            # accumulation and the crop planting decision.
+            # lapse-rate downscaled FROM, so it must describe THIS case's land
+            # point. Cloning the case inherited the donor's file twice over
+            # (Bow, then MerBleue at 71.55 m) against a land point at
+            # -96.71/44.80 -- the #253 defect, recurring. Now derived.
             block = re.sub(
                 r"<file>[^<]*topo_forcing\.nc</file>",
-                f"<file>{DONOR_FORCING / 'topo_forcing.nc'}</file>",
+                f"<file>{topo_nc}</file>",
                 block,
             )
         return block
