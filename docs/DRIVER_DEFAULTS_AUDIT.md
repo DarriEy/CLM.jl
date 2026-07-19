@@ -188,9 +188,25 @@ stomatal conductance, transpiration and GPP under water stress.
 <use_luna phys="clm4_5"  use_fates=".false.">.false.</use_luna>
 ```
 
-CTSM `clm5_0` / non-FATES → **`.true.`**. CLM.jl defaults **`false`**.
-Consequence: no LUNA photosynthetic-N acclimation, so `vcmax25` is the static
-PFT value rather than the acclimated `vcmx25_z`.
+CTSM `clm5_0` / non-FATES → **`.true.`**; the default is CONDITIONAL on
+`use_fates` (CTSM `endrun`s on LUNA+FATES, `controlMod.F90:505`). CLM.jl
+defaulted **`false`** — CTSM's *code fallback* (`clm_varctl.F90:371`), not its
+namelist default: the same root cause as #252/#259.
+
+**FIXED in the LUNA campaign** — `use_luna` is now `Union{Bool,Nothing}` with
+`nothing` → `!use_fates`, matching `use_bedrock`. Full suite unchanged
+(26351/0/0/3 before and after; zero movers).
+
+**But the flip is currently INERT on the default path.** See
+`docs/LUNA_DEFAULT_CAMPAIGN.md`: CTSM applies the LUNA-acclimated
+`vcmx25_z`/`jmx25_z` in **both** photosynthesis routines —
+`Photosynthesis` (non-PHS) at `PhotosynthesisMod.F90:1721,1748` and
+`PhotosynthesisHydraulicStress` at `:3335,3377`. CLM.jl ported only the PHS
+pair (`photosynthesis.jl:2100,2132`). The default, non-PHS `photosynthesis!`
+accepts a `use_luna` kwarg and **never reads it**, so LUNA acclimates
+`vcmx25_z` (measured: 30.0 → 38.1/43.9 over 16 days at Bow) and the result is
+discarded. That is why the flip moved zero tests, and it is why closing M4
+does *not* by itself deliver CLM5 photosynthesis.
 
 ### M5 — `create_crop_landunit` (FIXED — was MISMATCH, live)
 
@@ -293,7 +309,7 @@ anyway: an inert wrong default is a landmine for the first consumer).
 | `use_aquifer_layer` | `true` | **`.false.`** (derived: `clm5_0`→method 1→lbc 2 = `bc_zero_flux`) | **MISMATCH** | selects CLM4.5 Zeng-Decker-2009 + aquifer solver instead of CLM5 moisture-form + zero-flux; CTSM `endrun`s on this combined with `use_bedrock=true` | 16 scripts (see M1) |
 | `baseflow_scalar` | `1.0e-2` | **`0.001`** (`lbc=2`); `1.d-2` only for `lbc=1` or `clm4_5` | **MISMATCH** | 10× drainage/baseflow rate | `parity_run_domain.jl` (per-domain) |
 | `use_hydrstress` | `false` | **`.true.`** (`clm5_0`, non-FATES, `configuration="clm"`) | **COND-MISMATCH** | PHS off → BTRAN path; different gs/transpiration/GPP under stress | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `probe_h2osfc_subdaily.jl` |
-| `use_luna` | `false` | **`.true.`** (`clm5_0`, non-FATES) | **COND-MISMATCH** | no photosynthetic-N acclimation; static `vcmax25` | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `fortran_parity_cn_coldstart.jl` |
+| `use_luna` | `nothing` → `!use_fates` | **`.true.`** (`clm5_0`, non-FATES) | **FIXED** (this campaign) | — but see the LUNA-consumption gap below: the flip is currently INERT on the default non-PHS path | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `fortran_parity_cn_coldstart.jl` (now redundant) |
 | `int_snow_max` | `2000.0` | `2000.` (`1.e30` for `clm4_5`) | **MATCH** | — | — |
 | `dtime` | `1800` | `1800` | **MATCH** | — | — |
 | `use_cn` | `false` | `.true.` for BGC compsets, `.false.` for SP | **MATCH** (compset-level, not a physics default) | — | — |
