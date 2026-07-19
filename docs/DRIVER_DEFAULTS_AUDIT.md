@@ -208,6 +208,34 @@ accepts a `use_luna` kwarg and **never reads it**, so LUNA acclimates
 discarded. That is why the flip moved zero tests, and it is why closing M4
 does *not* by itself deliver CLM5 photosynthesis.
 
+**The LUNA consumption guard (verified against CTSM source, 2026-07-19).** CTSM
+gates every LUNA read with *three* conditions, not two — the same expression at
+all four consumption sites:
+
+```fortran
+if(use_luna.and.c3flag(p).and.crop(patch%itype(p))== 0)
+```
+
+- `src/biogeophys/PhotosynthesisMod.F90:1721` — non-PHS, `lmr25` (leaf resp).
+- `src/biogeophys/PhotosynthesisMod.F90:1748` — non-PHS, `vcmax25`/`jmax25`/`tpu25`.
+- `src/biogeophys/PhotosynthesisMod.F90:3335` — PHS, `lmr25_sun`/`lmr25_sha`.
+- `src/biogeophys/PhotosynthesisMod.F90:3377` — PHS, `vcmax25_sun`/`_sha` etc.
+
+The two PHS sites guard **identically** to the two non-PHS sites (byte-identical
+condition text apart from whitespace). `crop` is the `pftcon` crop flag indexed
+by `patch%itype(p)` — a 0/1-valued per-PFT parameter, so `crop(ivt)==0` is
+"this PFT is not a crop". LUNA therefore never acclimates a crop patch: crops
+stay on the static `vcmax25top*nscaler` profile in CTSM.
+
+`crop(patch%itype(p))` also appears at `:3498`/`:3515`/`:3718`/`:3753`, but those
+are the separate `modifyphoto_and_lmr_forcrop` branches and are unrelated to LUNA.
+
+**Status:** #268 ported the non-PHS pair (`:1721`/`:1748`) CTSM-exact, crop guard
+included. The PHS pair was ported earlier gating on `use_luna && c3flag_p` only
+— the `crop(itype)==0` condition was **missing**, so crop patches under PHS
+received LUNA-acclimated `vcmax25`/`jmax25`/`lmr25`. Fixed in the PR that added
+this note.
+
 ### M5 — `create_crop_landunit` (FIXED — was MISMATCH, live)
 
 ```xml

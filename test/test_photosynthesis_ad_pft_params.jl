@@ -72,6 +72,7 @@ using CLM
             pftv(1.0), pftv(9.0),                             # c3psn, mbbopt
             fill(T(101325.0), np), fill(T(20900.0), np),      # forc_pbot, oair
             pftv(0.01), pftv(25.0), pftv(0.1), pftv(1.0),     # slatop/leafcn/flnr/fnitr
+            pftv(0.0),                                        # crop_pft (host Float64, like its siblings)
             fill(T(1.0), np),                                 # dayl_factor
             fill(T(290.0), np), fill(tveg_val, np),           # t10, t_veg
             fill(T(1.0), np, nlevcan),                        # tlai_z

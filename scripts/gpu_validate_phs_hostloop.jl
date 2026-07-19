@@ -78,7 +78,7 @@ function run_passes!(B, S; hostloop::Bool)
 
         CLM.psn_phs_pass2_update!(ps, S.kn, S.jmax_z_local, B.mask, i.ivt, i.c3psn_pft,
             i.mbbopt_pft, i.forc_pbot, i.oair, i.slatop_pft, i.leafcn_pft, i.flnr_pft,
-            i.fnitr_pft, i.dayl_factor, i.t10, i.t_veg, i.tlai_z, i.par_z_sun_in,
+            i.fnitr_pft, i.crop_pft, i.dayl_factor, i.t10, i.t_veg, i.tlai_z, i.par_z_sun_in,
             i.par_z_sha_in, i.vcmaxcint_sun, i.vcmaxcint_sha, i.nrad, false, false,
             0.015, B.nlevcan, ps.stomatalcond_mtd, ps.light_inhibit, ps.leafresp_method,
             overrides, bp; use_luna = false)

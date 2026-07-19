@@ -1980,7 +1980,7 @@ Base.@kwdef struct _Psn2Idx{VB,VI}
 end
 Base.@kwdef struct _Psn2Pft{Vp}
     c3psn_pft::Vp; mbbopt_pft::Vp; slatop_pft::Vp; leafcn_pft::Vp
-    flnr_pft::Vp; fnitr_pft::Vp; lmr_intercept_atkin::Vp
+    flnr_pft::Vp; fnitr_pft::Vp; lmr_intercept_atkin::Vp; crop_pft::Vp
 end
 Base.@kwdef struct _Psn2In{V,M}     # read-only forcing vectors (V) + matrices (M)
     forc_pbot::V; oair::V; dayl_factor::V; t10::V; t_veg::V
@@ -2013,7 +2013,7 @@ end
     mask_patch = idx.mask_patch; ivt = idx.ivt; nrad = idx.nrad
     c3psn_pft = pft.c3psn_pft; mbbopt_pft = pft.mbbopt_pft; slatop_pft = pft.slatop_pft
     leafcn_pft = pft.leafcn_pft; flnr_pft = pft.flnr_pft; fnitr_pft = pft.fnitr_pft
-    lmr_intercept_atkin = pft.lmr_intercept_atkin
+    lmr_intercept_atkin = pft.lmr_intercept_atkin; crop_pft = pft.crop_pft
     forc_pbot = inp.forc_pbot; oair = inp.oair; dayl_factor = inp.dayl_factor
     t10 = inp.t10; t_veg = inp.t_veg
     vcmaxcint_sun = inp.vcmaxcint_sun; vcmaxcint_sha = inp.vcmaxcint_sha
@@ -2040,6 +2040,11 @@ end
             ps.c3flag_patch[p] = false
         end
         c3flag_p = ps.c3flag_patch[p]
+        # LUNA acclimation applies to non-crop C3 patches only
+        # (PhotosynthesisMod.F90:3335/3377 `use_luna .and. c3flag .and. crop(ivt)==0`).
+        # `crop_pft` is 0/1 valued, so round(Int,·)==0 ⟺ <0.5 (see _psn_phs_pass4_body!).
+        # Short-circuits before indexing, so crop_pft may be empty when use_luna=false.
+        luna_p = use_luna && c3flag_p && !(crop_pft[ivt_p] > T(0.5))
 
         if c3flag_p
             ps.qe_patch[p] = zero(T)
@@ -2131,9 +2136,9 @@ end
             # CN, leaf maintenance respiration scales with the LUNA-acclimated vcmax25
             # (vcmx25_z) rather than the static lnc-based vcmax25top*nscaler. Matches
             # PhotosynthesisMod.F90:3335-3340 (use_luna .and. c3flag .and. crop==0 .and.
-            # .not.use_cn). Mirrors the existing LUNA vcmax25 branch below (crop check
-            # omitted, consistent with that branch).
-            if use_luna && c3flag_p && !use_cn
+            # .not.use_cn). With CN on, leaf N already predicts respiration (lmr25top
+            # above) and LUNA does not override.
+            if luna_p && !use_cn
                 lmr25_sun = T(leaf_mr_vcm) * vcmx25_z[p, iv]
                 lmr25_sha = T(leaf_mr_vcm) * vcmx25_z[p, iv]
             end
@@ -2165,11 +2170,11 @@ end
                     ps.alphapsnsha_patch[p] = one(T)
                 end
             else  # day time
-                if use_luna && c3flag_p
+                if luna_p
                     # LUNA-acclimated vcmax25/jmax25 (injected from restart), overriding
                     # the static lnc-based vcmax25top. Sun uses the layer value directly;
                     # sha is scaled by the canopy sun/sha integration ratio. Matches
-                    # PhotosynthesisMod.F90:3378 (use_luna .and. c3flag .and. crop==0).
+                    # PhotosynthesisMod.F90:3377-3391 (use_luna .and. c3flag .and. crop==0).
                     vcmax25_sun = vcmx25_z[p, iv]
                     jmax25_sun = jmx25_z[p, iv]
                     tpu25_sun = prm.tpu25ratio * vcmax25_sun
@@ -2240,7 +2245,7 @@ end
 
 function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
         mbbopt_pft, forc_pbot, oair, slatop_pft, leafcn_pft, flnr_pft, fnitr_pft,
-        dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
+        crop_pft, dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
         vcmaxcint_sha, nrad, use_cn::Bool, use_c13::Bool, leaf_mr_vcm, nlevcan::Int,
         stomatalcond_mtd::Int, light_inhibit::Bool, leafresp_method::Int,
         overrides, bounds_patch; use_luna::Bool=false)
@@ -2266,7 +2271,8 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
     lmr_intercept_atkin = _psn_pft_like(slatop_pft, params_inst.lmr_intercept_atkin)
     pft = _Psn2Pft(; c3psn_pft = c3psn_pft, mbbopt_pft = mbbopt_pft,
         slatop_pft = slatop_pft, leafcn_pft = leafcn_pft, flnr_pft = flnr_pft,
-        fnitr_pft = fnitr_pft, lmr_intercept_atkin = lmr_intercept_atkin)
+        fnitr_pft = fnitr_pft, lmr_intercept_atkin = lmr_intercept_atkin,
+        crop_pft = crop_pft)
     inp = _Psn2In(; forc_pbot = forc_pbot, oair = oair, dayl_factor = dayl_factor,
         t10 = t10, t_veg = t_veg, vcmaxcint_sun = vcmaxcint_sun,
         vcmaxcint_sha = vcmaxcint_sha, tlai_z = tlai_z,
@@ -5553,7 +5559,7 @@ function photosynthesis_hydrstress!(ps,
     # kernel-local scalar; overrides/leaf_mr_vcm/jmax25top_sf resolved on the host.
     psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
         mbbopt_pft, forc_pbot, oair, slatop_pft, leafcn_pft, flnr_pft, fnitr_pft,
-        dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
+        crop_pft, dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
         vcmaxcint_sha, nrad, use_cn, use_c13, leaf_mr_vcm, nlevcan,
         stomatalcond_mtd, light_inhibit, leafresp_method, overrides, bounds_patch;
         use_luna=use_luna)
