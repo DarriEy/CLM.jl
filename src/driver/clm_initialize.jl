@@ -48,7 +48,8 @@ state, and returns all data structures ready for `clm_drv!()`.
 - `use_crop::Bool`        — use crop model (default false)
 - `use_bedrock::Union{Bool,Nothing}` — use bedrock. `nothing` (default) reproduces CTSM's
   conditional namelist default: `false` under FATES, `true` otherwise (CLM5).
-- `use_aquifer_layer::Bool` — use aquifer lower boundary (default true)
+- `use_aquifer_layer::Bool` — use aquifer lower boundary. Default `false`, matching
+  CTSM's derivation for clm5_0 (lbc=bc_zero_flux). `true` selects ZD09+BC_AQUIFER.
 - `all_active::Bool`      — all points active (default false)
 - `lat::Float64`          — gridcell latitude  (default: read from surfdata)
 - `lon::Float64`          — gridcell longitude (default: read from surfdata)
@@ -86,7 +87,17 @@ function clm_initialize!(;
     # clamp_zwt_to_bedrock! drag zwt up to the bedrock depth, and qflx_drain ~ exp(-zwt/hkdepth)
     # then ignites drainage that bleeds the column (the FATES top-layer over-drying, #251).
     use_bedrock::Union{Bool,Nothing} = nothing,
-    use_aquifer_layer::Bool = true,
+    # CTSM DERIVES this from lower_boundary_condition rather than reading a
+    # namelist flag: for phys=clm5_0 the chain is soilwater_movement_method=1 ->
+    # lower_boundary_condition=2 (bc_zero_flux) -> use_aquifer_layer() = .false.
+    # (namelist_defaults_ctsm.xml:419-428; SoilWaterMovementMod.F90:221-236).
+    # The port defaulted `true`, which is CTSM's *code fallback* (bc_aquifer) --
+    # the value the namelist overrides -- and `true` together with use_bedrock
+    # is a combination CTSM itself endrun's on (SoilWaterMovementMod.F90:181).
+    # It selects the whole soil-water solver: ZD09+BC_AQUIFER vs the CLM5
+    # moisture-form solver + BC_ZERO_FLUX (see clm_driver.jl's swm_cfg switch).
+    # 71 of the 75 explicit call sites in scripts/+test/ already pass `false`.
+    use_aquifer_layer::Bool = false,
     all_active::Bool = false,
     lat::Real = NaN,
     lon::Real = NaN,
