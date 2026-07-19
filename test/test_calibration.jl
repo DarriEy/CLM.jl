@@ -61,6 +61,21 @@ include(joinpath(@__DIR__, "testdata.jl"))
         @test hydro[1].name == "baseflow_scalar"
         @test hydro[2].name == "fff"
 
+        # REGRESSION: asserting `.name` is a VACUOUS check — it passes whether or
+        # not the parameter can actually be applied. Both hydrology appliers threw
+        # FieldError on their FIRST call (they looped over `inst.column.baseflow_scalar`
+        # / `.fff`, fields ColumnData does not have), so neither parameter had ever
+        # worked, and this testset reported green the whole time. Invoke `apply!` and
+        # assert the override LANDS, so the dead code cannot come back behind another
+        # name-only assertion.
+        let inst = CLM.CLMInstances()
+            inst.overrides = CLM.CalibrationOverrides()
+            for (p, probe) in ((hydro[1], :baseflow_scalar), (hydro[2], :fff))
+                p.apply!(inst, 0.25)                       # must not throw
+                @test getfield(inst.overrides, probe) == 0.25
+            end
+        end
+
         canopy = CLM.default_canopy_params()
         @test length(canopy) == 2
 

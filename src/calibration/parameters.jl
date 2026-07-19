@@ -14,18 +14,22 @@
 # --- Apply functions using CalibrationOverrides ---
 
 function _apply_baseflow_scalar!(inst, val)
+    # The override IS the live mechanism: clm_run! reads
+    # `overrides.baseflow_scalar` into `init_soil_hydrology_config`, which sets
+    # the `BASEFLOW_SCALAR[]` Ref that soil_hydrology.jl:3002 actually uses.
+    # There was also a loop over `inst.column.baseflow_scalar` here -- a field
+    # ColumnData does not have -- so this function threw FieldError on its FIRST
+    # call and the parameter had never once been applied. It survived because
+    # test_calibration.jl asserted only `.name` and never invoked `apply!`.
     inst.overrides.baseflow_scalar = val
-    for c in eachindex(inst.column.baseflow_scalar)
-        inst.column.baseflow_scalar[c] = val
-    end
     return nothing
 end
 
 function _apply_fff!(inst, val)
+    # Same defect and same fix as _apply_baseflow_scalar!: the override is live
+    # (clm_run! copies it into `sat_excess_runoff_params.fff`), while the loop
+    # over the non-existent `inst.column.fff` made every call throw.
     inst.overrides.fff = val
-    for c in eachindex(inst.column.fff)
-        inst.column.fff[c] = val
-    end
     return nothing
 end
 
