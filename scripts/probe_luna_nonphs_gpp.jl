@@ -36,9 +36,12 @@ function make_probe(rows, tag)
         for p in eachindex(inst.patch.itype)
             inst.patch.itype[p] == 0 && continue
             inst.patch.wtgcell[p] > 0.0 || continue
-            size(ps.vcmx25_z_patch, 1) >= p || continue
+            # vcmx25_z is EMPTY on the LUNA-off run (it is only allocated under
+            # use_luna) — record NaN rather than dropping the sample, or the two
+            # runs share no keys and the comparison silently comes out empty.
             push!(rows, (tag = tag, date = d, p = p, itype = Int(inst.patch.itype[p]),
-                vcmx25 = Float64(ps.vcmx25_z_patch[p, 1]),
+                vcmx25 = size(ps.vcmx25_z_patch, 1) >= p ?
+                         Float64(ps.vcmx25_z_patch[p, 1]) : NaN,
                 vcmax_z = Float64(ps.vcmax_z_patch[p, 1]),
                 psnsun = Float64(ps.psnsun_patch[p]),
                 psnsha = Float64(ps.psnsha_patch[p]),
@@ -75,23 +78,29 @@ end
 off = Dict((r.date, r.p) => r for r in rows if r.tag == "lunaoff")
 on  = Dict((r.date, r.p) => r for r in rows if r.tag == "lunaon")
 
-println("date        p itype  vcmx25_off  vcmx25_on   fpsn_off    fpsn_on     dfpsn%")
-ndiff = 0; maxrel = 0.0
-for k in sort(collect(keys(on)))
-    haskey(off, k) || continue
-    a = off[k]; b = on[k]
-    rel = a.fpsn == 0 ? 0.0 : 100 * (b.fpsn - a.fpsn) / abs(a.fpsn)
-    b.fpsn != a.fpsn && (ndiff += 1)
-    maxrel = max(maxrel, abs(rel))
-    @printf("%s %2d %5d  %10.4f %10.4f %11.5f %11.5f %8.3f\n",
-        Dates.format(k[1], "yyyy-mm-dd"), k[2], b.itype,
-        a.vcmx25, b.vcmx25, a.fpsn, b.fpsn, rel)
+function summarize(off, on)
+    println("date        p itype   vcmx25_on  vcmax_z_off  vcmax_z_on    fpsn_off     fpsn_on   dfpsn%")
+    ndiff = 0; maxrel = 0.0
+    for k in sort(collect(keys(on)))
+        haskey(off, k) || continue
+        a = off[k]; b = on[k]
+        rel = a.fpsn == 0 ? 0.0 : 100 * (b.fpsn - a.fpsn) / abs(a.fpsn)
+        b.fpsn != a.fpsn && (ndiff += 1)
+        maxrel = max(maxrel, abs(rel))
+        @printf("%s %2d %5d  %10.4f %12.5f %12.5f %11.6f %11.6f %8.3f\n",
+            Dates.format(k[1], "yyyy-mm-dd"), k[2], b.itype,
+            b.vcmx25, a.vcmax_z, b.vcmax_z, a.fpsn, b.fpsn, rel)
+    end
+    # LUNA-off never allocates vcmx25_z, so "acclimated" means the LUNA run's own
+    # vcmx25_z has moved off its 30.0 cold-start value.
+    nacc = count(k -> isfinite(on[k].vcmx25) && on[k].vcmx25 != 30.0, keys(on))
+    @printf("\nsamples where LUNA ACCLIMATED (vcmx25 != 30.0 cold start): %d / %d\n",
+            nacc, length(on))
+    @printf("samples where that reached GPP  (fpsn differs): %d   max |dfpsn| = %.4f%%\n",
+            ndiff, maxrel)
+    return (ndiff, nacc)
 end
-
-nacc = count(k -> haskey(off, k) && on[k].vcmx25 != off[k].vcmx25, keys(on))
-@printf("\nsamples where LUNA ACCLIMATED (vcmx25 differs): %d\n", nacc)
-@printf("samples where that reached GPP  (fpsn differs): %d   max |dfpsn| = %.4f%%\n",
-        ndiff, maxrel)
+ndiff, nacc = summarize(off, on)
 println(ndiff == 0 && nacc > 0 ?
     "\nVACUOUS: LUNA acclimates but the branch is missing — GPP is bit-identical." :
     "\nLIVE: the LUNA branch reaches GPP.")
