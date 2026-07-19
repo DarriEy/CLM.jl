@@ -70,17 +70,23 @@ Base.@kwdef mutable struct VarCtl
     convert_ocean_to_land::Bool = false
     collapse_urban::Bool = false
     run_zero_weight_urban::Bool = false
-    n_dom_landunits::Int = -1
-    n_dom_pfts::Int = -1
+    # CTSM namelist defaults:2387,2390 (structure="standard"); the Fortran code
+    # fallback is -1, which is what the port originally copied. Guards are `> 0`,
+    # so 0 and -1 are behaviourally identical — closed as INERT (see
+    # docs/DRIVER_DEFAULTS_AUDIT.md, campaign #2).
+    n_dom_landunits::Int = 0
+    n_dom_pfts::Int = 0
     use_subgrid_fluxes::Bool = true
 
     # --- Landunit size thresholds ---
-    toosmall_soil::Float64 = -1.0
-    toosmall_crop::Float64 = -1.0
-    toosmall_glacier::Float64 = -1.0
-    toosmall_lake::Float64 = -1.0
-    toosmall_wetland::Float64 = -1.0
-    toosmall_urban::Float64 = -1.0
+    # CTSM namelist defaults:2393-2398 = 0.d00 (code fallback -1). Guards are
+    # `> 0.0` / `toosmall_any > 0.0`, so 0.0 and -1.0 are indistinguishable.
+    toosmall_soil::Float64 = 0.0
+    toosmall_crop::Float64 = 0.0
+    toosmall_glacier::Float64 = 0.0
+    toosmall_lake::Float64 = 0.0
+    toosmall_wetland::Float64 = 0.0
+    toosmall_urban::Float64 = 0.0
 
     # --- Hillslope control ---
     nhillslope::Int = 0
