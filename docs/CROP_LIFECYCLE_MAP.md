@@ -46,9 +46,10 @@ validated *in isolation* rather than only end-to-end.
 present. **Vernalization is NOT exercised by this reference** — it can be wired but
 NOT validated here. Recorded as a gap, not papered over.
 
-`SOYFIXN = 0` in *both* windows (CTSM's `CNSoyfix` needs a later phase than either
-samples), so **`n_soyfix!` remains unvalidatable** — the same standard #253 applied
-to `n_fert!`.
+`SOYFIXN = 0` in *both* windows, so **`n_soyfix!` remains unvalidatable** — the same
+standard #253 applied to `n_fert!`. (The parenthetical this line used to carry —
+"CNSoyfix needs a later phase than either samples" — was **wrong**; `CNSoyfix` is
+not phase-gated at all. See §3c-§3g for the real causes.)
 
 ### Three formulas the reference pins EXACTLY (checked, not assumed)
 
@@ -223,8 +224,11 @@ corn-family branch.
 
 ### Remaining work, in order
 
-1. A third reference window (or phase-targeted bracket) that reaches the growth phase
-   `CNSoyfix` requires → then wire and validate `n_soyfix!`.
+1. ~~A third reference window (or phase-targeted bracket) that reaches the growth phase
+   `CNSoyfix` requires~~ → **RESOLVED AS WRONG, see §3c-§3g.** `CNSoyfix` is not
+   phase-gated; three cold Fortran runs proved the blocker is `use_fun=.true.`
+   (routine never called) and then `fpg ≡ 1` (site is N-replete). What is needed
+   is an **N-limited soybean column**, or a CTSM-side unit harness — not a window.
 2. A winter-wheat CFT reference → validate `vernalization!`.
 3. An end-to-end `scripts/fortran_parity_crop.jl` single-step diff on the
    `fortran_parity_common.jl` pattern, which would also close the planting-date gap
@@ -493,6 +497,75 @@ restart carries `fpg` = NaN and `plant_ndemand` = 0, which the non-FUN
 nutrient-competition path is not written to absorb. The warm-restart shortcut is
 therefore not available: a non-FUN reference must be **cold-started**. (Cheap in
 practice — 5 model years is ~2.5 min at this single point.)
+
+## 3g. `use_fertilizer = .false.` tried — still `fpg >= 1`. VERDICT: site cannot work
+
+The obvious lever was pulled and **it is not enough**. A third cold spin-up
+(`crop_ref_nofun_nofert`: `use_fun=.false.`, `use_fertilizer=.false.`) gives, at
+every step of the window:
+
+| | fert ON | fert OFF |
+|---|---|---|
+| `SMINN` (crop cols) | 19.765 / 19.241 | 16.164 / 15.804 |
+| `PLANT_NDEMAND` (soy) | 1.4690e-7 | 1.4474e-7 |
+| **`FPG`** | 1.000000 | **1.000001** |
+| `SOYFIXN` | 0.0 | **0.0** |
+
+Removing the entire fertilizer subsidy moved the mineral-N pool by only ~18%
+(19.8 → 16.2 gN/m²) and left `fpg` at 1. The reason is a **three-orders-of-
+magnitude margin**: demand is 1.45e-7 gN/m²/s ≈ 0.0125 gN/m²/day against a
+16 gN/m² pool — roughly 1300 days of supply standing in the soil. No dump
+window, and no fertilizer setting, makes this column N-limited.
+
+**Verdict: `SOYFIXN` is un-generatable at `crop_cft_USplains` as configured.**
+`n_soyfix!` therefore **remains unwired**, on the same standard #218/#253/#266
+applied. The port code (`src/biogeochem/n_dynamics.jl:453`) is a complete and
+faithful line-by-line translation and is *ready*; what is missing is ground
+truth, and the missing ingredient is now named precisely.
+
+### What a usable reference actually requires
+
+Not a window. An **N-limited soybean column** — `fpg < 1` at a step where
+`croplive` and `0.15 < hui/gddmaturity < 0.75` also hold. Candidate levers, in
+rough order of expected effect:
+
+1. **Cut atmospheric N deposition** (`ndep` stream → near zero). This is the
+   dominant N input sustaining the pool; fertilizer is not.
+2. **A much longer N-depleting spin-up** without the ndep subsidy, so
+   mineralization alone sets `sminn`.
+3. **A genuinely N-poor site/soil**, rather than a fertilized US-Plains
+   cropland chosen for its crop CFT coverage.
+4. Failing all of the above, a **CTSM-side unit harness**: a SourceMod that
+   calls `CNSoyfix` on injected `fpg`/`plant_ndemand`/`sminn`/`wf` values and
+   dumps the result. This produces genuine *Fortran* ground truth for the
+   algebra — which is what the port needs — without requiring the coupled model
+   to reach an N-limited state at all. Given how large the N margin is, **this
+   is likely the cheapest real path**, and it validates each of `fxw`/`fxn`/`fxg`
+   branch-by-branch rather than at one operating point.
+
+Note that (4) is not "manufacturing a reference": the numbers would still come
+out of the Fortran routine. What would be illegitimate is asserting the port
+against numbers computed by the port.
+
+### Unrelated defect noticed while verifying the generated cases
+
+`datm.streams.xml` in `crop_ref_usplains` (and therefore in all three cases
+derived from it here) points its **topo stream at the MerBleue donor site**:
+
+    .../domain_Peatland_MerBleue_Canada/data/forcing/CLM_input/topo_forcing.nc
+    TOPO = 71.55 m, LONGXY = -75.550, LATIXY = 45.412
+
+while the crop point is **LONGXY = -96.71, LATIXY = 44.80** (US Great Plains).
+This is the #253 defect class recurring — a donor-site stream left in place. It
+feeds the datm lapse-rate correction, hence air temperature, hence GDD and the
+planting decision. It does **not** affect any conclusion above (the `SOYFIXN`
+result is structural, and a few K cannot move `fpg` from 1.0 to below 1 against
+a 1300-day N margin), and it does not affect the already-validated `FERT`
+numbers (a formula over parameters, not climate). But the reference's
+**planting dates are computed on the wrong site's elevation**, which is worth
+knowing given `idop` is already flagged as unvalidated in §3b. Flagged, not
+fixed — fixing it invalidates the existing validated reference and is a
+separate decision.
 
 ## 4. Standing rules for this work
 

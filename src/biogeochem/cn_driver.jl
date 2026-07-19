@@ -421,10 +421,25 @@ function cn_driver_no_leaching!(
     # against the Fortran May-window reference to round-off on all 8 crop patches
     # (test/test_crop_lifecycle.jl; docs/CROP_LIFECYCLE_MAP.md).
     #
-    # CNSoyfix remains UNWIRED, deliberately and for the original reason: SOYFIXN is
-    # identically 0 in BOTH reference windows, so there is still no non-zero ground
-    # truth to validate it against. Wiring it would be exactly the blind wiring this
-    # comment used to describe. See docs/N_CYCLE_PARITY.md.
+    # CNSoyfix (n_soyfix!) remains UNWIRED, deliberately. The reason is now known
+    # precisely, and it is NOT the one previously recorded here.
+    #
+    # CNSoyfix is *not* phase-gated (it never reads cphase). Its gates are
+    # croplive, itype in {23,24,77,78}, and — the load-bearing one — fpg < 1.
+    # Three Fortran runs were generated to chase a non-zero SOYFIXN:
+    #   1. Existing refs: lnd_in has use_fun=.true., and CNDriverMod calls
+    #      CNSoyfix only under `if (.not. use_fun)` — so it was NEVER CALLED.
+    #      SOYFIXN=0 there is an untouched field, not a computed zero.
+    #   2. Cold non-FUN spin-up: routine now runs, but fpg == 1.000000 on every
+    #      crop column -> no N deficit -> a CORRECT zero.
+    #   3. Cold non-FUN + use_fertilizer=.false.: fpg == 1.000001. Still zero.
+    #      Demand 1.45e-7 gN/m2/s vs a 16 gN/m2 pool is ~1300 days of supply.
+    # So the reference site is N-replete and cannot exercise this routine at all.
+    # What is missing is an N-LIMITED soybean column (or a CTSM-side unit harness),
+    # NOT a different dump window. Wiring against any of the above would scatter
+    # zeros and pass an "is it wired?" test while moving nothing — the blind wiring
+    # #218/#253/#266 each refused. n_dynamics.jl:453 is ported and ready.
+    # Full evidence: docs/CROP_LIFECYCLE_MAP.md §3c-§3g.
     if config.use_crop && soilbgc_nf !== nothing && patch !== nothing &&
        num_bgc_vegp > 0 && !isempty(cnveg_nf.fert_patch)
         n_fert!(soilbgc_nf, cnveg_nf;
