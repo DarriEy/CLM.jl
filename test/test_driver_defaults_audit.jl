@@ -166,19 +166,24 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         @test v.co2_ppmv == 355.0                # CTSM defaults:25   → 379.0 at sim_year=2000
         @test v.glc_snow_persistence_max_days == 7300  # CTSM defaults:540 → 0; 7300 is the clm4_5 variant
 
-        # INERT today (0 reads, or guarded so the value cannot matter):
-        @test v.nsegspc == 20                    # CTSM defaults:2404 → 35
-        @test v.nyr_forcing == 10                # CTSM defaults:688  → 1
-        @test v.h2osno_max == -999.0             # CTSM defaults:465  → 10000.0 (physics uses varcon.H2OSNO_MAX, which is correct)
-        @test v.n_dom_landunits == -1            # CTSM defaults:2387 → 0 (guards are `> 0`, so -1 ≡ 0)
-        @test v.n_dom_pfts == -1                 # CTSM defaults:2390 → 0
-        @test v.toosmall_soil == -1.0            # CTSM defaults:2393 → 0
-        @test v.toosmall_crop == -1.0            # CTSM defaults:2394 → 0
-        @test v.toosmall_glacier == -1.0         # CTSM defaults:2395 → 0
-        @test v.toosmall_lake == -1.0            # CTSM defaults:2396 → 0
-        @test v.toosmall_wetland == -1.0         # CTSM defaults:2397 → 0
-        @test v.toosmall_urban == -1.0           # CTSM defaults:2398 → 0
-        @test v.downscale_hillslope_meteorology == false  # CTSM defaults:665 → .true. (inert: hillslope off)
+        # INERT tranche — CLOSED to the CTSM values (defaults campaign #2).
+        # Inertness was PROVEN, not asserted: with these twelve flipped, the full
+        # suite moved by exactly the twelve pin assertions below and nothing else
+        # (26150→26140 passed with 12 failing pins, +2 from a new calibration
+        # test). Zero physics assertions moved. These now pin the CORRECT value.
+        @test v.nsegspc == 35                    # CTSM defaults:2404 (code fallback 20)
+        @test v.nyr_forcing == 1                 # CTSM defaults:688  (code fallback 10)
+        @test v.h2osno_max == 10000.0            # CTSM defaults:465; controlMod.F90:557 HARD-ERRORS on <=0, so -999.0 was a value CTSM refuses to start on. This varctl copy is a dead duplicate — physics reads varcon.H2OSNO_MAX.
+        @test v.n_dom_landunits == 0             # CTSM defaults:2387 (guards are `> 0`, so -1 ≡ 0)
+        @test v.n_dom_pfts == 0                  # CTSM defaults:2390
+        @test v.toosmall_soil == 0.0             # CTSM defaults:2393
+        @test v.toosmall_crop == 0.0             # CTSM defaults:2394
+        @test v.toosmall_glacier == 0.0          # CTSM defaults:2395
+        @test v.toosmall_lake == 0.0             # CTSM defaults:2396
+        @test v.toosmall_wetland == 0.0          # CTSM defaults:2397
+        @test v.toosmall_urban == 0.0            # CTSM defaults:2398
+        @test v.downscale_hillslope_meteorology == true   # CTSM defaults:665 (inert: hillslope off)
+        @test v.z0param_method == "ZengWang2007" # CTSM clm5_0; cosmetic — friction_velocity.jl:322 branches only on "Meier2022"
     end
 
     @testset "varctl — the use_flexibleCN cascade is OFF (open finding M6)" begin
