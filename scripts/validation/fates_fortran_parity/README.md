@@ -622,3 +622,45 @@ and this site has no lake column), so the 20-day comparison is unaffected — bu
 future harness that reads the global instead of the config would silently run a
 different model. Same class as #252/#259: a struct default that is CTSM's *code
 fallback* rather than its *namelist* value.
+
+---
+
+# D3 (2026-07-19): the 20-day comparison RE-RUN on the corrected footing
+
+#247 measured the 20-day divergence with the harness running `use_bedrock=true`
+against a reference that runs `.false.` — the mismatch #251/#252 then found and fixed.
+This section re-measures the same 480-step window with the harness now matched
+(flag-audited above, no active mismatch), against the **same** surviving Fortran
+reference dump (`<run dir>/fates_pdump_fortran.txt`, `stop_n = 480`).
+
+```bash
+FATES_PARITY_STEPS=480 julia +1.12 --project=. scripts/fates_fortran_parity.jl \
+    compare <run dir>/fates_pdump_fortran.txt
+```
+
+## Result: the over-drying is GONE and the growth stall went with it
+
+Site state at phase 18 (`updatesite`, end of each daily step), one row per day:
+
+| day | C julia | C fortran | relC | dbh julia | dbh fortran | relDBH | h2ovol1 J/F | ncoh J/F |
+|---|---|---|---|---|---|---|---|---|
+| 1  | 2548.10 | 2547.88 | +8.3e-05 | 1.8848 | 1.8848 | 0.0 | 0.3995 / 0.3979 | 14/14 |
+| 5  | 2605.83 | 2600.47 | +2.1e-03 | 1.8867 | 1.8865 | +9.5e-05 | 0.3530 / 0.3538 | 44/45 |
+| 10 | 2691.97 | 2683.57 | +3.1e-03 | 1.8893 | 1.8891 | +1.4e-04 | 0.3610 / 0.3612 | 50/50 |
+| 11 | 2558.50 | 2703.25 | **−5.4e-02** | 1.8899 | 1.8897 | +1.4e-04 | 0.3476 / 0.3475 | **43/50** |
+| 15 | 2576.87 | 2782.33 | −7.4e-02 | 2.0507 | 2.0474 | +1.6e-03 | 0.3615 / 0.3576 | 45/53 |
+| 20 | 2602.02 | 2888.45 | −9.9e-02 | 2.4888 | 2.5199 | **−1.2e-02** | 0.3314 / 0.3198 | 45/57 |
+
+Against #247's numbers (which stopped at day 19):
+
+| quantity | #247 (bedrock mismatch) | D3 (corrected) | verdict |
+|---|---|---|---|
+| `h2ovol1`, days 1–20 | J **0.11–0.14** vs F 0.32–0.34 (3× dry) | J 0.324–0.400 vs F 0.320–0.422, tracking to **~0.003–0.01** | **CLOSED** |
+| `maxdbh` day 19 | 1.9754 vs 2.5199 → **−22 %** | 2.3870 vs 2.4127 → **−1.1 %** | **CLOSED (20× better)** — the port now *enters* the day-13 vigorous-growth phase (1.89 → 2.49) instead of stalling |
+| `btran_ft` days 11–13 | J collapses to 0.0, F stays 1.0 | no collapse | **CLOSED** |
+| site carbon day 19 | −5.5 % | **−9.4 %** | **SURVIVES, and is a different mechanism** |
+
+So D2's fix is confirmed end-to-end: the host over-drying, the `btran_ft` collapse and
+the stature-growth stall were all one `use_bedrock` artefact, and with it gone the port
+tracks Fortran's dbh trajectory to ~1 %. The carbon gap, however, did **not** close —
+it got *worse*, which is the tell that it was never the same bug.
