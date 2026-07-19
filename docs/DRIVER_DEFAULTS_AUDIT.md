@@ -200,9 +200,35 @@ PFT value rather than the acclimated `vcmx25_z`.
 ```
 
 CTSM keys this on **`use_fates`**, not on `use_crop`: for any non-FATES run it is
-`.true.`. `clm_initialize.jl:127` sets `varctl.create_crop_landunit = use_crop`,
+`.true.`. `clm_initialize.jl:138` sets `varctl.create_crop_landunit = use_crop`,
 so a non-FATES, non-crop run gets `.false.` where CTSM gives `.true.`. Live
 (4 reads in `src/`) — it affects subgrid landunit construction.
+
+**Verified against CTSM source (2026-07-19).** The default is not merely a
+namelist preference — for a non-FATES run CTSM makes `.false.` a *fatal build
+error*:
+
+- `bld/namelist_files/namelist_defaults_ctsm.xml:2377-2378` — keyed on
+  `use_fates` alone; `use_crop` is not a selector.
+- `bld/CLMBuildNamelist.pm:2248-2250` —
+  `"$var is false which is ONLY allowed when FATES is being used"` (fatal).
+  So no non-FATES CTSM run can ever have `create_crop_landunit=.false.`
+- `src/main/controlMod.F90:460-461` — the runtime check is only the
+  *converse* (`use_crop .and. .not. create_crop_landunit` → `endrun`); it does
+  **not** permit the non-crop case to turn the landunit off.
+- `src/main/clm_varpar.F90:209` — the `cft_size` branch keys on
+  `create_crop_landunit`, and its else-branch is commented
+  `"only true when FATES is active"`.
+
+The port's mirror of that branch is `src/constants/varpar.jl:178`, which keys on
+`varctl.use_crop`. Consequence for the **default** (non-crop, non-FATES) run:
+CTSM takes the `create_crop_landunit=.true.` branch (`cft_size = surf_numcft`,
+crop landunit built), CLM.jl takes the else-branch (`cft_size = 0`, crop area
+folded into natural veg). Two different subgrid structures from one surfdata.
+
+Note the downstream consumers (`init_gridcells.jl:144`,
+`surfdata.jl:442,734`) already gate on `create_crop_landunit` correctly — only
+the *derivation* and the `varpar_init!` branch are wrong.
 
 ---
 
