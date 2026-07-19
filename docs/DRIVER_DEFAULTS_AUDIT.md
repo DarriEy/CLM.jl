@@ -291,6 +291,149 @@ validation campaign against a Fortran reference (see "Not fixed here" below).
 
 ---
 
+## Follow-up campaign #2 — closing the INERT half (this PR)
+
+#256 deliberately changed nothing and pinned all 27 mismatches at their current
+(wrong) values. Those pins were never meant to calcify into "expected". This
+section records the first tranche closed: **the 12 INERT `varctl` mismatches**.
+
+### Re-verification of the INERT classification
+
+Every one was re-checked independently of the #256 sweep, by grepping *each*
+read of the field and confirming the value cannot reach a branch under the
+default configuration. `varctl reads` counts `varctl.<field>` in `src/`
+(excluding the declaration and the `control.jl` echo-print).
+
+| Field | −> CTSM | `varctl.` reads | Why the flip cannot move anything |
+|---|---|---|---|
+| `nsegspc` | 20 → **35** | 0 | Only consumer is `decomp_init.jl`, which takes its own `nsegspc::Integer = 20` kwarg; nothing wires `varctl` to it. |
+| `nyr_forcing` | 10 → **1** | 0 | No read anywhere in `src/`. |
+| `h2osno_max` | −999.0 → **10000.0** | 0 | Snow capping uses `varcon.H2OSNO_MAX` (already 10000.0). The `varctl` copy is a dead duplicate. |
+| `n_dom_landunits` | −1 → **0** | 2 | Both guards are `> 0` (`surfdata.jl:324`, `control.jl:126`); −1 and 0 are indistinguishable. |
+| `n_dom_pfts` | −1 → **0** | 0 | Guard `> 0` at `control.jl:126` only. |
+| `toosmall_soil/_crop/_glacier/_lake/_wetland/_urban` | −1.0 → **0.0** (×6) | 2 each | `surfdata.jl:311` guards with `any(x -> x > 0.0, …)`; `surfrd_utils.jl:135` guards with `toosmall_any > 0.0`. Both reject −1.0 and 0.0 alike. |
+| `downscale_hillslope_meteorology` | false → **true** | 0 | No read. The physics consumers (`topo.jl`, `surface_albedo.jl`) take their own kwarg and are additionally gated on `col.is_hillslope_column`, and `use_hillslope` defaults false. |
+
+All twelve CTSM values were re-read from
+`namelist_defaults_ctsm.xml` under `phys="clm5_0"`, `structure="standard"`:
+lines 2404, 688, 465, 2387, 2390, 2393–2398, 665 respectively.
+
+**Byte-identity is the proof of inertness.** The full suite was run to
+completion on unmodified `main` and again after the twelve flips, Julia 1.12,
+`--check-bounds=yes`. See "Verification" below. A flip that moved the suite
+would have been evidence the flag was *not* inert, and would have been reverted
+rather than accommodated.
+
+### Also corrected: `surfrd_utils.jl` kwarg defaults
+
+`collapse_individual_lunits!` declared `toosmall_* = -1.0` while
+`dyn_subgrid_control.jl` already declared the same six at `0.0`. Aligned on
+`0.0` (CTSM). Inert for the same reason as above — the `toosmall_any > 0.0`
+early-return rejects both.
+
+### NOT closed, and why — the internal defaults that are *not* provably inert
+
+Three internal function-level defaults disagree with CTSM but are **reachable**,
+so they are recorded rather than flipped:
+
+- `decomp_init.jl:39,74` — `nsegspc::Integer = 20` (CTSM 35). Live whenever
+  `numg/nclumps` falls between 20 and 35: it flips `seglen1` and therefore
+  selects segment-based instead of round-robin gridcell decomposition. The real
+  defect is that **nothing wires `varctl.nsegspc` into `decompInit!` at all**;
+  fixing the wiring is the correct change, not moving a second literal.
+- `topo.jl:49,112,189` and `surface_albedo.jl:1297` —
+  `downscale_hillslope_meteorology::Bool = false` (CTSM `.true.`). Gated on
+  `col.is_hillslope_column`, so unreachable while `use_hillslope=false`, but a
+  caller that enables hillslopes reaches it. Belongs with the hillslope campaign.
+
+## M2 revisited — `baseflow_scalar`: the contradiction is real, and worse than a 10×
+
+#256 recorded that CLM.jl holds two values for one constant: `1.0e-2` on the
+driver path and `0.001` (the CTSM value) in `src/calibration/parameters.jl:72`.
+Chasing which one is live produced a **separate, larger finding**.
+
+**Which is live: only `1.0e-2`.** The chain is
+`clm_run.jl:96 (baseflow_scalar = 1.0e-2)` →
+`init_soil_hydrology_config` → `BASEFLOW_SCALAR[]` (`soil_hydrology.jl:44,87`) →
+`qflx_latflow_out` (`soil_hydrology.jl:2750, 3002`). `soil_hydrology.jl:66,77`
+agree at `1.0e-2`. That is the CTSM value for `lower_boundary_condition=1`, or
+for `clm4_5` — **not** for `clm5_0`, where `lbc=2` gives `0.001`
+(`namelist_defaults_ctsm.xml:195-197`, re-read and confirmed).
+
+**The calibration `0.001` is unreachable — its applier crashes.**
+`_apply_baseflow_scalar!` (`parameters.jl:16-22`) does:
+
+```julia
+inst.overrides.baseflow_scalar = val          # correct: clm_run.jl:145 consumes this
+for c in eachindex(inst.column.baseflow_scalar)   # ColumnData HAS NO SUCH FIELD
+    inst.column.baseflow_scalar[c] = val
+end
+```
+
+Verified live on Julia 1.12:
+
+```
+ColumnData.baseflow_scalar? false
+ColumnData.fff?             false
+param baseflow_scalar default=0.001 -> APPLIER THREW: FieldError: type CLM.ColumnData has no field `baseflow_scalar`
+param fff             default=0.5   -> APPLIER THREW: FieldError: type CLM.ColumnData has no field `fff`
+```
+
+So **both** hydrology calibration parameters are dead: calibrating
+`baseflow_scalar` or `fff` throws on the first `apply!`. The `inst.overrides.…`
+assignment on the line above is the real, working injection point (consumed at
+`clm_run.jl:145-146` and `:150-151`); the array loop is unreachable-by-design
+code that could never have run.
+
+**Why nobody noticed** — `test/test_calibration.jl:59-62` asserts only
+`hydro[1].name == "baseflow_scalar"`. It never calls `apply!`. A textbook
+instance of the vacuous-check class: the test proves the parameter is *listed*,
+not that it *works*.
+
+**What is fixed here** — the bogus array loops are deleted (they can only
+throw), and `test_calibration.jl` now actually invokes `apply!` and asserts the
+override lands. This is byte-identical for every non-calibration caller.
+
+**What is deliberately NOT fixed here** — the value. Repairing the applier means
+`0.001` can now reach physics through the calibration path while the driver path
+still starts at `1.0e-2`, i.e. the 10× disagreement becomes genuinely live
+rather than merely written down. Resolving it is a **physics change to the
+drainage/baseflow rate** and needs the dedicated `baseflow_scalar` campaign with
+Fortran parity evidence — exactly the treatment `use_hydrstress` and `use_luna`
+are getting. Flipping it inside a sweep labelled "inert" would be the very bug
+this audit exists to catch.
+
+## M6 revisited — classifying the 8 `use_cn` cascade flags
+
+Asked whether any of the cascade is inert under the default `use_cn=false` and
+therefore closeable now. Result: **none should be closed now, but for two
+different reasons.**
+
+| Flag | `varctl.` reads | Status |
+|---|---|---|
+| `use_flexibleCN` | 0 | **Unwired.** `fun.jl` takes its own `use_flexiblecn` argument; `soil_water_movement.jl:1746` takes its own kwarg defaulting `false`. Neither reads `varctl`. |
+| `MM_Nuptake_opt` | 0 | **Unwired** — zero occurrences in `src/` outside the declaration. |
+| `lnc_opt` | 0 | **Unwired** — zero occurrences. |
+| `vcmax_opt` | 0 | **Unwired** — appears only in two `history_writer.jl` comments. |
+| `CN_evergreen_phenology_opt` | 1 | **Unwired, and a known divergence.** The single "read" is inside a comment block (`phenology.jl:1028-1042`); the code sets `tranr = 0.0002` *unconditionally*, where Fortran applies it only when the flag is 1. Documented in-source as deliberate: the 16-biome scorecard was validated against the always-on behaviour. |
+| `CNratio_floating` | 3 | **Live under `use_cn=true`** — `phenology.jl:952,958,962`, inside `cn_phenology!`. Inert under the default `use_cn=false`. |
+| `carbon_resp_opt` | 0 | **Live under `use_cn=true`**, but through `CNDriverConfig.carbon_resp_opt` (`cn_driver.jl:44`, branch at `cn_veg_carbon_flux.jl:1376`), not through `varctl`. |
+| `use_nguardrail` | 0 | **Live under `use_cn=true`**, likewise through `CNDriverConfig` (`cn_driver.jl:48` → `cn_precision_control.jl:82,92`). |
+
+**Verdict.** Four flags (`use_flexibleCN`, `MM_Nuptake_opt`, `lnc_opt`,
+`vcmax_opt`) plus `CN_evergreen_phenology_opt` have zero live reads and are
+technically inert *even under `use_cn=true`* — flipping them would pass a
+byte-identity suite. They are **still not closed here**, deliberately: setting
+`varctl.use_flexibleCN = true` while every consumer independently defaults
+`false` would make the control state *assert* that the port runs flexible-CN
+when it demonstrably does not. That is a worse landmine than the current honest
+`false`, not a smaller one. The correct fix for all five is **wiring plus
+validation**, which is the CN campaign.
+
+The remaining three (`CNratio_floating`, `carbon_resp_opt`, `use_nguardrail`)
+are live the moment `use_cn=true`, which is how all BGC work runs. They need the
+CN campaign outright.
+
 ## Scorecard
 
 | Category | Count |
