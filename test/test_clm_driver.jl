@@ -220,7 +220,11 @@
 
         # --- Photosynthesis ---
         photosyns = CLM.PhotosynthesisData()
-        CLM.photosynthesis_data_init!(photosyns, np)
+        # Init LUNA exactly as `config` specifies. #267 made CLMDriverConfig()
+        # default use_luna=true (CTSM's conditional) and #268 made photosynthesis!
+        # ERROR when LUNA is on but its arrays were never allocated. Hardcoding the
+        # LUNA-free init here left the fixture incoherent with its own config.
+        CLM.photosynthesis_data_init!(photosyns, np; use_luna=config.use_luna)
         CLM.set_params_for_testing!(photosyns)
 
         return inst, bounds, filt, filt_ia, config, photosyns
