@@ -541,5 +541,59 @@ i.e. the reference's lapse-rate reference elevation is that of a point
 **~1670 km away**. This is exactly the #253 defect class, inherited by the
 already-validated reference because the case was cloned from the donor.
 
-(In progress: quantifying the elevation error and whether the mediator applies
-the downscaling at all when `mesh_atm == mesh_lnd`.)
+### The elevation is WRONG but INERT — the lapse-rate correction never fires
+
+The premise that this corrupts GDD was checked against the CTSM source rather
+than assumed, and it **does not hold for this case**. The absolute topo value
+never reaches the temperature.
+
+`downscale_forcings` (`atm2lndMod.F90:202`) loops over `downscale_filter_c`,
+which is built by `TopoMod.F90:339`:
+
+```fortran
+filter = col_filter_from_logical_array_active_only(bounds, &
+     this%needs_downscaling_col(bounds%begc:bounds%endc))
+```
+
+`needs_downscaling_col` is set `.true.` in exactly three places: ice columns
+(`ice_cols_need_downscaling`), `update_glc2lnd_topo`, and hillslope columns
+under `downscale_hillslope_meteorology`. The crop case has **`PCT_GLACIER = 0`**
+and **`use_hillslope = .false.`** (verified in the surfdata and `lnd_in`), so
+the filter is **empty and the loop body never executes**.
+
+Belt and braces, `TopoMod.F90:282` sets, for every column that is *not* being
+downscaled:
+
+```fortran
+this%topo_col(c) = atm_topo(g)
+```
+
+so `hsurf_c - hsurf_g == 0` identically, and `tbot_c = tbot_g - lapse_rate*0`.
+The same delta form guards the precipitation repartition (`atm2lndMod.F90:910`)
+and the longwave downscaling. **Every consumer of topo in CTSM is a
+column-minus-gridcell difference, and that difference is zero here by
+construction.** An absolute elevation error cannot propagate.
+
+CLM.jl already mirrors this exactly (`src/driver/clm_run.jl:296-301`), with the
+gating written out in a comment: `topo_col = forc_topo` → "no lapse correction
+(hsurf_c = hsurf_g → ΔT = 0)".
+
+### Consequences
+
+1. **The reference is not corrupted.** #266's results — including anything
+   downstream of GDD — are unaffected by this defect. The wrong file is a real
+   provenance bug and is fixed below, but it changed no number.
+2. **#253's "~12.4 K of spurious lapse-rate downscaling" was never real.** That
+   site was also a single point with no glacier and no hillslopes, so its topo
+   was inert for the same reason. #253's fix was correct hygiene; its stated
+   impact was inferred from the lapse-rate formula without checking whether the
+   filter that gates it was ever non-empty. Recorded so the number is not
+   propagated further.
+3. The `verify_case` assertion that the topo file must be the *met donor's* was
+   itself encoding the wrong invariant — the topo should describe the **land
+   point**, not the met donor.
+
+**This is the `vacuous-checks-bug-class` lesson pointing the other way:** a
+guard can be vacuous, and so can a *bug*. Reading the formula (`tbot_c = tbot_g
+- lapse_rate*(hsurf_c-hsurf_g)`) makes the error look catastrophic; reading the
+filter that decides whether the formula runs at all shows it is inert.
