@@ -230,6 +230,38 @@ Note the downstream consumers (`init_gridcells.jl:144`,
 `surfdata.jl:442,734`) already gate on `create_crop_landunit` correctly — only
 the *derivation* and the `varpar_init!` branch are wrong.
 
+#### Measured blast radius
+
+`scripts/probe_crop_landunit_default.jl` builds the real `initGridCells!`
+subgrid both ways for a default non-crop, non-FATES run. The answer depends
+entirely on whether the surfdata has crop area:
+
+| surfdata | `PCT_CROP` | subgrid change |
+|---|---|---|
+| `domain_Bow_at_Banff_lumped` (and every scorecard domain checked: Stillwater, Donga, HubbardBrook, Tagus, Cropland_Mead) | `0` | **none** — `nl/nc/np = 2/2/4` both ways, identical landunit types and weights |
+| `crop_cft_surfdata/surfdata_cropCFT_USplains_1pt.nc` | `45.01%` | **structural** — `nl/nc/np` `4/12/16` → `5/13/17`; `wt_lunit[ISTSOIL]` `0.9628` → `0.5127` with a new `ISTCROP` landunit at `0.4501` |
+
+So the divergence is **latent on every domain this port currently validates**:
+`set_landunit_crop_noncompete!` returns early on
+`wt_lunit[g,ISTCROP] > 0.0`, so with `PCT_CROP = 0` no crop landunit is built
+either way. It becomes structural the moment a surfdata with crop area is used —
+where today's default silently folds 45% of the gridcell into natural veg.
+
+What *does* change on every non-FATES run is the varpar bounds, since
+`cft_size` goes `0 → surf_numcft` (2 on the generic-crop Bow file, 64 on the
+full-CFT file), moving `cft_ub` and `maxveg` (`15 → 16` on Bow).
+
+#### Latent inconsistency found while probing
+
+`count_subgrid_elements` and `set_landunit_crop_noncompete!` disagree when
+`create_crop_landunit=true` **and** `cft_size==0`: the counter's `n_cft == 0`
+fallback reserves a column and patch (`surfdata.jl:740-747`) while the builder
+returns early (`init_gridcells.jl:147`), so `initGridCells!` dies with
+`landunit count mismatch: 4 != 5`. That state is unreachable once the flag and
+`varpar_init!` move together (which is the fix), but it is a live landmine for
+anyone who sets the flag alone. CTSM forbids the state outright —
+`surfrdMod.F90:958-961` `endrun`s on `cft_size == 0 .and. any(PCT_CROP > 0)`.
+
 ---
 
 ## Full sweep
