@@ -525,3 +525,21 @@ plainly on macOS-26 per `macos26-lldb-xzone-brk-artifact`), then add a
 `scripts/fortran_parity_crop.jl` on the `fortran_parity_common.jl` single-step
 pattern — verifying the harness datm year/hour + injected inputs match the
 Fortran run first (the #233/#240/#243 lesson).
+
+## WRONG-SITE TOPO IN THE REFERENCE (2026-07-19) — #253 recurring
+
+Verified on disk. The crop reference case's `topo.observed` stream still reads
+the **donor (MerBleue) topo file**, while every other asset in the case is the
+crop point:
+
+| Asset | lon | lat | elevation |
+|---|---|---|---|
+| `datm.streams.xml` topo stream → `domain_Peatland_MerBleue_Canada/.../topo_forcing.nc` | **−75.5504** | **45.4120** | **71.5498 m** |
+| `surfdata_cropCFT_USplains_1pt.nc` (the run's actual land point) | −96.7082 (263.2918) | 44.8032 | — (`STD_ELEV` 201.24) |
+
+i.e. the reference's lapse-rate reference elevation is that of a point
+**~1670 km away**. This is exactly the #253 defect class, inherited by the
+already-validated reference because the case was cloned from the donor.
+
+(In progress: quantifying the elevation error and whether the mediator applies
+the downscaling at all when `mesh_atm == mesh_lnd`.)
