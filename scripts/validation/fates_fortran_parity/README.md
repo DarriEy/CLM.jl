@@ -664,3 +664,77 @@ So D2's fix is confirmed end-to-end: the host over-drying, the `btran_ft` collap
 the stature-growth stall were all one `use_bedrock` artefact, and with it gone the port
 tracks Fortran's dbh trajectory to ~1 %. The carbon gap, however, did **not** close —
 it got *worse*, which is the tell that it was never the same bug.
+
+## The surviving carbon gap, attributed: a **dead running-mean wiring** in the port
+
+Phase attribution (the #217 template) localised it in one step. Site carbon by phase
+on the day it breaks (day 11 = step 241) versus the day before:
+
+| phase | day 10 J / F | day 11 J / F |
+|---|---|---|
+| 10 `dyn_in` | 2673.26 / 2664.96 | 2691.97 / 2683.57 |
+| 11 `phenology` | 2673.26 / 2664.96 | **2537.27** / 2683.57 |
+| 13 `integrate` | 2692.05 / 2683.66 | 2558.59 / 2703.34 |
+| 15 `cohortfuse` (ncoh) | 50 / 50 | **43** / 50 |
+
+The entire loss appears **inside `phenology`**, where Fortran is a no-op. Cohort dumps
+show why: on 11 July the port flips `status` 2 → 1 and zeroes `leafc` on every
+**cold-deciduous** PFT (3, 6, 11) — a mid-summer leaf-off Fortran never performs.
+
+### Root cause: `InitTimeAveragingGlobals()` was ported and never called
+
+Instrumenting the site phenology state (`scripts/` probe, `vegtemp_memory` / `ncolddays`
+/ `cstatus` per day) showed `tveg24` advancing **only every second day** — each daily
+`phenology` call saw the same 24-hour mean twice, so `vegtemp_memory` filled at half
+rate and its still-**uninitialised 0.0 slots counted as cold days** (`0.0 <
+phen_coldtemp = 7.5`). On day 11 — the first day the `model_day > num_vegtemp_mem = 10`
+gate opens — `ncolddays = 6 > ncolddayslim = 5` and the cold leaf-off fired:
+
+```
+        pre-fix           post-fix
+day   tveg24  ncold     tveg24  ncold
+  1   15.000    10      15.000    10
+  3    3.993     8       5.152     9
+  5    7.451     8       7.900     9
+  7    6.692     8       7.700     8
+  9   12.359     8      12.383     6
+ 11   11.887     6 -> LEAF OFF    13.388  4  (no leaf-off)
+```
+(the pre-fix `tveg24` column repeats each value for two consecutive days — the tell)
+
+Fortran `FatesInterfaceMod.F90:1041-1047` defines every running-mean with
+**`up_period = hlm_stepsize`**, the host's actual timestep, and derives
+`n_mem = nint(mem_period/up_period)`. The port has all of this — `hlm_stepsize` and
+`InitTimeAveragingGlobals()` in `FatesInterfaceMod.jl` — and **neither was ever
+called or consumed anywhere in `src/`**. Patches instead used the `_patch_*`
+fallbacks in `FatesPatchMod.jl`, which hardcode `up_period = 1800 s, n_mem = 48`.
+On the reference case's `dtime = 3600 s` that is a **48-HOUR "24-hour" window**.
+
+This is the `dead-initcold-systemic` class: ported, correct, never wired. The
+source comment even advertised it ("not yet ported… can be re-pointed to the real
+definitions"), and the harness ran for the port's whole life on the stub.
+
+**Fix** (`fates(rmean)`): `clm_fates_init!` takes `dtime`, sets `hlm_stepsize[]` and
+calls `InitTimeAveragingGlobals()`; `InitRunningMeans!` selects the defined global
+via `_rmdef`, falling back to the `_patch_*` constant only when FATES init never ran
+(unit-test fixtures), so no fixture changes behaviour.
+
+### Result — the 20-day carbon gap closes
+
+| day | relC before | relC **after** | relDBH before | relDBH **after** | ncoh J/F before | **after** |
+|---|---|---|---|---|---|---|
+| 11 | −5.4e-02 | **+3.0e-03** | +1.4e-04 | +1.4e-04 | 43/50 | **50/50** |
+| 15 | −7.4e-02 | **+3.0e-03** | +1.6e-03 | +1.1e-02 | 45/53 | **53/53** |
+| 20 | −9.9e-02 | **+2.4e-03** | −1.2e-02 | +7.1e-03 | 45/57 | **57/57** |
+
+Site carbon tracks Fortran to **0.25 %** across the whole 20-day window (was −9.9 %),
+the demography is **cohort-count-exact against Fortran every day**, and the
+record-set mismatch rate drops from **311/481 to 96/481** at phase `fast` and
+**12/20 to 4/20** at the daily phases. Cold start is unchanged at `7.133e-16` and the
+first divergence is still the same host-driven `npp` `4.9218e-09` at step 0.
+
+**What still survives:** `maxdbh` runs **+0.7 – 1.1 % high** from day 14 (it was
+−1.2 % low before; the sign flipped, so this is a genuine residual and not the same
+defect), and the `hmort`-family `NaN-only-one-side` diagnostics are unchanged and
+pre-existing. Both are smaller than the two bugs already removed and are the next
+D-tier item, not a blocker.
