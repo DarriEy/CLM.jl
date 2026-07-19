@@ -1333,12 +1333,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     # froot_carbon=0 → root_biomass_density floored to c_to_b → r_soil ~70x too large
     # → soil-to-root conductance ~48x too small → over-stressed stomata (rss pinned to
     # rsmax). Compute it whenever PHS is on, matching Fortran for either mode.
+    # The FACADE owns the CN-vs-SP choice (it branches on its own
+    # `veg.config.use_cn`, exactly as Fortran's CNVegetationFacade does), so pass
+    # the SP inputs unconditionally rather than duplicating the decision here.
+    # Deciding it twice meant that if the driver config and the facade config ever
+    # disagreed, the driver's CN branch landed in the facade's SP branch with all
+    # four PFT inputs defaulted EMPTY — an immediate BoundsError. The kwargs are
+    # read only by the SP branch, so the CN path is unchanged.
     phs_froot_c = if config.use_hydrstress
-        config.use_cn ?
-            get_froot_carbon_patch(inst.bgc_vegetation, bc_patch) :
-            get_froot_carbon_patch(inst.bgc_vegetation, bc_patch;
-                tlai=cs.tlai_patch, slatop=pftcon.slatop,
-                froot_leaf=pftcon.froot_leaf, ivt=(pch.itype .+ 1))
+        get_froot_carbon_patch(inst.bgc_vegetation, bc_patch;
+            tlai=cs.tlai_patch, slatop=pftcon.slatop,
+            froot_leaf=pftcon.froot_leaf, ivt=(pch.itype .+ 1))
     else
         FT[]
     end
