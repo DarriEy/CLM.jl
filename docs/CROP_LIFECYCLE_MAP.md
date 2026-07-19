@@ -46,9 +46,10 @@ validated *in isolation* rather than only end-to-end.
 present. **Vernalization is NOT exercised by this reference** — it can be wired but
 NOT validated here. Recorded as a gap, not papered over.
 
-`SOYFIXN = 0` in *both* windows (CTSM's `CNSoyfix` needs a later phase than either
-samples), so **`n_soyfix!` remains unvalidatable** — the same standard #253 applied
-to `n_fert!`.
+`SOYFIXN = 0` in *both* windows, so **`n_soyfix!` remains unvalidatable** — the same
+standard #253 applied to `n_fert!`. (The parenthetical this line used to carry —
+"CNSoyfix needs a later phase than either samples" — was **wrong**; `CNSoyfix` is
+not phase-gated at all. See §3c-§3g for the real causes.)
 
 ### Three formulas the reference pins EXACTLY (checked, not assumed)
 
@@ -223,8 +224,11 @@ corn-family branch.
 
 ### Remaining work, in order
 
-1. A third reference window (or phase-targeted bracket) that reaches the growth phase
-   `CNSoyfix` requires → then wire and validate `n_soyfix!`.
+1. ~~A third reference window (or phase-targeted bracket) that reaches the growth phase
+   `CNSoyfix` requires~~ → **RESOLVED AS WRONG, see §3c-§3g.** `CNSoyfix` is not
+   phase-gated; three cold Fortran runs proved the blocker is `use_fun=.true.`
+   (routine never called) and then `fpg ≡ 1` (site is N-replete). What is needed
+   is an **N-limited soybean column**, or a CTSM-side unit harness — not a window.
 2. A winter-wheat CFT reference → validate `vernalization!`.
 3. An end-to-end `scripts/fortran_parity_crop.jl` single-step diff on the
    `fortran_parity_common.jl` pattern, which would also close the planting-date gap
@@ -232,6 +236,336 @@ corn-family branch.
    the #233/#240/#243 lesson).
 4. Crop allocation (`arepr`/grain pools) and `CNCropHarvestToProductPools` value
    parity — reachable now that the lifecycle drives `cphase`.
+
+## 3c. `CNSoyfix` activation criterion (2026-07-19, read from source)
+
+Source: `CNNDynamicsMod.F90:319-463`, called from `CNDriverMod.F90:325`.
+
+**Correction to a standing assumption.** `docs/CROP_LIFECYCLE_MAP.md` §3 and
+`docs/CROP_PARITY.md` both say `n_soyfix!` "needs `cphase`" and that
+`CNSoyfix` "fires only in a later growth phase". **Neither is true.**
+`CNSoyfix` never reads `cphase`. It is not phase-gated. The real gate is
+`fpg`, and that changes what a valid reference window is.
+
+The routine writes `soyfixn_patch` on **every** patch every step (it has an
+explicit `else → soyfixn = 0` on both branches), then `p2c`-scatters to
+`soyfixn_to_sminn_col`. So it is never "skipped" — a zero is a computed zero.
+
+### The three gates, in order
+
+```
+(A) croplive(p) == .true.
+(B) patch%itype(p) ∈ {ntmp_soybean, nirrig_tmp_soybean,
+                      ntrp_soybean, nirrig_trp_soybean}
+(C) fpg(c) < 1.0            <-- THE LOAD-BEARING GATE
+```
+
+If (A) or (B) fails → `soyfixn = 0`. If (C) fails → `soyfixn = 0` explicitly
+("if nitrogen demand met, no fixation"). Only when all three hold is anything
+computed.
+
+In the 8-patch collapsed set, (B) selects **exactly patches p0 = 9 (itype 23,
+`temperate_soybean`) and p0 = 10 (itype 24, `irrigated_temperate_soybean`)**.
+`ntrp_soybean`/`nirrig_trp_soybean` are the *tropical* soybeans (not 75/76 —
+those are `tropical_corn`/`irrigated_tropical_corn`, per §3b) and are absent
+from this surfdata. **So at most 2 of 8 patches can ever be non-zero here**,
+and a test asserting non-zero on all 8 would be wrong.
+
+### The computation when all three gates hold
+
+```
+soy_ndemand = plant_ndemand(p) - plant_ndemand(p)*fpg(c)      ! = pnd*(1-fpg)
+
+fxw = wf(c) / 0.85                                            ! wf = soil water
+                                                              !   frac of whc, top 0.5 m
+fxn = 0                       if sminn(c) >  30
+    = 1.5 - 0.005*(sminn*10)  if 10 < sminn(c) <= 30
+    = 1                       if sminn(c) <= 10
+
+GDDfrac = hui(p) / gddmaturity(p)
+fxg = 0                    if GDDfrac <= 0.15
+    = 6.67*GDDfrac - 1     if 0.15 < GDDfrac <= 0.30
+    = 1                    if 0.30 < GDDfrac <= 0.55
+    = 3.75 - 5*GDDfrac     if 0.55 < GDDfrac <= 0.75
+    = 0                    if GDDfrac >  0.75
+
+fxr = max(0, min(1, fxw, fxn) * fxg)
+soyfixn(p) = min(fxr * soy_ndemand, soy_ndemand)
+```
+
+Note `min(1, fxw, fxn)` is a 3-way min including the literal `1`, so the water
+and N factors are capped at 1 but `fxg` is applied *after* the cap and is not
+itself capped by it. The final `min(soyfixn, soy_ndemand)` is redundant given
+`fxr <= 1` but is kept for fidelity.
+
+### Where to bracket a dump — and the trap
+
+The **GDD window** is `0.15 < hui/gddmaturity < 0.75`. With soybean
+`gddmaturity` ≈ 1259 / 1257 (p0 9/10, from the restart), that is
+`hui ∈ (189, 944)`, peaking at `fxg = 1` for `hui ∈ (378, 692)`. A dump
+bracketing the `fxg = 1` plateau is the most discriminative target, because
+there `soyfixn = min(1, fxw, fxn) * plant_ndemand * (1 - fpg)` exactly.
+
+**Why the two existing windows are zero is NOT the same reason in each:**
+
+- **May (n38665, 2020-05-30):** soybean `idop` = 145, so at jday 151 `hui` is
+  barely accumulating → `GDDfrac <= 0.15` → `fxg = 0`. A *timing* zero. A
+  later window fixes this.
+- **July (n39865, 2020-07-19):** `GDDfrac` is plausibly inside the window here,
+  so if this dump is also zero the cause is likely **gate (C)**: `fpg = 1`,
+  i.e. the soil supplies all the N the plants demand and there is no deficit to
+  fix. That is a *state* zero, and **no choice of window fixes it** — it is a
+  property of the run's N budget (a fertilized, spun-up soil column), not of
+  when you look.
+
+**This distinction is the whole risk of the task.** Before generating any new
+window, `fpg` and `GDDfrac` must be read out of the July reference to determine
+which of the two zeros is in play. If `fpg == 1` at July, a new dump window is
+the wrong instrument and the blocker is an N-budget one.
+
+## 3d. Why `SOYFIXN` ≡ 0 — ROOT CAUSE FOUND: `use_fun = .true.`
+
+**The existing reference cannot produce a non-zero `SOYFIXN` at any window, and
+the reason is not timing.** `CNSoyfix` is never called in it.
+
+`CNDriverMod.F90:319-329`:
+
+```fortran
+if (use_crop) then
+   call CNNFert(...)
+   if (.not. use_fun) then  ! if FUN is active, then soy fixation handled by FUN
+      call CNSoyfix (...)
+   end if
+end if
+```
+
+and `crop_ref_usplains/lnd_in` has:
+
+```
+ use_cn   = .true.
+ use_crop = .true.
+ use_fun  = .true.        <-- CNSoyfix is compiled in but NEVER CALLED
+ use_nitrif_denitrif = .true.
+```
+
+With FUN active, soybean fixation is handled inside `CNFUNMod` and
+`soyfixn_patch` is simply never written — it holds its initialized value, 0.
+`SOYFIXN` in the dumps is therefore **not a computed zero at all**; it is an
+untouched field. The `p2c` scatter to `SOYFIXN_TO_SMINN` likewise never runs.
+
+### The evidence that rules out the timing hypothesis
+
+The natural assumption (recorded in prior docs) was that the windows sample the
+wrong growth phase. **The July window disproves that**: at `n39865` the two
+soybean patches sit at the *most favourable possible* point of the criterion.
+
+| Quantity | p0 = 9 (itype 23) | p0 = 10 (itype 24) | Gate |
+|---|---|---|---|
+| `CROPLIVE` | 1 | 1 | (A) PASS |
+| itype | 23 `temperate_soybean` | 24 `irrigated_temperate_soybean` | (B) PASS |
+| `HUI` | 552.196 | 549.678 | — |
+| `gddmaturity` | 1259.261 | 1257.360 | — |
+| `GDDfrac` | **0.43851** | **0.43717** | in (0.30, 0.55] → **`fxg` = 1**, the plateau |
+| `SOYFIXN` | **0.0** | **0.0** | — |
+
+Every gate that a *window* controls is satisfied, and the growth-stage factor is
+at its maximum. A zero here cannot be explained by phase. (For completeness the
+May window *is* a genuine timing zero: `HUI` = 64.93 → `GDDfrac` = 0.0516 →
+`fxg` = 0. The two windows are zero for two different reasons, and neither is
+fixable by choosing a third window.)
+
+Corroborating: the July restart has `fpg` = **NaN** on all soil columns and
+`plant_ndemand` = **0.0 on all 24 patches** — both are FUN-path artifacts. Under
+`use_fun = .true.` the `fpg`/`plant_ndemand` pair that `CNSoyfix` consumes is not
+maintained by the non-FUN nutrient-competition path at all, so even a forced call
+would have read NaN/zero inputs.
+
+### Consequence — `n_soyfix!` stays UNWIRED
+
+`SOYFIXN ≡ 0` is **not** evidence about a window. It is evidence that this
+reference is configured for a code path that excludes `CNSoyfix` entirely.
+Wiring `n_soyfix!` against it would scatter zeros and pass any "is it wired?"
+test while moving nothing — the exact failure #218, #253 and #266 each refused.
+**The refusal stands.**
+
+### What would actually unblock it (precise, in order)
+
+1. **A reference run with `use_fun = .false.`** — this is the whole blocker. It
+   is a *runtime* namelist flag (no rebuild; same binary), so the existing case
+   from `scripts/setup_crop_ref_case.py` can be reconfigured. Note this is not a
+   cosmetic switch: it swaps FUN for `NutrientCompetitionFlexibleCNMod`, which is
+   what computes the `fpg`/`plant_ndemand` pair `CNSoyfix` needs
+   (`NutrientCompetitionFlexibleCNMod.F90:442`).
+2. **Restart it from `Crop_USplains.clm2.r.2020-07-19-14400.nc`** and dump the
+   same `n39865..76` bracket. That restart already sits on the `fxg = 1` plateau
+   (table above), so the growth-stage gate is pre-satisfied and only a handful of
+   steps are needed — a warm restart, not a re-spin-up. Whether a FUN restart
+   loads cleanly into a non-FUN run is the open risk and must be verified, not
+   assumed.
+3. **Extend the BGCDUMP instrumentation to carry `CNSoyfix`'s inputs**, which the
+   current dump does not: `fpg_col`, `plant_ndemand_patch`, `sminn_col`, `wf_col`
+   (plus the existing `HUI`/`gddmaturity`/`CROPLIVE`). Without them the only
+   possible test is end-to-end; with them each of `fxw`/`fxn`/`fxg`/`fxr` can be
+   validated in isolation, which is what makes the branch structure
+   discriminative rather than a single number that many wrong formulas reproduce.
+4. Only then wire `n_soyfix!` and assert values.
+
+Until (1) exists, **`n_soyfix!` is blocked on a reference-configuration gap, not
+on Julia code.** The port side is ready; the ground truth is not.
+
+## 3e. Second blocker, found by generating the run: `fpg ≡ 1` (N-replete site)
+
+Flipping `use_fun` was necessary but **not sufficient**. A fresh cold-start
+non-FUN spin-up was generated (`crop_ref_nofun_cold`, 5 model years
+2016-2020, ~2.5 min wall) with the instrumented dump described below.
+`CNSoyfix` now genuinely executes — and still returns 0, for a **third,
+different reason**.
+
+At `n39870` (2020-07-19), soybean patches p0 = 9 / 10:
+
+| Input | p0 = 9 | p0 = 10 | Gate |
+|---|---|---|---|
+| `CROPLIVE` | 1 | 1 | (A) PASS |
+| itype | 23 | 24 | (B) PASS |
+| `HUI` | 568.226 | 567.706 | — |
+| `GDDMATURITY` | 1304.541 | 1303.836 | — |
+| `GDDfrac` | 0.4356 | 0.4354 | `fxg` = **1** (plateau) |
+| `WF` | 0.4547 | 0.4723 | `fxw` = 0.535 / 0.556 |
+| `SMINN` | 19.765 | 19.241 | `fxn` = 0.512 / 0.538 |
+| `PLANT_NDEMAND` | 1.46898e-7 | 1.47982e-7 | non-zero — the non-FUN path computes it |
+| **`FPG`** | **1.000000** | **1.000000** | **(C) FAIL** |
+| `SOYFIXN` | 0.0 | 0.0 | correct given (C) |
+
+Every other gate passes and every other factor is favourable. `fpg` is
+**exactly 1.0 on all eight crop columns**: the soil mineral-N pool
+(`SMINN` ≈ 19-41 gN/m²) vastly exceeds plant demand (≈1.5e-7 gN/m²/s), so the
+plants get 100% of the N they ask for. `soy_ndemand = pnd*(1 - fpg) = 0`, and
+`CNSoyfix` returns 0 **correctly**. This is a true computed zero — the routine
+is live, the physics simply has no N deficit to fix.
+
+So `SOYFIXN ≡ 0` has now been traced through **three** distinct causes, only the
+first of which is a "window" question:
+
+1. **May window** — `GDDfrac` = 0.0516 → `fxg` = 0. Timing.
+2. **Both existing windows** — `use_fun = .true.` → routine never called. Config.
+3. **Non-FUN cold run** — `fpg` = 1 → no N deficit. **Site N status.**
+
+**A reference for `n_soyfix!` requires an N-LIMITED soybean column**
+(`fpg < 1`), not merely a later date. The natural lever is
+`use_fertilizer = .false.` (a runtime flag, no rebuild), which removes the
+`FERT` N subsidy that is holding `fpg` at 1; ndep reduction or a longer
+N-depleting spin-up are alternatives. Whether that is enough to push `fpg`
+below 1 at this site is an empirical question, and it must be **verified in the
+dump, not assumed** — the same rule that caught causes (2) and (3).
+
+## 3f. Instrumentation added (reusable — this is what made the diagnosis possible)
+
+The existing bgcdump carried only `SOYFIXN`, which is why two prior attempts
+could only report "it's zero" without knowing why. Two SourceMods changes in
+`installs/clm/cases/symfluence_build/SourceMods/src.clm/` now expose the whole
+criterion:
+
+1. **`bgcdumpMod.F90`** — dumps `CNSoyfix`'s five inputs alongside its output:
+   `FPG`, `SMINN`, `WF` (column) and `PLANT_NDEMAND`, `GDDMATURITY` (patch).
+   With these, each of `fxw`/`fxn`/`fxg`/`fxr` can be validated in isolation
+   rather than through one end-to-end number that many wrong formulas reproduce.
+2. **`CNDriverMod.F90`** — a new dump point `bgcdump_write(bounds,'after_soyfix')`
+   placed **immediately after** the `CNSoyfix` call. This matters: `CNSoyfix`
+   runs near the top of `CNDriverNoLeaching`, long before allocation updates
+   `fpg`/`plant_ndemand`/`sminn`. Dumping at end-of-step (`after_fire`, the only
+   pre-existing hook) would pair the output with *post-allocation* inputs and
+   silently mis-attribute the result — the before-vs-after dump trap that has
+   already manufactured one phantom bug in this port. `CNSoyfix` writes only
+   `soyfixn`/`soyfixn_to_sminn`, so at this point the dumped inputs are exactly
+   what it read.
+
+Verified in the binary with `strings bld/cesm.exe | grep after_soyfix` — CIME
+reported `MODEL BUILD HAS FINISHED SUCCESSFULLY` after a **2.0 s** clm build,
+which is precisely the "nothing recompiled" false-green the recipe warns about;
+the string check is what confirms the rebuild was real.
+
+Reproduction: `crop_ref_nofun_cold/run_cold.sh` (cold start, `use_fun=.false.`,
+`BGCDUMP_NSTEP_LO/HI=39865/39876`). `nstep` 39865 ↔ 2020-07-19 tod 18000 is
+exact for a 2016-01-01 tod 14400 start at dt = 3600 s, so the cold run's step
+numbering lines up with the original reference windows.
+
+### Also learned: a FUN restart cannot be reused for a non-FUN run
+
+Restarting `2020-07-19-14400` (a `use_fun=.true.` restart) into a
+`use_fun=.false.` run **SIGSEGVs** reproducibly after the first step. The FUN
+restart carries `fpg` = NaN and `plant_ndemand` = 0, which the non-FUN
+nutrient-competition path is not written to absorb. The warm-restart shortcut is
+therefore not available: a non-FUN reference must be **cold-started**. (Cheap in
+practice — 5 model years is ~2.5 min at this single point.)
+
+## 3g. `use_fertilizer = .false.` tried — still `fpg >= 1`. VERDICT: site cannot work
+
+The obvious lever was pulled and **it is not enough**. A third cold spin-up
+(`crop_ref_nofun_nofert`: `use_fun=.false.`, `use_fertilizer=.false.`) gives, at
+every step of the window:
+
+| | fert ON | fert OFF |
+|---|---|---|
+| `SMINN` (crop cols) | 19.765 / 19.241 | 16.164 / 15.804 |
+| `PLANT_NDEMAND` (soy) | 1.4690e-7 | 1.4474e-7 |
+| **`FPG`** | 1.000000 | **1.000001** |
+| `SOYFIXN` | 0.0 | **0.0** |
+
+Removing the entire fertilizer subsidy moved the mineral-N pool by only ~18%
+(19.8 → 16.2 gN/m²) and left `fpg` at 1. The reason is a **three-orders-of-
+magnitude margin**: demand is 1.45e-7 gN/m²/s ≈ 0.0125 gN/m²/day against a
+16 gN/m² pool — roughly 1300 days of supply standing in the soil. No dump
+window, and no fertilizer setting, makes this column N-limited.
+
+**Verdict: `SOYFIXN` is un-generatable at `crop_cft_USplains` as configured.**
+`n_soyfix!` therefore **remains unwired**, on the same standard #218/#253/#266
+applied. The port code (`src/biogeochem/n_dynamics.jl:453`) is a complete and
+faithful line-by-line translation and is *ready*; what is missing is ground
+truth, and the missing ingredient is now named precisely.
+
+### What a usable reference actually requires
+
+Not a window. An **N-limited soybean column** — `fpg < 1` at a step where
+`croplive` and `0.15 < hui/gddmaturity < 0.75` also hold. Candidate levers, in
+rough order of expected effect:
+
+1. **Cut atmospheric N deposition** (`ndep` stream → near zero). This is the
+   dominant N input sustaining the pool; fertilizer is not.
+2. **A much longer N-depleting spin-up** without the ndep subsidy, so
+   mineralization alone sets `sminn`.
+3. **A genuinely N-poor site/soil**, rather than a fertilized US-Plains
+   cropland chosen for its crop CFT coverage.
+4. Failing all of the above, a **CTSM-side unit harness**: a SourceMod that
+   calls `CNSoyfix` on injected `fpg`/`plant_ndemand`/`sminn`/`wf` values and
+   dumps the result. This produces genuine *Fortran* ground truth for the
+   algebra — which is what the port needs — without requiring the coupled model
+   to reach an N-limited state at all. Given how large the N margin is, **this
+   is likely the cheapest real path**, and it validates each of `fxw`/`fxn`/`fxg`
+   branch-by-branch rather than at one operating point.
+
+Note that (4) is not "manufacturing a reference": the numbers would still come
+out of the Fortran routine. What would be illegitimate is asserting the port
+against numbers computed by the port.
+
+### Unrelated defect noticed while verifying the generated cases
+
+`datm.streams.xml` in `crop_ref_usplains` (and therefore in all three cases
+derived from it here) points its **topo stream at the MerBleue donor site**:
+
+    .../domain_Peatland_MerBleue_Canada/data/forcing/CLM_input/topo_forcing.nc
+    TOPO = 71.55 m, LONGXY = -75.550, LATIXY = 45.412
+
+while the crop point is **LONGXY = -96.71, LATIXY = 44.80** (US Great Plains).
+This is the #253 defect class recurring — a donor-site stream left in place. It
+feeds the datm lapse-rate correction, hence air temperature, hence GDD and the
+planting decision. It does **not** affect any conclusion above (the `SOYFIXN`
+result is structural, and a few K cannot move `fpg` from 1.0 to below 1 against
+a 1300-day N margin), and it does not affect the already-validated `FERT`
+numbers (a formula over parameters, not climate). But the reference's
+**planting dates are computed on the wrong site's elevation**, which is worth
+knowing given `idop` is already flagged as unvalidated in §3b. Flagged, not
+fixed — fixing it invalidates the existing validated reference and is a
+separate decision.
 
 ## 4. Standing rules for this work
 

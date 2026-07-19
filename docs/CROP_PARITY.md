@@ -6,7 +6,11 @@
 > - The § "Wiring `n_fert!` — it would be a NO-OP today" analysis was correct and
 >   its precondition is now MET: `crop_phenology!` computes `fert_patch`, whose
 >   value matches the May reference to relative error 0.0, so `n_fert!` is wired.
->   **`n_soyfix!` is still NOT wired** — `SOYFIXN` ≡ 0 in both windows.
+>   **`n_soyfix!` is still NOT wired** — `SOYFIXN` ≡ 0 in both windows. The cause
+>   is now fully diagnosed and is **not** a window/phase issue: these runs have
+>   `use_fun = .true.`, and CTSM calls `CNSoyfix` only under `.not. use_fun`, so
+>   it never executed. Non-FUN runs were generated and hit a second wall,
+>   `fpg ≡ 1` (the site is N-replete). See `docs/CROP_LIFECYCLE_MAP.md` §3c-§3g.
 > - The § "Verified Julia wiring state" rows for `crop_phenology!` /
 >   `plant_crop!` / `vernalization!` are out of date (all three now have live call
 >   sites).
