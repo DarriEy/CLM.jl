@@ -42,7 +42,9 @@
         cfg = CLM.SoilHydrologyConfig()
         @test cfg.head_gradient_method == CLM.HEAD_GRADIENT_DARCY
         @test cfg.transmissivity_method == CLM.TRANSMISSIVITY_LAYERSUM
-        @test cfg.baseflow_scalar == 1.0e-2
+        # CTSM clm5_0 default: namelist_defaults_ctsm.xml:195 under lbc=2.
+        # Was 1.0e-2 (the lbc=1 / clm4_5 value) -- see DRIVER_DEFAULTS_AUDIT "M2".
+        @test cfg.baseflow_scalar == 0.001
     end
 
     @testset "init_soil_hydrology_config" begin

@@ -41,7 +41,19 @@ end
 const soilhydrology_params = SoilHydrologyParams()
 
 # ---- Module-level constants ----
-const BASEFLOW_SCALAR = Ref(1.0e-2)                  # baseflow scalar (namelist adjustable)
+# Baseflow scalar (namelist adjustable). CTSM keys this on
+# lower_boundary_condition (namelist_defaults_ctsm.xml:195-197). For clm5_0 the
+# chain soilwater_movement_method=1 (defaults:419) + use_bedrock=.true.
+# (defaults:180) resolves lbc=2 (defaults:426), giving 0.001. `1.d-2` is the
+# lbc=1 / clm4_5 value. SoilHydrologyMod.F90:71's `= 1.e-2_r8` is only the
+# pre-namelist initialiser that build-namelist overwrites -- the same
+# code-fallback-instead-of-namelist-default trap as #252/#259/#273.
+# Corroborated by two CTSM-emitted lnd_in files (Bow, MerBleue), both
+# `baseflow_scalar = 0.001d00`. NOTE: this Ref, the SoilHydrologyConfig field,
+# the init_soil_hydrology_config kwarg and clm_run!'s kwarg must all agree --
+# test_soil_hydrology_mod.jl calls bare init_soil_hydrology_config(), so a
+# partial change makes the live global depend on test ordering.
+const BASEFLOW_SCALAR = Ref(0.001)
 const TOLERANCE_SOILHYDRO = 1.0e-12                   # tolerance for sublimation check
 
 # Head gradient methods
@@ -63,7 +75,7 @@ Configuration for hillslope hydrology settings.
 Base.@kwdef mutable struct SoilHydrologyConfig
     head_gradient_method::Int  = HEAD_GRADIENT_DARCY
     transmissivity_method::Int = TRANSMISSIVITY_LAYERSUM
-    baseflow_scalar::Float64   = 1.0e-2
+    baseflow_scalar::Float64   = 0.001   # CTSM clm5_0 (lbc=2); see BASEFLOW_SCALAR
 end
 
 """
@@ -74,7 +86,7 @@ Create a soil hydrology configuration with defaults.
 function init_soil_hydrology_config(;
     head_gradient_method::Int = HEAD_GRADIENT_DARCY,
     transmissivity_method::Int = TRANSMISSIVITY_LAYERSUM,
-    baseflow_scalar::Real = 1.0e-2
+    baseflow_scalar::Real = 0.001   # CTSM clm5_0 (lbc=2); see BASEFLOW_SCALAR
 )
     cfg = SoilHydrologyConfig(
         head_gradient_method = head_gradient_method,

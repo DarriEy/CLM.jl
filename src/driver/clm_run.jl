@@ -114,7 +114,12 @@ function clm_run!(;
     fsnowaging::String = "",
     frestart::String = "",
     ffortran_restart::String = "",
-    baseflow_scalar::Real = 1.0e-2,
+    # CTSM namelist_defaults_ctsm.xml:195-197 keys baseflow_scalar on
+    # lower_boundary_condition; for clm5_0 that resolves to lbc=2 -> 0.001.
+    # `1.d-2` belongs to lbc=1 or clm4_5 -- this entry point shipped the CLM4.5
+    # value, a 10x on the drainage/baseflow rate. See soil_hydrology.jl's
+    # BASEFLOW_SCALAR and docs/DRIVER_DEFAULTS_AUDIT.md "M2 CLOSED".
+    baseflow_scalar::Real = 0.001,
     int_snow_max::Real = 2000.0,
     interp_forcing::Bool = false,
     forcing_phase_shift_s::Int = 0,
