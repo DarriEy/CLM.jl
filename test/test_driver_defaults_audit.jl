@@ -167,6 +167,27 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         @test CLM.CLMDriverConfig(use_luna=false).use_luna === false
     end
 
+    @testset "use_hydrstress is CONDITIONAL, not a bare Bool (row M3)" begin
+        # namelist_defaults_ctsm.xml — .true. for phys=clm5_0, use_fates=.false.,
+        # configuration="clm"; .false. otherwise. The port shipped `false`, which is
+        # CTSM's CODE FALLBACK (clm_varctl.F90) — the same root cause as #252/#259/#267.
+        # A bare `true` would be wrong too: control.jl:102 endruns on PHS+FATES,
+        # mirroring CTSM. Hence `nothing`. See docs/PHS_DEFAULT_BLOCKERS.md.
+        @test _INIT_KW[:use_hydrstress] === :nothing
+        @test _RUN_KW[:use_hydrstress] === :nothing
+
+        # The conditional must actually RESOLVE — pin the resolved values, not just
+        # the sentinel, so this cannot go vacuously green (the #267 lesson).
+        @test CLM.CLMDriverConfig().use_hydrstress === true
+        @test CLM.CLMDriverConfig(use_fates=true).use_hydrstress === false
+        @test CLM.CLMDriverConfig(use_hydrstress=false).use_hydrstress === false
+
+        # The varctl STRUCT default stays `false`: that mirrors CTSM's code fallback,
+        # the value the namelist overrides. It is the DERIVATION that carries the
+        # namelist default — the #265 principle.
+        @test CLM.VarCtl().use_hydrstress == false
+    end
+
     @testset "int_snow_max == 2000.0" begin
         # namelist_defaults_ctsm.xml:476 (clm4_5 variant is 1.e30).
         @test _INIT_KW[:int_snow_max] == 2000.0

@@ -1,97 +1,146 @@
-# `use_hydrstress` cannot be defaulted on yet — three blockers
+# `use_hydrstress` — the three blockers, and how they closed
 
-**Status: the flip was attempted, measured, and REVERTED.** This is the honest
-result of campaign #3 of the defaults programme (#256, row M3). The default
-stays `false`; the reasons are below, with the numbers.
+**Status: the conditional default is IN.** `use_hydrstress` now takes CTSM's
+conditional namelist default (`nothing` → `!use_fates`), closing row M3 of
+`docs/DRIVER_DEFAULTS_AUDIT.md` — the last live-physics row of the defaults
+campaign.
+
+The first attempt (#261) flipped it, measured **18 errors**, and REVERTED. That
+was the right call, and the documented blocker report was the right deliverable:
+the 18 errors turned out to be **three real defects**, not tests calibrated to
+the wrong default. This document is that report, updated with how each closed.
 
 ## What CTSM says
 
 For `phys=clm5_0`, non-FATES, `configuration="clm"`, CTSM defaults
 `use_hydrstress = .true.` — plant hydraulic stress is **on** in CLM5. CLM.jl
-ships `false`, i.e. the BTRAN path, which gives different `gs`, transpiration
-and GPP under water stress. So the port's default vegetation-water physics is
-not CLM5's. That part of the audit stands.
+shipped `false`, which is CTSM's **code fallback** (`clm_varctl.F90`), the value
+the namelist overrides. Same root cause as #252 (`use_bedrock`), #259
+(`use_aquifer_layer`) and #267 (`use_luna`): the audit found fourteen such
+namelist-vs-code-fallback disagreements, and CLM.jl had copied the fallback in
+every one.
 
-## What happened when we flipped it
-
-Full suite, `--check-bounds=yes`, against a baseline of
-**26150 passed / 0 failed / 0 errored / 3 broken** (confirmed by two
-independent runs):
-
-| | baseline | `use_hydrstress = true` |
-|---|---|---|
-| passed | 26150 | 26088 |
-| failed | 0 | 1 |
-| **errored** | 0 | **18** |
-
-Errors, not value mismatches — the code *throws*. Three distinct causes.
-
-### Blocker 1 — PHS and FATES are mutually exclusive (3 errors)
+## Blocker 1 — PHS and FATES are mutually exclusive — **CLOSED**
 
 `control.jl:102` raises `use_hydrstress and use_fates cannot both be true`,
-which matches CTSM: the `.true.` default applies to the **non-FATES**
-configuration only. The audit correctly labelled this row `COND-MISMATCH`.
+matching CTSM: the `.true.` default applies to the **non-FATES** configuration
+only. So a bare `true` would have been just as wrong as `false`.
 
-*Fix when unblocked:* make the default conditional (`nothing` sentinel →
-`!use_fates`), exactly as `use_bedrock` was handled in #252. This one is
-straightforward and is not the reason the campaign stopped.
+**Fix:** the `nothing` sentinel, resolving to `!use_fates`, at the three entry
+points that carry the default — `clm_initialize!`, `clm_run!` and
+`CLMDriverConfig`. `varctl.use_hydrstress` keeps its `false` **struct** default,
+which mirrors CTSM's code fallback: it is the DERIVATION that carries the
+namelist default, not the struct (the #265 principle, as for
+`create_crop_landunit`).
 
-### Blocker 2 — the PHS path is not AD-differentiable (14 errors)
+Pinned in `test/test_driver_defaults_audit.jl` — the sentinel **and** the
+resolved values (`CLMDriverConfig().use_hydrstress === true`, `use_fates=true` →
+`false`, explicit `false` → `false`), so the pin cannot go vacuously green.
+
+## Blocker 2 — the PHS path was not AD-differentiable — **CLOSED**
+
+Originally 14 errors:
 
 ```
 MethodError: no method matching CLM._Psn2Pft(
-    ::Vector{Float64}, ::Vector{Float64}, ::Vector{Float64}, ::Vector{Float64},
-    ::Vector{Float64}, ::Vector{Float64}, ::Vector{Dual{…}})
+    ::Vector{Float64}, …, ::Vector{Dual{…}})
 ```
 
-`_Psn2Pft{Vp}` (`photosynthesis.jl:1918`) declares **all seven fields with a
-single shared type parameter**. Six arrive as `Vector{Float64}`; the seventh,
-`lmr_intercept_atkin`, arrives as `Vector{Dual}` because it is the only field
-built through the element type:
+`_Psn2Pft{Vp}` (`photosynthesis.jl:1981`) declares **all eight pft fields with a
+single shared type parameter**. If any one field arrives as `Vector{Dual}` while
+the rest are `Vector{Float64}`, `Vp` cannot unify and construction throws.
+
+#262 fixed the first offender, `lmr_intercept_atkin`. **This campaign found the
+same bug one field over**, and it was still fatal:
 
 ```julia
-_lmratk = T.(params_inst.lmr_intercept_atkin)          # T = Dual under AD
-lmr_intercept_atkin = slatop_pft isa Array ? _lmratk : convert(typeof(slatop_pft), _lmratk)
+# canopy_fluxes.jl — before
+crop_pft_s = isempty(crop_pft) ?
+    _to_backend_like(ivt_vec, FT, zeros(FT, length(medlynslope_pft))) : crop_pft
 ```
 
-When `slatop_pft` is a plain `Array`, the ternary keeps the `Dual`-typed
-`_lmratk`, so `Vp` cannot unify and construction fails. `lmr_intercept_atkin`
-is a **constant parameter** — it has no derivative to carry, so promoting it to
-`Dual` is wrong independently of this campaign.
+`FT` is the AD element type. When `crop_pft` is empty — which is the
+**default, non-CN configuration**, i.e. exactly the AD/calibration path — the
+substitute was built as `Vector{Dual}`, and PHS pass-2 construction threw. Fix:
 
-This hits `test_ad_robustness` (all 6 scenarios), `test_parameter_recovery`,
-`test_multisite_calibration` and `test_calibration` — i.e. **enabling PHS breaks
-the entire AD/calibration surface**. That is a real port gap, not a
-test-calibration artefact, and it is the blocker that stopped the flip.
+```julia
+crop_pft_s = isempty(crop_pft) ? zero(medlynslope_pft) : crop_pft
+```
 
-*Fix:* build `lmr_intercept_atkin` to match the other pft vectors' type rather
-than the AD element type (or give the struct per-field type parameters). Needs
-its own PR + validation, since it touches the live photosynthesis path.
+`zero(sibling)` keeps both the eltype (`Float64` — `crop_pft` is a CONSTANT
+per-PFT parameter carrying no derivative) and the container (a device array
+stays a device array, so the GPU path is unperturbed).
 
-### Blocker 3 — unallocated PHS state on some fixtures (≈6 errors)
+**Measured:** `test_ad_robustness` with PHS on goes from **6 errors / 0 passes**
+to **96 passes / 0 errors**, with AD-vs-finite-difference relative error
+**0.0%** on `d(LH)/d(T)`, `d(SH)/d(T)` and `d(T_grnd)/d(T)` in all six climate
+scenarios. 96 is exactly the PHS-**off** baseline for that file, so this is a
+RESTORATION, not an inflated count: each scenario previously threw at the first
+PHS call, so its six assertions never ran. The suite total is unaffected by
+this file.
 
-`BoundsError: attempt to access 0-element Vector{Float64} at index [2]` (and an
-`Int64` variant) from `test_clm_driver` / `test_control`. The PHS branch reads
-per-patch state that those fixtures never allocate, because they were built for
-the BTRAN path. Needs a look at what `use_hydrstress=true` requires at init that
-the non-PHS path does not.
+A sweep for the same bug class found LUNA's `_LunaPft` promotes *all* its pft
+fields to `FT` — wasteful, but it unifies, so it is not broken. `crop_pft` was
+the unique unification breaker.
 
-## Why this is the right outcome
+## Blocker 3 — unallocated PHS state on some fixtures — **CLOSED**
 
-Nothing here was tuned to pass. The suite was allowed to fail honestly, and the
-failures turned out to be **three real defects** — one config-constraint
-mismatch and two genuine port gaps — rather than tests calibrated to the wrong
-default. Making PHS the default *before* fixing blockers 2 and 3 would have
-broken AD and calibration for every caller who trusts the default: exactly the
-class of bug this whole programme exists to remove.
+Reproduced exactly: **6 `BoundsError`s** in `test_clm_driver`, every one inside
+`get_froot_carbon_patch`. Two distinct causes, and only one was the fixture's
+fault.
 
-## Order of work to unblock
+**3a — a real port fragility (2 of the 6).** `clm_drv_core!` decided CN-vs-SP
+*itself* and then called the facade, which decides **again** on its own
+`veg.config.use_cn`:
 
-1. Fix `_Psn2Pft`'s type unification (blocker 2) — highest value on its own
-   merit, since it makes the photosynthesis path AD-safe regardless of PHS.
-2. Fix the PHS init/allocation gap (blocker 3).
-3. Re-run this experiment; if clean, land the default as a **conditional**
-   (`!use_fates`, blocker 1) with the same evidence discipline used for
-   `use_bedrock` (#252) and `use_aquifer_layer` (#259).
+```julia
+config.use_cn ? get_froot_carbon_patch(veg, bc_patch)      # no PFT inputs
+              : get_froot_carbon_patch(veg, bc_patch; tlai, slatop, froot_leaf, ivt)
+```
 
-`use_luna` (row M4) is untouched and remains queued behind this.
+When the two configs disagree, the driver's CN call lands in the facade's SP
+branch with all four PFT inputs defaulted **empty** → `BoundsError` on
+`ivtH[p]`. Fortran's `CNVegetationFacade` owns that choice; the port duplicated
+it. Fixed by passing the SP inputs unconditionally and letting the facade
+branch. The CN path is unchanged (the kwargs are read only by the SP branch).
+
+**3b — fixture incoherence (4 of the 6), fixed the #271 way.** The
+`make_driver_data` fixture hardcodes a BTRAN-era pftcon list; with PHS now the
+default it runs the PHS path, which reads three parameters the fixture never
+set. The fix is to give the fixture **real parameter values** — not to weaken
+#263's guard, which is new and was doing its job:
+
+| parameter | value | source |
+|---|---|---|
+| `froot_leaf` | 2.8143 | `clm5_params.nc`, all veg PFTs |
+| `root_radius` | `ROOT_RADIUS_PARAM` = 0.29e-3 m | `pftcon.jl:107` (constant, not file-read) |
+| `root_density` | `ROOT_DENSITY_PARAM` = 0.31e6 | `pftcon.jl:106` |
+
+**A silent NaN found on the way.** `set_params_for_testing!` (the port of
+Fortran's `setParamsForTesting`) sets only `ck` and `psi50`, while
+`photo_params_init!` leaves `krmax`, `kmax` and `theta_cj` at **NaN**. Nothing
+read them on the BTRAN default. The PHS path does — and NaN there is a *silent
+wrong answer*, not an error: no `BoundsError`, no guard, just a quiet NaN
+propagating into the PHS conductance chain. The fixture now seeds the real
+`clm5_params.nc` values (`krmax` 7.943e-10, `kmax` 2e-8, `theta_cj` 0.98).
+
+That is the `conservation-is-not-accuracy` lesson in miniature: the loud failure
+was the easy one, and the thing worth finding was the quiet one next to it.
+
+## Why this landed and #261 did not
+
+Nothing was tuned to pass. Every one of the 18 original errors was traced to a
+defect and fixed at the defect:
+
+| blocker | original errors | disposition |
+|---|---|---|
+| 1 — PHS+FATES exclusivity | 3 | conditional default (`nothing` → `!use_fates`) |
+| 2 — `_Psn2Pft` AD unification | 14 | **real port gap** — `crop_pft` built at the AD element type (#262, one field over) |
+| 3 — unallocated PHS state | ~6 | **1 real port fragility** (duplicated CN branch) + fixture given real parameters |
+
+Errors mean a port gap; value mismatches mean a test calibrated to the old
+default. These were errors, and they were gaps.
+
+## Full-suite measurement
+
+See the PR body for the baseline-vs-after diff with every moved test named.

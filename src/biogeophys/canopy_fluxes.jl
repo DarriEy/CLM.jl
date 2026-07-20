@@ -1852,8 +1852,18 @@ function canopy_fluxes_core!(
             # input guard below; no-op when crop_pft is populated (default path
             # byte-identical). Without this an empty crop_pft is an @inbounds OOB
             # read that throws under --check-bounds=yes.
-            crop_pft_s = isempty(crop_pft) ?
-                _to_backend_like(ivt_vec, FT, zeros(FT, length(medlynslope_pft))) : crop_pft
+            #
+            # The substitute must be built at the SIBLING PFT vector's type, NOT at
+            # FT. FT is the AD element type (`Dual` under ForwardDiff), and crop_pft
+            # is a CONSTANT per-PFT parameter carrying no derivative. Widening it to
+            # Dual is not merely wasteful: `_Psn2Pft{Vp}` declares all eight pft
+            # fields with ONE shared type parameter, so seven `Vector{Float64}` plus
+            # one `Vector{Dual}` fails to unify and PHS pass-2 construction throws
+            # `MethodError`. That is exactly the defect #262 fixed for
+            # `lmr_intercept_atkin`; this was the same bug one field over, and it is
+            # what made PHS non-differentiable. `zero(medlynslope_pft)` keeps both
+            # the eltype AND the container (device array stays a device array).
+            crop_pft_s = isempty(crop_pft) ? zero(medlynslope_pft) : crop_pft
 
           if use_hydrstress
             # --- PHS photosynthesis (plant hydraulic stress) ---

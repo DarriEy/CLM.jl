@@ -175,10 +175,25 @@ Live: `BASEFLOW_SCALAR[]` feeds the drainage computation in `soil_hydrology.jl`.
 ```
 
 CTSM `clm5_0` / non-FATES / `configuration="clm"` → **`.true.`** (plant hydraulic
-stress is the CLM5 default photosynthesis path). CLM.jl defaults **`false`** in
-`clm_initialize!`, `clm_run!` and `CLMDriverConfig`. Consequence: the default
-driver uses the Soil-Moisture-Stress (BTRAN) path rather than PHS, changing
-stomatal conductance, transpiration and GPP under water stress.
+stress is the CLM5 default photosynthesis path). CLM.jl defaulted **`false`** in
+`clm_initialize!`, `clm_run!` and `CLMDriverConfig` — CTSM's *code fallback*
+(`clm_varctl.F90`), not its namelist default: the same root cause as
+#252/#259/#267. Consequence: the default driver used the Soil-Moisture-Stress
+(BTRAN) path rather than PHS, changing stomatal conductance, transpiration and
+GPP under water stress.
+
+**FIXED in the PHS campaign** — `use_hydrstress` is now `Union{Bool,Nothing}`
+with `nothing` → `!use_fates`, matching `use_bedrock` (#252) and `use_luna`
+(#267). The default has to be CONDITIONAL rather than a bare `true` because
+`control.jl:102` endruns on PHS+FATES, mirroring CTSM: the `.true.` namelist
+default applies to the non-FATES configuration only.
+
+`varctl.use_hydrstress` keeps its `false` **struct** default, which mirrors
+CTSM's code fallback; it is the DERIVATION that carries the namelist default
+(the #265 principle, as for `create_crop_landunit`).
+
+See `docs/PHS_DEFAULT_BLOCKERS.md` for the blocker history and the measured
+suite diff.
 
 ### M4 — `use_luna` (CONDITIONAL-MISMATCH, live)
 
@@ -336,7 +351,7 @@ anyway: an inert wrong default is a landmine for the first consumer).
 | `h2osfcflag` | `1` | `1` (code fallback `SoilHydrologyType.F90:339,347`) | **MATCH** (fixed #225) | surface-water store disabled | `parity_run_domain.jl` (now redundant) |
 | `use_aquifer_layer` | `true` | **`.false.`** (derived: `clm5_0`→method 1→lbc 2 = `bc_zero_flux`) | **MISMATCH** | selects CLM4.5 Zeng-Decker-2009 + aquifer solver instead of CLM5 moisture-form + zero-flux; CTSM `endrun`s on this combined with `use_bedrock=true` | 16 scripts (see M1) |
 | `baseflow_scalar` | `1.0e-2` | **`0.001`** (`lbc=2`); `1.d-2` only for `lbc=1` or `clm4_5` | **MISMATCH** | 10× drainage/baseflow rate | `parity_run_domain.jl` (per-domain) |
-| `use_hydrstress` | `false` | **`.true.`** (`clm5_0`, non-FATES, `configuration="clm"`) | **COND-MISMATCH** | PHS off → BTRAN path; different gs/transpiration/GPP under stress | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `probe_h2osfc_subdaily.jl` |
+| `use_hydrstress` | `nothing` → `!use_fates` (**FIXED**) | **`.true.`** (`clm5_0`, non-FATES, `configuration="clm"`) | **COND-MISMATCH — CLOSED** | was: PHS off → BTRAN path; different gs/transpiration/GPP under stress | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `probe_h2osfc_subdaily.jl` |
 | `use_luna` | `nothing` → `!use_fates` | **`.true.`** (`clm5_0`, non-FATES) | **FIXED** (this campaign) | — but see the LUNA-consumption gap below: the flip is currently INERT on the default non-PHS path | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `fortran_parity_cn_coldstart.jl` (now redundant) |
 | `int_snow_max` | `2000.0` | `2000.` (`1.e30` for `clm4_5`) | **MATCH** | — | — |
 | `dtime` | `1800` | `1800` | **MATCH** | — | — |
@@ -570,7 +585,7 @@ CN campaign outright.
 |---|---|
 | Flags audited | **~110** (16 driver-entry keywords + 79 `varctl` fields + `CLMDriverConfig` switches + the `use_flexibleCN` cascade) |
 | MATCH | ~85 |
-| MISMATCH — live physics | **5** (`use_aquifer_layer`, `baseflow_scalar`, `use_hydrstress`, `use_luna`, `convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). `create_crop_landunit` was the 6th — **fixed**, see M5 |
+| MISMATCH — live physics | **3 remaining** (`use_aquifer_layer`, `baseflow_scalar`, `convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). Originally 6: `create_crop_landunit` **fixed** (M5), `use_luna` **fixed** (#267, M4), `use_hydrstress` **fixed** (PHS campaign, M3) |
 | MISMATCH — inert (0 reads / guarded) | 12 (`nsegspc`, `nyr_forcing`, `h2osno_max`, `n_dom_landunits`, `n_dom_pfts`, 6× `toosmall_*`, `downscale_hillslope_meteorology`, `z0param_method`) |
 | CONDITIONAL-MISMATCH under `use_cn=true` | 8 (the `use_flexibleCN` cascade, M6) |
 | Namelist-vs-code-fallback disagreements found | **14** — CLM.jl copied the code fallback in *every* case |
@@ -582,12 +597,11 @@ changed**, because each is a model-configuration decision rather than a
 mechanical correction, and flipping them silently would be the mirror image of
 the bug this audit exists to catch:
 
-- **`use_hydrstress` / `use_luna` (M3, M4).** Turning PHS and LUNA on by default
-  switches the photosynthesis pathway for every caller. Both are already
-  validated *when enabled* (see the PHS and LUNA parity work), so the physics is
-  not in question — but the default flip changes every number in every test that
-  does not pass them explicitly, and it should land as its own change with its
-  own parity evidence, not buried in a defaults sweep.
+- ~~**`use_hydrstress` / `use_luna` (M3, M4).**~~ **Both are now CLOSED**, each as
+  its own change with its own evidence, exactly as this section asked: `use_luna`
+  in #267 and `use_hydrstress` in the PHS campaign
+  (`docs/PHS_DEFAULT_BLOCKERS.md`). Both landed as CONDITIONAL defaults
+  (`nothing` → `!use_fates`), not bare flips.
 - **The `use_flexibleCN` cascade (M6).** Eight coupled flags; enabling
   flexible-CN needs a validation campaign against a Fortran CN reference, not a
   one-line default change.

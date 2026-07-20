@@ -200,7 +200,10 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           # CTSM-derived default: .false. for clm5_0 (see clm_initialize!).
                           use_aquifer_layer::Bool=false,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
-                          n_drydep::Int=0, use_hydrstress::Bool=false,
+                          n_drydep::Int=0,
+                          # CTSM-conditional default: .false. under FATES, .true.
+                          # otherwise (clm5_0 configuration="clm"). See clm_initialize!.
+                          use_hydrstress::Union{Bool,Nothing}=nothing,
                           # CTSM-conditional default (namelist_defaults_ctsm.xml:578-580):
                           # .false. under FATES, .true. otherwise. See clm_initialize!.
                           use_luna::Union{Bool,Nothing}=nothing,
@@ -237,8 +240,11 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     # Resolve the conditional default: FATES runs get .false. (CTSM endrun's on
     # LUNA+FATES, controlMod.F90:505); everything else gets CLM5's .true.
     _use_luna = use_luna === nothing ? !use_fates : use_luna
+    # Same conditional for PHS: control.jl:102 endruns on PHS+FATES, so the CLM5
+    # .true. default applies to the non-FATES configuration only.
+    _use_hydrstress = use_hydrstress === nothing ? !use_fates : use_hydrstress
     CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
-                    use_soil_moisture_streams, use_lai_streams, n_drydep, use_hydrstress, _use_luna,
+                    use_soil_moisture_streams, use_lai_streams, n_drydep, _use_hydrstress, _use_luna,
                     use_voc, use_ozone, megan, nothing, dust, dyn_subgrid, use_threaded_clumps)
 end
 
@@ -1327,12 +1333,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     # froot_carbon=0 → root_biomass_density floored to c_to_b → r_soil ~70x too large
     # → soil-to-root conductance ~48x too small → over-stressed stomata (rss pinned to
     # rsmax). Compute it whenever PHS is on, matching Fortran for either mode.
+    # The FACADE owns the CN-vs-SP choice (it branches on its own
+    # `veg.config.use_cn`, exactly as Fortran's CNVegetationFacade does), so pass
+    # the SP inputs unconditionally rather than duplicating the decision here.
+    # Deciding it twice meant that if the driver config and the facade config ever
+    # disagreed, the driver's CN branch landed in the facade's SP branch with all
+    # four PFT inputs defaulted EMPTY — an immediate BoundsError. The kwargs are
+    # read only by the SP branch, so the CN path is unchanged.
     phs_froot_c = if config.use_hydrstress
-        config.use_cn ?
-            get_froot_carbon_patch(inst.bgc_vegetation, bc_patch) :
-            get_froot_carbon_patch(inst.bgc_vegetation, bc_patch;
-                tlai=cs.tlai_patch, slatop=pftcon.slatop,
-                froot_leaf=pftcon.froot_leaf, ivt=(pch.itype .+ 1))
+        get_froot_carbon_patch(inst.bgc_vegetation, bc_patch;
+            tlai=cs.tlai_patch, slatop=pftcon.slatop,
+            froot_leaf=pftcon.froot_leaf, ivt=(pch.itype .+ 1))
     else
         FT[]
     end

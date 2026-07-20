@@ -162,6 +162,22 @@
         p.medlynslope     = fill(6.0, npft)
         p.crop          = fill(0.0, npft)
 
+        # --- PHS (plant hydraulic stress) PFT parameters ---
+        # #267/#271 shape: CLMDriverConfig() now resolves use_hydrstress=true
+        # (CTSM's clm5_0 non-FATES default), so this fixture RUNS the PHS path and
+        # has to supply what PHS reads. Hardcoding a BTRAN-era parameter list left
+        # the fixture incoherent with its own config.
+        #
+        # These are the real clm5_params.nc values, not placeholders:
+        #   froot_leaf 2.8143 (all veg PFTs; 0 for bare)
+        #   root_radius/root_density are the pftcon.jl constants, not file-read.
+        # get_froot_carbon_patch's SP branch indexes froot_leaf[pft] with NO
+        # @inbounds (a hard BoundsError when empty), and _psn_phs_pass1_update!
+        # indexes all three by ivt — #263 added a loud check for exactly this.
+        p.froot_leaf    = fill(2.8143, npft)
+        p.root_radius   = fill(CLM.ROOT_RADIUS_PARAM, npft)
+        p.root_density  = fill(CLM.ROOT_DENSITY_PARAM, npft)
+
         # --- Water state: give the fixture a FINITE water column ---
         # This used to be left entirely at its NaN init: h2osoi_liq/ice, h2osno,
         # h2osfc, wa and the canopy stores were all NaN, so begwb/endwb were NaN,
@@ -226,6 +242,13 @@
         # LUNA-free init here left the fixture incoherent with its own config.
         CLM.photosynthesis_data_init!(photosyns, np; use_luna=config.use_luna)
         CLM.set_params_for_testing!(photosyns)
+        # set_params_for_testing! (Fortran setParamsForTesting) sets only ck and
+        # psi50; photo_params_init! leaves krmax/kmax/theta_cj at NaN. Nothing read
+        # them on the BTRAN default — the PHS path does, and NaN there is a SILENT
+        # wrong answer rather than an error. Seed the real clm5_params.nc values.
+        CLM.params_inst.krmax    .= 7.94328234724282e-10  # modal veg PFT
+        CLM.params_inst.kmax     .= 2.0e-8                # all veg PFTs
+        CLM.params_inst.theta_cj .= 0.98                  # C3
 
         return inst, bounds, filt, filt_ia, config, photosyns
     end
