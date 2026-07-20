@@ -27,8 +27,11 @@ A flipped default silently re-points a harness at a different code path.
 | passed first time | 114 |
 | **failed** | **9** |
 
-Of the 9: **7 fixed here**, 1 blocked on missing input data (not a defect), 1 left
-open as a genuine device divergence.
+Of the 9: **8 fixed here**, 1 blocked on missing input data (not a defect). The last
+one (`watertablevariants`) was initially logged as an open device divergence but
+turned out to be a harness fixture bug and is now also fixed — see the resolved item
+below. A separate, softer CPU-side issue (`combine_snow_layers!` optimization
+dependence) remains open and is not a device-parity failure.
 
 Three of the failures were already failing at the #258 commit (`a99a4ce`) — verified
 by re-running them there in a detached worktree. They are not regressions from the
@@ -116,9 +119,25 @@ Both harnesses also pass under `--check-bounds=yes`.
 
 ## Still open
 
-1. **`gpu_validate_watertablevariants_e2e` — genuine device divergence.**
-   `zwt_perched` and `zwt` are NaN on device (host finite); `frost_table` rel 1.0;
-   `h2osoi_vol` is exact. Not an arity or fixture-shape problem. **Top follow-up.**
+1. ~~`gpu_validate_watertablevariants_e2e` — genuine device divergence.~~
+   **RESOLVED — it was a harness fixture bug, not a device/port bug.** The initial
+   read here ("device NaN, host finite; not a fixture-shape problem") was wrong on
+   both counts. Reproducing it showed **host = NaN, device = 0.0**, and the cause was
+   fixture layout: both water-table kernels index the snow+soil column arrays with the
+   standard snow offset (soil layer k at padded index `k + nlevsno`, interfaces at
+   `k + nlevsno + 1`) — what the real caller passes (`col.dz/col.z/col.zi` are
+   nc×(nlevsno+nlevgrnd), init_vertical.jl:152-160) and how every state field is laid
+   out. The harness built `col_dz/col_z/col_zi` as soil-only nc×nlevsoi and wrote
+   h2osoi_liq/ice and t_soisno at `[c,k]` instead of `[c,k+nlevsno]`, so the geometry
+   reads ran off the end of the 20-wide arrays: CPU `@inbounds` returned adjacent-heap
+   garbage (NaN), Metal's OOB read returned 0.0. h2osoi_liq/ice were mis-written but
+   stayed in bounds of their 37-wide arrays, so `h2osoi_vol` matched device==host on
+   shifted-but-consistent values — a green 0.0 over physically wrong inputs.
+   Fix (harness only, no `src/` change): build geometry snow-padded, write soil
+   quantities at `k+nlevsno`, keep `watsat_col` soil-indexed. All four columns now pass
+   with finite, per-column-distinct depths (zwt 0.05 / 1.39 / 27.1 / 104.5 m across the
+   four branches), and it passes under `--check-bounds=yes` — the mode that would have
+   thrown a BoundsError on the original OOB instead of silently reading garbage.
 
 2. **`combine_snow_layers!` gives an optimization-dependent answer on the KA CPU
    backend.** Under `--check-bounds=yes` the **host** returns

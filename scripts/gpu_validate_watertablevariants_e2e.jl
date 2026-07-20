@@ -37,11 +37,15 @@ function reldiff(a, b)
 end
 cpu_has_finite(a) = any(isfinite, Array(a))
 
-# Build a small instance for the perched/theta water-table variants. Geometry
-# uses direct [c,k] indexing (nc x nlevsoi), matching the host loops / tests.
+# Build a small instance for the perched/theta water-table variants. Geometry and
+# state use the snow+soil offset layout the kernels actually index (soil layer k at
+# padded index k+nlevsno) — see the note inside build(). watsat_col alone is
+# soil-indexed. This mirrors what the real caller (clm_driver.jl) passes.
 function build(::Type{FT}) where {FT}
     CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
-    nlevsoi = CLM.varpar.nlevsoi
+    nlevsoi  = CLM.varpar.nlevsoi
+    nlevsno  = CLM.varpar.nlevsno
+    nlevgrnd = CLM.varpar.nlevgrnd
     nc = 4; np = 4; nl = 1; ng = 1
 
     sh = CLM.SoilHydrologyData{FT}(); CLM.soilhydrology_init!(sh, nc)
@@ -49,31 +53,54 @@ function build(::Type{FT}) where {FT}
     ws = CLM.WaterStateData{FT}();    CLM.waterstate_init!(ws, nc, np, nl, ng)
     temp = CLM.TemperatureData{FT}(); CLM.temperature_init!(temp, np, nc, nl, ng)
 
-    # --- geometry: direct [c,k] soil-layer thickness/depth/interface (m) ---
-    col_dz = fill(FT(NaN), nc, nlevsoi)
-    col_z  = fill(FT(NaN), nc, nlevsoi)
-    col_zi = fill(FT(NaN), nc, nlevsoi)
+    # Both kernels index the snow+soil column arrays with the standard snow offset:
+    # a soil-layer quantity for layer k lives at padded index k + joff (joff = nlevsno),
+    # and an interface at k + joff_zi (joff_zi = nlevsno + 1, with the soil surface at
+    # index joff_zi). This is the layout the real caller passes (col.dz/col.z/col.zi
+    # are nc × (nlevsno+nlevgrnd); init_vertical.jl:152-160 fills them at that offset)
+    # AND the layout of every state field here — waterstate/temperature arrays are all
+    # nc × 37 = nc × (nlevsno+nlevgrnd). The one exception is watsat_col, which is a
+    # SOIL-ONLY nc × nlevgrnd array the kernels read at [c, k] with NO offset.
+    #
+    # The previous fixture built col_dz/col_z/col_zi as soil-only nc × nlevsoi arrays
+    # and wrote h2osoi_liq/ice and t_soisno at [c, k] instead of [c, k+joff]. The
+    # geometry reads then ran OFF THE END of the 20-wide arrays: on CPU @inbounds
+    # returned adjacent-heap garbage (zwt/frost_table = NaN / bogus depths), on Metal
+    # the out-of-bounds read returned 0.0 — a real device divergence that was purely a
+    # fixture-layout error. (h2osoi_liq/ice were mis-written but stayed IN bounds of
+    # their 37-wide arrays, so h2osoi_vol matched device-to-host on shifted-but-
+    # consistent values — a green number over physically wrong inputs.)
+    joff    = nlevsno
+    joff_zi = nlevsno + 1
+
+    # --- geometry: snow+soil padded, soil layer k at index k+joff (matches col.dz) ---
+    npad_g  = nlevsno + nlevgrnd
+    col_dz = zeros(FT, nc, npad_g)
+    col_z  = zeros(FT, nc, npad_g)
+    col_zi = zeros(FT, nc, npad_g + 1)
+    zi_bot = FT(0)
     for c in 1:nc
         zi_prev = FT(0.0)
+        col_zi[c, joff_zi] = FT(0.0)              # soil surface interface
         for k in 1:nlevsoi
             dz = FT(0.05) * FT(1.4)^(k - 1)
-            col_dz[c, k] = dz
+            col_dz[c, k + joff] = dz
             zi = zi_prev + dz
-            col_zi[c, k] = zi
-            col_z[c, k]  = FT(0.5) * (zi_prev + zi)
+            col_zi[c, k + joff_zi] = zi           # interface below soil layer k
+            col_z[c,  k + joff]    = FT(0.5) * (zi_prev + zi)
             zi_prev = zi
         end
+        zi_bot = zi_prev
     end
-    zi_bot = Array(col_zi)[1, nlevsoi]
 
-    # --- soil hydraulic properties (per column,layer) ---
+    # --- soil hydraulic properties: watsat is SOIL-INDEXED (no offset) ---
     for c in 1:nc, k in 1:nlevsoi
         ss.watsat_col[c, k] = FT(0.45)
     end
 
-    # --- temperature: warm everywhere by default ---
+    # --- temperature: warm everywhere by default (offset-indexed) ---
     for c in 1:nc, k in 1:nlevsoi
-        temp.t_soisno_col[c, k] = FT(285.0)
+        temp.t_soisno_col[c, k + joff] = FT(285.0)
     end
 
     # --- per-column water table scalars ---
@@ -83,12 +110,15 @@ function build(::Type{FT}) where {FT}
         sh.frost_table_col[c] = FT(0.0)
     end
 
-    # Helper to set a column's moisture by per-layer saturation fraction.
+    # Helper to set a column's moisture by per-layer saturation fraction. h2osoi_liq/ice
+    # are offset-indexed (k+joff), exactly what the kernels read; h2osoi_vol_col is the
+    # kernel's OUTPUT (soil-indexed [c,k]) and is seeded NaN so a both-NaN false PASS
+    # cannot slip through if the kernel ever fails to write it.
     setcol! = (c, fracs) -> begin
         for k in 1:nlevsoi
             f = fracs(k)
-            ws.h2osoi_liq_col[c, k] = f * FT(0.45) * Array(col_dz)[c, k] * FT(1000.0)
-            ws.h2osoi_ice_col[c, k] = FT(0.0)
+            ws.h2osoi_liq_col[c, k + joff] = f * FT(0.45) * col_dz[c, k + joff] * FT(1000.0)
+            ws.h2osoi_ice_col[c, k + joff] = FT(0.0)
             ws.h2osoi_vol_col[c, k] = FT(NaN)
         end
     end
@@ -111,7 +141,7 @@ function build(::Type{FT}) where {FT}
     # Perched: col 4 has frozen layers below k=6 (so k_frz>=2, no index-0 OOB),
     # with a saturated→dry transition above the frost table for the perched search.
     for k in 1:nlevsoi
-        temp.t_soisno_col[4, k] = k <= 5 ? FT(285.0) : FT(270.0)
+        temp.t_soisno_col[4, k + joff] = k <= 5 ? FT(285.0) : FT(270.0)
     end
     # Keep zwt below the frost table for col 4 so the perched search runs.
     sh.zwt_col[4] = FT(0.95 * zi_bot)
