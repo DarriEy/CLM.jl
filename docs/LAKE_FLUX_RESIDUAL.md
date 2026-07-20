@@ -333,9 +333,25 @@ harness prints the histogram). A 273 K lake under 255 K air is strongly
 convective, so the one branch the port had was the one branch the reference never
 needed. Regimes 3 and 4 are unreachable on this reference and are covered by the
 unit tests in `test/test_lake_ref2m.jl` instead, which assert each branch is
-reached, matches the independently-ported array form of the same Fortran
-(`friction_velocity!`) to 1e-12, and differs from the old regime-2 expression by
->5%.
+reached and matches the independently-ported array form of the same Fortran
+(`friction_velocity!`) to 1e-12.
+
+**How much the regime-1 branch actually changes the answer — and where.** A first
+version of that test asserted ">5% different from the old regime-2 expression" at
+`zeta = -3.0` and FAILED at **0.52%**. The failure was correct and is worth
+recording: regimes 1 and 2 JOIN CONTINUOUSLY at `-zeta*` by construction, so just
+past the transition they agree to a fraction of a percent. Measured at the
+reference's own condition (`zeta = -100`, `obu = -0.3 m`) the split is:
+
+| profile | old regime-2-only | regime 1 | change |
+|---|---|---|---|
+| momentum `denom_m` | 5.96 | 8.78 | **+32%** |
+| heat `denom_h` | 5.89 | 6.07 | +3.0% |
+
+That asymmetry IS the parity result: `ustar` moved a long way (0.075 -> 0.058,
+onto Fortran's ~0.061) while `temp1` barely moved, which is why C corrected the
+momentum profile but left `rah` dominated by defect D below. Testing the branch
+near its transition would have made this fix look cosmetic.
 
 ### D (NEW, open) — the lake never freezes, so it is on the WRONG roughness branch
 
