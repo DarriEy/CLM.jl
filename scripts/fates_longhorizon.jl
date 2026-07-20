@@ -167,6 +167,22 @@ function build()
             for j in 1:ngr; temp.t_soisno_col[c, joff+j]=299.0; end
         end
     end
+    # DIAGNOSTIC-ONLY escape hatch. On current `main` this site trips a FATAL
+    # longwave energy-balance error (errlon ~ -410 W/m2 at p=7) around day 74-98,
+    # so a multi-YEAR demographic trajectory cannot be measured at all. That is a
+    # real, unfixed defect and it is NOT the subject of this harness. Setting
+    # FATES_SOFT_BALANCE=1 degrades every hard balance error to a warning so the
+    # demography can be observed past it.
+    #
+    # A run with this set has a KNOWN, UNCLOSED energy balance: its absolute
+    # carbon numbers are NOT trustworthy. Use it only to read the SHAPE of the
+    # demographic trajectory (boom-bust vs. bounded), never as a parity or
+    # conservation result. Default OFF -> byte-identical, still fatal.
+    if get(ENV,"FATES_SOFT_BALANCE","0")=="1"
+        inst.balcheck.hard_error = false
+        println("  [DIAG] FATES_SOFT_BALANCE=1: balance hard errors degraded to warnings.")
+        println("         Absolute carbon is NOT trustworthy in this run — trajectory SHAPE only.")
+    end
     config = _C.CLMDriverConfig(use_fates=true)
     filt_ia = _C.clump_filter_inactive_and_active
     return inst, inst.fates, config, bounds, filt, filt_ia
