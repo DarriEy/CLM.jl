@@ -27,7 +27,11 @@
 # ==========================================================================
 using CLM, Printf, Dates
 const _C = CLM
-const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+# Honour SYMFLUENCE_DATA like every other harness (test/testdata.jl's
+# `symfluence_data_root()`). This was HARDCODED, which is why #227 reported
+# "Tropical Aripuana data is absent in this environment" and skipped the tropical
+# arm: the domain existed, just under a different root the script could not see.
+const DATA = get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
 
 # ---- FATES default PFT phenology (data/fates/fates_params_default.cdl) --------
 # idx name                                 evergrn season_decid stress_decid
