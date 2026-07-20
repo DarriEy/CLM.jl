@@ -103,8 +103,10 @@ end
 
 # use_bedrock. This harness INHERITED the driver default, so #252 (which made that
 # default conditional -- `use_fates => false`, previously `true`) silently flipped it
-# under us. That flip is what makes every multi-year run here die at day 74 on a
-# 400 W/m2 longwave imbalance. `nothing` = inherit the (correct, CTSM-matching)
+# under us. At #252 that flip IS what makes multi-year runs here die at day 74 on a
+# 400 W/m2 longwave imbalance (pinning it back to `true` there rescues the run) -- but
+# on current main pinning no longer rescues, so a SECOND defect followed it. See
+# fates_fortran_parity/README.md D4. `nothing` = inherit the (correct, CTSM-matching)
 # conditional default; FATES_USE_BEDROCK=1/0 pins it, for attributing that failure.
 _use_bedrock() = (v = get(ENV, "FATES_USE_BEDROCK", "");
                   v == "1" ? true : v == "0" ? false : nothing)
