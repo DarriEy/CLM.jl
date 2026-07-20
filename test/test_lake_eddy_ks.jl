@@ -54,9 +54,22 @@ using Test, CLM
     @test exp(-ks_ref * 5.0) < 1.0e-4
     @test exp(-0.0     * 5.0) == 1.0     # what the port did before this fix
 
-    # Degrees-for-radians would be a silent 1.7e2x error in the argument of sin;
-    # pin the unit by asserting the two disagree materially.
-    @test abs(ks_fortran(51.17, u2m_ref) - ks_ref) / ks_ref > 0.1
+    # Degrees-for-radians is a silent unit error in the argument of sin. Pin the
+    # unit by ANALYTIC VALUE at a latitude whose sine is exact:
+    #   lat = pi/6 rad = 30 deg -> |sin| = 0.5 exactly.
+    # Reading pi/6 as DEGREES gives sin(0.5236 deg) = 0.00914, i.e. sqrt() is 7.4x
+    # smaller — so this single equality separates the two readings unambiguously.
+    @test ks_fortran(pi/6, 1.0) ≈ 6.6 * sqrt(0.5) rtol=1e-12
+    @test ks_fortran(pi/6, 1.0) / ks_fortran(deg2rad(pi/6), 1.0) > 7.0
+    #
+    # NOTE ON THE PREMISE, because the first version of this pin FAILED and the
+    # failure was correct: it compared ks(51.17) against ks(51.17*pi/180) at the
+    # reference's own latitude and asserted they differ by >10%. They differ by
+    # 0.46% — 51.17 rad wraps to 0.905 rad, whose sine (0.786) is coincidentally
+    # almost exactly sin(51.17 deg) = 0.779. Testing a unit convention at a value
+    # where the two conventions happen to agree proves nothing; the fix is to move
+    # the test to where the distinction actually lives, not to lower the bound.
+    # Bow is still checked below, but for MAGNITUDE, not for units.
 
     # The equator is the one place the sqrt has an infinite derivative, which is
     # why the port had written a literal zero. The branch must still return an
