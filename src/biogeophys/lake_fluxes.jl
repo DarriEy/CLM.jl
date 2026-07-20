@@ -30,7 +30,17 @@
 # Lake-specific constants (normally from LakeCon.F90)
 const EMG_LAKE = 0.97          # lake surface emissivity
 const BETAVIS_LAKE = 0.4       # fraction of visible radiation absorbed at surface
-const MINZ0LAKE = 1.0e-5       # minimum lake roughness length [m]
+# LakeCon.F90:143-158 sets fcrit and minz0lake as a PAIR, chosen by the
+# `lake_use_old_fcrit_minz0` namelist flag (default .false., LakeCon.F90:98):
+#   .true.  (Subin et al. 2011)  -> fcrit = 22.0,  minz0lake = 1.0e-5
+#   .false. (Vickers&Mahrt 1997) -> fcrit = 100.0, minz0lake = 1.0e-10
+# This file previously took FCRIT from the new branch and MINZ0LAKE from the old
+# one, which is not a configuration CTSM can ever be in. `lake_con.jl` already
+# defaults `lake_use_old_fcrit_minz0 = false`, so the new branch is the one the
+# port is on: minz0lake is 1e-10, "set low so it is only to avoid floating point
+# exceptions" — NOT a physical floor. At 1e-5 it is a 1e5x floor waiting to bite
+# any case where the Charnock roughness legitimately drops below 1e-5 m.
+const MINZ0LAKE = 1.0e-10      # minimum lake roughness length [m] (LakeCon minz0lake)
 const TDMAX_LAKE = 277.0       # temperature of maximum water density [K]
 
 # Aerodynamic parameters
