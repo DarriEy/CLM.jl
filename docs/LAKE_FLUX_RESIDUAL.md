@@ -260,22 +260,165 @@ term. That changes `temp1` → `rah` → FSH/EFLX_LH directly, in the right magn
 ~10% flux bias. Regimes 3/4 are additionally unreachable in the port but do not fire in
 this particular winter-lake case.
 
+## STEP 3 — B and C fixed; C exposed a FOURTH defect (D)
+
+Both port defects are now fixed. Each was measured on its own run so neither is
+tuned against the other. Harness: `scripts/fortran_parity_lake.jl 47`, per-field
+max|rel| over the run.
+
+| field | baseline | after B | after C (= B+C) |
+|---|---|---|---|
+| FSH | 3.10e-01 | 3.10e-01 | **2.70e-01** |
+| EFLX_LH | 2.80e-01 | 2.80e-01 | **2.70e-01** |
+| TSA | 1.10e-01 | **8.30e-03** | 7.40e-03 |
+| TLAKE | 6.50e-03 | 6.50e-03 | 1.30e-02 |
+| LAKEICE / LAKEICE_SRF | 1.80e-02 | 1.80e-02 | **3.80e-01** |
+| TG | 1.30e-02 | 1.30e-02 | 3.30e-02 |
+| FIRE | 5.00e-02 | 5.00e-02 | 1.40e-01 |
+| run max\|rel\| | 3.108e-01 | 3.108e-01 | 4.966e-01 |
+
+### B — `t_ref2m` wired (LakeFluxesMod.F90:707-717)
+
+CTSM computes the lake 2-m diagnostics in the loop AFTER the stability
+iteration, from the profile coefficients the iteration converged on:
+
+```
+t_ref2m = thm + temp1*dth*(1/temp12m - 1/temp1)
+q_ref2m = forc_q + temp2*dqh*(1/temp22m - 1/temp2)
+rh_ref2m = min(100, q_ref2m/QSat(t_ref2m)*100)
+```
+
+`temp12m`/`temp22m` are the same profile relations evaluated at `zldis = 2 + z0h`
+(`FrictionVelocityMod.F90:1010-1050`), and `dth`/`dqh` are as last set INSIDE the
+iteration (F90:535-536) — i.e. before the Phase-3 freeze corrections touch
+`t_grnd`, so they must be carried out of the loop rather than recomputed.
+
+Effect: **TSA 1.10e-01 -> 8.30e-03** (a flat 283.000 K against a 255-270 K
+reference, i.e. 13-28 K, becomes max ~1.9 K on the cold-start transient and
+~0.1 K by the end of the run). Every other field is BYTE-IDENTICAL, which is the
+expected signature of a pure dead-write fix: nothing else reads the field.
+
+Note lake `z0` is a function of `ustar` (F90:570-582 Subin/Charnock for open
+water, ZengWang2007 off `ust_lake` when frozen), unlike the land path's fixed
+`zlnd`/`zsno` — so `temp12m` had to be evaluated inside the iteration where the
+converged `z0hg` lives, not from a stored roughness afterwards.
+
+### C — all four stability regimes ported
+
+`FrictionVelocityMod.F90` branches four ways on `zeta`, identically for the
+momentum profile (`:847-861`, transition `zetam = 1.574`) and the
+temperature/humidity profile (`:946-960`, transition `zetat = 0.465`):
+
+1. `zeta < -zeta*` very unstable — log capped at the transition + a convective
+   correction (`1.14*((-zeta)^0.333 - zetam^0.333)` momentum,
+   `0.8*(zetat^-0.333 - (-zeta)^-0.333)` heat)
+2. `zeta < 0` unstable — plain log + `StabilityFunc`
+3. `0 <= zeta <= 1` stable — `log + 5*zeta - 5*z0/obu`
+4. `zeta > 1` very stable — log capped at `obu` + `5*log(zeta)+zeta-1`
+
+The port implemented **regime 2 only**, and `stability_func1/2` clamp their
+argument at 0, so above neutral the correction silently vanished and regimes 3/4
+were unreachable. Now a single scalar, GPU-safe pair —
+`mo_profile_denom_m` / `mo_profile_denom_h` in `src/types/friction_velocity.jl` —
+carries all four branches for every caller. The kernel's pre-existing
+`clamp(zeta, -100, ZETAMAX_LAKE)` before the profile evaluation was also removed:
+that is Fortran's clamp on the zeta UPDATE (F90:544-551, still applied), not a
+clamp inside `FrictionVelocity`, and it truncated exactly the convective range
+the four-way branch exists to handle.
+
+**Which regime does the reference exercise?** All 47 steps are in **regime 1**.
+`zeta` stays in `[-100.000, -15.729]` and never rises above the `-zetat = -0.465`
+transition (`frictionvel.zeta_patch` is now written by the lake kernel; the
+harness prints the histogram). A 273 K lake under 255 K air is strongly
+convective, so the one branch the port had was the one branch the reference never
+needed. Regimes 3 and 4 are unreachable on this reference and are covered by the
+unit tests in `test/test_lake_ref2m.jl` instead, which assert each branch is
+reached, matches the independently-ported array form of the same Fortran
+(`friction_velocity!`) to 1e-12, and differs from the old regime-2 expression by
+>5%.
+
+### D (NEW, open) — the lake never freezes, so it is on the WRONG roughness branch
+
+C is faithful to CTSM and fixes the momentum profile measurably, but the run
+metric got WORSE (3.11e-01 -> 4.97e-01, driven by LAKEICE 1.8e-02 -> 3.8e-01).
+That is a compensating-error pair coming apart, and the second error is now
+localised exactly.
+
+Fortran does not write `ustar`/`obu`/`rah` to h0, but the flux definitions invert
+from fields that ARE there (`LAKE_AERO_PROBE=1` does this):
+
+```
+rah = rho*cp*(TG - thm)/FSH      (F90:526)
+ram = -rho*u/TAUX                (F90:699)
+```
+
+| step | zeta J | ustar J | z0mg J | z0hg J | rah J | rah F | ram F | TG J | TG F |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | -100.0 | 0.0534 | 3.39e-05 | 1.00e-04 | 316.8 | 159.7 | 372.9 | 273.25 | 269.50 |
+| 8 | -100.0 | 0.0578 | 3.11e-05 | 9.20e-05 | 296.5 | 145.7 | 353.5 | 276.17 | 267.29 |
+| 16 | -100.0 | 0.0559 | 3.19e-05 | 9.44e-05 | 305.4 | 148.7 | 357.7 | 275.23 | 268.29 |
+
+Reading it:
+
+* **Momentum is now right.** `ram_F = 353` implies `ustar_F = sqrt(um/ram) ~ 0.061`.
+  The port is at 0.0578 after C, against ~0.075 before it — the regime-1 momentum
+  cap plus convective term moved `ustar` onto the reference. This is C working.
+* **Heat is not**, and it is not the regime. At `zeta = -100` with `z0h ~ 1e-4`
+  the regime-1 and regime-2 heat denominators nearly coincide (6.84 vs 6.66), so
+  C barely moved `temp1`. The reference needs `denom_h = 3.64`; the port has 6.84.
+  Solving regime 1 for the roughness that closes that gap gives
+  **`z0hg ~ 2.3e-03` against the port's 9.2e-05 — 25x too small.**
+* **Why**: `TG_J = 273-276 K` while `TG_F = 267-269 K`. The port's lake surface
+  never drops below freezing, so `lake_fluxes.jl` stays on the UNFROZEN roughness
+  branch (`z0mg = max(minz0lake, cus*kva/ustar, cur*ustar^2/g) ~ 3e-05`) while
+  CTSM is on the FROZEN branch (`z0mg = z0frzlake = 1e-03`, LakeCon.F90:50). It is
+  self-reinforcing: too-small roughness -> `rah` 2x too high -> too little
+  sensible heat lost -> surface stays warm -> never freezes.
+
+So D is upstream of the surface-flux kernel: the lake surface energy/ice state,
+not the Monin-Obukhov solve. Do not chase it inside `lake_fluxes.jl`'s profile
+code again — that is now correct.
+
+### Also found: `MINZ0LAKE` is a MIXED PAIR
+
+`LakeCon.F90:143-158` sets `fcrit` and `minz0lake` together from one flag:
+
+| `lake_use_old_fcrit_minz0` | `fcrit` | `minz0lake` |
+|---|---|---|
+| `.true.` (Subin 2011) | 22 | 1e-05 |
+| `.false.` (**the default, and the reference's setting**) | 100 | **1e-10** |
+
+`lake_fluxes.jl` has `FCRIT = 100.0` (the `.false.` value) and
+`MINZ0LAKE = 1.0e-5` (the `.true.` value) — one from each branch, which cannot
+both be right. Not on the critical path for D (the port's `z0hg ~ 9e-05` sits
+above the 1e-05 floor, so it is currently inert), but it is a latent 1e5x floor
+error that will bite the moment D is fixed and the roughnesses move. Left
+unchanged here so it lands with its own evidence.
+
 ## Status
 
 STEP 1 complete (table above; `z0param_method` retracted as a dead end).
-STEP 2 complete. The "surface turbulent-flux residual" is **three** distinct defects,
+STEP 2 complete. STEP 3 complete (B and C fixed; C exposed D). The "surface
+turbulent-flux residual" is **four** distinct defects,
 none of which is the Monin-Obukhov *iteration* that three previous fixes chased:
 
 - **A (harness, dominant):** h0 record off-by-one — 1.30e+01 → 3.11e-01 max|rel|. Fixed.
-- **B (port, dead write):** `t_ref2m_patch` never written on a lake patch; TSA is a
-  frozen 283.000 K. Not yet fixed — it is a self-contained wiring job.
-- **C (port, physics):** the lake MO kernel implements 1 of 4 stability regimes; the
-  missing very-unstable branch is the plausible cause of the surviving FSH/LH ~6-12%.
-  Not yet fixed.
+- **B (port, dead write): FIXED.** `t_ref2m`/`q_ref2m`/`rh_ref2m` are now written
+  on the lake path (LakeFluxesMod.F90:707-717). TSA 1.10e-01 -> 8.30e-03; every
+  other field byte-identical.
+- **C (port, physics): FIXED.** All four `zeta` stability regimes ported as one
+  scalar pair shared with the array form. The reference sits in regime 1 at every
+  one of its 47 steps. FSH 3.10e-01 -> 2.70e-01, EFLX_LH 2.80e-01 -> 2.70e-01,
+  and `ustar` moves onto the reference (0.075 -> 0.058 vs Fortran's ~0.061).
+- **D (port, NEW, open):** the run metric nevertheless went 3.11e-01 -> 4.97e-01,
+  because C broke up a compensating pair. The port's lake surface never freezes
+  (TG 273-276 K vs 267-269 K), so it stays on the UNFROZEN roughness branch and
+  runs `z0hg` ~25x below the frozen `z0frzlake` branch CTSM is on, leaving
+  `rah ~300` against Fortran's `~150`. That is a lake surface energy/ice-state
+  defect, upstream of the Monin-Obukhov solve, and it is the whole of the
+  surviving FSH/EFLX_LH/LAKEICE residual. See STEP 3 for the inverted-resistance
+  evidence.
 
-B and C are both lake-landunit-gated by construction (`lake_fluxes.jl` runs only on lake
-columns; nothing writes `t_ref2m_patch` there today), so fixing them cannot perturb any
-non-lake result. Neither has been applied here — this PR deliberately stops at the
-harness fix plus a precise characterisation, so the physics changes land on their own
-with their own before/after numbers rather than being tuned against the same run that
-motivated them.
+B and C are both lake-landunit-gated by construction (`lake_fluxes.jl` runs only
+over `mask_lakep`; nothing wrote `t_ref2m_patch` on a lake patch before), so
+neither can perturb any non-lake result.
