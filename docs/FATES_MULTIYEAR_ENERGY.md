@@ -70,3 +70,29 @@ Four configs, both arms (`before` = `main` b2fef5b, `after` = this branch), 1460
 `main` death at **day 74**. Per `conservation-is-not-accuracy` the accompanying
 `119/119` daily carbon balance is NOT cited as evidence — the survival past the
 `errlon` step is.
+
+### `before` arm — all four configs reproduce on current `main` (b2fef5b)
+
+1460-day horizon requested; each run dies at the `errlon` assertion and stops.
+
+| config | dies (day) | step | patch | `errlon` [W/m²] | `ncoh` range | `npatch` max |
+|---|---|---|---|---|---|---|
+| `arip_none` | **74** | 3601 | 7 | −412.97 | [14, 363] | 5 |
+| `arip_screened` | **98** | 4753 | 7 | −405.41 | [9, 343] | 5 |
+| `bow_nowarm` | **148** | 42241 | 7 | −280.20 | [14, 470] | 5 |
+| `krycklan_baseline` | **235** | 11329 | 7 | −351.36 | [14, 331] | 5 |
+
+Three of the four match #277's table to the day. **Two deltas worth recording**, both
+from `main` having moved (#278/#281/#282) since #277 measured:
+
+* Bow is now **day 148, patch 7, −280.20** where #277 recorded day 147, patch **4**,
+  −294.76. The failing patch index moved, so the Bow row is the same *defect* but not
+  the same *step* — do not treat #277's Bow numbers as a current baseline.
+* `krycklan_baseline` is unchanged at day 235 / −351.36, confirming #282's retirement of
+  the #227 prime did not move this config (it was already the un-primed arm).
+
+`npatch` max is **5 in every one of the four**, and the failing patch index is **7 in
+every one of the four** — independent of site, PFT set, forcing, and day of death. That
+is the signature the root cause predicts: the failure fires when the FATES patch
+population crosses the reserved-and-active HLM slot count, not at any site-specific
+physical threshold.
