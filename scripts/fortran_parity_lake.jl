@@ -19,9 +19,22 @@
 # the Julia state at end-of-step — with 1 step/record these coincide for state vars;
 # flux fields (LH/SH/FIRE/FSA) are the step's instantaneous value vs a 1-sample mean.
 #
-# RESULT (48-step cold-start): the lake THERMODYNAMICS track Fortran (TLAKE ~1%,
-# H2OSNO tight, FSA==0 at the winter-night start); the residual is the lake SURFACE
-# TURBULENT-FLUX solve (FSH/EFLX_LH still low vs Fortran +85/+54, TG over-cools).
+# RESULT (2026-07-20, see docs/LAKE_FLUX_RESIDUAL.md): the long-standing "surface
+# turbulent-flux residual" was substantially a HARNESS bug — this script compared
+# Julia step s against h0 record s, but record 1 is the nstep=0 cold-start dump
+# (time_bounds [0,0]), so model step s is record s+1. Fixing the index (LAKE_REC_SHIFT,
+# default 1) takes max|rel| from 1.298e+01 to 3.108e-01. Run 47 steps, not 48.
+#
+# What SURVIVES the fix (both lake-gated, both still open):
+#   - TSA is a DEAD WRITE: t_ref2m_patch is written only by bareground/urban fluxes,
+#     never on a lake patch, so it sits at the cold-start 283.000 K for all 48 steps.
+#   - FSH/EFLX_LH ~6-12%: lake_fluxes.jl:336 implements ONE of the four stability
+#     regimes in FrictionVelocityMod.F90:1010-1050 (the very-unstable branch, which is
+#     the one a warm winter lake under cold air actually needs, is missing).
+#
+# NOTE: the old note below about t_grnd being "BOUNDED to ~[248,261] K, no rah reaches
+# Fortran's 271 K" was an artifact of the off-by-one — it compared against record 1,
+# the initial dump. TG now tracks to ~0.3 K. Do not re-chase it.
 #
 # FIXED 2026-06-19 (lake_fluxes.jl): (1) the MoninObukIni obu had the WRONG SIGN for
 # unstable conditions (obu = -ustar^3*thv/(vkc*g*thvstar) returned the stable branch

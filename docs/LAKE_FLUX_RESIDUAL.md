@@ -201,9 +201,81 @@ single-regime profile, it is not computed at all.
 A fix is lake-landunit-gated by construction: nothing writes `t_ref2m_patch` on a lake
 patch today, so writing it there cannot change any non-lake result.
 
+### Measured effect of the record fix
+
+`LAKE_DUMP=1`, 47 steps (step `s` needs record `s+1`, so 47 not 48). `LAKE_REC_SHIFT`
+and `LAKE_FORC_OFFSET` / `LAKE_FORC_EXACT` are env knobs on the harness.
+
+| config | record map | forcing map | max\|rel\| |
+|---|---|---|---|
+| historical | `s` | `max(s-1,1)` | **1.298e+01** |
+| forcing shifted −1h (rejected) | `s` | `max(s-1,1) − 1` | 9.617e-01 |
+| **record fix (adopted)** | **`s+1`** | **`max(s-1,1)`** | **3.108e-01** |
+| record fix + forcing `s` | `s+1` | `s` | 2.012e+00 |
+
+**42× reduction** from the record fix alone, with the forcing mapping left untouched.
+Note the last row: "correcting" the forcing on top of the record fix makes it *worse*,
+which independently confirms the historical forcing mapping was already right and that
+the −1h shift was compensation, not a fix.
+
+Sample raw values after the record fix (Julia vs Fortran):
+
+| step | FSH J / F | EFLX_LH J / F | TG J / F |
+|---|---|---|---|
+| 1 | 69.999 / 70.255 | 44.276 / 41.737 | 272.899 / 269.497 |
+| 23 | 40.004 / 36.954 | 32.646 / 32.794 | 270.844 / 271.078 |
+| 44 | 18.275 / 18.329 | 20.953 / 22.809 | 272.016 / 272.353 |
+| 47 | 10.488 / 10.675 | 19.226 / 20.893 | 272.268 / 272.456 |
+
+### Finding C — the lake MO kernel implements ONE of Fortran's FOUR stability regimes
+
+A real residual SURVIVES correct alignment: FSH ~6-12% (31% at step 2), EFLX_LH ~6-10%,
+plus H2OSNO ~10-20% in the last few steps. Part of that is Finding B (TSA is dead and
+still contributes its ~7-11%), but the flux bias is separate, and there is a concrete
+kernel-level cause.
+
+`FrictionVelocityMod.F90:960-1050` computes the temperature/humidity profile relations
+under a **four-way branch on `zeta`**:
+
+1. `zeta < -zetat` (very unstable) — log capped at `-zetat*obu/z0h`, plus a convective
+   correction `0.8*((zetat)^-0.333 - (-zeta)^-0.333)`
+2. `zeta < 0` (unstable) — plain `log(zldis/z0h) - psi2(zeta) + psi2(z0h/obu)`
+3. `0 <= zeta <= 1` (stable) — `log(zldis/z0h) + 5*zeta - 5*z0h/obu`
+4. `zeta > 1` (very stable) — `log(obu/z0h) + 5 - 5*z0h/obu + (5*log(zeta)+zeta-1)`
+
+`lake_fluxes.jl:336-337` implements **regime 2 only**:
+
+```julia
+temp1 = VKC / (log(zldis_t / z0hg) - stability_func2(zeta_t) + stability_func2(zeta0h))
+```
+
+and `stability_func2` (`friction_velocity.jl:357-364`) clamps `z = min(zeta, 0)`, so it
+is a no-op above neutral — it is explicitly documented "only valid for zeta <= 0".
+`zeta_t` is clamped to `[-100, ZETAMAX_LAKE=0.5]`, so it genuinely can be positive.
+
+Consequence for THIS reference: a 273 K lake under 255 K air with light wind is
+strongly unstable, so **regime 1 is the one being missed** — the port applies the plain
+unstable form at large negative `zeta` where CTSM caps the log and adds the convective
+term. That changes `temp1` → `rah` → FSH/EFLX_LH directly, in the right magnitude for a
+~10% flux bias. Regimes 3/4 are additionally unreachable in the port but do not fire in
+this particular winter-lake case.
+
 ## Status
 
 STEP 1 complete (table above; `z0param_method` retracted as a dead end).
-STEP 2 complete: the residual is two harness/port defects, not a mis-ported
-Monin-Obukhov kernel. Instrumenting the MO iteration was NOT needed and would have
-chased a phantom — which is what the record-1 comparison had been manufacturing.
+STEP 2 complete. The "surface turbulent-flux residual" is **three** distinct defects,
+none of which is the Monin-Obukhov *iteration* that three previous fixes chased:
+
+- **A (harness, dominant):** h0 record off-by-one — 1.30e+01 → 3.11e-01 max|rel|. Fixed.
+- **B (port, dead write):** `t_ref2m_patch` never written on a lake patch; TSA is a
+  frozen 283.000 K. Not yet fixed — it is a self-contained wiring job.
+- **C (port, physics):** the lake MO kernel implements 1 of 4 stability regimes; the
+  missing very-unstable branch is the plausible cause of the surviving FSH/LH ~6-12%.
+  Not yet fixed.
+
+B and C are both lake-landunit-gated by construction (`lake_fluxes.jl` runs only on lake
+columns; nothing writes `t_ref2m_patch` there today), so fixing them cannot perturb any
+non-lake result. Neither has been applied here — this PR deliberately stops at the
+harness fix plus a precise characterisation, so the physics changes land on their own
+with their own before/after numbers rather than being tuned against the same run that
+motivated them.
