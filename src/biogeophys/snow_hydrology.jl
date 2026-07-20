@@ -1648,14 +1648,22 @@ Adapt.@adapt_structure CombineSnowCol
             j += 1
         end
 
-        # Recompute snow depth and total water
-        cv.snow_depth[c] = zr
+        # Recompute snow depth and total water. Accumulate into a LOCAL, not into the
+        # array element cv.snow_depth[c]: a loop-carried `+=` on an array cell is the
+        # store→load recurrence the KA CPU backend miscompiles (see the tridiagonal_multi!
+        # case, #263). Left as `cv.snow_depth[c] +=` it dropped all but the last layer's
+        # dz under --check-bounds=yes, so a healthy 0.054 m two-layer pack read as 0.004 m,
+        # tripped the `< dzmin` all-snow-gone branch, and wrongly collapsed the column to
+        # snl=0 — while the device and the normally-compiled CPU (which don't reorder the
+        # recurrence) stayed correct at snl=-2. h2osno_total was already a local.
+        snow_depth_acc = zr
         h2osno_total = zr
         for jl in (snl[c]+1):0
             jj = jl + nlevsno
-            cv.snow_depth[c] += m.dz[c, jj]
+            snow_depth_acc += m.dz[c, jj]
             h2osno_total += m.h2osoi_ice[c, jj] + m.h2osoi_liq[c, jj]
         end
+        cv.snow_depth[c] = snow_depth_acc
 
         # Check if all snow gone
         if cv.snow_depth[c] > zr

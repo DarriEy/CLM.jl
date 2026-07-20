@@ -231,9 +231,23 @@ function main(backend)
         end
         println("  post-call snl (CPU): ", B.snl)
 
+        # Pin the PHYSICALLY-CORRECT layer counts, not just device==host parity. This
+        # harness passed device==host green while the CPU was store→load-fragile: under
+        # --check-bounds=yes the `cv.snow_depth[c] +=` accumulator (snow_hydrology.jl,
+        # #263 class) dropped all but the last layer and collapsed col 2 to snl=0. Both
+        # the device and the normally-compiled CPU agreed on the correct -2, so a
+        # parity-only check couldn't see it. Asserting the expected vector makes the
+        # harness catch it in ANY compile mode.
+        #   col1 -1 -> 0 (thin, combined away); col2 -2 -> -2 (combine to -1, then the
+        #   0.054 m layer re-divides past dzmax_l[1]=0.03); col3 -1 -> -3 (0.20 m splits);
+        #   col4 -3 -> -3 (healthy); col5 masked, untouched at 0.
+        expected_snl = [0, -2, -3, -3, 0]
+        @assert B.snl == expected_snl "CPU snl $(B.snl) != expected $expected_snl — a store→load/optimization regression (run also under --check-bounds=yes)"
+
         # Device run
         run_dev!(D, m_dev, bounds)
         println("  post-call snl (dev): ", Array(D.snl))
+        @assert Array(D.snl) == expected_snl "device snl $(Array(D.snl)) != expected $expected_snl"
 
         checks = [
             ("snl",        B.snl,        D.snl),

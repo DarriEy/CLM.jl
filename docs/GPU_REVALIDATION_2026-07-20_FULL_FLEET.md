@@ -139,13 +139,26 @@ Both harnesses also pass under `--check-bounds=yes`.
    four branches), and it passes under `--check-bounds=yes` — the mode that would have
    thrown a BoundsError on the original OOB instead of silently reading garbage.
 
-2. **`combine_snow_layers!` gives an optimization-dependent answer on the KA CPU
-   backend.** Under `--check-bounds=yes` the **host** returns
-   `snl = [0, 0, -3, -3, 0]`; under normal bounds it returns `[0, -2, -3, -3, 0]`.
-   The **device is stable and identical in both**. Deterministic across repeat runs.
-   This is the #263 class ("the GPU is the honest backend") in a new location, and
-   there is no independent oracle for this kernel — only CPU-vs-device — so which
-   answer is physically right is currently undetermined. Worth a dense/serial oracle.
+2. ~~`combine_snow_layers!` gives an optimization-dependent answer on the KA CPU
+   backend.~~ **RESOLVED — a real #263-class store→load miscompile, now fixed.** Under
+   `--check-bounds=yes` the host returned `snl = [0, 0, -3, -3, 0]` vs `[0, -2, -3, -3, 0]`
+   under normal bounds; the device was stable and correct in both. The physically-right
+   answer is unambiguous (col 2's two snow layers have ice 10.0 and 0.5, both far above
+   the 0.01 removal threshold → snl = -2), so no oracle was needed. Root cause: the
+   snow-depth recompute (`snow_hydrology.jl`, `_snowhyd_combine_kernel!`, ~line 1652)
+   accumulated into the array cell — `cv.snow_depth[c] = 0; for jl: cv.snow_depth[c] += m.dz[c,jj]`
+   — the textbook reduction-into-a-memory-location the KA CPU backend miscompiles.
+   Under `--check-bounds=yes` it kept only the last layer's dz, so a healthy 0.054 m
+   two-layer pack read as 0.004 m, tripped the `frac_sno_eff*snow_depth < dzmin`
+   all-snow-gone branch, and collapsed the column to snl = 0. **This is a genuine
+   production CPU correctness hazard, not a CI artifact** — any compile that
+   reassociates the reduction can wrongly collapse a multi-layer snowpack; the device
+   was always correct. Fix: accumulate into a local scalar, write the cell once at the
+   end (the #263 register-carry pattern). All three CPU modes + device now agree on -2,
+   and the harness now asserts the expected `snl` vector, not just device==host parity.
+   A sweep of the file's other `[c,jj] +=` sites found only downward mass-transfers
+   (distinct source/dest cells, RHS a local) — not reductions, so LLVM won't reassociate
+   them; left as-is.
 
 3. **`gpu_validate_clmdrv_fates_e2e` cannot run here** — needs
    `domain_Aripuana_Amazon/settings/CLM/parameters/surfdata_clm.nc`, absent on this
