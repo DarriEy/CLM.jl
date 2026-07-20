@@ -134,17 +134,23 @@ function build(::Type{FT}) where {FT}
     # --- forcings (gridcell-indexed) ---
     forc_u = fill(FT(3.0), ng); forc_v = fill(FT(2.0), ng)
     forc_hgt_u = fill(FT(30.0), ng); forc_hgt_t = fill(FT(30.0), ng); forc_hgt_q = fill(FT(30.0), ng)
+    grc_lat = fill(FT(0.893), ng)   # 51.2 deg N in radians — see run_lf! below
 
     return (; nc, np, col, patch, lun, temp, sa, wsb, wdb, wfb, ef, fv, ls,
         forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
-        forc_u, forc_v, forc_hgt_u, forc_hgt_t, forc_hgt_q)
+        forc_u, forc_v, forc_hgt_u, forc_hgt_t, forc_hgt_q, grc_lat)
 end
 
 run_lf!(d, m_c, m_p) = CLM.lake_fluxes!(d.temp, d.ef, d.fv, d.sa, d.ls, d.wsb, d.wdb, d.wfb,
     d.col, d.patch, d.lun,
     d.forc_t, d.forc_th, d.forc_q, d.forc_pbot, d.forc_rho, d.forc_lwrad,
     d.forc_u, d.forc_v, d.forc_hgt_u, d.forc_hgt_t, d.forc_hgt_q,
-    m_c, m_p, 1:d.nc, 1:d.np; dtime = 1800.0)
+    m_c, m_p, 1:d.nc, 1:d.np; dtime = 1800.0,
+    # Non-zero latitude on purpose: ks = 6.6*sqrt(|sin(lat)|)*u2m^-1.84 is exactly
+    # zero at lat = 0, so validating on the default would leave the ks branch (and
+    # the sqrt/pow it lowers to on device) UNCOVERED. 0.893 rad = 51.2 deg, the
+    # lake parity reference's own latitude.
+    grc_lat = d.grc_lat)
 
 function main(backend)
     println("=" ^ 70)
@@ -169,7 +175,8 @@ function main(backend)
             forc_t = to(B.forc_t), forc_th = to(B.forc_th), forc_q = to(B.forc_q),
             forc_pbot = to(B.forc_pbot), forc_rho = to(B.forc_rho), forc_lwrad = to(B.forc_lwrad),
             forc_u = to(B.forc_u), forc_v = to(B.forc_v),
-            forc_hgt_u = to(B.forc_hgt_u), forc_hgt_t = to(B.forc_hgt_t), forc_hgt_q = to(B.forc_hgt_q))
+            forc_hgt_u = to(B.forc_hgt_u), forc_hgt_t = to(B.forc_hgt_t), forc_hgt_q = to(B.forc_hgt_q),
+            grc_lat = to(B.grc_lat))
         if !(D.temp.t_grnd_col isa device_array_type() && D.fv.ustar_patch isa device_array_type())
             println("  BLOCKED: a lake state struct did not move to the device under adapt.")
             return 2

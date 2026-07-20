@@ -102,6 +102,18 @@ Base.@kwdef struct LakeFluxDV{Vi,V,M}
 end
 Adapt.@adapt_structure LakeFluxDV
 
+# Coerce the gridcell latitude to the SAME array type as the other gridcell-indexed
+# forcings. `LakeFluxDV{Vi,V,M}` requires every float-vector field to share one type
+# V, so handing it a host `Vector{Float64}` while the state is on the device (or a
+# Float64 lat against a Float32 device build) would fail to construct. `similar` +
+# `copyto!` keeps the device path working with one small gridcell-length allocation,
+# and the common case (same type already) is a no-op passthrough.
+function _lake_lat_like(proto, grc_lat)
+    grc_lat === nothing && return zero(proto)
+    typeof(grc_lat) === typeof(proto) && return grc_lat
+    return copyto!(similar(proto), grc_lat)
+end
+
 # Build a LakeFluxDV from the caller's state structs (array fields are shared refs).
 function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate,
                        waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
@@ -658,7 +670,7 @@ function lake_fluxes!(temperature::TemperatureData,
                        waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
                        forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
                        forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc,
-                       grc_lat === nothing ? zero(forc_hgt_u_grc) : grc_lat)
+                       _lake_lat_like(forc_hgt_u_grc, grc_lat))
 
     FT = eltype(temperature.t_grnd_col)
     # Struct-first kernel (the DV is passed whole as the first arg): pick the
