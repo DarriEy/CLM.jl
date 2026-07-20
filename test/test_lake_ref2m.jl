@@ -106,18 +106,52 @@ using Test, CLM
             dh2 = CLM.mo_profile_denom_h(zldis2 / obu, zldis2, z0h, obu)
             @test CLM.VKC / dh2 ≈ temp12m[1] rtol=1e-12
 
-            # (c) the branch MATTERS: what the lake kernel used to apply
-            #     everywhere is the regime-2 expression. Outside regime 2 it must
-            #     give a materially different answer, or "porting the other three
-            #     regimes" would be a no-op and this whole fix cosmetic.
-            regime2_h = log(zldis / z0h) - CLM.stability_func2(min(zeta, 0.0)) +
-                        CLM.stability_func2(min(z0h / obu, 0.0))
+            # (c) regime 2 IS the expression the kernel used to apply everywhere,
+            #     so the new code must reproduce it exactly inside regime 2.
+            regime2_h = log(zldis / z0h) - CLM.stability_func2(zeta) +
+                        CLM.stability_func2(z0h / obu)
             if want_h == 2
-                @test dh ≈ regime2_h rtol=1e-12       # regime 2 IS the old form
-            else
-                @test abs(dh - regime2_h) / abs(dh) > 0.05
+                @test dh ≈ regime2_h rtol=1e-12
             end
         end
+    end
+
+    # C1b. The branch MATTERS — measured AT THE REFERENCE'S OWN CONDITION.
+    #
+    # An earlier version of this test asserted "regime 1 differs from the old
+    # regime-2 expression by >5%" at zeta = -3.0 and FAILED at 0.52%. That
+    # failure was correct and is worth keeping the lesson from: regimes 1 and 2
+    # JOIN CONTINUOUSLY at -zeta* by construction, so just past the transition
+    # they agree to a fraction of a percent. Picking a zeta near the boundary
+    # would have made this fix look cosmetic.
+    #
+    # The reference actually runs at zeta = -100 (obu = -0.3 m at zldis = 30 m),
+    # pinned at the clamp for all 47 steps. THAT is where the branch bites, and
+    # the split between the two profiles below is exactly what the parity run
+    # showed: the momentum profile moves a lot (ustar 0.075 -> 0.058, onto
+    # Fortran's ~0.061), the heat profile barely moves (temp1 within ~3%), which
+    # is why fixing the regimes corrected ustar but left rah dominated by the
+    # separate roughness-branch defect D. See docs/LAKE_FLUX_RESIDUAL.md.
+    @testset "regime 1 vs the old regime-2-only form at the reference's zeta" begin
+        obu = -0.3; zeta = zldis / obu          # = -100, the reference's condition
+        @test heat_regime_of(zeta) == 1 && wind_regime_of(zeta) == 1
+
+        dm = CLM.mo_profile_denom_m(zeta, zldis, z0m, obu)
+        dh = CLM.mo_profile_denom_h(zeta, zldis, z0h, obu)
+        old_m = log(zldis / z0m) - CLM.stability_func1(zeta) +
+                CLM.stability_func1(z0m / obu)
+        old_h = log(zldis / z0h) - CLM.stability_func2(zeta) +
+                CLM.stability_func2(z0h / obu)
+
+        # Momentum: ~32% — the free-convection correction plus the capped log.
+        # This is the term whose absence inflated the port's ustar.
+        @test abs(dm - old_m) / abs(dm) > 0.20
+        # Heat: ~3% — small, but real and in the measured direction.
+        @test abs(dh - old_h) / abs(dh) > 0.02
+        # Both corrections RAISE the denominator (lower the transfer
+        # coefficient); a sign error in either flips this.
+        @test dm > old_m
+        @test dh > old_h
     end
 
     # C2. The transition is continuous where CTSM makes it continuous: the
